@@ -9,21 +9,41 @@ services:
     restart: unless-stopped
     ports:
       - "8787:8787"
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
       # 「今日消耗 / 用量统计」的日期边界按此时区计算
       - TZ=Asia/Shanghai
       # 日报的统计日界线与定时发送时区（未设置时也默认 Asia/Shanghai）
       - REPORT_TIME_ZONE=Asia/Shanghai
       # ---- MySQL（外部实例，必填）----
-      - DB_HOST=change-me
+      - DB_HOST=db
       - DB_PORT=3306
-      - DB_USER=relay
-      - DB_PASSWORD=change-me
-      - DB_NAME=relay_monitor
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
       # ---- v1 数据一次性迁移（可选）：导入完成后可删除这两行 ----
       - V1_DATA_DIR=/app/v1-data
     volumes:
       - ./data:/app/v1-data:ro
+
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - ./mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   watchtower:
     image: containrrr/watchtower
