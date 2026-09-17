@@ -4,7 +4,7 @@
 # 用法：mkdir -p ~/relay-monitor && cp docker-compose.yml ~/relay-monitor/ && cd ~/relay-monitor && docker compose up -d
 services:
   relay-monitor:
-    image: ghcr.io/lettimepassby/relay-monitor:latest
+    image: ghcr.io/zhuyihe/relay-monitor:latest
     container_name: relay-monitor
     restart: unless-stopped
     ports:
