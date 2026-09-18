@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/index.md","reason":"Review frontend changes against project guidance"}
+{"file":".trellis/tasks/09-18-mobile-responsive/research/frontend-audit.md","reason":"Verify audited mobile risks are covered"}
+{"file":".trellis/tasks/09-18-mobile-responsive/research/plan-review.md","reason":"Verify review findings, view-first scope and objective acceptance criteria"}
+{"file": ".trellis/tasks/09-18-mobile-responsive/research/station-card-redesign.md", "reason": "Verify station-card information hierarchy, mobile actions and card-height targets"}

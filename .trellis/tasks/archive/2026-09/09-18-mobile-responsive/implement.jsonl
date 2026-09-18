@@ -1,0 +1,4 @@
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend package guidance and quality checklist"}
+{"file":".trellis/tasks/09-18-mobile-responsive/research/frontend-audit.md","reason":"Concrete mobile-readiness risks and recommended implementation order"}
+{"file":".trellis/tasks/09-18-mobile-responsive/research/plan-review.md","reason":"Independent review decisions, measurable acceptance rules and scope guardrails"}
+{"file": ".trellis/tasks/09-18-mobile-responsive/research/station-card-redesign.md", "reason": "Approved station-card rework structure, file ownership and measurable acceptance criteria"}
