@@ -4,7 +4,7 @@
 // 通知相关事件处理(1925-2027)与 loadNotifications(2094)。
 // v1 对通知页刻意跳过自动重绘（refreshCurrentView：表单未保存的输入会被清空），
 // 因此本页只在挂载时加载一次，不做 30 秒轮询。
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { PageContainer, ProCard } from "@ant-design/pro-components";
 import {
   App,
@@ -30,6 +30,7 @@ import {
 } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { api } from "../../../lib/client";
+import AppState from "../../components/app-state";
 
 const { Text } = Typography;
 
@@ -69,6 +70,8 @@ export default function NotificationsPage() {
 
   // 通知数据（对照 v1 state.channels / state.rules / state.channelTypes / state.settings）
   const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [channels, setChannels] = useState<any[]>([]);
   const [rules, setRules] = useState<any>({});
   const [channelTypes, setChannelTypes] = useState<any[]>([]);
@@ -122,24 +125,35 @@ export default function NotificationsPage() {
   };
 
   // 挂载时加载：notifications 给渠道/规则/类型，meta 给 settings（对照 v1 bootData）
-  useEffect(() => {
-    (async () => {
-      try {
-        const [n, m] = await Promise.all([api("/api/notifications"), api("/api/meta")]);
-        setChannels(n.channels);
-        setRules(n.rules);
-        setChannelTypes(n.channelTypes);
-        setSettings(m.settings);
-        syncRuleForm(n.rules);
-        syncDrForm(m.settings);
-      } catch (e: any) {
-        message.error(e.message || "加载失败");
-      } finally {
-        setLoading(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const loadPage = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [n, m] = await Promise.all([api("/api/notifications"), api("/api/meta")]);
+      setChannels(n.channels);
+      setRules(n.rules);
+      setChannelTypes(n.channelTypes);
+      setSettings(m.settings);
+      setEtaUnit(n.rules?.etaUnit === "hours" ? "hours" : "days");
+      setEtaVal(String(etaRuleDisplay(n.rules)));
+      setRenotify(String(n.rules?.renotifyHours ?? 24));
+      setErrThreshold(String(n.rules?.errorThreshold ?? 1));
+      setErrRetry(String(n.rules?.errorRetrySec ?? 30));
+      setChannelsFor(n.rules?.channelsFor || {});
+      setDrEnabled(!!m.settings?.dailyReport?.enabled);
+      setDrTime(m.settings?.dailyReport?.time || "09:00");
+      setDrChannelIds(m.settings?.dailyReport?.channelIds || []);
+      setLoaded(true);
+      setLoadError(null);
+    } catch (e: any) {
+      setLoadError(e.message || "告警中心加载失败");
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    loadPage();
+  }, [loadPage]);
 
   // 重新拉取渠道数据（对照 v1 loadNotifications）
   // 同步渠道绑定（删除渠道时服务端会清理其中的死 id），但不动阈值输入表单
@@ -412,6 +426,19 @@ export default function NotificationsPage() {
   };
 
   // ---- 渲染 -------------------------------------------------------------------
+
+  if (!loaded && loadError) {
+    return (
+      <PageContainer className="responsive-page" title="告警中心" subTitle="管理告警规则、推送渠道与每日日报">
+        <AppState
+          kind="error"
+          title="告警中心暂时无法加载"
+          description={loadError}
+          actions={<Button type="primary" loading={loading} onClick={loadPage}>重新加载</Button>}
+        />
+      </PageContainer>
+    );
+  }
 
   const curType = channelTypes.find((x) => x.value === chType);
   const r = rules;

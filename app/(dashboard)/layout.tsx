@@ -37,6 +37,11 @@ const menuRoute = {
   ],
 };
 
+const passwordChangeRoute = {
+  path: "/settings",
+  routes: [{ path: "/settings", name: NAV_LABELS.settings, icon: <SettingOutlined /> }],
+};
+
 const pageNames = Object.fromEntries(menuRoute.routes.map((route) => [route.path, route.name]));
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -49,20 +54,25 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const compactHeader = !screens.md;
   const isMobile = !screens.lg;
   const [username, setUsername] = useState<string>("");
+  const [passwordChangeRequired, setPasswordChangeRequired] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const currentPageName = pageNames[pathname] || BRAND.productName;
+  const currentPageName = passwordChangeRequired ? NAV_LABELS.settings : (pageNames[pathname] || BRAND.productName);
 
   useEffect(() => {
     setCollapsed(isMobile);
   }, [isMobile]);
 
-  // 挂载时校验登录态（401 由 api() 自动跳转 /login）。
+  // 校验登录态；初始密码会话只能前往修改密码流程。
   useEffect(() => {
     api("/api/auth/me")
-      .then((r) => setUsername(r.username))
+      .then((r) => {
+        setUsername(r.username);
+        setPasswordChangeRequired(!!r.isDefaultPassword);
+        if (r.isDefaultPassword && pathname !== "/settings") router.replace("/settings");
+      })
       .catch(() => {});
-  }, []);
+  }, [pathname, router]);
 
   // 手动全量刷新（对应 v1 标题栏的刷新按钮）
   const onRefresh = async () => {
@@ -125,8 +135,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           colorBgRightActionsItemHover: token.colorFillTertiary,
         },
       }}
-      route={menuRoute}
-      location={{ pathname }}
+      route={passwordChangeRequired ? passwordChangeRoute : menuRoute}
+      location={{ pathname: passwordChangeRequired ? "/settings" : pathname }}
       pageTitleRender={() => formatPageTitle(currentPageName)}
       menuHeaderRender={(_logo, _title, props) => (
         <div className="app-sider-brand">
@@ -158,7 +168,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           {dom}
         </a>
       )}
-      actionsRender={() => [
+      actionsRender={() => passwordChangeRequired ? [] : [
         <Button
           key="refresh"
           className="touch-icon-button"
@@ -178,7 +188,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           <Dropdown
             trigger={["click"]}
             menu={{
-              items: [
+              items: passwordChangeRequired ? [
+                { key: "logout", icon: <LogoutOutlined />, label: "退出登录" },
+              ] : [
                 {
                   key: "theme",
                   icon: dark ? <SunOutlined /> : <MoonOutlined />,

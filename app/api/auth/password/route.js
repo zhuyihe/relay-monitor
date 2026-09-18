@@ -1,5 +1,5 @@
 // POST /api/auth/password —— 修改用户名/密码：先校验原密码，新密码至少 6 位
-import { withAuth, json } from "../../../../lib/api.js";
+import { withAuth, json, requestIsSecure } from "../../../../lib/api.js";
 import { verifyPassword } from "../../../../lib/auth.js";
 
 export const POST = withAuth(async (request, rt) => {
@@ -11,6 +11,8 @@ export const POST = withAuth(async (request, rt) => {
     return json({ error: "新密码至少 6 位" }, 400);
   }
   await rt.store.setPassword(username ? String(username).trim() : undefined, String(newPassword));
-  // 旧会话继续有效（同一秘钥签名）；仅更新凭证
-  return json({ ok: true });
+  // 会话版本绑定凭证哈希；改密后旧 Cookie 均不再可用。
+  const res = json({ ok: true, reauthenticate: true });
+  res.headers.set("Set-Cookie", rt.sessions.clearCookieHeader(requestIsSecure(request)));
+  return res;
 });

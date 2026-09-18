@@ -1,6 +1,6 @@
 // POST /api/auth/login —— 登录（无需会话），行为与 v1 完全一致：
 // 按 IP 限流，验证用户名+密码，成功后签发会话 Cookie。
-import { withRuntime, json, clientIp } from "../../../../lib/api.js";
+import { withRuntime, json, clientIp, requestIsSecure } from "../../../../lib/api.js";
 import { verifyPassword } from "../../../../lib/auth.js";
 
 export const POST = withRuntime(async (request, rt) => {
@@ -17,8 +17,8 @@ export const POST = withRuntime(async (request, rt) => {
     return json({ error: "用户名或密码错误" }, 401);
   }
   rt.sessions.recordSuccess(ip);
-  const token = rt.sessions.issue(auth.username);
+  const token = rt.sessions.issue(auth.username, rt.sessions.sessionVersion(auth));
   const res = json({ ok: true, username: auth.username, isDefaultPassword: !!auth.isDefault });
-  res.headers.set("Set-Cookie", rt.sessions.cookieHeader(token));
+  res.headers.set("Set-Cookie", rt.sessions.cookieHeader(token, requestIsSecure(request)));
   return res;
 });

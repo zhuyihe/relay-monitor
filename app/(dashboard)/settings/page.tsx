@@ -88,14 +88,9 @@ export default function SettingsPage() {
       });
       setPwOld("");
       setPwNew("");
-      message.success("密码已修改");
-      // 重新拉会话信息：用户名可能已改、默认密码提醒随之消失
-      api("/api/auth/me")
-        .then((r) => {
-          setMe(r);
-          setUsername(r.username || "");
-        })
-        .catch(() => {});
+      message.success("密码已修改，请使用新密码重新登录");
+      // 改密接口会使全部旧会话失效，直接回登录页避免继续停留在受限壳中。
+      window.setTimeout(() => { window.location.href = "/login"; }, 600);
     } catch (e: any) {
       message.error(e.message || "修改失败");
     } finally {
@@ -107,10 +102,10 @@ export default function SettingsPage() {
     <PageContainer
       className="responsive-page"
       title={NAV_LABELS.settings}
-      subTitle="运行策略、账户安全与系统信息"
+      subTitle={me?.isDefaultPassword ? "请完成首次密码修改后继续使用控制台" : "运行策略、账户安全与系统信息"}
     >
       <Space direction="vertical" size={16} style={{ display: "flex" }}>
-        <ProCard title="运行策略" headerBordered>
+        {!me?.isDefaultPassword && <ProCard title="运行策略" headerBordered>
           <SetRow title="自动刷新间隔" desc="后台按此间隔更新上游资源余额">
             <Space>
               <InputNumber
@@ -133,14 +128,14 @@ export default function SettingsPage() {
               保存
             </Button>
           </SetRow>
-        </ProCard>
+        </ProCard>}
 
         <ProCard title="账户安全" headerBordered>
           {me?.isDefaultPassword && (
             <Alert
               type="warning"
               showIcon
-              message="当前仍在使用初始密码，建议尽快修改"
+              message="首次登录请先设置新的管理员密码；完成后需重新登录。"
               style={{ marginBottom: 16 }}
             />
           )}
@@ -169,7 +164,7 @@ export default function SettingsPage() {
           </Space>
         </ProCard>
 
-        <ProCard title="系统信息" headerBordered>
+        {!me?.isDefaultPassword && <ProCard title="系统信息" headerBordered>
           <SetRow title="产品" desc="当前运行的管理控制台">
             <Text strong>{BRAND.productName}</Text>
           </SetRow>
@@ -179,7 +174,7 @@ export default function SettingsPage() {
           <SetRow title="构建标识" desc="用于定位当前部署对应的代码版本">
             <Text code>{appInfo ? appInfo.commit || "未提供" : "读取中…"}</Text>
           </SetRow>
-        </ProCard>
+        </ProCard>}
       </Space>
     </PageContainer>
   );
