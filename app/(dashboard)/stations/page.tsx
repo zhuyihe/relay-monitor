@@ -31,6 +31,7 @@ import LastRefreshed from "../last-refreshed";
 import AppState from "../../components/app-state";
 import dayjs from "dayjs";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta, statusOf } from "../../../lib/client";
+import { describeConnectionFailure } from "../../../lib/connection-test";
 
 // ---- 展示工具（v1 app.js 同名函数平移）--------------------------------------
 function relTime(iso: any) {
@@ -73,14 +74,89 @@ function mobileAmountFontSize(value: string): number {
   return 17;
 }
 
-// 表单类型提示（v1 syncCredFields 的 hints，逐字平移）
-const TYPE_HINTS: Record<string, string> = {
-  newapi: "New API 后台「个人设置」的系统访问令牌 + 用户 ID；地址填站点根地址。",
-  "newapi-key": "任意可用的 sk- 密钥；通过 OpenAI 兼容计费接口查询额度。",
-  sub2api: "Sub2API 登录后的访问令牌（JWT）；过期需手动更换，推荐用账号密码模式。",
-  "sub2api-password": "填 Sub2API 的登录邮箱和密码，面板会自动登录并在令牌过期时自动续期；站点使用 Cap 验证码时也会自动完成验证。",
-  fixed: "包月 / 包年等定期投入的上游：不访问任何接口，只按天摊销计入利润成本。",
+const CONNECTION_FIELDS = new Set(["type", "baseUrl", "accessToken", "apiKey", "userId", "email", "password"]);
+const CONNECTION_INPUT_FIELDS = ["baseUrl", "accessToken", "apiKey", "userId", "email", "password"] as const;
+
+type ConnectionGuidance = {
+  title: string;
+  credentials: string;
+  address: string;
+  lifecycle: string;
+  test: string;
 };
+
+const CONNECTION_GUIDANCE: Record<string, ConnectionGuidance> = {
+  newapi: {
+    title: "New API · 系统访问令牌",
+    credentials: "需要系统访问令牌和用户 ID。令牌通常在 New API 后台的「个人设置」中获取，用户 ID 可在同页查看。",
+    address: "填写站点根地址，例如 https://relay.example.com；不要填写 /api/user/self、管理后台或具体接口路径。",
+    lifecycle: "令牌由上游站点管理；过期、撤销或权限变化后，需要手动更新后重新验证。",
+    test: "测试只读取当前账户额度，不会保存凭证、刷新资源或触发告警。",
+  },
+  "newapi-key": {
+    title: "New API · sk 密钥",
+    credentials: "需要一个可用的 sk- API 密钥，通常从站点的令牌/密钥管理页创建。",
+    address: "填写站点根地址，例如 https://relay.example.com；不要填写 /v1 或 /dashboard/billing 等路径。",
+    lifecycle: "密钥的有效期和权限由上游站点控制；失效或被撤销后需替换为新的密钥。",
+    test: "测试通过 OpenAI 兼容计费接口读取额度，不会写入资源或触发告警。",
+  },
+  sub2api: {
+    title: "Sub2API · 登录令牌",
+    credentials: "需要登录后的访问令牌（JWT），通常在浏览器已登录状态下，从站点账户接口请求的 Authorization 头中获取。",
+    address: "填写站点根地址，例如 https://relay.example.com；不要填写 /api/v1/auth/me 等具体接口路径。",
+    lifecycle: "JWT 过期、退出登录或被吊销后需手动更换。若希望自动续期，请选择账号密码模式。",
+    test: "测试会验证 JWT 是否能读取账户余额，不会保存令牌或触发刷新、告警。",
+  },
+  "sub2api-password": {
+    title: "Sub2API · 账号密码自动续期",
+    credentials: "需要可登录的邮箱和密码。保存后，平台会在访问令牌临近过期时自动刷新，无法刷新时再重新登录。",
+    address: "填写站点根地址，例如 https://relay.example.com；不要填写登录接口或管理后台路径。",
+    lifecycle: "测试只临时验证邮箱和密码，不保存测试期间产生的令牌；保存资源后才会启用自动续期。开启两步验证的账号无法自动登录。",
+    test: "测试会完成一次临时登录并读取余额，不写入数据库、不刷新资源，也不触发告警。",
+  },
+  fixed: {
+    title: "固定成本 · 不访问接口",
+    credentials: "不需要令牌、密钥、邮箱或密码。",
+    address: "不需要填写站点地址；成本通过下方的付费记录按天摊销。",
+    lifecycle: "没有令牌续期行为；到期后添加新的付费记录即可继续计入成本。",
+    test: "固定成本不测试连接，也不会访问任何外部接口。",
+  },
+};
+
+type ConnectionIssue = {
+  code?: string;
+  category: string;
+  message: string;
+  action: string;
+  diagnostic?: string;
+};
+
+type ConnectionTestResult = ConnectionIssue & {
+  ok: boolean;
+  latencyMs?: number;
+  account?: string | null;
+  remaining?: number;
+  currency?: string | null;
+};
+
+function resultIssue(result: Partial<ConnectionIssue> | null | undefined, fallback: unknown, station: any = {}): ConnectionIssue {
+  const described = describeConnectionFailure(fallback, station);
+  return {
+    code: result?.code || described.code,
+    category: result?.category || described.category,
+    message: result?.message || described.message,
+    action: result?.action || described.action,
+    diagnostic: result?.diagnostic || described.diagnostic,
+  };
+}
+
+function testBalanceText(result: ConnectionTestResult) {
+  if (!Number.isFinite(Number(result.remaining))) return null;
+  const amount = Number(result.remaining);
+  return result.currency === "USD"
+    ? `余额 ${usd(amount)}`
+    : `余额 ${amount.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}${result.currency ? ` ${result.currency}` : ""}`;
+}
 
 const hintStyle = (token: ReturnType<typeof theme.useToken>["token"]): React.CSSProperties => ({
   fontSize: 12,
@@ -88,6 +164,61 @@ const hintStyle = (token: ReturnType<typeof theme.useToken>["token"]): React.CSS
   marginTop: 4,
   lineHeight: 1.6,
 });
+
+function ConnectionProblem({
+  checkedAt,
+  issue,
+  onRetest,
+  testing,
+}: {
+  checkedAt?: string | null;
+  issue: ConnectionIssue;
+  onRetest: () => void;
+  testing: boolean;
+}) {
+  const { token } = theme.useToken();
+  return (
+    <div
+      role="alert"
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "flex-start",
+        gap: 10,
+        marginTop: 10,
+        padding: "10px 12px",
+        borderInlineStart: `2px solid ${token.colorError}`,
+        background: token.colorErrorBg,
+      }}
+    >
+      <div style={{ flex: "1 1 220px", minWidth: 0 }}>
+        <div style={{ color: token.colorError, fontSize: 14, fontWeight: 600 }}>
+          {issue.category}：{issue.message}
+        </div>
+        <div style={{ ...hintStyle(token), marginTop: 2 }}>{issue.action}</div>
+        <div style={{ ...hintStyle(token), marginTop: 2 }}>最近检查：{relTime(checkedAt)}</div>
+        {issue.diagnostic ? (
+          <details style={{ marginTop: 6, fontSize: 12, lineHeight: 1.6, overflowWrap: "anywhere" }}>
+            <summary style={{ display: "flex", alignItems: "center", minHeight: 40, cursor: "pointer" }}>查看脱敏诊断</summary>
+            <span>{issue.diagnostic}</span>
+          </details>
+        ) : null}
+      </div>
+      <Button
+        type="default"
+        loading={testing}
+        onClick={(event) => {
+          event.stopPropagation();
+          onRetest();
+        }}
+        onKeyDown={(event) => event.stopPropagation()}
+        style={{ minHeight: 44 }}
+      >
+        重新测试连接
+      </Button>
+    </div>
+  );
+}
 
 // ---- 迷你余额走势（近 48 小时，与总览卡片使用相同坐标口径）--------------------
 function Spark({ pts, fluid = false }: { pts: [number, number][]; fluid?: boolean }) {
@@ -125,12 +256,18 @@ function StationRow(props: {
   etaDaysRule: number;
   compact: boolean;
   refreshing: boolean;
+  retesting: boolean;
+  connectionCheck?: { issue: ConnectionIssue; checkedAt: string };
   onTrend: (s: any) => void;
   onRefresh: (s: any) => void;
+  onRetest: (s: any) => void;
   onEdit: (s: any) => void;
   onDelete: (s: any) => void;
 }) {
-  const { s, settings, types, etaDaysRule, compact, refreshing, onTrend, onRefresh, onEdit, onDelete } = props;
+  const {
+    s, settings, types, etaDaysRule, compact, refreshing, retesting, connectionCheck,
+    onTrend, onRefresh, onRetest, onEdit, onDelete,
+  } = props;
   const { token } = theme.useToken();
   const typeLabel = (v: string) => types.find((t) => t.value === v)?.label || v;
   const rowStyle: React.CSSProperties = {
@@ -240,12 +377,17 @@ function StationRow(props: {
 
   const st = statusOf(s, settings);
   const b = s.balance;
+  const connectionIssue = connectionCheck?.issue || (b && !b.ok ? resultIssue(null, b.error) : null);
+  const checkedAt = connectionCheck?.checkedAt || b?.checkedAt;
   const rate = rateOf(s);
-  const amtColor = st === "danger" || st === "error" ? token.colorError : st === "warn" ? token.colorWarning : undefined;
+  const effectiveStatus = connectionIssue ? "error" : st;
+  const amtColor = effectiveStatus === "danger" || effectiveStatus === "error" ? token.colorError : effectiveStatus === "warn" ? token.colorWarning : undefined;
   const amount = b && b.ok ? cny(b.remaining * rate) : "—";
   // 副标题行：类型 · 账号 · 令牌续期 · 上次查询 · 延迟（同 v1 meta 拼接顺序）
   let meta: React.ReactNode;
-  if (b && b.ok) {
+  if (connectionIssue) {
+    meta = (<>{typeLabel(s.type)} · <span style={{ color: token.colorError }}>{connectionIssue.message}</span> · {relTime(checkedAt)}</>);
+  } else if (b && b.ok) {
     const bits: string[] = [typeLabel(s.type)];
     if (b.account) bits.push(b.account);
     if (s.type === "sub2api-password" && s.tokenInfo?.expiresAt) {
@@ -254,27 +396,20 @@ function StationRow(props: {
     bits.push(relTime(b.checkedAt));
     if (b.latencyMs != null) bits.push(b.latencyMs + "ms");
     meta = bits.join(" · ");
-  } else if (b && !b.ok) {
-    meta = (<>{typeLabel(s.type)} · <span style={{ color: token.colorError }}>{b.error || "查询失败"}</span></>);
   } else {
     meta = `${typeLabel(s.type)} · 尚未查询`;
   }
   const eta = etaText(s.prediction, rate, etaDaysRule);
   let mobileMeta: React.ReactNode;
-  const hasMobileError = !!(b && !b.ok);
-  if (b && b.ok) {
+  const hasMobileError = !!connectionIssue;
+  if (connectionIssue) {
+    mobileMeta = `${typeLabel(s.type)} · ${connectionIssue.message} · ${relTime(checkedAt)}`;
+  } else if (b && b.ok) {
     const bits: string[] = [typeLabel(s.type)];
     if (b.account) bits.push(b.account);
     bits.push(relTime(b.checkedAt));
     if (b.latencyMs != null) bits.push(b.latencyMs + "ms");
     mobileMeta = bits.join(" · ");
-  } else if (b && !b.ok) {
-    mobileMeta = (
-      <details className="mobile-station-card__error">
-        <summary>{typeLabel(s.type)} · 查询失败</summary>
-        <span>{b.error || "查询失败"}</span>
-      </details>
-    );
   } else {
     mobileMeta = `${typeLabel(s.type)} · 尚未查询`;
   }
@@ -311,10 +446,11 @@ function StationRow(props: {
             </div>
           </div>
           <div className="mobile-station-card__summary">
-            <StatusText st={st} />
+            <StatusText st={effectiveStatus} />
             <strong aria-label={`人民币余额 ${amount}`} style={{ color: amtColor, fontSize: mobileAmountFontSize(amount) }}>{amount}</strong>
           </div>
         </div>
+        {connectionIssue ? <ConnectionProblem checkedAt={checkedAt} issue={connectionIssue} onRetest={() => onRetest(s)} testing={retesting} /> : null}
         <div className="mobile-station-card__metrics">
           <div className="mobile-station-card__metric">
             <span>今日消耗</span>
@@ -364,9 +500,10 @@ function StationRow(props: {
           {s.includeInProfit === false ? <span className="resource-flag">不计利润成本</span> : null}
           {s.noRenewal ? <span className="resource-flag resource-flag--warning">不再续费</span> : null}
           {s.demo ? <span className="resource-flag">演示</span> : null}
-          <StatusText st={st} />
+          <StatusText st={effectiveStatus} />
         </div>
         <div className="station-row__meta" style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>{meta}</div>
+        {connectionIssue ? <ConnectionProblem checkedAt={checkedAt} issue={connectionIssue} onRetest={() => onRetest(s)} testing={retesting} /> : null}
         {b && b.ok && s.spark && s.spark.length > 1 ? (
           <div className="station-row__spark" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }} title="近 48 小时余额走势">
             <Spark pts={s.spark} />
@@ -414,6 +551,8 @@ export default function StationsPage() {
   const [metaError, setMetaError] = useState<string | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [refreshingIds, setRefreshingIds] = useState<Record<string, boolean>>({});
+  const [retestingIds, setRetestingIds] = useState<Record<string, boolean>>({});
+  const [stationChecks, setStationChecks] = useState<Record<string, { issue: ConnectionIssue; checkedAt: string }>>({});
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
 
   // 添加/编辑弹窗
@@ -423,13 +562,7 @@ export default function StationsPage() {
   const [purchases, setPurchases] = useState<any[]>([]); // 固定成本付费记录行
   const formType = Form.useWatch("type", form);
   const [testingConnection, setTestingConnection] = useState(false);
-  const [connectionTest, setConnectionTest] = useState<{
-    ok: boolean;
-    message: string;
-    action?: string;
-    diagnostic?: string;
-    latencyMs?: number;
-  } | null>(null);
+  const [connectionTest, setConnectionTest] = useState<ConnectionTestResult | null>(null);
   const [formFingerprint, setFormFingerprint] = useState("");
   const [testedFingerprint, setTestedFingerprint] = useState<string | null>(null);
 
@@ -501,7 +634,7 @@ export default function StationsPage() {
     try {
       const r = await api(`/api/stations/${s.id}/refresh`, { method: "POST", body: {} });
       setStations((list) => list.map((x) => (x.id === s.id ? { ...x, ...(r.station || {}), balance: r.balance } : x)));
-      if (!r.balance.ok) message.error(s.name + "：" + (r.balance.error || "查询失败"));
+      if (!r.balance.ok) message.error(`${s.name}：${resultIssue(null, r.balance.error).message}`);
     } catch (e: any) {
       message.error(e.message);
     } finally {
@@ -561,56 +694,107 @@ export default function StationsPage() {
     setModalOpen(true);
   };
 
+  const connectionFieldsFor = (type: string) => types.find((item) => item.value === type)?.needs || [];
+
   function connectionFingerprint(values: any, stationId = editing?.id) {
-    return JSON.stringify({
+    const type = String(values.type || "").trim();
+    const fields = connectionFieldsFor(type);
+    const fingerprint: Record<string, string | null> = {
       stationId: stationId || null,
-      type: String(values.type || "").trim(),
-      baseUrl: String(values.baseUrl || "").trim(),
-      accessToken: String(values.accessToken || "").trim(),
-      apiKey: String(values.apiKey || "").trim(),
-      userId: String(values.userId || "").trim(),
-      email: String(values.email || "").trim(),
-      password: String(values.password || ""),
-    });
+      type,
+    };
+    if (type !== "fixed") fingerprint.baseUrl = String(values.baseUrl || "").trim();
+    for (const field of fields) {
+      fingerprint[field] = field === "password"
+        ? String(values[field] || "")
+        : String(values[field] || "").trim();
+    }
+    return JSON.stringify(fingerprint);
   }
 
-  const onFormValuesChange = (_changed: any, values: any) => {
-    setFormFingerprint(connectionFingerprint(values));
-    setConnectionTest(null);
-    setTestedFingerprint(null);
+  const onFormValuesChange = (changed: any, values: any) => {
+    if (!Object.keys(changed).some((field) => CONNECTION_FIELDS.has(field))) return;
+    const fingerprint = connectionFingerprint(values);
+    setFormFingerprint(fingerprint);
+    if (testedFingerprint !== fingerprint) {
+      setConnectionTest(null);
+      setTestedFingerprint(null);
+    }
   };
 
   const onTestConnection = async () => {
     const values = form.getFieldsValue();
+    const type = String(values.type || "").trim();
+    const fields = connectionFieldsFor(type);
     const fingerprint = connectionFingerprint(values);
     setTestingConnection(true);
     setConnectionTest(null);
     setTestedFingerprint(null);
     try {
+      const payload: Record<string, unknown> = { stationId: editing?.id, type };
+      if (type !== "fixed") payload.baseUrl = String(values.baseUrl || "").trim();
+      for (const field of fields) payload[field] = values[field] ?? "";
       const result = await api("/api/stations/test", {
-        body: {
-          stationId: editing?.id,
-          type: values.type,
-          baseUrl: values.baseUrl,
-          accessToken: values.accessToken,
-          apiKey: values.apiKey,
-          userId: values.userId,
-          email: values.email,
-          password: values.password,
-        },
+        body: payload,
       });
-      setConnectionTest(result);
+      setConnectionTest(result.ok
+        ? result
+        : { ok: false, ...resultIssue(result, result.message, values) });
       setTestedFingerprint(fingerprint);
     } catch (e: any) {
+      const issue = resultIssue(null, e.message || "请求失败", values);
       setConnectionTest({
         ok: false,
-        message: "无法发起连接测试",
-        action: "请检查本机网络或稍后重试。",
-        diagnostic: e.message || "请求失败",
+        ...issue,
       });
       setTestedFingerprint(fingerprint);
     } finally {
       setTestingConnection(false);
+    }
+  };
+
+  const onRetestSavedConnection = async (station: any) => {
+    setRetestingIds((ids) => ({ ...ids, [station.id]: true }));
+    setStationChecks((checks) => {
+      const { [station.id]: _ignored, ...rest } = checks;
+      return rest;
+    });
+    try {
+      // 只传资源 ID 与类型；测试接口从已保存资源的内存副本读取凭证，不写库、不刷新、不告警。
+      const result = await api("/api/stations/test", {
+        body: { stationId: station.id, type: station.type },
+      });
+      if (!result.ok) {
+        const issue = resultIssue(result, result.message);
+        setStationChecks((checks) => ({
+          ...checks,
+          [station.id]: { issue, checkedAt: new Date().toISOString() },
+        }));
+        return;
+      }
+
+      const checkedAt = new Date().toISOString();
+      setStations((list) => list.map((item) => item.id === station.id ? {
+        ...item,
+        balance: {
+          ...(item.balance && item.balance.ok ? item.balance : {}),
+          ok: true,
+          checkedAt,
+          latencyMs: result.latencyMs,
+          account: result.account || null,
+          remaining: result.remaining,
+          currency: result.currency || null,
+        },
+      } : item));
+      message.success(`${station.name} 已验证连接，当前展示已更新`);
+    } catch (e: any) {
+      const issue = resultIssue(null, e.message || "请求失败");
+      setStationChecks((checks) => ({
+        ...checks,
+        [station.id]: { issue, checkedAt: new Date().toISOString() },
+      }));
+    } finally {
+      setRetestingIds((ids) => ({ ...ids, [station.id]: false }));
     }
   };
 
@@ -620,12 +804,11 @@ export default function StationsPage() {
 
   const onSave = async () => {
     const v = form.getFieldsValue();
+    const type = String(v.type || "").trim();
+    const connectionFields = connectionFieldsFor(type);
     const payload: any = {
       name: String(v.name || "").trim(),
-      type: v.type,
-      baseUrl: String(v.baseUrl || "").trim(),
-      userId: String(v.userId ?? "").trim(),
-      email: String(v.email || "").trim(),
+      type,
       lowBalanceUsd: String(v.lowBalanceUsd ?? "").trim(),
       cnyPerUsd: String(v.cnyPerUsd ?? "").trim(),
       costAliases: String(v.costAliasesText || "")
@@ -644,12 +827,23 @@ export default function StationsPage() {
       isOwn: v.type === "newapi" && !!v.isOwn,
       noRenewal: v.type !== "fixed" && !!v.noRenewal,
     };
-    const at = String(v.accessToken || "").trim();
-    const ak = String(v.apiKey || "").trim();
-    const pw = v.password || "";
-    if (at) payload.accessToken = at;
-    if (ak) payload.apiKey = ak;
-    if (pw) payload.password = pw;
+    if (type !== "fixed") {
+      payload.baseUrl = String(v.baseUrl || "").trim();
+      for (const field of connectionFields) {
+        const value = field === "password" ? String(v[field] || "") : String(v[field] ?? "").trim();
+        // 编辑时敏感凭证留空表示保持已保存的值；其他当前类型字段按表单值提交。
+        if (["accessToken", "apiKey", "password"].includes(field)) {
+          if (value) payload[field] = value;
+        } else {
+          payload[field] = value;
+        }
+      }
+    }
+    // 切换接入类型时，删除不再适用的旧凭证和地址；同类型编辑仍允许敏感字段留空以保持原值。
+    const applicableConnectionFields = new Set(type === "fixed" ? [] : ["baseUrl", ...connectionFields]);
+    for (const field of CONNECTION_INPUT_FIELDS) {
+      if (!applicableConnectionFields.has(field)) payload[field] = "";
+    }
     if (payload.type === "fixed") {
       const bad = payload.fixedPurchases.find((p: any) => !(Number(p.amount) > 0) || !(Number(p.days) > 0));
       if (bad) return message.error("每笔付费需填写金额与天数（均大于 0）");
@@ -689,6 +883,16 @@ export default function StationsPage() {
   const needs: string[] = curType?.needs || [];
   const isFixed = formType === "fixed";
   const canSave = isFixed || (!!connectionTest?.ok && testedFingerprint === formFingerprint);
+  const guidance = CONNECTION_GUIDANCE[formType] || null;
+  const testState = isFixed
+    ? { label: "无需测试", tone: "pending" }
+    : testingConnection
+      ? { label: "测试中", tone: "pending" }
+      : connectionTest?.ok && testedFingerprint === formFingerprint
+        ? { label: "已验证", tone: "ok" }
+        : connectionTest
+          ? { label: "需要修复", tone: "error" }
+          : { label: "尚未测试", tone: "pending" };
   const retryInitialLoad = () => {
     reload().catch(() => {});
     loadMeta().catch(() => {});
@@ -756,8 +960,11 @@ export default function StationsPage() {
                 etaDaysRule={rules.etaDays ?? 3}
                 compact={compact}
                 refreshing={!!refreshingIds[s.id]}
+                retesting={!!retestingIds[s.id]}
+                connectionCheck={stationChecks[s.id]}
                 onTrend={openTrend}
                 onRefresh={onRefreshOne}
+                onRetest={onRetestSavedConnection}
                 onEdit={openModal}
                 onDelete={onDelete}
               />
@@ -798,12 +1005,30 @@ export default function StationsPage() {
           <Form.Item label="名称" name="name" style={{ marginBottom: 12 }}>
             <Input placeholder="例如：主力资源" />
           </Form.Item>
-          <Form.Item label="类型" name="type" style={{ marginBottom: 12 }} extra={TYPE_HINTS[formType] || ""}>
+          <Form.Item label="类型" name="type" style={{ marginBottom: 12 }} extra="选择类型后会显示对应的凭证、续期与测试说明。">
             <Select options={types.map((t) => ({ value: t.value, label: t.label }))} />
           </Form.Item>
-          <Form.Item label="站点地址" name="baseUrl" style={{ marginBottom: 12 }}>
-            <Input placeholder="https://your-relay.com" />
-          </Form.Item>
+          {guidance ? (
+            <Alert
+              type="info"
+              showIcon
+              message={guidance.title}
+              description={
+                <div style={{ fontSize: 12, lineHeight: 1.65 }}>
+                  <div><strong>所需凭证：</strong>{guidance.credentials}</div>
+                  <div><strong>地址规则：</strong>{guidance.address}</div>
+                  <div><strong>续期说明：</strong>{guidance.lifecycle}</div>
+                  <div><strong>测试行为：</strong>{guidance.test}</div>
+                </div>
+              }
+              style={{ marginBottom: 12 }}
+            />
+          ) : null}
+          {!isFixed && (
+            <Form.Item label="站点地址" name="baseUrl" style={{ marginBottom: 12 }}>
+              <Input placeholder="https://your-relay.com" />
+            </Form.Item>
+          )}
           {needs.includes("accessToken") && (
             <Form.Item
               label={String(formType || "").startsWith("sub2api") ? "登录令牌（JWT）" : "访问令牌"}
@@ -836,8 +1061,12 @@ export default function StationsPage() {
           {!isFixed && (
             <Form.Item label="连接验证" style={{ marginBottom: 12 }}>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8 }}>
+                <div className={`resource-status resource-status--${testState.tone}`} aria-live="polite">
+                  <span className="resource-status__dot" aria-hidden="true" />
+                  {testState.label}
+                </div>
                 <Button type="dashed" style={{ minHeight: 44 }} loading={testingConnection} onClick={onTestConnection}>
-                  测试连接
+                  {connectionTest ? "重新测试连接" : "测试连接"}
                 </Button>
                 {connectionTest ? (
                   <Alert
@@ -845,11 +1074,20 @@ export default function StationsPage() {
                     showIcon
                     message={connectionTest.ok
                       ? `${connectionTest.message}${connectionTest.latencyMs != null ? `（${connectionTest.latencyMs}ms）` : ""}`
-                      : connectionTest.message}
-                    description={connectionTest.ok ? "连接信息未写入，点击保存后才会创建或更新资源。" : (
+                      : `${connectionTest.category}：${connectionTest.message}`}
+                    description={connectionTest.ok ? (
+                      <div>
+                        <div>连接信息尚未写入；点击保存后才会创建或更新资源。</div>
+                        {connectionTest.account || testBalanceText(connectionTest) ? (
+                          <div style={{ marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
+                            {[connectionTest.account ? `账户 ${connectionTest.account}` : null, testBalanceText(connectionTest)].filter(Boolean).join(" · ")}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
                       <div>
                         <div>{connectionTest.action}</div>
-                        {connectionTest.diagnostic ? <details style={{ marginTop: 6 }}><summary>查看诊断信息</summary><span>{connectionTest.diagnostic}</span></details> : null}
+                        {connectionTest.diagnostic ? <details style={{ marginTop: 6, overflowWrap: "anywhere" }}><summary style={{ display: "flex", alignItems: "center", minHeight: 40, cursor: "pointer" }}>查看脱敏诊断</summary><span>{connectionTest.diagnostic}</span></details> : null}
                       </div>
                     )}
                   />
@@ -859,6 +1097,15 @@ export default function StationsPage() {
               </div>
             </Form.Item>
           )}
+          {isFixed ? (
+            <Alert
+              type="info"
+              showIcon
+              message="固定成本无需测试连接"
+              description="保存后仅按付费记录计算日均摊销，不会访问上游接口、刷新余额或触发连接类告警。"
+              style={{ marginBottom: 12 }}
+            />
+          ) : null}
           {!isFixed && (
             <Form.Item label="低余额告警阈值（按站点余额 $ 计，可留空）" name="lowBalanceUsd" style={{ marginBottom: 12 }}>
               <Input placeholder="留空则用全局阈值" />
