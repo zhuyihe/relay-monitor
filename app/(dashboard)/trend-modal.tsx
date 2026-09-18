@@ -1,9 +1,9 @@
 "use client";
-// 余额趋势详情弹窗（共享组件）：总览页与中转站页点击站点行时打开
+// 余额趋势详情弹窗（共享组件）：运营总览与上游资源页点击资源行时打开
 // 从 stations/page.tsx 提取（v1 openTrend/drawChart 平移）：KPI 行 + 范围切换 +
 // 历史实线 / 虚线耗尽投影；数据拉取 GET /api/stations/:id/history?hours=
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Col, Grid, Modal, Row, Segmented, Spin, Statistic, theme } from "antd";
+import { Grid, Modal, Segmented, Spin, theme } from "antd";
 import { Line } from "@ant-design/plots";
 import ChartBox from "./chart-box";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta } from "../../lib/client";
@@ -11,9 +11,6 @@ import { useThemeMode } from "../providers";
 
 // 图表本体固定高度（与提取前 stations 页一致）
 const CHART_H = 280;
-// 语义色（antd 色板值，两种主题下都可读）；中性色一律走 token
-const COLOR = { warn: "#faad14", danger: "#ff4d4f" };
-
 // 范围切换选项（v1 RANGES）
 const RANGES = [
   { label: "24 小时", value: 24 },
@@ -74,7 +71,7 @@ function TrendChart({ points, prediction }: { points: any[]; prediction: any }) 
       height: CHART_H,
       animate: false,
       theme: dark ? "classicDark" : "classic",
-      scale: { color: { range: ["#1677ff", "#faad14"] }, y: { domainMin: 0, nice: true } },
+      scale: { color: { range: [token.colorPrimary, token.colorWarning] }, y: { domainMin: 0, nice: true } },
       // 预测段画虚线（G2 折线的 style 回调收到的是该分组的数据数组）
       style: { lineWidth: 2, lineDash: (d: any[]) => (d[0]?.s === "预测" ? [5, 5] : null) },
       axis: {
@@ -100,25 +97,26 @@ function TrendChart({ points, prediction }: { points: any[]; prediction: any }) 
               type: "point",
               data: [{ date: new Date(proj.t), v: 0 }],
               encode: { x: "date", y: "v" },
-              style: { fill: COLOR.danger, r: 4 },
+              style: { fill: token.colorError, r: 4 },
               tooltip: false,
             },
             ...(!isMobile ? [{
               type: "text",
               data: [{ date: new Date(proj.t), v: 0 }],
               encode: { x: "date", y: "v" },
-              style: { text: `预计耗尽 ${fmtClock(proj.t)}`, dy: -10, dx: -6, textAlign: "end", fill: COLOR.danger, fontSize: 12 },
+              style: { text: `预计耗尽 ${fmtClock(proj.t)}`, dy: -10, dx: -6, textAlign: "end", fill: token.colorError, fontSize: 12 },
               tooltip: false,
             }] : []),
           ]
         : [],
     } as any;
-  }, [points, prediction, dark, isMobile]);
+  }, [points, prediction, dark, isMobile, token.colorError, token.colorPrimary, token.colorWarning]);
 
   if (!cfg)
     return (
-      <div style={{ height: CHART_H, display: "flex", alignItems: "center", justifyContent: "center", color: token.colorTextSecondary }}>
-        数据点不足（需要至少两次成功查询），稍后再来看看
+      <div className="trend-state" style={{ height: CHART_H, color: token.colorTextSecondary }}>
+        <strong>趋势尚未形成</strong>
+        <span>至少完成两次成功查询后，这里会显示余额变化。</span>
       </div>
     );
   return (
@@ -183,7 +181,7 @@ export default function TrendModal({
 
   return (
     <Modal
-      className="responsive-modal"
+      className="responsive-modal trend-modal"
       title={station ? `余额趋势 · ${station.name}` : ""}
       open={!!station}
       onCancel={() => { seq.current++; onClose(); }}
@@ -193,55 +191,51 @@ export default function TrendModal({
     >
       {station && (
         <>
-          <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-            <Col xs={12} sm={6}>
-              <Statistic
-                title="当前余额"
-                value={station.balance?.ok ? cny(station.balance.remaining * rate) : "—"}
-              />
+          <section className="trend-metrics" aria-label="资源趋势摘要">
+            <div className="trend-metric trend-metric--primary">
+              <span>当前余额</span>
+              <strong>{station.balance?.ok ? cny(station.balance.remaining * rate) : "—"}</strong>
               {station.balance?.ok && rate !== 1 ? (
-                <div style={hint}>站点余额 {usd(station.balance.remaining)}</div>
+                <small style={hint}>站点余额 {usd(station.balance.remaining)}</small>
               ) : null}
-            </Col>
-            <Col xs={12} sm={6}>
-              <Statistic
-                title="今日消耗"
-                value={
+            </div>
+            <div className="trend-metric trend-metric--primary">
+              <span>今日消耗</span>
+              <strong>
+                {
                   station.todayUsed != null
                     ? (station.todayIsEstimate ? "≈ " : "") + cny(station.todayUsed * rate)
                     : "—"
                 }
-              />
+              </strong>
               {station.todayTokens != null || station.todayRequests != null ? (
-                <div style={hint}>
+                <small style={hint}>
                   {[
                     station.todayTokens != null ? fmtTokens(station.todayTokens) + " tokens" : null,
                     station.todayRequests != null ? station.todayRequests.toLocaleString("en-US") + " 次" : null,
                   ].filter(Boolean).join(" · ")}
-                </div>
+                </small>
               ) : null}
-            </Col>
-            <Col xs={12} sm={6}>
-              <Statistic
-                title="日均消耗（估算）"
-                value={pred?.burnPerDay > 0 ? cny(pred.burnPerDay * rate) : "—"}
-              />
-            </Col>
-            <Col xs={12} sm={6}>
-              <Statistic
-                title="预计耗尽"
-                value={pred?.etaDays != null ? fmtEta(pred.etaDays) : "—"}
-                valueStyle={eta?.cls ? { color: eta.cls === "danger" ? COLOR.danger : COLOR.warn } : undefined}
-              />
-            </Col>
-          </Row>
-          <div className="mobile-scroll" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+            </div>
+            <div className="trend-metric">
+              <span>日均消耗</span>
+              <strong>{pred?.burnPerDay > 0 ? cny(pred.burnPerDay * rate) : "—"}</strong>
+              <small>按近期趋势估算</small>
+            </div>
+            <div className={`trend-metric${eta?.cls ? ` trend-metric--${eta.cls}` : ""}`}>
+              <span>预计耗尽</span>
+              <strong>{pred?.etaDays != null ? fmtEta(pred.etaDays) : "—"}</strong>
+              <small>{eta?.text || "暂无有效预测"}</small>
+            </div>
+          </section>
+          <div className="mobile-scroll trend-range">
             <Segmented options={RANGES} value={hours} onChange={(v) => setHours(Number(v))} />
           </div>
           <Spin spinning={loading}>
             {err ? (
-              <div style={{ height: CHART_H, display: "flex", alignItems: "center", justifyContent: "center", color: token.colorTextSecondary }}>
-                {err}
+              <div className="trend-state trend-state--error" style={{ height: CHART_H }}>
+                <strong>趋势加载失败</strong>
+                <span>{err}</span>
               </div>
             ) : data ? (
               // 图表纵轴按充值汇率折算成 ¥（耗尽时间等预测不受影响，同 v1）
@@ -250,7 +244,9 @@ export default function TrendModal({
                 prediction={pred ? { ...pred, burnPerDay: pred.burnPerDay * rate } : pred}
               />
             ) : (
-              <div style={{ height: CHART_H }} />
+              <div className="trend-state" style={{ height: CHART_H, color: token.colorTextSecondary }}>
+                <span>正在读取趋势数据…</span>
+              </div>
             )}
           </Spin>
         </>

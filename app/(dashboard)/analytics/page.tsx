@@ -1,7 +1,7 @@
 "use client";
-// 经营分析页（v2 新增，无 v1 对应）：从经营视角看成本/收入/利润与余额跑道。
+// 成本与利润页（v2 新增，无 v1 对应）：从经营视角看成本/收入/利润与余额跑道。
 // 数据源：GET /api/analytics?days=N（history_points SQL 聚合 + 固定摊销 + 跑道预测）；
-// 收入系列客户端合并自 GET /api/own/analytics（无「我的站点」时自动隐藏收入与毛利）。
+// 收入系列客户端合并自 GET /api/own/analytics（无自营业务时自动隐藏收入与毛利）。
 // 口径与 /api/own/analytics 的利润计算一致：成本只算上游站（isOwn 排除），¥ 按站点汇率折算。
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { PageContainer, ProCard } from "@ant-design/pro-components";
@@ -17,9 +17,6 @@ const { Text } = Typography;
 // 与后端 WEEKDAY() 对齐：0=周一 … 6=周日
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const r2 = (v: number) => Math.round(v * 100) / 100;
-// 跑道分档色（antd 色板）：<3 天红 / <7 天黄 / 其他绿
-const runwayColor = (d: number) => (d < 3 ? "#ff4d4f" : d < 7 ? "#faad14" : "#52c41a");
-
 // 图表统一高度：同排两图高度一致，卡片 height:100% 后同排等高
 const CHART_H = 300;
 
@@ -68,7 +65,7 @@ export default function AnalyticsPage() {
       const o = await api(`/api/own/analytics?range=${d <= 7 ? "7d" : "30d"}`);
       setOwn(o);
     } catch {
-      setOwn(null); // 未标记「我的中转站」（400）或上游失败：隐藏收入/毛利系列
+      setOwn(null); // 未配置自营业务站点（400）或上游失败：隐藏收入/毛利系列
     } finally {
       setLoading(false);
     }
@@ -197,8 +194,8 @@ export default function AnalyticsPage() {
   return (
     <PageContainer
       className="responsive-page"
-      title="经营分析"
-      subTitle="上游成本 · 下游收入 · 余额跑道"
+      title="成本与利润"
+      subTitle="跟踪上游成本、下游收入、利润与余额跑道"
       extra={
         <div className="page-toolbar">
           <LastRefreshed at={refreshedAt} />
@@ -272,11 +269,11 @@ export default function AnalyticsPage() {
                 自绘一行 antd 图例，色块与系列 scale.color 保持一致，保证三项永远完整可见 */}
             <div style={{ display: "flex", justifyContent: "center", gap: 16, flexWrap: "wrap", marginBottom: 8 }}>
               {[
-                { label: "成本", color: "#1677ff" },
+                { label: "成本", color: token.colorPrimary },
                 ...(derived.hasIncome
                   ? [
-                      { label: "收入", color: "#52c41a" },
-                      { label: "毛利", color: "#fa8c16" },
+                      { label: "收入", color: token.colorTextSecondary },
+                      { label: "毛利", color: token.colorText },
                     ]
                   : []),
               ].map((it) => (
@@ -297,7 +294,9 @@ export default function AnalyticsPage() {
               scale={{
                 color: {
                   domain: derived.hasIncome ? ["成本", "收入", "毛利"] : ["成本"],
-                  range: derived.hasIncome ? ["#1677ff", "#52c41a", "#fa8c16"] : ["#1677ff"],
+                  range: derived.hasIncome
+                    ? [token.colorPrimary, token.colorTextSecondary, token.colorText]
+                    : [token.colorPrimary],
                 },
               }}
               children={[
@@ -412,7 +411,11 @@ export default function AnalyticsPage() {
                 data={derived.runway}
                 xField="name"
                 yField="etaDays"
-                style={{ fill: (d: any) => runwayColor(d.etaDays), maxWidth: 24 }}
+                style={{
+                  fill: (d: any) =>
+                    d.etaDays < 3 ? token.colorError : d.etaDays < 7 ? token.colorWarning : token.colorSuccess,
+                  maxWidth: 24,
+                }}
                 label={isMobile ? false : { text: (d: any) => `${d.etaDays} 天`, position: "right", dx: 4 }}
                 axis={{
                   y: { title: "天" },
@@ -449,7 +452,12 @@ export default function AnalyticsPage() {
                 yField="cny"
                 colorField="type"
                 stack
-                scale={{ color: { domain: ["用量成本", "固定摊销"], range: ["#1677ff", "#faad14"] } }}
+                scale={{
+                  color: {
+                    domain: ["用量成本", "固定摊销"],
+                    range: [token.colorPrimary, token.colorTextSecondary],
+                  },
+                }}
                 axis={yAxisCny}
                 legend={{ color: { position: isMobile ? "bottom" : "top" } }}
                 tooltip={tooltipCny}
@@ -477,7 +485,7 @@ export default function AnalyticsPage() {
             xField="date"
             yField="cny"
             shapeField="smooth"
-            style={{ lineWidth: 2 }}
+            style={{ lineWidth: 2, stroke: token.colorPrimary }}
             axis={yAxisCny}
             tooltip={tooltipCny}
           />

@@ -1,17 +1,17 @@
 {
-  "name": "中转站余额监控",
-  "short_name": "中转监控",
-  "description": "sub2api / new-api 中转站余额监控与经营分析面板",
+  "name": "炬元控制台",
+  "short_name": "炬元",
+  "description": "AI API 运营与成本管理平台",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "orientation": "portrait",
-  "background_color": "#F4F5F7",
-  "theme_color": "#0A84FF",
+  "background_color": "#F4F6F8",
+  "theme_color": "#3157D5",
   "lang": "zh-CN",
   "icons": [
-    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/juyuan-mark.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

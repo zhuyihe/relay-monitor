@@ -1,5 +1,5 @@
 "use client";
-// 我的站点页：自有中转站的下游用量分析 + 利润分析 + 消费预测
+// 自营业务页：自有中转站的下游用量分析 + 利润分析 + 消费预测
 // 对照 v1 app.js renderOwn/renderOwnBody/drawHourlyChart/renderResoldManager/drawOwnUsers/drawForecast，
 // 功能与文案逐条平移；图表改用 @ant-design/plots，布局用 ProCard 重排
 import { useEffect, useRef, useState } from "react";
@@ -12,7 +12,6 @@ import {
   Col,
   Grid,
   Input,
-  Result,
   Row,
   Segmented,
   Statistic,
@@ -25,6 +24,7 @@ import { PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { Bar, Column, Line } from "@ant-design/plots";
 import ChartBox from "../chart-box";
 import LastRefreshed from "../last-refreshed";
+import AppState from "../../components/app-state";
 import { api, cny, cny4, fmtTokens, rateOf } from "../../../lib/client";
 import { useThemeMode } from "../../providers";
 
@@ -37,13 +37,19 @@ const OWN_RANGES = [
   { value: "30d", label: "近 30 天" },
 ];
 
-// 日志精算的扫描条数档位（new-api 每页上限 100 条，条数越大请求越多越慢）
+// 日志精算的扫描条数档位（New API 每页上限 100 条，条数越大请求越多越慢）
 const AUDIT_ROWS = [
   { value: 2000, label: "2 千条" },
   { value: 4000, label: "4 千条" },
   { value: 10000, label: "1 万条" },
   { value: 20000, label: "2 万条" },
 ];
+
+const productErrorMessage = (error: any) =>
+  String(error?.message || error || "请求失败")
+    .replaceAll("「我的中转站」", "自营业务资源")
+    .replaceAll("我的中转站", "自营业务资源")
+    .replaceAll("这是我自己的中转站", "这是我的自营资源");
 
 // 成本口径标签（同 v1 MODE_LABEL）
 const MODE_LABEL: Record<string, string> = { usage: "按用量", fixed: "固定摊销", history: "余额推算 ≈" };
@@ -220,7 +226,7 @@ export default function MyStationPage() {
       setRefreshedAt(Date.now());
     } catch (e: any) {
       if (rangeRef.current !== r) return;
-      setError(e.message || String(e));
+      setError(productErrorMessage(e));
     }
   };
 
@@ -258,7 +264,7 @@ export default function MyStationPage() {
       );
       setAudit(r);
     } catch (e: any) {
-      setAuditError(e.message || String(e));
+      setAuditError(productErrorMessage(e));
       setAudit(null);
     } finally {
       setAuditing(false);
@@ -286,7 +292,7 @@ export default function MyStationPage() {
       const r = await api("/api/own/admin-keys");
       setAccounts(r.accounts);
     } catch (e: any) {
-      setMgrError(e.message || String(e));
+      setMgrError(productErrorMessage(e));
     } finally {
       setMgrLoading(false);
     }
@@ -328,7 +334,7 @@ export default function MyStationPage() {
       setAccounts(null);
       await load(true);
     } catch (e: any) {
-      message.error(e.message || String(e));
+      message.error(productErrorMessage(e));
     } finally {
       setSaving(false);
     }
@@ -349,14 +355,21 @@ export default function MyStationPage() {
 
   if (error) {
     return (
-      <PageContainer className="responsive-page" title="我的站点" subTitle="自有中转站的下游用量分析与消费预测" extra={headerExtra}>
-        <Result status="warning" title="无法加载下游数据" subTitle={error} />
-      </PageContainer>
+      <AppState
+        kind="error"
+        title="无法加载自营业务数据"
+        description={error}
+        actions={
+          <Button type="primary" icon={<ReloadOutlined />} loading={refreshing} onClick={onRefresh}>
+            重新加载
+          </Button>
+        }
+      />
     );
   }
   if (!data) {
     return (
-      <PageContainer className="responsive-page" title="我的站点" subTitle="自有中转站的下游用量分析与消费预测" extra={headerExtra}>
+      <PageContainer className="responsive-page" title="自营业务" subTitle="汇总下游用量、利润与消费预测" extra={headerExtra}>
         {/* 初次加载统一 ProCard 骨架屏（全站规范 3），形状对齐真实布局：4 KPI + 两图 */}
         <Row gutter={[12, 12]}>
           {[0, 1, 2, 3].map((i) => (
@@ -430,7 +443,7 @@ export default function MyStationPage() {
     : [];
 
   const p = d.profit;
-  const profitColor = p && !p.error ? (p.profitCny >= 0 ? "#3f8600" : "#cf1322") : undefined;
+  const profitColor = p && !p.error ? (p.profitCny >= 0 ? token.colorSuccess : token.colorError) : undefined;
   const incomeSub = p && !p.error
     ? [
         (p.resoldCny || 0) > 0 ? `含转售管理员 Key ${cny(p.resoldCny)}` : "",
@@ -474,7 +487,7 @@ export default function MyStationPage() {
   const userItems = top10(users, "user");
 
   return (
-    <PageContainer className="responsive-page" title="我的站点" subTitle="自有中转站的下游用量分析与消费预测" extra={headerExtra}>
+    <PageContainer className="responsive-page" title="自营业务" subTitle="汇总下游用量、利润与消费预测" extra={headerExtra}>
       {/* KPI：期内消费 / Tokens / 请求数 / 活跃用户 */}
       <Row gutter={[12, 12]}>
         <Col xs={12} md={6}>
@@ -706,6 +719,7 @@ export default function MyStationPage() {
                 data={buckets}
                 xField="label"
                 yField="tokens"
+                style={{ fill: token.colorPrimary }}
                 axis={{
                   x: { labelFormatter: (v: any) => (isMobile ? trunc(v, 8) : v) },
                   y: { labelFormatter: (v: any) => fmtTokens(v) },
@@ -735,6 +749,7 @@ export default function MyStationPage() {
                 data={modelItems}
                 xField="model"
                 yField="tokens"
+                style={{ fill: token.colorPrimary }}
                 axis={{ x: { labelFormatter: (v: any) => trunc(v, isMobile ? 12 : 20) }, y: { labelFormatter: (v: any) => fmtTokens(v) } }}
                 label={isMobile ? false : { text: (m: any) => fmtTokens(m.tokens), position: "right", dx: 4 }}
                 tooltip={{
@@ -776,7 +791,7 @@ export default function MyStationPage() {
               xField="t"
               yField="cost"
               colorField="kind"
-              scale={{ color: { domain: ["实际", "预测"], range: ["#1677ff", "rgba(22,119,255,0.35)"] } }}
+              scale={{ color: { domain: ["实际", "预测"], range: [token.colorPrimary, token.colorTextTertiary] } }}
               axis={{
                 x: {
                   labelFormatter: (v: any) => (!isMobile || new Date(Number(v)).getHours() % 4 === 0 ? hourLabel(v) : ""),
@@ -818,7 +833,7 @@ export default function MyStationPage() {
                   yField="cost"
                   colorField="kind"
                   legend={false}
-                  scale={{ color: { domain: ["历史日消费", "预测"], range: ["#1677ff", "#1677ff"] } }}
+                  scale={{ color: { domain: ["历史日消费", "预测"], range: [token.colorPrimary, token.colorTextTertiary] } }}
                   style={{
                     lineWidth: 2,
                     lineDash: (items: any) => {
@@ -834,7 +849,7 @@ export default function MyStationPage() {
                             type: "area",
                             data: bandData,
                             encode: { x: "date", y: "lo", y1: "hi" },
-                            style: { fill: "#1677ff", fillOpacity: 0.12 },
+                            style: { fill: token.colorPrimary, fillOpacity: 0.12 },
                             tooltip: false,
                           },
                         ]
@@ -851,9 +866,9 @@ export default function MyStationPage() {
                 </ChartBox>
                 {/* 图例（对照 v1 .fc-legend） */}
                 <div style={{ display: "flex", flexWrap: "wrap", minWidth: 0, gap: 16, marginTop: 8, fontSize: 12, color: token.colorTextSecondary }}>
-                  <span><span style={{ display: "inline-block", width: 18, borderTop: "2px solid #1677ff", verticalAlign: "middle", marginRight: 4 }} />历史日消费</span>
-                  <span><span style={{ display: "inline-block", width: 18, borderTop: "2px dashed #1677ff", verticalAlign: "middle", marginRight: 4 }} />预测</span>
-                  <span><span style={{ display: "inline-block", width: 18, height: 10, background: "rgba(22,119,255,0.12)", verticalAlign: "middle", marginRight: 4 }} />80% 置信区间</span>
+                  <span><span style={{ display: "inline-block", width: 18, borderTop: `2px solid ${token.colorPrimary}`, verticalAlign: "middle", marginRight: 4 }} />历史日消费</span>
+                  <span><span style={{ display: "inline-block", width: 18, borderTop: `2px dashed ${token.colorTextTertiary}`, verticalAlign: "middle", marginRight: 4 }} />预测</span>
+                  <span><span style={{ display: "inline-block", width: 18, height: 10, background: token.colorFillSecondary, verticalAlign: "middle", marginRight: 4 }} />80% 置信区间</span>
                 </div>
               </>
             )}
@@ -871,6 +886,7 @@ export default function MyStationPage() {
                 data={userItems}
                 xField="user"
                 yField="cost"
+                style={{ fill: token.colorPrimary }}
                 axis={{ x: { labelFormatter: (v: any) => trunc(v, isMobile ? 10 : 14) }, y: { labelFormatter: yuanTick } }}
                 label={isMobile ? false : { text: (u: any) => cny(u.cost), position: "right", dx: 4 }}
                 tooltip={{
@@ -1010,7 +1026,7 @@ export default function MyStationPage() {
           type="info"
           showIcon
           style={{ marginBottom: 12 }}
-          message={`分组口径只覆盖 ${flow.coveragePct}% 的消费：new-api 的流向查询会跳过没有分组字段的历史记录`}
+          message={`分组口径只覆盖 ${flow.coveragePct}% 的消费：New API 的流向查询会跳过没有分组字段的历史记录`}
         />
       ) : null}
       {flow && !flow.error ? (

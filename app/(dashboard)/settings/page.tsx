@@ -4,7 +4,8 @@
 // 主题切换由 antd 主题体系接管、退出登录在顶栏用户菜单，故不在本页重复。
 import { useEffect, useState } from "react";
 import { PageContainer, ProCard } from "@ant-design/pro-components";
-import { Alert, App, Button, Input, InputNumber, Space, Tag, Typography } from "antd";
+import { Alert, App, Button, Input, InputNumber, Space, Typography } from "antd";
+import { BRAND, NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 
 const { Text } = Typography;
@@ -103,10 +104,14 @@ export default function SettingsPage() {
   };
 
   return (
-    <PageContainer className="responsive-page" title="设置" subTitle="刷新策略、告警阈值与面板账号">
+    <PageContainer
+      className="responsive-page"
+      title={NAV_LABELS.settings}
+      subTitle="运行策略、账户安全与系统信息"
+    >
       <Space direction="vertical" size={16} style={{ display: "flex" }}>
-        <ProCard title="全局设置" headerBordered>
-          <SetRow title="自动刷新间隔" desc="后台按此间隔自动查询各中转站余额">
+        <ProCard title="运行策略" headerBordered>
+          <SetRow title="自动刷新间隔" desc="后台按此间隔更新上游资源余额">
             <Space>
               <InputNumber
                 value={interval}
@@ -130,12 +135,12 @@ export default function SettingsPage() {
           </SetRow>
         </ProCard>
 
-        <ProCard title="面板账号" headerBordered>
+        <ProCard title="账户安全" headerBordered>
           {me?.isDefaultPassword && (
             <Alert
               type="warning"
               showIcon
-              message="当前为默认密码 admin123，建议尽快修改"
+              message="当前仍在使用初始密码，建议尽快修改"
               style={{ marginBottom: 16 }}
             />
           )}
@@ -164,20 +169,16 @@ export default function SettingsPage() {
           </Space>
         </ProCard>
 
-        <ProCard title="关于" headerBordered>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>
-            中转站余额监控{" "}
-            {appInfo && (
-              <Tag>
-                v{appInfo.version}
-                {appInfo.commit ? ` · ${appInfo.commit}` : ""}
-              </Tag>
-            )}
-          </div>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            支持 New API（访问令牌 / sk 密钥）与 Sub2API（登录令牌 / 账号密码自动续期）。界面基于
-            Ant Design Pro 构建。凭证存储于你配置的 MySQL 数据库。
-          </Text>
+        <ProCard title="系统信息" headerBordered>
+          <SetRow title="产品" desc="当前运行的管理控制台">
+            <Text strong>{BRAND.productName}</Text>
+          </SetRow>
+          <SetRow title="版本" desc="当前部署版本">
+            <Text code>{appInfo ? `v${appInfo.version}` : "读取中…"}</Text>
+          </SetRow>
+          <SetRow title="构建标识" desc="用于定位当前部署对应的代码版本">
+            <Text code>{appInfo ? appInfo.commit || "未提供" : "读取中…"}</Text>
+          </SetRow>
         </ProCard>
       </Space>
     </PageContainer>

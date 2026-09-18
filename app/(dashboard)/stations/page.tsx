@@ -1,5 +1,5 @@
 "use client";
-// 中转站管理页：站点列表 + 添加/编辑弹窗 + 单站刷新/删除 + 余额趋势详情弹窗
+// 上游资源页：资源列表 + 添加/编辑弹窗 + 单项刷新/删除 + 余额趋势详情弹窗
 // 功能对照 v1 app.js：renderStations/stationRow（553-586、193-288）、站点表单弹窗（1487-1614）、
 // 趋势弹窗 openTrend/drawChart（1675-1822）——文案与数字口径逐条对齐，布局用 Pro 风格重排
 import { useCallback, useEffect, useState } from "react";
@@ -16,7 +16,6 @@ import {
   Modal,
   Select,
   Space,
-  Tag,
   theme,
 } from "antd";
 import {
@@ -32,10 +31,6 @@ import dayjs from "dayjs";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta, statusOf } from "../../../lib/client";
 
 // ---- 展示工具（v1 app.js 同名函数平移）--------------------------------------
-const PLATE: Record<string, string> = { newapi: "NA", "newapi-key": "KEY", sub2api: "S2", "sub2api-password": "S2" };
-// 语义色（antd 色板值，两种主题下都可读）；中性色一律走 token
-const COLOR = { warn: "#faad14", danger: "#ff4d4f" };
-
 function relTime(iso: any) {
   if (!iso) return "从未";
   const d = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -56,25 +51,24 @@ function etaText(p: any, rate: number, etaDaysRule: number): { text: string; cls
   const cls = p.etaDays <= etaDaysRule ? "danger" : p.etaDays <= 7 ? "warn" : "";
   return { text: `≈ ${cny(p.burnPerDay * rate)}/天（${p.basis || "估算"}）· 预计 ${fmtEta(p.etaDays)}后耗尽`, cls };
 }
-// 状态徽标（v1 statusPill）：文案一致，样式换 antd Tag
-function statusPill(st: string, compact = false) {
-  const map: Record<string, [string, string]> = {
-    ok: ["success", "正常"],
-    warn: ["warning", "余额偏低"],
-    danger: ["error", "已耗尽"],
-    error: ["error", "查询失败"],
-    pending: ["default", "待刷新"],
+function StatusText({ st }: { st: string }) {
+  const labels: Record<string, string> = {
+    ok: "正常", warn: "余额偏低", danger: "已耗尽", error: "查询失败", pending: "待刷新",
   };
-  const [color, txt] = map[st] || map.pending;
-  return <Tag color={color} style={{ marginInlineStart: compact ? 0 : 6 }}>{txt}</Tag>;
+  const status = labels[st] ? st : "pending";
+  return (
+    <span className={`resource-status resource-status--${status}`}>
+      <span className="resource-status__dot" aria-hidden="true" />
+      {labels[status]}
+    </span>
+  );
 }
 
 function mobileAmountFontSize(value: string): number {
   const length = Array.from(value).length;
-  if (length > 18) return 10;
-  if (length > 15) return 11;
-  if (length > 12) return 13;
-  return 16;
+  if (length > 15) return 14;
+  if (length > 12) return 15;
+  return 17;
 }
 
 // 表单类型提示（v1 syncCredFields 的 hints，逐字平移）
@@ -140,19 +134,6 @@ function StationRow(props: {
   const rowStyle: React.CSSProperties = {
     borderBottom: `1px solid ${token.colorBorderSecondary}`,
   };
-  const plateStyle: React.CSSProperties = {
-    width: 44,
-    height: 44,
-    borderRadius: 10,
-    background: token.colorPrimaryBg,
-    color: token.colorPrimary,
-    fontWeight: 700,
-    fontSize: 13,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
-  };
   const mutedStyle: React.CSSProperties = { color: token.colorTextSecondary };
   const sep = <span style={{ margin: "0 6px", ...mutedStyle }}>·</span>;
 
@@ -181,19 +162,18 @@ function StationRow(props: {
     if (nextEnd != null) {
       const remain = Math.ceil((nextEnd - nowMs) / 86400000);
       pieces.push(
-        <span key="n" style={remain <= 3 ? { color: COLOR.warn } : undefined}>
+        <span key="n" style={remain <= 3 ? { color: token.colorWarning } : undefined}>
           最近一笔 {fmtClock(nextEnd).split(" ")[0]} 到期（剩 {remain} 天）
         </span>
       );
     }
-    if (expiredAll) pieces.push(<span key="e" style={{ color: COLOR.danger }}>已全部到期，续费请追加付费记录</span>);
+    if (expiredAll) pieces.push(<span key="e" style={{ color: token.colorError }}>已全部到期，续费请追加付费记录</span>);
     const nextEndRemain = nextEnd == null ? null : Math.ceil((nextEnd - nowMs) / 86400000);
     if (compact) {
       const fixedAmount = cny(daily);
       return (
         <article className="mobile-station-card mobile-station-card--fixed" style={rowStyle}>
           <div className="mobile-station-card__header">
-            <div className="mobile-station-card__plate" style={{ ...plateStyle, width: 40, height: 40 }}>¥</div>
             <div className="mobile-station-card__identity">
               <div className="mobile-station-card__name" title={s.name}>{s.name}</div>
               <div className="mobile-station-card__meta" title={s.baseUrl || "不访问接口，仅计入利润成本"}>
@@ -201,10 +181,13 @@ function StationRow(props: {
               </div>
             </div>
             <div className="mobile-station-card__summary">
-              <Tag color={expiredAll ? "error" : undefined}>{expiredAll ? "已到期" : "固定成本"}</Tag>
+              <span className={`resource-status resource-status--${expiredAll ? "danger" : "pending"}`}>
+                <span className="resource-status__dot" aria-hidden="true" />
+                {expiredAll ? "已到期" : "固定成本"}
+              </span>
               <strong
                 aria-label={`日均摊销 ${fixedAmount}`}
-                style={{ color: expiredAll ? COLOR.danger : undefined, fontSize: mobileAmountFontSize(fixedAmount) }}
+                style={{ color: expiredAll ? token.colorError : undefined, fontSize: mobileAmountFontSize(fixedAmount) }}
               >
                 {fixedAmount}
               </strong>
@@ -218,7 +201,7 @@ function StationRow(props: {
             </div>
             <div className="mobile-station-card__metric">
               <span>最近到期</span>
-              <strong style={nextEndRemain != null && nextEndRemain <= 3 ? { color: COLOR.warn } : undefined}>
+              <strong style={nextEndRemain != null && nextEndRemain <= 3 ? { color: token.colorWarning } : undefined}>
                 {nextEnd == null ? "—" : fmtClock(nextEnd).split(" ")[0]}
               </strong>
               <small>{nextEndRemain == null ? (expiredAll ? "已全部到期" : "暂无到期日") : `剩 ${nextEndRemain} 天`}</small>
@@ -229,11 +212,10 @@ function StationRow(props: {
       );
     }
     return (
-      <div className="station-row desktop-station-row" style={rowStyle}>
-        <div className="station-row__plate" style={plateStyle}>¥</div>
+      <div className="station-row desktop-station-row resource-list-row" style={rowStyle}>
         <div className="station-row__main">
-          <div className="station-row__name" style={{ fontWeight: 600 }}>
-            {s.name}<Tag style={{ marginInlineStart: 6 }}>固定成本</Tag>
+          <div className="station-row__name resource-list-row__name" style={{ fontWeight: 600 }}>
+            {s.name}<span className="resource-flag">固定成本</span>
           </div>
           <div className="station-row__meta" style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>
             {s.baseUrl ? `${s.baseUrl} · ` : ""}不访问接口 · 仅计入利润成本
@@ -243,7 +225,7 @@ function StationRow(props: {
           </div>
         </div>
         <div className="station-row__amount" style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 18, fontWeight: 700, color: expiredAll ? COLOR.danger : undefined }}>{cny(daily)}</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: expiredAll ? token.colorError : undefined }}>{cny(daily)}</div>
           <div style={{ fontSize: 12, color: token.colorTextSecondary }}>{expiredAll ? "已到期" : "每天"}</div>
         </div>
         <Space className="station-row__actions" size={2}>
@@ -257,7 +239,7 @@ function StationRow(props: {
   const st = statusOf(s, settings);
   const b = s.balance;
   const rate = rateOf(s);
-  const amtColor = st === "danger" || st === "error" ? COLOR.danger : st === "warn" ? COLOR.warn : undefined;
+  const amtColor = st === "danger" || st === "error" ? token.colorError : st === "warn" ? token.colorWarning : undefined;
   const amount = b && b.ok ? cny(b.remaining * rate) : "—";
   // 副标题行：类型 · 账号 · 令牌续期 · 上次查询 · 延迟（同 v1 meta 拼接顺序）
   let meta: React.ReactNode;
@@ -271,7 +253,7 @@ function StationRow(props: {
     if (b.latencyMs != null) bits.push(b.latencyMs + "ms");
     meta = bits.join(" · ");
   } else if (b && !b.ok) {
-    meta = (<>{typeLabel(s.type)} · <span style={{ color: COLOR.danger }}>{b.error || "查询失败"}</span></>);
+    meta = (<>{typeLabel(s.type)} · <span style={{ color: token.colorError }}>{b.error || "查询失败"}</span></>);
   } else {
     meta = `${typeLabel(s.type)} · 尚未查询`;
   }
@@ -299,7 +281,7 @@ function StationRow(props: {
     : s.prediction?.etaDays != null
       ? fmtEta(s.prediction.etaDays)
       : "—";
-  const etaColor = eta?.cls === "danger" ? COLOR.danger : eta?.cls === "warn" ? COLOR.warn : undefined;
+  const etaColor = eta?.cls === "danger" ? token.colorError : eta?.cls === "warn" ? token.colorWarning : undefined;
   const pieces: React.ReactNode[] = [];
   if (b && b.ok && s.todayUsed != null) {
     pieces.push(<span key="t">今日消耗 {s.todayIsEstimate ? "≈" : ""}{cny(s.todayUsed * rate)}</span>);
@@ -307,7 +289,7 @@ function StationRow(props: {
   }
   if (eta) {
     pieces.push(
-      <span key="e" style={eta.cls ? { color: eta.cls === "danger" ? COLOR.danger : COLOR.warn } : undefined}>
+      <span key="e" style={eta.cls ? { color: eta.cls === "danger" ? token.colorError : token.colorWarning } : undefined}>
         {eta.text}
       </span>
     );
@@ -317,7 +299,6 @@ function StationRow(props: {
     return (
       <article className="mobile-station-card" style={rowStyle}>
         <div className="mobile-station-card__header">
-          <div className="mobile-station-card__plate" style={{ ...plateStyle, width: 40, height: 40 }}>{PLATE[s.type] || "?"}</div>
           <div className="mobile-station-card__identity">
             <div className="mobile-station-card__name" title={s.name}>{s.name}</div>
             <div
@@ -328,7 +309,7 @@ function StationRow(props: {
             </div>
           </div>
           <div className="mobile-station-card__summary">
-            {statusPill(st, true)}
+            <StatusText st={st} />
             <strong aria-label={`人民币余额 ${amount}`} style={{ color: amtColor, fontSize: mobileAmountFontSize(amount) }}>{amount}</strong>
           </div>
         </div>
@@ -359,8 +340,7 @@ function StationRow(props: {
   }
 
   return (
-    <div className="station-row desktop-station-row" style={rowStyle}>
-      <div className="station-row__plate" style={plateStyle}>{PLATE[s.type] || "?"}</div>
+    <div className="station-row desktop-station-row resource-list-row" style={rowStyle}>
       <div
         className="station-row__main"
         style={{ cursor: "pointer" }}
@@ -376,13 +356,13 @@ function StationRow(props: {
           }
         }}
       >
-        <div className="station-row__name" style={{ fontWeight: 600 }}>
+        <div className="station-row__name resource-list-row__name" style={{ fontWeight: 600 }}>
           {s.name}
-          {s.isOwn ? <Tag color="blue" style={{ marginInlineStart: 6 }}>我的站</Tag> : null}
-          {s.includeInProfit === false ? <Tag style={{ marginInlineStart: 6 }}>不计利润成本</Tag> : null}
-          {s.noRenewal ? <Tag color="orange" style={{ marginInlineStart: 6 }}>不再续费</Tag> : null}
-          {s.demo ? <Tag style={{ marginInlineStart: 6 }}>演示</Tag> : null}
-          {statusPill(st)}
+          {s.isOwn ? <span className="resource-flag">自营</span> : null}
+          {s.includeInProfit === false ? <span className="resource-flag">不计利润成本</span> : null}
+          {s.noRenewal ? <span className="resource-flag resource-flag--warning">不再续费</span> : null}
+          {s.demo ? <span className="resource-flag">演示</span> : null}
+          <StatusText st={st} />
         </div>
         <div className="station-row__meta" style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>{meta}</div>
         {b && b.ok && s.spark && s.spark.length > 1 ? (
@@ -609,18 +589,18 @@ export default function StationsPage() {
 
   return (
     <PageContainer
-      className="responsive-page"
-      title="中转站"
-      subTitle={compact ? "查看余额、消耗与趋势" : "管理你的 sub2api / new-api 中转站"}
+      className="responsive-page resources-page"
+      title="上游资源"
+      subTitle={compact ? "查看余额、消耗与风险" : "统一管理供应连接、资金余额与消耗风险"}
       extra={
         <div className="page-toolbar">
           <LastRefreshed at={refreshedAt} />
           <Button className="touch-icon-button" icon={<ReloadOutlined />} loading={refreshingAll} onClick={onRefreshAll}>刷新</Button>
-          {!compact ? <Button className="touch-icon-button desktop-station-action" type="primary" icon={<PlusOutlined />} onClick={() => openModal(null)}>添加中转站</Button> : null}
+          {!compact ? <Button className="touch-icon-button desktop-station-action" type="primary" icon={<PlusOutlined />} onClick={() => openModal(null)}>添加资源</Button> : null}
         </div>
       }
     >
-      <ProCard className="station-list-card" loading={!loaded}>
+      <ProCard className="station-list-card resource-list-card" loading={!loaded}>
         {stations.length ? (
           <div>
             {stations.map((s) => (
@@ -644,9 +624,9 @@ export default function StationsPage() {
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             description={
               <div>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>还没有中转站</div>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>还没有上游资源</div>
                 <div style={{ color: token.colorTextSecondary }}>
-                  {compact ? "请在电脑端添加中转站，移动端用于查看与刷新数据。" : "点击右上角「添加中转站」，填入站点地址与凭证即可监控余额。"}
+                  {compact ? "请在电脑端添加资源，移动端用于查看与刷新数据。" : "点击右上角「添加资源」，配置连接地址与凭证后即可监控余额。"}
                 </div>
               </div>
             }
@@ -658,7 +638,7 @@ export default function StationsPage() {
       {/* ---- 添加/编辑弹窗 ---- */}
       <Modal
         className="responsive-modal"
-        title={editing ? "编辑中转站" : "添加中转站"}
+        title={editing ? "编辑上游资源" : "添加上游资源"}
         open={modalOpen}
         onCancel={() => setModalOpen(false)}
         onOk={onSave}
@@ -668,10 +648,10 @@ export default function StationsPage() {
         destroyOnHidden={false}
         width={520}
       >
-        <div style={{ ...hint, marginBottom: 12 }}>凭证仅保存在本机，用于向该中转站查询余额。</div>
+        <div style={{ ...hint, marginBottom: 12 }}>凭证仅保存在本机，用于连接该上游并查询余额。</div>
         <Form form={form} layout="vertical" size="middle">
           <Form.Item label="名称" name="name" style={{ marginBottom: 12 }}>
-            <Input placeholder="例如：某某中转站" />
+            <Input placeholder="例如：主力资源" />
           </Form.Item>
           <Form.Item label="类型" name="type" style={{ marginBottom: 12 }} extra={TYPE_HINTS[formType] || ""}>
             <Select options={types.map((t) => ({ value: t.value, label: t.label }))} />
@@ -750,7 +730,7 @@ export default function StationsPage() {
               style={{ marginBottom: formType === "newapi" ? 12 : 0 }}
               extra="余额首次低于阈值时提醒一次；之后不再发送持续低余额、余额耗尽或预计耗尽提醒。查询失败告警不受影响。"
             >
-              <Checkbox>不再续费此中转站</Checkbox>
+              <Checkbox>不再续费此资源</Checkbox>
             </Form.Item>
           )}
           {isFixed && (
@@ -803,15 +783,15 @@ export default function StationsPage() {
               name="isOwn"
               valuePropName="checked"
               style={{ marginBottom: 0 }}
-              extra="启用「我的站点」下游分析（分用户/分模型用量与消费预测）。需要管理员（root）账号的系统访问令牌与用户 ID。转售给他人的管理员 Key 可在「我的站点」页的「管理员转售 Key」中勾选，其消费计入转售收入。"
+              extra="启用「自营业务」下游分析（分用户/分模型用量与消费预测）。需要管理员（root）账号的系统访问令牌与用户 ID。转售给他人的管理员 Key 可在「自营业务」页的「管理员转售 Key」中勾选，其消费计入转售收入。"
             >
-              <Checkbox>这是我自己的中转站</Checkbox>
+              <Checkbox>这是我的自营资源</Checkbox>
             </Form.Item>
           )}
         </Form>
       </Modal>
 
-      {/* ---- 趋势详情弹窗（共享组件，总览页同款） ---- */}
+      {/* ---- 趋势详情弹窗（共享组件，运营总览同款） ---- */}
       <TrendModal station={trendCur} onClose={() => setTrendStation(null)} etaDaysRule={rules.etaDays ?? 3} />
     </PageContainer>
   );

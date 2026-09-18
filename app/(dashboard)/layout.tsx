@@ -1,6 +1,5 @@
 "use client";
-// 面板壳：ProLayout 侧栏导航 + 顶栏动作（手动刷新 / 用户下拉退出）+ 页脚版本号
-// 导航结构对照 v1 index.html 侧栏：总览/中转站/我的站点/用量统计/经营分析/通知/设置
+// 炬元控制台外壳：保留 ProLayout 的响应式导航能力，定制品牌区、导航与全局动作。
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ProLayout } from "@ant-design/pro-components";
@@ -8,7 +7,7 @@ import { App, Avatar, Button, Dropdown, Grid, theme as antdTheme } from "antd";
 import {
   AppstoreOutlined,
   ClusterOutlined,
-  LineChartOutlined,
+  ApiOutlined,
   BarChartOutlined,
   FundOutlined,
   BellOutlined,
@@ -20,21 +19,25 @@ import {
   SunOutlined,
 } from "@ant-design/icons";
 import { api } from "../../lib/client";
+import { BRAND, formatPageTitle, NAV_LABELS } from "../../lib/brand";
+import BrandMark from "../components/brand-mark";
 import { useThemeMode } from "../providers";
 
 // 侧栏菜单（path 即 App Router 路由）
 const menuRoute = {
   path: "/",
   routes: [
-    { path: "/", name: "总览", icon: <AppstoreOutlined /> },
-    { path: "/stations", name: "中转站", icon: <ClusterOutlined /> },
-    { path: "/my", name: "我的站点", icon: <LineChartOutlined /> },
-    { path: "/usage", name: "用量统计", icon: <BarChartOutlined /> },
-    { path: "/analytics", name: "经营分析", icon: <FundOutlined /> },
-    { path: "/notifications", name: "通知", icon: <BellOutlined /> },
-    { path: "/settings", name: "设置", icon: <SettingOutlined /> },
+    { path: "/", name: NAV_LABELS.home, icon: <AppstoreOutlined /> },
+    { path: "/stations", name: NAV_LABELS.stations, icon: <ClusterOutlined /> },
+    { path: "/my", name: NAV_LABELS.my, icon: <ApiOutlined /> },
+    { path: "/usage", name: NAV_LABELS.usage, icon: <BarChartOutlined /> },
+    { path: "/analytics", name: NAV_LABELS.analytics, icon: <FundOutlined /> },
+    { path: "/notifications", name: NAV_LABELS.notifications, icon: <BellOutlined /> },
+    { path: "/settings", name: NAV_LABELS.settings, icon: <SettingOutlined /> },
   ],
 };
+
+const pageNames = Object.fromEntries(menuRoute.routes.map((route) => [route.path, route.name]));
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -46,21 +49,18 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const compactHeader = !screens.md;
   const isMobile = !screens.lg;
   const [username, setUsername] = useState<string>("");
-  const [appInfo, setAppInfo] = useState<{ version: string; commit: string | null } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const currentPageName = pageNames[pathname] || BRAND.productName;
 
   useEffect(() => {
     setCollapsed(isMobile);
   }, [isMobile]);
 
-  // 挂载时校验登录态（401 由 api() 自动跳转 /login），并取版本号
+  // 挂载时校验登录态（401 由 api() 自动跳转 /login）。
   useEffect(() => {
     api("/api/auth/me")
       .then((r) => setUsername(r.username))
-      .catch(() => {});
-    api("/api/meta")
-      .then((m) => setAppInfo(m.app))
       .catch(() => {});
   }, []);
 
@@ -88,16 +88,65 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   return (
     <ProLayout
       className="dashboard-layout"
-      title="中转站余额监控"
-      logo={<LineChartOutlined style={{ fontSize: 22, color: "#1677ff" }} />}
+      title={BRAND.name}
+      logo={<BrandMark size={30} inverse />}
       layout="side"
       fixSiderbar
       breakpoint="lg"
+      siderWidth={240}
       collapsed={collapsed}
       onCollapse={setCollapsed}
       contentStyle={{ minWidth: 0 }}
+      token={{
+        bgLayout: token.colorBgLayout,
+        sider: {
+          colorMenuBackground: "#111827",
+          colorBgMenuItemHover: "rgba(255, 255, 255, 0.07)",
+          colorBgMenuItemActive: "rgba(127, 156, 255, 0.12)",
+          colorBgMenuItemSelected: "rgba(127, 156, 255, 0.16)",
+          colorTextMenu: "#B8C2D1",
+          colorTextMenuActive: "#FFFFFF",
+          colorTextMenuItemHover: "#FFFFFF",
+          colorTextMenuSelected: "#FFFFFF",
+          colorTextMenuTitle: "#FFFFFF",
+          colorTextMenuSecondary: "#8F9BAA",
+          colorMenuItemDivider: "rgba(255, 255, 255, 0.08)",
+          colorBgCollapsedButton: "#182231",
+          colorTextCollapsedButton: "#B8C2D1",
+          colorTextCollapsedButtonHover: "#FFFFFF",
+          paddingInlineLayoutMenu: 12,
+          paddingBlockLayoutMenu: 8,
+        },
+        header: {
+          colorBgHeader: token.colorBgContainer,
+          colorBgScrollHeader: token.colorBgContainer,
+          colorHeaderTitle: token.colorText,
+          colorTextRightActionsItem: token.colorTextSecondary,
+          colorBgRightActionsItemHover: token.colorFillTertiary,
+        },
+      }}
       route={menuRoute}
       location={{ pathname }}
+      pageTitleRender={() => formatPageTitle(currentPageName)}
+      menuHeaderRender={(_logo, _title, props) => (
+        <div className="app-sider-brand">
+          <BrandMark
+            size={30}
+            inverse
+            showWordmark={!props?.collapsed}
+            subtitle={BRAND.productDescriptor}
+          />
+        </div>
+      )}
+      headerTitleRender={() => (
+        <div className="app-header-context">
+          <BrandMark className="app-header-context__mark" size={26} />
+          <span>
+            <small>{BRAND.productName}</small>
+            <strong>{currentPageName}</strong>
+          </span>
+        </div>
+      )}
       menuItemRender={(item, dom) => (
         <a
           onClick={(e) => {
@@ -110,15 +159,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </a>
       )}
       actionsRender={() => [
-        <Button
-          key="theme"
-          className="touch-icon-button"
-          type="text"
-          icon={dark ? <SunOutlined /> : <MoonOutlined />}
-          onClick={toggle}
-          title={dark ? "切换浅色" : "切换深色"}
-          aria-label={dark ? "切换浅色主题" : "切换深色主题"}
-        />,
         <Button
           key="refresh"
           className="touch-icon-button"
@@ -136,9 +176,21 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         title: compactHeader ? undefined : username || "…",
         render: () => (
           <Dropdown
+            trigger={["click"]}
             menu={{
-              items: [{ key: "logout", icon: <LogoutOutlined />, label: "退出登录" }],
+              items: [
+                {
+                  key: "theme",
+                  icon: dark ? <SunOutlined /> : <MoonOutlined />,
+                  label: dark ? "切换为浅色主题" : "切换为深色主题",
+                },
+                { key: "settings", icon: <SettingOutlined />, label: NAV_LABELS.settings },
+                { type: "divider" },
+                { key: "logout", icon: <LogoutOutlined />, label: "退出登录" },
+              ],
               onClick: ({ key }) => {
+                if (key === "theme") toggle();
+                if (key === "settings") router.push("/settings");
                 if (key === "logout") onLogout();
               },
             }}
@@ -154,12 +206,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </Dropdown>
         ),
       }}
-      footerRender={() => (
-        <div style={{ textAlign: "center", padding: "12px 0", fontSize: 12, color: token.colorTextTertiary }}>
-          中转站余额监控
-          {appInfo ? ` v${appInfo.version}${appInfo.commit ? ` (${appInfo.commit})` : ""}` : ""}
-        </div>
-      )}
+      footerRender={false}
     >
       {children}
     </ProLayout>

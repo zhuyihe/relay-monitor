@@ -1,5 +1,5 @@
 "use client";
-// 通知页：渠道列表 / 添加编辑渠道弹窗 / 告警规则 / 每日日报
+// 告警中心：推送渠道 / 添加编辑渠道弹窗 / 告警规则 / 每日日报
 // 对照 v1 app.js renderNotify(587-680)、openChModal/renderChFields(1616-1673)、
 // 通知相关事件处理(1925-2027)与 loadNotifications(2094)。
 // v1 对通知页刻意跳过自动重绘（refreshCurrentView：表单未保存的输入会被清空），
@@ -419,7 +419,8 @@ export default function NotificationsPage() {
   return (
     <PageContainer
       className="responsive-page"
-      title="通知"
+      title="告警中心"
+      subTitle="管理告警规则、推送渠道与每日日报"
       extra={
         <div className="page-toolbar">
           <Button className="touch-icon-button" type="primary" icon={<PlusOutlined />} onClick={() => openChModal(null)}>
@@ -429,11 +430,11 @@ export default function NotificationsPage() {
       }
       loading={loading}
     >
-      {/* 通知渠道列表 */}
+      {/* 推送渠道列表 */}
       {/* 窄视口：标题不换行不收缩，说明文字（extra）允许换行，避免标题被挤成竖排 */}
       <ProCard
         className="mobile-card-header"
-        title={<span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>通知渠道</span>}
+        title={<span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>推送渠道</span>}
         extra={
           <Text type="secondary" style={{ fontSize: 12, whiteSpace: "normal", textAlign: "right" }}>
             在下方「告警规则」中可为每类告警单独选择推送渠道
@@ -448,7 +449,7 @@ export default function NotificationsPage() {
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description={
                   <>
-                    <div style={{ fontWeight: 600 }}>还没有通知渠道</div>
+                    <div style={{ fontWeight: 600 }}>还没有推送渠道</div>
                     <Text type="secondary" style={{ fontSize: 12 }}>
                       添加 Telegram、钉钉、企业微信、飞书、Bark、ntfy、Server酱或自定义 Webhook。
                     </Text>
@@ -548,7 +549,7 @@ export default function NotificationsPage() {
         title={<span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>每日日报</span>}
         extra={
           <Text type="secondary" style={{ fontSize: 12, whiteSpace: "normal", textAlign: "right" }}>
-            定时汇总昨日「我的站点」经营情况并推送（时间按服务器时区）
+            定时汇总昨日自营业务经营情况并推送（时间按服务器时区）
           </Text>
         }
         style={{ marginTop: 16 }}
@@ -574,7 +575,7 @@ export default function NotificationsPage() {
               options={channels.map((c) => ({ value: c.id, label: c.name }))}
             />
           ) : (
-            <Text type="secondary">先添加通知渠道</Text>
+            <Text type="secondary">先添加推送渠道</Text>
           )}
         </SetRow>
         <SetRow title="保存与测试" desc="预览按当前数据生成的报告，或立即发送一次">
@@ -592,11 +593,11 @@ export default function NotificationsPage() {
         </SetRow>
       </ProCard>
 
-      {/* 通知渠道弹窗（对照 v1 chModal） */}
+      {/* 推送渠道弹窗（对照 v1 chModal） */}
       <Modal
         className="responsive-modal"
         open={chOpen}
-        title={editingCh ? "编辑通知渠道" : "添加通知渠道"}
+        title={editingCh ? "编辑推送渠道" : "添加推送渠道"}
         onCancel={() => setChOpen(false)}
         footer={
           <div style={{ display: "flex", gap: 8 }}>

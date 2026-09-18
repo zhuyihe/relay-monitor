@@ -1,17 +1,28 @@
 import type { Metadata, Viewport } from "next";
 import { AntdRegistry } from "@ant-design/nextjs-registry";
 import Providers from "./providers";
+import { BRAND } from "../lib/brand";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "中转站余额监控",
-  description: "Sub2API / NewAPI 中转站余额与经营监控面板",
+  title: {
+    default: BRAND.productName,
+    template: `%s · ${BRAND.name}`,
+  },
+  description: `${BRAND.positioning}。${BRAND.loginTagline}`,
   manifest: "/manifest.webmanifest",
-  icons: { apple: "/icons/apple-touch-icon.png" },
+  applicationName: BRAND.productName,
+  icons: {
+    icon: [{ url: "/icons/juyuan-mark.svg", type: "image/svg+xml" }],
+    apple: [{ url: "/icons/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+  },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#1677ff",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#F4F6F8" },
+    { media: "(prefers-color-scheme: dark)", color: "#0F141B" },
+  ],
   width: "device-width",
   initialScale: 1,
 };

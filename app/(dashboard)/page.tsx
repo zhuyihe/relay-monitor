@@ -1,10 +1,10 @@
 "use client";
-// 总览页：5 张 KPI + 总余额趋势图 + 今日消耗对比 + 中转站余额列表
+// 运营总览：核心经营指标 + 健康摘要 + 余额趋势 + 上游资源摘要
 // 功能与口径逐条对照 v1 app.js：renderDashboard / drawTotalChart / drawBurnBars / stationRow
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageContainer, ProCard } from "@ant-design/pro-components";
 import LastRefreshed from "./last-refreshed";
-import { App, Button, Col, Empty, Grid, Row, Segmented, Tag, Typography, theme } from "antd";
+import { App, Button, Col, Empty, Grid, Row, Segmented, Typography, theme } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { Line, Bar } from "@ant-design/plots";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta, statusOf } from "../../lib/client";
@@ -28,9 +28,6 @@ function CardTitle({ title, sub }: { title: string; sub: string }) {
 }
 
 // ---- v1 工具函数平移（app.js 同名实现，行为逐字对齐）------------------------
-
-// 站点类型徽标缩写（app.js PLATE）
-const PLATE: Record<string, string> = { newapi: "NA", "newapi-key": "KEY", sub2api: "S2", "sub2api-password": "S2" };
 
 // 相对时间（app.js relTime）
 function relTime(iso: string | null | undefined): string {
@@ -68,19 +65,18 @@ function truncateLabel(s: any, units = 14): string {
   return String(s);
 }
 
-// 颜色语义（对应 v1 css 的 warn/danger 文本色）：antd 色板值，两种主题下都可读
-const C_DANGER = "#ff4d4f";
-const C_WARN = "#faad14";
-const clsColor = (cls: string) => (cls === "danger" ? C_DANGER : cls === "warn" ? C_WARN : undefined);
-
-// 状态徽标（app.js statusPill）
-function StatusPill({ st }: { st: string }) {
-  const map: Record<string, [string, string]> = {
-    ok: ["green", "正常"], warn: ["orange", "余额偏低"], danger: ["red", "已耗尽"],
-    error: ["red", "查询失败"], pending: ["default", "待刷新"],
+// 状态同时使用色点与文字表达，避免只依赖颜色。
+function StatusText({ st }: { st: string }) {
+  const labels: Record<string, string> = {
+    ok: "正常", warn: "余额偏低", danger: "已耗尽", error: "查询失败", pending: "待刷新",
   };
-  const [color, txt] = map[st] || map.pending;
-  return <Tag color={color} style={{ marginInlineStart: 8 }}>{txt}</Tag>;
+  const status = labels[st] ? st : "pending";
+  return (
+    <span className={`resource-status resource-status--${status}`}>
+      <span className="resource-status__dot" aria-hidden="true" />
+      {labels[status]}
+    </span>
+  );
 }
 
 // 站点卡片里的迷你余额走势（app.js sparkSvg 平移为 JSX）：陡降 = 消耗快，平线 = 闲置，跳升 = 充值
@@ -106,16 +102,23 @@ function SparkSvg({ pts }: { pts: [number, number][] | null }) {
   );
 }
 
-// KPI 卡片（对应 v1 stat-card：label + value + 可选副行）
-function StatCard({ label, value, valueColor, sub }: { label: string; value: React.ReactNode; valueColor?: string; sub?: React.ReactNode }) {
-  const { token } = theme.useToken();
+function PrimaryMetric({ label, value, sub }: { label: string; value: React.ReactNode; sub?: React.ReactNode }) {
   return (
-    <ProCard style={{ height: "100%" }}>
-      <div style={{ fontSize: 13, color: token.colorTextSecondary }}>{label}</div>
-      <div style={{ fontSize: 26, fontWeight: 600, lineHeight: 1.4, color: valueColor }}>{value}</div>
-      {/* 副行统一占位：有的卡带副行有的不带，不占位会高低不齐（全站规范） */}
-      <div style={{ minHeight: 20, fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>{sub || null}</div>
-    </ProCard>
+    <article className="overview-primary-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{sub || "\u00a0"}</small>
+    </article>
+  );
+}
+
+function HealthItem({ label, value, tone = "default", detail }: { label: string; value: React.ReactNode; tone?: "default" | "warning" | "danger"; detail: string }) {
+  return (
+    <div className={`overview-health-item overview-health-item--${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </div>
   );
 }
 
@@ -154,7 +157,7 @@ export default function OverviewPage() {
   const [overviewErr, setOverviewErr] = useState<string | null>(null);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
-  // 趋势详情弹窗（共享组件 TrendModal，与中转站页点击行为一致）
+  // 趋势详情弹窗（共享组件 TrendModal，与上游资源页点击行为一致）
   const [trendStation, setTrendStation] = useState<any>(null);
   const hoursRef = useRef(trendHours);
   hoursRef.current = trendHours;
@@ -222,7 +225,7 @@ export default function OverviewPage() {
   };
 
   // ---- 聚合统计（renderDashboard 逐行平移）---------------------------------
-  // 聚合统计只算上游：标记「我的站点」的余额是自家 root 账号额度，混进来会污染数字
+  // 聚合统计只算上游：标记为自营的余额是自家 root 账号额度，混进来会污染数字
   const ups = useMemo(() => stations.filter((s) => !s.isOwn), [stations]);
   const agg = useMemo(() => {
     const okList = ups.filter((s) => s.balance?.ok);
@@ -236,17 +239,21 @@ export default function OverviewPage() {
     const todayApprox = ups.some((s) => (s.todayUsed || 0) > 0 && s.todayIsEstimate);
     const lowCount = ups.filter((s) => ["warn", "danger"].includes(statusOf(s, settings))).length;
     const errCount = ups.filter((s) => statusOf(s, settings) === "error").length;
+    const earliest = ups
+      .filter((s) => s.prediction?.etaDays != null)
+      .map((s) => ({ name: s.name, days: Number(s.prediction.etaDays) }))
+      .sort((a, b) => a.days - b.days)[0] || null;
     // 今日 tokens / 请求数：只有 sub2api 站点能提供，有数据才显示
     const tokList = ups.filter((s) => s.todayTokens != null);
     const reqList = ups.filter((s) => s.todayRequests != null);
     const subBits: string[] = [];
     if (tokList.length) subBits.push(`${fmtTokens(tokList.reduce((a, s) => a + s.todayTokens, 0))} tokens`);
     if (reqList.length) subBits.push(`${reqList.reduce((a, s) => a + s.todayRequests, 0).toLocaleString("en-US")} 次请求`);
-    return { anyRate, totalRemaining, totalRemainingCny, totalUsedCny, totalBurnCny, todayTotalCny, todayApprox, lowCount, errCount, subBits };
+    return { anyRate, totalRemaining, totalRemainingCny, totalUsedCny, totalBurnCny, todayTotalCny, todayApprox, lowCount, errCount, earliest, subBits };
   }, [ups, settings]);
 
   // ---- 总余额趋势数据（drawTotalChart 的聚合部分平移）------------------------
-  // 聚合上游站点：时间并集 + 各站前向填充求和（按各站充值汇率折算成 ¥，不含我的站点）
+  // 聚合上游资源：时间并集 + 各站前向填充求和（按充值汇率折算成 ¥，不含自营资源）
   const trend = useMemo(() => {
     if (!overview) return null;
     const rateMap = new Map(stations.map((s) => [s.id, rateOf(s)]));
@@ -307,11 +314,6 @@ export default function OverviewPage() {
 
   // ---- 单站行（stationRow 平移）--------------------------------------------
   const rowStyle: React.CSSProperties = { borderBottom: `1px solid ${token.colorBorderSecondary}` };
-  const plateStyle: React.CSSProperties = {
-    width: 40, height: 40, borderRadius: 10, flex: "none", display: "flex", alignItems: "center", justifyContent: "center",
-    background: token.colorPrimaryBg, color: token.colorPrimary, fontWeight: 700, fontSize: 12,
-  };
-
   function renderStationRow(s: any) {
     // 固定成本渠道：不访问接口，展示当前生效各笔的摊销汇总
     if (s.type === "fixed") {
@@ -338,19 +340,18 @@ export default function OverviewPage() {
       if (nextEnd != null) {
         const remain = Math.ceil((nextEnd - nowMs) / 86400000);
         pieces.push(
-          <span key="n" style={{ color: remain <= 3 ? C_WARN : undefined }}>
+          <span key="n" style={{ color: remain <= 3 ? token.colorWarning : undefined }}>
             最近一笔 {fmtClock(nextEnd).split(" ")[0]} 到期（剩 {remain} 天）
           </span>
         );
       }
-      if (expiredAll) pieces.push(<span key="e" style={{ color: C_DANGER }}>已全部到期，续费请追加付费记录</span>);
+      if (expiredAll) pieces.push(<span key="e" style={{ color: token.colorError }}>已全部到期，续费请追加付费记录</span>);
       return (
-        <div key={s.id} className="station-row" style={rowStyle}>
-          <div className="station-row__plate" style={plateStyle}>¥</div>
+        <div key={s.id} className="station-row overview-resource-row" style={rowStyle}>
           <div className="station-row__main">
-            <div className="station-row__name" style={{ fontWeight: 600 }}>
+            <div className="station-row__name overview-resource-row__name" style={{ fontWeight: 600 }}>
               {s.name}
-              <Tag style={{ marginInlineStart: 8 }}>固定成本</Tag>
+              <span className="resource-flag">固定成本</span>
             </div>
             <div className="station-row__meta" style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>
               {s.baseUrl ? `${s.baseUrl} · ` : ""}不访问接口 · 仅计入利润成本
@@ -360,7 +361,7 @@ export default function OverviewPage() {
             </div>
           </div>
           <div className="station-row__amount" style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 18, fontWeight: 600, color: expiredAll ? C_DANGER : undefined }}>{cny(daily)}</div>
+            <div style={{ fontSize: 18, fontWeight: 600, color: expiredAll ? token.colorError : undefined }}>{cny(daily)}</div>
             <div style={{ fontSize: 12, color: token.colorTextSecondary }}>{expiredAll ? "已到期" : "每天"}</div>
           </div>
         </div>
@@ -370,7 +371,7 @@ export default function OverviewPage() {
     const st = statusOf(s, settings);
     const b = s.balance;
     const rate = rateOf(s);
-    const amtColor = st === "danger" || st === "error" ? C_DANGER : st === "warn" ? C_WARN : undefined;
+    const amtColor = st === "danger" || st === "error" ? token.colorError : st === "warn" ? token.colorWarning : undefined;
     const amount = b && b.ok ? cny(b.remaining * rate) : "—";
     // 副信息行：类型 · 账号 · 令牌续期 · 查询时间 · 延迟；失败时红字错误
     let meta: React.ReactNode;
@@ -386,7 +387,7 @@ export default function OverviewPage() {
     } else if (b && !b.ok) {
       meta = (
         <>
-          {typeLabel(s.type)} · <span style={{ color: C_DANGER }}>{b.error || "查询失败"}</span>
+          {typeLabel(s.type)} · <span style={{ color: token.colorError }}>{b.error || "查询失败"}</span>
         </>
       );
     } else {
@@ -398,16 +399,15 @@ export default function OverviewPage() {
       pieces.push(<span key="t">今日消耗 {s.todayIsEstimate ? "≈" : ""}{cny(s.todayUsed * rate)}</span>);
       if (s.todayTokens != null) pieces.push(<span key="k">{fmtTokens(s.todayTokens)} tokens</span>);
     }
-    if (eta) pieces.push(<span key="e" style={{ color: clsColor(eta.cls) }}>{eta.text}</span>);
+    if (eta) pieces.push(<span key="e" style={{ color: eta.cls === "danger" ? token.colorError : eta.cls === "warn" ? token.colorWarning : undefined }}>{eta.text}</span>);
     if (pieces.length) pieces.push(<span key="c" style={{ color: token.colorTextSecondary }}>点击查看趋势</span>);
     return (
       // 主信息区可点开余额趋势弹窗，刷新按钮保持独立交互目标
       <div
         key={s.id}
-        className="station-row"
+        className="station-row overview-resource-row"
         style={rowStyle}
       >
-        <div className="station-row__plate" style={plateStyle}>{PLATE[s.type] || "?"}</div>
         <div
           className="station-row__main"
           style={{ cursor: "pointer" }}
@@ -423,12 +423,12 @@ export default function OverviewPage() {
             }
           }}
         >
-          <div className="station-row__name" style={{ fontWeight: 600, display: "flex", alignItems: "center", flexWrap: "wrap" }}>
+          <div className="station-row__name overview-resource-row__name" style={{ fontWeight: 600, display: "flex", alignItems: "center", flexWrap: "wrap" }}>
             {s.name}
-            {s.isOwn ? <Tag style={{ marginInlineStart: 8 }}>我的站</Tag> : null}
-            {s.noRenewal ? <Tag color="orange" style={{ marginInlineStart: 8 }}>不再续费</Tag> : null}
-            {s.demo ? <Tag style={{ marginInlineStart: 8 }}>演示</Tag> : null}
-            <StatusPill st={st} />
+            {s.isOwn ? <span className="resource-flag">自营</span> : null}
+            {s.noRenewal ? <span className="resource-flag resource-flag--warning">不再续费</span> : null}
+            {s.demo ? <span className="resource-flag">演示</span> : null}
+            <StatusText st={st} />
           </div>
           <div className="station-row__meta" style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>{meta}</div>
           {b && b.ok && s.spark && s.spark.length >= 2 ? (
@@ -552,9 +552,8 @@ export default function OverviewPage() {
   } : null;
 
   if (!loaded) {
-    // 初次加载统一 ProCard 骨架屏（全站规范：不要转圈文字）
     return (
-      <PageContainer className="responsive-page" title="总览">
+      <PageContainer className="responsive-page overview-page" title="运营总览" subTitle="掌握上游资金、消耗与风险变化">
         <Row gutter={[16, 16]}>
           <Col xs={24} lg={14}><ProCard loading style={{ height: "100%" }} /></Col>
           <Col xs={24} lg={10}><ProCard loading style={{ height: "100%" }} /></Col>
@@ -566,43 +565,66 @@ export default function OverviewPage() {
 
   return (
     <PageContainer
-      className="responsive-page"
-      title="总览"
+      className="responsive-page overview-page"
+      title="运营总览"
+      subTitle="掌握上游资金、消耗与风险变化"
       extra={<div className="page-toolbar"><LastRefreshed at={refreshedAt} /></div>}
     >
-      {/* 5 张 KPI（renderDashboard stats 区，口径逐项一致） */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 16 }}>
-        <StatCard
-          label="总剩余余额"
-          value={cny(agg.totalRemainingCny)}
-          sub={agg.anyRate ? `站点余额合计 ${usd(agg.totalRemaining)}` : undefined}
-        />
-        <StatCard
-          label="今日总消耗"
-          value={`${agg.todayApprox ? "≈ " : ""}${cny(agg.todayTotalCny)}`}
-          sub={agg.subBits.length ? agg.subBits.join(" · ") : undefined}
-        />
-        <StatCard label="日均消耗（估算）" value={agg.totalBurnCny > 0 ? cny(agg.totalBurnCny) : "—"} />
-        <StatCard
-          label="低余额 / 耗尽"
-          value={<>{agg.lowCount}<small style={{ fontSize: 14, marginInlineStart: 2 }}>个</small></>}
-          valueColor={agg.lowCount ? C_WARN : undefined}
-        />
-        <StatCard
-          label="查询异常"
-          value={<>{agg.errCount}<small style={{ fontSize: 14, marginInlineStart: 2 }}>个</small></>}
-          valueColor={agg.errCount ? C_DANGER : undefined}
-        />
-      </div>
+      <section className="overview-command" aria-label="核心经营指标">
+        <div className="overview-primary-grid">
+          <PrimaryMetric
+            label="总余额"
+            value={cny(agg.totalRemainingCny)}
+            sub={agg.anyRate ? `原始站点余额合计 ${usd(agg.totalRemaining)}` : "全部上游资源折算后余额"}
+          />
+          <PrimaryMetric
+            label="今日消耗"
+            value={`${agg.todayApprox ? "≈ " : ""}${cny(agg.todayTotalCny)}`}
+            sub={agg.subBits.length ? agg.subBits.join(" · ") : "今日 0 点至今"}
+          />
+        </div>
+        <aside className="overview-health" aria-label="资源健康摘要">
+          <div className="overview-health__heading">
+            <span>资源健康</span>
+            <small>{ups.length} 个上游资源</small>
+          </div>
+          <div className="overview-health__grid">
+            <HealthItem
+              label="低余额 / 耗尽"
+              value={`${agg.lowCount} 个`}
+              tone={agg.lowCount ? "warning" : "default"}
+              detail={agg.lowCount ? "需要关注" : "当前无风险"}
+            />
+            <HealthItem
+              label="查询异常"
+              value={`${agg.errCount} 个`}
+              tone={agg.errCount ? "danger" : "default"}
+              detail={agg.errCount ? "数据可能滞后" : "查询均正常"}
+            />
+            <HealthItem
+              label="日均消耗"
+              value={agg.totalBurnCny > 0 ? cny(agg.totalBurnCny) : "—"}
+              detail="按近期趋势估算"
+            />
+            <HealthItem
+              label="最早预计耗尽"
+              value={agg.earliest ? fmtEta(agg.earliest.days) : "—"}
+              tone={agg.earliest && agg.earliest.days <= (rules?.etaDays ?? 3) ? "danger" : agg.earliest && agg.earliest.days <= 7 ? "warning" : "default"}
+              detail={agg.earliest ? agg.earliest.name : "暂无有效预测"}
+            />
+          </div>
+        </aside>
+      </section>
 
       {/* 图表区：仅有站点时展示（同 v1 charts 条件）；窄屏降为单列（xs=24 lg 分栏） */}
       {stations.length ? (
         <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
           <Col xs={24} lg={14}>
             <ProCard
+              className="overview-panel overview-panel--primary"
               style={{ height: "100%" }}
               // 两行头：副标题换行放标题下方（全站规范 1），范围切换保持在 extra
-              title={<CardTitle title="总余额趋势" sub="上游站点剩余余额合计（按充值汇率折算 ¥，不含我的站点）" />}
+              title={<CardTitle title="总余额趋势" sub="上游资源剩余余额合计（按充值汇率折算 ¥，不含自营资源）" />}
               // 初次加载骨架屏（全站规范 3）；已有数据后切范围不闪骨架
               loading={!overview && !overviewErr}
               extra={
@@ -627,6 +649,7 @@ export default function OverviewPage() {
           </Col>
           <Col xs={24} lg={10}>
             <ProCard
+              className="overview-panel"
               style={{ height: "100%" }}
               title={<CardTitle title="今日消耗对比" sub="各站当日 0 点至今实际扣费（¥）" />}
             >
@@ -636,28 +659,29 @@ export default function OverviewPage() {
         </Row>
       ) : null}
 
-      {/* 中转站余额列表（stationRow 全字段） */}
+      {/* 上游资源摘要（stationRow 全字段） */}
       {stations.length ? (
         <ProCard
-          title={<CardTitle title="中转站余额" sub={`共 ${stations.length} 个 · 累计已用 ${cny(agg.totalUsedCny)}`} />}
+          className="overview-panel overview-resource-panel"
+          title={<CardTitle title="上游资源" sub={`共 ${stations.length} 个 · 累计已用 ${cny(agg.totalUsedCny)}`} />}
           style={{ marginTop: 16 }}
         >
           <div>{stations.map(renderStationRow)}</div>
         </ProCard>
       ) : (
-        <ProCard style={{ marginTop: 16 }}>
+        <ProCard className="overview-panel" style={{ marginTop: 16 }}>
           <Empty
             description={
               <>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>还没有中转站</div>
-                <div style={{ color: token.colorTextSecondary }}>到「中转站」页面添加站点，填入站点地址与凭证即可监控余额。</div>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>还没有上游资源</div>
+                <div style={{ color: token.colorTextSecondary }}>前往「上游资源」添加连接，配置地址与凭证后即可监控余额。</div>
               </>
             }
           />
         </ProCard>
       )}
 
-      {/* 余额趋势详情弹窗（共享组件，中转站页同款）；KPI 用列表里的最新站点数据（轮询会更新） */}
+      {/* 余额趋势详情弹窗（共享组件，上游资源页同款）；指标用列表里的最新数据（轮询会更新） */}
       <TrendModal
         station={trendStation ? stations.find((x) => x.id === trendStation.id) || trendStation : null}
         onClose={() => setTrendStation(null)}

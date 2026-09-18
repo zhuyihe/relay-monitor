@@ -1,5 +1,5 @@
 "use client";
-// 用量统计页：分站点、分模型、分时段的 Token 消耗
+// 用量分析页：分站点、分模型、分时段的 Token 消耗
 // 对照 v1 app.js renderUsage/renderUsageBody/drawUsageTrend/drawUsageModels（681-931 行）逐条平移：
 // 时间档位、站点筛选、四张合计卡、错误站点提示、趋势/分模型图、模型明细表，口径与文案一致
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -32,8 +32,8 @@ function truncateLabel(s: any, units = 14): string {
   return String(s);
 }
 
-// new-api 站点的 token 口径提示（sub2api 站点自带输入/输出明细，不受此限）
-const NEWAPI_TOKEN_NOTE = "new-api 口径：prompt + completion，不含缓存读写";
+// New API 站点的 token 口径提示（Sub2API 站点自带输入/输出明细，不受此限）
+const NEWAPI_TOKEN_NOTE = "New API 口径：prompt + completion，不含缓存读写";
 
 const num = (n: any) => Number(n ?? 0).toLocaleString("en-US");
 
@@ -137,7 +137,7 @@ export default function UsagePage() {
   // ---- 聚合（照抄 v1 renderUsageBody）--------------------------------------
   const agg = useMemo(() => {
     if (!data) return null;
-    // 「全部」只聚合上游；我的站点仍可在下拉里单独选看
+    // 「全部」只聚合上游；自营业务站点仍可在下拉里单独选看
     const sts =
       station === "all"
         ? (data.stations || []).filter((s: any) => !s.isOwn)
@@ -253,8 +253,8 @@ export default function UsagePage() {
     { title: "输入 Tokens", dataIndex: "inputTokens", align: "right" as const, render: (v: any, r: any) => (r.hasIO ? num(v) : "—") },
     { title: "输出 Tokens", dataIndex: "outputTokens", align: "right" as const, render: (v: any, r: any) => (r.hasIO ? num(v) : "—") },
     {
-      // new-api 的 token_used 只写 prompt + completion，缓存读写不在里面：
-      // 缓存重的模型会显示成 token 很少但消耗很大（精算见「我的站点 · 日志精算」）
+      // New API 的 token_used 只写 prompt + completion，缓存读写不在里面：
+      // 缓存重的模型会显示成 token 很少但消耗很大（精算见「自营业务 · 日志精算」）
       title: <span title={NEWAPI_TOKEN_NOTE}>总 Tokens</span>,
       dataIndex: "tokens", align: "right" as const, render: (v: any) => num(v),
     },
@@ -264,8 +264,8 @@ export default function UsagePage() {
   return (
     <PageContainer
       className="responsive-page"
-      title="用量统计"
-      subTitle="分站点、分模型、分时段的 Token 消耗"
+      title="用量分析"
+      subTitle="按上游资源、模型和时段查看 Token 消耗"
       extra={
         <div className="page-toolbar">
           <LastRefreshed at={refreshedAt} />
@@ -290,7 +290,7 @@ export default function UsagePage() {
           style={{ minWidth: 200 }}
           options={[
             { value: "all", label: "全部上游站点" },
-            ...stations.map((s: any) => ({ value: s.id, label: `${s.name}${s.isOwn ? "（我的站）" : ""}` })),
+            ...stations.map((s: any) => ({ value: s.id, label: `${s.name}${s.isOwn ? "（自营业务）" : ""}` })),
           ]}
         />
       </div>
@@ -383,7 +383,7 @@ export default function UsagePage() {
                   yField="tokens"
                   height={CHART_H}
                   theme={dark ? "classicDark" : "classic"}
-                  style={{ radiusTopLeft: 4, radiusTopRight: 4, maxWidth: 24 }}
+                  style={{ fill: token.colorPrimary, radiusTopLeft: 4, radiusTopRight: 4, maxWidth: 24 }}
                   axis={{
                     x: { title: false, labelFormatter: (v: any) => (isMobile ? truncateLabel(v, 8) : v) },
                     y: { title: false, labelFormatter: (v: any) => fmtTokens(v) },
@@ -414,7 +414,7 @@ export default function UsagePage() {
                   yField="tokens"
                   height={CHART_H}
                   theme={dark ? "classicDark" : "classic"}
-                  style={{ maxWidth: 16, radiusTopRight: 4, radiusBottomRight: 4 }}
+                  style={{ fill: token.colorPrimary, maxWidth: 16, radiusTopRight: 4, radiusBottomRight: 4 }}
                   axis={{
                     x: { title: false, labelFormatter: (v: any) => truncateLabel(v, isMobile ? 12 : 20) },
                     y: false,
