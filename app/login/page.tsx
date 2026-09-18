@@ -21,7 +21,7 @@ export default function LoginPage() {
       });
       // 与 v1 一致：默认密码登录成功后提示尽快修改
       if (r.isDefaultPassword) message.warning("当前为默认密码，请到「系统设置」中修改");
-      router.push("/");
+      router.push(r.isDefaultPassword ? "/settings" : "/");
     } catch (e: any) {
       message.error(e.message || "登录失败");
     } finally {

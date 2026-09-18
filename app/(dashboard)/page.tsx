@@ -4,13 +4,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageContainer, ProCard } from "@ant-design/pro-components";
 import LastRefreshed from "./last-refreshed";
-import { App, Button, Col, Empty, Grid, Row, Segmented, Typography, theme } from "antd";
+import { Alert, App, Button, Col, Empty, Grid, Row, Segmented, Typography, theme } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { Line, Bar } from "@ant-design/plots";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta, statusOf } from "../../lib/client";
 import ChartBox from "./chart-box";
 import TrendModal from "./trend-modal";
 import { useThemeMode } from "../providers";
+import AppState from "../components/app-state";
 
 const { Text } = Typography;
 
@@ -151,6 +152,8 @@ export default function OverviewPage() {
   const [types, setTypes] = useState<any[]>([]);
   const [rules, setRules] = useState<any>({});
   const [loaded, setLoaded] = useState(false);
+  const [loadingStations, setLoadingStations] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [trendHours, setTrendHours] = useState(24);
   // 总览趋势数据缓存 {hours, series}（对应 v1 state.overview）
   const [overview, setOverview] = useState<{ hours: number; series: any[] } | null>(null);
@@ -166,14 +169,19 @@ export default function OverviewPage() {
 
   // 拉站点列表（对应 v1 reload）
   const reload = useCallback(async () => {
+    setLoadingStations(true);
     try {
       const r = await api("/api/stations");
       setStations(r.stations);
       setSettings(r.settings);
       setLoaded(true);
+      setLoadError(null);
       setRefreshedAt(Date.now());
-    } catch {
-      /* 401 已由 api() 跳登录，其余错误静默等下轮 */
+    } catch (e: any) {
+      setLoadError(e.message || "运营总览加载失败");
+      throw e;
+    } finally {
+      setLoadingStations(false);
     }
   }, []);
 
@@ -200,7 +208,10 @@ export default function OverviewPage() {
 
   // 30s 轮询列表 + 趋势；切回标签页立即刷新一次（同 v1 visibilitychange）
   useEffect(() => {
-    const tick = () => { reload(); loadOverview(hoursRef.current); };
+    const tick = () => {
+      reload().catch(() => {});
+      loadOverview(hoursRef.current);
+    };
     tick();
     const timer = setInterval(tick, 30000);
     const onVis = () => { if (!document.hidden) tick(); };
@@ -551,6 +562,19 @@ export default function OverviewPage() {
     animate: false,
   } : null;
 
+  if (!loaded && loadError) {
+    return (
+      <PageContainer className="responsive-page overview-page" title="运营总览" subTitle="掌握上游资金、消耗与风险变化">
+        <AppState
+          kind="error"
+          title="运营总览暂时无法加载"
+          description={loadError}
+          actions={<Button type="primary" loading={loadingStations} onClick={() => { reload().catch(() => {}); loadOverview(hoursRef.current); }}>重新加载</Button>}
+        />
+      </PageContainer>
+    );
+  }
+
   if (!loaded) {
     return (
       <PageContainer className="responsive-page overview-page" title="运营总览" subTitle="掌握上游资金、消耗与风险变化">
@@ -570,6 +594,16 @@ export default function OverviewPage() {
       subTitle="掌握上游资金、消耗与风险变化"
       extra={<div className="page-toolbar"><LastRefreshed at={refreshedAt} /></div>}
     >
+      {loadError ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="总览刷新失败，正在显示上次成功加载的数据"
+          description={loadError}
+          action={<Button size="small" loading={loadingStations} onClick={() => { reload().catch(() => {}); }}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      ) : null}
       <section className="overview-command" aria-label="核心经营指标">
         <div className="overview-primary-grid">
           <PrimaryMetric

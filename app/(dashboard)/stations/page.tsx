@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { PageContainer, ProCard } from "@ant-design/pro-components";
 import {
+  Alert,
   App,
   Button,
   Checkbox,
@@ -27,6 +28,7 @@ import {
 } from "@ant-design/icons";
 import TrendModal from "../trend-modal";
 import LastRefreshed from "../last-refreshed";
+import AppState from "../../components/app-state";
 import dayjs from "dayjs";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta, statusOf } from "../../../lib/client";
 
@@ -406,6 +408,10 @@ export default function StationsPage() {
   const [types, setTypes] = useState<any[]>([]);
   const [rules, setRules] = useState<any>({});
   const [loaded, setLoaded] = useState(false);
+  const [loadingList, setLoadingList] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadingMeta, setLoadingMeta] = useState(true);
+  const [metaError, setMetaError] = useState<string | null>(null);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [refreshingIds, setRefreshingIds] = useState<Record<string, boolean>>({});
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
@@ -416,25 +422,57 @@ export default function StationsPage() {
   const [saving, setSaving] = useState(false);
   const [purchases, setPurchases] = useState<any[]>([]); // 固定成本付费记录行
   const formType = Form.useWatch("type", form);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [connectionTest, setConnectionTest] = useState<{
+    ok: boolean;
+    message: string;
+    action?: string;
+    diagnostic?: string;
+    latencyMs?: number;
+  } | null>(null);
+  const [formFingerprint, setFormFingerprint] = useState("");
+  const [testedFingerprint, setTestedFingerprint] = useState<string | null>(null);
 
   // 趋势详情弹窗（数据拉取与范围切换在共享组件 TrendModal 内）
   const [trendStation, setTrendStation] = useState<any>(null);
 
   // 列表加载（GET /api/stations 同时带回全局设置，同 v1 reload）
   const reload = useCallback(async () => {
-    const r = await api("/api/stations");
-    setStations(r.stations);
-    setSettings(r.settings);
-    setLoaded(true);
-    setRefreshedAt(Date.now());
+    setLoadingList(true);
+    try {
+      const r = await api("/api/stations");
+      setStations(r.stations);
+      setSettings(r.settings);
+      setLoaded(true);
+      setLoadError(null);
+      setRefreshedAt(Date.now());
+    } catch (e: any) {
+      setLoadError(e.message || "上游资源加载失败");
+      throw e;
+    } finally {
+      setLoadingList(false);
+    }
+  }, []);
+
+  const loadMeta = useCallback(async () => {
+    setLoadingMeta(true);
+    try {
+      const m = await api("/api/meta");
+      setTypes(m.types);
+      setRules(m.rules);
+      setMetaError(null);
+    } catch (e: any) {
+      setMetaError(e.message || "资源配置加载失败");
+      throw e;
+    } finally {
+      setLoadingMeta(false);
+    }
   }, []);
 
   useEffect(() => {
     reload().catch(() => {});
-    api("/api/meta")
-      .then((m) => { setTypes(m.types); setRules(m.rules); })
-      .catch(() => {});
-  }, [reload]);
+    loadMeta().catch(() => {});
+  }, [loadMeta, reload]);
 
   // 自动刷新：跟随全局设置的刷新间隔（同 v1 startAuto，下限 10 秒）
   useEffect(() => {
@@ -492,8 +530,12 @@ export default function StationsPage() {
 
   // ---- 添加/编辑弹窗（v1 openModal/modalSave 平移）---------------------------
   const openModal = (station: any) => {
+    if (!types.length) {
+      message.warning("资源类型暂未加载，请先重试资源配置加载。");
+      return;
+    }
     setEditing(station || null);
-    form.setFieldsValue({
+    const values = {
       name: station?.name || "",
       type: station?.type || types[0]?.value,
       baseUrl: station?.baseUrl || "",
@@ -508,11 +550,68 @@ export default function StationsPage() {
       includeInProfit: station?.includeInProfit !== false,
       isOwn: !!station?.isOwn,
       noRenewal: !!station?.noRenewal,
-    });
+    };
+    form.setFieldsValue(values);
+    setFormFingerprint(connectionFingerprint(values, station?.id));
+    setConnectionTest(null);
+    setTestedFingerprint(null);
     // 付费记录：无记录时默认给一行、起始日期今天（同 v1 seedPurchaseRows）
     const list = station?.fixedPurchases;
     setPurchases(list && list.length ? list.map((p: any) => ({ ...p })) : [{ startDate: dayjs().format("YYYY-MM-DD") }]);
     setModalOpen(true);
+  };
+
+  function connectionFingerprint(values: any, stationId = editing?.id) {
+    return JSON.stringify({
+      stationId: stationId || null,
+      type: String(values.type || "").trim(),
+      baseUrl: String(values.baseUrl || "").trim(),
+      accessToken: String(values.accessToken || "").trim(),
+      apiKey: String(values.apiKey || "").trim(),
+      userId: String(values.userId || "").trim(),
+      email: String(values.email || "").trim(),
+      password: String(values.password || ""),
+    });
+  }
+
+  const onFormValuesChange = (_changed: any, values: any) => {
+    setFormFingerprint(connectionFingerprint(values));
+    setConnectionTest(null);
+    setTestedFingerprint(null);
+  };
+
+  const onTestConnection = async () => {
+    const values = form.getFieldsValue();
+    const fingerprint = connectionFingerprint(values);
+    setTestingConnection(true);
+    setConnectionTest(null);
+    setTestedFingerprint(null);
+    try {
+      const result = await api("/api/stations/test", {
+        body: {
+          stationId: editing?.id,
+          type: values.type,
+          baseUrl: values.baseUrl,
+          accessToken: values.accessToken,
+          apiKey: values.apiKey,
+          userId: values.userId,
+          email: values.email,
+          password: values.password,
+        },
+      });
+      setConnectionTest(result);
+      setTestedFingerprint(fingerprint);
+    } catch (e: any) {
+      setConnectionTest({
+        ok: false,
+        message: "无法发起连接测试",
+        action: "请检查本机网络或稍后重试。",
+        diagnostic: e.message || "请求失败",
+      });
+      setTestedFingerprint(fingerprint);
+    } finally {
+      setTestingConnection(false);
+    }
   };
 
   // 编辑时密钥不回显：placeholder 提示「已配置，留空保持不变」（同 v1）
@@ -558,6 +657,9 @@ export default function StationsPage() {
     } else if (!payload.baseUrl) {
       return message.error("请填写站点地址");
     }
+    if (payload.type !== "fixed" && (!connectionTest?.ok || testedFingerprint !== formFingerprint)) {
+      return message.warning("请先测试连接，确认成功后再保存");
+    }
     setSaving(true);
     try {
       if (editing) {
@@ -586,6 +688,28 @@ export default function StationsPage() {
   const curType = types.find((t) => t.value === formType);
   const needs: string[] = curType?.needs || [];
   const isFixed = formType === "fixed";
+  const canSave = isFixed || (!!connectionTest?.ok && testedFingerprint === formFingerprint);
+  const retryInitialLoad = () => {
+    reload().catch(() => {});
+    loadMeta().catch(() => {});
+  };
+
+  if (!loaded && (loadError || metaError)) {
+    return (
+      <PageContainer
+        className="responsive-page resources-page"
+        title="上游资源"
+        subTitle="统一管理供应连接、资金余额与消耗风险"
+      >
+        <AppState
+          kind="error"
+          title="上游资源暂时无法加载"
+          description={loadError || metaError || "请稍后重试"}
+          actions={<Button type="primary" onClick={retryInitialLoad}>重新加载</Button>}
+        />
+      </PageContainer>
+    );
+  }
 
   return (
     <PageContainer
@@ -596,11 +720,31 @@ export default function StationsPage() {
         <div className="page-toolbar">
           <LastRefreshed at={refreshedAt} />
           <Button className="touch-icon-button" icon={<ReloadOutlined />} loading={refreshingAll} onClick={onRefreshAll}>刷新</Button>
-          {!compact ? <Button className="touch-icon-button desktop-station-action" type="primary" icon={<PlusOutlined />} onClick={() => openModal(null)}>添加资源</Button> : null}
+          {!compact ? <Button className="touch-icon-button desktop-station-action" type="primary" icon={<PlusOutlined />} disabled={!types.length || loadingMeta} onClick={() => openModal(null)}>添加资源</Button> : null}
         </div>
       }
     >
-      <ProCard className="station-list-card resource-list-card" loading={!loaded}>
+      {loadError ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="资源数据刷新失败，正在显示上次成功加载的数据"
+          description={loadError}
+          action={<Button size="small" onClick={() => { reload().catch(() => {}); }}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      ) : null}
+      {metaError ? (
+        <Alert
+          type="warning"
+          showIcon
+          message={types.length ? "资源配置刷新失败，正在使用上次成功加载的配置" : "资源配置暂时无法加载，暂不能添加或编辑资源"}
+          description={metaError}
+          action={<Button size="small" loading={loadingMeta} onClick={() => { loadMeta().catch(() => {}); }}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      ) : null}
+      <ProCard className="station-list-card resource-list-card" loading={loadingList && !loaded}>
         {stations.length ? (
           <div>
             {stations.map((s) => (
@@ -645,11 +789,12 @@ export default function StationsPage() {
         okText="保存"
         cancelText="取消"
         confirmLoading={saving}
+        okButtonProps={{ disabled: !canSave }}
         destroyOnHidden={false}
         width={520}
       >
         <div style={{ ...hint, marginBottom: 12 }}>凭证仅保存在本机，用于连接该上游并查询余额。</div>
-        <Form form={form} layout="vertical" size="middle">
+        <Form form={form} layout="vertical" size="middle" onValuesChange={onFormValuesChange}>
           <Form.Item label="名称" name="name" style={{ marginBottom: 12 }}>
             <Input placeholder="例如：主力资源" />
           </Form.Item>
@@ -686,6 +831,32 @@ export default function StationsPage() {
           {needs.includes("password") && (
             <Form.Item label="登录密码" name="password" style={{ marginBottom: 12 }}>
               <Input.Password placeholder={credPlaceholder(!!editing?.hasPassword, "站点的登录密码")} />
+            </Form.Item>
+          )}
+          {!isFixed && (
+            <Form.Item label="连接验证" style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8 }}>
+                <Button type="dashed" style={{ minHeight: 44 }} loading={testingConnection} onClick={onTestConnection}>
+                  测试连接
+                </Button>
+                {connectionTest ? (
+                  <Alert
+                    type={connectionTest.ok ? "success" : "error"}
+                    showIcon
+                    message={connectionTest.ok
+                      ? `${connectionTest.message}${connectionTest.latencyMs != null ? `（${connectionTest.latencyMs}ms）` : ""}`
+                      : connectionTest.message}
+                    description={connectionTest.ok ? "连接信息未写入，点击保存后才会创建或更新资源。" : (
+                      <div>
+                        <div>{connectionTest.action}</div>
+                        {connectionTest.diagnostic ? <details style={{ marginTop: 6 }}><summary>查看诊断信息</summary><span>{connectionTest.diagnostic}</span></details> : null}
+                      </div>
+                    )}
+                  />
+                ) : (
+                  <span style={hint}>请先测试连接；测试成功后才可保存资源。</span>
+                )}
+              </div>
             </Form.Item>
           )}
           {!isFixed && (
