@@ -12,6 +12,8 @@ import ChartBox from "./chart-box";
 import TrendModal from "./trend-modal";
 import { useThemeMode } from "../providers";
 import AppState from "../components/app-state";
+import { buildOverviewActions } from "../../lib/overview-actions";
+import { describeConnectionFailure } from "../../lib/connection-test";
 
 const { Text } = Typography;
 
@@ -262,6 +264,44 @@ export default function OverviewPage() {
     if (reqList.length) subBits.push(`${reqList.reduce((a, s) => a + s.todayRequests, 0).toLocaleString("en-US")} 次请求`);
     return { anyRate, totalRemaining, totalRemainingCny, totalUsedCny, totalBurnCny, todayTotalCny, todayApprox, lowCount, errCount, earliest, subBits };
   }, [ups, settings]);
+
+  const actionSummary = useMemo(
+    () => buildOverviewActions(stations, { rules, settings, statusOf }),
+    [stations, rules, settings],
+  );
+
+  function actionDetail(action: any): string {
+    const station = action.station;
+    if (action.kind === "query-failed") {
+      const issue = describeConnectionFailure(station.balance?.error, station);
+      const checkedAt = station.balance?.checkedAt;
+      return `${issue.message}${checkedAt ? ` · 最近查询 ${relTime(checkedAt)}` : ""}`;
+    }
+    if (action.kind === "balance-danger" || action.kind === "balance-low") {
+      const etaDays = Number(station.prediction?.etaDays);
+      const eta = Number.isFinite(etaDays) ? ` · 预计 ${fmtEta(etaDays)}后耗尽` : "";
+      return `当前余额 ${cny(Number(station.balance?.remaining || 0) * rateOf(station))}${eta}`;
+    }
+    if (action.kind === "eta-soon") {
+      return `预计 ${fmtEta(action.etaDays)}后耗尽 · 近期日均消耗 ${cny(Number(station.prediction?.burnPerDay || 0) * rateOf(station))}`;
+    }
+    return `最近一笔将在 ${fmtClock(action.endAt)} 到期 · 剩 ${action.daysRemaining} 天`;
+  }
+
+  function actionTitle(kind: string): string {
+    const titles: Record<string, string> = {
+      "query-failed": "查询失败",
+      "balance-danger": "余额已耗尽",
+      "balance-low": "余额偏低",
+      "eta-soon": "预计即将耗尽",
+      "fixed-expiring": "固定成本即将到期",
+    };
+    return titles[kind] || "需要处理";
+  }
+
+  function actionTone(kind: string): "danger" | "warning" {
+    return kind === "query-failed" || kind === "balance-danger" ? "danger" : "warning";
+  }
 
   // ---- 总余额趋势数据（drawTotalChart 的聚合部分平移）------------------------
   // 聚合上游资源：时间并集 + 各站前向填充求和（按充值汇率折算成 ¥，不含自营资源）
@@ -648,6 +688,111 @@ export default function OverviewPage() {
             />
           </div>
         </aside>
+      </section>
+
+      <section aria-labelledby="overview-actions-heading" style={{ marginTop: 16 }}>
+        <ProCard
+          className="overview-panel"
+          title={
+            <div>
+              <div id="overview-actions-heading" style={{ fontWeight: 600 }}>需要处理</div>
+              <Text type="secondary" style={{ fontSize: 12, fontWeight: "normal", whiteSpace: "normal" }}>
+                {actionSummary.all.length
+                  ? `共 ${actionSummary.all.length} 个运营事项，按优先级展示前 ${actionSummary.visible.length} 项`
+                  : "当前上游资源与固定成本没有需要立即处理的事项"}
+              </Text>
+            </div>
+          }
+        >
+          {actionSummary.visible.length ? (
+            <div
+              role="list"
+              aria-label="需要处理的运营事项"
+              style={{
+                display: "grid",
+                gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "repeat(2, minmax(0, 1fr))",
+                gap: 12,
+              }}
+            >
+              {actionSummary.visible.map((action: any) => {
+                const tone = actionTone(action.kind);
+                const isRetry = action.kind === "query-failed";
+                const toneColor = tone === "danger" ? token.colorError : token.colorWarning;
+                const toneBg = tone === "danger" ? token.colorErrorBg : token.colorWarningBg;
+                return (
+                  <article
+                    key={`${action.stationId}-${action.kind}`}
+                    role="listitem"
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      flexWrap: "wrap",
+                      gap: 12,
+                      minWidth: 0,
+                      padding: 16,
+                      border: `1px solid ${token.colorBorderSecondary}`,
+                      borderInlineStart: `3px solid ${toneColor}`,
+                      borderRadius: 8,
+                      background: toneBg,
+                    }}
+                  >
+                    <div style={{ flex: "1 1 190px", minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px 8px" }}>
+                        <span style={{ color: toneColor, fontSize: 12, fontWeight: 650 }}>{actionTitle(action.kind)}</span>
+                        <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>资源：{action.stationName}</span>
+                      </div>
+                      <div style={{ marginTop: 6, color: token.colorText, fontSize: 14, lineHeight: 1.6, overflowWrap: "anywhere" }}>
+                        {actionDetail(action)}
+                      </div>
+                    </div>
+                    {isRetry ? (
+                      <Button
+                        type="primary"
+                        danger
+                        icon={<ReloadOutlined />}
+                        loading={refreshingId === action.stationId}
+                        onClick={() => refreshOne(action.stationId)}
+                        aria-label={`重新查询 ${action.stationName}`}
+                        style={{ minHeight: 44 }}
+                      >
+                        重新查询
+                      </Button>
+                    ) : (
+                      <Button
+                        href="/stations"
+                        aria-label={`查看 ${action.stationName} 资源`}
+                        style={{ minHeight: 44 }}
+                      >
+                        查看资源
+                      </Button>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div
+              role="status"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                flexWrap: "wrap",
+                gap: 12,
+                minHeight: 72,
+                padding: "14px 16px",
+                borderRadius: 8,
+                background: token.colorSuccessBg,
+              }}
+            >
+              <div>
+                <div style={{ color: token.colorSuccess, fontSize: 14, fontWeight: 650 }}>状态健康</div>
+                <div style={{ marginTop: 3, color: token.colorTextSecondary, fontSize: 12 }}>当前没有查询失败、低余额、即将耗尽或固定成本到期事项。</div>
+              </div>
+              <Button href="/stations" aria-label="查看上游资源" style={{ minHeight: 44 }}>查看资源</Button>
+            </div>
+          )}
+        </ProCard>
       </section>
 
       {/* 图表区：仅有站点时展示（同 v1 charts 条件）；窄屏降为单列（xs=24 lg 分栏） */}
