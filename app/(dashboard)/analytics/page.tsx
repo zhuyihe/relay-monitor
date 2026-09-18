@@ -5,7 +5,7 @@
 // 口径与 /api/own/analytics 的利润计算一致：成本只算上游站（isOwn 排除），¥ 按站点汇率折算。
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { PageContainer, ProCard } from "@ant-design/pro-components";
-import { Col, Empty, Row, Segmented, Statistic, Typography, theme } from "antd";
+import { Col, Empty, Grid, Row, Segmented, Statistic, Typography, theme } from "antd";
 import { Bar, Column, DualAxes, Heatmap, Line, Pie } from "@ant-design/plots";
 import { api, cny } from "../../../lib/client";
 import ChartBox from "../chart-box";
@@ -45,6 +45,8 @@ function CardHeader({ title, sub }: { title: ReactNode; sub?: ReactNode }) {
 export default function AnalyticsPage() {
   const { dark } = useThemeMode();
   const { token } = theme.useToken();
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   // plots 图表不随 ConfigProvider 算法切换，需显式跟随暗色主题
   const chartTheme = dark ? "classicDark" : "classic";
   const [days, setDays] = useState<number>(30);
@@ -194,21 +196,25 @@ export default function AnalyticsPage() {
 
   return (
     <PageContainer
+      className="responsive-page"
       title="经营分析"
       subTitle="上游成本 · 下游收入 · 余额跑道"
-      extra={[
-        <LastRefreshed key="last-refreshed" at={refreshedAt} />,
-        <Segmented
-          key="days"
-          value={days}
-          onChange={(v) => setDays(Number(v))}
-          options={[
-            { label: "7 天", value: 7 },
-            { label: "14 天", value: 14 },
-            { label: "30 天", value: 30 },
-          ]}
-        />,
-      ]}
+      extra={
+        <div className="page-toolbar">
+          <LastRefreshed at={refreshedAt} />
+          <div className="mobile-scroll">
+            <Segmented
+              value={days}
+              onChange={(v) => setDays(Number(v))}
+              options={[
+                { label: "7 天", value: 7 },
+                { label: "14 天", value: 14 },
+                { label: "30 天", value: 30 },
+              ]}
+            />
+          </div>
+        </div>
+      }
     >
       {/* KPI 行：总成本 / 日均 / 峰值日 / 预计月化 */}
       <Row gutter={[16, 16]}>
@@ -346,7 +352,13 @@ export default function AnalyticsPage() {
                 // 显式色带：0 值 = 容器底色（浅色白 / 深色深灰），避免 G2 默认桃色系把无消耗格子染成肤色
                 scale={{ color: { range: [token.colorBgContainer, token.colorPrimary] } }}
                 style={{ inset: 0.5, stroke: token.colorBorderSecondary }}
-                axis={{ x: { title: "时" }, y: { title: null } }}
+                axis={{
+                  x: {
+                    title: "时",
+                    labelFormatter: (v: any) => (!isMobile || Number(v) % 4 === 0 ? v : ""),
+                  },
+                  y: { title: null },
+                }}
                 legend={{ color: { position: "bottom" } }}
                 tooltip={{ items: [{ channel: "color", valueFormatter: (v: number) => cny(v) }] }}
               />
@@ -372,7 +384,7 @@ export default function AnalyticsPage() {
                 angleField="cny"
                 colorField="name"
                 innerRadius={0.6}
-                label={{ text: "name", position: "outside" }}
+                label={isMobile ? false : { text: "name", position: "outside" }}
                 legend={{ color: { position: "bottom" } }}
                 tooltip={{ items: [{ channel: "y", valueFormatter: (v: number) => cny(v) }] }}
               />
@@ -401,8 +413,17 @@ export default function AnalyticsPage() {
                 xField="name"
                 yField="etaDays"
                 style={{ fill: (d: any) => runwayColor(d.etaDays), maxWidth: 24 }}
-                label={{ text: (d: any) => `${d.etaDays} 天`, position: "right", dx: 4 }}
-                axis={{ y: { title: "天" }, x: { title: null } }}
+                label={isMobile ? false : { text: (d: any) => `${d.etaDays} 天`, position: "right", dx: 4 }}
+                axis={{
+                  y: { title: "天" },
+                  x: {
+                    title: null,
+                    labelFormatter: (v: any) => {
+                      const s = String(v ?? "");
+                      return isMobile && s.length > 8 ? `${s.slice(0, 7)}…` : s;
+                    },
+                  },
+                }}
                 tooltip={{ items: [{ channel: "y", valueFormatter: (v: number) => `${v} 天` }] }}
               />
               </ChartBox>
@@ -430,7 +451,7 @@ export default function AnalyticsPage() {
                 stack
                 scale={{ color: { domain: ["用量成本", "固定摊销"], range: ["#1677ff", "#faad14"] } }}
                 axis={yAxisCny}
-                legend={{ color: { position: "top" } }}
+                legend={{ color: { position: isMobile ? "bottom" : "top" } }}
                 tooltip={tooltipCny}
               />
               </ChartBox>

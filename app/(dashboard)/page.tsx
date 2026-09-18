@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageContainer, ProCard } from "@ant-design/pro-components";
 import LastRefreshed from "./last-refreshed";
-import { App, Button, Col, Empty, Row, Segmented, Tag, Typography, theme } from "antd";
+import { App, Button, Col, Empty, Grid, Row, Segmented, Tag, Typography, theme } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { Line, Bar } from "@ant-design/plots";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta, statusOf } from "../../lib/client";
@@ -98,7 +98,7 @@ function SparkSvg({ pts }: { pts: [number, number][] | null }) {
   const area = `${line}L${x(t1).toFixed(1)},${H - P}L${x(t0).toFixed(1)},${H - P}Z`;
   const last = pts[pts.length - 1];
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width={170} height={30} aria-hidden="true" style={{ display: "block" }}>
+    <svg viewBox={`0 0 ${W} ${H}`} width={170} height={30} aria-hidden="true" style={{ display: "block", maxWidth: "100%" }}>
       <path d={area} fill={token.colorPrimaryBg} />
       <path d={line} fill="none" stroke={token.colorPrimary} strokeWidth={1.5} />
       <circle cx={x(last[0]).toFixed(1)} cy={y(last[1]).toFixed(1)} r={2.5} fill={token.colorPrimary} />
@@ -141,6 +141,8 @@ export default function OverviewPage() {
   const { message } = App.useApp();
   const { token } = theme.useToken();
   const { dark } = useThemeMode();
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   const [stations, setStations] = useState<any[]>([]);
   const [settings, setSettings] = useState<any>({ refreshIntervalSec: 60, lowBalanceUsd: 5 });
   const [types, setTypes] = useState<any[]>([]);
@@ -304,7 +306,7 @@ export default function OverviewPage() {
   }, [ups]);
 
   // ---- 单站行（stationRow 平移）--------------------------------------------
-  const rowStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 14, padding: "14px 4px", borderBottom: `1px solid ${token.colorBorderSecondary}` };
+  const rowStyle: React.CSSProperties = { borderBottom: `1px solid ${token.colorBorderSecondary}` };
   const plateStyle: React.CSSProperties = {
     width: 40, height: 40, borderRadius: 10, flex: "none", display: "flex", alignItems: "center", justifyContent: "center",
     background: token.colorPrimaryBg, color: token.colorPrimary, fontWeight: 700, fontSize: 12,
@@ -343,21 +345,21 @@ export default function OverviewPage() {
       }
       if (expiredAll) pieces.push(<span key="e" style={{ color: C_DANGER }}>已全部到期，续费请追加付费记录</span>);
       return (
-        <div key={s.id} style={rowStyle}>
-          <div style={plateStyle}>¥</div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontWeight: 600 }}>
+        <div key={s.id} className="station-row" style={rowStyle}>
+          <div className="station-row__plate" style={plateStyle}>¥</div>
+          <div className="station-row__main">
+            <div className="station-row__name" style={{ fontWeight: 600 }}>
               {s.name}
               <Tag style={{ marginInlineStart: 8 }}>固定成本</Tag>
             </div>
-            <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>
+            <div className="station-row__meta" style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>
               {s.baseUrl ? `${s.baseUrl} · ` : ""}不访问接口 · 仅计入利润成本
             </div>
             <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 4, display: "flex", flexWrap: "wrap", gap: "0 6px" }}>
               {pieces.reduce<React.ReactNode[]>((acc, el, i) => (i ? [...acc, <span key={`sep${i}`}>·</span>, el] : [el]), [])}
             </div>
           </div>
-          <div style={{ textAlign: "right", flex: "none" }}>
+          <div className="station-row__amount" style={{ textAlign: "right" }}>
             <div style={{ fontSize: 18, fontWeight: 600, color: expiredAll ? C_DANGER : undefined }}>{cny(daily)}</div>
             <div style={{ fontSize: 12, color: token.colorTextSecondary }}>{expiredAll ? "已到期" : "每天"}</div>
           </div>
@@ -399,20 +401,38 @@ export default function OverviewPage() {
     if (eta) pieces.push(<span key="e" style={{ color: clsColor(eta.cls) }}>{eta.text}</span>);
     if (pieces.length) pieces.push(<span key="c" style={{ color: token.colorTextSecondary }}>点击查看趋势</span>);
     return (
-      // 整行可点开余额趋势弹窗（同 v1 总览 / 中转站页行为）
-      <div key={s.id} style={{ ...rowStyle, cursor: "pointer" }} title="查看余额趋势" onClick={() => setTrendStation(s)}>
-        <div style={plateStyle}>{PLATE[s.type] || "?"}</div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 600, display: "flex", alignItems: "center", flexWrap: "wrap" }}>
+      // 主信息区可点开余额趋势弹窗，刷新按钮保持独立交互目标
+      <div
+        key={s.id}
+        className="station-row"
+        style={rowStyle}
+      >
+        <div className="station-row__plate" style={plateStyle}>{PLATE[s.type] || "?"}</div>
+        <div
+          className="station-row__main"
+          style={{ cursor: "pointer" }}
+          title="查看余额趋势"
+          role="button"
+          tabIndex={0}
+          aria-label={`查看 ${s.name} 的余额趋势`}
+          onClick={() => setTrendStation(s)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              setTrendStation(s);
+            }
+          }}
+        >
+          <div className="station-row__name" style={{ fontWeight: 600, display: "flex", alignItems: "center", flexWrap: "wrap" }}>
             {s.name}
             {s.isOwn ? <Tag style={{ marginInlineStart: 8 }}>我的站</Tag> : null}
             {s.noRenewal ? <Tag color="orange" style={{ marginInlineStart: 8 }}>不再续费</Tag> : null}
             {s.demo ? <Tag style={{ marginInlineStart: 8 }}>演示</Tag> : null}
             <StatusPill st={st} />
           </div>
-          <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>{meta}</div>
+          <div className="station-row__meta" style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>{meta}</div>
           {b && b.ok && s.spark && s.spark.length >= 2 ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+            <div className="station-row__spark" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
               <SparkSvg pts={s.spark} />
               <span style={{ fontSize: 12, color: token.colorTextSecondary }}>近 48h 余额</span>
             </div>
@@ -423,13 +443,13 @@ export default function OverviewPage() {
             </div>
           ) : null}
         </div>
-        <div style={{ textAlign: "right", flex: "none" }}>
+        <div className="station-row__amount" style={{ textAlign: "right" }}>
           <div style={{ fontSize: 18, fontWeight: 600, color: amtColor }}>{amount}</div>
           <div style={{ fontSize: 12, color: token.colorTextSecondary }}>
             {b && b.ok && rate !== 1 ? `站点余额 ${usd(b.remaining)}` : "剩余余额"}
           </div>
         </div>
-        <div style={{ flex: "none" }}>
+        <div className="station-row__actions">
           <Button
             type="text"
             size="small"
@@ -438,6 +458,7 @@ export default function OverviewPage() {
             // 行本身可点开趋势弹窗，刷新按钮要拦住冒泡避免误开
             onClick={(e) => { e.stopPropagation(); refreshOne(s.id); }}
             title="刷新"
+            aria-label={`刷新 ${s.name}`}
           />
         </div>
       </div>
@@ -454,7 +475,15 @@ export default function OverviewPage() {
     theme: dark ? "classicDark" : "classic",
     style: { stroke: token.colorPrimary, lineWidth: 2 },
     axis: {
-      x: { labelFormatter: (d: Date) => fmtClock(d), grid: false },
+      x: {
+        labelFormatter: (d: Date) => {
+          const full = fmtClock(d);
+          if (!isMobile) return full;
+          const [date, time] = full.split(" ");
+          return trendHours <= 24 ? time : date;
+        },
+        grid: false,
+      },
       y: { labelFormatter: (v: number) => `¥${v >= 100 ? Math.round(v).toLocaleString("en-US") : v}` },
     },
     scale: { y: { nice: true, domainMin: 0 } },
@@ -493,7 +522,7 @@ export default function OverviewPage() {
     theme: dark ? "classicDark" : "classic",
     // 单一色相：对比的是数值不是身份（同 v1 drawBurnBars 注释）
     style: { fill: token.colorPrimary, radiusTopRight: 4, radiusBottomRight: 4 },
-    label: {
+    label: isMobile ? false : {
       // 条端金额标注；历史推算站加 ≈ 前缀（同 v1）
       text: (d: any) => `${d.est ? "≈ " : ""}${cny(d.burn)}`,
       position: "right" as const,
@@ -501,7 +530,7 @@ export default function OverviewPage() {
       style: { fontSize: 11, fill: token.colorTextSecondary },
     },
     axis: {
-      x: { labelFormatter: (n: string) => truncateLabel(n, 12), title: false },
+      x: { labelFormatter: (n: string) => truncateLabel(n, isMobile ? 8 : 12), title: false },
       y: false as const,
     },
     legend: false as const,
@@ -525,7 +554,7 @@ export default function OverviewPage() {
   if (!loaded) {
     // 初次加载统一 ProCard 骨架屏（全站规范：不要转圈文字）
     return (
-      <PageContainer title="总览">
+      <PageContainer className="responsive-page" title="总览">
         <Row gutter={[16, 16]}>
           <Col xs={24} lg={14}><ProCard loading style={{ height: "100%" }} /></Col>
           <Col xs={24} lg={10}><ProCard loading style={{ height: "100%" }} /></Col>
@@ -536,7 +565,11 @@ export default function OverviewPage() {
   }
 
   return (
-    <PageContainer title="总览" extra={<LastRefreshed at={refreshedAt} />}>
+    <PageContainer
+      className="responsive-page"
+      title="总览"
+      extra={<div className="page-toolbar"><LastRefreshed at={refreshedAt} /></div>}
+    >
       {/* 5 张 KPI（renderDashboard stats 区，口径逐项一致） */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 16 }}>
         <StatCard
@@ -573,12 +606,14 @@ export default function OverviewPage() {
               // 初次加载骨架屏（全站规范 3）；已有数据后切范围不闪骨架
               loading={!overview && !overviewErr}
               extra={
-                <Segmented
-                  size="small"
-                  value={trendHours}
-                  options={RANGES}
-                  onChange={(v) => setTrendHours(v as number)}
-                />
+                <div className="mobile-scroll">
+                  <Segmented
+                    size="small"
+                    value={trendHours}
+                    options={RANGES}
+                    onChange={(v) => setTrendHours(v as number)}
+                  />
+                </div>
               }
             >
               {overviewErr && !overview ? (

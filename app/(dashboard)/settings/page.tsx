@@ -12,23 +12,14 @@ const { Text } = Typography;
 // 单行设置项：左侧标题+说明，右侧控件（对照 v1 的 .set-row 结构）
 function SetRow({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 16,
-        padding: "14px 0",
-        flexWrap: "wrap",
-      }}
-    >
-      <div style={{ minWidth: 220 }}>
+    <div className="setting-row">
+      <div className="setting-row__description">
         <div style={{ fontWeight: 600 }}>{title}</div>
         <Text type="secondary" style={{ fontSize: 12 }}>
           {desc}
         </Text>
       </div>
-      <div>{children}</div>
+      <div className="setting-row__controls">{children}</div>
     </div>
   );
 }
@@ -112,7 +103,7 @@ export default function SettingsPage() {
   };
 
   return (
-    <PageContainer title="设置" subTitle="刷新策略、告警阈值与面板账号">
+    <PageContainer className="responsive-page" title="设置" subTitle="刷新策略、告警阈值与面板账号">
       <Space direction="vertical" size={16} style={{ display: "flex" }}>
         <ProCard title="全局设置" headerBordered>
           <SetRow title="自动刷新间隔" desc="后台按此间隔自动查询各中转站余额">
@@ -154,7 +145,7 @@ export default function SettingsPage() {
               当前用户：{me?.username || "admin"}，密码至少 6 位
             </Text>
           </div>
-          <Space wrap align="end" size={12}>
+          <Space className="mobile-form-fields" wrap align="end" size={12}>
             <div>
               <div style={{ fontSize: 12, marginBottom: 4 }}>用户名</div>
               <Input value={username} onChange={(e) => setUsername(e.target.value)} style={{ width: 180 }} />

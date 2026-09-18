@@ -4,7 +4,7 @@
 // 时间档位、站点筛选、四张合计卡、错误站点提示、趋势/分模型图、模型明细表，口径与文案一致
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PageContainer, ProCard, ProTable } from "@ant-design/pro-components";
-import { Alert, Button, Segmented, Select, Space, Statistic, Typography, theme } from "antd";
+import { Alert, Button, Grid, Segmented, Select, Space, Statistic, Typography, theme } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { Bar, Column } from "@ant-design/plots";
 import { api, cny4, fmtTokens, rateOf } from "../../../lib/client";
@@ -67,6 +67,8 @@ function CardTitle({ text, sub }: { text: string; sub: string }) {
 export default function UsagePage() {
   const { token } = theme.useToken();
   const { dark } = useThemeMode();
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   const [range, setRange] = useState<string>("today");
   const [station, setStation] = useState<string>("all");
   const [stations, setStations] = useState<any[]>([]); // 下拉用的站点列表（/api/stations）
@@ -261,22 +263,27 @@ export default function UsagePage() {
 
   return (
     <PageContainer
+      className="responsive-page"
       title="用量统计"
       subTitle="分站点、分模型、分时段的 Token 消耗"
-      extra={[
-        <LastRefreshed key="last-refreshed" at={refreshedAt} />,
-        <Button key="refresh" icon={<ReloadOutlined />} loading={refreshing} onClick={onRefresh}>
-          刷新
-        </Button>,
-      ]}
+      extra={
+        <div className="page-toolbar">
+          <LastRefreshed at={refreshedAt} />
+          <Button className="touch-icon-button" icon={<ReloadOutlined />} loading={refreshing} onClick={onRefresh}>
+            刷新
+          </Button>
+        </div>
+      }
     >
       {/* 筛选：时间档位 + 站点（同 v1 usage-filters） */}
-      <Space wrap style={{ marginBottom: 16 }}>
-        <Segmented
-          value={range}
-          onChange={(v) => setRange(String(v))}
-          options={USAGE_RANGES.map(([v, l]) => ({ value: v, label: l }))}
-        />
+      <div className="mobile-filterbar" style={{ marginBottom: 16 }}>
+        <div className="mobile-scroll">
+          <Segmented
+            value={range}
+            onChange={(v) => setRange(String(v))}
+            options={USAGE_RANGES.map(([v, l]) => ({ value: v, label: l }))}
+          />
+        </div>
         <Select
           value={station}
           onChange={setStation}
@@ -286,7 +293,7 @@ export default function UsagePage() {
             ...stations.map((s: any) => ({ value: s.id, label: `${s.name}${s.isOwn ? "（我的站）" : ""}` })),
           ]}
         />
-      </Space>
+      </div>
 
       {err ? (
         <ProCard>
@@ -378,7 +385,7 @@ export default function UsagePage() {
                   theme={dark ? "classicDark" : "classic"}
                   style={{ radiusTopLeft: 4, radiusTopRight: 4, maxWidth: 24 }}
                   axis={{
-                    x: { title: false },
+                    x: { title: false, labelFormatter: (v: any) => (isMobile ? truncateLabel(v, 8) : v) },
                     y: { title: false, labelFormatter: (v: any) => fmtTokens(v) },
                   }}
                   tooltip={{ title: (d: any) => d.label, items: tipItems }}
@@ -409,10 +416,10 @@ export default function UsagePage() {
                   theme={dark ? "classicDark" : "classic"}
                   style={{ maxWidth: 16, radiusTopRight: 4, radiusBottomRight: 4 }}
                   axis={{
-                    x: { title: false, labelFormatter: (v: any) => truncateLabel(v, 20) },
+                    x: { title: false, labelFormatter: (v: any) => truncateLabel(v, isMobile ? 12 : 20) },
                     y: false,
                   }}
-                  label={{ text: (d: any) => fmtTokens(d.tokens), position: "right", dx: 4 }}
+                  label={isMobile ? false : { text: (d: any) => fmtTokens(d.tokens), position: "right", dx: 4 }}
                   tooltip={{ title: (d: any) => d.model, items: tipItems }}
                 />
                 </ChartBox>
@@ -432,6 +439,7 @@ export default function UsagePage() {
             rowKey="model"
             dataSource={agg.models}
             columns={columns as any}
+            scroll={{ x: "max-content" }}
             locale={{ emptyText: "该范围内暂无用量数据" }}
           />
         </>

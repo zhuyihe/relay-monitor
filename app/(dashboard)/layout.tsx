@@ -4,7 +4,7 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ProLayout } from "@ant-design/pro-components";
-import { App, Button, Dropdown, theme as antdTheme } from "antd";
+import { App, Avatar, Button, Dropdown, Grid, theme as antdTheme } from "antd";
 import {
   AppstoreOutlined,
   ClusterOutlined,
@@ -42,9 +42,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const { message } = App.useApp();
   const { dark, toggle } = useThemeMode();
   const { token } = antdTheme.useToken();
+  const screens = Grid.useBreakpoint();
+  const compactHeader = !screens.md;
+  const isMobile = !screens.lg;
   const [username, setUsername] = useState<string>("");
   const [appInfo, setAppInfo] = useState<{ version: string; commit: string | null } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+
+  useEffect(() => {
+    setCollapsed(isMobile);
+  }, [isMobile]);
 
   // 挂载时校验登录态（401 由 api() 自动跳转 /login），并取版本号
   useEffect(() => {
@@ -79,10 +87,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <ProLayout
+      className="dashboard-layout"
       title="中转站余额监控"
       logo={<LineChartOutlined style={{ fontSize: 22, color: "#1677ff" }} />}
       layout="side"
       fixSiderbar
+      breakpoint="lg"
+      collapsed={collapsed}
+      onCollapse={setCollapsed}
+      contentStyle={{ minWidth: 0 }}
       route={menuRoute}
       location={{ pathname }}
       menuItemRender={(item, dom) => (
@@ -90,6 +103,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           onClick={(e) => {
             e.preventDefault();
             if (item.path && item.path !== pathname) router.push(item.path);
+            if (isMobile) setCollapsed(true);
           }}
         >
           {dom}
@@ -98,25 +112,29 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       actionsRender={() => [
         <Button
           key="theme"
+          className="touch-icon-button"
           type="text"
           icon={dark ? <SunOutlined /> : <MoonOutlined />}
           onClick={toggle}
           title={dark ? "切换浅色" : "切换深色"}
+          aria-label={dark ? "切换浅色主题" : "切换深色主题"}
         />,
         <Button
           key="refresh"
+          className="touch-icon-button"
           type="text"
           icon={<ReloadOutlined />}
           loading={refreshing}
           onClick={onRefresh}
           title="刷新全部"
+          aria-label="刷新全部站点"
         />,
       ]}
       avatarProps={{
         icon: <UserOutlined />,
         size: "small",
-        title: username || "…",
-        render: (_props, dom) => (
+        title: compactHeader ? undefined : username || "…",
+        render: () => (
           <Dropdown
             menu={{
               items: [{ key: "logout", icon: <LogoutOutlined />, label: "退出登录" }],
@@ -125,7 +143,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               },
             }}
           >
-            {dom}
+            <button
+              type="button"
+              className="header-avatar-trigger"
+              aria-label={username ? `用户菜单，当前用户 ${username}` : "用户菜单"}
+            >
+              <Avatar icon={<UserOutlined />} size={28} />
+              {compactHeader ? null : <span>{username || "…"}</span>}
+            </button>
           </Dropdown>
         ),
       }}

@@ -3,7 +3,7 @@
 // 从 stations/page.tsx 提取（v1 openTrend/drawChart 平移）：KPI 行 + 范围切换 +
 // 历史实线 / 虚线耗尽投影；数据拉取 GET /api/stations/:id/history?hours=
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Col, Modal, Row, Segmented, Spin, Statistic, theme } from "antd";
+import { Col, Grid, Modal, Row, Segmented, Spin, Statistic, theme } from "antd";
 import { Line } from "@ant-design/plots";
 import ChartBox from "./chart-box";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta } from "../../lib/client";
@@ -41,11 +41,14 @@ function etaText(p: any, rate: number, etaDaysRule: number): { text: string; cls
 function TrendChart({ points, prediction }: { points: any[]; prediction: any }) {
   const { dark } = useThemeMode();
   const { token } = theme.useToken();
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   const cfg = useMemo(() => {
     if (!points || points.length < 2) return null;
     const t0 = points[0][0];
     const lastT = points[points.length - 1][0];
     const lastR = points[points.length - 1][1];
+    const spanHours = Math.max(0, Number(lastT) - Number(t0)) / 3_600_000;
     // 投影段：最多延伸一个历史窗口的长度，避免把历史压扁（同 v1）
     let proj: { t: number; r: number; hitsZero: boolean } | null = null;
     if (prediction && prediction.burnPerDay > 0 && prediction.etaDays != null) {
@@ -75,7 +78,14 @@ function TrendChart({ points, prediction }: { points: any[]; prediction: any }) 
       // 预测段画虚线（G2 折线的 style 回调收到的是该分组的数据数组）
       style: { lineWidth: 2, lineDash: (d: any[]) => (d[0]?.s === "预测" ? [5, 5] : null) },
       axis: {
-        x: { labelFormatter: (d: any) => fmtClock(d) },
+        x: {
+          labelFormatter: (d: any) => {
+            const full = fmtClock(d);
+            if (!isMobile) return full;
+            const [date, time] = full.split(" ");
+            return spanHours <= 36 ? time : date;
+          },
+        },
         y: { labelFormatter: (v: any) => `¥${v >= 100 ? Math.round(v) : v}` },
       },
       legend: proj ? undefined : false,
@@ -93,17 +103,17 @@ function TrendChart({ points, prediction }: { points: any[]; prediction: any }) 
               style: { fill: COLOR.danger, r: 4 },
               tooltip: false,
             },
-            {
+            ...(!isMobile ? [{
               type: "text",
               data: [{ date: new Date(proj.t), v: 0 }],
               encode: { x: "date", y: "v" },
               style: { text: `预计耗尽 ${fmtClock(proj.t)}`, dy: -10, dx: -6, textAlign: "end", fill: COLOR.danger, fontSize: 12 },
               tooltip: false,
-            },
+            }] : []),
           ]
         : [],
     } as any;
-  }, [points, prediction, dark]);
+  }, [points, prediction, dark, isMobile]);
 
   if (!cfg)
     return (
@@ -173,11 +183,13 @@ export default function TrendModal({
 
   return (
     <Modal
+      className="responsive-modal"
       title={station ? `余额趋势 · ${station.name}` : ""}
       open={!!station}
       onCancel={() => { seq.current++; onClose(); }}
       footer={null}
       width={760}
+      centered
     >
       {station && (
         <>
@@ -223,7 +235,7 @@ export default function TrendModal({
               />
             </Col>
           </Row>
-          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8, overflowX: "auto" }}>
+          <div className="mobile-scroll" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
             <Segmented options={RANGES} value={hours} onChange={(v) => setHours(Number(v))} />
           </div>
           <Spin spinning={loading}>

@@ -51,23 +51,14 @@ function etaRuleDisplay(r: any): number {
 // 单行设置项：左侧标题+说明，右侧控件（对照 v1 的 .set-row 结构）
 function SetRow({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 16,
-        padding: "14px 0",
-        flexWrap: "wrap",
-      }}
-    >
-      <div style={{ minWidth: 220, maxWidth: 520 }}>
+    <div className="setting-row">
+      <div className="setting-row__description">
         <div style={{ fontWeight: 600 }}>{title}</div>
         <Text type="secondary" style={{ fontSize: 12 }}>
           {desc}
         </Text>
       </div>
-      <div>{children}</div>
+      <div className="setting-row__controls">{children}</div>
     </div>
   );
 }
@@ -427,17 +418,21 @@ export default function NotificationsPage() {
 
   return (
     <PageContainer
+      className="responsive-page"
       title="通知"
-      extra={[
-        <Button key="add" type="primary" icon={<PlusOutlined />} onClick={() => openChModal(null)}>
-          添加渠道
-        </Button>,
-      ]}
+      extra={
+        <div className="page-toolbar">
+          <Button className="touch-icon-button" type="primary" icon={<PlusOutlined />} onClick={() => openChModal(null)}>
+            添加渠道
+          </Button>
+        </div>
+      }
       loading={loading}
     >
       {/* 通知渠道列表 */}
       {/* 窄视口：标题不换行不收缩，说明文字（extra）允许换行，避免标题被挤成竖排 */}
       <ProCard
+        className="mobile-card-header"
         title={<span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>通知渠道</span>}
         extra={
           <Text type="secondary" style={{ fontSize: 12, whiteSpace: "normal", textAlign: "right" }}>
@@ -466,6 +461,7 @@ export default function NotificationsPage() {
             const t = channelTypes.find((x) => x.value === c.type);
             return (
               <List.Item
+                className="notification-row"
                 actions={[
                   <Switch key="enabled" checked={c.enabled !== false} onChange={() => toggleChannel(c)} title="启用/停用" />,
                   <Button
@@ -475,9 +471,10 @@ export default function NotificationsPage() {
                     loading={rowTesting === c.id}
                     onClick={() => testChannel(c)}
                     title="发送测试"
+                    aria-label={`测试 ${c.name}`}
                   />,
-                  <Button key="edit" type="text" icon={<EditOutlined />} onClick={() => openChModal(c)} title="编辑" />,
-                  <Button key="del" type="text" danger icon={<DeleteOutlined />} onClick={() => deleteChannel(c)} title="删除" />,
+                  <Button key="edit" type="text" icon={<EditOutlined />} onClick={() => openChModal(c)} title="编辑" aria-label={`编辑 ${c.name}`} />,
+                  <Button key="del" type="text" danger icon={<DeleteOutlined />} onClick={() => deleteChannel(c)} title="删除" aria-label={`删除 ${c.name}`} />,
                 ]}
               >
                 <List.Item.Meta
@@ -547,6 +544,7 @@ export default function NotificationsPage() {
 
       {/* 每日日报 */}
       <ProCard
+        className="mobile-card-header"
         title={<span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>每日日报</span>}
         extra={
           <Text type="secondary" style={{ fontSize: 12, whiteSpace: "normal", textAlign: "right" }}>
@@ -596,6 +594,7 @@ export default function NotificationsPage() {
 
       {/* 通知渠道弹窗（对照 v1 chModal） */}
       <Modal
+        className="responsive-modal"
         open={chOpen}
         title={editingCh ? "编辑通知渠道" : "添加通知渠道"}
         onCancel={() => setChOpen(false)}
@@ -646,6 +645,7 @@ export default function NotificationsPage() {
 
       {/* 日报预览弹窗（对照 v1 reportModal：HTML / 纯文本两个标签页） */}
       <Modal
+        className="responsive-modal"
         open={reportOpen}
         title="日报预览"
         width={720}
@@ -661,6 +661,7 @@ export default function NotificationsPage() {
               label: "HTML（邮件效果）",
               children: (
                 <iframe
+                  className="report-preview-frame"
                   title="日报 HTML 预览"
                   sandbox=""
                   srcDoc={report?.html || "<p>无 HTML 版本</p>"}

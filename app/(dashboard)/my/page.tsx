@@ -10,6 +10,7 @@ import {
   Button,
   Checkbox,
   Col,
+  Grid,
   Input,
   Result,
   Row,
@@ -87,7 +88,7 @@ function top10<T extends Record<string, any>>(list: T[], nameField: string): T[]
 // 标题不收缩不换行，窄屏下说明文字整体折到下一行而不是把标题挤成竖排
 function SectionHead({ title, sub, extra }: { title: string; sub?: React.ReactNode; extra?: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, margin: "20px 0 12px" }}>
+    <div className="section-head" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, margin: "20px 0 12px" }}>
       <Title level={5} style={{ margin: 0, whiteSpace: "nowrap", flexShrink: 0 }}>{title}</Title>
       {sub ? <Text type="secondary" style={{ fontSize: 12, minWidth: 0 }}>{sub}</Text> : null}
       {extra ? <span style={{ marginLeft: "auto" }}>{extra}</span> : null}
@@ -171,6 +172,8 @@ export default function MyStationPage() {
   const { message } = App.useApp();
   const { token } = theme.useToken();
   const { dark } = useThemeMode();
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   // @ant-design/plots 不随 ConfigProvider 算法切换，需显式指定主题
   const plotTheme = dark ? "classicDark" : "classic";
   const [range, setRange] = useState<string>("today");
@@ -332,24 +335,28 @@ export default function MyStationPage() {
   };
 
   // ---- 页面头部：范围切换 + 手动刷新（v1 #ownRange / #ownRefresh）----
-  const headerExtra = [
-    <LastRefreshed key="refreshed" at={refreshedAt} />,
-    <Segmented key="range" options={OWN_RANGES} value={range} onChange={(v) => setRange(String(v))} />,
-    <Button key="refresh" icon={<ReloadOutlined />} loading={refreshing} onClick={onRefresh}>
-      刷新
-    </Button>,
-  ];
+  const headerExtra = (
+    <div className="page-toolbar">
+      <LastRefreshed at={refreshedAt} />
+      <div className="mobile-scroll">
+        <Segmented options={OWN_RANGES} value={range} onChange={(v) => setRange(String(v))} />
+      </div>
+      <Button className="touch-icon-button" icon={<ReloadOutlined />} loading={refreshing} onClick={onRefresh}>
+        刷新
+      </Button>
+    </div>
+  );
 
   if (error) {
     return (
-      <PageContainer title="我的站点" subTitle="自有中转站的下游用量分析与消费预测" extra={headerExtra}>
+      <PageContainer className="responsive-page" title="我的站点" subTitle="自有中转站的下游用量分析与消费预测" extra={headerExtra}>
         <Result status="warning" title="无法加载下游数据" subTitle={error} />
       </PageContainer>
     );
   }
   if (!data) {
     return (
-      <PageContainer title="我的站点" subTitle="自有中转站的下游用量分析与消费预测" extra={headerExtra}>
+      <PageContainer className="responsive-page" title="我的站点" subTitle="自有中转站的下游用量分析与消费预测" extra={headerExtra}>
         {/* 初次加载统一 ProCard 骨架屏（全站规范 3），形状对齐真实布局：4 KPI + 两图 */}
         <Row gutter={[12, 12]}>
           {[0, 1, 2, 3].map((i) => (
@@ -467,7 +474,7 @@ export default function MyStationPage() {
   const userItems = top10(users, "user");
 
   return (
-    <PageContainer title="我的站点" subTitle="自有中转站的下游用量分析与消费预测" extra={headerExtra}>
+    <PageContainer className="responsive-page" title="我的站点" subTitle="自有中转站的下游用量分析与消费预测" extra={headerExtra}>
       {/* KPI：期内消费 / Tokens / 请求数 / 活跃用户 */}
       <Row gutter={[12, 12]}>
         <Col xs={12} md={6}>
@@ -699,7 +706,10 @@ export default function MyStationPage() {
                 data={buckets}
                 xField="label"
                 yField="tokens"
-                axis={{ y: { labelFormatter: (v: any) => fmtTokens(v) } }}
+                axis={{
+                  x: { labelFormatter: (v: any) => (isMobile ? trunc(v, 8) : v) },
+                  y: { labelFormatter: (v: any) => fmtTokens(v) },
+                }}
                 tooltip={{
                   title: (b: any) => b.label,
                   items: [
@@ -725,8 +735,8 @@ export default function MyStationPage() {
                 data={modelItems}
                 xField="model"
                 yField="tokens"
-                axis={{ x: { labelFormatter: (v: any) => trunc(v, 20) }, y: { labelFormatter: (v: any) => fmtTokens(v) } }}
-                label={{ text: (m: any) => fmtTokens(m.tokens), position: "right", dx: 4 }}
+                axis={{ x: { labelFormatter: (v: any) => trunc(v, isMobile ? 12 : 20) }, y: { labelFormatter: (v: any) => fmtTokens(v) } }}
+                label={isMobile ? false : { text: (m: any) => fmtTokens(m.tokens), position: "right", dx: 4 }}
                 tooltip={{
                   title: (m: any) => m.model,
                   items: [
@@ -767,7 +777,12 @@ export default function MyStationPage() {
               yField="cost"
               colorField="kind"
               scale={{ color: { domain: ["实际", "预测"], range: ["#1677ff", "rgba(22,119,255,0.35)"] } }}
-              axis={{ x: { labelFormatter: (v: any) => hourLabel(v) }, y: { labelFormatter: yuanTick } }}
+              axis={{
+                x: {
+                  labelFormatter: (v: any) => (!isMobile || new Date(Number(v)).getHours() % 4 === 0 ? hourLabel(v) : ""),
+                },
+                y: { labelFormatter: yuanTick },
+              }}
               annotations={
                 d.hourly.next.length
                   ? [{ type: "lineX", data: [d.hourly.next[0].t], style: { stroke: token.colorTextTertiary, lineDash: [4, 4] } }]
@@ -856,8 +871,8 @@ export default function MyStationPage() {
                 data={userItems}
                 xField="user"
                 yField="cost"
-                axis={{ x: { labelFormatter: (v: any) => trunc(v, 14) }, y: { labelFormatter: yuanTick } }}
-                label={{ text: (u: any) => cny(u.cost), position: "right", dx: 4 }}
+                axis={{ x: { labelFormatter: (v: any) => trunc(v, isMobile ? 10 : 14) }, y: { labelFormatter: yuanTick } }}
+                label={isMobile ? false : { text: (u: any) => cny(u.cost), position: "right", dx: 4 }}
                 tooltip={{
                   title: (u: any) => u.user,
                   items: [

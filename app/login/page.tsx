@@ -30,13 +30,14 @@ export default function LoginPage() {
 
   return (
     <div
+      className="login-screen"
       style={{
-        minHeight: "100vh",
+        minHeight: "100dvh",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         background: token.colorBgLayout,
-        padding: 16,
+        padding: "max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left))",
       }}
     >
       <Card style={{ width: "100%", maxWidth: 360, boxShadow: token.boxShadowSecondary }}>
