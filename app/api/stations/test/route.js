@@ -4,9 +4,15 @@ import { describeConnectionFailure } from "../../../../lib/connection-test.js";
 import { queryStation, STATION_TYPES } from "../../../../lib/providers.js";
 
 const CONNECTION_FIELDS = ["baseUrl", "accessToken", "apiKey", "userId", "email", "password"];
+const PRESERVED_SECRET_FIELDS = new Set(["accessToken", "apiKey", "password"]);
 
 function text(value) {
   return String(value || "").trim();
+}
+
+function connectionValue(field, value) {
+  // 密码中的首尾空格可能是有效字符，不能像 URL/令牌一样做标准化。
+  return field === "password" ? String(value || "") : text(value);
 }
 
 function findSavedStation(store, stationId) {
@@ -21,11 +27,11 @@ function testStation(body, saved) {
 
   for (const field of CONNECTION_FIELDS) {
     if (Object.hasOwn(body, field)) {
-      const value = text(body[field]);
-      // 编辑既有资源时，表单中空的凭证代表“保持不变”，只用于本次内存测试。
-      station[field] = value || (sameType && field !== "baseUrl" ? text(saved?.[field]) : "");
+      const value = connectionValue(field, body[field]);
+      // 编辑既有资源时，表单中空的敏感凭证代表“保持不变”；其他连接字段的空值会参与测试。
+      station[field] = value || (sameType && PRESERVED_SECRET_FIELDS.has(field) ? connectionValue(field, saved?.[field]) : "");
     } else if (sameType) {
-      station[field] = text(saved?.[field]);
+      station[field] = connectionValue(field, saved?.[field]);
     }
   }
 
