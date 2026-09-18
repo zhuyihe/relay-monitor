@@ -3,6 +3,7 @@
 // startReportScheduler 由 lib/runtime.js 在初始化时启动，定时器挂在 rt 字段上。
 import { queryOwnData, dateStrInTz, parseDateLabel } from "../lib/providers.js";
 import { forecastDaily } from "../lib/forecast.js";
+import { BRAND } from "../lib/brand.js";
 import { broadcast } from "../lib/notify.js";
 import { fmtEta } from "../lib/alerts.js";
 import { getOwnUsers, computeResold, computeProfit } from "./own-helpers.js";
@@ -61,7 +62,7 @@ const pctDelta = (cur, base) => {
 export async function buildReport(rt) {
   const { store, history } = rt;
   const own = store.list().find((s) => s.isOwn && s.type === "newapi");
-  if (!own) throw new Error("还没有标记「我的中转站」，无法生成日报");
+  if (!own) throw new Error("还没有标记自营业务站点，无法生成日报");
   const { tz, dayStart, dayEnd, wideStart } = reportDayWindow();
   const ownRate = own.cnyPerUsd != null && own.cnyPerUsd > 0 ? own.cnyPerUsd : 1;
 
@@ -136,7 +137,7 @@ export async function buildReport(rt) {
   const dateLabel = dateStrInTz(dayStart, tz);
   const dow = "日一二三四五六"[new Date(`${dateLabel}T00:00:00Z`).getUTCDay()];
   const L = [];
-  L.push(`【${own.name} 日报】${dateLabel}（周${dow}）`);
+  L.push(`【${BRAND.name}日报】${own.name} · ${dateLabel}（周${dow}）`);
   L.push("");
   L.push("■ 经营概览");
   L.push(`昨日消费：${rptCny(totalCost * ownRate)}${prev != null ? `（环比 ${pctDelta(totalCost, prev)}，近7天日均 ${rptCny(avg7 * ownRate)} ${pctDelta(totalCost, avg7)}）` : ""}`);
@@ -179,6 +180,8 @@ export async function buildReport(rt) {
     L.push(`未来 7 天预计：≈${rptCny(fc.nextTotal * ownRate)}（区间 ${rptCny((fc.nextLo ?? 0) * ownRate)} ~ ${rptCny((fc.nextHi ?? 0) * ownRate)}）`);
     L.push(`（${fc.method} · 基于 ${fc.sampleDays} 天 · 回测日均偏差 ±${fc.backtestWapePct ?? "?"}%）`);
   }
+  L.push("");
+  L.push(`${BRAND.reportSignature} · 统计区间为 ${dateLabel} 00:00–24:00`);
   const html = buildReportHtml(rt, {
     own, dateLabel, dow, ownRate,
     totalCost, prev, avg7, incomeUsd, adminUsd, profit,
@@ -186,7 +189,7 @@ export async function buildReport(rt) {
     byModel, byUser, daily, fc, upstreams, balanceTotal,
     userCount: (ownUsers || []).filter((u) => u.role < 10).length, hasUsers: !!ownUsers,
   });
-  return { title: `【日报】${own.name} ${dateLabel}`, text: L.join("\n"), html };
+  return { title: `【${BRAND.name}日报】${own.name} ${dateLabel}`, text: L.join("\n"), html };
 }
 
 // 邮件安全的 HTML 日报：全内联样式 + 表格排版，图表用色块/条形实现
@@ -194,7 +197,7 @@ export async function buildReport(rt) {
 function buildReportHtml(rt, d) {
   const { history } = rt;
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const C = { ink: "#1c1c1e", sub: "#6e6e73", line: "#e5e5ea", blue: "#0a84ff", blueSoft: "#b9d6f8", green: "#1f9d4d", red: "#d03b3b", track: "#eef1f5", bg: "#f5f6f8" };
+  const C = { ink: "#152033", sub: "#667085", line: "#dfe4ea", blue: "#3157d5", blueSoft: "#aebff1", green: "#137a63", red: "#c83c3c", track: "#edf2ff", bg: "#f4f6f8" };
   const font = "font-family:-apple-system,'PingFang SC','Segoe UI',sans-serif;";
   const money = (v) => rptCny(v);
 
@@ -294,8 +297,8 @@ function buildReportHtml(rt, d) {
   return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:${C.bg}">
   <table width="100%" cellpadding="0" cellspacing="0" style="background:${C.bg};padding:18px 0"><tr><td align="center">
   <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%">
-    <tr><td style="padding:6px 12px 2px;${font}font-size:18px;font-weight:700;color:${C.ink}">${esc(d.own.name)} 日报</td></tr>
-    <tr><td style="padding:0 12px 8px;${font}font-size:12px;color:${C.sub}">${esc(d.dateLabel)}（周${esc(d.dow)}）· 由 relay-monitor 生成</td></tr>
+    <tr><td style="padding:6px 12px 2px;${font}font-size:18px;font-weight:700;color:${C.ink}">${esc(BRAND.name)} · ${esc(d.own.name)} 日报</td></tr>
+    <tr><td style="padding:0 12px 8px;${font}font-size:12px;color:${C.sub}">${esc(d.dateLabel)}（周${esc(d.dow)}）· ${esc(BRAND.reportSignature)}</td></tr>
     <tr><td><table width="100%" cellpadding="0" cellspacing="0"><tr>
       ${kpi("昨日消费", money(d.totalCost * d.ownRate), d.prev != null ? `环比 ${pctDelta(d.totalCost, d.prev)} · 7日均 ${pctDelta(d.totalCost, d.avg7)}` : "", null)}
       ${kpi("收入（不含管理员）", money(d.incomeUsd * d.ownRate), d.adminUsd > 0 ? `管理员另耗 ${money(d.adminUsd * d.ownRate)}` : "", null)}
@@ -311,7 +314,7 @@ function buildReportHtml(rt, d) {
     ${section("上游余额", upRows)}
     ${d.hasUsers ? section(`用户余额合计：${money(d.balanceTotal)}（预收 · ${d.userCount} 个用户）`, "") : ""}
     ${outlook ? section("展望", outlook) : ""}
-    <tr><td style="padding:16px 12px;${font}font-size:11px;color:${C.sub}">relay-monitor 每日日报 · 统计区间为 ${esc(d.dateLabel)} 00:00–24:00</td></tr>
+    <tr><td style="padding:16px 12px;${font}font-size:11px;color:${C.sub}">${esc(BRAND.reportSignature)} · 每日经营日报 · 统计区间为 ${esc(d.dateLabel)} 00:00–24:00</td></tr>
   </table></td></tr></table></body></html>`;
 }
 
