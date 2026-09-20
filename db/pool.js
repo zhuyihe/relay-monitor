@@ -52,4 +52,67 @@ export async function ensureSchema(pool) {
     PRIMARY KEY (station_id, date),
     INDEX idx_date (date)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 上游渠道对账：规则、规则下的本站渠道、聚合快照与独立告警状态。
+  // 凭据继续只保存在既有 stations.doc；此处不复制 PAT 或 API Key。
+  await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_rules (
+    id VARCHAR(32) PRIMARY KEY,
+    upstream_station_id VARCHAR(32) NOT NULL,
+    own_station_id VARCHAR(32) NOT NULL,
+    token_id BIGINT NOT NULL,
+    token_name VARCHAR(160) NOT NULL,
+    fixed_group VARCHAR(160) NOT NULL,
+    timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Shanghai',
+    enabled TINYINT NOT NULL DEFAULT 1,
+    active_token_key VARCHAR(255) NULL,
+    archived_at DATETIME NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_reconciliation_upstream (upstream_station_id, token_id),
+    INDEX idx_reconciliation_enabled (enabled, archived_at),
+    UNIQUE KEY uq_reconciliation_active_token (active_token_key)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_rule_channels (
+    rule_id VARCHAR(32) NOT NULL,
+    channel_id BIGINT NOT NULL,
+    channel_name VARCHAR(160) NOT NULL,
+    active_channel_key VARCHAR(96) NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (rule_id, channel_id),
+    INDEX idx_reconciliation_channel (channel_id),
+    UNIQUE KEY uq_reconciliation_active_channel (active_channel_key)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_snapshots (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    rule_id VARCHAR(32) NOT NULL,
+    snapshot_key VARCHAR(128) NOT NULL,
+    window_kind VARCHAR(24) NOT NULL,
+    window_start_ms BIGINT NOT NULL,
+    window_end_ms BIGINT NOT NULL,
+    local_date DATE NULL,
+    upstream_quota DOUBLE NULL,
+    upstream_quota_per_unit DOUBLE NULL,
+    upstream_usd DOUBLE NULL,
+    downstream_quota DOUBLE NULL,
+    downstream_quota_per_unit DOUBLE NULL,
+    downstream_usd DOUBLE NULL,
+    difference_usd DOUBLE NULL,
+    margin_rate DOUBLE NULL,
+    coverage DOUBLE NULL,
+    health_code VARCHAR(64) NOT NULL,
+    health_detail VARCHAR(300) NULL,
+    source JSON NULL,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_reconciliation_snapshot (rule_id, snapshot_key),
+    INDEX idx_reconciliation_snapshot_window (window_start_ms, window_end_ms)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_alert_state (
+    rule_id VARCHAR(32) NOT NULL,
+    event_code VARCHAR(64) NOT NULL,
+    active TINYINT NOT NULL DEFAULT 1,
+    first_seen_at BIGINT NOT NULL,
+    last_seen_at BIGINT NOT NULL,
+    last_notified_at BIGINT NULL,
+    recovered_at BIGINT NULL,
+    PRIMARY KEY (rule_id, event_code)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 }
