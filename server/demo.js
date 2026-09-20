@@ -69,6 +69,69 @@ export function mockNewApiUsage(acc) {
   return { status: 200, body: { object: "list", total_usage: Math.round(s.usedUsd * 100) } };
 }
 
+// ---- 上游渠道对账 mock（普通用户 PAT 能看到的 Key / 分组 / 自己的账单） -------
+const MOCK_RECONCILIATION_TOKENS = [
+  { id: 101, name: "oai", status: 1, group: "oai", cross_group_retry: false, key: "sk-demo-oai" },
+  { id: 102, name: "gemini-mixed", status: 1, group: "gemini_mixed", cross_group_retry: false, key: "sk-demo-gemini" },
+];
+
+export function mockNewApiStatus() {
+  return { status: 200, body: { success: true, data: { version: "demo-2.0", quota_per_unit: QUOTA_PER_UNIT } } };
+}
+
+export function mockNewApiTokenList(request) {
+  if (!hasAuth(request)) return unauthorized();
+  return { status: 200, body: { success: true, data: { page: 1, page_size: 100, total: MOCK_RECONCILIATION_TOKENS.length, items: MOCK_RECONCILIATION_TOKENS } } };
+}
+
+export function mockNewApiSelfGroups(request) {
+  if (!hasAuth(request)) return unauthorized();
+  return { status: 200, body: { success: true, data: {
+    oai: { ratio: 2.3, desc: "OpenAI 固定分组" },
+    gemini_mixed: { ratio: 1.2, desc: "Gemini 混合分组" },
+  } } };
+}
+
+function mockReconciliationRows(startSec, endSec, tokenName = "") {
+  const start = Math.max(0, Number(startSec) || 0);
+  const end = Math.max(start, Number(endSec) || Math.floor(Date.now() / 1000));
+  const rows = [];
+  for (let t = start; t <= end; t += 900) {
+    for (const token of MOCK_RECONCILIATION_TOKENS) {
+      if (tokenName && token.name !== tokenName) continue;
+      const phase = Math.floor(t / 900) % 5;
+      rows.push({
+        id: rows.length + 1,
+        created_at: t,
+        type: 2,
+        token_id: token.id,
+        token_name: token.name,
+        group: token.group,
+        model_name: token.id === 101 ? "gpt-5.5" : "gemini-2.5-pro",
+        quota: 180000 + phase * 18000,
+      });
+    }
+  }
+  return rows.sort((a, b) => b.created_at - a.created_at);
+}
+
+export function mockNewApiSelfLogs(request) {
+  if (!hasAuth(request)) return unauthorized();
+  const q = new URL(request.url).searchParams;
+  const rows = mockReconciliationRows(q.get("start_timestamp"), q.get("end_timestamp"), q.get("token_name") || "");
+  const page = Math.max(1, Number(q.get("p")) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(q.get("page_size")) || 10));
+  const items = rows.slice((page - 1) * pageSize, page * pageSize);
+  return { status: 200, body: { success: true, data: { page, page_size: pageSize, total: rows.length, items } } };
+}
+
+export function mockNewApiSelfLogStat(request) {
+  if (!hasAuth(request)) return unauthorized();
+  const q = new URL(request.url).searchParams;
+  const rows = mockReconciliationRows(q.get("start_timestamp"), q.get("end_timestamp"), q.get("token_name") || "");
+  return { status: 200, body: { success: true, data: { quota: rows.reduce((sum, row) => sum + row.quota, 0), rpm: 0, tpm: 0 } } };
+}
+
 // ---- Sub2API mock：登录 / 刷新 / me（契约与 Wei-Shaw/sub2api 一致） ----------
 export function mockSub2ApiLogin(acc, body) {
   const { email, password } = body || {};
