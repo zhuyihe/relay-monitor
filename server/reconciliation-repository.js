@@ -134,10 +134,12 @@ export class ReconciliationRepository {
         [id, input.upstreamStationId, input.ownStationId, input.tokenId, input.tokenName,
           input.fixedGroup, input.timezone, input.enabled === false ? 0 : 1, tokenKey]
       );
-      await conn.query(
-        "INSERT INTO reconciliation_rule_channels (rule_id, channel_id, channel_name, active_channel_key) VALUES ?",
-        [input.channels.map((channel) => [id, channel.channelId, channel.name, activeChannelKey(input, channel.channelId)])]
-      );
+      if (input.channels.length) {
+        await conn.query(
+          "INSERT INTO reconciliation_rule_channels (rule_id, channel_id, channel_name, active_channel_key) VALUES ?",
+          [input.channels.map((channel) => [id, channel.channelId, channel.name, activeChannelKey(input, channel.channelId)])]
+        );
+      }
       await conn.commit();
     } catch (err) {
       await conn.rollback().catch(() => {});
@@ -162,10 +164,12 @@ export class ReconciliationRepository {
       );
       if (!result.affectedRows) throw new Error("对账规则不存在或已归档");
       await conn.query("DELETE FROM reconciliation_rule_channels WHERE rule_id = ?", [id]);
-      await conn.query(
-        "INSERT INTO reconciliation_rule_channels (rule_id, channel_id, channel_name, active_channel_key) VALUES ?",
-        [input.channels.map((channel) => [id, channel.channelId, channel.name, activeChannelKey(input, channel.channelId)])]
-      );
+      if (input.channels.length) {
+        await conn.query(
+          "INSERT INTO reconciliation_rule_channels (rule_id, channel_id, channel_name, active_channel_key) VALUES ?",
+          [input.channels.map((channel) => [id, channel.channelId, channel.name, activeChannelKey(input, channel.channelId)])]
+        );
+      }
       await conn.commit();
     } catch (err) {
       await conn.rollback().catch(() => {});

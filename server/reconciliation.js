@@ -65,6 +65,7 @@ export function resolveReconciliationWindow(input = {}, now = Date.now()) {
     startMs = finite(input.startMs);
     endMs = finite(input.endMs);
     if (startMs == null || endMs == null || startMs >= endMs) throw new Error("自定义时间段无效");
+    if (endMs > now) throw new Error("自定义时间段不能超过当前时间");
   } else {
     const dayStart = midnight(now, timezone);
     if (preset === "yesterday") {
@@ -163,6 +164,20 @@ export function createReconciliationModule(rt) {
   const ownChannelsCache = (rt._reconciliationOwnChannelsCache ||= new Map());
   const tokenLogCaches = (rt._reconciliationTokenLogCaches ||= new Map());
 
+  function clearRuleTokenLogCaches(ruleId) {
+    const prefix = `${ruleId}:`;
+    for (const key of tokenLogCaches.keys()) {
+      if (key.startsWith(prefix)) tokenLogCaches.delete(key);
+    }
+  }
+
+  function pruneTokenLogCaches(now = Date.now()) {
+    const cutoff = now - 2 * DAY_MS;
+    for (const [key, cached] of tokenLogCaches) {
+      if (!Number.isFinite(cached?.dayStartMs) || cached.dayStartMs < cutoff) tokenLogCaches.delete(key);
+    }
+  }
+
   const ownStation = () => rt.store.list().find((station) => station.isOwn && station.type === "newapi") || null;
   const upstreamStation = (id) => rt.store.get(id) || null;
 
@@ -184,6 +199,7 @@ export function createReconciliationModule(rt) {
 
   async function upstreamWindowFor(rule, upstream, token, window, { force = false } = {}) {
     // 只有“今天”会随轮询增长：首次全量扫描，之后保留 3 分钟重叠增量扫，按上游日志 ID 去重。
+    pruneTokenLogCaches();
     if (window.preset !== "today" || force) {
       return queryNewApiTokenWindow(upstream, {
         tokenId: token.id, tokenName: token.name, startMs: window.startMs, endMs: window.endMs,
@@ -196,7 +212,7 @@ export function createReconciliationModule(rt) {
         tokenId: token.id, tokenName: token.name, startMs: window.startMs, endMs: window.endMs,
       });
       const facts = new Map(scan.facts.map((fact) => [fact.id, fact]));
-      tokenLogCaches.set(key, { tokenId: token.id, scannedToMs: window.endMs, facts });
+      tokenLogCaches.set(key, { tokenId: token.id, dayStartMs: window.startMs, scannedToMs: window.endMs, facts });
       return aggregateTokenFacts(scan, facts, window.startMs, window.endMs);
     }
     // Key 被编辑后不能把旧 Key 的内存事实混进新规则。
@@ -280,7 +296,7 @@ export function createReconciliationModule(rt) {
     const existing = await repository.getRule(id);
     if (!existing) throw new Error("对账规则不存在");
     const valid = await validateInput(input, { excludeRuleId: id });
-    return repository.updateRule(id, {
+    const updated = await repository.updateRule(id, {
       upstreamStationId: valid.upstream.id,
       ownStationId: valid.own.id,
       tokenId: valid.token.id,
@@ -290,6 +306,8 @@ export function createReconciliationModule(rt) {
       enabled: input?.enabled !== false,
       channels: valid.channels,
     });
+    clearRuleTokenLogCaches(id);
+    return updated;
   }
 
   async function inspectRule(ruleId, window, { force = false, origin = "manual" } = {}) {
@@ -475,6 +493,7 @@ export function createReconciliationModule(rt) {
     async archiveRule(id) {
       const ok = await repository.archiveRule(id);
       if (!ok) throw new Error("对账规则不存在");
+      clearRuleTokenLogCaches(id);
     },
     async queryRules({ ruleIds = null, ...input } = {}, options = {}) {
       const rules = await repository.listRules();
