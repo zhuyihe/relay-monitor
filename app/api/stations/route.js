@@ -5,7 +5,11 @@ import { redact } from "../../../server/stations.js";
 import { refreshStation } from "../../../server/refresh.js";
 
 export const GET = withAuth(async (request, rt) => {
-  return json({ stations: rt.store.list().map((s) => redact(rt, s)), settings: rt.store.settings });
+  const includeArchived = new URL(request.url).searchParams.get("includeArchived") === "true";
+  return json({
+    stations: rt.store.list({ includeArchived }).map((s) => redact(rt, s)),
+    settings: rt.store.settings,
+  });
 });
 
 export const POST = withAuth(async (request, rt) => {

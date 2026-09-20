@@ -32,6 +32,8 @@ services:
     image: mysql:8.0
     restart: unless-stopped
     environment:
+      # 与应用的自然日口径一致；日汇总回填和热力图中的 FROM_UNIXTIME 依赖 MySQL 会话时区。
+      TZ: Asia/Shanghai
       MYSQL_DATABASE: ${DB_NAME}
       MYSQL_USER: ${DB_USER}
       MYSQL_PASSWORD: ${DB_PASSWORD}
