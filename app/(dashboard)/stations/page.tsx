@@ -1,5 +1,5 @@
 "use client";
-// 上游资源页：资源列表 + 添加/编辑弹窗 + 单项刷新/删除 + 余额趋势详情弹窗
+// 上游资源页：资源列表 + 添加/编辑弹窗 + 单项刷新/归档 + 余额趋势详情弹窗
 // 功能对照 v1 app.js：renderStations/stationRow（553-586、193-288）、站点表单弹窗（1487-1614）、
 // 趋势弹窗 openTrend/drawChart（1675-1822）——文案与数字口径逐条对齐，布局用 Pro 风格重排
 import { useCallback, useEffect, useState } from "react";
@@ -17,12 +17,14 @@ import {
   Modal,
   Select,
   Space,
+  Typography,
   theme,
 } from "antd";
 import {
   PlusOutlined,
   ReloadOutlined,
   EditOutlined,
+  InboxOutlined,
   DeleteOutlined,
   CloseOutlined,
 } from "@ant-design/icons";
@@ -32,6 +34,8 @@ import AppState from "../../components/app-state";
 import dayjs from "dayjs";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta, statusOf } from "../../../lib/client";
 import { describeConnectionFailure } from "../../../lib/connection-test";
+
+const { Text } = Typography;
 
 // ---- 展示工具（v1 app.js 同名函数平移）--------------------------------------
 function relTime(iso: any) {
@@ -262,11 +266,12 @@ function StationRow(props: {
   onRefresh: (s: any) => void;
   onRetest: (s: any) => void;
   onEdit: (s: any) => void;
-  onDelete: (s: any) => void;
+  onArchive: (s: any) => void;
+  onPurge: (s: any) => void;
 }) {
   const {
     s, settings, types, etaDaysRule, compact, refreshing, retesting, connectionCheck,
-    onTrend, onRefresh, onRetest, onEdit, onDelete,
+    onTrend, onRefresh, onRetest, onEdit, onArchive, onPurge,
   } = props;
   const { token } = theme.useToken();
   const typeLabel = (v: string) => types.find((t) => t.value === v)?.label || v;
@@ -347,6 +352,14 @@ function StationRow(props: {
             </div>
           </div>
           {expiredAll ? <div className="mobile-station-card__notice">已全部到期，续费请追加付费记录</div> : null}
+          <div className="mobile-station-card__footer">
+            <Button type="text" aria-label={`编辑 ${s.name}`} onClick={() => onEdit(s)}>编辑</Button>
+            {s.archivedAt ? (
+              <Button type="text" danger aria-label={`彻底删除 ${s.name}`} onClick={() => onPurge(s)}>彻底删除</Button>
+            ) : (
+              <Button type="text" aria-label={`归档 ${s.name}`} onClick={() => onArchive(s)}>归档</Button>
+            )}
+          </div>
         </article>
       );
     }
@@ -354,7 +367,7 @@ function StationRow(props: {
       <div className="station-row desktop-station-row resource-list-row" style={rowStyle}>
         <div className="station-row__main">
           <div className="station-row__name resource-list-row__name" style={{ fontWeight: 600 }}>
-            {s.name}<span className="resource-flag">固定成本</span>
+            {s.name}<span className="resource-flag">固定成本</span>{s.archivedAt ? <span className="resource-flag">已归档</span> : null}
           </div>
           <div className="station-row__meta" style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>
             {s.baseUrl ? `${s.baseUrl} · ` : ""}不访问接口 · 仅计入利润成本
@@ -369,7 +382,11 @@ function StationRow(props: {
         </div>
         <Space className="station-row__actions" size={2}>
           <Button type="text" icon={<EditOutlined />} title="编辑" aria-label={`编辑 ${s.name}`} onClick={() => onEdit(s)} />
-          <Button type="text" danger icon={<DeleteOutlined />} title="删除" aria-label={`删除 ${s.name}`} onClick={() => onDelete(s)} />
+          {s.archivedAt ? (
+            <Button type="text" danger icon={<DeleteOutlined />} title="彻底删除" aria-label={`彻底删除 ${s.name}`} onClick={() => onPurge(s)} />
+          ) : (
+            <Button type="text" icon={<InboxOutlined />} title="归档" aria-label={`归档 ${s.name}`} onClick={() => onArchive(s)} />
+          )}
         </Space>
       </div>
     );
@@ -436,10 +453,11 @@ function StationRow(props: {
     return (
       <article className="mobile-station-card" style={rowStyle}>
         <div className="mobile-station-card__header">
-          <div className="mobile-station-card__identity">
-            <div className="mobile-station-card__name" title={s.name}>{s.name}</div>
-            <div
-              className={`mobile-station-card__meta${hasMobileError ? " mobile-station-card__meta--expandable" : ""}`}
+            <div className="mobile-station-card__identity">
+              <div className="mobile-station-card__name" title={s.name}>{s.name}</div>
+              {s.archivedAt ? <span className="resource-flag">已归档</span> : null}
+              <div
+                className={`mobile-station-card__meta${hasMobileError ? " mobile-station-card__meta--expandable" : ""}`}
               title={typeof mobileMeta === "string" ? mobileMeta : undefined}
             >
               {mobileMeta}
@@ -471,7 +489,12 @@ function StationRow(props: {
         ) : null}
         <div className="mobile-station-card__footer">
           <Button type="text" aria-label={`查看 ${s.name} 的余额趋势`} onClick={() => onTrend(s)}>查看趋势</Button>
-          <Button type="text" aria-label={`刷新 ${s.name}`} icon={<ReloadOutlined />} loading={refreshing} onClick={() => onRefresh(s)}>刷新</Button>
+          {!s.archivedAt ? <Button type="text" aria-label={`刷新 ${s.name}`} icon={<ReloadOutlined />} loading={refreshing} onClick={() => onRefresh(s)}>刷新</Button> : null}
+          {s.archivedAt ? (
+            <Button type="text" danger aria-label={`彻底删除 ${s.name}`} onClick={() => onPurge(s)}>彻底删除</Button>
+          ) : (
+            <Button type="text" aria-label={`归档 ${s.name}`} onClick={() => onArchive(s)}>归档</Button>
+          )}
         </div>
       </article>
     );
@@ -497,6 +520,7 @@ function StationRow(props: {
         <div className="station-row__name resource-list-row__name" style={{ fontWeight: 600 }}>
           {s.name}
           {s.isOwn ? <span className="resource-flag">自营</span> : null}
+          {s.archivedAt ? <span className="resource-flag">已归档</span> : null}
           {s.includeInProfit === false ? <span className="resource-flag">不计利润成本</span> : null}
           {s.noRenewal ? <span className="resource-flag resource-flag--warning">不再续费</span> : null}
           {s.demo ? <span className="resource-flag">演示</span> : null}
@@ -523,9 +547,13 @@ function StationRow(props: {
         </div>
       </div>
       <Space className="station-row__actions" size={2}>
-        <Button type="text" icon={<ReloadOutlined />} title="刷新" aria-label={`刷新 ${s.name}`} loading={refreshing} onClick={() => onRefresh(s)} />
+        {!s.archivedAt ? <Button type="text" icon={<ReloadOutlined />} title="刷新" aria-label={`刷新 ${s.name}`} loading={refreshing} onClick={() => onRefresh(s)} /> : null}
         <Button type="text" icon={<EditOutlined />} title="编辑" aria-label={`编辑 ${s.name}`} onClick={() => onEdit(s)} />
-        <Button type="text" danger icon={<DeleteOutlined />} title="删除" aria-label={`删除 ${s.name}`} onClick={() => onDelete(s)} />
+        {s.archivedAt ? (
+          <Button type="text" danger icon={<DeleteOutlined />} title="彻底删除" aria-label={`彻底删除 ${s.name}`} onClick={() => onPurge(s)} />
+        ) : (
+          <Button type="text" icon={<InboxOutlined />} title="归档" aria-label={`归档 ${s.name}`} onClick={() => onArchive(s)} />
+        )}
       </Space>
     </div>
   );
@@ -533,7 +561,7 @@ function StationRow(props: {
 
 // ---- 页面 --------------------------------------------------------------------
 export default function StationsPage() {
-  const { message, modal } = App.useApp();
+  const { message } = App.useApp();
   const { token } = theme.useToken();
   const screens = Grid.useBreakpoint();
   const compact = screens.md === false;
@@ -541,6 +569,7 @@ export default function StationsPage() {
   const [form] = Form.useForm();
 
   const [stations, setStations] = useState<any[]>([]);
+  const [showArchived, setShowArchived] = useState(false);
   const [settings, setSettings] = useState<any>({ refreshIntervalSec: 60, lowBalanceUsd: 5 });
   const [types, setTypes] = useState<any[]>([]);
   const [rules, setRules] = useState<any>({});
@@ -568,12 +597,18 @@ export default function StationsPage() {
 
   // 趋势详情弹窗（数据拉取与范围切换在共享组件 TrendModal 内）
   const [trendStation, setTrendStation] = useState<any>(null);
+  // 资源生命周期：默认归档保留历史；物理删除必须在独立危险流程中输入确认词。
+  const [archiveTarget, setArchiveTarget] = useState<any>(null);
+  const [purgeTarget, setPurgeTarget] = useState<any>(null);
+  const [purgeConfirm, setPurgeConfirm] = useState("");
+  const [archiving, setArchiving] = useState(false);
+  const [purging, setPurging] = useState(false);
 
   // 列表加载（GET /api/stations 同时带回全局设置，同 v1 reload）
   const reload = useCallback(async () => {
     setLoadingList(true);
     try {
-      const r = await api("/api/stations");
+      const r = await api(`/api/stations${showArchived ? "?includeArchived=true" : ""}`);
       setStations(r.stations);
       setSettings(r.settings);
       setLoaded(true);
@@ -585,7 +620,7 @@ export default function StationsPage() {
     } finally {
       setLoadingList(false);
     }
-  }, []);
+  }, [showArchived]);
 
   const loadMeta = useCallback(async () => {
     setLoadingMeta(true);
@@ -619,7 +654,8 @@ export default function StationsPage() {
     setRefreshingAll(true);
     try {
       const r = await api("/api/refresh", { method: "POST", body: {} });
-      setStations(r.stations);
+      if (showArchived) await reload();
+      else setStations(r.stations);
       message.success("已刷新全部");
     } catch {
       message.error("刷新失败");
@@ -642,23 +678,37 @@ export default function StationsPage() {
     }
   };
 
-  // 删除（v1 data-act="delete"：confirm 文案一致）
-  const onDelete = (s: any) => {
-    modal.confirm({
-      title: `确定删除「${s.name}」？`,
-      okText: "删除",
-      okButtonProps: { danger: true },
-      cancelText: "取消",
-      onOk: async () => {
-        try {
-          await api(`/api/stations/${s.id}`, { method: "DELETE" });
-          message.success("已删除");
-          await reload();
-        } catch (e: any) {
-          message.error(e.message);
-        }
-      },
-    });
+  const onArchive = async () => {
+    if (!archiveTarget) return;
+    setArchiving(true);
+    try {
+      const result = await api(`/api/stations/${archiveTarget.id}`, { method: "DELETE" });
+      if (!result.ok) throw new Error(result.error || "资源不存在或已归档");
+      message.success(`已归档「${archiveTarget.name}」，监测历史会继续保留用于分析`);
+      setArchiveTarget(null);
+      await reload();
+    } catch (e: any) {
+      message.error(e.message || "归档失败");
+    } finally {
+      setArchiving(false);
+    }
+  };
+
+  const onPurge = async () => {
+    if (!purgeTarget || purgeConfirm !== "DELETE") return;
+    setPurging(true);
+    try {
+      const result = await api(`/api/stations/${purgeTarget.id}?purge=true`, { method: "DELETE", body: { confirm: "DELETE" } });
+      if (!result.ok) throw new Error(result.error || "资源不存在或已删除");
+      message.success(`已彻底删除「${purgeTarget.name}」及其监测历史`);
+      setPurgeTarget(null);
+      setPurgeConfirm("");
+      await reload();
+    } catch (e: any) {
+      message.error(e.message || "彻底删除失败");
+    } finally {
+      setPurging(false);
+    }
   };
 
   // ---- 添加/编辑弹窗（v1 openModal/modalSave 平移）---------------------------
@@ -923,6 +973,12 @@ export default function StationsPage() {
       extra={
         <div className="page-toolbar">
           <LastRefreshed at={refreshedAt} />
+          <Button
+            aria-pressed={showArchived}
+            onClick={() => setShowArchived((current) => !current)}
+          >
+            {showArchived ? "隐藏归档资源" : "查看归档资源"}
+          </Button>
           <Button className="touch-icon-button" icon={<ReloadOutlined />} loading={refreshingAll} onClick={onRefreshAll}>刷新</Button>
           {!compact ? <Button className="touch-icon-button desktop-station-action" type="primary" icon={<PlusOutlined />} disabled={!types.length || loadingMeta} onClick={() => openModal(null)}>添加资源</Button> : null}
         </div>
@@ -966,7 +1022,11 @@ export default function StationsPage() {
                 onRefresh={onRefreshOne}
                 onRetest={onRetestSavedConnection}
                 onEdit={openModal}
-                onDelete={onDelete}
+                onArchive={(station) => setArchiveTarget(station)}
+                onPurge={(station) => {
+                  setPurgeTarget(station);
+                  setPurgeConfirm("");
+                }}
               />
             ))}
           </div>
@@ -985,6 +1045,67 @@ export default function StationsPage() {
           />
         )}
       </ProCard>
+
+      <Modal
+        className="responsive-modal"
+        title={archiveTarget ? `归档「${archiveTarget.name}」？` : "归档资源"}
+        open={!!archiveTarget}
+        onCancel={() => setArchiveTarget(null)}
+        onOk={onArchive}
+        okText="归档资源"
+        cancelText="取消"
+        confirmLoading={archiving}
+        width={480}
+      >
+        <Alert
+          type="info"
+          showIcon
+          message="归档会停止刷新与告警，但不会删除监测历史。"
+          description="归档后的资源默认不出现在实时总览，历史成本仍可用于长期分析。"
+        />
+        <Button
+          type="link"
+          danger
+          style={{ paddingInline: 0, marginTop: 12 }}
+          onClick={() => {
+            setPurgeTarget(archiveTarget);
+            setPurgeConfirm("");
+            setArchiveTarget(null);
+          }}
+        >
+          改为彻底删除资源及其监测历史…
+        </Button>
+      </Modal>
+
+      <Modal
+        className="responsive-modal"
+        title={purgeTarget ? `彻底删除「${purgeTarget.name}」？` : "彻底删除资源"}
+        open={!!purgeTarget}
+        onCancel={() => { setPurgeTarget(null); setPurgeConfirm(""); }}
+        onOk={onPurge}
+        okText="永久删除"
+        cancelText="取消"
+        confirmLoading={purging}
+        okButtonProps={{ danger: true, disabled: purgeConfirm !== "DELETE" }}
+        width={480}
+      >
+        <Alert
+          type="error"
+          showIcon
+          message="此操作不可恢复"
+          description="资源配置、原始监测快照与用于长期分析的历史都会被永久删除。"
+        />
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 12, marginBottom: 6 }}>请输入 <Text code>DELETE</Text> 以确认：</div>
+          <Input
+            autoFocus
+            aria-label="输入 DELETE 确认彻底删除资源"
+            value={purgeConfirm}
+            onChange={(event) => setPurgeConfirm(event.target.value)}
+            placeholder="DELETE"
+          />
+        </div>
+      </Modal>
 
       {/* ---- 添加/编辑弹窗 ---- */}
       <Modal

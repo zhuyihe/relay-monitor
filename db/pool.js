@@ -42,4 +42,14 @@ export async function ensureSchema(pool) {
     PRIMARY KEY (station_id, t),
     INDEX idx_t (t)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 原始快照是长期事实来源；日汇总只用于成本分析查询加速。
+  // 保留 DATE 类型，查询时统一 DATE_FORMAT 为 YYYY-MM-DD，避免时区隐式转换。
+  await pool.query(`CREATE TABLE IF NOT EXISTS station_daily_usage (
+    station_id VARCHAR(32) NOT NULL,
+    date DATE NOT NULL,
+    used_usd DOUBLE NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (station_id, date),
+    INDEX idx_date (date)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 }

@@ -115,3 +115,14 @@ test("加载旧规则时补齐渠道绑定字段且不共享默认对象", async
   a.rules.channelsFor.low.push("x");
   assert.deepEqual(b.rules.channelsFor.low, []);
 });
+
+test("历史默认永久保留，归档资源不进入默认列表但仍可显式查询", async () => {
+  const store = new Store(fakePool());
+  const station = await store.add({ name: "历史资源", type: "newapi", baseUrl: "https://a.example.com" });
+  assert.equal(store.settings.historyRetentionDays, null);
+
+  await store.archive(station.id);
+  assert.equal(store.list().length, 0);
+  assert.equal(store.list({ includeArchived: true }).length, 1);
+  assert.ok(store.get(station.id).archivedAt);
+});

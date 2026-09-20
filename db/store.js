@@ -7,6 +7,8 @@ import { ALERT_EVENT_KEYS, DEFAULT_RULES } from "../lib/alerts.js";
 const DEFAULT_SETTINGS = {
   refreshIntervalSec: 60, // 后台自动刷新间隔
   lowBalanceUsd: 5, // 全局低余额告警阈值（美元）
+  // null 表示永久保留；有限期限只影响原始监测快照，不影响日汇总。
+  historyRetentionDays: null,
   // 每日日报：默认按北京时间定时汇总昨日「我的站点」经营情况并推送
   dailyReport: { enabled: false, time: "09:00", channelIds: [], lastSent: null },
 };
@@ -20,6 +22,12 @@ function numOrNull(v) {
   if (v === "" || v == null) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+export function normalizeHistoryRetentionDays(v) {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
 // 成本渠道匹配别名：用于渠道配置采用容器域名/IP、与监控地址不一致的场景。
@@ -104,6 +112,8 @@ export class Store {
         rules: { ...DEFAULT_RULES, ...(meta.notifications?.rules || {}) },
       },
     };
+    this.data.settings.historyRetentionDays =
+      normalizeHistoryRetentionDays(this.data.settings.historyRetentionDays);
     // v2.2：旧规则没有渠道绑定字段；归一化成 5 个事件键齐全的独立对象
     this.data.notifications.rules.channelsFor =
       sanitizeChannelsFor(this.data.notifications.rules.channelsFor, null);
@@ -112,6 +122,8 @@ export class Store {
     for (const s of this.data.stations) {
       // v2.1：旧站点没有续费计划字段，默认保持原有的正常重复提醒策略。
       s.noRenewal = !!s.noRenewal;
+      // 归档资源保留在存储层及长期分析中，但不再出现在默认实时列表。
+      s.archivedAt = typeof s.archivedAt === "string" && s.archivedAt ? s.archivedAt : null;
       s.costAliases = sanitizeCostAliases(s.costAliases);
       // 所有监控上游默认计入利润成本；仅显式关闭的观察/重复汇总节点排除。
       s.includeInProfit = s.includeInProfit !== false;
@@ -199,6 +211,12 @@ export class Store {
           channelIds: Array.isArray(p.channelIds) ? p.channelIds.map(String) : cur.channelIds,
           lastSent: cur.lastSent ?? null,
         },
+      };
+    }
+    if ("historyRetentionDays" in patch) {
+      patch = {
+        ...patch,
+        historyRetentionDays: normalizeHistoryRetentionDays(patch.historyRetentionDays),
       };
     }
     this.data.settings = { ...this.data.settings, ...patch };
@@ -303,8 +321,10 @@ export class Store {
   }
 
   // ---- 中转站 ----------------------------------------------------------------
-  list() {
-    return this.data.stations;
+  list({ includeArchived = false } = {}) {
+    return includeArchived
+      ? this.data.stations
+      : this.data.stations.filter((s) => !s.archivedAt);
   }
 
   get(id) {
@@ -339,6 +359,7 @@ export class Store {
       resoldAdminKeys: sanitizeResoldKeys(input.resoldAdminKeys) || [],
       demo: !!input.demo,
       createdAt: new Date().toISOString(),
+      archivedAt: null,
       s2Tokens: null, // Sub2API 密码模式的令牌缓存 {accessToken, refreshToken, expiresAt}
       alertState: null, // 告警去重状态（含不再续费站点的一次性低余额提醒时间）
       balance: null, // 最近一次查询结果
@@ -390,6 +411,26 @@ export class Store {
     this.data.stations = this.data.stations.filter((s) => s.id !== id);
     await this.save();
     return this.data.stations.length < n;
+  }
+
+  async archive(id) {
+    const s = this.get(id);
+    if (!s) return null;
+    if (!s.archivedAt) {
+      s.archivedAt = new Date().toISOString();
+      await this.save();
+    }
+    return s;
+  }
+
+  async restore(id) {
+    const s = this.get(id);
+    if (!s) return null;
+    if (s.archivedAt) {
+      s.archivedAt = null;
+      await this.save();
+    }
+    return s;
   }
 
   async setBalance(id, balance) {
