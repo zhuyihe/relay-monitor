@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PageContainer } from "@ant-design/pro-components";
 import {
-  Alert, App, Button, Card, Collapse, DatePicker, Drawer, Empty, Grid, Input, List,
+  Alert, App, Button, Card, Collapse, DatePicker, Drawer, Empty, Form, Grid, Input, List,
   Popconfirm, Segmented, Select, Space, Statistic, Tag, Typography, theme,
 } from "antd";
-import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined, SettingOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { api, cny, usd } from "../../../lib/client";
 import AppState from "../../components/app-state";
@@ -163,12 +163,11 @@ export default function ReconciliationPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [detail, setDetail] = useState<any>(null);
   const [editing, setEditing] = useState<any>(null);
-  const [upstreamId, setUpstreamId] = useState<string | undefined>();
-  const [tokenId, setTokenId] = useState<number | undefined>();
+  const [form] = Form.useForm();
+  const upstreamId = Form.useWatch("upstreamStationId", form);
   const [keyData, setKeyData] = useState<any>(null);
   const [keyLoading, setKeyLoading] = useState(false);
-  const [channelIds, setChannelIds] = useState<number[]>([]);
-  const [timezone, setTimezone] = useState("Asia/Shanghai");
+  const keyRequestId = useRef(0);
   const [saving, setSaving] = useState(false);
 
   const rate = config?.ownStation?.cnyPerUsd ?? null;
@@ -242,36 +241,55 @@ export default function ReconciliationPage() {
   };
 
   const fetchKeys = async (id: string, force = false) => {
+    const requestId = ++keyRequestId.current;
     setKeyLoading(true);
     try {
       const next = await api(`/api/reconciliation/upstreams/${encodeURIComponent(id)}/keys${force ? "?force=true" : ""}`);
-      setKeyData(next);
+      if (keyRequestId.current === requestId) setKeyData(next);
       return next;
     } catch (err: any) {
-      setKeyData(null);
-      message.error(err?.message || "读取上游 Key 失败");
+      if (keyRequestId.current === requestId) {
+        setKeyData(null);
+        message.error(err?.message || "读取上游 Key 失败");
+      }
       return null;
     } finally {
-      setKeyLoading(false);
+      if (keyRequestId.current === requestId) setKeyLoading(false);
     }
   };
 
   const openCreate = () => {
-    setEditing(null); setUpstreamId(undefined); setTokenId(undefined); setKeyData(null); setChannelIds([]); setTimezone("Asia/Shanghai"); setDrawerOpen(true);
+    setEditing(null);
+    keyRequestId.current += 1;
+    setKeyData(null);
+    setKeyLoading(false);
+    form.resetFields();
+    form.setFieldsValue({ timezone: "Asia/Shanghai" });
+    setDrawerOpen(true);
   };
 
   const openEdit = async (rule: any) => {
-    setEditing(rule); setUpstreamId(rule.upstreamStationId); setTokenId(rule.tokenId);
-    setChannelIds((rule.channels || []).map((channel: any) => Number(channel.channelId)));
-    setTimezone(rule.timezone || "Asia/Shanghai"); setDrawerOpen(true);
+    setEditing(rule);
+    setKeyData(null);
+    form.setFieldsValue({
+      upstreamStationId: rule.upstreamStationId,
+      tokenId: rule.tokenId,
+      salesChannelIds: (rule.channels || []).map((channel: any) => Number(channel.channelId)),
+      timezone: rule.timezone || "Asia/Shanghai",
+    });
+    setDrawerOpen(true);
     await fetchKeys(rule.upstreamStationId);
   };
 
-  const saveRule = async () => {
-    if (!upstreamId || !tokenId || !channelIds.length) return message.warning("请选择上游 Key 和至少一个本站渠道");
+  const saveRule = async (values: any) => {
     setSaving(true);
     try {
-      const body = { upstreamStationId: upstreamId, tokenId, salesChannelIds: channelIds, timezone };
+      const body = {
+        upstreamStationId: values.upstreamStationId,
+        tokenId: Number(values.tokenId),
+        salesChannelIds: values.salesChannelIds.map(Number),
+        timezone: values.timezone,
+      };
       const path = editing ? `/api/reconciliation/rules/${editing.id}` : "/api/reconciliation/rules";
       await api(path, { method: editing ? "PUT" : "POST", body });
       message.success(editing ? "对账规则已更新" : "对账规则已创建");
@@ -314,7 +332,7 @@ export default function ReconciliationPage() {
       className="responsive-page"
       title="上游渠道对账"
       subTitle="按同一时间窗核算上游实际消费与本站渠道收费"
-      extra={<div className="page-toolbar"><Button icon={<SettingOutlined />} onClick={openCreate}>管理规则</Button><Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>添加规则</Button></div>}
+      extra={<div className="page-toolbar"><Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>添加规则</Button></div>}
     >
       <div className="mobile-filterbar" style={{ marginBottom: 16 }}>
         <Segmented options={PRESETS} value={preset} onChange={(value) => setPreset(String(value))} />
@@ -358,32 +376,28 @@ export default function ReconciliationPage() {
         </Space> : null}
       </Drawer>
 
-      <Drawer title={editing ? "编辑对账规则" : "添加对账规则"} open={drawerOpen} onClose={() => setDrawerOpen(false)} width={compact ? "100%" : 520} extra={<Button type="primary" loading={saving} onClick={saveRule}>保存规则</Button>}>
-        <Space direction="vertical" size={18} style={{ width: "100%" }}>
-          <Field label="上游账号" hint="复用该站点已有 PAT，不需要再次填写。">
-            <Select value={upstreamId} placeholder="选择已配置的 NewAPI 上游站点" options={(config?.upstreams || []).map((station: any) => ({ value: station.id, label: station.name }))} onChange={(value) => { setUpstreamId(value); setTokenId(undefined); setKeyData(null); fetchKeys(value, true); }} />
-          </Field>
-          <Field label="固定分组 Key" hint="仅显示固定分组、未启用跨组重试且当前可用的 Key。">
-            <Select loading={keyLoading} disabled={!upstreamId} value={tokenId} placeholder={upstreamId ? "选择上游 Key" : "请先选择上游账号"} options={(keyData?.tokens || []).map((item: any) => ({ value: item.id, disabled: item.status !== 1 || item.group === "auto" || item.crossGroupRetry, label: `${item.name} · ${item.group || "无分组"}${keyData?.groups?.[item.group]?.ratio != null ? ` · ${keyData.groups[item.group].ratio}×` : ""}` }))} onChange={(value) => setTokenId(Number(value))} />
-          </Field>
-          <Field label="本站销售渠道" hint="一个渠道同一时刻只能归属一条启用规则。">
-            <Select mode="multiple" value={channelIds} placeholder="选择一个或多个渠道" options={(config?.channels || []).map((channel: any) => {
+      <Drawer title={editing ? "编辑对账规则" : "添加对账规则"} open={drawerOpen} onClose={() => setDrawerOpen(false)} width={compact ? "100%" : 520} extra={<Button type="primary" loading={saving} htmlType="submit" form="reconciliation-rule-form">保存规则</Button>}>
+        <Form id="reconciliation-rule-form" form={form} layout="vertical" requiredMark={false} onFinish={saveRule}>
+          <Form.Item label="上游账号" name="upstreamStationId" extra="复用该站点已有 PAT，不需要再次填写。" rules={[{ required: true, message: "请选择上游账号" }]}>
+            <Select placeholder="选择已配置的 NewAPI 上游站点" options={(config?.upstreams || []).map((station: any) => ({ value: station.id, label: station.name }))} onChange={(value) => { form.setFieldValue("tokenId", undefined); setKeyData(null); fetchKeys(value, true); }} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
+          </Form.Item>
+          <Form.Item label="固定分组 Key" name="tokenId" extra="仅显示固定分组、未启用跨组重试且当前可用的 Key。" rules={[{ required: true, message: "请选择固定分组 Key" }]}>
+            <Select loading={keyLoading} disabled={!upstreamId || keyLoading} placeholder={upstreamId ? "选择上游 Key" : "请先选择上游账号"} options={(keyData?.tokens || []).map((item: any) => ({ value: item.id, disabled: item.status !== 1 || item.group === "auto" || item.crossGroupRetry, label: `${item.name} · ${item.group || "无分组"}${keyData?.groups?.[item.group]?.ratio != null ? ` · ${keyData.groups[item.group].ratio}×` : ""}` }))} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
+          </Form.Item>
+          <Form.Item label="本站销售渠道" name="salesChannelIds" extra="一个渠道同一时刻只能归属一条启用规则。" rules={[{ required: true, type: "array", min: 1, message: "请至少选择一个本站渠道" }]}>
+            <Select mode="multiple" placeholder="选择一个或多个渠道" options={(config?.channels || []).map((channel: any) => {
               const occupiedBy = unavailableChannels.get(Number(channel.id));
               return { value: Number(channel.id), disabled: !!occupiedBy, label: `${channel.name || `渠道 ${channel.id}`}${occupiedBy ? `（已用于 ${occupiedBy}）` : ""}` };
-            })} onChange={(values) => setChannelIds(values.map(Number))} />
-          </Field>
-          <Field label="对账时区" hint="“今天”从该时区的 00:00 计算到当前时刻。">
-            <Input value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="Asia/Shanghai" />
-          </Field>
+            })} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
+          </Form.Item>
+          <Form.Item label="对账时区" name="timezone" extra="“今天”从该时区的 00:00 计算到当前时刻。">
+            <Input placeholder="Asia/Shanghai" />
+          </Form.Item>
           <Alert type="info" showIcon message="核算口径" description="该规则汇总完整上游成本与全部所选渠道收费。渠道子项只展示收费占比，不分摊成本。" />
-        </Space>
+        </Form>
       </Drawer>
     </PageContainer>
   );
-}
-
-function Field({ label, hint, children }: any) {
-  return <label style={{ display: "block" }}><Text strong>{label}</Text><Text type="secondary" style={{ display: "block", fontSize: 12, margin: "3px 0 7px" }}>{hint}</Text>{children}</label>;
 }
 
 function Detail({ label, value }: { label: string; value: string }) {

@@ -21,12 +21,25 @@ test("同一个上游 Key 不能同时建立两条启用对账规则", async () 
   assert.match(calls[0].sql, /archived_at IS NULL/);
 });
 
-test("对账窗口按规则时区切今天零点，结束点保留当前时刻", () => {
+test("默认今天对账窗口按规则时区切零点，结束点比当前时刻晚一小时", () => {
   const now = Date.parse("2026-09-20T04:26:08.000Z"); // 上海 12:26:08
-  const window = resolveReconciliationWindow({ preset: "today", timezone: "Asia/Shanghai" }, now);
+  const window = resolveReconciliationWindow({ timezone: "Asia/Shanghai" }, now);
   assert.equal(window.startMs, Date.parse("2026-09-19T16:00:00.000Z"));
-  assert.equal(window.endMs, now);
+  assert.equal(window.endMs, now + 60 * 60 * 1000);
   assert.equal(window.timezone, "Asia/Shanghai");
+});
+
+test("昨天和近 7 天对账窗口保留原有结束时间语义", () => {
+  const now = Date.parse("2026-09-20T04:26:08.000Z"); // 上海 12:26:08
+  const dayStart = Date.parse("2026-09-19T16:00:00.000Z");
+  assert.deepEqual(
+    resolveReconciliationWindow({ preset: "yesterday", timezone: "Asia/Shanghai" }, now),
+    { preset: "yesterday", timezone: "Asia/Shanghai", startMs: dayStart - 86400000, endMs: dayStart }
+  );
+  assert.deepEqual(
+    resolveReconciliationWindow({ preset: "7d", timezone: "Asia/Shanghai" }, now),
+    { preset: "7d", timezone: "Asia/Shanghai", startMs: dayStart - 6 * 86400000, endMs: now }
+  );
 });
 
 test("自定义对账窗口使用半开区间并拒绝超过 31 天", () => {
