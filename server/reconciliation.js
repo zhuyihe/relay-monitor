@@ -9,6 +9,7 @@ import { ReconciliationRepository } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 
 const DAY_MS = 86400000;
+const TODAY_WINDOW_END_OFFSET_MS = 60 * 60 * 1000;
 const TODAY_TTL_MS = 60000;
 const QUERY_TTL_MS = 60000;
 
@@ -75,7 +76,7 @@ export function resolveReconciliationWindow(input = {}, now = Date.now()) {
       endMs = now;
     } else {
       startMs = dayStart;
-      endMs = now;
+      endMs = now + TODAY_WINDOW_END_OFFSET_MS;
     }
   }
   if (endMs - startMs > 31 * DAY_MS) throw new Error("单次查询时间范围不能超过 31 天");
