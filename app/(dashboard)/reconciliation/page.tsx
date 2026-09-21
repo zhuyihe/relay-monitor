@@ -57,6 +57,19 @@ function statusTag(item: any) {
   return <Tag color={statusColor[current.code] || "default"}>{current.label || "数据待获取"}</Tag>;
 }
 
+function upstreamName(rule: any, upstreams: any) {
+  if (!Array.isArray(upstreams)) return "上游账号目录暂不可用";
+  const station = upstreams.find((item) => String(item.id) === String(rule?.upstreamStationId));
+  return station?.name || `已删除的上游账号（${rule?.upstreamStationId || "未知站点"}）`;
+}
+
+function linkedChannelNames(rule: any, item: any) {
+  const configured = rule?.channels || [];
+  const observed = item?.downstream?.channels || [];
+  const channels = configured.length ? configured : observed;
+  return channels.map((channel: any) => channel.name || `渠道 ${channel.channelId || channel.id}`).join("、") || "未配置渠道";
+}
+
 function RuleChildren({ item, rate }: { item: any; rate: any }) {
   const channels = item?.downstream?.channels || [];
   if (!channels.length) return <Text type="secondary">该窗口没有可展示的渠道收费。</Text>;
@@ -66,8 +79,8 @@ function RuleChildren({ item, rate }: { item: any; rate: any }) {
       dataSource={channels}
       renderItem={(channel: any) => (
         <List.Item>
-          <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
-            <Text strong ellipsis>{channel.name}</Text>
+          <Space direction="vertical" size={0} style={{ minWidth: 0, flex: 1 }}>
+            <Text strong style={{ overflowWrap: "anywhere" }}>{channel.name}</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>渠道 ID：{channel.channelId} · 收费占比 {percent(channel.share)}</Text>
           </Space>
           <Text strong style={{ fontVariantNumeric: "tabular-nums" }}>{money(channel.amountUsd, rate)}</Text>
@@ -77,19 +90,24 @@ function RuleChildren({ item, rate }: { item: any; rate: any }) {
   );
 }
 
-function RuleRow({ item, rate, compact, onEdit, onDelete, onDetail }: any) {
+function RuleRow({ item, rate, compact, upstreams, onEdit, onDelete, onDetail }: any) {
   const { token } = theme.useToken();
   const rule = item.rule || {};
   const warning = item.health?.code !== "READY";
+  const accountName = upstreamName(rule, upstreams);
+  const channelNames = linkedChannelNames(rule, item);
   const content = (
     <div style={{ display: "grid", gridTemplateColumns: compact ? "1fr" : "minmax(210px, 1.35fr) repeat(4, minmax(110px, .8fr)) auto", gap: compact ? 10 : 18, alignItems: "center", minWidth: 0 }}>
       <div style={{ minWidth: 0 }}>
-        <Space wrap size={[6, 4]}>
-          <Text strong ellipsis>{rule.tokenName || "未命名 Key"}</Text>
+        <Space wrap size={[6, 4]} style={{ minWidth: 0, maxWidth: "100%" }}>
+          <Text strong style={{ minWidth: 0, overflowWrap: "anywhere" }}>{accountName}</Text>
           {statusTag(item)}
         </Space>
-        <div style={{ marginTop: 4, color: token.colorTextSecondary, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {rule.upstreamStationId} · {rule.fixedGroup} · {item.downstream?.channels?.length || rule.channels?.length || 0} 个渠道
+        <div style={{ marginTop: 4, color: token.colorTextSecondary, fontSize: 12, overflowWrap: "anywhere" }}>
+          Key：{rule.tokenName || "未命名 Key"} · 固定分组：{rule.fixedGroup || "未设置"}
+        </div>
+        <div style={{ marginTop: 2, color: token.colorTextSecondary, fontSize: 12, overflowWrap: "anywhere" }}>
+          销售渠道：{channelNames}
         </div>
       </div>
       <Metric compact={compact} label="本站收费" value={money(item.downstream?.amountUsd, rate)} />
@@ -307,7 +325,7 @@ export default function ReconciliationPage() {
 
       {data?.results?.[0]?.window ? <Text type="secondary" style={{ display: "block", marginBottom: 16 }}>当前窗口：{formatWindow(data.results[0].window)}（{data.results[0].window.timezone}）</Text> : null}
       {error ? <Alert type="error" showIcon message="对账数据加载失败" description={error} action={<Button size="small" onClick={() => loadWindow(activeWindow, true)}>重试</Button>} style={{ marginBottom: 16 }} /> : null}
-      {config.channelsError ? <Alert type="warning" showIcon message="本站渠道目录读取失败" description={config.channelsError} style={{ marginBottom: 16 }} /> : null}
+      {config?.channelsError ? <Alert type="warning" showIcon message="本站渠道目录读取失败" description={config.channelsError} style={{ marginBottom: 16 }} /> : null}
 
       <Card style={{ marginBottom: 16 }} styles={{ body: { padding: compact ? 16 : "18px 24px" } }}>
         <div style={{ display: "grid", gridTemplateColumns: compact ? "1fr 1fr" : "1.2fr 1fr 1.1fr .8fr", gap: 20 }}>
@@ -322,14 +340,16 @@ export default function ReconciliationPage() {
       {!results.length ? (
         <Card><Empty description="还没有启用的对账规则" image={Empty.PRESENTED_IMAGE_SIMPLE}><Button type="primary" onClick={openCreate}>创建第一条规则</Button></Empty></Card>
       ) : results.map((item: any) => (
-        <RuleRow key={item.rule?.id} item={item} rate={rate} compact={compact} onEdit={() => openEdit(item.rule)} onDelete={() => stopRule(item.rule.id)} onDetail={() => setDetail(item)} />
+        <RuleRow key={item.rule?.id} item={item} rate={rate} compact={compact} upstreams={config?.upstreams} onEdit={() => openEdit(item.rule)} onDelete={() => stopRule(item.rule.id)} onDetail={() => setDetail(item)} />
       ))}
 
       <Drawer title={detail?.rule?.tokenName ? `${detail.rule.tokenName} · 对账详情` : "对账详情"} open={!!detail} onClose={() => setDetail(null)} width={compact ? "100%" : 520}>
         {detail ? <Space direction="vertical" size={16} style={{ width: "100%" }}>
           <Alert type={detail.health?.code === "READY" ? "success" : "warning"} showIcon message={detail.health?.label} description={detail.health?.detail || "数据来源正常"} />
           <Detail label="查询窗口" value={`${formatWindow(detail.window)}（${detail.window?.timezone}）`} />
+          <Detail label="上游账号" value={upstreamName(detail.rule, config?.upstreams)} />
           <Detail label="上游 Key / 分组" value={`${detail.rule?.tokenName || "—"} · ${detail.upstream?.group || detail.rule?.fixedGroup || "—"}`} />
+          <Detail label="关联销售渠道" value={linkedChannelNames(detail.rule, detail)} />
           <Detail label="当前倍率" value={detail.upstream?.ratio == null ? "未返回" : `${detail.upstream.ratio}×`} />
           <Detail label="本站收费" value={money(detail.downstream?.amountUsd, rate)} />
           <Detail label="上游成本" value={money(detail.upstream?.amountUsd, rate)} />
@@ -367,5 +387,5 @@ function Field({ label, hint, children }: any) {
 }
 
 function Detail({ label, value }: { label: string; value: string }) {
-  return <div><Text type="secondary" style={{ display: "block", fontSize: 12 }}>{label}</Text><Text strong style={{ fontVariantNumeric: "tabular-nums" }}>{value}</Text></div>;
+  return <div><Text type="secondary" style={{ display: "block", fontSize: 12 }}>{label}</Text><Text strong style={{ fontVariantNumeric: "tabular-nums", overflowWrap: "anywhere" }}>{value}</Text></div>;
 }

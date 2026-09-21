@@ -76,7 +76,7 @@ test("空渠道不会生成批量渠道插入", async () => {
   assert.equal(queries.filter(({ sql }) => sql.includes("reconciliation_rule_channels") && sql.includes("INSERT")).length, 0);
 });
 
-test("归档规则会清理对应的上游日志缓存", async () => {
+test("归档规则会清理对应的对账结果缓存", async () => {
   const connection = {
     async beginTransaction() {},
     async query() { return [{ affectedRows: 1 }]; },
@@ -87,14 +87,59 @@ test("归档规则会清理对应的上游日志缓存", async () => {
   const rt = {
     pool: { async getConnection() { return connection; } },
     store: { list() { return []; }, get() { return null; } },
-    _reconciliationTokenLogCaches: new Map([
-      ["rr-archived:2026-09-20", { dayStartMs: Date.now(), facts: new Map() }],
-      ["rr-remaining:2026-09-20", { dayStartMs: Date.now(), facts: new Map() }],
+    _reconciliationResultCache: new Map([
+      ["rr-archived:today:1:2:Asia/Shanghai", { at: Date.now(), value: {} }],
+      ["rr-remaining:today:1:2:Asia/Shanghai", { at: Date.now(), value: {} }],
     ]),
   };
 
   await createReconciliationModule(rt).archiveRule("rr-archived");
 
-  assert.equal(rt._reconciliationTokenLogCaches.has("rr-archived:2026-09-20"), false);
-  assert.equal(rt._reconciliationTokenLogCaches.has("rr-remaining:2026-09-20"), true);
+  assert.equal(rt._reconciliationResultCache.has("rr-archived:today:1:2:Asia/Shanghai"), false);
+  assert.equal(rt._reconciliationResultCache.has("rr-remaining:today:1:2:Asia/Shanghai"), true);
+});
+
+test("统计接口不会绕过已变更的固定 Key 元数据", async (t) => {
+  const { createServer } = await import("node:http");
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, "http://x");
+    const body = url.pathname === "/api/status"
+      ? { success: true, data: { quota_per_unit: 100 } }
+      : url.pathname === "/api/user/self"
+        ? { success: true, data: { id: 42 } }
+      : url.pathname === "/api/user/self/groups"
+        ? { success: true, data: { fixed: { ratio: 1 } } }
+        : url.pathname === "/api/token/"
+          ? { success: true, data: { total: 1, items: [{ id: 9, name: "renamed-key", status: 1, group: "fixed", cross_group_retry: false }] } }
+          : null;
+    assert.notEqual(url.pathname, "/api/log/self/stat", "changed Key must be rejected before stat aggregation");
+    response.writeHead(body ? 200 : 404, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(body || { success: false }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const rule = {
+    id: "rr_test", upstream_station_id: "upstream", own_station_id: "own", token_id: 9,
+    token_name: "original-key", fixed_group: "fixed", timezone: "Asia/Shanghai", enabled: 1,
+    archived_at: null, created_at: null, updated_at: null,
+  };
+  const pool = {
+    async query(sql) {
+      if (sql.includes("SELECT * FROM reconciliation_rules")) return [[rule]];
+      if (sql.includes("FROM reconciliation_rule_channels")) return [[{ rule_id: "rr_test", channel_id: 1, channel_name: "渠道" }]];
+      return [[]];
+    },
+  };
+  const stations = [
+    { id: "upstream", type: "newapi", baseUrl, accessToken: "pat" },
+    { id: "own", type: "newapi", isOwn: true },
+  ];
+  const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id) } });
+  const { results } = await module.queryRules({
+    ruleIds: ["rr_test"], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000,
+  }, { force: true });
+  const result = results[0];
+  assert.equal(result.health.code, "KEY_INVALID_OR_DENIED");
+  assert.match(result.health.detail, /名称已变化/);
 });

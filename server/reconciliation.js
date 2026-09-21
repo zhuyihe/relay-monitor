@@ -1,7 +1,7 @@
 // 对账深模块：把窗口、上游取数、本站收费、快照和告警收敛在一个 Interface 后。
 import {
   queryNewApiReconciliationMetadata,
-  queryNewApiTokenWindow,
+  queryNewApiTokenStat,
   queryOwnChannelRevenue,
   queryOwnChannels,
 } from "../lib/providers.js";
@@ -11,7 +11,6 @@ import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 const DAY_MS = 86400000;
 const TODAY_TTL_MS = 60000;
 const QUERY_TTL_MS = 60000;
-const LOG_SYNC_OVERLAP_MS = 3 * 60000;
 
 const HEALTH = {
   READY: { label: "数据正常" },
@@ -111,11 +110,8 @@ function toErrorHealth(err, own = false) {
   if (!own && code === "UPSTREAM_AUTH_DENIED") {
     return health("KEY_INVALID_OR_DENIED", "上游 PAT 无权读取 Key 或消费日志");
   }
-  if (!own && code === "UPSTREAM_TOKEN_ID_UNAVAILABLE") {
-    return health("UPSTREAM_DATA_UNAVAILABLE", "上游日志未提供 token_id，无法安全精确对账");
-  }
-  if (!own && code === "UPSTREAM_LOG_LIMIT") {
-    return health("UPSTREAM_DATA_UNAVAILABLE", "上游日志达到可安全读取上限，无法完成精确对账");
+  if (!own && code === "UPSTREAM_STAT_UNAVAILABLE") {
+    return health("UPSTREAM_DATA_UNAVAILABLE", "上游日志统计接口不可用或返回无效数据");
   }
   return health(own ? "OWN_FLOW_INCOMPLETE" : "UPSTREAM_DATA_UNAVAILABLE",
     own ? "无法完整读取本站渠道收费" : "无法完整读取上游对账数据");
@@ -144,37 +140,17 @@ function sourceSnapshot(token, metadata, upstream, downstream) {
   };
 }
 
-function aggregateTokenFacts(scan, facts, startMs, endMs) {
-  const inWindow = [...facts.values()].filter((fact) => fact.createdAtMs >= startMs && fact.createdAtMs < endMs);
-  return {
-    ...scan,
-    quotaUnits: inWindow.reduce((sum, fact) => sum + fact.quotaUnits, 0),
-    actualGroups: [...new Set(inWindow.map((fact) => fact.group).filter(Boolean))],
-    tokenIds: [...new Set(inWindow.map((fact) => fact.tokenId))],
-    latestLogAtMs: inWindow.reduce((latest, fact) => Math.max(latest, fact.createdAtMs), 0) || null,
-    scanned: facts.size,
-  };
-}
-
 export function createReconciliationModule(rt) {
   const repository = new ReconciliationRepository(rt.pool);
   const resultCache = (rt._reconciliationResultCache ||= new Map());
   const inflight = (rt._reconciliationInflight ||= new Map());
   const metadataCache = (rt._reconciliationMetadataCache ||= new Map());
   const ownChannelsCache = (rt._reconciliationOwnChannelsCache ||= new Map());
-  const tokenLogCaches = (rt._reconciliationTokenLogCaches ||= new Map());
 
-  function clearRuleTokenLogCaches(ruleId) {
+  function clearRuleResults(ruleId) {
     const prefix = `${ruleId}:`;
-    for (const key of tokenLogCaches.keys()) {
-      if (key.startsWith(prefix)) tokenLogCaches.delete(key);
-    }
-  }
-
-  function pruneTokenLogCaches(now = Date.now()) {
-    const cutoff = now - 2 * DAY_MS;
-    for (const [key, cached] of tokenLogCaches) {
-      if (!Number.isFinite(cached?.dayStartMs) || cached.dayStartMs < cutoff) tokenLogCaches.delete(key);
+    for (const key of resultCache.keys()) {
+      if (key.startsWith(prefix)) resultCache.delete(key);
     }
   }
 
@@ -198,35 +174,12 @@ export function createReconciliationModule(rt) {
   }
 
   async function upstreamWindowFor(rule, upstream, token, window, { force = false } = {}) {
-    // 只有“今天”会随轮询增长：首次全量扫描，之后保留 3 分钟重叠增量扫，按上游日志 ID 去重。
-    pruneTokenLogCaches();
-    if (window.preset !== "today" || force) {
-      return queryNewApiTokenWindow(upstream, {
-        tokenId: token.id, tokenName: token.name, startMs: window.startMs, endMs: window.endMs,
-      });
-    }
-    const key = `${rule.id}:${localDate(window.startMs, window.timezone)}`;
-    const cached = tokenLogCaches.get(key);
-    if (!cached) {
-      const scan = await queryNewApiTokenWindow(upstream, {
-        tokenId: token.id, tokenName: token.name, startMs: window.startMs, endMs: window.endMs,
-      });
-      const facts = new Map(scan.facts.map((fact) => [fact.id, fact]));
-      tokenLogCaches.set(key, { tokenId: token.id, dayStartMs: window.startMs, scannedToMs: window.endMs, facts });
-      return aggregateTokenFacts(scan, facts, window.startMs, window.endMs);
-    }
-    // Key 被编辑后不能把旧 Key 的内存事实混进新规则。
-    if (cached.tokenId !== token.id) {
-      tokenLogCaches.delete(key);
-      return upstreamWindowFor(rule, upstream, token, window, { force: false });
-    }
-    const scanStartMs = Math.max(window.startMs, cached.scannedToMs - LOG_SYNC_OVERLAP_MS);
-    const scan = await queryNewApiTokenWindow(upstream, {
-      tokenId: token.id, tokenName: token.name, startMs: scanStartMs, endMs: window.endMs,
+    return queryNewApiTokenStat(upstream, {
+      tokenName: token.name,
+      group: rule.fixedGroup,
+      startMs: window.startMs,
+      endMs: window.endMs,
     });
-    for (const fact of scan.facts) cached.facts.set(fact.id, fact);
-    cached.scannedToMs = window.endMs;
-    return aggregateTokenFacts(scan, cached.facts, window.startMs, window.endMs);
   }
 
   async function validateInput(input, { excludeRuleId = null } = {}) {
@@ -306,7 +259,7 @@ export function createReconciliationModule(rt) {
       enabled: input?.enabled !== false,
       channels: valid.channels,
     });
-    clearRuleTokenLogCaches(id);
+    clearRuleResults(id);
     return updated;
   }
 
@@ -335,7 +288,9 @@ export function createReconciliationModule(rt) {
       if (!token || token.status !== 1) {
         return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", token ? "上游 Key 已停用" : "上游 Key 不存在或无权限读取"), origin, { metadata, token });
       }
-      if (token.name !== rule.tokenName) await repository.updateObservedToken(rule.id, { tokenName: token.name });
+      if (token.name !== rule.tokenName) {
+        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", "上游 Key 名称已变化，无法确认统计归属"), origin, { metadata, token });
+      }
       if (token.group !== rule.fixedGroup || token.group === "auto" || token.crossGroupRetry) {
         return persistUnavailable(rule, window, health("GROUP_OR_RATIO_CHANGED", "上游 Key 的固定分组或跨组重试设置已变化"), origin, { metadata, token });
       }
@@ -493,7 +448,7 @@ export function createReconciliationModule(rt) {
     async archiveRule(id) {
       const ok = await repository.archiveRule(id);
       if (!ok) throw new Error("对账规则不存在");
-      clearRuleTokenLogCaches(id);
+      clearRuleResults(id);
     },
     async queryRules({ ruleIds = null, ...input } = {}, options = {}) {
       const rules = await repository.listRules();
