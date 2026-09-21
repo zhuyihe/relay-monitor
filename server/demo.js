@@ -46,6 +46,7 @@ export function mockNewApiUserSelf(request, acc) {
     body: {
       success: true,
       data: {
+        id: 1,
         username: s.name,
         quota: Math.round((s.grantUsd - s.usedUsd) * QUOTA_PER_UNIT),
         used_quota: Math.round(s.usedUsd * QUOTA_PER_UNIT),
@@ -128,7 +129,8 @@ export function mockNewApiSelfLogs(request) {
 export function mockNewApiSelfLogStat(request) {
   if (!hasAuth(request)) return unauthorized();
   const q = new URL(request.url).searchParams;
-  const rows = mockReconciliationRows(q.get("start_timestamp"), q.get("end_timestamp"), q.get("token_name") || "");
+  const rows = mockReconciliationRows(q.get("start_timestamp"), q.get("end_timestamp"), q.get("token_name") || "")
+    .filter((row) => !q.get("group") || row.group === q.get("group"));
   return { status: 200, body: { success: true, data: { quota: rows.reduce((sum, row) => sum + row.quota, 0), rpm: 0, tpm: 0 } } };
 }
 
