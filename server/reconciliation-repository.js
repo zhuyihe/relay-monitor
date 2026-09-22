@@ -453,7 +453,8 @@ export class ReconciliationRepository {
       return { row, source, result: normalizeSuccessfulResult(source?.result, row.health_code) };
     }).filter(({ source, result }) => {
       const saved = source?.window;
-      if (!source?.result || !source?.resultGeneratedAt || !saved || saved.preset !== window.preset
+      if (!isCurrentReconciliationBillingContract(source)
+        || !source?.result || !source?.resultGeneratedAt || !saved || saved.preset !== window.preset
         || Number(saved.startMs) !== Number(window.startMs) || saved.timezone !== window.timezone) return false;
       const sameWindow = window.preset === "today"
         ? Number(saved.endMs) <= Number(window.endMs)
@@ -495,3 +496,4 @@ export class ReconciliationRepository {
     }]));
   }
 }
+import { isCurrentReconciliationBillingContract } from "../lib/reconciliation-contract.js";

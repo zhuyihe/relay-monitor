@@ -359,7 +359,7 @@ test("短于一秒的分段标记为不可核算，且不调用上游 stat 或�
   const aggregateCalls = [];
   const server = createServer((request, response) => {
     const url = new URL(request.url, "http://x");
-    if (["/api/log/self/stat", "/api/data/flow", "/api/data/"].includes(url.pathname)) aggregateCalls.push(url.pathname);
+    if (["/api/log/self/stat", "/api/log/stat", "/api/data/flow", "/api/data/"].includes(url.pathname)) aggregateCalls.push(url.pathname);
     const body = url.pathname === "/api/status" ? { success: true, data: { quota_per_unit: 100 } }
       : url.pathname === "/api/user/self" ? { success: true, data: { id: 1 } }
         : url.pathname === "/api/user/self/groups" ? { success: true, data: { fixed: { ratio: 1 } } }
@@ -483,6 +483,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
   const { createServer } = await import("node:http");
   const statRequests = [];
   let upstreamBroken = false;
+  let ownBillingBroken = false;
   const server = createServer((request, response) => {
     const url = new URL(request.url, "http://x");
     const start = Number(url.searchParams.get("start_timestamp"));
@@ -495,8 +496,13 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
       statRequests.push({ tokenName: url.searchParams.get("token_name"), group: url.searchParams.get("group"), start, end: Number(url.searchParams.get("end_timestamp")) });
       body = upstreamBroken ? { success: false, message: "stat unavailable" } : { success: true, data: { quota: start === 1000 ? 0 : 100 } };
     }
-    else if (url.pathname === "/api/data/flow") body = { success: true, data: [{ channel_id: 1, channel_name: "渠道", quota: start === 1000 ? 200 : 100 }] };
-    else if (url.pathname === "/api/data/") body = { success: true, data: [{ quota: start === 1000 ? 200 : 100 }] };
+    else if (url.pathname === "/api/log/stat") {
+      assert.equal(url.searchParams.get("channel"), "1");
+      assert.equal(url.searchParams.has("channel_id"), false);
+      body = ownBillingBroken
+        ? { success: false, message: "channel stat unavailable" }
+        : { success: true, data: { quota: start === 1000 ? 200 : 100 } };
+    }
     else if (url.pathname === "/api/channel/") body = { success: true, data: { items: [{ id: 1, name: "渠道", status: 2 }] } };
     else body = { success: false };
     response.writeHead(body.success === false ? 404 : 200, { "Content-Type": "application/json" });
@@ -549,6 +555,9 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
   assert.equal(result.segments.length, 2);
   assert.equal(result.upstream.amountUsd, 1);
   assert.equal(result.downstream.amountUsd, 3);
+  assert.equal(result.downstream.billingSource, "channel-log-stat");
+  assert.equal(result.downstream.calculationVersion, 2);
+  assert.equal(result.downstream.billingCoverage, 1);
   assert.equal(result.calculation.differenceUsd, 2);
   assert.equal(result.calculation.profitUsd, null, "an upstream-empty sales anomaly is a risk difference, never confirmed profit");
   assert.equal(result.calculation.riskDifferenceUsd, 2);
@@ -565,6 +574,26 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
   assert.deepEqual(snapshotSources[0].segment, {
     group: "g1", ratio: 2.9, ratioObservedAt: 1000001, ratioSource: "group_catalog", timingSource: "operator_confirmed",
   });
+  assert.equal(snapshotSources[0].calculationVersion, 2);
+  assert.equal(snapshotSources[0].billingSource, "channel-log-stat");
+  assert.equal(snapshotSources[0].downstream.calculationVersion, 2);
+  assert.deepEqual(
+    snapshotSources.map((source) => source.downstream.channels),
+    [
+      [{ channelId: 1, quotaUnits: 200, amountUsd: 2 }],
+      [{ channelId: 1, quotaUnits: 100, amountUsd: 1 }],
+    ],
+    "即使利润被阻断，每个分段也必须保存自己的渠道收费证据"
+  );
+  ownBillingBroken = true;
+  const afterBillingFailure = await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 }, { force: true });
+  assert.equal(afterBillingFailure.results[0].health.code, "OWN_BILLING_UNAVAILABLE");
+  assert.equal(afterBillingFailure.results[0].downstream.amountUsd, null, "任一渠道账单失败后不得保留部分收费");
+  assert.equal(afterBillingFailure.results[0].downstream.channels[0].quotaUnits, null);
+  assert.equal(afterBillingFailure.results[0].downstream.channels[0].share, null, "账单不完整时渠道占比必须保持未知");
+  assert.equal(afterBillingFailure.results[0].calculation.profitUsd, null);
+  assert.equal(afterBillingFailure.results[0].calculation.marginRate, null);
+  ownBillingBroken = false;
   upstreamBroken = true;
   const afterAnomaly = await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 }, { force: true });
   assert.equal(afterAnomaly.results[0].lastSuccessfulAt, undefined, "上游空消费异常不能作为后续失败的最近成功账单");
@@ -649,8 +678,7 @@ test("首次观察到已知倍率会补全当前 legacy 分段，随后切组才
         : url.pathname === "/api/user/self/groups" ? { success: true, data: { AWS_Bedrock3: { ratio: 2.9 }, AWS_Bedrock2: { ratio: 2.6 } } }
           : url.pathname === "/api/token/" ? { success: true, data: { total: 1, items: [{ id: 9, name: "stable", status: 1, group: currentGroup, cross_group_retry: false }] } }
             : url.pathname === "/api/log/self/stat" ? { success: true, data: { quota: 100 } }
-              : url.pathname === "/api/data/flow" ? { success: true, data: [{ channel_id: 1, channel_name: "渠道", quota: 100 }] }
-                : url.pathname === "/api/data/" ? { success: true, data: [{ quota: 100 }] }
+              : url.pathname === "/api/log/stat" ? { success: true, data: { quota: 100 } }
                   : url.pathname === "/api/channel/" ? { success: true, data: { items: [{ id: 1, name: "渠道", status: 1 }] } }
                     : { success: false };
     response.writeHead(body.success === false ? 404 : 200, { "Content-Type": "application/json" });
@@ -920,6 +948,8 @@ test("进程重启后只恢复同一完整窗口的持久化成功账单，失�
   };
   const writes = [];
   const source = {
+    calculationVersion: 2,
+    billingSource: "channel-log-stat",
     window: { preset: "custom", startMs: 1000, endMs: 2000, timezone: "Asia/Shanghai" },
     resultGeneratedAt: "2026-09-22T10:00:00.000Z",
     segment: { group: "g1", ratio: 2.9, ratioObservedAt: 1234, ratioSource: "group_catalog", timingSource: "operator_confirmed" },
@@ -970,7 +1000,7 @@ test("持久化 today 成功账单可用于同日较晚窗口，不能跨本地�
   const first = resolveReconciliationWindow({ preset: "today", timezone: "Asia/Shanghai" }, Date.parse("2026-09-20T04:26:08.000Z"));
   const rows = [{
     health_code: "READY",
-    source: JSON.stringify({ window: first, resultGeneratedAt: "2026-09-20T04:26:08.000Z", result: { upstream: { amountUsd: 2.5 }, calculation: { differenceUsd: 2.5, profitUsd: 2.5, riskDifferenceUsd: null, marginRate: 0.5 } } }),
+    source: JSON.stringify({ calculationVersion: 2, billingSource: "channel-log-stat", window: first, resultGeneratedAt: "2026-09-20T04:26:08.000Z", result: { upstream: { amountUsd: 2.5 }, calculation: { differenceUsd: 2.5, profitUsd: 2.5, riskDifferenceUsd: null, marginRate: 0.5 } } }),
   }];
   const repository = new ReconciliationRepository({
     async query() { return [rows]; },
@@ -986,6 +1016,7 @@ test("零利润的完整账单仍可作为最近成功结果恢复", async () =>
   const repository = new ReconciliationRepository({
     async query() {
       return [[{ health_code: "READY", source: JSON.stringify({
+        calculationVersion: 2, billingSource: "channel-log-stat",
         window, resultGeneratedAt: "2026-09-22T10:00:00.000Z",
         result: { calculation: { differenceUsd: 0, profitUsd: 0, riskDifferenceUsd: null, marginRate: 0 } },
       }) }]];
@@ -994,6 +1025,20 @@ test("零利润的完整账单仍可作为最近成功结果恢复", async () =>
   const result = await repository.latestSuccessfulResult("rr", window);
   assert.equal(result?.result.calculation.profitUsd, 0);
   assert.equal(result?.result.calculation.marginRate, 0);
+});
+
+test("旧版 flow 收费快照即使曾有利润也不能作为最近成功账单复用", async () => {
+  const window = { preset: "custom", startMs: 1000, endMs: 2000, timezone: "Asia/Shanghai" };
+  const repository = new ReconciliationRepository({
+    async query() {
+      return [[{ health_code: "READY", source: JSON.stringify({
+        window, resultGeneratedAt: "2026-09-22T10:00:00.000Z",
+        result: { calculation: { differenceUsd: 2.5, profitUsd: 2.5, riskDifferenceUsd: null, marginRate: 0.5 } },
+      }) }]];
+    },
+  });
+
+  assert.equal(await repository.latestSuccessfulResult("rr", window), null);
 });
 
 test("非确认的旧快照不会被兼容逻辑伪造成利润", async () => {

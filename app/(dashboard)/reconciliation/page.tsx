@@ -14,6 +14,11 @@ import {
   mergeReconciliationSegments,
   summarizeReconciliationFreshness,
 } from "../../../lib/reconciliation-view";
+import {
+  RECONCILIATION_BILLING_SOURCE,
+  RECONCILIATION_BILLING_SOURCE_LABEL,
+  reconciliationHealthMeta,
+} from "../../../lib/reconciliation-contract";
 import AppState from "../../components/app-state";
 
 const { Text } = Typography;
@@ -25,19 +30,6 @@ const PRESETS = [
   { label: "近 7 天", value: "7d" },
   { label: "自定义", value: "custom" },
 ];
-
-const statusColor: Record<string, string> = {
-  READY: "success",
-  GROUP_OR_RATIO_CHANGED: "warning",
-  KEY_INVALID_OR_DENIED: "error",
-  UPSTREAM_DATA_UNAVAILABLE: "error",
-  OWN_FLOW_INCOMPLETE: "warning",
-  UPSTREAM_EMPTY_WITH_SALES: "warning",
-  STALE: "default",
-  SALES_CHANNEL_DISABLED: "warning",
-  SALES_CHANNEL_MISSING: "error",
-  ROUTE_TRANSITION_DETECTED: "warning",
-};
 
 const channelStateLabel: Record<string, string> = {
   enabled: "启用", manual_disabled: "手动禁用", auto_disabled: "自动禁用", missing: "已缺失", unknown: "状态未知",
@@ -79,7 +71,8 @@ function formatWindow(window: any) {
 
 function statusTag(item: any) {
   const current = item?.health || {};
-  return <Tag color={current.stale ? "default" : statusColor[current.code] || "default"}>{current.stale ? "数据已过期" : current.label || "数据待获取"}</Tag>;
+  const meta = reconciliationHealthMeta(current.code);
+  return <Tag color={current.stale ? "default" : meta.tone}>{current.stale ? reconciliationHealthMeta("STALE").label : current.label || meta.label || "数据待获取"}</Tag>;
 }
 
 function upstreamName(rule: any, upstreams: any) {
@@ -215,7 +208,7 @@ function RuleRow({ item, rate, compact, upstreams, onEdit, onDelete, onDetail }:
         请求窗口 {formatWindow(item.requestedWindow || item.window)} · {item.health?.stale ? `数据已过期 · 最近成功 ${formatTime(item.lastSuccessfulAt, timezone)} · 金额覆盖至 ${formatTime(item.lastSuccessfulWindow?.endMs || item.window?.endMs, timezone)}` : item.lastSuccessfulAt ? `最近成功 ${formatTime(item.lastSuccessfulAt, timezone)}` : "暂未成功（当前读取失败）"}
       </Text>
 
-      {latestTransition && previousTransition ? <Alert className="reconciliation-transition" type="warning" showIcon message="已检测到上游分组或倍率变化" description={<span>{previousTransition.group || "分组未知"} · {ratioLabel(previousTransition.ratio)} → {latestTransition.group || "分组未知"} · {ratioLabel(latestTransition.ratio)} · {transitionPending ? `暂按 ${formatTime(latestTransition.detectedAt, timezone)} 生效` : `切换时间已于 ${formatTime(latestTransition.effectiveFrom, timezone)} 确认`}</span>} action={transitionPending ? <Button size="small" className="reconciliation-transition__action" onClick={onDetail} aria-label={`修正 ${rule.tokenName || "Key"} 的切换时间`}>修正切换时间</Button> : null} /> : null}
+      {latestTransition && previousTransition ? <Alert className="reconciliation-transition" type="warning" showIcon message={reconciliationHealthMeta("ROUTE_TRANSITION_DETECTED").label} description={<span>{previousTransition.group || "分组未知"} · {ratioLabel(previousTransition.ratio)} → {latestTransition.group || "分组未知"} · {ratioLabel(latestTransition.ratio)} · {transitionPending ? `暂按 ${formatTime(latestTransition.detectedAt, timezone)} 生效` : `切换时间已于 ${formatTime(latestTransition.effectiveFrom, timezone)} 确认`}</span>} action={transitionPending ? <Button size="small" className="reconciliation-transition__action" onClick={onDetail} aria-label={`修正 ${rule.tokenName || "Key"} 的切换时间`}>修正切换时间</Button> : null} /> : null}
 
       <section aria-label={`${rule.tokenName || "该规则"}的渠道状态与收费`} style={{ marginTop: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 6 }}>
@@ -506,7 +499,7 @@ export default function ReconciliationPage() {
           <Statistic title="确认利润" value={money(totalDifference, rate)} valueStyle={{ color: totalDifference == null ? "var(--jy-text)" : totalDifference >= 0 ? "var(--jy-success)" : "var(--jy-danger)", fontVariantNumeric: "tabular-nums" }} />
           <Statistic title="毛利率" value={percent(totalMargin)} valueStyle={{ fontVariantNumeric: "tabular-nums" }} />
         </div>
-        <Text type="secondary" style={{ display: "block", marginTop: 14, fontSize: 12 }}>上游完整成本仅在父规则统计；子渠道只展示本站收费与占比。{totals.profitComplete ? "" : ` 存在未确认规则，风险差额 ${money(totals.riskDifference, rate)} 未计入确认利润。`}{riskItems.length ? ` 当前 ${riskItems.length} 个异常。` : ""}</Text>
+        <Text type="secondary" style={{ display: "block", marginTop: 14, fontSize: 12 }}>本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}；上游完整成本仅在父规则统计，子渠道只展示本站收费与占比。{totals.profitComplete ? "" : ` 存在未确认规则，风险差额 ${money(totals.riskDifference, rate)} 未计入确认利润。`}{riskItems.length ? ` 当前 ${riskItems.length} 个异常。` : ""}</Text>
       </Card>
 
       {riskItems.length ? <Card className="reconciliation-risks" size="small" title={`风险事件（${riskItems.length}）`} style={{ marginBottom: 16 }}>
@@ -530,8 +523,9 @@ export default function ReconciliationPage() {
           <Detail label="当前倍率" value={(detail.upstream?.ratio ?? detail.currentSegment?.ratio) == null ? "未返回" : `${detail.upstream?.ratio ?? detail.currentSegment?.ratio}×`} />
           <Detail label="本站收费" value={money(detail.downstream?.amountUsd, rate)} />
           <Detail label="上游成本" value={money(detail.upstream?.amountUsd, rate)} />
-          <Detail label="数据覆盖" value={percent(detail.downstream?.coverage)} />
-          {(detail.health?.issues || []).map((issue: any, index: number) => <Alert key={`${issue.code}-${index}`} type={issue.code.includes("MISSING") || issue.code.includes("UNAVAILABLE") ? "error" : "warning"} showIcon message={HEALTH_LABEL(issue.code)} description={issue.detail} />)}
+          <Detail label="本站收费来源" value={detail.downstream?.amountUsd == null ? "未取得" : detail.downstream.billingSource === RECONCILIATION_BILLING_SOURCE ? RECONCILIATION_BILLING_SOURCE_LABEL : "旧版来源（待重新核算）"} />
+          <Detail label="渠道账单覆盖" value={percent(detail.downstream?.billingCoverage ?? detail.downstream?.coverage)} />
+          {(detail.health?.issues || []).map((issue: any, index: number) => <Alert key={`${issue.code}-${index}`} type={reconciliationHealthMeta(issue.code).tone === "error" ? "error" : "warning"} showIcon message={HEALTH_LABEL(issue.code)} description={issue.detail} />)}
           {transitionSegments.some((segment: any) => segment.timingSource === "detected") ? <Space wrap>
             <Select value={transitionSegmentId} onChange={setTransitionSegmentId} placeholder="选择待确认的切换分段" style={{ minWidth: compact ? "100%" : 230 }} options={transitionSegments.filter((segment: any) => segment.timingSource === "detected").map((segment: any) => ({ value: segment.id, label: `${segment.group} · ${formatWindow(segment.window || { startMs: segment.effectiveFrom, endMs: segment.effectiveTo ?? Date.now(), timezone: detail.window?.timezone || detail.rule?.timezone })}` }))} />
             <DatePicker showTime value={transitionAt} onChange={(value) => setTransitionAt(value)} placeholder="实际切换时间" />
@@ -572,5 +566,5 @@ function Detail({ label, value }: { label: string; value: string }) {
 }
 
 function HEALTH_LABEL(code: string) {
-  return ({ SALES_CHANNEL_DISABLED: "本站销售渠道已禁用", SALES_CHANNEL_MISSING: "本站销售渠道已缺失", ROUTE_TRANSITION_DETECTED: "已检测到上游分组或倍率变化", SEGMENT_TIMING_UNCONFIRMED: "分段切换时间待确认" } as Record<string, string>)[code] || code;
+  return reconciliationHealthMeta(code).label || code;
 }
