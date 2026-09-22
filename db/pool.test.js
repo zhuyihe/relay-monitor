@@ -28,6 +28,8 @@ test("对账 schema 缺列或索引时使用 MySQL 8 兼容的普通 ALTER", asy
     "ALTER TABLE reconciliation_rule_channels ADD COLUMN status_observed_at_ms BIGINT NULL",
     "ALTER TABLE reconciliation_rule_channels ADD COLUMN status_changed_at_ms BIGINT NULL",
     "ALTER TABLE reconciliation_snapshots ADD COLUMN segment_id VARCHAR(32) NULL",
+    "ALTER TABLE reconciliation_rule_segments ADD COLUMN ratio_observed_at_ms BIGINT NULL",
+    "ALTER TABLE reconciliation_rule_segments ADD COLUMN ratio_source VARCHAR(24) NULL",
     "ALTER TABLE reconciliation_snapshots ADD INDEX idx_reconciliation_snapshot_segment (segment_id)",
   ]);
   assert.equal(alters.some((sql) => sql.includes("IF NOT EXISTS")), false);
@@ -35,7 +37,7 @@ test("对账 schema 缺列或索引时使用 MySQL 8 兼容的普通 ALTER", asy
 
 test("对账 schema 已具备列和索引时不重复执行 ALTER", async () => {
   const pool = schemaPool({
-    columns: ["channel_status", "status_observed_at_ms", "status_changed_at_ms", "segment_id"],
+    columns: ["channel_status", "status_observed_at_ms", "status_changed_at_ms", "segment_id", "ratio_observed_at_ms", "ratio_source"],
     indexes: ["idx_reconciliation_snapshot_segment"],
   });
   await ensureSchema(pool);

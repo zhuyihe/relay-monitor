@@ -1283,6 +1283,77 @@ textarea {
   }
 }
 
+.reconciliation-freshness {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-bottom: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.reconciliation-summary__metrics {
+  display: grid;
+  gap: 20px;
+}
+
+.reconciliation-summary .ant-statistic-content,
+.reconciliation-metric__value {
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.reconciliation-updated {
+  display: block;
+  margin-top: 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.reconciliation-transition {
+  margin-top: 14px;
+}
+
+.reconciliation-channel-list {
+  display: grid;
+  gap: 8px;
+}
+
+.reconciliation-risks .ant-list-item {
+  align-items: flex-start;
+  gap: 8px;
+}
+
+@media (max-width: 767px) {
+  .reconciliation-summary__metrics {
+    gap: 14px;
+  }
+
+  .reconciliation-summary .ant-statistic-content {
+    font-size: 20px;
+    overflow-wrap: anywhere;
+  }
+
+  .reconciliation-rule-actions .ant-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .reconciliation-query-action,
+  .reconciliation-transition__action,
+  .reconciliation-primary-action {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .reconciliation-page .ant-picker-input > input {
+    font-size: 16px;
+  }
+
+  .reconciliation-transition .ant-alert-action {
+    margin-top: 8px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

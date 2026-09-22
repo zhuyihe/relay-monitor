@@ -12,6 +12,22 @@ function asJson(value) {
   return value;
 }
 
+function normalizeSuccessfulResult(result, healthCode) {
+  const calculation = result?.calculation;
+  if (!calculation || calculation.profitUsd !== undefined || calculation.riskDifferenceUsd !== undefined) return result;
+  const differenceUsd = calculation.differenceUsd ?? null;
+  const confirmed = (result.health?.code || healthCode) === "READY" && differenceUsd != null;
+  return {
+    ...result,
+    calculation: {
+      ...calculation,
+      profitUsd: confirmed ? differenceUsd : null,
+      riskDifferenceUsd: confirmed ? null : differenceUsd,
+      marginRate: confirmed ? calculation.marginRate ?? null : null,
+    },
+  };
+}
+
 function activeTokenKey(input) {
   return input.enabled === false ? null : `${input.upstreamStationId}:${input.tokenId}`;
 }
@@ -145,9 +161,9 @@ export class ReconciliationRepository {
       }
       await conn.query(
         `INSERT INTO reconciliation_rule_segments
-          (id, rule_id, group_name, group_ratio, effective_from_ms, detected_at_ms, timing_source)
-         VALUES (?, ?, ?, ?, ?, ?, 'operator_confirmed')`,
-        [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, Number(input.initialEffectiveFromMs || Date.now()), Date.now()]
+          (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, detected_at_ms, timing_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'operator_confirmed')`,
+        [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs || Date.now()), Date.now()]
       );
       await conn.commit();
     } catch (err) {
@@ -207,6 +223,8 @@ export class ReconciliationRepository {
       ruleId: row.rule_id,
       group: row.group_name,
       ratio: row.group_ratio == null ? null : Number(row.group_ratio),
+      ratioObservedAt: row.ratio_observed_at_ms == null ? null : Number(row.ratio_observed_at_ms),
+      ratioSource: row.ratio_source || null,
       effectiveFrom: Number(row.effective_from_ms),
       effectiveTo: row.effective_to_ms == null ? null : Number(row.effective_to_ms),
       detectedAt: Number(row.detected_at_ms),
@@ -214,8 +232,43 @@ export class ReconciliationRepository {
     }));
   }
 
-  async transitionSegment(ruleId, { group, ratio, detectedAt = Date.now() }) {
+  async backfillMissingSegmentRatios(ruleId, groups, observedAt = Date.now(), segments = null) {
+    const knownRatios = new Map(Object.entries(groups || {}).flatMap(([name, group]) => {
+      const ratio = Number(group?.ratio);
+      return group?.ratio != null && Number.isFinite(ratio) ? [[name, ratio]] : [];
+    }));
+    const existing = segments || await this.listSegments(ruleId);
+    if (!existing.some((segment) => segment.ratio == null && knownRatios.has(segment.group))) return 0;
+
     const conn = await this.pool.getConnection();
+    let updated = 0;
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query(
+        `SELECT * FROM reconciliation_rule_segments
+         WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE`,
+        [ruleId]
+      );
+      for (const row of rows) {
+        const ratio = knownRatios.get(row.group_name);
+        if (row.group_ratio != null || ratio == null || !Number.isFinite(ratio)) continue;
+        const [result] = await conn.query(
+          "UPDATE reconciliation_rule_segments SET group_ratio = ?, ratio_observed_at_ms = ?, ratio_source = 'group_catalog' WHERE id = ? AND group_ratio IS NULL",
+          [ratio, observedAt, row.id]
+        );
+        updated += Number(result.affectedRows || 0);
+      }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally { conn.release(); }
+    return updated;
+  }
+
+  async reconcileCurrentSegment(ruleId, { group, ratio, currentSegmentRatio = null, detectedAt = Date.now() }) {
+    const conn = await this.pool.getConnection();
+    let outcome;
     try {
       await conn.beginTransaction();
       const [rows] = await conn.query(
@@ -226,23 +279,40 @@ export class ReconciliationRepository {
       if (!current) throw new Error("对账规则缺少当前分段");
       const currentRatio = current.group_ratio == null ? null : Number(current.group_ratio);
       const nextRatio = ratio == null ? null : Number(ratio);
-      const same = current.group_name === group && currentRatio === nextRatio;
-      if (!same) {
+      const sameGroup = current.group_name === group;
+      const observedCurrentSegmentRatio = currentSegmentRatio == null ? null : Number(currentSegmentRatio);
+      const ratioToBackfill = sameGroup ? nextRatio : observedCurrentSegmentRatio;
+      const ratioBackfilled = currentRatio == null && ratioToBackfill != null;
+      const ratioChanged = sameGroup && currentRatio != null && nextRatio != null && currentRatio !== nextRatio;
+      if (ratioBackfilled) {
+        await conn.query(
+          "UPDATE reconciliation_rule_segments SET group_ratio = ?, ratio_observed_at_ms = ?, ratio_source = 'group_catalog' WHERE id = ? AND group_ratio IS NULL",
+          [ratioToBackfill, detectedAt, current.id]
+        );
+        current.group_ratio = ratioToBackfill;
+      }
+      if (!sameGroup || ratioChanged) {
         const at = Math.max(Number(detectedAt), Number(current.effective_from_ms));
         await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [at, current.id]);
         await conn.query(
           `INSERT INTO reconciliation_rule_segments
-            (id, rule_id, group_name, group_ratio, effective_from_ms, detected_at_ms, timing_source)
-           VALUES (?, ?, ?, ?, ?, ?, 'detected')`,
-          [uid("rs"), ruleId, group, ratio ?? null, at, at]
+            (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, detected_at_ms, timing_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'detected')`,
+          [uid("rs"), ruleId, group, ratio ?? null, nextRatio == null ? null : detectedAt, nextRatio == null ? null : "group_catalog", at, at]
         );
       }
       await conn.commit();
+      outcome = { transitioned: !sameGroup || ratioChanged, ratioBackfilled };
     } catch (err) {
       await conn.rollback().catch(() => {});
       throw err;
     } finally { conn.release(); }
-    return this.listSegments(ruleId);
+    const segments = await this.listSegments(ruleId);
+    return { ...outcome, segments, currentSegment: segments[segments.length - 1] || null };
+  }
+
+  async transitionSegment(ruleId, input) {
+    return (await this.reconcileCurrentSegment(ruleId, input)).segments;
   }
 
   async correctTransition(ruleId, segmentId, effectiveAt) {
@@ -370,6 +440,38 @@ export class ReconciliationRepository {
       "UPDATE reconciliation_alert_state SET active = 0, recovered_at = ?, last_seen_at = ? WHERE rule_id = ? AND active = 1",
       [recoveredAt, recoveredAt, ruleId]
     );
+  }
+
+  async latestSuccessfulResult(ruleId, window) {
+    const [rows] = await this.pool.query(
+      `SELECT * FROM reconciliation_snapshots
+       WHERE rule_id = ? AND window_kind = ? ORDER BY generated_at DESC`,
+      [ruleId, window.preset]
+    );
+    const exact = rows.map((row) => {
+      const source = asJson(row.source);
+      return { row, source, result: normalizeSuccessfulResult(source?.result, row.health_code) };
+    }).filter(({ source, result }) => {
+      const saved = source?.window;
+      if (!source?.result || !source?.resultGeneratedAt || !saved || saved.preset !== window.preset
+        || Number(saved.startMs) !== Number(window.startMs) || saved.timezone !== window.timezone) return false;
+      const sameWindow = window.preset === "today"
+        ? Number(saved.endMs) <= Number(window.endMs)
+        : Number(saved.endMs) === Number(window.endMs);
+      return sameWindow && result?.calculation?.profitUsd != null;
+    });
+    if (!exact.length) return null;
+    const latest = exact.reduce((current, candidate) => String(candidate.source.resultGeneratedAt) > String(current.source.resultGeneratedAt) ? candidate : current);
+    const savedWindow = latest.source.window;
+    return {
+      generatedAt: latest.source.resultGeneratedAt,
+      result: {
+        ...latest.result,
+        window: savedWindow,
+        requestedWindow: latest.source.result.requestedWindow || savedWindow,
+        lastSuccessfulWindow: latest.source.result.lastSuccessfulWindow || savedWindow,
+      },
+    };
   }
 
   async latestSnapshots(ruleIds) {
