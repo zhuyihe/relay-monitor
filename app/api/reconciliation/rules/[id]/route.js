@@ -8,6 +8,6 @@ export const PUT = withAuth(async (request, rt, params) => {
 });
 
 export const DELETE = withAuth(async (_request, rt, params) => {
-  await (rt.reconciliation ||= createReconciliationModule(rt)).archiveRule(params.id);
-  return json({ ok: true });
+  const release = await (rt.reconciliation ||= createReconciliationModule(rt)).archiveRule(params.id);
+  return json({ ok: true, release });
 });

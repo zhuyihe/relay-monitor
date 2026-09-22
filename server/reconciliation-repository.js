@@ -36,6 +36,9 @@ function ruleFromRow(row, channels = []) {
     channels: channels.map((channel) => ({
       channelId: Number(channel.channel_id),
       name: channel.channel_name,
+      state: channel.channel_status || null,
+      stateObservedAt: channel.status_observed_at_ms == null ? null : Number(channel.status_observed_at_ms),
+      stateChangedAt: channel.status_changed_at_ms == null ? null : Number(channel.status_changed_at_ms),
     })),
   };
 }
@@ -52,7 +55,7 @@ export class ReconciliationRepository {
     if (!rows.length) return [];
     const ids = rows.map((row) => row.id);
     const [channelRows] = await this.pool.query(
-      "SELECT rule_id, channel_id, channel_name FROM reconciliation_rule_channels WHERE rule_id IN (?) ORDER BY channel_name, channel_id",
+      "SELECT rule_id, channel_id, channel_name, channel_status, status_observed_at_ms, status_changed_at_ms FROM reconciliation_rule_channels WHERE rule_id IN (?) ORDER BY channel_name, channel_id",
       [ids]
     );
     const grouped = new Map();
@@ -71,7 +74,7 @@ export class ReconciliationRepository {
     );
     if (!rows.length) return null;
     const [channels] = await this.pool.query(
-      "SELECT rule_id, channel_id, channel_name FROM reconciliation_rule_channels WHERE rule_id = ? ORDER BY channel_name, channel_id",
+      "SELECT rule_id, channel_id, channel_name, channel_status, status_observed_at_ms, status_changed_at_ms FROM reconciliation_rule_channels WHERE rule_id = ? ORDER BY channel_name, channel_id",
       [id]
     );
     return ruleFromRow(rows[0], channels);
@@ -140,6 +143,12 @@ export class ReconciliationRepository {
           [input.channels.map((channel) => [id, channel.channelId, channel.name, activeChannelKey(input, channel.channelId)])]
         );
       }
+      await conn.query(
+        `INSERT INTO reconciliation_rule_segments
+          (id, rule_id, group_name, group_ratio, effective_from_ms, detected_at_ms, timing_source)
+         VALUES (?, ?, ?, ?, ?, ?, 'operator_confirmed')`,
+        [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, Number(input.initialEffectiveFromMs || Date.now()), Date.now()]
+      );
       await conn.commit();
     } catch (err) {
       await conn.rollback().catch(() => {});
@@ -180,11 +189,115 @@ export class ReconciliationRepository {
     return this.getRule(id);
   }
 
-  async updateObservedToken(id, { tokenName }) {
+  async updateObservedToken(id, { tokenName, fixedGroup = null }) {
     await this.pool.query(
-      "UPDATE reconciliation_rules SET token_name = ? WHERE id = ? AND archived_at IS NULL",
-      [tokenName, id]
+      "UPDATE reconciliation_rules SET token_name = ?, fixed_group = COALESCE(?, fixed_group) WHERE id = ? AND archived_at IS NULL",
+      [tokenName, fixedGroup, id]
     );
+  }
+
+  async listSegments(ruleId) {
+    const [rows] = await this.pool.query(
+      `SELECT * FROM reconciliation_rule_segments
+       WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC`,
+      [ruleId]
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      ruleId: row.rule_id,
+      group: row.group_name,
+      ratio: row.group_ratio == null ? null : Number(row.group_ratio),
+      effectiveFrom: Number(row.effective_from_ms),
+      effectiveTo: row.effective_to_ms == null ? null : Number(row.effective_to_ms),
+      detectedAt: Number(row.detected_at_ms),
+      timingSource: row.timing_source,
+    }));
+  }
+
+  async transitionSegment(ruleId, { group, ratio, detectedAt = Date.now() }) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query(
+        `SELECT * FROM reconciliation_rule_segments
+         WHERE rule_id = ? AND effective_to_ms IS NULL FOR UPDATE`, [ruleId]
+      );
+      const current = rows[0];
+      if (!current) throw new Error("对账规则缺少当前分段");
+      const currentRatio = current.group_ratio == null ? null : Number(current.group_ratio);
+      const nextRatio = ratio == null ? null : Number(ratio);
+      const same = current.group_name === group && currentRatio === nextRatio;
+      if (!same) {
+        const at = Math.max(Number(detectedAt), Number(current.effective_from_ms));
+        await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [at, current.id]);
+        await conn.query(
+          `INSERT INTO reconciliation_rule_segments
+            (id, rule_id, group_name, group_ratio, effective_from_ms, detected_at_ms, timing_source)
+           VALUES (?, ?, ?, ?, ?, ?, 'detected')`,
+          [uid("rs"), ruleId, group, ratio ?? null, at, at]
+        );
+      }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally { conn.release(); }
+    return this.listSegments(ruleId);
+  }
+
+  async correctTransition(ruleId, segmentId, effectiveAt) {
+    const at = Number(effectiveAt);
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query(
+        `SELECT * FROM reconciliation_rule_segments
+         WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE`,
+        [ruleId]
+      );
+      const segments = rows.map((row) => ({
+        id: row.id,
+        effectiveFrom: Number(row.effective_from_ms),
+      }));
+      const index = segments.findIndex((segment) => segment.id === segmentId);
+      if (index <= 0) throw new Error("只能修正有前序分段的切换时间");
+      const previous = segments[index - 1];
+      const next = segments[index + 1];
+      if (!Number.isFinite(at) || at <= previous.effectiveFrom || (next && at >= next.effectiveFrom)) {
+        throw new Error("切换时间必须位于相邻分段之间");
+      }
+      await conn.query(
+        `UPDATE reconciliation_rule_segments
+         SET effective_to_ms = CASE WHEN id = ? THEN ? ELSE effective_to_ms END,
+             effective_from_ms = CASE WHEN id = ? THEN ? ELSE effective_from_ms END,
+             timing_source = CASE WHEN id = ? THEN 'operator_confirmed' ELSE timing_source END
+         WHERE id IN (?, ?)`,
+        [previous.id, at, segmentId, at, segmentId, previous.id, segmentId]
+      );
+      await conn.query(
+        "DELETE FROM reconciliation_snapshots WHERE rule_id = ? AND segment_id IN (?, ?)",
+        [ruleId, previous.id, segmentId]
+      );
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally {
+      conn.release();
+    }
+    return this.listSegments(ruleId);
+  }
+
+  async updateChannelStates(ruleId, states, observedAt = Date.now()) {
+    for (const state of states) {
+      await this.pool.query(
+        `UPDATE reconciliation_rule_channels
+         SET channel_status = ?, status_observed_at_ms = ?,
+             status_changed_at_ms = CASE WHEN channel_status <=> ? THEN status_changed_at_ms ELSE ? END
+         WHERE rule_id = ? AND channel_id = ?`,
+        [state.state, observedAt, state.state, observedAt, ruleId, state.channelId]
+      );
+    }
   }
 
   async archiveRule(id) {
@@ -212,11 +325,11 @@ export class ReconciliationRepository {
   async saveSnapshot(snapshot) {
     await this.pool.query(
       `INSERT INTO reconciliation_snapshots (
-        rule_id, snapshot_key, window_kind, window_start_ms, window_end_ms, local_date,
+        rule_id, segment_id, snapshot_key, window_kind, window_start_ms, window_end_ms, local_date,
         upstream_quota, upstream_quota_per_unit, upstream_usd,
         downstream_quota, downstream_quota_per_unit, downstream_usd,
         difference_usd, margin_rate, coverage, health_code, health_detail, source
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         window_end_ms = VALUES(window_end_ms), upstream_quota = VALUES(upstream_quota),
         upstream_quota_per_unit = VALUES(upstream_quota_per_unit), upstream_usd = VALUES(upstream_usd),
@@ -224,7 +337,7 @@ export class ReconciliationRepository {
         downstream_usd = VALUES(downstream_usd), difference_usd = VALUES(difference_usd),
         margin_rate = VALUES(margin_rate), coverage = VALUES(coverage), health_code = VALUES(health_code),
         health_detail = VALUES(health_detail), source = VALUES(source), generated_at = CURRENT_TIMESTAMP`,
-      [snapshot.ruleId, snapshot.snapshotKey, snapshot.windowKind, snapshot.startMs, snapshot.endMs,
+      [snapshot.ruleId, snapshot.segmentId ?? null, snapshot.snapshotKey, snapshot.windowKind, snapshot.startMs, snapshot.endMs,
         snapshot.localDate, snapshot.upstreamQuota, snapshot.upstreamQuotaPerUnit, snapshot.upstreamUsd,
         snapshot.downstreamQuota, snapshot.downstreamQuotaPerUnit, snapshot.downstreamUsd,
         snapshot.differenceUsd, snapshot.marginRate, snapshot.coverage, snapshot.healthCode,
