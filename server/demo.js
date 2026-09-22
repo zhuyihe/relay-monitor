@@ -368,6 +368,24 @@ export function mockNewApiLogs(request) {
   };
 }
 
+export function mockNewApiLogStat(request) {
+  if (!hasAuth(request)) return unauthorized();
+  const q = new URL(request.url).searchParams;
+  const startSec = Number(q.get("start_timestamp")) || 0;
+  const endSec = Number(q.get("end_timestamp")) || 0;
+  let rows = mockLogRows(startSec, endSec);
+  for (const [param, field] of [["model_name", "model_name"], ["username", "username"], ["group", "group"], ["token_name", "token_name"]]) {
+    const value = q.get(param);
+    if (value) rows = rows.filter((row) => row[field] === value);
+  }
+  const channel = Number(q.get("channel"));
+  if (Number.isFinite(channel) && channel > 0) rows = rows.filter((row) => Number(row.channel) === channel);
+  return {
+    status: 200,
+    body: { success: true, message: "", data: { quota: rows.reduce((sum, row) => sum + Number(row.quota || 0), 0), rpm: 0, tpm: 0 } },
+  };
+}
+
 export function mockNewApiUserList(request) {
   if (!hasAuth(request)) return unauthorized();
   return {
