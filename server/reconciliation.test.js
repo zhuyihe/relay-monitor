@@ -186,7 +186,20 @@ test("归档规则会清理对应的对账结果缓存", async () => {
     release() {},
   };
   const rt = {
-    pool: { async getConnection() { return connection; } },
+    pool: {
+      async getConnection() { return connection; },
+      async query(sql) {
+        if (sql.includes("SELECT * FROM reconciliation_rules")) return [[{
+          id: "rr-archived", upstream_station_id: "upstream", own_station_id: "own", token_id: 9,
+          token_name: "archived-key", fixed_group: "fixed", timezone: "Asia/Shanghai", enabled: 1,
+          archived_at: null, created_at: null, updated_at: null,
+        }]];
+        if (sql.includes("FROM reconciliation_rule_channels")) return [[{
+          rule_id: "rr-archived", channel_id: 1, channel_name: "渠道",
+        }]];
+        throw new Error(`unexpected query: ${sql}`);
+      },
+    },
     store: { list() { return []; }, get() { return null; } },
     _reconciliationResultCache: new Map([
       ["rr-archived:today:1:2:Asia/Shanghai", { at: Date.now(), value: {} }],
