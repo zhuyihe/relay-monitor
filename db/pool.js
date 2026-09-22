@@ -3,6 +3,42 @@ import mysql from "mysql2/promise";
 
 let _pool = null;
 
+async function hasColumn(db, table, column) {
+  const [rows] = await db.query(
+    `SELECT 1 FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1`,
+    [table, column]
+  );
+  return rows.length > 0;
+}
+
+async function hasIndex(db, table, index) {
+  const [rows] = await db.query(
+    `SELECT 1 FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? LIMIT 1`,
+    [table, index]
+  );
+  return rows.length > 0;
+}
+
+async function addColumnIfMissing(db, table, column, definition) {
+  if (await hasColumn(db, table, column)) return;
+  try {
+    await db.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  } catch (err) {
+    if (err?.code !== "ER_DUP_FIELDNAME" || !(await hasColumn(db, table, column))) throw err;
+  }
+}
+
+async function addIndexIfMissing(db, table, index, definition) {
+  if (await hasIndex(db, table, index)) return;
+  try {
+    await db.query(`ALTER TABLE ${table} ADD INDEX ${index} ${definition}`);
+  } catch (err) {
+    if (err?.code !== "ER_DUP_KEYNAME" || !(await hasIndex(db, table, index))) throw err;
+  }
+}
+
 export function getPool() {
   if (_pool) return _pool;
   _pool = mysql.createPool({
@@ -76,10 +112,27 @@ export async function ensureSchema(pool) {
     channel_id BIGINT NOT NULL,
     channel_name VARCHAR(160) NOT NULL,
     active_channel_key VARCHAR(96) NULL,
+    channel_status VARCHAR(24) NULL,
+    status_observed_at_ms BIGINT NULL,
+    status_changed_at_ms BIGINT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (rule_id, channel_id),
     INDEX idx_reconciliation_channel (channel_id),
     UNIQUE KEY uq_reconciliation_active_channel (active_channel_key)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_rule_segments (
+    id VARCHAR(32) PRIMARY KEY,
+    rule_id VARCHAR(32) NOT NULL,
+    group_name VARCHAR(160) NOT NULL,
+    group_ratio DOUBLE NULL,
+    effective_from_ms BIGINT NOT NULL,
+    effective_to_ms BIGINT NULL,
+    detected_at_ms BIGINT NOT NULL,
+    timing_source VARCHAR(24) NOT NULL DEFAULT 'detected',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_reconciliation_segment_rule (rule_id, effective_from_ms),
+    INDEX idx_reconciliation_segment_open (rule_id, effective_to_ms)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_snapshots (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -101,10 +154,31 @@ export async function ensureSchema(pool) {
     health_code VARCHAR(64) NOT NULL,
     health_detail VARCHAR(300) NULL,
     source JSON NULL,
+    segment_id VARCHAR(32) NULL,
     generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_reconciliation_snapshot (rule_id, snapshot_key),
     INDEX idx_reconciliation_snapshot_window (window_start_ms, window_end_ms)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // MySQL 8 has no ALTER TABLE ... ADD ... IF NOT EXISTS. Probe schema facts
+  // first, then use ordinary ALTER syntax so repeated startup is safe.
+  await addColumnIfMissing(pool, "reconciliation_rule_channels", "channel_status", "VARCHAR(24) NULL");
+  await addColumnIfMissing(pool, "reconciliation_rule_channels", "status_observed_at_ms", "BIGINT NULL");
+  await addColumnIfMissing(pool, "reconciliation_rule_channels", "status_changed_at_ms", "BIGINT NULL");
+  await addColumnIfMissing(pool, "reconciliation_snapshots", "segment_id", "VARCHAR(32) NULL");
+  await addIndexIfMissing(pool, "reconciliation_snapshots", "idx_reconciliation_snapshot_segment", "(segment_id)");
+  // Legacy rules get exactly one open segment. The deterministic 32-byte ID
+  // fits this table even if a historic rule ID used its full column width.
+  // We deliberately do not invent old transitions or ratios that facts cannot prove.
+  await pool.query(`INSERT INTO reconciliation_rule_segments
+    (id, rule_id, group_name, group_ratio, effective_from_ms, effective_to_ms, detected_at_ms, timing_source)
+    SELECT CONCAT('ls_', LEFT(MD5(r.id), 29)), r.id, r.fixed_group, NULL, 0, NULL,
+      UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000, 'legacy'
+    FROM reconciliation_rules r
+    WHERE NOT EXISTS (SELECT 1 FROM reconciliation_rule_segments s WHERE s.rule_id = r.id)`);
+  await pool.query(`UPDATE reconciliation_snapshots s
+    JOIN reconciliation_rule_segments g ON g.rule_id = s.rule_id
+    SET s.segment_id = g.id
+    WHERE s.segment_id IS NULL AND g.timing_source = 'legacy'`);
   await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_alert_state (
     rule_id VARCHAR(32) NOT NULL,
     event_code VARCHAR(64) NOT NULL,

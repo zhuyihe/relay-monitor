@@ -29,6 +29,13 @@ const statusColor: Record<string, string> = {
   OWN_FLOW_INCOMPLETE: "warning",
   UPSTREAM_EMPTY_WITH_SALES: "warning",
   STALE: "default",
+  SALES_CHANNEL_DISABLED: "warning",
+  SALES_CHANNEL_MISSING: "error",
+  ROUTE_TRANSITION_DETECTED: "warning",
+};
+
+const channelStateLabel: Record<string, string> = {
+  enabled: "启用", manual_disabled: "手动禁用", auto_disabled: "自动禁用", missing: "已缺失", unknown: "状态未知",
 };
 
 function money(amount: any, rate: any) {
@@ -44,7 +51,7 @@ function percent(value: any) {
 }
 
 function formatWindow(window: any) {
-  if (!window?.startMs || !window?.endMs) return "—";
+  if (window?.startMs == null || window?.endMs == null) return "—";
   const opts: Intl.DateTimeFormatOptions = {
     timeZone: window.timezone || "Asia/Shanghai", hour12: false,
     month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
@@ -81,13 +88,32 @@ function RuleChildren({ item, rate }: { item: any; rate: any }) {
         <List.Item>
           <Space direction="vertical" size={0} style={{ minWidth: 0, flex: 1 }}>
             <Text strong style={{ overflowWrap: "anywhere" }}>{channel.name}</Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>渠道 ID：{channel.channelId} · 收费占比 {percent(channel.share)}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>渠道 ID：{channel.channelId} · 收费占比 {percent(channel.share)} · <Tag color={channel.state === "enabled" ? "success" : channel.state === "missing" ? "error" : "warning"}>{channelStateLabel[channel.state] || "状态未知"}</Tag></Text>
           </Space>
           <Text strong style={{ fontVariantNumeric: "tabular-nums" }}>{money(channel.amountUsd, rate)}</Text>
         </List.Item>
       )}
     />
   );
+}
+
+function SegmentTimeline({ item, rate }: { item: any; rate: any }) {
+  const segments = item?.segments || [];
+  if (!segments.length) return null;
+  return <List
+    size="small"
+    header="分组与倍率时间线"
+    dataSource={segments.slice().reverse()}
+    renderItem={(segment: any) => <List.Item>
+      <Space direction="vertical" size={2} style={{ width: "100%" }}>
+        <Text strong>{formatWindow(segment.window)} · {segment.group} · {segment.ratio == null ? "倍率未知" : `${segment.ratio}×`}</Text>
+        <Text type="secondary" style={{ fontSize: 12 }}>{segment.timingSource === "operator_confirmed" ? "已人工确认" : segment.timingSource === "detected" ? "暂按检测时间生效" : "历史初始分段"}</Text>
+        <Space wrap size="middle" style={{ fontVariantNumeric: "tabular-nums" }}>
+          <Text>收费 {money(segment.downstream?.amountUsd, rate)}</Text><Text>成本 {money(segment.upstream?.amountUsd, rate)}</Text><Text>差额 {money(segment.calculation?.differenceUsd, rate)}</Text><Text>毛利率 {percent(segment.calculation?.marginRate)}</Text>
+        </Space>
+      </Space>
+    </List.Item>}
+  />;
 }
 
 function RuleRow({ item, rate, compact, upstreams, onEdit, onDelete, onDetail }: any) {
@@ -109,6 +135,9 @@ function RuleRow({ item, rate, compact, upstreams, onEdit, onDelete, onDetail }:
         <div style={{ marginTop: 2, color: token.colorTextSecondary, fontSize: 12, overflowWrap: "anywhere" }}>
           销售渠道：{channelNames}
         </div>
+        <div style={{ marginTop: 2, color: token.colorTextSecondary, fontSize: 12 }}>
+          {(item.downstream?.channels || []).length} 个渠道 · 启用 {(item.downstream?.channels || []).filter((channel: any) => channel.state === "enabled").length} · 禁用 {(item.downstream?.channels || []).filter((channel: any) => ["manual_disabled", "auto_disabled"].includes(channel.state)).length} · 缺失 {(item.downstream?.channels || []).filter((channel: any) => channel.state === "missing").length}
+        </div>
       </div>
       <Metric compact={compact} label="本站收费" value={money(item.downstream?.amountUsd, rate)} />
       <Metric compact={compact} label="上游成本" value={money(item.upstream?.amountUsd, rate)} />
@@ -117,8 +146,8 @@ function RuleRow({ item, rate, compact, upstreams, onEdit, onDelete, onDetail }:
       <Space size={2}>
         <Button type="text" size="small" onClick={(event) => { event.stopPropagation(); onDetail(); }} aria-label={`查看 ${rule.tokenName || "Key"} 的对账详情`}>详情</Button>
         <Button type="text" size="small" icon={<EditOutlined />} onClick={(event) => { event.stopPropagation(); onEdit(); }} aria-label={`编辑 ${rule.tokenName || "Key"} 的规则`} />
-        <Popconfirm title="停止此对账规则？" description="历史快照会保留，后台将不再自动刷新。" okText="停止" cancelText="取消" onConfirm={onDelete}>
-          <Button danger type="text" size="small" icon={<DeleteOutlined />} onClick={(event) => event.stopPropagation()} aria-label={`停止 ${rule.tokenName || "Key"} 的规则`} />
+        <Popconfirm title="停止并释放此对账规则？" description="停止后会释放此 Key 和关联销售渠道；历史快照会保留，后台将不再自动刷新。" okText="停止并释放" cancelText="取消" onConfirm={onDelete}>
+          <Button danger type="text" size="small" icon={<DeleteOutlined />} onClick={(event) => event.stopPropagation()} aria-label={`停止并释放 ${rule.tokenName || "Key"} 的规则`} />
         </Popconfirm>
       </Space>
     </div>
@@ -127,14 +156,14 @@ function RuleRow({ item, rate, compact, upstreams, onEdit, onDelete, onDetail }:
     return (
       <Card style={{ marginBottom: 12 }} styles={{ body: { padding: 16 } }}>
         {content}
-        <Collapse ghost size="small" style={{ marginTop: 8 }} items={[{ key: "channels", label: "查看渠道收费组成", children: <RuleChildren item={item} rate={rate} /> }]} />
+        <Collapse ghost size="small" style={{ marginTop: 8 }} items={[{ key: "channels", label: "查看分段与渠道收费组成", children: <><SegmentTimeline item={item} rate={rate} /><RuleChildren item={item} rate={rate} /></> }]} />
       </Card>
     );
   }
   return (
     <Collapse
       style={{ marginBottom: 8 }}
-      items={[{ key: rule.id || "rule", label: content, children: <RuleChildren item={item} rate={rate} /> }]}
+      items={[{ key: rule.id || "rule", label: content, children: <><SegmentTimeline item={item} rate={rate} /><RuleChildren item={item} rate={rate} /></> }]}
     />
   );
 }
@@ -169,6 +198,9 @@ export default function ReconciliationPage() {
   const [keyLoading, setKeyLoading] = useState(false);
   const keyRequestId = useRef(0);
   const [saving, setSaving] = useState(false);
+  const [transitionAt, setTransitionAt] = useState<any>(null);
+  const [transitionSegmentId, setTransitionSegmentId] = useState<string | null>(null);
+  const [transitionSegments, setTransitionSegments] = useState<any[]>([]);
 
   const rate = config?.ownStation?.cnyPerUsd ?? null;
   const results = data?.results || [];
@@ -197,8 +229,10 @@ export default function ReconciliationPage() {
       }
       setData(next);
       setError("");
+      return next;
     } catch (err: any) {
       setError(err?.message || "对账数据加载失败");
+      return null;
     } finally {
       setQuerying(false);
       setLoading(false);
@@ -302,10 +336,43 @@ export default function ReconciliationPage() {
 
   const stopRule = async (id: string) => {
     try {
-      await api(`/api/reconciliation/rules/${id}`, { method: "DELETE" });
-      message.success("已停止对账规则");
+      const { release } = await api(`/api/reconciliation/rules/${id}`, { method: "DELETE" });
+      message.success(`已停止对账规则，已释放 Key ${release.tokenName}（${release.fixedGroup}）及 ${release.releasedChannelCount} 个销售渠道`);
       await Promise.all([loadConfiguration(), loadWindow(activeWindow, true)]);
     } catch (err: any) { message.error(err?.message || "停止规则失败"); }
+  };
+
+  const correctTransition = async () => {
+    const segment = transitionSegments.find((item: any) => item.id === transitionSegmentId);
+    if (!detail?.rule?.id || !segment?.id || !transitionAt) return message.warning("请选择实际切换时间");
+    try {
+      await api(`/api/reconciliation/rules/${detail.rule.id}/transitions/${segment.id}`, { method: "PUT", body: { effectiveAt: transitionAt.valueOf() } });
+      message.success("切换时间已修正，正在重新核算");
+      setTransitionAt(null);
+      const next = await loadWindow(activeWindow, true);
+      const refreshed = next?.results?.find((item: any) => item.rule?.id === detail.rule.id);
+      if (refreshed) setDetail(refreshed);
+      const history = await api(`/api/reconciliation/rules/${detail.rule.id}/segments`);
+      const unconfirmed = (history.segments || []).filter((item: any) => item.timingSource === "detected");
+      setTransitionSegments(history.segments || []);
+      setTransitionSegmentId(unconfirmed[0]?.id || null);
+    } catch (err: any) { message.error(err?.message || "修正切换时间失败"); }
+  };
+
+  const openDetail = async (item: any) => {
+    setDetail(item);
+    setTransitionAt(null);
+    const fallback = item.segments || [];
+    setTransitionSegments(fallback);
+    setTransitionSegmentId(fallback.find((segment: any) => segment.timingSource === "detected")?.id || null);
+    try {
+      const history = await api(`/api/reconciliation/rules/${item.rule.id}/segments`);
+      const all = history.segments || [];
+      setTransitionSegments(all);
+      setTransitionSegmentId(all.find((segment: any) => segment.timingSource === "detected")?.id || null);
+    } catch (err: any) {
+      message.warning(err?.message || "未能读取完整分段历史");
+    }
   };
 
   const unavailableChannels = useMemo(() => {
@@ -358,7 +425,7 @@ export default function ReconciliationPage() {
       {!results.length ? (
         <Card><Empty description="还没有启用的对账规则" image={Empty.PRESENTED_IMAGE_SIMPLE}><Button type="primary" onClick={openCreate}>创建第一条规则</Button></Empty></Card>
       ) : results.map((item: any) => (
-        <RuleRow key={item.rule?.id} item={item} rate={rate} compact={compact} upstreams={config?.upstreams} onEdit={() => openEdit(item.rule)} onDelete={() => stopRule(item.rule.id)} onDetail={() => setDetail(item)} />
+        <RuleRow key={item.rule?.id} item={item} rate={rate} compact={compact} upstreams={config?.upstreams} onEdit={() => openEdit(item.rule)} onDelete={() => stopRule(item.rule.id)} onDetail={() => openDetail(item)} />
       ))}
 
       <Drawer title={detail?.rule?.tokenName ? `${detail.rule.tokenName} · 对账详情` : "对账详情"} open={!!detail} onClose={() => setDetail(null)} width={compact ? "100%" : 520}>
@@ -372,6 +439,13 @@ export default function ReconciliationPage() {
           <Detail label="本站收费" value={money(detail.downstream?.amountUsd, rate)} />
           <Detail label="上游成本" value={money(detail.upstream?.amountUsd, rate)} />
           <Detail label="数据覆盖" value={percent(detail.downstream?.coverage)} />
+          {(detail.health?.issues || []).map((issue: any, index: number) => <Alert key={`${issue.code}-${index}`} type={issue.code.includes("MISSING") || issue.code.includes("UNAVAILABLE") ? "error" : "warning"} showIcon message={HEALTH_LABEL(issue.code)} description={issue.detail} />)}
+          {transitionSegments.some((segment: any) => segment.timingSource === "detected") ? <Space wrap>
+            <Select value={transitionSegmentId} onChange={setTransitionSegmentId} placeholder="选择待确认的切换分段" style={{ minWidth: compact ? "100%" : 230 }} options={transitionSegments.filter((segment: any) => segment.timingSource === "detected").map((segment: any) => ({ value: segment.id, label: `${segment.group} · ${formatWindow(segment.window || { startMs: segment.effectiveFrom, endMs: segment.effectiveTo ?? Date.now(), timezone: detail.window?.timezone })}` }))} />
+            <DatePicker showTime value={transitionAt} onChange={(value) => setTransitionAt(value)} placeholder="实际切换时间" />
+            <Button onClick={correctTransition}>修正切换时间</Button>
+          </Space> : null}
+          <SegmentTimeline item={detail} rate={rate} />
           <RuleChildren item={detail} rate={rate} />
         </Space> : null}
       </Drawer>
@@ -379,13 +453,13 @@ export default function ReconciliationPage() {
       <Drawer title={editing ? "编辑对账规则" : "添加对账规则"} open={drawerOpen} onClose={() => setDrawerOpen(false)} width={compact ? "100%" : 520} extra={<Button type="primary" loading={saving} htmlType="submit" form="reconciliation-rule-form">保存规则</Button>}>
         <Form id="reconciliation-rule-form" form={form} layout="vertical" requiredMark={false} onFinish={saveRule}>
           <Form.Item label="上游账号" name="upstreamStationId" extra="复用该站点已有 PAT，不需要再次填写。" rules={[{ required: true, message: "请选择上游账号" }]}>
-            <Select placeholder="选择已配置的 NewAPI 上游站点" options={(config?.upstreams || []).map((station: any) => ({ value: station.id, label: station.name }))} onChange={(value) => { form.setFieldValue("tokenId", undefined); setKeyData(null); fetchKeys(value, true); }} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
+            <Select showSearch optionFilterProp="label" placeholder="选择已配置的 NewAPI 上游站点" options={(config?.upstreams || []).map((station: any) => ({ value: station.id, label: station.name }))} onChange={(value) => { form.setFieldValue("tokenId", undefined); setKeyData(null); fetchKeys(value, true); }} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
           </Form.Item>
           <Form.Item label="固定分组 Key" name="tokenId" extra="仅显示固定分组、未启用跨组重试且当前可用的 Key。" rules={[{ required: true, message: "请选择固定分组 Key" }]}>
-            <Select loading={keyLoading} disabled={!upstreamId || keyLoading} placeholder={upstreamId ? "选择上游 Key" : "请先选择上游账号"} options={(keyData?.tokens || []).map((item: any) => ({ value: item.id, disabled: item.status !== 1 || item.group === "auto" || item.crossGroupRetry, label: `${item.name} · ${item.group || "无分组"}${keyData?.groups?.[item.group]?.ratio != null ? ` · ${keyData.groups[item.group].ratio}×` : ""}` }))} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
+            <Select showSearch optionFilterProp="label" loading={keyLoading} disabled={!upstreamId || keyLoading} placeholder={upstreamId ? "选择上游 Key" : "请先选择上游账号"} options={(keyData?.tokens || []).map((item: any) => ({ value: item.id, disabled: item.status !== 1 || item.group === "auto" || item.crossGroupRetry, label: `${item.name} · ${item.group || "无分组"}${keyData?.groups?.[item.group]?.ratio != null ? ` · ${keyData.groups[item.group].ratio}×` : ""}` }))} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
           </Form.Item>
           <Form.Item label="本站销售渠道" name="salesChannelIds" extra="一个渠道同一时刻只能归属一条启用规则。" rules={[{ required: true, type: "array", min: 1, message: "请至少选择一个本站渠道" }]}>
-            <Select mode="multiple" placeholder="选择一个或多个渠道" options={(config?.channels || []).map((channel: any) => {
+            <Select showSearch optionFilterProp="label" mode="multiple" placeholder="选择一个或多个渠道" options={(config?.channels || []).map((channel: any) => {
               const occupiedBy = unavailableChannels.get(Number(channel.id));
               return { value: Number(channel.id), disabled: !!occupiedBy, label: `${channel.name || `渠道 ${channel.id}`}${occupiedBy ? `（已用于 ${occupiedBy}）` : ""}` };
             })} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
@@ -402,4 +476,8 @@ export default function ReconciliationPage() {
 
 function Detail({ label, value }: { label: string; value: string }) {
   return <div><Text type="secondary" style={{ display: "block", fontSize: 12 }}>{label}</Text><Text strong style={{ fontVariantNumeric: "tabular-nums", overflowWrap: "anywhere" }}>{value}</Text></div>;
+}
+
+function HEALTH_LABEL(code: string) {
+  return ({ SALES_CHANNEL_DISABLED: "本站销售渠道已禁用", SALES_CHANNEL_MISSING: "本站销售渠道已缺失", ROUTE_TRANSITION_DETECTED: "已检测到上游分组或倍率变化", SEGMENT_TIMING_UNCONFIRMED: "分段切换时间待确认" } as Record<string, string>)[code] || code;
 }
