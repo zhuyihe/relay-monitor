@@ -125,6 +125,8 @@ export async function ensureSchema(pool) {
     rule_id VARCHAR(32) NOT NULL,
     group_name VARCHAR(160) NOT NULL,
     group_ratio DOUBLE NULL,
+    ratio_observed_at_ms BIGINT NULL,
+    ratio_source VARCHAR(24) NULL,
     effective_from_ms BIGINT NOT NULL,
     effective_to_ms BIGINT NULL,
     detected_at_ms BIGINT NOT NULL,
@@ -165,6 +167,8 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_rule_channels", "status_observed_at_ms", "BIGINT NULL");
   await addColumnIfMissing(pool, "reconciliation_rule_channels", "status_changed_at_ms", "BIGINT NULL");
   await addColumnIfMissing(pool, "reconciliation_snapshots", "segment_id", "VARCHAR(32) NULL");
+  await addColumnIfMissing(pool, "reconciliation_rule_segments", "ratio_observed_at_ms", "BIGINT NULL");
+  await addColumnIfMissing(pool, "reconciliation_rule_segments", "ratio_source", "VARCHAR(24) NULL");
   await addIndexIfMissing(pool, "reconciliation_snapshots", "idx_reconciliation_snapshot_segment", "(segment_id)");
   // Legacy rules get exactly one open segment. The deterministic 32-byte ID
   // fits this table even if a historic rule ID used its full column width.
