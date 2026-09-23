@@ -15,6 +15,19 @@ import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 
 const DAY_MS = 86400000;
 const TODAY_WINDOW_END_OFFSET_MS = 60 * 60 * 1000;
+const MAX_CONCURRENT_RULES = 6;
+
+export async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await mapper(items[index], index);
+    }
+  }));
+  return results;
+}
 const TODAY_TTL_MS = 60000;
 const QUERY_TTL_MS = 60000;
 
@@ -740,20 +753,20 @@ export function createReconciliationModule(rt) {
         ? rules.filter((rule) => ruleIds.includes(rule.id))
         : rules.filter((rule) => rule.enabled);
       const now = Date.now();
-      const results = await Promise.all(selected.map((rule) => inspectRule(
+      const results = await mapWithConcurrency(selected, MAX_CONCURRENT_RULES, (rule) => inspectRule(
         rule.id,
         resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now),
         options
-      )));
+      ));
       return { results, generatedAt: new Date(now).toISOString() };
     },
     async refreshDue(now = Date.now()) {
       const rules = (await repository.listRules()).filter((rule) => rule.enabled);
-      await Promise.allSettled(rules.map((rule) => inspectRule(
+      await mapWithConcurrency(rules, MAX_CONCURRENT_RULES, (rule) => inspectRule(
         rule.id,
         resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, now),
         { origin: "poll" }
-      )));
+      ).catch(() => null));
     },
   };
 }
