@@ -12,6 +12,9 @@ import {
 } from "../lib/reconciliation-contract.js";
 import { ReconciliationRepository } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
+import { reconciliationScopeFingerprint, reconciliationSnapshotIdentity } from "../lib/reconciliation-snapshot.js";
+
+export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 
 const DAY_MS = 86400000;
 const TODAY_WINDOW_END_OFFSET_MS = 60 * 60 * 1000;
@@ -30,6 +33,8 @@ export async function mapWithConcurrency(items, limit, mapper) {
 }
 const TODAY_TTL_MS = 60000;
 const QUERY_TTL_MS = 60000;
+const MAX_RESULT_CACHE_ENTRIES = 200;
+const STALE_SCOPE = Symbol("STALE_SCOPE");
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -182,12 +187,6 @@ function calculationFromAmounts(upstreamUsd, downstreamUsd, issues = []) {
   };
 }
 
-function snapshotKey(window) {
-  return window.preset === "today"
-    ? `today:${localDate(window.startMs, window.timezone)}`
-    : `${window.preset}:${window.startMs}:${window.endMs}`;
-}
-
 function sourceSnapshot(token, metadata, upstream, downstream) {
   return {
     calculationVersion: RECONCILIATION_CALCULATION_VERSION,
@@ -221,17 +220,36 @@ export function createReconciliationModule(rt) {
   const metadataCache = (rt._reconciliationMetadataCache ||= new Map());
   const ownChannelsCache = (rt._reconciliationOwnChannelsCache ||= new Map());
   const ownChannelsRequests = (rt._reconciliationOwnChannelsRequests ||= new Map());
-  const lastSuccessfulResults = (rt._reconciliationLastSuccessfulResults ||= new Map());
+  const ruleGenerations = (rt._reconciliationRuleGenerations ||= new Map());
 
   const resultKey = (rule, window) => window.preset === "today"
     ? `${rule.id}:today:${window.startMs}:${window.timezone}`
     : `${rule.id}:${window.preset}:${window.startMs}:${window.endMs}:${window.timezone}`;
 
   function clearRuleResults(ruleId) {
+    ruleGenerations.set(ruleId, (ruleGenerations.get(ruleId) || 0) + 1);
     const prefix = `${ruleId}:`;
     for (const key of resultCache.keys()) {
       if (key.startsWith(prefix)) resultCache.delete(key);
     }
+    for (const key of inflight.keys()) if (key.startsWith(prefix)) inflight.delete(key);
+  }
+
+  function cacheResult(key, value) {
+    const now = Date.now();
+    const previous = resultCache.get(key)?.value;
+    const previousEnd = Number(previous?.requestedWindow?.endMs ?? previous?.window?.endMs);
+    const nextEnd = Number(value?.requestedWindow?.endMs ?? value?.window?.endMs);
+    if (previous && (previousEnd > nextEnd || (previousEnd === nextEnd && String(previous.generatedAt) > String(value.generatedAt)))) return;
+    for (const [cachedKey, cached] of resultCache) if (cachedKey !== key && now - cached.at >= QUERY_TTL_MS) resultCache.delete(cachedKey);
+    resultCache.set(key, { at: now, value });
+    while (resultCache.size > MAX_RESULT_CACHE_ENTRIES) resultCache.delete(resultCache.keys().next().value);
+  }
+
+  async function hasCurrentScope(ruleId, scopeFingerprint, generation) {
+    if ((ruleGenerations.get(ruleId) || 0) !== generation) return false;
+    const [currentRule, segments] = await Promise.all([repository.getRule(ruleId), repository.listSegments(ruleId)]);
+    return !!currentRule && reconciliationScopeFingerprint(currentRule, segments) === scopeFingerprint;
   }
 
   const ownStation = () => rt.store.list().find((station) => station.isOwn && station.type === "newapi") || null;
@@ -391,42 +409,44 @@ export function createReconciliationModule(rt) {
   async function inspectRule(ruleId, window, { force = false, origin = "manual" } = {}) {
     const rule = await repository.getRule(ruleId);
     if (!rule) throw new Error("对账规则不存在");
+    const generation = ruleGenerations.get(ruleId) || 0;
     const cacheKey = resultKey(rule, window);
+    const inflightKey = window.preset === "today" ? `${cacheKey}:${window.endMs}` : cacheKey;
     const ttl = window.preset === "today" ? TODAY_TTL_MS : QUERY_TTL_MS;
     const cached = resultCache.get(cacheKey);
     if (!force && cached && Date.now() - cached.at < ttl) return cached.value;
-    if (inflight.has(cacheKey)) return inflight.get(cacheKey);
+    if (inflight.has(inflightKey)) return inflight.get(inflightKey);
 
     const task = (async () => {
       const upstream = upstreamStation(rule.upstreamStationId);
       const own = upstreamStation(rule.ownStationId);
-      if (!upstream || upstream.type !== "newapi") return persistUnavailable(rule, window, health("UPSTREAM_DATA_UNAVAILABLE", "上游站点已删除或不是 NewAPI"), origin);
-      if (!own || !own.isOwn || own.type !== "newapi") return persistUnavailable(rule, window, health("OWN_BILLING_UNAVAILABLE", "本站管理员 NewAPI 站点不可用"), origin);
+      if (!upstream || upstream.type !== "newapi") return persistUnavailable(rule, window, health("UPSTREAM_DATA_UNAVAILABLE", "上游站点已删除或不是 NewAPI"), origin, {}, generation);
+      if (!own || !own.isOwn || own.type !== "newapi") return persistUnavailable(rule, window, health("OWN_BILLING_UNAVAILABLE", "本站管理员 NewAPI 站点不可用"), origin, {}, generation);
 
       let metadata;
       try {
         metadata = await metadataFor(upstream, { force });
       } catch (err) {
-        return persistUnavailable(rule, window, toErrorHealth(err), origin);
+        return persistUnavailable(rule, window, toErrorHealth(err), origin, {}, generation);
       }
       const token = metadata.tokens.find((item) => item.id === rule.tokenId);
       if (!token || token.status !== 1) {
-        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", token ? "上游 Key 已停用" : "上游 Key 不存在或无权限读取"), origin, { metadata, token });
+        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", token ? "上游 Key 已停用" : "上游 Key 不存在或无权限读取"), origin, { metadata, token }, generation);
       }
       if (token.name !== rule.tokenName) {
-        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", "上游 Key 名称已变化，无法确认统计归属"), origin, { metadata, token });
+        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", "上游 Key 名称已变化，无法确认统计归属"), origin, { metadata, token }, generation);
       }
       if (!tokenNameIsUnique(metadata, token)) {
-        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", "上游 Key 名称不唯一，无法安全归属统计账单"), origin, { metadata, token });
+        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", "上游 Key 名称不唯一，无法安全归属统计账单"), origin, { metadata, token }, generation);
       }
       if (token.group === "auto" || token.crossGroupRetry) {
-        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", "上游 Key 不再是可核算的固定分组 Key"), origin, { metadata, token });
+        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", "上游 Key 不再是可核算的固定分组 Key"), origin, { metadata, token }, generation);
       }
       if (!metadata.groups[token.group]) {
-        return persistUnavailable(rule, window, health("UPSTREAM_DATA_UNAVAILABLE", "该固定分组已不在上游账号的当前可用分组中"), origin, { metadata, token });
+        return persistUnavailable(rule, window, health("UPSTREAM_DATA_UNAVAILABLE", "该固定分组已不在上游账号的当前可用分组中"), origin, { metadata, token }, generation);
       }
       let segments = await repository.listSegments(rule.id);
-      if (!segments.length) return persistUnavailable(rule, window, health("UPSTREAM_DATA_UNAVAILABLE", "对账规则缺少历史分段"), origin, { metadata, token });
+      if (!segments.length) return persistUnavailable(rule, window, health("UPSTREAM_DATA_UNAVAILABLE", "对账规则缺少历史分段"), origin, { metadata, token }, generation);
       const currentRatio = metadata.groups[token.group]?.ratio ?? null;
       const ratioObservedAt = Date.now();
       if (await repository.backfillMissingSegmentRatios(rule.id, metadata.groups, ratioObservedAt, segments)) {
@@ -546,13 +566,13 @@ export function createReconciliationModule(rt) {
         calculation: calculationFromAmounts(upstreamUsd, downstreamUsd, issues),
         health: resultHealth, generatedAt: new Date().toISOString(),
       };
+      const scopeFingerprint = reconciliationScopeFingerprint(rule, segments);
+      if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return STALE_SCOPE;
       const sourceUnavailable = issues.some((issue) => ["KEY_INVALID_OR_DENIED", "UPSTREAM_DATA_UNAVAILABLE", "OWN_BILLING_UNAVAILABLE", "OWN_FLOW_INCOMPLETE"].includes(issue.code));
-      if (result.calculation.profitUsd != null) {
-        result.lastSuccessfulAt = result.generatedAt;
-        lastSuccessfulResults.set(cacheKey, { result, at: result.generatedAt });
-      }
-      const previous = lastSuccessfulResults.get(cacheKey)
-        || await repository.latestSuccessfulResult(rule.id, window).catch(() => null);
+      if (result.calculation.profitUsd != null) result.lastSuccessfulAt = result.generatedAt;
+      let previous;
+      let successfulLookupFailed = false;
+      try { previous = await repository.latestSuccessfulResult(rule.id, window, scopeFingerprint); } catch { successfulLookupFailed = true; }
       if (sourceUnavailable && previous) {
         const stale = {
           ...previous.result,
@@ -566,25 +586,33 @@ export function createReconciliationModule(rt) {
           lastSuccessfulAt: previous.at || previous.generatedAt,
           generatedAt: result.generatedAt,
         };
-        await persistResult(rule, stale, origin, metadata, token, { saveSnapshots: false });
-        return stale;
+        return (await persistResult(rule, stale, origin, metadata, token, { saveSnapshots: false, scopeFingerprint, generation })) ? stale : STALE_SCOPE;
       }
-      await persistResult(rule, result, origin, metadata, token);
-      return result;
+      // A later unconfirmed anomaly is useful for this response and alerts, but
+      // must not overwrite the same logical-window successful fallback.
+      return (await persistResult(rule, result, origin, metadata, token, {
+        saveSnapshots: result.calculation.profitUsd != null || (!previous && !successfulLookupFailed),
+        scopeFingerprint, generation,
+      })) ? result : STALE_SCOPE;
     })();
-    inflight.set(cacheKey, task);
-    try {
-      const value = await task;
-      resultCache.set(cacheKey, { at: Date.now(), value });
-      return value;
-    } finally {
-      inflight.delete(cacheKey);
+    inflight.set(inflightKey, task);
+    let value;
+    try { value = await task; } finally {
+      if (inflight.get(inflightKey) === task) inflight.delete(inflightKey);
     }
+    if (value === STALE_SCOPE || (ruleGenerations.get(rule.id) || 0) !== generation) {
+      return inspectRule(rule.id, window, { force: true, origin });
+    }
+    cacheResult(cacheKey, value);
+    return value;
   }
 
-  async function persistUnavailable(rule, window, resultHealth, origin, evidence = {}) {
+  async function persistUnavailable(rule, window, resultHealth, origin, evidence = {}, generation = 0) {
     const persistedSegments = await repository.listSegments(rule.id).catch(() => []);
     const currentSegment = persistedSegments[persistedSegments.length - 1] || null;
+    const scopeFingerprint = reconciliationScopeFingerprint(rule, persistedSegments);
+    const currentRule = await repository.getRule(rule.id).catch(() => null);
+    if (!currentRule || reconciliationScopeFingerprint(currentRule, persistedSegments) !== scopeFingerprint || (ruleGenerations.get(rule.id) || 0) !== generation) return STALE_SCOPE;
     const unavailable = {
       rule,
       window,
@@ -616,8 +644,9 @@ export function createReconciliationModule(rt) {
       health: resultHealth,
       generatedAt: new Date().toISOString(),
     };
-    const previous = lastSuccessfulResults.get(resultKey(rule, window))
-      || await repository.latestSuccessfulResult(rule.id, window).catch(() => null);
+    let previous;
+    let successfulLookupFailed = false;
+    try { previous = await repository.latestSuccessfulResult(rule.id, window, scopeFingerprint); } catch { successfulLookupFailed = true; }
     const result = previous ? {
       ...previous.result,
       rule,
@@ -630,13 +659,14 @@ export function createReconciliationModule(rt) {
       lastSuccessfulAt: previous.at || previous.generatedAt,
       generatedAt: unavailable.generatedAt,
     } : unavailable;
-    await persistResult(rule, result, origin, evidence.metadata, evidence.token, { saveSnapshots: !previous });
-    return result;
+    return (await persistResult(rule, result, origin, evidence.metadata, evidence.token, { saveSnapshots: !previous && !successfulLookupFailed, scopeFingerprint, generation })) ? result : STALE_SCOPE;
   }
 
-  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true } = {}) {
+  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, generation = 0 } = {}) {
+    if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return false;
     const snapshots = result.segments?.length ? result.segments : [{ id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health }];
-    const save = () => Promise.all(snapshots.map((segment) => {
+    const save = async () => {
+      const snapshotsToSave = snapshots.map((segment) => {
       const source = metadata && token ? sourceSnapshot(token, metadata, segment.upstream, segment.downstream) : {
         calculationVersion: RECONCILIATION_CALCULATION_VERSION,
         billingSource: RECONCILIATION_BILLING_SOURCE,
@@ -653,10 +683,10 @@ export function createReconciliationModule(rt) {
           })) || [],
         },
       };
-      return repository.saveSnapshot({
+      return {
         ruleId: rule.id,
         segmentId: segment.id,
-        snapshotKey: `${snapshotKey(segment.window)}:${segment.id || "legacy"}`,
+        snapshotKey: `${reconciliationSnapshotIdentity(result.window, scopeFingerprint)}:${segment.id || "legacy"}`,
         windowKind: result.window.preset,
         startMs: segment.window.startMs,
         endMs: segment.window.endMs,
@@ -674,6 +704,7 @@ export function createReconciliationModule(rt) {
         healthDetail: segment.health?.detail || result.health.detail || null,
         source: {
           ...source,
+          scopeFingerprint,
           segment: (() => {
             const evidence = segment.group != null ? segment : result.currentSegment;
             return evidence ? {
@@ -696,12 +727,19 @@ export function createReconciliationModule(rt) {
             calculation: result.calculation,
           } : null,
         },
+      };
       });
-    }));
-    if (saveSnapshots) await save();
+      return repository.saveSnapshotsForScope(rule.id, scopeFingerprint, snapshotsToSave);
+    };
+    if (saveSnapshots) {
+      if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return false;
+      if (!await save()) return false;
+    }
+    if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return false;
     try { await notifyReconciliationHealth(rt, repository, rule, result); } catch (err) {
       console.error("渠道对账通知失败:", err?.message || String(err));
     }
+    return true;
   }
 
   return {
@@ -747,7 +785,7 @@ export function createReconciliationModule(rt) {
       const rule = await repository.getRule(ruleId, { includeArchived: true });
       if (!rule) throw new Error("对账规则不存在");
       const segments = await repository.correctTransition(ruleId, segmentId, effectiveAt);
-      for (const key of resultCache.keys()) if (key.startsWith(`${ruleId}:`)) resultCache.delete(key);
+      clearRuleResults(ruleId);
       return segments;
      },
     async queryRules({ ruleIds = null, ...input } = {}, options = {}) {

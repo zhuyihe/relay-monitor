@@ -12,6 +12,10 @@ function asJson(value) {
   return value;
 }
 
+function escapeLike(value) {
+  return String(value).replace(/[!%_]/g, "!$&");
+}
+
 function normalizeSuccessfulResult(result, healthCode) {
   const calculation = result?.calculation;
   if (!calculation || calculation.profitUsd !== undefined || calculation.riskDifferenceUsd !== undefined) return result;
@@ -57,6 +61,34 @@ function ruleFromRow(row, channels = []) {
       stateChangedAt: channel.status_changed_at_ms == null ? null : Number(channel.status_changed_at_ms),
     })),
   };
+}
+
+function segmentFromRow(row) {
+  return {
+    id: row.id,
+    ruleId: row.rule_id,
+    group: row.group_name,
+    ratio: row.group_ratio == null ? null : Number(row.group_ratio),
+    ratioObservedAt: row.ratio_observed_at_ms == null ? null : Number(row.ratio_observed_at_ms),
+    ratioSource: row.ratio_source || null,
+    effectiveFrom: Number(row.effective_from_ms),
+    effectiveTo: row.effective_to_ms == null ? null : Number(row.effective_to_ms),
+    detectedAt: Number(row.detected_at_ms),
+    timingSource: row.timing_source,
+  };
+}
+
+function isConfirmedSnapshotSource(source) {
+  return source?.result?.calculation?.profitUsd != null;
+}
+
+function snapshotLogicalEnd(source) {
+  const endMs = Number(source?.window?.endMs);
+  return Number.isFinite(endMs) ? endMs : null;
+}
+
+function snapshotGeneratedAt(source) {
+  return String(source?.resultGeneratedAt || "");
 }
 
 export class ReconciliationRepository {
@@ -180,6 +212,7 @@ export class ReconciliationRepository {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
+      await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
       const [result] = await conn.query(
         `UPDATE reconciliation_rules
          SET upstream_station_id = ?, own_station_id = ?, token_id = ?, token_name = ?, fixed_group = ?, timezone = ?, enabled = ?, active_token_key = ?
@@ -206,10 +239,19 @@ export class ReconciliationRepository {
   }
 
   async updateObservedToken(id, { tokenName, fixedGroup = null }) {
-    await this.pool.query(
-      "UPDATE reconciliation_rules SET token_name = ?, fixed_group = COALESCE(?, fixed_group) WHERE id = ? AND archived_at IS NULL",
-      [tokenName, fixedGroup, id]
-    );
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
+      await conn.query(
+        "UPDATE reconciliation_rules SET token_name = ?, fixed_group = COALESCE(?, fixed_group) WHERE id = ? AND archived_at IS NULL",
+        [tokenName, fixedGroup, id]
+      );
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally { conn.release(); }
   }
 
   async listSegments(ruleId) {
@@ -218,18 +260,7 @@ export class ReconciliationRepository {
        WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC`,
       [ruleId]
     );
-    return rows.map((row) => ({
-      id: row.id,
-      ruleId: row.rule_id,
-      group: row.group_name,
-      ratio: row.group_ratio == null ? null : Number(row.group_ratio),
-      ratioObservedAt: row.ratio_observed_at_ms == null ? null : Number(row.ratio_observed_at_ms),
-      ratioSource: row.ratio_source || null,
-      effectiveFrom: Number(row.effective_from_ms),
-      effectiveTo: row.effective_to_ms == null ? null : Number(row.effective_to_ms),
-      detectedAt: Number(row.detected_at_ms),
-      timingSource: row.timing_source,
-    }));
+    return rows.map(segmentFromRow);
   }
 
   async backfillMissingSegmentRatios(ruleId, groups, observedAt = Date.now(), segments = null) {
@@ -244,6 +275,7 @@ export class ReconciliationRepository {
     let updated = 0;
     try {
       await conn.beginTransaction();
+      await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
       const [rows] = await conn.query(
         `SELECT * FROM reconciliation_rule_segments
          WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE`,
@@ -271,6 +303,7 @@ export class ReconciliationRepository {
     let outcome;
     try {
       await conn.beginTransaction();
+      await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
       const [rows] = await conn.query(
         `SELECT * FROM reconciliation_rule_segments
          WHERE rule_id = ? AND effective_to_ms IS NULL FOR UPDATE`, [ruleId]
@@ -320,6 +353,7 @@ export class ReconciliationRepository {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
+      await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
       const [rows] = await conn.query(
         `SELECT * FROM reconciliation_rule_segments
          WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE`,
@@ -343,10 +377,6 @@ export class ReconciliationRepository {
              timing_source = CASE WHEN id = ? THEN 'operator_confirmed' ELSE timing_source END
          WHERE id IN (?, ?)`,
         [previous.id, at, segmentId, at, segmentId, previous.id, segmentId]
-      );
-      await conn.query(
-        "DELETE FROM reconciliation_snapshots WHERE rule_id = ? AND segment_id IN (?, ?)",
-        [ruleId, previous.id, segmentId]
       );
       await conn.commit();
     } catch (err) {
@@ -375,6 +405,7 @@ export class ReconciliationRepository {
     let result;
     try {
       await conn.beginTransaction();
+      await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
       [result] = await conn.query(
         "UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, archived_at = NOW() WHERE id = ? AND archived_at IS NULL",
         [id]
@@ -392,8 +423,8 @@ export class ReconciliationRepository {
     return result.affectedRows > 0;
   }
 
-  async saveSnapshot(snapshot) {
-    await this.pool.query(
+  async saveSnapshot(snapshot, executor = this.pool) {
+    await executor.query(
       `INSERT INTO reconciliation_snapshots (
         rule_id, segment_id, snapshot_key, window_kind, window_start_ms, window_end_ms, local_date,
         upstream_quota, upstream_quota_per_unit, upstream_usd,
@@ -406,13 +437,53 @@ export class ReconciliationRepository {
         downstream_quota = VALUES(downstream_quota), downstream_quota_per_unit = VALUES(downstream_quota_per_unit),
         downstream_usd = VALUES(downstream_usd), difference_usd = VALUES(difference_usd),
         margin_rate = VALUES(margin_rate), coverage = VALUES(coverage), health_code = VALUES(health_code),
-        health_detail = VALUES(health_detail), source = VALUES(source), generated_at = CURRENT_TIMESTAMP`,
+        health_detail = VALUES(health_detail), source = VALUES(source),
+        generated_at = CURRENT_TIMESTAMP`,
       [snapshot.ruleId, snapshot.segmentId ?? null, snapshot.snapshotKey, snapshot.windowKind, snapshot.startMs, snapshot.endMs,
         snapshot.localDate, snapshot.upstreamQuota, snapshot.upstreamQuotaPerUnit, snapshot.upstreamUsd,
         snapshot.downstreamQuota, snapshot.downstreamQuotaPerUnit, snapshot.downstreamUsd,
         snapshot.differenceUsd, snapshot.marginRate, snapshot.coverage, snapshot.healthCode,
         snapshot.healthDetail, JSON.stringify(snapshot.source || null)]
     );
+    return true;
+  }
+
+  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [ruleRows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
+      if (!ruleRows.length) {
+        await conn.commit();
+        return false;
+      }
+      const [channels] = await conn.query("SELECT rule_id, channel_id, channel_name, channel_status, status_observed_at_ms, status_changed_at_ms FROM reconciliation_rule_channels WHERE rule_id = ? ORDER BY channel_name, channel_id FOR UPDATE", [ruleId]);
+      const [segments] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE", [ruleId]);
+      if (reconciliationScopeFingerprint(ruleFromRow(ruleRows[0], channels), segments.map(segmentFromRow)) !== expectedScopeFingerprint) {
+        await conn.commit();
+        return false;
+      }
+      for (const snapshot of snapshots) {
+        const [existing] = await conn.query(
+          "SELECT source FROM reconciliation_snapshots WHERE rule_id = ? AND snapshot_key = ? FOR UPDATE",
+          [ruleId, snapshot.snapshotKey]
+        );
+        const savedSource = asJson(existing[0]?.source);
+        const incomingSource = snapshot.source || null;
+        const savedEnd = snapshotLogicalEnd(savedSource);
+        const incomingEnd = snapshotLogicalEnd(incomingSource);
+        if (isConfirmedSnapshotSource(savedSource)
+          && (!isConfirmedSnapshotSource(incomingSource)
+            || savedEnd > incomingEnd
+            || (savedEnd === incomingEnd && snapshotGeneratedAt(savedSource) >= snapshotGeneratedAt(incomingSource)))) continue;
+        await this.saveSnapshot(snapshot, conn);
+      }
+      await conn.commit();
+      return true;
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally { conn.release(); }
   }
 
   async getAlertState(ruleId, eventCode) {
@@ -442,11 +513,14 @@ export class ReconciliationRepository {
     );
   }
 
-  async latestSuccessfulResult(ruleId, window) {
+  async latestSuccessfulResult(ruleId, window, scopeFingerprint) {
+    if (!scopeFingerprint) throw new Error("成功账单查询必须指定核算口径");
+    const prefix = reconciliationSnapshotIdentity(window, scopeFingerprint);
     const [rows] = await this.pool.query(
       `SELECT * FROM reconciliation_snapshots
-       WHERE rule_id = ? AND window_kind = ? ORDER BY generated_at DESC`,
-      [ruleId, window.preset]
+       WHERE rule_id = ? AND window_kind = ? AND snapshot_key LIKE ? ESCAPE '!' AND window_end_ms <= ?
+       ORDER BY generated_at DESC`,
+      [ruleId, window.preset, `${escapeLike(prefix)}:%`, window.endMs]
     );
     const exact = rows.map((row) => {
       const source = asJson(row.source);
@@ -454,9 +528,9 @@ export class ReconciliationRepository {
     }).filter(({ source, result }) => {
       const saved = source?.window;
       if (!isCurrentReconciliationBillingContract(source)
-        || !source?.result || !source?.resultGeneratedAt || !saved || saved.preset !== window.preset
+        || source?.scopeFingerprint !== scopeFingerprint || !source?.result || !source?.resultGeneratedAt || !saved || saved.preset !== window.preset
         || Number(saved.startMs) !== Number(window.startMs) || saved.timezone !== window.timezone) return false;
-      const sameWindow = window.preset === "today"
+      const sameWindow = window.preset === "today" || window.preset === "7d"
         ? Number(saved.endMs) <= Number(window.endMs)
         : Number(saved.endMs) === Number(window.endMs);
       return sameWindow && result?.calculation?.profitUsd != null;
@@ -497,3 +571,4 @@ export class ReconciliationRepository {
   }
 }
 import { isCurrentReconciliationBillingContract } from "../lib/reconciliation-contract.js";
+import { reconciliationScopeFingerprint, reconciliationSnapshotIdentity } from "../lib/reconciliation-snapshot.js";
