@@ -1,7 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createReconciliationModule, resolveReconciliationWindow } from "./reconciliation.js";
+import { createReconciliationModule, mapWithConcurrency, resolveReconciliationWindow } from "./reconciliation.js";
 import { ReconciliationRepository } from "./reconciliation-repository.js";
+
+test("多规则查询限制同时执行数且保持结果顺序", async () => {
+  let active = 0;
+  let peak = 0;
+  const result = await mapWithConcurrency(Array.from({ length: 18 }, (_, index) => index), 3, async (value) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, value % 3));
+    active -= 1;
+    return value * 2;
+  });
+  assert.equal(peak, 3);
+  assert.deepEqual(result, Array.from({ length: 18 }, (_, index) => index * 2));
+});
 
 test("同一个上游 Key 不能同时建立两条启用对账规则", async () => {
   const calls = [];
