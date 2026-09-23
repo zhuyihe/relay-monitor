@@ -1500,10 +1500,14 @@ textarea {
 }
 
 .reconciliation-table .ant-table-tbody > tr {
+  cursor: default;
+}
+
+.reconciliation-table .ant-table-tbody > tr.reconciliation-row--expandable {
   cursor: pointer;
 }
 
-.reconciliation-table .ant-table-tbody > tr:hover > td {
+.reconciliation-table .ant-table-tbody > tr.reconciliation-row--expandable:hover > td {
   background: var(--jy-primary-soft);
 }
 
@@ -1536,6 +1540,13 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.reconciliation-table-group small {
+  display: block;
+  margin-top: 3px;
+  color: var(--jy-primary);
+  font-size: 12px;
+}
+
 .reconciliation-table-channels {
   color: var(--jy-text-secondary);
 }
@@ -1556,6 +1567,70 @@ textarea {
   margin: 16px 0 0;
 }
 
+.reconciliation-table .ant-table-expanded-row > td {
+  padding: 0 !important;
+  background: var(--jy-surface-muted);
+}
+
+.reconciliation-history {
+  padding: 12px 16px 16px;
+  background: var(--jy-surface-muted);
+  border-left: 2px solid var(--jy-primary);
+}
+
+.reconciliation-history__intro {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  margin-bottom: 10px;
+  color: var(--jy-text-secondary);
+  font-size: 12px;
+}
+
+.reconciliation-history__intro strong {
+  color: var(--jy-text);
+  font-size: 14px;
+}
+
+.reconciliation-history-table .ant-table-container {
+  border: 1px solid var(--jy-border);
+  border-radius: 6px;
+  background: var(--jy-surface);
+}
+
+.reconciliation-history-table .ant-table-thead > tr > th,
+.reconciliation-history-table .ant-table-tbody > tr > td {
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.reconciliation-history-table .ant-table-tbody > tr {
+  cursor: default;
+}
+
+.reconciliation-history-period,
+.reconciliation-history-group,
+.reconciliation-history-result {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.reconciliation-history-period small,
+.reconciliation-history-group small,
+.reconciliation-history-result small {
+  color: var(--jy-text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.reconciliation-history-result {
+  justify-items: end;
+}
+
 .reconciliation-empty {
   padding: 36px 16px;
   border: 1px solid var(--jy-border);
@@ -1570,22 +1645,26 @@ textarea {
   background: var(--jy-surface);
 }
 
+.reconciliation-mobile-item {
+  border-bottom: 1px solid var(--jy-border);
+}
+
+.reconciliation-mobile-item:last-child {
+  border-bottom: 0;
+}
+
 .reconciliation-mobile-row {
   display: grid;
   gap: 12px;
   width: 100%;
   padding: 16px;
   border: 0;
-  border-bottom: 1px solid var(--jy-border);
+  border-bottom: 0;
   background: var(--jy-surface);
   color: var(--jy-text);
   text-align: left;
   cursor: pointer;
   transition: background-color 180ms ease;
-}
-
-.reconciliation-mobile-row:last-child {
-  border-bottom: 0;
 }
 
 .reconciliation-mobile-row:hover,
@@ -1650,6 +1729,60 @@ textarea {
 
 .reconciliation-mobile-row__channels {
   margin-top: -6px;
+}
+
+.reconciliation-mobile-history-toggle {
+  min-height: 44px;
+  margin: 0 12px 8px;
+  color: var(--jy-primary);
+  font-size: 14px;
+}
+
+.reconciliation-history-mobile {
+  display: grid;
+  gap: 0;
+  background: var(--jy-surface);
+}
+
+.reconciliation-history-mobile__row {
+  display: grid;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--jy-border);
+}
+
+.reconciliation-history-mobile__heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 10px;
+  font-size: 14px;
+}
+
+.reconciliation-history-mobile__heading span,
+.reconciliation-history-mobile__period {
+  color: var(--jy-text-secondary);
+  font-size: 12px;
+}
+
+.reconciliation-history-mobile__figures {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.reconciliation-history-mobile__figures span {
+  display: grid;
+  gap: 2px;
+  color: var(--jy-text-secondary);
+}
+
+.reconciliation-history-mobile__figures strong {
+  color: var(--jy-text);
+  font-size: 14px;
+  overflow-wrap: anywhere;
 }
 
 .reconciliation-mobile-pagination {

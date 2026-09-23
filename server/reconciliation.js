@@ -220,6 +220,7 @@ export function createReconciliationModule(rt) {
   const inflight = (rt._reconciliationInflight ||= new Map());
   const metadataCache = (rt._reconciliationMetadataCache ||= new Map());
   const ownChannelsCache = (rt._reconciliationOwnChannelsCache ||= new Map());
+  const ownChannelsRequests = (rt._reconciliationOwnChannelsRequests ||= new Map());
   const lastSuccessfulResults = (rt._reconciliationLastSuccessfulResults ||= new Map());
 
   const resultKey = (rule, window) => window.preset === "today"
@@ -247,8 +248,10 @@ export function createReconciliationModule(rt) {
   async function ownChannelsFor(station, { force = false } = {}) {
     const cached = ownChannelsCache.get(station.id);
     if (!force && cached && Date.now() - cached.at < 10 * 60000) return cached.value;
+    const request = Symbol();
+    ownChannelsRequests.set(station.id, request);
     const value = await queryOwnChannels(station);
-    ownChannelsCache.set(station.id, { at: Date.now(), value });
+    if (ownChannelsRequests.get(station.id) === request) ownChannelsCache.set(station.id, { at: Date.now(), value });
     return value;
   }
 
@@ -702,14 +705,14 @@ export function createReconciliationModule(rt) {
   }
 
   return {
-    async getConfiguration() {
+    async getConfiguration({ forceChannels = false } = {}) {
       const own = ownStation();
       const rules = await repository.listRules();
       const upstreams = rt.store.list().filter((station) => station.type === "newapi" && !station.isOwn && !station.archivedAt).map(publicStation);
       let channels = [];
       let channelsError = null;
       if (own) {
-        try { channels = await ownChannelsFor(own); } catch (err) { channelsError = String(err?.message || err); }
+        try { channels = await ownChannelsFor(own, { force: forceChannels }); } catch { channelsError = "本站渠道目录读取失败，请检查管理员权限或稍后重试"; }
       }
       return { ownStation: publicStation(own), upstreams, channels, channelsError, rules };
     },

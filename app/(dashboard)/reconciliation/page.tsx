@@ -3,13 +3,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PageContainer } from "@ant-design/pro-components";
 import {
-  Alert, App, Button, Collapse, DatePicker, Drawer, Dropdown, Empty, Form, Grid, Input, List,
+  Alert, App, Button, Collapse, DatePicker, Drawer, Dropdown, Empty, Form, Grid, Input,
   Pagination, Popconfirm, Segmented, Select, Space, Table, Tag, Typography,
 } from "antd";
 import { DeleteOutlined, EditOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, RightOutlined, SearchOutlined } from "@ant-design/icons";
 import { api } from "../../../lib/client";
 import {
   formatReconciliationMoney as money,
+  hasReconciliationHistory,
   mergeReconciliationChannels,
   mergeReconciliationSegments,
   filterReconciliationResults,
@@ -79,30 +80,11 @@ function formatTime(value: any, timezone?: string) {
   return new Intl.DateTimeFormat("zh-CN", { timeZone: timezone || "Asia/Shanghai", hour12: false, hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
-function formatRecentTime(value: any, timezone?: string, includeSeconds = false) {
+function formatRecentTime(value: any, timezone?: string, includeSeconds = false, includeYear = false) {
   if (value == null) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return "—";
-  return new Intl.DateTimeFormat("zh-CN", { timeZone: timezone || "Asia/Shanghai", hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", ...(includeSeconds ? { second: "2-digit" } : {}) }).format(date);
-}
-
-function hasSegmentChanges(segments: any[] = []) {
-  return segments.slice(1).some((segment, index) => {
-    const previous = segments[index];
-    if (segment.group !== previous.group) return true;
-    if (previous.ratio == null || segment.ratio == null) return false;
-    const previousRatio = Number(previous.ratio);
-    const nextRatio = Number(segment.ratio);
-    return Number.isFinite(previousRatio) && Number.isFinite(nextRatio) && previousRatio !== nextRatio;
-  });
-}
-
-function segmentWindow(segment: any, timezone?: string) {
-  return segment?.window || {
-    startMs: segment?.effectiveFrom,
-    endMs: segment?.effectiveTo ?? Date.now(),
-    timezone: segment?.timezone || timezone,
-  };
+  return new Intl.DateTimeFormat("zh-CN", { timeZone: timezone || "Asia/Shanghai", hour12: false, ...(includeYear ? { year: "numeric" } : {}), month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", ...(includeSeconds ? { second: "2-digit" } : {}) }).format(date);
 }
 
 function ChannelBreakdown({ item, rate }: { item: any; rate: any }) {
@@ -128,23 +110,40 @@ function ChannelBreakdown({ item, rate }: { item: any; rate: any }) {
   );
 }
 
-function SegmentTimeline({ segments, rate, timezone }: { segments: any[]; rate: any; timezone?: string }) {
-  if (!segments.length) return null;
-  return <List
-    size="small"
-    header="变更历史"
-    dataSource={segments.slice().reverse()}
-    renderItem={(segment: any) => <List.Item>
-      <Space direction="vertical" size={2} style={{ width: "100%" }}>
-        <Text strong>{formatWindow(segmentWindow(segment, timezone))} · {segment.group || "分组未知"} · {ratioLabel(segment.ratio)}</Text>
-        <Text type="secondary" style={{ fontSize: 12 }}>{segment.timingSource === "operator_confirmed" ? "已人工确认" : segment.timingSource === "detected" ? "暂按检测时间生效" : "历史初始分段"}</Text>
-        {segment.ratioSource === "group_catalog" ? <Text type="secondary" style={{ fontSize: 12 }}>倍率由上游分组目录观察补录{segment.ratioObservedAt ? `（${formatTime(segment.ratioObservedAt, timezone)}）` : ""}，不代表历史切换时刻</Text> : null}
-        <Space wrap size="middle" style={{ fontVariantNumeric: "tabular-nums" }}>
-          {(() => { const values = calculationValues(segment.calculation, segment.health); return <><Text>收费 {money(segment.downstream?.amountUsd, rate)}</Text><Text>成本 {money(segment.upstream?.amountUsd, rate)}</Text><Text>{values.confirmed ? "利润" : "风险差额"} {money(values.confirmed ? values.profitUsd : values.riskDifferenceUsd, rate)}</Text><Text>毛利率 {percent(values.marginRate)}</Text></>; })()}
-        </Space>
-      </Space>
-    </List.Item>}
-  />;
+function segmentPeriod(segment: any, timezone?: string) {
+  return `${formatRecentTime(segment.effectiveFrom, timezone, false, true)} — ${segment.effectiveTo == null ? "至今" : formatRecentTime(segment.effectiveTo, timezone, false, true)}`;
+}
+
+function segmentTimingLabel(segment: any) {
+  return segment.timingSource === "detected" ? "切换时间待确认"
+    : segment.timingSource === "operator_confirmed" ? "已人工确认" : "初始分段";
+}
+
+function SegmentHistory({ item, rate, compact, onDetail }: { item: any; rate: any; compact: boolean; onDetail: () => void }) {
+  const timezone = item.window?.timezone || item.rule?.timezone;
+  const segments = mergeReconciliationSegments(item.transitionSegments, item.segments).slice().reverse();
+  const rows = segments.map((segment: any) => ({ ...segment, values: calculationValues(segment.calculation, segment.health) }));
+  const columns: any[] = [
+    { title: "生效区间", key: "period", width: 225, render: (_: any, row: any) => <span className="reconciliation-history-period"><strong>{segmentPeriod(row, timezone)}</strong><small>{row.window ? `本次核算 ${formatWindow(row.window)}` : "查询窗口外 · 无本次金额"}</small></span> },
+    { title: "上游分组 / 倍率", key: "group", width: 185, render: (_: any, row: any) => <span className="reconciliation-history-group"><strong>{row.group || "分组未知"}</strong><small>{ratioLabel(row.ratio)}{row.ratioSource === "group_catalog" ? " · 目录观察值" : ""}</small></span> },
+    { title: "本站收费", key: "income", width: 120, align: "right", render: (_: any, row: any) => <span className="reconciliation-table-amount">{money(row.downstream?.amountUsd, rate)}</span> },
+    { title: "上游成本", key: "cost", width: 120, align: "right", render: (_: any, row: any) => <span className="reconciliation-table-amount">{money(row.upstream?.amountUsd, rate)}</span> },
+    { title: "利润 / 风险差额", key: "profit", width: 145, align: "right", render: (_: any, row: any) => <span className="reconciliation-history-result"><strong className={row.values.confirmed && Number(row.values.profitUsd) < 0 ? "reconciliation-amount--danger" : ""}>{money(row.values.confirmed ? row.values.profitUsd : row.values.riskDifferenceUsd, rate)}</strong><small>{row.window ? row.values.confirmed ? "确认利润" : "风险差额" : "本次窗口外"}</small></span> },
+    { title: "实际毛利率", key: "margin", width: 110, align: "right", render: (_: any, row: any) => <span className="reconciliation-table-amount">{percent(row.values.marginRate)}</span> },
+    { title: "时间依据", key: "timing", width: 135, render: (_: any, row: any) => row.timingSource === "detected" ? <Button type="link" size="small" onClick={onDetail}>待确认 · 去修正</Button> : segmentTimingLabel(row) },
+  ];
+
+  return <section className="reconciliation-history" aria-label={`${item.rule?.tokenName || "上游 Key"} 的分组变更历史`}>
+    <div className="reconciliation-history__intro"><strong>分组与倍率历史 · {rows.length} 段</strong><span>金额仅对应顶部查询窗口；窗口外的历史分段不计入本次金额。</span></div>
+    {compact ? <div className="reconciliation-history-mobile">
+      {rows.map((row: any) => <div key={row.id} className="reconciliation-history-mobile__row">
+        <div className="reconciliation-history-mobile__heading"><strong>{row.group || "分组未知"} · {ratioLabel(row.ratio)}</strong><span>{segmentTimingLabel(row)}</span></div>
+        <div className="reconciliation-history-mobile__period">{segmentPeriod(row, timezone)}{row.window ? ` · 本次核算 ${formatWindow(row.window)}` : " · 查询窗口外"}</div>
+        <div className="reconciliation-history-mobile__figures"><span>收费 <strong>{money(row.downstream?.amountUsd, rate)}</strong></span><span>成本 <strong>{money(row.upstream?.amountUsd, rate)}</strong></span><span>{row.values.confirmed ? "利润" : "风险差额"} <strong>{money(row.values.confirmed ? row.values.profitUsd : row.values.riskDifferenceUsd, rate)}</strong></span><span>毛利率 <strong>{percent(row.values.marginRate)}</strong></span></div>
+        {row.timingSource === "detected" ? <Button type="link" size="small" onClick={onDetail}>修正切换时间</Button> : null}
+      </div>)}
+    </div> : <Table className="reconciliation-history-table" size="small" rowKey={(row: any) => row.id} columns={columns} dataSource={rows} scroll={{ x: 1040 }} pagination={rows.length > 6 ? { pageSize: 6, size: "small", showSizeChanger: false } : false} />}
+  </section>;
 }
 
 function currentGroup(item: any) {
@@ -155,12 +154,21 @@ function currentRatio(item: any) {
   return item?.currentSegment?.ratio ?? item?.upstream?.ratio;
 }
 
+function ruleHistory(item: any) {
+  return mergeReconciliationSegments(item?.transitionSegments, item?.segments);
+}
+
 function channelStateSummary(channels: any[]) {
   const enabled = channels.filter((channel) => channel.state === "enabled").length;
   const disabled = channels.filter((channel) => channel.state === "manual_disabled" || channel.state === "auto_disabled").length;
   const missing = channels.filter((channel) => channel.state === "missing").length;
   const unknown = channels.length - enabled - disabled - missing;
   return `启用 ${enabled} · 禁用 ${disabled} · 缺失 ${missing}${unknown ? ` · 未知 ${unknown}` : ""}`;
+}
+
+function channelLabel(channel: any) {
+  const id = channel.channelId ?? channel.id;
+  return `${channel.name || `渠道 ${id ?? "—"}`} · ID ${id ?? "—"}`;
 }
 
 function SummaryMetric({ label, value, tone }: { label: string; value: string; tone?: string }) {
@@ -170,18 +178,20 @@ function SummaryMetric({ label, value, tone }: { label: string; value: string; t
   </div>;
 }
 
-function RuleMobileItem({ item, rate, upstreams, onDetail }: { item: any; rate: any; upstreams: any; onDetail: () => void }) {
+function RuleMobileItem({ item, rate, upstreams, onDetail, expanded, onExpand }: { item: any; rate: any; upstreams: any; onDetail: () => void; expanded: boolean; onExpand: () => void }) {
   const rule = item.rule || {};
   const channels = mergeReconciliationChannels(rule.channels, item.downstream?.channels);
   const calculation = calculationValues(item.calculation, item.health);
   const profit = calculation.profitUsd == null ? null : Number(calculation.profitUsd);
   const tone = profit == null || !Number.isFinite(profit) ? "" : profit < 0 ? "danger" : "success";
-  return <button type="button" className="reconciliation-mobile-row" onClick={onDetail}>
+  const history = ruleHistory(item);
+  const hasHistory = hasReconciliationHistory(history);
+  return <div className="reconciliation-mobile-item"><button type="button" className="reconciliation-mobile-row" onClick={onDetail}>
     <span className="reconciliation-mobile-row__top">
       <span className="reconciliation-mobile-row__identity">
         <strong>{upstreamName(rule, upstreams)}</strong>
         <span>Key：{rule.tokenName || "未命名 Key"}</span>
-        <span>现用分组：{currentGroup(item)} · {ratioLabel(currentRatio(item))}</span>
+        <span>现用分组 / 上游倍率：{currentGroup(item)} · {ratioLabel(currentRatio(item))}</span>
       </span>
       <span className="reconciliation-mobile-row__finance">
         {statusTag(item)}
@@ -191,8 +201,11 @@ function RuleMobileItem({ item, rate, upstreams, onDetail }: { item: any; rate: 
       <RightOutlined className="reconciliation-mobile-row__chevron" aria-hidden="true" />
     </span>
     <span className="reconciliation-mobile-row__bottom">收费 {money(item.downstream?.amountUsd, rate)} <span aria-hidden="true">·</span> 成本 {money(item.upstream?.amountUsd, rate)} <span aria-hidden="true">·</span> {channels.length} 个渠道</span>
-    {channels.length ? <span className="reconciliation-mobile-row__channels">{channels.map((channel: any) => channel.name || `渠道 ${channel.channelId || channel.id}`).join("、")} · {channelStateSummary(channels)}</span> : null}
-  </button>;
+    {channels.length ? <span className="reconciliation-mobile-row__channels">{channels.map(channelLabel).join("、")} · {channelStateSummary(channels)}</span> : null}
+  </button>
+    {hasHistory ? <Button type="text" className="reconciliation-mobile-history-toggle" onClick={onExpand} aria-expanded={expanded}>{expanded ? "收起" : "查看"}分组历史 · {history.length} 段</Button> : null}
+    {hasHistory && expanded ? <SegmentHistory item={item} rate={rate} compact onDetail={onDetail} /> : null}
+  </div>;
 }
 
 export default function ReconciliationPage() {
@@ -214,6 +227,10 @@ export default function ReconciliationPage() {
   const upstreamId = Form.useWatch("upstreamStationId", form);
   const [keyData, setKeyData] = useState<any>(null);
   const [keyLoading, setKeyLoading] = useState(false);
+  const [channelsRefreshing, setChannelsRefreshing] = useState(false);
+  const [channelsError, setChannelsError] = useState("");
+  const configRequestId = useRef(0);
+  const channelRefreshRequestId = useRef(0);
   const keyRequestId = useRef(0);
   const windowRequestId = useRef(0);
   const windowRequestInFlight = useRef(false);
@@ -224,10 +241,10 @@ export default function ReconciliationPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(1);
+  const [expandedRuleId, setExpandedRuleId] = useState<string | null>(null);
 
   const rate = config?.ownStation?.cnyPerUsd ?? null;
   const results = data?.results || [];
-  const detailTimelineSegments = mergeReconciliationSegments(detail?.transitionSegments, detail?.segments, transitionSegments);
   const totals = useMemo(() => summarizeReconciliationTotals(results), [results]);
   const totalDifference = totals.profitComplete ? totals.profit : null;
   const totalMargin = totals.profitComplete && totals.incomeComplete && totals.income > 0 ? totalDifference / totals.income : null;
@@ -254,10 +271,28 @@ export default function ReconciliationPage() {
   const pageSize = compact ? 4 : 10;
   const currentPage = Math.min(page, Math.max(1, Math.ceil(filteredResults.length / pageSize)));
 
-  const loadConfiguration = async () => {
-    const next = await api("/api/reconciliation/configuration");
-    setConfig(next);
+  const loadConfiguration = async (refreshChannels = false) => {
+    const requestId = ++configRequestId.current;
+    const next = await api(`/api/reconciliation/configuration${refreshChannels ? "?refreshChannels=true" : ""}`);
+    if (requestId !== configRequestId.current) return null;
+    setConfig((previous: any) => refreshChannels && next.channelsError && previous
+      ? { ...next, channels: previous.channels }
+      : next);
     return next;
+  };
+
+  const refreshChannelOptions = async () => {
+    const requestId = ++channelRefreshRequestId.current;
+    setChannelsRefreshing(true);
+    setChannelsError("");
+    try {
+      const next = await loadConfiguration(true);
+      if (requestId === channelRefreshRequestId.current && next?.channelsError) setChannelsError(next.channelsError);
+    } catch {
+      if (requestId === channelRefreshRequestId.current) setChannelsError("本站渠道刷新失败，请稍后重试");
+    } finally {
+      if (requestId === channelRefreshRequestId.current) setChannelsRefreshing(false);
+    }
   };
 
   const loadWindow = async (window = activeWindow, force = false) => {
@@ -352,6 +387,7 @@ export default function ReconciliationPage() {
     form.resetFields();
     form.setFieldsValue({ timezone: "Asia/Shanghai" });
     setDrawerOpen(true);
+    void refreshChannelOptions();
   };
 
   const openEdit = (rule: any) => {
@@ -367,6 +403,7 @@ export default function ReconciliationPage() {
       timezone: rule.timezone || "Asia/Shanghai",
     });
     setDrawerOpen(true);
+    void refreshChannelOptions();
   };
 
   const saveRule = async (values: any) => {
@@ -442,14 +479,17 @@ export default function ReconciliationPage() {
   const columns: any[] = [
     { title: "状态", key: "status", width: 112, render: (_: any, item: any) => statusTag(item) },
     { title: "上游 / Key", key: "upstream", width: 180, sorter: (a: any, b: any) => upstreamName(a.rule, config?.upstreams).localeCompare(upstreamName(b.rule, config?.upstreams)), render: (_: any, item: any) => <span className="reconciliation-table-identity"><strong>{upstreamName(item.rule, config?.upstreams)}</strong><small>{item.rule?.tokenName || "未命名 Key"}</small></span> },
-    { title: "当前分组", key: "group", width: 175, sorter: (a: any, b: any) => currentGroup(a).localeCompare(currentGroup(b)), render: (_: any, item: any) => <span className="reconciliation-table-group">{currentGroup(item)} · {ratioLabel(currentRatio(item))}</span> },
-    { title: "关联渠道", key: "channels", width: 190, sorter: (a: any, b: any) => (a.rule?.channels?.length || 0) - (b.rule?.channels?.length || 0), render: (_: any, item: any) => { const channels = mergeReconciliationChannels(item.rule?.channels, item.downstream?.channels); return <span className="reconciliation-table-channels">{channels.map((channel: any) => channel.name || `渠道 ${channel.channelId || channel.id}`).join("、") || "—"}{channels.length ? <small>{channelStateSummary(channels)}</small> : null}</span>; } },
+    { title: "当前分组 / 上游倍率", key: "group", width: 185, sorter: (a: any, b: any) => currentGroup(a).localeCompare(currentGroup(b)), render: (_: any, item: any) => { const history = ruleHistory(item); return <span className="reconciliation-table-group">{currentGroup(item)} · {ratioLabel(currentRatio(item))}{hasReconciliationHistory(history) ? <small>变更历史 · {history.length} 段</small> : null}</span>; } },
+    { title: "关联渠道", key: "channels", width: 190, sorter: (a: any, b: any) => (a.rule?.channels?.length || 0) - (b.rule?.channels?.length || 0), render: (_: any, item: any) => { const channels = mergeReconciliationChannels(item.rule?.channels, item.downstream?.channels); return <span className="reconciliation-table-channels">{channels.map(channelLabel).join("、") || "—"}{channels.length ? <small>{channelStateSummary(channels)}</small> : null}</span>; } },
     { title: "本站收费", key: "income", width: 128, align: "right", sorter: (a: any, b: any) => Number(a.downstream?.amountUsd || 0) - Number(b.downstream?.amountUsd || 0), render: (_: any, item: any) => <span className="reconciliation-table-amount">{money(item.downstream?.amountUsd, rate)}</span> },
     { title: "上游成本", key: "cost", width: 128, align: "right", sorter: (a: any, b: any) => Number(a.upstream?.amountUsd || 0) - Number(b.upstream?.amountUsd || 0), render: (_: any, item: any) => <span className="reconciliation-table-amount">{money(item.upstream?.amountUsd, rate)}</span> },
     { title: "确认利润", key: "profit", width: 128, align: "right", sorter: (a: any, b: any) => Number(calculationValues(a.calculation, a.health).profitUsd || 0) - Number(calculationValues(b.calculation, b.health).profitUsd || 0), render: (_: any, item: any) => { const profit = calculationValues(item.calculation, item.health).profitUsd; return <strong className={`reconciliation-table-amount ${profit == null ? "" : Number(profit) < 0 ? "reconciliation-amount--danger" : "reconciliation-amount--success"}`}>{money(profit, rate)}</strong>; } },
     { title: "毛利率", key: "margin", width: 94, align: "right", sorter: (a: any, b: any) => Number(calculationValues(a.calculation, a.health).marginRate || 0) - Number(calculationValues(b.calculation, b.health).marginRate || 0), render: (_: any, item: any) => { const margin = calculationValues(item.calculation, item.health).marginRate; return <span className={`reconciliation-table-amount ${margin == null ? "" : Number(margin) < 0 ? "reconciliation-amount--danger" : ""}`}>{percent(margin)}</span>; } },
     { title: "最近成功", key: "recent", width: 120, align: "right", sorter: (a: any, b: any) => Number(new Date(a.lastSuccessfulAt || 0)) - Number(new Date(b.lastSuccessfulAt || 0)), render: (_: any, item: any) => <span className="reconciliation-table-amount">{formatRecentTime(item.lastSuccessfulAt, item.window?.timezone)}</span> },
-    { title: "", key: "actions", width: 48, align: "center", render: (_: any, item: any) => <Dropdown trigger={["click"]} menu={{ items: [{ key: "detail", label: "查看详情" }, { key: "edit", label: "编辑规则" }, { key: "stop", label: "停止并释放", danger: true }], onClick: ({ key, domEvent }: any) => { domEvent.stopPropagation(); if (key === "detail") openDetail(item); else if (key === "edit") openEdit(item.rule); else modal.confirm({ title: "停止并释放此对账规则？", content: "停止后会释放此 Key 和关联销售渠道；历史快照会保留。", okText: "停止并释放", okButtonProps: { danger: true }, cancelText: "取消", onOk: () => stopRule(item.rule.id) }); } }}><Button type="text" icon={<MoreOutlined />} aria-label={`操作 ${item.rule?.tokenName || "Key"} 的规则`} onClick={(event) => event.stopPropagation()} /></Dropdown> },
+    { title: "操作", key: "actions", width: 100, align: "center", render: (_: any, item: any) => <Space size={0} onClick={(event) => event.stopPropagation()}>
+      <Button type="link" size="small" aria-label={`查看 ${item.rule?.tokenName || "Key"} 的对账详情`} onClick={() => openDetail(item)}>详情</Button>
+      <Dropdown trigger={["click"]} menu={{ items: [{ key: "edit", label: "编辑规则" }, { key: "stop", label: "停止并释放", danger: true }], onClick: ({ key, domEvent }: any) => { domEvent.stopPropagation(); if (key === "edit") openEdit(item.rule); else modal.confirm({ title: "停止并释放此对账规则？", content: "停止后会释放此 Key 和关联销售渠道；历史快照会保留。", okText: "停止并释放", okButtonProps: { danger: true }, cancelText: "取消", onOk: () => stopRule(item.rule.id) }); } }}><Button type="text" icon={<MoreOutlined />} aria-label={`操作 ${item.rule?.tokenName || "Key"} 的规则`} /></Dropdown>
+    </Space> },
   ];
 
   if (loading) return <AppState kind="loading" title="正在读取渠道对账" description="正在汇总上游实际消费与本站渠道收费。" />;
@@ -504,9 +544,9 @@ export default function ReconciliationPage() {
       </section>
 
       <div className="reconciliation-list-tools">
-        <Input className="reconciliation-search" prefix={<SearchOutlined />} allowClear value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="搜索上游、Key 或渠道" aria-label="搜索上游、Key 或渠道" />
+        <Input className="reconciliation-search" prefix={<SearchOutlined />} allowClear value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); setExpandedRuleId(null); }} placeholder="搜索上游、Key、渠道名称或 ID" aria-label="搜索上游、Key、渠道名称或 ID" />
         <div className="reconciliation-status-filter mobile-scroll">
-          <Segmented value={statusFilter} onChange={(value) => { setStatusFilter(String(value)); setPage(1); }} options={[
+          <Segmented value={statusFilter} onChange={(value) => { setStatusFilter(String(value)); setPage(1); setExpandedRuleId(null); }} options={[
             { label: `全部 ${filterCounts.all}`, value: "all" },
             { label: `需处理 ${filterCounts.attention}`, value: "attention" },
             { label: `负毛利 ${filterCounts.negative}`, value: "negative" },
@@ -521,11 +561,11 @@ export default function ReconciliationPage() {
         : !filteredResults.length ? <div className="reconciliation-empty"><Empty description={statusFilter === "attention" && !search ? "当前无需处理事项" : "没有匹配的对账规则"} image={Empty.PRESENTED_IMAGE_SIMPLE}><Button onClick={() => { setSearch(""); setStatusFilter("all"); setPage(1); }}>查看全部规则</Button></Empty></div>
         : compact ? <>
           <div className="reconciliation-mobile-list">
-            {filteredResults.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((item: any) => <RuleMobileItem key={item.rule?.id} item={item} rate={rate} upstreams={config?.upstreams} onDetail={() => openDetail(item)} />)}
+            {filteredResults.slice((currentPage - 1) * pageSize, currentPage * pageSize).map((item: any) => <RuleMobileItem key={item.rule?.id} item={item} rate={rate} upstreams={config?.upstreams} onDetail={() => openDetail(item)} expanded={expandedRuleId === item.rule?.id} onExpand={() => setExpandedRuleId(expandedRuleId === item.rule?.id ? null : item.rule?.id)} />)}
           </div>
           <div className="reconciliation-mobile-pagination">
             <span>显示 {Math.min(filteredResults.length, currentPage * pageSize)} / {filteredResults.length} 条规则</span>
-            <Space size={6}><Button disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)}>上一页</Button><Button disabled={currentPage * pageSize >= filteredResults.length} onClick={() => setPage(currentPage + 1)}>下一页 <RightOutlined /></Button></Space>
+            <Space size={6}><Button disabled={currentPage <= 1} onClick={() => { setPage(currentPage - 1); setExpandedRuleId(null); }}>上一页</Button><Button disabled={currentPage * pageSize >= filteredResults.length} onClick={() => { setPage(currentPage + 1); setExpandedRuleId(null); }}>下一页 <RightOutlined /></Button></Space>
           </div>
         </> : <Table
           className="reconciliation-table"
@@ -533,10 +573,18 @@ export default function ReconciliationPage() {
           dataSource={filteredResults}
           columns={columns}
           rowKey={(item: any) => item.rule?.id}
-          scroll={{ x: 1250 }}
+          rowClassName={(item: any) => hasReconciliationHistory(ruleHistory(item)) ? "reconciliation-row--expandable" : ""}
+          scroll={{ x: 1300 }}
+          expandable={{
+            expandedRowKeys: expandedRuleId ? [expandedRuleId] : [],
+            rowExpandable: (item: any) => hasReconciliationHistory(ruleHistory(item)),
+            expandedRowRender: (item: any) => <SegmentHistory item={item} rate={rate} compact={false} onDetail={() => openDetail(item)} />,
+            onExpand: (expanded: boolean, item: any) => setExpandedRuleId(expanded ? item.rule?.id : null),
+            expandRowByClick: true,
+          }}
           pagination={{ current: currentPage, pageSize, showSizeChanger: false, total: filteredResults.length, showTotal: (total, range) => `显示 ${range[0]}–${range[1]} / ${total} 条规则` }}
-          onChange={(pagination) => setPage(pagination.current || 1)}
-          onRow={(item: any) => ({ tabIndex: 0, onClick: () => openDetail(item), onKeyDown: (event: any) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openDetail(item); } } })}
+          onChange={(pagination) => { setPage(pagination.current || 1); setExpandedRuleId(null); }}
+          onRow={(item: any) => ({ tabIndex: hasReconciliationHistory(ruleHistory(item)) ? 0 : undefined, onKeyDown: (event: any) => { if (hasReconciliationHistory(ruleHistory(item)) && event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); setExpandedRuleId(expandedRuleId === item.rule?.id ? null : item.rule?.id); } } })}
         />}
 
       <Drawer className="reconciliation-detail-drawer" title={detail?.rule?.tokenName ? `${detail.rule.tokenName} · 对账详情` : "对账详情"} open={!!detail} onClose={() => setDetail(null)} width={compact ? "100%" : 520} aria-label="对账详情抽屉" extra={detail ? <Space size={4}><Button type="text" icon={<EditOutlined />} aria-label={`编辑 ${detail.rule?.tokenName || "Key"} 的规则`} onClick={() => { openEdit(detail.rule); setDetail(null); }} /><Popconfirm title="停止并释放此对账规则？" description="停止后会释放 Key 和关联渠道，历史快照保留。" okText="停止并释放" cancelText="取消" onConfirm={async () => { if (await stopRule(detail.rule.id)) setDetail(null); }}><Button danger type="text" icon={<DeleteOutlined />} aria-label={`停止并释放 ${detail.rule?.tokenName || "Key"} 的规则`} /></Popconfirm></Space> : null}>
@@ -546,7 +594,7 @@ export default function ReconciliationPage() {
           {detail.health?.stale ? <Detail label="成功金额覆盖窗口" value={`${formatWindow(detail.lastSuccessfulWindow || detail.window)}（${(detail.lastSuccessfulWindow || detail.window)?.timezone}）`} /> : null}
           <Detail label="上游账号" value={upstreamName(detail.rule, config?.upstreams)} />
           <Detail label="上游 Key / 分组" value={`${detail.rule?.tokenName || "—"} · ${detail.upstream?.group || detail.currentSegment?.group || detail.rule?.fixedGroup || "—"}`} />
-          <Detail label="关联销售渠道" value={(detail.rule?.channels?.length ? detail.rule.channels : detail.downstream?.channels || []).map((channel: any) => channel.name || `渠道 ${channel.channelId || channel.id}`).join("、") || "未配置渠道"} />
+          <Detail label="关联销售渠道" value={(detail.rule?.channels?.length ? detail.rule.channels : detail.downstream?.channels || []).map(channelLabel).join("、") || "未配置渠道"} />
           <Detail label="当前倍率" value={(detail.upstream?.ratio ?? detail.currentSegment?.ratio) == null ? "未返回" : `${detail.upstream?.ratio ?? detail.currentSegment?.ratio}×`} />
           <Detail label="本站收费" value={money(detail.downstream?.amountUsd, rate)} />
           <Detail label="上游成本" value={money(detail.upstream?.amountUsd, rate)} />
@@ -566,7 +614,6 @@ export default function ReconciliationPage() {
             <DatePicker showTime value={transitionAt} onChange={(value) => setTransitionAt(value)} placeholder="实际切换时间" />
             <Button onClick={correctTransition}>修正切换时间</Button>
           </Space> : null}
-          {hasSegmentChanges(detailTimelineSegments) ? <SegmentTimeline segments={detailTimelineSegments} rate={rate} timezone={detail.window?.timezone || detail.rule?.timezone} /> : null}
           <ChannelBreakdown item={detail} rate={rate} />
         </Space> : null}
       </Drawer>
@@ -580,12 +627,13 @@ export default function ReconciliationPage() {
           <Form.Item label="固定分组 Key" name="tokenId" extra={editing ? "已锁定；同一 Key 的分组或倍率变化由系统自动记录为新分段。" : "仅显示固定分组、未启用跨组重试且当前可用的 Key。"} rules={[{ required: true, message: "请选择固定分组 Key" }]}>
             <Select showSearch optionFilterProp="label" loading={keyLoading} disabled={!!editing || !upstreamId || keyLoading} placeholder={upstreamId ? "选择上游 Key" : "请先选择上游账号"} options={(keyData?.tokens || []).map((item: any) => ({ value: item.id, disabled: item.status !== 1 || item.group === "auto" || item.crossGroupRetry, label: `${item.name} · ${item.group || "无分组"}${keyData?.groups?.[item.group]?.ratio != null ? ` · ${keyData.groups[item.group].ratio}×` : ""}` }))} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
           </Form.Item>
-          <Form.Item label="本站销售渠道" name="salesChannelIds" extra="一个渠道同一时刻只能归属一条启用规则。" rules={[{ required: true, type: "array", min: 1, message: "请至少选择一个本站渠道" }]}>
-            <Select showSearch optionFilterProp="label" mode="multiple" placeholder="选择一个或多个渠道" options={(config?.channels || []).map((channel: any) => {
+          <Form.Item label="本站销售渠道" name="salesChannelIds" extra={<span>一个渠道同一时刻只能归属一条启用规则。<Button type="link" size="small" loading={channelsRefreshing} onClick={() => void refreshChannelOptions()}>刷新渠道</Button></span>} rules={[{ required: true, type: "array", min: 1, message: "请至少选择一个本站渠道" }]}>
+            <Select showSearch optionFilterProp="label" mode="multiple" loading={channelsRefreshing} disabled={channelsRefreshing || !!channelsError} placeholder={channelsRefreshing ? "正在刷新本站渠道" : "选择一个或多个渠道"} options={(config?.channels || []).map((channel: any) => {
               const occupiedBy = unavailableChannels.get(Number(channel.id));
-              return { value: Number(channel.id), disabled: !!occupiedBy, label: `${channel.name || `渠道 ${channel.id}`}${occupiedBy ? `（已用于 ${occupiedBy}）` : ""}` };
+              return { value: Number(channel.id), disabled: !!occupiedBy, label: `${channelLabel(channel)}${occupiedBy ? `（已用于 ${occupiedBy}）` : ""}` };
             })} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
           </Form.Item>
+          {channelsError ? <Alert type="error" showIcon message={`本站渠道刷新失败：${channelsError}`} style={{ marginBottom: 16 }} /> : null}
           <Form.Item label="对账时区" name="timezone" extra="“今天”从该时区的 00:00 计算到当前时刻。">
             <Input placeholder="Asia/Shanghai" />
           </Form.Item>
