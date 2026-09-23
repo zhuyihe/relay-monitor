@@ -17,6 +17,71 @@ test("多规则查询限制同时执行数且保持结果顺序", async () => {
   assert.deepEqual(result, Array.from({ length: 18 }, (_, index) => index * 2));
 });
 
+test("打开添加规则时可强制刷新本站渠道目录", async (t) => {
+  let requests = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    requests += 1;
+    return {
+      status: 200,
+      text: async () => JSON.stringify({ success: true, data: { total: 1, items: [
+        { id: requests === 1 ? 312 : 333, name: requests === 1 ? "小福星-awsb-2.9" : "小福星-awsb_3-2.9", status: 1 },
+      ] } }),
+    };
+  });
+  const own = { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "test-token" };
+  const reconciliation = createReconciliationModule({
+    pool: { async query() { return [[]]; } },
+    store: { list: () => [own], get: () => own },
+  });
+
+  assert.deepEqual((await reconciliation.getConfiguration()).channels.map((channel) => channel.id), [312]);
+  assert.deepEqual((await reconciliation.getConfiguration()).channels.map((channel) => channel.id), [312]);
+  assert.deepEqual((await reconciliation.getConfiguration({ forceChannels: true })).channels.map((channel) => channel.id), [333]);
+  assert.equal(requests, 2);
+});
+
+test("并发强制刷新时较晚完成的旧目录不能覆盖最新渠道缓存", async (t) => {
+  const pending = [];
+  t.mock.method(globalThis, "fetch", () => new Promise((resolve) => pending.push(resolve)));
+  const own = { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "test-token" };
+  const reconciliation = createReconciliationModule({
+    pool: { async query() { return [[]]; } },
+    store: { list: () => [own], get: () => own },
+  });
+  const responseFor = (id) => ({
+    status: 200,
+    text: async () => JSON.stringify({ success: true, data: { total: 1, items: [{ id, name: `渠道 ${id}`, status: 1 }] } }),
+  });
+
+  const older = reconciliation.getConfiguration({ forceChannels: true });
+  const newer = reconciliation.getConfiguration({ forceChannels: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(pending.length, 2);
+  pending[1](responseFor(333));
+  assert.deepEqual((await newer).channels.map((channel) => channel.id), [333]);
+  pending[0](responseFor(312));
+  assert.deepEqual((await older).channels.map((channel) => channel.id), [312]);
+  assert.deepEqual((await reconciliation.getConfiguration()).channels.map((channel) => channel.id), [333]);
+  assert.equal(pending.length, 2);
+});
+
+test("渠道目录失败时配置接口不回显上游错误中的令牌", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => ({
+    status: 500,
+    text: async () => JSON.stringify({ success: false, message: "Authorization: Bearer sk-sensitive-value" }),
+  }));
+  const own = { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "test-token" };
+  const reconciliation = createReconciliationModule({
+    pool: { async query() { return [[]]; } },
+    store: { list: () => [own], get: () => own },
+  });
+
+  const configuration = await reconciliation.getConfiguration();
+  assert.equal(configuration.channels.length, 0);
+  assert.match(configuration.channelsError, /本站渠道目录读取失败/);
+  assert.doesNotMatch(JSON.stringify(configuration), /sk-sensitive-value/);
+});
+
 test("同一个上游 Key 不能同时建立两条启用对账规则", async () => {
   const calls = [];
   const repository = new ReconciliationRepository({
@@ -192,10 +257,11 @@ test("编辑渠道或时区保留 Key 展示与分组，且不读取上游 Key �
   const { createServer } = await import("node:http");
   const paths = [];
   const server = createServer((request, response) => {
-    const path = new URL(request.url, "http://x").pathname;
+    const url = new URL(request.url, "http://x");
+    const path = url.pathname;
     paths.push(path);
     const body = path === "/api/channel/"
-      ? { success: true, data: { items: [{ id: 2, name: "渠道二", status: 1 }] } }
+      ? { success: true, data: { items: url.searchParams.get("p") === "1" ? [{ id: 2, name: "渠道二", status: 1 }] : [] } }
       : { success: false, message: "upstream metadata must not be read" };
     response.writeHead(body.success ? 200 : 500, { "Content-Type": "application/json" });
     response.end(JSON.stringify(body));
@@ -234,7 +300,7 @@ test("编辑渠道或时区保留 Key 展示与分组，且不读取上游 Key �
   const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id) } });
   const updated = await module.updateRule(row.id, { upstreamStationId: "upstream", tokenId: 9, salesChannelIds: [2], timezone: "America/New_York" });
 
-  assert.deepEqual(paths, ["/api/channel/"]);
+  assert.deepEqual(paths, ["/api/channel/", "/api/channel/"]);
   assert.equal(updated.tokenName, "stable-key");
   assert.equal(updated.fixedGroup, "old-group");
   assert.equal(updated.timezone, "America/New_York");
@@ -466,7 +532,8 @@ test("同名上游 Key 无法唯一归属时 fail closed，不能请求 stat 或
 test("创建规则遇到同名上游 Key 时 fail closed", async (t) => {
   const { createServer } = await import("node:http");
   const server = createServer((request, response) => {
-    const path = new URL(request.url, "http://x").pathname;
+    const url = new URL(request.url, "http://x");
+    const path = url.pathname;
     const body = path === "/api/status" ? { success: true, data: { quota_per_unit: 100 } }
       : path === "/api/user/self" ? { success: true, data: { id: 1 } }
         : path === "/api/user/self/groups" ? { success: true, data: { fixed: { ratio: 1 } } }
@@ -474,7 +541,7 @@ test("创建规则遇到同名上游 Key 时 fail closed", async (t) => {
             { id: 9, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
             { id: 10, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
           ] } }
-            : path === "/api/channel/" ? { success: true, data: { items: [{ id: 1, name: "渠道", status: 1 }] } }
+            : path === "/api/channel/" ? { success: true, data: { items: url.searchParams.get("p") === "1" ? [{ id: 1, name: "渠道", status: 1 }] : [] } }
               : { success: false };
     response.writeHead(body.success === false ? 404 : 200, { "Content-Type": "application/json" });
     response.end(JSON.stringify(body));
@@ -517,7 +584,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
         ? { success: false, message: "channel stat unavailable" }
         : { success: true, data: { quota: start === 1000 ? 200 : 100 } };
     }
-    else if (url.pathname === "/api/channel/") body = { success: true, data: { items: [{ id: 1, name: "渠道", status: 2 }] } };
+    else if (url.pathname === "/api/channel/") body = { success: true, data: { items: url.searchParams.get("p") === "1" ? [{ id: 1, name: "渠道", status: 2 }] : [] } };
     else body = { success: false };
     response.writeHead(body.success === false ? 404 : 200, { "Content-Type": "application/json" });
     response.end(JSON.stringify(body));
