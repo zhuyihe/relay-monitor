@@ -3,15 +3,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PageContainer } from "@ant-design/pro-components";
 import {
-  Alert, App, Button, DatePicker, Drawer, Dropdown, Empty, Form, Grid, Input, List,
+  Alert, App, Button, Collapse, DatePicker, Drawer, Dropdown, Empty, Form, Grid, Input, List,
   Pagination, Popconfirm, Segmented, Select, Space, Table, Tag, Typography,
 } from "antd";
 import { DeleteOutlined, EditOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, RightOutlined, SearchOutlined } from "@ant-design/icons";
-import { api, cny, usd } from "../../../lib/client";
+import { api } from "../../../lib/client";
 import {
+  formatReconciliationMoney as money,
   mergeReconciliationChannels,
   mergeReconciliationSegments,
   filterReconciliationResults,
+  reconciliationBillingBasis,
   reconciliationCalculationValues as calculationValues,
   reconciliationRowFlags,
   summarizeReconciliationTotals,
@@ -38,14 +40,6 @@ const channelStateLabel: Record<string, string> = {
   enabled: "启用", manual_disabled: "手动禁用", auto_disabled: "自动禁用", missing: "已缺失", unknown: "状态未知",
 };
 
-function money(amount: any, rate: any) {
-  if (amount == null) return "—";
-  const value = Number(amount);
-  const cnyRate = Number(rate);
-  if (!Number.isFinite(value)) return "—";
-  return Number.isFinite(cnyRate) && cnyRate > 0 ? cny(value * cnyRate) : usd(value);
-}
-
 function percent(value: any) {
   if (value == null) return "—";
   const number = Number(value);
@@ -62,8 +56,10 @@ function formatWindow(window: any) {
 }
 
 function statusTag(item: any) {
-  const { status } = reconciliationRowFlags(item);
-  return <span className={`reconciliation-status reconciliation-status--${status.tone}`}>{status.label}</span>;
+  const { status, secondaryStatuses } = reconciliationRowFlags(item);
+  return <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
+    {[status, ...secondaryStatuses].map((badge) => <span key={badge.label} className={`reconciliation-status reconciliation-status--${badge.tone}`}>{badge.label}</span>)}
+  </span>;
 }
 
 function upstreamName(rule: any, upstreams: any) {
@@ -556,6 +552,12 @@ export default function ReconciliationPage() {
           <Detail label="上游成本" value={money(detail.upstream?.amountUsd, rate)} />
           <Detail label={calculationValues(detail.calculation, detail.health).confirmed ? "确认利润" : "风险差额（未计入确认利润）"} value={money(calculationValues(detail.calculation, detail.health).confirmed ? calculationValues(detail.calculation, detail.health).profitUsd : calculationValues(detail.calculation, detail.health).riskDifferenceUsd, rate)} />
           <Detail label="毛利率" value={percent(calculationValues(detail.calculation, detail.health).marginRate)} />
+          <Collapse size="small" ghost items={[{ key: "billing-basis", label: "查看原始账单与计算依据", children: <Space direction="vertical" size={10}>
+            <Detail label="本站收费（美元原值）" value={reconciliationBillingBasis(detail.segments?.length === 1 ? detail.downstream : { amountUsd: detail.downstream?.amountUsd })} />
+            <Detail label="上游成本（美元原值）" value={reconciliationBillingBasis(detail.segments?.length === 1 ? detail.upstream : { amountUsd: detail.upstream?.amountUsd })} />
+            <Detail label={calculationValues(detail.calculation, detail.health).confirmed ? "确认利润（美元原值）" : "风险差额（美元原值）"} value={reconciliationBillingBasis({ amountUsd: calculationValues(detail.calculation, detail.health).confirmed ? calculationValues(detail.calculation, detail.health).profitUsd : calculationValues(detail.calculation, detail.health).riskDifferenceUsd })} />
+            <Text type="secondary" style={{ fontSize: 12 }}>利润 = 本站收费 − 上游成本；毛利率 = 利润 ÷ 本站收费。计算使用未舍入金额，跨分段时先分别核算再汇总。</Text>
+          </Space> }]} />
           <Detail label="本站收费来源" value={detail.downstream?.amountUsd == null ? "未取得" : detail.downstream.billingSource === RECONCILIATION_BILLING_SOURCE ? RECONCILIATION_BILLING_SOURCE_LABEL : "旧版来源（待重新核算）"} />
           <Detail label="渠道账单覆盖" value={percent(detail.downstream?.billingCoverage ?? detail.downstream?.coverage)} />
           {(detail.health?.issues || []).map((issue: any, index: number) => <Alert key={`${issue.code}-${index}`} type={reconciliationHealthMeta(issue.code).tone === "error" ? "error" : "warning"} showIcon message={HEALTH_LABEL(issue.code)} description={issue.detail} />)}
