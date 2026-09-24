@@ -1,5 +1,6 @@
 // 利润等式条（招牌组件）：收入 − 用量成本 − 固定成本 = 毛利。
-// 数据不全时带 ≈ 并在下方说明原因；没设置自营站点时收入和毛利留空并给出入口。
+// 数据不全时带 ≈ 并在下方说明原因；收入算不出来（没设置自营站点、超出范围、读取失败）时
+// 收入和毛利留空，下方说明原因和下一步，成本照常显示。
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { MINUS, formatMoney, formatPct, splitTotal } from "../../lib/format";
@@ -96,6 +97,9 @@ export function ProfitEquation({
   reasons = [],
   unconfigured = false,
   configureHref = "/my",
+  revenueEmpty = "未设置",
+  profitNote,
+  notice,
   loading = false,
   partialTail = "实际毛利会比这里低。",
 }: {
@@ -109,14 +113,19 @@ export function ProfitEquation({
   profit?: number | null;
   // 数据不完整的原因，每条一句，句号结尾
   reasons?: ReactNode[];
+  // 收入算不出来：收入、毛利留空
   unconfigured?: boolean;
   configureHref?: string;
+  // 以下三项只在 unconfigured 时使用，默认是"没有设置自营站点"的说法
+  revenueEmpty?: string;
+  profitNote?: ReactNode;
+  notice?: ReactNode;
   loading?: boolean;
   // 不完整说明的最后一句；缺的是成本时毛利偏高，缺的是汇率等时方向不定
   partialTail?: ReactNode;
 }) {
   const rev = unconfigured ? null : revenue.value;
-  const approx = !!(revenue.approx || usage.approx || fixed.approx);
+  const approx = !!((!unconfigured && revenue.approx) || usage.approx || fixed.approx);
   const partial = approx || reasons.length > 0;
   const p =
     profit !== undefined
@@ -128,7 +137,7 @@ export function ProfitEquation({
   const margin = rev && p != null ? p / rev : null;
 
   let resultNote: ReactNode;
-  if (unconfigured) resultNote = "设置自营站点后计算";
+  if (unconfigured) resultNote = profitNote ?? "设置自营站点后计算";
   else if (loss) resultNote = <StatusText level="crit">亏损</StatusText>;
   else if (margin != null) resultNote = `毛利率 ${partial ? "≈ " : ""}${formatPct(margin)}`;
 
@@ -155,8 +164,8 @@ export function ProfitEquation({
         <Term
           label="收入"
           color="var(--jy-s1)"
-          term={unconfigured ? { value: null, note: "没有自营站点" } : revenue}
-          empty="未设置"
+          term={unconfigured ? { value: null, note: revenue.note ?? "没有自营站点", href: revenue.href } : revenue}
+          empty={revenueEmpty}
           loading={loading}
         />
         <Op ch={MINUS} spoken="减" />
@@ -176,10 +185,14 @@ export function ProfitEquation({
         <div className="jy-partial-note">
           <Icon name="info" />
           <span>
-            还没有设置自营站点，所以收入和毛利暂时无法计算；用量成本和固定成本照常统计。
-            <Link href={configureHref} className="jy-link">
-              设置自营站点
-            </Link>
+            {notice ?? (
+              <>
+                还没有设置自营站点，所以收入和毛利暂时无法计算；用量成本和固定成本照常统计。
+                <Link href={configureHref} className="jy-link">
+                  设置自营站点
+                </Link>
+              </>
+            )}
           </span>
         </div>
       )}
@@ -207,7 +220,7 @@ export function ProfitEquation({
           </div>
         </div>
       )}
-      {partial && !unconfigured && !loading && (
+      {partial && !loading && (
         <div className="jy-partial-note">
           <Icon name="info" />
           <span>

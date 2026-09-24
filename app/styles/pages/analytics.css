@@ -1,0 +1,23 @@
+/* 成本与利润：只放本页独有的细节，布局和组件样式都在 jy.css */
+
+/* 切换范围或归档开关时保留上一份数据，变淡表示正在更新 */
+.jy-analytics-switching { opacity: .6; transition: opacity .15s ease; }
+
+/* 刷新失败横幅：文字和重试按钮同一行，窄屏换行 */
+.jy-analytics-banner-body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; }
+
+/* 说明文字里的重试按钮 */
+.jy-analytics-inline-btn { margin-left: 8px; vertical-align: baseline; }
+
+/* 可用天数面板不带正文内边距（跑道自带左右留白），只补上与标题的间距 */
+.jy-analytics-runway { padding-top: 16px; }
+
+/* 从等式里的"查看覆盖说明"跳过来时，不被顶栏遮住 */
+.jy-analytics-anchor { scroll-margin-top: 72px; }
+
+.jy-analytics-lead { margin: 0 0 16px; color: var(--jy-ink-2); }
+.jy-analytics-gaps { margin-top: 16px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .jy-analytics-switching { transition: none; }
+}
