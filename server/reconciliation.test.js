@@ -122,7 +122,7 @@ test("较早成功或未确认快照都不能覆盖更晚的确认快照", async
       if (sql.includes("FROM reconciliation_rules")) return [[rule]];
       if (sql.includes("FROM reconciliation_rule_channels")) return [[]];
       if (sql.includes("FROM reconciliation_rule_segments")) return [segments];
-      if (sql.includes("FROM reconciliation_snapshots") && sql.includes("FOR UPDATE")) return [[{ source: JSON.stringify(source) }]];
+      if (sql.includes("FROM reconciliation_snapshots")) return [[{ source: JSON.stringify(source) }]];
       if (sql.includes("INSERT INTO reconciliation_snapshots")) throw new Error("superseded snapshot must not write");
       throw new Error(`unexpected query: ${sql}`);
     },
@@ -133,6 +133,8 @@ test("较早成功或未确认快照都不能覆盖更晚的确认快照", async
     assert.equal(await repository.saveSnapshotsForScope("rr", expected, [{ snapshotKey: "7d:1000:Asia/Shanghai:scope:s1", source: { window: { endMs: 4000 }, result: { calculation: { profitUsd } } } }]), true);
   }
   assert.equal(calls.some((call) => call.sql?.includes("INSERT INTO reconciliation_snapshots")), false);
+  assert.ok(calls.some((call) => call.sql.includes("FROM reconciliation_rules") && call.sql.includes("FOR UPDATE")), "同一规则的快照写入仍由规则行锁串行");
+  assert.equal(calls.some((call) => call.sql.includes("FROM reconciliation_snapshots") && call.sql.includes("FOR UPDATE")), false, "快照行不加锁定读，避免不存在的键产生间隙锁死锁");
 });
 
 test("持久化成功账单只接受相同核算口径，并在 SQL 中限定候选快照", async () => {
@@ -228,11 +230,13 @@ test("并发强制刷新时较晚完成的旧目录不能覆盖最新渠道缓�
   assert.equal(pending.length, 2);
 });
 
-test("渠道目录失败时配置接口不回显上游错误中的令牌", async (t) => {
+test("渠道目录失败时配置接口不回显上游错误中的令牌，服务端日志只记脱敏原因", async (t) => {
   t.mock.method(globalThis, "fetch", async () => ({
     status: 500,
-    text: async () => JSON.stringify({ success: false, message: "Authorization: Bearer sk-sensitive-value" }),
+    text: async () => JSON.stringify({ success: false, message: "Authorization: Bearer sk-sensitive-value; admin test-token rejected" }),
   }));
+  const logged = [];
+  t.mock.method(console, "error", (...args) => { logged.push(args.join(" ")); });
   const own = { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "test-token" };
   const reconciliation = createReconciliationModule({
     pool: { async query() { return [[]]; } },
@@ -242,7 +246,10 @@ test("渠道目录失败时配置接口不回显上游错误中的令牌", async
   const configuration = await reconciliation.getConfiguration();
   assert.equal(configuration.channels.length, 0);
   assert.match(configuration.channelsError, /本站渠道目录读取失败/);
-  assert.doesNotMatch(JSON.stringify(configuration), /sk-sensitive-value/);
+  assert.doesNotMatch(JSON.stringify(configuration), /sk-sensitive-value|test-token/);
+  assert.equal(logged.length, 1, "失败原因要留在服务端日志里便于排查");
+  assert.match(logged[0], /本站渠道目录读取失败:.*rejected/);
+  assert.doesNotMatch(logged[0], /sk-sensitive-value|test-token/);
 });
 
 test("同一个上游 Key 不能同时建立两条启用对账规则", async () => {
@@ -353,18 +360,20 @@ test("停止对账规则遇到并发归档时不释放渠道且返回错误", as
   assert.deepEqual(calls.filter((call) => ["begin", "commit", "release"].includes(call)), ["begin", "commit", "release"]);
 });
 
-test("默认今天对账窗口按规则时区切零点，结束点比当前时刻晚一小时", () => {
+test("默认今天对账窗口按规则时区切零点，结束于当前时刻", () => {
   const now = Date.parse("2026-09-20T04:26:08.000Z"); // 上海 12:26:08
   const window = resolveReconciliationWindow({ timezone: "Asia/Shanghai" }, now);
   assert.equal(window.startMs, Date.parse("2026-09-19T16:00:00.000Z"));
-  assert.equal(window.endMs, now + 60 * 60 * 1000);
+  assert.equal(window.endMs, now);
   assert.equal(window.timezone, "Asia/Shanghai");
 });
 
-test("今天窗口的确认一小时延后不外溢到 7d 或自定义窗口", () => {
+test("预设窗口都不会结束在当前时刻之后，自定义窗口超过当前时间会被拒绝", () => {
   const now = Date.parse("2026-09-20T04:26:08.000Z");
-  assert.equal(resolveReconciliationWindow({ preset: "today", timezone: "Asia/Shanghai" }, now).endMs, now + 3600000);
-  assert.equal(resolveReconciliationWindow({ preset: "7d", timezone: "Asia/Shanghai" }, now).endMs, now);
+  for (const preset of ["today", "yesterday", "7d"]) {
+    assert.ok(resolveReconciliationWindow({ preset, timezone: "Asia/Shanghai" }, now).endMs <= now, preset);
+  }
+  assert.equal(resolveReconciliationWindow({ preset: "today", timezone: "Asia/Shanghai" }, now).endMs, now);
   assert.throws(() => resolveReconciliationWindow({ preset: "custom", timezone: "Asia/Shanghai", startMs: now - 1, endMs: now + 1 }, now), /不能超过当前时间/);
 });
 
@@ -433,7 +442,7 @@ test("编辑渠道或时区保留 Key 展示与分组，且不读取上游 Key �
     const path = url.pathname;
     paths.push(path);
     const body = path === "/api/channel/"
-      ? { success: true, data: { items: url.searchParams.get("p") === "1" ? [{ id: 2, name: "渠道二", status: 1 }] : [] } }
+      ? { success: true, data: { items: Number(url.searchParams.get("p")) <= 1 ? [{ id: 2, name: "渠道二", status: 1 }] : [] } }
       : { success: false, message: "upstream metadata must not be read" };
     response.writeHead(body.success ? 200 : 500, { "Content-Type": "application/json" });
     response.end(JSON.stringify(body));
@@ -718,7 +727,7 @@ test("创建规则遇到同名上游 Key 时 fail closed", async (t) => {
             { id: 9, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
             { id: 10, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
           ] } }
-            : path === "/api/channel/" ? { success: true, data: { items: url.searchParams.get("p") === "1" ? [{ id: 1, name: "渠道", status: 1 }] : [] } }
+            : path === "/api/channel/" ? { success: true, data: { items: Number(url.searchParams.get("p")) <= 1 ? [{ id: 1, name: "渠道", status: 1 }] : [] } }
               : { success: false };
     response.writeHead(body.success === false ? 404 : 200, { "Content-Type": "application/json" });
     response.end(JSON.stringify(body));
@@ -761,7 +770,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
         ? { success: false, message: "channel stat unavailable" }
         : { success: true, data: { quota: start === 1000 ? 200 : 100 } };
     }
-    else if (url.pathname === "/api/channel/") body = { success: true, data: { items: url.searchParams.get("p") === "1" ? [{ id: 1, name: "渠道", status: 2 }] : [] } };
+    else if (url.pathname === "/api/channel/") body = { success: true, data: { items: Number(url.searchParams.get("p")) <= 1 ? [{ id: 1, name: "渠道", status: 2 }] : [] } };
     else body = { success: false };
     response.writeHead(body.success === false ? 404 : 200, { "Content-Type": "application/json" });
     response.end(JSON.stringify(body));
@@ -797,7 +806,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
           if (sql.includes("FROM reconciliation_rule_channels") && sql.includes("FOR UPDATE")) return [[{ rule_id: rule.id, channel_id: 1, channel_name: "渠道", channel_status: null }]];
           if (sql.includes("effective_to_ms IS NULL") && sql.includes("FOR UPDATE")) return [[segments.find((segment) => segment.effective_to_ms == null)]];
           if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [segments];
-          if (sql.includes("FROM reconciliation_snapshots") && sql.includes("FOR UPDATE")) return [[]];
+          if (sql.includes("FROM reconciliation_snapshots")) return [[]];
           if (sql.includes("INSERT INTO reconciliation_snapshots")) {
             snapshotSources.push(JSON.parse(params.at(-1)));
             return [{ affectedRows: 1 }];
@@ -905,6 +914,85 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
   assert.equal(stale.results[0].lastSuccessfulAt, undefined);
 });
 
+test("多分段查询不会按分段重复探测上游身份或两侧 /api/status", async (t) => {
+  const { createServer } = await import("node:http");
+  const upstreamCounts = {};
+  const ownCounts = {};
+  const statUsers = [];
+  let ownStatusBroken = false;
+  const serve = (counts, route) => createServer((request, response) => {
+    const url = new URL(request.url, "http://x");
+    counts[url.pathname] = (counts[url.pathname] || 0) + 1;
+    const body = route(url, request) || { success: false };
+    response.writeHead(body.success === false ? 500 : 200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify(body));
+  });
+  const upstreamServer = serve(upstreamCounts, (url, request) => {
+    if (url.pathname === "/api/status") return { success: true, data: { quota_per_unit: 100 } };
+    if (url.pathname === "/api/user/self") return { success: true, data: { id: 7 } };
+    if (url.pathname === "/api/user/self/groups") return { success: true, data: { g1: { ratio: 1 }, g2: { ratio: 2 } } };
+    if (url.pathname === "/api/token/") return { success: true, data: { total: 1, items: [{ id: 9, name: "stable", status: 1, group: "g2", cross_group_retry: false }] } };
+    if (url.pathname === "/api/log/self/stat") {
+      statUsers.push(request.headers["new-api-user"]);
+      return { success: true, data: { quota: 100 } };
+    }
+  });
+  const ownServer = serve(ownCounts, (url) => {
+    if (url.pathname === "/api/status") return ownStatusBroken ? { success: false, message: "status unavailable" } : { success: true, data: { quota_per_unit: 100 } };
+    if (url.pathname === "/api/log/stat") return { success: true, data: { quota: 250 } };
+    if (url.pathname === "/api/channel/") return { success: true, data: { total: 1, items: [{ id: 1, name: "渠道", status: 1 }] } };
+  });
+  await Promise.all([upstreamServer, ownServer].map((server) => new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))));
+  t.after(() => { upstreamServer.close(); ownServer.close(); });
+  const rule = { id: "rr_request_budget", upstream_station_id: "upstream", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: "g2", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+  const segments = [1000000, 1030000, 1060000, 1090000].map((from, index) => ({
+    id: `s${index + 1}`, rule_id: rule.id, group_name: index % 2 ? "g2" : "g1", group_ratio: index % 2 ? 2 : 1,
+    ratio_observed_at_ms: from, ratio_source: "group_catalog",
+    effective_from_ms: from, effective_to_ms: index === 3 ? null : from + 30000,
+    detected_at_ms: from, timing_source: "operator_confirmed",
+  }));
+  const query = async (sql) => {
+    if (sql.includes("FROM reconciliation_rules")) return [[rule]];
+    if (sql.includes("FROM reconciliation_rule_channels")) return [[{ rule_id: rule.id, channel_id: 1, channel_name: "渠道", channel_status: null }]];
+    if (sql.includes("effective_to_ms IS NULL")) return [[segments[3]]];
+    if (sql.includes("FROM reconciliation_rule_segments")) return [segments];
+    if (sql.includes("FROM reconciliation_snapshots") || sql.includes("reconciliation_alert_state")) return [[]];
+    return [{ affectedRows: 1 }];
+  };
+  const pool = {
+    query,
+    async getConnection() {
+      return { query, async beginTransaction() {}, async commit() {}, async rollback() {}, release() {} };
+    },
+  };
+  const stations = [
+    { id: "upstream", type: "newapi", baseUrl: `http://127.0.0.1:${upstreamServer.address().port}`, accessToken: "pat" },
+    { id: "own", type: "newapi", isOwn: true, baseUrl: `http://127.0.0.1:${ownServer.address().port}`, accessToken: "admin" },
+  ];
+  const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id), channels: [] } });
+  const window = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1120000 };
+
+  const { results: [result] } = await module.queryRules(window, { force: true });
+  assert.equal(result.segments.length, 4);
+  assert.equal(result.health.code, "READY");
+  assert.equal(result.upstream.amountUsd, 4);
+  assert.equal(result.downstream.amountUsd, 10);
+  assert.equal(result.calculation.profitUsd, 6);
+  assert.deepEqual(upstreamCounts, {
+    "/api/user/self": 1, "/api/status": 1, "/api/user/self/groups": 1, "/api/token/": 1, "/api/log/self/stat": 4,
+  }, "上游身份与 /api/status 只在读取元数据时各探测一次，分段只请求自己的 stat");
+  assert.deepEqual(statUsers, ["7", "7", "7", "7"], "分段 stat 复用元数据解析出的 PAT 身份");
+  assert.deepEqual(ownCounts, { "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 4 }, "本站 /api/status 每轮只读一次，由各分段共用");
+
+  for (const counts of [upstreamCounts, ownCounts]) for (const path of Object.keys(counts)) delete counts[path];
+  ownStatusBroken = true;
+  const { results: [broken] } = await module.queryRules(window, { force: true });
+  assert.equal(ownCounts["/api/status"], 1, "本站 /api/status 失败时也不会按分段重试");
+  assert.deepEqual(broken.segments.map((segment) => segment.health.issues.map((issue) => issue.code)), Array(4).fill(["OWN_BILLING_UNAVAILABLE"]));
+  assert.equal(broken.downstream.amountUsd, null);
+  assert.equal(broken.calculation.profitUsd, null);
+});
+
 test("检测到 group 或 ratio 变化时关闭旧分段、保留历史并只打开一个新分段", async () => {
   const rows = [{ id: "s1", rule_id: "rr", group_name: "g1", group_ratio: 2.9, effective_from_ms: 1000, effective_to_ms: null, detected_at_ms: 1000, timing_source: "operator_confirmed" }];
   const calls = [];
@@ -972,7 +1060,7 @@ test("首次观察到已知倍率会补全当前 legacy 分段，随后切组才
           if (sql.includes("FROM reconciliation_rule_channels") && sql.includes("FOR UPDATE")) return [[{ rule_id: rule.id, channel_id: 1, channel_name: "渠道" }]];
           if (sql.includes("effective_to_ms IS NULL") && sql.includes("FOR UPDATE")) return [[segments.find((segment) => segment.effective_to_ms == null)]];
           if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [segments];
-          if (sql.includes("FROM reconciliation_snapshots") && sql.includes("FOR UPDATE")) return [[]];
+          if (sql.includes("FROM reconciliation_snapshots")) return [[]];
           if (sql.includes("INSERT INTO reconciliation_snapshots")) return [{ affectedRows: 1 }];
           if (sql.startsWith("UPDATE reconciliation_rules SET token_name")) return [{ affectedRows: 1 }];
           if (sql.includes("FOR UPDATE")) return [[segments.find((segment) => segment.effective_to_ms == null)]];
@@ -1191,7 +1279,7 @@ test("查询中修正切换时间后，旧失败任务不会写入或缓存旧�
           if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) return [[rule]];
           if (sql.includes("FROM reconciliation_rule_channels") && sql.includes("FOR UPDATE")) return [[]];
           if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [segments];
-          if (sql.includes("FROM reconciliation_snapshots") && sql.includes("FOR UPDATE")) return [[]];
+          if (sql.includes("FROM reconciliation_snapshots")) return [[]];
           if (sql.includes("INSERT INTO reconciliation_snapshots")) { writes.push(params); return [{ affectedRows: 1 }]; }
           if (sql.includes("FOR UPDATE")) return [segments];
           if (sql.startsWith("UPDATE reconciliation_rule_segments")) {
@@ -1218,6 +1306,540 @@ test("查询中修正切换时间后，旧失败任务不会写入或缓存旧�
   assert.equal(writes.length, 1, "only the restarted query may persist an unavailable snapshot");
   assert.equal(writes[0][1], "s2", "the old task must not write the pre-correction segment");
   assert.equal([...rt._reconciliationResultCache.values()][0].value.currentSegment.effectiveFrom, 2500);
+});
+
+test("加入同一 in-flight 查询的调用方在口径变化后也只拿到新口径结果", async () => {
+  const rule = { id: "rr_joined_scope", upstream_station_id: "missing", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: "g2", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+  const segments = [
+    { id: "s1", rule_id: rule.id, group_name: "g1", group_ratio: 2, effective_from_ms: 1000, effective_to_ms: 2000, detected_at_ms: 2000, timing_source: "operator_confirmed" },
+    { id: "s2", rule_id: rule.id, group_name: "g2", group_ratio: 3, effective_from_ms: 2000, effective_to_ms: null, detected_at_ms: 2000, timing_source: "detected" },
+  ];
+  let releaseOldRead;
+  let delayOldRead = true;
+  const writes = [];
+  const pool = {
+    async query(sql) {
+      if (sql.includes("SELECT * FROM reconciliation_rules")) return [[rule]];
+      if (sql.includes("FROM reconciliation_rule_channels")) return [[]];
+      if (sql.includes("FROM reconciliation_rule_segments")) {
+        if (delayOldRead) {
+          delayOldRead = false;
+          return new Promise((resolve) => { releaseOldRead = () => resolve([segments.map((row) => ({ ...row, effective_to_ms: row.id === "s1" ? 2000 : null, effective_from_ms: row.id === "s2" ? 2000 : row.effective_from_ms }))]); });
+        }
+        return [segments];
+      }
+      if (sql.includes("FROM reconciliation_snapshots")) return [[]];
+      if (sql.includes("reconciliation_alert_state")) return [[]];
+      return [{ affectedRows: 1 }];
+    },
+    async getConnection() {
+      return {
+        async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
+        async query(sql, params) {
+          if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) return [[rule]];
+          if (sql.includes("FROM reconciliation_rule_channels") && sql.includes("FOR UPDATE")) return [[]];
+          if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [segments];
+          if (sql.includes("FROM reconciliation_snapshots")) return [[]];
+          if (sql.includes("INSERT INTO reconciliation_snapshots")) { writes.push(params); return [{ affectedRows: 1 }]; }
+          if (sql.startsWith("UPDATE reconciliation_rule_segments")) {
+            segments[0].effective_to_ms = params[1];
+            segments[1].effective_from_ms = params[3];
+            segments[1].timing_source = "operator_confirmed";
+            return [{ affectedRows: 2 }];
+          }
+          throw new Error(`unexpected transaction query: ${sql}`);
+        },
+      };
+    },
+  };
+  const module = createReconciliationModule({ pool, store: { list: () => [], get: () => null, channels: [] } });
+  const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000, endMs: 3000 };
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const first = module.queryRules(input, { force: true });
+  await tick();
+  const joined = module.queryRules(input);
+  for (let i = 0; i < 5; i += 1) await tick();
+  await module.correctTransition(rule.id, "s2", 2500);
+  releaseOldRead();
+  const [firstResponse, joinedResponse] = await Promise.all([first, joined]);
+
+  assert.equal(firstResponse.results[0].currentSegment.effectiveFrom, 2500);
+  // 路由把结果序列化成 JSON；内部作废标记一旦漏出就会变成 null，前端读取 requestedWindow 时崩溃。
+  const joinedJson = JSON.parse(JSON.stringify(joinedResponse));
+  assert.notEqual(joinedJson.results[0], null);
+  assert.equal(joinedJson.results[0].currentSegment.effectiveFrom, 2500);
+  assert.equal(writes.length, 1, "两个调用方共享一次重跑，只写入一次新口径快照");
+});
+
+test("查询期间口径持续变化时最多尝试 3 次，本轮返回待获取且不缓存", async () => {
+  const rule = { id: "rr_unstable_scope", upstream_station_id: "missing", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: "g", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+  const segments = [{ id: "s1", rule_id: rule.id, group_name: "g", group_ratio: 1, effective_from_ms: 1000, effective_to_ms: null, detected_at_ms: 1000, timing_source: "operator_confirmed" }];
+  let channelReads = 0;
+  let segmentReads = 0;
+  const pool = {
+    async query(sql) {
+      if (sql.includes("SELECT * FROM reconciliation_rules")) return [[rule]];
+      // 每次读取都像刚被编辑过一样换一个渠道，口径指纹永远对不上。
+      if (sql.includes("FROM reconciliation_rule_channels")) {
+        channelReads += 1;
+        // 重试一旦失去上限，就在这里失败而不是让测试挂死。
+        if (channelReads > 20) throw new Error("口径重试没有上限");
+        return [[{ rule_id: rule.id, channel_id: channelReads, channel_name: `渠道 ${channelReads}` }]];
+      }
+      if (sql.includes("FROM reconciliation_rule_segments")) {
+        segmentReads += 1;
+        return [segments];
+      }
+      throw new Error(`unexpected query: ${sql}`);
+    },
+    async getConnection() { throw new Error("口径不一致时不能开启快照写入事务"); },
+  };
+  const rt = { pool, store: { list: () => [], get: () => null, channels: [] } };
+  const module = createReconciliationModule(rt);
+  const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000, endMs: 3000 };
+
+  const { results } = await module.queryRules(input, { force: true });
+  assert.equal(results[0].rule.id, rule.id);
+  assert.equal(results[0].health.code, "PENDING", "口径被连续改动时只让这条规则本轮待获取，不能让整个查询失败");
+  assert.equal(results[0].calculation.profitUsd, null);
+  assert.equal(results[0].requestedWindow.endMs, 3000);
+  assert.equal(segmentReads, 3, "每次尝试读取一次分段，总共只尝试 3 次");
+  assert.equal(rt._reconciliationResultCache.size, 0, "待获取结果不能进缓存");
+
+  await module.queryRules(input);
+  assert.equal(segmentReads, 6, "下一轮非强制查询必须重新取数，不能命中待获取结果");
+});
+
+// 测试中途可挂起的检查点：hold() 挂起调用方并让 reached 完成，release() 放行。
+function holdPoint() {
+  let reach;
+  let release;
+  const reached = new Promise((resolve) => { reach = resolve; });
+  const released = new Promise((resolve) => { release = resolve; });
+  return { reached, release, hold: () => { reach(); return released; } };
+}
+
+// 上游站点缺失的规则走不可用落库路径，不需要网络；成功账单查询、告警读取、快照事务提交都可挂起，
+// 用来在查询中途插入切换时间修正。
+function scopeRaceFixture(id, { beforeLookup = null, beforeAlertRead = null, beforeSnapshotCommit = null } = {}) {
+  const rule = { id, upstream_station_id: "missing", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: "g2", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+  const segments = [
+    { id: "s1", rule_id: id, group_name: "g1", group_ratio: 2, effective_from_ms: 1000, effective_to_ms: 2000, detected_at_ms: 2000, timing_source: "operator_confirmed" },
+    { id: "s2", rule_id: id, group_name: "g2", group_ratio: 3, effective_from_ms: 2000, effective_to_ms: null, detected_at_ms: 2000, timing_source: "detected" },
+  ];
+  const state = { writes: [], lookups: 0, alertInserts: 0 };
+  const pool = {
+    async query(sql) {
+      if (sql.includes("SELECT * FROM reconciliation_rules")) return [[rule]];
+      if (sql.includes("FROM reconciliation_rule_channels")) return [[]];
+      if (sql.includes("FROM reconciliation_rule_segments")) return [segments];
+      if (sql.includes("FROM reconciliation_snapshots")) {
+        state.lookups += 1;
+        await beforeLookup?.(state.lookups);
+        return [[]];
+      }
+      if (sql.includes("SELECT * FROM reconciliation_alert_state")) {
+        await beforeAlertRead?.();
+        return [[]];
+      }
+      if (sql.includes("INSERT INTO reconciliation_alert_state")) state.alertInserts += 1;
+      return [{ affectedRows: 1 }];
+    },
+    async getConnection() {
+      let wroteSnapshots = false;
+      return {
+        async beginTransaction() {}, async rollback() {}, release() {},
+        async commit() { if (wroteSnapshots) await beforeSnapshotCommit?.(); },
+        async query(sql, params) {
+          if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) return [[rule]];
+          if (sql.includes("FROM reconciliation_rule_channels") && sql.includes("FOR UPDATE")) return [[]];
+          if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [segments];
+          if (sql.includes("FROM reconciliation_snapshots")) return [[]];
+          if (sql.includes("INSERT INTO reconciliation_snapshots")) {
+            wroteSnapshots = true;
+            state.writes.push(params);
+            return [{ affectedRows: 1 }];
+          }
+          if (sql.startsWith("UPDATE reconciliation_rule_segments")) {
+            segments[0].effective_to_ms = params[1];
+            segments[1].effective_from_ms = params[3];
+            segments[1].timing_source = "operator_confirmed";
+            return [{ affectedRows: 2 }];
+          }
+          throw new Error(`unexpected transaction query: ${sql}`);
+        },
+      };
+    },
+  };
+  const rt = { pool, store: { list: () => [], get: () => null, channels: [] } };
+  const input = { ruleIds: [id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000, endMs: 3000 };
+  return { rule, state, rt, input, module: createReconciliationModule(rt) };
+}
+
+test("编辑后已有调用方按新口径另起任务时，旧任务直接等它，不重复取数和写快照", async () => {
+  const lookups = [holdPoint(), holdPoint()];
+  const { rule, state, module, input } = scopeRaceFixture("rr_join_newer", { beforeLookup: (count) => lookups[count - 1]?.hold() });
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const older = module.queryRules(input, { force: true });
+  await lookups[0].reached;
+  await module.correctTransition(rule.id, "s2", 2500);
+  const newer = module.queryRules(input, { force: true });
+  await lookups[1].reached;
+  lookups[0].release();
+  for (let i = 0; i < 5; i += 1) await tick();
+  lookups[1].release();
+  const [olderResponse, newerResponse] = await Promise.all([older, newer]);
+
+  assert.equal(olderResponse.results[0], newerResponse.results[0], "旧任务直接复用新口径任务的结果");
+  assert.equal(olderResponse.results[0].currentSegment.effectiveFrom, 2500);
+  assert.equal(state.lookups, 2, "旧任务作废后不能自己再重跑一轮");
+  assert.equal(state.writes.length, 1, "两个任务只写入一次新口径快照");
+  assert.equal(state.writes[0][1], "s2");
+});
+
+test("落库和通知期间口径被修正时，旧口径结果既不返回也不缓存", async () => {
+  const alertRead = holdPoint();
+  let held = false;
+  const { rule, rt, module, input } = scopeRaceFixture("rr_generation_race", {
+    beforeAlertRead: () => {
+      if (held) return;
+      held = true;
+      return alertRead.hold();
+    },
+  });
+  const pending = module.queryRules(input, { force: true });
+  await alertRead.reached;
+  await module.correctTransition(rule.id, "s2", 2500);
+  alertRead.release();
+  const { results } = await pending;
+
+  assert.equal(results[0].currentSegment.effectiveFrom, 2500);
+  assert.equal([...rt._reconciliationResultCache.values()][0].value.currentSegment.effectiveFrom, 2500);
+});
+
+test("快照事务提交后、通知前口径被修正时，不为旧口径记录告警", async () => {
+  const commit = holdPoint();
+  let held = false;
+  const { rule, state, module, input } = scopeRaceFixture("rr_notify_race", {
+    beforeSnapshotCommit: () => {
+      if (held) return;
+      held = true;
+      return commit.hold();
+    },
+  });
+  const pending = module.queryRules(input, { force: true });
+  await commit.reached;
+  await module.correctTransition(rule.id, "s2", 2500);
+  commit.release();
+  const { results } = await pending;
+
+  assert.equal(results[0].currentSegment.effectiveFrom, 2500);
+  assert.equal(state.alertInserts, 1, "只能按新口径记录一次告警状态");
+});
+
+// 真实取数路径的夹具：两侧 NewAPI 由 fetch 替身应答，数据库按 SQL 路由。
+// 每个分段上游消费 $1、本站渠道收费 $2.5，利润 $1.5。
+function liveReconciliationFixture(t, { segments: specs, onRequest = null }) {
+  const ratios = { g1: 1, g2: 2 };
+  const segments = specs.map(({ id, group, from, to = null }) => ({
+    id, rule_id: "rr_live", group_name: group, group_ratio: ratios[group],
+    ratio_observed_at_ms: from, ratio_source: "group_catalog",
+    effective_from_ms: from, effective_to_ms: to, detected_at_ms: from, timing_source: "operator_confirmed",
+  }));
+  const open = segments.find((segment) => segment.effective_to_ms == null);
+  const rule = { id: "rr_live", upstream_station_id: "upstream", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: open.group_name, timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+  const state = { upstreamQuota: 100, ownQuota: 250, statCalls: [], requests: [], writes: 0, alertQueries: 0, snapshots: new Map() };
+  const query = async (sql, params) => {
+    if (sql.includes("INSERT INTO reconciliation_snapshots")) {
+      state.writes += 1;
+      state.snapshots.set(params[2], {
+        rule_id: params[0], segment_id: params[1], snapshot_key: params[2], window_kind: params[3],
+        window_start_ms: params[4], window_end_ms: params[5], health_code: params[16], health_detail: params[17],
+        source: params[18], generated_at: new Date().toISOString(),
+      });
+      return [{ affectedRows: 1 }];
+    }
+    if (sql.includes("SELECT source FROM reconciliation_snapshots")) return [[state.snapshots.get(params[1])].filter(Boolean)];
+    if (sql.includes("FROM reconciliation_snapshots")) return [[...state.snapshots.values()]];
+    if (sql.includes("reconciliation_alert_state")) {
+      state.alertQueries += 1;
+      return [[]];
+    }
+    if (sql.includes("effective_to_ms IS NULL")) return [[open]];
+    if (sql.includes("FROM reconciliation_rule_segments")) return [segments];
+    if (sql.includes("FROM reconciliation_rule_channels")) return [[{ rule_id: rule.id, channel_id: 1, channel_name: "渠道", channel_status: null }]];
+    if (sql.includes("FROM reconciliation_rules")) return [[rule]];
+    return [{ affectedRows: 1 }];
+  };
+  const pool = {
+    query,
+    async getConnection() {
+      return { query, async beginTransaction() {}, async commit() {}, async rollback() {}, release() {} };
+    },
+  };
+  const reply = (status, body) => ({ status, text: async () => JSON.stringify(body) });
+  const stat = (side, url, quota) => {
+    state.statCalls.push({ side, start: Number(url.searchParams.get("start_timestamp")), end: Number(url.searchParams.get("end_timestamp")) });
+    return quota == null ? reply(500, { success: false }) : reply(200, { success: true, data: { quota } });
+  };
+  t.mock.method(globalThis, "fetch", async (input, init = {}) => {
+    const url = new URL(String(input));
+    const request = { host: url.host, path: url.pathname, authorization: init.headers?.Authorization ?? null };
+    state.requests.push(request);
+    if (onRequest) await onRequest(request);
+    if (url.pathname === "/api/status") return reply(200, { success: true, data: { quota_per_unit: 100, version: "v" } });
+    if (url.host === "upstream.test") {
+      if (url.pathname === "/api/user/self") return reply(200, { success: true, data: { id: 7 } });
+      if (url.pathname === "/api/user/self/groups") return reply(200, { success: true, data: { g1: { ratio: 1 }, g2: { ratio: 2 } } });
+      if (url.pathname === "/api/token/") return reply(200, { success: true, data: { total: 1, items: [{ id: 9, name: "stable", status: 1, group: rule.fixed_group, cross_group_retry: false }] } });
+      if (url.pathname === "/api/log/self/stat") return stat("upstream", url, state.upstreamQuota);
+    }
+    if (url.host === "own.test") {
+      if (url.pathname === "/api/channel/") return reply(200, { success: true, data: { total: 1, items: [{ id: 1, name: "渠道", status: 1 }] } });
+      if (url.pathname === "/api/log/stat") return stat("own", url, state.ownQuota);
+    }
+    return reply(404, { success: false });
+  });
+  const stations = [
+    { id: "upstream", name: "上游", type: "newapi", baseUrl: "https://upstream.test", accessToken: "pat" },
+    { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin" },
+  ];
+  const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null, channels: [] } };
+  return { rule, state, stations, rt, module: createReconciliationModule(rt) };
+}
+
+test("今天窗口刚过零点不满一个统计秒时返回待获取：不取数、不写快照、不告警、不缓存", async (t) => {
+  const dayStart = Date.parse("2026-09-19T16:00:00.000Z"); // Asia/Shanghai 2026-09-20 00:00
+  const { rule, rt, state, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: dayStart - 3600000 }] });
+  const realNow = Date.now;
+  let now = dayStart + 500;
+  Date.now = () => now;
+  t.after(() => { Date.now = realNow; });
+  const input = { ruleIds: [rule.id], preset: "today", timezone: "Asia/Shanghai" };
+
+  await module.refreshDue(now);
+  const pending = await module.queryRules(input);
+  assert.equal(pending.results[0].health.code, "PENDING");
+  assert.equal(pending.results[0].calculation.profitUsd, null);
+  assert.deepEqual(state.statCalls, [], "不满一秒的窗口不能向任何一侧请求统计");
+  assert.equal(state.writes, 0, "待获取不能写入快照");
+  assert.equal(state.alertQueries, 0, "待获取既不能告警也不能清除告警");
+  assert.equal(rt._reconciliationResultCache.size, 0, "待获取不能进缓存");
+
+  now = dayStart + 1500;
+  const ready = await module.queryRules(input);
+  assert.equal(ready.results[0].health.code, "READY", "满一个统计秒后，非强制查询必须立即重新核算");
+  assert.equal(ready.results[0].calculation.profitUsd, 1.5);
+});
+
+test("规则刚创建不满一个统计秒时，今天和近 7 天都返回待获取", async (t) => {
+  const createdAt = Date.parse("2026-09-20T04:26:08.200Z");
+  const { rule, rt, state, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: createdAt }] });
+  const realNow = Date.now;
+  let now = createdAt + 700;
+  Date.now = () => now;
+  t.after(() => { Date.now = realNow; });
+
+  for (const preset of ["today", "7d"]) {
+    const { results } = await module.queryRules({ ruleIds: [rule.id], preset, timezone: "Asia/Shanghai" }, { force: true });
+    assert.equal(results[0].health.code, "PENDING", `${preset} 不能把不满一秒的新分段当成上游数据不可用`);
+  }
+  assert.deepEqual(state.statCalls, []);
+  assert.equal(state.writes, 0);
+  assert.equal(state.alertQueries, 0);
+  assert.equal(rt._reconciliationResultCache.size, 0);
+
+  now = createdAt + 2000;
+  const { results } = await module.queryRules({ ruleIds: [rule.id], preset: "today", timezone: "Asia/Shanghai" });
+  assert.equal(results[0].health.code, "READY");
+  assert.equal(results[0].calculation.profitUsd, 1.5);
+});
+
+test("近 7 天刚切段时跳过不满一秒的新分段，已结束的分段照常核算", async (t) => {
+  const switchedAt = Date.parse("2026-09-20T04:26:08.000Z") + 900;
+  const { rule, state, module } = liveReconciliationFixture(t, {
+    segments: [
+      { id: "s1", group: "g1", from: switchedAt - 3600000, to: switchedAt },
+      { id: "s2", group: "g2", from: switchedAt },
+    ],
+  });
+  const realNow = Date.now;
+  Date.now = () => switchedAt + 300;
+  t.after(() => { Date.now = realNow; });
+
+  const { results } = await module.queryRules({ ruleIds: [rule.id], preset: "7d", timezone: "Asia/Shanghai" }, { force: true });
+  assert.equal(results[0].health.code, "READY");
+  assert.deepEqual(results[0].segments.map((segment) => segment.id), ["s1"]);
+  assert.equal(results[0].currentSegment.id, "s2");
+  assert.equal(results[0].calculation.profitUsd, 1.5);
+  const expected = { start: Math.ceil((switchedAt - 3600000) / 1000), end: Math.floor(switchedAt / 1000) - 1 };
+  for (const side of ["upstream", "own"]) {
+    assert.deepEqual(state.statCalls.filter((call) => call.side === side).map(({ start, end }) => ({ start, end })), [expected], `${side} 只统计已结束分段`);
+  }
+});
+
+test("窗口完全在规则生效之前时照常核算为 0，不返回不会自行恢复的待获取", async (t) => {
+  const createdAt = Date.parse("2026-09-20T02:00:00.000Z"); // Asia/Shanghai 2026-09-20 10:00
+  const { rule, state, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: createdAt }] });
+  const realNow = Date.now;
+  Date.now = () => createdAt + 7200000;
+  t.after(() => { Date.now = realNow; });
+
+  const inputs = [
+    { ruleIds: [rule.id], preset: "yesterday", timezone: "Asia/Shanghai" },
+    { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: createdAt - 7200000, endMs: createdAt - 3600000 },
+  ];
+  for (const input of inputs) {
+    const { results } = await module.queryRules(input, { force: true });
+    assert.equal(results[0].health.code, "READY", `${input.preset} 窗口内规则尚未生效，应按 0 核算`);
+    assert.equal(results[0].calculation.profitUsd, 0);
+  }
+  assert.deepEqual(state.statCalls, [], "没有相交分段时不需要请求任何一侧的统计");
+});
+
+test("今天和近 7 天中间有不满一秒的已结束分段时不能跳过，按不可核算处理", async (t) => {
+  const switchedAt = Date.parse("2026-09-20T04:26:08.200Z");
+  const { rule, state, module } = liveReconciliationFixture(t, {
+    segments: [
+      { id: "s1", group: "g1", from: switchedAt - 3600000, to: switchedAt },
+      { id: "s2", group: "g2", from: switchedAt, to: switchedAt + 500 },
+      { id: "s3", group: "g1", from: switchedAt + 500 },
+    ],
+  });
+  const realNow = Date.now;
+  Date.now = () => switchedAt + 3600000;
+  t.after(() => { Date.now = realNow; });
+
+  for (const preset of ["today", "7d"]) {
+    state.statCalls.length = 0;
+    const { results } = await module.queryRules({ ruleIds: [rule.id], preset, timezone: "Asia/Shanghai" }, { force: true });
+    assert.equal(results[0].health.code, "UPSTREAM_DATA_UNAVAILABLE", `${preset} 只能跳过窗口末尾的不满一秒分段`);
+    assert.equal(results[0].calculation.profitUsd, null);
+    assert.deepEqual(results[0].segments.map((segment) => [segment.id, segment.health.code]), [["s1", "READY"], ["s2", "UPSTREAM_DATA_UNAVAILABLE"], ["s3", "READY"]]);
+    assert.equal(state.statCalls.length, 4, `${preset} 两侧只统计 s1 和 s3`);
+  }
+});
+
+test("两侧都已应答的上游空消费异常不能被旧的确认利润掩盖，数据源不可用时才回退", async (t) => {
+  const { rule, state, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }] });
+  const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 };
+  const confirmed = await module.queryRules(input, { force: true });
+  assert.equal(confirmed.results[0].calculation.profitUsd, 1.5);
+  assert.equal(state.writes, 1);
+  const savedSource = [...state.snapshots.values()][0].source;
+
+  state.upstreamQuota = 0;
+  const anomaly = await module.queryRules(input, { force: true });
+  assert.equal(anomaly.results[0].health.code, "UPSTREAM_EMPTY_WITH_SALES");
+  assert.equal(anomaly.results[0].health.stale, false, "两侧都已应答时展示本轮异常，不能回退到旧账单");
+  assert.equal(anomaly.results[0].calculation.profitUsd, null);
+  assert.equal(anomaly.results[0].calculation.riskDifferenceUsd, 2.5);
+  assert.equal(state.writes, 1, "未确认的异常不能覆盖同一窗口的成功快照");
+  assert.equal([...state.snapshots.values()][0].source, savedSource);
+
+  state.upstreamQuota = null;
+  const unavailable = await module.queryRules(input, { force: true });
+  assert.equal(unavailable.results[0].health.code, "UPSTREAM_DATA_UNAVAILABLE");
+  assert.equal(unavailable.results[0].health.stale, true, "上游取不到数据时才回退到最近成功账单");
+  assert.equal(unavailable.results[0].calculation.profitUsd, 1.5);
+  assert.equal(state.writes, 1);
+});
+
+test("多分段两侧取数并行发出", async (t) => {
+  let arrived = 0;
+  let releaseStats;
+  const allStatsInFlight = new Promise((resolve) => { releaseStats = resolve; });
+  const { rule, module } = liveReconciliationFixture(t, {
+    segments: [
+      { id: "s1", group: "g1", from: 1000000, to: 1030000 },
+      { id: "s2", group: "g2", from: 1030000 },
+    ],
+    // 两个分段 × 两侧共 4 个统计请求全部发出后才统一应答；串行取数会卡在第一个分段。
+    onRequest: async ({ path }) => {
+      if (!path.startsWith("/api/log/")) return;
+      if (++arrived === 4) releaseStats();
+      await allStatsInFlight;
+    },
+  });
+  let timeout;
+  try {
+    const { results } = await Promise.race([
+      module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 }, { force: true }),
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("分段取数被串行化")), 2000); }),
+    ]);
+    assert.equal(results[0].health.code, "READY");
+    assert.equal(results[0].calculation.profitUsd, 3);
+  } finally {
+    clearTimeout(timeout);
+    releaseStats();
+  }
+});
+
+test("站点凭据原地改写后，元数据和渠道目录缓存不再复用旧凭据读到的数据", async (t) => {
+  let hold = null;
+  const { stations, state, module } = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 1000 }],
+    onRequest: (request) => hold?.(request),
+  });
+  const requestsTo = (host, path) => state.requests.filter((request) => request.host === host && request.path === path);
+
+  await module.getUpstreamKeys("upstream");
+  await module.getUpstreamKeys("upstream");
+  assert.equal(requestsTo("upstream.test", "/api/token/").length, 1, "同一凭据在有效期内复用缓存");
+  stations[0].accessToken = "pat-2";
+  await module.getUpstreamKeys("upstream");
+  assert.equal(requestsTo("upstream.test", "/api/token/").length, 2, "换了 PAT 后必须重新读取");
+  assert.equal(requestsTo("upstream.test", "/api/token/").at(-1).authorization, "Bearer pat-2");
+
+  // 请求发出后凭据才被改写：缓存要记在发起请求时的凭据名下，不能把旧 PAT 读到的数据当成新 PAT 的。
+  const identityProbe = holdPoint();
+  hold = (request) => {
+    if (request.path !== "/api/user/self") return;
+    hold = null;
+    return identityProbe.hold();
+  };
+  const inFlight = module.getUpstreamKeys("upstream", { force: true });
+  await identityProbe.reached;
+  stations[0].accessToken = "pat-3";
+  identityProbe.release();
+  await inFlight;
+  assert.equal(requestsTo("upstream.test", "/api/token/").length, 3);
+  assert.equal(requestsTo("upstream.test", "/api/token/").at(-1).authorization, "Bearer pat-2");
+  await module.getUpstreamKeys("upstream");
+  assert.equal(requestsTo("upstream.test", "/api/token/").length, 4, "旧 PAT 读到的数据不能记到新 PAT 名下");
+
+  await module.getConfiguration();
+  await module.getConfiguration();
+  assert.equal(requestsTo("own.test", "/api/channel/").length, 1);
+  stations[1].accessToken = "admin-2";
+  const configuration = await module.getConfiguration();
+  assert.equal(requestsTo("own.test", "/api/channel/").length, 2, "换了本站管理员令牌后必须重新读取渠道目录");
+  assert.equal(requestsTo("own.test", "/api/channel/").at(-1).authorization, "admin-2");
+  assert.equal(configuration.channelsError, null);
+});
+
+test("列出规则后才被停止的规则从本轮结果中去掉，其余规则照常返回", async () => {
+  const active = { id: "rr_active", upstream_station_id: "missing", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: "g", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+  const archived = { ...active, id: "rr_archived", token_id: 10 };
+  const segment = { id: "s1", rule_id: active.id, group_name: "g", group_ratio: 1, effective_from_ms: 1000, effective_to_ms: null, detected_at_ms: 1000, timing_source: "operator_confirmed" };
+  const query = async (sql, params) => {
+    if (sql.includes("FROM reconciliation_rule_channels")) return [[]];
+    if (sql.includes("FROM reconciliation_rule_segments")) return [[segment]];
+    // 规则列表里还有它，按 id 读取时它已被停止。
+    if (sql.includes("FROM reconciliation_rules")) return sql.includes("WHERE id = ?") ? [params[0] === archived.id ? [] : [active]] : [[active, archived]];
+    if (sql.includes("FROM reconciliation_snapshots") || sql.includes("reconciliation_alert_state")) return [[]];
+    return [{ affectedRows: 1 }];
+  };
+  const pool = {
+    query,
+    async getConnection() {
+      return { query, async beginTransaction() {}, async commit() {}, async rollback() {}, release() {} };
+    },
+  };
+  const module = createReconciliationModule({ pool, store: { list: () => [], get: () => null, channels: [] } });
+
+  const { results } = await module.queryRules({ ruleIds: [active.id, archived.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000, endMs: 3000 }, { force: true });
+  assert.deepEqual(results.map((result) => result.rule.id), [active.id]);
 });
 
 test("upstream unavailable retains persisted segment evidence in the response and snapshot", async () => {

@@ -1,4 +1,6 @@
 // 上游渠道对账的持久化层：只保存规则、聚合快照和告警状态，绝不复制站点凭据。
+import { isCurrentReconciliationBillingContract } from "../lib/reconciliation-contract.js";
+import { reconciliationScopeFingerprint, reconciliationSnapshotIdentity } from "../lib/reconciliation-snapshot.js";
 
 function uid(prefix) {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}${Date.now().toString(36).slice(-4)}`;
@@ -464,8 +466,11 @@ export class ReconciliationRepository {
         return false;
       }
       for (const snapshot of snapshots) {
+        // 规则行已 FOR UPDATE，同一规则的快照写入在这里串行；此前的查询都是锁定读，本事务的
+        // read view 在这里才建立，普通一致性读就能看到已提交的写入。不对快照行加 FOR UPDATE：
+        // 键不存在时 InnoDB 会加间隙锁，两条规则的事务落在同一间隙后各自插入会互相等待而死锁（1213）。
         const [existing] = await conn.query(
-          "SELECT source FROM reconciliation_snapshots WHERE rule_id = ? AND snapshot_key = ? FOR UPDATE",
+          "SELECT source FROM reconciliation_snapshots WHERE rule_id = ? AND snapshot_key = ?",
           [ruleId, snapshot.snapshotKey]
         );
         const savedSource = asJson(existing[0]?.source);
@@ -548,27 +553,4 @@ export class ReconciliationRepository {
       },
     };
   }
-
-  async latestSnapshots(ruleIds) {
-    if (!ruleIds.length) return new Map();
-    const [rows] = await this.pool.query(
-      `SELECT s.* FROM reconciliation_snapshots s
-       JOIN (
-         SELECT rule_id, MAX(generated_at) AS generated_at
-         FROM reconciliation_snapshots WHERE rule_id IN (?) GROUP BY rule_id
-       ) latest ON latest.rule_id = s.rule_id AND latest.generated_at = s.generated_at`,
-      [ruleIds]
-    );
-    return new Map(rows.map((row) => [row.rule_id, {
-      windowKind: row.window_kind,
-      startMs: Number(row.window_start_ms),
-      endMs: Number(row.window_end_ms),
-      healthCode: row.health_code,
-      healthDetail: row.health_detail,
-      generatedAt: row.generated_at ? new Date(row.generated_at).toISOString() : null,
-      source: asJson(row.source),
-    }]));
-  }
 }
-import { isCurrentReconciliationBillingContract } from "../lib/reconciliation-contract.js";
-import { reconciliationScopeFingerprint, reconciliationSnapshotIdentity } from "../lib/reconciliation-snapshot.js";
