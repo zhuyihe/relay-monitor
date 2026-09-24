@@ -1,0 +1,19 @@
+/* 运营总览：只放本页独有的细节，布局和组件样式都在 jy.css */
+
+/* 上游余量里的站点名：点击打开余额趋势，外观保持为普通名称 */
+.jy-ov-name {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  border-radius: var(--jy-r1);
+}
+.jy-ov-name:hover { color: var(--jy-cobalt); text-decoration: underline; text-underline-offset: 3px; }
