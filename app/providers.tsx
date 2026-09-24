@@ -58,7 +58,7 @@ export default function Providers({
 
   return (
     <ThemeCtx.Provider value={{ dark: mode === "dark", toggle }}>
-      <ConfigProvider locale={zhCN} theme={themeConfig}>
+      <ConfigProvider locale={zhCN} theme={themeConfig} button={{ autoInsertSpace: false }}>
         <App>{children}</App>
       </ConfigProvider>
     </ThemeCtx.Provider>
