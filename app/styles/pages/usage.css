@@ -1,0 +1,44 @@
+/* 用量分析页：只放本页特有的布局，通用外观用 jy.css */
+
+.jy-usage-filters label { font-size: 13px; color: var(--jy-ink-2); }
+.jy-usage-filters .ant-select { min-width: 200px; }
+
+/* 合计四项：宽屏一行四列，窄屏两列 */
+.jy-usage-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px 24px; margin: 0; }
+.jy-usage-kpis > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.jy-usage-kpis > div + div { padding-left: 24px; border-left: 1px solid var(--jy-rule-soft); }
+.jy-usage-kpis dt { font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-usage-kpis dd { margin: 0; }
+.jy-usage-figure { font-size: 24px; line-height: 32px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; }
+.jy-usage-unit { font-size: 14px; font-weight: 400; color: var(--jy-ink-3); }
+
+.jy-usage-banner { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; font-size: 13px; line-height: 20px; }
+.jy-usage-banner b { font-weight: 600; font-size: 14px; }
+.jy-usage-banner ul { margin: 0; padding-left: 18px; color: var(--jy-ink-2); }
+
+/* 两张图：趋势略宽，1200 以下上下排 */
+.jy-usage-charts { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 24px; }
+.jy-usage-charts > .jy-panel { height: 100%; }
+.jy-usage-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.jy-usage-empty { min-height: 300px; display: grid; place-items: center; }
+
+/* 趋势数据表：限高滚动，行标题不要沿用表头的底色和吸顶 */
+.jy-usage-scroll { max-height: 348px; overflow: auto; }
+.jy-usage-scroll:focus-visible { outline: 2px solid var(--jy-cobalt); outline-offset: -2px; }
+table.jy-data tbody th.jy-usage-rowhead {
+  position: static; background: var(--jy-sheet); color: var(--jy-ink); font-size: 13px; font-weight: 400;
+  padding: 8px 12px; border-bottom: 1px solid var(--jy-rule-soft);
+}
+
+.jy-usage-model { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; word-break: break-all; }
+
+@media (max-width: 1199px) {
+  .jy-usage-charts { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 767px) {
+  .jy-usage-filters .ant-select { flex: 1 1 200px; }
+  .jy-usage-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .jy-usage-kpis > div + div { padding-left: 0; border-left: 0; }
+  .jy-usage-figure { font-size: 20px; line-height: 28px; }
+  .jy-usage-charts { gap: 16px; }
+}
