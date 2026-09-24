@@ -326,6 +326,7 @@ a.jy-eq-term:hover { background: var(--jy-sunken); text-decoration: none; color:
 .jy-chart .hover-dot { stroke: var(--jy-sheet); stroke-width: 2; }
 .jy-chart .day-rule { stroke: var(--jy-rule); stroke-dasharray: 3 3; }
 .jy-chart-stack { position: relative; display: flex; flex-direction: column; gap: 4px; border-radius: var(--jy-r2); }
+.jy-chart-stack:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); }
 .jy-chart-sub { display: flex; align-items: baseline; gap: 12px; margin: 16px 0 4px; }
 .jy-chart-sub h3 { margin: 0; font-size: 14px; line-height: 22px; font-weight: 500; }
 .jy-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; line-height: 18px; color: var(--jy-ink-2); margin-bottom: 12px; }
@@ -421,6 +422,10 @@ table.jy-data tfoot th, table.jy-data tfoot td {
 .jy-fs .ant-form-item:last-child { margin-bottom: 0; }
 .jy-fs .ant-form-item-label > label { font-size: 13px; color: var(--jy-ink-2); font-weight: 500; }
 .jy-two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+.jy-field { display: flex; flex-direction: column; gap: 6px; }
+.jy-field > label { font-size: 13px; line-height: 20px; color: var(--jy-ink-2); font-weight: 500; }
+.jy-caption-link { font-size: 12px; line-height: 18px; color: var(--jy-cobalt); }
+.jy-empty-inline { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; color: var(--jy-ink-2); }
 .jy-test-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 12px; }
 .jy-test-result {
   display: grid; grid-template-columns: 16px 1fr; gap: 2px 10px; padding: 12px; margin-top: 4px;

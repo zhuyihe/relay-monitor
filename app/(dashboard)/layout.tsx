@@ -1,7 +1,7 @@
 "use client";
 // 炬元控制台外壳：深色侧栏（分组导航 + 待处理计数）+ 56px 顶栏（标题、时间范围、数据截至、刷新、主题、账户）。
 // 页面通过 useShellPage 注册刷新动作、数据时间和时间范围控件，外壳只负责摆放。
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { App, Dropdown } from "antd";
@@ -292,7 +292,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
           <main className={`jy-content${refreshing ? " is-refreshing" : ""}`} aria-busy={refreshing || undefined}>
             {range ? <div className="jy-mobile-range">{range}</div> : null}
-            {children}
+            {/* 页面用 useSearchParams 保存筛选状态，需要 Suspense 边界 */}
+            <Suspense fallback={null}>{children}</Suspense>
           </main>
         </div>
       </div>
