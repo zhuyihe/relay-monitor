@@ -1,90 +1,107 @@
 "use client";
-// 告警中心：推送渠道 / 添加编辑渠道弹窗 / 告警规则 / 每日日报
-// 对照 v1 app.js renderNotify(587-680)、openChModal/renderChFields(1616-1673)、
-// 通知相关事件处理(1925-2027)与 loadNotifications(2094)。
-// v1 对通知页刻意跳过自动重绘（refreshCurrentView：表单未保存的输入会被清空），
-// 因此本页只在挂载时加载一次，不做 30 秒轮询。
-import { useCallback, useEffect, useState } from "react";
-import { PageContainer, ProCard } from "@ant-design/pro-components";
-import {
-  App,
-  Avatar,
-  Button,
-  Checkbox,
-  Empty,
-  Input,
-  List,
-  Modal,
-  Select,
-  Switch,
-  Tabs,
-  theme,
-  TimePicker,
-  Typography,
-} from "antd";
-import {
-  DeleteOutlined,
-  EditOutlined,
-  PlusOutlined,
-  SendOutlined,
-} from "@ant-design/icons";
+// 告警中心：告警规则 / 通知渠道 / 每日日报。
+// 只在挂载时加载一次、不注册顶栏刷新：自动重载会冲掉未保存的阈值输入（沿用 v1 的取舍）。
+import "../../styles/pages/notifications.css";
+import { useCallback, useEffect, useId, useState } from "react";
+import Link from "next/link";
+import { App, Button, Checkbox, Form, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
 import { api } from "../../../lib/client";
-import AppState from "../../components/app-state";
+import { formatHhmm } from "../../../lib/format";
+import { CountBadge, Panel } from "../../components/panel";
+import { ErrorState, PanelSkeleton } from "../../components/data-state";
+import { Icon, Sym } from "../../components/icons";
+import { StatusText } from "../../components/status";
+import { TabPanel, Tabs } from "../../components/seg";
 
-const { Text } = Typography;
+type ChannelField = { key: string; label: string; required?: boolean };
+type ChannelType = { value: string; label: string; fields: ChannelField[] };
+type TestResult = { ok: boolean; text: string; at: number };
 
-// 渠道类型铭牌缩写（对照 v1 CH_PLATE）
+// 渠道类型铭牌缩写
 const CH_PLATE: Record<string, string> = {
   telegram: "TG", dingtalk: "DT", wecom: "WC", feishu: "FS", bark: "BK",
   ntfy: "NF", serverchan: "SC", resend: "RS", smtp: "SM", webhook: "WH",
 };
 
-// 密钥类字段：编辑时不回显，留空提交表示保持不变（store.updateChannel 的空值保留策略）
-const SECRET_KEYS = ["botToken", "secret", "token", "sendKey", "apiKey", "password", "deviceKey"];
+// 密钥类字段：编辑时不回显，留空提交 = 保持原值（store.updateChannel 对任意键都保留空值原值）。
+// Webhook 地址里带着访问令牌，自定义 Webhook 的请求头常含鉴权信息，一并按密钥处理（审计 V1）
+const SECRET_KEYS = ["botToken", "secret", "token", "sendKey", "apiKey", "password", "deviceKey", "webhook", "url", "headersJson"];
 
-// 阈值内部按天存储；界面按所选单位展示（对照 v1 etaRuleDisplay）
+// 告警规则：事件键（渠道绑定用）+ 开关键
+const RULES = [
+  { ev: "low", key: "onLow", title: "余额偏低", desc: "剩余余额低于阈值时通知" },
+  { ev: "exhaust", key: "onExhaust", title: "余额耗尽", desc: "剩余余额归零时通知" },
+  { ev: "error", key: "onError", title: "查询失败", desc: "接口查询出错时通知（令牌失效、上游宕机等）" },
+  { ev: "recover", key: "onRecover", title: "恢复正常", desc: "从异常状态恢复后通知" },
+  { ev: "eta", key: "onEta", title: "耗尽预警", desc: "按消耗速度预计即将耗尽时通知" },
+];
+
+// 阈值内部按天存储；界面按所选单位展示
 function etaRuleDisplay(r: any): number {
   const days = Number(r?.etaDays ?? 3);
   return r?.etaUnit === "hours" ? +(days * 24).toFixed(2) : +days.toFixed(2);
 }
 
-// 单行设置项：左侧标题+说明，右侧控件（对照 v1 的 .set-row 结构）
-function SetRow({ title, desc, children }: { title: string; desc: string; children: React.ReactNode }) {
+// 字段说明里用的简称：去掉「（可选…）」之类的括注；英文开头时补一个空格
+function shortLabel(label: string) {
+  const s = label.replace(/（.*?）/g, "").trim();
+  return /^[A-Za-z]/.test(s) ? ` ${s}` : s;
+}
+
+function sameIds(a: string[] = [], b: string[] = []) {
+  return a.length === b.length && [...a].sort().join("\n") === [...b].sort().join("\n");
+}
+
+function Dirty({ show }: { show: boolean }) {
+  return show ? (
+    <span className="jy-dirty">
+      <i aria-hidden="true" />
+      未保存
+    </span>
+  ) : null;
+}
+
+// 测试发送结果：图标 + 文字 + 底色，不单靠颜色
+function ResultBox({ r, okTitle }: { r: TestResult; okTitle: string }) {
   return (
-    <div className="setting-row">
-      <div className="setting-row__description">
-        <div style={{ fontWeight: 600 }}>{title}</div>
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          {desc}
-        </Text>
-      </div>
-      <div className="setting-row__controls">{children}</div>
+    <div className={`jy-test-result${r.ok ? "" : " jy-test-result--bad"}`}>
+      <Sym kind={r.ok ? "good" : "crit"} />
+      <b>{r.ok ? okTitle : "发送失败"}</b>
+      <span>
+        {r.text}
+        {r.text ? "；" : ""}
+        {formatHhmm(r.at)} 发送
+      </span>
     </div>
   );
 }
 
 export default function NotificationsPage() {
   const { message, modal } = App.useApp();
-  const { token } = theme.useToken(); // 深浅主题下均可读的语义 token
+  const uid = useId();
 
-  // 通知数据（对照 v1 state.channels / state.rules / state.channelTypes / state.settings）
-  const [loading, setLoading] = useState(true);
-  const [loaded, setLoaded] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // 渠道 / 规则 / 渠道类型来自 /api/notifications
+  const [notifLoaded, setNotifLoaded] = useState(false);
+  const [notifLoading, setNotifLoading] = useState(true);
+  const [notifErr, setNotifErr] = useState<unknown>(null);
   const [channels, setChannels] = useState<any[]>([]);
   const [rules, setRules] = useState<any>({});
-  const [channelTypes, setChannelTypes] = useState<any[]>([]);
+  const [channelTypes, setChannelTypes] = useState<ChannelType[]>([]);
+  // 日报设置来自 /api/meta 的 settings
+  const [metaLoaded, setMetaLoaded] = useState(false);
+  const [metaLoading, setMetaLoading] = useState(true);
+  const [metaErr, setMetaErr] = useState<unknown>(null);
   const [settings, setSettings] = useState<any>({});
 
-  // 告警规则表单（阈值与间隔；开关直接落库，不进表单）
-  const [etaVal, setEtaVal] = useState("");
+  // 规则阈值表单（开关和渠道绑定即时落库，不进表单）
+  const [etaVal, setEtaVal] = useState<number | null>(null);
   const [etaUnit, setEtaUnit] = useState<"days" | "hours">("days");
-  const [renotify, setRenotify] = useState("24");
-  const [errThreshold, setErrThreshold] = useState("1");
-  const [errRetry, setErrRetry] = useState("30");
+  const [renotify, setRenotify] = useState<number | null>(24);
+  const [errThreshold, setErrThreshold] = useState<number | null>(1);
+  const [errRetry, setErrRetry] = useState<number | null>(30);
+  const [ruleErrors, setRuleErrors] = useState<Record<string, string>>({});
   const [rulesSaving, setRulesSaving] = useState(false);
-  // 每类告警的推送渠道绑定（空 = 所有启用渠道）；选择即落库，与开关一致
   const [channelsFor, setChannelsFor] = useState<Record<string, string[]>>({});
 
   // 每日日报表单
@@ -94,7 +111,9 @@ export default function NotificationsPage() {
   const [drSaving, setDrSaving] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [sending, setSending] = useState(false);
+  const [sendResult, setSendResult] = useState<(TestResult & { fails: string[] }) | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
+  const [reportTab, setReportTab] = useState<"html" | "text">("html");
   const [report, setReport] = useState<{ text: string; html: string } | null>(null);
 
   // 渠道弹窗
@@ -103,19 +122,23 @@ export default function NotificationsPage() {
   const [chName, setChName] = useState("");
   const [chType, setChType] = useState("");
   const [chConfig, setChConfig] = useState<Record<string, string>>({});
+  const [chErrors, setChErrors] = useState<Record<string, string>>({});
   const [chSaving, setChSaving] = useState(false);
   const [chTesting, setChTesting] = useState(false);
-  const [rowTesting, setRowTesting] = useState<string | null>(null); // 列表行测试中的渠道 id
+  const [chTest, setChTest] = useState<TestResult | null>(null);
+  // 列表行：测试中的渠道 id 与本次会话内的测试结果（服务端不记录测试历史）
+  const [rowTesting, setRowTesting] = useState<string | null>(null);
+  const [rowTests, setRowTests] = useState<Record<string, TestResult>>({});
 
-  // 服务端钳制后的规则回显到表单（如非法输入被忽略、eta 下限 1 小时），
-  // 不然界面显示的是没生效的输入（对照 v1 rulesSave 后的回填）
+  // 服务端钳制后的规则回显到表单（如 eta 下限 1 小时），否则界面显示的是没生效的输入
   const syncRuleForm = (r: any) => {
     setEtaUnit(r?.etaUnit === "hours" ? "hours" : "days");
-    setEtaVal(String(etaRuleDisplay(r)));
-    setRenotify(String(r?.renotifyHours ?? 24));
-    setErrThreshold(String(r?.errorThreshold ?? 1));
-    setErrRetry(String(r?.errorRetrySec ?? 30));
+    setEtaVal(etaRuleDisplay(r));
+    setRenotify(Number(r?.renotifyHours ?? 24));
+    setErrThreshold(Number(r?.errorThreshold ?? 1));
+    setErrRetry(Number(r?.errorRetrySec ?? 30));
     setChannelsFor(r?.channelsFor || {});
+    setRuleErrors({});
   };
 
   const syncDrForm = (s: any) => {
@@ -124,39 +147,45 @@ export default function NotificationsPage() {
     setDrChannelIds(s?.dailyReport?.channelIds || []);
   };
 
-  // 挂载时加载：notifications 给渠道/规则/类型，meta 给 settings（对照 v1 bootData）
-  const loadPage = useCallback(async () => {
-    setLoading(true);
+  // 两个来源分开加载：任一失败只影响自己的区块
+  const loadNotif = useCallback(async () => {
+    setNotifLoading(true);
+    setNotifErr(null);
     try {
-      const [n, m] = await Promise.all([api("/api/notifications"), api("/api/meta")]);
+      const n = await api("/api/notifications");
       setChannels(n.channels);
       setRules(n.rules);
       setChannelTypes(n.channelTypes);
-      setSettings(m.settings);
-      setEtaUnit(n.rules?.etaUnit === "hours" ? "hours" : "days");
-      setEtaVal(String(etaRuleDisplay(n.rules)));
-      setRenotify(String(n.rules?.renotifyHours ?? 24));
-      setErrThreshold(String(n.rules?.errorThreshold ?? 1));
-      setErrRetry(String(n.rules?.errorRetrySec ?? 30));
-      setChannelsFor(n.rules?.channelsFor || {});
-      setDrEnabled(!!m.settings?.dailyReport?.enabled);
-      setDrTime(m.settings?.dailyReport?.time || "09:00");
-      setDrChannelIds(m.settings?.dailyReport?.channelIds || []);
-      setLoaded(true);
-      setLoadError(null);
-    } catch (e: any) {
-      setLoadError(e.message || "告警中心加载失败");
+      syncRuleForm(n.rules);
+      setNotifLoaded(true);
+    } catch (e) {
+      setNotifErr(e);
     } finally {
-      setLoading(false);
+      setNotifLoading(false);
+    }
+  }, []);
+
+  const loadMeta = useCallback(async () => {
+    setMetaLoading(true);
+    setMetaErr(null);
+    try {
+      const m = await api("/api/meta");
+      setSettings(m.settings);
+      syncDrForm(m.settings);
+      setMetaLoaded(true);
+    } catch (e) {
+      setMetaErr(e);
+    } finally {
+      setMetaLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadPage();
-  }, [loadPage]);
+    loadNotif();
+    loadMeta();
+  }, [loadNotif, loadMeta]);
 
-  // 重新拉取渠道数据（对照 v1 loadNotifications）
-  // 同步渠道绑定（删除渠道时服务端会清理其中的死 id），但不动阈值输入表单
+  // 重新拉取渠道数据：同步渠道绑定（删除渠道时服务端会清理其中的死 id），但不动阈值输入
   const reloadChannels = async () => {
     const n = await api("/api/notifications");
     setChannels(n.channels);
@@ -168,9 +197,10 @@ export default function NotificationsPage() {
   // ---- 渠道操作 ---------------------------------------------------------------
 
   const toggleChannel = async (c: any) => {
+    const next = c.enabled === false;
     try {
-      await api(`/api/notifications/channels/${c.id}`, { method: "PUT", body: { enabled: !c.enabled } });
-      setChannels((list) => list.map((x) => (x.id === c.id ? { ...x, enabled: !c.enabled } : x)));
+      await api(`/api/notifications/channels/${c.id}`, { method: "PUT", body: { enabled: next } });
+      setChannels((list) => list.map((x) => (x.id === c.id ? { ...x, enabled: next } : x)));
     } catch (e: any) {
       message.error(e.message);
     }
@@ -180,10 +210,9 @@ export default function NotificationsPage() {
     setRowTesting(c.id);
     try {
       const r = await api("/api/notifications/test", { body: { channelId: c.id } });
-      if (r.ok) message.success(`已发送到「${c.name}」`);
-      else message.error(`发送失败：${r.error}`);
+      setRowTests((m) => ({ ...m, [c.id]: { ok: !!r.ok, text: r.ok ? `已发送到「${c.name}」` : r.error || "", at: Date.now() } }));
     } catch (e: any) {
-      message.error(e.message);
+      setRowTests((m) => ({ ...m, [c.id]: { ok: false, text: e.message, at: Date.now() } }));
     } finally {
       setRowTesting(null);
     }
@@ -192,6 +221,7 @@ export default function NotificationsPage() {
   const deleteChannel = (c: any) => {
     modal.confirm({
       title: `确定删除渠道「${c.name}」？`,
+      content: "删除后不能恢复。",
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
@@ -209,9 +239,9 @@ export default function NotificationsPage() {
 
   // ---- 渠道弹窗 ---------------------------------------------------------------
 
-  // 打开弹窗：编辑时回填 config，但密钥字段不回显（留空提交 = 保持原值）
-  const openChModal = (channel: any) => {
-    const type = channel?.type || channelTypes[0]?.value || "";
+  // 打开弹窗：编辑时回填非密钥字段；密钥字段不回显（留空提交 = 保持原值）
+  const openChModal = (channel: any, presetType?: string) => {
+    const type = channel?.type || presetType || channelTypes[0]?.value || "";
     const t = channelTypes.find((x) => x.value === type);
     const cfg: Record<string, string> = {};
     for (const f of t?.fields || []) {
@@ -222,16 +252,26 @@ export default function NotificationsPage() {
     setChType(type);
     setChName(channel?.name || "");
     setChConfig(cfg);
+    setChErrors({});
+    setChTest(null);
     setChOpen(true);
   };
 
-  // 切换类型时清空动态字段（对照 v1 renderChFields(null)）；仅新增时可切
+  // 切换类型时清空动态字段；仅新增时可切
   const onChTypeChange = (type: string) => {
     setChType(type);
     setChConfig({});
+    setChErrors({});
+    setChTest(null);
   };
 
-  // 表单载荷：按当前类型的字段定义取值并 trim（对照 v1 chFormPayload）
+  const onChFieldChange = (key: string, value: string) => {
+    setChConfig((cfg) => ({ ...cfg, [key]: value }));
+    setChErrors((e) => (e[key] ? { ...e, [key]: "" } : e));
+    setChTest(null); // 配置变了，上一次的测试结果不再代表当前配置
+  };
+
+  // 表单载荷：按当前类型的字段定义取值并 trim
   const chFormConfig = () => {
     const t = channelTypes.find((x) => x.value === chType);
     const config: Record<string, string> = {};
@@ -243,11 +283,10 @@ export default function NotificationsPage() {
     const t = channelTypes.find((x) => x.value === chType);
     const config = chFormConfig();
     // 必填校验：编辑时密钥不回显，已配置过的空值视为「保持不变」不算缺失
-    const missing = (t?.fields || []).filter(
-      (f: any) => f.required && !config[f.key] && !editingCh?.config?.[f.key]
-    );
+    const missing = (t?.fields || []).filter((f) => f.required && !config[f.key] && !editingCh?.config?.[f.key]);
     if (missing.length) {
-      message.error(`请填写：${missing.map((f: any) => f.label).join("、")}`);
+      setChErrors(Object.fromEntries(missing.map((f) => [f.key, `请填写${shortLabel(f.label).trim()}`])));
+      document.getElementById(`${uid}-ch-${missing[0].key}`)?.focus();
       return;
     }
     setChSaving(true);
@@ -265,7 +304,7 @@ export default function NotificationsPage() {
     }
   };
 
-  // 弹窗内测试：按 type+config 试发未保存的配置（对照 v1 chTest）；
+  // 弹窗内测试：按 type+config 试发未保存的配置；
   // 编辑时密钥字段不回显，空值用已保存的原值补齐，否则测试必然失败
   const testChForm = async () => {
     const config = chFormConfig();
@@ -275,12 +314,12 @@ export default function NotificationsPage() {
       }
     }
     setChTesting(true);
+    setChTest(null);
     try {
       const r = await api("/api/notifications/test", { body: { type: chType, config } });
-      if (r.ok) message.success("测试消息已发送");
-      else message.error(`发送失败：${r.error}`);
+      setChTest({ ok: !!r.ok, text: r.ok ? "请在对应应用里确认是否收到" : r.error || "", at: Date.now() });
     } catch (e: any) {
-      message.error(e.message);
+      setChTest({ ok: false, text: e.message, at: Date.now() });
     } finally {
       setChTesting(false);
     }
@@ -288,7 +327,7 @@ export default function NotificationsPage() {
 
   // ---- 告警规则 ---------------------------------------------------------------
 
-  // 开关即时落库（对照 v1 data-rule 点击）
+  // 开关即时落库；只更新 rules，不覆盖未保存的阈值输入
   const toggleRule = async (key: string) => {
     try {
       const r = await api("/api/notifications/rules", { method: "PUT", body: { [key]: !rules[key] } });
@@ -302,10 +341,7 @@ export default function NotificationsPage() {
   const saveChannelsFor = async (key: string, ids: string[]) => {
     setChannelsFor((cf) => ({ ...cf, [key]: ids }));
     try {
-      const r = await api("/api/notifications/rules", {
-        method: "PUT",
-        body: { channelsFor: { [key]: ids } },
-      });
+      const r = await api("/api/notifications/rules", { method: "PUT", body: { channelsFor: { [key]: ids } } });
       setRules(r.rules);
       setChannelsFor(r.rules?.channelsFor || {});
     } catch (e: any) {
@@ -314,51 +350,46 @@ export default function NotificationsPage() {
     }
   };
 
-  // 告警规则行右侧：渠道多选（空 = 全部启用渠道）+ 开关
-  const alertChannelOptions = channels.map((c: any) => ({
-    value: c.id,
-    label: c.enabled === false ? `${c.name}（已停用）` : c.name,
-  }));
-  // 普通渲染函数而非内嵌组件：避免每次渲染产生新组件类型导致 Select 重挂、
-  // 多选下拉每选一项就被关闭
-  const renderAlertControls = (evKey: string, ruleKey: string) => (
-    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
-      <Select
-        mode="multiple"
-        allowClear
-        style={{ minWidth: 200, maxWidth: 320 }}
-        placeholder="全部启用渠道"
-        maxTagCount="responsive"
-        optionFilterProp="label"
-        value={channelsFor[evKey] || []}
-        onChange={(ids) => saveChannelsFor(evKey, ids as string[])}
-        options={alertChannelOptions}
-        disabled={!channels.length}
-      />
-      <Switch checked={!!rules[ruleKey]} onChange={() => toggleRule(ruleKey)} />
-    </div>
-  );
-
-  // 切换单位时把输入值换算过去（两个单位间必然是互换，对照 v1 rule-etaUnit onchange）
+  // 切换单位时把输入值换算过去（两个单位间必然是互换）
   const onEtaUnitChange = (u: "days" | "hours") => {
     const v = Number(etaVal);
-    if (Number.isFinite(v) && v > 0) {
-      setEtaVal(String(u === "hours" ? +(v * 24).toFixed(2) : +(v / 24).toFixed(2)));
+    if (etaVal != null && Number.isFinite(v) && v > 0) {
+      setEtaVal(u === "hours" ? +(v * 24).toFixed(2) : +(v / 24).toFixed(2));
     }
     setEtaUnit(u);
   };
 
+  const rulesDirty =
+    notifLoaded &&
+    (etaUnit !== (rules?.etaUnit === "hours" ? "hours" : "days") ||
+      etaVal !== etaRuleDisplay(rules) ||
+      renotify !== Number(rules?.renotifyHours ?? 24) ||
+      errThreshold !== Number(rules?.errorThreshold ?? 1) ||
+      errRetry !== Number(rules?.errorRetrySec ?? 30));
+
   const saveRules = async () => {
+    // 清空视为「未填写」而不是 0；被禁用（规则关闭）的空字段沿用已保存的值，不拦截保存
+    const errs: Record<string, string> = {};
+    if (etaVal == null && rules.onEta) errs.eta = "请填写耗尽预警阈值";
+    if (errThreshold == null && rules.onError) errs.errThreshold = "请填写失败次数";
+    if (renotify == null) errs.renotify = "请填写重复提醒间隔，0 表示只提醒一次";
+    if (errRetry == null) errs.errRetry = "请填写重试间隔，0 表示关闭";
+    setRuleErrors(errs);
+    const first = Object.keys(errs)[0];
+    if (first) {
+      document.getElementById(`${uid}-${first}`)?.focus();
+      return;
+    }
     setRulesSaving(true);
     try {
-      const val = Number(etaVal);
+      const val = Number(etaVal ?? etaRuleDisplay(rules));
       const r = await api("/api/notifications/rules", {
         method: "PUT",
         body: {
           etaDays: etaUnit === "hours" ? val / 24 : val, // 内部统一按天
           etaUnit,
           renotifyHours: Number(renotify),
-          errorThreshold: Number(errThreshold),
+          errorThreshold: Number(errThreshold ?? rules.errorThreshold ?? 1),
           errorRetrySec: Number(errRetry),
         },
       });
@@ -374,18 +405,17 @@ export default function NotificationsPage() {
 
   // ---- 每日日报 ---------------------------------------------------------------
 
+  const drSaved = settings?.dailyReport || {};
+  const drDirty =
+    metaLoaded &&
+    (drEnabled !== !!drSaved.enabled || drTime !== (drSaved.time || "09:00") || !sameIds(drChannelIds, drSaved.channelIds || []));
+
   const saveDailyReport = async () => {
     setDrSaving(true);
     try {
       const r = await api("/api/settings", {
         method: "PUT",
-        body: {
-          dailyReport: {
-            enabled: drEnabled,
-            time: drTime || "09:00",
-            channelIds: drChannelIds,
-          },
-        },
+        body: { dailyReport: { enabled: drEnabled, time: drTime || "09:00", channelIds: drChannelIds } },
       });
       setSettings(r.settings);
       syncDrForm(r.settings);
@@ -402,6 +432,7 @@ export default function NotificationsPage() {
     try {
       const r = await api("/api/report/preview", { method: "POST", body: {} });
       setReport({ text: r.text, html: r.html });
+      setReportTab("html");
       setReportOpen(true);
     } catch (e: any) {
       message.error(e.message);
@@ -412,14 +443,19 @@ export default function NotificationsPage() {
 
   const sendReport = async () => {
     setSending(true);
+    setSendResult(null);
     try {
       const r = await api("/api/report/send", { method: "POST", body: {} });
-      const ok = r.results.filter((x: any) => x.ok).length;
-      const text = `日报已发送：${ok}/${r.results.length} 个渠道成功`;
-      if (ok) message.success(text);
-      else message.error(text);
+      const results: any[] = r.results || [];
+      const ok = results.filter((x) => x.ok).length;
+      setSendResult({
+        ok: ok > 0,
+        text: `日报已发送：${ok}/${results.length} 个渠道成功`,
+        at: Date.now(),
+        fails: results.filter((x) => !x.ok).map((x) => `${x.name || x.id}：${x.error || "发送失败"}`),
+      });
     } catch (e: any) {
-      message.error(e.message);
+      setSendResult({ ok: false, text: e.message, at: Date.now(), fails: [] });
     } finally {
       setSending(false);
     }
@@ -427,296 +463,571 @@ export default function NotificationsPage() {
 
   // ---- 渲染 -------------------------------------------------------------------
 
-  if (!loaded && loadError) {
-    return (
-      <PageContainer className="responsive-page" title="告警中心" subTitle="管理告警规则、推送渠道与每日日报">
-        <AppState
-          kind="error"
-          title="告警中心暂时无法加载"
-          description={loadError}
-          actions={<Button type="primary" loading={loading} onClick={loadPage}>重新加载</Button>}
-        />
-      </PageContainer>
-    );
-  }
-
   const curType = channelTypes.find((x) => x.value === chType);
-  const r = rules;
+  const typeLabel = (type: string) => channelTypes.find((x) => x.value === type)?.label || type;
+  const channelOptions = channels.map((c: any) => ({
+    value: c.id,
+    label: c.enabled === false ? `${c.name}（已停用）` : c.name,
+  }));
 
-  return (
-    <PageContainer
-      className="responsive-page"
-      title="告警中心"
-      subTitle="管理告警规则、推送渠道与每日日报"
-      extra={
-        <div className="page-toolbar">
-          <Button className="touch-icon-button" type="primary" icon={<PlusOutlined />} onClick={() => openChModal(null)}>
-            添加渠道
-          </Button>
-        </div>
-      }
-      loading={loading}
-    >
-      {/* 推送渠道列表 */}
-      {/* 窄视口：标题不换行不收缩，说明文字（extra）允许换行，避免标题被挤成竖排 */}
-      <ProCard
-        className="mobile-card-header"
-        title={<span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>推送渠道</span>}
-        extra={
-          <Text type="secondary" style={{ fontSize: 12, whiteSpace: "normal", textAlign: "right" }}>
-            在下方「告警规则」中可为每类告警单独选择推送渠道
-          </Text>
-        }
-      >
-        <List
-          dataSource={channels}
-          locale={{
-            emptyText: (
-              <Empty
-                image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description={
-                  <>
-                    <div style={{ fontWeight: 600 }}>还没有推送渠道</div>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      添加 Telegram、钉钉、企业微信、飞书、Bark、ntfy、Server酱或自定义 Webhook。
-                    </Text>
-                  </>
-                }
-              />
-            ),
-          }}
-          renderItem={(c: any) => {
-            const t = channelTypes.find((x) => x.value === c.type);
-            return (
-              <List.Item
-                className="notification-row"
-                actions={[
-                  <Switch key="enabled" checked={c.enabled !== false} onChange={() => toggleChannel(c)} title="启用/停用" />,
-                  <Button
-                    key="test"
-                    type="text"
-                    icon={<SendOutlined />}
-                    loading={rowTesting === c.id}
-                    onClick={() => testChannel(c)}
-                    title="发送测试"
-                    aria-label={`测试 ${c.name}`}
-                  />,
-                  <Button key="edit" type="text" icon={<EditOutlined />} onClick={() => openChModal(c)} title="编辑" aria-label={`编辑 ${c.name}`} />,
-                  <Button key="del" type="text" danger icon={<DeleteOutlined />} onClick={() => deleteChannel(c)} title="删除" aria-label={`删除 ${c.name}`} />,
-                ]}
-              >
-                <List.Item.Meta
-                  avatar={
-                    <Avatar shape="square" style={{ background: token.colorPrimaryBg, color: token.colorPrimary, fontWeight: 700 }}>
-                      {CH_PLATE[c.type] || "?"}
-                    </Avatar>
-                  }
-                  title={c.name}
-                  description={t?.label || c.type}
-                />
-              </List.Item>
-            );
-          }}
-        />
-      </ProCard>
+  const testCell = (c: any) => {
+    const t = rowTests[c.id];
+    if (!t) return <span className="jy-muted">未测试</span>;
+    return (
+      <span className="jy-notifications-test">
+        <StatusText level={t.ok ? "good" : "crit"}>
+          {t.ok ? "发送成功" : "发送失败"}
+          <span className="jy-caption">{formatHhmm(t.at)}</span>
+        </StatusText>
+        {!t.ok && t.text && <span className="jy-caption">{t.text}</span>}
+      </span>
+    );
+  };
 
-      {/* 告警规则 */}
-      <ProCard title="告警规则" style={{ marginTop: 16 }}>
-        <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
-          每类告警可单独选择推送渠道；不选 = 发送到所有启用的渠道
-        </Text>
-        <SetRow title="余额偏低" desc="剩余余额低于阈值时通知">
-          {renderAlertControls("low", "onLow")}
-        </SetRow>
-        <SetRow title="余额耗尽" desc="剩余余额归零时通知">
-          {renderAlertControls("exhaust", "onExhaust")}
-        </SetRow>
-        <SetRow title="查询失败" desc="接口查询出错时通知（令牌失效、站点宕机等）">
-          {renderAlertControls("error", "onError")}
-        </SetRow>
-        <SetRow title="恢复正常" desc="从异常状态恢复后通知">
-          {renderAlertControls("recover", "onRecover")}
-        </SetRow>
-        <SetRow title="耗尽预警" desc="按消耗速度预计即将耗尽时通知">
-          {renderAlertControls("eta", "onEta")}
-        </SetRow>
-        <SetRow title="耗尽预警阈值" desc="预计在该时间内耗尽则触发「耗尽预警」，可按天或小时设置">
-          <div style={{ display: "flex", gap: 8 }}>
-            <Input style={{ width: 90 }} value={etaVal} onChange={(e) => setEtaVal(e.target.value)} />
+  const rowActions = (c: any) => (
+    <>
+      <Button type="link" size="small" loading={rowTesting === c.id} onClick={() => testChannel(c)} aria-label={`向「${c.name}」发送测试消息`}>
+        测试
+      </Button>
+      <Button type="link" size="small" onClick={() => openChModal(c)} aria-label={`编辑「${c.name}」`}>
+        编辑
+      </Button>
+      <Button type="link" size="small" danger onClick={() => deleteChannel(c)} aria-label={`删除「${c.name}」`}>
+        删除
+      </Button>
+    </>
+  );
+
+  const enabledToggle = (c: any) => (
+    <span className="jy-notifications-toggle">
+      <Switch size="small" checked={c.enabled !== false} onChange={() => toggleChannel(c)} aria-label={`启用渠道「${c.name}」`} />
+      <span>{c.enabled !== false ? "已启用" : "已停用"}</span>
+    </span>
+  );
+
+  const plate = (type: string) => (
+    <span className="jy-notifications-type">
+      <span className="jy-notifications-plate" aria-hidden="true">
+        {CH_PLATE[type] || "?"}
+      </span>
+      {typeLabel(type)}
+    </span>
+  );
+
+  // 规则行的附加条件：关闭规则时整体禁用
+  const ruleCondition = (ruleKey: string) => {
+    const off = !rules[ruleKey];
+    if (ruleKey === "onLow")
+      return (
+        <p className="jy-notifications-cond jy-caption">
+          阈值取全局低余额阈值（<Link className="jy-link" href="/settings">系统设置</Link>），单个上游可单独覆盖
+        </p>
+      );
+    if (ruleKey === "onEta")
+      return (
+        <div className="jy-notifications-cond">
+          <label htmlFor={`${uid}-eta`}>预计在</label>
+          <Space.Compact>
+            <InputNumber
+              id={`${uid}-eta`}
+              min={0}
+              precision={2}
+              value={etaVal}
+              onChange={(v) => {
+                setEtaVal(v as number | null);
+                setRuleErrors((e) => ({ ...e, eta: "" }));
+              }}
+              disabled={off}
+              status={ruleErrors.eta ? "error" : undefined}
+              aria-describedby={ruleErrors.eta ? `${uid}-eta-err` : undefined}
+            />
             <Select
-              style={{ width: 80 }}
+              aria-label="耗尽预警阈值单位"
               value={etaUnit}
               onChange={onEtaUnitChange}
+              disabled={off}
               options={[
                 { value: "days", label: "天" },
                 { value: "hours", label: "小时" },
               ]}
             />
+          </Space.Compact>
+          <span>内耗尽时通知</span>
+          {ruleErrors.eta && (
+            <span className="jy-err" id={`${uid}-eta-err`}>
+              <Sym kind="crit" />
+              {ruleErrors.eta}
+            </span>
+          )}
+        </div>
+      );
+    if (ruleKey === "onError")
+      return (
+        <div className="jy-notifications-cond">
+          <label htmlFor={`${uid}-errThreshold`}>连续失败达到</label>
+          <InputNumber
+            id={`${uid}-errThreshold`}
+            min={1}
+            precision={0}
+            suffix="次"
+            value={errThreshold}
+            onChange={(v) => {
+              setErrThreshold(v as number | null);
+              setRuleErrors((e) => ({ ...e, errThreshold: "" }));
+            }}
+            disabled={off}
+            status={ruleErrors.errThreshold ? "error" : undefined}
+            aria-describedby={`${uid}-errThreshold-desc`}
+          />
+          <span id={`${uid}-errThreshold-desc`}>才通知（1 = 首次失败即通知）</span>
+          {ruleErrors.errThreshold && (
+            <span className="jy-err">
+              <Sym kind="crit" />
+              {ruleErrors.errThreshold}
+            </span>
+          )}
+        </div>
+      );
+    return null;
+  };
+
+  // 首次加载：与真实布局同形的骨架
+  if (!notifLoaded && !notifErr && notifLoading) {
+    return (
+      <div className="jy-page">
+        <PanelSkeleton title="告警规则" lines={6} />
+        <PanelSkeleton title="通知渠道" lines={3} />
+        <PanelSkeleton title="每日日报" lines={3} />
+      </div>
+    );
+  }
+
+  const notifFailed = !notifLoaded && !!notifErr;
+
+  return (
+    <div className="jy-page">
+      {/* 告警规则 */}
+      {notifFailed ? (
+        <Panel title="告警规则">
+          <ErrorState title="告警规则和通知渠道暂时无法加载" error={notifErr} onRetry={loadNotif} />
+        </Panel>
+      ) : (
+        <Panel
+          title="告警规则"
+          badge={<Dirty show={rulesDirty} />}
+          caption="每类告警可单独选择通知渠道；不选 = 发送到所有启用的渠道"
+          body="flush"
+        >
+          <div className="jy-table-wrap">
+            <table className="jy-data jy-notifications-rules">
+              <thead>
+                <tr>
+                  <th className="col-switch">开关</th>
+                  <th>告警与触发条件</th>
+                  <th className="col-to">通知到</th>
+                </tr>
+              </thead>
+              <tbody>
+                {RULES.map((rule) => {
+                  const on = !!rules[rule.key];
+                  const titleId = `${uid}-rule-${rule.ev}`;
+                  return (
+                    <tr key={rule.key} className={on ? undefined : "is-off"}>
+                      <td className="col-switch">
+                        <Switch
+                          checked={on}
+                          checkedChildren="开"
+                          unCheckedChildren="关"
+                          onChange={() => toggleRule(rule.key)}
+                          aria-labelledby={titleId}
+                        />
+                      </td>
+                      <td>
+                        <span className="jy-notifications-rule-title" id={titleId}>
+                          {rule.title}
+                        </span>
+                        <span className="jy-notifications-rule-desc">{rule.desc}</span>
+                        {ruleCondition(rule.key)}
+                      </td>
+                      <td className="col-to">
+                        <Select
+                          mode="multiple"
+                          allowClear
+                          aria-label={`「${rule.title}」通知到的渠道`}
+                          placeholder={channels.length ? "全部启用渠道" : "还没有通知渠道"}
+                          maxTagCount="responsive"
+                          optionFilterProp="label"
+                          value={channelsFor[rule.ev] || []}
+                          onChange={(ids) => saveChannelsFor(rule.ev, ids as string[])}
+                          options={channelOptions}
+                          disabled={!channels.length || !on}
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
-        </SetRow>
-        <SetRow title="重复提醒间隔" desc="同一异常持续存在时，每隔 N 小时再次提醒（0 = 只提醒一次）">
-          <Input style={{ width: 90 }} value={renotify} onChange={(e) => setRenotify(e.target.value)} suffix="小时" />
-        </SetRow>
-        <SetRow title="失败通知阈值" desc="查询连续失败达到该次数才推送「查询失败」（1 = 首次失败即通知）">
-          <Input style={{ width: 90 }} value={errThreshold} onChange={(e) => setErrThreshold(e.target.value)} suffix="次" />
-        </SetRow>
-        <SetRow title="失败快速重试" desc="查询失败后隔 N 秒立即重试一次以尽快确认，不必等下次轮询（0 = 关闭）">
-          <Input style={{ width: 90 }} value={errRetry} onChange={(e) => setErrRetry(e.target.value)} suffix="秒" />
-        </SetRow>
-        <SetRow title="保存规则" desc="应用阈值与间隔修改">
-          <Button type="primary" loading={rulesSaving} onClick={saveRules}>
-            保存
-          </Button>
-        </SetRow>
-      </ProCard>
+
+          <div className="jy-notifications-pad">
+            <fieldset className="jy-fs">
+              <legend>提醒节奏</legend>
+              <p className="fs-desc">对所有已开启的告警生效。</p>
+              <div className="jy-two">
+                <div className="jy-field">
+                  <label htmlFor={`${uid}-renotify`}>重复提醒间隔</label>
+                  <InputNumber
+                    id={`${uid}-renotify`}
+                    min={0}
+                    suffix="小时"
+                    value={renotify}
+                    onChange={(v) => {
+                      setRenotify(v as number | null);
+                      setRuleErrors((e) => ({ ...e, renotify: "" }));
+                    }}
+                    status={ruleErrors.renotify ? "error" : undefined}
+                    aria-describedby={`${uid}-renotify-desc`}
+                  />
+                  {ruleErrors.renotify ? (
+                    <span className="jy-err" id={`${uid}-renotify-desc`}>
+                      <Sym kind="crit" />
+                      {ruleErrors.renotify}
+                    </span>
+                  ) : (
+                    <span className="jy-caption" id={`${uid}-renotify-desc`}>
+                      同一异常持续存在时，每隔 N 小时再次提醒（0 = 只提醒一次）
+                    </span>
+                  )}
+                </div>
+                <div className="jy-field">
+                  <label htmlFor={`${uid}-errRetry`}>失败快速重试</label>
+                  <InputNumber
+                    id={`${uid}-errRetry`}
+                    min={0}
+                    precision={0}
+                    suffix="秒"
+                    value={errRetry}
+                    onChange={(v) => {
+                      setErrRetry(v as number | null);
+                      setRuleErrors((e) => ({ ...e, errRetry: "" }));
+                    }}
+                    status={ruleErrors.errRetry ? "error" : undefined}
+                    aria-describedby={`${uid}-errRetry-desc`}
+                  />
+                  {ruleErrors.errRetry ? (
+                    <span className="jy-err" id={`${uid}-errRetry-desc`}>
+                      <Sym kind="crit" />
+                      {ruleErrors.errRetry}
+                    </span>
+                  ) : (
+                    <span className="jy-caption" id={`${uid}-errRetry-desc`}>
+                      查询失败后隔 N 秒立即重试一次以尽快确认，不必等下次轮询（0 = 关闭）
+                    </span>
+                  )}
+                </div>
+              </div>
+            </fieldset>
+            <div className="jy-notifications-actions">
+              <Button type="primary" loading={rulesSaving} onClick={saveRules}>
+                保存规则
+              </Button>
+              <span className="jy-caption">开关和通知渠道改动后立即生效；阈值与间隔需点「保存规则」</span>
+            </div>
+          </div>
+        </Panel>
+      )}
+
+      {/* 通知渠道 */}
+      {notifFailed ? (
+        <Panel title="通知渠道">
+          <ErrorState title="通知渠道暂时无法加载" error={notifErr} onRetry={loadNotif} />
+        </Panel>
+      ) : (
+        <Panel
+          title="通知渠道"
+          badge={<CountBadge count={channels.length} muted />}
+          caption="告警和日报通过这些渠道推送"
+          extra={
+            channels.length ? (
+              <Button icon={<Icon name="plus" />} onClick={() => openChModal(null)}>
+                添加渠道
+              </Button>
+            ) : null
+          }
+          body={channels.length ? "flush" : true}
+        >
+          {channels.length ? (
+            <>
+              <div className="jy-table-wrap has-mobile">
+                <table className="jy-data">
+                  <thead>
+                    <tr>
+                      <th>类型</th>
+                      <th>名称</th>
+                      <th>状态</th>
+                      <th>本次测试</th>
+                      <th className="r">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {channels.map((c: any) => (
+                      <tr key={c.id}>
+                        <td>{plate(c.type)}</td>
+                        <td className="jy-notifications-name">{c.name}</td>
+                        <td>{enabledToggle(c)}</td>
+                        <td aria-live="polite">{testCell(c)}</td>
+                        <td className="r">
+                          <div className="jy-row-actions">{rowActions(c)}</div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <ul className="jy-m-list" aria-label="通知渠道">
+                {channels.map((c: any) => (
+                  <li key={c.id}>
+                    <span className="m-top">{c.name}</span>
+                    {enabledToggle(c)}
+                    <div className="m-sub">
+                      {plate(c.type)}
+                      <span aria-live="polite">{testCell(c)}</span>
+                    </div>
+                    <div className="m-actions">{rowActions(c)}</div>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <div className="jy-empty-inline">
+              <div>
+                <b className="jy-notifications-empty-title">还没有通知渠道</b>
+                <p className="jy-notifications-empty-desc">添加至少一个渠道后，告警和日报才能送达。可选的渠道类型：</p>
+              </div>
+              <ul className="jy-notifications-types">
+                {channelTypes.map((t) => (
+                  <li key={t.value}>
+                    <Button onClick={() => openChModal(null, t.value)} aria-label={`添加${t.label}渠道`}>
+                      <span className="jy-notifications-plate" aria-hidden="true">
+                        {CH_PLATE[t.value] || "?"}
+                      </span>
+                      {t.label}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+              <Button type="primary" icon={<Icon name="plus" />} onClick={() => openChModal(null)}>
+                添加渠道
+              </Button>
+            </div>
+          )}
+        </Panel>
+      )}
 
       {/* 每日日报 */}
-      <ProCard
-        className="mobile-card-header"
-        title={<span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>每日日报</span>}
-        extra={
-          <Text type="secondary" style={{ fontSize: 12, whiteSpace: "normal", textAlign: "right" }}>
-            定时汇总昨日自营业务经营情况并推送（时间按服务器时区）
-          </Text>
-        }
-        style={{ marginTop: 16 }}
-      >
-        <SetRow title="启用日报" desc="每天在设定时间生成并发送昨日报告">
-          <Switch checked={drEnabled} onChange={setDrEnabled} />
-        </SetRow>
-        <SetRow title="发送时间" desc="服务器时区的每日时刻">
-          <TimePicker
-            style={{ width: 112 }}
-            format="HH:mm"
-            allowClear={false}
-            value={drTime ? dayjs(drTime, "HH:mm") : null}
-            onChange={(d) => setDrTime(d ? d.format("HH:mm") : "")}
-          />
-        </SetRow>
-        <SetRow title="发送渠道" desc="不勾选 = 所有启用的渠道；日报较长，建议勾选邮件渠道">
-          {channels.length ? (
-            <Checkbox.Group
-              style={{ display: "flex", flexDirection: "column", gap: 4 }}
-              value={drChannelIds}
-              onChange={(ids) => setDrChannelIds(ids as string[])}
-              options={channels.map((c) => ({ value: c.id, label: c.name }))}
-            />
-          ) : (
-            <Text type="secondary">先添加推送渠道</Text>
-          )}
-        </SetRow>
-        <SetRow title="保存与测试" desc="预览按当前数据生成的报告，或立即发送一次">
-          <div style={{ display: "flex", gap: 8 }}>
+      {!metaLoaded && metaLoading ? (
+        <PanelSkeleton title="每日日报" lines={3} />
+      ) : !metaLoaded ? (
+        <Panel title="每日日报">
+          <ErrorState title="日报设置暂时无法加载" error={metaErr} onRetry={loadMeta} />
+        </Panel>
+      ) : (
+        <Panel
+          title="每日日报"
+          badge={<Dirty show={drDirty} />}
+          caption="定时汇总昨日自营业务经营情况并推送（时间按服务器时区）"
+        >
+          <Form layout="vertical" requiredMark={false} component="div" className="jy-notifications-dr">
+            <Form.Item label="启用日报" htmlFor={`${uid}-dr-enabled`} extra="每天在设定时间生成并发送昨日报告">
+              <Switch
+                id={`${uid}-dr-enabled`}
+                checked={drEnabled}
+                checkedChildren="开"
+                unCheckedChildren="关"
+                onChange={setDrEnabled}
+              />
+            </Form.Item>
+            <div className="jy-two">
+              <Form.Item label="发送时间" htmlFor={`${uid}-dr-time`} extra="服务器时区的每日时刻">
+                <TimePicker
+                  id={`${uid}-dr-time`}
+                  format="HH:mm"
+                  allowClear={false}
+                  disabled={!drEnabled}
+                  value={drTime ? dayjs(drTime, "HH:mm") : null}
+                  onChange={(d) => setDrTime(d ? d.format("HH:mm") : "")}
+                />
+              </Form.Item>
+              <Form.Item
+                label={<span id={`${uid}-dr-ch`}>发送渠道</span>}
+                extra="不勾选 = 所有启用的渠道；日报较长，建议勾选邮件渠道"
+              >
+                {channels.length ? (
+                  <div role="group" aria-labelledby={`${uid}-dr-ch`}>
+                    <Checkbox.Group
+                      className="jy-notifications-checks"
+                      value={drChannelIds}
+                      disabled={!drEnabled}
+                      onChange={(ids) => setDrChannelIds(ids as string[])}
+                      options={channels.map((c) => ({ value: c.id, label: c.name }))}
+                    />
+                  </div>
+                ) : (
+                  <span className="jy-muted">{notifFailed ? "通知渠道未能加载" : "先添加通知渠道"}</span>
+                )}
+              </Form.Item>
+            </div>
+          </Form>
+          <div className="jy-notifications-actions">
+            <Button type="primary" loading={drSaving} onClick={saveDailyReport}>
+              保存日报设置
+            </Button>
             <Button loading={previewing} onClick={previewReport}>
               预览
             </Button>
             <Button loading={sending} onClick={sendReport}>
               立即发送
             </Button>
-            <Button type="primary" loading={drSaving} onClick={saveDailyReport}>
-              保存
-            </Button>
+            <span className="jy-caption">
+              {drDirty
+                ? "「立即发送」按已保存的渠道设置发送"
+                : drSaved.lastSent
+                  ? `上次定时发送：${drSaved.lastSent}`
+                  : "预览按当前数据生成；立即发送不影响当天的定时发送"}
+            </span>
           </div>
-        </SetRow>
-      </ProCard>
+          <div aria-live="polite">
+            {sendResult && (
+              <div className={`jy-test-result${sendResult.ok ? "" : " jy-test-result--bad"}`}>
+                <Sym kind={sendResult.ok ? "good" : "crit"} />
+                <b>{sendResult.text}</b>
+                <span>{formatHhmm(sendResult.at)} 发送</span>
+                {sendResult.fails.map((f) => (
+                  <span key={f}>{f}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        </Panel>
+      )}
 
-      {/* 推送渠道弹窗（对照 v1 chModal） */}
+      {/* 通知渠道弹窗 */}
       <Modal
-        className="responsive-modal"
         open={chOpen}
-        title={editingCh ? "编辑推送渠道" : "添加推送渠道"}
+        title={editingCh ? "编辑通知渠道" : "添加通知渠道"}
         onCancel={() => setChOpen(false)}
-        footer={
-          <div style={{ display: "flex", gap: 8 }}>
-            <Button loading={chTesting} onClick={testChForm}>
-              发送测试
-            </Button>
-            <span style={{ flex: 1 }} />
-            <Button onClick={() => setChOpen(false)}>取消</Button>
-            <Button type="primary" loading={chSaving} onClick={saveChannel}>
-              保存
-            </Button>
-          </div>
-        }
+        footer={[
+          <Button key="cancel" onClick={() => setChOpen(false)}>
+            取消
+          </Button>,
+          <Button key="save" type="primary" loading={chSaving} onClick={saveChannel}>
+            {editingCh ? "保存修改" : "添加渠道"}
+          </Button>,
+        ]}
         destroyOnHidden
       >
-        <Text type="secondary">默认接收所有告警；可在「告警规则」中按告警类型指定渠道。</Text>
-        <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
-          <div>
-            <div style={{ marginBottom: 4 }}>名称</div>
-            <Input placeholder="例如：运维 Telegram 群" value={chName} onChange={(e) => setChName(e.target.value)} />
-          </div>
-          <div>
-            <div style={{ marginBottom: 4 }}>渠道类型</div>
-            <Select
-              style={{ width: "100%" }}
-              value={chType || undefined}
-              onChange={onChTypeChange}
-              disabled={!!editingCh}
-              options={channelTypes.map((t) => ({ value: t.value, label: t.label }))}
-            />
-          </div>
-          {(curType?.fields || []).map((f: any) => (
-            <div key={f.key}>
-              <div style={{ marginBottom: 4 }}>{f.label}</div>
+        <p className="jy-caption jy-notifications-modal-intro">默认接收所有告警；可在「告警规则」中按告警类型指定渠道。</p>
+        <Form layout="vertical" onFinish={saveChannel} autoComplete="off">
+          <div className="jy-two">
+            <Form.Item label="名称" htmlFor={`${uid}-ch-name`}>
               <Input
-                value={chConfig[f.key] || ""}
-                onChange={(e) => setChConfig((cfg) => ({ ...cfg, [f.key]: e.target.value }))}
-                placeholder={
-                  SECRET_KEYS.includes(f.key) && editingCh?.config?.[f.key] ? "已配置，留空保持不变" : undefined
-                }
+                id={`${uid}-ch-name`}
+                autoComplete="off"
+                placeholder="例如：运维 Telegram 群"
+                value={chName}
+                onChange={(e) => setChName(e.target.value)}
               />
-            </div>
-          ))}
+            </Form.Item>
+            <Form.Item
+              label="渠道类型"
+              htmlFor={`${uid}-ch-type`}
+              extra={editingCh ? "已创建的渠道不能更改类型" : undefined}
+            >
+              <Select
+                id={`${uid}-ch-type`}
+                value={chType || undefined}
+                onChange={onChTypeChange}
+                disabled={!!editingCh}
+                options={channelTypes.map((t) => ({ value: t.value, label: t.label }))}
+              />
+            </Form.Item>
+          </div>
+          {(curType?.fields || []).map((f) => {
+            const id = `${uid}-ch-${f.key}`;
+            const secret = SECRET_KEYS.includes(f.key);
+            const saved = secret && !!editingCh?.config?.[f.key];
+            const val = chConfig[f.key] || "";
+            const help = saved
+              ? val
+                ? `保存后替换原来的${shortLabel(f.label)}`
+                : `留空则继续使用已保存的${shortLabel(f.label)}`
+              : undefined;
+            return (
+              <Form.Item
+                key={f.key}
+                label={f.label}
+                htmlFor={id}
+                required={!!f.required}
+                validateStatus={chErrors[f.key] ? "error" : undefined}
+                help={chErrors[f.key] || undefined}
+                extra={help}
+              >
+                {secret ? (
+                  <Input.Password
+                    id={id}
+                    autoComplete="new-password"
+                    placeholder={saved ? "已保存" : undefined}
+                    value={val}
+                    onChange={(e) => onChFieldChange(f.key, e.target.value)}
+                  />
+                ) : (
+                  <Input id={id} autoComplete="off" value={val} onChange={(e) => onChFieldChange(f.key, e.target.value)} />
+                )}
+              </Form.Item>
+            );
+          })}
+        </Form>
+        <div className="jy-test-row">
+          <Button icon={<Icon name="test" />} loading={chTesting} onClick={testChForm}>
+            发送测试
+          </Button>
+          <span className="jy-caption">用当前填写的配置发一条测试消息，不会保存</span>
         </div>
+        <div aria-live="polite">{chTest && <ResultBox r={chTest} okTitle="测试消息已发送" />}</div>
       </Modal>
 
-      {/* 日报预览弹窗（对照 v1 reportModal：HTML / 纯文本两个标签页） */}
+      {/* 日报预览弹窗：HTML / 纯文本两个标签页 */}
       <Modal
-        className="responsive-modal"
         open={reportOpen}
         title="日报预览"
         width={720}
         onCancel={() => setReportOpen(false)}
         footer={<Button onClick={() => setReportOpen(false)}>关闭</Button>}
       >
-        <Text type="secondary">按当前数据生成的昨日报告（实际发送时按设定时间的数据）</Text>
+        <p className="jy-caption jy-notifications-modal-intro">按当前数据生成的昨日报告（实际发送时按设定时间的数据）</p>
         <Tabs
-          style={{ marginTop: 8 }}
-          items={[
-            {
-              key: "html",
-              label: "HTML（邮件效果）",
-              children: (
-                <iframe
-                  className="report-preview-frame"
-                  title="日报 HTML 预览"
-                  sandbox=""
-                  srcDoc={report?.html || "<p>无 HTML 版本</p>"}
-                  // 邮件 HTML 自带浅色底（server/report.js 的 C.bg），iframe 内不随站点主题，
-                  // 白底是「邮件效果」的语义色，深色模式下保留；边框随主题 token
-                  style={{
-                    width: "100%",
-                    height: 440,
-                    border: `1px solid ${token.colorBorderSecondary}`,
-                    borderRadius: token.borderRadiusLG,
-                    background: "#fff",
-                  }}
-                />
-              ),
-            },
-            {
-              key: "text",
-              label: "纯文本（IM 渠道）",
-              children: (
-                <pre style={{ maxHeight: 440, overflow: "auto", whiteSpace: "pre-wrap", fontSize: 12, margin: 0 }}>
-                  {report?.text}
-                </pre>
-              ),
-            },
+          idPrefix={`${uid}-report`}
+          label="日报格式"
+          active={reportTab}
+          onChange={(k) => setReportTab(k as "html" | "text")}
+          tabs={[
+            { key: "html", label: "HTML（邮件效果）" },
+            { key: "text", label: "纯文本（IM 渠道）" },
           ]}
         />
+        <TabPanel idPrefix={`${uid}-report`} tabKey="html" active={reportTab === "html"}>
+          <iframe
+            className="jy-notifications-frame"
+            title="日报 HTML 预览"
+            sandbox=""
+            srcDoc={report?.html || "<p>无 HTML 版本</p>"}
+          />
+        </TabPanel>
+        <TabPanel idPrefix={`${uid}-report`} tabKey="text" active={reportTab === "text"}>
+          <pre className="jy-notifications-text">{report?.text}</pre>
+        </TabPanel>
       </Modal>
-    </PageContainer>
+    </div>
   );
 }
