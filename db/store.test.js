@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "./store.js";
+import { refreshStation } from "../server/refresh.js";
 
 function fakePool(stations = []) {
   const conn = {
@@ -145,3 +146,167 @@ test("站点编辑等待同一站点的观察提交边界", async () => {
   await Promise.all([observation, update]);
   assert.equal(store.get(station.id).accessToken, "new");
 });
+
+test("写库失败向调用方报错，后续串行保存仍能成功", async () => {
+  const pool = fakePool();
+  const connection = await pool.getConnection();
+  const failure = new Error("simulated database failure");
+  let attempts = 0;
+  pool.getConnection = async () => {
+    if (++attempts === 1) throw failure;
+    return connection;
+  };
+  const store = new Store(pool);
+  const failed = assert.rejects(store.save(), /保存失败/);
+  const recovered = store.save();
+  await Promise.all([failed, recovered]);
+  assert.equal(attempts, 2);
+});
+
+test("配置写库失败不会发布账号、设置、通知或站点变更", async () => {
+  const changes = [
+    (store) => store.updateSettings({ refreshIntervalSec: 90 }),
+    (store) => store.setPassword("new-admin", "new-password"),
+    (store) => store.add({ name: "new", type: "newapi" }),
+    (store) => store.update("station", { name: "new", password: "new-password", noRenewal: true }),
+    (store) => store.remove("station"),
+    (store) => store.archive("station"),
+    (store) => store.restore("archived"),
+    (store) => store.addChannel({ name: "new", type: "webhook" }),
+    (store) => store.updateChannel("channel", { name: "new", config: { url: "new" } }),
+    (store) => store.removeChannel("channel"),
+    (store) => store.updateRules({ onLow: false, channelsFor: { low: [] } }),
+  ];
+  for (const change of changes) {
+    const pool = fakePool();
+    pool.getConnection = async () => { throw new Error("database offline"); };
+    const store = new Store(pool);
+    store.data = structuredClone(store.data);
+    store.data.auth = { username: "admin", salt: "old", hash: "old", isDefault: false };
+    store.data.stations = [
+      { id: "station", name: "old", type: "newapi", archivedAt: null, alertState: { state: "warn" } },
+      { id: "archived", name: "archived", archivedAt: "2026-10-01T00:00:00.000Z" },
+    ];
+    store.data.notifications.channels = [{ id: "channel", name: "old", config: { url: "old" } }];
+    store.data.notifications.rules.channelsFor = { low: ["channel"] };
+    store.data.settings.dailyReport.channelIds = ["channel"];
+    const previous = structuredClone(store.data);
+    await assert.rejects(change(store), /保存失败/);
+    assert.deepEqual(store.data, previous);
+  }
+});
+
+test("配置提交前读到旧值，并发配置保存不会相互覆盖", async () => {
+  const pool = fakePool();
+  const connection = await pool.getConnection();
+  let entered;
+  let release;
+  const reached = new Promise((resolve) => { entered = resolve; });
+  connection.commit = async () => {
+    entered();
+    await new Promise((resolve) => { release = resolve; });
+    connection.commit = async () => {};
+  };
+  const store = new Store(pool);
+  const first = store.updateSettings({ refreshIntervalSec: 90 });
+  await reached;
+  assert.equal(store.settings.refreshIntervalSec, 60);
+  const second = store.updateSettings({ lowBalanceUsd: 8 });
+  release();
+  await Promise.all([first, second]);
+  assert.equal(store.settings.refreshIntervalSec, 90);
+  assert.equal(store.settings.lowBalanceUsd, 8);
+});
+
+test("站点配置提交保留对象身份及提交期间更新的余额和令牌", async () => {
+  const pool = fakePool();
+  const connection = await pool.getConnection();
+  const store = new Store(pool);
+  const station = await store.add({ name: "old", type: "sub2api-password" });
+  let entered;
+  let release;
+  const reached = new Promise((resolve) => { entered = resolve; });
+  connection.commit = async () => {
+    entered();
+    await new Promise((resolve) => { release = resolve; });
+  };
+  const update = store.update(station.id, { name: "new" });
+  await reached;
+  assert.equal(station.name, "old");
+  station.balance = { ok: true, remaining: 20 };
+  station.s2Tokens = { accessToken: "refreshed" };
+  release();
+  assert.equal(await update, station);
+  assert.equal(store.get(station.id), station);
+  assert.equal(station.name, "new");
+  assert.deepEqual(station.balance, { ok: true, remaining: 20 });
+  assert.equal(station.s2Tokens.accessToken, "refreshed");
+});
+
+test("凭证修改提交时作废后台刚取得的旧凭证令牌", async (t) => {
+  const pool = fakePool();
+  const connection = await pool.getConnection();
+  const store = new Store(pool);
+  const station = await store.add({ name: "old", type: "sub2api-password", password: "old-password" });
+  let entered;
+  let release;
+  const reached = new Promise((resolve) => { entered = resolve; });
+  connection.commit = async () => {
+    entered();
+    await new Promise((resolve) => { release = resolve; });
+  };
+  t.after(() => release?.());
+  const update = store.update(station.id, { password: "new-password" });
+  await reached;
+  station.s2Tokens = { accessToken: "old-credentials-token" };
+  release();
+  await update;
+  assert.equal(station.password, "new-password");
+  assert.equal(station.s2Tokens, null);
+});
+
+for (const initialAlertState of [{ state: "unknown", errorCount: 0, noRenewalLowNotifiedAt: 20 }, null]) {
+  test(`续费计划提交保留后台更新的告警状态（${initialAlertState ? "已有状态" : "初始为空"}）`, async (t) => {
+    const pool = fakePool();
+    const connection = await pool.getConnection();
+    const store = new Store(pool);
+    const station = await store.add({ name: "source", type: "newapi", baseUrl: "https://source.example", noRenewal: true });
+    station.alertState = structuredClone(initialAlertState);
+    store.data.notifications.rules = { ...store.rules, errorThreshold: 3, errorRetrySec: 0 };
+    t.mock.method(globalThis, "fetch", async () => new Response("{}", { status: 503 }));
+    const writes = [];
+    connection.query = async (sql, [values] = []) => {
+      if (sql.startsWith("INSERT INTO stations")) writes.push(JSON.parse(values[0][2]));
+      return [[]];
+    };
+    let entered;
+    let release;
+    let commits = 0;
+    const reached = new Promise((resolve) => { entered = resolve; });
+    connection.commit = async () => {
+      if (++commits === 1) {
+        entered();
+        await new Promise((resolve) => { release = resolve; });
+      }
+    };
+    const update = store.update(station.id, { noRenewal: false });
+    t.after(() => release?.());
+    await reached;
+    let refreshed;
+    const refreshReached = new Promise((resolve) => { refreshed = resolve; });
+    const save = store.save.bind(store);
+    t.mock.method(store, "save", () => { refreshed(); return save(); });
+    const refresh = refreshStation({ store, history: { predict: () => null } }, station);
+    await refreshReached;
+    assert.equal(station.alertState.errorCount, 1);
+    const latest = { ...station.alertState, notifiedAt: 30, etaNotifiedAt: 40, noRenewalLowNotifiedAt: 50 };
+    station.alertState = latest;
+    release();
+    await Promise.all([update, refresh]);
+    const expected = { ...latest };
+    delete expected.noRenewalLowNotifiedAt;
+    assert.equal(station.noRenewal, false);
+    assert.deepEqual(station.alertState, expected);
+    assert.deepEqual(writes.at(-1).alertState, expected);
+  });
+}

@@ -1,5 +1,5 @@
 # 服务器部署：面板 + Watchtower 自动更新
-# MySQL 不在本 compose 内——面板连接你自有的 MySQL 实例（DB_* 环境变量）。
+# MySQL 随本 compose 启动；数据库账号与密码通过 DB_* 环境变量配置。
 # 首次切换 v2：把 v1 的 data/ 目录只读挂载进来并设 V1_DATA_DIR，库为空时启动自动一次性导入。
 # 用法：mkdir -p ~/relay-monitor && cp docker-compose.yml ~/relay-monitor/ && cd ~/relay-monitor && docker compose up -d
 services:
@@ -8,7 +8,7 @@ services:
     container_name: relay-monitor
     restart: unless-stopped
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
     depends_on:
       db:
         condition: service_healthy
@@ -17,7 +17,9 @@ services:
       - TZ=Asia/Shanghai
       # 日报的统计日界线与定时发送时区（未设置时也默认 Asia/Shanghai）
       - REPORT_TIME_ZONE=Asia/Shanghai
-      # ---- MySQL（外部实例，必填）----
+      # 仅在可信反向代理覆盖转发头且应用不能被公网直连时启用。
+      - TRUST_PROXY=${TRUST_PROXY:-false}
+      # ---- MySQL（本 compose 的 db 服务，必填）----
       - DB_HOST=db
       - DB_PORT=3306
       - DB_USER=${DB_USER}
