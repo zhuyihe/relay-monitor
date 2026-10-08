@@ -300,6 +300,77 @@ export class ReconciliationRepository {
     return updated;
   }
 
+  // Metadata observation is one historical fact: ratio backfills, a possible
+  // segment transition, and the rule's current group must commit together.
+  async observeSource(ruleId, { groups, group, ratio, tokenName, detectedAt = Date.now() }) {
+    const knownRatios = new Map(Object.entries(groups || {}).flatMap(([name, item]) => {
+      const value = Number(item?.ratio);
+      return item?.ratio != null && Number.isFinite(value) ? [[name, value]] : [];
+    }));
+    const conn = await this.pool.getConnection();
+    let outcome;
+    try {
+      await conn.beginTransaction();
+      const [rules] = await conn.query(
+        "SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]
+      );
+      if (!rules.length) throw new Error("对账规则不存在或已停止");
+      const [rows] = await conn.query(
+        `SELECT * FROM reconciliation_rule_segments
+         WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE`, [ruleId]
+      );
+      let ratioBackfilled = false;
+      for (const row of rows) {
+        const knownRatio = knownRatios.get(row.group_name);
+        if (row.group_ratio != null || knownRatio == null) continue;
+        const [result] = await conn.query(
+          "UPDATE reconciliation_rule_segments SET group_ratio = ?, ratio_observed_at_ms = ?, ratio_source = 'group_catalog' WHERE id = ? AND group_ratio IS NULL",
+          [knownRatio, detectedAt, row.id]
+        );
+        ratioBackfilled ||= Number(result.affectedRows || 0) > 0;
+        if (Number(result.affectedRows || 0)) row.group_ratio = knownRatio;
+      }
+      const current = rows.find((row) => row.effective_to_ms == null);
+      if (!current) throw new Error("对账规则缺少当前分段");
+      const currentRatio = current.group_ratio == null ? null : Number(current.group_ratio);
+      const nextRatio = ratio == null ? null : Number(ratio);
+      const sameGroup = current.group_name === group;
+      const observedCurrentRatio = knownRatios.get(current.group_name) ?? null;
+      const ratioToBackfill = sameGroup ? nextRatio : observedCurrentRatio;
+      if (currentRatio == null && ratioToBackfill != null) {
+        const [result] = await conn.query(
+          "UPDATE reconciliation_rule_segments SET group_ratio = ?, ratio_observed_at_ms = ?, ratio_source = 'group_catalog' WHERE id = ? AND group_ratio IS NULL",
+          [ratioToBackfill, detectedAt, current.id]
+        );
+        ratioBackfilled ||= Number(result.affectedRows || 0) > 0;
+        if (Number(result.affectedRows || 0)) current.group_ratio = ratioToBackfill;
+      }
+      const ratioChanged = sameGroup && currentRatio != null && nextRatio != null && currentRatio !== nextRatio;
+      const transitioned = !sameGroup || ratioChanged;
+      if (transitioned) {
+        const at = Math.max(Number(detectedAt), Number(current.effective_from_ms));
+        await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [at, current.id]);
+        await conn.query(
+          `INSERT INTO reconciliation_rule_segments
+            (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, detected_at_ms, timing_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'detected')`,
+          [uid("rs"), ruleId, group, ratio ?? null, nextRatio == null ? null : detectedAt, nextRatio == null ? null : "group_catalog", at, at]
+        );
+        await conn.query(
+          "UPDATE reconciliation_rules SET token_name = ?, fixed_group = ? WHERE id = ? AND archived_at IS NULL",
+          [tokenName, group, ruleId]
+        );
+      }
+      await conn.commit();
+      outcome = { transitioned, ratioBackfilled };
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally { conn.release(); }
+    const segments = await this.listSegments(ruleId);
+    return { ...outcome, segments, currentSegment: segments[segments.length - 1] || null };
+  }
+
   async reconcileCurrentSegment(ruleId, { group, ratio, currentSegmentRatio = null, detectedAt = Date.now() }) {
     const conn = await this.pool.getConnection();
     let outcome;
@@ -391,15 +462,25 @@ export class ReconciliationRepository {
   }
 
   async updateChannelStates(ruleId, states, observedAt = Date.now()) {
-    for (const state of states) {
-      await this.pool.query(
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [rules] = await conn.query(
+        "SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]
+      );
+      if (!rules.length) throw new Error("对账规则不存在或已停止");
+      for (const state of states) await conn.query(
         `UPDATE reconciliation_rule_channels
          SET channel_status = ?, status_observed_at_ms = ?,
              status_changed_at_ms = CASE WHEN channel_status <=> ? THEN status_changed_at_ms ELSE ? END
          WHERE rule_id = ? AND channel_id = ?`,
         [state.state, observedAt, state.state, observedAt, ruleId, state.channelId]
       );
-    }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally { conn.release(); }
   }
 
   async archiveRule(id) {

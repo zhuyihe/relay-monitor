@@ -3,6 +3,138 @@ import assert from "node:assert/strict";
 import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow } from "./reconciliation.js";
 import { ReconciliationRepository } from "./reconciliation-repository.js";
 import { reconciliationSnapshotIdentity } from "../lib/reconciliation-snapshot.js";
+import { Store } from "../db/store.js";
+
+function observationRepositoryFixture({ segments, rule = { id: "rr", token_name: "stable", fixed_group: "g1", archived_at: null }, hooks = {}, fail = null }) {
+  const state = { rule: { ...rule }, segments: structuredClone(segments), commits: 0, rollbacks: 0, releases: 0 };
+  const pool = {
+    async query(sql) {
+      if (sql.includes("FROM reconciliation_rule_segments")) return [state.segments];
+      throw new Error(`unexpected pool query: ${sql}`);
+    },
+    async getConnection() {
+      await hooks.beforeConnection?.();
+      let working;
+      return {
+        async beginTransaction() { working = structuredClone(state); },
+        async commit() {
+          await hooks.beforeCommit?.();
+          state.commits += 1;
+          state.rule = working.rule;
+          state.segments = working.segments;
+        },
+        async rollback() { state.rollbacks += 1; }, release() { state.releases += 1; },
+        async query(sql, params = []) {
+          if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) return [working.rule.archived_at ? [] : [working.rule]];
+          if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [working.segments];
+          if (sql.startsWith("UPDATE reconciliation_rule_segments SET group_ratio")) {
+            if (fail === "ratio") throw new Error("ratio write failed");
+            const row = working.segments.find((item) => item.id === params[2]);
+            if (row) { row.group_ratio = params[0]; row.ratio_observed_at_ms = params[1]; row.ratio_source = "group_catalog"; }
+            return [{ affectedRows: row ? 1 : 0 }];
+          }
+          if (sql.startsWith("UPDATE reconciliation_rule_segments SET effective_to_ms")) {
+            if (fail === "close") throw new Error("close failed");
+            const row = working.segments.find((item) => item.id === params[1]);
+            if (row) row.effective_to_ms = params[0];
+            return [{ affectedRows: row ? 1 : 0 }];
+          }
+          if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) {
+            if (fail === "insert") { fail = null; throw new Error("insert failed"); }
+            working.segments.push({ id: params[0], rule_id: params[1], group_name: params[2], group_ratio: params[3], ratio_observed_at_ms: params[4], ratio_source: params[5], effective_from_ms: params[6], effective_to_ms: null, detected_at_ms: params[7], timing_source: "detected" });
+            return [{ affectedRows: 1 }];
+          }
+          if (sql.startsWith("UPDATE reconciliation_rules SET token_name")) {
+            if (fail === "rule") { fail = null; throw new Error("rule write failed"); }
+            working.rule.token_name = params[0]; working.rule.fixed_group = params[1];
+            return [{ affectedRows: 1 }];
+          }
+          throw new Error(`unexpected transaction query: ${sql}`);
+        },
+      };
+    },
+  };
+  return { state, repository: new ReconciliationRepository(pool) };
+}
+
+function sourceStore() {
+  const conn = { beginTransaction: async () => {}, query: async () => [[]], commit: async () => {}, rollback: async () => {}, release() {} };
+  const store = new Store({ getConnection: async () => conn });
+  store.data.stations = [
+    { id: "up", type: "newapi", baseUrl: "https://up.example", accessToken: "old" },
+    { id: "own", type: "newapi", isOwn: true, baseUrl: "https://own.example", accessToken: "admin" },
+  ];
+  return store;
+}
+
+test("observeSource atomically backfills an unknown ratio without transitioning", async () => {
+  const { state, repository } = observationRepositoryFixture({ segments: [{ id: "s1", rule_id: "rr", group_name: "g1", group_ratio: null, effective_from_ms: 1000, effective_to_ms: null }] });
+  const observed = await repository.observeSource("rr", { groups: { g1: { ratio: 1.5 } }, group: "g1", ratio: 1.5, tokenName: "stable", detectedAt: 2000 });
+  assert.equal(observed.transitioned, false);
+  assert.equal(state.segments.length, 1);
+  assert.equal(state.segments[0].group_ratio, 1.5);
+  assert.equal(state.rule.fixed_group, "g1");
+});
+
+test("observeSource commits a real ratio transition and current rule group together", async () => {
+  const { state, repository } = observationRepositoryFixture({ segments: [{ id: "s1", rule_id: "rr", group_name: "g1", group_ratio: 1, effective_from_ms: 1000, effective_to_ms: null }] });
+  const observed = await repository.observeSource("rr", { groups: { g1: { ratio: 2 } }, group: "g1", ratio: 2, tokenName: "renamed", detectedAt: 2000 });
+  assert.equal(observed.transitioned, true);
+  assert.deepEqual(state.segments.map((segment) => [segment.group_name, segment.group_ratio, segment.effective_to_ms]), [["g1", 1, 2000], ["g1", 2, null]]);
+  assert.deepEqual([state.rule.token_name, state.rule.fixed_group], ["renamed", "g1"]);
+});
+
+test("observeSource rollback leaves no partial ratio or segment history and releases the source lock", async () => {
+  for (const failure of ["insert", "rule"]) {
+    const { state, repository } = observationRepositoryFixture({ segments: [{ id: "s1", rule_id: "rr", group_name: "g1", group_ratio: null, effective_from_ms: 1000, effective_to_ms: null }], fail: failure });
+    const store = sourceStore();
+    await assert.rejects(store.withStationLocks(["up", "own"], () => repository.observeSource("rr", {
+      groups: { g1: { ratio: 1 }, g2: { ratio: 2 } }, group: "g2", ratio: 2, tokenName: "stable", detectedAt: 2000,
+    })), failure === "insert" ? /insert failed/ : /rule write failed/);
+    assert.deepEqual(state.segments, [{ id: "s1", rule_id: "rr", group_name: "g1", group_ratio: null, effective_from_ms: 1000, effective_to_ms: null }]);
+    assert.deepEqual([state.commits, state.rollbacks, state.releases], [0, 1, 1]);
+    await repository.observeSource("rr", { groups: { g1: { ratio: 1 } }, group: "g1", ratio: 1, tokenName: "stable", detectedAt: 3000 });
+    assert.equal(state.commits, 1, "connection may be reused after rollback");
+    await store.update("up", { accessToken: "new" });
+    assert.equal(store.get("up").accessToken, "new", "failed observation must release the source lock");
+  }
+});
+
+test("Store.update queues behind observeSource connection and commit boundaries", async () => {
+  let releaseConnection;
+  let enteredConnection;
+  const connectionReached = new Promise((resolve) => { enteredConnection = resolve; });
+  const fixture = observationRepositoryFixture({
+    segments: [{ id: "s1", rule_id: "rr", group_name: "g1", group_ratio: null, effective_from_ms: 1000, effective_to_ms: null }],
+    hooks: { beforeConnection: async () => { enteredConnection(); await new Promise((resolve) => { releaseConnection = resolve; }); } },
+  });
+  const store = sourceStore();
+  const observation = store.withStationLocks(["up", "own"], () => fixture.repository.observeSource("rr", { groups: { g1: { ratio: 1 } }, group: "g1", ratio: 1, tokenName: "stable", detectedAt: 2000 }));
+  await connectionReached;
+  const edit = store.update("up", { accessToken: "new" });
+  await Promise.resolve();
+  assert.equal(store.get("up").accessToken, "old");
+  releaseConnection();
+  await Promise.all([observation, edit]);
+  assert.equal(store.get("up").accessToken, "new");
+
+  let releaseCommit;
+  let enteredCommit;
+  const commitReached = new Promise((resolve) => { enteredCommit = resolve; });
+  const commitFixture = observationRepositoryFixture({
+    segments: [{ id: "s1", rule_id: "rr", group_name: "g1", group_ratio: null, effective_from_ms: 1000, effective_to_ms: null }],
+    hooks: { beforeCommit: async () => { enteredCommit(); await new Promise((resolve) => { releaseCommit = resolve; }); } },
+  });
+  const commitStore = sourceStore();
+  const committing = commitStore.withStationLocks(["up", "own"], () => commitFixture.repository.observeSource("rr", { groups: { g1: { ratio: 1 } }, group: "g1", ratio: 1, tokenName: "stable", detectedAt: 2000 }));
+  await commitReached;
+  const committingEdit = commitStore.update("up", { accessToken: "new" });
+  await Promise.resolve();
+  assert.equal(commitStore.get("up").accessToken, "old", "source edit must wait while transaction commit is pending");
+  releaseCommit();
+  await Promise.all([committing, committingEdit]);
+  assert.equal(commitStore.get("up").accessToken, "new");
+});
 
 test("快照读写共用同一逻辑窗口身份", () => {
   const scope = "same-scope";
@@ -1539,16 +1671,16 @@ test("快照事务提交后、通知前口径被修正时，不为旧口径记�
 
 // 真实取数路径的夹具：两侧 NewAPI 由 fetch 替身应答，数据库按 SQL 路由。
 // 每个分段上游消费 $1、本站渠道收费 $2.5，利润 $1.5。
-function liveReconciliationFixture(t, { segments: specs, onRequest = null }) {
+function liveReconciliationFixture(t, { segments: specs, onRequest = null, metadataGroups = null, ownChannels = null, onRepositoryConnection = null, onRepositoryCommit = null }) {
   const ratios = { g1: 1, g2: 2 };
-  const segments = specs.map(({ id, group, from, to = null }) => ({
-    id, rule_id: "rr_live", group_name: group, group_ratio: ratios[group],
+  const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
+    id, rule_id: "rr_live", group_name: group, group_ratio: ratio,
     ratio_observed_at_ms: from, ratio_source: "group_catalog",
     effective_from_ms: from, effective_to_ms: to, detected_at_ms: from, timing_source: "operator_confirmed",
   }));
   const open = segments.find((segment) => segment.effective_to_ms == null);
   const rule = { id: "rr_live", upstream_station_id: "upstream", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: open.group_name, timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
-  const state = { upstreamQuota: 100, ownQuota: 250, statCalls: [], requests: [], writes: 0, alertQueries: 0, snapshots: new Map() };
+  const state = { upstreamQuota: 100, ownQuota: 250, statCalls: [], requests: [], writes: 0, alertQueries: 0, snapshots: new Map(), channelStates: new Map(), channelStateWrites: [], ratioWrites: [] };
   const query = async (sql, params) => {
     if (sql.includes("INSERT INTO reconciliation_snapshots")) {
       state.writes += 1;
@@ -1565,16 +1697,37 @@ function liveReconciliationFixture(t, { segments: specs, onRequest = null }) {
       state.alertQueries += 1;
       return [[]];
     }
-    if (sql.includes("effective_to_ms IS NULL")) return [[open]];
+    if (sql.includes("effective_to_ms IS NULL")) return [[segments.find((segment) => segment.effective_to_ms == null)]];
     if (sql.includes("FROM reconciliation_rule_segments")) return [segments];
     if (sql.includes("FROM reconciliation_rule_channels")) return [[{ rule_id: rule.id, channel_id: 1, channel_name: "渠道", channel_status: null }]];
     if (sql.includes("FROM reconciliation_rules")) return [[rule]];
+    if (sql.startsWith("UPDATE reconciliation_rule_segments SET group_ratio")) {
+      const segment = segments.find((item) => item.id === params[2]);
+      state.ratioWrites.push(params[0]);
+      if (segment) segment.group_ratio = params[0];
+      return [{ affectedRows: 1 }];
+    }
+    if (sql.startsWith("UPDATE reconciliation_rule_segments SET effective_to_ms")) {
+      const segment = segments.find((item) => item.id === params[1]);
+      if (segment) segment.effective_to_ms = params[0];
+      return [{ affectedRows: 1 }];
+    }
+    if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) {
+      segments.push({ id: params[0], rule_id: params[1], group_name: params[2], group_ratio: params[3], effective_from_ms: params[6], effective_to_ms: null, detected_at_ms: params[7], timing_source: "detected" });
+      return [{ affectedRows: 1 }];
+    }
+    if (sql.includes("UPDATE reconciliation_rule_channels")) {
+      state.channelStateWrites.push(params[0]);
+      state.channelStates.set(params[5], params[0]);
+      return [{ affectedRows: 1 }];
+    }
     return [{ affectedRows: 1 }];
   };
   const pool = {
     query,
     async getConnection() {
-      return { query, async beginTransaction() {}, async commit() {}, async rollback() {}, release() {} };
+      await onRepositoryConnection?.();
+      return { query, async beginTransaction() {}, async commit() { await onRepositoryCommit?.(); }, async rollback() {}, release() {} };
     },
   };
   const reply = (status, body) => ({ status, text: async () => JSON.stringify(body) });
@@ -1590,12 +1743,12 @@ function liveReconciliationFixture(t, { segments: specs, onRequest = null }) {
     if (url.pathname === "/api/status") return reply(200, { success: true, data: { quota_per_unit: 100, version: "v" } });
     if (url.host === "upstream.test") {
       if (url.pathname === "/api/user/self") return reply(200, { success: true, data: { id: 7 } });
-      if (url.pathname === "/api/user/self/groups") return reply(200, { success: true, data: { g1: { ratio: 1 }, g2: { ratio: 2 } } });
+      if (url.pathname === "/api/user/self/groups") return reply(200, { success: true, data: metadataGroups ? metadataGroups(request) : { g1: { ratio: 1 }, g2: { ratio: 2 } } });
       if (url.pathname === "/api/token/") return reply(200, { success: true, data: { total: 1, items: [{ id: 9, name: "stable", status: 1, group: rule.fixed_group, cross_group_retry: false }] } });
       if (url.pathname === "/api/log/self/stat") return stat("upstream", url, state.upstreamQuota);
     }
     if (url.host === "own.test") {
-      if (url.pathname === "/api/channel/") return reply(200, { success: true, data: { total: 1, items: [{ id: 1, name: "渠道", status: 1 }] } });
+      if (url.pathname === "/api/channel/") return reply(200, { success: true, data: { total: 1, items: ownChannels ? ownChannels(request) : [{ id: 1, name: "渠道", status: 1 }] } });
       if (url.pathname === "/api/log/stat") return stat("own", url, state.ownQuota);
     }
     return reply(404, { success: false });
@@ -1605,7 +1758,7 @@ function liveReconciliationFixture(t, { segments: specs, onRequest = null }) {
     { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin" },
   ];
   const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null, channels: [] } };
-  return { rule, state, stations, rt, module: createReconciliationModule(rt) };
+  return { rule, state, segments, stations, rt, module: createReconciliationModule(rt) };
 }
 
 test("今天窗口刚过零点不满一个统计秒时返回待获取：不取数、不写快照、不告警、不缓存", async (t) => {
@@ -1655,27 +1808,34 @@ test("规则刚创建不满一个统计秒时，今天和近 7 天都返回待�
   assert.equal(results[0].calculation.profitUsd, 1.5);
 });
 
-test("近 7 天刚切段时跳过不满一秒的新分段，已结束的分段照常核算", async (t) => {
+test("今天和近 7 天刚切段且新分段不足一秒时，不把已结束分段冒充整窗确认账单", async (t) => {
   const switchedAt = Date.parse("2026-09-20T04:26:08.000Z") + 900;
-  const { rule, state, module } = liveReconciliationFixture(t, {
+  const { rule, state, rt, module } = liveReconciliationFixture(t, {
     segments: [
       { id: "s1", group: "g1", from: switchedAt - 3600000, to: switchedAt },
       { id: "s2", group: "g2", from: switchedAt },
     ],
   });
   const realNow = Date.now;
-  Date.now = () => switchedAt + 300;
+  let now = switchedAt + 300;
+  Date.now = () => now;
   t.after(() => { Date.now = realNow; });
 
-  const { results } = await module.queryRules({ ruleIds: [rule.id], preset: "7d", timezone: "Asia/Shanghai" }, { force: true });
-  assert.equal(results[0].health.code, "READY");
-  assert.deepEqual(results[0].segments.map((segment) => segment.id), ["s1"]);
-  assert.equal(results[0].currentSegment.id, "s2");
-  assert.equal(results[0].calculation.profitUsd, 1.5);
-  const expected = { start: Math.ceil((switchedAt - 3600000) / 1000), end: Math.floor(switchedAt / 1000) - 1 };
-  for (const side of ["upstream", "own"]) {
-    assert.deepEqual(state.statCalls.filter((call) => call.side === side).map(({ start, end }) => ({ start, end })), [expected], `${side} 只统计已结束分段`);
+  for (const preset of ["today", "7d"]) {
+    const { results } = await module.queryRules({ ruleIds: [rule.id], preset, timezone: "Asia/Shanghai" }, { force: true });
+    assert.equal(results[0].health.code, "PENDING", `${preset} 不能确认缺少最新分段的整窗账单`);
+    assert.equal(results[0].currentSegment.id, "s2");
+    assert.equal(results[0].calculation.profitUsd, null);
   }
+  assert.deepEqual(state.statCalls, []);
+  assert.equal(state.writes, 0);
+  assert.equal(rt._reconciliationResultCache.size, 0);
+
+  now = switchedAt + 2000;
+  const ready = await module.queryRules({ ruleIds: [rule.id], preset: "7d", timezone: "Asia/Shanghai" });
+  assert.equal(ready.results[0].health.code, "READY");
+  assert.deepEqual(ready.results[0].segments.map((segment) => segment.id), ["s1", "s2"]);
+  assert.equal(ready.results[0].calculation.profitUsd, 3);
 });
 
 test("窗口完全在规则生效之前时照常核算为 0，不返回不会自行恢复的待获取", async (t) => {
@@ -1818,6 +1978,155 @@ test("站点凭据原地改写后，元数据和渠道目录缓存不再复用�
   assert.equal(configuration.channelsError, null);
 });
 
+test("上游 PAT 在元数据请求期间变化时，不确认混用新旧凭据的账单", async (t) => {
+  const metadataRead = holdPoint();
+  let held = false;
+  const { rule, state, stations, module } = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 1000 }],
+    onRequest: ({ host, path, authorization }) => {
+      if (held || host !== "upstream.test" || path !== "/api/token/" || authorization !== "Bearer pat") return;
+      held = true;
+      return metadataRead.hold();
+    },
+  });
+  const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 };
+  const pending = module.queryRules(input, { force: true });
+  await metadataRead.reached;
+  stations[0].accessToken = "pat-2";
+  metadataRead.release();
+  const { results } = await pending;
+
+  const refreshedMetadata = state.requests.some((request) => request.host === "upstream.test"
+    && request.path === "/api/token/" && request.authorization === "Bearer pat-2");
+  assert.ok(results[0].calculation.profitUsd == null || refreshedMetadata,
+    "确认账单前必须用新 PAT 重新验证 Key，而不能用旧元数据配新统计");
+});
+
+test("过期上游目录响应不会提交旧倍率或分段", async (t) => {
+  const groupsRead = holdPoint();
+  let held = false;
+  const { rule, state, segments, stations, module } = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", ratio: null, from: 1000 }],
+    metadataGroups: ({ authorization }) => authorization === "Bearer pat" ? { g1: { ratio: 7 } } : { g1: { ratio: 1 } },
+    onRequest: ({ host, path, authorization }) => {
+      if (held || host !== "upstream.test" || path !== "/api/user/self/groups" || authorization !== "Bearer pat") return;
+      held = true;
+      return groupsRead.hold();
+    },
+  });
+  const pending = module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 }, { force: true });
+  await groupsRead.reached;
+  stations[0].accessToken = "pat-2";
+  groupsRead.release();
+  await pending;
+
+  assert.equal(segments.length, 1, "old catalogue must not create a transition");
+  assert.notEqual(segments[0].group_ratio, 7, "old catalogue ratio must never commit");
+  assert.ok(!state.ratioWrites.includes(7), "old catalogue ratio must never be written, even if a retry later succeeds");
+});
+
+test("本站管理员令牌在渠道目录请求期间变化时，不确认混用新旧站点的账单", async (t) => {
+  const channelsRead = holdPoint();
+  let held = false;
+  const { rule, state, stations, module } = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 1000 }],
+    onRequest: ({ host, path, authorization }) => {
+      if (held || host !== "own.test" || path !== "/api/channel/" || authorization !== "admin") return;
+      held = true;
+      return channelsRead.hold();
+    },
+  });
+  const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 };
+  const pending = module.queryRules(input, { force: true });
+  await channelsRead.reached;
+  stations[1].accessToken = "admin-2";
+  channelsRead.release();
+  const { results } = await pending;
+
+  const refreshedChannels = state.requests.some((request) => request.host === "own.test"
+    && request.path === "/api/channel/" && request.authorization === "admin-2");
+  assert.ok(results[0].calculation.profitUsd == null || refreshedChannels,
+    "确认账单前必须用新管理员令牌重新读取渠道目录");
+});
+
+test("过期本站渠道目录不会提交旧的禁用状态", async (t) => {
+  const channelsRead = holdPoint();
+  let held = false;
+  const { rule, state, stations, module } = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 1000 }],
+    ownChannels: ({ authorization }) => [{ id: 1, name: "渠道", status: authorization === "admin" ? 2 : 1 }],
+    onRequest: ({ host, path, authorization }) => {
+      if (held || host !== "own.test" || path !== "/api/channel/" || authorization !== "admin") return;
+      held = true;
+      return channelsRead.hold();
+    },
+  });
+  const pending = module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 }, { force: true });
+  await channelsRead.reached;
+  stations[1].accessToken = "admin-2";
+  channelsRead.release();
+  await pending;
+
+  assert.ok(!state.channelStateWrites.includes("manual_disabled"), "old directory status must never be written, even if a retry later succeeds");
+  assert.notEqual(state.channelStates.get(1), "manual_disabled", "old directory status must never commit");
+  assert.equal(state.channelStates.get(1), "enabled");
+});
+
+test("真实对账观察在连接和提交边界阻塞 Store.update", async (t) => {
+  for (const phase of ["connection", "commit"]) {
+    let release;
+    let entered;
+    const reached = new Promise((resolve) => { entered = resolve; });
+    let held = false;
+    const fixture = liveReconciliationFixture(t, {
+      segments: [{ id: "s1", group: "g1", from: 1000 }],
+      onRepositoryConnection: phase === "connection" ? async () => {
+        if (held) return;
+        held = true; entered(); await new Promise((resolve) => { release = resolve; });
+      } : null,
+      onRepositoryCommit: phase === "commit" ? async () => {
+        if (held) return;
+        held = true; entered(); await new Promise((resolve) => { release = resolve; });
+      } : null,
+    });
+    const store = new Store({ getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]], commit: async () => {}, rollback: async () => {}, release() {} }) });
+    store.data.stations = fixture.stations;
+    fixture.rt.store = store;
+    const pending = fixture.module.queryRules({ ruleIds: [fixture.rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 }, { force: true });
+    await reached;
+    const edit = store.update("upstream", { accessToken: "new" });
+    await Promise.resolve();
+    assert.equal(store.get("upstream").accessToken, "pat", `${phase} must retain old source until observation commits`);
+    release();
+    await Promise.all([pending, edit]);
+    assert.equal(store.get("upstream").accessToken, "new");
+  }
+});
+
+test("上游 PAT 更换后不可复用旧凭据的结果缓存和成功快照", async (t) => {
+  let denyNewPat = false;
+  const { rule, state, stations, module } = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 1000 }],
+    onRequest: ({ host, path, authorization }) => {
+      if (denyNewPat && host === "upstream.test" && path === "/api/user/self/groups"
+        && authorization === "Bearer pat-2") throw new Error("新 PAT 暂时不可用");
+    },
+  });
+  const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 };
+  const initial = await module.queryRules(input, { force: true });
+  assert.equal(initial.results[0].calculation.profitUsd, 1.5);
+  const oldSnapshotKeys = [...state.snapshots.keys()];
+
+  stations[0].accessToken = "pat-2";
+  denyNewPat = true;
+  for (const force of [false, true]) {
+    const { results } = await module.queryRules(input, { force });
+    assert.equal(results[0].calculation.profitUsd, null, "新 PAT 不可用时不能返回旧 PAT 的利润");
+    assert.equal(results[0].health.stale, false, "旧 PAT 的成功快照不能作为新账户兜底");
+  }
+  assert.ok(oldSnapshotKeys.every((key) => state.snapshots.has(key)), "旧证据仍应保留");
+});
+
 test("列出规则后才被停止的规则从本轮结果中去掉，其余规则照常返回", async () => {
   const active = { id: "rr_active", upstream_station_id: "missing", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: "g", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
   const archived = { ...active, id: "rr_archived", token_id: 10 };
@@ -1901,62 +2210,23 @@ test("upstream unavailable retains persisted segment evidence in the response an
   assert.equal(second.results[0].health.stale, false);
 });
 
-test("进程重启后只恢复同一完整窗口的持久化成功账单，失败不覆盖该快照", async () => {
-  const rule = {
-    id: "rr_persisted", upstream_station_id: "missing-upstream", own_station_id: "own", token_id: 9,
-    token_name: "stable", fixed_group: "g1", timezone: "Asia/Shanghai", enabled: 1, archived_at: null,
-  };
-  const writes = [];
-  const source = {
-    calculationVersion: 2,
-    billingSource: "channel-log-stat",
-    scopeFingerprint: reconciliationScopeFingerprint({
-      upstreamStationId: "missing-upstream", ownStationId: "own", tokenId: 9, tokenName: "stable", timezone: "Asia/Shanghai", channels: [],
-    }, [{ id: "s1", group: "g1", ratio: 2.9, effectiveFrom: 1000, effectiveTo: null }]),
-    window: { preset: "custom", startMs: 1000, endMs: 2000, timezone: "Asia/Shanghai" },
-    resultGeneratedAt: "2026-09-22T10:00:00.000Z",
-    segment: { group: "g1", ratio: 2.9, ratioObservedAt: 1234, ratioSource: "group_catalog", timingSource: "operator_confirmed" },
-    downstream: { channels: [{ channelId: 1, quotaUnits: 500 }] },
-    result: {
-      currentSegment: { id: "s1", group: "g1", ratio: 2.9 }, transitionSegments: [], segments: [],
-      upstream: { quotaUnits: 250, quotaPerUnit: 100, amountUsd: 2.5 },
-      downstream: { quotaUnits: 500, quotaPerUnit: 100, amountUsd: 5, coverage: 1, channels: [] },
-      calculation: { differenceUsd: 2.5, marginRate: 0.5 },
-    },
-  };
-  const pool = {
-    async query(sql, params) {
-      if (sql.includes("SELECT * FROM reconciliation_rules")) return [[rule]];
-      if (sql.includes("FROM reconciliation_rule_channels")) return [[]];
-      if (sql.includes("FROM reconciliation_rule_segments")) return [[{
-        id: "s1", rule_id: rule.id, group_name: "g1", group_ratio: 2.9,
-        ratio_observed_at_ms: 1234, ratio_source: "group_catalog", effective_from_ms: 1000,
-        effective_to_ms: null, detected_at_ms: 1234, timing_source: "operator_confirmed",
-      }]];
-      if (sql.includes("FROM reconciliation_snapshots")) return [[{
-        rule_id: rule.id, segment_id: "s1", snapshot_key: "custom:1000:2000:s1", window_kind: "custom",
-        window_start_ms: 1000, window_end_ms: 2000, upstream_quota: 250, upstream_quota_per_unit: 100, upstream_usd: 2.5,
-        downstream_quota: 500, downstream_quota_per_unit: 100, downstream_usd: 5, difference_usd: 2.5, margin_rate: 0.5,
-        coverage: 1, health_code: "READY", health_detail: null, source: JSON.stringify(source), generated_at: "2026-09-22T10:00:00.000Z",
-      }]];
-      if (sql.includes("INSERT INTO reconciliation_snapshots")) { writes.push(params); return [{ affectedRows: 1 }]; }
-      if (sql.includes("reconciliation_alert_state")) return [[]];
-      return [{ affectedRows: 1 }];
-    },
-  };
-  const module = createReconciliationModule({ pool, store: { list: () => [], get: () => null, channels: [] } });
-  const { results } = await module.queryRules({
-    ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000, endMs: 2000,
-  }, { force: true });
+test("进程重启后只恢复同一完整窗口和站点来源的成功账单，失败不覆盖该快照", async (t) => {
+  const { rule, state, rt, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }] });
+  const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 };
+  const initial = await module.queryRules(input, { force: true });
+  assert.equal(initial.results[0].calculation.profitUsd, 1.5);
+  const writes = state.writes;
 
-  assert.equal(results[0].upstream.amountUsd, 2.5);
-  assert.equal(results[0].downstream.amountUsd, 5);
-  assert.equal(results[0].lastSuccessfulAt, "2026-09-22T10:00:00.000Z");
+  state.upstreamQuota = null;
+  const restarted = createReconciliationModule({ pool: rt.pool, store: rt.store });
+  const { results } = await restarted.queryRules(input, { force: true });
   assert.equal(results[0].health.stale, true);
-  assert.equal(results[0].calculation.profitUsd, 2.5, "旧成功快照的差额应恢复为确认利润");
+  assert.equal(results[0].upstream.amountUsd, 1);
+  assert.equal(results[0].downstream.amountUsd, 2.5);
+  assert.equal(results[0].calculation.profitUsd, 1.5);
   assert.equal(results[0].calculation.riskDifferenceUsd, null);
-  assert.equal(results[0].calculation.marginRate, 0.5);
-  assert.equal(writes.length, 0, "a failed refresh must not upsert over the most recent successful snapshot");
+  assert.equal(results[0].calculation.marginRate, 0.6);
+  assert.equal(state.writes, writes, "上游故障不得覆盖同一来源的确认快照");
 });
 
 test("持久化 today 成功账单可用于同日较晚窗口，不能跨本地日期复用", async () => {
