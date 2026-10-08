@@ -334,22 +334,53 @@ export async function sendReport(rt, channelIds) {
   return { ok: true, results };
 }
 
-// 调度：每 30 秒按日报时区检查（HH:MM 命中且当天未发送）
+const REPORT_MAX_ATTEMPTS = 5;
+const REPORT_RETRY_MS = 60000;
+
+// 调度：到达计划时间后可跨分钟重试；持久化渠道进度，成功后才标记已发送。
 export function startReportScheduler(rt) {
   if (rt._reportTimer) clearInterval(rt._reportTimer); // HMR/重复初始化时防止双定时器
   rt._reportTimer = setInterval(async () => {
+    if (rt._reportRunning) return;
     const cfg = rt.store.settings.dailyReport;
     if (!cfg?.enabled || !cfg.time) return;
     const { hhmm, today } = reportClock();
-    if (hhmm !== cfg.time || cfg.lastSent === today) return;
-    cfg.lastSent = today; // 先占位，避免同一分钟重复发送
-    await rt.store.save();
+    if (hhmm < cfg.time || cfg.lastSent === today) return;
+    const previous = rt._reportDelivery?.day === today ? rt._reportDelivery
+      : cfg.delivery?.day === today ? cfg.delivery : null;
+    const now = Date.now();
+    if (previous && (previous.attempts >= REPORT_MAX_ATTEMPTS || previous.nextAttemptAt > now)) return;
+    const delivery = {
+      day: today,
+      attempts: (previous?.attempts || 0) + 1,
+      successfulChannelIds: [...(previous?.successfulChannelIds || [])],
+      nextAttemptAt: now + REPORT_RETRY_MS * 2 ** (previous?.attempts || 0),
+    };
+    rt._reportDelivery = delivery;
+    rt._reportRunning = true;
     try {
-      const { title, text, html } = await buildReport(rt);
-      await broadcast(reportChannels(rt), title, text, { event: "daily-report", html });
-      console.log(`日报已发送（${today} ${cfg.time}）`);
+      // 先写本次尝试，重启后仍遵守次数上限；写库失败时不开始外部发送。
+      await rt.store.saveReportDelivery(structuredClone(delivery));
+      const channels = reportChannels(rt);
+      if (!channels.length) throw new Error("没有启用的日报通知渠道");
+      const successful = new Set(delivery.successfulChannelIds);
+      const pending = channels.filter((channel) => !successful.has(channel.id));
+      if (pending.length) {
+        const { title, text, html } = await buildReport(rt);
+        const results = await broadcast(pending, title, text, { event: "daily-report", html });
+        for (const result of results) if (result.ok) successful.add(result.id);
+      }
+      delivery.successfulChannelIds = [...successful];
+      // 配置可能在发送期间变化，按当前启用渠道判断是否完成。
+      const currentChannels = reportChannels(rt);
+      const complete = currentChannels.length > 0 && currentChannels.every((channel) => successful.has(channel.id));
+      await rt.store.saveReportDelivery(structuredClone(delivery), complete ? today : null);
+      if (complete) console.log(`日报已发送（${today} ${cfg.time}）`);
+      else console.error(`日报部分渠道发送失败（第 ${delivery.attempts}/${REPORT_MAX_ATTEMPTS} 次）`);
     } catch (err) {
       console.error("日报发送失败:", err?.message);
+    } finally {
+      rt._reportRunning = false;
     }
   }, 30000);
 }

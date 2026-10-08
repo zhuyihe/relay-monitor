@@ -158,20 +158,37 @@ export class Store {
 
   // 串行化写透（并行刷新会同时触发 save）；事务保证 stations+meta 原子落库
   save() {
-    this._saveChain = (this._saveChain || Promise.resolve())
-      .then(() => this._writeNow())
-      .catch((err) => console.error("保存失败:", err?.message));
-    return this._saveChain;
+    return this._saveChange(() => ({ data: this.data }));
   }
 
-  async _writeNow() {
+  _saveChange(prepare) {
+    const pending = (this._saveChain || Promise.resolve()).then(async () => {
+      const change = prepare();
+      if (!change) return null;
+      if (change.data) {
+        try {
+          await this._writeNow(change.data);
+        } catch (err) {
+          // API 只返回操作失败，不回显可能包含凭证的数据库错误。
+          throw new Error("保存失败，请稍后重试", { cause: err });
+        }
+      }
+      change.publish?.();
+      return change.value;
+    });
+    // 队列恢复与本次操作的返回值分开：调用方仍能收到失败。
+    this._saveChain = pending.catch((err) => console.error("保存失败:", err?.cause?.code || err?.message));
+    return pending;
+  }
+
+  async _writeNow(data = this.data) {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
-      const ids = this.data.stations.map((s) => s.id);
+      const ids = data.stations.map((s) => s.id);
       if (ids.length) {
         await conn.query("DELETE FROM stations WHERE id NOT IN (?)", [ids]);
-        const values = this.data.stations.map((s, i) => [s.id, i, JSON.stringify(s)]);
+        const values = data.stations.map((s, i) => [s.id, i, JSON.stringify(s)]);
         await conn.query(
           "INSERT INTO stations (id, pos, doc) VALUES ? ON DUPLICATE KEY UPDATE pos = VALUES(pos), doc = VALUES(doc)",
           [values]
@@ -180,9 +197,9 @@ export class Store {
         await conn.query("DELETE FROM stations");
       }
       const metas = [
-        ["settings", JSON.stringify(this.data.settings)],
-        ["auth", JSON.stringify(this.data.auth)],
-        ["notifications", JSON.stringify(this.data.notifications)],
+        ["settings", JSON.stringify(data.settings)],
+        ["auth", JSON.stringify(data.auth)],
+        ["notifications", JSON.stringify(data.notifications)],
       ];
       await conn.query(
         "INSERT INTO meta (k, v) VALUES ? ON DUPLICATE KEY UPDATE v = VALUES(v)",
@@ -203,29 +220,50 @@ export class Store {
   }
 
   async updateSettings(patch) {
-    // dailyReport 做字段级合并与校验，保留 lastSent
-    if (patch.dailyReport && typeof patch.dailyReport === "object") {
-      const cur = this.data.settings.dailyReport || DEFAULT_SETTINGS.dailyReport;
-      const p = patch.dailyReport;
-      patch = {
-        ...patch,
-        dailyReport: {
-          enabled: "enabled" in p ? !!p.enabled : cur.enabled,
-          time: /^\d{2}:\d{2}$/.test(p.time || "") ? p.time : cur.time,
-          channelIds: Array.isArray(p.channelIds) ? p.channelIds.map(String) : cur.channelIds,
-          lastSent: cur.lastSent ?? null,
-        },
+    return this._saveChange(() => {
+      // dailyReport 做字段级合并与校验，保留 lastSent
+      if (patch.dailyReport && typeof patch.dailyReport === "object") {
+        const cur = this.data.settings.dailyReport || DEFAULT_SETTINGS.dailyReport;
+        const p = patch.dailyReport;
+        patch = {
+          ...patch,
+          dailyReport: {
+            ...cur,
+            enabled: "enabled" in p ? !!p.enabled : cur.enabled,
+            time: /^\d{2}:\d{2}$/.test(p.time || "") ? p.time : cur.time,
+            channelIds: Array.isArray(p.channelIds) ? p.channelIds.map(String) : cur.channelIds,
+            lastSent: cur.lastSent ?? null,
+          },
+        };
+      }
+      if ("historyRetentionDays" in patch) {
+        patch = {
+          ...patch,
+          historyRetentionDays: normalizeHistoryRetentionDays(patch.historyRetentionDays),
+        };
+      }
+      const settings = { ...this.data.settings, ...patch };
+      return {
+        data: { ...this.data, settings },
+        publish: () => { this.data.settings = settings; },
+        value: settings,
       };
-    }
-    if ("historyRetentionDays" in patch) {
-      patch = {
-        ...patch,
-        historyRetentionDays: normalizeHistoryRetentionDays(patch.historyRetentionDays),
+    });
+  }
+
+  async saveReportDelivery(delivery, lastSent = null) {
+    return this._saveChange(() => {
+      const dailyReport = {
+        ...this.settings.dailyReport, delivery,
+        ...(lastSent == null ? {} : { lastSent }),
       };
-    }
-    this.data.settings = { ...this.data.settings, ...patch };
-    await this.save();
-    return this.data.settings;
+      const settings = { ...this.settings, dailyReport };
+      return {
+        data: { ...this.data, settings },
+        publish: () => { this.data.settings = settings; },
+        value: dailyReport,
+      };
+    });
   }
 
   // ---- 面板账号 --------------------------------------------------------------
@@ -235,8 +273,10 @@ export class Store {
 
   async setPassword(username, password) {
     const { salt, hash } = hashPassword(password);
-    this.data.auth = { username: username || this.data.auth.username, salt, hash, isDefault: false };
-    await this.save();
+    return this._saveChange(() => {
+      const auth = { username: username || this.data.auth.username, salt, hash, isDefault: false };
+      return { data: { ...this.data, auth }, publish: () => { this.data.auth = auth; } };
+    });
   }
 
   // ---- 通知 ------------------------------------------------------------------
@@ -248,6 +288,20 @@ export class Store {
     return this.data.notifications.rules;
   }
 
+  _changeNotifications(apply) {
+    return this._saveChange(() => {
+      const notifications = structuredClone(this.data.notifications);
+      const settings = structuredClone(this.settings);
+      const value = apply(notifications, settings);
+      if (value == null) return null;
+      return {
+        data: { ...this.data, notifications, settings },
+        publish: () => { Object.assign(this.data, { notifications, settings }); },
+        value,
+      };
+    });
+  }
+
   async addChannel(input) {
     const ch = {
       id: uid("ch"),
@@ -257,71 +311,75 @@ export class Store {
       config: typeof input.config === "object" && input.config ? input.config : {},
       createdAt: new Date().toISOString(),
     };
-    this.data.notifications.channels.push(ch);
-    await this.save();
-    return ch;
+    return this._changeNotifications((notifications) => {
+      notifications.channels.push(ch);
+      return ch;
+    });
   }
 
   async updateChannel(id, patch) {
-    const ch = this.data.notifications.channels.find((c) => c.id === id);
-    if (!ch) return null;
-    if ("name" in patch) ch.name = String(patch.name ?? "").trim();
-    if ("enabled" in patch) ch.enabled = !!patch.enabled;
-    if ("config" in patch && typeof patch.config === "object" && patch.config) {
-      // 空值表示保留原值（前端编辑时不回显密钥）
-      for (const [k, v] of Object.entries(patch.config)) {
-        if (v !== "" && v != null) ch.config[k] = String(v);
-        else if (v === "" && !(k in ch.config)) ch.config[k] = "";
+    return this._changeNotifications((notifications) => {
+      const ch = notifications.channels.find((c) => c.id === id);
+      if (!ch) return null;
+      if ("name" in patch) ch.name = String(patch.name ?? "").trim();
+      if ("enabled" in patch) ch.enabled = !!patch.enabled;
+      if ("config" in patch && typeof patch.config === "object" && patch.config) {
+        // 空值表示保留原值（前端编辑时不回显密钥）
+        for (const [k, v] of Object.entries(patch.config)) {
+          if (v !== "" && v != null) ch.config[k] = String(v);
+          else if (v === "" && !(k in ch.config)) ch.config[k] = "";
+        }
       }
-    }
-    await this.save();
-    return ch;
+      return ch;
+    });
   }
 
   async removeChannel(id) {
-    const n = this.data.notifications.channels.length;
-    this.data.notifications.channels = this.data.notifications.channels.filter((c) => c.id !== id);
-    // 同步清理各处的渠道绑定，避免留下永远匹配不到的死 id
-    // （绑定清空后自动回落到「所有启用渠道」的默认语义）
-    const cf = this.data.notifications.rules.channelsFor;
-    if (cf) {
-      for (const k of ALERT_EVENT_KEYS) {
-        if (Array.isArray(cf[k])) cf[k] = cf[k].filter((x) => x !== id);
+    return this._changeNotifications((notifications, settings) => {
+      const n = notifications.channels.length;
+      notifications.channels = notifications.channels.filter((c) => c.id !== id);
+      // 同步清理各处的渠道绑定，避免留下永远匹配不到的死 id
+      // （绑定清空后自动回落到「所有启用渠道」的默认语义）
+      const cf = notifications.rules.channelsFor;
+      if (cf) {
+        for (const k of ALERT_EVENT_KEYS) {
+          if (Array.isArray(cf[k])) cf[k] = cf[k].filter((x) => x !== id);
+        }
       }
-    }
-    const dr = this.data.settings.dailyReport;
-    if (Array.isArray(dr?.channelIds)) dr.channelIds = dr.channelIds.filter((x) => x !== id);
-    await this.save();
-    return this.data.notifications.channels.length < n;
+      const dr = settings.dailyReport;
+      if (Array.isArray(dr?.channelIds)) dr.channelIds = dr.channelIds.filter((x) => x !== id);
+      return notifications.channels.length < n;
+    });
   }
 
   async updateRules(patch) {
-    const r = this.data.notifications.rules;
-    for (const k of ["onLow", "onExhaust", "onError", "onRecover", "onEta"]) {
-      if (k in patch) r[k] = !!patch[k];
-    }
-    if ("etaDays" in patch) {
-      const v = Number(patch.etaDays);
-      // 非法输入保留原值；下限 1 小时（阈值支持按小时配置）
-      if (Number.isFinite(v) && v > 0) r.etaDays = Math.max(1 / 24, Math.round(v * 10000) / 10000);
-    }
-    if ("etaUnit" in patch) r.etaUnit = patch.etaUnit === "hours" ? "hours" : "days";
-    if ("renotifyHours" in patch) r.renotifyHours = Math.max(0, Number(patch.renotifyHours) || 0);
-    if ("errorThreshold" in patch) r.errorThreshold = Math.max(1, Math.floor(Number(patch.errorThreshold) || 1));
-    if ("errorRetrySec" in patch) r.errorRetrySec = Math.max(0, Math.floor(Number(patch.errorRetrySec) || 0));
-    if ("channelsFor" in patch && typeof patch.channelsFor === "object" && patch.channelsFor) {
-      // 字段级合并：只更新载荷里出现的事件键；仅接受当前存在的渠道 id
-      const valid = new Set(this.data.notifications.channels.map((c) => c.id));
-      const cleaned = {};
-      for (const k of ALERT_EVENT_KEYS) {
-        if (!(k in patch.channelsFor)) continue;
-        const v = patch.channelsFor[k];
-        cleaned[k] = Array.isArray(v) ? v.filter((x) => valid.has(String(x))) : [];
+    return this._changeNotifications((notifications) => {
+      const r = notifications.rules;
+      for (const k of ["onLow", "onExhaust", "onError", "onRecover", "onEta"]) {
+        if (k in patch) r[k] = !!patch[k];
       }
-      r.channelsFor = sanitizeChannelsFor(cleaned, r.channelsFor);
-    }
-    await this.save();
-    return r;
+      if ("etaDays" in patch) {
+        const v = Number(patch.etaDays);
+        // 非法输入保留原值；下限 1 小时（阈值支持按小时配置）
+        if (Number.isFinite(v) && v > 0) r.etaDays = Math.max(1 / 24, Math.round(v * 10000) / 10000);
+      }
+      if ("etaUnit" in patch) r.etaUnit = patch.etaUnit === "hours" ? "hours" : "days";
+      if ("renotifyHours" in patch) r.renotifyHours = Math.max(0, Number(patch.renotifyHours) || 0);
+      if ("errorThreshold" in patch) r.errorThreshold = Math.max(1, Math.floor(Number(patch.errorThreshold) || 1));
+      if ("errorRetrySec" in patch) r.errorRetrySec = Math.max(0, Math.floor(Number(patch.errorRetrySec) || 0));
+      if ("channelsFor" in patch && typeof patch.channelsFor === "object" && patch.channelsFor) {
+        // 字段级合并：只更新载荷里出现的事件键；仅接受当前存在的渠道 id
+        const valid = new Set(notifications.channels.map((c) => c.id));
+        const cleaned = {};
+        for (const k of ALERT_EVENT_KEYS) {
+          if (!(k in patch.channelsFor)) continue;
+          const v = patch.channelsFor[k];
+          cleaned[k] = Array.isArray(v) ? v.filter((x) => valid.has(String(x))) : [];
+        }
+        r.channelsFor = sanitizeChannelsFor(cleaned, r.channelsFor);
+      }
+      return r;
+    });
   }
 
   // ---- 中转站 ----------------------------------------------------------------
@@ -368,15 +426,14 @@ export class Store {
       alertState: null, // 告警去重状态（含不再续费站点的一次性低余额提醒时间）
       balance: null, // 最近一次查询结果
     };
-    this.data.stations.push(station);
-    await this.save();
-    return station;
+    return this._saveChange(() => {
+      const stations = [...this.data.stations, station];
+      return { data: { ...this.data, stations }, publish: () => { this.data.stations = stations; }, value: station };
+    });
   }
 
   async update(id, patch) {
-    return this.withStationLocks([id], async () => {
-      const s = this.get(id);
-      if (!s) return null;
+    return this._changeStation(id, (s) => {
       const before = {
         type: s.type, baseUrl: s.baseUrl, email: s.email,
         accessToken: s.accessToken, password: s.password,
@@ -407,42 +464,48 @@ export class Store {
         ("accessToken" in patch && s.accessToken !== before.accessToken) ||
         ("password" in patch && s.password !== before.password);
       if (credsChanged) s.s2Tokens = null;
-      await this.save();
-      return s;
+      // 即使原缓存为空，也须覆盖提交期间后台取得的旧凭证令牌。
+      if (credsChanged) return { s2Tokens: null };
     });
+  }
+
+  _changeStation(id, apply) {
+    return this.withStationLocks([id], () => this._saveChange(() => {
+      const current = this.get(id);
+      if (!current) return null;
+      const next = { ...current };
+      const forcedFields = apply(next);
+      const fields = Object.fromEntries(Object.entries(next).filter(([key, value]) => !Object.is(current[key], value)));
+      Object.assign(fields, forcedFields);
+      if (!Object.keys(fields).length) return { value: current };
+      const stations = this.data.stations.map((s) => s.id === id ? next : s);
+      return {
+        data: { ...this.data, stations },
+        // 保留刷新持有的对象及提交期间更新的余额、令牌等未编辑字段。
+        publish: () => { Object.assign(current, fields); },
+        value: current,
+      };
+    }));
   }
 
   async remove(id) {
-    return this.withStationLocks([id], async () => {
+    return this.withStationLocks([id], () => this._saveChange(() => {
       const n = this.data.stations.length;
-      this.data.stations = this.data.stations.filter((s) => s.id !== id);
-      await this.save();
-      return this.data.stations.length < n;
-    });
+      const stations = this.data.stations.filter((s) => s.id !== id);
+      return {
+        data: { ...this.data, stations },
+        publish: () => { this.data.stations = stations; },
+        value: stations.length < n,
+      };
+    }));
   }
 
   async archive(id) {
-    return this.withStationLocks([id], async () => {
-      const s = this.get(id);
-      if (!s) return null;
-      if (!s.archivedAt) {
-        s.archivedAt = new Date().toISOString();
-        await this.save();
-      }
-      return s;
-    });
+    return this._changeStation(id, (s) => { s.archivedAt ||= new Date().toISOString(); });
   }
 
   async restore(id) {
-    return this.withStationLocks([id], async () => {
-      const s = this.get(id);
-      if (!s) return null;
-      if (s.archivedAt) {
-        s.archivedAt = null;
-        await this.save();
-      }
-      return s;
-    });
+    return this._changeStation(id, (s) => { if (s.archivedAt) s.archivedAt = null; });
   }
 
   async withStationLocks(ids, action) {
@@ -467,9 +530,6 @@ export class Store {
   }
 
   async setBalance(id, balance) {
-    const s = this.get(id);
-    if (!s) return;
-    s.balance = balance;
-    await this.save();
+    await this._changeStation(id, (s) => { s.balance = balance; });
   }
 }
