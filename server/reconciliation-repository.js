@@ -1,6 +1,6 @@
 // 上游渠道对账的持久化层：只保存规则、聚合快照和告警状态，绝不复制站点凭据。
 import { isCurrentReconciliationBillingContract } from "../lib/reconciliation-contract.js";
-import { reconciliationScopeFingerprint, reconciliationSnapshotIdentity } from "../lib/reconciliation-snapshot.js";
+import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
 
 function uid(prefix) {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}${Date.now().toString(36).slice(-4)}`;
@@ -12,10 +12,6 @@ function asJson(value) {
     try { return JSON.parse(value); } catch { return null; }
   }
   return value;
-}
-
-function escapeLike(value) {
-  return String(value).replace(/[!%_]/g, "!$&");
 }
 
 function normalizeSuccessfulResult(result, healthCode) {
@@ -81,7 +77,11 @@ function segmentFromRow(row) {
 }
 
 function isConfirmedSnapshotSource(source) {
-  return source?.result?.calculation?.profitUsd != null;
+  return source?.recordType === "confirmed" && source?.result?.calculation?.profitUsd != null;
+}
+
+function isObservationSnapshotSource(source) {
+  return source?.recordType === "observation";
 }
 
 function snapshotLogicalEnd(source) {
@@ -558,10 +558,9 @@ export class ReconciliationRepository {
         const incomingSource = snapshot.source || null;
         const savedEnd = snapshotLogicalEnd(savedSource);
         const incomingEnd = snapshotLogicalEnd(incomingSource);
-        if (isConfirmedSnapshotSource(savedSource)
-          && (!isConfirmedSnapshotSource(incomingSource)
-            || savedEnd > incomingEnd
-            || (savedEnd === incomingEnd && snapshotGeneratedAt(savedSource) >= snapshotGeneratedAt(incomingSource)))) continue;
+        const sameRecordType = savedSource?.recordType && savedSource.recordType === incomingSource?.recordType;
+        if (sameRecordType && (savedEnd > incomingEnd
+          || (savedEnd === incomingEnd && snapshotGeneratedAt(savedSource) > snapshotGeneratedAt(incomingSource)))) continue;
         await this.saveSnapshot(snapshot, conn);
       }
       await conn.commit();
@@ -599,14 +598,13 @@ export class ReconciliationRepository {
     );
   }
 
-  async latestSuccessfulResult(ruleId, window, scopeFingerprint) {
+  async latestRecord(ruleId, window, scopeFingerprint, recordType) {
     if (!scopeFingerprint) throw new Error("成功账单查询必须指定核算口径");
-    const prefix = reconciliationSnapshotIdentity(window, scopeFingerprint);
     const [rows] = await this.pool.query(
       `SELECT * FROM reconciliation_snapshots
-       WHERE rule_id = ? AND window_kind = ? AND snapshot_key LIKE ? ESCAPE '!' AND window_end_ms <= ?
+       WHERE rule_id = ? AND window_kind = ? AND window_end_ms <= ? AND snapshot_key LIKE ?
        ORDER BY generated_at DESC`,
-      [ruleId, window.preset, `${escapeLike(prefix)}:%`, window.endMs]
+      [ruleId, window.preset, window.endMs, `${reconciliationSnapshotRecordPrefix(window, scopeFingerprint, recordType)}%`]
     );
     const exact = rows.map((row) => {
       const source = asJson(row.source);
@@ -616,10 +614,11 @@ export class ReconciliationRepository {
       if (!isCurrentReconciliationBillingContract(source)
         || source?.scopeFingerprint !== scopeFingerprint || !source?.result || !source?.resultGeneratedAt || !saved || saved.preset !== window.preset
         || Number(saved.startMs) !== Number(window.startMs) || saved.timezone !== window.timezone) return false;
+      if (recordType === "confirmed" ? !isConfirmedSnapshotSource(source) : !isObservationSnapshotSource(source)) return false;
       const sameWindow = window.preset === "today" || window.preset === "7d"
         ? Number(saved.endMs) <= Number(window.endMs)
         : Number(saved.endMs) === Number(window.endMs);
-      return sameWindow && result?.calculation?.profitUsd != null;
+      return sameWindow && (recordType !== "confirmed" || result?.calculation?.profitUsd != null);
     });
     if (!exact.length) return null;
     const latest = exact.reduce((current, candidate) => String(candidate.source.resultGeneratedAt) > String(current.source.resultGeneratedAt) ? candidate : current);
@@ -630,8 +629,16 @@ export class ReconciliationRepository {
         ...latest.result,
         window: savedWindow,
         requestedWindow: latest.source.result.requestedWindow || savedWindow,
-        lastSuccessfulWindow: latest.source.result.lastSuccessfulWindow || savedWindow,
+        lastSuccessfulWindow: recordType === "confirmed" ? latest.source.result.lastSuccessfulWindow || savedWindow : latest.source.result.lastSuccessfulWindow ?? null,
       },
     };
+  }
+
+  async latestSuccessfulResult(ruleId, window, scopeFingerprint) {
+    return this.latestRecord(ruleId, window, scopeFingerprint, "confirmed");
+  }
+
+  async latestObservation(ruleId, window, scopeFingerprint) {
+    return this.latestRecord(ruleId, window, scopeFingerprint, "observation");
   }
 }

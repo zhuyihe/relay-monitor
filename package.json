@@ -14,6 +14,7 @@
     "start": "next start",
     "test": "node --test lib/alerts.test.js lib/auth.test.js lib/connection-test.test.js lib/overview-actions.test.js lib/providers.test.js lib/reconciliation-view.test.js db/history.test.js db/store.test.js db/pool.test.js server/own-helpers.test.js server/reconciliation.test.js server/report.test.js app/api/analytics/route.test.js app/api/stations/[id]/route.test.js",
     "typecheck": "next typegen && tsc --noEmit --incremental false",
+    "test:reconciliation-ui": "node --test tests/reconciliation-ui.test.mjs",
     "db:migrate": "node db/migrate.js"
   },
   "dependencies": {
