@@ -9,7 +9,7 @@ function setup(t, { now = START, own = true, channels = ["a", "b"] } = {}) {
   t.mock.timers.enable({ apis: ["Date"], now });
   t.mock.method(console, "error", () => {});
   t.mock.method(console, "log", () => {});
-  const database = { settings: null, failNextCommit: false };
+  const database = { settings: null, failNextCommit: false, beforeCommit: null };
   const pool = {
     getConnection: async () => {
       let settings;
@@ -20,6 +20,7 @@ function setup(t, { now = START, own = true, channels = ["a", "b"] } = {}) {
           return [[]];
         },
         commit: async () => {
+          await database.beforeCommit?.();
           if (database.failNextCommit) {
             database.failNextCommit = false;
             throw new Error("simulated persistence failure");
@@ -166,4 +167,65 @@ test("没有启用渠道时不标记已发送，用户设置不能覆盖发送�
   await h.rt.store.updateSettings({ dailyReport: { time: "10:00", lastSent: "forged", delivery: { attempts: 0 } } });
   assert.deepEqual(h.rt.store.settings.dailyReport.delivery, delivery);
   assert.equal(h.rt.store.settings.dailyReport.lastSent, null);
+});
+
+for (const kind of ["generation", "partial"]) {
+  test(`慢事务后的${kind === "generation" ? "生成失败" : "部分发送失败"}从失败完成时退避`, async (t) => {
+    const h = setup(t, { own: kind !== "generation" });
+    if (kind === "partial") h.failures.add("b");
+    h.database.beforeCommit = () => {
+      h.database.beforeCommit = null;
+      t.mock.timers.tick(90000);
+    };
+    await h.tick();
+    const delivery = h.rt.store.settings.dailyReport.delivery;
+    assert.equal(delivery.nextAttemptAt, START + 150000);
+    assert.equal(h.database.settings.dailyReport.delivery.nextAttemptAt, START + 150000);
+    t.mock.timers.tick(59999);
+    await h.tick();
+    assert.equal(h.rt._reportDelivery.attempts, 1);
+    t.mock.timers.tick(1);
+    await h.tick();
+    assert.equal(h.rt._reportDelivery.attempts, 2);
+    if (kind === "partial") assert.deepEqual(h.deliveries, ["a", "b", "b"]);
+  });
+}
+
+test("慢的发送前写库失败仍持久化完整退避，重启后不会提前重试", async (t) => {
+  const h = setup(t, { channels: ["a"] });
+  h.database.failNextCommit = true;
+  h.database.beforeCommit = () => {
+    h.database.beforeCommit = null;
+    t.mock.timers.tick(90000);
+  };
+  await h.tick();
+  assert.equal(h.rt._reportDelivery.nextAttemptAt, START + 150000);
+  assert.equal(h.database.settings.dailyReport.delivery.nextAttemptAt, START + 150000);
+  assert.deepEqual(h.deliveries, []);
+  h.rt.store.data.settings = structuredClone(h.database.settings);
+  delete h.rt._reportDelivery;
+  startReportScheduler(h.rt);
+  t.mock.timers.tick(59999);
+  await h.tick();
+  assert.deepEqual(h.deliveries, []);
+  t.mock.timers.tick(1);
+  await h.tick();
+  assert.deepEqual(h.deliveries, ["a"]);
+});
+
+test("退避进度写库也失败时，从最后一次失败完成时保留运行时退避", async (t) => {
+  const h = setup(t, { channels: ["a"] });
+  h.database.beforeCommit = () => {
+    t.mock.timers.tick(90000);
+    h.database.failNextCommit = true;
+  };
+  await h.tick();
+  assert.equal(h.rt._reportDelivery.nextAttemptAt, Date.now() + 60000);
+  h.database.beforeCommit = null;
+  t.mock.timers.tick(59999);
+  await h.tick();
+  assert.deepEqual(h.deliveries, []);
+  t.mock.timers.tick(1);
+  await h.tick();
+  assert.deepEqual(h.deliveries, ["a"]);
 });

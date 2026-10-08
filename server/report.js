@@ -350,11 +350,12 @@ export function startReportScheduler(rt) {
       : cfg.delivery?.day === today ? cfg.delivery : null;
     const now = Date.now();
     if (previous && (previous.attempts >= REPORT_MAX_ATTEMPTS || previous.nextAttemptAt > now)) return;
+    const retryDelay = REPORT_RETRY_MS * 2 ** (previous?.attempts || 0);
     const delivery = {
       day: today,
       attempts: (previous?.attempts || 0) + 1,
       successfulChannelIds: [...(previous?.successfulChannelIds || [])],
-      nextAttemptAt: now + REPORT_RETRY_MS * 2 ** (previous?.attempts || 0),
+      nextAttemptAt: now + retryDelay,
     };
     rt._reportDelivery = delivery;
     rt._reportRunning = true;
@@ -374,11 +375,20 @@ export function startReportScheduler(rt) {
       // 配置可能在发送期间变化，按当前启用渠道判断是否完成。
       const currentChannels = reportChannels(rt);
       const complete = currentChannels.length > 0 && currentChannels.every((channel) => successful.has(channel.id));
+      delivery.nextAttemptAt = Date.now() + retryDelay;
       await rt.store.saveReportDelivery(structuredClone(delivery), complete ? today : null);
       if (complete) console.log(`日报已发送（${today} ${cfg.time}）`);
       else console.error(`日报部分渠道发送失败（第 ${delivery.attempts}/${REPORT_MAX_ATTEMPTS} 次）`);
     } catch (err) {
       console.error("日报发送失败:", err?.message);
+      delivery.nextAttemptAt = Date.now() + retryDelay;
+      try {
+        await rt.store.saveReportDelivery(structuredClone(delivery));
+      } catch (saveErr) {
+        // 进度保存也可能慢失败；本进程仍从最后一次失败完成后等待。
+        delivery.nextAttemptAt = Date.now() + retryDelay;
+        console.error("日报发送进度保存失败:", saveErr?.message);
+      }
     } finally {
       rt._reportRunning = false;
     }

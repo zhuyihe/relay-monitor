@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "./store.js";
+import { refreshStation } from "../server/refresh.js";
 
 function fakePool(stations = []) {
   const conn = {
@@ -263,3 +264,49 @@ test("凭证修改提交时作废后台刚取得的旧凭证令牌", async (t) =
   assert.equal(station.password, "new-password");
   assert.equal(station.s2Tokens, null);
 });
+
+for (const initialAlertState of [{ state: "unknown", errorCount: 0, noRenewalLowNotifiedAt: 20 }, null]) {
+  test(`续费计划提交保留后台更新的告警状态（${initialAlertState ? "已有状态" : "初始为空"}）`, async (t) => {
+    const pool = fakePool();
+    const connection = await pool.getConnection();
+    const store = new Store(pool);
+    const station = await store.add({ name: "source", type: "newapi", baseUrl: "https://source.example", noRenewal: true });
+    station.alertState = structuredClone(initialAlertState);
+    store.data.notifications.rules = { ...store.rules, errorThreshold: 3, errorRetrySec: 0 };
+    t.mock.method(globalThis, "fetch", async () => new Response("{}", { status: 503 }));
+    const writes = [];
+    connection.query = async (sql, [values] = []) => {
+      if (sql.startsWith("INSERT INTO stations")) writes.push(JSON.parse(values[0][2]));
+      return [[]];
+    };
+    let entered;
+    let release;
+    let commits = 0;
+    const reached = new Promise((resolve) => { entered = resolve; });
+    connection.commit = async () => {
+      if (++commits === 1) {
+        entered();
+        await new Promise((resolve) => { release = resolve; });
+      }
+    };
+    const update = store.update(station.id, { noRenewal: false });
+    t.after(() => release?.());
+    await reached;
+    let refreshed;
+    const refreshReached = new Promise((resolve) => { refreshed = resolve; });
+    const save = store.save.bind(store);
+    t.mock.method(store, "save", () => { refreshed(); return save(); });
+    const refresh = refreshStation({ store, history: { predict: () => null } }, station);
+    await refreshReached;
+    assert.equal(station.alertState.errorCount, 1);
+    const latest = { ...station.alertState, notifiedAt: 30, etaNotifiedAt: 40, noRenewalLowNotifiedAt: 50 };
+    station.alertState = latest;
+    release();
+    await Promise.all([update, refresh]);
+    const expected = { ...latest };
+    delete expected.noRenewalLowNotifiedAt;
+    assert.equal(station.noRenewal, false);
+    assert.deepEqual(station.alertState, expected);
+    assert.deepEqual(writes.at(-1).alertState, expected);
+  });
+}

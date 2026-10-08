@@ -482,7 +482,14 @@ export class Store {
       return {
         data: { ...this.data, stations },
         // 保留刷新持有的对象及提交期间更新的余额、令牌等未编辑字段。
-        publish: () => { Object.assign(current, fields); },
+        publish: () => {
+          if ("noRenewal" in fields) {
+            // 只重置单次提醒，保留提交期间后台更新的其他告警字段。
+            const { noRenewalLowNotifiedAt, ...alertState } = current.alertState || {};
+            fields.alertState = current.alertState ? alertState : current.alertState;
+          }
+          Object.assign(current, fields);
+        },
         value: current,
       };
     }));
