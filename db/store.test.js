@@ -126,3 +126,22 @@ test("历史默认永久保留，归档资源不进入默认列表但仍可显�
   assert.equal(store.list({ includeArchived: true }).length, 1);
   assert.ok(store.get(station.id).archivedAt);
 });
+
+test("站点编辑等待同一站点的观察提交边界", async () => {
+  const store = new Store(fakePool());
+  const station = await store.add({ name: "来源", type: "newapi", baseUrl: "https://old.example", accessToken: "old" });
+  let release;
+  let entered;
+  const reached = new Promise((resolve) => { entered = resolve; });
+  const observation = store.withStationLocks([station.id], async () => {
+    entered();
+    await new Promise((resolve) => { release = resolve; });
+  });
+  await reached;
+  const update = store.update(station.id, { accessToken: "new" });
+  await Promise.resolve();
+  assert.equal(store.get(station.id).accessToken, "old", "edit must not mutate memory before observation commits");
+  release();
+  await Promise.all([observation, update]);
+  assert.equal(store.get(station.id).accessToken, "new");
+});

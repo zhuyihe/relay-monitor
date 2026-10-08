@@ -129,8 +129,9 @@ export function mockNewApiSelfLogs(request) {
 export function mockNewApiSelfLogStat(request) {
   if (!hasAuth(request)) return unauthorized();
   const q = new URL(request.url).searchParams;
+  const type = Number(q.get("type") || 0);
   const rows = mockReconciliationRows(q.get("start_timestamp"), q.get("end_timestamp"), q.get("token_name") || "")
-    .filter((row) => !q.get("group") || row.group === q.get("group"));
+    .filter((row) => (!type || row.type === type) && (!q.get("group") || row.group === q.get("group")));
   return { status: 200, body: { success: true, data: { quota: rows.reduce((sum, row) => sum + row.quota, 0), rpm: 0, tpm: 0 } } };
 }
 
@@ -374,6 +375,8 @@ export function mockNewApiLogStat(request) {
   const startSec = Number(q.get("start_timestamp")) || 0;
   const endSec = Number(q.get("end_timestamp")) || 0;
   let rows = mockLogRows(startSec, endSec);
+  const type = Number(q.get("type") || 0);
+  if (type) rows = rows.filter((row) => row.type === type);
   for (const [param, field] of [["model_name", "model_name"], ["username", "username"], ["group", "group"], ["token_name", "token_name"]]) {
     const value = q.get(param);
     if (value) rows = rows.filter((row) => row[field] === value);

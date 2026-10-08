@@ -88,6 +88,10 @@ function sanitizeChannelsFor(input, base) {
 export class Store {
   constructor(pool) {
     this.pool = pool;
+    // The runtime has one Store instance.  Source edits and reconciliation
+    // observation commits use this short-lived, per-station boundary; network
+    // requests deliberately happen before it is acquired.
+    this._stationLocks = new Map();
     this.data = {
       stations: [],
       settings: { ...DEFAULT_SETTINGS },
@@ -370,67 +374,96 @@ export class Store {
   }
 
   async update(id, patch) {
-    const s = this.get(id);
-    if (!s) return null;
-    const before = {
-      type: s.type, baseUrl: s.baseUrl, email: s.email,
-      accessToken: s.accessToken, password: s.password,
-    };
-    const fields = ["name", "type", "baseUrl", "accessToken", "userId", "apiKey", "email"];
-    for (const f of fields) if (f in patch) s[f] = String(patch[f] ?? "").trim();
-    if ("password" in patch) s.password = String(patch.password ?? "");
-    if ("lowBalanceUsd" in patch) s.lowBalanceUsd = numOrNull(patch.lowBalanceUsd);
-    if ("cnyPerUsd" in patch) s.cnyPerUsd = numOrNull(patch.cnyPerUsd);
-    if ("costAliases" in patch) s.costAliases = sanitizeCostAliases(patch.costAliases);
-    if ("includeInProfit" in patch) s.includeInProfit = patch.includeInProfit !== false;
-    if ("isOwn" in patch) s.isOwn = !!patch.isOwn;
-    if ("noRenewal" in patch || s.type === "fixed") {
-      const noRenewal = s.type !== "fixed" && !!patch.noRenewal;
-      if (noRenewal !== !!s.noRenewal && s.alertState) {
-        // 每次重新标记都开启一轮新的单次提醒；其他告警去重状态保持不变。
-        const { noRenewalLowNotifiedAt, ...alertState } = s.alertState;
-        s.alertState = alertState;
+    return this.withStationLocks([id], async () => {
+      const s = this.get(id);
+      if (!s) return null;
+      const before = {
+        type: s.type, baseUrl: s.baseUrl, email: s.email,
+        accessToken: s.accessToken, password: s.password,
+      };
+      const fields = ["name", "type", "baseUrl", "accessToken", "userId", "apiKey", "email"];
+      for (const f of fields) if (f in patch) s[f] = String(patch[f] ?? "").trim();
+      if ("password" in patch) s.password = String(patch.password ?? "");
+      if ("lowBalanceUsd" in patch) s.lowBalanceUsd = numOrNull(patch.lowBalanceUsd);
+      if ("cnyPerUsd" in patch) s.cnyPerUsd = numOrNull(patch.cnyPerUsd);
+      if ("costAliases" in patch) s.costAliases = sanitizeCostAliases(patch.costAliases);
+      if ("includeInProfit" in patch) s.includeInProfit = patch.includeInProfit !== false;
+      if ("isOwn" in patch) s.isOwn = !!patch.isOwn;
+      if ("noRenewal" in patch || s.type === "fixed") {
+        const noRenewal = s.type !== "fixed" && !!patch.noRenewal;
+        if (noRenewal !== !!s.noRenewal && s.alertState) {
+          // 每次重新标记都开启一轮新的单次提醒；其他告警去重状态保持不变。
+          const { noRenewalLowNotifiedAt, ...alertState } = s.alertState;
+          s.alertState = alertState;
+        }
+        s.noRenewal = noRenewal;
       }
-      s.noRenewal = noRenewal;
-    }
-    if ("fixedPurchases" in patch) s.fixedPurchases = sanitizePurchases(patch.fixedPurchases) || [];
-    if ("resoldAdminKeys" in patch) s.resoldAdminKeys = sanitizeResoldKeys(patch.resoldAdminKeys) || [];
-    // 凭证或站点实际变化才作废令牌缓存（前端编辑总会带上 type/email 原值，
-    // 无脑作废会导致每次改名都触发一次完整重登录）
-    const credsChanged =
-      before.type !== s.type || before.baseUrl !== s.baseUrl || before.email !== s.email ||
-      ("accessToken" in patch && s.accessToken !== before.accessToken) ||
-      ("password" in patch && s.password !== before.password);
-    if (credsChanged) s.s2Tokens = null;
-    await this.save();
-    return s;
+      if ("fixedPurchases" in patch) s.fixedPurchases = sanitizePurchases(patch.fixedPurchases) || [];
+      if ("resoldAdminKeys" in patch) s.resoldAdminKeys = sanitizeResoldKeys(patch.resoldAdminKeys) || [];
+      // 凭证或站点实际变化才作废令牌缓存（前端编辑总会带上 type/email 原值，
+      // 无脑作废会导致每次改名都触发一次完整重登录）
+      const credsChanged =
+        before.type !== s.type || before.baseUrl !== s.baseUrl || before.email !== s.email ||
+        ("accessToken" in patch && s.accessToken !== before.accessToken) ||
+        ("password" in patch && s.password !== before.password);
+      if (credsChanged) s.s2Tokens = null;
+      await this.save();
+      return s;
+    });
   }
 
   async remove(id) {
-    const n = this.data.stations.length;
-    this.data.stations = this.data.stations.filter((s) => s.id !== id);
-    await this.save();
-    return this.data.stations.length < n;
+    return this.withStationLocks([id], async () => {
+      const n = this.data.stations.length;
+      this.data.stations = this.data.stations.filter((s) => s.id !== id);
+      await this.save();
+      return this.data.stations.length < n;
+    });
   }
 
   async archive(id) {
-    const s = this.get(id);
-    if (!s) return null;
-    if (!s.archivedAt) {
-      s.archivedAt = new Date().toISOString();
-      await this.save();
-    }
-    return s;
+    return this.withStationLocks([id], async () => {
+      const s = this.get(id);
+      if (!s) return null;
+      if (!s.archivedAt) {
+        s.archivedAt = new Date().toISOString();
+        await this.save();
+      }
+      return s;
+    });
   }
 
   async restore(id) {
-    const s = this.get(id);
-    if (!s) return null;
-    if (s.archivedAt) {
-      s.archivedAt = null;
-      await this.save();
+    return this.withStationLocks([id], async () => {
+      const s = this.get(id);
+      if (!s) return null;
+      if (s.archivedAt) {
+        s.archivedAt = null;
+        await this.save();
+      }
+      return s;
+    });
+  }
+
+  async withStationLocks(ids, action) {
+    const releases = [];
+    for (const id of [...new Set(ids.filter(Boolean))].sort()) {
+      const previous = this._stationLocks.get(id) || Promise.resolve();
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const tail = previous.then(() => gate);
+      this._stationLocks.set(id, tail);
+      await previous;
+      releases.push(() => {
+        release();
+        if (this._stationLocks.get(id) === tail) this._stationLocks.delete(id);
+      });
     }
-    return s;
+    try {
+      return await action();
+    } finally {
+      for (const release of releases.reverse()) release();
+    }
   }
 
   async setBalance(id, balance) {

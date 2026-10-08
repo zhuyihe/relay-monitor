@@ -531,7 +531,7 @@ export default function ReconciliationPage() {
 
       {data ? <div className="reconciliation-freshness"><Text type="secondary">显示结果生成：{formatRecentTime(data.generatedAt, displayTimezone, true)}（{displayTimezone}）</Text>{results.length ? <Text type="secondary">{freshness.staleCount ? `${freshness.staleCount} 条规则数据已过期${sharedWindow && freshness.coverageEndMs != null ? ` · 最早金额覆盖至 ${formatTime(freshness.coverageEndMs, sharedWindow.timezone)}` : ""}` : latestSuccessful ? `最近成功：${formatRecentTime(latestSuccessful.lastSuccessfulAt, latestSuccessful.window?.timezone)}（${latestSuccessful.window?.timezone || "Asia/Shanghai"}）` : "暂未成功（当前读取失败）"}</Text> : null}</div> : null}
       {error ? <Alert type="error" showIcon message="对账数据加载失败 · 当前显示上次结果" description={`${error}。下方窗口与金额属于上次查询，非本次查询结果。`} action={<Button size="small" onClick={() => loadWindow(activeWindow, true)}>重试</Button>} className="reconciliation-inline-alert" /> : null}
-      {config?.channelsError ? <Alert type="warning" showIcon message="本站渠道目录读取失败" description={config.channelsError} className="reconciliation-inline-alert" /> : null}
+      {config?.channelsError ? <Alert type="warning" showIcon message={config.channelsError} className="reconciliation-inline-alert" /> : null}
 
       <section className="reconciliation-summary" aria-label="对账汇总">
         <div className="reconciliation-summary__metrics">
@@ -633,7 +633,7 @@ export default function ReconciliationPage() {
               return { value: Number(channel.id), disabled: !!occupiedBy, label: `${channelLabel(channel)}${occupiedBy ? `（已用于 ${occupiedBy}）` : ""}` };
             })} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
           </Form.Item>
-          {channelsError ? <Alert type="error" showIcon message={`本站渠道刷新失败：${channelsError}`} style={{ marginBottom: 16 }} /> : null}
+          {channelsError ? <Alert type="error" showIcon message={channelsError} style={{ marginBottom: 16 }} /> : null}
           <Form.Item label="对账时区" name="timezone" extra="“今天”从该时区的 00:00 计算到当前时刻。">
             <Input placeholder="Asia/Shanghai" />
           </Form.Item>
