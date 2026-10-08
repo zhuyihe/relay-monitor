@@ -5,11 +5,15 @@
   "license": "MIT",
   "type": "module",
   "description": "中转站余额监控面板 v2：Next.js 全栈 + Ant Design Pro (antd 6) + MySQL",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --test lib/alerts.test.js lib/auth.test.js lib/connection-test.test.js lib/overview-actions.test.js lib/providers.test.js lib/reconciliation-view.test.js db/history.test.js db/store.test.js server/own-helpers.test.js server/reconciliation.test.js app/api/analytics/route.test.js app/api/stations/[id]/route.test.js",
+    "test": "node --test lib/alerts.test.js lib/auth.test.js lib/connection-test.test.js lib/overview-actions.test.js lib/providers.test.js lib/reconciliation-view.test.js db/history.test.js db/store.test.js db/pool.test.js server/own-helpers.test.js server/reconciliation.test.js server/report.test.js app/api/analytics/route.test.js app/api/stations/[id]/route.test.js",
+    "typecheck": "next typegen && tsc --noEmit --incremental false",
     "db:migrate": "node db/migrate.js"
   },
   "dependencies": {

@@ -9,6 +9,10 @@
 - 只有同时满足“应用端口不可被公网直连”和“代理会清理外部伪造的转发头”时，才设置 `TRUST_PROXY=true`。启用后，HTTPS 代理请求签发的会话 Cookie 会带 `Secure` 属性。
 - 未启用 `TRUST_PROXY` 时，应用只根据自身请求协议决定 Cookie 是否带 `Secure`；直接 HTTP 访问不会带该属性，因此不能作为生产访问方式。
 
+示例 Compose 将应用端口绑定到宿主机 `127.0.0.1:8787`，供宿主机上的反向代理访问。满足上述代理条件后，在 Compose 使用的 `.env` 中设置 `TRUST_PROXY=true` 并重建应用容器。若反向代理也在 Docker 内，使用同一内部网络访问 `relay-monitor:8787`，并移除应用的 `ports` 映射。
+
+本地 Docker 构建排除 `.env`、`.env.*` 和 `server.md`；公开的 `.env.example` 可以保留。构建阶段不应包含真实数据库或部署凭证。
+
 ## 初始账号
 
 - 首次初始化会创建 `admin / admin123`。
