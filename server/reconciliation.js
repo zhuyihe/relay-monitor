@@ -15,7 +15,7 @@ import {
 } from "../lib/reconciliation-contract.js";
 import { ReconciliationRepository } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
-import { reconciliationScopeFingerprint, reconciliationSnapshotIdentity } from "../lib/reconciliation-snapshot.js";
+import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity } from "../lib/reconciliation-snapshot.js";
 import { describeConnectionFailure } from "../lib/connection-test.js";
 
 export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
@@ -199,10 +199,34 @@ function channelState(status) {
 }
 
 function healthWithIssues(issues) {
-  const priority = ["KEY_INVALID_OR_DENIED", "UPSTREAM_DATA_UNAVAILABLE", "OWN_BILLING_UNAVAILABLE", "OWN_FLOW_INCOMPLETE", "UPSTREAM_EMPTY_WITH_SALES", "SALES_CHANNEL_MISSING", "SALES_CHANNEL_DISABLED", "SALES_CHANNEL_STATE_UNKNOWN", "ROUTE_TRANSITION_DETECTED", "SEGMENT_TIMING_UNCONFIRMED"];
+  const priority = ["KEY_INVALID_OR_DENIED", "UPSTREAM_DATA_UNAVAILABLE", "OWN_BILLING_UNAVAILABLE", "OWN_FLOW_INCOMPLETE", "UPSTREAM_EMPTY_WITH_SALES", "GROUP_DATA_UNAVAILABLE", "PENDING", "SALES_CHANNEL_MISSING", "SALES_CHANNEL_DISABLED", "SALES_CHANNEL_STATE_UNKNOWN", "ROUTE_TRANSITION_DETECTED", "SEGMENT_TIMING_UNCONFIRMED"];
   const first = priority.find((code) => issues.some((issue) => issue.code === code));
   const base = first ? health(first, issues.find((issue) => issue.code === first)?.detail || "") : health("READY");
   return { ...base, issues };
+}
+
+function persistenceFailedResult(rule, window) {
+  const observedAt = Date.now();
+  const channels = rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null }));
+  const issue = { code: "PERSISTENCE_FAILED", scope: "persistence", detail: "本轮对账结果未能保存，请稍后重试", observedAt };
+  return {
+    rule, window, requestedWindow: window, lastSuccessfulWindow: null, currentSegment: null, segments: [], transitionSegments: [],
+    upstream: { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: 1, observedAt, window },
+    downstream: { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: rule.channels.length, billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION, observedAt, window, channels },
+    calculation: { differenceUsd: null, profitUsd: null, riskDifferenceUsd: null, marginRate: null },
+    health: { ...health("PERSISTENCE_FAILED", issue.detail), issues: [issue] }, generatedAt: new Date().toISOString(),
+  };
+}
+
+function snapshotReference(record) {
+  return {
+    generatedAt: record.generatedAt,
+    window: record.result.lastSuccessfulWindow || record.result.window,
+    upstream: record.result.upstream,
+    downstream: record.result.downstream,
+    calculation: record.result.calculation,
+    health: record.result.health,
+  };
 }
 
 function toErrorHealth(err, own = false) {
@@ -225,15 +249,6 @@ const CALCULATION_BLOCKERS = new Set([
   "UPSTREAM_EMPTY_WITH_SALES",
 ]);
 
-// 两侧任一数据源不可用时才回退到最近成功账单。UPSTREAM_EMPTY_WITH_SALES 表示两侧都已应答，
-// 新异常必须以风险差额展示，不能被旧的确认利润掩盖。
-const SOURCE_UNAVAILABLE_BLOCKERS = new Set([
-  "KEY_INVALID_OR_DENIED",
-  "UPSTREAM_DATA_UNAVAILABLE",
-  "OWN_BILLING_UNAVAILABLE",
-  "OWN_FLOW_INCOMPLETE",
-]);
-
 function calculationFromAmounts(upstreamUsd, downstreamUsd, issues = []) {
   const differenceUsd = upstreamUsd == null || downstreamUsd == null ? null : downstreamUsd - upstreamUsd;
   const confirmed = differenceUsd != null && !issues.some((issue) => CALCULATION_BLOCKERS.has(issue.code));
@@ -253,7 +268,7 @@ function sourceSnapshot(token, metadata, upstream, downstream) {
       tokenId: token.id,
       tokenName: token.name,
       group: token.group,
-      ratio: metadata.groups[token.group]?.ratio ?? null,
+      ratio: metadata.groups?.[token.group]?.ratio ?? null,
       status: token.status,
       latestLogAtMs: upstream?.latestLogAtMs ?? null,
     },
@@ -498,9 +513,85 @@ export function createReconciliationModule(rt) {
       const upstream = currentUpstream && { ...currentUpstream };
       const own = currentOwn && { ...currentOwn };
       const sourceCredential = sourceCredentialFingerprint(upstream, own);
-      const unavailable = (resultHealth, evidence = {}) => persistUnavailable(rule, window, resultHealth, origin, evidence, generation, sourceCredential);
+      const ownAvailable = !!own && own.isOwn && own.type === "newapi";
+      const downstreamEvidence = async () => {
+        if (!own || !own.isOwn || own.type !== "newapi") return null;
+        const persistedSegments = await repository.listSegments(rule.id).catch(() => []);
+        const applicable = persistedSegments
+          .map((segment) => ({ segment, window: intersectSegment(window, segment) }))
+          .filter((item) => item.window);
+        if (!applicable.length) return null;
+        try {
+          const [catalogue, results] = await Promise.all([
+            ownChannelsFor(own, { force }).catch(() => null),
+            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => queryOwnChannelRevenue(own, {
+              channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs,
+            }).catch(() => null)),
+          ]);
+          const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
+          const channelsFor = (result) => rule.channels.map((channel) => {
+            const billed = result?.channels?.find((item) => item.channelId === channel.channelId);
+            const observed = channelById.get(channel.channelId);
+            return {
+              ...channel,
+              state: catalogue ? (observed ? channelState(observed.status) : "missing") : "unknown",
+              stateObservedAt: Date.now(),
+              billingState: billed?.billingState || "unavailable",
+              quotaUnits: billed?.quotaUnits ?? null,
+              amountUsd: billed?.amountUsd ?? null,
+              knownAmountUsd: billed?.amountUsd ?? null,
+            };
+          });
+          const downstreamFor = (result, segmentWindow) => result ? {
+            ...result, observedAt: Date.now(), window: segmentWindow, channels: channelsFor(result),
+          } : {
+            state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null,
+            successfulCount: 0, expectedCount: rule.channels.length,
+            billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION,
+            observedAt: Date.now(), window: segmentWindow, channels: channelsFor(null),
+          };
+          const channels = rule.channels.map((channel) => {
+            const rows = results.map((result) => result?.channels?.find((item) => item.channelId === channel.channelId)).filter(Boolean);
+            const complete = rows.length === applicable.length && rows.every((item) => item.billingState === "complete" && item.amountUsd != null);
+            const known = rows.some((item) => item.amountUsd != null);
+            const observed = channelById.get(channel.channelId);
+            return {
+              ...channel,
+              state: catalogue ? (observed ? channelState(observed.status) : "missing") : "unknown",
+              stateObservedAt: Date.now(),
+              billingState: complete ? "complete" : known ? "partial" : "unavailable",
+              quotaUnits: complete ? rows.reduce((sum, item) => sum + item.quotaUnits, 0) : null,
+              amountUsd: complete ? rows.reduce((sum, item) => sum + item.amountUsd, 0) : null,
+              knownAmountUsd: known ? rows.reduce((sum, item) => sum + (item.amountUsd ?? 0), 0) : null,
+            };
+          });
+          const successfulCount = results.reduce((sum, result) => sum + (result?.successfulCount ?? 0), 0);
+          const expectedCount = applicable.length * rule.channels.length;
+          const complete = results.length === applicable.length && results.every((result) => result?.state === "complete");
+          const known = results.some((result) => result?.knownAmountUsd != null);
+          return {
+            state: complete ? "complete" : known ? "partial" : "unavailable",
+            quotaUnits: complete ? results.reduce((sum, result) => sum + result.quotaUnits, 0) : null,
+            quotaPerUnit: complete ? results[0]?.quotaPerUnit ?? null : null,
+            amountUsd: complete ? results.reduce((sum, result) => sum + result.amountUsd, 0) : null,
+            knownAmountUsd: known ? results.reduce((sum, result) => sum + (result?.knownAmountUsd ?? 0), 0) : null,
+            successfulCount, expectedCount,
+            billingSource: RECONCILIATION_BILLING_SOURCE,
+            calculationVersion: RECONCILIATION_CALCULATION_VERSION,
+            channels,
+            segments: applicable.map(({ segment, window: segmentWindow }, index) => ({
+              ...segment,
+              window: segmentWindow,
+              downstream: downstreamFor(results[index], segmentWindow),
+            })),
+          };
+        } catch { return null; }
+      };
+      const unavailable = async (resultHealth, evidence = {}) => persistUnavailable(rule, window, resultHealth, origin, {
+        ...evidence,
+        downstream: evidence.downstream ?? await downstreamEvidence(),
+      }, generation, sourceCredential);
       if (!upstream || upstream.type !== "newapi") return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", "上游站点已删除或不是 NewAPI"));
-      if (!own || !own.isOwn || own.type !== "newapi") return unavailable(health("OWN_BILLING_UNAVAILABLE", "本站管理员 NewAPI 站点不可用"));
 
       let metadata;
       try {
@@ -521,15 +612,13 @@ export function createReconciliationModule(rt) {
       if (token.group === "auto" || token.crossGroupRetry) {
         return unavailable(health("KEY_INVALID_OR_DENIED", "上游 Key 不再是可核算的固定分组 Key"), { metadata, token });
       }
-      if (!metadata.groups[token.group]) {
-        return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", "该固定分组已不在上游账号的当前可用分组中"), { metadata, token });
-      }
       const persistedSegments = await repository.listSegments(rule.id);
       if (!persistedSegments.length) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", "对账规则缺少历史分段"), { metadata, token });
-      const currentRatio = metadata.groups[token.group]?.ratio ?? null;
+      const catalogueObserved = metadata.groupsAvailable && metadata.groups[token.group]?.ratio != null;
+      const currentRatio = catalogueObserved ? metadata.groups[token.group].ratio : null;
       const ratioObservedAt = Date.now();
       const reconciliation = await withObservationSourceLock(rule, sourceCredential, () => repository.observeSource(rule.id, {
-        groups: metadata.groups,
+        groups: metadata.groupsAvailable ? metadata.groups : {},
         group: token.group,
         ratio: currentRatio,
         tokenName: token.name,
@@ -539,6 +628,13 @@ export function createReconciliationModule(rt) {
       let segments = reconciliation.segments;
       let currentSegment = reconciliation.currentSegment;
       const issues = [];
+      if (!ownAvailable) issues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "downstream", detail: "本站管理员 NewAPI 站点不可用", observedAt: Date.now() });
+      if (!catalogueObserved) {
+        issues.push({
+          code: "GROUP_DATA_UNAVAILABLE", scope: "upstream", observedAt: Date.now(),
+          detail: metadata.groupError || `当前上游分组目录未返回 ${token.group}`,
+        });
+      }
       if (reconciliation.transitioned) {
         issues.push({ code: "ROUTE_TRANSITION_DETECTED", scope: "rule", detail: "已按首次检测时间切换分段", observedAt: Date.now() });
       }
@@ -554,18 +650,12 @@ export function createReconciliationModule(rt) {
       // today / 近 7 天结束于当前时刻：刚建规则、刚切段或刚过零点时，最新一段还不满一个完整秒，秒级统计无法无重叠地核算。
       // 这段尾巴会随时间变长，本轮整条规则待获取，不能只核算旧分段却把整窗标为已确认；切段通知若因此没发出，下一轮会以分段切换时间待确认补报。
       // 窗口与规则任何分段都不相交（如查规则创建之前的时段）时照常核算为 0，不算待获取：那种情况不会随时间自行恢复。
-      const liveWindow = window.preset === "today" || window.preset === "7d";
       const intersecting = segments
         .map((segment) => ({ segment, segmentWindow: intersectSegment(window, segment) }))
         .filter(({ segmentWindow }) => segmentWindow);
-      if (liveWindow && intersecting.some(({ segmentWindow }) => segmentWindow.endMs === window.endMs
-        && unixSecondWindow(segmentWindow.startMs, segmentWindow.endMs).empty)) {
-        return pendingResult({ ...rule, tokenName: token.name, fixedGroup: currentSegment.group }, window,
-          "最新分段还不满一个统计秒，稍后刷新即可核算", { currentSegment, transitionSegments: segments, issues });
-      }
       const applicable = intersecting;
       let catalogue = null;
-      try { catalogue = await ownChannelsFor(own, { force }); } catch {
+      try { if (ownAvailable) catalogue = await ownChannelsFor(own, { force }); } catch {
         issues.push({ code: "SALES_CHANNEL_STATE_UNKNOWN", scope: "channels", detail: "本站渠道目录读取失败，渠道状态未知", observedAt: Date.now() });
       }
       const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
@@ -587,17 +677,22 @@ export function createReconciliationModule(rt) {
       // 各分段共用本轮的一次本站 /api/status 读取；读取失败时每个分段照常按本站账单不可用处理。
       let ownStatus = null;
       const loadOwnStatus = () => (ownStatus ||= queryNewApiStatus(own));
-      const segmentResults = await Promise.all(applicable.map(async ({ segment, segmentWindow }) => {
+      const segmentResults = await mapWithConcurrency(applicable, 6, async ({ segment, segmentWindow }) => {
         const [upstreamResult, downstreamResult] = await Promise.all([
           upstreamWindowFor(upstream, metadata, token, segmentWindow).catch((error) => ({ error })),
-          queryOwnChannelRevenue(own, { channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, loadStatus: loadOwnStatus }).catch((error) => ({ error })),
+          (ownAvailable
+            ? queryOwnChannelRevenue(own, { channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, loadStatus: loadOwnStatus })
+            : Promise.resolve({ error: Object.assign(new Error("本站管理员 NewAPI 站点不可用"), { code: "OWN_BILLING_UNAVAILABLE" }) }))
+            .catch((error) => ({ error })),
         ]);
         const segmentIssues = [];
         if (upstreamResult.error) segmentIssues.push({ code: toErrorHealth(upstreamResult.error).code, scope: "segment", detail: toErrorHealth(upstreamResult.error).detail, observedAt: Date.now() });
-        if (upstreamResult.emptySecondWindow || downstreamResult.emptySecondWindow) segmentIssues.push({ code: "UPSTREAM_DATA_UNAVAILABLE", scope: "segment", detail: "分段短于统计秒粒度，无法无重叠地核算", observedAt: Date.now() });
-        if (downstreamResult.error) segmentIssues.push({ code: toErrorHealth(downstreamResult.error, true).code, scope: "segment", detail: toErrorHealth(downstreamResult.error, true).detail, observedAt: Date.now() });
+        if (upstreamResult.emptySecondWindow || downstreamResult.emptySecondWindow) segmentIssues.push({ code: "PENDING", scope: "segment", detail: "分段短于统计秒粒度，稍后刷新即可核算", observedAt: Date.now() });
+        if (downstreamResult.error || (downstreamResult.state !== "complete" && downstreamResult.state !== "pending")) {
+          segmentIssues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "segment", detail: "本站渠道账单未完整获取", observedAt: Date.now() });
+        }
         const upstreamUnavailable = upstreamResult.error || upstreamResult.emptySecondWindow;
-        const downstreamUnavailable = downstreamResult.error || downstreamResult.emptySecondWindow;
+        const downstreamUnavailable = downstreamResult.error || downstreamResult.emptySecondWindow || downstreamResult.state !== "complete";
         const upstreamUsd = upstreamUnavailable ? null : upstreamResult.quotaUnits / upstreamResult.quotaPerUnit;
         const downstreamUsd = downstreamUnavailable ? null : downstreamResult.quotaUnits / downstreamResult.quotaPerUnit;
         if (!upstreamUnavailable && !downstreamUnavailable && upstreamResult.quotaUnits <= 0 && downstreamResult.quotaUnits > 0) segmentIssues.push({ code: "UPSTREAM_EMPTY_WITH_SALES", scope: "segment", detail: "本站渠道已有收费，但上游未返回对应窗口消费", observedAt: Date.now() });
@@ -605,55 +700,91 @@ export function createReconciliationModule(rt) {
         return {
           ...segment,
           window: segmentWindow,
-          upstream: upstreamUnavailable ? null : { quotaUnits: upstreamResult.quotaUnits, quotaPerUnit: upstreamResult.quotaPerUnit, amountUsd: upstreamUsd, observedAt: upstreamResult.latestLogAtMs || Date.now() },
-          downstream: downstreamUnavailable ? null : {
+          upstream: upstreamUnavailable ? {
+            state: upstreamResult.emptySecondWindow ? "pending" : "unavailable",
+            quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null,
+            successfulCount: 0, expectedCount: 1, observedAt: Date.now(), window: segmentWindow,
+          } : {
+            state: "complete", quotaUnits: upstreamResult.quotaUnits, quotaPerUnit: upstreamResult.quotaPerUnit,
+            amountUsd: upstreamUsd, knownAmountUsd: upstreamUsd, successfulCount: 1, expectedCount: 1,
+            observedAt: upstreamResult.latestLogAtMs || Date.now(), window: segmentWindow,
+          },
+          downstream: downstreamResult.error ? {
+            state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null,
+            successfulCount: 0, expectedCount: rule.channels.length,
+            billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION,
+            observedAt: Date.now(), window: segmentWindow,
+            channels: rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null })),
+          } : {
             quotaUnits: downstreamResult.quotaUnits,
             quotaPerUnit: downstreamResult.quotaPerUnit,
-            amountUsd: downstreamUsd,
-            coverage: downstreamResult.coverage,
-            billingCoverage: downstreamResult.billingCoverage,
+            amountUsd: downstreamUnavailable ? null : downstreamUsd,
+            knownAmountUsd: downstreamResult.knownAmountUsd,
+            state: downstreamResult.state,
+            successfulCount: downstreamResult.successfulCount,
+            expectedCount: downstreamResult.expectedCount,
             billingSource: downstreamResult.billingSource,
             calculationVersion: downstreamResult.calculationVersion,
+            observedAt: Date.now(), window: segmentWindow,
             channels: downstreamResult.channels,
           },
           calculation: calculationFromAmounts(upstreamUsd, downstreamUsd, segmentIssues),
           health: segmentHealth,
         };
-      }));
+      });
       for (const segment of segmentResults) issues.push(...segment.health.issues);
-      const completeUpstream = segmentResults.every((segment) => segment.upstream);
-      const completeDownstream = segmentResults.every((segment) => segment.downstream);
+      const completeUpstream = segmentResults.every((segment) => segment.upstream.state === "complete");
+      const completeDownstream = segmentResults.every((segment) => segment.downstream.state === "complete");
       const upstreamUsd = completeUpstream ? segmentResults.reduce((sum, segment) => sum + segment.upstream.amountUsd, 0) : null;
       const downstreamUsd = completeDownstream ? segmentResults.reduce((sum, segment) => sum + segment.downstream.amountUsd, 0) : null;
       const upstreamUnits = completeUpstream ? segmentResults.reduce((sum, segment) => sum + segment.upstream.quotaUnits, 0) : null;
       const downstreamUnits = completeDownstream ? segmentResults.reduce((sum, segment) => sum + segment.downstream.quotaUnits, 0) : null;
+      const successfulUpstream = segmentResults.filter((segment) => segment.upstream.state === "complete");
+      const knownUpstreamUsd = completeUpstream ? upstreamUsd : successfulUpstream.length
+        ? successfulUpstream.reduce((sum, segment) => sum + segment.upstream.amountUsd, 0) : null;
       const allChannels = states.map((channel) => {
-        const quotaUnits = segmentResults.reduce((sum, segment) => sum + Number(segment.downstream?.channels?.find((item) => item.channelId === channel.channelId)?.quotaUnits || 0), 0);
+        const billingRows = segmentResults.map((segment) => segment.downstream.channels?.find((item) => item.channelId === channel.channelId)).filter(Boolean);
+        const complete = billingRows.length === segmentResults.length && billingRows.every((item) => item.billingState === "complete" && item.amountUsd != null);
+        const quotaUnits = billingRows.reduce((sum, item) => sum + (item.quotaUnits ?? 0), 0);
         return {
           ...channel,
-          quotaUnits: completeDownstream ? quotaUnits : null,
-          amountUsd: completeDownstream ? segmentResults.reduce((sum, segment) => sum + Number(segment.downstream?.channels?.find((item) => item.channelId === channel.channelId)?.amountUsd || 0), 0) : null,
-          share: completeDownstream ? (downstreamUnits > 0 ? quotaUnits / downstreamUnits : 0) : null,
+          billingState: complete ? "complete" : billingRows.some((item) => item.billingState === "complete") ? "partial" : "unavailable",
+          quotaUnits: complete ? quotaUnits : null,
+          amountUsd: complete ? billingRows.reduce((sum, item) => sum + (item.amountUsd ?? 0), 0) : null,
+          knownAmountUsd: complete ? billingRows.reduce((sum, item) => sum + item.amountUsd, 0) : billingRows.some((item) => item.amountUsd != null)
+            ? billingRows.reduce((sum, item) => sum + (item.amountUsd ?? 0), 0) : null,
+          share: completeDownstream && complete ? (downstreamUnits > 0 ? quotaUnits / downstreamUnits : 0) : null,
         };
       });
       const resultHealth = healthWithIssues(issues);
       const result = {
         rule: { ...rule, tokenName: token.name, fixedGroup: currentSegment.group }, window,
         requestedWindow: window,
-        lastSuccessfulWindow: window,
+        lastSuccessfulWindow: null,
         currentSegment,
         segments: segmentResults,
         transitionSegments: segments,
-        upstream: upstreamUsd == null ? null : { quotaUnits: upstreamUnits, quotaPerUnit: segmentResults[0]?.upstream?.quotaPerUnit ?? null, amountUsd: upstreamUsd, observedAt: Date.now(), status: token.status, group: currentSegment.group, ratio: currentSegment.ratio },
+        upstream: {
+          state: completeUpstream ? "complete" : successfulUpstream.length ? "partial" : segmentResults.some((segment) => segment.upstream.state === "pending") ? "pending" : "unavailable",
+          quotaUnits: upstreamUnits,
+          quotaPerUnit: segmentResults[0]?.upstream?.quotaPerUnit ?? null,
+          amountUsd: upstreamUsd,
+          knownAmountUsd: knownUpstreamUsd,
+          successfulCount: successfulUpstream.length,
+          expectedCount: segmentResults.length,
+          observedAt: Date.now(), window, status: token.status, group: currentSegment.group, ratio: currentRatio,
+        },
         downstream: {
+          state: completeDownstream ? "complete" : segmentResults.some((segment) => segment.downstream.knownAmountUsd != null) ? "partial" : segmentResults.some((segment) => segment.downstream.state === "pending") ? "pending" : "unavailable",
           quotaUnits: downstreamUnits,
           quotaPerUnit: segmentResults[0]?.downstream?.quotaPerUnit ?? null,
           amountUsd: downstreamUsd,
-          coverage: completeDownstream ? 1 : 0,
-          billingCoverage: completeDownstream ? 1 : 0,
+          knownAmountUsd: completeDownstream ? downstreamUsd : segmentResults.reduce((sum, segment) => sum + (segment.downstream.knownAmountUsd ?? 0), 0) || (segmentResults.some((segment) => segment.downstream.knownAmountUsd != null) ? 0 : null),
+          successfulCount: segmentResults.reduce((sum, segment) => sum + segment.downstream.successfulCount, 0),
+          expectedCount: segmentResults.reduce((sum, segment) => sum + segment.downstream.expectedCount, 0),
           billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION,
-          observedAt: Date.now(),
+          observedAt: Date.now(), window,
           channels: allChannels,
         },
         calculation: calculationFromAmounts(upstreamUsd, downstreamUsd, issues),
@@ -663,30 +794,16 @@ export function createReconciliationModule(rt) {
       if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return STALE_SCOPE;
       if (currentSourceCredential(rule) !== sourceCredential) return STALE_SCOPE;
       const billingFingerprint = sourceScopeFingerprint(scopeFingerprint, sourceCredential);
-      const sourceUnavailable = issues.some((issue) => SOURCE_UNAVAILABLE_BLOCKERS.has(issue.code));
-      if (result.calculation.profitUsd != null) result.lastSuccessfulAt = result.generatedAt;
-      let previous;
-      let successfulLookupFailed = false;
-      try { previous = await repository.latestSuccessfulResult(rule.id, window, billingFingerprint); } catch { successfulLookupFailed = true; }
-      if (sourceUnavailable && previous) {
-        const stale = {
-          ...previous.result,
-          rule: result.rule,
-          currentSegment,
-          transitionSegments: segments,
-          health: { ...resultHealth, stale: true },
-          window: previous.result.lastSuccessfulWindow || previous.result.window,
-          requestedWindow: window,
-          lastSuccessfulWindow: previous.result.lastSuccessfulWindow || previous.result.window,
-          lastSuccessfulAt: previous.at || previous.generatedAt,
-          generatedAt: result.generatedAt,
-        };
-        return (await persistResult(rule, stale, origin, metadata, token, { saveSnapshots: false, scopeFingerprint, billingFingerprint, sourceCredential, generation })) ? stale : STALE_SCOPE;
+      if (result.calculation.profitUsd != null) {
+        result.lastSuccessfulAt = result.generatedAt;
+        result.lastSuccessfulWindow = window;
       }
-      // A later unconfirmed anomaly is useful for this response and alerts, but
-      // must not overwrite the same logical-window successful fallback.
+      let previous;
+      try { previous = await repository.latestSuccessfulResult(rule.id, window, billingFingerprint); } catch {}
+      if (previous) {
+        result.lastConfirmed = snapshotReference(previous);
+      }
       return (await persistResult(rule, result, origin, metadata, token, {
-        saveSnapshots: result.calculation.profitUsd != null || (!previous && !successfulLookupFailed),
         scopeFingerprint, billingFingerprint, sourceCredential, generation,
       })) ? result : STALE_SCOPE;
     };
@@ -729,7 +846,7 @@ export function createReconciliationModule(rt) {
     if (!currentRule || reconciliationScopeFingerprint(currentRule, persistedSegments) !== scopeFingerprint || (ruleGenerations.get(rule.id) || 0) !== generation) return STALE_SCOPE;
     if (currentSourceCredential(rule) !== sourceCredential) return STALE_SCOPE;
     const billingFingerprint = sourceScopeFingerprint(scopeFingerprint, sourceCredential);
-    const unavailable = {
+      const unavailable = {
       rule,
       window,
       requestedWindow: window,
@@ -737,6 +854,7 @@ export function createReconciliationModule(rt) {
       currentSegment,
       transitionSegments: persistedSegments,
       upstream: evidence.upstream ? {
+        state: "complete",
         quotaUnits: evidence.upstream.quotaUnits,
         quotaPerUnit: evidence.upstream.quotaPerUnit,
         amountUsd: evidence.upstream.quotaUnits / evidence.upstream.quotaPerUnit,
@@ -744,42 +862,48 @@ export function createReconciliationModule(rt) {
         status: evidence.token?.status ?? null,
         group: evidence.token?.group ?? null,
         ratio: evidence.metadata?.groups?.[evidence.token?.group]?.ratio ?? null,
-      } : null,
+      } : { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: 1, observedAt: Date.now(), window },
       downstream: evidence.downstream ? {
+        state: evidence.downstream.state || "unavailable",
         quotaUnits: evidence.downstream.quotaUnits,
         quotaPerUnit: evidence.downstream.quotaPerUnit,
-        amountUsd: evidence.downstream.quotaUnits / evidence.downstream.quotaPerUnit,
-        coverage: evidence.downstream.coverage,
-        billingCoverage: evidence.downstream.billingCoverage ?? evidence.downstream.coverage,
+        amountUsd: evidence.downstream.state === "complete" && Number.isFinite(evidence.downstream.quotaUnits) && Number.isFinite(evidence.downstream.quotaPerUnit) && evidence.downstream.quotaPerUnit > 0
+          ? evidence.downstream.quotaUnits / evidence.downstream.quotaPerUnit : null,
+        knownAmountUsd: evidence.downstream.knownAmountUsd ?? null,
+        successfulCount: evidence.downstream.successfulCount ?? 0,
+        expectedCount: evidence.downstream.expectedCount ?? rule.channels.length,
         billingSource: evidence.downstream.billingSource || RECONCILIATION_BILLING_SOURCE,
         calculationVersion: evidence.downstream.calculationVersion || RECONCILIATION_CALCULATION_VERSION,
-        observedAt: Date.now(),
+        observedAt: Date.now(), window,
         channels: evidence.downstream.channels || [],
-      } : null,
+      } : { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: rule.channels.length, observedAt: Date.now(), window, channels: rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null })) },
       calculation: { differenceUsd: null, profitUsd: null, riskDifferenceUsd: null, marginRate: null },
       health: resultHealth,
       generatedAt: new Date().toISOString(),
     };
+    unavailable.segments = (evidence.downstream?.segments || []).map((segment) => ({
+      ...segment,
+      upstream: {
+        state: resultHealth.code === "PENDING" ? "pending" : "unavailable",
+        quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null,
+        successfulCount: 0, expectedCount: 1, observedAt: Date.now(), window: segment.window,
+      },
+      downstream: segment.downstream,
+      calculation: { differenceUsd: null, profitUsd: null, riskDifferenceUsd: null, marginRate: null },
+      health: resultHealth,
+    }));
     let previous;
-    let successfulLookupFailed = false;
-    try { previous = await repository.latestSuccessfulResult(rule.id, window, billingFingerprint); } catch { successfulLookupFailed = true; }
-    const result = previous ? {
-      ...previous.result,
-      rule,
-      window: previous.result.lastSuccessfulWindow || previous.result.window,
-      requestedWindow: window,
-      lastSuccessfulWindow: previous.result.lastSuccessfulWindow || previous.result.window,
-      currentSegment: currentSegment || previous.result.currentSegment,
-      transitionSegments: persistedSegments.length ? persistedSegments : previous.result.transitionSegments,
-      health: { ...resultHealth, stale: true },
-      lastSuccessfulAt: previous.at || previous.generatedAt,
-      generatedAt: unavailable.generatedAt,
-    } : unavailable;
-    return (await persistResult(rule, result, origin, evidence.metadata, evidence.token, { saveSnapshots: !previous && !successfulLookupFailed, scopeFingerprint, billingFingerprint, sourceCredential, generation })) ? result : STALE_SCOPE;
+    try { previous = await repository.latestSuccessfulResult(rule.id, window, billingFingerprint); } catch {}
+    if (previous) {
+      unavailable.lastConfirmed = snapshotReference(previous);
+    }
+    return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation })) ? unavailable : STALE_SCOPE;
   }
 
   async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0 } = {}) {
-    const snapshots = result.segments?.length ? result.segments : [{ id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health }];
+    const segmentSnapshots = result.segments?.length ? result.segments : [{ id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health }];
+    const snapshots = ["observation", ...(result.calculation?.profitUsd != null ? ["confirmed"] : [])]
+      .flatMap((recordType) => segmentSnapshots.map((segment) => ({ ...segment, recordType })));
     // 数据库事务核验规则/分段口径；快照键和失败兜底另用包含两侧站点来源的口径。
     const save = () => repository.saveSnapshotsForScope(rule.id, scopeFingerprint, snapshots.map((segment) => {
       const source = metadata && token ? sourceSnapshot(token, metadata, segment.upstream, segment.downstream) : {
@@ -801,7 +925,7 @@ export function createReconciliationModule(rt) {
       return {
         ruleId: rule.id,
         segmentId: segment.id,
-        snapshotKey: `${reconciliationSnapshotIdentity(result.window, billingFingerprint)}:${segment.id || "legacy"}`,
+        snapshotKey: reconciliationSnapshotRecordIdentity(result.window, billingFingerprint, segment.recordType, segment.id),
         windowKind: result.window.preset,
         startMs: segment.window.startMs,
         endMs: segment.window.endMs,
@@ -819,6 +943,7 @@ export function createReconciliationModule(rt) {
         healthDetail: segment.health?.detail || result.health.detail || null,
         source: {
           ...source,
+          recordType: segment.recordType,
           scopeFingerprint: billingFingerprint,
           segment: (() => {
             const evidence = segment.group != null ? segment : result.currentSegment;
@@ -832,25 +957,45 @@ export function createReconciliationModule(rt) {
           })(),
           origin,
           window: result.window,
-          resultGeneratedAt: result.lastSuccessfulAt === result.generatedAt ? result.generatedAt : null,
-          result: result.lastSuccessfulAt === result.generatedAt ? {
+          resultGeneratedAt: result.generatedAt,
+          result: {
+            window: result.window,
+            requestedWindow: result.requestedWindow,
+            lastSuccessfulWindow: result.lastSuccessfulWindow,
             currentSegment: result.currentSegment,
             transitionSegments: result.transitionSegments,
             segments: result.segments,
             upstream: result.upstream,
             downstream: result.downstream,
             calculation: result.calculation,
-          } : null,
+            health: result.health,
+            generatedAt: result.generatedAt,
+          },
         },
       };
     }));
     // 调用方已核对过口径；写快照的事务会在规则行锁内再按库里的口径核对一次，这里只需挡住已作废的代次。
     if (currentSourceCredential(rule) !== sourceCredential) return false;
-    if (saveSnapshots && ((ruleGenerations.get(rule.id) || 0) !== generation || !await save())) return false;
+    if (saveSnapshots) {
+      let saved;
+      try {
+        saved = await withObservationSourceLock(rule, sourceCredential, async () => {
+          if ((ruleGenerations.get(rule.id) || 0) !== generation) return false;
+          return save();
+        });
+      } catch {
+        const error = new Error("对账结果未能保存");
+        error.code = "PERSISTENCE_FAILED";
+        throw error;
+      }
+      if (saved !== true) return false;
+    }
     if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return false;
     if (currentSourceCredential(rule) !== sourceCredential) return false;
-    try { await notifyReconciliationHealth(rt, repository, rule, result); } catch (err) {
-      console.error("渠道对账通知失败:", err?.message || String(err));
+    if (result.health.code !== "PENDING") {
+      try { await notifyReconciliationHealth(rt, repository, rule, result); } catch (err) {
+        console.error("渠道对账通知失败:", err?.message || String(err));
+      }
     }
     return true;
   }
@@ -918,6 +1063,7 @@ export function createReconciliationModule(rt) {
       ).catch((err) => {
         // 列出规则后才被停止的规则从本轮结果中去掉，不能让整个多规则查询失败。
         if (err?.code === "RULE_NOT_FOUND") return null;
+        if (err?.code === "PERSISTENCE_FAILED") return persistenceFailedResult(rule, resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now));
         throw err;
       }));
       return { results: results.filter(Boolean), generatedAt: new Date(now).toISOString() };

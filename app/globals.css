@@ -1559,8 +1559,19 @@ textarea {
 }
 
 .reconciliation-table-amount {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  min-width: 0;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+}
+
+.reconciliation-table-amount > small {
+  color: var(--jy-text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.25;
 }
 
 .reconciliation-table .ant-pagination {
