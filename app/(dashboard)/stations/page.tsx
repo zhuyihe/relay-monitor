@@ -31,6 +31,7 @@ import {
 import TrendModal from "../trend-modal";
 import LastRefreshed from "../last-refreshed";
 import AppState from "../../components/app-state";
+import ChannelOnboarding from "../../components/channel-onboarding";
 import dayjs from "dayjs";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta, statusOf } from "../../../lib/client";
 import { describeConnectionFailure } from "../../../lib/connection-test";
@@ -973,7 +974,6 @@ export default function StationsPage() {
       extra={
         <div className="page-toolbar">
           <LastRefreshed at={refreshedAt} />
-          <Button href="/reconciliation">从 New API 接入</Button>
           <Button
             aria-pressed={showArchived}
             onClick={() => setShowArchived((current) => !current)}
@@ -985,6 +985,7 @@ export default function StationsPage() {
         </div>
       }
     >
+      <ChannelOnboarding compact={compact} onComplete={reload} />
       {loadError ? (
         <Alert
           type="warning"

@@ -443,15 +443,6 @@ export default function ReconciliationPage() {
   }, []);
 
   useEffect(() => {
-    const discover = () => { if (!document.hidden) void refreshChannelOptions(); };
-    const timer = setInterval(discover, 60000);
-    document.addEventListener("visibilitychange", discover);
-    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", discover); };
-  // 首屏函数使用请求序号和函数式更新，不依赖已显示的目录。
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
     if (activeWindow.preset !== "today" || !config) return;
     const timer = setInterval(() => loadWindow(activeWindow), 30000);
     const onVisible = () => { if (!document.hidden) loadWindow(activeWindow); };
@@ -625,8 +616,8 @@ export default function ReconciliationPage() {
       subTitle="核对上游成本与本站收费，监控利润情况"
       extra={<div className="page-toolbar"><Button className="reconciliation-primary-action" type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!config?.ownStation} aria-label="添加对账规则"><span>添加规则</span></Button></div>}
     >
-      <ChannelOnboarding config={config} compact={compact} refreshing={channelsRefreshing} error={channelsError}
-        onRefresh={refreshChannelOptions} onComplete={async () => { await loadConfiguration(true); await loadWindow(activeWindow, true); }} />
+      <ChannelOnboarding compact={compact}
+        onComplete={async () => { await loadConfiguration(); await loadWindow(activeWindow, true); }} />
       <div className="reconciliation-controls">
         <div className="reconciliation-controls__date">
           {preset === "custom"
