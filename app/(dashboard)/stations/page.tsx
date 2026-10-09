@@ -973,6 +973,7 @@ export default function StationsPage() {
       extra={
         <div className="page-toolbar">
           <LastRefreshed at={refreshedAt} />
+          <Button href="/reconciliation">从 New API 接入</Button>
           <Button
             aria-pressed={showArchived}
             onClick={() => setShowArchived((current) => !current)}

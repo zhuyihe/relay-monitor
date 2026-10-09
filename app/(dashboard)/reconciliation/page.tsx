@@ -26,6 +26,7 @@ import {
   reconciliationHealthMeta,
 } from "../../../lib/reconciliation-contract";
 import AppState from "../../components/app-state";
+import ChannelOnboarding from "../../components/channel-onboarding";
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -267,6 +268,7 @@ export default function ReconciliationPage() {
   const [channelsError, setChannelsError] = useState("");
   const configRequestId = useRef(0);
   const channelRefreshRequestId = useRef(0);
+  const channelDiscoveryInFlight = useRef(false);
   const keyRequestId = useRef(0);
   const windowRequestId = useRef(0);
   const windowRequestInFlight = useRef(false);
@@ -333,6 +335,8 @@ export default function ReconciliationPage() {
   };
 
   const refreshChannelOptions = async () => {
+    if (channelDiscoveryInFlight.current) return;
+    channelDiscoveryInFlight.current = true;
     const requestId = ++channelRefreshRequestId.current;
     setChannelsRefreshing(true);
     setChannelsError("");
@@ -342,6 +346,7 @@ export default function ReconciliationPage() {
     } catch {
       if (requestId === channelRefreshRequestId.current) setChannelsError("本站渠道刷新失败，请稍后重试");
     } finally {
+      channelDiscoveryInFlight.current = false;
       if (requestId === channelRefreshRequestId.current) setChannelsRefreshing(false);
     }
   };
@@ -426,7 +431,7 @@ export default function ReconciliationPage() {
   useEffect(() => {
     (async () => {
       try {
-        await loadConfiguration();
+        await loadConfiguration(true);
         await loadWindow({ preset: "today" });
       } catch (err: any) {
         setError(err?.message || "初始化失败");
@@ -434,6 +439,15 @@ export default function ReconciliationPage() {
       }
     })();
   // 仅首屏初始化；后续查询由按钮和定时器驱动。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const discover = () => { if (!document.hidden) void refreshChannelOptions(); };
+    const timer = setInterval(discover, 60000);
+    document.addEventListener("visibilitychange", discover);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", discover); };
+  // 首屏函数使用请求序号和函数式更新，不依赖已显示的目录。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -611,6 +625,8 @@ export default function ReconciliationPage() {
       subTitle="核对上游成本与本站收费，监控利润情况"
       extra={<div className="page-toolbar"><Button className="reconciliation-primary-action" type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!config?.ownStation} aria-label="添加对账规则"><span>添加规则</span></Button></div>}
     >
+      <ChannelOnboarding config={config} compact={compact} refreshing={channelsRefreshing} error={channelsError}
+        onRefresh={refreshChannelOptions} onComplete={async () => { await loadConfiguration(true); await loadWindow(activeWindow, true); }} />
       <div className="reconciliation-controls">
         <div className="reconciliation-controls__date">
           {preset === "custom"

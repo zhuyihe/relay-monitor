@@ -3,6 +3,7 @@
 // when Chromium is unavailable locally.
 import { createRequire } from "node:module";
 import test from "node:test";
+import assert from "node:assert/strict";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
@@ -34,14 +35,15 @@ function response(results) {
   return { generatedAt: "2026-10-08T00:00:00.000Z", results };
 }
 
-async function openFixturePage(t, handler, viewport) {
+async function openFixturePage(t, handler, viewport, clock = false) {
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
   t.after(() => browser.close());
   const context = await browser.newContext({ serviceWorkers: "block", ...(viewport ? { viewport, isMobile: true, hasTouch: true } : {}) });
   const page = await context.newPage();
+  if (clock) await page.clock.install();
   page.setDefaultTimeout(5_000);
   await page.route("**/api/**", handler);
-  await page.goto(`${baseURL}/reconciliation`);
+  await page.goto(`${baseURL}/reconciliation`, { timeout: 30000 });
   await page.getByText("Rule A").first().waitFor();
   return page;
 }
@@ -49,6 +51,196 @@ async function openFixturePage(t, handler, viewport) {
 async function fulfill(route, body) {
   await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
 }
+
+function onboardingFixture(existing = true) {
+  return {
+    ...configuration,
+    ownStation: { ...configuration.ownStation, baseUrl: "https://own.example" },
+    upstreams: existing ? [{ id: "upstream-1", name: "Fixture upstream", type: "newapi", baseUrl: "https://up.example" }] : [],
+    channels: [{ id: 4, name: "New channel", status: 1, baseUrl: "https://up.example", groups: ["local-sales"] }],
+    rules: existing ? [{ ...rule("rule-1", "Rule A", 10).rule, ownStationId: "own-1", tokenId: 7, enabled: true }] : [],
+  };
+}
+const onboardingKeys = { tokens: [{ id: 7, name: "Supplier Key", status: 1, group: "upstream-group" }], groups: {} };
+
+async function selectOnboardingKey(page) {
+  const drawer = page.getByRole("dialog", { name: "接入监控与对账" });
+  await drawer.getByRole("combobox", { name: "接入上游 Key" }).click();
+  await page.getByText("Supplier Key · 上游分组 upstream-group", { exact: true }).last().click();
+  return drawer;
+}
+
+test("channel onboarding reuses an account and appends to the existing Key without repeating credentials", async (t) => {
+  const config = onboardingFixture();
+  const writes = [];
+  const page = await openFixturePage(t, async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/reconciliation/configuration") return fulfill(route, config);
+    if (path === "/api/reconciliation" || path === "/api/reconciliation/query") return fulfill(route, response([rule("rule-1", "Rule A", 10)]));
+    if (path.endsWith("/keys")) return fulfill(route, onboardingKeys);
+    if (path === "/api/reconciliation/rules/rule-1") {
+      writes.push({ method: request.method(), body: request.postDataJSON() });
+      config.rules[0].channels.push({ channelId: 4, name: "New channel" });
+      return fulfill(route, { rule: config.rules[0] });
+    }
+    throw new Error(`unexpected onboarding request: ${path}`);
+  });
+  await page.getByRole("button", { name: "接入渠道 New channel" }).click();
+  const drawer = await selectOnboardingKey(page);
+  await drawer.getByText("加入已有对账规则", { exact: true }).waitFor();
+  await drawer.getByRole("button", { name: "确认关联" }).click();
+  await drawer.waitFor({ state: "hidden" });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].method, "PUT");
+  assert.deepEqual(writes[0].body.salesChannelIds, [1, 4]);
+  assert.equal(writes[0].body.tokenId, 7);
+  await page.getByRole("button", { name: "接入渠道 New channel" }).waitFor({ state: "hidden" });
+});
+
+test("first-time onboarding prefills channel details and connects a monitor before the one-time Key association", async (t) => {
+  const config = onboardingFixture(false);
+  const accounts = [];
+  const bindings = [];
+  const page = await openFixturePage(t, async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/reconciliation/configuration") return fulfill(route, config);
+    if (path === "/api/reconciliation" || path === "/api/reconciliation/query") return fulfill(route, response([rule("rule-1", "Rule A", 10)]));
+    if (path === "/api/reconciliation/upstreams") {
+      accounts.push(request.postDataJSON());
+      const station = { id: "new-up", name: "New channel", type: "newapi", baseUrl: "https://up.example" };
+      config.upstreams.push(station);
+      return fulfill(route, { station, created: true });
+    }
+    if (path.endsWith("/keys")) return fulfill(route, onboardingKeys);
+    if (path === "/api/reconciliation/rules") {
+      bindings.push(request.postDataJSON());
+      return fulfill(route, {});
+    }
+    throw new Error(`unexpected onboarding request: ${path}`);
+  }, { width: 390, height: 844 });
+  await page.getByRole("button", { name: "接入渠道 New channel" }).click();
+  const drawer = page.getByRole("dialog", { name: "接入监控与对账" });
+  assert.equal(await drawer.getByLabel("上游站点地址", { exact: true }).inputValue(), "https://up.example");
+  assert.equal(await drawer.getByLabel("上游账号名称", { exact: true }).inputValue(), "New channel");
+  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-pat");
+  await drawer.getByRole("button", { name: "验证并接入账号" }).click();
+  await drawer.getByText("账号已接入资源监控", { exact: true }).waitFor();
+  await selectOnboardingKey(page);
+  await drawer.getByRole("button", { name: "确认关联" }).click();
+  await drawer.waitFor({ state: "hidden" });
+  assert.equal(accounts.length, 1);
+  assert.equal(accounts[0].accessToken, "fixture-pat");
+  assert.deepEqual(bindings[0].salesChannelIds, [4]);
+  assert.equal(bindings[0].upstreamStationId, "new-up");
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+});
+
+test("failed Key reads retain the connected account and offer an in-place retry", async (t) => {
+  const config = onboardingFixture();
+  let attempts = 0;
+  const page = await openFixturePage(t, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/reconciliation/configuration") return fulfill(route, config);
+    if (path === "/api/reconciliation") return fulfill(route, response([rule("rule-1", "Rule A", 10)]));
+    if (path.endsWith("/keys")) {
+      attempts += 1;
+      if (attempts === 1) return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "Key directory unavailable" }) });
+      return fulfill(route, onboardingKeys);
+    }
+    throw new Error(`unexpected onboarding request: ${path}`);
+  });
+  await page.getByRole("button", { name: "接入渠道 New channel" }).click();
+  const drawer = page.getByRole("dialog", { name: "接入监控与对账" });
+  await drawer.getByText("Key directory unavailable", { exact: true }).waitFor();
+  await drawer.getByRole("button", { name: "重新读取 Key" }).click();
+  await selectOnboardingKey(page);
+  assert.equal(attempts, 2);
+});
+
+test("visible-page discovery finds a newly added channel without re-entering its sales group", async (t) => {
+  const config = onboardingFixture();
+  let reads = 0;
+  const page = await openFixturePage(t, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/reconciliation/configuration") { reads += 1; return fulfill(route, config); }
+    if (path === "/api/reconciliation" || path === "/api/reconciliation/query") return fulfill(route, response([rule("rule-1", "Rule A", 10)]));
+    throw new Error(`unexpected discovery request: ${path}`);
+  }, undefined, true);
+  config.channels.push({ id: 5, name: "Later channel", baseUrl: "https://up.example", status: 1, groups: ["new-sales-group"] });
+  await page.clock.fastForward(60000);
+  await page.getByRole("button", { name: "接入渠道 Later channel" }).waitFor();
+  await page.getByText("本站分组：new-sales-group", { exact: true }).waitFor();
+  assert.ok(reads >= 2);
+});
+
+test("failed discovery keeps the previous channel visible and disables stale onboarding", async (t) => {
+  const config = onboardingFixture();
+  let reads = 0;
+  const page = await openFixturePage(t, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/reconciliation/configuration") {
+      reads += 1;
+      return fulfill(route, reads > 1 ? { ...config, channels: [], channelsError: "目录暂不可用" } : config);
+    }
+    if (path === "/api/reconciliation") return fulfill(route, response([rule("rule-1", "Rule A", 10)]));
+    throw new Error(`unexpected discovery request: ${path}`);
+  });
+  await page.getByRole("button", { name: "发现新渠道", exact: true }).click();
+  await page.getByText("渠道目录读取失败，正在显示上次发现的渠道", { exact: true }).waitFor();
+  const action = page.getByRole("button", { name: "接入渠道 New channel" });
+  assert.equal(await action.isVisible(), true);
+  assert.equal(await action.isDisabled(), true);
+});
+
+test("channel discovery and first-time connection fit compact, tablet and desktop widths", async (t) => {
+  for (const width of [320, 390, 768, 1440]) {
+    const config = onboardingFixture(false);
+    const page = await openFixturePage(t, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+      if (path === "/api/reconciliation/configuration") return fulfill(route, config);
+      if (path === "/api/reconciliation") return fulfill(route, response([rule("rule-1", "Rule A", 10)]));
+      throw new Error(`unexpected layout request: ${path}`);
+    }, { width, height: 900 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `${width}px discovery list`);
+    await page.getByRole("button", { name: "接入渠道 New channel" }).click();
+    await page.getByRole("dialog", { name: "接入监控与对账" }).waitFor();
+    assert.equal(await page.getByRole("dialog", { name: "接入监控与对账" }).locator(".ant-drawer-body").evaluate((element) => element.scrollWidth <= element.clientWidth), true, `${width}px connection drawer`);
+    await page.close();
+  }
+});
+
+test("slow channel discovery does not start overlapping automatic directory requests", { timeout: 30000 }, async (t) => {
+  const config = onboardingFixture();
+  let reads = 0;
+  let deferred;
+  let started;
+  const discoveryStarted = new Promise((resolve) => { started = resolve; });
+  const page = await openFixturePage(t, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/reconciliation/configuration") {
+      reads += 1;
+      if (reads === 1) return fulfill(route, config);
+      return new Promise((resolve) => { deferred = { route, resolve }; started(); });
+    }
+    if (path === "/api/reconciliation" || path === "/api/reconciliation/query") return fulfill(route, response([rule("rule-1", "Rule A", 10)]));
+    throw new Error(`unexpected discovery request: ${path}`);
+  }, undefined, true);
+  await page.getByRole("button", { name: "发现新渠道", exact: true }).click();
+  await discoveryStarted;
+  await page.clock.fastForward(120000);
+  assert.equal(reads, 2);
+  deferred.resolve(fulfill(deferred.route, config));
+  await page.getByRole("button", { name: "发现新渠道", exact: true }).waitFor();
+});
 
 test("two rule retries retain both independently returned amounts", async (t) => {
   const deferred = new Map();
