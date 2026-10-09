@@ -69,8 +69,34 @@ export type BatchResult = {
   retryInput: BatchRecoveryIntent;
 };
 export type RuleEditPreview = { previewId: string; groupId: string; expiresAtMs: number; existingRule?: any; basis: GroupBasis; preview: GroupPreview };
+export type ConfirmedHistoryWindow = { preset: string; startMs: number; endMs: number; timezone: string | null };
+export type ConfirmedHistoryBilling = {
+  state: "complete" | "partial" | "unavailable" | "pending" | null; quotaUnits: number | null; quotaPerUnit: number | null;
+  amountUsd: number | null; knownAmountUsd: number | null; countedAmountUsd: number | null;
+  successfulCount: number | null; expectedCount: number | null; observedAt: number | null; window: ConfirmedHistoryWindow;
+};
+export type ConfirmedHistoryRecord = {
+  historyId: string; confirmedAt: string; window: ConfirmedHistoryWindow; ownSource: OwnSource | null;
+  upstreamSource: { provider: string | null; baseUrl: string | null; accountId: string | null; tokenId: number | null; tokenName: string | null };
+  scopeVersion: number | null; scopeFingerprint: string | null; billingEffectiveFromMs: number | null; channels: { channelId: number; name: string | null }[];
+  amountBasis: { id: string; currency: "USD"; billingSource: string; calculationVersion: number; conversion: "quota_per_unit" | "provider_cost_usd" | null };
+  upstream: ConfirmedHistoryBilling; downstream: ConfirmedHistoryBilling & { channels: { channelId: number; name: string | null; billingState: string | null; quotaUnits: number | null; amountUsd: number | null; knownAmountUsd: number | null }[] };
+  calculation: { differenceUsd: number | null; profitUsd: number | null; riskDifferenceUsd: number | null; marginRate: number | null };
+  sourceCompleteness: "complete" | "legacy_partial";
+};
+export type ConfirmedHistoryResponse = { ruleId: string; readOnly: true; records: ConfirmedHistoryRecord[]; nextCursor: string | null };
+export type ReconciliationAmountBasis = { id: string; currency: "USD"; billingSource: string; calculationVersion: number; conversion: "quota_per_unit" | "provider_cost_usd" | null };
+export type KnownChannelCoverage = {
+  label: "known-channel-coverage"; state: "complete_known" | "partial" | "unknown"; catalogueState: "verified" | "unknown"; wholeSiteState: "unverified";
+  knownChannelCount: number; accountedChannelCount: number;
+  channels: { ownSource: OwnSource | null; ownStationId: string; channelId: number; name: string; operatingState: string; ruleIds: string[];
+    status: "accounted" | "unlinked" | "not_effective" | "source_unverified" | "billing_missing" | "coverage_unknown" | "duplicate"; issues: string[]; actions: WorkflowAction[] }[];
+};
+export type ReconciliationWindowTotals = { knownIncomeUsd: number | null; knownCostUsd: number | null; confirmedProfitUsd: number | null; confirmedMarginRate: number | null; profitComplete: boolean; notCountedCostRuleIds: string[] };
+export type ReconciliationWindowGroup = { groupKey: string; ownSource: OwnSource | null; window: { startMs: number; endMs: number }; timezones: string[]; amountBasis: ReconciliationAmountBasis; ruleIds: string[]; totals: ReconciliationWindowTotals; coverage: KnownChannelCoverage; actions: WorkflowAction[] };
+export type ReconciliationSummary = { groupKey: string; totals: ReconciliationWindowTotals; coverage: KnownChannelCoverage };
 export type WorkflowAction = {
-  id: string; kind: "verify_identity" | "update_authorization" | "verify_capability" | "connect_channels" | "confirm_coverage" | "wait_effective" | "review_source" | "inspect_balance";
+  id: string; kind: "verify_identity" | "update_authorization" | "verify_capability" | "connect_channels" | "confirm_coverage" | "wait_effective" | "review_source" | "inspect_balance" | "retry_bill" | "review_conflict";
   label: string; accountKey: string | null; stationId: string | null; ruleId: string | null; ownStationId: string | null;
   channelIds: number[]; window: { startMs: number; endMs: number; timezone: string } | null; href: string;
 };
