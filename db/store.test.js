@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "./store.js";
 import { refreshStation } from "../server/refresh.js";
+import { selectCostUpstreams } from "../server/own-helpers.js";
 
 function fakePool(stations = []) {
   const conn = {
@@ -32,6 +33,138 @@ function fakePool(stations = []) {
 test("旧站点数据升级时默认保持续费", async () => {
   const store = await new Store(fakePool([{ id: "old", name: "旧站点", fixedPurchases: [] }])).load();
   assert.equal(store.get("old").noRenewal, false);
+  assert.equal(store.get("old").monitorEnabled, true);
+  assert.equal(store.get("old").authVersion, 1);
+});
+
+test("账单专用授权全量保存且不进入监控或整体成本", async (t) => {
+  const pool = fakePool();
+  const conn = await pool.getConnection();
+  let documents = [];
+  t.mock.method(conn, "query", async (sql, params) => {
+    if (sql.startsWith("INSERT INTO stations")) documents = params[0].map((row) => JSON.parse(row[2]));
+    return [[]];
+  });
+  const store = new Store(pool);
+  const normal = await store.add({ type: "newapi", name: "现有监控" });
+  const grant = await store.add({
+    type: "newapi", name: "账单授权", monitorEnabled: false, includeInProfit: true, isOwn: true,
+  });
+  assert.deepEqual(store.list().map((s) => s.id), [normal.id]);
+  assert.deepEqual(store.list({ includeUnmonitored: true }).map((s) => s.id), [normal.id, grant.id]);
+  assert.equal(store.get(grant.id).includeInProfit, false);
+  assert.equal(store.get(grant.id).isOwn, false);
+  assert.equal(documents.length, 2);
+  const restarted = await new Store(fakePool(documents)).load();
+  assert.equal(restarted.list().length, 1);
+  assert.equal(restarted.get(grant.id).monitorEnabled, false);
+  await restarted.update(grant.id, { includeInProfit: true, isOwn: true });
+  assert.equal(restarted.get(grant.id).includeInProfit, false);
+  assert.equal(restarted.get(grant.id).isOwn, false);
+  assert.equal(selectCostUpstreams([{ ...grant, includeInProfit: true }], "own").included.length, 0);
+});
+
+test("身份只能由服务端验证参数保存，真实授权变更作废身份和令牌", async () => {
+  const store = new Store(fakePool());
+  const identity = { provider: "sub2api", baseUrl: "https://supplier.example/", accountId: "81" };
+  const station = await store.add({
+    type: "sub2api-password", baseUrl: "https://supplier.example", email: "a@example", password: "secret",
+    verifiedIdentity: identity, authVersion: 99,
+  });
+  assert.equal(station.verifiedIdentity, null);
+  assert.equal(station.authVersion, 1);
+  await store.update(station.id, { verifiedIdentity: identity, authVersion: 99 });
+  assert.equal(station.verifiedIdentity, null);
+  await store.update(station.id, {}, { verifiedIdentity: identity });
+  assert.equal(station.verifiedIdentity.accountId, "81");
+  assert.equal(station.verifiedIdentity.baseUrl, "https://supplier.example");
+  station.s2Tokens = { accessToken: "rotated" };
+  await store.save();
+  assert.equal(station.authVersion, 1, "automatic JWT rotation is not an account change");
+  await store.update(station.id, { name: "新名字", password: "secret" });
+  assert.equal(station.authVersion, 1);
+  assert.equal(station.verifiedIdentity.accountId, "81");
+  await store.update(station.id, { email: "b@example" });
+  assert.equal(station.authVersion, 2);
+  assert.equal(station.verifiedIdentity, null);
+  assert.equal(station.s2Tokens, null);
+  await store.update(station.id, { password: "new" }, { verifiedIdentity: { ...identity, accountId: "82" } });
+  assert.equal(station.authVersion, 3);
+  assert.equal(station.verifiedIdentity.accountId, "82");
+});
+
+test("服务端验证结果不能覆盖已经编辑的新授权版本", async () => {
+  const store = new Store(fakePool());
+  const station = await store.add({ type: "newapi", baseUrl: "https://supplier.example", accessToken: "old" });
+  await store.update(station.id, { accessToken: "new" });
+  await assert.rejects(store.update(station.id, {}, {
+    expectedAuthVersion: 1, verifiedIdentity: { provider: "newapi", baseUrl: "https://supplier.example", accountId: "old-account" },
+  }), (error) => error.code === "AUTHORIZATION_CHANGED");
+  assert.equal(station.accessToken, "new");
+  assert.equal(station.authVersion, 2);
+  assert.equal(station.verifiedIdentity, null);
+});
+
+test("用途与身份在提交前保持旧值，失败不发布并可重试", async (t) => {
+  const pool = fakePool();
+  const conn = await pool.getConnection();
+  const store = new Store(pool);
+  const station = await store.add({ type: "newapi", baseUrl: "https://supplier.example", accessToken: "old" });
+  let entered, release;
+  const reached = new Promise((resolve) => { entered = resolve; });
+  t.mock.method(conn, "commit", async () => { entered(); await new Promise((resolve) => { release = resolve; }); });
+  const pending = store.update(station.id, { monitorEnabled: false }, {
+    verifiedIdentity: { provider: "newapi", baseUrl: "https://supplier.example", accountId: "1" },
+  });
+  await reached;
+  assert.equal(store.list().length, 1);
+  assert.equal(station.verifiedIdentity, null);
+  release();
+  await pending;
+  assert.equal(store.list().length, 0);
+  assert.equal(station.verifiedIdentity.accountId, "1");
+  t.mock.method(conn, "commit", async () => { throw new Error("offline"); });
+  await assert.rejects(store.update(station.id, { monitorEnabled: true, accessToken: "new" }), /保存失败/);
+  assert.equal(station.monitorEnabled, false);
+  assert.equal(station.authVersion, 1);
+  assert.equal(station.verifiedIdentity.accountId, "1");
+  t.mock.method(conn, "commit", async () => {});
+  await store.update(station.id, { monitorEnabled: true, accessToken: "new" });
+  assert.equal(station.monitorEnabled, true);
+  assert.equal(station.authVersion, 2);
+  assert.equal(station.verifiedIdentity, null);
+});
+
+test("按 ID 刷新账单授权不请求上游或写历史告警", async (t) => {
+  const store = new Store(fakePool());
+  const grant = await store.add({ type: "newapi", monitorEnabled: false });
+  const forbidden = () => { throw new Error("must not monitor a billing-only grant"); };
+  t.mock.method(globalThis, "fetch", forbidden);
+  assert.equal(await refreshStation({ store, history: { append: forbidden, predict: forbidden } }, grant), null);
+  assert.equal(await refreshStation({ store, history: { append: forbidden, predict: forbidden } },
+    { ...grant, monitorEnabled: true }), null, "a stale caller cannot bypass persisted purpose");
+  assert.equal(grant.balance, null);
+  assert.equal(grant.alertState, null);
+});
+
+test("在途余额查询期间关闭监控后丢弃历史和告警", async (t) => {
+  const store = new Store(fakePool());
+  const station = await store.add({ type: "newapi", baseUrl: "https://supplier.example", accessToken: "test" });
+  let entered, release;
+  const reached = new Promise((resolve) => { entered = resolve; });
+  t.mock.method(globalThis, "fetch", async () => {
+    entered();
+    await new Promise((resolve) => { release = resolve; });
+    return new Response(JSON.stringify({ success: true, data: { quota: 500000, used_quota: 0 } }));
+  });
+  const forbidden = () => { throw new Error("disabled station must not write history or evaluate alerts"); };
+  const pending = refreshStation({ store, history: { append: forbidden, predict: forbidden } }, station);
+  await reached;
+  await store.update(station.id, { monitorEnabled: false });
+  release();
+  assert.equal((await pending).ok, true);
+  assert.equal(station.balance, null);
+  assert.equal(station.alertState, null);
 });
 
 test("重新标记不再续费会重置单次提醒资格", async () => {

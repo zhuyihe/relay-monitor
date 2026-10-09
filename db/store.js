@@ -74,6 +74,26 @@ function asDoc(v) {
   return typeof v === "string" ? JSON.parse(v) : v;
 }
 
+// This value comes from server-side verification, never from station input.
+function verifiedAccount(identity) {
+  if (!identity) return null;
+  if (!["newapi", "sub2api"].includes(identity.provider) || !String(identity.accountId || "").trim()) {
+    throw new Error("上游账号身份无效");
+  }
+  const panel = new URL(identity.baseUrl);
+  if (!["http:", "https:"].includes(panel.protocol) || panel.username || panel.password) {
+    throw new Error("上游面板地址无效");
+  }
+  panel.search = "";
+  panel.hash = "";
+  return {
+    provider: identity.provider,
+    baseUrl: panel.toString().replace(/\/+$/, ""),
+    accountId: String(identity.accountId).trim(),
+    verifiedAt: Date.now(),
+  };
+}
+
 // 每类告警的渠道绑定：归一化为 5 个事件键齐全的新对象（渠道 id 去重、字符串化）。
 // 始终返回新对象，避免共享/回写 DEFAULT_RULES.channelsFor。
 function sanitizeChannelsFor(input, base) {
@@ -129,8 +149,11 @@ export class Store {
       // 归档资源保留在存储层及长期分析中，但不再出现在默认实时列表。
       s.archivedAt = typeof s.archivedAt === "string" && s.archivedAt ? s.archivedAt : null;
       s.costAliases = sanitizeCostAliases(s.costAliases);
+      s.monitorEnabled = s.monitorEnabled !== false;
+      s.authVersion = Number.isSafeInteger(s.authVersion) && s.authVersion > 0 ? s.authVersion : 1;
       // 所有监控上游默认计入利润成本；仅显式关闭的观察/重复汇总节点排除。
       s.includeInProfit = s.includeInProfit !== false;
+      if (!s.monitorEnabled) { s.includeInProfit = false; s.isOwn = false; }
       delete s.costGateway;
       if (!Array.isArray(s.fixedPurchases)) {
         s.fixedPurchases = [];
@@ -383,22 +406,25 @@ export class Store {
   }
 
   // ---- 中转站 ----------------------------------------------------------------
-  list({ includeArchived = false } = {}) {
-    return includeArchived
-      ? this.data.stations
-      : this.data.stations.filter((s) => !s.archivedAt);
+  list({ includeArchived = false, includeUnmonitored = false } = {}) {
+    return this.data.stations.filter((s) =>
+      (includeArchived || !s.archivedAt) && (includeUnmonitored || s.monitorEnabled !== false)
+    );
   }
 
   get(id) {
     return this.data.stations.find((s) => s.id === id);
   }
 
-  async add(input) {
+  async add(input, { verifiedIdentity = null } = {}) {
     const station = {
       id: uid("st"),
       name: String(input.name || "未命名中转站").trim(),
       type: input.type,
       baseUrl: String(input.baseUrl || "").trim(),
+      monitorEnabled: input.monitorEnabled !== false,
+      authVersion: 1,
+      verifiedIdentity: verifiedAccount(verifiedIdentity),
       accessToken: input.accessToken ? String(input.accessToken).trim() : "",
       userId: input.userId ? String(input.userId).trim() : "",
       apiKey: input.apiKey ? String(input.apiKey).trim() : "",
@@ -410,9 +436,9 @@ export class Store {
       // 自有站渠道可能使用容器域名、内网 IP 等地址；别名参与利润成本归属匹配。
       costAliases: sanitizeCostAliases(input.costAliases),
       // 即使不出现在 New API 渠道列表，也按本站用量/余额下降计入利润成本。
-      includeInProfit: input.includeInProfit !== false,
+      includeInProfit: input.monitorEnabled !== false && input.includeInProfit !== false,
       // 我自己的中转站：启用「我的站点」下游用量分析（需管理员令牌）
-      isOwn: !!input.isOwn,
+      isOwn: input.monitorEnabled !== false && !!input.isOwn,
       // 不再续费：余额低于阈值时仅提醒一次，不再发送耗尽/ETA/持续余额提醒
       noRenewal: input.type !== "fixed" && !!input.noRenewal,
       // 固定成本付费记录（可多笔叠加）：每笔按 金额÷天数 在生效区间内摊销
@@ -432,11 +458,15 @@ export class Store {
     });
   }
 
-  async update(id, patch) {
+  async update(id, patch, { verifiedIdentity, expectedAuthVersion } = {}) {
+    const identity = verifiedIdentity === undefined ? undefined : verifiedAccount(verifiedIdentity);
     return this._changeStation(id, (s) => {
+      if (expectedAuthVersion != null && Number(expectedAuthVersion) !== (s.authVersion || 1)) {
+        throw Object.assign(new Error("授权配置已变化，请重新验证"), { code: "AUTHORIZATION_CHANGED" });
+      }
       const before = {
         type: s.type, baseUrl: s.baseUrl, email: s.email,
-        accessToken: s.accessToken, password: s.password,
+        accessToken: s.accessToken, password: s.password, userId: s.userId, apiKey: s.apiKey,
       };
       const fields = ["name", "type", "baseUrl", "accessToken", "userId", "apiKey", "email"];
       for (const f of fields) if (f in patch) s[f] = String(patch[f] ?? "").trim();
@@ -446,6 +476,8 @@ export class Store {
       if ("costAliases" in patch) s.costAliases = sanitizeCostAliases(patch.costAliases);
       if ("includeInProfit" in patch) s.includeInProfit = patch.includeInProfit !== false;
       if ("isOwn" in patch) s.isOwn = !!patch.isOwn;
+      if ("monitorEnabled" in patch) s.monitorEnabled = patch.monitorEnabled !== false;
+      if (s.monitorEnabled === false) { s.includeInProfit = false; s.isOwn = false; }
       if ("noRenewal" in patch || s.type === "fixed") {
         const noRenewal = s.type !== "fixed" && !!patch.noRenewal;
         if (noRenewal !== !!s.noRenewal && s.alertState) {
@@ -462,8 +494,14 @@ export class Store {
       const credsChanged =
         before.type !== s.type || before.baseUrl !== s.baseUrl || before.email !== s.email ||
         ("accessToken" in patch && s.accessToken !== before.accessToken) ||
-        ("password" in patch && s.password !== before.password);
-      if (credsChanged) s.s2Tokens = null;
+        ("password" in patch && s.password !== before.password) ||
+        before.userId !== s.userId || before.apiKey !== s.apiKey;
+      if (credsChanged) {
+        s.s2Tokens = null;
+        s.authVersion = (s.authVersion || 1) + 1;
+        s.verifiedIdentity = null;
+      }
+      if (identity !== undefined) s.verifiedIdentity = identity;
       // 即使原缓存为空，也须覆盖提交期间后台取得的旧凭证令牌。
       if (credsChanged) return { s2Tokens: null };
     });
