@@ -14,13 +14,14 @@ import {
   RECONCILIATION_CALCULATION_VERSION,
   reconciliationHealthMeta,
 } from "../lib/reconciliation-contract.js";
-import { ReconciliationRepository, reconciliationOwnerRuleState } from "./reconciliation-repository.js";
+import { ReconciliationRepository, reconciliationOwnerRuleState, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
-import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity } from "../lib/reconciliation-snapshot.js";
+import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { describeConnectionFailure } from "../lib/connection-test.js";
-import { applyScopePolicy, canonicalBillingKey, nextBillingEffectiveFrom, scopePolicyIssues } from "../lib/reconciliation-scope-policy.js";
+import { applyScopePolicy, canonicalBillingKey, nextBillingEffectiveFrom, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow } from "../lib/reconciliation-scope-policy.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
+import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions } from "../lib/reconciliation-view.js";
 
 export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 
@@ -80,6 +81,16 @@ function validateTimezone(input) {
   return timezone;
 }
 
+const canonicalTimezone = (input) => new Intl.DateTimeFormat("en-US", { timeZone: validateTimezone(input) }).resolvedOptions().timeZone;
+const sameAbsoluteWindow = (a, b) => !!a && !!b && a.startMs === b.startMs && a.endMs === b.endMs;
+function commonBillingTimezone(window, sides) {
+  const timezone = canonicalTimezone(window.timezone);
+  const verified = sides.length && sides.every((side) => side?.billingTimezone?.state === "verified"
+    && side.billingTimezone.timezone === timezone && sameAbsoluteWindow(side.window, side.requestedWindow || window));
+  return { state: verified ? "verified" : "unverified", timezone,
+    ...(verified ? {} : { reason: "BILLING_TIMEZONE_UNVERIFIED" }) };
+}
+
 function zonedParts(ms, timezone) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: timezone, hour12: false,
@@ -119,7 +130,7 @@ function localDate(ms, timezone) {
 
 export function resolveReconciliationWindow(input = {}, now = Date.now()) {
   const timezone = validateTimezone(input.timezone);
-  const preset = ["today", "yesterday", "7d", "custom"].includes(input.preset) ? input.preset : "today";
+  const preset = ["today", "yesterday", "7d", "custom"].includes(input.preset) ? input.preset : "yesterday";
   let startMs;
   let endMs;
   // 所有窗口都是规则时区下的半开区间 [startMs, endMs)，结束点不晚于当前时刻。两侧都按秒级日志统计取数，
@@ -157,6 +168,7 @@ function publicMetadata(metadata) {
     groups: metadata.groups,
     platform: metadata.platform,
     capability: metadata.capability,
+    billingTimezone: metadata.billingTimezone,
     tokens: metadata.tokens.map((token) => ({
       id: token.id,
       name: token.name,
@@ -241,7 +253,8 @@ function channelState(status) {
 
 function healthWithIssues(issues) {
   const priority = ["KEY_INVALID_OR_DENIED", "LEGACY_IDENTITY_UNVERIFIED", "SOURCE_BINDING_UNCONFIRMED", "COST_OWNER_UNVERIFIED", "CANONICAL_KEY_CONFLICT", "UPSTREAM_DATA_UNAVAILABLE", "OWN_BILLING_UNAVAILABLE", "OWN_FLOW_INCOMPLETE", "UPSTREAM_EMPTY_WITH_SALES", "UPSTREAM_CAPABILITY_UNVERIFIED", "COST_COVERAGE_UNKNOWN", "BILLING_SCOPE_NOT_EFFECTIVE", "BILLING_WINDOW_UNCONFIRMED", "GROUP_DATA_UNAVAILABLE", "PENDING", "SALES_CHANNEL_MISSING", "SALES_CHANNEL_DISABLED", "SALES_CHANNEL_STATE_UNKNOWN", "ROUTE_TRANSITION_DETECTED", "SEGMENT_TIMING_UNCONFIRMED"];
-  const first = priority.find((code) => issues.some((issue) => issue.code === code));
+  const first = [...priority.slice(0, 5), "BILLING_WINDOW_MISMATCH", "DUPLICATE_CHANNEL_ASSIGNMENT", "WAITING_FOR_BILL",
+    ...priority.slice(5, 7), "BILLING_TIMEZONE_UNVERIFIED", ...priority.slice(7)].find((code) => issues.some((issue) => issue.code === code));
   const base = first ? health(first, issues.find((issue) => issue.code === first)?.detail || "") : health("READY");
   return { ...base, issues };
 }
@@ -295,6 +308,10 @@ const CALCULATION_BLOCKERS = new Set([
   "COST_COVERAGE_UNKNOWN",
   "BILLING_SCOPE_NOT_EFFECTIVE",
   "BILLING_WINDOW_UNCONFIRMED",
+  "BILLING_TIMEZONE_UNVERIFIED",
+  "BILLING_WINDOW_MISMATCH",
+  "DUPLICATE_CHANNEL_ASSIGNMENT",
+  "WAITING_FOR_BILL",
   "UPSTREAM_CAPABILITY_UNVERIFIED",
 ]);
 
@@ -427,20 +444,20 @@ export function createReconciliationModule(rt) {
   };
 
   // 凭据指纹必须在发请求前取：请求读的是发起时的凭据，等待期间站点可能已被原地改写。
-  async function metadataFor(station, { force = false } = {}) {
+  async function metadataFor(station, { force = false, timezone = "Asia/Shanghai" } = {}) {
     const credential = credentialFingerprint(station);
-    const cached = metadataCache.get(station.id);
+    const zone = canonicalTimezone(timezone), cacheKey = `${station.id}:${zone}`;
+    const cached = metadataCache.get(cacheKey);
     if (!force && cached?.credential === credential && Date.now() - cached.at < 5 * 60000) return cached.value;
-    const value = await queryReconciliationMetadata({ ...station });
-    metadataCache.set(station.id, { at: Date.now(), credential, value });
+    const value = await queryReconciliationMetadata({ ...station }, { timezone: zone });
+    metadataCache.set(cacheKey, { at: Date.now(), credential, value });
     return value;
   }
 
   async function ownerRegistryFor(rules, selected) {
     const billingSource = { ...billingSourceState(), expectedOwnerState: reconciliationOwnerRuleState(rules) };
-    const tokenIds = new Set(selected.map((rule) => rule.tokenId));
     const selectedIds = new Set(selected.map((rule) => rule.id));
-    const participants = rules.filter((rule) => tokenIds.has(rule.tokenId) && (rule.enabled || selectedIds.has(rule.id)));
+    const participants = rules.filter((rule) => rule.enabled || selectedIds.has(rule.id));
     const stationIds = [...new Set(participants.flatMap((rule) => [rule.upstreamStationId, rule.ownStationId]))].sort();
     const resources = new Map(await mapWithConcurrency(stationIds, 4, async (id) => {
       const configured = upstreamStation(id);
@@ -448,15 +465,36 @@ export function createReconciliationModule(rt) {
       const resourceVersion = stationBusinessVersion(station);
       try {
         if (!station) throw new Error("参与成本归属的账号资源已缺失");
-        const metadata = billingStation(station) ? await metadataFor(station, { force: true }) : null;
+        const timezone = selected.find((rule) => rule.upstreamStationId === id)?.timezone
+          || participants.find((rule) => rule.upstreamStationId === id)?.timezone || "Asia/Shanghai";
+        const metadata = billingStation(station) ? await metadataFor(station, { force: true, timezone }) : null;
         const identity = metadata ? { provider: metadata.platform, baseUrl: onboardingBaseUrl(station.baseUrl), accountId: String(metadata.accountId ?? metadata.userId) }
           : await queryAccountIdentity(station);
         return [id, Object.freeze({ station, resourceVersion, metadata, identity: Object.freeze(identity), error: null })];
       } catch (error) { return [id, Object.freeze({ station, resourceVersion, metadata: null, identity: null, error })]; }
     }));
     billingSource.ownerVersion = createHash("sha256").update(JSON.stringify([billingSource.version, billingSource.expectedOwnerState,
-      stationIds.map((id) => [id, resources.get(id).identity])])).digest("hex");
-    return { rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, billingSource: Object.freeze(billingSource) };
+      stationIds.map((id) => {
+        const { identity, metadata } = resources.get(id);
+        return [id, identity, metadata?.quotaPerUnit ?? null, metadata?.groupsAvailable ?? null,
+          Object.entries(metadata?.groups || {}).sort(([a], [b]) => a.localeCompare(b)).map(([group, value]) => [group, value.ratio]),
+          (metadata?.tokens || []).map((token) => [token.id, token.name, token.group, token.status, !!token.crossGroupRetry]).sort((a, b) => a[0] - b[0]),
+          metadata?.capability?.state || null];
+      })])).digest("hex");
+    const assignments = new Map(), duplicateSales = new Map();
+    for (const rule of rules.filter((rule) => rule.enabled)) {
+      const resource = resources.get(rule.ownStationId);
+      // 未锚定旧成员不能据此取得历史来源；当前身份只阻止潜在重复收入确认。
+      const source = rule.ownSource || (resource?.identity && resource.station ? ownSourceFor(resource.station, resource.identity) : null);
+      if (source) for (const channel of rule.channels) {
+        const key = `${source.namespaceKey}:${channel.channelId}`;
+        assignments.set(key, [...(assignments.get(key) || []), rule.id]);
+      }
+    }
+    for (const ids of assignments.values()) if (ids.length > 1) for (const id of ids) {
+      duplicateSales.set(id, [...new Set([...(duplicateSales.get(id) || []), ...ids])].sort());
+    }
+    return { rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, duplicateSales, billingSource: Object.freeze(billingSource) };
   }
 
   function costOwnerFor(rule, canonicalKey, registry) {
@@ -538,7 +576,7 @@ export function createReconciliationModule(rt) {
       .map(Number).filter((id) => Number.isFinite(id) && id > 0))];
     if (!channelIds.length) throw new Error("至少选择一个本站销售渠道");
     const [metadata, channels, ownIdentity] = await Promise.all([
-      authorization?.metadata || metadataFor(upstream, { force: true }),
+      authorization?.metadata || metadataFor(upstream, { force: true, timezone: input?.timezone }),
       ownChannelsFor(own, { force: true }),
       queryAccountIdentity(own),
     ]);
@@ -896,7 +934,7 @@ export function createReconciliationModule(rt) {
           const [catalogue, results] = await Promise.all([
             ownChannelsFor(own, { force }).catch(() => null),
             mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => queryOwnChannelRevenue(own, {
-              channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs,
+              channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone,
             }).catch(() => null)),
           ]);
           const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
@@ -914,7 +952,7 @@ export function createReconciliationModule(rt) {
             };
           });
           const downstreamFor = (result, segmentWindow) => result ? {
-            ...result, observedAt: Date.now(), window: segmentWindow, channels: channelsFor(result),
+            ...result, observedAt: Date.now(), window: result.window || segmentWindow, channels: channelsFor(result),
           } : {
             state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null,
             successfulCount: 0, expectedCount: rule.channels.length,
@@ -942,6 +980,8 @@ export function createReconciliationModule(rt) {
           const known = results.some((result) => result?.knownAmountUsd != null);
           return {
             state: complete ? "complete" : known ? "partial" : "unavailable",
+            window: results.length === 1 ? results[0]?.window || window : window,
+            billingTimezone: commonBillingTimezone(window, results.map((result, index) => ({ ...result, requestedWindow: applicable[index].window }))),
             quotaUnits: complete ? results.reduce((sum, result) => sum + result.quotaUnits, 0) : null,
             quotaPerUnit: complete ? results[0]?.quotaPerUnit ?? null : null,
             amountUsd: complete ? results.reduce((sum, result) => sum + result.amountUsd, 0) : null,
@@ -1031,6 +1071,8 @@ export function createReconciliationModule(rt) {
       let segments = reconciliation.segments;
       let currentSegment = reconciliation.currentSegment;
       const issues = scopePolicyIssues(rule, window);
+      if (ownerRegistry.duplicateSales.has(rule.id)) issues.push({ code: "DUPLICATE_CHANNEL_ASSIGNMENT", scope: "rule",
+        detail: "同一实际本站渠道归属多个启用规则，保留原始金额但不确认重复利润", ruleIds: ownerRegistry.duplicateSales.get(rule.id), observedAt: Date.now() });
       const observedSource = sourceState(rule);
       if (observedSource.status !== "confirmed") issues.push({ code: "SOURCE_BINDING_UNCONFIRMED", scope: "source", detail: "渠道连接已变化或来源尚未核对，当前金额仅供参考", observedAt: Date.now() });
       const costOwner = costOwnerFor(rule, canonicalKey, ownerRegistry);
@@ -1090,11 +1132,16 @@ export function createReconciliationModule(rt) {
         const [upstreamResult, downstreamResult] = await Promise.all([
           upstreamWindowFor(upstream, metadata, token, segmentWindow).catch((error) => ({ error })),
           (ownAvailable
-            ? queryOwnChannelRevenue(own, { channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, loadStatus: loadOwnStatus })
+            ? queryOwnChannelRevenue(own, { channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus: loadOwnStatus })
             : Promise.resolve({ error: Object.assign(new Error("本站管理员 NewAPI 站点不可用"), { code: "OWN_BILLING_UNAVAILABLE" }) }))
             .catch((error) => ({ error })),
         ]);
         const segmentIssues = issues.filter((issue) => CALCULATION_BLOCKERS.has(issue.code));
+        const sides = [upstreamResult, downstreamResult].filter((side) => !side.error);
+        if (sides.some((side) => !sameAbsoluteWindow(side.window, segmentWindow))) segmentIssues.push({ code: "BILLING_WINDOW_MISMATCH",
+          scope: "segment", detail: "实际账单窗口与所请求区间不一致，已取金额仅供参考", observedAt: Date.now() });
+        if (sides.length !== 2 || commonBillingTimezone(segmentWindow, sides).state !== "verified") segmentIssues.push({ code: "BILLING_TIMEZONE_UNVERIFIED",
+          scope: "segment", detail: "双方账单尚未证明所请求时区及日界线，金额仅供参考", observedAt: Date.now() });
         if (upstreamResult.error) segmentIssues.push({ code: toErrorHealth(upstreamResult.error).code, scope: "segment", detail: toErrorHealth(upstreamResult.error).detail, observedAt: Date.now() });
         if (upstreamResult.emptySecondWindow || downstreamResult.emptySecondWindow) segmentIssues.push({ code: "PENDING", scope: "segment", detail: "分段短于统计秒粒度，稍后刷新即可核算", observedAt: Date.now() });
         if (downstreamResult.error || (downstreamResult.state !== "complete" && downstreamResult.state !== "pending")) {
@@ -1108,6 +1155,9 @@ export function createReconciliationModule(rt) {
         }
         const downstreamUsd = downstreamUnavailable ? null : downstreamResult.quotaUnits / downstreamResult.quotaPerUnit;
         if (!upstreamUnavailable && !downstreamUnavailable && upstreamUsd <= 0 && downstreamUsd > 0) segmentIssues.push({ code: "UPSTREAM_EMPTY_WITH_SALES", scope: "segment", detail: "本站渠道已有收费，但上游未返回对应窗口消费", observedAt: Date.now() });
+        if (isCompletedBillingWindow(window) && !downstreamUnavailable && downstreamUsd > 0 && (upstreamUnavailable || upstreamUsd === 0)) {
+          segmentIssues.push({ code: "WAITING_FOR_BILL", scope: "upstream", detail: "该已结束窗口的上游账单尚未完整取得，请重查同一窗口", observedAt: Date.now() });
+        }
         const segmentHealth = healthWithIssues(segmentIssues);
         return {
           ...segment,
@@ -1115,17 +1165,19 @@ export function createReconciliationModule(rt) {
           upstream: upstreamUnavailable ? {
             state: upstreamResult.emptySecondWindow ? "pending" : upstreamResult.state || "unavailable",
             quotaUnits: upstreamResult.quotaUnits ?? null, quotaPerUnit: upstreamResult.quotaPerUnit ?? null, amountUsd: null, knownAmountUsd: upstreamResult.knownAmountUsd ?? null,
-            successfulCount: upstreamResult.knownAmountUsd != null ? 1 : 0, expectedCount: 1, observedAt: Date.now(), window: segmentWindow,
+            successfulCount: upstreamResult.knownAmountUsd != null ? 1 : 0, expectedCount: 1, observedAt: Date.now(),
+            window: upstreamResult.window || segmentWindow, requestedWindow: segmentWindow, billingTimezone: upstreamResult.billingTimezone,
           } : {
             state: "complete", quotaUnits: upstreamResult.quotaUnits, quotaPerUnit: upstreamResult.quotaPerUnit,
             amountUsd: upstreamUsd, knownAmountUsd: upstreamUsd, successfulCount: 1, expectedCount: 1,
-            observedAt: upstreamResult.latestLogAtMs || Date.now(), window: segmentWindow,
+            observedAt: upstreamResult.latestLogAtMs || Date.now(), window: upstreamResult.window || segmentWindow,
+            requestedWindow: segmentWindow, billingTimezone: upstreamResult.billingTimezone,
           },
           downstream: downstreamResult.error ? {
             state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null,
             successfulCount: 0, expectedCount: rule.channels.length,
             billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION,
-            observedAt: Date.now(), window: segmentWindow,
+            observedAt: Date.now(), window: segmentWindow, requestedWindow: segmentWindow, billingTimezone: null,
             channels: rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null })),
           } : {
             quotaUnits: downstreamResult.quotaUnits,
@@ -1137,7 +1189,7 @@ export function createReconciliationModule(rt) {
             expectedCount: downstreamResult.expectedCount,
             billingSource: downstreamResult.billingSource,
             calculationVersion: downstreamResult.calculationVersion,
-            observedAt: Date.now(), window: segmentWindow,
+            observedAt: Date.now(), window: downstreamResult.window || segmentWindow, requestedWindow: segmentWindow, billingTimezone: downstreamResult.billingTimezone,
             channels: downstreamResult.channels,
           },
           calculation: calculationFromAmounts(upstreamUsd, downstreamUsd, segmentIssues),
@@ -1177,6 +1229,10 @@ export function createReconciliationModule(rt) {
       const resultHealth = healthWithIssues(issues);
       const result = {
         rule: { ...rule, tokenName: token.name, fixedGroup: currentSegment.group }, window,
+        ownSource, scope: reconciliationBillingSchedule(rule),
+        amountBasis: { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,
+          calculationVersion: RECONCILIATION_CALCULATION_VERSION, conversion: metadata.platform === "sub2api" ? "provider_cost_usd" : "quota_per_unit" },
+        billingTimezone: commonBillingTimezone(window, segmentResults.flatMap((segment) => [segment.upstream, segment.downstream])),
         requestedWindow: window,
         lastSuccessfulWindow: null,
         currentSegment,
@@ -1194,7 +1250,9 @@ export function createReconciliationModule(rt) {
           countedAmountUsd: countedCost ? knownUpstreamUsd : null,
           successfulCount: successfulUpstream.length,
           expectedCount: segmentResults.length,
-          observedAt: Date.now(), window, status: token.status, group: currentSegment.group, ratio: currentRatio,
+          observedAt: Date.now(), window: segmentResults.length === 1 ? segmentResults[0].upstream.window : window,
+          billingTimezone: commonBillingTimezone(window, segmentResults.map((segment) => segment.upstream)),
+          status: token.status, group: currentSegment.group, ratio: currentRatio,
         },
         downstream: {
           state: completeDownstream ? "complete" : segmentResults.some((segment) => segment.downstream.knownAmountUsd != null) ? "partial" : segmentResults.some((segment) => segment.downstream.state === "pending") ? "pending" : "unavailable",
@@ -1206,7 +1264,8 @@ export function createReconciliationModule(rt) {
           expectedCount: segmentResults.reduce((sum, segment) => sum + segment.downstream.expectedCount, 0),
           billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION,
-          observedAt: Date.now(), window,
+          observedAt: Date.now(), window: segmentResults.length === 1 ? segmentResults[0].downstream.window : window,
+          billingTimezone: commonBillingTimezone(window, segmentResults.map((segment) => segment.downstream)),
           channels: allChannels,
         },
         calculation: calculationFromAmounts(upstreamUsd, downstreamUsd, issues),
@@ -1289,7 +1348,7 @@ export function createReconciliationModule(rt) {
         countedAmountUsd: null,
         ownershipState: "unknown",
         successfulCount: evidence.upstream.knownAmountUsd != null || evidence.upstream.amountUsd != null ? 1 : 0,
-        expectedCount: 1, window,
+        expectedCount: 1, window: evidence.upstream.window || window, billingTimezone: evidence.upstream.billingTimezone,
         observedAt: evidence.upstream.latestLogAtMs || Date.now(),
         status: evidence.token?.status ?? null,
         group: evidence.token?.group ?? null,
@@ -1306,7 +1365,7 @@ export function createReconciliationModule(rt) {
         expectedCount: evidence.downstream.expectedCount ?? rule.channels.length,
         billingSource: evidence.downstream.billingSource || RECONCILIATION_BILLING_SOURCE,
         calculationVersion: evidence.downstream.calculationVersion || RECONCILIATION_CALCULATION_VERSION,
-        observedAt: Date.now(), window,
+        observedAt: Date.now(), window: evidence.downstream.window || window, billingTimezone: evidence.downstream.billingTimezone,
         channels: evidence.downstream.channels || [],
       } : { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: rule.channels.length, observedAt: Date.now(), window, channels: rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null })) },
       calculation: { differenceUsd: null, profitUsd: null, riskDifferenceUsd: null, marginRate: null },
@@ -1378,6 +1437,9 @@ export function createReconciliationModule(rt) {
         healthDetail: segment.health?.detail || result.health.detail || null,
         source: {
           ...source,
+          ruleEvidence: reconciliationRuleEvidence(rule, metadata ? { provider: metadata.platform,
+            baseUrl: metadata.baseUrl || upstreamStation(rule.upstreamStationId)?.baseUrl,
+            accountId: metadata.accountId ?? metadata.userId } : null),
           scopePolicy: { billingPolicy: rule.billingPolicy, scopeVersion: rule.scopeVersion, billingEffectiveFrom: rule.billingEffectiveFrom,
             costCoverage: rule.costCoverage, sourceBinding: rule.sourceBinding, ownSource: rule.ownSource, coverageDeclaration: rule.coverageDeclaration,
             canonicalKey: rule.canonicalKey, sourceState: sourceState(rule) },
@@ -1397,6 +1459,7 @@ export function createReconciliationModule(rt) {
           window: result.window,
           resultGeneratedAt: result.generatedAt,
           result: {
+            ownSource: result.ownSource, billingTimezone: result.billingTimezone, amountBasis: result.amountBasis, scope: result.scope,
             window: result.window,
             requestedWindow: result.requestedWindow,
             lastSuccessfulWindow: result.lastSuccessfulWindow,
@@ -1438,10 +1501,46 @@ export function createReconciliationModule(rt) {
     return true;
   }
 
+  function readResponse(knownRules, rules, results, registry, input, now) {
+    const factsFor = (result) => {
+      const resource = registry.resources.get(result.rule.ownStationId);
+      const source = result.rule.ownSource && resource?.identity && resource.station ? ownSourceFor(resource.station, resource.identity) : null;
+      const provider = registry.resources.get(result.rule.upstreamStationId)?.metadata?.platform || result.rule.provider;
+      const enriched = Object.assign(result, { ownSource: source, scope: result.scope || reconciliationBillingSchedule(result.rule),
+        billingTimezone: result.billingTimezone || commonBillingTimezone(result.window, [result.upstream, result.downstream]),
+        amountBasis: result.amountBasis || { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,
+          calculationVersion: RECONCILIATION_CALCULATION_VERSION, conversion: provider === "sub2api" ? "provider_cost_usd" : provider === "newapi" ? "quota_per_unit" : null } });
+      enriched.actions = reconciliationResultActions(enriched);
+      return enriched;
+    };
+    const selected = results.map(factsFor), coverageFacts = [...selected];
+    knownRules = knownRules.map((rule) => selected.find((row) => row.rule.id === rule.id)?.rule || rule);
+    for (const rule of rules.filter((rule) => rule.enabled && !selected.some((row) => row.rule.id === rule.id))) {
+      const window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now), cached = resultCache.get(resultKey(rule, window));
+      const resource = registry.resources.get(rule.upstreamStationId), key = resource?.metadata?.tokens.find((token) => token.id === rule.tokenId);
+      if (!cached || cached.sourceCredential !== currentSourceCredential(rule) || cached.billingCredential !== registry.billingSource.ownerVersion
+        || now - cached.at >= (window.preset === "today" ? TODAY_TTL_MS : QUERY_TTL_MS) || !sameAbsoluteWindow(cached.value.window, window)
+        || !key || key.status !== 1 || key.name !== cached.value.rule.tokenName || key.group !== cached.value.rule.fixedGroup
+        || reconciliationScopeFingerprint(rule, cached.value.transitionSegments || []) !== reconciliationScopeFingerprint(cached.value.rule, cached.value.transitionSegments || [])) continue;
+      coverageFacts.push(factsFor(cached.value));
+    }
+    const catalogue = rt.onboardingSource?.getSourceCatalogue?.() || null;
+    const isCompletedWindow = (window) => isCompletedBillingWindow(window, now);
+    const coverage = deriveKnownChannelCoverage(catalogue, knownRules, coverageFacts, { isCompletedWindow });
+    const grouped = summarizeReconciliationWindowGroups(selected, { isCompletedWindow, coverageFor: (window, source) => {
+      const sameSource = (value) => source?.namespaceKey ? value?.namespaceKey === source.namespaceKey : !value;
+      return deriveKnownChannelCoverage(catalogue && sameSource(catalogue.ownSource) ? catalogue : null,
+        knownRules.filter((rule) => sameSource(rule.ownSource)), coverageFacts.filter((result) => sameSource(result.ownSource)), { window, isCompletedWindow });
+    } });
+    const actions = [...new Map([...selected.flatMap((row) => row.actions), ...coverage.channels.flatMap((channel) => channel.actions)]
+      .map((action) => [action.id, action])).values()];
+    return { results: selected, generatedAt: new Date(now).toISOString(), ...grouped, coverage, actions };
+  }
+
   return {
-    async getConfiguration({ forceChannels = false } = {}) {
+    async getConfiguration({ forceChannels = false, includeArchived = false } = {}) {
       const own = ownStation();
-      const rules = await repository.listRules();
+      const rules = await repository.listRules({ includeArchived });
       const upstreams = rt.store.list({ includeUnmonitored: true }).filter((station) => billingStation(station) && !station.archivedAt).map(publicStation);
       let channels = [];
       let channelsError = null;
@@ -1455,10 +1554,10 @@ export function createReconciliationModule(rt) {
       return { ownStation: publicStation(own), upstreams, channels, channelsError, rules };
     },
 
-    async getUpstreamKeys(stationId, { force = false } = {}) {
+    async getUpstreamKeys(stationId, { force = false, timezone } = {}) {
       const station = upstreamStation(stationId);
       if (!billingStation(station)) throw new Error("上游站点不存在");
-      return publicMetadata(await metadataFor(station, { force }));
+      return publicMetadata(await metadataFor(station, { force, timezone }));
     },
 
     createRule: saveRule,
@@ -1467,6 +1566,16 @@ export function createReconciliationModule(rt) {
     previewKeyScope,
     listRules: (options = {}) => repository.listRules(options),
     nextBillingEffectiveFrom,
+    async getConfirmedHistory(id, input = {}) {
+      const options = normalizeConfirmedHistoryOptions(input);
+      try {
+        if (!await repository.getRule(id, { includeArchived: true })) throw ruleNotFound();
+        return { ruleId: id, readOnly: true, ...await repository.listConfirmedHistory(id, options) };
+      } catch (error) {
+        if (error.code === "RULE_NOT_FOUND" || error.code === "INVALID_REQUEST") throw error;
+        throw Object.assign(new Error("已确认历史账单暂时无法读取，请稍后重试"), { code: "HISTORY_UNAVAILABLE" });
+      }
+    },
     async findRuleForKey(stationId, tokenId) {
       const station = upstreamStation(stationId);
       if (!billingStation(station)) throw new Error("上游账号不存在");
@@ -1506,9 +1615,10 @@ export function createReconciliationModule(rt) {
     },
     async queryRules({ ruleIds = null, ...input } = {}, options = {}) {
       for (let attempt = 1; ; attempt += 1) {
-        const rules = await repository.listRules();
+        const knownRules = await repository.listRules({ includeArchived: true });
+        const rules = knownRules.filter((rule) => !rule.archivedAt);
         const selected = (Array.isArray(ruleIds) && ruleIds.length)
-          ? rules.filter((rule) => ruleIds.includes(rule.id))
+          ? rules.filter((rule) => rule.enabled && ruleIds.includes(rule.id))
           : rules.filter((rule) => rule.enabled);
         const ownerRegistry = await ownerRegistryFor(rules, selected);
         const billingSource = ownerRegistry.billingSource;
@@ -1523,10 +1633,10 @@ export function createReconciliationModule(rt) {
           if (err?.code === "PERSISTENCE_FAILED") return persistenceFailedResult(rule, resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now));
           throw err;
         }));
-        if (billingSourceState().version === billingSource.version && !results.includes(STALE_SCOPE)) return { results: results.filter(Boolean), generatedAt: new Date(now).toISOString() };
-        if (attempt >= MAX_SCOPE_ATTEMPTS) return { results: selected.map((rule) => pendingResult(rule,
+        if (billingSourceState().version === billingSource.version && !results.includes(STALE_SCOPE)) return readResponse(knownRules, rules, results.filter(Boolean), ownerRegistry, input, now);
+        if (attempt >= MAX_SCOPE_ATTEMPTS) return readResponse(knownRules, rules, selected.map((rule) => pendingResult(rule,
           resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now), "查询期间成本来源多次变化，下一轮刷新时重新获取")),
-          generatedAt: new Date(now).toISOString() };
+          ownerRegistry, input, now);
       }
     },
     async refreshDue(now = Date.now()) {

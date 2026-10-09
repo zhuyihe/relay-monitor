@@ -1,6 +1,6 @@
 // 上游渠道对账的持久化层：只保存规则、聚合快照和告警状态，绝不复制站点凭据。
 import { isCurrentReconciliationBillingContract } from "../lib/reconciliation-contract.js";
-import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
+import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
 import { applyScopePolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 
 function uid(prefix) {
@@ -104,6 +104,29 @@ function snapshotLogicalEnd(source) {
 
 function snapshotGeneratedAt(source) {
   return String(source?.resultGeneratedAt || "");
+}
+
+export function normalizeConfirmedHistoryOptions(input = {}, now = Date.now()) {
+  const invalid = () => Object.assign(new Error("历史日期范围、数量或游标无效"), { code: "INVALID_REQUEST" });
+  const endMs = input.endMs == null ? now : Number(input.endMs);
+  const startMs = input.startMs == null ? endMs - 31 * 86400000 : Number(input.startMs);
+  const requestedLimit = input.limit == null ? 20 : Number(input.limit);
+  if (!Number.isSafeInteger(startMs) || !Number.isSafeInteger(endMs) || endMs <= startMs || endMs - startMs > 31 * 86400000
+    || !Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || input.startMs === "" || input.endMs === "" || input.limit === "") throw invalid();
+  let after = null;
+  if (input.cursor != null) {
+    try {
+      if (typeof input.cursor !== "string" || input.cursor.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(input.cursor)) throw invalid();
+      const decoded = Buffer.from(input.cursor, "base64url");
+      if (decoded.toString("base64url") !== input.cursor) throw invalid();
+      after = JSON.parse(decoded.toString("utf8"));
+      if (!Array.isArray(after) || after.length !== 3 || !Number.isSafeInteger(after[0])
+        || typeof after[1] !== "string" || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(after[1])
+        || new Date(`${after[1].replace(" ", "T")}Z`).toISOString().slice(0, 19).replace("T", " ") !== after[1]
+        || typeof after[2] !== "string" || !after[2].length || after[2].length > 128) throw invalid();
+    } catch { throw invalid(); }
+  }
+  return { startMs, endMs, limit: Math.min(50, requestedLimit), cursor: input.cursor ?? null, after };
 }
 
 export class ReconciliationRepository {
@@ -717,5 +740,41 @@ export class ReconciliationRepository {
 
   async latestObservation(ruleId, window, scopeFingerprint) {
     return this.latestRecord(ruleId, window, scopeFingerprint, "observation");
+  }
+
+  async listConfirmedHistory(ruleId, input = {}) {
+    const { startMs, endMs, limit, after } = normalizeConfirmedHistoryOptions(input);
+    const cursorFilter = after ? "AND (window_end_ms < ? OR (window_end_ms = ? AND generated_at < ?) OR (window_end_ms = ? AND generated_at = ? AND snapshot_key < ?))" : "";
+    const [rows] = await this.pool.query(
+      `WITH evidence AS (
+         SELECT s.*, source->>'$.window.startMs' AS saved_start, source->>'$.window.endMs' AS saved_end,
+           source->>'$.window.timezone' AS saved_timezone, source->>'$.scopeFingerprint' AS saved_scope,
+           source->>'$.resultGeneratedAt' AS saved_generation,
+           JSON_TYPE(source->'$.window.startMs') IN ('INTEGER','DOUBLE')
+             AND JSON_TYPE(source->'$.window.endMs') IN ('INTEGER','DOUBLE')
+             AND CAST(source->>'$.window.endMs' AS SIGNED) > CAST(source->>'$.window.startMs' AS SIGNED) AS has_logical_window
+         FROM reconciliation_snapshots s WHERE rule_id = ? AND source->>'$.recordType' = 'confirmed'
+           AND COALESCE(source->>'$.billingSource',source->>'$.downstream.billingSource') = 'channel-log-stat'
+           AND CAST(COALESCE(source->>'$.calculationVersion',source->>'$.downstream.calculationVersion') AS UNSIGNED) = 3
+           AND JSON_TYPE(source->'$.result.calculation.profitUsd') IN ('INTEGER','DOUBLE')
+       ), logical AS (
+         SELECT evidence.*, IF(has_logical_window,CAST(saved_start AS SIGNED),window_start_ms) AS logical_start,
+           IF(has_logical_window,CAST(saved_end AS SIGNED),window_end_ms) AS logical_end,
+           IF(has_logical_window AND JSON_TYPE(source->'$.scopeFingerprint') = 'STRING' AND saved_scope <> ''
+             AND JSON_TYPE(source->'$.resultGeneratedAt') = 'STRING' AND saved_generation <> '',
+             '',snapshot_key) AS separate_record
+         FROM evidence
+       ), ranked AS (
+         SELECT logical.*, ROW_NUMBER() OVER (
+           PARTITION BY logical_start,logical_end,saved_timezone,saved_scope,saved_generation,separate_record
+           ORDER BY window_end_ms DESC,generated_at DESC,snapshot_key DESC) AS logical_rank FROM logical
+       ) SELECT *, DATE_FORMAT(generated_at,'%Y-%m-%d %H:%i:%s') AS cursor_generated_at FROM ranked
+         WHERE logical_rank = 1 AND logical_start >= ? AND logical_end <= ? ${cursorFilter}
+         ORDER BY window_end_ms DESC,generated_at DESC,snapshot_key DESC LIMIT ?`,
+      [ruleId, startMs, endMs, ...(after ? [after[0], after[0], after[1], after[0], after[1], after[2]] : []), limit + 1]
+    );
+    const page = rows.slice(0, limit), last = page.at(-1);
+    return { records: page.map(reconciliationConfirmedHistoryRecord), nextCursor: rows.length > limit && last
+      ? Buffer.from(JSON.stringify([Number(last.window_end_ms), last.cursor_generated_at, last.snapshot_key])).toString("base64url") : null };
   }
 }

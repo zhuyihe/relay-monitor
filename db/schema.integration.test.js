@@ -327,4 +327,130 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     const [[rows]] = await pool.query("SELECT COUNT(*) AS count FROM reconciliation_snapshots WHERE snapshot_key IN ('integration-good', 'integration-invalid')");
     assert.equal(rows.count, 0);
   });
+
+  const billStart = Date.parse("2026-10-08T00:00:00Z"), billEnd = Date.parse("2026-10-09T00:00:00Z");
+  const historySource = { stationId: "history-own", provider: "newapi", baseUrl: "https://original-own.fixture.invalid",
+    accountId: "21", namespaceKey: "original-history-namespace" };
+  async function historyRule(tokenId) {
+    return reconciliation.createRule({ upstreamStationId: "history-upstream", ownStationId: "history-own", tokenId,
+      tokenName: `Current Key ${tokenId}`, fixedGroup: "current", timezone: "Asia/Shanghai", billingPolicy: "legacy-v3",
+      ownSource: historySource, channels: [{ channelId: tokenId, name: "Current member" }] });
+  }
+  function savedBill({ scope = "original-scope", generation = "2026-10-09T00:00:00Z", profit = 4 } = {}) {
+    const channels = [{ channelId: 11, name: "Original first" }, { channelId: 12, name: "Original second" }];
+    return { recordType: "confirmed", billingSource: "channel-log-stat", calculationVersion: 3,
+      scopeFingerprint: scope, resultGeneratedAt: generation,
+      window: { preset: "yesterday", startMs: billStart, endMs: billEnd, timezone: "UTC" },
+      scopePolicy: { billingEffectiveFrom: billStart, scopeVersion: 3 },
+      ruleEvidence: { ownSource: historySource, upstreamIdentity: { provider: "newapi",
+        baseUrl: "https://original-upstream.fixture.invalid", accountId: "42" }, canonicalKey: "original-history-key",
+        tokenId: 7, tokenName: "Original Key", channels, scopeVersion: 3 },
+      result: { upstream: { state: "complete", amountUsd: 6, knownAmountUsd: 6, quotaPerUnit: 500000,
+        raw: { accessToken: "fixture-history-secret" } },
+      downstream: { state: "complete", amountUsd: 10, knownAmountUsd: 10,
+        channels: channels.map((channel) => ({ ...channel, billingState: "complete", amountUsd: 5, knownAmountUsd: 5 })) },
+      calculation: { profitUsd: profit, differenceUsd: profit, marginRate: profit == null ? null : profit / 10 } },
+      diagnostic: "fixture-history-secret" };
+  }
+  async function savedHistoryRow(rule, key, source, startMs = billStart, endMs = billEnd) {
+    await pool.query(`INSERT INTO reconciliation_snapshots
+      (rule_id, snapshot_key, window_kind, window_start_ms, window_end_ms, health_code, source, generated_at)
+      VALUES (?, ?, 'custom', ?, ?, 'READY', ?, '2026-10-09 12:00:00')`,
+    [rule.id, key, startMs, endMs, JSON.stringify(source)]);
+  }
+
+  const originalHistoryRule = await historyRule(201);
+  await t.test("confirmed history collapses original segments and excludes observation, v2 and unknown profit", async () => {
+    const middle = (billStart + billEnd) / 2;
+    await savedHistoryRow(originalHistoryRule, "original-a", savedBill(), billStart, middle);
+    await savedHistoryRow(originalHistoryRule, "original-z", savedBill(), middle, billEnd);
+    await savedHistoryRow(originalHistoryRule, "zero", savedBill({ generation: "2026-10-09T01:00:00Z", profit: 0 }));
+    await savedHistoryRow(originalHistoryRule, "negative", savedBill({ scope: "second-scope", profit: -2 }));
+    await savedHistoryRow(originalHistoryRule, "observation", { ...savedBill(), recordType: "observation" });
+    await savedHistoryRow(originalHistoryRule, "v2", { ...savedBill(), calculationVersion: 2 });
+    await savedHistoryRow(originalHistoryRule, "unknown", savedBill({ profit: null }));
+    const result = await reconciliation.listConfirmedHistory(originalHistoryRule.id, { startMs: billStart, endMs: billEnd });
+    assert.equal(result.records.length, 3);
+    assert.deepEqual(result.records.map((record) => record.calculation.profitUsd).sort((a, b) => a - b), [-2, 0, 4]);
+    for (const record of result.records) {
+      assert.deepEqual(record.window, { preset: "yesterday", startMs: billStart, endMs: billEnd, timezone: "UTC" });
+      assert.deepEqual(record.channels.map((channel) => channel.channelId), [11, 12]);
+      assert.equal(record.sourceCompleteness, "complete");
+      assert.equal(record.upstreamSource.tokenName, "Original Key");
+    }
+    assert.equal(JSON.stringify(result).includes("fixture-history-secret"), false);
+  });
+
+  await t.test("equal storage timestamps paginate logical bills without repeating earlier segment rows", async () => {
+    const ids = [], profits = [];
+    let cursor = null;
+    for (let page = 0; page < 4; page += 1) {
+      const result = await reconciliation.listConfirmedHistory(originalHistoryRule.id,
+        { startMs: billStart, endMs: billEnd, limit: 1, ...(cursor ? { cursor } : {}) });
+      assert.equal(result.records.length, 1);
+      ids.push(result.records[0].historyId); profits.push(result.records[0].calculation.profitUsd);
+      cursor = result.nextCursor;
+      if (!cursor) break;
+    }
+    assert.equal(cursor, null);
+    assert.equal(ids.length, 3);
+    assert.equal(new Set(ids).size, 3);
+    assert.deepEqual(profits.sort((a, b) => a - b), [-2, 0, 4]);
+  });
+
+  await t.test("history range uses saved whole window and retains original facts after member change and archive", async () => {
+    const tail = await reconciliation.listConfirmedHistory(originalHistoryRule.id,
+      { startMs: (billStart + billEnd) / 2, endMs: billEnd });
+    assert.deepEqual(tail.records, []);
+    const [before] = await pool.query("SELECT snapshot_key, source FROM reconciliation_snapshots WHERE rule_id = ? ORDER BY snapshot_key", [originalHistoryRule.id]);
+    await reconciliation.appendChannels(originalHistoryRule.id, [{ channelId: 204, name: "Added later" }], { costCoverage: "complete" });
+    await reconciliation.archiveRule(originalHistoryRule.id);
+    const result = await reconciliation.listConfirmedHistory(originalHistoryRule.id, { startMs: billStart, endMs: billEnd });
+    assert.equal(result.records.length, 3);
+    assert.equal(result.records.some((record) => record.channels.some((channel) => channel.channelId === 204)), false);
+    assert.deepEqual(result.records[0].ownSource, historySource);
+    assert.equal(result.records[0].upstreamSource.baseUrl, "https://original-upstream.fixture.invalid");
+    const [after] = await pool.query("SELECT snapshot_key, source FROM reconciliation_snapshots WHERE rule_id = ? ORDER BY snapshot_key", [originalHistoryRule.id]);
+    assert.deepEqual(after, before);
+    assert.equal((await reconciliation.listRules({ includeArchived: true })).some((rule) => rule.id === originalHistoryRule.id), true);
+    assert.equal((await reconciliation.listRules()).some((rule) => rule.id === originalHistoryRule.id), false);
+  });
+
+  await t.test("history limit caps at fifty and final page exposes no duplicate or extra cursor", async () => {
+    const rule = await historyRule(202);
+    for (let i = 0; i < 52; i += 1) await savedHistoryRow(rule, `page-${String(i).padStart(3, "0")}`,
+      savedBill({ scope: `page-scope-${i}` }));
+    const first = await reconciliation.listConfirmedHistory(rule.id, { startMs: billStart, endMs: billEnd, limit: 100 });
+    assert.equal(first.records.length, 50); assert.ok(first.nextCursor);
+    const last = await reconciliation.listConfirmedHistory(rule.id,
+      { startMs: billStart, endMs: billEnd, limit: 100, cursor: first.nextCursor });
+    assert.equal(last.records.length, 2); assert.equal(last.nextCursor, null);
+    assert.equal(new Set([...first.records, ...last.records].map((record) => record.historyId)).size, 52);
+  });
+
+  await t.test("legacy missing logical scope stays separate with original physical facts and no current identity", async () => {
+    const rule = await historyRule(203);
+    const source = { recordType: "confirmed", billingSource: "channel-log-stat", calculationVersion: 3,
+      result: { calculation: { profitUsd: 0 }, downstream: { channels: [{ channelId: 11, name: "Original legacy member" }] } } };
+    await savedHistoryRow(rule, "legacy-first", source, 1000, 2000);
+    await savedHistoryRow(rule, "legacy-second", source, 1000, 2000);
+    const result = await reconciliation.listConfirmedHistory(rule.id, { startMs: 1000, endMs: 2000 });
+    assert.equal(result.records.length, 2);
+    assert.equal(new Set(result.records.map((record) => record.historyId)).size, 2);
+    for (const record of result.records) {
+      assert.equal(record.sourceCompleteness, "legacy_partial");
+      assert.equal(record.window.startMs, 1000); assert.equal(record.window.endMs, 2000);
+      assert.equal(record.window.timezone, null); assert.equal(record.ownSource, null);
+      assert.equal(record.upstreamSource.accountId, null); assert.equal(record.upstreamSource.tokenName, null);
+      assert.deepEqual(record.channels, [{ channelId: 11, name: "Original legacy member" }]);
+    }
+    const logicalNullFacts = { ...source, window: { preset: "yesterday", startMs: billStart, endMs: billEnd, timezone: "UTC" },
+      scopeFingerprint: null, resultGeneratedAt: null };
+    await savedHistoryRow(rule, "legacy-logical-first", logicalNullFacts);
+    await savedHistoryRow(rule, "legacy-logical-second", logicalNullFacts);
+    const logical = await reconciliation.listConfirmedHistory(rule.id, { startMs: billStart, endMs: billEnd });
+    assert.equal(logical.records.length, 2);
+    assert.equal(new Set(logical.records.map((record) => record.historyId)).size, 2);
+    assert.equal(logical.records.every((record) => record.sourceCompleteness === "legacy_partial"), true);
+  });
 });
