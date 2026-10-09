@@ -104,6 +104,20 @@ async function genuineBatchFixture(t) {
   return { state, rt, store, own, supplier, request, restart };
 }
 
+async function ruleEditRoutes() {
+  const { registerHooks } = await import("node:module");
+  const hooks = registerHooks({ load(url, context, next) {
+    if (url.endsWith("/lib/api.js")) return { format: "module", shortCircuit: true,
+      source: "export const withAuth = handler => handler; export const json = (value, status=200) => Response.json(value, {status});" };
+    return next(url, context);
+  } });
+  try {
+    const { POST } = await import("../app/api/reconciliation/rules/[id]/preview/route.js");
+    const { PUT } = await import("../app/api/reconciliation/rules/[id]/route.js");
+    return { POST, PUT };
+  } finally { hooks.deregister(); }
+}
+
 test("genuine HTTP batch既有账号五渠道零凭据只建一个Key scope，probe无写，重启恢复不依赖返回ID", async (t) => {
   const f = await genuineBatchFixture(t), input = f.request([[1], [2], [3], [4], [5]]);
   const before = structuredClone(f.store.data);
@@ -383,6 +397,165 @@ test("genuine batch两个明确旧ID同实际账号/Key但合法PAT不同，合�
   assert.equal(result.groups[0].saved.scopeVersion, 2); assert.equal(f.state.ruleWrites, 2);
   assert.equal(second.accessToken, "another-valid-pat"); assert.equal(second.authVersion, 1); assert.equal(second.lowBalanceUsd, 35);
   assert.equal(f.store.list().length, 3);
+});
+
+test("U02 actual issuer只绑定最终set且可删除missing旧成员，私有replace意图含enabled且probe零写", async (t) => {
+  const f = await genuineBatchFixture(t), initial = f.request([[1, 2, 3]]);
+  const firstProbe = await f.rt.channelOnboarding.probeBatch(initial);
+  const first = await f.rt.channelOnboarding.connectBatch({ ...initial, previewId: firstProbe.previewId });
+  const id = first.groups[0].saved.ruleId;
+  f.state.channels = f.state.channels.filter((channelId) => channelId !== 1); await f.rt.channelOnboarding.sync();
+  const before = structuredClone({ stations: f.store.data, rules: f.state.rules, members: f.state.members, links: f.state.links });
+  const input = { upstreamStationId: f.supplier.id, tokenId: 9, salesChannelIds: [3, 2, 3], enabled: false,
+    coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [1] },
+    replaceRuleId: "forged", authorization: {}, guard: {}, sourceBinding: { 2: "forged" }, ownSource: { namespaceKey: "forged" } };
+  const probe = await f.rt.channelOnboarding.probeRuleEdit(id, input);
+  assert.deepEqual(probe.basis.existingChannelIds, [1, 2, 3]); assert.deepEqual(probe.basis.proposedChannelIds, [2, 3]);
+  assert.deepEqual(Object.keys(probe.basis.channelRevisions), ["2", "3"]); assert.equal(probe.preview.costCoverage, "unknown");
+  assert.equal(probe.preview.scopeChanged, true); assert.equal(probe.existingRule.id, id);
+  assert.doesNotMatch(JSON.stringify(probe), /scopeIntent|normalizedPutIntent|forged|accessToken|password/);
+  assert.deepEqual({ stations: f.store.data, rules: f.state.rules, members: f.state.members, links: f.state.links }, before);
+  const guard = f.rt.channelOnboarding.getPreviewGuard(probe.previewId, probe.groupId);
+  assert.equal(guard.scopeIntent.kind, "replace"); assert.equal(guard.scopeIntent.targetRuleId, id);
+  assert.equal(guard.scopeIntent.existingEnabled, true); assert.equal(guard.scopeIntent.normalizedPutIntent.enabled, false);
+  assert.deepEqual(guard.scopeIntent.normalizedPutIntent.salesChannelIds, [2, 3]);
+  assert.throws(() => guard.scopeIntent.normalizedPutIntent.salesChannelIds.push(8), TypeError);
+  assert.throws(() => f.rt.channelOnboarding.assertPreviewGuard({ ...guard }, { basis: probe.basis, preview: probe.preview }),
+    (error) => error.code === "PREVIEW_REQUIRED");
+  await assert.rejects(f.rt.channelOnboarding.connectBatch({ ...initial, previewId: probe.previewId }), (error) => error.code === "PREVIEW_REQUIRED");
+  const saved = await f.rt.reconciliation.updateRule(id, { upstreamStationId: f.supplier.id, tokenId: 9,
+    salesChannelIds: [2, 3], enabled: false, coverageDeclaration: input.coverageDeclaration }, { previewGuard: guard });
+  assert.deepEqual(saved.channels.map((channel) => channel.channelId), [2, 3]);
+  assert.equal(saved.enabled, false); assert.equal(saved.costCoverage, "unknown"); assert.equal(saved.scopeVersion, 2);
+  assert.deepEqual(f.state.links, before.links); assert.deepEqual(f.store.data, before.stations);
+});
+
+test("U02 actual issuer拒绝取消声明与immutable Key变化，验证途中授权变化不能签发proof", async (t) => {
+  const f = await genuineBatchFixture(t), initial = f.request([[1, 2]]);
+  const firstProbe = await f.rt.channelOnboarding.probeBatch(initial);
+  const first = await f.rt.channelOnboarding.connectBatch({ ...initial, previewId: firstProbe.previewId });
+  const id = first.groups[0].saved.ruleId, input = { upstreamStationId: f.supplier.id, tokenId: 9,
+    salesChannelIds: [2], coverageDeclaration: { answer: "none" } };
+  await assert.rejects(f.rt.channelOnboarding.probeRuleEdit(id, { ...input, coverageDeclaration: undefined }), (error) => error.code === "INVALID_REQUEST");
+  await assert.rejects(f.rt.channelOnboarding.probeRuleEdit(id, { ...input, tokenId: 10 }), (error) => error.code === "RULE_IDENTITY_IMMUTABLE");
+  let changed = false;
+  f.state.requestHook = async (url) => {
+    if (!changed && url.host === "up.test" && url.pathname === "/api/user/self") {
+      changed = true; await f.store.update(f.supplier.id, { accessToken: "replacement-pat" });
+    }
+  };
+  await assert.rejects(f.rt.channelOnboarding.probeRuleEdit(id, input), (error) => error.code === "PREVIEW_BASIS_CHANGED");
+  assert.equal(f.state.ruleWrites, 1); assert.deepEqual(f.state.members.map((member) => member.channel_id), [1, 2]);
+});
+
+test("U02 actual HTTP一次preview一次PUT精确删除/同时增删/时区声明编辑，重启相同配置不延期", async (t) => {
+  const f = await genuineBatchFixture(t), initial = f.request([[1, 2]]);
+  const firstProbe = await f.rt.channelOnboarding.probeBatch(initial);
+  const first = await f.rt.channelOnboarding.connectBatch({ ...initial, previewId: firstProbe.previewId });
+  const id = first.groups[0].saved.ruleId, { POST, PUT } = await ruleEditRoutes(), links = structuredClone(f.state.links);
+  const request = (body) => new Request("http://local/api/reconciliation/rules/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const edits = [
+    { upstreamStationId: f.supplier.id, tokenId: 9, salesChannelIds: [2], coverageDeclaration: { answer: "none" } },
+    { upstreamStationId: f.supplier.id, tokenId: 9, salesChannelIds: [2, 3], coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [1] } },
+    { upstreamStationId: f.supplier.id, tokenId: 9, salesChannelIds: [2, 3], timezone: "UTC", coverageDeclaration: { answer: "unknown" } },
+  ];
+  let saved;
+  for (const [index, input] of edits.entries()) {
+    const before = f.state.ruleWrites, response = await POST(request(input), f.rt, { id });
+    assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+    const preview = await response.json();
+    assert.deepEqual(preview.basis.proposedChannelIds, input.salesChannelIds); assert.equal(f.state.ruleWrites, before);
+    const updated = await PUT(request({ ...input, previewId: preview.previewId, groupId: preview.groupId }), f.rt, { id });
+    assert.equal(updated.status, 200, JSON.stringify(await updated.clone().json()));
+    saved = (await updated.json()).rule;
+    assert.equal(saved.id, id); assert.equal(saved.upstreamStationId, f.supplier.id); assert.equal(saved.tokenId, 9);
+    assert.deepEqual(saved.channels.map((channel) => channel.channelId), input.salesChannelIds); assert.equal(saved.scopeVersion, index + 2);
+    assert.equal(saved.costCoverage, input.coverageDeclaration.answer === "none" ? "complete" : "unknown");
+    assert.deepEqual(f.state.links, links); assert.equal(f.store.list().length, 2);
+  }
+  f.state.now += 24 * 3600000; await f.restart(); await f.rt.channelOnboarding.sync();
+  const repeated = await PUT(request(edits[2]), f.rt, { id });
+  assert.equal(repeated.status, 200, JSON.stringify(await repeated.clone().json()));
+  const rule = (await repeated.json()).rule;
+  assert.equal(rule.scopeVersion, saved.scopeVersion); assert.equal(rule.billingEffectiveFrom, saved.billingEffectiveFrom);
+  assert.equal(f.state.ruleWrites, 4);
+});
+
+test("U02 actual HTTP拒绝append跨操作/replace跨target/篡改最终set声明时区enabled，全部零写", async (t) => {
+  const f = await genuineBatchFixture(t), initial = f.request([[1, 2], [4]], [9, 10]);
+  const initialProbe = await f.rt.channelOnboarding.probeBatch(initial);
+  const first = await f.rt.channelOnboarding.connectBatch({ ...initial, previewId: initialProbe.previewId });
+  const id = first.groups[0].saved.ruleId, otherId = first.groups[1].saved.ruleId, { POST, PUT } = await ruleEditRoutes();
+  const req = (body) => new Request("http://local/api/reconciliation/rules", { method: "POST", body: JSON.stringify(body) });
+  const input = { upstreamStationId: f.supplier.id, tokenId: 9, salesChannelIds: [2, 3], timezone: "Asia/Shanghai", enabled: true,
+    coverageDeclaration: { answer: "none" } };
+  const preview = await (await POST(req({ ...input, replaceRuleId: otherId, options: { replaceRuleId: otherId }, guard: {} }), f.rt, { id })).json();
+  assert.equal(preview.basis.existingRuleId, id);
+  const proof = { previewId: preview.previewId, groupId: preview.groupId };
+  const before = structuredClone({ rules: f.state.rules, members: f.state.members, writes: f.state.ruleWrites });
+  const bodies = [
+    { ...input, salesChannelIds: [2], ...proof }, { ...input, timezone: "UTC", ...proof },
+    { ...input, enabled: false, ...proof }, { ...input, coverageDeclaration: { answer: "unknown" }, ...proof },
+  ];
+  for (const body of bodies) {
+    const rejected = await PUT(req(body), f.rt, { id });
+    assert.equal(rejected.status, 409, JSON.stringify(await rejected.clone().json()));
+    assert.equal((await rejected.json()).code, "PREVIEW_BASIS_CHANGED");
+  }
+  const acrossTarget = await PUT(req({ ...input, tokenId: 10, salesChannelIds: [4, 5], ...proof }), f.rt, { id: otherId });
+  assert.equal(acrossTarget.status, 409); assert.ok(["PREVIEW_BASIS_CHANGED", "RULE_IDENTITY_IMMUTABLE"].includes((await acrossTarget.json()).code));
+  const appendInput = f.request([[1, 2, 3]]), append = await f.rt.channelOnboarding.probeBatch(appendInput);
+  const acrossOperation = await PUT(req({ ...input, salesChannelIds: [1, 2, 3], previewId: append.previewId, groupId: "group-1" }), f.rt, { id });
+  assert.equal(acrossOperation.status, 409); assert.equal((await acrossOperation.json()).code, "PREVIEW_BASIS_CHANGED");
+  assert.deepEqual({ rules: f.state.rules, members: f.state.members, writes: f.state.ruleWrites }, before);
+});
+
+test("U02 actual HTTP跨午夜edit零写后要求新预览，相同成功最终配置次日重试不延期", async (t) => {
+  const f = await genuineBatchFixture(t), initial = f.request([[1, 2]]);
+  const firstProbe = await f.rt.channelOnboarding.probeBatch(initial);
+  const first = await f.rt.channelOnboarding.connectBatch({ ...initial, previewId: firstProbe.previewId });
+  const id = first.groups[0].saved.ruleId, { POST, PUT } = await ruleEditRoutes();
+  const req = (body) => new Request("http://local/api/reconciliation/rules", { method: "POST", body: JSON.stringify(body) });
+  const input = { upstreamStationId: f.supplier.id, tokenId: 9, salesChannelIds: [2], coverageDeclaration: { answer: "none" } };
+  f.state.now = Date.parse("2026-10-09T15:59:50Z"); await f.rt.channelOnboarding.sync();
+  const preview = await (await POST(req(input), f.rt, { id })).json();
+  const before = structuredClone({ stations: f.store.data, links: f.state.links, rules: f.state.rules, members: f.state.members });
+  f.state.now = Date.parse("2026-10-09T16:00:01Z"); await f.rt.channelOnboarding.sync();
+  const stale = await PUT(req({ ...input, previewId: preview.previewId, groupId: preview.groupId }), f.rt, { id });
+  assert.equal(stale.status, 409); const error = await stale.json();
+  assert.equal(error.code, "EFFECTIVE_PREVIEW_CHANGED"); assert.equal(error.nextPreview.billingEffectiveFromMs, Date.parse("2026-10-10T16:00:00Z"));
+  assert.deepEqual({ stations: f.store.data, links: f.state.links, rules: f.state.rules, members: f.state.members }, before);
+  assert.equal(f.state.ruleWrites, 1);
+  const fresh = await (await POST(req(input), f.rt, { id })).json();
+  const result = await PUT(req({ ...input, previewId: fresh.previewId, groupId: fresh.groupId }), f.rt, { id });
+  assert.equal(result.status, 200, JSON.stringify(await result.clone().json()));
+  const saved = (await result.json()).rule;
+  assert.equal(saved.scopeVersion, 2); assert.equal(saved.billingEffectiveFrom, Date.parse("2026-10-10T16:00:00Z"));
+  f.state.now += 24 * 3600000; await f.rt.channelOnboarding.sync();
+  const repeated = await PUT(req(input), f.rt, { id });
+  assert.equal(repeated.status, 200); const rule = (await repeated.json()).rule;
+  assert.equal(rule.scopeVersion, saved.scopeVersion); assert.equal(rule.billingEffectiveFrom, saved.billingEffectiveFrom);
+});
+
+test("U02 edit与batch使用同一100项/10min preview map，取消和restart不写资源关联规则", async (t) => {
+  const f = await genuineBatchFixture(t), initial = f.request([[1, 2]]);
+  const firstProbe = await f.rt.channelOnboarding.probeBatch(initial);
+  const first = await f.rt.channelOnboarding.connectBatch({ ...initial, previewId: firstProbe.previewId });
+  const id = first.groups[0].saved.ruleId, input = { upstreamStationId: f.supplier.id, tokenId: 9,
+    salesChannelIds: [2], coverageDeclaration: { answer: "unknown" } };
+  const before = structuredClone({ stations: f.store.data, links: f.state.links, rules: f.state.rules, members: f.state.members });
+  const oldest = await f.rt.channelOnboarding.probeRuleEdit(id, input);
+  let latest;
+  for (let index = 0; index < 100; index++) latest = await f.rt.channelOnboarding.probeRuleEdit(id, input);
+  assert.throws(() => f.rt.channelOnboarding.getPreviewGuard(firstProbe.previewId, "group-1"), (error) => error.code === "PREVIEW_REQUIRED");
+  assert.throws(() => f.rt.channelOnboarding.getPreviewGuard(oldest.previewId, oldest.groupId), (error) => error.code === "PREVIEW_REQUIRED");
+  assert.equal(f.rt.channelOnboarding.getPreviewGuard(latest.previewId, latest.groupId).scopeIntent.kind, "replace");
+  assert.deepEqual({ stations: f.store.data, links: f.state.links, rules: f.state.rules, members: f.state.members }, before);
+  f.state.now += 10 * 60000;
+  assert.throws(() => f.rt.channelOnboarding.getPreviewGuard(latest.previewId, latest.groupId), (error) => error.code === "PREVIEW_REQUIRED");
+  await f.restart();
+  assert.throws(() => f.rt.channelOnboarding.getPreviewGuard(latest.previewId, latest.groupId), (error) => error.code === "PREVIEW_REQUIRED");
+  assert.equal(f.state.ruleWrites, 1);
 });
 
 test("concurrent connections and a response retry share one persisted monitor and never return credentials", async () => {

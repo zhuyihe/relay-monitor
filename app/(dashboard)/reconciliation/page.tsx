@@ -8,6 +8,7 @@ import {
 } from "antd";
 import { DeleteOutlined, EditOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, RightOutlined, SearchOutlined } from "@ant-design/icons";
 import { api } from "../../../lib/client";
+import type { BatchInput, BatchProbe, CoverageDeclaration, RuleEditPreview } from "../../../lib/client";
 import {
   formatReconciliationMoney as money,
   hasReconciliationHistory,
@@ -276,6 +277,13 @@ export default function ReconciliationPage() {
   const resultEpoch = useRef(0);
   const rowResultEpoch = useRef(new Map<string, number>());
   const [saving, setSaving] = useState(false);
+  const [rulePreview, setRulePreview] = useState<RuleEditPreview | null>(null);
+  const [ruleBatch, setRuleBatch] = useState<BatchInput | null>(null);
+  const [previewingRule, setPreviewingRule] = useState(false);
+  const [ruleFormError, setRuleFormError] = useState("");
+  const rulePreviewEpoch = useRef(0);
+  const coverageAnswer = Form.useWatch("coverageAnswer", form);
+  const otherUse = Form.useWatch("otherUse", form);
   const [transitionAt, setTransitionAt] = useState<any>(null);
   const [transitionSegmentId, setTransitionSegmentId] = useState<string | null>(null);
   const [transitionSegments, setTransitionSegments] = useState<any[]>([]);
@@ -488,7 +496,9 @@ export default function ReconciliationPage() {
     setKeyData(null);
     setKeyLoading(false);
     form.resetFields();
-    form.setFieldsValue({ timezone: "Asia/Shanghai" });
+    form.setFieldsValue({ timezone: "Asia/Shanghai", coverageAnswer: "unknown" });
+    rulePreviewEpoch.current += 1;
+    setRulePreview(null); setRuleBatch(null); setRuleFormError("");
     setDrawerOpen(true);
     void refreshChannelOptions();
   };
@@ -504,27 +514,59 @@ export default function ReconciliationPage() {
       tokenId: rule.tokenId,
       salesChannelIds: (rule.channels || []).map((channel: any) => Number(channel.channelId)),
       timezone: rule.timezone || "Asia/Shanghai",
+      coverageAnswer: "unknown", otherUse: "unspecified", uncoveredOwnChannelIds: [],
     });
+    rulePreviewEpoch.current += 1;
+    setRulePreview(null); setRuleBatch(null); setRuleFormError("");
     setDrawerOpen(true);
     void refreshChannelOptions();
   };
 
-  const saveRule = async (values: any) => {
-    setSaving(true);
+  const ruleInput = (values: any) => ({
+    upstreamStationId: values.upstreamStationId, tokenId: Number(values.tokenId),
+    salesChannelIds: values.salesChannelIds.map(Number), timezone: values.timezone,
+    coverageDeclaration: { answer: values.coverageAnswer || "unknown", otherUse: values.coverageAnswer === "other_use" ? values.otherUse || "unspecified" : null, uncoveredOwnChannelIds: values.coverageAnswer === "other_use" && values.otherUse === "own_channels" ? values.uncoveredOwnChannelIds || [] : [] } as CoverageDeclaration,
+  });
+  const previewRule = async () => {
+    setRuleFormError("");
     try {
-      const body = {
-        upstreamStationId: values.upstreamStationId,
-        tokenId: Number(values.tokenId),
-        salesChannelIds: values.salesChannelIds.map(Number),
-        timezone: values.timezone,
-      };
-      const path = editing ? `/api/reconciliation/rules/${editing.id}` : "/api/reconciliation/rules";
-      await api(path, { method: editing ? "PUT" : "POST", body });
+      const values = await form.validateFields(), body = ruleInput(values), current = ++rulePreviewEpoch.current;
+      setPreviewingRule(true);
+      if (editing) {
+        const next: RuleEditPreview = await api(`/api/reconciliation/rules/${encodeURIComponent(editing.id)}/preview`, { body });
+        if (current === rulePreviewEpoch.current) setRulePreview(next);
+      } else {
+        const catalogue = await api("/api/channel-onboarding");
+        if (catalogue.stale || !catalogue.ownStation) throw new Error("渠道目录待刷新，请发现新渠道后重新预览");
+        const input: BatchInput = { requestId: crypto.randomUUID(), ownStationId: catalogue.ownStation.id,
+          selections: [{ selectionId: "rule-account", stationId: body.upstreamStationId, monitor: false }],
+          groups: [{ groupId: "rule-key", selectionId: "rule-account", channels: body.salesChannelIds.map((id: number) => {
+            const channel = catalogue.channels.find((entry: any) => entry.id === id);
+            if (!channel?.revision) throw new Error(`渠道 #${id} 目录待刷新`);
+            return { channelId: id, channelRevision: channel.revision };
+          }), reconciliation: { tokenId: body.tokenId, timezone: body.timezone, coverageDeclaration: body.coverageDeclaration } }] };
+        const next: BatchProbe = await api("/api/channel-onboarding/batch/probe", { body: input });
+        const group = next.groups[0];
+        if (group.status !== "ready") throw new Error(group.reason || "账单能力待验证，请在渠道接入中补齐授权");
+        if (current === rulePreviewEpoch.current) { setRuleBatch(input); setRulePreview({ previewId: next.previewId, groupId: group.groupId, expiresAtMs: next.expiresAtMs, basis: group.basis, preview: group.preview }); }
+      }
+    } catch (err: any) { if (!err.errorFields) setRuleFormError(err.message || "预览失败，请重试"); setRulePreview(null); }
+    finally { setPreviewingRule(false); }
+  };
+  const saveRule = async (values: any) => {
+    if (!rulePreview || Date.now() >= rulePreview.expiresAtMs) { setRulePreview(null); return setRuleFormError("预览已失效，请重新预览修改"); }
+    setSaving(true); setRuleFormError("");
+    try {
+      if (editing) await api(`/api/reconciliation/rules/${encodeURIComponent(editing.id)}`, { method: "PUT", body: { ...ruleInput(values), previewId: rulePreview.previewId, groupId: rulePreview.groupId } });
+      else {
+        const next = await api("/api/channel-onboarding/batch", { body: { ...ruleBatch, previewId: rulePreview.previewId } });
+        if (!next.complete) throw new Error(next.groups?.find((group: any) => !group.complete)?.reason || "账单关联尚未完成，请重新预览后重试");
+      }
       message.success(editing ? "对账规则已更新" : "对账规则已创建");
       setDrawerOpen(false);
-      await Promise.all([loadConfiguration(), loadWindow({ preset: "today" }, true)]);
+      await Promise.all([loadConfiguration(), loadWindow(activeWindow, true)]);
     } catch (err: any) {
-      message.error(err?.message || "保存规则失败");
+      setRuleFormError(err?.message || "保存规则失败，请重新预览"); setRulePreview(null);
     } finally { setSaving(false); }
   };
 
@@ -725,8 +767,8 @@ export default function ReconciliationPage() {
         </Space> : null}
       </Drawer>
 
-      <Drawer title={editing ? "编辑对账规则" : "添加对账规则"} open={drawerOpen} onClose={() => setDrawerOpen(false)} width={compact ? "100%" : 520} aria-label={editing ? "编辑对账规则抽屉" : "添加对账规则抽屉"} extra={<Button className="reconciliation-primary-action" type="primary" loading={saving} htmlType="submit" form="reconciliation-rule-form" aria-label="保存对账规则">保存规则</Button>}>
-        <Form id="reconciliation-rule-form" form={form} layout="vertical" requiredMark={false} onFinish={saveRule}>
+      <Drawer title={editing ? "编辑对账规则" : "添加对账规则"} open={drawerOpen} onClose={() => { rulePreviewEpoch.current += 1; setDrawerOpen(false); }} width={compact ? "100%" : 520} aria-label={editing ? "编辑对账规则抽屉" : "添加对账规则抽屉"} closable={!saving && !previewingRule} maskClosable={!saving && !previewingRule} keyboard={!saving && !previewingRule} extra={<Button className="reconciliation-primary-action" type="primary" loading={saving} disabled={!rulePreview || previewingRule} htmlType="submit" form="reconciliation-rule-form" aria-label="保存对账规则">{editing ? "确认修改" : "确认关联"}</Button>}>
+        <Form id="reconciliation-rule-form" form={form} layout="vertical" requiredMark={false} disabled={saving || previewingRule} onFinish={saveRule} onValuesChange={() => { rulePreviewEpoch.current += 1; setRulePreview(null); setRuleFormError(""); }}>
           {editing ? <Alert type="info" showIcon message="规则身份不可修改" description="上游账号或 Key 需要更换时，请停止当前规则后创建新规则；当前历史账单会继续保留。" style={{ marginBottom: 16 }} /> : null}
           <Form.Item label="上游账号" name="upstreamStationId" extra={editing ? "已锁定，避免新账号重算当前规则的历史账单。" : "复用该站点已有 PAT，不需要再次填写。"} rules={[{ required: true, message: "请选择上游账号" }]}>
             <Select showSearch optionFilterProp="label" disabled={!!editing} placeholder="选择已配置的 NewAPI 上游站点" options={(config?.upstreams || []).map((station: any) => ({ value: station.id, label: station.name }))} onChange={(value) => { form.setFieldValue("tokenId", undefined); setKeyData(null); fetchKeys(value, true); }} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
@@ -741,10 +783,18 @@ export default function ReconciliationPage() {
             })} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
           </Form.Item>
           {channelsError ? <Alert type="error" showIcon message={channelsError} style={{ marginBottom: 16 }} /> : null}
-          <Form.Item label="对账时区" name="timezone" extra="“今天”从该时区的 00:00 计算到当前时刻。">
+          <Form.Item label="对账时区" name="timezone" extra="真实范围变更从下一共同完整自然日生效。">
             <Input placeholder="Asia/Shanghai" />
           </Form.Item>
+          <Form.Item label="除以上渠道外，这把 Key 是否还用于本站其他渠道或站外调用？" name="coverageAnswer">
+            <Select aria-label="规则 Key 消费范围" options={[{ value: "none", label: "没有" }, { value: "other_use", label: "有" }, { value: "unknown", label: "不确定" }]} />
+          </Form.Item>
+          {coverageAnswer === "other_use" ? <><Form.Item label="其他用途" name="otherUse"><Select options={[{ value: "own_channels", label: "本站其他渠道" }, { value: "external", label: "站外调用" }, { value: "unspecified", label: "尚未明确" }]} /></Form.Item>{otherUse === "own_channels" ? <Form.Item label="尚未纳入的本站渠道" name="uncoveredOwnChannelIds"><Select mode="multiple" options={(config?.channels || []).map((channel: any) => ({ value: channel.id, label: channelLabel(channel) }))} /></Form.Item> : null}</> : null}
+          {coverageAnswer !== "none" ? <Text type="secondary">保留收费与成本参考，账面毛利待确认。{otherUse === "external" ? "请隔离调用 Key 后重新关联。" : "移除渠道后仍使用这把 Key 的渠道也需在完整用途中说明。"}</Text> : null}
           <Alert type="info" showIcon message="核算口径" description="该规则汇总完整上游成本与全部所选渠道收费。渠道子项只展示收费占比，不分摊成本。" />
+          {ruleFormError ? <Alert type="error" showIcon message={ruleFormError} style={{ marginTop: 16 }} /> : null}
+          <Button style={{ minHeight: 44, marginTop: 16 }} loading={previewingRule} disabled={saving} onClick={() => void previewRule()} aria-label="预览对账规则">{editing ? "预览修改" : "验证并预览关联"}</Button>
+          {rulePreview ? <Alert type="info" showIcon style={{ marginTop: 16 }} message={editing ? "规则修改预览，尚未保存" : "Key 完整范围预览，尚未保存"} description={<Space direction="vertical"><Text>原渠道：{rulePreview.basis.existingChannelIds.map((id) => `#${id}`).join("、") || "无"}</Text><Text>最终渠道：{rulePreview.basis.proposedChannelIds.map((id) => `#${id}`).join("、")}</Text>{editing ? <Text>释放渠道：{rulePreview.basis.existingChannelIds.filter((id) => !rulePreview.basis.proposedChannelIds.includes(id)).map((id) => `#${id}`).join("、") || "无"}；原账单保留。</Text> : null}<Text>完整日生效：{formatRecentTime(rulePreview.preview.billingEffectiveFromMs, rulePreview.basis.timezone, false, true)}（{rulePreview.basis.timezone}）</Text><Text>首个完整账单可查询：{formatRecentTime(rulePreview.preview.firstQueryableAtMs, rulePreview.basis.timezone, false, true)}</Text><Text>{rulePreview.preview.costCoverage === "complete" ? "已声明这把 Key 没有其他用途" : "Key 用途待确认，金额作为参考"}</Text></Space>} /> : null}
         </Form>
       </Drawer>
     </PageContainer>

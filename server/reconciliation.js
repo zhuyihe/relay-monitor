@@ -20,12 +20,35 @@ import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity } 
 import { describeConnectionFailure } from "../lib/connection-test.js";
 import { applyScopePolicy, canonicalBillingKey, nextBillingEffectiveFrom, scopePolicyIssues } from "../lib/reconciliation-scope-policy.js";
 import { stationBusinessVersion } from "../db/store.js";
-import { onboardingBaseUrl } from "../lib/channel-onboarding.js";
+import { onboardingBaseUrl, normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
 
 export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 
 const DAY_MS = 86400000;
 const MAX_CONCURRENT_RULES = 6;
+
+export function normalizeReconciliationScopeIntent(kind, targetRuleId, input, { timezone, enabled } = {}) {
+  if (!input?.coverageDeclaration) throw Object.assign(new Error("请填写完整 Key 用途声明"), { code: "INVALID_REQUEST" });
+  let coverageDeclaration;
+  try { coverageDeclaration = normalizeCoverageDeclaration(input.coverageDeclaration); }
+  catch { throw Object.assign(new Error("Key 用途声明无效"), { code: "INVALID_REQUEST" }); }
+  let zone;
+  try { zone = validateTimezone(input?.timezone || timezone); }
+  catch { throw Object.assign(new Error("规则时区无效"), { code: "INVALID_REQUEST" }); }
+  const semantic = { tokenId: finite(input?.tokenId),
+    salesChannelIds: [...new Set((Array.isArray(input?.salesChannelIds) ? input.salesChannelIds : []).map(Number)
+      .filter((id) => Number.isSafeInteger(id) && id > 0))].sort((a, b) => a - b),
+    timezone: zone, enabled: input?.enabled == null ? enabled ?? true : input.enabled !== false,
+    coverageDeclaration };
+  if (!Number.isSafeInteger(semantic.tokenId) || semantic.tokenId <= 0 || !semantic.salesChannelIds.length
+    || input.salesChannelIds.some((id) => !Number.isSafeInteger(Number(id)) || Number(id) <= 0)
+    || input.enabled != null && typeof input.enabled !== "boolean" || kind === "replace" && !input.upstreamStationId) {
+    throw Object.assign(new Error("规则编辑字段无效"), { code: "INVALID_REQUEST" });
+  }
+  return { kind, targetRuleId: targetRuleId || null, existingEnabled: targetRuleId ? enabled ?? true : null,
+    ...(kind === "replace" ? { normalizedPutIntent: { upstreamStationId: String(input?.upstreamStationId || ""), ...semantic } }
+      : { normalizedAppendIntent: semantic }) };
+}
 
 export async function mapWithConcurrency(items, limit, mapper) {
   const results = new Array(items.length);
@@ -508,7 +531,7 @@ export function createReconciliationModule(rt) {
     if (!billingStation(upstream)) throw new Error("请选择已配置的 NewAPI 或 Sub2API 上游账号");
     const configuredOwn = existingRule ? upstreamStation(existingRule.ownStationId) : ownStation();
     const own = configuredOwn && { ...configuredOwn };
-    if (!own) throw new Error("还没有标记「我的中转站」的 NewAPI 管理员站点");
+    if (!own || !own.isOwn || own.type !== "newapi") throw new Error("还没有标记「我的中转站」的 NewAPI 管理员站点");
     const tokenId = finite(input?.tokenId);
     if (tokenId == null || tokenId <= 0) throw new Error("上游 Key 无效");
     const channelIds = [...new Set((Array.isArray(input?.salesChannelIds) ? input.salesChannelIds : [])
@@ -625,7 +648,8 @@ export function createReconciliationModule(rt) {
 
   function financialContext(valid, existing, policy, previewGuard = null) {
     const catalogue = rt.onboardingSource?.getSourceCatalogue?.();
-    if (!catalogue?.ownSource || catalogue.stale || catalogue.ownSource.namespaceKey !== valid.ownSource.namespaceKey) {
+    if (!catalogue?.ownSource || catalogue.stale || catalogue.ownSource.stationId !== valid.own.id
+      || catalogue.ownSource.namespaceKey !== valid.ownSource.namespaceKey) {
       throw Object.assign(new Error("本站来源已变化或尚未核验，请重新预览"), { code: "PREVIEW_BASIS_CHANGED" });
     }
     const proposedChannelIds = policy.channels.map((channel) => channel.channelId).sort((a, b) => a - b);
@@ -662,35 +686,55 @@ export function createReconciliationModule(rt) {
     return Object.assign(new Error("财务范围变更需要当前服务端预览，请重新预览后确认"), { code: "PREVIEW_REQUIRED" });
   }
 
-  function financialGuard(valid, previewGuard) {
+  function financialGuard(valid, previewGuard, kind = "append") {
     return (lockedRule, _channels, policy) => {
-      if (previewGuard && lockedRule && !lockedRule.enabled) {
+      if (previewGuard && lockedRule && !lockedRule.enabled && kind !== "replace") {
         throw Object.assign(new Error("规则已停用，请核对当前规则后重新预览"), { code: "PREVIEW_BASIS_CHANGED" });
       }
       if (!policy.scopeChanged && !previewGuard) return;
       if (!previewGuard || typeof rt.onboardingSource?.assertPreviewGuard !== "function") throw previewRequired();
       const context = financialContext(valid, lockedRule, policy, previewGuard);
       rt.onboardingSource.assertPreviewGuard(previewGuard, context);
+      const intent = normalizeReconciliationScopeIntent(kind, lockedRule?.id, { upstreamStationId: policy.upstreamStationId,
+        tokenId: policy.tokenId, salesChannelIds: valid.channels.map((channel) => channel.channelId),
+        timezone: policy.timezone, enabled: policy.enabled, coverageDeclaration: policy.coverageDeclaration }, lockedRule || {});
+      if (JSON.stringify(intent) !== JSON.stringify(previewGuard.scopeIntent)) {
+        throw Object.assign(new Error("预览操作、目标或完整修改意图不一致，请重新预览"), { code: "PREVIEW_BASIS_CHANGED" });
+      }
       if (JSON.stringify(policy.sourceBinding || {}) !== JSON.stringify(context.basis.channelRevisions)) {
         throw Object.assign(new Error("完整渠道来源不匹配当前预览，请重新预览"), { code: "PREVIEW_BASIS_CHANGED" });
       }
     };
   }
 
-  async function previewKeyScope(input, { authorization = null } = {}) {
-    const valid = await validateInput(input, { authorization });
+  function assertRuleIdentity(existing, input) {
+    if (String(input?.upstreamStationId || "") !== String(existing.upstreamStationId) || finite(input?.tokenId) !== Number(existing.tokenId)) {
+      throw Object.assign(new Error("上游账号和 Key 是规则身份，不能编辑"), { code: "RULE_IDENTITY_IMMUTABLE" });
+    }
+  }
+
+  async function previewKeyScope(input, { authorization = null, replaceRuleId = null } = {}) {
+    let target = null;
+    if (replaceRuleId) {
+      target = await repository.getRule(replaceRuleId);
+      if (!target) throw ruleNotFound();
+      assertRuleIdentity(target, input);
+      input = normalizeReconciliationScopeIntent("replace", target.id, input, target).normalizedPutIntent;
+    }
+    const valid = await validateInput(input, { authorization, ...(target ? { excludeRuleId: target.id, existingRule: target } : {}) });
     if (valid.metadata.capability?.state !== "supported") {
       throw Object.assign(new Error("账单能力尚未验证，先保存监控资源并核验能力"), { code: "BILLING_CAPABILITY_UNVERIFIED" });
     }
     const existingRule = valid.existingRule;
-    if (existingRule && !existingRule.enabled) {
+    if (!replaceRuleId && existingRule && !existingRule.enabled) {
       throw Object.assign(new Error("规则已停用，请明确处理停用规则后重新预览"), { code: "RULE_DISABLED" });
     }
     const fields = financialFields(valid, input);
-    const preliminary = applyScopePolicy(existingRule, fields, Date.now(), { append: !!existingRule });
+    const append = !replaceRuleId && !!existingRule;
+    const preliminary = applyScopePolicy(existingRule, fields, Date.now(), { append });
     const context = financialContext(valid, existingRule, preliminary);
     fields.sourceBinding = context.basis.channelRevisions;
-    const policy = applyScopePolicy(existingRule, fields, Date.now(), { append: !!existingRule });
+    const policy = applyScopePolicy(existingRule, fields, Date.now(), { append });
     const { basis, preview } = financialContext(valid, existingRule, policy);
     return { existingRule, basis, preview };
   }
@@ -735,13 +779,7 @@ export function createReconciliationModule(rt) {
     return serializeWrite(async () => {
       const existing = await repository.getRule(id);
       if (!existing) throw new Error("对账规则不存在");
-      const requestedUpstreamStationId = String(input?.upstreamStationId || "");
-      const requestedTokenId = finite(input?.tokenId);
-      if (requestedUpstreamStationId !== String(existing.upstreamStationId) || requestedTokenId !== Number(existing.tokenId)) {
-        const error = new Error("上游账号和 Key 是规则身份，不能编辑；请停止旧规则后新建规则");
-        error.code = "RULE_IDENTITY_IMMUTABLE";
-        throw error;
-      }
+      assertRuleIdentity(existing, input);
       const capturedCredential = currentSourceCredential(existing);
       const billingSource = participatingSource(previewGuard);
       let valid;
@@ -761,13 +799,39 @@ export function createReconciliationModule(rt) {
         upstreamStationId: existing.upstreamStationId, ownStationId: existing.ownStationId, tokenId: existing.tokenId,
         tokenName: existing.tokenName, fixedGroup: existing.fixedGroup, provider: existing.provider,
         canonicalKey: existing.canonicalKey, ownSource: existing.ownSource, channels: valid.channels, timezone: valid.timezone,
-        enabled: input?.enabled !== false, costCoverage: input?.costCoverage ?? (changedMembers ? "unknown" : existing.costCoverage),
-        coverageDeclaration: input?.coverageDeclaration ?? (changedMembers ? { answer: "unknown" } : existing.coverageDeclaration),
+        enabled: input?.enabled == null ? existing.enabled : input.enabled !== false, costCoverage: input?.costCoverage ?? (changedMembers ? "unknown" : existing.costCoverage),
+        coverageDeclaration: input?.coverageDeclaration ?? (input?.costCoverage != null && input.costCoverage !== existing.costCoverage
+          ? { answer: input.costCoverage === "complete" ? "none" : "unknown" } : changedMembers ? { answer: "unknown" } : existing.coverageDeclaration),
         sourceBinding: input?.sourceBinding ?? existing.sourceBinding,
       };
       if (previewGuard) fields.sourceBinding = input?.sourceBinding ?? previewGuard.basis.channelRevisions;
+      const candidate = applyScopePolicy(existing, fields);
+      const completedValid = !candidate.scopeChanged && fields.enabled === existing.enabled && existing.canonicalKey && existing.ownSource
+        && Object.keys(existing.sourceBinding || {}).length ? previewGuard ? valid
+          : await validateInput(input, { excludeRuleId: id, existingRule: existing }) : null;
       const updated = await withObservationSourceLock(existing, capturedCredential, async () => {
-        const saved = await repository.updateRule(id, fields, { guard: financialGuard(valid, previewGuard) });
+        if (completedValid) {
+          const completeFields = financialFields(completedValid, input);
+          let policy = applyScopePolicy(existing, { ...completeFields, sourceBinding: existing.sourceBinding });
+          completeFields.sourceBinding = financialContext(completedValid, existing, policy).basis.channelRevisions;
+          policy = applyScopePolicy(existing, completeFields);
+          if (policy.scopeChanged || completedValid.token.name !== existing.tokenName || completedValid.token.group !== existing.fixedGroup) throw previewRequired();
+          if (previewGuard) {
+            const intent = normalizeReconciliationScopeIntent("replace", id, { ...input, coverageDeclaration: policy.coverageDeclaration }, existing);
+            if (previewGuard.scopeIntent?.kind !== "replace" || previewGuard.scopeIntent.targetRuleId !== id
+              || JSON.stringify(previewGuard.scopeIntent.normalizedPutIntent) !== JSON.stringify(intent.normalizedPutIntent)) {
+              throw Object.assign(new Error("预览操作、目标或完整修改意图不一致，请重新预览"), { code: "PREVIEW_BASIS_CHANGED" });
+            }
+            const context = financialContext(completedValid, existing, policy, previewGuard);
+            // A completed retry is a read. Keep the original row proof only for
+            // issuer/ref validation; source, Key and all resources stay current.
+            rt.onboardingSource.assertPreviewGuard(previewGuard, { ...context, basis: { ...context.basis,
+              existingScopeVersion: previewGuard.basis.existingScopeVersion, existingChannelIds: previewGuard.basis.existingChannelIds,
+              billingEffectiveFromMs: previewGuard.basis.billingEffectiveFromMs }, preview: previewGuard.preview });
+          }
+          return existing;
+        }
+        const saved = await repository.updateRule(id, fields, { guard: financialGuard(valid, previewGuard, "replace") });
         clearBillingResults(id);
         return saved;
       }, billingSource);

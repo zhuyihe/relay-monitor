@@ -57,382 +57,253 @@ async function fulfill(route, body) {
   await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
 }
 
-function onboardingFixture(existing = true, type = "newapi") {
+function onboardingFixture(existing = true, type = "newapi", ids = [4]) {
   return {
     ownStation: { id: "own-1", baseUrl: "https://own.example" },
-    upstreams: existing ? [{ id: "upstream-1", name: "Fixture upstream", type, monitorEnabled: true, baseUrl: "https://up.example" }] : [],
-    channels: [{ id: 4, name: "New channel", status: 1, baseUrl: "https://up.example", groups: ["local-sales"], revision: "revision-4", candidates: existing ? ["upstream-1"] : [], monitor: { status: "unlinked", stationIds: [] }, reconciliation: { status: "unconfigured", ruleIds: [] } }],
+    upstreams: existing ? [{ id: "upstream-1", name: "Fixture upstream", type, monitorEnabled: true, baseUrl: "https://up.example", identity: type === "newapi-key" ? null : { provider: type.startsWith("sub2api") ? "sub2api" : "newapi", accountId: "42" } }] : [],
+    channels: ids.map((id) => ({ id, name: id === 4 ? "New channel" : "New channel " + id, status: 1, baseUrl: "https://up.example", groups: ["local-sales"], revision: "revision-" + id, candidates: existing ? ["upstream-1"] : [], monitor: { status: "unlinked", stationIds: [] }, reconciliation: { status: "unconfigured", ruleIds: [] } })),
     rules: existing ? [{ ...rule("rule-1", "Rule A", 10).rule, ownStationId: "own-1", tokenId: 7, enabled: true }] : [],
     syncedAt: "2026-10-09T06:00:00.000Z", stale: false,
   };
 }
-const onboardingTokens = [
-  { id: 7, name: "Supplier Key", status: 1, group: "upstream-group" },
-  { id: 8, name: "New Key", status: 1, group: "upstream-group" },
-];
-const preview = { billingEffectiveFromMs: Date.parse("2026-10-10T00:00:00+08:00"), timezone: "Asia/Shanghai", costCoverage: "unknown" };
+const onboardingTokens = [{ id: 7, name: "Supplier Key", status: 1, group: "upstream-group" }, { id: 8, name: "New Key", status: 1, group: "upstream-group" }];
+const preview = { billingEffectiveFromMs: Date.parse("2026-10-10T00:00:00+08:00"), firstQueryableAtMs: Date.parse("2026-10-11T00:00:00+08:00"), scopeChanged: true };
+const ownSource = { stationId: "own-1", provider: "newapi", baseUrl: "https://own.example", accountId: "1", namespaceKey: "fixture-own-namespace" };
 
-function probeResult(body) {
+function probeResult(body, config, options = {}) {
+  const selection = body.selections[0];
+  const accountIdentity = { provider: selection.newStation?.type?.startsWith("sub2api") ? "sub2api" : "newapi", baseUrl: selection.newStation?.baseUrl || "https://up.example", accountId: "42" };
+  const mainIdentity = (selection.newStation?.type || config.upstreams.find((entry) => entry.id === selection.stationId)?.type) === "newapi-key" ? null : accountIdentity;
+  const groups = body.groups.map((group) => {
+    const tokenId = group.reconciliation?.tokenId || null;
+    const existing = tokenId === 7 ? [1, 2, 3] : [];
+    const proposed = [...new Set([...existing, ...group.channels.map((entry) => entry.channelId)])];
+    return {
+      groupId: group.groupId, requestedGroupIds: [group.groupId], selectionIds: [group.selectionId], requestedChannelIds: group.channels.map((entry) => entry.channelId),
+      status: group.reconciliation ? options.billingStatus || "ready" : "monitor_only",
+      basis: { ownSource, sourceVersion: "source-v1", channelRevisions: Object.fromEntries(proposed.map((id) => [id, "revision-" + id])), resourceVersions: {}, accountIdentity, canonicalKey: tokenId ? "canonical-" + tokenId : null, tokenId, keyVersion: tokenId ? "key-v1" : null, existingRuleId: tokenId === 7 ? "rule-1" : null, existingScopeVersion: tokenId === 7 ? 1 : null, existingChannelIds: existing, proposedChannelIds: proposed, timezone: "Asia/Shanghai", billingEffectiveFromMs: preview.billingEffectiveFromMs, coverageDeclaration: group.reconciliation?.coverageDeclaration || { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } },
+      preview: { ...preview, costCoverage: group.reconciliation?.coverageDeclaration.answer === "none" ? "complete" : "unknown" },
+    };
+  });
   return {
-    station: { id: body.stationId || "new-up", name: "New channel" },
-    monitor: { status: "verified" },
-    reconciliation: body.reconciliation ? {
-      status: "ready", tokens: onboardingTokens, upstreamStationId: body.reconciliation.upstreamStationId || body.stationId,
-      existingRuleId: body.reconciliation.tokenId === 7 ? "rule-1" : null,
-      existingChannelIds: body.reconciliation.tokenId === 7 ? [1] : [],
-    } : { status: "not_requested" },
-    preview: { ...preview, costCoverage: body.reconciliation?.costCoverage || "unknown" },
-    channelRevision: "revision-4",
+    requestId: body.requestId, previewId: "preview-" + body.requestId, expiresAtMs: Date.now() + 600000, source: { ownSource, sourceVersion: "source-v1", resourceVersion: "own-v1" },
+    selections: [{ selectionId: selection.selectionId, station: { id: selection.stationId || "new-up", name: "Fixture upstream" }, monitor: { status: "verified" }, authorizationStationId: selection.reconciliationAuthorization?.stationId || (mainIdentity ? selection.stationId || null : null), accountIdentity: mainIdentity, tokens: options.billingStatus ? [] : onboardingTokens, credentialUpdateRequired: !!options.requireUpdate }],
+    groups,
+    retryInput: { requestId: body.requestId, source: { ownStationId: body.ownStationId, ownSource, sourceVersion: "source-v1" }, selections: [{ selectionId: selection.selectionId, stationId: selection.stationId || null, type: selection.newStation?.type || config.upstreams.find((entry) => entry.id === selection.stationId)?.type || "newapi", baseUrl: selection.newStation?.baseUrl || "https://up.example", monitor: selection.monitor, additionalMonitorStationIds: selection.additionalMonitorStationIds || [], accountIdentity: mainIdentity, authorizationStationId: selection.reconciliationAuthorization?.stationId || null, authorizationIdentity: accountIdentity, credentialUpdateRequested: !!selection.updateCredentials && !!selection.newStation }], groups: groups.map((group, index) => ({ groupId: group.groupId, requestedGroupIds: group.requestedGroupIds, selectionIds: group.selectionIds, channels: body.groups[index].channels, reconciliationRequested: !!body.groups[index].reconciliation, reconciliation: group.basis.tokenId ? { canonicalKey: group.basis.canonicalKey, tokenId: group.basis.tokenId, timezone: "Asia/Shanghai", coverageDeclaration: group.basis.coverageDeclaration, previewEffectiveFromMs: preview.billingEffectiveFromMs } : null })) },
   };
 }
-
+function batchResult(body, probe, complete = true) {
+  return { requestId: body.requestId, complete, retryInput: probe.retryInput, groups: probe.groups.map((group) => ({
+    groupId: group.groupId, requestedGroupIds: group.requestedGroupIds, canonicalKey: group.basis.canonicalKey, complete,
+    monitor: { status: body.selections[0].monitor ? "linked" : "not_requested", stationIds: body.selections[0].monitor ? [body.selections[0].stationId || "new-up"] : [] },
+    reconciliation: { status: body.groups[0].reconciliation ? complete ? "configured" : "unverified" : "not_requested", ruleId: complete ? "rule-" + (group.basis.tokenId || "monitor") : undefined },
+    saved: { stationIds: body.selections[0].monitor ? [body.selections[0].stationId || "new-up"] : [], authorizationStationId: !body.selections[0].monitor ? body.selections[0].stationId || "new-billing-auth" : body.selections[0].reconciliationAuthorization ? body.selections[0].reconciliationAuthorization.stationId || "billing-auth" : null, links: [], ruleId: complete && body.groups[0].reconciliation ? "rule-" + group.basis.tokenId : null, scopeVersion: 2, billingEffectiveFromMs: preview.billingEffectiveFromMs },
+    channels: body.groups.find((entry) => entry.groupId === group.groupId).channels.map((entry) => ({ ...entry, complete, stationIds: [body.selections[0].stationId || "new-up"], ruleId: complete ? "rule-" + group.basis.tokenId : null, remainingActions: complete ? [] : ["retry_rule"] })),
+    remainingActions: complete ? [] : ["repreview"],
+  })) };
+}
 async function openOnboardingPage(t, options = {}) {
-  const config = options.config || onboardingFixture();
-  const probes = [];
-  const writes = [];
-  const reads = [];
+  const config = options.config || onboardingFixture(), probes = [], writes = [], reads = [], recoveries = [];
+  let latestProbe, latestResult;
   const page = await openFixturePage(t, async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (path === "/api/reconciliation/configuration") return fulfill(route, configuration);
-    if (path === "/api/reconciliation" || path === "/api/reconciliation/query") return fulfill(route, response([rule("rule-1", "Rule A", 10)]));
+    if (path === "/api/reconciliation/configuration") return fulfill(route, options.ruleConfiguration || configuration);
+    if (path === "/api/reconciliation" || path === "/api/reconciliation/query") return fulfill(route, response(options.ruleResults || [rule("rule-1", "Rule A", 10)]));
     if (options.extraAPI) return options.extraAPI(route, path);
-    throw new Error(`unexpected onboarding request: ${path}`);
+    throw new Error("unexpected fixture API: " + path);
   }, options.viewport, !!options.clock, async (route) => {
-    const request = route.request();
-    const path = new URL(request.url()).pathname;
-    if (request.method() === "GET" || path.endsWith("/sync")) {
-      reads.push({ path, method: request.method() });
-      return options.discovery ? options.discovery(route, reads, config) : fulfill(route, config);
-    }
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (request.method() === "GET" || path.endsWith("/sync")) { reads.push({ path, method: request.method() }); return options.discovery ? options.discovery(route, reads, config) : fulfill(route, config); }
     const body = request.postDataJSON();
-    if (path.endsWith("/probe")) {
-      probes.push(body);
-      return options.probe ? fulfill(route, options.probe(body, probes.length)) : fulfill(route, probeResult(body));
-    }
-    assert.equal(path, "/api/channel-onboarding");
+    if (path === "/api/channel-onboarding/batch/probe") { probes.push(body); latestProbe = options.probe ? options.probe(body, probes.length, config) : probeResult(body, config, options); latestProbe.previewId += "-" + probes.length; return fulfill(route, latestProbe); }
+    if (path === "/api/channel-onboarding/batch/recover") { recoveries.push(body); return fulfill(route, options.recover ? options.recover(body, latestResult) : latestResult || batchResult({ ...probes.at(-1) }, latestProbe, false)); }
+    assert.equal(path, "/api/channel-onboarding/batch");
     writes.push(body);
-    if (options.connect) return options.connect(route, body, writes.length);
-    config.channels[0].monitor = { status: "linked", stationIds: [body.stationId || "new-up"] };
-    config.channels[0].reconciliation = { status: body.reconciliation ? "configured" : "unconfigured", ruleIds: body.reconciliation ? ["rule-1"] : [] };
-    return fulfill(route, { complete: true, monitor: { status: "linked", stationIds: config.channels[0].monitor.stationIds }, reconciliation: { status: body.reconciliation ? "configured" : "not_requested" }, saved: { stationIds: config.channels[0].monitor.stationIds, link: true } });
+    latestResult = options.connect ? options.connect(body, writes.length, latestProbe) : batchResult(body, latestProbe);
+    if (latestResult.complete) for (const group of body.groups) for (const channel of group.channels) {
+      const entry = config.channels.find((entry) => entry.id === channel.channelId);
+      entry.monitor = { status: "linked", stationIds: [body.selections[0].stationId || "new-up"] }; entry.reconciliation = { status: group.reconciliation ? "configured" : "unconfigured", ruleIds: group.reconciliation ? ["rule-1"] : [] };
+    }
+    if (options.loseResponseAt === writes.length) return route.abort("failed");
+    return fulfill(route, latestResult);
   });
-  await page.getByRole("button", { name: "发现新渠道", exact: true }).waitFor();
-  await page.getByRole("button", { name: "接入渠道 New channel" }).waitFor();
-  await page.getByRole("button", { name: "接入渠道 New channel" }).click({ trial: true });
-  return { page, config, probes, writes, reads };
+  await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click({ trial: true });
+  return { page, config, probes, writes, reads, recoveries };
 }
-
-async function openOnboardingDrawer(page) {
-  const action = page.getByRole("button", { name: "接入渠道 New channel" });
-  // 入场同步结束后才允许接入。
-  await action.waitFor();
-  await action.click();
+async function openOnboardingDrawer(page, batch = false) {
+  if (batch) { await page.getByText("选择当前筛选渠道（最多 100 个）", { exact: true }).click(); await page.getByRole("button", { name: "批量接入所选渠道", exact: true }).click(); }
+  else await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click();
   return page.getByRole("dialog", { name: "接入监控与对账" });
 }
-async function chooseKey(page, drawer, name = "Supplier Key") {
-  await drawer.getByRole("combobox", { name: "接入上游 Key" }).click();
-  await page.getByText(`${name} · 上游分组 upstream-group`, { exact: true }).last().click();
+async function verifyOnboarding(drawer) {
+  const button = drawer.getByRole("button", { name: "验证并预览", exact: true });
+  await button.scrollIntoViewIfNeeded();
+  const devBadge = drawer.page().getByRole("button", { name: "Collapse issues badge", exact: true });
+  if (await devBadge.isVisible()) await devBadge.click();
+  await button.click(); await drawer.getByText("监控连接已验证，尚未保存", { exact: true }).waitFor();
 }
+async function chooseKey(page, drawer, name = "Supplier Key") { await drawer.getByRole("combobox", { name: "接入上游 Key", exact: true }).click(); await page.getByText(name + " · 上游分组 upstream-group", { exact: true }).last().click(); }
 async function enableBilling(page, drawer, key = "Supplier Key") {
-  await drawer.getByText("同时配置 Key 对账", { exact: true }).click();
-  const devBadge = page.getByRole("button", { name: "Collapse issues badge", exact: true });
-  if (await devBadge.isVisible()) await devBadge.click();
-  await drawer.getByRole("button", { name: "验证并预览", exact: true }).click();
-  await drawer.getByText("监控连接已验证，尚未保存", { exact: true }).waitFor();
-  await chooseKey(page, drawer, key);
-  await drawer.getByRole("combobox", { name: "Key 消费范围" }).click();
-  await page.getByText("该 Key 仅供已关联及本次加入的渠道使用", { exact: true }).last().click();
-  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
-  if (await devBadge.isVisible()) await devBadge.click();
-  await drawer.getByRole("button", { name: "验证并预览", exact: true }).click();
+  await drawer.getByText("同时配置 Key 对账", { exact: true }).click(); await verifyOnboarding(drawer); await chooseKey(page, drawer, key); await verifyOnboarding(drawer);
+  await drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }).click(); await page.getByText("没有", { exact: true }).last().click();
+  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true); await verifyOnboarding(drawer);
 }
-async function saveOnboarding(drawer) {
-  await drawer.getByRole("button", { name: "确认关联", exact: true }).click();
-  await drawer.waitFor({ state: "hidden" });
-}
+async function saveOnboarding(drawer) { await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); }
 
-test("an existing account and Key are reused through one server-side channel append", async (t) => {
-  const { page, probes, writes } = await openOnboardingPage(t);
-  const drawer = await openOnboardingDrawer(page);
+test("five existing-account channels choose one Key and confirm one genuine batch without credentials", async (t) => {
+  const { page, probes, writes } = await openOnboardingPage(t, { config: onboardingFixture(true, "newapi", [4, 5, 6, 7, 8]) });
+  const drawer = await openOnboardingDrawer(page, true); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
+  await enableBilling(page, drawer); await drawer.getByText("完整范围：#1、#2、#3、New channel、New channel 5、New channel 6、New channel 7、New channel 8", { exact: true }).waitFor();
+  await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].selections.length, 1); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal(writes[0].groups.length, 1); assert.deepEqual(writes[0].groups[0].channels.map((entry) => entry.channelId), [4, 5, 6, 7, 8]); assert.equal(writes[0].groups[0].reconciliation.tokenId, 7); assert.equal(writes[0].groups[0].reconciliation.coverageDeclaration.answer, "none"); assert.ok(writes[0].previewId); assert.equal(probes.filter((entry) => entry.groups[0].reconciliation?.tokenId === 7).length, 2); assert.equal("newStation" in writes[0].selections[0], false);
+});
+
+test("different saved resource IDs for the same verified account reuse one existing authorization", async (t) => {
+  const config = onboardingFixture(true, "newapi", [4, 5]);
+  config.upstreams.push({ ...config.upstreams[0], id: "upstream-2", name: "Same account, another saved PAT" });
+  config.channels[0].monitor = { status: "linked", stationIds: ["upstream-1"] };
+  config.channels[1].monitor = { status: "linked", stationIds: ["upstream-2"] };
+  const { page, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page, true);
   assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
-  await enableBilling(page, drawer);
-  await drawer.getByText("加入已有对账规则", { exact: true }).waitFor();
-  await drawer.getByText("已有渠道：#1；本次加入：New channel", { exact: true }).waitFor();
-  await saveOnboarding(drawer);
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].stationId, "upstream-1");
-  assert.equal(writes[0].channelId, 4);
-  assert.equal(writes[0].reconciliation.tokenId, 7);
-  assert.equal(writes[0].reconciliation.costCoverage, "complete");
-  assert.equal(writes[0].reconciliation.previewEffectiveFromMs, preview.billingEffectiveFromMs);
-  assert.equal("salesChannelIds" in writes[0], false);
-  assert.equal(probes.length, 2);
-  await page.getByText("监控：已关联", { exact: true }).waitFor();
+  await enableBilling(page, drawer); await saveOnboarding(drawer);
+  assert.equal(writes.length, 1); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal("newStation" in writes[0].selections[0], false); assert.equal(writes[0].groups.length, 1); assert.deepEqual(writes[0].groups[0].channels.map((entry) => entry.channelId), [4, 5]);
 });
 
-test("an existing account can add a new Key without creating another monitoring account", async (t) => {
-  const { page, writes } = await openOnboardingPage(t);
-  const drawer = await openOnboardingDrawer(page);
-  await enableBilling(page, drawer, "New Key");
-  await saveOnboarding(drawer);
-  assert.equal(writes[0].stationId, "upstream-1");
-  assert.equal(writes[0].reconciliation.tokenId, 8);
-  assert.equal("newStation" in writes[0], false);
-});
-
-test("first-time New API onboarding verifies without saving and confirms monitoring and billing once", async (t) => {
-  const { page, probes, writes } = await openOnboardingPage(t, { config: onboardingFixture(false), viewport: { width: 390, height: 844 } });
-  const drawer = await openOnboardingDrawer(page);
-  assert.equal(await drawer.getByLabel("上游站点地址", { exact: true }).inputValue(), "https://up.example");
-  assert.equal(await drawer.getByLabel("上游资源名称", { exact: true }).inputValue(), "New channel");
-  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-pat");
-  await enableBilling(page, drawer);
-  assert.equal(writes.length, 0);
-  await saveOnboarding(drawer);
-  assert.equal(probes[0].newStation.accessToken, "fixture-pat");
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].newStation.accessToken, "fixture-pat");
-  assert.equal(writes[0].reconciliation.tokenId, 7);
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
-});
-
-test("monitor-only onboarding needs no Key or billing credential and cancelling a probe saves nothing", async (t) => {
-  const { page, probes, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) });
-  const drawer = await openOnboardingDrawer(page);
-  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-pat");
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await drawer.getByText("监控连接已验证，尚未保存", { exact: true }).waitFor();
-  assert.equal(probes[0].reconciliation, undefined);
-  assert.equal(writes.length, 0);
-  await drawer.getByRole("button", { name: "关闭", exact: true }).click();
-  await drawer.waitFor({ state: "hidden" });
-  assert.equal(writes.length, 0);
-  const reopened = await openOnboardingDrawer(page);
-  await reopened.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-pat");
-  await reopened.getByRole("button", { name: "验证并预览" }).click();
-  await saveOnboarding(reopened);
-  assert.equal(writes[0].reconciliation, undefined);
-});
-
-test("Sub2API password onboarding clears hidden credentials and retains a pending billing result", async (t) => {
-  const { page, probes, writes } = await openOnboardingPage(t, {
-    config: onboardingFixture(false),
-    probe: (body) => ({ ...probeResult(body), reconciliation: { status: "unverified", tokens: [], reason: "实际部署扣费字段待验证" } }),
-    connect: (route) => fulfill(route, { complete: false, monitor: { status: "linked" }, reconciliation: { status: "unverified", reason: "实际部署扣费字段待验证" }, saved: { stationIds: ["sub-up"], link: true }, retryInput: { stationId: "sub-up" } }),
-  });
-  const drawer = await openOnboardingDrawer(page);
-  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("discarded-pat");
-  await drawer.getByLabel("监控方式", { exact: true }).click();
-  await page.getByText("Sub2API · 账号密码", { exact: true }).last().click();
-  await drawer.getByLabel("上游登录邮箱", { exact: true }).fill("fixture@example.com");
-  await drawer.getByLabel("上游登录密码", { exact: true }).fill("fixture-password");
-  await drawer.getByText("同时配置 Key 对账", { exact: true }).click();
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await drawer.getByText("账单能力待验证", { exact: true }).waitFor();
-  await drawer.getByRole("button", { name: "确认关联" }).click();
-  await drawer.getByText("接入尚有待完成步骤，已保存部分会继续复用", { exact: true }).waitFor();
-  assert.equal(probes[0].newStation.type, "sub2api-password");
-  assert.equal("accessToken" in probes[0].newStation, false);
-  assert.equal(writes[0].newStation.password, "fixture-password");
-  assert.equal(await drawer.isVisible(), true);
-});
-
-test("a Key monitor supplements billing authorization in the same flow without another monitor", async (t) => {
-  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(true, "newapi-key") });
-  const drawer = await openOnboardingDrawer(page);
-  await drawer.getByText("同时配置 Key 对账", { exact: true }).click();
-  await drawer.getByText("账单授权只补一次", { exact: true }).waitFor();
-  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("billing-only-pat");
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await chooseKey(page, drawer);
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await saveOnboarding(drawer);
-  assert.equal(writes[0].stationId, "upstream-1");
-  assert.equal(writes[0].newStation, undefined);
-  assert.equal(writes[0].reconciliation.newAuthorization.accessToken, "billing-only-pat");
-  assert.deepEqual(writes[0].additionalMonitorStationIds, []);
-});
-
-test("additional account and Key monitors show the existing whole-monitor cost overlap before confirmation", async (t) => {
-  const config = onboardingFixture();
-  config.upstreams.push({ id: "key-monitor", name: "Existing Key monitor", type: "newapi-key", monitorEnabled: true, baseUrl: "https://up.example" });
-  const { page, writes } = await openOnboardingPage(t, { config });
-  const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("combobox", { name: "其他监控资源" }).click();
-  await page.getByText("Existing Key monitor", { exact: true }).last().click();
-  await drawer.getByText("核对整体监控成本", { exact: true }).waitFor();
-  await drawer.getByText("账号余额与 Key 额度可能覆盖同一消费。", { exact: false }).waitFor();
-  await drawer.getByRole("combobox", { name: "其他监控资源" }).press("Escape");
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await saveOnboarding(drawer);
-  assert.deepEqual(writes[0].additionalMonitorStationIds, ["key-monitor"]);
-  assert.equal(writes[0].includeInProfit, undefined);
-});
-
-test("editing connection fields invalidates a successful probe while changing the display name preserves it", async (t) => {
-  const { page, probes, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) });
-  const drawer = await openOnboardingDrawer(page);
-  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-pat");
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  const confirm = drawer.getByRole("button", { name: "确认关联" });
-  await confirm.click({ trial: true });
-  await drawer.getByLabel("上游资源名称", { exact: true }).fill("Renamed upstream");
-  assert.equal(await confirm.isDisabled(), false);
-  await drawer.getByLabel("上游站点地址", { exact: true }).fill("https://changed.example");
-  assert.equal(await confirm.isDisabled(), true);
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await saveOnboarding(drawer);
-  assert.equal(probes.length, 2);
-  assert.equal(writes[0].newStation.baseUrl, "https://changed.example");
-});
-
-test("a partial save retries using saved IDs while retaining an authorization that was not saved", async (t) => {
-  const { page, writes } = await openOnboardingPage(t, {
-    config: onboardingFixture(false),
-    connect: (route, body, count) => fulfill(route, count === 1 ? {
-      complete: false, monitor: { status: "linked" }, reconciliation: { status: "unavailable", reason: "账单保存暂时失败" },
-      saved: { stationIds: ["new-up"], link: true }, retryInput: { stationId: "new-up" },
-    } : { complete: true, monitor: { status: "linked" }, reconciliation: { status: "configured" }, saved: { stationIds: ["new-up"], ruleId: "new-rule" } }),
-  });
-  const drawer = await openOnboardingDrawer(page);
-  await drawer.getByLabel("监控方式", { exact: true }).click();
-  await page.getByText("New API · Key 额度", { exact: true }).last().click();
-  await drawer.getByLabel("上游 API Key", { exact: true }).fill("fixture-key");
-  await drawer.getByText("同时配置 Key 对账", { exact: true }).click();
-  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("billing-only-pat");
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await chooseKey(page, drawer);
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await drawer.getByRole("button", { name: "确认关联" }).click();
-  await drawer.getByText("账单保存暂时失败", { exact: false }).waitFor();
-  await drawer.getByRole("button", { name: "重试未完成步骤" }).click();
-  await drawer.waitFor({ state: "hidden" });
-  assert.equal(writes.length, 2);
-  assert.equal(writes[1].stationId, "new-up");
-  assert.equal(writes[1].newStation, undefined);
-  assert.equal(writes[1].reconciliation.newAuthorization.accessToken, "billing-only-pat");
-  assert.equal(writes[1].reconciliation.tokenId, 7);
-});
-
-test("same-account credential replacement requires an explicit confirmation in the drawer", async (t) => {
-  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false), probe: (body) => ({ ...probeResult(body), credentialUpdateRequired: true }) });
-  const drawer = await openOnboardingDrawer(page);
-  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("replacement-pat");
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await drawer.getByText("已发现相同账号，确认用本次授权更新已有凭证", { exact: true }).waitFor();
-  assert.equal(await drawer.getByRole("button", { name: "确认关联" }).isDisabled(), true);
-  await drawer.getByText("已发现相同账号，确认用本次授权更新已有凭证", { exact: true }).click();
-  await saveOnboarding(drawer);
-  assert.equal(writes[0].updateCredentials, true);
-  assert.equal(writes[0].newStation.accessToken, "replacement-pat");
-});
-
-test("a saved billing authorization can be updated after partial onboarding in the same drawer", async (t) => {
-  const config = onboardingFixture(true, "newapi-key");
-  const { page, writes } = await openOnboardingPage(t, {
-    config,
-    probe: (body) => body.reconciliation?.newAuthorization?.accessToken === "billing-pat-new"
-      ? { ...probeResult(body), credentialUpdateRequired: true }
-      : { ...probeResult(body), reconciliation: { status: "unavailable", tokens: [], reason: "原授权无法读取 Key 目录" } },
-    connect: (route, body, count) => {
-      if (count === 1) {
-        config.upstreams.push({ id: "billing-grant", name: "Saved billing grant", type: "newapi", monitorEnabled: false, baseUrl: "https://up.example" });
-        return fulfill(route, { complete: false, monitor: { status: "linked" }, reconciliation: { status: "unavailable", reason: "原授权无法读取 Key 目录" }, saved: { stationIds: ["upstream-1"], authorizationStationId: "billing-grant", link: true }, retryInput: { stationId: "upstream-1", updateCredentials: false, reconciliation: { upstreamStationId: "billing-grant" } } });
-      }
-      return fulfill(route, { complete: true, monitor: { status: "linked" }, reconciliation: { status: "configured" }, saved: { stationIds: ["upstream-1"], authorizationStationId: "billing-grant", ruleId: "rule-1" } });
-    },
-  });
-  const drawer = await openOnboardingDrawer(page);
-  await drawer.getByText("同时配置 Key 对账", { exact: true }).click();
-  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("billing-pat-old");
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await drawer.getByRole("button", { name: "确认关联" }).click();
-  await drawer.getByText("接入尚有待完成步骤，已保存部分会继续复用", { exact: true }).waitFor();
-  await drawer.getByRole("combobox", { name: "接入账单授权" }).click();
-  await page.getByText("补充或更新账号账单授权", { exact: true }).last().click();
-  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("billing-pat-new");
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await drawer.getByText("已发现相同账号，确认用本次授权更新已有凭证", { exact: true }).click();
-  await chooseKey(page, drawer);
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await drawer.getByRole("button", { name: "重试未完成步骤" }).click();
-  await drawer.waitFor({ state: "hidden" });
-  assert.equal(writes.length, 2);
-  assert.equal(writes[1].stationId, "upstream-1");
-  assert.equal(writes[1].newStation, undefined);
-  assert.equal(writes[1].updateCredentials, true);
-  assert.equal(writes[1].reconciliation.upstreamStationId, undefined);
-  assert.equal(writes[1].reconciliation.newAuthorization.accessToken, "billing-pat-new");
-});
-
-test("the resources page uses the same monitor-only channel onboarding without a page switch", async (t) => {
-  const { page, writes } = await openOnboardingPage(t, { extraAPI: (route, path) => {
-    if (path === "/api/stations") return fulfill(route, { stations: [], settings: {} });
-    if (path === "/api/meta") return fulfill(route, { types: [], rules: [] });
-    throw new Error(`unexpected resources request: ${path}`);
+test("different Keys remain explicit groups and partial saves recover after reload using public intent", async (t) => {
+  const { page, probes, writes, recoveries } = await openOnboardingPage(t, { config: onboardingFixture(true, "newapi", [4, 5]), connect(body, count, probe) {
+    const result = batchResult(body, probe);
+    if (count === 1) { result.complete = false; const second = result.groups[1]; second.complete = false; second.saved.ruleId = null; second.reconciliation = { status: "pending", reason: "第二把 Key 账单配置保存失败" }; second.channels.forEach((entry) => { entry.complete = false; entry.ruleId = null; entry.remainingActions = ["retry_rule"]; }); second.remainingActions = ["repreview"]; }
+    return result;
   } });
-  await page.goto(`${baseURL}/stations`, { timeout: 30000 });
-  const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await saveOnboarding(drawer);
-  assert.equal(new URL(page.url()).pathname, "/stations");
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].stationId, "upstream-1");
-  assert.equal(writes[0].reconciliation, undefined);
+  const drawer = await openOnboardingDrawer(page, true); await drawer.getByText("同时配置 Key 对账", { exact: true }).click(); await verifyOnboarding(drawer); await chooseKey(page, drawer); await drawer.getByText("这些渠道使用不同 Key，分别指定", { exact: true }).click();
+  await drawer.getByRole("combobox", { name: "渠道 5 的上游 Key", exact: true }).click(); await page.getByText("New Key · 上游分组 upstream-group", { exact: true }).last().click(); await verifyOnboarding(drawer);
+  await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("第二把 Key 账单配置保存失败", { exact: true }).waitFor(); assert.equal(writes.length, 1); assert.deepEqual(writes[0].groups.map((group) => group.reconciliation.tokenId), [7, 8]);
+  await page.reload(); await page.getByRole("button", { name: "恢复上次接入", exact: true }).click(); await drawer.getByText("第二把 Key 账单配置保存失败", { exact: true }).waitFor();
+  assert.equal(recoveries[0].requestId, writes[0].requestId); assert.deepEqual(recoveries[0].groups.map((group) => group.channels.map((entry) => entry.channelId)), [[4], [5]]); assert.equal("accessToken" in recoveries[0].selections[0], false); assert.equal("saved" in recoveries[0], false); assert.equal(recoveries[0].groups.length, 2);
+  await verifyOnboarding(drawer); await drawer.getByRole("button", { name: "重试未完成步骤", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 2); assert.equal(writes[1].selections[0].stationId, "upstream-1"); assert.deepEqual(writes[1].groups.map((group) => group.channels.map((entry) => entry.channelId)), [[4], [5]]);
 });
 
-test("a midnight preview change requires revalidation and uses the new complete-day boundary", async (t) => {
-  const nextPreview = { ...preview, billingEffectiveFromMs: preview.billingEffectiveFromMs + 86400000 };
-  const { page, writes } = await openOnboardingPage(t, {
-    probe: (body, count) => ({ ...probeResult(body), preview: count > 2 ? nextPreview : preview }),
-    connect: (route, body, count) => fulfill(route, count === 1 ? { complete: false, monitor: { status: "linked" }, reconciliation: { status: "pending", reason: "完整日边界已变化" }, code: "EFFECTIVE_PREVIEW_CHANGED", preview: nextPreview, saved: { stationIds: ["upstream-1"], link: true }, retryInput: { stationId: "upstream-1" } } : { complete: true, monitor: { status: "linked" }, reconciliation: { status: "configured" } }),
-  });
-  const drawer = await openOnboardingDrawer(page);
-  await enableBilling(page, drawer);
-  await drawer.getByRole("button", { name: "确认关联" }).click();
-  await drawer.getByText("完整日边界已变化，请重新验证并确认新的生效时间。", { exact: true }).waitFor();
-  assert.equal(await drawer.getByRole("button", { name: "重试未完成步骤" }).isDisabled(), true);
-  await drawer.getByRole("button", { name: "验证并预览" }).click();
-  await drawer.getByRole("button", { name: "重试未完成步骤" }).click();
-  await drawer.waitFor({ state: "hidden" });
-  assert.equal(writes[1].reconciliation.previewEffectiveFromMs, nextPreview.billingEffectiveFromMs);
+test("new New API credentials are entered once and keyboard cancellation after a probe creates nothing", async (t) => {
+  const { page, probes, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) });
+  const drawer = await openOnboardingDrawer(page); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-new-pat"); await enableBilling(page, drawer);
+  await drawer.getByRole("button", { name: "确认关联", exact: true }).click({ trial: true }); assert.equal(writes.length, 0); assert.equal(probes.at(-1).selections[0].newStation.accessToken, "fixture-new-pat"); await drawer.getByRole("button", { name: "验证并预览", exact: true }).focus(); await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 0);
 });
 
-test("manual discovery finds a new channel and no page-minute polling repeats the sync", async (t) => {
-  const { page, config, reads } = await openOnboardingPage(t, { clock: true });
-  const initial = reads.length;
-  config.channels.push({ ...config.channels[0], id: 5, name: "Later channel", groups: ["new-sales-group"] });
-  await page.clock.fastForward(60000);
-  assert.equal(reads.length, initial);
-  await page.getByRole("button", { name: "发现新渠道", exact: true }).click();
-  await page.getByRole("button", { name: "接入渠道 Later channel" }).waitFor();
-  await page.getByText("本站分组：new-sales-group", { exact: true }).waitFor();
+test("monitor-only onboarding needs no Key and submits one batch", async (t) => {
+  const { page, writes } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].groups[0].reconciliation, null);
 });
 
-test("failed discovery keeps the previous catalogue visible and disables stale onboarding", async (t) => {
-  let failed = false;
-  const { page } = await openOnboardingPage(t, {
-    discovery: (route, reads, config) => fulfill(route, failed ? { ...config, channels: [], stale: true, error: "目录暂不可用" } : config),
-  });
-  failed = true;
-  await page.getByRole("button", { name: "发现新渠道", exact: true }).click();
-  await page.getByText("渠道目录读取失败，正在显示上次发现的渠道", { exact: true }).waitFor();
-  const action = page.getByRole("button", { name: "接入渠道 New channel" });
-  assert.equal(await action.isVisible(), true);
-  assert.equal(await action.isDisabled(), true);
+test("Sub2API password mode clears hidden credentials and preserves unsupported billing as partial", async (t) => {
+  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false), billingStatus: "unsupported", connect(body, count, probe) { const result = batchResult(body, probe, false); result.groups[0].reconciliation = { status: "unsupported", reason: "当前部署账单能力不支持" }; return result; } });
+  const drawer = await openOnboardingDrawer(page); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("hidden-old-pat"); await drawer.getByLabel("监控方式", { exact: true }).click(); await page.getByText("Sub2API · 账号密码", { exact: true }).last().click(); await drawer.getByLabel("上游登录邮箱", { exact: true }).fill("fixture@example.test"); await drawer.getByLabel("上游登录密码", { exact: true }).fill("fixture-password");
+  await drawer.getByText("同时配置 Key 对账", { exact: true }).click(); await verifyOnboarding(drawer); await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("当前部署账单能力不支持", { exact: true }).waitFor();
+  assert.equal(writes[0].selections[0].newStation.type, "sub2api-password"); assert.equal("accessToken" in writes[0].selections[0].newStation, false); assert.equal(writes[0].selections[0].newStation.password, "fixture-password");
 });
 
-test("channel discovery and first-time forms fit compact, tablet and desktop widths", async (t) => {
+test("pure Key monitor supplements one dedicated billing authorization", async (t) => {
+  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(true, "newapi-key") }); const drawer = await openOnboardingDrawer(page); await drawer.getByText("同时配置 Key 对账", { exact: true }).click(); await drawer.getByText("账单授权只补一次", { exact: true }).waitFor(); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-billing-pat"); await verifyOnboarding(drawer); await chooseKey(page, drawer); await verifyOnboarding(drawer); await saveOnboarding(drawer);
+  assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal(writes[0].selections[0].reconciliationAuthorization.newAuthorization.accessToken, "fixture-billing-pat");
+});
+
+test("pure Key recovery after reload reuses the saved dedicated billing authorization", async (t) => {
+  const config = onboardingFixture(true, "newapi-key");
+  const { page, probes, writes, recoveries } = await openOnboardingPage(t, { config, connect(body, count, probe) {
+    const result = batchResult(body, probe, count > 1); result.groups[0].saved.authorizationStationId = "billing-auth";
+    if (count === 1) { config.upstreams.push({ id: "billing-auth", name: "Saved billing account", type: "newapi", monitorEnabled: false, baseUrl: "https://up.example", identity: { provider: "newapi", accountId: "42" } }); result.groups[0].reason = "授权已保存，规则待完成"; }
+    return result;
+  } });
+  const drawer = await openOnboardingDrawer(page); await drawer.getByText("同时配置 Key 对账", { exact: true }).click(); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-billing-pat"); await verifyOnboarding(drawer); await chooseKey(page, drawer); await verifyOnboarding(drawer); await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("授权已保存，规则待完成", { exact: true }).waitFor();
+  await page.reload(); await page.getByRole("button", { name: "恢复上次接入", exact: true }).click(); await drawer.getByText("授权已保存，规则待完成", { exact: true }).waitFor(); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
+  await verifyOnboarding(drawer); assert.equal(probes.at(-1).selections[0].reconciliationAuthorization.stationId, "billing-auth"); assert.equal(recoveries[0].selections[0].accountIdentity, null); await drawer.getByRole("button", { name: "重试未完成步骤", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 2); assert.equal("newAuthorization" in writes[1].selections[0].reconciliationAuthorization, false);
+});
+
+test("additional account and Key monitors retain their explicit overlap warning", async (t) => {
+  const config = onboardingFixture(); config.upstreams.push({ id: "key-monitor", name: "Extra Key monitor", type: "newapi-key", monitorEnabled: true, baseUrl: "https://up.example" });
+  const { page, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page); await drawer.getByText("同时关联其他已有监控资源（可选）", { exact: true }).click(); await drawer.getByRole("combobox", { name: "其他监控资源", exact: true }).click(); await page.getByText("Extra Key monitor", { exact: true }).last().click(); await drawer.getByText("核对整体监控成本", { exact: true }).waitFor(); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.deepEqual(writes[0].selections[0].additionalMonitorStationIds, ["key-monitor"]);
+});
+
+test("connection edits invalidate proof while a display-name edit preserves it", async (t) => {
+  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) }); const drawer = await openOnboardingDrawer(page); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-pat"); await verifyOnboarding(drawer); await drawer.getByLabel("上游资源名称", { exact: true }).fill("Renamed"); assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isEnabled(), true); await drawer.getByLabel("上游站点地址", { exact: true }).fill("https://another.example"); assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true); assert.equal(writes.length, 0);
+});
+
+test("same-account update needs explicit consent and recovery cannot claim existing relations prove rotation", async (t) => {
+  const { page, writes, recoveries } = await openOnboardingPage(t, { config: onboardingFixture(false), requireUpdate: true, connect(body, count, probe) {
+    const result = batchResult(body, probe, false); result.groups[0].code = "CREDENTIAL_UPDATE_UNCONFIRMED"; result.groups[0].reason = "关联已保存，授权更新结果尚未确认，请重新预览"; result.groups[0].remainingActions = ["repreview"]; result.groups[0].reconciliation.status = "configured"; result.groups[0].saved.ruleId = "rule-7"; return result;
+  } });
+  const drawer = await openOnboardingDrawer(page); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-replacement"); await verifyOnboarding(drawer); assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true); await drawer.getByText("已发现相同账号，确认用本次授权更新已有凭证", { exact: true }).click(); await verifyOnboarding(drawer); await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("关联已保存，授权更新结果尚未确认，请重新预览", { exact: true }).waitFor(); await drawer.getByRole("button", { name: "核对已保存结果", exact: true }).click(); assert.equal(writes[0].selections[0].updateCredentials, true); assert.equal(recoveries[0].selections[0].credentialUpdateRequested, true); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).inputValue(), "fixture-replacement");
+});
+
+test("manual discovery keeps a stale catalogue visible and disables new binding", async (t) => {
+  const { page } = await openOnboardingPage(t, { discovery(route, reads, config) { return fulfill(route, reads.length > 2 ? { ...config, stale: true, error: "fixture catalogue unavailable" } : config); } });
+  await page.getByRole("button", { name: "发现新渠道", exact: true }).click(); await page.getByText("渠道目录读取失败，正在显示上次发现的渠道", { exact: true }).waitFor(); assert.equal(await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).isDisabled(), true);
+});
+
+test("channel search and status filters do not silently select another account", async (t) => {
+  const config = onboardingFixture(true, "newapi", [4, 5]); config.channels[1].baseUrl = "https://other.example"; config.channels[1].candidates = ["other-account"]; config.upstreams.push({ id: "other-account", name: "Other account", type: "newapi", baseUrl: "https://other.example", monitorEnabled: true });
+  const { page } = await openOnboardingPage(t, { config }); await page.getByRole("textbox", { name: "搜索接入渠道", exact: true }).fill("local-sales"); const drawer = await openOnboardingDrawer(page, true); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 1); assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
+});
+
+test("five-channel batches fit 320/390/768/1440 widths without root overflow", async (t) => {
   for (const width of [320, 390, 768, 1440]) {
-    const { page } = await openOnboardingPage(t, { config: onboardingFixture(false), viewport: { width, height: 900 } });
-    const drawer = await openOnboardingDrawer(page);
-    await drawer.getByLabel("上游系统访问令牌", { exact: true }).waitFor();
-    assert.ok((await page.getByRole("button", { name: "发现新渠道", exact: true }).boundingBox()).height >= 40, `${width}px discover touch target`);
-    assert.ok((await drawer.getByRole("button", { name: "确认关联", exact: true }).boundingBox()).height >= 44, `${width}px confirm touch target`);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `${width}px root`);
-    assert.equal(await drawer.evaluate((element) => element.scrollWidth <= element.clientWidth), true, `${width}px drawer`);
+    const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(true, "newapi", [4, 5, 6, 7, 8]), viewport: { width, height: 900 } });
+    const drawer = await openOnboardingDrawer(page, true); await enableBilling(page, drawer); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true); await saveOnboarding(drawer); assert.equal(writes.length, 1); await page.close();
   }
+});
+
+test("old rule editor previews one exact final set and confirms one PUT without recreating the rule", async (t) => {
+  const row = rule("rule-1", "Rule A", 10);
+  row.rule = { ...row.rule, tokenId: 7, timezone: "Asia/Shanghai", channels: [1, 2].map((channelId) => ({ channelId, name: "Sales " + channelId })) };
+  const config = { ...configuration, channels: [1, 2, 3].map((id) => ({ id, name: "Sales " + id, status: 1 })), rules: [{ ...row.rule, enabled: true }] };
+  const previews = [], puts = [];
+  const { page } = await openOnboardingPage(t, { ruleConfiguration: config, ruleResults: [row], extraAPI(route, path) {
+    const body = route.request().postDataJSON();
+    if (path === "/api/reconciliation/rules/rule-1/preview") {
+      previews.push(body);
+      const group = probeResult({ requestId: "fixture", ownStationId: "own-1", selections: [{ selectionId: "primary", stationId: "upstream-1", monitor: false }], groups: [{ groupId: "rule-edit", selectionId: "primary", channels: body.salesChannelIds.map((channelId) => ({ channelId, channelRevision: "revision-" + channelId })), reconciliation: { tokenId: 7, coverageDeclaration: body.coverageDeclaration } }] }, onboardingFixture()).groups[0];
+      return fulfill(route, { previewId: "exact-rule-preview", groupId: "rule-edit", expiresAtMs: Date.now() + 600000, basis: { ...group.basis, existingChannelIds: [1, 2], proposedChannelIds: body.salesChannelIds }, preview: group.preview });
+    }
+    if (path === "/api/reconciliation/rules/rule-1" && route.request().method() === "PUT") { puts.push(body); return fulfill(route, { rule: { ...row.rule, channels: body.salesChannelIds.map((channelId) => ({ channelId })) } }); }
+    throw new Error("unexpected rule fixture API: " + path);
+  } });
+  await page.getByRole("button", { name: "操作 Rule A 的规则", exact: true }).click(); await page.getByText("编辑规则", { exact: true }).last().click();
+  const drawer = page.getByRole("dialog", { name: "编辑对账规则", exact: true });
+  await drawer.locator('.ant-select-selection-item[title="Sales 1 · ID 1"] .ant-select-selection-item-remove').click();
+  await drawer.getByLabel("本站销售渠道", { exact: true }).click(); await page.getByText("Sales 3 · ID 3", { exact: true }).last().click(); await drawer.getByLabel("本站销售渠道", { exact: true }).press("Escape");
+  await drawer.getByRole("button", { name: "预览对账规则", exact: true }).click(); await drawer.getByText("最终渠道：#2、#3", { exact: true }).waitFor(); await drawer.getByText("释放渠道：#1；原账单保留。", { exact: true }).waitFor(); assert.equal(puts.length, 0);
+  await drawer.getByRole("button", { name: "保存对账规则", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); assert.equal(previews.length, 1); assert.equal(puts.length, 1); assert.deepEqual(puts[0].salesChannelIds, [2, 3]); assert.equal(puts[0].tokenId, 7); assert.equal(puts[0].groupId, "rule-edit"); assert.equal(puts[0].previewId, "exact-rule-preview"); assert.equal(puts[0].coverageDeclaration.answer, "unknown");
+});
+
+test("manual create uses genuine batch proof and retains account monitoring purpose", async (t) => {
+  const { page, probes, writes } = await openOnboardingPage(t, { ruleConfiguration: { ...configuration, channels: [{ id: 4, name: "New channel", status: 1 }] }, extraAPI(route, path) {
+    if (path === "/api/reconciliation/upstreams/upstream-1/keys") return fulfill(route, { tokens: onboardingTokens, groups: {} });
+    throw new Error("unexpected create fixture API: " + path);
+  } });
+  await page.getByRole("button", { name: "添加对账规则", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "添加对账规则", exact: true });
+  await drawer.getByLabel("上游账号", { exact: true }).click(); await page.getByText("Fixture upstream", { exact: true }).last().click(); await drawer.getByLabel("固定分组 Key", { exact: true }).click(); await page.getByText("Supplier Key · upstream-group", { exact: true }).last().click(); await drawer.getByLabel("本站销售渠道", { exact: true }).click(); await page.getByText("New channel · ID 4", { exact: true }).last().click(); await drawer.getByLabel("对账时区", { exact: true }).click();
+  await drawer.getByRole("button", { name: "预览对账规则", exact: true }).click(); await drawer.getByText("最终渠道：#1、#2、#3、#4", { exact: true }).waitFor(); assert.equal(writes.length, 0); await drawer.getByRole("button", { name: "保存对账规则", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); assert.equal(probes.length, 1); assert.equal(writes.length, 1); assert.equal(writes[0].selections[0].monitor, false); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal(writes[0].previewId, "preview-" + writes[0].requestId + "-1");
+});
+
+test("a lost batch response recovers persisted results without returned browser IDs or another confirm", async (t) => {
+  const { page, writes, recoveries } = await openOnboardingPage(t, { loseResponseAt: 1 });
+  const drawer = await openOnboardingDrawer(page); await enableBilling(page, drawer); await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("全部请求步骤已保存", { exact: true }).waitFor();
+  assert.equal(writes.length, 1); assert.equal(recoveries.length, 1); assert.equal(recoveries[0].requestId, writes[0].requestId); assert.equal(recoveries[0].selections[0].stationId, "upstream-1"); assert.equal("saved" in recoveries[0], false); assert.equal(await drawer.getByRole("button", { name: "重试未完成步骤", exact: true }).isDisabled(), true);
+});
+
+test("a new billing-only account is confirmed without creating another monitor", async (t) => {
+  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) }); const drawer = await openOnboardingDrawer(page); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-billing-only"); await drawer.getByText("关联余额监控", { exact: true }).click(); await enableBilling(page, drawer); await saveOnboarding(drawer); assert.equal(writes[0].selections[0].monitor, false); assert.equal(writes[0].selections[0].newStation.accessToken, "fixture-billing-only");
+});
+
+test("the resources page retains the same batch entry and original resource configuration", async (t) => {
+  const { page, writes } = await openOnboardingPage(t, { extraAPI(route, path) {
+    if (path === "/api/stations") return fulfill(route, { stations: [], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
+    throw new Error("unexpected station fixture API: " + path);
+  } });
+  await page.goto(baseURL + "/stations"); const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].groups[0].channels[0].channelId, 4); await page.getByRole("button", { name: /添加资源/ }).click(); await page.getByRole("dialog", { name: "添加上游资源", exact: true }).waitFor();
+});
+
+test("catalogue sync occurs on entry and manual discovery, without page-minute polling", async (t) => {
+  const { page, reads } = await openOnboardingPage(t, { clock: true }); assert.equal(reads.filter((entry) => entry.path.endsWith("/sync")).length, 1); await page.clock.fastForward(70000); assert.equal(reads.filter((entry) => entry.path.endsWith("/sync")).length, 1); await page.getByRole("button", { name: "发现新渠道", exact: true }).click(); await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click({ trial: true }); assert.equal(reads.filter((entry) => entry.path.endsWith("/sync")).length, 2);
 });
 
 test("two rule retries retain both independently returned amounts", async (t) => {

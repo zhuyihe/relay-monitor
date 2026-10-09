@@ -18,6 +18,58 @@ export async function api(path: string, opts: { method?: string; body?: any } = 
   return data;
 }
 
+export type AccountIdentity = { provider: "newapi" | "sub2api"; baseUrl: string; accountId: string };
+export type OwnSource = AccountIdentity & { stationId: string; namespaceKey: string };
+export type CoverageDeclaration = { answer: "none" | "other_use" | "unknown"; otherUse: "own_channels" | "external" | "unspecified" | null; uncoveredOwnChannelIds: number[] };
+export type ConnectionInput = { type: "newapi" | "newapi-key" | "sub2api" | "sub2api-password"; baseUrl: string; name?: string; accessToken?: string; userId?: string; apiKey?: string; email?: string; password?: string };
+export type PublicResource = {
+  id: string | null; name: string; type: ConnectionInput["type"]; baseUrl: string; monitorEnabled: boolean;
+  archivedAt: string | null; authVersion: number; resourceVersion: string | null; identity: AccountIdentity | null;
+  verification: "verified" | "unverified"; purposes: { monitor: boolean; billingRuleIds: string[] };
+  balance: any; lowBalanceUsd: number | null; cnyPerUsd: number | null; includeInProfit: boolean; noRenewal: boolean;
+  hasAccessToken: boolean; hasApiKey: boolean; hasPassword: boolean;
+};
+export type SafeToken = { id: number; name: string; status: number; group?: string; crossGroupRetry?: boolean; maskedKey?: string };
+export type GroupBasis = {
+  ownSource: OwnSource; sourceVersion: string; channelRevisions: Record<string, string>;
+  resourceVersions: Record<string, { authVersion: number; resourceVersion: string }>;
+  accountIdentity: AccountIdentity | null; canonicalKey: string | null; tokenId: number | null; keyVersion: string | null;
+  existingRuleId: string | null; existingScopeVersion: number | null; existingChannelIds: number[]; proposedChannelIds: number[];
+  timezone: string; billingEffectiveFromMs: number | null; coverageDeclaration: CoverageDeclaration;
+};
+export type GroupPreview = { costCoverage: "complete" | "unknown"; billingEffectiveFromMs: number | null; firstQueryableAtMs: number | null; scopeChanged: boolean };
+export type BatchInput = {
+  requestId: string; ownStationId: string;
+  selections: { selectionId: string; stationId?: string; newStation?: ConnectionInput; monitor: boolean; additionalMonitorStationIds?: string[]; updateCredentials?: boolean; reconciliationAuthorization?: { stationId?: string; newAuthorization?: ConnectionInput } }[];
+  groups: { groupId: string; selectionId: string; channels: { channelId: number; channelRevision: string }[]; reconciliation: null | { tokenId?: number; timezone?: string; coverageDeclaration: CoverageDeclaration } }[];
+  previewId?: string;
+};
+export type BatchRecoveryIntent = {
+  requestId: string; source: { ownStationId: string; ownSource: OwnSource; sourceVersion: string };
+  selections: { selectionId: string; stationId: string | null; type: ConnectionInput["type"]; baseUrl: string; monitor: boolean; additionalMonitorStationIds: string[]; accountIdentity: AccountIdentity | null; authorizationStationId: string | null; authorizationIdentity: AccountIdentity | null; credentialUpdateRequested: boolean }[];
+  groups: { groupId: string; requestedGroupIds: string[]; selectionIds: string[]; channels: { channelId: number; channelRevision: string }[]; reconciliationRequested: boolean; reconciliation: null | { canonicalKey: string; tokenId: number; timezone: string; coverageDeclaration: CoverageDeclaration; previewEffectiveFromMs: number | null } }[];
+};
+export type BatchProbe = {
+  requestId: string; previewId: string; expiresAtMs: number; source: { ownSource: OwnSource; sourceVersion: string; resourceVersion: string };
+  selections: { selectionId: string; station: PublicResource | null; monitor: { status: "verified" | "unavailable"; reason?: string }; authorizationStationId: string | null; accountIdentity: AccountIdentity | null; tokens: SafeToken[]; credentialUpdateRequired: boolean }[];
+  groups: { groupId: string; requestedGroupIds: string[]; selectionIds: string[]; requestedChannelIds: number[]; status: "ready" | "monitor_only" | "unverified" | "unsupported" | "unavailable"; reason?: string; code?: string; basis: GroupBasis; preview: GroupPreview }[];
+  retryInput: BatchRecoveryIntent;
+};
+export type BatchResult = {
+  requestId: string; complete: boolean;
+  groups: {
+    groupId: string; requestedGroupIds: string[]; canonicalKey: string | null; complete: boolean; code?: string; reason?: string;
+    nextPreview?: { billingEffectiveFromMs: number; timezone: string; proposedChannelIds: number[]; coverageDeclaration: CoverageDeclaration };
+    monitor: { status: "linked" | "not_requested" | "pending" | "unavailable"; stationIds: string[] };
+    reconciliation: { status: "configured" | "not_requested" | "unverified" | "unsupported" | "unavailable" | "pending"; ruleId?: string; scopeVersion?: number; billingEffectiveFromMs?: number; reason?: string };
+    channels: { channelId: number; channelRevision: string; complete: boolean; stationIds: string[]; ruleId: string | null; code?: string; reason?: string; remainingActions: string[] }[];
+    saved: { stationIds: string[]; authorizationStationId: string | null; links: { ownStationId: string; channelId: number; stationId: string; channelRevision: string; confirmedAt?: string }[]; ruleId: string | null; scopeVersion: number | null; billingEffectiveFromMs: number | null };
+    remainingActions: string[];
+  }[];
+  retryInput: BatchRecoveryIntent;
+};
+export type RuleEditPreview = { previewId: string; groupId: string; expiresAtMs: number; existingRule?: any; basis: GroupBasis; preview: GroupPreview };
+
 // ---- 工具（与 v1 app.js 完全一致）-------------------------------------------
 export const usd = (n: any) => "$" + Number(n ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 export const cny = (n: any) => "¥" + Number(n ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });

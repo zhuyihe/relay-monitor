@@ -4,7 +4,11 @@ import { createReconciliationModule } from "../../../../../server/reconciliation
 export const PUT = withAuth(async (request, rt, params) => {
   const body = await request.json().catch(() => ({}));
   try {
-    const previewGuard = body.previewId && body.groupId ? rt.onboardingSource?.getPreviewGuard(body.previewId, body.groupId) : null;
+    let previewGuard = null;
+    if (body.previewId && body.groupId) {
+      try { previewGuard = rt.onboardingSource?.getPreviewGuard(body.previewId, body.groupId); }
+      catch (error) { if (error.code !== "PREVIEW_REQUIRED") throw error; }
+    }
     const rule = await (rt.reconciliation ||= createReconciliationModule(rt)).updateRule(params.id, body, { previewGuard });
     return json({ rule });
   } catch (error) {

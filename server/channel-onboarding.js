@@ -7,6 +7,7 @@ import { stationBusinessVersion } from "../db/store.js";
 import { nextBillingEffectiveFrom, completedBillingDayWindow, canonicalBillingKey, applyScopePolicy } from "../lib/reconciliation-scope-policy.js";
 import { ChannelOnboardingRepository } from "./channel-onboarding-repository.js";
 import { refreshStation } from "./refresh.js";
+import { normalizeReconciliationScopeIntent } from "./reconciliation.js";
 
 // 验证后才保存。重试和同进程并发接入按上游地址 + 账号身份复用，避免重复监控同一余额。
 export async function connectNewApiUpstream(rt, input, queryMetadata = queryNewApiReconciliationMetadata) {
@@ -218,19 +219,18 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     if (hash(preview) !== hash(facts.preview) || basis.billingEffectiveFromMs !== facts.basis.billingEffectiveFromMs) changed();
   }
 
-  function registerBatchPreview(input, groups, retryInput) {
+  function registerPreview(groups, retryInput = null) {
     expirePreviews();
     while (previews.size >= 100) previews.delete(previews.keys().next().value);
     const previewId = randomUUID(), expiresAtMs = now() + 10 * 60000;
-    const storedGroups = groups.map((group) => ({ groupId: group.groupId, requestedGroupIds: [...group.requestedGroupIds],
-      selectionIds: [...group.selectionIds], channels: structuredClone(group.channels), basis: structuredClone(group.basis),
-      preview: structuredClone(group.preview), roles: structuredClone(group.roles), digest: batchGroupDigest(input, group) }));
+    const storedGroups = structuredClone(groups);
     const value = { previewId, expiresAtMs, retryInput: structuredClone(retryInput), groups: storedGroups };
     for (const group of storedGroups) {
       const facts = { previewId, expiresAtMs, basis: frozen(structuredClone(group.basis)),
         preview: frozen(structuredClone(group.preview)), saved: new Map(), roles: group.roles,
-        digest: group.digest };
+        digest: group.digest, scopeIntent: frozen(structuredClone(group.scopeIntent || null)) };
       const guard = Object.freeze({ basis: facts.basis, preview: facts.preview,
+        scopeIntent: facts.scopeIntent,
         requestedChannelIds: Object.freeze(group.channels.map((channel) => channel.channelId)),
         get postSaveResourceVersions() { return frozen(Object.fromEntries([...facts.saved].map(([id, saved]) => [id, { ...saved.version }]))); } });
       group.guard = guard;
@@ -238,6 +238,13 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     }
     previews.set(previewId, value);
     return value;
+  }
+
+  function registerBatchPreview(input, groups, retryInput) {
+    return registerPreview(groups.map((group) => ({ groupId: group.groupId, requestedGroupIds: [...group.requestedGroupIds],
+      selectionIds: [...group.selectionIds], channels: structuredClone(group.channels), basis: structuredClone(group.basis),
+      preview: structuredClone(group.preview), roles: structuredClone(group.roles), scopeIntent: group.scopeIntent,
+      digest: batchGroupDigest(input, group) })), retryInput);
   }
 
   function batchGroupDigest(input, group) {
@@ -582,6 +589,12 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           group.code = error.code || "FINANCIAL_PREVIEW_FAILED"; group.reason = failure(error, [prepared.get(group.selectionIds[0])?.billing?.connection, own()]);
         }
       }
+      if (group.status === "ready" && group.reconciliation) {
+        group.scopeIntent = normalizeReconciliationScopeIntent("append", group.basis.existingRuleId, {
+          tokenId: group.reconciliation.tokenId, salesChannelIds: group.channels.map((channel) => channel.channelId),
+          timezone: group.basis.timezone, coverageDeclaration: group.basis.coverageDeclaration,
+        }, { timezone: group.basis.timezone, enabled: group.existingRule?.enabled ?? true });
+      }
     }
     const retryInput = { requestId: input.requestId, source: { ownStationId: input.ownStationId, ownSource: source.ownSource, sourceVersion: source.sourceVersion },
       selections: input.selections.map((selection) => {
@@ -617,6 +630,35 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   async function probeBatch(input) {
     return (await batchProbeState(normalizeBatchInput(input))).output;
+  }
+
+  async function probeRuleEdit(id, input) {
+    const existing = (await rules()).find((rule) => rule.id === id && !rule.archivedAt);
+    if (!existing) throw previewFailure("RULE_NOT_FOUND", "规则不存在或已归档");
+    const source = getSourceCatalogue(), sourceConnection = structuredClone(own());
+    const upstream = structuredClone(rt.store.get(existing.upstreamStationId));
+    const versions = Object.fromEntries([sourceConnection, upstream].filter(Boolean).map((station) => [station.id, stationBusinessVersion(station)]));
+    const originalRule = (rule) => hash([rule.id, rule.upstreamStationId, rule.ownStationId, rule.tokenId, rule.scopeVersion,
+      rule.channels.map((channel) => channel.channelId).sort((a, b) => a - b), rule.timezone, rule.enabled,
+      rule.canonicalKey, rule.ownSource, rule.sourceBinding, rule.costCoverage, rule.coverageDeclaration, rule.billingEffectiveFrom]);
+    try {
+      const scopeIntent = normalizeReconciliationScopeIntent("replace", id, input, existing);
+      const financial = await rt.reconciliation.previewKeyScope(scopeIntent.normalizedPutIntent, { replaceRuleId: id });
+      const latest = (await rules()).find((rule) => rule.id === id && !rule.archivedAt);
+      if (!latest || originalRule(existing) !== originalRule(financial.existingRule) || originalRule(existing) !== originalRule(latest)
+          || getSourceCatalogue().stale || sourceVersion() !== source.sourceVersion
+          || Object.entries(versions).some(([stationId, version]) => stationBusinessVersion(rt.store.get(stationId)) !== version)) {
+        throw previewFailure("PREVIEW_BASIS_CHANGED", "规则、来源或授权在验证期间变化，请重新预览");
+      }
+      const groupId = "rule-edit";
+      const record = registerPreview([{ groupId, requestedGroupIds: [groupId], selectionIds: [], roles: [],
+        channels: financial.basis.proposedChannelIds.map((channelId) => ({ channelId, channelRevision: financial.basis.channelRevisions[channelId] })),
+        basis: financial.basis, preview: financial.preview, scopeIntent, digest: hash(scopeIntent) }]);
+      return { previewId: record.previewId, groupId, expiresAtMs: record.expiresAtMs,
+        existingRule: financial.existingRule, basis: financial.basis, preview: financial.preview };
+    } catch (error) {
+      throw previewFailure(error.code || "RULE_PREVIEW_FAILED", failure(error, [sourceConnection, upstream, own(), rt.store.get(existing.upstreamStationId)]));
+    }
   }
 
   function currentGroupContext(group, guard, latestRule) {
@@ -676,6 +718,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const sourceConnection = structuredClone(own());
     expirePreviews();
     const original = input.previewId && previews.get(input.previewId);
+    if (original && !original.retryInput) throw previewFailure("PREVIEW_REQUIRED", "规则编辑预览不能用于批量接入，请重新预览");
     if (financialRequested && !original && !input.previewId) throw previewFailure("PREVIEW_REQUIRED", "财务接入需要当前服务端预览，请先验证后确认");
     const state = await batchProbeState(input, { register: !original && !financialRequested });
     const record = original || state.record;
@@ -988,7 +1031,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   function singleBatchInput(input) {
     if (!input || typeof input !== "object" || Array.isArray(input)) throw previewFailure("INVALID_REQUEST", "接入请求格式无效");
     const previous = input.previewId && previews.get(input.previewId);
-    const requestId = input.requestId || previous?.retryInput.requestId || randomUUID();
+    const requestId = input.requestId || previous?.retryInput?.requestId || randomUUID();
     const authorization = input.reconciliation;
     const selection = { selectionId: "primary", monitor: true, stationId: input.stationId, newStation: input.newStation,
       additionalMonitorStationIds: input.additionalMonitorStationIds || [], updateCredentials: input.updateCredentials === true };
@@ -1039,7 +1082,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   }
 
   return { list, sync, probe, connect, inspectSource, getRuleSource: inspectSource, getSourceCatalogue, withSourceLock,
-    getPreviewGuard, assertPreviewGuard, probeBatch, connectBatch, recoverBatch,
+    getPreviewGuard, assertPreviewGuard, probeBatch, connectBatch, recoverBatch, probeRuleEdit,
     async load() { [catalogue, links] = await Promise.all([repository.getCatalogue(), repository.listLinks()]); return this; } };
 }
 

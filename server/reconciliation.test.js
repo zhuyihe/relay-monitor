@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow } from "./reconciliation.js";
+import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow, normalizeReconciliationScopeIntent } from "./reconciliation.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState } from "./reconciliation-repository.js";
 import { reconciliationSnapshotIdentity } from "../lib/reconciliation-snapshot.js";
 import { Store } from "../db/store.js";
@@ -662,7 +662,7 @@ test("编辑规则不能替换上游账号或 Key，且拒绝发生在元数据�
   const input = { upstreamStationId: "upstream-a", tokenId: 10, salesChannelIds: [1], timezone: "Asia/Shanghai" };
   await assert.rejects(
     () => module.updateRule(rule.id, input),
-    (error) => error.code === "RULE_IDENTITY_IMMUTABLE" && /新建规则/.test(error.message)
+    (error) => error.code === "RULE_IDENTITY_IMMUTABLE" && /规则身份/.test(error.message)
   );
   assert.equal(queries, 2);
 });
@@ -2795,7 +2795,7 @@ test("R02本站同源PAT不延期；A换B并同步仍不确认旧A，旧快照�
 function membershipFixture() {
   const state = { rules: [{ id: "rr_members", upstream_station_id: "up", own_station_id: "own", token_id: 9,
     token_name: "stable", fixed_group: "g1", timezone: "Asia/Shanghai", enabled: 1, archived_at: null }],
-    channels: [{ rule_id: "rr_members", channel_id: 1, channel_name: "一" }], created: 0, rollbacks: 0, failChannels: false };
+    channels: [{ rule_id: "rr_members", channel_id: 1, channel_name: "一" }], created: 0, ruleWrites: 0, rollbacks: 0, failChannels: false };
   let lockTail = Promise.resolve();
   const read = (sql, params = [], target = state) => {
     if (sql.includes("JOIN reconciliation_rule_channels")) return [target.channels.filter((channel) => params[0].includes(channel.channel_id)
@@ -2824,6 +2824,7 @@ function membershipFixture() {
         if (sql.startsWith("UPDATE reconciliation_rules")) {
           const rule = working.rules.find((item) => item.id === params[15]);
           if (!rule) return [{ affectedRows: 0 }];
+          working.ruleWrites += 1;
           [rule.upstream_station_id, rule.own_station_id, rule.token_id, rule.token_name, rule.fixed_group, rule.timezone,
             rule.enabled, rule.active_token_key, rule.billing_policy, rule.scope_version, rule.billing_effective_from_ms,
             rule.cost_coverage, rule.provider, rule.canonical_key, rule.source_binding] = params;
@@ -2852,7 +2853,7 @@ function membershipFixture() {
         if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) return [{ affectedRows: 1 }];
         throw new Error(`Unexpected write: ${sql}`);
       },
-      async commit() { state.rules = working.rules; state.channels = working.channels; state.created = working.created; },
+      async commit() { state.rules = working.rules; state.channels = working.channels; state.created = working.created; state.ruleWrites = working.ruleWrites; },
       async rollback() { state.rollbacks += 1; },
       release() { releaseLock?.(); },
     };
@@ -2916,7 +2917,8 @@ async function financialRuleRoutes() {
   try {
     const { POST } = await import("../app/api/reconciliation/rules/route.js");
     const { PUT } = await import("../app/api/reconciliation/rules/[id]/route.js");
-    return { POST, PUT };
+    const { POST: PREVIEW } = await import("../app/api/reconciliation/rules/[id]/preview/route.js");
+    return { POST, PUT, PREVIEW };
   } finally { hooks.deregister(); }
 }
 
@@ -2938,6 +2940,25 @@ test("U01 dry-read使用真实Key与来源并集，无写入且不把采样时�
   await assert.rejects(f.module.previewKeyScope(f.input, { authorization: { station: f.store.get("up"),
     metadata: { ...metadata, platform: "newapi", accountId: 42, capability: { state: "unverified" } } } }),
   (error) => error.code === "BILLING_CAPABILITY_UNVERIFIED");
+});
+
+test("U02 exact replace dryread最终集合/原成员完整绑定，缺声明不继承旧complete且零写", async (t) => {
+  const f = await financialFixture(t);
+  f.state.channels.push({ rule_id: "rr_members", channel_id: 2, channel_name: "two" });
+  const body = { ...f.input, salesChannelIds: [3, 2, 3], enabled: false };
+  const before = structuredClone(f.state.rules);
+  const result = await f.module.previewKeyScope(body, { replaceRuleId: "rr_members" });
+  assert.deepEqual(result.basis.existingChannelIds, [1, 2]);
+  assert.deepEqual(result.basis.proposedChannelIds, [2, 3]);
+  assert.deepEqual(Object.keys(result.basis.channelRevisions), ["2", "3"]);
+  assert.deepEqual(f.state.rules, before);
+  const intent = normalizeReconciliationScopeIntent("replace", "rr_members", body, { timezone: "Asia/Shanghai", enabled: true });
+  assert.deepEqual(intent, { kind: "replace", targetRuleId: "rr_members", existingEnabled: true, normalizedPutIntent: {
+    upstreamStationId: "up", tokenId: 9, salesChannelIds: [2, 3], timezone: "Asia/Shanghai", enabled: false, coverageDeclaration: f.input.coverageDeclaration } });
+  await assert.rejects(f.module.previewKeyScope({ ...body, coverageDeclaration: undefined }, { replaceRuleId: "rr_members" }),
+    (error) => error.code === "INVALID_REQUEST");
+  await assert.rejects(f.module.previewKeyScope({ ...body, tokenId: 10 }, { replaceRuleId: "rr_members" }),
+    (error) => error.code === "RULE_IDENTITY_IMMUTABLE");
 });
 
 test("U01公共旧POST/PUT拒绝body伪造guard/options，真实runtime拒绝复制proof引用", async (t) => {
@@ -3010,8 +3031,112 @@ test("U01真public probe授权整组五渠道一次scope；复制引用失败，
   assert.equal(f.state.created, 1);
   const second = await financialProof(f, [1, 2, 3, 4, 5]);
   const updated = await PUT(new Request("https://app.test/rules", { method: "PUT", body: JSON.stringify({ ...body, previewId: second.probe.previewId }) }), f.rt, { id: rule.id });
-  assert.equal(updated.status, 200, JSON.stringify(await updated.clone().json()));
-  assert.equal((await updated.json()).rule.billingEffectiveFrom, rule.billingEffectiveFrom);
+  assert.equal(updated.status, 409);
+  assert.equal((await updated.json()).code, "PREVIEW_BASIS_CHANGED", "append proof即使最终集合相同也不能授权PUT");
+});
+
+test("U02真实issuer+HTTP删除/同时增删精确替换，不继承被删成员的complete覆盖", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-09T07:00:00Z"));
+  const f = await financialFixture(t), { PREVIEW, PUT } = await financialRuleRoutes();
+  f.state.channels.push({ rule_id: "rr_members", channel_id: 2, channel_name: "two" });
+  const body = { ...f.input, salesChannelIds: [2] };
+  const request = (value) => new Request("https://app.test/rules/rr_members", { method: "POST", body: JSON.stringify(value) });
+  const response = await PREVIEW(request({ ...body, replaceRuleId: "fake", authorization: { station: { id: "fake" } }, scopeIntent: { kind: "append" } }), f.rt, { id: "rr_members" });
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  const proof = await response.json();
+  assert.deepEqual(proof.basis.existingChannelIds, [1, 2]);
+  assert.deepEqual(proof.basis.proposedChannelIds, [2]);
+  assert.equal(f.state.rules[0].canonical_key, undefined, "preview不得锚定旧来源或写规则");
+  let confirmed = await PUT(request({ ...body, previewId: proof.previewId, groupId: proof.groupId }), f.rt, { id: "rr_members" });
+  assert.equal(confirmed.status, 200, JSON.stringify(await confirmed.clone().json()));
+  const first = (await confirmed.json()).rule;
+  assert.equal(first.id, "rr_members");
+  assert.deepEqual(first.channels.map((channel) => channel.channelId), [2]);
+  assert.equal(first.scopeVersion, 2);
+  assert.equal(first.billingEffectiveFrom, Date.parse("2026-10-09T16:00:00Z"));
+  const mixed = { ...body, salesChannelIds: [3], coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] } };
+  const next = await f.rt.onboardingSource.probeRuleEdit("rr_members", mixed);
+  confirmed = await PUT(request({ ...mixed, previewId: next.previewId, groupId: next.groupId }), f.rt, { id: "rr_members" });
+  assert.equal(confirmed.status, 200, JSON.stringify(await confirmed.clone().json()));
+  const changed = (await confirmed.json()).rule;
+  assert.deepEqual(changed.channels.map((channel) => channel.channelId), [3]);
+  assert.equal(changed.costCoverage, "unknown");
+  assert.equal(changed.scopeVersion, 3);
+  assert.deepEqual(first.channels.map((channel) => channel.channelId), [2], "原scope DTO成员保留");
+});
+
+test("U02同一PUT成功后次日/重启/过期preview只读重试，scope/day和SQL次数不变", async (t) => {
+  let now = Date.parse("2026-10-09T07:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const f = await financialFixture(t), { PUT } = await financialRuleRoutes();
+  const body = { ...f.input, salesChannelIds: [2], enabled: false };
+  const proof = await f.rt.onboardingSource.probeRuleEdit("rr_members", body);
+  const send = (input) => PUT(new Request("https://app.test/rules/rr_members", { method: "PUT", body: JSON.stringify(input) }), f.rt, { id: "rr_members" });
+  const confirmed = await send({ ...body, previewId: proof.previewId, groupId: proof.groupId });
+  assert.equal(confirmed.status, 200, JSON.stringify(await confirmed.clone().json()));
+  const first = (await confirmed.json()).rule, writes = f.state.ruleWrites;
+  const immediate = await send({ ...body, previewId: proof.previewId, groupId: proof.groupId });
+  assert.equal(immediate.status, 200, JSON.stringify(await immediate.clone().json()));
+  assert.equal(f.state.ruleWrites, writes);
+  now += 86400000; await f.rt.onboardingSource.sync();
+  f.rt.reconciliation = f.module = createReconciliationModule(f.rt);
+  for (const input of [body, { ...body, previewId: "lost-after-restart", groupId: proof.groupId }]) {
+    const response = await send(input);
+    assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+    const current = (await response.json()).rule;
+    assert.equal(current.scopeVersion, first.scopeVersion);
+    assert.equal(current.billingEffectiveFrom, first.billingEffectiveFrom);
+    assert.equal(f.state.ruleWrites, writes);
+  }
+  const unproved = await send({ ...body, salesChannelIds: [3], previewId: "lost-after-restart", groupId: proof.groupId });
+  assert.equal(unproved.status, 409);
+  assert.equal((await unproved.json()).code, "PREVIEW_REQUIRED");
+  assert.equal(f.state.ruleWrites, writes);
+});
+
+test("U02 genuine PUT SQL期间跨午夜在commit guard回滚，不留下成员或身份锚定", async (t) => {
+  let now = Date.parse("2026-10-09T15:59:59Z");
+  t.mock.method(Date, "now", () => now);
+  const f = await financialFixture(t), { PUT } = await financialRuleRoutes();
+  const body = { ...f.input, salesChannelIds: [2] }, proof = await f.rt.onboardingSource.probeRuleEdit("rr_members", body);
+  f.state.onRuleWrite = () => { now += 2000; };
+  const response = await PUT(new Request("https://app.test/rules/rr_members", { method: "PUT", body: JSON.stringify({ ...body,
+    previewId: proof.previewId, groupId: proof.groupId }) }), f.rt, { id: "rr_members" });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, "EFFECTIVE_PREVIEW_CHANGED");
+  assert.equal(f.state.ruleWrites, 0);
+  assert.equal(f.state.rules[0].canonical_key, undefined);
+  assert.equal(f.state.rules[0].scope_version, undefined);
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1]);
+});
+
+test("U02 exact replace旧preview不得删除并发新成员，fresh final意图可保留它", async (t) => {
+  const f = await financialFixture(t), body = { ...f.input, salesChannelIds: [2] };
+  const proof = await f.rt.onboardingSource.probeRuleEdit("rr_members", body), append = await financialProof(f, [3]);
+  await f.module.appendChannels("rr_members", [3], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: append.guard });
+  const writes = f.state.ruleWrites;
+  await assert.rejects(f.module.updateRule("rr_members", body, { previewGuard: f.rt.onboardingSource.getPreviewGuard(proof.previewId, proof.groupId) }),
+    (error) => error.code === "PREVIEW_BASIS_CHANGED");
+  assert.equal(f.state.ruleWrites, writes);
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1, 3]);
+  const nextBody = { ...body, salesChannelIds: [2, 3] }, next = await f.rt.onboardingSource.probeRuleEdit("rr_members", nextBody);
+  const rule = await f.module.updateRule("rr_members", nextBody, { previewGuard: f.rt.onboardingSource.getPreviewGuard(next.previewId, next.groupId) });
+  assert.deepEqual(rule.channels.map((channel) => channel.channelId), [2, 3]);
+});
+
+test("U02 private original enabled事实拒绝preview后停用，fresh replace可明确恢复", async (t) => {
+  const f = await financialFixture(t), body = { ...f.input, salesChannelIds: [2], enabled: true };
+  const proof = await f.rt.onboardingSource.probeRuleEdit("rr_members", body);
+  await f.module.updateRule("rr_members", { ...body, salesChannelIds: [1], enabled: false, coverageDeclaration: undefined });
+  const writes = f.state.ruleWrites;
+  await assert.rejects(f.module.updateRule("rr_members", body, { previewGuard: f.rt.onboardingSource.getPreviewGuard(proof.previewId, proof.groupId) }),
+    (error) => error.code === "PREVIEW_BASIS_CHANGED");
+  assert.equal(f.state.ruleWrites, writes);
+  const fresh = await f.rt.onboardingSource.probeRuleEdit("rr_members", body);
+  const saved = await f.module.updateRule("rr_members", body, { previewGuard: f.rt.onboardingSource.getPreviewGuard(fresh.previewId, fresh.groupId) });
+  assert.equal(saved.enabled, true);
+  assert.deepEqual(saved.channels.map((channel) => channel.channelId), [2]);
+  assert.equal(saved.scopeVersion, 2);
 });
 
 test("U01真正public batch确认一次保存五渠道金融组，消费成功资源证明并恢复相同重试", async (t) => {
@@ -3133,7 +3258,7 @@ test("U01public guard核验额外监控/独立billing auth；同actual账号轮�
   for (const id of ["extra", "billing"]) f.store.data.stations.push({ ...f.store.get("up"), id, accessToken: `${id}-pat` });
   const selection = { additionalMonitorStationIds: ["extra"], reconciliationAuthorization: { stationId: "billing" } };
   const original = await financialProof(f, [1, 2], selection);
-  const saved = await f.module.appendChannels("rr_members", [2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: original.guard });
+  const saved = await f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: original.guard });
   const monitorProof = await financialProof(f, [1, 2], selection);
   await f.store.update("extra", { monitorEnabled: false });
   await assert.rejects(f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: monitorProof.guard }),
@@ -3157,7 +3282,7 @@ test("U01actual账号/ownnamespace改变要求新完整日，旧history不被提
   const anchors = t.mock.method(ReconciliationRepository.prototype, "anchorRuleIdentity");
   const observations = t.mock.method(ReconciliationRepository.prototype, "observeSource");
   assert.equal(f.state.rules[0].canonical_key, undefined);
-  const first = await f.module.appendChannels("rr_members", [2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: original.guard });
+  const first = await f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: original.guard });
   now += 86400000; await f.rt.onboardingSource.sync();
   const stale = await financialProof(f, [1, 2]);
   f.remote.accountId = 43;
@@ -3195,7 +3320,7 @@ test("U01真实Sub2API public proof允许自动JWT续期，显式密码修改废
   });
   const proof = await financialProof(f, [1, 2]);
   station.s2Tokens = { accessToken: "automatically-renewed-jwt", expiresAt: Date.now() + 1000000 };
-  const first = await f.module.appendChannels("rr_members", [2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: proof.guard });
+  const first = await f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: proof.guard });
   assert.equal(station.s2Tokens.accessToken, "automatically-renewed-jwt");
   const beforePassword = await financialProof(f, [1, 2]);
   await f.store.update("up", { password: "new-password" }, { verifiedIdentity: { provider: "sub2api", baseUrl: "https://up.test", accountId: "42" } });
