@@ -219,8 +219,9 @@ export class Store {
       if (!change) return null;
       if (change.data) {
         try {
-          await this._writeNow(change.data);
+          await this._writeNow(change.data, change.guard);
         } catch (err) {
+          if (change.guard && ["AUTHORIZATION_CHANGED", "RESOURCE_CHANGED", "PREVIEW_BASIS_CHANGED"].includes(err?.code)) throw err;
           // API 只返回操作失败，不回显可能包含凭证的数据库错误。
           throw new Error("保存失败，请稍后重试", { cause: err });
         }
@@ -233,7 +234,7 @@ export class Store {
     return pending;
   }
 
-  async _writeNow(data = this.data) {
+  async _writeNow(data = this.data, guard) {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
@@ -257,6 +258,7 @@ export class Store {
         "INSERT INTO meta (k, v) VALUES ? ON DUPLICATE KEY UPDATE v = VALUES(v)",
         [metas]
       );
+      guard?.();
       await conn.commit();
     } catch (err) {
       await conn.rollback().catch(() => {});
@@ -486,7 +488,8 @@ export class Store {
     return this._saveChange(() => {
       guard?.(null);
       const stations = [...this.data.stations, station];
-      return { data: { ...this.data, stations }, publish: () => { this.data.stations = stations; }, value: station };
+      return { data: { ...this.data, stations }, guard: guard && (() => guard(null)),
+        publish: () => { this.data.stations = stations; }, value: station };
     });
   }
 
@@ -554,14 +557,14 @@ export class Store {
       }
       // 即使原缓存为空，也须覆盖提交期间后台取得的旧凭证令牌。
       if (credsChanged) return { s2Tokens: null };
-    });
+    }, { guard: guard && (() => guard(this.get(id))) });
   }
 
   _changeStation(id, apply) {
     return this.withStationLocks([id], () => this._changeStationLocked(id, apply));
   }
 
-  _changeStationLocked(id, apply) {
+  _changeStationLocked(id, apply, { guard } = {}) {
     return this._saveChange(() => {
       const current = this.get(id);
       if (!current) return null;
@@ -573,6 +576,7 @@ export class Store {
       const stations = this.data.stations.map((s) => s.id === id ? next : s);
       return {
         data: { ...this.data, stations },
+        guard,
         // 保留刷新持有的对象及提交期间更新的余额、令牌等未编辑字段。
         publish: () => {
           if ("noRenewal" in fields) {

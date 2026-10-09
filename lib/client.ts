@@ -87,6 +87,15 @@ export type AccountKeyScope = {
 };
 export type AccountRecord = { accountKey: string; siteKey: string; identity: AccountIdentity; resources: PublicResource[]; keys: AccountKeyScope[]; actions: WorkflowAction[] };
 export type AccountReadModel = { accounts: AccountRecord[]; unverifiedResources: PublicResource[]; channels: PublicCatalogueChannel[]; actions: WorkflowAction[]; generatedAt: string };
+export type AccountAuthorizationRecoveryIntent = { requestId: string; targetStationIds: string[] };
+export type AccountAuthorizationInput = AccountAuthorizationRecoveryIntent & { authorization?: { type: "newapi" | "sub2api" | "sub2api-password"; baseUrl: string; accessToken?: string; userId?: string; email?: string; password?: string }; reuseSavedAuthorization?: boolean; previewId?: string };
+export type AccountAuthorizationImpact = { monitorStationIds: string[]; billingRuleIds: string[]; channels: { ownStationId: string; channelId: number; name: string }[] };
+export type AccountAuthorizationProbe = {
+  requestId: string; previewId: string; expiresAtMs: number; accountKey: string; identity: AccountIdentity;
+  targets: { stationId: string; authVersion: number; resourceVersion: string; currentType: string; newType: string; purposes: PublicResource["purposes"]; monitorChannelIds: number[]; billingRuleIds: string[]; billingChannelIds: number[] }[];
+  excluded: { stationId: string; reason: string }[]; impact: AccountAuthorizationImpact; retryInput: AccountAuthorizationRecoveryIntent;
+};
+export type AccountAuthorizationResult = { requestId: string; accountKey: string; complete: boolean; targets: { stationId: string; status: "updated" | "already_updated" | "failed" | "repreview_required"; savedAuthVersion: number | null; code?: string; reason?: string; remainingActions: string[] }[]; excluded: { stationId: string; reason: string }[]; impact: AccountAuthorizationImpact; retryInput: AccountAuthorizationRecoveryIntent };
 
 // ---- 工具（与 v1 app.js 完全一致）-------------------------------------------
 export const usd = (n: any) => "$" + Number(n ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });

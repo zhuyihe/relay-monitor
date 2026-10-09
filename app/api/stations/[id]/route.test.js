@@ -55,6 +55,64 @@ test("公共PUT明确映射CAS，忽略伪造identity/markers/guard，restore保
   assert.equal(station.name, "Renamed");
 });
 
+test("U04 actual authenticated GET显式includeUnmonitored可重载暂停和专用授权完整编辑数据，默认/非法值不开放全量", async (t) => {
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]],
+    commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const store = new Store(pool);
+  const own = await store.add({ type: "newapi", baseUrl: "https://own.test", accessToken: "own-secret", isOwn: true });
+  const paused = await store.add({ type: "newapi", baseUrl: "https://up.test", accessToken: "monitor-secret", userId: "41",
+    costAliases: ["old-alias"], lowBalanceUsd: 17, cnyPerUsd: 0.7, noRenewal: true, fixedPurchases: [{ amount: 200, days: 30, startDate: "2026-10-01" }] });
+  const dedicated = await store.add({ type: "sub2api-password", baseUrl: "https://billing.test", email: "billing@example.test", password: "billing-password", monitorEnabled: false,
+    costAliases: ["billing-alias"], lowBalanceUsd: 29, cnyPerUsd: 0.6, noRenewal: true });
+  const archived = await store.add({ type: "newapi", baseUrl: "https://archived.test", accessToken: "archived-secret" }); await store.archive(archived.id);
+  paused.onboardingOrigin = { requestId: "internal-origin" }; paused.authorizationUpdateRef = { requestId: "internal-update" };
+  dedicated.s2Tokens = { accessToken: "generated-access", refreshToken: "generated-refresh" };
+  store.data.auth = { username: "admin", isDefault: false };
+  const rt = { store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 },
+    sessions: { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
+  const { PUT } = await stationRoute();
+  const pausedResponse = await PUT(new Request("http://localhost/api/stations/one", { method: "PUT", body: JSON.stringify({ monitorEnabled: false,
+    expectedAuthVersion: paused.authVersion, expectedResourceVersion: stationBusinessVersion(paused) }) }), rt, { id: paused.id });
+  assert.equal(pausedResponse.status, 200); assert.equal(paused.monitorEnabled, false); assert.equal(own.isOwn, true);
+  const before = structuredClone(store.data);
+  t.mock.method(globalThis, "fetch", async () => { assert.fail("GET must not fetch upstream"); });
+  t.mock.method(store, "_writeNow", async () => { assert.fail("GET must not write"); });
+  globalThis.__u04StationsRuntime = rt;
+  const hooks = registerHooks({
+    resolve(specifier, context, next) {
+      if (specifier === "next/server") return { url: "test:u04-stations-next", shortCircuit: true };
+      // Isolate the actual authentication adapter from the older PUT handler-only fixture.
+      if (specifier === "../../../lib/api.js" && context.parentURL?.endsWith("/app/api/stations/route.js")) {
+        return { url: new URL("../../../../lib/api.js?u04-stations-get", import.meta.url).href, shortCircuit: true };
+      }
+      return next(specifier, context);
+    },
+    load(url, context, next) {
+      if (url === "test:u04-stations-next") return { format: "module", shortCircuit: true, source: "export const NextResponse = {json:(value,init)=>Response.json(value,init)};" };
+      if (url.endsWith("/lib/runtime.js")) return { format: "module", shortCircuit: true, source: "export const getRuntime = async () => globalThis.__u04StationsRuntime;" };
+      return next(url, context);
+    },
+  });
+  try {
+    const { GET } = await import("../route.js");
+    const get = (query = "", authenticated = true) => GET(new Request(`http://localhost/api/stations${query}`, { headers: authenticated ? { cookie: "rm_session=valid" } : {} }));
+    assert.equal((await get("?includeUnmonitored=true", false)).status, 401);
+    for (const query of ["", "?includeUnmonitored=false", "?includeUnmonitored=1", "?includeUnmonitored=TRUE", "?includeUnmonitored=invalid"]) {
+      assert.deepEqual((await (await get(query)).json()).stations.map((station) => station.id), [own.id]);
+    }
+    const full = await (await get("?includeUnmonitored=true")).json();
+    assert.deepEqual(full.stations.map((station) => station.id), [own.id, paused.id, dedicated.id]);
+    const monitor = full.stations.find((station) => station.id === paused.id), billing = full.stations.find((station) => station.id === dedicated.id);
+    for (const field of ["id", "userId", "costAliases", "lowBalanceUsd", "cnyPerUsd", "noRenewal", "fixedPurchases", "monitorEnabled", "includeInProfit"]) assert.deepEqual(monitor[field], paused[field]);
+    for (const field of ["id", "email", "costAliases", "lowBalanceUsd", "cnyPerUsd", "noRenewal", "monitorEnabled", "includeInProfit"]) assert.deepEqual(billing[field], dedicated[field]);
+    assert.doesNotMatch(JSON.stringify(full), /own-secret|monitor-secret|billing-password|generated-access|generated-refresh|internal-origin|internal-update|authorizationUpdateRef|onboardingOrigin|s2Tokens/);
+    assert.equal(monitor.hasAccessToken, true); assert.equal(billing.hasPassword, true);
+    assert.deepEqual((await (await get("?includeArchived=true")).json()).stations.map((station) => station.id), [own.id, archived.id]);
+    assert.deepEqual((await (await get("?includeArchived=true&includeUnmonitored=true")).json()).stations.map((station) => station.id), [own.id, paused.id, dedicated.id, archived.id]);
+    assert.deepEqual(store.data, before);
+  } finally { hooks.deregister(); delete globalThis.__u04StationsRuntime; }
+});
+
 test("彻底删除先清除历史；历史清除失败后保留资源以便重试", async () => {
   let purgeAttempts = 0;
   let removeCalls = 0;

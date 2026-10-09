@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { handleChannelOnboardingRequest } from "./handler.js";
 import { createChannelOnboardingModule } from "../../../server/channel-onboarding.js";
 import { Store } from "../../../db/store.js";
@@ -67,6 +68,62 @@ test("U03 authenticated accounts GET走实际wrapper/module，全量read无上�
     globalThis.__u03AccountsRuntime = { ...f.rt, channelOnboarding: null };
     assert.equal((await GET(new Request(url, { headers: { cookie: "rm_session=valid" } }))).status, 503);
   } finally { hooks.deregister(); delete globalThis.__u03AccountsRuntime; }
+});
+
+test("U04 三条authenticated authorization POST实际wrapper/module/Provider，params独占accountKey且recover零请求零保存", async (t) => {
+  const f = await liveOnboarding(), identity = { provider: "newapi", baseUrl: "https://up.test", accountId: "7" };
+  const monitor = await f.rt.store.add({ type: "newapi", baseUrl: identity.baseUrl, accessToken: "current-pat" }, { verifiedIdentity: identity });
+  const dedicated = await f.rt.store.add({ type: "newapi", baseUrl: identity.baseUrl, accessToken: "current-billing-pat", monitorEnabled: false }, { verifiedIdentity: identity });
+  f.rt.store.data.auth = { ...f.rt.store.auth, isDefault: false };
+  f.rt.sessions = { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 };
+  let fetches = 0;
+  t.mock.method(globalThis, "fetch", async () => { fetches += 1; return { status: 200, text: async () => JSON.stringify({ success: true, data: { id: 7 } }) }; });
+  const accountKey = createHash("sha256").update(JSON.stringify([identity.provider, identity.baseUrl, identity.accountId])).digest("hex");
+  const input = { requestId: "authenticated-update", targetStationIds: [monitor.id, dedicated.id],
+    authorization: { type: "newapi", baseUrl: identity.baseUrl, accessToken: "replacement-pat", verifiedIdentity: { accountId: "forged" },
+      authorizationUpdateRef: { requestId: "forged" } }, accountKey: "forged", options: { guard: "forged" } };
+  const { registerHooks } = await import("node:module"); globalThis.__u03AccountsRuntime = f.rt;
+  const hooks = registerHooks({
+    resolve(specifier, context, next) { return specifier === "next/server" ? { url: "test:u04-next", shortCircuit: true } : next(specifier, context); },
+    load(url, context, next) {
+      if (url === "test:u04-next") return { format: "module", shortCircuit: true, source: "export const NextResponse = {json:(value,init)=>Response.json(value,init)};" };
+      if (url.endsWith("/lib/runtime.js")) return { format: "module", shortCircuit: true, source: "export const getRuntime = async () => globalThis.__u03AccountsRuntime;" };
+      return next(url, context);
+    },
+  });
+  try {
+    const [{ POST: probeRoute }, { POST: updateRoute }, { POST: recoverRoute }] = await Promise.all([
+      import("./accounts/[accountKey]/authorization/probe/route.js"), import("./accounts/[accountKey]/authorization/route.js"),
+      import("./accounts/[accountKey]/authorization/recover/route.js"),
+    ]);
+    const send = (route, body, authenticated = true, pathKey = accountKey) => route(new Request(`http://localhost/api/channel-onboarding/accounts/${pathKey}/authorization`, {
+      method: "POST", headers: authenticated ? { cookie: "rm_session=valid" } : {}, body: JSON.stringify(body),
+    }), { params: Promise.resolve({ accountKey: pathKey }) });
+    for (const route of [probeRoute, updateRoute, recoverRoute]) assert.equal((await send(route, input, false)).status, 401);
+    assert.equal(fetches, 0);
+    assert.equal((await send(probeRoute, input, true, "invalid")).status, 400); assert.equal(fetches, 0);
+    const before = structuredClone(f.rt.store.data), response = await send(probeRoute, input); assert.equal(response.status, 200);
+    const probe = await response.json(); assert.equal(probe.accountKey, accountKey); assert.deepEqual(f.rt.store.data, before);
+    const updated = await (await send(updateRoute, { ...input, previewId: probe.previewId })).json(); assert.equal(updated.complete, true);
+    assert.ok(updated.targets.every((target) => target.status === "updated"));
+    const requests = fetches; t.mock.method(f.rt.store, "_writeNow", async () => { assert.fail("readonly recover must not write"); });
+    const recovered = await (await send(recoverRoute, { ...probe.retryInput, authorizationUpdateRef: "forged", identity: "forged" })).json();
+    assert.equal(recovered.complete, true); assert.equal(fetches, requests);
+    assert.doesNotMatch(JSON.stringify([probe, updated, recovered]), /current-pat|current-billing-pat|replacement-pat|forged|authorizationUpdateRef|digest/);
+    const invalid = await probeRoute(new Request("http://localhost/authorization", { method: "POST", headers: { cookie: "rm_session=valid" }, body: "private-password is not JSON" }),
+      { params: Promise.resolve({ accountKey }) }); assert.equal(invalid.status, 400); assert.equal((await invalid.json()).code, "INVALID_REQUEST");
+    globalThis.__u03AccountsRuntime = { ...f.rt, channelOnboarding: null };
+    assert.equal((await send(probeRoute, input)).status, 503);
+  } finally { hooks.deregister(); delete globalThis.__u03AccountsRuntime; }
+});
+
+test("U04 authorization失败诊断隐藏输入、当前和生成的JWT/password/PAT", async () => {
+  const station = { accessToken: "current-pat", password: "current-password", s2Tokens: { accessToken: "generated-access", refreshToken: "generated-refresh" } };
+  const rt = { store: { list: () => [station] }, channelOnboarding: { probeAccountAuthorization: async () => {
+    throw new Error("replacement-pat current-pat current-password generated-access generated-refresh");
+  } } };
+  const response = await handleChannelOnboardingRequest(request({ authorization: { accessToken: "replacement-pat" } }), rt, "probeAccountAuthorization", { accountKey: "account" });
+  assert.equal(response.status, 400); assert.doesNotMatch(JSON.stringify(await response.json()), /replacement-pat|current-pat|current-password|generated-access|generated-refresh/);
 });
 
 test("U03 accounts读取失败诊断隐藏全量saved凭据和JWT，不要求GET body", async () => {

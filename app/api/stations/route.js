@@ -5,9 +5,11 @@ import { redact } from "../../../server/stations.js";
 import { refreshStation } from "../../../server/refresh.js";
 
 export const GET = withAuth(async (request, rt) => {
-  const includeArchived = new URL(request.url).searchParams.get("includeArchived") === "true";
+  const search = new URL(request.url).searchParams;
+  const includeArchived = search.get("includeArchived") === "true";
+  const includeUnmonitored = search.get("includeUnmonitored") === "true";
   return json({
-    stations: rt.store.list({ includeArchived }).map((s) => redact(rt, s)),
+    stations: rt.store.list({ includeArchived, includeUnmonitored }).map((s) => redact(rt, s)),
     settings: rt.store.settings,
   });
 });

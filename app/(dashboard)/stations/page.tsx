@@ -11,6 +11,7 @@ import {
   Checkbox,
   Collapse,
   DatePicker,
+  Drawer,
   Empty,
   Form,
   Grid,
@@ -36,10 +37,11 @@ import AppState from "../../components/app-state";
 import ChannelOnboarding from "../../components/channel-onboarding";
 import dayjs from "dayjs";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta, statusOf } from "../../../lib/client";
-import type { AccountReadModel, AccountRecord, PublicResource } from "../../../lib/client";
+import type { AccountReadModel, AccountRecord, AccountKeyScope, PublicResource, AccountAuthorizationInput, AccountAuthorizationProbe, AccountAuthorizationResult, AccountAuthorizationRecoveryIntent } from "../../../lib/client";
 import { describeConnectionFailure } from "../../../lib/connection-test";
 
 const { Text } = Typography;
+const AUTHORIZATION_RECOVERY_KEY = "account-authorization-recovery-v05";
 
 // ---- 展示工具（v1 app.js 同名函数平移）--------------------------------------
 function relTime(iso: any) {
@@ -593,6 +595,22 @@ export default function StationsPage() {
   const [accountSearch, setAccountSearch] = useState("");
   const [accountFilter, setAccountFilter] = useState("all");
   const accountReadEpoch = useRef(0);
+  const [authorizationAccount, setAuthorizationAccount] = useState<AccountRecord | null>(null);
+  const [authorizationTargets, setAuthorizationTargets] = useState<string[]>([]);
+  const [authorizationRequestId, setAuthorizationRequestId] = useState("");
+  const [authorizationProbe, setAuthorizationProbe] = useState<AccountAuthorizationProbe | null>(null);
+  const [authorizationResult, setAuthorizationResult] = useState<AccountAuthorizationResult | null>(null);
+  const [authorizationError, setAuthorizationError] = useState("");
+  const [authorizationBusy, setAuthorizationBusy] = useState(false);
+  const [reuseAuthorization, setReuseAuthorization] = useState(false);
+  const [previouslyUpdatedIds, setPreviouslyUpdatedIds] = useState<string[]>([]);
+  const [authorizationRecovery, setAuthorizationRecovery] = useState<{ accountKey: string; retryInput: AccountAuthorizationRecoveryIntent } | null>(null);
+  const [authorizationForm] = Form.useForm();
+  const authorizationType = Form.useWatch("type", authorizationForm) || "newapi";
+  const authorizationEpoch = useRef(0);
+  const [purposeTarget, setPurposeTarget] = useState<{ resource?: PublicResource; monitorEnabled?: boolean; key?: AccountKeyScope; ruleId?: string } | null>(null);
+  const [purposeBusy, setPurposeBusy] = useState(false);
+  const [purposeError, setPurposeError] = useState("");
 
   // 添加/编辑弹窗
   const [modalOpen, setModalOpen] = useState(false);
@@ -627,11 +645,113 @@ export default function StationsPage() {
     }
   }, []);
 
+  useEffect(() => {
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(AUTHORIZATION_RECOVERY_KEY) || "null");
+      if (/^[a-f0-9]{64}$/.test(stored?.accountKey || "") && typeof stored.retryInput?.requestId === "string" && Array.isArray(stored.retryInput.targetStationIds) && stored.retryInput.targetStationIds.every((id: any) => typeof id === "string")) {
+        setAuthorizationRecovery({ accountKey: stored.accountKey, retryInput: { requestId: stored.retryInput.requestId, targetStationIds: [...stored.retryInput.targetStationIds] } });
+      }
+    } catch { /* 不阻断资源读取。 */ }
+    return () => { authorizationEpoch.current += 1; };
+  }, []);
+
+  const rememberAuthorization = (accountKey: string, intent: AccountAuthorizationRecoveryIntent | null) => {
+    const safe = intent ? { accountKey, retryInput: { requestId: intent.requestId, targetStationIds: [...intent.targetStationIds] } } : null;
+    setAuthorizationRecovery(safe);
+    try { if (safe) sessionStorage.setItem(AUTHORIZATION_RECOVERY_KEY, JSON.stringify(safe)); else sessionStorage.removeItem(AUTHORIZATION_RECOVERY_KEY); } catch { /* 当前抽屉仍可核对。 */ }
+  };
+  const authorizationName = (id: string) => accountModel?.accounts.flatMap((account) => account.resources).find((resource) => resource.id === id)?.name || accountModel?.unverifiedResources.find((resource) => resource.id === id)?.name || stations.find((station) => station.id === id)?.name || id;
+  const authorizationEligible = (account: AccountRecord) => account.resources.filter((resource) => !resource.archivedAt && resource.type !== "newapi-key" && !stations.some((station) => station.id === resource.id && station.isOwn));
+  const initializeAuthorizationForm = (account: AccountRecord) => {
+    authorizationForm.resetFields();
+    authorizationForm.setFieldsValue({ type: account.identity.provider === "newapi" ? "newapi" : authorizationEligible(account)[0]?.type || "sub2api" });
+  };
+  const openAuthorization = (account: AccountRecord) => {
+    authorizationEpoch.current += 1; setAuthorizationAccount(account); setAuthorizationTargets(authorizationEligible(account).map((resource) => resource.id!)); setAuthorizationRequestId(crypto.randomUUID()); setAuthorizationProbe(null); setAuthorizationResult(null); setAuthorizationError(""); setReuseAuthorization(false); setPreviouslyUpdatedIds([]); initializeAuthorizationForm(account);
+  };
+  const freshAuthorization = () => {
+    if (!authorizationAccount) return;
+    const saved = authorizationResult?.targets.filter((target) => ["updated", "already_updated"].includes(target.status)).map((target) => target.stationId) || [];
+    const remaining = authorizationResult?.targets.filter((target) => !saved.includes(target.stationId) && !authorizationResult.excluded.some((item) => item.stationId === target.stationId)).map((target) => target.stationId);
+    setPreviouslyUpdatedIds([...new Set([...previouslyUpdatedIds, ...saved])]); if (remaining) setAuthorizationTargets(remaining);
+    authorizationEpoch.current += 1; setAuthorizationRequestId(crypto.randomUUID()); setAuthorizationProbe(null); setAuthorizationResult(null); setReuseAuthorization(false); initializeAuthorizationForm(authorizationAccount);
+  };
+  const authorizationInput = async (reuse = reuseAuthorization): Promise<AccountAuthorizationInput> => {
+    if (!authorizationAccount || !authorizationTargets.length) throw new Error("请选择明确的更新目标");
+    const intent = { requestId: authorizationRequestId, targetStationIds: [...authorizationTargets] };
+    if (reuse) return { ...intent, reuseSavedAuthorization: true };
+    const values = await authorizationForm.validateFields();
+    return { ...intent, authorization: { type: values.type, baseUrl: authorizationAccount.identity.baseUrl,
+      ...(values.type === "sub2api-password" ? { email: values.email, password: values.password } : { accessToken: values.accessToken }),
+      ...(values.type === "newapi" ? { userId: authorizationAccount.identity.accountId } : {}) } };
+  };
+  const probeAuthorization = async (reuse = reuseAuthorization) => {
+    const current = ++authorizationEpoch.current; setAuthorizationError(""); setAuthorizationBusy(true);
+    try {
+      const input = await authorizationInput(reuse);
+      if (current !== authorizationEpoch.current) return;
+      const next: AccountAuthorizationProbe = await api(`/api/channel-onboarding/accounts/${encodeURIComponent(authorizationAccount!.accountKey)}/authorization/probe`, { body: input });
+      if (current !== authorizationEpoch.current) return;
+      setAuthorizationProbe(next); setReuseAuthorization(reuse); rememberAuthorization(next.accountKey, next.retryInput);
+      if (reuse) authorizationForm.resetFields();
+    } catch (err: any) {
+      if (current !== authorizationEpoch.current) return;
+      setAuthorizationProbe(null);
+      if (!err.errorFields) {
+        if (reuse) { freshAuthorization(); setAuthorizationError(`${err.message}。请重新输入授权，已开始新的更新操作。`); }
+        else setAuthorizationError(err.message || "授权预览失败，请重试");
+      }
+    } finally { setAuthorizationBusy(false); }
+  };
+  const acceptAuthorizationResult = (next: AccountAuthorizationResult) => {
+    setAuthorizationResult(next); setAuthorizationProbe(null); setReuseAuthorization(true); authorizationForm.resetFields();
+    rememberAuthorization(next.accountKey, next.complete ? null : next.retryInput);
+    if (next.complete) message.success("本次所选目标的授权已更新，原设置与历史保留");
+  };
+  const recoverAuthorization = async (saved = authorizationRecovery, restore = false) => {
+    if (!saved) return;
+    const account = accountModel?.accounts.find((item) => item.accountKey === saved.accountKey);
+    if (restore && !account) { setAccountError("原账号暂不在当前关系中，请刷新并核验资源后恢复"); return; }
+    if (restore && account) { openAuthorization(account); setAuthorizationRequestId(saved.retryInput.requestId); setAuthorizationTargets(saved.retryInput.targetStationIds); }
+    setAuthorizationBusy(true); setAuthorizationError("");
+    try { acceptAuthorizationResult(await api(`/api/channel-onboarding/accounts/${encodeURIComponent(saved.accountKey)}/authorization/recover`, { body: saved.retryInput })); }
+    catch (err: any) { setAuthorizationError(err.message || "结果核对失败，请重试"); }
+    finally { setAuthorizationBusy(false); }
+  };
+  const confirmAuthorization = async () => {
+    if (!authorizationProbe || Date.now() >= authorizationProbe.expiresAtMs) { setAuthorizationProbe(null); setAuthorizationError("预览已失效，请重新验证"); return; }
+    setAuthorizationBusy(true); setAuthorizationError("");
+    const accountKey = authorizationAccount!.accountKey, intent = { requestId: authorizationRequestId, targetStationIds: [...authorizationTargets] };
+    try { acceptAuthorizationResult(await api(`/api/channel-onboarding/accounts/${encodeURIComponent(accountKey)}/authorization`, { body: { ...await authorizationInput(), previewId: authorizationProbe.previewId } })); await reload(); }
+    catch (err: any) {
+      setAuthorizationProbe(null); setAuthorizationError(err.message || "保存结果未取得，请核对结果");
+      try { const recovered: AccountAuthorizationResult = await api(`/api/channel-onboarding/accounts/${encodeURIComponent(accountKey)}/authorization/recover`, { body: intent }); acceptAuthorizationResult(recovered); if (recovered.complete) setAuthorizationError(""); }
+      catch { rememberAuthorization(accountKey, intent); }
+    } finally { setAuthorizationBusy(false); }
+  };
+  const confirmPurpose = async () => {
+    if (!purposeTarget) return;
+    setPurposeBusy(true); setPurposeError("");
+    try {
+      if (purposeTarget.resource) {
+        const resource = purposeTarget.resource;
+        if (stations.some((station) => station.id === resource.id && station.isOwn)) throw new Error("本站来源不参与此操作");
+        await api(`/api/stations/${encodeURIComponent(resource.id!)}`, { method: "PUT", body: { monitorEnabled: purposeTarget.monitorEnabled === true, expectedAuthVersion: resource.authVersion, expectedResourceVersion: resource.resourceVersion } });
+        message.success(purposeTarget.monitorEnabled ? "该资源监控已启用，保持现有成本设置" : "该资源监控已暂停，账单关联与历史保留");
+      } else {
+        if (!purposeTarget.ruleId) throw new Error("请选择明确的核算规则");
+        await api(`/api/reconciliation/rules/${encodeURIComponent(purposeTarget.ruleId)}`, { method: "DELETE" }); message.success("所选规则已停止核算，历史保留");
+      }
+      setPurposeTarget(null); await reload();
+    } catch (err: any) { setPurposeError(`${err.message || "操作失败"}；请刷新关系并重新打开影响预览。`); }
+    finally { setPurposeBusy(false); }
+  };
+
   // 列表加载（GET /api/stations 同时带回全局设置，同 v1 reload）
   const reload = useCallback(async () => {
     setLoadingList(true);
     try {
-      const r = await api(`/api/stations${showArchived ? "?includeArchived=true" : ""}`);
+      const r = await api(`/api/stations?includeUnmonitored=true${showArchived ? "&includeArchived=true" : ""}`);
       setStations(r.stations);
       setSettings(r.settings);
       setLoaded(true);
@@ -678,9 +798,8 @@ export default function StationsPage() {
   const onRefreshAll = async () => {
     setRefreshingAll(true);
     try {
-      const r = await api("/api/refresh", { method: "POST", body: {} });
-      if (showArchived) await reload();
-      else { setStations(r.stations); void loadAccounts(); }
+      await api("/api/refresh", { method: "POST", body: {} });
+      await reload();
       message.success("已刷新全部");
     } catch {
       message.error("刷新失败");
@@ -974,6 +1093,7 @@ export default function StationsPage() {
     loadMeta().catch(() => {});
   };
 
+  const monitoredStations = stations.filter((station) => station.monitorEnabled !== false);
   const accountQuery = accountSearch.trim().toLowerCase();
   const matchesAccountQuery = (values: unknown[]) => values.join(" ").toLowerCase().includes(accountQuery);
   const filteredAccounts = (accountModel?.accounts || []).filter((account) =>
@@ -990,11 +1110,13 @@ export default function StationsPage() {
   const renderAccountResource = (resource: PublicResource) => {
     const original = stations.find((station) => station.id === resource.id);
     return <div key={resource.id} data-resource-id={resource.id} style={{ paddingBlock: 10, borderBottom: `1px solid ${token.colorBorderSecondary}` }}>
-      <Space wrap><Text strong>{resource.name}</Text><Tag>{resource.purposes.monitor ? "余额监控" : "账单专用"}</Tag>{resource.archivedAt ? <Tag>已归档</Tag> : null}{resource.purposes.billingRuleIds.length ? <Tag>关联账单规则 {resource.purposes.billingRuleIds.length}</Tag> : null}</Space>
+      <Space wrap><Text strong>{resource.name}</Text><Tag>{resource.purposes.monitor ? "余额监控" : "监控暂停 / 未启用"}</Tag>{resource.archivedAt ? <Tag>已归档</Tag> : null}{resource.purposes.billingRuleIds.length ? <Tag>关联账单规则 {resource.purposes.billingRuleIds.length}</Tag> : null}</Space>
       <div><Text type="secondary">原资源 ID：{resource.id} · {resource.type} · {resource.baseUrl}</Text></div>
       <div><Text type="secondary">提醒阈值：{resource.lowBalanceUsd == null ? "沿用全局" : usd(resource.lowBalanceUsd)}；折算汇率：{resource.cnyPerUsd == null ? "沿用默认" : `${resource.cnyPerUsd} RMB/USD`}；成本设置：{resource.includeInProfit ? "纳入" : "不纳入"}{resource.noRenewal ? "；不再续费" : ""}</Text></div>
       {resource.purposes.billingRuleIds.length ? <div><Text type="secondary">账单关系（含历史）：{resource.purposes.billingRuleIds.join("、")}</Text></div> : null}
-      {!resource.purposes.monitor ? <Text type="secondary">专用账单授权，设置只读；不会增加余额监控。</Text> : original && !compact ? <Button disabled={loadingMeta || !types.length} style={{ minHeight: 40, marginTop: 8 }} aria-label={`查看原资源设置 ${resource.name}`} onClick={() => openModal(original)}>资源设置</Button> : <Text type="secondary">余额、趋势与原资源设置见下方监控资源。</Text>}
+      {!resource.purposes.monitor ? <div><Text type="secondary">监控暂停/未启用，现有账单关系继续保留。</Text></div> : null}
+      {original && !compact ? <Button disabled={loadingMeta || !types.length} style={{ minHeight: 40, marginTop: 8 }} aria-label={`查看原资源设置 ${resource.name}`} onClick={() => openModal(original)}>资源设置</Button> : <Text type="secondary">原资源设置使用完整资源记录；余额与趋势见下方监控资源。</Text>}
+      {!resource.archivedAt && !original?.isOwn ? <Button style={{ minHeight: 44, marginTop: 8 }} disabled={loadingAccounts || !!accountError || authorizationBusy} aria-label={`${resource.monitorEnabled ? "暂停" : "启用"}监控 ${resource.name}`} onClick={() => { setPurposeError(""); setPurposeTarget({ resource, monitorEnabled: !resource.monitorEnabled }); }}>{resource.monitorEnabled ? "暂停监控" : "启用监控"}</Button> : null}
     </div>;
   };
   const accountBoundary = (value: number | null) => value == null ? "待核验" : `${new Date(value).toISOString().replace("T", " ").replace(".000Z", " UTC")}`;
@@ -1040,7 +1162,7 @@ export default function StationsPage() {
         <ProCard title="账号关系" extra={<Button style={{ minHeight: 40 }} loading={loadingAccounts} onClick={() => void loadAccounts()}>刷新账号关系</Button>} loading={loadingAccounts && !accountModel}>
           <Space direction="vertical" style={{ width: "100%", minWidth: 0 }} size={12}>
             <Text type="secondary">按已核验的上游账号查看资源、Key 与本站渠道。各资源可能覆盖同一余额，继续按原资源查看，不合计账号余额。</Text>
-            <div className="page-toolbar" style={{ width: "100%" }}><Input aria-label="搜索账号关系" allowClear placeholder="搜索站点、账号、资源、Key 或渠道" value={accountSearch} onChange={(event) => setAccountSearch(event.target.value)} style={{ flex: "1 1 200px", minWidth: 0, fontSize: compact ? 16 : undefined }} /><Select aria-label="账号关系状态" value={accountFilter} onChange={setAccountFilter} style={{ minWidth: 130 }} options={[{ value: "all", label: "全部账号" }, { value: "attention", label: "需处理" }]} /></div>
+            <div className="page-toolbar" style={{ width: "100%" }}><Input aria-label="搜索账号关系" allowClear placeholder="搜索站点、账号、资源、Key 或渠道" value={accountSearch} onChange={(event) => setAccountSearch(event.target.value)} style={{ flex: "1 1 200px", minWidth: 0, fontSize: compact ? 16 : undefined }} /><Select aria-label="账号关系状态" value={accountFilter} onChange={setAccountFilter} style={{ minWidth: 130 }} options={[{ value: "all", label: "全部账号" }, { value: "attention", label: "需处理" }]} />{authorizationRecovery ? <Button style={{ minHeight: 44 }} disabled={loadingAccounts || authorizationBusy} onClick={() => void recoverAuthorization(authorizationRecovery, true)}>恢复上次授权更新</Button> : null}</div>
             {accountError ? <Alert type="warning" showIcon message={accountModel ? "账号关系刷新失败，正在显示上次结果" : "账号关系暂不可用"} description={accountError} action={<Button aria-label="重试账号关系" onClick={() => void loadAccounts()}>重试</Button>} /> : null}
             {accountModel ? <Text type="secondary">显示 {filteredAccounts.length}/{accountModel.accounts.length} 个已核验账号；待核验资源 {unverifiedResources.length}/{accountModel.unverifiedResources.length} · 关系读取：{new Date(accountModel.generatedAt).toLocaleString("zh-CN")}</Text> : null}
             {[...accountSites].map(([siteKey, accounts]) => <div key={siteKey} data-site-key={siteKey} style={{ width: "100%", minWidth: 0 }}>
@@ -1050,6 +1172,7 @@ export default function StationsPage() {
                 children: <div data-account-key={account.accountKey} style={{ minWidth: 0 }}>
                   <Text type="secondary">已核验账号 ID：{account.identity.accountId} · {account.identity.baseUrl}</Text>
                   <div><Text type="secondary">待处理：{[...new Set(account.actions.filter((action) => action.kind !== "inspect_balance").map((action) => action.label))].join("；") || "暂无待处理事项"}</Text></div>
+                  <Button style={{ minHeight: 44, marginTop: 8 }} disabled={loadingAccounts || !!accountError || authorizationBusy || !authorizationEligible(account).length} aria-label={`更新账号授权 ${account.identity.provider} ${account.identity.accountId}`} onClick={() => openAuthorization(account)}>更新此账号授权</Button>
                   {account.resources.filter((resource) => showArchived || !resource.archivedAt).map(renderAccountResource)}
                   {account.resources.some((resource) => resource.archivedAt) && !showArchived ? <Text type="secondary">另有归档资源，使用页面上方「查看归档资源」展开。</Text> : null}
                   {account.keys.length ? <Collapse ghost items={account.keys.map((key) => ({ key: key.canonicalKey,
@@ -1057,6 +1180,7 @@ export default function StationsPage() {
                     children: <div data-canonical-key={key.canonicalKey} style={{ minWidth: 0 }}>
                       <div><Text>规则（含历史）：{key.ruleIds.join("、")}</Text></div>
                       <div><Text>有效规则：{key.activeRuleIds.join("、") || "无"}</Text></div>
+                      {key.activeRuleIds.length ? <Button style={{ minHeight: 44, marginBlock: 8 }} disabled={loadingAccounts || !!accountError || authorizationBusy} aria-label={`停止 Key ${key.tokenId} 的账单核算`} onClick={() => { setPurposeError(""); setPurposeTarget({ key, ruleId: key.activeRuleIds.length === 1 ? key.activeRuleIds[0] : undefined }); }}>停止此 Key 的账单核算</Button> : null}
                       {key.scopeAmbiguous ? <Alert type="warning" showIcon message="存在多个有效规则，范围待核对" description="当前覆盖、生效时间与范围版本尚未统一确认。" /> : <><div><Text>{key.activeRuleIds.length ? "当前" : "历史"}范围版本：{key.scopeVersion ?? "待核验"} · {key.costCoverage === "complete" ? "用途范围已确认" : "用途范围待确认"}</Text></div><div><Text>{key.activeRuleIds.length ? "生效边界" : "历史生效边界"}：{accountBoundary(key.billingEffectiveFromMs)}</Text></div><div><Text>首个完整账单查询边界：{accountBoundary(key.firstQueryableAtMs)}</Text></div></>}
                       {key.coverageDeclaration.answer === "other_use" ? <div><Text type="secondary">其他用途：{key.coverageDeclaration.otherUse === "own_channels" ? `本站其他渠道 ${key.coverageDeclaration.uncoveredOwnChannelIds.map((id) => `#${id}`).join("、") || "待补充"}` : key.coverageDeclaration.otherUse === "external" ? "站外调用" : "尚未明确"}</Text></div> : null}
                       <div style={{ marginTop: 8 }}><Text strong>关联渠道（含历史）</Text>{key.channels.map((channel) => <div key={`${channel.ownSource?.namespaceKey || channel.ownStationId}:${channel.channelId}`}><Text>{channel.name || `渠道 ${channel.channelId}`} · #{channel.channelId}</Text><div><Text type="secondary">{channel.ownSource ? `本站账号 ${channel.ownSource.accountId} · ${channel.ownStationId}` : `来源待核验 · ${channel.ownStationId}`}</Text></div></div>)}</div>
@@ -1075,6 +1199,30 @@ export default function StationsPage() {
           </Space>
         </ProCard>
       </section>
+      <Drawer title={`更新账号授权${authorizationAccount ? ` · ${authorizationAccount.identity.accountId}` : ""}`} open={!!authorizationAccount} width={compact ? "100%" : 600} closable={!authorizationBusy} maskClosable={!authorizationBusy} keyboard={!authorizationBusy} onClose={() => { authorizationEpoch.current += 1; setAuthorizationAccount(null); setAuthorizationProbe(null); authorizationForm.resetFields(); }} extra={<Button type="primary" style={{ minHeight: 44 }} aria-label="确认更新所选授权" loading={authorizationBusy} disabled={!authorizationProbe || !authorizationProbe.targets.length || authorizationResult?.complete || Date.now() >= (authorizationProbe?.expiresAtMs || 0)} onClick={() => void confirmAuthorization()}>确认更新</Button>}>
+        {authorizationAccount ? <Space direction="vertical" size={16} style={{ width: "100%", minWidth: 0, overflowWrap: "anywhere" }}>
+          <Text strong>{authorizationAccount.identity.provider} · {authorizationAccount.identity.baseUrl} · 账号 {authorizationAccount.identity.accountId}</Text>
+          <Alert type="info" showIcon message="授权只输入一次，明确选择更新目标" description="保留每条原资源 ID、监控用途、提醒、成本设置、关联与历史。本站、纯 Key、其他账号和已归档资源不跟随更新。" />
+          {authorizationError ? <Alert type="error" showIcon message={authorizationError} /> : null}
+          {previouslyUpdatedIds.length ? <Text type="secondary">已确认更新，本次不再改写：{previouslyUpdatedIds.map(authorizationName).join("、")}</Text> : null}
+          {!reuseAuthorization && !authorizationResult?.complete ? <Form form={authorizationForm} layout="vertical" disabled={authorizationBusy} onValuesChange={(changed) => {
+            if (changed.type) authorizationForm.setFieldsValue(changed.type === "sub2api-password" ? { accessToken: "" } : { email: "", password: "" });
+            authorizationEpoch.current += 1; setAuthorizationProbe(null); setAuthorizationRequestId(crypto.randomUUID()); setAuthorizationError("");
+          }}>
+            <Form.Item name="type" label="更新授权方式"><Select options={authorizationAccount.identity.provider === "newapi" ? [{ value: "newapi", label: "New API 访问令牌" }] : [{ value: "sub2api", label: "Sub2API 登录令牌" }, { value: "sub2api-password", label: "Sub2API 邮箱与密码" }]} /></Form.Item>
+            {authorizationType === "sub2api-password" ? <><Form.Item name="email" label="更新登录邮箱" rules={[{ required: true, message: "请输入邮箱" }]}><Input autoComplete="username" /></Form.Item><Form.Item name="password" label="更新登录密码" rules={[{ required: true, message: "请输入密码" }]}><Input.Password autoComplete="off" /></Form.Item></> : <Form.Item name="accessToken" label="更新访问令牌" rules={[{ required: true, message: "请输入令牌" }]}><Input.Password autoComplete="off" /></Form.Item>}
+          </Form> : !authorizationResult?.complete ? <Text>复用服务端已保存授权重新核验，无需再次输入凭据。</Text> : null}
+          <div><Text strong>明确的更新目标</Text>{[...authorizationEligible(authorizationAccount), ...(accountModel?.unverifiedResources || []).filter((resource) => resource.type !== "newapi-key" && !resource.archivedAt && resource.baseUrl === authorizationAccount.identity.baseUrl && resource.type.startsWith("sub2api") === (authorizationAccount.identity.provider === "sub2api"))].map((resource) => <div key={resource.id}><Checkbox aria-label={`更新目标 ${resource.name}`} checked={authorizationTargets.includes(resource.id!)} disabled={authorizationBusy || authorizationResult?.complete} onChange={(event) => { setAuthorizationTargets(event.target.checked ? [...authorizationTargets, resource.id!] : authorizationTargets.filter((id) => id !== resource.id)); authorizationEpoch.current += 1; setAuthorizationProbe(null); }}><Text>{resource.name} · {resource.id} · {resource.purposes.monitor ? "监控" : "监控未启用"}{resource.verification !== "verified" ? " · 身份待核验，预览后才可加入" : ""}</Text></Checkbox></div>)}</div>
+          <Text type="secondary">排除记录：{[...authorizationAccount.resources.filter((resource) => resource.archivedAt).map((resource) => `${resource.name}（已归档）`), ...(accountModel?.accounts || []).filter((account) => account.accountKey !== authorizationAccount.accountKey && account.identity.baseUrl === authorizationAccount.identity.baseUrl).flatMap((account) => account.resources.map((resource) => `${resource.name}（其他账号/平台）`)), ...(accountModel?.unverifiedResources || []).filter((resource) => resource.type === "newapi-key").map((resource) => `${resource.name}（纯 Key）`), ...stations.filter((station) => station.isOwn).map((station) => `${station.name}（本站）`)].join("、") || "无"}</Text>
+          {!authorizationResult?.complete ? <Button style={{ minHeight: 44 }} aria-label={reuseAuthorization ? "重新验证并补未完成" : "预览授权更新"} loading={authorizationBusy} onClick={() => void probeAuthorization()}>{reuseAuthorization ? "重新验证并补未完成" : "验证并预览更新"}</Button> : null}
+          {authorizationProbe ? <Alert type="info" showIcon message="授权更新预览，尚未保存" description={<Space direction="vertical">{authorizationProbe.targets.map((target) => <Text key={target.stationId}>{authorizationName(target.stationId)} · 授权版本 {target.authVersion} · {target.currentType} → {target.newType} · 监控渠道 {target.monitorChannelIds.join("、") || "无"} · 账单规则 {target.billingRuleIds.join("、") || "无"} · 账单渠道 {target.billingChannelIds.join("、") || "无"}</Text>)}{authorizationProbe.excluded.map((target) => <Text type="warning" key={target.stationId}>排除 {authorizationName(target.stationId)}：{target.reason}</Text>)}<Text>影响监控资源：{authorizationProbe.impact.monitorStationIds.map(authorizationName).join("、") || "无"}</Text><Text>影响账单规则：{authorizationProbe.impact.billingRuleIds.join("、") || "无"}</Text><Text>关联渠道：{authorizationProbe.impact.channels.map((channel) => `${channel.name} #${channel.channelId}（${channel.ownStationId}）`).join("、") || "无"}</Text></Space>} /> : null}
+          {authorizationResult ? <Alert type={authorizationResult.complete ? "success" : "warning"} showIcon message={authorizationResult.complete ? "本次所选目标已完成授权更新" : "部分目标尚未更新，已保存目标保留"} description={<Space direction="vertical">{authorizationResult.targets.map((target) => <div key={target.stationId} data-authorization-target={target.stationId}><Text strong>{authorizationName(target.stationId)}：{{ updated: "已更新", already_updated: "已保存，无需重复更新", failed: "更新失败", repreview_required: "需重新预览" }[target.status]}</Text><div><Text>{target.reason}{target.savedAuthVersion != null ? ` · 已保存授权版本 ${target.savedAuthVersion}` : ""}</Text></div></div>)}{authorizationResult.excluded.map((target) => <Text type="warning" key={target.stationId}>排除 {authorizationName(target.stationId)}：{target.reason}</Text>)}{!authorizationResult.complete ? <><Button style={{ minHeight: 44 }} disabled={authorizationBusy} onClick={() => void recoverAuthorization({ accountKey: authorizationResult.accountKey, retryInput: authorizationResult.retryInput })}>只读核对保存结果</Button><Button style={{ minHeight: 44 }} disabled={authorizationBusy} onClick={() => { freshAuthorization(); setAuthorizationError(""); }}>重新输入授权，开始新的更新</Button></> : null}</Space>} /> : null}
+        </Space> : null}
+      </Drawer>
+      <Modal title={purposeTarget?.resource ? `${purposeTarget.monitorEnabled ? "启用" : "暂停"}「${purposeTarget.resource.name}」监控？` : "停止此 Key 的账单核算？"} open={!!purposeTarget} onCancel={() => { if (!purposeBusy) setPurposeTarget(null); }} closable={!purposeBusy} maskClosable={!purposeBusy} keyboard={!purposeBusy} confirmLoading={purposeBusy} onOk={() => void confirmPurpose()} okButtonProps={{ disabled: !!purposeTarget?.key && !purposeTarget.ruleId, "aria-label": "确认用途操作" }} okText="确认操作">
+        {purposeError ? <Alert type="error" showIcon message={purposeError} /> : null}
+        {purposeTarget?.resource ? <><Text>{purposeTarget.monitorEnabled ? "启用该资源的监控与监控估算，保持现有成本设置" : "仅停止该资源的监控估算"}；Key 账单核算继续，原资源 ID、设置与历史保留。</Text><div>现有成本设置：{purposeTarget.resource.includeInProfit ? "纳入" : "不纳入"}</div><div>关联监控渠道：{accountModel?.channels.filter((channel) => channel.monitor.stationIds.includes(purposeTarget.resource!.id!)).map((channel) => `${channel.name} #${channel.id}`).join("、") || "无"}</div><div>继续保留账单关系：{purposeTarget.resource.purposes.billingRuleIds.join("、") || "无"}</div></> : purposeTarget?.key ? <><Text>停止所选账单规则，释放它的当前归属范围并保留历史；其他监控资源继续运行。</Text>{purposeTarget.key.activeRuleIds.length > 1 ? <Select aria-label="要停止的核算规则" style={{ width: "100%", marginBlock: 12 }} value={purposeTarget.ruleId} options={purposeTarget.key.activeRuleIds.map((id) => ({ value: id, label: id }))} onChange={(ruleId) => setPurposeTarget({ ...purposeTarget, ruleId })} /> : null}<div>所选规则：{purposeTarget.ruleId || "请选择"}</div><div>Key 关联范围（含历史）：{purposeTarget.key.channels.map((channel) => `${channel.name} #${channel.channelId}（${channel.ownStationId}）`).join("、")}</div>{purposeTarget.key.activeRuleIds.length > 1 ? <Text type="warning">其它有效规则继续保留；本次只停止明确选择的一条。</Text> : null}</> : null}
+      </Modal>
       {loadError ? (
         <Alert
           type="warning"
@@ -1096,9 +1244,9 @@ export default function StationsPage() {
         />
       ) : null}
       <ProCard className="station-list-card resource-list-card" loading={loadingList && !loaded}>
-        {stations.length ? (
+        {monitoredStations.length ? (
           <div>
-            {stations.map((s) => (
+            {monitoredStations.map((s) => (
               <StationRow
                 key={s.id}
                 s={s}

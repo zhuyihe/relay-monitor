@@ -177,6 +177,39 @@ test("updateLocked不递归加锁，guard/CAS与marker在同次提交后发布�
   assert.equal(station.authorizationUpdateRef, null);
 });
 
+test("U04 Store add/update guard在实际SQL后commit前复核，失效rollback不发布配置、身份或marker", async (t) => {
+  for (const operation of ["add", "update"]) await t.test(operation, async () => {
+    let persisted = [], draft, valid = true, invalidate = false, commits = 0, rollbacks = 0, validations = 0;
+    const conn = { beginTransaction: async () => { draft = structuredClone(persisted); },
+      query: async (sql, params) => {
+        if (sql.startsWith("INSERT INTO stations")) draft = params[0].map((row) => JSON.parse(row[2]));
+        if (sql.startsWith("INSERT INTO meta") && invalidate) valid = false;
+        return [[]];
+      }, commit: async () => { persisted = draft; commits += 1; }, rollback: async () => { rollbacks += 1; }, release() {} };
+    const store = new Store({ getConnection: async () => conn });
+    const identity = { provider: "sub2api", baseUrl: "https://transaction.test", accountId: "7" };
+    const original = await store.add({ type: "sub2api", baseUrl: identity.baseUrl, accessToken: "old-JWT" }, { verifiedIdentity: identity });
+    const before = structuredClone(store.data), savedBefore = structuredClone(persisted), commitsBefore = commits;
+    const guard = () => { validations += 1; if (!valid) throw Object.assign(new Error("participating resource changed"), { code: "RESOURCE_CHANGED" }); };
+    const execute = () => operation === "add"
+      ? store.add({ type: "newapi-key", baseUrl: identity.baseUrl, apiKey: "new-Key" }, { guard,
+        onboardingOrigin: { requestId: "add", selectionId: "key", accountKey: null, type: "newapi-key", purpose: "monitor" } })
+      : store.withStationLocks([original.id], () => store.updateLocked(original.id,
+        { type: "sub2api-password", email: "a@example.test", password: "new-password" }, { guard, verifiedIdentity: identity,
+          authorizationUpdateRef: { requestId: "rotate", accountKey: "account" } }));
+    invalidate = true;
+    await assert.rejects(execute(), { code: "RESOURCE_CHANGED" });
+    assert.equal(validations, 2); assert.equal(rollbacks, 1); assert.equal(commits, commitsBefore);
+    assert.deepEqual(store.data, before); assert.deepEqual(persisted, savedBefore);
+    if (operation === "update") {
+      assert.equal(draft[0].password, "new-password"); assert.equal(draft[0].authorizationUpdateRef.authVersion, 2);
+      assert.equal(original.accessToken, "old-JWT"); assert.equal(original.authorizationUpdateRef, undefined);
+    } else { assert.equal(draft.length, 2); assert.equal(draft[1].onboardingOrigin.requestId, "add"); }
+    valid = true; invalidate = false; validations = 0;
+    await execute(); assert.equal(validations, 2); assert.equal(commits, commitsBefore + 1);
+  });
+});
+
 test("用途与身份在提交前保持旧值，失败不发布并可重试", async (t) => {
   const pool = fakePool();
   const conn = await pool.getConnection();

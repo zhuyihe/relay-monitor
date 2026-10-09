@@ -116,6 +116,7 @@ async function openOnboardingPage(t, options = {}) {
   }, options.viewport, !!options.clock, async (route) => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path === "/api/channel-onboarding/accounts") { reads.push({ path, method: request.method() }); return options.accounts ? options.accounts(route, reads) : fulfill(route, options.accountModel || { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }); }
+    if (options.accountOperation && path.startsWith("/api/channel-onboarding/accounts/")) return options.accountOperation(route, path);
     if (request.method() === "GET" || path.endsWith("/sync")) { reads.push({ path, method: request.method() }); return options.discovery ? options.discovery(route, reads, config) : fulfill(route, config); }
     const body = request.postDataJSON();
     if (path === "/api/channel-onboarding/batch/probe") { probes.push(body); latestProbe = options.probe ? options.probe(body, probes.length, config) : probeResult(body, config, options); latestProbe.previewId += "-" + probes.length; return fulfill(route, latestProbe); }
@@ -336,28 +337,154 @@ function accountReadFixture() {
 async function openAccountsPage(t, options = {}) {
   const model = options.model || accountReadFixture(), mutations = [], accountRequests = [];
   const originalStations = [
-    { id: "own", name: "Own station", type: "newapi", baseUrl: "https://own.test", isOwn: true, monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 50 } },
-    ...model.accounts.flatMap((account) => account.resources).filter((entry) => entry.monitorEnabled), ...model.unverifiedResources,
-  ].map((entry) => ({ ...entry, isOwn: !!entry.isOwn, userId: entry.id === "A-monitor-1" ? "operator-A" : "", email: entry.id === "Sub-password" ? "saved-sub@example.test" : "", costAliases: entry.id === "A-monitor-1" ? ["kept_alias"] : [], tokenInfo: null, prediction: null, spark: [], todayUsed: null }));
-  const { page } = await openOnboardingPage(t, { viewport: options.viewport, accountModel: model, accounts(route) {
+    { id: options.ownStationId || "own", name: "Own station", type: "newapi", baseUrl: "https://own.test", isOwn: true, monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 50 } },
+    ...model.accounts.flatMap((account) => account.resources), ...model.unverifiedResources,
+  ].map((entry) => ({ ...entry, isOwn: !!entry.isOwn, userId: ["A-monitor-1", "st_u04_a1"].includes(entry.id) ? "operator-A" : "", email: entry.id === "Sub-password" ? "saved-sub@example.test" : "", costAliases: ["A-monitor-1", "st_u04_a1"].includes(entry.id) ? ["kept_alias"] : [], tokenInfo: null, prediction: null, spark: [], todayUsed: null }));
+  const { page } = await openOnboardingPage(t, { viewport: options.viewport, accountModel: model, accountOperation: options.accountOperation, accounts(route) {
     accountRequests.push(route.request().method()); return options.accounts ? options.accounts(route, accountRequests.length, model) : fulfill(route, model);
   }, extraAPI(route, path) {
-    if (route.request().method() !== "GET") { mutations.push({ path, body: route.request().postDataJSON() }); throw new Error("unexpected account-center write"); }
-    if (path === "/api/stations") return fulfill(route, { stations: originalStations.filter((entry) => !entry.archivedAt || new URL(route.request().url()).searchParams.get("includeArchived") === "true"), settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    if (route.request().method() !== "GET") { const mutation = { path, method: route.request().method(), body: route.request().postData() ? route.request().postDataJSON() : null }; mutations.push(mutation); if (options.mutation) return options.mutation(route, mutation, originalStations); throw new Error("unexpected account-center write"); }
+    if (path === "/api/stations") { const params = new URL(route.request().url()).searchParams; return fulfill(route, { stations: originalStations.filter((entry) => (!entry.archivedAt || params.get("includeArchived") === "true") && (entry.monitorEnabled !== false || params.get("includeUnmonitored") === "true")), settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } }); }
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }, { value: "newapi-key", label: "Key", needs: ["apiKey"] }, { value: "sub2api", label: "Sub2API", needs: ["accessToken"] }, { value: "sub2api-password", label: "Sub2API password", needs: ["email", "password"] }], rules: {} });
     throw new Error("unexpected account fixture API: " + path);
   } });
   await page.goto(baseURL + "/stations"); const center = page.getByRole("region", { name: "账号关系中心" }); if (options.initialFailure) await center.getByRole("button", { name: "重试账号关系", exact: true }).waitFor(); else await center.getByText(/显示 3\/3 个已核验账号/).waitFor();
   const badge = page.getByRole("button", { name: "Collapse issues badge", exact: true }); if (await badge.isVisible()) await badge.click();
-  return { page, center, model, mutations, accountRequests };
+  return { page, center, model, mutations, accountRequests, originalStations };
 }
 async function expandAccount(center, account) { await center.locator(`[data-site-key="${account.siteKey}"]`).getByRole("button", { name: new RegExp("账号 " + account.identity.accountId + " ") }).click(); return center.locator(`[data-account-key="${account.accountKey}"]`); }
+
+async function openAuthorizationPage(t, options = {}) {
+  const model = accountReadFixture(), probes = [], updates = [], recoveries = [], operations = new Map();
+  const rename = { "A-monitor-1": "st_u04_a1", "A-monitor-2": "st_u04_a2", "A-billing": "st_u04_billing", "A-archived": "st_u04_archived", "B-monitor": "st_u04_b", "pure-key": "st_u04_key", "unknown-legacy": "st_u04_unknown", own: "st_u04_own" };
+  const account = model.accounts[0], b = model.accounts[1]; account.identity.accountId = "42"; b.identity.accountId = "43";
+  for (const item of [account, b]) {
+    item.accountKey = createHash("sha256").update(JSON.stringify([item.identity.provider, item.identity.baseUrl, item.identity.accountId])).digest("hex");
+    for (const resource of item.resources) { resource.id = rename[resource.id] || resource.id; resource.identity = { ...item.identity }; resource.purposes.billingRuleIds = resource.id === "st_u04_billing" ? ["rule_u04"] : []; }
+    for (const key of item.keys) if (key.activeRuleIds.length) { key.ruleIds = item === account ? ["rule_u04", "rule_history"] : ["rule_b"]; key.activeRuleIds = [key.ruleIds[0]]; }
+  }
+  for (const resource of model.unverifiedResources) resource.id = rename[resource.id];
+  for (const channel of model.channels) { channel.monitor.stationIds = channel.monitor.stationIds.map((id) => rename[id] || id); channel.reconciliation.ruleIds = channel.id === 1 ? ["rule_u04"] : channel.reconciliation.ruleIds; }
+  for (const item of model.accounts) for (const key of item.keys) for (const channel of key.channels) { channel.ownStationId = "st_u04_own"; channel.ownSource.stationId = "st_u04_own"; }
+  let originalStations, donorRejected = false;
+  const resources = model.accounts.flatMap((item) => item.resources);
+  const intent = (body) => ({ requestId: body.requestId, targetStationIds: [...body.targetStationIds] });
+  const impact = (targets) => ({ monitorStationIds: targets.filter((target) => target.purposes.monitor).map((target) => target.stationId), billingRuleIds: [...new Set(targets.flatMap((target) => target.billingRuleIds))], channels: [{ ownStationId: "st_u04_own", channelId: 1, name: "Sales 1" }] });
+  const project = (body, targetAccount) => {
+    const targets = body.targetStationIds.flatMap((id) => {
+      const resource = targetAccount.resources.find((entry) => entry.id === id && !entry.archivedAt);
+      return resource ? [{ stationId: id, authVersion: resource.authVersion, resourceVersion: resource.resourceVersion, currentType: resource.type, newType: body.authorization?.type || resource.type, purposes: resource.purposes, monitorChannelIds: resource.purposes.monitor ? [1] : [], billingRuleIds: resource.purposes.billingRuleIds, billingChannelIds: resource.purposes.billingRuleIds.length ? [1] : [] }] : [];
+    });
+    return { requestId: body.requestId, previewId: "authorization-preview-" + probes.length, expiresAtMs: Date.now() + 600000, accountKey: targetAccount.accountKey, identity: targetAccount.identity, targets, excluded: body.targetStationIds.filter((id) => !targets.some((target) => target.stationId === id)).map((stationId) => ({ stationId, reason: "账号身份未核验，已排除" })), impact: impact(targets), retryInput: intent(body) };
+  };
+  const opened = await openAccountsPage(t, { model, viewport: options.viewport, ownStationId: "st_u04_own", async accountOperation(route, path) {
+    const body = route.request().postDataJSON(), targetAccount = model.accounts.find((item) => path.includes(item.accountKey)); assert.ok(targetAccount);
+    if (path.endsWith("/probe")) {
+      probes.push(body);
+      if (body.authorization?.accessToken === "account-B") return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: "ACCOUNT_IDENTITY_CHANGED", error: "替换授权属于另一个账号，请另行接入" }) });
+      if (body.reuseSavedAuthorization && options.invalidDonor && !donorRejected) { donorRejected = true; return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: "AUTHORIZATION_UNVERIFIED", error: "已保存授权验证失败 [已隐藏]" }) }); }
+      if (body.reuseSavedAuthorization && options.noDonor) return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: "SAVED_AUTHORIZATION_UNAVAILABLE", error: "尚无已确认更新的授权可复用，请重新输入" }) });
+      const preview = project(body, targetAccount); operations.set(body.requestId, { preview, saved: operations.get(body.requestId)?.saved || new Set() }); return fulfill(route, preview);
+    }
+    const operation = operations.get(body.requestId); assert.ok(operation, "recovery uses the original credential-free intent");
+    if (path.endsWith("/recover")) {
+      recoveries.push(body); assert.deepEqual(body, operation.preview.retryInput);
+      const targets = body.targetStationIds.map((stationId) => ({ stationId, status: operation.saved.has(stationId) ? "already_updated" : "repreview_required", savedAuthVersion: operation.saved.has(stationId) ? 2 : null, ...(operation.saved.has(stationId) ? {} : { code: "PREVIEW_REQUIRED", reason: "请重新预览" }), remainingActions: operation.saved.has(stationId) ? [] : ["repreview"] }));
+      return fulfill(route, { requestId: body.requestId, accountKey: targetAccount.accountKey, complete: targets.every((target) => target.status === "already_updated"), targets, excluded: operation.preview.excluded, impact: operation.preview.impact, retryInput: intent(body) });
+    }
+    updates.push(body); assert.equal(body.previewId, operation.preview.previewId);
+    const targets = operation.preview.targets.map((target) => {
+      if (operation.saved.has(target.stationId)) return { stationId: target.stationId, status: "already_updated", savedAuthVersion: 2, remainingActions: [] };
+      if ((options.partial && target.stationId === "st_u04_a2" || options.noDonor) && updates.length === 1) return { stationId: target.stationId, status: "failed", savedAuthVersion: null, code: "AUTHORIZATION_UPDATE_FAILED", reason: "保存失败，请稍后重试", remainingActions: ["repreview"] };
+      operation.saved.add(target.stationId); const resource = resources.find((entry) => entry.id === target.stationId); resource.authVersion += 1; resource.resourceVersion += "-updated"; resource.type = target.newType;
+      Object.assign(originalStations.find((entry) => entry.id === target.stationId), { authVersion: resource.authVersion, resourceVersion: resource.resourceVersion, type: resource.type });
+      return { stationId: target.stationId, status: "updated", savedAuthVersion: resource.authVersion, remainingActions: [] };
+    });
+    targets.push(...operation.preview.excluded.map((target) => ({ stationId: target.stationId, status: "failed", savedAuthVersion: null, code: "TARGET_EXCLUDED", reason: target.reason, remainingActions: ["verify_identity", "repreview"] })));
+    const result = { requestId: body.requestId, accountKey: targetAccount.accountKey, complete: targets.every((target) => target.status !== "failed"), targets, excluded: operation.preview.excluded, impact: operation.preview.impact, retryInput: operation.preview.retryInput };
+    if (options.loseResponse && updates.length === 1) return route.abort("failed"); return fulfill(route, result);
+  }, mutation(route, mutation, stations) {
+    if (mutation.method === "PUT") {
+      const id = decodeURIComponent(mutation.path.split("/").at(-1)), resource = resources.find((entry) => entry.id === id); assert.ok(resource);
+      assert.deepEqual(Object.keys(mutation.body).sort(), ["expectedAuthVersion", "expectedResourceVersion", "monitorEnabled"]);
+      assert.equal(mutation.body.expectedAuthVersion, resource.authVersion); assert.equal(mutation.body.expectedResourceVersion, resource.resourceVersion);
+      resource.monitorEnabled = mutation.body.monitorEnabled; resource.purposes.monitor = mutation.body.monitorEnabled; if (!resource.monitorEnabled) resource.includeInProfit = false; resource.resourceVersion += "-purpose";
+      Object.assign(stations.find((entry) => entry.id === id), { monitorEnabled: resource.monitorEnabled, includeInProfit: resource.includeInProfit, resourceVersion: resource.resourceVersion }); return fulfill(route, { ok: true });
+    }
+    assert.equal(mutation.method, "DELETE"); const ruleId = mutation.path.split("/").at(-1); for (const item of model.accounts) for (const key of item.keys) key.activeRuleIds = key.activeRuleIds.filter((id) => id !== ruleId); return fulfill(route, { ok: true });
+  } });
+  originalStations = opened.originalStations;
+  return { ...opened, probes, updates, recoveries };
+}
+async function openAccountAuthorization(page, center, account) {
+  const expanded = await expandAccount(center, account); await expanded.getByRole("button", { name: `更新账号授权 ${account.identity.provider} ${account.identity.accountId}`, exact: true }).click();
+  return page.getByRole("dialog", { name: `更新账号授权 · ${account.identity.accountId}`, exact: true });
+}
+async function previewAuthorization(drawer) { await drawer.getByRole("button", { name: "预览授权更新", exact: true }).click(); await drawer.getByText("授权更新预览，尚未保存", { exact: true }).waitFor(); }
+async function confirmAccountAuthorization(drawer) { const button = drawer.getByRole("button", { name: "确认更新所选授权", exact: true }); await button.click(); await drawer.getByText(/本次所选目标已完成授权更新|部分目标尚未更新，已保存目标保留/).waitFor(); await drawer.locator(".ant-drawer-close").waitFor(); }
+
+test("account authorization inputs once and confirms three explicit targets while excluding same-site B, own, archived and pure Key", async (t) => {
+  const { page, center, model, probes, updates, originalStations } = await openAuthorizationPage(t), account = model.accounts[0]; const before = originalStations.map((resource) => ({ id: resource.id, userId: resource.userId, costAliases: resource.costAliases, lowBalanceUsd: resource.lowBalanceUsd, cnyPerUsd: resource.cnyPerUsd, includeInProfit: resource.includeInProfit, noRenewal: resource.noRenewal }));
+  const drawer = await openAccountAuthorization(page, center, account); assert.equal(await drawer.locator('input[type="password"]').count(), 1); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("one-new-pat"); await previewAuthorization(drawer);
+  assert.deepEqual(probes[0].targetStationIds, ["st_u04_billing", "st_u04_a1", "st_u04_a2"]); assert.deepEqual(probes[0].authorization, { type: "newapi", baseUrl: "https://same.test", accessToken: "one-new-pat", userId: "42" });
+  const stored = await page.evaluate(() => JSON.parse(sessionStorage.getItem("account-authorization-recovery-v05"))); assert.deepEqual(stored, { accountKey: account.accountKey, retryInput: { requestId: probes[0].requestId, targetStationIds: probes[0].targetStationIds } }); assert.doesNotMatch(JSON.stringify(stored), /pat|authorization|previewId|marker/);
+  await drawer.getByText(/排除记录：.*已归档.*其他账号.*纯 Key.*本站/).waitFor(); await drawer.getByText("影响账单规则：rule_u04", { exact: true }).waitFor(); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); assert.equal(await drawer.locator('[data-authorization-target]').count(), 3); assert.equal(await drawer.locator('input[type="password"]').count(), 0); assert.equal(await page.evaluate(() => sessionStorage.getItem("account-authorization-recovery-v05")), null);
+  assert.deepEqual(originalStations.map((resource) => ({ id: resource.id, userId: resource.userId, costAliases: resource.costAliases, lowBalanceUsd: resource.lowBalanceUsd, cnyPerUsd: resource.cnyPerUsd, includeInProfit: resource.includeInProfit, noRenewal: resource.noRenewal })), before); assert.equal(model.accounts[1].resources[0].authVersion, 1);
+});
+
+test("Sub2API JWT and password switches clear hidden authorization and invalidate the previous preview", async (t) => {
+  const { page, center, model, probes, updates } = await openAuthorizationPage(t); const drawer = await openAccountAuthorization(page, center, model.accounts[2]);
+  await drawer.getByLabel("更新访问令牌", { exact: true }).fill("old-jwt-input"); await previewAuthorization(drawer); await drawer.getByRole("combobox", { name: "更新授权方式", exact: true }).click(); await page.getByText("Sub2API 邮箱与密码", { exact: true }).last().click(); assert.equal(await drawer.getByRole("button", { name: "确认更新所选授权", exact: true }).isDisabled(), true);
+  await drawer.getByLabel("更新登录邮箱", { exact: true }).fill("new@example.test"); await drawer.getByLabel("更新登录密码", { exact: true }).fill("temporary-password"); await previewAuthorization(drawer); assert.equal(probes[1].authorization.accessToken, undefined);
+  await drawer.getByRole("combobox", { name: "更新授权方式", exact: true }).click(); await page.getByText("Sub2API 登录令牌", { exact: true }).last().click(); assert.equal(await drawer.getByLabel("更新访问令牌", { exact: true }).inputValue(), ""); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("new-jwt-input"); await previewAuthorization(drawer); assert.deepEqual(probes[2].authorization, { type: "sub2api", baseUrl: "https://same.test", accessToken: "new-jwt-input" }); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); assert.notEqual(probes[0].requestId, probes[2].requestId);
+  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); await center.locator(`[data-account-key="${model.accounts[2].accountKey}"]`).getByRole("button", { name: "更新账号授权 sub2api A", exact: true }).click(); await drawer.getByRole("combobox", { name: "更新授权方式", exact: true }).click(); await page.getByText("Sub2API 邮箱与密码", { exact: true }).last().click(); assert.equal(await drawer.getByLabel("更新登录邮箱", { exact: true }).inputValue(), ""); assert.equal(await drawer.getByLabel("更新登录密码", { exact: true }).inputValue(), ""); await drawer.getByLabel("更新登录邮箱", { exact: true }).fill("final@example.test"); await drawer.getByLabel("更新登录密码", { exact: true }).fill("final-password"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.deepEqual(updates[1].authorization, { type: "sub2api-password", baseUrl: "https://same.test", email: "final@example.test", password: "final-password" });
+});
+
+test("partial authorization reload uses readonly recovery before a new saved-donor preview and one confirmation", async (t) => {
+  const { page, center, model, probes, updates, recoveries } = await openAuthorizationPage(t, { partial: true }); let drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("partial-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); await drawer.locator('[data-authorization-target="st_u04_a2"]').getByText("A-monitor-2：更新失败", { exact: true }).waitFor();
+  await page.reload(); await center.getByRole("button", { name: "恢复上次授权更新", exact: true }).click(); drawer = page.getByRole("dialog", { name: "更新账号授权 · 42", exact: true }); await drawer.getByText("A-monitor-1：已保存，无需重复更新", { exact: true }).waitFor(); assert.equal(probes.length, 1); assert.equal(updates.length, 1); assert.equal(recoveries.length, 1); assert.deepEqual(recoveries[0], { requestId: probes[0].requestId, targetStationIds: probes[0].targetStationIds });
+  await drawer.getByRole("button", { name: "重新验证并补未完成", exact: true }).click(); await drawer.getByText("授权更新预览，尚未保存", { exact: true }).waitFor(); assert.equal(probes[1].reuseSavedAuthorization, true); assert.equal(probes[1].authorization, undefined); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a1").authVersion, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a2").authVersion, 2);
+});
+
+test("authorization response loss reads saved outcomes without submitting the update again", async (t) => {
+  const { page, center, model, updates, recoveries } = await openAuthorizationPage(t, { loseResponse: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("response-loss-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); await drawer.getByText("A-billing：已保存，无需重复更新", { exact: true }).waitFor(); assert.equal(updates.length, 1); assert.equal(recoveries.length, 1); assert.equal(await page.evaluate(() => sessionStorage.getItem("account-authorization-recovery-v05")), null);
+});
+
+test("an invalid saved donor starts a new authorization operation for only unfinished targets", async (t) => {
+  const { page, center, model, probes, updates } = await openAuthorizationPage(t, { partial: true, invalidDonor: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("initial-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); await drawer.getByRole("button", { name: "重新验证并补未完成", exact: true }).click(); await drawer.getByText(/请重新输入授权，已开始新的更新操作/).waitFor(); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("replacement-pat"); await previewAuthorization(drawer); assert.notEqual(probes[2].requestId, probes[0].requestId); assert.deepEqual(probes[2].targetStationIds, ["st_u04_a2"]); await drawer.getByText(/已确认更新，本次不再改写：.*A-monitor-1/).waitFor(); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a1").authVersion, 2);
+});
+
+test("unknown authorization targets are opt-in and exclusions never count as updated resources", async (t) => {
+  const { page, center, model, probes, updates } = await openAuthorizationPage(t); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); const unknown = drawer.getByRole("checkbox", { name: "更新目标 unknown-legacy", exact: true }); assert.equal(await unknown.isChecked(), false); await unknown.check(); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("checked-pat"); await previewAuthorization(drawer); assert.equal(probes[0].targetStationIds.includes("st_u04_unknown"), true); await drawer.getByText("排除 unknown-legacy：账号身份未核验，已排除", { exact: true }).waitFor(); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); await drawer.getByText("部分目标尚未更新，已保存目标保留", { exact: true }).waitFor(); await drawer.locator('[data-authorization-target="st_u04_unknown"]').getByText("unknown-legacy：更新失败", { exact: true }).waitFor(); assert.equal(await drawer.getByText("本次所选目标已完成授权更新", { exact: true }).count(), 0);
+  await drawer.getByRole("button", { name: "重新输入授权，开始新的更新", exact: true }).click(); assert.equal(await drawer.getByRole("checkbox", { name: "更新目标 A-monitor-1", exact: true }).isChecked(), false); assert.equal(await drawer.getByRole("checkbox", { name: "更新目标 A-monitor-2", exact: true }).isChecked(), false); assert.equal(await drawer.getByRole("checkbox", { name: "更新目标 A-billing", exact: true }).isChecked(), false); assert.equal(await unknown.isChecked(), false); assert.equal(updates.length, 1);
+});
+
+test("authorization from same-site account B cannot update account A and requires a fresh valid preview", async (t) => {
+  const { page, center, model, updates } = await openAuthorizationPage(t); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("account-B"); await drawer.getByRole("button", { name: "预览授权更新", exact: true }).click(); await drawer.getByText("替换授权属于另一个账号，请另行接入", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("button", { name: "确认更新所选授权", exact: true }).isDisabled(), true); assert.equal(updates.length, 0); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("correct-account-A"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1);
+});
+
+test("authorization with no saved donor requests fresh input and a new operation without a preview bypass", async (t) => {
+  const { page, center, model, probes, updates } = await openAuthorizationPage(t, { noDonor: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("failed-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); await drawer.getByRole("button", { name: "重新验证并补未完成", exact: true }).click(); await drawer.getByText(/尚无已确认更新的授权可复用/).waitFor(); assert.equal(updates.length, 1); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("fresh-pat"); await previewAuthorization(drawer); assert.notEqual(probes[2].requestId, probes[0].requestId); assert.equal(probes[2].targetStationIds.length, 3); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2);
+});
+
+test("pause and re-enable retain complete resource settings while stopping one Key leaves other monitors and history intact", async (t) => {
+  const { page, center, model, mutations, originalStations } = await openAuthorizationPage(t); let a = await expandAccount(center, model.accounts[0]); const resource = () => a.locator('[data-resource-id="st_u04_a1"]'); await resource().getByRole("button", { name: "暂停监控 A-monitor-1", exact: true }).click(); let modal = page.getByRole("dialog", { name: "暂停「A-monitor-1」监控？", exact: true }); await modal.getByText(/Key 账单核算继续/).waitFor(); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" }); await page.reload(); await center.getByText(/显示 3\/3/).waitFor(); a = await expandAccount(center, model.accounts[0]); await resource().getByText("监控暂停 / 未启用", { exact: true }).waitFor(); assert.equal(await page.locator(".resource-list-card").getByText("A-monitor-1", { exact: true }).count(), 0);
+  await resource().getByRole("button", { name: "查看原资源设置 A-monitor-1", exact: true }).click(); const editor = page.getByRole("dialog", { name: "编辑上游资源", exact: true }); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("成本渠道匹配别名", { exact: true }).inputValue(), "kept_alias"); await editor.getByRole("button", { name: /取\s*消/ }).click();
+  await resource().getByRole("button", { name: "启用监控 A-monitor-1", exact: true }).click(); modal = page.getByRole("dialog", { name: "启用「A-monitor-1」监控？", exact: true }); await modal.getByText("现有成本设置：不纳入", { exact: true }).waitFor(); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" }); await resource().getByText("余额监控", { exact: true }).waitFor(); assert.equal(originalStations.find((entry) => entry.id === "st_u04_a1").includeInProfit, false);
+  await a.getByRole("button", { name: /Key 9 · #9/ }).click(); await a.getByRole("button", { name: "停止 Key 9 的账单核算", exact: true }).click(); modal = page.getByRole("dialog", { name: "停止此 Key 的账单核算？", exact: true }); await modal.getByText(/Channel 1 #1.*st_u04_own/).waitFor(); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" }); await a.getByText("有效规则：无", { exact: true }).first().waitFor(); assert.equal(await a.getByRole("button", { name: "停止 Key 9 的账单核算", exact: true }).count(), 0); assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["PUT", "/api/stations/st_u04_a1"], ["PUT", "/api/stations/st_u04_a1"], ["DELETE", "/api/reconciliation/rules/rule_u04"]]); assert.equal(model.accounts[0].resources.find((entry) => entry.id === "st_u04_a2").monitorEnabled, true); assert.equal(model.accounts[0].keys[0].ruleIds.includes("rule_history"), true); assert.equal(await center.getByRole("button", { name: /暂停监控 st_u04_own/ }).count(), 0);
+});
+
+test("authorization target changes invalidate preview and keyboard cancellation works at 320/390/768/1440 without overflow", async (t) => {
+  for (const width of [320, 390, 768, 1440]) {
+    const { page, center, model, updates } = await openAuthorizationPage(t, { viewport: { width, height: 900 } }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("width-pat"); await previewAuthorization(drawer); const target = drawer.getByRole("checkbox", { name: "更新目标 A-monitor-2", exact: true }); await target.focus(); await page.keyboard.press("Space"); assert.equal(await drawer.getByRole("button", { name: "确认更新所选授权", exact: true }).isDisabled(), true); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `authorization overflow at ${width}`); await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(updates.length, 0);
+  }
+});
 
 test("account center preserves mixed accounts, original resource IDs, dedicated purpose and independent pure Keys", async (t) => {
   const { page, center, model, mutations } = await openAccountsPage(t);
   assert.equal(await center.locator("[data-site-key]").count(), 2); const a = await expandAccount(center, model.accounts[0]), b = await expandAccount(center, model.accounts[1]), sub = await expandAccount(center, model.accounts[2]);
   assert.equal(await a.locator("[data-resource-id]").count(), 3); assert.equal(await b.locator("[data-resource-id='B-monitor']").count(), 1); assert.equal(await sub.locator("[data-resource-id]").count(), 2);
-  const dedicated = a.locator("[data-resource-id='A-billing']"); await dedicated.getByText("账单专用", { exact: true }).waitFor(); assert.equal(await dedicated.getByRole("button").count(), 0); await a.getByText(/提醒阈值：\$27.00；折算汇率：0.7 RMB\/USD；成本设置：不纳入；不再续费/).waitFor();
+  const dedicated = a.locator("[data-resource-id='A-billing']"); await dedicated.getByText("监控暂停 / 未启用", { exact: true }).waitFor(); await dedicated.getByRole("button", { name: "查看原资源设置 A-billing", exact: true }).waitFor(); assert.equal(await page.locator(".resource-list-card").getByText("A-billing", { exact: true }).count(), 0); await a.getByText(/提醒阈值：\$27.00；折算汇率：0.7 RMB\/USD；成本设置：不纳入；不再续费/).waitFor();
   assert.equal(await a.locator("[data-resource-id='pure-key']").count(), 0); await center.locator("[data-unverified-resource-id='pure-key']").getByText("关联本站渠道：Channel 1 #1", { exact: true }).waitFor(); await center.locator("[data-unverified-resource-id='unknown-legacy']").getByText("账号身份待核验", { exact: true }).waitFor(); assert.equal(await center.locator("[data-resource-id='own']").count(), 0);
   await a.getByRole("button", { name: /Key 9 · #9/ }).click(); await a.getByText("Channel 3 · #3", { exact: true }).waitFor(); await a.getByText("当前范围版本：3 · 用途范围待确认", { exact: true }).waitFor(); await a.getByRole("button", { name: /Key 10 · #10/ }).click(); await a.getByText("历史范围版本：3 · 用途范围待确认", { exact: true }).waitFor(); await a.getByText("有效规则：无", { exact: true }).waitFor();
   await page.getByRole("button", { name: "查看归档资源", exact: true }).click(); await a.locator("[data-resource-id='A-archived']").waitFor(); await page.getByText("自营", { exact: true }).waitFor(); assert.doesNotMatch(await center.innerText(), /余额合计|总余额|\$30\.00/); assert.equal(await center.getByRole("link").count(), 0); assert.equal(mutations.length, 0);

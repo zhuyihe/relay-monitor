@@ -76,6 +76,285 @@ async function accountReadFixture(t) {
   return { rt, store, a1, a2, billing, b, pure, unknown, archived, state, rule, writes: () => writes };
 }
 
+async function authorizationFixture(t, type = "newapi") {
+  const state = { now: Date.parse("2026-10-09T07:00:00Z"), docs: [], meta: {}, links: [], rules: [], requests: [],
+    commits: 0, rollbacks: 0, sqlHook: null, requestHook: null, failStationId: null, generated: 0, history: [{ stationId: "st_u04_a1", remaining: 20 }] };
+  t.mock.method(Date, "now", () => state.now);
+  t.mock.method(globalThis, "fetch", async (input, options = {}) => {
+    const url = new URL(input), token = options.headers?.Authorization || "", body = options.body && JSON.parse(options.body);
+    state.requests.push({ path: url.pathname, token, body }); await state.requestHook?.(url, options);
+    if (token.includes("denied") || state.deniedTokens?.includes(token.replace(/^Bearer\s+/i, ""))) return { status: 403, text: async () => JSON.stringify({ success: false, code: 403, message: token }) };
+    const account = token.includes("-B") || body?.email === "b@example.test" ? 43 : url.host === "own.test" ? 1 : 42;
+    let data = { id: account };
+    if (url.pathname.endsWith("/auth/login") || url.pathname.endsWith("/auth/refresh")) {
+      state.generated += 1; data = { access_token: `generated-access-${state.generated}-A`, refresh_token: `generated-refresh-${state.generated}-A`, expires_in: 3600 };
+    }
+    return { status: 200, text: async () => JSON.stringify(url.pathname.startsWith("/api/v1/") ? { code: 0, data } : { success: true, data }) };
+  });
+  const read = (sql, params = []) => {
+    if (sql.includes("SELECT id, doc FROM stations")) return [state.docs.map((doc) => ({ id: doc.id, doc: structuredClone(doc) }))];
+    if (sql.includes("FROM reconciliation_rule_channels")) return [state.rules.flatMap((rule) => rule.members.map((member) => ({ rule_id: rule.id, ...member })))];
+    if (sql.includes("FROM reconciliation_rules")) return [structuredClone(sql.includes("WHERE archived_at IS NULL") ? state.rules.filter((rule) => !rule.archived_at) : state.rules)];
+    if (sql.includes("FROM channel_monitor_links")) return [structuredClone(state.links)];
+    if (sql.includes("FROM meta")) return [Object.entries(state.meta).filter(([key]) => !params.length || params[0] === key || sql.includes("IN ('settings'"))
+      .map(([k, v]) => ({ k, v: structuredClone(v) }))];
+    throw new Error(`unexpected read: ${sql}`);
+  };
+  const pool = { query: async (...args) => read(...args), getConnection: async () => {
+    let draft;
+    return { beginTransaction: async () => { draft = structuredClone({ docs: state.docs, meta: state.meta }); },
+      async query(sql, params = []) {
+        if (sql.startsWith("DELETE FROM stations")) draft.docs = params.length ? draft.docs.filter((doc) => params[0].includes(doc.id)) : [];
+        else if (sql.startsWith("INSERT INTO stations")) {
+          const docs = params[0].map((row) => JSON.parse(row[2])), failed = docs.find((doc) => doc.id === state.failStationId);
+          if (failed && JSON.stringify(failed) !== JSON.stringify(state.docs.find((doc) => doc.id === failed.id))) throw new Error("synthetic Store failure");
+          draft.docs = docs;
+        } else if (sql.startsWith("INSERT INTO meta")) for (const [key, value] of params[0]) draft.meta[key] = JSON.parse(value);
+        else return read(sql, params);
+        await state.sqlHook?.(sql, params); return [[]];
+      }, commit: async () => { state.docs = draft.docs; state.meta = draft.meta; state.commits += 1; },
+      rollback: async () => { state.rollbacks += 1; }, release() {} };
+  } };
+  let store = new Store(pool);
+  const provider = type.startsWith("sub2api") ? "sub2api" : "newapi", identity = { provider, baseUrl: "https://same.test", accountId: "42" };
+  const add = async (id, input, verifiedIdentity = identity) => {
+    const station = await store.add({ type, baseUrl: identity.baseUrl, accessToken: `${id}-A`, email: "a@example.test", password: "old-password-A",
+      lowBalanceUsd: 31, cnyPerUsd: 0.8, noRenewal: true, ...input }, { verifiedIdentity }); station.id = id; return station;
+  };
+  const own = await add("st_u04_own", { type: "newapi", baseUrl: "https://own.test", isOwn: true }, { provider: "newapi", baseUrl: "https://own.test", accountId: "1" });
+  const a1 = await add("st_u04_a1", { includeInProfit: false }), a2 = await add("st_u04_a2", {}), billing = await add("st_u04_billing", { monitorEnabled: false });
+  const pure = await add("st_u04_key", { type: "newapi-key", apiKey: "independent-Key-A" }, null);
+  const b = await add("st_u04_b", { accessToken: "account-B", email: "b@example.test" }, { ...identity, accountId: "43" });
+  const unknown = await add("st_u04_unknown", { accessToken: "denied-A", email: "unknown@example.test" }, null);
+  const archived = await add("st_u04_archived", {}); await store.archive(archived.id);
+  const other = await add("st_u04_other", { baseUrl: "https://other.test" }, { ...identity, baseUrl: "https://other.test" });
+  a1.alertState = { errorCount: 2, status: "low" }; a1.costAliases = ["retained-alias"];
+  const ownSource = { stationId: own.id, provider: "newapi", baseUrl: own.baseUrl, accountId: "1",
+    namespaceKey: createHash("sha256").update(JSON.stringify(["newapi", own.baseUrl, "1"])).digest("hex") };
+  state.meta.channel_onboarding_catalogue = { ownStationId: own.id, ownSource, syncedAt: state.now,
+    sourceVersion: createHash("sha256").update(JSON.stringify([stationBusinessVersion(own), ownSource.namespaceKey])).digest("hex"),
+    channels: [1, 2].map((id) => ({ id, name: `Sales ${id}`, type: 1, baseUrl: "https://same.test", status: 1, groups: ["g"], revision: `revision-${id}` })) };
+  state.links = [a1, a2, pure].map((station) => ({ own_station_id: own.id, channel_id: 1, station_id: station.id, channel_revision: "revision-1", confirmed_at_ms: 1 }));
+  state.rules = [{ id: "rule_u04", upstream_station_id: billing.id, own_station_id: own.id, token_id: 9, token_name: "Key 9", enabled: true,
+    provider, canonical_key: canonicalBillingKey(billing, identity, 9), billing_policy: "next-complete-day", scope_version: 3,
+    billing_effective_from_ms: Date.parse("2026-10-09T16:00:00Z"), timezone: "Asia/Shanghai", cost_coverage: "complete",
+    source_binding: { version: 2, ownSource, channels: { 1: "revision-1" }, coverageDeclaration: { answer: "none" } },
+    members: [{ channel_id: 1, channel_name: "Sales 1" }] }];
+  store.data.auth = { isDefault: false }; await store.save();
+  let rt;
+  async function restart() {
+    store = new Store(pool); await store.load(); rt = { pool, store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 },
+      sessions: { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
+    rt.reconciliation = createReconciliationModule(rt); rt.channelOnboarding = rt.onboardingSource = await createChannelOnboardingModule(rt, { now: () => state.now }).load();
+  }
+  await restart(); state.commits = 0;
+  const accountKey = createHash("sha256").update(JSON.stringify([provider, identity.baseUrl, "42"])).digest("hex");
+  const input = { requestId: "u04-operation", targetStationIds: [a1.id, a2.id, billing.id],
+    authorization: type === "sub2api-password" ? { type, baseUrl: identity.baseUrl, email: "a@example.test", password: "replacement-password-A" }
+      : { type, baseUrl: identity.baseUrl, accessToken: "replacement-A" } };
+  const http = (operation, body) => handleChannelOnboardingRequest(new Request("https://local.test/api/channel-onboarding/accounts/account/authorization", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }), rt, operation, { accountKey });
+  return { state, get rt() { return rt; }, get store() { return store; }, ids: { own: own.id, a1: a1.id, a2: a2.id, billing: billing.id,
+    pure: pure.id, b: b.id, unknown: unknown.id, archived: archived.id, other: other.id }, accountKey, input, restart, http };
+}
+
+test("U04 genuine Provider+Store+关系Repository HTTP probe零保存，三个eligible原ID并排除pureKey/own/B/unknown/archived/other", async (t) => {
+  const f = await authorizationFixture(t), before = structuredClone(f.store.data);
+  const input = { ...f.input, targetStationIds: Object.values(f.ids), authorization: { ...f.input.authorization,
+    verifiedIdentity: { accountId: "forged" }, authorizationUpdateRef: { requestId: "forged" }, guard: "forged" }, accountKey: "forged" };
+  const response = await f.http("probeAccountAuthorization", input); assert.equal(response.status, 200);
+  const probe = await response.json(); assert.equal(probe.accountKey, f.accountKey);
+  assert.deepEqual(probe.targets.map((target) => target.stationId), f.input.targetStationIds);
+  assert.deepEqual(probe.excluded.map((target) => target.stationId), [f.ids.own, f.ids.pure, f.ids.b, f.ids.unknown, f.ids.archived, f.ids.other]);
+  assert.deepEqual(probe.targets[2].purposes, { monitor: false, billingRuleIds: ["rule_u04"] });
+  assert.deepEqual(probe.targets[0].monitorChannelIds, [1]); assert.deepEqual(probe.targets[2].billingChannelIds, [1]);
+  assert.deepEqual(probe.impact, { monitorStationIds: [f.ids.a1, f.ids.a2], billingRuleIds: ["rule_u04"], channels: [{ ownStationId: f.ids.own, channelId: 1, name: "Sales 1" }] });
+  assert.doesNotMatch(JSON.stringify(probe), /replacement-A|st_u04_a1-A|denied-A|forged|authorizationUpdateRef|password|digest/);
+  assert.deepEqual(f.store.data, before); assert.equal(f.state.commits, 0);
+  const wrong = await f.http("probeAccountAuthorization", { ...f.input, requestId: "wrong", authorization: { ...f.input.authorization, accessToken: "replacement-B" } });
+  assert.equal(wrong.status, 400); assert.equal((await wrong.json()).code, "ACCOUNT_IDENTITY_CHANGED"); assert.equal(f.state.commits, 0);
+  const result = await (await f.http("updateAccountAuthorization", { ...input, previewId: probe.previewId })).json();
+  assert.equal(result.complete, false); assert.equal(result.targets.length, Object.keys(f.ids).length);
+  assert.equal(result.targets.filter((target) => target.status === "updated").length, 3);
+  assert.ok([f.ids.own, f.ids.pure, f.ids.b, f.ids.unknown, f.ids.archived, f.ids.other].every((id) =>
+    JSON.stringify(f.store.get(id)) === JSON.stringify(before.stations.find((station) => station.id === id))));
+});
+
+test("U04 public一次confirm保持用途设置/alerts/links/rules/history，readonly recover0fetch0write，重启重复不重改或延期", async (t) => {
+  const f = await authorizationFixture(t), before = structuredClone({ rules: f.state.rules, links: f.state.links, history: f.state.history });
+  const original = structuredClone(f.store.get(f.ids.a1));
+  const probe = await (await f.http("probeAccountAuthorization", f.input)).json();
+  const updated = await (await f.http("updateAccountAuthorization", { ...f.input, previewId: probe.previewId })).json();
+  assert.equal(updated.complete, true); assert.ok(updated.targets.every((target) => target.status === "updated" && target.savedAuthVersion === 2));
+  const station = f.store.get(f.ids.a1); for (const field of ["id", "monitorEnabled", "lowBalanceUsd", "cnyPerUsd", "includeInProfit", "noRenewal", "alertState", "costAliases"]) assert.deepEqual(station[field], original[field]);
+  assert.equal(f.store.get(f.ids.billing).monitorEnabled, false); assert.equal(f.store.get(f.ids.billing).includeInProfit, false);
+  assert.deepEqual({ rules: f.state.rules, links: f.state.links, history: f.state.history }, before);
+  assert.doesNotMatch(JSON.stringify(updated), /replacement-A|authorizationUpdateRef|accessToken|password|digest/);
+  await f.restart(); const requests = f.state.requests.length, commits = f.state.commits;
+  const recovered = await (await f.http("recoverAccountAuthorization", probe.retryInput)).json();
+  assert.equal(recovered.complete, true); assert.ok(recovered.targets.every((target) => target.status === "already_updated"));
+  assert.equal(f.state.requests.length, requests); assert.equal(f.state.commits, commits);
+  f.state.now += 86400000;
+  const retry = await (await f.http("updateAccountAuthorization", { ...f.input, previewId: probe.previewId })).json();
+  assert.equal(retry.complete, true); assert.equal(f.state.commits, commits); assert.deepEqual(f.state.rules, before.rules);
+  const changed = await f.http("probeAccountAuthorization", { ...f.input, authorization: { ...f.input.authorization, accessToken: "other-desired-A" } });
+  assert.equal(changed.status, 400); assert.equal((await changed.json()).code, "OPERATION_CHANGED");
+});
+
+test("U04 public Store单目标失败保留partial，response-loss+restart由saved donor fresh验证只补缺项", async (t) => {
+  const f = await authorizationFixture(t), probe = await (await f.http("probeAccountAuthorization", f.input)).json();
+  f.state.failStationId = f.ids.a2;
+  const partial = await (await f.http("updateAccountAuthorization", { ...f.input, previewId: probe.previewId })).json();
+  assert.equal(partial.complete, false); assert.deepEqual(partial.targets.map((target) => target.status), ["updated", "failed", "updated"]);
+  assert.equal(f.store.get(f.ids.a2).authVersion, 1); assert.equal(f.store.get(f.ids.a2).authorizationUpdateRef, undefined);
+  assert.equal(f.state.docs.find((doc) => doc.id === f.ids.a2).accessToken, "st_u04_a2-A");
+  await f.restart(); const requests = f.state.requests.length;
+  const recovered = await (await f.http("recoverAccountAuthorization", probe.retryInput)).json();
+  assert.deepEqual(recovered.targets.map((target) => target.status), ["already_updated", "repreview_required", "already_updated"]);
+  assert.equal(f.state.requests.length, requests); assert.equal(recovered.complete, false);
+  f.state.failStationId = null;
+  const retryInput = { ...probe.retryInput, reuseSavedAuthorization: true }, retryProbe = await (await f.http("probeAccountAuthorization", retryInput)).json();
+  assert.ok(f.state.requests.length > requests, "saved donor is actually reverified on new probe");
+  const completed = await (await f.http("updateAccountAuthorization", { ...retryInput, previewId: retryProbe.previewId })).json();
+  assert.equal(completed.complete, true); assert.deepEqual(completed.targets.map((target) => target.status), ["already_updated", "updated", "already_updated"]);
+  assert.ok(f.input.targetStationIds.every((id) => f.store.get(id).authVersion === 2));
+  await f.restart(); const writes = f.state.commits;
+  assert.equal((await (await f.http("recoverAccountAuthorization", probe.retryInput)).json()).complete, true); assert.equal(f.state.commits, writes);
+});
+
+test("U04 public已核验当前版本可更换过期授权，unknown目标必须用旧凭据实际核验不能按同域归并", async (t) => {
+  const f = await authorizationFixture(t); f.state.deniedTokens = [f.store.get(f.ids.a1).accessToken];
+  const unknownA = await f.store.add({ type: "newapi", baseUrl: "https://same.test", accessToken: "unknown-valid-A" });
+  const unknownB = await f.store.add({ type: "newapi", baseUrl: "https://same.test", accessToken: "unknown-valid-B" });
+  const input = { ...f.input, targetStationIds: [f.ids.a1, unknownA.id, unknownB.id] }, requests = f.state.requests.length, commits = f.state.commits;
+  const probe = await (await f.http("probeAccountAuthorization", input)).json();
+  assert.deepEqual(probe.targets.map((target) => target.stationId), [f.ids.a1, unknownA.id]);
+  assert.deepEqual(probe.excluded.map((target) => target.stationId), [unknownB.id]);
+  assert.equal(f.state.requests.length - requests, 3, "one replacement plus two unknown current credentials; known expired credential is not required");
+  assert.equal(unknownA.verifiedIdentity, null); assert.equal(f.state.commits, commits);
+  const updated = await (await f.http("updateAccountAuthorization", { ...input, previewId: probe.previewId })).json();
+  assert.equal(updated.complete, false); assert.deepEqual(updated.targets.map((target) => target.status), ["updated", "updated", "failed"]);
+  assert.equal(f.store.get(unknownA.id).verifiedIdentity.accountId, "42"); assert.equal(f.store.get(unknownB.id).verifiedIdentity, null);
+});
+
+test("U04 public原资源、source、link、rule版本变化拒绝旧预览且零授权写入", async (t) => {
+  for (const change of ["resource", "source", "link", "rule"]) await t.test(change, async (child) => {
+    const f = await authorizationFixture(child), probe = await (await f.http("probeAccountAuthorization", f.input)).json();
+    if (change === "resource") await f.store.update(f.ids.a2, { monitorEnabled: false });
+    if (change === "source") await f.store.update(f.ids.own, { accessToken: "rotated-own-A" });
+    if (change === "link") f.state.links.push({ own_station_id: f.ids.own, channel_id: 2, station_id: f.ids.a1, channel_revision: "revision-2", confirmed_at_ms: 2 });
+    if (change === "rule") f.state.rules[0].scope_version += 1;
+    const before = structuredClone(f.store.data), commits = f.state.commits;
+    const result = await (await f.http("updateAccountAuthorization", { ...f.input, previewId: probe.previewId })).json();
+    assert.equal(result.complete, false); assert.equal(result.targets.length, 3);
+    assert.ok(result.targets.every((target) => target.status === "repreview_required"));
+    assert.ok(result.targets.every((target) => ["RESOURCE_CHANGED", "PREVIEW_BASIS_CHANGED"].includes(target.code)));
+    assert.deepEqual(f.store.data, before); assert.equal(f.state.commits, commits);
+  });
+});
+
+test("U04 public实际Store SQL后预览失效rollback，之前成功目标保留且未保存目标版本不提升", async (t) => {
+  const f = await authorizationFixture(t), probe = await (await f.http("probeAccountAuthorization", f.input)).json();
+  f.state.sqlHook = (sql) => { if (sql.startsWith("INSERT INTO stations") && f.state.commits === 1) f.state.now = probe.expiresAtMs; };
+  const result = await (await f.http("updateAccountAuthorization", { ...f.input, previewId: probe.previewId })).json();
+  assert.equal(result.complete, false); assert.deepEqual(result.targets.map((target) => target.status), ["updated", "repreview_required", "repreview_required"]);
+  assert.equal(result.targets[1].code, "PREVIEW_BASIS_CHANGED"); assert.equal(f.state.rollbacks, 1); assert.equal(f.state.commits, 1);
+  for (const id of [f.ids.a2, f.ids.billing]) {
+    assert.equal(f.store.get(id).authVersion, 1); assert.equal(f.store.get(id).authorizationUpdateRef, undefined);
+    assert.equal(f.state.docs.find((doc) => doc.id === id).accessToken, `${id}-A`);
+  }
+  assert.equal(f.store.get(f.ids.a1).authVersion, 2);
+  f.state.sqlHook = null; await f.restart(); const requests = f.state.requests.length, commits = f.state.commits;
+  const recovered = await (await f.http("recoverAccountAuthorization", probe.retryInput)).json();
+  assert.deepEqual(recovered.targets.map((target) => target.status), ["already_updated", "repreview_required", "repreview_required"]);
+  assert.equal(f.state.requests.length, requests); assert.equal(f.state.commits, commits);
+});
+
+test("U04 public JWT→密码→JWT清理hidden凭据，临时JWT续期不推进authVersion或泄漏返回", async (t) => {
+  const f = await authorizationFixture(t, "sub2api"), before = structuredClone({ rules: f.state.rules, links: f.state.links, history: f.state.history });
+  const passwordInput = { ...f.input, requestId: "password-rotation", authorization: { type: "sub2api-password", baseUrl: "https://same.test", email: "a@example.test", password: "replacement-password-A" } };
+  const probe = await (await f.http("probeAccountAuthorization", passwordInput)).json();
+  const result = await (await f.http("updateAccountAuthorization", { ...passwordInput, previewId: probe.previewId })).json();
+  assert.equal(result.complete, true, JSON.stringify(result));
+  for (const id of f.input.targetStationIds) {
+    const station = f.store.get(id); assert.equal(station.type, "sub2api-password"); assert.equal(station.accessToken, "");
+    assert.equal(station.password, "replacement-password-A"); assert.equal(station.s2Tokens, null); assert.equal(station.authVersion, 2);
+  }
+  const station = f.store.get(f.ids.a1), resourceVersion = stationBusinessVersion(station);
+  await queryAccountIdentity(station); const generated = f.state.generated; f.state.now += 7200000; await queryAccountIdentity(station);
+  assert.ok(f.state.generated > generated); assert.equal(station.authVersion, 2); assert.equal(stationBusinessVersion(station), resourceVersion);
+  const recovered = await (await f.http("recoverAccountAuthorization", probe.retryInput)).json(); assert.equal(recovered.complete, true);
+  const jwtInput = { ...f.input, requestId: "jwt-rotation", authorization: { type: "sub2api", baseUrl: "https://same.test", accessToken: "replacement-JWT-A" } };
+  const jwtProbe = await (await f.http("probeAccountAuthorization", jwtInput)).json();
+  const jwtResult = await (await f.http("updateAccountAuthorization", { ...jwtInput, previewId: jwtProbe.previewId })).json(); assert.equal(jwtResult.complete, true);
+  for (const id of f.input.targetStationIds) {
+    const saved = f.store.get(id); assert.equal(saved.type, "sub2api"); assert.equal(saved.email, ""); assert.equal(saved.password, "");
+    assert.equal(saved.s2Tokens, null); assert.equal(saved.accessToken, "replacement-JWT-A"); assert.equal(saved.authVersion, 3);
+  }
+  assert.deepEqual({ rules: f.state.rules, links: f.state.links, history: f.state.history }, before);
+  assert.doesNotMatch(JSON.stringify([probe, result, recovered, jwtProbe, jwtResult]), /generated-access|generated-refresh|replacement-password|replacement-JWT|authorizationUpdateRef|s2Tokens/);
+});
+
+test("U04 public无donor要求新输入，失效donor不能复用，同operation改凭据即使重启也拒绝", async (t) => {
+  const f = await authorizationFixture(t), single = { ...f.input, targetStationIds: [f.ids.a1] };
+  const probe = await (await f.http("probeAccountAuthorization", single)).json(); f.state.failStationId = f.ids.a1;
+  const failed = await (await f.http("updateAccountAuthorization", { ...single, previewId: probe.previewId })).json(); assert.equal(failed.complete, false);
+  await f.restart(); const recovered = await (await f.http("recoverAccountAuthorization", probe.retryInput)).json();
+  assert.deepEqual(recovered.targets[0].remainingActions, ["supply_credentials", "repreview"]);
+  const noDonor = await f.http("probeAccountAuthorization", { ...probe.retryInput, reuseSavedAuthorization: true });
+  assert.equal((await noDonor.json()).code, "SAVED_AUTHORIZATION_UNAVAILABLE");
+  f.state.failStationId = null;
+  const fresh = await (await f.http("probeAccountAuthorization", single)).json();
+  assert.equal((await (await f.http("updateAccountAuthorization", { ...single, previewId: fresh.previewId })).json()).complete, true);
+  await f.restart();
+  const changed = await f.http("updateAccountAuthorization", { ...single, authorization: { ...single.authorization, accessToken: "changed-A" }, previewId: fresh.previewId });
+  assert.equal((await changed.json()).code, "OPERATION_CHANGED");
+  await f.store.update(f.ids.a1, { accessToken: "ordinary-edit-A" }); assert.equal(f.store.get(f.ids.a1).authorizationUpdateRef, null);
+  const invalidated = await (await f.http("recoverAccountAuthorization", fresh.retryInput)).json();
+  assert.equal(invalidated.complete, false); assert.deepEqual(invalidated.targets[0].remainingActions, ["supply_credentials", "repreview"]);
+  const reuse = await f.http("probeAccountAuthorization", { ...fresh.retryInput, reuseSavedAuthorization: true });
+  assert.equal((await reuse.json()).code, "SAVED_AUTHORIZATION_UNAVAILABLE");
+});
+
+test("U04 public readonly恢复只证明已保存结果，过期donor在新的probe实际核验失败且不泄漏授权", async (t) => {
+  const f = await authorizationFixture(t), input = { ...f.input, targetStationIds: [f.ids.a1, f.ids.a2] };
+  const probe = await (await f.http("probeAccountAuthorization", input)).json(); f.state.failStationId = f.ids.a2;
+  const partial = await (await f.http("updateAccountAuthorization", { ...input, previewId: probe.previewId })).json(); assert.equal(partial.complete, false);
+  await f.restart(); f.state.deniedTokens = ["replacement-A"];
+  const requests = f.state.requests.length, commits = f.state.commits;
+  const recovered = await (await f.http("recoverAccountAuthorization", probe.retryInput)).json();
+  assert.deepEqual(recovered.targets.map((target) => target.status), ["already_updated", "repreview_required"]);
+  assert.equal(f.state.requests.length, requests); assert.equal(f.state.commits, commits);
+  const rejected = await f.http("probeAccountAuthorization", { ...probe.retryInput, reuseSavedAuthorization: true });
+  assert.equal(rejected.status, 400); const error = await rejected.json(); assert.equal(error.code, "AUTHORIZATION_UNVERIFIED");
+  assert.doesNotMatch(JSON.stringify(error), /replacement-A/); assert.ok(f.state.requests.length > requests); assert.equal(f.state.commits, commits);
+  assert.equal(f.store.get(f.ids.a2).authorizationUpdateRef, undefined);
+});
+
+test("U04 ordinary monitor暂停走实际PUT/CAS，仅停监控估算且保留bill/scope/date/link/history与own用途", async (t) => {
+  const f = await authorizationFixture(t), before = structuredClone({ rules: f.state.rules, links: f.state.links, history: f.state.history });
+  const station = f.store.get(f.ids.a1), ownVersion = stationBusinessVersion(f.store.get(f.ids.own)), authVersion = station.authVersion;
+  const { registerHooks } = await import("node:module");
+  const hooks = registerHooks({ load(url, context, next) {
+    if (url.endsWith("/lib/api.js")) return { format: "module", shortCircuit: true,
+      source: "export const withAuth = handler => handler; export const json = (value, status = 200) => Response.json(value, {status});" };
+    return next(url, context);
+  } });
+  let PUT; try { ({ PUT } = await import("../app/api/stations/[id]/route.js")); } finally { hooks.deregister(); }
+  const response = await PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify({ monitorEnabled: false,
+    expectedAuthVersion: authVersion, expectedResourceVersion: stationBusinessVersion(station) }) }), f.rt, { id: station.id });
+  assert.equal(response.status, 200); assert.equal(station.monitorEnabled, false); assert.equal(station.includeInProfit, false);
+  assert.equal(station.authVersion, authVersion); assert.equal(station.isOwn, false);
+  assert.deepEqual({ rules: f.state.rules, links: f.state.links, history: f.state.history }, before);
+  assert.equal(f.state.rules[0].enabled, true); assert.equal(stationBusinessVersion(f.store.get(f.ids.own)), ownVersion);
+  const preview = await (await f.http("probeAccountAuthorization", f.input)).json();
+  assert.deepEqual(preview.impact.monitorStationIds, [f.ids.a2]); assert.deepEqual(preview.impact.billingRuleIds, ["rule_u04"]);
+  assert.equal(preview.targets[0].purposes.monitor, false); assert.equal(preview.targets[2].purposes.monitor, false);
+  const stale = await PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify({ monitorEnabled: true,
+    expectedResourceVersion: "old-version" }) }), f.rt, { id: station.id }); assert.equal(stale.status, 400);
+  assert.equal(station.monitorEnabled, false); assert.deepEqual(f.state.rules, before.rules);
+});
+
 test("U03 actual Store本地全量账号视图同域A/B分离，两old monitor与dedicated保持ID，纯Key/unknown不借关联推断身份", async (t) => {
   const f = await accountReadFixture(t), before = structuredClone(f.store.data), model = await f.rt.channelOnboarding.listAccounts();
   assert.equal(model.accounts.length, 2); const a = model.accounts.find((account) => account.identity.accountId === "A"), b = model.accounts.find((account) => account.identity.accountId === "B");
