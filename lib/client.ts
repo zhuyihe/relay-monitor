@@ -69,6 +69,24 @@ export type BatchResult = {
   retryInput: BatchRecoveryIntent;
 };
 export type RuleEditPreview = { previewId: string; groupId: string; expiresAtMs: number; existingRule?: any; basis: GroupBasis; preview: GroupPreview };
+export type WorkflowAction = {
+  id: string; kind: "verify_identity" | "update_authorization" | "verify_capability" | "connect_channels" | "confirm_coverage" | "wait_effective" | "review_source" | "inspect_balance";
+  label: string; accountKey: string | null; stationId: string | null; ruleId: string | null; ownStationId: string | null;
+  channelIds: number[]; window: { startMs: number; endMs: number; timezone: string } | null; href: string;
+};
+export type PublicCatalogueChannel = {
+  id: number; name: string; type: number; status: number; baseUrl: string; groups: string[]; revision: string; missing: boolean;
+  monitor: { status: "linked" | "unlinked" | "review_required"; stationIds: string[] };
+  reconciliation: { status: "configured" | "unconfigured" | "review_required"; ruleIds: string[] };
+};
+export type AccountKeyScope = {
+  canonicalKey: string; tokenId: number; tokenName: string; ruleIds: string[]; activeRuleIds: string[]; scopeAmbiguous: boolean;
+  channels: { ownSource: OwnSource | null; ownStationId: string; channelId: number; name: string }[];
+  costCoverage: string; coverageDeclaration: CoverageDeclaration; scopeVersion: number | null;
+  billingEffectiveFromMs: number | null; firstQueryableAtMs: number | null;
+};
+export type AccountRecord = { accountKey: string; siteKey: string; identity: AccountIdentity; resources: PublicResource[]; keys: AccountKeyScope[]; actions: WorkflowAction[] };
+export type AccountReadModel = { accounts: AccountRecord[]; unverifiedResources: PublicResource[]; channels: PublicCatalogueChannel[]; actions: WorkflowAction[]; generatedAt: string };
 
 // ---- 工具（与 v1 app.js 完全一致）-------------------------------------------
 export const usd = (n: any) => "$" + Number(n ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });

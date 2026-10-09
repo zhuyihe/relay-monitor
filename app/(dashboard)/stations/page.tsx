@@ -2,13 +2,14 @@
 // 上游资源页：资源列表 + 添加/编辑弹窗 + 单项刷新/归档 + 余额趋势详情弹窗
 // 功能对照 v1 app.js：renderStations/stationRow（553-586、193-288）、站点表单弹窗（1487-1614）、
 // 趋势弹窗 openTrend/drawChart（1675-1822）——文案与数字口径逐条对齐，布局用 Pro 风格重排
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PageContainer, ProCard } from "@ant-design/pro-components";
 import {
   Alert,
   App,
   Button,
   Checkbox,
+  Collapse,
   DatePicker,
   Empty,
   Form,
@@ -17,6 +18,7 @@ import {
   Modal,
   Select,
   Space,
+  Tag,
   Typography,
   theme,
 } from "antd";
@@ -34,6 +36,7 @@ import AppState from "../../components/app-state";
 import ChannelOnboarding from "../../components/channel-onboarding";
 import dayjs from "dayjs";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta, statusOf } from "../../../lib/client";
+import type { AccountReadModel, AccountRecord, PublicResource } from "../../../lib/client";
 import { describeConnectionFailure } from "../../../lib/connection-test";
 
 const { Text } = Typography;
@@ -584,6 +587,12 @@ export default function StationsPage() {
   const [retestingIds, setRetestingIds] = useState<Record<string, boolean>>({});
   const [stationChecks, setStationChecks] = useState<Record<string, { issue: ConnectionIssue; checkedAt: string }>>({});
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
+  const [accountModel, setAccountModel] = useState<AccountReadModel | null>(null);
+  const [accountError, setAccountError] = useState("");
+  const [loadingAccounts, setLoadingAccounts] = useState(true);
+  const [accountSearch, setAccountSearch] = useState("");
+  const [accountFilter, setAccountFilter] = useState("all");
+  const accountReadEpoch = useRef(0);
 
   // 添加/编辑弹窗
   const [modalOpen, setModalOpen] = useState(false);
@@ -605,6 +614,19 @@ export default function StationsPage() {
   const [archiving, setArchiving] = useState(false);
   const [purging, setPurging] = useState(false);
 
+  const loadAccounts = useCallback(async () => {
+    const current = ++accountReadEpoch.current;
+    setLoadingAccounts(true);
+    try {
+      const next: AccountReadModel = await api("/api/channel-onboarding/accounts");
+      if (current === accountReadEpoch.current) { setAccountModel(next); setAccountError(""); }
+    } catch (err: any) {
+      if (current === accountReadEpoch.current) setAccountError(err.message || "账号关系暂不可用");
+    } finally {
+      if (current === accountReadEpoch.current) setLoadingAccounts(false);
+    }
+  }, []);
+
   // 列表加载（GET /api/stations 同时带回全局设置，同 v1 reload）
   const reload = useCallback(async () => {
     setLoadingList(true);
@@ -620,8 +642,9 @@ export default function StationsPage() {
       throw e;
     } finally {
       setLoadingList(false);
+      void loadAccounts();
     }
-  }, [showArchived]);
+  }, [showArchived, loadAccounts]);
 
   const loadMeta = useCallback(async () => {
     setLoadingMeta(true);
@@ -641,6 +664,7 @@ export default function StationsPage() {
   useEffect(() => {
     reload().catch(() => {});
     loadMeta().catch(() => {});
+    return () => { accountReadEpoch.current += 1; };
   }, [loadMeta, reload]);
 
   // 自动刷新：跟随全局设置的刷新间隔（同 v1 startAuto，下限 10 秒）
@@ -656,7 +680,7 @@ export default function StationsPage() {
     try {
       const r = await api("/api/refresh", { method: "POST", body: {} });
       if (showArchived) await reload();
-      else setStations(r.stations);
+      else { setStations(r.stations); void loadAccounts(); }
       message.success("已刷新全部");
     } catch {
       message.error("刷新失败");
@@ -671,6 +695,7 @@ export default function StationsPage() {
     try {
       const r = await api(`/api/stations/${s.id}/refresh`, { method: "POST", body: {} });
       setStations((list) => list.map((x) => (x.id === s.id ? { ...x, ...(r.station || {}), balance: r.balance } : x)));
+      void loadAccounts();
       if (!r.balance.ok) message.error(`${s.name}：${resultIssue(null, r.balance.error).message}`);
     } catch (e: any) {
       message.error(e.message);
@@ -949,6 +974,31 @@ export default function StationsPage() {
     loadMeta().catch(() => {});
   };
 
+  const accountQuery = accountSearch.trim().toLowerCase();
+  const matchesAccountQuery = (values: unknown[]) => values.join(" ").toLowerCase().includes(accountQuery);
+  const filteredAccounts = (accountModel?.accounts || []).filter((account) =>
+    (accountFilter !== "attention" || account.actions.some((action) => action.kind !== "inspect_balance")) &&
+    matchesAccountQuery([account.accountKey, account.identity.provider, account.identity.baseUrl, account.identity.accountId,
+      ...account.resources.flatMap((resource) => [resource.id, resource.name, resource.type]),
+      ...account.keys.flatMap((key) => [key.tokenId, key.tokenName, ...key.channels.flatMap((channel) => [channel.channelId, channel.name])])])
+  );
+  const accountSites = new Map<string, AccountRecord[]>();
+  for (const account of filteredAccounts) accountSites.set(account.siteKey, [...(accountSites.get(account.siteKey) || []), account]);
+  const unverifiedResources = (accountModel?.unverifiedResources || []).filter((resource) =>
+    (showArchived || !resource.archivedAt) && matchesAccountQuery([resource.id, resource.name, resource.type, resource.baseUrl])
+  );
+  const renderAccountResource = (resource: PublicResource) => {
+    const original = stations.find((station) => station.id === resource.id);
+    return <div key={resource.id} data-resource-id={resource.id} style={{ paddingBlock: 10, borderBottom: `1px solid ${token.colorBorderSecondary}` }}>
+      <Space wrap><Text strong>{resource.name}</Text><Tag>{resource.purposes.monitor ? "余额监控" : "账单专用"}</Tag>{resource.archivedAt ? <Tag>已归档</Tag> : null}{resource.purposes.billingRuleIds.length ? <Tag>关联账单规则 {resource.purposes.billingRuleIds.length}</Tag> : null}</Space>
+      <div><Text type="secondary">原资源 ID：{resource.id} · {resource.type} · {resource.baseUrl}</Text></div>
+      <div><Text type="secondary">提醒阈值：{resource.lowBalanceUsd == null ? "沿用全局" : usd(resource.lowBalanceUsd)}；折算汇率：{resource.cnyPerUsd == null ? "沿用默认" : `${resource.cnyPerUsd} RMB/USD`}；成本设置：{resource.includeInProfit ? "纳入" : "不纳入"}{resource.noRenewal ? "；不再续费" : ""}</Text></div>
+      {resource.purposes.billingRuleIds.length ? <div><Text type="secondary">账单关系（含历史）：{resource.purposes.billingRuleIds.join("、")}</Text></div> : null}
+      {!resource.purposes.monitor ? <Text type="secondary">专用账单授权，设置只读；不会增加余额监控。</Text> : original && !compact ? <Button disabled={loadingMeta || !types.length} style={{ minHeight: 40, marginTop: 8 }} aria-label={`查看原资源设置 ${resource.name}`} onClick={() => openModal(original)}>资源设置</Button> : <Text type="secondary">余额、趋势与原资源设置见下方监控资源。</Text>}
+    </div>;
+  };
+  const accountBoundary = (value: number | null) => value == null ? "待核验" : `${new Date(value).toISOString().replace("T", " ").replace(".000Z", " UTC")}`;
+
   if (!loaded && (loadError || metaError)) {
     return (
       <PageContainer
@@ -986,6 +1036,45 @@ export default function StationsPage() {
       }
     >
       <ChannelOnboarding compact={compact} onComplete={reload} />
+      <section aria-label="账号关系中心" style={{ minWidth: 0, marginBottom: 16, overflowWrap: "anywhere" }}>
+        <ProCard title="账号关系" extra={<Button style={{ minHeight: 40 }} loading={loadingAccounts} onClick={() => void loadAccounts()}>刷新账号关系</Button>} loading={loadingAccounts && !accountModel}>
+          <Space direction="vertical" style={{ width: "100%", minWidth: 0 }} size={12}>
+            <Text type="secondary">按已核验的上游账号查看资源、Key 与本站渠道。各资源可能覆盖同一余额，继续按原资源查看，不合计账号余额。</Text>
+            <div className="page-toolbar" style={{ width: "100%" }}><Input aria-label="搜索账号关系" allowClear placeholder="搜索站点、账号、资源、Key 或渠道" value={accountSearch} onChange={(event) => setAccountSearch(event.target.value)} style={{ flex: "1 1 200px", minWidth: 0, fontSize: compact ? 16 : undefined }} /><Select aria-label="账号关系状态" value={accountFilter} onChange={setAccountFilter} style={{ minWidth: 130 }} options={[{ value: "all", label: "全部账号" }, { value: "attention", label: "需处理" }]} /></div>
+            {accountError ? <Alert type="warning" showIcon message={accountModel ? "账号关系刷新失败，正在显示上次结果" : "账号关系暂不可用"} description={accountError} action={<Button aria-label="重试账号关系" onClick={() => void loadAccounts()}>重试</Button>} /> : null}
+            {accountModel ? <Text type="secondary">显示 {filteredAccounts.length}/{accountModel.accounts.length} 个已核验账号；待核验资源 {unverifiedResources.length}/{accountModel.unverifiedResources.length} · 关系读取：{new Date(accountModel.generatedAt).toLocaleString("zh-CN")}</Text> : null}
+            {[...accountSites].map(([siteKey, accounts]) => <div key={siteKey} data-site-key={siteKey} style={{ width: "100%", minWidth: 0 }}>
+              <Text strong>{accounts[0].identity.provider === "newapi" ? "New API" : "Sub2API"} · {accounts[0].identity.baseUrl}</Text>
+              <Collapse ghost items={accounts.map((account) => ({ key: account.accountKey,
+                label: <Space wrap><Text strong>账号 {account.identity.accountId}</Text><Text type="secondary">{account.resources.filter((resource) => showArchived || !resource.archivedAt).length} 个资源 · {account.keys.length} 把 Key</Text>{account.actions.some((action) => action.kind !== "inspect_balance") ? <Tag color="warning">需处理</Tag> : null}</Space>,
+                children: <div data-account-key={account.accountKey} style={{ minWidth: 0 }}>
+                  <Text type="secondary">已核验账号 ID：{account.identity.accountId} · {account.identity.baseUrl}</Text>
+                  <div><Text type="secondary">待处理：{[...new Set(account.actions.filter((action) => action.kind !== "inspect_balance").map((action) => action.label))].join("；") || "暂无待处理事项"}</Text></div>
+                  {account.resources.filter((resource) => showArchived || !resource.archivedAt).map(renderAccountResource)}
+                  {account.resources.some((resource) => resource.archivedAt) && !showArchived ? <Text type="secondary">另有归档资源，使用页面上方「查看归档资源」展开。</Text> : null}
+                  {account.keys.length ? <Collapse ghost items={account.keys.map((key) => ({ key: key.canonicalKey,
+                    label: <Space wrap><Text strong>{key.tokenName || `Key ${key.tokenId}`} · #{key.tokenId}</Text><Tag color={key.scopeAmbiguous ? "error" : key.activeRuleIds.length ? "processing" : "default"}>{key.scopeAmbiguous ? "有效规则范围冲突" : key.activeRuleIds.length ? "正在核算" : "已停止核算 / 历史范围"}</Tag></Space>,
+                    children: <div data-canonical-key={key.canonicalKey} style={{ minWidth: 0 }}>
+                      <div><Text>规则（含历史）：{key.ruleIds.join("、")}</Text></div>
+                      <div><Text>有效规则：{key.activeRuleIds.join("、") || "无"}</Text></div>
+                      {key.scopeAmbiguous ? <Alert type="warning" showIcon message="存在多个有效规则，范围待核对" description="当前覆盖、生效时间与范围版本尚未统一确认。" /> : <><div><Text>{key.activeRuleIds.length ? "当前" : "历史"}范围版本：{key.scopeVersion ?? "待核验"} · {key.costCoverage === "complete" ? "用途范围已确认" : "用途范围待确认"}</Text></div><div><Text>{key.activeRuleIds.length ? "生效边界" : "历史生效边界"}：{accountBoundary(key.billingEffectiveFromMs)}</Text></div><div><Text>首个完整账单查询边界：{accountBoundary(key.firstQueryableAtMs)}</Text></div></>}
+                      {key.coverageDeclaration.answer === "other_use" ? <div><Text type="secondary">其他用途：{key.coverageDeclaration.otherUse === "own_channels" ? `本站其他渠道 ${key.coverageDeclaration.uncoveredOwnChannelIds.map((id) => `#${id}`).join("、") || "待补充"}` : key.coverageDeclaration.otherUse === "external" ? "站外调用" : "尚未明确"}</Text></div> : null}
+                      <div style={{ marginTop: 8 }}><Text strong>关联渠道（含历史）</Text>{key.channels.map((channel) => <div key={`${channel.ownSource?.namespaceKey || channel.ownStationId}:${channel.channelId}`}><Text>{channel.name || `渠道 ${channel.channelId}`} · #{channel.channelId}</Text><div><Text type="secondary">{channel.ownSource ? `本站账号 ${channel.ownSource.accountId} · ${channel.ownStationId}` : `来源待核验 · ${channel.ownStationId}`}</Text></div></div>)}</div>
+                    </div>,
+                  }))} /> : <Text type="secondary">尚无已核验的 Key 账单关系。</Text>}
+                </div>,
+              }))} />
+            </div>)}
+            {!filteredAccounts.length && accountModel ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={accountModel.accounts.length ? "没有匹配的已核验账号" : "暂无已核验账号"} /> : null}
+            <div style={{ width: "100%", minWidth: 0 }}><Text strong>独立 Key 与待核验资源</Text><Text type="secondary"> · 保留原记录，渠道关联不能证明所属账号。</Text>{unverifiedResources.map((resource) => <div key={resource.id} data-unverified-resource-id={resource.id} style={{ marginTop: 12 }}>
+              <Tag color="warning">{resource.type === "newapi-key" ? "独立 Key · 所属账号未核验" : "账号身份待核验"}</Tag>
+              {renderAccountResource(resource)}
+              <div><Text type="secondary">关联本站渠道：{accountModel?.channels.filter((channel) => channel.monitor.stationIds.includes(resource.id!)).map((channel) => `${channel.name} #${channel.id}`).join("、") || "尚无关联"}</Text></div>
+              <div><Text type="secondary">待处理：{accountModel?.actions.filter((action) => action.stationId === resource.id).map((action) => action.label).join("；") || "核验授权和关联"}</Text></div>
+            </div>)}{!unverifiedResources.length && accountModel ? <Text type="secondary"> · 当前没有匹配的待核验资源。</Text> : null}</div>
+          </Space>
+        </ProCard>
+      </section>
       {loadError ? (
         <Alert
           type="warning"
