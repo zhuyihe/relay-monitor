@@ -364,17 +364,6 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     const middle = (billStart + billEnd) / 2;
     await savedHistoryRow(originalHistoryRule, "original-a", savedBill(), billStart, middle);
     await savedHistoryRow(originalHistoryRule, "original-z", savedBill(), middle, billEnd);
-    const [windowDiagnostics] = await pool.query(`SELECT snapshot_key,
-      JSON_TYPE(source->'$.window.startMs') AS start_type,
-      JSON_TYPE(source->'$.window.endMs') AS end_type,
-      JSON_TYPE(source->'$.scopeFingerprint') AS scope_type,
-      JSON_TYPE(source->'$.resultGeneratedAt') AS generation_type,
-      CAST(source->>'$.window.endMs' AS SIGNED) > CAST(source->>'$.window.startMs' AS SIGNED) AS ordered,
-      (JSON_TYPE(source->'$.window.startMs') IN ('INTEGER', 'DOUBLE')
-        AND JSON_TYPE(source->'$.window.endMs') IN ('INTEGER', 'DOUBLE')
-        AND CAST(source->>'$.window.endMs' AS SIGNED) > CAST(source->>'$.window.startMs' AS SIGNED)) AS has_logical_window
-      FROM reconciliation_snapshots WHERE snapshot_key IN ('original-a', 'original-z') ORDER BY snapshot_key`);
-    t.diagnostic(`original saved window types: ${JSON.stringify(windowDiagnostics)}`);
     await savedHistoryRow(originalHistoryRule, "zero", savedBill({ generation: "2026-10-09T01:00:00Z", profit: 0 }));
     await savedHistoryRow(originalHistoryRule, "negative", savedBill({ scope: "second-scope", profit: -2 }));
     await savedHistoryRow(originalHistoryRule, "observation", { ...savedBill(), recordType: "observation" });

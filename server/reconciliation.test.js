@@ -3933,6 +3933,32 @@ test("U05已归档规则历史保留原scope/source/window/members且白名单�
     (error) => error.code === "HISTORY_UNAVAILABLE" && !error.message.includes("raw-secret"));
 });
 
+test("U05历史真实长epoch原窗口JSON不被physical半段替换，同logical账单historyId稳定", async (t) => {
+  const f = confirmedHistoryFixture();
+  t.mock.method(globalThis, "fetch", async () => { assert.fail("history must not query upstream"); });
+  const window = { preset: "yesterday", startMs: 1791417600000, endMs: 1791504000000, timezone: "UTC" };
+  const source = { ...f.source, window, scopeFingerprint: "original-scope", resultGeneratedAt: "2026-10-09T00:00:00Z",
+    result: { ...f.source.result, calculation: { profitUsd: 4 } } };
+  const midpoint = window.startMs + 12 * 3600000;
+  const records = [];
+  for (const [snapshot_key, window_start_ms, window_end_ms] of [
+    ["original-a", window.startMs, midpoint], ["original-z", midpoint, window.endMs],
+  ]) {
+    // Feed each possible SQL representative separately; collapse/range are verified by the MySQL engine cases.
+    f.state.rows = [{ ...f.row, snapshot_key, window_start_ms, window_end_ms, source: JSON.stringify(source) }];
+    const result = await f.module.getConfirmedHistory("old-rule", { startMs: window.startMs, endMs: window.endMs });
+    assert.equal(result.records.length, 1);
+    const record = result.records[0];
+    assert.deepEqual(record.window, window);
+    assert.deepEqual(record.upstream.window, window); assert.deepEqual(record.downstream.window, window);
+    assert.equal(record.calculation.profitUsd, 4); assert.equal(record.scopeFingerprint, "original-scope");
+    assert.doesNotMatch(JSON.stringify(result), /raw-secret|new-name|new-two/);
+    records.push(record);
+  }
+  assert.equal(records[0].historyId, records[1].historyId);
+  assert.ok(f.state.queries.every(({ sql }) => sql.startsWith("SELECT") || sql.startsWith("WITH")));
+});
+
 test("U05历史storage cursor/limit+1分页与legacy distinct ID，0及负profit原样保留", async () => {
   const f = confirmedHistoryFixture();
   const first = { ...structuredClone(f.row), snapshot_key: "old-bill-z", source: { ...structuredClone(f.source), result: { ...structuredClone(f.source.result), calculation: { profitUsd: 0 } } } };

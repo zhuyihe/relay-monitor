@@ -750,13 +750,13 @@ export class ReconciliationRepository {
          SELECT s.*, source->>'$.window.startMs' AS saved_start, source->>'$.window.endMs' AS saved_end,
            source->>'$.window.timezone' AS saved_timezone, source->>'$.scopeFingerprint' AS saved_scope,
            source->>'$.resultGeneratedAt' AS saved_generation,
-           JSON_TYPE(source->'$.window.startMs') IN ('INTEGER','DOUBLE')
-             AND JSON_TYPE(source->'$.window.endMs') IN ('INTEGER','DOUBLE')
+           JSON_TYPE(source->'$.window.startMs') IN ('INTEGER','UNSIGNED INTEGER','DOUBLE')
+             AND JSON_TYPE(source->'$.window.endMs') IN ('INTEGER','UNSIGNED INTEGER','DOUBLE')
              AND CAST(source->>'$.window.endMs' AS SIGNED) > CAST(source->>'$.window.startMs' AS SIGNED) AS has_logical_window
          FROM reconciliation_snapshots s WHERE rule_id = ? AND source->>'$.recordType' = 'confirmed'
            AND COALESCE(source->>'$.billingSource',source->>'$.downstream.billingSource') = 'channel-log-stat'
            AND CAST(COALESCE(source->>'$.calculationVersion',source->>'$.downstream.calculationVersion') AS UNSIGNED) = 3
-           AND JSON_TYPE(source->'$.result.calculation.profitUsd') IN ('INTEGER','DOUBLE')
+           AND JSON_TYPE(source->'$.result.calculation.profitUsd') IN ('INTEGER','UNSIGNED INTEGER','DOUBLE')
        ), logical AS (
          SELECT evidence.*, IF(has_logical_window,CAST(saved_start AS SIGNED),window_start_ms) AS logical_start,
            IF(has_logical_window,CAST(saved_end AS SIGNED),window_end_ms) AS logical_end,
