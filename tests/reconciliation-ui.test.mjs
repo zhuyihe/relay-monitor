@@ -65,7 +65,7 @@ async function openDailyPage(t, options = {}) {
     if (url.pathname === "/api/reconciliation/query") { const body = route.request().postDataJSON(); queries.push(body); return options.query ? options.query(route, body, initial) : fulfill(route, initial); }
     if (url.pathname.endsWith("/segments")) return fulfill(route, { segments: [] });
     throw new Error("unexpected daily fixture API: " + url.pathname);
-  }, options.viewport);
+  }, options.viewport, false, null, options.path);
   return { page, reads, queries, initial };
 }
 
@@ -169,7 +169,7 @@ test("daily zero and negative confirmed subtotals remain numeric while unknown w
   const next = await openDailyPage(t, { data: dailyResponse([unknown]) }); const row = next.page.locator("tr.ant-table-row", { hasText: "Rule A" }); await row.getByText("¥17.50", { exact: true }).waitFor(); await row.getByText("¥7.00", { exact: true }).waitFor(); await row.getByText("待核算", { exact: true }).waitFor(); const coverage = next.page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.locator(".ant-collapse-header").click(); await coverage.getByText("Key 用途待确认", { exact: true }).waitFor(); await coverage.getByText("待处理：核对这把 Key 的全部用途", { exact: true }).waitFor();
 });
 
-async function openFixturePage(t, handler, viewport, clock = false, onboardingHandler = null) {
+async function openFixturePage(t, handler, viewport, clock = false, onboardingHandler = null, path = "/reconciliation") {
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
   t.after(() => browser.close());
   const context = await browser.newContext({ serviceWorkers: "block", ...(viewport ? { viewport, isMobile: true, hasTouch: true } : {}) });
@@ -182,7 +182,7 @@ async function openFixturePage(t, handler, viewport, clock = false, onboardingHa
     }
     return handler(route);
   });
-  await page.goto(`${baseURL}/reconciliation`, { timeout: 30000 });
+  await page.goto(`${baseURL}${path}`, { timeout: 30000 });
   await page.getByText("Rule A").first().waitFor();
   return page;
 }
@@ -191,18 +191,45 @@ async function fulfill(route, body) {
   await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
 }
 
+test("workflow retry destination verifies the original absolute window and retries it once before full re-read", async (t) => {
+  const path = `/reconciliation?action=retry&ruleId=rule-1&startMs=${window.startMs}&endMs=${window.endMs}&timezone=Asia%2FShanghai`;
+  const { page, reads, queries } = await openDailyPage(t, { path });
+  const drawer = page.getByRole("dialog", { name: "Rule A · 对账详情", exact: true }); await drawer.waitFor();
+  assert.deepEqual(reads[0], { preset: "custom", startMs: String(window.startMs), endMs: String(window.endMs) });
+  assert.equal(queries.length, 0); await drawer.getByRole("button", { name: "重查该窗口账单", exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector(".ant-btn-loading"));
+  assert.deepEqual(queries, [{ preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: ["rule-1"] }]);
+  assert.deepEqual(reads[1], reads[0]);
+});
+
+test("workflow rejects invalid, deleted and changed-zone bill destinations with a usable reload", async (t) => {
+  for (const suffix of ["action=unknown&ruleId=rule-1", "action=scope&ruleId=deleted-rule", `action=retry&ruleId=rule-1&startMs=${window.startMs}&endMs=${window.endMs}&timezone=UTC`, "action=retry&ruleId=rule-1&startMs=bad&endMs=1&timezone=Asia%2FShanghai"]) {
+    const { page, queries } = await openDailyPage(t, { path: "/reconciliation?" + suffix });
+    await page.getByRole("button", { name: "刷新处理目标", exact: true }).waitFor(); assert.equal(queries.length, 0); assert.equal(await page.getByRole("dialog").count(), 0);
+    assert.equal(await page.getByRole("button", { name: "重查该窗口账单", exact: true }).count(), 0);
+  }
+});
+
+test("workflow scope and conflict destinations expose saved history and all conflict rule corrections", async (t) => {
+  const scope = await openDailyPage(t, { path: "/reconciliation?action=scope&ruleId=rule-1" });
+  const drawer = scope.page.getByRole("dialog", { name: "Rule A · 对账详情", exact: true }); await drawer.getByText("当前范围完整日生效", { exact: true }).waitFor(); await drawer.getByRole("button", { name: "查看已确认账单历史", exact: true }).waitFor();
+  const rows = dailyRows(); for (const row of rows.slice(0, 2)) row.health = { code: "DUPLICATE_CHANNEL_ASSIGNMENT", issues: [{ code: "DUPLICATE_CHANNEL_ASSIGNMENT", ruleIds: ["rule-1", "rule-2"], detail: "销售渠道重复归属" }] };
+  const conflict = await openDailyPage(t, { path: "/reconciliation?action=conflict&ruleId=rule-1", data: dailyResponse(rows) }); const detail = conflict.page.getByRole("dialog", { name: "Rule A · 对账详情", exact: true }); await detail.getByText("重复销售归属待处理", { exact: true }).waitFor(); await detail.getByRole("button", { name: "核对 rule-2", exact: true }).click(); const second = conflict.page.getByRole("dialog", { name: "Rule B · 对账详情", exact: true }); await second.getByRole("button", { name: "编辑当前范围", exact: true }).waitFor();
+});
+
 function onboardingFixture(existing = true, type = "newapi", ids = [4]) {
   return {
     ownStation: { id: "own-1", baseUrl: "https://own.example" },
+    ownSource, sourceVersion: "source-v1",
     upstreams: existing ? [{ id: "upstream-1", name: "Fixture upstream", type, monitorEnabled: true, baseUrl: "https://up.example", identity: type === "newapi-key" ? null : { provider: type.startsWith("sub2api") ? "sub2api" : "newapi", accountId: "42" } }] : [],
     channels: ids.map((id) => ({ id, name: id === 4 ? "New channel" : "New channel " + id, status: 1, baseUrl: "https://up.example", groups: ["local-sales"], revision: "revision-" + id, candidates: existing ? ["upstream-1"] : [], monitor: { status: "unlinked", stationIds: [] }, reconciliation: { status: "unconfigured", ruleIds: [] } })),
-    rules: existing ? [{ ...rule("rule-1", "Rule A", 10).rule, ownStationId: "own-1", tokenId: 7, enabled: true }] : [],
+    rules: existing ? [{ ...rule("rule-1", "Rule A", 10).rule, ownStationId: "own-1", ownSource, tokenId: 7, enabled: true }] : [],
     syncedAt: "2026-10-09T06:00:00.000Z", stale: false,
   };
 }
 const onboardingTokens = [{ id: 7, name: "Supplier Key", status: 1, group: "upstream-group" }, { id: 8, name: "New Key", status: 1, group: "upstream-group" }];
 const preview = { billingEffectiveFromMs: Date.parse("2026-10-10T00:00:00+08:00"), firstQueryableAtMs: Date.parse("2026-10-11T00:00:00+08:00"), scopeChanged: true };
-const ownSource = { stationId: "own-1", provider: "newapi", baseUrl: "https://own.example", accountId: "1", namespaceKey: "fixture-own-namespace" };
+const ownSource = { stationId: "own-1", provider: "newapi", baseUrl: "https://own.example", accountId: "1", namespaceKey: createHash("sha256").update(JSON.stringify(["newapi", "https://own.example", "1"])).digest("hex") };
 
 function probeResult(body, config, options = {}) {
   const selection = body.selections[0];
@@ -215,7 +242,7 @@ function probeResult(body, config, options = {}) {
     return {
       groupId: group.groupId, requestedGroupIds: [group.groupId], selectionIds: [group.selectionId], requestedChannelIds: group.channels.map((entry) => entry.channelId),
       status: group.reconciliation ? options.billingStatus || "ready" : "monitor_only",
-      basis: { ownSource, sourceVersion: "source-v1", channelRevisions: Object.fromEntries(proposed.map((id) => [id, "revision-" + id])), resourceVersions: {}, accountIdentity, canonicalKey: tokenId ? "canonical-" + tokenId : null, tokenId, keyVersion: tokenId ? "key-v1" : null, existingRuleId: tokenId === 7 ? "rule-1" : null, existingScopeVersion: tokenId === 7 ? 1 : null, existingChannelIds: existing, proposedChannelIds: proposed, timezone: "Asia/Shanghai", billingEffectiveFromMs: preview.billingEffectiveFromMs, coverageDeclaration: group.reconciliation?.coverageDeclaration || { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } },
+      basis: { ownSource, sourceVersion: "source-v1", channelRevisions: Object.fromEntries(proposed.map((id) => [id, "revision-" + id])), resourceVersions: {}, accountIdentity, canonicalKey: tokenId ? "canonical-" + tokenId : null, tokenId, keyVersion: tokenId ? "key-v1" : null, existingRuleId: tokenId === 7 ? "rule-1" : null, existingScopeVersion: tokenId === 7 ? 1 : null, existingChannelIds: existing, proposedChannelIds: proposed, timezone: group.reconciliation?.timezone || "Asia/Shanghai", billingEffectiveFromMs: preview.billingEffectiveFromMs, coverageDeclaration: group.reconciliation?.coverageDeclaration || { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } },
       preview: { ...preview, costCoverage: group.reconciliation?.coverageDeclaration.answer === "none" ? "complete" : "unknown" },
     };
   });
@@ -243,7 +270,7 @@ async function openOnboardingPage(t, options = {}) {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (path === "/api/reconciliation/configuration") return fulfill(route, options.ruleConfiguration || configuration);
-    if (path === "/api/reconciliation" || path === "/api/reconciliation/query") return fulfill(route, response(options.ruleResults || [rule("rule-1", "Rule A", 10)]));
+    if (path === "/api/reconciliation" || path === "/api/reconciliation/query") return fulfill(route, options.ruleModel || response(options.ruleResults || [rule("rule-1", "Rule A", 10)]));
     if (options.extraAPI) return options.extraAPI(route, path);
     throw new Error("unexpected fixture API: " + path);
   }, options.viewport, !!options.clock, async (route) => {
@@ -264,7 +291,8 @@ async function openOnboardingPage(t, options = {}) {
     if (options.loseResponseAt === writes.length) return route.abort("failed");
     return fulfill(route, latestResult);
   });
-  await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click({ trial: true });
+  if (config.stale) await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).waitFor();
+  else await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click({ trial: true });
   return { page, config, probes, writes, reads, recoveries };
 }
 async function openOnboardingDrawer(page, batch = false) {
@@ -473,19 +501,104 @@ async function openAccountsPage(t, options = {}) {
     { id: options.ownStationId || "own", name: "Own station", type: "newapi", baseUrl: "https://own.test", isOwn: true, monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 50 } },
     ...model.accounts.flatMap((account) => account.resources), ...model.unverifiedResources,
   ].map((entry) => ({ ...entry, isOwn: !!entry.isOwn, userId: ["A-monitor-1", "st_u04_a1"].includes(entry.id) ? "operator-A" : "", email: entry.id === "Sub-password" ? "saved-sub@example.test" : "", costAliases: ["A-monitor-1", "st_u04_a1"].includes(entry.id) ? ["kept_alias"] : [], tokenInfo: null, prediction: null, spark: [], todayUsed: null }));
-  const { page } = await openOnboardingPage(t, { viewport: options.viewport, accountModel: model, accountOperation: options.accountOperation, accounts(route) {
+  const onboarded = await openOnboardingPage(t, { ...options, viewport: options.viewport, accountModel: model, accountOperation: options.accountOperation, accounts(route) {
     accountRequests.push(route.request().method()); return options.accounts ? options.accounts(route, accountRequests.length, model) : fulfill(route, model);
   }, extraAPI(route, path) {
     if (route.request().method() !== "GET") { const mutation = { path, method: route.request().method(), body: route.request().postData() ? route.request().postDataJSON() : null }; mutations.push(mutation); if (options.mutation) return options.mutation(route, mutation, originalStations); throw new Error("unexpected account-center write"); }
     if (path === "/api/stations") { const params = new URL(route.request().url()).searchParams; return fulfill(route, { stations: originalStations.filter((entry) => (!entry.archivedAt || params.get("includeArchived") === "true") && (entry.monitorEnabled !== false || params.get("includeUnmonitored") === "true")), settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } }); }
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }, { value: "newapi-key", label: "Key", needs: ["apiKey"] }, { value: "sub2api", label: "Sub2API", needs: ["accessToken"] }, { value: "sub2api-password", label: "Sub2API password", needs: ["email", "password"] }], rules: {} });
+    if (options.readonlyAPI) return options.readonlyAPI(route, path);
     throw new Error("unexpected account fixture API: " + path);
   } });
-  await page.goto(baseURL + "/stations"); const center = page.getByRole("region", { name: "账号关系中心" }); if (options.initialFailure) await center.getByRole("button", { name: "重试账号关系", exact: true }).waitFor(); else await center.getByText(/显示 3\/3 个已核验账号/).waitFor();
+  const { page } = onboarded;
+  await page.goto(baseURL + (options.path || "/stations")); const center = page.getByRole("region", { name: "账号关系中心" }); if (options.initialFailure) await center.getByRole("button", { name: "重试账号关系", exact: true }).waitFor(); else if (!options.path) await center.getByText(/显示 3\/3 个已核验账号/).waitFor(); else await center.getByText(/显示 .* 个已核验账号/).waitFor();
   const badge = page.getByRole("button", { name: "Collapse issues badge", exact: true }); if (await badge.isVisible()) await badge.click();
-  return { page, center, model, mutations, accountRequests, originalStations };
+  return { ...onboarded, page, center, model, mutations, accountRequests, originalStations };
 }
 async function expandAccount(center, account) { await center.locator(`[data-site-key="${account.siteKey}"]`).getByRole("button", { name: new RegExp("账号 " + account.identity.accountId + " ") }).click(); return center.locator(`[data-account-key="${account.accountKey}"]`); }
+
+test("workflow channel and complete-Key destinations reuse one batch confirmation with known ninth channel", async (t) => {
+  const config = onboardingFixture(true, "newapi", [1, 2, 3, 4, 9]); config.rules[0].channels = [1, 2, 3].map((channelId) => ({ channelId, name: "Sales " + channelId })); config.rules[0].coverageDeclaration = { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [9] }; config.rules[0].timezone = "UTC";
+  const opened = await openAccountsPage(t, { config, path: "/stations?action=coverage&ruleId=rule-1" });
+  const drawer = opened.page.getByRole("dialog", { name: "接入监控与对账", exact: true }); await drawer.getByText("本次选择 4 个渠道", { exact: true }).waitFor(); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0); await verifyOnboarding(drawer); await drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }).click(); await opened.page.getByText("没有", { exact: true }).last().click(); await verifyOnboarding(drawer); await saveOnboarding(drawer);
+  assert.equal(opened.writes.length, 1); assert.deepEqual(opened.writes[0].groups[0].channels.map((channel) => channel.channelId), [1, 2, 3, 9]); assert.equal(opened.writes[0].groups[0].reconciliation.tokenId, 7); assert.equal(opened.writes[0].groups[0].reconciliation.timezone, "UTC"); assert.equal(opened.writes[0].groups[0].reconciliation.coverageDeclaration.answer, "none"); assert.equal(opened.writes[0].selections[0].stationId, "upstream-1");
+  const connected = await openAccountsPage(t, { path: "/stations?action=connect&ownStationId=own-1&channelIds=4" }); const single = connected.page.getByRole("dialog", { name: "接入监控与对账", exact: true }); await single.getByText("本次选择 1 个渠道", { exact: true }).waitFor(); await verifyOnboarding(single); await saveOnboarding(single); assert.equal(connected.writes.length, 1);
+});
+
+test("workflow stale channel, changed source and stopped coverage destinations keep an actionable reload", async (t) => {
+  for (const path of ["/stations?action=connect&ownStationId=own-1&channelIds=999", "/stations?action=connect&ownStationId=another-source&channelIds=4", "/stations?action=coverage&ruleId=stopped-rule", "/stations?action=source&ownStationId=another-source"]) {
+    const opened = await openAccountsPage(t, { path }); await opened.page.getByRole("button", { name: "刷新处理目标", exact: true }).waitFor(); assert.equal(opened.writes.length, 0); assert.equal(opened.probes.length, 0); assert.equal(await opened.page.getByRole("dialog").count(), 0);
+  }
+  const config = onboardingFixture(true, "newapi", [1, 2, 3, 4]); config.ownSource = { ...ownSource, accountId: "2", namespaceKey: createHash("sha256").update(JSON.stringify(["newapi", ownSource.baseUrl, "2"])).digest("hex") };
+  const changed = await openAccountsPage(t, { config, path: "/stations?action=coverage&ruleId=rule-1" }); await changed.page.getByText("原规则的本站来源与当前核验来源不同，请先核对本站来源；原历史账单不会改归新来源。", { exact: true }).waitFor(); assert.equal(changed.probes.length, 0); assert.equal(changed.writes.length, 0);
+});
+
+test("workflow balance destination focuses original resource settings and account authorization opens its existing flow", async (t) => {
+  const opened = await openAccountsPage(t, { path: "/stations?stationId=A-monitor-1" }); const focused = opened.page.getByRole("region", { name: "定位原资源余额与监控", exact: true }); await focused.getByText("A-monitor-1", { exact: true }).waitFor(); assert.equal(await focused.getByText("A-monitor-2", { exact: true }).count(), 0); await focused.getByRole("button", { name: "原资源设置", exact: true }).click(); const editor = opened.page.getByRole("dialog", { name: "编辑上游资源", exact: true }); await editor.waitFor(); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("低余额告警阈值（按站点余额 $ 计，可留空）", { exact: true }).inputValue(), "27");
+  const authorized = await openAuthorizationPage(t); await authorized.page.goto(`${baseURL}/stations?action=authorization&accountKey=${authorized.model.accounts[0].accountKey}`); const drawer = authorized.page.getByRole("dialog", { name: "更新账号授权 · 42", exact: true }); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("u06-once"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.equal(authorized.updates.length, 1); assert.deepEqual(authorized.updates[0].targetStationIds.sort(), ["st_u04_a1", "st_u04_a2", "st_u04_billing"]);
+});
+
+test("workflow source destination distinguishes last verified stale namespace and explicit current sync", async (t) => {
+  const config = { ...onboardingFixture(), ownSource, sourceVersion: "source-v1", stale: true, error: "source unavailable" }; let current = false;
+  const opened = await openAccountsPage(t, { config, path: "/stations?action=source&ownStationId=own-1", discovery(route, reads) { return fulfill(route, current ? { ...config, ownSource: { ...ownSource, accountId: "2", namespaceKey: "new-source-namespace" }, sourceVersion: "source-v2", stale: false, error: null } : config); } });
+  const source = opened.page.getByRole("region", { name: "核对本站来源", exact: true }); await source.getByText("目录已过期，以下为最后核验来源", { exact: true }).waitFor(); assert.ok((await source.textContent()).includes("实际账号 1")); current = true; await source.getByRole("button", { name: "读取最新本站渠道", exact: true }).click(); await source.getByText("当前已核验本站来源", { exact: true }).waitFor(); assert.ok((await source.textContent()).includes("实际账号 2")); assert.equal(opened.writes.length, 0); assert.equal(opened.probes.length, 0);
+});
+
+function keyVerificationFixture(provider = "newapi", timezone = "UTC", selected = false) {
+  const capability = { state: "supported", currency: "USD", window: provider === "sub2api" ? "natural-day" : "second" };
+  const billingTimezone = provider === "sub2api" ? { state: "unverified", timezone, reason: "BILLING_TIMEZONE_UNVERIFIED" } : { state: "verified", timezone };
+  return { quotaPerUnit: provider === "newapi" ? 100 : null, version: provider === "newapi" ? "deployment-v1" : "", groups: provider === "newapi" ? { g: { ratio: 1, description: "" } } : {}, platform: provider,
+    capability: provider === "sub2api" ? { state: "unverified", currency: "USD", window: "natural-day", reason: "DEPLOYMENT_NOT_VERIFIED" } : capability,
+    billingTimezone, tokens: [{ id: 9, name: "actual-key", status: 1, group: provider === "newapi" ? "g" : "", crossGroupRetry: false }], identity: { provider, baseUrl: "https://same.test", accountId: "42" }, resourceVersion: "verified-resource-version",
+    probe: selected ? { tokenId: 9, state: "complete", complete: true, window: timezone === "UTC" ? { startMs: 1791417600000, endMs: 1791504000000, timezone } : { startMs: 1791388800000, endMs: 1791475200000, timezone }, currency: "USD", amountUsd: provider === "newapi" ? 0 : 3.25, knownAmountUsd: provider === "newapi" ? 0 : 3.25, actualCostUsd: provider === "sub2api" ? 3.25 : null, quotaUnits: provider === "newapi" ? 0 : null, quotaPerUnit: provider === "newapi" ? 100 : null, capability, billingTimezone } : null };
+}
+test("workflow identity and selected-Key read preserve actual zero and separate Sub2 date capability from timezone", async (t) => {
+  for (const [stationId, provider, action, timezone] of [["unknown-legacy", "newapi", "verify", "UTC"], ["Sub-password", "sub2api", "verify-billing", "Asia/Shanghai"]]) {
+    const reads = []; const opened = await openAccountsPage(t, { path: `/stations?action=${action}&stationId=${stationId}`, readonlyAPI(route, path) {
+      assert.equal(path, `/api/reconciliation/upstreams/${stationId}/keys`); const params = Object.fromEntries(new URL(route.request().url()).searchParams); reads.push(params); return fulfill(route, keyVerificationFixture(provider, params.timezone, !!params.tokenId));
+    } });
+    const drawer = opened.page.getByRole("dialog", { name: `核验账号与账单能力 · ${stationId}`, exact: true }); await drawer.waitFor(); await drawer.getByRole("textbox", { name: "核验账单时区", exact: true }).fill(timezone); await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click(); await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); await drawer.getByRole("combobox", { name: "核验实际 Key", exact: true }).click(); await opened.page.getByText(`actual-key · #9 · ${provider === "newapi" ? "g" : "无分组"}`, { exact: true }).last().click(); await drawer.getByRole("button", { name: "核验所选 Key 账单", exact: true }).click(); await drawer.getByText(provider === "newapi" ? "所选 Key 原统计" : "所选 Key 扣费参考", { exact: true }).waitFor();
+    assert.deepEqual(reads, [{ force: "true", timezone }, { force: "true", timezone, tokenId: "9" }]); assert.ok((await drawer.textContent()).includes(provider === "newapi" ? "原金额：$0.00" : "原金额：$3.25")); assert.ok((await drawer.textContent()).includes("此处不确认利润")); if (provider === "sub2api") { assert.ok((await drawer.textContent()).includes("本次 Key / 日期能力：已支持")); assert.ok((await drawer.textContent()).includes("未核验，原金额仅供参考")); } assert.equal(opened.mutations.length, 0); assert.equal(opened.writes.length, 0);
+  }
+});
+
+test("workflow unreadable Key directory remains partial and pure-Key fallback uses the full original editor", async (t) => {
+  const opened = await openAccountsPage(t, { path: "/stations?action=verify&stationId=unknown-legacy", readonlyAPI(route) {
+    const partial = keyVerificationFixture(); Object.assign(partial, { quotaPerUnit: null, version: "", groups: {}, tokens: [], capability: { state: "unverified", currency: "USD", window: "second", reason: "KEY_METADATA_UNAVAILABLE" }, billingTimezone: { state: "unverified", timezone: "Asia/Shanghai", reason: "KEY_METADATA_UNAVAILABLE" } }); return fulfill(route, partial);
+  } }); const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · unknown-legacy", exact: true }); await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click(); await drawer.getByText("Key 目录无法读取，请检查目录权限或稍后重试", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: "核验实际 Key", exact: true }).count(), 0); assert.equal(opened.mutations.length, 0);
+  const pure = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=pure-key", readonlyAPI() { assert.fail("pure Key must not enter account probe"); } }); const pureDrawer = pure.page.getByRole("dialog", { name: "核验账号与账单能力 · pure-key", exact: true }); await pureDrawer.getByText("纯 Key 保持独立，不能推断所属账号", { exact: true }).waitFor(); await pureDrawer.getByRole("button", { name: "补充原资源授权", exact: true }).click(); const editor = pure.page.getByRole("dialog", { name: "编辑上游资源", exact: true }); await editor.waitFor(); assert.equal(await editor.getByLabel("名称", { exact: true }).inputValue(), "pure-key"); assert.equal(pure.mutations.length, 0);
+});
+
+test("workflow external Key use stops the old rule before selecting a new Key while unknown use stays reference", async (t) => {
+  const config = onboardingFixture(true, "newapi", [1, 2, 3, 4]); config.rules[0].channels = [1, 2, 3].map((channelId) => ({ channelId })); config.rules[0].coverageDeclaration = { answer: "other_use", otherUse: "external", uncoveredOwnChannelIds: [] };
+  const opened = await openAccountsPage(t, { config, path: "/stations?action=coverage&ruleId=rule-1", mutation(route, mutation) { assert.equal(mutation.path, "/api/reconciliation/rules/rule-1"); assert.equal(mutation.method, "DELETE"); config.rules[0].enabled = false; return fulfill(route, { ok: true }); } }); const drawer = opened.page.getByRole("dialog", { name: "接入监控与对账", exact: true }); await drawer.getByText("核对既有 Key 的完整用途", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: "接入上游 Key", exact: true }).isDisabled(), true);
+  await drawer.getByRole("button", { name: "隔离站外调用后关联新 Key", exact: true }).click(); const confirm = opened.page.getByRole("dialog", { name: "停止旧 Key 核算后重新关联？", exact: true }); await confirm.getByText(/原账、旧范围与监控资源保留/).waitFor(); assert.equal(opened.writes.length, 0); await confirm.getByRole("button", { name: "停止旧规则并选择新 Key", exact: true }).click(); await confirm.waitFor({ state: "hidden" }); assert.equal(opened.mutations.length, 1);
+  await verifyOnboarding(drawer); await chooseKey(opened.page, drawer, "New Key"); await verifyOnboarding(drawer); await drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }).click(); await opened.page.getByText("没有", { exact: true }).last().click(); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(opened.writes.length, 1); assert.equal(opened.writes[0].groups[0].reconciliation.tokenId, 8); assert.equal(opened.writes[0].selections[0].stationId, "upstream-1");
+  const unknown = await openAccountsPage(t, { config: onboardingFixture(true, "newapi", [1, 2, 3, 4]), path: "/stations?action=coverage&ruleId=rule-1" }); const unknownDrawer = unknown.page.getByRole("dialog", { name: "接入监控与对账", exact: true }); await verifyOnboarding(unknownDrawer); await unknownDrawer.getByText(/保留成本与收入参考，账面毛利待确认/).waitFor(); await unknownDrawer.getByRole("button", { name: "验证并预览", exact: true }).waitFor(); assert.equal(unknown.mutations.length, 0); assert.equal(unknown.writes.length, 0); assert.equal(unknown.probes[0].groups[0].reconciliation.coverageDeclaration.answer, "unknown");
+});
+
+test("workflow overview merges stable public actions and preserves prior actions on a partial read failure", async (t) => {
+  let reads = 0; const opened = await openAccountsPage(t, { accounts(route, count, model) { reads += 1; return count > 2 ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture account read unavailable" }) }) : fulfill(route, model); }, readonlyAPI(route, path) { assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] }); } });
+  await opened.page.goto(baseURL); const region = opened.page.getByRole("region", { name: "需要处理", exact: true }); await region.getByRole("link", { name: "更新账号授权", exact: true }).waitFor(); assert.equal(await region.getByRole("link", { name: "核对这把 Key 的全部用途", exact: true }).count(), 1); const before = await region.getByRole("listitem").count(); await region.getByRole("button", { name: "刷新处理事项", exact: true }).click(); await region.getByText("部分账号或账单事项未能更新，保留上次已读事项。", { exact: true }).waitFor(); assert.equal(await region.getByRole("listitem").count(), before); const href = await region.getByRole("link", { name: "更新账号授权", exact: true }).getAttribute("href"); assert.equal(href, opened.model.accounts[0].actions[0].href); assert.equal(opened.mutations.length, 0); assert.ok(reads >= 3);
+});
+
+test("workflow read failures and deleted verification targets expose a safe retry with no save", async (t) => {
+  let calls = 0; const opened = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=unknown-legacy", readonlyAPI(route) { calls += 1; if (calls === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "KEY_PROBE_UNAVAILABLE", retryable: true, error: "账号身份暂时无法核验，请检查授权或稍后重试" }) }); return fulfill(route, keyVerificationFixture("newapi", "Asia/Shanghai")); } }); const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · unknown-legacy", exact: true }); await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click(); await drawer.getByRole("button", { name: "刷新处理目标", exact: true }).waitFor(); await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click(); await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); assert.equal(calls, 2); assert.equal(opened.mutations.length, 0);
+  for (const path of ["/stations?action=verify&stationId=deleted", "/stations?action=authorization&accountKey=deleted", "/stations?stationId=deleted"]) { const unavailable = await openAccountsPage(t, { path }); await unavailable.page.getByRole("button", { name: "刷新处理目标", exact: true }).waitFor(); assert.equal(await unavailable.page.getByRole("dialog").count(), 0); assert.equal(unavailable.mutations.length, 0); }
+});
+
+test("workflow verification keyboard and financial source links fit 320/390/768/1440 widths", async (t) => {
+  for (const width of [320, 390, 768, 1440]) {
+    const opened = await openAccountsPage(t, { viewport: { width, height: 900 }, path: "/stations?action=verify-billing&stationId=Sub-password", readonlyAPI(route, path) {
+      if (path.endsWith("/keys")) { const params = new URL(route.request().url()).searchParams; return fulfill(route, keyVerificationFixture("sub2api", params.get("timezone"), params.has("tokenId"))); }
+      if (path === "/api/analytics") return fulfill(route, { days: 30, start: "2026-09-09", end: "2026-10-08", selection: { includeArchived: false, stationCount: 0, archivedStationCount: 0 }, coverage: { earliestDate: null, latestDate: null, availableDays: 0, requestedDays: 30, monitoredStationCount: 0, isComplete: false, stationGaps: [] }, stations: [], daily: [], fixedDaily: [], heatmap: [], heatmapAvailable: false, heatmapAvailability: { available: false, reason: "no-cost-stations", coverage: null }, generatedAt: "2026-10-09T03:00:00Z" });
+      if (path === "/api/own/analytics") return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "还没有标记「我的中转站」" }) });
+      throw new Error("unexpected financial navigation fixture: " + path);
+    } });
+    const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · Sub-password", exact: true }); const directory = drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }); await directory.focus(); await opened.page.keyboard.press("Enter"); await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); const key = drawer.getByRole("combobox", { name: "核验实际 Key", exact: true }); await key.focus(); await opened.page.keyboard.press("ArrowDown"); await opened.page.keyboard.press("Enter"); const probe = drawer.getByRole("button", { name: "核验所选 Key 账单", exact: true }); await probe.focus(); await opened.page.keyboard.press("Enter"); await drawer.getByText("所选 Key 扣费参考", { exact: true }).waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); await drawer.locator(".ant-drawer-close").focus(); await opened.page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
+    await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText("监控估算来源", { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.getByRole("region", { name: "对账汇总", exact: true }).waitFor(); await opened.page.getByRole("link", { name: "监控估算", exact: true }).last().waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); assert.equal(opened.mutations.length, 0); await opened.page.context().browser().close();
+  }
+});
 
 async function openAuthorizationPage(t, options = {}) {
   const model = accountReadFixture(), probes = [], updates = [], recoveries = [], operations = new Map();
@@ -510,7 +623,7 @@ async function openAuthorizationPage(t, options = {}) {
     });
     return { requestId: body.requestId, previewId: "authorization-preview-" + probes.length, expiresAtMs: Date.now() + 600000, accountKey: targetAccount.accountKey, identity: targetAccount.identity, targets, excluded: body.targetStationIds.filter((id) => !targets.some((target) => target.stationId === id)).map((stationId) => ({ stationId, reason: "账号身份未核验，已排除" })), impact: impact(targets), retryInput: intent(body) };
   };
-  const opened = await openAccountsPage(t, { model, viewport: options.viewport, ownStationId: "st_u04_own", async accountOperation(route, path) {
+  const opened = await openAccountsPage(t, { model, viewport: options.viewport, path: options.path, ownStationId: "st_u04_own", async accountOperation(route, path) {
     const body = route.request().postDataJSON(), targetAccount = model.accounts.find((item) => path.includes(item.accountKey)); assert.ok(targetAccount);
     if (path.endsWith("/probe")) {
       probes.push(body);

@@ -100,6 +100,43 @@ export type WorkflowAction = {
   label: string; accountKey: string | null; stationId: string | null; ruleId: string | null; ownStationId: string | null;
   channelIds: number[]; window: { startMs: number; endMs: number; timezone: string } | null; href: string;
 };
+export type WorkflowDestination = {
+  action: string; ruleId: string | null; stationId: string | null; accountKey: string | null; ownStationId: string | null;
+  channelIds: number[]; window: WorkflowAction["window"]; error: string;
+};
+export type SourceCatalogueProjection = { ownSource: OwnSource | null; sourceVersion: string | null };
+export type BillingCapability = { state: "supported" | "unsupported" | "unverified"; currency: string; window: string; reason?: string; message?: string };
+export type BillingTimezone = { state: "verified" | "unverified"; timezone: string; reason?: string };
+export type UpstreamKeyRead = {
+  quotaPerUnit: number | null; version: string; groups: Record<string, { ratio: number; description?: string }>;
+  platform: string; capability: BillingCapability; billingTimezone: BillingTimezone; tokens: SafeToken[];
+  identity: AccountIdentity | null; resourceVersion: string;
+  probe: null | { tokenId: number; state: string; complete: boolean; window: { startMs: number | null; endMs: number | null; timezone: string | null };
+    currency: string; amountUsd: number | null; knownAmountUsd: number | null; actualCostUsd: number | null; quotaUnits: number | null; quotaPerUnit: number | null;
+    capability: BillingCapability | null; billingTimezone: BillingTimezone | null };
+};
+export function readWorkflowDestination(search: string, page: "stations" | "reconciliation"): WorkflowDestination | null {
+  const params = new URLSearchParams(search), action = params.get("action") || "inspect";
+  if (!params.has("action") && !params.has("stationId") && !params.has("accountKey")) return null;
+  const result: WorkflowDestination = { action, ruleId: params.get("ruleId"), stationId: params.get("stationId"), accountKey: params.get("accountKey"), ownStationId: params.get("ownStationId"), channelIds: [], window: null, error: "" };
+  const allowed = page === "stations" ? ["connect", "verify", "authorization", "verify-billing", "coverage", "source", "inspect"] : ["retry", "conflict", "scope"];
+  if (!allowed.includes(action)) result.error = "无法识别此处理入口，请刷新后从当前事项重新打开。";
+  const channelIds = params.get("channelIds");
+  if (channelIds != null) {
+    const values = channelIds.split(",");
+    if (values.some((value) => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1)) result.error = "渠道参数无效，请从当前渠道目录重新选择。";
+    else { result.channelIds = [...new Set(values.map(Number))]; if (result.channelIds.length > 100) result.error = "本次最多选择 100 个渠道，请从当前目录分批选择。"; }
+  }
+  if (action === "retry") {
+    const start = params.get("startMs"), end = params.get("endMs"), timezone = params.get("timezone");
+    if (!start || !end || !/^\d+$/.test(start) || !/^\d+$/.test(end) || !Number.isSafeInteger(Number(start)) || !Number.isSafeInteger(Number(end)) || !Number.isFinite(new Date(Number(start)).valueOf()) || !Number.isFinite(new Date(Number(end)).valueOf()) || Number(end) <= Number(start) || !timezone) result.error = "账单窗口参数无效，请从原账单窗口重新打开。";
+    else {
+      try { new Intl.DateTimeFormat("zh-CN", { timeZone: timezone }).format(); result.window = { startMs: Number(start), endMs: Number(end), timezone }; }
+      catch { result.error = "账单时区参数无效，请从原账单窗口重新打开。"; }
+    }
+  }
+  return result;
+}
 export type PublicCatalogueChannel = {
   id: number; name: string; type: number; status: number; baseUrl: string; groups: string[]; revision: string; missing: boolean;
   monitor: { status: "linked" | "unlinked" | "review_required"; stationIds: string[] };

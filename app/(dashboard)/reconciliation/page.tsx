@@ -7,8 +7,8 @@ import {
   Pagination, Popconfirm, Segmented, Select, Space, Table, Tag, Typography,
 } from "antd";
 import { DeleteOutlined, EditOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, RightOutlined, SearchOutlined } from "@ant-design/icons";
-import { api } from "../../../lib/client";
-import type { BatchInput, BatchProbe, ConfirmedHistoryRecord, ConfirmedHistoryResponse, CoverageDeclaration, KnownChannelCoverage, ReconciliationWindowGroup, ReconciliationSummary, RuleEditPreview } from "../../../lib/client";
+import { api, readWorkflowDestination } from "../../../lib/client";
+import type { BatchInput, BatchProbe, ConfirmedHistoryRecord, ConfirmedHistoryResponse, CoverageDeclaration, KnownChannelCoverage, ReconciliationWindowGroup, ReconciliationSummary, RuleEditPreview, WorkflowDestination } from "../../../lib/client";
 import {
   formatReconciliationMoney as money,
   hasReconciliationHistory,
@@ -27,6 +27,7 @@ import {
 } from "../../../lib/reconciliation-contract";
 import AppState from "../../components/app-state";
 import ChannelOnboarding from "../../components/channel-onboarding";
+import { NAV_LABELS } from "../../../lib/brand";
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -254,6 +255,9 @@ export default function ReconciliationPage() {
   const [loading, setLoading] = useState(true);
   const [querying, setQuerying] = useState(false);
   const [error, setError] = useState("");
+  const [destination, setDestination] = useState<WorkflowDestination | null>(null);
+  const [workflowError, setWorkflowError] = useState("");
+  const destinationResolved = useRef(false);
   const [preset, setPreset] = useState("yesterday");
   const [activeWindow, setActiveWindow] = useState<any>({ preset: "yesterday" });
   const [range, setRange] = useState<any>(null);
@@ -311,6 +315,9 @@ export default function ReconciliationPage() {
 
   const rate = config?.ownStation?.cnyPerUsd ?? null;
   const results = data?.results || [];
+  const workflowRow = results.find((item: any) => item.rule?.id === destination?.ruleId);
+  const workflowRule = (config?.rules || []).find((rule: any) => rule.id === destination?.ruleId);
+  const conflictIds: string[] = destination?.action === "conflict" ? [...new Set<string>((workflowRow?.health?.issues || []).flatMap((issue: any) => issue.ruleIds || []).concat(destination.ruleId || []))] : [];
   const windowGroups: ReconciliationWindowGroup[] = data?.windowGroups || [];
   const commonSummary: ReconciliationSummary | null = data?.commonSummary || null;
   const coverage: KnownChannelCoverage | null = data?.coverage || null;
@@ -527,8 +534,16 @@ export default function ReconciliationPage() {
   useEffect(() => {
     (async () => {
       try {
-        await loadConfiguration(true);
-        await loadWindow({ preset: "yesterday" });
+        const target = readWorkflowDestination(window.location.search, "reconciliation");
+        setDestination(target);
+        const current = await loadConfiguration(true);
+        const rule = current?.rules?.find((rule: any) => rule.id === target?.ruleId);
+        if (target?.error) setWorkflowError(target.error);
+        else if (target && !rule) setWorkflowError("此规则已删除或不在当前目录中，请刷新事项后重新打开；已保存的历史账单仍可从历史入口查看。");
+        else if (target?.action === "retry" && (!rule.enabled || rule.archivedAt)) setWorkflowError("此规则已停止当前核算，不能重查新账单；可读取原确认历史。");
+        const initial = target?.action === "retry" && target.window && !target.error && rule?.enabled && !rule.archivedAt ? { preset: "custom", startMs: target.window.startMs, endMs: target.window.endMs } : { preset: "yesterday" };
+        setActiveWindow(initial); setPreset(initial.preset);
+        await loadWindow(initial);
       } catch (err: any) {
         setError(err?.message || "初始化失败");
         setLoading(false);
@@ -537,6 +552,17 @@ export default function ReconciliationPage() {
   // 仅首屏初始化；后续查询由按钮和定时器驱动。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!destination || destinationResolved.current || !data || !config || workflowError) return;
+    destinationResolved.current = true;
+    if (destination.action === "retry" && !sameWindow(destination.window, workflowRow?.requestedWindow || workflowRow?.window)) {
+      setWorkflowError("当前规则的请求窗口或时区已变化，请刷新事项后从当前账单重新打开。"); return;
+    }
+    if (workflowRow) { setExpandedRuleId(workflowRow.rule.id); void openDetail(workflowRow); }
+  // 目标只在首个当前公共响应完成后定位，后续行重试不重复打开抽屉。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [destination, data, config, workflowError]);
 
   useEffect(() => {
     if (activeWindow.preset !== "today" || !config) return;
@@ -742,12 +768,18 @@ export default function ReconciliationPage() {
   return (
     <PageContainer
       className="responsive-page reconciliation-page"
-      title="上游渠道对账"
-      subTitle="核对上游成本与本站收费，监控利润情况"
+      title={NAV_LABELS.reconciliation}
+      subTitle="实际 Key 账单与本站渠道收费，按原来源和绝对窗口核算"
       extra={<div className="page-toolbar"><Button className="reconciliation-primary-action" type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!config?.ownStation} aria-label="添加对账规则"><span>添加规则</span></Button></div>}
     >
       <ChannelOnboarding compact={compact}
         onComplete={async () => { await loadConfiguration(); await loadWindow(activeWindow, true); }} />
+      {destination ? <Alert type={workflowError ? "warning" : "info"} showIcon message={workflowError || (destination.action === "retry" ? "重查原账单窗口" : destination.action === "conflict" ? "处理重复销售归属" : "查看当前范围生效时间")}
+        description={!workflowError ? <div style={{ overflowWrap: "anywhere" }}>规则 {destination.ruleId}{destination.window ? ` · ${new Date(destination.window.startMs).toISOString()} — ${new Date(destination.window.endMs).toISOString()}（${destination.window.timezone}）` : ""}
+          {destination.action === "conflict" ? <div>涉及规则：{conflictIds.join("、") || "当前未发现冲突"}。逐条核对成员，使用规则编辑预览修正重复归属；原历史保留。<Space wrap>{conflictIds.map((id) => { const row = results.find((item: any) => item.rule?.id === id); return row ? <Button key={id} onClick={() => void openDetail(row)}>核对 {id}</Button> : <Text key={id}>已不可用：{id}</Text>; })}</Space></div> : null}
+        </div> : undefined}
+        action={<Space wrap>{!workflowError && destination.action === "retry" && workflowRow && sameWindow(destination.window, workflowRow.requestedWindow || workflowRow.window) ? <Button loading={retryingRuleIds.has(workflowRow.rule.id)} onClick={() => void retryRule(workflowRow)}>重查该窗口账单</Button> : null}{!workflowError && destination.action === "conflict" && workflowRule ? <Button onClick={() => openEdit(workflowRule)}>修正当前规则归属</Button> : null}{workflowRule ? <Button onClick={() => void openConfirmedHistory(workflowRule.id)}>原确认历史</Button> : null}<Button onClick={() => window.location.reload()}>刷新处理目标</Button><Button href="/reconciliation">返回当前账单</Button></Space>}
+        style={{ marginBottom: 16 }} /> : null}
       <div className="reconciliation-controls">
         <div className="reconciliation-controls__date">
           {preset === "custom"
@@ -764,7 +796,7 @@ export default function ReconciliationPage() {
         </div>
       </div>
 
-      <Button style={{ minHeight: 44, marginBottom: 12 }} onClick={() => openConfirmedHistory()}>查看已确认账单历史</Button>
+      <Space wrap style={{ marginBottom: 12 }}><Button href="/analytics" style={{ minHeight: 44 }}>{NAV_LABELS.analytics}</Button><Button style={{ minHeight: 44 }} onClick={() => openConfirmedHistory()}>查看已确认账单历史</Button></Space>
       {data ? <div className="reconciliation-freshness"><Text type="secondary">{summaryReference ? "参考结果生成" : "显示结果生成"}：{formatRecentTime(data.generatedAt, displayTimezone, true)}（{displayTimezone}）</Text>{results.length ? <Text type="secondary">{summaryReference ? `上次成功窗口：${sharedWindow ? formatWindow(sharedWindow) : "见各规则详情"}（仅供参考）` : freshness.staleCount ? `${freshness.staleCount} 条规则数据已过期${sharedWindow && freshness.coverageEndMs != null ? ` · 最早金额覆盖至 ${formatTime(freshness.coverageEndMs, sharedWindow.timezone)}` : ""}` : latestSuccessful ? `最近成功：${formatRecentTime(latestSuccessful.lastSuccessfulAt, latestSuccessful.window?.timezone)}（${latestSuccessful.window?.timezone || "Asia/Shanghai"}）` : "暂未成功（当前读取失败）"}</Text> : null}</div> : null}
       {error ? <Alert type="error" showIcon message="对账数据加载失败 · 当前显示上次结果" description={`${error}。下方窗口与金额属于上次查询，非本次查询结果。`} action={<Button size="small" onClick={() => loadWindow(activeWindow, true)}>重试</Button>} className="reconciliation-inline-alert" /> : null}
       {!config?.ownStation && results.length ? <Alert type="warning" showIcon message="本站管理员站点未配置" description="本站收费当前不可获取；已保存规则仍显示可用的上游成本与历史参考。请先配置本站管理员站点后再添加或更新规则。" action={<Button size="small" onClick={() => window.location.assign("/stations")}>前往配置</Button>} className="reconciliation-inline-alert" /> : null}
@@ -789,7 +821,7 @@ export default function ReconciliationPage() {
           <Text strong>{channel.name} · ID {channel.channelId}</Text> <Tag color={channel.status === "accounted" ? "success" : "warning"}>{({ accounted: "已核算", unlinked: "未关联", not_effective: "范围未生效", source_unverified: "来源待核验", billing_missing: "账单未齐", coverage_unknown: "Key 用途待确认", duplicate: "重复归属" })[channel.status]}</Tag>
           <div>{channelStateLabel[channel.operatingState] || "状态未知"} · 本站 {channel.ownStationId} · 规则 {channel.ruleIds.join("、") || "无"}</div>
           {channel.issues.length ? <div>{channel.issues.map((issue) => issue === "CHANNEL_UNLINKED" ? "尚未关联账单规则" : issue === "BILLING_EVIDENCE_NOT_QUERIED" ? "该窗口账单证据尚未读取" : HEALTH_LABEL(issue)).join("；")}</div> : null}
-          {channel.actions.length ? <Text type="secondary">待处理：{channel.actions.map((action) => action.label).join("；")}</Text> : null}
+          {channel.actions.length ? <><Text type="secondary">待处理：{channel.actions.map((action) => action.label).join("；")}</Text><Space wrap>{channel.actions.map((action) => <Button key={action.id} href={action.href}>{action.label}</Button>)}</Space></> : null}
         </div>)}</div> }]} />
       </section> : null}
 
@@ -856,7 +888,10 @@ export default function ReconciliationPage() {
           {confirmedHistory ? <Text type="secondary">已读取 {confirmedHistory.records.length} 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。</Text> : null}
           {confirmedHistory?.nextCursor ? <Button style={{ minHeight: 44 }} disabled={historyRangeChanged} loading={historyBusy} onClick={() => historyRuleId && void loadConfirmedHistory(historyRuleId, historyRequest.current?.range || null, confirmedHistory.nextCursor)}>读取更多原确认账单</Button> : null}
         </div> : detail ? <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          <Button style={{ minHeight: 44 }} onClick={() => openConfirmedHistory(detail.rule.id)}>查看已确认账单历史</Button>
+          <Space wrap><Button style={{ minHeight: 44 }} onClick={() => openConfirmedHistory(detail.rule.id)}>查看已确认账单历史</Button><Button loading={retryingRuleIds.has(detail.rule.id)} onClick={() => void retryRule(detail)}>重查该窗口账单</Button><Button onClick={() => { const rule = detail.rule; setDetail(null); openEdit(rule); }}>编辑当前范围</Button></Space>
+          {ruleRetryErrors[detail.rule.id] ? <Alert type="error" showIcon message={ruleRetryErrors[detail.rule.id]} /> : null}
+          {destination?.action === "conflict" && conflictIds.includes(detail.rule.id) ? <Alert type="warning" showIcon message="重复销售归属待处理" description={<div>涉及规则：{conflictIds.join("、")}。<Space wrap>{conflictIds.map((id) => { const row = results.find((item: any) => item.rule?.id === id); return row ? <Button key={id} onClick={() => void openDetail(row)}>核对 {id}</Button> : <Text key={id}>已不可用：{id}</Text>; })}</Space></div>} /> : null}
+          {detail.actions?.length ? <Space wrap>{detail.actions.map((action: any) => <Button key={action.id} href={action.href}>{action.label}</Button>)}</Space> : null}
           <Alert type={reconciliationHealthMeta(detail.health?.code).tone === "error" || reconciliationRowFlags(detail).negative ? "error" : detail.health?.code === "READY" ? "success" : "warning"} showIcon message={reconciliationHealthMeta(detail.health?.code).tone === "error" ? detail.health?.label || reconciliationHealthMeta(detail.health?.code).label : reconciliationRowFlags(detail).negative ? "该规则确认利润为负" : detail.health?.label} description={detail.health?.detail || "数据来源正常"} />
           <Detail label="请求窗口" value={`${formatWindow(detail.requestedWindow || detail.window)}（${(detail.requestedWindow || detail.window)?.timezone}）`} />
           <Detail label="返回账单实际窗口" value={`${formatWindow(detail.window)}（${detail.window?.timezone}）`} />
