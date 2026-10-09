@@ -1,6 +1,7 @@
 // 上游渠道对账的持久化层：只保存规则、聚合快照和告警状态，绝不复制站点凭据。
 import { isCurrentReconciliationBillingContract } from "../lib/reconciliation-contract.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
+import { applyScopePolicy } from "../lib/reconciliation-scope-policy.js";
 
 function uid(prefix) {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}${Date.now().toString(36).slice(-4)}`;
@@ -31,7 +32,7 @@ function normalizeSuccessfulResult(result, healthCode) {
 }
 
 function activeTokenKey(input) {
-  return input.enabled === false ? null : `${input.upstreamStationId}:${input.tokenId}`;
+  return input.enabled === false ? null : input.canonicalKey || `${input.upstreamStationId}:${input.tokenId}`;
 }
 
 function activeChannelKey(input, channelId) {
@@ -48,6 +49,13 @@ function ruleFromRow(row, channels = []) {
     fixedGroup: row.fixed_group,
     timezone: row.timezone,
     enabled: !!row.enabled,
+    billingPolicy: row.billing_policy || "legacy-v3",
+    scopeVersion: Number(row.scope_version || 1),
+    billingEffectiveFrom: row.billing_effective_from_ms == null ? null : Number(row.billing_effective_from_ms),
+    costCoverage: row.cost_coverage || "unknown",
+    provider: row.provider || null,
+    canonicalKey: row.canonical_key || null,
+    sourceBinding: asJson(row.source_binding),
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
@@ -180,12 +188,16 @@ export class ReconciliationRepository {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
+      if (input.billingPolicy === "next-complete-day") input = applyScopePolicy(null, input);
       await conn.query(
         `INSERT INTO reconciliation_rules
-          (id, upstream_station_id, own_station_id, token_id, token_name, fixed_group, timezone, enabled, active_token_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, upstream_station_id, own_station_id, token_id, token_name, fixed_group, timezone, enabled, active_token_key,
+           billing_policy, scope_version, billing_effective_from_ms, cost_coverage, provider, canonical_key, source_binding)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, input.upstreamStationId, input.ownStationId, input.tokenId, input.tokenName,
-          input.fixedGroup, input.timezone, input.enabled === false ? 0 : 1, tokenKey]
+          input.fixedGroup, input.timezone, input.enabled === false ? 0 : 1, tokenKey,
+          input.billingPolicy || "legacy-v3", input.scopeVersion || 1, input.billingEffectiveFrom ?? null,
+          input.costCoverage || "unknown", input.provider || null, input.canonicalKey || null, JSON.stringify(input.sourceBinding || null)]
       );
       if (input.channels.length) {
         await conn.query(
@@ -197,7 +209,7 @@ export class ReconciliationRepository {
         `INSERT INTO reconciliation_rule_segments
           (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, detected_at_ms, timing_source)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'operator_confirmed')`,
-        [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs || Date.now()), Date.now()]
+        [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs ?? (input.billingPolicy === "next-complete-day" ? 0 : Date.now())), Date.now()]
       );
       await conn.commit();
     } catch (err) {
@@ -209,18 +221,32 @@ export class ReconciliationRepository {
     return this.getRule(id);
   }
 
-  async updateRule(id, input) {
-    const tokenKey = activeTokenKey(input);
+  async updateRule(id, input, { append = false } = {}) {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
-      await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
+      const [rows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
+      if (!rows.length) throw new Error("对账规则不存在或已归档");
+      const [channelRows] = await conn.query("SELECT * FROM reconciliation_rule_channels WHERE rule_id = ? FOR UPDATE", [id]);
+      const existing = ruleFromRow(rows[0], channelRows);
+      input = { ...existing, ...input };
+      if (append) {
+        const channels = new Map(existing.channels.map((channel) => [channel.channelId, channel]));
+        for (const channel of input.channels) channels.set(channel.channelId, channel);
+        input.channels = [...channels.values()];
+        input.sourceBinding = { ...existing.sourceBinding, ...input.sourceBinding };
+      }
+      input = applyScopePolicy(existing, input);
+      const tokenKey = activeTokenKey(input);
       const [result] = await conn.query(
         `UPDATE reconciliation_rules
-         SET upstream_station_id = ?, own_station_id = ?, token_id = ?, token_name = ?, fixed_group = ?, timezone = ?, enabled = ?, active_token_key = ?
+         SET upstream_station_id = ?, own_station_id = ?, token_id = ?, token_name = ?, fixed_group = ?, timezone = ?, enabled = ?, active_token_key = ?,
+             billing_policy = ?, scope_version = ?, billing_effective_from_ms = ?, cost_coverage = ?, provider = ?, canonical_key = ?, source_binding = ?
          WHERE id = ? AND archived_at IS NULL`,
         [input.upstreamStationId, input.ownStationId, input.tokenId, input.tokenName,
-          input.fixedGroup, input.timezone, input.enabled === false ? 0 : 1, tokenKey, id]
+          input.fixedGroup, input.timezone, input.enabled === false ? 0 : 1, tokenKey,
+          input.billingPolicy, input.scopeVersion, input.billingEffectiveFrom, input.costCoverage,
+          input.provider, input.canonicalKey, JSON.stringify(input.sourceBinding || null), id]
       );
       if (!result.affectedRows) throw new Error("对账规则不存在或已归档");
       await conn.query("DELETE FROM reconciliation_rule_channels WHERE rule_id = ?", [id]);
@@ -238,6 +264,10 @@ export class ReconciliationRepository {
       conn.release();
     }
     return this.getRule(id);
+  }
+
+  async appendChannels(id, channels, confirmation = {}) {
+    return this.updateRule(id, { channels, ...confirmation }, { append: true });
   }
 
   async updateObservedToken(id, { tokenName, fixedGroup = null }) {
