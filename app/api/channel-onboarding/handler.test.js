@@ -31,6 +31,51 @@ const request = (body = {}) => new Request("http://localhost/api/channel-onboard
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
 });
 
+test("U03 authenticated accounts GET走实际wrapper/module，全量read无上游或写入，忽略查询伪造identity/guard", async (t) => {
+  const f = await liveOnboarding();
+  const identity = { provider: "newapi", baseUrl: "https://up.test", accountId: "7" };
+  const monitor = await f.rt.store.add({ name: "Monitor", type: "newapi", baseUrl: identity.baseUrl, accessToken: "monitor-pat" }, { verifiedIdentity: identity });
+  const dedicated = await f.rt.store.add({ name: "Billing", type: "newapi", baseUrl: identity.baseUrl, accessToken: "billing-pat", monitorEnabled: false }, { verifiedIdentity: identity });
+  await f.rt.store.archive(monitor.id);
+  const pure = await f.rt.store.add({ type: "newapi-key", baseUrl: identity.baseUrl, apiKey: "pure-api-key" });
+  f.rt.store.data.auth = { ...f.rt.store.auth, isDefault: false };
+  f.rt.sessions = { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 };
+  const before = structuredClone(f.rt.store.data);
+  t.mock.method(globalThis, "fetch", async () => { throw new Error("GET must not query upstream"); });
+  t.mock.method(f.rt.store, "_writeNow", async () => { assert.fail("GET must not save Store"); });
+  const { registerHooks } = await import("node:module");
+  globalThis.__u03AccountsRuntime = f.rt;
+  const hooks = registerHooks({
+    resolve(specifier, context, next) { return specifier === "next/server" ? { url: "test:u03-next", shortCircuit: true } : next(specifier, context); },
+    load(url, context, next) {
+      if (url === "test:u03-next") return { format: "module", shortCircuit: true, source: "export const NextResponse = {json:(value,init)=>Response.json(value,init)};" };
+      if (url.endsWith("/lib/runtime.js")) return { format: "module", shortCircuit: true, source: "export const getRuntime = async () => globalThis.__u03AccountsRuntime;" };
+      return next(url, context);
+    },
+  });
+  try {
+    const { GET } = await import("./accounts/route.js");
+    const url = "http://localhost/api/channel-onboarding/accounts?verifiedIdentity=forged&guard=forged";
+    const unauthenticated = await GET(new Request(url)); assert.equal(unauthenticated.status, 401);
+    assert.equal((await unauthenticated.json()).code, "UNAUTHORIZED");
+    const response = await GET(new Request(url, { headers: { cookie: "rm_session=valid" } }));
+    assert.equal(response.status, 200); const model = await response.json(); assert.equal(model.accounts.length, 1);
+    assert.deepEqual(model.accounts[0].resources.map((resource) => resource.id).sort(), [monitor.id, dedicated.id].sort());
+    assert.deepEqual(model.unverifiedResources.map((resource) => resource.id), [pure.id]);
+    assert.doesNotMatch(JSON.stringify(model), /monitor-pat|billing-pat|pure-api-key|forged|verifiedIdentity/);
+    assert.deepEqual(f.rt.store.data, before);
+    globalThis.__u03AccountsRuntime = { ...f.rt, channelOnboarding: null };
+    assert.equal((await GET(new Request(url, { headers: { cookie: "rm_session=valid" } }))).status, 503);
+  } finally { hooks.deregister(); delete globalThis.__u03AccountsRuntime; }
+});
+
+test("U03 accounts读取失败诊断隐藏全量saved凭据和JWT，不要求GET body", async () => {
+  const connection = { accessToken: "saved-pat", password: "saved-password", s2Tokens: { accessToken: "saved-access", refreshToken: "saved-refresh" } };
+  const rt = { store: { list: () => [connection] }, channelOnboarding: { listAccounts: async () => { throw new Error("saved-pat saved-password saved-access saved-refresh"); } } };
+  const response = await handleChannelOnboardingRequest(new Request("http://localhost/api/channel-onboarding/accounts"), rt, "listAccounts");
+  assert.equal(response.status, 400); assert.doesNotMatch(JSON.stringify(await response.json()), /saved-pat|saved-password|saved-access|saved-refresh/);
+});
+
 test("HTTP边界保留partial状态与公开重试ID，不能把200当作完成", async () => {
   const result = { complete: false, monitor: { status: "linked", stationIds: ["monitor"] },
     reconciliation: { status: "unverified", reason: "DEPLOYMENT_NOT_VERIFIED" },

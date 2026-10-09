@@ -27,6 +27,148 @@ function fixture(stations = []) {
 const input = { name: "Supplier", baseUrl: "https://up.example/", accessToken: "secret-pat" };
 const metadata = async () => ({ userId: "7", tokens: [], groups: {} });
 
+async function accountReadFixture(t) {
+  let writes = 0;
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => { writes += 1; return [[]]; },
+    commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const store = new Store(pool), identities = { A: { provider: "newapi", baseUrl: "https://same.test", accountId: "A" },
+    B: { provider: "newapi", baseUrl: "https://same.test", accountId: "B" } };
+  async function add(id, input, identity) {
+    const station = await store.add({ name: id, type: "newapi", baseUrl: "https://same.test/", accessToken: `${id}-pat`, ...input }, { verifiedIdentity: identity });
+    station.id = id; return station;
+  }
+  const own = await add("own", { isOwn: true, baseUrl: "https://own.test" });
+  const a1 = await add("A-monitor-1", { lowBalanceUsd: 27, cnyPerUsd: 0.7, noRenewal: true, includeInProfit: false }, identities.A);
+  const a2 = await add("A-monitor-2", {}, identities.A);
+  const billing = await add("A-billing", { monitorEnabled: false }, identities.A);
+  const b = await add("B-monitor", {}, identities.B);
+  const pure = await add("pure-key", { type: "newapi-key", apiKey: "independent-key" });
+  const unknown = await add("unknown-legacy", { userId: "A" });
+  const archived = await add("A-archived", {}, identities.A); await store.archive(archived.id);
+  a1.balance = { ok: false, error: "403 A-monitor-1-pat old-access old-refresh", remaining: 10, raw: { password: "private-raw" },
+    accessToken: "private-balance", diagnostics: { password: "private-diagnostics" }, account: { password: "private-object" } };
+  a1.s2Tokens = { accessToken: "old-access", refreshToken: "old-refresh" }; a1.alertState = { errorCount: 9, privateAlert: true };
+  a1.onboardingOrigin = { requestId: "private-origin" }; a1.authorizationUpdateRef = { requestId: "private-update" };
+  a2.balance = { ok: true, remaining: 10, used: 2, total: 12, currency: "USD" };
+  billing.balance = { ok: true, remaining: 10 }; pure.verifiedIdentity = { ...identities.A }; // Pure Key is never account identity evidence.
+  const ownSource = { stationId: own.id, provider: "newapi", baseUrl: own.baseUrl, accountId: "1",
+    namespaceKey: createHash("sha256").update(JSON.stringify(["newapi", own.baseUrl, "1"])).digest("hex") };
+  const state = { catalogue: { ownStationId: own.id, ownSource, syncedAt: 1, sourceVersion: "old-local-source", totalValidated: true, catalogueTotal: 3,
+    channels: [1, 2, 3].map((id) => ({ id, name: `Channel ${id}`, type: 1, status: id === 2 ? 2 : 1,
+      baseUrl: "https://same.test", revision: `revision-${id}`, groups: ["sales"], missing: id === 3 })) },
+    links: [a1, a2, pure].map((station) => ({ ownStationId: own.id, channelId: 1, stationId: station.id, channelRevision: "revision-1", confirmedAt: 1 })),
+    rules: [] };
+  const rule = (id, station, tokenId, ids, extra = {}) => ({ id, upstreamStationId: station.id, ownStationId: own.id, tokenId, tokenName: `Key ${tokenId}`,
+    canonicalKey: canonicalBillingKey(station, station.verifiedIdentity, tokenId), provider: "newapi", ownSource,
+    sourceBinding: Object.fromEntries(ids.map((channelId) => [channelId, `revision-${channelId}`])),
+    channels: ids.map((channelId) => ({ channelId, name: `Channel ${channelId}` })), enabled: true, archivedAt: null,
+    costCoverage: "unknown", coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] },
+    scopeVersion: 3, timezone: "Asia/Shanghai", billingEffectiveFrom: Date.parse("2026-10-09T16:00:00Z"), ...extra });
+  state.rules = [rule("A-active", billing, 9, [1]), rule("A-history", archived, 9, [3], { enabled: false, archivedAt: "2026-10-01T00:00:00Z", scopeVersion: 1 }),
+    rule("A-stopped", a2, 10, [2], { enabled: false }), rule("B-active", b, 9, [2], { costCoverage: "complete", coverageDeclaration: { answer: "none" } })];
+  const rt = { store, reconciliation: { listRules: async (options) => { assert.equal(options.includeArchived, true); return structuredClone(state.rules); } } };
+  const fail = async () => { throw new Error("account read must not request upstreams"); };
+  t.mock.method(globalThis, "fetch", fail);
+  const repository = { getCatalogue: async () => structuredClone(state.catalogue), listLinks: async () => structuredClone(state.links), saveLinks: fail, saveCatalogue: fail };
+  rt.channelOnboarding = await createChannelOnboardingModule(rt, { repository, now: () => Date.parse("2026-10-09T07:00:00Z"),
+    queryChannels: fail, queryIdentity: fail, queryMetadata: fail, queryMonitor: fail }).load();
+  writes = 0;
+  return { rt, store, a1, a2, billing, b, pure, unknown, archived, state, rule, writes: () => writes };
+}
+
+test("U03 actual Store本地全量账号视图同域A/B分离，两old monitor与dedicated保持ID，纯Key/unknown不借关联推断身份", async (t) => {
+  const f = await accountReadFixture(t), before = structuredClone(f.store.data), model = await f.rt.channelOnboarding.listAccounts();
+  assert.equal(model.accounts.length, 2); const a = model.accounts.find((account) => account.identity.accountId === "A"), b = model.accounts.find((account) => account.identity.accountId === "B");
+  assert.notEqual(a.accountKey, b.accountKey); assert.equal(a.siteKey, b.siteKey);
+  assert.equal(a.accountKey, createHash("sha256").update(JSON.stringify(["newapi", "https://same.test", "A"])).digest("hex"));
+  assert.deepEqual(a.resources.map((resource) => resource.id), ["A-archived", "A-billing", "A-monitor-1", "A-monitor-2"]);
+  const dedicated = a.resources.find((resource) => resource.id === "A-billing"); assert.equal(dedicated.monitorEnabled, false);
+  assert.deepEqual(dedicated.purposes, { monitor: false, billingRuleIds: ["A-active"] });
+  const monitor = a.resources.find((resource) => resource.id === "A-monitor-1"); assert.equal(monitor.lowBalanceUsd, 27);
+  assert.equal(monitor.cnyPerUsd, 0.7); assert.equal(monitor.includeInProfit, false); assert.equal(monitor.noRenewal, true);
+  assert.equal(monitor.resourceVersion, stationBusinessVersion(f.a1)); assert.equal(monitor.authVersion, 1);
+  assert.equal(monitor.balance.remaining, 10); assert.equal(monitor.balance.account, null);
+  assert.doesNotMatch(JSON.stringify(model), /A-monitor-1-pat|old-access|old-refresh|private-|independent-key|s2Tokens|alertState|onboardingOrigin|authorizationUpdateRef/);
+  assert.deepEqual(model.unverifiedResources.map((resource) => resource.id), ["pure-key", "unknown-legacy"]);
+  assert.ok(model.unverifiedResources.every((resource) => resource.identity === null && resource.verification === "unverified"));
+  assert.deepEqual(model.channels[0].monitor.stationIds, ["A-monitor-1", "A-monitor-2", "pure-key"]);
+  assert.ok(!model.accounts.flatMap((account) => account.resources).some((resource) => resource.id === "own"));
+  assert.ok(!("balance" in a)); assert.deepEqual(f.store.data, before); assert.equal(f.writes(), 0);
+  const key = a.keys.find((item) => item.tokenId === 9); assert.deepEqual(key.ruleIds, ["A-active", "A-history"]);
+  assert.deepEqual(key.activeRuleIds, ["A-active"]); assert.deepEqual(key.channels.map((channel) => channel.channelId), [1, 3]);
+  assert.equal(key.scopeVersion, 3); assert.equal(key.billingEffectiveFromMs, Date.parse("2026-10-09T16:00:00Z"));
+  assert.equal(key.firstQueryableAtMs, Date.parse("2026-10-10T16:00:00Z")); assert.equal(key.scopeAmbiguous, false);
+  const kinds = new Set(model.actions.map((action) => action.kind));
+  for (const kind of ["update_authorization", "inspect_balance", "verify_identity", "connect_channels", "confirm_coverage", "wait_effective", "review_source"]) assert.ok(kinds.has(kind), kind);
+  for (const item of model.actions) {
+    const href = new URL(item.href, "https://local.test");
+    assert.ok(["/stations", "/reconciliation"].includes(href.pathname)); assert.ok(item.id && item.label); assert.equal(item.window, null);
+    if (item.stationId) assert.ok(f.store.get(item.stationId)); if (item.ruleId) assert.ok(f.state.rules.some((rule) => rule.id === item.ruleId));
+    assert.notEqual(item.stationId, "own");
+  }
+  assert.deepEqual((await f.rt.channelOnboarding.listAccounts()).actions, model.actions);
+  monitor.balance.remaining = 999; key.channels[0].ownSource.accountId = "changed";
+  assert.equal(f.a1.balance.remaining, 10); assert.equal(f.state.rules[0].ownSource.accountId, "1");
+});
+
+test("U03 public历史关系保留，0active标历史，多active口径冲突不制造统一scope，未知legacy不伪造canonicalKey", async (t) => {
+  const f = await accountReadFixture(t);
+  f.state.rules.push(f.rule("A-conflict", f.a1, 9, [2], { scopeVersion: 4, costCoverage: "complete", coverageDeclaration: { answer: "none" }, timezone: "UTC" }),
+    f.rule("A-legacy", f.a2, 11, [1], { canonicalKey: null }),
+    f.rule("A-old-identity", f.a2, 12, [3], { canonicalKey: canonicalBillingKey(f.b, f.b.verifiedIdentity, 12) }));
+  const model = await f.rt.channelOnboarding.listAccounts(), a = model.accounts.find((account) => account.identity.accountId === "A");
+  const key = a.keys.find((item) => item.tokenId === 9); assert.deepEqual(key.activeRuleIds, ["A-active", "A-conflict"]);
+  assert.equal(key.scopeAmbiguous, true); assert.equal(key.costCoverage, "unknown"); assert.equal(key.scopeVersion, null);
+  assert.equal(key.billingEffectiveFromMs, null); assert.equal(key.firstQueryableAtMs, null); assert.equal(key.coverageDeclaration.answer, "unknown");
+  assert.ok(!a.actions.some((action) => action.kind === "wait_effective" && ["A-active", "A-conflict"].includes(action.ruleId)));
+  const stopped = a.keys.find((item) => item.tokenId === 10); assert.deepEqual(stopped.activeRuleIds, []); assert.equal(stopped.scopeAmbiguous, false);
+  assert.ok(!a.actions.some((action) => ["confirm_coverage", "wait_effective"].includes(action.kind) && action.ruleId === "A-stopped"));
+  assert.deepEqual(a.resources.find((resource) => resource.id === f.a2.id).purposes.billingRuleIds, ["A-legacy", "A-old-identity", "A-stopped"]);
+  assert.ok(!a.keys.some((item) => [11, 12].includes(item.tokenId)));
+  assert.deepEqual(a.actions.filter((action) => action.kind === "verify_capability").map((action) => action.ruleId).sort(), ["A-legacy", "A-old-identity"]);
+  assert.deepEqual(model.channels.find((channel) => channel.id === 3).reconciliation.ruleIds, ["A-history", "A-old-identity"]);
+  f.state.rules = f.state.rules.filter((rule) => rule.id !== "A-conflict");
+  f.state.rules.push(f.rule("A-membership-conflict", f.a1, 9, [2]));
+  const membership = (await f.rt.channelOnboarding.listAccounts()).accounts.find((account) => account.identity.accountId === "A").keys.find((item) => item.tokenId === 9);
+  assert.equal(membership.scopeAmbiguous, true, "equal scope version/policy still cannot unify different channel sets");
+  assert.equal(membership.scopeVersion, null);
+  assert.equal(f.writes(), 0);
+});
+
+test("U03 actual Repository全量入口保留archived/disabled关系；Store真实改PAT后旧身份作废，JWT自动续期不影响账号版本", async (t) => {
+  const f = await accountReadFixture(t), statements = [];
+  const pool = { query: async (sql) => {
+    statements.push(sql);
+    if (sql.includes("FROM reconciliation_rule_channels")) return [f.state.rules.flatMap((rule) => rule.channels.map((channel) =>
+      ({ rule_id: rule.id, channel_id: channel.channelId, channel_name: channel.name })))];
+    assert.ok(sql.includes("FROM reconciliation_rules"));
+    const rules = sql.includes("WHERE archived_at IS NULL") ? f.state.rules.filter((rule) => !rule.archivedAt) : f.state.rules;
+    return [rules.map((rule) => ({ id: rule.id, upstream_station_id: rule.upstreamStationId, own_station_id: rule.ownStationId, token_id: rule.tokenId,
+      token_name: rule.tokenName, timezone: rule.timezone, enabled: rule.enabled, billing_policy: "next-complete-day", scope_version: rule.scopeVersion,
+      billing_effective_from_ms: rule.billingEffectiveFrom, cost_coverage: rule.costCoverage, provider: rule.provider, canonical_key: rule.canonicalKey,
+      source_binding: { version: 2, channels: rule.sourceBinding, ownSource: rule.ownSource, coverageDeclaration: rule.coverageDeclaration }, archived_at: rule.archivedAt }))];
+  } };
+  f.rt.reconciliation = createReconciliationModule({ store: f.store, pool });
+  let model = await f.rt.channelOnboarding.listAccounts(), a = model.accounts.find((account) => account.identity.accountId === "A");
+  assert.ok(statements.some((sql) => sql.includes("FROM reconciliation_rules") && !sql.includes("WHERE archived_at")));
+  assert.ok(statements.every((sql) => sql.trim().startsWith("SELECT")));
+  assert.deepEqual(a.keys.find((key) => key.tokenId === 9).ruleIds, ["A-active", "A-history"]);
+  assert.deepEqual(a.keys.find((key) => key.tokenId === 10).activeRuleIds, []); assert.equal(f.writes(), 0);
+  const oldVersion = stationBusinessVersion(f.a1); f.a1.s2Tokens = { accessToken: "automatic-jwt", refreshToken: "automatic-refresh" };
+  assert.equal(stationBusinessVersion(f.a1), oldVersion);
+  await f.store.update(f.a1.id, { accessToken: "replacement-pat" });
+  model = await f.rt.channelOnboarding.listAccounts();
+  const resource = model.unverifiedResources.find((item) => item.id === f.a1.id);
+  assert.equal(resource.authVersion, 2); assert.notEqual(resource.resourceVersion, oldVersion); assert.equal(resource.identity, null);
+  assert.ok(!model.accounts.flatMap((account) => account.resources).some((item) => item.id === f.a1.id));
+  const subIdentity = { provider: "sub2api", baseUrl: "https://same.test", accountId: "A" };
+  await f.store.add({ type: "sub2api", baseUrl: "https://same.test/", accessToken: "sub-jwt" }, { verifiedIdentity: subIdentity });
+  await f.store.add({ type: "sub2api-password", baseUrl: "https://same.test", email: "sub@example.test", password: "sub-password" }, { verifiedIdentity: subIdentity });
+  model = await f.rt.channelOnboarding.listAccounts(); const sub = model.accounts.find((account) => account.identity.provider === "sub2api");
+  assert.equal(sub.resources.length, 2); assert.notEqual(sub.accountKey, a.accountKey); assert.notEqual(sub.siteKey, a.siteKey);
+  assert.doesNotMatch(JSON.stringify(model), /replacement-pat|sub-jwt|sub-password|sub@example/);
+});
+
 async function genuineBatchFixture(t) {
   const state = { now: Date.parse("2026-10-09T07:00:00Z"), rules: [], members: [], created: 0, ruleWrites: 0,
     catalogue: null, links: [], linkGate: null, failLinks: false, failRuleKey: null, requests: [], requestHook: null,

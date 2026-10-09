@@ -4,7 +4,7 @@ import { describeConnectionFailure } from "../lib/connection-test.js";
 import { onboardingBaseUrl, publicOnboardingStation, onboardingConnectionPatch, normalizeBatchInput,
   coalesceVerifiedBatchGroups, normalizeBatchRecoveryIntent } from "../lib/channel-onboarding.js";
 import { stationBusinessVersion } from "../db/store.js";
-import { nextBillingEffectiveFrom, completedBillingDayWindow, canonicalBillingKey, applyScopePolicy } from "../lib/reconciliation-scope-policy.js";
+import { nextBillingEffectiveFrom, completedBillingDayWindow, canonicalBillingKey, applyScopePolicy, normalizeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { ChannelOnboardingRepository } from "./channel-onboarding-repository.js";
 import { refreshStation } from "./refresh.js";
 import { normalizeReconciliationScopeIntent } from "./reconciliation.js";
@@ -173,6 +173,122 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       channels: (catalogue?.channels || []).map((channel) => ({ id: channel.id, name: channel.name, type: channel.type,
         status: channel.status, baseUrl: channel.baseUrl, groups: [...(channel.groups || [])], revision: channel.revision, missing: !!channel.missing })),
     };
+  }
+
+  async function listAccounts() {
+    const [savedLinks, allRules] = await Promise.all([repository.listLinks(), rt.reconciliation?.listRules?.({ includeArchived: true }) || []]);
+    const stations = rt.store.list({ includeUnmonitored: true, includeArchived: true }).filter((station) => !station.isOwn && TYPES.includes(station.type));
+    const source = getSourceCatalogue(), accounts = new Map(), unverifiedResources = [], actions = [];
+    const active = (rule) => rule.enabled && !rule.archivedAt;
+    const channelIds = (members) => [...new Set(members.map((member) => Number(member.channelId)))].sort((a, b) => a - b);
+    function action(kind, target = {}) {
+      const value = { kind, accountKey: null, stationId: null, ruleId: null, ownStationId: null, channelIds: [], window: null, ...target };
+      value.channelIds = [...new Set(value.channelIds)].sort((a, b) => a - b);
+      const routes = {
+        verify_identity: ["核验账号身份", { action: "verify", stationId: value.stationId }],
+        update_authorization: ["更新账号授权", { action: "authorization", accountKey: value.accountKey }],
+        verify_capability: ["核验账单能力", { action: "verify-billing", stationId: value.stationId }],
+        connect_channels: ["接入这些渠道", { action: "connect", ownStationId: value.ownStationId, channelIds: value.channelIds.join(",") }],
+        confirm_coverage: ["核对这把 Key 的全部用途", { action: "coverage", ruleId: value.ruleId }],
+        wait_effective: ["查看生效时间", { action: "scope", ruleId: value.ruleId }],
+        review_source: ["核对本站来源", { action: "source", ownStationId: value.ownStationId }],
+        inspect_balance: ["查看余额与监控", value.stationId ? { stationId: value.stationId } : { accountKey: value.accountKey }],
+      };
+      const [label, query] = routes[kind];
+      return { id: `${kind}:${hash(value)}`, ...value, label,
+        href: `${kind === "wait_effective" ? "/reconciliation" : "/stations"}?${new URLSearchParams(query)}` };
+    }
+    for (const station of stations) {
+      const stored = station.verifiedIdentity, provider = station.type.startsWith("sub2api") ? "sub2api" : "newapi";
+      const baseUrl = onboardingBaseUrl(station.baseUrl), accountId = String(stored?.accountId || "").trim();
+      const identity = ACCOUNT_TYPES.includes(station.type) && stored?.provider === provider && accountId && baseUrl
+        && onboardingBaseUrl(stored.baseUrl) === baseUrl ? { provider, baseUrl, accountId } : null;
+      const resource = publicBatchStation(station, identity, allRules);
+      resource.baseUrl = baseUrl;
+      resource.purposes.billingRuleIds = allRules.filter((rule) => rule.upstreamStationId === station.id).map((rule) => rule.id).sort();
+      if (!identity) {
+        unverifiedResources.push(resource);
+        const members = savedLinks.filter((link) => link.stationId === station.id && link.ownStationId === source.ownSource?.stationId);
+        actions.push(action(station.type === "newapi-key" ? members.length ? "connect_channels" : "verify_capability" : "verify_identity",
+          { stationId: station.id, ownStationId: source.ownSource?.stationId || null, channelIds: channelIds(members) }));
+        continue;
+      }
+      const accountKey = hash([provider, baseUrl, accountId]);
+      if (!accounts.has(accountKey)) accounts.set(accountKey, { accountKey, siteKey: hash([provider, baseUrl]), identity, resources: [], keys: [], actions: [] });
+      accounts.get(accountKey).resources.push(resource);
+    }
+    for (const account of accounts.values()) {
+      const ids = new Set(account.resources.map((resource) => resource.id)), keyRules = new Map();
+      for (const rule of allRules.filter((rule) => ids.has(rule.upstreamStationId))) {
+        const station = rt.store.get(rule.upstreamStationId);
+        if (!rule.canonicalKey || rule.canonicalKey !== canonicalBillingKey(station, account.identity, rule.tokenId)) {
+          account.actions.push(action("verify_capability", { accountKey: account.accountKey, stationId: station.id, ruleId: rule.id }));
+          continue;
+        }
+        if (!keyRules.has(rule.canonicalKey)) keyRules.set(rule.canonicalKey, []);
+        keyRules.get(rule.canonicalKey).push(rule);
+      }
+      for (const [canonicalKey, related] of keyRules) {
+        const current = related.filter(active), ordered = [...(current.length ? current : related)]
+          .sort((a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0)
+            || (b.scopeVersion || 1) - (a.scopeVersion || 1) || a.id.localeCompare(b.id));
+        const rule = ordered[0], members = new Map();
+        for (const item of related) for (const channel of item.channels || []) {
+          const key = JSON.stringify([item.ownSource?.namespaceKey || item.ownStationId, Number(channel.channelId)]);
+          members.set(key, { ownSource: item.ownSource ? normalizeRuleSourceBinding({ version: 2, ownSource: item.ownSource }).ownSource : null,
+            ownStationId: item.ownStationId, channelId: Number(channel.channelId), name: channel.name || channel.channelName || `渠道 ${channel.channelId}` });
+        }
+        const coverage = normalizeRuleSourceBinding({ version: 2, coverageDeclaration: rule.coverageDeclaration }, rule.costCoverage).coverageDeclaration;
+        const scope = (item) => hash([item.ownSource?.namespaceKey || item.ownStationId, channelIds(item.channels || []),
+          normalizeRuleSourceBinding(item.sourceBinding).sourceBinding,
+          item.costCoverage, normalizeRuleSourceBinding({ version: 2, coverageDeclaration: item.coverageDeclaration }, item.costCoverage).coverageDeclaration,
+          item.scopeVersion || 1, item.billingEffectiveFrom ?? null, item.timezone]);
+        const ambiguous = current.length > 1 && current.some((item) => scope(item) !== scope(rule));
+        const effective = Number.isFinite(rule.billingEffectiveFrom) ? rule.billingEffectiveFrom : null;
+        let firstQueryableAtMs = null;
+        if (effective != null) { try { firstQueryableAtMs = nextBillingEffectiveFrom(rule.timezone, effective); } catch { /* Unknown legacy timezone has no trustworthy boundary. */ } }
+        account.keys.push({ canonicalKey, tokenId: rule.tokenId, tokenName: rule.tokenName || `Key ${rule.tokenId}`,
+          ruleIds: related.map((item) => item.id).sort(), activeRuleIds: current.map((item) => item.id).sort(), scopeAmbiguous: ambiguous,
+          channels: [...members.values()].sort((a, b) => a.ownStationId.localeCompare(b.ownStationId) || a.channelId - b.channelId),
+          costCoverage: !ambiguous && rule.costCoverage === "complete" ? "complete" : "unknown", coverageDeclaration: ambiguous ? { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } : coverage,
+          scopeVersion: ambiguous ? null : rule.scopeVersion || 1, billingEffectiveFromMs: ambiguous ? null : effective,
+          firstQueryableAtMs: ambiguous ? null : firstQueryableAtMs });
+        if (current.length && (ambiguous || rule.costCoverage !== "complete")) account.actions.push(action("confirm_coverage",
+          { accountKey: account.accountKey, ruleId: rule.id, ownStationId: rule.ownStationId, channelIds: coverage.uncoveredOwnChannelIds }));
+        if (current.length && !ambiguous && firstQueryableAtMs > now()) account.actions.push(action("wait_effective", { accountKey: account.accountKey, ruleId: rule.id }));
+      }
+      for (const resource of account.resources) {
+        if (resource.monitorEnabled) account.actions.push(action("inspect_balance", { accountKey: account.accountKey, stationId: resource.id }));
+        if (!resource.archivedAt && resource.balance?.ok === false && describeConnectionFailure(resource.balance.error).code === "AUTHENTICATION_FAILED") {
+          account.actions.push(action("update_authorization", { accountKey: account.accountKey }));
+        }
+        const members = savedLinks.filter((link) => link.stationId === resource.id);
+        if (!resource.archivedAt && members.length && !allRules.some((rule) => active(rule) && ids.has(rule.upstreamStationId))) {
+          account.actions.push(action("verify_capability", { accountKey: account.accountKey, stationId: resource.id, channelIds: channelIds(members) }));
+        }
+      }
+      account.actions = [...new Map(account.actions.map((item) => [item.id, item])).values()];
+      account.resources.sort((a, b) => a.id.localeCompare(b.id)); account.keys.sort((a, b) => a.canonicalKey.localeCompare(b.canonicalKey));
+      actions.push(...account.actions);
+    }
+    const channels = source.channels.map((channel) => {
+      const members = savedLinks.filter((link) => link.ownStationId === source.ownSource?.stationId && link.channelId === Number(channel.id) && rt.store.get(link.stationId));
+      const monitored = members.filter((link) => rt.store.get(link.stationId).monitorEnabled !== false && !rt.store.get(link.stationId).archivedAt);
+      const related = allRules.filter((rule) => rule.ownStationId === source.ownSource?.stationId
+        && (rule.channels || []).some((member) => Number(member.channelId) === Number(channel.id)));
+      return { ...channel, baseUrl: onboardingBaseUrl(channel.baseUrl), monitor: { status: channel.missing || monitored.some((link) => link.channelRevision !== channel.revision) ? "review_required" : monitored.length ? "linked" : "unlinked",
+        stationIds: [...new Set(members.map((link) => link.stationId))].sort() },
+        reconciliation: { status: related.some((rule) => active(rule) && inspectSource(rule).status !== "confirmed") ? "review_required"
+          : related.some(active) ? "configured" : "unconfigured", ruleIds: related.map((rule) => rule.id).sort() } };
+    });
+    const unlinked = channels.filter((channel) => !channel.missing && channel.reconciliation.status === "unconfigured").map((channel) => channel.id);
+    if (source.ownSource && unlinked.length) actions.push(action("connect_channels", { ownStationId: source.ownSource.stationId, channelIds: unlinked }));
+    if (own() && (source.stale || channels.some((channel) => channel.reconciliation.status === "review_required"))) {
+      actions.push(action("review_source", { ownStationId: own().id, channelIds: channels.map((channel) => channel.id) }));
+    }
+    return { accounts: [...accounts.values()].sort((a, b) => a.accountKey.localeCompare(b.accountKey)),
+      unverifiedResources: unverifiedResources.sort((a, b) => a.id.localeCompare(b.id)), channels,
+      actions: [...new Map(actions.map((item) => [item.id, item])).values()], generatedAt: new Date(now()).toISOString() };
   }
 
   function expirePreviews() {
@@ -457,8 +573,12 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   function publicBatchStation(station, identity, allRules) {
     if (!station) return null;
-    const balance = station.balance && { ...station.balance,
-      ...(station.balance.error ? { error: failure(station.balance.error, [station]) } : {}) };
+    const balance = station.balance && Object.fromEntries(["ok", "remaining", "used", "total", "currency", "account", "checkedAt", "latencyMs",
+      "todayUsed", "todayRequests", "todayTokens", "error"].filter((field) => field in station.balance).map((field) => {
+      const value = station.balance[field];
+      return [field, ["currency", "account", "checkedAt", "error"].includes(field) ? typeof value === "string" ? failure(value, [station]) : null
+        : field === "ok" ? value === true : typeof value === "number" && Number.isFinite(value) ? value : null];
+    }));
     return { id: station.id || null, name: station.name || "上游账号", type: station.type, baseUrl: station.baseUrl,
       monitorEnabled: station.monitorEnabled !== false, archivedAt: station.archivedAt || null,
       authVersion: station.authVersion || 1, resourceVersion: station.id ? stationBusinessVersion(station) : null,
@@ -1081,7 +1201,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         costCoverage: input.reconciliation?.costCoverage || "unknown" } } : {}) };
   }
 
-  return { list, sync, probe, connect, inspectSource, getRuleSource: inspectSource, getSourceCatalogue, withSourceLock,
+  return { list, listAccounts, sync, probe, connect, inspectSource, getRuleSource: inspectSource, getSourceCatalogue, withSourceLock,
     getPreviewGuard, assertPreviewGuard, probeBatch, connectBatch, recoverBatch, probeRuleEdit,
     async load() { [catalogue, links] = await Promise.all([repository.getCatalogue(), repository.listLinks()]); return this; } };
 }

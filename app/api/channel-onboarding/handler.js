@@ -20,6 +20,7 @@ export async function handleChannelOnboardingRequest(request, rt, operation, par
     const connections = [body?.newStation, body?.reconciliation?.newAuthorization,
       rt.store?.get?.(body?.stationId), rt.store?.get?.(body?.reconciliation?.upstreamStationId),
       rt.store?.get?.(body?.ownStationId || body?.source?.ownStationId),
+      ...(operation === "listAccounts" ? rt.store?.list?.({ includeUnmonitored: true, includeArchived: true }) || [] : []),
       ...(Array.isArray(body?.selections) ? body.selections.flatMap((selection) => [selection?.newStation,
         selection?.reconciliationAuthorization?.newAuthorization, rt.store?.get?.(selection?.stationId),
         rt.store?.get?.(selection?.authorizationStationId), rt.store?.get?.(selection?.reconciliationAuthorization?.stationId)]) : [])];
