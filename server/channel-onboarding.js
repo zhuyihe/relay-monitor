@@ -583,8 +583,10 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   async function list() {
     const station = own(), allRules = await rules(), upstreams = resources();
+    const source = getSourceCatalogue();
     const channels = catalogue?.ownStationId === station?.id ? catalogue.channels : [];
     return {
+      ownSource: source.ownSource, sourceVersion: source.sourceVersion,
       ownStation: publicOnboardingStation(station), upstreams: upstreams.map(publicOnboardingStation), rules: allRules,
       channels: channels.map((channel) => {
         const monitorLinks = links.filter((link) => link.ownStationId === station.id && link.channelId === Number(channel.id)

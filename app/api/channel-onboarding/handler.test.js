@@ -32,6 +32,78 @@ const request = (body = {}) => new Request("http://localhost/api/channel-onboard
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
 });
 
+test("U06 authenticated GET/sync真实Provider来源DTO，默认零读写且失败保留最后核验namespace", async (t) => {
+  let writes = 0, catalogueWrites = 0, catalogue = null, failIdentity = false;
+  const requests = [], now = Date.parse("2026-10-09T07:00:00Z");
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => { writes += 1; return [[]]; },
+    commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const store = new Store(pool), own = await store.add({ name: "Own", type: "newapi", baseUrl: "https://u06-own.test",
+    accessToken: "u06-own-a-pat", isOwn: true });
+  const rt = { pool, store, reconciliation: { listRules: async () => [] },
+    sessions: { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
+  store.data.auth = { ...store.auth, isDefault: false };
+  rt.channelOnboarding = await createChannelOnboardingModule(rt, { now: () => now, repository: {
+    getCatalogue: async () => catalogue, listLinks: async () => [],
+    saveCatalogue: async (value) => { catalogueWrites += 1; catalogue = structuredClone(value); },
+    saveLinks: async () => { assert.fail("source read/sync must not save links"); },
+  } }).load();
+  t.mock.method(globalThis, "fetch", async (input, options) => {
+    const url = new URL(String(input)), authorization = options?.headers?.Authorization || "";
+    requests.push({ path: url.pathname, authorization });
+    if (url.pathname === "/api/user/self") {
+      if (failIdentity) return { status: 403, text: async () => JSON.stringify({ success: false, message: `denied ${authorization}` }) };
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { id: authorization.includes("u06-own-b-pat") ? 42 : 41 } }) };
+    }
+    assert.equal(url.pathname, "/api/channel/");
+    return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: 1, items: [{ id: 1, name: "Sales", type: 1,
+      status: 1, base_url: "https://supplier.test", group: "sales", key: "private-channel-key", raw: { password: "private-channel-password" } }] } }) };
+  });
+  const { registerHooks } = await import("node:module"); globalThis.__u03AccountsRuntime = rt;
+  const hooks = registerHooks({
+    resolve(specifier, context, next) { return specifier === "next/server" ? { url: "test:u06-source-next", shortCircuit: true } : next(specifier, context); },
+    load(url, context, next) {
+      if (url === "test:u06-source-next") return { format: "module", shortCircuit: true, source: "export const NextResponse = {json:(value,init)=>Response.json(value,init)};" };
+      if (url.endsWith("/lib/runtime.js")) return { format: "module", shortCircuit: true, source: "export const getRuntime = async () => globalThis.__u03AccountsRuntime;" };
+      return next(url, context);
+    },
+  });
+  try {
+    const { GET } = await import("./route.js"), { POST } = await import("./sync/route.js");
+    const url = "http://localhost/api/channel-onboarding?ownSource=forged&sourceVersion=forged";
+    const get = () => GET(new Request(url, { headers: { cookie: "rm_session=valid" } }));
+    const sync = () => POST(new Request("http://localhost/api/channel-onboarding/sync", { method: "POST",
+      headers: { cookie: "rm_session=valid" }, body: JSON.stringify({ ownSource: "forged", sourceVersion: "forged" }) }));
+    assert.equal((await GET(new Request(url))).status, 401);
+    assert.equal((await POST(new Request("http://localhost/api/channel-onboarding/sync", { method: "POST" }))).status, 401);
+    const initialWrites = writes, before = structuredClone(store.data), initial = await (await get()).json();
+    assert.deepEqual(initial, { ownSource: null, sourceVersion: rt.channelOnboarding.getSourceCatalogue().sourceVersion,
+      ownStation: { id: own.id, name: "Own", type: "newapi", baseUrl: own.baseUrl, monitorEnabled: true, identity: null },
+      upstreams: [], rules: [], channels: [], syncedAt: null, stale: true, error: null });
+    assert.equal(requests.length, 0); assert.equal(writes, initialWrites); assert.equal(catalogueWrites, 0);
+    const synced = await (await sync()).json(), namespaceKey = createHash("sha256")
+      .update(JSON.stringify(["newapi", own.baseUrl, "41"])).digest("hex");
+    assert.deepEqual(synced.ownSource, { stationId: own.id, provider: "newapi", baseUrl: own.baseUrl, accountId: "41", namespaceKey });
+    assert.match(synced.sourceVersion, /^[a-f0-9]{64}$/); assert.equal(synced.stale, false); assert.equal(synced.syncedAt, now);
+    assert.deepEqual(Object.keys(synced).sort(), ["channels", "error", "ownSource", "ownStation", "rules", "sourceVersion", "stale", "syncedAt", "upstreams"]);
+    assert.equal(requests.length, 2); assert.equal(catalogueWrites, 1); assert.equal(writes, initialWrites);
+    assert.deepEqual(await (await get()).json(), synced); assert.equal(requests.length, 2);
+    assert.deepEqual(store.data, before, "source sync does not backfill Store identity");
+    await store.update(own.id, { accessToken: "u06-own-b-pat" });
+    const savedWrites = writes; failIdentity = true;
+    const failed = await (await sync()).json();
+    assert.equal(failed.stale, true); assert.ok(failed.error); assert.deepEqual(failed.ownSource, synced.ownSource);
+    assert.notEqual(failed.sourceVersion, synced.sourceVersion); assert.equal(catalogueWrites, 1); assert.equal(writes, savedWrites);
+    const failedRequests = requests.length;
+    assert.deepEqual(await (await get()).json(), failed); assert.equal(requests.length, failedRequests);
+    failIdentity = false;
+    const replaced = await (await sync()).json();
+    assert.equal(replaced.stale, false); assert.equal(replaced.ownSource.accountId, "42");
+    assert.notEqual(replaced.ownSource.namespaceKey, synced.ownSource.namespaceKey); assert.equal(catalogueWrites, 2);
+    assert.equal(writes, savedWrites); assert.equal(store.get(own.id).verifiedIdentity, null);
+    assert.doesNotMatch(JSON.stringify([initial, synced, failed, replaced]), /u06-own-[ab]-pat|private-channel|Authorization|accessToken|password|raw|forged/);
+  } finally { hooks.deregister(); delete globalThis.__u03AccountsRuntime; }
+});
+
 test("U03 authenticated accounts GET走实际wrapper/module，全量read无上游或写入，忽略查询伪造identity/guard", async (t) => {
   const f = await liveOnboarding();
   const identity = { provider: "newapi", baseUrl: "https://up.test", accountId: "7" };

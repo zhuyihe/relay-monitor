@@ -2202,12 +2202,13 @@ test("站点凭据原地改写后，元数据和渠道目录缓存不再复用�
   const inFlight = module.getUpstreamKeys("upstream", { force: true });
   await identityProbe.reached;
   stations[0].accessToken = "pat-3";
+  stations[0].authVersion += 1;
   identityProbe.release();
-  await inFlight;
-  assert.equal(requestsTo("upstream.test", "/api/token/").length, 3);
+  await assert.rejects(inFlight, (error) => error.code === "RESOURCE_CHANGED");
+  assert.equal(requestsTo("upstream.test", "/api/token/").length, 2, "身份等待后已改授权，不能继续读取旧授权的 Key 目录");
   assert.equal(requestsTo("upstream.test", "/api/token/").at(-1).authorization, "Bearer pat-2");
   await module.getUpstreamKeys("upstream");
-  assert.equal(requestsTo("upstream.test", "/api/token/").length, 4, "旧 PAT 读到的数据不能记到新 PAT 名下");
+  assert.equal(requestsTo("upstream.test", "/api/token/").length, 3, "旧 PAT 读到的数据不能记到新 PAT 名下");
 
   await module.getConfiguration();
   await module.getConfiguration();
@@ -4340,4 +4341,176 @@ test("U05 external/unknown全Key用途保留原始金额与实际coverage action
   assert.equal(actual.windowGroups[0].totals.knownIncomeUsd, 7.5);
   assert.equal(actual.windowGroups[0].totals.confirmedProfitUsd, 1.5);
   assert.equal(actual.windowGroups[0].totals.profitComplete, false);
+});
+
+function upstreamReadFixture(t, type = "newapi") {
+  const pool = { async query() { assert.fail("Key read must not access SQL"); }, async getConnection() { assert.fail("Key read must not save"); } };
+  const store = new Store(pool);
+  store.data.auth = { isDefault: false };
+  store.data.stations = [{ id: "resource", type, name: "Old account", baseUrl: `https://u06-${type}-${t.name.length}.test`,
+    accessToken: "saved-secret", authVersion: 1, monitorEnabled: false,
+    ...(type === "sub2api-password" ? { email: "old@example.test", password: "saved-password",
+      s2Tokens: { accessToken: "stored-auto-jwt", refreshToken: "stored-auto-refresh", expiresAt: 1 } } : {}) }];
+  const state = { requests: [], accountId: 42, selfCount: 0, cost: 3.25, quota: 0, directoryError: false, missingAmount: false, onRequest: null, identityAt: null };
+  const reply = (status, data) => ({ status, text: async () => JSON.stringify(type === "newapi"
+    ? { success: status < 300, data, message: status >= 300 ? "permission denied Bearer raw-secret" : undefined }
+    : { code: status >= 300 ? status : 0, data, message: status >= 300 ? "permission denied Bearer raw-secret" : undefined }) });
+  t.mock.method(globalThis, "fetch", async (input, init = {}) => {
+    const url = new URL(String(input)); state.requests.push({ url, authorization: init.headers?.Authorization });
+    await state.onRequest?.(url);
+    if (["/api/user/self", "/api/v1/auth/me"].includes(url.pathname)) {
+      state.selfCount += 1;
+      return reply(200, { id: state.identityAt?.(state.selfCount) ?? state.accountId, password: "raw-secret" });
+    }
+    if (url.pathname === "/api/status") return reply(200, { quota_per_unit: 100, version: "deployment-v1" });
+    if (url.pathname === "/api/user/self/groups") return reply(200, { g: { ratio: 1 } });
+    if (url.pathname === "/api/token/") return state.directoryError ? reply(403, null)
+      : reply(200, { total: 1, items: [{ id: 9, name: "actual-key", status: 1, group: "g", key: "raw-call-secret" }] });
+    if (url.pathname === "/api/log/self/stat") return reply(200, { quota: state.quota, accessToken: "raw-secret" });
+    if (url.pathname === "/api/v1/settings/public") return reply(200, { turnstile_enabled: false });
+    if (url.pathname === "/api/v1/auth/login") return reply(200, { access_token: "fresh-auto-jwt", refresh_token: "fresh-auto-refresh", expires_in: 3600 });
+    if (url.pathname === "/api/v1/keys") return state.directoryError ? reply(403, null)
+      : reply(200, { total: 1, items: [{ id: 9, user_id: state.accountId, name: "actual-key", status: "active", group_id: null, key: "raw-call-secret" }] });
+    if (url.pathname.startsWith("/api/v1/keys/")) return reply(404, null);
+    if (url.pathname === "/api/v1/usage/stats") {
+      if (url.searchParams.get("api_key_id") !== "9") return reply(404, null);
+      const future = Date.parse(url.searchParams.get("start_date")) > Date.now();
+      return reply(200, state.missingAmount ? { total_cost: 19 } : { total_actual_cost: future ? 0 : state.cost, total_cost: 19, accessToken: "raw-secret" });
+    }
+    assert.fail(`Unexpected Key read: ${url.pathname}`);
+  });
+  const rt = { store, pool, sessions: { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
+  const module = rt.reconciliation = createReconciliationModule(rt);
+  return { rt, module, store, state, station: store.get("resource") };
+}
+
+test("U06实际NewAPI Key读取：默认旧目录不加身份请求，explicit actual identity/zero/probe白名单且零写", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-09T03:00:00Z"));
+  const f = upstreamReadFixture(t), before = structuredClone(f.store.data);
+  const original = await f.module.getUpstreamKeys("resource");
+  assert.equal(f.state.selfCount, 1, "默认只沿原metadata路径，不加独立accountprobe");
+  assert.equal(original.identity, null); assert.equal(original.probe, null); assert.equal(original.version, "deployment-v1");
+  const verified = await f.module.getUpstreamKeys("resource", { force: true });
+  assert.equal(f.state.selfCount, 3, "force使用独立actual身份，再与metadata身份核对");
+  assert.deepEqual(verified.identity, { provider: "newapi", baseUrl: f.station.baseUrl, accountId: "42" });
+  assert.equal(verified.resourceVersion, original.resourceVersion); assert.equal(verified.probe, null);
+  const selected = await f.module.getUpstreamKeys("resource", { tokenId: "9", timezone: "Etc/UTC" });
+  assert.equal(f.state.selfCount, 5, "显式选Key即使force=false仍走actual身份核验");
+  assert.deepEqual(selected.probe.window, { startMs: Date.parse("2026-10-08T00:00:00Z"), endMs: Date.parse("2026-10-09T00:00:00Z"), timezone: "UTC" });
+  assert.deepEqual([selected.probe.amountUsd, selected.probe.knownAmountUsd, selected.probe.quotaUnits, selected.probe.actualCostUsd], [0, 0, 0, null]);
+  assert.equal(selected.probe.currency, "USD"); assert.equal(selected.probe.complete, true); assert.equal(selected.version, "deployment-v1");
+  assert.deepEqual(Object.keys(selected.probe).sort(), ["tokenId", "state", "complete", "window", "currency", "amountUsd", "knownAmountUsd", "actualCostUsd", "quotaUnits", "quotaPerUnit", "capability", "billingTimezone"].sort());
+  const stat = f.state.requests.find(({ url }) => url.pathname === "/api/log/self/stat").url;
+  assert.equal(stat.searchParams.get("token_name"), "actual-key"); assert.equal(stat.searchParams.get("end_timestamp"), String(selected.probe.window.endMs / 1000 - 1));
+  await assert.rejects(f.module.getUpstreamKeys("resource", { tokenId: 99 }), (error) => error.code === "INVALID_REQUEST");
+  assert.equal(f.state.requests.filter(({ url }) => url.pathname === "/api/log/self/stat").length, 1, "仅目录中的实际选Key可调用stat");
+  assert.doesNotMatch(JSON.stringify(selected), /raw-|saved-secret|accessToken|password|maskedKey|observedAt/);
+  assert.deepEqual(f.store.data, before);
+});
+
+test("U06实际目录权限失败：仅force无Key安全partial，default仍原错误、selectedKey拒绝", async (t) => {
+  const f = upstreamReadFixture(t), before = structuredClone(f.store.data); f.state.directoryError = true;
+  await assert.rejects(f.module.getUpstreamKeys("resource"), (error) => error.code === "UPSTREAM_AUTH_DENIED");
+  const partial = await f.module.getUpstreamKeys("resource", { force: true, timezone: "UTC" });
+  assert.equal(partial.identity.accountId, "42"); assert.equal(partial.probe, null);
+  assert.deepEqual([partial.quotaPerUnit, partial.version, partial.groups, partial.tokens], [null, "", {}, []]);
+  assert.equal(partial.capability.reason, "KEY_METADATA_UNAVAILABLE");
+  assert.deepEqual(partial.billingTimezone, { state: "unverified", timezone: "UTC", reason: "KEY_METADATA_UNAVAILABLE" });
+  await assert.rejects(f.module.getUpstreamKeys("resource", { tokenId: 9 }), (error) => error.code === "KEY_METADATA_UNAVAILABLE" && !error.message.includes("raw-secret"));
+  assert.deepEqual(f.store.data, before);
+});
+
+test("U06非法zone/token、own/pureKey不触发accountprobe；存userId不能冒充actual身份", async (t) => {
+  const f = upstreamReadFixture(t);
+  for (const options of [{ timezone: "invalid/zone" }, { timezone: "" }, ...[0, -1, 1.5, "", " 9", "9e0", true, Number.MAX_SAFE_INTEGER + 1].map((tokenId) => ({ tokenId }))]) {
+    await assert.rejects(f.module.getUpstreamKeys("resource", options), (error) => error.code === "INVALID_REQUEST");
+  }
+  for (const patch of [{ type: "newapi-key" }, { type: "newapi", isOwn: true }]) {
+    Object.assign(f.station, patch);
+    await assert.rejects(f.module.getUpstreamKeys("resource", { force: true, tokenId: 9 }), /上游站点不存在/);
+  }
+  assert.equal(f.state.requests.length, 0);
+  Object.assign(f.station, { type: "newapi", isOwn: false, userId: 7 });
+  await assert.rejects(f.module.getUpstreamKeys("resource", { force: true }), (error) => error.code === "KEY_PROBE_UNAVAILABLE");
+  assert.equal(f.station.userId, 7); assert.equal(f.station.verifiedIdentity, undefined);
+  assert.equal(f.state.requests.length, 1, "actual 42与存7不同，不能借存身份继续目录/统计");
+});
+
+test("U06 actual identity/metadata冲突与每个await业务版本漂移均拒绝，零SQL/身份回填", async (t) => {
+  for (const phase of ["identity", "metadata", "stat", "crosscheck"]) await t.test(phase, async (child) => {
+    const f = upstreamReadFixture(child);
+    if (phase === "crosscheck") f.state.identityAt = (count) => count === 1 ? 42 : 43;
+    else f.state.onRequest = (url) => {
+      const expected = { identity: "/api/user/self", metadata: "/api/token/", stat: "/api/log/self/stat" }[phase];
+      if (url.pathname === expected) { f.station.monitorEnabled = true; f.state.onRequest = null; }
+    };
+    await assert.rejects(f.module.getUpstreamKeys("resource", { force: true, tokenId: 9 }), (error) => error.code === "RESOURCE_CHANGED");
+    assert.equal(f.station.verifiedIdentity, undefined);
+    if (phase !== "stat") assert.equal(f.state.requests.some(({ url }) => url.pathname === "/api/log/self/stat"), false);
+  });
+});
+
+test("U06实际Sub2API selectedKey保留3.25/0/unknown与Key-date能力，zone独立unverified且共享JWT不写", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-09T03:00:00Z"));
+  const f = upstreamReadFixture(t, "sub2api-password"), before = structuredClone(f.store.data);
+  const first = await f.module.getUpstreamKeys("resource", { tokenId: 9 });
+  assert.equal(first.identity.accountId, "42"); assert.equal(first.probe.capability.state, "supported");
+  assert.deepEqual([first.probe.amountUsd, first.probe.knownAmountUsd, first.probe.actualCostUsd], [3.25, 3.25, 3.25]);
+  assert.deepEqual(first.probe.billingTimezone, { state: "unverified", timezone: "Asia/Shanghai", reason: "BILLING_TIMEZONE_UNVERIFIED" });
+  f.state.cost = 0;
+  const zero = await f.module.getUpstreamKeys("resource", { tokenId: 9 });
+  assert.deepEqual([zero.probe.amountUsd, zero.probe.knownAmountUsd, zero.probe.actualCostUsd], [0, 0, 0]);
+  const otherZone = await f.module.getUpstreamKeys("resource", { tokenId: 9, timezone: "UTC" });
+  assert.deepEqual([otherZone.probe.complete, otherZone.probe.amountUsd, otherZone.probe.knownAmountUsd], [false, null, 0]);
+  f.state.missingAmount = true;
+  const unknown = await f.module.getUpstreamKeys("resource", { tokenId: 9 });
+  assert.deepEqual([unknown.probe.amountUsd, unknown.probe.knownAmountUsd, unknown.probe.actualCostUsd], [null, null, null]);
+  assert.equal(unknown.probe.capability.state, "unsupported");
+  assert.doesNotMatch(JSON.stringify([first, zero, otherZone, unknown]), /raw-|saved-password|fresh-auto|stored-auto|accessToken/);
+  assert.deepEqual(f.store.data, before);
+});
+
+test("U06真实withAuth keys GET：登录/zone/token/drift400、原default500、selected503与force精确参数", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-09T03:00:00Z"));
+  t.mock.method(console, "error", () => {});
+  const f = upstreamReadFixture(t), { registerHooks } = await import("node:module");
+  globalThis.__u06KeysRuntime = f.rt;
+  const hooks = registerHooks({ resolve(specifier, context, next) {
+    if (specifier === "next/server") return { url: "test:u06-keys-next", shortCircuit: true };
+    if (specifier.endsWith("/runtime.js")) return { url: "test:u06-keys-runtime", shortCircuit: true };
+    if (specifier.endsWith("/lib/api.js")) return { url: new URL(`${specifier}?u06-keys-auth`, context.parentURL).href, shortCircuit: true };
+    return next(specifier, context);
+  }, load(url, context, next) {
+    if (url === "test:u06-keys-next") return { format: "module", shortCircuit: true, source: "export const NextResponse={json:(value,init)=>Response.json(value,init)};" };
+    if (url === "test:u06-keys-runtime") return { format: "module", shortCircuit: true, source: "export const getRuntime=async()=>globalThis.__u06KeysRuntime;" };
+    return next(url, context);
+  } });
+  try {
+    const { GET } = await import("../app/api/reconciliation/upstreams/[id]/keys/route.js?u06-keys");
+    const get = (suffix = "", authenticated = true) => GET(new Request(`http://localhost/api/reconciliation/upstreams/resource/keys${suffix}`,
+      { headers: authenticated ? { cookie: "rm_session=valid" } : {} }), { params: Promise.resolve({ id: "resource" }) });
+    assert.equal((await get("", false)).status, 401); assert.equal(f.state.requests.length, 0);
+    for (const suffix of ["?timezone=", "?timezone=invalid", "?tokenId=0", "?tokenId=9e0", "?tokenId=9007199254740992"]) {
+      const response = await get(suffix); assert.equal(response.status, 400); assert.equal((await response.json()).code, "INVALID_REQUEST");
+    }
+    assert.equal(f.state.requests.length, 0);
+    const old = await (await get("?force=TRUE")).json(); assert.equal(old.identity, null); assert.equal(old.probe, null);
+    assert.equal(f.state.selfCount, 1, "force只接受原exact true");
+    const ready = await get("?force=true&tokenId=9&timezone=UTC"); assert.equal(ready.status, 200);
+    const body = await ready.json(); assert.equal(body.identity.accountId, "42"); assert.equal(body.probe.amountUsd, 0);
+    assert.equal(body.probe.window.timezone, "UTC"); assert.match(body.resourceVersion, /^[a-f0-9]{64}$/);
+    assert.equal(body.version, "deployment-v1"); assert.doesNotMatch(JSON.stringify(body), /raw-|saved-secret|accessToken|password/);
+    f.state.quota = null;
+    const statError = await get("?tokenId=9"); assert.equal(statError.status, 503);
+    assert.deepEqual(await statError.json(), { error: "Key 账单能力暂时无法核验，请检查授权或稍后重试", code: "KEY_PROBE_UNAVAILABLE", retryable: true });
+    f.state.quota = 0;
+    f.state.directoryError = true; f.rt._reconciliationMetadataCache.clear();
+    const oldError = await get(); assert.equal(oldError.status, 500); assert.deepEqual(Object.keys(await oldError.json()), ["error"]);
+    const selectedError = await get("?tokenId=9"); assert.equal(selectedError.status, 503);
+    assert.deepEqual(await selectedError.json(), { error: "Key 目录暂时无法读取，请检查权限或稍后重试", code: "KEY_METADATA_UNAVAILABLE", retryable: true });
+    const partial = await get("?force=true"); assert.equal(partial.status, 200); assert.equal((await partial.json()).capability.reason, "KEY_METADATA_UNAVAILABLE");
+    f.state.directoryError = false; f.state.onRequest = () => { f.station.authVersion += 1; f.state.onRequest = null; };
+    const changed = await get("?force=true"); assert.equal(changed.status, 400); assert.equal((await changed.json()).code, "RESOURCE_CHANGED");
+    assert.equal(f.station.verifiedIdentity, undefined);
+  } finally { hooks.deregister(); delete globalThis.__u06KeysRuntime; }
 });

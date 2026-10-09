@@ -18,7 +18,7 @@ import { ReconciliationRepository, reconciliationOwnerRuleState, normalizeConfir
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { describeConnectionFailure } from "../lib/connection-test.js";
-import { applyScopePolicy, canonicalBillingKey, nextBillingEffectiveFrom, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow } from "../lib/reconciliation-scope-policy.js";
+import { applyScopePolicy, canonicalBillingKey, nextBillingEffectiveFrom, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow } from "../lib/reconciliation-scope-policy.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions } from "../lib/reconciliation-view.js";
@@ -1554,10 +1554,67 @@ export function createReconciliationModule(rt) {
       return { ownStation: publicStation(own), upstreams, channels, channelsError, rules };
     },
 
-    async getUpstreamKeys(stationId, { force = false, timezone } = {}) {
+    async getUpstreamKeys(stationId, { force = false, timezone, tokenId } = {}) {
+      let zone;
+      try {
+        if (timezone != null && (typeof timezone !== "string" || !timezone.trim())) throw new Error();
+        zone = canonicalTimezone(timezone);
+      } catch { throw Object.assign(new Error("账单时区无效"), { code: "INVALID_REQUEST" }); }
+      const selectedId = tokenId == null ? null : Number(tokenId);
+      if (tokenId != null && (typeof tokenId !== "number" && (typeof tokenId !== "string" || !/^\d+$/.test(tokenId))
+        || !Number.isSafeInteger(selectedId) || selectedId <= 0)) {
+        throw Object.assign(new Error("Key ID 必须是正整数"), { code: "INVALID_REQUEST" });
+      }
       const station = upstreamStation(stationId);
       if (!billingStation(station)) throw new Error("上游站点不存在");
-      return publicMetadata(await metadataFor(station, { force, timezone }));
+      const connection = structuredClone(station), resourceVersion = stationBusinessVersion(connection);
+      if (!force && selectedId == null) return { ...publicMetadata(await metadataFor(connection, { timezone: zone })), identity: null, resourceVersion, probe: null };
+      const credential = credentialFingerprint(connection);
+      const assertCurrent = () => {
+        if (stationBusinessVersion(upstreamStation(stationId)) !== resourceVersion
+          || credentialFingerprint(upstreamStation(stationId) || {}) !== credential) {
+          throw Object.assign(new Error("账号资源已变化，请重新核验"), { code: "RESOURCE_CHANGED" });
+        }
+      };
+      let identity, metadata;
+      try { identity = await queryAccountIdentity(connection); }
+      catch { assertCurrent(); throw Object.assign(new Error("账号身份暂时无法核验，请检查授权或稍后重试"), { code: "KEY_PROBE_UNAVAILABLE" }); }
+      assertCurrent();
+      identity = { provider: identity.provider, baseUrl: identity.baseUrl, accountId: String(identity.accountId) };
+      try { metadata = await metadataFor(connection, { force: true, timezone: zone }); }
+      catch (error) {
+        assertCurrent();
+        if (error.code === "UPSTREAM_IDENTITY_CHANGED") throw Object.assign(new Error("账号身份在核验期间变化，请重新核验"), { code: "RESOURCE_CHANGED" });
+        if (selectedId != null) throw Object.assign(new Error("Key 目录暂时无法读取，请检查权限或稍后重试"), { code: "KEY_METADATA_UNAVAILABLE" });
+        return { quotaPerUnit: null, version: "", groups: {}, tokens: [], platform: identity.provider,
+          capability: { state: "unverified", currency: "USD", window: identity.provider === "newapi" ? "second" : "natural-day", reason: "KEY_METADATA_UNAVAILABLE" },
+          billingTimezone: { state: "unverified", timezone: zone, reason: "KEY_METADATA_UNAVAILABLE" }, identity, resourceVersion, probe: null };
+      }
+      assertCurrent();
+      if (metadata.platform !== identity.provider || onboardingBaseUrl(metadata.baseUrl) !== identity.baseUrl
+        || String(metadata.accountId ?? metadata.userId) !== identity.accountId) {
+        throw Object.assign(new Error("账号身份在核验期间变化，请重新核验"), { code: "RESOURCE_CHANGED" });
+      }
+      let probe = null;
+      if (selectedId != null) {
+        const token = metadata.tokens.find((item) => item.id === selectedId);
+        if (!token || token.status !== 1 || !tokenNameIsUnique(metadata, token)) {
+          throw Object.assign(new Error("请选择目录中有效且名称唯一的 Key"), { code: "INVALID_REQUEST" });
+        }
+        let stat;
+        try { stat = await queryKeyReconciliationStat(connection, { token, metadata, ...completedBillingDayWindow(zone) }); }
+        catch { assertCurrent(); throw Object.assign(new Error("Key 账单能力暂时无法核验，请检查授权或稍后重试"), { code: "KEY_PROBE_UNAVAILABLE" }); }
+        assertCurrent();
+        const number = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
+        const capability = stat.capability || metadata.capability;
+        probe = { tokenId: selectedId, state: stat.state, complete: stat.complete === true,
+          window: { startMs: number(stat.window?.startMs), endMs: number(stat.window?.endMs), timezone: stat.window?.timezone ?? null },
+          currency: stat.currency || capability?.currency || "USD", amountUsd: number(stat.amountUsd), knownAmountUsd: number(stat.knownAmountUsd),
+          actualCostUsd: number(stat.actualCostUsd), quotaUnits: number(stat.quotaUnits), quotaPerUnit: number(stat.quotaPerUnit),
+          capability: capability ? Object.fromEntries(["state", "currency", "window", "reason", "message"].filter((key) => capability[key] != null).map((key) => [key, capability[key]])) : null,
+          billingTimezone: stat.billingTimezone ? Object.fromEntries(["state", "timezone", "reason"].filter((key) => stat.billingTimezone[key] != null).map((key) => [key, stat.billingTimezone[key]])) : null };
+      }
+      return { ...publicMetadata(metadata), identity, resourceVersion, probe };
     },
 
     createRule: saveRule,

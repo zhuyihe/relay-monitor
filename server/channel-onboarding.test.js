@@ -1240,6 +1240,42 @@ test("关联或规则部分保存失败返回成功 ID，重试免凭证且不�
   }
 });
 
+test("U06公开list仅投影已核验OwnSource白名单，零上游请求与持久写", async (t) => {
+  const f = await onboardingFixture();
+  Object.assign(f.state.catalogue.ownSource, { accessToken: "private-source-token", raw: { password: "private-source-password" },
+    authorizationUpdateRef: { requestId: "private-source-marker" } });
+  f.dependencies.queryIdentity = async () => { assert.fail("list must not verify upstream identity"); };
+  f.dependencies.queryChannels = async () => { assert.fail("list must not fetch upstream channels"); };
+  await f.restart();
+  t.mock.method(f.repository, "saveCatalogue", async () => { assert.fail("list must not save catalogue"); });
+  t.mock.method(f.repository, "saveLinks", async () => { assert.fail("list must not save links"); });
+  t.mock.method(f.rt.store, "_writeNow", async () => { assert.fail("list must not save Store"); });
+  const before = structuredClone({ store: f.rt.store.data, catalogue: f.state.catalogue, rules: f.state.rules, links: f.state.links });
+  const result = await f.module.list(), source = f.module.getSourceCatalogue();
+  assert.deepEqual(result.ownSource, source.ownSource); assert.equal(result.sourceVersion, source.sourceVersion);
+  assert.deepEqual(Object.keys(result.ownSource).sort(), ["accountId", "baseUrl", "namespaceKey", "provider", "stationId"]);
+  assert.equal(result.stale, false); assert.equal(result.ownSource.accountId, "7");
+  assert.doesNotMatch(JSON.stringify(result), /own-secret|private-source|accessToken|password|authorizationUpdateRef|raw/);
+  result.ownSource.accountId = "copied-identity";
+  assert.equal((await f.module.list()).ownSource.accountId, "7", "public source is a detached projection");
+  assert.deepEqual({ store: f.rt.store.data, catalogue: f.state.catalogue, rules: f.state.rules, links: f.state.links }, before);
+});
+
+test("U06普通授权变化及sync失败保留最后核验来源，不能把旧namespace认作当前账号", async (t) => {
+  const f = await onboardingFixture(), initial = await f.module.list();
+  await f.rt.store.update(f.own.id, { accessToken: "next-own-secret", userId: "8" });
+  const stale = await f.module.list();
+  assert.deepEqual(stale.ownSource, initial.ownSource); assert.equal(stale.stale, true);
+  assert.notEqual(stale.sourceVersion, initial.sourceVersion); assert.equal(stale.ownSource.accountId, "7");
+  f.dependencies.queryIdentity = async () => { throw new Error("denied next-own-secret"); };
+  await f.restart();
+  t.mock.method(f.repository, "saveCatalogue", async () => { assert.fail("failed sync must not save catalogue"); });
+  const failed = await f.module.sync();
+  assert.deepEqual(failed.ownSource, initial.ownSource); assert.equal(failed.sourceVersion, stale.sourceVersion);
+  assert.equal(failed.stale, true); assert.ok(failed.error);
+  assert.doesNotMatch(JSON.stringify(failed), /own-secret|next-own-secret|accessToken|password/);
+});
+
 test("目录失败保留旧副本并阻止新关联，缺项标记核对而不删除资源", async () => {
   const f = await onboardingFixture();
   const connected = await connectWithPreview(f,f.request({ reconciliation: f.billing() }));
