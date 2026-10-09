@@ -1127,13 +1127,13 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
               noteSave(primary);
               saved = { primary, billing: value.billing === value.main ? primary : null };
               savedSelections.set(selection.selectionId, saved);
-              if (!guard.basis.resourceVersions[primary.station.id]) newlyCreatedIds.push(primary.station.id);
+              if (!ids.includes(primary.station.id)) newlyCreatedIds.push(primary.station.id);
             }
             if (selection.monitor && !result.saved.stationIds.includes(saved.primary.station.id)) result.saved.stationIds.push(saved.primary.station.id);
             if (group.reconciliation && value.billing && !saved.billing) {
               const billing = await saveItem(value.billing, selection, "dedicated", guard, assertCurrent);
               noteSave(billing); saved.billing = billing;
-              if (!guard.basis.resourceVersions[billing.station.id]) newlyCreatedIds.push(billing.station.id);
+              if (!ids.includes(billing.station.id)) newlyCreatedIds.push(billing.station.id);
             }
             if (group.reconciliation && saved.billing && !authorization) authorization = saved.billing.station;
             for (const extra of value.additional) if (!result.saved.stationIds.includes(extra.existing.id)) result.saved.stationIds.push(extra.existing.id);
@@ -1142,7 +1142,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           }
           const monitorIds = [...result.saved.stationIds], linksToSave = group.channels.flatMap((channel) => monitorIds.map((stationId) => ({ ownStationId: input.ownStationId,
             channelId: channel.channelId, stationId, channelRevision: channel.channelRevision, confirmedAt: now() })));
-          // Newly published IDs are locked too, before the whole link transaction starts.
+          // Newly published IDs not held by the outer lock are locked before the link transaction.
           await stationLock(newlyCreatedIds, async () => {
             assertCurrent();
             const confirmed = await repository.saveLinks(linksToSave, { guard: assertCurrent });

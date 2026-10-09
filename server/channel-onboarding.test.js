@@ -764,6 +764,88 @@ test("genuine batch新资源ID在link保存期间持锁，后续用途编辑让�
   assert.deepEqual(result.groups[0].saved.stationIds, [stationId]); assert.equal(f.store.get(stationId).monitorEnabled, false);
 });
 
+test("U08 genuine HTTP原preview在link失败后不重启重试，不递归资源锁且财务与来源队列可继续", async (t) => {
+  for (const mode of ["account", "dedicated"]) await t.test(mode, async (child) => {
+    const f = await genuineBatchFixture(child); await f.store.archive(f.supplier.id);
+    const input = f.request([[1]]), settings = { lowBalanceUsd: 33, cnyPerUsd: 0.8, noRenewal: true, includeInProfit: false,
+      costAliases: ["retained-new-alias"] };
+    input.selections = [{ selectionId: "account", monitor: true, newStation: mode === "account"
+      ? { type: "newapi", baseUrl: "https://up.test", accessToken: "new-account-pat", ...settings }
+      : { type: "newapi-key", baseUrl: "https://call.test/v1", apiKey: "new-call-key", ...settings },
+      ...(mode === "dedicated" ? { reconciliationAuthorization: { newAuthorization: {
+        type: "newapi", baseUrl: "https://up.test", accessToken: "new-dedicated-pat" } } } : {}) }];
+    if (mode === "account") input.groups[0].reconciliation = null;
+    const http = (operation, body) => handleChannelOnboardingRequest(new Request("http://local/api/channel-onboarding/batch", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }), f.rt, operation);
+    const held = new Set(), lockAttempts = [], originalLock = f.store.withStationLocks.bind(f.store);
+    child.mock.method(f.store, "withStationLocks", (ids, write) => {
+      const requested = [...new Set(ids.filter(Boolean))].sort();
+      lockAttempts.push({ requested, overlaps: requested.filter((id) => held.has(id)) });
+      return originalLock(ids, async () => {
+        requested.forEach((id) => held.add(id));
+        try { return await write(); } finally { requested.forEach((id) => held.delete(id)); }
+      });
+    });
+    const bounded = async (pending) => {
+      let timer;
+      try { return await Promise.race([pending, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`retry/queue exceeded 1000ms: ${JSON.stringify(lockAttempts)}`)), 1000);
+      })]); } finally { clearTimeout(timer); }
+    };
+    const probe = await (await http("probeBatch", input)).json(), confirmation = { ...input, previewId: probe.previewId };
+    f.state.failLinks = true;
+    const partial = await (await http("connectBatch", confirmation)).json();
+    assert.equal(partial.complete, false); assert.equal(partial.groups[0].saved.stationIds.length, 1);
+    const savedId = partial.groups[0].saved.stationIds[0], authorizationId = partial.groups[0].saved.authorizationStationId;
+    const count = f.store.list({ includeUnmonitored: true, includeArchived: true }).length;
+    assert.equal(count, mode === "account" ? 3 : 4); assert.deepEqual(f.state.links, []); assert.equal(f.state.ruleWrites, 0);
+    assert.ok(lockAttempts.some((attempt) => attempt.requested.includes(savedId)), "first-published monitor is held for links");
+    if (mode === "dedicated") {
+      assert.ok(authorizationId); assert.notEqual(authorizationId, savedId);
+      assert.ok(lockAttempts.some((attempt) => attempt.requested.includes(authorizationId)), "first-published dedicated authorization is held for links");
+    }
+    f.state.failLinks = false;
+    const response = await bounded(http("connectBatch", confirmation)); assert.equal(response.status, 200);
+    const completed = await response.json(); assert.equal(completed.complete, true, JSON.stringify(completed));
+    assert.deepEqual(completed.groups[0].saved.stationIds, [savedId]); assert.equal(f.state.links.length, 1);
+    assert.equal(f.store.list({ includeUnmonitored: true, includeArchived: true }).length, count);
+    assert.equal(f.store.get(savedId).monitorEnabled, true);
+    assert.deepEqual(Object.fromEntries(Object.keys(settings).map((key) => [key, f.store.get(savedId)[key]])), settings);
+    if (mode === "dedicated") {
+      assert.equal(completed.groups[0].saved.authorizationStationId, authorizationId);
+      assert.equal(f.store.get(authorizationId).monitorEnabled, false); assert.equal(f.store.get(authorizationId).includeInProfit, false);
+      assert.equal(completed.groups[0].saved.billingEffectiveFromMs, probe.groups[0].preview.billingEffectiveFromMs);
+    }
+    const repeated = await (await bounded(http("connectBatch", confirmation))).json();
+    assert.equal(repeated.complete, true); assert.equal(f.state.ruleWrites, mode === "account" ? 0 : 1);
+    const selected = { selectionId: "account", stationId: savedId, monitor: true,
+      ...(mode === "dedicated" ? { reconciliationAuthorization: { stationId: authorizationId } } : {}) };
+    if (mode === "account") {
+      const initialBill = f.request([[1]]); initialBill.selections = [selected];
+      const initialProbe = await (await http("probeBatch", initialBill)).json();
+      assert.equal((await (await bounded(http("connectBatch", { ...initialBill, previewId: initialProbe.previewId }))).json()).complete, true);
+    }
+    assert.equal(f.state.ruleWrites, 1); assert.equal(f.state.created, 1);
+    await bounded(f.rt.channelOnboarding.sync());
+    const next = f.request([[2]]); next.selections = [selected];
+    const nextProbe = await (await http("probeBatch", next)).json();
+    let appends = 0; const append = f.rt.reconciliation.appendChannels;
+    child.mock.method(f.rt.reconciliation, "appendChannels", async (...args) => { appends += 1; return append(...args); });
+    const appended = await (await bounded(http("connectBatch", { ...next, previewId: nextProbe.previewId }))).json();
+    assert.equal(appended.complete, true, JSON.stringify(appended)); assert.equal(appends, 1);
+    assert.equal(appended.groups[0].saved.scopeVersion, 2); assert.equal(f.state.ruleWrites, 2); assert.equal(f.state.created, 1);
+    assert.deepEqual(f.state.members.map((member) => member.channel_id).sort(), [1, 2]);
+    f.state.now += 24 * 3600000; await bounded(f.rt.channelOnboarding.sync());
+    const later = await (await bounded(http("connectBatch", { ...next, previewId: nextProbe.previewId }))).json();
+    assert.equal(later.complete, true); assert.equal(appends, 1); assert.equal(f.state.ruleWrites, 2);
+    assert.equal(later.groups[0].saved.billingEffectiveFromMs, appended.groups[0].saved.billingEffectiveFromMs);
+    assert.equal(f.store.list({ includeUnmonitored: true, includeArchived: true }).length, count);
+    assert.ok(lockAttempts.every((attempt) => !attempt.overlaps.length), JSON.stringify(lockAttempts));
+    assert.equal(held.size, 0); assert.equal(f.store._stationLocks.size, 0);
+    assert.doesNotMatch(JSON.stringify([probe, partial, completed, later]), /new-account-pat|new-call-key|new-dedicated-pat|onboardingOrigin/);
+  });
+});
+
 test("genuine public pureKey保存后link失败，restart从origin恢复原ID并仅补link", async (t) => {
   const f = await genuineBatchFixture(t), input = f.request([[1]]);
   input.selections = [{ selectionId: "account", monitor: true,

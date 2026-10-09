@@ -727,13 +727,28 @@ test("authorization target changes invalidate preview and keyboard cancellation 
 });
 
 test("account center preserves mixed accounts, original resource IDs, dedicated purpose and independent pure Keys", async (t) => {
-  const { page, center, model, mutations } = await openAccountsPage(t);
+  const model = accountReadFixture(); model.accounts[1].actions[0].href = "/stations?stationId=B-monitor";
+  const { page, center, mutations, probes, writes } = await openAccountsPage(t, { model });
   assert.equal(await center.locator("[data-site-key]").count(), 2); const a = await expandAccount(center, model.accounts[0]), b = await expandAccount(center, model.accounts[1]), sub = await expandAccount(center, model.accounts[2]);
   assert.equal(await a.locator("[data-resource-id]").count(), 3); assert.equal(await b.locator("[data-resource-id='B-monitor']").count(), 1); assert.equal(await sub.locator("[data-resource-id]").count(), 2);
   const dedicated = a.locator("[data-resource-id='A-billing']"); await dedicated.getByText("监控暂停 / 未启用", { exact: true }).waitFor(); await dedicated.getByRole("button", { name: "查看原资源设置 A-billing", exact: true }).waitFor(); assert.equal(await page.locator(".resource-list-card").getByText("A-billing", { exact: true }).count(), 0); await a.getByText(/提醒阈值：\$27.00；折算汇率：0.7 RMB\/USD；成本设置：不纳入；不再续费/).waitFor();
   assert.equal(await a.locator("[data-resource-id='pure-key']").count(), 0); await center.locator("[data-unverified-resource-id='pure-key']").getByText("关联本站渠道：Channel 1 #1", { exact: true }).waitFor(); await center.locator("[data-unverified-resource-id='unknown-legacy']").getByText("账号身份待核验", { exact: true }).waitFor(); assert.equal(await center.locator("[data-resource-id='own']").count(), 0);
   await a.getByRole("button", { name: /Key 9 · #9/ }).click(); await a.getByText("Channel 3 · #3", { exact: true }).waitFor(); await a.getByText("当前范围版本：3 · 用途范围待确认", { exact: true }).waitFor(); await a.getByRole("button", { name: /Key 10 · #10/ }).click(); await a.getByText("历史范围版本：3 · 用途范围待确认", { exact: true }).waitFor(); await a.getByText("有效规则：无", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "查看归档资源", exact: true }).click(); await a.locator("[data-resource-id='A-archived']").waitFor(); await page.getByText("自营", { exact: true }).waitFor(); assert.doesNotMatch(await center.innerText(), /余额合计|总余额|\$30\.00/); assert.equal(await center.getByRole("link").count(), 0); assert.equal(mutations.length, 0);
+  await page.getByRole("button", { name: "查看归档资源", exact: true }).click(); await a.locator("[data-resource-id='A-archived']").waitFor(); await page.getByText("自营", { exact: true }).waitFor(); assert.doesNotMatch(await center.innerText(), /余额合计|总余额|\$30\.00/);
+  const destinations = [
+    { scope: a, label: "更新账号授权", params: { action: "authorization", accountKey: model.accounts[0].accountKey } },
+    { scope: a, label: "核对这把 Key 的全部用途", params: { action: "coverage", ruleId: "A-active" } },
+    { scope: b, label: "查看余额与监控", params: { stationId: "B-monitor" } },
+    { scope: center.locator("[data-unverified-resource-id='pure-key']"), label: "接入这些渠道", params: { action: "connect", ownStationId: "own", channelIds: "1" } },
+    { scope: center.locator("[data-unverified-resource-id='unknown-legacy']"), label: "核验账号身份", params: { action: "verify", stationId: "unknown-legacy" } },
+  ];
+  const allowedHrefs = [];
+  for (const { scope, label, params } of destinations) {
+    const href = await scope.getByRole("link", { name: label, exact: true }).getAttribute("href"), target = new URL(href, baseURL);
+    assert.equal(target.origin, new URL(baseURL).origin); assert.equal(target.pathname, "/stations"); assert.deepEqual(Object.fromEntries(target.searchParams), params); allowedHrefs.push(href);
+  }
+  assert.deepEqual((await center.getByRole("link").evaluateAll((links) => links.map((link) => link.getAttribute("href")))).sort(), allowedHrefs.sort());
+  assert.equal(mutations.length, 0); assert.equal(probes.length, 0); assert.equal(writes.length, 0);
 });
 
 test("account search and attention filters preserve relationships and open only the original complete editor object", async (t) => {
