@@ -5,17 +5,17 @@ import { redact } from "../../../../server/stations.js";
 import { refreshStation } from "../../../../server/refresh.js";
 import { purgeStation } from "./purge.js";
 
-export const PUT = withAuth(async (request, rt, params) => {
+async function updateStation(request, rt, params) {
   const b = (await request.json().catch(() => null)) || {};
+  const options = { expectedAuthVersion: b.expectedAuthVersion, expectedResourceVersion: b.expectedResourceVersion };
   if ("type" in b && !STATION_TYPES.some((t) => t.value === b.type))
     return json({ error: "无效的中转站类型" }, 400);
   let s;
-  if (b.archived === false) {
-    await rt.store.restore(params.id);
-    const { archived, ...patch } = b;
-    s = Object.keys(patch).length ? await rt.store.update(params.id, patch) : rt.store.get(params.id);
-  } else {
-    s = await rt.store.update(params.id, b);
+  try {
+    s = await rt.store.update(params.id, b, options);
+  } catch (error) {
+    if (["AUTHORIZATION_CHANGED", "RESOURCE_CHANGED"].includes(error.code)) return json({ error: error.message, code: error.code }, 400);
+    throw error;
   }
   if (!s) return json({ error: "未找到该中转站" }, 404);
   rt._ownCache?.clear();
@@ -23,7 +23,9 @@ export const PUT = withAuth(async (request, rt, params) => {
   delete rt._ownUsersCache;
   refreshStation(rt, s).catch(() => {});
   return json({ station: redact(rt, s) });
-});
+}
+
+export const PUT = withAuth(updateStation);
 
 export const DELETE = withAuth(async (request, rt, params) => {
   const search = new URL(request.url).searchParams;

@@ -1,10 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow } from "./reconciliation.js";
-import { ReconciliationRepository } from "./reconciliation-repository.js";
+import { ReconciliationRepository, reconciliationOwnerRuleState } from "./reconciliation-repository.js";
 import { reconciliationSnapshotIdentity } from "../lib/reconciliation-snapshot.js";
 import { Store } from "../db/store.js";
 import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconciliation-scope-policy.js";
+import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+import { createChannelOnboardingModule } from "./channel-onboarding.js";
+import { createHash } from "node:crypto";
+import { summarizeReconciliationTotals } from "../lib/reconciliation-view.js";
+
+function trustedLegacyRule(rule, stations = [], upstreamAccountId = 7, ownAccountId = 7) {
+  const upstream = stations.find((station) => station.id === rule.upstream_station_id) || { type: "newapi", baseUrl: "https://upstream.test" };
+  const own = stations.find((station) => station.id === rule.own_station_id) || { id: rule.own_station_id, baseUrl: "https://own.test" };
+  const baseUrl = new URL(own.baseUrl).href.replace(/\/+$/, "");
+  const ownSource = { stationId: own.id, provider: "newapi", baseUrl, accountId: String(ownAccountId),
+    namespaceKey: createHash("sha256").update(JSON.stringify(["newapi", baseUrl, String(ownAccountId)])).digest("hex") };
+  rule.canonical_key = canonicalBillingKey(upstream, { platform: "newapi", accountId: upstreamAccountId }, rule.token_id);
+  rule.source_binding = serializeRuleSourceBinding({ sourceBinding: null, ownSource, costCoverage: rule.cost_coverage || "unknown" });
+}
 
 function observationRepositoryFixture({ segments, rule = { id: "rr", token_name: "stable", fixed_group: "g1", archived_at: null }, hooks = {}, fail = null }) {
   const state = { rule: { ...rule }, segments: structuredClone(segments), commits: 0, rollbacks: 0, releases: 0 };
@@ -330,6 +344,36 @@ test("双命名空间快照批量写入第二条失败时整个事务回滚", as
   assert.deepEqual(calls, ["begin", "rollback", "release"]);
 });
 
+test("R03 Repository核验owner状态并在INSERT前和commit前执行guard，失败原子回滚", async () => {
+  for (const failure of ["owner", "before", "commit"]) {
+    const rule = { id: "rr", upstream_station_id: "up", own_station_id: "own", token_id: 1, token_name: "token", fixed_group: "g", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+    const calls = [];
+    const pending = [];
+    const committed = [];
+    let guardCalls = 0;
+    const query = async (sql, params) => {
+      if (sql.includes("FROM reconciliation_rules")) return [[rule]];
+      if (sql.includes("FROM reconciliation_rule_channels") || sql.includes("FROM reconciliation_rule_segments") || sql.includes("FROM reconciliation_snapshots")) return [[]];
+      if (sql.includes("INSERT INTO reconciliation_snapshots")) { pending.push(params[2]); return [{ affectedRows: 1 }]; }
+      throw new Error(`unexpected query: ${sql}`);
+    };
+    const repository = new ReconciliationRepository({ query, async getConnection() { return { query,
+      async beginTransaction() {}, async commit() { calls.push("commit"); committed.push(...pending); },
+      async rollback() { calls.push("rollback"); pending.length = 0; }, release() {},
+    }; } });
+    const original = await repository.getRule("rr");
+    const expectedOwnerState = reconciliationOwnerRuleState([original]);
+    if (failure === "owner") rule.enabled = 0;
+    const saved = await repository.saveSnapshotsForScope("rr", reconciliationScopeFingerprint(original, []), [{ snapshotKey: "observation", source: { recordType: "observation" } }], {
+      expectedOwnerState, guard: () => ++guardCalls < (failure === "before" ? 1 : 2),
+    });
+    assert.equal(saved, false);
+    assert.deepEqual(calls, ["rollback"]);
+    assert.deepEqual(committed, []);
+    assert.equal(guardCalls, failure === "owner" ? 0 : failure === "before" ? 1 : 2);
+  }
+});
+
 test("observation 单调写入不会覆盖较新的 observation 或确认命名空间", async () => {
   const stored = new Map();
   const rule = { id: "rr", upstream_station_id: "up", own_station_id: "own", token_id: 1, token_name: "token", fixed_group: "g", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
@@ -623,7 +667,7 @@ test("编辑规则不能替换上游账号或 Key，且拒绝发生在元数据�
   assert.equal(queries, 2);
 });
 
-test("编辑渠道或时区保留 Key 展示与分组，且不读取上游 Key 元数据", async (t) => {
+test("旧编辑缺少金融proof时拒绝渠道/时区变化，原Key展示与分组无写入", async (t) => {
   const { createServer } = await import("node:http");
   const paths = [];
   const server = createServer((request, response) => {
@@ -632,7 +676,8 @@ test("编辑渠道或时区保留 Key 展示与分组，且不读取上游 Key �
     paths.push(path);
     const body = path === "/api/channel/"
       ? { success: true, data: { items: Number(url.searchParams.get("p")) <= 1 ? [{ id: 2, name: "渠道二", status: 1 }] : [] } }
-      : { success: false, message: "upstream metadata must not be read" };
+      : path === "/api/user/self" ? { success: true, data: { id: 7 } }
+        : { success: false, message: "upstream metadata must not be read" };
     response.writeHead(body.success ? 200 : 500, { "Content-Type": "application/json" });
     response.end(JSON.stringify(body));
   });
@@ -670,12 +715,15 @@ test("编辑渠道或时区保留 Key 展示与分组，且不读取上游 Key �
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   const stations = [{ id: "upstream", type: "newapi", baseUrl, accessToken: "upstream-pat" }, { id: "own", type: "newapi", isOwn: true, baseUrl, accessToken: "admin" }];
   const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id) } });
-  const updated = await module.updateRule(row.id, { upstreamStationId: "upstream", tokenId: 9, salesChannelIds: [2], timezone: "America/New_York" });
+  await assert.rejects(module.updateRule(row.id, { upstreamStationId: "upstream", tokenId: 9, salesChannelIds: [2], timezone: "America/New_York" }),
+    (error) => error.code === "PREVIEW_REQUIRED");
 
-  assert.deepEqual(paths, ["/api/channel/", "/api/channel/"]);
-  assert.equal(updated.tokenName, "stable-key");
-  assert.equal(updated.fixedGroup, "old-group");
-  assert.equal(updated.timezone, "America/New_York");
+  assert.equal(paths.filter((path) => path === "/api/user/self").length, 2);
+  assert.equal(paths.filter((path) => path === "/api/channel/").length, 2);
+  assert.equal(paths.some((path) => path === "/api/token/" || path === "/api/user/self/groups"), false);
+  assert.equal(row.token_name, "stable-key");
+  assert.equal(row.fixed_group, "old-group");
+  assert.equal(row.timezone, "Asia/Shanghai");
 });
 
 test("自定义对账窗口使用半开区间并拒绝超过 31 天", () => {
@@ -851,6 +899,7 @@ test("短于一秒的分段标记为不可核算，且不调用上游 stat 或�
   };
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   const stations = [{ id: "upstream", type: "newapi", baseUrl, accessToken: "pat" }, { id: "own", type: "newapi", isOwn: true, baseUrl, accessToken: "admin" }];
+  trustedLegacyRule(rule, stations, 1, 1);
   const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id) } });
   const { results } = await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1500, endMs: 1999 }, { force: true });
 
@@ -1022,6 +1071,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
   };
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   const stations = [{ id: "upstream", type: "newapi", baseUrl, accessToken: "pat" }, { id: "own", type: "newapi", isOwn: true, baseUrl, accessToken: "admin" }];
+  trustedLegacyRule(rule, stations);
   const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id), channels: [] } });
   const { results } = await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 }, { force: true });
   const result = results[0];
@@ -1134,6 +1184,7 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
     }
   });
   const ownServer = serve(ownCounts, (url) => {
+    if (url.pathname === "/api/user/self") return { success: true, data: { id: 1 } };
     if (url.pathname === "/api/status") return ownStatusBroken ? { success: false, message: "status unavailable" } : { success: true, data: { quota_per_unit: 100 } };
     if (url.pathname === "/api/log/stat") return { success: true, data: { quota: 250 } };
     if (url.pathname === "/api/channel/") return { success: true, data: { total: 1, items: [{ id: 1, name: "渠道", status: 1 }] } };
@@ -1166,6 +1217,7 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
     { id: "own", type: "newapi", isOwn: true, baseUrl: `http://127.0.0.1:${ownServer.address().port}`, accessToken: "admin" },
   ];
   const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id), channels: [] } });
+  trustedLegacyRule(rule, stations, 7, 1);
   const window = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1120000 };
 
   const { results: [result] } = await module.queryRules(window, { force: true });
@@ -1178,7 +1230,7 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
     "/api/user/self": 1, "/api/status": 1, "/api/user/self/groups": 1, "/api/token/": 1, "/api/log/self/stat": 4,
   }, "上游身份与 /api/status 只在读取元数据时各探测一次，分段只请求自己的 stat");
   assert.deepEqual(statUsers, ["7", "7", "7", "7"], "分段 stat 复用元数据解析出的 PAT 身份");
-  assert.deepEqual(ownCounts, { "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 4 }, "本站 /api/status 每轮只读一次，由各分段共用");
+  assert.deepEqual(ownCounts, { "/api/user/self": 1, "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 4 }, "本站身份和 /api/status 每轮只读一次，由各分段共用");
 
   for (const counts of [upstreamCounts, ownCounts]) for (const path of Object.keys(counts)) delete counts[path];
   ownStatusBroken = true;
@@ -1239,6 +1291,8 @@ test("首次观察到已知倍率会补全当前 legacy 分段，随后切组才
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => server.close());
   const rule = { id: "rr_legacy_ratio", upstream_station_id: "upstream", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: "AWS_Bedrock3", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+  trustedLegacyRule(rule, [{ id: "upstream", type: "newapi", baseUrl: `http://127.0.0.1:${server.address().port}` },
+    { id: "own", baseUrl: `http://127.0.0.1:${server.address().port}` }]);
   const segments = [{ id: "s_legacy", rule_id: rule.id, group_name: "AWS_Bedrock3", group_ratio: null, effective_from_ms: 0, effective_to_ms: null, detected_at_ms: 0, timing_source: "legacy" }];
   const pool = {
     async query(sql) {
@@ -1445,6 +1499,7 @@ test("修正切换时间锁定相邻分段，并保留旧快照作为历史证�
 
 test("查询中修正切换时间后，旧失败任务不会写入或缓存旧分段结果", async () => {
   const rule = { id: "rr_race_scope", upstream_station_id: "missing", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: "g2", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+  trustedLegacyRule(rule);
   const segments = [
     { id: "s1", rule_id: rule.id, group_name: "g1", group_ratio: 2, effective_from_ms: 1000, effective_to_ms: 2000, detected_at_ms: 2000, timing_source: "operator_confirmed" },
     { id: "s2", rule_id: rule.id, group_name: "g2", group_ratio: 3, effective_from_ms: 2000, effective_to_ms: null, detected_at_ms: 2000, timing_source: "detected" },
@@ -1506,6 +1561,7 @@ test("查询中修正切换时间后，旧失败任务不会写入或缓存旧�
 
 test("加入同一 in-flight 查询的调用方在口径变化后也只拿到新口径结果", async () => {
   const rule = { id: "rr_joined_scope", upstream_station_id: "missing", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: "g2", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+  trustedLegacyRule(rule);
   const segments = [
     { id: "s1", rule_id: rule.id, group_name: "g1", group_ratio: 2, effective_from_ms: 1000, effective_to_ms: 2000, detected_at_ms: 2000, timing_source: "operator_confirmed" },
     { id: "s2", rule_id: rule.id, group_name: "g2", group_ratio: 3, effective_from_ms: 2000, effective_to_ms: null, detected_at_ms: 2000, timing_source: "detected" },
@@ -1619,6 +1675,7 @@ function holdPoint() {
 // 用来在查询中途插入切换时间修正。
 function scopeRaceFixture(id, { beforeLookup = null, beforeAlertRead = null, beforeSnapshotCommit = null } = {}) {
   const rule = { id, upstream_station_id: "missing", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: "g2", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+  trustedLegacyRule(rule);
   const segments = [
     { id: "s1", rule_id: id, group_name: "g1", group_ratio: 2, effective_from_ms: 1000, effective_to_ms: 2000, detected_at_ms: 2000, timing_source: "operator_confirmed" },
     { id: "s2", rule_id: id, group_name: "g2", group_ratio: 3, effective_from_ms: 2000, effective_to_ms: null, detected_at_ms: 2000, timing_source: "detected" },
@@ -1735,7 +1792,7 @@ test("快照事务提交后、通知前口径被修正时，不为旧口径记�
 
 // 真实取数路径的夹具：两侧 NewAPI 由 fetch 替身应答，数据库按 SQL 路由。
 // 每个分段上游消费 $1、本站渠道收费 $2.5，利润 $1.5。
-function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, onRepositoryConnection = null, onRepositoryCommit = null }) {
+function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
     id, rule_id: "rr_live", group_name: group, group_ratio: ratio,
@@ -1746,7 +1803,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
   const rule = { id: "rr_live", upstream_station_id: "upstream", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: open.group_name, timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
   const rules = [rule, ...extraRuleIds.map((id, index) => ({ ...rule, id, token_id: duplicateKeys ? 9 : 10 + index, token_name: duplicateKeys ? "stable" : `stable-${id}` }))];
   const allSegments = [...segments, ...extraRuleIds.flatMap((ruleId) => segments.map((segment) => ({ ...segment, id: `${segment.id}-${ruleId}`, rule_id: ruleId })) )];
-  const state = { upstreamQuota: 100, ownQuota: 250, statCalls: [], requests: [], writes: 0, alertQueries: 0, snapshots: new Map(), channelStates: new Map(), channelStateWrites: [], ratioWrites: [] };
+  const state = { upstreamQuota: 100, ownQuota: 250, statCalls: [], requests: [], writes: 0, alertQueries: 0, snapshots: new Map(), channelStates: new Map(), channelStateWrites: [], ratioWrites: [], commits: [] };
   const query = async (sql, params) => {
     if (sql.includes("INSERT INTO reconciliation_snapshots")) {
       if (failSnapshotForRule === params[0]) throw new Error("snapshot insert rejected");
@@ -1758,10 +1815,10 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       });
       return [{ affectedRows: 1 }];
     }
-    if (sql.includes("SELECT source FROM reconciliation_snapshots")) return [[state.snapshots.get(params[1])].filter(Boolean)];
+    if (sql.includes("SELECT source FROM reconciliation_snapshots") && sql.includes("snapshot_key = ?")) return [[state.snapshots.get(params[1])].filter(Boolean)];
     if (sql.includes("FROM reconciliation_snapshots")) {
-      if (failLatestLookup) throw new Error("latest snapshot lookup failed");
-      return [[...state.snapshots.values()]];
+      if (failLatestLookup && sql.includes("snapshot_key LIKE")) throw new Error("latest snapshot lookup failed");
+      return [[...state.snapshots.values()].filter((snapshot) => !params?.[0] || snapshot.rule_id === params[0])];
     }
     if (sql.includes("reconciliation_alert_state")) {
       state.alertQueries += 1;
@@ -1771,9 +1828,15 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     if (sql.includes("FROM reconciliation_rule_segments")) return [allSegments.filter((segment) => !params?.[0] || segment.rule_id === params[0])];
     if (sql.includes("FROM reconciliation_rule_channels")) {
       const ids = Array.isArray(params?.[0]) ? params[0] : [params?.[0] || rule.id];
-      return [ids.map((ruleId) => ({ rule_id: ruleId, channel_id: 1, channel_name: "渠道", channel_status: null }))];
+      return [ids.map((ruleId) => ({ rule_id: ruleId, channel_id: 1, channel_name: "渠道", channel_status: null, status_observed_at_ms: channelObservedAt }))];
     }
-    if (sql.includes("FROM reconciliation_rules")) return [params?.[0] ? rules.filter((item) => item.id === params[0]) : rules];
+    if (sql.includes("FROM reconciliation_rules")) return [rules.filter((item) => (!params?.[0] || item.id === params[0]) && (!sql.includes("archived_at IS NULL") || !item.archived_at))];
+    if (sql.startsWith("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL")) {
+      const archived = rules.find((item) => item.id === params[0] && !item.archived_at);
+      if (!archived) return [{ affectedRows: 0 }];
+      Object.assign(archived, { enabled: 0, active_token_key: null, archived_at: new Date().toISOString() });
+      return [{ affectedRows: 1 }];
+    }
     if (sql.startsWith("UPDATE reconciliation_rules") && sql.includes("active_token_key = ?")) {
       const updated = rules.find((item) => item.id === params[15]);
       if (!updated) return [{ affectedRows: 0 }];
@@ -1781,6 +1844,12 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
         updated.fixed_group, updated.timezone, updated.enabled, updated.active_token_key,
         updated.billing_policy, updated.scope_version, updated.billing_effective_from_ms,
         updated.cost_coverage, updated.provider, updated.canonical_key, updated.source_binding] = params;
+      return [{ affectedRows: 1 }];
+    }
+    if (sql.startsWith("UPDATE reconciliation_rules SET provider = ?")) {
+      const updated = rules.find((item) => item.id === params[3]);
+      if (!updated) return [{ affectedRows: 0 }];
+      [updated.provider, updated.canonical_key, updated.source_binding] = params;
       return [{ affectedRows: 1 }];
     }
     if (sql.startsWith("UPDATE reconciliation_rule_segments SET group_ratio")) {
@@ -1798,7 +1867,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       segments.push({ id: params[0], rule_id: params[1], group_name: params[2], group_ratio: params[3], effective_from_ms: params[6], effective_to_ms: null, detected_at_ms: params[7], timing_source: "detected" });
       return [{ affectedRows: 1 }];
     }
-    if (sql.includes("UPDATE reconciliation_rule_channels")) {
+    if (sql.includes("UPDATE reconciliation_rule_channels") && !sql.includes("active_channel_key = NULL")) {
       state.channelStateWrites.push(params[0]);
       state.channelStates.set(params[5], params[0]);
       return [{ affectedRows: 1 }];
@@ -1809,7 +1878,17 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     query,
     async getConnection() {
       await onRepositoryConnection?.();
-      return { query, async beginTransaction() {}, async commit() { await onRepositoryCommit?.(); }, async rollback() {}, release() {} };
+      const transaction = { snapshots: [], archivedRuleIds: [] };
+      return { async query(sql, params) {
+        const result = await query(sql, params);
+        if (sql.includes("INSERT INTO reconciliation_snapshots")) {
+          const snapshot = { ruleId: params[0], source: JSON.parse(params.at(-1)) };
+          transaction.snapshots.push(snapshot);
+          await onSnapshotInsert?.(snapshot);
+        }
+        if (sql.startsWith("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL")) transaction.archivedRuleIds.push(params[0]);
+        return result;
+      }, async beginTransaction() {}, async commit() { await onRepositoryCommit?.(transaction); state.commits.push(transaction); }, async rollback() {}, release() {} };
     },
   };
   const reply = (status, body) => ({ status, text: async () => JSON.stringify(body) });
@@ -1824,23 +1903,25 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     if (onRequest) await onRequest(request);
     if (url.pathname === "/api/status") return reply(200, { success: true, data: { quota_per_unit: 100, version: "v" } });
     if (url.host === "upstream.test") {
-      if (url.pathname === "/api/user/self") return metadataFailure ? reply(500, { success: false }) : reply(200, { success: true, data: { id: 7 } });
+      if (url.pathname === "/api/user/self") return reply(200, { success: true, data: { id: 7 } });
       if (url.pathname === "/api/user/self/groups") return reply(200, { success: true, data: metadataGroups ? metadataGroups(request) : { g1: { ratio: 1 }, g2: { ratio: 2 } } });
       if (url.pathname === "/api/token/") {
+        if (metadataFailure) return reply(500, { success: false });
         const distinct = [...new Map(rules.map((item) => [item.token_id, item])).values()];
         return reply(200, { success: true, data: { total: distinct.length, items: distinct.map((item) => ({ id: item.token_id, name: item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false })) } });
       }
       if (url.pathname === "/api/log/self/stat") return stat("upstream", url, state.upstreamQuota);
     }
     if (url.host === "own.test") {
+      if (url.pathname === "/api/user/self") return reply(200, { success: true, data: { id: 1 } });
       if (url.pathname === "/api/channel/") return reply(200, { success: true, data: { total: 1, items: ownChannels ? ownChannels(request) : [{ id: 1, name: "渠道", status: 1 }] } });
       if (url.pathname === "/api/log/stat") return stat("own", url, state.ownQuota);
     }
     return reply(404, { success: false });
   });
   const stations = [
-    { id: "upstream", name: "上游", type: "newapi", baseUrl: "https://upstream.test", accessToken: "pat" },
-    { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin" },
+    { id: "upstream", name: "上游", type: "newapi", baseUrl: "https://upstream.test", accessToken: "pat", authVersion: 1 },
+    { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin", authVersion: 1 },
   ];
   const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null, channels: [] } };
   return { rule, state, segments, stations, rt, module: createReconciliationModule(rt) };
@@ -2367,6 +2448,7 @@ test("upstream unavailable retains persisted segment evidence in the response an
     id: "rr_unavailable", upstream_station_id: "missing-upstream", own_station_id: "own", token_id: 9,
     token_name: "stable", fixed_group: "g1", timezone: "Asia/Shanghai", enabled: 1, archived_at: null,
   };
+  trustedLegacyRule(rule);
   const snapshots = [];
   const snapshotRows = [];
   const pool = {
@@ -2570,6 +2652,146 @@ test("known catalogue ratios backfill closed legacy segments without changing bo
   assert.deepEqual(calls.filter((call) => typeof call === "string"), ["begin", "commit", "release"]);
 });
 
+test("R02 legacy首次安全锚定先于观察；换账号不写分组、倍率、渠道或快照", async (t) => {
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }] });
+  const store = new Store(f.rt.pool);
+  store.data.stations = f.stations;
+  f.rt.store = store;
+  const input = { ruleIds: [f.rule.id], preset: "custom", startMs: 1000000, endMs: 1060000 };
+  const observe = ReconciliationRepository.prototype.observeSource;
+  t.mock.method(ReconciliationRepository.prototype, "observeSource", async function (...args) {
+    assert.equal(f.rule.canonical_key, canonicalBillingKey(f.stations[0], { provider: "newapi", accountId: "7" }, 9));
+    assert.equal(JSON.parse(f.rule.source_binding).ownSource.accountId, "1");
+    return observe.apply(this, args);
+  });
+  const first = (await f.module.queryRules(input, { force: true })).results[0];
+  assert.equal(first.calculation.profitUsd, 1.5);
+  assert.equal(first.rule.billingPolicy, "legacy-v3");
+  assert.equal(first.rule.scopeVersion, 1);
+  assert.equal(first.rule.billingEffectiveFrom, null);
+  const before = { segments: structuredClone(f.segments), snapshots: [...f.state.snapshots.values()], ratios: [...f.state.ratioWrites], states: [...f.state.channelStateWrites] };
+  const oldFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(input);
+    if (url.host === "upstream.test" && init?.headers?.Authorization === "Bearer replacement-account") {
+      const data = url.pathname === "/api/user/self" ? { id: 8 }
+        : url.pathname === "/api/token/" ? { total: 1, items: [{ id: 9, name: "stable", status: 1, group: "g2", cross_group_retry: false }] }
+          : url.pathname === "/api/user/self/groups" ? { g2: { ratio: 20 } } : null;
+      if (data) return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
+    }
+    return oldFetch(input, init);
+  });
+  await store.update("upstream", { accessToken: "replacement-account" });
+  const changed = (await f.module.queryRules(input, { force: true })).results[0];
+  assert.equal(changed.health.code, "SOURCE_BINDING_UNCONFIRMED");
+  assert.equal(changed.calculation.profitUsd, null);
+  assert.equal(changed.downstream.knownAmountUsd, 2.5);
+  assert.deepEqual(f.segments, before.segments);
+  assert.deepEqual([...f.state.snapshots.values()], before.snapshots);
+  assert.deepEqual(f.state.ratioWrites, before.ratios);
+  assert.deepEqual(f.state.channelStateWrites, before.states);
+  assert.equal(f.rule.fixed_group, "g1");
+});
+
+test("R02 Repository首锚定拒绝已有渠道观察，持久原身份匹配才保留旧范围锚定", async (t) => {
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }], channelObservedAt: 123 });
+  const repository = new ReconciliationRepository(f.rt.pool);
+  const original = { ...f.rule };
+  trustedLegacyRule(original, f.stations, 7, 1);
+  const identity = { provider: "newapi", canonicalKey: original.canonical_key, ownSource: original.source_binding.ownSource };
+  const before = await repository.getRule(f.rule.id);
+  const options = { expectedScopeFingerprint: reconciliationScopeFingerprint(before, await repository.listSegments(f.rule.id)), allowInitialAnchoring: true };
+  await assert.rejects(repository.anchorRuleIdentity(f.rule.id, identity, options), { code: "LEGACY_IDENTITY_UNVERIFIED" });
+  assert.equal(f.rule.canonical_key, undefined);
+  f.state.snapshots.set("original-identity", { rule_id: f.rule.id, source: JSON.stringify({ scopePolicy: {
+    canonicalKey: identity.canonicalKey, ownSource: { ...identity.ownSource, namespaceKey: "different" },
+  } }) });
+  await assert.rejects(repository.anchorRuleIdentity(f.rule.id, identity, options), { code: "LEGACY_IDENTITY_UNVERIFIED" });
+  f.state.snapshots.get("original-identity").source = JSON.stringify({ scopePolicy: identity });
+  const anchored = await repository.anchorRuleIdentity(f.rule.id, identity, { ...options, allowInitialAnchoring: false });
+  assert.equal(anchored.canonicalKey, identity.canonicalKey);
+  assert.deepEqual(anchored.ownSource, identity.ownSource);
+  assert.equal(anchored.billingPolicy, before.billingPolicy);
+  assert.equal(anchored.scopeVersion, before.scopeVersion);
+  assert.equal(anchored.billingEffectiveFrom, before.billingEffectiveFrom);
+  assert.deepEqual(anchored.channels, before.channels);
+  assert.equal(f.state.writes, 0);
+});
+
+test("R02有旧历史但无原身份时，当前verifiedIdentity不能倒推原规则或落库", async (t) => {
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }] });
+  f.stations[0].verifiedIdentity = { provider: "newapi", baseUrl: "https://upstream.test", accountId: "7" };
+  f.state.snapshots.set("old-observation", { rule_id: f.rule.id, snapshot_key: "old-observation", source: JSON.stringify({
+    recordType: "observation", upstream: { tokenId: 9, tokenName: "stable" }, result: { calculation: { profitUsd: null } },
+  }) });
+  const snapshots = [...f.state.snapshots.values()];
+  const segments = structuredClone(f.segments);
+  const result = (await f.module.queryRules({ preset: "custom", startMs: 1000000, endMs: 1060000 }, { force: true })).results[0];
+  assert.equal(result.health.code, "LEGACY_IDENTITY_UNVERIFIED");
+  assert.match(result.health.detail, /确认新的账号和本站范围/);
+  assert.equal(result.calculation.profitUsd, null);
+  assert.equal(result.upstream.knownAmountUsd, 1);
+  assert.equal(result.downstream.knownAmountUsd, 2.5);
+  assert.equal(f.rule.canonical_key, undefined);
+  assert.deepEqual(f.segments, segments);
+  assert.deepEqual([...f.state.snapshots.values()], snapshots);
+  assert.deepEqual(f.state.ratioWrites, []);
+  assert.deepEqual(f.state.channelStateWrites, []);
+});
+
+test("R02本站同源PAT不延期；A换B并同步仍不确认旧A，旧快照来源保留", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-12T07:00:00Z"));
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }] });
+  const store = new Store(f.rt.pool);
+  store.data.stations = f.stations;
+  f.rt.store = store;
+  let catalogue = null;
+  const onboarding = await createChannelOnboardingModule(f.rt, { repository: {
+    getCatalogue: async () => catalogue, listLinks: async () => [],
+    saveCatalogue: async (value) => { catalogue = structuredClone(value); },
+  } }).load();
+  f.rt.onboardingSource = onboarding;
+  await onboarding.sync();
+  const sourceA = onboarding.getSourceCatalogue().ownSource;
+  const revisionA = onboarding.getSourceCatalogue().channels[0].revision;
+  const effective = Date.parse("2026-10-10T16:00:00Z");
+  Object.assign(f.rule, { canonical_key: canonicalBillingKey(f.stations[0], { provider: "newapi", accountId: "7" }, 9),
+    billing_policy: "next-complete-day", scope_version: 1, billing_effective_from_ms: effective, cost_coverage: "complete",
+    source_binding: serializeRuleSourceBinding({ sourceBinding: { 1: revisionA }, ownSource: sourceA, costCoverage: "complete" }) });
+  const input = { preset: "custom", startMs: effective, endMs: effective + 86400000 };
+  assert.equal((await f.module.queryRules(input, { force: true })).results[0].calculation.profitUsd, 1.5);
+  await store.update("own", { accessToken: "same-source-pat" });
+  await onboarding.sync();
+  assert.equal(onboarding.getSourceCatalogue().ownSource.namespaceKey, sourceA.namespaceKey);
+  const rotated = await f.module.appendChannels(f.rule.id, [1], { sourceBinding: { 1: revisionA }, ownSource: sourceA, costCoverage: "complete" });
+  assert.equal(rotated.scopeVersion, 1);
+  assert.equal(rotated.billingEffectiveFrom, effective);
+  const snapshots = [...f.state.snapshots.values()];
+  const oldFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(input);
+    if (url.host === "own-b.test") {
+      const data = url.pathname === "/api/user/self" ? { id: 2 }
+        : url.pathname === "/api/status" ? { quota_per_unit: 100 }
+          : url.pathname === "/api/channel/" ? { total: 1, items: [{ id: 1, name: "渠道", status: 1 }] }
+            : url.pathname === "/api/log/stat" ? { quota: 500 } : null;
+      return { status: data ? 200 : 404, text: async () => JSON.stringify({ success: !!data, data }) };
+    }
+    return oldFetch(input, init);
+  });
+  await store.update("own", { baseUrl: "https://own-b.test", accessToken: "source-b-pat" });
+  await onboarding.sync();
+  assert.notEqual(onboarding.getSourceCatalogue().ownSource.namespaceKey, sourceA.namespaceKey);
+  const changed = (await f.module.queryRules(input, { force: true })).results[0];
+  assert.equal(changed.health.code, "SOURCE_BINDING_UNCONFIRMED");
+  assert.equal(changed.calculation.profitUsd, null);
+  assert.equal(changed.downstream.knownAmountUsd, 5);
+  assert.equal(changed.rule.scopeVersion, 1);
+  assert.equal(changed.rule.ownSource.namespaceKey, sourceA.namespaceKey);
+  assert.deepEqual([...f.state.snapshots.values()], snapshots);
+  assert.ok(snapshots.every((snapshot) => JSON.parse(snapshot.source).scopePolicy.ownSource.namespaceKey === sourceA.namespaceKey));
+});
+
 function membershipFixture() {
   const state = { rules: [{ id: "rr_members", upstream_station_id: "up", own_station_id: "own", token_id: 9,
     token_name: "stable", fixed_group: "g1", timezone: "Asia/Shanghai", enabled: 1, archived_at: null }],
@@ -2589,13 +2811,13 @@ function membershipFixture() {
     let releaseLock;
     let working;
     return {
-      async beginTransaction() {},
+      async beginTransaction() { working = structuredClone({ ...state, onRuleWrite: undefined }); },
       async query(sql, params = []) {
         if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) {
           const previous = lockTail;
           lockTail = new Promise((resolve) => { releaseLock = resolve; });
           await previous;
-          working = structuredClone(state);
+          working = structuredClone({ ...state, onRuleWrite: undefined });
           return read(sql, params, working);
         }
         if (sql.startsWith("SELECT")) return read(sql, params, working);
@@ -2605,6 +2827,7 @@ function membershipFixture() {
           [rule.upstream_station_id, rule.own_station_id, rule.token_id, rule.token_name, rule.fixed_group, rule.timezone,
             rule.enabled, rule.active_token_key, rule.billing_policy, rule.scope_version, rule.billing_effective_from_ms,
             rule.cost_coverage, rule.provider, rule.canonical_key, rule.source_binding] = params;
+          await state.onRuleWrite?.();
           return [{ affectedRows: 1 }];
         }
         if (sql.startsWith("DELETE FROM reconciliation_rule_channels")) {
@@ -2616,16 +2839,373 @@ function membershipFixture() {
           working.channels.push(...params[0].map(([rule_id, channel_id, channel_name, active_channel_key]) => ({ rule_id, channel_id, channel_name, active_channel_key })));
           return [{ affectedRows: params[0].length }];
         }
-        if (sql.startsWith("INSERT INTO reconciliation_rules")) { state.created += 1; throw new Error("must reuse existing rule"); }
+        if (sql.startsWith("INSERT INTO reconciliation_rules")) {
+          if (!state.allowCreate) { state.created += 1; throw new Error("must reuse existing rule"); }
+          const [id, upstream_station_id, own_station_id, token_id, token_name, fixed_group, timezone, enabled, active_token_key,
+            billing_policy, scope_version, billing_effective_from_ms, cost_coverage, provider, canonical_key, source_binding] = params;
+          working.rules.push({ id, upstream_station_id, own_station_id, token_id, token_name, fixed_group, timezone, enabled,
+            active_token_key, billing_policy, scope_version, billing_effective_from_ms, cost_coverage, provider, canonical_key, source_binding });
+          working.created += 1;
+          await state.onRuleWrite?.();
+          return [{ affectedRows: 1 }];
+        }
+        if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) return [{ affectedRows: 1 }];
         throw new Error(`Unexpected write: ${sql}`);
       },
-      async commit() { state.rules = working.rules; state.channels = working.channels; },
+      async commit() { state.rules = working.rules; state.channels = working.channels; state.created = working.created; },
       async rollback() { state.rollbacks += 1; },
       release() { releaseLock?.(); },
     };
   } };
   return { state, pool, repository: new ReconciliationRepository(pool) };
 }
+
+async function financialFixture(t, { create = false } = {}) {
+  const fixture = membershipFixture();
+  if (create) { fixture.state.rules = []; fixture.state.channels = []; fixture.state.allowCreate = true; }
+  const store = sourceStore();
+  store.data.stations = [{ id: "up", name: "Upstream", type: "newapi", baseUrl: "https://up.test", accessToken: "pat", authVersion: 1 },
+    { id: "own", name: "Own", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin", authVersion: 1 }];
+  const remote = { accountId: 42, ownAccountId: 1, tokenId: 9, channels: [1, 2, 3, 4, 5], requests: [] };
+  t.mock.method(globalThis, "fetch", async (input, init = {}) => {
+    const url = new URL(input);
+    remote.requests.push({ host: url.host, path: url.pathname, authorization: init.headers?.Authorization });
+    const data = url.pathname === "/api/user/self" ? { id: url.host === "own.test" ? remote.ownAccountId : remote.accountId, quota: 100, used_quota: 1 }
+      : url.pathname === "/api/status" ? { quota_per_unit: 100 }
+        : url.pathname === "/api/user/self/groups" ? { g1: { ratio: 1 } }
+          : url.pathname === "/api/token/" ? { total: 1, items: [{ id: remote.tokenId, name: "stable", status: 1, group: "g1", cross_group_retry: false }] }
+            : url.pathname === "/api/channel/" ? { total: remote.channels.length, items: remote.channels.map((id) => ({ id, name: `Channel ${id}`, type: 1, status: 1, base_url: "https://up.test", group: "g1" })) }
+              : { quota: 100 };
+    return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
+  });
+  const persisted = { catalogue: null, links: [] };
+  const repository = { getCatalogue: async () => persisted.catalogue, listLinks: async () => persisted.links,
+    saveCatalogue: async (value) => { persisted.catalogue = structuredClone(value); },
+    saveLinks: async (values) => { persisted.links.push(...structuredClone(values)); return structuredClone(values); } };
+  const rt = { store, pool: fixture.pool };
+  rt.reconciliation = createReconciliationModule(rt);
+  rt.onboardingSource = rt.channelOnboarding = createChannelOnboardingModule(rt, { repository, refresh: async () => {} });
+  await rt.onboardingSource.sync();
+  return { ...fixture, rt, module: rt.reconciliation, store, remote, persisted,
+    input: { upstreamStationId: "up", tokenId: 9, salesChannelIds: [2, 3, 4, 5], timezone: "Asia/Shanghai",
+      coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] } } };
+}
+
+function financialBatchInput(f, channelIds = f.input.salesChannelIds, selection = {}) {
+  const catalogue = f.rt.onboardingSource.getSourceCatalogue();
+  return { requestId: "11111111-1111-4111-8111-111111111111", ownStationId: "own",
+    selections: [{ selectionId: "s", stationId: "up", monitor: true, ...selection }],
+    groups: [{ groupId: "g", selectionId: "s", channels: channelIds.map((channelId) => ({ channelId,
+      channelRevision: catalogue.channels.find((channel) => channel.id === channelId).revision })),
+    reconciliation: { tokenId: f.remote.tokenId, timezone: "Asia/Shanghai", coverageDeclaration: f.input.coverageDeclaration } }] };
+}
+
+async function financialProof(f, channelIds, selection) {
+  const input = financialBatchInput(f, channelIds, selection), probe = await f.rt.onboardingSource.probeBatch(input);
+  assert.equal(probe.groups[0].status, "ready", JSON.stringify(probe.groups[0]));
+  return { input, probe, guard: f.rt.onboardingSource.getPreviewGuard(probe.previewId, "g") };
+}
+
+async function financialRuleRoutes() {
+  const { registerHooks } = await import("node:module");
+  const hooks = registerHooks({ load(url, context, next) {
+    if (url.endsWith("/lib/api.js")) return { format: "module", shortCircuit: true,
+      source: "export const withAuth = handler => handler; export const json = (value, status=200) => Response.json(value, {status});" };
+    return next(url, context);
+  } });
+  try {
+    const { POST } = await import("../app/api/reconciliation/rules/route.js");
+    const { PUT } = await import("../app/api/reconciliation/rules/[id]/route.js");
+    return { POST, PUT };
+  } finally { hooks.deregister(); }
+}
+
+test("U01 dry-read使用真实Key与来源并集，无写入且不把采样时间纳入keyVersion", async (t) => {
+  const f = await financialFixture(t);
+  const before = structuredClone(f.state.rules);
+  const first = await f.module.previewKeyScope(f.input);
+  assert.deepEqual(first.basis.existingChannelIds, [1]);
+  assert.deepEqual(first.basis.proposedChannelIds, [1, 2, 3, 4, 5]);
+  assert.deepEqual(Object.keys(first.basis.channelRevisions), ["1", "2", "3", "4", "5"]);
+  assert.equal(first.basis.billingEffectiveFromMs, null);
+  assert.equal(first.preview.scopeChanged, true);
+  assert.equal(first.preview.costCoverage, "complete");
+  assert.equal(first.preview.billingEffectiveFromMs, nextBillingEffectiveFrom("Asia/Shanghai"));
+  const second = await f.module.previewKeyScope(f.input);
+  assert.equal(first.basis.keyVersion, second.basis.keyVersion);
+  assert.deepEqual(f.state.rules, before);
+  const metadata = await f.module.getUpstreamKeys("up", { force: true });
+  await assert.rejects(f.module.previewKeyScope(f.input, { authorization: { station: f.store.get("up"),
+    metadata: { ...metadata, platform: "newapi", accountId: 42, capability: { state: "unverified" } } } }),
+  (error) => error.code === "BILLING_CAPABILITY_UNVERIFIED");
+});
+
+test("U01公共旧POST/PUT拒绝body伪造guard/options，真实runtime拒绝复制proof引用", async (t) => {
+  const f = await financialFixture(t, { create: true });
+  const { POST, PUT } = await financialRuleRoutes();
+  const body = { ...f.input, previewGuard: { basis: {} }, options: { previewGuard: { basis: {} }, authorization: { station: f.store.get("up") } } };
+  const request = () => new Request("https://app.test/api/reconciliation/rules", { method: "POST", body: JSON.stringify(body) });
+  let response = await POST(request(), f.rt);
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, "PREVIEW_REQUIRED");
+  assert.equal(f.state.created, 0);
+  f.state.rules.push({ id: "rr_members", upstream_station_id: "up", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: "g1", timezone: "Asia/Shanghai", enabled: 1 });
+  f.state.channels.push({ rule_id: "rr_members", channel_id: 1, channel_name: "one" });
+  response = await PUT(request(), f.rt, { id: "rr_members" });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, "PREVIEW_REQUIRED");
+  const proof = await f.module.previewKeyScope(f.input);
+  await assert.rejects(f.module.createRule(f.input, { previewGuard: { basis: proof.basis, preview: proof.preview, postSaveResourceVersions: {} } }),
+    (error) => error.code === "PREVIEW_REQUIRED");
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1]);
+  assert.equal(f.state.rules[0].scope_version, undefined);
+});
+
+test("U01财务Repository guard在SQL前和commit前执行，后者失败无成员/日期部分提交", async () => {
+  const f = membershipFixture();
+  let calls = 0;
+  await assert.rejects(f.repository.appendChannels("rr_members", [{ channelId: 2, name: "two" }], { costCoverage: "complete" }, {
+    guard(existing, channels, policy) {
+      calls += 1;
+      assert.equal(existing.id, "rr_members");
+      assert.deepEqual(channels.map((channel) => channel.channelId), [1]);
+      assert.deepEqual(policy.channels.map((channel) => channel.channelId), [1, 2]);
+      if (calls === 2) throw Object.assign(new Error("proof changed before commit"), { code: "PREVIEW_BASIS_CHANGED" });
+    },
+  }), (error) => error.code === "PREVIEW_BASIS_CHANGED");
+  assert.equal(calls, 2);
+  assert.equal(f.state.rollbacks, 1);
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1]);
+  assert.equal(f.state.rules[0].scope_version, undefined);
+});
+
+test("U01行锁写入期间跨午夜在commit guard重算完整日，拒绝旧日期且回滚", async (t) => {
+  let now = Date.parse("2026-10-09T15:59:59Z");
+  t.mock.method(Date, "now", () => now);
+  const f = membershipFixture(), expected = nextBillingEffectiveFrom("Asia/Shanghai", now);
+  f.state.onRuleWrite = () => { now += 2000; };
+  let calls = 0;
+  await assert.rejects(f.repository.appendChannels("rr_members", [{ channelId: 2, name: "two" }], { costCoverage: "complete" }, {
+    guard(_existing, _channels, policy) {
+      calls += 1;
+      if (policy.billingEffectiveFrom !== expected) throw Object.assign(new Error("date boundary changed"), { code: "EFFECTIVE_PREVIEW_CHANGED" });
+    },
+  }), (error) => error.code === "EFFECTIVE_PREVIEW_CHANGED");
+  assert.equal(calls, 2);
+  assert.equal(f.state.rules[0].billing_effective_from_ms, undefined);
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1]);
+});
+
+test("U01真public probe授权整组五渠道一次scope；复制引用失败，旧POST/PUT明确消费proof", async (t) => {
+  const f = await financialFixture(t, { create: true });
+  const proof = await financialProof(f, [1, 2, 3, 4, 5]);
+  const body = { ...f.input, salesChannelIds: [1, 2, 3, 4, 5], previewId: proof.probe.previewId, groupId: "g" };
+  await assert.rejects(f.module.createRule(body, { previewGuard: { ...proof.guard } }), (error) => error.code === "PREVIEW_REQUIRED");
+  const { POST, PUT } = await financialRuleRoutes();
+  const response = await POST(new Request("https://app.test/rules", { method: "POST", body: JSON.stringify(body) }), f.rt);
+  assert.equal(response.status, 201, JSON.stringify(await response.clone().json()));
+  const { rule } = await response.json();
+  assert.deepEqual(rule.channels.map((channel) => channel.channelId), [1, 2, 3, 4, 5]);
+  assert.equal(rule.scopeVersion, 1);
+  assert.equal(f.state.created, 1);
+  const second = await financialProof(f, [1, 2, 3, 4, 5]);
+  const updated = await PUT(new Request("https://app.test/rules", { method: "PUT", body: JSON.stringify({ ...body, previewId: second.probe.previewId }) }), f.rt, { id: rule.id });
+  assert.equal(updated.status, 200, JSON.stringify(await updated.clone().json()));
+  assert.equal((await updated.json()).rule.billingEffectiveFrom, rule.billingEffectiveFrom);
+});
+
+test("U01真正public batch确认一次保存五渠道金融组，消费成功资源证明并恢复相同重试", async (t) => {
+  const f = await financialFixture(t, { create: true }), proof = await financialProof(f, [1, 2, 3, 4, 5]);
+  const result = await f.rt.onboardingSource.connectBatch({ ...proof.input, previewId: proof.probe.previewId });
+  assert.equal(result.complete, true, JSON.stringify(result));
+  assert.equal(result.groups.length, 1);
+  assert.equal(result.groups[0].reconciliation.status, "configured");
+  assert.equal(result.groups[0].saved.scopeVersion, 1);
+  assert.equal(f.state.created, 1);
+  assert.equal(f.persisted.links.length, 5);
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1, 2, 3, 4, 5]);
+  assert.deepEqual(Object.keys(proof.guard.postSaveResourceVersions), ["up"]);
+  assert.equal(f.store.get("up").verifiedIdentity.accountId, "42");
+  const recovered = await f.rt.onboardingSource.connectBatch({ ...proof.input, previewId: proof.probe.previewId });
+  assert.equal(recovered.complete, true, JSON.stringify(recovered));
+  assert.equal(f.state.created, 1);
+  assert.equal(f.state.rules[0].scope_version, 1);
+  assert.equal(f.persisted.links.length, 5);
+});
+
+test("U01真正public batch跨午夜拒绝发生在resource/link/rule任何写入前", async (t) => {
+  let now = Date.parse("2026-10-09T15:59:59Z");
+  t.mock.method(Date, "now", () => now);
+  const f = await financialFixture(t, { create: true }), proof = await financialProof(f, [1, 2, 3, 4, 5]);
+  const before = structuredClone(f.store.data.stations);
+  now += 2000;
+  const result = await f.rt.onboardingSource.connectBatch({ ...proof.input, previewId: proof.probe.previewId });
+  assert.equal(result.complete, false);
+  assert.equal(result.groups[0].code, "EFFECTIVE_PREVIEW_CHANGED", JSON.stringify(result));
+  assert.ok(result.groups[0].remainingActions.includes("repreview"));
+  assert.equal(result.groups[0].nextPreview.billingEffectiveFromMs, Date.parse("2026-10-10T16:00:00Z"));
+  assert.deepEqual(f.store.data.stations, before);
+  assert.equal(f.persisted.links.length, 0);
+  assert.equal(f.state.created, 0);
+});
+
+test("U01真正public batch并发旧预览拒绝，重新预览完整并集保留另一成功追加", async (t) => {
+  const f = await financialFixture(t), a = await financialProof(f, [2]), b = await financialProof(f, [3]);
+  const [first, stale] = await Promise.all([
+    f.rt.onboardingSource.connectBatch({ ...a.input, previewId: a.probe.previewId }),
+    f.rt.onboardingSource.connectBatch({ ...b.input, previewId: b.probe.previewId }),
+  ]);
+  assert.equal(first.complete, true, JSON.stringify(first));
+  assert.equal(stale.complete, false);
+  assert.equal(stale.groups[0].code, "PREVIEW_BASIS_CHANGED", JSON.stringify(stale));
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1, 2]);
+  assert.deepEqual(f.persisted.links.map((link) => link.channelId), [2]);
+  const fresh = await financialProof(f, [3]);
+  assert.deepEqual(fresh.probe.groups[0].basis.proposedChannelIds, [1, 2, 3]);
+  const second = await f.rt.onboardingSource.connectBatch({ ...fresh.input, previewId: fresh.probe.previewId });
+  assert.equal(second.complete, true, JSON.stringify(second));
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1, 2, 3]);
+  assert.equal(f.state.rules[0].scope_version, 3);
+});
+
+test("U01public proof下两个旧资源同actual账号/Key复用原规则及原billing授权", async (t) => {
+  const f = await financialFixture(t);
+  f.store.data.stations.push({ ...f.store.get("up"), id: "duplicate", accessToken: "another-same-account-pat" });
+  const proof = await financialProof(f, [2], { stationId: "duplicate" });
+  const rule = await f.module.createRule({ ...f.input, upstreamStationId: "duplicate", salesChannelIds: [2] }, { previewGuard: proof.guard });
+  assert.equal(rule.id, "rr_members");
+  assert.equal(rule.upstreamStationId, "up");
+  assert.deepEqual(rule.channels.map((channel) => channel.channelId), [1, 2]);
+  assert.equal(rule.canonicalKey, canonicalBillingKey(f.store.get("up"), { platform: "newapi", accountId: 42 }, 9));
+  assert.equal(f.state.created, 0);
+});
+
+test("U01真public preview跨午夜在金融提交前拒绝，已完成无proof重试保留日期", async (t) => {
+  let now = Date.parse("2026-10-09T15:59:59Z");
+  t.mock.method(Date, "now", () => now);
+  const f = await financialFixture(t), proof = await financialProof(f);
+  now += 2000;
+  await assert.rejects(f.module.appendChannels("rr_members", f.input.salesChannelIds, { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: proof.guard }),
+    (error) => error.code === "EFFECTIVE_PREVIEW_CHANGED" && error.nextPreview.billingEffectiveFromMs === Date.parse("2026-10-10T16:00:00Z"));
+  assert.equal(f.state.rules[0].scope_version, undefined);
+  const next = await financialProof(f);
+  const saved = await f.module.appendChannels("rr_members", f.input.salesChannelIds, { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: next.guard });
+  assert.equal(saved.scopeVersion, 2);
+  now += 86400000;
+  await f.rt.onboardingSource.sync();
+  const retry = await f.module.appendChannels("rr_members", f.input.salesChannelIds, { coverageDeclaration: f.input.coverageDeclaration });
+  assert.equal(retry.scopeVersion, saved.scopeVersion);
+  assert.equal(retry.billingEffectiveFrom, saved.billingEffectiveFrom);
+});
+
+test("U01public preview之后规则停用不消费旧proof；启停仍保留原policy/day", async (t) => {
+  const f = await financialFixture(t), proof = await financialProof(f);
+  await f.module.updateRule("rr_members", { upstreamStationId: "up", tokenId: 9, salesChannelIds: [1], timezone: "Asia/Shanghai", enabled: false });
+  await assert.rejects(f.module.appendChannels("rr_members", [2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: proof.guard }),
+    (error) => error.code === "PREVIEW_BASIS_CHANGED");
+  await assert.rejects(f.module.previewKeyScope(f.input), (error) => error.code === "RULE_DISABLED");
+  assert.equal(f.state.rules[0].scope_version, 1);
+  assert.equal(f.state.rules[0].billing_effective_from_ms, null);
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1]);
+});
+
+test("U01并发append旧basis拒绝且无部分提交，fresh public preview保留两次追加", async (t) => {
+  const f = await financialFixture(t);
+  const a = await financialProof(f, [2]), b = await financialProof(f, [3]);
+  const results = await Promise.allSettled([
+    f.module.appendChannels("rr_members", [2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: a.guard }),
+    f.module.appendChannels("rr_members", [3], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: b.guard }),
+  ]);
+  assert.equal(results[0].status, "fulfilled");
+  assert.equal(results[1].status, "rejected");
+  assert.equal(results[1].reason.code, "PREVIEW_BASIS_CHANGED");
+  const first = results[0].value;
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1, 2]);
+  assert.equal(f.state.rules[0].scope_version, first.scopeVersion);
+  const next = await financialProof(f, [3]);
+  const merged = await f.module.appendChannels("rr_members", [3], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: next.guard });
+  assert.deepEqual(merged.channels.map((channel) => channel.channelId), [1, 2, 3]);
+  assert.equal(merged.scopeVersion, first.scopeVersion + 1);
+});
+
+test("U01public guard核验额外监控/独立billing auth；同actual账号轮换后新预览不延期", async (t) => {
+  const f = await financialFixture(t);
+  for (const id of ["extra", "billing"]) f.store.data.stations.push({ ...f.store.get("up"), id, accessToken: `${id}-pat` });
+  const selection = { additionalMonitorStationIds: ["extra"], reconciliationAuthorization: { stationId: "billing" } };
+  const original = await financialProof(f, [1, 2], selection);
+  const saved = await f.module.appendChannels("rr_members", [2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: original.guard });
+  const monitorProof = await financialProof(f, [1, 2], selection);
+  await f.store.update("extra", { monitorEnabled: false });
+  await assert.rejects(f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: monitorProof.guard }),
+    (error) => error.code === "PREVIEW_BASIS_CHANGED");
+  await f.store.update("extra", { monitorEnabled: true });
+  const authProof = await financialProof(f, [1, 2], selection);
+  await f.store.update("billing", { accessToken: "same-account-rotated-pat" }, { verifiedIdentity: { provider: "newapi", baseUrl: "https://up.test", accountId: "42" } });
+  await assert.rejects(f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: authProof.guard }),
+    (error) => error.code === "PREVIEW_BASIS_CHANGED");
+  const fresh = await financialProof(f, [1, 2], selection);
+  assert.equal(fresh.probe.groups[0].preview.scopeChanged, false);
+  const unchanged = await f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: fresh.guard });
+  assert.equal(unchanged.billingEffectiveFrom, saved.billingEffectiveFrom);
+  assert.equal(unchanged.scopeVersion, saved.scopeVersion);
+});
+
+test("U01actual账号/ownnamespace改变要求新完整日，旧history不被提前锚定", async (t) => {
+  let now = Date.parse("2026-10-09T07:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const f = await financialFixture(t), original = await financialProof(f, [1, 2]);
+  const anchors = t.mock.method(ReconciliationRepository.prototype, "anchorRuleIdentity");
+  const observations = t.mock.method(ReconciliationRepository.prototype, "observeSource");
+  assert.equal(f.state.rules[0].canonical_key, undefined);
+  const first = await f.module.appendChannels("rr_members", [2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: original.guard });
+  now += 86400000; await f.rt.onboardingSource.sync();
+  const stale = await financialProof(f, [1, 2]);
+  f.remote.accountId = 43;
+  await assert.rejects(f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: stale.guard }),
+    (error) => error.code === "PREVIEW_BASIS_CHANGED");
+  const account = await financialProof(f, [1, 2]);
+  const changed = await f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: account.guard });
+  assert.notEqual(changed.canonicalKey, first.canonicalKey);
+  assert.equal(changed.scopeVersion, first.scopeVersion + 1);
+  assert.equal(changed.billingEffectiveFrom, nextBillingEffectiveFrom("Asia/Shanghai", now));
+  now += 86400000;
+  f.remote.ownAccountId = 2; await f.rt.onboardingSource.sync();
+  const namespace = await financialProof(f, [1, 2]);
+  const moved = await f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: namespace.guard });
+  assert.equal(moved.scopeVersion, changed.scopeVersion + 1);
+  assert.notEqual(moved.ownSource.namespaceKey, changed.ownSource.namespaceKey);
+  assert.equal(moved.billingEffectiveFrom, nextBillingEffectiveFrom("Asia/Shanghai", now));
+  assert.equal(anchors.mock.callCount(), 0);
+  assert.equal(observations.mock.callCount(), 0, "scope确认不得先改旧来源/倍率历史");
+});
+
+test("U01真实Sub2API public proof允许自动JWT续期，显式密码修改废弃proof且同账号不延期", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-09T07:00:00Z"));
+  const f = await financialFixture(t), station = f.store.get("up"), previousFetch = globalThis.fetch;
+  Object.assign(station, { type: "sub2api-password", email: "fixture@example.test", password: "old-password", s2Tokens: { accessToken: "before-jwt" } });
+  t.mock.method(globalThis, "fetch", async (input, init = {}) => {
+    const url = new URL(input);
+    if (url.host !== "up.test") return previousFetch(input, init);
+    const reply = (status, data) => ({ status, text: async () => JSON.stringify({ code: status === 200 ? 0 : 1, data }) });
+    if (url.pathname === "/api/v1/auth/login") return reply(200, { access_token: JSON.parse(init.body).password, refresh_token: "refresh", expires_in: 3600 });
+    if (url.pathname === "/api/v1/auth/me") return reply(200, { id: 42 });
+    if (url.pathname === "/api/v1/keys") return reply(200, { total: 1, items: [{ id: 9, user_id: 42, name: "stable", status: "active", group_id: 7 }] });
+    if (url.pathname.startsWith("/api/v1/keys/")) return reply(404, {});
+    return reply(200, { total_actual_cost: url.searchParams.get("api_key_id") === "9" && url.searchParams.get("start_date") === "2026-10-08" ? 1 : 0 });
+  });
+  const proof = await financialProof(f, [1, 2]);
+  station.s2Tokens = { accessToken: "automatically-renewed-jwt", expiresAt: Date.now() + 1000000 };
+  const first = await f.module.appendChannels("rr_members", [2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: proof.guard });
+  assert.equal(station.s2Tokens.accessToken, "automatically-renewed-jwt");
+  const beforePassword = await financialProof(f, [1, 2]);
+  await f.store.update("up", { password: "new-password" }, { verifiedIdentity: { provider: "sub2api", baseUrl: "https://up.test", accountId: "42" } });
+  await assert.rejects(f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: beforePassword.guard }),
+    (error) => error.code === "PREVIEW_BASIS_CHANGED");
+  const next = await financialProof(f, [1, 2]);
+  const retried = await f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: next.guard });
+  assert.equal(retried.billingEffectiveFrom, first.billingEffectiveFrom);
+  assert.equal(retried.scopeVersion, first.scopeVersion);
+});
 
 test("Repository 并发追加在行锁内读取最新并集，次日幂等重试不延期", async (t) => {
   let now = Date.parse("2026-10-09T07:00:00Z");
@@ -2650,24 +3230,24 @@ test("Repository 并发追加在行锁内读取最新并集，次日幂等重试
   assert.deepEqual((await repository.getRule("rr_members")).channels.map((channel) => channel.channelId).sort(), [1, 2, 3]);
 });
 
-test("旧 PUT 成员编辑也启用完整日范围并清理旧当前缓存", async (t) => {
+test("旧PUT成员编辑没有金融proof不推进范围或清理当前缓存", async (t) => {
   const now = Date.parse("2026-10-09T07:00:00Z");
   t.mock.method(Date, "now", () => now);
   const { pool, state } = membershipFixture();
   const stations = [{ id: "up", type: "newapi", baseUrl: "https://up.test", accessToken: "pat" },
     { id: "own", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin" }];
-  t.mock.method(globalThis, "fetch", async () => ({ status: 200, text: async () => JSON.stringify({ success: true, data: { total: 1, items: [{ id: 2, name: "二", status: 1 }] } }) }));
+  t.mock.method(globalThis, "fetch", async (input) => ({ status: 200, text: async () => JSON.stringify({ success: true,
+    data: new URL(input).pathname === "/api/user/self" ? { id: 42 } : { total: 1, items: [{ id: 2, name: "二", status: 1 }] } }) }));
   const rt = { pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id) },
     _reconciliationResultCache: new Map([["rr_members:today:old", { value: { calculation: { profitUsd: 9 } } }]]) };
-  const changed = await createReconciliationModule(rt).updateRule("rr_members", { upstreamStationId: "up", tokenId: 9, salesChannelIds: [2], timezone: "Asia/Shanghai" });
-  assert.equal(changed.billingPolicy, "next-complete-day");
-  assert.equal(changed.billingEffectiveFrom, nextBillingEffectiveFrom("Asia/Shanghai", now));
-  assert.equal(changed.costCoverage, "unknown");
-  assert.equal(rt._reconciliationResultCache.size, 0);
-  assert.equal(state.rules[0].scope_version, 2);
+  await assert.rejects(createReconciliationModule(rt).updateRule("rr_members", { upstreamStationId: "up", tokenId: 9, salesChannelIds: [2], timezone: "Asia/Shanghai" }),
+    (error) => error.code === "PREVIEW_REQUIRED");
+  assert.equal(rt._reconciliationResultCache.size, 1);
+  assert.equal(state.rules[0].scope_version, undefined);
+  assert.deepEqual(state.channels.map((channel) => channel.channel_id), [1]);
 });
 
-test("两个旧资源同账号与实际 Key 创建时复用规则，不创建第二份成本", async (t) => {
+test("两个旧资源同账号新金融创建不能绕过proof或产生第二份成本", async (t) => {
   const { pool, state } = membershipFixture();
   const stations = [{ id: "up", type: "newapi", baseUrl: "https://up.test", accessToken: "pat-1" },
     { id: "duplicate", type: "newapi", baseUrl: "https://up.test/", accessToken: "pat-2" },
@@ -2682,11 +3262,9 @@ test("两个旧资源同账号与实际 Key 创建时复用规则，不创建第
     return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
   });
   const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id) } });
-  const result = await module.createRule({ upstreamStationId: "duplicate", tokenId: 9, salesChannelIds: [2], timezone: "Asia/Shanghai", costCoverage: "complete" });
-  assert.equal(result.id, "rr_members");
-  assert.equal(result.upstreamStationId, "up");
-  assert.deepEqual(result.channels.map((channel) => channel.channelId).sort(), [1, 2]);
-  assert.equal(result.canonicalKey, canonicalBillingKey(stations[0], { platform: "newapi", accountId: 42 }, 9));
+  await assert.rejects(module.createRule({ upstreamStationId: "duplicate", tokenId: 9, salesChannelIds: [2], timezone: "Asia/Shanghai", costCoverage: "complete" }),
+    (error) => error.code === "PREVIEW_REQUIRED");
+  assert.deepEqual(state.channels.map((channel) => channel.channel_id), [1]);
   assert.equal(state.created, 0);
 });
 
@@ -2758,10 +3336,12 @@ test("旧重叠规则保留历史与收入，当前同 Key 成本只列一次且
   const { rule, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_overlap"], duplicateKeys: true });
   const { results } = await module.queryRules({ ruleIds: [rule.id, "rr_overlap"], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 }, { force: true });
   assert.ok(results.every((result) => result.calculation.profitUsd === null && result.health.issues.some((issue) => issue.code === "CANONICAL_KEY_CONFLICT")));
-  assert.equal(results.reduce((sum, result) => sum + (result.upstream.knownAmountUsd ?? 0), 0), 1);
+  assert.equal(results.reduce((sum, result) => sum + (result.upstream.countedAmountUsd ?? 0), 0), 1);
+  assert.equal(results.reduce((sum, result) => sum + (result.upstream.knownAmountUsd ?? 0), 0), 2, "每行保留真实成本参考");
   assert.equal(results.reduce((sum, result) => sum + result.downstream.knownAmountUsd, 0), 5);
   assert.equal(results[1].upstream.duplicateOfRuleId, rule.id);
-  assert.equal(results[1].segments[0].upstream.duplicateCostReferenceUsd, 1);
+  assert.equal(results[1].segments[0].upstream.knownAmountUsd, 1);
+  assert.equal(summarizeReconciliationTotals(results).cost, 1);
 });
 
 test("同 Key 规则停用再恢复后，普通查询不能复用另一规则的旧成本缓存", async (t) => {
@@ -2778,7 +3358,7 @@ test("同 Key 规则停用再恢复后，普通查询不能复用另一规则的
   await module.updateRule(rule.id, { ...edit, enabled: true });
   const after = (await module.queryRules(input, { force: false })).results;
   assert.equal(after.length, 2);
-  assert.equal(after.reduce((sum, result) => sum + (result.upstream.knownAmountUsd ?? 0), 0), 1);
+  assert.equal(after.reduce((sum, result) => sum + (result.upstream.countedAmountUsd ?? 0), 0), 1);
   assert.ok(after.every((result) => result.calculation.profitUsd == null));
   assert.equal(after.find((result) => result.rule.id === "rr_overlap").upstream.duplicateOfRuleId, rule.id);
 });
@@ -2800,14 +3380,14 @@ test("恢复同 Key 成本 owner 时，另一规则旧在途结果不能提交�
   await module.updateRule(rule.id, { ...edit, enabled: true });
   wait.release();
   const result = (await pending).results[0];
-  assert.equal(result.upstream.knownAmountUsd, null);
+  assert.equal(result.upstream.countedAmountUsd, null);
   assert.equal(result.upstream.duplicateOfRuleId, rule.id);
   assert.equal(state.writes, 1, "旧 owner 的成本观察不得落库");
   for (const row of state.snapshots.values()) {
-    assert.equal(JSON.parse(row.source).result.upstream.knownAmountUsd, null);
+    assert.equal(JSON.parse(row.source).result.upstream.countedAmountUsd, null);
   }
   for (const cached of rt._reconciliationResultCache.values()) {
-    assert.equal(cached.value.upstream.knownAmountUsd, null);
+    assert.equal(cached.value.upstream.countedAmountUsd, null);
   }
 });
 
@@ -2833,16 +3413,19 @@ async function separateAccountCostFixture(t, options = {}) {
   return { ...fixture, store };
 }
 
-test("两个旧规则从不同账号改成同账号后，普通查询按新实际 Key 成本归属取数", async (t) => {
-  const { module, store } = await separateAccountCostFixture(t);
+test("两个规则从不同账号改成同账号后，原身份范围保留参考且不自动合并", async (t) => {
+  const { module, store, state } = await separateAccountCostFixture(t);
   const input = { preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 };
   const before = (await module.queryRules(input, { force: false })).results;
   assert.equal(before.reduce((sum, result) => sum + (result.upstream.knownAmountUsd ?? 0), 0), 2);
+  const saved = structuredClone([...state.snapshots.values()].filter((snapshot) => snapshot.rule_id === "rr_live"));
   await store.update("upstream", { accessToken: "account-seven" });
   const after = (await module.queryRules(input, { force: false })).results;
   assert.equal(after.reduce((sum, result) => sum + (result.upstream.knownAmountUsd ?? 0), 0), 1);
-  assert.ok(after.every((result) => result.calculation.profitUsd == null));
-  assert.ok(after.every((result) => result.health.issues.some((issue) => issue.code === "CANONICAL_KEY_CONFLICT")));
+  assert.equal(after.find((result) => result.rule.id === "rr_live").health.code, "SOURCE_BINDING_UNCONFIRMED");
+  assert.equal(after.find((result) => result.rule.id === "rr_live").calculation.profitUsd, null);
+  assert.equal(after.find((result) => result.rule.id === "rr_overlap").calculation.profitUsd, 1.5);
+  assert.deepEqual([...state.snapshots.values()].filter((snapshot) => snapshot.rule_id === "rr_live"), saved, "替换原账号的规则不得写入原范围");
 });
 
 test("其它参与成本判定的资源换凭证时，旧在途成本不能保存或缓存", async (t) => {
@@ -2859,11 +3442,97 @@ test("其它参与成本判定的资源换凭证时，旧在途成本不能保�
   await store.update("upstream", { accessToken: "account-seven" });
   wait.release();
   const result = (await pending).results[0];
-  assert.equal(result.upstream.knownAmountUsd, null);
+  assert.equal(result.upstream.countedAmountUsd, null);
   assert.equal(result.upstream.duplicateOfRuleId, "rr_live");
   assert.equal(state.writes, 1, "只有新的 duplicate 参考观察能保存");
-  for (const row of state.snapshots.values()) assert.equal(JSON.parse(row.source).result.upstream.knownAmountUsd, null);
-  for (const cached of rt._reconciliationResultCache.values()) assert.equal(cached.value.upstream.knownAmountUsd, null);
+  for (const row of state.snapshots.values()) assert.equal(JSON.parse(row.source).result.upstream.countedAmountUsd, null);
+  for (const cached of rt._reconciliationResultCache.values()) assert.equal(cached.value.upstream.countedAmountUsd, null);
+});
+
+test("R03整批共享fresh owner证据，暂时metadata失败不自选唯一owner或重复计成本", async (t) => {
+  const f = await separateAccountCostFixture(t);
+  f.stations[0].accessToken = "account-seven";
+  f.stations.find((station) => station.id === "second").accessToken = "candidate-seven";
+  const oldFetch = globalThis.fetch;
+  const identityCalls = new Map();
+  let failCandidate = true;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(input);
+    if (url.pathname === "/api/user/self") {
+      const credential = init.headers.Authorization;
+      identityCalls.set(credential, (identityCalls.get(credential) || 0) + 1);
+      if (credential === "Bearer candidate-seven" && failCandidate) {
+        failCandidate = false;
+        return { status: 500, text: async () => JSON.stringify({ success: false }) };
+      }
+    }
+    return oldFetch(input, init);
+  });
+  const input = { preset: "custom", startMs: 1000000, endMs: 1060000 };
+  const results = (await f.module.queryRules(input, { force: true })).results;
+  const healthy = results.find((result) => result.rule.id === "rr_live");
+  assert.equal(healthy.upstream.knownAmountUsd, 1);
+  assert.equal(healthy.upstream.countedAmountUsd, null);
+  assert.equal(healthy.upstream.ownershipState, "unknown");
+  assert.deepEqual(healthy.upstream.unverifiedOwnerRuleIds, ["rr_overlap"]);
+  assert.equal(healthy.health.code, "COST_OWNER_UNVERIFIED");
+  assert.ok(results.every((result) => result.calculation.profitUsd == null));
+  assert.equal(summarizeReconciliationTotals(results).cost, null);
+  assert.equal(summarizeReconciliationTotals(results).income, 5);
+  for (const credential of ["Bearer account-seven", "Bearer candidate-seven", "Bearer admin"]) assert.equal(identityCalls.get(credential), 1);
+  assert.ok([...f.state.snapshots.values()].every((snapshot) => JSON.parse(snapshot.source).recordType === "observation"));
+  failCandidate = true;
+  const single = (await f.module.queryRules({ ...input, ruleIds: ["rr_live"] })).results[0];
+  assert.equal(single.upstream.ownershipState, "unknown", "只查一行仍核验未选中的参与owner");
+  assert.equal(single.upstream.countedAmountUsd, null);
+  const recovered = (await f.module.queryRules(input)).results;
+  assert.equal(summarizeReconciliationTotals(recovered).cost, 1);
+  assert.ok(recovered.every((result) => result.upstream.knownAmountUsd === 1 && result.calculation.profitUsd == null));
+  for (const credential of ["Bearer account-seven", "Bearer candidate-seven", "Bearer admin"]) assert.equal(identityCalls.get(credential), 3);
+});
+
+test("R03归档owner与另一规则observation INSERT/commit串行，归档后不提交旧owner证据", async (t) => {
+  for (const boundary of ["insert", "commit"]) await t.test(boundary, async (t) => {
+    const wait = holdPoint();
+    let held = false;
+    const hold = async () => { if (!held) { held = true; await wait.hold(); } };
+    const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_overlap"], duplicateKeys: true,
+      onSnapshotInsert: (snapshot) => boundary === "insert" && snapshot.ruleId === "rr_overlap" ? hold() : null,
+      onRepositoryCommit: (transaction) => boundary === "commit" && transaction.snapshots.some((snapshot) => snapshot.ruleId === "rr_overlap") ? hold() : null,
+    });
+    const store = new Store(f.rt.pool);
+    store.data.stations = f.stations;
+    f.rt.store = store;
+    let catalogue = null;
+    const onboarding = await createChannelOnboardingModule(f.rt, { repository: {
+      getCatalogue: async () => catalogue, listLinks: async () => [], saveCatalogue: async (value) => { catalogue = structuredClone(value); },
+    } }).load();
+    f.rt.onboardingSource = onboarding;
+    await onboarding.sync();
+    const [rules] = await f.rt.pool.query("SELECT * FROM reconciliation_rules");
+    for (const rule of rules) trustedLegacyRule(rule, f.stations, 7, 1);
+    const input = { ruleIds: ["rr_overlap"], preset: "custom", startMs: 1000000, endMs: 1060000 };
+    await f.module.queryRules({ ...input, ruleIds: ["rr_live"] }, { force: true });
+    const ownerHistory = structuredClone([...f.state.snapshots.values()].filter((snapshot) => snapshot.rule_id === "rr_live"));
+    const pending = f.module.queryRules(input, { force: true });
+    await wait.reached;
+    let archived = false;
+    const stopping = f.module.archiveRule("rr_live").then(() => { archived = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(archived, false, "公开归档必须等待已持有source/Store锁的观察事务");
+    assert.equal(f.rule.archived_at, null);
+    wait.release();
+    await Promise.all([pending, stopping]);
+    const archiveIndex = f.state.commits.findIndex((transaction) => transaction.archivedRuleIds.includes("rr_live"));
+    assert.ok(archiveIndex >= 0);
+    assert.ok(f.state.commits.slice(0, archiveIndex).some((transaction) => transaction.snapshots.some((snapshot) => snapshot.source.result.upstream.duplicateOfRuleId === "rr_live")));
+    assert.ok(f.state.commits.slice(archiveIndex + 1).every((transaction) => transaction.snapshots.every((snapshot) => snapshot.source.result.upstream.duplicateOfRuleId !== "rr_live")), "旧owner的observation不可在归档后提交");
+    const current = (await f.module.queryRules(input)).results[0];
+    assert.equal(current.upstream.countedAmountUsd, 1);
+    assert.equal(current.upstream.ownershipState, "unique");
+    assert.equal(current.calculation.profitUsd, 1.5);
+    assert.deepEqual([...f.state.snapshots.values()].filter((snapshot) => snapshot.rule_id === "rr_live"), ownerHistory, "已归档owner的旧历史保留只读");
+  });
 });
 
 test("观察事务提交期间也锁定其它参与成本归属判定的资源", async (t) => {
@@ -2903,8 +3572,9 @@ test("整批查询期间账号归属改变，不能混合早返回的旧缓存�
   wait.release();
   const after = (await pending).results;
   assert.equal(after.reduce((sum, result) => sum + (result.upstream.knownAmountUsd ?? 0), 0), 1);
-  assert.ok(after.every((result) => result.calculation.profitUsd == null));
-  assert.ok(after.every((result) => result.health.issues.some((issue) => issue.code === "CANONICAL_KEY_CONFLICT")));
+  assert.equal(after.find((result) => result.rule.id === "rr_live").health.code, "SOURCE_BINDING_UNCONFIRMED");
+  assert.equal(after.find((result) => result.rule.id === "rr_live").calculation.profitUsd, null);
+  assert.equal(after.find((result) => result.rule.id === "rr_overlap").calculation.profitUsd, 1.5);
 });
 
 test("参与成本判定资源持续换凭证时，整批有界返回待获取且不保存旧成本", async (t) => {
@@ -3035,7 +3705,7 @@ test("目录在创建取数期间变化时，即使新的待核对状态稳定�
   const rt = { pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id) },
     onboardingSource: { inspectSource: (rule) => ({ version: revision, status: rule.sourceBinding?.[2] === revision ? "confirmed" : "review_required" }) } };
   await assert.rejects(createReconciliationModule(rt).createRule({ upstreamStationId: "up", tokenId: 9, salesChannelIds: [2], timezone: "Asia/Shanghai",
-    costCoverage: "complete", sourceBinding: { 1: "r1", 2: "before" } }), (error) => error.code === "SOURCE_BINDING_UNCONFIRMED");
+    costCoverage: "complete", sourceBinding: { 1: "r1", 2: "before" } }), (error) => error.code === "PREVIEW_REQUIRED");
   assert.equal(state.rules[0].scope_version, undefined);
   assert.deepEqual(state.channels.map((channel) => channel.channel_id), [1]);
 });

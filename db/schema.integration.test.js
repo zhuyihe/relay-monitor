@@ -3,7 +3,7 @@ import test from "node:test";
 import mysql from "mysql2/promise";
 import { ensureSchema } from "./pool.js";
 import { ChannelOnboardingRepository } from "../server/channel-onboarding-repository.js";
-import { ReconciliationRepository } from "../server/reconciliation-repository.js";
+import { ReconciliationRepository, reconciliationOwnerRuleState } from "../server/reconciliation-repository.js";
 import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 
 // Opt-in only: this fixture replaces tables in this one disposable local schema.
@@ -167,6 +167,151 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     assert.deepEqual(after, before);
     const [[legacySnapshot]] = await pool.query("SELECT source FROM reconciliation_snapshots WHERE snapshot_key = 'legacy-confirmed'");
     assert.deepEqual(legacySnapshot.source, legacySource);
+  });
+
+  const ownSource = { stationId: "anchor-own", provider: "newapi", baseUrl: "https://own.fixture.invalid",
+    accountId: "1", namespaceKey: "fixture-own-namespace" };
+  async function unanchoredRule(tokenId, sourceBinding = null, source = null) {
+    return reconciliation.createRule({ upstreamStationId: `anchor-up-${tokenId}`, ownStationId: "anchor-own", tokenId,
+      tokenName: `Anchor Key ${tokenId}`, fixedGroup: "g", timezone: "Asia/Shanghai", billingPolicy: "legacy-v3",
+      scopeVersion: 7, billingEffectiveFrom: 1000, sourceBinding, ownSource: source,
+      channels: [{ channelId: tokenId, name: `Anchor channel ${tokenId}` }] });
+  }
+  async function fingerprint(rule) {
+    return reconciliationScopeFingerprint(rule, await reconciliation.listSegments(rule.id));
+  }
+  const anchor = (tokenId) => ({ provider: "newapi", canonicalKey: `fixture-anchor-${tokenId}`, ownSource });
+  async function originalSnapshot(rule, source) {
+    await pool.query(`INSERT INTO reconciliation_snapshots
+      (rule_id, snapshot_key, window_kind, window_start_ms, window_end_ms, health_code, source)
+      VALUES (?, ?, 'custom', 1000, 2000, 'READY', ?)`, [rule.id, `anchor-history-${rule.tokenId}`, JSON.stringify(source)]);
+  }
+
+  await t.test("safe identity anchoring round trips null, legacy map and V2 without changing scope or members", async () => {
+    for (const [tokenId, binding, initialSource] of [[101, null, null], [102, { 102: "r102" }, null], [103, { 103: "r103" }, ownSource]]) {
+      const before = await unanchoredRule(tokenId, binding, initialSource);
+      if (tokenId === 102) {
+        await pool.query("UPDATE reconciliation_rules SET source_binding = ? WHERE id = ?", [JSON.stringify(binding), before.id]);
+      }
+      const segments = await reconciliation.listSegments(before.id);
+      const current = await reconciliation.getRule(before.id);
+      assert.deepEqual(current.sourceBinding, binding);
+      const saved = await reconciliation.anchorRuleIdentity(before.id, anchor(tokenId),
+        { expectedScopeFingerprint: await fingerprint(current), allowInitialAnchoring: true });
+      assert.equal(saved.provider, "newapi");
+      assert.equal(saved.canonicalKey, anchor(tokenId).canonicalKey);
+      assert.deepEqual(saved.ownSource, ownSource);
+      assert.deepEqual(saved.sourceBinding, binding || {});
+      for (const field of ["billingPolicy", "scopeVersion", "billingEffectiveFrom", "costCoverage", "enabled", "timezone"]) {
+        assert.deepEqual(saved[field], before[field], field);
+      }
+      assert.deepEqual(saved.channels, before.channels);
+      assert.deepEqual(await reconciliation.listSegments(saved.id), segments);
+      const [[raw]] = await pool.query("SELECT source_binding FROM reconciliation_rules WHERE id = ?", [saved.id]);
+      assert.equal(raw.source_binding.version, 2);
+      assert.deepEqual(raw.source_binding.ownSource, ownSource);
+    }
+  });
+
+  await t.test("unproven historical identity or prior status observation rejects initial proof with no write", async () => {
+    for (const tokenId of [104, 105, 106]) {
+      const rule = await unanchoredRule(tokenId);
+      if (tokenId === 104) await originalSnapshot(rule, { recordType: "confirmed" });
+      if (tokenId === 105) await originalSnapshot(rule, { ruleEvidence: { canonicalKey: anchor(tokenId).canonicalKey,
+        ownSource: { ...ownSource, namespaceKey: "different-original-source" } } });
+      if (tokenId === 106) await pool.query(
+        "UPDATE reconciliation_rule_channels SET status_observed_at_ms = 1500, channel_status = 'enabled' WHERE rule_id = ?", [rule.id]);
+      const before = await reconciliation.getRule(rule.id);
+      const segments = await reconciliation.listSegments(rule.id);
+      await assert.rejects(reconciliation.anchorRuleIdentity(rule.id, anchor(tokenId),
+        { expectedScopeFingerprint: await fingerprint(before), allowInitialAnchoring: true }),
+      (error) => error.code === "LEGACY_IDENTITY_UNVERIFIED");
+      assert.deepEqual(await reconciliation.getRule(rule.id), before);
+      assert.deepEqual(await reconciliation.listSegments(rule.id), segments);
+    }
+  });
+
+  await t.test("matching original facts anchor without initial proof while changed fingerprint or archived row cannot write", async () => {
+    const rule = await unanchoredRule(107);
+    await originalSnapshot(rule, { ruleEvidence: anchor(107) });
+    const before = await reconciliation.getRule(rule.id);
+    const originalFingerprint = await fingerprint(before);
+    assert.equal(await reconciliation.anchorRuleIdentity(rule.id, anchor(107), { expectedScopeFingerprint: "obsolete" }), null);
+    assert.deepEqual(await reconciliation.getRule(rule.id), before);
+    const saved = await reconciliation.anchorRuleIdentity(rule.id, anchor(107), { expectedScopeFingerprint: originalFingerprint });
+    assert.equal(saved.canonicalKey, anchor(107).canonicalKey);
+    assert.deepEqual(saved.ownSource, ownSource);
+    await reconciliation.archiveRule(rule.id);
+    const archived = await reconciliation.getRule(rule.id, { includeArchived: true });
+    assert.equal(await reconciliation.anchorRuleIdentity(rule.id, anchor(107), { expectedScopeFingerprint: await fingerprint(archived) }), null);
+    assert.deepEqual(await reconciliation.getRule(rule.id, { includeArchived: true }), archived);
+    const [[history]] = await pool.query("SELECT source FROM reconciliation_snapshots WHERE snapshot_key = ?", ["anchor-history-107"]);
+    assert.deepEqual(history.source, { ruleEvidence: anchor(107) });
+  });
+
+  await t.test("rule create and member update final guards roll back every financial write", async () => {
+    async function rowCounts() {
+      const counts = [];
+      for (const table of ["reconciliation_rules", "reconciliation_rule_channels", "reconciliation_rule_segments"]) {
+        const [[row]] = await pool.query(`SELECT COUNT(*) AS count FROM ${table}`);
+        counts.push(row.count);
+      }
+      return counts;
+    }
+    const beforeCounts = await rowCounts();
+    let createChecks = 0;
+    await assert.rejects(reconciliation.createRule({ upstreamStationId: "guard-upstream", ownStationId: "guard-own", tokenId: 109,
+      tokenName: "Guard Key", fixedGroup: "g", timezone: "Asia/Shanghai", billingPolicy: "next-complete-day",
+      channels: [{ channelId: 109, name: "Guard channel" }], costCoverage: "complete" },
+    { guard: (lockedRule, lockedChannels, policy) => {
+      assert.equal(lockedRule, null);
+      assert.deepEqual(lockedChannels, []);
+      assert.deepEqual(policy.channels.map((channel) => channel.channelId), [109]);
+      if (++createChecks === 2) throw Object.assign(new Error("fixture changed preview"), { code: "PREVIEW_BASIS_CHANGED" });
+    } }), (error) => error.code === "PREVIEW_BASIS_CHANGED");
+    assert.equal(createChecks, 2);
+    assert.deepEqual(await rowCounts(), beforeCounts);
+
+    const beforeRule = await reconciliation.getRule("legacy_rule");
+    const beforeSegments = await reconciliation.listSegments(beforeRule.id);
+    let updateChecks = 0;
+    await assert.rejects(reconciliation.appendChannels(beforeRule.id, [{ channelId: 109, name: "Added channel" }],
+      { costCoverage: "complete", sourceBinding: { 109: "r109" } },
+      { guard: (lockedRule, lockedChannels, policy) => {
+        assert.equal(lockedRule.id, beforeRule.id);
+        assert.deepEqual(lockedChannels.map((channel) => channel.channelId).sort((a, b) => a - b), [1, 2, 3]);
+        assert.deepEqual(policy.channels.map((channel) => channel.channelId).sort((a, b) => a - b), [1, 2, 3, 109]);
+        if (++updateChecks === 2) throw Object.assign(new Error("fixture changed day"), { code: "EFFECTIVE_PREVIEW_CHANGED" });
+      } }), (error) => error.code === "EFFECTIVE_PREVIEW_CHANGED");
+    assert.equal(updateChecks, 2);
+    assert.deepEqual(await reconciliation.getRule(beforeRule.id), beforeRule);
+    assert.deepEqual(await reconciliation.listSegments(beforeRule.id), beforeSegments);
+    assert.deepEqual(await rowCounts(), beforeCounts);
+  });
+
+  await t.test("owner generation and final guard prevent obsolete snapshot SQL commits", async () => {
+    const rule = await reconciliation.getRule("legacy_rule");
+    const segments = await reconciliation.listSegments(rule.id);
+    const expectedScope = reconciliationScopeFingerprint(rule, segments);
+    const expectedOwnerState = reconciliationOwnerRuleState(await reconciliation.listRules());
+    const snapshot = { ruleId: rule.id, segmentId: segments[0].id, snapshotKey: "owner-obsolete", windowKind: "custom",
+      startMs: 5000, endMs: 6000, localDate: null, upstreamUsd: 2, downstreamUsd: 3, differenceUsd: 1,
+      marginRate: 1 / 3, healthCode: "READY", source: { recordType: "confirmed", scopeFingerprint: expectedScope } };
+    await reconciliation.createRule({ upstreamStationId: "owner-extra-upstream", ownStationId: "owner-extra-own", tokenId: 108,
+      tokenName: "New owner", fixedGroup: "g", timezone: "Asia/Shanghai", channels: [{ channelId: 108, name: "Owner channel" }] });
+    let guardCalls = 0;
+    assert.equal(await reconciliation.saveSnapshotsForScope(rule.id, expectedScope, [snapshot],
+      { expectedOwnerState, guard: () => { guardCalls += 1; return true; } }), false);
+    assert.equal(guardCalls, 0);
+    const currentOwners = reconciliationOwnerRuleState(await reconciliation.listRules());
+    assert.equal(await reconciliation.saveSnapshotsForScope(rule.id, expectedScope,
+      [{ ...snapshot, snapshotKey: "owner-final-guard" }],
+      { expectedOwnerState: currentOwners, guard: () => ++guardCalls === 1 }), false);
+    assert.equal(guardCalls, 2);
+    const [[rows]] = await pool.query("SELECT COUNT(*) AS count FROM reconciliation_snapshots WHERE snapshot_key IN ('owner-obsolete', 'owner-final-guard')");
+    assert.equal(rows.count, 0);
+    const [[original]] = await pool.query("SELECT source FROM reconciliation_snapshots WHERE snapshot_key = 'legacy-confirmed'");
+    assert.deepEqual(original.source, legacySource);
   });
 
   await t.test("snapshot batch SQL failure rolls back every preceding insert", async () => {

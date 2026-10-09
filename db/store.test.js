@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Store } from "./store.js";
+import { Store, stationBusinessVersion } from "./store.js";
 import { refreshStation } from "../server/refresh.js";
 import { selectCostUpstreams } from "../server/own-helpers.js";
 
@@ -103,6 +103,78 @@ test("服务端验证结果不能覆盖已经编辑的新授权版本", async ()
   assert.equal(station.accessToken, "new");
   assert.equal(station.authVersion, 2);
   assert.equal(station.verifiedIdentity, null);
+});
+
+test("资源业务版本包含用途/身份/归档，自动令牌刷新和名称不改变版本", async () => {
+  const store = new Store(fakePool());
+  const station = await store.add({ type: "sub2api", baseUrl: "https://supplier.example/", accessToken: "jwt" });
+  const before = stationBusinessVersion(station);
+  station.s2Tokens = { accessToken: "renewed", refreshToken: "renewed-refresh" };
+  await store.update(station.id, { name: "Renamed" });
+  assert.equal(stationBusinessVersion(station), before);
+  await store.update(station.id, { monitorEnabled: false });
+  assert.notEqual(stationBusinessVersion(station), before);
+  await assert.rejects(store.update(station.id, { name: "Stale edit" }, { expectedResourceVersion: before }),
+    (error) => error.code === "RESOURCE_CHANGED");
+  assert.equal(station.name, "Renamed");
+  const paused = stationBusinessVersion(station);
+  await store.update(station.id, {}, { verifiedIdentity: { provider: "sub2api", baseUrl: station.baseUrl, accountId: "7" } });
+  assert.notEqual(stationBusinessVersion(station), paused);
+  const verified = stationBusinessVersion(station);
+  await store.archive(station.id);
+  assert.notEqual(stationBusinessVersion(station), verified);
+});
+
+test("updateLocked不递归加锁，guard/CAS与marker在同次提交后发布，失败保留旧配置", async (t) => {
+  const pool = fakePool(), conn = await pool.getConnection(), store = new Store(pool);
+  const station = await store.add({ type: "sub2api", baseUrl: "https://supplier.example", accessToken: "old-jwt",
+    onboardingOrigin: { requestId: "forged" }, authorizationUpdateRef: { requestId: "forged" } });
+  assert.equal(station.onboardingOrigin, undefined);
+  assert.equal(station.authorizationUpdateRef, undefined);
+  let documents;
+  t.mock.method(conn, "query", async (sql, params) => {
+    if (sql.startsWith("INSERT INTO stations")) documents = params[0].map((row) => JSON.parse(row[2]));
+    return [[]];
+  });
+  const options = { expectedAuthVersion: 1, expectedResourceVersion: stationBusinessVersion(station),
+    verifiedIdentity: { provider: "sub2api", baseUrl: station.baseUrl, accountId: "7" },
+    authorizationUpdateRef: { requestId: "rotation", accountKey: "account", authVersion: 99, secret: "forged-secret" },
+    guard: (current) => { assert.equal(current, station); assert.equal(current.type, "sub2api"); } };
+  let entered, release;
+  const reached = new Promise((resolve) => { entered = resolve; });
+  t.mock.method(conn, "commit", async () => { entered(); await new Promise((resolve) => { release = resolve; }); throw new Error("offline"); });
+  const change = { type: "sub2api-password", email: "a@example", password: "new-password" };
+  const pending = store.withStationLocks([station.id], () => store.updateLocked(station.id, change, options));
+  const rejection = assert.rejects(pending, /保存失败/);
+  await reached;
+  assert.equal(station.accessToken, "old-jwt");
+  assert.equal(station.authorizationUpdateRef, undefined);
+  assert.equal(documents[0].accessToken, "");
+  assert.equal(documents[0].authorizationUpdateRef.authVersion, 2);
+  assert.equal(documents[0].authorizationUpdateRef.secret, undefined);
+  release();
+  await rejection;
+  assert.equal(station.type, "sub2api");
+  assert.equal(station.verifiedIdentity, null);
+  t.mock.method(conn, "commit", async () => {});
+  await store.withStationLocks([station.id], () => store.updateLocked(station.id, change, options));
+  assert.equal(station.type, "sub2api-password");
+  assert.equal(station.accessToken, "");
+  assert.equal(station.authVersion, 2);
+  assert.deepEqual(station.authorizationUpdateRef, { requestId: "rotation", accountKey: "account", authVersion: 2, authorizationType: "sub2api-password" });
+  await assert.rejects(store.update(station.id, {}, { guard: () => { throw new Error("basis changed"); } }), /basis changed/);
+  const count = store.list({ includeUnmonitored: true }).length;
+  await assert.rejects(store.add({ type: "newapi" }, { guard: () => { throw new Error("basis changed"); } }), /basis changed/);
+  assert.equal(store.list({ includeUnmonitored: true }).length, count);
+  const origin = await store.add({ type: "newapi-key", apiKey: "call-key", password: "ignored-password" }, {
+    onboardingOrigin: { requestId: "batch", selectionId: "key", accountKey: null, type: "newapi-key", purpose: "monitor", secret: "ignored-secret" },
+    guard: (current) => assert.equal(current, null),
+  });
+  assert.deepEqual(origin.onboardingOrigin, { requestId: "batch", selectionId: "key", accountKey: null, type: "newapi-key", purpose: "monitor" });
+  assert.equal(origin.password, "");
+  await store.update(station.id, { type: "sub2api", accessToken: "replacement-jwt" });
+  assert.equal(station.email, ""); assert.equal(station.password, "");
+  assert.equal(station.authorizationUpdateRef, null);
 });
 
 test("用途与身份在提交前保持旧值，失败不发布并可重试", async (t) => {
@@ -443,3 +515,15 @@ for (const initialAlertState of [{ state: "unknown", errorCount: 0, noRenewalLow
     assert.deepEqual(writes.at(-1).alertState, expected);
   });
 }
+
+test("ordinary pure-Key credential changes invalidate onboarding recovery marker in the committed configuration", async () => {
+  const store = new Store(fakePool());
+  const origin = { requestId: "request", selectionId: "key", accountKey: null, type: "newapi-key", purpose: "monitor" };
+  const station = await store.add({ type: "newapi-key", baseUrl: "https://up.test", apiKey: "original" }, { onboardingOrigin: origin });
+  await store.update(station.id, { name: "renamed" });
+  assert.deepEqual(station.onboardingOrigin, origin);
+  await store.update(station.id, { apiKey: "replacement", onboardingOrigin: origin });
+  assert.equal(station.onboardingOrigin, null, "HTTP-shaped marker cannot preserve the old recovery intent");
+  await store.update(station.id, { apiKey: "verified-new" }, { onboardingOrigin: { ...origin, requestId: "new-request" } });
+  assert.equal(station.onboardingOrigin.requestId, "new-request");
+});

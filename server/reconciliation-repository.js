@@ -1,10 +1,15 @@
 // 上游渠道对账的持久化层：只保存规则、聚合快照和告警状态，绝不复制站点凭据。
 import { isCurrentReconciliationBillingContract } from "../lib/reconciliation-contract.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
-import { applyScopePolicy } from "../lib/reconciliation-scope-policy.js";
+import { applyScopePolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 
 function uid(prefix) {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}${Date.now().toString(36).slice(-4)}`;
+}
+
+export function reconciliationOwnerRuleState(rules) {
+  return JSON.stringify(rules.map((rule) => [rule.id, rule.upstreamStationId, rule.ownStationId, rule.tokenId, rule.enabled])
+    .sort(([a], [b]) => a.localeCompare(b)));
 }
 
 function asJson(value) {
@@ -55,7 +60,7 @@ function ruleFromRow(row, channels = []) {
     costCoverage: row.cost_coverage || "unknown",
     provider: row.provider || null,
     canonicalKey: row.canonical_key || null,
-    sourceBinding: asJson(row.source_binding),
+    ...normalizeRuleSourceBinding(row.source_binding, row.cost_coverage || "unknown"),
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
@@ -182,13 +187,15 @@ export class ReconciliationRepository {
     } : null;
   }
 
-  async createRule(input) {
+  async createRule(input, { guard = null } = {}) {
+    const requested = input;
     const id = uid("rr");
     const tokenKey = activeTokenKey(input);
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
       if (input.billingPolicy === "next-complete-day") input = applyScopePolicy(null, input);
+      if (guard) guard(null, [], input);
       await conn.query(
         `INSERT INTO reconciliation_rules
           (id, upstream_station_id, own_station_id, token_id, token_name, fixed_group, timezone, enabled, active_token_key,
@@ -197,7 +204,7 @@ export class ReconciliationRepository {
         [id, input.upstreamStationId, input.ownStationId, input.tokenId, input.tokenName,
           input.fixedGroup, input.timezone, input.enabled === false ? 0 : 1, tokenKey,
           input.billingPolicy || "legacy-v3", input.scopeVersion || 1, input.billingEffectiveFrom ?? null,
-          input.costCoverage || "unknown", input.provider || null, input.canonicalKey || null, JSON.stringify(input.sourceBinding || null)]
+          input.costCoverage || "unknown", input.provider || null, input.canonicalKey || null, JSON.stringify(serializeRuleSourceBinding(input))]
       );
       if (input.channels.length) {
         await conn.query(
@@ -211,6 +218,7 @@ export class ReconciliationRepository {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'operator_confirmed')`,
         [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs ?? (input.billingPolicy === "next-complete-day" ? 0 : Date.now())), Date.now()]
       );
+      if (guard) guard(null, [], input.billingPolicy === "next-complete-day" ? applyScopePolicy(null, requested) : input);
       await conn.commit();
     } catch (err) {
       await conn.rollback().catch(() => {});
@@ -221,7 +229,8 @@ export class ReconciliationRepository {
     return this.getRule(id);
   }
 
-  async updateRule(id, input, { append = false } = {}) {
+  async updateRule(id, input, { append = false, guard = null } = {}) {
+    const requested = input;
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
@@ -229,14 +238,8 @@ export class ReconciliationRepository {
       if (!rows.length) throw new Error("对账规则不存在或已归档");
       const [channelRows] = await conn.query("SELECT * FROM reconciliation_rule_channels WHERE rule_id = ? FOR UPDATE", [id]);
       const existing = ruleFromRow(rows[0], channelRows);
-      input = { ...existing, ...input };
-      if (append) {
-        const channels = new Map(existing.channels.map((channel) => [channel.channelId, channel]));
-        for (const channel of input.channels) channels.set(channel.channelId, channel);
-        input.channels = [...channels.values()];
-        input.sourceBinding = { ...existing.sourceBinding, ...input.sourceBinding };
-      }
-      input = applyScopePolicy(existing, input);
+      input = applyScopePolicy(existing, input, Date.now(), { append });
+      if (guard) guard(existing, existing.channels, input);
       const tokenKey = activeTokenKey(input);
       const [result] = await conn.query(
         `UPDATE reconciliation_rules
@@ -246,7 +249,7 @@ export class ReconciliationRepository {
         [input.upstreamStationId, input.ownStationId, input.tokenId, input.tokenName,
           input.fixedGroup, input.timezone, input.enabled === false ? 0 : 1, tokenKey,
           input.billingPolicy, input.scopeVersion, input.billingEffectiveFrom, input.costCoverage,
-          input.provider, input.canonicalKey, JSON.stringify(input.sourceBinding || null), id]
+          input.provider, input.canonicalKey, JSON.stringify(serializeRuleSourceBinding(input)), id]
       );
       if (!result.affectedRows) throw new Error("对账规则不存在或已归档");
       await conn.query("DELETE FROM reconciliation_rule_channels WHERE rule_id = ?", [id]);
@@ -256,6 +259,7 @@ export class ReconciliationRepository {
           [input.channels.map((channel) => [id, channel.channelId, channel.name, activeChannelKey(input, channel.channelId)])]
         );
       }
+      if (guard) guard(existing, existing.channels, applyScopePolicy(existing, requested, Date.now(), { append }));
       await conn.commit();
     } catch (err) {
       await conn.rollback().catch(() => {});
@@ -266,8 +270,42 @@ export class ReconciliationRepository {
     return this.getRule(id);
   }
 
-  async appendChannels(id, channels, confirmation = {}) {
-    return this.updateRule(id, { channels, ...confirmation }, { append: true });
+  async appendChannels(id, channels, confirmation = {}, { guard = null } = {}) {
+    return this.updateRule(id, { channels, ...confirmation }, { append: true, guard });
+  }
+
+  async anchorRuleIdentity(id, { provider, canonicalKey, ownSource }, { expectedScopeFingerprint, allowInitialAnchoring = false } = {}) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
+      if (!rows.length) { await conn.commit(); return null; }
+      const [channels] = await conn.query("SELECT * FROM reconciliation_rule_channels WHERE rule_id = ? FOR UPDATE", [id]);
+      const [segments] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE", [id]);
+      const rule = ruleFromRow(rows[0], channels);
+      if (reconciliationScopeFingerprint(rule, segments.map(segmentFromRow)) !== expectedScopeFingerprint) { await conn.commit(); return null; }
+      if ((rule.canonicalKey && rule.canonicalKey !== canonicalKey) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource?.namespaceKey)) {
+        throw Object.assign(new Error("原始账号或本站来源已变化，请明确确认新范围"), { code: "SOURCE_BINDING_UNCONFIRMED" });
+      }
+      if (!rule.canonicalKey || !rule.ownSource) {
+        const [history] = await conn.query("SELECT source FROM reconciliation_snapshots WHERE rule_id = ? ORDER BY generated_at DESC LIMIT 1", [id]);
+        const source = asJson(history[0]?.source);
+        const original = source?.ruleEvidence || source?.scopePolicy;
+        const originalMatches = original?.canonicalKey === canonicalKey && original?.ownSource?.namespaceKey === ownSource?.namespaceKey;
+        const observed = channels.some((channel) => channel.status_observed_at_ms != null) || segments.some((segment) => segment.timing_source === "detected"
+          || (segment.ratio_source === "group_catalog" && Number(segment.ratio_observed_at_ms) > Number(segment.effective_from_ms)));
+        if (!originalMatches && !(allowInitialAnchoring && !history.length && !observed)) {
+          throw Object.assign(new Error("旧规则缺少可信原始身份，保留金额参考；请明确确认新的账号和本站范围"), { code: "LEGACY_IDENTITY_UNVERIFIED" });
+        }
+        await conn.query("UPDATE reconciliation_rules SET provider = ?, canonical_key = ?, source_binding = ? WHERE id = ? AND archived_at IS NULL",
+          [rule.provider || provider, rule.canonicalKey || canonicalKey, JSON.stringify(serializeRuleSourceBinding({ ...rule, ownSource: rule.ownSource || ownSource })), id]);
+      }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally { conn.release(); }
+    return this.getRule(id);
   }
 
   async updateObservedToken(id, { tokenName, fixedGroup = null }) {
@@ -561,10 +599,17 @@ export class ReconciliationRepository {
     return true;
   }
 
-  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots) {
+  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null } = {}) {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
+      if (expectedOwnerState != null) {
+        const [owners] = await conn.query("SELECT * FROM reconciliation_rules WHERE archived_at IS NULL ORDER BY id FOR UPDATE");
+        if (reconciliationOwnerRuleState(owners.map((row) => ruleFromRow(row))) !== expectedOwnerState) {
+          await conn.rollback();
+          return false;
+        }
+      }
       const [ruleRows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
       if (!ruleRows.length) {
         await conn.commit();
@@ -576,6 +621,7 @@ export class ReconciliationRepository {
         await conn.commit();
         return false;
       }
+      if (guard && !guard()) { await conn.rollback(); return false; }
       for (const snapshot of snapshots) {
         // 规则行已 FOR UPDATE，同一规则的快照写入在这里串行；此前的查询都是锁定读，本事务的
         // read view 在这里才建立，普通一致性读就能看到已提交的写入。不对快照行加 FOR UPDATE：
@@ -593,6 +639,7 @@ export class ReconciliationRepository {
           || (savedEnd === incomingEnd && snapshotGeneratedAt(savedSource) > snapshotGeneratedAt(incomingSource)))) continue;
         await this.saveSnapshot(snapshot, conn);
       }
+      if (guard && !guard()) { await conn.rollback(); return false; }
       await conn.commit();
       return true;
     } catch (err) {

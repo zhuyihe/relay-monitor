@@ -31,7 +31,7 @@ export class ChannelOnboardingRepository {
     return rows.map(linkFromRow);
   }
 
-  async saveLinks(links) {
+  async saveLinks(links, { guard = null } = {}) {
     const unique = new Map();
     for (const input of links) {
       const channelId = Number(input.channelId);
@@ -52,6 +52,7 @@ export class ChannelOnboardingRepository {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
+      guard?.();
       for (const link of unique.values()) {
         await conn.query(
           `INSERT INTO channel_monitor_links
@@ -70,6 +71,7 @@ export class ChannelOnboardingRepository {
         );
         saved.push(linkFromRow(rows[0]));
       }
+      guard?.();
       await conn.commit();
       return saved;
     } catch (err) {

@@ -98,7 +98,11 @@ test("目录使用独立 meta 键，Store 写透与重启读取互不覆盖", as
   const pool = memoryPool();
   const repository = new ChannelOnboardingRepository(pool);
   assert.equal(await repository.getCatalogue(), null);
-  const catalogue = { ownStationId: "own", sourceVersion: "config-1", syncedAt: 2000, channels: [{ id: 7 }] };
+  const catalogue = { ownStationId: "own", ownSource: { stationId: "own", provider: "newapi",
+    baseUrl: "https://own.example", accountId: "11", namespaceKey: "source-a" },
+    sourceVersion: "config-1", syncedAt: 2000, totalValidated: true, catalogueTotal: 1,
+    channels: [{ id: 7, revision: "source-a-channel-7", missing: false },
+      { id: 8, revision: "source-a-channel-8", missing: true }] };
   await repository.saveCatalogue(catalogue);
   assert.deepEqual(pool.state.meta.get("settings"), { refreshIntervalSec: 90 });
   const store = new Store(pool);
@@ -127,4 +131,16 @@ test("关联校验在写入前完成，空批次不改变记录", async () => {
   await assert.rejects(repository.saveLinks([link, { ...link, channelId: 0 }]), /关联无效/);
   assert.equal((await repository.listLinks()).length, 0);
   assert.deepEqual(await repository.saveLinks([]), []);
+});
+
+test("整组关联在SQL前和commit前复核server guard，过期证据不发布半批关联", async () => {
+  const pool = memoryPool(), repository = new ChannelOnboardingRepository(pool);
+  await assert.rejects(repository.saveLinks([link], { guard: () => { throw new Error("preview changed before SQL"); } }), /before SQL/);
+  assert.equal(pool.calls.some((call) => call.sql.startsWith("INSERT INTO channel_monitor_links")), false);
+  let checks = 0;
+  await assert.rejects(repository.saveLinks([link, { ...link, channelId: 8 }], { guard: () => {
+    if (++checks === 2) throw new Error("preview changed before commit");
+  } }), /before commit/);
+  assert.equal(checks, 2);
+  assert.deepEqual(await repository.listLinks(), []);
 });

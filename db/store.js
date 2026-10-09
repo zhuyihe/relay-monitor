@@ -3,6 +3,35 @@
 // 所有写通过 save() 串行化写透 MySQL——消费方（26 个端点/告警/日报）零改动。
 import { hashPassword } from "../lib/auth.js";
 import { ALERT_EVENT_KEYS, DEFAULT_RULES } from "../lib/alerts.js";
+import { createHash } from "node:crypto";
+import { onboardingBaseUrl } from "../lib/channel-onboarding.js";
+
+export function stationBusinessVersion(station) {
+  if (!station) return null;
+  return createHash("sha256").update(JSON.stringify([
+    station.id, station.authVersion || 1, station.type, onboardingBaseUrl(station.baseUrl),
+    station.monitorEnabled !== false, !!station.isOwn, station.archivedAt || null, station.verifiedIdentity || null,
+  ])).digest("hex");
+}
+
+function clearHiddenCredentials(station) {
+  const applicable = { newapi: ["accessToken", "userId"], "newapi-key": ["apiKey"],
+    sub2api: ["accessToken"], "sub2api-password": ["email", "password"], fixed: [] }[station.type];
+  if (applicable) for (const field of ["accessToken", "userId", "apiKey", "email", "password"]) {
+    if (!applicable.includes(field)) station[field] = "";
+  }
+}
+
+function originMarker(value) {
+  if (!value) return null;
+  return { requestId: String(value.requestId), selectionId: String(value.selectionId),
+    accountKey: value.accountKey == null ? null : String(value.accountKey), type: String(value.type), purpose: value.purpose };
+}
+
+function authorizationMarker(value, authVersion, type) {
+  if (!value) return null;
+  return { requestId: String(value.requestId), accountKey: String(value.accountKey), authVersion, authorizationType: type };
+}
 
 const DEFAULT_SETTINGS = {
   refreshIntervalSec: 60, // 后台自动刷新间隔
@@ -416,7 +445,7 @@ export class Store {
     return this.data.stations.find((s) => s.id === id);
   }
 
-  async add(input, { verifiedIdentity = null } = {}) {
+  async add(input, { verifiedIdentity = null, onboardingOrigin, guard } = {}) {
     const station = {
       id: uid("st"),
       name: String(input.name || "未命名中转站").trim(),
@@ -452,17 +481,29 @@ export class Store {
       alertState: null, // 告警去重状态（含不再续费站点的一次性低余额提醒时间）
       balance: null, // 最近一次查询结果
     };
+    clearHiddenCredentials(station);
+    if (onboardingOrigin !== undefined) station.onboardingOrigin = originMarker(onboardingOrigin);
     return this._saveChange(() => {
+      guard?.(null);
       const stations = [...this.data.stations, station];
       return { data: { ...this.data, stations }, publish: () => { this.data.stations = stations; }, value: station };
     });
   }
 
-  async update(id, patch, { verifiedIdentity, expectedAuthVersion } = {}) {
+  async update(id, patch, options = {}) {
+    return this.withStationLocks([id], () => this.updateLocked(id, patch, options));
+  }
+
+  async updateLocked(id, patch, { verifiedIdentity, expectedAuthVersion, expectedResourceVersion,
+    onboardingOrigin, authorizationUpdateRef, guard } = {}) {
     const identity = verifiedIdentity === undefined ? undefined : verifiedAccount(verifiedIdentity);
-    return this._changeStation(id, (s) => {
+    return this._changeStationLocked(id, (s) => {
+      guard?.(this.get(id));
       if (expectedAuthVersion != null && Number(expectedAuthVersion) !== (s.authVersion || 1)) {
         throw Object.assign(new Error("授权配置已变化，请重新验证"), { code: "AUTHORIZATION_CHANGED" });
+      }
+      if (expectedResourceVersion != null && expectedResourceVersion !== stationBusinessVersion(s)) {
+        throw Object.assign(new Error("资源配置已变化，请重新预览"), { code: "RESOURCE_CHANGED" });
       }
       const before = {
         type: s.type, baseUrl: s.baseUrl, email: s.email,
@@ -471,12 +512,14 @@ export class Store {
       const fields = ["name", "type", "baseUrl", "accessToken", "userId", "apiKey", "email"];
       for (const f of fields) if (f in patch) s[f] = String(patch[f] ?? "").trim();
       if ("password" in patch) s.password = String(patch.password ?? "");
+      if (s.type !== before.type) clearHiddenCredentials(s);
       if ("lowBalanceUsd" in patch) s.lowBalanceUsd = numOrNull(patch.lowBalanceUsd);
       if ("cnyPerUsd" in patch) s.cnyPerUsd = numOrNull(patch.cnyPerUsd);
       if ("costAliases" in patch) s.costAliases = sanitizeCostAliases(patch.costAliases);
       if ("includeInProfit" in patch) s.includeInProfit = patch.includeInProfit !== false;
       if ("isOwn" in patch) s.isOwn = !!patch.isOwn;
       if ("monitorEnabled" in patch) s.monitorEnabled = patch.monitorEnabled !== false;
+      if (patch.archived === false) s.archivedAt = null;
       if (s.monitorEnabled === false) { s.includeInProfit = false; s.isOwn = false; }
       if ("noRenewal" in patch || s.type === "fixed") {
         const noRenewal = s.type !== "fixed" && !!patch.noRenewal;
@@ -502,13 +545,24 @@ export class Store {
         s.verifiedIdentity = null;
       }
       if (identity !== undefined) s.verifiedIdentity = identity;
+      if (onboardingOrigin !== undefined) s.onboardingOrigin = originMarker(onboardingOrigin);
+      else if (credsChanged && s.onboardingOrigin) s.onboardingOrigin = null;
+      if (authorizationUpdateRef !== undefined) {
+        s.authorizationUpdateRef = authorizationMarker(authorizationUpdateRef, s.authVersion || 1, s.type);
+      } else if (credsChanged) {
+        s.authorizationUpdateRef = null;
+      }
       // 即使原缓存为空，也须覆盖提交期间后台取得的旧凭证令牌。
       if (credsChanged) return { s2Tokens: null };
     });
   }
 
   _changeStation(id, apply) {
-    return this.withStationLocks([id], () => this._saveChange(() => {
+    return this.withStationLocks([id], () => this._changeStationLocked(id, apply));
+  }
+
+  _changeStationLocked(id, apply) {
+    return this._saveChange(() => {
       const current = this.get(id);
       if (!current) return null;
       const next = { ...current };
@@ -530,7 +584,7 @@ export class Store {
         },
         value: current,
       };
-    }));
+    });
   }
 
   async remove(id) {
