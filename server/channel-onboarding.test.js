@@ -759,6 +759,30 @@ test("F08 shared setup facts do not bypass each selection's monitoring purpose",
   assert.deepEqual(f.store.data, before); assert.equal(f.state.ruleWrites, 0); assert.equal(f.state.links.length, 0);
 });
 
+test("F08 equivalent new authorizations keep each selection's display, purpose and cost settings", async (t) => {
+  const f = await genuineBatchFixture(t); await f.store.remove(f.supplier.id);
+  const connection = { type: "newapi", baseUrl: "https://up.test", accessToken: "new-pat", userId: "42" };
+  const input = f.request([[1], [2]], [9, 10]);
+  input.selections = [
+    { selectionId: "billing", monitor: false, newStation: { ...connection, name: "Billing authorization", cnyPerUsd: 5, lowBalanceUsd: 12, noRenewal: true } },
+    { selectionId: "monitor", monitor: true, newStation: { ...connection, name: "Monitor A", cnyPerUsd: 8, lowBalanceUsd: 99, noRenewal: false } },
+  ];
+  input.groups[0].selectionId = "billing"; input.groups[1].selectionId = "monitor"; input.groups[1].reconciliation = null;
+  const before = structuredClone(f.store.data), response = await handleChannelOnboardingRequest(new Request("http://fixture/api/channel-onboarding/batch/probe", {
+    method: "POST", body: JSON.stringify(input) }), f.rt, "probeBatch");
+  const preview = await response.json();
+  assert.equal(response.status, 200); assert.deepEqual(f.store.data, before);
+  const monitorPreview = preview.selections.find((selection) => selection.selectionId === "monitor").station;
+  assert.equal(monitorPreview.name, "Monitor A"); assert.equal(monitorPreview.cnyPerUsd, 8);
+  assert.equal(monitorPreview.includeInProfit, true); assert.notEqual(monitorPreview.monitorEnabled, false);
+  const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId });
+  const group = result.groups.find((value) => value.requestedGroupIds.includes("group-2")); assert.equal(group.complete, true);
+  const station = f.store.get(group.monitor.stationIds[0]);
+  assert.equal(station.name, "Monitor A"); assert.equal(station.monitorEnabled, true);
+  assert.equal(station.cnyPerUsd, 8); assert.equal(station.lowBalanceUsd, 99);
+  assert.equal(station.noRenewal, false); assert.equal(station.includeInProfit, true);
+});
+
 test("F07 directory reads reevaluate rule source after missing channels, restored catalogue and expiry", async (t) => {
   const f = await genuineBatchFixture(t), input = f.request([[1]]), preview = await f.rt.channelOnboarding.probeBatch(input);
   assert.equal((await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId })).complete, true);

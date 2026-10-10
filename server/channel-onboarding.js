@@ -718,7 +718,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         existing ? stationBusinessVersion(existing) : null]);
       if (!verificationReads.has(readKey)) verificationReads.set(readKey, verify(connection, existing));
       const observation = await verificationReads.get(readKey);
-      return { ...observation, existing, connection: structuredClone(observation.connection),
+      return { ...observation, existing, connection: { ...structuredClone(connection),
+        ...(observation.connection.s2Tokens ? { s2Tokens: structuredClone(observation.connection.s2Tokens) } : {}) },
         metadata: observation.metadata && structuredClone(observation.metadata),
         identity: observation.identity && structuredClone(observation.identity) };
     }
