@@ -196,9 +196,10 @@ a.jy-eq-term:hover { background: var(--jy-sunken); text-decoration: none; color:
 .jy-eq-value .unit { font-size: 20px; font-weight: 500; margin-right: 2px; color: var(--jy-ink-2); }
 .jy-eq-value .approx { font-weight: 400; color: var(--jy-ink-3); margin-right: 4px; }
 .jy-eq-note { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* 运算符与金额同字号同行高，顶部让出标签行（22px + 间距 6px），基线和金额对齐 */
 .jy-eq-op {
-  align-self: center; padding: 18px 4px 0;
-  font-size: 40px; line-height: 40px; font-weight: 300; color: var(--jy-ink-3);
+  align-self: start; padding: 28px 4px 0;
+  font-size: 32px; line-height: 40px; font-weight: 300; color: var(--jy-ink-3);
 }
 .jy-eq-result { background: var(--jy-cobalt-tint); margin-left: 8px; }
 .jy-eq-result .jy-eq-label { color: var(--jy-ink); font-weight: 500; }
@@ -298,7 +299,8 @@ a.jy-eq-term:hover { background: var(--jy-sunken); text-decoration: none; color:
 /* ─── 横向条形 ───────────────────────────────────────── */
 .jy-hbars { list-style: none; margin: 0; padding: 0; }
 .jy-hbars li {
-  display: grid; grid-template-columns: minmax(84px, 128px) minmax(0, 1fr); gap: 12px; align-items: center;
+  /* 标签列随面板变宽（最宽 200px），宽面板里站点全名不再被截断 */
+  display: grid; grid-template-columns: minmax(84px, min(200px, 32%)) minmax(0, 1fr); gap: 12px; align-items: center;
   height: 36px; cursor: default;
 }
 .jy-hbars .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--jy-ink-2); }
@@ -456,6 +458,7 @@ table.jy-data tfoot th, table.jy-data tfoot td {
   content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; border-radius: 2px; background: var(--jy-cobalt);
 }
 .jy-tabpanel { display: flex; flex-direction: column; gap: 24px; }
+.jy-tabpanel[hidden] { display: none; }
 
 /* ─── 空态 / 引导 / 错误 ─────────────────────────────── */
 .jy-onboard { display: grid; grid-template-columns: minmax(0, 560px) minmax(0, 1fr); gap: 48px; padding: 40px; align-items: center; }
@@ -504,7 +507,7 @@ table.jy-data tfoot th, table.jy-data tfoot td {
   .jy-grid-2:not(.jy-grid-even) { grid-template-columns: minmax(0, 1fr); }
   .jy-grid-3 { grid-template-columns: minmax(0, 1fr); }
   .jy-eq-value { font-size: 28px; line-height: 36px; }
-  .jy-eq-op { font-size: 32px; }
+  .jy-eq-op { font-size: 28px; line-height: 36px; }
 }
 @media (max-width: 991px) {
   .jy-shell, .jy-shell.is-collapsed { grid-template-columns: 64px minmax(0, 1fr); }

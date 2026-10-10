@@ -35,6 +35,8 @@ export function ForecastChart({
   const y = (v: number) => T + (1 - v / yt.hi) * (H - T - B);
   const mid = pts.findIndex((p) => p.h === 0);
   const tomorrow = (i: number) => mid > 0 && i >= mid;
+  // 每个"21:00"标签约 34px，窄面板里拉开间隔（3 / 6 / 12 小时一个），避免挤在一起
+  const every = [3, 6, 12].find((k) => step * k >= 44) ?? 12;
 
   const band = n
     ? `M${pts.map((p, i) => `${cx(i).toFixed(1)},${y(p.hi).toFixed(1)}`).join("L")}L${pts
@@ -92,7 +94,7 @@ export function ForecastChart({
               </g>
               {yt.ticks.map((t) => (
                 <text key={t} className="tick-label" x={L - 8} y={y(t) + 4} textAnchor="end">
-                  {axisMoney(t)}
+                  {axisMoney(t, yt.step)}
                 </text>
               ))}
               {mid > 0 && (
@@ -106,7 +108,7 @@ export function ForecastChart({
               <path d={band} style={{ fill: "var(--jy-s1)", opacity: 0.14 }} />
               <path className="series" style={{ stroke: "var(--jy-s1)" }} d={line} />
               {pts.map((p, i) =>
-                p.h % 3 === 0 ? (
+                p.h % every === 0 ? (
                   <text key={p.t} className="tick-label" x={cx(i)} y={H - 8} textAnchor="middle">
                     {p.h}:00
                   </text>

@@ -172,7 +172,7 @@ export function CumulativePanel({ rows, asOf }: { rows: TrendRow[]; asOf?: numbe
               </g>
               {yt.ticks.map((t) => (
                 <text key={t} className="tick-label" x={L - 8} y={y(t) + 4} textAnchor="end">
-                  {axisMoney(t)}
+                  {axisMoney(t, yt.step)}
                 </text>
               ))}
               {bands.map(([a, b]) => (
