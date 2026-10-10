@@ -653,7 +653,8 @@ test("F06 a rejected identity save remains retryable and requires a new read bef
   await drawer.getByText("资源配置已变化，请重新核验", { exact: true }).waitFor();
   assert.equal(await drawer.getByRole("button", { name: "确认保存账号身份", exact: true }).count(), 0);
   await drawer.getByRole("button", { name: /实际核验账号与 Key 目录/ }).click();
-  await drawer.getByRole("button", { name: "确认保存账号身份", exact: true }).waitFor();
+  await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor();
+  await drawer.getByRole("button", { name: /确认保存账号身份/ }).waitFor();
   assert.equal(opened.mutations.length, 1); assert.equal(opened.writes.length, 0);
 });
 test("workflow identity and selected-Key read preserve actual zero and separate Sub2 date capability from timezone", async (t) => {
