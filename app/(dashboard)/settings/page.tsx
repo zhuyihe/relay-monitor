@@ -181,7 +181,6 @@ export default function SettingsPage() {
     try {
       const result = await api("/api/auth/me");
       setMe(result);
-      setUsername(result.username || "");
       setMeError(null);
     } catch (e: any) {
       setMeError(e.message || "账户信息加载失败");
@@ -224,7 +223,8 @@ export default function SettingsPage() {
   const retentionShortening = historyRetentionDays != null && (
     savedRetentionDays == null || historyRetentionDays < savedRetentionDays
   );
-  const accountDirty = !!(pwOld || pwNew || pwConfirm) || (me != null && username !== (me.username || ""));
+  // 用户名输入框默认留空（留空即不修改），填了不同的名字才算有改动
+  const accountDirty = !!(pwOld || pwNew || pwConfirm) || (!!username.trim() && username.trim() !== (me?.username || ""));
 
   // 保存某一组。保存期间锁住所有保存按钮：各组请求体里带着别组的"已保存值"，并发会互相覆盖。
   const persistSettings = async (group: Group, confirmRetentionCleanup = false, retentionDays = historyRetentionDays) => {
@@ -384,11 +384,12 @@ export default function SettingsPage() {
             id={ids.username}
             value={username}
             onChange={(e) => setUsername(e.target.value)}
+            placeholder={me?.username ? `留空保持 ${me.username}` : "留空则不修改"}
             autoComplete="username"
             aria-describedby={`${ids.username}-desc`}
           />
           <span className="jy-caption" id={`${ids.username}-desc`}>
-            当前用户：{me?.username || (meLoaded ? "暂不可用" : "读取中…")}。留空则不修改用户名
+            当前用户：{me?.username || (meLoaded ? "暂不可用" : "读取中…")}。要改用户名时填新名字，留空则不修改
           </span>
         </div>
         <div className="jy-field">
@@ -594,6 +595,17 @@ export default function SettingsPage() {
                   </span>
                 ) : null}
               </div>
+              {/* 保存按钮紧跟留存设置，下面的健康度、清理记录只是参考信息 */}
+              <div className="jy-settings-actions">
+                <Button
+                  type="primary"
+                  onClick={() => void onSaveRetention()}
+                  loading={savingGroup === "retention" || previewingCleanup}
+                  disabled={!settingsLoaded || (busy && savingGroup !== "retention" && !previewingCleanup)}
+                >
+                  保存修改
+                </Button>
+              </div>
 
               <div className="jy-settings-health">
                 <section aria-labelledby={`${uid}-health`}>
@@ -635,16 +647,6 @@ export default function SettingsPage() {
                 </section>
               </div>
 
-              <div className="jy-settings-actions">
-                <Button
-                  type="primary"
-                  onClick={() => void onSaveRetention()}
-                  loading={savingGroup === "retention" || previewingCleanup}
-                  disabled={!settingsLoaded || (busy && savingGroup !== "retention" && !previewingCleanup)}
-                >
-                  保存修改
-                </Button>
-              </div>
             </Panel>
           </>
         )

@@ -1,7 +1,7 @@
 "use client";
 // 自营业务：自营站点的下游收入、上游成本与毛利，按概览 / 用户 / 模型与渠道分标签。
-// 数据来自 /api/own/analytics（同范围 60 秒内复用，约 30 秒自动刷新一次）；
-// 近 7 / 30 天另取 /api/analytics 的逐日上游成本，画每日收入、成本与毛利；
+// 数据来自 /api/own/analytics（同范围 60 秒内复用成功结果，约 30 秒自动刷新一次）；
+// 近 7 / 30 天另取 /api/analytics 的逐日上游成本，画每日收入、成本与毛利（它慢，不挡着页面先出来）；
 // 日志精算另走 /api/own/audit，开销大，只在点按钮时请求。
 import "../../styles/pages/my.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -33,13 +33,14 @@ const tzName = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 export default function MyStationPage() {
   const router = useRouter();
-  const [range, setRange] = useUrlState<OwnRange>("range", "today", RANGES);
+  // 默认近 7 天：「今天」在早上几乎是空的，首屏看不出走势
+  const [range, setRange] = useUrlState<OwnRange>("range", "7d", RANGES);
   const [tab, setTab] = useUrlState<MyTab>("tab", "overview", TABS);
 
   // data 是最近一次成功的结果（可能是上一个范围的，换范围时先留着变淡显示）
   const [data, setData] = useState<any>(null);
-  // 与 data 同一范围的逐日上游成本；取不到时是 { error }，只影响趋势图
-  const [costs, setCosts] = useState<any>(null);
+  // 与 data 同一范围的逐日上游成本；undefined 是还在取，取不到时是 { error }，只影响趋势图
+  const [costs, setCosts] = useState<any>(undefined);
   const [err, setErr] = useState<{ range: string; msg: string } | null>(null);
   const [unconfigured, setUnconfigured] = useState(false);
   const [asOf, setAsOf] = useState<number | null>(null);
@@ -51,14 +52,14 @@ export default function MyStationPage() {
   const [auditRows, setAuditRows] = useState(4000);
   const [auditOpen, setAuditOpen] = useState(false);
 
-  // 客户端缓存：同范围 60 秒内直接复用
-  const cacheRef = useRef<Record<string, { at: number; data: any; costs: any }>>({});
+  // 客户端缓存：同范围 60 秒内直接复用；逐日成本失败的结果不复用，下次照常重取
+  const cacheRef = useRef<Record<string, { at: number; data: any; costs?: any }>>({});
   const rangeRef = useRef<string>(range);
   rangeRef.current = range;
 
   const load = useCallback(async (force: boolean, r: string = rangeRef.current, rethrow = false) => {
     const cached = cacheRef.current[r];
-    if (!force && cached && Date.now() - cached.at < 60000) {
+    if (!force && cached && !cached.costs?.error && Date.now() - cached.at < 60000) {
       setData(cached.data);
       setCosts(cached.costs);
       setErr(null);
@@ -66,18 +67,28 @@ export default function MyStationPage() {
       setAsOf(cached.at);
       return;
     }
+    // 逐日成本单独等：自营数据先渲染，趋势图晚一点补上
+    const costReq =
+      r === "today"
+        ? Promise.resolve(null)
+        : api(`/api/analytics?days=${r === "7d" ? 7 : 30}`).catch((e: any) => ({ error: productErrorMessage(e) }));
     try {
-      const [res, cost] = await Promise.all([
-        api(`/api/own/analytics?range=${r}&tz=${encodeURIComponent(tzName())}`),
-        r === "today"
-          ? null
-          : api(`/api/analytics?days=${r === "7d" ? 7 : 30}`).catch((e: any) => ({ error: productErrorMessage(e) })),
-      ]);
-      cacheRef.current[r] = { at: Date.now(), data: res, costs: cost };
+      const res = await api(`/api/own/analytics?range=${r}&tz=${encodeURIComponent(tzName())}`);
+      // 新的逐日成本回来前先沿用上一份成功的，免得每次轮询趋势图都闪一下
+      const entry: { at: number; data: any; costs?: any } = {
+        at: Date.now(),
+        data: res,
+        costs: cached?.costs?.error ? undefined : cached?.costs,
+      };
+      cacheRef.current[r] = entry;
+      costReq.then((cost) => {
+        entry.costs = cost;
+        if (rangeRef.current === r && cacheRef.current[r] === entry) setCosts(cost);
+      });
       // 响应回来时范围已切走则丢弃
       if (rangeRef.current !== r) return;
       setData(res);
-      setCosts(cost);
+      setCosts(entry.costs);
       setErr(null);
       setUnconfigured(false);
       setAsOf(Date.now());

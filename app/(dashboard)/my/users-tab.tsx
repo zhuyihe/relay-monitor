@@ -7,7 +7,7 @@ import { ErrorState } from "../../components/data-state";
 import { Icon } from "../../components/icons";
 import { CountBadge, Panel } from "../../components/panel";
 import { StatusText } from "../../components/status";
-import { DataTable, Delta, RANGE_LABEL, TOKEN_NOTE, deltaSortValue, money, perM, productErrorMessage, sum } from "./shared";
+import { DataTable, Delta, RANGE_LABEL, TOKEN_NOTE, deltaSortValue, money, perM, productErrorMessage, sum, totalsNote } from "./shared";
 import type { Col, OwnRange, OwnView, UsageRow } from "./shared";
 
 export function UsersTab({ v, range, reload }: { v: OwnView; range: OwnRange; reload: () => Promise<unknown> }) {
@@ -24,7 +24,9 @@ export function UsersTab({ v, range, reload }: { v: OwnView; range: OwnRange; re
 
 function UserTable({ v, range }: { v: OwnView; range: OwnRange }) {
   const [q, setQ] = useState("");
-  const { users, totCost, d, prevLabel } = v;
+  const { users, d, prevLabel } = v;
+  // 占比按用户表自己的合计算，各行加起来是 100%（模型表的合计口径不同，见表下说明）
+  const totCost = sum(users, (u) => u.cost);
   const shown = useMemo(() => {
     const k = q.trim().toLowerCase();
     return k ? users.filter((u) => String(u.user).toLowerCase().includes(k)) : users;
@@ -75,6 +77,7 @@ function UserTable({ v, range }: { v: OwnView; range: OwnRange }) {
       title="用户消费排行"
       badge={<CountBadge count={users.length} muted />}
       caption={RANGE_LABEL[range]}
+      foot={totalsNote(v, "users")}
       extra={
         <div className="jy-toolbar">
           <Input

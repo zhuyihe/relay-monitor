@@ -68,7 +68,9 @@ export function ForecastChart({
 
   const hp = hover != null ? pts[hover] : null;
   const title = hp ? `${tomorrow(hover as number) ? "明天 " : ""}${hp.h}:00 至 ${hp.h + 1}:00` : "";
-  const range = hp ? `${format(hp.lo, { dp: 0 })} 至 ${format(hp.hi, { dp: 0 })}` : "";
+  // 区间按元取整只适合大额；小额（每小时几块钱）取整会变成「¥0 至 ¥1」，保留两位
+  const rangeDp = hp && hp.hi >= 100 ? 0 : 2;
+  const range = hp ? `${format(hp.lo, { dp: rangeDp })} 至 ${format(hp.hi, { dp: rangeDp })}` : "";
   const x = hover != null ? cx(hover) : 0;
 
   return (

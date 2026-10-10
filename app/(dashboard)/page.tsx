@@ -101,42 +101,51 @@ export default function OverviewPage() {
   const rangeRef = useRef(range);
   rangeRef.current = range;
 
-  const loadStations = useCallback(async () => {
+  // 两个加载函数都返回错误信息（成功返回 null），顶栏刷新据此提示
+  const loadStations = useCallback(async (): Promise<string | null> => {
     try {
       const r = await api("/api/stations");
       setStations(Array.isArray(r?.stations) ? r.stations : []);
       if (r?.settings) setSettings(r.settings);
       setStationsErr(null);
       setStationsAt(Date.now());
+      return null;
     } catch (e: any) {
-      setStationsErr(e?.message || "上游资源加载失败");
+      const msg = e?.message || "上游资源加载失败";
+      setStationsErr(msg);
+      return msg;
     }
   }, []);
 
   // 经营数据：优先自营站点口径；没标记自营站点时只统计成本
-  const loadMoney = useCallback(async (r: Range) => {
+  const loadMoney = useCallback(async (r: Range): Promise<string | null> => {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     try {
       const own = await api(`/api/own/analytics?range=${r}&tz=${encodeURIComponent(tz)}`);
-      if (rangeRef.current !== r) return;
+      if (rangeRef.current !== r) return null;
       setMoney({ range: r, unconfigured: false, own, fallback: null });
       setMoneyErr(null);
       setMoneyAt(Date.now());
+      return null;
     } catch (e: any) {
-      if (rangeRef.current !== r) return;
+      if (rangeRef.current !== r) return null;
       const msg = String(e?.message || "");
       if (!msg.includes("还没有标记")) {
         setMoneyErr(msg || "经营数据加载失败");
-        return;
+        return msg || "经营数据加载失败";
       }
       try {
         const fallback = await api(`/api/analytics?days=${RANGE_DAYS[r]}&includeArchived=true`);
-        if (rangeRef.current !== r) return;
+        if (rangeRef.current !== r) return null;
         setMoney({ range: r, unconfigured: true, own: null, fallback });
         setMoneyErr(null);
         setMoneyAt(Date.now());
+        return null;
       } catch (e2: any) {
-        if (rangeRef.current === r) setMoneyErr(e2?.message || "成本数据加载失败");
+        if (rangeRef.current !== r) return null;
+        const msg2 = e2?.message || "成本数据加载失败";
+        setMoneyErr(msg2);
+        return msg2;
       }
     }
   }, []);
@@ -173,10 +182,16 @@ export default function OverviewPage() {
     };
   }, [intervalSec, loadStations, loadMoney]);
 
+  // 刷新全部上游后重新加载本页；重新加载失败时抛错由顶栏提示，部分上游查询失败时如实说明
   const onRefresh = async () => {
-    await api("/api/refresh", { method: "POST", body: {} });
-    await Promise.all([loadStations(), loadMoney(rangeRef.current), reloadWorkflowActions()]);
-    message.success("已刷新全部上游资源");
+    const r = await api("/api/refresh", { method: "POST", body: {} });
+    const [stationsLoadErr, moneyLoadErr] = await Promise.all([loadStations(), loadMoney(rangeRef.current), reloadWorkflowActions()]);
+    const err = stationsLoadErr || moneyLoadErr;
+    if (err) throw new Error(`已刷新上游，但本页数据加载失败：${err}`);
+    const list: any[] = Array.isArray(r?.stations) ? r.stations : [];
+    const failed = list.filter((s) => !s.archivedAt && s.balance && !s.balance.ok).length;
+    if (failed) message.warning(`已刷新上游资源，其中 ${failed} 个余额查询失败，见「需要处理」`);
+    else message.success("已刷新全部上游资源");
   };
 
   const syncOne = async (s: any) => {
@@ -316,7 +331,8 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
         value: profit.incomeCny ?? null,
         approx: ownRateMissing,
         note: ownRateMissing ? "未设置汇率，按 1:1 折算" : `来自 ${users} 位下游用户`,
-        href: "/my",
+        // 带上同一个时间范围，自营业务默认是近 7 天
+        href: range === "7d" ? "/my" : `/my?range=${range}`,
       }}
       usage={{
         value: r2(sum(usageCosts.map((c) => Number(c.cny) || 0))),

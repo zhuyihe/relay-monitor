@@ -124,3 +124,18 @@
   .jy-accounts-facts dd { margin-bottom: 4px; }
   .jy-accounts-unverified-item { padding: 12px; }
 }
+
+/* 余额列下的近 48 小时走势：整块是按钮，点开余额趋势 */
+.jy-spark-btn {
+  display: inline-flex; align-items: center; gap: 6px; margin: 4px -4px 0 0; padding: 2px 4px;
+  border: 0; border-radius: var(--jy-r1); background: none; cursor: pointer;
+  font: inherit; font-size: 12px; line-height: 18px; color: var(--jy-ink-3);
+}
+.jy-spark-btn:hover { background: var(--jy-sunken); color: var(--jy-ink-2); }
+.jy-spark-btn:focus-visible { outline: 2px solid var(--jy-cobalt); outline-offset: 1px; }
+.jy-spark { display: block; flex: none; }
+.jy-spark .line { fill: none; stroke: var(--jy-cobalt); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.jy-spark .area { fill: var(--jy-cobalt-tint); }
+.jy-spark .dot { fill: var(--jy-cobalt); }
+.jy-m-list .m-spark { grid-column: 1 / -1; }
+.jy-m-list .m-spark .jy-spark-btn { margin: 0 0 0 -4px; }

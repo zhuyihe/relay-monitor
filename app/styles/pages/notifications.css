@@ -56,3 +56,6 @@
   .jy-notifications-pad { padding: 4px 16px 16px; }
   .jy-m-list .jy-notifications-test { flex-direction: row; flex-wrap: wrap; gap: 4px 8px; }
 }
+.jy-notifications-banner-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.jy-notifications-banner-body p { margin: 0; }
+.jy-notifications-channels { scroll-margin-top: 72px; }

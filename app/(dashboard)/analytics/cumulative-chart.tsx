@@ -1,7 +1,7 @@
 "use client";
 // 累计成本：期内逐日累加的用量成本、固定成本与总成本三条折线（直线连接，不做平滑）。
-// 旧页面的"固定 vs 用量"堆叠图和累计成本折线合并到这里；共享的 TrendPanel 不画固定成本线，
-// 这张图补上固定成本的走势。缺记录的日子画斜纹带，累计值在那之后带 ≈（按已有数据累加）。
+// 旧页面的"固定 vs 用量"堆叠图和累计成本折线合并到这里。没有固定成本时总成本就是用量成本，
+// 三条线会重叠成一条，这时只画用量成本。缺记录的日子画斜纹带，累计值在那之后带 ≈（按已有数据累加）。
 import { useId, useMemo, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import { WEEKDAYS, axisMoney, formatHhmm, formatMoney, formatMonthDay, parseDay } from "../../../lib/format";
@@ -64,6 +64,8 @@ export function CumulativePanel({ rows, asOf }: { rows: TrendRow[]; asOf?: numbe
   const n = pts.length;
   const hasMissing = pts.some((p) => p.missing);
   const hasToday = !!pts[n - 1]?.today;
+  const hasFixed = (pts[n - 1]?.fixed ?? 0) > 0;
+  const series = hasFixed ? SERIES : SERIES.filter((s) => s.key === "usage");
 
   const H = 220;
   const T = 12;
@@ -78,7 +80,7 @@ export function CumulativePanel({ rows, asOf }: { rows: TrendRow[]; asOf?: numbe
   const bands = runs(pts.map((p) => p.missing));
   const lastSolid = hasToday ? n - 2 : n - 1;
   const vals = (k: (typeof SERIES)[number]["key"]) => pts.map((p) => p[k]);
-  const ends = spreadLabels(SERIES.map((s) => ({ name: s.name, y: y(pts[n - 1]?.[s.key] ?? 0) + 4 })));
+  const ends = spreadLabels(series.map((s) => ({ name: s.name, y: y(pts[n - 1]?.[s.key] ?? 0) + 4 })));
   const xIdx = n ? xTickIdx(n, pw) : [];
 
   const title = (p: Point) => `${formatMonthDay(p.d)} ${WEEKDAYS[p.d.getDay()]}${p.today && asOf ? `，截至 ${formatHhmm(asOf)}` : ""}`;
@@ -112,40 +114,51 @@ export function CumulativePanel({ rows, asOf }: { rows: TrendRow[]; asOf?: numbe
     const usage = formatMoney(hp.usage, { approx: hp.approx });
     const fixed = formatMoney(hp.fixed);
     const day = hp.dayCost == null ? "用量记录缺失" : formatMoney(r2(hp.dayCost + hp.dayFixed));
-    tipRows = [
-      ["累计总成本", total, "var(--jy-ink-2)"],
-      ["累计用量成本", usage, "var(--jy-s2)"],
-      ["累计固定成本", fixed, "var(--jy-s3)"],
-      ["当天成本", day],
-    ];
-    spoken = `${title(hp)}：累计总成本 ${total}，累计用量成本 ${usage}，累计固定成本 ${fixed}，当天成本 ${day}`;
+    tipRows = hasFixed
+      ? [
+          ["累计总成本", total, "var(--jy-ink-2)"],
+          ["累计用量成本", usage, "var(--jy-s2)"],
+          ["累计固定成本", fixed, "var(--jy-s3)"],
+          ["当天成本", day],
+        ]
+      : [
+          ["累计用量成本", usage, "var(--jy-s2)"],
+          ["当天成本", day],
+        ];
+    spoken = hasFixed
+      ? `${title(hp)}：累计总成本 ${total}，累计用量成本 ${usage}，累计固定成本 ${fixed}，当天成本 ${day}`
+      : `${title(hp)}：累计用量成本 ${usage}，当天成本 ${day}`;
   }
   const ready = w > 0 && n > 0;
   const x = hover != null ? cx(hover) : 0;
   const last = pts[n - 1];
 
   return (
-    <Panel title="累计成本" caption="期内逐日累加">
-      <div className="jy-legend">
-        {SERIES.map((s) => (
-          <span key={s.key}>
-            <i className="line-key" style={{ background: s.color }} />
-            {s.name}
-          </span>
-        ))}
-        {hasToday && (
-          <span>
-            <i className="line-key line-key--dash" />
-            今天（未满一天）
-          </span>
-        )}
-        {hasMissing && (
-          <span>
-            <i className="jy-swatch hatch-swatch" />
-            数据缺失，未计入
-          </span>
-        )}
-      </div>
+    <Panel title="累计成本" caption={hasFixed ? "期内逐日累加" : "期内逐日累加；没有固定成本，总成本即用量成本"}>
+      {(hasFixed || hasToday || hasMissing) && (
+        <div className="jy-legend">
+          {/* 只有一条线时由线尾标签标明，不再单列图例 */}
+          {hasFixed &&
+            series.map((s) => (
+              <span key={s.key}>
+                <i className="line-key" style={{ background: s.color }} />
+                {s.name}
+              </span>
+            ))}
+          {hasToday && (
+            <span>
+              <i className="line-key line-key--dash" />
+              今天（未满一天）
+            </span>
+          )}
+          {hasMissing && (
+            <span>
+              <i className="jy-swatch hatch-swatch" />
+              数据缺失，未计入
+            </span>
+          )}
+        </div>
+      )}
       <div
         ref={ref}
         className="jy-chart-stack"
@@ -178,7 +191,7 @@ export function CumulativePanel({ rows, asOf }: { rows: TrendRow[]; asOf?: numbe
               {bands.map(([a, b]) => (
                 <rect key={a} x={cx(a) - step / 2} y={T} width={(b - a + 1) * step} height={H - B - T} fill={`url(#${uid}h)`} />
               ))}
-              {SERIES.map((s) => (
+              {series.map((s) => (
                 <g key={s.key}>
                   <path className="series" style={{ stroke: s.color }} d={linePath(vals(s.key), cx, y, 0, lastSolid)} />
                   {hasToday && n > 1 && (
@@ -199,7 +212,7 @@ export function CumulativePanel({ rows, asOf }: { rows: TrendRow[]; asOf?: numbe
               {hover != null && (
                 <>
                   <line className="cross" x1={x} x2={x} y1={T} y2={H - B} />
-                  {SERIES.map((s) => (
+                  {series.map((s) => (
                     <circle key={s.key} className="hover-dot" r={4.5} cx={x} cy={y(pts[hover][s.key])} style={{ fill: s.color }} />
                   ))}
                 </>

@@ -11,7 +11,7 @@ import { CountBadge, Panel } from "../../components/panel";
 import { Seg } from "../../components/seg";
 import { AuditPanel } from "./audit-panel";
 import type { AuditProps } from "./audit-panel";
-import { DataTable, Delta, MODE_LABEL, RANGE_LABEL, TOKEN_NOTE, deltaSortValue, money, perM, productErrorMessage, sum } from "./shared";
+import { DataTable, Delta, MODE_LABEL, RANGE_LABEL, TOKEN_NOTE, deltaSortValue, money, perM, productErrorMessage, sum, totalsNote } from "./shared";
 import type { Col, OwnRange, OwnView, UsageRow } from "./shared";
 
 export function ModelsTab({
@@ -181,7 +181,7 @@ function ModelTable({ v, range }: { v: OwnView; range: OwnRange }) {
     { key: "delta", label: "环比", title: prevLabel, num: true, sort: deltaSortValue, render: (r) => <Delta pct={r.deltaPct} isNew={r.isNew} /> },
   ];
   return (
-    <Panel title="模型明细" badge={<CountBadge count={models.length} muted />} caption={RANGE_LABEL[range]}>
+    <Panel title="模型明细" badge={<CountBadge count={models.length} muted />} caption={RANGE_LABEL[range]} foot={totalsNote(v, "models")}>
       <DataTable<UsageRow>
         scroll
         tall
@@ -220,7 +220,8 @@ function UsageTrend({ v, range }: { v: OwnView; range: OwnRange }) {
         defaultSort={{ key: "t", dir: "desc" }}
         empty="这个时间范围内还没有用量。"
         cols={[
-          { key: "t", label: hourly ? "时间" : "日期", sort: (r) => r.t, render: (r) => label(r.t), foot: "合计" },
+          // 表格只露出一部分行，合计标明覆盖了多少行，免得误以为只合计了看得见的几行
+          { key: "t", label: hourly ? "时间" : "日期", sort: (r) => r.t, render: (r) => label(r.t), foot: `合计（${rows.length} ${hourly ? "小时" : "天"}）` },
           { key: "req", label: "请求数", num: true, sort: (r) => r.requests, render: (r) => formatInt(r.requests), foot: formatInt(sum(rows, (r) => r.requests)) },
           { key: "tok", label: "计费 Token", title: TOKEN_NOTE, num: true, sort: (r) => r.tokens, render: (r) => formatInt(r.tokens), foot: formatInt(sum(rows, (r) => r.tokens)) },
           { key: "cost", label: "消费", num: true, sort: (r) => r.cost, render: (r) => money(r.cost), foot: money(sum(rows, (r) => r.cost)) },

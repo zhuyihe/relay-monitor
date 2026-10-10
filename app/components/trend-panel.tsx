@@ -1,5 +1,6 @@
 "use client";
-// 收入与用量成本趋势（同一纵轴）+ 每日毛利柱（共用横轴），一个面板，可切换成表格。
+// 收入、用量成本与固定成本趋势（同一纵轴）+ 每日毛利柱（共用横轴），一个面板，可切换成表格。
+// 没有固定成本时不画固定成本线。
 // 今天未满一天用虚线；缺数据的日子画斜纹带、断线，不补零。
 // 悬停或用左右方向键逐日查看，十字线同时贯穿两张图。
 import { useId, useMemo, useState } from "react";
@@ -46,15 +47,12 @@ export function TrendPanel({
   rows: input,
   showRev = true,
   asOf,
-  fixedNote,
   title,
   caption = "按天，同一纵轴",
 }: {
   rows: TrendRow[];
   showRev?: boolean;
   asOf?: number | null;
-  // 图例右侧的说明，如"固定成本每天 ¥40.00，只计入毛利"
-  fixedNote?: ReactNode;
   title?: ReactNode;
   caption?: ReactNode;
 }) {
@@ -93,7 +91,7 @@ export function TrendPanel({
       }
     >
       {view === "chart" ? (
-        <TrendChart rows={rows} showRev={showRev} asOf={asOf} fixedNote={fixedNote} />
+        <TrendChart rows={rows} showRev={showRev} asOf={asOf} />
       ) : (
         <TrendTable rows={rows} showRev={showRev} asOf={asOf} />
       )}
@@ -105,12 +103,10 @@ function TrendChart({
   rows,
   showRev,
   asOf,
-  fixedNote,
 }: {
   rows: Row[];
   showRev: boolean;
   asOf?: number | null;
-  fixedNote?: ReactNode;
 }) {
   const [stackRef, w] = useElementWidth();
   const [hover, setHover] = useState<number | null>(null);
@@ -118,6 +114,7 @@ function TrendChart({
   const n = rows.length;
   const hasMissing = rows.some((r) => r.missing);
   const hasToday = !!rows[n - 1]?.today;
+  const hasFixed = rows.some((r) => r.fixed > 0);
 
   const T = 12;
   const L = w < 480 ? 46 : 52;
@@ -126,16 +123,17 @@ function TrendChart({
   const step = pw / Math.max(1, n);
   const cx = (i: number) => L + step * (i + 0.5);
 
-  // 上图：收入与用量成本
+  // 上图：收入、用量成本与固定成本
   const HL = 208;
   const BL = showRev ? 8 : 28;
-  const vals = rows.flatMap((r) => [r.rev, r.cost]).filter((v): v is number => v != null);
+  const vals = rows.flatMap((r) => [r.rev, r.cost, hasFixed ? r.fixed : null]).filter((v): v is number => v != null);
   const yt = niceTicks(0, Math.max(0, ...vals), 4);
   const y = (v: number) => T + (1 - (v - yt.lo) / (yt.hi - yt.lo)) * (HL - T - BL);
   const bands = runs(rows.map((r) => !!r.missing));
   const series = [
     ...(showRev ? [{ name: "收入", color: "var(--jy-s1)", vals: rows.map((r) => r.rev) }] : []),
     { name: "用量成本", color: "var(--jy-s2)", vals: rows.map((r) => r.cost) },
+    ...(hasFixed ? [{ name: "固定成本", color: "var(--jy-s3)", vals: rows.map((r): number | null => r.fixed) }] : []),
   ];
   const lastSolid = hasToday ? n - 2 : n - 1;
   const ends = spreadLabels(series.map((s) => ({ name: s.name, y: y(s.vals[n - 1] ?? s.vals[n - 2] ?? 0) + 4 })));
@@ -185,7 +183,7 @@ function TrendChart({
     const profit = hr.profit == null ? "无法计算" : formatMoney(hr.profit, { approx: hr.partial });
     if (showRev) tipRows.push(["收入", formatMoney(hr.rev), "var(--jy-s1)"]);
     tipRows.push(["用量成本", cost, "var(--jy-s2)"]);
-    tipRows.push(["固定成本", formatMoney(hr.fixed)]);
+    tipRows.push(["固定成本", formatMoney(hr.fixed), hasFixed ? "var(--jy-s3)" : undefined]);
     if (showRev)
       tipRows.push([
         "毛利",
@@ -216,6 +214,12 @@ function TrendChart({
           <i className="line-key" style={{ background: "var(--jy-s2)" }} />
           用量成本
         </span>
+        {hasFixed && (
+          <span>
+            <i className="line-key" style={{ background: "var(--jy-s3)" }} />
+            固定成本
+          </span>
+        )}
         {hasToday && (
           <span>
             <i className="line-key line-key--dash" />
@@ -228,14 +232,13 @@ function TrendChart({
             数据缺失
           </span>
         )}
-        {fixedNote != null && <span className="legend-note">{fixedNote}</span>}
       </div>
       <div
         ref={stackRef}
         className="jy-chart-stack"
         tabIndex={0}
         role="img"
-        aria-label={`${showRev ? "每日收入与用量成本折线图，以及每日毛利柱状图" : "每日用量成本折线图"}，可用左右方向键逐日查看`}
+        aria-label={`${showRev ? "每日收入与用量成本" : "每日用量成本"}${hasFixed ? "、固定成本" : ""}折线图${showRev ? "，以及每日毛利柱状图" : ""}，可用左右方向键逐日查看`}
         onPointerMove={onPointerMove}
         onPointerLeave={() => setHover(null)}
         onKeyDown={onKeyDown}

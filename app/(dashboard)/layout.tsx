@@ -138,17 +138,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const clearPage = useCallback(() => setPageState({}), []);
   const shellApi = useMemo(() => ({ setPage, clearPage, refreshing }), [setPage, clearPage, refreshing]);
 
-  // 刷新：页面注册了就刷新本页数据；没注册的页面沿用"刷新全部上游"
+  // 刷新本页数据；没有注册刷新的页面（设置、告警中心、账单核算）不显示刷新按钮，
+  // 避免在这些页面误触发"刷新全部上游"
   const onRefresh = async () => {
-    if (refreshing) return;
+    if (refreshing || !page.onRefresh) return;
     setRefreshing(true);
     try {
-      if (page.onRefresh) {
-        await page.onRefresh();
-      } else {
-        await api("/api/refresh", { method: "POST", body: {} });
-        message.success("已刷新全部上游资源");
-      }
+      await page.onRefresh();
     } catch (e: any) {
       message.error(e?.message || "刷新失败");
     } finally {
@@ -261,14 +257,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 <span className="jy-num">{hhmm(asOf)}</span>
               </span>
             )}
-            {!passwordChangeRequired && (
+            {!passwordChangeRequired && page.onRefresh && (
               <button
                 type="button"
                 className={`jy-icon-btn${refreshing ? " jy-spinning" : ""}`}
                 onClick={onRefresh}
                 disabled={refreshing}
-                aria-label={page.onRefresh ? "刷新当前页面数据" : "刷新全部上游资源"}
-                title={page.onRefresh ? "刷新当前页面数据" : "刷新全部上游资源"}
+                aria-label="刷新当前页面数据"
+                title="刷新当前页面数据"
               >
                 <Icon name="refresh" />
               </button>

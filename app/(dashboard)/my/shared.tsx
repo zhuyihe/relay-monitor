@@ -74,6 +74,24 @@ export function deriveOwn(d: any) {
 }
 export type OwnView = ReturnType<typeof deriveOwn>;
 
+// 用户表、模型表和概览收入三个合计口径不同，在表下说明差在哪
+export function totalsNote(v: OwnView, here: "users" | "models"): string | undefined {
+  const userTot = sum(v.users, (u) => u.cost);
+  const adminTot = sum(
+    v.users.filter((u) => u.isAdmin),
+    (u) => u.cost,
+  );
+  const notes: string[] = [];
+  if (here === "users" && adminTot >= 0.005) notes.push(`合计含管理员自用的 ${money(adminTot)}，概览里的收入不算这部分。`);
+  if (here === "models") notes.push("合计是全部消费，含管理员自用。");
+  const mine = here === "users" ? userTot : v.totCost;
+  const other = here === "users" ? v.totCost : userTot;
+  if (Math.abs(mine - other) >= Math.max(0.01, other * 0.005)) {
+    notes.push(`按${here === "users" ? "模型" : "用户"}统计的合计是 ${money(other)}：站点分别汇总这两份数据，合计可能有出入。`);
+  }
+  return notes.length ? notes.join("") : undefined;
+}
+
 // 环比：上窗为 0 记"新增"；涨跌 50% 以上加粗
 export function Delta({ pct, isNew }: { pct: number | null | undefined; isNew?: boolean }) {
   if (isNew) return <span className="jy-delta jy-delta--new">新增</span>;

@@ -16,8 +16,9 @@ import { EmptyState, ErrorState, Skeleton } from "../../components/data-state";
 import { Icon, Sym } from "../../components/icons";
 import { Panel } from "../../components/panel";
 import { RunwayTrack } from "../../components/runway";
-import { Seg } from "../../components/seg";
+import { Seg, TabPanel, Tabs } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
+import { Spark } from "../../components/spark";
 import { LEVEL_ORDER, StatusText } from "../../components/status";
 import { useUrlParams, useUrlState } from "../../components/use-url-state";
 import { useWorkflowActions } from "../../components/use-workflow-actions";
@@ -40,6 +41,10 @@ import type { StationDrawerHandle } from "./station-drawer";
 const FILTERS = ["all", "attention", "ok", "archived"] as const;
 type Filter = (typeof FILTERS)[number];
 const SORTS = ["", "days", "-days"] as const;
+// 资源列表、渠道接入、账号关系分成三个标签，避免一页从头滚到尾
+const VIEWS = ["list", "onboarding", "accounts"] as const;
+type View = (typeof VIEWS)[number];
+const ONBOARDING_ACTIONS = ["connect", "coverage", "source"];
 type Sort = (typeof SORTS)[number];
 const COLS = 7;
 
@@ -84,12 +89,25 @@ export default function StationsPage() {
   const [archiving, setArchiving] = useState(false);
   const [purging, setPurging] = useState(false);
 
-  const [query, setQuery] = useState("");
+  // 搜索词写进地址栏（停止输入 300ms 后），刷新与分享链接时保持
+  const [queryParam, setQueryParam] = useUrlState<string>("q", "");
+  const [query, setQuery] = useState(queryParam);
+  const [view, setView] = useUrlState<View>("view", "list", VIEWS);
   const [filter, setFilter] = useUrlState<Filter>("filter", "all", FILTERS);
   const [typeFilter, setTypeFilter] = useUrlState<string>("type", "");
   const [sort, setSort] = useUrlState<Sort>("sort", "", SORTS);
   const [params, setParams] = useUrlParams();
   const editParam = params.get("edit");
+
+  useEffect(() => {
+    if (query === queryParam) return;
+    const t = setTimeout(() => setQueryParam(query.trim() ? query : ""), 300);
+    return () => clearTimeout(t);
+  }, [query]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 浏览器前进后退改了地址栏时跟上
+  useEffect(() => {
+    setQuery((cur) => (cur.trim() === queryParam.trim() ? cur : queryParam));
+  }, [queryParam]);
 
   const drawerRef = useRef<StationDrawerHandle>(null);
   // 更多菜单里的“编辑”：关闭抽屉后焦点回到这一行的更多按钮
@@ -286,7 +304,7 @@ export default function StationsPage() {
   };
 
   // “需处理”直接复用总览的待办规则：同一批在用资源、同一份规则和阈值，账号与账单待办也算在内
-  // 列表只放在监控的资源（归档的照常放在「已归档」里）；暂停监控的资源在下方账号关系中查看与重新启用
+  // 列表只放在监控的资源（归档的照常放在「已归档」里）；暂停监控的资源在「账号关系」标签中查看与重新启用
   const listed = useMemo(() => stations.filter((s) => s.monitorEnabled !== false || s.archivedAt), [stations]);
   const paused = stations.filter((s) => s.monitorEnabled === false && !s.archivedAt);
   const { actions: workflowActions } = useWorkflowActions();
@@ -339,7 +357,7 @@ export default function StationsPage() {
   const filtered = !!q || !!typeFilter || filter !== "all";
   const clearFilters = () => {
     setQuery("");
-    setParams({ filter: null, type: null });
+    setParams({ filter: null, type: null, q: null });
   };
   const nextSort: Record<Sort, Sort> = { "": "days", days: "-days", "-days": "" };
   const ariaSort = sort === "days" ? "ascending" : sort === "-days" ? "descending" : undefined;
@@ -371,11 +389,16 @@ export default function StationsPage() {
       return;
     }
     accounts.openWorkflow(href);
-    // 核验与授权会弹出对话框；接入类事项在下方接入区，其余定位到账号关系里的原资源
+    // 核验与授权会弹出抽屉；接入类事项切到「渠道接入」，其余在页面顶部列出原资源
     const action = new URL(href, window.location.origin).searchParams.get("action") || "";
-    const target = ["verify", "verify-billing", "authorization"].includes(action) ? null : ["connect", "coverage", "source"].includes(action) ? ".jy-stations-onboarding" : ".jy-accounts-inspect";
-    if (target) setTimeout(() => document.querySelector(target)?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
+    if (["verify", "verify-billing", "authorization"].includes(action)) return;
+    const target = ONBOARDING_ACTIONS.includes(action) ? ".jy-tabs" : ".jy-accounts-inspect";
+    setTimeout(() => document.querySelector(target)?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
   };
+  // 从总览、账单核算或行内打开的接入类事项，在「渠道接入」标签里处理
+  useEffect(() => {
+    if (accounts.destination && ONBOARDING_ACTIONS.includes(accounts.destination.action)) setView("onboarding");
+  }, [accounts.destination]); // eslint-disable-line react-hooks/exhaustive-deps
   const todosOf = (v: StationView) => (v.archived ? [] : (todosById.get(actionKey(v.s)) || []).filter((a: any) => a.workflow));
   const todoLinks = (v: StationView) => {
     const list = todosOf(v);
@@ -438,16 +461,39 @@ export default function StationsPage() {
     if (v.fixed) return <span className="jy-muted">不适用</span>;
     if (!b?.ok) return <span className="jy-muted">—</span>;
     const rem = Number(b.remaining);
-    return hasRate(v) ? (
+    return (
       <>
-        {formatMoney(rem * v.rate)}
-        <span className="jy-sub-money">原币 {formatUsd(rem)}</span>
+        {hasRate(v) ? (
+          <>
+            {formatMoney(rem * v.rate)}
+            <span className="jy-sub-money">原币 {formatUsd(rem)}</span>
+          </>
+        ) : (
+          <>
+            {formatMoney(rem)}
+            <span className="jy-sub-money" title="折算成本与利润时按 1:1 计算，可在编辑里设置汇率">未设置汇率</span>
+          </>
+        )}
+        {sparkButton(v)}
       </>
-    ) : (
-      <>
-        {formatMoney(rem)}
-        <span className="jy-sub-money" title="折算成本与利润时按 1:1 计算，可在编辑里设置汇率">未设置汇率</span>
-      </>
+    );
+  };
+
+  // 近 48 小时走势本身就是余额趋势的入口；没有足够数据点时只能从“更多”菜单打开
+  const sparkButton = (v: StationView, withLabel = false) => {
+    const pts = v.s.spark;
+    if (v.fixed || v.archived || !v.s.balance?.ok || !Array.isArray(pts) || pts.length < 2) return null;
+    return (
+      <button
+        type="button"
+        className="jy-spark-btn"
+        title="近 48 小时余额走势，点击查看详细趋势"
+        aria-label={`查看 ${v.s.name} 的余额趋势`}
+        onClick={() => setTrendStation(v.s)}
+      >
+        {withLabel ? <span>近 48 小时</span> : null}
+        <Spark pts={pts} width={withLabel ? 120 : 88} />
+      </button>
     );
   };
 
@@ -512,7 +558,7 @@ export default function StationsPage() {
         <>
           {syncTime(b.checkedAt)}
           <span className="jy-stations-sub">
-            {relTime(b.checkedAt)}{b.latencyMs != null ? ` · ${b.latencyMs}ms` : ""}
+            {relTime(b.checkedAt)}
           </span>
         </>
       );
@@ -642,7 +688,7 @@ export default function StationsPage() {
     body = (
       <EmptyState
         title="没有正在监控的上游资源"
-        desc={`另有 ${paused.length} 个资源已暂停监控，可在下方账号关系中重新启用。`}
+        desc={`另有 ${paused.length} 个资源已暂停监控，可在「账号关系」标签中重新启用。`}
         action={addButton}
       />
     );
@@ -719,7 +765,7 @@ export default function StationsPage() {
             const b = v.s.balance;
             return (
               <li key={v.id}>
-                <span className="m-top">{v.s.name}</span>
+                <span className="m-top" title={v.s.name}>{v.s.name}</span>
                 <StatusText level={v.level}>{v.statusLabel}</StatusText>
                 {todoLinks(v)}
                 <div className="m-sub">
@@ -738,6 +784,7 @@ export default function StationsPage() {
                   {v.runway ? <span>可用 <b>{v.runway.text}</b></span> : null}
                   {!v.fixed && b?.checkedAt && !v.issue ? <span>同步 <b>{syncTime(b.checkedAt)}</b></span> : null}
                 </div>
+                {sparkButton(v, true) ? <div className="m-spark">{sparkButton(v, true)}</div> : null}
                 {!v.archived && v.issue ? <div className="jy-stations-m-issue">{issueBox(v)}</div> : null}
                 <div className="m-actions">
                   {primaryAction(v)}
@@ -793,51 +840,71 @@ export default function StationsPage() {
       ) : null}
       {accounts.top}
 
-      <div className="jy-toolbar">
-        <Input
-          prefix={<Icon name="search" />}
-          allowClear
-          placeholder="搜索名称或地址"
-          aria-label="搜索上游资源"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        <Seg<Filter>
-          label="按状态筛选"
-          value={filter}
-          onChange={setFilter}
-          options={[
-            { value: "all", label: "全部", count: counts.all },
-            { value: "attention", label: "需处理", count: counts.attention },
-            { value: "ok", label: "无需处理", count: counts.ok },
-            { value: "archived", label: "已归档", count: counts.archived },
-          ]}
-        />
-        <Select
-          className="jy-stations-type"
-          aria-label="按类型筛选"
-          value={typeFilter}
-          onChange={(value: string) => setTypeFilter(value)}
-          options={[{ value: "", label: "全部类型" }, ...types.map((t) => ({ value: t.value, label: t.label }))]}
-        />
-        <span className="spacer" />
-        <Button icon={<Icon name="refresh" />} loading={refreshingAll} onClick={onRefreshAll}>同步全部</Button>
-        {addButton}
+      <Tabs<View>
+        tabs={[
+          { key: "list", label: "资源列表" },
+          { key: "onboarding", label: "渠道接入" },
+          { key: "accounts", label: "账号关系" },
+        ]}
+        active={view}
+        onChange={setView}
+        idPrefix="stations"
+        label="上游资源视图"
+      />
+      {/* 外层包一层：隐藏的标签面板不参与页面的间距；渠道接入与账号关系始终挂载，切换标签不丢状态 */}
+      <div>
+        <TabPanel idPrefix="stations" tabKey="list" active={view === "list"}>
+          <div className="jy-toolbar">
+            <Input
+              prefix={<Icon name="search" />}
+              allowClear
+              placeholder="搜索名称或地址"
+              aria-label="搜索上游资源"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <Seg<Filter>
+              label="按状态筛选"
+              value={filter}
+              onChange={setFilter}
+              options={[
+                { value: "all", label: "全部", count: counts.all },
+                { value: "attention", label: "需处理", count: counts.attention },
+                { value: "ok", label: "无需处理", count: counts.ok },
+                { value: "archived", label: "已归档", count: counts.archived },
+              ]}
+            />
+            <Select
+              className="jy-stations-type"
+              aria-label="按类型筛选"
+              value={typeFilter}
+              onChange={(value: string) => setTypeFilter(value)}
+              options={[{ value: "", label: "全部类型" }, ...types.map((t) => ({ value: t.value, label: t.label }))]}
+            />
+            <span className="spacer" />
+            <Button icon={<Icon name="refresh" />} loading={refreshingAll} onClick={onRefreshAll}>同步全部</Button>
+            {addButton}
+          </div>
+
+          {filter === "attention" && unowned > 0 ? (
+            <p className="jy-caption jy-stations-unowned">
+              另有 {unowned} 项账号与账单待办不归属单个资源，在<Link className="jy-link" href="/">运营总览</Link>处理。
+            </p>
+          ) : null}
+          <Panel body={false} label="上游资源列表">{body}</Panel>
+        </TabPanel>
+
+        <TabPanel idPrefix="stations" tabKey="onboarding" active={view === "onboarding"}>
+          <div className="jy-stations-onboarding">
+            {/* 行内打开新的处理目标时重新挂载，让它按新目标重新定位 */}
+            <ChannelOnboarding key={accounts.destinationSeq} compact={compact} onComplete={reload} destination={accounts.destination} />
+          </div>
+        </TabPanel>
+
+        <TabPanel idPrefix="stations" tabKey="accounts" active={view === "accounts"}>
+          {accounts.center}
+        </TabPanel>
       </div>
-
-      {filter === "attention" && unowned > 0 ? (
-        <p className="jy-caption jy-stations-unowned">
-          另有 {unowned} 项账号与账单待办不归属单个资源，在<Link className="jy-link" href="/">运营总览</Link>处理。
-        </p>
-      ) : null}
-      <Panel body={false} label="上游资源列表">{body}</Panel>
-
-      <div className="jy-stations-onboarding">
-        {/* 行内打开新的处理目标时重新挂载，让它按新目标重新定位 */}
-        <ChannelOnboarding key={accounts.destinationSeq} compact={compact} onComplete={reload} destination={accounts.destination} />
-      </div>
-
-      {accounts.center}
 
       <Modal
         title={archiveTarget ? `归档「${archiveTarget.name}」？` : "归档资源"}

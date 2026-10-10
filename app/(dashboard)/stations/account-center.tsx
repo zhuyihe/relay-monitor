@@ -321,7 +321,7 @@ export function useAccountCenter({
         <div className="jy-accounts-actions">
           {original && !compact
             ? <Button size="small" disabled={loadingMeta || !types.length} aria-label={`查看原资源设置 ${resource.name}`} onClick={() => openEditor(original)}>资源设置</Button>
-            : <span className="jy-caption">原资源设置使用完整资源记录；余额与趋势见上方资源列表。</span>}
+            : <span className="jy-caption">原资源设置使用完整资源记录；余额与趋势见「资源列表」标签。</span>}
           {!resource.archivedAt && !original?.isOwn ? (
             <Button
               size="small"

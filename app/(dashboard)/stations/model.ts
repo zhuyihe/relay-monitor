@@ -292,7 +292,7 @@ export function buildStationView(
       if (st !== "warn") statusLabel = etaLevel === "crit" ? "即将耗尽" : "7 天内耗尽";
     }
   }
-  if (burn > 0 && eta != null) statusNote = `预计 ${fmtEta(eta)}后耗尽`;
+  if (burn > 0 && eta != null) statusNote = `预计 ${fmtEta(eta)}后用完`;
   // 不再续费的资源与自营站点不做余额提醒（与运营总览一致），只保留文字
   if ((s.noRenewal || s.isOwn) && (level === "crit" || level === "warn")) {
     level = "muted";

@@ -18,6 +18,9 @@
 .jy-analytics-lead { margin: 0 0 16px; color: var(--jy-ink-2); }
 .jy-analytics-gaps { margin-top: 16px; }
 
+/* 消耗时段退回近 7 天时的说明 */
+.jy-analytics-heat-note { margin: 0 0 12px; max-width: 72ch; }
+
 @media (prefers-reduced-motion: reduce) {
   .jy-analytics-switching { transition: none; }
 }

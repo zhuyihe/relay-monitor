@@ -398,8 +398,8 @@ export function StationDrawer({
           <Button
             type="primary"
             loading={saving}
-            disabled={!canSave}
-            title={canSave ? undefined : "请先测试连接"}
+            disabled={!canSave || (!!editing && !dirty)}
+            title={!canSave ? "请先测试连接" : editing && !dirty ? "还没有修改" : undefined}
             onClick={onSave}
           >
             {editing ? "保存修改" : "添加资源"}

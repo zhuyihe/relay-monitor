@@ -18,7 +18,8 @@ import { Seg } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
 import { useUrlState } from "../../components/use-url-state";
 
-// 时间档位（照抄 v1 USAGE_RANGES）
+// 时间档位（照抄 v1 USAGE_RANGES）。今天 / 近 7 天 / 近 30 天与总览、自营一致；
+// 用量有小时粒度，所以多一个和余额趋势弹窗同款的「近 24 小时」滚动窗口
 const USAGE_RANGES = [
   { value: "today", label: "今天" },
   { value: "24h", label: "近 24 小时" },
@@ -278,7 +279,9 @@ export default function UsagePage() {
   }, [agg]);
 
   // "按上游"：取用量最大的 8 个上游单独成列，其余合并为"其他"。
-  // 颜色按上游在接口里的固定顺序（添加顺序）取槽位，排名变化不换色；只有撞色时才顺延到下一个空槽。
+  // 颜色跟着上游走，不跟排名走：每个上游的本色槽位 = 接口里的固定顺序（添加顺序）% 8。
+  // 先让本色没被更早添加的上游占用的都拿本色，再把撞色的分到剩下的空槽；
+  // 这样前 8 个添加的上游颜色永远不变，排名变化只会影响第 9 个以后、且和别人撞色的上游。
   const upstream = useMemo(() => {
     if (!agg || !current) return null;
     const order = new Map<string, number>((current.stations || []).map((s: any, i: number) => [s.id, i]));
@@ -293,13 +296,22 @@ export default function UsagePage() {
     const shown = totals.slice(0, MAX_SERIES).map((x: any) => x.s);
     const rest = totals.slice(MAX_SERIES).map((x: any) => x.s);
     shown.sort((a: any, b: any) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+    const home = (s: any) => (order.get(s.id) ?? 0) % MAX_SERIES;
     const used = new Set<number>();
-    const series: Series[] = shown.map((s: any) => {
-      let slot = (order.get(s.id) ?? 0) % MAX_SERIES;
+    const slotOf = new Map<string, number>();
+    for (const s of shown) {
+      if (used.has(home(s))) continue;
+      used.add(home(s));
+      slotOf.set(s.id, home(s));
+    }
+    for (const s of shown) {
+      if (slotOf.has(s.id)) continue;
+      let slot = home(s);
       while (used.has(slot)) slot = (slot + 1) % MAX_SERIES;
       used.add(slot);
-      return { key: s.id, name: s.name, slot };
-    });
+      slotOf.set(s.id, slot);
+    }
+    const series: Series[] = shown.map((s: any) => ({ key: s.id, name: s.name, slot: slotOf.get(s.id) as number }));
     if (rest.length) series.push({ key: OTHER_KEY, name: `其他 ${rest.length} 个`, slot: null });
 
     const rows: { key: string; label: string; sid: string; name: string; tokens: number }[] = [];

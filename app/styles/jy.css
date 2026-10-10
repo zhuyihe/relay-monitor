@@ -356,7 +356,6 @@ a.jy-eq-term:hover { background: var(--jy-sunken); text-decoration: none; color:
 .jy-legend .line-key { width: 14px; height: 2px; border-radius: 1px; display: inline-block; }
 .jy-legend .line-key--dash { background: repeating-linear-gradient(90deg, var(--jy-ink-3) 0 3px, transparent 3px 6px); }
 .jy-legend .hatch-swatch { border: 1px solid var(--jy-rule); background-image: repeating-linear-gradient(135deg, var(--jy-ink-dis) 0 1.5px, transparent 1.5px 4px); }
-.jy-legend .legend-note { margin-left: auto; color: var(--jy-ink-3); }
 .jy-tip {
   position: absolute; z-index: 5; pointer-events: none;
   min-width: 148px; padding: 8px 10px; border-radius: var(--jy-r2);
@@ -523,6 +522,21 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-banner--info { background: var(--jy-sunken); }
 .jy-banner--info .jy-sym { color: var(--jy-ink-3); }
 
+/* 余额趋势弹窗：四个读数 + 范围切换 + 折线 */
+.jy-trend { display: flex; flex-direction: column; gap: 16px; }
+.jy-trend-figs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; border-top: 1px solid var(--jy-rule-soft); border-bottom: 1px solid var(--jy-rule-soft); }
+.jy-trend-figs > div { min-width: 0; padding: 12px 16px; border-left: 1px solid var(--jy-rule-soft); }
+.jy-trend-figs > div:first-child { padding-left: 0; border-left: 0; }
+.jy-trend-figs dt { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
+.jy-trend-figs dd { margin: 2px 0 0; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); overflow-wrap: anywhere; }
+.jy-trend-figs dd.fig { margin: 2px 0 4px; font-size: 20px; line-height: 28px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jy-trend-figs .jy-status .jy-sym { width: 10px; height: 10px; }
+.jy-trend-bar { display: flex; justify-content: flex-end; }
+.jy-trend-body { min-height: 268px; }
+.jy-trend-body[aria-busy="true"] .jy-chart-stack { opacity: .55; transition: opacity .15s; }
+.jy-trend-body .jy-state--center { min-height: 268px; justify-content: center; }
+.jy-legend .jy-sym { width: 10px; height: 10px; }
+
 /* ─── antd 适配 ──────────────────────────────────────── */
 .ant-btn-link { padding-inline: 8px; }
 .ant-btn-link:not(:disabled):hover { background: var(--jy-cobalt-tint); }
@@ -568,7 +582,9 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-topbar .jy-menu-btn { display: inline-grid; margin-left: -8px; }
   .jy-topbar { padding: 0 16px; gap: 8px; }
   .jy-topbar h1 { font-size: 18px; line-height: 26px; overflow: hidden; text-overflow: ellipsis; }
-  .jy-topbar .jy-freshness, .jy-topbar .jy-avatar, .jy-topbar-range { display: none; }
+  .jy-topbar .jy-avatar, .jy-topbar-range { display: none; }
+  /* 手机上也要知道数据是几点的：只留状态点和时间 */
+  .jy-topbar .jy-freshness { flex: none; }
   .jy-mobile-range:not(:empty) { display: flex; flex-direction: column; gap: 6px; }
   .jy-mobile-range .jy-range { flex-direction: column; align-items: stretch; gap: 6px; }
   .jy-mobile-range .jy-seg { width: 100%; }
@@ -612,10 +628,14 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-tabs { gap: 20px; overflow-x: auto; }
   .jy-tabs-bar .extra { display: none; }
   .jy-heat .clabel:nth-child(odd) { visibility: hidden; }
-  .jy-legend .legend-note { margin-left: 0; flex-basis: 100%; }
   .jy-popover { width: 100%; }
   .jy-kv { grid-template-columns: 1fr; gap: 2px; }
   .jy-kv dd { margin-bottom: 8px; }
+  .jy-trend-figs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .jy-trend-figs > div { padding: 10px 12px; }
+  .jy-trend-figs > div:nth-child(odd) { padding-left: 0; border-left: 0; }
+  .jy-trend-figs > div:nth-child(n+3) { border-top: 1px solid var(--jy-rule-soft); }
+  .jy-trend-bar { justify-content: flex-start; }
 }
 
 @media (prefers-reduced-motion: reduce) {

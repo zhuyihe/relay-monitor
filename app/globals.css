@@ -170,110 +170,11 @@ textarea {
   overscroll-behavior: contain;
 }
 
-/* 余额趋势弹窗（trend-modal.tsx） */
-.trend-metric > span {
-  display: block;
-  color: var(--jy-text-secondary);
-  font-size: 12px;
-  font-weight: 550;
-  line-height: 18px;
-}
-
-.trend-metric > small {
-  display: block;
-  margin-top: 8px;
-  overflow: hidden;
-  color: var(--jy-text-secondary);
-  font-size: 12px;
-  line-height: 18px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.trend-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 1px;
-  overflow: hidden;
-  margin-bottom: 18px;
-  border: 1px solid var(--jy-border);
-  border-radius: 8px;
-  background: var(--jy-border);
-}
-
-.trend-metric {
-  min-width: 0;
-  padding: 14px;
-  background: var(--jy-surface);
-}
-
-.trend-metric--primary {
-  background: var(--jy-primary-soft);
-}
-
-.trend-metric > strong {
-  display: block;
-  margin-top: 4px;
-  overflow: hidden;
-  color: var(--jy-text);
-  font-size: 18px;
-  font-weight: 650;
-  line-height: 26px;
-  letter-spacing: -0.02em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.trend-metric--warn > strong {
-  color: var(--jy-warning);
-}
-
-.trend-metric--danger > strong {
-  color: var(--jy-danger);
-}
-
-.trend-range {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 10px;
-}
-
-.trend-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 24px;
-  text-align: center;
-}
-
-.trend-state > strong {
-  color: var(--jy-text);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.trend-state > span {
-  max-width: 420px;
-  color: var(--jy-text-secondary);
-  font-size: 12px;
-  line-height: 18px;
-  overflow-wrap: anywhere;
-}
-
-.trend-state--error > strong,
-.trend-state--error > span {
-  color: var(--jy-danger);
-}
-
 @media (max-width: 991px) {
   .mobile-scroll .ant-segmented-item-label {
     min-height: 44px;
     line-height: 44px;
   }
-
 }
 
 @media (max-width: 767px) {
@@ -316,18 +217,6 @@ textarea {
 
   .page-toolbar {
     width: 100%;
-    justify-content: flex-start;
-  }
-
-  .trend-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .trend-metric {
-    padding: 12px;
-  }
-
-  .trend-range {
     justify-content: flex-start;
   }
 

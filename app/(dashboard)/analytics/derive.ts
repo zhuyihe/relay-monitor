@@ -110,8 +110,10 @@ export function derive(data: any, own: any) {
   // 保证收入合计与利润口径一致。
   let incomeBy: Map<string, number> | null = null;
   let incomeIssue: string | null = null;
+  // 自营站点没设汇率时按 1:1 折算，收入只是估算
+  const ownNoRate = !!own && !(own.station?.cnyPerUsd > 0);
   if (own && own.profit && !own.profit.error && Array.isArray(own.trend)) {
-    const rate = own.station?.cnyPerUsd > 0 ? own.station.cnyPerUsd : 1;
+    const rate = ownNoRate ? 1 : own.station.cnyPerUsd;
     const trendTotal = own.trend.reduce((a: number, t: any) => a + (Number(t.cost) || 0), 0);
     if (trendTotal > 0) {
       const ratio = own.profit.incomeCny / (trendTotal * rate);
@@ -152,6 +154,9 @@ export function derive(data: any, own: any) {
   });
 
   const revenue = incomeBy ? r2(rows.reduce((a, r) => a + (r.rev || 0), 0)) : null;
+  // 自营收入只有 7 / 30 天口径；所选天数不同时，收入是从整段分摊后截取的部分
+  const ownDays = days <= 7 ? 7 : 30;
+  const revenueSplit = !!incomeBy && days !== ownDays;
   const usage = r2(rows.reduce((a, r) => a + (r.cost || 0), 0));
   const fixed = r2(rows.reduce((a, r) => a + r.fixed, 0));
 
@@ -176,31 +181,13 @@ export function derive(data: any, own: any) {
     .filter((m) => m.unknown || m.usage + m.fixed > 0)
     .sort((a, b) => Number(a.unknown) - Number(b.unknown) || b.usage + b.fixed - (a.usage + a.fixed));
 
-  // 消耗时段：接口给的是窗口内每个"星期 × 小时"的合计（weekday 0 = 周一）
-  const avail = data.heatmapAvailability;
-  const heatAvailable = avail ? !!avail.available : days <= 30 && data.heatmapAvailable !== false;
-  const heatReason: HeatReason = heatAvailable
-    ? null
-    : avail?.reason || (days > 30 ? "range-not-supported" : "incomplete-raw-history");
-  const grid = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0));
-  if (heatAvailable) {
-    for (const h of Array.isArray(data.heatmap) ? data.heatmap : []) {
-      const w = Number(h.weekday);
-      const hr = Number(h.hour);
-      if (w >= 0 && w < 7 && hr >= 0 && hr < 24) grid[w][hr] = r2(grid[w][hr] + (Number(h.cny) || 0));
-    }
-  }
-  const heatEmpty = heatAvailable && !grid.some((row) => row.some((v) => v > 0));
-  const heatGaps: any[] = Array.isArray(avail?.coverage?.stationGaps) ? avail.coverage.stationGaps : [];
-
-  // 可用天数：沿用旧页面口径，全部资源里有预测值的都列出，最紧急的在最上面
+  // 可用天数：和总览的上游余量同一口径，只列上游（不含自营站点），最紧急的在最上面
   const runway = stations
-    .filter((s) => s.runway && s.runway.etaDays != null)
+    .filter((s) => !s.isOwn && s.runway && s.runway.etaDays != null)
     .map((s) => ({
       id: s.id,
       name: s.name,
       archived: !!s.archivedAt,
-      isOwn: !!s.isOwn,
       days: Number(s.runway.etaDays),
       burnCny: Number(s.runway.burnPerDay) * rateOf(s),
       basis: s.runway.basis || null,
@@ -213,6 +200,10 @@ export function derive(data: any, own: any) {
     hasIncome: !!incomeBy,
     incomeIssue,
     revenue,
+    revenueApprox: !!incomeBy && (ownNoRate || revenueSplit),
+    ownNoRate,
+    revenueSplit,
+    ownDays,
     usage,
     fixed,
     usageApprox: missingDates.length > 0 || partialDates.length > 0,
@@ -231,9 +222,28 @@ export function derive(data: any, own: any) {
       coveredDays: covered.length,
     },
     mix,
-    heat: { available: heatAvailable, reason: heatReason, grid, empty: heatEmpty, gaps: heatGaps },
+    heat: deriveHeat(data),
     runway,
   };
+}
+
+// 消耗时段：接口给的是窗口内每个"星期 × 小时"的合计（weekday 0 = 周一）
+export function deriveHeat(data: any) {
+  const days = Math.max(1, Number(data.days) || 1);
+  const avail = data.heatmapAvailability;
+  const available = avail ? !!avail.available : days <= 30 && data.heatmapAvailable !== false;
+  const reason: HeatReason = available ? null : avail?.reason || (days > 30 ? "range-not-supported" : "incomplete-raw-history");
+  const grid = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0));
+  if (available) {
+    for (const h of Array.isArray(data.heatmap) ? data.heatmap : []) {
+      const w = Number(h.weekday);
+      const hr = Number(h.hour);
+      if (w >= 0 && w < 7 && hr >= 0 && hr < 24) grid[w][hr] = r2(grid[w][hr] + (Number(h.cny) || 0));
+    }
+  }
+  const empty = available && !grid.some((row) => row.some((v) => v > 0));
+  const gaps: any[] = Array.isArray(avail?.coverage?.stationGaps) ? avail.coverage.stationGaps : [];
+  return { available, reason, grid, empty, gaps, days };
 }
 
 export type Derived = ReturnType<typeof derive>;

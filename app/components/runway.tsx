@@ -86,7 +86,7 @@ export function Runway({
         {items.map((s) => (
           <li key={s.key} tabIndex={s.tip ? 0 : undefined} {...(s.tip ? bind(() => <TipBody title={s.tipTitle ?? s.name} rows={s.tip} />) : {})}>
             <div className="who">
-              <strong>{s.name}</strong>
+              <strong title={typeof s.name === "string" ? s.name : typeof s.tipTitle === "string" ? s.tipTitle : undefined}>{s.name}</strong>
               <span>{s.failed ? "余额未知" : s.sub}</span>
             </div>
             <RunwayTrack days={s.days} level={s.level} failed={s.failed} critDays={critDays} warnDays={warnDays} maxDays={maxDays} />

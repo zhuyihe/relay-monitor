@@ -10,7 +10,7 @@ import { Button, Checkbox } from "antd";
 import { NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { formatDays, formatMoney, isoDay } from "../../../lib/format";
-import { EmptyState, ErrorState, PanelSkeleton } from "../../components/data-state";
+import { EmptyState, ErrorState, PanelSkeleton, Skeleton } from "../../components/data-state";
 import type { TipRow } from "../../components/float-tip";
 import { HBars } from "../../components/hbars";
 import type { HBarItem } from "../../components/hbars";
@@ -26,8 +26,12 @@ import { useShellPage } from "../../components/shell-context";
 import { TrendPanel } from "../../components/trend-panel";
 import { useUrlParams } from "../../components/use-url-state";
 import { CumulativePanel } from "./cumulative-chart";
-import { addDays, dayDiff, derive, gapSummary, md, r2, runsText, validDay } from "./derive";
+import { addDays, dayDiff, derive, deriveHeat, gapSummary, md, r2, runsText, validDay } from "./derive";
 import type { Derived, OwnStatus } from "./derive";
+
+type Heat = ReturnType<typeof deriveHeat>;
+// 所选范围的消耗时段画不出来时退回的近 7 天；heat 为 null 表示退回也失败了
+type HeatFallback = { includeArchived: boolean; heat: Heat | null };
 
 const PRESET_DAYS: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
 const RANGE_OPTIONS = [
@@ -78,8 +82,9 @@ export default function AnalyticsPage() {
   // 只采用最后一次发出的请求结果，避免快速切换范围时旧响应覆盖新范围
   const seq = useRef(0);
 
+  // 返回这次加载的错误信息（成功或已被更新的请求取代时返回 null），供顶栏刷新按钮提示
   const load = useCallback(
-    async (d: number) => {
+    async (d: number): Promise<string | null> => {
       const my = ++seq.current;
       const params = new URLSearchParams({ days: String(d) });
       if (includeArchived) params.set("includeArchived", "true");
@@ -88,10 +93,12 @@ export default function AnalyticsPage() {
         api(`/api/analytics?${params}`),
         d <= 30 ? api(`/api/own/analytics?range=${d <= 7 ? "7d" : "30d"}`) : Promise.resolve(null),
       ]);
-      if (my !== seq.current) return;
+      if (my !== seq.current) return null;
+      let error: string | null = null;
       if (a.status === "rejected") {
         // 保留上一次成功的数据，页面顶部提示刷新失败
-        setLoadError(a.reason?.message || "成本分析加载失败");
+        error = a.reason?.message || "成本分析加载失败";
+        setLoadError(error);
       } else {
         let ownStatus: OwnStatus = "not-applicable";
         let own: any = null;
@@ -114,6 +121,7 @@ export default function AnalyticsPage() {
         setLoadError(null);
       }
       setLoading(false);
+      return error;
     },
     [includeArchived],
   );
@@ -158,9 +166,35 @@ export default function AnalyticsPage() {
     [rangeValue, customOk, rawStart, minDate, today, setUrl],
   );
 
-  useShellPage({ onRefresh: () => load(days), asOf, range });
+  useShellPage({
+    onRefresh: async () => {
+      const error = await load(days);
+      if (error) throw new Error(`成本分析刷新失败：${error}`);
+    },
+    asOf,
+    range,
+  });
 
   const dv = useMemo(() => (snap ? derive(snap.data, snap.own) : null), [snap]);
+
+  // 消耗时段要求所选范围内每个上游的原始快照都齐全；缺了某几天时退回近 7 天，
+  // 不让整块空着。按小时取一次就够（热力图本身就是小时粒度）。
+  const needHeat7 = !!dv && !dv.heat.available && dv.heat.reason === "incomplete-raw-history" && (snap?.days ?? 0) > 7;
+  const hourKey = asOf ? Math.floor(asOf / 3600000) : 0;
+  const [heat7, setHeat7] = useState<HeatFallback | null>(null);
+  useEffect(() => {
+    if (!needHeat7) return;
+    let alive = true;
+    const params = new URLSearchParams({ days: "7" });
+    if (includeArchived) params.set("includeArchived", "true");
+    api(`/api/analytics?${params}`)
+      .then((d) => alive && setHeat7({ includeArchived, heat: deriveHeat(d) }))
+      .catch(() => alive && setHeat7({ includeArchived, heat: null }));
+    return () => {
+      alive = false;
+    };
+  }, [needHeat7, includeArchived, hourKey]);
+  const heatFallback = needHeat7 && heat7?.includeArchived === includeArchived ? heat7 : null;
 
   const archivedCount = Number(snap?.data?.selection?.archivedStationCount) || 0;
   const archiveToggle = (
@@ -260,11 +294,18 @@ export default function AnalyticsPage() {
 
       <Equation dv={dv} snap={snap} caption={windowCaption} extra={archiveToggle} href30={href30} onRetry={retry} />
 
-      <TrendPanel rows={dv.rows} showRev={dv.hasIncome} asOf={asOf} fixedNote={fixedNote(dv)} />
+      <TrendPanel rows={dv.rows} showRev={dv.hasIncome} asOf={asOf} />
 
       <div className="jy-grid-2 jy-grid-even">
         <MixPanel dv={dv} />
-        <HeatPanel dv={dv} days={data.days} href30={href30} onShorter={() => setUrl({ range: "7d", start: null })} />
+        <HeatPanel
+          dv={dv}
+          days={data.days}
+          href30={href30}
+          fallback={heatFallback}
+          fallbackLoading={needHeat7 && !heatFallback}
+          onShorter={() => setUrl({ range: "7d", start: null })}
+        />
       </div>
 
       {/* 可用天数的进度条在半宽卡片里太窄，窄屏和总览一样先换成单列 */}
@@ -324,16 +365,30 @@ function Equation({
   const ownName = snap.own?.station?.name || "自营站点";
 
   if (dv.hasIncome) {
+    // 收入是估算的两种情况：自营站点没设汇率（按 1:1 折算）、所选天数和自营收入口径（7 / 30 天）不一致
+    const revReasons: string[] = [];
+    if (dv.ownNoRate) revReasons.push(`${ownName} 没有设置售价汇率，收入按 1 美元 = 1 元折算。`);
+    if (dv.revenueSplit)
+      revReasons.push(`自营收入只按近 7 天、近 30 天统计，这里的收入是把近 ${dv.ownDays} 天的收入按每天下游消费占比摊开后取了所选的 ${dv.rows.length} 天。`);
+    const revNote = dv.ownNoRate ? "未设汇率，按 1:1 估算" : dv.revenueSplit ? `由近 ${dv.ownDays} 天收入摊分` : ownName;
+    // 缺的是成本时毛利一定偏高；只是收入估算时方向不定
+    const tail = reasons.length ? (
+      <>
+        缺失的用量成本会让毛利偏高。{coverageLink}
+      </>
+    ) : (
+      "毛利随收入一起是估算值。"
+    );
     return (
       <ProfitEquation
         title={EQ_TITLE}
         caption={caption}
         extra={extra}
-        revenue={{ value: dv.revenue, note: ownName, href: "/my" }}
+        revenue={{ value: dv.revenue, approx: dv.revenueApprox, note: revNote, href: "/my" }}
         usage={usage}
         fixed={fixed}
-        reasons={reasons}
-        partialTail={<>实际毛利会比这里低。{coverageLink}</>}
+        reasons={[...revReasons, ...reasons]}
+        partialTail={revReasons.length ? tail : <>实际毛利会比这里低。{coverageLink}</>}
       />
     );
   }
@@ -409,15 +464,6 @@ function Equation({
   );
 }
 
-// 趋势图图例旁的固定成本说明（共享趋势图不画固定成本线）
-function fixedNote(dv: Derived): ReactNode {
-  if (dv.fixed <= 0) return undefined;
-  const first = dv.rows[0]?.fixed ?? 0;
-  const flat = dv.rows.every((r) => r.fixed === first);
-  const where = dv.hasIncome ? "计入毛利" : "走势见累计成本";
-  return flat ? `固定成本每天 ${formatMoney(first)}，${where}` : `固定成本按天摊销，期内合计 ${formatMoney(dv.fixed)}，${where}`;
-}
-
 // ---- 成本构成 ------------------------------------------------------------------
 
 function MixPanel({ dv }: { dv: Derived }) {
@@ -456,8 +502,24 @@ function MixPanel({ dv }: { dv: Derived }) {
 
 // ---- 消耗时段 ------------------------------------------------------------------
 
-function HeatPanel({ dv, days, href30, onShorter }: { dv: Derived; days: number; href30: string; onShorter: () => void }) {
+function HeatPanel({
+  dv,
+  days,
+  href30,
+  fallback,
+  fallbackLoading,
+  onShorter,
+}: {
+  dv: Derived;
+  days: number;
+  href30: string;
+  fallback: HeatFallback | null;
+  fallbackLoading: boolean;
+  onShorter: () => void;
+}) {
   const { heat } = dv;
+  const fb = fallback?.heat?.available ? fallback.heat : null;
+  let caption = "期内每个时段的用量成本合计，按星期和小时";
   let body: ReactNode;
   if (heat.available && !heat.empty) {
     body = <Heatmap grid={heat.grid} valueLabel="用量成本合计" peakNote={`期内 ${days} 天合计`} />;
@@ -487,6 +549,27 @@ function HeatPanel({ dv, days, href30, onShorter }: { dv: Derived; days: number;
         }
       />
     );
+  } else if (fallbackLoading) {
+    body = <Skeleton height={180} />;
+  } else if (fb) {
+    // 退回近 7 天：说明为什么不是所选范围，缺快照的上游点名
+    const who = gapSummary(heat.gaps);
+    caption = "近 7 天每个时段的用量成本合计，按星期和小时";
+    body = (
+      <>
+        <p className="jy-caption jy-analytics-heat-note">
+          所选 {days} 天里有上游缺少原始监测快照{who ? `：${who}` : ""}。这里改为显示近 7 天。
+          <Link href="/settings" className="jy-link">
+            调整数据留存
+          </Link>
+        </p>
+        {fb.empty ? (
+          <EmptyState title="近 7 天上游没有用量消耗" desc="有消耗后，这里会按星期和小时显示用量成本。" />
+        ) : (
+          <Heatmap grid={fb.grid} valueLabel="用量成本合计" peakNote="近 7 天合计" />
+        )}
+      </>
+    );
   } else {
     const who = gapSummary(heat.gaps);
     body = (
@@ -495,7 +578,8 @@ function HeatPanel({ dv, days, href30, onShorter }: { dv: Derived; days: number;
         desc={`热力图需要近期原始监测快照。当前留存期限或采集覆盖不足，缺失时段不会补成零消耗。${who ? `缺快照的上游：${who}。` : ""}`}
         action={
           <>
-            {days > 7 && <Button onClick={onShorter}>切换到近 7 天</Button>}
+            {/* 近 7 天也画不出来时不再引导切换 */}
+            {days > 7 && !fallback?.heat && <Button onClick={onShorter}>切换到近 7 天</Button>}
             <Link href="/settings" className="jy-link">
               调整数据留存
             </Link>
@@ -505,7 +589,7 @@ function HeatPanel({ dv, days, href30, onShorter }: { dv: Derived; days: number;
     );
   }
   return (
-    <Panel title="消耗时段" caption="期内每个时段的用量成本合计，按星期和小时">
+    <Panel title="消耗时段" caption={caption}>
       {body}
     </Panel>
   );
@@ -516,7 +600,7 @@ function HeatPanel({ dv, days, href30, onShorter }: { dv: Derived; days: number;
 function RunwayPanel({ dv, critDays, metaFailed }: { dv: Derived; critDays: number; metaFailed: boolean }) {
   const items: RunwayItem[] = dv.runway.map((s) => {
     const level = s.days <= critDays ? "crit" : s.days < WARN_DAYS ? "warn" : "good";
-    const suffix = s.isOwn ? "（自营）" : s.archived ? "（已归档）" : "";
+    const suffix = s.archived ? "（已归档）" : "";
     const burn = Number.isFinite(s.burnCny) ? formatMoney(s.burnCny) : "—";
     const tip: TipRow[] = [
       ["日均消耗", burn],

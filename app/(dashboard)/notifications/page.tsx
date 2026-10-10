@@ -1,8 +1,9 @@
 "use client";
 // 告警中心：告警规则 / 通知渠道 / 每日日报。
-// 只在挂载时加载一次、不注册顶栏刷新：自动重载会冲掉未保存的阈值输入（沿用 v1 的取舍）。
+// 只在挂载时加载一次、不注册顶栏刷新：自动重载会冲掉正在输入的阈值（沿用 v1 的取舍）。
+// 告警规则整块即时生效：开关、渠道选择改动即保存，数字输入在离开输入框或按回车时保存。
 import "../../styles/pages/notifications.css";
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { App, Button, Checkbox, Form, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
@@ -62,6 +63,23 @@ function Dirty({ show }: { show: boolean }) {
   ) : null;
 }
 
+// 即时保存的状态：保存中 / 有没保存的输入 / 上次保存时间
+function SaveState({ saving, dirty, at }: { saving: boolean; dirty: boolean; at: number }) {
+  return (
+    <span aria-live="polite">
+      {saving ? <span className="jy-dirty">保存中…</span> : dirty ? <Dirty show /> : at ? <span className="jy-dirty">已保存 {formatHhmm(at)}</span> : null}
+    </span>
+  );
+}
+
+type RuleForm = {
+  etaUnit: "days" | "hours";
+  etaVal: number | null;
+  renotify: number | null;
+  errThreshold: number | null;
+  errRetry: number | null;
+};
+
 // 测试发送结果：图标 + 文字 + 底色，不单靠颜色
 function ResultBox({ r, okTitle }: { r: TestResult; okTitle: string }) {
   return (
@@ -94,7 +112,7 @@ export default function NotificationsPage() {
   const [metaErr, setMetaErr] = useState<unknown>(null);
   const [settings, setSettings] = useState<any>({});
 
-  // 规则阈值表单（开关和渠道绑定即时落库，不进表单）
+  // 规则阈值输入（开关和渠道绑定直接落库，不经过这里）
   const [etaVal, setEtaVal] = useState<number | null>(null);
   const [etaUnit, setEtaUnit] = useState<"days" | "hours">("days");
   const [renotify, setRenotify] = useState<number | null>(24);
@@ -102,6 +120,7 @@ export default function NotificationsPage() {
   const [errRetry, setErrRetry] = useState<number | null>(30);
   const [ruleErrors, setRuleErrors] = useState<Record<string, string>>({});
   const [rulesSaving, setRulesSaving] = useState(false);
+  const [rulesSavedAt, setRulesSavedAt] = useState(0);
   const [channelsFor, setChannelsFor] = useState<Record<string, string[]>>({});
 
   // 每日日报表单
@@ -332,6 +351,7 @@ export default function NotificationsPage() {
     try {
       const r = await api("/api/notifications/rules", { method: "PUT", body: { [key]: !rules[key] } });
       setRules(r.rules);
+      setRulesSavedAt(Date.now());
     } catch (e: any) {
       message.error(e.message);
     }
@@ -344,19 +364,20 @@ export default function NotificationsPage() {
       const r = await api("/api/notifications/rules", { method: "PUT", body: { channelsFor: { [key]: ids } } });
       setRules(r.rules);
       setChannelsFor(r.rules?.channelsFor || {});
+      setRulesSavedAt(Date.now());
     } catch (e: any) {
       message.error(e.message);
       setChannelsFor(rules?.channelsFor || {});
     }
   };
 
-  // 切换单位时把输入值换算过去（两个单位间必然是互换）
+  // 切换单位时把输入值换算过去（两个单位间必然是互换），换算后直接保存
   const onEtaUnitChange = (u: "days" | "hours") => {
     const v = Number(etaVal);
-    if (etaVal != null && Number.isFinite(v) && v > 0) {
-      setEtaVal(u === "hours" ? +(v * 24).toFixed(2) : +(v / 24).toFixed(2));
-    }
+    const next = etaVal != null && Number.isFinite(v) && v > 0 ? (u === "hours" ? +(v * 24).toFixed(2) : +(v / 24).toFixed(2)) : etaVal;
+    setEtaVal(next);
     setEtaUnit(u);
+    void saveRules({ etaUnit: u, etaVal: next });
   };
 
   const rulesDirty =
@@ -367,40 +388,53 @@ export default function NotificationsPage() {
       errThreshold !== Number(rules?.errorThreshold ?? 1) ||
       errRetry !== Number(rules?.errorRetrySec ?? 30));
 
-  const saveRules = async () => {
+  // over：刚改、还没进 state 的值（切换单位时）
+  const saveRules = async (over: Partial<RuleForm> = {}) => {
+    const f: RuleForm = { etaUnit, etaVal, renotify, errThreshold, errRetry, ...over };
     // 清空视为「未填写」而不是 0；被禁用（规则关闭）的空字段沿用已保存的值，不拦截保存
     const errs: Record<string, string> = {};
-    if (etaVal == null && rules.onEta) errs.eta = "请填写耗尽预警阈值";
-    if (errThreshold == null && rules.onError) errs.errThreshold = "请填写失败次数";
-    if (renotify == null) errs.renotify = "请填写重复提醒间隔，0 表示只提醒一次";
-    if (errRetry == null) errs.errRetry = "请填写重试间隔，0 表示关闭";
+    if (f.etaVal == null && rules.onEta) errs.eta = "请填写耗尽预警阈值";
+    if (f.errThreshold == null && rules.onError) errs.errThreshold = "请填写失败次数";
+    if (f.renotify == null) errs.renotify = "请填写重复提醒间隔，0 表示只提醒一次";
+    if (f.errRetry == null) errs.errRetry = "请填写重试间隔，0 表示关闭";
     setRuleErrors(errs);
-    const first = Object.keys(errs)[0];
-    if (first) {
-      document.getElementById(`${uid}-${first}`)?.focus();
-      return;
-    }
+    if (Object.keys(errs).length) return;
     setRulesSaving(true);
     try {
-      const val = Number(etaVal ?? etaRuleDisplay(rules));
+      const val = Number(f.etaVal ?? etaRuleDisplay(rules));
       const r = await api("/api/notifications/rules", {
         method: "PUT",
         body: {
-          etaDays: etaUnit === "hours" ? val / 24 : val, // 内部统一按天
-          etaUnit,
-          renotifyHours: Number(renotify),
-          errorThreshold: Number(errThreshold ?? rules.errorThreshold ?? 1),
-          errorRetrySec: Number(errRetry),
+          etaDays: f.etaUnit === "hours" ? val / 24 : val, // 内部统一按天
+          etaUnit: f.etaUnit,
+          renotifyHours: Number(f.renotify),
+          errorThreshold: Number(f.errThreshold ?? rules.errorThreshold ?? 1),
+          errorRetrySec: Number(f.errRetry),
         },
       });
       setRules(r.rules);
-      syncRuleForm(r.rules);
-      message.success("规则已保存");
+      // 回显服务端钳制后的值；保存途中又改了的输入保持用户正在输入的内容
+      const keep = <T,>(sent: T, saved: T) => (cur: T) => (cur === sent ? saved : cur);
+      setEtaUnit(keep(f.etaUnit, r.rules?.etaUnit === "hours" ? "hours" : "days"));
+      setEtaVal(keep(f.etaVal, etaRuleDisplay(r.rules)));
+      setRenotify(keep(f.renotify, Number(r.rules?.renotifyHours ?? 24)));
+      setErrThreshold(keep(f.errThreshold, Number(r.rules?.errorThreshold ?? 1)));
+      setErrRetry(keep(f.errRetry, Number(r.rules?.errorRetrySec ?? 30)));
+      setRulesSavedAt(Date.now());
     } catch (e: any) {
       message.error(e.message);
     } finally {
       setRulesSaving(false);
     }
+  };
+  // 离开输入框或按回车时保存；没改动就不发请求。
+  // 推迟一拍再读：输入框失焦时才把越界值钳到范围内，要等这次 onChange 渲染完拿到最新值
+  const commitRef = useRef<() => void>(null);
+  commitRef.current = () => {
+    if (rulesDirty) void saveRules();
+  };
+  const commitRules = () => {
+    setTimeout(() => commitRef.current?.(), 0);
   };
 
   // ---- 每日日报 ---------------------------------------------------------------
@@ -531,6 +565,8 @@ export default function NotificationsPage() {
           <Space.Compact>
             <InputNumber
               id={`${uid}-eta`}
+              onBlur={commitRules}
+              onPressEnter={commitRules}
               min={0}
               precision={2}
               value={etaVal}
@@ -553,7 +589,7 @@ export default function NotificationsPage() {
               ]}
             />
           </Space.Compact>
-          <span>内耗尽时通知</span>
+          <span>内用完时通知</span>
           {ruleErrors.eta && (
             <span className="jy-err" id={`${uid}-eta-err`}>
               <Sym kind="crit" />
@@ -568,6 +604,8 @@ export default function NotificationsPage() {
           <label htmlFor={`${uid}-errThreshold`}>连续失败达到</label>
           <InputNumber
             id={`${uid}-errThreshold`}
+            onBlur={commitRules}
+            onPressEnter={commitRules}
             min={1}
             precision={0}
             suffix="次"
@@ -604,9 +642,35 @@ export default function NotificationsPage() {
   }
 
   const notifFailed = !notifLoaded && !!notifErr;
+  // 有告警或日报要发，却没有可用的渠道：消息会被静默丢掉，放在页首提醒
+  const wantsDelivery = RULES.some((r) => rules[r.key]) || !!settings?.dailyReport?.enabled;
+  const noDelivery = notifLoaded && wantsDelivery && !channels.some((c) => c.enabled !== false);
+  const showChannels = () => {
+    document.querySelector(".jy-notifications-channels")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   return (
     <div className="jy-page">
+      {noDelivery ? (
+        <div className="jy-banner jy-banner--crit" role="alert">
+          <Sym kind="crit" />
+          <div className="jy-notifications-banner-body">
+            <b>{channels.length ? "通知渠道都已停用，告警不会送达" : "还没有通知渠道，告警不会送达"}</b>
+            <p className="jy-caption">
+              {channels.length ? "至少启用一个渠道，已开启的告警和日报才会发出。" : "添加至少一个渠道，已开启的告警和日报才会发出。"}
+            </p>
+          </div>
+          {channels.length ? (
+            <Button size="small" onClick={showChannels}>
+              查看通知渠道
+            </Button>
+          ) : (
+            <Button size="small" type="primary" icon={<Icon name="plus" />} onClick={() => openChModal(null)}>
+              添加渠道
+            </Button>
+          )}
+        </div>
+      ) : null}
       {/* 告警规则 */}
       {notifFailed ? (
         <Panel title="告警规则">
@@ -615,8 +679,8 @@ export default function NotificationsPage() {
       ) : (
         <Panel
           title="告警规则"
-          badge={<Dirty show={rulesDirty} />}
-          caption="每类告警可单独选择通知渠道；不选 = 发送到所有启用的渠道"
+          badge={<SaveState saving={rulesSaving} dirty={rulesDirty} at={rulesSavedAt} />}
+          caption="改动即时生效；每类告警可单独选择通知渠道，不选则发到所有启用的渠道"
           body="flush"
         >
           <div className="jy-table-wrap">
@@ -680,6 +744,8 @@ export default function NotificationsPage() {
                   <label htmlFor={`${uid}-renotify`}>重复提醒间隔</label>
                   <InputNumber
                     id={`${uid}-renotify`}
+                    onBlur={commitRules}
+                    onPressEnter={commitRules}
                     min={0}
                     suffix="小时"
                     value={renotify}
@@ -705,6 +771,8 @@ export default function NotificationsPage() {
                   <label htmlFor={`${uid}-errRetry`}>失败快速重试</label>
                   <InputNumber
                     id={`${uid}-errRetry`}
+                    onBlur={commitRules}
+                    onPressEnter={commitRules}
                     min={0}
                     precision={0}
                     suffix="秒"
@@ -729,12 +797,6 @@ export default function NotificationsPage() {
                 </div>
               </div>
             </fieldset>
-            <div className="jy-notifications-actions">
-              <Button type="primary" loading={rulesSaving} onClick={saveRules}>
-                保存规则
-              </Button>
-              <span className="jy-caption">开关和通知渠道改动后立即生效；阈值与间隔需点「保存规则」</span>
-            </div>
           </div>
         </Panel>
       )}
@@ -747,6 +809,7 @@ export default function NotificationsPage() {
       ) : (
         <Panel
           title="通知渠道"
+          className="jy-notifications-channels"
           badge={<CountBadge count={channels.length} muted />}
           caption="告警和日报通过这些渠道推送"
           extra={

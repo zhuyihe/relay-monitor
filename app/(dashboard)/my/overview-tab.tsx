@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { Button } from "antd";
 import { EMPTY, WEEKDAYS, formatCompact, formatInt, formatMoney, formatMonthDay } from "../../../lib/format";
-import { EmptyState, ErrorState } from "../../components/data-state";
+import { EmptyState, ErrorState, PanelSkeleton } from "../../components/data-state";
 import { ForecastChart } from "../../components/forecast-chart";
 import { HBars } from "../../components/hbars";
 import type { HBarItem } from "../../components/hbars";
@@ -21,7 +21,7 @@ import type { MyTab, OwnRange, OwnView } from "./shared";
 // 利润等式里各项跳到哪个标签页看明细（保留当前时间范围）
 const tabHref = (range: OwnRange, tab: MyTab) => {
   const qs = new URLSearchParams();
-  if (range !== "today") qs.set("range", range);
+  if (range !== "7d") qs.set("range", range); // 7d 是默认范围，不写进地址
   if (tab !== "overview") qs.set("tab", tab);
   const s = qs.toString();
   return s ? `/my?${s}` : "/my";
@@ -155,6 +155,7 @@ function Equation({ v, range, onBasis, reload }: { v: OwnView; range: OwnRange; 
 // 缺记录的日子标成缺失，不补零。
 function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: number | null; reload: () => Promise<unknown> }) {
   const dv = useMemo(() => (costs && !costs.error ? derive(costs, v.d) : null), [costs, v.d]);
+  if (costs === undefined) return <PanelSkeleton title="收入与用量成本" height={220} />;
   if (!dv) {
     return (
       <Panel title="收入与用量成本" caption="按天">
@@ -166,14 +167,6 @@ function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: 
       </Panel>
     );
   }
-  const first = dv.rows[0]?.fixed ?? 0;
-  const flat = dv.rows.every((r) => r.fixed === first);
-  const note =
-    dv.fixed > 0
-      ? flat
-        ? `固定成本每天 ${formatMoney(first)}，计入毛利`
-        : `固定成本按天摊销，期内合计 ${formatMoney(dv.fixed)}，计入毛利`
-      : undefined;
   return (
     <TrendPanel
       rows={dv.rows}
@@ -187,7 +180,6 @@ function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: 
           </Link>
         </>
       }
-      fixedNote={note}
     />
   );
 }
