@@ -113,6 +113,86 @@ test("U04 actual authenticated GET显式includeUnmonitored可重载暂停和专�
   } finally { hooks.deregister(); delete globalThis.__u04StationsRuntime; }
 });
 
+test("authenticated PUT暂停、SQL重载和启用保留原成本设置，CAS及失败提交不发布", async (t) => {
+  let documents = [], metas = [], draft, draftMetas, failCommit = false, requests = 0;
+  const conn = { beginTransaction: async () => { draft = structuredClone(documents); draftMetas = structuredClone(metas); },
+    query: async (sql, params) => {
+      if (sql.startsWith("INSERT INTO stations")) draft = params[0].map((row) => JSON.parse(row[2]));
+      if (sql.startsWith("INSERT INTO meta")) draftMetas = params[0].map(([k, v]) => ({ k, v }));
+      return [[]];
+    }, commit: async () => { if (failCommit) throw new Error("synthetic offline"); documents = draft; metas = draftMetas; },
+    rollback: async () => {}, release() {} };
+  const pool = { getConnection: async () => conn, query: async (sql) => [sql.startsWith("SELECT id, doc FROM stations")
+    ? documents.map((doc) => ({ id: doc.id, doc: JSON.stringify(doc) })) : structuredClone(metas)] };
+  const store = new Store(pool);
+  store.data.auth = { username: "admin", isDefault: false };
+  const resources = [];
+  for (const includeInProfit of [true, false]) resources.push(await store.add({ type: "newapi", baseUrl: "https://synthetic-monitor.test",
+    accessToken: "synthetic-monitor-token", userId: "41", includeInProfit, cnyPerUsd: 0.7, lowBalanceUsd: 17 }));
+  const dedicated = await store.add({ type: "newapi", monitorEnabled: false, includeInProfit: true });
+  assert.equal(dedicated.includeInProfit, false);
+  const rt = { store, history: { append() {}, predict: () => null, sparkline: () => [], usedSince: () => 0 },
+    sessions: { verify: (token) => token === "synthetic-valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
+  t.mock.method(console, "error", () => {});
+  t.mock.method(globalThis, "fetch", async (url) => {
+    requests += 1;
+    if (new URL(url).pathname === "/api/status") return Response.json({ success: true, data: { quota_per_unit: 500000 } });
+    assert.equal(new URL(url).pathname, "/api/user/self");
+    return Response.json({ success: true, data: { id: 41, quota: 500000, used_quota: 0 } });
+  });
+  globalThis.__s1StationsRuntime = rt;
+  const hooks = registerHooks({
+    resolve(specifier, context, next) {
+      if (specifier === "next/server") return { url: "test:s1-stations-next", shortCircuit: true };
+      if (specifier === "../../../../lib/api.js" && context.parentURL?.endsWith("/route.js?s1-auth")) {
+        return { url: new URL("../../../../lib/api.js?s1-auth", import.meta.url).href, shortCircuit: true };
+      }
+      if (specifier === "./runtime.js" && context.parentURL?.endsWith("/lib/api.js?s1-auth")) return { url: "test:s1-stations-runtime", shortCircuit: true };
+      return next(specifier, context);
+    }, load(url, context, next) {
+      if (url === "test:s1-stations-next") return { format: "module", shortCircuit: true, source: "export const NextResponse = {json:(value,init)=>Response.json(value,init)};" };
+      if (url === "test:s1-stations-runtime") return { format: "module", shortCircuit: true, source: "export const getRuntime = async () => globalThis.__s1StationsRuntime;" };
+      return next(url, context);
+    },
+  });
+  try {
+    const { PUT } = await import("./route.js?s1-auth");
+    for (const [index, resource] of resources.entries()) await t.test(String(resource.includeInProfit), async () => {
+      const includeInProfit = index === 0;
+      let station = rt.store.get(resource.id);
+      const send = (body, authenticated = true) => PUT(new Request(`https://local.test/api/stations/${station.id}`, { method: "PUT",
+        headers: authenticated ? { cookie: "rm_session=synthetic-valid" } : {}, body: JSON.stringify(body) }), { params: Promise.resolve({ id: station.id }) });
+      const version = stationBusinessVersion(station), options = { expectedAuthVersion: station.authVersion, expectedResourceVersion: version };
+      assert.equal((await send({ monitorEnabled: false, ...options }, false)).status, 401);
+      const saved = structuredClone(documents), beforeRequests = requests;
+      failCommit = true;
+      const failed = await send({ monitorEnabled: false, ...options });
+      assert.equal(failed.status, 500); assert.equal((await failed.json()).error, "保存失败，请稍后重试");
+      assert.equal(station.monitorEnabled, true); assert.equal(station.includeInProfit, includeInProfit);
+      assert.deepEqual(documents, saved);
+      failCommit = false;
+      const paused = await send({ monitorEnabled: false, ...options });
+      assert.equal(paused.status, 200); assert.equal((await paused.json()).station.includeInProfit, includeInProfit);
+      assert.equal(requests, beforeRequests, "pause must not query the upstream");
+      assert.equal(documents.find((doc) => doc.id === station.id).includeInProfit, includeInProfit);
+      const stale = await send({ monitorEnabled: true, ...options });
+      assert.equal(stale.status, 400); assert.equal((await stale.json()).code, "RESOURCE_CHANGED");
+      assert.equal(station.monitorEnabled, false);
+      rt.store = await new Store(pool).load(); station = rt.store.get(resource.id);
+      assert.equal(station.includeInProfit, includeInProfit); assert.equal(station.monitorEnabled, false);
+      const resumed = await send({ monitorEnabled: true, expectedAuthVersion: station.authVersion, expectedResourceVersion: stationBusinessVersion(station) });
+      assert.equal(resumed.status, 200);
+      const result = (await resumed.json()).station;
+      assert.equal(result.includeInProfit, includeInProfit); assert.equal(result.cnyPerUsd, 0.7); assert.equal(result.lowBalanceUsd, 17);
+      await rt._inflightRefresh?.get(station.id);
+      assert.ok(requests > beforeRequests, "the actual Provider refresh runs only after resume");
+      const persisted = documents.find((doc) => doc.id === station.id);
+      assert.equal(persisted.includeInProfit, includeInProfit); assert.equal(persisted.monitorEnabled, true); assert.equal(persisted.cnyPerUsd, 0.7);
+      assert.equal(rt.store.get(dedicated.id).includeInProfit, false);
+    });
+  } finally { hooks.deregister(); delete globalThis.__s1StationsRuntime; }
+});
+
 test("彻底删除先清除历史；历史清除失败后保留资源以便重试", async () => {
   let purgeAttempts = 0;
   let removeCalls = 0;

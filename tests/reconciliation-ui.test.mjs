@@ -315,6 +315,60 @@ async function enableBilling(page, drawer, key = "Supplier Key") {
 }
 async function saveOnboarding(drawer) { await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); }
 
+test("discovery refresh preserves the panel state for Enter, Space and click", { timeout: 45000 }, async (t) => {
+  const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
+  t.after(() => browser.close());
+  const context = await browser.newContext({ serviceWorkers: "block" });
+  const page = await context.newPage();
+  page.setDefaultTimeout(5_000);
+  const catalogue = onboardingFixture();
+  const requests = [];
+  let syncs = 0;
+  await page.route("**/*", async (route) => {
+    const request = route.request(), url = new URL(request.url());
+    if (url.origin !== new URL(baseURL).origin) return route.abort();
+    if (!url.pathname.startsWith("/api/")) return route.continue();
+    requests.push({ path: url.pathname, method: request.method() });
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/channel-onboarding" || url.pathname === "/api/channel-onboarding/sync") {
+      if (url.pathname.endsWith("/sync")) syncs++;
+      return fulfill(route, catalogue);
+    }
+    if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, configuration);
+    if (url.pathname === "/api/reconciliation") return fulfill(route, response([rule("rule-1", "Rule A", 10)]));
+    throw new Error("unexpected fixture API: " + url.pathname);
+  });
+  await page.goto(`${baseURL}/reconciliation`, { timeout: 30000 });
+  const discovery = page.getByRole("button", { name: "发现新渠道", exact: true });
+  const header = page.locator(".ant-collapse-item").filter({ has: discovery }).locator(".ant-collapse-header");
+  const settled = () => page.waitForFunction(() => !document.querySelector('button[aria-label="发现新渠道"]')?.classList.contains("ant-btn-loading"));
+  await discovery.waitFor();
+  await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click({ trial: true });
+  await settled();
+  assert.equal(await header.getAttribute("aria-expanded"), "true");
+  for (const expanded of ["true", "false"]) {
+    for (const action of ["Enter", "Space", "click"]) {
+      const before = syncs;
+      const refreshed = page.waitForResponse((result) => new URL(result.url()).pathname === "/api/channel-onboarding/sync");
+      await discovery.focus();
+      if (action === "click") await discovery.click();
+      else await page.keyboard.press(action);
+      await refreshed;
+      await settled();
+      assert.equal(syncs, before + 1, `${expanded} panel: ${action} refreshes once`);
+      assert.equal(await header.getAttribute("aria-expanded"), expanded, `${expanded} panel: ${action} preserves expansion`);
+      assert.equal(await discovery.evaluate((button) => button === document.activeElement), true, `${action} preserves button focus`);
+    }
+    const before = syncs;
+    await header.focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await header.getAttribute("aria-expanded"), expanded === "true" ? "false" : "true");
+    assert.equal(syncs, before, "the parent title does not refresh discovery");
+  }
+  assert.ok(requests.every((entry) => entry.method === "GET" || entry.path === "/api/channel-onboarding/sync"));
+  console.log(JSON.stringify({ discoveryActions: 6, parentTitleActions: 2, mockedApiRequests: requests.length, syncs, productMutations: 0 }));
+});
+
 test("five existing-account channels choose one Key and confirm one genuine batch without credentials", async (t) => {
   const { page, probes, writes } = await openOnboardingPage(t, { config: onboardingFixture(true, "newapi", [4, 5, 6, 7, 8]) });
   const drawer = await openOnboardingDrawer(page, true); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);

@@ -32,6 +32,42 @@ const request = (body = {}) => new Request("http://localhost/api/channel-onboard
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
 });
 
+test("F02 authenticated legacy upstream POST refuses unknown old credentials after normal userId edit", async (t) => {
+  const f = await liveOnboarding(), station = await f.rt.store.add({ type: "newapi", baseUrl: "https://up.test", accessToken: "old-A", userId: "1" },
+    { verifiedIdentity: { provider: "newapi", baseUrl: "https://up.test", accountId: "1" } });
+  await f.rt.store.update(station.id, { userId: "2" }); assert.equal(station.verifiedIdentity, null);
+  f.rt.store.data.auth = { isDefault: false };
+  f.rt.sessions = { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 };
+  const before = structuredClone(f.rt.store.data), requests = [];
+  t.mock.method(globalThis, "fetch", async (input, options = {}) => {
+    const url = new URL(input), token = options.headers?.Authorization; assert.equal(url.host, "up.test"); requests.push(token);
+    if (token === "Bearer old-A") return Response.json({ success: false, message: "denied old-A" }, { status: 401 });
+    const data = url.pathname === "/api/user/self" ? { id: 2 }
+      : url.pathname === "/api/status" ? { quota_per_unit: 100 }
+        : url.pathname === "/api/user/self/groups" ? { g1: 1 } : { total: 0, items: [] };
+    return Response.json({ success: true, data });
+  });
+  const { registerHooks } = await import("node:module"); globalThis.__u03AccountsRuntime = f.rt;
+  const hooks = registerHooks({
+    resolve(specifier, context, next) { return specifier === "next/server" ? { url: "test:f02-next", shortCircuit: true } : next(specifier, context); },
+    load(url, context, next) {
+      if (url === "test:f02-next") return { format: "module", shortCircuit: true, source: "export const NextResponse = {json:(value,init)=>Response.json(value,init)};" };
+      if (url.endsWith("/lib/runtime.js")) return { format: "module", shortCircuit: true, source: "export const getRuntime = async () => globalThis.__u03AccountsRuntime;" };
+      return next(url, context);
+    },
+  });
+  try {
+    const { POST } = await import("../reconciliation/upstreams/route.js");
+    const body = { baseUrl: station.baseUrl, accessToken: "new-B", verifiedIdentity: { accountId: "2" }, guard: {} };
+    const call = (authenticated) => POST(new Request("http://localhost/api/reconciliation/upstreams", { method: "POST",
+      headers: authenticated ? { cookie: "rm_session=valid" } : {}, body: JSON.stringify(body) }));
+    assert.equal((await call(false)).status, 401); assert.equal(requests.length, 0);
+    const response = await call(true); assert.equal(response.status, 400);
+    assert.doesNotMatch(JSON.stringify(await response.json()), /old-A|new-B|verifiedIdentity|guard/);
+    assert.ok(requests.includes("Bearer old-A")); assert.deepEqual(f.rt.store.data, before);
+  } finally { hooks.deregister(); delete globalThis.__u03AccountsRuntime; }
+});
+
 test("U06 authenticated GET/sync真实Provider来源DTO，默认零读写且失败保留最后核验namespace", async (t) => {
   let writes = 0, catalogueWrites = 0, catalogue = null, failIdentity = false;
   const requests = [], now = Date.parse("2026-10-09T07:00:00Z");

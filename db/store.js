@@ -182,7 +182,7 @@ export class Store {
       s.authVersion = Number.isSafeInteger(s.authVersion) && s.authVersion > 0 ? s.authVersion : 1;
       // 所有监控上游默认计入利润成本；仅显式关闭的观察/重复汇总节点排除。
       s.includeInProfit = s.includeInProfit !== false;
-      if (!s.monitorEnabled) { s.includeInProfit = false; s.isOwn = false; }
+      if (!s.monitorEnabled) s.isOwn = false;
       delete s.costGateway;
       if (!Array.isArray(s.fixedPurchases)) {
         s.fixedPurchases = [];
@@ -523,7 +523,7 @@ export class Store {
       if ("isOwn" in patch) s.isOwn = !!patch.isOwn;
       if ("monitorEnabled" in patch) s.monitorEnabled = patch.monitorEnabled !== false;
       if (patch.archived === false) s.archivedAt = null;
-      if (s.monitorEnabled === false) { s.includeInProfit = false; s.isOwn = false; }
+      if (s.monitorEnabled === false) s.isOwn = false;
       if ("noRenewal" in patch || s.type === "fixed") {
         const noRenewal = s.type !== "fixed" && !!patch.noRenewal;
         if (noRenewal !== !!s.noRenewal && s.alertState) {

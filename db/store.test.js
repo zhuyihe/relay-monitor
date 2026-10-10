@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { Store, stationBusinessVersion } from "./store.js";
 import { refreshStation } from "../server/refresh.js";
 import { selectCostUpstreams } from "../server/own-helpers.js";
+import { evaluateStation } from "../lib/alerts.js";
 
 function fakePool(stations = []) {
   const conn = {
@@ -37,6 +38,52 @@ test("旧站点数据升级时默认保持续费", async () => {
   assert.equal(store.get("old").authVersion, 1);
 });
 
+test("暂停和恢复保留原成本设置、费率及实际持久化值", async (t) => {
+  for (const includeInProfit of [true, false]) await t.test(String(includeInProfit), async (t) => {
+    const pool = fakePool(), conn = await pool.getConnection(), store = new Store(pool);
+    let documents = [], draft;
+    t.mock.method(conn, "query", async (sql, params) => {
+      if (sql.startsWith("INSERT INTO stations")) draft = params[0].map((row) => JSON.parse(row[2]));
+      return [[]];
+    });
+    t.mock.method(conn, "commit", async () => { documents = draft; });
+    const station = await store.add({ type: "newapi", includeInProfit, cnyPerUsd: 0.7, lowBalanceUsd: 17 });
+    await store.update(station.id, { monitorEnabled: false }, { expectedResourceVersion: stationBusinessVersion(station) });
+    assert.equal(station.includeInProfit, includeInProfit);
+    assert.equal(documents[0].includeInProfit, includeInProfit);
+    assert.equal(documents[0].monitorEnabled, false);
+    assert.deepEqual(store.list(), []);
+    assert.deepEqual(selectCostUpstreams(store.list({ includeUnmonitored: true }), "own"), { included: [], excluded: [] });
+    assert.equal(await evaluateStation({ ...station, balance: { ok: true, remaining: 0 } }, null, {}, [], 5), null);
+    const forbidden = () => assert.fail("paused monitoring must not fetch or write history");
+    t.mock.method(globalThis, "fetch", forbidden);
+    assert.equal(await refreshStation({ store, history: { append: forbidden, predict: forbidden } }, station), null);
+    await store.update(station.id, { monitorEnabled: true }, { expectedResourceVersion: stationBusinessVersion(station) });
+    assert.equal(station.includeInProfit, includeInProfit);
+    assert.equal(station.cnyPerUsd, 0.7); assert.equal(station.lowBalanceUsd, 17);
+    assert.equal(documents[0].includeInProfit, includeInProfit);
+    assert.equal(documents[0].monitorEnabled, true);
+    assert.equal(documents[0].cnyPerUsd, 0.7);
+    const costs = selectCostUpstreams(store.list(), "own");
+    assert.deepEqual(costs.included.map((s) => s.id), includeInProfit ? [station.id] : []);
+    assert.deepEqual(costs.excluded.map((s) => s.id), includeInProfit ? [] : [station.id]);
+  });
+});
+
+test("加载暂停资源后启用仍保留原true或false成本设置", async (t) => {
+  for (const includeInProfit of [true, false]) await t.test(String(includeInProfit), async () => {
+    const station = { id: "paused", type: "newapi", monitorEnabled: false, includeInProfit, cnyPerUsd: 0.7,
+      lowBalanceUsd: 17, fixedPurchases: [] };
+    const store = await new Store(fakePool([structuredClone(station)])).load();
+    assert.equal(store.get(station.id).includeInProfit, includeInProfit);
+    assert.deepEqual(store.list(), []);
+    await store.update(station.id, { monitorEnabled: true });
+    assert.equal(store.get(station.id).includeInProfit, includeInProfit);
+    assert.equal(store.get(station.id).cnyPerUsd, 0.7);
+    assert.equal(store.get(station.id).lowBalanceUsd, 17);
+  });
+});
+
 test("账单专用授权全量保存且不进入监控或整体成本", async (t) => {
   const pool = fakePool();
   const conn = await pool.getConnection();
@@ -59,9 +106,9 @@ test("账单专用授权全量保存且不进入监控或整体成本", async (t
   assert.equal(restarted.list().length, 1);
   assert.equal(restarted.get(grant.id).monitorEnabled, false);
   await restarted.update(grant.id, { includeInProfit: true, isOwn: true });
-  assert.equal(restarted.get(grant.id).includeInProfit, false);
+  assert.equal(restarted.get(grant.id).includeInProfit, true);
   assert.equal(restarted.get(grant.id).isOwn, false);
-  assert.equal(selectCostUpstreams([{ ...grant, includeInProfit: true }], "own").included.length, 0);
+  assert.equal(selectCostUpstreams([restarted.get(grant.id)], "own").included.length, 0);
 });
 
 test("身份只能由服务端验证参数保存，真实授权变更作废身份和令牌", async () => {

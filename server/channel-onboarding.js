@@ -10,7 +10,7 @@ import { refreshStation } from "./refresh.js";
 import { normalizeReconciliationScopeIntent } from "./reconciliation.js";
 
 // 验证后才保存。重试和同进程并发接入按上游地址 + 账号身份复用，避免重复监控同一余额。
-export async function connectNewApiUpstream(rt, input, queryMetadata = queryNewApiReconciliationMetadata) {
+export async function connectNewApiUpstream(rt, input, queryMetadata = queryNewApiReconciliationMetadata, queryIdentity = queryAccountIdentity) {
   const baseUrl = onboardingBaseUrl(input?.baseUrl);
   const accessToken = String(input?.accessToken || "").trim();
   if (!baseUrl) throw new Error("请填写有效的上游站点根地址");
@@ -22,15 +22,42 @@ export async function connectNewApiUpstream(rt, input, queryMetadata = queryNewA
   }
   const userId = String(metadata.userId || "").trim();
   if (!userId) throw new Error("无法确认上游账号身份，请填写用户 ID 后重试");
+  const identity = accountIdentity(connection, metadata);
 
   const pending = (rt._newApiOnboardingChain || Promise.resolve()).then(async () => {
-    const existing = rt.store.list().find((station) => station.type === "newapi" && !station.isOwn && !station.archivedAt
-      && onboardingBaseUrl(station.baseUrl) === baseUrl
-      && (String(station.userId || "").trim() === userId
-        || (!station.userId && String(station.accessToken || "").replace(/^Bearer\s+/i, "").trim() === accessToken.replace(/^Bearer\s+/i, ""))));
-    if (existing) return { station: { id: existing.id, name: existing.name, type: existing.type, baseUrl: existing.baseUrl }, created: false };
-    const station = await rt.store.add({ ...connection, userId, name: String(input?.name || "").trim() || "上游账号" });
-    return { station: { id: station.id, name: station.name, type: station.type, baseUrl: station.baseUrl }, created: true };
+    const candidates = rt.store.list().filter((station) => station.type === "newapi" && !station.isOwn && !station.archivedAt
+      && onboardingBaseUrl(station.baseUrl) === baseUrl).map((station) => ({ station,
+      version: authVersion(station), resourceVersion: stationBusinessVersion(station) }));
+    const matches = [];
+    let unknown = false;
+    for (const candidate of candidates) {
+      let currentIdentity = null;
+      try { currentIdentity = await queryIdentity(structuredClone(candidate.station)); } catch { unknown = true; }
+      if (!currentIdentity) unknown = true;
+      if (!sameIdentity(currentIdentity, identity)) continue;
+      if (candidate.station.verifiedIdentity && !sameIdentity(candidate.station.verifiedIdentity, currentIdentity)) {
+        throw previewFailure("ACCOUNT_IDENTITY_CHANGED", "旧资源的实际账号身份已变化，请重新确认关联");
+      }
+      matches.push(candidate.station);
+    }
+    const assertCurrent = () => {
+      for (const candidate of candidates) {
+        const station = rt.store.get(candidate.station.id);
+        if (authVersion(station) !== candidate.version || stationBusinessVersion(station) !== candidate.resourceVersion) {
+          throw previewFailure("AUTHORIZATION_CHANGED", "候选资源配置已变化，请重新验证");
+        }
+      }
+    };
+    const save = async () => {
+      assertCurrent();
+      if (matches.length > 1 || !matches.length && unknown) {
+        throw previewFailure("IDENTITY_CONFLICT", "旧资源身份尚无法唯一确认，请先在资源设置中核对授权，或在渠道接入中明确选择资源并核验");
+      }
+      const station = matches[0] || await rt.store.add({ ...connection, userId, name: String(input?.name || "").trim() || "上游账号" },
+        { verifiedIdentity: identity, guard: assertCurrent });
+      return { station: { id: station.id, name: station.name, type: station.type, baseUrl: station.baseUrl }, created: !matches.length };
+    };
+    return rt.store.withStationLocks ? rt.store.withStationLocks(candidates.map((candidate) => candidate.station.id), save) : save();
   });
   rt._newApiOnboardingChain = pending.catch(() => {});
   return pending;
@@ -843,6 +870,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     for (const requested of input.groups) {
       const value = prepared.get(requested.selectionId), group = { ...requested, canonicalKey: null, ownNamespaceKey: source.ownSource.namespaceKey,
         authorizationIntent: null, status: requested.reconciliation ? "unavailable" : "monitor_only" };
+      let billingConnection = null;
       try {
         if (value.error) throw value.error;
         for (const channel of requested.channels) sourceChannel({ ownStationId: input.ownStationId, ...channel });
@@ -850,7 +878,20 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           throw previewFailure("PREVIEW_BASIS_CHANGED", "验证期间本站来源已变化，请重新预览");
         }
         if (requested.reconciliation) {
-          const billing = value.billing;
+          const billing = value.billing && { ...value.billing, metadata: null };
+          if (value.billing?.metadata) {
+            const canonicalKey = canonicalBillingKey(billing.connection, value.billing.metadata, requested.reconciliation.tokenId);
+            const existing = allRules.find((rule) => rule.enabled && !rule.archivedAt && rule.canonicalKey === canonicalKey);
+            const timezone = new Intl.DateTimeFormat("en", { timeZone: requested.reconciliation.timezone || existing?.timezone || "Asia/Shanghai" })
+              .resolvedOptions().timeZone;
+            group.reconciliation = { ...requested.reconciliation, timezone };
+            billingConnection = structuredClone(billing.connection);
+            billing.metadata = await queryMetadata(billingConnection, { timezone });
+            if (!sameIdentity(billing.identity, accountIdentity(billing.connection, billing.metadata))) {
+              throw previewFailure("ACCOUNT_IDENTITY_CHANGED", "账号身份在验证期间发生变化，请重新验证");
+            }
+            group.billingMetadata = billing.metadata;
+          }
           group.status = billingStatus(billing, true).status;
           if (value.billingError) group.reason = value.billingError;
           else if (group.status !== "ready") group.reason = billingStatus(billing, true).reason;
@@ -858,7 +899,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           if (token && billing.connection.type.startsWith("sub2api") && billing.metadata.capability?.state === "unverified") {
             try {
               const observation = await queryStat(structuredClone(billing.connection), { token, metadata: billing.metadata,
-                ...completedBillingDayWindow(requested.reconciliation.timezone || "Asia/Shanghai", now()) });
+                ...completedBillingDayWindow(group.reconciliation.timezone, now()) });
               billing.metadata.capability = observation.capability || { state: "unverified", reason: "DEPLOYMENT_NOT_VERIFIED" };
               group.status = billingStatus(billing, true).status;
               group.reason = billingStatus(billing, true).reason;
@@ -867,16 +908,23 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           if (token && billing.identity) group.intentCanonicalKey = canonicalBillingKey(billing.connection, billing.metadata, token.id);
           if (group.status === "ready" && token && billing.identity) {
             group.canonicalKey = group.intentCanonicalKey;
-            const existing = allRules.find((rule) => rule.enabled && !rule.archivedAt && rule.canonicalKey === group.canonicalKey);
-            group.reconciliation = { ...requested.reconciliation, timezone: requested.reconciliation.timezone || existing?.timezone || "Asia/Shanghai" };
             const authorization = value.selection.reconciliationAuthorization;
             group.authorizationIntent = authorization?.stationId || value.selection.stationId && !authorization?.newAuthorization
               ? null : hash(onboardingConnectionPatch(billing.connection));
           } else if (group.status === "ready") {
             group.status = "unavailable"; group.code = "KEY_REQUIRED"; group.reason = "请选择实际使用的上游 Key";
           }
+          for (const item of [value.main, ...value.additional, value.billing].filter(Boolean)) {
+            const station = reusable(item);
+            if (station && stationBusinessVersion(rt.store.get(station.id)) !== item.resourceVersion) {
+              throw previewFailure("PREVIEW_BASIS_CHANGED", "验证期间资源配置已变化，请重新预览");
+            }
+          }
         }
-      } catch (error) { group.status = "unavailable"; group.code = error.code || "VERIFICATION_FAILED"; group.reason = failure(error); }
+      } catch (error) {
+        group.status = "unavailable"; group.code = error.code || "VERIFICATION_FAILED";
+        group.reason = failure(error, [value.main?.connection, value.billing?.connection, billingConnection, own()]);
+      }
       rawGroups.push(group);
     }
     const partition = new Map();
@@ -903,7 +951,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             timezone: group.reconciliation.timezone, coverageDeclaration: group.reconciliation.coverageDeclaration,
             costCoverage: group.reconciliation.coverageDeclaration.answer === "none" ? "complete" : "unknown", ownSource: source.ownSource },
           { authorization: { station: { ...structuredClone(billing.connection), id: reusable(billing)?.id || null,
-            authVersion: billing.expectedAuthVersion || 1 }, metadata: structuredClone(billing.metadata) } });
+            authVersion: billing.expectedAuthVersion || 1 }, metadata: structuredClone(group.billingMetadata) } });
           group.basis = { ...financial.basis, resourceVersions: { ...financial.basis.resourceVersions, ...versions } };
           group.preview = financial.preview; group.existingRule = financial.existingRule;
         } catch (error) {

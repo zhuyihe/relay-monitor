@@ -13,6 +13,7 @@ function fixture(stations = []) {
   let failNext = false;
   const rt = { store: {
     list: () => stations,
+    get: (id) => stations.find((station) => station.id === id),
     async add(input) {
       writes += 1;
       await Promise.resolve();
@@ -26,6 +27,84 @@ function fixture(stations = []) {
 }
 const input = { name: "Supplier", baseUrl: "https://up.example/", accessToken: "secret-pat" };
 const metadata = async () => ({ userId: "7", tokens: [], groups: {} });
+const legacyIdentity = async (station) => ({ provider: "newapi", baseUrl: station.baseUrl, accountId: station.userId || "7" });
+
+async function legacyUpstreamFixture(t) {
+  const state = { writes: 0, requests: [], requestHook: null, failCandidate: false };
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {},
+    query: async () => { state.writes += 1; return [[]]; }, commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const store = new Store(pool), identity = { provider: "newapi", baseUrl: "https://legacy.test", accountId: "1" };
+  const station = await store.add({ name: "Retained A", type: "newapi", baseUrl: identity.baseUrl, userId: "1",
+    accessToken: "legacy-A", cnyPerUsd: 0.7, lowBalanceUsd: 33, noRenewal: true, includeInProfit: false }, { verifiedIdentity: identity });
+  t.mock.method(globalThis, "fetch", async (input, options = {}) => {
+    const url = new URL(input), token = options.headers?.Authorization, userId = options.headers?.["New-Api-User"];
+    assert.equal(url.host, "legacy.test"); state.requests.push({ path: url.pathname, token, userId });
+    await state.requestHook?.(url, options);
+    const accountId = token === "Bearer legacy-B" ? 2 : 1;
+    if (token === "Bearer legacy-A" && (state.failCandidate || userId && String(userId) !== String(accountId))) {
+      return Response.json({ success: false, message: `denied ${token}` }, { status: 401 });
+    }
+    const data = url.pathname === "/api/user/self" ? { id: accountId }
+      : url.pathname === "/api/status" ? { quota_per_unit: 100 }
+        : url.pathname === "/api/user/self/groups" ? { g1: 1 } : { total: 0, items: [] };
+    return Response.json({ success: true, data });
+  });
+  state.writes = 0;
+  return { state, store, station, identity, rt: { store }, input: { baseUrl: identity.baseUrl, accessToken: "replacement-A", name: "New name" } };
+}
+
+test("F02 legacy helper rejects unknown hint reuse after a normal Store identity-clearing edit", async (t) => {
+  const f = await legacyUpstreamFixture(t);
+  await f.store.update(f.station.id, { userId: "2" }); assert.equal(f.station.verifiedIdentity, null);
+  const before = structuredClone(f.store.data), writes = f.state.writes;
+  await assert.rejects(connectNewApiUpstream(f.rt, { ...f.input, accessToken: "legacy-B" }), /旧资源身份/);
+  assert.ok(f.state.requests.some((request) => request.token === "Bearer legacy-A"));
+  assert.deepEqual(f.store.data, before); assert.equal(f.state.writes, writes);
+});
+
+test("F02 legacy helper verifies actual same identity and preserves the original ID credentials and settings", async (t) => {
+  const f = await legacyUpstreamFixture(t), before = structuredClone(f.station);
+  const result = await connectNewApiUpstream(f.rt, f.input);
+  assert.equal(result.created, false); assert.equal(result.station.id, f.station.id);
+  assert.ok(f.state.requests.some((request) => request.token === "Bearer legacy-A" && request.path === "/api/user/self"));
+  assert.deepEqual(f.station, before); assert.equal(f.state.writes, 0);
+});
+
+test("F02 legacy helper can reuse a normally cleared unknown resource after its actual identity verifies", async (t) => {
+  const f = await legacyUpstreamFixture(t); await f.store.update(f.station.id, { userId: "" });
+  assert.equal(f.station.verifiedIdentity, null); const before = structuredClone(f.station), writes = f.state.writes;
+  const result = await connectNewApiUpstream(f.rt, f.input);
+  assert.equal(result.created, false); assert.equal(result.station.id, f.station.id);
+  assert.deepEqual(f.station, before); assert.equal(f.state.writes, writes);
+});
+
+test("F02 legacy helper keeps same-panel different actual accounts separate", async (t) => {
+  const f = await legacyUpstreamFixture(t), before = structuredClone(f.station);
+  const result = await connectNewApiUpstream(f.rt, { ...f.input, accessToken: "legacy-B" });
+  assert.equal(result.created, true); assert.notEqual(result.station.id, f.station.id);
+  assert.equal(f.store.get(result.station.id).verifiedIdentity.accountId, "2");
+  assert.deepEqual(f.station, before); assert.equal(f.store.data.stations.length, 2);
+});
+
+test("F02 legacy helper cannot reuse stored verified identity when current credentials fail", async (t) => {
+  const f = await legacyUpstreamFixture(t), before = structuredClone(f.store.data); f.state.failCandidate = true;
+  await assert.rejects(connectNewApiUpstream(f.rt, f.input), /旧资源身份/);
+  assert.deepEqual(f.store.data, before); assert.equal(f.state.writes, 0);
+});
+
+for (const patch of [{ accessToken: "edited-A" }, { monitorEnabled: false }]) {
+  test(`F02 legacy candidate ${Object.keys(patch)[0]} drift during verification rejects without onboarding writes`, async (t) => {
+    const f = await legacyUpstreamFixture(t); let afterEdit, writes;
+    f.state.requestHook = async (url, options) => {
+      if (url.pathname === "/api/user/self" && options.headers?.Authorization === "Bearer legacy-A") {
+        f.state.requestHook = null; await f.store.update(f.station.id, patch);
+        afterEdit = structuredClone(f.store.data); writes = f.state.writes;
+      }
+    };
+    await assert.rejects(connectNewApiUpstream(f.rt, f.input), /候选资源配置已变化/);
+    assert.deepEqual(f.store.data, afterEdit); assert.equal(f.state.writes, writes);
+  });
+}
 
 async function accountReadFixture(t) {
   let writes = 0;
@@ -333,7 +412,8 @@ test("U04 public readonly恢复只证明已保存结果，过期donor在新的pr
 
 test("U04 ordinary monitor暂停走实际PUT/CAS，仅停监控估算且保留bill/scope/date/link/history与own用途", async (t) => {
   const f = await authorizationFixture(t), before = structuredClone({ rules: f.state.rules, links: f.state.links, history: f.state.history });
-  const station = f.store.get(f.ids.a1), ownVersion = stationBusinessVersion(f.store.get(f.ids.own)), authVersion = station.authVersion;
+  const station = f.store.get(f.ids.a2), includeInProfit = station.includeInProfit,
+    ownVersion = stationBusinessVersion(f.store.get(f.ids.own)), authVersion = station.authVersion;
   const { registerHooks } = await import("node:module");
   const hooks = registerHooks({ load(url, context, next) {
     if (url.endsWith("/lib/api.js")) return { format: "module", shortCircuit: true,
@@ -343,13 +423,14 @@ test("U04 ordinary monitor暂停走实际PUT/CAS，仅停监控估算且保留bi
   let PUT; try { ({ PUT } = await import("../app/api/stations/[id]/route.js")); } finally { hooks.deregister(); }
   const response = await PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify({ monitorEnabled: false,
     expectedAuthVersion: authVersion, expectedResourceVersion: stationBusinessVersion(station) }) }), f.rt, { id: station.id });
-  assert.equal(response.status, 200); assert.equal(station.monitorEnabled, false); assert.equal(station.includeInProfit, false);
+  assert.equal(response.status, 200); assert.equal(station.monitorEnabled, false); assert.equal(station.includeInProfit, includeInProfit);
+  assert.equal(includeInProfit, true); assert.ok(!f.store.list().some((item) => item.id === station.id));
   assert.equal(station.authVersion, authVersion); assert.equal(station.isOwn, false);
   assert.deepEqual({ rules: f.state.rules, links: f.state.links, history: f.state.history }, before);
   assert.equal(f.state.rules[0].enabled, true); assert.equal(stationBusinessVersion(f.store.get(f.ids.own)), ownVersion);
   const preview = await (await f.http("probeAccountAuthorization", f.input)).json();
-  assert.deepEqual(preview.impact.monitorStationIds, [f.ids.a2]); assert.deepEqual(preview.impact.billingRuleIds, ["rule_u04"]);
-  assert.equal(preview.targets[0].purposes.monitor, false); assert.equal(preview.targets[2].purposes.monitor, false);
+  assert.deepEqual(preview.impact.monitorStationIds, [f.ids.a1]); assert.deepEqual(preview.impact.billingRuleIds, ["rule_u04"]);
+  assert.equal(preview.targets[1].purposes.monitor, false); assert.equal(preview.targets[2].purposes.monitor, false);
   const stale = await PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify({ monitorEnabled: true,
     expectedResourceVersion: "old-version" }) }), f.rt, { id: station.id }); assert.equal(stale.status, 400);
   assert.equal(station.monitorEnabled, false); assert.deepEqual(f.state.rules, before.rules);
@@ -451,7 +532,7 @@ test("U03 actual Repository全量入口保留archived/disabled关系；Store真�
 async function genuineBatchFixture(t) {
   const state = { now: Date.parse("2026-10-09T07:00:00Z"), rules: [], members: [], created: 0, ruleWrites: 0,
     catalogue: null, links: [], linkGate: null, failLinks: false, failRuleKey: null, requests: [], requestHook: null,
-    channels: Array.from({ length: 10 }, (_, index) => index + 1) };
+    channels: Array.from({ length: 10 }, (_, index) => index + 1), keys: [9, 10], keyNames: {}, upstreamAccountId: 42 };
   t.mock.method(Date, "now", () => state.now);
   t.mock.method(globalThis, "fetch", async (input, options = {}) => {
     const url = new URL(input);
@@ -459,10 +540,10 @@ async function genuineBatchFixture(t) {
     await state.requestHook?.(url, options);
     if (url.pathname.endsWith("/dashboard/billing/subscription")) return { status: 200, text: async () => JSON.stringify({ hard_limit_usd: 100 }) };
     if (url.pathname.endsWith("/dashboard/billing/usage")) return { status: 200, text: async () => JSON.stringify({ total_usage: 1 }) };
-    const data = url.pathname === "/api/user/self" ? { id: url.host === "own.test" ? 1 : 42, quota: 100, used_quota: 1 }
+    const data = url.pathname === "/api/user/self" ? { id: url.host === "own.test" ? 1 : state.upstreamAccountId, quota: 100, used_quota: 1 }
       : url.pathname === "/api/status" ? { quota_per_unit: 100 }
         : url.pathname === "/api/user/self/groups" ? { g1: { ratio: 1 } }
-          : url.pathname === "/api/token/" ? { total: 2, items: [9, 10].map((id) => ({ id, name: `Key ${id}`, status: 1, group: "g1", cross_group_retry: false })) }
+          : url.pathname === "/api/token/" ? { total: state.keys.length, items: state.keys.map((id) => ({ id, name: state.keyNames[id] || `Key ${id}`, status: 1, group: "g1", cross_group_retry: false })) }
             : url.pathname === "/api/channel/" ? { total: state.channels.length, items: state.channels.map((id) => ({ id, name: `Channel ${id}`,
               type: 1, status: 1, base_url: "https://up.test", group: "g1" })) } : { quota: 100 };
     return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
@@ -523,6 +604,131 @@ async function genuineBatchFixture(t) {
       channelRevision: rt.channelOnboarding.getSourceCatalogue().channels.find((channel) => channel.id === channelId).revision })),
     reconciliation: { tokenId: keys[index] || 9, coverageDeclaration: { answer: "none" } } })) });
   return { state, rt, store, own, supplier, request, restart };
+}
+
+for (const timezone of ["Asia/Shanghai", "UTC", "Asia/Singapore"]) {
+  test(`F03 genuine ${timezone} create confirm original/new preview retries and existing-rule append share actual zone evidence`, async (t) => {
+    const f = await genuineBatchFixture(t), input = f.request([[1]]), seen = [];
+    input.groups[0].reconciliation.timezone = timezone;
+    const previewKeyScope = f.rt.reconciliation.previewKeyScope;
+    t.mock.method(f.rt.reconciliation, "previewKeyScope", async (value, options) => {
+      seen.push({ requested: value.timezone, actual: options.authorization.metadata.billingTimezone.timezone });
+      return previewKeyScope(value, options);
+    });
+    const probe = await f.rt.channelOnboarding.probeBatch(input); assert.equal(probe.groups[0].status, "ready");
+    assert.equal(f.state.ruleWrites, 0); assert.equal(f.state.links.length, 0);
+    const confirmation = { ...input, previewId: probe.previewId }, result = await f.rt.channelOnboarding.connectBatch(confirmation);
+    assert.equal(result.complete, true); assert.equal(f.state.created, 1);
+    const saved = result.groups[0].saved, id = saved.ruleId;
+    assert.equal((await f.rt.reconciliation.listRules()).find((rule) => rule.id === id).timezone, timezone);
+    const samePreview = await f.rt.channelOnboarding.connectBatch(confirmation);
+    assert.equal(samePreview.complete, true); assert.deepEqual(samePreview.groups[0].saved, saved);
+    const fresh = await f.rt.channelOnboarding.probeBatch(input);
+    const newPreview = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: fresh.previewId });
+    assert.equal(newPreview.complete, true); assert.equal(newPreview.groups[0].saved.billingEffectiveFromMs, saved.billingEffectiveFromMs);
+    assert.equal(f.state.ruleWrites, 1);
+    const append = f.request([[2]]); append.groups[0].reconciliation.timezone = timezone;
+    const appendedProbe = await f.rt.channelOnboarding.probeBatch(append);
+    assert.deepEqual(appendedProbe.groups[0].basis.proposedChannelIds, [1, 2]);
+    const appended = await f.rt.channelOnboarding.connectBatch({ ...append, previewId: appendedProbe.previewId });
+    assert.equal(appended.complete, true); assert.equal(appended.groups[0].saved.ruleId, id);
+    const rule = (await f.rt.reconciliation.listRules()).find((rule) => rule.id === id); assert.deepEqual(rule.channels.map((channel) => channel.channelId), [1, 2]);
+    assert.equal(rule.scopeVersion, saved.scopeVersion + 1); assert.equal(f.state.created, 1); assert.equal(f.state.ruleWrites, 2);
+    assert.ok(seen.length > 1); assert.ok(seen.every((value) => value.requested === timezone && value.actual === timezone));
+    const inferred = f.request([[3]]), inferredProbe = await f.rt.channelOnboarding.probeBatch(inferred);
+    assert.equal(inferredProbe.groups[0].basis.timezone, timezone);
+    assert.equal((await f.rt.channelOnboarding.connectBatch({ ...inferred, previewId: inferredProbe.previewId })).complete, true);
+  });
+}
+
+test("F03 genuine UTC original preview survives transient link failure and retries once without scope/date drift", async (t) => {
+  const f = await genuineBatchFixture(t), input = f.request([[1]]); input.groups[0].reconciliation.timezone = "UTC";
+  const probe = await f.rt.channelOnboarding.probeBatch(input), confirmation = { ...input, previewId: probe.previewId };
+  f.state.failLinks = true;
+  const partial = await f.rt.channelOnboarding.connectBatch(confirmation); assert.equal(partial.complete, false); assert.equal(f.state.ruleWrites, 0);
+  f.state.failLinks = false;
+  const result = await f.rt.channelOnboarding.connectBatch(confirmation); assert.equal(result.complete, true); assert.equal(f.state.created, 1);
+  assert.equal(result.groups[0].saved.billingEffectiveFromMs, probe.groups[0].preview.billingEffectiveFromMs);
+  assert.equal(f.state.links.length, 1); assert.equal(f.store.data.stations.length, 2);
+});
+
+test("F03 genuine one selection with three Key groups preserves each requested canonical timezone", async (t) => {
+  const f = await genuineBatchFixture(t); f.state.keys.push(11);
+  const zones = ["Asia/Shanghai", "UTC", "Asia/Singapore"], input = f.request([[1], [2], [3]], [9, 10, 11]);
+  input.groups.forEach((group, index) => { group.reconciliation.timezone = zones[index]; });
+  const probe = await f.rt.channelOnboarding.probeBatch(input); assert.deepEqual(probe.groups.map((group) => group.status), ["ready", "ready", "ready"]);
+  const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: probe.previewId });
+  assert.equal(result.complete, true); assert.equal(f.state.created, 3); assert.equal(f.state.links.length, 3);
+  const rules = await f.rt.reconciliation.listRules(); assert.deepEqual(rules.map((rule) => rule.timezone).sort(), [...zones].sort());
+  const retry = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: probe.previewId });
+  assert.equal(retry.complete, true); assert.equal(f.state.created, 3); assert.equal(f.state.ruleWrites, 3);
+});
+
+test("F03 genuine Sub2API verifies actual Key/date controls independently in each requested zone", async (t) => {
+  const f = await genuineBatchFixture(t), fetchNewApi = globalThis.fetch, stats = [], seen = [];
+  await f.store.update(f.supplier.id, { type: "sub2api", accessToken: "f03-sub2-zone-pat", userId: "" });
+  t.mock.method(globalThis, "fetch", async (input, options) => {
+    const url = new URL(input);
+    if (!url.pathname.startsWith("/api/v1/")) return fetchNewApi(input, options);
+    assert.equal(url.host, "up.test");
+    if (url.pathname.startsWith("/api/v1/keys/")) return Response.json({ code: 404, data: {} }, { status: 404 });
+    const data = url.pathname === "/api/v1/auth/me" ? { id: 42 }
+      : url.pathname === "/api/v1/keys" ? { total: 2, items: [9, 10].map((id) => ({ id, user_id: 42, name: `Key ${id}`, status: "active", group_id: 1 })) }
+        : { total_actual_cost: url.searchParams.get("api_key_id") === String(Number.MAX_SAFE_INTEGER)
+          || url.searchParams.get("start_date") > "2026-10-09" || url.searchParams.get("timezone") === "America/New_York" ? 0 : 2 };
+    if (url.pathname === "/api/v1/usage/stats") stats.push(Object.fromEntries(url.searchParams));
+    return Response.json({ code: 0, data });
+  });
+  const previewKeyScope = f.rt.reconciliation.previewKeyScope;
+  t.mock.method(f.rt.reconciliation, "previewKeyScope", async (value, options) => {
+    seen.push(structuredClone(options.authorization.metadata)); return previewKeyScope(value, options);
+  });
+  const input = f.request([[1], [2]], [9, 10]), zones = ["UTC", "Asia/Singapore"];
+  input.groups.forEach((group, index) => { group.reconciliation.timezone = zones[index]; });
+  const probe = await f.rt.channelOnboarding.probeBatch(input); assert.deepEqual(probe.groups.map((group) => group.status), ["ready", "ready"]);
+  for (const timezone of zones) {
+    const metadata = seen.find((item) => item.billingTimezone.timezone === timezone);
+    assert.equal(metadata.capability.state, "supported"); assert.equal(metadata.billingTimezone.state, "unverified");
+    assert.ok(stats.some((item) => item.timezone === timezone && item.api_key_id === String(Number.MAX_SAFE_INTEGER)));
+    assert.ok(stats.some((item) => item.timezone === timezone && item.start_date > "2026-10-09"));
+  }
+  assert.equal((await f.rt.channelOnboarding.connectBatch({ ...input, previewId: probe.previewId })).complete, true);
+  const zero = f.request([[3]]); zero.groups[0].reconciliation.timezone = "America/New_York";
+  const unverified = await f.rt.channelOnboarding.probeBatch(zero);
+  assert.equal(unverified.groups[0].status, "unverified"); assert.equal(f.state.created, 2);
+});
+
+test("F03 per-group metadata failure independently redacts own upstream and generated temporary credentials", async () => {
+  const f = await onboardingFixture(), queryMetadata = f.dependencies.queryMetadata;
+  f.dependencies.queryMetadata = async (connection, options) => {
+    if (!options?.timezone) return queryMetadata(connection);
+    connection.s2Tokens = { accessToken: "generated-zone-access", refreshToken: "generated-zone-refresh" };
+    throw new Error(`supplier-secret own-secret temporary-jwt generated-zone-access generated-zone-refresh denied`);
+  };
+  await f.restart(); const single = f.request(), before = structuredClone(f.rt.store.data);
+  const probe = await f.module.probeBatch({ requestId: "4a102bfe-f680-4ad8-92ac-26e732b07c9b", ownStationId: f.own.id,
+    selections: [{ selectionId: "account", newStation: single.newStation, monitor: true }],
+    groups: [{ groupId: "group", selectionId: "account", channels: [{ channelId: single.channelId, channelRevision: single.channelRevision }],
+      reconciliation: { tokenId: 8, timezone: "UTC", coverageDeclaration: { answer: "none" } } }] });
+  assert.equal(probe.groups[0].status, "unavailable");
+  assert.doesNotMatch(JSON.stringify(probe), /supplier-secret|own-secret|temporary-jwt|generated-zone-access|generated-zone-refresh/);
+  assert.deepEqual(f.rt.store.data, before); assert.equal(f.state.links.length, 0); assert.equal(f.state.rules.length, 0);
+});
+
+for (const change of ["key", "identity", "authorization", "purpose", "source", "timezone"]) {
+  test(`F03 genuine UTC still rejects a real ${change} change before any onboarding write`, async (t) => {
+    const f = await genuineBatchFixture(t), input = f.request([[1]]); input.groups[0].reconciliation.timezone = "UTC";
+    const probe = await f.rt.channelOnboarding.probeBatch(input);
+    if (change === "key") f.state.keyNames[9] = "Changed Key";
+    if (change === "identity") f.state.upstreamAccountId = 43;
+    if (change === "authorization") await f.store.update(f.supplier.id, { accessToken: "changed-pat" });
+    if (change === "purpose") await f.store.update(f.supplier.id, { includeInProfit: false, monitorEnabled: false });
+    if (change === "source") await f.store.update(f.own.id, { accessToken: "changed-admin" });
+    if (change === "timezone") input.groups[0].reconciliation.timezone = "Asia/Singapore";
+    const before = structuredClone(f.store.data), result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: probe.previewId });
+    assert.equal(result.complete, false); assert.equal(f.state.ruleWrites, 0); assert.equal(f.state.links.length, 0);
+    assert.deepEqual(f.store.data, before);
+  });
 }
 
 async function ruleEditRoutes() {
@@ -1063,8 +1269,8 @@ test("U02 edit与batch使用同一100项/10min preview map，取消和restart不
 
 test("concurrent connections and a response retry share one persisted monitor and never return credentials", async () => {
   const state = fixture();
-  const results = await Promise.all([connectNewApiUpstream(state.rt, input, metadata), connectNewApiUpstream(state.rt, input, metadata)]);
-  results.push(await connectNewApiUpstream(state.rt, input, metadata));
+  const results = await Promise.all([connectNewApiUpstream(state.rt, input, metadata, legacyIdentity), connectNewApiUpstream(state.rt, input, metadata, legacyIdentity)]);
+  results.push(await connectNewApiUpstream(state.rt, input, metadata, legacyIdentity));
   assert.equal(state.writes(), 1);
   assert.equal(state.stations[0].userId, "7");
   assert.deepEqual(results.map((result) => result.station.id), ["station-1", "station-1", "station-1"]);
@@ -1078,7 +1284,7 @@ test("different users at the same URL remain distinct and own/archived stations 
     { id: "archived", type: "newapi", baseUrl: input.baseUrl, userId: "7", archivedAt: "2026-10-09" },
     { id: "another", type: "newapi", baseUrl: input.baseUrl, userId: "8" },
   ]);
-  const result = await connectNewApiUpstream(state.rt, input, metadata);
+  const result = await connectNewApiUpstream(state.rt, input, metadata, legacyIdentity);
   assert.equal(result.created, true);
   assert.equal(state.writes(), 1);
   assert.equal(state.stations.length, 4);
@@ -1086,7 +1292,7 @@ test("different users at the same URL remain distinct and own/archived stations 
 
 test("legacy account with identical PAT can be reused without a stored user ID", async () => {
   const state = fixture([{ id: "legacy", type: "newapi", baseUrl: input.baseUrl, accessToken: "Bearer secret-pat" }]);
-  assert.equal((await connectNewApiUpstream(state.rt, input, metadata)).station.id, "legacy");
+  assert.equal((await connectNewApiUpstream(state.rt, input, metadata, legacyIdentity)).station.id, "legacy");
   assert.equal(state.writes(), 0);
 });
 
