@@ -6,7 +6,8 @@ export async function handleChannelOnboardingRequest(request, rt, operation, par
   if (!module) return Response.json({ error: "渠道接入模块尚未就绪，请稍后重试" }, { status: 503 });
   let body;
   const accountAuthorization = ["probeAccountAuthorization", "updateAccountAuthorization", "recoverAccountAuthorization"].includes(operation);
-  if (accountAuthorization || ["connect", "probe", "connectBatch", "probeBatch", "recoverBatch"].includes(operation)) {
+  const resourceIdentity = operation === "confirmResourceIdentity";
+  if (resourceIdentity || accountAuthorization || ["connect", "probe", "connectBatch", "probeBatch", "recoverBatch"].includes(operation)) {
     try { body = await request.json(); } catch {
       return Response.json({ error: "请求格式无效", code: "INVALID_REQUEST" }, { status: 400 });
     }
@@ -15,11 +16,12 @@ export async function handleChannelOnboardingRequest(request, rt, operation, par
     }
   }
   try {
-    const result = accountAuthorization ? await module[operation](params.accountKey, body) : await module[operation](body, params);
+    const result = resourceIdentity ? await module[operation](params.stationId, body)
+      : accountAuthorization ? await module[operation](params.accountKey, body) : await module[operation](body, params);
     return Response.json(result);
   } catch (error) {
     const connections = [body?.newStation, body?.reconciliation?.newAuthorization, body?.authorization,
-      rt.store?.get?.(body?.stationId), rt.store?.get?.(body?.reconciliation?.upstreamStationId),
+      rt.store?.get?.(params.stationId), rt.store?.get?.(body?.stationId), rt.store?.get?.(body?.reconciliation?.upstreamStationId),
       rt.store?.get?.(body?.ownStationId || body?.source?.ownStationId),
       ...(operation === "listAccounts" ? rt.store?.list?.({ includeUnmonitored: true, includeArchived: true }) || [] : []),
       ...(accountAuthorization ? rt.store?.list?.({ includeUnmonitored: true, includeArchived: true }) || [] : []),

@@ -361,8 +361,27 @@ export function createReconciliationModule(rt) {
   const ownChannelsRequests = (rt._reconciliationOwnChannelsRequests ||= new Map());
   const ruleGenerations = (rt._reconciliationRuleGenerations ||= new Map());
   const verifiedRuleCredentials = new WeakMap();
+  const previewReadFacts = new WeakMap();
   const ownIdentities = new Map();
   const billingStation = (station) => station && ["newapi", "sub2api", "sub2api-password"].includes(station.type) && !station.isOwn;
+  const billingPanel = (station) => station && JSON.stringify([station.type.startsWith("sub2api") ? "sub2api" : "newapi", onboardingBaseUrl(station.baseUrl)]);
+  function createPreviewReadContext() {
+    const context = {};
+    previewReadFacts.set(context, new Map());
+    return context;
+  }
+
+  async function previewRead(context, station, kind, query) {
+    const observations = previewReadFacts.get(context);
+    if (!observations) return query();
+    const version = stationBusinessVersion(station), key = JSON.stringify([station.id, version, kind]);
+    if (!observations.has(key)) observations.set(key, Promise.resolve().then(query));
+    const value = await observations.get(key);
+    if (stationBusinessVersion(rt.store.get(station.id)) !== version) {
+      throw Object.assign(new Error("验证期间资源配置已变化，请重新预览"), { code: "PREVIEW_BASIS_CHANGED" });
+    }
+    return structuredClone(value);
+  }
   const billingSourceState = () => {
     const stations = rt.store.list({ includeUnmonitored: true, includeArchived: true })
       .filter((station) => ["newapi", "sub2api", "sub2api-password"].includes(station.type))
@@ -499,13 +518,12 @@ export function createReconciliationModule(rt) {
 
   function costOwnerFor(rule, canonicalKey, registry) {
     const current = registry.resources.get(rule.upstreamStationId)?.station;
-    const panel = (station) => station && JSON.stringify([station.type.startsWith("sub2api") ? "sub2api" : "newapi", onboardingBaseUrl(station.baseUrl)]);
     const matching = [];
     const unknown = [];
     for (const candidate of registry.rules.filter((item) => item.enabled && item.tokenId === rule.tokenId)) {
       const resource = registry.resources.get(candidate.upstreamStationId);
       if (!resource?.identity) {
-        if (!resource?.station || panel(resource.station) === panel(current)) unknown.push(candidate.id);
+        if (!resource?.station || billingPanel(resource.station) === billingPanel(current)) unknown.push(candidate.id);
         continue;
       }
       const key = canonicalBillingKey(resource.station, resource.identity, candidate.tokenId);
@@ -563,7 +581,7 @@ export function createReconciliationModule(rt) {
     })).filter(Boolean);
   }
 
-  async function validateInput(input, { excludeRuleId = null, authorization = null, existingRule = null } = {}) {
+  async function validateInput(input, { excludeRuleId = null, authorization = null, existingRule = null, readContext = null } = {}) {
     const configuredUpstream = authorization?.station || upstreamStation(String(input?.upstreamStationId || ""));
     const upstream = configuredUpstream && { ...configuredUpstream };
     if (!billingStation(upstream)) throw new Error("请选择已配置的 NewAPI 或 Sub2API 上游账号");
@@ -577,18 +595,22 @@ export function createReconciliationModule(rt) {
     if (!channelIds.length) throw new Error("至少选择一个本站销售渠道");
     const [metadata, channels, ownIdentity] = await Promise.all([
       authorization?.metadata || metadataFor(upstream, { force: true, timezone: input?.timezone }),
-      ownChannelsFor(own, { force: true }),
-      queryAccountIdentity(own),
+      previewRead(readContext, own, "channels", () => ownChannelsFor(own, { force: true })),
+      previewRead(readContext, own, "identity", () => queryAccountIdentity(own)),
     ]);
     const canonicalKey = canonicalBillingKey(upstream, metadata, tokenId);
     if (!canonicalKey) throw new Error("无法验证上游稳定账号身份");
-    const candidates = (await repository.listRules()).filter((rule) => rule.id !== excludeRuleId && rule.tokenId === tokenId
-      && (rule.enabled || rule.upstreamStationId === upstream.id));
+    const candidates = (await repository.listRules()).filter((rule) => {
+      if (rule.id === excludeRuleId || rule.tokenId !== tokenId || !(rule.enabled || rule.upstreamStationId === upstream.id)) return false;
+      const configured = upstreamStation(rule.upstreamStationId);
+      return !configured || billingPanel(configured) === billingPanel(upstream);
+    });
     const identities = new Map([[upstream.id, Promise.resolve(metadata)]]);
     const matches = (await mapWithConcurrency(candidates, 4, async (rule) => {
       const configured = upstreamStation(rule.upstreamStationId);
       if (!billingStation(configured)) throw Object.assign(new Error("参与实际 Key 归属的账号未能核验"), { code: "COST_OWNER_UNVERIFIED" });
-      if (!identities.has(configured.id)) identities.set(configured.id, queryAccountIdentity({ ...configured }));
+      if (!identities.has(configured.id)) identities.set(configured.id,
+        previewRead(readContext, { ...configured }, "identity", () => queryAccountIdentity({ ...configured })));
       const identity = await identities.get(configured.id);
       if (canonicalBillingKey(configured, identity, tokenId) !== canonicalKey) return rule.upstreamStationId === upstream.id ? rule : null;
       if (rule.canonicalKey && rule.canonicalKey !== canonicalKey && rule.upstreamStationId !== upstream.id) {
@@ -751,7 +773,7 @@ export function createReconciliationModule(rt) {
     }
   }
 
-  async function previewKeyScope(input, { authorization = null, replaceRuleId = null } = {}) {
+  async function previewKeyScope(input, { authorization = null, replaceRuleId = null, readContext = null } = {}) {
     let target = null;
     if (replaceRuleId) {
       target = await repository.getRule(replaceRuleId);
@@ -759,7 +781,7 @@ export function createReconciliationModule(rt) {
       assertRuleIdentity(target, input);
       input = normalizeReconciliationScopeIntent("replace", target.id, input, target).normalizedPutIntent;
     }
-    const valid = await validateInput(input, { authorization, ...(target ? { excludeRuleId: target.id, existingRule: target } : {}) });
+    const valid = await validateInput(input, { authorization, readContext, ...(target ? { excludeRuleId: target.id, existingRule: target } : {}) });
     if (valid.metadata.capability?.state !== "supported") {
       throw Object.assign(new Error("账单能力尚未验证，先保存监控资源并核验能力"), { code: "BILLING_CAPABILITY_UNVERIFIED" });
     }
@@ -1621,6 +1643,7 @@ export function createReconciliationModule(rt) {
     updateRule,
     appendChannels,
     previewKeyScope,
+    createPreviewReadContext,
     listRules: (options = {}) => repository.listRules(options),
     nextBillingEffectiveFrom,
     async getConfirmedHistory(id, input = {}) {

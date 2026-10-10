@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { connectNewApiUpstream, createChannelOnboardingModule, startChannelOnboarding } from "./channel-onboarding.js";
 import { Store, stationBusinessVersion } from "../db/store.js";
 import { applyScopePolicy, nextBillingEffectiveFrom, canonicalBillingKey } from "../lib/reconciliation-scope-policy.js";
-import { queryAccountIdentity, queryOwnChannels } from "../lib/providers.js";
+import { queryAccountIdentity, queryOwnChannels, queryReconciliationMetadata } from "../lib/providers.js";
 import { createReconciliationModule } from "./reconciliation.js";
 import { handleChannelOnboardingRequest } from "../app/api/channel-onboarding/handler.js";
 
@@ -236,6 +236,74 @@ async function authorizationFixture(t, type = "newapi") {
   return { state, get rt() { return rt; }, get store() { return store; }, ids: { own: own.id, a1: a1.id, a2: a2.id, billing: billing.id,
     pure: pure.id, b: b.id, unknown: unknown.id, archived: archived.id, other: other.id }, accountKey, input, restart, http };
 }
+
+async function legacyIdentityFixture(t, type = "newapi") {
+  const f = await authorizationFixture(t, type), id = f.ids.a1;
+  await f.store.update(id, type === "sub2api-password" ? { password: "fresh-password-A" } : { accessToken: "fresh-A" });
+  f.store.data.stations = [f.store.get(id)]; f.state.links = []; f.state.rules = [];
+  delete f.store.data.channel_onboarding_catalogue; delete f.state.meta.channel_onboarding_catalogue;
+  await f.store.save(); await f.restart(); f.state.commits = 0;
+  const http = (body) => handleChannelOnboardingRequest(new Request("https://local.test/api/channel-onboarding/resources/resource/identity", {
+    method: "POST", body: JSON.stringify(body) }), f.rt, "confirmResourceIdentity", { stationId: id });
+  return { ...f, get rt() { return f.rt; }, get store() { return f.store; }, id, http };
+}
+
+for (const type of ["newapi", "sub2api", "sub2api-password"]) {
+  test(`F06 ${type} legacy identity GET is read-only and explicit POST enters account management without channels`, async (t) => {
+    const f = await legacyIdentityFixture(t, type), original = structuredClone(f.store.get(f.id)), history = structuredClone(f.state.history);
+    const before = await f.rt.channelOnboarding.listAccounts(); assert.equal(before.accounts.length, 0); assert.equal(before.unverifiedResources.length, 1);
+    const read = await f.rt.reconciliation.getUpstreamKeys(f.id, { force: true });
+    assert.equal(read.identity.accountId, "42"); assert.deepEqual(f.store.get(f.id), original); assert.equal(f.state.commits, 0);
+    const response = await f.http({ identity: read.identity, resourceVersion: read.resourceVersion,
+      verifiedIdentity: { provider: "newapi", baseUrl: "https://forged.test", accountId: "999" }, monitorEnabled: false, includeInProfit: true });
+    const saved = await response.json(); assert.equal(response.status, 200); assert.equal(saved.stationId, f.id);
+    assert.equal(saved.identity.accountId, "42"); assert.equal(f.store.get(f.id).verifiedIdentity.accountId, "42");
+    const withoutIdentity = ({ verifiedIdentity, ...station }) => station;
+    assert.deepEqual(withoutIdentity(f.store.get(f.id)), withoutIdentity(original));
+    const model = await f.rt.channelOnboarding.listAccounts(); assert.equal(model.accounts.length, 1); assert.equal(model.unverifiedResources.length, 0);
+    assert.equal(model.accounts[0].accountKey, saved.accountKey); assert.equal(model.accounts[0].resources[0].id, f.id);
+    assert.equal(f.state.links.length, 0); assert.equal(f.state.rules.length, 0); assert.deepEqual(f.state.history, history);
+    const commits = f.state.commits;
+    assert.equal((await f.http({ identity: saved.identity, resourceVersion: saved.resourceVersion })).status, 200);
+    assert.equal(f.state.commits, commits, "current repeated confirmation is idempotent");
+    await f.restart(); assert.equal((await f.rt.channelOnboarding.listAccounts()).accounts[0].resources[0].id, f.id);
+    assert.deepEqual(withoutIdentity(f.store.get(f.id)), withoutIdentity(original)); assert.deepEqual(f.state.history, history);
+  });
+}
+
+for (const change of ["forged-identity", "stale-auth", "stale-purpose", "identity-drift", "await-drift", "persistence-failure"]) {
+  test(`F06 explicit identity confirmation rejects ${change} without publishing identity`, async (t) => {
+    const f = await legacyIdentityFixture(t), read = await f.rt.reconciliation.getUpstreamKeys(f.id, { force: true });
+    if (change === "forged-identity") read.identity.accountId = "43";
+    if (change === "stale-auth") await f.store.update(f.id, { accessToken: "replacement-A" });
+    if (change === "stale-purpose") await f.store.update(f.id, { monitorEnabled: false });
+    if (change === "identity-drift") t.mock.method(globalThis, "fetch", async () => Response.json({ success: true, data: { id: 43 } }));
+    if (change === "await-drift") f.state.requestHook = async () => { f.state.requestHook = null; await f.store.update(f.id, { monitorEnabled: false }); };
+    if (change === "persistence-failure") f.state.failStationId = f.id;
+    const response = await f.http({ identity: read.identity, resourceVersion: read.resourceVersion }), error = await response.json();
+    assert.equal(response.status, 400); assert.doesNotMatch(JSON.stringify(error), /fresh-A/);
+    assert.equal(f.store.get(f.id).verifiedIdentity, null); assert.equal((await f.rt.channelOnboarding.listAccounts()).accounts.length, 0);
+    assert.equal(f.state.links.length, 0); assert.equal(f.state.rules.length, 0);
+    if (change === "persistence-failure") assert.ok(f.state.rollbacks > 0);
+  });
+}
+
+test("F06 resource identity route preserves concurrent alert settings and excludes own, pure-Key and archived resources", async (t) => {
+  const f = await legacyIdentityFixture(t), read = await f.rt.reconciliation.getUpstreamKeys(f.id, { force: true });
+  await f.store.update(f.id, { lowBalanceUsd: 99, cnyPerUsd: 0.9, noRenewal: false });
+  const { confirmIdentity } = await ruleEditRoutes();
+  const response = await confirmIdentity(new Request("https://local.test/api/channel-onboarding/resources/resource/identity", {
+    method: "POST", body: JSON.stringify({ identity: read.identity, resourceVersion: read.resourceVersion }) }), f.rt, { stationId: f.id });
+  assert.equal(response.status, 200); assert.equal(f.store.get(f.id).lowBalanceUsd, 99);
+  assert.equal(f.store.get(f.id).cnyPerUsd, 0.9); assert.equal(f.store.get(f.id).noRenewal, false);
+  const others = await authorizationFixture(t);
+  for (const id of [others.ids.own, others.ids.pure, others.ids.archived, "missing"]) {
+    const response = await handleChannelOnboardingRequest(new Request("https://local.test/identity", {
+      method: "POST", body: JSON.stringify({ identity: read.identity, resourceVersion: stationBusinessVersion(others.store.get(id)) })
+    }), others.rt, "confirmResourceIdentity", { stationId: id });
+    assert.equal(response.status, 400); assert.equal((await response.json()).code, "INVALID_RESOURCE");
+  }
+});
 
 test("U04 genuine Provider+Store+关系Repository HTTP probe零保存，三个eligible原ID并排除pureKey/own/B/unknown/archived/other", async (t) => {
   const f = await authorizationFixture(t), before = structuredClone(f.store.data);
@@ -603,8 +671,100 @@ async function genuineBatchFixture(t) {
     groups: groups.map((ids, index) => ({ groupId: `group-${index + 1}`, selectionId: "account", channels: ids.map((channelId) => ({ channelId,
       channelRevision: rt.channelOnboarding.getSourceCatalogue().channels.find((channel) => channel.id === channelId).revision })),
     reconciliation: { tokenId: keys[index] || 9, coverageDeclaration: { answer: "none" } } })) });
-  return { state, rt, store, own, supplier, request, restart };
+  return { state, rt, store, own, supplier, request, restart, repository };
 }
+
+for (const [type, baseUrl, allowed] of [["newapi", "https://offline.test", true], ["sub2api", "https://up.test", true], ["newapi", "https://up.test/", false]]) {
+  test(`F05 actual HTTP isolates Key 9 at ${type} ${baseUrl}, while same-panel uncertainty still blocks`, async (t) => {
+    const f = await genuineBatchFixture(t), other = await f.store.add({ type, baseUrl, accessToken: "offline-pat", userId: "42" });
+    f.state.rules.push({ id: "other-rule", upstream_station_id: other.id, own_station_id: f.own.id, token_id: 9,
+      token_name: "Key 9", timezone: "Asia/Shanghai", enabled: 1, archived_at: null });
+    f.state.requestHook = async (_url, options) => {
+      if (options.headers?.Authorization === "Bearer offline-pat") throw new Error("offline panel");
+    };
+    const before = structuredClone(f.store.data), request = f.request([[1]]);
+    const response = await handleChannelOnboardingRequest(new Request("http://fixture/api/channel-onboarding/batch/probe", {
+      method: "POST", body: JSON.stringify(request) }), f.rt, "probeBatch");
+    const probe = await response.json();
+    assert.equal(response.status, 200); assert.equal(probe.groups[0].status, allowed ? "ready" : "unavailable");
+    assert.equal(f.state.requests.some((item) => item.authorization === "Bearer offline-pat"), !allowed);
+    assert.deepEqual(f.store.data, before); assert.equal(f.state.ruleWrites, 0); assert.equal(f.state.links.length, 0);
+  });
+}
+
+test("F08 actual 100-Key preview shares complete same-version same-zone directories and confirmation rechecks", async (t) => {
+  const f = await genuineBatchFixture(t);
+  f.state.channels = Array.from({ length: 100 }, (_, index) => index + 1);
+  f.state.keys = Array.from({ length: 100 }, (_, index) => index + 9);
+  await f.rt.channelOnboarding.sync(); f.state.requests.length = 0;
+  const input = f.request(f.state.channels.map((id) => [id]), f.state.keys), before = structuredClone(f.store.data);
+  const probe = await f.rt.channelOnboarding.probeBatch(input);
+  assert.equal(probe.groups.length, 100); assert.ok(probe.groups.every((group) => group.status === "ready"));
+  const requests = (host, path) => f.state.requests.filter((item) => item.host === host && item.path === path).length;
+  assert.equal(requests("up.test", "/api/token/"), 2, "initial selection and requested-zone observations are bounded per operation");
+  assert.equal(requests("own.test", "/api/channel/"), 1); assert.equal(requests("own.test", "/api/user/self"), 1);
+  assert.deepEqual(f.store.data, before); assert.equal(f.state.ruleWrites, 0);
+  f.state.keyNames[9] = "Changed Key"; f.state.requests.length = 0;
+  const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: probe.previewId });
+  assert.equal(result.groups.find((group) => group.canonicalKey === probe.groups[0].basis.canonicalKey).complete, false);
+  assert.ok(requests("up.test", "/api/token/") > 0, "confirmation must not reuse the earlier operation's Key catalogue");
+});
+
+test("F07 directory reads reevaluate rule source after missing channels, restored catalogue and expiry", async (t) => {
+  const f = await genuineBatchFixture(t), input = f.request([[1]]), preview = await f.rt.channelOnboarding.probeBatch(input);
+  assert.equal((await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId })).complete, true);
+  const check = async (expected) => {
+    for (const method of ["list", "listAccounts"]) {
+      const result = await f.rt.channelOnboarding[method]();
+      assert.equal(result.channels.find((channel) => channel.id === 1).reconciliation.status, expected);
+    }
+  };
+  await check("configured"); f.state.channels = f.state.channels.filter((id) => id !== 1);
+  await f.rt.channelOnboarding.sync(); await check("review_required");
+  f.state.channels.unshift(1); await f.rt.channelOnboarding.sync(); await check("configured");
+  f.state.now += 6 * 60000; await check("review_required");
+  await f.rt.channelOnboarding.sync(); await check("configured");
+  assert.equal(f.state.ruleWrites, 1, "source observations do not rewrite financial scope");
+});
+
+test("F08 shared Sub2API metadata cannot inherit another selected Key's positive capability", async (t) => {
+  const f = await genuineBatchFixture(t), fetchNewApi = globalThis.fetch, stats = [];
+  await f.store.update(f.supplier.id, { type: "sub2api", accessToken: "sub2-A", userId: "" });
+  t.mock.method(globalThis, "fetch", async (input, options) => {
+    const url = new URL(input);
+    if (!url.pathname.startsWith("/api/v1/")) return fetchNewApi(input, options);
+    if (url.pathname.startsWith("/api/v1/keys/")) return Response.json({ code: 404, data: {} }, { status: 404 });
+    if (url.pathname === "/api/v1/usage/stats") {
+      stats.push(Object.fromEntries(url.searchParams));
+      if (url.searchParams.get("api_key_id") === "9") return Response.json({ code: 403, data: {} }, { status: 403 });
+    }
+    const data = url.pathname === "/api/v1/auth/me" ? { id: 42 }
+      : url.pathname === "/api/v1/keys" ? { total: 2, items: [9, 10].map((id) => ({ id, user_id: 42, name: `Key ${id}`, status: "active", group_id: 1 })) }
+        : { total_actual_cost: url.searchParams.get("api_key_id") !== "10" || url.searchParams.get("start_date") > "2026-10-09" ? 0 : 2 };
+    return Response.json({ code: 0, data });
+  });
+  // Exercise the selected-Key fallback with a directory observation whose deployment proof is still unverified.
+  f.rt.channelOnboarding = f.rt.onboardingSource = await createChannelOnboardingModule(f.rt, { repository: f.repository,
+    queryMetadata: async (connection, options) => ({ ...await queryReconciliationMetadata(connection, options),
+      capability: { state: "unverified", currency: "USD", window: "natural-day", reason: "DEPLOYMENT_NOT_VERIFIED" } }), refresh: async () => {},
+  }).load();
+  const probe = await f.rt.channelOnboarding.probeBatch(f.request([[1], [2]], [10, 9]));
+  assert.equal(probe.groups[0].status, "ready"); assert.equal(probe.groups[1].status, "unverified");
+  assert.ok(stats.some((query) => query.api_key_id === "10")); assert.ok(stats.some((query) => query.api_key_id === "9"));
+  assert.equal(f.state.ruleWrites, 0); assert.equal(f.state.links.length, 0);
+});
+
+test("F08 shared own observation still rejects a purpose change while its request is pending", async (t) => {
+  const f = await genuineBatchFixture(t);
+  f.state.requestHook = async (url) => {
+    if (url.host === "own.test" && url.pathname === "/api/channel/") {
+      f.state.requestHook = null; await f.store.update(f.own.id, { monitorEnabled: false });
+    }
+  };
+  const probe = await f.rt.channelOnboarding.probeBatch(f.request([[1], [2]], [9, 10]));
+  assert.ok(probe.groups.every((group) => group.status === "unavailable"));
+  assert.equal(f.state.ruleWrites, 0); assert.equal(f.state.links.length, 0);
+});
 
 for (const timezone of ["Asia/Shanghai", "UTC", "Asia/Singapore"]) {
   test(`F03 genuine ${timezone} create confirm original/new preview retries and existing-rule append share actual zone evidence`, async (t) => {
@@ -741,7 +901,8 @@ async function ruleEditRoutes() {
   try {
     const { POST } = await import("../app/api/reconciliation/rules/[id]/preview/route.js");
     const { PUT } = await import("../app/api/reconciliation/rules/[id]/route.js");
-    return { POST, PUT };
+    const { POST: confirmIdentity } = await import("../app/api/channel-onboarding/resources/[stationId]/identity/route.js");
+    return { POST, PUT, confirmIdentity };
   } finally { hooks.deregister(); }
 }
 

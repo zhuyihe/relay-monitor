@@ -277,6 +277,7 @@ async function openOnboardingPage(t, options = {}) {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path === "/api/channel-onboarding/accounts") { reads.push({ path, method: request.method() }); return options.accounts ? options.accounts(route, reads) : fulfill(route, options.accountModel || { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }); }
     if (options.accountOperation && path.startsWith("/api/channel-onboarding/accounts/")) return options.accountOperation(route, path);
+    if (/^\/api\/channel-onboarding\/resources\/[^/]+\/identity$/.test(path) && options.extraAPI) return options.extraAPI(route, path);
     if (request.method() === "GET" || path.endsWith("/sync")) { reads.push({ path, method: request.method() }); return options.discovery ? options.discovery(route, reads, config) : fulfill(route, config); }
     const body = request.postDataJSON();
     if (path === "/api/channel-onboarding/batch/probe") { probes.push(body); latestProbe = options.probe ? options.probe(body, probes.length, config) : probeResult(body, config, options); latestProbe.previewId += "-" + probes.length; return fulfill(route, latestProbe); }
@@ -566,6 +567,10 @@ async function openAccountsPage(t, options = {}) {
   } });
   const { page } = onboarded;
   await page.goto(baseURL + (options.path || "/stations")); const center = page.getByRole("region", { name: "账号关系中心" }); if (options.initialFailure) await center.getByRole("button", { name: "重试账号关系", exact: true }).waitFor(); else if (!options.path) await center.getByText(/显示 3\/3 个已核验账号/).waitFor(); else await center.getByText(/显示 .* 个已核验账号/).waitFor();
+  if (/action=verify(?:&|-billing&)/.test(options.path || "") && !options.path.includes("stationId=deleted")) {
+    const verification = page.getByRole("dialog", { name: /^核验账号与账单能力/ }); await verification.waitFor();
+    await page.waitForFunction((dialog) => !dialog.closest(".ant-drawer")?.getAnimations({ subtree: true }).some((animation) => animation.playState === "running" && animation.effect?.getTiming().iterations !== Infinity), await verification.elementHandle());
+  }
   const badge = page.getByRole("button", { name: "Collapse issues badge", exact: true }); if (await badge.isVisible()) await badge.click();
   return { ...onboarded, page, center, model, mutations, accountRequests, originalStations };
 }
@@ -606,6 +611,51 @@ function keyVerificationFixture(provider = "newapi", timezone = "UTC", selected 
     billingTimezone, tokens: [{ id: 9, name: "actual-key", status: 1, group: provider === "newapi" ? "g" : "", crossGroupRetry: false }], identity: { provider, baseUrl: "https://same.test", accountId: "42" }, resourceVersion: "verified-resource-version",
     probe: selected ? { tokenId: 9, state: "complete", complete: true, window: timezone === "UTC" ? { startMs: 1791417600000, endMs: 1791504000000, timezone } : { startMs: 1791388800000, endMs: 1791475200000, timezone }, currency: "USD", amountUsd: provider === "newapi" ? 0 : 3.25, knownAmountUsd: provider === "newapi" ? 0 : 3.25, actualCostUsd: provider === "sub2api" ? 3.25 : null, quotaUnits: provider === "newapi" ? 0 : null, quotaPerUnit: provider === "newapi" ? 100 : null, capability, billingTimezone } : null };
 }
+
+for (const width of [320, 390, 768, 1440]) {
+  test(`F06 legacy account identity is explicitly confirmed without channels at ${width}px`, async (t) => {
+    const model = accountReadFixture(), original = model.unverifiedResources.find((resource) => resource.id === "unknown-legacy");
+    model.accounts = []; model.unverifiedResources = [original]; model.channels = []; model.actions = [];
+    const read = keyVerificationFixture(); read.resourceVersion = original.resourceVersion;
+    read.tokens = []; read.capability = { state: "unverified", currency: "USD", window: "second", reason: "KEY_METADATA_UNAVAILABLE" };
+    const accountKey = createHash("sha256").update(JSON.stringify([read.identity.provider, read.identity.baseUrl, read.identity.accountId])).digest("hex");
+    const opened = await openAccountsPage(t, { model, viewport: { width, height: 900 }, path: "/stations?action=verify&stationId=unknown-legacy",
+      readonlyAPI(route) { return fulfill(route, read); }, mutation(route, mutation, stations) {
+        assert.equal(mutation.path, "/api/channel-onboarding/resources/unknown-legacy/identity"); assert.equal(mutation.method, "POST");
+        assert.deepEqual(mutation.body, { identity: read.identity, resourceVersion: read.resourceVersion });
+        const resource = { ...original, identity: read.identity, verification: "verified", resourceVersion: "saved-resource-version" };
+        Object.assign(stations.find((station) => station.id === original.id), resource);
+        model.accounts = [{ accountKey, siteKey: createHash("sha256").update(JSON.stringify([read.identity.provider, read.identity.baseUrl])).digest("hex"),
+          identity: read.identity, resources: [resource], keys: [], actions: [] }]; model.unverifiedResources = [];
+        return fulfill(route, { stationId: original.id, identity: read.identity, accountKey, resourceVersion: resource.resourceVersion });
+      } });
+    const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · unknown-legacy", exact: true });
+    assert.equal(await drawer.getByRole("button", { name: "确认保存账号身份", exact: true }).count(), 0);
+    await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click();
+    await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); assert.equal(opened.mutations.length, 0);
+    const confirm = drawer.getByRole("button", { name: "确认保存账号身份", exact: true });
+    await confirm.focus(); await opened.page.keyboard.press("Enter"); await drawer.waitFor({ state: "hidden" });
+    await opened.center.getByText(/显示 1\/1 个已核验账号/).waitFor();
+    await opened.center.getByRole("button", { name: "更新账号授权 newapi 42", exact: true }).waitFor();
+    assert.equal(opened.mutations.length, 1); assert.equal(opened.writes.length, 0);
+    assert.equal(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
+  });
+}
+
+test("F06 a rejected identity save remains retryable and requires a new read before another confirmation", async (t) => {
+  const opened = await openAccountsPage(t, { path: "/stations?action=verify&stationId=unknown-legacy",
+    readonlyAPI(route) { return fulfill(route, keyVerificationFixture()); }, mutation(route) {
+      return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: "RESOURCE_CHANGED", error: "资源配置已变化，请重新核验" }) });
+    } });
+  const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · unknown-legacy", exact: true });
+  await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click();
+  await drawer.getByRole("button", { name: "确认保存账号身份", exact: true }).click();
+  await drawer.getByText("资源配置已变化，请重新核验", { exact: true }).waitFor();
+  assert.equal(await drawer.getByRole("button", { name: "确认保存账号身份", exact: true }).count(), 0);
+  await drawer.getByRole("button", { name: /实际核验账号与 Key 目录/ }).click();
+  await drawer.getByRole("button", { name: "确认保存账号身份", exact: true }).waitFor();
+  assert.equal(opened.mutations.length, 1); assert.equal(opened.writes.length, 0);
+});
 test("workflow identity and selected-Key read preserve actual zero and separate Sub2 date capability from timezone", async (t) => {
   for (const [stationId, provider, action, timezone] of [["unknown-legacy", "newapi", "verify", "UTC"], ["Sub-password", "sub2api", "verify-billing", "Asia/Shanghai"]]) {
     const reads = []; const opened = await openAccountsPage(t, { path: `/stations?action=${action}&stationId=${stationId}`, readonlyAPI(route, path) {
@@ -637,7 +687,7 @@ test("workflow overview merges stable public actions and preserves prior actions
 });
 
 test("workflow read failures and deleted verification targets expose a safe retry with no save", async (t) => {
-  let calls = 0; const opened = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=unknown-legacy", readonlyAPI(route) { calls += 1; if (calls === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "KEY_PROBE_UNAVAILABLE", retryable: true, error: "账号身份暂时无法核验，请检查授权或稍后重试" }) }); return fulfill(route, keyVerificationFixture("newapi", "Asia/Shanghai")); } }); const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · unknown-legacy", exact: true }); await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click(); await drawer.getByRole("button", { name: "刷新处理目标", exact: true }).waitFor(); await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click(); await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); assert.equal(calls, 2); assert.equal(opened.mutations.length, 0);
+  let calls = 0; const opened = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=unknown-legacy", readonlyAPI(route) { calls += 1; if (calls === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "KEY_PROBE_UNAVAILABLE", retryable: true, error: "账号身份暂时无法核验，请检查授权或稍后重试" }) }); return fulfill(route, keyVerificationFixture("newapi", "Asia/Shanghai")); } }); const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · unknown-legacy", exact: true }); await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click(); await drawer.getByRole("button", { name: "刷新处理目标", exact: true }).waitFor(); await drawer.getByRole("button", { name: /实际核验账号与 Key 目录/ }).click(); await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); assert.equal(calls, 2); assert.equal(opened.mutations.length, 0);
   for (const path of ["/stations?action=verify&stationId=deleted", "/stations?action=authorization&accountKey=deleted", "/stations?stationId=deleted"]) { const unavailable = await openAccountsPage(t, { path }); await unavailable.page.getByRole("button", { name: "刷新处理目标", exact: true }).waitFor(); assert.equal(await unavailable.page.getByRole("dialog").count(), 0); assert.equal(unavailable.mutations.length, 0); }
 });
 
@@ -649,7 +699,13 @@ test("workflow verification keyboard and financial source links fit 320/390/768/
       if (path === "/api/own/analytics") return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "还没有标记「我的中转站」" }) });
       throw new Error("unexpected financial navigation fixture: " + path);
     } });
-    const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · Sub-password", exact: true }); const directory = drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }); await directory.focus(); await opened.page.keyboard.press("Enter"); await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); const key = drawer.getByRole("combobox", { name: "核验实际 Key", exact: true }); await key.focus(); await opened.page.keyboard.press("ArrowDown"); await opened.page.keyboard.press("Enter"); const probe = drawer.getByRole("button", { name: "核验所选 Key 账单", exact: true }); await probe.focus(); await opened.page.keyboard.press("Enter"); await drawer.getByText("所选 Key 扣费参考", { exact: true }).waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); await drawer.locator(".ant-drawer-close").focus(); await opened.page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
+    const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · Sub-password", exact: true }); const directory = drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }); await directory.focus(); await opened.page.keyboard.press("Enter"); await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); const key = drawer.getByRole("combobox", { name: "核验实际 Key", exact: true }); await key.focus(); await opened.page.keyboard.press("ArrowDown"); await opened.page.keyboard.press("Enter"); const probe = drawer.getByRole("button", { name: "核验所选 Key 账单", exact: true }); await probe.focus(); await opened.page.keyboard.press("Enter"); await drawer.getByText("所选 Key 扣费参考", { exact: true }).waitFor();
+    await opened.page.waitForFunction((dialog) => !dialog.closest(".ant-drawer")?.getAnimations({ subtree: true }).some((animation) => animation.playState === "running" && animation.effect?.getTiming().iterations !== Infinity), await drawer.elementHandle());
+    const overflow = await opened.page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
+      elements: [...document.querySelectorAll("body *")].filter((node) => node.getBoundingClientRect().right > document.documentElement.clientWidth + 1).slice(0, 8)
+        .map((node) => ({ tag: node.tagName, className: node.className, right: node.getBoundingClientRect().right, text: node.textContent?.slice(0, 100) })) }));
+    assert.ok(overflow.scroll <= overflow.client, JSON.stringify({ width, ...overflow }));
+    await drawer.locator(".ant-drawer-close").focus(); await opened.page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
     await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText("监控估算来源", { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.getByRole("region", { name: "对账汇总", exact: true }).waitFor(); await opened.page.getByRole("link", { name: "监控估算", exact: true }).last().waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); assert.equal(opened.mutations.length, 0); await opened.page.context().browser().close();
   }
 });

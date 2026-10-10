@@ -19,6 +19,7 @@ export async function api(path: string, opts: { method?: string; body?: any } = 
 }
 
 export type AccountIdentity = { provider: "newapi" | "sub2api"; baseUrl: string; accountId: string };
+export type ResourceIdentityConfirmation = { stationId: string; identity: AccountIdentity; accountKey: string; resourceVersion: string };
 export type OwnSource = AccountIdentity & { stationId: string; namespaceKey: string };
 export type CoverageDeclaration = { answer: "none" | "other_use" | "unknown"; otherUse: "own_channels" | "external" | "unspecified" | null; uncoveredOwnChannelIds: number[] };
 export type ConnectionInput = { type: "newapi" | "newapi-key" | "sub2api" | "sub2api-password"; baseUrl: string; name?: string; accessToken?: string; userId?: string; apiKey?: string; email?: string; password?: string };

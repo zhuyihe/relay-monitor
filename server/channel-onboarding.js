@@ -181,13 +181,14 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     return channel;
   }
 
-  function inspectSource(rule) {
+  function inspectSource(rule, channelById) {
     const hasBinding = Object.keys(rule.sourceBinding || {}).length > 0;
     if (!hasBinding && !rule.ownSource) return { version: "legacy", status: "confirmed", issues: [] };
+    channelById ||= new Map((catalogue?.channels || []).map((channel) => [Number(channel.id), channel]));
     const station = own();
     const entries = (rule.channels || []).map((member) => {
       const id = Number(member.channelId);
-      const channel = catalogue?.channels?.find((item) => Number(item.id) === id);
+      const channel = channelById.get(id);
       return [id, rule.sourceBinding?.[id] || null, channel?.revision || null, !!channel?.missing];
     }).sort(([a], [b]) => a - b);
     const available = !!station && rule.ownStationId === station.id && catalogue?.ownStationId === station.id && !stale();
@@ -196,6 +197,14 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const status = !available ? "unavailable" : confirmed ? "confirmed" : "review_required";
     return { version: hash([sourceVersion(), catalogue?.sourceVersion || null, rule.ownSource?.namespaceKey || null, entries]), status,
       issues: confirmed ? [] : [{ code: "SOURCE_BINDING_UNCONFIRMED", detail: "渠道来源已变化或待核对，当前金额仅供参考" }] };
+  }
+
+  function sourceInspectorForRead() {
+    const channelById = new Map((catalogue?.channels || []).map((channel) => [Number(channel.id), channel])), states = new Map();
+    return (rule) => {
+      if (!states.has(rule)) states.set(rule, inspectSource(rule, channelById));
+      return states.get(rule);
+    };
   }
 
   function getSourceCatalogue() {
@@ -213,7 +222,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   async function listAccounts() {
     const [savedLinks, allRules] = await Promise.all([repository.listLinks(), rt.reconciliation?.listRules?.({ includeArchived: true }) || []]);
     const stations = rt.store.list({ includeUnmonitored: true, includeArchived: true }).filter((station) => !station.isOwn && TYPES.includes(station.type));
-    const source = getSourceCatalogue(), accounts = new Map(), unverifiedResources = [], actions = [];
+    const source = getSourceCatalogue(), inspect = sourceInspectorForRead(), accounts = new Map(), unverifiedResources = [], actions = [];
     const active = (rule) => rule.enabled && !rule.archivedAt;
     const channelIds = (members) => [...new Set(members.map((member) => Number(member.channelId)))].sort((a, b) => a - b);
     function action(kind, target = {}) {
@@ -310,7 +319,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         && (rule.channels || []).some((member) => Number(member.channelId) === Number(channel.id)));
       return { ...channel, baseUrl: onboardingBaseUrl(channel.baseUrl), monitor: { status: channel.missing || monitored.some((link) => link.channelRevision !== channel.revision) ? "review_required" : monitored.length ? "linked" : "unlinked",
         stationIds: [...new Set(members.map((link) => link.stationId))].sort() },
-        reconciliation: { status: related.some((rule) => active(rule) && inspectSource(rule).status !== "confirmed") ? "review_required"
+        reconciliation: { status: related.some((rule) => active(rule) && inspect(rule).status !== "confirmed") ? "review_required"
           : related.some(active) ? "configured" : "unconfigured", ruleIds: related.map((rule) => rule.id).sort() } };
     });
     const unlinked = channels.filter((channel) => !channel.missing && channel.reconciliation.status === "unconfigured").map((channel) => channel.id);
@@ -321,6 +330,40 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     return { accounts: [...accounts.values()].sort((a, b) => a.accountKey.localeCompare(b.accountKey)),
       unverifiedResources: unverifiedResources.sort((a, b) => a.id.localeCompare(b.id)), channels,
       actions: [...new Map(actions.map((item) => [item.id, item])).values()], generatedAt: new Date(now()).toISOString() };
+  }
+
+  async function confirmResourceIdentity(stationId, input) {
+    const station = rt.store.get(stationId), expected = input?.identity;
+    if (!station || station.archivedAt || station.isOwn || !ACCOUNT_TYPES.includes(station.type)) {
+      throw previewFailure("INVALID_RESOURCE", "请选择未归档的上游账号资源");
+    }
+    if (typeof input?.resourceVersion !== "string" || !input.resourceVersion
+        || !["newapi", "sub2api"].includes(expected?.provider) || typeof expected?.baseUrl !== "string"
+        || typeof expected?.accountId !== "string" || !expected.accountId.trim()) {
+      throw previewFailure("INVALID_REQUEST", "请先核验当前资源的实际账号身份");
+    }
+    const version = input.resourceVersion, expectedAuthVersion = station.authVersion || 1, connection = structuredClone(station);
+    const assertCurrent = () => {
+      if (stationBusinessVersion(rt.store.get(stationId)) !== version) {
+        throw previewFailure("RESOURCE_CHANGED", "资源配置已变化，请重新核验");
+      }
+    };
+    assertCurrent();
+    let identity;
+    try { identity = await queryIdentity(connection); }
+    catch (error) { throw previewFailure("IDENTITY_VERIFICATION_FAILED", failure(error, [station, connection])); }
+    assertCurrent();
+    if (!sameIdentity(identity, expected) || storedIdentity(station) && !sameIdentity(storedIdentity(station), identity)) {
+      throw previewFailure("ACCOUNT_IDENTITY_CHANGED", "实际账号身份已变化，请重新核验并确认");
+    }
+    return stationLock([stationId], async () => {
+      assertCurrent();
+      const current = rt.store.get(stationId);
+      const saved = sameIdentity(storedIdentity(current), identity) ? current : await rt.store.updateLocked(stationId, {}, {
+        verifiedIdentity: identity, expectedAuthVersion, expectedResourceVersion: version, guard: assertCurrent,
+      });
+      return { stationId, identity, accountKey: accountKeyOf(identity), resourceVersion: stationBusinessVersion(saved) };
+    });
   }
 
   function authorizationInput(accountKey, input, recovery = false) {
@@ -610,7 +653,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   async function list() {
     const station = own(), allRules = await rules(), upstreams = resources();
-    const source = getSourceCatalogue();
+    const source = getSourceCatalogue(), inspect = sourceInspectorForRead();
     const channels = catalogue?.ownStationId === station?.id ? catalogue.channels : [];
     return {
       ownSource: source.ownSource, sourceVersion: source.sourceVersion,
@@ -626,7 +669,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             && onboardingBaseUrl(candidate.baseUrl) === onboardingBaseUrl(channel.baseUrl)).map((candidate) => candidate.id),
           monitor: { status: needsReview ? "review_required" : monitorLinks.length ? "linked" : "unlinked",
             stationIds: monitorLinks.map((link) => link.stationId) },
-          reconciliation: { status: relatedRules.some((rule) => inspectSource(rule).status !== "confirmed") ? "review_required"
+          reconciliation: { status: relatedRules.some((rule) => inspect(rule).status !== "confirmed") ? "review_required"
             : relatedRules.length ? "configured" : "unconfigured", ruleIds: relatedRules.map((rule) => rule.id) },
         };
       }),
@@ -856,7 +899,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   async function batchProbeState(input, { register = true } = {}) {
     const source = getSourceCatalogue(), sourceStationVersion = stationBusinessVersion(own());
     if (!source.ownSource) throw previewFailure("CHANNEL_CATALOGUE_STALE", "请先同步并核验本站渠道来源");
-    const prepared = new Map(), allRules = await rules();
+    const prepared = new Map(), metadataReads = new Map(), allRules = await rules();
+    const readContext = rt.reconciliation?.createPreviewReadContext?.();
     for (const selection of input.selections) {
       try {
         const value = await prepareBatchSelection(selection, input.groups.some((group) => group.selectionId === selection.selectionId && group.reconciliation));
@@ -885,8 +929,14 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             const timezone = new Intl.DateTimeFormat("en", { timeZone: requested.reconciliation.timezone || existing?.timezone || "Asia/Shanghai" })
               .resolvedOptions().timeZone;
             group.reconciliation = { ...requested.reconciliation, timezone };
-            billingConnection = structuredClone(billing.connection);
-            billing.metadata = await queryMetadata(billingConnection, { timezone });
+            const readKey = hash([onboardingConnectionPatch(billing.connection), billing.expectedAuthVersion, billing.resourceVersion, timezone]);
+            if (!metadataReads.has(readKey)) {
+              const connection = structuredClone(billing.connection);
+              metadataReads.set(readKey, { connection, promise: queryMetadata(connection, { timezone }) });
+            }
+            const observation = metadataReads.get(readKey);
+            billingConnection = observation.connection;
+            billing.metadata = structuredClone(await observation.promise);
             if (!sameIdentity(billing.identity, accountIdentity(billing.connection, billing.metadata))) {
               throw previewFailure("ACCOUNT_IDENTITY_CHANGED", "账号身份在验证期间发生变化，请重新验证");
             }
@@ -950,7 +1000,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             tokenId: group.reconciliation.tokenId, salesChannelIds: group.channels.map((channel) => channel.channelId),
             timezone: group.reconciliation.timezone, coverageDeclaration: group.reconciliation.coverageDeclaration,
             costCoverage: group.reconciliation.coverageDeclaration.answer === "none" ? "complete" : "unknown", ownSource: source.ownSource },
-          { authorization: { station: { ...structuredClone(billing.connection), id: reusable(billing)?.id || null,
+          { readContext, authorization: { station: { ...structuredClone(billing.connection), id: reusable(billing)?.id || null,
             authVersion: billing.expectedAuthVersion || 1 }, metadata: structuredClone(group.billingMetadata) } });
           group.basis = { ...financial.basis, resourceVersions: { ...financial.basis.resourceVersions, ...versions } };
           group.preview = financial.preview; group.existingRule = financial.existingRule;
@@ -1453,7 +1503,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   return { list, listAccounts, sync, probe, connect, inspectSource, getRuleSource: inspectSource, getSourceCatalogue, withSourceLock,
     getPreviewGuard, assertPreviewGuard, probeBatch, connectBatch, recoverBatch, probeRuleEdit,
-    probeAccountAuthorization, updateAccountAuthorization, recoverAccountAuthorization,
+    probeAccountAuthorization, updateAccountAuthorization, recoverAccountAuthorization, confirmResourceIdentity,
     async load() { [catalogue, links] = await Promise.all([repository.getCatalogue(), repository.listLinks()]); return this; } };
 }
 

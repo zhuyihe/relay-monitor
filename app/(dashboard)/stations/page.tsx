@@ -37,7 +37,7 @@ import AppState from "../../components/app-state";
 import ChannelOnboarding from "../../components/channel-onboarding";
 import dayjs from "dayjs";
 import { api, cny, usd, rateOf, fmtTokens, fmtEta, statusOf, readWorkflowDestination } from "../../../lib/client";
-import type { AccountReadModel, AccountRecord, AccountKeyScope, PublicResource, AccountAuthorizationInput, AccountAuthorizationProbe, AccountAuthorizationResult, AccountAuthorizationRecoveryIntent, WorkflowDestination, UpstreamKeyRead } from "../../../lib/client";
+import type { AccountReadModel, AccountRecord, AccountKeyScope, PublicResource, AccountAuthorizationInput, AccountAuthorizationProbe, AccountAuthorizationResult, AccountAuthorizationRecoveryIntent, WorkflowDestination, UpstreamKeyRead, ResourceIdentityConfirmation } from "../../../lib/client";
 import { describeConnectionFailure } from "../../../lib/connection-test";
 
 const { Text } = Typography;
@@ -692,7 +692,7 @@ export default function StationsPage() {
   }, [destination, loaded, accountModel, loadingAccounts, loadingList, accountError, loadError]);
 
   const openVerification = (station: any) => {
-    verificationEpoch.current += 1; setVerificationStation(station); setVerification(null); setVerificationTokenId(undefined); setVerificationTimezone("Asia/Shanghai"); setVerificationError("");
+    verificationEpoch.current += 1; setVerificationStation(station); setVerification(null); setVerificationTokenId(undefined); setVerificationTimezone("Asia/Shanghai"); setVerificationError(""); setVerificationBusy(false);
   };
   const verifyUpstream = async (selected: number | null = verificationTokenId ?? null) => {
     if (!verificationStation || verificationStation.isOwn || verificationStation.type === "newapi-key") return;
@@ -704,6 +704,22 @@ export default function StationsPage() {
       if (epoch === verificationEpoch.current) setVerification(next);
     } catch (err: any) { if (epoch === verificationEpoch.current) { setVerification(null); setVerificationError(err.message || "实际核验暂不可用，请检查授权或稍后重试"); } }
     finally { if (epoch === verificationEpoch.current) setVerificationBusy(false); }
+  };
+  const confirmIdentity = async () => {
+    if (!verificationStation || !verification?.identity || verificationBusy) return;
+    const epoch = ++verificationEpoch.current; setVerificationBusy(true); setVerificationError("");
+    try {
+      const saved: ResourceIdentityConfirmation = await api(`/api/channel-onboarding/resources/${encodeURIComponent(verificationStation.id)}/identity`, {
+        method: "POST", body: { identity: verification.identity, resourceVersion: verification.resourceVersion },
+      });
+      if (epoch !== verificationEpoch.current) return;
+      message.success(`账号 ${saved.identity.accountId} 的身份已保存`);
+      setExpandedAccounts([saved.accountKey]); setVerificationStation(null); setVerification(null); setVerificationBusy(false);
+      verificationEpoch.current += 1;
+      await reload();
+    } catch (err: any) {
+      if (epoch === verificationEpoch.current) { setVerification(null); setVerificationError(err.message || "身份未能保存，请重新核验后确认"); }
+    } finally { if (epoch === verificationEpoch.current) setVerificationBusy(false); }
   };
   useEffect(() => {
     if (!verificationStation) return;
@@ -1265,13 +1281,14 @@ export default function StationsPage() {
       <Drawer title={`核验账号与账单能力${verificationStation ? ` · ${verificationStation.name}` : ""}`} open={!!verificationStation} width={compact ? "100%" : 600} onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); verificationEpoch.current += 1; setVerificationStation(null); setVerification(null); setVerificationBusy(false); } }} onClose={() => { verificationEpoch.current += 1; setVerificationStation(null); setVerification(null); setVerificationBusy(false); }}>
         {verificationStation ? <Space direction="vertical" size={16} style={{ width: "100%", overflowWrap: "anywhere" }}>
           <Text>原资源 ID：{verificationStation.id} · {verificationStation.type} · {verificationStation.baseUrl}</Text>
-          <Alert type="info" showIcon message="只读核验，不保存身份或更改核算范围" description="使用服务端已保存授权读取实际账号、Key 目录与所选 Key 的已结束日统计。实际 Key 统计能力、请求时区和用途覆盖仍需分别核对。" />
+          <Alert type="info" showIcon message="核验只读，确认后保存账号身份" description="使用已保存授权核验实际账号，可明确确认身份并进入账号管理。保存身份保留原资源用途和核算范围；Key 账单能力、请求时区和用途覆盖仍需分别核对。" />
           {verificationError ? <Alert type="warning" showIcon message={verificationError} action={<Button onClick={() => window.location.reload()}>刷新处理目标</Button>} /> : null}
           {verificationStation.isOwn || verificationStation.type === "newapi-key" ? <Alert type="warning" showIcon message={verificationStation.isOwn ? "本站资源请核对本站来源与渠道目录" : "纯 Key 保持独立，不能推断所属账号"} description="需要账号权限时，在原资源设置中补充账号授权后重新核验；也可选择真实本站渠道，在接入流程中补专用账单授权。" action={<Space wrap><Button disabled={!types.length} onClick={() => { const original = stations.find((station) => station.id === verificationStation.id); if (!original) return; verificationEpoch.current += 1; setVerificationStation(null); setVerification(null); openModal(original); }}>补充原资源授权</Button><Button href="/stations">选择真实渠道并补账单授权</Button></Space>} /> : <>
             <div><Text strong>请求账单时区</Text><Input aria-label="核验账单时区" value={verificationTimezone} disabled={verificationBusy} onChange={(event) => { verificationEpoch.current += 1; setVerificationTimezone(event.target.value); setVerification(null); setVerificationTokenId(undefined); setVerificationError(""); }} /></div>
             <Button style={{ minHeight: 44 }} loading={verificationBusy} onClick={() => void verifyUpstream(null)}>实际核验账号与 Key 目录</Button>
             {verification ? <>
               <Alert type={verification.identity ? "success" : "warning"} showIcon message={verification.identity ? `本次实际账号已核验：${verification.identity.accountId}` : "实际账号尚未核验"} description={`${verification.identity?.provider || verification.platform} · ${verification.identity?.baseUrl || verificationStation.baseUrl} · 资源版本 ${verification.resourceVersion}。该结果未回填已保存账号关系。`} />
+              {verification.identity ? <Button type="primary" style={{ minHeight: 44 }} loading={verificationBusy} disabled={verificationBusy} onClick={() => void confirmIdentity()}>确认保存账号身份</Button> : null}
               {verification.capability?.reason === "KEY_METADATA_UNAVAILABLE" ? <Alert type="warning" showIcon message="Key 目录无法读取，请检查目录权限或稍后重试" description="账号身份核验成功；空目录不表示该账号没有 Key，也没有所选 Key 的账单证明。" /> : <><Select aria-label="核验实际 Key" style={{ width: "100%" }} value={verificationTokenId} disabled={verificationBusy} placeholder="从实际目录选择 Key" options={verification.tokens.map((key) => ({ value: key.id, label: `${key.name} · #${key.id} · ${key.group || "无分组"}`, disabled: key.status !== 1 }))} onChange={(tokenId) => { verificationEpoch.current += 1; setVerificationTokenId(tokenId); setVerification((previous) => previous ? { ...previous, probe: null } : null); setVerificationError(""); }} /><Button style={{ minHeight: 44 }} disabled={verificationTokenId == null || verificationBusy} loading={verificationBusy} onClick={() => void verifyUpstream()}>核验所选 Key 账单</Button>{!verification.tokens.length ? <Text type="secondary">当前已读取目录未返回 Key，可重试目录核验。</Text> : null}</>}
               <Text>本次 Key / 日期能力：{(verification.probe?.capability || verification.capability)?.state === "supported" ? "已支持" : (verification.probe?.capability || verification.capability)?.state === "unsupported" ? "不支持" : "待核验"} · {(verification.probe?.capability || verification.capability)?.window} · {(verification.probe?.capability || verification.capability)?.reason || ""}</Text>
               <Text>请求时区能力：{(verification.probe?.billingTimezone || verification.billingTimezone)?.timezone} · {(verification.probe?.billingTimezone || verification.billingTimezone)?.state === "verified" ? "已核验" : "未核验，原金额仅供参考"}</Text>
