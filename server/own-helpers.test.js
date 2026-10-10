@@ -44,6 +44,15 @@ test("未出现在 New API 渠道中的监控上游仍计入成本", () => {
   assert.equal(attribution.unmatched.size, 1);
 });
 
+test("账单专用授权硬排除成本，不能被 includeInProfit 覆盖", () => {
+  const own = { id: "own", isOwn: true };
+  const grant = { id: "grant", monitorEnabled: false, includeInProfit: true };
+  const monitored = { id: "monitored", includeInProfit: true };
+  const result = selectCostUpstreams([own, grant, monitored], own.id);
+  assert.deepEqual(result.included, [monitored]);
+  assert.deepEqual(result.excluded, []);
+});
+
 test("用量接口有有效成本时保持接口口径", () => {
   assert.deepEqual(reconcileUsageCost(4.1675, 4.16), {
     usd: 4.1675,

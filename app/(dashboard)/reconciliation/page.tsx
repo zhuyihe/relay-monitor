@@ -7,7 +7,8 @@ import {
   Pagination, Popconfirm, Segmented, Select, Space, Table, Tag, Typography,
 } from "antd";
 import { DeleteOutlined, EditOutlined, MoreOutlined, PlusOutlined, ReloadOutlined, RightOutlined, SearchOutlined } from "@ant-design/icons";
-import { api } from "../../../lib/client";
+import { api, readWorkflowDestination } from "../../../lib/client";
+import type { BatchInput, BatchProbe, ConfirmedHistoryRecord, ConfirmedHistoryResponse, CoverageDeclaration, KnownChannelCoverage, ReconciliationWindowGroup, ReconciliationSummary, RuleEditPreview, WorkflowDestination } from "../../../lib/client";
 import {
   formatReconciliationMoney as money,
   hasReconciliationHistory,
@@ -17,7 +18,6 @@ import {
   reconciliationBillingBasis,
   reconciliationCalculationValues as calculationValues,
   reconciliationRowFlags,
-  summarizeReconciliationTotals,
   summarizeReconciliationFreshness,
 } from "../../../lib/reconciliation-view";
 import {
@@ -26,6 +26,8 @@ import {
   reconciliationHealthMeta,
 } from "../../../lib/reconciliation-contract";
 import AppState from "../../components/app-state";
+import ChannelOnboarding from "../../components/channel-onboarding";
+import { NAV_LABELS } from "../../../lib/brand";
 
 const { Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -253,8 +255,11 @@ export default function ReconciliationPage() {
   const [loading, setLoading] = useState(true);
   const [querying, setQuerying] = useState(false);
   const [error, setError] = useState("");
-  const [preset, setPreset] = useState("today");
-  const [activeWindow, setActiveWindow] = useState<any>({ preset: "today" });
+  const [destination, setDestination] = useState<WorkflowDestination | null>(null);
+  const [workflowError, setWorkflowError] = useState("");
+  const destinationResolved = useRef(false);
+  const [preset, setPreset] = useState("yesterday");
+  const [activeWindow, setActiveWindow] = useState<any>({ preset: "yesterday" });
   const [range, setRange] = useState<any>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [detail, setDetail] = useState<any>(null);
@@ -267,13 +272,24 @@ export default function ReconciliationPage() {
   const [channelsError, setChannelsError] = useState("");
   const configRequestId = useRef(0);
   const channelRefreshRequestId = useRef(0);
+  const channelDiscoveryInFlight = useRef(false);
   const keyRequestId = useRef(0);
   const windowRequestId = useRef(0);
   const windowRequestInFlight = useRef(false);
   const ruleRetryRequestId = useRef(new Map<string, number>());
   const resultEpoch = useRef(0);
-  const rowResultEpoch = useRef(new Map<string, number>());
+  const rowResultEpoch = useRef(new Map<string, { epoch: number; window: any }>());
+  const summaryRequestId = useRef(0);
+  const [summaryStale, setSummaryStale] = useState(false);
+  const [summaryError, setSummaryError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [rulePreview, setRulePreview] = useState<RuleEditPreview | null>(null);
+  const [ruleBatch, setRuleBatch] = useState<BatchInput | null>(null);
+  const [previewingRule, setPreviewingRule] = useState(false);
+  const [ruleFormError, setRuleFormError] = useState("");
+  const rulePreviewEpoch = useRef(0);
+  const coverageAnswer = Form.useWatch("coverageAnswer", form);
+  const otherUse = Form.useWatch("otherUse", form);
   const [transitionAt, setTransitionAt] = useState<any>(null);
   const [transitionSegmentId, setTransitionSegmentId] = useState<string | null>(null);
   const [transitionSegments, setTransitionSegments] = useState<any[]>([]);
@@ -283,25 +299,28 @@ export default function ReconciliationPage() {
   const [expandedRuleId, setExpandedRuleId] = useState<string | null>(null);
   const [retryingRuleIds, setRetryingRuleIds] = useState<Set<string>>(new Set());
   const [ruleRetryErrors, setRuleRetryErrors] = useState<Record<string, string>>({});
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyDirectory, setHistoryDirectory] = useState<any[] | null>(null);
+  const [historyDirectoryBusy, setHistoryDirectoryBusy] = useState(false);
+  const [historyDirectoryError, setHistoryDirectoryError] = useState("");
+  const [historyRuleId, setHistoryRuleId] = useState<string | null>(null);
+  const [historyRange, setHistoryRange] = useState<any>(null);
+  const [historyRangeChanged, setHistoryRangeChanged] = useState(false);
+  const [confirmedHistory, setConfirmedHistory] = useState<ConfirmedHistoryResponse | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
+  const historyRequestId = useRef(0);
+  const historyRequest = useRef<{ ruleId: string; range: { startMs: number; endMs: number } | null; cursor: string | null } | null>(null);
 
   const rate = config?.ownStation?.cnyPerUsd ?? null;
   const results = data?.results || [];
-  const totals = useMemo(() => summarizeReconciliationTotals(results), [results]);
-  const totalDifference = totals.profit;
-  const totalMargin = totals.confirmedMarginRate;
-  const riskItems = useMemo(() => results.flatMap((item: any) => {
-    const issues = item?.health?.issues?.length ? item.health.issues : item?.health?.code !== "READY" ? [{ code: item?.health?.code, detail: item?.health?.detail }] : [];
-    return issues.map((issue: any) => ({ ...issue, rule: item.rule }));
-  }), [results]);
-  const issueCategoryCounts = useMemo(() => results.reduce((counts: any, item: any) => {
-    const codes = new Set([item?.health?.code, ...(item?.health?.issues || []).map((issue: any) => issue?.code)]);
-    if (["UPSTREAM_DATA_UNAVAILABLE", "OWN_BILLING_UNAVAILABLE", "KEY_INVALID_OR_DENIED", "PENDING"].some((code) => codes.has(code))) counts.fetch += 1;
-    if (codes.has("PERSISTENCE_FAILED")) counts.persistence += 1;
-    if (codes.has("GROUP_DATA_UNAVAILABLE")) counts.group += 1;
-    if (["SALES_CHANNEL_DISABLED", "SALES_CHANNEL_MISSING", "SALES_CHANNEL_STATE_UNKNOWN"].some((code) => codes.has(code))) counts.channel += 1;
-    if (["SEGMENT_TIMING_UNCONFIRMED", "ROUTE_TRANSITION_DETECTED"].some((code) => codes.has(code))) counts.timing += 1;
-    return counts;
-  }, { fetch: 0, persistence: 0, group: 0, channel: 0, timing: 0 }), [results]);
+  const workflowRow = results.find((item: any) => item.rule?.id === destination?.ruleId);
+  const workflowRule = (config?.rules || []).find((rule: any) => rule.id === destination?.ruleId);
+  const conflictIds: string[] = destination?.action === "conflict" ? [...new Set<string>((workflowRow?.health?.issues || []).flatMap((issue: any) => issue.ruleIds || []).concat(destination.ruleId || []))] : [];
+  const windowGroups: ReconciliationWindowGroup[] = data?.windowGroups || [];
+  const commonSummary: ReconciliationSummary | null = data?.commonSummary || null;
+  const coverage: KnownChannelCoverage | null = data?.coverage || null;
   const latestSuccessful = results.filter((item: any) => item.lastSuccessfulAt).reduce((latest: any, item: any) => !latest || Date.parse(item.lastSuccessfulAt) > Date.parse(latest.lastSuccessfulAt) ? item : latest, null);
   const freshness = summarizeReconciliationFreshness(results);
   const requestedWindows = results.map((item: any) => item.requestedWindow || item.window).filter(Boolean);
@@ -309,8 +328,14 @@ export default function ReconciliationPage() {
     ? requestedWindows[0]
     : null;
   const displayTimezone = sharedWindow?.timezone || "Asia/Shanghai";
-  const summaryReference = Boolean(data && (error || querying));
+  const summaryReference = Boolean(data && (error || querying || summaryStale || retryingRuleIds.size));
   const filteredResults = useMemo(() => filterReconciliationResults(results, config?.upstreams, search, statusFilter), [results, config?.upstreams, search, statusFilter]);
+  const windowMetrics = (totals: ReconciliationWindowGroup["totals"]) => <div className="reconciliation-summary__metrics">
+    <SummaryMetric label="本站已获取收费（USD）" value={money(totals.knownIncomeUsd, null)} />
+    <SummaryMetric label="已计入上游成本（USD）" value={money(totals.knownCostUsd, null)} />
+    <SummaryMetric label="已确认范围账面毛利" value={money(totals.confirmedProfitUsd, null)} tone={totals.confirmedProfitUsd == null ? "" : totals.confirmedProfitUsd < 0 ? "danger" : "success"} />
+    <SummaryMetric label="已确认范围毛利率" value={percent(totals.confirmedMarginRate)} />
+  </div>;
   const filterCounts = useMemo(() => results.reduce((counts: any, item: any) => {
     const flags = reconciliationRowFlags(item);
     counts.all += 1;
@@ -332,7 +357,55 @@ export default function ReconciliationPage() {
     return next;
   };
 
+  const loadHistoryDirectory = async () => {
+    setHistoryDirectoryBusy(true); setHistoryDirectoryError("");
+    try { const next = await api("/api/reconciliation/configuration?includeArchived=true"); setHistoryDirectory(next.rules || []); }
+    catch (err: any) { setHistoryDirectoryError(err.message || "历史规则目录读取失败"); }
+    finally { setHistoryDirectoryBusy(false); }
+  };
+  const loadConfirmedHistory = async (ruleId: string, range: { startMs: number; endMs: number } | null = null, cursor: string | null = null) => {
+    const requestId = ++historyRequestId.current; historyRequest.current = { ruleId, range, cursor }; setHistoryBusy(true); setHistoryError("");
+    const params = new URLSearchParams({ limit: "20" });
+    if (range) { params.set("startMs", String(range.startMs)); params.set("endMs", String(range.endMs)); }
+    if (cursor) params.set("cursor", cursor);
+    try {
+      const next: ConfirmedHistoryResponse = await api(`/api/reconciliation/rules/${encodeURIComponent(ruleId)}/confirmed?${params}`);
+      if (requestId !== historyRequestId.current) return;
+      setHistoryRangeChanged(false);
+      setConfirmedHistory((previous) => { const records = cursor ? [...(previous?.records || []), ...next.records] : next.records; return { ...next, records: records.filter((record, index) => records.findIndex((item) => item.historyId === record.historyId) === index) }; });
+    } catch (err: any) { if (requestId === historyRequestId.current) setHistoryError(err.message || "确认账单历史读取失败"); }
+    finally { if (requestId === historyRequestId.current) setHistoryBusy(false); }
+  };
+  const selectedHistoryRange = () => historyRange?.[0] && historyRange?.[1] ? { startMs: historyRange[0].valueOf(), endMs: historyRange[1].valueOf() } : null;
+  const chooseHistoryRule = (id: string) => {
+    setHistoryRuleId(id); setConfirmedHistory(null); setExpandedHistoryId(null); setHistoryRangeChanged(false); void loadConfirmedHistory(id, selectedHistoryRange());
+  };
+  const openConfirmedHistory = (id?: string) => {
+    setDetail(null); setHistoryOpen(true);
+    if (!historyDirectory && !historyDirectoryBusy) void loadHistoryDirectory();
+    if (id && id !== historyRuleId) { setHistoryRange(null); setHistoryRangeChanged(false); setHistoryRuleId(id); setConfirmedHistory(null); setExpandedHistoryId(null); void loadConfirmedHistory(id); }
+  };
+  const historyWindowLabel = (record: ConfirmedHistoryRecord) => record.window.timezone
+    ? `${formatWindow(record.window)}（${record.window.timezone}）`
+    : `${new Date(record.window.startMs).toISOString()} — ${new Date(record.window.endMs).toISOString()} · 原时区未保存`;
+  const historyDetails = (record: ConfirmedHistoryRecord) => <div style={{ display: "grid", gap: 12, width: "100%", minWidth: 0, overflowWrap: "anywhere" }}>
+    {record.sourceCompleteness === "legacy_partial" ? <Alert type="warning" showIcon message="旧记录信息不完整" description="仅显示原存储区间与已保存金额；缺失的原来源、时区或范围未知，不能据此认定完整自然日。" /> : null}
+    <Detail label="原账单窗口" value={historyWindowLabel(record)} />
+    <Detail label="原本站来源" value={record.ownSource ? `${record.ownSource.provider} · ${record.ownSource.baseUrl} · 账号 ${record.ownSource.accountId} · ${record.ownSource.stationId} · ${record.ownSource.namespaceKey}` : "原本站来源未保存"} />
+    <Detail label="原上游来源" value={`${record.upstreamSource.provider || "原平台未保存"} · ${record.upstreamSource.baseUrl || "原地址未保存"} · 账号 ${record.upstreamSource.accountId ?? "未保存"}`} />
+    <Detail label="原 Key / 范围" value={`${record.upstreamSource.tokenName ?? "原 Key 名称未保存"} · #${record.upstreamSource.tokenId ?? "未保存"} · 范围版本 ${record.scopeVersion ?? "未保存"}`} />
+    <Detail label="原关联渠道" value={record.channels.map(channelLabel).join("、") || "原关联渠道未保存"} />
+    <Detail label="原生效边界" value={record.billingEffectiveFromMs == null ? "原生效边界未保存" : new Date(record.billingEffectiveFromMs).toISOString()} />
+    <Detail label="原收费 / 成本 / 账面毛利" value={`${billingAmountText(record.downstream, null)} / ${billingAmountText(record.upstream, null)} / ${money(record.calculation.profitUsd, null)}`} />
+    <Detail label="原毛利率" value={percent(record.calculation.marginRate)} />
+    <Detail label="原账单计量" value={`${record.amountBasis.currency} · ${record.amountBasis.billingSource} · 计算版本 ${record.amountBasis.calculationVersion} · ${record.amountBasis.conversion === "quota_per_unit" ? "配额 ÷ 单位" : record.amountBasis.conversion === "provider_cost_usd" ? "上游美元账单" : "原换算依据未保存"}`} />
+    <Detail label="原收费计量 / 成本计量" value={`${reconciliationBillingBasis(record.downstream)} / ${reconciliationBillingBasis(record.upstream)}`} />
+    <Detail label="确认保存时间" value={record.confirmedAt} />
+  </div>;
+
   const refreshChannelOptions = async () => {
+    if (channelDiscoveryInFlight.current) return;
+    channelDiscoveryInFlight.current = true;
     const requestId = ++channelRefreshRequestId.current;
     setChannelsRefreshing(true);
     setChannelsError("");
@@ -342,37 +415,71 @@ export default function ReconciliationPage() {
     } catch {
       if (requestId === channelRefreshRequestId.current) setChannelsError("本站渠道刷新失败，请稍后重试");
     } finally {
+      channelDiscoveryInFlight.current = false;
       if (requestId === channelRefreshRequestId.current) setChannelsRefreshing(false);
+    }
+  };
+
+  const readWindow = (window: any) => {
+    const params = new URLSearchParams({ preset: window.preset });
+    if (window.startMs != null) params.set("startMs", String(window.startMs));
+    if (window.endMs != null) params.set("endMs", String(window.endMs));
+    return api(`/api/reconciliation?${params}`);
+  };
+
+  const refreshSummary = async (window = activeWindow, windowEpoch = windowRequestId.current) => {
+    const requestId = ++summaryRequestId.current;
+    const responseEpoch = ++resultEpoch.current;
+    setSummaryStale(true); setSummaryError("");
+    try {
+      const next = await readWindow(window);
+      if (requestId !== summaryRequestId.current || windowEpoch !== windowRequestId.current) return;
+      const newerRows = new Set((next.results || []).filter((row: any) => {
+        const current = rowResultEpoch.current.get(String(row.rule?.id));
+        return current?.epoch! > responseEpoch && sameWindow(current?.window, row.window);
+      }).map((row: any) => String(row.rule?.id)));
+      setData((previous: any) => ({ ...next, results: (next.results || []).map((row: any) => {
+        const id = String(row.rule?.id), current = previous?.results?.find((item: any) => String(item.rule?.id) === id);
+        if (newerRows.has(id) && sameWindow(current?.window, row.window)) return current;
+        rowResultEpoch.current.set(id, { epoch: responseEpoch, window: row.window }); return row;
+      }) }));
+      if (newerRows.size) void refreshSummary(window, windowEpoch);
+      else setSummaryStale(false);
+    } catch (err: any) {
+      if (requestId === summaryRequestId.current && windowEpoch === windowRequestId.current) setSummaryError(err?.message || "全量汇总读取失败");
     }
   };
 
   const loadWindow = async (window = activeWindow, force = false) => {
     if (!force && windowRequestInFlight.current) return null;
     const requestId = ++windowRequestId.current;
+    summaryRequestId.current += 1;
     const responseEpoch = ++resultEpoch.current;
     windowRequestInFlight.current = true;
     setQuerying(true);
     try {
-      let next;
-      if (window.preset === "today" && !force) {
-        next = await api("/api/reconciliation?preset=today");
-      } else {
-        next = await api("/api/reconciliation/query", { method: "POST", body: window });
-      }
+      const next = force ? await api("/api/reconciliation/query", { method: "POST", body: window }) : await readWindow(window);
       if (requestId === windowRequestId.current) {
         setData((previous: any) => {
           const previousRows = new Map((previous?.results || []).map((item: any) => [String(item?.rule?.id), item]));
           const rows = (next?.results || []).map((item: any) => {
             const id = String(item?.rule?.id || "");
             const previousRow: any = previousRows.get(id);
-            const previousWindow = previousRow?.requestedWindow || previousRow?.window;
-            const nextWindow = item?.requestedWindow || item?.window;
-            if (id && rowResultEpoch.current.get(id)! > responseEpoch && sameWindow(previousWindow, nextWindow)) return previousRow || item;
-            if (id) rowResultEpoch.current.set(id, responseEpoch);
+            const previousWindow = previousRow?.window;
+            const nextWindow = item?.window;
+            if (id && rowResultEpoch.current.get(id)?.epoch! > responseEpoch && sameWindow(previousWindow, nextWindow)) return previousRow || item;
+            if (id) rowResultEpoch.current.set(id, { epoch: responseEpoch, window: item.window });
             return item;
           });
           return { ...next, results: rows };
         });
+        setSummaryError("");
+        const hasNewerRows = (next.results || []).some((item: any) => {
+          const current = rowResultEpoch.current.get(String(item.rule?.id));
+          return current?.epoch! > responseEpoch && sameWindow(current?.window, item.window);
+        });
+        setSummaryStale(hasNewerRows);
+        if (hasNewerRows) void refreshSummary(window, requestId);
         setError("");
         return next;
       }
@@ -408,10 +515,11 @@ export default function ReconciliationPage() {
         const current = (previous?.results || []).find((candidate: any) => String(candidate?.rule?.id) === id);
         const currentWindow = current?.requestedWindow || current?.window;
         if (!current || !sameWindow(window, currentWindow)) return previous;
-        rowResultEpoch.current.set(id, responseEpoch);
+        rowResultEpoch.current.set(id, { epoch: responseEpoch, window: replacement.window });
         return { ...previous, results: previous.results.map((candidate: any) => String(candidate?.rule?.id) === id ? replacement : candidate) };
       });
       setDetail((current: any) => String(current?.rule?.id) === id ? replacement : current);
+      void refreshSummary(activeWindow, requestWindowEpoch);
     } catch (err: any) {
       if (requestId === ruleRetryRequestId.current.get(id) && requestWindowEpoch === windowRequestId.current) setRuleRetryErrors((previous) => ({ ...previous, [id]: err?.message || "重试失败，请稍后再试" }));
     } finally {
@@ -426,8 +534,16 @@ export default function ReconciliationPage() {
   useEffect(() => {
     (async () => {
       try {
-        await loadConfiguration();
-        await loadWindow({ preset: "today" });
+        const target = readWorkflowDestination(window.location.search, "reconciliation");
+        setDestination(target);
+        const current = await loadConfiguration(true);
+        const rule = current?.rules?.find((rule: any) => rule.id === target?.ruleId);
+        if (target?.error) setWorkflowError(target.error);
+        else if (target && !rule) setWorkflowError("此规则已删除或不在当前目录中，请刷新事项后重新打开；已保存的历史账单仍可从历史入口查看。");
+        else if (target?.action === "retry" && (!rule.enabled || rule.archivedAt)) setWorkflowError("此规则已停止当前核算，不能重查新账单；可读取原确认历史。");
+        const initial = target?.action === "retry" && target.window && !target.error && rule?.enabled && !rule.archivedAt ? { preset: "custom", startMs: target.window.startMs, endMs: target.window.endMs } : { preset: "yesterday" };
+        setActiveWindow(initial); setPreset(initial.preset);
+        await loadWindow(initial);
       } catch (err: any) {
         setError(err?.message || "初始化失败");
         setLoading(false);
@@ -436,6 +552,17 @@ export default function ReconciliationPage() {
   // 仅首屏初始化；后续查询由按钮和定时器驱动。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!destination || destinationResolved.current || !data || !config || workflowError) return;
+    destinationResolved.current = true;
+    if (destination.action === "retry" && !sameWindow(destination.window, workflowRow?.requestedWindow || workflowRow?.window)) {
+      setWorkflowError("当前规则的请求窗口或时区已变化，请刷新事项后从当前账单重新打开。"); return;
+    }
+    if (workflowRow) { setExpandedRuleId(workflowRow.rule.id); void openDetail(workflowRow); }
+  // 目标只在首个当前公共响应完成后定位，后续行重试不重复打开抽屉。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [destination, data, config, workflowError]);
 
   useEffect(() => {
     if (activeWindow.preset !== "today" || !config) return;
@@ -483,7 +610,9 @@ export default function ReconciliationPage() {
     setKeyData(null);
     setKeyLoading(false);
     form.resetFields();
-    form.setFieldsValue({ timezone: "Asia/Shanghai" });
+    form.setFieldsValue({ timezone: "Asia/Shanghai", coverageAnswer: "unknown" });
+    rulePreviewEpoch.current += 1;
+    setRulePreview(null); setRuleBatch(null); setRuleFormError("");
     setDrawerOpen(true);
     void refreshChannelOptions();
   };
@@ -499,27 +628,59 @@ export default function ReconciliationPage() {
       tokenId: rule.tokenId,
       salesChannelIds: (rule.channels || []).map((channel: any) => Number(channel.channelId)),
       timezone: rule.timezone || "Asia/Shanghai",
+      coverageAnswer: "unknown", otherUse: "unspecified", uncoveredOwnChannelIds: [],
     });
+    rulePreviewEpoch.current += 1;
+    setRulePreview(null); setRuleBatch(null); setRuleFormError("");
     setDrawerOpen(true);
     void refreshChannelOptions();
   };
 
-  const saveRule = async (values: any) => {
-    setSaving(true);
+  const ruleInput = (values: any) => ({
+    upstreamStationId: values.upstreamStationId, tokenId: Number(values.tokenId),
+    salesChannelIds: values.salesChannelIds.map(Number), timezone: values.timezone,
+    coverageDeclaration: { answer: values.coverageAnswer || "unknown", otherUse: values.coverageAnswer === "other_use" ? values.otherUse || "unspecified" : null, uncoveredOwnChannelIds: values.coverageAnswer === "other_use" && values.otherUse === "own_channels" ? values.uncoveredOwnChannelIds || [] : [] } as CoverageDeclaration,
+  });
+  const previewRule = async () => {
+    setRuleFormError("");
     try {
-      const body = {
-        upstreamStationId: values.upstreamStationId,
-        tokenId: Number(values.tokenId),
-        salesChannelIds: values.salesChannelIds.map(Number),
-        timezone: values.timezone,
-      };
-      const path = editing ? `/api/reconciliation/rules/${editing.id}` : "/api/reconciliation/rules";
-      await api(path, { method: editing ? "PUT" : "POST", body });
+      const values = await form.validateFields(), body = ruleInput(values), current = ++rulePreviewEpoch.current;
+      setPreviewingRule(true);
+      if (editing) {
+        const next: RuleEditPreview = await api(`/api/reconciliation/rules/${encodeURIComponent(editing.id)}/preview`, { body });
+        if (current === rulePreviewEpoch.current) setRulePreview(next);
+      } else {
+        const catalogue = await api("/api/channel-onboarding");
+        if (catalogue.stale || !catalogue.ownStation) throw new Error("渠道目录待刷新，请发现新渠道后重新预览");
+        const input: BatchInput = { requestId: crypto.randomUUID(), ownStationId: catalogue.ownStation.id,
+          selections: [{ selectionId: "rule-account", stationId: body.upstreamStationId, monitor: false }],
+          groups: [{ groupId: "rule-key", selectionId: "rule-account", channels: body.salesChannelIds.map((id: number) => {
+            const channel = catalogue.channels.find((entry: any) => entry.id === id);
+            if (!channel?.revision) throw new Error(`渠道 #${id} 目录待刷新`);
+            return { channelId: id, channelRevision: channel.revision };
+          }), reconciliation: { tokenId: body.tokenId, timezone: body.timezone, coverageDeclaration: body.coverageDeclaration } }] };
+        const next: BatchProbe = await api("/api/channel-onboarding/batch/probe", { body: input });
+        const group = next.groups[0];
+        if (group.status !== "ready") throw new Error(group.reason || "账单能力待验证，请在渠道接入中补齐授权");
+        if (current === rulePreviewEpoch.current) { setRuleBatch(input); setRulePreview({ previewId: next.previewId, groupId: group.groupId, expiresAtMs: next.expiresAtMs, basis: group.basis, preview: group.preview }); }
+      }
+    } catch (err: any) { if (!err.errorFields) setRuleFormError(err.message || "预览失败，请重试"); setRulePreview(null); }
+    finally { setPreviewingRule(false); }
+  };
+  const saveRule = async (values: any) => {
+    if (!rulePreview || Date.now() >= rulePreview.expiresAtMs) { setRulePreview(null); return setRuleFormError("预览已失效，请重新预览修改"); }
+    setSaving(true); setRuleFormError("");
+    try {
+      if (editing) await api(`/api/reconciliation/rules/${encodeURIComponent(editing.id)}`, { method: "PUT", body: { ...ruleInput(values), previewId: rulePreview.previewId, groupId: rulePreview.groupId } });
+      else {
+        const next = await api("/api/channel-onboarding/batch", { body: { ...ruleBatch, previewId: rulePreview.previewId } });
+        if (!next.complete) throw new Error(next.groups?.find((group: any) => !group.complete)?.reason || "账单关联尚未完成，请重新预览后重试");
+      }
       message.success(editing ? "对账规则已更新" : "对账规则已创建");
       setDrawerOpen(false);
-      await Promise.all([loadConfiguration(), loadWindow({ preset: "today" }, true)]);
+      await Promise.all([loadConfiguration(), loadWindow(activeWindow, true)]);
     } catch (err: any) {
-      message.error(err?.message || "保存规则失败");
+      setRuleFormError(err?.message || "保存规则失败，请重新预览"); setRulePreview(null);
     } finally { setSaving(false); }
   };
 
@@ -596,8 +757,8 @@ export default function ReconciliationPage() {
     return <AppState kind="error" title="无法加载渠道对账" description={error} actions={<Button type="primary" onClick={() => window.location.reload()}>重新加载</Button>} />;
   }
 
-  if (!config?.ownStation && !results.length) {
-    return <AppState kind="empty" title="还不能开始对账" description="请先在上游资源中标记一个自己的 NewAPI 管理员站点，用于读取本站渠道收费。" actions={<Button type="primary" onClick={() => window.location.assign("/stations")}>前往上游资源</Button>} />;
+  if (!config?.ownStation && !results.length && !historyOpen) {
+    return <AppState kind="empty" title="还不能开始对账" description="请先在上游资源中标记一个自己的 NewAPI 管理员站点，用于读取本站渠道收费。" actions={<Space wrap><Button type="primary" onClick={() => window.location.assign("/stations")}>前往上游资源</Button><Button onClick={() => openConfirmedHistory()}>查看已确认账单历史</Button></Space>} />;
   }
 
   if (!data && error) {
@@ -607,10 +768,18 @@ export default function ReconciliationPage() {
   return (
     <PageContainer
       className="responsive-page reconciliation-page"
-      title="上游渠道对账"
-      subTitle="核对上游成本与本站收费，监控利润情况"
+      title={NAV_LABELS.reconciliation}
+      subTitle="实际 Key 账单与本站渠道收费，按原来源和绝对窗口核算"
       extra={<div className="page-toolbar"><Button className="reconciliation-primary-action" type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!config?.ownStation} aria-label="添加对账规则"><span>添加规则</span></Button></div>}
     >
+      <ChannelOnboarding compact={compact}
+        onComplete={async () => { await loadConfiguration(); await loadWindow(activeWindow, true); }} />
+      {destination ? <Alert type={workflowError ? "warning" : "info"} showIcon message={workflowError || (destination.action === "retry" ? "重查原账单窗口" : destination.action === "conflict" ? "处理重复销售归属" : "查看当前范围生效时间")}
+        description={!workflowError ? <div style={{ overflowWrap: "anywhere" }}>规则 {destination.ruleId}{destination.window ? ` · ${new Date(destination.window.startMs).toISOString()} — ${new Date(destination.window.endMs).toISOString()}（${destination.window.timezone}）` : ""}
+          {destination.action === "conflict" ? <div>涉及规则：{conflictIds.join("、") || "当前未发现冲突"}。逐条核对成员，使用规则编辑预览修正重复归属；原历史保留。<Space wrap>{conflictIds.map((id) => { const row = results.find((item: any) => item.rule?.id === id); return row ? <Button key={id} onClick={() => void openDetail(row)}>核对 {id}</Button> : <Text key={id}>已不可用：{id}</Text>; })}</Space></div> : null}
+        </div> : undefined}
+        action={<Space wrap>{!workflowError && destination.action === "retry" && workflowRow && sameWindow(destination.window, workflowRow.requestedWindow || workflowRow.window) ? <Button loading={retryingRuleIds.has(workflowRow.rule.id)} onClick={() => void retryRule(workflowRow)}>重查该窗口账单</Button> : null}{!workflowError && destination.action === "conflict" && workflowRule ? <Button onClick={() => openEdit(workflowRule)}>修正当前规则归属</Button> : null}{workflowRule ? <Button onClick={() => void openConfirmedHistory(workflowRule.id)}>原确认历史</Button> : null}<Button onClick={() => window.location.reload()}>刷新处理目标</Button><Button href="/reconciliation">返回当前账单</Button></Space>}
+        style={{ marginBottom: 16 }} /> : null}
       <div className="reconciliation-controls">
         <div className="reconciliation-controls__date">
           {preset === "custom"
@@ -627,20 +796,34 @@ export default function ReconciliationPage() {
         </div>
       </div>
 
+      <Space wrap style={{ marginBottom: 12 }}><Button href="/analytics" style={{ minHeight: 44 }}>{NAV_LABELS.analytics}</Button><Button style={{ minHeight: 44 }} onClick={() => openConfirmedHistory()}>查看已确认账单历史</Button></Space>
       {data ? <div className="reconciliation-freshness"><Text type="secondary">{summaryReference ? "参考结果生成" : "显示结果生成"}：{formatRecentTime(data.generatedAt, displayTimezone, true)}（{displayTimezone}）</Text>{results.length ? <Text type="secondary">{summaryReference ? `上次成功窗口：${sharedWindow ? formatWindow(sharedWindow) : "见各规则详情"}（仅供参考）` : freshness.staleCount ? `${freshness.staleCount} 条规则数据已过期${sharedWindow && freshness.coverageEndMs != null ? ` · 最早金额覆盖至 ${formatTime(freshness.coverageEndMs, sharedWindow.timezone)}` : ""}` : latestSuccessful ? `最近成功：${formatRecentTime(latestSuccessful.lastSuccessfulAt, latestSuccessful.window?.timezone)}（${latestSuccessful.window?.timezone || "Asia/Shanghai"}）` : "暂未成功（当前读取失败）"}</Text> : null}</div> : null}
       {error ? <Alert type="error" showIcon message="对账数据加载失败 · 当前显示上次结果" description={`${error}。下方窗口与金额属于上次查询，非本次查询结果。`} action={<Button size="small" onClick={() => loadWindow(activeWindow, true)}>重试</Button>} className="reconciliation-inline-alert" /> : null}
       {!config?.ownStation && results.length ? <Alert type="warning" showIcon message="本站管理员站点未配置" description="本站收费当前不可获取；已保存规则仍显示可用的上游成本与历史参考。请先配置本站管理员站点后再添加或更新规则。" action={<Button size="small" onClick={() => window.location.assign("/stations")}>前往配置</Button>} className="reconciliation-inline-alert" /> : null}
       {config?.channelsError ? <Alert type="warning" showIcon message={config.channelsError} className="reconciliation-inline-alert" /> : null}
+      {summaryError ? <Alert type="warning" showIcon message="全量汇总读取失败 · 摘要仅供参考" description={summaryError} action={<Button onClick={() => void refreshSummary()}>重读全量汇总</Button>} className="reconciliation-inline-alert" /> : null}
 
       <section className="reconciliation-summary" aria-label="对账汇总">
-        <div className="reconciliation-summary__metrics">
-          <SummaryMetric label={summaryReference ? "本站收费（本次）" : totals.incomeComplete ? "本站收费" : "本站已获取收费"} value={summaryReference || totals.income == null ? "待获取" : money(totals.income, rate)} />
-          <SummaryMetric label={summaryReference ? "上游成本（本次）" : totals.costComplete ? "上游成本" : "上游已获取成本"} value={summaryReference || totals.cost == null ? "待获取" : money(totals.cost, rate)} />
-          <SummaryMetric label={summaryReference ? "利润（本次）" : totals.profitComplete ? "确认利润" : "已核算利润"} value={summaryReference || totalDifference == null ? "待核算" : money(totalDifference, rate)} tone={summaryReference || totalDifference == null ? "" : totalDifference < 0 ? "danger" : "success"} />
-          <SummaryMetric label={summaryReference ? "毛利率（本次）" : totals.profitComplete ? "毛利率" : "已核算毛利率"} value={summaryReference ? "—" : percent(totalMargin)} />
-        </div>
-        <p className="reconciliation-summary__note">{summaryReference ? `本次查询尚未取得当前窗口金额；上次成功窗口 ${sharedWindow ? formatWindow(sharedWindow) : "见各规则详情"} 的列表内容仅供参考，不计入本次汇总。` : <>全量查询规则汇总 · 本站 {totals.incomeCoverage.complete} 完整 / {totals.incomeCoverage.partial} 部分 / {totals.incomeCoverage.missing} 未获取（{totals.incomeCoverage.successfulCount}/{totals.incomeCoverage.expectedCount} 个渠道）；上游 {totals.costCoverage.complete} 完整 / {totals.costCoverage.partial} 部分 / {totals.costCoverage.missing} 未获取（{totals.costCoverage.successfulCount}/{totals.costCoverage.expectedCount} 个分段）。本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}；已核算 {totals.profitCoverage.confirmed}/{results.length} 条规则。{totals.profitComplete ? "" : ` 风险差额 ${money(totals.riskDifference, rate)} 未计入确认利润。`}{riskItems.length ? ` 当前状态：取数异常 ${issueCategoryCounts.fetch} · 保存异常 ${issueCategoryCounts.persistence} · 分组异常 ${issueCategoryCounts.group} · 渠道状态 ${issueCategoryCounts.channel} · 切换待确认 ${issueCategoryCounts.timing}（可重叠）。` : ""}</>}</p>
+        {summaryReference ? <Alert type="info" showIcon message="全量摘要仅供参考，正在核对当前窗口" description="规则列表保留已读金额；全量读取完成后再显示当前汇总。" /> : commonSummary ? windowMetrics(commonSummary.totals) : <Text strong>暂无共同整日汇总</Text>}
+        <p className="reconciliation-summary__note">{commonSummary?.totals.profitComplete ? "已知渠道范围的完整账单。" : "仅已确认范围的金额，不代表全站完整利润。"} 金额按 USD 汇总；本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}。今天与未完成日的金额仅供参考。</p>
       </section>
+      {windowGroups.length ? <Collapse style={{ marginBottom: 16 }} items={windowGroups.map((group) => ({ key: group.groupKey, label: <span>账单窗口 · {formatWindow({ ...group.window, timezone: group.timezones[0] })} · {group.timezones.join(" / ")}{summaryReference ? " · 参考" : ""}</span>, children: <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+        <Detail label="绝对窗口" value={`${new Date(group.window.startMs).toISOString()} — ${new Date(group.window.endMs).toISOString()}`} />
+        <Detail label="本站来源" value={group.ownSource ? `${group.ownSource.provider} · ${group.ownSource.baseUrl} · 账号 ${group.ownSource.accountId} · ${group.ownSource.namespaceKey}` : "来源待核对"} />
+        <Detail label="金额口径" value={`${group.amountBasis.currency} · ${group.amountBasis.billingSource} · 计算版本 ${group.amountBasis.calculationVersion} · ${group.amountBasis.conversion || "换算依据待核验"}`} />
+        <Detail label="规则范围" value={group.ruleIds.join("、")} />
+        {windowMetrics(group.totals)}
+        <Text type="secondary">{summaryReference ? "本组金额仅供参考。" : group.totals.profitComplete ? "已知范围完整账单。" : "已确认范围小计，完整性待确认。"} 已核算 {group.coverage.accountedChannelCount}/{group.coverage.knownChannelCount} 个已知渠道。{group.totals.notCountedCostRuleIds.length ? `未计入成本的规则：${group.totals.notCountedCostRuleIds.join("、")}。` : ""}</Text>
+      </div> }))} /> : null}
+      {coverage ? <section aria-label="已知渠道覆盖" style={{ marginBottom: 16, minWidth: 0 }}>
+        <Alert type={coverage.state === "complete_known" ? "success" : "warning"} showIcon message={`${summaryReference ? "参考 · " : ""}已知渠道覆盖：已核算 ${coverage.accountedChannelCount}/${coverage.knownChannelCount}`} description={`${coverage.catalogueState === "verified" ? "当前目录已核验" : "当前目录覆盖未知"}；全站历史渠道全集未核验。搜索、筛选和分页不改变此覆盖统计。`} />
+        <Collapse style={{ marginTop: 8 }} items={[{ key: "known-coverage", label: "查看全部已知渠道与未核算原因", children: <div style={{ display: "grid", gap: 12, minWidth: 0, overflowWrap: "anywhere" }}>{coverage.channels.map((channel, index) => <div key={`${channel.ownSource?.namespaceKey || channel.ownStationId}:${channel.channelId}:${index}`}>
+          <Text strong>{channel.name} · ID {channel.channelId}</Text> <Tag color={channel.status === "accounted" ? "success" : "warning"}>{({ accounted: "已核算", unlinked: "未关联", not_effective: "范围未生效", source_unverified: "来源待核验", billing_missing: "账单未齐", coverage_unknown: "Key 用途待确认", duplicate: "重复归属" })[channel.status]}</Tag>
+          <div>{channelStateLabel[channel.operatingState] || "状态未知"} · 本站 {channel.ownStationId} · 规则 {channel.ruleIds.join("、") || "无"}</div>
+          {channel.issues.length ? <div>{channel.issues.map((issue) => issue === "CHANNEL_UNLINKED" ? "尚未关联账单规则" : issue === "BILLING_EVIDENCE_NOT_QUERIED" ? "该窗口账单证据尚未读取" : HEALTH_LABEL(issue)).join("；")}</div> : null}
+          {channel.actions.length ? <><Text type="secondary">待处理：{channel.actions.map((action) => action.label).join("；")}</Text><Space wrap>{channel.actions.map((action) => <Button key={action.id} href={action.href}>{action.label}</Button>)}</Space></> : null}
+        </div>)}</div> }]} />
+      </section> : null}
 
       <div className="reconciliation-list-tools">
         <Input className="reconciliation-search" prefix={<SearchOutlined />} allowClear value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); setExpandedRuleId(null); }} placeholder="搜索上游、Key、渠道名称或 ID" aria-label="搜索上游、Key、渠道名称或 ID" />
@@ -656,7 +839,7 @@ export default function ReconciliationPage() {
 
       {!error && results.length > 0 && filterCounts.attention === 0 ? <Alert type="success" showIcon message={`全部 ${results.length} 条规则暂无需处理事项`} className="reconciliation-inline-alert" /> : null}
 
-      {!results.length ? <div className="reconciliation-empty"><Empty description="还没有启用的对账规则" image={Empty.PRESENTED_IMAGE_SIMPLE}><Button type="primary" onClick={openCreate}>创建第一条规则</Button></Empty></div>
+      {!results.length ? <div className="reconciliation-empty"><Empty description="还没有启用的对账规则" image={Empty.PRESENTED_IMAGE_SIMPLE}><Button type="primary" disabled={!config?.ownStation} onClick={openCreate}>创建第一条规则</Button></Empty></div>
         : !filteredResults.length ? <div className="reconciliation-empty"><Empty description={statusFilter === "attention" && !search ? "当前无需处理事项" : "没有匹配的对账规则"} image={Empty.PRESENTED_IMAGE_SIMPLE}><Button onClick={() => { setSearch(""); setStatusFilter("all"); setPage(1); }}>查看全部规则</Button></Empty></div>
         : compact ? <>
           <div className="reconciliation-mobile-list">
@@ -686,14 +869,40 @@ export default function ReconciliationPage() {
           onRow={(item: any) => ({ tabIndex: hasReconciliationHistory(ruleHistory(item)) ? 0 : undefined, onKeyDown: (event: any) => { if (hasReconciliationHistory(ruleHistory(item)) && event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); setExpandedRuleId(expandedRuleId === item.rule?.id ? null : item.rule?.id); } } })}
         />}
 
-      <Drawer className="reconciliation-detail-drawer" title={detail?.rule?.tokenName ? `${detail.rule.tokenName} · 对账详情` : "对账详情"} open={!!detail} onClose={() => setDetail(null)} width={compact ? "100%" : 520} aria-label="对账详情抽屉" extra={detail ? <Space size={4}><Button type="text" icon={<EditOutlined />} aria-label={`编辑 ${detail.rule?.tokenName || "Key"} 的规则`} onClick={() => { openEdit(detail.rule); setDetail(null); }} /><Popconfirm title="停止并释放此对账规则？" description="停止后会释放 Key 和关联渠道，历史快照保留。" okText="停止并释放" cancelText="取消" onConfirm={async () => { if (await stopRule(detail.rule.id)) setDetail(null); }}><Button danger type="text" icon={<DeleteOutlined />} aria-label={`停止并释放 ${detail.rule?.tokenName || "Key"} 的规则`} /></Popconfirm></Space> : null}>
-        {detail ? <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      <Drawer className="reconciliation-detail-drawer" title={historyOpen ? "已确认账单历史" : detail?.rule?.tokenName ? `${detail.rule.tokenName} · 对账详情` : "对账详情"} open={historyOpen || !!detail} onClose={() => { setDetail(null); setHistoryOpen(false); historyRequestId.current += 1; setHistoryBusy(false); }} width={compact ? "100%" : 520} aria-label={historyOpen ? "已确认账单历史抽屉" : "对账详情抽屉"} extra={detail && !historyOpen ? <Space size={4}><Button type="text" icon={<EditOutlined />} aria-label={`编辑 ${detail.rule?.tokenName || "Key"} 的规则`} onClick={() => { openEdit(detail.rule); setDetail(null); }} /><Popconfirm title="停止并释放此对账规则？" description="停止后会释放 Key 和关联渠道，历史快照保留。" okText="停止并释放" cancelText="取消" onConfirm={async () => { if (await stopRule(detail.rule.id)) setDetail(null); }}><Button danger type="text" icon={<DeleteOutlined />} aria-label={`停止并释放 ${detail.rule?.tokenName || "Key"} 的规则`} /></Popconfirm></Space> : null}>
+        {historyOpen ? <div style={{ display: "grid", gap: 16, width: "100%", minWidth: 0, overflowWrap: "anywhere" }}>
+          <Alert type="info" showIcon message="只读原确认账单，不计入当前汇总" description="保留原窗口、来源、Key 和成员；规则目录当前名称仅用于定位，不填补旧记录。默认读取最近 31 天，每页 20 条，日期范围最多 31 天。" />
+          {historyDirectoryError ? <Alert type="warning" showIcon message="历史规则目录读取失败" description={historyDirectoryError} action={<Button aria-label="重试历史规则目录" onClick={() => void loadHistoryDirectory()}>重试</Button>} /> : null}
+          <div style={{ width: "100%", minWidth: 0 }}><Text>历史账单规则（含已停止规则）</Text><Select aria-label="历史账单规则" showSearch optionFilterProp="label" loading={historyDirectoryBusy} value={historyRuleId} style={{ width: "100%", minWidth: 0, marginTop: 6 }} placeholder="选择当前或已停止的规则" options={(historyDirectory || config?.rules || []).map((rule: any) => ({ value: rule.id, label: `${rule.tokenName || `Key ${rule.tokenId ?? "未命名"}`} · ${rule.archivedAt || !rule.enabled ? "已停止 / 归档" : "当前规则"} · ${rule.id}` }))} onChange={chooseHistoryRule} /></div>
+          <div style={{ width: "100%", minWidth: 0 }}><RangePicker aria-label="已确认账单历史日期" showTime value={historyRange} style={{ width: "100%", minWidth: 0 }} onChange={(value) => { historyRequestId.current += 1; setHistoryBusy(false); setHistoryRange(value); setHistoryRangeChanged(true); setHistoryError(""); setExpandedHistoryId(null); }} /></div>
+          {historyRangeChanged && confirmedHistory ? <Alert type="info" showIcon message="日期已修改，下方保留上次读取记录" description="请查询所选日期；读取成功后替换为该范围的原账单。" /> : null}
+          <Button style={{ minHeight: 44 }} disabled={!historyRuleId} loading={historyBusy} onClick={() => historyRuleId && void loadConfirmedHistory(historyRuleId, selectedHistoryRange())}>查询已确认历史</Button>
+          {historyError ? <Alert type="error" showIcon message="确认账单历史读取失败" description={`${historyError}。已读记录继续保留。`} action={<Button aria-label="重试确认账单历史" onClick={() => { const request = historyRequest.current; if (request) void loadConfirmedHistory(request.ruleId, request.range, request.cursor); }}>重试</Button>} /> : null}
+          {confirmedHistory?.records.length ? compact ? <div style={{ width: "100%", minWidth: 0 }}>{confirmedHistory.records.map((record) => <Collapse key={record.historyId} ghost style={{ marginBottom: 8 }} items={[{ key: record.historyId, label: <div><strong>{record.upstreamSource.tokenName ?? "原 Key 名称未保存"} · 原范围 {record.scopeVersion ?? "未保存"}</strong><div>{historyWindowLabel(record)}</div><div>原记录毛利 {money(record.calculation.profitUsd, null)}</div>{record.sourceCompleteness === "legacy_partial" ? <Tag color="warning">旧记录信息不完整</Tag> : null}</div>, children: <div data-history-id={record.historyId}>{historyDetails(record)}</div> }]} />)}</div> : <Table className="reconciliation-history-table" size="small" rowKey="historyId" dataSource={confirmedHistory.records} pagination={false} scroll={{ x: 880 }} columns={[
+            { title: "原窗口 / 范围", width: 250, render: (_: any, record: ConfirmedHistoryRecord) => <div>{historyWindowLabel(record)}<div>原范围版本 {record.scopeVersion ?? "未保存"}</div>{record.sourceCompleteness === "legacy_partial" ? <Tag color="warning">旧记录信息不完整</Tag> : null}</div> },
+            { title: "原 Key / 渠道", width: 220, render: (_: any, record: ConfirmedHistoryRecord) => <div>{record.upstreamSource.tokenName ?? "原 Key 名称未保存"}<div>{record.channels.map(channelLabel).join("、") || "原渠道未保存"}</div></div> },
+            { title: "原收费", width: 110, render: (_: any, record: ConfirmedHistoryRecord) => billingAmountText(record.downstream, null) },
+            { title: "原成本", width: 110, render: (_: any, record: ConfirmedHistoryRecord) => billingAmountText(record.upstream, null) },
+            { title: "原记录毛利", width: 110, render: (_: any, record: ConfirmedHistoryRecord) => money(record.calculation.profitUsd, null) },
+          ]} expandable={{ expandedRowKeys: expandedHistoryId ? [expandedHistoryId] : [], onExpand: (expanded, record) => setExpandedHistoryId(expanded ? record.historyId : null), expandedRowRender: (record) => <div data-history-id={record.historyId}>{historyDetails(record)}</div> }} onRow={(record) => ({ tabIndex: 0, onKeyDown: (event) => { if (event.target === event.currentTarget && ["Enter", " "].includes(event.key)) { event.preventDefault(); setExpandedHistoryId(expandedHistoryId === record.historyId ? null : record.historyId); } } })} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={historyBusy ? "正在读取原确认账单" : historyError ? "历史读取失败，请重试" : confirmedHistory ? "所选范围没有已保存的确认账单" : historyRuleId ? "请选择日期并查询原确认账单" : "请选择历史账单规则"} />}
+          {confirmedHistory ? <Text type="secondary">已读取 {confirmedHistory.records.length} 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。</Text> : null}
+          {confirmedHistory?.nextCursor ? <Button style={{ minHeight: 44 }} disabled={historyRangeChanged} loading={historyBusy} onClick={() => historyRuleId && void loadConfirmedHistory(historyRuleId, historyRequest.current?.range || null, confirmedHistory.nextCursor)}>读取更多原确认账单</Button> : null}
+        </div> : detail ? <Space direction="vertical" size={16} style={{ width: "100%" }}>
+          <Space wrap><Button style={{ minHeight: 44 }} onClick={() => openConfirmedHistory(detail.rule.id)}>查看已确认账单历史</Button><Button loading={retryingRuleIds.has(detail.rule.id)} onClick={() => void retryRule(detail)}>重查该窗口账单</Button><Button onClick={() => { const rule = detail.rule; setDetail(null); openEdit(rule); }}>编辑当前范围</Button></Space>
+          {ruleRetryErrors[detail.rule.id] ? <Alert type="error" showIcon message={ruleRetryErrors[detail.rule.id]} /> : null}
+          {destination?.action === "conflict" && conflictIds.includes(detail.rule.id) ? <Alert type="warning" showIcon message="重复销售归属待处理" description={<div>涉及规则：{conflictIds.join("、")}。<Space wrap>{conflictIds.map((id) => { const row = results.find((item: any) => item.rule?.id === id); return row ? <Button key={id} onClick={() => void openDetail(row)}>核对 {id}</Button> : <Text key={id}>已不可用：{id}</Text>; })}</Space></div>} /> : null}
+          {detail.actions?.length ? <Space wrap>{detail.actions.map((action: any) => <Button key={action.id} href={action.href}>{action.label}</Button>)}</Space> : null}
           <Alert type={reconciliationHealthMeta(detail.health?.code).tone === "error" || reconciliationRowFlags(detail).negative ? "error" : detail.health?.code === "READY" ? "success" : "warning"} showIcon message={reconciliationHealthMeta(detail.health?.code).tone === "error" ? detail.health?.label || reconciliationHealthMeta(detail.health?.code).label : reconciliationRowFlags(detail).negative ? "该规则确认利润为负" : detail.health?.label} description={detail.health?.detail || "数据来源正常"} />
           <Detail label="请求窗口" value={`${formatWindow(detail.requestedWindow || detail.window)}（${(detail.requestedWindow || detail.window)?.timezone}）`} />
+          <Detail label="返回账单实际窗口" value={`${formatWindow(detail.window)}（${detail.window?.timezone}）`} />
+          {detail.upstream?.window && !sameWindow(detail.upstream.window, detail.window) ? <Detail label="上游原账单窗口" value={`${formatWindow(detail.upstream.window)}（${detail.upstream.window.timezone}）`} /> : null}
+          {detail.downstream?.window && !sameWindow(detail.downstream.window, detail.window) ? <Detail label="本站原账单窗口" value={`${formatWindow(detail.downstream.window)}（${detail.downstream.window.timezone}）`} /> : null}
           {detail.health?.stale ? <Detail label="成功金额覆盖窗口" value={`${formatWindow(detail.lastSuccessfulWindow || detail.window)}（${(detail.lastSuccessfulWindow || detail.window)?.timezone}）`} /> : null}
           <Detail label="上游账号" value={upstreamName(detail.rule, config?.upstreams)} />
           <Detail label="上游 Key / 分组" value={`${detail.rule?.tokenName || "—"} · ${detail.upstream?.group || detail.currentSegment?.group || detail.rule?.fixedGroup || "—"}`} />
           <Detail label="关联销售渠道" value={(detail.rule?.channels?.length ? detail.rule.channels : detail.downstream?.channels || []).map(channelLabel).join("、") || "未配置渠道"} />
+          {detail.scope ? <><Detail label="当前核算范围版本" value={String(detail.scope.scopeVersion ?? "未知")} /><Detail label="当前范围完整日生效" value={detail.scope.billingEffectiveFromMs == null ? "未知" : new Date(detail.scope.billingEffectiveFromMs).toISOString()} /><Detail label="首个完整账单可查询" value={detail.scope.firstQueryableAtMs == null ? "未知" : new Date(detail.scope.firstQueryableAtMs).toISOString()} /></> : null}
+          {detail.billingTimezone ? <Detail label="账单时区能力" value={`${detail.billingTimezone.timezone} · ${detail.billingTimezone.state === "verified" ? "已核验" : "待核验，原金额仅供参考"}${detail.billingTimezone.reason ? ` · ${detail.billingTimezone.reason}` : ""}`} /> : null}
           <Detail label="当前倍率" value={currentRatioLabel(detail)} />
           <Detail label="本站收费" value={`${billingAmountText(detail.downstream, rate)} · ${billingCoverageText(detail.downstream)}`} />
           <Detail label="上游成本" value={`${billingAmountText(detail.upstream, rate)} · ${billingCoverageText(detail.upstream)}`} />
@@ -718,8 +927,8 @@ export default function ReconciliationPage() {
         </Space> : null}
       </Drawer>
 
-      <Drawer title={editing ? "编辑对账规则" : "添加对账规则"} open={drawerOpen} onClose={() => setDrawerOpen(false)} width={compact ? "100%" : 520} aria-label={editing ? "编辑对账规则抽屉" : "添加对账规则抽屉"} extra={<Button className="reconciliation-primary-action" type="primary" loading={saving} htmlType="submit" form="reconciliation-rule-form" aria-label="保存对账规则">保存规则</Button>}>
-        <Form id="reconciliation-rule-form" form={form} layout="vertical" requiredMark={false} onFinish={saveRule}>
+      <Drawer title={editing ? "编辑对账规则" : "添加对账规则"} open={drawerOpen} onClose={() => { rulePreviewEpoch.current += 1; setDrawerOpen(false); }} width={compact ? "100%" : 520} aria-label={editing ? "编辑对账规则抽屉" : "添加对账规则抽屉"} closable={!saving && !previewingRule} maskClosable={!saving && !previewingRule} keyboard={!saving && !previewingRule} extra={<Button className="reconciliation-primary-action" type="primary" loading={saving} disabled={!rulePreview || previewingRule} htmlType="submit" form="reconciliation-rule-form" aria-label="保存对账规则">{editing ? "确认修改" : "确认关联"}</Button>}>
+        <Form id="reconciliation-rule-form" form={form} layout="vertical" requiredMark={false} disabled={saving || previewingRule} onFinish={saveRule} onValuesChange={() => { rulePreviewEpoch.current += 1; setRulePreview(null); setRuleFormError(""); }}>
           {editing ? <Alert type="info" showIcon message="规则身份不可修改" description="上游账号或 Key 需要更换时，请停止当前规则后创建新规则；当前历史账单会继续保留。" style={{ marginBottom: 16 }} /> : null}
           <Form.Item label="上游账号" name="upstreamStationId" extra={editing ? "已锁定，避免新账号重算当前规则的历史账单。" : "复用该站点已有 PAT，不需要再次填写。"} rules={[{ required: true, message: "请选择上游账号" }]}>
             <Select showSearch optionFilterProp="label" disabled={!!editing} placeholder="选择已配置的 NewAPI 上游站点" options={(config?.upstreams || []).map((station: any) => ({ value: station.id, label: station.name }))} onChange={(value) => { form.setFieldValue("tokenId", undefined); setKeyData(null); fetchKeys(value, true); }} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
@@ -734,10 +943,18 @@ export default function ReconciliationPage() {
             })} getPopupContainer={(trigger) => trigger.parentElement || document.body} />
           </Form.Item>
           {channelsError ? <Alert type="error" showIcon message={channelsError} style={{ marginBottom: 16 }} /> : null}
-          <Form.Item label="对账时区" name="timezone" extra="“今天”从该时区的 00:00 计算到当前时刻。">
+          <Form.Item label="对账时区" name="timezone" extra="真实范围变更从下一共同完整自然日生效。">
             <Input placeholder="Asia/Shanghai" />
           </Form.Item>
+          <Form.Item label="除以上渠道外，这把 Key 是否还用于本站其他渠道或站外调用？" name="coverageAnswer">
+            <Select aria-label="规则 Key 消费范围" options={[{ value: "none", label: "没有" }, { value: "other_use", label: "有" }, { value: "unknown", label: "不确定" }]} />
+          </Form.Item>
+          {coverageAnswer === "other_use" ? <><Form.Item label="其他用途" name="otherUse"><Select options={[{ value: "own_channels", label: "本站其他渠道" }, { value: "external", label: "站外调用" }, { value: "unspecified", label: "尚未明确" }]} /></Form.Item>{otherUse === "own_channels" ? <Form.Item label="尚未纳入的本站渠道" name="uncoveredOwnChannelIds"><Select mode="multiple" options={(config?.channels || []).map((channel: any) => ({ value: channel.id, label: channelLabel(channel) }))} /></Form.Item> : null}</> : null}
+          {coverageAnswer !== "none" ? <Text type="secondary">保留收费与成本参考，账面毛利待确认。{otherUse === "external" ? "请隔离调用 Key 后重新关联。" : "移除渠道后仍使用这把 Key 的渠道也需在完整用途中说明。"}</Text> : null}
           <Alert type="info" showIcon message="核算口径" description="该规则汇总完整上游成本与全部所选渠道收费。渠道子项只展示收费占比，不分摊成本。" />
+          {ruleFormError ? <Alert type="error" showIcon message={ruleFormError} style={{ marginTop: 16 }} /> : null}
+          <Button style={{ minHeight: 44, marginTop: 16 }} loading={previewingRule} disabled={saving} onClick={() => void previewRule()} aria-label="预览对账规则">{editing ? "预览修改" : "验证并预览关联"}</Button>
+          {rulePreview ? <Alert type="info" showIcon style={{ marginTop: 16 }} message={editing ? "规则修改预览，尚未保存" : "Key 完整范围预览，尚未保存"} description={<Space direction="vertical"><Text>原渠道：{rulePreview.basis.existingChannelIds.map((id) => `#${id}`).join("、") || "无"}</Text><Text>最终渠道：{rulePreview.basis.proposedChannelIds.map((id) => `#${id}`).join("、")}</Text>{editing ? <Text>释放渠道：{rulePreview.basis.existingChannelIds.filter((id) => !rulePreview.basis.proposedChannelIds.includes(id)).map((id) => `#${id}`).join("、") || "无"}；原账单保留。</Text> : null}<Text>完整日生效：{formatRecentTime(rulePreview.preview.billingEffectiveFromMs, rulePreview.basis.timezone, false, true)}（{rulePreview.basis.timezone}）</Text><Text>首个完整账单可查询：{formatRecentTime(rulePreview.preview.firstQueryableAtMs, rulePreview.basis.timezone, false, true)}</Text><Text>{rulePreview.preview.costCoverage === "complete" ? "已声明这把 Key 没有其他用途" : "Key 用途待确认，金额作为参考"}</Text></Space>} /> : null}
         </Form>
       </Drawer>
     </PageContainer>

@@ -3,7 +3,7 @@
 import { describeConnectionFailure } from "../lib/connection-test.js";
 
 export function redact(rt, s) {
-  const { accessToken, apiKey, password, s2Tokens, ...rest } = s;
+  const { accessToken, apiKey, password, s2Tokens, onboardingOrigin, authorizationUpdateRef, ...rest } = s;
   const balance = s.balance && !s.balance.ok
     ? { ...s.balance, error: describeConnectionFailure(s.balance.error, s).diagnostic }
     : s.balance;

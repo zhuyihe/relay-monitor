@@ -14,6 +14,7 @@ import { useThemeMode } from "../providers";
 import AppState from "../components/app-state";
 import { buildOverviewActions } from "../../lib/overview-actions";
 import { describeConnectionFailure } from "../../lib/connection-test";
+import type { WorkflowAction } from "../../lib/client";
 
 const { Text } = Typography;
 
@@ -156,6 +157,9 @@ export default function OverviewPage() {
   const [loaded, setLoaded] = useState(false);
   const [loadingStations, setLoadingStations] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [workflowActions, setWorkflowActions] = useState<{ accounts: WorkflowAction[]; bills: WorkflowAction[] }>({ accounts: [], bills: [] });
+  const [workflowError, setWorkflowError] = useState("");
+  const workflowRequestId = useRef(0);
   const [trendHours, setTrendHours] = useState(24);
   // 总览趋势数据缓存 {hours, series}（对应 v1 state.overview）
   const [overview, setOverview] = useState<{ hours: number; series: any[] } | null>(null);
@@ -168,6 +172,18 @@ export default function OverviewPage() {
   hoursRef.current = trendHours;
 
   const typeLabel = useCallback((v: string) => types.find((t) => t.value === v)?.label || v, [types]);
+
+  const loadWorkflowActions = useCallback(async () => {
+    const requestId = ++workflowRequestId.current;
+    const responses = await Promise.allSettled([api("/api/channel-onboarding/accounts"), api("/api/reconciliation?preset=yesterday")]);
+    if (requestId !== workflowRequestId.current) return;
+    setWorkflowActions((previous) => ({
+      accounts: responses[0].status === "fulfilled" ? responses[0].value.actions || [] : previous.accounts,
+      bills: responses[1].status === "fulfilled" ? responses[1].value.actions || [] : previous.bills,
+    }));
+    setWorkflowError(responses.some((response) => response.status === "rejected") ? "部分账号或账单事项未能更新，保留上次已读事项。" : "");
+  }, []);
+  useEffect(() => { void loadWorkflowActions(); }, [loadWorkflowActions]);
 
   // 拉站点列表（对应 v1 reload）
   const reload = useCallback(async () => {
@@ -266,11 +282,12 @@ export default function OverviewPage() {
   }, [ups, settings]);
 
   const actionSummary = useMemo(
-    () => buildOverviewActions(stations, { rules, settings, statusOf }),
-    [stations, rules, settings],
+    () => buildOverviewActions(stations, { rules, settings, statusOf, workflowActions: [...workflowActions.accounts, ...workflowActions.bills] }),
+    [stations, rules, settings, workflowActions],
   );
 
   function actionDetail(action: any): string {
+    if (action.workflow) return [action.ruleId ? `规则 ${action.ruleId}` : action.accountKey ? "已核验账号" : action.stationId ? `资源 ${action.stationId}` : "本站渠道", action.channelIds?.length ? `渠道 ${action.channelIds.join("、")}` : "", action.window ? `${new Date(action.window.startMs).toISOString()} — ${new Date(action.window.endMs).toISOString()}（${action.window.timezone}）` : ""].filter(Boolean).join(" · ");
     const station = action.station;
     if (action.kind === "query-failed") {
       const issue = describeConnectionFailure(station.balance?.error, station);
@@ -300,7 +317,7 @@ export default function OverviewPage() {
   }
 
   function actionTone(kind: string): "danger" | "warning" {
-    return kind === "query-failed" || kind === "balance-danger" ? "danger" : "warning";
+    return ["query-failed", "balance-danger", "update_authorization", "review_conflict", "review_source"].includes(kind) ? "danger" : "warning";
   }
 
   // ---- 总余额趋势数据（drawTotalChart 的聚合部分平移）------------------------
@@ -693,6 +710,7 @@ export default function OverviewPage() {
       <section aria-labelledby="overview-actions-heading" style={{ marginTop: 16 }}>
         <ProCard
           className="overview-panel"
+          extra={<Button onClick={() => void loadWorkflowActions()}>刷新处理事项</Button>}
           title={
             <div>
               <div id="overview-actions-heading" style={{ fontWeight: 600 }}>需要处理</div>
@@ -704,6 +722,7 @@ export default function OverviewPage() {
             </div>
           }
         >
+          {workflowError ? <Alert type="warning" showIcon message={workflowError} action={<Button onClick={() => void loadWorkflowActions()}>重读处理事项</Button>} style={{ marginBottom: 12 }} /> : null}
           {actionSummary.visible.length ? (
             <div
               role="list"
@@ -721,7 +740,7 @@ export default function OverviewPage() {
                 const toneBg = tone === "danger" ? token.colorErrorBg : token.colorWarningBg;
                 return (
                   <article
-                    key={`${action.stationId}-${action.kind}`}
+                    key={action.id}
                     role="listitem"
                     style={{
                       display: "flex",
@@ -738,8 +757,8 @@ export default function OverviewPage() {
                   >
                     <div style={{ flex: "1 1 190px", minWidth: 0 }}>
                       <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "4px 8px" }}>
-                        <span style={{ color: toneColor, fontSize: 12, fontWeight: 650 }}>{actionTitle(action.kind)}</span>
-                        <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>资源：{action.stationName}</span>
+                        <span style={{ color: toneColor, fontSize: 12, fontWeight: 650 }}>{action.workflow ? action.label : actionTitle(action.kind)}</span>
+                        {!action.workflow ? <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>资源：{action.stationName}</span> : null}
                       </div>
                       <div style={{ marginTop: 6, color: token.colorText, fontSize: 14, lineHeight: 1.6, overflowWrap: "anywhere" }}>
                         {actionDetail(action)}
@@ -759,11 +778,11 @@ export default function OverviewPage() {
                       </Button>
                     ) : (
                       <Button
-                        href="/stations"
-                        aria-label={`查看 ${action.stationName} 资源`}
+                        href={action.href}
+                        aria-label={action.workflow ? action.label : `查看 ${action.stationName} 资源`}
                         style={{ minHeight: 44 }}
                       >
-                        查看资源
+                        {action.workflow ? "前往处理" : "查看资源"}
                       </Button>
                     )}
                   </article>

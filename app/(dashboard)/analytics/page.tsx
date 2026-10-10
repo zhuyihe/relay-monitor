@@ -12,6 +12,7 @@ import ChartBox from "../chart-box";
 import LastRefreshed from "../last-refreshed";
 import { useThemeMode } from "../../providers";
 import AppState from "../../components/app-state";
+import { NAV_LABELS } from "../../../lib/brand";
 
 const { Text } = Typography;
 
@@ -283,7 +284,7 @@ export default function AnalyticsPage() {
 
   if (!data && loadError && !loading) {
     return (
-      <PageContainer className="responsive-page" title="成本与利润" subTitle="跟踪上游成本、下游收入、利润与余额跑道">
+      <PageContainer className="responsive-page" title={NAV_LABELS.analytics} subTitle="余额变化、固定摊销与历史预测">
         <AppState
           kind="error"
           title="成本分析暂时无法加载"
@@ -297,10 +298,11 @@ export default function AnalyticsPage() {
   return (
     <PageContainer
       className="responsive-page"
-      title="成本与利润"
-      subTitle="跟踪上游成本、下游收入、利润与余额跑道"
+      title={NAV_LABELS.analytics}
+      subTitle="余额变化、固定摊销与历史预测"
       extra={
         <div className="page-toolbar">
+          <Button href="/reconciliation">{NAV_LABELS.reconciliation}</Button>
           <LastRefreshed at={refreshedAt} />
           <div className="mobile-scroll">
             <Segmented
@@ -323,6 +325,7 @@ export default function AnalyticsPage() {
         </div>
       }
     >
+      <Alert type="info" showIcon message="监控估算来源" description="成本来自余额变化与固定摊销，余额跑道来自历史预测；按资源汇率折算为人民币。此处估算不代表实际 Key 账单成本或现金付款，账单核算请查看对应来源与完整日窗口。" style={{ marginBottom: 16 }} />
       {coverageText ? (
         <Alert
           type={coverageIsComplete ? "info" : "warning"}

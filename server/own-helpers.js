@@ -71,7 +71,7 @@ export function mapCostChannels(upstreams, channels) {
 
 // 成本纳入与 New API 渠道匹配解耦：列表中的监控上游默认全部计入。
 export function selectCostUpstreams(stations, ownId) {
-  const candidates = stations.filter((s) => s.id !== ownId);
+  const candidates = stations.filter((s) => s.id !== ownId && s.monitorEnabled !== false);
   return {
     included: candidates.filter((s) => s.includeInProfit !== false),
     excluded: candidates.filter((s) => s.includeInProfit === false),
