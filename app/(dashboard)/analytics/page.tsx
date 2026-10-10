@@ -1,666 +1,761 @@
 "use client";
-// 成本与利润页（v2 新增，无 v1 对应）：从经营视角看成本/收入/利润与余额跑道。
-// 数据源：GET /api/analytics?days=N（history_points SQL 聚合 + 固定摊销 + 跑道预测）；
-// 收入系列客户端合并自 GET /api/own/analytics（无自营业务时自动隐藏收入与毛利）。
-// 口径与 /api/own/analytics 的利润计算一致：成本只算上游站（isOwn 排除），¥ 按站点汇率折算。
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { PageContainer, ProCard } from "@ant-design/pro-components";
-import { Alert, Button, Col, Empty, Grid, Row, Segmented, Statistic, Typography, theme } from "antd";
-import { Bar, Column, DualAxes, Heatmap, Line, Pie } from "@ant-design/plots";
-import { api, cny } from "../../../lib/client";
-import ChartBox from "../chart-box";
-import LastRefreshed from "../last-refreshed";
-import { useThemeMode } from "../../providers";
-import AppState from "../../components/app-state";
+// 监控估算：利润等式 + 收入与用量成本趋势 + 成本构成 + 消耗时段 + 可用天数 + 累计成本 + 覆盖说明。
+// 成本来自 /api/analytics（按上游汇总、按站点汇率折算），收入来自 /api/own/analytics（只支持 7/30 天）。
+// 时间范围和"包含已归档"写进地址栏；切换时保留上一份数据并变淡，避免整页闪成骨架。
+import "../../styles/pages/analytics.css";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
+import Link from "next/link";
+import { Button, Checkbox } from "antd";
 import { NAV_LABELS } from "../../../lib/brand";
+import { api } from "../../../lib/client";
+import { formatDays, formatMoney, isoDay } from "../../../lib/format";
+import { EmptyState, ErrorState, PanelSkeleton, Skeleton } from "../../components/data-state";
+import type { TipRow } from "../../components/float-tip";
+import { HBars } from "../../components/hbars";
+import type { HBarItem } from "../../components/hbars";
+import { Heatmap } from "../../components/heatmap";
+import { Sym } from "../../components/icons";
+import { Panel } from "../../components/panel";
+import { ProfitEquation } from "../../components/profit-equation";
+import type { EqTerm } from "../../components/profit-equation";
+import { RangePicker } from "../../components/range-picker";
+import { Runway } from "../../components/runway";
+import type { RunwayItem } from "../../components/runway";
+import { useShellPage } from "../../components/shell-context";
+import { TrendPanel } from "../../components/trend-panel";
+import { useUrlParams } from "../../components/use-url-state";
+import { CumulativePanel } from "./cumulative-chart";
+import { addDays, dayDiff, derive, deriveHeat, gapSummary, md, r2, runsText, validDay } from "./derive";
+import type { Derived, OwnStatus } from "./derive";
 
-const { Text } = Typography;
+type Heat = ReturnType<typeof deriveHeat>;
+// 所选范围的消耗时段画不出来时退回的近 7 天；heat 为 null 表示退回也失败了
+// key：归档条件 + 整点，只有两者都和当前一致才拿来展示
+type HeatFallback = { key: string; heat: Heat | null };
 
-// 与后端 WEEKDAY() 对齐：0=周一 … 6=周日
-const r2 = (v: number) => Math.round(v * 100) / 100;
-// 图表统一高度：同排两图高度一致，卡片 height:100% 后同排等高
-const CHART_H = 300;
+const PRESET_DAYS: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
+const RANGE_OPTIONS = [
+  { value: "7d", label: "近 7 天" },
+  { value: "30d", label: "近 30 天" },
+  { value: "90d", label: "近 90 天" },
+];
+// 接口 days 上限 365：自定义开始日期最早到 364 天前
+const MAX_DAYS = 365;
+const WARN_DAYS = 7;
+const POLL_MS = 30000;
+const EQ_TITLE = "期内成本与利润";
+const COVERAGE_ID = "analytics-coverage";
 
-// 卡片内空态（数据窗口内没有任何消耗快照时）
-function Blank() {
-  return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" style={{ padding: "48px 0" }} />;
-}
+type Snapshot = {
+  data: any;
+  own: any;
+  ownStatus: OwnStatus;
+  ownError: string | null;
+  // 这份数据对应的查询条件；与当前选择不一致时说明正在切换
+  days: number;
+  includeArchived: boolean;
+};
 
-// 图表卡统一两行头：标题一行 + 副标题说明换行放下方（允许折行，不与标题同行挤）
-function CardHeader({ title, sub }: { title: ReactNode; sub?: ReactNode }) {
+const coverageLink = (
+  <a href={`#${COVERAGE_ID}`} className="jy-link">
+    查看覆盖说明
+  </a>
+);
+
+export default function AnalyticsPage() {
+  const [sp, setUrl] = useUrlParams();
+  const today = isoDay(new Date());
+  const minDate = addDays(today, -(MAX_DAYS - 1));
+  const rawRange = sp.get("range") || "";
+  const rawStart = sp.get("start");
+  const customOk = rawRange === "custom" && validDay(rawStart) && rawStart >= minDate && rawStart <= today;
+  const rangeValue = customOk ? "custom" : PRESET_DAYS[rawRange] ? rawRange : "30d";
+  const days = customOk ? dayDiff(rawStart, today) + 1 : PRESET_DAYS[rangeValue];
+  const includeArchived = sp.get("archived") === "1";
+
+  const [snap, setSnap] = useState<Snapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [asOf, setAsOf] = useState<number | null>(null);
+  const [critDays, setCritDays] = useState(3);
+  const [metaFailed, setMetaFailed] = useState(false);
+  // 只采用最后一次发出的请求结果，避免快速切换范围时旧响应覆盖新范围
+  const seq = useRef(0);
+
+  // 返回这次加载的错误信息（成功或已被更新的请求取代时返回 null），供顶栏刷新按钮提示
+  const load = useCallback(
+    async (d: number): Promise<string | null> => {
+      const my = ++seq.current;
+      const params = new URLSearchParams({ days: String(d) });
+      if (includeArchived) params.set("includeArchived", "true");
+      // 两个请求并行；自营收入只有 7/30 天口径，长周期不能拿 30 天收入与更长的成本混算利润
+      const [a, o] = await Promise.allSettled([
+        api(`/api/analytics?${params}`),
+        d <= 30 ? api(`/api/own/analytics?range=${d <= 7 ? "7d" : "30d"}`) : Promise.resolve(null),
+      ]);
+      if (my !== seq.current) return null;
+      let error: string | null = null;
+      if (a.status === "rejected") {
+        // 保留上一次成功的数据，页面顶部提示刷新失败
+        error = a.reason?.message || "成本分析加载失败";
+        setLoadError(error);
+      } else {
+        let ownStatus: OwnStatus = "not-applicable";
+        let own: any = null;
+        let ownError: string | null = null;
+        if (d <= 30) {
+          if (o.status === "fulfilled") {
+            own = o.value;
+            ownStatus = "available";
+          } else {
+            const message = String(o.reason?.message || "自营收入分析加载失败");
+            if (message.startsWith("还没有标记「我的中转站」")) ownStatus = "missing";
+            else {
+              ownStatus = "error";
+              ownError = message;
+            }
+          }
+        }
+        setSnap({ data: a.value, own, ownStatus, ownError, days: d, includeArchived });
+        setAsOf(Date.now());
+        setLoadError(null);
+      }
+      setLoading(false);
+      return error;
+    },
+    [includeArchived],
+  );
+
+  // 首次 + 每 30 秒轮询；切换范围或归档开关立即重拉
+  useEffect(() => {
+    setLoading(true);
+    load(days);
+    const timer = setInterval(() => load(days), POLL_MS);
+    return () => clearInterval(timer);
+  }, [days, load]);
+
+  // 紧急阈值与告警规则一致（可用天数 ≤ rules.etaDays 时告警）
+  useEffect(() => {
+    api("/api/meta")
+      .then((m) => {
+        const v = Number(m?.rules?.etaDays);
+        if (Number.isFinite(v) && v > 0) setCritDays(v);
+      })
+      .catch(() => setMetaFailed(true));
+  }, []);
+
+  const retry = useCallback(() => {
+    setLoading(true);
+    return load(days);
+  }, [load, days]);
+
+  const range = useMemo(
+    () => (
+      <RangePicker
+        value={rangeValue}
+        options={RANGE_OPTIONS}
+        onChange={(v) => setUrl({ range: v === "30d" ? null : v, start: null })}
+        custom={{
+          startDate: customOk ? rawStart : null,
+          minDate,
+          maxDate: today,
+          onApply: (start) => setUrl({ range: "custom", start }),
+        }}
+      />
+    ),
+    [rangeValue, customOk, rawStart, minDate, today, setUrl],
+  );
+
+  useShellPage({
+    onRefresh: async () => {
+      const error = await load(days);
+      if (error) throw new Error(`成本分析刷新失败：${error}`);
+    },
+    asOf,
+    range,
+  });
+
+  const dv = useMemo(() => (snap ? derive(snap.data, snap.own) : null), [snap]);
+
+  // 消耗时段要求所选范围内每个上游的原始快照都齐全；缺了某几天时退回近 7 天，
+  // 不让整块空着。按小时取一次就够（热力图本身就是小时粒度）。
+  const needHeat7 = !!dv && !dv.heat.available && dv.heat.reason === "incomplete-raw-history" && (snap?.days ?? 0) > 7;
+  const hourKey = asOf ? Math.floor(asOf / 3600000) : 0;
+  const heat7Key = `${includeArchived ? 1 : 0}:${hourKey}`;
+  const [heat7, setHeat7] = useState<HeatFallback | null>(null);
+  const heat7Ready = heat7?.key === heat7Key;
+  useEffect(() => {
+    // 同一条件、同一小时内已经取过就直接复用（来回切换范围不再重复请求）
+    if (!needHeat7 || heat7Ready) return;
+    let alive = true;
+    const params = new URLSearchParams({ days: "7" });
+    if (includeArchived) params.set("includeArchived", "true");
+    api(`/api/analytics?${params}`)
+      .then((d) => alive && setHeat7({ key: heat7Key, heat: deriveHeat(d) }))
+      .catch(() => alive && setHeat7({ key: heat7Key, heat: null }));
+    return () => {
+      alive = false;
+    };
+  }, [needHeat7, heat7Key, heat7Ready]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 条件或整点变了、新数据还没回来时显示加载中，不拿上一份顶替
+  const heatFallback = needHeat7 && heat7Ready ? heat7 : null;
+
+  const archivedCount = Number(snap?.data?.selection?.archivedStationCount) || 0;
+  const archiveToggle = (
+    <Checkbox checked={includeArchived} onChange={(e) => setUrl({ archived: e.target.checked ? "1" : null })}>
+      包含已归档{includeArchived && snap?.includeArchived && archivedCount > 0 ? `（${archivedCount} 个）` : ""}
+    </Checkbox>
+  );
+
+  // 本页是监控口径的估算，实际 Key 账单在账单核算页
+  const sourceNote = (
+    <div className="jy-banner jy-banner--info jy-analytics-source">
+      <Sym kind="info" />
+      <div className="jy-analytics-source-body">
+        <b>监控估算来源</b>
+        <p>
+          成本来自余额变化与固定摊销，余额跑道来自历史预测；按资源汇率折算为人民币。此处估算不代表实际 Key
+          账单成本或现金付款，账单核算请查看对应来源与完整日窗口。
+        </p>
+      </div>
+      <div className="page-toolbar">
+        <Button size="small" href="/reconciliation">
+          {NAV_LABELS.reconciliation}
+        </Button>
+      </div>
+    </div>
+  );
+
+  // 首次加载：骨架与真实布局一致
+  if (!snap && loading) {
+    return (
+      <div className="jy-page" aria-busy="true">
+        <ProfitEquation title={EQ_TITLE} extra={archiveToggle} loading revenue={{ value: null }} usage={{ value: null }} fixed={{ value: null }} />
+        <PanelSkeleton title="收入与用量成本" height={400} />
+        <div className="jy-grid-2 jy-grid-even">
+          <PanelSkeleton title="成本构成" lines={5} />
+          <PanelSkeleton title="消耗时段" height={180} />
+        </div>
+        <div className="jy-grid-2">
+          <PanelSkeleton title="可用天数" lines={4} />
+          <PanelSkeleton title="成本概况" lines={4} />
+        </div>
+      </div>
+    );
+  }
+
+  // 没有任何数据，或刚切换的范围加载失败（旧数据对应别的范围，不能冒充）
+  const stale = !!snap && (snap.days !== days || snap.includeArchived !== includeArchived);
+  if (!snap || !dv || (stale && loadError && !loading)) {
+    return (
+      <div className="jy-page">
+        <Panel title={EQ_TITLE} extra={archiveToggle}>
+          <ErrorState title="成本分析暂时无法加载" error={loadError} onRetry={retry} center />
+        </Panel>
+      </div>
+    );
+  }
+
+  const data = snap.data;
+  const stations: any[] = Array.isArray(data.stations) ? data.stations : [];
+  if (stations.length === 0) {
+    return (
+      <div className={`jy-page${loading && stale ? " jy-analytics-switching" : ""}`} aria-busy={(loading && stale) || undefined}>
+        {sourceNote}
+        <Panel title={EQ_TITLE} extra={archiveToggle}>
+          <EmptyState
+            title="还没有上游资源"
+            desc={includeArchived ? "添加上游资源并开始采集后，这里会统计成本与利润。" : "添加上游资源并开始采集后，这里会统计成本与利润。已归档的资源勾选“包含已归档”后可以查看。"}
+            action={
+              <Link href="/stations" className="jy-link">
+                添加上游资源
+              </Link>
+            }
+          />
+        </Panel>
+      </div>
+    );
+  }
+
+  const windowCaption = `${md(data.start)} 至 ${data.end === today ? "今天" : md(data.end)}，共 ${data.days} 天`;
+  const href30 = includeArchived ? "/analytics?archived=1" : "/analytics";
+
   return (
-    <div>
-      <div style={{ fontWeight: 600 }}>{title}</div>
-      {sub ? (
-        <Text type="secondary" style={{ fontSize: 12, fontWeight: "normal", whiteSpace: "normal" }}>
-          {sub}
-        </Text>
-      ) : null}
+    <div className={`jy-page${loading && stale ? " jy-analytics-switching" : ""}`} aria-busy={(loading && stale) || undefined}>
+      {loadError && (
+        <div className="jy-banner" role="alert">
+          <Sym kind="warn" />
+          <div className="jy-analytics-banner-body">
+            <span>成本分析刷新失败，正在显示上次成功加载的数据。{loadError}</span>
+            <Button size="small" onClick={retry}>
+              重试
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {sourceNote}
+
+      <Equation dv={dv} snap={snap} caption={windowCaption} extra={archiveToggle} href30={href30} onRetry={retry} />
+
+      <TrendPanel rows={dv.rows} showRev={dv.hasIncome} asOf={asOf} />
+
+      <div className="jy-grid-2 jy-grid-even">
+        <MixPanel dv={dv} />
+        <HeatPanel
+          dv={dv}
+          days={data.days}
+          href30={href30}
+          fallback={heatFallback}
+          fallbackLoading={needHeat7 && !heatFallback}
+          onShorter={() => setUrl({ range: "7d", start: null })}
+        />
+      </div>
+
+      {/* 可用天数的进度条在半宽卡片里太窄，窄屏和总览一样先换成单列 */}
+      <div className="jy-grid-2">
+        <RunwayPanel dv={dv} critDays={critDays} metaFailed={metaFailed} />
+        <SummaryPanel dv={dv} days={data.days} />
+      </div>
+
+      <CumulativePanel rows={dv.rows} asOf={asOf} />
+
+      <CoveragePanel dv={dv} data={data} stations={stations} />
     </div>
   );
 }
 
-function formatDate(value: string | null | undefined) {
-  if (!value) return "暂无历史记录";
-  const date = new Date(`${value}T00:00:00`);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+// ---- 利润等式 ------------------------------------------------------------------
+
+// 缺数据的原因：每条一句，句号结尾
+function coverageReasons(dv: Derived): ReactNode[] {
+  const out: ReactNode[] = [];
+  const todayMissing = dv.rows.some((r) => r.today && r.missing);
+  const past = dv.missingDates.filter((d) => !dv.rows.find((r) => r.date === d)?.today);
+  if (past.length) out.push(`${runsText(past)}上游用量记录缺失，这 ${past.length} 天的用量成本未计入。`);
+  if (todayMissing) out.push("今天还没有采集到上游用量，今天的用量成本未计入。");
+  if (dv.partialDates.length) {
+    const who = gapSummary(dv.upstreamGaps);
+    out.push(
+      `${out.length ? "另有" : ""} ${dv.partialDates.length} 天只有部分上游有记录${who ? `（${who}）` : ""}，缺记录的上游在这些天的用量成本未计入。`.trim(),
+    );
+  }
+  return out;
 }
 
-function isMissingOwnConfiguration(message: string) {
-  return message.startsWith("还没有标记「我的中转站」");
-}
+function Equation({
+  dv,
+  snap,
+  caption,
+  extra,
+  href30,
+  onRetry,
+}: {
+  dv: Derived;
+  snap: Snapshot;
+  caption: string;
+  extra: ReactNode;
+  href30: string;
+  onRetry: () => void;
+}) {
+  const usage: EqTerm = {
+    value: dv.usage,
+    approx: dv.usageApprox,
+    note: dv.usageApprox ? "部分数据缺失" : dv.monitoredCount ? `${dv.monitoredCount} 个上游` : "没有按量计费的上游",
+    href: "/stations",
+  };
+  const fixed: EqTerm = { value: dv.fixed, note: dv.fixed > 0 ? "按付费周期摊到每天" : "没有固定成本" };
+  const reasons = coverageReasons(dv);
+  const ownName = snap.own?.station?.name || "自营站点";
 
-function stationCoverageGaps(coverage: any) {
-  const candidates = [
-    coverage?.stationGaps,
-    coverage?.gaps,
-    coverage?.stationCoverage,
-    coverage?.stations,
-  ];
-  const rows = candidates.find(Array.isArray) || [];
-  return rows.filter((row: any) =>
-    row?.isComplete === false ||
-    row?.hasGap === true ||
-    Number(row?.missingDays) > 0 ||
-    (Array.isArray(row?.missingDates) && row.missingDates.length > 0)
-  );
-}
-
-function stationGapText(gaps: any[]) {
-  if (!gaps.length) return null;
-  const labels = gaps.slice(0, 2).map((gap) => {
-    const name = gap.stationName || gap.name || gap.stationId || gap.id || "资源";
-    const missingDays = Number(gap.missingDays);
-    return Number.isFinite(missingDays) && missingDays > 0 ? `${name} 缺 ${missingDays} 天` : `${name} 有采集缺口`;
-  });
-  const rest = gaps.length - labels.length;
-  return `${labels.join("；")}${rest > 0 ? `；另有 ${rest} 个资源` : ""}`;
-}
-
-export default function AnalyticsPage() {
-  const { dark } = useThemeMode();
-  const { token } = theme.useToken();
-  const screens = Grid.useBreakpoint();
-  const isMobile = !screens.md;
-  // plots 图表不随 ConfigProvider 算法切换，需显式跟随暗色主题
-  const chartTheme = dark ? "classicDark" : "classic";
-  const [days, setDays] = useState<number>(30);
-  const [data, setData] = useState<any>(null);
-  const [own, setOwn] = useState<any>(null); // /api/own/analytics 响应（无自有站/拉取失败为 null）
-  const [ownStatus, setOwnStatus] = useState<"available" | "missing" | "error" | "not-applicable">("not-applicable");
-  const [ownError, setOwnError] = useState<string | null>(null);
-  const [includeArchived, setIncludeArchived] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
-
-  const load = useCallback(async (d: number) => {
-    try {
-      const params = new URLSearchParams({ days: String(d) });
-      if (includeArchived) params.set("includeArchived", "true");
-      const resp = await api(`/api/analytics?${params}`);
-      setData(resp);
-      setRefreshedAt(Date.now());
-      setLoadError(null);
-      if (d <= 30) {
-        try {
-          // 自营收入当前只有 7/30 天数据，长周期不能拿 30 天收入与全年成本混算利润。
-          const o = await api(`/api/own/analytics?range=${d <= 7 ? "7d" : "30d"}`);
-          setOwn(o);
-          setOwnStatus("available");
-          setOwnError(null);
-        } catch (e: any) {
-          const message = e.message || "自营收入分析加载失败";
-          setOwn(null);
-          if (isMissingOwnConfiguration(message)) {
-            setOwnStatus("missing");
-            setOwnError(null);
-          } else {
-            setOwnStatus("error");
-            setOwnError(message);
-          }
-        }
-      } else {
-        setOwn(null);
-        setOwnStatus("not-applicable");
-        setOwnError(null);
-      }
-    } catch (e: any) {
-      setLoadError(e.message || "成本分析加载失败");
-    } finally {
-      setLoading(false);
-    }
-  }, [includeArchived]);
-
-  // 首次 + 每 30 秒轮询（与面板其它页面的自动刷新节奏一致），切换范围立即重拉
-  useEffect(() => {
-    setLoading(true);
-    setData(null);
-    setOwn(null);
-    setOwnStatus("not-applicable");
-    setOwnError(null);
-    setLoadError(null);
-    load(days);
-    const timer = setInterval(() => load(days), 30000);
-    return () => clearInterval(timer);
-  }, [days, includeArchived, load]);
-
-  // ---- 派生数据 ---------------------------------------------------------------
-  const derived = useMemo(() => {
-    if (!data) return null;
-    const upstream = data.stations.filter((s: any) => !s.isOwn && s.includeInProfit !== false);
-    const upstreamIds = new Set(upstream.map((s: any) => s.id));
-
-    // 请求窗口日期序列。历史不足时不在最早可用日期之前补 0，避免伪造完整周期。
-    const requestedDates: string[] = [];
-    {
-      const [y, m, d] = String(data.start).split("-").map(Number);
-      const cur = new Date(y, m - 1, d);
-      for (let i = 0; i < data.days; i++) {
-        requestedDates.push(
-          `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`
-        );
-        cur.setDate(cur.getDate() + 1);
-      }
-    }
-    const coverage = data.coverage || null;
-
-    // 每日用量成本 / 固定摊销（¥，仅上游站）
-    const usageBy = new Map<string, number>();
-    const usageDates = new Set<string>();
-    for (const r of data.daily) {
-      if (!upstreamIds.has(r.stationId)) continue;
-      usageBy.set(r.date, (usageBy.get(r.date) || 0) + r.cny);
-      usageDates.add(r.date);
-    }
-    const fixedBy = new Map<string, number>();
-    const fixedDates = new Set<string>();
-    for (const r of data.fixedDaily) {
-      if (!upstreamIds.has(r.stationId)) continue;
-      fixedBy.set(r.date, (fixedBy.get(r.date) || 0) + r.cny);
-      fixedDates.add(r.date);
-    }
-    // 每日汇总会显式保存零消耗日；若某天完全没有汇总记录，说明监测尚未覆盖，不能当作零成本补齐。
-    // 没有按量上游时，固定成本记录本身就是该日可用的成本依据。
-    const hasUsageStations = upstream.some((s: any) => s.type !== "fixed");
-    const dates = requestedDates.filter((date) => hasUsageStations ? usageDates.has(date) : fixedDates.has(date));
-    const costSeries = dates.map((date) => {
-      const usage = r2(usageBy.get(date) || 0);
-      const fixed = r2(fixedBy.get(date) || 0);
-      return { date, usage, fixed, cost: r2(usage + fixed) };
-    });
-
-    // KPI：窗口总成本 / 日均 / 峰值日 / 预计月化（日均 × 30）
-    const totalCost = r2(costSeries.reduce((a, d) => a + d.cost, 0));
-    const averageDays = dates.length;
-    const avgCost = r2(totalCost / Math.max(1, averageDays));
-    const peak = costSeries.reduce((a, d) => (d.cost > a.cost ? d : a), costSeries[0]);
-    const monthly = r2(avgCost * 30);
-
-    // 日收入：own 分析只给窗口总收入（含转售 Key 重归），按每日下游消费占比摊到天。
-    // 比例分摊保证收入合计与利润口径严格一致，逐日形状随消费波动。
-    let incomeBy: Map<string, number> | null = null;
-    if (own && own.profit && !own.profit.error && Array.isArray(own.trend)) {
-      const rate = own.station?.cnyPerUsd > 0 ? own.station.cnyPerUsd : 1;
-      const trendTotal = own.trend.reduce((a: number, t: any) => a + t.cost, 0);
-      if (trendTotal > 0) {
-        const ratio = own.profit.incomeCny / (trendTotal * rate);
-        incomeBy = new Map();
-        for (const t of own.trend) {
-          const dt = new Date(t.t);
-          const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
-          incomeBy.set(key, r2((incomeBy.get(key) || 0) + t.cost * rate * ratio));
-        }
-      }
-    }
-
-    // 图 1：收支柱（长表）+ 毛利线
-    const cashCols: any[] = [];
-    const profitLine: any[] = [];
-    for (const d of costSeries) {
-      cashCols.push({ date: d.date, type: "成本", cny: d.cost });
-      if (incomeBy) {
-        const inc = incomeBy.get(d.date) || 0;
-        cashCols.push({ date: d.date, type: "收入", cny: inc });
-        profitLine.push({ date: d.date, type: "毛利", cny: r2(inc - d.cost) });
-      }
-    }
-
-    // 时段热力图只适用于短周期原始快照；长周期不传输小时级数据。
-    const heat = data.days <= 30 && data.heatmapAvailable !== false
-      ? (data.heatmap || []).map((h: any) => ({
-          weekday: ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][Number(h.weekday)] || String(h.weekday),
-          hour: String(h.hour).padStart(2, "0"),
-          cny: Number(h.cny),
-        }))
-      : [];
-
-    // 图 3：站点成本占比（用量 + 固定摊销，仅有成本的站）
-    const pie = upstream
-      .map((s: any) => ({ name: s.name, cny: r2(s.totalCny + s.fixedCny) }))
-      .filter((x: any) => x.cny > 0)
-      .sort((a: any, b: any) => b.cny - a.cny);
-
-    // 图 4：余额跑道（全部站点，剩余天数升序，最紧急在最上面）
-    const runway = data.stations
-      .filter((s: any) => s.runway && s.runway.etaDays != null)
-      .map((s: any) => ({ name: s.name, etaDays: s.runway.etaDays, burnPerDay: s.runway.burnPerDay }))
-      .sort((a: any, b: any) => a.etaDays - b.etaDays);
-
-    // 图 5：固定 vs 用量堆叠（长表）
-    const stacked: any[] = [];
-    for (const d of costSeries) {
-      stacked.push({ date: d.date, type: "用量成本", cny: d.usage });
-      stacked.push({ date: d.date, type: "固定摊销", cny: d.fixed });
-    }
-
-    // 图 6：累计消耗
-    let acc = 0;
-    const cumulative = costSeries.map((d) => ({ date: d.date, cny: (acc = r2(acc + d.cost)) }));
-
-    // 只统计确有日报记录的天数；缺失日不会被成本图表伪装成零消耗。
-    const coveredDays = dates.length;
-    const hasData = data.daily.length > 0 || data.fixedDaily.length > 0;
-    return {
-      costSeries, totalCost, avgCost, peak, monthly, cashCols, profitLine, heat, pie, runway, stacked, cumulative,
-      hasIncome: !!incomeBy, hasData, coveredDays, averageDays, coverage,
-    };
-  }, [data, own]);
-
-  const yAxisCny = { y: { labelFormatter: (v: number) => `¥${v}` } };
-  const tooltipCny = { items: [{ channel: "y", valueFormatter: (v: number) => cny(v) }] };
-  const coverage = derived?.coverage || data?.coverage || null;
-  const coveredDays = coverage ? Number(coverage.availableDays || 0) : (derived?.coveredDays ?? 0);
-  const coverageGaps = stationCoverageGaps(coverage);
-  const coverageGapSummary = stationGapText(coverageGaps);
-  const coverageIsComplete = !!coverage?.isComplete && coveredDays >= days && coverageGaps.length === 0;
-  const coverageStart = derived?.costSeries[0]?.date || coverage?.earliestDate;
-  const coverageText = coverage
-    ? coverageIsComplete
-      ? `已完整覆盖 ${coveredDays} 天（${formatDate(coverageStart)} 至 ${formatDate(coverage.latestDate)}）`
-      : `请求过去 ${coverage.requestedDays || days} 天，当前可用于成本分析 ${coveredDays} 天（自 ${formatDate(coverageStart)} 起）${coverageGapSummary ? `；${coverageGapSummary}` : ""}`
-    : null;
-
-  if (!data && loadError && !loading) {
+  if (dv.hasIncome) {
+    // 收入是估算的两种情况：自营站点没设汇率（按 1:1 折算）、所选天数和自营收入口径（7 / 30 天）不一致
+    const revReasons: string[] = [];
+    if (dv.ownNoRate) revReasons.push(`${ownName} 没有设置售价汇率，收入按 1 美元 = 1 元折算。`);
+    if (dv.revenueSplit)
+      revReasons.push(`自营收入只按近 7 天、近 30 天统计，这里的收入是把近 ${dv.ownDays} 天的收入按每天下游消费占比摊开后取了所选的 ${dv.rows.length} 天。`);
+    const revNote = dv.ownNoRate ? "未设汇率，按 1:1 估算" : dv.revenueSplit ? `由近 ${dv.ownDays} 天收入摊分` : ownName;
+    // 缺的是成本时毛利一定偏高；只是收入估算时方向不定
+    const tail = reasons.length ? (
+      <>
+        缺失的用量成本会让毛利偏高。{coverageLink}
+      </>
+    ) : (
+      "毛利随收入一起是估算值。"
+    );
     return (
-      <PageContainer className="responsive-page" title={NAV_LABELS.analytics} subTitle="余额变化、固定摊销与历史预测">
-        <AppState
-          kind="error"
-          title="成本分析暂时无法加载"
-          description={loadError}
-          actions={<Button type="primary" onClick={() => { setLoading(true); void load(days); }}>重试</Button>}
-        />
-      </PageContainer>
+      <ProfitEquation
+        title={EQ_TITLE}
+        caption={caption}
+        extra={extra}
+        revenue={{ value: dv.revenue, approx: dv.revenueApprox, note: revNote, href: "/my" }}
+        usage={usage}
+        fixed={fixed}
+        reasons={[...revReasons, ...reasons]}
+        partialTail={revReasons.length ? tail : <>实际毛利会比这里低。{coverageLink}</>}
+      />
+    );
+  }
+
+  // 收入算不出来：说明原因和下一步，成本照常统计
+  let revenueEmpty = "无法计算";
+  let revenueNote: ReactNode = ownName;
+  let profitNote: ReactNode = "收入无法计算";
+  let notice: ReactNode;
+  const retryBtn = (
+    <Button size="small" onClick={onRetry} className="jy-analytics-inline-btn">
+      重试
+    </Button>
+  );
+  if (snap.ownStatus === "not-applicable") {
+    revenueEmpty = "不适用";
+    revenueNote = "只支持 30 天以内";
+    profitNote = "收入不适用";
+    notice = (
+      <>
+        自营收入目前只支持 30 天以内。超过 30 天时只统计成本，不把 30 天的收入和更长时间的成本混在一起算毛利。
+        <Link href={href30} className="jy-link" scroll={false}>
+          切换到近 30 天
+        </Link>
+      </>
+    );
+  } else if (snap.ownStatus === "missing") {
+    revenueEmpty = "未设置";
+    revenueNote = "没有自营站点";
+    profitNote = "设置自营站点后计算";
+    notice = (
+      <>
+        还没有设置自营站点，所以收入和毛利暂时无法计算；用量成本和固定成本照常统计。把自己的 New API 资源标记为自营后即可显示收入。
+        <Link href="/my" className="jy-link">
+          设置自营站点
+        </Link>
+      </>
+    );
+  } else if (snap.ownStatus === "error") {
+    revenueEmpty = "读取失败";
+    revenueNote = "自营收入";
+    profitNote = "收入读取失败";
+    notice = (
+      <>
+        自营收入暂时无法读取，当前只统计成本。{snap.ownError}
+        {retryBtn}
+      </>
+    );
+  } else {
+    notice = (
+      <>
+        自营收入无法按天计算：{dv.incomeIssue || "自营站点没有返回可用的收入数据。"}
+        {retryBtn}
+      </>
     );
   }
 
   return (
-    <PageContainer
-      className="responsive-page"
-      title={NAV_LABELS.analytics}
-      subTitle="余额变化、固定摊销与历史预测"
-      extra={
-        <div className="page-toolbar">
-          <Button href="/reconciliation">{NAV_LABELS.reconciliation}</Button>
-          <LastRefreshed at={refreshedAt} />
-          <div className="mobile-scroll">
-            <Segmented
-              value={days}
-              onChange={(v) => setDays(Number(v))}
-              options={[
-                { label: "7 天", value: 7 },
-                { label: "30 天", value: 30 },
-                { label: "90 天", value: 90 },
-                { label: "365 天", value: 365 },
-              ]}
-            />
-          </div>
-          <Button
-            aria-pressed={includeArchived}
-            onClick={() => setIncludeArchived((current) => !current)}
-          >
-            {includeArchived ? "已包含归档资源" : "包含归档资源"}
-          </Button>
-        </div>
-      }
-    >
-      <Alert type="info" showIcon message="监控估算来源" description="成本来自余额变化与固定摊销，余额跑道来自历史预测；按资源汇率折算为人民币。此处估算不代表实际 Key 账单成本或现金付款，账单核算请查看对应来源与完整日窗口。" style={{ marginBottom: 16 }} />
-      {coverageText ? (
-        <Alert
-          type={coverageIsComplete ? "info" : "warning"}
-          showIcon
-          message={coverageIsComplete ? "历史数据覆盖完整" : "历史数据仍在积累"}
-          description={coverageText}
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-      {loadError && data ? (
-        <Alert
-          type="warning"
-          showIcon
-          message="成本分析刷新失败，正在显示上次成功加载的数据"
-          description={loadError}
-          action={<Button size="small" onClick={() => { setLoading(true); void load(days); }}>重试</Button>}
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-      {days <= 30 && ownStatus === "missing" ? (
-        <Alert
-          type="info"
-          showIcon
-          message="尚未配置自营业务资源"
-          description="当前仅展示上游成本。添加或编辑 New API 资源并标记为自营后，才能显示收入与毛利。"
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-      {days <= 30 && ownError ? (
-        <Alert
-          type="warning"
-          showIcon
-          message="自营收入暂时无法读取，当前仅展示成本"
-          description={ownError}
-          action={<Button size="small" onClick={() => { setLoading(true); void load(days); }}>重试</Button>}
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-      {days > 30 ? (
-        <Alert
-          type="info"
-          showIcon
-          message="长周期按日汇总展示"
-          description="90/365 天报告不会加载小时级快照或时段热力图；自营收入目前只支持 7/30 天，因此长周期仅展示成本。"
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-      {/* KPI 行：总成本 / 日均 / 峰值日 / 预计月化 */}
-      <Row gutter={[16, 16]}>
-        <Col xs={12} md={6}>
-          <ProCard style={{ height: "100%" }} loading={loading && !data}>
-            <Statistic title={`${days} 天总成本`} value={derived ? cny(derived.totalCost) : "-"} />
-            {/* 副行统一占位：无内容也保留 minHeight，四卡等高 */}
-            <div style={{ minHeight: 20 }}>
-              {derived && coveredDays < days ? (
-                <Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                  数据当前覆盖 {coveredDays} 天，将随运行自动补全
-                </Text>
-              ) : null}
-            </div>
-          </ProCard>
-        </Col>
-        <Col xs={12} md={6}>
-          <ProCard style={{ height: "100%" }} loading={loading && !data}>
-            <Statistic title="日均成本" value={derived ? cny(derived.avgCost) : "-"} />
-            <div style={{ minHeight: 20 }}>{null}</div>
-          </ProCard>
-        </Col>
-        <Col xs={12} md={6}>
-          <ProCard style={{ height: "100%" }} loading={loading && !data}>
-            <Statistic title="峰值日" value={derived ? cny(derived.peak?.cost ?? 0) : "-"} />
-            <div style={{ minHeight: 20 }}>
-              <Text type="secondary" style={{ fontSize: token.fontSizeSM }}>{derived?.peak?.date || ""}</Text>
-            </div>
-          </ProCard>
-        </Col>
-        <Col xs={12} md={6}>
-          <ProCard style={{ height: "100%" }} loading={loading && !data}>
-            <Statistic title="预计月化成本" value={derived ? cny(derived.monthly) : "-"} />
-            <div style={{ minHeight: 20 }}>
-              <Text type="secondary" style={{ fontSize: token.fontSizeSM }}>按已覆盖 {derived ? derived.averageDays : days} 天日均 × 30</Text>
-            </div>
-          </ProCard>
-        </Col>
-      </Row>
+    <ProfitEquation
+      title={EQ_TITLE}
+      caption={caption}
+      extra={extra}
+      unconfigured
+      revenue={{ value: null, note: revenueNote, href: "/my" }}
+      revenueEmpty={revenueEmpty}
+      usage={usage}
+      fixed={fixed}
+      profitNote={profitNote}
+      notice={notice}
+      reasons={reasons}
+      partialTail={<>实际成本会比这里高。{coverageLink}</>}
+    />
+  );
+}
 
-      {/* 图 1：收支利润趋势（无自有站时退化为成本柱） */}
-      <ProCard
-        title={
-          <CardHeader
-            title={derived?.hasIncome ? "收支利润趋势" : "成本趋势"}
-            sub={derived?.hasIncome ? "日成本 = 上游消耗 × 汇率 + 固定摊销；日收入按下游消费占比分摊；毛利 = 收入 − 成本" : "日成本 = 上游消耗 × 汇率 + 固定摊销"}
-          />
-        }
-        style={{ marginTop: 16 }}
-        loading={loading && !data}
-      >
-        {derived && derived.hasData ? (
+// ---- 成本构成 ------------------------------------------------------------------
+
+function MixPanel({ dv }: { dv: Derived }) {
+  const items: HBarItem[] = dv.mix.map((m) => {
+    const name = m.archived ? `${m.name}（已归档）` : m.name;
+    if (m.unknown) {
+      // 期内一条用量记录都没有：画斜纹空条，不当作 0
+      return { key: m.id, name, value: null, note: m.fixed > 0 ? `数据缺失，固定成本 ${formatMoney(m.fixed)}` : "数据缺失" };
+    }
+    const tip: [ReactNode, ReactNode][] = [
+      ["用量成本", formatMoney(m.usage, { approx: m.missingDays > 0 })],
+      ["固定成本", formatMoney(m.fixed)],
+    ];
+    if (m.missingDays > 0) tip.push(["用量记录", `缺 ${m.missingDays} 天，未计入`]);
+    return { key: m.id, name, value: r2(m.usage + m.fixed), tipExtra: tip };
+  });
+  return (
+    <Panel title="成本构成" caption="按上游资源，期内合计（用量成本 + 固定成本）">
+      <HBars
+        items={items}
+        color="var(--jy-s2)"
+        unitName="成本"
+        total={items.length ? { label: "合计", value: formatMoney(r2(dv.usage + dv.fixed), { approx: dv.usageApprox }) } : undefined}
+        empty={
           <>
-            {/* G2 内置图例会把三个系列折叠成分页器（成本 ◀1/3▶），此处关闭内置图例，
-                自绘一行 antd 图例，色块与系列 scale.color 保持一致，保证三项永远完整可见 */}
-            <div style={{ display: "flex", justifyContent: "center", gap: 16, flexWrap: "wrap", marginBottom: 8 }}>
-              {[
-                { label: "成本", color: token.colorPrimary },
-                ...(derived.hasIncome
-                  ? [
-                      { label: "收入", color: token.colorTextSecondary },
-                      { label: "毛利", color: token.colorText },
-                    ]
-                  : []),
-              ].map((it) => (
-                <span key={it.label} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ width: 10, height: 10, borderRadius: 2, background: it.color, display: "inline-block" }} />
-                  <Text style={{ fontSize: 12 }}>{it.label}</Text>
-                </span>
-              ))}
-            </div>
-            <ChartBox h={CHART_H}>
-            <DualAxes
-              height={CHART_H}
-              theme={chartTheme}
-              xField="date"
-              legend={false}
-              /* color scale 必须放顶层：DualAxes 会合并子图的 color 通道，
-                 子图各写各的 range 会互相覆盖（毛利的橙色曾把成本柱也染橙，与图例不符） */
-              scale={{
-                color: {
-                  domain: derived.hasIncome ? ["成本", "收入", "毛利"] : ["成本"],
-                  range: derived.hasIncome
-                    ? [token.colorPrimary, token.colorTextSecondary, token.colorText]
-                    : [token.colorPrimary],
-                },
-              }}
-              children={[
-              {
-                data: derived.cashCols,
-                type: "interval",
-                yField: "cny",
-                colorField: "type",
-                group: true,
-                axis: yAxisCny,
-                tooltip: tooltipCny,
-              },
-              ...(derived.hasIncome
-                ? [{
-                    data: derived.profitLine,
-                    type: "line",
-                    yField: "cny",
-                    colorField: "type",
-                    style: { lineWidth: 2 },
-                    axis: { y: { position: "right", labelFormatter: (v: number) => `¥${v}` } },
-                    scale: { y: { independent: true } },
-                    tooltip: tooltipCny,
-                  }]
-                : []),
-              ]}
-            />
-            </ChartBox>
+            期内没有上游成本。
+            <Link href="/stations" className="jy-link">
+              管理上游资源
+            </Link>
           </>
+        }
+      />
+    </Panel>
+  );
+}
+
+// ---- 消耗时段 ------------------------------------------------------------------
+
+function HeatPanel({
+  dv,
+  days,
+  href30,
+  fallback,
+  fallbackLoading,
+  onShorter,
+}: {
+  dv: Derived;
+  days: number;
+  href30: string;
+  fallback: HeatFallback | null;
+  fallbackLoading: boolean;
+  onShorter: () => void;
+}) {
+  const { heat } = dv;
+  const fb = fallback?.heat?.available ? fallback.heat : null;
+  let caption = "期内每个时段的用量成本合计，按星期和小时";
+  let body: ReactNode;
+  if (heat.available && !heat.empty) {
+    body = <Heatmap grid={heat.grid} valueLabel="用量成本合计" peakNote={`期内 ${days} 天合计`} />;
+  } else if (heat.available) {
+    body = <EmptyState title="这段时间上游没有用量消耗" desc="有消耗后，这里会按星期和小时显示用量成本。" />;
+  } else if (heat.reason === "range-not-supported") {
+    body = (
+      <EmptyState
+        title="超过 30 天不提供消耗时段"
+        desc="时段统计需要小时级的原始监测快照，只在 30 天以内提供；长周期按日汇总，不加载小时级快照。"
+        action={
+          <Link href={href30} className="jy-link" scroll={false}>
+            切换到近 30 天
+          </Link>
+        }
+      />
+    );
+  } else if (heat.reason === "no-cost-stations") {
+    body = (
+      <EmptyState
+        title="没有可统计时段的上游"
+        desc="消耗时段只统计按量计费、计入利润的上游；当前范围内没有这样的上游。"
+        action={
+          <Link href="/stations" className="jy-link">
+            管理上游资源
+          </Link>
+        }
+      />
+    );
+  } else if (fallbackLoading) {
+    body = <Skeleton height={180} />;
+  } else if (fb) {
+    // 退回近 7 天：说明为什么不是所选范围，缺快照的上游点名
+    const who = gapSummary(heat.gaps);
+    caption = "近 7 天每个时段的用量成本合计，按星期和小时";
+    body = (
+      <>
+        <p className="jy-caption jy-analytics-heat-note">
+          所选 {days} 天里有上游缺少原始监测快照{who ? `：${who}` : ""}。这里改为显示近 7 天。
+          <Link href="/settings" className="jy-link">
+            调整数据留存
+          </Link>
+        </p>
+        {fb.empty ? (
+          <EmptyState title="近 7 天上游没有用量消耗" desc="有消耗后，这里会按星期和小时显示用量成本。" />
         ) : (
-          <Blank />
+          <Heatmap grid={fb.grid} valueLabel="用量成本合计" peakNote="近 7 天合计" />
         )}
-      </ProCard>
+      </>
+    );
+  } else {
+    const who = gapSummary(heat.gaps);
+    body = (
+      <EmptyState
+        title="近期原始快照不足"
+        desc={`热力图需要近期原始监测快照。当前留存期限或采集覆盖不足，缺失时段不会补成零消耗。${who ? `缺快照的上游：${who}。` : ""}`}
+        action={
+          <>
+            {/* 近 7 天也画不出来时不再引导切换 */}
+            {days > 7 && !fallback?.heat && <Button onClick={onShorter}>切换到近 7 天</Button>}
+            <Link href="/settings" className="jy-link">
+              调整数据留存
+            </Link>
+          </>
+        }
+      />
+    );
+  }
+  return (
+    <Panel title="消耗时段" caption={caption}>
+      {body}
+    </Panel>
+  );
+}
 
-      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        {/* 图 2：时段热力图仅适用于短周期原始快照 */}
-        {days <= 30 ? <Col xs={24} lg={14}>
-          <ProCard
-            title={<CardHeader title="消耗时段热力图" sub="星期 × 小时的消耗强度（¥），颜色越深消耗越大" />}
-            style={{ height: "100%" }}
-            loading={loading && !data}
-          >
-            {data?.heatmapAvailable === false ? (
-              <Alert
-                type="info"
-                showIcon
-                message="时段热力图暂不可用"
-                description="热力图需要近期原始监测快照。当前留存期限或采集覆盖不足，缺失时段不会补成零消耗。"
-              />
-            ) : derived?.heat.length ? (
-              <ChartBox h={CHART_H}>
-              <Heatmap
-                height={CHART_H}
-                theme={chartTheme}
-                data={derived.heat}
-                xField="hour"
-                yField="weekday"
-                colorField="cny"
-                mark="cell"
-                // 显式色带：0 值 = 容器底色（浅色白 / 深色深灰），避免 G2 默认桃色系把无消耗格子染成肤色
-                scale={{ color: { range: [token.colorBgContainer, token.colorPrimary] } }}
-                style={{ inset: 0.5, stroke: token.colorBorderSecondary }}
-                axis={{
-                  x: {
-                    title: "时",
-                    labelFormatter: (v: any) => (!isMobile || Number(v) % 4 === 0 ? v : ""),
-                  },
-                  y: { title: null },
-                }}
-                legend={{ color: { position: "bottom" } }}
-                tooltip={{ items: [{ channel: "color", valueFormatter: (v: number) => cny(v) }] }}
-              />
-              </ChartBox>
-            ) : (
-              <Blank />
-            )}
-          </ProCard>
-        </Col> : null}
-        {/* 图 3：站点成本占比 */}
-        <Col xs={24} lg={days <= 30 ? 10 : 24}>
-          <ProCard
-            title={<CardHeader title={`站点成本占比（近 ${days} 天）`} sub="用量成本 + 固定摊销，¥ 口径" />}
-            style={{ height: "100%" }}
-            loading={loading && !data}
-          >
-            {derived && derived.pie.length ? (
-              <ChartBox h={CHART_H}>
-              <Pie
-                height={CHART_H}
-                theme={chartTheme}
-                data={derived.pie}
-                angleField="cny"
-                colorField="name"
-                innerRadius={0.6}
-                label={isMobile ? false : { text: "name", position: "outside" }}
-                legend={{ color: { position: "bottom" } }}
-                tooltip={{ items: [{ channel: "y", valueFormatter: (v: number) => cny(v) }] }}
-              />
-              </ChartBox>
-            ) : (
-              <Blank />
-            )}
-          </ProCard>
-        </Col>
-      </Row>
+// ---- 可用天数 ------------------------------------------------------------------
 
-      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
-        {/* 图 4：余额跑道 */}
-        <Col xs={24} lg={10}>
-          <ProCard
-            title={<CardHeader title="余额跑道（预计可用天数）" sub="按实时消耗速率预测的耗尽天数：红 <3 天、黄 <7 天、绿 ≥7 天" />}
-            style={{ height: "100%" }}
-            loading={loading && !data}
-          >
-            {derived && derived.runway.length ? (
-              <ChartBox h={CHART_H}>
-              <Bar
-                height={CHART_H}
-                theme={chartTheme}
-                data={derived.runway}
-                xField="name"
-                yField="etaDays"
-                style={{
-                  fill: (d: any) =>
-                    d.etaDays < 3 ? token.colorError : d.etaDays < 7 ? token.colorWarning : token.colorSuccess,
-                  maxWidth: 24,
-                }}
-                label={isMobile ? false : { text: (d: any) => `${d.etaDays} 天`, position: "right", dx: 4 }}
-                axis={{
-                  y: { title: "天" },
-                  x: {
-                    title: null,
-                    labelFormatter: (v: any) => {
-                      const s = String(v ?? "");
-                      return isMobile && s.length > 8 ? `${s.slice(0, 7)}…` : s;
-                    },
-                  },
-                }}
-                tooltip={{ items: [{ channel: "y", valueFormatter: (v: number) => `${v} 天` }] }}
-              />
-              </ChartBox>
-            ) : (
-              <Blank />
-            )}
-          </ProCard>
-        </Col>
-        {/* 图 5：固定成本 vs 用量成本 */}
-        <Col xs={24} lg={14}>
-          <ProCard
-            title={<CardHeader title="固定成本 vs 用量成本" sub="固定摊销 = 每笔付费按 金额÷天数 摊到生效日" />}
-            style={{ height: "100%" }}
-            loading={loading && !data}
-          >
-            {derived && derived.hasData ? (
-              <ChartBox h={CHART_H}>
-              <Column
-                height={CHART_H}
-                theme={chartTheme}
-                data={derived.stacked}
-                xField="date"
-                yField="cny"
-                colorField="type"
-                stack
-                scale={{
-                  color: {
-                    domain: ["用量成本", "固定摊销"],
-                    range: [token.colorPrimary, token.colorTextSecondary],
-                  },
-                }}
-                axis={yAxisCny}
-                legend={{ color: { position: isMobile ? "bottom" : "top" } }}
-                tooltip={tooltipCny}
-              />
-              </ChartBox>
-            ) : (
-              <Blank />
-            )}
-          </ProCard>
-        </Col>
-      </Row>
+function RunwayPanel({ dv, critDays, metaFailed }: { dv: Derived; critDays: number; metaFailed: boolean }) {
+  const items: RunwayItem[] = dv.runway.map((s) => {
+    const level = s.days <= critDays ? "crit" : s.days < WARN_DAYS ? "warn" : "good";
+    const suffix = s.archived ? "（已归档）" : "";
+    const burn = Number.isFinite(s.burnCny) ? formatMoney(s.burnCny) : "—";
+    const tip: TipRow[] = [
+      ["日均消耗", burn],
+      ["可用", formatDays(s.days)],
+    ];
+    if (s.basis) tip.push(["推算依据", s.basis]);
+    return { key: s.id, name: `${s.name}${suffix}`, sub: `日均消耗 ${burn}`, days: s.days, level, tip };
+  });
+  const caption = metaFailed
+    ? `告警规则读取失败，按 ${critDays} 天内为紧急`
+    : `按近期消耗推算，${critDays} 天内为紧急，${WARN_DAYS} 天内需注意`;
+  return (
+    <Panel title="可用天数" caption={caption} body={items.length ? false : true}>
+      {items.length ? (
+        <div className="jy-analytics-runway">
+          <Runway items={items} critDays={critDays} warnDays={WARN_DAYS} />
+        </div>
+      ) : (
+        <EmptyState
+          title="暂时没有可推算的上游"
+          desc="需要有余额记录和近期消耗才能推算可用天数。"
+          action={
+            <Link href="/stations" className="jy-link">
+              查看上游资源
+            </Link>
+          }
+        />
+      )}
+    </Panel>
+  );
+}
 
-      {/* 图 6：累计消耗 */}
-      <ProCard
-        title={<CardHeader title={`累计消耗（近 ${days} 天）`} sub={`窗口内日成本逐日累加（用量 + 固定摊销，¥ 口径）`} />}
-        style={{ marginTop: 16 }}
-        loading={loading && !data}
-      >
-        {derived && derived.hasData ? (
-          <ChartBox h={CHART_H}>
-          <Line
-            height={CHART_H}
-            theme={chartTheme}
-            data={derived.cumulative}
-            xField="date"
-            yField="cny"
-            shapeField="smooth"
-            style={{ lineWidth: 2, stroke: token.colorPrimary }}
-            axis={yAxisCny}
-            tooltip={tooltipCny}
-          />
-          </ChartBox>
-        ) : (
-          <Blank />
+// ---- 成本概况 ------------------------------------------------------------------
+
+function SummaryPanel({ dv, days }: { dv: Derived; days: number }) {
+  const { kpi } = dv;
+  const approx = dv.usageApprox;
+  const none = kpi.coveredDays === 0;
+  return (
+    <Panel title="成本概况" caption="用量成本 + 固定成本">
+      <dl className="jy-kv jy-num">
+        <dt>期内总成本</dt>
+        <dd>
+          {formatMoney(kpi.total, { approx })}
+          {kpi.coveredDays < days && <div className="jy-caption">数据当前覆盖 {kpi.coveredDays} 天，将随运行自动补全</div>}
+        </dd>
+        <dt>日均成本</dt>
+        <dd>
+          {none ? "—" : formatMoney(kpi.avg, { approx: dv.partialDates.length > 0 })}
+          <div className="jy-caption">{none ? "没有可用的记录" : `按有记录的 ${kpi.coveredDays} 天平均`}</div>
+        </dd>
+        <dt>峰值日</dt>
+        <dd>
+          {kpi.peak ? (
+            <>
+              {formatMoney(kpi.peak.cost)}
+              <div className="jy-caption">{kpi.peak.today ? "今天" : md(kpi.peak.date)}</div>
+            </>
+          ) : (
+            "—"
+          )}
+        </dd>
+        <dt>预计月化成本</dt>
+        <dd>
+          {none ? "—" : formatMoney(kpi.monthly, { approx: dv.partialDates.length > 0 })}
+          {!none && <div className="jy-caption">按已覆盖 {kpi.coveredDays} 天日均 × 30</div>}
+        </dd>
+      </dl>
+    </Panel>
+  );
+}
+
+// ---- 覆盖说明 ------------------------------------------------------------------
+
+function CoveragePanel({ dv, data, stations }: { dv: Derived; data: any; stations: any[] }) {
+  const days = dv.rows.length;
+  const nMissing = dv.missingDates.length;
+  const nPartial = dv.partialDates.length;
+  const earliest: string | null = dv.coverage?.earliestDate || null;
+  const byId = new Map(stations.map((s) => [s.id, s]));
+
+  let lead: string;
+  if (dv.monitoredCount === 0) {
+    lead = "所选范围内没有按量计费的上游用量记录，只统计固定成本。";
+  } else if (!nMissing && !nPartial) {
+    lead = `所选 ${days} 天每天都有全部 ${dv.monitoredCount} 个上游的用量记录。`;
+  } else {
+    const parts = [`${days - nMissing - nPartial} 天记录完整`];
+    if (nPartial) parts.push(`${nPartial} 天只有部分上游有记录`);
+    if (nMissing) parts.push(`${nMissing} 天没有任何上游用量记录`);
+    lead = `所选 ${days} 天中，${parts.join("，")}。缺记录的日子不会补成零，用量成本只按已有记录计算。`;
+  }
+  if (earliest && earliest > data.start) lead += `历史数据还在积累：最早的用量记录是 ${md(earliest)}，之后会随运行自动补全。`;
+
+  return (
+    <div id={COVERAGE_ID} className="jy-analytics-anchor">
+      <Panel title="覆盖说明" caption="上游用量记录是否齐全">
+        <p className="jy-analytics-lead">{lead}</p>
+        <dl className="jy-kv">
+          <dt>所选范围</dt>
+          <dd>
+            {md(data.start)} 至 {md(data.end)}，共 {days} 天
+          </dd>
+          <dt>最早的用量记录</dt>
+          <dd>{earliest ? md(earliest) : "暂无"}</dd>
+          <dt>缺失日期</dt>
+          <dd>{nMissing ? `${runsText(dv.missingDates, 6)}，共 ${nMissing} 天` : "无"}</dd>
+          <dt>部分缺失日期</dt>
+          <dd>{nPartial ? `${runsText(dv.partialDates, 6)}，共 ${nPartial} 天` : "无"}</dd>
+        </dl>
+        {dv.allGaps.length > 0 && (
+          <div className="jy-table-scroll jy-analytics-gaps">
+            <table className="jy-data jy-data--compact jy-num">
+              <caption className="sr-only">记录不全的资源</caption>
+              <thead>
+                <tr>
+                  <th scope="col">资源</th>
+                  <th scope="col" className="r">
+                    有记录
+                  </th>
+                  <th scope="col" className="r">
+                    缺
+                  </th>
+                  <th scope="col">最早记录</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dv.allGaps.map((g) => {
+                  const s = byId.get(g.stationId);
+                  const tags = [
+                    s?.isOwn ? "自营，不计入成本" : s?.includeInProfit === false ? "不计入利润" : "",
+                    g.archivedAt || s?.archivedAt ? "已归档" : "",
+                  ].filter(Boolean);
+                  return (
+                    <tr key={g.stationId}>
+                      <td>
+                        {g.stationName || s?.name || g.stationId}
+                        {tags.length > 0 && <span className="jy-caption">（{tags.join("，")}）</span>}
+                      </td>
+                      <td className="r">{Number(g.availableDays) || 0} 天</td>
+                      <td className="r">{Number(g.missingDays) || 0} 天</td>
+                      <td>{g.earliestDate ? md(g.earliestDate) : "暂无"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
-      </ProCard>
-    </PageContainer>
+      </Panel>
+    </div>
   );
 }

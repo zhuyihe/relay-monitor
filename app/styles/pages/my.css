@@ -1,0 +1,58 @@
+/* 自营业务：只放本页独有的细节，布局和组件样式都在 jy.css */
+
+/* 可排序表头：整格是按钮，当前排序列带箭头 */
+.jy-my-sort {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer;
+  border-radius: var(--jy-r1); white-space: nowrap;
+}
+.jy-my-sort:hover, .jy-my-sort.is-active { color: var(--jy-ink); }
+.jy-my-sort .jy-icon { width: 12px; height: 12px; }
+
+/* 环比涨跌 50% 以上加粗，方便一眼扫到跳变 */
+.jy-my-delta-big { color: var(--jy-warn-ink); font-weight: 600; }
+
+/* 换范围时先保留旧数据，变淡表示正在更新 */
+.jy-my-busy { opacity: .6; transition: opacity .15s; }
+
+/* 外观像链接的按钮：切标签页、展开面板 */
+.jy-my-linkbtn { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; }
+
+/* 并列的几项事实分列摆放，不用"·"连接 */
+.jy-my-facts { display: flex; flex-wrap: wrap; gap: 4px 24px; margin: 0; padding: 0; list-style: none; }
+.jy-my-facts b { color: var(--jy-ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+
+/* 面板内的分节 */
+.jy-my-section + .jy-my-section { margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--jy-rule-soft); }
+.jy-my-h3 { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 12px; font-size: 14px; line-height: 22px; font-weight: 600; color: var(--jy-ink); }
+.jy-my-h3 .spacer { flex: 1; }
+.jy-my-lines { margin: 0 0 16px; color: var(--jy-ink-2); font-size: 13px; line-height: 20px; }
+.jy-my-lines p { margin: 0; }
+.jy-banner ul.jy-my-list { margin: 4px 0 0; padding-left: 18px; }
+.jy-my-banner-action { margin-left: auto; flex-shrink: 0; }
+
+/* 长表格可以更高一些 */
+.jy-table-scroll.jy-my-tall { max-height: 560px; }
+
+/* 日志精算的四项汇总 */
+.jy-my-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0 0 12px; }
+.jy-my-stats > div { padding: 12px 16px; border-radius: var(--jy-r2); background: var(--jy-sunken); min-width: 0; }
+.jy-my-stats dt { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
+.jy-my-stats dd { margin: 4px 0 0; font-size: 20px; line-height: 28px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; }
+.jy-my-stats dd small { display: block; font-size: 12px; line-height: 18px; font-weight: 400; color: var(--jy-ink-3); }
+.jy-my-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+
+/* 转售 Key 管理：按账号分组的勾选列表 */
+.jy-my-mgr { margin-top: 16px; padding: 16px; border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); }
+.jy-my-account + .jy-my-account { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--jy-rule-soft); }
+.jy-my-account h4 { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 13px; line-height: 20px; font-weight: 500; }
+.jy-my-keys { display: flex; flex-direction: column; gap: 6px; }
+.jy-my-add { display: flex; gap: 8px; max-width: 360px; margin-top: 8px; }
+.jy-my-mgr-foot { display: flex; gap: 8px; margin-top: 16px; }
+
+@media (max-width: 767px) {
+  .jy-my-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* 收起的面板只剩标题和摘要，摘要下补足留白 */
+.jy-my-collapsed .jy-panel-sub { padding-bottom: 20px; }
