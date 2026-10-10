@@ -91,6 +91,17 @@ function seriesVar(s: Series) {
   return s.slot == null ? "var(--jy-ink-dis)" : `var(--jy-${SERIES_KEYS[s.slot]})`;
 }
 
+// 上游只回了状态码时，把状态码换成能照着处理的说明（原文保留在悬停提示里）
+function usageErrorText(error: unknown): string {
+  const text = String(error || "");
+  const status = Number(text.match(/^HTTP (\d{3})$/)?.[1]);
+  if (status === 404) return "该上游不提供用量明细接口，无法统计用量";
+  if (status === 401 || status === 403) return "凭据无效或没有读取用量的权限，请在上游资源里更新登录信息";
+  if (status === 429) return "上游限流，稍后会自动重试";
+  if (status >= 500) return "上游服务暂时出错，稍后会自动重试";
+  return text || "查询失败，原因未知";
+}
+
 export default function UsagePage() {
   const { dark } = useThemeMode();
   const screens = Grid.useBreakpoint();
@@ -357,10 +368,13 @@ export default function UsagePage() {
 
   const hourly = current.granularity === "hour";
   const trendHasData = group === "total" ? !trendEmpty : !!upstream?.series.length && !trendEmpty;
-  // 全部上游都查询失败时，"暂无数据"会被误读为没有用量
+  // 全部上游都查询失败时，"暂无数据"会被误读为没有用量；合计也不显示 0
   const allFailed = agg.okSts.length === 0 && agg.errSts.length > 0;
+  const partial = agg.okSts.length > 0 && agg.errSts.length > 0;
+  const figure = (text: string) => (allFailed ? "—" : text);
+  const partialNote = partial ? <dd className="jy-caption">不含查询失败的 {agg.errSts.length} 个上游</dd> : null;
   const emptyTitle = allFailed ? "用量查询全部失败，暂时没有数据" : "该范围内暂无用量数据";
-  const emptyDesc = allFailed ? "失败原因见上方，恢复后会自动显示。" : "换一个时间范围，或在筛选里选择其他上游资源。";
+  const emptyDesc = allFailed ? "各上游的失败原因见上方；临时故障恢复后，下次刷新会自动显示。" : "换一个时间范围，或在筛选里选择其他上游资源。";
   // 整个范围都没有用量时只留一个空状态，不再并排三个空卡片
   const noData = trendEmpty && !agg.models.length;
 
@@ -496,16 +510,19 @@ export default function UsagePage() {
         <dl className="jy-usage-kpis">
           <div>
             <dt>总 Tokens</dt>
-            <dd className="jy-usage-figure">{fmtTokens(agg.totTokens)}</dd>
-            <dd className="jy-caption">精确值 {num(agg.totTokens)}</dd>
+            <dd className="jy-usage-figure">{figure(fmtTokens(agg.totTokens))}</dd>
+            {allFailed ? <dd className="jy-caption">没有读到任何上游的用量</dd> : <dd className="jy-caption">精确值 {num(agg.totTokens)}</dd>}
+            {partialNote}
           </div>
           <div>
             <dt>用量成本</dt>
-            <dd className="jy-usage-figure">{cny4(agg.totCost)}</dd>
+            <dd className="jy-usage-figure">{figure(cny4(agg.totCost))}</dd>
+            {partialNote}
           </div>
           <div>
             <dt>请求数</dt>
-            <dd className="jy-usage-figure">{num(agg.totReqs)}</dd>
+            <dd className="jy-usage-figure">{figure(num(agg.totReqs))}</dd>
+            {partialNote}
           </div>
           <div>
             <dt>数据来源</dt>
@@ -528,11 +545,11 @@ export default function UsagePage() {
         <div className="jy-banner">
           <Sym kind="warn" />
           <div className="jy-usage-banner">
-            <b>以下上游的用量查询失败，合计未包含它们</b>
+            <b>{allFailed ? "以下上游的用量查询失败" : "以下上游的用量查询失败，合计未包含它们"}</b>
             <ul>
               {agg.errSts.map((s: any) => (
-                <li key={s.id}>
-                  {s.name}：{s.error}
+                <li key={s.id} title={s.error}>
+                  {s.name}：{usageErrorText(s.error)}
                 </li>
               ))}
             </ul>

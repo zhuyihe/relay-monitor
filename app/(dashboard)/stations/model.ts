@@ -3,6 +3,7 @@
 import { fmtEta, rateOf, statusOf, usd } from "../../../lib/client";
 import { describeConnectionFailure } from "../../../lib/connection-test";
 import { formatDays, formatMonthDay } from "../../../lib/format";
+import { LEVEL_ORDER } from "../../components/status";
 import type { Level } from "../../components/status";
 
 export const DAY_MS = 86400000;
@@ -237,7 +238,8 @@ export function buildStationView(
       level = "muted";
       statusLabel = "待生效";
     } else if (fx.remain != null && fx.remain <= critDays) {
-      level = "warn";
+      // 标记为不再续费的不再提醒到期（与运营总览一致）
+      level = s.noRenewal ? "muted" : "warn";
       statusLabel = `${fx.remain} 天后到期`;
     }
     const runway: RunwayView = fx.remain != null
@@ -282,17 +284,20 @@ export function buildStationView(
     level = "warn";
     statusLabel = "余额偏低";
   }
-  // 余额本身没触发阈值时，再看耗尽预测：阈值内算紧急，7 天内算注意（与旧版的红 / 黄口径一致）
-  if (level === "good" && burn > 0 && eta != null) {
-    if (eta <= critDays) {
-      level = "crit";
-      statusLabel = "即将耗尽";
-    } else if (eta <= WARN_DAYS) {
-      level = "warn";
-      statusLabel = "7 天内耗尽";
+  // 再看耗尽预测，取两者中更严重的：阈值内算紧急，7 天内算注意（与运营总览、上游余量同一口径）
+  if (burn > 0 && eta != null) {
+    const etaLevel = runwayLevel(Number(eta), critDays);
+    if (etaLevel !== "good" && LEVEL_ORDER[etaLevel] < LEVEL_ORDER[level]) {
+      level = etaLevel;
+      if (st !== "warn") statusLabel = etaLevel === "crit" ? "即将耗尽" : "7 天内耗尽";
     }
   }
   if (burn > 0 && eta != null) statusNote = `预计 ${fmtEta(eta)}后耗尽`;
+  // 不再续费的资源与自营站点不做余额提醒（与运营总览一致），只保留文字
+  if ((s.noRenewal || s.isOwn) && (level === "crit" || level === "warn")) {
+    level = "muted";
+    statusNote = s.noRenewal ? "已标记不再续费，不再提醒" : "自营站点不做余额提醒";
+  }
   const sortDays = runway && runway.days != null ? runway.days : null;
   return { ...base, level, statusLabel, statusNote, issue: null, checkedAt, sortDays, runway, fx: null };
 }

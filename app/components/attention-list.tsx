@@ -9,6 +9,8 @@ export type AttentionItem = {
   who: ReactNode;
   what: ReactNode;
   desc?: ReactNode;
+  // 同一对象合并进来的其余事项（"另有 N 项"）
+  note?: ReactNode;
   actions?: ReactNode;
 };
 
@@ -21,7 +23,7 @@ export function AttentionList({
   items: AttentionItem[];
   emptyTitle?: ReactNode;
   emptyDesc?: ReactNode;
-  // 列表截断后的"查看全部"
+  // 列表截断后的展开/收起，或其余资源的一句话交代
   more?: ReactNode;
 }) {
   if (!items.length) {
@@ -47,6 +49,7 @@ export function AttentionList({
                 <span className="sr-only">，{LEVEL_LABEL[it.level]}</span>
               </div>
               {it.desc != null && <p>{it.desc}</p>}
+              {it.note != null && <p className="jy-attention-note">{it.note}</p>}
             </div>
             {it.actions != null && <div className="actions">{it.actions}</div>}
           </li>

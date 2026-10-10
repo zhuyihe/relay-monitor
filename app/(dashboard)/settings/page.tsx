@@ -529,14 +529,12 @@ export default function SettingsPage() {
                       if (fieldErrors.low) setFieldErrors((p) => ({ ...p, low: undefined }));
                     }}
                     min={0}
-                    prefix="$"
-                    suffix="美元"
                     status={fieldErrors.low ? "error" : undefined}
                     aria-invalid={!!fieldErrors.low}
                     aria-describedby={`${ids.low}-desc${fieldErrors.low ? ` ${ids.low}-err` : ""}`}
                   />
                   <span className="jy-caption" id={`${ids.low}-desc`}>
-                    剩余余额低于此值时标记为「余额偏低」；上游资源单独设置的阈值优先。告警的开关与通知渠道在
+                    剩余余额低于此值时标记为「余额偏低」。按各上游资源自己的余额单位比较（设了汇率的是美元额度），不做汇率换算；上游资源单独设置的阈值优先。告警的开关与通知渠道在
                     <Link className="jy-link" href="/notifications">告警中心</Link>
                     设置
                   </span>

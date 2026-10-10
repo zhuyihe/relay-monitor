@@ -2,15 +2,14 @@
 // 运营总览：利润等式 + 需要处理 + 上游余量 + 收入 / 用量成本排行。
 // 利润口径与"我的中转站"一致（/api/own/analytics 的 profit）；没设置自营站点时，成本退回 /api/analytics 统计。
 // 需要处理、上游余量来自 /api/stations，规则与侧栏的待处理计数共用 buildOverviewActions。
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { App, Button } from "antd";
 import { api, rateOf, statusOf, threshold } from "../../lib/client";
 import type { WorkflowAction } from "../../lib/client";
-import { NAV_LABELS } from "../../lib/brand";
-import { buildOverviewActions } from "../../lib/overview-actions";
+import { attentionStationIds, buildOverviewActions } from "../../lib/overview-actions";
 import { describeConnectionFailure } from "../../lib/connection-test";
 import { formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd } from "../../lib/format";
 import { AttentionList } from "../components/attention-list";
@@ -30,6 +29,8 @@ import { useShellPage } from "../components/shell-context";
 import { LEVEL_ORDER } from "../components/status";
 import type { Level } from "../components/status";
 import { useUrlState } from "../components/use-url-state";
+import { useWorkflowActions } from "../components/use-workflow-actions";
+import { actionPhrase, workflowDetail, workflowOwner, workflowProblem } from "../components/workflow-copy";
 import TrendModal from "./trend-modal";
 import "../styles/pages/overview.css";
 
@@ -95,11 +96,8 @@ export default function OverviewPage() {
   const [moneyAt, setMoneyAt] = useState<number | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [trendStation, setTrendStation] = useState<any>(null);
-  // 账号关系与账单核算产生的待办；某一路读取失败时保留上次读到的事项
-  const [workflowActions, setWorkflowActions] = useState<{ accounts: WorkflowAction[]; bills: WorkflowAction[] }>({ accounts: [], bills: [] });
-  const [workflowError, setWorkflowError] = useState("");
-  const [workflowLoading, setWorkflowLoading] = useState(false);
-  const workflowRequestId = useRef(0);
+  // 账号关系与账单核算产生的待办：与侧栏计数、上游资源页共用一份
+  const { actions: workflowActions, error: workflowError, loading: workflowLoading, reload: reloadWorkflowActions } = useWorkflowActions();
   const rangeRef = useRef(range);
   rangeRef.current = range;
 
@@ -114,22 +112,6 @@ export default function OverviewPage() {
       setStationsErr(e?.message || "上游资源加载失败");
     }
   }, []);
-
-  const loadWorkflowActions = useCallback(async () => {
-    const requestId = ++workflowRequestId.current;
-    setWorkflowLoading(true);
-    const responses = await Promise.allSettled([api("/api/channel-onboarding/accounts"), api("/api/reconciliation?preset=yesterday")]);
-    if (requestId !== workflowRequestId.current) return;
-    setWorkflowActions((previous) => ({
-      accounts: responses[0].status === "fulfilled" ? responses[0].value?.actions || [] : previous.accounts,
-      bills: responses[1].status === "fulfilled" ? responses[1].value?.actions || [] : previous.bills,
-    }));
-    setWorkflowError(responses.some((response) => response.status === "rejected") ? "部分账号或账单事项未能更新，保留上次已读事项。" : "");
-    setWorkflowLoading(false);
-  }, []);
-  useEffect(() => {
-    void loadWorkflowActions();
-  }, [loadWorkflowActions]);
 
   // 经营数据：优先自营站点口径；没标记自营站点时只统计成本
   const loadMoney = useCallback(async (r: Range) => {
@@ -193,7 +175,7 @@ export default function OverviewPage() {
 
   const onRefresh = async () => {
     await api("/api/refresh", { method: "POST", body: {} });
-    await Promise.all([loadStations(), loadMoney(rangeRef.current), loadWorkflowActions()]);
+    await Promise.all([loadStations(), loadMoney(rangeRef.current), reloadWorkflowActions()]);
     message.success("已刷新全部上游资源");
   };
 
@@ -234,7 +216,7 @@ export default function OverviewPage() {
           workflowActions={workflowActions}
           workflowError={workflowError}
           workflowLoading={workflowLoading}
-          onReloadWorkflow={() => void loadWorkflowActions()}
+          onReloadWorkflow={() => void reloadWorkflowActions()}
           syncingId={syncingId}
           onRetry={loadStations}
           onSync={syncOne}
@@ -356,21 +338,6 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
 
 // ---- 需要处理 ---------------------------------------------------------------
 
-// 账号关系 / 账单核算待办的补充说明（与 main 的口径一致）
-function workflowDetail(action: any): string {
-  return [
-    action.ruleId ? `规则 ${action.ruleId}` : action.accountKey ? "已核验账号" : action.stationId ? `资源 ${action.stationId}` : "本站渠道",
-    action.channelIds?.length ? `渠道 ${action.channelIds.join("、")}` : "",
-    action.window
-      ? `${new Date(action.window.startMs).toISOString()} — ${new Date(action.window.endMs).toISOString()}（${action.window.timezone}）`
-      : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-}
-
-const WORKFLOW_CRIT = new Set(["update_authorization", "review_conflict", "review_source"]);
-
 function AttentionPanel({
   stations,
   error,
@@ -390,7 +357,7 @@ function AttentionPanel({
   error: string | null;
   rules: any;
   settings: any;
-  workflowActions: { accounts: WorkflowAction[]; bills: WorkflowAction[] };
+  workflowActions: WorkflowAction[];
   workflowError: string;
   workflowLoading: boolean;
   onReloadWorkflow: () => void;
@@ -406,10 +373,12 @@ function AttentionPanel({
         rules,
         settings,
         statusOf,
-        workflowActions: [...workflowActions.accounts, ...workflowActions.bills],
+        workflowActions,
       }),
     [stations, rules, settings, workflowActions],
   );
+  const router = useRouter();
+  const [expanded, setExpanded] = useState(false);
   const extra = (
     <>
       <span className="jy-caption">紧急在前，同级按耗尽时间</span>
@@ -435,24 +404,44 @@ function AttentionPanel({
       {label}
     </Button>
   );
-  const nameOf = new Map(stations.filter(Boolean).map((s) => [String(s.id), s.name || s.id]));
+  const names = new Map(stations.filter(Boolean).map((s) => [String(s.id), s.name || s.id]));
+  const nameOf = (id: string) => names.get(id);
+  // 账号与账单待办在本站内跳转（不整页刷新），按钮名就是要做的动作
+  const open = (a: any, primary = true) =>
+    btn(a.label, () => router.push(a.href), { primary, aria: `${a.label}（${workflowOwner(a, nameOf)}）` });
+  // 合并进同一行的其余事项：账号待办可以直接点开
+  const noteOf = (a: any): ReactNode => {
+    if (!a.others?.length) return undefined;
+    return (
+      <>
+        另有 {a.others.length} 项：
+        {a.others.map((o: any, i: number) => (
+          <Fragment key={o.id}>
+            {i > 0 ? "、" : ""}
+            {o.workflow ? (
+              <Link href={o.href} className="jy-caption-link">
+                {o.label}
+              </Link>
+            ) : (
+              actionPhrase(o)
+            )}
+          </Fragment>
+        ))}
+      </>
+    );
+  };
 
-  const items: AttentionItem[] = actions.visible.map((a: any) => {
-    // 账号与账单待办：跳到对应页面处理，链接名就是待办本身
+  const shown = expanded ? actions.all : actions.visible;
+  const items: AttentionItem[] = shown.map((a: any) => {
     if (a.workflow) {
-      const onStation = a.href.startsWith("/stations");
-      const who = onStation ? (a.stationId && nameOf.get(String(a.stationId))) || "账号关系" : NAV_LABELS.reconciliation;
       return {
         key: a.id,
-        level: WORKFLOW_CRIT.has(a.kind) ? "crit" : "warn",
-        who,
-        what: a.label,
+        level: a.level,
+        who: workflowOwner(a, nameOf),
+        what: workflowProblem(a.kind),
         desc: workflowDetail(a),
-        actions: (
-          <Button size="small" href={a.href} aria-label={a.label}>
-            前往处理
-          </Button>
-        ),
+        note: noteOf(a),
+        actions: open(a),
       };
     }
     const s = a.station;
@@ -514,14 +503,14 @@ function AttentionPanel({
         buttons = edit(true);
       }
     }
-    const level: "crit" | "warn" = a.kind === "query-failed" || a.kind === "balance-danger" ? "crit" : "warn";
-    return { key: a.id, level, who: name, what, desc, actions: buttons };
+    return { key: a.id, level: a.level, who: name, what, desc, note: noteOf(a), actions: buttons };
   });
 
   const hidden = actions.all.length - actions.visible.length;
-  // 每个资源最多一条待处理，剩下的就是状态正常的，列表短时用一句话交代其余资源
-  const busy = new Set(actions.all.filter((a: any) => a.stationId).map((a: any) => String(a.stationId)));
+  // 每个资源最多一行待处理，剩下的就是状态正常的，用一句话交代其余资源
+  const busy = attentionStationIds(actions.all);
   const healthy = stations.filter((s) => s && !s.isOwn && !busy.has(String(s.id || s.name))).length;
+  const healthyNote = healthy > 0 ? <span className="jy-caption">其余 {healthy} 个上游资源状态正常</span> : null;
   return (
     <Panel title="需要处理" badge={<CountBadge count={actions.all.length} />} extra={extra} body={false}>
       {workflowError ? (
@@ -538,12 +527,15 @@ function AttentionPanel({
         emptyDesc="上游资源余额充足、查询正常，近期没有到期的固定成本，账号与账单也没有待办。"
         more={
           hidden > 0 ? (
-            <Link href="/stations?filter=attention" className="jy-caption-link">
-              还有 {hidden} 项，查看全部
-            </Link>
-          ) : healthy > 0 ? (
-            <span className="jy-caption">其余 {healthy} 个上游资源状态正常</span>
-          ) : undefined
+            <>
+              <button type="button" className="jy-attention-toggle" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
+                {expanded ? "收起" : `展开其余 ${hidden} 项`}
+              </button>
+              {expanded ? healthyNote : null}
+            </>
+          ) : (
+            healthyNote ?? undefined
+          )
         }
       />
     </Panel>

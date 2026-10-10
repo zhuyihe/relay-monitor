@@ -495,7 +495,7 @@ export function StationDrawer({
             </Form.Item>
           )}
           {!isFixed && (
-            <Form.Item label="低余额告警阈值（按站点余额 $ 计，可留空）" name="lowBalanceUsd">
+            <Form.Item label="低余额告警阈值（按该资源的余额单位计，可留空）" name="lowBalanceUsd">
               <Input placeholder="留空则用全局阈值" inputMode="decimal" autoComplete="off" />
             </Form.Item>
           )}

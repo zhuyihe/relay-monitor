@@ -4,10 +4,12 @@
 import "../../styles/pages/stations.css";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
 import type { MenuProps } from "antd";
 import { api, cny, fmtTokens, statusOf } from "../../../lib/client";
-import { buildOverviewActions } from "../../../lib/overview-actions";
+import { actionsByStation, buildOverviewActions } from "../../../lib/overview-actions";
 import { formatMoney, formatUsd } from "../../../lib/format";
 import ChannelOnboarding from "../../components/channel-onboarding";
 import { EmptyState, ErrorState, Skeleton } from "../../components/data-state";
@@ -18,6 +20,7 @@ import { Seg } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
 import { LEVEL_ORDER, StatusText } from "../../components/status";
 import { useUrlParams, useUrlState } from "../../components/use-url-state";
+import { useWorkflowActions } from "../../components/use-workflow-actions";
 import TrendModal from "../trend-modal";
 import {
   MAX_DAYS,
@@ -282,15 +285,19 @@ export default function StationsPage() {
     await reload();
   };
 
-  // “需处理”直接复用总览的待办规则：同一批在用资源、同一份规则和阈值
+  // “需处理”直接复用总览的待办规则：同一批在用资源、同一份规则和阈值，账号与账单待办也算在内
   // 列表只放在监控的资源（归档的照常放在「已归档」里）；暂停监控的资源在下方账号关系中查看与重新启用
   const listed = useMemo(() => stations.filter((s) => s.monitorEnabled !== false || s.archivedAt), [stations]);
   const paused = stations.filter((s) => s.monitorEnabled === false && !s.archivedAt);
+  const { actions: workflowActions } = useWorkflowActions();
 
-  const attentionIds = useMemo(() => {
+  const { todosById, unowned } = useMemo(() => {
     const live = listed.filter((s) => !s.archivedAt);
-    return new Set(buildOverviewActions(live, { rules, settings, statusOf }).all.map((a: any) => a.stationId));
-  }, [listed, rules, settings]);
+    const all = buildOverviewActions(live, { rules, settings, statusOf, workflowActions }).all;
+    const ids = new Set(live.map(actionKey));
+    // 按账号或核算规则归类、不落在单个资源上的待办只在运营总览处理，这里交代条数
+    return { todosById: actionsByStation(all), unowned: all.filter((a: any) => !a.stationId || !ids.has(String(a.stationId))).length };
+  }, [listed, rules, settings, workflowActions]);
 
   const critDays = critDaysOf(rules);
   const views = useMemo(() => {
@@ -300,23 +307,24 @@ export default function StationsPage() {
       critDays,
       typeName: (t) => types.find((x) => x.value === t)?.label || t,
       check: stationChecks[s.id],
-      attention: !s.archivedAt && attentionIds.has(actionKey(s)),
+      attention: !s.archivedAt && todosById.has(actionKey(s)),
       now,
     }));
-  }, [listed, settings, critDays, types, stationChecks, attentionIds]);
+  }, [listed, settings, critDays, types, stationChecks, todosById]);
 
   const live = views.filter((v) => !v.archived);
   const archived = views.filter((v) => v.archived);
-  const isOk = (v: StationView) => v.level === "good" && !v.attention;
+  // 「需处理」与「无需处理」互补，两者相加等于「全部」
+  const needsWork = (v: StationView) => v.attention || v.level === "crit" || v.level === "warn";
   const counts: Record<Filter, number> = {
     all: live.length,
-    attention: live.filter((v) => v.attention).length,
-    ok: live.filter(isOk).length,
+    attention: live.filter(needsWork).length,
+    ok: live.filter((v) => !needsWork(v)).length,
     archived: archived.length,
   };
 
   const q = query.trim().toLowerCase();
-  const byStatus = filter === "archived" ? archived : filter === "attention" ? live.filter((v) => v.attention) : filter === "ok" ? live.filter(isOk) : live;
+  const byStatus = filter === "archived" ? archived : filter === "attention" ? live.filter(needsWork) : filter === "ok" ? live.filter((v) => !needsWork(v)) : live;
   const rows = byStatus
     .filter((v) => !typeFilter || v.s.type === typeFilter)
     .filter((v) => !q || [v.s.name, v.s.baseUrl, v.host, v.s.balance?.account].some((x) => String(x || "").toLowerCase().includes(q)))
@@ -355,6 +363,34 @@ export default function StationsPage() {
     openTrend: setTrendStation,
   });
 
+  // 行内的账号待办：本页能处理的直接打开对应抽屉或区块，不整页刷新
+  const router = useRouter();
+  const openTodo = (href: string) => {
+    if (!href.startsWith("/stations")) {
+      router.push(href);
+      return;
+    }
+    accounts.openWorkflow(href);
+    // 核验与授权会弹出对话框；接入类事项在下方接入区，其余定位到账号关系里的原资源
+    const action = new URL(href, window.location.origin).searchParams.get("action") || "";
+    const target = ["verify", "verify-billing", "authorization"].includes(action) ? null : ["connect", "coverage", "source"].includes(action) ? ".jy-stations-onboarding" : ".jy-accounts-inspect";
+    if (target) setTimeout(() => document.querySelector(target)?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
+  };
+  const todosOf = (v: StationView) => (v.archived ? [] : (todosById.get(actionKey(v.s)) || []).filter((a: any) => a.workflow));
+  const todoLinks = (v: StationView) => {
+    const list = todosOf(v);
+    if (!list.length) return null;
+    return (
+      <span className="jy-stations-todos">
+        {list.map((a: any) => (
+          <button key={a.id} type="button" className="link" onClick={() => openTodo(a.href)} aria-label={`${a.label}（${v.s.name}）`}>
+            {a.label}
+          </button>
+        ))}
+      </span>
+    );
+  };
+
   const retryAll = () => {
     reload().catch(() => {});
     if (metaError || !types.length) loadMeta().catch(() => {});
@@ -390,19 +426,27 @@ export default function StationsPage() {
     <>
       <StatusText level={v.level}>{v.statusLabel}</StatusText>
       {!v.issue && v.statusNote ? <span className="jy-stations-sub">{v.statusNote}</span> : null}
+      {todoLinks(v)}
     </>
   );
 
-  // 余额按站点的 $ 显示，折算后的人民币放在下方（汇率未设置时按 1:1）
+  // 余额与总览同一口径：设了汇率的是美元额度，主数字显示折算后的人民币，原币放在下方；
+  // 没设汇率的按人民币直接显示，并注明未设置汇率（不再把同一个数同时写成 $ 和 ¥）
+  const hasRate = (v: StationView) => Number(v.s.cnyPerUsd) > 0;
   const balanceCell = (v: StationView) => {
     const b = v.s.balance;
     if (v.fixed) return <span className="jy-muted">不适用</span>;
     if (!b?.ok) return <span className="jy-muted">—</span>;
     const rem = Number(b.remaining);
-    return (
+    return hasRate(v) ? (
       <>
-        {formatUsd(rem)}
-        <span className="jy-sub-money">{formatMoney(rem * v.rate)}</span>
+        {formatMoney(rem * v.rate)}
+        <span className="jy-sub-money">原币 {formatUsd(rem)}</span>
+      </>
+    ) : (
+      <>
+        {formatMoney(rem)}
+        <span className="jy-sub-money" title="折算成本与利润时按 1:1 计算，可在编辑里设置汇率">未设置汇率</span>
       </>
     );
   };
@@ -677,11 +721,16 @@ export default function StationsPage() {
               <li key={v.id}>
                 <span className="m-top">{v.s.name}</span>
                 <StatusText level={v.level}>{v.statusLabel}</StatusText>
+                {todoLinks(v)}
                 <div className="m-sub">
                   {v.fixed ? (
                     <span>日均 <b>{v.fx ? formatMoney(v.fx.daily) : "—"}</b></span>
+                  ) : !b?.ok ? (
+                    <span>余额 <b>—</b></span>
+                  ) : hasRate(v) ? (
+                    <span>余额 <b>{formatMoney(Number(b.remaining) * v.rate)}</b>（{formatUsd(Number(b.remaining))}）</span>
                   ) : (
-                    <span>余额 <b>{b?.ok ? formatUsd(Number(b.remaining)) : "—"}</b></span>
+                    <span>余额 <b>{formatMoney(Number(b.remaining))}</b>（未设汇率）</span>
                   )}
                   {!v.fixed && !v.archived && v.s.prediction?.burnPerDay > 0 ? (
                     <span>日均 <b>{formatMoney(v.s.prediction.burnPerDay * v.rate, { approx: true })}</b></span>
@@ -760,7 +809,7 @@ export default function StationsPage() {
           options={[
             { value: "all", label: "全部", count: counts.all },
             { value: "attention", label: "需处理", count: counts.attention },
-            { value: "ok", label: "正常", count: counts.ok },
+            { value: "ok", label: "无需处理", count: counts.ok },
             { value: "archived", label: "已归档", count: counts.archived },
           ]}
         />
@@ -776,10 +825,16 @@ export default function StationsPage() {
         {addButton}
       </div>
 
+      {filter === "attention" && unowned > 0 ? (
+        <p className="jy-caption jy-stations-unowned">
+          另有 {unowned} 项账号与账单待办不归属单个资源，在<Link className="jy-link" href="/">运营总览</Link>处理。
+        </p>
+      ) : null}
       <Panel body={false} label="上游资源列表">{body}</Panel>
 
       <div className="jy-stations-onboarding">
-        <ChannelOnboarding compact={compact} onComplete={reload} destination={accounts.destination} />
+        {/* 行内打开新的处理目标时重新挂载，让它按新目标重新定位 */}
+        <ChannelOnboarding key={accounts.destinationSeq} compact={compact} onComplete={reload} destination={accounts.destination} />
       </div>
 
       {accounts.center}

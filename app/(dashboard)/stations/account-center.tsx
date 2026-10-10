@@ -10,6 +10,7 @@ import type { AccountReadModel, AccountRecord, AccountKeyScope, PublicResource, 
 import { Skeleton } from "../../components/data-state";
 import { Icon, Sym } from "../../components/icons";
 import { CountBadge } from "../../components/panel";
+import { publishAccountActions } from "../../components/use-workflow-actions";
 
 const { Text } = Typography;
 const AUTHORIZATION_RECOVERY_KEY = "account-authorization-recovery-v05";
@@ -33,7 +34,15 @@ type AccountCenterProps = {
 
 export function useAccountCenter({
   stations, types, loadingMeta, compact, showArchived, loaded, loadingList, loadError, reload, reloadToken, openEditor, openTrend,
-}: AccountCenterProps): { destination: WorkflowDestination | null; top: ReactNode; center: ReactNode; overlays: ReactNode } {
+}: AccountCenterProps): {
+  destination: WorkflowDestination | null;
+  // 每次在页面内打开新的处理目标时递增，供依赖目标的区块重新定位
+  destinationSeq: number;
+  openWorkflow: (href: string) => void;
+  top: ReactNode;
+  center: ReactNode;
+  overlays: ReactNode;
+} {
   const { message } = App.useApp();
   const [accountModel, setAccountModel] = useState<AccountReadModel | null>(null);
   const [accountError, setAccountError] = useState("");
@@ -41,6 +50,7 @@ export function useAccountCenter({
   const [accountSearch, setAccountSearch] = useState("");
   const [accountFilter, setAccountFilter] = useState("all");
   const [destination, setDestination] = useState<WorkflowDestination | null>(null);
+  const [destinationSeq, setDestinationSeq] = useState(0);
   const [workflowError, setWorkflowError] = useState("");
   const [expandedAccounts, setExpandedAccounts] = useState<string[]>([]);
   const destinationResolved = useRef(false);
@@ -74,7 +84,7 @@ export function useAccountCenter({
     setLoadingAccounts(true);
     try {
       const next: AccountReadModel = await api("/api/channel-onboarding/accounts");
-      if (current === accountReadEpoch.current) { setAccountModel(next); setAccountError(""); }
+      if (current === accountReadEpoch.current) { setAccountModel(next); setAccountError(""); publishAccountActions(next.actions); }
     } catch (err: any) {
       if (current === accountReadEpoch.current) setAccountError(err.message || "账号关系暂不可用");
     } finally {
@@ -120,6 +130,15 @@ export function useAccountCenter({
   // 只在当前资源与账号读取均成功后定位，自动刷新不重复打开授权流程。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [destination, loaded, accountModel, loadingAccounts, loadingList, accountError, loadError]);
+
+  // 在页面内打开处理目标（不整页刷新），与从总览、账单核算跳转进来走同一套定位逻辑
+  const openWorkflow = useCallback((href: string) => {
+    const url = new URL(href, window.location.origin);
+    destinationResolved.current = false;
+    setWorkflowError("");
+    setDestination(readWorkflowDestination(url.search, "stations"));
+    setDestinationSeq((n) => n + 1);
+  }, []);
 
   const openVerification = (station: any) => {
     verificationEpoch.current += 1; setVerificationStation(station); setVerification(null); setVerificationTokenId(undefined); setVerificationTimezone("Asia/Shanghai"); setVerificationError(""); setVerificationBusy(false);
@@ -402,7 +421,9 @@ export function useAccountCenter({
           <p className="jy-caption">已核验账号 ID：{account.identity.accountId} · {account.identity.baseUrl}</p>
           <p className="jy-accounts-pending">待处理：{pending || "暂无待处理事项"}</p>
           <div className="jy-accounts-actions">
-            {account.actions.map((action) => <Button key={action.id} size="small" href={action.href}>{action.label}</Button>)}
+            {account.actions.map((action) => action.href.startsWith("/stations")
+              ? <Button key={action.id} size="small" onClick={() => openWorkflow(action.href)}>{action.label}</Button>
+              : <Button key={action.id} size="small" href={action.href}>{action.label}</Button>)}
             <Button
               size="small"
               disabled={purposeLocked || !authorizationEligible(account).length}
@@ -776,5 +797,5 @@ export function useAccountCenter({
     </>
   );
 
-  return { destination, top, center, overlays };
+  return { destination, destinationSeq, openWorkflow, top, center, overlays };
 }

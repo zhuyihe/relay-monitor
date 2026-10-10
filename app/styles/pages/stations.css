@@ -11,6 +11,12 @@
 .jy-stations-name-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }
 .jy-stations-flag { height: 20px; padding: 0 6px; font-size: 11px; font-style: normal; }
 .jy-stations-sub { display: block; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); white-space: nowrap; }
+/* 行内账号待办：动词按钮，点开后在本页处理 */
+.jy-stations-unowned { margin: -8px 0 0; }
+.jy-stations-todos { display: flex; flex-wrap: wrap; gap: 0 12px; margin-top: 2px; }
+.jy-stations-todos .link { padding: 0; border: 0; background: none; font: inherit; font-size: 12px; line-height: 20px; color: var(--jy-cobalt); cursor: pointer; white-space: nowrap; }
+.jy-stations-todos .link:hover { text-decoration: underline; }
+.jy-stations-todos .link:focus-visible { outline: 2px solid var(--jy-cobalt); outline-offset: 2px; border-radius: 2px; }
 .jy-stations-table .jy-cell-runway { min-height: 22px; }
 
 /* 查询失败的说明行：跨整行，横向滚动时贴左 */

@@ -15,6 +15,7 @@ import type { IconName } from "../components/icons";
 import { ShellContext } from "../components/shell-context";
 import type { ShellPage } from "../components/shell-context";
 import { useThemeMode } from "../providers";
+import { loadWorkflowActions, useWorkflowActions } from "../components/use-workflow-actions";
 import pkg from "../../package.json";
 
 const SIDER_KEY = "jy-sider";
@@ -26,9 +27,10 @@ const hhmm = (ts: number) => {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 };
 
-// 运营总览的待处理条数：与总览页"需要处理"同一套规则
+// 运营总览的待处理条数：与总览页"需要处理"同一套规则，账号与账单待办也算在内
 function useAttentionCount(enabled: boolean) {
-  const [count, setCount] = useState(0);
+  const [source, setSource] = useState<{ stations: any[]; meta: any } | null>(null);
+  const { actions: workflowActions } = useWorkflowActions(enabled);
   useEffect(() => {
     if (!enabled) return;
     let alive = true;
@@ -38,13 +40,10 @@ function useAttentionCount(enabled: boolean) {
         if (!meta) meta = await api("/api/meta");
         const r = await api("/api/stations");
         const stations = Array.isArray(r) ? r : r?.stations || [];
-        const { all } = buildOverviewActions(stations, {
-          rules: meta?.rules || {},
-          settings: meta?.settings || {},
-          statusOf,
-        });
-        if (alive) setCount(all.length);
+        if (alive) setSource({ stations, meta });
       } catch {}
+      // 5 分钟内读过就直接用缓存
+      void loadWorkflowActions();
     };
     load();
     const id = setInterval(load, COUNT_POLL_MS);
@@ -53,7 +52,15 @@ function useAttentionCount(enabled: boolean) {
       clearInterval(id);
     };
   }, [enabled]);
-  return count;
+  return useMemo(() => {
+    if (!enabled || !source) return 0;
+    return buildOverviewActions(source.stations, {
+      rules: source.meta?.rules || {},
+      settings: source.meta?.settings || {},
+      statusOf,
+      workflowActions,
+    }).all.length;
+  }, [enabled, source, workflowActions]);
 }
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -204,6 +211,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               </Fragment>
             ))}
           </nav>
+          {/* 窄屏顶栏放不下账户菜单，账户与退出登录放在导航抽屉底部 */}
+          <div className="jy-sider-account">
+            <span className="jy-avatar" aria-hidden="true">{initial}</span>
+            <span className="grow">{username || "当前账户"}</span>
+            <button type="button" className="jy-sider-logout" onClick={onLogout}>
+              <Icon name="logout" />
+              退出登录
+            </button>
+          </div>
           <div className="jy-sider-foot">
             <span className="grow">v{pkg.version}</span>
             <button
