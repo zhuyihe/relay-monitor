@@ -1,9 +1,12 @@
 // 对账深模块：把窗口、上游取数、本站收费、快照和告警收敛在一个 Interface 后。
+import { createHash } from "node:crypto";
 import {
   queryNewApiReconciliationMetadata,
+  queryNewApiStatus,
   queryNewApiTokenStat,
   queryOwnChannelRevenue,
   queryOwnChannels,
+  unixSecondWindow,
 } from "../lib/providers.js";
 import {
   RECONCILIATION_BILLING_SOURCE,
@@ -12,9 +15,12 @@ import {
 } from "../lib/reconciliation-contract.js";
 import { ReconciliationRepository } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
+import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity } from "../lib/reconciliation-snapshot.js";
+import { describeConnectionFailure } from "../lib/connection-test.js";
+
+export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 
 const DAY_MS = 86400000;
-const TODAY_WINDOW_END_OFFSET_MS = 60 * 60 * 1000;
 const MAX_CONCURRENT_RULES = 6;
 
 export async function mapWithConcurrency(items, limit, mapper) {
@@ -30,6 +36,9 @@ export async function mapWithConcurrency(items, limit, mapper) {
 }
 const TODAY_TTL_MS = 60000;
 const QUERY_TTL_MS = 60000;
+const MAX_RESULT_CACHE_ENTRIES = 200;
+const STALE_SCOPE = Symbol("STALE_SCOPE");
+const MAX_SCOPE_ATTEMPTS = 3;
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -86,6 +95,8 @@ export function resolveReconciliationWindow(input = {}, now = Date.now()) {
   const preset = ["today", "yesterday", "7d", "custom"].includes(input.preset) ? input.preset : "today";
   let startMs;
   let endMs;
+  // 所有窗口都是规则时区下的半开区间 [startMs, endMs)，结束点不晚于当前时刻。两侧都按秒级日志统计取数，
+  // 把窗口延伸到未来取不到更多账单，只会把未来时刻写进快照和界面；晚落库的日志由下一轮刷新补齐。
   if (preset === "custom") {
     startMs = finite(input.startMs);
     endMs = finite(input.endMs);
@@ -101,7 +112,7 @@ export function resolveReconciliationWindow(input = {}, now = Date.now()) {
       endMs = now;
     } else {
       startMs = dayStart;
-      endMs = now + TODAY_WINDOW_END_OFFSET_MS;
+      endMs = now;
     }
   }
   if (endMs - startMs > 31 * DAY_MS) throw new Error("单次查询时间范围不能超过 31 天");
@@ -131,6 +142,49 @@ function health(code, detail = "") {
   return { code, label: reconciliationHealthMeta(code).label || code, detail, stale: code === "STALE" };
 }
 
+function ruleNotFound() {
+  const error = new Error("对账规则不存在");
+  error.code = "RULE_NOT_FOUND";
+  return error;
+}
+
+// 站点编辑会原地改写 station 对象：缓存带上凭据指纹，换了地址、令牌或用户后不再复用旧凭据读到的数据。
+function credentialFingerprint(station) {
+  return createHash("sha256")
+    .update(JSON.stringify([String(station.baseUrl || ""), String(station.accessToken || ""), String(station.userId || "")]))
+    .digest("hex");
+}
+
+function sourceCredentialFingerprint(upstream, own) {
+  const stationSource = (station) => station ? [station.id, station.type, !!station.isOwn, credentialFingerprint(station)] : null;
+  return createHash("sha256")
+    .update(JSON.stringify([stationSource(upstream), stationSource(own)]))
+    .digest("hex");
+}
+
+function sourceScopeFingerprint(ruleScopeFingerprint, sourceCredential) {
+  // 保留旧快照作为证据；站点地址、PAT 或身份变化后不能拿旧账单兜底新来源。
+  return createHash("sha256").update(`${ruleScopeFingerprint}:${sourceCredential}`).digest("hex").slice(0, 24);
+}
+
+// 本轮还不能核算、也不代表任何异常的结果：不写快照、不告警、不缓存，下一轮刷新再取。
+function pendingResult(rule, window, detail, { currentSegment = null, transitionSegments = [], issues = [] } = {}) {
+  return {
+    rule,
+    window,
+    requestedWindow: window,
+    lastSuccessfulWindow: null,
+    currentSegment,
+    segments: [],
+    transitionSegments,
+    upstream: null,
+    downstream: null,
+    calculation: { differenceUsd: null, profitUsd: null, riskDifferenceUsd: null, marginRate: null },
+    health: { ...health("PENDING", detail), issues },
+    generatedAt: new Date().toISOString(),
+  };
+}
+
 function intersectSegment(window, segment) {
   const startMs = Math.max(window.startMs, segment.effectiveFrom);
   const endMs = Math.min(window.endMs, segment.effectiveTo ?? window.endMs);
@@ -145,10 +199,34 @@ function channelState(status) {
 }
 
 function healthWithIssues(issues) {
-  const priority = ["KEY_INVALID_OR_DENIED", "UPSTREAM_DATA_UNAVAILABLE", "OWN_BILLING_UNAVAILABLE", "OWN_FLOW_INCOMPLETE", "UPSTREAM_EMPTY_WITH_SALES", "SALES_CHANNEL_MISSING", "SALES_CHANNEL_DISABLED", "SALES_CHANNEL_STATE_UNKNOWN", "ROUTE_TRANSITION_DETECTED", "SEGMENT_TIMING_UNCONFIRMED"];
+  const priority = ["KEY_INVALID_OR_DENIED", "UPSTREAM_DATA_UNAVAILABLE", "OWN_BILLING_UNAVAILABLE", "OWN_FLOW_INCOMPLETE", "UPSTREAM_EMPTY_WITH_SALES", "GROUP_DATA_UNAVAILABLE", "PENDING", "SALES_CHANNEL_MISSING", "SALES_CHANNEL_DISABLED", "SALES_CHANNEL_STATE_UNKNOWN", "ROUTE_TRANSITION_DETECTED", "SEGMENT_TIMING_UNCONFIRMED"];
   const first = priority.find((code) => issues.some((issue) => issue.code === code));
   const base = first ? health(first, issues.find((issue) => issue.code === first)?.detail || "") : health("READY");
   return { ...base, issues };
+}
+
+function persistenceFailedResult(rule, window) {
+  const observedAt = Date.now();
+  const channels = rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null }));
+  const issue = { code: "PERSISTENCE_FAILED", scope: "persistence", detail: "本轮对账结果未能保存，请稍后重试", observedAt };
+  return {
+    rule, window, requestedWindow: window, lastSuccessfulWindow: null, currentSegment: null, segments: [], transitionSegments: [],
+    upstream: { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: 1, observedAt, window },
+    downstream: { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: rule.channels.length, billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION, observedAt, window, channels },
+    calculation: { differenceUsd: null, profitUsd: null, riskDifferenceUsd: null, marginRate: null },
+    health: { ...health("PERSISTENCE_FAILED", issue.detail), issues: [issue] }, generatedAt: new Date().toISOString(),
+  };
+}
+
+function snapshotReference(record) {
+  return {
+    generatedAt: record.generatedAt,
+    window: record.result.lastSuccessfulWindow || record.result.window,
+    upstream: record.result.upstream,
+    downstream: record.result.downstream,
+    calculation: record.result.calculation,
+    health: record.result.health,
+  };
 }
 
 function toErrorHealth(err, own = false) {
@@ -182,12 +260,6 @@ function calculationFromAmounts(upstreamUsd, downstreamUsd, issues = []) {
   };
 }
 
-function snapshotKey(window) {
-  return window.preset === "today"
-    ? `today:${localDate(window.startMs, window.timezone)}`
-    : `${window.preset}:${window.startMs}:${window.endMs}`;
-}
-
 function sourceSnapshot(token, metadata, upstream, downstream) {
   return {
     calculationVersion: RECONCILIATION_CALCULATION_VERSION,
@@ -196,7 +268,7 @@ function sourceSnapshot(token, metadata, upstream, downstream) {
       tokenId: token.id,
       tokenName: token.name,
       group: token.group,
-      ratio: metadata.groups[token.group]?.ratio ?? null,
+      ratio: metadata.groups?.[token.group]?.ratio ?? null,
       status: token.status,
       latestLogAtMs: upstream?.latestLogAtMs ?? null,
     },
@@ -221,45 +293,81 @@ export function createReconciliationModule(rt) {
   const metadataCache = (rt._reconciliationMetadataCache ||= new Map());
   const ownChannelsCache = (rt._reconciliationOwnChannelsCache ||= new Map());
   const ownChannelsRequests = (rt._reconciliationOwnChannelsRequests ||= new Map());
-  const lastSuccessfulResults = (rt._reconciliationLastSuccessfulResults ||= new Map());
+  const ruleGenerations = (rt._reconciliationRuleGenerations ||= new Map());
 
   const resultKey = (rule, window) => window.preset === "today"
     ? `${rule.id}:today:${window.startMs}:${window.timezone}`
     : `${rule.id}:${window.preset}:${window.startMs}:${window.endMs}:${window.timezone}`;
 
   function clearRuleResults(ruleId) {
+    ruleGenerations.set(ruleId, (ruleGenerations.get(ruleId) || 0) + 1);
     const prefix = `${ruleId}:`;
     for (const key of resultCache.keys()) {
       if (key.startsWith(prefix)) resultCache.delete(key);
     }
+    for (const key of inflight.keys()) if (key.startsWith(prefix)) inflight.delete(key);
+  }
+
+  function cacheResult(key, value, sourceCredential) {
+    const now = Date.now();
+    const cached = resultCache.get(key);
+    const previous = cached?.sourceCredential === sourceCredential ? cached.value : null;
+    const previousEnd = Number(previous?.requestedWindow?.endMs ?? previous?.window?.endMs);
+    const nextEnd = Number(value?.requestedWindow?.endMs ?? value?.window?.endMs);
+    if (previous && (previousEnd > nextEnd || (previousEnd === nextEnd && String(previous.generatedAt) > String(value.generatedAt)))) return;
+    for (const [cachedKey, cached] of resultCache) if (cachedKey !== key && now - cached.at >= QUERY_TTL_MS) resultCache.delete(cachedKey);
+    resultCache.set(key, { at: now, value, sourceCredential });
+    while (resultCache.size > MAX_RESULT_CACHE_ENTRIES) resultCache.delete(resultCache.keys().next().value);
+  }
+
+  async function hasCurrentScope(ruleId, scopeFingerprint, generation) {
+    if ((ruleGenerations.get(ruleId) || 0) !== generation) return false;
+    const [currentRule, segments] = await Promise.all([repository.getRule(ruleId), repository.listSegments(ruleId)]);
+    return !!currentRule && reconciliationScopeFingerprint(currentRule, segments) === scopeFingerprint;
   }
 
   const ownStation = () => rt.store.list().find((station) => station.isOwn && station.type === "newapi") || null;
   const upstreamStation = (id) => rt.store.get(id) || null;
+  const currentSourceCredential = (rule) => sourceCredentialFingerprint(
+    upstreamStation(rule.upstreamStationId), upstreamStation(rule.ownStationId)
+  );
+  const withObservationSourceLock = async (rule, sourceCredential, write) => {
+    const verifyAndWrite = async () => currentSourceCredential(rule) === sourceCredential ? write() : STALE_SCOPE;
+    // Store is the single runtime's source-of-truth boundary.  Older narrow
+    // test doubles do not expose it, but production Store always does.
+    if (typeof rt.store.withStationLocks !== "function") return verifyAndWrite();
+    return rt.store.withStationLocks([rule.upstreamStationId, rule.ownStationId], verifyAndWrite);
+  };
 
+  // 凭据指纹必须在发请求前取：请求读的是发起时的凭据，等待期间站点可能已被原地改写。
   async function metadataFor(station, { force = false } = {}) {
+    const credential = credentialFingerprint(station);
     const cached = metadataCache.get(station.id);
-    if (!force && cached && Date.now() - cached.at < 5 * 60000) return cached.value;
+    if (!force && cached?.credential === credential && Date.now() - cached.at < 5 * 60000) return cached.value;
     const value = await queryNewApiReconciliationMetadata(station);
-    metadataCache.set(station.id, { at: Date.now(), value });
+    metadataCache.set(station.id, { at: Date.now(), credential, value });
     return value;
   }
 
   async function ownChannelsFor(station, { force = false } = {}) {
+    const credential = credentialFingerprint(station);
     const cached = ownChannelsCache.get(station.id);
-    if (!force && cached && Date.now() - cached.at < 10 * 60000) return cached.value;
+    if (!force && cached?.credential === credential && Date.now() - cached.at < 10 * 60000) return cached.value;
     const request = Symbol();
     ownChannelsRequests.set(station.id, request);
     const value = await queryOwnChannels(station);
-    if (ownChannelsRequests.get(station.id) === request) ownChannelsCache.set(station.id, { at: Date.now(), value });
+    if (ownChannelsRequests.get(station.id) === request) ownChannelsCache.set(station.id, { at: Date.now(), credential, value });
     return value;
   }
 
-  async function upstreamWindowFor(upstream, token, window) {
+  async function upstreamWindowFor(upstream, metadata, token, window) {
     return queryNewApiTokenStat(upstream, {
       tokenName: token.name,
       startMs: window.startMs,
       endMs: window.endMs,
+      // 元数据已用同一 PAT 读到身份和 /api/status（与 Key 校验同一份观察），各分段直接复用，不再逐段探测。
+      userId: metadata.userId,
+      status: { quotaPerUnit: metadata.quotaPerUnit, version: metadata.version },
     });
   }
 
@@ -389,64 +497,145 @@ export function createReconciliationModule(rt) {
   }
 
   async function inspectRule(ruleId, window, { force = false, origin = "manual" } = {}) {
-    const rule = await repository.getRule(ruleId);
-    if (!rule) throw new Error("对账规则不存在");
-    const cacheKey = resultKey(rule, window);
+    const firstRule = await repository.getRule(ruleId);
+    if (!firstRule) throw ruleNotFound();
+    const cacheKey = resultKey(firstRule, window);
+    const requestCredential = currentSourceCredential(firstRule);
+    const inflightKey = window.preset === "today" ? `${cacheKey}:${window.endMs}:${requestCredential}` : `${cacheKey}:${requestCredential}`;
     const ttl = window.preset === "today" ? TODAY_TTL_MS : QUERY_TTL_MS;
     const cached = resultCache.get(cacheKey);
-    if (!force && cached && Date.now() - cached.at < ttl) return cached.value;
-    if (inflight.has(cacheKey)) return inflight.get(cacheKey);
+    if (!force && cached?.sourceCredential === requestCredential && Date.now() - cached.at < ttl) return cached.value;
+    if (inflight.has(inflightKey)) return inflight.get(inflightKey);
 
-    const task = (async () => {
-      const upstream = upstreamStation(rule.upstreamStationId);
-      const own = upstreamStation(rule.ownStationId);
-      if (!upstream || upstream.type !== "newapi") return persistUnavailable(rule, window, health("UPSTREAM_DATA_UNAVAILABLE", "上游站点已删除或不是 NewAPI"), origin);
-      if (!own || !own.isOwn || own.type !== "newapi") return persistUnavailable(rule, window, health("OWN_BILLING_UNAVAILABLE", "本站管理员 NewAPI 站点不可用"), origin);
+    const inspectScope = async (rule, generation) => {
+      const currentUpstream = upstreamStation(rule.upstreamStationId);
+      const currentOwn = upstreamStation(rule.ownStationId);
+      const upstream = currentUpstream && { ...currentUpstream };
+      const own = currentOwn && { ...currentOwn };
+      const sourceCredential = sourceCredentialFingerprint(upstream, own);
+      const ownAvailable = !!own && own.isOwn && own.type === "newapi";
+      const downstreamEvidence = async () => {
+        if (!own || !own.isOwn || own.type !== "newapi") return null;
+        const persistedSegments = await repository.listSegments(rule.id).catch(() => []);
+        const applicable = persistedSegments
+          .map((segment) => ({ segment, window: intersectSegment(window, segment) }))
+          .filter((item) => item.window);
+        if (!applicable.length) return null;
+        try {
+          const [catalogue, results] = await Promise.all([
+            ownChannelsFor(own, { force }).catch(() => null),
+            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => queryOwnChannelRevenue(own, {
+              channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs,
+            }).catch(() => null)),
+          ]);
+          const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
+          const channelsFor = (result) => rule.channels.map((channel) => {
+            const billed = result?.channels?.find((item) => item.channelId === channel.channelId);
+            const observed = channelById.get(channel.channelId);
+            return {
+              ...channel,
+              state: catalogue ? (observed ? channelState(observed.status) : "missing") : "unknown",
+              stateObservedAt: Date.now(),
+              billingState: billed?.billingState || "unavailable",
+              quotaUnits: billed?.quotaUnits ?? null,
+              amountUsd: billed?.amountUsd ?? null,
+              knownAmountUsd: billed?.amountUsd ?? null,
+            };
+          });
+          const downstreamFor = (result, segmentWindow) => result ? {
+            ...result, observedAt: Date.now(), window: segmentWindow, channels: channelsFor(result),
+          } : {
+            state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null,
+            successfulCount: 0, expectedCount: rule.channels.length,
+            billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION,
+            observedAt: Date.now(), window: segmentWindow, channels: channelsFor(null),
+          };
+          const channels = rule.channels.map((channel) => {
+            const rows = results.map((result) => result?.channels?.find((item) => item.channelId === channel.channelId)).filter(Boolean);
+            const complete = rows.length === applicable.length && rows.every((item) => item.billingState === "complete" && item.amountUsd != null);
+            const known = rows.some((item) => item.amountUsd != null);
+            const observed = channelById.get(channel.channelId);
+            return {
+              ...channel,
+              state: catalogue ? (observed ? channelState(observed.status) : "missing") : "unknown",
+              stateObservedAt: Date.now(),
+              billingState: complete ? "complete" : known ? "partial" : "unavailable",
+              quotaUnits: complete ? rows.reduce((sum, item) => sum + item.quotaUnits, 0) : null,
+              amountUsd: complete ? rows.reduce((sum, item) => sum + item.amountUsd, 0) : null,
+              knownAmountUsd: known ? rows.reduce((sum, item) => sum + (item.amountUsd ?? 0), 0) : null,
+            };
+          });
+          const successfulCount = results.reduce((sum, result) => sum + (result?.successfulCount ?? 0), 0);
+          const expectedCount = applicable.length * rule.channels.length;
+          const complete = results.length === applicable.length && results.every((result) => result?.state === "complete");
+          const known = results.some((result) => result?.knownAmountUsd != null);
+          return {
+            state: complete ? "complete" : known ? "partial" : "unavailable",
+            quotaUnits: complete ? results.reduce((sum, result) => sum + result.quotaUnits, 0) : null,
+            quotaPerUnit: complete ? results[0]?.quotaPerUnit ?? null : null,
+            amountUsd: complete ? results.reduce((sum, result) => sum + result.amountUsd, 0) : null,
+            knownAmountUsd: known ? results.reduce((sum, result) => sum + (result?.knownAmountUsd ?? 0), 0) : null,
+            successfulCount, expectedCount,
+            billingSource: RECONCILIATION_BILLING_SOURCE,
+            calculationVersion: RECONCILIATION_CALCULATION_VERSION,
+            channels,
+            segments: applicable.map(({ segment, window: segmentWindow }, index) => ({
+              ...segment,
+              window: segmentWindow,
+              downstream: downstreamFor(results[index], segmentWindow),
+            })),
+          };
+        } catch { return null; }
+      };
+      const unavailable = async (resultHealth, evidence = {}) => persistUnavailable(rule, window, resultHealth, origin, {
+        ...evidence,
+        downstream: evidence.downstream ?? await downstreamEvidence(),
+      }, generation, sourceCredential);
+      if (!upstream || upstream.type !== "newapi") return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", "上游站点已删除或不是 NewAPI"));
 
       let metadata;
       try {
         metadata = await metadataFor(upstream, { force });
       } catch (err) {
-        return persistUnavailable(rule, window, toErrorHealth(err), origin);
+        return unavailable(toErrorHealth(err));
       }
       const token = metadata.tokens.find((item) => item.id === rule.tokenId);
       if (!token || token.status !== 1) {
-        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", token ? "上游 Key 已停用" : "上游 Key 不存在或无权限读取"), origin, { metadata, token });
+        return unavailable(health("KEY_INVALID_OR_DENIED", token ? "上游 Key 已停用" : "上游 Key 不存在或无权限读取"), { metadata, token });
       }
       if (token.name !== rule.tokenName) {
-        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", "上游 Key 名称已变化，无法确认统计归属"), origin, { metadata, token });
+        return unavailable(health("KEY_INVALID_OR_DENIED", "上游 Key 名称已变化，无法确认统计归属"), { metadata, token });
       }
       if (!tokenNameIsUnique(metadata, token)) {
-        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", "上游 Key 名称不唯一，无法安全归属统计账单"), origin, { metadata, token });
+        return unavailable(health("KEY_INVALID_OR_DENIED", "上游 Key 名称不唯一，无法安全归属统计账单"), { metadata, token });
       }
       if (token.group === "auto" || token.crossGroupRetry) {
-        return persistUnavailable(rule, window, health("KEY_INVALID_OR_DENIED", "上游 Key 不再是可核算的固定分组 Key"), origin, { metadata, token });
+        return unavailable(health("KEY_INVALID_OR_DENIED", "上游 Key 不再是可核算的固定分组 Key"), { metadata, token });
       }
-      if (!metadata.groups[token.group]) {
-        return persistUnavailable(rule, window, health("UPSTREAM_DATA_UNAVAILABLE", "该固定分组已不在上游账号的当前可用分组中"), origin, { metadata, token });
-      }
-      let segments = await repository.listSegments(rule.id);
-      if (!segments.length) return persistUnavailable(rule, window, health("UPSTREAM_DATA_UNAVAILABLE", "对账规则缺少历史分段"), origin, { metadata, token });
-      const currentRatio = metadata.groups[token.group]?.ratio ?? null;
+      const persistedSegments = await repository.listSegments(rule.id);
+      if (!persistedSegments.length) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", "对账规则缺少历史分段"), { metadata, token });
+      const catalogueObserved = metadata.groupsAvailable && metadata.groups[token.group]?.ratio != null;
+      const currentRatio = catalogueObserved ? metadata.groups[token.group].ratio : null;
       const ratioObservedAt = Date.now();
-      if (await repository.backfillMissingSegmentRatios(rule.id, metadata.groups, ratioObservedAt, segments)) {
-        segments = await repository.listSegments(rule.id);
-      }
-      const openSegment = segments[segments.length - 1];
-      const reconciliation = await repository.reconcileCurrentSegment(rule.id, {
+      const reconciliation = await withObservationSourceLock(rule, sourceCredential, () => repository.observeSource(rule.id, {
+        groups: metadata.groupsAvailable ? metadata.groups : {},
         group: token.group,
         ratio: currentRatio,
-        // When detection arrives after a group switch, the account catalogue is
-        // the only honest source available for the previous open segment.
-        // Missing catalogue data remains null rather than being inferred.
-        currentSegmentRatio: metadata.groups[openSegment.group]?.ratio ?? null,
+        tokenName: token.name,
         detectedAt: ratioObservedAt,
-      });
-      segments = reconciliation.segments;
+      }));
+      if (reconciliation === STALE_SCOPE) return STALE_SCOPE;
+      let segments = reconciliation.segments;
       let currentSegment = reconciliation.currentSegment;
       const issues = [];
+      if (!ownAvailable) issues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "downstream", detail: "本站管理员 NewAPI 站点不可用", observedAt: Date.now() });
+      if (!catalogueObserved) {
+        issues.push({
+          code: "GROUP_DATA_UNAVAILABLE", scope: "upstream", observedAt: Date.now(),
+          detail: metadata.groupError || `当前上游分组目录未返回 ${token.group}`,
+        });
+      }
       if (reconciliation.transitioned) {
-        await repository.updateObservedToken(rule.id, { tokenName: token.name, fixedGroup: token.group });
         issues.push({ code: "ROUTE_TRANSITION_DETECTED", scope: "rule", detail: "已按首次检测时间切换分段", observedAt: Date.now() });
       }
       const unconfirmedSegments = segments.filter((segment) => segment.timingSource === "detected");
@@ -458,9 +647,15 @@ export function createReconciliationModule(rt) {
           observedAt: Date.now(),
         });
       }
-      const applicable = segments.map((segment) => ({ segment, segmentWindow: intersectSegment(window, segment) })).filter((item) => item.segmentWindow);
+      // today / 近 7 天结束于当前时刻：刚建规则、刚切段或刚过零点时，最新一段还不满一个完整秒，秒级统计无法无重叠地核算。
+      // 这段尾巴会随时间变长，本轮整条规则待获取，不能只核算旧分段却把整窗标为已确认；切段通知若因此没发出，下一轮会以分段切换时间待确认补报。
+      // 窗口与规则任何分段都不相交（如查规则创建之前的时段）时照常核算为 0，不算待获取：那种情况不会随时间自行恢复。
+      const intersecting = segments
+        .map((segment) => ({ segment, segmentWindow: intersectSegment(window, segment) }))
+        .filter(({ segmentWindow }) => segmentWindow);
+      const applicable = intersecting;
       let catalogue = null;
-      try { catalogue = await ownChannelsFor(own, { force }); } catch {
+      try { if (ownAvailable) catalogue = await ownChannelsFor(own, { force }); } catch {
         issues.push({ code: "SALES_CHANNEL_STATE_UNKNOWN", scope: "channels", detail: "本站渠道目录读取失败，渠道状态未知", observedAt: Date.now() });
       }
       const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
@@ -469,22 +664,35 @@ export function createReconciliationModule(rt) {
         const state = catalogue ? (found ? channelState(found.status) : "missing") : "unknown";
         return { ...channel, state, stateObservedAt: Date.now() };
       });
-      await repository.updateChannelStates(rule.id, states).catch(() => {});
+      let channelStatesUpdated;
+      try {
+        channelStatesUpdated = await withObservationSourceLock(rule, sourceCredential,
+          () => repository.updateChannelStates(rule.id, states));
+      } catch { channelStatesUpdated = null; }
+      if (channelStatesUpdated === STALE_SCOPE) return STALE_SCOPE;
       for (const channel of states) {
         if (channel.state === "manual_disabled" || channel.state === "auto_disabled") issues.push({ code: "SALES_CHANNEL_DISABLED", scope: "channel", channelId: channel.channelId, detail: `${channel.name} ${channel.state === "manual_disabled" ? "已手动禁用" : "已自动禁用"}`, observedAt: Date.now() });
         if (channel.state === "missing") issues.push({ code: "SALES_CHANNEL_MISSING", scope: "channel", channelId: channel.channelId, detail: `${channel.name} 已不在本站渠道目录中`, observedAt: Date.now() });
       }
-      const segmentResults = await Promise.all(applicable.map(async ({ segment, segmentWindow }) => {
+      // 各分段共用本轮的一次本站 /api/status 读取；读取失败时每个分段照常按本站账单不可用处理。
+      let ownStatus = null;
+      const loadOwnStatus = () => (ownStatus ||= queryNewApiStatus(own));
+      const segmentResults = await mapWithConcurrency(applicable, 6, async ({ segment, segmentWindow }) => {
         const [upstreamResult, downstreamResult] = await Promise.all([
-          upstreamWindowFor(upstream, token, segmentWindow).catch((error) => ({ error })),
-          queryOwnChannelRevenue(own, { channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs }).catch((error) => ({ error })),
+          upstreamWindowFor(upstream, metadata, token, segmentWindow).catch((error) => ({ error })),
+          (ownAvailable
+            ? queryOwnChannelRevenue(own, { channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, loadStatus: loadOwnStatus })
+            : Promise.resolve({ error: Object.assign(new Error("本站管理员 NewAPI 站点不可用"), { code: "OWN_BILLING_UNAVAILABLE" }) }))
+            .catch((error) => ({ error })),
         ]);
         const segmentIssues = [];
         if (upstreamResult.error) segmentIssues.push({ code: toErrorHealth(upstreamResult.error).code, scope: "segment", detail: toErrorHealth(upstreamResult.error).detail, observedAt: Date.now() });
-        if (upstreamResult.emptySecondWindow || downstreamResult.emptySecondWindow) segmentIssues.push({ code: "UPSTREAM_DATA_UNAVAILABLE", scope: "segment", detail: "分段短于统计秒粒度，无法无重叠地核算", observedAt: Date.now() });
-        if (downstreamResult.error) segmentIssues.push({ code: toErrorHealth(downstreamResult.error, true).code, scope: "segment", detail: toErrorHealth(downstreamResult.error, true).detail, observedAt: Date.now() });
+        if (upstreamResult.emptySecondWindow || downstreamResult.emptySecondWindow) segmentIssues.push({ code: "PENDING", scope: "segment", detail: "分段短于统计秒粒度，稍后刷新即可核算", observedAt: Date.now() });
+        if (downstreamResult.error || (downstreamResult.state !== "complete" && downstreamResult.state !== "pending")) {
+          segmentIssues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "segment", detail: "本站渠道账单未完整获取", observedAt: Date.now() });
+        }
         const upstreamUnavailable = upstreamResult.error || upstreamResult.emptySecondWindow;
-        const downstreamUnavailable = downstreamResult.error || downstreamResult.emptySecondWindow;
+        const downstreamUnavailable = downstreamResult.error || downstreamResult.emptySecondWindow || downstreamResult.state !== "complete";
         const upstreamUsd = upstreamUnavailable ? null : upstreamResult.quotaUnits / upstreamResult.quotaPerUnit;
         const downstreamUsd = downstreamUnavailable ? null : downstreamResult.quotaUnits / downstreamResult.quotaPerUnit;
         if (!upstreamUnavailable && !downstreamUnavailable && upstreamResult.quotaUnits <= 0 && downstreamResult.quotaUnits > 0) segmentIssues.push({ code: "UPSTREAM_EMPTY_WITH_SALES", scope: "segment", detail: "本站渠道已有收费，但上游未返回对应窗口消费", observedAt: Date.now() });
@@ -492,100 +700,153 @@ export function createReconciliationModule(rt) {
         return {
           ...segment,
           window: segmentWindow,
-          upstream: upstreamUnavailable ? null : { quotaUnits: upstreamResult.quotaUnits, quotaPerUnit: upstreamResult.quotaPerUnit, amountUsd: upstreamUsd, observedAt: upstreamResult.latestLogAtMs || Date.now() },
-          downstream: downstreamUnavailable ? null : {
+          upstream: upstreamUnavailable ? {
+            state: upstreamResult.emptySecondWindow ? "pending" : "unavailable",
+            quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null,
+            successfulCount: 0, expectedCount: 1, observedAt: Date.now(), window: segmentWindow,
+          } : {
+            state: "complete", quotaUnits: upstreamResult.quotaUnits, quotaPerUnit: upstreamResult.quotaPerUnit,
+            amountUsd: upstreamUsd, knownAmountUsd: upstreamUsd, successfulCount: 1, expectedCount: 1,
+            observedAt: upstreamResult.latestLogAtMs || Date.now(), window: segmentWindow,
+          },
+          downstream: downstreamResult.error ? {
+            state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null,
+            successfulCount: 0, expectedCount: rule.channels.length,
+            billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION,
+            observedAt: Date.now(), window: segmentWindow,
+            channels: rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null })),
+          } : {
             quotaUnits: downstreamResult.quotaUnits,
             quotaPerUnit: downstreamResult.quotaPerUnit,
-            amountUsd: downstreamUsd,
-            coverage: downstreamResult.coverage,
-            billingCoverage: downstreamResult.billingCoverage,
+            amountUsd: downstreamUnavailable ? null : downstreamUsd,
+            knownAmountUsd: downstreamResult.knownAmountUsd,
+            state: downstreamResult.state,
+            successfulCount: downstreamResult.successfulCount,
+            expectedCount: downstreamResult.expectedCount,
             billingSource: downstreamResult.billingSource,
             calculationVersion: downstreamResult.calculationVersion,
+            observedAt: Date.now(), window: segmentWindow,
             channels: downstreamResult.channels,
           },
           calculation: calculationFromAmounts(upstreamUsd, downstreamUsd, segmentIssues),
           health: segmentHealth,
         };
-      }));
+      });
       for (const segment of segmentResults) issues.push(...segment.health.issues);
-      const completeUpstream = segmentResults.every((segment) => segment.upstream);
-      const completeDownstream = segmentResults.every((segment) => segment.downstream);
+      const completeUpstream = segmentResults.every((segment) => segment.upstream.state === "complete");
+      const completeDownstream = segmentResults.every((segment) => segment.downstream.state === "complete");
       const upstreamUsd = completeUpstream ? segmentResults.reduce((sum, segment) => sum + segment.upstream.amountUsd, 0) : null;
       const downstreamUsd = completeDownstream ? segmentResults.reduce((sum, segment) => sum + segment.downstream.amountUsd, 0) : null;
       const upstreamUnits = completeUpstream ? segmentResults.reduce((sum, segment) => sum + segment.upstream.quotaUnits, 0) : null;
       const downstreamUnits = completeDownstream ? segmentResults.reduce((sum, segment) => sum + segment.downstream.quotaUnits, 0) : null;
+      const successfulUpstream = segmentResults.filter((segment) => segment.upstream.state === "complete");
+      const knownUpstreamUsd = completeUpstream ? upstreamUsd : successfulUpstream.length
+        ? successfulUpstream.reduce((sum, segment) => sum + segment.upstream.amountUsd, 0) : null;
       const allChannels = states.map((channel) => {
-        const quotaUnits = segmentResults.reduce((sum, segment) => sum + Number(segment.downstream?.channels?.find((item) => item.channelId === channel.channelId)?.quotaUnits || 0), 0);
+        const billingRows = segmentResults.map((segment) => segment.downstream.channels?.find((item) => item.channelId === channel.channelId)).filter(Boolean);
+        const complete = billingRows.length === segmentResults.length && billingRows.every((item) => item.billingState === "complete" && item.amountUsd != null);
+        const quotaUnits = billingRows.reduce((sum, item) => sum + (item.quotaUnits ?? 0), 0);
         return {
           ...channel,
-          quotaUnits: completeDownstream ? quotaUnits : null,
-          amountUsd: completeDownstream ? segmentResults.reduce((sum, segment) => sum + Number(segment.downstream?.channels?.find((item) => item.channelId === channel.channelId)?.amountUsd || 0), 0) : null,
-          share: completeDownstream ? (downstreamUnits > 0 ? quotaUnits / downstreamUnits : 0) : null,
+          billingState: complete ? "complete" : billingRows.some((item) => item.billingState === "complete") ? "partial" : "unavailable",
+          quotaUnits: complete ? quotaUnits : null,
+          amountUsd: complete ? billingRows.reduce((sum, item) => sum + (item.amountUsd ?? 0), 0) : null,
+          knownAmountUsd: complete ? billingRows.reduce((sum, item) => sum + item.amountUsd, 0) : billingRows.some((item) => item.amountUsd != null)
+            ? billingRows.reduce((sum, item) => sum + (item.amountUsd ?? 0), 0) : null,
+          share: completeDownstream && complete ? (downstreamUnits > 0 ? quotaUnits / downstreamUnits : 0) : null,
         };
       });
       const resultHealth = healthWithIssues(issues);
       const result = {
         rule: { ...rule, tokenName: token.name, fixedGroup: currentSegment.group }, window,
         requestedWindow: window,
-        lastSuccessfulWindow: window,
+        lastSuccessfulWindow: null,
         currentSegment,
         segments: segmentResults,
         transitionSegments: segments,
-        upstream: upstreamUsd == null ? null : { quotaUnits: upstreamUnits, quotaPerUnit: segmentResults[0]?.upstream?.quotaPerUnit ?? null, amountUsd: upstreamUsd, observedAt: Date.now(), status: token.status, group: currentSegment.group, ratio: currentSegment.ratio },
+        upstream: {
+          state: completeUpstream ? "complete" : successfulUpstream.length ? "partial" : segmentResults.some((segment) => segment.upstream.state === "pending") ? "pending" : "unavailable",
+          quotaUnits: upstreamUnits,
+          quotaPerUnit: segmentResults[0]?.upstream?.quotaPerUnit ?? null,
+          amountUsd: upstreamUsd,
+          knownAmountUsd: knownUpstreamUsd,
+          successfulCount: successfulUpstream.length,
+          expectedCount: segmentResults.length,
+          observedAt: Date.now(), window, status: token.status, group: currentSegment.group, ratio: currentRatio,
+        },
         downstream: {
+          state: completeDownstream ? "complete" : segmentResults.some((segment) => segment.downstream.knownAmountUsd != null) ? "partial" : segmentResults.some((segment) => segment.downstream.state === "pending") ? "pending" : "unavailable",
           quotaUnits: downstreamUnits,
           quotaPerUnit: segmentResults[0]?.downstream?.quotaPerUnit ?? null,
           amountUsd: downstreamUsd,
-          coverage: completeDownstream ? 1 : 0,
-          billingCoverage: completeDownstream ? 1 : 0,
+          knownAmountUsd: completeDownstream ? downstreamUsd : segmentResults.reduce((sum, segment) => sum + (segment.downstream.knownAmountUsd ?? 0), 0) || (segmentResults.some((segment) => segment.downstream.knownAmountUsd != null) ? 0 : null),
+          successfulCount: segmentResults.reduce((sum, segment) => sum + segment.downstream.successfulCount, 0),
+          expectedCount: segmentResults.reduce((sum, segment) => sum + segment.downstream.expectedCount, 0),
           billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION,
-          observedAt: Date.now(),
+          observedAt: Date.now(), window,
           channels: allChannels,
         },
         calculation: calculationFromAmounts(upstreamUsd, downstreamUsd, issues),
         health: resultHealth, generatedAt: new Date().toISOString(),
       };
-      const sourceUnavailable = issues.some((issue) => ["KEY_INVALID_OR_DENIED", "UPSTREAM_DATA_UNAVAILABLE", "OWN_BILLING_UNAVAILABLE", "OWN_FLOW_INCOMPLETE"].includes(issue.code));
+      const scopeFingerprint = reconciliationScopeFingerprint(rule, segments);
+      if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return STALE_SCOPE;
+      if (currentSourceCredential(rule) !== sourceCredential) return STALE_SCOPE;
+      const billingFingerprint = sourceScopeFingerprint(scopeFingerprint, sourceCredential);
       if (result.calculation.profitUsd != null) {
         result.lastSuccessfulAt = result.generatedAt;
-        lastSuccessfulResults.set(cacheKey, { result, at: result.generatedAt });
+        result.lastSuccessfulWindow = window;
       }
-      const previous = lastSuccessfulResults.get(cacheKey)
-        || await repository.latestSuccessfulResult(rule.id, window).catch(() => null);
-      if (sourceUnavailable && previous) {
-        const stale = {
-          ...previous.result,
-          rule: result.rule,
-          currentSegment,
-          transitionSegments: segments,
-          health: { ...resultHealth, stale: true },
-          window: previous.result.lastSuccessfulWindow || previous.result.window,
-          requestedWindow: window,
-          lastSuccessfulWindow: previous.result.lastSuccessfulWindow || previous.result.window,
-          lastSuccessfulAt: previous.at || previous.generatedAt,
-          generatedAt: result.generatedAt,
-        };
-        await persistResult(rule, stale, origin, metadata, token, { saveSnapshots: false });
-        return stale;
+      let previous;
+      try { previous = await repository.latestSuccessfulResult(rule.id, window, billingFingerprint); } catch {}
+      if (previous) {
+        result.lastConfirmed = snapshotReference(previous);
       }
-      await persistResult(rule, result, origin, metadata, token);
-      return result;
-    })();
-    inflight.set(cacheKey, task);
-    try {
-      const value = await task;
-      resultCache.set(cacheKey, { at: Date.now(), value });
-      return value;
-    } finally {
-      inflight.delete(cacheKey);
+      return (await persistResult(rule, result, origin, metadata, token, {
+        scopeFingerprint, billingFingerprint, sourceCredential, generation,
+      })) ? result : STALE_SCOPE;
+    };
+    // 口径在查询期间变化时，在共享的 in-flight 任务内重跑，加入等待的调用方也只会拿到最新口径的结果。
+    // 编辑会注销本任务的 in-flight 登记：期间已有调用方按新口径另起任务时直接等它，不再重复取数和写快照；
+    // 否则重新登记，让重跑期间到达的调用方加入本任务。
+    let task;
+    const run = async () => {
+      let rule = firstRule;
+      for (let attempt = 1; ; attempt += 1) {
+        const generation = ruleGenerations.get(ruleId) || 0;
+        const sourceCredential = currentSourceCredential(rule);
+        const value = await inspectScope(rule, generation);
+        if (value !== STALE_SCOPE && (ruleGenerations.get(ruleId) || 0) === generation
+          && currentSourceCredential(rule) === sourceCredential) {
+          if (value.health.code !== "PENDING") cacheResult(cacheKey, value, sourceCredential);
+          return value;
+        }
+        const newer = inflight.get(inflightKey);
+        if (newer && newer !== task) return newer;
+        // 口径被连续改动时不再重跑：只让这条规则本轮待获取，不能让整个多规则查询失败。
+        if (attempt >= MAX_SCOPE_ATTEMPTS) return pendingResult(rule, window, "查询期间对账口径多次变化，下一轮刷新时重新获取");
+        inflight.set(inflightKey, task);
+        rule = await repository.getRule(ruleId);
+        if (!rule) throw ruleNotFound();
+      }
+    };
+    task = run();
+    inflight.set(inflightKey, task);
+    try { return await task; } finally {
+      if (inflight.get(inflightKey) === task) inflight.delete(inflightKey);
     }
   }
 
-  async function persistUnavailable(rule, window, resultHealth, origin, evidence = {}) {
+  async function persistUnavailable(rule, window, resultHealth, origin, evidence = {}, generation = 0, sourceCredential = currentSourceCredential(rule)) {
     const persistedSegments = await repository.listSegments(rule.id).catch(() => []);
     const currentSegment = persistedSegments[persistedSegments.length - 1] || null;
-    const unavailable = {
+    const scopeFingerprint = reconciliationScopeFingerprint(rule, persistedSegments);
+    const currentRule = await repository.getRule(rule.id).catch(() => null);
+    if (!currentRule || reconciliationScopeFingerprint(currentRule, persistedSegments) !== scopeFingerprint || (ruleGenerations.get(rule.id) || 0) !== generation) return STALE_SCOPE;
+    if (currentSourceCredential(rule) !== sourceCredential) return STALE_SCOPE;
+    const billingFingerprint = sourceScopeFingerprint(scopeFingerprint, sourceCredential);
+      const unavailable = {
       rule,
       window,
       requestedWindow: window,
@@ -593,6 +854,7 @@ export function createReconciliationModule(rt) {
       currentSegment,
       transitionSegments: persistedSegments,
       upstream: evidence.upstream ? {
+        state: "complete",
         quotaUnits: evidence.upstream.quotaUnits,
         quotaPerUnit: evidence.upstream.quotaPerUnit,
         amountUsd: evidence.upstream.quotaUnits / evidence.upstream.quotaPerUnit,
@@ -600,43 +862,50 @@ export function createReconciliationModule(rt) {
         status: evidence.token?.status ?? null,
         group: evidence.token?.group ?? null,
         ratio: evidence.metadata?.groups?.[evidence.token?.group]?.ratio ?? null,
-      } : null,
+      } : { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: 1, observedAt: Date.now(), window },
       downstream: evidence.downstream ? {
+        state: evidence.downstream.state || "unavailable",
         quotaUnits: evidence.downstream.quotaUnits,
         quotaPerUnit: evidence.downstream.quotaPerUnit,
-        amountUsd: evidence.downstream.quotaUnits / evidence.downstream.quotaPerUnit,
-        coverage: evidence.downstream.coverage,
-        billingCoverage: evidence.downstream.billingCoverage ?? evidence.downstream.coverage,
+        amountUsd: evidence.downstream.state === "complete" && Number.isFinite(evidence.downstream.quotaUnits) && Number.isFinite(evidence.downstream.quotaPerUnit) && evidence.downstream.quotaPerUnit > 0
+          ? evidence.downstream.quotaUnits / evidence.downstream.quotaPerUnit : null,
+        knownAmountUsd: evidence.downstream.knownAmountUsd ?? null,
+        successfulCount: evidence.downstream.successfulCount ?? 0,
+        expectedCount: evidence.downstream.expectedCount ?? rule.channels.length,
         billingSource: evidence.downstream.billingSource || RECONCILIATION_BILLING_SOURCE,
         calculationVersion: evidence.downstream.calculationVersion || RECONCILIATION_CALCULATION_VERSION,
-        observedAt: Date.now(),
+        observedAt: Date.now(), window,
         channels: evidence.downstream.channels || [],
-      } : null,
+      } : { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: rule.channels.length, observedAt: Date.now(), window, channels: rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null })) },
       calculation: { differenceUsd: null, profitUsd: null, riskDifferenceUsd: null, marginRate: null },
       health: resultHealth,
       generatedAt: new Date().toISOString(),
     };
-    const previous = lastSuccessfulResults.get(resultKey(rule, window))
-      || await repository.latestSuccessfulResult(rule.id, window).catch(() => null);
-    const result = previous ? {
-      ...previous.result,
-      rule,
-      window: previous.result.lastSuccessfulWindow || previous.result.window,
-      requestedWindow: window,
-      lastSuccessfulWindow: previous.result.lastSuccessfulWindow || previous.result.window,
-      currentSegment: currentSegment || previous.result.currentSegment,
-      transitionSegments: persistedSegments.length ? persistedSegments : previous.result.transitionSegments,
-      health: { ...resultHealth, stale: true },
-      lastSuccessfulAt: previous.at || previous.generatedAt,
-      generatedAt: unavailable.generatedAt,
-    } : unavailable;
-    await persistResult(rule, result, origin, evidence.metadata, evidence.token, { saveSnapshots: !previous });
-    return result;
+    unavailable.segments = (evidence.downstream?.segments || []).map((segment) => ({
+      ...segment,
+      upstream: {
+        state: resultHealth.code === "PENDING" ? "pending" : "unavailable",
+        quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null,
+        successfulCount: 0, expectedCount: 1, observedAt: Date.now(), window: segment.window,
+      },
+      downstream: segment.downstream,
+      calculation: { differenceUsd: null, profitUsd: null, riskDifferenceUsd: null, marginRate: null },
+      health: resultHealth,
+    }));
+    let previous;
+    try { previous = await repository.latestSuccessfulResult(rule.id, window, billingFingerprint); } catch {}
+    if (previous) {
+      unavailable.lastConfirmed = snapshotReference(previous);
+    }
+    return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation })) ? unavailable : STALE_SCOPE;
   }
 
-  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true } = {}) {
-    const snapshots = result.segments?.length ? result.segments : [{ id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health }];
-    const save = () => Promise.all(snapshots.map((segment) => {
+  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0 } = {}) {
+    const segmentSnapshots = result.segments?.length ? result.segments : [{ id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health }];
+    const snapshots = ["observation", ...(result.calculation?.profitUsd != null ? ["confirmed"] : [])]
+      .flatMap((recordType) => segmentSnapshots.map((segment) => ({ ...segment, recordType })));
+    // 数据库事务核验规则/分段口径；快照键和失败兜底另用包含两侧站点来源的口径。
+    const save = () => repository.saveSnapshotsForScope(rule.id, scopeFingerprint, snapshots.map((segment) => {
       const source = metadata && token ? sourceSnapshot(token, metadata, segment.upstream, segment.downstream) : {
         calculationVersion: RECONCILIATION_CALCULATION_VERSION,
         billingSource: RECONCILIATION_BILLING_SOURCE,
@@ -653,10 +922,10 @@ export function createReconciliationModule(rt) {
           })) || [],
         },
       };
-      return repository.saveSnapshot({
+      return {
         ruleId: rule.id,
         segmentId: segment.id,
-        snapshotKey: `${snapshotKey(segment.window)}:${segment.id || "legacy"}`,
+        snapshotKey: reconciliationSnapshotRecordIdentity(result.window, billingFingerprint, segment.recordType, segment.id),
         windowKind: result.window.preset,
         startMs: segment.window.startMs,
         endMs: segment.window.endMs,
@@ -674,6 +943,8 @@ export function createReconciliationModule(rt) {
         healthDetail: segment.health?.detail || result.health.detail || null,
         source: {
           ...source,
+          recordType: segment.recordType,
+          scopeFingerprint: billingFingerprint,
           segment: (() => {
             const evidence = segment.group != null ? segment : result.currentSegment;
             return evidence ? {
@@ -686,22 +957,47 @@ export function createReconciliationModule(rt) {
           })(),
           origin,
           window: result.window,
-          resultGeneratedAt: result.lastSuccessfulAt === result.generatedAt ? result.generatedAt : null,
-          result: result.lastSuccessfulAt === result.generatedAt ? {
+          resultGeneratedAt: result.generatedAt,
+          result: {
+            window: result.window,
+            requestedWindow: result.requestedWindow,
+            lastSuccessfulWindow: result.lastSuccessfulWindow,
             currentSegment: result.currentSegment,
             transitionSegments: result.transitionSegments,
             segments: result.segments,
             upstream: result.upstream,
             downstream: result.downstream,
             calculation: result.calculation,
-          } : null,
+            health: result.health,
+            generatedAt: result.generatedAt,
+          },
         },
-      });
+      };
     }));
-    if (saveSnapshots) await save();
-    try { await notifyReconciliationHealth(rt, repository, rule, result); } catch (err) {
-      console.error("渠道对账通知失败:", err?.message || String(err));
+    // 调用方已核对过口径；写快照的事务会在规则行锁内再按库里的口径核对一次，这里只需挡住已作废的代次。
+    if (currentSourceCredential(rule) !== sourceCredential) return false;
+    if (saveSnapshots) {
+      let saved;
+      try {
+        saved = await withObservationSourceLock(rule, sourceCredential, async () => {
+          if ((ruleGenerations.get(rule.id) || 0) !== generation) return false;
+          return save();
+        });
+      } catch {
+        const error = new Error("对账结果未能保存");
+        error.code = "PERSISTENCE_FAILED";
+        throw error;
+      }
+      if (saved !== true) return false;
     }
+    if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return false;
+    if (currentSourceCredential(rule) !== sourceCredential) return false;
+    if (result.health.code !== "PENDING") {
+      try { await notifyReconciliationHealth(rt, repository, rule, result); } catch (err) {
+        console.error("渠道对账通知失败:", err?.message || String(err));
+      }
+    }
+    return true;
   }
 
   return {
@@ -712,7 +1008,11 @@ export function createReconciliationModule(rt) {
       let channels = [];
       let channelsError = null;
       if (own) {
-        try { channels = await ownChannelsFor(own, { force: forceChannels }); } catch { channelsError = "本站渠道目录读取失败，请检查管理员权限或稍后重试"; }
+        try { channels = await ownChannelsFor(own, { force: forceChannels }); } catch (err) {
+          // 上游错误原文可能回显令牌：接口只返回固定提示，服务端日志只记脱敏后的原因。
+          console.error("本站渠道目录读取失败:", describeConnectionFailure(err?.message || String(err), own).diagnostic);
+          channelsError = "本站渠道目录读取失败，请检查管理员权限或稍后重试";
+        }
       }
       return { ownStation: publicStation(own), upstreams, channels, channelsError, rules };
     },
@@ -747,9 +1047,9 @@ export function createReconciliationModule(rt) {
       const rule = await repository.getRule(ruleId, { includeArchived: true });
       if (!rule) throw new Error("对账规则不存在");
       const segments = await repository.correctTransition(ruleId, segmentId, effectiveAt);
-      for (const key of resultCache.keys()) if (key.startsWith(`${ruleId}:`)) resultCache.delete(key);
+      clearRuleResults(ruleId);
       return segments;
-     },
+    },
     async queryRules({ ruleIds = null, ...input } = {}, options = {}) {
       const rules = await repository.listRules();
       const selected = (Array.isArray(ruleIds) && ruleIds.length)
@@ -760,8 +1060,13 @@ export function createReconciliationModule(rt) {
         rule.id,
         resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now),
         options
-      ));
-      return { results, generatedAt: new Date(now).toISOString() };
+      ).catch((err) => {
+        // 列出规则后才被停止的规则从本轮结果中去掉，不能让整个多规则查询失败。
+        if (err?.code === "RULE_NOT_FOUND") return null;
+        if (err?.code === "PERSISTENCE_FAILED") return persistenceFailedResult(rule, resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now));
+        throw err;
+      }));
+      return { results: results.filter(Boolean), generatedAt: new Date(now).toISOString() };
     },
     async refreshDue(now = Date.now()) {
       const rules = (await repository.listRules()).filter((rule) => rule.enabled);
