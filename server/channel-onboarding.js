@@ -712,7 +712,16 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     return pending;
   }
 
-  async function verify(connection, existing = null) {
+  async function verify(connection, existing = null, verificationReads = null) {
+    if (verificationReads) {
+      const readKey = hash([onboardingConnectionPatch(connection), existing ? authVersion(existing) : null,
+        existing ? stationBusinessVersion(existing) : null]);
+      if (!verificationReads.has(readKey)) verificationReads.set(readKey, verify(connection, existing));
+      const observation = await verificationReads.get(readKey);
+      return { ...observation, existing, connection: structuredClone(observation.connection),
+        metadata: observation.metadata && structuredClone(observation.metadata),
+        identity: observation.identity && structuredClone(observation.identity) };
+    }
     const version = existing ? authVersion(existing) : null;
     const resourceVersion = existing ? stationBusinessVersion(existing) : null;
     const expectedAuthVersion = existing?.authVersion || 1;
@@ -779,16 +788,16 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     if (matches.length) Object.assign(item, matches[0]);
   }
 
-  async function prepareBatchSelection(selection, requested) {
+  async function prepareBatchSelection(selection, requested, verificationReads) {
     const selected = selection.stationId ? rt.store.get(selection.stationId) : null;
     if (selection.stationId && (!selected || selected.archivedAt || selected.isOwn || !TYPES.includes(selected.type)
         || selection.monitor && selected.monitorEnabled === false)) throw new Error("所选资源不存在或用途不匹配");
-    const main = await verify(selected || connectionInput(selection.newStation, { authorization: !selection.monitor }), selected);
+    const main = await verify(selected || connectionInput(selection.newStation, { authorization: !selection.monitor }), selected, verificationReads);
     const additional = [];
     for (const id of selection.additionalMonitorStationIds.filter((id) => id !== selected?.id)) {
       const station = rt.store.get(id);
       if (!station || station.archivedAt || station.isOwn || station.monitorEnabled === false || !TYPES.includes(station.type)) throw new Error("额外监控资源不可用");
-      const item = await verify(station, station);
+      const item = await verify(station, station, verificationReads);
       if (main.identity && item.identity && !sameIdentity(main.identity, item.identity)) throw new Error("额外监控资源属于不同账号");
       additional.push(item);
     }
@@ -799,10 +808,10 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         if (authorization?.stationId) {
           const station = rt.store.get(authorization.stationId);
           if (!station || station.archivedAt || station.isOwn || !ACCOUNT_TYPES.includes(station.type)) throw new Error("账单授权不存在");
-          billing = station.id === selected?.id ? main : await verify(station, station);
+          billing = station.id === selected?.id ? main : await verify(station, station, verificationReads);
         } else if (authorization?.newAuthorization) {
           if (main.connection.type !== "newapi-key") throw new Error("只有独立 Key 监控可以新增专用账号授权");
-          billing = await verify(connectionInput(authorization.newAuthorization, { authorization: true }));
+          billing = await verify(connectionInput(authorization.newAuthorization, { authorization: true }), null, verificationReads);
         } else if (ACCOUNT_TYPES.includes(main.connection.type)) billing = main;
       } catch (error) { billingError = failure(error, [authorization?.newAuthorization, rt.store.get(authorization?.stationId)]); }
     }
@@ -899,11 +908,11 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   async function batchProbeState(input, { register = true } = {}) {
     const source = getSourceCatalogue(), sourceStationVersion = stationBusinessVersion(own());
     if (!source.ownSource) throw previewFailure("CHANNEL_CATALOGUE_STALE", "请先同步并核验本站渠道来源");
-    const prepared = new Map(), metadataReads = new Map(), allRules = await rules();
+    const prepared = new Map(), verificationReads = new Map(), metadataReads = new Map(), allRules = await rules();
     const readContext = rt.reconciliation?.createPreviewReadContext?.();
     for (const selection of input.selections) {
       try {
-        const value = await prepareBatchSelection(selection, input.groups.some((group) => group.selectionId === selection.selectionId && group.reconciliation));
+        const value = await prepareBatchSelection(selection, input.groups.some((group) => group.selectionId === selection.selectionId && group.reconciliation), verificationReads);
         prepared.set(selection.selectionId, { ...value, selection });
       } catch (error) {
         prepared.set(selection.selectionId, { selection, error: previewFailure(error.code || "VERIFICATION_FAILED",

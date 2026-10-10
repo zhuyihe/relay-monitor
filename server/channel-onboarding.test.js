@@ -710,6 +710,55 @@ test("F08 actual 100-Key preview shares complete same-version same-zone director
   assert.ok(requests("up.test", "/api/token/") > 0, "confirmation must not reuse the earlier operation's Key catalogue");
 });
 
+test("F08 public repeated selections reuse same-version setup observations without writes", async (t) => {
+  const f = await genuineBatchFixture(t);
+  f.state.channels = Array.from({ length: 100 }, (_, index) => index + 1);
+  f.state.keys = Array.from({ length: 100 }, (_, index) => index + 9);
+  await f.rt.channelOnboarding.sync(); f.state.requests.length = 0;
+  const input = f.request(f.state.channels.map((id) => [id]), f.state.keys), before = structuredClone(f.store.data);
+  input.selections = input.groups.map((group, index) => {
+    group.selectionId = `account-${index}`;
+    return { ...input.selections[0], selectionId: group.selectionId };
+  });
+  const response = await handleChannelOnboardingRequest(new Request("http://fixture/api/channel-onboarding/batch/probe", {
+    method: "POST", body: JSON.stringify(input) }), f.rt, "probeBatch");
+  const result = await response.json();
+  assert.equal(response.status, 200); assert.equal(result.groups.length, 100);
+  assert.ok(result.groups.every((group) => group.status === "ready"));
+  assert.equal(f.state.requests.length, 11);
+  assert.equal(f.state.requests.filter((item) => item.host === "up.test" && item.path === "/api/token/").length, 2);
+  assert.deepEqual(f.store.data, before); assert.equal(f.state.ruleWrites, 0); assert.equal(f.state.links.length, 0);
+});
+
+test("F08 different saved authorizations retain separate setup and requested-zone observations", async (t) => {
+  const f = await genuineBatchFixture(t), other = await f.store.add({ type: "newapi", baseUrl: "https://up.test",
+    accessToken: "different-pat", userId: "42" });
+  const input = f.request([[1], [2]], [9, 10]);
+  input.selections.push({ selectionId: "other", stationId: other.id, monitor: true }); input.groups[1].selectionId = "other";
+  const before = structuredClone(f.store.data); f.state.requests.length = 0;
+  const response = await handleChannelOnboardingRequest(new Request("http://fixture/api/channel-onboarding/batch/probe", {
+    method: "POST", body: JSON.stringify(input) }), f.rt, "probeBatch");
+  const result = await response.json();
+  assert.equal(response.status, 200); assert.ok(result.groups.every((group) => group.status === "ready"));
+  for (const accessToken of [f.supplier.accessToken, other.accessToken]) {
+    assert.equal(f.state.requests.filter((item) => item.path === "/api/token/" && item.authorization === `Bearer ${accessToken}`).length, 2);
+  }
+  assert.deepEqual(f.store.data, before); assert.equal(f.state.ruleWrites, 0); assert.equal(f.state.links.length, 0);
+});
+
+test("F08 shared setup facts do not bypass each selection's monitoring purpose", async (t) => {
+  const f = await genuineBatchFixture(t); await f.store.update(f.supplier.id, { monitorEnabled: false });
+  const input = f.request([[1], [2]], [9, 10]); input.selections[0].monitor = false;
+  input.selections.push({ ...input.selections[0], selectionId: "monitor", monitor: true }); input.groups[1].selectionId = "monitor";
+  const before = structuredClone(f.store.data); f.state.requests.length = 0;
+  const response = await handleChannelOnboardingRequest(new Request("http://fixture/api/channel-onboarding/batch/probe", {
+    method: "POST", body: JSON.stringify(input) }), f.rt, "probeBatch");
+  const result = await response.json();
+  assert.equal(response.status, 200); assert.deepEqual(result.groups.map((group) => group.status), ["ready", "unavailable"]);
+  assert.equal(f.state.requests.filter((item) => item.host === "up.test" && item.path === "/api/token/").length, 2);
+  assert.deepEqual(f.store.data, before); assert.equal(f.state.ruleWrites, 0); assert.equal(f.state.links.length, 0);
+});
+
 test("F07 directory reads reevaluate rule source after missing channels, restored catalogue and expiry", async (t) => {
   const f = await genuineBatchFixture(t), input = f.request([[1]]), preview = await f.rt.channelOnboarding.probeBatch(input);
   assert.equal((await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId })).complete, true);
