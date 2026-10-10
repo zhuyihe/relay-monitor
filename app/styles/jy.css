@@ -404,7 +404,7 @@ table.jy-data tfoot th, table.jy-data tfoot td {
 .jy-m-list li { padding: 14px 16px; border-top: 1px solid var(--jy-rule-soft); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; }
 .jy-m-list li:first-child { border-top: 0; }
 .jy-m-list .m-top { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.jy-m-list .m-sub { grid-column: 1 / -1; display: flex; gap: 16px; font-size: 13px; color: var(--jy-ink-2); flex-wrap: wrap; }
+.jy-m-list .m-sub { grid-column: 1 / -1; display: flex; gap: 2px 16px; font-size: 13px; color: var(--jy-ink-2); flex-wrap: wrap; }
 .jy-m-list .m-sub b { font-weight: 500; color: var(--jy-ink); font-variant-numeric: tabular-nums; }
 .jy-m-list .m-actions { grid-column: 1 / -1; display: flex; gap: 4px; margin-left: -8px; }
 
@@ -417,8 +417,10 @@ table.jy-data tfoot th, table.jy-data tfoot td {
 .jy-drawer-foot .spacer { flex: 1; }
 .jy-fs { border: 0; margin: 0; padding: 20px 0; border-top: 1px solid var(--jy-rule-soft); min-width: 0; }
 .jy-fs:first-child { border-top: 0; }
-.jy-fs > legend { float: left; width: 100%; padding: 0; font-weight: 600; font-size: 14px; line-height: 22px; margin-bottom: 4px; color: var(--jy-ink); }
+/* fieldset.jy-fs 提高优先级：antd 的 .ant-form legend 同级且后注入，会把标题改成 16px 灰字加下划线 */
+fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-weight: 600; font-size: 14px; line-height: 22px; margin-bottom: 12px; color: var(--jy-ink); }
 .jy-fs > :not(legend) { clear: both; }
+.jy-fs > legend + .fs-desc { margin-top: -8px; }
 .jy-fs .fs-desc { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); margin: 0 0 16px; }
 .jy-fs .ant-form-item { margin-bottom: 16px; }
 .jy-fs .ant-form-item:last-child { margin-bottom: 0; }

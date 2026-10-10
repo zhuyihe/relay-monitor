@@ -1,0 +1,67 @@
+/* 上游资源页：只放本页特有的布局，通用外观用 jy.css */
+
+/* 表格横向滚动时，资源名与操作列固定在两侧（jy.css 暂无通用的固定列类） */
+.jy-stations-table .jy-stations-pin-l { position: sticky; left: 0; z-index: 1; }
+.jy-stations-table .jy-stations-pin-r { position: sticky; right: 0; z-index: 1; box-shadow: -1px 0 0 var(--jy-rule-soft); }
+.jy-stations-table th.jy-stations-pin-l, .jy-stations-table th.jy-stations-pin-r { z-index: 2; }
+.jy-stations-table .jy-res-name { max-width: 280px; }
+.jy-stations-table td { vertical-align: top; }
+.jy-stations-table td.jy-empty-row { text-align: center; vertical-align: middle; }
+
+.jy-stations-name-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }
+.jy-stations-flag { height: 20px; padding: 0 6px; font-size: 11px; font-style: normal; }
+.jy-stations-sub { display: block; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); white-space: nowrap; }
+.jy-stations-table .jy-cell-runway { min-height: 22px; }
+
+/* 查询失败的说明行：跨整行，横向滚动时贴左 */
+.jy-stations-table tr.has-issue td { border-bottom: 0; }
+.jy-stations-table tr.jy-stations-issue-row td { padding-top: 0; }
+.jy-stations-issue {
+  position: sticky; left: 16px; max-width: 760px;
+  display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px 12px;
+  padding: 10px 12px; border-radius: var(--jy-r2);
+  border-left: 2px solid var(--jy-crit); background: var(--jy-crit-tint);
+}
+.jy-stations-issue > .jy-sym { width: 14px; height: 14px; margin-top: 3px; color: var(--jy-crit); flex: none; }
+.jy-stations-issue-body { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
+.jy-stations-issue-body b { font-size: 13px; line-height: 20px; font-weight: 500; color: var(--jy-crit-ink); }
+.jy-stations-diag summary { cursor: pointer; color: var(--jy-ink-2); min-height: 24px; display: flex; align-items: center; }
+.jy-stations-diag > span { display: block; overflow-wrap: anywhere; color: var(--jy-ink-2); }
+
+.jy-stations-sort {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none;
+  font: inherit; color: inherit; cursor: pointer;
+}
+.jy-stations-sort .jy-icon { width: 14px; height: 14px; }
+.jy-stations-sort:hover { color: var(--jy-ink); }
+
+.jy-stations-type { width: 200px; }
+.jy-stations-banner-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.jy-stations-banner-body p { margin: 0; }
+.jy-stations-skeleton { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
+
+/* 抽屉 */
+.jy-stations-guide { margin: 0 0 16px; padding: 12px; border-radius: var(--jy-r2); background: var(--jy-sunken); font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
+.jy-stations-guide > b { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--jy-ink); }
+.jy-stations-guide dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+.jy-stations-guide dt { color: var(--jy-ink-3); white-space: nowrap; }
+.jy-stations-guide dd { margin: 0; }
+.jy-stations-switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--jy-ink); }
+.jy-stations-hint { margin: 8px 0 0; }
+.jy-stations-purchase { display: grid; grid-template-columns: minmax(0, 1fr) 96px 150px auto; gap: 8px; margin-bottom: 8px; align-items: center; }
+.jy-stations-purchase .ant-picker { width: 100%; }
+.jy-stations-purge-link.ant-btn { padding-inline: 0; margin-top: 12px; }
+.jy-stations-confirm { margin-top: 16px; }
+.jy-stations-confirm label { display: block; margin-bottom: 6px; }
+.jy-stations-confirm code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0 4px; border-radius: var(--jy-r1); background: var(--jy-sunken); }
+
+/* 移动端卡片 */
+.jy-stations-m-issue { grid-column: 1 / -1; margin-top: 6px; }
+.jy-stations-m-issue .jy-stations-issue { position: static; }
+
+@media (max-width: 767px) {
+  .jy-stations-type { width: 100%; }
+  .jy-m-list .m-actions .ant-btn { min-height: 44px; }
+  .jy-m-list .m-actions .jy-icon-btn { width: 44px; height: 44px; }
+  .jy-stations-purchase { grid-template-columns: minmax(0, 1fr) 96px; }
+}
