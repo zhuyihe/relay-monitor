@@ -21,6 +21,7 @@
 .jy-usage-charts > .jy-panel { height: 100%; }
 .jy-usage-controls { display: flex; flex-wrap: wrap; gap: 8px; }
 .jy-usage-empty { min-height: 300px; display: grid; place-items: center; }
+.jy-usage-empty--short { min-height: 200px; }
 
 /* 趋势数据表：限高滚动，行标题不要沿用表头的底色和吸顶 */
 .jy-usage-scroll { max-height: 348px; overflow: auto; }

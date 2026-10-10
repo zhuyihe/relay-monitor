@@ -178,7 +178,7 @@ export default function AnalyticsPage() {
           <PanelSkeleton title="成本构成" lines={5} />
           <PanelSkeleton title="消耗时段" height={180} />
         </div>
-        <div className="jy-grid-2 jy-grid-even">
+        <div className="jy-grid-2">
           <PanelSkeleton title="可用天数" lines={4} />
           <PanelSkeleton title="成本概况" lines={4} />
         </div>
@@ -244,7 +244,8 @@ export default function AnalyticsPage() {
         <HeatPanel dv={dv} days={data.days} href30={href30} onShorter={() => setUrl({ range: "7d", start: null })} />
       </div>
 
-      <div className="jy-grid-2 jy-grid-even">
+      {/* 可用天数的进度条在半宽卡片里太窄，窄屏和总览一样先换成单列 */}
+      <div className="jy-grid-2">
         <RunwayPanel dv={dv} critDays={critDays} metaFailed={metaFailed} />
         <SummaryPanel dv={dv} days={data.days} />
       </div>

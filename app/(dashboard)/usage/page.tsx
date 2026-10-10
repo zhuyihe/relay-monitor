@@ -360,6 +360,9 @@ export default function UsagePage() {
   // 全部上游都查询失败时，"暂无数据"会被误读为没有用量
   const allFailed = agg.okSts.length === 0 && agg.errSts.length > 0;
   const emptyTitle = allFailed ? "用量查询全部失败，暂时没有数据" : "该范围内暂无用量数据";
+  const emptyDesc = allFailed ? "失败原因见上方，恢复后会自动显示。" : "换一个时间范围，或在筛选里选择其他上游资源。";
+  // 整个范围都没有用量时只留一个空状态，不再并排三个空卡片
+  const noData = trendEmpty && !agg.models.length;
 
   const trendTable = (
     <div className="jy-table-wrap jy-usage-scroll" tabIndex={0} role="region" aria-label="Token 用量趋势数据">
@@ -537,133 +540,143 @@ export default function UsagePage() {
         </div>
       )}
 
-      <div className="jy-usage-charts">
-        <Panel
-          title="Token 用量趋势"
-          caption={hourly ? "按小时汇总" : "按天汇总"}
-          extra={
-            <div className="jy-usage-controls">
-              <Seg
-                size="sm"
-                label="分组方式"
-                value={group}
-                onChange={setGroup}
-                options={[
-                  { value: "total", label: "合计" },
-                  { value: "upstream", label: "按上游" },
-                ]}
-              />
-              <Seg
-                size="sm"
-                label="显示方式"
-                value={trendView}
-                onChange={(v) => setTrendView(v as "chart" | "table")}
-                options={[
-                  { value: "chart", label: "图表" },
-                  { value: "table", label: "表格" },
-                ]}
-              />
-            </div>
-          }
-          body={trendView === "table" && trendHasData ? "flush" : true}
-        >
-          {!trendHasData ? (
-            <div className="jy-usage-empty">
-              <EmptyState title={emptyTitle} desc={allFailed ? "失败原因见上方，恢复后会自动显示。" : "换一个时间范围，或在筛选里选择其他上游资源。"} />
-            </div>
-          ) : trendView === "table" ? (
-            trendTable
-          ) : (
-            trendChart
-          )}
+      {noData ? (
+        <Panel title="用量明细">
+          <div className="jy-usage-empty jy-usage-empty--short">
+            <EmptyState title={emptyTitle} desc={emptyDesc} />
+          </div>
         </Panel>
+      ) : (
+        <>
+          <div className="jy-usage-charts">
+            <Panel
+              title="Token 用量趋势"
+              caption={hourly ? "按小时汇总" : "按天汇总"}
+              extra={
+                <div className="jy-usage-controls">
+                  <Seg
+                    size="sm"
+                    label="分组方式"
+                    value={group}
+                    onChange={setGroup}
+                    options={[
+                      { value: "total", label: "合计" },
+                      { value: "upstream", label: "按上游" },
+                    ]}
+                  />
+                  <Seg
+                    size="sm"
+                    label="显示方式"
+                    value={trendView}
+                    onChange={(v) => setTrendView(v as "chart" | "table")}
+                    options={[
+                      { value: "chart", label: "图表" },
+                      { value: "table", label: "表格" },
+                    ]}
+                  />
+                </div>
+              }
+              body={trendView === "table" && trendHasData ? "flush" : true}
+            >
+              {!trendHasData ? (
+                <div className="jy-usage-empty">
+                  <EmptyState title={emptyTitle} desc={emptyDesc} />
+                </div>
+              ) : trendView === "table" ? (
+                trendTable
+              ) : (
+                trendChart
+              )}
+            </Panel>
 
-        <Panel
-          title="分模型 Token"
-          caption={agg.modelsByDate ? "Sub2API 模型明细按自然日（昨日+今日）统计" : "按用量降序，最多显示 10 项"}
-        >
-          {!modelChartItems.length ? (
-            <div className="jy-usage-empty">
+            <Panel
+              title="分模型 Token"
+              caption={agg.modelsByDate ? "Sub2API 模型明细按自然日（昨日+今日）统计" : "按用量降序，最多显示 10 项"}
+            >
+              {!modelChartItems.length ? (
+                <div className="jy-usage-empty">
+                  <EmptyState title={emptyTitle} />
+                </div>
+              ) : (
+                <ChartBox h={CHART_H}>
+                  <Bar
+                    data={modelChartItems}
+                    xField="model"
+                    yField="tokens"
+                    height={CHART_H}
+                    theme={kit.theme}
+                    interaction={kit.interaction}
+                    style={{ fill: kit.p.cobalt, maxWidth: 16, radiusTopRight: 4, radiusBottomRight: 4 }}
+                    axis={{
+                      x: { ...kit.xAxis, line: false, labelFill: kit.p["ink-2"], labelFormatter: (v: any) => truncateLabel(v, isMobile ? 12 : 20) },
+                      y: false,
+                    }}
+                    label={isMobile ? false : { text: (d: any) => fmtTokens(d.tokens), position: "right", dx: 4, fill: kit.p["ink-2"], fillOpacity: 1 }}
+                    tooltip={{ title: (d: any) => d.model, items: tipItems }}
+                  />
+                </ChartBox>
+              )}
+            </Panel>
+          </div>
+
+          {/* 模型明细表 */}
+          <Panel title="模型明细" caption={`共 ${agg.models.length} 个模型`} body="flush" foot={NEWAPI_TOKEN_NOTE}>
+            {!agg.models.length ? (
               <EmptyState title={emptyTitle} />
-            </div>
-          ) : (
-            <ChartBox h={CHART_H}>
-              <Bar
-                data={modelChartItems}
-                xField="model"
-                yField="tokens"
-                height={CHART_H}
-                theme={kit.theme}
-                interaction={kit.interaction}
-                style={{ fill: kit.p.cobalt, maxWidth: 16, radiusTopRight: 4, radiusBottomRight: 4 }}
-                axis={{
-                  x: { ...kit.xAxis, line: false, labelFill: kit.p["ink-2"], labelFormatter: (v: any) => truncateLabel(v, isMobile ? 12 : 20) },
-                  y: false,
-                }}
-                label={isMobile ? false : { text: (d: any) => fmtTokens(d.tokens), position: "right", dx: 4, fill: kit.p["ink-2"], fillOpacity: 1 }}
-                tooltip={{ title: (d: any) => d.model, items: tipItems }}
-              />
-            </ChartBox>
-          )}
-        </Panel>
-      </div>
-
-      {/* 模型明细表 */}
-      <Panel title="模型明细" caption={`共 ${agg.models.length} 个模型`} body="flush" foot={NEWAPI_TOKEN_NOTE}>
-        {!agg.models.length ? (
-          <EmptyState title={emptyTitle} />
-        ) : (
-          <>
-            <div className="jy-table-wrap has-mobile">
-              <table className="jy-data">
-                <thead>
-                  <tr>
-                    <th scope="col">模型</th>
-                    <th scope="col" className="r">请求数</th>
-                    <th scope="col" className="r">输入 Tokens</th>
-                    <th scope="col" className="r">输出 Tokens</th>
-                    <th scope="col" className="r">总 Tokens</th>
-                    <th scope="col" className="r">用量成本</th>
-                  </tr>
-                </thead>
-                <tbody>
+            ) : (
+              <>
+                <div className="jy-table-wrap has-mobile">
+                  <table className="jy-data">
+                    <thead>
+                      <tr>
+                        <th scope="col">模型</th>
+                        <th scope="col" className="r">请求数</th>
+                        <th scope="col" className="r">输入 Tokens</th>
+                        <th scope="col" className="r">输出 Tokens</th>
+                        <th scope="col" className="r">总 Tokens</th>
+                        <th scope="col" className="r">用量成本</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {agg.models.map((m: any) => (
+                        <tr key={m.model}>
+                          <td className="jy-usage-model">{m.model}</td>
+                          <td className="r jy-num">{num(m.requests)}</td>
+                          <td className="r jy-num">{m.hasIO ? num(m.inputTokens) : "—"}</td>
+                          <td className="r jy-num">{m.hasIO ? num(m.outputTokens) : "—"}</td>
+                          <td className="r jy-num">{num(m.tokens)}</td>
+                          <td className="r jy-num">{cny4(m.cost)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <ul className="jy-m-list">
                   {agg.models.map((m: any) => (
-                    <tr key={m.model}>
-                      <td className="jy-usage-model">{m.model}</td>
-                      <td className="r jy-num">{num(m.requests)}</td>
-                      <td className="r jy-num">{m.hasIO ? num(m.inputTokens) : "—"}</td>
-                      <td className="r jy-num">{m.hasIO ? num(m.outputTokens) : "—"}</td>
-                      <td className="r jy-num">{num(m.tokens)}</td>
-                      <td className="r jy-num">{cny4(m.cost)}</td>
-                    </tr>
+                    <li key={m.model}>
+                      <span className="m-top jy-usage-model">{m.model}</span>
+                      <span className="jy-num">{fmtTokens(m.tokens)}</span>
+                      <div className="m-sub">
+                        <span>
+                          请求 <b>{num(m.requests)}</b>
+                        </span>
+                        {m.hasIO ? (
+                          <span>
+                            输入/输出 <b>{num(m.inputTokens)}</b> / <b>{num(m.outputTokens)}</b>
+                          </span>
+                        ) : null}
+                        <span>
+                          用量成本 <b>{cny4(m.cost)}</b>
+                        </span>
+                      </div>
+                    </li>
                   ))}
-                </tbody>
-              </table>
-            </div>
-            <ul className="jy-m-list">
-              {agg.models.map((m: any) => (
-                <li key={m.model}>
-                  <span className="m-top jy-usage-model">{m.model}</span>
-                  <span className="jy-num">{fmtTokens(m.tokens)}</span>
-                  <div className="m-sub">
-                    <span>
-                      请求 <b>{num(m.requests)}</b>
-                    </span>
-                    {m.hasIO ? (
-                      <span>
-                        输入/输出 <b>{num(m.inputTokens)}</b> / <b>{num(m.outputTokens)}</b>
-                      </span>
-                    ) : null}
-                    <span>
-                      用量成本 <b>{cny4(m.cost)}</b>
-                    </span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </Panel>
+                </ul>
+              </>
+            )}
+          </Panel>
+        </>
+      )}
     </div>
   );
 }

@@ -437,6 +437,8 @@ function AttentionPanel({
   });
 
   const hidden = actions.all.length - actions.visible.length;
+  // 每个资源最多一条待处理，剩下的就是状态正常的，列表短时用一句话交代其余资源
+  const healthy = stations.filter((s) => s && !s.isOwn).length - actions.all.length;
   return (
     <Panel title="需要处理" badge={<CountBadge count={actions.all.length} />} extra={sortNote} body={false}>
       <AttentionList
@@ -447,6 +449,8 @@ function AttentionPanel({
             <Link href="/stations?filter=attention" className="jy-caption-link">
               还有 {hidden} 项，查看全部
             </Link>
+          ) : healthy > 0 ? (
+            <span className="jy-caption">其余 {healthy} 个上游资源状态正常</span>
           ) : undefined
         }
       />

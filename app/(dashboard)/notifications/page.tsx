@@ -519,7 +519,8 @@ export default function NotificationsPage() {
     const off = !rules[ruleKey];
     if (ruleKey === "onLow")
       return (
-        <p className="jy-notifications-cond jy-caption">
+        // 纯文字，不用 flex 容器，否则链接两侧会被 gap 撑开
+        <p className="jy-notifications-note">
           阈值取全局低余额阈值（<Link className="jy-link" href="/settings">系统设置</Link>），单个上游可单独覆盖
         </p>
       );
@@ -838,7 +839,7 @@ export default function NotificationsPage() {
           badge={<Dirty show={drDirty} />}
           caption="定时汇总昨日自营业务经营情况并推送（时间按服务器时区）"
         >
-          <Form layout="vertical" requiredMark={false} component="div" className="jy-notifications-dr">
+          <Form layout="vertical" requiredMark={false} component="div" className="jy-form jy-notifications-dr">
             <Form.Item label="启用日报" htmlFor={`${uid}-dr-enabled`} extra="每天在设定时间生成并发送昨日报告">
               <Switch
                 id={`${uid}-dr-enabled`}
@@ -928,7 +929,7 @@ export default function NotificationsPage() {
         destroyOnHidden
       >
         <p className="jy-caption jy-notifications-modal-intro">默认接收所有告警；可在「告警规则」中按告警类型指定渠道。</p>
-        <Form layout="vertical" onFinish={saveChannel} autoComplete="off">
+        <Form layout="vertical" onFinish={saveChannel} autoComplete="off" className="jy-form">
           <div className="jy-two">
             <Form.Item label="名称" htmlFor={`${uid}-ch-name`}>
               <Input

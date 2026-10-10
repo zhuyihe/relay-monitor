@@ -18,6 +18,8 @@
 
 .jy-settings-form { display: flex; flex-direction: column; gap: 16px; max-width: 560px; }
 .jy-settings-form .jy-two { gap: 16px; }
+/* 表单本身有 16px 行距，保存区只补到和其他分组一样的 20px */
+.jy-settings-form > .jy-settings-actions { margin-top: 4px; }
 .jy-settings-inline-error { margin: -16px -24px 16px; }
 .jy-settings-banner-text { display: flex; flex-direction: column; gap: 2px; }
 .jy-settings-banner-text b { font-weight: 600; }

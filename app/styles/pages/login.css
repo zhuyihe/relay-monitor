@@ -18,8 +18,7 @@
     0 0 0 144px color-mix(in srgb, var(--jy-sider-ink) 2%, transparent);
 }
 .jy-login-brand-body { position: relative; z-index: 1; max-width: 560px; margin: auto 0; padding-block: 72px; }
-.jy-login-eyebrow { margin: 0 0 14px; font-size: 12px; line-height: 18px; font-weight: 600; letter-spacing: .12em; color: var(--jy-cobalt); }
-.jy-login-brand .jy-login-eyebrow { color: var(--jy-sider-ink-3); }
+.jy-login-eyebrow { margin: 0 0 14px; font-size: 12px; line-height: 18px; font-weight: 600; letter-spacing: .12em; color: var(--jy-sider-ink-3); }
 .jy-login-tagline { max-width: 520px; margin: 0; font-size: clamp(32px, 4vw, 52px); line-height: 1.18; font-weight: 600; letter-spacing: -.02em; color: var(--jy-sider-ink); }
 .jy-login-lead { max-width: 470px; margin: 24px 0 0; font-size: 15px; line-height: 1.8; color: var(--jy-sider-ink-3); }
 .jy-login-caps { display: grid; gap: 12px; margin: 32px 0 0; padding: 0; list-style: none; font-size: 14px; color: var(--jy-sider-ink); }

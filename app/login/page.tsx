@@ -76,7 +76,6 @@ export default function LoginPage() {
             <BrandMark showWordmark size={34} label={BRAND.name} subtitle={BRAND.productDescriptor} />
           </div>
           <div className="jy-login-heading">
-            <p className="jy-login-eyebrow">安全访问</p>
             <h1>登录{BRAND.productName}</h1>
             <p>使用管理员账户继续。</p>
           </div>

@@ -428,9 +428,14 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-fs > :not(legend) { clear: both; }
 .jy-fs > legend + .fs-desc { margin-top: -8px; }
 .jy-fs .fs-desc { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); margin: 0 0 16px; }
-.jy-fs .ant-form-item { margin-bottom: 16px; }
+.jy-fs .ant-form-item, .jy-form .ant-form-item { margin-bottom: 16px; }
 .jy-fs .ant-form-item:last-child { margin-bottom: 0; }
-.jy-fs .ant-form-item-label > label { font-size: 13px; color: var(--jy-ink-2); font-weight: 500; }
+/* 表单字段层级：标签 13px 次级墨色，说明 12px 弱墨色（.jy-form 给不分组的表单用）。
+   多一层 .ant-form-item：antd 的同级规则后注入，不抬高就压不过 */
+.jy-fs .ant-form-item .ant-form-item-label > label,
+.jy-form .ant-form-item .ant-form-item-label > label { font-size: 13px; color: var(--jy-ink-2); font-weight: 500; }
+.jy-fs .ant-form-item .ant-form-item-extra,
+.jy-form .ant-form-item .ant-form-item-extra { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); margin-top: 4px; }
 .jy-two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
 .jy-field { display: flex; flex-direction: column; gap: 6px; }
 .jy-field > label { font-size: 13px; line-height: 20px; color: var(--jy-ink-2); font-weight: 500; }
@@ -559,6 +564,7 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-grid-2, .jy-grid-3 { gap: 16px; }
   .jy-panel-head { padding: 16px 16px 0; }
   .jy-panel-body { padding: 12px 16px 16px; }
+  .jy-panel-body--flush { padding: 12px 0 0; }
   .jy-panel-sub { padding: 4px 16px 8px; }
   .jy-panel-foot { padding: 0 16px 16px; }
   .jy-equation { padding: 16px; }
@@ -585,6 +591,8 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-toolbar .spacer { display: none; }
   .jy-toolbar .jy-seg { overflow-x: auto; }
   .jy-two { grid-template-columns: 1fr; }
+  /* 叠成单列后两个字段之间没有行距（Form.Item 自带下边距，不用补） */
+  .jy-two:has(> .jy-field) { row-gap: 16px; }
   .jy-onboard { padding: 24px 16px; gap: 24px; }
   .jy-tabs { gap: 20px; overflow-x: auto; }
   .jy-tabs-bar .extra { display: none; }

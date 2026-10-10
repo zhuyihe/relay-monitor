@@ -12,6 +12,7 @@
 .jy-notifications-cond .ant-input-number { width: 104px; }
 .jy-notifications-cond .ant-select { width: 80px; }
 .jy-notifications-cond .jy-err { flex-basis: 100%; }
+.jy-notifications-note { margin: 8px 0 0; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
 
 .jy-notifications-pad { padding: 4px 24px 24px; border-top: 1px solid var(--jy-rule-soft); }
 .jy-notifications-pad .jy-field .ant-input-number { width: 160px; }
@@ -49,7 +50,7 @@
   .jy-notifications-rules thead { display: none; }
   .jy-notifications-rules tr { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 12px; padding: 14px 16px; border-top: 1px solid var(--jy-rule-soft); }
   .jy-notifications-rules tr:first-child { border-top: 0; }
-  .jy-notifications-rules td { display: block; padding: 0; border: 0; }
+  table.jy-notifications-rules td { display: block; padding: 0; border: 0; }
   .jy-notifications-rules .col-switch { width: auto; }
   .jy-notifications-rules .col-to { grid-column: 2; width: auto; }
   .jy-notifications-pad { padding: 4px 16px 16px; }
