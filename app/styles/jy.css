@@ -125,11 +125,17 @@ body {
 
 .jy-scrim { position: fixed; inset: 0; z-index: 45; background: var(--jy-scrim); opacity: 0; pointer-events: none; transition: opacity .2s; }
 
-/* 旧页面的 PageContainer 标题由顶栏承担，这里只保留 extra 操作区 */
-.jy-content .ant-pro-page-container .ant-page-header-heading-title,
-.jy-content .ant-pro-page-container .ant-page-header-heading-sub-title { display: none; }
-.jy-content .ant-pro-page-container-children-container { padding-inline: 0; padding-block: 0; }
-.jy-content .ant-pro-page-container-warp-page-header { padding-inline: 0; }
+/* 旧页面（对账页）的 PageContainer：标题由顶栏承担，副标题作为页面说明与 extra 操作区同一行 */
+.jy-content .ant-pro-page-container .ant-page-header-heading-title { display: none; }
+.jy-content .ant-pro-page-container .ant-page-header-heading-sub-title { margin: 0; font-size: 14px; line-height: 22px; color: var(--jy-ink-2); }
+.jy-content .ant-pro-page-container .ant-pro-page-container-children-container { padding-inline: 0; padding-block: 0; }
+.jy-content .ant-pro-page-container .ant-pro-page-container-warp-page-header { padding: 0 0 16px; }
+.jy-content .ant-pro-page-container .ant-page-header .ant-page-header-heading { padding-block: 0; align-items: center; }
+.jy-content .ant-pro-page-container .ant-page-header-heading > .ant-page-header-heading-left,
+.jy-content .ant-pro-page-container .ant-page-header-heading > .ant-page-header-heading-extra { margin-block: 0; }
+/* 对账页移动端用 span:not(.anticon) 隐藏按钮文字，antd 6 的图标包在 .ant-btn-icon 里也被一起隐藏，按钮成了空白方块 */
+button.reconciliation-primary-action > .ant-btn-icon { display: inline-flex; }
+button.reconciliation-primary-action:not(:has(> .ant-btn-icon)) > span { display: inline; }
 
 /* ─── 分段控件（时间范围 / 筛选） ─────────────────────── */
 .jy-seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--jy-sunken); border-radius: var(--jy-r2); max-width: 100%; }
