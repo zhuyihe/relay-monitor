@@ -10,7 +10,8 @@ import { evaluateStation } from "../lib/alerts.js";
 // 同一站点同时只允许一个刷新在途：定时器、手动刷新、保存后刷新可能重叠，
 // 并发会重复发告警、并让 Sub2API 轮换的 refresh_token 相互作废
 export function refreshStation(rt, station) {
-  if (station.archivedAt) return Promise.resolve(null); // 归档资源不再刷新或触发告警
+  station = station && rt.store.get(station.id);
+  if (!station || station.archivedAt || station.monitorEnabled === false) return Promise.resolve(null);
   if (station.type === "fixed") return Promise.resolve(null); // 固定成本渠道不访问任何接口
   const inflight = rt._inflightRefresh || (rt._inflightRefresh = new Map());
   const running = inflight.get(station.id);
@@ -26,6 +27,7 @@ function scheduleErrorRetry(rt, station) {
   const timers = rt._errorRetryTimers || (rt._errorRetryTimers = new Map());
   const old = timers.get(station.id);
   if (old) { clearTimeout(old); timers.delete(station.id); }
+  if (station.archivedAt || station.monitorEnabled === false) return;
 
   const r = rt.store.rules || {};
   const delaySec = Number(r.errorRetrySec);
@@ -39,7 +41,7 @@ function scheduleErrorRetry(rt, station) {
   const t = setTimeout(() => {
     timers.delete(station.id);
     const cur = rt.store.get(station.id); // 期间可能已被删除
-    if (cur && !cur.archivedAt) refreshStation(rt, cur).catch(() => {});
+    if (cur && !cur.archivedAt && cur.monitorEnabled !== false) refreshStation(rt, cur).catch(() => {});
   }, delaySec * 1000);
   if (t.unref) t.unref();
   timers.set(station.id, t);
@@ -48,7 +50,8 @@ function scheduleErrorRetry(rt, station) {
 async function doRefreshOne(rt, station) {
   const { result } = await queryStation(station);
   // 查询在途期间站点可能已被删除：丢弃结果，避免复活历史记录或发幽灵告警
-  if (!rt.store.get(station.id) || station.archivedAt) return result;
+  const current = rt.store.get(station.id);
+  if (!current || current.archivedAt || current.monitorEnabled === false) return result;
   station.balance = result;
   if (result.ok) rt.history.append(station.id, result.remaining, result.used);
 
@@ -58,7 +61,8 @@ async function doRefreshOne(rt, station) {
     const next = await evaluateStation(
       station, prediction, rt.store.rules, rt.store.channels, rt.store.settings.lowBalanceUsd
     );
-    if (next) station.alertState = next;
+    const latest = rt.store.get(station.id);
+    if (next && latest && !latest.archivedAt && latest.monitorEnabled !== false) latest.alertState = next;
   } catch (err) {
     console.error("告警评估失败:", err?.message);
   }

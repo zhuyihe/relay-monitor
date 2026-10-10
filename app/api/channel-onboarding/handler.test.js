@@ -1,0 +1,392 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { handleChannelOnboardingRequest } from "./handler.js";
+import { createChannelOnboardingModule } from "../../../server/channel-onboarding.js";
+import { Store } from "../../../db/store.js";
+import { queryAccountIdentity } from "../../../lib/providers.js";
+
+async function liveOnboarding(dependencies = {}) {
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]],
+    commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const store = new Store(pool);
+  const own = await store.add({ type: "newapi", baseUrl: "https://own.test", accessToken: "own-pat", isOwn: true });
+  let catalogue = null, links = [];
+  const rt = { pool, store, reconciliation: { listRules: async () => [] } };
+  rt.channelOnboarding = await createChannelOnboardingModule(rt, {
+    repository: { getCatalogue: async () => catalogue, listLinks: async () => links,
+      saveCatalogue: async (value) => { catalogue = structuredClone(value); },
+      saveLinks: async (values) => { links = values; return values; } },
+    queryChannels: async () => [{ id: 1, type: 1, name: "Sales", baseUrl: "https://up.test", groups: [] }],
+    refresh: async () => {}, ...dependencies,
+    queryIdentity: async (connection) => connection.isOwn
+      ? { provider: "newapi", baseUrl: connection.baseUrl, accountId: "1" }
+      : (dependencies.queryIdentity || queryAccountIdentity)(connection),
+  }).load();
+  await rt.channelOnboarding.sync();
+  const channel = (await rt.channelOnboarding.list()).channels[0];
+  return { rt, own, input: { ownStationId: own.id, channelId: 1, channelRevision: channel.revision }, links: () => links };
+}
+
+const request = (body = {}) => new Request("http://localhost/api/channel-onboarding", {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+});
+
+test("F02 authenticated legacy upstream POST refuses unknown old credentials after normal userId edit", async (t) => {
+  const f = await liveOnboarding(), station = await f.rt.store.add({ type: "newapi", baseUrl: "https://up.test", accessToken: "old-A", userId: "1" },
+    { verifiedIdentity: { provider: "newapi", baseUrl: "https://up.test", accountId: "1" } });
+  await f.rt.store.update(station.id, { userId: "2" }); assert.equal(station.verifiedIdentity, null);
+  f.rt.store.data.auth = { isDefault: false };
+  f.rt.sessions = { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 };
+  const before = structuredClone(f.rt.store.data), requests = [];
+  t.mock.method(globalThis, "fetch", async (input, options = {}) => {
+    const url = new URL(input), token = options.headers?.Authorization; assert.equal(url.host, "up.test"); requests.push(token);
+    if (token === "Bearer old-A") return Response.json({ success: false, message: "denied old-A" }, { status: 401 });
+    const data = url.pathname === "/api/user/self" ? { id: 2 }
+      : url.pathname === "/api/status" ? { quota_per_unit: 100 }
+        : url.pathname === "/api/user/self/groups" ? { g1: 1 } : { total: 0, items: [] };
+    return Response.json({ success: true, data });
+  });
+  const { registerHooks } = await import("node:module"); globalThis.__u03AccountsRuntime = f.rt;
+  const hooks = registerHooks({
+    resolve(specifier, context, next) { return specifier === "next/server" ? { url: "test:f02-next", shortCircuit: true } : next(specifier, context); },
+    load(url, context, next) {
+      if (url === "test:f02-next") return { format: "module", shortCircuit: true, source: "export const NextResponse = {json:(value,init)=>Response.json(value,init)};" };
+      if (url.endsWith("/lib/runtime.js")) return { format: "module", shortCircuit: true, source: "export const getRuntime = async () => globalThis.__u03AccountsRuntime;" };
+      return next(url, context);
+    },
+  });
+  try {
+    const { POST } = await import("../reconciliation/upstreams/route.js");
+    const body = { baseUrl: station.baseUrl, accessToken: "new-B", verifiedIdentity: { accountId: "2" }, guard: {} };
+    const call = (authenticated) => POST(new Request("http://localhost/api/reconciliation/upstreams", { method: "POST",
+      headers: authenticated ? { cookie: "rm_session=valid" } : {}, body: JSON.stringify(body) }));
+    assert.equal((await call(false)).status, 401); assert.equal(requests.length, 0);
+    const response = await call(true); assert.equal(response.status, 400);
+    assert.doesNotMatch(JSON.stringify(await response.json()), /old-A|new-B|verifiedIdentity|guard/);
+    assert.ok(requests.includes("Bearer old-A")); assert.deepEqual(f.rt.store.data, before);
+  } finally { hooks.deregister(); delete globalThis.__u03AccountsRuntime; }
+});
+
+test("U06 authenticated GET/sync真实Provider来源DTO，默认零读写且失败保留最后核验namespace", async (t) => {
+  let writes = 0, catalogueWrites = 0, catalogue = null, failIdentity = false;
+  const requests = [], now = Date.parse("2026-10-09T07:00:00Z");
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => { writes += 1; return [[]]; },
+    commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const store = new Store(pool), own = await store.add({ name: "Own", type: "newapi", baseUrl: "https://u06-own.test",
+    accessToken: "u06-own-a-pat", isOwn: true });
+  const rt = { pool, store, reconciliation: { listRules: async () => [] },
+    sessions: { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
+  store.data.auth = { ...store.auth, isDefault: false };
+  rt.channelOnboarding = await createChannelOnboardingModule(rt, { now: () => now, repository: {
+    getCatalogue: async () => catalogue, listLinks: async () => [],
+    saveCatalogue: async (value) => { catalogueWrites += 1; catalogue = structuredClone(value); },
+    saveLinks: async () => { assert.fail("source read/sync must not save links"); },
+  } }).load();
+  t.mock.method(globalThis, "fetch", async (input, options) => {
+    const url = new URL(String(input)), authorization = options?.headers?.Authorization || "";
+    requests.push({ path: url.pathname, authorization });
+    if (url.pathname === "/api/user/self") {
+      if (failIdentity) return { status: 403, text: async () => JSON.stringify({ success: false, message: `denied ${authorization}` }) };
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { id: authorization.includes("u06-own-b-pat") ? 42 : 41 } }) };
+    }
+    assert.equal(url.pathname, "/api/channel/");
+    return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: 1, items: [{ id: 1, name: "Sales", type: 1,
+      status: 1, base_url: "https://supplier.test", group: "sales", key: "private-channel-key", raw: { password: "private-channel-password" } }] } }) };
+  });
+  const { registerHooks } = await import("node:module"); globalThis.__u03AccountsRuntime = rt;
+  const hooks = registerHooks({
+    resolve(specifier, context, next) { return specifier === "next/server" ? { url: "test:u06-source-next", shortCircuit: true } : next(specifier, context); },
+    load(url, context, next) {
+      if (url === "test:u06-source-next") return { format: "module", shortCircuit: true, source: "export const NextResponse = {json:(value,init)=>Response.json(value,init)};" };
+      if (url.endsWith("/lib/runtime.js")) return { format: "module", shortCircuit: true, source: "export const getRuntime = async () => globalThis.__u03AccountsRuntime;" };
+      return next(url, context);
+    },
+  });
+  try {
+    const { GET } = await import("./route.js"), { POST } = await import("./sync/route.js");
+    const url = "http://localhost/api/channel-onboarding?ownSource=forged&sourceVersion=forged";
+    const get = () => GET(new Request(url, { headers: { cookie: "rm_session=valid" } }));
+    const sync = () => POST(new Request("http://localhost/api/channel-onboarding/sync", { method: "POST",
+      headers: { cookie: "rm_session=valid" }, body: JSON.stringify({ ownSource: "forged", sourceVersion: "forged" }) }));
+    assert.equal((await GET(new Request(url))).status, 401);
+    assert.equal((await POST(new Request("http://localhost/api/channel-onboarding/sync", { method: "POST" }))).status, 401);
+    const initialWrites = writes, before = structuredClone(store.data), initial = await (await get()).json();
+    assert.deepEqual(initial, { ownSource: null, sourceVersion: rt.channelOnboarding.getSourceCatalogue().sourceVersion,
+      ownStation: { id: own.id, name: "Own", type: "newapi", baseUrl: own.baseUrl, monitorEnabled: true, identity: null },
+      upstreams: [], rules: [], channels: [], syncedAt: null, stale: true, error: null });
+    assert.equal(requests.length, 0); assert.equal(writes, initialWrites); assert.equal(catalogueWrites, 0);
+    const synced = await (await sync()).json(), namespaceKey = createHash("sha256")
+      .update(JSON.stringify(["newapi", own.baseUrl, "41"])).digest("hex");
+    assert.deepEqual(synced.ownSource, { stationId: own.id, provider: "newapi", baseUrl: own.baseUrl, accountId: "41", namespaceKey });
+    assert.match(synced.sourceVersion, /^[a-f0-9]{64}$/); assert.equal(synced.stale, false); assert.equal(synced.syncedAt, now);
+    assert.deepEqual(Object.keys(synced).sort(), ["channels", "error", "ownSource", "ownStation", "rules", "sourceVersion", "stale", "syncedAt", "upstreams"]);
+    assert.equal(requests.length, 2); assert.equal(catalogueWrites, 1); assert.equal(writes, initialWrites);
+    assert.deepEqual(await (await get()).json(), synced); assert.equal(requests.length, 2);
+    assert.deepEqual(store.data, before, "source sync does not backfill Store identity");
+    await store.update(own.id, { accessToken: "u06-own-b-pat" });
+    const savedWrites = writes; failIdentity = true;
+    const failed = await (await sync()).json();
+    assert.equal(failed.stale, true); assert.ok(failed.error); assert.deepEqual(failed.ownSource, synced.ownSource);
+    assert.notEqual(failed.sourceVersion, synced.sourceVersion); assert.equal(catalogueWrites, 1); assert.equal(writes, savedWrites);
+    const failedRequests = requests.length;
+    assert.deepEqual(await (await get()).json(), failed); assert.equal(requests.length, failedRequests);
+    failIdentity = false;
+    const replaced = await (await sync()).json();
+    assert.equal(replaced.stale, false); assert.equal(replaced.ownSource.accountId, "42");
+    assert.notEqual(replaced.ownSource.namespaceKey, synced.ownSource.namespaceKey); assert.equal(catalogueWrites, 2);
+    assert.equal(writes, savedWrites); assert.equal(store.get(own.id).verifiedIdentity, null);
+    assert.doesNotMatch(JSON.stringify([initial, synced, failed, replaced]), /u06-own-[ab]-pat|private-channel|Authorization|accessToken|password|raw|forged/);
+  } finally { hooks.deregister(); delete globalThis.__u03AccountsRuntime; }
+});
+
+test("U03 authenticated accounts GET走实际wrapper/module，全量read无上游或写入，忽略查询伪造identity/guard", async (t) => {
+  const f = await liveOnboarding();
+  const identity = { provider: "newapi", baseUrl: "https://up.test", accountId: "7" };
+  const monitor = await f.rt.store.add({ name: "Monitor", type: "newapi", baseUrl: identity.baseUrl, accessToken: "monitor-pat" }, { verifiedIdentity: identity });
+  const dedicated = await f.rt.store.add({ name: "Billing", type: "newapi", baseUrl: identity.baseUrl, accessToken: "billing-pat", monitorEnabled: false }, { verifiedIdentity: identity });
+  await f.rt.store.archive(monitor.id);
+  const pure = await f.rt.store.add({ type: "newapi-key", baseUrl: identity.baseUrl, apiKey: "pure-api-key" });
+  f.rt.store.data.auth = { ...f.rt.store.auth, isDefault: false };
+  f.rt.sessions = { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 };
+  const before = structuredClone(f.rt.store.data);
+  t.mock.method(globalThis, "fetch", async () => { throw new Error("GET must not query upstream"); });
+  t.mock.method(f.rt.store, "_writeNow", async () => { assert.fail("GET must not save Store"); });
+  const { registerHooks } = await import("node:module");
+  globalThis.__u03AccountsRuntime = f.rt;
+  const hooks = registerHooks({
+    resolve(specifier, context, next) { return specifier === "next/server" ? { url: "test:u03-next", shortCircuit: true } : next(specifier, context); },
+    load(url, context, next) {
+      if (url === "test:u03-next") return { format: "module", shortCircuit: true, source: "export const NextResponse = {json:(value,init)=>Response.json(value,init)};" };
+      if (url.endsWith("/lib/runtime.js")) return { format: "module", shortCircuit: true, source: "export const getRuntime = async () => globalThis.__u03AccountsRuntime;" };
+      return next(url, context);
+    },
+  });
+  try {
+    const { GET } = await import("./accounts/route.js");
+    const url = "http://localhost/api/channel-onboarding/accounts?verifiedIdentity=forged&guard=forged";
+    const unauthenticated = await GET(new Request(url)); assert.equal(unauthenticated.status, 401);
+    assert.equal((await unauthenticated.json()).code, "UNAUTHORIZED");
+    const response = await GET(new Request(url, { headers: { cookie: "rm_session=valid" } }));
+    assert.equal(response.status, 200); const model = await response.json(); assert.equal(model.accounts.length, 1);
+    assert.deepEqual(model.accounts[0].resources.map((resource) => resource.id).sort(), [monitor.id, dedicated.id].sort());
+    assert.deepEqual(model.unverifiedResources.map((resource) => resource.id), [pure.id]);
+    assert.doesNotMatch(JSON.stringify(model), /monitor-pat|billing-pat|pure-api-key|forged|verifiedIdentity/);
+    assert.deepEqual(f.rt.store.data, before);
+    globalThis.__u03AccountsRuntime = { ...f.rt, channelOnboarding: null };
+    assert.equal((await GET(new Request(url, { headers: { cookie: "rm_session=valid" } }))).status, 503);
+  } finally { hooks.deregister(); delete globalThis.__u03AccountsRuntime; }
+});
+
+test("U04 三条authenticated authorization POST实际wrapper/module/Provider，params独占accountKey且recover零请求零保存", async (t) => {
+  const f = await liveOnboarding(), identity = { provider: "newapi", baseUrl: "https://up.test", accountId: "7" };
+  const monitor = await f.rt.store.add({ type: "newapi", baseUrl: identity.baseUrl, accessToken: "current-pat" }, { verifiedIdentity: identity });
+  const dedicated = await f.rt.store.add({ type: "newapi", baseUrl: identity.baseUrl, accessToken: "current-billing-pat", monitorEnabled: false }, { verifiedIdentity: identity });
+  f.rt.store.data.auth = { ...f.rt.store.auth, isDefault: false };
+  f.rt.sessions = { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 };
+  let fetches = 0;
+  t.mock.method(globalThis, "fetch", async () => { fetches += 1; return { status: 200, text: async () => JSON.stringify({ success: true, data: { id: 7 } }) }; });
+  const accountKey = createHash("sha256").update(JSON.stringify([identity.provider, identity.baseUrl, identity.accountId])).digest("hex");
+  const input = { requestId: "authenticated-update", targetStationIds: [monitor.id, dedicated.id],
+    authorization: { type: "newapi", baseUrl: identity.baseUrl, accessToken: "replacement-pat", verifiedIdentity: { accountId: "forged" },
+      authorizationUpdateRef: { requestId: "forged" } }, accountKey: "forged", options: { guard: "forged" } };
+  const { registerHooks } = await import("node:module"); globalThis.__u03AccountsRuntime = f.rt;
+  const hooks = registerHooks({
+    resolve(specifier, context, next) { return specifier === "next/server" ? { url: "test:u04-next", shortCircuit: true } : next(specifier, context); },
+    load(url, context, next) {
+      if (url === "test:u04-next") return { format: "module", shortCircuit: true, source: "export const NextResponse = {json:(value,init)=>Response.json(value,init)};" };
+      if (url.endsWith("/lib/runtime.js")) return { format: "module", shortCircuit: true, source: "export const getRuntime = async () => globalThis.__u03AccountsRuntime;" };
+      return next(url, context);
+    },
+  });
+  try {
+    const [{ POST: probeRoute }, { POST: updateRoute }, { POST: recoverRoute }] = await Promise.all([
+      import("./accounts/[accountKey]/authorization/probe/route.js"), import("./accounts/[accountKey]/authorization/route.js"),
+      import("./accounts/[accountKey]/authorization/recover/route.js"),
+    ]);
+    const send = (route, body, authenticated = true, pathKey = accountKey) => route(new Request(`http://localhost/api/channel-onboarding/accounts/${pathKey}/authorization`, {
+      method: "POST", headers: authenticated ? { cookie: "rm_session=valid" } : {}, body: JSON.stringify(body),
+    }), { params: Promise.resolve({ accountKey: pathKey }) });
+    for (const route of [probeRoute, updateRoute, recoverRoute]) assert.equal((await send(route, input, false)).status, 401);
+    assert.equal(fetches, 0);
+    assert.equal((await send(probeRoute, input, true, "invalid")).status, 400); assert.equal(fetches, 0);
+    const before = structuredClone(f.rt.store.data), response = await send(probeRoute, input); assert.equal(response.status, 200);
+    const probe = await response.json(); assert.equal(probe.accountKey, accountKey); assert.deepEqual(f.rt.store.data, before);
+    const updated = await (await send(updateRoute, { ...input, previewId: probe.previewId })).json(); assert.equal(updated.complete, true);
+    assert.ok(updated.targets.every((target) => target.status === "updated"));
+    const requests = fetches; t.mock.method(f.rt.store, "_writeNow", async () => { assert.fail("readonly recover must not write"); });
+    const recovered = await (await send(recoverRoute, { ...probe.retryInput, authorizationUpdateRef: "forged", identity: "forged" })).json();
+    assert.equal(recovered.complete, true); assert.equal(fetches, requests);
+    assert.doesNotMatch(JSON.stringify([probe, updated, recovered]), /current-pat|current-billing-pat|replacement-pat|forged|authorizationUpdateRef|digest/);
+    const invalid = await probeRoute(new Request("http://localhost/authorization", { method: "POST", headers: { cookie: "rm_session=valid" }, body: "private-password is not JSON" }),
+      { params: Promise.resolve({ accountKey }) }); assert.equal(invalid.status, 400); assert.equal((await invalid.json()).code, "INVALID_REQUEST");
+    globalThis.__u03AccountsRuntime = { ...f.rt, channelOnboarding: null };
+    assert.equal((await send(probeRoute, input)).status, 503);
+  } finally { hooks.deregister(); delete globalThis.__u03AccountsRuntime; }
+});
+
+test("U04 authorization失败诊断隐藏输入、当前和生成的JWT/password/PAT", async () => {
+  const station = { accessToken: "current-pat", password: "current-password", s2Tokens: { accessToken: "generated-access", refreshToken: "generated-refresh" } };
+  const rt = { store: { list: () => [station] }, channelOnboarding: { probeAccountAuthorization: async () => {
+    throw new Error("replacement-pat current-pat current-password generated-access generated-refresh");
+  } } };
+  const response = await handleChannelOnboardingRequest(request({ authorization: { accessToken: "replacement-pat" } }), rt, "probeAccountAuthorization", { accountKey: "account" });
+  assert.equal(response.status, 400); assert.doesNotMatch(JSON.stringify(await response.json()), /replacement-pat|current-pat|current-password|generated-access|generated-refresh/);
+});
+
+test("U03 accounts读取失败诊断隐藏全量saved凭据和JWT，不要求GET body", async () => {
+  const connection = { accessToken: "saved-pat", password: "saved-password", s2Tokens: { accessToken: "saved-access", refreshToken: "saved-refresh" } };
+  const rt = { store: { list: () => [connection] }, channelOnboarding: { listAccounts: async () => { throw new Error("saved-pat saved-password saved-access saved-refresh"); } } };
+  const response = await handleChannelOnboardingRequest(new Request("http://localhost/api/channel-onboarding/accounts"), rt, "listAccounts");
+  assert.equal(response.status, 400); assert.doesNotMatch(JSON.stringify(await response.json()), /saved-pat|saved-password|saved-access|saved-refresh/);
+});
+
+test("HTTP边界保留partial状态与公开重试ID，不能把200当作完成", async () => {
+  const result = { complete: false, monitor: { status: "linked", stationIds: ["monitor"] },
+    reconciliation: { status: "unverified", reason: "DEPLOYMENT_NOT_VERIFIED" },
+    saved: { stationIds: ["monitor"], authorizationStationId: "grant" }, retryInput: { stationId: "monitor" } };
+  const response = await handleChannelOnboardingRequest(request(), { channelOnboarding: { connect: async () => result } }, "connect");
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), result);
+});
+
+test("HTTP边界保留来源变化码且隐藏错误回显凭证", async () => {
+  const rt = { channelOnboarding: { probe: async () => {
+    throw Object.assign(new Error("token private-secret changed"), { code: "CHANNEL_SOURCE_CHANGED" });
+  } } };
+  const response = await handleChannelOnboardingRequest(request({ newStation: { accessToken: "private-secret" } }), rt, "probe");
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.equal(body.code, "CHANNEL_SOURCE_CHANGED");
+  assert.equal(body.error.includes("private-secret"), false);
+});
+
+test("HTTP拒绝坏JSON，不回显包含密码的解析错误", async () => {
+  const bad = new Request("http://localhost/api/channel-onboarding", { method: "POST", body: "private-password is not JSON" });
+  const response = await handleChannelOnboardingRequest(bad, { channelOnboarding: {} }, "connect");
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "请求格式无效", code: "INVALID_REQUEST" });
+});
+
+test("HTTP目录查询/即时同步调用公开模块，未初始化明确503", async () => {
+  const rt = { channelOnboarding: { list: async () => ({ channels: [], stale: true }),
+    sync: async () => ({ channels: [{ id: 1 }], stale: false }) } };
+  assert.deepEqual(await (await handleChannelOnboardingRequest(request(), rt, "list")).json(), { channels: [], stale: true });
+  assert.deepEqual(await (await handleChannelOnboardingRequest(request(), rt, "sync")).json(), { channels: [{ id: 1 }], stale: false });
+  assert.equal((await handleChannelOnboardingRequest(request(), {}, "list")).status, 503);
+});
+
+test("HTTP批量与recover薄入口保留每组partial，并只把body作为业务输入", async () => {
+  const seen = [];
+  const value = { requestId: "request", complete: false, groups: [{ groupId: "saved", complete: true }, { groupId: "pending", complete: false,
+    remainingActions: ["repreview"] }] };
+  const module = Object.fromEntries(["probeBatch", "connectBatch", "recoverBatch"].map((operation) => [operation, async (...args) => {
+    seen.push({ operation, args }); return value;
+  }]));
+  for (const operation of Object.keys(module)) {
+    const response = await handleChannelOnboardingRequest(request({ input: "intent", guard: "forged" }), { channelOnboarding: module }, operation);
+    assert.equal(response.status, 200); assert.deepEqual(await response.json(), value);
+  }
+  assert.equal(seen.length, 3);
+  assert.ok(seen.every((call) => call.args[1] && !call.args[1].guard));
+  const invalid = await handleChannelOnboardingRequest(request([]), { channelOnboarding: module }, "probeBatch");
+  assert.equal(invalid.status, 400); assert.equal((await invalid.json()).code, "INVALID_REQUEST");
+});
+
+test("真实Provider密码fallback裸JWT回显不能进入HTTP，probe取消不保存", async (t) => {
+  const access = "fixture-generated-access-jwt", refresh = "fixture-generated-refresh-jwt";
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const path = new URL(input).pathname;
+    if (path.endsWith("/auth/me")) return { status: 500, text: async () => JSON.stringify({ message: `rejected ${access} ${refresh}` }) };
+    const data = path.endsWith("/auth/login") ? { access_token: access, refresh_token: refresh, expires_in: 3600 } : {};
+    return { status: 200, text: async () => JSON.stringify({ code: 0, data }) };
+  });
+  const f = await liveOnboarding();
+  const response = await handleChannelOnboardingRequest(request({ ...f.input,
+    newStation: { type: "sub2api-password", baseUrl: "https://up.test", email: "a@example.test", password: "fixture-password" } }), f.rt, "probe");
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.equal(body.code, "VERIFICATION_FAILED");
+  assert.doesNotMatch(JSON.stringify(body), /fixture-generated|fixture-password/);
+  assert.match(body.error, /已隐藏/);
+  assert.equal(f.rt.store.list({ includeUnmonitored: true }).length, 1);
+  assert.deepEqual(f.links(), []);
+});
+
+test("orchestration独立隐藏注入Provider的旧/临时/当前裸JWT", async () => {
+  const f = await liveOnboarding({
+    queryIdentity: async () => { throw new Error("identity unavailable"); },
+    queryMetadata: async (connection) => {
+      connection.s2Tokens = { accessToken: "temporary-access", refreshToken: "temporary-refresh" };
+      throw new Error("metadata unavailable");
+    },
+    queryMonitor: async (connection) => {
+      connection.s2Tokens = { accessToken: "current-access", refreshToken: "current-refresh" };
+      return { result: { ok: false, error: "old-access old-refresh temporary-access temporary-refresh current-access current-refresh" } };
+    },
+  });
+  const legacy = await f.rt.store.add({ type: "sub2api-password", baseUrl: "https://up.test", email: "a@example", password: "password" });
+  legacy.s2Tokens = { accessToken: "old-access", refreshToken: "old-refresh" };
+  const response = await handleChannelOnboardingRequest(request({ ...f.input, stationId: legacy.id }), f.rt, "probe");
+  assert.equal(response.status, 400);
+  assert.doesNotMatch(JSON.stringify(await response.json()), /old-access|old-refresh|temporary-access|temporary-refresh|current-access|current-refresh/);
+  assert.deepEqual(legacy.s2Tokens, { accessToken: "old-access", refreshToken: "old-refresh" });
+  assert.equal(legacy.verifiedIdentity, null);
+});
+
+test("旧Sub2 JWT经当前身份核验后密码更新复用原ID，同域不同账号保持独立", async (t) => {
+  const identityRequests = [];
+  t.mock.method(globalThis, "fetch", async (input, options) => {
+    const path = new URL(input).pathname;
+    if (path.endsWith("/keys")) return { status: 403, text: async () => JSON.stringify({ code: 403, message: "Key permission denied" }) };
+    const account = options?.headers?.Authorization?.includes("account-8") ? 8 : 7;
+    if (path.endsWith("/auth/me")) identityRequests.push(options.headers.Authorization);
+    const data = path.endsWith("/auth/login")
+      ? { access_token: JSON.parse(options.body).email === "other@example.test" ? "account-8-jwt" : "account-7-jwt", refresh_token: "refresh-jwt", expires_in: 3600 }
+      : path.endsWith("/auth/me") ? { id: account, balance: 10 } : {};
+    return { status: 200, text: async () => JSON.stringify({ code: 0, data }) };
+  });
+  const f = await liveOnboarding();
+  const legacy = await f.rt.store.add({ type: "sub2api", baseUrl: "https://up.test", accessToken: "old-account-7-jwt",
+    name: "Original", lowBalanceUsd: 42, includeInProfit: false, noRenewal: true });
+  legacy.apiKey = "obsolete-key"; legacy.email = "obsolete-email"; legacy.password = "obsolete-password";
+  legacy.alertState = { status: "low", errorCount: 3 };
+  const replacement = { type: "sub2api-password", baseUrl: "https://up.test", email: "same@example.test", password: "replacement-password",
+    verifiedIdentity: { provider: "sub2api", baseUrl: "https://up.test", accountId: "forged" },
+    onboardingOrigin: { requestId: "forged" }, authorizationUpdateRef: { requestId: "forged" }, guard: "forged" };
+  const body = { ...f.input, newStation: replacement, updateCredentials: true };
+  const preview = await (await handleChannelOnboardingRequest(request(body), f.rt, "probe")).json();
+  assert.equal(preview.station.id, legacy.id);
+  assert.equal(preview.credentialUpdateRequired, true);
+  assert.equal(legacy.verifiedIdentity, null);
+  assert.equal(legacy.type, "sub2api");
+  assert.ok(identityRequests.includes("Bearer old-account-7-jwt"));
+  const batchInput = { requestId: "91776f02-a520-47f2-a581-3cda3017d929", ownStationId: f.own.id,
+    selections: [{ selectionId: "legacy", newStation: replacement, monitor: true, updateCredentials: true }],
+    groups: [{ groupId: "monitor", selectionId: "legacy", channels: [{ channelId: 1, channelRevision: f.input.channelRevision }] }] };
+  const batchProbe = await (await handleChannelOnboardingRequest(request(batchInput), f.rt, "probeBatch")).json();
+  const mocked = t.mock.method(f.rt.store, "updateLocked", async () => { throw new Error("store save failed"); });
+  const failed = await (await handleChannelOnboardingRequest(request({ ...batchInput, previewId: batchProbe.previewId }), f.rt, "connectBatch")).json();
+  assert.equal(failed.complete, false); assert.deepEqual(failed.groups[0].saved.stationIds, [legacy.id]);
+  mocked.mock.restore();
+  const recovered = await (await handleChannelOnboardingRequest(request(batchProbe.retryInput), f.rt, "recoverBatch")).json();
+  assert.equal(recovered.complete, false); assert.equal(recovered.groups[0].code, "CREDENTIAL_UPDATE_UNCONFIRMED");
+  assert.deepEqual(recovered.groups[0].saved.stationIds, [legacy.id]); assert.equal(legacy.type, "sub2api");
+  const connected = await (await handleChannelOnboardingRequest(request(body), f.rt, "connect")).json();
+  assert.equal(connected.complete, true);
+  assert.deepEqual(connected.saved.stationIds, [legacy.id]);
+  assert.equal(f.rt.store.list().length, 2);
+  assert.equal(legacy.type, "sub2api-password");
+  assert.equal(legacy.verifiedIdentity.accountId, "7");
+  assert.equal(legacy.authVersion, 2);
+  assert.equal(legacy.accessToken, ""); assert.equal(legacy.apiKey, ""); assert.equal(legacy.userId, "");
+  assert.equal(legacy.lowBalanceUsd, 42); assert.equal(legacy.includeInProfit, false); assert.equal(legacy.noRenewal, true);
+  assert.deepEqual(legacy.alertState, { status: "low", errorCount: 3 });
+  assert.equal(legacy.onboardingOrigin, undefined); assert.equal(legacy.authorizationUpdateRef, null);
+  const another = await (await handleChannelOnboardingRequest(request({ ...body,
+    newStation: { ...replacement, email: "other@example.test" } }), f.rt, "connect")).json();
+  assert.equal(another.complete, true);
+  assert.notEqual(another.saved.stationIds[0], legacy.id);
+  assert.equal(f.rt.store.get(another.saved.stationIds[0]).verifiedIdentity.accountId, "8");
+  assert.equal(f.rt.store.list().length, 3);
+});

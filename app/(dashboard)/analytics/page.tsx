@@ -1,5 +1,5 @@
 "use client";
-// 成本与利润：利润等式 + 收入与用量成本趋势 + 成本构成 + 消耗时段 + 可用天数 + 累计成本 + 覆盖说明。
+// 监控估算：利润等式 + 收入与用量成本趋势 + 成本构成 + 消耗时段 + 可用天数 + 累计成本 + 覆盖说明。
 // 成本来自 /api/analytics（按上游汇总、按站点汇率折算），收入来自 /api/own/analytics（只支持 7/30 天）。
 // 时间范围和"包含已归档"写进地址栏；切换时保留上一份数据并变淡，避免整页闪成骨架。
 import "../../styles/pages/analytics.css";
@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { Button, Checkbox } from "antd";
+import { NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { formatDays, formatMoney, isoDay } from "../../../lib/format";
 import { EmptyState, ErrorState, PanelSkeleton } from "../../components/data-state";
@@ -168,6 +169,25 @@ export default function AnalyticsPage() {
     </Checkbox>
   );
 
+  // 本页是监控口径的估算，实际 Key 账单在账单核算页
+  const sourceNote = (
+    <div className="jy-banner jy-banner--info jy-analytics-source">
+      <Sym kind="info" />
+      <div className="jy-analytics-source-body">
+        <b>监控估算来源</b>
+        <p>
+          成本来自余额变化与固定摊销，余额跑道来自历史预测；按资源汇率折算为人民币。此处估算不代表实际 Key
+          账单成本或现金付款，账单核算请查看对应来源与完整日窗口。
+        </p>
+      </div>
+      <div className="page-toolbar">
+        <Button size="small" href="/reconciliation">
+          {NAV_LABELS.reconciliation}
+        </Button>
+      </div>
+    </div>
+  );
+
   // 首次加载：骨架与真实布局一致
   if (!snap && loading) {
     return (
@@ -203,6 +223,7 @@ export default function AnalyticsPage() {
   if (stations.length === 0) {
     return (
       <div className={`jy-page${loading && stale ? " jy-analytics-switching" : ""}`} aria-busy={(loading && stale) || undefined}>
+        {sourceNote}
         <Panel title={EQ_TITLE} extra={archiveToggle}>
           <EmptyState
             title="还没有上游资源"
@@ -234,6 +255,8 @@ export default function AnalyticsPage() {
           </div>
         </div>
       )}
+
+      {sourceNote}
 
       <Equation dv={dv} snap={snap} caption={windowCaption} extra={archiveToggle} href30={href30} onRetry={retry} />
 

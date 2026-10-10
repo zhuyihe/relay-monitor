@@ -1,4 +1,4 @@
-/* 成本与利润：只放本页独有的细节，布局和组件样式都在 jy.css */
+/* 监控估算：只放本页独有的细节，布局和组件样式都在 jy.css */
 
 /* 切换范围或归档开关时保留上一份数据，变淡表示正在更新 */
 .jy-analytics-switching { opacity: .6; transition: opacity .15s ease; }
@@ -20,4 +20,15 @@
 
 @media (prefers-reduced-motion: reduce) {
   .jy-analytics-switching { transition: none; }
+}
+
+/* 口径说明：估算与实际账单的分界，右侧直达账单核算 */
+.jy-analytics-source { align-items: flex-start; }
+.jy-analytics-source-body { flex: 1; min-width: 0; }
+.jy-analytics-source-body b { font-weight: 500; }
+.jy-analytics-source-body p { margin: 2px 0 0; max-width: 72ch; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-analytics-source .page-toolbar { flex: none; }
+@media (max-width: 767px) {
+  .jy-analytics-source { flex-wrap: wrap; }
+  .jy-analytics-source .page-toolbar { width: auto; margin-left: 24px; }
 }

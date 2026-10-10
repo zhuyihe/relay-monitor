@@ -4,11 +4,12 @@
 import "../../styles/pages/stations.css";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
-import { App, Button, Dropdown, Input, Modal, Select } from "antd";
+import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
 import type { MenuProps } from "antd";
 import { api, cny, fmtTokens, statusOf } from "../../../lib/client";
 import { buildOverviewActions } from "../../../lib/overview-actions";
 import { formatMoney, formatUsd } from "../../../lib/format";
+import ChannelOnboarding from "../../components/channel-onboarding";
 import { EmptyState, ErrorState, Skeleton } from "../../components/data-state";
 import { Icon, Sym } from "../../components/icons";
 import { Panel } from "../../components/panel";
@@ -29,6 +30,7 @@ import {
   syncTime,
 } from "./model";
 import type { StationCheck, StationView } from "./model";
+import { useAccountCenter } from "./account-center";
 import { StationDrawer } from "./station-drawer";
 import type { StationDrawerHandle } from "./station-drawer";
 
@@ -50,12 +52,16 @@ function compareDays(a: number | null, b: number | null, dir: 1 | -1) {
 
 export default function StationsPage() {
   const { message } = App.useApp();
+  const compact = Grid.useBreakpoint().md === false;
 
   const [stations, setStations] = useState<any[]>([]);
   const [settings, setSettings] = useState<any>({ refreshIntervalSec: 60, lowBalanceUsd: 5 });
   const [types, setTypes] = useState<any[]>([]);
   const [rules, setRules] = useState<any>({});
   const [loaded, setLoaded] = useState(false);
+  const [loadingList, setLoadingList] = useState(true);
+  // 每次读取资源后递增，账号关系随之重读
+  const [accountsToken, setAccountsToken] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingMeta, setLoadingMeta] = useState(true);
   const [metaError, setMetaError] = useState<string | null>(null);
@@ -86,10 +92,11 @@ export default function StationsPage() {
   // 更多菜单里的“编辑”：关闭抽屉后焦点回到这一行的更多按钮
   const moreTriggerRef = useRef<HTMLElement | null>(null);
 
-  // 始终带上归档资源：“已归档”只是一个筛选，不再单独切换请求
+  // 始终带上归档与暂停监控的资源：“已归档”只是一个筛选；暂停监控的资源在账号关系中管理
   const reload = useCallback(async () => {
+    setLoadingList(true);
     try {
-      const r = await api("/api/stations?includeArchived=true");
+      const r = await api("/api/stations?includeUnmonitored=true&includeArchived=true");
       setStations(r.stations);
       setSettings(r.settings);
       setLoaded(true);
@@ -98,6 +105,9 @@ export default function StationsPage() {
     } catch (e: any) {
       setLoadError(e.message || "上游资源加载失败");
       throw e;
+    } finally {
+      setLoadingList(false);
+      setAccountsToken((n) => n + 1);
     }
   }, []);
 
@@ -150,10 +160,9 @@ export default function StationsPage() {
   const onRefreshAll = async () => {
     setRefreshingAll(true);
     try {
-      const r = await api("/api/refresh", { method: "POST", body: {} });
-      // /api/refresh 只返回在用资源；归档资源不刷新，沿用列表里已有的副本
-      setStations((list) => [...(r.stations || []), ...list.filter((s) => s.archivedAt)]);
-      setRefreshedAt(Date.now());
+      await api("/api/refresh", { method: "POST", body: {} });
+      // /api/refresh 只返回在监控的资源；重新读取完整列表，归档与暂停监控的资源一并保留
+      await reload();
       message.success("已刷新全部");
     } catch {
       message.error("刷新失败");
@@ -167,6 +176,7 @@ export default function StationsPage() {
     try {
       const r = await api(`/api/stations/${s.id}/refresh`, { method: "POST", body: {} });
       setStations((list) => list.map((x) => (x.id === s.id ? { ...x, ...(r.station || {}), balance: r.balance } : x)));
+      setAccountsToken((n) => n + 1);
       if (!r.balance.ok) message.error(`${s.name}：${resultIssue(null, r.balance.error).message}`);
     } catch (e: any) {
       message.error(e.message);
@@ -273,15 +283,19 @@ export default function StationsPage() {
   };
 
   // “需处理”直接复用总览的待办规则：同一批在用资源、同一份规则和阈值
+  // 列表只放在监控的资源（归档的照常放在「已归档」里）；暂停监控的资源在下方账号关系中查看与重新启用
+  const listed = useMemo(() => stations.filter((s) => s.monitorEnabled !== false || s.archivedAt), [stations]);
+  const paused = stations.filter((s) => s.monitorEnabled === false && !s.archivedAt);
+
   const attentionIds = useMemo(() => {
-    const live = stations.filter((s) => !s.archivedAt);
+    const live = listed.filter((s) => !s.archivedAt);
     return new Set(buildOverviewActions(live, { rules, settings, statusOf }).all.map((a: any) => a.stationId));
-  }, [stations, rules, settings]);
+  }, [listed, rules, settings]);
 
   const critDays = critDaysOf(rules);
   const views = useMemo(() => {
     const now = Date.now();
-    return stations.map((s) => buildStationView(s, {
+    return listed.map((s) => buildStationView(s, {
       settings,
       critDays,
       typeName: (t) => types.find((x) => x.value === t)?.label || t,
@@ -289,7 +303,7 @@ export default function StationsPage() {
       attention: !s.archivedAt && attentionIds.has(actionKey(s)),
       now,
     }));
-  }, [stations, settings, critDays, types, stationChecks, attentionIds]);
+  }, [listed, settings, critDays, types, stationChecks, attentionIds]);
 
   const live = views.filter((v) => !v.archived);
   const archived = views.filter((v) => v.archived);
@@ -325,6 +339,21 @@ export default function StationsPage() {
   // 弹窗内 KPI 用列表里的最新站点数据（轮询会更新）
   const trendCur = trendStation ? stations.find((x) => x.id === trendStation.id) || trendStation : null;
   const canAdd = !!types.length && !loadingMeta;
+
+  const accounts = useAccountCenter({
+    stations,
+    types,
+    loadingMeta,
+    compact,
+    showArchived: filter === "archived",
+    loaded,
+    loadingList,
+    loadError,
+    reload,
+    reloadToken: accountsToken,
+    openEditor: (station) => openEditor(station, null),
+    openTrend: setTrendStation,
+  });
 
   const retryAll = () => {
     reload().catch(() => {});
@@ -565,6 +594,14 @@ export default function StationsPage() {
         action={addButton}
       />
     );
+  } else if (!live.length && filter !== "archived" && paused.length) {
+    body = (
+      <EmptyState
+        title="没有正在监控的上游资源"
+        desc={`另有 ${paused.length} 个资源已暂停监控，可在下方账号关系中重新启用。`}
+        action={addButton}
+      />
+    );
   } else if (!live.length && filter !== "archived") {
     body = (
       <EmptyState
@@ -705,6 +742,7 @@ export default function StationsPage() {
           <Button size="small" loading={loadingMeta} onClick={() => { loadMeta().catch(() => {}); }}>重试</Button>
         </div>
       ) : null}
+      {accounts.top}
 
       <div className="jy-toolbar">
         <Input
@@ -739,6 +777,12 @@ export default function StationsPage() {
       </div>
 
       <Panel body={false} label="上游资源列表">{body}</Panel>
+
+      <div className="jy-stations-onboarding">
+        <ChannelOnboarding compact={compact} onComplete={reload} destination={accounts.destination} />
+      </div>
+
+      {accounts.center}
 
       <Modal
         title={archiveTarget ? `归档「${archiveTarget.name}」？` : "归档资源"}
@@ -802,6 +846,8 @@ export default function StationsPage() {
           />
         </div>
       </Modal>
+
+      {accounts.overlays}
 
       <TrendModal station={trendCur} onClose={() => setTrendStation(null)} etaDaysRule={rules.etaDays ?? 3} />
 

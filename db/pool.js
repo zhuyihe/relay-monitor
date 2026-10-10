@@ -70,6 +70,15 @@ export async function ensureSchema(pool) {
     v JSON NOT NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS channel_monitor_links (
+    own_station_id VARCHAR(32) NOT NULL,
+    channel_id BIGINT NOT NULL,
+    station_id VARCHAR(32) NOT NULL,
+    channel_revision VARCHAR(128) NOT NULL,
+    confirmed_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (own_station_id, channel_id, station_id),
+    INDEX idx_channel_monitor_station (station_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   await pool.query(`CREATE TABLE IF NOT EXISTS history_points (
     station_id VARCHAR(32) NOT NULL,
     t BIGINT NOT NULL,
@@ -169,6 +178,14 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_snapshots", "segment_id", "VARCHAR(32) NULL");
   await addColumnIfMissing(pool, "reconciliation_rule_segments", "ratio_observed_at_ms", "BIGINT NULL");
   await addColumnIfMissing(pool, "reconciliation_rule_segments", "ratio_source", "VARCHAR(24) NULL");
+  // Existing rules retain their original billing policy until a real scope edit.
+  await addColumnIfMissing(pool, "reconciliation_rules", "billing_policy", "VARCHAR(32) NOT NULL DEFAULT 'legacy-v3'");
+  await addColumnIfMissing(pool, "reconciliation_rules", "scope_version", "BIGINT NOT NULL DEFAULT 1");
+  await addColumnIfMissing(pool, "reconciliation_rules", "billing_effective_from_ms", "BIGINT NULL");
+  await addColumnIfMissing(pool, "reconciliation_rules", "cost_coverage", "VARCHAR(24) NOT NULL DEFAULT 'unknown'");
+  await addColumnIfMissing(pool, "reconciliation_rules", "provider", "VARCHAR(24) NULL");
+  await addColumnIfMissing(pool, "reconciliation_rules", "canonical_key", "VARCHAR(255) NULL");
+  await addColumnIfMissing(pool, "reconciliation_rules", "source_binding", "JSON NULL");
   await addIndexIfMissing(pool, "reconciliation_snapshots", "idx_reconciliation_snapshot_segment", "(segment_id)");
   // Legacy rules get exactly one open segment. The deterministic 32-byte ID
   // fits this table even if a historic rule ID used its full column width.

@@ -17,3 +17,11 @@
   border-radius: var(--jy-r1);
 }
 .jy-ov-name:hover { color: var(--jy-cobalt); text-decoration: underline; text-underline-offset: 3px; }
+
+/* 需要处理：账号或账单事项读取失败时的提示，放在列表上方 */
+.jy-ov-banner { align-items: center; margin: 12px 24px 0; }
+.jy-ov-banner .jy-sym { margin-top: 0; }
+.jy-ov-banner-text { flex: 1; min-width: 0; font-size: 13px; line-height: 20px; }
+@media (max-width: 767px) {
+  .jy-ov-banner { margin: 12px 16px 0; flex-wrap: wrap; }
+}

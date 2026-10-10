@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Store } from "./store.js";
+import { Store, stationBusinessVersion } from "./store.js";
 import { refreshStation } from "../server/refresh.js";
+import { selectCostUpstreams } from "../server/own-helpers.js";
+import { evaluateStation } from "../lib/alerts.js";
 
 function fakePool(stations = []) {
   const conn = {
@@ -32,6 +34,289 @@ function fakePool(stations = []) {
 test("旧站点数据升级时默认保持续费", async () => {
   const store = await new Store(fakePool([{ id: "old", name: "旧站点", fixedPurchases: [] }])).load();
   assert.equal(store.get("old").noRenewal, false);
+  assert.equal(store.get("old").monitorEnabled, true);
+  assert.equal(store.get("old").authVersion, 1);
+});
+
+test("暂停和恢复保留原成本设置、费率及实际持久化值", async (t) => {
+  for (const includeInProfit of [true, false]) await t.test(String(includeInProfit), async (t) => {
+    const pool = fakePool(), conn = await pool.getConnection(), store = new Store(pool);
+    let documents = [], draft;
+    t.mock.method(conn, "query", async (sql, params) => {
+      if (sql.startsWith("INSERT INTO stations")) draft = params[0].map((row) => JSON.parse(row[2]));
+      return [[]];
+    });
+    t.mock.method(conn, "commit", async () => { documents = draft; });
+    const station = await store.add({ type: "newapi", includeInProfit, cnyPerUsd: 0.7, lowBalanceUsd: 17 });
+    await store.update(station.id, { monitorEnabled: false }, { expectedResourceVersion: stationBusinessVersion(station) });
+    assert.equal(station.includeInProfit, includeInProfit);
+    assert.equal(documents[0].includeInProfit, includeInProfit);
+    assert.equal(documents[0].monitorEnabled, false);
+    assert.deepEqual(store.list(), []);
+    assert.deepEqual(selectCostUpstreams(store.list({ includeUnmonitored: true }), "own"), { included: [], excluded: [] });
+    assert.equal(await evaluateStation({ ...station, balance: { ok: true, remaining: 0 } }, null, {}, [], 5), null);
+    const forbidden = () => assert.fail("paused monitoring must not fetch or write history");
+    t.mock.method(globalThis, "fetch", forbidden);
+    assert.equal(await refreshStation({ store, history: { append: forbidden, predict: forbidden } }, station), null);
+    await store.update(station.id, { monitorEnabled: true }, { expectedResourceVersion: stationBusinessVersion(station) });
+    assert.equal(station.includeInProfit, includeInProfit);
+    assert.equal(station.cnyPerUsd, 0.7); assert.equal(station.lowBalanceUsd, 17);
+    assert.equal(documents[0].includeInProfit, includeInProfit);
+    assert.equal(documents[0].monitorEnabled, true);
+    assert.equal(documents[0].cnyPerUsd, 0.7);
+    const costs = selectCostUpstreams(store.list(), "own");
+    assert.deepEqual(costs.included.map((s) => s.id), includeInProfit ? [station.id] : []);
+    assert.deepEqual(costs.excluded.map((s) => s.id), includeInProfit ? [] : [station.id]);
+  });
+});
+
+test("加载暂停资源后启用仍保留原true或false成本设置", async (t) => {
+  for (const includeInProfit of [true, false]) await t.test(String(includeInProfit), async () => {
+    const station = { id: "paused", type: "newapi", monitorEnabled: false, includeInProfit, cnyPerUsd: 0.7,
+      lowBalanceUsd: 17, fixedPurchases: [] };
+    const store = await new Store(fakePool([structuredClone(station)])).load();
+    assert.equal(store.get(station.id).includeInProfit, includeInProfit);
+    assert.deepEqual(store.list(), []);
+    await store.update(station.id, { monitorEnabled: true });
+    assert.equal(store.get(station.id).includeInProfit, includeInProfit);
+    assert.equal(store.get(station.id).cnyPerUsd, 0.7);
+    assert.equal(store.get(station.id).lowBalanceUsd, 17);
+  });
+});
+
+test("账单专用授权全量保存且不进入监控或整体成本", async (t) => {
+  const pool = fakePool();
+  const conn = await pool.getConnection();
+  let documents = [];
+  t.mock.method(conn, "query", async (sql, params) => {
+    if (sql.startsWith("INSERT INTO stations")) documents = params[0].map((row) => JSON.parse(row[2]));
+    return [[]];
+  });
+  const store = new Store(pool);
+  const normal = await store.add({ type: "newapi", name: "现有监控" });
+  const grant = await store.add({
+    type: "newapi", name: "账单授权", monitorEnabled: false, includeInProfit: true, isOwn: true,
+  });
+  assert.deepEqual(store.list().map((s) => s.id), [normal.id]);
+  assert.deepEqual(store.list({ includeUnmonitored: true }).map((s) => s.id), [normal.id, grant.id]);
+  assert.equal(store.get(grant.id).includeInProfit, false);
+  assert.equal(store.get(grant.id).isOwn, false);
+  assert.equal(documents.length, 2);
+  const restarted = await new Store(fakePool(documents)).load();
+  assert.equal(restarted.list().length, 1);
+  assert.equal(restarted.get(grant.id).monitorEnabled, false);
+  await restarted.update(grant.id, { includeInProfit: true, isOwn: true });
+  assert.equal(restarted.get(grant.id).includeInProfit, true);
+  assert.equal(restarted.get(grant.id).isOwn, false);
+  assert.equal(selectCostUpstreams([restarted.get(grant.id)], "own").included.length, 0);
+});
+
+test("身份只能由服务端验证参数保存，真实授权变更作废身份和令牌", async () => {
+  const store = new Store(fakePool());
+  const identity = { provider: "sub2api", baseUrl: "https://supplier.example/", accountId: "81" };
+  const station = await store.add({
+    type: "sub2api-password", baseUrl: "https://supplier.example", email: "a@example", password: "secret",
+    verifiedIdentity: identity, authVersion: 99,
+  });
+  assert.equal(station.verifiedIdentity, null);
+  assert.equal(station.authVersion, 1);
+  await store.update(station.id, { verifiedIdentity: identity, authVersion: 99 });
+  assert.equal(station.verifiedIdentity, null);
+  await store.update(station.id, {}, { verifiedIdentity: identity });
+  assert.equal(station.verifiedIdentity.accountId, "81");
+  assert.equal(station.verifiedIdentity.baseUrl, "https://supplier.example");
+  station.s2Tokens = { accessToken: "rotated" };
+  await store.save();
+  assert.equal(station.authVersion, 1, "automatic JWT rotation is not an account change");
+  await store.update(station.id, { name: "新名字", password: "secret" });
+  assert.equal(station.authVersion, 1);
+  assert.equal(station.verifiedIdentity.accountId, "81");
+  await store.update(station.id, { email: "b@example" });
+  assert.equal(station.authVersion, 2);
+  assert.equal(station.verifiedIdentity, null);
+  assert.equal(station.s2Tokens, null);
+  await store.update(station.id, { password: "new" }, { verifiedIdentity: { ...identity, accountId: "82" } });
+  assert.equal(station.authVersion, 3);
+  assert.equal(station.verifiedIdentity.accountId, "82");
+});
+
+test("服务端验证结果不能覆盖已经编辑的新授权版本", async () => {
+  const store = new Store(fakePool());
+  const station = await store.add({ type: "newapi", baseUrl: "https://supplier.example", accessToken: "old" });
+  await store.update(station.id, { accessToken: "new" });
+  await assert.rejects(store.update(station.id, {}, {
+    expectedAuthVersion: 1, verifiedIdentity: { provider: "newapi", baseUrl: "https://supplier.example", accountId: "old-account" },
+  }), (error) => error.code === "AUTHORIZATION_CHANGED");
+  assert.equal(station.accessToken, "new");
+  assert.equal(station.authVersion, 2);
+  assert.equal(station.verifiedIdentity, null);
+});
+
+test("资源业务版本包含用途/身份/归档，自动令牌刷新和名称不改变版本", async () => {
+  const store = new Store(fakePool());
+  const station = await store.add({ type: "sub2api", baseUrl: "https://supplier.example/", accessToken: "jwt" });
+  const before = stationBusinessVersion(station);
+  station.s2Tokens = { accessToken: "renewed", refreshToken: "renewed-refresh" };
+  await store.update(station.id, { name: "Renamed" });
+  assert.equal(stationBusinessVersion(station), before);
+  await store.update(station.id, { monitorEnabled: false });
+  assert.notEqual(stationBusinessVersion(station), before);
+  await assert.rejects(store.update(station.id, { name: "Stale edit" }, { expectedResourceVersion: before }),
+    (error) => error.code === "RESOURCE_CHANGED");
+  assert.equal(station.name, "Renamed");
+  const paused = stationBusinessVersion(station);
+  await store.update(station.id, {}, { verifiedIdentity: { provider: "sub2api", baseUrl: station.baseUrl, accountId: "7" } });
+  assert.notEqual(stationBusinessVersion(station), paused);
+  const verified = stationBusinessVersion(station);
+  await store.archive(station.id);
+  assert.notEqual(stationBusinessVersion(station), verified);
+});
+
+test("updateLocked不递归加锁，guard/CAS与marker在同次提交后发布，失败保留旧配置", async (t) => {
+  const pool = fakePool(), conn = await pool.getConnection(), store = new Store(pool);
+  const station = await store.add({ type: "sub2api", baseUrl: "https://supplier.example", accessToken: "old-jwt",
+    onboardingOrigin: { requestId: "forged" }, authorizationUpdateRef: { requestId: "forged" } });
+  assert.equal(station.onboardingOrigin, undefined);
+  assert.equal(station.authorizationUpdateRef, undefined);
+  let documents;
+  t.mock.method(conn, "query", async (sql, params) => {
+    if (sql.startsWith("INSERT INTO stations")) documents = params[0].map((row) => JSON.parse(row[2]));
+    return [[]];
+  });
+  const options = { expectedAuthVersion: 1, expectedResourceVersion: stationBusinessVersion(station),
+    verifiedIdentity: { provider: "sub2api", baseUrl: station.baseUrl, accountId: "7" },
+    authorizationUpdateRef: { requestId: "rotation", accountKey: "account", authVersion: 99, secret: "forged-secret" },
+    guard: (current) => { assert.equal(current, station); assert.equal(current.type, "sub2api"); } };
+  let entered, release;
+  const reached = new Promise((resolve) => { entered = resolve; });
+  t.mock.method(conn, "commit", async () => { entered(); await new Promise((resolve) => { release = resolve; }); throw new Error("offline"); });
+  const change = { type: "sub2api-password", email: "a@example", password: "new-password" };
+  const pending = store.withStationLocks([station.id], () => store.updateLocked(station.id, change, options));
+  const rejection = assert.rejects(pending, /保存失败/);
+  await reached;
+  assert.equal(station.accessToken, "old-jwt");
+  assert.equal(station.authorizationUpdateRef, undefined);
+  assert.equal(documents[0].accessToken, "");
+  assert.equal(documents[0].authorizationUpdateRef.authVersion, 2);
+  assert.equal(documents[0].authorizationUpdateRef.secret, undefined);
+  release();
+  await rejection;
+  assert.equal(station.type, "sub2api");
+  assert.equal(station.verifiedIdentity, null);
+  t.mock.method(conn, "commit", async () => {});
+  await store.withStationLocks([station.id], () => store.updateLocked(station.id, change, options));
+  assert.equal(station.type, "sub2api-password");
+  assert.equal(station.accessToken, "");
+  assert.equal(station.authVersion, 2);
+  assert.deepEqual(station.authorizationUpdateRef, { requestId: "rotation", accountKey: "account", authVersion: 2, authorizationType: "sub2api-password" });
+  await assert.rejects(store.update(station.id, {}, { guard: () => { throw new Error("basis changed"); } }), /basis changed/);
+  const count = store.list({ includeUnmonitored: true }).length;
+  await assert.rejects(store.add({ type: "newapi" }, { guard: () => { throw new Error("basis changed"); } }), /basis changed/);
+  assert.equal(store.list({ includeUnmonitored: true }).length, count);
+  const origin = await store.add({ type: "newapi-key", apiKey: "call-key", password: "ignored-password" }, {
+    onboardingOrigin: { requestId: "batch", selectionId: "key", accountKey: null, type: "newapi-key", purpose: "monitor", secret: "ignored-secret" },
+    guard: (current) => assert.equal(current, null),
+  });
+  assert.deepEqual(origin.onboardingOrigin, { requestId: "batch", selectionId: "key", accountKey: null, type: "newapi-key", purpose: "monitor" });
+  assert.equal(origin.password, "");
+  await store.update(station.id, { type: "sub2api", accessToken: "replacement-jwt" });
+  assert.equal(station.email, ""); assert.equal(station.password, "");
+  assert.equal(station.authorizationUpdateRef, null);
+});
+
+test("U04 Store add/update guard在实际SQL后commit前复核，失效rollback不发布配置、身份或marker", async (t) => {
+  for (const operation of ["add", "update"]) await t.test(operation, async () => {
+    let persisted = [], draft, valid = true, invalidate = false, commits = 0, rollbacks = 0, validations = 0;
+    const conn = { beginTransaction: async () => { draft = structuredClone(persisted); },
+      query: async (sql, params) => {
+        if (sql.startsWith("INSERT INTO stations")) draft = params[0].map((row) => JSON.parse(row[2]));
+        if (sql.startsWith("INSERT INTO meta") && invalidate) valid = false;
+        return [[]];
+      }, commit: async () => { persisted = draft; commits += 1; }, rollback: async () => { rollbacks += 1; }, release() {} };
+    const store = new Store({ getConnection: async () => conn });
+    const identity = { provider: "sub2api", baseUrl: "https://transaction.test", accountId: "7" };
+    const original = await store.add({ type: "sub2api", baseUrl: identity.baseUrl, accessToken: "old-JWT" }, { verifiedIdentity: identity });
+    const before = structuredClone(store.data), savedBefore = structuredClone(persisted), commitsBefore = commits;
+    const guard = () => { validations += 1; if (!valid) throw Object.assign(new Error("participating resource changed"), { code: "RESOURCE_CHANGED" }); };
+    const execute = () => operation === "add"
+      ? store.add({ type: "newapi-key", baseUrl: identity.baseUrl, apiKey: "new-Key" }, { guard,
+        onboardingOrigin: { requestId: "add", selectionId: "key", accountKey: null, type: "newapi-key", purpose: "monitor" } })
+      : store.withStationLocks([original.id], () => store.updateLocked(original.id,
+        { type: "sub2api-password", email: "a@example.test", password: "new-password" }, { guard, verifiedIdentity: identity,
+          authorizationUpdateRef: { requestId: "rotate", accountKey: "account" } }));
+    invalidate = true;
+    await assert.rejects(execute(), { code: "RESOURCE_CHANGED" });
+    assert.equal(validations, 2); assert.equal(rollbacks, 1); assert.equal(commits, commitsBefore);
+    assert.deepEqual(store.data, before); assert.deepEqual(persisted, savedBefore);
+    if (operation === "update") {
+      assert.equal(draft[0].password, "new-password"); assert.equal(draft[0].authorizationUpdateRef.authVersion, 2);
+      assert.equal(original.accessToken, "old-JWT"); assert.equal(original.authorizationUpdateRef, undefined);
+    } else { assert.equal(draft.length, 2); assert.equal(draft[1].onboardingOrigin.requestId, "add"); }
+    valid = true; invalidate = false; validations = 0;
+    await execute(); assert.equal(validations, 2); assert.equal(commits, commitsBefore + 1);
+  });
+});
+
+test("用途与身份在提交前保持旧值，失败不发布并可重试", async (t) => {
+  const pool = fakePool();
+  const conn = await pool.getConnection();
+  const store = new Store(pool);
+  const station = await store.add({ type: "newapi", baseUrl: "https://supplier.example", accessToken: "old" });
+  let entered, release;
+  const reached = new Promise((resolve) => { entered = resolve; });
+  t.mock.method(conn, "commit", async () => { entered(); await new Promise((resolve) => { release = resolve; }); });
+  const pending = store.update(station.id, { monitorEnabled: false }, {
+    verifiedIdentity: { provider: "newapi", baseUrl: "https://supplier.example", accountId: "1" },
+  });
+  await reached;
+  assert.equal(store.list().length, 1);
+  assert.equal(station.verifiedIdentity, null);
+  release();
+  await pending;
+  assert.equal(store.list().length, 0);
+  assert.equal(station.verifiedIdentity.accountId, "1");
+  t.mock.method(conn, "commit", async () => { throw new Error("offline"); });
+  await assert.rejects(store.update(station.id, { monitorEnabled: true, accessToken: "new" }), /保存失败/);
+  assert.equal(station.monitorEnabled, false);
+  assert.equal(station.authVersion, 1);
+  assert.equal(station.verifiedIdentity.accountId, "1");
+  t.mock.method(conn, "commit", async () => {});
+  await store.update(station.id, { monitorEnabled: true, accessToken: "new" });
+  assert.equal(station.monitorEnabled, true);
+  assert.equal(station.authVersion, 2);
+  assert.equal(station.verifiedIdentity, null);
+});
+
+test("按 ID 刷新账单授权不请求上游或写历史告警", async (t) => {
+  const store = new Store(fakePool());
+  const grant = await store.add({ type: "newapi", monitorEnabled: false });
+  const forbidden = () => { throw new Error("must not monitor a billing-only grant"); };
+  t.mock.method(globalThis, "fetch", forbidden);
+  assert.equal(await refreshStation({ store, history: { append: forbidden, predict: forbidden } }, grant), null);
+  assert.equal(await refreshStation({ store, history: { append: forbidden, predict: forbidden } },
+    { ...grant, monitorEnabled: true }), null, "a stale caller cannot bypass persisted purpose");
+  assert.equal(grant.balance, null);
+  assert.equal(grant.alertState, null);
+});
+
+test("在途余额查询期间关闭监控后丢弃历史和告警", async (t) => {
+  const store = new Store(fakePool());
+  const station = await store.add({ type: "newapi", baseUrl: "https://supplier.example", accessToken: "test" });
+  let entered, release;
+  const reached = new Promise((resolve) => { entered = resolve; });
+  t.mock.method(globalThis, "fetch", async () => {
+    entered();
+    await new Promise((resolve) => { release = resolve; });
+    return new Response(JSON.stringify({ success: true, data: { quota: 500000, used_quota: 0 } }));
+  });
+  const forbidden = () => { throw new Error("disabled station must not write history or evaluate alerts"); };
+  const pending = refreshStation({ store, history: { append: forbidden, predict: forbidden } }, station);
+  await reached;
+  await store.update(station.id, { monitorEnabled: false });
+  release();
+  assert.equal((await pending).ok, true);
+  assert.equal(station.balance, null);
+  assert.equal(station.alertState, null);
 });
 
 test("重新标记不再续费会重置单次提醒资格", async () => {
@@ -310,3 +595,15 @@ for (const initialAlertState of [{ state: "unknown", errorCount: 0, noRenewalLow
     assert.deepEqual(writes.at(-1).alertState, expected);
   });
 }
+
+test("ordinary pure-Key credential changes invalidate onboarding recovery marker in the committed configuration", async () => {
+  const store = new Store(fakePool());
+  const origin = { requestId: "request", selectionId: "key", accountKey: null, type: "newapi-key", purpose: "monitor" };
+  const station = await store.add({ type: "newapi-key", baseUrl: "https://up.test", apiKey: "original" }, { onboardingOrigin: origin });
+  await store.update(station.id, { name: "renamed" });
+  assert.deepEqual(station.onboardingOrigin, origin);
+  await store.update(station.id, { apiKey: "replacement", onboardingOrigin: origin });
+  assert.equal(station.onboardingOrigin, null, "HTTP-shaped marker cannot preserve the old recovery intent");
+  await store.update(station.id, { apiKey: "verified-new" }, { onboardingOrigin: { ...origin, requestId: "new-request" } });
+  assert.equal(station.onboardingOrigin.requestId, "new-request");
+});
