@@ -347,11 +347,21 @@ export default function NotificationsPage() {
   // ---- 告警规则 ---------------------------------------------------------------
 
   // 开关即时落库；只更新 rules，不覆盖未保存的阈值输入
+  // 关闭规则时，它的阈值框会被禁用：清空没保存的话恢复成已保存的值，并清掉报错，免得「未保存」卡住
   const toggleRule = async (key: string) => {
+    const turningOff = !!rules[key];
     try {
       const r = await api("/api/notifications/rules", { method: "PUT", body: { [key]: !rules[key] } });
       setRules(r.rules);
       setRulesSavedAt(Date.now());
+      if (turningOff && key === "onEta") {
+        setEtaVal((v) => v ?? etaRuleDisplay(r.rules));
+        setRuleErrors((e) => ({ ...e, eta: "" }));
+      }
+      if (turningOff && key === "onError") {
+        setErrThreshold((v) => v ?? Number(r.rules?.errorThreshold ?? 1));
+        setRuleErrors((e) => ({ ...e, errThreshold: "" }));
+      }
     } catch (e: any) {
       message.error(e.message);
     }
@@ -371,8 +381,17 @@ export default function NotificationsPage() {
     }
   };
 
-  // 切换单位时把输入值换算过去（两个单位间必然是互换），换算后直接保存
+  // 切换单位时把输入值换算过去（两个单位间必然是互换），换算后直接保存。
+  // 数值没改过时只保存单位（saveRules 不提交 etaDays），显示值按已保存的天数重新换算，
+  // 不用四舍五入后的值覆盖阈值（5 小时来回切仍是 5 小时）
   const onEtaUnitChange = (u: "days" | "hours") => {
+    if (etaVal === etaRuleDisplay(rules)) {
+      const shown = etaRuleDisplay({ ...rules, etaUnit: u });
+      setEtaVal(shown);
+      setEtaUnit(u);
+      void saveRules({ etaUnit: u, etaVal: shown });
+      return;
+    }
     const v = Number(etaVal);
     const next = etaVal != null && Number.isFinite(v) && v > 0 ? (u === "hours" ? +(v * 24).toFixed(2) : +(v / 24).toFixed(2)) : etaVal;
     setEtaVal(next);
@@ -401,11 +420,13 @@ export default function NotificationsPage() {
     if (Object.keys(errs).length) return;
     setRulesSaving(true);
     try {
-      const val = Number(f.etaVal ?? etaRuleDisplay(rules));
+      // 只有用户改过阈值才提交 etaDays；否则由服务端保留原值，免得显示用的两位小数把阈值改掉
+      const etaEdited = f.etaVal != null && f.etaVal !== etaRuleDisplay({ ...rules, etaUnit: f.etaUnit });
+      const val = Number(f.etaVal);
       const r = await api("/api/notifications/rules", {
         method: "PUT",
         body: {
-          etaDays: f.etaUnit === "hours" ? val / 24 : val, // 内部统一按天
+          ...(etaEdited ? { etaDays: f.etaUnit === "hours" ? val / 24 : val } : {}), // 内部统一按天
           etaUnit: f.etaUnit,
           renotifyHours: Number(f.renotify),
           errorThreshold: Number(f.errThreshold ?? rules.errorThreshold ?? 1),
@@ -576,6 +597,7 @@ export default function NotificationsPage() {
               }}
               disabled={off}
               status={ruleErrors.eta ? "error" : undefined}
+              aria-invalid={ruleErrors.eta ? true : undefined}
               aria-describedby={ruleErrors.eta ? `${uid}-eta-err` : undefined}
             />
             <Select
@@ -591,7 +613,7 @@ export default function NotificationsPage() {
           </Space.Compact>
           <span>内用完时通知</span>
           {ruleErrors.eta && (
-            <span className="jy-err" id={`${uid}-eta-err`}>
+            <span className="jy-err" id={`${uid}-eta-err`} role="alert">
               <Sym kind="crit" />
               {ruleErrors.eta}
             </span>
@@ -616,11 +638,12 @@ export default function NotificationsPage() {
             }}
             disabled={off}
             status={ruleErrors.errThreshold ? "error" : undefined}
-            aria-describedby={`${uid}-errThreshold-desc`}
+            aria-invalid={ruleErrors.errThreshold ? true : undefined}
+            aria-describedby={ruleErrors.errThreshold ? `${uid}-errThreshold-desc ${uid}-errThreshold-err` : `${uid}-errThreshold-desc`}
           />
           <span id={`${uid}-errThreshold-desc`}>才通知（1 = 首次失败即通知）</span>
           {ruleErrors.errThreshold && (
-            <span className="jy-err">
+            <span className="jy-err" id={`${uid}-errThreshold-err`} role="alert">
               <Sym kind="crit" />
               {ruleErrors.errThreshold}
             </span>
@@ -754,15 +777,16 @@ export default function NotificationsPage() {
                       setRuleErrors((e) => ({ ...e, renotify: "" }));
                     }}
                     status={ruleErrors.renotify ? "error" : undefined}
+                    aria-invalid={ruleErrors.renotify ? true : undefined}
                     aria-describedby={`${uid}-renotify-desc`}
                   />
                   {ruleErrors.renotify ? (
-                    <span className="jy-err" id={`${uid}-renotify-desc`}>
+                    <span key="err" className="jy-err" id={`${uid}-renotify-desc`} role="alert">
                       <Sym kind="crit" />
                       {ruleErrors.renotify}
                     </span>
                   ) : (
-                    <span className="jy-caption" id={`${uid}-renotify-desc`}>
+                    <span key="desc" className="jy-caption" id={`${uid}-renotify-desc`}>
                       同一异常持续存在时，每隔 N 小时再次提醒（0 = 只提醒一次）
                     </span>
                   )}
@@ -782,15 +806,16 @@ export default function NotificationsPage() {
                       setRuleErrors((e) => ({ ...e, errRetry: "" }));
                     }}
                     status={ruleErrors.errRetry ? "error" : undefined}
+                    aria-invalid={ruleErrors.errRetry ? true : undefined}
                     aria-describedby={`${uid}-errRetry-desc`}
                   />
                   {ruleErrors.errRetry ? (
-                    <span className="jy-err" id={`${uid}-errRetry-desc`}>
+                    <span key="err" className="jy-err" id={`${uid}-errRetry-desc`} role="alert">
                       <Sym kind="crit" />
                       {ruleErrors.errRetry}
                     </span>
                   ) : (
-                    <span className="jy-caption" id={`${uid}-errRetry-desc`}>
+                    <span key="desc" className="jy-caption" id={`${uid}-errRetry-desc`}>
                       查询失败后隔 N 秒立即重试一次以尽快确认，不必等下次轮询（0 = 关闭）
                     </span>
                   )}

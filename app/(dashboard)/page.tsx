@@ -189,7 +189,8 @@ export default function OverviewPage() {
     const err = stationsLoadErr || moneyLoadErr;
     if (err) throw new Error(`已刷新上游，但本页数据加载失败：${err}`);
     const list: any[] = Array.isArray(r?.stations) ? r.stations : [];
-    const failed = list.filter((s) => !s.archivedAt && s.balance && !s.balance.ok).length;
+    // 口径与「需要处理」一致：自营站点的余额不在那里列出，这里也不计
+    const failed = list.filter((s) => !s.archivedAt && !s.isOwn && s.balance && !s.balance.ok).length;
     if (failed) message.warning(`已刷新上游资源，其中 ${failed} 个余额查询失败，见「需要处理」`);
     else message.success("已刷新全部上游资源");
   };

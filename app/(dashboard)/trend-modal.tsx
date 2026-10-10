@@ -37,12 +37,14 @@ function basisText(basis: string | undefined) {
   return `按${basis.replace(/(\d+)/, " $1 ")}的消耗估算`;
 }
 
-// 横轴刻度：按跨度选 1 小时到 7 天的整点间隔，保证每个标签至少有 72px
+// 横轴刻度：按跨度选 1 小时到 7 天的整点间隔，保证每个标签至少有 72px；
+// 带预测的 30 天能拉到 60 天，窄屏上 7 天也放不下时按整周加大间隔
 function timeTicks(t0: number, t1: number, plotW: number) {
   const span = Math.max(HOUR, t1 - t0);
   const maxTicks = Math.max(2, Math.floor(plotW / 72));
   const steps = [1, 2, 3, 6, 12, 24, 48, 72, 168].map((h) => h * HOUR);
-  const step = steps.find((s) => span / s <= maxTicks) ?? steps[steps.length - 1];
+  const WEEK = 168 * HOUR;
+  const step = steps.find((s) => span / s <= maxTicks) ?? Math.ceil(span / maxTicks / WEEK) * WEEK;
   const start = new Date(t0);
   if (step >= 24 * HOUR) start.setHours(0, 0, 0, 0);
   else start.setMinutes(0, 0, 0);
@@ -177,7 +179,13 @@ function BalanceChart({ points, proj, label }: { points: [number, number][]; pro
               {proj && (
                 <>
                   <line className="day-rule" x1={x(last[0])} x2={x(last[0])} y1={T} y2={H - B} />
-                  <text className="tick-label" x={x(last[0]) + 6} y={T + 12}>
+                  {/* 预测段很短时「现在」贴着右边缘，改放到竖线左侧 */}
+                  <text
+                    className="tick-label"
+                    x={x(last[0]) + 36 > w ? x(last[0]) - 6 : x(last[0]) + 6}
+                    y={T + 12}
+                    textAnchor={x(last[0]) + 36 > w ? "end" : "start"}
+                  >
                     现在
                   </text>
                   <path
@@ -370,7 +378,7 @@ export default function TrendModal({
               </div>
             ) : points.length < 2 ? (
               <div className="jy-state jy-state--center">
-                <h3>近 {rangeLabel}还没有形成走势</h3>
+                <h3>{rangeLabel}还没有形成走势</h3>
                 <p>完成至少两次成功的余额查询后，这里会显示余额变化。</p>
               </div>
             ) : (

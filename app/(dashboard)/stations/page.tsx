@@ -99,14 +99,22 @@ export default function StationsPage() {
   const [params, setParams] = useUrlParams();
   const editParam = params.get("edit");
 
+  // 写地址栏是异步的：记住自己写进去的值，回声到达时不回填输入框，否则会吞掉这期间新打的字
+  const lastWrittenQuery = useRef(queryParam);
   useEffect(() => {
     if (query === queryParam) return;
-    const t = setTimeout(() => setQueryParam(query.trim() ? query : ""), 300);
+    const t = setTimeout(() => {
+      const next = query.trim() ? query : "";
+      lastWrittenQuery.current = next;
+      setQueryParam(next);
+    }, 300);
     return () => clearTimeout(t);
   }, [query]); // eslint-disable-line react-hooks/exhaustive-deps
-  // 浏览器前进后退改了地址栏时跟上
+  // 浏览器前进后退等外部改动了地址栏时才跟上
   useEffect(() => {
-    setQuery((cur) => (cur.trim() === queryParam.trim() ? cur : queryParam));
+    if (queryParam === lastWrittenQuery.current) return;
+    lastWrittenQuery.current = queryParam;
+    setQuery(queryParam);
   }, [queryParam]);
 
   const drawerRef = useRef<StationDrawerHandle>(null);
@@ -851,7 +859,7 @@ export default function StationsPage() {
         idPrefix="stations"
         label="上游资源视图"
       />
-      {/* 外层包一层：隐藏的标签面板不参与页面的间距；渠道接入与账号关系始终挂载，切换标签不丢状态 */}
+      {/* 外层包一层：隐藏的标签面板不参与页面的间距；渠道接入与账号关系首次打开后保持挂载，切换标签不丢状态 */}
       <div>
         <TabPanel idPrefix="stations" tabKey="list" active={view === "list"}>
           <div className="jy-toolbar">
@@ -894,14 +902,14 @@ export default function StationsPage() {
           <Panel body={false} label="上游资源列表">{body}</Panel>
         </TabPanel>
 
-        <TabPanel idPrefix="stations" tabKey="onboarding" active={view === "onboarding"}>
+        <TabPanel idPrefix="stations" tabKey="onboarding" active={view === "onboarding"} keepMounted>
           <div className="jy-stations-onboarding">
             {/* 行内打开新的处理目标时重新挂载，让它按新目标重新定位 */}
             <ChannelOnboarding key={accounts.destinationSeq} compact={compact} onComplete={reload} destination={accounts.destination} />
           </div>
         </TabPanel>
 
-        <TabPanel idPrefix="stations" tabKey="accounts" active={view === "accounts"}>
+        <TabPanel idPrefix="stations" tabKey="accounts" active={view === "accounts"} keepMounted>
           {accounts.center}
         </TabPanel>
       </div>

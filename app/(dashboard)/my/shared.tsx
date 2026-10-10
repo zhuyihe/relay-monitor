@@ -82,7 +82,17 @@ export function totalsNote(v: OwnView, here: "users" | "models"): string | undef
     (u) => u.cost,
   );
   const notes: string[] = [];
-  if (here === "users" && adminTot >= 0.005) notes.push(`合计含管理员自用的 ${money(adminTot)}，概览里的收入不算这部分。`);
+  // 管理员 Key 转售出去的消费在概览里算收入（服务端 computeResold），只有自用部分不计入
+  const resold = Number(v.profit?.resoldCny) || 0;
+  if (here === "users" && adminTot >= 0.005) {
+    if (resold >= 0.005) {
+      const self = Number(v.profit?.adminUsageCny) || 0;
+      notes.push(
+        `合计含管理员账号的 ${money(adminTot)}：其中转售 Key 的 ${money(resold)} 在概览里计入收入` +
+          (self >= 0.005 ? `，管理员自用的 ${money(self)} 不计入。` : "。"),
+      );
+    } else notes.push(`合计含管理员自用的 ${money(adminTot)}，概览里的收入不算这部分。`);
+  }
   if (here === "models") notes.push("合计是全部消费，含管理员自用。");
   const mine = here === "users" ? userTot : v.totCost;
   const other = here === "users" ? v.totCost : userTot;

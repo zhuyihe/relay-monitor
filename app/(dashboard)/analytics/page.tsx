@@ -31,7 +31,8 @@ import type { Derived, OwnStatus } from "./derive";
 
 type Heat = ReturnType<typeof deriveHeat>;
 // 所选范围的消耗时段画不出来时退回的近 7 天；heat 为 null 表示退回也失败了
-type HeatFallback = { includeArchived: boolean; heat: Heat | null };
+// key：归档条件 + 整点，只有两者都和当前一致才拿来展示
+type HeatFallback = { key: string; heat: Heat | null };
 
 const PRESET_DAYS: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
 const RANGE_OPTIONS = [
@@ -181,20 +182,24 @@ export default function AnalyticsPage() {
   // 不让整块空着。按小时取一次就够（热力图本身就是小时粒度）。
   const needHeat7 = !!dv && !dv.heat.available && dv.heat.reason === "incomplete-raw-history" && (snap?.days ?? 0) > 7;
   const hourKey = asOf ? Math.floor(asOf / 3600000) : 0;
+  const heat7Key = `${includeArchived ? 1 : 0}:${hourKey}`;
   const [heat7, setHeat7] = useState<HeatFallback | null>(null);
+  const heat7Ready = heat7?.key === heat7Key;
   useEffect(() => {
-    if (!needHeat7) return;
+    // 同一条件、同一小时内已经取过就直接复用（来回切换范围不再重复请求）
+    if (!needHeat7 || heat7Ready) return;
     let alive = true;
     const params = new URLSearchParams({ days: "7" });
     if (includeArchived) params.set("includeArchived", "true");
     api(`/api/analytics?${params}`)
-      .then((d) => alive && setHeat7({ includeArchived, heat: deriveHeat(d) }))
-      .catch(() => alive && setHeat7({ includeArchived, heat: null }));
+      .then((d) => alive && setHeat7({ key: heat7Key, heat: deriveHeat(d) }))
+      .catch(() => alive && setHeat7({ key: heat7Key, heat: null }));
     return () => {
       alive = false;
     };
-  }, [needHeat7, includeArchived, hourKey]);
-  const heatFallback = needHeat7 && heat7?.includeArchived === includeArchived ? heat7 : null;
+  }, [needHeat7, heat7Key, heat7Ready]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 条件或整点变了、新数据还没回来时显示加载中，不拿上一份顶替
+  const heatFallback = needHeat7 && heat7Ready ? heat7 : null;
 
   const archivedCount = Number(snap?.data?.selection?.archivedStationCount) || 0;
   const archiveToggle = (

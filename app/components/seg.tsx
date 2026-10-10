@@ -1,6 +1,6 @@
 "use client";
 // 分段控件（时间范围、筛选、图表/表格切换）与标签页。
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { Icon } from "./icons";
 import type { IconName } from "./icons";
@@ -110,17 +110,22 @@ export function Tabs<T extends string>({
   );
 }
 
+// keepMounted：第一次打开后一直挂载，切走只隐藏，表单与向导状态不丢；没打开过的不挂载，不提前发请求
 export function TabPanel({
   idPrefix,
   tabKey,
   active,
+  keepMounted = false,
   children,
 }: {
   idPrefix: string;
   tabKey: string;
   active: boolean;
+  keepMounted?: boolean;
   children: ReactNode;
 }) {
+  const [seen, setSeen] = useState(active);
+  if (active && !seen) setSeen(true);
   return (
     <div
       role="tabpanel"
@@ -129,7 +134,7 @@ export function TabPanel({
       className="jy-tabpanel"
       hidden={!active}
     >
-      {active ? children : null}
+      {active || (keepMounted && seen) ? children : null}
     </div>
   );
 }
