@@ -169,6 +169,7 @@ test("daily zero and negative confirmed subtotals remain numeric while unknown w
   const next = await openDailyPage(t, { data: dailyResponse([unknown]) }); const row = next.page.locator("tr.ant-table-row", { hasText: "Rule A" }); await row.getByText("¥17.50", { exact: true }).waitFor(); await row.getByText("¥7.00", { exact: true }).waitFor(); await row.getByText("待核算", { exact: true }).waitFor(); const coverage = next.page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.locator(".ant-collapse-header").click(); await coverage.getByText("Key 用途待确认", { exact: true }).waitFor(); await coverage.getByText("待处理：核对这把 Key 的全部用途", { exact: true }).waitFor();
 });
 
+const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} } };
 async function openFixturePage(t, handler, viewport, clock = false, onboardingHandler = null, path = "/reconciliation") {
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
   t.after(() => browser.close());
@@ -177,10 +178,16 @@ async function openFixturePage(t, handler, viewport, clock = false, onboardingHa
   if (clock) await page.clock.install();
   page.setDefaultTimeout(5_000);
   await page.route("**/api/**", async (route) => {
-    if (new URL(route.request().url()).pathname.startsWith("/api/channel-onboarding")) {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname.startsWith("/api/channel-onboarding")) {
       return onboardingHandler ? onboardingHandler(route) : fulfill(route, { ownStation: null, channels: [], upstreams: [], rules: [], stale: false });
     }
-    return handler(route);
+    try { return await handler(route); }
+    catch (error) {
+      // 外壳侧栏在每个页面读这两个接口算待处理条数；用例没有声明时给空数据，其余未声明的接口照常失败
+      if (shellFallback[pathname] && route.request().method() === "GET" && /^unexpected /.test(error?.message || "")) return fulfill(route, shellFallback[pathname]);
+      throw error;
+    }
   });
   await page.goto(`${baseURL}${path}`, { timeout: 30000 });
   await page.getByText("Rule A").first().waitFor();
@@ -337,6 +344,7 @@ test("discovery refresh preserves the panel state for Enter, Space and click", {
     }
     if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, configuration);
     if (url.pathname === "/api/reconciliation") return fulfill(route, response([rule("rule-1", "Rule A", 10)]));
+    if (shellFallback[url.pathname]) return fulfill(route, shellFallback[url.pathname]);
     throw new Error("unexpected fixture API: " + url.pathname);
   });
   await page.goto(`${baseURL}/reconciliation`, { timeout: 30000 });
@@ -518,7 +526,7 @@ test("the resources page retains the same batch entry and original resource conf
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
     throw new Error("unexpected station fixture API: " + path);
   } });
-  await page.goto(baseURL + "/stations"); const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].groups[0].channels[0].channelId, 4); await page.getByRole("button", { name: /添加资源/ }).click(); await page.getByRole("dialog", { name: "添加上游资源", exact: true }).waitFor();
+  await page.goto(baseURL + "/stations?view=onboarding"); const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].groups[0].channels[0].channelId, 4); await page.getByRole("tab", { name: "资源列表", exact: true }).click(); await page.getByRole("button", { name: "新增上游资源", exact: true }).first().click(); await page.getByRole("dialog", { name: "新增上游资源", exact: true }).waitFor();
 });
 
 test("catalogue sync occurs on entry and manual discovery, without page-minute polling", async (t) => {
@@ -550,6 +558,12 @@ function accountReadFixture() {
     monitor: { status: id === 1 ? "linked" : "unlinked", stationIds: id === 1 ? ["A-monitor-1", "A-monitor-2", "pure-key"] : [] }, reconciliation: { status: "configured", ruleIds: id === 1 ? ["A-active"] : id === 2 ? ["B-active", "A-stopped"] : ["A-history"] } }));
   return { accounts: [a, b, sub], unverifiedResources, channels, actions: [...a.actions, ...b.actions, action("connect_channels", "接入这些渠道", { stationId: "pure-key", ownStationId: "own", channelIds: [1], href: "/stations?action=connect&ownStationId=own&channelIds=1" }), action("verify_identity", "核验账号身份", { stationId: "unknown-legacy", ownStationId: "own", href: "/stations?action=verify&stationId=unknown-legacy" })], generatedAt: "2026-10-09T07:00:00.000Z" };
 }
+// 账号卡片里的事实按 dt/dd 成对展示：等到这一项的值出现
+const exactText = (text) => new RegExp(`^\\s*${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`);
+async function waitForFact(scope, term, value) {
+  await scope.locator("dt").filter({ hasText: exactText(term) }).locator("xpath=following-sibling::dd[1]").filter({ hasText: exactText(value) }).first().waitFor();
+}
+
 async function openAccountsPage(t, options = {}) {
   const model = options.model || accountReadFixture(), mutations = [], accountRequests = [];
   const originalStations = [
@@ -566,7 +580,9 @@ async function openAccountsPage(t, options = {}) {
     throw new Error("unexpected account fixture API: " + path);
   } });
   const { page } = onboarded;
-  await page.goto(baseURL + (options.path || "/stations")); const center = page.getByRole("region", { name: "账号关系中心" }); if (options.initialFailure) await center.getByRole("button", { name: "重试账号关系", exact: true }).waitFor(); else if (!options.path) await center.getByText(/显示 3\/3 个已核验账号/).waitFor(); else await center.getByText(/显示 .* 个已核验账号/).waitFor();
+  // 账号关系中心在「账号关系」标签里；接入类事项落到「渠道接入」标签，账号关系中心此时不可见
+  const path = options.path || "/stations?view=accounts", onboardingDestination = /[?&]action=(?:connect|coverage|source)(?:&|$)/.test(path);
+  await page.goto(baseURL + path); const center = page.getByRole("region", { name: "账号关系中心" }); if (onboardingDestination) await page.getByRole("tab", { name: "渠道接入", selected: true }).waitFor(); else if (options.initialFailure) await center.getByRole("button", { name: "重试账号关系", exact: true }).waitFor(); else if (!options.path) await center.getByText(/显示 3\/3 个已核验账号/).waitFor(); else await center.getByText(/显示 .* 个已核验账号/).waitFor();
   if (/action=verify(?:&|-billing&)/.test(options.path || "") && !options.path.includes("stationId=deleted")) {
     const verification = page.getByRole("dialog", { name: /^核验账号与账单能力/ }); await verification.waitFor();
     await page.waitForFunction((dialog) => !dialog.closest(".ant-drawer")?.getAnimations({ subtree: true }).some((animation) => animation.playState === "running" && animation.effect?.getTiming().iterations !== Infinity), await verification.elementHandle());
@@ -593,7 +609,7 @@ test("workflow stale channel, changed source and stopped coverage destinations k
 });
 
 test("workflow balance destination focuses original resource settings and account authorization opens its existing flow", async (t) => {
-  const opened = await openAccountsPage(t, { path: "/stations?stationId=A-monitor-1" }); const focused = opened.page.getByRole("region", { name: "定位原资源余额与监控", exact: true }); await focused.getByText("A-monitor-1", { exact: true }).waitFor(); assert.equal(await focused.getByText("A-monitor-2", { exact: true }).count(), 0); await focused.getByRole("button", { name: "原资源设置", exact: true }).click(); const editor = opened.page.getByRole("dialog", { name: "编辑上游资源", exact: true }); await editor.waitFor(); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("低余额告警阈值（按站点余额 $ 计，可留空）", { exact: true }).inputValue(), "27");
+  const opened = await openAccountsPage(t, { path: "/stations?stationId=A-monitor-1" }); const focused = opened.page.getByRole("region", { name: "定位原资源余额与监控", exact: true }); await focused.getByText("A-monitor-1", { exact: true }).waitFor(); assert.equal(await focused.getByText("A-monitor-2", { exact: true }).count(), 0); await focused.getByRole("button", { name: "原资源设置", exact: true }).click(); const editor = opened.page.getByRole("dialog", { name: /^编辑上游资源：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("低余额告警阈值（按该资源的余额单位计，可留空）", { exact: true }).inputValue(), "27");
   const authorized = await openAuthorizationPage(t); await authorized.page.goto(`${baseURL}/stations?action=authorization&accountKey=${authorized.model.accounts[0].accountKey}`); const drawer = authorized.page.getByRole("dialog", { name: "更新账号授权 · 42", exact: true }); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("u06-once"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.equal(authorized.updates.length, 1); assert.deepEqual(authorized.updates[0].targetStationIds.sort(), ["st_u04_a1", "st_u04_a2", "st_u04_billing"]);
 });
 
@@ -671,7 +687,7 @@ test("workflow unreadable Key directory remains partial and pure-Key fallback us
   const opened = await openAccountsPage(t, { path: "/stations?action=verify&stationId=unknown-legacy", readonlyAPI(route) {
     const partial = keyVerificationFixture(); Object.assign(partial, { quotaPerUnit: null, version: "", groups: {}, tokens: [], capability: { state: "unverified", currency: "USD", window: "second", reason: "KEY_METADATA_UNAVAILABLE" }, billingTimezone: { state: "unverified", timezone: "Asia/Shanghai", reason: "KEY_METADATA_UNAVAILABLE" } }); return fulfill(route, partial);
   } }); const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · unknown-legacy", exact: true }); await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click(); await drawer.getByText("Key 目录无法读取，请检查目录权限或稍后重试", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: "核验实际 Key", exact: true }).count(), 0); assert.equal(opened.mutations.length, 0);
-  const pure = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=pure-key", readonlyAPI() { assert.fail("pure Key must not enter account probe"); } }); const pureDrawer = pure.page.getByRole("dialog", { name: "核验账号与账单能力 · pure-key", exact: true }); await pureDrawer.getByText("纯 Key 保持独立，不能推断所属账号", { exact: true }).waitFor(); await pureDrawer.getByRole("button", { name: "补充原资源授权", exact: true }).click(); const editor = pure.page.getByRole("dialog", { name: "编辑上游资源", exact: true }); await editor.waitFor(); assert.equal(await editor.getByLabel("名称", { exact: true }).inputValue(), "pure-key"); assert.equal(pure.mutations.length, 0);
+  const pure = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=pure-key", readonlyAPI() { assert.fail("pure Key must not enter account probe"); } }); const pureDrawer = pure.page.getByRole("dialog", { name: "核验账号与账单能力 · pure-key", exact: true }); await pureDrawer.getByText("纯 Key 保持独立，不能推断所属账号", { exact: true }).waitFor(); await pureDrawer.getByRole("button", { name: "补充原资源授权", exact: true }).click(); const editor = pure.page.getByRole("dialog", { name: /^编辑上游资源：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel("名称", { exact: true }).inputValue(), "pure-key"); assert.equal(pure.mutations.length, 0);
 });
 
 test("workflow external Key use stops the old rule before selecting a new Key while unknown use stays reference", async (t) => {
@@ -683,8 +699,12 @@ test("workflow external Key use stops the old rule before selecting a new Key wh
 });
 
 test("workflow overview merges stable public actions and preserves prior actions on a partial read failure", async (t) => {
-  let reads = 0; const opened = await openAccountsPage(t, { accounts(route, count, model) { reads += 1; return count > 2 ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture account read unavailable" }) }) : fulfill(route, model); }, readonlyAPI(route, path) { assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] }); } });
-  await opened.page.goto(baseURL); const region = opened.page.getByRole("region", { name: "需要处理", exact: true }); await region.getByRole("link", { name: "更新账号授权", exact: true }).waitFor(); assert.equal(await region.getByRole("link", { name: "核对这把 Key 的全部用途", exact: true }).count(), 1); const before = await region.getByRole("listitem").count(); await region.getByRole("button", { name: "刷新处理事项", exact: true }).click(); await region.getByText("部分账号或账单事项未能更新，保留上次已读事项。", { exact: true }).waitFor(); assert.equal(await region.getByRole("listitem").count(), before); const href = await region.getByRole("link", { name: "更新账号授权", exact: true }).getAttribute("href"); assert.equal(href, opened.model.accounts[0].actions[0].href); assert.equal(opened.mutations.length, 0); assert.ok(reads >= 3);
+  let reads = 0; const opened = await openAccountsPage(t, { accounts(route, count, model) { reads += 1; return count > 2 ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture account read unavailable" }) }) : fulfill(route, model); }, readonlyAPI(route, path) {
+    // 总览的经营数据不在本用例范围内：只读接口给不可用，页面照常展示需要处理的事项
+    if (path === "/api/own/analytics") return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture analytics unavailable" }) });
+    assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
+  } });
+  await opened.page.goto(baseURL); const region = opened.page.getByRole("region", { name: "需要处理", exact: true }); await region.getByRole("link", { name: /^更新账号授权（/ }).waitFor(); assert.equal(await region.getByRole("link", { name: /^核对这把 Key 的全部用途（/ }).count(), 1); const before = await region.getByRole("listitem").count(); await region.getByRole("button", { name: "刷新处理事项", exact: true }).click(); await region.getByText("部分账号或账单事项未能更新，保留上次已读事项。", { exact: true }).waitFor(); assert.equal(await region.getByRole("listitem").count(), before); const href = await region.getByRole("link", { name: /^更新账号授权（/ }).getAttribute("href"); assert.equal(href, opened.model.accounts[0].actions[0].href); assert.equal(opened.mutations.length, 0); assert.ok(reads >= 3);
 });
 
 test("workflow read failures and deleted verification targets expose a safe retry with no save", async (t) => {
@@ -826,9 +846,9 @@ test("authorization with no saved donor requests fresh input and a new operation
 
 test("pause and re-enable retain complete resource settings while stopping one Key leaves other monitors and history intact", async (t) => {
   const { page, center, model, mutations, originalStations } = await openAuthorizationPage(t); let a = await expandAccount(center, model.accounts[0]); const resource = () => a.locator('[data-resource-id="st_u04_a1"]'); await resource().getByRole("button", { name: "暂停监控 A-monitor-1", exact: true }).click(); let modal = page.getByRole("dialog", { name: "暂停「A-monitor-1」监控？", exact: true }); await modal.getByText(/Key 账单核算继续/).waitFor(); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" }); await page.reload(); await center.getByText(/显示 3\/3/).waitFor(); a = await expandAccount(center, model.accounts[0]); await resource().getByText("监控暂停 / 未启用", { exact: true }).waitFor(); assert.equal(await page.locator(".resource-list-card").getByText("A-monitor-1", { exact: true }).count(), 0);
-  await resource().getByRole("button", { name: "查看原资源设置 A-monitor-1", exact: true }).click(); const editor = page.getByRole("dialog", { name: "编辑上游资源", exact: true }); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("成本渠道匹配别名", { exact: true }).inputValue(), "kept_alias"); await editor.getByRole("button", { name: /取\s*消/ }).click();
-  await resource().getByRole("button", { name: "启用监控 A-monitor-1", exact: true }).click(); modal = page.getByRole("dialog", { name: "启用「A-monitor-1」监控？", exact: true }); await modal.getByText("现有成本设置：不纳入", { exact: true }).waitFor(); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" }); await resource().getByText("余额监控", { exact: true }).waitFor(); assert.equal(originalStations.find((entry) => entry.id === "st_u04_a1").includeInProfit, false);
-  await a.getByRole("button", { name: /Key 9 · #9/ }).click(); await a.getByRole("button", { name: "停止 Key 9 的账单核算", exact: true }).click(); modal = page.getByRole("dialog", { name: "停止此 Key 的账单核算？", exact: true }); await modal.getByText(/Channel 1 #1.*st_u04_own/).waitFor(); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" }); await a.getByText("有效规则：无", { exact: true }).first().waitFor(); assert.equal(await a.getByRole("button", { name: "停止 Key 9 的账单核算", exact: true }).count(), 0); assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["PUT", "/api/stations/st_u04_a1"], ["PUT", "/api/stations/st_u04_a1"], ["DELETE", "/api/reconciliation/rules/rule_u04"]]); assert.equal(model.accounts[0].resources.find((entry) => entry.id === "st_u04_a2").monitorEnabled, true); assert.equal(model.accounts[0].keys[0].ruleIds.includes("rule_history"), true); assert.equal(await center.getByRole("button", { name: /暂停监控 st_u04_own/ }).count(), 0);
+  await resource().getByRole("button", { name: "查看原资源设置 A-monitor-1", exact: true }).click(); const editor = page.getByRole("dialog", { name: /^编辑上游资源：/ }); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("成本渠道匹配别名", { exact: true }).inputValue(), "kept_alias"); await editor.getByRole("button", { name: /取\s*消/ }).click();
+  await resource().getByRole("button", { name: "启用监控 A-monitor-1", exact: true }).click(); modal = page.getByRole("dialog", { name: "启用「A-monitor-1」监控？", exact: true }); await waitForFact(modal, "现有成本设置", "不纳入"); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" }); await resource().getByText("余额监控", { exact: true }).waitFor(); assert.equal(originalStations.find((entry) => entry.id === "st_u04_a1").includeInProfit, false);
+  await a.getByRole("button", { name: /Key 9 · #9/ }).click(); await a.getByRole("button", { name: "停止 Key 9 的账单核算", exact: true }).click(); modal = page.getByRole("dialog", { name: "停止此 Key 的账单核算？", exact: true }); await modal.getByText(/Channel 1 #1.*st_u04_own/).waitFor(); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" }); await waitForFact(a, "有效规则", "无"); assert.equal(await a.getByRole("button", { name: "停止 Key 9 的账单核算", exact: true }).count(), 0); assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["PUT", "/api/stations/st_u04_a1"], ["PUT", "/api/stations/st_u04_a1"], ["DELETE", "/api/reconciliation/rules/rule_u04"]]); assert.equal(model.accounts[0].resources.find((entry) => entry.id === "st_u04_a2").monitorEnabled, true); assert.equal(model.accounts[0].keys[0].ruleIds.includes("rule_history"), true); assert.equal(await center.getByRole("button", { name: /暂停监控 st_u04_own/ }).count(), 0);
 });
 
 test("authorization target changes invalidate preview and keyboard cancellation works at 320/390/768/1440 without overflow", async (t) => {
@@ -844,8 +864,10 @@ test("account center preserves mixed accounts, original resource IDs, dedicated 
   assert.equal(await a.locator("[data-resource-id]").count(), 3); assert.equal(await b.locator("[data-resource-id='B-monitor']").count(), 1); assert.equal(await sub.locator("[data-resource-id]").count(), 2);
   const dedicated = a.locator("[data-resource-id='A-billing']"); await dedicated.getByText("监控暂停 / 未启用", { exact: true }).waitFor(); await dedicated.getByRole("button", { name: "查看原资源设置 A-billing", exact: true }).waitFor(); assert.equal(await page.locator(".resource-list-card").getByText("A-billing", { exact: true }).count(), 0); await a.getByText(/提醒阈值：\$27.00；折算汇率：0.7 RMB\/USD；成本设置：不纳入；不再续费/).waitFor();
   assert.equal(await a.locator("[data-resource-id='pure-key']").count(), 0); await center.locator("[data-unverified-resource-id='pure-key']").getByText("关联本站渠道：Channel 1 #1", { exact: true }).waitFor(); await center.locator("[data-unverified-resource-id='unknown-legacy']").getByText("账号身份待核验", { exact: true }).waitFor(); assert.equal(await center.locator("[data-resource-id='own']").count(), 0);
-  await a.getByRole("button", { name: /Key 9 · #9/ }).click(); await a.getByText("Channel 3 · #3", { exact: true }).waitFor(); await a.getByText("当前范围版本：3 · 用途范围待确认", { exact: true }).waitFor(); await a.getByRole("button", { name: /Key 10 · #10/ }).click(); await a.getByText("历史范围版本：3 · 用途范围待确认", { exact: true }).waitFor(); await a.getByText("有效规则：无", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "查看归档资源", exact: true }).click(); await a.locator("[data-resource-id='A-archived']").waitFor(); await page.getByText("自营", { exact: true }).waitFor(); assert.doesNotMatch(await center.innerText(), /余额合计|总余额|\$30\.00/);
+  await a.getByRole("button", { name: /Key 9 · #9/ }).click(); await a.getByText("Channel 3 · #3", { exact: true }).waitFor(); await waitForFact(a, "当前范围版本", "3 · 用途范围待确认"); await a.getByRole("button", { name: /Key 10 · #10/ }).click(); await waitForFact(a, "历史范围版本", "3 · 用途范围待确认"); await waitForFact(a, "有效规则", "无");
+  await page.getByRole("button", { name: "查看归档资源", exact: true }).click(); await a.locator("[data-resource-id='A-archived']").waitFor(); assert.doesNotMatch(await center.innerText(), /余额合计|总余额|\$30\.00/);
+  // 本站资源不进账号关系，仍在资源列表里
+  await page.getByRole("tab", { name: "资源列表", exact: true }).click(); await page.getByText("自营", { exact: true }).waitFor(); await page.getByRole("tab", { name: "账号关系", exact: true }).click(); await center.waitFor();
   const destinations = [
     { scope: a, label: "更新账号授权", params: { action: "authorization", accountKey: model.accounts[0].accountKey } },
     { scope: a, label: "核对这把 Key 的全部用途", params: { action: "coverage", ruleId: "A-active" } },
@@ -864,7 +886,7 @@ test("account center preserves mixed accounts, original resource IDs, dedicated 
 
 test("account search and attention filters preserve relationships and open only the original complete editor object", async (t) => {
   const { page, center, model, mutations } = await openAccountsPage(t); await center.getByRole("textbox", { name: "搜索账号关系" }).fill("A-monitor-1"); await center.getByText(/显示 1\/3 个已核验账号/).waitFor(); const a = await expandAccount(center, model.accounts[0]);
-  await a.getByRole("button", { name: "查看原资源设置 A-monitor-1", exact: true }).click(); const editor = page.getByRole("dialog", { name: "编辑上游资源", exact: true }); await editor.waitFor(); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("成本渠道匹配别名", { exact: true }).inputValue(), "kept_alias"); await editor.getByRole("button", { name: /取\s*消/ }).click(); await editor.waitFor({ state: "hidden" });
+  await a.getByRole("button", { name: "查看原资源设置 A-monitor-1", exact: true }).click(); const editor = page.getByRole("dialog", { name: /^编辑上游资源：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("成本渠道匹配别名", { exact: true }).inputValue(), "kept_alias"); await editor.getByRole("button", { name: /取\s*消/ }).click(); await editor.waitFor({ state: "hidden" });
   await center.getByRole("textbox", { name: "搜索账号关系" }).fill("Sub-password"); const sub = await expandAccount(center, model.accounts[2]); await sub.getByRole("button", { name: "查看原资源设置 Sub-password", exact: true }).click(); await editor.waitFor(); assert.equal(await editor.getByLabel("登录邮箱", { exact: true }).inputValue(), "saved-sub@example.test"); await editor.getByRole("button", { name: /取\s*消/ }).click(); await editor.waitFor({ state: "hidden" });
   await center.getByRole("textbox", { name: "搜索账号关系" }).fill("Key 10"); await expandAccount(center, model.accounts[0]); await a.getByRole("button", { name: /Key 10 · #10/ }).click(); await a.getByText("Channel 2 · #2", { exact: true }).waitFor(); assert.equal(await a.locator("[data-resource-id]").count(), 3);
   await center.getByRole("textbox", { name: "搜索账号关系" }).fill(""); await center.getByRole("combobox", { name: "账号关系状态" }).click(); await page.getByText("需处理", { exact: true }).last().click(); await center.getByText(/显示 1\/3 个已核验账号/).waitFor(); assert.equal(await center.getByRole("button", { name: /账号 B / }).count(), 0);
@@ -883,7 +905,9 @@ test("account read failure retains the last public relationships and retry resto
 
 test("an initial account read failure offers a working retry without affecting original monitoring resources", async (t) => {
   const { page, center, accountRequests } = await openAccountsPage(t, { initialFailure: true, accounts(route, count, model) { return count === 1 ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "账号关系暂不可用" }) }) : fulfill(route, model); } });
-  await page.getByText("自营", { exact: true }).waitFor(); await center.getByRole("button", { name: "重试账号关系", exact: true }).click(); await center.getByText(/显示 3\/3 个已核验账号/).waitFor(); assert.deepEqual(accountRequests, ["GET", "GET"]);
+  // 资源列表照常可用
+  await page.getByRole("tab", { name: "资源列表", exact: true }).click(); await page.getByText("自营", { exact: true }).waitFor(); await page.getByRole("tab", { name: "账号关系", exact: true }).click();
+  await center.getByRole("button", { name: "重试账号关系", exact: true }).click(); await center.getByText(/显示 3\/3 个已核验账号/).waitFor(); assert.deepEqual(accountRequests, ["GET", "GET"]);
 });
 
 test("account and Key expansion works by keyboard across 320/390/768/1440 widths without root overflow", async (t) => {

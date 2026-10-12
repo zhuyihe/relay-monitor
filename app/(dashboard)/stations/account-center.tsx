@@ -21,7 +21,6 @@ type AccountCenterProps = {
   types: any[];
   loadingMeta: boolean;
   compact: boolean;
-  showArchived: boolean;
   loaded: boolean;
   loadingList: boolean;
   loadError: string | null;
@@ -33,7 +32,7 @@ type AccountCenterProps = {
 };
 
 export function useAccountCenter({
-  stations, types, loadingMeta, compact, showArchived, loaded, loadingList, loadError, reload, reloadToken, openEditor, openTrend,
+  stations, types, loadingMeta, compact, loaded, loadingList, loadError, reload, reloadToken, openEditor, openTrend,
 }: AccountCenterProps): {
   destination: WorkflowDestination | null;
   // 每次在页面内打开新的处理目标时递增，供依赖目标的区块重新定位
@@ -49,6 +48,8 @@ export function useAccountCenter({
   const [loadingAccounts, setLoadingAccounts] = useState(true);
   const [accountSearch, setAccountSearch] = useState("");
   const [accountFilter, setAccountFilter] = useState("all");
+  // 归档资源默认收起，账号关系里按需展开，与资源列表的筛选互不影响
+  const [showArchived, setShowArchived] = useState(false);
   const [destination, setDestination] = useState<WorkflowDestination | null>(null);
   const [destinationSeq, setDestinationSeq] = useState(0);
   const [workflowError, setWorkflowError] = useState("");
@@ -298,10 +299,23 @@ export function useAccountCenter({
   const purposeLocked = loadingAccounts || !!accountError || authorizationBusy;
 
   // ---- 片段 ------------------------------------------------------------------
+  // 处理入口保留真实链接（可复制、可在新标签打开）；本页能处理的普通点击直接在页内打开，不整页刷新
+  const actionLink = (action: { id: string; href: string; label: string }) => (
+    <Button
+      key={action.id}
+      size="small"
+      href={action.href}
+      onClick={(event) => {
+        if (!action.href.startsWith("/stations") || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        openWorkflow(action.href);
+      }}
+    >
+      {action.label}
+    </Button>
+  );
   const actionLinks = (actions: { id: string; href: string; label: string }[]) => (actions.length ? (
-    <div className="jy-accounts-actions">
-      {actions.map((action) => <Button key={action.id} size="small" href={action.href}>{action.label}</Button>)}
-    </div>
+    <div className="jy-accounts-actions">{actions.map(actionLink)}</div>
   ) : null);
 
   const renderAccountResource = (resource: PublicResource) => {
@@ -421,9 +435,7 @@ export function useAccountCenter({
           <p className="jy-caption">已核验账号 ID：{account.identity.accountId} · {account.identity.baseUrl}</p>
           <p className="jy-accounts-pending">待处理：{pending || "暂无待处理事项"}</p>
           <div className="jy-accounts-actions">
-            {account.actions.map((action) => action.href.startsWith("/stations")
-              ? <Button key={action.id} size="small" onClick={() => openWorkflow(action.href)}>{action.label}</Button>
-              : <Button key={action.id} size="small" href={action.href}>{action.label}</Button>)}
+            {account.actions.map(actionLink)}
             <Button
               size="small"
               disabled={purposeLocked || !authorizationEligible(account).length}
@@ -435,7 +447,7 @@ export function useAccountCenter({
           </div>
           <div className="jy-accounts-group">
             {resources.map(renderAccountResource)}
-            {account.resources.some((resource) => resource.archivedAt) && !showArchived ? <p className="jy-caption">另有归档资源，在资源列表筛选「已归档」后显示。</p> : null}
+            {account.resources.some((resource) => resource.archivedAt) && !showArchived ? <p className="jy-caption">另有归档资源，点上方「查看归档资源」展开。</p> : null}
           </div>
           {account.keys.length
             ? <Collapse ghost size="small" className="jy-accounts-keys" items={account.keys.map(renderKey)} />
@@ -510,6 +522,9 @@ export function useAccountCenter({
             onChange={setAccountFilter}
             options={[{ value: "all", label: "全部账号" }, { value: "attention", label: "需处理" }]}
           />
+          <Button aria-pressed={showArchived} onClick={() => setShowArchived((current) => !current)}>
+            {showArchived ? "隐藏归档资源" : "查看归档资源"}
+          </Button>
           {authorizationRecovery ? (
             <Button disabled={loadingAccounts || authorizationBusy} onClick={() => void recoverAuthorization(authorizationRecovery, true)}>恢复上次授权更新</Button>
           ) : null}
@@ -671,6 +686,7 @@ export function useAccountCenter({
             {previouslyUpdatedIds.length ? <Text type="secondary">已确认更新，本次不再改写：{previouslyUpdatedIds.map(authorizationName).join("、")}</Text> : null}
             {!reuseAuthorization && !authorizationResult?.complete ? (
               <Form
+                name="account-authorization"
                 form={authorizationForm}
                 layout="vertical"
                 disabled={authorizationBusy}

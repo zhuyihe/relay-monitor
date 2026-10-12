@@ -15,7 +15,7 @@ import type { IconName } from "../components/icons";
 import { ShellContext } from "../components/shell-context";
 import type { ShellPage } from "../components/shell-context";
 import { useThemeMode } from "../providers";
-import { loadWorkflowActions, useWorkflowActions } from "../components/use-workflow-actions";
+import { useWorkflowActions } from "../components/use-workflow-actions";
 import pkg from "../../package.json";
 
 const SIDER_KEY = "jy-sider";
@@ -27,10 +27,12 @@ const hhmm = (ts: number) => {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 };
 
-// 运营总览的待处理条数：与总览页"需要处理"同一套规则，账号与账单待办也算在内
+// 运营总览的待处理条数：与总览页"需要处理"同一套规则。
+// 账号与账单待办只读总览、上游资源页已经取到的那份：账单待办要在服务端跑一遍全部核算，
+// 不能让每个页面的侧栏都去触发
 function useAttentionCount(enabled: boolean) {
   const [source, setSource] = useState<{ stations: any[]; meta: any } | null>(null);
-  const { actions: workflowActions } = useWorkflowActions(enabled);
+  const { actions: workflowActions } = useWorkflowActions(false);
   useEffect(() => {
     if (!enabled) return;
     let alive = true;
@@ -42,8 +44,6 @@ function useAttentionCount(enabled: boolean) {
         const stations = Array.isArray(r) ? r : r?.stations || [];
         if (alive) setSource({ stations, meta });
       } catch {}
-      // 5 分钟内读过就直接用缓存
-      void loadWorkflowActions();
     };
     load();
     const id = setInterval(load, COUNT_POLL_MS);

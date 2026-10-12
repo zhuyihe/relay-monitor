@@ -638,6 +638,7 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-trend-bar { justify-content: flex-start; }
 }
 
+/* 减少动态效果：时长压到几乎为零而不是去掉过渡，antd 的进出场要等 transitionend 才收尾，去掉过渡会让加载图标等元素停在半路 */
 @media (prefers-reduced-motion: reduce) {
-  .jy-shell *, .jy-shell *::before, .jy-shell *::after { transition: none !important; animation: none !important; }
+  .jy-shell *, .jy-shell *::before, .jy-shell *::after { transition-duration: 0.01ms !important; transition-delay: 0s !important; animation-duration: 0.01ms !important; animation-delay: 0s !important; animation-iteration-count: 1 !important; }
 }

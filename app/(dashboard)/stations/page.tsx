@@ -8,7 +8,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
 import type { MenuProps } from "antd";
-import { api, cny, fmtTokens, statusOf } from "../../../lib/client";
+import { api, cny, fmtTokens, readWorkflowDestination, statusOf } from "../../../lib/client";
 import { actionsByStation, buildOverviewActions } from "../../../lib/overview-actions";
 import { formatMoney, formatUsd } from "../../../lib/format";
 import ChannelOnboarding from "../../components/channel-onboarding";
@@ -129,11 +129,23 @@ export default function StationsPage() {
   // 搜索词写进地址栏（停止输入 300ms 后），刷新与分享链接时保持
   const [queryParam, setQueryParam] = useUrlState<string>("q", "");
   const [query, setQuery] = useState(queryParam);
-  const [view, setView] = useUrlState<View>("view", "list", VIEWS);
+  const [urlView, setUrlView] = useUrlState<View>("view", "list", VIEWS);
   const [filter, setFilter] = useUrlState<Filter>("filter", "all", FILTERS);
   const [typeFilter, setTypeFilter] = useUrlState<string>("type", "");
   const [sort, setSort] = useUrlState<Sort>("sort", "", SORTS);
   const [params, setParams] = useUrlParams();
+  // 带着处理入口进来时，第一帧就落在它所在的标签，不先渲染资源列表再跳过去（中途切换会打断按钮加载动画的收尾）。
+  // 地址栏写入 view 之后以地址栏为准；用户自己切标签时立即放弃
+  const [entryView, setEntryView] = useState<View | null>(() => {
+    const destination = readWorkflowDestination(params.toString(), "stations");
+    return destination ? (ONBOARDING_ACTIONS.includes(destination.action) ? "onboarding" : "accounts") : null;
+  });
+  if (entryView && urlView === entryView) setEntryView(null);
+  const view = entryView ?? urlView;
+  const setView = useCallback((v: View) => {
+    setEntryView(null);
+    setUrlView(v);
+  }, [setUrlView]);
   const editParam = params.get("edit");
 
   // 写地址栏是异步的：记住自己写进去的值，回声到达时不回填输入框，否则会吞掉这期间新打的字
@@ -357,7 +369,8 @@ export default function StationsPage() {
   // 列表只放在监控的资源（归档的照常放在「已归档」里）；暂停监控的资源在「账号关系」标签中查看与重新启用
   const listed = useMemo(() => stations.filter((s) => s.monitorEnabled !== false || s.archivedAt), [stations]);
   const paused = stations.filter((s) => s.monitorEnabled === false && !s.archivedAt);
-  const { actions: workflowActions } = useWorkflowActions();
+  // 账号待办由账号关系中心读到后发布，这里只补读账单待办
+  const { actions: workflowActions } = useWorkflowActions(true, ["bills"]);
 
   const { todosById, unowned } = useMemo(() => {
     const live = listed.filter((s) => !s.archivedAt);
@@ -435,7 +448,6 @@ export default function StationsPage() {
     types,
     loadingMeta,
     compact,
-    showArchived: filter === "archived",
     loaded,
     loadingList,
     loadError,
@@ -459,9 +471,13 @@ export default function StationsPage() {
     const target = ONBOARDING_ACTIONS.includes(action) ? ".jy-tabs" : ".jy-accounts-inspect";
     setTimeout(() => document.querySelector(target)?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
   };
-  // 从总览、账单核算或行内打开的接入类事项，在「渠道接入」标签里处理
+  // 从总览、账单核算或行内打开的接入类事项，在「渠道接入」标签里处理；
+  // 从别的页面带进来的账号事项（核验、授权、定位原资源）落到「账号关系」，抽屉下面就是这个账号。
+  // 行内打开的账号事项（destinationSeq > 0）留在当前列表
   useEffect(() => {
-    if (accounts.destination && ONBOARDING_ACTIONS.includes(accounts.destination.action)) setView("onboarding");
+    if (!accounts.destination) return;
+    if (ONBOARDING_ACTIONS.includes(accounts.destination.action)) setUrlView("onboarding");
+    else if (accounts.destinationSeq === 0) setUrlView("accounts");
   }, [accounts.destination]); // eslint-disable-line react-hooks/exhaustive-deps
   const resourceSig = useMemo(() => onboardingSig(stations), [stations]);
   const nextSync = syncOnboarding(onboardingSync, view, accounts.destinationSeq, resourceSig, loaded, loadingList);

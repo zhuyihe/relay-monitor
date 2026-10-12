@@ -423,9 +423,22 @@ function AttentionPanel({
   );
   const names = new Map(stations.filter(Boolean).map((s) => [String(s.id), s.name || s.id]));
   const nameOf = (id: string) => names.get(id);
-  // 账号与账单待办在本站内跳转（不整页刷新），按钮名就是要做的动作
-  const open = (a: any, primary = true) =>
-    btn(a.label, () => router.push(a.href), { primary, aria: `${a.label}（${workflowOwner(a, nameOf)}）` });
+  // 账号与账单待办是真实链接（可复制、可在新标签打开），普通点击在本站内跳转（不整页刷新），按钮名就是要做的动作
+  const open = (a: any, primary = true) => (
+    <Button
+      size="small"
+      type={primary ? "default" : "link"}
+      href={a.href}
+      aria-label={`${a.label}（${workflowOwner(a, nameOf)}）`}
+      onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        router.push(a.href);
+      }}
+    >
+      {a.label}
+    </Button>
+  );
   // 合并进同一行的其余事项：账号待办可以直接点开
   const noteOf = (a: any): ReactNode => {
     if (!a.others?.length) return undefined;
