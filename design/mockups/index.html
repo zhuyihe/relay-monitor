@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>炬元控制台 改版高保真稿</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <!-- 状态图标：形状不同，色觉异常和灰度打印也能区分 -->
+  <symbol id="i-crit" viewBox="0 0 12 12"><path d="M6 .6 11.4 6 6 11.4.6 6Z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 12 12"><path d="M6 1 11.6 10.8H.4Z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-good" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.2" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-unknown" viewBox="0 0 12 12"><circle cx="6" cy="6" r="3.9" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+  <!-- 线性图标 -->
+  <symbol id="i-overview" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></symbol>
+  <symbol id="i-stations" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="4.5" rx="1"/><rect x="2" y="9" width="12" height="4.5" rx="1"/><path d="M4.6 4.75h.01M4.6 11.25h.01"/></symbol>
+  <symbol id="i-usage" viewBox="0 0 16 16"><path d="M1.5 8.5h3l2-5.5 3 10 2-4.5h3"/></symbol>
+  <symbol id="i-my" viewBox="0 0 16 16"><path d="M2.5 6.5 8 2l5.5 4.5V14h-11Z"/><path d="M6.5 14v-4h3v4"/></symbol>
+  <symbol id="i-analytics" viewBox="0 0 16 16"><path d="M2 14h12"/><path d="M4.5 11V8M8 11V4M11.5 11V6.5"/></symbol>
+  <symbol id="i-recon" viewBox="0 0 16 16"><path d="M2.5 4h7M2.5 8h5M2.5 12h4"/><path d="m9.5 11 1.8 1.8L14 9.5"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 16 16"><path d="M4 7a4 4 0 0 1 8 0v3l1.5 2h-11L4 10Z"/><path d="M6.5 14h3"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.5 8A5.5 5.5 0 1 1 11.9 4.1"/><path d="M13.5 2.2v3.3h-3.3"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11a5.5 5.5 0 0 0 0-11Z" fill="currentColor"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 16 16"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></symbol>
+  <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+  <symbol id="i-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 16 16"><path d="M10.5 2.5 13.5 5.5 5.5 13.5H2.5V10.5Z"/></symbol>
+  <symbol id="i-more" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.1" fill="currentColor" stroke="none"/><circle cx="8" cy="8" r="1.1" fill="currentColor" stroke="none"/><circle cx="12.5" cy="8" r="1.1" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="m3 8.5 3 3 7-7"/></symbol>
+  <symbol id="i-sort" viewBox="0 0 16 16"><path d="M8 13V3M4.5 6.5 8 3l3.5 3.5"/></symbol>
+  <symbol id="i-sort-down" viewBox="0 0 16 16"><path d="M8 3v10M4.5 9.5 8 13l3.5-3.5"/></symbol>
+  <symbol id="i-restore" viewBox="0 0 16 16"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9"/><path d="M2.3 2.3v3h3"/></symbol>
+  <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 7.2V11M8 5h.01"/></symbol>
+  <symbol id="i-calendar" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="11" rx="1.5"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3"/></symbol>
+</svg>
+
+<div class="shell" id="shell">
+  <aside class="sider" id="sider" aria-label="主导航">
+    <div class="brand">
+      <svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M7 7H11.5C15.5 7 16 12 21.5 12"/>
+        <path d="M7 16H21.5"/>
+        <path d="M7 25H11.5C15.5 25 16 20 21.5 20"/>
+        <path d="M22 5V27"/>
+        <circle cx="5" cy="7" r="2"/>
+        <circle cx="5" cy="16" r="2"/>
+        <circle cx="5" cy="25" r="2"/>
+      </svg>
+      <div><strong>炬元</strong><small>控制台</small></div>
+    </div>
+    <nav class="nav" id="nav">
+      <div class="nav-group">监控</div>
+      <a href="#overview" data-route="overview"><svg class="icon"><use href="#i-overview"/></svg><span class="label">运营总览</span><span class="nav-count" id="navCount" aria-hidden="true">3</span></a>
+      <a href="#stations" data-route="stations"><svg class="icon"><use href="#i-stations"/></svg><span class="label">上游资源</span></a>
+      <a href="#usage" data-route="usage"><svg class="icon"><use href="#i-usage"/></svg><span class="label">用量分析</span></a>
+      <div class="nav-group">经营</div>
+      <a href="#my" data-route="my"><svg class="icon"><use href="#i-my"/></svg><span class="label">自营业务</span></a>
+      <a href="#analytics" data-route="analytics"><svg class="icon"><use href="#i-analytics"/></svg><span class="label">成本与利润</span></a>
+      <a href="#reconciliation" data-route="reconciliation"><svg class="icon"><use href="#i-recon"/></svg><span class="label">渠道对账</span></a>
+      <div class="nav-group">系统</div>
+      <a href="#notifications" data-route="notifications"><svg class="icon"><use href="#i-bell"/></svg><span class="label">告警中心</span></a>
+      <a href="#settings" data-route="settings"><svg class="icon"><use href="#i-gear"/></svg><span class="label">系统设置</span></a>
+    </nav>
+    <p class="sider-foot">改版设计稿，全部为演示数据</p>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn menu-btn" id="menuBtn" type="button" aria-label="打开导航" aria-controls="sider" aria-expanded="false"><svg class="icon"><use href="#i-menu"/></svg></button>
+      <h1 id="pageTitle">运营总览</h1>
+      <div class="topbar-range" id="rangeSlot"></div>
+      <div class="topbar-spacer"></div>
+      <span class="freshness" id="freshness" title="数据每 60 秒自动刷新"><i class="dot" aria-hidden="true"></i><span class="txt">数据截至</span><span class="num" id="asOf">14:32</span></span>
+      <button class="icon-btn" id="refreshBtn" type="button" aria-label="刷新当前页面数据"><svg class="icon"><use href="#i-refresh"/></svg></button>
+      <button class="icon-btn" id="themeBtn" type="button" aria-label="切换到深色模式"><svg class="icon"><use href="#i-theme"/></svg></button>
+      <span class="avatar" role="img" aria-label="账户：管理员">管</span>
+    </header>
+
+    <main class="content" id="content">
+      <div class="mobile-range" id="mobileRangeSlot"></div>
+
+      <!-- ─── 运营总览 ─── -->
+      <section class="page" id="page-overview" data-title="运营总览" aria-label="运营总览">
+        <section class="panel equation" id="ov-eq"></section>
+        <div class="grid-2">
+          <section class="panel" aria-labelledby="att-title">
+            <div class="panel-head">
+              <h2 id="att-title">需要处理</h2><span class="count-badge num" id="attCount">3</span>
+              <span class="spacer"></span><span class="caption">紧急在前，同级按耗尽时间</span>
+            </div>
+            <ul class="attention" id="attList"></ul>
+          </section>
+          <section class="panel" aria-labelledby="rw-title">
+            <div class="panel-head">
+              <h2 id="rw-title">上游余量</h2>
+              <span class="spacer"></span><a href="#stations" class="caption-link">全部上游资源</a>
+            </div>
+            <p class="panel-sub" id="rwTotal"></p>
+            <div id="runway"></div>
+            <p class="panel-foot caption">竖线为告警阈值：少于 3 天为紧急，少于 7 天为注意，可在系统设置中修改。</p>
+          </section>
+        </div>
+        <div class="grid-2 grid-even">
+          <section class="panel" aria-labelledby="ov-rev-title">
+            <div class="panel-head"><h2 id="ov-rev-title">今日收入</h2><span class="caption">按自营站点</span></div>
+            <div class="panel-body" id="ovRev"></div>
+          </section>
+          <section class="panel" aria-labelledby="ov-cost-title">
+            <div class="panel-head"><h2 id="ov-cost-title">今日用量成本</h2><span class="caption">按上游资源</span></div>
+            <div class="panel-body" id="ovCost"></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ─── 上游资源 ─── -->
+      <section class="page" id="page-stations" data-title="上游资源" aria-label="上游资源">
+        <div class="toolbar">
+          <label class="search"><svg class="icon"><use href="#i-search"/></svg><span class="sr-only">搜索上游资源</span><input id="stSearch" type="search" placeholder="搜索名称或地址" autocomplete="off"></label>
+          <div class="seg" role="group" aria-label="按状态筛选" id="stFilter"></div>
+          <label class="sr-only" for="stType">按类型筛选</label>
+          <select class="select" id="stType">
+            <option value="">全部类型</option><option>NewAPI</option><option>OneAPI</option><option>OpenRouter</option><option>官方 API</option>
+          </select>
+          <span class="spacer"></span>
+          <button class="btn btn--primary btn--lg" type="button" id="addStation"><svg class="icon"><use href="#i-plus"/></svg>新增上游资源</button>
+        </div>
+        <section class="panel" aria-label="上游资源列表">
+          <div class="table-wrap has-mobile"><table class="data" id="stTable"></table></div>
+          <ul class="m-list" id="stList"></ul>
+        </section>
+      </section>
+
+      <!-- ─── 自营业务 ─── -->
+      <section class="page" id="page-my" data-title="自营业务" aria-label="自营业务">
+        <div class="tabs-bar" id="myTabsBar">
+          <div class="tabs" role="tablist" aria-label="自营业务视图">
+            <button role="tab" id="tab-overview" aria-controls="my-overview" aria-selected="true" data-tab="overview">概览</button>
+            <button role="tab" id="tab-users" aria-controls="my-users" aria-selected="false" data-tab="users" tabindex="-1">用户</button>
+            <button role="tab" id="tab-models" aria-controls="my-models" aria-selected="false" data-tab="models" tabindex="-1">模型与渠道</button>
+          </div>
+          <button class="btn" type="button"><svg class="icon"><use href="#i-gear"/></svg>站点设置</button>
+        </div>
+        <div role="tabpanel" id="my-overview" aria-labelledby="tab-overview" class="tabpanel">
+          <section class="panel equation" id="my-eq"></section>
+          <section class="panel" id="my-trend"></section>
+          <div class="grid-2 grid-even">
+            <section class="panel" aria-labelledby="fc-title">
+              <div class="panel-head"><h2 id="fc-title">未来 24 小时消费预测</h2></div>
+              <p class="panel-sub" id="fcSummary"></p>
+              <div class="panel-body" id="myForecast"></div>
+            </section>
+            <section class="panel" aria-labelledby="tu-title">
+              <div class="panel-head"><h2 id="tu-title">消费最多的用户</h2><span class="caption" id="tuCaption"></span><span class="spacer"></span><a class="caption-link" href="#my?tab=users" data-goto-tab="users">全部用户</a></div>
+              <div class="panel-body" id="myTopUsers"></div>
+            </section>
+          </div>
+        </div>
+        <div role="tabpanel" id="my-users" aria-labelledby="tab-users" class="tabpanel" hidden>
+          <section class="panel">
+            <div class="panel-head"><h2>用户消费排行</h2><span class="caption" id="usersCaption"></span><span class="spacer"></span>
+              <label class="search search--sm"><svg class="icon"><use href="#i-search"/></svg><span class="sr-only">搜索用户</span><input id="userSearch" type="search" placeholder="搜索用户" autocomplete="off"></label>
+            </div>
+            <div class="panel-body"><div class="table-wrap"><table class="data" id="userTable"></table></div></div>
+          </section>
+        </div>
+        <div role="tabpanel" id="my-models" aria-labelledby="tab-models" class="tabpanel" hidden>
+          <div class="grid-2 grid-even">
+            <section class="panel"><div class="panel-head"><h2>消费</h2><span class="caption">按模型</span></div><div class="panel-body" id="myModels"></div></section>
+            <section class="panel"><div class="panel-head"><h2>用量成本</h2><span class="caption">按渠道</span></div><div class="panel-body" id="myChannels"></div></section>
+          </div>
+        </div>
+        <section class="panel onboard-panel" id="my-onboard" hidden></section>
+      </section>
+
+      <!-- ─── 成本与利润 ─── -->
+      <section class="page" id="page-analytics" data-title="成本与利润" aria-label="成本与利润">
+        <section class="panel equation" id="an-eq"></section>
+        <section class="panel" id="an-trend"></section>
+        <div class="grid-2 grid-even">
+          <section class="panel" aria-labelledby="mix-title">
+            <div class="panel-head"><h2 id="mix-title">成本构成</h2><span class="caption">按上游资源，期内合计</span></div>
+            <div class="panel-body" id="anMix"></div>
+          </section>
+          <section class="panel" aria-labelledby="heat-title">
+            <div class="panel-head"><h2 id="heat-title">消耗时段</h2><span class="caption">每小时平均用量成本，按星期和时段</span></div>
+            <div class="panel-body" id="anHeat"></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ─── 未出高保真的页面 ─── -->
+      <section class="page" id="page-stub" data-title="" aria-live="polite">
+        <section class="panel stub">
+          <div class="panel-head"><h2 id="stubTitle"></h2></div>
+          <div class="panel-body">
+            <p id="stubText"></p>
+            <p class="caption">这一页在本稿中只给出规则，没有画高保真。布局与行为见 <a id="stubLink" href="../ui-design-spec.md">设计规范</a>。</p>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+</div>
+
+<!-- 抽屉：新增 / 编辑上游资源 -->
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" hidden>
+  <div class="drawer-head">
+    <h2 id="drawerTitle">编辑上游资源</h2>
+    <button class="icon-btn" type="button" id="drawerClose" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
+  </div>
+  <form class="drawer-body" id="stationForm" novalidate>
+    <fieldset class="fs">
+      <legend>基本信息</legend>
+      <div class="field">
+        <label for="f-name">名称</label>
+        <div class="input"><input id="f-name" name="name" autocomplete="off"></div>
+      </div>
+      <div class="field">
+        <label for="f-type">类型</label>
+        <select class="select" id="f-type" name="type"><option>NewAPI</option><option>OneAPI</option><option>OpenRouter</option><option>官方 API</option></select>
+      </div>
+      <div class="field field--switch">
+        <label class="switch"><input type="checkbox" id="f-own" name="own"><span class="switch-ui" aria-hidden="true"></span><span>这是我的自营站点</span></label>
+        <span class="help">打开后，控制台会读取该站点的渠道计费，作为收入计入自营业务。</span>
+      </div>
+    </fieldset>
+
+    <fieldset class="fs" id="fsConn">
+      <legend>连接凭证</legend>
+      <p class="fs-desc">凭证保存在控制台服务端的数据库中，仅用于连接该上游查询余额和用量。</p>
+      <div class="field">
+        <label for="f-url">接口地址</label>
+        <div class="input"><input id="f-url" name="url" type="url" inputmode="url" autocomplete="off" data-conn></div>
+        <span class="err" id="err-url" hidden></span>
+      </div>
+      <div class="two">
+        <div class="field">
+          <label for="f-token">访问令牌</label>
+          <div class="input"><input id="f-token" name="token" type="password" autocomplete="new-password" data-conn></div>
+          <span class="help" id="tokenHelp">留空则继续使用已保存的令牌</span>
+        </div>
+        <div class="field">
+          <label for="f-uid">用户 ID</label>
+          <div class="input"><input id="f-uid" name="uid" inputmode="numeric" autocomplete="off" data-conn></div>
+        </div>
+      </div>
+      <div class="test-row">
+        <button class="btn" type="button" id="testBtn">测试连接</button>
+        <span class="caption" id="testHint">只有修改连接凭证时才需要重新测试</span>
+      </div>
+      <div id="testResult" aria-live="polite"></div>
+    </fieldset>
+
+    <fieldset class="fs">
+      <legend>成本与阈值</legend>
+      <p class="fs-desc">留空表示不设置，不会按 0 处理。</p>
+      <div class="two">
+        <div class="field">
+          <label for="f-low">余额提醒线</label>
+          <div class="input" id="lowWrap"><span class="suffix">¥</span><input id="f-low" name="low" inputmode="decimal" autocomplete="off" aria-describedby="err-low"></div>
+          <span class="err" id="err-low" hidden></span>
+        </div>
+        <div class="field">
+          <label for="f-monthly">固定月费</label>
+          <div class="input"><span class="suffix">¥</span><input id="f-monthly" name="monthly" inputmode="decimal" autocomplete="off" placeholder="未设置"><span class="suffix">每月</span></div>
+        </div>
+      </div>
+    </fieldset>
+  </form>
+  <div class="drawer-foot">
+    <span class="dirty" id="dirty" hidden><i></i>有未保存的修改</span>
+    <span class="spacer"></span>
+    <button class="btn" type="button" id="drawerCancel">取消</button>
+    <button class="btn btn--primary" type="submit" form="stationForm" id="saveBtn">保存修改</button>
+  </div>
+</aside>
+
+<div class="float-tip tip" id="floatTip" role="tooltip"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<!-- 评审面板：仅用于评审稿件，不属于产品界面 -->
+<div class="review" id="review" role="region" aria-label="评审面板">
+  <div class="row"><strong>评审面板</strong><button type="button" class="fold" id="reviewFold" aria-expanded="true">收起</button></div>
+  <div class="row"><span class="k">主题</span><button type="button" data-set-theme="light" aria-pressed="true">浅色</button><button type="button" data-set-theme="dark" aria-pressed="false">深色</button></div>
+  <div class="row"><span class="k">数据</span><button type="button" data-set-state="normal" aria-pressed="true">正常</button><button type="button" data-set-state="partial" aria-pressed="false">数据不完整</button><button type="button" data-set-state="unconfigured" aria-pressed="false">未配置自营</button></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

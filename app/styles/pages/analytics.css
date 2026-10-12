@@ -1,0 +1,37 @@
+/* 监控估算：只放本页独有的细节，布局和组件样式都在 jy.css */
+
+/* 切换范围或归档开关时保留上一份数据，变淡表示正在更新 */
+.jy-analytics-switching { opacity: .6; transition: opacity .15s ease; }
+
+/* 刷新失败横幅：文字和重试按钮同一行，窄屏换行 */
+.jy-analytics-banner-body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; }
+
+/* 说明文字里的重试按钮 */
+.jy-analytics-inline-btn { margin-left: 8px; vertical-align: baseline; }
+
+/* 可用天数面板不带正文内边距（跑道自带左右留白），只补上与标题的间距 */
+.jy-analytics-runway { padding-top: 16px; }
+
+/* 从等式里的"查看覆盖说明"跳过来时，不被顶栏遮住 */
+.jy-analytics-anchor { scroll-margin-top: 72px; }
+
+.jy-analytics-lead { margin: 0 0 16px; color: var(--jy-ink-2); }
+.jy-analytics-gaps { margin-top: 16px; }
+
+/* 消耗时段退回近 7 天时的说明 */
+.jy-analytics-heat-note { margin: 0 0 12px; max-width: 72ch; }
+
+@media (prefers-reduced-motion: reduce) {
+  .jy-analytics-switching { transition: none; }
+}
+
+/* 口径说明：估算与实际账单的分界，右侧直达账单核算 */
+.jy-analytics-source { align-items: flex-start; }
+.jy-analytics-source-body { flex: 1; min-width: 0; }
+.jy-analytics-source-body b { font-weight: 500; }
+.jy-analytics-source-body p { margin: 2px 0 0; max-width: 72ch; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-analytics-source .page-toolbar { flex: none; }
+@media (max-width: 767px) {
+  .jy-analytics-source { flex-wrap: wrap; }
+  .jy-analytics-source .page-toolbar { width: auto; margin-left: 24px; }
+}

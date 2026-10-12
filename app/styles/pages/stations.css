@@ -1,0 +1,141 @@
+/* 上游资源页：只放本页特有的布局，通用外观用 jy.css */
+
+/* 表格横向滚动时，资源名与操作列固定在两侧（jy.css 暂无通用的固定列类） */
+.jy-stations-table .jy-stations-pin-l { position: sticky; left: 0; z-index: 1; }
+.jy-stations-table .jy-stations-pin-r { position: sticky; right: 0; z-index: 1; box-shadow: -1px 0 0 var(--jy-rule-soft); }
+.jy-stations-table th.jy-stations-pin-l, .jy-stations-table th.jy-stations-pin-r { z-index: 2; }
+.jy-stations-table .jy-res-name { max-width: 280px; }
+.jy-stations-table td { vertical-align: top; }
+.jy-stations-table td.jy-empty-row { text-align: center; vertical-align: middle; }
+
+.jy-stations-name-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }
+.jy-stations-flag { height: 20px; padding: 0 6px; font-size: 11px; font-style: normal; }
+.jy-stations-sub { display: block; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); white-space: nowrap; }
+/* 行内账号待办：动词按钮，点开后在本页处理 */
+.jy-stations-unowned { margin: -8px 0 0; }
+.jy-stations-todos { display: flex; flex-wrap: wrap; gap: 0 12px; margin-top: 2px; }
+.jy-stations-todos .link { padding: 0; border: 0; background: none; font: inherit; font-size: 12px; line-height: 20px; color: var(--jy-cobalt); cursor: pointer; white-space: nowrap; }
+.jy-stations-todos .link:hover { text-decoration: underline; }
+.jy-stations-todos .link:focus-visible { outline: 2px solid var(--jy-cobalt); outline-offset: 2px; border-radius: 2px; }
+.jy-stations-table .jy-cell-runway { min-height: 22px; }
+
+/* 查询失败的说明行：跨整行，横向滚动时贴左 */
+.jy-stations-table tr.has-issue td { border-bottom: 0; }
+.jy-stations-table tr.jy-stations-issue-row td { padding-top: 0; }
+.jy-stations-issue {
+  position: sticky; left: 16px; max-width: 760px;
+  display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px 12px;
+  padding: 10px 12px; border-radius: var(--jy-r2);
+  border-left: 2px solid var(--jy-crit); background: var(--jy-crit-tint);
+}
+.jy-stations-issue > .jy-sym { width: 14px; height: 14px; margin-top: 3px; color: var(--jy-crit); flex: none; }
+.jy-stations-issue-body { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
+.jy-stations-issue-body b { font-size: 13px; line-height: 20px; font-weight: 500; color: var(--jy-crit-ink); }
+.jy-stations-diag summary { cursor: pointer; color: var(--jy-ink-2); min-height: 24px; display: flex; align-items: center; }
+.jy-stations-diag > span { display: block; overflow-wrap: anywhere; color: var(--jy-ink-2); }
+
+.jy-stations-sort {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none;
+  font: inherit; color: inherit; cursor: pointer;
+}
+.jy-stations-sort .jy-icon { width: 14px; height: 14px; }
+.jy-stations-sort:hover { color: var(--jy-ink); }
+
+.jy-stations-type { width: 200px; }
+.jy-stations-banner-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.jy-stations-banner-body p { margin: 0; }
+.jy-stations-skeleton { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
+
+/* 抽屉 */
+.jy-stations-guide { margin: 0 0 16px; padding: 12px; border-radius: var(--jy-r2); background: var(--jy-sunken); font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
+.jy-stations-guide > b { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--jy-ink); }
+.jy-stations-guide dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+.jy-stations-guide dt { color: var(--jy-ink-3); white-space: nowrap; }
+.jy-stations-guide dd { margin: 0; }
+.jy-stations-switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--jy-ink); }
+.jy-stations-hint { margin: 8px 0 0; }
+.jy-stations-purchase { display: grid; grid-template-columns: minmax(0, 1fr) 96px 150px auto; gap: 8px; margin-bottom: 8px; align-items: center; }
+.jy-stations-purchase .ant-picker { width: 100%; }
+.jy-stations-purge-link.ant-btn { padding-inline: 0; margin-top: 12px; }
+.jy-stations-confirm { margin-top: 16px; }
+.jy-stations-confirm label { display: block; margin-bottom: 6px; }
+.jy-stations-confirm code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0 4px; border-radius: var(--jy-r1); background: var(--jy-sunken); }
+
+/* 移动端卡片 */
+.jy-stations-m-issue { grid-column: 1 / -1; margin-top: 6px; }
+.jy-stations-m-issue .jy-stations-issue { position: static; }
+
+/* 渠道接入（main 的共享组件，内部仍是 antd 原生件）：去掉组件自带的外边距，折叠面板对齐新版面板 */
+.jy-stations-onboarding { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.jy-stations-onboarding:empty { display: none; }
+.jy-stations-onboarding > * { margin-bottom: 0 !important; }
+.jy-stations-onboarding > .ant-collapse { background: var(--jy-sheet); border-color: var(--jy-rule); border-radius: var(--jy-r2); overflow: hidden; }
+.jy-stations-onboarding > .ant-collapse > .ant-collapse-item { border-color: var(--jy-rule); }
+.jy-stations-onboarding > .ant-collapse > .ant-collapse-item > .ant-collapse-header { padding: 16px 24px; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--jy-ink); }
+.jy-stations-onboarding > .ant-collapse .ant-collapse-content { background: var(--jy-sheet); border-color: var(--jy-rule-soft); }
+
+/* 账号关系 */
+.jy-accounts-body { display: flex; flex-direction: column; gap: 16px; overflow-wrap: anywhere; }
+.jy-accounts-body > .jy-caption { margin: 0; }
+.jy-accounts-toolbar .ant-input-affix-wrapper { width: 320px; max-width: 100%; }
+.jy-accounts-filter { width: 130px; }
+.jy-accounts-skeleton { display: flex; flex-direction: column; gap: 12px; }
+.jy-accounts-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.jy-accounts-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.jy-accounts-line b { font-weight: 600; color: var(--jy-ink); }
+.jy-accounts-site h3, .jy-accounts-unverified h3 { margin: 0 0 8px; font-size: 13px; line-height: 20px; font-weight: 600; color: var(--jy-ink-2); }
+.jy-accounts-collapse.ant-collapse { background: var(--jy-sheet); border-color: var(--jy-rule); border-radius: var(--jy-r2); }
+.jy-accounts-collapse.ant-collapse > .ant-collapse-item { border-color: var(--jy-rule); }
+.jy-accounts-collapse.ant-collapse .ant-collapse-content { border-color: var(--jy-rule-soft); }
+.jy-accounts-account { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.jy-accounts-account p, .jy-accounts-resource p, .jy-accounts-unverified p { margin: 0; }
+.jy-accounts-pending { font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-accounts-group { display: flex; flex-direction: column; }
+.jy-accounts-resource { display: flex; flex-direction: column; gap: 4px; padding: 12px 0; border-bottom: 1px solid var(--jy-rule-soft); min-width: 0; }
+.jy-accounts-resource:last-child { border-bottom: 0; }
+.jy-accounts-resource .jy-accounts-actions { margin-top: 4px; }
+.jy-accounts-keys.ant-collapse > .ant-collapse-item > .ant-collapse-header { padding-inline: 0; }
+.jy-accounts-keys.ant-collapse .ant-collapse-content-box { padding-inline: 0; }
+.jy-accounts-key { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.jy-accounts-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 16px; margin: 0; font-size: 13px; line-height: 20px; }
+.jy-accounts-facts dt { color: var(--jy-ink-3); white-space: nowrap; }
+.jy-accounts-facts dd { margin: 0; color: var(--jy-ink); }
+.jy-accounts-channels > b { display: block; margin-bottom: 4px; font-size: 13px; font-weight: 600; color: var(--jy-ink); }
+.jy-accounts-channels ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.jy-accounts-channels li { display: flex; flex-direction: column; font-size: 13px; line-height: 20px; }
+.jy-accounts-empty { margin: 0; padding: 16px; border-radius: var(--jy-r2); background: var(--jy-sunken); text-align: center; color: var(--jy-ink-2); font-size: 13px; }
+.jy-accounts-unverified { display: flex; flex-direction: column; gap: 8px; padding-top: 16px; border-top: 1px solid var(--jy-rule-soft); }
+.jy-accounts-unverified h3 { margin: 0; }
+.jy-accounts-unverified-item { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 12px 16px; border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); }
+.jy-accounts-unverified-item > .jy-accounts-resource { align-self: stretch; padding-top: 4px; border-bottom: 0; }
+.jy-accounts-purpose { display: flex; flex-direction: column; gap: 12px; }
+.jy-accounts-purpose p { margin: 0; }
+.jy-accounts-inspect .jy-panel-body { display: flex; flex-direction: column; padding-top: 4px; }
+
+@media (max-width: 767px) {
+  .jy-stations-type { width: 100%; }
+  .jy-m-list .m-actions .ant-btn { min-height: 44px; }
+  .jy-m-list .m-actions .jy-icon-btn { width: 44px; height: 44px; }
+  .jy-stations-purchase { grid-template-columns: minmax(0, 1fr) 96px; }
+  .jy-stations-onboarding > .ant-collapse > .ant-collapse-item > .ant-collapse-header { padding: 12px 16px; }
+  .jy-accounts-toolbar .ant-input-affix-wrapper, .jy-accounts-filter { width: 100%; }
+  .jy-accounts-actions .ant-btn { min-height: 44px; }
+  .jy-accounts-facts { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .jy-accounts-facts dd { margin-bottom: 4px; }
+  .jy-accounts-unverified-item { padding: 12px; }
+}
+
+/* 余额列下的近 48 小时走势：整块是按钮，点开余额趋势 */
+.jy-spark-btn {
+  display: inline-flex; align-items: center; gap: 6px; margin: 4px -4px 0 0; padding: 2px 4px;
+  border: 0; border-radius: var(--jy-r1); background: none; cursor: pointer;
+  font: inherit; font-size: 12px; line-height: 18px; color: var(--jy-ink-3);
+}
+.jy-spark-btn:hover { background: var(--jy-sunken); color: var(--jy-ink-2); }
+.jy-spark-btn:focus-visible { outline: 2px solid var(--jy-cobalt); outline-offset: 1px; }
+.jy-spark { display: block; flex: none; }
+.jy-spark .line { fill: none; stroke: var(--jy-cobalt); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.jy-spark .area { fill: var(--jy-cobalt-tint); }
+.jy-spark .dot { fill: var(--jy-cobalt); }
+.jy-m-list .m-spark { grid-column: 1 / -1; }
+.jy-m-list .m-spark .jy-spark-btn { margin: 0 0 0 -4px; }
