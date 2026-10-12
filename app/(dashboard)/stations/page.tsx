@@ -51,6 +51,43 @@ const COLS = 7;
 // 与 buildOverviewActions 的 stationId 同一口径，保证“需处理”与总览的待办完全对得上
 const actionKey = (s: any) => String(s.id || String(s?.name || "").trim() || "未命名资源");
 
+// 渠道接入目录里的资源及其用到的字段（与服务端目录同口径：四种账号类型，含本站来源）
+const ONBOARDING_TYPES = ["newapi", "newapi-key", "sub2api", "sub2api-password"];
+const onboardingSig = (list: any[]) =>
+  list
+    .filter((s) => ONBOARDING_TYPES.includes(s.type))
+    .map((s) =>
+      [s.id, s.name, s.type, s.baseUrl, s.archivedAt ?? "", s.monitorEnabled !== false, !!s.isOwn, s.authVersion ?? "", s.verifiedIdentity?.provider ?? "", s.verifiedIdentity?.accountId ?? ""].join("|"),
+    )
+    .join("\n");
+
+// 渠道接入只在挂载时读目录，切换标签又保持挂载；这里决定什么时候换 key 重新挂载（rev + 1）。
+// sig：当前实例已同步到的资源签名（列表首次读到前为 null）；dirty：账号关系里改过身份、授权或核算；
+// shown：标签打开过（首次打开才挂载，读到的就是当前目录）；wait：列表还在刷新，落地后怎么处理——
+// absorb 实例刚按当前目录挂载，只记下签名；compare 切回时还不知道有没有变化，落地后再比。
+// 显示期间的变化不重挂（免得冲掉接入结果），也不算已同步，下次切回时重挂
+type OnboardingSync = { view: string; seq: number; sig: string | null; dirty: boolean; shown: boolean; wait: "absorb" | "compare" | null; rev: number };
+function syncOnboarding(o: OnboardingSync, view: string, seq: number, sig: string, loaded: boolean, loading: boolean): OnboardingSync {
+  let n = o;
+  // 实例此刻按当前目录（重新）挂载
+  const mounted = (x: OnboardingSync): OnboardingSync => ({ ...x, sig: loaded ? sig : x.sig, dirty: false, wait: loading ? "absorb" : null });
+  // 行内打开新的处理目标已按新 key 重挂
+  if (n.seq !== seq) n = mounted({ ...n, seq });
+  if (loaded && n.sig === null) n = { ...n, sig };
+  if (n.view !== view) {
+    if (view !== "onboarding") n = { ...n, view, wait: n.wait === "compare" ? null : n.wait };
+    else if (!n.shown) n = mounted({ ...n, view, shown: true });
+    // 切回时已知有变化就立刻重挂（改动已写进服务端，重挂后读到的是新目录）；还在刷新就等它落地再比
+    else if (n.dirty || (loaded && n.sig !== sig)) n = mounted({ ...n, view, rev: n.rev + 1 });
+    else n = { ...n, view, wait: n.wait ?? (loading ? "compare" : null) };
+  }
+  if (n.wait && loaded && !loading) {
+    const changed = n.wait === "compare" && n.sig !== sig;
+    n = changed ? { ...n, sig, wait: null, dirty: false, rev: n.rev + 1 } : { ...n, sig, wait: null };
+  }
+  return n;
+}
+
 function compareDays(a: number | null, b: number | null, dir: 1 | -1) {
   if (a === b) return 0;
   if (a == null) return 1; // 无法计算的永远排最后
@@ -121,8 +158,11 @@ export default function StationsPage() {
   // 更多菜单里的“编辑”：关闭抽屉后焦点回到这一行的更多按钮
   const moreTriggerRef = useRef<HTMLElement | null>(null);
 
+  // 轮询和手动刷新可能重叠，全部落地才算刷新结束
+  const reloading = useRef(0);
   // 始终带上归档与暂停监控的资源：“已归档”只是一个筛选；暂停监控的资源在账号关系中管理
   const reload = useCallback(async () => {
+    reloading.current += 1;
     setLoadingList(true);
     try {
       const r = await api("/api/stations?includeUnmonitored=true&includeArchived=true");
@@ -131,11 +171,13 @@ export default function StationsPage() {
       setLoaded(true);
       setLoadError(null);
       setRefreshedAt(Date.now());
+      return r.stations as any[];
     } catch (e: any) {
       setLoadError(e.message || "上游资源加载失败");
       throw e;
     } finally {
-      setLoadingList(false);
+      reloading.current -= 1;
+      if (!reloading.current) setLoadingList(false);
       setAccountsToken((n) => n + 1);
     }
   }, []);
@@ -365,6 +407,8 @@ export default function StationsPage() {
   const filtered = !!q || !!typeFilter || filter !== "all";
   const clearFilters = () => {
     setQuery("");
+    // 同搜索框：记下写进去的空值，回声到达时不清掉这期间新打的字
+    lastWrittenQuery.current = "";
     setParams({ filter: null, type: null, q: null });
   };
   const nextSort: Record<Sort, Sort> = { "": "days", days: "-days", "-days": "" };
@@ -373,6 +417,18 @@ export default function StationsPage() {
   // 弹窗内 KPI 用列表里的最新站点数据（轮询会更新）
   const trendCur = trendStation ? stations.find((x) => x.id === trendStation.id) || trendStation : null;
   const canAdd = !!types.length && !loadingMeta;
+
+  const [onboardingSync, setOnboardingSync] = useState<OnboardingSync>(() => ({ view, seq: 0, sig: null, dirty: false, shown: view === "onboarding", wait: null, rev: 0 }));
+  // 账号关系里的操作都会改到接入目录（身份、授权、监控用途、核算规则），切回渠道接入时重读
+  const reloadAfterAccountChange = useCallback(async () => {
+    setOnboardingSync((o) => ({ ...o, dirty: true }));
+    await reload();
+  }, [reload]);
+  // 渠道接入自己完成后的刷新：它已经读过最新目录，即使刷新落地前切走了，切回来也不重挂
+  const reloadAfterOnboarding = useCallback(async () => {
+    const list = await reload();
+    setOnboardingSync((o) => ({ ...o, sig: onboardingSig(list) }));
+  }, [reload]);
 
   const accounts = useAccountCenter({
     stations,
@@ -383,7 +439,7 @@ export default function StationsPage() {
     loaded,
     loadingList,
     loadError,
-    reload,
+    reload: reloadAfterAccountChange,
     reloadToken: accountsToken,
     openEditor: (station) => openEditor(station, null),
     openTrend: setTrendStation,
@@ -407,6 +463,9 @@ export default function StationsPage() {
   useEffect(() => {
     if (accounts.destination && ONBOARDING_ACTIONS.includes(accounts.destination.action)) setView("onboarding");
   }, [accounts.destination]); // eslint-disable-line react-hooks/exhaustive-deps
+  const resourceSig = useMemo(() => onboardingSig(stations), [stations]);
+  const nextSync = syncOnboarding(onboardingSync, view, accounts.destinationSeq, resourceSig, loaded, loadingList);
+  if (nextSync !== onboardingSync) setOnboardingSync(nextSync);
   const todosOf = (v: StationView) => (v.archived ? [] : (todosById.get(actionKey(v.s)) || []).filter((a: any) => a.workflow));
   const todoLinks = (v: StationView) => {
     const list = todosOf(v);
@@ -904,8 +963,8 @@ export default function StationsPage() {
 
         <TabPanel idPrefix="stations" tabKey="onboarding" active={view === "onboarding"} keepMounted>
           <div className="jy-stations-onboarding">
-            {/* 行内打开新的处理目标时重新挂载，让它按新目标重新定位 */}
-            <ChannelOnboarding key={accounts.destinationSeq} compact={compact} onComplete={reload} destination={accounts.destination} />
+            {/* 行内打开新的处理目标、或离开期间目录有变动时重新挂载（见 syncOnboarding） */}
+            <ChannelOnboarding key={`${accounts.destinationSeq}-${onboardingSync.rev}`} compact={compact} onComplete={reloadAfterOnboarding} destination={accounts.destination} />
           </div>
         </TabPanel>
 

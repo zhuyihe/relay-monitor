@@ -31,8 +31,8 @@ import type { Derived, OwnStatus } from "./derive";
 
 type Heat = ReturnType<typeof deriveHeat>;
 // 所选范围的消耗时段画不出来时退回的近 7 天；heat 为 null 表示退回也失败了
-// key：归档条件 + 整点，只有两者都和当前一致才拿来展示
-type HeatFallback = { key: string; heat: Heat | null };
+// archived：取数时的归档条件，不一致的不拿来展示；hour：最近一次去取（成功或失败）时的整点，过了整点再取一次
+type HeatFallback = { archived: boolean; hour: number; heat: Heat | null };
 
 const PRESET_DAYS: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
 const RANGE_OPTIONS = [
@@ -182,24 +182,26 @@ export default function AnalyticsPage() {
   // 不让整块空着。按小时取一次就够（热力图本身就是小时粒度）。
   const needHeat7 = !!dv && !dv.heat.available && dv.heat.reason === "incomplete-raw-history" && (snap?.days ?? 0) > 7;
   const hourKey = asOf ? Math.floor(asOf / 3600000) : 0;
-  const heat7Key = `${includeArchived ? 1 : 0}:${hourKey}`;
   const [heat7, setHeat7] = useState<HeatFallback | null>(null);
-  const heat7Ready = heat7?.key === heat7Key;
+  const heat7Fresh = heat7?.archived === includeArchived && heat7.hour === hourKey;
   useEffect(() => {
     // 同一条件、同一小时内已经取过就直接复用（来回切换范围不再重复请求）
-    if (!needHeat7 || heat7Ready) return;
+    if (!needHeat7 || heat7Fresh) return;
     let alive = true;
+    const archived = includeArchived;
+    const hour = hourKey;
     const params = new URLSearchParams({ days: "7" });
-    if (includeArchived) params.set("includeArchived", "true");
+    if (archived) params.set("includeArchived", "true");
     api(`/api/analytics?${params}`)
-      .then((d) => alive && setHeat7({ key: heat7Key, heat: deriveHeat(d) }))
-      .catch(() => alive && setHeat7({ key: heat7Key, heat: null }));
+      .then((d) => alive && setHeat7({ archived, hour, heat: deriveHeat(d) }))
+      // 整点刷新失败时保留同口径的上一份（与主数据轮询失败时一致），下个整点再取
+      .catch(() => alive && setHeat7((prev) => (prev?.archived === archived && prev.heat ? { ...prev, hour } : { archived, hour, heat: null })));
     return () => {
       alive = false;
     };
-  }, [needHeat7, heat7Key, heat7Ready]); // eslint-disable-line react-hooks/exhaustive-deps
-  // 条件或整点变了、新数据还没回来时显示加载中，不拿上一份顶替
-  const heatFallback = needHeat7 && heat7Ready ? heat7 : null;
+  }, [needHeat7, heat7Fresh, includeArchived, hourKey]);
+  // 只是过了整点：新数据回来前继续显示上一份，不闪加载；归档条件变了才显示加载中，不拿另一种口径顶替
+  const heatFallback = needHeat7 && heat7?.archived === includeArchived ? heat7 : null;
 
   const archivedCount = Number(snap?.data?.selection?.archivedStationCount) || 0;
   const archiveToggle = (
