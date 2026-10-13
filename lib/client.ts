@@ -60,7 +60,6 @@ export type BatchResult = {
   requestId: string; complete: boolean;
   groups: {
     groupId: string; requestedGroupIds: string[]; canonicalKey: string | null; complete: boolean; code?: string; reason?: string;
-    nextPreview?: { billingEffectiveFromMs: number; timezone: string; proposedChannelIds: number[]; coverageDeclaration: CoverageDeclaration };
     monitor: { status: "linked" | "not_requested" | "pending" | "unavailable"; stationIds: string[] };
     reconciliation: { status: "configured" | "not_requested" | "unverified" | "unsupported" | "unavailable" | "pending"; ruleId?: string; scopeVersion?: number; billingEffectiveFromMs?: number; reason?: string };
     channels: { channelId: number; channelRevision: string; complete: boolean; stationIds: string[]; ruleId: string | null; code?: string; reason?: string; remainingActions: string[] }[];
@@ -95,6 +94,8 @@ export type KnownChannelCoverage = {
 };
 export type ReconciliationWindowTotals = { knownIncomeUsd: number | null; knownCostUsd: number | null; confirmedProfitUsd: number | null; confirmedMarginRate: number | null; profitComplete: boolean; notCountedCostRuleIds: string[] };
 export type ReconciliationWindowGroup = { groupKey: string; ownSource: OwnSource | null; window: { startMs: number; endMs: number }; timezones: string[]; amountBasis: ReconciliationAmountBasis; ruleIds: string[]; totals: ReconciliationWindowTotals; coverage: KnownChannelCoverage; actions: WorkflowAction[] };
+// live 实时（窗口未结束）/ settled 已结账 / pending 待结账 / unavailable 不可用；由服务端给出，前端只渲染。
+export type ReconciliationSettlement = "live" | "settled" | "pending" | "unavailable";
 export type ReconciliationSummary = { groupKey: string; totals: ReconciliationWindowTotals; coverage: KnownChannelCoverage };
 export type WorkflowAction = {
   id: string; kind: "verify_identity" | "update_authorization" | "verify_capability" | "connect_channels" | "confirm_coverage" | "wait_effective" | "review_source" | "inspect_balance" | "retry_bill" | "review_conflict";

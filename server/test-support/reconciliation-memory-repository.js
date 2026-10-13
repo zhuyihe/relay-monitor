@@ -9,10 +9,10 @@
 // - 单表 UPDATE 的 SET 从左到右求值，后面的表达式读到的是前面刚赋的新值。
 // - 读取结果是新对象，JSON 列像 mysql2 一样解析成新对象，调用方改了也不影响存储。
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix, reconciliationConfirmedHistoryRecord } from "../../lib/reconciliation-snapshot.js";
-import { applyScopePolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
+import { applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
 import {
   uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, segmentFromRow,
-  snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions,
+  snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, isSettledConfirmedSource,
 } from "../reconciliation-repository.js";
 
 const JSON_COLUMNS = new Set(["source_binding", "source"]);
@@ -190,7 +190,7 @@ export class MemoryReconciliationRepository {
     const tokenKey = activeTokenKey(input);
     await this.#transaction("createRule", async (tx) => {
       await this.#lock(tx, `rule:${id}`);
-      if (input.billingPolicy === "next-complete-day") input = applyScopePolicy(null, input);
+      if (isScopedBillingPolicy(input.billingPolicy)) input = applyScopePolicy(null, input);
       if (guard) guard(null, [], input);
       const createdAt = this.#timestamp();
       this.#insert(tx, "rules", {
@@ -206,10 +206,10 @@ export class MemoryReconciliationRepository {
       this.#insert(tx, "segments", {
         id: uid("rs"), rule_id: id, group_name: input.fixedGroup ?? null, group_ratio: bigint(input.initialRatio),
         ratio_observed_at_ms: input.initialRatio == null ? null : Date.now(), ratio_source: input.initialRatio == null ? null : "group_catalog",
-        effective_from_ms: Number(input.initialEffectiveFromMs ?? (input.billingPolicy === "next-complete-day" ? 0 : Date.now())),
+        effective_from_ms: Number(input.initialEffectiveFromMs ?? (isScopedBillingPolicy(input.billingPolicy) ? 0 : Date.now())),
         effective_to_ms: null, detected_at_ms: Date.now(), timing_source: "operator_confirmed", created_at: createdAt, updated_at: createdAt,
       });
-      if (guard) guard(null, [], input.billingPolicy === "next-complete-day" ? applyScopePolicy(null, requested) : input);
+      if (guard) guard(null, [], isScopedBillingPolicy(input.billingPolicy) ? applyScopePolicy(null, requested) : input);
     });
     return this.getRule(id);
   }
@@ -232,9 +232,16 @@ export class MemoryReconciliationRepository {
         source_binding: JSON.stringify(serializeRuleSourceBinding(input)),
       });
       if (!affected) throw new Error("对账规则不存在或已归档");
-      // 与 MySQL 版一致：先删后插，渠道状态列随之清空。
-      this.#delete(tx, "channels", this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, id)));
-      for (const channel of input.channels) this.#insertChannel(tx, id, channel, input);
+      // 与 MySQL 版一致：保留仍在关联里的渠道行（含状态列），只删移除的、插入新增的。
+      const current = this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, id));
+      const channelIds = new Set(input.channels.map((channel) => Number(channel.channelId)));
+      this.#delete(tx, "channels", current.filter(({ row }) => !channelIds.has(Number(row.channel_id))));
+      const kept = new Set(current.map(({ row }) => Number(row.channel_id)));
+      for (const channel of input.channels) {
+        if (!kept.has(Number(channel.channelId))) this.#insertChannel(tx, id, channel, input);
+        else this.#update(tx, "channels", current.filter(({ row }) => Number(row.channel_id) === Number(channel.channelId)),
+          { channel_name: channel.name ?? null, active_channel_key: activeChannelKey(input, channel.channelId) ?? null });
+      }
       if (guard) guard(existing, existing.channels, applyScopePolicy(existing, requested, Date.now(), { append }));
     });
     return this.getRule(id);
@@ -402,9 +409,9 @@ export class MemoryReconciliationRepository {
       for (const state of states) {
         this.log.channelStateWrites.push({ ruleId, channelId: state.channelId, state: state.state ?? null, observedAt });
         const entries = this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, ruleId) && Number(row.channel_id) === Number(state.channelId));
-        // SQL 的 SET 从左到右求值，CASE 比较时 channel_status 已是新值，恒为相等，
-        // 所以 status_changed_at_ms 实际从不更新（生产代码现状，已在本地 MySQL 8.4 上确认）。
-        this.#update(tx, "channels", entries, { channel_status: state.state ?? null, status_observed_at_ms: bigint(observedAt) });
+        // 对应 MySQL 版的 channel_status <=> ?：状态变了才刷新 status_changed_at_ms。
+        this.#update(tx, "channels", entries, (row) => ({ channel_status: state.state ?? null, status_observed_at_ms: bigint(observedAt),
+          status_changed_at_ms: (row.channel_status ?? null) === (state.state ?? null) ? row.status_changed_at_ms : bigint(observedAt) }));
       }
     });
   }
@@ -518,6 +525,8 @@ export class MemoryReconciliationRepository {
       const logicalEnd = logicalWindow ? castInteger(savedEnd) : Number(row.window_end_ms);
       const separateRecord = logicalWindow && type("scopeFingerprint") === "STRING" && savedScope !== ""
         && type("resultGeneratedAt") === "STRING" && savedGeneration !== "" ? "" : row.snapshot_key;
+      if (logicalWindow ? !isSettledConfirmedSource(source, { startMs: logicalStart, endMs: logicalEnd, timezone: text("window", "timezone") })
+        : ["today", "7d"].includes(row.window_kind)) return [];
       return [{ row, logicalStart, logicalEnd,
         partition: JSON.stringify([logicalStart, logicalEnd, text("window", "timezone"), savedScope, savedGeneration, separateRecord]) }];
     });

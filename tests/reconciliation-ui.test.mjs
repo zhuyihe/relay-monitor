@@ -90,7 +90,7 @@ test("daily billing keeps absolute Shanghai and UTC groups separate and combines
   const groups = page.locator(".ant-collapse-header", { hasText: /^账单窗口/ }); assert.equal(await groups.count(), 2); await groups.first().focus(); await page.keyboard.press("Enter"); await page.getByText("2026-10-07T16:00:00.000Z — 2026-10-08T16:00:00.000Z", { exact: true }).waitFor();
   const combined = dailyRows(); combined[1] = rule("rule-2", "Rule B", 2.5, { ...window, timezone: "Asia/Singapore" });
   const next = await openDailyPage(t, { data: dailyResponse(combined), query(route, body) { assert.equal(body.preset, "today"); const today = dailyRows({ ...window, preset: "today", startMs: window.endMs, endMs: Date.parse("2026-10-09T03:00:00Z") }); for (const row of today) row.calculation = { profitUsd: null, marginRate: null, riskDifferenceUsd: 1.5 }; return fulfill(route, dailyResponse(today)); } }); await next.page.getByRole("region", { name: "对账汇总", exact: true }).getByText("$7.50", { exact: true }).waitFor(); assert.equal(await next.page.locator(".ant-collapse-header", { hasText: /^账单窗口/ }).count(), 1); await next.page.locator(".ant-collapse-header", { hasText: /账单窗口.*Asia\/Shanghai \/ Asia\/Singapore/ }).waitFor();
-  await next.page.getByText("今天", { exact: true }).click(); await next.page.locator(".reconciliation-query-action").first().click(); await next.page.getByRole("region", { name: "对账汇总", exact: true }).getByText("暂无共同整日汇总", { exact: true }).waitFor(); assert.equal(next.queries[0].preset, "today");
+  await next.page.getByText("今天", { exact: true }).click(); await next.page.locator(".reconciliation-query-action").first().click(); const todaySummary = next.page.getByRole("region", { name: "对账汇总", exact: true }); await todaySummary.locator(".reconciliation-summary-metric", { hasText: "已确认范围账面毛利" }).getByText("—", { exact: true }).waitFor(); await todaySummary.locator(".reconciliation-summary-metric", { hasText: "本站已获取收费（USD）" }).getByText("$7.50", { exact: true }).waitFor(); assert.equal(next.queries[0].preset, "today");
 });
 
 test("daily row retry uses one selected query then reloads full GET before showing current aggregates", async (t) => {
@@ -219,7 +219,7 @@ test("workflow rejects invalid, deleted and changed-zone bill destinations with 
 
 test("workflow scope and conflict destinations expose saved history and all conflict rule corrections", async (t) => {
   const scope = await openDailyPage(t, { path: "/reconciliation?action=scope&ruleId=rule-1" });
-  const drawer = scope.page.getByRole("dialog", { name: "Rule A · 对账详情", exact: true }); await drawer.getByText("当前范围完整日生效", { exact: true }).waitFor(); await drawer.getByRole("button", { name: "查看已确认账单历史", exact: true }).waitFor();
+  const drawer = scope.page.getByRole("dialog", { name: "Rule A · 对账详情", exact: true }); await drawer.getByText("生效时间", { exact: true }).waitFor(); await drawer.getByText("首次结账", { exact: true }).waitFor(); await drawer.getByRole("button", { name: "查看已确认账单历史", exact: true }).waitFor();
   const rows = dailyRows(); for (const row of rows.slice(0, 2)) row.health = { code: "DUPLICATE_CHANNEL_ASSIGNMENT", issues: [{ code: "DUPLICATE_CHANNEL_ASSIGNMENT", ruleIds: ["rule-1", "rule-2"], detail: "销售渠道重复归属" }] };
   const conflict = await openDailyPage(t, { path: "/reconciliation?action=conflict&ruleId=rule-1", data: dailyResponse(rows) }); const detail = conflict.page.getByRole("dialog", { name: "Rule A · 对账详情", exact: true }); await detail.getByText("重复销售归属待处理", { exact: true }).waitFor(); await detail.getByRole("button", { name: "核对 rule-2", exact: true }).click(); const second = conflict.page.getByRole("dialog", { name: "Rule B · 对账详情", exact: true }); await second.getByRole("button", { name: "编辑当前范围", exact: true }).waitFor();
 });
@@ -235,7 +235,7 @@ function onboardingFixture(existing = true, type = "newapi", ids = [4]) {
   };
 }
 const onboardingTokens = [{ id: 7, name: "Supplier Key", status: 1, group: "upstream-group" }, { id: 8, name: "New Key", status: 1, group: "upstream-group" }];
-const preview = { billingEffectiveFromMs: Date.parse("2026-10-10T00:00:00+08:00"), firstQueryableAtMs: Date.parse("2026-10-11T00:00:00+08:00"), scopeChanged: true };
+const preview = { billingEffectiveFromMs: null, firstQueryableAtMs: null, scopeChanged: true };
 const ownSource = { stationId: "own-1", provider: "newapi", baseUrl: "https://own.example", accountId: "1", namespaceKey: createHash("sha256").update(JSON.stringify(["newapi", "https://own.example", "1"])).digest("hex") };
 
 function probeResult(body, config, options = {}) {
@@ -265,7 +265,7 @@ function batchResult(body, probe, complete = true) {
     groupId: group.groupId, requestedGroupIds: group.requestedGroupIds, canonicalKey: group.basis.canonicalKey, complete,
     monitor: { status: body.selections[0].monitor ? "linked" : "not_requested", stationIds: body.selections[0].monitor ? [body.selections[0].stationId || "new-up"] : [] },
     reconciliation: { status: body.groups[0].reconciliation ? complete ? "configured" : "unverified" : "not_requested", ruleId: complete ? "rule-" + (group.basis.tokenId || "monitor") : undefined },
-    saved: { stationIds: body.selections[0].monitor ? [body.selections[0].stationId || "new-up"] : [], authorizationStationId: !body.selections[0].monitor ? body.selections[0].stationId || "new-billing-auth" : body.selections[0].reconciliationAuthorization ? body.selections[0].reconciliationAuthorization.stationId || "billing-auth" : null, links: [], ruleId: complete && body.groups[0].reconciliation ? "rule-" + group.basis.tokenId : null, scopeVersion: 2, billingEffectiveFromMs: preview.billingEffectiveFromMs },
+    saved: { stationIds: body.selections[0].monitor ? [body.selections[0].stationId || "new-up"] : [], authorizationStationId: !body.selections[0].monitor ? body.selections[0].stationId || "new-billing-auth" : body.selections[0].reconciliationAuthorization ? body.selections[0].reconciliationAuthorization.stationId || "billing-auth" : null, links: [], ruleId: complete && body.groups[0].reconciliation ? "rule-" + group.basis.tokenId : null, scopeVersion: 2, billingEffectiveFromMs: Date.parse("2026-10-10T12:00:00+08:00") },
     channels: body.groups.find((entry) => entry.groupId === group.groupId).channels.map((entry) => ({ ...entry, complete, stationIds: [body.selections[0].stationId || "new-up"], ruleId: complete ? "rule-" + group.basis.tokenId : null, remainingActions: complete ? [] : ["retry_rule"] })),
     remainingActions: complete ? [] : ["repreview"],
   })) };

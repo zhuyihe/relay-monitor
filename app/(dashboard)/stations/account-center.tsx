@@ -370,8 +370,8 @@ export function useAccountCenter({
           {!key.scopeAmbiguous ? (
             <>
               <dt>{key.activeRuleIds.length ? "当前" : "历史"}范围版本</dt><dd>{key.scopeVersion ?? "待核验"} · {key.costCoverage === "complete" ? "用途范围已确认" : "用途范围待确认"}</dd>
-              <dt>{key.activeRuleIds.length ? "生效边界" : "历史生效边界"}</dt><dd>{accountBoundary(key.billingEffectiveFromMs)}</dd>
-              <dt>首个完整账单查询边界</dt><dd>{accountBoundary(key.firstQueryableAtMs)}</dd>
+              <dt>{key.activeRuleIds.length ? "生效时间" : "历史生效时间"}</dt><dd>{accountBoundary(key.billingEffectiveFromMs)}</dd>
+              <dt>首次结账</dt><dd>{accountBoundary(key.firstQueryableAtMs)}</dd>
             </>
           ) : null}
           {key.coverageDeclaration.answer === "other_use" ? (

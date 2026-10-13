@@ -145,13 +145,13 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     ]);
     const rule = await reconciliation.getRule("legacy_rule");
     assert.deepEqual(rule.channels.map((channel) => channel.channelId).sort(), [1, 2, 3]);
-    assert.equal(rule.billingPolicy, "next-complete-day");
+    assert.equal(rule.billingPolicy, "immediate");
     assert.equal(rule.scopeVersion, 3);
     assert.equal(rule.provider, "newapi");
     assert.equal(rule.canonicalKey, "fixture-canonical-key");
     assert.equal(rule.costCoverage, "complete");
     assert.deepEqual(rule.sourceBinding, { 1: "r1", 2: "r2", 3: "r3" });
-    assert.ok(rule.billingEffectiveFrom > Date.now());
+    assert.ok(rule.billingEffectiveFrom <= Date.now());
     const retried = await reconciliation.appendChannels(rule.id, [{ channelId: 2, name: "Second channel" }],
       { costCoverage: "complete", sourceBinding: { 2: "r2" } });
     assert.equal(retried.scopeVersion, rule.scopeVersion);
@@ -282,8 +282,8 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
         assert.equal(lockedRule.id, beforeRule.id);
         assert.deepEqual(lockedChannels.map((channel) => channel.channelId).sort((a, b) => a - b), [1, 2, 3]);
         assert.deepEqual(policy.channels.map((channel) => channel.channelId).sort((a, b) => a - b), [1, 2, 3, 109]);
-        if (++updateChecks === 2) throw Object.assign(new Error("fixture changed day"), { code: "EFFECTIVE_PREVIEW_CHANGED" });
-      } }), (error) => error.code === "EFFECTIVE_PREVIEW_CHANGED");
+        if (++updateChecks === 2) throw Object.assign(new Error("fixture changed preview"), { code: "PREVIEW_BASIS_CHANGED" });
+      } }), (error) => error.code === "PREVIEW_BASIS_CHANGED");
     assert.equal(updateChecks, 2);
     assert.deepEqual(await reconciliation.getRule(beforeRule.id), beforeRule);
     assert.deepEqual(await reconciliation.listSegments(beforeRule.id), beforeSegments);

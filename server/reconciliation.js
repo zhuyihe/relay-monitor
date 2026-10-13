@@ -18,10 +18,11 @@ import { ReconciliationRepository, reconciliationOwnerRuleState, normalizeConfir
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { describeConnectionFailure } from "../lib/connection-test.js";
-import { applyScopePolicy, canonicalBillingKey, nextBillingEffectiveFrom, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow } from "../lib/reconciliation-scope-policy.js";
+import { applyScopePolicy, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
+  isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
-import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions } from "../lib/reconciliation-view.js";
+import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationSettlement } from "../lib/reconciliation-view.js";
 
 export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 
@@ -67,6 +68,9 @@ const QUERY_TTL_MS = 60000;
 const MAX_RESULT_CACHE_ENTRIES = 200;
 const STALE_SCOPE = Symbol("STALE_SCOPE");
 const MAX_SCOPE_ATTEMPTS = 3;
+// 自然日结束 15 分钟后由轮询结账，给上游账单留出落库时间；数据还不完整就 10 分钟后重试。
+const SETTLE_DELAY_MS = 15 * 60000;
+const SETTLE_RETRY_MS = 10 * 60000;
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -85,7 +89,8 @@ const canonicalTimezone = (input) => new Intl.DateTimeFormat("en-US", { timeZone
 const sameAbsoluteWindow = (a, b) => !!a && !!b && a.startMs === b.startMs && a.endMs === b.endMs;
 function commonBillingTimezone(window, sides) {
   const timezone = canonicalTimezone(window.timezone);
-  const verified = sides.length && sides.every((side) => side?.billingTimezone?.state === "verified"
+  // 没有任何账单需要取（窗口整段在核算起点之前），也就没有待证明的日界线。
+  const verified = sides.every((side) => side?.billingTimezone?.state === "verified"
     && side.billingTimezone.timezone === timezone && sameAbsoluteWindow(side.window, side.requestedWindow || window));
   return { state: verified ? "verified" : "unverified", timezone,
     ...(verified ? {} : { reason: "BILLING_TIMEZONE_UNVERIFIED" }) };
@@ -244,6 +249,14 @@ function intersectSegment(window, segment) {
   return startMs < endMs ? { ...window, startMs, endMs } : null;
 }
 
+// 按 Key 整体取数的关联从核算起点开始计账。Sub2API 只能按天取数，起点所在的那天按全天算。
+function accountingWindow(rule, window, platform = rule.provider) {
+  const start = reconciliationAccountingStart(rule);
+  if (start == null) return window;
+  const clipStart = Math.max(window.startMs, platform === "sub2api" ? startOfBillingDay(start, window.timezone) : start);
+  return clipStart < window.endMs ? { ...window, startMs: clipStart } : null;
+}
+
 function channelState(status) {
   if (Number(status) === 1) return "enabled";
   if (Number(status) === 2) return "manual_disabled";
@@ -252,7 +265,7 @@ function channelState(status) {
 }
 
 function healthWithIssues(issues) {
-  const priority = ["KEY_INVALID_OR_DENIED", "LEGACY_IDENTITY_UNVERIFIED", "SOURCE_BINDING_UNCONFIRMED", "COST_OWNER_UNVERIFIED", "CANONICAL_KEY_CONFLICT", "UPSTREAM_DATA_UNAVAILABLE", "OWN_BILLING_UNAVAILABLE", "OWN_FLOW_INCOMPLETE", "UPSTREAM_EMPTY_WITH_SALES", "UPSTREAM_CAPABILITY_UNVERIFIED", "COST_COVERAGE_UNKNOWN", "BILLING_SCOPE_NOT_EFFECTIVE", "BILLING_WINDOW_UNCONFIRMED", "GROUP_DATA_UNAVAILABLE", "PENDING", "SALES_CHANNEL_MISSING", "SALES_CHANNEL_DISABLED", "SALES_CHANNEL_STATE_UNKNOWN", "ROUTE_TRANSITION_DETECTED", "SEGMENT_TIMING_UNCONFIRMED"];
+  const priority = ["KEY_INVALID_OR_DENIED", "LEGACY_IDENTITY_UNVERIFIED", "SOURCE_BINDING_UNCONFIRMED", "COST_OWNER_UNVERIFIED", "CANONICAL_KEY_CONFLICT", "UPSTREAM_DATA_UNAVAILABLE", "OWN_BILLING_UNAVAILABLE", "OWN_FLOW_INCOMPLETE", "UPSTREAM_EMPTY_WITH_SALES", "UPSTREAM_CAPABILITY_UNVERIFIED", "COST_COVERAGE_UNKNOWN", "GROUP_DATA_UNAVAILABLE", "PENDING", "SALES_CHANNEL_MISSING", "SALES_CHANNEL_DISABLED", "SALES_CHANNEL_STATE_UNKNOWN", "ROUTE_TRANSITION_DETECTED", "SEGMENT_TIMING_UNCONFIRMED"];
   const first = [...priority.slice(0, 5), "BILLING_WINDOW_MISMATCH", "DUPLICATE_CHANNEL_ASSIGNMENT", "WAITING_FOR_BILL",
     ...priority.slice(5, 7), "BILLING_TIMEZONE_UNVERIFIED", ...priority.slice(7)].find((code) => issues.some((issue) => issue.code === code));
   const base = first ? health(first, issues.find((issue) => issue.code === first)?.detail || "") : health("READY");
@@ -306,8 +319,6 @@ const CALCULATION_BLOCKERS = new Set([
   "CANONICAL_KEY_CONFLICT",
   "COST_OWNER_UNVERIFIED",
   "COST_COVERAGE_UNKNOWN",
-  "BILLING_SCOPE_NOT_EFFECTIVE",
-  "BILLING_WINDOW_UNCONFIRMED",
   "BILLING_TIMEZONE_UNVERIFIED",
   "BILLING_WINDOW_MISMATCH",
   "DUPLICATE_CHANNEL_ASSIGNMENT",
@@ -360,6 +371,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const ownChannelsCache = (rt._reconciliationOwnChannelsCache ||= new Map());
   const ownChannelsRequests = (rt._reconciliationOwnChannelsRequests ||= new Map());
   const ruleGenerations = (rt._reconciliationRuleGenerations ||= new Map());
+  const settlements = (rt._reconciliationSettlements ||= new Map());
   const verifiedRuleCredentials = new WeakMap();
   const previewReadFacts = new WeakMap();
   const ownIdentities = new Map();
@@ -391,7 +403,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         stations.map((station) => [station.id, !!station.isOwn, station.archivedAt || null, credentialFingerprint(station)])])).digest("hex") };
   };
   const sourceState = (rule) => {
-    if (!Object.keys(rule.sourceBinding || {}).length && rule.billingPolicy === "next-complete-day") return { version: "missing-confirmation", status: "unavailable" };
+    if (!Object.keys(rule.sourceBinding || {}).length && isScopedBillingPolicy(rule.billingPolicy)) return { version: "missing-confirmation", status: "unavailable" };
     if (!Object.keys(rule.sourceBinding || {}).length && !rule.ownSource) return { version: "legacy", status: "confirmed" };
     if (rt.onboardingSource?.inspectSource) return rt.onboardingSource.inspectSource(rule);
     const current = ownIdentities.get(rule.ownStationId);
@@ -409,6 +421,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const resultKey = (rule, window) => window.preset === "today"
     ? `${rule.id}:today:${window.startMs}:${window.timezone}`
     : `${rule.id}:${window.preset}:${window.startMs}:${window.endMs}:${window.timezone}`;
+
+  // 上游账单在自然日结束后还会陆续入账，结束满 SETTLE_DELAY_MS 才算可结账。
+  function isSettleableWindow(window, now) {
+    return isCompletedBillingWindow(window, now - SETTLE_DELAY_MS);
+  }
+
+  function settlementWindowDue(rule, now) {
+    let window;
+    try { window = resolveReconciliationWindow({ preset: "yesterday", timezone: rule.timezone }, now); } catch { return null; }
+    if (now < window.endMs + SETTLE_DELAY_MS) return null;
+    const start = reconciliationAccountingStart(rule) ?? Date.parse(rule.createdAt);
+    if (Number.isFinite(start) && start >= window.endMs) return null;
+    const entry = settlements.get(`${rule.id}:${window.startMs}:${window.timezone}`);
+    return entry && (entry.settled || now < entry.retryAt) ? null : window;
+  }
 
   function clearRuleResults(ruleId) {
     ruleGenerations.set(ruleId, (ruleGenerations.get(ruleId) || 0) + 1);
@@ -449,7 +476,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const upstreamStation = (id) => rt.store.get(id) || null;
   const observationCredential = (rule, upstream, own) => {
     const source = sourceState(rule);
-    if (source.version === "legacy" || rule.billingPolicy !== "next-complete-day" && !Object.keys(rule.sourceBinding || {}).length) return sourceCredentialFingerprint(upstream, own);
+    if (source.version === "legacy" || !isScopedBillingPolicy(rule.billingPolicy) && !Object.keys(rule.sourceBinding || {}).length) return sourceCredentialFingerprint(upstream, own);
     return createHash("sha256").update(JSON.stringify([sourceCredentialFingerprint(upstream, own), source.version, source.status])).digest("hex");
   };
   const currentSourceCredential = (rule) => observationCredential(rule, upstreamStation(rule.upstreamStationId), upstreamStation(rule.ownStationId));
@@ -701,7 +728,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return { upstreamStationId: valid.upstream.id || null, ownStationId: valid.own.id, tokenId: valid.token.id,
       tokenName: valid.token.name, fixedGroup: valid.token.group, initialRatio: valid.metadata.groups?.[valid.token.group]?.ratio ?? null,
       timezone: valid.timezone, enabled: input?.enabled == null ? valid.existingRule?.enabled ?? true : input.enabled !== false, provider: valid.metadata.platform,
-      canonicalKey: valid.canonicalKey, billingPolicy: "next-complete-day", ownSource: valid.ownSource,
+      canonicalKey: valid.canonicalKey, billingPolicy: "immediate", ownSource: valid.ownSource,
       costCoverage: input?.costCoverage ?? valid.existingRule?.costCoverage ?? "unknown", coverageDeclaration: input?.coverageDeclaration ?? valid.existingRule?.coverageDeclaration,
       sourceBinding: input?.sourceBinding || null, channels: valid.channels, previewEffectiveFromMs: null };
   }
@@ -737,8 +764,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       existingScopeVersion: existing?.scopeVersion || null, existingChannelIds: (existing?.channels || []).map((channel) => channel.channelId).sort((a, b) => a - b),
       proposedChannelIds, timezone: policy.timezone, billingEffectiveFromMs: existing?.billingEffectiveFrom ?? null,
       coverageDeclaration: policy.coverageDeclaration },
-      preview: { costCoverage: policy.costCoverage, billingEffectiveFromMs: policy.billingEffectiveFrom,
-        firstQueryableAtMs: policy.billingEffectiveFrom == null ? null : nextBillingEffectiveFrom(policy.timezone, policy.billingEffectiveFrom), scopeChanged: policy.scopeChanged },
+      // 范围有变化时确认那一刻才生效，生效时间不进预览摘要（预览和确认的时刻不同）。
+      preview: { costCoverage: policy.costCoverage, billingEffectiveFromMs: policy.scopeChanged ? null : policy.billingEffectiveFrom,
+        firstQueryableAtMs: policy.scopeChanged ? null : reconciliationBillingSchedule(policy).firstQueryableAtMs, scopeChanged: policy.scopeChanged },
       ...(previewGuard ? { postSaveResourceVersions: previewGuard.postSaveResourceVersions } : {}) };
   }
 
@@ -946,8 +974,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const downstreamEvidence = async () => {
         if (!own || !own.isOwn || own.type !== "newapi") return null;
         const persistedSegments = await repository.listSegments(rule.id).catch(() => []);
-        const applicable = rule.billingPolicy === "next-complete-day" && persistedSegments.length
-          ? [{ segment: persistedSegments[persistedSegments.length - 1], window }]
+        const scopedWindow = isScopedBillingPolicy(rule.billingPolicy) ? accountingWindow(rule, window) : null;
+        const applicable = isScopedBillingPolicy(rule.billingPolicy)
+          ? persistedSegments.length && scopedWindow ? [{ segment: persistedSegments[persistedSegments.length - 1], window: scopedWindow }] : []
           : persistedSegments
           .map((segment) => ({ segment, window: intersectSegment(window, segment) }))
           .filter((item) => item.window);
@@ -1125,8 +1154,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const intersecting = segments
         .map((segment) => ({ segment, segmentWindow: intersectSegment(window, segment) }))
         .filter(({ segmentWindow }) => segmentWindow);
-      // 新政策查询完整请求窗口；生效前/跨界金额仍是参考，不把裁切窗口冒充整窗。
-      const applicable = rule.billingPolicy === "next-complete-day" ? [{ segment: currentSegment, segmentWindow: window }] : intersecting;
+      // 按 Key 整体取数的关联确认即生效：窗口裁到核算起点（Sub2API 起点当天按全天），整个窗口都在起点之前时金额为 0。
+      // 修改关联后的过渡期，修改之前的未结账时段也按当前配置计算，结果带 scope.recalculated 标记。
+      const clipped = isScopedBillingPolicy(rule.billingPolicy) ? accountingWindow(rule, window, metadata.platform) : window;
+      const applicable = isScopedBillingPolicy(rule.billingPolicy) ? (clipped ? [{ segment: currentSegment, segmentWindow: clipped }] : []) : intersecting;
       let catalogue = null;
       try { if (ownAvailable) catalogue = await ownChannelsFor(own, { force }); } catch {
         issues.push({ code: "SALES_CHANNEL_STATE_UNKNOWN", scope: "channels", detail: "本站渠道目录读取失败，渠道状态未知", observedAt: Date.now() });
@@ -1232,7 +1263,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const upstreamUnits = completeUpstream ? segmentResults.reduce((sum, segment) => sum + segment.upstream.quotaUnits, 0) : null;
       const downstreamUnits = completeDownstream ? segmentResults.reduce((sum, segment) => sum + segment.downstream.quotaUnits, 0) : null;
       const successfulUpstream = segmentResults.filter((segment) => segment.upstream.state === "complete");
-      const knownUpstreamUsd = segmentResults.some((segment) => segment.upstream.knownAmountUsd != null)
+      // 窗口整段在核算起点之前时没有分段：这条关联在该窗口的收入和成本都确定为 0。
+      const knownUpstreamUsd = !segmentResults.length ? 0 : segmentResults.some((segment) => segment.upstream.knownAmountUsd != null)
         ? segmentResults.reduce((sum, segment) => sum + (segment.upstream.knownAmountUsd ?? 0), 0) : null;
       const allChannels = states.map((channel) => {
         const billingRows = segmentResults.map((segment) => segment.downstream.channels?.find((item) => item.channelId === channel.channelId)).filter(Boolean);
@@ -1249,9 +1281,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         };
       });
       const resultHealth = healthWithIssues(issues);
+      // 按 Key 整体取数的关联在核算起点之前没有成本和收入：裁切后的取数窗口如实覆盖了整个请求窗口。
+      const sideWindow = (side) => {
+        if (segmentResults.length !== 1) return window;
+        const [segment] = segmentResults;
+        return isScopedBillingPolicy(rule.billingPolicy) && sameAbsoluteWindow(segment[side].window, segment.window) ? window : segment[side].window;
+      };
       const result = {
         rule: { ...rule, tokenName: token.name, fixedGroup: currentSegment.group }, window,
-        ownSource, scope: reconciliationBillingSchedule(rule),
+        ownSource, scope: { ...reconciliationBillingSchedule(rule), recalculated: scopeRecalculatedInWindow(rule, window),
+          accountedFromMs: clipped && clipped.startMs > window.startMs ? clipped.startMs : null, notEffective: !applicable.length && isScopedBillingPolicy(rule.billingPolicy) },
         amountBasis: { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION, conversion: metadata.platform === "sub2api" ? "provider_cost_usd" : "quota_per_unit" },
         billingTimezone: commonBillingTimezone(window, segmentResults.flatMap((segment) => [segment.upstream, segment.downstream])),
@@ -1272,7 +1311,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           countedAmountUsd: countedCost ? knownUpstreamUsd : null,
           successfulCount: successfulUpstream.length,
           expectedCount: segmentResults.length,
-          observedAt: Date.now(), window: segmentResults.length === 1 ? segmentResults[0].upstream.window : window,
+          observedAt: Date.now(), window: sideWindow("upstream"),
           billingTimezone: commonBillingTimezone(window, segmentResults.map((segment) => segment.upstream)),
           status: token.status, group: currentSegment.group, ratio: currentRatio,
         },
@@ -1286,7 +1325,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           expectedCount: segmentResults.reduce((sum, segment) => sum + segment.downstream.expectedCount, 0),
           billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION,
-          observedAt: Date.now(), window: segmentResults.length === 1 ? segmentResults[0].downstream.window : window,
+          observedAt: Date.now(), window: sideWindow("downstream"),
           billingTimezone: commonBillingTimezone(window, segmentResults.map((segment) => segment.downstream)),
           channels: allChannels,
         },
@@ -1416,7 +1455,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null } = {}) {
     const segmentSnapshots = result.segments?.length ? result.segments : [{ id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health }];
-    const snapshots = ["observation", ...(result.calculation?.profitUsd != null ? ["confirmed"] : [])]
+    // 只有结束满 15 分钟的自然日窗口才写「确认」：今天、近 7 天和刚结束的昨天还在变化，只记观测。
+    // 关联生效前的日子没有账可结，不写成确认账单。
+    const settled = result.calculation?.profitUsd != null && !result.scope?.notEffective && isSettleableWindow(result.window, Date.now());
+    const snapshots = ["observation", ...(settled ? ["confirmed"] : [])]
       .flatMap((recordType) => segmentSnapshots.map((segment) => ({ ...segment, recordType })));
     // 数据库事务核验规则/分段口径；快照键和失败兜底另用包含两侧站点来源的口径。
     const guard = () => (ruleGenerations.get(rule.id) || 0) === generation && currentSourceCredential(rule) === sourceCredential
@@ -1524,6 +1566,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   function readResponse(knownRules, rules, results, registry, input, now) {
+    const isCompletedWindow = (window) => isSettleableWindow(window, now);
     const factsFor = (result) => {
       const resource = registry.resources.get(result.rule.ownStationId);
       const source = result.rule.ownSource && resource?.identity && resource.station ? ownSourceFor(resource.station, resource.identity) : null;
@@ -1533,6 +1576,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         amountBasis: result.amountBasis || { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION, conversion: provider === "sub2api" ? "provider_cost_usd" : provider === "newapi" ? "quota_per_unit" : null } });
       enriched.actions = reconciliationResultActions(enriched);
+      enriched.settlement = reconciliationSettlement(enriched, { isCompletedWindow });
       return enriched;
     };
     const selected = results.map(factsFor), coverageFacts = [...selected];
@@ -1547,12 +1591,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       coverageFacts.push(factsFor(cached.value));
     }
     const catalogue = rt.onboardingSource?.getSourceCatalogue?.() || null;
-    const isCompletedWindow = (window) => isCompletedBillingWindow(window, now);
-    const coverage = deriveKnownChannelCoverage(catalogue, knownRules, coverageFacts, { isCompletedWindow });
-    const grouped = summarizeReconciliationWindowGroups(selected, { isCompletedWindow, coverageFor: (window, source) => {
+    const coverage = deriveKnownChannelCoverage(catalogue, knownRules, coverageFacts);
+    const grouped = summarizeReconciliationWindowGroups(selected, { coverageFor: (window, source) => {
       const sameSource = (value) => source?.namespaceKey ? value?.namespaceKey === source.namespaceKey : !value;
       return deriveKnownChannelCoverage(catalogue && sameSource(catalogue.ownSource) ? catalogue : null,
-        knownRules.filter((rule) => sameSource(rule.ownSource)), coverageFacts.filter((result) => sameSource(result.ownSource)), { window, isCompletedWindow });
+        knownRules.filter((rule) => sameSource(rule.ownSource)), coverageFacts.filter((result) => sameSource(result.ownSource)), { window });
     } });
     const actions = [...new Map([...selected.flatMap((row) => row.actions), ...coverage.channels.flatMap((channel) => channel.actions)]
       .map((action) => [action.id, action])).values()];
@@ -1645,7 +1688,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     previewKeyScope,
     createPreviewReadContext,
     listRules: (options = {}) => repository.listRules(options),
-    nextBillingEffectiveFrom,
     async getConfirmedHistory(id, input = {}) {
       const options = normalizeConfirmedHistoryOptions(input);
       try {
@@ -1687,11 +1729,20 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       return repository.listSegments(id);
     },
     async correctTransition(ruleId, segmentId, effectiveAt) {
-      const rule = await repository.getRule(ruleId, { includeArchived: true });
-      if (!rule) throw new Error("对账规则不存在");
-      const segments = await repository.correctTransition(ruleId, segmentId, effectiveAt);
-      clearRuleResults(ruleId);
-      return segments;
+      return serializeWrite(async () => {
+        const rule = await repository.getRule(ruleId, { includeArchived: true });
+        if (!rule) throw new Error("对账规则不存在");
+        const billingSource = billingSourceState();
+        const segments = await withObservationSourceLock(rule, currentSourceCredential(rule), async () => {
+          const corrected = await repository.correctTransition(ruleId, segmentId, effectiveAt);
+          clearBillingResults(ruleId);
+          // 分段变了，已结账的昨天要按新分段重新结账。
+          for (const key of settlements.keys()) if (key.startsWith(`${ruleId}:`)) settlements.delete(key);
+          return corrected;
+        }, billingSource);
+        if (segments === STALE_SCOPE) throw new Error("关联来源已变化，请刷新后重新确认");
+        return segments;
+      });
     },
     async queryRules({ ruleIds = null, ...input } = {}, options = {}) {
       for (let attempt = 1; ; attempt += 1) {
@@ -1719,27 +1770,38 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           ownerRegistry, input, now);
       }
     },
+    // 每轮观测今天；每条规则按自己的时区，在昨天结束 15 分钟后结账昨天，直到算出毛利为止。
     async refreshDue(now = Date.now()) {
       const allRules = await repository.listRules();
       const rules = allRules.filter((rule) => rule.enabled);
       const ownerRegistry = await ownerRegistryFor(allRules, rules);
-      await mapWithConcurrency(rules, MAX_CONCURRENT_RULES, (rule) => inspectRule(
-        rule.id,
-        resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, now),
-        { origin: "poll", ownerRegistry }
-      ).catch(() => null));
+      for (const [key, entry] of settlements) if (entry.endMs < now - 3 * DAY_MS) settlements.delete(key);
+      await mapWithConcurrency(rules, MAX_CONCURRENT_RULES, async (rule) => {
+        await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, now), { origin: "poll", ownerRegistry })
+          .catch(() => null);
+        const window = settlementWindowDue(rule, now);
+        if (!window) return;
+        // 结账必须重新取数：等待期内手动查询留下的缓存可能是上游入账未完成时的结果。
+        const result = await inspectRule(rule.id, window, { force: true, origin: "poll", ownerRegistry }).catch(() => null);
+        const settled = result?.calculation?.profitUsd != null;
+        settlements.set(`${rule.id}:${window.startMs}:${window.timezone}`, { endMs: window.endMs, settled, retryAt: settled ? null : now + SETTLE_RETRY_MS });
+      });
     },
   };
 }
 
+// 每轮结束后按当前设置排下一轮：改了刷新间隔不用重启，慢的一轮也不会和下一轮重叠。
 export function startReconciliationPolling(rt) {
   const module = (rt.reconciliation ||= createReconciliationModule(rt));
-  const sec = Math.max(60, Number(rt.store.settings.refreshIntervalSec) || 60);
-  if (rt._reconciliationPollTimer && rt._reconciliationPollSec === sec) return module;
-  if (rt._reconciliationPollTimer) clearInterval(rt._reconciliationPollTimer);
-  rt._reconciliationPollSec = sec;
-  rt._reconciliationPollTimer = setInterval(() => module.refreshDue().catch(() => {}), sec * 1000);
-  if (rt._reconciliationPollTimer.unref) rt._reconciliationPollTimer.unref();
-  module.refreshDue().catch(() => {});
+  if (rt._reconciliationPollTimer) return module;
+  const schedule = (delayMs) => {
+    rt._reconciliationPollTimer = setTimeout(tick, delayMs);
+    rt._reconciliationPollTimer.unref?.();
+  };
+  const tick = async () => {
+    try { await module.refreshDue(); } catch { /* 下一轮重试 */ }
+    schedule(Math.max(60, Number(rt.store.settings?.refreshIntervalSec) || 60) * 1000);
+  };
+  schedule(0);
   return module;
 }

@@ -4,7 +4,7 @@ import { describeConnectionFailure } from "../lib/connection-test.js";
 import { onboardingBaseUrl, publicOnboardingStation, onboardingConnectionPatch, normalizeBatchInput,
   coalesceVerifiedBatchGroups, normalizeBatchRecoveryIntent } from "../lib/channel-onboarding.js";
 import { stationBusinessVersion } from "../db/store.js";
-import { nextBillingEffectiveFrom, completedBillingDayWindow, canonicalBillingKey, applyScopePolicy, normalizeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+import { completedBillingDayWindow, canonicalBillingKey, applyScopePolicy, normalizeRuleSourceBinding, reconciliationBillingSchedule } from "../lib/reconciliation-scope-policy.js";
 import { ChannelOnboardingRepository } from "./channel-onboarding-repository.js";
 import { refreshStation } from "./refresh.js";
 import { normalizeReconciliationScopeIntent } from "./reconciliation.js";
@@ -234,13 +234,12 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         verify_capability: ["核验账单能力", { action: "verify-billing", stationId: value.stationId }],
         connect_channels: ["接入这些渠道", { action: "connect", ownStationId: value.ownStationId, channelIds: value.channelIds.join(",") }],
         confirm_coverage: ["核对这把 Key 的全部用途", { action: "coverage", ruleId: value.ruleId }],
-        wait_effective: ["查看生效时间", { action: "scope", ruleId: value.ruleId }],
         review_source: ["核对本站来源", { action: "source", ownStationId: value.ownStationId }],
         inspect_balance: ["查看余额与监控", value.stationId ? { stationId: value.stationId } : { accountKey: value.accountKey }],
       };
       const [label, query] = routes[kind];
       return { id: `${kind}:${hash(value)}`, ...value, label,
-        href: `${kind === "wait_effective" ? "/reconciliation" : "/stations"}?${new URLSearchParams(query)}` };
+        href: `/stations?${new URLSearchParams(query)}` };
     }
     for (const station of stations) {
       const identity = storedIdentity(station), baseUrl = onboardingBaseUrl(station.baseUrl);
@@ -287,7 +286,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         const ambiguous = current.length > 1 && current.some((item) => scope(item) !== scope(rule));
         const effective = Number.isFinite(rule.billingEffectiveFrom) ? rule.billingEffectiveFrom : null;
         let firstQueryableAtMs = null;
-        if (effective != null) { try { firstQueryableAtMs = nextBillingEffectiveFrom(rule.timezone, effective); } catch { /* Unknown legacy timezone has no trustworthy boundary. */ } }
+        if (effective != null) { try { firstQueryableAtMs = reconciliationBillingSchedule(rule).firstQueryableAtMs; } catch { /* Unknown legacy timezone has no trustworthy boundary. */ } }
         account.keys.push({ canonicalKey, tokenId: rule.tokenId, tokenName: rule.tokenName || `Key ${rule.tokenId}`,
           ruleIds: related.map((item) => item.id).sort(), activeRuleIds: current.map((item) => item.id).sort(), scopeAmbiguous: ambiguous,
           channels: [...members.values()].sort((a, b) => a.ownStationId.localeCompare(b.ownStationId) || a.channelId - b.channelId),
@@ -296,7 +295,6 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           firstQueryableAtMs: ambiguous ? null : firstQueryableAtMs });
         if (current.length && (ambiguous || rule.costCoverage !== "complete")) account.actions.push(action("confirm_coverage",
           { accountKey: account.accountKey, ruleId: rule.id, ownStationId: rule.ownStationId, channelIds: coverage.uncoveredOwnChannelIds }));
-        if (current.length && !ambiguous && firstQueryableAtMs > now()) account.actions.push(action("wait_effective", { accountKey: account.accountKey, ruleId: rule.id }));
       }
       for (const resource of account.resources) {
         if (resource.monitorEnabled) account.actions.push(action("inspect_balance", { accountKey: account.accountKey, stationId: resource.id }));
@@ -595,13 +593,6 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const fields = ["ownSource", "sourceVersion", "channelRevisions", "accountIdentity", "canonicalKey", "tokenId", "keyVersion",
       "existingRuleId", "existingScopeVersion", "existingChannelIds", "proposedChannelIds", "timezone", "coverageDeclaration"];
     if (fields.some((field) => hash(basis[field]) !== hash(facts.basis[field]))) changed();
-    if (preview.scopeChanged && preview.billingEffectiveFromMs !== facts.preview.billingEffectiveFromMs) {
-      const error = previewFailure("EFFECTIVE_PREVIEW_CHANGED", "确认时间已跨过日期边界，请查看新的生效日期并重新预览");
-      error.billingEffectiveFrom = preview.billingEffectiveFromMs;
-      error.nextPreview = { billingEffectiveFromMs: preview.billingEffectiveFromMs, timezone: basis.timezone,
-        proposedChannelIds: basis.proposedChannelIds, coverageDeclaration: basis.coverageDeclaration };
-      throw error;
-    }
     if (hash(preview) !== hash(facts.preview) || basis.billingEffectiveFromMs !== facts.basis.billingEffectiveFromMs) changed();
   }
 
@@ -1112,8 +1103,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       existingChannelIds: (latestRule?.channels || []).map((channel) => Number(channel.channelId)).sort((a, b) => a - b),
       proposedChannelIds: ids, billingEffectiveFromMs: latestRule?.billingEffectiveFrom ?? null,
       timezone: policy.timezone, coverageDeclaration: policy.coverageDeclaration });
-    return { basis, preview: { costCoverage: policy.costCoverage, billingEffectiveFromMs: policy.billingEffectiveFrom,
-      firstQueryableAtMs: policy.billingEffectiveFrom == null ? null : nextBillingEffectiveFrom(policy.timezone, policy.billingEffectiveFrom),
+    // 范围有变化时确认那一刻才生效，生效时间不进预览摘要（预览和确认的时刻不同）。
+    return { basis, preview: { costCoverage: policy.costCoverage, billingEffectiveFromMs: policy.scopeChanged ? null : policy.billingEffectiveFrom,
+      firstQueryableAtMs: policy.scopeChanged || policy.billingEffectiveFrom == null ? null : reconciliationBillingSchedule(policy).firstQueryableAtMs,
       scopeChanged: policy.scopeChanged }, postSaveResourceVersions: guard.postSaveResourceVersions };
   }
 
@@ -1288,9 +1280,6 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         }
         result.code = error.code || "ONBOARDING_FAILED";
         result.reason = failure(error, [sourceConnection, own(), ...values.flatMap((value) => [value.main?.connection, value.billing?.connection])]);
-        if (error.nextPreview) result.nextPreview = error.nextPreview;
-        else if (error.code === "EFFECTIVE_PREVIEW_CHANGED") result.nextPreview = { billingEffectiveFromMs: error.billingEffectiveFrom,
-          timezone: group.basis.timezone, proposedChannelIds: group.basis.proposedChannelIds, coverageDeclaration: group.basis.coverageDeclaration };
         actions.push(error.code === "AUTHORIZATION_UPDATE_REQUIRED" ? "verify_identity"
           : ["PREVIEW_REQUIRED", "PREVIEW_BASIS_CHANGED", "EFFECTIVE_PREVIEW_CHANGED", "GROUP_CONFLICT"].includes(error.code) ? "repreview"
             : updatesRequested ? "repreview"
@@ -1425,7 +1414,6 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
               && rule.ownStationId === intent.source.ownStationId && rule.ownSource?.namespaceKey === intent.source.ownSource.namespaceKey
                && rule.tokenId === bill.tokenId && rule.timezone === bill.timezone && inspectSource(rule).status === "confirmed"
               && hash(rule.coverageDeclaration) === hash(bill.coverageDeclaration)
-              && (bill.previewEffectiveFromMs == null || rule.billingEffectiveFrom === bill.previewEffectiveFromMs)
               && group.channels.every((channel) => rule.channels.some((member) => Number(member.channelId) === channel.channelId)
                 && rule.sourceBinding?.[channel.channelId] === channel.channelRevision));
             if (matches.length === 1 && sourceValid) {
@@ -1507,8 +1495,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       previewEffectiveFromMs: result.retryInput.groups[0].reconciliation?.previewEffectiveFromMs ?? null };
     return { complete: group.complete, monitor: group.monitor, reconciliation: group.reconciliation,
       saved: { ...group.saved, link: group.saved.links }, retryInput, batchRetryInput: result.retryInput,
-      ...(group.code ? { code: group.code } : {}), ...(group.nextPreview ? { preview: { ...group.nextPreview,
-        costCoverage: input.reconciliation?.costCoverage || "unknown" } } : {}) };
+      ...(group.code ? { code: group.code } : {}) };
   }
 
   return { list, listAccounts, sync, probe, connect, inspectSource, getRuleSource: inspectSource, getSourceCatalogue, withSourceLock,

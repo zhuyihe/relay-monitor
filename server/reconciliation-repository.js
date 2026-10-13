@@ -1,7 +1,7 @@
 // 上游渠道对账的持久化层：只保存规则、聚合快照和告警状态，绝不复制站点凭据。
 import { isCurrentReconciliationBillingContract } from "../lib/reconciliation-contract.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
-import { applyScopePolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+import { applyScopePolicy, isCompletedBillingWindow, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 
 export function uid(prefix) {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}${Date.now().toString(36).slice(-4)}`;
@@ -106,6 +106,16 @@ export function snapshotGeneratedAt(source) {
   return String(source?.resultGeneratedAt || "");
 }
 
+// 结账记录只认已结束的自然日窗口；旧版本把今天的半天、近 7 天也写成过 confirmed，读取时一并排除。
+// 有逻辑窗口但没存生成时间的旧记录，只要窗口是现在已结束的完整自然日就认。
+// 更早的记录没有逻辑窗口和生成时间，无从判断时区，只按行上的 window_kind 排除今天和近 7 天。
+const LIVE_WINDOW_KINDS = new Set(["today", "7d"]);
+export function isSettledConfirmedSource(source, window = source?.window, now = Date.now()) {
+  const generatedAt = Date.parse(source?.resultGeneratedAt);
+  return isCompletedBillingWindow(window && { startMs: Number(window.startMs), endMs: Number(window.endMs), timezone: window.timezone },
+    Number.isFinite(generatedAt) ? generatedAt : now);
+}
+
 // latestRecord 在 SQL 粗筛之后的判定：只认当前账单合同、同一口径、同一窗口的记录，取最新生成的一条。
 export function selectLatestRecord(rows, window, scopeFingerprint, recordType) {
   const exact = rows.map((row) => {
@@ -120,7 +130,7 @@ export function selectLatestRecord(rows, window, scopeFingerprint, recordType) {
     const sameWindow = window.preset === "today" || window.preset === "7d"
       ? Number(saved.endMs) <= Number(window.endMs)
       : Number(saved.endMs) === Number(window.endMs);
-    return sameWindow && (recordType !== "confirmed" || result?.calculation?.profitUsd != null);
+    return sameWindow && (recordType !== "confirmed" || (result?.calculation?.profitUsd != null && isSettledConfirmedSource(source)));
   });
   if (!exact.length) return null;
   const latest = exact.reduce((current, candidate) => String(candidate.source.resultGeneratedAt) > String(current.source.resultGeneratedAt) ? candidate : current);
@@ -247,7 +257,7 @@ export class ReconciliationRepository {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
-      if (input.billingPolicy === "next-complete-day") input = applyScopePolicy(null, input);
+      if (isScopedBillingPolicy(input.billingPolicy)) input = applyScopePolicy(null, input);
       if (guard) guard(null, [], input);
       await conn.query(
         `INSERT INTO reconciliation_rules
@@ -269,9 +279,9 @@ export class ReconciliationRepository {
         `INSERT INTO reconciliation_rule_segments
           (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, detected_at_ms, timing_source)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'operator_confirmed')`,
-        [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs ?? (input.billingPolicy === "next-complete-day" ? 0 : Date.now())), Date.now()]
+        [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs ?? (isScopedBillingPolicy(input.billingPolicy) ? 0 : Date.now())), Date.now()]
       );
-      if (guard) guard(null, [], input.billingPolicy === "next-complete-day" ? applyScopePolicy(null, requested) : input);
+      if (guard) guard(null, [], isScopedBillingPolicy(input.billingPolicy) ? applyScopePolicy(null, requested) : input);
       await conn.commit();
     } catch (err) {
       await conn.rollback().catch(() => {});
@@ -305,11 +315,20 @@ export class ReconciliationRepository {
           input.provider, input.canonicalKey, JSON.stringify(serializeRuleSourceBinding(input)), id]
       );
       if (!result.affectedRows) throw new Error("对账规则不存在或已归档");
-      await conn.query("DELETE FROM reconciliation_rule_channels WHERE rule_id = ?", [id]);
-      if (input.channels.length) {
+      // 保留仍在关联里的渠道行（连同已观测到的状态列），只删掉移除的、插入新增的。
+      const kept = new Set(channelRows.map((row) => Number(row.channel_id)));
+      const channelIds = input.channels.map((channel) => Number(channel.channelId));
+      await conn.query(channelIds.length ? "DELETE FROM reconciliation_rule_channels WHERE rule_id = ? AND channel_id NOT IN (?)"
+        : "DELETE FROM reconciliation_rule_channels WHERE rule_id = ?", channelIds.length ? [id, channelIds] : [id]);
+      for (const channel of input.channels.filter((item) => kept.has(Number(item.channelId)))) await conn.query(
+        "UPDATE reconciliation_rule_channels SET channel_name = ?, active_channel_key = ? WHERE rule_id = ? AND channel_id = ?",
+        [channel.name, activeChannelKey(input, channel.channelId), id, channel.channelId]
+      );
+      const added = input.channels.filter((channel) => !kept.has(Number(channel.channelId)));
+      if (added.length) {
         await conn.query(
           "INSERT INTO reconciliation_rule_channels (rule_id, channel_id, channel_name, active_channel_key) VALUES ?",
-          [input.channels.map((channel) => [id, channel.channelId, channel.name, activeChannelKey(input, channel.channelId)])]
+          [added.map((channel) => [id, channel.channelId, channel.name, activeChannelKey(input, channel.channelId)])]
         );
       }
       if (guard) guard(existing, existing.channels, applyScopePolicy(existing, requested, Date.now(), { append }));
@@ -592,9 +611,10 @@ export class ReconciliationRepository {
       if (!rules.length) throw new Error("对账规则不存在或已停止");
       for (const state of states) await conn.query(
         `UPDATE reconciliation_rule_channels
-         SET channel_status = ?, status_observed_at_ms = ?,
-             status_changed_at_ms = CASE WHEN channel_status <=> ? THEN status_changed_at_ms ELSE ? END
+         SET status_changed_at_ms = CASE WHEN channel_status <=> ? THEN status_changed_at_ms ELSE ? END,
+             channel_status = ?, status_observed_at_ms = ?
          WHERE rule_id = ? AND channel_id = ?`,
+        // SET 从左到右求值：先拿旧的 channel_status 比较，再覆盖。
         [state.state, observedAt, state.state, observedAt, ruleId, state.channelId]
       );
       await conn.commit();
@@ -748,7 +768,23 @@ export class ReconciliationRepository {
   }
 
   async listConfirmedHistory(ruleId, input = {}) {
-    const { startMs, endMs, limit, after } = normalizeConfirmedHistoryOptions(input);
+    const { startMs, endMs, limit, after: initialCursor } = normalizeConfirmedHistoryOptions(input);
+    // SQL 判断不了"按时区的自然日"，所以分批取、在 JS 里滤掉非结账窗口，凑够 limit + 1 条或取完为止。
+    const settled = [];
+    for (let after = initialCursor; ;) {
+      const rows = await this.#confirmedHistoryBatch(ruleId, startMs, endMs, after, limit + 1);
+      settled.push(...rows.filter((row) => Number(row.has_logical_window) ? isSettledConfirmedSource(asJson(row.source), {
+        startMs: row.logical_start, endMs: row.logical_end, timezone: row.saved_timezone }) : !LIVE_WINDOW_KINDS.has(row.window_kind)));
+      if (settled.length > limit || rows.length <= limit) break;
+      const tail = rows.at(-1);
+      after = [Number(tail.window_end_ms), tail.cursor_generated_at, tail.snapshot_key];
+    }
+    const page = settled.slice(0, limit), last = page.at(-1);
+    return { records: page.map(reconciliationConfirmedHistoryRecord), nextCursor: settled.length > limit && last
+      ? Buffer.from(JSON.stringify([Number(last.window_end_ms), last.cursor_generated_at, last.snapshot_key])).toString("base64url") : null };
+  }
+
+  async #confirmedHistoryBatch(ruleId, startMs, endMs, after, size) {
     const cursorFilter = after ? "AND (window_end_ms < ? OR (window_end_ms = ? AND generated_at < ?) OR (window_end_ms = ? AND generated_at = ? AND snapshot_key < ?))" : "";
     const [rows] = await this.pool.query(
       `WITH evidence AS (
@@ -776,10 +812,8 @@ export class ReconciliationRepository {
        ) SELECT *, DATE_FORMAT(generated_at,'%Y-%m-%d %H:%i:%s') AS cursor_generated_at FROM ranked
          WHERE logical_rank = 1 AND logical_start >= ? AND logical_end <= ? ${cursorFilter}
          ORDER BY window_end_ms DESC,generated_at DESC,snapshot_key DESC LIMIT ?`,
-      [ruleId, startMs, endMs, ...(after ? [after[0], after[0], after[1], after[0], after[1], after[2]] : []), limit + 1]
+      [ruleId, startMs, endMs, ...(after ? [after[0], after[0], after[1], after[0], after[1], after[2]] : []), size]
     );
-    const page = rows.slice(0, limit), last = page.at(-1);
-    return { records: page.map(reconciliationConfirmedHistoryRecord), nextCursor: rows.length > limit && last
-      ? Buffer.from(JSON.stringify([Number(last.window_end_ms), last.cursor_generated_at, last.snapshot_key])).toString("base64url") : null };
+    return rows;
   }
 }

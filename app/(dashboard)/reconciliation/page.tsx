@@ -395,7 +395,7 @@ export default function ReconciliationPage() {
     <Detail label="原上游来源" value={`${record.upstreamSource.provider || "原平台未保存"} · ${record.upstreamSource.baseUrl || "原地址未保存"} · 账号 ${record.upstreamSource.accountId ?? "未保存"}`} />
     <Detail label="原 Key / 范围" value={`${record.upstreamSource.tokenName ?? "原 Key 名称未保存"} · #${record.upstreamSource.tokenId ?? "未保存"} · 范围版本 ${record.scopeVersion ?? "未保存"}`} />
     <Detail label="原关联渠道" value={record.channels.map(channelLabel).join("、") || "原关联渠道未保存"} />
-    <Detail label="原生效边界" value={record.billingEffectiveFromMs == null ? "原生效边界未保存" : new Date(record.billingEffectiveFromMs).toISOString()} />
+    <Detail label="原生效时间" value={record.billingEffectiveFromMs == null ? "原生效时间未保存" : new Date(record.billingEffectiveFromMs).toISOString()} />
     <Detail label="原收费 / 成本 / 账面毛利" value={`${billingAmountText(record.downstream, null)} / ${billingAmountText(record.upstream, null)} / ${money(record.calculation.profitUsd, null)}`} />
     <Detail label="原毛利率" value={percent(record.calculation.marginRate)} />
     <Detail label="原账单计量" value={`${record.amountBasis.currency} · ${record.amountBasis.billingSource} · 计算版本 ${record.amountBasis.calculationVersion} · ${record.amountBasis.conversion === "quota_per_unit" ? "配额 ÷ 单位" : record.amountBasis.conversion === "provider_cost_usd" ? "上游美元账单" : "原换算依据未保存"}`} />
@@ -805,7 +805,7 @@ export default function ReconciliationPage() {
 
       <section className="reconciliation-summary" aria-label="对账汇总">
         {summaryReference ? <Alert type="info" showIcon message="全量摘要仅供参考，正在核对当前窗口" description="规则列表保留已读金额；全量读取完成后再显示当前汇总。" /> : commonSummary ? windowMetrics(commonSummary.totals) : <Text strong>暂无共同整日汇总</Text>}
-        <p className="reconciliation-summary__note">{commonSummary?.totals.profitComplete ? "已知渠道范围的完整账单。" : "仅已确认范围的金额，不代表全站完整利润。"} 金额按 USD 汇总；本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}。今天与未完成日的金额仅供参考。</p>
+        <p className="reconciliation-summary__note">{commonSummary?.totals.profitComplete ? "已知渠道范围的完整账单。" : "仅已确认范围的金额，不代表全站完整利润。"} 金额按 USD 汇总；本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}。今天为截至现在的实时金额，自然日结束后自动结账。</p>
       </section>
       {windowGroups.length ? <Collapse style={{ marginBottom: 16 }} items={windowGroups.map((group) => ({ key: group.groupKey, label: <span>账单窗口 · {formatWindow({ ...group.window, timezone: group.timezones[0] })} · {group.timezones.join(" / ")}{summaryReference ? " · 参考" : ""}</span>, children: <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
         <Detail label="绝对窗口" value={`${new Date(group.window.startMs).toISOString()} — ${new Date(group.window.endMs).toISOString()}`} />
@@ -901,7 +901,7 @@ export default function ReconciliationPage() {
           <Detail label="上游账号" value={upstreamName(detail.rule, config?.upstreams)} />
           <Detail label="上游 Key / 分组" value={`${detail.rule?.tokenName || "—"} · ${detail.upstream?.group || detail.currentSegment?.group || detail.rule?.fixedGroup || "—"}`} />
           <Detail label="关联销售渠道" value={(detail.rule?.channels?.length ? detail.rule.channels : detail.downstream?.channels || []).map(channelLabel).join("、") || "未配置渠道"} />
-          {detail.scope ? <><Detail label="当前核算范围版本" value={String(detail.scope.scopeVersion ?? "未知")} /><Detail label="当前范围完整日生效" value={detail.scope.billingEffectiveFromMs == null ? "未知" : new Date(detail.scope.billingEffectiveFromMs).toISOString()} /><Detail label="首个完整账单可查询" value={detail.scope.firstQueryableAtMs == null ? "未知" : new Date(detail.scope.firstQueryableAtMs).toISOString()} /></> : null}
+          {detail.scope ? <><Detail label="当前核算范围版本" value={String(detail.scope.scopeVersion ?? "未知")} /><Detail label="生效时间" value={detail.scope.billingEffectiveFromMs == null ? "未知" : new Date(detail.scope.billingEffectiveFromMs).toISOString()} /><Detail label="首次结账" value={detail.scope.firstQueryableAtMs == null ? "未知" : new Date(detail.scope.firstQueryableAtMs).toISOString()} />{detail.scope.accountedFromMs != null ? <Detail label="本窗口核算起点" value={new Date(detail.scope.accountedFromMs).toISOString()} /> : null}{detail.scope.recalculated ? <Detail label="配置变更" value="已按新配置重算（修改前尚未结账的时段也按当前配置计算）" /> : null}</> : null}
           {detail.billingTimezone ? <Detail label="账单时区能力" value={`${detail.billingTimezone.timezone} · ${detail.billingTimezone.state === "verified" ? "已核验" : "待核验，原金额仅供参考"}${detail.billingTimezone.reason ? ` · ${detail.billingTimezone.reason}` : ""}`} /> : null}
           <Detail label="当前倍率" value={currentRatioLabel(detail)} />
           <Detail label="本站收费" value={`${billingAmountText(detail.downstream, rate)} · ${billingCoverageText(detail.downstream)}`} />
@@ -954,7 +954,7 @@ export default function ReconciliationPage() {
           <Alert type="info" showIcon message="核算口径" description="该规则汇总完整上游成本与全部所选渠道收费。渠道子项只展示收费占比，不分摊成本。" />
           {ruleFormError ? <Alert type="error" showIcon message={ruleFormError} style={{ marginTop: 16 }} /> : null}
           <Button style={{ minHeight: 44, marginTop: 16 }} loading={previewingRule} disabled={saving} onClick={() => void previewRule()} aria-label="预览对账规则">{editing ? "预览修改" : "验证并预览关联"}</Button>
-          {rulePreview ? <Alert type="info" showIcon style={{ marginTop: 16 }} message={editing ? "规则修改预览，尚未保存" : "Key 完整范围预览，尚未保存"} description={<Space direction="vertical"><Text>原渠道：{rulePreview.basis.existingChannelIds.map((id) => `#${id}`).join("、") || "无"}</Text><Text>最终渠道：{rulePreview.basis.proposedChannelIds.map((id) => `#${id}`).join("、")}</Text>{editing ? <Text>释放渠道：{rulePreview.basis.existingChannelIds.filter((id) => !rulePreview.basis.proposedChannelIds.includes(id)).map((id) => `#${id}`).join("、") || "无"}；原账单保留。</Text> : null}<Text>完整日生效：{formatRecentTime(rulePreview.preview.billingEffectiveFromMs, rulePreview.basis.timezone, false, true)}（{rulePreview.basis.timezone}）</Text><Text>首个完整账单可查询：{formatRecentTime(rulePreview.preview.firstQueryableAtMs, rulePreview.basis.timezone, false, true)}</Text><Text>{rulePreview.preview.costCoverage === "complete" ? "已声明这把 Key 没有其他用途" : "Key 用途待确认，金额作为参考"}</Text></Space>} /> : null}
+          {rulePreview ? <Alert type="info" showIcon style={{ marginTop: 16 }} message={editing ? "规则修改预览，尚未保存" : "Key 完整范围预览，尚未保存"} description={<Space direction="vertical"><Text>原渠道：{rulePreview.basis.existingChannelIds.map((id) => `#${id}`).join("、") || "无"}</Text><Text>最终渠道：{rulePreview.basis.proposedChannelIds.map((id) => `#${id}`).join("、")}</Text>{editing ? <Text>释放渠道：{rulePreview.basis.existingChannelIds.filter((id) => !rulePreview.basis.proposedChannelIds.includes(id)).map((id) => `#${id}`).join("、") || "无"}；原账单保留。</Text> : null}<Text>{rulePreview.preview.scopeChanged ? "确认后立即生效；今天尚未结账的部分按新配置重算，已结账的日子不变。" : `生效时间：${formatRecentTime(rulePreview.preview.billingEffectiveFromMs, rulePreview.basis.timezone, false, true)}（${rulePreview.basis.timezone}），范围未变化。`}</Text><Text>{rulePreview.preview.costCoverage === "complete" ? "已声明这把 Key 没有其他用途" : "Key 用途待确认，金额作为参考"}</Text></Space>} /> : null}
         </Form>
       </Drawer>
     </PageContainer>
