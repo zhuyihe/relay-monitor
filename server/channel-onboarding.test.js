@@ -623,7 +623,14 @@ async function genuineBatchFixture(t) {
               type: 1, status: 1, base_url: "https://up.test", group: "g1" })) } : { quota: 100 };
     return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
   });
+  const capabilities = new Map();
   const read = (sql, params = [], draft = state) => {
+    if (sql.includes("reconciliation_billing_capabilities")) {
+      if (sql.startsWith("SELECT")) return [capabilities.has(params[0]) ? [{ capability: capabilities.get(params[0]) }] : []];
+      if (sql.startsWith("INSERT")) capabilities.set(params[0], params[1]);
+      else if (sql.includes("WHERE identity")) capabilities.delete(params[0]);
+      return [{ affectedRows: 1 }];
+    }
     if (sql.includes("JOIN reconciliation_rule_channels")) return [draft.members.filter((member) => params[0].includes(member.channel_id)
       && member.rule_id !== params[1] && draft.rules.find((rule) => rule.id === member.rule_id)?.enabled)
       .map((member) => ({ id: member.rule_id, channel_id: member.channel_id, token_name: "Key" }))];
@@ -949,7 +956,7 @@ test("F03 genuine Sub2API verifies actual Key/date controls independently in eac
   const probe = await f.rt.channelOnboarding.probeBatch(input); assert.deepEqual(probe.groups.map((group) => group.status), ["ready", "ready"]);
   for (const timezone of zones) {
     const metadata = seen.find((item) => item.billingTimezone.timezone === timezone);
-    assert.equal(metadata.capability.state, "supported"); assert.equal(metadata.billingTimezone.state, "unverified");
+    assert.equal(metadata.capability.state, "supported"); assert.deepEqual(metadata.billingTimezone, { state: "verified", timezone });
     assert.ok(stats.some((item) => item.timezone === timezone && item.api_key_id === String(Number.MAX_SAFE_INTEGER)));
     assert.ok(stats.some((item) => item.timezone === timezone && item.start_date > "2026-10-09"));
   }

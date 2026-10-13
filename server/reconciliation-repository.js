@@ -1,4 +1,4 @@
-// 上游渠道对账的持久化层：只保存规则、聚合快照和告警状态，绝不复制站点凭据。
+// 上游渠道对账的持久化层：只保存规则、聚合快照、告警状态和账单能力核验结果，绝不复制站点凭据。
 import { isCurrentReconciliationBillingContract } from "../lib/reconciliation-contract.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
 import { applyScopePolicy, isCompletedBillingWindow, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
@@ -171,6 +171,8 @@ export function normalizeConfirmedHistoryOptions(input = {}, now = Date.now()) {
   }
   return { startMs, endMs, limit: Math.min(50, requestedLimit), cursor: input.cursor ?? null, after };
 }
+
+export const BILLING_CAPABILITY_MAX_AGE_MS = 30 * 24 * 3600000;
 
 export class ReconciliationRepository {
   constructor(pool) {
@@ -735,6 +737,29 @@ export class ReconciliationRepository {
       "UPDATE reconciliation_alert_state SET active = 0, recovered_at = ?, last_seen_at = ? WHERE rule_id = ? AND active = 1",
       [recoveredAt, recoveredAt, ruleId]
     );
+  }
+
+  // Sub2API 账单过滤能力的核验结果，按上游连接身份的哈希保存，重启后仍有效。
+  async getBillingCapability(identity) {
+    const [rows] = await this.pool.query(
+      "SELECT capability FROM reconciliation_billing_capabilities WHERE identity = ?",
+      [identity]
+    );
+    return rows.length ? asJson(rows[0].capability) : null;
+  }
+
+  // 顺带清掉 30 天没再核验的身份：在用的能力每 7 天重新核验一次，换过凭据或时区的旧身份不会再被读取。
+  async saveBillingCapability(identity, capability, { now = Date.now(), maxAgeMs = BILLING_CAPABILITY_MAX_AGE_MS } = {}) {
+    await this.pool.query(
+      `INSERT INTO reconciliation_billing_capabilities (identity, capability, verified_at) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE capability = VALUES(capability), verified_at = VALUES(verified_at)`,
+      [identity, JSON.stringify(capability), capability.verifiedAt]
+    );
+    await this.pool.query("DELETE FROM reconciliation_billing_capabilities WHERE verified_at < ?", [now - maxAgeMs]);
+  }
+
+  async deleteBillingCapability(identity) {
+    await this.pool.query("DELETE FROM reconciliation_billing_capabilities WHERE identity = ?", [identity]);
   }
 
   async latestRecord(ruleId, window, scopeFingerprint, recordType) {

@@ -26,7 +26,7 @@ const legacySource = { recordType: "confirmed", billingSource: "channel-log-stat
   scopeFingerprint: "legacy-scope", result: { calculation: { profitUsd: 4, marginRate: 0.4 } } };
 
 async function seedLegacySchema(pool) {
-  const tables = ["channel_monitor_links", "reconciliation_alert_state", "reconciliation_snapshots",
+  const tables = ["channel_monitor_links", "reconciliation_billing_capabilities", "reconciliation_alert_state", "reconciliation_snapshots",
     "reconciliation_rule_segments", "reconciliation_rule_channels", "reconciliation_rules",
     "station_daily_usage", "history_points", "meta", "stations"];
   for (const table of tables) await pool.query(`DROP TABLE IF EXISTS ${table}`);
@@ -469,7 +469,10 @@ defineReconciliationRepositoryContract({
     await contractSchemaReady;
     return new ReconciliationRepository(contractPool);
   },
-  cleanup: async ({ ruleIds }) => {
+  cleanup: async ({ ruleIds, capabilityIdentities }) => {
+    if (capabilityIdentities.length) {
+      await contractPool.query("DELETE FROM reconciliation_billing_capabilities WHERE identity IN (?)", [capabilityIdentities]);
+    }
     if (!ruleIds.length) return;
     for (const table of ["reconciliation_alert_state", "reconciliation_snapshots", "reconciliation_rule_segments",
       "reconciliation_rule_channels"]) await contractPool.query(`DELETE FROM ${table} WHERE rule_id IN (?)`, [ruleIds]);

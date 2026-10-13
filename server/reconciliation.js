@@ -378,6 +378,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const verifiedRuleCredentials = new WeakMap();
   const previewReadFacts = new WeakMap();
   const ownIdentities = new Map();
+  // Sub2API 账单过滤能力的核验结果存进库里，重启后不必重新核验。
+  const billingCapabilityStore = {
+    get: (identity) => repository.getBillingCapability(identity),
+    set: (identity, capability) => repository.saveBillingCapability(identity, capability),
+    delete: (identity) => repository.deleteBillingCapability(identity),
+  };
   // 观测时锚定身份失败的原因：只读计算不锚定，沿用最近一次观测的结论。
   const identityIssues = new Map();
   const billingStation = (station) => station && ["newapi", "sub2api", "sub2api-password"].includes(station.type) && !station.isOwn;
@@ -502,7 +508,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const zone = canonicalTimezone(timezone), cacheKey = `${station.id}:${zone}`;
     const cached = metadataCache.get(cacheKey);
     if (!force && cached?.credential === credential && Date.now() - cached.at < 5 * 60000) return cached.value;
-    const value = await queryReconciliationMetadata({ ...station }, { timezone: zone });
+    const value = await queryReconciliationMetadata({ ...station }, { timezone: zone, capabilityStore: billingCapabilityStore });
     metadataCache.set(cacheKey, { at: Date.now(), credential, value });
     return value;
   }
@@ -589,9 +595,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return value;
   }
 
-  async function upstreamWindowFor(upstream, metadata, token, window) {
+  // 只读查询不核验、不改写账单能力；观测（轮询、刷新）才会核验并保存。
+  async function upstreamWindowFor(upstream, metadata, token, window, { readOnly }) {
     return queryKeyReconciliationStat(upstream, {
-      token, metadata, timezone: window.timezone,
+      token, metadata, timezone: window.timezone, capabilityStore: billingCapabilityStore, readOnly,
       startMs: window.startMs,
       endMs: window.endMs,
       // 元数据已用同一 PAT 读到身份和 /api/status（与 Key 校验同一份观察），各分段直接复用，不再逐段探测。
@@ -1154,7 +1161,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const token = metadata.tokens.find((item) => item.id === rule.tokenId);
       if (identityIssue) {
         const upstreamEvidence = token && (!rule.canonicalKey || rule.canonicalKey === actualKey)
-          ? await upstreamWindowFor(upstream, metadata, token, window).catch(() => null) : null;
+          ? await upstreamWindowFor(upstream, metadata, token, window, { readOnly: !observe }).catch(() => null) : null;
         return unavailable(identityIssue, { metadata, token, upstream: upstreamEvidence }, false);
       }
       const canonicalKey = canonicalBillingKey(upstream, metadata, token.id);
@@ -1240,7 +1247,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const loadOwnStatus = () => (ownStatus ||= queryNewApiStatus(own));
       const segmentResults = await mapWithConcurrency(applicable, 6, async ({ segment, segmentWindow }) => {
         const [upstreamResult, downstreamResult] = await Promise.all([
-          upstreamWindowFor(upstream, metadata, token, segmentWindow).catch((error) => ({ error })),
+          upstreamWindowFor(upstream, metadata, token, segmentWindow, { readOnly: !observe }).catch((error) => ({ error })),
           (ownAvailable
             ? queryOwnChannelRevenue(own, { channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus: loadOwnStatus })
             : Promise.resolve({ error: Object.assign(new Error("本站管理员 NewAPI 站点不可用"), { code: "OWN_BILLING_UNAVAILABLE" }) }))
@@ -1727,7 +1734,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           throw Object.assign(new Error("请选择目录中有效且名称唯一的 Key"), { code: "INVALID_REQUEST" });
         }
         let stat;
-        try { stat = await queryKeyReconciliationStat(connection, { token, metadata, ...completedBillingDayWindow(zone) }); }
+        // 选定 Key 是用户显式发起的核验，核验结果写入账单能力表，重启后仍有效。
+        try { stat = await queryKeyReconciliationStat(connection, { token, metadata, capabilityStore: billingCapabilityStore, ...completedBillingDayWindow(zone) }); }
         catch { assertCurrent(); throw Object.assign(new Error("Key 账单能力暂时无法核验，请检查授权或稍后重试"), { code: "KEY_PROBE_UNAVAILABLE" }); }
         assertCurrent();
         const number = (value) => typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -1833,12 +1841,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     },
     // 每轮观测今天；每条规则按自己的时区，在昨天结束 15 分钟后结账昨天，直到算出毛利为止。
     async refreshDue(now = Date.now()) {
+      const startedAt = Date.now();
       const allRules = await repository.listRules();
       const rules = allRules.filter((rule) => rule.enabled);
       const ownerRegistry = await ownerRegistryFor(allRules, rules, { observe: true });
       for (const [key, entry] of settlements) if (entry.endMs < now - 3 * DAY_MS) settlements.delete(key);
       await mapWithConcurrency(rules, MAX_CONCURRENT_RULES, async (rule) => {
-        await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, now), { mode: "observe", origin: "poll", ownerRegistry })
+        // 规则排队轮到时才定今天的截止点：实时窗口截至取数时刻，不能用整轮开始时的旧时刻。
+        const at = now + Math.max(0, Date.now() - startedAt);
+        await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "observe", origin: "poll", ownerRegistry })
           .catch(() => null);
         const window = settlementWindowDue(rule, now);
         if (!window) return;
@@ -1861,6 +1872,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       identityCache.clear();
       clearBillingResults();
     },
+    // 接入向导核验 Sub2API Key 时共用同一份能力存储。
+    billingCapabilityStore,
   };
   return api;
 }

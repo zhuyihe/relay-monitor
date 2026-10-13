@@ -2803,9 +2803,16 @@ test("R02本站同源PAT不延期；A换B并同步仍不确认旧A，旧快照�
 function membershipFixture() {
   const state = { rules: [{ id: "rr_members", upstream_station_id: "up", own_station_id: "own", token_id: 9,
     token_name: "stable", fixed_group: "g1", timezone: "Asia/Shanghai", enabled: 1, archived_at: null }],
-    channels: [{ rule_id: "rr_members", channel_id: 1, channel_name: "一" }], created: 0, ruleWrites: 0, rollbacks: 0, failChannels: false };
+    channels: [{ rule_id: "rr_members", channel_id: 1, channel_name: "一" }], created: 0, ruleWrites: 0, rollbacks: 0, failChannels: false,
+    capabilities: new Map() };
   let lockTail = Promise.resolve();
   const read = (sql, params = [], target = state) => {
+    if (sql.includes("reconciliation_billing_capabilities")) {
+      if (sql.startsWith("SELECT")) return [state.capabilities.has(params[0]) ? [{ capability: state.capabilities.get(params[0]) }] : []];
+      if (sql.startsWith("INSERT")) { state.capabilities.set(params[0], params[1]); return [{ affectedRows: 1 }]; }
+      if (sql.includes("WHERE identity")) state.capabilities.delete(params[0]);
+      return [{ affectedRows: 1 }];
+    }
     if (sql.includes("JOIN reconciliation_rule_channels")) return [target.channels.filter((channel) => params[0].includes(channel.channel_id)
       && channel.rule_id !== params[1]).map((channel) => ({ id: channel.rule_id, channel_id: channel.channel_id, token_name: "stable" }))];
     if (sql.includes("FROM reconciliation_rule_channels")) {
@@ -3797,7 +3804,7 @@ test("换到另一稳定账号的授权不能写入原 Key 的分段或来源历
   assert.equal(state.statCalls.filter((call) => call.side === "upstream").length, 0);
 });
 
-test("Sub2API Key/date核验保留实际扣费，缺部署时区证据不确认整日利润", async (t) => {
+test("Sub2API Key/date核验后按业务时区确认整日利润，零值或缺实际扣费不确认", async (t) => {
   t.mock.method(Date, "now", () => Date.parse("2026-10-11T01:00:00Z"));
   const { rule, rt, stations, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "7", ratio: null, from: 0 }] });
   Object.assign(stations[0], { type: "sub2api", baseUrl: "https://sub2-caller.test", accessToken: "jwt" });
@@ -3822,18 +3829,18 @@ test("Sub2API Key/date核验保留实际扣费，缺部署时区证据不确认�
   assert.equal(zero.upstream.knownAmountUsd, 0);
   assert.equal(zero.downstream.amountUsd, 2.5);
   assert.equal(zero.calculation.profitUsd, null);
-  cost = 1;
-  const complete = (await module.queryRules(input, { force: true })).results[0];
-  assert.equal(complete.upstream.amountUsd, 1);
-  assert.equal(complete.upstream.quotaPerUnit, null, "实际美元扣费不通过不存在的 quota 除数推算");
-  assert.equal(complete.calculation.profitUsd, null);
-  assert.equal(complete.billingTimezone.state, "unverified");
-  assert.ok(complete.health.issues.some((issue) => issue.code === "BILLING_TIMEZONE_UNVERIFIED"));
   cost = null;
   const missing = (await module.queryRules(input, { force: true })).results[0];
   assert.equal(missing.upstream.knownAmountUsd, null);
   assert.equal(missing.downstream.knownAmountUsd, 2.5);
   assert.equal(missing.calculation.profitUsd, null);
+  cost = 1;
+  const complete = (await module.queryRules(input, { force: true })).results[0];
+  assert.equal(complete.upstream.amountUsd, 1);
+  assert.equal(complete.upstream.quotaPerUnit, null, "实际美元扣费不通过不存在的 quota 除数推算");
+  assert.equal(complete.calculation.profitUsd, 1.5);
+  assert.deepEqual(complete.billingTimezone, { state: "verified", timezone: "Asia/Shanghai" });
+  assert.ok(!complete.health.issues.some((issue) => /BILLING_TIMEZONE/.test(issue.code)));
 });
 
 test("Sub2API 密码/邮箱变更废弃元数据缓存，JWT 自动续期不改变授权身份", async (t) => {
@@ -3913,11 +3920,122 @@ test("Sub2API 密码在账单请求期间变化时，旧扣费不能写快照或
   oldStat.release();
   const result = (await pending).results[0];
   assert.equal(result.upstream.amountUsd, 2);
-  assert.equal(result.calculation.profitUsd, null, "新授权的实际成本保留，缺时区证据仍不确认整日利润");
-  assert.equal(result.billingTimezone.state, "unverified");
-  assert.equal(state.writes, 1, "只写新授权的 observation，旧扣费不得落库");
+  assert.equal(result.calculation.profitUsd, 0.5, "利润只按新授权的实际成本计算");
+  assert.equal(result.billingTimezone.state, "verified");
+  assert.equal(state.writes, 2, "只写新授权的 observation 与 confirmed，旧扣费不得落库");
   assert.ok([...state.snapshots.values()].every((snapshot) => JSON.parse(snapshot.source).result.upstream.amountUsd === 2));
   assert.equal([...rt._reconciliationResultCache.values()][0].value.upstream.amountUsd, 2);
+});
+
+// Sub2API 上游（Key 9，按 start_date 给实际扣费）+ 本站 NewAPI 收入 2.5；control 计数能力核验发出的不存在 Key 请求。
+function sub2ReconciliationFixture(t, { baseUrl, costs = {} }) {
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "7", ratio: null, from: 0 }] });
+  Object.assign(f.stations[0], { type: "sub2api", baseUrl, accessToken: "jwt" });
+  Object.assign(f.rule, { billing_policy: "next-complete-day", scope_version: 1, billing_effective_from_ms: Date.parse("2026-10-09T16:00:00Z"),
+    cost_coverage: "complete", source_binding: { 1: "r1" } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const host = new URL(baseUrl).host, ownFetch = globalThis.fetch;
+  const sub2 = { costs, controls: 0, stats: [], missing: false, onRequest: null };
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(input);
+    if (url.host !== host) return ownFetch(input, init);
+    await sub2.onRequest?.(url);
+    const reply = (status, data) => ({ status, text: async () => JSON.stringify({ code: status === 200 ? 0 : 1, data }) });
+    if (url.pathname === "/api/v1/auth/me") return reply(200, { id: 7 });
+    if (url.pathname === "/api/v1/keys") return reply(200, { total: 1, items: [{ id: 9, user_id: 7, name: "stable", status: "active", group_id: 7 }] });
+    if (url.pathname.startsWith("/api/v1/keys/")) { sub2.controls += 1; return reply(404, {}); }
+    sub2.stats.push(Object.fromEntries(url.searchParams));
+    if (sub2.missing) return reply(200, { total_cost: 100 });
+    const cost = url.searchParams.get("api_key_id") === "9" ? sub2.costs[url.searchParams.get("start_date")] ?? 0 : 0;
+    return reply(200, { total_actual_cost: cost });
+  });
+  const sources = () => [...f.state.snapshots.values()].map((row) => JSON.parse(row.source));
+  const restart = () => createReconciliationModule({ pool: f.rt.pool, store: f.rt.store, onboardingSource: f.rt.onboardingSource }, { repository: f.repository });
+  return { ...f, sub2, sources, restart, today: { ruleIds: [f.rule.id], preset: "today", timezone: "Asia/Shanghai" } };
+}
+
+test("1c Sub2API 今日实时毛利：页面查询只读不核验不写库，轮询核验能力并只结账昨天", async (t) => {
+  const now = Date.parse("2026-10-11T01:00:00Z"); // 上海 10-11 09:00
+  t.mock.method(Date, "now", () => now);
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-live-today.test", costs: { "2026-10-11": 1, "2026-10-10": 2 } });
+  const before = (await f.module.queryRules(f.today, { mode: "evaluate", origin: "page" })).results[0];
+  assert.deepEqual([before.health.code, before.upstream, before.calculation.profitUsd], ["PENDING", null, null], "首次观测前页面只提示等待");
+  assert.equal(f.sub2.controls, 0, "页面查询不发起能力核验"); assert.deepEqual(f.sub2.stats, []);
+  assert.deepEqual(f.repository.log.capabilityWrites, []);
+  assert.equal(f.state.writes, 0);
+
+  await f.module.refreshDue(now);
+  assert.deepEqual(f.repository.log.capabilityWrites.map((entry) => entry.method), ["saveBillingCapability"]);
+  const confirmed = f.sources().filter((source) => source.recordType === "confirmed");
+  assert.deepEqual(confirmed.map((source) => source.window.startMs), [Date.parse("2026-10-09T16:00:00Z")], "只结账昨天，今天的半天不写确认记录");
+  assert.equal(confirmed[0].result.calculation.profitUsd, 0.5);
+  assert.ok(f.sources().some((source) => source.recordType === "observation" && source.window.startMs === Date.parse("2026-10-10T16:00:00Z")));
+
+  const writes = f.state.writes, controls = f.sub2.controls;
+  const after = (await f.module.queryRules(f.today, { mode: "evaluate", origin: "page" })).results[0];
+  assert.deepEqual([after.upstream.state, after.upstream.amountUsd, after.calculation.profitUsd], ["complete", 1, 1.5]);
+  assert.deepEqual(after.billingTimezone, { state: "verified", timezone: "Asia/Shanghai" });
+  assert.ok(!after.health.issues.some((issue) => /BILLING_TIMEZONE|WINDOW/.test(issue.code)));
+  assert.equal(after.window.endMs, now, "今天截至当前时刻");
+  assert.equal(f.sub2.controls, controls); assert.equal(f.state.writes, writes);
+});
+
+test("1c Sub2API 能力核验结果落库：重启后页面沿用，存储清空后不借用进程缓存，满 7 天观测才重新核验", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-capability-restart.test", costs: { "2026-10-11": 1, "2026-10-17": 1, "2026-10-18": 1 } });
+  await f.module.queryRules(f.today, { force: true });
+  assert.equal(f.sub2.controls, 1); assert.equal(f.repository.tables.capabilities.length, 1);
+
+  const page = (await f.restart().queryRules(f.today, { mode: "evaluate", origin: "page" })).results[0];
+  assert.equal(page.calculation.profitUsd, 1.5, "重启后页面沿用已落库的核验结果");
+  assert.equal(f.sub2.controls, 1);
+
+  f.repository.tables.capabilities.splice(0);
+  const cleared = (await f.restart().queryRules(f.today, { mode: "evaluate", origin: "page" })).results[0];
+  assert.deepEqual([cleared.upstream.state, cleared.calculation.profitUsd], ["partial", null], "存储里没有核验结果时不借用进程内缓存");
+  await f.restart().queryRules(f.today, { force: true });
+  assert.equal(f.sub2.controls, 2, "观测重新核验");
+
+  now += 6 * 86400000;
+  await f.restart().queryRules(f.today, { force: true });
+  assert.equal(f.sub2.controls, 2, "7 天内沿用");
+  now += 86400000;
+  assert.equal((await f.restart().queryRules(f.today, { mode: "evaluate", force: true, origin: "manual" })).results[0].calculation.profitUsd, 1.5,
+    "到期的核验结果在页面上继续沿用");
+  assert.equal(f.sub2.controls, 2, "页面查询到期也不核验");
+  await f.restart().queryRules(f.today, { force: true });
+  assert.equal(f.sub2.controls, 3, "满 7 天观测重新核验");
+});
+
+test("1c Sub2API 实际扣费字段消失：页面查询不删核验结果，观测才作废", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-11T01:00:00Z"));
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-capability-invalidate.test", costs: { "2026-10-11": 1 } });
+  await f.module.queryRules(f.today, { force: true });
+  assert.equal(f.repository.tables.capabilities.length, 1);
+  f.sub2.missing = true;
+  const page = (await f.module.queryRules(f.today, { mode: "evaluate", force: true, origin: "manual" })).results[0];
+  assert.equal(page.calculation.profitUsd, null);
+  assert.equal(f.repository.tables.capabilities.length, 1, "只读查询不改写能力存储");
+  await f.module.queryRules(f.today, { force: true });
+  assert.equal(f.repository.tables.capabilities.length, 0, "观测确认字段消失后作废核验结果");
+  assert.deepEqual(f.repository.log.capabilityWrites.map((entry) => entry.method), ["saveBillingCapability", "deleteBillingCapability"]);
+});
+
+test("1c 轮询按规则实际取数时刻定今天的截止点，Sub2API 实时区间不因排队变旧", async (t) => {
+  const start = Date.parse("2026-10-11T01:00:00Z");
+  let now = start;
+  t.mock.method(Date, "now", () => now);
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-poll-clock.test", costs: { "2026-10-11": 1 } });
+  let advanced = false;
+  f.sub2.onRequest = (url) => {
+    if (!advanced && url.pathname === "/api/v1/keys") { advanced = true; now += 10 * 60000; }
+  };
+  await f.module.refreshDue(start);
+  const observation = f.sources().find((source) => source.recordType === "observation" && source.window.startMs === Date.parse("2026-10-10T16:00:00Z"));
+  assert.equal(observation.window.endMs, start + 10 * 60000);
+  assert.equal(observation.result.upstream.amountUsd, 1);
+  assert.ok(!observation.result.health.issues.some((issue) => issue.code === "UPSTREAM_WINDOW_UNSUPPORTED"));
 });
 
 function confirmedHistoryFixture() {
@@ -4517,7 +4635,15 @@ test("U05 external/unknown全Key用途保留原始金额与实际coverage action
 });
 
 function upstreamReadFixture(t, type = "newapi") {
-  const pool = { async query() { assert.fail("Key read must not access SQL"); }, async getConnection() { assert.fail("Key read must not save"); } };
+  // 显式 Key 核验只读写账单能力表（核验结果要在重启后仍有效），不碰其他表。
+  const capabilities = new Map();
+  const pool = { async query(sql, params = []) {
+    if (!sql.includes("reconciliation_billing_capabilities")) assert.fail("Key read must not access SQL");
+    if (sql.startsWith("SELECT")) return [capabilities.has(params[0]) ? [{ capability: capabilities.get(params[0]) }] : []];
+    if (sql.startsWith("INSERT")) capabilities.set(params[0], params[1]);
+    else if (sql.includes("WHERE identity")) capabilities.delete(params[0]);
+    return [{ affectedRows: 1 }];
+  }, async getConnection() { assert.fail("Key read must not save"); } };
   const store = new Store(pool);
   store.data.auth = { isDefault: false };
   store.data.stations = [{ id: "resource", type, name: "Old account", baseUrl: `https://u06-${type}-${t.name.length}.test`,
@@ -4623,13 +4749,13 @@ test("U06 actual identity/metadata冲突与每个await业务版本漂移均拒�
   });
 });
 
-test("U06实际Sub2API selectedKey保留3.25/0/unknown与Key-date能力，zone独立unverified且共享JWT不写", async (t) => {
+test("U06实际Sub2API selectedKey保留3.25/0/unknown与Key-date能力，zone独立核验且共享JWT不写", async (t) => {
   t.mock.method(Date, "now", () => Date.parse("2026-10-09T03:00:00Z"));
   const f = upstreamReadFixture(t, "sub2api-password"), before = structuredClone(f.store.data);
   const first = await f.module.getUpstreamKeys("resource", { tokenId: 9 });
   assert.equal(first.identity.accountId, "42"); assert.equal(first.probe.capability.state, "supported");
   assert.deepEqual([first.probe.amountUsd, first.probe.knownAmountUsd, first.probe.actualCostUsd], [3.25, 3.25, 3.25]);
-  assert.deepEqual(first.probe.billingTimezone, { state: "unverified", timezone: "Asia/Shanghai", reason: "BILLING_TIMEZONE_UNVERIFIED" });
+  assert.deepEqual(first.probe.billingTimezone, { state: "verified", timezone: "Asia/Shanghai" });
   f.state.cost = 0;
   const zero = await f.module.getUpstreamKeys("resource", { tokenId: 9 });
   assert.deepEqual([zero.probe.amountUsd, zero.probe.knownAmountUsd, zero.probe.actualCostUsd], [0, 0, 0]);
