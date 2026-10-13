@@ -3,7 +3,7 @@ import { isCurrentReconciliationBillingContract } from "../lib/reconciliation-co
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
 import { applyScopePolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 
-function uid(prefix) {
+export function uid(prefix) {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}${Date.now().toString(36).slice(-4)}`;
 }
 
@@ -12,7 +12,7 @@ export function reconciliationOwnerRuleState(rules) {
     .sort(([a], [b]) => a.localeCompare(b)));
 }
 
-function asJson(value) {
+export function asJson(value) {
   if (!value) return null;
   if (typeof value === "string") {
     try { return JSON.parse(value); } catch { return null; }
@@ -20,7 +20,7 @@ function asJson(value) {
   return value;
 }
 
-function normalizeSuccessfulResult(result, healthCode) {
+export function normalizeSuccessfulResult(result, healthCode) {
   const calculation = result?.calculation;
   if (!calculation || calculation.profitUsd !== undefined || calculation.riskDifferenceUsd !== undefined) return result;
   const differenceUsd = calculation.differenceUsd ?? null;
@@ -36,15 +36,15 @@ function normalizeSuccessfulResult(result, healthCode) {
   };
 }
 
-function activeTokenKey(input) {
+export function activeTokenKey(input) {
   return input.enabled === false ? null : input.canonicalKey || `${input.upstreamStationId}:${input.tokenId}`;
 }
 
-function activeChannelKey(input, channelId) {
+export function activeChannelKey(input, channelId) {
   return input.enabled === false ? null : `${input.ownStationId}:${channelId}`;
 }
 
-function ruleFromRow(row, channels = []) {
+export function ruleFromRow(row, channels = []) {
   return {
     id: row.id,
     upstreamStationId: row.upstream_station_id,
@@ -74,7 +74,7 @@ function ruleFromRow(row, channels = []) {
   };
 }
 
-function segmentFromRow(row) {
+export function segmentFromRow(row) {
   return {
     id: row.id,
     ruleId: row.rule_id,
@@ -89,21 +89,51 @@ function segmentFromRow(row) {
   };
 }
 
-function isConfirmedSnapshotSource(source) {
+export function isConfirmedSnapshotSource(source) {
   return source?.recordType === "confirmed" && source?.result?.calculation?.profitUsd != null;
 }
 
-function isObservationSnapshotSource(source) {
+export function isObservationSnapshotSource(source) {
   return source?.recordType === "observation";
 }
 
-function snapshotLogicalEnd(source) {
+export function snapshotLogicalEnd(source) {
   const endMs = Number(source?.window?.endMs);
   return Number.isFinite(endMs) ? endMs : null;
 }
 
-function snapshotGeneratedAt(source) {
+export function snapshotGeneratedAt(source) {
   return String(source?.resultGeneratedAt || "");
+}
+
+// latestRecord 在 SQL 粗筛之后的判定：只认当前账单合同、同一口径、同一窗口的记录，取最新生成的一条。
+export function selectLatestRecord(rows, window, scopeFingerprint, recordType) {
+  const exact = rows.map((row) => {
+    const source = asJson(row.source);
+    return { row, source, result: normalizeSuccessfulResult(source?.result, row.health_code) };
+  }).filter(({ source, result }) => {
+    const saved = source?.window;
+    if (!isCurrentReconciliationBillingContract(source)
+      || source?.scopeFingerprint !== scopeFingerprint || !source?.result || !source?.resultGeneratedAt || !saved || saved.preset !== window.preset
+      || Number(saved.startMs) !== Number(window.startMs) || saved.timezone !== window.timezone) return false;
+    if (recordType === "confirmed" ? !isConfirmedSnapshotSource(source) : !isObservationSnapshotSource(source)) return false;
+    const sameWindow = window.preset === "today" || window.preset === "7d"
+      ? Number(saved.endMs) <= Number(window.endMs)
+      : Number(saved.endMs) === Number(window.endMs);
+    return sameWindow && (recordType !== "confirmed" || result?.calculation?.profitUsd != null);
+  });
+  if (!exact.length) return null;
+  const latest = exact.reduce((current, candidate) => String(candidate.source.resultGeneratedAt) > String(current.source.resultGeneratedAt) ? candidate : current);
+  const savedWindow = latest.source.window;
+  return {
+    generatedAt: latest.source.resultGeneratedAt,
+    result: {
+      ...latest.result,
+      window: savedWindow,
+      requestedWindow: latest.source.result.requestedWindow || savedWindow,
+      lastSuccessfulWindow: recordType === "confirmed" ? latest.source.result.lastSuccessfulWindow || savedWindow : latest.source.result.lastSuccessfulWindow ?? null,
+    },
+  };
 }
 
 export function normalizeConfirmedHistoryOptions(input = {}, now = Date.now()) {
@@ -706,32 +736,7 @@ export class ReconciliationRepository {
        ORDER BY generated_at DESC`,
       [ruleId, window.preset, window.endMs, `${reconciliationSnapshotRecordPrefix(window, scopeFingerprint, recordType)}%`]
     );
-    const exact = rows.map((row) => {
-      const source = asJson(row.source);
-      return { row, source, result: normalizeSuccessfulResult(source?.result, row.health_code) };
-    }).filter(({ source, result }) => {
-      const saved = source?.window;
-      if (!isCurrentReconciliationBillingContract(source)
-        || source?.scopeFingerprint !== scopeFingerprint || !source?.result || !source?.resultGeneratedAt || !saved || saved.preset !== window.preset
-        || Number(saved.startMs) !== Number(window.startMs) || saved.timezone !== window.timezone) return false;
-      if (recordType === "confirmed" ? !isConfirmedSnapshotSource(source) : !isObservationSnapshotSource(source)) return false;
-      const sameWindow = window.preset === "today" || window.preset === "7d"
-        ? Number(saved.endMs) <= Number(window.endMs)
-        : Number(saved.endMs) === Number(window.endMs);
-      return sameWindow && (recordType !== "confirmed" || result?.calculation?.profitUsd != null);
-    });
-    if (!exact.length) return null;
-    const latest = exact.reduce((current, candidate) => String(candidate.source.resultGeneratedAt) > String(current.source.resultGeneratedAt) ? candidate : current);
-    const savedWindow = latest.source.window;
-    return {
-      generatedAt: latest.source.resultGeneratedAt,
-      result: {
-        ...latest.result,
-        window: savedWindow,
-        requestedWindow: latest.source.result.requestedWindow || savedWindow,
-        lastSuccessfulWindow: recordType === "confirmed" ? latest.source.result.lastSuccessfulWindow || savedWindow : latest.source.result.lastSuccessfulWindow ?? null,
-      },
-    };
+    return selectLatestRecord(rows, window, scopeFingerprint, recordType);
   }
 
   async latestSuccessfulResult(ruleId, window, scopeFingerprint) {

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow, normalizeReconciliationScopeIntent } from "./reconciliation.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState } from "./reconciliation-repository.js";
+import { MemoryReconciliationRepository } from "./test-support/reconciliation-memory-repository.js";
 import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
 import { Store } from "../db/store.js";
 import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconciliation-scope-policy.js";
@@ -1791,7 +1792,7 @@ test("快照事务提交后、通知前口径被修正时，不为旧口径记�
   assert.equal(state.alertInserts, 1, "只能按新口径记录一次告警状态");
 });
 
-// 真实取数路径的夹具：两侧 NewAPI 由 fetch 替身应答，数据库按 SQL 路由。
+// 真实取数路径的夹具：两侧 NewAPI 由 fetch 替身应答，数据库用内存 Repository。
 // 每个分段上游消费 $1、本站渠道收费 $2.5，利润 $1.5。
 function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null }) {
   const ratios = { g1: 1, g2: 2 };
@@ -1804,92 +1805,55 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
   const rule = { id: "rr_live", upstream_station_id: "upstream", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: open.group_name, timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
   const rules = [rule, ...extraRuleIds.map((id, index) => ({ ...rule, id, token_id: duplicateKeys ? 9 : 10 + index, token_name: duplicateKeys ? "stable" : `stable-${id}` }))];
   const allSegments = [...segments, ...extraRuleIds.flatMap((ruleId) => segments.map((segment) => ({ ...segment, id: `${segment.id}-${ruleId}`, rule_id: ruleId })) )];
-  const state = { upstreamQuota: 100, ownQuota: 250, statCalls: [], requests: [], writes: 0, alertQueries: 0, snapshots: new Map(), channelStates: new Map(), channelStateWrites: [], ratioWrites: [], commits: [] };
-  const query = async (sql, params) => {
-    if (sql.includes("INSERT INTO reconciliation_snapshots")) {
-      if (failSnapshotForRule === params[0]) throw new Error("snapshot insert rejected");
-      state.writes += 1;
-      state.snapshots.set(params[2], {
-        rule_id: params[0], segment_id: params[1], snapshot_key: params[2], window_kind: params[3],
-        window_start_ms: params[4], window_end_ms: params[5], health_code: params[16], health_detail: params[17],
-        source: params[18], generated_at: new Date().toISOString(),
-      });
-      return [{ affectedRows: 1 }];
-    }
-    if (sql.includes("SELECT source FROM reconciliation_snapshots") && sql.includes("snapshot_key = ?")) return [[state.snapshots.get(params[1])].filter(Boolean)];
-    if (sql.includes("FROM reconciliation_snapshots")) {
-      if (failLatestLookup && sql.includes("snapshot_key LIKE")) throw new Error("latest snapshot lookup failed");
-      return [[...state.snapshots.values()].filter((snapshot) => !params?.[0] || snapshot.rule_id === params[0])];
-    }
-    if (sql.includes("reconciliation_alert_state")) {
-      state.alertQueries += 1;
-      return [[]];
-    }
-    if (sql.includes("effective_to_ms IS NULL")) return [[allSegments.find((segment) => segment.rule_id === params?.[0] && segment.effective_to_ms == null)]];
-    if (sql.includes("FROM reconciliation_rule_segments")) return [allSegments.filter((segment) => !params?.[0] || segment.rule_id === params[0])];
-    if (sql.includes("FROM reconciliation_rule_channels")) {
-      const ids = Array.isArray(params?.[0]) ? params[0] : [params?.[0] || rule.id];
-      return [ids.flatMap((ruleId) => (channelsByRule[ruleId] || [1]).map((channelId) => ({ rule_id: ruleId, channel_id: channelId, channel_name: channelsByRule[ruleId] ? `渠道 ${channelId}` : "渠道", channel_status: null, status_observed_at_ms: channelObservedAt })))];
-    }
-    if (sql.includes("FROM reconciliation_rules")) return [rules.filter((item) => (!params?.[0] || item.id === params[0]) && (!sql.includes("archived_at IS NULL") || !item.archived_at))];
-    if (sql.startsWith("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL")) {
-      const archived = rules.find((item) => item.id === params[0] && !item.archived_at);
-      if (!archived) return [{ affectedRows: 0 }];
-      Object.assign(archived, { enabled: 0, active_token_key: null, archived_at: new Date().toISOString() });
-      return [{ affectedRows: 1 }];
-    }
-    if (sql.startsWith("UPDATE reconciliation_rules") && sql.includes("active_token_key = ?")) {
-      const updated = rules.find((item) => item.id === params[15]);
-      if (!updated) return [{ affectedRows: 0 }];
-      [updated.upstream_station_id, updated.own_station_id, updated.token_id, updated.token_name,
-        updated.fixed_group, updated.timezone, updated.enabled, updated.active_token_key,
-        updated.billing_policy, updated.scope_version, updated.billing_effective_from_ms,
-        updated.cost_coverage, updated.provider, updated.canonical_key, updated.source_binding] = params;
-      return [{ affectedRows: 1 }];
-    }
-    if (sql.startsWith("UPDATE reconciliation_rules SET provider = ?")) {
-      const updated = rules.find((item) => item.id === params[3]);
-      if (!updated) return [{ affectedRows: 0 }];
-      [updated.provider, updated.canonical_key, updated.source_binding] = params;
-      return [{ affectedRows: 1 }];
-    }
-    if (sql.startsWith("UPDATE reconciliation_rule_segments SET group_ratio")) {
-      const segment = segments.find((item) => item.id === params[2]);
-      state.ratioWrites.push(params[0]);
-      if (segment) segment.group_ratio = params[0];
-      return [{ affectedRows: 1 }];
-    }
-    if (sql.startsWith("UPDATE reconciliation_rule_segments SET effective_to_ms")) {
-      const segment = segments.find((item) => item.id === params[1]);
-      if (segment) segment.effective_to_ms = params[0];
-      return [{ affectedRows: 1 }];
-    }
-    if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) {
-      segments.push({ id: params[0], rule_id: params[1], group_name: params[2], group_ratio: params[3], effective_from_ms: params[6], effective_to_ms: null, detected_at_ms: params[7], timing_source: "detected" });
-      return [{ affectedRows: 1 }];
-    }
-    if (sql.includes("UPDATE reconciliation_rule_channels") && !sql.includes("active_channel_key = NULL")) {
-      state.channelStateWrites.push(params[0]);
-      state.channelStates.set(params[5], params[0]);
-      return [{ affectedRows: 1 }];
-    }
-    return [{ affectedRows: 1 }];
+  const channels = rules.flatMap((item) => (channelsByRule[item.id] || [1]).map((channelId) => ({
+    rule_id: item.id, channel_id: channelId, channel_name: channelsByRule[item.id] ? `渠道 ${channelId}` : "渠道",
+    active_channel_key: null, channel_status: null, status_observed_at_ms: channelObservedAt, status_changed_at_ms: null,
+  })));
+  const repository = new MemoryReconciliationRepository({ rules, channels, segments: allSegments, hooks: {
+    beforeTransaction: () => onRepositoryConnection?.(),
+    beforeRead: (name) => {
+      if (failLatestLookup && name === "latestRecord") throw new Error("latest snapshot lookup failed");
+    },
+    beforeSnapshotWrite: (entry) => {
+      if (failSnapshotForRule === entry.ruleId) throw new Error("snapshot insert rejected");
+    },
+    afterSnapshotWrite: (entry, tx) => tx && onSnapshotInsert?.({ ruleId: entry.ruleId, source: entry.source }),
+    beforeCommit: (tx) => onRepositoryCommit?.(tx),
+    // 返回的 segments 跟随主规则已提交的分段，切换出的新分段也会出现在里面。
+    afterCommit: () => segments.splice(0, segments.length, ...repository.tables.segments.filter((segment) => segment.rule_id === rule.id)),
+  } });
+  const { log, tables } = repository;
+  // 测试按快照键直接读写已提交的快照行；set 只是预置数据，不计入写入次数。
+  const snapshots = {
+    get: (key) => tables.snapshots.find((row) => row.snapshot_key === key),
+    has: (key) => tables.snapshots.some((row) => row.snapshot_key === key),
+    set(key, row) {
+      const index = tables.snapshots.findIndex((item) => item.snapshot_key === key);
+      const next = { ...row, snapshot_key: key };
+      if (index >= 0) tables.snapshots[index] = next; else tables.snapshots.push(next);
+      return snapshots;
+    },
+    keys: () => tables.snapshots.map((row) => row.snapshot_key).values(),
+    values: () => tables.snapshots.slice().values(),
+    get size() { return tables.snapshots.length; },
   };
+  const state = {
+    upstreamQuota: 100, ownQuota: 250, statCalls: [], requests: [], snapshots,
+    get writes() { return log.snapshotWrites.length; },
+    get alertQueries() { return log.alertCalls.length; },
+    get ratioWrites() { return log.ratioWrites.map((entry) => entry.ratio); },
+    get channelStateWrites() { return log.channelStateWrites.map((entry) => entry.state); },
+    get channelStates() { return new Map(log.channelStateWrites.map((entry) => [entry.channelId, entry.state])); },
+    get commits() { return log.commits; },
+  };
+  // 只给 Store 用；对账表一律走 repository，误用直接报错。
   const pool = {
-    query,
+    async query(sql) {
+      if (/reconciliation_/.test(sql)) throw new Error(`对账表应经由 repository 访问：${sql}`);
+      return [{ affectedRows: 1 }];
+    },
     async getConnection() {
-      await onRepositoryConnection?.();
-      const transaction = { snapshots: [], archivedRuleIds: [] };
-      return { async query(sql, params) {
-        const result = await query(sql, params);
-        if (sql.includes("INSERT INTO reconciliation_snapshots")) {
-          const snapshot = { ruleId: params[0], source: JSON.parse(params.at(-1)) };
-          transaction.snapshots.push(snapshot);
-          await onSnapshotInsert?.(snapshot);
-        }
-        if (sql.startsWith("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL")) transaction.archivedRuleIds.push(params[0]);
-        return result;
-      }, async beginTransaction() {}, async commit() { await onRepositoryCommit?.(transaction); state.commits.push(transaction); }, async rollback() {}, release() {} };
+      return { query: pool.query, async beginTransaction() {}, async commit() {}, async rollback() {}, release() {} };
     },
   };
   const reply = (status, body) => ({ status, text: async () => JSON.stringify(body) });
@@ -1928,7 +1892,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin", authVersion: 1 },
   ];
   const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null, channels: [] } };
-  return { rule, state, segments, stations, rt, module: createReconciliationModule(rt) };
+  return { rule, state, segments, stations, rt, repository, module: createReconciliationModule(rt, { repository }) };
 }
 
 test("上游分组目录缺少当前组时仍独立获取本站渠道收费", async (t) => {
@@ -2509,14 +2473,14 @@ test("upstream unavailable retains persisted segment evidence in the response an
 });
 
 test("进程重启后只恢复同一完整窗口和站点来源的成功账单，失败不覆盖该快照", async (t) => {
-  const { rule, state, rt, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }] });
+  const { rule, state, rt, repository, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }] });
   const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 };
   const initial = await module.queryRules(input, { force: true });
   assert.equal(initial.results[0].calculation.profitUsd, 1.5);
   const writes = state.writes;
 
   state.upstreamQuota = null;
-  const restarted = createReconciliationModule({ pool: rt.pool, store: rt.store });
+  const restarted = createReconciliationModule({ pool: rt.pool, store: rt.store }, { repository });
   const { results } = await restarted.queryRules(input, { force: true });
   assert.equal(results[0].health.stale, false);
   assert.equal(results[0].upstream.amountUsd, null);
@@ -2663,8 +2627,8 @@ test("R02 legacy首次安全锚定先于观察；换账号不写分组、倍率�
   store.data.stations = f.stations;
   f.rt.store = store;
   const input = { ruleIds: [f.rule.id], preset: "custom", startMs: 1000000, endMs: 1060000 };
-  const observe = ReconciliationRepository.prototype.observeSource;
-  t.mock.method(ReconciliationRepository.prototype, "observeSource", async function (...args) {
+  const observe = f.repository.observeSource;
+  t.mock.method(f.repository, "observeSource", async function (...args) {
     assert.equal(f.rule.canonical_key, canonicalBillingKey(f.stations[0], { provider: "newapi", accountId: "7" }, 9));
     assert.equal(JSON.parse(f.rule.source_binding).ownSource.accountId, "1");
     return observe.apply(this, args);
@@ -2700,7 +2664,7 @@ test("R02 legacy首次安全锚定先于观察；换账号不写分组、倍率�
 
 test("R02 Repository首锚定拒绝已有渠道观察，持久原身份匹配才保留旧范围锚定", async (t) => {
   const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }], channelObservedAt: 123 });
-  const repository = new ReconciliationRepository(f.rt.pool);
+  const repository = f.repository;
   const original = { ...f.rule };
   trustedLegacyRule(original, f.stations, 7, 1);
   const identity = { provider: "newapi", canonicalKey: original.canonical_key, ownSource: original.source_binding.ownSource };
@@ -3474,9 +3438,12 @@ test("旧重叠规则保留历史与收入，当前同 Key 成本只列一次且
   assert.equal(summarizeReconciliationTotals(results).cost, 1);
 });
 
+// 同 Key 的另一条规则挂在本站第 2 个渠道：同一渠道不能同时归属两条启用规则，否则改规则会被渠道冲突拦下。
+const overlapOnSecondChannel = { channelsByRule: { rr_overlap: [2] }, ownChannels: () => [{ id: 1, name: "渠道", status: 1 }, { id: 2, name: "渠道 2", status: 1 }] };
+
 test("同 Key 规则停用再恢复后，普通查询不能复用另一规则的旧成本缓存", async (t) => {
   const { rule, module, rt } = liveReconciliationFixture(t, {
-    segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_overlap"], duplicateKeys: true,
+    segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_overlap"], duplicateKeys: true, ...overlapOnSecondChannel,
   });
   const edit = { upstreamStationId: "upstream", tokenId: 9, salesChannelIds: [1], timezone: "Asia/Shanghai" };
   await module.updateRule(rule.id, { ...edit, enabled: false });
@@ -3497,7 +3464,7 @@ test("恢复同 Key 成本 owner 时，另一规则旧在途结果不能提交�
   const wait = holdPoint();
   let held = false;
   const { rule, module, state, rt } = liveReconciliationFixture(t, {
-    segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_overlap"], duplicateKeys: true,
+    segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_overlap"], duplicateKeys: true, ...overlapOnSecondChannel,
     onRequest: (request) => {
       if (request.path === "/api/log/self/stat" && !held) { held = true; return wait.hold(); }
     },
@@ -3524,7 +3491,7 @@ test("恢复同 Key 成本 owner 时，另一规则旧在途结果不能提交�
 async function separateAccountCostFixture(t, options = {}) {
   const fixture = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }],
     extraRuleIds: ["rr_overlap"], duplicateKeys: true, channelsByRule: { rr_overlap: [2] }, ...options });
-  const [rules] = await fixture.rt.pool.query("SELECT * FROM reconciliation_rules");
+  const rules = fixture.repository.tables.rules;
   rules.find((rule) => rule.id === "rr_overlap").upstream_station_id = "second";
   fixture.stations[0].accessToken = "account-eight";
   fixture.stations.push({ ...fixture.stations[0], id: "second", accessToken: "account-seven" });
@@ -3639,7 +3606,7 @@ test("R03归档owner与另一规则observation INSERT/commit串行，归档后�
     } }).load();
     f.rt.onboardingSource = onboarding;
     await onboarding.sync();
-    const [rules] = await f.rt.pool.query("SELECT * FROM reconciliation_rules");
+    const rules = f.repository.tables.rules;
     for (const rule of rules) trustedLegacyRule(rule, f.stations, 7, 1);
     const input = { ruleIds: ["rr_overlap"], preset: "custom", startMs: 1000000, endMs: 1060000 };
     await f.module.queryRules({ ...input, ruleIds: ["rr_live"] }, { force: true });
@@ -3724,7 +3691,7 @@ test("参与成本判定资源持续换凭证时，整批有界返回待获取�
 });
 
 test("换到另一稳定账号的授权不能写入原 Key 的分段或来源历史", async (t) => {
-  const { rule, module, state, segments, stations } = liveReconciliationFixture(t, {
+  const { rule, module, state, segments, stations, repository } = liveReconciliationFixture(t, {
     segments: [{ id: "s1", group: "g1", ratio: null, from: 0 }],
   });
   rule.canonical_key = canonicalBillingKey(stations[0], { platform: "newapi", accountId: 7 }, 9);
@@ -3742,7 +3709,7 @@ test("换到另一稳定账号的授权不能写入原 Key 的分段或来源历
     return originalFetch(input, init);
   });
   const historyBefore = structuredClone(segments);
-  const observed = t.mock.method(ReconciliationRepository.prototype, "observeSource");
+  const observed = t.mock.method(repository, "observeSource");
   const result = (await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai",
     startMs: 1000000, endMs: 1060000 }, { force: true })).results[0];
   assert.equal(result.health.code, "SOURCE_BINDING_UNCONFIRMED");
@@ -4058,7 +4025,7 @@ async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", channelsBy
   const channels = Array.from({ length: 10 }, (_, index) => ({ id: index + 1, name: `渠道 ${index + 1}`, status: 1, revision: `r${index + 1}` }));
   const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_two", "rr_three"],
     ownChannels: () => channels.filter((channel) => !channel.missing), channelsByRule, ...options });
-  const [rows] = await f.rt.pool.query("SELECT * FROM reconciliation_rules");
+  const rows = f.repository.tables.rules;
   for (const row of rows) {
     Object.assign(row, { billing_policy: "next-complete-day", scope_version: 1, billing_effective_from_ms: Date.parse("2026-10-06T16:00:00Z"), cost_coverage: "complete" });
     trustedLegacyRule(row, f.stations, 7, 1);
@@ -4240,6 +4207,7 @@ test("U05真实Provider+module DST23/25小时、未完首日保留完整请求�
 
 test("U05真实withAuth GET/POST默认昨日、显式today参考、局部body与覆盖action完整透传", async (t) => {
   const f = await completedDayFixture(t);
+  f.rt.reconciliation = f.module; // 路由复用夹具模块，从而读写同一个内存 repository
   f.rt.store.auth = { isDefault: false };
   f.rt.sessions = { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 };
   const { registerHooks } = await import("node:module");
@@ -4296,7 +4264,7 @@ test("U05实际Provider返回窗口保留到公开row/segment/snapshot，不可�
   } });
   try {
     const { createReconciliationModule: moduleWithDifferentActualWindow } = await import("./reconciliation.js?u05-actual-window");
-    const result = await moduleWithDifferentActualWindow(f.rt).queryRules();
+    const result = await moduleWithDifferentActualWindow(f.rt, { repository: f.repository }).queryRules();
     for (const row of result.results) {
       assert.equal(row.upstream.amountUsd, 1); assert.equal(row.downstream.amountUsd, 2.5);
       assert.equal(row.upstream.window.endMs, row.window.endMs - 1000);

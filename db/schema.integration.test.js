@@ -5,6 +5,7 @@ import { ensureSchema } from "./pool.js";
 import { ChannelOnboardingRepository } from "../server/channel-onboarding-repository.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState } from "../server/reconciliation-repository.js";
 import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
+import { defineReconciliationRepositoryContract } from "../server/test-support/reconciliation-repository-contract.js";
 
 // Opt-in only: this fixture replaces tables in this one disposable local schema.
 // Never load .env or fall back to the application's connection defaults.
@@ -453,4 +454,32 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     assert.equal(new Set(logical.records.map((record) => record.historyId)).size, 2);
     assert.equal(logical.records.every((record) => record.sourceCompleteness === "legacy_partial"), true);
   });
+});
+
+// 与 server/reconciliation-repository.contract.test.js 同一组用例：内存实现和 MySQL 必须表现一致。
+// 放在迁移用例之后定义，node:test 按顺序执行，届时表结构已是最新版。
+const contractPool = mysql.createPool({ host: process.env.DB_HOST, port,
+  user: process.env.DB_USER, password: process.env.DB_PASSWORD, database: process.env.DB_NAME,
+  connectionLimit: 4, charset: "utf8mb4_unicode_ci", supportBigNumbers: true });
+let contractSchemaReady = null;
+defineReconciliationRepositoryContract({
+  name: "MySQL 8",
+  create: async () => {
+    contractSchemaReady ||= ensureSchema(contractPool);
+    await contractSchemaReady;
+    return new ReconciliationRepository(contractPool);
+  },
+  cleanup: async ({ ruleIds }) => {
+    if (!ruleIds.length) return;
+    for (const table of ["reconciliation_alert_state", "reconciliation_snapshots", "reconciliation_rule_segments",
+      "reconciliation_rule_channels"]) await contractPool.query(`DELETE FROM ${table} WHERE rule_id IN (?)`, [ruleIds]);
+    await contractPool.query("DELETE FROM reconciliation_rules WHERE id IN (?)", [ruleIds]);
+  },
+  inspectSnapshot: async ({ ruleId, snapshotKey }) => {
+    const [[row]] = await contractPool.query(`SELECT segment_id AS segmentId, window_kind AS windowKind, window_start_ms AS windowStartMs,
+      window_end_ms AS windowEndMs, upstream_usd AS upstreamUsd, health_code AS healthCode, health_detail AS healthDetail
+      FROM reconciliation_snapshots WHERE rule_id = ? AND snapshot_key = ?`, [ruleId, snapshotKey]);
+    return row ? { ...row, windowStartMs: Number(row.windowStartMs), windowEndMs: Number(row.windowEndMs) } : null;
+  },
+  teardown: () => contractPool.end(),
 });
