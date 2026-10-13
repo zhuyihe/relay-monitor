@@ -383,22 +383,6 @@ export class ReconciliationRepository {
     return this.getRule(id);
   }
 
-  async updateObservedToken(id, { tokenName, fixedGroup = null }) {
-    const conn = await this.pool.getConnection();
-    try {
-      await conn.beginTransaction();
-      await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
-      await conn.query(
-        "UPDATE reconciliation_rules SET token_name = ?, fixed_group = COALESCE(?, fixed_group) WHERE id = ? AND archived_at IS NULL",
-        [tokenName, fixedGroup, id]
-      );
-      await conn.commit();
-    } catch (err) {
-      await conn.rollback().catch(() => {});
-      throw err;
-    } finally { conn.release(); }
-  }
-
   // 切换检测得比当前分段起点还早时，旧分段收成零长度，和新分段同一起点、常在同一秒创建；
   // 各处都按起点、创建时间排序后让未结束的分段排最后，「最后一段」才总是当前分段。
   async listSegments(ruleId) {

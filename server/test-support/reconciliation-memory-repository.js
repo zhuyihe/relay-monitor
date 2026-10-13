@@ -284,14 +284,6 @@ export class MemoryReconciliationRepository {
     return anchored ? this.getRule(id) : null;
   }
 
-  async updateObservedToken(id, { tokenName, fixedGroup = null }) {
-    await this.#transaction("updateObservedToken", async (tx) => {
-      await this.#lock(tx, `rule:${id}`);
-      const entry = this.#ruleEntry(tx, id);
-      if (entry) this.#update(tx, "rules", [entry], (row) => ({ token_name: tokenName ?? null, fixed_group: fixedGroup ?? row.fixed_group }));
-    });
-  }
-
   async listSegments(ruleId) {
     await this.#read("listSegments", [ruleId]);
     return this.#segmentsOf(null, ruleId).map(({ row }) => segmentFromRow(fresh(row)));
