@@ -352,8 +352,8 @@ function sourceSnapshot(token, metadata, upstream, downstream) {
   };
 }
 
-export function createReconciliationModule(rt) {
-  const repository = new ReconciliationRepository(rt.pool);
+// repository 可注入：测试用内存实现替代 MySQL，生产默认走 rt.pool。
+export function createReconciliationModule(rt, { repository = new ReconciliationRepository(rt.pool) } = {}) {
   const resultCache = (rt._reconciliationResultCache ||= new Map());
   const inflight = (rt._reconciliationInflight ||= new Map());
   const metadataCache = (rt._reconciliationMetadataCache ||= new Map());
