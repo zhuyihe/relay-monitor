@@ -694,6 +694,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           catalogue = value;
           syncError = null;
           rt._reconciliationResultCache?.clear();
+          rt.reconciliation?.invalidateSources?.();
           delete rt._ownChannelsCache;
         }));
       } catch (error) { syncError = failure(error, [connection]); }
@@ -1271,6 +1272,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             result.saved.ruleId = rule.id; result.saved.scopeVersion = rule.scopeVersion; result.saved.billingEffectiveFromMs = rule.billingEffectiveFrom;
             result.saved.authorizationStationId = rule.upstreamStationId;
             result.reconciliation = { status: "configured", ruleId: rule.id, scopeVersion: rule.scopeVersion, billingEffectiveFromMs: rule.billingEffectiveFrom };
+            rt.reconciliation.observeSoon?.([rule.id]);
           }
         }
       } catch (error) {

@@ -450,7 +450,8 @@ export default function ReconciliationPage() {
     }
   };
 
-  const loadWindow = async (window = activeWindow, force = false) => {
+  // force 跳过缓存只读重算；observe 让服务端立即观测并写库，只有「刷新」按钮用。
+  const loadWindow = async (window = activeWindow, force = false, observe = false) => {
     if (!force && windowRequestInFlight.current) return null;
     const requestId = ++windowRequestId.current;
     summaryRequestId.current += 1;
@@ -458,7 +459,7 @@ export default function ReconciliationPage() {
     windowRequestInFlight.current = true;
     setQuerying(true);
     try {
-      const next = force ? await api("/api/reconciliation/query", { method: "POST", body: window }) : await readWindow(window);
+      const next = force ? await api("/api/reconciliation/query", { method: "POST", body: observe ? { ...window, observe: true } : window }) : await readWindow(window);
       if (requestId === windowRequestId.current) {
         setData((previous: any) => {
           const previousRows = new Map((previous?.results || []).map((item: any) => [String(item?.rule?.id), item]));
@@ -792,7 +793,7 @@ export default function ReconciliationPage() {
         </div>
         <div className="reconciliation-controls__actions">
           <Button type="primary" className="reconciliation-query-action" loading={querying} onClick={() => query(true)}>查询</Button>
-          <Button className="reconciliation-query-action" icon={<ReloadOutlined />} loading={querying} onClick={() => loadWindow(activeWindow, true)} aria-label="刷新当前对账窗口">刷新</Button>
+          <Button className="reconciliation-query-action" icon={<ReloadOutlined />} loading={querying} onClick={() => loadWindow(activeWindow, true, true)} aria-label="刷新当前对账窗口">刷新</Button>
         </div>
       </div>
 
