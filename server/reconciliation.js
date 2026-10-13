@@ -373,6 +373,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const ownChannelsRequests = (rt._reconciliationOwnChannelsRequests ||= new Map());
   const ruleGenerations = (rt._reconciliationRuleGenerations ||= new Map());
   const settlements = (rt._reconciliationSettlements ||= new Map());
+  // 修正过切换时间的规则：下一次结账昨天时重新取数，写一份新的结账记录。
+  const resettles = (rt._reconciliationResettles ||= new Set());
   const verifiedRuleCredentials = new WeakMap();
   const previewReadFacts = new WeakMap();
   const ownIdentities = new Map();
@@ -964,11 +966,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     });
   }
 
-  // 已结账窗口直接读结账记录，不再向上游取数。
-  async function settledResult(rule, window, sourceCredential, segments = null) {
-    segments ||= await repository.listSegments(rule.id);
-    const record = await repository.latestSuccessfulResult(rule.id, window,
-      sourceScopeFingerprint(reconciliationScopeFingerprint(rule, segments), sourceCredential)).catch(() => null);
+  // 已结账窗口直接读最近一次结账记录，不再向上游取数。不看当前关联口径：结账后改关联、换 Key、换凭据，
+  // 已结账的日子都不跟着重算；更正走「修正切换时间」后的重新结账（第 4 阶段改为结账修订）。
+  async function settledResult(rule, window) {
+    const record = await repository.latestSettlement(rule.id, window).catch(() => null);
     return isSettledRecord(record, window) ? settledFrom(rule, record) : null;
   }
 
@@ -984,7 +985,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // observe：锚定身份、记录分段切换和渠道状态、写快照、发通知，只由轮询、「刷新」和接入后的首次观测调用。
   // evaluate：只读已持久化的分段和锚定状态来计算，不写库、不通知；页面查询都走这条。
-  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe" } = {}) {
+  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle = false } = {}) {
     const observe = mode !== "evaluate";
     if (!ruleGenerations.has(ruleId)) ruleGenerations.set(ruleId, 0);
     const firstRule = await repository.getRule(ruleId);
@@ -993,7 +994,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const requestCredential = currentSourceCredential(firstRule);
     const requestBilling = ownerRegistry.billingSource;
     const evaluateKey = window.preset === "today" ? `${cacheKey}:${window.endMs}:${requestCredential}:${requestBilling.ownerVersion}` : `${cacheKey}:${requestCredential}:${requestBilling.ownerVersion}`;
-    const inflightKey = observe ? `${evaluateKey}:observe` : evaluateKey;
+    const inflightKey = observe ? `${evaluateKey}:observe${resettle ? ":resettle" : ""}` : evaluateKey;
     const ttl = window.preset === "today" ? TODAY_TTL_MS : QUERY_TTL_MS;
     const cached = resultCache.get(cacheKey);
     if (!force && (!observe || cached?.observed) && cached?.sourceCredential === requestCredential
@@ -1014,8 +1015,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const own = currentOwn && { ...currentOwn };
       let sourceCredential = observationCredential(rule, upstream, own);
       request.sourceCredential = sourceCredential;
-      if (!observe && isSettleableWindow(window, Date.now())) {
-        const settled = await settledResult(rule, window, sourceCredential);
+      if (!resettle && isSettleableWindow(window, Date.now())) {
+        const settled = await settledResult(rule, window);
         if (settled) return settled;
       }
       const ownAvailable = !!own && own.isOwn && own.type === "newapi";
@@ -1615,7 +1616,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
     if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return false;
     if (currentSourceCredential(rule) !== sourceCredential) return false;
-    if (result.health.code !== "PENDING") {
+    // 告警跟随今天的观测；结账已结束的自然日不动告警，否则昨天结账 READY 会清掉今天的告警，下一轮又重复推送。
+    if (result.health.code !== "PENDING" && !isSettleableWindow(result.window, Date.now())) {
       try { await notifyReconciliationHealth(rt, repository, rule, result); } catch (err) {
         console.error("渠道对账通知失败:", err?.message || String(err));
       }
@@ -1796,6 +1798,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           clearBillingResults(ruleId);
           // 分段变了，已结账的昨天要按新分段重新结账。
           for (const key of settlements.keys()) if (key.startsWith(`${ruleId}:`)) settlements.delete(key);
+          resettles.add(ruleId);
           return corrected;
         }, billingSource);
         if (segments === STALE_SCOPE) throw new Error("关联来源已变化，请刷新后重新确认");
@@ -1839,9 +1842,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           .catch(() => null);
         const window = settlementWindowDue(rule, now);
         if (!window) return;
-        // 结账必须重新取数：等待期内手动查询留下的缓存可能是上游入账未完成时的结果。
-        const result = await inspectRule(rule.id, window, { mode: "observe", force: true, origin: "poll", ownerRegistry }).catch(() => null);
+        // 结账必须重新取数：等待期内手动查询留下的缓存可能是上游入账未完成时的结果。已结账（比如重启前结过）就直接沿用。
+        const resettle = resettles.has(rule.id);
+        const result = await inspectRule(rule.id, window, { mode: "observe", force: true, origin: "poll", ownerRegistry, resettle }).catch(() => null);
         const settled = result?.calculation?.profitUsd != null;
+        if (settled && resettle) resettles.delete(rule.id);
         settlements.set(`${rule.id}:${window.startMs}:${window.timezone}`, { endMs: window.endMs, settled, retryAt: settled ? null : now + SETTLE_RETRY_MS });
       });
     },

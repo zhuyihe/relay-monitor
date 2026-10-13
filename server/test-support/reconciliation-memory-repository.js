@@ -284,14 +284,6 @@ export class MemoryReconciliationRepository {
     return anchored ? this.getRule(id) : null;
   }
 
-  async updateObservedToken(id, { tokenName, fixedGroup = null }) {
-    await this.#transaction("updateObservedToken", async (tx) => {
-      await this.#lock(tx, `rule:${id}`);
-      const entry = this.#ruleEntry(tx, id);
-      if (entry) this.#update(tx, "rules", [entry], (row) => ({ token_name: tokenName ?? null, fixed_group: fixedGroup ?? row.fixed_group }));
-    });
-  }
-
   async listSegments(ruleId) {
     await this.#read("listSegments", [ruleId]);
     return this.#segmentsOf(null, ruleId).map(({ row }) => segmentFromRow(fresh(row)));
@@ -501,6 +493,15 @@ export class MemoryReconciliationRepository {
     return this.latestRecord(ruleId, window, scopeFingerprint, "confirmed");
   }
 
+  async latestSettlement(ruleId, window) {
+    await this.#read("latestSettlement", [ruleId, window]);
+    const rows = this.#plain("snapshots")
+      .filter((row) => sameText(row.rule_id, ruleId) && row.snapshot_key != null && fold(row.snapshot_key).startsWith("r3:c:")
+        && Number(row.window_start_ms) >= Number(window.startMs) && Number(row.window_end_ms) <= Number(window.endMs))
+      .sort((a, b) => nullsFirst(seconds(b.generated_at), seconds(a.generated_at)));
+    return selectLatestRecord(rows.map(fresh), window, null, "confirmed");
+  }
+
   async latestObservation(ruleId, window, scopeFingerprint) {
     return this.latestRecord(ruleId, window, scopeFingerprint, "observation");
   }
@@ -673,10 +674,11 @@ export class MemoryReconciliationRepository {
       .sort((a, b) => (order === "name" ? compareText(a.channel_name, b.channel_name) : 0) || Number(a.channel_id) - Number(b.channel_id));
   }
 
-  // ORDER BY effective_from_ms ASC, created_at ASC；同值时保持插入顺序。
+  // ORDER BY effective_from_ms ASC, created_at ASC, effective_to_ms IS NOT NULL DESC, effective_to_ms ASC；同值时保持插入顺序。
   #segmentsOf(tx, ruleId) {
     return this.#rows("segments", tx).filter(({ row }) => sameText(row.rule_id, ruleId))
-      .sort((a, b) => Number(a.row.effective_from_ms) - Number(b.row.effective_from_ms) || nullsFirst(seconds(a.row.created_at), seconds(b.row.created_at)));
+      .sort((a, b) => Number(a.row.effective_from_ms) - Number(b.row.effective_from_ms) || nullsFirst(seconds(a.row.created_at), seconds(b.row.created_at))
+        || Number(a.row.effective_to_ms == null) - Number(b.row.effective_to_ms == null) || nullsFirst(bigint(a.row.effective_to_ms), bigint(b.row.effective_to_ms)));
   }
 
   #insertChannel(tx, ruleId, channel, input) {
