@@ -117,17 +117,20 @@ export function isSettledConfirmedSource(source, window = source?.window, now = 
 }
 
 // latestRecord 在 SQL 粗筛之后的判定：只认当前账单合同、同一口径、同一窗口的记录，取最新生成的一条。
+// scopeFingerprint 为 null（latestSettlement）时不限口径和查询方式，只认起止和时区都相同的窗口。
 export function selectLatestRecord(rows, window, scopeFingerprint, recordType) {
+  const anyScope = scopeFingerprint == null;
   const exact = rows.map((row) => {
     const source = asJson(row.source);
     return { row, source, result: normalizeSuccessfulResult(source?.result, row.health_code) };
   }).filter(({ source, result }) => {
     const saved = source?.window;
     if (!isCurrentReconciliationBillingContract(source)
-      || source?.scopeFingerprint !== scopeFingerprint || !source?.result || !source?.resultGeneratedAt || !saved || saved.preset !== window.preset
+      || (!anyScope && source?.scopeFingerprint !== scopeFingerprint) || !source?.result || !source?.resultGeneratedAt || !saved
+      || (!anyScope && saved.preset !== window.preset)
       || Number(saved.startMs) !== Number(window.startMs) || saved.timezone !== window.timezone) return false;
     if (recordType === "confirmed" ? !isConfirmedSnapshotSource(source) : !isObservationSnapshotSource(source)) return false;
-    const sameWindow = window.preset === "today" || window.preset === "7d"
+    const sameWindow = !anyScope && (window.preset === "today" || window.preset === "7d")
       ? Number(saved.endMs) <= Number(window.endMs)
       : Number(saved.endMs) === Number(window.endMs);
     return sameWindow && (recordType !== "confirmed" || (result?.calculation?.profitUsd != null && isSettledConfirmedSource(source)));
@@ -353,7 +356,7 @@ export class ReconciliationRepository {
       const [rows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
       if (!rows.length) { await conn.commit(); return null; }
       const [channels] = await conn.query("SELECT * FROM reconciliation_rule_channels WHERE rule_id = ? FOR UPDATE", [id]);
-      const [segments] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE", [id]);
+      const [segments] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC, effective_to_ms IS NOT NULL DESC, effective_to_ms ASC FOR UPDATE", [id]);
       const rule = ruleFromRow(rows[0], channels);
       if (reconciliationScopeFingerprint(rule, segments.map(segmentFromRow)) !== expectedScopeFingerprint) { await conn.commit(); return null; }
       if ((rule.canonicalKey && rule.canonicalKey !== canonicalKey) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource?.namespaceKey)) {
@@ -396,10 +399,12 @@ export class ReconciliationRepository {
     } finally { conn.release(); }
   }
 
+  // 切换检测得比当前分段起点还早时，旧分段收成零长度，和新分段同一起点、常在同一秒创建；
+  // 各处都按起点、创建时间排序后让未结束的分段排最后，「最后一段」才总是当前分段。
   async listSegments(ruleId) {
     const [rows] = await this.pool.query(
       `SELECT * FROM reconciliation_rule_segments
-       WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC`,
+       WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC, effective_to_ms IS NOT NULL DESC, effective_to_ms ASC`,
       [ruleId]
     );
     return rows.map(segmentFromRow);
@@ -420,7 +425,7 @@ export class ReconciliationRepository {
       await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
       const [rows] = await conn.query(
         `SELECT * FROM reconciliation_rule_segments
-         WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE`,
+         WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC, effective_to_ms IS NOT NULL DESC, effective_to_ms ASC FOR UPDATE`,
         [ruleId]
       );
       for (const row of rows) {
@@ -457,7 +462,7 @@ export class ReconciliationRepository {
       if (!rules.length) throw new Error("对账规则不存在或已停止");
       const [rows] = await conn.query(
         `SELECT * FROM reconciliation_rule_segments
-         WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE`, [ruleId]
+         WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC, effective_to_ms IS NOT NULL DESC, effective_to_ms ASC FOR UPDATE`, [ruleId]
       );
       let ratioBackfilled = false;
       for (const row of rows) {
@@ -569,7 +574,7 @@ export class ReconciliationRepository {
       await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
       const [rows] = await conn.query(
         `SELECT * FROM reconciliation_rule_segments
-         WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE`,
+         WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC, effective_to_ms IS NOT NULL DESC, effective_to_ms ASC FOR UPDATE`,
         [ruleId]
       );
       const segments = rows.map((row) => ({
@@ -689,7 +694,7 @@ export class ReconciliationRepository {
         return false;
       }
       const [channels] = await conn.query("SELECT rule_id, channel_id, channel_name, channel_status, status_observed_at_ms, status_changed_at_ms FROM reconciliation_rule_channels WHERE rule_id = ? ORDER BY channel_name, channel_id FOR UPDATE", [ruleId]);
-      const [segments] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC FOR UPDATE", [ruleId]);
+      const [segments] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC, effective_to_ms IS NOT NULL DESC, effective_to_ms ASC FOR UPDATE", [ruleId]);
       if (reconciliationScopeFingerprint(ruleFromRow(ruleRows[0], channels), segments.map(segmentFromRow)) !== expectedScopeFingerprint) {
         await conn.commit();
         return false;
@@ -761,6 +766,17 @@ export class ReconciliationRepository {
 
   async latestSuccessfulResult(ruleId, window, scopeFingerprint) {
     return this.latestRecord(ruleId, window, scopeFingerprint, "confirmed");
+  }
+
+  // 某个窗口最近一次结账，不管当时的关联口径和查询方式：结账后改关联、换 Key、换凭据都不改已结账的日子。
+  async latestSettlement(ruleId, window) {
+    const [rows] = await this.pool.query(
+      `SELECT * FROM reconciliation_snapshots
+       WHERE rule_id = ? AND snapshot_key LIKE 'r3:c:%' AND window_start_ms >= ? AND window_end_ms <= ?
+       ORDER BY generated_at DESC`,
+      [ruleId, window.startMs, window.endMs]
+    );
+    return selectLatestRecord(rows, window, null, "confirmed");
   }
 
   async latestObservation(ruleId, window, scopeFingerprint) {

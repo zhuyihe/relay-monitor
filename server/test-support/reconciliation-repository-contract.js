@@ -557,6 +557,20 @@ contract("reconcileCurrentSegment backfills and splits segments without touching
   await assert.rejects(repository.reconcileCurrentSegment(`rr_missing${fixture.tag}`, { group: "vip", ratio: 1, detectedAt: t4 }), /对账规则缺少当前分段/);
 });
 
+contract("a transition detected before the current segment started closes it at zero length, ordered before the open segment", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ initialRatio: 1 });
+  const shape = (segments) => segments.map((segment) => [segment.group, segment.effectiveFrom, segment.effectiveTo]);
+  // 旧分段收成零长度，和新分段同一起点、常在同一秒创建；未结束的分段必须排在最后。
+  const segments = await repository.transitionSegment(rule.id, { group: "vip", ratio: 2, detectedAt: EFFECTIVE_FROM - HOUR });
+  assert.deepEqual(shape(segments), [["default", EFFECTIVE_FROM, EFFECTIVE_FROM], ["vip", EFFECTIVE_FROM, null]]);
+  assert.deepEqual(await repository.listSegments(rule.id), segments);
+
+  // 下一次切换收的是未结束的那一段。
+  const next = await repository.transitionSegment(rule.id, { group: "pro", ratio: 3, detectedAt: EFFECTIVE_FROM + HOUR });
+  assert.deepEqual(shape(next), [["default", EFFECTIVE_FROM, EFFECTIVE_FROM], ["vip", EFFECTIVE_FROM, EFFECTIVE_FROM + HOUR], ["pro", EFFECTIVE_FROM + HOUR, null]]);
+  assert.deepEqual(await repository.listSegments(rule.id), next);
+});
+
 contract("correctTransition moves a transition between its neighbours only", async ({ repository, fixture }) => {
   const rule = await fixture.createRule({ initialRatio: 1 });
   const t1 = EFFECTIVE_FROM + 10 * HOUR, t2 = EFFECTIVE_FROM + 20 * HOUR;
@@ -787,6 +801,42 @@ contract("latestObservation picks the newest matching observation; latestSuccess
   const fullToday = { preset: "custom", startMs: day, endMs: day + DAY, timezone: "UTC" };
   await repository.saveSnapshot(billingSnapshot({ rule, segment, fingerprint, window: fullToday, generatedAt: "2026-01-12T20:00:00.000Z", profitUsd: 9 }));
   assert.equal(await repository.latestSuccessfulResult(rule.id, fullToday, fingerprint), null);
+});
+
+contract("latestSettlement returns the newest settled confirmed record of the exact window, whatever its scope or preset", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const other = await fixture.createRule({ tokenId: fixture.token(1), channels: [{ channelId: fixture.channel(2), name: "Other" }] });
+  const [segment] = await repository.listSegments(rule.id);
+  const [otherSegment] = await repository.listSegments(other.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const day = Date.UTC(2026, 0, 12);
+  const yesterday = { preset: "yesterday", startMs: day - DAY, endMs: day, timezone: "UTC" };
+  const custom = { ...yesterday, preset: "custom" };
+  const save = (overrides) => repository.saveSnapshot(billingSnapshot({ rule, segment, fingerprint, window: yesterday, ...overrides }));
+  assert.equal(await repository.latestSettlement(rule.id, yesterday), null);
+
+  // 观测记录、利润未知的确认记录、窗口结束前写下的确认记录、起止不同的窗口、别的规则都不算。
+  await save({ recordType: "observation", generatedAt: "2026-01-12T03:00:00.000Z", profitUsd: 1 });
+  await save({ segmentId: `seg-null-${fixture.tag}`, generatedAt: "2026-01-12T03:00:00.000Z", profitUsd: null });
+  await save({ segmentId: `seg-early-${fixture.tag}`, generatedAt: "2026-01-11T23:00:00.000Z", profitUsd: 2 });
+  await save({ segmentId: `seg-later-${fixture.tag}`, window: { ...custom, startMs: day - DAY + HOUR }, generatedAt: "2026-01-12T03:00:00.000Z", profitUsd: 3 });
+  await repository.saveSnapshot(billingSnapshot({ rule: other, segment: otherSegment, fingerprint: await fixture.fingerprint(other.id), window: yesterday,
+    generatedAt: "2026-01-12T03:00:00.000Z", profitUsd: 4 }));
+  assert.equal(await repository.latestSettlement(rule.id, yesterday), null);
+
+  await save({ generatedAt: "2026-01-12T00:15:00.000Z", profitUsd: 11 });
+  assert.equal((await repository.latestSettlement(rule.id, yesterday)).result.calculation.profitUsd, 11);
+  // 结账后改了关联口径、按「自定义」查询写下的更新记录同样算数。
+  await save({ segmentId: `seg-rebound-${fixture.tag}`, fingerprint: "other-fingerprint", window: custom, generatedAt: "2026-01-12T01:00:00.000Z", profitUsd: 12 });
+  for (const window of [yesterday, custom]) {
+    const settlement = await repository.latestSettlement(rule.id, window);
+    assert.equal(settlement.generatedAt, "2026-01-12T01:00:00.000Z");
+    assert.equal(settlement.result.calculation.profitUsd, 12);
+    assert.deepEqual(settlement.result.window, custom);
+  }
+  assert.equal(await repository.latestSettlement(rule.id, { ...yesterday, timezone: "Asia/Shanghai" }), null);
+  assert.equal(await repository.latestSettlement(rule.id, { ...yesterday, endMs: day + HOUR }), null);
+  assert.equal((await repository.latestSettlement(other.id, yesterday)).result.calculation.profitUsd, 4);
 });
 
 // ---- 告警 ----

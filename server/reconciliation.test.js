@@ -1142,16 +1142,21 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
   const restartedResult = await restarted.queryRules({
     ruleIds: [rule.id], preset: "yesterday",
   }, { force: true });
-  assert.equal(restartedResult.results[0].lastConfirmed.generatedAt, daySuccessAt, "a restarted process must preserve the persisted confirmed time when partial collection fails");
+  assert.equal(restartedResult.results[0].lastConfirmed.generatedAt, daySuccessAt, "重启后已结账的日子直接读结账记录，保留结账时间");
+  assert.equal(restartedResult.results[0].settledAt, daySuccessAt);
   assert.equal(restartedResult.results[0].window.endMs, dayA.results[0].window.endMs, "a restarted process must retain the persisted data coverage window");
   assert.ok(restartedResult.results[0].requestedWindow.endMs >= restartedResult.results[0].window.endMs);
   now += 30000;
   const dayB = await module.queryRules({ ruleIds: [rule.id], preset: "yesterday" }, { force: true });
-  assert.equal(dayB.results[0].health.stale, false);
-  assert.equal(dayB.results[0].upstream.amountUsd, null);
-  assert.equal(dayB.results[0].lastConfirmed.upstream.amountUsd, dayAmount);
-  assert.equal(dayB.results[0].lastConfirmed.generatedAt, daySuccessAt);
-  assert.ok(dayB.results[0].requestedWindow.endMs >= dayB.results[0].window.endMs);
+  assert.equal(dayB.results[0].upstream.amountUsd, dayAmount, "已结账的日子再刷新也不向上游重新取数");
+  assert.equal(dayB.results[0].settledAt, daySuccessAt);
+  // 重新结账（修正切换时间后）才重新取数；这次上游失败时保留上次结账。
+  const resettled = await module.queryRules({ ruleIds: [rule.id], preset: "yesterday" }, { force: true, resettle: true });
+  assert.equal(resettled.results[0].health.stale, false);
+  assert.equal(resettled.results[0].upstream.amountUsd, null);
+  assert.equal(resettled.results[0].lastConfirmed.upstream.amountUsd, dayAmount);
+  assert.equal(resettled.results[0].lastConfirmed.generatedAt, daySuccessAt);
+  assert.ok(resettled.results[0].requestedWindow.endMs >= resettled.results[0].window.endMs);
   now += 86400000;
   const nextDay = await module.queryRules({ ruleIds: [rule.id], preset: "yesterday" }, { force: true });
   assert.equal(nextDay.results[0].upstream.amountUsd, null, "a different local day must not reuse the previous day's confirmed result");
@@ -2100,7 +2105,13 @@ test("两侧都已应答的上游空消费异常不能被旧的确认利润掩�
   const savedSource = [...state.snapshots.values()][0].source;
 
   state.upstreamQuota = 0;
-  const anomaly = await module.queryRules(input, { force: true });
+  const calls = state.statCalls.length;
+  const settled = await module.queryRules(input, { force: true });
+  assert.equal(settled.results[0].calculation.profitUsd, 1.5, "已结账的日子再刷新直接读结账记录");
+  assert.equal(state.statCalls.length, calls);
+  assert.equal(state.writes, 2);
+  // 以下都是重新结账（修正切换时间后）的取数。
+  const anomaly = await module.queryRules(input, { force: true, resettle: true });
   // 已结束完整日上游为 0 时首要状态是“等待该窗口账单”，空消费异常仍作为本轮 issue 保留。
   assert.equal(anomaly.results[0].health.code, "WAITING_FOR_BILL");
   assert.ok(anomaly.results[0].health.issues.some((issue) => issue.code === "UPSTREAM_EMPTY_WITH_SALES"));
@@ -2111,7 +2122,7 @@ test("两侧都已应答的上游空消费异常不能被旧的确认利润掩�
   assert.ok([...state.snapshots.values()].some((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed"));
 
   state.upstreamQuota = null;
-  const unavailable = await module.queryRules(input, { force: true });
+  const unavailable = await module.queryRules(input, { force: true, resettle: true });
   assert.equal(unavailable.results[0].health.code, "WAITING_FOR_BILL");
   assert.ok(unavailable.results[0].health.issues.some((issue) => issue.code === "UPSTREAM_DATA_UNAVAILABLE"));
   assert.equal(unavailable.results[0].health.stale, false);
@@ -2491,7 +2502,14 @@ test("进程重启后只恢复同一完整窗口和站点来源的成功账单�
 
   state.upstreamQuota = null;
   const restarted = createReconciliationModule({ pool: rt.pool, store: rt.store }, { repository });
-  const { results } = await restarted.queryRules(input, { force: true });
+  // 重启后已结账的日子直接读结账记录，不重新取数也不再结一次账。
+  const settled = await restarted.queryRules(input, { force: true });
+  assert.equal(settled.results[0].calculation.profitUsd, 1.5);
+  assert.equal(settled.results[0].settledAt, initial.results[0].lastSuccessfulAt);
+  assert.equal(state.writes, writes);
+
+  // 重新结账时上游故障：保存本轮 observation，不覆盖已有结账。
+  const { results } = await restarted.queryRules(input, { force: true, resettle: true });
   assert.equal(results[0].health.stale, false);
   assert.equal(results[0].upstream.amountUsd, null);
   assert.equal(results[0].downstream.amountUsd, 2.5);
@@ -2766,7 +2784,13 @@ test("R02本站同源PAT不延期；A换B并同步仍不确认旧A，旧快照�
   await store.update("own", { baseUrl: "https://own-b.test", accessToken: "source-b-pat" });
   await onboarding.sync();
   assert.notEqual(onboarding.getSourceCatalogue().ownSource.namespaceKey, sourceA.namespaceKey);
-  const changed = (await f.module.queryRules(input, { force: true })).results[0];
+  // 已结账的日子不跟着换来源重算，仍是按 A 结的账。
+  const settled = (await f.module.queryRules(input, { force: true })).results[0];
+  assert.equal(settled.calculation.profitUsd, 1.5);
+  assert.ok(settled.settledAt);
+  assert.deepEqual([...f.state.snapshots.values()], snapshots);
+  // 重新结账时按 B 取数，但 B 没有确认过来源绑定，不能确认。
+  const changed = (await f.module.queryRules(input, { force: true, resettle: true })).results[0];
   assert.equal(changed.health.code, "SOURCE_BINDING_UNCONFIRMED");
   assert.equal(changed.calculation.profitUsd, null);
   assert.equal(changed.downstream.knownAmountUsd, 5);
@@ -3432,7 +3456,8 @@ test("新范围从生效时刻起核算：生效前窗口不取数，跨界窗�
   assert.equal(confirmed.scope.recalculated, false);
   assert.equal(confirmed.settlement, "settled");
   rule.cost_coverage = "unknown";
-  const unknown = await query(effective, effective + 86400000);
+  assert.equal((await query(effective, effective + 86400000)).settledAt, confirmed.lastSuccessfulAt, "已结账的日子不跟着改覆盖范围重算");
+  const unknown = (await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: effective, endMs: effective + 86400000 }, { force: true, resettle: true })).results[0];
   assert.equal(unknown.calculation.profitUsd, null);
   assert.equal(unknown.upstream.knownAmountUsd, 1);
   assert.ok(unknown.health.issues.some((issue) => issue.code === "COST_COVERAGE_UNKNOWN"));
@@ -4713,6 +4738,91 @@ test("1b窗口结束不满15分钟写下的旧确认记录不算结账：只读�
   const page = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
   assert.ok(f.state.statCalls.length > calls, "早写的记录不当结账记录，重新取数");
   assert.ok(page.results.every((row) => !row.settledAt && row.calculation.profitUsd !== 1.5));
+});
+
+const COMPLETED_YESTERDAY = { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") }; // completedDayFixture 的上海 10-08 整日
+const confirmedRows = (f) => [...f.state.snapshots.values()].filter((row) => JSON.parse(row.source).recordType === "confirmed");
+const yesterdayStatCalls = (f) => f.state.statCalls.filter((call) => call.end === COMPLETED_YESTERDAY.endMs / 1000 - 1).length;
+
+test("结账后改关联、换查账凭据：已结账的昨天查询和刷新都沿用结账记录，轮询也不再结一次账", async (t) => {
+  const f = await completedDayFixture(t);
+  await f.module.refreshDue(Date.now());
+  assert.equal(confirmedRows(f).length, 3);
+  f.rows[0].scope_version = 2; // 编辑关联会升口径版本，口径指纹随之变化
+  Object.assign(f.stations[0], { accessToken: "rotated-pat", authVersion: 2 }); // 换了上游查账凭据
+  f.rt._reconciliationResultCache.clear();
+  const calls = yesterdayStatCalls(f), rows = confirmedRows(f).length;
+  f.state.upstreamQuota = 50; // 上游事后变动也不影响已结账的日子
+  for (const mode of ["evaluate", "observe"]) {
+    const { results } = await f.module.queryRules({ preset: "yesterday" }, { mode, force: true, origin: "manual" });
+    assert.ok(results.every((row) => row.calculation.profitUsd === 1.5 && row.settledAt), `${mode}: ${JSON.stringify(results.map((row) => row.health))}`);
+  }
+  f.rt._reconciliationSettlements.clear(); // 内存里的结账表丢了，轮询会再来结昨天
+  await f.module.refreshDue(Date.now());
+  assert.equal(yesterdayStatCalls(f), calls, "已结账的昨天不再取数");
+  assert.equal(confirmedRows(f).length, rows, "不按新口径再写一份结账记录");
+  assert.deepEqual([...f.rt._reconciliationSettlements.values()].map((entry) => entry.settled), [true, true, true]);
+});
+
+test("重启后轮询认出已有结账记录：不重新取昨天、不再结一次账", async (t) => {
+  const f = await completedDayFixture(t);
+  await f.module.refreshDue(Date.now());
+  const calls = yesterdayStatCalls(f), writes = f.state.writes;
+  const rt = { pool: f.rt.pool, store: f.rt.store, onboardingSource: f.rt.onboardingSource };
+  await createReconciliationModule(rt, { repository: f.repository }).refreshDue(Date.now());
+  assert.equal(yesterdayStatCalls(f), calls);
+  assert.equal(confirmedRows(f).length, 3);
+  assert.ok(confirmedRows(f).every((row) => f.repository.log.snapshotWrites.filter((entry) => entry.snapshotKey === row.snapshot_key).length === 1), `writes ${writes} -> ${f.state.writes}`);
+  assert.deepEqual([...rt._reconciliationSettlements.values()].map((entry) => entry.settled), [true, true, true]);
+});
+
+test("昨天结账 READY 不动告警：今天的告警不被清掉", async (t) => {
+  const f = await completedDayFixture(t);
+  const todayStart = COMPLETED_YESTERDAY.endMs / 1000;
+  const oldFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    // 今天的上游账单取不到，昨天的正常。
+    if (url.pathname === "/api/log/self/stat" && Number(url.searchParams.get("start_timestamp")) === todayStart) {
+      return { status: 500, text: async () => JSON.stringify({ success: false }) };
+    }
+    return oldFetch(input, init);
+  });
+  await f.module.refreshDue(Date.now());
+  assert.equal(confirmedRows(f).length, 3, "昨天照常结账");
+  const alerts = f.repository.log.alertCalls;
+  assert.ok(alerts.some((call) => call.method === "setAlertState" && call.next.active), JSON.stringify(alerts));
+  assert.deepEqual(alerts.filter((call) => call.method === "clearActiveAlerts"), [], "昨天结账 READY 不能清掉今天的告警");
+});
+
+test("修正切换时间后下一轮轮询重新结账昨天，以新结账记录为准，之后不再重复取数", async (t) => {
+  const transition = Date.parse("2026-10-08T04:00:00Z"); // 昨天中午切换
+  const f = await completedDayFixture(t, { segments: [{ id: "s1", group: "g1", from: 0, to: transition }, { id: "s2", group: "g1", from: transition }] });
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  await f.module.refreshDue(now);
+  const yesterday = async () => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate" })).results[0];
+  const before = await yesterday();
+  assert.ok(before.settledAt);
+
+  await f.module.correctTransition("rr_live", "s2", transition - 3600000);
+  assert.ok(f.rt._reconciliationResettles.has("rr_live"));
+  assert.equal((await yesterday()).settledAt, before.settledAt, "重新结账之前仍是原来的结账");
+  f.state.upstreamQuota = 50;
+  now += 60000;
+  const calls = yesterdayStatCalls(f), rows = confirmedRows(f).length;
+  await f.module.refreshDue(now);
+  assert.ok(yesterdayStatCalls(f) > calls, "重新结账要重新取昨天");
+  assert.equal(confirmedRows(f).length, rows + 1, "按新分段写一份新的结账记录");
+  assert.equal(f.rt._reconciliationResettles.has("rr_live"), false);
+  const after = await yesterday();
+  assert.ok(after.settledAt > before.settledAt, "以新结账记录为准");
+  assert.equal(after.upstream.amountUsd, before.upstream.amountUsd / 2);
+
+  now += 60000;
+  const settledCalls = yesterdayStatCalls(f);
+  await f.module.refreshDue(now);
+  assert.equal(yesterdayStatCalls(f), settledCalls, "重新结账完成后不再取昨天");
 });
 
 test("1b同步来源时作废正在进行的计算：查询改用重新取的 Key 目录重算", async (t) => {
