@@ -205,7 +205,7 @@ test("workflow retry destination verifies the original absolute window and retri
   assert.deepEqual(reads[0], { preset: "custom", startMs: String(window.startMs), endMs: String(window.endMs) });
   assert.equal(queries.length, 0); await drawer.getByRole("button", { name: "重查该窗口账单", exact: true }).click();
   await page.waitForFunction(() => !document.querySelector(".ant-btn-loading"));
-  assert.deepEqual(queries, [{ preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: ["rule-1"] }]);
+  assert.deepEqual(queries, [{ preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: ["rule-1"], observe: true }]);
   assert.deepEqual(reads[1], reads[0]);
 });
 

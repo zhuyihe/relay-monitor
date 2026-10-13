@@ -452,7 +452,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 启用规则集合决定同一实际 Key 的成本归属；一条规则变更也会影响其它规则。
   function clearBillingResults(ruleId) {
     rt._reconciliationBillingGeneration = (rt._reconciliationBillingGeneration || 0) + 1;
-    const ids = new Set([ruleId, ...ruleGenerations.keys()]);
+    const ids = new Set(ruleGenerations.keys());
+    if (ruleId) ids.add(ruleId);
     for (const key of [...resultCache.keys(), ...inflight.keys()]) ids.add(key.split(":")[0]);
     for (const id of ids) clearRuleResults(id);
   }
@@ -968,7 +969,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     segments ||= await repository.listSegments(rule.id);
     const record = await repository.latestSuccessfulResult(rule.id, window,
       sourceScopeFingerprint(reconciliationScopeFingerprint(rule, segments), sourceCredential)).catch(() => null);
-    return record && settledFrom(rule, record);
+    return isSettledRecord(record, window) ? settledFrom(rule, record) : null;
+  }
+
+  // 1a 之前窗口一结束就会写确认记录，那时上游还在入账；结束不满 SETTLE_DELAY_MS 写下的记录不算结账。
+  function isSettledRecord(record, window) {
+    return !!record && new Date(record.generatedAt).getTime() >= window.endMs + SETTLE_DELAY_MS;
   }
 
   function settledFrom(rule, record) {
@@ -1119,7 +1125,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         : (rule.canonicalKey && rule.canonicalKey !== actualKey) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource.namespaceKey)
           ? health("SOURCE_BINDING_UNCONFIRMED", "上游账号或实际本站来源已变化，请明确确认新范围") : null;
       if (!identityIssue && (!rule.canonicalKey || !rule.ownSource) && !observe) {
-        identityIssue = identityIssues.get(rule.id) || health("PENDING", "等待首次观测：后台记录账号身份后即可核算");
+        // 还没观测过就没有可靠口径，取上下游账单也只是白跑一趟。
+        if (!identityIssues.has(rule.id)) return pendingResult(rule, window, "等待首次观测：后台记录账号身份后即可核算");
+        identityIssue = identityIssues.get(rule.id);
       } else if (!identityIssue && (!rule.canonicalKey || !rule.ownSource)) {
         try {
           const segments = await repository.listSegments(rule.id);
@@ -1393,8 +1401,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (previous) {
         result.lastConfirmed = snapshotReference(previous);
       }
-      // 重启后首次只读计算时来源口径还没核验，开头的结账记录查不到，算完再按核验后的口径认一次。
-      if (!observe) return previous && isSettleableWindow(window, Date.now()) ? settledFrom(rule, previous) : result;
+      if (!observe) return result;
       return (await persistResult(rule, result, origin, metadata, token, {
         scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource,
       })) ? result : STALE_SCOPE;
@@ -1841,13 +1848,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 接入关联后立即在后台观测今天一次，不必等下一轮轮询。没有启动后台轮询（测试、脚本）时不观测。
     observeSoon(ruleIds) {
       if (!rt._reconciliationPollTimer || !ruleIds?.length) return null;
-      return api.queryRules({ preset: "today", ruleIds }, { mode: "observe", origin: "manual" }).catch(() => null);
+      return api.queryRules({ preset: "today", ruleIds }, { mode: "observe", origin: "onboarding" }).catch(() => null);
     },
-    // 本站授权或渠道目录同步后，Key 目录、账号身份和结果缓存都要重新取。
+    // 本站授权或渠道目录同步后，Key 目录、账号身份和结果缓存都要重新取；正在算的旧结果也作废。
     invalidateSources() {
       metadataCache.clear();
       identityCache.clear();
-      resultCache.clear();
+      clearBillingResults();
     },
   };
   return api;

@@ -4685,12 +4685,56 @@ test("1b已结账的昨天：页面查询直接读结账记录不再取数，上
   const page = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
   assert.equal(f.state.statCalls.length, calls, "已结账的昨天不打上游");
   assert.ok(page.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled" && row.settledAt && row.lastConfirmed));
+  const queried = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" });
+  assert.equal(f.state.statCalls.length, calls, "「查询」跳过缓存也不重新取已结账的日子");
+  assert.ok(queried.results.every((row) => row.calculation.profitUsd === 1.5 && row.settledAt));
 
-  // 重启后内存里的账号身份和缓存都没了：第一次只读查询要取数核验来源口径，但结果仍以结账记录为准。
+  // 重启后内存缓存都没了；来源口径由接入模块持久化，开头就能认出结账记录，不必取数。
   const restarted = { pool: f.rt.pool, store: f.rt.store, onboardingSource: f.rt.onboardingSource };
   const again = await createReconciliationModule(restarted, { repository: f.repository }).queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
   assert.ok(again.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled" && row.settledAt));
+  assert.equal(f.state.statCalls.length, calls, "重启后也不打上游");
   assert.equal(f.state.writes, writes, "页面查询不追加任何快照");
+});
+
+test("1b窗口结束不满15分钟写下的旧确认记录不算结账：只读查询重新取数", async (t) => {
+  const f = await completedDayFixture(t);
+  await f.module.refreshDue(Date.now());
+  // 1a 之前窗口一结束就写确认记录，把结账记录改成这种早写的样子。
+  for (const row of f.state.snapshots.values()) {
+    const source = JSON.parse(row.source);
+    if (source.recordType !== "confirmed") continue;
+    source.resultGeneratedAt = source.result.generatedAt = "2026-10-08T16:05:00.000Z";
+    row.source = JSON.stringify(source);
+  }
+  f.rt._reconciliationResultCache.clear();
+  const calls = f.state.statCalls.length;
+  f.state.upstreamQuota = 50;
+  const page = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
+  assert.ok(f.state.statCalls.length > calls, "早写的记录不当结账记录，重新取数");
+  assert.ok(page.results.every((row) => !row.settledAt && row.calculation.profitUsd !== 1.5));
+});
+
+test("1b同步来源时作废正在进行的计算：查询改用重新取的 Key 目录重算", async (t) => {
+  // 第一次取上游账单时停住，模拟计算进行到一半。
+  let gate = null, reached, release;
+  const arrived = new Promise((resolve) => { reached = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }],
+    onRequest: (request) => request.path === "/api/log/self/stat" && gate ? gate() : null });
+  trustedLegacyRule(f.rule, f.stations, 7, 1);
+  gate = () => { gate = null; reached(); return held; };
+  const running = f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" });
+  await arrived;
+  const mark = f.state.requests.length;
+  f.module.invalidateSources();
+  release();
+  const result = await running;
+  assert.ok(f.state.requests.slice(mark).some((request) => request.path === "/api/token/"), "作废后重新取 Key 目录再算");
+  assert.equal(result.results[0].calculation.profitUsd, 1.5);
+  const calls = f.state.statCalls.length;
+  await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" });
+  assert.equal(f.state.statCalls.length, calls, "缓存的是重算后的结果");
 });
 
 test("1b未锚定的旧规则：页面查询显示等待首次观测且不锚定，观测一次后页面查询即可核算", async (t) => {
@@ -4701,6 +4745,7 @@ test("1b未锚定的旧规则：页面查询显示等待首次观测且不锚定
   assert.match(before.results[0].health.detail, /等待首次观测/);
   assert.equal(before.results[0].calculation.profitUsd, null);
   assert.deepEqual(f.state.commits.map((tx) => tx.name), [], "只读查询不锚定身份");
+  assert.deepEqual(f.state.statCalls, [], "还没观测过就不取上下游账单");
 
   await f.module.queryRules({ preset: "today" }, { mode: "observe", origin: "manual" });
   assert.ok(f.state.commits.some((tx) => tx.name === "anchorRuleIdentity"), "观测时锚定身份");

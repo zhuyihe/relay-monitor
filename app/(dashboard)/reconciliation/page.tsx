@@ -450,7 +450,7 @@ export default function ReconciliationPage() {
     }
   };
 
-  // force 跳过缓存只读重算；observe 让服务端立即观测并写库，只有「刷新」按钮用。
+  // force 跳过缓存重算，仍然只读；observe 让服务端立即观测并写库，只有「刷新」和单行「重试」这类明确操作才用。
   const loadWindow = async (window = activeWindow, force = false, observe = false) => {
     if (!force && windowRequestInFlight.current) return null;
     const requestId = ++windowRequestId.current;
@@ -508,7 +508,7 @@ export default function ReconciliationPage() {
     setRetryingRuleIds((previous) => new Set(previous).add(id));
     setRuleRetryErrors((previous) => ({ ...previous, [id]: "" }));
     try {
-      const next = await api("/api/reconciliation/query", { method: "POST", body: { preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: [id] } });
+      const next = await api("/api/reconciliation/query", { method: "POST", body: { preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: [id], observe: true } });
       const replacement = (next?.results || []).find((candidate: any) => String(candidate?.rule?.id) === id);
       const replacementWindow = replacement?.requestedWindow || replacement?.window;
       if (requestId !== ruleRetryRequestId.current.get(id) || requestWindowEpoch !== windowRequestId.current || !replacement || !sameWindow(window, replacementWindow)) return;
