@@ -796,6 +796,18 @@ test("F08 equivalent new authorizations keep each selection's display, purpose a
   assert.equal(station.noRenewal, false); assert.equal(station.includeInProfit, true);
 });
 
+test("1b接入确认后，新建的核算关联一起交给对账模块观测一次", async (t) => {
+  const f = await genuineBatchFixture(t), input = f.request([[1], [2]], [9, 10]), observed = [];
+  f.rt.reconciliation.observeSoon = (ruleIds) => { observed.push([...ruleIds]); return null; };
+  const preview = await f.rt.channelOnboarding.probeBatch(input);
+  assert.deepEqual(observed, [], "预览不观测");
+  const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId });
+  assert.equal(result.complete, true);
+  const ruleIds = result.groups.map((group) => group.saved.ruleId);
+  assert.equal(new Set(ruleIds).size, 2);
+  assert.deepEqual(observed, [ruleIds], "整批只观测一次");
+});
+
 test("F07 directory reads reevaluate rule source after missing channels, restored catalogue and expiry", async (t) => {
   const f = await genuineBatchFixture(t), input = f.request([[1]]), preview = await f.rt.channelOnboarding.probeBatch(input);
   assert.equal((await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId })).complete, true);

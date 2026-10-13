@@ -368,6 +368,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const resultCache = (rt._reconciliationResultCache ||= new Map());
   const inflight = (rt._reconciliationInflight ||= new Map());
   const metadataCache = (rt._reconciliationMetadataCache ||= new Map());
+  const identityCache = (rt._reconciliationIdentityCache ||= new Map());
   const ownChannelsCache = (rt._reconciliationOwnChannelsCache ||= new Map());
   const ownChannelsRequests = (rt._reconciliationOwnChannelsRequests ||= new Map());
   const ruleGenerations = (rt._reconciliationRuleGenerations ||= new Map());
@@ -375,6 +376,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const verifiedRuleCredentials = new WeakMap();
   const previewReadFacts = new WeakMap();
   const ownIdentities = new Map();
+  // 观测时锚定身份失败的原因：只读计算不锚定，沿用最近一次观测的结论。
+  const identityIssues = new Map();
   const billingStation = (station) => station && ["newapi", "sub2api", "sub2api-password"].includes(station.type) && !station.isOwn;
   const billingPanel = (station) => station && JSON.stringify([station.type.startsWith("sub2api") ? "sub2api" : "newapi", onboardingBaseUrl(station.baseUrl)]);
   function createPreviewReadContext() {
@@ -449,12 +452,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 启用规则集合决定同一实际 Key 的成本归属；一条规则变更也会影响其它规则。
   function clearBillingResults(ruleId) {
     rt._reconciliationBillingGeneration = (rt._reconciliationBillingGeneration || 0) + 1;
-    const ids = new Set([ruleId, ...ruleGenerations.keys()]);
+    const ids = new Set(ruleGenerations.keys());
+    if (ruleId) ids.add(ruleId);
     for (const key of [...resultCache.keys(), ...inflight.keys()]) ids.add(key.split(":")[0]);
     for (const id of ids) clearRuleResults(id);
   }
 
-  function cacheResult(key, value, sourceCredential, billingCredential) {
+  // observed 标记结果是否来自观测：观测轮询只认观测写下的缓存，只读计算的结果不能让轮询跳过写库。
+  function cacheResult(key, value, sourceCredential, billingCredential, observed = true) {
     const now = Date.now();
     const cached = resultCache.get(key);
     const previous = cached?.sourceCredential === sourceCredential && cached?.billingCredential === billingCredential ? cached.value : null;
@@ -462,7 +467,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const nextEnd = Number(value?.requestedWindow?.endMs ?? value?.window?.endMs);
     if (previous && (previousEnd > nextEnd || (previousEnd === nextEnd && String(previous.generatedAt) > String(value.generatedAt)))) return;
     for (const [cachedKey, cached] of resultCache) if (cachedKey !== key && now - cached.at >= QUERY_TTL_MS) resultCache.delete(cachedKey);
-    resultCache.set(key, { at: now, value, sourceCredential, billingCredential });
+    resultCache.set(key, { at: now, value, sourceCredential, billingCredential, observed });
     while (resultCache.size > MAX_RESULT_CACHE_ENTRIES) resultCache.delete(resultCache.keys().next().value);
   }
 
@@ -500,7 +505,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return value;
   }
 
-  async function ownerRegistryFor(rules, selected) {
+  async function identityFor(station, { force = false } = {}) {
+    const credential = credentialFingerprint(station);
+    const cached = identityCache.get(station.id);
+    if (!force && cached?.credential === credential && Date.now() - cached.at < 5 * 60000) return cached.value;
+    const value = await queryAccountIdentity(station);
+    identityCache.set(station.id, { at: Date.now(), credential, value });
+    return value;
+  }
+
+  // 只有观测才强制重读 Key 目录和账号身份；只读查询用 5 分钟缓存，轮询每轮会刷新它。
+  async function ownerRegistryFor(rules, selected, { observe = true } = {}) {
     const billingSource = { ...billingSourceState(), expectedOwnerState: reconciliationOwnerRuleState(rules) };
     const selectedIds = new Set(selected.map((rule) => rule.id));
     const participants = rules.filter((rule) => rule.enabled || selectedIds.has(rule.id));
@@ -513,9 +528,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (!station) throw new Error("参与成本归属的账号资源已缺失");
         const timezone = selected.find((rule) => rule.upstreamStationId === id)?.timezone
           || participants.find((rule) => rule.upstreamStationId === id)?.timezone || "Asia/Shanghai";
-        const metadata = billingStation(station) ? await metadataFor(station, { force: true, timezone }) : null;
+        const metadata = billingStation(station) ? await metadataFor(station, { force: observe, timezone }) : null;
         const identity = metadata ? { provider: metadata.platform, baseUrl: onboardingBaseUrl(station.baseUrl), accountId: String(metadata.accountId ?? metadata.userId) }
-          : await queryAccountIdentity(station);
+          : await identityFor(station, { force: observe });
         return [id, Object.freeze({ station, resourceVersion, metadata, identity: Object.freeze(identity), error: null })];
       } catch (error) { return [id, Object.freeze({ station, resourceVersion, metadata: null, identity: null, error })]; }
     }));
@@ -949,18 +964,47 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     });
   }
 
-  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry } = {}) {
+  // 已结账窗口直接读结账记录，不再向上游取数。
+  async function settledResult(rule, window, sourceCredential, segments = null) {
+    segments ||= await repository.listSegments(rule.id);
+    const record = await repository.latestSuccessfulResult(rule.id, window,
+      sourceScopeFingerprint(reconciliationScopeFingerprint(rule, segments), sourceCredential)).catch(() => null);
+    return isSettledRecord(record, window) ? settledFrom(rule, record) : null;
+  }
+
+  // 1a 之前窗口一结束就会写确认记录，那时上游还在入账；结束不满 SETTLE_DELAY_MS 写下的记录不算结账。
+  function isSettledRecord(record, window) {
+    return !!record && new Date(record.generatedAt).getTime() >= window.endMs + SETTLE_DELAY_MS;
+  }
+
+  function settledFrom(rule, record) {
+    return { ...record.result, rule: { ...rule, fixedGroup: record.result.currentSegment?.group ?? rule.fixedGroup },
+      lastSuccessfulAt: record.generatedAt, lastConfirmed: snapshotReference(record), settledAt: record.generatedAt };
+  }
+
+  // observe：锚定身份、记录分段切换和渠道状态、写快照、发通知，只由轮询、「刷新」和接入后的首次观测调用。
+  // evaluate：只读已持久化的分段和锚定状态来计算，不写库、不通知；页面查询都走这条。
+  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe" } = {}) {
+    const observe = mode !== "evaluate";
     if (!ruleGenerations.has(ruleId)) ruleGenerations.set(ruleId, 0);
     const firstRule = await repository.getRule(ruleId);
     if (!firstRule) throw ruleNotFound();
     const cacheKey = resultKey(firstRule, window);
     const requestCredential = currentSourceCredential(firstRule);
     const requestBilling = ownerRegistry.billingSource;
-    const inflightKey = window.preset === "today" ? `${cacheKey}:${window.endMs}:${requestCredential}:${requestBilling.ownerVersion}` : `${cacheKey}:${requestCredential}:${requestBilling.ownerVersion}`;
+    const evaluateKey = window.preset === "today" ? `${cacheKey}:${window.endMs}:${requestCredential}:${requestBilling.ownerVersion}` : `${cacheKey}:${requestCredential}:${requestBilling.ownerVersion}`;
+    const inflightKey = observe ? `${evaluateKey}:observe` : evaluateKey;
     const ttl = window.preset === "today" ? TODAY_TTL_MS : QUERY_TTL_MS;
     const cached = resultCache.get(cacheKey);
-    if (!force && cached?.sourceCredential === requestCredential && cached?.billingCredential === requestBilling.ownerVersion && Date.now() - cached.at < ttl) return cached.value;
+    if (!force && (!observe || cached?.observed) && cached?.sourceCredential === requestCredential
+      && cached?.billingCredential === requestBilling.ownerVersion && Date.now() - cached.at < ttl
+      // 观测写下的分段切换不会清缓存，用分段口径挡住切换前算出的结果。
+      && reconciliationScopeFingerprint(firstRule, await repository.listSegments(ruleId)) === reconciliationScopeFingerprint(firstRule, cached.value.transitionSegments || [])) {
+      return cached.value;
+    }
+    // 只读计算可以等同一窗口正在进行的观测；观测不能借只读计算的结果跳过写库。
     if (inflight.has(inflightKey)) return inflight.get(inflightKey);
+    if (!observe && inflight.has(`${evaluateKey}:observe`)) return inflight.get(`${evaluateKey}:observe`);
 
     const inspectScope = async (rule, generation, billingSource, request) => {
       if (billingSourceState().version !== billingSource.version) return STALE_SCOPE;
@@ -970,6 +1014,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const own = currentOwn && { ...currentOwn };
       let sourceCredential = observationCredential(rule, upstream, own);
       request.sourceCredential = sourceCredential;
+      if (!observe && isSettleableWindow(window, Date.now())) {
+        const settled = await settledResult(rule, window, sourceCredential);
+        if (settled) return settled;
+      }
       const ownAvailable = !!own && own.isOwn && own.type === "newapi";
       const downstreamEvidence = async () => {
         if (!own || !own.isOwn || own.type !== "newapi") return null;
@@ -1052,7 +1100,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const unavailable = async (resultHealth, evidence = {}, save = true) => persistUnavailable(rule, window, resultHealth, origin, {
         ...evidence,
         downstream: evidence.downstream ?? await downstreamEvidence(),
-      }, generation, sourceCredential, billingSource, { save });
+      }, generation, sourceCredential, billingSource, { save: save && observe });
       if (!billingStation(upstream)) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", "上游账号已删除或不支持账单读取"), {}, !!rule.canonicalKey && !!rule.ownSource);
 
       const upstreamResource = ownerRegistry.resources.get(rule.upstreamStationId);
@@ -1076,7 +1124,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       let identityIssue = !ownSource ? health("SOURCE_BINDING_UNCONFIRMED", "本站原始来源未能核验，金额仅供参考")
         : (rule.canonicalKey && rule.canonicalKey !== actualKey) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource.namespaceKey)
           ? health("SOURCE_BINDING_UNCONFIRMED", "上游账号或实际本站来源已变化，请明确确认新范围") : null;
-      if (!identityIssue && (!rule.canonicalKey || !rule.ownSource)) {
+      if (!identityIssue && (!rule.canonicalKey || !rule.ownSource) && !observe) {
+        // 还没观测过就没有可靠口径，取上下游账单也只是白跑一趟。
+        if (!identityIssues.has(rule.id)) return pendingResult(rule, window, "等待首次观测：后台记录账号身份后即可核算");
+        identityIssue = identityIssues.get(rule.id);
+      } else if (!identityIssue && (!rule.canonicalKey || !rule.ownSource)) {
         try {
           const segments = await repository.listSegments(rule.id);
           const anchored = await withObservationSourceLock(rule, sourceCredential, () => repository.anchorRuleIdentity(rule.id,
@@ -1084,9 +1136,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
               allowInitialAnchoring: (upstream.authVersion || 1) === 1 && (own.authVersion || 1) === 1 }), billingSource);
           if (!anchored || anchored === STALE_SCOPE) return STALE_SCOPE;
           Object.assign(rule, anchored);
+          identityIssues.delete(rule.id);
         } catch (err) {
           if (!["LEGACY_IDENTITY_UNVERIFIED", "SOURCE_BINDING_UNCONFIRMED"].includes(err?.code)) throw err;
           identityIssue = health(err.code, err.message);
+          identityIssues.set(rule.id, identityIssue);
         }
       }
       if (!identityIssue && ownSource) {
@@ -1111,13 +1165,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const catalogueObserved = metadata.groupsAvailable && metadata.groups[token.group]?.ratio != null;
       const currentRatio = catalogueObserved ? metadata.groups[token.group].ratio : null;
       const ratioObservedAt = Date.now();
-      const reconciliation = await withObservationSourceLock(rule, sourceCredential, () => repository.observeSource(rule.id, {
-        groups: metadata.groupsAvailable ? metadata.groups : {},
-        group: token.group,
-        ratio: currentRatio,
-        tokenName: token.name,
-        detectedAt: ratioObservedAt,
-      }), billingSource);
+      // 只读计算沿用已记录的分段；分组或倍率的切换由下一次观测记录。
+      const reconciliation = !observe ? { segments: persistedSegments, currentSegment: persistedSegments[persistedSegments.length - 1], transitioned: false }
+        : await withObservationSourceLock(rule, sourceCredential, () => repository.observeSource(rule.id, {
+          groups: metadata.groupsAvailable ? metadata.groups : {},
+          group: token.group,
+          ratio: currentRatio,
+          tokenName: token.name,
+          detectedAt: ratioObservedAt,
+        }), billingSource);
       if (reconciliation === STALE_SCOPE) return STALE_SCOPE;
       let segments = reconciliation.segments;
       let currentSegment = reconciliation.currentSegment;
@@ -1169,7 +1225,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         return { ...channel, state, stateObservedAt: Date.now() };
       });
       let channelStatesUpdated;
-      try {
+      if (observe) try {
         channelStatesUpdated = await withObservationSourceLock(rule, sourceCredential,
           () => repository.updateChannelStates(rule.id, states), billingSource);
       } catch { channelStatesUpdated = null; }
@@ -1345,6 +1401,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (previous) {
         result.lastConfirmed = snapshotReference(previous);
       }
+      if (!observe) return result;
       return (await persistResult(rule, result, origin, metadata, token, {
         scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource,
       })) ? result : STALE_SCOPE;
@@ -1365,7 +1422,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         });
         if (value !== STALE_SCOPE && (ruleGenerations.get(ruleId) || 0) === generation
           && currentSourceCredential(rule) === request.sourceCredential && billingSourceState().version === billingSource.version) {
-          if (value.health.code !== "PENDING") cacheResult(cacheKey, value, request.sourceCredential, billingSource.ownerVersion);
+          if (value.health.code !== "PENDING") cacheResult(cacheKey, value, request.sourceCredential, billingSource.ownerVersion, observe);
           return value;
         }
         if (billingSourceState().version !== billingSource.version) return STALE_SCOPE;
@@ -1554,6 +1611,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         throw error;
       }
       if (saved !== true) return false;
+      if (settled) result.settledAt = result.generatedAt;
     }
     if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return false;
     if (currentSourceCredential(rule) !== sourceCredential) return false;
@@ -1602,7 +1660,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return { results: selected, generatedAt: new Date(now).toISOString(), ...grouped, coverage, actions };
   }
 
-  return {
+  const api = {
     async getConfiguration({ forceChannels = false, includeArchived = false } = {}) {
       const own = ownStation();
       const rules = await repository.listRules({ includeArchived });
@@ -1751,7 +1809,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const selected = (Array.isArray(ruleIds) && ruleIds.length)
           ? rules.filter((rule) => rule.enabled && ruleIds.includes(rule.id))
           : rules.filter((rule) => rule.enabled);
-        const ownerRegistry = await ownerRegistryFor(rules, selected);
+        const ownerRegistry = await ownerRegistryFor(rules, selected, { observe: options.mode !== "evaluate" });
         const billingSource = ownerRegistry.billingSource;
         const now = Date.now();
         const results = await mapWithConcurrency(selected, MAX_CONCURRENT_RULES, (rule) => inspectRule(
@@ -1774,20 +1832,32 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     async refreshDue(now = Date.now()) {
       const allRules = await repository.listRules();
       const rules = allRules.filter((rule) => rule.enabled);
-      const ownerRegistry = await ownerRegistryFor(allRules, rules);
+      const ownerRegistry = await ownerRegistryFor(allRules, rules, { observe: true });
       for (const [key, entry] of settlements) if (entry.endMs < now - 3 * DAY_MS) settlements.delete(key);
       await mapWithConcurrency(rules, MAX_CONCURRENT_RULES, async (rule) => {
-        await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, now), { origin: "poll", ownerRegistry })
+        await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, now), { mode: "observe", origin: "poll", ownerRegistry })
           .catch(() => null);
         const window = settlementWindowDue(rule, now);
         if (!window) return;
         // 结账必须重新取数：等待期内手动查询留下的缓存可能是上游入账未完成时的结果。
-        const result = await inspectRule(rule.id, window, { force: true, origin: "poll", ownerRegistry }).catch(() => null);
+        const result = await inspectRule(rule.id, window, { mode: "observe", force: true, origin: "poll", ownerRegistry }).catch(() => null);
         const settled = result?.calculation?.profitUsd != null;
         settlements.set(`${rule.id}:${window.startMs}:${window.timezone}`, { endMs: window.endMs, settled, retryAt: settled ? null : now + SETTLE_RETRY_MS });
       });
     },
+    // 接入关联后立即在后台观测今天一次，不必等下一轮轮询。没有启动后台轮询（测试、脚本）时不观测。
+    observeSoon(ruleIds) {
+      if (!rt._reconciliationPollTimer || !ruleIds?.length) return null;
+      return api.queryRules({ preset: "today", ruleIds }, { mode: "observe", origin: "onboarding" }).catch(() => null);
+    },
+    // 本站授权或渠道目录同步后，Key 目录、账号身份和结果缓存都要重新取；正在算的旧结果也作废。
+    invalidateSources() {
+      metadataCache.clear();
+      identityCache.clear();
+      clearBillingResults();
+    },
   };
+  return api;
 }
 
 // 每轮结束后按当前设置排下一轮：改了刷新间隔不用重启，慢的一轮也不会和下一轮重叠。

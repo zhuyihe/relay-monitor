@@ -694,6 +694,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           catalogue = value;
           syncError = null;
           rt._reconciliationResultCache?.clear();
+          rt.reconciliation?.invalidateSources?.();
           delete rt._ownChannelsCache;
         }));
       } catch (error) { syncError = failure(error, [connection]); }
@@ -1154,7 +1155,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       return recovered;
     }
     const retryInput = structuredClone(record.retryInput), recovered = await recoverBatch(retryInput);
-    const results = [], savedSelections = new Map(), newAccounts = new Map();
+    const results = [], savedSelections = new Map(), newAccounts = new Map(), configuredRuleIds = [];
     const saveItem = async (item, selection, role, guard, assertCurrent) => {
       const key = !reusable(item) && item.identity ? hash([accountKeyOf(item.identity), role === "primary" && selection.monitor,
         item.connection.type, onboardingConnectionPatch(item.connection)]) : null;
@@ -1271,6 +1272,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             result.saved.ruleId = rule.id; result.saved.scopeVersion = rule.scopeVersion; result.saved.billingEffectiveFromMs = rule.billingEffectiveFrom;
             result.saved.authorizationStationId = rule.upstreamStationId;
             result.reconciliation = { status: "configured", ruleId: rule.id, scopeVersion: rule.scopeVersion, billingEffectiveFromMs: rule.billingEffectiveFrom };
+            configuredRuleIds.push(rule.id);
           }
         }
       } catch (error) {
@@ -1293,6 +1295,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       }
       results.push(finishGroup(result, actions));
     }
+    // 新接入的关联在后台一起观测今天一次，不必等下一轮轮询。
+    rt.reconciliation?.observeSoon?.(configuredRuleIds);
     return { requestId: input.requestId, complete: results.every((result) => result.complete), groups: results, retryInput };
   }
 

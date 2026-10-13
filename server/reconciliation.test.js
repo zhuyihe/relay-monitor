@@ -4662,3 +4662,182 @@ test("U06真实withAuth keys GET：登录/zone/token/drift400、原default500、
     assert.equal(f.station.verifiedIdentity, undefined);
   } finally { hooks.deregister(); delete globalThis.__u06KeysRuntime; }
 });
+
+test("1b页面查询只读：昨天和今天都给出毛利，但不开写事务、不查告警状态、不写渠道状态", async (t) => {
+  const f = await completedDayFixture(t);
+  const page = (preset) => f.module.queryRules({ preset }, { mode: "evaluate", origin: "page" });
+  const yesterday = await page("yesterday");
+  assert.ok(yesterday.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled"));
+  const today = await page("today");
+  assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "live"));
+  assert.deepEqual(f.state.commits.map((tx) => tx.name), [], "页面查询不开写事务");
+  assert.deepEqual([f.state.writes, f.state.alertQueries, f.state.channelStateWrites.length, f.state.snapshots.size], [0, 0, 0, 0]);
+});
+
+test("1b已结账的昨天：页面查询直接读结账记录不再取数，上游事后变动不影响；重启后也以结账记录为准", async (t) => {
+  const f = await completedDayFixture(t);
+  await f.module.refreshDue(Date.now());
+  const confirmed = () => [...f.state.snapshots.values()].filter((row) => JSON.parse(row.source).recordType === "confirmed");
+  assert.equal(confirmed().length, 3, "轮询结掉昨天");
+  f.rt._reconciliationResultCache.clear();
+  const calls = f.state.statCalls.length, writes = f.state.writes;
+  f.state.upstreamQuota = 50; // 上游事后又补了账，已结账的日子不跟着变
+  const page = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
+  assert.equal(f.state.statCalls.length, calls, "已结账的昨天不打上游");
+  assert.ok(page.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled" && row.settledAt && row.lastConfirmed));
+  const queried = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" });
+  assert.equal(f.state.statCalls.length, calls, "「查询」跳过缓存也不重新取已结账的日子");
+  assert.ok(queried.results.every((row) => row.calculation.profitUsd === 1.5 && row.settledAt));
+
+  // 重启后内存缓存都没了；来源口径由接入模块持久化，开头就能认出结账记录，不必取数。
+  const restarted = { pool: f.rt.pool, store: f.rt.store, onboardingSource: f.rt.onboardingSource };
+  const again = await createReconciliationModule(restarted, { repository: f.repository }).queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
+  assert.ok(again.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled" && row.settledAt));
+  assert.equal(f.state.statCalls.length, calls, "重启后也不打上游");
+  assert.equal(f.state.writes, writes, "页面查询不追加任何快照");
+});
+
+test("1b窗口结束不满15分钟写下的旧确认记录不算结账：只读查询重新取数", async (t) => {
+  const f = await completedDayFixture(t);
+  await f.module.refreshDue(Date.now());
+  // 1a 之前窗口一结束就写确认记录，把结账记录改成这种早写的样子。
+  for (const row of f.state.snapshots.values()) {
+    const source = JSON.parse(row.source);
+    if (source.recordType !== "confirmed") continue;
+    source.resultGeneratedAt = source.result.generatedAt = "2026-10-08T16:05:00.000Z";
+    row.source = JSON.stringify(source);
+  }
+  f.rt._reconciliationResultCache.clear();
+  const calls = f.state.statCalls.length;
+  f.state.upstreamQuota = 50;
+  const page = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
+  assert.ok(f.state.statCalls.length > calls, "早写的记录不当结账记录，重新取数");
+  assert.ok(page.results.every((row) => !row.settledAt && row.calculation.profitUsd !== 1.5));
+});
+
+test("1b同步来源时作废正在进行的计算：查询改用重新取的 Key 目录重算", async (t) => {
+  // 第一次取上游账单时停住，模拟计算进行到一半。
+  let gate = null, reached, release;
+  const arrived = new Promise((resolve) => { reached = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }],
+    onRequest: (request) => request.path === "/api/log/self/stat" && gate ? gate() : null });
+  trustedLegacyRule(f.rule, f.stations, 7, 1);
+  gate = () => { gate = null; reached(); return held; };
+  const running = f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" });
+  await arrived;
+  const mark = f.state.requests.length;
+  f.module.invalidateSources();
+  release();
+  const result = await running;
+  assert.ok(f.state.requests.slice(mark).some((request) => request.path === "/api/token/"), "作废后重新取 Key 目录再算");
+  assert.equal(result.results[0].calculation.profitUsd, 1.5);
+  const calls = f.state.statCalls.length;
+  await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" });
+  assert.equal(f.state.statCalls.length, calls, "缓存的是重算后的结果");
+});
+
+test("1b未锚定的旧规则：页面查询显示等待首次观测且不锚定，观测一次后页面查询即可核算", async (t) => {
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }] });
+  const page = () => f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" });
+  const before = await page();
+  assert.equal(before.results[0].health.code, "PENDING");
+  assert.match(before.results[0].health.detail, /等待首次观测/);
+  assert.equal(before.results[0].calculation.profitUsd, null);
+  assert.deepEqual(f.state.commits.map((tx) => tx.name), [], "只读查询不锚定身份");
+  assert.deepEqual(f.state.statCalls, [], "还没观测过就不取上下游账单");
+
+  await f.module.queryRules({ preset: "today" }, { mode: "observe", origin: "manual" });
+  assert.ok(f.state.commits.some((tx) => tx.name === "anchorRuleIdentity"), "观测时锚定身份");
+  f.rt._reconciliationResultCache.clear();
+  const after = await page();
+  assert.equal(after.results[0].calculation.profitUsd, 1.5);
+});
+
+test("1b只读缓存跟随已持久化分段：别处提交了分段变化后，非强制页面查询重新计算", async (t) => {
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000000, to: 1030000 }, { id: "s2", group: "g2", from: 1030000 }] });
+  trustedLegacyRule(f.rule, f.stations, 7, 1);
+  const input = { ruleIds: [f.rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 };
+  const page = () => f.module.queryRules(input, { mode: "evaluate", origin: "page" });
+  const windows = (result) => result.segments.map((segment) => [segment.id, segment.window.startMs, segment.window.endMs]);
+  assert.deepEqual(windows((await page()).results[0]), [["s1", 1000000, 1030000], ["s2", 1030000, 1060000]]);
+  const calls = f.state.statCalls.length;
+  await page();
+  assert.equal(f.state.statCalls.length, calls, "分段没变时命中只读缓存");
+  await f.repository.correctTransition(f.rule.id, "s2", 1045000); // 绕过模块，模拟轮询等别处已提交的分段变化
+  const after = await page();
+  assert.equal(f.state.statCalls.length, calls + 4, "分段变了不能用旧缓存");
+  assert.deepEqual(windows(after.results[0]), [["s1", 1000000, 1045000], ["s2", 1045000, 1060000]]);
+  assert.equal(f.state.writes, 0);
+});
+
+test("1b观测不复用只读缓存：页面先算过今天，观测仍重新取数并只写观测记录；观测的缓存页面可以直接用", async (t) => {
+  const f = await completedDayFixture(t);
+  const today = (mode) => f.module.queryRules({ preset: "today" }, { mode, origin: mode === "evaluate" ? "page" : "manual" });
+  await today("evaluate");
+  const calls = f.state.statCalls.length;
+  assert.equal(f.state.writes, 0);
+  await today("observe");
+  assert.ok(f.state.statCalls.length > calls, "观测要自己取数，不能拿只读结果跳过写库");
+  const sources = [...f.state.snapshots.values()].map((row) => JSON.parse(row.source));
+  assert.ok(sources.length > 0 && sources.every((source) => source.recordType === "observation"), "今天的半天只写观测，不写确认");
+  const observed = f.state.statCalls.length;
+  await today("evaluate");
+  assert.equal(f.state.statCalls.length, observed);
+});
+
+test("1b接入后的首次观测只在后台轮询运行时触发；同步来源后 Key 目录和结果缓存都重新取", async (t) => {
+  const f = await completedDayFixture(t);
+  assert.equal(f.module.observeSoon(["rr_live"]), null, "没有后台轮询（测试、脚本）时不观测");
+  assert.equal(f.state.requests.length, 0);
+  f.rt._reconciliationPollTimer = {};
+  assert.equal(f.module.observeSoon([]), null);
+  await f.module.observeSoon(["rr_live"]);
+  const sources = [...f.state.snapshots.values()].map((row) => ({ ruleId: row.rule_id, ...JSON.parse(row.source) }));
+  assert.ok(sources.length > 0 && sources.every((source) => source.ruleId === "rr_live" && source.recordType === "observation" && source.window.preset === "today"));
+
+  const directory = () => f.state.requests.filter((request) => request.host === "upstream.test" && request.path === "/api/token/").length;
+  const listed = directory();
+  await f.module.queryRules({ preset: "today", ruleIds: ["rr_live"] }, { mode: "evaluate", origin: "page" });
+  assert.equal(directory(), listed, "只读查询沿用 Key 目录缓存");
+  f.module.invalidateSources();
+  assert.equal(f.rt._reconciliationResultCache.size, 0);
+  await f.module.queryRules({ preset: "today", ruleIds: ["rr_live"] }, { mode: "evaluate", origin: "page" });
+  assert.ok(directory() > listed, "同步来源后重新取 Key 目录");
+});
+
+test("1b接口：GET 和 POST 默认只读零写入，只有带 observe:true 的「刷新」才观测写库", async (t) => {
+  const f = await completedDayFixture(t);
+  f.rt.reconciliation = f.module;
+  f.rt.store.auth = { isDefault: false };
+  f.rt.sessions = { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 };
+  const { registerHooks } = await import("node:module");
+  globalThis.__p1bRuntime = f.rt;
+  const hooks = registerHooks({ resolve(specifier, context, next) {
+    if (specifier === "next/server") return { url: "test:p1b-next", shortCircuit: true };
+    if (specifier.endsWith("/runtime.js")) return { url: "test:p1b-runtime", shortCircuit: true };
+    if (specifier.endsWith("/lib/api.js")) return { url: new URL(`${specifier}?p1b-auth`, context.parentURL).href, shortCircuit: true };
+    return next(specifier, context);
+  }, load(url, context, next) {
+    if (url === "test:p1b-next") return { format: "module", shortCircuit: true, source: "export const NextResponse={json:(value,init)=>Response.json(value,init)};" };
+    if (url === "test:p1b-runtime") return { format: "module", shortCircuit: true, source: "export const getRuntime=async()=>globalThis.__p1bRuntime;" };
+    return next(url, context);
+  } });
+  try {
+    const { GET } = await import("../app/api/reconciliation/route.js?p1b");
+    const { POST } = await import("../app/api/reconciliation/query/route.js?p1b");
+    const headers = { cookie: "rm_session=valid" };
+    const post = (body) => POST(new Request("http://localhost/api/reconciliation/query", { method: "POST", headers, body: JSON.stringify(body) }));
+    for (const response of [await GET(new Request("http://localhost/api/reconciliation", { headers })),
+      await GET(new Request("http://localhost/api/reconciliation?preset=today&force=true", { headers })), await post({ preset: "today" }), await post({ preset: "yesterday" })]) {
+      assert.equal(response.status, 200);
+      assert.ok((await response.json()).results.every((row) => row.calculation.profitUsd === 1.5));
+    }
+    assert.deepEqual([f.state.commits.length, f.state.writes, f.state.alertQueries], [0, 0, 0], "页面查询零写入、零告警");
+    const refreshed = await post({ preset: "today", observe: true });
+    assert.equal(refreshed.status, 200);
+    assert.equal((await refreshed.json()).results.length, 3);
+    const sources = [...f.state.snapshots.values()].map((row) => JSON.parse(row.source));
+    assert.ok(sources.length >= 3 && sources.every((source) => source.recordType === "observation"), "「刷新」观测今天并写观测记录");
+  } finally { hooks.deregister(); delete globalThis.__p1bRuntime; }
+});
