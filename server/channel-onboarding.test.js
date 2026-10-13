@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { connectNewApiUpstream, createChannelOnboardingModule, startChannelOnboarding } from "./channel-onboarding.js";
 import { Store, stationBusinessVersion } from "../db/store.js";
-import { applyScopePolicy, nextBillingEffectiveFrom, canonicalBillingKey } from "../lib/reconciliation-scope-policy.js";
+import { applyScopePolicy, nextBillingEffectiveFrom, canonicalBillingKey, reconciliationBillingSchedule } from "../lib/reconciliation-scope-policy.js";
 import { queryAccountIdentity, queryOwnChannels, queryReconciliationMetadata } from "../lib/providers.js";
 import { createReconciliationModule } from "./reconciliation.js";
 import { handleChannelOnboardingRequest } from "../app/api/channel-onboarding/handler.js";
@@ -527,16 +527,23 @@ test("U03 actual Store本地全量账号视图同域A/B分离，两old monitor�
   assert.equal(key.scopeVersion, 3); assert.equal(key.billingEffectiveFromMs, Date.parse("2026-10-09T16:00:00Z"));
   assert.equal(key.firstQueryableAtMs, Date.parse("2026-10-10T16:00:00Z")); assert.equal(key.scopeAmbiguous, false);
   const kinds = new Set(model.actions.map((action) => action.kind));
-  for (const kind of ["update_authorization", "inspect_balance", "verify_identity", "connect_channels", "confirm_coverage", "wait_effective", "review_source"]) assert.ok(kinds.has(kind), kind);
+  for (const kind of ["update_authorization", "inspect_balance", "verify_identity", "connect_channels", "confirm_coverage", "review_source"]) assert.ok(kinds.has(kind), kind);
+  // 关联确认即生效，不再有“等待生效”的动作；所有接入动作都留在资源页。
+  assert.equal(kinds.has("wait_effective"), false);
   for (const item of model.actions) {
     const href = new URL(item.href, "https://local.test");
-    assert.ok(["/stations", "/reconciliation"].includes(href.pathname)); assert.ok(item.id && item.label); assert.equal(item.window, null);
+    assert.equal(href.pathname, "/stations"); assert.ok(item.id && item.label); assert.equal(item.window, null);
     if (item.stationId) assert.ok(f.store.get(item.stationId)); if (item.ruleId) assert.ok(f.state.rules.some((rule) => rule.id === item.ruleId));
     assert.notEqual(item.stationId, "own");
   }
   assert.deepEqual((await f.rt.channelOnboarding.listAccounts()).actions, model.actions);
   monitor.balance.remaining = 999; key.channels[0].ownSource.accountId = "changed";
   assert.equal(f.a1.balance.remaining, 10); assert.equal(f.state.rules[0].ownSource.accountId, "1");
+  // 即时生效规则：首个可结账时刻是核算起点（创建时刻）之后的本地零点，而不是最近一次修改之后的零点。
+  Object.assign(f.state.rules[0], { billingPolicy: "immediate", createdAt: "2026-10-08T03:00:00Z", billingEffectiveFrom: Date.parse("2026-10-09T05:00:00Z") });
+  const immediate = (await f.rt.channelOnboarding.listAccounts()).accounts.find((account) => account.identity.accountId === "A").keys.find((item) => item.tokenId === 9);
+  assert.equal(immediate.billingEffectiveFromMs, Date.parse("2026-10-09T05:00:00Z"));
+  assert.equal(immediate.firstQueryableAtMs, Date.parse("2026-10-08T16:00:00Z"));
 });
 
 test("U03 public历史关系保留，0active标历史，多active口径冲突不制造统一scope，未知legacy不伪造canonicalKey", async (t) => {
@@ -642,8 +649,14 @@ async function genuineBatchFixture(t) {
             rule.active_token_key, rule.billing_policy, rule.scope_version, rule.billing_effective_from_ms, rule.cost_coverage,
             rule.provider, rule.canonical_key, rule.source_binding] = params;
           state.ruleWrites += 1;
-        } else if (sql.startsWith("DELETE FROM reconciliation_rule_channels")) draft.members = draft.members.filter((member) => member.rule_id !== params[0]);
-        else if (sql.startsWith("INSERT INTO reconciliation_rule_channels")) draft.members.push(...params[0].map(([rule_id, channel_id, channel_name, active_channel_key]) =>
+        } else if (sql.startsWith("DELETE FROM reconciliation_rule_channels")) {
+          // 修改关联只删掉被移除的渠道行，保留仍在关联里的行（channel_id NOT IN (?)）。
+          const keep = sql.includes("NOT IN") ? params[1].map(Number) : [];
+          draft.members = draft.members.filter((member) => member.rule_id !== params[0] || keep.includes(Number(member.channel_id)));
+        } else if (sql.startsWith("UPDATE reconciliation_rule_channels SET channel_name")) {
+          const member = draft.members.find((item) => item.rule_id === params[2] && Number(item.channel_id) === Number(params[3]));
+          if (member) [member.channel_name, member.active_channel_key] = params;
+        } else if (sql.startsWith("INSERT INTO reconciliation_rule_channels")) draft.members.push(...params[0].map(([rule_id, channel_id, channel_name, active_channel_key]) =>
           ({ rule_id, channel_id, channel_name, active_channel_key })));
         return [{ affectedRows: 1 }];
       }, commit: async () => { state.rules = draft.rules; state.members = draft.members; }, rollback: async () => {}, release() {} };
@@ -874,14 +887,17 @@ for (const timezone of ["Asia/Shanghai", "UTC", "Asia/Singapore"]) {
   });
 }
 
-test("F03 genuine UTC original preview survives transient link failure and retries once without scope/date drift", async (t) => {
+test("F03 genuine UTC original preview survives transient link failure and retries once, taking effect at the retry's save moment", async (t) => {
   const f = await genuineBatchFixture(t), input = f.request([[1]]); input.groups[0].reconciliation.timezone = "UTC";
   const probe = await f.rt.channelOnboarding.probeBatch(input), confirmation = { ...input, previewId: probe.previewId };
+  // 新规则的生效时刻是确认那一刻，预览阶段无从得知。
+  assert.equal(probe.groups[0].preview.scopeChanged, true);
+  assert.equal(probe.groups[0].preview.billingEffectiveFromMs, null); assert.equal(probe.groups[0].preview.firstQueryableAtMs, null);
   f.state.failLinks = true;
   const partial = await f.rt.channelOnboarding.connectBatch(confirmation); assert.equal(partial.complete, false); assert.equal(f.state.ruleWrites, 0);
-  f.state.failLinks = false;
+  f.state.failLinks = false; f.state.now += 60000;
   const result = await f.rt.channelOnboarding.connectBatch(confirmation); assert.equal(result.complete, true); assert.equal(f.state.created, 1);
-  assert.equal(result.groups[0].saved.billingEffectiveFromMs, probe.groups[0].preview.billingEffectiveFromMs);
+  assert.equal(result.groups[0].saved.scopeVersion, 1); assert.equal(result.groups[0].saved.billingEffectiveFromMs, f.state.now);
   assert.equal(f.state.links.length, 1); assert.equal(f.store.data.stations.length, 2);
 });
 
@@ -1254,7 +1270,9 @@ test("U08 genuine HTTP原preview在link失败后不重启重试，不递归资�
     if (mode === "dedicated") {
       assert.equal(completed.groups[0].saved.authorizationStationId, authorizationId);
       assert.equal(f.store.get(authorizationId).monitorEnabled, false); assert.equal(f.store.get(authorizationId).includeInProfit, false);
-      assert.equal(completed.groups[0].saved.billingEffectiveFromMs, probe.groups[0].preview.billingEffectiveFromMs);
+      // 新规则预览不含生效时间，确认时才以保存时刻生效。
+      assert.equal(probe.groups[0].preview.billingEffectiveFromMs, null);
+      assert.equal(completed.groups[0].saved.billingEffectiveFromMs, f.state.now);
     }
     const repeated = await (await bounded(http("connectBatch", confirmation))).json();
     assert.equal(repeated.complete, true); assert.equal(f.state.ruleWrites, mode === "account" ? 0 : 1);
@@ -1453,7 +1471,7 @@ test("U02 actual HTTP拒绝append跨操作/replace跨target/篡改最终set声�
   assert.deepEqual({ rules: f.state.rules, members: f.state.members, writes: f.state.ruleWrites }, before);
 });
 
-test("U02 actual HTTP跨午夜edit零写后要求新预览，相同成功最终配置次日重试不延期", async (t) => {
+test("U02 actual HTTP跨午夜确认原预览直接成功，生效于保存时刻且只写这一次，相同最终配置次日重试不延期", async (t) => {
   const f = await genuineBatchFixture(t), initial = f.request([[1, 2]]);
   const firstProbe = await f.rt.channelOnboarding.probeBatch(initial);
   const first = await f.rt.channelOnboarding.connectBatch({ ...initial, previewId: firstProbe.previewId });
@@ -1462,18 +1480,24 @@ test("U02 actual HTTP跨午夜edit零写后要求新预览，相同成功最终�
   const input = { upstreamStationId: f.supplier.id, tokenId: 9, salesChannelIds: [2], coverageDeclaration: { answer: "none" } };
   f.state.now = Date.parse("2026-10-09T15:59:50Z"); await f.rt.channelOnboarding.sync();
   const preview = await (await POST(req(input), f.rt, { id })).json();
-  const before = structuredClone({ stations: f.store.data, links: f.state.links, rules: f.state.rules, members: f.state.members });
+  // 范围有变化：生效时刻是确认那一刻，预览里没有生效/可查询时间。
+  assert.equal(preview.preview.scopeChanged, true);
+  assert.equal(preview.preview.billingEffectiveFromMs, null); assert.equal(preview.preview.firstQueryableAtMs, null);
+  const before = structuredClone({ stations: f.store.data, links: f.state.links });
   f.state.now = Date.parse("2026-10-09T16:00:01Z"); await f.rt.channelOnboarding.sync();
-  const stale = await PUT(req({ ...input, previewId: preview.previewId, groupId: preview.groupId }), f.rt, { id });
-  assert.equal(stale.status, 409); const error = await stale.json();
-  assert.equal(error.code, "EFFECTIVE_PREVIEW_CHANGED"); assert.equal(error.nextPreview.billingEffectiveFromMs, Date.parse("2026-10-10T16:00:00Z"));
-  assert.deepEqual({ stations: f.store.data, links: f.state.links, rules: f.state.rules, members: f.state.members }, before);
-  assert.equal(f.state.ruleWrites, 1);
-  const fresh = await (await POST(req(input), f.rt, { id })).json();
-  const result = await PUT(req({ ...input, previewId: fresh.previewId, groupId: fresh.groupId }), f.rt, { id });
+  const result = await PUT(req({ ...input, previewId: preview.previewId, groupId: preview.groupId }), f.rt, { id });
   assert.equal(result.status, 200, JSON.stringify(await result.clone().json()));
-  const saved = (await result.json()).rule;
-  assert.equal(saved.scopeVersion, 2); assert.equal(saved.billingEffectiveFrom, Date.parse("2026-10-10T16:00:00Z"));
+  const body = await result.json(), saved = body.rule;
+  assert.equal(body.nextPreview, undefined);
+  assert.equal(saved.scopeVersion, 2); assert.equal(saved.billingEffectiveFrom, Date.parse("2026-10-09T16:00:01Z"));
+  assert.deepEqual(saved.channels.map((channel) => channel.channelId), [2]);
+  assert.deepEqual({ stations: f.store.data, links: f.state.links }, before);
+  assert.equal(f.state.ruleWrites, 2); assert.deepEqual(f.state.members.map((member) => member.channel_id), [2]);
+  // 再次预览同一最终配置：范围未变，预览带回已保存的生效时间。
+  const fresh = await (await POST(req(input), f.rt, { id })).json();
+  assert.equal(fresh.preview.scopeChanged, false); assert.equal(fresh.preview.billingEffectiveFromMs, saved.billingEffectiveFrom);
+  assert.equal(fresh.preview.firstQueryableAtMs, reconciliationBillingSchedule(saved).firstQueryableAtMs);
+  assert.equal(f.state.ruleWrites, 2);
   f.state.now += 24 * 3600000; await f.rt.channelOnboarding.sync();
   const repeated = await PUT(req(input), f.rt, { id });
   assert.equal(repeated.status, 200); const rule = (await repeated.json()).rule;
@@ -1629,8 +1653,9 @@ async function onboardingFixture() {
       canonicalKey, tokenId: token.id, keyVersion, existingRuleId: existing?.id || null, existingScopeVersion: existing?.scopeVersion || null,
       existingChannelIds: (existing?.channels || []).map((channel) => channel.channelId).sort((a, b) => a - b), proposedChannelIds: ids,
       timezone: policy.timezone, billingEffectiveFromMs: existing?.billingEffectiveFrom ?? null, coverageDeclaration: policy.coverageDeclaration },
-    preview: { costCoverage: policy.costCoverage, billingEffectiveFromMs: policy.billingEffectiveFrom,
-      firstQueryableAtMs: nextBillingEffectiveFrom(policy.timezone, policy.billingEffectiveFrom), scopeChanged: policy.scopeChanged } };
+    // 与生产一致：范围有变化时确认那一刻才生效，预览里不给生效时间。
+    preview: { costCoverage: policy.costCoverage, billingEffectiveFromMs: policy.scopeChanged ? null : policy.billingEffectiveFrom,
+      firstQueryableAtMs: policy.scopeChanged ? null : reconciliationBillingSchedule(policy).firstQueryableAtMs, scopeChanged: policy.scopeChanged } };
   };
   const saveRule = async (existing, input, { previewGuard } = {}) => rt.onboardingSource.withSourceLock(null, async () => {
     const context = await financialPreview({ ...input, salesChannelIds: input.channels.map((channel) => channel.channelId) }, { previewGuard });
@@ -1667,8 +1692,8 @@ async function onboardingFixture() {
   const request = (fields = {}) => ({ ownStationId: own.id, channelId: state.pages[0]?.id || 1,
     channelRevision: state.catalogue.channels.find((channel) => channel.id === (fields.channelId || 1)).revision,
     newStation: { name: "Supplier", type: "newapi", baseUrl: "https://up.example", accessToken: "supplier-secret" }, ...fields });
-  const billing = () => ({ tokenId: 8, costCoverage: "complete", timezone: "Asia/Shanghai",
-    previewEffectiveFromMs: nextBillingEffectiveFrom("Asia/Shanghai", state.now) });
+  // 新规则预览没有生效时间（确认即生效），客户端带回的 previewEffectiveFromMs 为 null。
+  const billing = () => ({ tokenId: 8, costCoverage: "complete", timezone: "Asia/Shanghai", previewEffectiveFromMs: null });
   return { rt, own, state, dependencies, repository, request, billing, restart, get module() { return module; } };
 }
 
@@ -2039,26 +2064,30 @@ test("低权限账号可接监控，账单暂时失败保留关系且不宣称�
   assert.equal(JSON.stringify(partial).includes("supplier-secret"), false);
 });
 
-test("原成员来源变更影响重试预览，不静默延后既有完整日边界", async () => {
+test("原成员来源变更使原预览失效且不静默改动既有生效时间，重新预览确认后从保存时刻生效", async () => {
   const f = await onboardingFixture();
   f.state.pages.push({ ...f.state.pages[0], id: 2 });
   await f.module.sync();
   const first = await connectWithPreview(f,f.request({ reconciliation: f.billing() }));
   await connectWithPreview(f,f.request({ channelId: 2, newStation: undefined, stationId: first.saved.stationIds[0], reconciliation: f.billing() }));
-  const previousEffective = f.state.rules[0].billingEffectiveFrom;
+  const previousEffective = f.state.rules[0].billingEffectiveFrom, previousVersion = f.state.rules[0].scopeVersion;
   const request = f.request({ newStation: undefined, stationId: first.saved.stationIds[0], reconciliation: f.billing() });
   const original = await f.module.probe(request);
+  assert.equal(original.preview.scopeChanged, false); assert.equal(original.preview.billingEffectiveFromMs, previousEffective);
   f.state.now += 24 * 3600000;
   f.state.pages[1].baseUrl = "https://other.example";
   await f.module.sync();
   const preview = await f.module.probe(request);
-  assert.notEqual(preview.preview.billingEffectiveFromMs, previousEffective);
+  // 来源变化即范围变化：生效时刻要等确认那一刻，预览里不给时间。
+  assert.equal(preview.preview.scopeChanged, true);
+  assert.equal(preview.preview.billingEffectiveFromMs, null); assert.equal(preview.preview.firstQueryableAtMs, null);
   const changed = await f.module.connect({ ...request, requestId: original.requestId, previewId: original.previewId });
   assert.equal(changed.complete, false);
   assert.ok(["PREVIEW_REQUIRED", "PREVIEW_BASIS_CHANGED"].includes(changed.code));
-  assert.equal(f.state.rules[0].billingEffectiveFrom, previousEffective);
+  assert.equal(f.state.rules[0].billingEffectiveFrom, previousEffective); assert.equal(f.state.rules[0].scopeVersion, previousVersion);
   const confirmed = await f.module.connect({ ...request, requestId: preview.requestId, previewId: preview.previewId });
   assert.equal(confirmed.complete, true, JSON.stringify(confirmed));
+  assert.equal(f.state.rules[0].billingEffectiveFrom, f.state.now); assert.equal(f.state.rules[0].scopeVersion, previousVersion + 1);
   assert.equal(f.module.inspectSource(f.state.rules[0]).status, "confirmed");
 });
 
@@ -2078,25 +2107,30 @@ test("追加旧规则完整确认财务来源但不捏造原渠道监控关系",
   assert.deepEqual(f.state.links.map((link) => link.channelId), [2]);
 });
 
-test("跨午夜原预览在资源关联规则零写前返回新边界，重新预览才能确认", async () => {
+test("跨午夜确认原预览直接成功，从保存时刻生效，重复确认不多写资源关联规则", async () => {
   const f = await onboardingFixture();
   f.state.now = Date.parse("2026-10-09T15:59:50Z");
   await f.module.sync();
   const input = f.request({ reconciliation: f.billing() });
   const preview = await f.module.probe(input);
+  assert.equal(preview.preview.scopeChanged, true);
+  assert.equal(preview.preview.billingEffectiveFromMs, null); assert.equal(preview.preview.firstQueryableAtMs, null);
   f.state.now = Date.parse("2026-10-09T16:00:01Z");
   await f.module.sync();
-  const changed = await f.module.connect({ ...input, requestId: preview.requestId, previewId: preview.previewId });
-  assert.equal(changed.complete, false);
-  assert.equal(changed.code, "EFFECTIVE_PREVIEW_CHANGED");
-  assert.equal(changed.monitor.status, "unavailable");
-  assert.equal(changed.preview.billingEffectiveFromMs, nextBillingEffectiveFrom("Asia/Shanghai", f.state.now));
-  assert.equal(f.state.rules.length, 0);
-  assert.deepEqual(f.state.links, []);
-  assert.equal(f.rt.store.list().length, 1);
-  const completed = await connectWithPreview(f,input);
-  assert.equal(completed.complete, true);
+  const confirmation = { ...input, requestId: preview.requestId, previewId: preview.previewId };
+  const completed = await f.module.connect(confirmation);
+  assert.equal(completed.complete, true, JSON.stringify(completed));
+  assert.equal(completed.code, undefined); assert.equal(completed.preview, undefined);
+  assert.equal(completed.monitor.status, "linked"); assert.equal(completed.reconciliation.status, "configured");
+  assert.equal(f.state.rules.length, 1);
+  assert.equal(f.state.rules[0].scopeVersion, 1); assert.equal(f.state.rules[0].billingEffectiveFrom, Date.parse("2026-10-09T16:00:01Z"));
+  assert.equal(completed.reconciliation.billingEffectiveFromMs, Date.parse("2026-10-09T16:00:01Z"));
+  assert.equal(f.state.links.length, 1);
   assert.equal(f.rt.store.list().length, 2);
+  const saved = structuredClone({ rules: f.state.rules, links: f.state.links, stations: f.rt.store.list() });
+  const repeated = await f.module.connect(confirmation);
+  assert.equal(repeated.complete, true, JSON.stringify(repeated));
+  assert.deepEqual({ rules: f.state.rules, links: f.state.links, stations: f.rt.store.list() }, saved);
 });
 
 test("在途验证不能保存已编辑授权身份，临时令牌不共享给 Store", async () => {
@@ -2234,7 +2268,8 @@ test("下游目录错误回显本站旧凭证时，接入的部分结果和重�
   });
   f.rt.reconciliation.createRule = async () => queryOwnChannels(structuredClone(f.own));
   const pending = connectWithPreview(f,f.request({ reconciliation: f.billing() }));
-  await started;
+  // 若接入在调用 createRule 之前就结束（例如预览被拒），started 永远不会触发；此时立即失败而不是挂到超时。
+  await Promise.race([started, pending.then((value) => assert.fail(`接入未到达 createRule 就结束：${JSON.stringify(value)}`))]);
   await f.rt.store.update(f.own.id, { accessToken: "replacement-own-secret" });
   release();
   const result = await pending;

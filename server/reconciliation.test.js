@@ -214,10 +214,11 @@ test("今天的较早慢查询不能复用或覆盖较晚查询的缓存", async
 });
 
 test("成功快照查询不会因最新候选无效而漏掉较早有效账单", async () => {
-  const window = { preset: "7d", startMs: 1000, endMs: 5000, timezone: "Asia/Shanghai" };
+  // 确认账单只认已结束的完整自然日窗口。
+  const window = { preset: "yesterday", startMs: Date.parse("2026-09-21T16:00:00.000Z"), endMs: Date.parse("2026-09-22T16:00:00.000Z"), timezone: "Asia/Shanghai" };
   const valid = {
     recordType: "confirmed", calculationVersion: 3, billingSource: "channel-log-stat", scopeFingerprint: "scope",
-    window: { ...window, endMs: 4000 }, resultGeneratedAt: "2026-09-23T09:00:00.000Z",
+    window: { ...window }, resultGeneratedAt: "2026-09-23T09:00:00.000Z",
     result: { calculation: { differenceUsd: 2, profitUsd: 2, riskDifferenceUsd: null, marginRate: 0.5 } },
   };
   const repository = new ReconciliationRepository({
@@ -286,11 +287,11 @@ test("较早成功或未确认快照都不能覆盖更晚的确认快照", async
 });
 
 test("持久化成功账单只接受相同核算口径，并从记录类型命名空间筛选候选快照", async () => {
-  const window = { preset: "7d", startMs: 1000, endMs: 5000, timezone: "Asia/Shanghai" };
+  const window = { preset: "yesterday", startMs: Date.parse("2026-09-21T16:00:00.000Z"), endMs: Date.parse("2026-09-22T16:00:00.000Z"), timezone: "Asia/Shanghai" };
   const calls = [];
   const source = {
     recordType: "confirmed", calculationVersion: 3, billingSource: "channel-log-stat", scopeFingerprint: "current-scope",
-    window: { ...window, endMs: 4000 }, resultGeneratedAt: "2026-09-23T10:00:00.000Z",
+    window: { ...window }, resultGeneratedAt: "2026-09-23T10:00:00.000Z",
     result: { calculation: { differenceUsd: 2, profitUsd: 2, riskDifferenceUsd: null, marginRate: 0.5 } },
   };
   const repository = new ReconciliationRepository({
@@ -1131,28 +1132,31 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
   let now = Date.parse("2026-09-20T04:26:08.000Z");
   Date.now = () => now;
   t.after(() => { Date.now = realNow; });
-  const todayA = await module.queryRules({ ruleIds: [rule.id], preset: "today" }, { force: true });
-  const todayAmount = todayA.results[0].upstream.amountUsd;
-  const todaySuccessAt = todayA.results[0].lastSuccessfulAt;
+  // 只有已结束的完整日才保存确认账单，所以用"昨日"验证重启后保留确认时间、不跨日复用。
+  const dayA = await module.queryRules({ ruleIds: [rule.id], preset: "yesterday" }, { force: true });
+  const dayAmount = dayA.results[0].upstream.amountUsd;
+  const daySuccessAt = dayA.results[0].lastSuccessfulAt;
+  assert.ok(daySuccessAt, JSON.stringify(dayA.results[0].health));
   upstreamBroken = true;
   const restarted = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id), channels: [] } });
   const restartedResult = await restarted.queryRules({
-    ruleIds: [rule.id], preset: "today",
+    ruleIds: [rule.id], preset: "yesterday",
   }, { force: true });
-  assert.equal(restartedResult.results[0].lastConfirmed.generatedAt, todaySuccessAt, "a restarted process must preserve the persisted confirmed time when partial collection fails");
-  assert.equal(restartedResult.results[0].window.endMs, todayA.results[0].window.endMs, "a restarted process must retain the persisted data coverage window");
+  assert.equal(restartedResult.results[0].lastConfirmed.generatedAt, daySuccessAt, "a restarted process must preserve the persisted confirmed time when partial collection fails");
+  assert.equal(restartedResult.results[0].window.endMs, dayA.results[0].window.endMs, "a restarted process must retain the persisted data coverage window");
   assert.ok(restartedResult.results[0].requestedWindow.endMs >= restartedResult.results[0].window.endMs);
   now += 30000;
-  const todayB = await module.queryRules({ ruleIds: [rule.id], preset: "today" }, { force: true });
-  assert.equal(todayB.results[0].health.stale, false);
-  assert.equal(todayB.results[0].upstream.amountUsd, null);
-  assert.equal(todayB.results[0].lastConfirmed.upstream.amountUsd, todayAmount);
-  assert.equal(todayB.results[0].lastConfirmed.generatedAt, todaySuccessAt);
-  assert.ok(todayB.results[0].requestedWindow.endMs >= todayB.results[0].window.endMs);
+  const dayB = await module.queryRules({ ruleIds: [rule.id], preset: "yesterday" }, { force: true });
+  assert.equal(dayB.results[0].health.stale, false);
+  assert.equal(dayB.results[0].upstream.amountUsd, null);
+  assert.equal(dayB.results[0].lastConfirmed.upstream.amountUsd, dayAmount);
+  assert.equal(dayB.results[0].lastConfirmed.generatedAt, daySuccessAt);
+  assert.ok(dayB.results[0].requestedWindow.endMs >= dayB.results[0].window.endMs);
   now += 86400000;
-  const nextDayToday = await module.queryRules({ ruleIds: [rule.id], preset: "today" }, { force: true });
-  assert.equal(nextDayToday.results[0].upstream.amountUsd, null, "a different local day must not reuse yesterday's today result");
-  assert.equal(nextDayToday.results[0].health.stale, false);
+  const nextDay = await module.queryRules({ ruleIds: [rule.id], preset: "yesterday" }, { force: true });
+  assert.equal(nextDay.results[0].upstream.amountUsd, null, "a different local day must not reuse the previous day's confirmed result");
+  assert.equal(nextDay.results[0].lastConfirmed, undefined);
+  assert.equal(nextDay.results[0].health.stale, false);
   const otherWindow = await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1060000, endMs: 1120000 }, { force: true });
   assert.equal(otherWindow.results[0].upstream.amountUsd, null, "a failed second window must not reuse the first window's cost");
   assert.equal(otherWindow.results[0].lastSuccessfulAt, undefined);
@@ -1794,6 +1798,9 @@ test("快照事务提交后、通知前口径被修正时，不为旧口径记�
 
 // 真实取数路径的夹具：两侧 NewAPI 由 fetch 替身应答，数据库用内存 Repository。
 // 每个分段上游消费 $1、本站渠道收费 $2.5，利润 $1.5。
+// 已结束的上海完整自然日：只有这种窗口的利润会保存为确认账单。
+const SETTLED_DAY = { startMs: Date.parse("2026-09-18T16:00:00.000Z"), endMs: Date.parse("2026-09-19T16:00:00.000Z") };
+
 function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
@@ -2086,15 +2093,17 @@ test("今天和近 7 天中间有不满一秒的已结束分段时不能跳过�
 
 test("两侧都已应答的上游空消费异常不能被旧的确认利润掩盖，数据源不可用时才回退", async (t) => {
   const { rule, state, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }] });
-  const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 };
+  const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", ...SETTLED_DAY };
   const confirmed = await module.queryRules(input, { force: true });
   assert.equal(confirmed.results[0].calculation.profitUsd, 1.5);
-  assert.equal(state.writes, 2, "完整结果保存 observation 与 confirmed 两份记录");
+  assert.equal(state.writes, 2, "已结束完整日的完整结果保存 observation 与 confirmed 两份记录");
   const savedSource = [...state.snapshots.values()][0].source;
 
   state.upstreamQuota = 0;
   const anomaly = await module.queryRules(input, { force: true });
-  assert.equal(anomaly.results[0].health.code, "UPSTREAM_EMPTY_WITH_SALES");
+  // 已结束完整日上游为 0 时首要状态是“等待该窗口账单”，空消费异常仍作为本轮 issue 保留。
+  assert.equal(anomaly.results[0].health.code, "WAITING_FOR_BILL");
+  assert.ok(anomaly.results[0].health.issues.some((issue) => issue.code === "UPSTREAM_EMPTY_WITH_SALES"));
   assert.equal(anomaly.results[0].health.stale, false, "两侧都已应答时展示本轮异常，不能回退到旧账单");
   assert.equal(anomaly.results[0].calculation.profitUsd, null);
   assert.equal(anomaly.results[0].calculation.riskDifferenceUsd, 2.5);
@@ -2103,7 +2112,8 @@ test("两侧都已应答的上游空消费异常不能被旧的确认利润掩�
 
   state.upstreamQuota = null;
   const unavailable = await module.queryRules(input, { force: true });
-  assert.equal(unavailable.results[0].health.code, "UPSTREAM_DATA_UNAVAILABLE");
+  assert.equal(unavailable.results[0].health.code, "WAITING_FOR_BILL");
+  assert.ok(unavailable.results[0].health.issues.some((issue) => issue.code === "UPSTREAM_DATA_UNAVAILABLE"));
   assert.equal(unavailable.results[0].health.stale, false);
   assert.equal(unavailable.results[0].calculation.profitUsd, null);
   assert.equal(unavailable.results[0].lastConfirmed.calculation.profitUsd, 1.5);
@@ -2189,7 +2199,7 @@ test("最近确认快照读取失败不丢弃本轮 observation 和 confirmed �
     segments: [{ id: "s1", group: "g1", from: 1000 }], failLatestLookup: true,
   });
   const { results } = await module.queryRules({
-    ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000,
+    ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", ...SETTLED_DAY,
   }, { force: true });
   assert.equal(results[0].calculation.profitUsd, 1.5);
   assert.equal(results[0].lastConfirmed, undefined);
@@ -2202,7 +2212,7 @@ test("同批规则中快照写入失败只返回该规则的 PERSISTENCE_FAILED"
     extraRuleIds: ["rr_snapshot_fail"], channelsByRule: { rr_snapshot_fail: [2] }, failSnapshotForRule: "rr_snapshot_fail",
   });
   const { results } = await module.queryRules({
-    ruleIds: [rule.id, "rr_snapshot_fail"], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000,
+    ruleIds: [rule.id, "rr_snapshot_fail"], preset: "custom", timezone: "Asia/Shanghai", ...SETTLED_DAY,
   }, { force: true });
   assert.equal(results.length, 2);
   assert.equal(results[0].calculation.profitUsd, 1.5);
@@ -2474,7 +2484,7 @@ test("upstream unavailable retains persisted segment evidence in the response an
 
 test("进程重启后只恢复同一完整窗口和站点来源的成功账单，失败不覆盖该快照", async (t) => {
   const { rule, state, rt, repository, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }] });
-  const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 };
+  const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", ...SETTLED_DAY };
   const initial = await module.queryRules(input, { force: true });
   assert.equal(initial.results[0].calculation.profitUsd, 1.5);
   const writes = state.writes;
@@ -2490,18 +2500,23 @@ test("进程重启后只恢复同一完整窗口和站点来源的成功账单�
   assert.equal(state.writes, writes + 1, "上游故障保存本轮 observation 而不覆盖 confirmed");
 });
 
-test("持久化 today 成功账单可用于同日较晚窗口，不能跨本地日期复用", async () => {
+test("持久化 today observation 可用于同日较晚窗口、不能跨本地日期复用；未结束 today 不作为确认账单", async () => {
   const first = resolveReconciliationWindow({ preset: "today", timezone: "Asia/Shanghai" }, Date.parse("2026-09-20T04:26:08.000Z"));
-  const rows = [{
-    health_code: "READY",
-    source: JSON.stringify({ recordType: "confirmed", calculationVersion: 3, billingSource: "channel-log-stat", scopeFingerprint: "scope", window: first, resultGeneratedAt: "2026-09-20T04:26:08.000Z", result: { upstream: { amountUsd: 2.5 }, calculation: { differenceUsd: 2.5, profitUsd: 2.5, riskDifferenceUsd: null, marginRate: 0.5 } } }),
-  }];
+  const source = { calculationVersion: 3, billingSource: "channel-log-stat", scopeFingerprint: "scope", window: first, resultGeneratedAt: "2026-09-20T04:26:08.000Z",
+    result: { upstream: { amountUsd: 2.5 }, calculation: { differenceUsd: 2.5, profitUsd: 2.5, riskDifferenceUsd: null, marginRate: 0.5 } } };
+  const rows = [
+    { health_code: "READY", source: JSON.stringify({ ...source, recordType: "observation" }) },
+    // 旧版本曾把未结束的 today 也写成 confirmed。
+    { health_code: "READY", source: JSON.stringify({ ...source, recordType: "confirmed" }) },
+  ];
   const repository = new ReconciliationRepository({
     async query() { return [rows]; },
   });
   const sameDay = { ...first, endMs: first.endMs + 30000 };
-  assert.equal((await repository.latestSuccessfulResult("rr", sameDay, "scope"))?.result.upstream.amountUsd, 2.5);
+  assert.equal((await repository.latestObservation("rr", sameDay, "scope"))?.result.upstream.amountUsd, 2.5);
+  assert.equal(await repository.latestSuccessfulResult("rr", sameDay, "scope"), null, "未结束的 today 不是确认账单");
   const nextDay = resolveReconciliationWindow({ preset: "today", timezone: "Asia/Shanghai" }, Date.parse("2026-09-21T04:26:08.000Z"));
+  assert.equal(await repository.latestObservation("rr", nextDay, "scope"), null);
   assert.equal(await repository.latestSuccessfulResult("rr", nextDay, "scope"), null);
 });
 
@@ -2526,7 +2541,7 @@ test("重启后的仓储公开读取同口径 observation，且不伪称未确�
 });
 
 test("零利润的完整账单仍可作为最近成功结果恢复", async () => {
-  const window = { preset: "custom", startMs: 1000, endMs: 2000, timezone: "Asia/Shanghai" };
+  const window = { preset: "custom", startMs: Date.parse("2026-09-20T16:00:00.000Z"), endMs: Date.parse("2026-09-21T16:00:00.000Z"), timezone: "Asia/Shanghai" };
   const repository = new ReconciliationRepository({
     async query() {
       return [[{ health_code: "READY", source: JSON.stringify({
@@ -2800,8 +2815,14 @@ function membershipFixture() {
           await state.onRuleWrite?.();
           return [{ affectedRows: 1 }];
         }
+        if (sql.startsWith("UPDATE reconciliation_rule_channels")) {
+          const row = working.channels.find((channel) => channel.rule_id === params[2] && channel.channel_id === params[3]);
+          if (row) { row.channel_name = params[0]; row.active_channel_key = params[1]; }
+          return [{ affectedRows: row ? 1 : 0 }];
+        }
         if (sql.startsWith("DELETE FROM reconciliation_rule_channels")) {
-          working.channels = working.channels.filter((channel) => channel.rule_id !== params[0]);
+          const kept = sql.includes("NOT IN") ? params[1] : [];
+          working.channels = working.channels.filter((channel) => channel.rule_id !== params[0] || kept.includes(channel.channel_id));
           return [{ affectedRows: 1 }];
         }
         if (sql.startsWith("INSERT INTO reconciliation_rule_channels")) {
@@ -2901,7 +2922,8 @@ test("U01 dry-read使用真实Key与来源并集，无写入且不把采样时�
   assert.equal(first.basis.billingEffectiveFromMs, null);
   assert.equal(first.preview.scopeChanged, true);
   assert.equal(first.preview.costCoverage, "complete");
-  assert.equal(first.preview.billingEffectiveFromMs, nextBillingEffectiveFrom("Asia/Shanghai"));
+  assert.equal(first.preview.billingEffectiveFromMs, null, "范围变化在确认时刻生效，预览不给生效时间");
+  assert.equal(first.preview.firstQueryableAtMs, null);
   const second = await f.module.previewKeyScope(f.input);
   assert.equal(first.basis.keyVersion, second.basis.keyVersion);
   assert.deepEqual(f.state.rules, before);
@@ -2969,21 +2991,22 @@ test("U01财务Repository guard在SQL前和commit前执行，后者失败无成�
   assert.equal(f.state.rules[0].scope_version, undefined);
 });
 
-test("U01行锁写入期间跨午夜在commit guard重算完整日，拒绝旧日期且回滚", async (t) => {
+test("U01行锁写入期间跨午夜不再拒绝，commit guard复核后按保存时刻立即生效", async (t) => {
   let now = Date.parse("2026-10-09T15:59:59Z");
   t.mock.method(Date, "now", () => now);
-  const f = membershipFixture(), expected = nextBillingEffectiveFrom("Asia/Shanghai", now);
+  const f = membershipFixture(), savedAt = now;
   f.state.onRuleWrite = () => { now += 2000; };
-  let calls = 0;
-  await assert.rejects(f.repository.appendChannels("rr_members", [{ channelId: 2, name: "two" }], { costCoverage: "complete" }, {
-    guard(_existing, _channels, policy) {
-      calls += 1;
-      if (policy.billingEffectiveFrom !== expected) throw Object.assign(new Error("date boundary changed"), { code: "EFFECTIVE_PREVIEW_CHANGED" });
-    },
-  }), (error) => error.code === "EFFECTIVE_PREVIEW_CHANGED");
-  assert.equal(calls, 2);
-  assert.equal(f.state.rules[0].billing_effective_from_ms, undefined);
-  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1]);
+  const seen = [];
+  const rule = await f.repository.appendChannels("rr_members", [{ channelId: 2, name: "two" }], { costCoverage: "complete" }, {
+    guard(_existing, _channels, policy) { seen.push([policy.billingPolicy, policy.scopeVersion, policy.scopeChanged]); },
+  });
+  assert.deepEqual(seen, [["immediate", 2, true], ["immediate", 2, true]], "SQL前和commit前各复核一次");
+  assert.equal(f.state.rollbacks, 0);
+  assert.equal(f.state.rules[0].billing_effective_from_ms, savedAt);
+  assert.equal(rule.billingEffectiveFrom, savedAt);
+  assert.notEqual(rule.billingEffectiveFrom, nextBillingEffectiveFrom("Asia/Shanghai", savedAt), "不再推迟到下一个完整日");
+  assert.equal(rule.scopeVersion, 2);
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1, 2]);
 });
 
 test("U01真public probe授权整组五渠道一次scope；复制引用失败，旧POST/PUT明确消费proof", async (t) => {
@@ -3022,7 +3045,7 @@ test("U02真实issuer+HTTP删除/同时增删精确替换，不继承被删成�
   assert.equal(first.id, "rr_members");
   assert.deepEqual(first.channels.map((channel) => channel.channelId), [2]);
   assert.equal(first.scopeVersion, 2);
-  assert.equal(first.billingEffectiveFrom, Date.parse("2026-10-09T16:00:00Z"));
+  assert.equal(first.billingEffectiveFrom, Date.parse("2026-10-09T07:00:00Z"), "确认时刻即生效");
   const mixed = { ...body, salesChannelIds: [3], coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] } };
   const next = await f.rt.onboardingSource.probeRuleEdit("rr_members", mixed);
   confirmed = await PUT(request({ ...mixed, previewId: next.previewId, groupId: next.groupId }), f.rt, { id: "rr_members" });
@@ -3063,20 +3086,25 @@ test("U02同一PUT成功后次日/重启/过期preview只读重试，scope/day�
   assert.equal(f.state.ruleWrites, writes);
 });
 
-test("U02 genuine PUT SQL期间跨午夜在commit guard回滚，不留下成员或身份锚定", async (t) => {
+test("U02 genuine PUT SQL期间跨午夜仍一次提交，按保存时刻生效并精确替换成员", async (t) => {
   let now = Date.parse("2026-10-09T15:59:59Z");
   t.mock.method(Date, "now", () => now);
   const f = await financialFixture(t), { PUT } = await financialRuleRoutes();
   const body = { ...f.input, salesChannelIds: [2] }, proof = await f.rt.onboardingSource.probeRuleEdit("rr_members", body);
+  const savedAt = now;
   f.state.onRuleWrite = () => { now += 2000; };
   const response = await PUT(new Request("https://app.test/rules/rr_members", { method: "PUT", body: JSON.stringify({ ...body,
     previewId: proof.previewId, groupId: proof.groupId }) }), f.rt, { id: "rr_members" });
-  assert.equal(response.status, 409);
-  assert.equal((await response.json()).code, "EFFECTIVE_PREVIEW_CHANGED");
-  assert.equal(f.state.ruleWrites, 0);
-  assert.equal(f.state.rules[0].canonical_key, undefined);
-  assert.equal(f.state.rules[0].scope_version, undefined);
-  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1]);
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+  const { rule } = await response.json();
+  assert.equal(rule.scopeVersion, 2);
+  assert.equal(rule.billingEffectiveFrom, savedAt);
+  assert.deepEqual(rule.channels.map((channel) => channel.channelId), [2]);
+  assert.equal(f.state.ruleWrites, 1);
+  assert.equal(f.state.rollbacks, 0);
+  assert.equal(f.state.rules[0].scope_version, 2);
+  assert.equal(f.state.rules[0].canonical_key, rule.canonicalKey);
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [2]);
 });
 
 test("U02 exact replace旧preview不得删除并发新成员，fresh final意图可保留它", async (t) => {
@@ -3090,7 +3118,7 @@ test("U02 exact replace旧preview不得删除并发新成员，fresh final意图
   assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1, 3]);
   const nextBody = { ...body, salesChannelIds: [2, 3] }, next = await f.rt.onboardingSource.probeRuleEdit("rr_members", nextBody);
   const rule = await f.module.updateRule("rr_members", nextBody, { previewGuard: f.rt.onboardingSource.getPreviewGuard(next.previewId, next.groupId) });
-  assert.deepEqual(rule.channels.map((channel) => channel.channelId), [2, 3]);
+  assert.deepEqual(rule.channels.map((channel) => channel.channelId).sort((a, b) => a - b), [2, 3]);
 });
 
 test("U02 private original enabled事实拒绝preview后停用，fresh replace可明确恢复", async (t) => {
@@ -3127,20 +3155,21 @@ test("U01真正public batch确认一次保存五渠道金融组，消费成功�
   assert.equal(f.persisted.links.length, 5);
 });
 
-test("U01真正public batch跨午夜拒绝发生在resource/link/rule任何写入前", async (t) => {
+test("U01真正public batch预览后跨午夜确认仍一次保存，按保存时刻生效无需重新预览", async (t) => {
   let now = Date.parse("2026-10-09T15:59:59Z");
   t.mock.method(Date, "now", () => now);
   const f = await financialFixture(t, { create: true }), proof = await financialProof(f, [1, 2, 3, 4, 5]);
-  const before = structuredClone(f.store.data.stations);
+  assert.equal(proof.probe.groups[0].preview.billingEffectiveFromMs, null);
   now += 2000;
   const result = await f.rt.onboardingSource.connectBatch({ ...proof.input, previewId: proof.probe.previewId });
-  assert.equal(result.complete, false);
-  assert.equal(result.groups[0].code, "EFFECTIVE_PREVIEW_CHANGED", JSON.stringify(result));
-  assert.ok(result.groups[0].remainingActions.includes("repreview"));
-  assert.equal(result.groups[0].nextPreview.billingEffectiveFromMs, Date.parse("2026-10-10T16:00:00Z"));
-  assert.deepEqual(f.store.data.stations, before);
-  assert.equal(f.persisted.links.length, 0);
-  assert.equal(f.state.created, 0);
+  assert.equal(result.complete, true, JSON.stringify(result));
+  assert.equal(result.groups[0].reconciliation.status, "configured");
+  assert.equal(result.groups[0].saved.scopeVersion, 1);
+  assert.equal(result.groups[0].saved.billingEffectiveFromMs, now, "生效时刻是保存时刻而非下一个完整日");
+  assert.equal(f.state.rules[0].billing_effective_from_ms, now);
+  assert.equal(f.persisted.links.length, 5);
+  assert.equal(f.state.created, 1);
+  assert.deepEqual(f.state.channels.map((channel) => channel.channel_id), [1, 2, 3, 4, 5]);
 });
 
 test("U01真正public batch并发旧预览拒绝，重新预览完整并集保留另一成功追加", async (t) => {
@@ -3174,17 +3203,15 @@ test("U01public proof下两个旧资源同actual账号/Key复用原规则及原b
   assert.equal(f.state.created, 0);
 });
 
-test("U01真public preview跨午夜在金融提交前拒绝，已完成无proof重试保留日期", async (t) => {
+test("U01真public preview跨午夜后仍可确认并按保存时刻生效，已完成无proof重试保留日期", async (t) => {
   let now = Date.parse("2026-10-09T15:59:59Z");
   t.mock.method(Date, "now", () => now);
   const f = await financialFixture(t), proof = await financialProof(f);
   now += 2000;
-  await assert.rejects(f.module.appendChannels("rr_members", f.input.salesChannelIds, { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: proof.guard }),
-    (error) => error.code === "EFFECTIVE_PREVIEW_CHANGED" && error.nextPreview.billingEffectiveFromMs === Date.parse("2026-10-10T16:00:00Z"));
-  assert.equal(f.state.rules[0].scope_version, undefined);
-  const next = await financialProof(f);
-  const saved = await f.module.appendChannels("rr_members", f.input.salesChannelIds, { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: next.guard });
+  const saved = await f.module.appendChannels("rr_members", f.input.salesChannelIds, { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: proof.guard });
   assert.equal(saved.scopeVersion, 2);
+  assert.equal(saved.billingEffectiveFrom, now);
+  assert.deepEqual(saved.channels.map((channel) => channel.channelId).sort((a, b) => a - b), [1, 2, 3, 4, 5]);
   now += 86400000;
   await f.rt.onboardingSource.sync();
   const retry = await f.module.appendChannels("rr_members", f.input.salesChannelIds, { coverageDeclaration: f.input.coverageDeclaration });
@@ -3244,7 +3271,7 @@ test("U01public guard核验额外监控/独立billing auth；同actual账号轮�
   assert.equal(unchanged.scopeVersion, saved.scopeVersion);
 });
 
-test("U01actual账号/ownnamespace改变要求新完整日，旧history不被提前锚定", async (t) => {
+test("U01actual账号/ownnamespace改变推进scope版本并从确认时刻生效，旧history不被提前锚定", async (t) => {
   let now = Date.parse("2026-10-09T07:00:00Z");
   t.mock.method(Date, "now", () => now);
   const f = await financialFixture(t), original = await financialProof(f, [1, 2]);
@@ -3261,14 +3288,14 @@ test("U01actual账号/ownnamespace改变要求新完整日，旧history不被提
   const changed = await f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: account.guard });
   assert.notEqual(changed.canonicalKey, first.canonicalKey);
   assert.equal(changed.scopeVersion, first.scopeVersion + 1);
-  assert.equal(changed.billingEffectiveFrom, nextBillingEffectiveFrom("Asia/Shanghai", now));
+  assert.equal(changed.billingEffectiveFrom, now);
   now += 86400000;
   f.remote.ownAccountId = 2; await f.rt.onboardingSource.sync();
   const namespace = await financialProof(f, [1, 2]);
   const moved = await f.module.appendChannels("rr_members", [1, 2], { coverageDeclaration: f.input.coverageDeclaration }, { previewGuard: namespace.guard });
   assert.equal(moved.scopeVersion, changed.scopeVersion + 1);
   assert.notEqual(moved.ownSource.namespaceKey, changed.ownSource.namespaceKey);
-  assert.equal(moved.billingEffectiveFrom, nextBillingEffectiveFrom("Asia/Shanghai", now));
+  assert.equal(moved.billingEffectiveFrom, now);
   assert.equal(anchors.mock.callCount(), 0);
   assert.equal(observations.mock.callCount(), 0, "scope确认不得先改旧来源/倍率历史");
 });
@@ -3313,7 +3340,7 @@ test("Repository 并发追加在行锁内读取最新并集，次日幂等重试
   assert.deepEqual(first.channels.map((channel) => channel.channelId).sort(), [1, 2, 3]);
   assert.equal(first.scopeVersion, 3);
   assert.deepEqual(first.sourceBinding, { 2: "r2", 3: "r3" });
-  assert.equal(first.billingEffectiveFrom, Date.parse("2026-10-09T16:00:00Z"));
+  assert.equal(first.billingEffectiveFrom, Date.parse("2026-10-09T07:00:00Z"), "确认时刻即生效");
   now += 86400000;
   const retry = await repository.appendChannels("rr_members", [{ channelId: 2, name: "二" }], { costCoverage: "complete", sourceBinding: { 2: "r2" }, previewEffectiveFromMs: first.billingEffectiveFrom });
   assert.equal(retry.scopeVersion, first.scopeVersion);
@@ -3362,7 +3389,7 @@ test("两个旧资源同账号新金融创建不能绕过proof或产生第二份
   assert.equal(state.created, 0);
 });
 
-test("新范围生效前、跨界和未结束窗口保留两侧金额，只有完整日确认利润", async (t) => {
+test("新范围从生效时刻起核算：生效前窗口不取数，跨界窗口只算生效后，未结束窗口给实时利润，只有完整日确认", async (t) => {
   const now = Date.parse("2026-10-11T01:00:00Z");
   t.mock.method(Date, "now", () => now);
   const effective = Date.parse("2026-10-09T16:00:00Z");
@@ -3370,24 +3397,46 @@ test("新范围生效前、跨界和未结束窗口保留两侧金额，只有�
   Object.assign(rule, { billing_policy: "next-complete-day", scope_version: 2, billing_effective_from_ms: effective, cost_coverage: "complete", source_binding: { 1: "r1" } });
   rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
   const query = async (startMs, endMs) => (await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs, endMs }, { force: true })).results[0];
-  for (const [start, end, code] of [[effective - 86400000, effective, "BILLING_SCOPE_NOT_EFFECTIVE"],
-    [effective - 86400000, effective + 86400000, "BILLING_SCOPE_NOT_EFFECTIVE"],
-    [effective + 86400000, now, "BILLING_WINDOW_UNCONFIRMED"]]) {
-    const result = await query(start, end);
-    assert.equal(result.upstream.amountUsd, 1);
-    assert.equal(result.downstream.amountUsd, 2.5);
-    assert.equal(result.calculation.profitUsd, null);
-    assert.ok(result.health.issues.some((issue) => issue.code === code));
-    assert.deepEqual(result.segments[0].window, result.window, "不把生效边界裁切后金额冒充整窗");
-  }
+  const blockers = ["BILLING_SCOPE_NOT_EFFECTIVE", "BILLING_WINDOW_UNCONFIRMED"];
+  const confirmedCount = () => [...state.snapshots.values()].filter((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed").length;
+  let calls = state.statCalls.length;
+  const before = await query(effective - 86400000, effective);
+  assert.equal(state.statCalls.length, calls, "生效前窗口不向任何一侧取数");
+  assert.deepEqual(before.segments, []);
+  assert.equal(before.upstream.amountUsd, 0);
+  assert.equal(before.downstream.amountUsd, 0);
+  assert.equal(before.calculation.profitUsd, 0);
+  assert.ok(!before.health.issues.some((issue) => blockers.includes(issue.code)));
+  calls = state.statCalls.length;
+  const crossing = await query(effective - 86400000, effective + 86400000);
+  assert.equal(crossing.upstream.amountUsd, 1);
+  assert.equal(crossing.downstream.amountUsd, 2.5);
+  assert.equal(crossing.calculation.profitUsd, 1.5);
+  assert.deepEqual(crossing.segments[0].window, { ...crossing.window, startMs: effective }, "只核算生效时刻之后的部分");
+  assert.ok(state.statCalls.slice(calls).every((call) => call.start === effective / 1000), JSON.stringify(state.statCalls.slice(calls)));
+  assert.equal(crossing.scope.accountedFromMs, effective);
+  assert.equal(crossing.scope.recalculated, true);
+  assert.equal(crossing.settlement, "settled");
+  assert.ok(!crossing.health.issues.some((issue) => blockers.includes(issue.code)));
+  const written = confirmedCount();
+  const live = await query(effective + 86400000, now);
+  assert.equal(live.upstream.amountUsd, 1);
+  assert.equal(live.downstream.amountUsd, 2.5);
+  assert.equal(live.calculation.profitUsd, 1.5, "未结束窗口给出实时利润");
+  assert.equal(live.settlement, "live");
+  assert.equal(live.scope.accountedFromMs, null);
+  assert.ok(!live.health.issues.some((issue) => blockers.includes(issue.code)));
+  assert.equal(confirmedCount(), written, "未结束窗口只保存 observation，不写确认账单");
   const confirmed = await query(effective, effective + 86400000);
   assert.equal(confirmed.calculation.profitUsd, 1.5);
+  assert.equal(confirmed.scope.recalculated, false);
+  assert.equal(confirmed.settlement, "settled");
   rule.cost_coverage = "unknown";
   const unknown = await query(effective, effective + 86400000);
   assert.equal(unknown.calculation.profitUsd, null);
   assert.equal(unknown.upstream.knownAmountUsd, 1);
   assert.ok(unknown.health.issues.some((issue) => issue.code === "COST_COVERAGE_UNKNOWN"));
-  assert.equal([...state.snapshots.values()].filter((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed").length, 1);
+  assert.equal(confirmedCount(), written + 1, "覆盖未知的结果不写确认账单");
 });
 
 test("来源版本变化废弃旧在途查询和缓存，待核对保留独立账单金额", async (t) => {
@@ -4009,7 +4058,7 @@ test("U05真实withAuth历史/configuration opt-in：归档入口可发现、默
 test("U05未来snapshot保存原ruleEvidence，随后配置/成员变化不能改写已存原账", async (t) => {
   const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000000 }] });
   trustedLegacyRule(f.rule, f.stations, 7, 1);
-  await f.module.queryRules({ ruleIds: [f.rule.id], preset: "custom", startMs: 1000000, endMs: 1060000 }, { force: true });
+  await f.module.queryRules({ ruleIds: [f.rule.id], preset: "custom", timezone: "Asia/Shanghai", ...SETTLED_DAY }, { force: true });
   const snapshot = [...f.state.snapshots.values()].find((row) => JSON.parse(row.source).recordType === "confirmed");
   assert.ok(snapshot);
   const evidence = JSON.parse(snapshot.source).ruleEvidence;
@@ -4143,7 +4192,7 @@ test("U05真实旧规则首次安全锚定共享namespace阻断重复成员，�
   assert.deepEqual(f.rows.map((row) => [row.id, row.scope_version, row.billing_effective_from_ms]), before, "安全首锚定不推进原范围日期和版本");
 });
 
-test("U05实际Shanghai/UTC按绝对窗口分组；同绝对已核验标签可合组，today/custom短窗不进完整日汇总", async (t) => {
+test("U05实际Shanghai/UTC按绝对窗口分组；同绝对已核验标签可合组，today/custom短窗给实时利润并进入汇总但不写确认账单", async (t) => {
   const f = await completedDayFixture(t);
   f.rows[1].timezone = "UTC";
   const split = await f.module.queryRules();
@@ -4154,13 +4203,18 @@ test("U05实际Shanghai/UTC按绝对窗口分组；同绝对已核验标签可�
   const compatible = await f.module.queryRules();
   assert.equal(compatible.windowGroups.length, 1); assert.ok(compatible.commonSummary);
   assert.deepEqual(compatible.windowGroups[0].timezones, ["Asia/Shanghai", "Asia/Singapore"]);
+  const confirmedCount = () => [...f.state.snapshots.values()].filter((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed").length;
+  const confirmedBefore = confirmedCount();
   const today = await f.module.queryRules({ preset: "today" });
-  assert.equal(today.commonSummary, null); assert.equal(today.windowGroups[0].totals.confirmedProfitUsd, null);
-  assert.ok(today.results.every((row) => row.calculation.profitUsd == null));
+  assert.equal(today.windowGroups.length, 1); assert.ok(today.commonSummary, "today 同绝对窗口、覆盖已核验时进入汇总");
+  assert.equal(today.windowGroups[0].totals.confirmedProfitUsd, 4.5); assert.equal(today.commonSummary.totals.confirmedProfitUsd, 4.5);
+  assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "live"), "today 给出实时利润，但未结束窗口不结算");
   for (const row of f.rows) Object.assign(row, { billing_policy: "legacy-v3", source_binding: { ...row.source_binding, channels: {} } });
   const custom = await f.module.queryRules({ preset: "custom", startMs: 1000000, endMs: 1060000 }, { force: true });
   assert.equal(custom.results[0].calculation.profitUsd, 1.5, " untouched v3同epoch短区间仍保留原账语义");
-  assert.equal(custom.commonSummary, null); assert.equal(custom.windowGroups[0].totals.confirmedProfitUsd, null);
+  assert.ok(custom.results.every((row) => row.settlement === "live"), "非完整日 custom 窗口不是已结算账单");
+  assert.ok(custom.commonSummary); assert.equal(custom.windowGroups[0].totals.confirmedProfitUsd, 4.5);
+  assert.equal(confirmedCount(), confirmedBefore, "today/custom 短窗只保存 observation，不写确认账单");
 });
 
 test("U05最新已结束窗口等待账单：zero/失败均保留该日，真实retry action不拿旧成功日替换", async (t) => {
@@ -4182,7 +4236,7 @@ test("U05最新已结束窗口等待账单：zero/失败均保留该日，真实
   }
 });
 
-test("U05真实Provider+module DST23/25小时、未完首日保留完整请求与scope action", async (t) => {
+test("U05真实Provider+module DST23/25小时、生效前窗口保留完整请求、不取数并给出scope action", async (t) => {
   const f = await completedDayFixture(t);
   for (const row of f.rows) row.timezone = "America/New_York";
   for (const [now, start, end, hours] of [["2026-03-09T16:00:00Z", "2026-03-08T05:00:00Z", "2026-03-09T04:00:00Z", 23],
@@ -4199,13 +4253,137 @@ test("U05真实Provider+module DST23/25小时、未完首日保留完整请求�
   }
   t.mock.method(Date, "now", () => Date.parse("2026-10-09T03:00:00Z"));
   for (const row of f.rows) Object.assign(row, { timezone: "Asia/Shanghai", billing_effective_from_ms: Date.parse("2026-10-09T16:00:00Z") });
+  const callsBefore = f.state.statCalls.length;
   const before = await f.module.queryRules({}, { force: true });
-  assert.ok(before.results.every((row) => row.calculation.profitUsd == null && row.window.startMs === Date.parse("2026-10-07T16:00:00Z") && row.downstream.amountUsd === 2.5));
-  assert.equal(before.coverage.channels.find((channel) => channel.channelId === 1).status, "not_effective");
-  assert.ok(before.results[0].actions.some((action) => action.kind === "wait_effective" && action.href === "/reconciliation?action=scope&ruleId=rr_live"));
+  // 整个窗口早于核算起点：保留原请求窗口，不取数，金额和毛利按 0 计；覆盖范围标为未生效并给出查看生效时间入口。
+  assert.ok(before.results.every((row) => row.calculation.profitUsd === 0 && row.window.startMs === Date.parse("2026-10-07T16:00:00Z")
+    && row.downstream.amountUsd === 0 && row.upstream.amountUsd === 0 && row.segments.length === 0));
+  assert.equal(f.state.statCalls.length, callsBefore, "生效前窗口不向任何一侧取数");
+  // 已知成本同样确定为 0：汇总里不能出现“毛利 0、成本未知”的矛盾，也不能写成确认账单。
+  assert.ok(before.results.every((row) => row.scope.notEffective === true && row.upstream.knownAmountUsd === 0 && row.upstream.countedAmountUsd === 0 && row.downstream.knownAmountUsd === 0));
+  assert.equal(before.windowGroups.length, 1); assert.equal(before.windowGroups[0].totals.knownCostUsd, 0); assert.deepEqual(before.windowGroups[0].totals.notCountedCostRuleIds, []);
+  assert.equal([...f.state.snapshots.values()].some((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed" && JSON.parse(snapshot.source).window?.endMs === Date.parse("2026-10-08T16:00:00Z")), false);
+  const notEffective = before.coverage.channels.find((channel) => channel.channelId === 1);
+  assert.equal(notEffective.status, "not_effective"); assert.deepEqual(notEffective.issues, ["BILLING_SCOPE_NOT_EFFECTIVE"]);
+  assert.ok(notEffective.actions.some((action) => action.kind === "wait_effective" && action.href === "/reconciliation?action=scope&ruleId=rr_live"));
 });
 
-test("U05真实withAuth GET/POST默认昨日、显式today参考、局部body与覆盖action完整透传", async (t) => {
+test("U05轮询结账：昨天结束满15分钟才写昨天整日confirmed，结清后不再取数，无利润10分钟后重试，核算起点不早于昨天结束不结账", async (t) => {
+  const f = await completedDayFixture(t);
+  const yesterday = { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") }; // 上海 10-08 整日
+  let now = yesterday.endMs + 5 * 60000; // 上海 10-09 00:05
+  t.mock.method(Date, "now", () => now);
+  // rr_two 昨天中午才创建、今天零点才生效：核算起点取较早的创建时刻，昨天仍要结账。
+  Object.assign(f.rows[1], { created_at: new Date("2026-10-08T04:00:00Z"), billing_effective_from_ms: yesterday.endMs });
+  // rr_three 今天零点才创建并生效：核算起点恰为昨天结束，昨天没有账可结。
+  Object.assign(f.rows[2], { created_at: new Date(yesterday.endMs), billing_effective_from_ms: yesterday.endMs });
+  const sources = () => [...f.state.snapshots.values()].map((snapshot) => ({ ruleId: snapshot.rule_id, ...JSON.parse(snapshot.source) }));
+  const confirmed = () => sources().filter((source) => source.recordType === "confirmed");
+  const yesterdayCalls = () => f.state.statCalls.filter((call) => call.end === yesterday.endMs / 1000 - 1).length;
+  const settlements = () => [...f.rt._reconciliationSettlements].map(([key, entry]) => [key, entry.settled, entry.retryAt]).sort();
+  const key = (ruleId) => `${ruleId}:${yesterday.startMs}:Asia/Shanghai`;
+
+  await f.module.refreshDue(now);
+  assert.equal(yesterdayCalls(), 0, "昨天结束未满 15 分钟不结账、不取昨天的数");
+  assert.equal(confirmed().length, 0);
+  assert.ok(sources().length > 0 && sources().every((source) => source.recordType === "observation" && source.window.startMs === yesterday.endMs), "只观测今天");
+  assert.deepEqual(settlements(), []);
+
+  now = yesterday.endMs + 15 * 60000; f.state.upstreamQuota = null; // 刚满 15 分钟，但上游账单还取不到
+  await f.module.refreshDue(now);
+  assert.equal(yesterdayCalls(), 4, "rr_live/rr_two 两侧各取一次昨天，rr_three 不取");
+  assert.equal(confirmed().length, 0, "没有利润不写确认账单");
+  assert.deepEqual(settlements(), [[key("rr_live"), false, now + 10 * 60000], [key("rr_two"), false, now + 10 * 60000]]);
+
+  f.state.upstreamQuota = 100;
+  now = yesterday.endMs + 24 * 60000 + 59999; // 已过结果缓存期，但未到 10 分钟重试点
+  await f.module.refreshDue(now);
+  assert.equal(yesterdayCalls(), 4, "未结清的昨天 10 分钟内不重试");
+  assert.equal(confirmed().length, 0);
+
+  now = yesterday.endMs + 25 * 60000;
+  await f.module.refreshDue(now);
+  assert.equal(yesterdayCalls(), 8, "到重试点后重新取昨天");
+  assert.deepEqual(confirmed().map((source) => source.ruleId).sort(), ["rr_live", "rr_two"]);
+  for (const source of confirmed()) assert.deepEqual(source.window, { preset: "yesterday", ...yesterday, timezone: "Asia/Shanghai" });
+  assert.deepEqual(settlements(), [[key("rr_live"), true, null], [key("rr_two"), true, null]]);
+
+  now = yesterday.endMs + 60 * 60000;
+  await f.module.refreshDue(now);
+  assert.equal(yesterdayCalls(), 8, "已结清的昨天不再取数");
+  assert.equal(confirmed().length, 2, "今天的窗口始终只写 observation");
+  assert.ok(sources().filter((source) => source.window.startMs === yesterday.endMs).every((source) => source.recordType === "observation"));
+});
+
+test("U05结账等待期：昨天结束未满15分钟手动查询只给实时毛利不写确认，满15分钟轮询不复用该缓存、重新取数后结账", async (t) => {
+  const f = await completedDayFixture(t);
+  const yesterday = { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") }; // 上海 10-08 整日
+  let now = yesterday.endMs + 14 * 60000 + 30000; // 上海 10-09 00:14:30
+  t.mock.method(Date, "now", () => now);
+  const confirmedRows = () => [...f.state.snapshots.values()].filter((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed");
+  const yesterdayCalls = () => f.state.statCalls.filter((call) => call.end === yesterday.endMs / 1000 - 1).length;
+
+  f.state.upstreamQuota = 50; // 上游账单还在陆续入账
+  const early = await f.module.queryRules({ preset: "yesterday" });
+  assert.ok(early.results.every((row) => row.calculation.profitUsd === 2 && row.settlement === "live"), "等待期内昨天只是实时金额");
+  assert.equal(confirmedRows().length, 0, "等待期内的手动查询不写确认账单");
+  const calls = yesterdayCalls();
+  assert.equal(calls, 6);
+
+  now = yesterday.endMs + 15 * 60000; f.state.upstreamQuota = 100; // 30 秒后，手动查询的结果仍在缓存期内
+  await f.module.refreshDue(now);
+  assert.equal(yesterdayCalls(), calls + 6, "结账重新取昨天，不复用等待期的缓存");
+  assert.equal(confirmedRows().length, 3);
+  assert.ok(confirmedRows().every((row) => row.upstream_usd === 1), "确认账单用的是满 15 分钟后的上游金额");
+  const settled = await f.module.queryRules({ preset: "yesterday" });
+  assert.ok(settled.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled"));
+  assert.equal(yesterdayCalls(), calls + 6, "结账结果进入缓存，随后的查询直接复用");
+});
+
+test("module修正切换时间在来源锁内改分段并清空缓存：非强制查询重新取数并按新分段核算", async (t) => {
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000000, to: 1030000 }, { id: "s2", group: "g2", from: 1030000 }] });
+  trustedLegacyRule(f.rule, f.stations, 7, 1);
+  const locks = new Store({}), lockedIds = [];
+  f.rt.store.withStationLocks = (ids, action) => { lockedIds.push([...new Set(ids)].sort()); return locks.withStationLocks(ids, action); };
+  const input = { ruleIds: [f.rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000000, endMs: 1060000 };
+  const windows = (result) => result.segments.map((segment) => [segment.id, segment.window.startMs, segment.window.endMs]);
+  const first = await f.module.queryRules(input);
+  assert.deepEqual(windows(first.results[0]), [["s1", 1000000, 1030000], ["s2", 1030000, 1060000]]);
+  const calls = f.state.statCalls.length;
+  assert.equal(calls, 4);
+  await f.module.queryRules(input);
+  assert.equal(f.state.statCalls.length, calls, "修正前非强制查询命中缓存");
+
+  const settlements = f.rt._reconciliationSettlements;
+  settlements.set(`${f.rule.id}:0:Asia/Shanghai`, { endMs: 0, settled: true, retryAt: null });
+  settlements.set("rr_other:0:Asia/Shanghai", { endMs: 0, settled: true, retryAt: null });
+  const correction = holdPoint(), repositoryCorrect = f.repository.correctTransition.bind(f.repository);
+  f.repository.correctTransition = async (...args) => { await correction.hold(); return repositoryCorrect(...args); };
+  const pending = f.module.correctTransition(f.rule.id, "s2", 1045000);
+  await correction.reached;
+  assert.deepEqual(lockedIds.at(-1), ["own", "upstream"], "修正在两侧站点来源锁内进行");
+  let cacheAtEdit = null;
+  const edit = f.rt.store.withStationLocks(["upstream"], () => { cacheAtEdit = f.rt._reconciliationResultCache.size; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cacheAtEdit, null, "修正期间站点编辑须等待来源锁");
+  correction.release();
+  const segments = await pending; await edit;
+  assert.equal(cacheAtEdit, 0, "释放来源锁前已清空本规则缓存");
+  assert.deepEqual(segments.map((segment) => [segment.id, segment.effectiveFrom, segment.effectiveTo, segment.timingSource]),
+    [["s1", 1000000, 1045000, "operator_confirmed"], ["s2", 1045000, null, "operator_confirmed"]]);
+  assert.deepEqual([...settlements.keys()], ["rr_other:0:Asia/Shanghai"], "修正后本规则已结账的日子要按新分段重新结账，其它规则不受影响");
+
+  const after = await f.module.queryRules(input);
+  assert.equal(f.state.statCalls.length, calls + 4, "修正后非强制查询不能复用旧分段缓存");
+  for (const side of ["upstream", "own"]) {
+    assert.deepEqual(f.state.statCalls.slice(calls).filter((call) => call.side === side).map((call) => [call.start, call.end]).sort(), [[1000, 1044], [1045, 1059]]);
+  }
+  assert.deepEqual(windows(after.results[0]), [["s1", 1000000, 1045000], ["s2", 1045000, 1060000]]);
+  assert.equal(after.results[0].currentSegment.effectiveFrom, 1045000);
+  assert.equal(after.results[0].calculation.profitUsd, 3);
+});
+
+test("U05真实withAuth GET/POST默认昨日、显式today实时利润、局部body与覆盖action完整透传", async (t) => {
   const f = await completedDayFixture(t);
   f.rt.reconciliation = f.module; // 路由复用夹具模块，从而读写同一个内存 repository
   f.rt.store.auth = { isDefault: false };
@@ -4233,8 +4411,10 @@ test("U05真实withAuth GET/POST默认昨日、显式today参考、局部body与
       assert.deepEqual([body.coverage.knownChannelCount, body.coverage.accountedChannelCount], [10, 3]);
       assert.equal(body.windowGroups[0].totals.knownIncomeUsd, 7.5); assert.equal(body.actions[0].accountKey, null);
     }
-    const today = await (await get("?preset=today")).json(); assert.equal(today.commonSummary, null);
-    assert.equal(today.results[0].window.endMs, Date.now()); assert.equal(today.windowGroups[0].totals.confirmedProfitUsd, null);
+    // 显式 today 透传实时利润：进入汇总，但每行都是未结账的 live。
+    const today = await (await get("?preset=today")).json(); assert.ok(today.commonSummary);
+    assert.equal(today.results[0].window.endMs, Date.now()); assert.equal(today.windowGroups[0].totals.confirmedProfitUsd, 4.5);
+    assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "live"));
     const response = await POST(new Request("http://localhost/api/reconciliation/query", { method: "POST", headers: { cookie: "rm_session=valid" }, body: JSON.stringify({ ruleIds: ["rr_live"] }) }));
     assert.equal(response.status, 200); const one = await response.json();
     assert.equal(one.results[0].window.preset, "yesterday"); assert.equal(one.results.length, 1);

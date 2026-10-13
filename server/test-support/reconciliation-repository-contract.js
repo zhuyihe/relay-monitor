@@ -198,12 +198,13 @@ contract("createRule stores the rule, name-ordered channels and one operator-con
   assert.ok(segment.detectedAt >= before && segment.detectedAt <= after);
 });
 
-contract("createRule applies the next-complete-day policy and leaves a ratio-less segment unobserved", async ({ repository, fixture }) => {
-  const rule = await fixture.createRule({ billingPolicy: "next-complete-day", initialEffectiveFromMs: undefined });
-  assert.equal(rule.billingPolicy, "next-complete-day");
+contract("createRule applies the immediate policy and leaves a ratio-less segment unobserved", async ({ repository, fixture }) => {
+  const before = Date.now();
+  const rule = await fixture.createRule({ billingPolicy: "immediate", initialEffectiveFromMs: undefined });
+  assert.equal(rule.billingPolicy, "immediate");
   assert.equal(rule.scopeVersion, 1);
-  assert.equal(Number.isSafeInteger(rule.billingEffectiveFrom), true);
-  assert.ok(rule.billingEffectiveFrom > Date.now() - DAY);
+  // 确认即生效：生效时刻就是创建时刻。
+  assert.ok(rule.billingEffectiveFrom >= before && rule.billingEffectiveFrom <= Date.now());
   const [segment] = await repository.listSegments(rule.id);
   assert.equal(segment.effectiveFrom, 0);
   assert.equal(segment.ratio, null);
@@ -295,27 +296,32 @@ contract("findTokenConflict ignores disabled, archived and excluded rules", asyn
 
 // ---- 规则修改 ----
 
-contract("updateRule re-inserts channels, drops their status columns and bumps the scope version", async ({ repository, fixture }) => {
+contract("updateRule keeps surviving channel rows with their status, replaces the rest and bumps the scope version", async ({ repository, fixture }) => {
   const c1 = fixture.channel(1), c2 = fixture.channel(2), c3 = fixture.channel(3);
   const rule = await fixture.createRule({ channels: [{ channelId: c1, name: "One" }, { channelId: c2, name: "Two" }] });
-  await repository.updateChannelStates(rule.id, [{ channelId: c1, state: "enabled" }], EFFECTIVE_FROM + HOUR);
+  await repository.updateChannelStates(rule.id, [{ channelId: c1, state: "enabled" }, { channelId: c2, state: "disabled" }], EFFECTIVE_FROM + HOUR);
   assert.equal((await repository.getRule(rule.id)).channels[0].state, "enabled");
 
-  const updated = await repository.updateRule(rule.id, { channels: [{ channelId: c1, name: "One" }, { channelId: c3, name: "Three" }] });
+  const before = Date.now();
+  const updated = await repository.updateRule(rule.id, { channels: [{ channelId: c1, name: "One renamed" }, { channelId: c3, name: "Three" }] });
   assert.deepEqual(updated.channels, [
-    { channelId: c1, name: "One", state: null, stateObservedAt: null, stateChangedAt: null },
+    { channelId: c1, name: "One renamed", state: "enabled", stateObservedAt: EFFECTIVE_FROM + HOUR, stateChangedAt: EFFECTIVE_FROM + HOUR },
     { channelId: c3, name: "Three", state: null, stateObservedAt: null, stateChangedAt: null },
   ]);
-  assert.equal(updated.billingPolicy, "next-complete-day");
+  assert.equal(updated.billingPolicy, "immediate");
   assert.equal(updated.scopeVersion, 2);
-  assert.equal(Number.isSafeInteger(updated.billingEffectiveFrom), true);
+  assert.ok(updated.billingEffectiveFrom >= before && updated.billingEffectiveFrom <= Date.now());
+  // 移除的渠道连同状态一起删掉，重新加回来时从空状态开始。
+  const readded = await repository.updateRule(rule.id, { channels: [{ channelId: c1, name: "One renamed" }, { channelId: c2, name: "Two" }, { channelId: c3, name: "Three" }] });
+  assert.deepEqual(readded.channels.find((channel) => channel.channelId === c2), { channelId: c2, name: "Two", state: null, stateObservedAt: null, stateChangedAt: null });
+  assert.equal(readded.scopeVersion, 3);
   assert.equal(updated.tokenName, rule.tokenName);
 
   // 只改名称不改范围：策略和版本保持不变。
   const renamed = await repository.updateRule(rule.id, { tokenName: "Renamed" });
   assert.equal(renamed.tokenName, "Renamed");
-  assert.equal(renamed.scopeVersion, 2);
-  assert.equal(renamed.billingEffectiveFrom, updated.billingEffectiveFrom);
+  assert.equal(renamed.scopeVersion, 3);
+  assert.equal(renamed.billingEffectiveFrom, readded.billingEffectiveFrom);
 
   await assert.rejects(repository.updateRule(`rr_missing${fixture.tag}`, { tokenName: "x" }), /对账规则不存在或已归档/);
   const archived = await fixture.createRule({ tokenId: fixture.token(5), channels: [{ channelId: fixture.channel(5), name: "Five" }] });
@@ -335,13 +341,13 @@ contract("updateRule rolls back the rule and the deleted channel set on a duplic
   assert.deepEqual(after.channels, rule.channels);
 });
 
-contract("appendChannels keeps existing members, re-inserts them, and a failing guard rolls everything back", async ({ repository, fixture }) => {
+contract("appendChannels keeps existing members with their status, and a failing guard rolls everything back", async ({ repository, fixture }) => {
   const c1 = fixture.channel(1), c2 = fixture.channel(2), c3 = fixture.channel(3);
   const rule = await fixture.createRule({ channels: [{ channelId: c1, name: "One" }] });
   await repository.updateChannelStates(rule.id, [{ channelId: c1, state: "enabled" }], EFFECTIVE_FROM + HOUR);
   const appended = await repository.appendChannels(rule.id, [{ channelId: c2, name: "Two" }]);
   assert.deepEqual(appended.channels, [
-    { channelId: c1, name: "One", state: null, stateObservedAt: null, stateChangedAt: null },
+    { channelId: c1, name: "One", state: "enabled", stateObservedAt: EFFECTIVE_FROM + HOUR, stateChangedAt: EFFECTIVE_FROM + HOUR },
     { channelId: c2, name: "Two", state: null, stateObservedAt: null, stateChangedAt: null },
   ]);
   assert.equal(appended.scopeVersion, 2);
@@ -582,28 +588,28 @@ contract("correctTransition moves a transition between its neighbours only", asy
 
 // ---- 渠道状态与归档 ----
 
-contract("updateChannelStates records status and observation time per channel", async ({ repository, fixture }) => {
+contract("updateChannelStates records status, observation time and the time the status last changed", async ({ repository, fixture }) => {
   const c1 = fixture.channel(1), c2 = fixture.channel(2);
   const rule = await fixture.createRule({ channels: [{ channelId: c1, name: "A" }, { channelId: c2, name: "B" }] });
-  const t1 = EFFECTIVE_FROM + HOUR, t2 = EFFECTIVE_FROM + 2 * HOUR;
+  const t1 = EFFECTIVE_FROM + HOUR, t2 = EFFECTIVE_FROM + 2 * HOUR, t3 = EFFECTIVE_FROM + 3 * HOUR;
   await repository.updateChannelStates(rule.id, [{ channelId: c1, state: "enabled" }, { channelId: c2, state: "disabled" }, { channelId: fixture.channel(9), state: "enabled" }], t1);
   assert.deepEqual((await repository.getRule(rule.id)).channels, [
-    { channelId: c1, name: "A", state: "enabled", stateObservedAt: t1, stateChangedAt: null },
-    { channelId: c2, name: "B", state: "disabled", stateObservedAt: t1, stateChangedAt: null },
+    { channelId: c1, name: "A", state: "enabled", stateObservedAt: t1, stateChangedAt: t1 },
+    { channelId: c2, name: "B", state: "disabled", stateObservedAt: t1, stateChangedAt: t1 },
   ]);
   await repository.updateChannelStates(rule.id, [{ channelId: c1, state: "disabled" }], t2);
-  // 已知缺陷（计划后续修复）：SET 从左到右求值，CASE 读到的 channel_status 已是新值，
-  // 所以 status_changed_at_ms 永远不会被写入，状态变化后仍是 null。这里断言的是现状。
+  // 状态不变只刷新观测时间，变化时刻保持上一次变化的时间。
+  await repository.updateChannelStates(rule.id, [{ channelId: c1, state: "disabled" }, { channelId: c2, state: "disabled" }], t3);
   assert.deepEqual((await repository.getRule(rule.id)).channels, [
-    { channelId: c1, name: "A", state: "disabled", stateObservedAt: t2, stateChangedAt: null },
-    { channelId: c2, name: "B", state: "disabled", stateObservedAt: t1, stateChangedAt: null },
+    { channelId: c1, name: "A", state: "disabled", stateObservedAt: t3, stateChangedAt: t2 },
+    { channelId: c2, name: "B", state: "disabled", stateObservedAt: t3, stateChangedAt: t1 },
   ]);
   const listed = (await fixture.mine()).find((item) => item.id === rule.id);
   assert.deepEqual(listed.channels, (await repository.getRule(rule.id)).channels);
 
-  await assert.rejects(repository.updateChannelStates(`rr_missing${fixture.tag}`, [{ channelId: c1, state: "enabled" }], t2), /对账规则不存在或已停止/);
+  await assert.rejects(repository.updateChannelStates(`rr_missing${fixture.tag}`, [{ channelId: c1, state: "enabled" }], t3), /对账规则不存在或已停止/);
   await repository.archiveRule(rule.id);
-  await assert.rejects(repository.updateChannelStates(rule.id, [{ channelId: c1, state: "enabled" }], t2), /对账规则不存在或已停止/);
+  await assert.rejects(repository.updateChannelStates(rule.id, [{ channelId: c1, state: "enabled" }], t3), /对账规则不存在或已停止/);
 });
 
 contract("archiveRule archives once and releases the token and channel keys", async ({ repository, fixture }) => {
@@ -677,9 +683,9 @@ contract("saveSnapshotsForScope writes nothing for a stale scope, a stale owner 
   const rule = await fixture.createRule();
   const [segment] = await repository.listSegments(rule.id);
   const fingerprint = await fixture.fingerprint(rule.id);
-  const window = { preset: "today", startMs: Date.UTC(2026, 0, 10), endMs: Date.UTC(2026, 0, 10, 6), timezone: "UTC" };
-  const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: "2026-01-10T06:00:00.000Z", profitUsd: 2 });
-  const latest = () => repository.latestSuccessfulResult(rule.id, { ...window, endMs: Date.UTC(2026, 0, 11) }, fingerprint);
+  const window = { preset: "yesterday", startMs: Date.UTC(2026, 0, 10), endMs: Date.UTC(2026, 0, 11), timezone: "UTC" };
+  const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: "2026-01-11T00:20:00.000Z", profitUsd: 2 });
+  const latest = () => repository.latestSuccessfulResult(rule.id, window, fingerprint);
 
   assert.equal(await repository.saveSnapshotsForScope(rule.id, "stale-fingerprint", [snapshot]), false);
   assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { expectedOwnerState: reconciliationOwnerRuleState([]) }), false);
@@ -696,7 +702,7 @@ contract("saveSnapshotsForScope writes nothing for a stale scope, a stale owner 
 
   // 规则口径变化后旧口径的保存被拒绝。
   await repository.observeSource(rule.id, { groups: {}, group: "vip", ratio: 2, tokenName: "VIP", detectedAt: window.startMs + HOUR });
-  const second = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: "2026-01-10T07:00:00.000Z", profitUsd: 9 });
+  const second = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: "2026-01-11T01:00:00.000Z", profitUsd: 9 });
   assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [second]), false);
   assert.equal((await latest()).result.calculation.profitUsd, 2);
   await repository.archiveRule(rule.id);
@@ -709,10 +715,10 @@ contract("saveSnapshotsForScope skips records older than the saved one of the sa
   const fingerprint = await fixture.fingerprint(rule.id);
   const day = Date.UTC(2026, 0, 10);
   const save = (endHours, generatedAt, profitUsd) => repository.saveSnapshotsForScope(rule.id, fingerprint, [billingSnapshot({ rule, segment, fingerprint,
-    window: { preset: "today", startMs: day, endMs: day + endHours * HOUR, timezone: "UTC" }, generatedAt, profitUsd })]);
+    window: { preset: "today", startMs: day, endMs: day + endHours * HOUR, timezone: "UTC" }, recordType: "observation", generatedAt, profitUsd })]);
   const latest = async () => {
-    const found = await repository.latestSuccessfulResult(rule.id, { preset: "today", startMs: day, endMs: day + DAY, timezone: "UTC" }, fingerprint);
-    return [found.generatedAt, found.result.calculation.profitUsd, found.result.window.endMs];
+    const found = await repository.latestObservation(rule.id, { preset: "today", startMs: day, endMs: day + DAY, timezone: "UTC" }, fingerprint);
+    return [found.generatedAt, found.result.calculation.differenceUsd, found.result.window.endMs];
   };
 
   assert.equal(await save(6, "2026-01-10T06:00:00.000Z", 6), true);
@@ -728,7 +734,7 @@ contract("saveSnapshotsForScope skips records older than the saved one of the sa
   assert.deepEqual(await latest(), ["2026-01-10T08:00:00.000Z", 8, day + 8 * HOUR]);
 });
 
-contract("latestSuccessfulResult and latestObservation pick the newest matching record of their type", async ({ repository, fixture }) => {
+contract("latestObservation picks the newest matching observation; latestSuccessfulResult only returns settled whole days", async ({ repository, fixture }) => {
   const rule = await fixture.createRule();
   const [segment] = await repository.listSegments(rule.id);
   const fingerprint = await fixture.fingerprint(rule.id);
@@ -742,40 +748,45 @@ contract("latestSuccessfulResult and latestObservation pick the newest matching 
   await assert.rejects(repository.latestObservation(rule.id, window, null), /成功账单查询必须指定核算口径/);
   assert.equal(await confirmed(query(day + DAY)), null);
 
+  // 旧版本把今天的半天也写成过 confirmed：不是已结束的自然日，不算结账记录。
   await repository.saveSnapshot(billingSnapshot({ rule, segment, fingerprint, window, generatedAt: "2026-01-12T06:00:00.000Z", profitUsd: 2 }));
   await repository.saveSnapshot(billingSnapshot({ rule, segment, fingerprint, window, recordType: "observation", generatedAt: "2026-01-12T06:00:01.000Z", profitUsd: 3 }));
-
-  const success = await confirmed(query(day + 8 * HOUR));
-  assert.equal(success.generatedAt, "2026-01-12T06:00:00.000Z");
-  assert.deepEqual(success.result.window, window);
-  assert.deepEqual(success.result.requestedWindow, window);
-  assert.deepEqual(success.result.lastSuccessfulWindow, window);
-  assert.deepEqual(success.result.calculation, { differenceUsd: 2, profitUsd: 2, riskDifferenceUsd: null, marginRate: 0.5 });
-  assert.equal(success.result.health.code, "READY");
+  assert.equal(await confirmed(query(day + 8 * HOUR)), null);
 
   const observation = await observed(query(day + 8 * HOUR));
   assert.equal(observation.generatedAt, "2026-01-12T06:00:01.000Z");
+  assert.deepEqual(observation.result.window, window);
   assert.equal(observation.result.lastSuccessfulWindow, null);
   assert.deepEqual(observation.result.calculation, { differenceUsd: 3, profitUsd: null, riskDifferenceUsd: 3, marginRate: 0.5 });
 
-  // 行上的窗口结束晚于查询窗口、口径不同、时区不同都查不到。
-  assert.equal(await confirmed(query(day + 5 * HOUR)), null);
-  assert.equal(await confirmed(query(day + 8 * HOUR, "other-fingerprint")), null);
-  assert.equal(await repository.latestSuccessfulResult(rule.id, { ...window, endMs: day + 8 * HOUR, timezone: "Asia/Shanghai" }, fingerprint), null);
+  // 行上的窗口结束晚于查询窗口、口径不同、时区不同都查不到；today 取不晚于查询结束的最新一条。
+  assert.equal(await observed(query(day + 5 * HOUR)), null);
+  assert.equal(await observed(query(day + 8 * HOUR, "other-fingerprint")), null);
+  assert.equal(await repository.latestObservation(rule.id, { ...window, endMs: day + 8 * HOUR, timezone: "Asia/Shanghai" }, fingerprint), null);
+  await repository.saveSnapshot(billingSnapshot({ rule, segment, segmentId: `seg-later-${fixture.tag}`, fingerprint, window: { ...window, endMs: day + 7 * HOUR },
+    recordType: "observation", generatedAt: "2026-01-12T07:00:00.000Z", profitUsd: 5 }));
+  assert.equal((await observed(query(day + 8 * HOUR))).result.calculation.differenceUsd, 5);
+  assert.equal((await observed(query(day + 6.5 * HOUR))).result.calculation.differenceUsd, 3);
 
-  // 另一分段的更新记录胜出；利润未知的确认记录不算成功账单。
-  const later = { ...window, endMs: day + 7 * HOUR };
-  await repository.saveSnapshot(billingSnapshot({ rule, segment, segmentId: `seg-later-${fixture.tag}`, fingerprint, window: later, generatedAt: "2026-01-12T07:00:00.000Z", profitUsd: 5 }));
-  await repository.saveSnapshot(billingSnapshot({ rule, segment, segmentId: `seg-null-${fixture.tag}`, fingerprint, window: later, generatedAt: "2026-01-12T09:00:00.000Z", profitUsd: null }));
-  assert.equal((await confirmed(query(day + 8 * HOUR))).result.calculation.profitUsd, 5);
-  assert.equal((await confirmed(query(day + 6.5 * HOUR))).result.calculation.profitUsd, 2);
-  assert.equal((await observed(query(day + 8 * HOUR))).generatedAt, "2026-01-12T06:00:01.000Z");
+  // 已结束的自然日：结束时间必须完全一致；另一分段的更新记录胜出；利润未知的确认记录不算成功账单。
+  const yesterday = { preset: "yesterday", startMs: day - DAY, endMs: day, timezone: "UTC" };
+  await repository.saveSnapshot(billingSnapshot({ rule, segment, fingerprint, window: yesterday, generatedAt: "2026-01-12T00:15:00.000Z", profitUsd: 11 }));
+  const success = await repository.latestSuccessfulResult(rule.id, yesterday, fingerprint);
+  assert.equal(success.generatedAt, "2026-01-12T00:15:00.000Z");
+  assert.deepEqual(success.result.window, yesterday);
+  assert.deepEqual(success.result.requestedWindow, yesterday);
+  assert.deepEqual(success.result.lastSuccessfulWindow, yesterday);
+  assert.deepEqual(success.result.calculation, { differenceUsd: 11, profitUsd: 11, riskDifferenceUsd: null, marginRate: 0.5 });
+  assert.equal(success.result.health.code, "READY");
+  await repository.saveSnapshot(billingSnapshot({ rule, segment, segmentId: `seg-settle-${fixture.tag}`, fingerprint, window: yesterday, generatedAt: "2026-01-12T01:00:00.000Z", profitUsd: 12 }));
+  await repository.saveSnapshot(billingSnapshot({ rule, segment, segmentId: `seg-null-${fixture.tag}`, fingerprint, window: yesterday, generatedAt: "2026-01-12T02:00:00.000Z", profitUsd: null }));
+  assert.equal((await repository.latestSuccessfulResult(rule.id, yesterday, fingerprint)).result.calculation.profitUsd, 12);
+  assert.equal(await repository.latestSuccessfulResult(rule.id, { ...yesterday, endMs: day + HOUR }, fingerprint), null);
 
-  // 非 today/7d 窗口要求结束时间完全一致。
-  const custom = { preset: "custom", startMs: day - DAY, endMs: day, timezone: "UTC" };
-  await repository.saveSnapshot(billingSnapshot({ rule, segment, fingerprint, window: custom, generatedAt: "2026-01-12T00:10:00.000Z", profitUsd: 11 }));
-  assert.equal((await repository.latestSuccessfulResult(rule.id, custom, fingerprint)).result.calculation.profitUsd, 11);
-  assert.equal(await repository.latestSuccessfulResult(rule.id, { ...custom, endMs: day + HOUR }, fingerprint), null);
+  // 整天窗口但生成时还没结束（当天写下的）也不算。
+  const fullToday = { preset: "custom", startMs: day, endMs: day + DAY, timezone: "UTC" };
+  await repository.saveSnapshot(billingSnapshot({ rule, segment, fingerprint, window: fullToday, generatedAt: "2026-01-12T20:00:00.000Z", profitUsd: 9 }));
+  assert.equal(await repository.latestSuccessfulResult(rule.id, fullToday, fingerprint), null);
 });
 
 // ---- 告警 ----
@@ -849,6 +860,29 @@ contract("listConfirmedHistory keeps one record per logical bill within the requ
   assert.deepEqual((await repository.listConfirmedHistory(rule.id, { startMs: d1, endMs: d3 + DAY - 1 })).records.map((record) => record.window.startMs), [d2, d1]);
   assert.deepEqual((await repository.listConfirmedHistory(rule.id, { startMs: d1 + 1, endMs: d2 + DAY })).records.map((record) => record.window.startMs), [d2]);
   assert.deepEqual((await repository.listConfirmedHistory(`rr_missing${fixture.tag}`, { startMs: d1, endMs: d3 + DAY })).records, []);
+});
+
+contract("listConfirmedHistory skips confirmed records whose window had not ended and still fills the page", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = `contract-settled-${fixture.tag}`;
+  const d1 = Date.UTC(2026, 2, 10), d2 = d1 + DAY, d3 = d2 + DAY;
+  const save = (window, generatedAt, profitUsd) => repository.saveSnapshot(billingSnapshot({ rule, segment, fingerprint, window, generatedAt, profitUsd }));
+  await save({ preset: "yesterday", startMs: d1, endMs: d2, timezone: "UTC" }, "2026-03-11T00:15:00.000Z", 1);
+  await save({ preset: "yesterday", startMs: d2, endMs: d3, timezone: "UTC" }, "2026-03-12T00:15:00.000Z", 2);
+  // 旧版本写下的今天半天、当天写下的整天窗口、近 7 天都排在前面，但不是结账记录。
+  await save({ preset: "today", startMs: d3, endMs: d3 + 6 * HOUR, timezone: "UTC" }, "2026-03-12T06:00:00.000Z", 30);
+  await save({ preset: "custom", startMs: d3, endMs: d3 + DAY, timezone: "UTC" }, "2026-03-12T20:00:00.000Z", 31);
+  await save({ preset: "7d", startMs: d1, endMs: d3 + 6 * HOUR, timezone: "UTC" }, "2026-03-12T06:00:00.000Z", 32);
+
+  const range = { startMs: d1, endMs: d3 + DAY };
+  assert.deepEqual((await repository.listConfirmedHistory(rule.id, range)).records.map((record) => record.calculation.profitUsd), [2, 1]);
+  const first = await repository.listConfirmedHistory(rule.id, { ...range, limit: 1 });
+  assert.deepEqual(first.records.map((record) => record.calculation.profitUsd), [2]);
+  assert.equal(typeof first.nextCursor, "string");
+  const second = await repository.listConfirmedHistory(rule.id, { ...range, limit: 1, cursor: first.nextCursor });
+  assert.deepEqual(second.records.map((record) => record.calculation.profitUsd), [1]);
+  assert.equal(second.nextCursor, null);
 });
 
 contract("listConfirmedHistory pages with an opaque cursor and rejects invalid options", async ({ repository, fixture }) => {
