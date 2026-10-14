@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, App, Button, Drawer, Form, Select, Space, Typography } from "antd";
 import { api } from "../../../lib/client";
 import type { CoverageDeclaration, RuleEditPreview } from "../../../lib/client";
-import { closeOnEscape } from "../../components/drawer-escape";
+import { useDrawerEscape } from "../../components/drawer-escape";
 
 const { Text } = Typography;
 
@@ -46,6 +46,7 @@ export function AssociationEditor({ target, compact, onClose, onSaved }: {
   onSaved: () => Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
+  useDrawerEscape(!!target && !busy, onClose);
   return (
     <Drawer
       className="jy-drawer"
@@ -55,7 +56,6 @@ export function AssociationEditor({ target, compact, onClose, onSaved }: {
       closable={!busy}
       mask={{ closable: !busy }}
       keyboard={false}
-      onKeyDown={closeOnEscape(!busy, onClose)}
       destroyOnHidden
       onClose={() => { if (!busy) onClose(); }}
     >
@@ -64,7 +64,7 @@ export function AssociationEditor({ target, compact, onClose, onSaved }: {
           key={`${target.ruleId}:${target.seq}`}
           ruleId={target.ruleId}
           onBusyChange={setBusy}
-          onDone={async () => { setBusy(false); onClose(); await onSaved(); }}
+          onDone={() => { setBusy(false); onClose(); void onSaved().catch(() => {}); }}
         />
       ) : null}
     </Drawer>
@@ -72,7 +72,7 @@ export function AssociationEditor({ target, compact, onClose, onSaved }: {
 }
 
 // 每次打开都是新的表单实例，不会带出上一次未保存的选择
-function AssociationEditorBody({ ruleId, onBusyChange, onDone }: { ruleId: string; onBusyChange: (busy: boolean) => void; onDone: () => Promise<void> }) {
+function AssociationEditorBody({ ruleId, onBusyChange, onDone }: { ruleId: string; onBusyChange: (busy: boolean) => void; onDone: () => void }) {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const coverageAnswer = Form.useWatch("coverageAnswer", form);
@@ -142,37 +142,45 @@ function AssociationEditorBody({ ruleId, onBusyChange, onDone }: { ruleId: strin
     setSaving(true); setFormError("");
     try {
       await api(`/api/reconciliation/rules/${encodeURIComponent(ruleId)}`, { method: "PUT", body: { ...input(values), previewId: preview.previewId, groupId: preview.groupId } });
-      message.success("核算关联已更新");
-      setSaving(false);
-      await onDone();
     } catch (err: any) {
       setFormError(err?.message || "保存失败，请重新预览"); setPreview(null); setSaving(false);
+      return;
     }
+    // 已保存：之后上游账单重读失败不能再报成保存失败
+    message.success("核算关联已更新");
+    setSaving(false);
+    onDone();
   };
 
   if (loadError) {
-    return <Alert type="warning" showIcon message={loadError} />;
+    return <Alert type="warning" showIcon message={loadError} action={<Button size="small" loading={refreshing} onClick={() => { setLoadError(""); void load(true); }}>重试</Button>} />;
   }
   if (!rule) return <Text type="secondary">正在读取核算关联…</Text>;
 
-  // 同一本站下其他有效关联已认领的渠道不能再选
+  const original: number[] = (rule.channels || []).map((channel: any) => Number(channel.channelId));
+  // 与服务端同口径：任何其他有效关联已认领的渠道都不能再选。原来就重复认领的渠道保持可移除，并提示需要移除
   const occupied = new Map<number, string>();
   for (const other of config?.rules || []) {
-    if (!other.enabled || other.archivedAt || other.id === rule.id || other.ownStationId !== rule.ownStationId) continue;
+    if (!other.enabled || other.archivedAt || other.id === rule.id) continue;
     for (const channel of other.channels || []) occupied.set(Number(channel.channelId), other.tokenName || other.id);
   }
+  const occupiedNote = (id: number) => {
+    const occupiedBy = occupied.get(id);
+    if (!occupiedBy) return "";
+    return original.includes(id) ? `（与 ${occupiedBy} 重复，需移除）` : `（已用于 ${occupiedBy}）`;
+  };
   const directory: any[] = config?.channels || [];
   const options = [
     ...directory.map((channel: any) => {
-      const occupiedBy = occupied.get(Number(channel.id));
-      return { value: Number(channel.id), disabled: !!occupiedBy, label: `${channelLabel(channel)}${occupiedBy ? `（已用于 ${occupiedBy}）` : ""}` };
+      const id = Number(channel.id);
+      return { value: id, disabled: occupied.has(id) && !original.includes(id), label: `${channelLabel(channel)}${occupiedNote(id)}` };
     }),
-    // 目录里已缺失的原渠道仍显示，可移除
+    // 目录里找不到的原渠道仍显示，可移除；目录没读到时不能断言它已缺失
     ...(rule.channels || []).filter((channel: any) => !directory.some((entry: any) => Number(entry.id) === Number(channel.channelId)))
-      .map((channel: any) => ({ value: Number(channel.channelId), label: `${channelLabel(channel)}（目录中已缺失）` })),
+      .map((channel: any) => ({ value: Number(channel.channelId),
+        label: `${channelLabel(channel)}${occupiedNote(Number(channel.channelId)) || (config?.channelsError && !directory.length ? "（目录未读取）" : "（目录中已缺失）")}` })),
   ];
   const upstream = (config?.upstreams || []).find((station: any) => station.id === rule.upstreamStationId);
-  const original: number[] = (rule.channels || []).map((channel: any) => Number(channel.channelId));
   const removed = original.filter((id) => !(salesChannelIds || original).includes(id));
   const busy = previewing || saving;
 

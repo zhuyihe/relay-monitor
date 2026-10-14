@@ -6,16 +6,24 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, Modal, Select, Space, Typography } from "antd";
 import { api, usd, readWorkflowDestination } from "../../../lib/client";
-import type { AccountReadModel, AccountRecord, AccountKeyScope, AccountAssociation, CoverageDeclaration, PublicResource, AccountAuthorizationInput, AccountAuthorizationProbe, AccountAuthorizationResult, AccountAuthorizationRecoveryIntent, WorkflowDestination, UpstreamKeyRead, ResourceIdentityConfirmation } from "../../../lib/client";
+import type { AccountReadModel, AccountRecord, AccountKeyScope, AccountAssociation, UnmatchedAssociation, CoverageDeclaration, PublicResource, AccountAuthorizationInput, AccountAuthorizationProbe, AccountAuthorizationResult, AccountAuthorizationRecoveryIntent, WorkflowDestination, UpstreamKeyRead, ResourceIdentityConfirmation } from "../../../lib/client";
 import { Skeleton } from "../../components/data-state";
 import { Icon, Sym } from "../../components/icons";
 import { CountBadge } from "../../components/panel";
 import { publishAccountActions } from "../../components/use-workflow-actions";
+import { useDrawerEscape } from "../../components/drawer-escape";
 import { AssociationEditor } from "./association-editor";
 import type { AssociationEditTarget } from "./association-editor";
 
 const { Text } = Typography;
 const AUTHORIZATION_RECOVERY_KEY = "account-authorization-recovery-v05";
+// 归不到已核验 Key 的原因与处理办法
+const UNMATCHED_REASONS: Record<UnmatchedAssociation["reason"], [string, string]> = {
+  unverified_resource: ["资源账号未核验", "所在资源的账号身份还没核验，核验后这条关联归到对应 Key 下。"],
+  unanchored: ["实际 Key 未核验", "这条旧关联没有记录实际 Key，核验账单能力后归到对应 Key 下。"],
+  key_changed: ["账号身份已变化", "资源当前核验到的账号与关联记录的实际 Key 不一致。核对后停止旧关联，再从渠道接入重新关联。"],
+  missing_resource: ["上游资源已删除", "上游资源已不在资源列表中，这条关联取不到成本，请停止核算。"],
+};
 
 type AccountCenterProps = {
   // 完整资源列表：含暂停监控与归档资源
@@ -83,7 +91,7 @@ export function useAccountCenter({
   const [authorizationForm] = Form.useForm();
   const authorizationType = Form.useWatch("type", authorizationForm) || "newapi";
   const authorizationEpoch = useRef(0);
-  const [purposeTarget, setPurposeTarget] = useState<{ resource?: PublicResource; monitorEnabled?: boolean; key?: AccountKeyScope; association?: AccountAssociation } | null>(null);
+  const [purposeTarget, setPurposeTarget] = useState<{ resource?: PublicResource; monitorEnabled?: boolean; keyLabel?: string; association?: AccountAssociation } | null>(null);
   const [purposeBusy, setPurposeBusy] = useState(false);
   const [purposeError, setPurposeError] = useState("");
 
@@ -140,12 +148,14 @@ export function useAccountCenter({
       }
       // 重复归属一并展开另一方，便于对照后决定停哪一条
       const related = [located, ...(destination.action === "conflict" ? located.association.conflictRuleIds.map(locateAssociation).filter((item) => !!item) : [])];
-      const accountKeys = [...new Set(related.map((item) => item.account.accountKey))];
+      const accountKeys = [...new Set(related.flatMap((item) => item.account ? [item.account.accountKey] : []))];
       setAccountFilter("all");
-      setAccountSearch(accountKeys.length === 1 ? accountKeys[0] : "");
+      // 有一方在「未归到 Key 的核算关联」里时不按账号筛选，两边都能看到
+      setAccountSearch(accountKeys.length === 1 && related.every((item) => item.account) ? accountKeys[0] : "");
       setExpandedAccounts(accountKeys);
-      setExpandedKeys([...new Set(related.map((item) => item.key.canonicalKey))]);
+      setExpandedKeys([...new Set(related.flatMap((item) => item.key ? [item.key.canonicalKey] : []))]);
       setFocusRuleId(located.association.ruleId);
+      if (located.association.status !== "active") setWorkflowError("这条核算关联已停止，历史账单保留，不需要再处理。");
       return;
     } else {
       const original = stations.find((station) => station.id === destination.stationId);
@@ -233,6 +243,12 @@ export function useAccountCenter({
     authorizationForm.resetFields();
     authorizationForm.setFieldsValue({ type: account.identity.provider === "newapi" ? "newapi" : authorizationEligible(account)[0]?.type || "sub2api" });
   };
+  const closeAuthorization = () => {
+    authorizationEpoch.current += 1; setAuthorizationAccount(null); setAuthorizationProbe(null); authorizationForm.resetFields();
+  };
+  // 两个抽屉里都有下拉框：Esc 由抽屉自己处理（#413）
+  useDrawerEscape(!!verificationStation, closeVerification);
+  useDrawerEscape(!!authorizationAccount && !authorizationBusy, closeAuthorization);
   const openAuthorization = (account: AccountRecord) => {
     authorizationEpoch.current += 1; setAuthorizationAccount(account); setAuthorizationTargets(authorizationEligible(account).map((resource) => resource.id!)); setAuthorizationRequestId(crypto.randomUUID()); setAuthorizationProbe(null); setAuthorizationResult(null); setAuthorizationError(""); setReuseAuthorization(false); setPreviouslyUpdatedIds([]); initializeAuthorizationForm(account);
   };
@@ -309,9 +325,14 @@ export function useAccountCenter({
         if (!purposeTarget.association) throw new Error("请选择明确的核算关联");
         await api(`/api/reconciliation/rules/${encodeURIComponent(purposeTarget.association.ruleId)}`, { method: "DELETE" }); message.success("核算关联已停止，历史账单保留");
       }
-      setPurposeTarget(null); await reload();
-    } catch (err: any) { setPurposeError(`${err.message || "操作失败"}；请刷新上游账单后重新打开。`); }
-    finally { setPurposeBusy(false); }
+    } catch (err: any) {
+      setPurposeError(`${err.message || "操作失败"}；请刷新上游账单后重新打开。`); setPurposeBusy(false);
+      return;
+    }
+    // 已生效：之后重读失败不能再报成操作失败
+    setPurposeBusy(false); setPurposeTarget(null);
+    if (purposeTarget.association?.ruleId === focusRuleId) setFocusRuleId("");
+    await reload().catch(() => {});
   };
 
   // ---- 筛选 ------------------------------------------------------------------
@@ -329,12 +350,17 @@ export function useAccountCenter({
   const unverifiedResources = (accountModel?.unverifiedResources || []).filter((resource) =>
     (showArchived || !resource.archivedAt) && matchesAccountQuery([resource.id, resource.name, resource.type, resource.baseUrl])
   );
-  const locateAssociation = (ruleId: string) => {
+  const unmatchedAssociations = (accountModel?.unmatchedAssociations || []).filter((association) =>
+    matchesAccountQuery([association.ruleId, association.tokenId, association.tokenName, association.upstreamStationId, stations.find((station) => station.id === association.upstreamStationId)?.name,
+      ...association.channels.flatMap((channel) => [channel.channelId, channel.name])])
+  );
+  const locateAssociation = (ruleId: string): { account: AccountRecord | null; key: AccountKeyScope | null; association: AccountAssociation } | null => {
     for (const account of accountModel?.accounts || []) for (const key of account.keys) {
       const association = (key.associations || []).find((item) => item.ruleId === ruleId);
       if (association) return { account, key, association };
     }
-    return null;
+    const unmatched = accountModel?.unmatchedAssociations?.find((item) => item.ruleId === ruleId);
+    return unmatched ? { account: null, key: null, association: unmatched } : null;
   };
   // 按关联的账单时区显示时刻
   const formatAt = (value: number | string | null | undefined, timezone: string) => {
@@ -405,6 +431,25 @@ export function useAccountCenter({
     );
   };
 
+  // 重复归属：同一实际 Key 的只能停掉一条；同占渠道的也可以编辑渠道移除重复的那几个
+  const conflictBanner = (association: AccountAssociation) => {
+    if (!association.conflict) return null;
+    const keyConflicts = association.keyConflictRuleIds, channelConflicts = association.channelConflictRuleIds;
+    const advice = !keyConflicts || !channelConflicts
+      ? ["同一 Key 或同一渠道被多条有效关联认领，收入或成本会被重复计算。停止其中一条，或编辑渠道去掉重复的部分。"]
+      : [keyConflicts.length ? `与 ${keyConflicts.join("、")} 是同一把实际 Key，成本会被重复计算，只能停止其中一条。` : "",
+        channelConflicts.length ? `渠道 ${(association.duplicateChannelIds || []).map((id) => `#${id}`).join("、")} 同时归属 ${channelConflicts.join("、")}，收入会被重复计算；停止其中一条，或编辑渠道移除重复的渠道。` : ""];
+    return (
+      <div className="jy-banner" role="status">
+        <Sym kind="warn" />
+        <div className="jy-stations-banner-body">
+          <b>与关联 {association.conflictRuleIds.join("、")} 重复归属</b>
+          {advice.filter(Boolean).map((text) => <p key={text} className="jy-caption">{text}</p>)}
+        </div>
+      </div>
+    );
+  };
+
   // 一条核算关联：这把 Key 在某个本站下归属的渠道。动作只放在有效关联上，停止后保留为历史
   const renderAssociation = (key: AccountKeyScope, association: AccountAssociation) => {
     const active = association.status === "active";
@@ -425,22 +470,46 @@ export function useAccountCenter({
           <dt>Key 的其他用途</dt><dd>{otherUseText(association.coverageDeclaration)}</dd>
           <dt>范围版本</dt><dd>{association.scopeVersion} · {association.costCoverage === "complete" ? "用途已确认" : "用途待确认，毛利标为待确认"}</dd>
         </dl>
-        {association.conflict ? (
-          <div className="jy-banner" role="status">
-            <Sym kind="warn" />
-            <div className="jy-stations-banner-body">
-              <b>与关联 {association.conflictRuleIds.join("、")} 重复归属</b>
-              <p className="jy-caption">同一 Key 或同一渠道被多条有效关联认领，成本会被重复计算。停止其中一条，或编辑渠道去掉重复的部分。</p>
-            </div>
-          </div>
-        ) : null}
+        {conflictBanner(association)}
         {active ? (
           <div className="jy-accounts-actions">
             <Button size="small" disabled={purposeLocked} aria-label={`编辑渠道 ${association.ruleId}`} onClick={() => setEditTarget({ ruleId: association.ruleId, title: keyTitle(key), seq: ++editSeq.current })}>编辑渠道</Button>
             <Button size="small" disabled={purposeLocked} aria-label={`更换 Key ${association.ruleId}`} onClick={() => openWorkflow(`/stations?action=coverage&ruleId=${encodeURIComponent(association.ruleId)}`)}>更换 Key</Button>
-            <Button size="small" danger disabled={purposeLocked} aria-label={`停止核算关联 ${association.ruleId}`} onClick={() => { setPurposeError(""); setPurposeTarget({ key, association }); }}>停止核算</Button>
+            <Button size="small" danger disabled={purposeLocked} aria-label={`停止核算关联 ${association.ruleId}`} onClick={() => { setPurposeError(""); setPurposeTarget({ keyLabel: keyTitle(key), association }); }}>停止核算</Button>
           </div>
         ) : null}
+      </li>
+    );
+  };
+
+  // 归不到已核验 Key 的有效关联：仍在核算，给核验入口和停止入口
+  const renderUnmatched = (association: UnmatchedAssociation) => {
+    const [tag, detail] = UNMATCHED_REASONS[association.reason] || ["待核验", "核验后归到对应 Key 下。"];
+    const upstream = stations.find((station) => station.id === association.upstreamStationId);
+    const keyLabel = `${association.tokenName} · #${association.tokenId}`;
+    const actions = (accountModel?.actions || []).filter((action) => action.ruleId === association.ruleId
+      || (!action.ruleId && action.stationId === association.upstreamStationId && ["verify_identity", "verify_capability"].includes(action.kind)));
+    return (
+      <li key={association.ruleId} data-rule-id={association.ruleId} className={`jy-accounts-association${focusRuleId === association.ruleId ? " is-focused" : ""}`}>
+        <div className="jy-accounts-line">
+          <b>{keyLabel}</b>
+          {" "}
+          <span className={`jy-tag ${association.conflict ? "jy-tag--crit" : "jy-tag--warn"}`}>{association.conflict ? "重复归属" : tag}</span>
+          {" "}
+          <span className="jy-caption">关联 {association.ruleId}</span>
+        </div>
+        <p className="jy-caption">{association.conflict ? `${tag}：` : ""}{detail}</p>
+        <dl className="jy-accounts-facts">
+          <dt>上游资源</dt><dd>{upstream && upstream.name !== upstream.id ? `${upstream.name} · ${upstream.id}` : association.upstreamStationId}</dd>
+          <dt>本站</dt><dd>{ownStationName(association.ownStationId)}</dd>
+          <dt>本站渠道</dt><dd>{association.channels.map((channel) => `${channel.name || `渠道 ${channel.channelId}`} · #${channel.channelId}`).join("、") || "无"}</dd>
+          <dt>生效时间</dt><dd>{formatAt(association.accountingStartMs ?? association.billingEffectiveFromMs, association.timezone)}</dd>
+        </dl>
+        {conflictBanner(association)}
+        <div className="jy-accounts-actions">
+          {actions.map(actionLink)}
+          <Button size="small" danger disabled={purposeLocked} aria-label={`停止核算关联 ${association.ruleId}`} onClick={() => { setPurposeError(""); setPurposeTarget({ keyLabel, association }); }}>停止核算</Button>
+        </div>
       </li>
     );
   };
@@ -626,7 +695,8 @@ export function useAccountCenter({
         ) : null}
         {accountModel ? (
           <p className="jy-caption">
-            显示 {filteredAccounts.length}/{accountModel.accounts.length} 个已核验账号；待核验资源 {unverifiedResources.length}/{accountModel.unverifiedResources.length} · 读取时间：{new Date(accountModel.generatedAt).toLocaleString("zh-CN")}
+            显示 {filteredAccounts.length}/{accountModel.accounts.length} 个已核验账号；待核验资源 {unverifiedResources.length}/{accountModel.unverifiedResources.length}
+            {accountModel.unmatchedAssociations?.length ? `；未归到 Key 的核算关联 ${unmatchedAssociations.length}/${accountModel.unmatchedAssociations.length}` : ""} · 读取时间：{new Date(accountModel.generatedAt).toLocaleString("zh-CN")}
           </p>
         ) : null}
         {actionLinks(accountModel?.actions.filter((action) => action.kind === "review_source") || [])}
@@ -643,6 +713,15 @@ export function useAccountCenter({
         ))}
         {!filteredAccounts.length && accountModel ? (
           <p className="jy-accounts-empty">{accountModel.accounts.length ? "没有匹配的已核验账号" : "暂无已核验账号"}</p>
+        ) : null}
+        {accountModel?.unmatchedAssociations?.length ? (
+          <div className="jy-accounts-unverified" data-unmatched-associations>
+            <h3>未归到 Key 的核算关联</h3>
+            <p className="jy-caption">这些关联仍在核算，但还不能确认对应哪把实际 Key。先完成核验；不再需要的可以直接停止，历史账单保留。</p>
+            {unmatchedAssociations.length ? (
+              <ul className="jy-accounts-associations" aria-label="未归到 Key 的核算关联">{unmatchedAssociations.map(renderUnmatched)}</ul>
+            ) : <p className="jy-caption">当前没有匹配的关联。</p>}
+          </div>
         ) : null}
         <div className="jy-accounts-unverified">
           <h3>独立 Key 与待核验资源</h3>
@@ -690,7 +769,7 @@ export function useAccountCenter({
         title={`核验账号与账单能力${verificationStation ? ` · ${verificationStation.name}` : ""}`}
         open={!!verificationStation}
         size={compact ? "100%" : 600}
-        onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); closeVerification(); } }}
+        keyboard={false}
         onClose={closeVerification}
       >
         {verificationStation ? (
@@ -762,8 +841,8 @@ export function useAccountCenter({
         size={compact ? "100%" : 600}
         closable={!authorizationBusy}
         mask={{ closable: !authorizationBusy }}
-        keyboard={!authorizationBusy}
-        onClose={() => { authorizationEpoch.current += 1; setAuthorizationAccount(null); setAuthorizationProbe(null); authorizationForm.resetFields(); }}
+        keyboard={false}
+        onClose={closeAuthorization}
         extra={<Button type="primary" aria-label="确认更新所选授权" loading={authorizationBusy} disabled={!authorizationProbe || !authorizationProbe.targets.length || authorizationResult?.complete || Date.now() >= (authorizationProbe?.expiresAtMs || 0)} onClick={() => void confirmAuthorization()}>确认更新</Button>}
       >
         {authorizationAccount ? (
@@ -888,7 +967,7 @@ export function useAccountCenter({
               <p>停止后这条关联不再核算，释放它占用的本站渠道；已结账的历史账单保留，同一 Key 的其他关联不受影响。</p>
               <dl className="jy-accounts-facts">
                 <dt>核算关联</dt><dd>{purposeTarget.association.ruleId}</dd>
-                <dt>Key</dt><dd>{purposeTarget.key ? keyTitle(purposeTarget.key) : "—"}</dd>
+                <dt>Key</dt><dd>{purposeTarget.keyLabel || "—"}</dd>
                 <dt>释放的本站渠道</dt><dd>{purposeTarget.association.channels.map((channel) => `${channel.name} #${channel.channelId}`).join("、") || "无"}（{ownStationName(purposeTarget.association.ownStationId)}）</dd>
               </dl>
             </>

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, List, Select, Space, Tag, Typography } from "antd";
 import { api } from "../../lib/client";
 import type { BatchInput, BatchProbe, BatchRecoveryIntent, BatchResult, ConnectionInput, CoverageDeclaration, WorkflowDestination, SourceCatalogueProjection } from "../../lib/client";
-import { closeOnEscape } from "./drawer-escape";
+import { useDrawerEscape } from "./drawer-escape";
 
 const { Text } = Typography;
 const TYPES = [{ value: "newapi", label: "New API · 账号余额" }, { value: "newapi-key", label: "New API · Key 额度" }, { value: "sub2api", label: "Sub2API · 登录令牌" }, { value: "sub2api-password", label: "Sub2API · 账号密码" }];
@@ -212,6 +212,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
     if (Object.keys(changed).some((key) => key !== "name")) invalidate(true);
   };
   const closeDrawer = () => { generation.current += 1; setOpenIds([]); };
+  useDrawerEscape(openIds.length > 0 && !busy, closeDrawer);
   const stopForNewKey = (rule: any) => modal.confirm({
     title: "停止旧 Key 核算后重新关联？", okText: "停止旧关联并选择新 Key", cancelText: "取消", okButtonProps: { danger: true },
     content: `请先在上游将站外或脚本调用与本站销售隔离到不同 Key。将停止核算关联 ${rule.id}，涉及渠道 ${names((rule.channels || []).map((channel: any) => channel.channelId))}；原账、旧范围与监控资源保留。新 Key 仍需实际验证、预览和确认。`,
@@ -234,7 +235,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
       {filtered.length ? <Checkbox checked={filtered.every((entry) => selectedIds.includes(entry.id))} indeterminate={filtered.some((entry) => selectedIds.includes(entry.id)) && !filtered.every((entry) => selectedIds.includes(entry.id))} disabled={stale || busy} onChange={(event) => setSelectedIds(event.target.checked ? [...new Set([...selectedIds, ...filtered.map((entry) => entry.id)])].slice(0, 100) : selectedIds.filter((id) => !filtered.some((entry) => entry.id === id)))}>选择当前筛选渠道（最多 100 个）</Checkbox> : null}
       <List loading={refreshing && !catalogue} dataSource={filtered} locale={{ emptyText: stale ? "渠道目录暂不可用，请重试发现" : channels.length ? "没有匹配的渠道" : catalogue?.ownStation ? "暂无渠道，请在本站 New API 添加后发现" : "请先配置我的中转站，以读取渠道目录" }} pagination={filtered.length > 5 ? { pageSize: 5, size: "small", showSizeChanger: false } : false} renderItem={(entry: any) => <List.Item style={{ display: "flex", flexWrap: "wrap", gap: 12 }}><Checkbox aria-label={`选择渠道 ${entry.name || entry.id}`} disabled={stale || busy} checked={selectedIds.includes(entry.id)} onChange={(event) => setSelectedIds(event.target.checked ? [...selectedIds, entry.id].slice(0, 100) : selectedIds.filter((id) => id !== entry.id))} /><div style={{ flex: "1 1 200px", minWidth: 0, overflowWrap: "anywhere" }}><Space wrap><Text strong>{entry.name || `渠道 #${entry.id}`}</Text><Tag>{Number(entry.status) === 1 ? "启用" : Number(entry.status) === 2 ? "手动停用" : Number(entry.status) === 3 ? "自动停用" : "状态未知"}</Tag></Space><div><Text type="secondary">本站分组：{entry.groups?.join("、") || "未提供"}</Text></div><div><Text type="secondary">{entry.baseUrl || "渠道未提供上游地址，接入时补充"}</Text></div><Space wrap><Text>监控：{STATES[entry.monitor?.status] || "未关联"}</Text><Text>对账：{STATES[entry.reconciliation?.status] || "未配置"}</Text></Space></div><Button style={{ minHeight: 44 }} disabled={refreshing || stale || busy} onClick={() => open([entry.id])} aria-label={`接入渠道 ${entry.name || entry.id}`}>{entry.monitor?.status === "linked" ? "管理关联" : "接入监控与对账"}</Button></List.Item>} />
     </Space> }]} />
-    <Drawer title="接入监控与对账" aria-label="接入监控与对账" open={openIds.length > 0} width={compact ? "100%" : 600} closable={!busy} maskClosable={!busy} keyboard={false} onKeyDown={closeOnEscape(!busy, closeDrawer)} onClose={closeDrawer} extra={<Button aria-label={result ? "重试未完成步骤" : "确认关联"} style={{ minHeight: 44 }} type="primary" loading={saving} disabled={!canSave} onClick={() => void save()}>{result ? "重试未完成步骤" : "确认关联"}</Button>}>
+    <Drawer title="接入监控与对账" aria-label="接入监控与对账" open={openIds.length > 0} width={compact ? "100%" : 600} closable={!busy} maskClosable={!busy} keyboard={false} onClose={closeDrawer} extra={<Button aria-label={result ? "重试未完成步骤" : "确认关联"} style={{ minHeight: 44 }} type="primary" loading={saving} disabled={!canSave} onClick={() => void save()}>{result ? "重试未完成步骤" : "确认关联"}</Button>}>
       <Space direction="vertical" size={16} style={{ width: "100%", overflowWrap: "anywhere" }}>
         <Alert type="info" showIcon message={`本次选择 ${openIds.length} 个渠道`} description={<Space direction="vertical"><Text>{names(openIds)}</Text><Text>本站名称、地址、分组与启停状态已带入，无需再次填写。</Text>{openIds.map((id) => <Text key={id}>{names([id])} · 本站分组 {channels.find((entry) => entry.id === id)?.groups?.join("、") || "未提供"}</Text>)}</Space>} />
         {stale ? <Alert type="warning" showIcon message="目录已过期，请重新发现后验证" /> : null}{failure ? <Alert type="error" showIcon message={failure} /> : null}

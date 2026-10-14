@@ -170,17 +170,24 @@ test("daily zero and negative confirmed subtotals remain numeric while unknown w
 });
 
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} } };
+// 每个页面收到的渠道接入请求，供只读断言使用
+const onboardingRequests = new WeakMap();
 async function openFixturePage(t, handler, viewport, clock = false, onboardingHandler = null, path = "/reconciliation") {
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
   t.after(() => browser.close());
   const context = await browser.newContext({ serviceWorkers: "block", ...(viewport ? { viewport, isMobile: true, hasTouch: true } : {}) });
-  const page = await context.newPage();
+  const page = await context.newPage(), onboardingCalls = [];
+  onboardingRequests.set(page, onboardingCalls);
   if (clock) await page.clock.install();
   page.setDefaultTimeout(5_000);
   await page.route("**/api/**", async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname.startsWith("/api/channel-onboarding")) {
-      return onboardingHandler ? onboardingHandler(route) : fulfill(route, { ownStation: null, channels: [], upstreams: [], rules: [], stale: false });
+      onboardingCalls.push({ method: route.request().method(), pathname });
+      if (onboardingHandler) return onboardingHandler(route);
+      // 没有声明接入处理的用例只允许读
+      if (route.request().method() !== "GET") throw new Error("unexpected onboarding write: " + route.request().method() + " " + pathname);
+      return fulfill(route, { ownStation: null, channels: [], upstreams: [], rules: [], stale: false });
     }
     try { return await handler(route); }
     catch (error) {
@@ -420,7 +427,9 @@ test("new New API credentials are entered once and keyboard cancellation after a
   // 下拉框展开时 Esc 只收起下拉框；紧接着（收起动画还没结束）再按 Esc 要能关掉抽屉（#413）
   const scope = drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }); await scope.click(); await page.waitForFunction(() => document.querySelector('[aria-label="Key 消费范围"][aria-expanded="true"]'));
   await page.keyboard.press("Escape"); await page.waitForFunction(() => document.querySelector('[aria-label="Key 消费范围"][aria-expanded="false"]')); assert.equal(await drawer.isVisible(), true);
-  await drawer.getByRole("button", { name: "验证并预览", exact: true }).focus(); await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 0);
+  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 0);
+  // 刚打开、焦点还没进抽屉时 Esc 也能关
+  await openOnboardingDrawer(page); await drawer.waitFor(); await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 0);
 });
 
 test("monitor-only onboarding needs no Key and submits one batch", async (t) => {
@@ -484,20 +493,23 @@ test("five-channel batches fit 320/390/768/1440 widths without root overflow", a
   }
 });
 
-test("上游账单 edits one 核算关联 by one exact preview and one PUT, and Esc closes the editor right after a dropdown", async (t) => {
+test("上游账单 edits one 核算关联 by a fresh exact preview and one PUT, and Esc closes the editor on open and right after a dropdown", async (t) => {
   const declaration = { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] };
   const rules = [{ id: "A-active", tokenName: "Key 9", tokenId: 9, upstreamStationId: "A-billing", ownStationId: "own", enabled: true, archivedAt: null, timezone: "Asia/Shanghai", costCoverage: "unknown", coverageDeclaration: declaration, channels: [1, 3].map((channelId) => ({ channelId, name: "Channel " + channelId })) },
     { id: "B-active", tokenName: "B Key", tokenId: 9, upstreamStationId: "B-monitor", ownStationId: "own", enabled: true, archivedAt: null, timezone: "Asia/Shanghai", costCoverage: "complete", coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] }, channels: [{ channelId: 2, name: "Channel 2" }] }];
   const ruleConfiguration = { ownStation: { id: "own", cnyPerUsd: null }, upstreams: [{ id: "A-billing", name: "A billing" }], channels: [1, 2, 3, 4].map((id) => ({ id, name: "Channel " + id, status: 1 })), rules };
+  let previewCount = 0;
   const { page, center, model, mutations, accountRequests } = await openAccountsPage(t, { ruleConfiguration, mutation(route, mutation) {
-    if (mutation.path === "/api/reconciliation/rules/A-active/preview" && mutation.method === "POST") return fulfill(route, { previewId: "exact-rule-preview", groupId: "rule-edit", expiresAtMs: Date.now() + 600000,
+    if (mutation.path === "/api/reconciliation/rules/A-active/preview" && mutation.method === "POST") return fulfill(route, { previewId: "exact-rule-preview-" + ++previewCount, groupId: "rule-edit", expiresAtMs: Date.now() + 600000,
       basis: { existingChannelIds: [1, 3], proposedChannelIds: mutation.body.salesChannelIds, timezone: "Asia/Shanghai" }, preview: { scopeChanged: true, costCoverage: "unknown", billingEffectiveFromMs: null } });
     if (mutation.path === "/api/reconciliation/rules/A-active" && mutation.method === "PUT") return fulfill(route, { rule: { ...rules[0], channels: mutation.body.salesChannelIds.map((channelId) => ({ channelId })) } });
     throw new Error("unexpected rule fixture API: " + mutation.method + " " + mutation.path);
   } });
   const account = await expandAccount(center, model.accounts[0]); await account.getByRole("button", { name: /Key 9 · #9/ }).click();
   const edit = account.getByRole("button", { name: "编辑渠道 A-active", exact: true }), drawer = page.getByRole("dialog", { name: /^编辑渠道 · / });
-  assert.equal(await account.getByRole("button", { name: "编辑渠道 A-history", exact: true }).count(), 0);
+  await edit.waitFor(); assert.equal(await account.getByRole("button", { name: "编辑渠道 A-history", exact: true }).count(), 0);
+  // 刚打开、焦点还没进抽屉时 Esc 也能关
+  await edit.click(); await drawer.waitFor(); await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
   // 下拉框展开时 Esc 只收起下拉框；紧接着（收起动画还没结束）再按 Esc 要能关掉抽屉（#413）
   await edit.click(); const uses = drawer.getByRole("combobox", { name: "Key 的其他用途", exact: true }); await uses.click(); await page.waitForFunction(() => document.querySelector('[aria-label="Key 的其他用途"][aria-expanded="true"]'));
   await page.keyboard.press("Escape"); await page.waitForFunction(() => document.querySelector('[aria-label="Key 的其他用途"][aria-expanded="false"]')); assert.equal(await drawer.isVisible(), true);
@@ -506,21 +518,53 @@ test("上游账单 edits one 核算关联 by one exact preview and one PUT, and 
   await drawer.locator('.ant-select-selection-item[title="Channel 1 · ID 1"] .ant-select-selection-item-remove').click();
   await drawer.getByLabel("本站销售渠道", { exact: true }).click(); assert.equal(await page.locator(".ant-select-item-option-disabled", { hasText: "Channel 2 · ID 2（已用于 B Key）" }).count(), 1);
   await page.getByText("Channel 4 · ID 4", { exact: true }).last().click(); await drawer.getByLabel("本站销售渠道", { exact: true }).press("Escape"); assert.equal(await drawer.isVisible(), true);
-  await drawer.getByRole("button", { name: "预览核算关联修改", exact: true }).click(); await drawer.getByText("最终渠道：#3、#4", { exact: true }).waitFor(); await drawer.getByText("释放渠道：#1；原账单保留。", { exact: true }).waitFor(); assert.equal(mutations.filter((entry) => entry.method === "PUT").length, 0);
-  const reads = accountRequests.length; await drawer.getByRole("button", { name: "确认修改核算关联", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); await page.getByText("核算关联已更新", { exact: true }).waitFor();
-  const previews = mutations.filter((entry) => entry.method === "POST"), puts = mutations.filter((entry) => entry.method === "PUT");
-  assert.equal(previews.length, 1); assert.equal(puts.length, 1); assert.deepEqual(puts[0].body.salesChannelIds, [3, 4]); assert.equal(puts[0].body.tokenId, 9); assert.equal(puts[0].body.upstreamStationId, "A-billing"); assert.equal(puts[0].body.timezone, "Asia/Shanghai");
-  assert.equal(puts[0].body.groupId, "rule-edit"); assert.equal(puts[0].body.previewId, "exact-rule-preview"); assert.deepEqual(puts[0].body.coverageDeclaration, declaration);
-  for (let wait = 0; accountRequests.length <= reads && wait < 50; wait++) await page.waitForTimeout(100); assert.ok(accountRequests.length > reads);
+  const previewButton = drawer.getByRole("button", { name: "预览核算关联修改", exact: true }), confirm = drawer.getByRole("button", { name: "确认修改核算关联", exact: true });
+  await previewButton.click(); await drawer.getByText("最终渠道：#3、#4", { exact: true }).waitFor(); await drawer.getByText("释放渠道：#1；原账单保留。", { exact: true }).waitFor(); assert.equal(mutations.filter((entry) => entry.method === "PUT").length, 0);
+  // 预览后再改渠道：旧预览作废，确认前必须按当前选择重新预览
+  await drawer.locator('.ant-select-selection-item[title="Channel 4 · ID 4"] .ant-select-selection-item-remove').click(); await confirm.waitFor({ state: "detached" });
+  await drawer.getByLabel("本站销售渠道", { exact: true }).click(); await page.getByText("Channel 4 · ID 4", { exact: true }).last().click(); await drawer.getByLabel("本站销售渠道", { exact: true }).press("Escape");
+  await previewButton.click(); await drawer.getByText("最终渠道：#3、#4", { exact: true }).waitFor(); await confirm.waitFor();
+  const reads = accountRequests.length; await confirm.click(); await drawer.waitFor({ state: "hidden" }); await page.getByText("核算关联已更新", { exact: true }).waitFor();
+  assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["POST", "/api/reconciliation/rules/A-active/preview"], ["POST", "/api/reconciliation/rules/A-active/preview"], ["PUT", "/api/reconciliation/rules/A-active"]]);
+  const put = mutations[2].body; assert.deepEqual(put.salesChannelIds, [3, 4]); assert.equal(put.tokenId, 9); assert.equal(put.upstreamStationId, "A-billing"); assert.equal(put.timezone, "Asia/Shanghai");
+  assert.equal(put.groupId, "rule-edit"); assert.equal(put.previewId, "exact-rule-preview-2"); assert.deepEqual(put.coverageDeclaration, declaration);
+  // 保存后重读一次上游账单，不多读
+  for (let wait = 0; accountRequests.length <= reads && wait < 50; wait++) await page.waitForTimeout(100); await page.waitForTimeout(500); assert.equal(accountRequests.length, reads + 1);
+});
+
+test("上游账单 lets a 核算关联 remove a channel it already shares with another active 核算关联", async (t) => {
+  const declaration = { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] };
+  const rule = (id, tokenName, upstreamStationId, channelIds) => ({ id, tokenName, tokenId: 9, upstreamStationId, ownStationId: "own", enabled: true, archivedAt: null, timezone: "Asia/Shanghai", costCoverage: "complete", coverageDeclaration: declaration, channels: channelIds.map((channelId) => ({ channelId, name: "Channel " + channelId })) });
+  const rules = [rule("A-active", "Key 9", "A-billing", [1, 3]), rule("C-dup", "C Key", "B-monitor", [3])];
+  const ruleConfiguration = { ownStation: { id: "own", cnyPerUsd: null }, upstreams: [{ id: "A-billing", name: "A billing" }], channels: [1, 2, 3].map((id) => ({ id, name: "Channel " + id, status: 1 })), rules };
+  const model = accountReadFixture(); Object.assign(model.accounts[0].keys[0].associations[0], { conflict: true, conflictRuleIds: ["C-dup"], keyConflictRuleIds: [], channelConflictRuleIds: ["C-dup"], duplicateChannelIds: [3] });
+  const { page, center, mutations } = await openAccountsPage(t, { model, ruleConfiguration, mutation(route, mutation) {
+    if (mutation.path === "/api/reconciliation/rules/A-active/preview" && mutation.method === "POST") return fulfill(route, { previewId: "dup-preview", groupId: "dup-edit", expiresAtMs: Date.now() + 600000,
+      basis: { existingChannelIds: [1, 3], proposedChannelIds: mutation.body.salesChannelIds, timezone: "Asia/Shanghai" }, preview: { scopeChanged: true, costCoverage: "complete", billingEffectiveFromMs: null } });
+    if (mutation.path === "/api/reconciliation/rules/A-active" && mutation.method === "PUT") return fulfill(route, { rule: { ...rules[0], channels: mutation.body.salesChannelIds.map((channelId) => ({ channelId })) } });
+    throw new Error("unexpected rule fixture API: " + mutation.method + " " + mutation.path);
+  } });
+  const account = await expandAccount(center, model.accounts[0]); await account.getByRole("button", { name: /Key 9 · #9/ }).click(); const active = account.locator('[data-rule-id="A-active"]');
+  await active.getByText("渠道 #3 同时归属 C-dup，收入会被重复计算；停止其中一条，或编辑渠道移除重复的渠道。", { exact: true }).waitFor();
+  await active.getByRole("button", { name: "编辑渠道 A-active", exact: true }).click(); const drawer = page.getByRole("dialog", { name: /^编辑渠道 · / });
+  const duplicate = drawer.locator('.ant-select-selection-item[title="Channel 3 · ID 3（与 C Key 重复，需移除）"]'); await duplicate.waitFor();
+  await duplicate.locator(".ant-select-selection-item-remove").click(); await duplicate.waitFor({ state: "detached" });
+  await drawer.getByLabel("本站销售渠道", { exact: true }).click(); assert.equal(await page.locator(".ant-select-item-option", { hasText: "Channel 3 · ID 3（与 C Key 重复，需移除）" }).count(), 1); await drawer.getByLabel("本站销售渠道", { exact: true }).press("Escape");
+  await drawer.getByRole("button", { name: "预览核算关联修改", exact: true }).click(); await drawer.getByText("最终渠道：#1", { exact: true }).waitFor(); await drawer.getByRole("button", { name: "确认修改核算关联", exact: true }).click(); await drawer.waitFor({ state: "hidden" });
+  assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["POST", "/api/reconciliation/rules/A-active/preview"], ["PUT", "/api/reconciliation/rules/A-active"]]); assert.deepEqual(mutations[1].body.salesChannelIds, [1]); assert.equal(mutations[1].body.previewId, "dup-preview");
 });
 
 test("账单核算 is read-only: no create or edit entry, fixes link back to 上游账单", async (t) => {
-  const { page } = await openDailyPage(t);
-  for (const name of ["添加对账规则", "添加核算关联", "编辑渠道", "停止核算", "操作 Rule A 的规则"]) assert.equal(await page.getByRole("button", { name, exact: true }).count(), 0);
+  const { page } = await openDailyPage(t), writeLike = /^(添加|编辑|停止|更换|操作)/;
+  assert.equal(await page.getByRole("button", { name: writeLike }).count(), 0); assert.equal(await page.getByText("编辑当前范围").count(), 0);
   assert.equal(await page.getByRole("dialog", { name: "接入监控与对账" }).count(), 0);
   assert.equal(await page.getByRole("link", { name: "去上游账单", exact: true }).getAttribute("href"), "/stations?view=bills");
-  await page.getByRole("button", { name: "查看 Rule A 的对账详情", exact: true }).click(); const fix = page.getByRole("dialog", { name: "Rule A · 对账详情", exact: true }).getByRole("link", { name: "去上游账单处理", exact: true });
-  assert.equal(await fix.getAttribute("href"), "/stations?action=scope&ruleId=rule-1");
+  const rowLinks = await page.getByRole("link", { name: "去上游账单处理 Rule A 的核算关联", exact: true }).evaluateAll((links) => links.map((link) => link.getAttribute("href")));
+  assert.ok(rowLinks.length > 0); assert.deepEqual([...new Set(rowLinks)], ["/stations?action=scope&ruleId=rule-1"]);
+  await page.getByRole("button", { name: "查看 Rule A 的对账详情", exact: true }).click(); const detail = page.getByRole("dialog", { name: "Rule A · 对账详情", exact: true }), fix = detail.getByRole("link", { name: "去上游账单处理", exact: true });
+  assert.equal(await fix.getAttribute("href"), "/stations?action=scope&ruleId=rule-1"); assert.equal(await detail.getByRole("button", { name: writeLike }).count(), 0);
+  // 核算页不再嵌渠道接入：不读接入目录，也没有任何接入写请求
+  const calls = onboardingRequests.get(page); assert.equal(calls.filter((call) => call.pathname === "/api/channel-onboarding").length, 0); assert.deepEqual(calls.filter((call) => call.method !== "GET"), []);
 });
 
 test("a lost batch response recovers persisted results without returned browser IDs or another confirm", async (t) => {
@@ -875,7 +919,7 @@ test("pause and re-enable retain complete resource settings while stopping one �
   await resource().getByRole("button", { name: "查看原资源设置 A-monitor-1", exact: true }).click(); const editor = page.getByRole("dialog", { name: /^编辑上游资源：/ }); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("成本渠道匹配别名", { exact: true }).inputValue(), "kept_alias"); await editor.getByRole("button", { name: /取\s*消/ }).click();
   await resource().getByRole("button", { name: "启用监控 A-monitor-1", exact: true }).click(); modal = page.getByRole("dialog", { name: "启用「A-monitor-1」监控？", exact: true }); await waitForFact(modal, "现有成本设置", "不纳入"); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" }); await resource().getByText("余额监控", { exact: true }).waitFor(); assert.equal(originalStations.find((entry) => entry.id === "st_u04_a1").includeInProfit, false);
   await a.getByRole("button", { name: /Key 9 · #9/ }).click(); await a.getByRole("button", { name: "停止核算关联 rule_u04", exact: true }).click(); modal = page.getByRole("dialog", { name: "停止这条核算关联？", exact: true }); await waitForFact(modal, "释放的本站渠道", "Channel 1 #1、Channel 3 #3（Own station）"); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" });
-  await a.locator('[data-rule-id="rule_u04"]').getByText("已停止", { exact: true }).waitFor(); await a.getByRole("button", { name: /Key 9 · #9/ }).getByText("已停止核算", { exact: true }).waitFor(); assert.equal(await a.getByRole("button", { name: "停止核算关联 rule_u04", exact: true }).count(), 0); assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["PUT", "/api/stations/st_u04_a1"], ["PUT", "/api/stations/st_u04_a1"], ["DELETE", "/api/reconciliation/rules/rule_u04"]]); assert.equal(model.accounts[0].resources.find((entry) => entry.id === "st_u04_a2").monitorEnabled, true); assert.equal(model.accounts[0].keys[0].ruleIds.includes("rule_history"), true); assert.equal(await center.getByRole("button", { name: /暂停监控 st_u04_own/ }).count(), 0);
+  await a.locator('[data-rule-id="rule_u04"]').getByText("已停止", { exact: true }).waitFor(); await a.locator('[data-rule-id="rule_history"]').getByText("已停止", { exact: true }).waitFor(); await a.getByRole("button", { name: /Key 9 · #9/ }).getByText("已停止核算", { exact: true }).waitFor(); assert.equal(await a.getByRole("button", { name: "停止核算关联 rule_u04", exact: true }).count(), 0); assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["PUT", "/api/stations/st_u04_a1"], ["PUT", "/api/stations/st_u04_a1"], ["DELETE", "/api/reconciliation/rules/rule_u04"]]); assert.equal(model.accounts[0].resources.find((entry) => entry.id === "st_u04_a2").monitorEnabled, true); assert.equal(model.accounts[0].keys[0].ruleIds.includes("rule_history"), true); assert.equal(await center.getByRole("button", { name: /暂停监控 st_u04_own/ }).count(), 0);
 });
 
 test("authorization target changes invalidate preview and keyboard cancellation works at 320/390/768/1440 without overflow", async (t) => {
@@ -910,6 +954,9 @@ test("account center preserves mixed accounts, original resource IDs, dedicated 
     assert.equal(target.origin, new URL(baseURL).origin); assert.equal(target.pathname, "/stations"); assert.deepEqual(Object.fromEntries(target.searchParams), params); allowedHrefs.push(href);
   }
   assert.deepEqual((await center.getByRole("link").evaluateAll((links) => links.map((link) => link.getAttribute("href")))).sort(), allowedHrefs.sort());
+  // 更换 Key 只在有效关联上，走渠道接入的 coverage 流程
+  for (const id of ["A-history", "A-stopped"]) assert.equal(await a.getByRole("button", { name: "更换 Key " + id, exact: true }).count(), 0);
+  await a.getByRole("button", { name: "更换 Key A-active", exact: true }).click(); await page.getByRole("tab", { name: "渠道接入", selected: true }).waitFor();
   assert.equal(mutations.length, 0); assert.equal(probes.length, 0); assert.equal(writes.length, 0);
 });
 
@@ -924,13 +971,44 @@ test("account search and attention filters preserve relationships and open only 
 
 test("duplicate ownership deep link expands both active 核算关联 and never shows one scope as unified", async (t) => {
   const model = accountReadFixture(), key = model.accounts[0].keys[0]; Object.assign(key, { activeRuleIds: ["A-active", "A-conflict"], ruleIds: ["A-active", "A-conflict", "A-history"], scopeAmbiguous: true, costCoverage: "unknown", coverageDeclaration: { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] }, scopeVersion: null, billingEffectiveFromMs: null, firstQueryableAtMs: null }); key.channels.push({ ownSource: null, ownStationId: "old-own", channelId: 1, name: "Legacy channel 1" });
-  Object.assign(key.associations[0], { conflict: true, conflictRuleIds: ["A-conflict"] }); key.associations.splice(1, 0, { ...key.associations[0], ruleId: "A-conflict", ownStationId: "old-own", scopeVersion: 1, channels: [{ channelId: 1, name: "Legacy channel 1" }], conflictRuleIds: ["A-active"] });
+  Object.assign(key.associations[0], { conflict: true, conflictRuleIds: ["A-conflict"], keyConflictRuleIds: ["A-conflict"], channelConflictRuleIds: [], duplicateChannelIds: [] }); key.associations.splice(1, 0, { ...key.associations[0], ruleId: "A-conflict", ownStationId: "old-own", scopeVersion: 1, channels: [{ channelId: 1, name: "Legacy channel 1" }], conflictRuleIds: ["A-active"], keyConflictRuleIds: ["A-active"] });
   const { center } = await openAccountsPage(t, { model, path: "/stations?action=conflict&ruleId=A-conflict" }); const a = center.locator(`[data-account-key="${model.accounts[0].accountKey}"]`), scope = a.locator(`[data-canonical-key="${key.canonicalKey}"]`);
   await a.getByRole("button", { name: /Key 9 · #9/ }).getByText("重复归属", { exact: true }).waitFor();
   const first = scope.locator('[data-rule-id="A-active"]'), second = scope.locator('[data-rule-id="A-conflict"]'); await first.getByText("与关联 A-conflict 重复归属", { exact: true }).waitFor(); await second.getByText("与关联 A-active 重复归属", { exact: true }).waitFor();
   await second.getByText("本站 old-own", { exact: true }).waitFor(); await waitForFact(second, "本站渠道", "Legacy channel 1 · #1"); assert.match(await second.getAttribute("class"), /is-focused/); assert.doesNotMatch(await first.getAttribute("class"), /is-focused/);
+  await first.getByText("与 A-conflict 是同一把实际 Key，成本会被重复计算，只能停止其中一条。", { exact: true }).waitFor(); await second.getByText("与 A-active 是同一把实际 Key，成本会被重复计算，只能停止其中一条。", { exact: true }).waitFor();
+  // 范围版本只按关联各自显示，Key 头上不给一个合并后的版本或时间
+  await waitForFact(first, "范围版本", "3 · 用途待确认，毛利标为待确认"); await waitForFact(second, "范围版本", "1 · 用途待确认，毛利标为待确认");
+  assert.equal(await scope.locator("dt").filter({ hasText: exactText("范围版本") }).count(), 3); assert.equal(await scope.locator("[data-rule-id]").count(), 3);
+  assert.doesNotMatch(await a.getByRole("button", { name: /Key 9 · #9/ }).innerText(), /范围版本|生效|停止时间/);
   for (const id of ["A-active", "A-conflict"]) { await scope.getByRole("button", { name: "编辑渠道 " + id, exact: true }).waitFor(); await scope.getByRole("button", { name: "停止核算关联 " + id, exact: true }).waitFor(); }
   assert.equal(await scope.locator('[data-rule-id="A-history"]').getByText("重复归属").count(), 0);
+});
+
+test("active 核算关联 outside verified Keys stay listed with their reason, verification link and a working stop", async (t) => {
+  const model = accountReadFixture(), base = model.accounts[0].keys[0].associations[0];
+  Object.assign(base, { conflict: true, conflictRuleIds: ["U-legacy"], keyConflictRuleIds: [], channelConflictRuleIds: ["U-legacy"], duplicateChannelIds: [3] });
+  const unmatched = (ruleId, extra) => ({ ...base, ruleId, scopeVersion: 1, conflict: false, conflictRuleIds: [], keyConflictRuleIds: [], channelConflictRuleIds: [], duplicateChannelIds: [], ...extra });
+  model.unmatchedAssociations = [
+    unmatched("U-gone", { upstreamStationId: "deleted-station", channels: [{ channelId: 4, name: "Channel 4" }], reason: "missing_resource", tokenId: 5, tokenName: "Gone Key" }),
+    unmatched("U-legacy", { upstreamStationId: "unknown-legacy", channels: [{ channelId: 3, name: "Channel 3" }], conflict: true, conflictRuleIds: ["A-active"], channelConflictRuleIds: ["A-active"], duplicateChannelIds: [3], reason: "unverified_resource", tokenId: 9, tokenName: "Legacy Key" }),
+  ];
+  const { page, center, mutations } = await openAccountsPage(t, { model, path: "/stations?action=conflict&ruleId=A-active", mutation(route, mutation) {
+    assert.deepEqual([mutation.method, mutation.path], ["DELETE", "/api/reconciliation/rules/U-gone"]); model.unmatchedAssociations = model.unmatchedAssociations.filter((item) => item.ruleId !== "U-gone"); return fulfill(route, { ok: true });
+  } });
+  // 冲突的另一方不在任何 Key 下：不按账号筛选，两边都看得到
+  await center.getByText(/显示 3\/3 个已核验账号；待核验资源 2\/2；未归到 Key 的核算关联 2\/2/).waitFor();
+  const section = center.locator("[data-unmatched-associations]"), legacy = section.locator('[data-rule-id="U-legacy"]'), gone = section.locator('[data-rule-id="U-gone"]');
+  const active = center.locator(`[data-account-key="${model.accounts[0].accountKey}"] [data-rule-id="A-active"]`); await active.getByText("渠道 #3 同时归属 U-legacy，收入会被重复计算；停止其中一条，或编辑渠道移除重复的渠道。", { exact: true }).waitFor(); assert.match(await active.getAttribute("class"), /is-focused/);
+  await legacy.getByText("Legacy Key · #9", { exact: true }).waitFor(); await legacy.getByText("重复归属", { exact: true }).waitFor(); await legacy.getByText("渠道 #3 同时归属 A-active，收入会被重复计算；停止其中一条，或编辑渠道移除重复的渠道。", { exact: true }).waitFor();
+  await waitForFact(legacy, "上游资源", "unknown-legacy"); await waitForFact(legacy, "本站", "Own station"); await waitForFact(legacy, "本站渠道", "Channel 3 · #3");
+  assert.equal(await legacy.getByRole("link", { name: "核验账号身份", exact: true }).getAttribute("href"), "/stations?action=verify&stationId=unknown-legacy");
+  await gone.getByText("上游资源已删除", { exact: true }).waitFor(); await waitForFact(gone, "上游资源", "deleted-station"); assert.equal(await gone.getByRole("link").count(), 0);
+  await center.getByRole("textbox", { name: "搜索上游账单" }).fill("Gone Key"); await center.getByText(/未归到 Key 的核算关联 1\/2/).waitFor(); assert.equal(await legacy.count(), 0);
+  await gone.getByRole("button", { name: "停止核算关联 U-gone", exact: true }).click(); const modal = page.getByRole("dialog", { name: "停止这条核算关联？", exact: true });
+  await waitForFact(modal, "Key", "Gone Key · #5"); await waitForFact(modal, "释放的本站渠道", "Channel 4 #4（Own station）"); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" });
+  await gone.waitFor({ state: "detached" }); await center.getByRole("textbox", { name: "搜索上游账单" }).fill(""); await legacy.waitFor(); await center.getByText(/未归到 Key 的核算关联 1\/1/).waitFor();
+  assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["DELETE", "/api/reconciliation/rules/U-gone"]]);
 });
 
 test("account read failure retains the last public relationships and retry restores the center", async (t) => {

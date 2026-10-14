@@ -301,7 +301,7 @@ export class ReconciliationRepository {
     try {
       await conn.beginTransaction();
       const [rows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
-      if (!rows.length) throw new Error("对账规则不存在或已归档");
+      if (!rows.length) throw new Error("核算关联不存在或已归档");
       const [channelRows] = await conn.query("SELECT * FROM reconciliation_rule_channels WHERE rule_id = ? FOR UPDATE", [id]);
       const existing = ruleFromRow(rows[0], channelRows);
       input = applyScopePolicy(existing, input, Date.now(), { append });
@@ -317,7 +317,7 @@ export class ReconciliationRepository {
           input.billingPolicy, input.scopeVersion, input.billingEffectiveFrom, input.costCoverage,
           input.provider, input.canonicalKey, JSON.stringify(serializeRuleSourceBinding(input)), id]
       );
-      if (!result.affectedRows) throw new Error("对账规则不存在或已归档");
+      if (!result.affectedRows) throw new Error("核算关联不存在或已归档");
       // 保留仍在关联里的渠道行（连同已观测到的状态列），只删掉移除的、插入新增的。
       const kept = new Set(channelRows.map((row) => Number(row.channel_id)));
       const channelIds = input.channels.map((channel) => Number(channel.channelId));
@@ -370,7 +370,7 @@ export class ReconciliationRepository {
         const observed = channels.some((channel) => channel.status_observed_at_ms != null) || segments.some((segment) => segment.timing_source === "detected"
           || (segment.ratio_source === "group_catalog" && Number(segment.ratio_observed_at_ms) > Number(segment.effective_from_ms)));
         if (!originalMatches && !(allowInitialAnchoring && !history.length && !observed)) {
-          throw Object.assign(new Error("旧规则缺少可信原始身份，保留金额参考；请明确确认新的账号和本站范围"), { code: "LEGACY_IDENTITY_UNVERIFIED" });
+          throw Object.assign(new Error("旧核算关联缺少可信原始身份，保留金额参考；请明确确认新的账号和本站范围"), { code: "LEGACY_IDENTITY_UNVERIFIED" });
         }
         await conn.query("UPDATE reconciliation_rules SET provider = ?, canonical_key = ?, source_binding = ? WHERE id = ? AND archived_at IS NULL",
           [rule.provider || provider, rule.canonicalKey || canonicalKey, JSON.stringify(serializeRuleSourceBinding({ ...rule, ownSource: rule.ownSource || ownSource })), id]);
@@ -443,7 +443,7 @@ export class ReconciliationRepository {
       const [rules] = await conn.query(
         "SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]
       );
-      if (!rules.length) throw new Error("对账规则不存在或已停止");
+      if (!rules.length) throw new Error("核算关联不存在或已停止");
       const [rows] = await conn.query(
         `SELECT * FROM reconciliation_rule_segments
          WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC, effective_to_ms IS NOT NULL DESC, effective_to_ms ASC FOR UPDATE`, [ruleId]
@@ -460,7 +460,7 @@ export class ReconciliationRepository {
         if (Number(result.affectedRows || 0)) row.group_ratio = knownRatio;
       }
       const current = rows.find((row) => row.effective_to_ms == null);
-      if (!current) throw new Error("对账规则缺少当前分段");
+      if (!current) throw new Error("核算关联缺少当前分段");
       const currentRatio = current.group_ratio == null ? null : Number(current.group_ratio);
       const nextRatio = ratio == null ? null : Number(ratio);
       const sameGroup = current.group_name === group;
@@ -511,7 +511,7 @@ export class ReconciliationRepository {
          WHERE rule_id = ? AND effective_to_ms IS NULL FOR UPDATE`, [ruleId]
       );
       const current = rows[0];
-      if (!current) throw new Error("对账规则缺少当前分段");
+      if (!current) throw new Error("核算关联缺少当前分段");
       const currentRatio = current.group_ratio == null ? null : Number(current.group_ratio);
       const nextRatio = ratio == null ? null : Number(ratio);
       const sameGroup = current.group_name === group;
@@ -597,7 +597,7 @@ export class ReconciliationRepository {
       const [rules] = await conn.query(
         "SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]
       );
-      if (!rules.length) throw new Error("对账规则不存在或已停止");
+      if (!rules.length) throw new Error("核算关联不存在或已停止");
       for (const state of states) await conn.query(
         `UPDATE reconciliation_rule_channels
          SET status_changed_at_ms = CASE WHEN channel_status <=> ? THEN status_changed_at_ms ELSE ? END,

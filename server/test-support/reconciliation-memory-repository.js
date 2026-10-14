@@ -226,7 +226,7 @@ export class MemoryReconciliationRepository {
     await this.#transaction("updateRule", async (tx) => {
       await this.#lock(tx, `rule:${id}`);
       const entry = this.#ruleEntry(tx, id);
-      if (!entry) throw new Error("对账规则不存在或已归档");
+      if (!entry) throw new Error("核算关联不存在或已归档");
       const existing = ruleFromRow(entry.row, this.#channelsOf(tx, id, "id"));
       input = applyScopePolicy(existing, input, Date.now(), { append });
       if (guard) guard(existing, existing.channels, input);
@@ -238,7 +238,7 @@ export class MemoryReconciliationRepository {
         cost_coverage: input.costCoverage ?? null, provider: input.provider ?? null, canonical_key: input.canonicalKey ?? null,
         source_binding: JSON.stringify(serializeRuleSourceBinding(input)),
       });
-      if (!affected) throw new Error("对账规则不存在或已归档");
+      if (!affected) throw new Error("核算关联不存在或已归档");
       // 与 MySQL 版一致：保留仍在关联里的渠道行（含状态列），只删移除的、插入新增的。
       const current = this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, id));
       const channelIds = new Set(input.channels.map((channel) => Number(channel.channelId)));
@@ -279,7 +279,7 @@ export class MemoryReconciliationRepository {
         const observed = channels.some((channel) => channel.status_observed_at_ms != null) || segments.some((segment) => segment.timing_source === "detected"
           || (segment.ratio_source === "group_catalog" && Number(segment.ratio_observed_at_ms) > Number(segment.effective_from_ms)));
         if (!originalMatches && !(allowInitialAnchoring && !history.length && !observed)) {
-          throw Object.assign(new Error("旧规则缺少可信原始身份，保留金额参考；请明确确认新的账号和本站范围"), { code: "LEGACY_IDENTITY_UNVERIFIED" });
+          throw Object.assign(new Error("旧核算关联缺少可信原始身份，保留金额参考；请明确确认新的账号和本站范围"), { code: "LEGACY_IDENTITY_UNVERIFIED" });
         }
         this.#update(tx, "rules", [entry], {
           provider: (rule.provider || provider) ?? null, canonical_key: (rule.canonicalKey || canonicalKey) ?? null,
@@ -323,7 +323,7 @@ export class MemoryReconciliationRepository {
     const outcome = await this.#transaction("observeSource", async (tx) => {
       await this.#lock(tx, `rule:${ruleId}`);
       const rule = this.#ruleEntry(tx, ruleId);
-      if (!rule) throw new Error("对账规则不存在或已停止");
+      if (!rule) throw new Error("核算关联不存在或已停止");
       const rows = this.#segmentsOf(tx, ruleId).map(({ row }) => ({ ...row }));
       let ratioBackfilled = false;
       for (const row of rows) {
@@ -334,7 +334,7 @@ export class MemoryReconciliationRepository {
         if (affected) row.group_ratio = knownRatio;
       }
       const current = rows.find((row) => row.effective_to_ms == null);
-      if (!current) throw new Error("对账规则缺少当前分段");
+      if (!current) throw new Error("核算关联缺少当前分段");
       const currentRatio = current.group_ratio == null ? null : Number(current.group_ratio);
       const nextRatio = ratio == null ? null : Number(ratio);
       const sameGroup = current.group_name === group;
@@ -361,7 +361,7 @@ export class MemoryReconciliationRepository {
     const outcome = await this.#transaction("reconcileCurrentSegment", async (tx) => {
       await this.#lock(tx, `rule:${ruleId}`);
       const current = this.#segmentsOf(tx, ruleId).map(({ row }) => ({ ...row })).find((row) => row.effective_to_ms == null);
-      if (!current) throw new Error("对账规则缺少当前分段");
+      if (!current) throw new Error("核算关联缺少当前分段");
       const currentRatio = current.group_ratio == null ? null : Number(current.group_ratio);
       const nextRatio = ratio == null ? null : Number(ratio);
       const sameGroup = current.group_name === group;
@@ -404,7 +404,7 @@ export class MemoryReconciliationRepository {
   async updateChannelStates(ruleId, states, observedAt = Date.now()) {
     await this.#transaction("updateChannelStates", async (tx) => {
       await this.#lock(tx, `rule:${ruleId}`);
-      if (!this.#ruleEntry(tx, ruleId)) throw new Error("对账规则不存在或已停止");
+      if (!this.#ruleEntry(tx, ruleId)) throw new Error("核算关联不存在或已停止");
       for (const state of states) {
         this.log.channelStateWrites.push({ ruleId, channelId: state.channelId, state: state.state ?? null, observedAt });
         const entries = this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, ruleId) && Number(row.channel_id) === Number(state.channelId));
