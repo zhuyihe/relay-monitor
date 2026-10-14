@@ -980,13 +980,13 @@ contract("billing capabilities round-trip, overwrite and delete by identity", as
   const first = fixture.capabilityIdentity("first"), second = fixture.capabilityIdentity("second");
   assert.equal(await repository.getBillingCapability(first), null);
   const capability = { state: "supported", currency: "USD", window: "natural-day", verifiedAt: now - 1000, reason: "RUNTIME_FILTERS_VERIFIED" };
-  await repository.saveBillingCapability(first, capability, { now });
-  await repository.saveBillingCapability(second, { ...capability, verifiedAt: now - 500 }, { now });
+  await repository.saveBillingCapability(first, capability);
+  await repository.saveBillingCapability(second, { ...capability, verifiedAt: now - 500 });
   assert.deepEqual(await repository.getBillingCapability(first), capability);
   // 身份大小写不同仍是同一行（utf8mb4_0900_ai_ci）。
   assert.deepEqual(await repository.getBillingCapability(first.toUpperCase()), capability);
 
-  await repository.saveBillingCapability(first, { ...capability, verifiedAt: now }, { now });
+  await repository.saveBillingCapability(first, { ...capability, verifiedAt: now });
   assert.equal((await repository.getBillingCapability(first)).verifiedAt, now);
   assert.equal((await repository.getBillingCapability(second)).verifiedAt, now - 500);
 
@@ -994,19 +994,17 @@ contract("billing capabilities round-trip, overwrite and delete by identity", as
   assert.equal(await repository.getBillingCapability(first), null);
   assert.equal((await repository.getBillingCapability(second)).verifiedAt, now - 500);
   await repository.deleteBillingCapability(first);
-  await assert.rejects(repository.saveBillingCapability(`${first}0`, capability, { now }), { code: "ER_DATA_TOO_LONG" });
+  await assert.rejects(repository.saveBillingCapability(`${first}0`, capability), { code: "ER_DATA_TOO_LONG" });
 });
 
-contract("saving a billing capability expires identities not re-verified within the max age", async ({ repository, fixture }) => {
-  const now = Date.now(), maxAgeMs = 30 * DAY;
-  const stale = fixture.capabilityIdentity("stale"), edge = fixture.capabilityIdentity("edge"), fresh = fixture.capabilityIdentity("fresh");
+contract("saving a billing capability never drops other identities, however long ago they were verified", async ({ repository, fixture }) => {
+  const now = Date.now();
+  const idle = fixture.capabilityIdentity("idle"), fresh = fixture.capabilityIdentity("fresh");
   const capability = (verifiedAt) => ({ state: "supported", currency: "USD", window: "natural-day", verifiedAt, reason: "RUNTIME_FILTERS_VERIFIED" });
-  await repository.saveBillingCapability(stale, capability(now - maxAgeMs - 1), { now: now - 2 * DAY, maxAgeMs });
-  await repository.saveBillingCapability(edge, capability(now - maxAgeMs), { now: now - 2 * DAY, maxAgeMs });
-  assert.equal((await repository.getBillingCapability(stale)).verifiedAt, now - maxAgeMs - 1, "未到期前不会被清理");
-  await repository.saveBillingCapability(fresh, capability(now), { now, maxAgeMs });
-  assert.equal(await repository.getBillingCapability(stale), null);
-  assert.equal((await repository.getBillingCapability(edge)).verifiedAt, now - maxAgeMs, "恰好满 maxAge 的仍保留");
+  // 长期零消费的账号无法重新核验，它的旧核验结果要一直可读。
+  await repository.saveBillingCapability(idle, capability(now - 400 * DAY));
+  await repository.saveBillingCapability(fresh, capability(now));
+  assert.equal((await repository.getBillingCapability(idle)).verifiedAt, now - 400 * DAY);
   assert.equal((await repository.getBillingCapability(fresh)).verifiedAt, now);
 });
 

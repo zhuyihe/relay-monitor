@@ -214,7 +214,6 @@ export async function ensureSchema(pool) {
   await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_billing_capabilities (
     identity CHAR(64) NOT NULL PRIMARY KEY,
     capability JSON NOT NULL,
-    verified_at BIGINT NOT NULL,
-    INDEX idx_reconciliation_capability_verified (verified_at)
+    verified_at BIGINT NOT NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 }

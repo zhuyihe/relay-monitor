@@ -966,6 +966,29 @@ test("F03 genuine Sub2API verifies actual Key/date controls independently in eac
   assert.equal(unverified.groups[0].status, "unverified"); assert.equal(f.state.created, 2);
 });
 
+test("F03 新建 Sub2API 账号在向导里核验的能力，确认保存时按同一身份读到，不会误报预览已变化", async (t) => {
+  const f = await genuineBatchFixture(t), fetchNewApi = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, options) => {
+    const url = new URL(input);
+    if (!url.pathname.startsWith("/api/v1/")) return fetchNewApi(input, options);
+    if (url.pathname.startsWith("/api/v1/keys/")) return Response.json({ code: 404, data: {} }, { status: 404 });
+    const data = url.pathname === "/api/v1/auth/me" ? { id: 42 }
+      : url.pathname === "/api/v1/keys" ? { total: 1, items: [{ id: 9, user_id: 42, name: "Key 9", status: "active", group_id: 1 }] }
+        : { total_actual_cost: url.searchParams.get("api_key_id") === String(Number.MAX_SAFE_INTEGER) || url.searchParams.get("start_date") > "2026-10-09" ? 0 : 2 };
+    return Response.json({ code: 0, data });
+  });
+  const input = f.request([[1]], [9]);
+  input.selections = [{ selectionId: "account", monitor: true, newStation: { type: "sub2api", baseUrl: "https://up.test", accessToken: "brand-new-pat" } }];
+  const probe = await f.rt.channelOnboarding.probeBatch(input);
+  assert.equal(probe.groups[0].status, "ready");
+  const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: probe.previewId });
+  assert.equal(result.complete, true, JSON.stringify(result.groups?.map((group) => group.code)));
+  const station = f.store.list({ includeUnmonitored: true }).find((item) => item.type === "sub2api");
+  assert.equal(station.authVersion, 1); assert.equal(f.state.created, 1);
+  const metadata = await f.rt.reconciliation.getUpstreamKeys(station.id, { timezone: "Asia/Shanghai" });
+  assert.equal(metadata.capability.state, "supported");
+});
+
 test("F03 per-group metadata failure independently redacts own upstream and generated temporary credentials", async () => {
   const f = await onboardingFixture(), queryMetadata = f.dependencies.queryMetadata;
   f.dependencies.queryMetadata = async (connection, options) => {

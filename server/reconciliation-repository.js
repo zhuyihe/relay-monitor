@@ -172,8 +172,6 @@ export function normalizeConfirmedHistoryOptions(input = {}, now = Date.now()) {
   return { startMs, endMs, limit: Math.min(50, requestedLimit), cursor: input.cursor ?? null, after };
 }
 
-export const BILLING_CAPABILITY_MAX_AGE_MS = 30 * 24 * 3600000;
-
 export class ReconciliationRepository {
   constructor(pool) {
     this.pool = pool;
@@ -748,14 +746,14 @@ export class ReconciliationRepository {
     return rows.length ? asJson(rows[0].capability) : null;
   }
 
-  // 顺带清掉 30 天没再核验的身份：在用的能力每 7 天重新核验一次，换过凭据或时区的旧身份不会再被读取。
-  async saveBillingCapability(identity, capability, { now = Date.now(), maxAgeMs = BILLING_CAPABILITY_MAX_AGE_MS } = {}) {
+  // 不按核验时间清理：长期没有消费的账号无法重新核验（核验需要非零扣费），清掉后零消费的日子就结不了账。
+  // 换过凭据或时区留下的旧身份只在人工改授权时产生，数量很小。
+  async saveBillingCapability(identity, capability) {
     await this.pool.query(
       `INSERT INTO reconciliation_billing_capabilities (identity, capability, verified_at) VALUES (?, ?, ?)
        ON DUPLICATE KEY UPDATE capability = VALUES(capability), verified_at = VALUES(verified_at)`,
       [identity, JSON.stringify(capability), capability.verifiedAt]
     );
-    await this.pool.query("DELETE FROM reconciliation_billing_capabilities WHERE verified_at < ?", [now - maxAgeMs]);
   }
 
   async deleteBillingCapability(identity) {

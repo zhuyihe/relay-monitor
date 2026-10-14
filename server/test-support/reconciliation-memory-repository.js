@@ -13,7 +13,6 @@ import { applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } f
 import {
   uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, segmentFromRow,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, isSettledConfirmedSource,
-  BILLING_CAPABILITY_MAX_AGE_MS,
 } from "../reconciliation-repository.js";
 
 const JSON_COLUMNS = new Set(["source_binding", "source", "capability"]);
@@ -150,6 +149,7 @@ export class MemoryReconciliationRepository {
   //   beforeSnapshotWrite(entry, tx)   写快照前，可以抛错模拟写入失败
   //   afterSnapshotWrite(entry, tx)    写快照后、提交前
   //   beforeCommit(tx) / afterCommit(tx)
+  //   beforeCapabilityWrite(method, identity)  保存或删除账单能力前，可以抛错模拟写入失败
   // tx 是 { name, snapshots: [{ ruleId, snapshotKey, source }], archivedRuleIds }。
   constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], now = () => Date.now(), hooks = {} } = {}) {
     this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts], capabilities: [...capabilities] };
@@ -491,16 +491,17 @@ export class MemoryReconciliationRepository {
     return row ? fresh(row).capability : null;
   }
 
-  async saveBillingCapability(identity, capability, { now = Date.now(), maxAgeMs = BILLING_CAPABILITY_MAX_AGE_MS } = {}) {
+  async saveBillingCapability(identity, capability) {
+    await this.hooks.beforeCapabilityWrite?.("saveBillingCapability", identity);
     this.log.capabilityWrites.push({ method: "saveBillingCapability", identity, capability: structuredClone(capability) });
     const values = { capability: JSON.stringify(capability), verified_at: bigint(capability.verifiedAt) };
     const existing = this.#capabilityEntry(identity);
     if (existing) this.#update(null, "capabilities", [existing], values);
     else this.#insert(null, "capabilities", { identity, ...values });
-    this.#delete(null, "capabilities", this.#rows("capabilities").filter(({ row }) => Number(row.verified_at) < now - maxAgeMs));
   }
 
   async deleteBillingCapability(identity) {
+    await this.hooks.beforeCapabilityWrite?.("deleteBillingCapability", identity);
     this.log.capabilityWrites.push({ method: "deleteBillingCapability", identity });
     const existing = this.#capabilityEntry(identity);
     if (existing) this.#delete(null, "capabilities", [existing]);

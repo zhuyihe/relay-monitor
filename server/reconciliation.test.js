@@ -3806,7 +3806,7 @@ test("换到另一稳定账号的授权不能写入原 Key 的分段或来源历
 
 test("Sub2API Key/date核验后按业务时区确认整日利润，零值或缺实际扣费不确认", async (t) => {
   t.mock.method(Date, "now", () => Date.parse("2026-10-11T01:00:00Z"));
-  const { rule, rt, stations, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "7", ratio: null, from: 0 }] });
+  const { rule, state, rt, stations, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "7", ratio: null, from: 0 }] });
   Object.assign(stations[0], { type: "sub2api", baseUrl: "https://sub2-caller.test", accessToken: "jwt" });
   const startMs = Date.parse("2026-10-09T16:00:00Z");
   Object.assign(rule, { billing_policy: "next-complete-day", scope_version: 1, billing_effective_from_ms: startMs, cost_coverage: "complete", source_binding: { 1: "r1" } });
@@ -3841,6 +3841,13 @@ test("Sub2API Key/date核验后按业务时区确认整日利润，零值或缺�
   assert.equal(complete.calculation.profitUsd, 1.5);
   assert.deepEqual(complete.billingTimezone, { state: "verified", timezone: "Asia/Shanghai" });
   assert.ok(!complete.health.issues.some((issue) => /BILLING_TIMEZONE/.test(issue.code)));
+  // 确认记录即最终结果：之后上游再变，同一天直接读确认记录，不再取数也不再写库。
+  const writes = state.writes;
+  cost = null;
+  const final = (await module.queryRules(input, { force: true })).results[0];
+  assert.ok(complete.settledAt, "整日利润已结账");
+  assert.deepEqual([final.calculation.profitUsd, final.settledAt], [1.5, complete.settledAt], "已确认的一天不被之后的缺字段结果覆盖");
+  assert.equal(state.writes, writes);
 });
 
 test("Sub2API 密码/邮箱变更废弃元数据缓存，JWT 自动续期不改变授权身份", async (t) => {
@@ -3928,8 +3935,8 @@ test("Sub2API 密码在账单请求期间变化时，旧扣费不能写快照或
 });
 
 // Sub2API 上游（Key 9，按 start_date 给实际扣费）+ 本站 NewAPI 收入 2.5；control 计数能力核验发出的不存在 Key 请求。
-function sub2ReconciliationFixture(t, { baseUrl, costs = {} }) {
-  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "7", ratio: null, from: 0 }] });
+function sub2ReconciliationFixture(t, { baseUrl, costs = {}, ...live }) {
+  const f = liveReconciliationFixture(t, { ...live, segments: [{ id: "s1", group: "7", ratio: null, from: 0 }] });
   Object.assign(f.stations[0], { type: "sub2api", baseUrl, accessToken: "jwt" });
   Object.assign(f.rule, { billing_policy: "next-complete-day", scope_version: 1, billing_effective_from_ms: Date.parse("2026-10-09T16:00:00Z"),
     cost_coverage: "complete", source_binding: { 1: "r1" } });
@@ -3978,6 +3985,14 @@ test("1c Sub2API 今日实时毛利：页面查询只读不核验不写库，轮
   assert.ok(!after.health.issues.some((issue) => /BILLING_TIMEZONE|WINDOW/.test(issue.code)));
   assert.equal(after.window.endMs, now, "今天截至当前时刻");
   assert.equal(f.sub2.controls, controls); assert.equal(f.state.writes, writes);
+
+  // 存储清空后重启：页面查询只读，不借用进程缓存，也不顺手重新核验或补写能力。
+  f.repository.tables.capabilities.splice(0);
+  const capabilityWrites = f.repository.log.capabilityWrites.length;
+  const cleared = (await f.restart().queryRules(f.today, { mode: "evaluate", origin: "page" })).results[0];
+  assert.deepEqual([cleared.upstream.state, cleared.calculation.profitUsd], ["partial", null], "存储清空后不借用进程缓存");
+  assert.equal(f.sub2.controls, controls, "页面查询不重新核验");
+  assert.equal(f.repository.log.capabilityWrites.length, capabilityWrites, "页面查询不补写能力"); assert.equal(f.state.writes, writes);
 });
 
 test("1c Sub2API 能力核验结果落库：重启后页面沿用，存储清空后不借用进程缓存，满 7 天观测才重新核验", async (t) => {
@@ -4036,6 +4051,106 @@ test("1c 轮询按规则实际取数时刻定今天的截止点，Sub2API 实时
   assert.equal(observation.window.endMs, start + 10 * 60000);
   assert.equal(observation.result.upstream.amountUsd, 1);
   assert.ok(!observation.result.health.issues.some((issue) => issue.code === "UPSTREAM_WINDOW_UNSUPPORTED"));
+});
+
+test("1c 多规则查询按规则轮到时刻定今天的截止点，排在并发上限之后的 Sub2API 规则不因排队变旧", async (t) => {
+  const start = Date.parse("2026-10-11T01:00:00Z");
+  let now = start;
+  t.mock.method(Date, "now", () => now);
+  const extraRuleIds = ["rr_q1", "rr_q2", "rr_q3", "rr_q4", "rr_q5", "rr_q6"];
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-query-clock.test", costs: { "2026-10-11": 1 }, extraRuleIds,
+    channelsByRule: Object.fromEntries(extraRuleIds.map((id, index) => [id, [index + 2]])) });
+  // 主规则排到第 7 个：前 6 个占满并发，第一个开始处理时时钟走 10 分钟，主规则轮到时已超出实时区间允许的偏差。
+  f.repository.tables.rules.push(f.repository.tables.rules.shift());
+  const beforeRead = f.repository.hooks.beforeRead;
+  let advanced = false;
+  f.repository.hooks.beforeRead = (name, args) => {
+    if (!advanced && name === "getRule" && extraRuleIds.includes(args[0])) { advanced = true; now += 10 * 60000; }
+    return beforeRead(name, args);
+  };
+  const results = (await f.module.queryRules({ ...f.today, ruleIds: [f.rule.id, ...extraRuleIds] }, { force: true })).results;
+  assert.ok(advanced);
+  const result = results.find((item) => item.rule.id === f.rule.id);
+  assert.equal(result.window.endMs, start + 10 * 60000, "主规则按轮到时刻截止");
+  assert.deepEqual([result.upstream.state, result.upstream.amountUsd, result.calculation.profitUsd], ["complete", 1, 1.5]);
+  assert.ok(!result.health.issues.some((issue) => issue.code === "UPSTREAM_WINDOW_UNSUPPORTED"));
+});
+
+test("1c 观测结果不让位给截止点更晚的只读结果：下一轮轮询命中观测缓存，不重复取数写库", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-cache-observed.test", costs: { "2026-10-11": 1 } });
+  await f.module.queryRules(f.today, { force: true });
+  now += 2 * 60000;
+  const point = holdPoint();
+  let held = false;
+  f.sub2.onRequest = async (url) => {
+    if (!held && url.pathname === "/api/v1/usage/stats") { held = true; await point.hold(); }
+  };
+  // 轮询取数挂起期间页面查询算出截止点更晚的只读结果，随后轮询才写回观测结果。
+  const polling = f.module.queryRules(f.today, { force: true });
+  await point.reached;
+  now += 30000;
+  const page = (await f.module.queryRules(f.today, { mode: "evaluate", origin: "page" })).results[0];
+  assert.equal(page.window.endMs, now);
+  point.release();
+  const observed = (await polling).results[0];
+  assert.equal(observed.window.endMs, now - 30000);
+  assert.ok([...f.rt._reconciliationResultCache.values()].some((entry) => entry.observed && entry.value.window?.endMs === now - 30000), "缓存保留观测结果");
+  const stats = f.sub2.stats.length, writes = f.state.writes;
+  const next = (await f.module.queryRules(f.today)).results[0];
+  assert.equal(next.calculation.profitUsd, 1.5);
+  assert.equal(f.sub2.stats.length, stats, "下一轮轮询命中观测缓存，不重复取数"); assert.equal(f.state.writes, writes, "也不重复写库");
+});
+
+test("1c Sub2API 能力核验结果写入或作废后，Key 目录随即反映新的能力状态，不等 5 分钟缓存过期", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-11T01:00:00Z"));
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-metadata-capability.test", costs: { "2026-10-11": 1 } });
+  const keys = async () => (await f.module.getUpstreamKeys("upstream", { timezone: "Asia/Shanghai" })).capability.state;
+  assert.equal(await keys(), "unverified");
+  await f.module.queryRules(f.today, { force: true });
+  assert.equal(f.repository.tables.capabilities.length, 1);
+  assert.equal(await keys(), "supported", "核验通过后目录不沿用缓存里的未核验");
+  f.sub2.missing = true;
+  await f.module.queryRules(f.today, { force: true });
+  assert.equal(f.repository.tables.capabilities.length, 0);
+  assert.equal(await keys(), "unverified", "作废后目录不沿用缓存里的已核验");
+});
+
+test("1c 某一侧取数失败时只提示取数失败，不提示去核验时区或能力", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-11T01:00:00Z"));
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-one-side-failure.test", costs: { "2026-10-11": 1 } });
+  f.sub2.onRequest = (url) => {
+    if (url.pathname === "/api/v1/usage/stats") throw new Error("socket hang up");
+  };
+  const result = (await f.module.queryRules(f.today, { force: true })).results[0];
+  const codes = result.health.issues.map((issue) => issue.code);
+  assert.ok(codes.includes("UPSTREAM_DATA_UNAVAILABLE"), codes.join());
+  assert.ok(!codes.includes("BILLING_TIMEZONE_UNVERIFIED"), codes.join());
+  assert.ok(!result.actions.some((action) => action.kind === "verify_capability"), "不引导去核验能力");
+});
+
+test("1c Sub2API 作废能力时存储删除失败：进程内记下作废，存储残留的旧能力不再算完整账单，下次观测重新核验", async (t) => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-11T01:00:00Z"));
+  t.mock.method(console, "warn", () => {});
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-capability-revoke.test", costs: { "2026-10-11": 1 } });
+  await f.module.queryRules(f.today, { force: true });
+  assert.deepEqual([f.sub2.controls, f.repository.tables.capabilities.length], [1, 1]);
+  f.sub2.missing = true;
+  f.repository.hooks.beforeCapabilityWrite = (method) => {
+    if (method === "deleteBillingCapability") throw new Error("capability delete failed");
+  };
+  await f.module.queryRules(f.today, { force: true });
+  assert.equal(f.repository.tables.capabilities.length, 1, "删除失败，存储里残留旧能力");
+  // 字段恢复后页面只读查询：残留的旧能力已在进程内作废，只给参考扣费。
+  f.sub2.missing = false;
+  const page = (await f.module.queryRules(f.today, { mode: "evaluate", force: true, origin: "manual" })).results[0];
+  assert.deepEqual([page.upstream.state, page.upstream.knownAmountUsd, page.calculation.profitUsd], ["partial", 1, null], "不借残留能力算完整账单");
+  assert.equal(f.sub2.controls, 1, "页面查询不核验");
+  f.repository.hooks.beforeCapabilityWrite = null;
+  const polled = (await f.module.queryRules(f.today, { force: true })).results[0];
+  assert.equal(f.sub2.controls, 2, "下次观测重新核验");
+  assert.equal(polled.calculation.profitUsd, 1.5);
 });
 
 function confirmedHistoryFixture() {

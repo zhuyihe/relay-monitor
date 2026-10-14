@@ -158,7 +158,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   const resources = () => rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && TYPES.includes(station.type));
   const reusable = (item) => item && (item.existing || item.candidate);
   const sourceVersion = () => ownVersion(own(), catalogue?.ownSource);
-  // 对账模块在轮询启动时才创建，所以用到时再取它的账单能力存储；没有时只用进程内缓存。
+  // 对账模块晚于接入模块创建，所以用到时再取它的账单能力存储；没有对账模块时只用进程内缓存。
   const capabilityStore = () => rt.reconciliation?.billingCapabilityStore || null;
   const stale = () => !catalogue?.ownSource || catalogue.ownStationId !== own()?.id || catalogue.sourceVersion !== sourceVersion()
     || !!syncError || now() - catalogue.syncedAt > 5 * 60000;
