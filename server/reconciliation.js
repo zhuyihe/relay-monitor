@@ -36,7 +36,7 @@ export function normalizeReconciliationScopeIntent(kind, targetRuleId, input, { 
   catch { throw Object.assign(new Error("Key 用途声明无效"), { code: "INVALID_REQUEST" }); }
   let zone;
   try { zone = validateTimezone(input?.timezone || timezone); }
-  catch { throw Object.assign(new Error("规则时区无效"), { code: "INVALID_REQUEST" }); }
+  catch { throw Object.assign(new Error("核算关联时区无效"), { code: "INVALID_REQUEST" }); }
   const semantic = { tokenId: finite(input?.tokenId),
     salesChannelIds: [...new Set((Array.isArray(input?.salesChannelIds) ? input.salesChannelIds : []).map(Number)
       .filter((id) => Number.isSafeInteger(id) && id > 0))].sort((a, b) => a - b),
@@ -45,7 +45,7 @@ export function normalizeReconciliationScopeIntent(kind, targetRuleId, input, { 
   if (!Number.isSafeInteger(semantic.tokenId) || semantic.tokenId <= 0 || !semantic.salesChannelIds.length
     || input.salesChannelIds.some((id) => !Number.isSafeInteger(Number(id)) || Number(id) <= 0)
     || input.enabled != null && typeof input.enabled !== "boolean" || kind === "replace" && !input.upstreamStationId) {
-    throw Object.assign(new Error("规则编辑字段无效"), { code: "INVALID_REQUEST" });
+    throw Object.assign(new Error("核算关联编辑字段无效"), { code: "INVALID_REQUEST" });
   }
   return { kind, targetRuleId: targetRuleId || null, existingEnabled: targetRuleId ? enabled ?? true : null,
     ...(kind === "replace" ? { normalizedPutIntent: { upstreamStationId: String(input?.upstreamStationId || ""), ...semantic } }
@@ -189,7 +189,7 @@ function health(code, detail = "") {
 }
 
 function ruleNotFound() {
-  const error = new Error("对账规则不存在");
+  const error = new Error("核算关联不存在");
   error.code = "RULE_NOT_FOUND";
   return error;
 }
@@ -632,7 +632,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       if (!metadata || canonicalBillingKey(station, metadata, tokenId) !== canonicalKey) return null;
       if (rule.canonicalKey && rule.canonicalKey !== canonicalKey) {
-        throw Object.assign(new Error("原规则账号身份已变化，请停止旧规则后明确关联新身份"), { code: "SOURCE_BINDING_UNCONFIRMED" });
+        throw Object.assign(new Error("原核算关联的账号身份已变化，请停止旧关联后明确关联新身份"), { code: "SOURCE_BINDING_UNCONFIRMED" });
       }
       verifiedRuleCredentials.set(rule, credentialFingerprint(station));
       return rule;
@@ -681,17 +681,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const enabledMatches = matches.filter((rule) => rule.enabled);
     if (!existingRule && enabledMatches.length) matches.splice(0, matches.length, ...enabledMatches);
     if (matches.length > 1) {
-      const error = new Error("多个既有规则对应同一实际 Key，请核对后保留一个启用规则");
+      const error = new Error("多个既有核算关联对应同一实际 Key，请核对后只保留一条有效关联");
       error.code = "CANONICAL_KEY_CONFLICT";
       throw error;
     }
     if (matches[0] && matches[0].ownStationId !== own.id) {
-      throw Object.assign(new Error("该实际 Key 的规则属于另一本站来源，请先核对并停止旧规则"), { code: "RULE_OWN_STATION_CONFLICT" });
+      throw Object.assign(new Error("该实际 Key 的核算关联属于另一本站来源，请先核对并停止旧关联"), { code: "RULE_OWN_STATION_CONFLICT" });
     }
     const conflicts = await repository.findChannelConflicts(channelIds, { excludeRuleId: matches[0]?.id || excludeRuleId });
     if (conflicts.length) {
       const names = [...new Set(conflicts.map((item) => item.tokenName || item.ruleId))].join("、");
-      const error = new Error(`所选渠道已归属启用规则：${names}`);
+      const error = new Error(`所选渠道已归属有效核算关联：${names}`);
       error.code = "CHANNEL_CONFLICT";
       error.conflicts = conflicts;
       throw error;
@@ -741,7 +741,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     ]);
     if (conflicts.length) {
       const names = [...new Set(conflicts.map((item) => item.tokenName || item.ruleId))].join("、");
-      const error = new Error(`所选渠道已归属启用规则：${names}`);
+      const error = new Error(`所选渠道已归属有效核算关联：${names}`);
       error.code = "CHANNEL_CONFLICT";
       error.conflicts = conflicts;
       throw error;
@@ -808,7 +808,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   function financialGuard(valid, previewGuard, kind = "append") {
     return (lockedRule, _channels, policy) => {
       if (previewGuard && lockedRule && !lockedRule.enabled && kind !== "replace") {
-        throw Object.assign(new Error("规则已停用，请核对当前规则后重新预览"), { code: "PREVIEW_BASIS_CHANGED" });
+        throw Object.assign(new Error("核算关联已停止，请核对当前关联后重新预览"), { code: "PREVIEW_BASIS_CHANGED" });
       }
       if (!policy.scopeChanged && !previewGuard) return;
       if (!previewGuard || typeof rt.onboardingSource?.assertPreviewGuard !== "function") throw previewRequired();
@@ -828,7 +828,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   function assertRuleIdentity(existing, input) {
     if (String(input?.upstreamStationId || "") !== String(existing.upstreamStationId) || finite(input?.tokenId) !== Number(existing.tokenId)) {
-      throw Object.assign(new Error("上游账号和 Key 是规则身份，不能编辑"), { code: "RULE_IDENTITY_IMMUTABLE" });
+      throw Object.assign(new Error("上游账号和 Key 是核算关联的身份，不能编辑"), { code: "RULE_IDENTITY_IMMUTABLE" });
     }
   }
 
@@ -846,7 +846,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
     const existingRule = valid.existingRule;
     if (!replaceRuleId && existingRule && !existingRule.enabled) {
-      throw Object.assign(new Error("规则已停用，请明确处理停用规则后重新预览"), { code: "RULE_DISABLED" });
+      throw Object.assign(new Error("核算关联已停止，请先处理已停止的关联再重新预览"), { code: "RULE_DISABLED" });
     }
     const fields = financialFields(valid, input);
     const append = !replaceRuleId && !!existingRule;
@@ -897,7 +897,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   async function updateRule(id, input, { previewGuard = null } = {}) {
     return serializeWrite(async () => {
       const existing = await repository.getRule(id);
-      if (!existing) throw new Error("对账规则不存在");
+      if (!existing) throw new Error("核算关联不存在");
       assertRuleIdentity(existing, input);
       const capturedCredential = currentSourceCredential(existing);
       const billingSource = participatingSource(previewGuard);
@@ -1176,7 +1176,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         return unavailable(health("SOURCE_BINDING_UNCONFIRMED", "上游稳定账号身份已变化，需重新核对关联"), { metadata, token }, false);
       }
       const persistedSegments = await repository.listSegments(rule.id);
-      if (!persistedSegments.length) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", "对账规则缺少历史分段"), { metadata, token });
+      if (!persistedSegments.length) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", "核算关联缺少历史分段"), { metadata, token });
       const catalogueObserved = metadata.groupsAvailable && metadata.groups[token.group]?.ratio != null;
       const currentRatio = catalogueObserved ? metadata.groups[token.group].ratio : null;
       const ratioObservedAt = Date.now();
@@ -1194,12 +1194,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       let currentSegment = reconciliation.currentSegment;
       const issues = scopePolicyIssues(rule, window);
       if (ownerRegistry.duplicateSales.has(rule.id)) issues.push({ code: "DUPLICATE_CHANNEL_ASSIGNMENT", scope: "rule",
-        detail: "同一实际本站渠道归属多个启用规则，保留原始金额但不确认重复利润", ruleIds: ownerRegistry.duplicateSales.get(rule.id), observedAt: Date.now() });
+        detail: "同一实际本站渠道归属多条有效核算关联，保留原始金额但不确认重复利润", ruleIds: ownerRegistry.duplicateSales.get(rule.id), observedAt: Date.now() });
       const observedSource = sourceState(rule);
       if (observedSource.status !== "confirmed") issues.push({ code: "SOURCE_BINDING_UNCONFIRMED", scope: "source", detail: "渠道连接已变化或来源尚未核对，当前金额仅供参考", observedAt: Date.now() });
       const costOwner = costOwnerFor(rule, canonicalKey, ownerRegistry);
       if (costOwner.state === "unknown") issues.push({ code: "COST_OWNER_UNVERIFIED", scope: "rule", detail: "参与成本归属的账号身份未能核验，已获取成本仅供参考", ruleIds: costOwner.ruleIds, observedAt: Date.now() });
-      if (costOwner.state === "duplicate") issues.push({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: "多个启用规则使用同一实际 Key，成本只列一次，请核对重复规则", ruleIds: costOwner.ruleIds, observedAt: Date.now() });
+      if (costOwner.state === "duplicate") issues.push({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: "多条有效核算关联使用同一实际 Key，成本只列一次，请核对重复的关联", ruleIds: costOwner.ruleIds, observedAt: Date.now() });
       if (!ownAvailable) issues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "downstream", detail: "本站管理员 NewAPI 站点不可用", observedAt: Date.now() });
       if (!catalogueObserved && metadata.platform !== "sub2api") {
         issues.push({
@@ -1781,13 +1781,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const key = canonicalBillingKey(station, metadata, tokenId);
       if (!key) throw new Error("无法验证上游稳定账号身份");
       const matches = await canonicalRules(key, Number(tokenId));
-      if (matches.length > 1) throw Object.assign(new Error("多个启用规则对应同一实际 Key，请核对"), { code: "CANONICAL_KEY_CONFLICT" });
+      if (matches.length > 1) throw Object.assign(new Error("多条有效核算关联对应同一实际 Key，请核对"), { code: "CANONICAL_KEY_CONFLICT" });
       return matches[0] || null;
     },
     async archiveRule(id) {
       return serializeWrite(async () => {
         const rule = await repository.getRule(id);
-        if (!rule) throw new Error("对账规则不存在或已停止");
+        if (!rule) throw new Error("核算关联不存在或已停止");
         const billingSource = billingSourceState();
         const ok = await withObservationSourceLock(rule, currentSourceCredential(rule), async () => {
           const archived = await repository.archiveRule(id);
@@ -1795,19 +1795,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           return archived;
         }, billingSource);
         if (ok === STALE_SCOPE) throw new Error("关联来源已变化，请刷新后重新确认");
-        if (!ok) throw new Error("对账规则不存在或已停止");
+        if (!ok) throw new Error("核算关联不存在或已停止");
         return { ruleId: rule.id, tokenName: rule.tokenName, fixedGroup: rule.fixedGroup, releasedChannelCount: rule.channels.length };
       });
     },
     async listSegments(id) {
       const rule = await repository.getRule(id, { includeArchived: true });
-      if (!rule) throw new Error("对账规则不存在");
+      if (!rule) throw new Error("核算关联不存在");
       return repository.listSegments(id);
     },
     async correctTransition(ruleId, segmentId, effectiveAt) {
       return serializeWrite(async () => {
         const rule = await repository.getRule(ruleId, { includeArchived: true });
-        if (!rule) throw new Error("对账规则不存在");
+        if (!rule) throw new Error("核算关联不存在");
         const billingSource = billingSourceState();
         const segments = await withObservationSourceLock(rule, currentSourceCredential(rule), async () => {
           const corrected = await repository.correctTransition(ruleId, segmentId, effectiveAt);

@@ -259,6 +259,12 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       if (!accounts.has(accountKey)) accounts.set(accountKey, { accountKey, siteKey: hash([identity.provider, baseUrl]), identity, resources: [], keys: [], actions: [] });
       accounts.get(accountKey).resources.push(resource);
     }
+    // 与账单核算的重复归属判定一致：同一本站来源下的同一渠道被多条有效关联认领
+    const salesOwners = new Map();
+    for (const rule of allRules.filter(active)) for (const channel of rule.channels || []) {
+      const key = JSON.stringify([rule.ownSource?.namespaceKey || rule.ownStationId, Number(channel.channelId)]);
+      salesOwners.set(key, [...(salesOwners.get(key) || []), rule.id]);
+    }
     for (const account of accounts.values()) {
       const ids = new Set(account.resources.map((resource) => resource.id)), keyRules = new Map();
       for (const rule of allRules.filter((rule) => ids.has(rule.upstreamStationId))) {
@@ -289,8 +295,26 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         const effective = Number.isFinite(rule.billingEffectiveFrom) ? rule.billingEffectiveFrom : null;
         let firstQueryableAtMs = null;
         if (effective != null) { try { firstQueryableAtMs = reconciliationBillingSchedule(rule).firstQueryableAtMs; } catch { /* Unknown legacy timezone has no trustworthy boundary. */ } }
+        // 核算关联逐条列出（有效的在前，再按最近修改），上游账单在这一层编辑渠道、停止核算
+        const associations = [...related].sort((a, b) => Number(active(b)) - Number(active(a))
+          || (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0) || a.id.localeCompare(b.id)).map((item) => {
+          const schedule = (() => { try { return reconciliationBillingSchedule(item); } catch { return null; } })();
+          // 同一实际 Key 的其他有效关联（成本重复）与认领同一渠道的其他有效关联（收入重复）
+          const conflictRuleIds = !active(item) ? [] : [...new Set([...current.map((other) => other.id),
+            ...(item.channels || []).flatMap((channel) => salesOwners.get(JSON.stringify([item.ownSource?.namespaceKey || item.ownStationId, Number(channel.channelId)])) || [])])]
+            .filter((id) => id !== item.id).sort();
+          return { ruleId: item.id, status: active(item) ? "active" : "stopped", upstreamStationId: item.upstreamStationId,
+            ownStationId: item.ownStationId, timezone: item.timezone,
+            channels: (item.channels || []).map((channel) => ({ channelId: Number(channel.channelId), name: channel.name || channel.channelName || `渠道 ${channel.channelId}` }))
+              .sort((a, b) => a.channelId - b.channelId),
+            costCoverage: item.costCoverage === "complete" ? "complete" : "unknown",
+            coverageDeclaration: normalizeRuleSourceBinding({ version: 2, coverageDeclaration: item.coverageDeclaration }, item.costCoverage).coverageDeclaration,
+            scopeVersion: item.scopeVersion || 1, billingEffectiveFromMs: Number.isFinite(item.billingEffectiveFrom) ? item.billingEffectiveFrom : null,
+            accountingStartMs: schedule?.accountingStartMs ?? null, conflict: conflictRuleIds.length > 0, conflictRuleIds,
+            stoppedAt: active(item) ? null : item.archivedAt || item.updatedAt || null };
+        });
         account.keys.push({ canonicalKey, tokenId: rule.tokenId, tokenName: rule.tokenName || `Key ${rule.tokenId}`,
-          ruleIds: related.map((item) => item.id).sort(), activeRuleIds: current.map((item) => item.id).sort(), scopeAmbiguous: ambiguous,
+          ruleIds: related.map((item) => item.id).sort(), activeRuleIds: current.map((item) => item.id).sort(), scopeAmbiguous: ambiguous, associations,
           channels: [...members.values()].sort((a, b) => a.ownStationId.localeCompare(b.ownStationId) || a.channelId - b.channelId),
           costCoverage: !ambiguous && rule.costCoverage === "complete" ? "complete" : "unknown", coverageDeclaration: ambiguous ? { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } : coverage,
           scopeVersion: ambiguous ? null : rule.scopeVersion || 1, billingEffectiveFromMs: ambiguous ? null : effective,
@@ -1058,7 +1082,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   async function probeRuleEdit(id, input) {
     const existing = (await rules()).find((rule) => rule.id === id && !rule.archivedAt);
-    if (!existing) throw previewFailure("RULE_NOT_FOUND", "规则不存在或已归档");
+    if (!existing) throw previewFailure("RULE_NOT_FOUND", "核算关联不存在或已归档");
     const source = getSourceCatalogue(), sourceConnection = structuredClone(own());
     const upstream = structuredClone(rt.store.get(existing.upstreamStationId));
     const versions = Object.fromEntries([sourceConnection, upstream].filter(Boolean).map((station) => [station.id, stationBusinessVersion(station)]));
@@ -1072,7 +1096,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       if (!latest || originalRule(existing) !== originalRule(financial.existingRule) || originalRule(existing) !== originalRule(latest)
           || getSourceCatalogue().stale || sourceVersion() !== source.sourceVersion
           || Object.entries(versions).some(([stationId, version]) => stationBusinessVersion(rt.store.get(stationId)) !== version)) {
-        throw previewFailure("PREVIEW_BASIS_CHANGED", "规则、来源或授权在验证期间变化，请重新预览");
+        throw previewFailure("PREVIEW_BASIS_CHANGED", "核算关联、来源或授权在验证期间变化，请重新预览");
       }
       const groupId = "rule-edit";
       const record = registerPreview([{ groupId, requestedGroupIds: [groupId], selectionIds: [], roles: [],
@@ -1086,7 +1110,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   }
 
   function currentGroupContext(group, guard, latestRule) {
-    if (group.status === "ready" && latestRule?.enabled === false) throw previewFailure("PREVIEW_BASIS_CHANGED", "原财务规则已停用，请重新预览");
+    if (group.status === "ready" && latestRule?.enabled === false) throw previewFailure("PREVIEW_BASIS_CHANGED", "原核算关联已停止，请重新预览");
     const source = getSourceCatalogue(), ids = [...new Set([...(latestRule?.channels || []).map((channel) => Number(channel.channelId)),
       ...group.channels.map((channel) => channel.channelId)])].sort((a, b) => a - b);
     const channelRevisions = {};
@@ -1143,7 +1167,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const sourceConnection = structuredClone(own());
     expirePreviews();
     const original = input.previewId && previews.get(input.previewId);
-    if (original && !original.retryInput) throw previewFailure("PREVIEW_REQUIRED", "规则编辑预览不能用于批量接入，请重新预览");
+    if (original && !original.retryInput) throw previewFailure("PREVIEW_REQUIRED", "核算关联编辑预览不能用于批量接入，请重新预览");
     if (financialRequested && !original && !input.previewId) throw previewFailure("PREVIEW_REQUIRED", "财务接入需要当前服务端预览，请先验证后确认");
     const state = await batchProbeState(input, { register: !original && !financialRequested });
     const record = original || state.record;
@@ -1424,7 +1448,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
                 && rule.sourceBinding?.[channel.channelId] === channel.channelRevision));
             if (matches.length === 1 && sourceValid) {
               const rule = matches[0], actual = rt.store.get(rule.upstreamStationId), actualIdentity = actual && await verifySaved(actual);
-              if (!actualIdentity || !sameIdentity(actualIdentity.identity, owner.identity)) throw new Error("规则原授权身份待核验");
+              if (!actualIdentity || !sameIdentity(actualIdentity.identity, owner.identity)) throw new Error("核算关联的原授权身份待核验");
               result.saved.ruleId = rule.id; result.saved.scopeVersion = rule.scopeVersion;
               result.saved.billingEffectiveFromMs = rule.billingEffectiveFrom;
               result.reconciliation = { status: "configured", ruleId: rule.id, scopeVersion: rule.scopeVersion, billingEffectiveFromMs: rule.billingEffectiveFrom };

@@ -665,7 +665,7 @@ test("编辑规则不能替换上游账号或 Key，且拒绝发生在元数据�
   const input = { upstreamStationId: "upstream-a", tokenId: 10, salesChannelIds: [1], timezone: "Asia/Shanghai" };
   await assert.rejects(
     () => module.updateRule(rule.id, input),
-    (error) => error.code === "RULE_IDENTITY_IMMUTABLE" && /规则身份/.test(error.message)
+    (error) => error.code === "RULE_IDENTITY_IMMUTABLE" && /核算关联的身份/.test(error.message)
   );
   assert.equal(queries, 2);
 });
@@ -4523,7 +4523,7 @@ test("U05真实Provider+module DST23/25小时、生效前窗口保留完整请�
   assert.equal([...f.state.snapshots.values()].some((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed" && JSON.parse(snapshot.source).window?.endMs === Date.parse("2026-10-08T16:00:00Z")), false);
   const notEffective = before.coverage.channels.find((channel) => channel.channelId === 1);
   assert.equal(notEffective.status, "not_effective"); assert.deepEqual(notEffective.issues, ["BILLING_SCOPE_NOT_EFFECTIVE"]);
-  assert.ok(notEffective.actions.some((action) => action.kind === "wait_effective" && action.href === "/reconciliation?action=scope&ruleId=rr_live"));
+  assert.ok(notEffective.actions.some((action) => action.kind === "wait_effective" && action.href === "/stations?action=scope&ruleId=rr_live"));
 });
 
 test("U05轮询结账：昨天结束满15分钟才写昨天整日confirmed，结清后不再取数，无利润10分钟后重试，核算起点不早于昨天结束不结账", async (t) => {

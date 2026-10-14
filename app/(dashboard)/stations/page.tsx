@@ -41,10 +41,14 @@ import type { StationDrawerHandle } from "./station-drawer";
 const FILTERS = ["all", "attention", "ok", "archived"] as const;
 type Filter = (typeof FILTERS)[number];
 const SORTS = ["", "days", "-days"] as const;
-// 资源列表、渠道接入、账号关系分成三个标签，避免一页从头滚到尾
-const VIEWS = ["list", "onboarding", "accounts"] as const;
+// 资源列表、渠道接入、上游账单分成三个标签，避免一页从头滚到尾
+const VIEWS = ["list", "onboarding", "bills"] as const;
 type View = (typeof VIEWS)[number];
+// 「上游账单」原名「账号关系」，旧链接 view=accounts 仍打开它
+const URL_VIEWS = [...VIEWS, "accounts"] as const;
 const ONBOARDING_ACTIONS = ["connect", "coverage", "source"];
+// 指向某条核算关联的事项：无论从哪里打开，都切到「上游账单」定位
+const ASSOCIATION_ACTIONS = ["scope", "conflict"];
 type Sort = (typeof SORTS)[number];
 const COLS = 7;
 
@@ -62,7 +66,7 @@ const onboardingSig = (list: any[]) =>
     .join("\n");
 
 // 渠道接入只在挂载时读目录，切换标签又保持挂载；这里决定什么时候换 key 重新挂载（rev + 1）。
-// sig：当前实例已同步到的资源签名（列表首次读到前为 null）；dirty：账号关系里改过身份、授权或核算；
+// sig：当前实例已同步到的资源签名（列表首次读到前为 null）；dirty：上游账单里改过身份、授权或核算；
 // shown：标签打开过（首次打开才挂载，读到的就是当前目录）；wait：列表还在刷新，落地后怎么处理——
 // absorb 实例刚按当前目录挂载，只记下签名；compare 切回时还不知道有没有变化，落地后再比。
 // 显示期间的变化不重挂（免得冲掉接入结果），也不算已同步，下次切回时重挂
@@ -105,7 +109,7 @@ export default function StationsPage() {
   const [rules, setRules] = useState<any>({});
   const [loaded, setLoaded] = useState(false);
   const [loadingList, setLoadingList] = useState(true);
-  // 每次读取资源后递增，账号关系随之重读
+  // 每次读取资源后递增，上游账单随之重读
   const [accountsToken, setAccountsToken] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingMeta, setLoadingMeta] = useState(true);
@@ -129,7 +133,8 @@ export default function StationsPage() {
   // 搜索词写进地址栏（停止输入 300ms 后），刷新与分享链接时保持
   const [queryParam, setQueryParam] = useUrlState<string>("q", "");
   const [query, setQuery] = useState(queryParam);
-  const [urlView, setUrlView] = useUrlState<View>("view", "list", VIEWS);
+  const [rawView, setUrlView] = useUrlState<(typeof URL_VIEWS)[number]>("view", "list", URL_VIEWS);
+  const urlView: View = rawView === "accounts" ? "bills" : rawView;
   const [filter, setFilter] = useUrlState<Filter>("filter", "all", FILTERS);
   const [typeFilter, setTypeFilter] = useUrlState<string>("type", "");
   const [sort, setSort] = useUrlState<Sort>("sort", "", SORTS);
@@ -138,7 +143,7 @@ export default function StationsPage() {
   // 地址栏写入 view 之后以地址栏为准；用户自己切标签时立即放弃
   const [entryView, setEntryView] = useState<View | null>(() => {
     const destination = readWorkflowDestination(params.toString(), "stations");
-    return destination ? (ONBOARDING_ACTIONS.includes(destination.action) ? "onboarding" : "accounts") : null;
+    return destination ? (ONBOARDING_ACTIONS.includes(destination.action) ? "onboarding" : "bills") : null;
   });
   if (entryView && urlView === entryView) setEntryView(null);
   const view = entryView ?? urlView;
@@ -172,7 +177,7 @@ export default function StationsPage() {
 
   // 轮询和手动刷新可能重叠，全部落地才算刷新结束
   const reloading = useRef(0);
-  // 始终带上归档与暂停监控的资源：“已归档”只是一个筛选；暂停监控的资源在账号关系中管理
+  // 始终带上归档与暂停监控的资源：“已归档”只是一个筛选；暂停监控的资源在上游账单中管理
   const reload = useCallback(async () => {
     reloading.current += 1;
     setLoadingList(true);
@@ -366,17 +371,17 @@ export default function StationsPage() {
   };
 
   // “需处理”直接复用总览的待办规则：同一批在用资源、同一份规则和阈值，账号与账单待办也算在内
-  // 列表只放在监控的资源（归档的照常放在「已归档」里）；暂停监控的资源在「账号关系」标签中查看与重新启用
+  // 列表只放在监控的资源（归档的照常放在「已归档」里）；暂停监控的资源在「上游账单」标签中查看与重新启用
   const listed = useMemo(() => stations.filter((s) => s.monitorEnabled !== false || s.archivedAt), [stations]);
   const paused = stations.filter((s) => s.monitorEnabled === false && !s.archivedAt);
-  // 账号待办由账号关系中心读到后发布，这里只补读账单待办
+  // 账号待办由上游账单读到后发布，这里只补读账单待办
   const { actions: workflowActions } = useWorkflowActions(true, ["bills"]);
 
   const { todosById, unowned } = useMemo(() => {
     const live = listed.filter((s) => !s.archivedAt);
     const all = buildOverviewActions(live, { rules, settings, statusOf, workflowActions }).all;
     const ids = new Set(live.map(actionKey));
-    // 按账号或核算规则归类、不落在单个资源上的待办只在运营总览处理，这里交代条数
+    // 按账号或核算关联归类、不落在单个资源上的待办只在运营总览处理，这里交代条数
     return { todosById: actionsByStation(all), unowned: all.filter((a: any) => !a.stationId || !ids.has(String(a.stationId))).length };
   }, [listed, rules, settings, workflowActions]);
 
@@ -432,7 +437,7 @@ export default function StationsPage() {
   const canAdd = !!types.length && !loadingMeta;
 
   const [onboardingSync, setOnboardingSync] = useState<OnboardingSync>(() => ({ view, seq: 0, sig: null, dirty: false, shown: view === "onboarding", wait: null, rev: 0 }));
-  // 账号关系里的操作都会改到接入目录（身份、授权、监控用途、核算规则），切回渠道接入时重读
+  // 上游账单里的操作都会改到接入目录（身份、授权、监控用途、核算关联），切回渠道接入时重读
   const reloadAfterAccountChange = useCallback(async () => {
     setOnboardingSync((o) => ({ ...o, dirty: true }));
     await reload();
@@ -465,19 +470,19 @@ export default function StationsPage() {
       return;
     }
     accounts.openWorkflow(href);
-    // 核验与授权会弹出抽屉；接入类事项切到「渠道接入」，其余在页面顶部列出原资源
+    // 核验与授权会弹出抽屉；核算关联在「上游账单」里定位；接入类事项切到「渠道接入」，其余在页面顶部列出原资源
     const action = new URL(href, window.location.origin).searchParams.get("action") || "";
-    if (["verify", "verify-billing", "authorization"].includes(action)) return;
+    if (["verify", "verify-billing", "authorization", ...ASSOCIATION_ACTIONS].includes(action)) return;
     const target = ONBOARDING_ACTIONS.includes(action) ? ".jy-tabs" : ".jy-accounts-inspect";
     setTimeout(() => document.querySelector(target)?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
   };
-  // 从总览、账单核算或行内打开的接入类事项，在「渠道接入」标签里处理；
-  // 从别的页面带进来的账号事项（核验、授权、定位原资源）落到「账号关系」，抽屉下面就是这个账号。
+  // 从总览、账单核算或行内打开的接入类事项，在「渠道接入」标签里处理；核算关联事项总在「上游账单」里定位。
+  // 从别的页面带进来的账号事项（核验、授权、定位原资源）落到「上游账单」，抽屉下面就是这个账号。
   // 行内打开的账号事项（destinationSeq > 0）留在当前列表
   useEffect(() => {
     if (!accounts.destination) return;
     if (ONBOARDING_ACTIONS.includes(accounts.destination.action)) setUrlView("onboarding");
-    else if (accounts.destinationSeq === 0) setUrlView("accounts");
+    else if (accounts.destinationSeq === 0 || ASSOCIATION_ACTIONS.includes(accounts.destination.action)) setUrlView("bills");
   }, [accounts.destination]); // eslint-disable-line react-hooks/exhaustive-deps
   const resourceSig = useMemo(() => onboardingSig(stations), [stations]);
   const nextSync = syncOnboarding(onboardingSync, view, accounts.destinationSeq, resourceSig, loaded, loadingList);
@@ -771,7 +776,7 @@ export default function StationsPage() {
     body = (
       <EmptyState
         title="没有正在监控的上游资源"
-        desc={`另有 ${paused.length} 个资源已暂停监控，可在「账号关系」标签中重新启用。`}
+        desc={`另有 ${paused.length} 个资源已暂停监控，可在「上游账单」标签中重新启用。`}
         action={addButton}
       />
     );
@@ -927,14 +932,14 @@ export default function StationsPage() {
         tabs={[
           { key: "list", label: "资源列表" },
           { key: "onboarding", label: "渠道接入" },
-          { key: "accounts", label: "账号关系" },
+          { key: "bills", label: "上游账单" },
         ]}
         active={view}
         onChange={setView}
         idPrefix="stations"
         label="上游资源视图"
       />
-      {/* 外层包一层：隐藏的标签面板不参与页面的间距；渠道接入与账号关系首次打开后保持挂载，切换标签不丢状态 */}
+      {/* 外层包一层：隐藏的标签面板不参与页面的间距；渠道接入与上游账单首次打开后保持挂载，切换标签不丢状态 */}
       <div>
         <TabPanel idPrefix="stations" tabKey="list" active={view === "list"}>
           <div className="jy-toolbar">
@@ -984,7 +989,7 @@ export default function StationsPage() {
           </div>
         </TabPanel>
 
-        <TabPanel idPrefix="stations" tabKey="accounts" active={view === "accounts"} keepMounted>
+        <TabPanel idPrefix="stations" tabKey="bills" active={view === "bills"} keepMounted>
           {accounts.center}
         </TabPanel>
       </div>

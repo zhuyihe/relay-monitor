@@ -1,16 +1,18 @@
 "use client";
-// 账号关系中心：按已核验的上游账号查看资源、Key 与本站渠道，并承接总览/对账带来的处理目标
-// （核验账号、更新账号授权、暂停/启用监控、停止 Key 核算）。
-// 流程与文案沿用 main 的上游资源页，这里只换成新外观；资源列表与编辑抽屉仍由页面持有。
+// 上游账单：按「已核验账号 → Key → 核算关联」查看资源与本站渠道，并承接总览/账单核算带来的处理目标
+// （核验账号与 Key、更新账号授权、暂停/启用监控、编辑渠道、停止核算）。
+// 核算关联的写操作只在这里；资源列表与编辑抽屉仍由页面持有。
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, Modal, Select, Space, Typography } from "antd";
 import { api, usd, readWorkflowDestination } from "../../../lib/client";
-import type { AccountReadModel, AccountRecord, AccountKeyScope, PublicResource, AccountAuthorizationInput, AccountAuthorizationProbe, AccountAuthorizationResult, AccountAuthorizationRecoveryIntent, WorkflowDestination, UpstreamKeyRead, ResourceIdentityConfirmation } from "../../../lib/client";
+import type { AccountReadModel, AccountRecord, AccountKeyScope, AccountAssociation, CoverageDeclaration, PublicResource, AccountAuthorizationInput, AccountAuthorizationProbe, AccountAuthorizationResult, AccountAuthorizationRecoveryIntent, WorkflowDestination, UpstreamKeyRead, ResourceIdentityConfirmation } from "../../../lib/client";
 import { Skeleton } from "../../components/data-state";
 import { Icon, Sym } from "../../components/icons";
 import { CountBadge } from "../../components/panel";
 import { publishAccountActions } from "../../components/use-workflow-actions";
+import { AssociationEditor } from "./association-editor";
+import type { AssociationEditTarget } from "./association-editor";
 
 const { Text } = Typography;
 const AUTHORIZATION_RECOVERY_KEY = "account-authorization-recovery-v05";
@@ -25,7 +27,7 @@ type AccountCenterProps = {
   loadingList: boolean;
   loadError: string | null;
   reload: () => Promise<void>;
-  // 页面每次读取资源后递增，账号关系随之重读
+  // 页面每次读取资源后递增，上游账单随之重读
   reloadToken: number;
   openEditor: (station: any) => void;
   openTrend: (station: any) => void;
@@ -48,12 +50,17 @@ export function useAccountCenter({
   const [loadingAccounts, setLoadingAccounts] = useState(true);
   const [accountSearch, setAccountSearch] = useState("");
   const [accountFilter, setAccountFilter] = useState("all");
-  // 归档资源默认收起，账号关系里按需展开，与资源列表的筛选互不影响
+  // 归档资源默认收起，上游账单里按需展开，与资源列表的筛选互不影响
   const [showArchived, setShowArchived] = useState(false);
   const [destination, setDestination] = useState<WorkflowDestination | null>(null);
   const [destinationSeq, setDestinationSeq] = useState(0);
   const [workflowError, setWorkflowError] = useState("");
   const [expandedAccounts, setExpandedAccounts] = useState<string[]>([]);
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
+  // 处理目标指向的核算关联：展开所在账号与 Key 后高亮
+  const [focusRuleId, setFocusRuleId] = useState("");
+  const [editTarget, setEditTarget] = useState<AssociationEditTarget | null>(null);
+  const editSeq = useRef(0);
   const destinationResolved = useRef(false);
   const [verificationStation, setVerificationStation] = useState<any>(null);
   const [verification, setVerification] = useState<UpstreamKeyRead | null>(null);
@@ -76,7 +83,7 @@ export function useAccountCenter({
   const [authorizationForm] = Form.useForm();
   const authorizationType = Form.useWatch("type", authorizationForm) || "newapi";
   const authorizationEpoch = useRef(0);
-  const [purposeTarget, setPurposeTarget] = useState<{ resource?: PublicResource; monitorEnabled?: boolean; key?: AccountKeyScope; ruleId?: string } | null>(null);
+  const [purposeTarget, setPurposeTarget] = useState<{ resource?: PublicResource; monitorEnabled?: boolean; key?: AccountKeyScope; association?: AccountAssociation } | null>(null);
   const [purposeBusy, setPurposeBusy] = useState(false);
   const [purposeError, setPurposeError] = useState("");
 
@@ -87,7 +94,7 @@ export function useAccountCenter({
       const next: AccountReadModel = await api("/api/channel-onboarding/accounts");
       if (current === accountReadEpoch.current) { setAccountModel(next); setAccountError(""); publishAccountActions(next.actions); }
     } catch (err: any) {
-      if (current === accountReadEpoch.current) setAccountError(err.message || "账号关系暂不可用");
+      if (current === accountReadEpoch.current) setAccountError(err.message || "上游账单暂不可用");
     } finally {
       if (current === accountReadEpoch.current) setLoadingAccounts(false);
     }
@@ -120,8 +127,26 @@ export function useAccountCenter({
       if (!["newapi", "newapi-key", "sub2api", "sub2api-password"].includes(original.type)) { setWorkflowError("此资源不支持账号与 Key 账单核验，请返回原资源设置。"); return; }
       openVerification(original);
     } else if (destination.action === "authorization") {
-      if (!account || account.accountKey !== destination.accountKey || !authorizationEligible(account).length) { setWorkflowError("此账号或可更新目标已变化，请刷新当前账号关系后重新打开。"); return; }
+      if (!account || account.accountKey !== destination.accountKey || !authorizationEligible(account).length) { setWorkflowError("此账号或可更新目标已变化，请刷新上游账单后重新打开。"); return; }
       openAuthorization(account);
+    } else if (["scope", "conflict"].includes(destination.action)) {
+      const located = locateAssociation(destination.ruleId!);
+      if (!located) {
+        // 规则还挂在资源上、却没出现在任何已核验 Key 下：账号或 Key 尚未核验
+        const pending = [...accountModel.accounts.flatMap((item) => item.resources), ...accountModel.unverifiedResources].find((resource) => resource.purposes.billingRuleIds.includes(destination.ruleId!));
+        setWorkflowError(pending ? `这条核算关联所在的资源「${pending.name}」尚未完成账号或 Key 核验，先完成核验后再处理。` : "此核算关联已删除或不在当前目录中，请刷新当前事项后重新打开。");
+        if (pending) setAccountSearch(pending.id || "");
+        return;
+      }
+      // 重复归属一并展开另一方，便于对照后决定停哪一条
+      const related = [located, ...(destination.action === "conflict" ? located.association.conflictRuleIds.map(locateAssociation).filter((item) => !!item) : [])];
+      const accountKeys = [...new Set(related.map((item) => item.account.accountKey))];
+      setAccountFilter("all");
+      setAccountSearch(accountKeys.length === 1 ? accountKeys[0] : "");
+      setExpandedAccounts(accountKeys);
+      setExpandedKeys([...new Set(related.map((item) => item.key.canonicalKey))]);
+      setFocusRuleId(located.association.ruleId);
+      return;
     } else {
       const original = stations.find((station) => station.id === destination.stationId);
       if (!account && !original) { setWorkflowError("此资源已删除、归档或不在当前目录中，请刷新当前事项后重新打开。"); return; }
@@ -132,17 +157,26 @@ export function useAccountCenter({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [destination, loaded, accountModel, loadingAccounts, loadingList, accountError, loadError]);
 
+  // 定位到的核算关联：等账号与 Key 展开后滚到可见处
+  useEffect(() => {
+    if (!focusRuleId) return;
+    const timer = setTimeout(() => document.querySelector(`[data-rule-id="${CSS.escape(focusRuleId)}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 200);
+    return () => clearTimeout(timer);
+  }, [focusRuleId, destinationSeq]);
+
   // 在页面内打开处理目标（不整页刷新），与从总览、账单核算跳转进来走同一套定位逻辑
   const openWorkflow = useCallback((href: string) => {
     const url = new URL(href, window.location.origin);
     destinationResolved.current = false;
     setWorkflowError("");
+    setFocusRuleId("");
     setDestination(readWorkflowDestination(url.search, "stations"));
     setDestinationSeq((n) => n + 1);
   }, []);
 
-  const openVerification = (station: any) => {
-    verificationEpoch.current += 1; setVerificationStation(station); setVerification(null); setVerificationTokenId(undefined); setVerificationTimezone("Asia/Shanghai"); setVerificationError(""); setVerificationBusy(false);
+  // preset：从某把 Key 打开时预选这把 Key 与它的账单时区
+  const openVerification = (station: any, preset?: { tokenId: number; timezone: string }) => {
+    verificationEpoch.current += 1; setVerificationStation(station); setVerification(null); setVerificationTokenId(preset?.tokenId); setVerificationTimezone(preset?.timezone || "Asia/Shanghai"); setVerificationError(""); setVerificationBusy(false);
   };
   const closeVerification = () => {
     verificationEpoch.current += 1; setVerificationStation(null); setVerification(null); setVerificationBusy(false);
@@ -244,7 +278,7 @@ export function useAccountCenter({
   const recoverAuthorization = async (saved = authorizationRecovery, restore = false) => {
     if (!saved) return;
     const account = accountModel?.accounts.find((item) => item.accountKey === saved.accountKey);
-    if (restore && !account) { setAccountError("原账号暂不在当前关系中，请刷新并核验资源后恢复"); return; }
+    if (restore && !account) { setAccountError("原账号暂不在上游账单中，请刷新并核验资源后恢复"); return; }
     if (restore && account) { openAuthorization(account); setAuthorizationRequestId(saved.retryInput.requestId); setAuthorizationTargets(saved.retryInput.targetStationIds); }
     setAuthorizationBusy(true); setAuthorizationError("");
     try { acceptAuthorizationResult(await api(`/api/channel-onboarding/accounts/${encodeURIComponent(saved.accountKey)}/authorization/recover`, { body: saved.retryInput })); }
@@ -272,11 +306,11 @@ export function useAccountCenter({
         await api(`/api/stations/${encodeURIComponent(resource.id!)}`, { method: "PUT", body: { monitorEnabled: purposeTarget.monitorEnabled === true, expectedAuthVersion: resource.authVersion, expectedResourceVersion: resource.resourceVersion } });
         message.success(purposeTarget.monitorEnabled ? "该资源监控已启用，保持现有成本设置" : "该资源监控已暂停，账单关联与历史保留");
       } else {
-        if (!purposeTarget.ruleId) throw new Error("请选择明确的核算规则");
-        await api(`/api/reconciliation/rules/${encodeURIComponent(purposeTarget.ruleId)}`, { method: "DELETE" }); message.success("所选规则已停止核算，历史保留");
+        if (!purposeTarget.association) throw new Error("请选择明确的核算关联");
+        await api(`/api/reconciliation/rules/${encodeURIComponent(purposeTarget.association.ruleId)}`, { method: "DELETE" }); message.success("核算关联已停止，历史账单保留");
       }
       setPurposeTarget(null); await reload();
-    } catch (err: any) { setPurposeError(`${err.message || "操作失败"}；请刷新关系并重新打开影响预览。`); }
+    } catch (err: any) { setPurposeError(`${err.message || "操作失败"}；请刷新上游账单后重新打开。`); }
     finally { setPurposeBusy(false); }
   };
 
@@ -288,14 +322,34 @@ export function useAccountCenter({
     (accountFilter !== "attention" || needsAction(account)) &&
     matchesAccountQuery([account.accountKey, account.identity.provider, account.identity.baseUrl, account.identity.accountId,
       ...account.resources.flatMap((resource) => [resource.id, resource.name, resource.type]),
-      ...account.keys.flatMap((key) => [key.tokenId, key.tokenName, ...key.channels.flatMap((channel) => [channel.channelId, channel.name])])])
+      ...account.keys.flatMap((key) => [key.tokenId, key.tokenName, ...key.channels.flatMap((channel) => [channel.channelId, channel.name]), ...(key.associations || []).map((association) => association.ruleId)])])
   );
   const accountSites = new Map<string, AccountRecord[]>();
   for (const account of filteredAccounts) accountSites.set(account.siteKey, [...(accountSites.get(account.siteKey) || []), account]);
   const unverifiedResources = (accountModel?.unverifiedResources || []).filter((resource) =>
     (showArchived || !resource.archivedAt) && matchesAccountQuery([resource.id, resource.name, resource.type, resource.baseUrl])
   );
-  const accountBoundary = (value: number | null) => value == null ? "待核验" : `${new Date(value).toISOString().replace("T", " ").replace(".000Z", " UTC")}`;
+  const locateAssociation = (ruleId: string) => {
+    for (const account of accountModel?.accounts || []) for (const key of account.keys) {
+      const association = (key.associations || []).find((item) => item.ruleId === ruleId);
+      if (association) return { account, key, association };
+    }
+    return null;
+  };
+  // 按关联的账单时区显示时刻
+  const formatAt = (value: number | string | null | undefined, timezone: string) => {
+    if (value == null) return "待核验";
+    const date = new Date(value);
+    if (Number.isNaN(date.valueOf())) return "待核验";
+    try {
+      return `${new Intl.DateTimeFormat("zh-CN", { timeZone: timezone, hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date)}（${timezone}）`;
+    } catch { return date.toISOString(); }
+  };
+  const otherUseText = (declaration: CoverageDeclaration) => declaration.answer === "none" ? "没有，只用于上面这些渠道"
+    : declaration.answer === "other_use" ? declaration.otherUse === "own_channels" ? `本站其他渠道 ${declaration.uncoveredOwnChannelIds.map((id) => `#${id}`).join("、") || "待补充"}` : declaration.otherUse === "external" ? "站外调用" : "有，尚未说明用途"
+    : "尚未确认";
+  const ownStationName = (id: string) => stations.find((station) => station.id === id)?.name || id;
+  const keyTitle = (key: AccountKeyScope) => `${key.tokenName || `Key ${key.tokenId}`} · #${key.tokenId}`;
   const purposeLocked = loadingAccounts || !!accountError || authorizationBusy;
 
   // ---- 片段 ------------------------------------------------------------------
@@ -326,12 +380,12 @@ export function useAccountCenter({
           <b>{resource.name}</b>
           <span className={`jy-tag ${resource.purposes.monitor ? "jy-tag--good" : "jy-tag--muted"}`}>{resource.purposes.monitor ? "余额监控" : "监控暂停 / 未启用"}</span>
           {resource.archivedAt ? <span className="jy-tag jy-tag--muted">已归档</span> : null}
-          {resource.purposes.billingRuleIds.length ? <span className="jy-tag jy-tag--info">关联账单规则 {resource.purposes.billingRuleIds.length}</span> : null}
+          {resource.purposes.billingRuleIds.length ? <span className="jy-tag jy-tag--info">核算关联 {resource.purposes.billingRuleIds.length}</span> : null}
         </div>
         <p className="jy-caption">原资源 ID：{resource.id} · {resource.type} · {resource.baseUrl}</p>
         <p className="jy-caption">提醒阈值：{resource.lowBalanceUsd == null ? "沿用全局" : usd(resource.lowBalanceUsd)}；折算汇率：{resource.cnyPerUsd == null ? "沿用默认" : `${resource.cnyPerUsd} RMB/USD`}；成本设置：{resource.includeInProfit ? "纳入" : "不纳入"}{resource.noRenewal ? "；不再续费" : ""}</p>
-        {resource.purposes.billingRuleIds.length ? <p className="jy-caption">账单关系（含历史）：{resource.purposes.billingRuleIds.join("、")}</p> : null}
-        {!resource.purposes.monitor ? <p className="jy-caption">监控暂停/未启用，现有账单关系继续保留。</p> : null}
+        {resource.purposes.billingRuleIds.length ? <p className="jy-caption">核算关联（含历史）：{resource.purposes.billingRuleIds.join("、")}</p> : null}
+        {!resource.purposes.monitor ? <p className="jy-caption">监控暂停/未启用，现有核算关联继续保留。</p> : null}
         <div className="jy-accounts-actions">
           {original && !compact
             ? <Button size="small" disabled={loadingMeta || !types.length} aria-label={`查看原资源设置 ${resource.name}`} onClick={() => openEditor(original)}>资源设置</Button>
@@ -351,71 +405,85 @@ export function useAccountCenter({
     );
   };
 
-  const renderKey = (key: AccountKeyScope) => ({
-    key: key.canonicalKey,
-    label: (
-      <span className="jy-accounts-line">
-        <b>{key.tokenName || `Key ${key.tokenId}`} · #{key.tokenId}</b>
-        {" "}
-        <span className={`jy-tag ${key.scopeAmbiguous ? "jy-tag--crit" : key.activeRuleIds.length ? "jy-tag--info" : "jy-tag--muted"}`}>
-          {key.scopeAmbiguous ? "有效规则范围冲突" : key.activeRuleIds.length ? "正在核算" : "已停止核算 / 历史范围"}
-        </span>
-      </span>
-    ),
-    children: (
-      <div data-canonical-key={key.canonicalKey} className="jy-accounts-key">
+  // 一条核算关联：这把 Key 在某个本站下归属的渠道。动作只放在有效关联上，停止后保留为历史
+  const renderAssociation = (key: AccountKeyScope, association: AccountAssociation) => {
+    const active = association.status === "active";
+    return (
+      <li key={association.ruleId} data-rule-id={association.ruleId} className={`jy-accounts-association${focusRuleId === association.ruleId ? " is-focused" : ""}`}>
+        <div className="jy-accounts-line">
+          <b>本站 {ownStationName(association.ownStationId)}</b>
+          {" "}
+          <span className={`jy-tag ${association.conflict ? "jy-tag--crit" : active ? "jy-tag--good" : "jy-tag--muted"}`}>{association.conflict ? "重复归属" : active ? "有效" : "已停止"}</span>
+          {" "}
+          <span className="jy-caption">关联 {association.ruleId}</span>
+        </div>
         <dl className="jy-accounts-facts">
-          <dt>规则（含历史）</dt><dd>{key.ruleIds.join("、")}</dd>
-          <dt>有效规则</dt><dd>{key.activeRuleIds.join("、") || "无"}</dd>
-          {!key.scopeAmbiguous ? (
-            <>
-              <dt>{key.activeRuleIds.length ? "当前" : "历史"}范围版本</dt><dd>{key.scopeVersion ?? "待核验"} · {key.costCoverage === "complete" ? "用途范围已确认" : "用途范围待确认"}</dd>
-              <dt>{key.activeRuleIds.length ? "生效时间" : "历史生效时间"}</dt><dd>{accountBoundary(key.billingEffectiveFromMs)}</dd>
-              <dt>首次结账</dt><dd>{accountBoundary(key.firstQueryableAtMs)}</dd>
-            </>
-          ) : null}
-          {key.coverageDeclaration.answer === "other_use" ? (
-            <>
-              <dt>其他用途</dt>
-              <dd>{key.coverageDeclaration.otherUse === "own_channels" ? `本站其他渠道 ${key.coverageDeclaration.uncoveredOwnChannelIds.map((id) => `#${id}`).join("、") || "待补充"}` : key.coverageDeclaration.otherUse === "external" ? "站外调用" : "尚未明确"}</dd>
-            </>
-          ) : null}
+          <dt>本站渠道</dt><dd>{association.channels.map((channel) => `${channel.name || `渠道 ${channel.channelId}`} · #${channel.channelId}`).join("、") || "无"}</dd>
+          {active
+            ? <><dt>生效时间</dt><dd>{formatAt(association.accountingStartMs ?? association.billingEffectiveFromMs, association.timezone)}</dd></>
+            : <><dt>停止时间</dt><dd>{formatAt(association.stoppedAt, association.timezone)}</dd></>}
+          <dt>Key 的其他用途</dt><dd>{otherUseText(association.coverageDeclaration)}</dd>
+          <dt>范围版本</dt><dd>{association.scopeVersion} · {association.costCoverage === "complete" ? "用途已确认" : "用途待确认，毛利标为待确认"}</dd>
         </dl>
-        {key.scopeAmbiguous ? (
+        {association.conflict ? (
           <div className="jy-banner" role="status">
             <Sym kind="warn" />
             <div className="jy-stations-banner-body">
-              <b>存在多个有效规则，范围待核对</b>
-              <p className="jy-caption">当前覆盖、生效时间与范围版本尚未统一确认。</p>
+              <b>与关联 {association.conflictRuleIds.join("、")} 重复归属</b>
+              <p className="jy-caption">同一 Key 或同一渠道被多条有效关联认领，成本会被重复计算。停止其中一条，或编辑渠道去掉重复的部分。</p>
             </div>
           </div>
         ) : null}
-        <div className="jy-accounts-channels">
-          <b>关联渠道（含历史）</b>
-          <ul>
-            {key.channels.map((channel) => (
-              <li key={`${channel.ownSource?.namespaceKey || channel.ownStationId}:${channel.channelId}`}>
-                <span>{channel.name || `渠道 ${channel.channelId}`} · #{channel.channelId}</span>
-                <span className="jy-caption">{channel.ownSource ? `本站账号 ${channel.ownSource.accountId} · ${channel.ownStationId}` : `来源待核验 · ${channel.ownStationId}`}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-        {key.activeRuleIds.length ? (
+        {active ? (
+          <div className="jy-accounts-actions">
+            <Button size="small" disabled={purposeLocked} aria-label={`编辑渠道 ${association.ruleId}`} onClick={() => setEditTarget({ ruleId: association.ruleId, title: keyTitle(key), seq: ++editSeq.current })}>编辑渠道</Button>
+            <Button size="small" disabled={purposeLocked} aria-label={`更换 Key ${association.ruleId}`} onClick={() => openWorkflow(`/stations?action=coverage&ruleId=${encodeURIComponent(association.ruleId)}`)}>更换 Key</Button>
+            <Button size="small" danger disabled={purposeLocked} aria-label={`停止核算关联 ${association.ruleId}`} onClick={() => { setPurposeError(""); setPurposeTarget({ key, association }); }}>停止核算</Button>
+          </div>
+        ) : null}
+      </li>
+    );
+  };
+
+  const renderKey = (key: AccountKeyScope) => {
+    const associations = key.associations || [];
+    const current = associations.filter((association) => association.status === "active");
+    const conflict = key.scopeAmbiguous || current.some((association) => association.conflict);
+    // 用关联所用的账单授权核验这把 Key
+    const basis = current[0] || associations[0];
+    const verifyStation = basis ? stations.find((station) => station.id === basis.upstreamStationId && !station.archivedAt) : null;
+    return {
+      key: key.canonicalKey,
+      label: (
+        <span className="jy-accounts-line">
+          <b>{keyTitle(key)}</b>
+          {" "}
+          <span className={`jy-tag ${conflict ? "jy-tag--crit" : current.length ? "jy-tag--info" : "jy-tag--muted"}`}>
+            {conflict ? "重复归属" : current.length ? `有效关联 ${current.length}` : "已停止核算"}
+          </span>
+        </span>
+      ),
+      children: (
+        <div data-canonical-key={key.canonicalKey} className="jy-accounts-key">
           <div className="jy-accounts-actions">
             <Button
               size="small"
-              disabled={purposeLocked}
-              aria-label={`停止 Key ${key.tokenId} 的账单核算`}
-              onClick={() => { setPurposeError(""); setPurposeTarget({ key, ruleId: key.activeRuleIds.length === 1 ? key.activeRuleIds[0] : undefined }); }}
+              disabled={!verifyStation || verificationBusy}
+              aria-label={`核验 Key ${key.tokenId}`}
+              onClick={() => openVerification(verifyStation, { tokenId: key.tokenId, timezone: basis!.timezone })}
             >
-              停止此 Key 的账单核算
+              Key 核验
             </Button>
           </div>
-        ) : null}
-      </div>
-    ),
-  });
+          {associations.length ? (
+            <ul className="jy-accounts-associations" aria-label={`${keyTitle(key)} 的核算关联`}>
+              {associations.map((association) => renderAssociation(key, association))}
+            </ul>
+          ) : <p className="jy-caption">这把 Key 暂无核算关联。</p>}
+        </div>
+      ),
+    };
+  };
 
   const renderAccount = (account: AccountRecord) => {
     const resources = account.resources.filter((resource) => showArchived || !resource.archivedAt);
@@ -432,7 +500,13 @@ export function useAccountCenter({
       ),
       children: (
         <div data-account-key={account.accountKey} className="jy-accounts-account">
-          <p className="jy-caption">已核验账号 ID：{account.identity.accountId} · {account.identity.baseUrl}</p>
+          <p className="jy-accounts-line">
+            {account.actions.some((action) => action.kind === "update_authorization")
+              ? <span className="jy-tag jy-tag--warn">账号授权需更新</span>
+              : <span className="jy-tag jy-tag--good">账号已核验</span>}
+            {" "}
+            <span className="jy-caption">账号 ID：{account.identity.accountId} · {account.identity.baseUrl}</span>
+          </p>
           <p className="jy-accounts-pending">待处理：{pending || "暂无待处理事项"}</p>
           <div className="jy-accounts-actions">
             {account.actions.map(actionLink)}
@@ -449,9 +523,20 @@ export function useAccountCenter({
             {resources.map(renderAccountResource)}
             {account.resources.some((resource) => resource.archivedAt) && !showArchived ? <p className="jy-caption">另有归档资源，点上方「查看归档资源」展开。</p> : null}
           </div>
-          {account.keys.length
-            ? <Collapse ghost size="small" className="jy-accounts-keys" items={account.keys.map(renderKey)} />
-            : <p className="jy-caption">尚无已核验的 Key 账单关系。</p>}
+          {account.keys.length ? (
+            <Collapse
+              ghost
+              size="small"
+              className="jy-accounts-keys"
+              activeKey={expandedKeys}
+              onChange={(keys) => {
+                // 只改本账号下的 Key，别的账号展开着的保持不变
+                const own = new Set(account.keys.map((key) => key.canonicalKey)), next = (Array.isArray(keys) ? keys : [keys]).map(String);
+                setExpandedKeys((current) => [...current.filter((key) => !own.has(key)), ...next]);
+              }}
+              items={account.keys.map(renderKey)}
+            />
+          ) : <p className="jy-caption">尚无已核验的 Key。完成 Key 核验并接入渠道后，核算关联显示在这里。</p>}
         </div>
       ),
     };
@@ -494,12 +579,12 @@ export function useAccountCenter({
     </>
   );
 
-  // ---- 账号关系 ----------------------------------------------------------------
+  // ---- 上游账单 ----------------------------------------------------------------
   let body: ReactNode;
   if (loadingAccounts && !accountModel && !accountError) {
     body = (
       <div className="jy-accounts-skeleton" aria-busy="true">
-        <span className="sr-only">正在读取账号关系…</span>
+        <span className="sr-only">正在读取上游账单…</span>
         {[0, 1, 2].map((i) => <Skeleton key={i} height={36} />)}
       </div>
     );
@@ -509,14 +594,14 @@ export function useAccountCenter({
         <div className="jy-toolbar jy-accounts-toolbar">
           <Input
             prefix={<Icon name="search" />}
-            aria-label="搜索账号关系"
+            aria-label="搜索上游账单"
             allowClear
-            placeholder="搜索站点、账号、资源、Key 或渠道"
+            placeholder="搜索站点、账号、资源、Key、渠道或关联"
             value={accountSearch}
             onChange={(event) => setAccountSearch(event.target.value)}
           />
           <Select
-            aria-label="账号关系状态"
+            aria-label="上游账单状态"
             className="jy-accounts-filter"
             value={accountFilter}
             onChange={setAccountFilter}
@@ -533,15 +618,15 @@ export function useAccountCenter({
           <div className="jy-banner" role="alert">
             <Sym kind="warn" />
             <div className="jy-stations-banner-body">
-              <b>{accountModel ? "账号关系刷新失败，正在显示上次结果" : "账号关系暂不可用"}</b>
+              <b>{accountModel ? "上游账单刷新失败，正在显示上次结果" : "上游账单暂不可用"}</b>
               <p className="jy-caption">{accountError}</p>
             </div>
-            <Button size="small" aria-label="重试账号关系" onClick={() => void loadAccounts()}>重试</Button>
+            <Button size="small" aria-label="重试上游账单" onClick={() => void loadAccounts()}>重试</Button>
           </div>
         ) : null}
         {accountModel ? (
           <p className="jy-caption">
-            显示 {filteredAccounts.length}/{accountModel.accounts.length} 个已核验账号；待核验资源 {unverifiedResources.length}/{accountModel.unverifiedResources.length} · 关系读取：{new Date(accountModel.generatedAt).toLocaleString("zh-CN")}
+            显示 {filteredAccounts.length}/{accountModel.accounts.length} 个已核验账号；待核验资源 {unverifiedResources.length}/{accountModel.unverifiedResources.length} · 读取时间：{new Date(accountModel.generatedAt).toLocaleString("zh-CN")}
           </p>
         ) : null}
         {actionLinks(accountModel?.actions.filter((action) => action.kind === "review_source") || [])}
@@ -581,16 +666,16 @@ export function useAccountCenter({
   }
 
   const center = (
-    <section className="jy-panel jy-accounts" aria-label="账号关系中心">
+    <section className="jy-panel jy-accounts" aria-label="上游账单">
       <div className="jy-panel-head">
-        <h2>账号关系</h2>
+        <h2>上游账单</h2>
         {accountModel ? <CountBadge count={accountModel.accounts.length} muted /> : null}
         <span className="spacer" />
         <div className="extra">
-          <Button size="small" icon={<Icon name="refresh" />} loading={loadingAccounts} onClick={() => void loadAccounts()}>刷新账号关系</Button>
+          <Button size="small" icon={<Icon name="refresh" />} loading={loadingAccounts} onClick={() => void loadAccounts()}>刷新上游账单</Button>
         </div>
       </div>
-      <p className="jy-panel-sub">按已核验的上游账号查看资源、Key 与本站渠道。各资源可能覆盖同一余额，继续按原资源查看，不合计账号余额。</p>
+      <p className="jy-panel-sub">按已核验的上游账号查看资源、Key 与核算关联；编辑渠道、停止核算都在这里。各资源可能覆盖同一余额，继续按原资源查看，不合计账号余额。</p>
       <div className="jy-panel-body jy-accounts-body">{body}</div>
     </section>
   );
@@ -628,9 +713,12 @@ export function useAccountCenter({
                   <Input aria-label="核验账单时区" value={verificationTimezone} disabled={verificationBusy} onChange={(event) => { verificationEpoch.current += 1; setVerificationTimezone(event.target.value); setVerification(null); setVerificationTokenId(undefined); setVerificationError(""); }} />
                 </div>
                 <Button loading={verificationBusy} onClick={() => void verifyUpstream(null)}>实际核验账号与 Key 目录</Button>
+                {!verification && verificationTokenId != null ? (
+                  <Button type="primary" loading={verificationBusy} onClick={() => void verifyUpstream()}>核验 Key #{verificationTokenId} 的账单</Button>
+                ) : null}
                 {verification ? (
                   <>
-                    <Alert type={verification.identity ? "success" : "warning"} showIcon message={verification.identity ? `本次实际账号已核验：${verification.identity.accountId}` : "实际账号尚未核验"} description={`${verification.identity?.provider || verification.platform} · ${verification.identity?.baseUrl || verificationStation.baseUrl} · 资源版本 ${verification.resourceVersion}。该结果未回填已保存账号关系。`} />
+                    <Alert type={verification.identity ? "success" : "warning"} showIcon message={verification.identity ? `本次实际账号已核验：${verification.identity.accountId}` : "实际账号尚未核验"} description={`${verification.identity?.provider || verification.platform} · ${verification.identity?.baseUrl || verificationStation.baseUrl} · 资源版本 ${verification.resourceVersion}。该结果未回填上游账单。`} />
                     {verification.identity ? <Button type="primary" loading={verificationBusy} disabled={verificationBusy} onClick={() => void confirmIdentity()}>确认保存账号身份</Button> : null}
                     {verification.capability?.reason === "KEY_METADATA_UNAVAILABLE" ? (
                       <Alert type="warning" showIcon message="Key 目录无法读取，请检查目录权限或稍后重试" description="账号身份核验成功；空目录不表示该账号没有 Key，也没有所选 Key 的账单证明。" />
@@ -728,10 +816,10 @@ export function useAccountCenter({
                 message="授权更新预览，尚未保存"
                 description={
                   <Space orientation="vertical">
-                    {authorizationProbe.targets.map((target) => <Text key={target.stationId}>{authorizationName(target.stationId)} · 授权版本 {target.authVersion} · {target.currentType} → {target.newType} · 监控渠道 {target.monitorChannelIds.join("、") || "无"} · 账单规则 {target.billingRuleIds.join("、") || "无"} · 账单渠道 {target.billingChannelIds.join("、") || "无"}</Text>)}
+                    {authorizationProbe.targets.map((target) => <Text key={target.stationId}>{authorizationName(target.stationId)} · 授权版本 {target.authVersion} · {target.currentType} → {target.newType} · 监控渠道 {target.monitorChannelIds.join("、") || "无"} · 核算关联 {target.billingRuleIds.join("、") || "无"} · 账单渠道 {target.billingChannelIds.join("、") || "无"}</Text>)}
                     {authorizationProbe.excluded.map((target) => <Text type="warning" key={target.stationId}>排除 {authorizationName(target.stationId)}：{target.reason}</Text>)}
                     <Text>影响监控资源：{authorizationProbe.impact.monitorStationIds.map(authorizationName).join("、") || "无"}</Text>
-                    <Text>影响账单规则：{authorizationProbe.impact.billingRuleIds.join("、") || "无"}</Text>
+                    <Text>影响核算关联：{authorizationProbe.impact.billingRuleIds.join("、") || "无"}</Text>
                     <Text>关联渠道：{authorizationProbe.impact.channels.map((channel) => `${channel.name} #${channel.channelId}（${channel.ownStationId}）`).join("、") || "无"}</Text>
                   </Space>
                 }
@@ -766,7 +854,7 @@ export function useAccountCenter({
       </Drawer>
 
       <Modal
-        title={purposeTarget?.resource ? `${purposeTarget.monitorEnabled ? "启用" : "暂停"}「${purposeTarget.resource.name}」监控？` : "停止此 Key 的账单核算？"}
+        title={purposeTarget?.resource ? `${purposeTarget.monitorEnabled ? "启用" : "暂停"}「${purposeTarget.resource.name}」监控？` : "停止这条核算关联？"}
         open={!!purposeTarget}
         onCancel={() => { if (!purposeBusy) setPurposeTarget(null); }}
         closable={!purposeBusy}
@@ -774,7 +862,7 @@ export function useAccountCenter({
         keyboard={!purposeBusy}
         confirmLoading={purposeBusy}
         onOk={() => void confirmPurpose()}
-        okButtonProps={{ disabled: !!purposeTarget?.key && !purposeTarget.ruleId, "aria-label": "确认用途操作" }}
+        okButtonProps={{ disabled: !purposeTarget?.resource && !purposeTarget?.association, "aria-label": "确认用途操作" }}
         okText="确认操作"
         cancelText="取消"
         width={520}
@@ -792,24 +880,23 @@ export function useAccountCenter({
               <dl className="jy-accounts-facts">
                 <dt>现有成本设置</dt><dd>{purposeTarget.resource.includeInProfit ? "纳入" : "不纳入"}</dd>
                 <dt>关联监控渠道</dt><dd>{accountModel?.channels.filter((channel) => channel.monitor.stationIds.includes(purposeTarget.resource!.id!)).map((channel) => `${channel.name} #${channel.id}`).join("、") || "无"}</dd>
-                <dt>继续保留账单关系</dt><dd>{purposeTarget.resource.purposes.billingRuleIds.join("、") || "无"}</dd>
+                <dt>继续保留核算关联</dt><dd>{purposeTarget.resource.purposes.billingRuleIds.join("、") || "无"}</dd>
               </dl>
             </>
-          ) : purposeTarget?.key ? (
+          ) : purposeTarget?.association ? (
             <>
-              <p>停止所选账单规则，释放它的当前归属范围并保留历史；其他监控资源继续运行。</p>
-              {purposeTarget.key.activeRuleIds.length > 1 ? (
-                <Select aria-label="要停止的核算规则" style={{ width: "100%" }} value={purposeTarget.ruleId} placeholder="选择要停止的规则" options={purposeTarget.key.activeRuleIds.map((id) => ({ value: id, label: id }))} onChange={(ruleId) => setPurposeTarget({ ...purposeTarget, ruleId })} />
-              ) : null}
+              <p>停止后这条关联不再核算，释放它占用的本站渠道；已结账的历史账单保留，同一 Key 的其他关联不受影响。</p>
               <dl className="jy-accounts-facts">
-                <dt>所选规则</dt><dd>{purposeTarget.ruleId || "请选择"}</dd>
-                <dt>Key 关联范围（含历史）</dt><dd>{purposeTarget.key.channels.map((channel) => `${channel.name} #${channel.channelId}（${channel.ownStationId}）`).join("、")}</dd>
+                <dt>核算关联</dt><dd>{purposeTarget.association.ruleId}</dd>
+                <dt>Key</dt><dd>{purposeTarget.key ? keyTitle(purposeTarget.key) : "—"}</dd>
+                <dt>释放的本站渠道</dt><dd>{purposeTarget.association.channels.map((channel) => `${channel.name} #${channel.channelId}`).join("、") || "无"}（{ownStationName(purposeTarget.association.ownStationId)}）</dd>
               </dl>
-              {purposeTarget.key.activeRuleIds.length > 1 ? <p className="jy-caption">其它有效规则继续保留；本次只停止明确选择的一条。</p> : null}
             </>
           ) : null}
         </div>
       </Modal>
+
+      <AssociationEditor target={editTarget} compact={compact} onClose={() => setEditTarget(null)} onSaved={reload} />
     </>
   );
 

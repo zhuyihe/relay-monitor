@@ -1,5 +1,5 @@
 "use client";
-// 账号关系与账单核算产生的待办：侧栏计数、运营总览、上游资源页共用一份，保证三处条数一致。
+// 上游账单与账单核算产生的待办：侧栏计数、运营总览、上游资源页共用一份，保证三处条数一致。
 // 两路分别缓存 5 分钟，重复读取直接用缓存；某一路读取失败时保留上次读到的事项。
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { api } from "../../lib/client";
@@ -66,7 +66,7 @@ export function loadWorkflowActions(force = false, sources: readonly Source[] = 
   return Promise.all(sources.map((source) => loadSource(source, force))).then(() => {});
 }
 
-// 上游资源页读到新的账号关系后直接更新，不必再请求一次
+// 上游资源页读到新的上游账单后直接更新，不必再请求一次
 export function publishAccountActions(actions: WorkflowAction[] | undefined) {
   if (Array.isArray(actions)) {
     update({ accounts: actions, failed: { ...state.failed, accounts: false }, at: { ...state.at, accounts: Date.now() } });
@@ -80,7 +80,7 @@ function subscribe(listener: () => void) {
   };
 }
 
-// sources：这个页面需要自己去读的那几路；上游资源页的账号关系由账号关系中心读好后发布过来
+// sources：这个页面需要自己去读的那几路；上游资源页的账号待办由「上游账单」读好后发布过来
 export function useWorkflowActions(enabled = true, sources: readonly Source[] = ALL_SOURCES) {
   const snapshot = useSyncExternalStore(subscribe, () => state, () => INITIAL);
   const sourceKey = sources.join(",");

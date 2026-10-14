@@ -7,10 +7,10 @@ const PROBLEM: Record<string, [string, string]> = {
   verify_capability: ["账单读取能力未核验", "确认这把 Key 能读到用量明细，账单才能按渠道核算。"],
   connect_channels: ["本站渠道尚未接入核算", "接入后这些渠道的消耗会计入成本。"],
   confirm_coverage: ["Key 的用途未确认", "确认这把 Key 只服务已登记的渠道，成本才不会算多。"],
-  wait_effective: ["核算规则尚未生效", "生效后会自动开始核算，到时无需操作。"],
+  wait_effective: ["核算关联尚未生效", "生效后会自动开始核算，到时无需操作。"],
   review_source: ["本站来源待核对", "核对本站的收入来源，避免收入记错站点。"],
   retry_bill: ["账单未读取成功", "可以重查该时段的账单。"],
-  review_conflict: ["渠道重复归属", "同一渠道归到了多条核算规则，成本会被重复计算。"],
+  review_conflict: ["渠道重复归属", "同一渠道归到了多条核算关联，成本会被重复计算。"],
 };
 
 export function workflowProblem(kind: string): string {
@@ -32,13 +32,13 @@ export function workflowDetail(action: any): string {
   return parts.filter(Boolean).join("");
 }
 
-// 待办落在谁身上：资源名优先；按规则或账号归类的待办用通俗的归属名
+// 待办落在谁身上：资源名优先；按核算关联或账号归类的待办用通俗的归属名
 export function workflowOwner(action: any, nameOf: (id: string) => string | undefined): string {
   if (action.stationId && nameOf(String(action.stationId))) return nameOf(String(action.stationId))!;
   if (action.ownStationId && nameOf(String(action.ownStationId))) return nameOf(String(action.ownStationId))!;
   if (action.accountKey) return "上游账号";
   if (action.href?.startsWith("/reconciliation")) return "账单核算";
-  return "账号关系";
+  return "上游账单";
 }
 
 // 合并到同一行里的其余事项，用一句短语交代

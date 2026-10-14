@@ -570,6 +570,38 @@ test("U03 public历史关系保留，0active标历史，多active口径冲突不
   assert.equal(f.writes(), 0);
 });
 
+test("2a 上游账单按 Key 逐条列出核算关联：有效在前，停止的带停止时间，同 Key 或同一本站渠道的重复归属互相标出", async (t) => {
+  const f = await accountReadFixture(t);
+  const keyOf = (model, accountId, tokenId) => model.accounts.find((account) => account.identity.accountId === accountId).keys.find((item) => item.tokenId === tokenId);
+  let model = await f.rt.channelOnboarding.listAccounts();
+  const [active, history] = keyOf(model, "A", 9).associations;
+  assert.deepEqual(keyOf(model, "A", 9).associations.map((item) => item.ruleId), ["A-active", "A-history"]);
+  assert.deepEqual({ ...active, accountingStartMs: undefined }, { ruleId: "A-active", status: "active", upstreamStationId: "A-billing", ownStationId: "own",
+    timezone: "Asia/Shanghai", channels: [{ channelId: 1, name: "Channel 1" }], costCoverage: "unknown",
+    coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] }, scopeVersion: 3,
+    billingEffectiveFromMs: Date.parse("2026-10-09T16:00:00Z"), accountingStartMs: undefined, conflict: false, conflictRuleIds: [], stoppedAt: null });
+  assert.equal(typeof active.accountingStartMs, "number");
+  assert.equal(history.status, "stopped"); assert.equal(history.stoppedAt, "2026-10-01T00:00:00Z"); assert.deepEqual(history.conflictRuleIds, []);
+  const stopped = keyOf(model, "A", 10).associations[0];
+  assert.equal(stopped.status, "stopped"); assert.equal(stopped.conflict, false);
+  assert.deepEqual(keyOf(model, "B", 9).associations.map((item) => [item.ruleId, item.conflict]), [["B-active", false]]);
+
+  // A-conflict 与 A-active 同一实际 Key（成本重复），又与 B-active 认领同一本站渠道 2（收入重复）；
+  // 另一个本站来源下的渠道 2 不算重复，已停止的关联既不报冲突也不被别人算进去。
+  f.state.rules.push(f.rule("A-conflict", f.a1, 9, [2], { updatedAt: "2026-10-09T06:00:00Z" }),
+    f.rule("A-other-own", f.a2, 13, [2], { ownSource: { ...f.state.rules[0].ownSource, namespaceKey: "other-own" } }));
+  f.state.rules.find((rule) => rule.id === "A-active").updatedAt = "2026-10-09T05:00:00Z";
+  model = await f.rt.channelOnboarding.listAccounts();
+  const conflicted = keyOf(model, "A", 9).associations;
+  assert.deepEqual(conflicted.map((item) => [item.ruleId, item.status, item.conflictRuleIds]),
+    [["A-conflict", "active", ["A-active", "B-active"]], ["A-active", "active", ["A-conflict"]], ["A-history", "stopped", []]]);
+  assert.ok(conflicted.filter((item) => item.status === "active").every((item) => item.conflict));
+  assert.deepEqual(keyOf(model, "B", 9).associations[0].conflictRuleIds, ["A-conflict"]);
+  assert.deepEqual(keyOf(model, "A", 13).associations[0].conflictRuleIds, []);
+  assert.deepEqual(keyOf(model, "A", 10).associations[0].conflictRuleIds, []);
+  assert.equal(f.writes(), 0);
+});
+
 test("U03 actual Repository全量入口保留archived/disabled关系；Store真实改PAT后旧身份作废，JWT自动续期不影响账号版本", async (t) => {
   const f = await accountReadFixture(t), statements = [];
   const pool = { query: async (sql) => {
