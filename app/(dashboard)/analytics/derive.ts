@@ -4,6 +4,7 @@
 // 日期按接口返回的业务时区划分，与浏览器时区无关。缺记录的日子标成缺失，不补零。纯函数，不依赖 React。
 import { dayKeyInTz } from "../../../lib/business-time";
 import { formatMonthDay, isoDay, parseDay } from "../../../lib/format";
+import { splitByCumulative } from "../../../lib/profit";
 import type { TrendRow } from "../../components/trend-panel";
 
 export const r2 = (v: number) => Math.round(v * 100) / 100;
@@ -104,6 +105,10 @@ export function derive(data: any, own: any) {
     if (!upIds.has(r.stationId) || !inWindow.has(r.date)) continue;
     fixedBy.set(r.date, (fixedBy.get(r.date) || 0) + (Number(r.cny) || 0));
   }
+  // 固定成本合计取各上游的整段摊销（与「我的站点」同一口径），不用逐日舍入后的值相加；
+  // 再按逐日摊销的累计占比分回每天，趋势表合计、累计图终点与等式里的固定成本分毫不差。
+  const fixed = r2(upstream.reduce((a, s) => a + (Number(s.fixedCny) || 0), 0));
+  const fixedRows = splitByCumulative(dates.map((date) => fixedBy.get(date) || 0), fixed);
 
   // 用"有日汇总记录或出现在覆盖缺口里"识别需要采集用量的上游；纯固定成本的上游两者都不满足，
   // 配了固定付费的上游已按 costBasis 排除，都不会被误判为缺数据。
@@ -143,7 +148,7 @@ export function derive(data: any, own: any) {
 
   const missingDates: string[] = [];
   const partialDates: string[] = [];
-  const rows: TrendRow[] = dates.map((date) => {
+  const rows: TrendRow[] = dates.map((date, i) => {
     const n = seenBy.get(date)?.size || 0;
     const missing = monitored.length > 0 && n === 0;
     const partial = !missing && n < monitored.length;
@@ -153,7 +158,7 @@ export function derive(data: any, own: any) {
       date,
       rev: incomeBy ? incomeBy.get(date) || 0 : null,
       cost: missing ? null : r2(usageBy.get(date) || 0),
-      fixed: r2(fixedBy.get(date) || 0),
+      fixed: fixedRows[i],
       today: date === data.end,
       partial,
       missing,
@@ -165,8 +170,6 @@ export function derive(data: any, own: any) {
   const ownDays = days <= 7 ? 7 : 30;
   const revenueSplit = !!incomeBy && days !== ownDays;
   const usage = r2(rows.reduce((a, r) => a + (r.cost || 0), 0));
-  // 固定成本合计取各上游的整段摊销（与「我的站点」同一口径），不用逐日舍入后的值相加
-  const fixed = r2(upstream.reduce((a, s) => a + (Number(s.fixedCny) || 0), 0));
 
   // 概况：只按有记录的日子算日均与峰值，缺失日不当作零成本拉低平均
   const covered = rows.filter((r) => !r.missing).map((r) => ({ date: r.date, cost: r2((r.cost || 0) + r.fixed), today: r.today }));

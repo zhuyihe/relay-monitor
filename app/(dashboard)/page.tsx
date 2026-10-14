@@ -216,7 +216,12 @@ export default function OverviewPage() {
     [range, setRange],
   );
   const asOfs = [stationsAt, moneyAt].filter((t): t is number => t != null);
-  useShellPage({ onRefresh, asOf: asOfs.length ? Math.min(...asOfs) : null, range: rangePicker });
+  useShellPage({
+    onRefresh,
+    asOf: asOfs.length ? Math.min(...asOfs) : null,
+    range: rangePicker,
+    tz: money?.own?.tz || money?.fallback?.tz,
+  });
 
   const critDays = Number(rules?.etaDays) > 0 ? Number(rules.etaDays) : 3;
   const current = money && money.range === range ? money : null;

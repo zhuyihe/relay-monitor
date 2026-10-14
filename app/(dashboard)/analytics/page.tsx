@@ -37,6 +37,9 @@ type Heat = ReturnType<typeof deriveHeat>;
 type HeatFallback = { archived: boolean; hour: number; heat: Heat | null };
 
 const PRESET_DAYS: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
+// 自营收入只有 7/30 天口径；更长的范围不取，不能拿 30 天收入与更长的成本混算利润
+const ownRangeOf = (d: number) => (d <= 7 ? "7d" : d <= 30 ? "30d" : null);
+const fetchOwn = (range: string | null) => (range ? api(`/api/own/analytics?range=${range}`) : Promise.resolve(null));
 const RANGE_OPTIONS = [
   { value: "7d", label: "近 7 天" },
   { value: "30d", label: "近 30 天" },
@@ -55,6 +58,8 @@ type Snapshot = {
   ownStatus: OwnStatus;
   ownError: string | null;
   // 这份数据对应的查询条件；与当前选择不一致时说明正在切换
+  query: string;
+  // 服务端按业务时区算出的天数
   days: number;
   includeArchived: boolean;
 };
@@ -68,15 +73,23 @@ const coverageLink = (
 export default function AnalyticsPage() {
   const [sp, setUrl] = useUrlParams();
   const [snap, setSnap] = useState<Snapshot | null>(null);
-  // 自定义开始日期换算天数时，「今天」要和服务端按同一个业务时区取：加载后用接口返回的 tz
+  // 「今天」与日期选择器的可选范围要和服务端按同一个业务时区取：加载后用接口返回的 tz
   const tz: string = snap?.data?.tz || DEFAULT_BUSINESS_TIME_ZONE;
   const today = dayKeyInTz(Date.now(), tz);
   const minDate = addDays(today, -(MAX_DAYS - 1));
   const rawRange = sp.get("range") || "";
   const rawStart = sp.get("start");
-  const customOk = rawRange === "custom" && validDay(rawStart) && rawStart >= minDate && rawStart <= today;
+  // 拿到业务时区之前按上海估算「今天」，可能与服务端差一天：开始日期前后各放宽一天，超出的由服务端收窄
+  const customOk =
+    rawRange === "custom" && validDay(rawStart) && rawStart >= addDays(minDate, -1) && rawStart <= addDays(today, 1);
   const rangeValue = customOk ? "custom" : PRESET_DAYS[rawRange] ? rawRange : "30d";
-  const days = customOk ? dayDiff(rawStart, today) + 1 : PRESET_DAYS[rangeValue];
+  // 请求条件：预设范围传天数，自定义范围传开始日期、天数由服务端按业务时区算；
+  // 业务时区到达后本地「今天」变了，也还是同一个请求，不会多拉一次
+  const query = customOk ? `start=${rawStart}` : `days=${PRESET_DAYS[rangeValue]}`;
+  // 本地估算的天数，只用来预先挑自营收入的 7/30 天档；页面显示一律用服务端返回的 days
+  const days = customOk ? Math.max(1, dayDiff(rawStart, today) + 1) : PRESET_DAYS[rangeValue];
+  const guessRef = useRef(days);
+  guessRef.current = days;
   const includeArchived = sp.get("archived") === "1";
 
   const [loading, setLoading] = useState(true);
@@ -89,16 +102,20 @@ export default function AnalyticsPage() {
 
   // 返回这次加载的错误信息（成功或已被更新的请求取代时返回 null），供顶栏刷新按钮提示
   const load = useCallback(
-    async (d: number): Promise<string | null> => {
+    async (query: string): Promise<string | null> => {
       const my = ++seq.current;
-      const params = new URLSearchParams({ days: String(d) });
+      const params = new URLSearchParams(query);
       if (includeArchived) params.set("includeArchived", "true");
-      // 两个请求并行；自营收入只有 7/30 天口径，长周期不能拿 30 天收入与更长的成本混算利润
-      const [a, o] = await Promise.allSettled([
-        api(`/api/analytics?${params}`),
-        d <= 30 ? api(`/api/own/analytics?range=${d <= 7 ? "7d" : "30d"}`) : Promise.resolve(null),
-      ]);
+      // 两个请求并行，自营收入的口径先按本地估算的天数挑
+      const guess = ownRangeOf(guessRef.current);
+      let [a, o] = await Promise.allSettled([api(`/api/analytics?${params}`), fetchOwn(guess)]);
       if (my !== seq.current) return null;
+      const d = a.status === "fulfilled" ? Number(a.value?.days) || guessRef.current : guessRef.current;
+      // 服务端算出的天数跨了 7/30 天档（本地与业务时区差一天时）：按服务端天数补取一次自营收入
+      if (a.status === "fulfilled" && ownRangeOf(d) !== guess) {
+        [o] = await Promise.allSettled([fetchOwn(ownRangeOf(d))]);
+        if (my !== seq.current) return null;
+      }
       let error: string | null = null;
       if (a.status === "rejected") {
         // 保留上一次成功的数据，页面顶部提示刷新失败
@@ -121,7 +138,7 @@ export default function AnalyticsPage() {
             }
           }
         }
-        setSnap({ data: a.value, own, ownStatus, ownError, days: d, includeArchived });
+        setSnap({ data: a.value, own, ownStatus, ownError, query, days: d, includeArchived });
         setAsOf(Date.now());
         setLoadError(null);
       }
@@ -134,10 +151,10 @@ export default function AnalyticsPage() {
   // 首次 + 每 30 秒轮询；切换范围或归档开关立即重拉
   useEffect(() => {
     setLoading(true);
-    load(days);
-    const timer = setInterval(() => load(days), POLL_MS);
+    load(query);
+    const timer = setInterval(() => load(query), POLL_MS);
     return () => clearInterval(timer);
-  }, [days, load]);
+  }, [query, load]);
 
   // 紧急阈值与告警规则一致（可用天数 ≤ rules.etaDays 时告警）
   useEffect(() => {
@@ -151,8 +168,8 @@ export default function AnalyticsPage() {
 
   const retry = useCallback(() => {
     setLoading(true);
-    return load(days);
-  }, [load, days]);
+    return load(query);
+  }, [load, query]);
 
   const range = useMemo(
     () => (
@@ -161,23 +178,25 @@ export default function AnalyticsPage() {
         options={RANGE_OPTIONS}
         onChange={(v) => setUrl({ range: v === "30d" ? null : v, start: null })}
         custom={{
-          startDate: customOk ? rawStart : null,
+          // 数据回来后显示服务端实际采用的开始日期（超出范围的已被收窄）
+          startDate: customOk ? (snap?.query === query && snap.data?.start) || rawStart : null,
           minDate,
           maxDate: today,
           onApply: (start) => setUrl({ range: "custom", start }),
         }}
       />
     ),
-    [rangeValue, customOk, rawStart, minDate, today, setUrl],
+    [rangeValue, customOk, rawStart, snap, query, minDate, today, setUrl],
   );
 
   useShellPage({
     onRefresh: async () => {
-      const error = await load(days);
+      const error = await load(query);
       if (error) throw new Error(`成本分析刷新失败：${error}`);
     },
     asOf,
     range,
+    tz: snap?.data?.tz,
   });
 
   const dv = useMemo(() => (snap ? derive(snap.data, snap.own) : null), [snap]);
@@ -252,7 +271,7 @@ export default function AnalyticsPage() {
   }
 
   // 没有任何数据，或刚切换的范围加载失败（旧数据对应别的范围，不能冒充）
-  const stale = !!snap && (snap.days !== days || snap.includeArchived !== includeArchived);
+  const stale = !!snap && (snap.query !== query || snap.includeArchived !== includeArchived);
   if (!snap || !dv || (stale && loadError && !loading)) {
     return (
       <div className="jy-page">

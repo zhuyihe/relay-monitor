@@ -1,5 +1,5 @@
 // ---- 经营分析：日汇总支撑长期趋势，原始快照仅保留近期热力图 --------------------------
-// GET /api/analytics?days=1..365&includeArchived=true
+// GET /api/analytics?days=1..365&includeArchived=true，或 ?start=YYYY-MM-DD（自定义范围：从这天到今天）
 // 消耗口径与 History.usedSince 一致：相邻快照余额下降计消耗，上升视为充值忽略。
 // 日期、星期、小时一律按业务时区（lib/business-time.js）划分：SQL 只按 15 分钟取整，
 // 换算在 JS 里做，不依赖 MySQL 会话时区和进程时区。固定成本与「我的站点」同一摊销算法（lib/profit.js）。
@@ -27,21 +27,28 @@ const RECENT_DROPS_SQL = `
   WHERE h.t >= ?
 `;
 
-function requestedDays(value) {
-  const days = Math.floor(Number(value));
+// 自定义范围传开始日期，天数由服务端按业务时区的今天算：前端拿到业务时区之前也能发出同一个请求，
+// 不会因浏览器与业务时区差一天而多拉一次。早于 365 天前按 365 天，晚于今天按 1 天（只看今天）。
+function requestedDays(sp, todayLabel) {
+  const start = sp.get("start");
+  if (start && shiftDayLabel(start, 0) === start) {
+    const diff = Math.round((Date.parse(todayLabel) - Date.parse(start)) / 86400000);
+    return Math.min(365, Math.max(1, diff + 1));
+  }
+  const days = Math.floor(Number(sp.get("days")));
   return Number.isFinite(days) && days >= 1 && days <= 365 ? days : 30;
 }
 
 export const GET = withAuth(async (request, rt) => {
   const { pool, store, history } = rt;
   const sp = new URL(request.url).searchParams;
-  const days = requestedDays(sp.get("days"));
   const includeArchived = sp.get("includeArchived") === "true";
 
   // 窗口 = 今天（业务时区自然日）往前共 days 天，起点取业务时区零点。
   const tz = businessTimeZone();
   const nowMs = Date.now();
   const end = dayKeyInTz(nowMs, tz);
+  const days = requestedDays(sp, end);
   const start = shiftDayLabel(end, -(days - 1));
   const dayList = dayRangeInTz(start, end, tz);
   const startMs = dayList[0].startMs;
@@ -168,19 +175,18 @@ export const GET = withAuth(async (request, rt) => {
     totalUsd.set(row.stationId, (totalUsd.get(row.stationId) || 0) + usd);
   }
 
-  // 固定成本日摊销：与「我的站点」同一算法，按生效区间与当天的重叠毫秒摊；今天只摊到现在。
-  // 逐日值保留四位、合计用未舍入值累加，站点合计才与「我的站点」整段摊销一致（不会每天舍入丢几分钱）。
+  // 固定成本：站点合计与「我的站点」完全同一次调用（整段 [窗口起点, 现在) 摊销），两页分毫不差；
+  // 逐日值按生效区间与当天的重叠毫秒摊、今天只摊到现在，保留四位，只用来画逐日走势
+  // （前端按它的累计占比把合计分回每天，见 splitByCumulative）。
   const fixedDaily = [];
   const fixedTotal = new Map();
   for (const station of stations) {
     const purchases = purchasesOf(station);
     if (!purchases.length) continue;
+    fixedTotal.set(station.id, amortizeFixedCost(purchases, { startMs, endMs: nowMs, tz }).cny);
     for (const { date, startMs: dayStart, endMs: dayEnd } of dayList) {
       const { exact } = amortizeFixedCost(purchases, { startMs: dayStart, endMs: Math.min(dayEnd, nowMs), tz });
-      if (exact > 0) {
-        fixedDaily.push({ date, stationId: station.id, cny: r4(exact) });
-        fixedTotal.set(station.id, (fixedTotal.get(station.id) || 0) + exact);
-      }
+      if (exact > 0) fixedDaily.push({ date, stationId: station.id, cny: r4(exact) });
     }
   }
 
@@ -198,7 +204,7 @@ export const GET = withAuth(async (request, rt) => {
       cnyPerUsd: station.cnyPerUsd ?? null,
       totalUsd: r4(usd),
       totalCny: r2(usd * rateOf(station)),
-      fixedCny: r2(fixedTotal.get(station.id) || 0),
+      fixedCny: fixedTotal.get(station.id) || 0,
       runway: prediction ? { etaDays: prediction.etaDays, burnPerDay: prediction.burnPerDay, basis: prediction.basis } : null,
     };
   });

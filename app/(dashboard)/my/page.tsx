@@ -150,7 +150,7 @@ export default function MyStationPage() {
     () => (unconfigured ? undefined : <RangePicker value={range} options={RANGE_OPTIONS} onChange={(x) => setRange(x as OwnRange)} />),
     [unconfigured, range, setRange],
   );
-  useShellPage({ onRefresh, asOf, range: rangePicker });
+  useShellPage({ onRefresh, asOf, range: rangePicker, tz: costs?.tz || data?.tz });
 
   const view = useMemo(() => (data ? deriveOwn(data) : null), [data]);
 

@@ -6,6 +6,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { App, Dropdown } from "antd";
 import { api, statusOf } from "../../lib/client";
+import { formatZonedTime } from "../../lib/format";
 import { BRAND, formatPageTitle, NAV_LABELS } from "../../lib/brand";
 import { NAV_GROUPS, NAV_ITEMS, navItemFor } from "../../lib/nav";
 import { buildOverviewActions } from "../../lib/overview-actions";
@@ -258,7 +259,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               >
                 <i className="dot" aria-hidden="true" />
                 <span className="txt">数据截至</span>
-                <span className="jy-num">{hhmm(asOf)}</span>
+                <span className="jy-num">{page.tz ? formatZonedTime(asOf, page.tz) : hhmm(asOf)}</span>
               </span>
             )}
             {!passwordChangeRequired && page.onRefresh && (
