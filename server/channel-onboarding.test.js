@@ -623,7 +623,14 @@ async function genuineBatchFixture(t) {
               type: 1, status: 1, base_url: "https://up.test", group: "g1" })) } : { quota: 100 };
     return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
   });
+  const capabilities = new Map();
   const read = (sql, params = [], draft = state) => {
+    if (sql.includes("reconciliation_billing_capabilities")) {
+      if (sql.startsWith("SELECT")) return [capabilities.has(params[0]) ? [{ capability: capabilities.get(params[0]) }] : []];
+      if (sql.startsWith("INSERT")) capabilities.set(params[0], params[1]);
+      else if (sql.includes("WHERE identity")) capabilities.delete(params[0]);
+      return [{ affectedRows: 1 }];
+    }
     if (sql.includes("JOIN reconciliation_rule_channels")) return [draft.members.filter((member) => params[0].includes(member.channel_id)
       && member.rule_id !== params[1] && draft.rules.find((rule) => rule.id === member.rule_id)?.enabled)
       .map((member) => ({ id: member.rule_id, channel_id: member.channel_id, token_name: "Key" }))];
@@ -949,7 +956,7 @@ test("F03 genuine Sub2API verifies actual Key/date controls independently in eac
   const probe = await f.rt.channelOnboarding.probeBatch(input); assert.deepEqual(probe.groups.map((group) => group.status), ["ready", "ready"]);
   for (const timezone of zones) {
     const metadata = seen.find((item) => item.billingTimezone.timezone === timezone);
-    assert.equal(metadata.capability.state, "supported"); assert.equal(metadata.billingTimezone.state, "unverified");
+    assert.equal(metadata.capability.state, "supported"); assert.deepEqual(metadata.billingTimezone, { state: "verified", timezone });
     assert.ok(stats.some((item) => item.timezone === timezone && item.api_key_id === String(Number.MAX_SAFE_INTEGER)));
     assert.ok(stats.some((item) => item.timezone === timezone && item.start_date > "2026-10-09"));
   }
@@ -957,6 +964,29 @@ test("F03 genuine Sub2API verifies actual Key/date controls independently in eac
   const zero = f.request([[3]]); zero.groups[0].reconciliation.timezone = "America/New_York";
   const unverified = await f.rt.channelOnboarding.probeBatch(zero);
   assert.equal(unverified.groups[0].status, "unverified"); assert.equal(f.state.created, 2);
+});
+
+test("F03 新建 Sub2API 账号在向导里核验的能力，确认保存时按同一身份读到，不会误报预览已变化", async (t) => {
+  const f = await genuineBatchFixture(t), fetchNewApi = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, options) => {
+    const url = new URL(input);
+    if (!url.pathname.startsWith("/api/v1/")) return fetchNewApi(input, options);
+    if (url.pathname.startsWith("/api/v1/keys/")) return Response.json({ code: 404, data: {} }, { status: 404 });
+    const data = url.pathname === "/api/v1/auth/me" ? { id: 42 }
+      : url.pathname === "/api/v1/keys" ? { total: 1, items: [{ id: 9, user_id: 42, name: "Key 9", status: "active", group_id: 1 }] }
+        : { total_actual_cost: url.searchParams.get("api_key_id") === String(Number.MAX_SAFE_INTEGER) || url.searchParams.get("start_date") > "2026-10-09" ? 0 : 2 };
+    return Response.json({ code: 0, data });
+  });
+  const input = f.request([[1]], [9]);
+  input.selections = [{ selectionId: "account", monitor: true, newStation: { type: "sub2api", baseUrl: "https://up.test", accessToken: "brand-new-pat" } }];
+  const probe = await f.rt.channelOnboarding.probeBatch(input);
+  assert.equal(probe.groups[0].status, "ready");
+  const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: probe.previewId });
+  assert.equal(result.complete, true, JSON.stringify(result.groups?.map((group) => group.code)));
+  const station = f.store.list({ includeUnmonitored: true }).find((item) => item.type === "sub2api");
+  assert.equal(station.authVersion, 1); assert.equal(f.state.created, 1);
+  const metadata = await f.rt.reconciliation.getUpstreamKeys(station.id, { timezone: "Asia/Shanghai" });
+  assert.equal(metadata.capability.state, "supported");
 });
 
 test("F03 per-group metadata failure independently redacts own upstream and generated temporary credentials", async () => {

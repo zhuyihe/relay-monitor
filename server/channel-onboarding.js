@@ -158,6 +158,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   const resources = () => rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && TYPES.includes(station.type));
   const reusable = (item) => item && (item.existing || item.candidate);
   const sourceVersion = () => ownVersion(own(), catalogue?.ownSource);
+  // 对账模块晚于接入模块创建，所以用到时再取它的账单能力存储；没有对账模块时只用进程内缓存。
+  const capabilityStore = () => rt.reconciliation?.billingCapabilityStore || null;
   const stale = () => !catalogue?.ownSource || catalogue.ownStationId !== own()?.id || catalogue.sourceVersion !== sourceVersion()
     || !!syncError || now() - catalogue.syncedAt > 5 * 60000;
 
@@ -934,7 +936,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             const readKey = hash([onboardingConnectionPatch(billing.connection), billing.expectedAuthVersion, billing.resourceVersion, timezone]);
             if (!metadataReads.has(readKey)) {
               const connection = structuredClone(billing.connection);
-              metadataReads.set(readKey, { connection, promise: queryMetadata(connection, { timezone }) });
+              metadataReads.set(readKey, { connection, promise: queryMetadata(connection, { timezone, capabilityStore: capabilityStore() }) });
             }
             const observation = metadataReads.get(readKey);
             billingConnection = observation.connection;
@@ -951,7 +953,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           if (token && billing.connection.type.startsWith("sub2api") && billing.metadata.capability?.state === "unverified") {
             try {
               const observation = await queryStat(structuredClone(billing.connection), { token, metadata: billing.metadata,
-                ...completedBillingDayWindow(group.reconciliation.timezone, now()) });
+                capabilityStore: capabilityStore(), ...completedBillingDayWindow(group.reconciliation.timezone, now()) });
               billing.metadata.capability = observation.capability || { state: "unverified", reason: "DEPLOYMENT_NOT_VERIFIED" };
               group.status = billingStatus(billing, true).status;
               group.reason = billingStatus(billing, true).reason;

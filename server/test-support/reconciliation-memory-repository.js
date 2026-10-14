@@ -15,7 +15,7 @@ import {
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, isSettledConfirmedSource,
 } from "../reconciliation-repository.js";
 
-const JSON_COLUMNS = new Set(["source_binding", "source"]);
+const JSON_COLUMNS = new Set(["source_binding", "source", "capability"]);
 
 const TABLE_NAMES = {
   rules: "reconciliation_rules",
@@ -23,6 +23,7 @@ const TABLE_NAMES = {
   segments: "reconciliation_rule_segments",
   snapshots: "reconciliation_snapshots",
   alerts: "reconciliation_alert_state",
+  capabilities: "reconciliation_billing_capabilities",
 };
 
 // 与 db/pool.js 的建表语句保持一致。
@@ -54,6 +55,11 @@ const SCHEMA = {
     keys: { PRIMARY: ["rule_id", "event_code"] },
     notNull: ["rule_id", "event_code", "active", "first_seen_at", "last_seen_at"],
     varchar: { rule_id: 32, event_code: 64 },
+  },
+  capabilities: {
+    keys: { PRIMARY: ["identity"] },
+    notNull: ["identity", "capability", "verified_at"],
+    varchar: { identity: 64 },
   },
 };
 const fold = (value) => String(value).normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
@@ -143,13 +149,14 @@ export class MemoryReconciliationRepository {
   //   beforeSnapshotWrite(entry, tx)   写快照前，可以抛错模拟写入失败
   //   afterSnapshotWrite(entry, tx)    写快照后、提交前
   //   beforeCommit(tx) / afterCommit(tx)
+  //   beforeCapabilityWrite(method, identity)  保存或删除账单能力前，可以抛错模拟写入失败
   // tx 是 { name, snapshots: [{ ruleId, snapshotKey, source }], archivedRuleIds }。
-  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], now = () => Date.now(), hooks = {} } = {}) {
-    this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts] };
+  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], now = () => Date.now(), hooks = {} } = {}) {
+    this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts], capabilities: [...capabilities] };
     this.now = now;
     this.hooks = hooks;
     // snapshotWrites / ratioWrites / channelStateWrites 按语句记录，包括之后被回滚的写入。
-    this.log = { snapshotWrites: [], ratioWrites: [], channelStateWrites: [], alertCalls: [], commits: [], rollbacks: [] };
+    this.log = { snapshotWrites: [], ratioWrites: [], channelStateWrites: [], alertCalls: [], capabilityWrites: [], commits: [], rollbacks: [] };
   }
 
   async listRules({ includeArchived = false } = {}) {
@@ -478,6 +485,28 @@ export class MemoryReconciliationRepository {
     this.#update(null, "alerts", active, { active: 0, recovered_at: bigint(recoveredAt), last_seen_at: bigint(recoveredAt) });
   }
 
+  async getBillingCapability(identity) {
+    await this.#read("getBillingCapability", [identity]);
+    const row = this.#capabilityEntry(identity)?.row;
+    return row ? fresh(row).capability : null;
+  }
+
+  async saveBillingCapability(identity, capability) {
+    await this.hooks.beforeCapabilityWrite?.("saveBillingCapability", identity);
+    this.log.capabilityWrites.push({ method: "saveBillingCapability", identity, capability: structuredClone(capability) });
+    const values = { capability: JSON.stringify(capability), verified_at: bigint(capability.verifiedAt) };
+    const existing = this.#capabilityEntry(identity);
+    if (existing) this.#update(null, "capabilities", [existing], values);
+    else this.#insert(null, "capabilities", { identity, ...values });
+  }
+
+  async deleteBillingCapability(identity) {
+    await this.hooks.beforeCapabilityWrite?.("deleteBillingCapability", identity);
+    this.log.capabilityWrites.push({ method: "deleteBillingCapability", identity });
+    const existing = this.#capabilityEntry(identity);
+    if (existing) this.#delete(null, "capabilities", [existing]);
+  }
+
   async latestRecord(ruleId, window, scopeFingerprint, recordType) {
     if (!scopeFingerprint) throw new Error("成功账单查询必须指定核算口径");
     await this.#read("latestRecord", [ruleId, window, scopeFingerprint, recordType]);
@@ -666,6 +695,10 @@ export class MemoryReconciliationRepository {
 
   #alertEntry(ruleId, eventCode) {
     return this.#rows("alerts").find(({ row }) => sameText(row.rule_id, ruleId) && sameText(row.event_code, eventCode)) || null;
+  }
+
+  #capabilityEntry(identity) {
+    return this.#rows("capabilities").find(({ row }) => sameText(row.identity, identity)) || null;
   }
 
   // order = "name"：ORDER BY channel_name, channel_id；"id"：没有 ORDER BY 时按主键顺序。

@@ -3,7 +3,7 @@
 // 用例只调用公开方法；每个用例使用随机的站点、Key 与渠道编号，可以在已有数据的库里重复运行。
 // 运行方提供：
 //   create()                                        每个用例新建（或复用连接池）一个仓库实例
-//   cleanup({ repository, ruleIds })                 删除本用例写入的全部规则及其渠道、分段、快照、告警
+//   cleanup({ repository, ruleIds, capabilityIdentities })  删除本用例写入的全部规则及其渠道、分段、快照、告警，以及账单能力记录
 //   inspectSnapshot({ repository, ruleId, snapshotKey })  读取快照行的物理列（segment_id 等没有公开读取方法）
 //   teardown()                                       全部用例结束后释放资源
 import assert from "node:assert/strict";
@@ -30,6 +30,14 @@ class Fixture {
     this.ruleIds = new Set();
     this.tokenBase = randomInt(10_000_000, 900_000_000);
     this.channelBase = randomInt(10_000_000, 900_000_000);
+    this.capabilityIdentities = new Set();
+  }
+
+  // 账单能力按 64 位十六进制身份保存；以本用例的 tag 开头，清理时按集合删除。
+  capabilityIdentity(name) {
+    const identity = `${this.tag}${Buffer.from(String(name)).toString("hex")}`.padEnd(64, "0").slice(0, 64);
+    this.capabilityIdentities.add(identity);
+    return identity;
   }
 
   station(name) {
@@ -145,7 +153,7 @@ export function defineReconciliationRepositoryContract({ name, create, cleanup =
         try {
           await run({ repository, fixture, inspect });
         } finally {
-          await cleanup({ repository, ruleIds: await fixture.collectRuleIds() });
+          await cleanup({ repository, ruleIds: await fixture.collectRuleIds(), capabilityIdentities: [...fixture.capabilityIdentities] });
         }
       });
     }
@@ -965,6 +973,41 @@ contract("listConfirmedHistory pages with an opaque cursor and rejects invalid o
   await assert.rejects(repository.listConfirmedHistory(rule.id, { ...range, cursor: Buffer.from("[1,2]").toString("base64url") }), invalid);
 });
 
+// ---- 账单能力核验结果 ----
+
+contract("billing capabilities round-trip, overwrite and delete by identity", async ({ repository, fixture }) => {
+  const now = Date.now();
+  const first = fixture.capabilityIdentity("first"), second = fixture.capabilityIdentity("second");
+  assert.equal(await repository.getBillingCapability(first), null);
+  const capability = { state: "supported", currency: "USD", window: "natural-day", verifiedAt: now - 1000, reason: "RUNTIME_FILTERS_VERIFIED" };
+  await repository.saveBillingCapability(first, capability);
+  await repository.saveBillingCapability(second, { ...capability, verifiedAt: now - 500 });
+  assert.deepEqual(await repository.getBillingCapability(first), capability);
+  // 身份大小写不同仍是同一行（utf8mb4_0900_ai_ci）。
+  assert.deepEqual(await repository.getBillingCapability(first.toUpperCase()), capability);
+
+  await repository.saveBillingCapability(first, { ...capability, verifiedAt: now });
+  assert.equal((await repository.getBillingCapability(first)).verifiedAt, now);
+  assert.equal((await repository.getBillingCapability(second)).verifiedAt, now - 500);
+
+  await repository.deleteBillingCapability(first);
+  assert.equal(await repository.getBillingCapability(first), null);
+  assert.equal((await repository.getBillingCapability(second)).verifiedAt, now - 500);
+  await repository.deleteBillingCapability(first);
+  await assert.rejects(repository.saveBillingCapability(`${first}0`, capability), { code: "ER_DATA_TOO_LONG" });
+});
+
+contract("saving a billing capability never drops other identities, however long ago they were verified", async ({ repository, fixture }) => {
+  const now = Date.now();
+  const idle = fixture.capabilityIdentity("idle"), fresh = fixture.capabilityIdentity("fresh");
+  const capability = (verifiedAt) => ({ state: "supported", currency: "USD", window: "natural-day", verifiedAt, reason: "RUNTIME_FILTERS_VERIFIED" });
+  // 长期零消费的账号无法重新核验，它的旧核验结果要一直可读。
+  await repository.saveBillingCapability(idle, capability(now - 400 * DAY));
+  await repository.saveBillingCapability(fresh, capability(now));
+  assert.equal((await repository.getBillingCapability(idle)).verifiedAt, now - 400 * DAY);
+  assert.equal((await repository.getBillingCapability(fresh)).verifiedAt, now);
+});
+
 // ---- 返回值隔离 ----
 
 contract("returned values and saved inputs are independent copies", async ({ repository, fixture }) => {
@@ -1013,4 +1056,13 @@ contract("returned values and saved inputs are independent copies", async ({ rep
   const historyAgain = await repository.listConfirmedHistory(rule.id, { startMs: day, endMs: day + DAY });
   assert.equal(historyAgain.records[0].calculation.profitUsd, 4);
   assert.equal(historyAgain.records[0].window.startMs, day);
+
+  const identity = fixture.capabilityIdentity("copies");
+  const capability = { state: "supported", currency: "USD", window: "natural-day", verifiedAt: Date.now(), reason: "RUNTIME_FILTERS_VERIFIED" };
+  await repository.saveBillingCapability(identity, capability);
+  capability.state = "mutated input";
+  const read = await repository.getBillingCapability(identity);
+  assert.equal(read.state, "supported");
+  read.state = "mutated result";
+  assert.equal((await repository.getBillingCapability(identity)).state, "supported");
 });

@@ -210,4 +210,10 @@ export async function ensureSchema(pool) {
     recovered_at BIGINT NULL,
     PRIMARY KEY (rule_id, event_code)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // Sub2API 账单过滤能力核验结果；identity 是上游连接身份的 sha256，不含可还原的凭据。
+  await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_billing_capabilities (
+    identity CHAR(64) NOT NULL PRIMARY KEY,
+    capability JSON NOT NULL,
+    verified_at BIGINT NOT NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 }
