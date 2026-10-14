@@ -13,10 +13,11 @@ import {
   RECONCILIATION_BILLING_SOURCE,
   RECONCILIATION_CALCULATION_VERSION,
   reconciliationHealthMeta,
+  isLiveReconciliationPreset,
 } from "../lib/reconciliation-contract.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
-import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence, isLiveReconciliationPreset } from "../lib/reconciliation-snapshot.js";
+import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { describeConnectionFailure } from "../lib/connection-test.js";
 import { applyScopePolicy, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
@@ -282,7 +283,7 @@ function healthWithIssues(issues) {
 function persistenceFailedResult(rule, window) {
   const observedAt = Date.now();
   const channels = rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null }));
-  const issue = { code: "PERSISTENCE_FAILED", scope: "persistence", detail: "本轮对账结果未能保存，请稍后重试", observedAt };
+  const issue = { code: "PERSISTENCE_FAILED", scope: "persistence", detail: "本轮核算结果未能保存，请稍后重试", observedAt };
   return {
     rule, window, requestedWindow: window, lastSuccessfulWindow: null, currentSegment: null, segments: [], transitionSegments: [],
     upstream: { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: 1, observedAt, window },
@@ -312,7 +313,7 @@ function toErrorHealth(err, own = false) {
     return health("UPSTREAM_DATA_UNAVAILABLE", "上游日志统计接口不可用或返回无效数据");
   }
   return health(own ? "OWN_BILLING_UNAVAILABLE" : "UPSTREAM_DATA_UNAVAILABLE",
-    own ? "无法完整读取本站渠道账单统计" : "无法完整读取上游对账数据");
+    own ? "无法完整读取本站渠道账单统计" : "无法完整读取上游账单数据");
 }
 
 const CALCULATION_BLOCKERS = new Set([
@@ -1452,7 +1453,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const newer = inflight.get(inflightKey);
         if (newer && newer !== task) return newer;
         // 口径被连续改动时不再重跑：只让这条规则本轮待获取，不能让整个多规则查询失败。
-        if (attempt >= MAX_SCOPE_ATTEMPTS) return pendingResult(rule, window, "查询期间对账口径多次变化，下一轮刷新时重新获取");
+        if (attempt >= MAX_SCOPE_ATTEMPTS) return pendingResult(rule, window, "查询期间核算口径多次变化，下一轮刷新时重新获取");
         inflight.set(inflightKey, task);
         rule = await repository.getRule(ruleId);
         if (!rule) throw ruleNotFound();
@@ -1629,7 +1630,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           return save();
         }, billingSource);
       } catch {
-        const error = new Error("对账结果未能保存");
+        const error = new Error("核算结果未能保存");
         error.code = "PERSISTENCE_FAILED";
         throw error;
       }

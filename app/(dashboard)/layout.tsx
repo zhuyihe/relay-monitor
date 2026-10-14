@@ -138,7 +138,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const clearPage = useCallback(() => setPageState({}), []);
   const shellApi = useMemo(() => ({ setPage, clearPage, refreshing }), [setPage, clearPage, refreshing]);
 
-  // 刷新本页数据；没有注册刷新的页面（设置、告警中心、账单核算）不显示刷新按钮，
+  // 刷新本页数据；没有注册刷新的页面（设置、告警中心）不显示刷新按钮，
   // 避免在这些页面误触发"刷新全部上游"
   const onRefresh = async () => {
     if (refreshing || !page.onRefresh) return;
