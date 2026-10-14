@@ -570,6 +570,71 @@ test("U03 public历史关系保留，0active标历史，多active口径冲突不
   assert.equal(f.writes(), 0);
 });
 
+test("2a 上游账单按 Key 逐条列出核算关联：有效在前，停止的带停止时间，同 Key 或同一本站渠道的重复归属互相标出", async (t) => {
+  const f = await accountReadFixture(t);
+  const keyOf = (model, accountId, tokenId) => model.accounts.find((account) => account.identity.accountId === accountId).keys.find((item) => item.tokenId === tokenId);
+  let model = await f.rt.channelOnboarding.listAccounts();
+  const [active, history] = keyOf(model, "A", 9).associations;
+  assert.deepEqual(keyOf(model, "A", 9).associations.map((item) => item.ruleId), ["A-active", "A-history"]);
+  assert.deepEqual({ ...active, accountingStartMs: undefined }, { ruleId: "A-active", status: "active", upstreamStationId: "A-billing", ownStationId: "own",
+    timezone: "Asia/Shanghai", channels: [{ channelId: 1, name: "Channel 1" }], costCoverage: "unknown",
+    coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] }, scopeVersion: 3,
+    billingEffectiveFromMs: Date.parse("2026-10-09T16:00:00Z"), accountingStartMs: undefined, conflict: false, conflictRuleIds: [],
+    keyConflictRuleIds: [], channelConflictRuleIds: [], duplicateChannelIds: [], stoppedAt: null });
+  assert.equal(typeof active.accountingStartMs, "number");
+  assert.equal(history.status, "stopped"); assert.equal(history.stoppedAt, "2026-10-01T00:00:00Z"); assert.deepEqual(history.conflictRuleIds, []);
+  const stopped = keyOf(model, "A", 10).associations[0];
+  assert.equal(stopped.status, "stopped"); assert.equal(stopped.conflict, false);
+  assert.deepEqual(keyOf(model, "B", 9).associations.map((item) => [item.ruleId, item.conflict]), [["B-active", false]]);
+
+  // A-conflict 与 A-active 同一实际 Key（成本重复），又与 B-active 认领同一本站渠道 2（收入重复）；
+  // 另一个本站来源下的渠道 2 不算重复，已停止的关联既不报冲突也不被别人算进去。
+  f.state.rules.push(f.rule("A-conflict", f.a1, 9, [2], { updatedAt: "2026-10-09T06:00:00Z" }),
+    f.rule("A-other-own", f.a2, 13, [2], { ownSource: { ...f.state.rules[0].ownSource, namespaceKey: "other-own" } }));
+  f.state.rules.find((rule) => rule.id === "A-active").updatedAt = "2026-10-09T05:00:00Z";
+  model = await f.rt.channelOnboarding.listAccounts();
+  const conflicted = keyOf(model, "A", 9).associations;
+  assert.deepEqual(conflicted.map((item) => [item.ruleId, item.status, item.conflictRuleIds]),
+    [["A-conflict", "active", ["A-active", "B-active"]], ["A-active", "active", ["A-conflict"]], ["A-history", "stopped", []]]);
+  assert.ok(conflicted.filter((item) => item.status === "active").every((item) => item.conflict));
+  // 同 Key 只能停掉一条；渠道重复还可以编辑渠道移除重复的那几个
+  assert.deepEqual(conflicted.filter((item) => item.status === "active").map((item) => [item.ruleId, item.keyConflictRuleIds, item.channelConflictRuleIds, item.duplicateChannelIds]),
+    [["A-conflict", ["A-active"], ["B-active"], [2]], ["A-active", ["A-conflict"], [], []]]);
+  assert.deepEqual(keyOf(model, "B", 9).associations[0].conflictRuleIds, ["A-conflict"]);
+  assert.deepEqual(keyOf(model, "B", 9).associations[0].duplicateChannelIds, [2]);
+  assert.deepEqual(keyOf(model, "A", 13).associations[0].conflictRuleIds, []);
+  assert.deepEqual(keyOf(model, "A", 10).associations[0].conflictRuleIds, []);
+  assert.deepEqual(model.unmatchedAssociations, []);
+  assert.equal(f.writes(), 0);
+});
+
+test("2a 归不到已核验 Key 的有效关联单独列出（未落库实际 Key / 实际 Key 已变化 / 资源未核验 / 资源已缺失），并与账单核算同口径参与重复归属", async (t) => {
+  const f = await accountReadFixture(t);
+  const keyOf = (model, accountId, tokenId) => model.accounts.find((account) => account.identity.accountId === accountId).keys.find((item) => item.tokenId === tokenId);
+  // 未锚定本站来源、未落库实际 Key 的旧关联：按当前身份与 A-active 同一实际 Key，按当前本站来源与它同占渠道 1
+  f.state.rules.push(f.rule("A-unanchored", f.a2, 9, [1], { canonicalKey: null, ownSource: null }),
+    f.rule("A-key-changed", f.a2, 12, [3], { canonicalKey: canonicalBillingKey(f.b, f.b.verifiedIdentity, 12) }),
+    f.rule("U-unverified", f.unknown, 9, [2]),
+    f.rule("U-stopped", f.pure, 1, [3], { enabled: false }),
+    f.rule("Gone", { id: "deleted-station", type: "newapi", baseUrl: "https://same.test/" }, 14, [3], { ownSource: { ...f.state.rules[0].ownSource, namespaceKey: "other-own" } }));
+  const model = await f.rt.channelOnboarding.listAccounts();
+  assert.deepEqual(model.unmatchedAssociations.map((item) => [item.ruleId, item.reason, item.status, item.tokenId, item.tokenName]), [
+    ["A-key-changed", "key_changed", "active", 12, "Key 12"], ["A-unanchored", "unanchored", "active", 9, "Key 9"],
+    ["Gone", "missing_resource", "active", 14, "Key 14"], ["U-unverified", "unverified_resource", "active", 9, "Key 9"]]);
+  const unmatched = Object.fromEntries(model.unmatchedAssociations.map((item) => [item.ruleId, item]));
+  assert.deepEqual([unmatched["A-unanchored"].keyConflictRuleIds, unmatched["A-unanchored"].channelConflictRuleIds, unmatched["A-unanchored"].duplicateChannelIds],
+    [["A-active"], ["A-active"], [1]]);
+  // 未核验资源的成本归属待定，不算同 Key 重复；它占的渠道 2 与 B-active 重复
+  assert.deepEqual([unmatched["U-unverified"].keyConflictRuleIds, unmatched["U-unverified"].channelConflictRuleIds], [[], ["B-active"]]);
+  assert.deepEqual(unmatched["A-key-changed"].conflictRuleIds, []);
+  assert.deepEqual(unmatched.Gone.conflictRuleIds, []);
+  const active = keyOf(model, "A", 9).associations.find((item) => item.ruleId === "A-active");
+  assert.deepEqual([active.conflict, active.keyConflictRuleIds, active.channelConflictRuleIds, active.duplicateChannelIds], [true, ["A-unanchored"], ["A-unanchored"], [1]]);
+  assert.deepEqual(keyOf(model, "B", 9).associations[0].channelConflictRuleIds, ["U-unverified"]);
+  assert.ok(!model.accounts.some((account) => account.keys.some((key) => key.ruleIds.some((id) => ["A-unanchored", "A-key-changed"].includes(id)))));
+  assert.equal(f.writes(), 0);
+});
+
 test("U03 actual Repository全量入口保留archived/disabled关系；Store真实改PAT后旧身份作废，JWT自动续期不影响账号版本", async (t) => {
   const f = await accountReadFixture(t), statements = [];
   const pool = { query: async (sql) => {

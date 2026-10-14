@@ -259,6 +259,42 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       if (!accounts.has(accountKey)) accounts.set(accountKey, { accountKey, siteKey: hash([identity.provider, baseUrl]), identity, resources: [], keys: [], actions: [] });
       accounts.get(accountKey).resources.push(resource);
     }
+    // 与账单核算的重复归属判定同口径（reconciliation.js 的 duplicateSales 与 costOwnerFor）：收入按「本站来源 + 渠道」，
+    // 未锚定来源的旧关联按当前本站来源计；成本按这把 Key 当前的实际身份，未落库实际 Key 的旧关联也算，实际 Key 已变化的不算。
+    const stationById = new Map(stations.map((station) => [station.id, station]));
+    const currentKeyOf = (rule) => {
+      const station = stationById.get(rule.upstreamStationId), identity = storedIdentity(station);
+      return identity ? canonicalBillingKey(station, identity, rule.tokenId) : null;
+    };
+    const salesKey = (rule, channel) => JSON.stringify([rule.ownSource?.namespaceKey
+      || (source.ownSource && rule.ownStationId === source.ownSource.stationId ? source.ownSource.namespaceKey : `station:${rule.ownStationId}`),
+    Number(channel.channelId)]);
+    const salesOwners = new Map(), costOwners = new Map();
+    for (const rule of allRules.filter(active)) {
+      for (const channel of rule.channels || []) salesOwners.set(salesKey(rule, channel), [...(salesOwners.get(salesKey(rule, channel)) || []), rule.id]);
+      const key = currentKeyOf(rule);
+      if (key && (!rule.canonicalKey || rule.canonicalKey === key)) costOwners.set(key, [...(costOwners.get(key) || []), rule.id]);
+    }
+    function associationOf(item) {
+      const live = active(item), key = live ? currentKeyOf(item) : null;
+      const schedule = (() => { try { return reconciliationBillingSchedule(item); } catch { return null; } })();
+      const others = (ids) => [...new Set(ids)].filter((id) => id !== item.id).sort();
+      // 同一实际 Key 的其他有效关联（成本重复）与认领同一渠道的其他有效关联（收入重复）
+      const keyConflictRuleIds = key && (!item.canonicalKey || item.canonicalKey === key) ? others(costOwners.get(key) || []) : [];
+      const duplicated = live ? (item.channels || []).filter((channel) => others(salesOwners.get(salesKey(item, channel)) || []).length) : [];
+      const channelConflictRuleIds = others(duplicated.flatMap((channel) => salesOwners.get(salesKey(item, channel))));
+      const conflictRuleIds = others([...keyConflictRuleIds, ...channelConflictRuleIds]);
+      return { ruleId: item.id, status: live ? "active" : "stopped", upstreamStationId: item.upstreamStationId,
+        ownStationId: item.ownStationId, timezone: item.timezone,
+        channels: (item.channels || []).map((channel) => ({ channelId: Number(channel.channelId), name: channel.name || channel.channelName || `渠道 ${channel.channelId}` }))
+          .sort((a, b) => a.channelId - b.channelId),
+        costCoverage: item.costCoverage === "complete" ? "complete" : "unknown",
+        coverageDeclaration: normalizeRuleSourceBinding({ version: 2, coverageDeclaration: item.coverageDeclaration }, item.costCoverage).coverageDeclaration,
+        scopeVersion: item.scopeVersion || 1, billingEffectiveFromMs: Number.isFinite(item.billingEffectiveFrom) ? item.billingEffectiveFrom : null,
+        accountingStartMs: schedule?.accountingStartMs ?? null, conflict: conflictRuleIds.length > 0, conflictRuleIds,
+        keyConflictRuleIds, channelConflictRuleIds, duplicateChannelIds: channelIds(duplicated),
+        stoppedAt: live ? null : item.archivedAt || item.updatedAt || null };
+    }
     for (const account of accounts.values()) {
       const ids = new Set(account.resources.map((resource) => resource.id)), keyRules = new Map();
       for (const rule of allRules.filter((rule) => ids.has(rule.upstreamStationId))) {
@@ -289,8 +325,11 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         const effective = Number.isFinite(rule.billingEffectiveFrom) ? rule.billingEffectiveFrom : null;
         let firstQueryableAtMs = null;
         if (effective != null) { try { firstQueryableAtMs = reconciliationBillingSchedule(rule).firstQueryableAtMs; } catch { /* Unknown legacy timezone has no trustworthy boundary. */ } }
+        // 核算关联逐条列出（有效的在前，再按最近修改），上游账单在这一层编辑渠道、停止核算
+        const associations = [...related].sort((a, b) => Number(active(b)) - Number(active(a))
+          || (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0) || a.id.localeCompare(b.id)).map(associationOf);
         account.keys.push({ canonicalKey, tokenId: rule.tokenId, tokenName: rule.tokenName || `Key ${rule.tokenId}`,
-          ruleIds: related.map((item) => item.id).sort(), activeRuleIds: current.map((item) => item.id).sort(), scopeAmbiguous: ambiguous,
+          ruleIds: related.map((item) => item.id).sort(), activeRuleIds: current.map((item) => item.id).sort(), scopeAmbiguous: ambiguous, associations,
           channels: [...members.values()].sort((a, b) => a.ownStationId.localeCompare(b.ownStationId) || a.channelId - b.channelId),
           costCoverage: !ambiguous && rule.costCoverage === "complete" ? "complete" : "unknown", coverageDeclaration: ambiguous ? { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } : coverage,
           scopeVersion: ambiguous ? null : rule.scopeVersion || 1, billingEffectiveFromMs: ambiguous ? null : effective,
@@ -322,13 +361,20 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         reconciliation: { status: related.some((rule) => active(rule) && inspect(rule).status !== "confirmed") ? "review_required"
           : related.some(active) ? "configured" : "unconfigured", ruleIds: related.map((rule) => rule.id).sort() } };
     });
+    // 归不到已核验 Key 下的有效关联仍在核算：单独列出，保留停止入口
+    const placed = new Set([...accounts.values()].flatMap((account) => account.keys.flatMap((key) => key.ruleIds)));
+    const unmatchedAssociations = allRules.filter((rule) => active(rule) && !placed.has(rule.id)).map((rule) => {
+      const station = stationById.get(rule.upstreamStationId);
+      const reason = !station ? "missing_resource" : !storedIdentity(station) ? "unverified_resource" : rule.canonicalKey ? "key_changed" : "unanchored";
+      return { ...associationOf(rule), reason, tokenId: rule.tokenId, tokenName: rule.tokenName || `Key ${rule.tokenId}` };
+    }).sort((a, b) => a.ruleId.localeCompare(b.ruleId));
     const unlinked = channels.filter((channel) => !channel.missing && channel.reconciliation.status === "unconfigured").map((channel) => channel.id);
     if (source.ownSource && unlinked.length) actions.push(action("connect_channels", { ownStationId: source.ownSource.stationId, channelIds: unlinked }));
     if (own() && (source.stale || channels.some((channel) => channel.reconciliation.status === "review_required"))) {
       actions.push(action("review_source", { ownStationId: own().id, channelIds: channels.map((channel) => channel.id) }));
     }
     return { accounts: [...accounts.values()].sort((a, b) => a.accountKey.localeCompare(b.accountKey)),
-      unverifiedResources: unverifiedResources.sort((a, b) => a.id.localeCompare(b.id)), channels,
+      unverifiedResources: unverifiedResources.sort((a, b) => a.id.localeCompare(b.id)), unmatchedAssociations, channels,
       actions: [...new Map(actions.map((item) => [item.id, item])).values()], generatedAt: new Date(now()).toISOString() };
   }
 
@@ -1058,7 +1104,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   async function probeRuleEdit(id, input) {
     const existing = (await rules()).find((rule) => rule.id === id && !rule.archivedAt);
-    if (!existing) throw previewFailure("RULE_NOT_FOUND", "规则不存在或已归档");
+    if (!existing) throw previewFailure("RULE_NOT_FOUND", "核算关联不存在或已归档");
     const source = getSourceCatalogue(), sourceConnection = structuredClone(own());
     const upstream = structuredClone(rt.store.get(existing.upstreamStationId));
     const versions = Object.fromEntries([sourceConnection, upstream].filter(Boolean).map((station) => [station.id, stationBusinessVersion(station)]));
@@ -1072,7 +1118,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       if (!latest || originalRule(existing) !== originalRule(financial.existingRule) || originalRule(existing) !== originalRule(latest)
           || getSourceCatalogue().stale || sourceVersion() !== source.sourceVersion
           || Object.entries(versions).some(([stationId, version]) => stationBusinessVersion(rt.store.get(stationId)) !== version)) {
-        throw previewFailure("PREVIEW_BASIS_CHANGED", "规则、来源或授权在验证期间变化，请重新预览");
+        throw previewFailure("PREVIEW_BASIS_CHANGED", "核算关联、来源或授权在验证期间变化，请重新预览");
       }
       const groupId = "rule-edit";
       const record = registerPreview([{ groupId, requestedGroupIds: [groupId], selectionIds: [], roles: [],
@@ -1086,7 +1132,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   }
 
   function currentGroupContext(group, guard, latestRule) {
-    if (group.status === "ready" && latestRule?.enabled === false) throw previewFailure("PREVIEW_BASIS_CHANGED", "原财务规则已停用，请重新预览");
+    if (group.status === "ready" && latestRule?.enabled === false) throw previewFailure("PREVIEW_BASIS_CHANGED", "原核算关联已停止，请重新预览");
     const source = getSourceCatalogue(), ids = [...new Set([...(latestRule?.channels || []).map((channel) => Number(channel.channelId)),
       ...group.channels.map((channel) => channel.channelId)])].sort((a, b) => a - b);
     const channelRevisions = {};
@@ -1143,7 +1189,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const sourceConnection = structuredClone(own());
     expirePreviews();
     const original = input.previewId && previews.get(input.previewId);
-    if (original && !original.retryInput) throw previewFailure("PREVIEW_REQUIRED", "规则编辑预览不能用于批量接入，请重新预览");
+    if (original && !original.retryInput) throw previewFailure("PREVIEW_REQUIRED", "核算关联编辑预览不能用于批量接入，请重新预览");
     if (financialRequested && !original && !input.previewId) throw previewFailure("PREVIEW_REQUIRED", "财务接入需要当前服务端预览，请先验证后确认");
     const state = await batchProbeState(input, { register: !original && !financialRequested });
     const record = original || state.record;
@@ -1424,7 +1470,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
                 && rule.sourceBinding?.[channel.channelId] === channel.channelRevision));
             if (matches.length === 1 && sourceValid) {
               const rule = matches[0], actual = rt.store.get(rule.upstreamStationId), actualIdentity = actual && await verifySaved(actual);
-              if (!actualIdentity || !sameIdentity(actualIdentity.identity, owner.identity)) throw new Error("规则原授权身份待核验");
+              if (!actualIdentity || !sameIdentity(actualIdentity.identity, owner.identity)) throw new Error("核算关联的原授权身份待核验");
               result.saved.ruleId = rule.id; result.saved.scopeVersion = rule.scopeVersion;
               result.saved.billingEffectiveFromMs = rule.billingEffectiveFrom;
               result.reconciliation = { status: "configured", ruleId: rule.id, scopeVersion: rule.scopeVersion, billingEffectiveFromMs: rule.billingEffectiveFrom };

@@ -331,10 +331,10 @@ contract("updateRule keeps surviving channel rows with their status, replaces th
   assert.equal(renamed.scopeVersion, 3);
   assert.equal(renamed.billingEffectiveFrom, readded.billingEffectiveFrom);
 
-  await assert.rejects(repository.updateRule(`rr_missing${fixture.tag}`, { tokenName: "x" }), /对账规则不存在或已归档/);
+  await assert.rejects(repository.updateRule(`rr_missing${fixture.tag}`, { tokenName: "x" }), /核算关联不存在或已归档/);
   const archived = await fixture.createRule({ tokenId: fixture.token(5), channels: [{ channelId: fixture.channel(5), name: "Five" }] });
   await repository.archiveRule(archived.id);
-  await assert.rejects(repository.updateRule(archived.id, { tokenName: "x" }), /对账规则不存在或已归档/);
+  await assert.rejects(repository.updateRule(archived.id, { tokenName: "x" }), /核算关联不存在或已归档/);
 });
 
 contract("updateRule rolls back the rule and the deleted channel set on a duplicate channel key", async ({ repository, fixture }) => {
@@ -521,9 +521,9 @@ contract("observeSource backfills, splits on group or ratio change and records t
   assert.equal(stored.tokenName, "Free token");
   assert.deepEqual(await repository.listSegments(rule.id), unknownRatio.segments);
 
-  await assert.rejects(repository.observeSource(`rr_missing${fixture.tag}`, { groups, group: "vip", ratio: 2, tokenName: "x", detectedAt: t5 }), /对账规则不存在或已停止/);
+  await assert.rejects(repository.observeSource(`rr_missing${fixture.tag}`, { groups, group: "vip", ratio: 2, tokenName: "x", detectedAt: t5 }), /核算关联不存在或已停止/);
   await repository.archiveRule(rule.id);
-  await assert.rejects(repository.observeSource(rule.id, { groups, group: "vip", ratio: 2, tokenName: "x", detectedAt: t5 }), /对账规则不存在或已停止/);
+  await assert.rejects(repository.observeSource(rule.id, { groups, group: "vip", ratio: 2, tokenName: "x", detectedAt: t5 }), /核算关联不存在或已停止/);
 });
 
 contract("reconcileCurrentSegment backfills and splits segments without touching the rule row", async ({ repository, fixture }) => {
@@ -562,7 +562,7 @@ contract("reconcileCurrentSegment backfills and splits segments without touching
   assert.deepEqual(ratioChange.currentSegment && [ratioChange.currentSegment.group, ratioChange.currentSegment.ratio, ratioChange.currentSegment.effectiveFrom], ["pro", 5, t4]);
   assert.deepEqual((await repository.transitionSegment(rule.id, { group: "pro", ratio: 5, detectedAt: t4 + HOUR })), ratioChange.segments);
 
-  await assert.rejects(repository.reconcileCurrentSegment(`rr_missing${fixture.tag}`, { group: "vip", ratio: 1, detectedAt: t4 }), /对账规则缺少当前分段/);
+  await assert.rejects(repository.reconcileCurrentSegment(`rr_missing${fixture.tag}`, { group: "vip", ratio: 1, detectedAt: t4 }), /核算关联缺少当前分段/);
 });
 
 contract("a transition detected before the current segment started closes it at zero length, ordered before the open segment", async ({ repository, fixture }) => {
@@ -629,9 +629,9 @@ contract("updateChannelStates records status, observation time and the time the 
   const listed = (await fixture.mine()).find((item) => item.id === rule.id);
   assert.deepEqual(listed.channels, (await repository.getRule(rule.id)).channels);
 
-  await assert.rejects(repository.updateChannelStates(`rr_missing${fixture.tag}`, [{ channelId: c1, state: "enabled" }], t3), /对账规则不存在或已停止/);
+  await assert.rejects(repository.updateChannelStates(`rr_missing${fixture.tag}`, [{ channelId: c1, state: "enabled" }], t3), /核算关联不存在或已停止/);
   await repository.archiveRule(rule.id);
-  await assert.rejects(repository.updateChannelStates(rule.id, [{ channelId: c1, state: "enabled" }], t3), /对账规则不存在或已停止/);
+  await assert.rejects(repository.updateChannelStates(rule.id, [{ channelId: c1, state: "enabled" }], t3), /核算关联不存在或已停止/);
 });
 
 contract("archiveRule archives once and releases the token and channel keys", async ({ repository, fixture }) => {

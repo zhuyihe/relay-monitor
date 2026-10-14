@@ -121,8 +121,9 @@ export function readWorkflowDestination(search: string, page: "stations" | "reco
   const params = new URLSearchParams(search), action = params.get("action") || "inspect";
   if (!params.has("action") && !params.has("stationId") && !params.has("accountKey")) return null;
   const result: WorkflowDestination = { action, ruleId: params.get("ruleId"), stationId: params.get("stationId"), accountKey: params.get("accountKey"), ownStationId: params.get("ownStationId"), channelIds: [], window: null, error: "" };
-  const allowed = page === "stations" ? ["connect", "verify", "authorization", "verify-billing", "coverage", "source", "inspect"] : ["retry", "conflict", "scope"];
+  const allowed = page === "stations" ? ["connect", "verify", "authorization", "verify-billing", "coverage", "source", "inspect", "scope", "conflict"] : ["retry", "conflict", "scope"];
   if (!allowed.includes(action)) result.error = "无法识别此处理入口，请刷新后从当前事项重新打开。";
+  else if (page === "stations" && ["scope", "conflict"].includes(action) && !result.ruleId) result.error = "缺少要处理的核算关联，请从当前事项重新打开。";
   const channelIds = params.get("channelIds");
   if (channelIds != null) {
     const values = channelIds.split(",");
@@ -144,14 +145,29 @@ export type PublicCatalogueChannel = {
   monitor: { status: "linked" | "unlinked" | "review_required"; stationIds: string[] };
   reconciliation: { status: "configured" | "unconfigured" | "review_required"; ruleIds: string[] };
 };
+// 一条核算关联：一把 Key 在某个本站下归属的渠道范围（停止后保留为历史）
+export type AccountAssociation = {
+  ruleId: string; status: "active" | "stopped"; upstreamStationId: string; ownStationId: string; timezone: string;
+  channels: { channelId: number; name: string }[]; costCoverage: string; coverageDeclaration: CoverageDeclaration;
+  scopeVersion: number; billingEffectiveFromMs: number | null; accountingStartMs: number | null;
+  // 有效关联之间的重复归属：同一实际 Key 或同一渠道被多条有效关联认领
+  conflict: boolean; conflictRuleIds: string[]; stoppedAt: string | null;
+  // 拆开的重复归属：同一实际 Key 的（只能停掉一条）、同占渠道的（也可编辑渠道移除 duplicateChannelIds）
+  keyConflictRuleIds?: string[]; channelConflictRuleIds?: string[]; duplicateChannelIds?: number[];
+};
+// 归不到已核验 Key 下、但仍在核算的有效关联
+export type UnmatchedAssociation = AccountAssociation & {
+  reason: "unverified_resource" | "unanchored" | "key_changed" | "missing_resource"; tokenId: number; tokenName: string;
+};
 export type AccountKeyScope = {
   canonicalKey: string; tokenId: number; tokenName: string; ruleIds: string[]; activeRuleIds: string[]; scopeAmbiguous: boolean;
+  associations: AccountAssociation[];
   channels: { ownSource: OwnSource | null; ownStationId: string; channelId: number; name: string }[];
   costCoverage: string; coverageDeclaration: CoverageDeclaration; scopeVersion: number | null;
   billingEffectiveFromMs: number | null; firstQueryableAtMs: number | null;
 };
 export type AccountRecord = { accountKey: string; siteKey: string; identity: AccountIdentity; resources: PublicResource[]; keys: AccountKeyScope[]; actions: WorkflowAction[] };
-export type AccountReadModel = { accounts: AccountRecord[]; unverifiedResources: PublicResource[]; channels: PublicCatalogueChannel[]; actions: WorkflowAction[]; generatedAt: string };
+export type AccountReadModel = { accounts: AccountRecord[]; unverifiedResources: PublicResource[]; unmatchedAssociations?: UnmatchedAssociation[]; channels: PublicCatalogueChannel[]; actions: WorkflowAction[]; generatedAt: string };
 export type AccountAuthorizationRecoveryIntent = { requestId: string; targetStationIds: string[] };
 export type AccountAuthorizationInput = AccountAuthorizationRecoveryIntent & { authorization?: { type: "newapi" | "sub2api" | "sub2api-password"; baseUrl: string; accessToken?: string; userId?: string; email?: string; password?: string }; reuseSavedAuthorization?: boolean; previewId?: string };
 export type AccountAuthorizationImpact = { monitorStationIds: string[]; billingRuleIds: string[]; channels: { ownStationId: string; channelId: number; name: string }[] };

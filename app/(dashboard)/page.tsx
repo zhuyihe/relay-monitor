@@ -96,7 +96,7 @@ export default function OverviewPage() {
   const [moneyAt, setMoneyAt] = useState<number | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [trendStation, setTrendStation] = useState<any>(null);
-  // 账号关系与账单核算产生的待办：与侧栏计数、上游资源页共用一份
+  // 上游账单与账单核算产生的待办：与侧栏计数、上游资源页共用一份
   const { actions: workflowActions, error: workflowError, loading: workflowLoading, reload: reloadWorkflowActions } = useWorkflowActions();
   const rangeRef = useRef(range);
   rangeRef.current = range;

@@ -796,15 +796,6 @@ textarea {
     display: none;
   }
 
-  .reconciliation-primary-action {
-    min-width: 44px;
-    min-height: 44px;
-  }
-
-  .reconciliation-primary-action span:not(.anticon) {
-    display: none;
-  }
-
   .reconciliation-controls {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
