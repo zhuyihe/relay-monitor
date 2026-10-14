@@ -158,6 +158,7 @@ test("快照读写共用同一逻辑窗口身份", () => {
   assert.equal(reconciliationSnapshotIdentity(sevenDay, scope), "7d:1000:Asia/Shanghai:same-scope");
   assert.equal(reconciliationSnapshotIdentity({ ...sevenDay, endMs: 3000 }, scope), "7d:1000:Asia/Shanghai:same-scope");
   assert.equal(reconciliationSnapshotIdentity({ ...sevenDay, preset: "custom" }, scope), "custom:1000:2000:Asia/Shanghai:same-scope");
+  assert.equal(reconciliationSnapshotIdentity({ ...sevenDay, preset: "month", endMs: 4000 }, scope), "month:1000:Asia/Shanghai:same-scope");
 });
 
 test("今天的较早慢查询不能复用或覆盖较晚查询的缓存", async () => {
@@ -606,7 +607,7 @@ test("默认最近已结束日按规则时区切零点，today显式保留当前
 
 test("预设窗口都不会结束在当前时刻之后，自定义窗口超过当前时间会被拒绝", () => {
   const now = Date.parse("2026-09-20T04:26:08.000Z");
-  for (const preset of ["today", "yesterday", "7d"]) {
+  for (const preset of ["today", "yesterday", "7d", "month"]) {
     assert.ok(resolveReconciliationWindow({ preset, timezone: "Asia/Shanghai" }, now).endMs <= now, preset);
   }
   assert.equal(resolveReconciliationWindow({ preset: "today", timezone: "Asia/Shanghai" }, now).endMs, now);
@@ -639,6 +640,23 @@ test("DST 切换日按时区日历零点计算昨天与近 7 天", () => {
   assert.equal(fallYesterday.startMs, Date.parse("2026-10-31T04:00:00.000Z"));
   assert.equal(fallYesterday.endMs, Date.parse("2026-11-01T04:00:00.000Z"));
   assert.equal(resolveReconciliationWindow({ preset: "7d", timezone }, fallNow).startMs, Date.parse("2026-10-26T04:00:00.000Z"));
+});
+
+test("本月从时区当地 1 日零点到当前时刻，跨夏令时多一小时也不受 31 天上限限制", () => {
+  const now = Date.parse("2026-09-20T04:26:08.000Z"); // 上海 9 月 20 日 12:26:08
+  assert.deepEqual(resolveReconciliationWindow({ preset: "month", timezone: "Asia/Shanghai" }, now),
+    { preset: "month", timezone: "Asia/Shanghai", startMs: Date.parse("2026-08-31T16:00:00.000Z"), endMs: now });
+  // 当地 1 日凌晨，UTC 还在上个月
+  const firstDay = Date.parse("2026-09-30T17:00:00.000Z"); // 上海 10 月 1 日 01:00
+  assert.equal(resolveReconciliationWindow({ preset: "month", timezone: "Asia/Shanghai" }, firstDay).startMs, Date.parse("2026-09-30T16:00:00.000Z"));
+  // 柏林 10 月有 31 天又 1 小时（10 月 25 日退出夏令时），月末最后一小时窗口超过 31 天
+  const lastHour = Date.parse("2026-10-31T22:30:00.000Z"); // 柏林 10 月 31 日 23:30 CET
+  const month = resolveReconciliationWindow({ preset: "month", timezone: "Europe/Berlin" }, lastHour);
+  assert.equal(month.startMs, Date.parse("2026-09-30T22:00:00.000Z"));
+  assert.equal(month.endMs, lastHour);
+  assert.ok(month.endMs - month.startMs > 31 * 86400000);
+  assert.throws(() => resolveReconciliationWindow({ preset: "custom", timezone: "Europe/Berlin", startMs: month.startMs, endMs: month.endMs }, lastHour), /不能超过 31 天/);
+  assert.equal(resolveReconciliationWindow({ preset: "bogus", timezone: "Asia/Shanghai" }, now).preset, "yesterday");
 });
 
 test("编辑规则不能替换上游账号或 Key，且拒绝发生在元数据读取之前", async () => {
@@ -2086,7 +2104,7 @@ test("今天和近 7 天中间有不满一秒的已结束分段时不能跳过�
   Date.now = () => switchedAt + 3600000;
   t.after(() => { Date.now = realNow; });
 
-  for (const preset of ["today", "7d"]) {
+  for (const preset of ["today", "7d", "month"]) {
     state.statCalls.length = 0;
     const { results } = await module.queryRules({ ruleIds: [rule.id], preset, timezone: "Asia/Shanghai" }, { force: true });
     assert.equal(results[0].health.code, "PENDING", `${preset} 有未满一秒的分段时整窗仍待获取`);
@@ -2094,6 +2112,25 @@ test("今天和近 7 天中间有不满一秒的已结束分段时不能跳过�
     assert.deepEqual(results[0].segments.map((segment) => [segment.id, segment.health.code]), [["s1", "READY"], ["s2", "PENDING"], ["s3", "READY"]]);
     assert.equal(state.statCalls.length, 4, `${preset} 两侧只统计 s1 和 s3`);
   }
+});
+
+test("本月截至取数时刻：给实时毛利、只存 observation，同起点较晚截止的查询能读回较早记录", async (t) => {
+  const { rule, repository, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }] });
+  const realNow = Date.now;
+  const now = Date.parse("2026-09-20T04:26:08.000Z");
+  Date.now = () => now;
+  t.after(() => { Date.now = realNow; });
+
+  const { results } = await module.queryRules({ ruleIds: [rule.id], preset: "month" }, { force: true });
+  assert.deepEqual(results[0].window, { preset: "month", timezone: "Asia/Shanghai", startMs: Date.parse("2026-08-31T16:00:00.000Z"), endMs: now });
+  assert.equal(results[0].health.code, "READY");
+  assert.equal(results[0].calculation.profitUsd, 1.5);
+  assert.equal(results[0].settlement, "live");
+  const saved = repository.tables.snapshots.map((row) => [row.window_kind, JSON.parse(row.source).recordType]);
+  assert.deepEqual(saved, [["month", "observation"]], "本月还没结束，不写结账记录");
+  const fingerprint = JSON.parse(repository.tables.snapshots[0].source).scopeFingerprint;
+  const later = await repository.latestObservation(rule.id, { ...results[0].window, endMs: now + 60000 }, fingerprint);
+  assert.equal(later?.result.calculation.profitUsd, 1.5);
 });
 
 test("两侧都已应答的上游空消费异常不能被旧的确认利润掩盖，数据源不可用时才回退", async (t) => {
@@ -4470,7 +4507,7 @@ test("U05实际Shanghai/UTC按绝对窗口分组；同绝对已核验标签可�
   for (const row of f.rows) Object.assign(row, { billing_policy: "legacy-v3", source_binding: { ...row.source_binding, channels: {} } });
   const custom = await f.module.queryRules({ preset: "custom", startMs: 1000000, endMs: 1060000 }, { force: true });
   assert.equal(custom.results[0].calculation.profitUsd, 1.5, " untouched v3同epoch短区间仍保留原账语义");
-  assert.ok(custom.results.every((row) => row.settlement === "live"), "非完整日 custom 窗口不是已结算账单");
+  assert.ok(custom.results.every((row) => row.settlement === "ended"), "早已结束的非完整日 custom 窗口是已结束，不是已结账");
   assert.ok(custom.commonSummary); assert.equal(custom.windowGroups[0].totals.confirmedProfitUsd, 4.5);
   assert.equal(confirmedCount(), confirmedBefore, "today/custom 短窗只保存 observation，不写确认账单");
 });

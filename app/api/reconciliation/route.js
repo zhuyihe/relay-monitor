@@ -1,5 +1,5 @@
 import { withAuth, json } from "../../../lib/api.js";
-import { createReconciliationModule } from "../../../server/reconciliation.js";
+import { createReconciliationModule, RECONCILIATION_PRESETS } from "../../../server/reconciliation.js";
 
 function moduleFor(rt) {
   return rt.reconciliation ||= createReconciliationModule(rt);
@@ -10,7 +10,7 @@ function moduleFor(rt) {
 export const GET = withAuth(async (request, rt) => {
   const sp = new URL(request.url).searchParams;
   const ruleIds = String(sp.get("ruleIds") || "").split(",").map((id) => id.trim()).filter(Boolean);
-  const preset = ["today", "yesterday", "7d", "custom"].includes(sp.get("preset")) ? sp.get("preset") : "yesterday";
+  const preset = RECONCILIATION_PRESETS.includes(sp.get("preset")) ? sp.get("preset") : "yesterday";
   const payload = await moduleFor(rt).queryRules({
     ruleIds: ruleIds.length ? ruleIds : null,
     preset,
