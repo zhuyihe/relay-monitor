@@ -1,23 +1,23 @@
 // 每日日报：昨日「我的站点」经营汇总（v1 server.js 日报段的平移）。
 // buildReport/sendReport 供 /api/report/preview、/api/report/send 端点调用；
 // startReportScheduler 由 lib/runtime.js 在初始化时启动，定时器挂在 rt 字段上。
-import { queryOwnData, dateStrInTz, parseDateLabel } from "../lib/providers.js";
+import { queryOwnData } from "../lib/providers.js";
 import { forecastDaily } from "../lib/forecast.js";
 import { BRAND } from "../lib/brand.js";
 import { broadcast } from "../lib/notify.js";
 import { fmtEta } from "../lib/alerts.js";
 import { getOwnUsers, computeResold, computeProfit } from "./own-helpers.js";
-import { businessTimeZone, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
+import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
 
 // 日报时区就是业务时区（BUSINESS_TIME_ZONE，兼容旧的 REPORT_TIME_ZONE），与利润页、日汇总同一套日界线
 export const REPORT_TIME_ZONE = businessTimeZone();
 
 // 日报日界线必须与进程/容器时区无关，否则 UTC 部署会在北京时间 08:00 才切换“昨天”。
 export function reportDayWindow(nowMs = Date.now(), tz = REPORT_TIME_ZONE) {
-  const todayLabel = dateStrInTz(nowMs, tz);
-  const dayEnd = parseDateLabel(todayLabel, tz);
-  const dayStart = parseDateLabel(shiftDayLabel(todayLabel, -1), tz);
-  const wideStart = parseDateLabel(shiftDayLabel(todayLabel, -34), tz);
+  const todayLabel = dayKeyInTz(nowMs, tz);
+  const dayEnd = dayStartInTz(todayLabel, tz);
+  const dayStart = dayStartInTz(shiftDayLabel(todayLabel, -1), tz);
+  const wideStart = dayStartInTz(shiftDayLabel(todayLabel, -34), tz);
   return { tz, todayLabel, dayStart, dayEnd, wideStart };
 }
 
@@ -29,7 +29,7 @@ export function reportClock(nowMs = Date.now(), tz = REPORT_TIME_ZONE) {
     minute: "2-digit",
   }).formatToParts(new Date(nowMs));
   const value = (type) => parts.find((p) => p.type === type)?.value || "00";
-  return { today: dateStrInTz(nowMs, tz), hhmm: `${value("hour")}:${value("minute")}` };
+  return { today: dayKeyInTz(nowMs, tz), hhmm: `${value("hour")}:${value("minute")}` };
 }
 
 const rptCny = (v) => "¥" + Number(v ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -94,12 +94,12 @@ export async function buildReport(rt) {
   const dmap = new Map();
   for (const r of modelRows) {
     if (r.t >= dayEnd) continue;
-    const label = dateStrInTz(r.t, tz);
+    const label = dayKeyInTz(r.t, tz);
     dmap.set(label, (dmap.get(label) || 0) + r.cost);
   }
   const daily = [];
   if (dmap.size) {
-    const lastLabel = dateStrInTz(dayStart, tz);
+    const lastLabel = dayKeyInTz(dayStart, tz);
     for (let label = [...dmap.keys()].sort()[0]; label <= lastLabel; label = shiftDayLabel(label, 1)) {
       daily.push({ t: dayStartInTz(label, tz), cost: dmap.get(label) || 0 });
     }
@@ -125,7 +125,7 @@ export async function buildReport(rt) {
     .filter((u) => u.role < 10)
     .reduce((a, u) => a + u.quotaUsd, 0) * ownRate;
 
-  const dateLabel = dateStrInTz(dayStart, tz);
+  const dateLabel = dayKeyInTz(dayStart, tz);
   const dow = "日一二三四五六"[new Date(`${dateLabel}T00:00:00Z`).getUTCDay()];
   const L = [];
   L.push(`【${BRAND.name}日报】${own.name} · ${dateLabel}（周${dow}）`);
@@ -214,7 +214,7 @@ function buildReportHtml(rt, d) {
       <div title="${esc(money(x.cost * d.ownRate))}" style="height:${h}px;background:${last ? C.blue : C.blueSoft};border-radius:3px 3px 0 0"></div>
     </td>`;
   }).join("");
-  const fmtMD = (t) => { const [, m, dd] = dateStrInTz(t, d.tz).split("-").map(Number); return `${m}/${dd}`; };
+  const fmtMD = (t) => { const [, m, dd] = dayKeyInTz(t, d.tz).split("-").map(Number); return `${m}/${dd}`; };
   const trend = days.length ? `
     <div style="background:#fff;border:1px solid ${C.line};border-radius:10px;padding:14px">
       <table width="100%" cellpadding="0" cellspacing="0" style="height:76px"><tr>${trendCols}</tr></table>

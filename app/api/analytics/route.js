@@ -169,16 +169,17 @@ export const GET = withAuth(async (request, rt) => {
   }
 
   // 固定成本日摊销：与「我的站点」同一算法，按生效区间与当天的重叠毫秒摊；今天只摊到现在。
+  // 逐日值保留四位、合计用未舍入值累加，站点合计才与「我的站点」整段摊销一致（不会每天舍入丢几分钱）。
   const fixedDaily = [];
   const fixedTotal = new Map();
   for (const station of stations) {
     const purchases = purchasesOf(station);
     if (!purchases.length) continue;
     for (const { date, startMs: dayStart, endMs: dayEnd } of dayList) {
-      const { cny } = amortizeFixedCost(purchases, { startMs: dayStart, endMs: Math.min(dayEnd, nowMs), tz });
-      if (cny > 0) {
-        fixedDaily.push({ date, stationId: station.id, cny: r2(cny) });
-        fixedTotal.set(station.id, (fixedTotal.get(station.id) || 0) + cny);
+      const { exact } = amortizeFixedCost(purchases, { startMs: dayStart, endMs: Math.min(dayEnd, nowMs), tz });
+      if (exact > 0) {
+        fixedDaily.push({ date, stationId: station.id, cny: r4(exact) });
+        fixedTotal.set(station.id, (fixedTotal.get(station.id) || 0) + exact);
       }
     }
   }

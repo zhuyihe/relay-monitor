@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../db/store.js";
-import { startReportScheduler } from "./report.js";
+import { reportDayWindow, startReportScheduler } from "./report.js";
 
 const START = Date.parse("2026-10-08T01:00:00Z"); // 北京时间 09:00
 
@@ -228,4 +228,19 @@ test("退避进度写库也失败时，从最后一次失败完成时保留运�
   t.mock.timers.tick(1);
   await h.tick();
   assert.deepEqual(h.deliveries, ["a"]);
+});
+
+test("日报的「昨天」按业务时区的日历天切：与进程时区无关，夏令时切换日是 25 小时", () => {
+  // 北京时间 10-14 08:30：昨天 = 10-13 整天
+  const sh = reportDayWindow(Date.parse("2026-10-14T00:30:00Z"), "Asia/Shanghai");
+  assert.equal(sh.todayLabel, "2026-10-14");
+  assert.equal(sh.dayStart, Date.parse("2026-10-12T16:00:00Z"));
+  assert.equal(sh.dayEnd, Date.parse("2026-10-13T16:00:00Z"));
+  assert.equal(sh.wideStart, Date.parse("2026-09-09T16:00:00Z"));
+  // 纽约 2026-11-01 夏令时结束，这一天有 25 小时
+  const ny = reportDayWindow(Date.parse("2026-11-02T17:00:00Z"), "America/New_York");
+  assert.equal(ny.todayLabel, "2026-11-02");
+  assert.equal(ny.dayStart, Date.parse("2026-11-01T04:00:00Z"));
+  assert.equal(ny.dayEnd, Date.parse("2026-11-02T05:00:00Z"));
+  assert.equal(ny.dayEnd - ny.dayStart, 25 * 3600000);
 });

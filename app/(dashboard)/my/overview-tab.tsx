@@ -174,6 +174,7 @@ function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: 
       rows={dv.rows}
       showRev={dv.hasIncome}
       asOf={asOf}
+      tz={costs.tz || v.d?.tz}
       caption={
         <>
           按天，收入按当天消费占比摊分。

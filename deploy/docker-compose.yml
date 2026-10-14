@@ -13,10 +13,11 @@ services:
       db:
         condition: service_healthy
     environment:
-      # 「今日消耗 / 用量统计」的日期边界按此时区计算
+      # 进程时区：只影响日志等本地时间显示
       - TZ=Asia/Shanghai
-      # 日报的统计日界线与定时发送时区（未设置时也默认 Asia/Shanghai）
-      - REPORT_TIME_ZONE=Asia/Shanghai
+      # 业务时区：利润、日汇总、热力图、日报的「今天 / 昨天」都按它划日，日报也按它定时发送。
+      # 未设置时默认 Asia/Shanghai；旧变量 REPORT_TIME_ZONE 仍兼容。
+      - BUSINESS_TIME_ZONE=Asia/Shanghai
       # 仅在可信反向代理覆盖转发头且应用不能被公网直连时启用。
       - TRUST_PROXY=${TRUST_PROXY:-false}
       # ---- MySQL（本 compose 的 db 服务，必填）----
@@ -34,7 +35,7 @@ services:
     image: mysql:8.0
     restart: unless-stopped
     environment:
-      # 与应用的自然日口径一致；日汇总回填和热力图中的 FROM_UNIXTIME 依赖 MySQL 会话时区。
+      # 与业务时区保持一致：首次升级时的日汇总回填（FROM_UNIXTIME）按 MySQL 会话时区划日。
       TZ: Asia/Shanghai
       MYSQL_DATABASE: ${DB_NAME}
       MYSQL_USER: ${DB_USER}

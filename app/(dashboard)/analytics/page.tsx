@@ -67,8 +67,10 @@ const coverageLink = (
 
 export default function AnalyticsPage() {
   const [sp, setUrl] = useUrlParams();
-  // 自定义开始日期换算天数时，「今天」要和服务端按同一个业务时区取
-  const today = dayKeyInTz(Date.now(), DEFAULT_BUSINESS_TIME_ZONE);
+  const [snap, setSnap] = useState<Snapshot | null>(null);
+  // 自定义开始日期换算天数时，「今天」要和服务端按同一个业务时区取：加载后用接口返回的 tz
+  const tz: string = snap?.data?.tz || DEFAULT_BUSINESS_TIME_ZONE;
+  const today = dayKeyInTz(Date.now(), tz);
   const minDate = addDays(today, -(MAX_DAYS - 1));
   const rawRange = sp.get("range") || "";
   const rawStart = sp.get("start");
@@ -77,7 +79,6 @@ export default function AnalyticsPage() {
   const days = customOk ? dayDiff(rawStart, today) + 1 : PRESET_DAYS[rangeValue];
   const includeArchived = sp.get("archived") === "1";
 
-  const [snap, setSnap] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [asOf, setAsOf] = useState<number | null>(null);
@@ -304,7 +305,7 @@ export default function AnalyticsPage() {
 
       <Equation dv={dv} snap={snap} caption={windowCaption} extra={archiveToggle} href30={href30} onRetry={retry} />
 
-      <TrendPanel rows={dv.rows} showRev={dv.hasIncome} asOf={asOf} />
+      <TrendPanel rows={dv.rows} showRev={dv.hasIncome} asOf={asOf} tz={tz} />
 
       <div className="jy-grid-2 jy-grid-even">
         <MixPanel dv={dv} />
@@ -324,7 +325,7 @@ export default function AnalyticsPage() {
         <SummaryPanel dv={dv} days={data.days} />
       </div>
 
-      <CumulativePanel rows={dv.rows} asOf={asOf} />
+      <CumulativePanel rows={dv.rows} asOf={asOf} tz={tz} />
 
       <CoveragePanel dv={dv} data={data} stations={stations} />
     </div>

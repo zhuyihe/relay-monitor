@@ -40,13 +40,18 @@ test("日汇总按业务时区划日，与进程时区无关", () => {
   assert.deepEqual(utc, [{ stationId: "a", date: "2026-01-01", usd: 1 }]);
 });
 
-test("usedBetween 只计到终点为止，usedSince 不设终点", () => {
+test("usedBetween 按 [起点, 终点) 计、与日汇总同一边界，usedSince 不设终点", () => {
   const history = new History({ query: async () => [[]] });
   history.data.a = [[1000, 10], [2000, 9], [3000, 9.5], [4000, 8], [5000, 6]];
-  assert.equal(history.usedBetween("a", 1500, 4000), 2.5);
-  assert.equal(history.usedBetween("a", 1000, 2000), 1);
-  // 基线取起点之前的最后一个快照
-  assert.equal(history.usedBetween("a", 2500, 4000), 1.5);
+  assert.equal(history.usedBetween("a", 1500, 4500), 2.5);
+  // 正好落在终点的快照算下一段
+  assert.equal(history.usedBetween("a", 1500, 4000), 1);
+  assert.equal(history.usedBetween("a", 4000, 6000), 3.5);
+  // 基线取起点之前的最后一个快照；正好落在起点的快照算本段
+  assert.equal(history.usedBetween("a", 2500, 4500), 1.5);
+  assert.equal(history.usedBetween("a", 2000, 2500), 1);
+  // 相邻两段不重不漏
+  assert.equal(history.usedBetween("a", 1500, 4000) + history.usedBetween("a", 4000, 6000), history.usedBetween("a", 1500, 6000));
   assert.equal(history.usedSince("a", 1500), 4.5);
 });
 

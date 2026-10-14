@@ -165,7 +165,8 @@ export function derive(data: any, own: any) {
   const ownDays = days <= 7 ? 7 : 30;
   const revenueSplit = !!incomeBy && days !== ownDays;
   const usage = r2(rows.reduce((a, r) => a + (r.cost || 0), 0));
-  const fixed = r2(rows.reduce((a, r) => a + r.fixed, 0));
+  // 固定成本合计取各上游的整段摊销（与「我的站点」同一口径），不用逐日舍入后的值相加
+  const fixed = r2(upstream.reduce((a, s) => a + (Number(s.fixedCny) || 0), 0));
 
   // 概况：只按有记录的日子算日均与峰值，缺失日不当作零成本拉低平均
   const covered = rows.filter((r) => !r.missing).map((r) => ({ date: r.date, cost: r2((r.cost || 0) + r.fixed), today: r.today }));

@@ -344,15 +344,16 @@ export class History {
     return this.usedBetween(stationId, sinceTs, Infinity);
   }
 
-  // [sinceTs, untilTs] 内的实际消耗：口径同 usedSince，只计到 untilTs 为止的快照。
+  // [sinceTs, untilTs) 内的实际消耗：余额下降按后一快照的时间归属，与日汇总（dailyUsageRows）同一边界，
+  // 正好落在 untilTs 的快照算下一段，相邻两段不重不漏。
   // 日报算「昨天」时必须有终点，否则会把今天的消耗也算进昨天的成本。
   usedBetween(stationId, sinceTs, untilTs) {
     const arr = this.data[stationId] || [];
     if (arr.length < 2) return 0;
     let start = 0;
-    for (let i = 0; i < arr.length; i++) if (arr[i][0] <= sinceTs) start = i;
+    for (let i = 0; i < arr.length; i++) if (arr[i][0] < sinceTs) start = i;
     let used = 0;
-    for (let i = start + 1; i < arr.length && arr[i][0] <= untilTs; i++) {
+    for (let i = start + 1; i < arr.length && arr[i][0] < untilTs; i++) {
       const drop = arr[i - 1][1] - arr[i][1];
       if (drop > 0) used += drop;
     }

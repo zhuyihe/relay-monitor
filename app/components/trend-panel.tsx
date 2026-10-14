@@ -6,7 +6,7 @@
 // 悬停或用左右方向键逐日查看，十字线同时贯穿两张图。
 import { useId, useMemo, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
-import { WEEKDAYS, axisMoney, formatHhmm, formatMoney, formatMonthDay, parseDay } from "../../lib/format";
+import { WEEKDAYS, axisMoney, formatMoney, formatMonthDay, formatZonedTime, parseDay } from "../../lib/format";
 import { barPath, clamp, linePath, niceTicks, runs, spreadLabels, xTickIdx } from "../../lib/chart-math";
 import { ChartTip, TipBody } from "./float-tip";
 import type { TipRow } from "./float-tip";
@@ -33,8 +33,9 @@ export type TrendRow = {
 type Row = TrendRow & { d: Date; gross: number | null; profit: number | null };
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
-const dayTitle = (r: Row, asOf?: number | null) =>
-  `${formatMonthDay(r.d)} ${WEEKDAYS[r.d.getDay()]}${r.today && asOf ? `，截至 ${formatHhmm(asOf)}` : ""}`;
+// asOfText：「截至几点」，按业务时区显示（和日期划分同一时区），不用浏览器时区
+const dayTitle = (r: Row, asOfText?: string | null) =>
+  `${formatMonthDay(r.d)} ${WEEKDAYS[r.d.getDay()]}${r.today && asOfText ? `，截至 ${asOfText}` : ""}`;
 const dayLabel = (r: Row) => (r.today ? "今天" : formatMonthDay(r.d));
 
 function Hatch({ id }: { id: string }) {
@@ -49,16 +50,20 @@ export function TrendPanel({
   rows: input,
   showRev = true,
   asOf,
+  tz,
   title,
   caption = "按天，同一纵轴",
 }: {
   rows: TrendRow[];
   showRev?: boolean;
   asOf?: number | null;
+  /** 业务时区（接口返回的 tz），缺省 Asia/Shanghai */
+  tz?: string;
   title?: ReactNode;
   caption?: ReactNode;
 }) {
   const [view, setView] = useState<"chart" | "table">("chart");
+  const asOfText = asOf ? formatZonedTime(asOf, tz) : null;
   const rows: Row[] = useMemo(
     () =>
       input.map((r) => {
@@ -94,9 +99,9 @@ export function TrendPanel({
       }
     >
       {view === "chart" ? (
-        <TrendChart rows={rows} showRev={showRev} asOf={asOf} />
+        <TrendChart rows={rows} showRev={showRev} asOfText={asOfText} />
       ) : (
-        <TrendTable rows={rows} showRev={showRev} asOf={asOf} />
+        <TrendTable rows={rows} showRev={showRev} asOfText={asOfText} />
       )}
     </Panel>
   );
@@ -105,11 +110,11 @@ export function TrendPanel({
 function TrendChart({
   rows,
   showRev,
-  asOf,
+  asOfText,
 }: {
   rows: Row[];
   showRev: boolean;
-  asOf?: number | null;
+  asOfText?: string | null;
 }) {
   const [stackRef, w] = useElementWidth();
   const [hover, setHover] = useState<number | null>(null);
@@ -198,7 +203,7 @@ function TrendChart({
           profit
         ),
       ]);
-    spoken = `${dayTitle(hr, asOf)}：${showRev ? `收入 ${formatMoney(hr.rev)}，` : ""}上游成本 ${cost}，固定成本 ${formatMoney(hr.fixed)}${showRev ? `，净利 ${hr.profit != null && hr.profit < 0 ? "亏损 " : ""}${profit}` : ""}`;
+    spoken = `${dayTitle(hr, asOfText)}：${showRev ? `收入 ${formatMoney(hr.rev)}，` : ""}上游成本 ${cost}，固定成本 ${formatMoney(hr.fixed)}${showRev ? `，净利 ${hr.profit != null && hr.profit < 0 ? "亏损 " : ""}${profit}` : ""}`;
   }
 
   const ready = w > 0 && n > 0;
@@ -364,7 +369,7 @@ function TrendChart({
         )}
         {hr && (
           <ChartTip x={x} width={w}>
-            <TipBody title={dayTitle(hr, asOf)} rows={tipRows} />
+            <TipBody title={dayTitle(hr, asOfText)} rows={tipRows} />
           </ChartTip>
         )}
       </div>
@@ -375,7 +380,7 @@ function TrendChart({
   );
 }
 
-function TrendTable({ rows, showRev, asOf }: { rows: Row[]; showRev: boolean; asOf?: number | null }) {
+function TrendTable({ rows, showRev, asOfText }: { rows: Row[]; showRev: boolean; asOfText?: string | null }) {
   const approx = rows.some((r) => r.missing || r.partial);
   const sum = (f: (r: Row) => number | null) => round2(rows.reduce((a, r) => a + (f(r) || 0), 0));
   const rev = showRev ? sum((r) => r.rev) : null;
@@ -404,7 +409,7 @@ function TrendTable({ rows, showRev, asOf }: { rows: Row[]; showRev: boolean; as
             .reverse()
             .map((r) => (
               <tr key={r.date}>
-                <td>{dayTitle(r, asOf)}</td>
+                <td>{dayTitle(r, asOfText)}</td>
                 {showRev && <td className="r">{formatMoney(r.rev)}</td>}
                 <td className="r">{r.cost == null ? <span className="jy-muted">数据缺失</span> : formatMoney(r.cost, { approx: r.partial })}</td>
                 {showRev && <td className="r">{maybe(r.gross, r.partial)}</td>}

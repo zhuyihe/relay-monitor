@@ -19,7 +19,7 @@ ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0 \
     PORT=8787
 
-# 支持 TZ 环境变量（「今日」统计边界按此时区计算）
+# tzdata 让 TZ 环境变量生效（只影响日志等进程本地时间）；利润、日汇总、日报按 BUSINESS_TIME_ZONE 划日，与 TZ 无关
 RUN apk add --no-cache tzdata
 
 # standalone 产物：自带裁剪后的 node_modules 与 server.js

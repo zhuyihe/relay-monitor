@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { hasRawWindowCoverage, summarizeCoverage } from "./coverage.js";
+import { amortizeFixedCost } from "../../../lib/profit.js";
 
 const days = [
   { date: "2026-09-18" },
@@ -105,4 +106,27 @@ test("经营分析按业务时区划日：热力图按上海时间分桶、只�
   assert.equal(byId.f.costBasis, "fixed");
   assert.equal(byId.u.costBasis, "usage");
   assert.equal(byId.f.fixedCny, 65);
+});
+
+test("固定成本逐日摊销不逐日舍入：站点合计与整段摊销（我的站点口径）一致，小额付费也不会被舍成 0", async (t) => {
+  const NOW = Date.UTC(2026, 9, 14, 4, 0); // 上海 10-14 12:00
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const startMs = Date.UTC(2026, 9, 7, 16); // 上海 10-08 00:00
+  const stations = [
+    { id: "a", name: "除不尽", type: "newapi", fixedPurchases: [{ amount: 100, days: 30, startDate: "2026-10-01" }] },
+    { id: "b", name: "小额年付", type: "newapi", fixedPurchases: [{ amount: 1, days: 365 }] },
+  ];
+  const rt = { pool: { query: async () => [[]] }, store: { list: () => stations }, history: { predict: () => null } };
+  const { GET } = await analyticsRoute();
+  const body = await (await GET(new Request("https://local.test/api/analytics?days=7"), rt)).json();
+  const byId = Object.fromEntries(body.stations.map((s) => [s.id, s]));
+  for (const s of stations) {
+    const whole = amortizeFixedCost(s.fixedPurchases, { startMs, endMs: NOW, tz: "Asia/Shanghai" }).cny;
+    assert.equal(byId[s.id].fixedCny, whole, `${s.name} 合计应等于整段摊销`);
+  }
+  assert.equal(byId.a.fixedCny, 21.67);
+  assert.equal(byId.b.fixedCny, 0.02);
+  assert.equal(body.fixedDaily.filter((r) => r.stationId === "b").length, 7, "每天几厘钱的摊销也要保留");
+  const daySum = body.fixedDaily.filter((r) => r.stationId === "a").reduce((a, r) => a + r.cny, 0);
+  assert.equal(Math.round(daySum * 100) / 100, 21.67);
 });

@@ -4,7 +4,7 @@
 // 三条线会重叠成一条，这时只画上游成本。缺记录的日子画斜纹带，累计值在那之后带 ≈（按已有数据累加）。
 import { useId, useMemo, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
-import { WEEKDAYS, axisMoney, formatHhmm, formatMoney, formatMonthDay, parseDay } from "../../../lib/format";
+import { WEEKDAYS, axisMoney, formatMoney, formatMonthDay, formatZonedTime, parseDay } from "../../../lib/format";
 import { clamp, linePath, niceTicks, runs, spreadLabels, xTickIdx } from "../../../lib/chart-math";
 import { ChartTip, TipBody } from "../../components/float-tip";
 import type { TipRow } from "../../components/float-tip";
@@ -34,7 +34,8 @@ const SERIES = [
   { key: "fixed", name: "固定成本", color: "var(--jy-s3)" },
 ] as const;
 
-export function CumulativePanel({ rows, asOf }: { rows: TrendRow[]; asOf?: number | null }) {
+// tz：业务时区（接口返回的 tz），「截至几点」按它显示
+export function CumulativePanel({ rows, asOf, tz }: { rows: TrendRow[]; asOf?: number | null; tz?: string }) {
   const pts: Point[] = useMemo(() => {
     let usage = 0;
     let fixed = 0;
@@ -83,7 +84,7 @@ export function CumulativePanel({ rows, asOf }: { rows: TrendRow[]; asOf?: numbe
   const ends = spreadLabels(series.map((s) => ({ name: s.name, y: y(pts[n - 1]?.[s.key] ?? 0) + 4 })));
   const xIdx = n ? xTickIdx(n, pw) : [];
 
-  const title = (p: Point) => `${formatMonthDay(p.d)} ${WEEKDAYS[p.d.getDay()]}${p.today && asOf ? `，截至 ${formatHhmm(asOf)}` : ""}`;
+  const title = (p: Point) => `${formatMonthDay(p.d)} ${WEEKDAYS[p.d.getDay()]}${p.today && asOf ? `，截至 ${formatZonedTime(asOf, tz)}` : ""}`;
 
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
     if (!w || !n) return;
