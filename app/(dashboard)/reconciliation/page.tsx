@@ -12,7 +12,7 @@ import AppState from "../../components/app-state";
 import { Seg } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
 import { useDrawerEscape } from "../../components/drawer-escape";
-import { PRESETS, formatRecentTime, formatTime, formatWindow, sameWindow, upstreamBillsHref } from "./recon-format";
+import { PRESETS, formatRecentTime, formatTime, formatWindow, iso, sameWindow, upstreamBillsHref } from "./recon-format";
 import type { ReconWindow } from "./recon-format";
 import { useReconWindow } from "./use-recon-window";
 import { useReconDetail } from "./use-recon-detail";
@@ -24,8 +24,6 @@ import { ConflictRules, ReconDetail } from "./recon-detail";
 import { ReconHistory } from "./recon-history";
 
 const { RangePicker } = DatePicker;
-
-const iso = (value: number) => new Date(value).toISOString();
 
 const DESTINATION_TITLE: Record<string, string> = { retry: "重查原账单窗口", conflict: "处理重复销售归属" };
 
@@ -109,10 +107,13 @@ export default function ReconciliationPage() {
     [preset],
   );
   const asOf = data?.generatedAt ? Date.parse(data.generatedAt) : NaN;
+  // 首屏读完配置、定下初始窗口之前不放出时间范围和刷新，免得早点的预设被初始化覆盖、和显示的数据错位
+  const ready = !loading && !!config;
   useShellPage({
-    onRefresh: () => recon.loadWindow(activeWindow, true, true),
+    onRefresh: ready ? () => recon.loadWindow(activeWindow, true, true) : undefined,
     asOf: Number.isFinite(asOf) ? asOf : null,
-    range: rangeControl,
+    range: ready ? rangeControl : undefined,
+    autoRefreshMs: recon.pollMs,
   });
 
   const queryCustom = async () => {
@@ -198,6 +199,7 @@ export default function ReconciliationPage() {
           ? <div className="reconciliation-custom">
             <RangePicker showTime value={range} onChange={(value) => recon.setRange(value)} aria-label="自定义核算时间" />
             <Button type="primary" className="reconciliation-query-action" loading={querying} onClick={() => void queryCustom()}>查询</Button>
+            {activeWindow.preset !== "custom" && results.length ? <span className="jy-caption">当前显示：{windowCaption}</span> : null}
           </div>
           : <span className="reconciliation-window">{windowCaption}</span>}
         {sharedWindow ? <span className="jy-caption">{sharedWindow.timezone}</span> : null}

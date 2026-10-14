@@ -7,7 +7,8 @@ import { api } from "../../../lib/client";
 import { isLivePreset, sameWindow } from "./recon-format";
 import type { ReconPreset, ReconWindow } from "./recon-format";
 
-const LIVE_POLL_MS = 30000;
+// 今天每 30 秒重读；近 7 天、本月跨度大、上游取数重，总额分钟级变化不大，5 分钟一次
+const livePollMs = (preset: string) => (preset === "today" ? 30000 : isLivePreset(preset) ? 300000 : null);
 
 export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, row: any) => void }) {
   const [config, setConfig] = useState<any>(null);
@@ -181,18 +182,20 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
     return true;
   };
 
-  // 截至现在的窗口（今天、近 7 天、本月）定时重读；只读缓存，不触发观测
+  // 截至现在的窗口（今天、近 7 天、本月）定时重读：只读，服务端在缓存有效期内复用上次结果，不触发观测。
+  // 选了「自定义」还没查询时，显示的仍是旧窗口，暂停轮询，免得旧窗口在后台继续刷新。
+  const pollMs = preset === activeWindow.preset ? livePollMs(activeWindow.preset) : null;
   useEffect(() => {
-    if (!isLivePreset(activeWindow.preset) || !config) return;
-    const timer = setInterval(() => loadWindow(activeWindow), LIVE_POLL_MS);
+    if (!pollMs || !config) return;
+    const timer = setInterval(() => loadWindow(activeWindow), pollMs);
     const onVisible = () => { if (!document.hidden) loadWindow(activeWindow); };
     document.addEventListener("visibilitychange", onVisible);
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeWindow.preset, config]);
+  }, [activeWindow.preset, pollMs, config]);
 
   return {
-    config, data, loading, querying, error, preset, activeWindow, range, setRange, summaryStale, summaryError,
+    config, data, loading, querying, error, preset, activeWindow, pollMs, range, setRange, summaryStale, summaryError,
     retryingRuleIds, ruleRetryErrors, loadWindow, refreshSummary, retryRule, initialize, selectPreset, queryCustom,
   };
 }

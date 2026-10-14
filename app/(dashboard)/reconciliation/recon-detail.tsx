@@ -16,13 +16,11 @@ import {
 import { ChannelBreakdown, Detail } from "./recon-parts";
 import {
   billingAmountText, billingCoverageText, channelLabel, currentRatioLabel, formatRecentTime, formatWindow,
-  formatWindowWithZone, healthLabel, percent, rowHasConflict, sameWindow, upstreamBillsHref, upstreamName,
+  formatWindowWithZone, healthLabel, iso, percent, rowHasConflict, sameWindow, upstreamBillsHref, upstreamName,
 } from "./recon-format";
 import type { useReconDetail } from "./use-recon-detail";
 
 type DetailState = ReturnType<typeof useReconDetail>;
-
-const iso = (value: number | null | undefined) => (value == null ? "未知" : new Date(value).toISOString());
 
 // 冲突处理目标涉及的每条关联：在当前结果里就能打开核对，不在了就标明已不可用
 export function ConflictRules({ ids, results, onOpen }: { ids: string[]; results: any[]; onOpen: (row: any) => void }) {

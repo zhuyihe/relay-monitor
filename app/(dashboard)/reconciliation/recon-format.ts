@@ -18,6 +18,9 @@ export const PRESETS: { label: string; value: ReconPreset }[] = [
 // 截至现在的窗口（今天、近 7 天、本月）金额随时间增长，页面定时重读
 export const isLivePreset = (preset: string) => isLiveReconciliationPreset(preset);
 
+// 原始时间戳（UTC ISO），用于范围版本、生效时间等需要精确到毫秒的字段
+export const iso = (value: number | null | undefined) => (value == null ? "未知" : new Date(value).toISOString());
+
 export const channelStateLabel: Record<string, string> = {
   enabled: "启用", manual_disabled: "手动禁用", auto_disabled: "自动禁用", missing: "已缺失", unknown: "状态未知",
 };
@@ -37,7 +40,7 @@ export function percent(value: any) {
   return Number.isFinite(number) ? `${(number * 100).toFixed(1)}%` : EMPTY;
 }
 
-export function billingStateLabel(state: any) {
+function billingStateLabel(state: any) {
   return state === "complete" ? "完整" : state === "partial" ? "部分" : state === "pending" ? "待获取" : "不可用";
 }
 

@@ -442,9 +442,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     rt._reconciliationWriteChain = pending.catch(() => {});
     return pending;
   }
-  const resultKey = (rule, window) => window.preset === "today"
-    ? `${rule.id}:today:${window.startMs}:${window.timezone}`
+  // 今天、近 7 天、本月截至取数时刻，endMs 每次都不同；缓存键只认起点，否则实时窗口的轮询永远命中不了缓存。
+  const resultKey = (rule, window) => isLiveReconciliationPreset(window.preset)
+    ? `${rule.id}:${window.preset}:${window.startMs}:${window.timezone}`
     : `${rule.id}:${window.preset}:${window.startMs}:${window.endMs}:${window.timezone}`;
+  const resultTtl = (window) => isLiveReconciliationPreset(window.preset) ? TODAY_TTL_MS : QUERY_TTL_MS;
 
   // 上游账单在自然日结束后还会陆续入账，结束满 SETTLE_DELAY_MS 才算可结账。
   function isSettleableWindow(window, now) {
@@ -1015,9 +1017,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const cacheKey = resultKey(firstRule, window);
     const requestCredential = currentSourceCredential(firstRule);
     const requestBilling = ownerRegistry.billingSource;
-    const evaluateKey = window.preset === "today" ? `${cacheKey}:${window.endMs}:${requestCredential}:${requestBilling.ownerVersion}` : `${cacheKey}:${requestCredential}:${requestBilling.ownerVersion}`;
+    const evaluateKey = isLiveReconciliationPreset(window.preset) ? `${cacheKey}:${window.endMs}:${requestCredential}:${requestBilling.ownerVersion}` : `${cacheKey}:${requestCredential}:${requestBilling.ownerVersion}`;
     const inflightKey = observe ? `${evaluateKey}:observe${resettle ? ":resettle" : ""}` : evaluateKey;
-    const ttl = window.preset === "today" ? TODAY_TTL_MS : QUERY_TTL_MS;
+    const ttl = resultTtl(window);
     const cached = resultCache.get(cacheKey);
     if (!force && (!observe || cached?.observed) && cached?.sourceCredential === requestCredential
       && cached?.billingCredential === requestBilling.ownerVersion && Date.now() - cached.at < ttl
@@ -1669,7 +1671,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now), cached = resultCache.get(resultKey(rule, window));
       const resource = registry.resources.get(rule.upstreamStationId), key = resource?.metadata?.tokens.find((token) => token.id === rule.tokenId);
       if (!cached || cached.sourceCredential !== currentSourceCredential(rule) || cached.billingCredential !== registry.billingSource.ownerVersion
-        || now - cached.at >= (window.preset === "today" ? TODAY_TTL_MS : QUERY_TTL_MS) || !sameAbsoluteWindow(cached.value.window, window)
+        || now - cached.at >= resultTtl(window) || !sameAbsoluteWindow(cached.value.window, window)
         || !key || key.status !== 1 || key.name !== cached.value.rule.tokenName || key.group !== cached.value.rule.fixedGroup
         || reconciliationScopeFingerprint(rule, cached.value.transitionSegments || []) !== reconciliationScopeFingerprint(cached.value.rule, cached.value.transitionSegments || [])) continue;
       coverageFacts.push(factsFor(cached.value));

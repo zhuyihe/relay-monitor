@@ -1368,3 +1368,83 @@ test("390px mobile refresh and retry remain usable without root overflow", async
 test("320px mobile refresh and retry remain usable without root overflow", async (t) => {
   await verifyMobileRefreshAndRetry(t, 320);
 });
+
+test("本月 queries the month window, live windows poll read-only on their own cadence, and a pending 自定义 pauses polling", async (t) => {
+  const reads = [], queries = [];
+  // 浏览器时钟被快进后，响应的取数时刻跟着走，免得「数据截至」被判成过期而换掉提示文案
+  let skewMs = 0;
+  const fresh = (preset) => ({ ...response([rule("rule-1", "Rule A", 10, { ...window, preset }), rule("rule-2", "Rule B", 20, { ...window, preset }), rule("rule-3", "Rule C", 30, { ...window, preset })]), generatedAt: new Date(Date.now() + skewMs).toISOString() });
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, configuration);
+    if (url.pathname === "/api/reconciliation") { const params = Object.fromEntries(url.searchParams); reads.push(params); return fulfill(route, fresh(params.preset)); }
+    if (url.pathname === "/api/reconciliation/query") { const body = route.request().postDataJSON(); queries.push(body); return fulfill(route, fresh(body.preset)); }
+    throw new Error("unexpected API: " + url.pathname);
+  }, undefined, true);
+  const advance = async (ms) => { skewMs += ms; await page.clock.fastForward(ms); };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
+  const presets = page.getByRole("group", { name: "核算时间范围" });
+  const freshness = (title) => page.locator(`.jy-freshness[title="${title}"]`).waitFor();
+
+  // 昨天是已结束的窗口，不轮询
+  await freshness("当前时间范围不自动刷新，可点右侧刷新");
+  assert.deepEqual(reads, [{ preset: "yesterday" }]);
+  await advance(310000); await settle();
+  assert.equal(reads.length, 1); assert.equal(queries.length, 0);
+
+  // 本月点选即查，只读（不带 observe）；之后 5 分钟重读一次
+  await presets.getByRole("button", { name: "本月", exact: true }).filter({ visible: true }).click();
+  await freshness("数据每 5 分钟自动刷新");
+  assert.deepEqual(queries, [{ preset: "month" }]);
+  await advance(290000); await settle();
+  assert.equal(reads.length, 1);
+  await advance(20000); await settle();
+  assert.deepEqual(reads.slice(1), [{ preset: "month" }]);
+
+  // 选了自定义还没查询：仍显示本月的数据，标明当前显示的窗口，暂停轮询
+  await presets.getByRole("button", { name: "自定义", exact: true }).filter({ visible: true }).click();
+  await page.getByText(/^当前显示：/).waitFor();
+  await freshness("当前时间范围不自动刷新，可点右侧刷新");
+  await advance(310000); await settle();
+  assert.equal(reads.length, 2); assert.equal(queries.length, 1);
+
+  // 今天 30 秒重读一次
+  await presets.getByRole("button", { name: "今天", exact: true }).filter({ visible: true }).click();
+  await freshness("数据每 30 秒自动刷新");
+  assert.deepEqual(queries.at(-1), { preset: "today" });
+  await advance(31000); await settle();
+  assert.deepEqual(reads.slice(2), [{ preset: "today" }]);
+  assert.equal(queries.length, 2);
+});
+
+test("上游资源抽屉的 Esc 先收起展开的日期面板，再交给抽屉关闭", async (t) => {
+  const page = await openFixturePage(t, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations: [], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "fixed", label: "固定成本", needs: [] }, { value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
+    // 侧栏待办计数读昨天的账单
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    throw new Error("unexpected API: " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations");
+  await page.getByText("还没有上游资源", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "新增上游资源", exact: true }).first().click();
+  const drawer = page.getByRole("dialog", { name: "新增上游资源", exact: true });
+  await drawer.waitFor();
+  await drawer.getByRole("button", { name: "追加一笔", exact: true }).click();
+  await drawer.getByRole("group", { name: "第 2 笔付费", exact: true }).getByPlaceholder("购买日期").click();
+  const panel = page.locator(".ant-picker-dropdown:not(.ant-picker-dropdown-hidden)");
+  await panel.waitFor();
+  await page.keyboard.press("Escape");
+  await panel.waitFor({ state: "hidden" });
+  assert.equal(await drawer.isVisible(), true);
+  assert.equal(await page.getByRole("button", { name: "放弃修改", exact: true }).count(), 0);
+  // 第二次 Esc 交给抽屉：有未保存的付费记录，先确认是否放弃
+  await page.keyboard.press("Escape");
+  const discard = page.getByRole("button", { name: "放弃修改", exact: true });
+  await discard.waitFor();
+  assert.equal(await drawer.isVisible(), true);
+  await discard.click();
+  await drawer.waitFor({ state: "hidden" });
+});

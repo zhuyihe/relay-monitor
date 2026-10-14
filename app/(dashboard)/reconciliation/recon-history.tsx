@@ -7,14 +7,12 @@ import { EmptyState } from "../../components/data-state";
 import type { ConfirmedHistoryRecord } from "../../../lib/client";
 import { formatReconciliationMoney as money, reconciliationBillingBasis } from "../../../lib/reconciliation-view";
 import { Detail } from "./recon-parts";
-import { billingAmountText, channelLabel, formatWindowWithZone, percent } from "./recon-format";
+import { billingAmountText, channelLabel, formatWindowWithZone, iso, percent } from "./recon-format";
 import type { useConfirmedHistory } from "./use-confirmed-history";
 
 const { RangePicker } = DatePicker;
 
 type HistoryState = ReturnType<typeof useConfirmedHistory>;
-
-const iso = (value: number) => new Date(value).toISOString();
 
 const CONVERSION_LABEL: Record<string, string> = { quota_per_unit: "配额 ÷ 单位", provider_cost_usd: "上游美元账单" };
 

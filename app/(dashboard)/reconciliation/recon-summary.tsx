@@ -8,9 +8,7 @@ import type { KnownChannelCoverage, ReconciliationSummary, ReconciliationWindowG
 import { formatReconciliationMoney as money } from "../../../lib/reconciliation-view";
 import { RECONCILIATION_BILLING_SOURCE_LABEL } from "../../../lib/reconciliation-contract";
 import { Detail, SummaryMetric } from "./recon-parts";
-import { COVERAGE_STATUS_LABEL, amountTone, channelStateLabel, coverageIssueLabel, formatWindow, percent } from "./recon-format";
-
-const iso = (value: number) => new Date(value).toISOString();
+import { COVERAGE_STATUS_LABEL, amountTone, channelStateLabel, coverageIssueLabel, formatWindow, iso, percent } from "./recon-format";
 
 function WindowMetrics({ totals }: { totals: ReconciliationWindowGroup["totals"] }) {
   return <div className="reconciliation-summary__metrics">

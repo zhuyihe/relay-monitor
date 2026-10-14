@@ -11,6 +11,8 @@ export type ShellPage = {
   asOf?: number | null;
   // 时间范围控件：桌面端在标题右侧，移动端落到内容区顶部
   range?: ReactNode;
+  // 本页自动刷新间隔（毫秒），用于"数据截至"的提示；null 表示不自动刷新，不传按 60 秒提示
+  autoRefreshMs?: number | null;
 };
 
 type ShellApi = {
@@ -29,7 +31,7 @@ export function useShellRefreshing() {
   return useContext(ShellContext).refreshing;
 }
 
-export function useShellPage({ onRefresh, asOf, range }: ShellPage) {
+export function useShellPage({ onRefresh, asOf, range, autoRefreshMs }: ShellPage) {
   const { setPage, clearPage } = useContext(ShellContext);
   // onRefresh 通常是每次渲染新建的闭包，用 ref 保存最新值，避免反复注册
   const refreshRef = useRef(onRefresh);
@@ -41,8 +43,9 @@ export function useShellPage({ onRefresh, asOf, range }: ShellPage) {
       onRefresh: hasRefresh ? () => refreshRef.current?.() : undefined,
       asOf: asOf ?? null,
       range,
+      autoRefreshMs,
     });
-  }, [setPage, hasRefresh, asOf, range]);
+  }, [setPage, hasRefresh, asOf, range, autoRefreshMs]);
 
   useEffect(() => clearPage, [clearPage]);
 }

@@ -161,6 +161,30 @@ test("快照读写共用同一逻辑窗口身份", () => {
   assert.equal(reconciliationSnapshotIdentity({ ...sevenDay, preset: "month", endMs: 4000 }, scope), "month:1000:Asia/Shanghai:same-scope");
 });
 
+test("近 7 天和本月的轮询在缓存有效期内复用上次结果", async () => {
+  const rule = { id: "rr_live_cache", upstream_station_id: "missing", own_station_id: "own", token_id: 1, token_name: "key", fixed_group: "group", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
+  const segment = { id: "s1", rule_id: rule.id, group_name: "group", group_ratio: 1, effective_from_ms: 1, effective_to_ms: null, detected_at_ms: 1, timing_source: "operator_confirmed" };
+  const query = async (sql) => {
+    if (sql.includes("FROM reconciliation_rules")) return [[rule]];
+    if (sql.includes("FROM reconciliation_rule_channels")) return [[]];
+    if (sql.includes("FROM reconciliation_rule_segments")) return [[segment]];
+    if (sql.includes("FROM reconciliation_snapshots")) return [[]];
+    if (sql.includes("FROM reconciliation_alert_state")) return [[{ active: 1, first_seen_at: 1, last_seen_at: 1, last_notified_at: 1 }]];
+    return [{ affectedRows: 1 }];
+  };
+  const pool = { query, async getConnection() { return { query, async beginTransaction() {}, async commit() {}, async rollback() {}, release() {} }; } };
+  const rt = { pool, store: { list: () => [], get: () => null, channels: [] } };
+  const reconciliation = createReconciliationModule(rt);
+  for (const preset of ["7d", "month"]) {
+    const input = { ruleIds: [rule.id], preset, timezone: "Asia/Shanghai" };
+    const first = await reconciliation.queryRules(input, { force: true });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await reconciliation.queryRules(input);
+    assert.equal(second.results[0].window.endMs, first.results[0].window.endMs, `${preset} 截止点后移不应让缓存失效`);
+    assert.equal([...rt._reconciliationResultCache.keys()].filter((key) => key.includes(`:${preset}:`)).length, 1);
+  }
+});
+
 test("今天的较早慢查询不能复用或覆盖较晚查询的缓存", async () => {
   const rule = { id: "rr_today_cache", upstream_station_id: "missing", own_station_id: "own", token_id: 1, token_name: "key", fixed_group: "group", timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
   const segment = { id: "s1", rule_id: rule.id, group_name: "group", group_ratio: 1, effective_from_ms: 1, effective_to_ms: null, detected_at_ms: 1, timing_source: "operator_confirmed" };
