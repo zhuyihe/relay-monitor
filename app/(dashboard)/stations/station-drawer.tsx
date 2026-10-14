@@ -7,6 +7,7 @@ import type { ReactNode, Ref } from "react";
 import dayjs from "dayjs";
 import { App, Button, DatePicker, Drawer, Form, Grid, Input, Select, Switch } from "antd";
 import { api } from "../../../lib/client";
+import { useDrawerEscape } from "../../components/drawer-escape";
 import { Icon, Sym } from "../../components/icons";
 import { StatusText } from "../../components/status";
 import type { Level } from "../../components/status";
@@ -160,6 +161,8 @@ export function StationDrawer({
       onOk: close,
     });
   };
+  // 有日期选择器（固定采购到期日），Esc 先收起日期面板再关抽屉（#413）
+  useDrawerEscape(open && !saving, requestClose);
 
   const isFixed = formType === "fixed";
   const needs = needsFor(formType);
@@ -377,6 +380,7 @@ export function StationDrawer({
       size={screens.md === false ? "100%" : 520}
       open={open}
       onClose={requestClose}
+      keyboard={false}
       forceRender
       focusable={{ focusTriggerAfterClose: false }}
       afterOpenChange={(o) => {
