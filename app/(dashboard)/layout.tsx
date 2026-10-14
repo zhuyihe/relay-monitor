@@ -22,6 +22,10 @@ const SIDER_KEY = "jy-sider";
 const COUNT_POLL_MS = 60_000;
 const STALE_MS = 10 * 60_000;
 
+// 页面没声明时沿用 60 秒的说法；null 表示本页（或当前时间范围）不自动刷新
+const autoRefreshHint = (ms: number | null | undefined) => ms === null ? "当前时间范围不自动刷新，可点右侧刷新"
+  : `数据每 ${ms == null ? "60 秒" : ms % 60_000 === 0 ? `${ms / 60_000} 分钟` : `${Math.round(ms / 1000)} 秒`}自动刷新`;
+
 const hhmm = (ts: number) => {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
@@ -138,7 +142,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const clearPage = useCallback(() => setPageState({}), []);
   const shellApi = useMemo(() => ({ setPage, clearPage, refreshing }), [setPage, clearPage, refreshing]);
 
-  // 刷新本页数据；没有注册刷新的页面（设置、告警中心、账单核算）不显示刷新按钮，
+  // 刷新本页数据；没有注册刷新的页面（设置、告警中心）不显示刷新按钮，
   // 避免在这些页面误触发"刷新全部上游"
   const onRefresh = async () => {
     if (refreshing || !page.onRefresh) return;
@@ -250,7 +254,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             {asOf != null && (
               <span
                 className={`jy-freshness${stale ? " is-stale" : ""}`}
-                title={stale ? "数据已超过 10 分钟未更新，可点右侧刷新" : "数据每 60 秒自动刷新"}
+                title={stale ? "数据已超过 10 分钟未更新，可点右侧刷新" : autoRefreshHint(page.autoRefreshMs)}
               >
                 <i className="dot" aria-hidden="true" />
                 <span className="txt">数据截至</span>

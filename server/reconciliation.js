@@ -13,6 +13,7 @@ import {
   RECONCILIATION_BILLING_SOURCE,
   RECONCILIATION_CALCULATION_VERSION,
   reconciliationHealthMeta,
+  isLiveReconciliationPreset,
 } from "../lib/reconciliation-contract.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
@@ -133,9 +134,11 @@ function localDate(ms, timezone) {
   return `${part.year}-${String(part.month).padStart(2, "0")}-${String(part.day).padStart(2, "0")}`;
 }
 
+export const RECONCILIATION_PRESETS = Object.freeze(["today", "yesterday", "7d", "month", "custom"]);
+
 export function resolveReconciliationWindow(input = {}, now = Date.now()) {
   const timezone = validateTimezone(input.timezone);
-  const preset = ["today", "yesterday", "7d", "custom"].includes(input.preset) ? input.preset : "yesterday";
+  const preset = RECONCILIATION_PRESETS.includes(input.preset) ? input.preset : "yesterday";
   let startMs;
   let endMs;
   // 所有窗口都是规则时区下的半开区间 [startMs, endMs)，结束点不晚于当前时刻。两侧都按秒级日志统计取数，
@@ -145,6 +148,7 @@ export function resolveReconciliationWindow(input = {}, now = Date.now()) {
     endMs = finite(input.endMs);
     if (startMs == null || endMs == null || startMs >= endMs) throw new Error("自定义时间段无效");
     if (endMs > now) throw new Error("自定义时间段不能超过当前时间");
+    if (endMs - startMs > 31 * DAY_MS) throw new Error("单次查询时间范围不能超过 31 天");
   } else {
     const dayStart = midnight(now, timezone);
     if (preset === "yesterday") {
@@ -153,12 +157,16 @@ export function resolveReconciliationWindow(input = {}, now = Date.now()) {
     } else if (preset === "7d") {
       startMs = midnight(now, timezone, -6);
       endMs = now;
+    } else if (preset === "month") {
+      // 本月从当地 1 日零点起；夏令时切换的月份可能比 31 天多一小时，所以 31 天上限只管自定义。
+      const today = zonedParts(now, timezone);
+      startMs = calendarMidnight({ year: today.year, month: today.month, day: 1 }, timezone);
+      endMs = now;
     } else {
       startMs = dayStart;
       endMs = now;
     }
   }
-  if (endMs - startMs > 31 * DAY_MS) throw new Error("单次查询时间范围不能超过 31 天");
   return { preset, timezone, startMs: Math.floor(startMs), endMs: Math.floor(endMs) };
 }
 
@@ -275,7 +283,7 @@ function healthWithIssues(issues) {
 function persistenceFailedResult(rule, window) {
   const observedAt = Date.now();
   const channels = rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null }));
-  const issue = { code: "PERSISTENCE_FAILED", scope: "persistence", detail: "本轮对账结果未能保存，请稍后重试", observedAt };
+  const issue = { code: "PERSISTENCE_FAILED", scope: "persistence", detail: "本轮核算结果未能保存，请稍后重试", observedAt };
   return {
     rule, window, requestedWindow: window, lastSuccessfulWindow: null, currentSegment: null, segments: [], transitionSegments: [],
     upstream: { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: 1, observedAt, window },
@@ -305,7 +313,7 @@ function toErrorHealth(err, own = false) {
     return health("UPSTREAM_DATA_UNAVAILABLE", "上游日志统计接口不可用或返回无效数据");
   }
   return health(own ? "OWN_BILLING_UNAVAILABLE" : "UPSTREAM_DATA_UNAVAILABLE",
-    own ? "无法完整读取本站渠道账单统计" : "无法完整读取上游对账数据");
+    own ? "无法完整读取本站渠道账单统计" : "无法完整读取上游账单数据");
 }
 
 const CALCULATION_BLOCKERS = new Set([
@@ -434,9 +442,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     rt._reconciliationWriteChain = pending.catch(() => {});
     return pending;
   }
-  const resultKey = (rule, window) => window.preset === "today"
-    ? `${rule.id}:today:${window.startMs}:${window.timezone}`
+  // 今天、近 7 天、本月截至取数时刻，endMs 每次都不同；缓存键只认起点，否则实时窗口的轮询永远命中不了缓存。
+  const resultKey = (rule, window) => isLiveReconciliationPreset(window.preset)
+    ? `${rule.id}:${window.preset}:${window.startMs}:${window.timezone}`
     : `${rule.id}:${window.preset}:${window.startMs}:${window.endMs}:${window.timezone}`;
+  const resultTtl = (window) => isLiveReconciliationPreset(window.preset) ? TODAY_TTL_MS : QUERY_TTL_MS;
 
   // 上游账单在自然日结束后还会陆续入账，结束满 SETTLE_DELAY_MS 才算可结账。
   function isSettleableWindow(window, now) {
@@ -1007,9 +1017,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const cacheKey = resultKey(firstRule, window);
     const requestCredential = currentSourceCredential(firstRule);
     const requestBilling = ownerRegistry.billingSource;
-    const evaluateKey = window.preset === "today" ? `${cacheKey}:${window.endMs}:${requestCredential}:${requestBilling.ownerVersion}` : `${cacheKey}:${requestCredential}:${requestBilling.ownerVersion}`;
+    const evaluateKey = isLiveReconciliationPreset(window.preset) ? `${cacheKey}:${window.endMs}:${requestCredential}:${requestBilling.ownerVersion}` : `${cacheKey}:${requestCredential}:${requestBilling.ownerVersion}`;
     const inflightKey = observe ? `${evaluateKey}:observe${resettle ? ":resettle" : ""}` : evaluateKey;
-    const ttl = window.preset === "today" ? TODAY_TTL_MS : QUERY_TTL_MS;
+    const ttl = resultTtl(window);
     const cached = resultCache.get(cacheKey);
     if (!force && (!observe || cached?.observed) && cached?.sourceCredential === requestCredential
       && cached?.billingCredential === requestBilling.ownerVersion && Date.now() - cached.at < ttl
@@ -1445,7 +1455,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const newer = inflight.get(inflightKey);
         if (newer && newer !== task) return newer;
         // 口径被连续改动时不再重跑：只让这条规则本轮待获取，不能让整个多规则查询失败。
-        if (attempt >= MAX_SCOPE_ATTEMPTS) return pendingResult(rule, window, "查询期间对账口径多次变化，下一轮刷新时重新获取");
+        if (attempt >= MAX_SCOPE_ATTEMPTS) return pendingResult(rule, window, "查询期间核算口径多次变化，下一轮刷新时重新获取");
         inflight.set(inflightKey, task);
         rule = await repository.getRule(ruleId);
         if (!rule) throw ruleNotFound();
@@ -1622,7 +1632,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           return save();
         }, billingSource);
       } catch {
-        const error = new Error("对账结果未能保存");
+        const error = new Error("核算结果未能保存");
         error.code = "PERSISTENCE_FAILED";
         throw error;
       }
@@ -1642,6 +1652,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   function readResponse(knownRules, rules, results, registry, input, now) {
     const isCompletedWindow = (window) => isSettleableWindow(window, now);
+    const isEndedWindow = (window) => Number.isFinite(window?.endMs) && window.endMs <= now - SETTLE_DELAY_MS;
     const factsFor = (result) => {
       const resource = registry.resources.get(result.rule.ownStationId);
       const source = result.rule.ownSource && resource?.identity && resource.station ? ownSourceFor(resource.station, resource.identity) : null;
@@ -1651,7 +1662,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         amountBasis: result.amountBasis || { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION, conversion: provider === "sub2api" ? "provider_cost_usd" : provider === "newapi" ? "quota_per_unit" : null } });
       enriched.actions = reconciliationResultActions(enriched);
-      enriched.settlement = reconciliationSettlement(enriched, { isCompletedWindow });
+      enriched.settlement = reconciliationSettlement(enriched, { isCompletedWindow, isEndedWindow });
       return enriched;
     };
     const selected = results.map(factsFor), coverageFacts = [...selected];
@@ -1660,7 +1671,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now), cached = resultCache.get(resultKey(rule, window));
       const resource = registry.resources.get(rule.upstreamStationId), key = resource?.metadata?.tokens.find((token) => token.id === rule.tokenId);
       if (!cached || cached.sourceCredential !== currentSourceCredential(rule) || cached.billingCredential !== registry.billingSource.ownerVersion
-        || now - cached.at >= (window.preset === "today" ? TODAY_TTL_MS : QUERY_TTL_MS) || !sameAbsoluteWindow(cached.value.window, window)
+        || now - cached.at >= resultTtl(window) || !sameAbsoluteWindow(cached.value.window, window)
         || !key || key.status !== 1 || key.name !== cached.value.rule.tokenName || key.group !== cached.value.rule.fixedGroup
         || reconciliationScopeFingerprint(rule, cached.value.transitionSegments || []) !== reconciliationScopeFingerprint(cached.value.rule, cached.value.transitionSegments || [])) continue;
       coverageFacts.push(factsFor(cached.value));
@@ -1832,8 +1843,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const billingSource = ownerRegistry.billingSource;
         const now = Date.now();
         const results = await mapWithConcurrency(selected, MAX_CONCURRENT_RULES, (rule) => {
-          // 今天、近 7 天截至取数时刻：规则排队轮到时才定截止点（同 refreshDue），排队久了 Sub2API 实时区间也不会过旧。
-          const live = input.preset === "today" || input.preset === "7d";
+          // 今天、近 7 天、本月截至取数时刻：规则排队轮到时才定截止点（同 refreshDue），排队久了 Sub2API 实时区间也不会过旧。
+          const live = isLiveReconciliationPreset(input.preset);
           const window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, live ? Math.max(now, Date.now()) : now);
           return inspectRule(rule.id, window, { ...(attempt === 1 ? options : { ...options, force: false }), ownerRegistry }).catch((err) => {
             // 列出规则后才被停止的规则从本轮结果中去掉，不能让整个多规则查询失败。
