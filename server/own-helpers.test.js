@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  aggregateFlow, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
+  aggregateFlow, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
   reconcileUsageCost, resolveOwnWindow, selectCostUpstreams,
 } from "./own-helpers.js";
+import { History } from "../db/history.js";
+import { dayStartInTz } from "../lib/business-time.js";
 
 test("成本渠道支持主地址、api 后缀和显式别名匹配", () => {
   const publicStation = { id: "public", baseUrl: "https://relay.example.com/" };
@@ -93,6 +95,51 @@ test("展示窗口的上一窗与当窗等长且左移整窗", () => {
 
   const today = resolveOwnWindow(new URLSearchParams({ range: "today", tz: "Asia/Shanghai" }));
   assert.equal(today.startMs - today.prevStart, 86400000); // 今天 → 昨天同一时刻为止
-  // 非法时区退回本机时区而不是抛错
-  assert.ok(resolveOwnWindow(new URLSearchParams({ range: "today", tz: "Nowhere/Nope" })).tz);
+});
+
+test("展示窗口统一按业务时区划日，不跟随浏览器传来的 tz", () => {
+  const now = Date.UTC(2026, 9, 14, 2, 30); // 北京时间 10 月 14 日 10:30，洛杉矶仍是 13 日
+  const fromBrowser = resolveOwnWindow(new URLSearchParams({ range: "today", tz: "America/Los_Angeles" }), now);
+  const plain = resolveOwnWindow(new URLSearchParams({ range: "today" }), now);
+  assert.equal(fromBrowser.tz, "Asia/Shanghai");
+  assert.equal(fromBrowser.startMs, Date.UTC(2026, 9, 13, 16));
+  assert.deepEqual(fromBrowser, plain);
+  assert.equal(resolveOwnWindow(new URLSearchParams({ range: "nope" }), now).range, "7d");
+});
+
+test("利润拆成毛利与净利：固定付费上游只按摊销计，余额推算截止到窗口终点", async () => {
+  const SH = "Asia/Shanghai";
+  const startMs = dayStartInTz("2026-10-13", SH);
+  const now = startMs + 86400000; // 日报口径：算完整的 10 月 13 日
+  const own = { id: "own", name: "自营", isOwn: true, type: "newapi", cnyPerUsd: 2 };
+  // newapi-key 没有用量明细接口，会直接退回余额历史，不发网络请求
+  const usage = { id: "u", name: "按量上游", type: "newapi-key", cnyPerUsd: 7 };
+  const fixed = {
+    id: "f", name: "包月上游", type: "newapi-key", cnyPerUsd: 7,
+    fixedPurchases: [{ amount: 300, days: 30, startDate: "2026-10-01" }],
+  };
+  const history = new History({ query: async () => [[]] });
+  history.data.u = [[startMs - 1000, 10], [startMs + 3600000, 9], [now - 1000, 8], [now + 3600000, 5]];
+  // 包月上游的余额下降不能再算一遍成本
+  history.data.f = [[startMs - 1000, 10], [startMs + 3600000, 4]];
+  const rt = {
+    store: { list: () => [own, usage, fixed] },
+    history,
+    _ownChannelsCache: { at: Date.now(), stationId: "own", list: [] },
+  };
+  const p = await computeProfit(rt, own, 50, 0, { startMs, now, tz: SH, range: "7d", resold: null });
+  assert.equal(p.error, undefined);
+  assert.equal(p.incomeCny, 100);
+  // 只计到 now 为止：10 → 8，今天的 8 → 5 不算
+  assert.equal(p.upstreamCostCny, 14);
+  assert.equal(p.fixedCostCny, 10);
+  assert.equal(p.grossProfitCny, 86);
+  assert.equal(p.netProfitCny, 76);
+  assert.equal(p.grossMarginPct, 86);
+  assert.equal(p.netMarginPct, 76);
+  // 旧字段保持兼容：利润即净利
+  assert.equal(p.totalCostCny, 24);
+  assert.equal(p.profitCny, 76);
+  assert.equal(p.marginPct, 76);
+  assert.deepEqual(p.costs.map((c) => [c.stationId, c.mode]), [["u", "history"], ["f", "fixed"]]);
 });

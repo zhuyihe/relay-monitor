@@ -1,15 +1,19 @@
 // ---- 经营分析：日汇总支撑长期趋势，原始快照仅保留近期热力图 --------------------------
 // GET /api/analytics?days=1..365&includeArchived=true
 // 消耗口径与 History.usedSince 一致：相邻快照余额下降计消耗，上升视为充值忽略。
-// SQL 日期分桶跟随 MySQL 会话时区；部署统一为 Asia/Shanghai。
+// 日期、星期、小时一律按业务时区（lib/business-time.js）划分：SQL 只按 15 分钟取整，
+// 换算在 JS 里做，不依赖 MySQL 会话时区和进程时区。固定成本与「我的站点」同一摊销算法（lib/profit.js）。
 import { withAuth, json } from "../../../lib/api.js";
-import { fixedPurchases } from "../../../lib/providers.js";
+import {
+  businessTimeZone, dayKeyInTz, dayRangeInTz, shiftDayLabel, weekdayHourInTz,
+} from "../../../lib/business-time.js";
+import { amortizeFixedCost, costBasisOf, purchasesOf, rateSnapshotOf } from "../../../lib/profit.js";
 import { hasRawWindowCoverage, summarizeCoverage } from "./coverage.js";
 
 const r2 = (v) => Math.round(v * 100) / 100;
 const r4 = (v) => Math.round(v * 10000) / 10000;
-const pad2 = (n) => String(n).padStart(2, "0");
-const dayKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+// 时区偏移都是 15 分钟的整数倍，按 15 分钟分桶再换算，半点时区也不会分错日期和小时
+const SLOT_MS = 15 * 60 * 1000;
 
 // 热力图仍需原始快照。关联查询利用 (station_id, t) 主键取前一快照，
 // 避免长期留存后 LAG 扫描整张历史表。
@@ -34,15 +38,13 @@ export const GET = withAuth(async (request, rt) => {
   const days = requestedDays(sp.get("days"));
   const includeArchived = sp.get("includeArchived") === "true";
 
-  // 窗口 = 今天（本地自然日）往前共 days 天，起点取本地零点。
-  const now = new Date();
-  const startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (days - 1));
-  const start = dayKey(startDate);
-  const end = dayKey(now);
-  const dayList = Array.from({ length: days }, (_, index) => {
-    const date = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate() + index);
-    return { date: dayKey(date), ms: date.getTime() };
-  });
+  // 窗口 = 今天（业务时区自然日）往前共 days 天，起点取业务时区零点。
+  const tz = businessTimeZone();
+  const nowMs = Date.now();
+  const end = dayKeyInTz(nowMs, tz);
+  const start = shiftDayLabel(end, -(days - 1));
+  const dayList = dayRangeInTz(start, end, tz);
+  const startMs = dayList[0].startMs;
 
   // 归档资源默认不进入经营分析，需要由已认证客户端明确选择。
   const stations = store.list({ includeArchived });
@@ -50,7 +52,7 @@ export const GET = withAuth(async (request, rt) => {
   const monitoredStations = stations.filter((station) => station.type !== "fixed");
   const monitoredStationIds = monitoredStations.map((station) => station.id);
   const byId = new Map(stations.map((station) => [station.id, station]));
-  const rateOf = (station) => (station.cnyPerUsd != null && station.cnyPerUsd > 0 ? station.cnyPerUsd : 1);
+  const rateOf = (station) => rateSnapshotOf(station).cnyPerUsd;
 
   // 每站每日消耗（$）：从日汇总读取，不随原始历史规模增长而变慢。
   let dailyRows = [];
@@ -86,7 +88,10 @@ export const GET = withAuth(async (request, rt) => {
   );
 
   // 热力图仅有短周期价值，且必须由完整的原始快照覆盖来支撑。
-  const heatmapStations = monitoredStations.filter((station) => !station.isOwn && station.includeInProfit !== false);
+  // 只画按用量计成本的上游：配了固定付费的上游余额下降不算成本（见 costBasisOf）。
+  const heatmapStations = monitoredStations.filter(
+    (station) => !station.isOwn && station.includeInProfit !== false && costBasisOf(station) === "usage"
+  );
   let heatmap = [];
   let heatmapAvailability = {
     available: false,
@@ -95,28 +100,34 @@ export const GET = withAuth(async (request, rt) => {
   };
   if (days <= 30 && heatmapStations.length) {
     const heatmapStationIds = heatmapStations.map((station) => station.id);
-    const [rawDateRows] = await pool.query(
-      `SELECT station_id AS stationId,
-              DATE_FORMAT(FROM_UNIXTIME(t / 1000), '%Y-%m-%d') AS date
+    const [rawSlotRows] = await pool.query(
+      `SELECT station_id AS stationId, FLOOR(t / ${SLOT_MS}) AS slot
        FROM history_points
        WHERE station_id IN (?) AND t >= ? AND t <= ?
-       GROUP BY station_id, date`,
-      [heatmapStationIds, startDate.getTime(), now.getTime()]
+       GROUP BY station_id, slot`,
+      [heatmapStationIds, startMs, nowMs]
     );
+    const rawDates = new Set();
+    for (const row of rawSlotRows) rawDates.add(`${row.stationId}|${dayKeyInTz(Number(row.slot) * SLOT_MS, tz)}`);
+    const rawDateRows = [...rawDates].map((key) => {
+      const cut = key.lastIndexOf("|");
+      return { stationId: key.slice(0, cut), date: key.slice(cut + 1) };
+    });
     const [rawBoundsRows] = await pool.query(
-      `SELECT station_id AS stationId,
-              MIN(t) AS earliestAt,
-              DATE_FORMAT(FROM_UNIXTIME(MIN(t) / 1000), '%Y-%m-%d') AS earliestDate,
-              DATE_FORMAT(FROM_UNIXTIME(MAX(t) / 1000), '%Y-%m-%d') AS latestDate
+      `SELECT station_id AS stationId, MIN(t) AS earliestAt, MAX(t) AS latestAt
        FROM history_points
        WHERE station_id IN (?)
        GROUP BY station_id`,
       [heatmapStationIds]
     );
-    const rawBounds = new Map(rawBoundsRows.map((row) => [row.stationId, row]));
+    const rawBounds = new Map(rawBoundsRows.map((row) => [row.stationId, {
+      earliestAt: Number(row.earliestAt),
+      earliestDate: row.earliestAt != null ? dayKeyInTz(Number(row.earliestAt), tz) : null,
+      latestDate: row.latestAt != null ? dayKeyInTz(Number(row.latestAt), tz) : null,
+    }]));
     const rawCoverage = summarizeCoverage(heatmapStations, dayList, rawDateRows, rawBounds);
     // 有一天的快照不等于能计算整段热力图：还需保留窗口起点前的基线。
-    const available = hasRawWindowCoverage(rawCoverage, heatmapStations, rawBounds, startDate.getTime());
+    const available = hasRawWindowCoverage(rawCoverage, heatmapStations, rawBounds, startMs);
     heatmapAvailability = {
       available,
       reason: available ? null : "incomplete-raw-history",
@@ -125,19 +136,19 @@ export const GET = withAuth(async (request, rt) => {
     if (available) {
       const [heatRows] = await pool.query(
         `SELECT station_id AS stationId,
-                WEEKDAY(FROM_UNIXTIME(t / 1000)) AS weekday,
-                HOUR(FROM_UNIXTIME(t / 1000)) AS hour,
+                FLOOR(t / ${SLOT_MS}) AS slot,
                 SUM(prev - remaining) AS usd
          FROM (${RECENT_DROPS_SQL}) x
          WHERE station_id IN (?) AND prev IS NOT NULL AND prev > remaining
-         GROUP BY stationId, weekday, hour`,
-        [startDate.getTime(), heatmapStationIds]
+         GROUP BY stationId, slot`,
+        [startMs, heatmapStationIds]
       );
       const heatMap = new Map();
       for (const row of heatRows) {
         const station = byId.get(row.stationId);
         if (!station) continue;
-        const key = `${row.weekday}|${row.hour}`;
+        const { weekday, hour } = weekdayHourInTz(Number(row.slot) * SLOT_MS, tz);
+        const key = `${weekday}|${hour}`;
         heatMap.set(key, (heatMap.get(key) || 0) + Number(row.usd) * rateOf(station));
       }
       heatmap = [...heatMap.entries()].map(([key, cny]) => {
@@ -157,23 +168,14 @@ export const GET = withAuth(async (request, rt) => {
     totalUsd.set(row.stationId, (totalUsd.get(row.stationId) || 0) + usd);
   }
 
-  // 固定成本日摊销：每笔付费金额÷天数，摊到生效区间与查询窗口的重叠日。
+  // 固定成本日摊销：与「我的站点」同一算法，按生效区间与当天的重叠毫秒摊；今天只摊到现在。
   const fixedDaily = [];
   const fixedTotal = new Map();
   for (const station of stations) {
-    const purchases = fixedPurchases(station);
+    const purchases = purchasesOf(station);
     if (!purchases.length) continue;
-    for (const { date, ms } of dayList) {
-      let cny = 0;
-      for (const purchase of purchases) {
-        if (!(purchase.amount > 0) || !(purchase.days > 0)) continue;
-        if (purchase.startDate) {
-          const [year, month, day] = purchase.startDate.split("-").map(Number);
-          const purchaseStart = new Date(year, month - 1, day).getTime();
-          if (ms < purchaseStart || ms >= purchaseStart + purchase.days * 86400000) continue;
-        }
-        cny += purchase.amount / purchase.days;
-      }
+    for (const { date, startMs: dayStart, endMs: dayEnd } of dayList) {
+      const { cny } = amortizeFixedCost(purchases, { startMs: dayStart, endMs: Math.min(dayEnd, nowMs), tz });
       if (cny > 0) {
         fixedDaily.push({ date, stationId: station.id, cny: r2(cny) });
         fixedTotal.set(station.id, (fixedTotal.get(station.id) || 0) + cny);
@@ -190,6 +192,8 @@ export const GET = withAuth(async (request, rt) => {
       archivedAt: station.archivedAt || null,
       isOwn: !!station.isOwn,
       includeInProfit: station.includeInProfit !== false,
+      // fixed：只按固定付费摊销计成本，余额下降（totalUsd/totalCny 与 daily）不再算成本
+      costBasis: costBasisOf(station),
       cnyPerUsd: station.cnyPerUsd ?? null,
       totalUsd: r4(usd),
       totalCny: r2(usd * rateOf(station)),
@@ -202,6 +206,7 @@ export const GET = withAuth(async (request, rt) => {
     days,
     start,
     end,
+    tz,
     selection: {
       includeArchived,
       stationCount: stations.length,

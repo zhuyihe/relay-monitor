@@ -1,6 +1,7 @@
 "use client";
-// 监控估算：利润等式 + 收入与用量成本趋势 + 成本构成 + 消耗时段 + 可用天数 + 累计成本 + 覆盖说明。
+// 监控估算：利润等式 + 收入与上游成本趋势 + 成本构成 + 消耗时段 + 可用天数 + 累计成本 + 覆盖说明。
 // 成本来自 /api/analytics（按上游汇总、按站点汇率折算），收入来自 /api/own/analytics（只支持 7/30 天）。
+// 日期都按业务时区（默认 Asia/Shanghai）划分，与服务端一致，不跟随浏览器时区。
 // 时间范围和"包含已归档"写进地址栏；切换时保留上一份数据并变淡，避免整页闪成骨架。
 import "../../styles/pages/analytics.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -9,7 +10,8 @@ import Link from "next/link";
 import { Button, Checkbox } from "antd";
 import { NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
-import { formatDays, formatMoney, isoDay } from "../../../lib/format";
+import { formatDays, formatMoney } from "../../../lib/format";
+import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
 import { EmptyState, ErrorState, PanelSkeleton, Skeleton } from "../../components/data-state";
 import type { TipRow } from "../../components/float-tip";
 import { HBars } from "../../components/hbars";
@@ -65,7 +67,8 @@ const coverageLink = (
 
 export default function AnalyticsPage() {
   const [sp, setUrl] = useUrlParams();
-  const today = isoDay(new Date());
+  // 自定义开始日期换算天数时，「今天」要和服务端按同一个业务时区取
+  const today = dayKeyInTz(Date.now(), DEFAULT_BUSINESS_TIME_ZONE);
   const minDate = addDays(today, -(MAX_DAYS - 1));
   const rawRange = sp.get("range") || "";
   const rawStart = sp.get("start");
@@ -233,8 +236,8 @@ export default function AnalyticsPage() {
   if (!snap && loading) {
     return (
       <div className="jy-page" aria-busy="true">
-        <ProfitEquation title={EQ_TITLE} extra={archiveToggle} loading revenue={{ value: null }} usage={{ value: null }} fixed={{ value: null }} />
-        <PanelSkeleton title="收入与用量成本" height={400} />
+        <ProfitEquation title={EQ_TITLE} extra={archiveToggle} loading revenue={{ value: null }} upstream={{ value: null }} fixed={{ value: null }} />
+        <PanelSkeleton title="收入与上游成本" height={400} />
         <div className="jy-grid-2 jy-grid-even">
           <PanelSkeleton title="成本构成" lines={5} />
           <PanelSkeleton title="消耗时段" height={180} />
@@ -335,12 +338,12 @@ function coverageReasons(dv: Derived): ReactNode[] {
   const out: ReactNode[] = [];
   const todayMissing = dv.rows.some((r) => r.today && r.missing);
   const past = dv.missingDates.filter((d) => !dv.rows.find((r) => r.date === d)?.today);
-  if (past.length) out.push(`${runsText(past)}上游用量记录缺失，这 ${past.length} 天的用量成本未计入。`);
-  if (todayMissing) out.push("今天还没有采集到上游用量，今天的用量成本未计入。");
+  if (past.length) out.push(`${runsText(past)}上游用量记录缺失，这 ${past.length} 天的上游成本未计入。`);
+  if (todayMissing) out.push("今天还没有采集到上游用量，今天的上游成本未计入。");
   if (dv.partialDates.length) {
     const who = gapSummary(dv.upstreamGaps);
     out.push(
-      `${out.length ? "另有" : ""} ${dv.partialDates.length} 天只有部分上游有记录${who ? `（${who}）` : ""}，缺记录的上游在这些天的用量成本未计入。`.trim(),
+      `${out.length ? "另有" : ""} ${dv.partialDates.length} 天只有部分上游有记录${who ? `（${who}）` : ""}，缺记录的上游在这些天的上游成本未计入。`.trim(),
     );
   }
   return out;
@@ -361,7 +364,7 @@ function Equation({
   href30: string;
   onRetry: () => void;
 }) {
-  const usage: EqTerm = {
+  const upstream: EqTerm = {
     value: dv.usage,
     approx: dv.usageApprox,
     note: dv.usageApprox ? "部分数据缺失" : dv.monitoredCount ? `${dv.monitoredCount} 个上游` : "没有按量计费的上游",
@@ -378,13 +381,13 @@ function Equation({
     if (dv.revenueSplit)
       revReasons.push(`自营收入只按近 7 天、近 30 天统计，这里的收入是把近 ${dv.ownDays} 天的收入按每天下游消费占比摊开后取了所选的 ${dv.rows.length} 天。`);
     const revNote = dv.ownNoRate ? "未设汇率，按 1:1 估算" : dv.revenueSplit ? `由近 ${dv.ownDays} 天收入摊分` : ownName;
-    // 缺的是成本时毛利一定偏高；只是收入估算时方向不定
+    // 缺的是成本时利润一定偏高；只是收入估算时方向不定
     const tail = reasons.length ? (
       <>
-        缺失的用量成本会让毛利偏高。{coverageLink}
+        缺失的上游成本会让毛利和净利偏高。{coverageLink}
       </>
     ) : (
-      "毛利随收入一起是估算值。"
+      "毛利和净利随收入一起是估算值。"
     );
     return (
       <ProfitEquation
@@ -392,10 +395,10 @@ function Equation({
         caption={caption}
         extra={extra}
         revenue={{ value: dv.revenue, approx: dv.revenueApprox, note: revNote, href: "/my" }}
-        usage={usage}
+        upstream={upstream}
         fixed={fixed}
         reasons={[...revReasons, ...reasons]}
-        partialTail={revReasons.length ? tail : <>实际毛利会比这里低。{coverageLink}</>}
+        partialTail={revReasons.length ? tail : <>实际毛利和净利会比这里低。{coverageLink}</>}
       />
     );
   }
@@ -416,7 +419,7 @@ function Equation({
     profitNote = "收入不适用";
     notice = (
       <>
-        自营收入目前只支持 30 天以内。超过 30 天时只统计成本，不把 30 天的收入和更长时间的成本混在一起算毛利。
+        自营收入目前只支持 30 天以内。超过 30 天时只统计成本，不把 30 天的收入和更长时间的成本混在一起算利润。
         <Link href={href30} className="jy-link" scroll={false}>
           切换到近 30 天
         </Link>
@@ -428,7 +431,7 @@ function Equation({
     profitNote = "设置自营站点后计算";
     notice = (
       <>
-        还没有设置自营站点，所以收入和毛利暂时无法计算；用量成本和固定成本照常统计。把自己的 New API 资源标记为自营后即可显示收入。
+        还没有设置自营站点，所以收入、毛利和净利暂时无法计算；上游成本和固定成本照常统计。把自己的 New API 资源标记为自营后即可显示收入。
         <Link href="/my" className="jy-link">
           设置自营站点
         </Link>
@@ -461,7 +464,7 @@ function Equation({
       unconfigured
       revenue={{ value: null, note: revenueNote, href: "/my" }}
       revenueEmpty={revenueEmpty}
-      usage={usage}
+      upstream={upstream}
       fixed={fixed}
       profitNote={profitNote}
       notice={notice}
@@ -481,14 +484,14 @@ function MixPanel({ dv }: { dv: Derived }) {
       return { key: m.id, name, value: null, note: m.fixed > 0 ? `数据缺失，固定成本 ${formatMoney(m.fixed)}` : "数据缺失" };
     }
     const tip: [ReactNode, ReactNode][] = [
-      ["用量成本", formatMoney(m.usage, { approx: m.missingDays > 0 })],
+      ["上游成本", formatMoney(m.usage, { approx: m.missingDays > 0 })],
       ["固定成本", formatMoney(m.fixed)],
     ];
     if (m.missingDays > 0) tip.push(["用量记录", `缺 ${m.missingDays} 天，未计入`]);
     return { key: m.id, name, value: r2(m.usage + m.fixed), tipExtra: tip };
   });
   return (
-    <Panel title="成本构成" caption="按上游资源，期内合计（用量成本 + 固定成本）">
+    <Panel title="成本构成" caption="按上游资源，期内合计（上游成本 + 固定成本）">
       <HBars
         items={items}
         color="var(--jy-s2)"
@@ -526,12 +529,12 @@ function HeatPanel({
 }) {
   const { heat } = dv;
   const fb = fallback?.heat?.available ? fallback.heat : null;
-  let caption = "期内每个时段的用量成本合计，按星期和小时";
+  let caption = "期内每个时段的上游成本合计，按星期和小时";
   let body: ReactNode;
   if (heat.available && !heat.empty) {
-    body = <Heatmap grid={heat.grid} valueLabel="用量成本合计" peakNote={`期内 ${days} 天合计`} />;
+    body = <Heatmap grid={heat.grid} valueLabel="上游成本合计" peakNote={`期内 ${days} 天合计`} />;
   } else if (heat.available) {
-    body = <EmptyState title="这段时间上游没有用量消耗" desc="有消耗后，这里会按星期和小时显示用量成本。" />;
+    body = <EmptyState title="这段时间上游没有用量消耗" desc="有消耗后，这里会按星期和小时显示上游成本。" />;
   } else if (heat.reason === "range-not-supported") {
     body = (
       <EmptyState
@@ -561,7 +564,7 @@ function HeatPanel({
   } else if (fb) {
     // 退回近 7 天：说明为什么不是所选范围，缺快照的上游点名
     const who = gapSummary(heat.gaps);
-    caption = "近 7 天每个时段的用量成本合计，按星期和小时";
+    caption = "近 7 天每个时段的上游成本合计，按星期和小时";
     body = (
       <>
         <p className="jy-caption jy-analytics-heat-note">
@@ -571,9 +574,9 @@ function HeatPanel({
           </Link>
         </p>
         {fb.empty ? (
-          <EmptyState title="近 7 天上游没有用量消耗" desc="有消耗后，这里会按星期和小时显示用量成本。" />
+          <EmptyState title="近 7 天上游没有用量消耗" desc="有消耗后，这里会按星期和小时显示上游成本。" />
         ) : (
-          <Heatmap grid={fb.grid} valueLabel="用量成本合计" peakNote="近 7 天合计" />
+          <Heatmap grid={fb.grid} valueLabel="上游成本合计" peakNote="近 7 天合计" />
         )}
       </>
     );
@@ -647,7 +650,7 @@ function SummaryPanel({ dv, days }: { dv: Derived; days: number }) {
   const approx = dv.usageApprox;
   const none = kpi.coveredDays === 0;
   return (
-    <Panel title="成本概况" caption="用量成本 + 固定成本">
+    <Panel title="成本概况" caption="上游成本 + 固定成本">
       <dl className="jy-kv jy-num">
         <dt>期内总成本</dt>
         <dd>
@@ -698,7 +701,7 @@ function CoveragePanel({ dv, data, stations }: { dv: Derived; data: any; station
     const parts = [`${days - nMissing - nPartial} 天记录完整`];
     if (nPartial) parts.push(`${nPartial} 天只有部分上游有记录`);
     if (nMissing) parts.push(`${nMissing} 天没有任何上游用量记录`);
-    lead = `所选 ${days} 天中，${parts.join("，")}。缺记录的日子不会补成零，用量成本只按已有记录计算。`;
+    lead = `所选 ${days} 天中，${parts.join("，")}。缺记录的日子不会补成零，上游成本只按已有记录计算。`;
   }
   if (earliest && earliest > data.start) lead += `历史数据还在积累：最早的用量记录是 ${md(earliest)}，之后会随运行自动补全。`;
 
@@ -738,7 +741,13 @@ function CoveragePanel({ dv, data, stations }: { dv: Derived; data: any; station
                 {dv.allGaps.map((g) => {
                   const s = byId.get(g.stationId);
                   const tags = [
-                    s?.isOwn ? "自营，不计入成本" : s?.includeInProfit === false ? "不计入利润" : "",
+                    s?.isOwn
+                      ? "自营，不计入成本"
+                      : s?.includeInProfit === false
+                        ? "不计入利润"
+                        : s?.costBasis === "fixed"
+                          ? "按固定成本计，缺记录不影响成本"
+                          : "",
                     g.archivedAt || s?.archivedAt ? "已归档" : "",
                   ].filter(Boolean);
                   return (

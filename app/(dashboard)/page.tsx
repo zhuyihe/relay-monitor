@@ -1,6 +1,7 @@
 "use client";
-// 运营总览：利润等式 + 需要处理 + 上游余量 + 收入 / 用量成本排行。
-// 利润口径与"我的中转站"一致（/api/own/analytics 的 profit）；没设置自营站点时，成本退回 /api/analytics 统计。
+// 运营总览：利润等式 + 需要处理 + 上游余量 + 收入 / 上游成本排行。
+// 利润口径与"我的中转站"一致（/api/own/analytics 的 profit：毛利 = 收入 − 上游成本，净利 = 毛利 − 固定成本）；
+// 没设置自营站点时，成本退回 /api/analytics 统计。时间窗口按接口返回的业务时区显示。
 // 需要处理、上游余量来自 /api/stations，规则与侧栏的待处理计数共用 buildOverviewActions。
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -11,7 +12,8 @@ import { api, rateOf, statusOf, threshold } from "../../lib/client";
 import type { WorkflowAction } from "../../lib/client";
 import { attentionStationIds, buildOverviewActions } from "../../lib/overview-actions";
 import { describeConnectionFailure } from "../../lib/connection-test";
-import { formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd } from "../../lib/format";
+import { formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd, formatZonedTime, parseDay } from "../../lib/format";
+import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, shiftDayLabel } from "../../lib/business-time";
 import { AttentionList } from "../components/attention-list";
 import { Sym } from "../components/icons";
 import type { AttentionItem } from "../components/attention-list";
@@ -67,14 +69,15 @@ const balanceText = (s: any, v: number) => (rateOf(s) !== 1 ? formatUsd(v) : for
 const balanceWithCny = (s: any, v: number) =>
   rateOf(s) !== 1 ? `${formatUsd(v)}，约 ${formatMoney(v * rateOf(s))}` : formatMoney(v);
 
-// 利润等式标题下的时间说明
+// 利润等式标题下的时间说明：按业务时区（接口返回的 tz）划日，与浏览器所在时区无关
 function windowCaption(range: Range, data: any): string {
-  const now = new Date();
-  const end = formatHhmm(now.getTime());
+  const tz = data?.tz || DEFAULT_BUSINESS_TIME_ZONE;
+  const now = Date.now();
+  const end = formatZonedTime(now, tz);
   if (range === "today") return `今日 00:00 至 ${end}`;
   const days = RANGE_DAYS[range];
-  const start = data?.startMs ? new Date(data.startMs) : new Date(now.getFullYear(), now.getMonth(), now.getDate() - (days - 1));
-  return `${formatMonthDay(start)} 00:00 至 今天 ${end}，共 ${days} 天`;
+  const startLabel = data?.startMs != null ? dayKeyInTz(data.startMs, tz) : data?.start || shiftDayLabel(dayKeyInTz(now, tz), -(days - 1));
+  return `${formatMonthDay(parseDay(startLabel))} 00:00 至 今天 ${end}，共 ${days} 天`;
 }
 
 type Money =
@@ -119,9 +122,9 @@ export default function OverviewPage() {
 
   // 经营数据：优先自营站点口径；没标记自营站点时只统计成本
   const loadMoney = useCallback(async (r: Range): Promise<string | null> => {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     try {
-      const own = await api(`/api/own/analytics?range=${r}&tz=${encodeURIComponent(tz)}`);
+      // 窗口按服务端的业务时区划日，不传浏览器时区
+      const own = await api(`/api/own/analytics?range=${r}`);
       if (rangeRef.current !== r) return null;
       setMoney({ range: r, unconfigured: false, own, fallback: null });
       setMoneyErr(null);
@@ -251,7 +254,7 @@ export default function OverviewPage() {
 
       <div className="jy-grid-2 jy-grid-even">
         <RevenuePanel title={`${rangeName}收入`} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
-        <CostPanel title={`${rangeName}用量成本`} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
+        <CostPanel title={`${rangeName}上游成本`} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
       </div>
 
       <TrendModal station={trendStation} onClose={() => setTrendStation(null)} etaDaysRule={critDays} />
@@ -270,16 +273,17 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
       </Panel>
     );
   }
-  const caption = windowCaption(range, money?.own);
+  const caption = windowCaption(range, money?.own || money?.fallback);
   if (!money) {
     const blank: EqTerm = { value: null };
-    return <ProfitEquation title={title} caption={caption} revenue={blank} usage={blank} fixed={blank} loading />;
+    return <ProfitEquation title={title} caption={caption} revenue={blank} upstream={blank} fixed={blank} loading />;
   }
 
   if (money.unconfigured) {
     const fb = money.fallback || {};
     const list: any[] = (fb.stations || []).filter((s: any) => s.includeInProfit);
-    const usageList = list.filter((s) => !s.isOwn && !(s.fixedCny > 0));
+    // 与利润口径一致：配了固定付费的上游只按摊销计（costBasis = fixed），余额下降不算上游成本
+    const usageList = list.filter((s) => !s.isOwn && s.costBasis !== "fixed");
     const fixedList = list.filter((s) => s.fixedCny > 0);
     const usageIds = new Set(usageList.map((s) => s.id));
     const gaps: any[] = (fb.coverage?.stationGaps || []).filter((g: any) => usageIds.has(g.stationId) && Number(g.missingDays) > 0);
@@ -289,7 +293,7 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
         caption={caption}
         unconfigured
         revenue={{ value: null }}
-        usage={{
+        upstream={{
           value: r2(sum(usageList.map((s) => Number(s.totalCny) || 0))),
           approx: gaps.length > 0,
           note: `${usageList.length} 个上游资源`,
@@ -311,7 +315,7 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
   if (profit.error) {
     return (
       <Panel title={title} caption={caption}>
-        <ErrorState title="毛利暂时算不出来" error={profit.error} onRetry={onRetry} />
+        <ErrorState title="利润暂时算不出来" error={profit.error} onRetry={onRetry} />
       </Panel>
     );
   }
@@ -335,18 +339,19 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
         // 带上同一个时间范围，自营业务默认是近 7 天
         href: range === "7d" ? "/my" : `/my?range=${range}`,
       }}
-      usage={{
-        value: r2(sum(usageCosts.map((c) => Number(c.cny) || 0))),
+      upstream={{
+        value: profit.upstreamCostCny ?? r2(sum(usageCosts.map((c) => Number(c.cny) || 0))),
         approx: !!profit.estimated || (!profit.complete && !ownRateMissing),
         note: `${usageCosts.length} 个上游资源`,
         href: "/analytics",
       }}
       fixed={{
-        value: r2(sum(fixedCosts.map((c) => Number(c.cny) || 0))),
+        value: profit.fixedCostCny ?? r2(sum(fixedCosts.map((c) => Number(c.cny) || 0))),
         note: fixedCosts.length ? `${fixedCosts.length} 项，按天摊销` : "没有固定成本",
         href: "/stations",
       }}
-      profit={profit.profitCny ?? null}
+      gross={profit.grossProfitCny}
+      net={profit.netProfitCny ?? profit.profitCny}
       reasons={reasons}
       partialTail="实际数字可能与这里有出入。"
     />
@@ -719,7 +724,7 @@ function RunwayPanel({
   );
 }
 
-// ---- 收入 / 用量成本排行 ------------------------------------------------------
+// ---- 收入 / 上游成本排行 ------------------------------------------------------
 
 function MoneyPanelShell({
   title,
@@ -815,7 +820,7 @@ function CostPanel({ title, money, error, onRetry }: { title: string; money: Mon
           .map((g: any) => [g.stationId, Number(g.missingDays)]),
       );
       const list = (fb.stations || []).filter(
-        (s: any) => s.includeInProfit && !s.isOwn && !(s.fixedCny > 0) && (s.totalCny > 0 || gaps.has(s.id)),
+        (s: any) => s.includeInProfit && !s.isOwn && s.costBasis !== "fixed" && (s.totalCny > 0 || gaps.has(s.id)),
       );
       const items: HBarItem[] = list
         .map((s: any) => ({
@@ -860,8 +865,8 @@ function CostPanel({ title, money, error, onRetry }: { title: string; money: Mon
         <HBars
           items={view.items}
           color="var(--jy-s2)"
-          unitName="用量成本"
-          empty="这段时间上游资源没有产生用量成本。"
+          unitName="上游成本"
+          empty="这段时间按用量计费的上游没有产生成本。"
           total={view.items.length ? { label: "合计", value: formatMoney(view.total, { approx: view.approx }) } : undefined}
         />
       ) : null}

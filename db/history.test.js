@@ -1,29 +1,53 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { History, dailyUsageRows } from "./history.js";
+import { dayStartInTz } from "../lib/business-time.js";
 
 test("日汇总按后一快照归日，充值不计作消耗", () => {
-  const start = new Date(2026, 0, 2).getTime();
+  const start = dayStartInTz("2026-01-02", "Asia/Shanghai");
   const end = start + 86400000;
   const rows = dailyUsageRows([
     { station_id: "a", t: start - 3600000, remaining: 10 },
     { station_id: "a", t: start + 3600000, remaining: 8 },
     { station_id: "a", t: start + 7200000, remaining: 9 },
     { station_id: "a", t: start + 10800000, remaining: 7 },
-  ], start, end);
+  ], start, end, "Asia/Shanghai");
 
   assert.deepEqual(rows, [{ stationId: "a", date: "2026-01-02", usd: 4 }]);
 });
 
 test("日汇总保留零消耗日期，保证长期分析覆盖期诚实", () => {
-  const start = new Date(2026, 0, 2).getTime();
+  const start = dayStartInTz("2026-01-02", "Asia/Shanghai");
   const end = start + 86400000;
   const rows = dailyUsageRows([
     { station_id: "a", t: start - 1000, remaining: 10 },
     { station_id: "a", t: start + 1000, remaining: 10 },
-  ], start, end);
+  ], start, end, "Asia/Shanghai");
 
   assert.deepEqual(rows, [{ stationId: "a", date: "2026-01-02", usd: 0 }]);
+});
+
+test("日汇总按业务时区划日，与进程时区无关", () => {
+  // 北京时间 1 月 2 日 07:00 = UTC 1 月 1 日 23:00：按业务时区应归入 1 月 2 日
+  const start = dayStartInTz("2026-01-02", "Asia/Shanghai");
+  const points = [
+    { station_id: "a", t: start - 2 * 3600000, remaining: 10 },
+    { station_id: "a", t: start + 7 * 3600000, remaining: 9 },
+  ];
+  const rows = dailyUsageRows(points, start - 3600000, start + 86400000, "Asia/Shanghai");
+  assert.deepEqual(rows, [{ stationId: "a", date: "2026-01-02", usd: 1 }]);
+  const utc = dailyUsageRows(points, start - 3600000, start + 86400000, "UTC");
+  assert.deepEqual(utc, [{ stationId: "a", date: "2026-01-01", usd: 1 }]);
+});
+
+test("usedBetween 只计到终点为止，usedSince 不设终点", () => {
+  const history = new History({ query: async () => [[]] });
+  history.data.a = [[1000, 10], [2000, 9], [3000, 9.5], [4000, 8], [5000, 6]];
+  assert.equal(history.usedBetween("a", 1500, 4000), 2.5);
+  assert.equal(history.usedBetween("a", 1000, 2000), 1);
+  // 基线取起点之前的最后一个快照
+  assert.equal(history.usedBetween("a", 2500, 4000), 1.5);
+  assert.equal(history.usedSince("a", 1500), 4.5);
 });
 
 test("永久留存完全跳过原始快照清理", async () => {

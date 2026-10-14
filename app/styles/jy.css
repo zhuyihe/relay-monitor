@@ -183,10 +183,12 @@ body {
 .jy-eq-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
 .jy-eq-head h2 { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; }
 .jy-eq-head .spacer { flex: 1; }
+/* 两行共用一张五列网格：项 运算符 项 运算符 结果；第二行开头承接第一行的毛利 */
 .jy-eq-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1.2fr);
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1.2fr);
   align-items: stretch;
+  row-gap: 28px;
 }
 .jy-eq-term {
   display: flex; flex-direction: column; gap: 6px;
@@ -205,8 +207,11 @@ a.jy-eq-term:hover { background: var(--jy-sunken); text-decoration: none; color:
   align-self: start; padding: 28px 4px 0;
   font-size: 32px; line-height: 40px; font-weight: 300; color: var(--jy-ink-3);
 }
-.jy-eq-result { background: var(--jy-cobalt-tint); margin-left: 8px; }
+.jy-eq-result { margin-left: 8px; }
 .jy-eq-result .jy-eq-label { color: var(--jy-ink); font-weight: 500; }
+.jy-eq-result.is-gross { background: var(--jy-sunken); }
+.jy-eq-result.is-net { background: var(--jy-cobalt-tint); }
+.jy-eq-term.is-carry .jy-eq-label, .jy-eq-term.is-carry .jy-eq-value, .jy-eq-term.is-carry .jy-eq-value .unit { color: var(--jy-ink-3); }
 .jy-eq-term.is-partial .jy-eq-value { color: var(--jy-ink-2); }
 .jy-eq-empty { font-size: 24px; line-height: 40px; font-weight: 500; color: var(--jy-ink-3); }
 .jy-partial-strip { display: block; height: 6px; width: 100%; max-width: 160px; border-radius: 2px; background-color: var(--jy-sunken); }
@@ -546,8 +551,10 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-shell .jy-nav-count { position: absolute; top: 4px; right: 4px; min-width: 16px; height: 16px; font-size: 10px; line-height: 16px; padding: 0 4px; }
   .jy-grid-2, .jy-grid-2.jy-grid-even { grid-template-columns: minmax(0, 1fr); }
   .jy-freshness .txt { display: none; }
-  .jy-eq-row { grid-template-columns: 1fr 1fr; gap: 20px 12px; }
+  .jy-eq-row { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px 12px; }
   .jy-eq-op { display: none; }
+  /* 没有运算符时承接项只占位，固定成本、净利仍对齐上游成本、毛利 */
+  .jy-eq-term.is-carry { visibility: hidden; }
   .jy-eq-term { margin: 0; }
   .jy-eq-result { margin-left: 0; }
   .jy-onboard { grid-template-columns: 1fr; }
@@ -596,9 +603,11 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-eq-term .jy-eq-note { flex-basis: 100%; order: 4; }
   .jy-eq-term .jy-partial-strip { order: 3; flex-basis: 100%; max-width: none; margin: 4px 0 2px; }
   .jy-eq-term[data-op]::before { content: attr(data-op); position: absolute; left: 4px; top: 12px; font-size: 22px; font-weight: 300; color: var(--jy-ink-3); }
-  .jy-eq-result { border-top: 2px solid var(--jy-ink); margin-top: 6px; padding: 12px 12px 12px 28px; border-radius: 0 0 var(--jy-r2) var(--jy-r2); }
+  .jy-eq-term.is-carry { display: none; }
+  .jy-eq-result { margin-top: 6px; padding: 12px 12px 12px 28px; }
+  .jy-eq-result.is-gross { border-top: 1px solid var(--jy-ink-3); margin-bottom: 6px; }
+  .jy-eq-result.is-net { border-top: 2px solid var(--jy-ink); border-radius: 0 0 var(--jy-r2) var(--jy-r2); }
   a.jy-eq-term:hover { background: none; }
-  .jy-eq-result:hover { background: var(--jy-cobalt-tint) !important; }
   .jy-attention li { padding: 14px 16px; grid-template-columns: 16px minmax(0, 1fr); }
   .jy-attention .actions { grid-column: 2; margin-left: -8px; }
   .jy-runway { padding: 4px 16px 16px; }

@@ -439,8 +439,8 @@ export function StationDrawer({
             name="includeInProfit"
             valuePropName="checked"
             extra={isFixed
-              ? "固定付费默认按天摊销计入利润成本；纯观察或不属于当前业务时关闭。"
-              : "默认计入：即使本站不出现在 New API 渠道列表、只存在于外层 Sub2API 的内部负载均衡中，也会按用量或余额下降计入成本。仅纯观察节点或会造成重复汇总时关闭。"}
+              ? "固定付费默认按天摊销计入固定成本；纯观察或不属于当前业务时关闭。"
+              : "默认计入：即使本站不出现在 New API 渠道列表、只存在于外层 Sub2API 的内部负载均衡中，也会按用量或余额下降计入上游成本。仅纯观察节点或会造成重复汇总时关闭。"}
           >
             <SwitchRow label="计入利润成本" />
           </Form.Item>

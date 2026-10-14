@@ -1,6 +1,8 @@
 // 成本与利润页的数据整理：把 /api/analytics 与 /api/own/analytics 的响应整理成各面板要用的形状。
-// 口径与旧页面一致：成本只算上游（非自营且计入利润），¥ 由接口按站点汇率折算；
-// 缺记录的日子标成缺失，不补零。纯函数，不依赖 React。
+// 口径与「我的站点」一致（lib/profit.js）：成本只算上游（非自营且计入利润），¥ 由接口按站点汇率折算；
+// 上游成本只算按用量计费的上游，配了固定付费的上游只计摊销（costBasis = fixed），不重复计入余额下降。
+// 日期按接口返回的业务时区划分，与浏览器时区无关。缺记录的日子标成缺失，不补零。纯函数，不依赖 React。
+import { dayKeyInTz } from "../../../lib/business-time";
 import { formatMonthDay, isoDay, parseDay } from "../../../lib/format";
 import type { TrendRow } from "../../components/trend-panel";
 
@@ -77,18 +79,21 @@ export function derive(data: any, own: any) {
   const stations: any[] = Array.isArray(data?.stations) ? data.stations : [];
   const upstream = stations.filter((s) => !s.isOwn && s.includeInProfit !== false);
   const upIds = new Set(upstream.map((s) => s.id));
+  // 按用量计成本的上游；固定付费上游的余额下降不算成本
+  const usageUp = upstream.filter((s) => s.costBasis !== "fixed");
+  const usageIds = new Set(usageUp.map((s) => s.id));
   const days = Math.max(1, Number(data.days) || 1);
   const dates = Array.from({ length: days }, (_, i) => addDays(data.start, i));
   const inWindow = new Set(dates);
   const coverage = data.coverage || null;
   const allGaps: any[] = Array.isArray(coverage?.stationGaps) ? coverage.stationGaps : [];
 
-  // 每日用量成本，以及每天有哪些上游留下了日汇总记录
+  // 每日上游成本，以及每天有哪些按量上游留下了日汇总记录
   const usageBy = new Map<string, number>();
   const seenBy = new Map<string, Set<string>>();
   const withRows = new Set<string>();
   for (const r of Array.isArray(data.daily) ? data.daily : []) {
-    if (!upIds.has(r.stationId) || !inWindow.has(r.date)) continue;
+    if (!usageIds.has(r.stationId) || !inWindow.has(r.date)) continue;
     usageBy.set(r.date, (usageBy.get(r.date) || 0) + (Number(r.cny) || 0));
     if (!seenBy.has(r.date)) seenBy.set(r.date, new Set());
     seenBy.get(r.date).add(r.stationId);
@@ -100,11 +105,11 @@ export function derive(data: any, own: any) {
     fixedBy.set(r.date, (fixedBy.get(r.date) || 0) + (Number(r.cny) || 0));
   }
 
-  // 接口不返回资源类型，这里用"有日汇总记录或出现在覆盖缺口里"识别需要采集用量的上游；
-  // 纯固定成本的上游两者都不满足，不会被误判为缺数据。
+  // 用"有日汇总记录或出现在覆盖缺口里"识别需要采集用量的上游；纯固定成本的上游两者都不满足，
+  // 配了固定付费的上游已按 costBasis 排除，都不会被误判为缺数据。
   const gapIds = new Set(allGaps.map((g) => g.stationId));
-  const monitored = upstream.filter((s) => withRows.has(s.id) || gapIds.has(s.id));
-  const upstreamGaps = allGaps.filter((g) => upIds.has(g.stationId));
+  const monitored = usageUp.filter((s) => withRows.has(s.id) || gapIds.has(s.id));
+  const upstreamGaps = allGaps.filter((g) => usageIds.has(g.stationId));
 
   // 日收入：自营分析只给窗口总收入，按每日下游消费占比摊到天（与旧页面同一算法），
   // 保证收入合计与利润口径一致。
@@ -118,8 +123,10 @@ export function derive(data: any, own: any) {
     if (trendTotal > 0) {
       const ratio = own.profit.incomeCny / (trendTotal * rate);
       incomeBy = new Map();
+      // 自营趋势的 t 是业务时区零点，按同一时区取日期，浏览器在别的时区也不会错位一天
+      const tz = own.tz || data.tz;
       for (const t of own.trend) {
-        const key = isoDay(new Date(t.t));
+        const key = dayKeyInTz(t.t, tz);
         incomeBy.set(key, r2((incomeBy.get(key) || 0) + t.cost * rate * ratio));
       }
     } else if (!(Number(own.profit.incomeCny) > 0)) {
@@ -166,16 +173,16 @@ export function derive(data: any, own: any) {
   const avg = r2(coveredTotal / Math.max(1, covered.length));
   const peak = covered.reduce<(typeof covered)[number] | null>((a, r) => (!a || r.cost > a.cost ? r : a), null);
 
-  // 成本构成：按上游合计用量成本 + 固定成本；一条记录都没有的上游标成缺失而不是 0
+  // 成本构成：每个按量上游的上游成本 + 固定成本；一条记录都没有的上游标成缺失而不是 0
   const gapById = new Map(upstreamGaps.map((g) => [g.stationId, g]));
   const mix: MixItem[] = upstream
     .map((s) => ({
       id: s.id,
       name: s.name,
       archived: !!s.archivedAt,
-      usage: Number(s.totalCny) || 0,
+      usage: usageIds.has(s.id) ? Number(s.totalCny) || 0 : 0,
       fixed: Number(s.fixedCny) || 0,
-      unknown: gapIds.has(s.id) && !withRows.has(s.id),
+      unknown: usageIds.has(s.id) && gapIds.has(s.id) && !withRows.has(s.id),
       missingDays: Number(gapById.get(s.id)?.missingDays) || 0,
     }))
     .filter((m) => m.unknown || m.usage + m.fixed > 0)

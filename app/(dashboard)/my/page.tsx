@@ -1,7 +1,8 @@
 "use client";
-// 自营业务：自营站点的下游收入、上游成本与毛利，按概览 / 用户 / 模型与渠道分标签。
+// 自营业务：自营站点的下游收入、上游成本、毛利与净利，按概览 / 用户 / 模型与渠道分标签。
 // 数据来自 /api/own/analytics（同范围 60 秒内复用成功结果，约 30 秒自动刷新一次）；
-// 近 7 / 30 天另取 /api/analytics 的逐日上游成本，画每日收入、成本与毛利（它慢，不挡着页面先出来）；
+// 近 7 / 30 天另取 /api/analytics 的逐日上游成本，画每日收入、成本与净利（它慢，不挡着页面先出来）；
+// 时间窗口都按服务端的业务时区划日，不传浏览器时区；
 // 日志精算另走 /api/own/audit，开销大，只在点按钮时请求。
 import "../../styles/pages/my.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -28,8 +29,6 @@ const TAB_DEFS: { key: MyTab; label: string }[] = [
   { key: "users", label: "用户" },
   { key: "models", label: "模型与渠道" },
 ];
-
-const tzName = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 export default function MyStationPage() {
   const router = useRouter();
@@ -73,7 +72,7 @@ export default function MyStationPage() {
         ? Promise.resolve(null)
         : api(`/api/analytics?days=${r === "7d" ? 7 : 30}`).catch((e: any) => ({ error: productErrorMessage(e) }));
     try {
-      const res = await api(`/api/own/analytics?range=${r}&tz=${encodeURIComponent(tzName())}`);
+      const res = await api(`/api/own/analytics?range=${r}`);
       // 新的逐日成本回来前先沿用上一份成功的，免得每次轮询趋势图都闪一下
       const entry: { at: number; data: any; costs?: any } = {
         at: Date.now(),
@@ -131,7 +130,7 @@ export default function MyStationPage() {
     setAuditing(true);
     setAuditError(null);
     try {
-      const res = await api(`/api/own/audit?range=${r}&tz=${encodeURIComponent(tzName())}&maxRows=${auditRows}`);
+      const res = await api(`/api/own/audit?range=${r}&maxRows=${auditRows}`);
       if (rangeRef.current === r) setAudit(res);
     } catch (e: any) {
       if (rangeRef.current === r) {
@@ -160,18 +159,18 @@ export default function MyStationPage() {
       <div className="jy-page">
         <Onboarding
           title="还没有设置自营站点"
-          desc="自营业务会汇总你自己站点的下游收入，再减去上游用量成本和固定成本，得出期内毛利。"
+          desc="自营业务会汇总你自己站点的下游收入：减去上游成本得出毛利，再减去固定成本得出净利。"
           steps={[
             { title: "在上游资源中找到你自己的站点", desc: "编辑它，打开“这是我的自营站点”。" },
             { title: "填写管理员访问令牌", desc: "用于读取下游用户和渠道计费数据，只读，不会改动站点。" },
-            { title: "回到这里查看毛利", desc: "设置好后刷新本页，之后每 30 秒自动更新。" },
+            { title: "回到这里查看利润", desc: "设置好后刷新本页，之后每 30 秒自动更新。" },
           ]}
           action={
             <Button type="primary" size="large" onClick={() => router.push("/stations")}>
               前往上游资源设置
             </Button>
           }
-          figureNote="设置完成后，这里会算出期内毛利，并列出消费最多的用户和模型。"
+          figureNote="设置完成后，这里会算出期内毛利和净利，并列出消费最多的用户和模型。"
         />
       </div>
     );
@@ -192,8 +191,8 @@ export default function MyStationPage() {
     const blank = { value: null };
     return (
       <div className="jy-page" aria-busy="true">
-        <ProfitEquation title="期内经营" revenue={blank} usage={blank} fixed={blank} loading />
-        <PanelSkeleton title="收入与用量成本" height={220} />
+        <ProfitEquation title="期内经营" revenue={blank} upstream={blank} fixed={blank} loading />
+        <PanelSkeleton title="收入与上游成本" height={220} />
         <div className="jy-grid-2 jy-grid-even">
           <PanelSkeleton title="消费预测" lines={5} />
           <PanelSkeleton title="消费最多的用户" lines={5} />

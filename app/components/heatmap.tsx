@@ -9,7 +9,7 @@ const BINS = [0.1, 0.28, 0.46, 0.64, 0.82];
 
 export function Heatmap({
   grid,
-  valueLabel = "平均用量成本",
+  valueLabel = "平均上游成本",
   peakNote,
   format = formatMoney,
 }: {

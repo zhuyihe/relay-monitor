@@ -1,5 +1,6 @@
 // 站点响应拼装助手（v1 server.js redact 的平移版，改为显式接收 rt）。
 // 隐藏敏感凭证，仅返回是否已配置
+import { businessTimeZone, dayBoundsInTz } from "../lib/business-time.js";
 import { describeConnectionFailure } from "../lib/connection-test.js";
 
 export function redact(rt, s) {
@@ -7,9 +8,8 @@ export function redact(rt, s) {
   const balance = s.balance && !s.balance.ok
     ? { ...s.balance, error: describeConnectionFailure(s.balance.error, s).diagnostic }
     : s.balance;
-  // 今日消耗：sub2api 直接用站点仪表盘接口的值；拿不到就按余额历史推算（前端标 ≈）
-  const midnight = new Date();
-  midnight.setHours(0, 0, 0, 0);
+  // 今日消耗：sub2api 直接用站点仪表盘接口的值；拿不到就按余额历史从业务时区零点推算（前端标 ≈）
+  const midnight = dayBoundsInTz(Date.now(), businessTimeZone()).startMs;
   const fromSite = s.balance?.todayUsed;
   return {
     ...rest,
@@ -22,7 +22,7 @@ export function redact(rt, s) {
       : null,
     prediction: rt.history.predict(s.id),
     spark: rt.history.sparkline(s.id, 48),
-    todayUsed: fromSite ?? rt.history.usedSince(s.id, midnight.getTime()),
+    todayUsed: fromSite ?? rt.history.usedSince(s.id, midnight),
     todayIsEstimate: fromSite == null,
     todayTokens: s.balance?.todayTokens ?? null,
     todayRequests: s.balance?.todayRequests ?? null,

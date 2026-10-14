@@ -1,5 +1,5 @@
 "use client";
-// 模型与渠道：模型用量排行、按上游的用量成本、模型明细、用量趋势、分组与渠道、未关联渠道、日志精算。
+// 模型与渠道：模型用量排行、按上游的上游成本、模型明细、用量趋势、分组与渠道、未关联渠道、日志精算。
 import { useState } from "react";
 import Link from "next/link";
 import { EMPTY, formatCompact, formatHhmm, formatInt, formatMoney, formatMonthDay, formatPct } from "../../../lib/format";
@@ -93,13 +93,13 @@ function ModelBars({ v, range }: { v: OwnView; range: OwnRange }) {
   );
 }
 
-// ---- 按上游的用量成本 --------------------------------------------------------
+// ---- 按上游的上游成本 --------------------------------------------------------
 
 function UpstreamCost({ v, reload }: { v: OwnView; reload: () => Promise<unknown> }) {
   const p = v.profit;
   if (!p || p.error) {
     return (
-      <Panel title="用量成本" caption="按上游">
+      <Panel title="上游成本" caption="按上游">
         <ErrorState title="上游成本暂时算不出来" error={productErrorMessage(p?.error || "接口没有返回利润数据")} onRetry={() => reload()} />
       </Panel>
     );
@@ -115,11 +115,11 @@ function UpstreamCost({ v, reload }: { v: OwnView; reload: () => Promise<unknown
   const unmatched: any[] = p.unmatched || [];
   const enabledUnmatched = sum(unmatched, (u) => u.enabled);
   return (
-    <Panel title="用量成本" caption="按上游，不含固定成本">
+    <Panel title="上游成本" caption="按上游，不含固定成本">
       <HBars
         items={items}
         color="var(--jy-s2)"
-        unitName="用量成本"
+        unitName="上游成本"
         total={items.length ? { label: "合计", value: formatMoney(sum(rows, (c) => c.cny)) } : undefined}
         empty="没有按用量计成本的上游。"
       />
