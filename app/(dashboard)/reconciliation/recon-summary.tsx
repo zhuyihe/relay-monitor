@@ -34,10 +34,13 @@ const unaccountedLevel = (state: string) => state === "complete" ? "good" : stat
 function UnaccountedUpstreamBlock({ data, rereading }: { data: UnaccountedUpstream; rereading: boolean }) {
   const { currency } = data;
   const pending = data.state === "pending";
-  // 已核算多于账号扣费的原因：取数时刻不同、汇率不同或两者都有；旧响应没有 overAccounted 时按取数时刻
+  // 已核算多于账号扣费的原因：取数时刻不同、汇率不同或两者都有（mixed）；旧响应没有 overAccounted 时按取数时刻。
+  // 每个账号都有的原因直接说，只有部分账号有的说「部分还有」，两种原因各有账号单独占着时说「或」
   const overReasons = new Set(data.accounts.filter((account) => (account.unaccounted ?? 0) < 0).map((account) => account.overAccounted || "timing"));
-  const overReason = !overReasons.size ? "" : overReasons.size > 1 ? "取数时刻或汇率不同"
-    : overReasons.has("mixed") ? "取数时刻和汇率不同" : overReasons.has("rate") ? "汇率不同" : "多为取数时刻不同";
+  const mixed = overReasons.has("mixed"), timing = overReasons.has("timing"), rate = overReasons.has("rate");
+  const overReason = !overReasons.size ? "" : timing && rate ? "取数时刻或汇率不同"
+    : timing ? (mixed ? "多为取数时刻不同，部分还有汇率不同" : "多为取数时刻不同")
+    : rate ? (mixed ? "汇率不同，部分还有取数时刻不同" : "汇率不同") : "取数时刻和汇率不同";
   // 截至现在的窗口里，账号扣费按取数时刻截止（缓存期内复用），核算成本截至本次读取，两者可能差几分钟。
   const live = isLivePreset(data.window.preset);
   const stationNames = (stations: { name: string }[]) => stations.map((station) => station.name).join("、");

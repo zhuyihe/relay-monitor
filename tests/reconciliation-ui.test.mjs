@@ -206,8 +206,8 @@ test("3b unaccounted upstream copy explains partial reads, excluded upstreams an
   await unaccounted.locator(".reconciliation-summary-metric").getByText("$3.00", { exact: true }).waitFor();
   await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游账号" }).click(); await unaccounted.getByText("账号扣费 $1.00 · 已核算 $2.00 · 未纳入 -$1.00", { exact: true }).waitFor();
   await unaccounted.getByText(/余额历史没覆盖整个时段，金额偏低/).waitFor(); assert.equal(await unaccounted.getByText(/账号扣费截至/).count(), 0);
-  // 多核算的原因按各账号给出：只有汇率不同时说汇率，同一账号两者都有时说「和」，不同账号原因不同时说「或」；
-  // 旧响应没有 overAccounted 时按取数时刻；不计入成本的上游有多个时说「它们」
+  // 多核算的原因按各账号给出：只有汇率不同时说汇率，每个账号两者都有时说「和」，只有部分账号还有另一种原因时说「部分还有」，
+  // 两种原因各有账号单独占着时说「或」；旧响应没有 overAccounted 时按取数时刻；不计入成本的上游有多个时说「它们」
   const reasons = async (overAccounted, excludedStations, caption, second = {}) => {
     const accounts = summarized.accounts.map((account, index) => index === 0 ? { ...account, overAccounted } : { ...account, ...second });
     const opened = await openDailyPage(t, { data: dailyResponse(rows, { unaccountedUpstream: { ...summarized, accounts, window, fixedStations: [], excludedStations } }) });
@@ -218,6 +218,8 @@ test("3b unaccounted upstream copy explains partial reads, excluded upstreams an
   await reasons("rate", [], /已核算多于账号扣费的账号（汇率不同）在合计里按 0 计。/);
   await reasons(undefined, [], /已核算多于账号扣费的账号（多为取数时刻不同）在合计里按 0 计。/);
   await reasons("rate", [], /已核算多于账号扣费的账号（取数时刻或汇率不同）在合计里按 0 计。/, { unaccountedUsd: -1, unaccounted: -1, overAccounted: "timing" });
+  await reasons("mixed", [], /已核算多于账号扣费的账号（多为取数时刻不同，部分还有汇率不同）在合计里按 0 计。/, { unaccountedUsd: -1, unaccounted: -1, overAccounted: "timing" });
+  await reasons("mixed", [], /已核算多于账号扣费的账号（汇率不同，部分还有取数时刻不同）在合计里按 0 计。/, { unaccounted: -1, overAccounted: "rate" });
   const mixed = await reasons("mixed", [{ id: "excluded-1", name: "Excluded upstream" }, { id: "excluded-2", name: "Second excluded" }], /已核算多于账号扣费的账号（取数时刻和汇率不同）在合计里按 0 计。/);
   await mixed.getByText(/设为不计入成本的上游不做账号级对比：Excluded upstream、Second excluded（建在它们上面的核算关联仍按 Key 用量计成本）。/).waitFor();
 });

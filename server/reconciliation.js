@@ -1748,7 +1748,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   function usageUpstreams() {
     const own = ownStation();
     if (!own) return null;
-    // store.list() 默认已不含归档站点，这里再按归档过滤一次，和我的站点的取数范围保持一致
+    // store.list() 默认已不含归档站点（我的站点的利润也靠这个默认行为排除归档站点）；这里再过滤一次，不依赖 list 的默认参数
     const { included, excluded } = selectCostUpstreams(rt.store.list().filter((station) => !station.archivedAt), own.id);
     return { own, usage: included.filter((station) => costBasisOf(station) === "usage"), fixed: included.filter((station) => costBasisOf(station) === "fixed"), excluded };
   }
