@@ -1550,8 +1550,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       ...(group.code ? { code: group.code } : {}) };
   }
 
-  // 当前有效的监控关联：渠道还在目录里且没改过、监控站点仍在用（和渠道列表的「已接入」同一判断）。
-  // 核算页按它把账单授权上的核算关联归到对应的监控账号。
+  // 当前有效的监控关联：本站还是目录里的本站、渠道还在且没改过、监控站点仍开着监控且没归档。
+  // 逐条判断：渠道列表只要有一条关联待复核就把整个渠道标为待复核，这里只去掉那一条，其余仍算有效。
+  // 核算页按它把没开监控的站点上的核算关联归到对应的监控账号。
   function getMonitorLinks() {
     const channels = new Map((catalogue?.channels || []).map((channel) => [Number(channel.id), channel]));
     return links.filter((link) => {

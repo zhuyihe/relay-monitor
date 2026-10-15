@@ -76,15 +76,16 @@ function UnaccountedUpstreamBlock({ data, rereading }: { data: UnaccountedUpstre
 }
 
 // fixedCost：本页有建在固定采购上游上的关联，它们的成本记 0，采购费只在自营业务页按时段摊销。
-export function ReconSummary({ summary, unaccounted, usageRereading = false, reference, fixedCost = false }: {
-  summary: ReconciliationSummary | null; unaccounted?: UnaccountedUpstream | null; usageRereading?: boolean; reference: boolean; fixedCost?: boolean;
+// preset：当前核算范围；「今天」带到自营业务页，其余用它的默认范围（近 7 天）。
+export function ReconSummary({ summary, unaccounted, usageRereading = false, reference, fixedCost = false, preset }: {
+  summary: ReconciliationSummary | null; unaccounted?: UnaccountedUpstream | null; usageRereading?: boolean; reference: boolean; fixedCost?: boolean; preset?: string;
 }) {
   const currency = summary ? displayTotals(summary.totals).currency : "USD";
   const note = <>
     {summary?.totals.profitComplete ? "已知渠道范围的完整账单。" : "仅已确认范围的金额，不代表全站完整利润。"}
     {currency === "CNY" ? "金额按人民币汇总，收费按本站、成本按各上游的当前汇率折算（过去的时段也按当前汇率）；" : "金额按系统原值（美元）汇总；"}
     本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}。今天、近 7 天、本月为截至现在的实时金额，自然日结束后自动结账。
-    {fixedCost ? <>固定采购上游的成本记 0，采购费不在这里分摊；扣掉固定成本后的净利见<Link href="/my">{NAV_LABELS.my}</Link>。</> : null}
+    {fixedCost ? <>固定采购上游的成本记 0，采购费不在这里分摊；扣掉固定成本后的净利见<Link href={preset === "today" ? "/my?range=today" : "/my"}>{NAV_LABELS.my}</Link>。</> : null}
   </>;
   return <Panel title="核算汇总" className="reconciliation-summary" foot={note}>
     {reference

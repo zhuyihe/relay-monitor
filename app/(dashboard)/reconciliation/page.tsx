@@ -245,7 +245,7 @@ export default function ReconciliationPage() {
     </div> : null}
 
     <div className="reconciliation-overview">
-      <ReconSummary summary={commonSummary} unaccounted={unaccounted} usageRereading={usageRereading} reference={reference} fixedCost={results.some(isFixedCost)} />
+      <ReconSummary summary={commonSummary} unaccounted={unaccounted} usageRereading={usageRereading} reference={reference} fixedCost={results.some(isFixedCost)} preset={activeWindow.preset} />
       <ReconWindowGroups groups={windowGroups} reference={reference} />
       <ReconCoverage coverage={coverage} reference={reference} />
     </div>

@@ -672,7 +672,7 @@ test("U03 actual Repository全量入口保留archived/disabled关系；Store真�
 async function genuineBatchFixture(t) {
   const state = { now: Date.parse("2026-10-09T07:00:00Z"), rules: [], members: [], created: 0, ruleWrites: 0,
     catalogue: null, links: [], linkGate: null, failLinks: false, failRuleKey: null, requests: [], requestHook: null,
-    channels: Array.from({ length: 10 }, (_, index) => index + 1), keys: [9, 10], keyNames: {}, upstreamAccountId: 42 };
+    channels: Array.from({ length: 10 }, (_, index) => index + 1), channelBaseUrls: {}, keys: [9, 10], keyNames: {}, upstreamAccountId: 42 };
   t.mock.method(Date, "now", () => state.now);
   t.mock.method(globalThis, "fetch", async (input, options = {}) => {
     const url = new URL(input);
@@ -685,7 +685,7 @@ async function genuineBatchFixture(t) {
         : url.pathname === "/api/user/self/groups" ? { g1: { ratio: 1 } }
           : url.pathname === "/api/token/" ? { total: state.keys.length, items: state.keys.map((id) => ({ id, name: state.keyNames[id] || `Key ${id}`, status: 1, group: "g1", cross_group_retry: false })) }
             : url.pathname === "/api/channel/" ? { total: state.channels.length, items: state.channels.map((id) => ({ id, name: `Channel ${id}`,
-              type: 1, status: 1, base_url: "https://up.test", group: "g1" })) } : { quota: 100 };
+              type: 1, status: 1, base_url: state.channelBaseUrls[id] || "https://up.test", group: "g1" })) } : { quota: 100 };
     return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
   });
   const capabilities = new Map();
@@ -897,7 +897,7 @@ test("F07 directory reads reevaluate rule source after missing channels, restore
   assert.equal(f.state.ruleWrites, 1, "source observations do not rewrite financial scope");
 });
 
-test("3b 当前有效的监控关联：渠道不在目录或监控站点停用时不再返回，给出的是副本", async (t) => {
+test("3b 当前有效的监控关联：渠道不在目录、改过上游地址或监控站点停用、归档时不再返回，给出的是副本", async (t) => {
   const f = await genuineBatchFixture(t), input = f.request([[1]]), preview = await f.rt.channelOnboarding.probeBatch(input);
   const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId });
   const stationIds = result.groups[0].saved.stationIds;
@@ -910,9 +910,14 @@ test("3b 当前有效的监控关联：渠道不在目录或监控站点停用�
   f.state.channels = f.state.channels.filter((id) => id !== 1);
   await f.rt.channelOnboarding.sync(); assert.deepEqual(current(), [], "渠道不在目录里");
   f.state.channels.unshift(1); await f.rt.channelOnboarding.sync(); assert.deepEqual(current(), expected);
+  f.state.channelBaseUrls[1] = "https://moved.test";
+  await f.rt.channelOnboarding.sync(); assert.deepEqual(current(), [], "渠道改过上游地址，关联待复核");
+  delete f.state.channelBaseUrls[1]; await f.rt.channelOnboarding.sync(); assert.deepEqual(current(), expected);
   const station = f.rt.store.get(stationIds[0]), monitorEnabled = station.monitorEnabled;
   station.monitorEnabled = false; assert.deepEqual(current(), expected.slice(1), "监控站点停用");
   station.monitorEnabled = monitorEnabled;
+  station.archivedAt = f.state.now; assert.deepEqual(current(), expected.slice(1), "监控站点已归档");
+  delete station.archivedAt; assert.deepEqual(current(), expected);
 });
 
 test("F08 shared Sub2API metadata cannot inherit another selected Key's positive capability", async (t) => {

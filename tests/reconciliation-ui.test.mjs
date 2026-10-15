@@ -116,6 +116,10 @@ test("3b daily page switches to yuan only when every station has a rate, with fi
   await drawer.getByText("本站 ¥7/$ · 上游 ¥6/$", { exact: true }).waitFor(); await drawer.locator(".ant-collapse-header", { hasText: "查看原始账单与计算依据" }).click(); await drawer.getByText("1.5 USD", { exact: true }).waitFor(); await drawer.locator(".ant-drawer-close").click();
   await page.getByRole("button", { name: "查看 Rule C 的核算详情", exact: true }).click(); drawer = page.getByRole("dialog", { name: "Rule C · 核算详情", exact: true });
   await drawer.getByText("¥0.00 · 固定采购：Key 用量 $1.00 不计成本", { exact: true }).waitFor(); await drawer.getByText("本站 ¥7/$ · 上游 固定采购不计成本", { exact: true }).waitFor();
+  // 看「今天」时，去自营业务的链接也带上今天
+  await drawer.locator(".ant-drawer-close").click();
+  await page.getByRole("group", { name: "核算时间范围" }).getByRole("button", { name: "今天", exact: true }).filter({ visible: true }).click();
+  await summary.locator('a[href="/my?range=today"]', { hasText: "自营业务" }).waitFor();
 });
 
 test("3b partially configured rates keep system dollars everywhere and name the stations still missing a rate", async (t) => {
