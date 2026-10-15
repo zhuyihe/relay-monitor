@@ -1259,8 +1259,10 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         const ids = [...new Set([...Object.keys(guard.basis.resourceVersions), ...Object.keys(guard.postSaveResourceVersions)])];
         await withSourceLock(null, () => stationLock(ids, async () => {
           const currentRules = await rules();
-          latestRule = currentRules.find((rule) => rule.id === group.basis.existingRuleId)
-            || currentRules.find((rule) => rule.enabled && !rule.archivedAt && rule.canonicalKey === group.basis.canonicalKey) || null;
+          latestRule = group.reconciliation && group.basis.canonicalKey
+            ? currentRules.find((rule) => rule.id === group.basis.existingRuleId)
+              || currentRules.find((rule) => rule.enabled && !rule.archivedAt && rule.canonicalKey === group.basis.canonicalKey) || null
+            : null;
           const assertCurrent = () => assertPreviewGuard(guard, currentGroupContext(group, guard, latestRule));
           assertCurrent();
           if (values.some((value) => !value.selection.updateCredentials && [value.main, value.billing].filter(Boolean)

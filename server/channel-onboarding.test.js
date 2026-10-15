@@ -1244,6 +1244,37 @@ test("genuine public recover既有关系不能证明失败或response-loss后的
   assert.equal(confirmed.groups[0].saved.billingEffectiveFromMs, first.groups[0].saved.billingEffectiveFromMs);
 });
 
+for (const mode of ["saved monitor", "new monitor", "pending Key", "verified Key"]) {
+  test(`genuine batch ${mode} ignores an unrelated legacy null-Key rule`, async (t) => {
+    const f = await genuineBatchFixture(t), seed = f.request([[1]]);
+    const original = await f.rt.channelOnboarding.probeBatch(seed);
+    assert.equal((await f.rt.channelOnboarding.connectBatch({ ...seed, previewId: original.previewId })).complete, true);
+    f.state.rules[0].canonical_key = null;
+    const legacyRule = structuredClone(f.state.rules[0]);
+    const legacyMembers = structuredClone(f.state.members.filter((member) => member.rule_id === legacyRule.id));
+    const input = f.request([[2]], [10]);
+    input.requestId = "22222222-2222-4222-8222-222222222222";
+    if (mode.endsWith("monitor")) input.groups[0].reconciliation = null;
+    if (mode === "pending Key") delete input.groups[0].reconciliation.tokenId;
+    if (mode === "new monitor" || mode === "pending Key") {
+      input.selections = [{ selectionId: "account", monitor: true, newStation: {
+        name: "New monitor", type: "newapi", baseUrl: "https://another.test/", accessToken: "fixture-only" } }];
+    }
+    const probe = await f.rt.channelOnboarding.probeBatch(input);
+    const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: probe.previewId });
+    assert.equal(result.groups[0].monitor.status, "linked", JSON.stringify(result));
+    assert.equal(result.groups[0].saved.stationIds.length, 1);
+    if (mode === "pending Key") {
+      assert.equal(result.complete, false);
+      assert.deepEqual(result.groups[0].remainingActions, ["select_key"]);
+    } else assert.equal(result.complete, true, JSON.stringify(result));
+    assert.equal(f.state.ruleWrites, mode === "verified Key" ? 2 : 1);
+    assert.deepEqual(f.state.rules[0], legacyRule);
+    assert.deepEqual(f.state.members.filter((member) => member.rule_id === legacyRule.id), legacyMembers);
+    assert.ok(f.state.links.some((link) => link.channelId === 1 && link.stationId === f.supplier.id));
+  });
+}
+
 test("genuine batch纯监控无财务proof可用，monitor false新账号维持专用用途", async (t) => {
   const f = await genuineBatchFixture(t), monitorInput = f.request([[1]]);
   monitorInput.groups[0].reconciliation = null;
