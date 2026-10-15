@@ -83,6 +83,9 @@ export type ConfirmedHistoryRecord = {
   upstream: ConfirmedHistoryBilling; downstream: ConfirmedHistoryBilling & { channels: { channelId: number; name: string | null; billingState: string | null; quotaUnits: number | null; amountUsd: number | null; knownAmountUsd: number | null }[] };
   calculation: { differenceUsd: number | null; profitUsd: number | null; riskDifferenceUsd: number | null; marginRate: number | null };
   sourceCompleteness: "complete" | "legacy_partial";
+  // 结账账本：自然日、版本（重新结账 +1）、来源、结账时配置的汇率（没配置为 null）和成本计法（迁移的旧账为 null，按 Key 用量算）。
+  billDate?: string; revision?: number; settlementSource?: "settle" | "resettle" | "migrated";
+  settledRates?: { income: number | null; cost: number | null }; costBasis?: "usage" | "fixed" | null;
 };
 export type ConfirmedHistoryResponse = { ruleId: string; readOnly: true; records: ConfirmedHistoryRecord[]; nextCursor: string | null };
 export type ReconciliationAmountBasis = { id: string; currency: "USD"; billingSource: string; calculationVersion: number; conversion: "quota_per_unit" | "provider_cost_usd" | null };

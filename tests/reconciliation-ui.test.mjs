@@ -103,8 +103,8 @@ test("3b daily page switches to yuan only when every station has a rate, with fi
   const summary = page.getByRole("region", { name: "核算汇总", exact: true }), metric = (label) => summary.locator(".reconciliation-summary-metric", { hasText: label });
   await metric("本站已获取收费（CNY）").getByText("¥52.50", { exact: true }).waitFor(); await metric("已计入上游成本（CNY）").getByText("¥12.00", { exact: true }).waitFor(); await metric("已确认范围账面毛利").getByText("¥40.50", { exact: true }).waitFor();
   assert.doesNotMatch(await summary.locator(".reconciliation-summary__metrics").innerText(), /\$/);
-  // 页脚：按当前汇率折算，过去的时段也一样；有固定采购的关联时说明成本记 0，净利去自营业务看
-  await summary.getByText(/收费按本站、成本按各上游的当前汇率折算（过去的时段也按当前汇率）/).waitFor();
+  // 页脚：已结账的日子按结账时的汇率，其余按当前汇率；有固定采购的关联时说明成本记 0，净利去自营业务看
+  await summary.getByText(/收费按本站、成本按各上游的汇率折算（已结账的日子按结账时记下的汇率，其余按当前汇率）/).waitFor();
   await summary.getByText(/固定采购上游的成本记 0，采购费不在这里分摊；扣掉固定成本后的净利见自营业务/).waitFor();
   assert.equal(await summary.getByRole("link", { name: "自营业务", exact: true }).getAttribute("href"), "/my");
   const rowA = page.locator("tr.ant-table-row", { hasText: "Rule A" }), rowC = page.locator("tr.ant-table-row", { hasText: "Rule C" });
@@ -1288,6 +1288,22 @@ test("3b confirmed history for a fixed-purchase upstream keeps the original Key-
   const usage = await openConfirmedHistoryPage(t, { upstreams: configuration.upstreams.map((station) => ({ ...station, costBasis: "usage" })) });
   await usage.page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); drawer = usage.page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(usage.page, drawer);
   await drawer.getByText("已读取 1 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。", { exact: true }).waitFor(); assert.equal(await drawer.getByText(note).count(), 0);
+});
+
+test("4a ledger history shows each record's settle-time cost basis, revision and rates; the fixed note only covers Key-usage records", async (t) => {
+  const note = /这个关联的上游现在是固定采购，当前核算里上游成本记 0/, fixedUpstreams = configuration.upstreams.map((station) => ({ ...station, costBasis: "fixed" }));
+  const fixed = { ...confirmedHistoryRecord("ledger-fixed", 3), billDate: "2026-10-08", revision: 2, settlementSource: "resettle", settledRates: { income: 7.1, cost: null }, costBasis: "fixed" }; fixed.upstreamSource = { ...fixed.upstreamSource, tokenName: "fixed-key" };
+  const migrated = { ...confirmedHistoryRecord("ledger-migrated"), billDate: "2026-10-07", revision: 1, settlementSource: "migrated", settledRates: { income: null, cost: null }, costBasis: null }; migrated.upstreamSource = { ...migrated.upstreamSource, tokenName: "migrated-key" };
+  const mixed = await openConfirmedHistoryPage(t, { records: [fixed, migrated], upstreams: fixedUpstreams });
+  await mixed.page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); let drawer = mixed.page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(mixed.page, drawer);
+  await drawer.getByText(note).waitFor(); const fixedRow = drawer.locator("tr.ant-table-row", { hasText: "fixed-key" }), migratedRow = drawer.locator("tr.ant-table-row", { hasText: "migrated-key" });
+  assert.match(await fixedRow.locator(".reconciliation-table-amount", { hasText: "固定采购" }).innerText(), /^\$0\.00\s*固定采购$/); await fixedRow.getByText("第 2 版 · 重新结账", { exact: true }).waitFor(); await fixedRow.getByText("$3.00", { exact: true }).waitFor();
+  await migratedRow.getByText("迁移的旧账", { exact: true }).waitFor(); await migratedRow.getByText("$2.00", { exact: true }).waitFor(); assert.equal(await migratedRow.getByText("固定采购").count(), 0);
+  let record = await expandConfirmedRecord(drawer, fixed); await record.getByText("$5.00 / $0.00 / $3.00", { exact: true }).waitFor(); await record.getByText("固定采购，成本记 0（当天 Key 用量 $2.00，不计入毛利）", { exact: true }).waitFor(); await record.getByText("第 2 版 · 重新结账", { exact: true }).waitFor(); await record.getByText("本站 ¥7.1/$ · 上游 未设置", { exact: true }).waitFor();
+  record = await expandConfirmedRecord(drawer, migrated); await record.getByText("$3.00 / $2.00 / $1.00", { exact: true }).waitFor(); await record.getByText("迁移的旧账", { exact: true }).waitFor(); await record.getByText("旧账未记录", { exact: true }).waitFor(); assert.doesNotMatch(await record.innerText(), /成本计法|未设置/);
+  const onlyFixed = await openConfirmedHistoryPage(t, { records: [fixed], upstreams: fixedUpstreams });
+  await onlyFixed.page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); drawer = onlyFixed.page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(onlyFixed.page, drawer);
+  await drawer.getByText("已读取 1 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。", { exact: true }).waitFor(); assert.equal(await drawer.getByText(note).count(), 0, "全是固定采购结的账时不需要说明");
 });
 
 test("confirmed history pagination failure retains read records and retry reuses the opaque cursor without duplicate history", async (t) => {

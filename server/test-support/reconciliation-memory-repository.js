@@ -8,14 +8,15 @@
 //   ON UPDATE CURRENT_TIMESTAMP 只在值真正变化时刷新；UPDATE 返回匹配行数（mysql2 默认 FOUND_ROWS）。
 // - 单表 UPDATE 的 SET 从左到右求值，后面的表达式读到的是前面刚赋的新值。
 // - 读取结果是新对象，JSON 列像 mysql2 一样解析成新对象，调用方改了也不影响存储。
-import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix, reconciliationConfirmedHistoryRecord } from "../../lib/reconciliation-snapshot.js";
-import { applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
+import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../../lib/reconciliation-snapshot.js";
+import { applyScopePolicy, billingDayOf, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
+import { RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues } from "../../lib/reconciliation-ledger.js";
 import {
   uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, segmentFromRow,
-  snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, isSettledConfirmedSource,
+  snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions,
 } from "../reconciliation-repository.js";
 
-const JSON_COLUMNS = new Set(["source_binding", "source", "capability"]);
+const JSON_COLUMNS = new Set(["source_binding", "source", "capability", "detail"]);
 
 const TABLE_NAMES = {
   rules: "reconciliation_rules",
@@ -24,6 +25,7 @@ const TABLE_NAMES = {
   snapshots: "reconciliation_snapshots",
   alerts: "reconciliation_alert_state",
   capabilities: "reconciliation_billing_capabilities",
+  ledger: "reconciliation_ledger",
 };
 
 // 与 db/pool.js 的建表语句保持一致。
@@ -61,7 +63,17 @@ const SCHEMA = {
     notNull: ["identity", "capability", "verified_at"],
     varchar: { identity: 64 },
   },
+  ledger: {
+    keys: { PRIMARY: ["rule_id", "bill_date", "revision"] },
+    notNull: ["rule_id", "bill_date", "revision", "timezone", "window_start_ms", "window_end_ms", "revenue_usd", "source", "settled_at"],
+    varchar: { rule_id: 32, version_id: 32, timezone: 64, cost_basis: 16, source: 24 },
+  },
 };
+// 账本行按 LEDGER_SELECT 的读法返回：DECIMAL 是定点字符串，DATETIME(3) 经 DATE_FORMAT(%f) 带 6 位小数。
+// 账本的 source 是 VARCHAR（结账来源），不是快照表那样的 JSON 列。
+const DECIMAL_SCALE = { revenue_usd: 8, cost_usd: 8, revenue_rate: 6, cost_rate: 6 };
+const ledgerRead = (row) => ({ ...fresh(row), source: row.source, settled_at: `${row.settled_at}000`,
+  ...Object.fromEntries(Object.entries(DECIMAL_SCALE).map(([column, scale]) => [column, row[column] == null ? null : Number(row[column]).toFixed(scale)])) });
 const fold = (value) => String(value).normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
 const sameText = (a, b) => a != null && b != null && fold(a) === fold(b);
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
@@ -69,7 +81,6 @@ const compareText = (a, b) => compare(fold(a), fold(b));
 // MySQL 里 NULL 比任何值都小：升序排最前，降序排最后。
 const nullsFirst = (a, b) => a == null ? (b == null ? 0 : -1) : b == null ? 1 : compare(a, b);
 const seconds = (value) => value == null ? null : Math.floor(new Date(value).getTime() / 1000);
-const stamp = (value) => value == null ? null : new Date(seconds(value) * 1000).toISOString().slice(0, 19).replace("T", " ");
 const bigint = (value) => value == null ? null : Number(value);
 const fresh = (row) => Object.fromEntries(Object.entries(row).map(([column, value]) => [column,
   value instanceof Date ? new Date(value) : JSON_COLUMNS.has(column) && value != null ? structuredClone(asJson(value)) : value]));
@@ -87,41 +98,6 @@ function sameValue(column, a, b) {
 
 function sqlError(code, errno, sqlState, message) {
   return Object.assign(new Error(message), { code, errno, sqlState, sqlMessage: message });
-}
-
-// source->'$.a.b' / source->>'$.a.b' / JSON_TYPE 的取值：路径不存在得到 NULL；JSON null 经 ->> 得到字符串 "null"。
-function jsonPath(source, path) {
-  let value = source;
-  for (const key of path) {
-    if (!value || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, key)) return { missing: true };
-    value = value[key];
-  }
-  return { missing: false, value };
-}
-
-function jsonType(source, path) {
-  const { missing, value } = jsonPath(source, path);
-  if (missing) return null;
-  if (value === null) return "NULL";
-  if (typeof value === "number") return Number.isInteger(value) && Math.abs(value) < 2 ** 63 ? "INTEGER" : "DOUBLE";
-  if (typeof value === "string") return "STRING";
-  if (typeof value === "boolean") return "BOOLEAN";
-  return Array.isArray(value) ? "ARRAY" : "OBJECT";
-}
-
-function jsonText(source, path) {
-  const { missing, value } = jsonPath(source, path);
-  if (missing) return null;
-  return typeof value === "string" ? value : JSON.stringify(value);
-}
-
-// CAST(text AS SIGNED|UNSIGNED)：只取开头的整数部分，没有数字时为 0；UNSIGNED 下负数按 64 位回绕。
-function castInteger(text, unsigned = false) {
-  if (text == null) return null;
-  const match = /^\s*([+-]?\d+)/.exec(text);
-  if (!match) return 0;
-  const value = BigInt(match[1]);
-  return Number(unsigned && value < 0n ? value + 2n ** 64n : value);
 }
 
 class MemoryTransaction {
@@ -151,12 +127,12 @@ export class MemoryReconciliationRepository {
   //   beforeCommit(tx) / afterCommit(tx)
   //   beforeCapabilityWrite(method, identity)  保存或删除账单能力前，可以抛错模拟写入失败
   // tx 是 { name, snapshots: [{ ruleId, snapshotKey, source }], archivedRuleIds }。
-  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], now = () => Date.now(), hooks = {} } = {}) {
-    this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts], capabilities: [...capabilities] };
+  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], now = () => Date.now(), hooks = {} } = {}) {
+    this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts], capabilities: [...capabilities], ledger: [...ledger] };
     this.now = now;
     this.hooks = hooks;
     // snapshotWrites / ratioWrites / channelStateWrites 按语句记录，包括之后被回滚的写入。
-    this.log = { snapshotWrites: [], ratioWrites: [], channelStateWrites: [], alertCalls: [], capabilityWrites: [], commits: [], rollbacks: [] };
+    this.log = { snapshotWrites: [], ratioWrites: [], channelStateWrites: [], alertCalls: [], capabilityWrites: [], ledgerWrites: [], commits: [], rollbacks: [] };
   }
 
   async listRules({ includeArchived = false } = {}) {
@@ -432,7 +408,7 @@ export class MemoryReconciliationRepository {
     return this.#saveSnapshot(snapshot, null);
   }
 
-  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null } = {}) {
+  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null } = {}) {
     return this.#transaction("saveSnapshotsForScope", async (tx) => {
       if (expectedOwnerState != null) {
         await this.#lock(tx, "*");
@@ -455,6 +431,17 @@ export class MemoryReconciliationRepository {
         if (sameRecordType && (savedEnd > incomingEnd
           || (savedEnd === incomingEnd && snapshotGeneratedAt(savedSource) > snapshotGeneratedAt(incomingSource)))) continue;
         await this.#saveSnapshot(snapshot, tx);
+      }
+      if (ledger?.entry) {
+        const top = this.#ledgerOf(tx, ruleId, ledger.entry.billDate)[0];
+        const sameWindow = top && top.timezone === ledger.entry.timezone
+          && Number(top.window_start_ms) === ledger.entry.startMs && Number(top.window_end_ms) === ledger.entry.endMs;
+        if (ledger.resettle || !sameWindow) {
+          const values = ledgerInsertValues({ ...ledger.entry, ruleId, revision: top ? Number(top.revision) + 1 : 1, source: top ? "resettle" : "settle" });
+          const row = Object.fromEntries(RECONCILIATION_LEDGER_COLUMNS.map((column, index) => [column, values[index]]));
+          this.log.ledgerWrites.push({ ruleId, billDate: row.bill_date, revision: row.revision, source: row.source });
+          this.#insert(tx, "ledger", row);
+        }
       }
       if (guard && !guard()) return this.#abort(tx, false);
       return true;
@@ -535,50 +522,26 @@ export class MemoryReconciliationRepository {
     return this.latestRecord(ruleId, window, scopeFingerprint, "observation");
   }
 
-  // 逐步对应 MySQL 版的 evidence / logical / ranked 三段 CTE。
-  async listConfirmedHistory(ruleId, input = {}) {
+  async latestLedgerEntry(ruleId, window) {
+    const billDate = billingDayOf(window);
+    if (!billDate) return null;
+    await this.#read("latestLedgerEntry", [ruleId, window]);
+    const top = this.#ledgerOf(null, ruleId, billDate)[0];
+    const entry = top ? ledgerEntryFromRow(ledgerRead(top)) : null;
+    return entry && entry.timezone === window.timezone && entry.startMs === window.startMs && entry.endMs === window.endMs ? entry : null;
+  }
+
+  async listLedgerHistory(ruleId, input = {}) {
     const { startMs, endMs, limit, after } = normalizeConfirmedHistoryOptions(input);
-    await this.#read("listConfirmedHistory", [ruleId, input]);
-    const numeric = (type) => ["INTEGER", "UNSIGNED INTEGER", "DOUBLE"].includes(type);
-    const evidence = this.#plain("snapshots").filter((row) => sameText(row.rule_id, ruleId)).flatMap((row) => {
-      const source = asJson(row.source);
-      const text = (...path) => jsonText(source, path);
-      const type = (...path) => jsonType(source, path);
-      if (text("recordType") !== "confirmed"
-        || (text("billingSource") ?? text("downstream", "billingSource")) !== "channel-log-stat"
-        || castInteger(text("calculationVersion") ?? text("downstream", "calculationVersion"), true) !== 3
-        || !numeric(type("result", "calculation", "profitUsd"))) return [];
-      const savedStart = text("window", "startMs"), savedEnd = text("window", "endMs");
-      const savedScope = text("scopeFingerprint"), savedGeneration = text("resultGeneratedAt");
-      const logicalWindow = numeric(type("window", "startMs")) && numeric(type("window", "endMs")) && castInteger(savedEnd) > castInteger(savedStart);
-      const logicalStart = logicalWindow ? castInteger(savedStart) : Number(row.window_start_ms);
-      const logicalEnd = logicalWindow ? castInteger(savedEnd) : Number(row.window_end_ms);
-      const separateRecord = logicalWindow && type("scopeFingerprint") === "STRING" && savedScope !== ""
-        && type("resultGeneratedAt") === "STRING" && savedGeneration !== "" ? "" : row.snapshot_key;
-      if (logicalWindow ? !isSettledConfirmedSource(source, { startMs: logicalStart, endMs: logicalEnd, timezone: text("window", "timezone") })
-        : ["today", "7d"].includes(row.window_kind)) return [];
-      return [{ row, logicalStart, logicalEnd,
-        partition: JSON.stringify([logicalStart, logicalEnd, text("window", "timezone"), savedScope, savedGeneration, separateRecord]) }];
-    });
-    const order = (a, b) => Number(b.row.window_end_ms) - Number(a.row.window_end_ms)
-      || nullsFirst(seconds(b.row.generated_at), seconds(a.row.generated_at))
-      || compareText(b.row.snapshot_key, a.row.snapshot_key);
-    const ranked = new Map();
-    for (const item of evidence) {
-      const current = ranked.get(item.partition);
-      if (!current || order(item, current) < 0) ranked.set(item.partition, item);
-    }
-    const afterCursor = ({ row }) => {
-      const end = Number(row.window_end_ms), generated = stamp(row.generated_at);
-      return end < after[0] || (end === after[0] && generated != null && generated < after[1])
-        || (end === after[0] && generated === after[1] && compareText(row.snapshot_key, after[2]) < 0);
-    };
-    const rows = [...ranked.values()]
-      .filter((item) => item.logicalStart >= startMs && item.logicalEnd <= endMs && (!after || afterCursor(item)))
-      .sort(order).slice(0, limit + 1);
-    const page = rows.slice(0, limit), last = page.at(-1)?.row;
-    return { records: page.map(({ row }) => reconciliationConfirmedHistoryRecord(fresh(row))), nextCursor: rows.length > limit && last
-      ? Buffer.from(JSON.stringify([Number(last.window_end_ms), stamp(last.generated_at), last.snapshot_key])).toString("base64url") : null };
+    await this.#read("listLedgerHistory", [ruleId, input]);
+    const rows = this.#plain("ledger").filter((row) => sameText(row.rule_id, ruleId)
+      && Number(row.window_start_ms) >= startMs && Number(row.window_end_ms) <= endMs
+      && Number(row.revision) === this.#ledgerOf(null, row.rule_id, row.bill_date)[0].revision
+      && (!after || row.bill_date < after[0] || (row.bill_date === after[0] && compareText(row.rule_id, after[1]) < 0)))
+      .sort((a, b) => compare(b.bill_date, a.bill_date) || compareText(b.rule_id, a.rule_id)).slice(0, limit + 1);
+    const entries = rows.map((row) => ledgerEntryFromRow(ledgerRead(row)));
+    const page = entries.slice(0, limit);
+    return { records: page.map(ledgerHistoryRecord), nextCursor: entries.length > limit ? encodeLedgerCursor(page.at(-1)) : null };
   }
 
   // ---- 内部：事务、锁与行操作 ----
@@ -695,6 +658,12 @@ export class MemoryReconciliationRepository {
 
   #alertEntry(ruleId, eventCode) {
     return this.#rows("alerts").find(({ row }) => sameText(row.rule_id, ruleId) && sameText(row.event_code, eventCode)) || null;
+  }
+
+  // 某天的账本行，按 revision 倒序。
+  #ledgerOf(tx, ruleId, billDate) {
+    return this.#rows("ledger", tx).map(({ row }) => row).filter((row) => sameText(row.rule_id, ruleId) && row.bill_date === billDate)
+      .sort((a, b) => Number(b.revision) - Number(a.revision));
   }
 
   #capabilityEntry(identity) {

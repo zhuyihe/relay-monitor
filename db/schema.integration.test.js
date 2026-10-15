@@ -5,6 +5,7 @@ import { ensureSchema } from "./pool.js";
 import { ChannelOnboardingRepository } from "../server/channel-onboarding-repository.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState } from "../server/reconciliation-repository.js";
 import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
+import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues } from "../lib/reconciliation-ledger.js";
 import { defineReconciliationRepositoryContract } from "../server/test-support/reconciliation-repository-contract.js";
 
 // Opt-in only: this fixture replaces tables in this one disposable local schema.
@@ -24,9 +25,21 @@ const legacyStation = { id: "upstream", name: "Legacy monitor", type: "newapi", 
 const legacySettings = { refreshIntervalSec: 60, dailyReport: { enabled: false, lastSent: "2026-10-08" } };
 const legacySource = { recordType: "confirmed", billingSource: "channel-log-stat", calculationVersion: 3,
   scopeFingerprint: "legacy-scope", result: { calculation: { profitUsd: 4, marginRate: 0.4 } } };
+// 第 4 阶段之前写下的单日结账（上海 2026-10-09）：升级时搬进账本。多日窗口留在快照表里不搬。
+const LEDGER_DAY = Date.UTC(2026, 9, 8, 16);
+const legacySettlement = (window, generatedAt, profitUsd) => ({ recordType: "confirmed", billingSource: "channel-log-stat", calculationVersion: 3,
+  scopeFingerprint: "legacy-scope", window, resultGeneratedAt: generatedAt,
+  result: { window, requestedWindow: window, lastSuccessfulWindow: window, generatedAt,
+    upstream: { state: "complete", amountUsd: 6.5 }, downstream: { state: "complete", amountUsd: 10.25 },
+    calculation: { differenceUsd: profitUsd, profitUsd, riskDifferenceUsd: null, marginRate: 0.4 }, health: { code: "READY", issues: [] } } });
+const legacyDayWindow = { preset: "yesterday", timezone: "Asia/Shanghai", startMs: LEDGER_DAY, endMs: LEDGER_DAY + 86400000 };
+const legacyLedgerRows = [
+  ["r3:c:legacyday000000000000000:0000000000000001", legacyDayWindow, "2026-10-09T16:20:00.000Z", 3.75],
+  ["r3:c:legacyweek00000000000000:0000000000000001", { ...legacyDayWindow, preset: "custom", startMs: LEDGER_DAY - 6 * 86400000 }, "2026-10-09T16:20:00.000Z", 20],
+];
 
 async function seedLegacySchema(pool) {
-  const tables = ["channel_monitor_links", "reconciliation_billing_capabilities", "reconciliation_alert_state", "reconciliation_snapshots",
+  const tables = ["channel_monitor_links", "reconciliation_ledger", "reconciliation_billing_capabilities", "reconciliation_alert_state", "reconciliation_snapshots",
     "reconciliation_rule_segments", "reconciliation_rule_channels", "reconciliation_rules",
     "station_daily_usage", "history_points", "meta", "stations"];
   for (const table of tables) await pool.query(`DROP TABLE IF EXISTS ${table}`);
@@ -79,6 +92,11 @@ async function seedLegacySchema(pool) {
     (rule_id, snapshot_key, window_kind, window_start_ms, window_end_ms, upstream_usd, downstream_usd,
      difference_usd, margin_rate, health_code, source)
     VALUES ('legacy_rule', 'legacy-confirmed', 'custom', 1000, 2000, 6, 10, 4, 0.4, 'READY', ?)`, [JSON.stringify(legacySource)]);
+  for (const [key, window, generatedAt, profitUsd] of legacyLedgerRows) {
+    await pool.query(`INSERT INTO reconciliation_snapshots
+      (rule_id, snapshot_key, window_kind, window_start_ms, window_end_ms, health_code, source)
+      VALUES ('legacy_rule', ?, ?, ?, ?, 'READY', ?)`, [key, window.preset, window.startMs, window.endMs, JSON.stringify(legacySettlement(window, generatedAt, profitUsd))]);
+  }
 }
 
 test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async (t) => {
@@ -110,14 +128,40 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     const [[station]] = await pool.query("SELECT doc FROM stations WHERE id = ?", [legacyStation.id]);
     assert.deepEqual(station.doc, legacyStation);
     const [meta] = await pool.query("SELECT k, v FROM meta ORDER BY k");
-    assert.deepEqual(Object.fromEntries(meta.map((row) => [row.k, row.v])),
-      { auth: { enabled: true }, settings: legacySettings, unrelated: { keep: "unchanged" } });
+    const { reconciliation_ledger_backfill_v1: backfill, ...rest } = Object.fromEntries(meta.map((row) => [row.k, row.v]));
+    assert.deepEqual(rest, { auth: { enabled: true }, settings: legacySettings, unrelated: { keep: "unchanged" } });
+    assert.equal(backfill.migrated, 1);
+    assert.ok(Number.isFinite(Date.parse(backfill.completedAt)));
     const [[snapshot]] = await pool.query("SELECT * FROM reconciliation_snapshots WHERE snapshot_key = 'legacy-confirmed'");
     assert.deepEqual(snapshot.source, legacySource);
     assert.equal(snapshot.upstream_usd, 6);
     assert.equal(snapshot.downstream_usd, 10);
     assert.equal(snapshot.difference_usd, 4);
     assert.equal(snapshot.segment_id, segments[0].id);
+  });
+
+  await t.test("ledger backfill moves single-day settlements once and is skipped after its marker is written", async () => {
+    const count = async () => Number((await pool.query("SELECT COUNT(*) AS n FROM reconciliation_ledger WHERE rule_id = 'legacy_rule'"))[0][0].n);
+    assert.equal(await count(), 1);
+    const entry = await reconciliation.latestLedgerEntry("legacy_rule", legacyDayWindow);
+    assert.deepEqual({ ...entry, detail: undefined }, { ruleId: "legacy_rule", billDate: "2026-10-09", revision: 1, versionId: null,
+      timezone: "Asia/Shanghai", startMs: LEDGER_DAY, endMs: LEDGER_DAY + 86400000, revenueUsd: 10.25, costUsd: 6.5, revenueRate: null,
+      costRate: null, costBasis: null, source: "migrated", detail: undefined, settledAt: "2026-10-09T16:20:00.000Z" });
+    assert.equal(entry.detail.result.calculation.profitUsd, 3.75);
+    const { records } = await reconciliation.listLedgerHistory("legacy_rule", { startMs: LEDGER_DAY - 86400000, endMs: LEDGER_DAY + 86400000 });
+    assert.deepEqual(records.map((record) => [record.billDate, record.settlementSource, record.calculation.profitUsd]), [["2026-10-09", "migrated", 3.75]]);
+    // 多日窗口没有搬，旧快照原样保留。
+    const [[week]] = await pool.query("SELECT COUNT(*) AS n FROM reconciliation_snapshots WHERE snapshot_key = ?", [legacyLedgerRows[1][0]]);
+    assert.equal(Number(week.n), 1);
+
+    // 有完成标记就不再搬：删掉账本行后重跑迁移不会补回来；标记没了才会重搬，且不重复。
+    await pool.query("DELETE FROM reconciliation_ledger WHERE rule_id = 'legacy_rule'");
+    await ensureSchema(pool);
+    assert.equal(await count(), 0);
+    await pool.query("DELETE FROM meta WHERE k = 'reconciliation_ledger_backfill_v1'");
+    await ensureSchema(pool);
+    await ensureSchema(pool);
+    assert.equal(await count(), 1);
   });
 
   await t.test("link revision retries are idempotent and catalogue has an independent meta key", async () => {
@@ -353,106 +397,71 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
       calculation: { profitUsd: profit, differenceUsd: profit, marginRate: profit == null ? null : profit / 10 } },
       diagnostic: "fixture-history-secret" };
   }
-  async function savedHistoryRow(rule, key, source, startMs = billStart, endMs = billEnd) {
-    await pool.query(`INSERT INTO reconciliation_snapshots
-      (rule_id, snapshot_key, window_kind, window_start_ms, window_end_ms, health_code, source, generated_at)
-      VALUES (?, ?, 'custom', ?, ?, 'READY', ?, '2026-10-09 12:00:00')`,
-    [rule.id, key, startMs, endMs, JSON.stringify(source)]);
+
+  async function ledgerRow(rule, billDate, revision, source, { profit = 4, startMs = billStart, endMs = billEnd, settledAt = "2026-10-09T00:20:00.000Z",
+    revenueRate = null, costRate = null, costBasis = null } = {}) {
+    const detail = savedBill({ profit, generation: settledAt });
+    await pool.query(`INSERT INTO reconciliation_ledger (${RECONCILIATION_LEDGER_COLUMNS.join(", ")}) VALUES (?)`,
+      [ledgerInsertValues({ ruleId: rule.id, billDate, revision, versionId: null, timezone: "UTC", startMs, endMs, revenueUsd: 10.25, costUsd: 6,
+        revenueRate, costRate, costBasis, source, detail, settledAt })]);
   }
 
   const originalHistoryRule = await historyRule(201);
-  await t.test("confirmed history collapses original segments and excludes observation, v2 and unknown profit", async () => {
-    const middle = (billStart + billEnd) / 2;
-    await savedHistoryRow(originalHistoryRule, "original-a", savedBill(), billStart, middle);
-    await savedHistoryRow(originalHistoryRule, "original-z", savedBill(), middle, billEnd);
-    await savedHistoryRow(originalHistoryRule, "zero", savedBill({ generation: "2026-10-09T01:00:00Z", profit: 0 }));
-    await savedHistoryRow(originalHistoryRule, "negative", savedBill({ scope: "second-scope", profit: -2 }));
-    await savedHistoryRow(originalHistoryRule, "observation", { ...savedBill(), recordType: "observation" });
-    await savedHistoryRow(originalHistoryRule, "v2", { ...savedBill(), calculationVersion: 2 });
-    await savedHistoryRow(originalHistoryRule, "unknown", savedBill({ profit: null }));
-    const result = await reconciliation.listConfirmedHistory(originalHistoryRule.id, { startMs: billStart, endMs: billEnd });
-    assert.equal(result.records.length, 3);
-    assert.deepEqual(result.records.map((record) => record.calculation.profitUsd).sort((a, b) => a - b), [-2, 0, 4]);
+  await t.test("ledger history lists the newest revision per day with saved facts and no secrets", async () => {
+    await ledgerRow(originalHistoryRule, "2026-10-08", 1, "settle", { profit: 4 });
+    await ledgerRow(originalHistoryRule, "2026-10-08", 2, "resettle", { profit: -2, settledAt: "2026-10-09T03:00:00.000Z", revenueRate: 7.123456, costBasis: "usage" });
+    await ledgerRow(originalHistoryRule, "2026-10-07", 1, "migrated", { profit: 0, startMs: billStart - 86400000, endMs: billStart });
+    const result = await reconciliation.listLedgerHistory(originalHistoryRule.id, { startMs: billStart - 86400000, endMs: billEnd });
+    assert.equal(result.nextCursor, null);
+    assert.deepEqual(result.records.map((record) => [record.billDate, record.revision, record.settlementSource, record.calculation.profitUsd, record.confirmedAt]), [
+      ["2026-10-08", 2, "resettle", -2, "2026-10-09T03:00:00.000Z"], ["2026-10-07", 1, "migrated", 0, "2026-10-09T00:20:00.000Z"]]);
+    assert.deepEqual([result.records[0].settledRates, result.records[0].costBasis], [{ income: 7.123456, cost: null }, "usage"]);
     for (const record of result.records) {
-      assert.deepEqual(record.window, { preset: "yesterday", startMs: billStart, endMs: billEnd, timezone: "UTC" });
       assert.deepEqual(record.channels.map((channel) => channel.channelId), [11, 12]);
       assert.equal(record.sourceCompleteness, "complete");
       assert.equal(record.upstreamSource.tokenName, "Original Key");
     }
+    assert.deepEqual(result.records[0].window, { preset: "yesterday", startMs: billStart, endMs: billEnd, timezone: "UTC" });
     assert.equal(JSON.stringify(result).includes("fixture-history-secret"), false);
+    assert.deepEqual((await reconciliation.listLedgerHistory(originalHistoryRule.id, { startMs: billStart, endMs: billEnd })).records.map((record) => record.billDate),
+      ["2026-10-08"]);
   });
 
-  await t.test("equal storage timestamps paginate logical bills without repeating earlier segment rows", async () => {
-    const ids = [], profits = [];
-    let cursor = null;
-    for (let page = 0; page < 4; page += 1) {
-      const result = await reconciliation.listConfirmedHistory(originalHistoryRule.id,
-        { startMs: billStart, endMs: billEnd, limit: 1, ...(cursor ? { cursor } : {}) });
-      assert.equal(result.records.length, 1);
-      ids.push(result.records[0].historyId); profits.push(result.records[0].calculation.profitUsd);
-      cursor = result.nextCursor;
-      if (!cursor) break;
-    }
-    assert.equal(cursor, null);
-    assert.equal(ids.length, 3);
-    assert.equal(new Set(ids).size, 3);
-    assert.deepEqual(profits.sort((a, b) => a - b), [-2, 0, 4]);
-  });
-
-  await t.test("history range uses saved whole window and retains original facts after member change and archive", async () => {
-    const tail = await reconciliation.listConfirmedHistory(originalHistoryRule.id,
-      { startMs: (billStart + billEnd) / 2, endMs: billEnd });
-    assert.deepEqual(tail.records, []);
-    const [before] = await pool.query("SELECT snapshot_key, source FROM reconciliation_snapshots WHERE rule_id = ? ORDER BY snapshot_key", [originalHistoryRule.id]);
+  await t.test("ledger history keeps original facts after member change and archive", async () => {
+    const [before] = await pool.query("SELECT * FROM reconciliation_ledger WHERE rule_id = ? ORDER BY bill_date, revision", [originalHistoryRule.id]);
     await reconciliation.appendChannels(originalHistoryRule.id, [{ channelId: 204, name: "Added later" }], { costCoverage: "complete" });
     await reconciliation.archiveRule(originalHistoryRule.id);
-    const result = await reconciliation.listConfirmedHistory(originalHistoryRule.id, { startMs: billStart, endMs: billEnd });
-    assert.equal(result.records.length, 3);
+    const result = await reconciliation.listLedgerHistory(originalHistoryRule.id, { startMs: billStart - 86400000, endMs: billEnd });
+    assert.equal(result.records.length, 2);
     assert.equal(result.records.some((record) => record.channels.some((channel) => channel.channelId === 204)), false);
     assert.deepEqual(result.records[0].ownSource, historySource);
     assert.equal(result.records[0].upstreamSource.baseUrl, "https://original-upstream.fixture.invalid");
-    const [after] = await pool.query("SELECT snapshot_key, source FROM reconciliation_snapshots WHERE rule_id = ? ORDER BY snapshot_key", [originalHistoryRule.id]);
+    const [after] = await pool.query("SELECT * FROM reconciliation_ledger WHERE rule_id = ? ORDER BY bill_date, revision", [originalHistoryRule.id]);
     assert.deepEqual(after, before);
     assert.equal((await reconciliation.listRules({ includeArchived: true })).some((rule) => rule.id === originalHistoryRule.id), true);
     assert.equal((await reconciliation.listRules()).some((rule) => rule.id === originalHistoryRule.id), false);
   });
 
-  await t.test("history limit caps at fifty and final page exposes no duplicate or extra cursor", async () => {
+  await t.test("ledger history pages a full 31-day range by day without repeats", async () => {
     const rule = await historyRule(202);
-    for (let i = 0; i < 52; i += 1) await savedHistoryRow(rule, `page-${String(i).padStart(3, "0")}`,
-      savedBill({ scope: `page-scope-${i}` }));
-    const first = await reconciliation.listConfirmedHistory(rule.id, { startMs: billStart, endMs: billEnd, limit: 100 });
-    assert.equal(first.records.length, 50); assert.ok(first.nextCursor);
-    const last = await reconciliation.listConfirmedHistory(rule.id,
-      { startMs: billStart, endMs: billEnd, limit: 100, cursor: first.nextCursor });
-    assert.equal(last.records.length, 2); assert.equal(last.nextCursor, null);
-    assert.equal(new Set([...first.records, ...last.records].map((record) => record.historyId)).size, 52);
-  });
-
-  await t.test("legacy missing logical scope stays separate with original physical facts and no current identity", async () => {
-    const rule = await historyRule(203);
-    const source = { recordType: "confirmed", billingSource: "channel-log-stat", calculationVersion: 3,
-      result: { calculation: { profitUsd: 0 }, downstream: { channels: [{ channelId: 11, name: "Original legacy member" }] } } };
-    await savedHistoryRow(rule, "legacy-first", source, 1000, 2000);
-    await savedHistoryRow(rule, "legacy-second", source, 1000, 2000);
-    const result = await reconciliation.listConfirmedHistory(rule.id, { startMs: 1000, endMs: 2000 });
-    assert.equal(result.records.length, 2);
-    assert.equal(new Set(result.records.map((record) => record.historyId)).size, 2);
-    for (const record of result.records) {
-      assert.equal(record.sourceCompleteness, "legacy_partial");
-      assert.equal(record.window.startMs, 1000); assert.equal(record.window.endMs, 2000);
-      assert.equal(record.window.timezone, null); assert.equal(record.ownSource, null);
-      assert.equal(record.upstreamSource.accountId, null); assert.equal(record.upstreamSource.tokenName, null);
-      assert.deepEqual(record.channels, [{ channelId: 11, name: "Original legacy member" }]);
+    const first = Date.UTC(2026, 8, 8);
+    for (let i = 0; i < 31; i += 1) {
+      const startMs = first + i * 86400000;
+      await ledgerRow(rule, new Date(startMs).toISOString().slice(0, 10), 1, "settle", { profit: i, startMs, endMs: startMs + 86400000 });
     }
-    const logicalNullFacts = { ...source, window: { preset: "yesterday", startMs: billStart, endMs: billEnd, timezone: "UTC" },
-      scopeFingerprint: null, resultGeneratedAt: null };
-    await savedHistoryRow(rule, "legacy-logical-first", logicalNullFacts);
-    await savedHistoryRow(rule, "legacy-logical-second", logicalNullFacts);
-    const logical = await reconciliation.listConfirmedHistory(rule.id, { startMs: billStart, endMs: billEnd });
-    assert.equal(logical.records.length, 2);
-    assert.equal(new Set(logical.records.map((record) => record.historyId)).size, 2);
-    assert.equal(logical.records.every((record) => record.sourceCompleteness === "legacy_partial"), true);
+    const range = { startMs: first, endMs: first + 31 * 86400000 };
+    const all = await reconciliation.listLedgerHistory(rule.id, { ...range, limit: 100 });
+    assert.equal(all.records.length, 31); assert.equal(all.nextCursor, null);
+    assert.equal(all.records[0].billDate, "2026-10-08"); assert.equal(all.records.at(-1).billDate, "2026-09-08");
+    const seen = [];
+    let cursor = null;
+    do {
+      const page = await reconciliation.listLedgerHistory(rule.id, { ...range, limit: 10, ...(cursor ? { cursor } : {}) });
+      seen.push(...page.records.map((record) => record.billDate));
+      cursor = page.nextCursor;
+    } while (cursor);
+    assert.deepEqual(seen, all.records.map((record) => record.billDate));
+    assert.equal(new Set(seen).size, 31);
   });
 });
 
@@ -474,7 +483,7 @@ defineReconciliationRepositoryContract({
       await contractPool.query("DELETE FROM reconciliation_billing_capabilities WHERE identity IN (?)", [capabilityIdentities]);
     }
     if (!ruleIds.length) return;
-    for (const table of ["reconciliation_alert_state", "reconciliation_snapshots", "reconciliation_rule_segments",
+    for (const table of ["reconciliation_alert_state", "reconciliation_snapshots", "reconciliation_ledger", "reconciliation_rule_segments",
       "reconciliation_rule_channels"]) await contractPool.query(`DELETE FROM ${table} WHERE rule_id IN (?)`, [ruleIds]);
     await contractPool.query("DELETE FROM reconciliation_rules WHERE id IN (?)", [ruleIds]);
   },

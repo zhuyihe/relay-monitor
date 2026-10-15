@@ -1,5 +1,6 @@
 // MySQL 连接池（mysql2/promise）。连接参数来自环境变量，见 .env.example
 import mysql from "mysql2/promise";
+import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues, migratedLedgerEntries } from "../lib/reconciliation-ledger.js";
 
 let _pool = null;
 
@@ -216,4 +217,48 @@ export async function ensureSchema(pool) {
     capability JSON NOT NULL,
     verified_at BIGINT NOT NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 结账账本：每条核算关联、每个已结束的自然日一行，只插入不更新；重新结账写 revision + 1。
+  // 金额是系统原值（美元）；汇率和成本计法为空表示结账时没有记录，读取时按当前配置。version_id 留给第 6 阶段的关联版本。
+  await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_ledger (
+    rule_id VARCHAR(32) NOT NULL,
+    bill_date DATE NOT NULL,
+    revision INT NOT NULL,
+    version_id VARCHAR(32) NULL,
+    timezone VARCHAR(64) NOT NULL,
+    window_start_ms BIGINT NOT NULL,
+    window_end_ms BIGINT NOT NULL,
+    revenue_usd DECIMAL(20,8) NOT NULL,
+    cost_usd DECIMAL(20,8) NULL,
+    revenue_rate DECIMAL(12,6) NULL,
+    cost_rate DECIMAL(12,6) NULL,
+    cost_basis VARCHAR(16) NULL,
+    source VARCHAR(24) NOT NULL,
+    detail JSON NULL,
+    settled_at DATETIME(3) NOT NULL,
+    PRIMARY KEY (rule_id, bill_date, revision)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await backfillReconciliationLedger(pool);
+}
+
+const LEDGER_BACKFILL_META_KEY = "reconciliation_ledger_backfill_v1";
+
+// 只在首次升级时把旧的单日结账记录搬进账本一次（revision 1、source=migrated）；
+// 中途失败没写标记，下次启动重跑，INSERT IGNORE 跳过已搬的行。
+async function backfillReconciliationLedger(pool) {
+  const [markers] = await pool.query("SELECT k FROM meta WHERE k = ?", [LEDGER_BACKFILL_META_KEY]);
+  if (markers.length) return;
+  const [rows] = await pool.query(
+    "SELECT rule_id, health_code, source FROM reconciliation_snapshots WHERE snapshot_key LIKE 'r3:c:%' AND window_kind NOT IN ('today', '7d', 'month')"
+  );
+  const entries = migratedLedgerEntries(rows);
+  for (const entry of entries) {
+    await pool.query(
+      `INSERT IGNORE INTO reconciliation_ledger (${RECONCILIATION_LEDGER_COLUMNS.join(", ")}) VALUES (${RECONCILIATION_LEDGER_COLUMNS.map(() => "?").join(", ")})`,
+      ledgerInsertValues(entry)
+    );
+  }
+  await pool.query(
+    "INSERT INTO meta (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)",
+    [LEDGER_BACKFILL_META_KEY, JSON.stringify({ completedAt: new Date().toISOString(), migrated: entries.length })]
+  );
 }
