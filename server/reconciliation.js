@@ -24,7 +24,7 @@ import { applyScopePolicy, canonicalBillingKey, completedBillingDayWindow, scope
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationSettlement,
-  sameReconciliationWindow, summarizeUnaccountedUpstream, reconciliationDisplayCurrency } from "../lib/reconciliation-view.js";
+  sameReconciliationWindow, summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency } from "../lib/reconciliation-view.js";
 import { costBasisOf, rateSnapshotOf } from "../lib/profit.js";
 import { selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 
@@ -1777,10 +1777,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       new Promise((resolve) => { timer = setTimeout(resolve, ACCOUNT_USAGE_WAIT_MS); timer.unref?.(); })]);
     clearTimeout(timer);
     const dayAligned = midnight(window.startMs, window.timezone) === window.startMs && midnight(window.endMs, window.timezone) === window.endMs;
+    const attributed = attributeAuthorizationRules({ usageStations: upstreams.usage, rows: response.results, stationOf: (id) => rt.store.get(id),
+      monitorLinks: rt.onboardingSource?.getMonitorLinks?.() || [] });
     const summarized = summarizeUnaccountedUpstream(upstreams.usage.map((station, index) => ({
       station: { id: station.id, name: station.name }, rate: rateSnapshotOf(station),
       usage: entries[index].pending ? null : entries[index].value,
       approximate: station.type.startsWith("sub2api") && !dayAligned && !isLiveReconciliationPreset(window.preset),
+      ...attributed.get(String(station.id)),
     })), response.results, { currency: response.displayCurrency });
     const named = (stations) => stations.map((station) => ({ id: station.id, name: station.name }));
     return { ...summarized, window: { startMs: group.window.startMs, endMs: group.window.endMs, timezone: window.timezone, preset: window.preset },

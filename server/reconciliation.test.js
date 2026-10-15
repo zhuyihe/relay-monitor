@@ -4473,6 +4473,30 @@ test("3b 核算按人民币：收入按本站汇率、成本按上游汇率；�
   assert.equal(usage.calls.length, 2);
 });
 
+// 独立 Key 监控 + 专用账号授权：核算关联建在没开监控的授权站点上，按用量对比的是 Key 监控站点。
+test("3b 账单授权上的核算关联：渠道接到 Key 监控站点时计入它的已核算，无法确认时标为部分", async (t) => {
+  const f = await completedDayFixture(t);
+  Object.assign(f.stations.find((station) => station.id === "upstream"), { monitorEnabled: false, includeInProfit: false });
+  f.stations.push({ id: "key", name: "Key 监控", type: "newapi-key", baseUrl: "https://upstream.test/", apiKey: "sk-test", authVersion: 1 });
+  const usage = accountUsageStub({ key: 5 });
+  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: usage.stationUsageCost });
+  let unaccounted = (await module.queryRules({}, { accountUsage: true })).unaccountedUpstream;
+  assert.deepEqual(unaccounted.accounts.map((item) => [item.stationId, item.state, item.accountUsd, item.accountedUsd, item.unaccountedUsd, item.ruleIds]),
+    [["key", "partial", 5, 0, 5, []]], "地址相同不能确认是同一账号");
+  assert.deepEqual(unaccounted.accounts[0].notes, ["同站点账单授权「上游」上的核算关联 rr_live、rr_two、rr_three 无法确认是否属于这个账号，未纳入金额可能偏高"]);
+  assert.deepEqual([unaccounted.state, unaccounted.excludedStations], ["partial", []], "授权站点没开监控，不算设为不计入成本的上游");
+  const links = [1, 2, 3].map((channelId) => ({ ownStationId: "own", channelId, stationId: "key", channelRevision: `r${channelId}` }));
+  f.rt.onboardingSource.getMonitorLinks = () => links;
+  unaccounted = (await module.queryRules({}, { accountUsage: true })).unaccountedUpstream;
+  assert.deepEqual(unaccounted.accounts.map((item) => [item.state, item.accountedUsd, item.unaccountedUsd, item.ruleIds, item.notes]),
+    [["complete", 3, 2, ["rr_live", "rr_two", "rr_three"], ["已核算含账单授权「上游」上的核算关联 rr_live、rr_two、rr_three"]]]);
+  assert.deepEqual([unaccounted.state, unaccounted.total], ["complete", 2]);
+  links.splice(1);
+  unaccounted = (await module.queryRules({}, { accountUsage: true })).unaccountedUpstream;
+  assert.deepEqual(unaccounted.accounts.map((item) => [item.state, item.accountedUsd, item.ruleIds]), [["partial", 1, ["rr_live"]]], "只有接了监控的渠道上的关联才归属");
+  assert.equal(usage.calls.length, 1);
+});
+
 test("3b 固定采购上游：核算成本记 0，不用它的汇率；账号级对比只列为固定采购", async (t) => {
   const f = await completedDayFixture(t);
   const upstream = f.stations.find((station) => station.id === "upstream");

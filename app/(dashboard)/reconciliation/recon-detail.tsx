@@ -107,7 +107,7 @@ export function ReconDetail({ detail, state, currency, upstreams, compact, confl
         <Detail label="本站收费（美元原值）" value={basis(detail.downstream)} />
         <Detail label={fixedCost ? "上游 Key 用量（美元原值，固定采购不计成本）" : "上游成本（美元原值）"} value={basis(detail.upstream)} />
         <Detail label={calculation.confirmed ? "毛利（美元原值）" : "风险差额（美元原值）"} value={reconciliationBillingBasis({ state: "complete", amountUsd: originalResult })} />
-        <p className="jy-caption">毛利 = 本站收费 − 上游成本；毛利率 = 毛利 ÷ 本站收费。计算使用未舍入金额，跨分段时先分别核算再汇总。{currency === "CNY" ? "按人民币显示时，收费按本站汇率、成本按该上游汇率分别折算后相减。" : ""}</p>
+        <p className="jy-caption">毛利 = 本站收费 − 上游成本；毛利率 = 毛利 ÷ 本站收费。计算使用未舍入金额，跨分段时先分别核算再汇总。{currency === "CNY" ? "按人民币显示时，收费按本站、成本按该上游的当前汇率分别折算后相减。" : ""}</p>
       </div>,
     }]} />
 

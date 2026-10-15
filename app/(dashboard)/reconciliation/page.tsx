@@ -12,7 +12,7 @@ import AppState from "../../components/app-state";
 import { Seg } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
 import { useDrawerEscape } from "../../components/drawer-escape";
-import { PRESETS, formatRecentTime, formatTime, formatWindow, iso, sameRequestedWindow, sameWindow, upstreamBillsHref } from "./recon-format";
+import { PRESETS, formatRecentTime, formatTime, formatWindow, isFixedCost, iso, sameRequestedWindow, sameWindow, upstreamBillsHref } from "./recon-format";
 import type { ReconWindow } from "./recon-format";
 import { useReconWindow } from "./use-recon-window";
 import { useReconDetail } from "./use-recon-detail";
@@ -245,7 +245,7 @@ export default function ReconciliationPage() {
     </div> : null}
 
     <div className="reconciliation-overview">
-      <ReconSummary summary={commonSummary} unaccounted={unaccounted} usageRereading={usageRereading} reference={reference} />
+      <ReconSummary summary={commonSummary} unaccounted={unaccounted} usageRereading={usageRereading} reference={reference} fixedCost={results.some(isFixedCost)} />
       <ReconWindowGroups groups={windowGroups} reference={reference} />
       <ReconCoverage coverage={coverage} reference={reference} />
     </div>

@@ -2,10 +2,12 @@
 // 核算汇总、未纳入核算的上游消费、按账单窗口分组的小计、已知渠道覆盖。
 // 金额按服务端定的显示币种（totals.display）汇总；reference 表示当前正在核对（查询中、过期或读取失败），只能当参考。
 import { Alert, Button, Collapse } from "antd";
+import Link from "next/link";
 import { Panel } from "../../components/panel";
 import { StatusTag } from "../../components/status";
 import type { KnownChannelCoverage, ReconciliationDisplayTotals, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream } from "../../../lib/client";
 import { RECONCILIATION_BILLING_SOURCE_LABEL } from "../../../lib/reconciliation-contract";
+import { NAV_LABELS } from "../../../lib/brand";
 import { Detail, SummaryMetric } from "./recon-parts";
 import { COVERAGE_STATUS_LABEL, amountText, amountTone, channelStateLabel, coverageIssueLabel, formatRecentTime, formatWindow, isLivePreset, iso, percent } from "./recon-format";
 
@@ -42,7 +44,7 @@ function UnaccountedUpstreamBlock({ data, rereading }: { data: UnaccountedUpstre
       <StatusTag level={unaccountedLevel(data.state)}>{UNACCOUNTED_STATE_LABEL[data.state] || data.state}</StatusTag>
     </div>
     <p className="jy-caption">
-      各上游账号的实际扣费（和「我的站点」同一取数）减去已计入核算的 Key 成本。
+      各上游账号的实际扣费（和「{NAV_LABELS.my}」同一取数）减去已计入核算的 Key 成本。
       {pending ? (rereading ? "上游用量还在读取，稍后自动重读。" : "上游用量读取较慢，可点顶栏的刷新重试。")
         : data.state === "complete" ? "" : data.state === "estimated" ? "部分账号按余额历史或整日用量估算。" : "部分账号或关联没取全，合计不准确，展开看各账号说明。"}
       {!pending && overAccounted ? " 已核算多于账号扣费的账号（多为取数时刻不同）在合计里按 0 计。" : ""}
@@ -73,14 +75,16 @@ function UnaccountedUpstreamBlock({ data, rereading }: { data: UnaccountedUpstre
   </section>;
 }
 
-export function ReconSummary({ summary, unaccounted, usageRereading = false, reference }: {
-  summary: ReconciliationSummary | null; unaccounted?: UnaccountedUpstream | null; usageRereading?: boolean; reference: boolean;
+// fixedCost：本页有建在固定采购上游上的关联，它们的成本记 0，采购费只在自营业务页按时段摊销。
+export function ReconSummary({ summary, unaccounted, usageRereading = false, reference, fixedCost = false }: {
+  summary: ReconciliationSummary | null; unaccounted?: UnaccountedUpstream | null; usageRereading?: boolean; reference: boolean; fixedCost?: boolean;
 }) {
   const currency = summary ? displayTotals(summary.totals).currency : "USD";
   const note = <>
     {summary?.totals.profitComplete ? "已知渠道范围的完整账单。" : "仅已确认范围的金额，不代表全站完整利润。"}
-    {currency === "CNY" ? "金额按人民币汇总，收费按本站汇率、成本按各上游汇率分别折算；" : "金额按系统原值（美元）汇总；"}
+    {currency === "CNY" ? "金额按人民币汇总，收费按本站、成本按各上游的当前汇率折算（过去的时段也按当前汇率）；" : "金额按系统原值（美元）汇总；"}
     本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}。今天、近 7 天、本月为截至现在的实时金额，自然日结束后自动结账。
+    {fixedCost ? <>固定采购上游的成本记 0，采购费不在这里分摊；扣掉固定成本后的净利见<Link href="/my">{NAV_LABELS.my}</Link>。</> : null}
   </>;
   return <Panel title="核算汇总" className="reconciliation-summary" foot={note}>
     {reference

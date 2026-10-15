@@ -101,6 +101,10 @@ test("3b daily page switches to yuan only when every station has a rate, with fi
   const summary = page.getByRole("region", { name: "核算汇总", exact: true }), metric = (label) => summary.locator(".reconciliation-summary-metric", { hasText: label });
   await metric("本站已获取收费（CNY）").getByText("¥52.50", { exact: true }).waitFor(); await metric("已计入上游成本（CNY）").getByText("¥12.00", { exact: true }).waitFor(); await metric("已确认范围账面毛利").getByText("¥40.50", { exact: true }).waitFor();
   assert.doesNotMatch(await summary.locator(".reconciliation-summary__metrics").innerText(), /\$/);
+  // 页脚：按当前汇率折算，过去的时段也一样；有固定采购的关联时说明成本记 0，净利去自营业务看
+  await summary.getByText(/收费按本站、成本按各上游的当前汇率折算（过去的时段也按当前汇率）/).waitFor();
+  await summary.getByText(/固定采购上游的成本记 0，采购费不在这里分摊；扣掉固定成本后的净利见自营业务/).waitFor();
+  assert.equal(await summary.getByRole("link", { name: "自营业务", exact: true }).getAttribute("href"), "/my");
   const rowA = page.locator("tr.ant-table-row", { hasText: "Rule A" }), rowC = page.locator("tr.ant-table-row", { hasText: "Rule C" });
   await rowA.getByText("¥17.50", { exact: true }).waitFor(); await rowA.getByText("¥6.00", { exact: true }).waitFor(); await rowA.getByText("¥11.50", { exact: true }).waitFor();
   await rowC.getByText("Fixed upstream", { exact: true }).waitFor(); assert.match(await rowC.locator(".reconciliation-table-amount", { hasText: "固定采购" }).innerText(), /^¥0\.00\s*固定采购$/); assert.equal(await rowC.getByText("¥17.50", { exact: true }).count(), 2);
@@ -122,9 +126,11 @@ test("3b partially configured rates keep system dollars everywhere and name the 
   await metric("本站已获取收费（USD）").getByText("$7.50", { exact: true }).waitFor(); await metric("已计入上游成本（USD）").getByText("$2.00", { exact: true }).waitFor(); await metric("已确认范围账面毛利").getByText("$5.50", { exact: true }).waitFor();
   await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$1.50", { exact: true }).waitFor(); assert.match(await page.locator("tr.ant-table-row", { hasText: "Rule C" }).locator(".reconciliation-table-amount", { hasText: "固定采购" }).innerText(), /^\$0\.00\s*固定采购$/);
   await summary.getByRole("region", { name: "未纳入核算的上游消费", exact: true }).locator(".reconciliation-summary-metric").getByText("$2.00", { exact: true }).waitFor();
+  await summary.getByText(/金额按系统原值（美元）汇总；.*固定采购上游的成本记 0/).waitFor();
   assert.doesNotMatch(await page.locator(".reconciliation-page").innerText(), /¥/);
   // 一个汇率都没设置时不提示
   const next = await openDailyPage(t, { data: dailyResponse(dailyRows()) }); await next.page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$2.50", { exact: true }).waitFor(); assert.equal(await next.page.getByText("金额按系统原值（美元）显示", { exact: true }).count(), 0);
+  assert.equal(await next.page.getByText(/固定采购上游的成本记 0/).count(), 0, "没有固定采购的关联时不提");
 });
 
 test("3b live today rows share one window although each stops at its own fetch time", async (t) => {

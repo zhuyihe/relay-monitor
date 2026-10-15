@@ -897,6 +897,24 @@ test("F07 directory reads reevaluate rule source after missing channels, restore
   assert.equal(f.state.ruleWrites, 1, "source observations do not rewrite financial scope");
 });
 
+test("3b 当前有效的监控关联：渠道不在目录或监控站点停用时不再返回，给出的是副本", async (t) => {
+  const f = await genuineBatchFixture(t), input = f.request([[1]]), preview = await f.rt.channelOnboarding.probeBatch(input);
+  const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId });
+  const stationIds = result.groups[0].saved.stationIds;
+  assert.ok(stationIds.length > 0);
+  const current = () => f.rt.channelOnboarding.getMonitorLinks().map((link) => [link.ownStationId, link.channelId, link.stationId]);
+  const expected = stationIds.map((stationId) => [input.ownStationId, 1, stationId]);
+  assert.deepEqual(current(), expected);
+  f.rt.channelOnboarding.getMonitorLinks()[0].stationId = "changed";
+  assert.deepEqual(current(), expected, "改返回值不影响模块里的关联");
+  f.state.channels = f.state.channels.filter((id) => id !== 1);
+  await f.rt.channelOnboarding.sync(); assert.deepEqual(current(), [], "渠道不在目录里");
+  f.state.channels.unshift(1); await f.rt.channelOnboarding.sync(); assert.deepEqual(current(), expected);
+  const station = f.rt.store.get(stationIds[0]), monitorEnabled = station.monitorEnabled;
+  station.monitorEnabled = false; assert.deepEqual(current(), expected.slice(1), "监控站点停用");
+  station.monitorEnabled = monitorEnabled;
+});
+
 test("F08 shared Sub2API metadata cannot inherit another selected Key's positive capability", async (t) => {
   const f = await genuineBatchFixture(t), fetchNewApi = globalThis.fetch, stats = [];
   await f.store.update(f.supplier.id, { type: "sub2api", accessToken: "sub2-A", userId: "" });

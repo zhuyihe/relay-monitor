@@ -1550,9 +1550,19 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       ...(group.code ? { code: group.code } : {}) };
   }
 
+  // 当前有效的监控关联：渠道还在目录里且没改过、监控站点仍在用（和渠道列表的「已接入」同一判断）。
+  // 核算页按它把账单授权上的核算关联归到对应的监控账号。
+  function getMonitorLinks() {
+    const channels = new Map((catalogue?.channels || []).map((channel) => [Number(channel.id), channel]));
+    return links.filter((link) => {
+      const channel = catalogue?.ownStationId === link.ownStationId ? channels.get(Number(link.channelId)) : null, station = rt.store.get(link.stationId);
+      return channel && !channel.missing && link.channelRevision === channel.revision && station && station.monitorEnabled !== false && !station.archivedAt;
+    }).map((link) => ({ ...link }));
+  }
+
   return { list, listAccounts, sync, probe, connect, inspectSource, getRuleSource: inspectSource, getSourceCatalogue, withSourceLock,
     getPreviewGuard, assertPreviewGuard, probeBatch, connectBatch, recoverBatch, probeRuleEdit,
-    probeAccountAuthorization, updateAccountAuthorization, recoverAccountAuthorization, confirmResourceIdentity,
+    probeAccountAuthorization, updateAccountAuthorization, recoverAccountAuthorization, confirmResourceIdentity, getMonitorLinks,
     async load() { [catalogue, links] = await Promise.all([repository.getCatalogue(), repository.listLinks()]); return this; } };
 }
 
