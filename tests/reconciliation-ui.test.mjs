@@ -616,7 +616,50 @@ test("new New API credentials are entered once and keyboard cancellation after a
 });
 
 test("monitor-only onboarding needs no Key and submits one batch", async (t) => {
-  const { page, writes } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].groups[0].reconciliation, null);
+  const { page, writes } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer);
+  assert.equal(await drawer.getByText(/实际账单账号|生效时间：|同一 Key 成本/).count(), 0);
+  await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].selections[0].monitor, true); assert.equal(writes[0].groups[0].reconciliation, null);
+});
+
+test("monitor-only preview preserves an actual channel verification failure", async (t) => {
+  const { page } = await openOnboardingPage(t, { probe(body, count, config) {
+    const probe = probeResult(body, config);
+    Object.assign(probe.groups[0], { status: "unavailable", code: "CHANNEL_CHANGED", reason: "渠道版本已变化，请重新发现" });
+    return probe;
+  } });
+  const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer);
+  await drawer.getByText("监控关联待完成", { exact: true }).waitFor();
+  await drawer.getByText("渠道版本已变化，请重新发现", { exact: true }).waitFor();
+  assert.equal(await drawer.getByText(/实际账单账号|同一 Key 成本/).count(), 0);
+});
+
+test("onboarding requires a purpose and recovers by selecting balance monitoring", async (t) => {
+  const { page, probes, writes } = await openOnboardingPage(t);
+  const drawer = await openOnboardingDrawer(page);
+  await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).uncheck();
+  await drawer.getByText("请选择余额监控或 Key 对账", { exact: true }).waitFor();
+  assert.equal(await drawer.getByRole("button", { name: "验证并预览", exact: true }).isDisabled(), true);
+  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
+  assert.equal(probes.length, 0); assert.equal(writes.length, 0);
+  await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).check();
+  await verifyOnboarding(drawer); await saveOnboarding(drawer);
+  assert.equal(writes.length, 1); assert.equal(writes[0].selections[0].monitor, true);
+});
+
+test("pending Key billing can be deselected to save only balance monitoring", async (t) => {
+  const { page, writes } = await openOnboardingPage(t, { probe(body, count, config) {
+    const probe = probeResult(body, config);
+    if (body.groups[0].reconciliation) Object.assign(probe.groups[0], { status: "unavailable", code: "KEY_REQUIRED", reason: "请选择实际使用的上游 Key" });
+    return probe;
+  } });
+  const drawer = await openOnboardingDrawer(page);
+  await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check();
+  await verifyOnboarding(drawer);
+  await drawer.getByText("Key 对账待配置", { exact: true }).waitFor();
+  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
+  await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).uncheck();
+  await verifyOnboarding(drawer); await saveOnboarding(drawer);
+  assert.equal(writes.length, 1); assert.equal(writes[0].groups[0].reconciliation, null);
 });
 
 test("Sub2API password mode clears hidden credentials and preserves unsupported billing as partial", async (t) => {
