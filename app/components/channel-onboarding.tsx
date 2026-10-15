@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, List, Select, Space, Tag, Typography } from "antd";
 import { api } from "../../lib/client";
+import { createRequestId } from "../../lib/request-id.js";
 import type { BatchInput, BatchProbe, BatchRecoveryIntent, BatchResult, ConnectionInput, CoverageDeclaration, WorkflowDestination, SourceCatalogueProjection } from "../../lib/client";
 import { useDrawerEscape } from "./drawer-escape";
 
@@ -118,7 +119,9 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const open = (ids: number[]) => {
-    invalidate(true); setTokenId(undefined); setOpenIds(ids); setResult(null); setRetryInput(null); setRequestId(crypto.randomUUID()); setAdditionalIds([]); setBilling(false); setCoverage({}); setCoverageRule(null); setKeyTimezones({}); setSplitKeys(false); setAuthorizationId("self");
+    let nextRequestId: string;
+    try { nextRequestId = createRequestId(); } catch (err: any) { message.error(err.message); return; }
+    invalidate(true); setTokenId(undefined); setOpenIds(ids); setResult(null); setRetryInput(null); setRequestId(nextRequestId); setAdditionalIds([]); setBilling(false); setCoverage({}); setCoverageRule(null); setKeyTimezones({}); setSplitKeys(false); setAuthorizationId("self");
     const entries = ids.map((id) => channels.find((entry) => entry.id === id)).filter(Boolean);
     const candidates = entries.map((entry) => entry.monitor?.stationIds?.[0] || (entry.candidates?.length === 1 ? entry.candidates[0]?.id || entry.candidates[0] : undefined));
     const linked = candidates.map((id) => upstreams.find((item) => item.id === id));
@@ -177,6 +180,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
     finally { setRecovering(false); }
   };
   const buildInput = async (): Promise<BatchInput> => {
+    if (!requestId) throw new Error("请求标识无效，请关闭接入窗口后重新打开");
     const selection: BatchInput["selections"][number] = { selectionId: "primary", monitor, additionalMonitorStationIds: additionalIds, updateCredentials };
     if (creating) selection.newStation = connection(await form.validateFields()); else selection.stationId = stationId;
     if (billing && authorizationId !== "self") selection.reconciliationAuthorization = authorizationId === "new" ? { newAuthorization: connection(await authorizationForm.validateFields()) } : { stationId: authorizationId };

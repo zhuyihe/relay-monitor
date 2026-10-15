@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups } from "../lib/reconciliation-view.js";
+import { normalizeBatchInput } from "../lib/channel-onboarding.js";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
@@ -330,6 +331,34 @@ async function enableBilling(page, drawer, key = "Supplier Key") {
   assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true); await verifyOnboarding(drawer);
 }
 async function saveOnboarding(drawer) { await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); }
+
+test("onboarding without randomUUID keeps valid request IDs within an operation and renews them when reopened", async (t) => {
+  const { page, probes, writes } = await openOnboardingPage(t, { config: onboardingFixture(true) });
+  await page.evaluate(() => Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined }));
+  const drawer = await openOnboardingDrawer(page);
+  await verifyOnboarding(drawer);
+  const first = normalizeBatchInput(probes[0]).requestId;
+  const repeated = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/channel-onboarding/batch/probe");
+  await verifyOnboarding(drawer); await repeated;
+  assert.equal(normalizeBatchInput(probes[1]).requestId, first);
+  await drawer.locator("button.ant-btn-loading").waitFor({ state: "hidden" });
+  await drawer.locator(".ant-drawer-close").click(); await drawer.waitFor({ state: "hidden" });
+  const reopened = await openOnboardingDrawer(page); await verifyOnboarding(reopened);
+  assert.notEqual(normalizeBatchInput(probes[2]).requestId, first);
+  assert.equal(writes.length, 0);
+});
+
+test("onboarding without browser cryptography does not partially open a drawer or send a request", async (t) => {
+  const { page, probes, writes } = await openOnboardingPage(t);
+  await page.evaluate(() => {
+    Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined });
+    Object.defineProperty(globalThis.crypto, "getRandomValues", { configurable: true, value: undefined });
+  });
+  await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click();
+  await page.getByText("当前浏览器无法生成请求标识，请更新浏览器后重试", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("dialog", { name: "接入监控与对账", exact: true }).count(), 0);
+  assert.equal(probes.length, 0); assert.equal(writes.length, 0);
+});
 
 test("discovery refresh preserves the panel state for Enter, Space and click", { timeout: 45000 }, async (t) => {
   const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
@@ -869,6 +898,32 @@ async function openAccountAuthorization(page, center, account) {
 }
 async function previewAuthorization(drawer) { await drawer.getByRole("button", { name: "预览授权更新", exact: true }).click(); await drawer.getByText("授权更新预览，尚未保存", { exact: true }).waitFor(); }
 async function confirmAccountAuthorization(drawer) { const button = drawer.getByRole("button", { name: "确认更新所选授权", exact: true }); await button.click(); await drawer.getByText(/本次所选目标已完成授权更新|部分目标尚未更新，已保存目标保留/).waitFor(); await drawer.locator(".ant-drawer-close").waitFor(); }
+
+test("account authorization without randomUUID renews IDs on input changes and confirms the preview ID", async (t) => {
+  const { page, center, model, probes, updates } = await openAuthorizationPage(t);
+  await page.evaluate(() => Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined }));
+  const drawer = await openAccountAuthorization(page, center, model.accounts[0]);
+  await drawer.getByLabel("更新访问令牌", { exact: true }).fill("first-fixture-pat"); await previewAuthorization(drawer);
+  const first = probes[0].requestId;
+  assert.match(first, /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i);
+  await drawer.getByLabel("更新访问令牌", { exact: true }).fill("second-fixture-pat"); await previewAuthorization(drawer);
+  assert.notEqual(probes[1].requestId, first);
+  assert.match(probes[1].requestId, /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i);
+  await confirmAccountAuthorization(drawer);
+  assert.equal(updates[0].requestId, probes[1].requestId);
+});
+
+test("account authorization without browser cryptography does not partially open or send an update", async (t) => {
+  const { page, center, model, probes, updates } = await openAuthorizationPage(t);
+  await page.evaluate(() => {
+    Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined });
+    Object.defineProperty(globalThis.crypto, "getRandomValues", { configurable: true, value: undefined });
+  });
+  await openAccountAuthorization(page, center, model.accounts[0]);
+  await page.getByText("当前浏览器无法生成请求标识，请更新浏览器后重试", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("dialog", { name: "更新账号授权 · 42", exact: true }).count(), 0);
+  assert.equal(probes.length, 0); assert.equal(updates.length, 0);
+});
 
 test("account authorization inputs once and confirms three explicit targets while excluding same-site B, own, archived and pure Key", async (t) => {
   const { page, center, model, probes, updates, originalStations } = await openAuthorizationPage(t), account = model.accounts[0]; const before = originalStations.map((resource) => ({ id: resource.id, userId: resource.userId, costAliases: resource.costAliases, lowBalanceUsd: resource.lowBalanceUsd, cnyPerUsd: resource.cnyPerUsd, includeInProfit: resource.includeInProfit, noRenewal: resource.noRenewal }));
