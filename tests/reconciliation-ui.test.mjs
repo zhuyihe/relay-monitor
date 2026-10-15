@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups } from "../lib/reconciliation-view.js";
+import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
@@ -52,15 +52,17 @@ function dailyResponse(rows = dailyRows(), options = {}) {
   const catalogue = { ownSource: billingSource, stale: false, totalValidated: true, catalogueTotal: 10, channels: Array.from({ length: 10 }, (_, index) => ({ id: index + 1, name: `渠道 ${index + 1}`, status: 1 })), ...options.catalogue };
   const isCompletedWindow = (range) => range.preset !== "today" && range.endMs - range.startMs >= 23 * 3600000;
   const coverage = deriveKnownChannelCoverage(catalogue, rules, rows, { isCompletedWindow });
-  const grouped = summarizeReconciliationWindowGroups(rows, { isCompletedWindow, coverageFor: (range, source) => deriveKnownChannelCoverage(catalogue, rules.filter((rule) => rule.ownSource?.namespaceKey === source?.namespaceKey), rows.filter((row) => row.ownSource?.namespaceKey === source?.namespaceKey), { window: range, isCompletedWindow }) });
-  return { generatedAt: "2026-10-09T03:00:00.000Z", results: rows, ...grouped, coverage, actions: coverage.channels.flatMap((channel) => channel.actions) };
+  const currency = options.displayCurrency || "USD";
+  const grouped = summarizeReconciliationWindowGroups(rows, { currency, isCompletedWindow, coverageFor: (range, source) => deriveKnownChannelCoverage(catalogue, rules.filter((rule) => rule.ownSource?.namespaceKey === source?.namespaceKey), rows.filter((row) => row.ownSource?.namespaceKey === source?.namespaceKey), { window: range, isCompletedWindow }) });
+  const extra = { displayCurrency: currency, unconfiguredRateStations: options.unconfiguredRateStations || [], ...(options.unaccountedUpstream ? { unaccountedUpstream: options.unaccountedUpstream } : {}) };
+  return { generatedAt: "2026-10-09T03:00:00.000Z", results: rows, ...grouped, coverage, actions: coverage.channels.flatMap((channel) => channel.actions), ...extra };
 }
 async function openDailyPage(t, options = {}) {
   const reads = [], queries = [], initial = options.data || dailyResponse();
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, { ...configuration, ownStation: { id: "own-1", cnyPerUsd: 7 }, rules: initial.results.map((row) => row.rule) });
+    if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, { ...configuration, ownStation: { id: "own-1", cnyPerUsd: 7 }, ...(options.upstreams ? { upstreams: options.upstreams } : {}), rules: initial.results.map((row) => row.rule) });
     if (url.pathname === "/api/reconciliation") { reads.push(Object.fromEntries(url.searchParams)); return options.read ? options.read(route, reads.length, initial) : fulfill(route, initial); }
     if (url.pathname === "/api/reconciliation/query") { const body = route.request().postDataJSON(); queries.push(body); return options.query ? options.query(route, body, initial) : fulfill(route, initial); }
     if (url.pathname.endsWith("/segments")) return fulfill(route, { segments: [] });
@@ -76,6 +78,79 @@ test("daily billing defaults to complete yesterday and global 3/10 coverage surv
   await page.getByRole("textbox", { name: "搜索上游、Key、渠道名称或 ID", exact: true }).fill("Rule A"); assert.equal(await page.locator("tr.ant-table-row").count(), 1); await summary.getByText("$7.50", { exact: true }).waitFor();
   await page.getByText("负毛利 0", { exact: true }).click(); await page.getByText("没有匹配的核算关联", { exact: true }).waitFor(); await coverage.getByText("已知渠道覆盖：已核算 3/10", { exact: true }).waitFor();
   await coverage.locator(".ant-collapse-header", { hasText: "查看全部已知渠道与未核算原因" }).click(); await coverage.getByText("渠道 9 · ID 9", { exact: true }).waitFor(); assert.ok((await coverage.textContent()).includes("尚未建立核算关联")); assert.equal(reads.length, 1);
+});
+
+// 3b：汇率都设置了才整页按人民币；收费按本站汇率、成本按该上游汇率；固定采购成本记 0
+const ratedUpstreams = [...configuration.upstreams, { id: "fixed-1", name: "Fixed upstream" }];
+const configuredRate = (stationId, cnyPerUsd) => ({ stationId, cnyPerUsd, source: "configured" });
+const defaultRate = (stationId) => ({ stationId, cnyPerUsd: 1, source: "default" });
+function ratedDailyRows() {
+  const rows = dailyRows();
+  for (const row of rows) row.rates = { income: configuredRate("own-1", 7), cost: configuredRate("upstream-1", 6), costBasis: "usage" };
+  rows[2].rule.upstreamStationId = "fixed-1"; rows[2].rates = { income: configuredRate("own-1", 7), cost: configuredRate("fixed-1", 6), costBasis: "fixed" };
+  return rows;
+}
+function unaccountedFor(rows, currency, usage = { usd: 4, mode: "usage" }) {
+  const summarized = summarizeUnaccountedUpstream([{ station: { id: "upstream-1", name: "Fixture upstream" }, rate: configuredRate("upstream-1", 6), usage }], rows, { currency });
+  return { ...summarized, window, fixedStations: [{ id: "fixed-1", name: "Fixed upstream" }], excludedStations: [] };
+}
+
+test("3b daily page switches to yuan only when every station has a rate, with fixed purchases at zero cost", async (t) => {
+  const rows = ratedDailyRows();
+  const { page } = await openDailyPage(t, { upstreams: ratedUpstreams, data: dailyResponse(rows, { displayCurrency: "CNY", unaccountedUpstream: unaccountedFor(rows, "CNY") }) });
+  const summary = page.getByRole("region", { name: "核算汇总", exact: true }), metric = (label) => summary.locator(".reconciliation-summary-metric", { hasText: label });
+  await metric("本站已获取收费（CNY）").getByText("¥52.50", { exact: true }).waitFor(); await metric("已计入上游成本（CNY）").getByText("¥12.00", { exact: true }).waitFor(); await metric("已确认范围账面毛利").getByText("¥40.50", { exact: true }).waitFor();
+  assert.doesNotMatch(await summary.locator(".reconciliation-summary__metrics").innerText(), /\$/);
+  const rowA = page.locator("tr.ant-table-row", { hasText: "Rule A" }), rowC = page.locator("tr.ant-table-row", { hasText: "Rule C" });
+  await rowA.getByText("¥17.50", { exact: true }).waitFor(); await rowA.getByText("¥6.00", { exact: true }).waitFor(); await rowA.getByText("¥11.50", { exact: true }).waitFor();
+  await rowC.getByText("Fixed upstream", { exact: true }).waitFor(); assert.match(await rowC.locator(".reconciliation-table-amount", { hasText: "固定采购" }).innerText(), /^¥0\.00\s*固定采购$/); assert.equal(await rowC.getByText("¥17.50", { exact: true }).count(), 2);
+  // 未纳入核算的上游消费：账号扣费 $4 − 已核算 $2，按该上游汇率 6 折算
+  const unaccounted = summary.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
+  await unaccounted.locator(".reconciliation-summary-metric").getByText("¥12.00", { exact: true }).waitFor(); await unaccounted.getByText(/固定采购的上游不按用量计成本，不在此列：Fixed upstream/).waitFor();
+  await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游账号" }).click(); await unaccounted.getByText("账号扣费 ¥24.00 · 已核算 ¥12.00 · 未纳入 ¥12.00", { exact: true }).waitFor(); await unaccounted.getByText(/汇率 ¥6\/\$ · 核算关联 rule-1、rule-2/).waitFor();
+  await page.getByRole("button", { name: "查看 Rule A 的核算详情", exact: true }).click(); let drawer = page.getByRole("dialog", { name: "Rule A · 核算详情", exact: true });
+  await drawer.getByText("本站 ¥7/$ · 上游 ¥6/$", { exact: true }).waitFor(); await drawer.locator(".ant-collapse-header", { hasText: "查看原始账单与计算依据" }).click(); await drawer.getByText("1.5 USD", { exact: true }).waitFor(); await drawer.locator(".ant-drawer-close").click();
+  await page.getByRole("button", { name: "查看 Rule C 的核算详情", exact: true }).click(); drawer = page.getByRole("dialog", { name: "Rule C · 核算详情", exact: true });
+  await drawer.getByText("¥0.00 · 固定采购：Key 用量 $1.00 不计成本", { exact: true }).waitFor(); await drawer.getByText("本站 ¥7/$ · 上游 固定采购不计成本", { exact: true }).waitFor();
+});
+
+test("3b partially configured rates keep system dollars everywhere and name the stations still missing a rate", async (t) => {
+  const rows = ratedDailyRows(); for (const row of rows.slice(0, 2)) row.rates.cost = defaultRate("upstream-1");
+  const { page } = await openDailyPage(t, { upstreams: ratedUpstreams, data: dailyResponse(rows, { unconfiguredRateStations: [{ id: "upstream-1", name: "Fixture upstream" }], unaccountedUpstream: unaccountedFor(rows, "USD") }) });
+  await page.getByText("金额按系统原值（美元）显示", { exact: true }).waitFor(); await page.getByText(/部分站点未设置汇率：Fixture upstream/).waitFor();
+  const summary = page.getByRole("region", { name: "核算汇总", exact: true }), metric = (label) => summary.locator(".reconciliation-summary-metric", { hasText: label });
+  await metric("本站已获取收费（USD）").getByText("$7.50", { exact: true }).waitFor(); await metric("已计入上游成本（USD）").getByText("$2.00", { exact: true }).waitFor(); await metric("已确认范围账面毛利").getByText("$5.50", { exact: true }).waitFor();
+  await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$1.50", { exact: true }).waitFor(); assert.match(await page.locator("tr.ant-table-row", { hasText: "Rule C" }).locator(".reconciliation-table-amount", { hasText: "固定采购" }).innerText(), /^\$0\.00\s*固定采购$/);
+  await summary.getByRole("region", { name: "未纳入核算的上游消费", exact: true }).locator(".reconciliation-summary-metric").getByText("$2.00", { exact: true }).waitFor();
+  assert.doesNotMatch(await page.locator(".reconciliation-page").innerText(), /¥/);
+  // 一个汇率都没设置时不提示
+  const next = await openDailyPage(t, { data: dailyResponse(dailyRows()) }); await next.page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$2.50", { exact: true }).waitFor(); assert.equal(await next.page.getByText("金额按系统原值（美元）显示", { exact: true }).count(), 0);
+});
+
+test("3b live today rows share one window although each stops at its own fetch time", async (t) => {
+  const start = window.endMs, rows = dailyRows({ ...window, preset: "today", startMs: start, endMs: start + 3 * 3600000 });
+  const later = { ...rows[1].window, endMs: start + 3 * 3600000 + 1500 };
+  Object.assign(rows[1], { window: later, requestedWindow: later }); rows[1].downstream.window = rows[1].upstream.window = later;
+  const { page } = await openDailyPage(t, { data: dailyResponse(rows) });
+  assert.equal(await page.locator(".ant-collapse-header", { hasText: /^账单窗口/ }).count(), 1); await page.getByRole("region", { name: "核算汇总", exact: true }).locator(".reconciliation-summary-metric", { hasText: "本站已获取收费（USD）" }).getByText("$7.50", { exact: true }).waitFor();
+  assert.equal(await page.getByText("按各关联时区计算，具体时间见详情", { exact: true }).count(), 0);
+});
+
+test("3b pending upstream account usage re-reads the page at most three times", async (t) => {
+  const reads = [], rows = ratedDailyRows();
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, { ...configuration, rules: rows.map((row) => row.rule) });
+    if (url.pathname === "/api/reconciliation") { reads.push(Object.fromEntries(url.searchParams)); return fulfill(route, { ...dailyResponse(rows, { unaccountedUpstream: unaccountedFor(rows, "USD", reads.length >= 5 ? { usd: 4, mode: "usage" } : null) }), generatedAt: new Date(Date.now()).toISOString() }); }
+    throw new Error("unexpected API: " + url.pathname);
+  }, undefined, true);
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
+  const unaccounted = page.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
+  await unaccounted.getByText("读取中", { exact: true }).first().waitFor(); assert.equal(reads.length, 1);
+  for (const expected of [2, 3, 4]) { await page.clock.fastForward(5000); await settle(); assert.equal(reads.length, expected); }
+  await page.clock.fastForward(20000); await settle(); assert.equal(reads.length, 4);
+  assert.ok(reads.every((read) => read.preset === "yesterday"));
 });
 
 test("daily mobile pagination changes only visible rules and retains global amounts and coverage", async (t) => {
@@ -96,7 +171,7 @@ test("daily billing keeps absolute Shanghai and UTC groups separate and combines
 test("daily row retry uses one selected query then reloads full GET before showing current aggregates", async (t) => {
   let reload, ready; const started = new Promise((resolve) => { ready = resolve; }); const initial = dailyResponse();
   const { page, reads, queries } = await openDailyPage(t, { data: initial, read(route, count) { if (count === 1) return fulfill(route, initial); return new Promise((resolve) => { reload = { route, resolve }; ready(); }); }, query(route, body) { assert.deepEqual(body.ruleIds, ["rule-1"]); const rows = dailyRows(); rows[0] = rule("rule-1", "Rule A", 4); return fulfill(route, dailyResponse([rows[0]], { rules: initial.results.map((row) => row.rule) })); } });
-  await page.getByRole("button", { name: /重试.*Rule A/ }).click(); await started; await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("¥28.00", { exact: true }).waitFor(); await page.getByText("全量摘要仅供参考，正在核对当前窗口", { exact: true }).waitFor(); assert.deepEqual(reads[1], { preset: "yesterday" }); assert.equal(queries.length, 1); assert.deepEqual([queries[0].startMs, queries[0].endMs], [window.startMs, window.endMs]);
+  await page.getByRole("button", { name: /重试.*Rule A/ }).click(); await started; await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$4.00", { exact: true }).waitFor(); await page.getByText("全量摘要仅供参考，正在核对当前窗口", { exact: true }).waitFor(); assert.deepEqual(reads[1], { preset: "yesterday" }); assert.equal(queries.length, 1); assert.deepEqual([queries[0].startMs, queries[0].endMs], [window.startMs, window.endMs]);
   const full = dailyRows(); full[0] = rule("rule-1", "Rule A", 4); reload.resolve(fulfill(reload.route, dailyResponse(full))); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("$9.00", { exact: true }).waitFor(); await page.getByRole("region", { name: "已知渠道覆盖", exact: true }).getByText("已知渠道覆盖：已核算 3/10", { exact: true }).waitFor();
 });
 
@@ -105,21 +180,21 @@ test("daily summary re-read ignores an earlier aggregate when another row finish
   const { page, reads } = await openDailyPage(t, { data: initial, read(route, count) { if (count === 1) return fulfill(route, initial); return new Promise((resolve) => { gets.push({ route, resolve }); getReady(); }); }, query(route, body) { return new Promise((resolve) => retries.set(body.ruleIds[0], { route, resolve })); } });
   await page.getByRole("button", { name: /重试.*Rule A/ }).click(); await page.getByRole("button", { name: /重试.*Rule B/ }).click(); const rows = dailyRows(); rows[0] = rule("rule-1", "Rule A", 4); retries.get("rule-1").resolve(fulfill(retries.get("rule-1").route, dailyResponse([rows[0]]))); await getStarted;
   rows[1] = rule("rule-2", "Rule B", 5); retries.get("rule-2").resolve(fulfill(retries.get("rule-2").route, dailyResponse([rows[1]]))); await page.waitForFunction(() => document.querySelectorAll(".ant-btn-loading-icon").length === 0); assert.equal(reads.length, 3);
-  const earlier = dailyRows(); earlier[0] = rows[0]; gets[0].resolve(fulfill(gets[0].route, dailyResponse(earlier))); await page.locator("tr.ant-table-row", { hasText: "Rule B" }).getByText("¥35.00", { exact: true }).waitFor(); await page.getByText("全量摘要仅供参考，正在核对当前窗口", { exact: true }).waitFor();
+  const earlier = dailyRows(); earlier[0] = rows[0]; gets[0].resolve(fulfill(gets[0].route, dailyResponse(earlier))); await page.locator("tr.ant-table-row", { hasText: "Rule B" }).getByText("$5.00", { exact: true }).waitFor(); await page.getByText("全量摘要仅供参考，正在核对当前窗口", { exact: true }).waitFor();
   gets[1].resolve(fulfill(gets[1].route, dailyResponse(rows))); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("$11.50", { exact: true }).waitFor();
 });
 
 test("daily full-summary read failure keeps successful row and retries full GET without another financial query", async (t) => {
   const rows = dailyRows(); let successful = false;
   const { page, reads, queries } = await openDailyPage(t, { read(route, count) { if (count === 2) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture summary unavailable" }) }); return fulfill(route, dailyResponse(rows)); }, query(route) { rows[0] = rule("rule-1", "Rule A", 4); successful = true; return fulfill(route, dailyResponse([rows[0]])); } });
-  await page.getByRole("button", { name: /重试.*Rule A/ }).click(); await page.getByText("全量汇总读取失败 · 摘要仅供参考", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("¥28.00", { exact: true }).waitFor(); assert.equal(successful, true); await page.getByRole("button", { name: "重读全量汇总", exact: true }).click(); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("$9.00", { exact: true }).waitFor(); assert.equal(queries.length, 1); assert.equal(reads.length, 3); assert.ok(reads.every((read) => read.preset === "yesterday"));
+  await page.getByRole("button", { name: /重试.*Rule A/ }).click(); await page.getByText("全量汇总读取失败 · 摘要仅供参考", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$4.00", { exact: true }).waitFor(); assert.equal(successful, true); await page.getByRole("button", { name: "重读全量汇总", exact: true }).click(); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("$9.00", { exact: true }).waitFor(); assert.equal(queries.length, 1); assert.equal(reads.length, 3); assert.ok(reads.every((read) => read.preset === "yesterday"));
 });
 
 test("daily coverage retains disabled and missing known channels and zero active rules after stopping", async (t) => {
   const rows = dailyRows(), channels = Array.from({ length: 10 }, (_, index) => ({ id: index + 1, name: `渠道 ${index + 1}`, status: index === 1 ? 2 : 1, missing: index === 8 }));
   rows[1].downstream.channels[0].state = "manual_disabled"; rows[2].rule.channels = [{ channelId: 9, name: "渠道 9" }]; rows[2].downstream.channels[0] = { ...rows[2].downstream.channels[0], channelId: 9, name: "渠道 9", state: "missing" }; rows[2].health = { code: "SOURCE_BINDING_UNCONFIRMED", issues: [{ code: "SOURCE_BINDING_UNCONFIRMED", detail: "原渠道已缺失，需要核对来源" }] }; rows[2].calculation = { profitUsd: null, riskDifferenceUsd: 1.5, marginRate: null };
   const data = dailyResponse(rows, { catalogue: { channels } }); const { page } = await openDailyPage(t, { data, query(route) { return fulfill(route, dailyResponse([], { rules: rows.map((row) => ({ ...row.rule, enabled: false, archivedAt: "2026-10-09T03:00:00.000Z" })), catalogue: { channels } })); } });
-  const coverage = page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.getByText("已知渠道覆盖：已核算 2/10", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule C" }).getByText("¥17.50", { exact: true }).waitFor();
+  const coverage = page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.getByText("已知渠道覆盖：已核算 2/10", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule C" }).getByText("$2.50", { exact: true }).waitFor();
   await coverage.locator(".ant-collapse-header").click(); await coverage.getByText("渠道 9 · ID 9", { exact: true }).waitFor(); assert.ok((await coverage.textContent()).includes("已缺失")); assert.ok((await coverage.textContent()).includes("手动禁用"));
   await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click(); await page.getByText("还没有有效的核算关联", { exact: true }).waitFor(); await coverage.getByText("已知渠道覆盖：已核算 0/10", { exact: true }).waitFor(); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("暂无共同整日汇总", { exact: true }).waitFor();
 });
@@ -128,13 +203,13 @@ test("daily duplicate sales and shared Key costs use server totals while raw row
   const rows = dailyRows(); rows[1].rule.channels = structuredClone(rows[0].rule.channels); rows[1].downstream.channels = structuredClone(rows[0].downstream.channels); rows[1].upstream.countedAmountUsd = null; rows[1].upstream.ownershipState = "duplicate";
   for (const row of rows.slice(0, 2)) { row.calculation = { profitUsd: null, riskDifferenceUsd: 1.5, marginRate: null }; row.health = { code: "DUPLICATE_CHANNEL_ASSIGNMENT", issues: [{ code: "DUPLICATE_CHANNEL_ASSIGNMENT", detail: "rule-1、rule-2 重复归属" }] }; }
   const { page } = await openDailyPage(t, { data: dailyResponse(rows) }); const summary = page.getByRole("region", { name: "核算汇总", exact: true }); await summary.getByText("$5.00", { exact: true }).waitFor(); await summary.getByText("$2.00", { exact: true }).waitFor(); await summary.getByText("$1.50", { exact: true }).waitFor();
-  const rowB = page.locator("tr.ant-table-row", { hasText: "Rule B" }); await rowB.getByText("¥17.50", { exact: true }).waitFor(); await rowB.getByText("¥7.00", { exact: true }).waitFor(); await rowB.getByText("待核算", { exact: true }).waitFor();
+  const rowB = page.locator("tr.ant-table-row", { hasText: "Rule B" }); await rowB.getByText("$2.50", { exact: true }).waitFor(); await rowB.getByText("$1.00", { exact: true }).waitFor(); await rowB.getByText("待核算", { exact: true }).waitFor();
   await page.locator(".ant-collapse-header", { hasText: /^账单窗口/ }).click(); await page.getByText(/未计入成本的关联：rule-2/).waitFor(); const coverage = page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.locator(".ant-collapse-header").click(); await coverage.getByText("重复归属", { exact: true }).waitFor();
 });
 
 test("daily Sub2API unverified timezone keeps zero and actual dollar reference without confirmed day profit", async (t) => {
   const row = dailyRows()[0]; row.amountBasis = { ...amountBasis, conversion: "provider_cost_usd" }; row.billingTimezone = { state: "unverified", timezone: "Asia/Shanghai", reason: "BILLING_TIMEZONE_UNVERIFIED" }; row.upstream = { ...row.upstream, state: "partial", amountUsd: null, knownAmountUsd: 0, countedAmountUsd: 0, quotaPerUnit: null }; row.calculation = { profitUsd: null, marginRate: null, riskDifferenceUsd: 2.5 }; row.health = { code: "BILLING_TIMEZONE_UNVERIFIED", issues: [{ code: "BILLING_TIMEZONE_UNVERIFIED", detail: "当前部署自然日边界尚未核验" }] };
-  const { page } = await openDailyPage(t, { data: dailyResponse([row]) }); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("暂无共同整日汇总", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).locator("td", { hasText: "¥0.00 · 部分" }).waitFor();
+  const { page } = await openDailyPage(t, { data: dailyResponse([row]) }); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("暂无共同整日汇总", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).locator("td", { hasText: "$0.00 · 部分" }).waitFor();
   await page.getByRole("button", { name: "查看 Rule A 的核算详情", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "Rule A · 核算详情", exact: true }); await drawer.getByText(/Asia\/Shanghai · 待核验，原金额仅供参考/).waitFor(); await drawer.locator(".ant-collapse-header", { hasText: "查看原始账单与计算依据" }).click(); await drawer.getByText("0 USD（部分）", { exact: true }).waitFor(); assert.equal(await drawer.getByText("确认利润", { exact: true }).count(), 0);
 });
 
@@ -164,9 +239,9 @@ test("daily unknown catalogue and unknown-source retained members do not become 
 });
 
 test("daily zero and negative confirmed subtotals remain numeric while unknown whole-Key use is reference", async (t) => {
-  const rows = [rule("rule-1", "Rule A", 1), rule("rule-2", "Rule B", 0)]; const { page } = await openDailyPage(t, { data: dailyResponse(rows) }); const summary = page.getByRole("region", { name: "核算汇总", exact: true }); await summary.getByText("-$1.00", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("¥0.00", { exact: true }).waitFor();
+  const rows = [rule("rule-1", "Rule A", 1), rule("rule-2", "Rule B", 0)]; const { page } = await openDailyPage(t, { data: dailyResponse(rows) }); const summary = page.getByRole("region", { name: "核算汇总", exact: true }); await summary.getByText("-$1.00", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$0.00", { exact: true }).waitFor();
   const unknown = dailyRows()[0]; unknown.rule.costCoverage = "unknown"; unknown.rule.coverageDeclaration = { answer: "other_use", otherUse: "external", uncoveredOwnChannelIds: [] }; unknown.calculation = { profitUsd: null, riskDifferenceUsd: 1.5, marginRate: null }; unknown.health = { code: "COST_COVERAGE_UNKNOWN", issues: [{ code: "COST_COVERAGE_UNKNOWN", detail: "同 Key 仍有站外调用" }] };
-  const next = await openDailyPage(t, { data: dailyResponse([unknown]) }); const row = next.page.locator("tr.ant-table-row", { hasText: "Rule A" }); await row.getByText("¥17.50", { exact: true }).waitFor(); await row.getByText("¥7.00", { exact: true }).waitFor(); await row.getByText("待核算", { exact: true }).waitFor(); const coverage = next.page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.locator(".ant-collapse-header").click(); await coverage.getByText("Key 用途待确认", { exact: true }).waitFor(); await coverage.getByText("待处理：核对这把 Key 的全部用途", { exact: true }).waitFor();
+  const next = await openDailyPage(t, { data: dailyResponse([unknown]) }); const row = next.page.locator("tr.ant-table-row", { hasText: "Rule A" }); await row.getByText("$2.50", { exact: true }).waitFor(); await row.getByText("$1.00", { exact: true }).waitFor(); await row.getByText("待核算", { exact: true }).waitFor(); const coverage = next.page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.locator(".ant-collapse-header").click(); await coverage.getByText("Key 用途待确认", { exact: true }).waitFor(); await coverage.getByText("待处理：核对这把 Key 的全部用途", { exact: true }).waitFor();
 });
 
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} } };

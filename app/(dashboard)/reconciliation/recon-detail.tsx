@@ -3,7 +3,6 @@
 // 「修正切换时间」是页面只读的唯一例外，其余处理都跳到上游账单。
 import { Alert, Button, Collapse, DatePicker, Select } from "antd";
 import {
-  formatReconciliationMoney as money,
   reconciliationBillingBasis,
   reconciliationCalculationValues as calculationValues,
   reconciliationRowFlags,
@@ -15,10 +14,11 @@ import {
 } from "../../../lib/reconciliation-contract";
 import { ChannelBreakdown, Detail } from "./recon-parts";
 import {
-  billingAmountText, billingCoverageText, channelLabel, currentRatioLabel, formatRecentTime, formatWindow,
-  formatWindowWithZone, healthLabel, iso, percent, rowHasConflict, sameWindow, upstreamBillsHref, upstreamName,
+  amountText, billingAmountText, billingCoverageText, channelLabel, costText, currentRatioLabel, formatRecentTime, formatWindow,
+  formatWindowWithZone, healthLabel, incomeText, isFixedCost, iso, percent, rowHasConflict, sameWindow, sideAmount, upstreamBillsHref, upstreamName,
 } from "./recon-format";
 import type { useReconDetail } from "./use-recon-detail";
+import type { ReconciliationCurrency } from "../../../lib/client";
 
 type DetailState = ReturnType<typeof useReconDetail>;
 
@@ -32,23 +32,27 @@ export function ConflictRules({ ids, results, onOpen }: { ids: string[]; results
   </div>;
 }
 
-function HealthAlert({ detail }: { detail: any }) {
+function HealthAlert({ detail, currency }: { detail: any; currency: ReconciliationCurrency }) {
   const meta = reconciliationHealthMeta(detail.health?.code);
-  const negative = reconciliationRowFlags(detail).negative;
+  const negative = reconciliationRowFlags(detail, currency).negative;
   const type = meta.tone === "error" || negative ? "error" : detail.health?.code === "READY" ? "success" : "warning";
   const title = meta.tone === "error" ? detail.health?.label || meta.label : negative ? "这条核算关联毛利为负" : detail.health?.label;
   return <Alert type={type} showIcon title={title} description={detail.health?.detail || "数据来源正常"} />;
 }
 
-export function ReconDetail({ detail, state, rate, upstreams, compact, conflictIds, results, retrying, retryError, onOpenHistory, onRetry, onOpen, onCorrect }: {
-  detail: any; state: DetailState; rate: any; upstreams: any; compact: boolean; conflictIds: string[]; results: any[];
+export function ReconDetail({ detail, state, currency, upstreams, compact, conflictIds, results, retrying, retryError, onOpenHistory, onRetry, onOpen, onCorrect }: {
+  detail: any; state: DetailState; currency: ReconciliationCurrency; upstreams: any; compact: boolean; conflictIds: string[]; results: any[];
   retrying: boolean; retryError?: string; onOpenHistory: (id: string) => void; onRetry: (item: any) => void; onOpen: (row: any) => void; onCorrect: () => void;
 }) {
-  const calculation = calculationValues(detail.calculation, detail.health, detail);
+  const calculation = calculationValues(detail.calculation, detail.health, detail, currency);
+  const original = calculationValues(detail.calculation, detail.health, detail, "USD");
+  const fixedCost = isFixedCost(detail);
   const requested = detail.requestedWindow || detail.window;
   const pendingSegments = state.transitionSegments.filter((segment: any) => segment.timingSource === "detected");
   const basis = (billing: any) => reconciliationBillingBasis(detail.segments?.length === 1 ? billing : { state: billing?.state, amountUsd: billing?.amountUsd, knownAmountUsd: billing?.knownAmountUsd });
-  const resultValue = calculation.confirmed ? calculation.profitUsd : calculation.riskDifferenceUsd;
+  const resultValue = calculation.confirmed ? calculation.profit : calculation.riskDifference;
+  const originalResult = original.confirmed ? original.profit : original.riskDifference;
+  const reference = detail.lastConfirmed ? { ...detail.lastConfirmed, rates: detail.rates } : null;
 
   return <div className="reconciliation-detail-body">
     <div className="reconciliation-button-row">
@@ -63,7 +67,7 @@ export function ReconDetail({ detail, state, rate, upstreams, compact, conflictI
     {detail.actions?.length
       ? <div className="reconciliation-button-row">{detail.actions.map((action: any) => <Button key={action.id} href={action.href}>{action.label}</Button>)}</div>
       : null}
-    <HealthAlert detail={detail} />
+    <HealthAlert detail={detail} currency={currency} />
 
     <div className="reconciliation-detail-grid">
       <Detail label="请求窗口" value={formatWindowWithZone(requested)} />
@@ -85,10 +89,15 @@ export function ReconDetail({ detail, state, rate, upstreams, compact, conflictI
         ? <Detail label="账单时区能力" value={`${detail.billingTimezone.timezone} · ${detail.billingTimezone.state === "verified" ? "已核验" : "待核验，原金额仅供参考"}${detail.billingTimezone.reason ? ` · ${detail.billingTimezone.reason}` : ""}`} />
         : null}
       <Detail label="当前倍率" value={currentRatioLabel(detail)} />
-      <Detail label="本站收费" value={`${billingAmountText(detail.downstream, rate)} · ${billingCoverageText(detail.downstream)}`} />
-      <Detail label="上游成本" value={`${billingAmountText(detail.upstream, rate)} · ${billingCoverageText(detail.upstream)}`} />
-      <Detail label={calculation.confirmed ? "毛利" : "风险差额（未计入毛利）"} value={money(resultValue, rate)} />
-      <Detail label="毛利率" value={percent(calculation.marginRate)} />
+      <Detail label="本站收费" value={`${incomeText(detail, currency)} · ${billingCoverageText(detail.downstream)}`} />
+      <Detail label="上游成本" value={fixedCost
+        ? `${costText(detail, currency)} · 固定采购：Key 用量 ${billingAmountText(detail.upstream, null)} 不计成本`
+        : `${costText(detail, currency)} · ${billingCoverageText(detail.upstream)}`} />
+      <Detail label={calculation.confirmed ? "毛利" : "风险差额（未计入毛利）"} value={amountText(resultValue, currency)} />
+      <Detail label="毛利率" value={percent(calculation.margin)} />
+      {currency === "CNY"
+        ? <Detail label="汇率" value={`本站 ¥${detail.rates?.income?.cnyPerUsd}/$ · 上游 ${fixedCost ? "固定采购不计成本" : `¥${detail.rates?.cost?.cnyPerUsd}/$`}`} />
+        : null}
     </div>
 
     <Collapse size="small" ghost className="reconciliation-basis" items={[{
@@ -96,9 +105,9 @@ export function ReconDetail({ detail, state, rate, upstreams, compact, conflictI
       label: "查看原始账单与计算依据",
       children: <div className="reconciliation-detail-grid">
         <Detail label="本站收费（美元原值）" value={basis(detail.downstream)} />
-        <Detail label="上游成本（美元原值）" value={basis(detail.upstream)} />
-        <Detail label={calculation.confirmed ? "毛利（美元原值）" : "风险差额（美元原值）"} value={reconciliationBillingBasis({ state: "complete", amountUsd: resultValue })} />
-        <p className="jy-caption">毛利 = 本站收费 − 上游成本；毛利率 = 毛利 ÷ 本站收费。计算使用未舍入金额，跨分段时先分别核算再汇总。</p>
+        <Detail label={fixedCost ? "上游 Key 用量（美元原值，固定采购不计成本）" : "上游成本（美元原值）"} value={basis(detail.upstream)} />
+        <Detail label={calculation.confirmed ? "毛利（美元原值）" : "风险差额（美元原值）"} value={reconciliationBillingBasis({ state: "complete", amountUsd: originalResult })} />
+        <p className="jy-caption">毛利 = 本站收费 − 上游成本；毛利率 = 毛利 ÷ 本站收费。计算使用未舍入金额，跨分段时先分别核算再汇总。{currency === "CNY" ? "按人民币显示时，收费按本站汇率、成本按该上游汇率分别折算后相减。" : ""}</p>
       </div>,
     }]} />
 
@@ -107,7 +116,7 @@ export function ReconDetail({ detail, state, rate, upstreams, compact, conflictI
       <Detail label="渠道账单覆盖" value={billingCoverageText(detail.downstream)} />
       {detail.lastConfirmed ? <>
         <Detail label="最近完整账单（仅参考）" value={`${formatRecentTime(detail.lastConfirmed.generatedAt, detail.lastConfirmed.window?.timezone, true)} · ${formatWindow(detail.lastConfirmed.window)}`} />
-        <Detail label="参考收费 / 成本" value={`${money(detail.lastConfirmed.downstream?.amountUsd, rate)} / ${money(detail.lastConfirmed.upstream?.amountUsd, rate)}（不计入当前汇总）`} />
+        <Detail label="参考收费 / 成本" value={`${amountText(sideAmount(reference, "income", currency), currency)} / ${amountText(sideAmount(reference, "cost", currency), currency)}（不计入当前汇总）`} />
       </> : null}
     </div>
 
@@ -135,7 +144,7 @@ export function ReconDetail({ detail, state, rate, upstreams, compact, conflictI
 
     <section className="reconciliation-channels" aria-label="渠道收费明细">
       <h3>渠道收费明细</h3>
-      <ChannelBreakdown item={detail} rate={rate} />
+      <ChannelBreakdown item={detail} currency={currency} />
     </section>
   </div>;
 }

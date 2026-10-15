@@ -30,6 +30,7 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
   const resultEpoch = useRef(0);
   const rowResultEpoch = useRef(new Map<string, { epoch: number; window: any }>());
   const summaryRequestId = useRef(0);
+  const usageRereads = useRef({ key: "", count: 0 });
 
   const loadConfiguration = async () => {
     const requestId = ++configRequestId.current;
@@ -193,6 +194,18 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWindow.preset, pollMs, config]);
+
+  // 上游账号用量取数慢时服务端先回「读取中」：同一窗口最多再读 3 次，间隔 5 秒（读缓存，不重算）
+  useEffect(() => {
+    if (data?.unaccountedUpstream?.state !== "pending" || !config) return;
+    const key = JSON.stringify(activeWindow);
+    if (usageRereads.current.key !== key) usageRereads.current = { key, count: 0 };
+    if (usageRereads.current.count >= 3) return;
+    usageRereads.current.count += 1;
+    const timer = setTimeout(() => void loadWindow(activeWindow), 5000);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, activeWindow, config]);
 
   return {
     config, data, loading, querying, error, preset, activeWindow, pollMs, range, setRange, summaryStale, summaryError,

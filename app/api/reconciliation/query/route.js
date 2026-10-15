@@ -1,7 +1,7 @@
 import { withAuth, json } from "../../../../lib/api.js";
 import { createReconciliationModule } from "../../../../server/reconciliation.js";
 
-// 跳过缓存重新计算；只有页面「刷新」带 observe: true，才会观测并写库。
+// 跳过缓存重新计算；只有页面「刷新」带 observe: true，才会观测并写库，也才重新读账号级上游用量。
 export const POST = withAuth(async (request, rt) => {
   const body = await request.json().catch(() => ({}));
   const payload = await (rt.reconciliation ||= createReconciliationModule(rt)).queryRules({
@@ -9,6 +9,7 @@ export const POST = withAuth(async (request, rt) => {
     preset: body?.preset,
     startMs: body?.startMs,
     endMs: body?.endMs,
-  }, { mode: body?.observe === true ? "observe" : "evaluate", force: true, origin: "manual" });
+  }, { mode: body?.observe === true ? "observe" : "evaluate", force: true, origin: "manual",
+    accountUsage: body?.observe === true ? "refresh" : true });
   return json(payload);
 });

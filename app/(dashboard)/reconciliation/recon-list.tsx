@@ -7,65 +7,65 @@ import { CountBadge, Panel } from "../../components/panel";
 import { Seg } from "../../components/seg";
 import { EmptyState } from "../../components/data-state";
 import {
-  formatReconciliationMoney as money,
   hasReconciliationHistory,
   mergeReconciliationChannels,
   reconciliationCalculationValues as calculationValues,
 } from "../../../lib/reconciliation-view";
 import { RowStatus, RuleMobileItem, SegmentHistory, SettlementNote } from "./recon-parts";
 import {
-  amountTone, billingAmountText, billingCoverageText, channelLabel, channelStateSummary, currentGroup, currentRatioLabel,
-  formatRecentTime, percent, ruleHistory, rowHasConflict, upstreamBillsHref, upstreamName,
+  amountText, amountTone, billingCoverageText, channelLabel, channelStateSummary, costText, currentGroup, currentRatioLabel,
+  formatRecentTime, incomeText, isFixedCost, percent, ruleHistory, rowHasConflict, sideAmount, upstreamBillsHref, upstreamName,
 } from "./recon-format";
 import type { ReconStatusFilter, useReconResults } from "./use-recon-results";
+import type { ReconciliationCurrency } from "../../../lib/client";
 
 type ListState = ReturnType<typeof useReconResults>;
 
 const keyName = (item: any) => item.rule?.tokenName || "Key";
-const amountOf = (billing: any) => Number(billing?.knownAmountUsd ?? billing?.amountUsd ?? 0);
-const values = (item: any) => calculationValues(item.calculation, item.health, item);
 const expandable = (item: any) => hasReconciliationHistory(ruleHistory(item));
 
-function BillingCell({ billing, rate }: { billing: any; rate: any }) {
+function BillingCell({ text, billing, note }: { text: string; billing: any; note?: string }) {
   return <span className="reconciliation-table-amount">
-    {billingAmountText(billing, rate)}
-    {billing?.state !== "complete" ? <small>{billingCoverageText(billing)}</small> : null}
+    {text}
+    {note ? <small>{note}</small> : billing?.state !== "complete" ? <small>{billingCoverageText(billing)}</small> : null}
   </span>;
 }
 
-export function ReconList({ results, list, rate, upstreams, compact, error, ownStation, retryingRuleIds, ruleRetryErrors, onDetail, onRetry }: {
-  results: any[]; list: ListState; rate: any; upstreams: any; compact: boolean; error: string; ownStation: boolean;
+export function ReconList({ results, list, currency, upstreams, compact, error, ownStation, retryingRuleIds, ruleRetryErrors, onDetail, onRetry }: {
+  results: any[]; list: ListState; currency: ReconciliationCurrency; upstreams: any; compact: boolean; error: string; ownStation: boolean;
   retryingRuleIds: Set<string>; ruleRetryErrors: Record<string, string>; onDetail: (item: any) => void; onRetry: (item: any) => void;
 }) {
   const { counts, filtered, currentPage, pageSize, expandedRuleId } = list;
+  const values = (item: any) => calculationValues(item.calculation, item.health, item, currency);
+  const sortAmount = (side: "income" | "cost") => (a: any, b: any) => (sideAmount(a, side, currency) ?? 0) - (sideAmount(b, side, currency) ?? 0);
 
   // 金额列紧跟上游 / Key，桌面宽度下不横向滚动也能看到毛利；操作列固定在右侧
   const columns: any[] = [
-    { title: "状态", key: "status", width: 112, render: (_: any, item: any) => <RowStatus item={item} /> },
+    { title: "状态", key: "status", width: 112, render: (_: any, item: any) => <RowStatus item={item} currency={currency} /> },
     {
       title: "上游 / Key", key: "upstream", width: 180,
       sorter: (a: any, b: any) => upstreamName(a.rule, upstreams).localeCompare(upstreamName(b.rule, upstreams)),
       render: (_: any, item: any) => <span className="reconciliation-table-identity"><strong>{upstreamName(item.rule, upstreams)}</strong><small>{item.rule?.tokenName || "未命名 Key"}</small></span>,
     },
-    { title: "本站收费", key: "income", width: 128, align: "right", sorter: (a: any, b: any) => amountOf(a.downstream) - amountOf(b.downstream), render: (_: any, item: any) => <BillingCell billing={item.downstream} rate={rate} /> },
-    { title: "上游成本", key: "cost", width: 128, align: "right", sorter: (a: any, b: any) => amountOf(a.upstream) - amountOf(b.upstream), render: (_: any, item: any) => <BillingCell billing={item.upstream} rate={rate} /> },
+    { title: "本站收费", key: "income", width: 128, align: "right", sorter: sortAmount("income"), render: (_: any, item: any) => <BillingCell text={incomeText(item, currency)} billing={item.downstream} /> },
+    { title: "上游成本", key: "cost", width: 128, align: "right", sorter: sortAmount("cost"), render: (_: any, item: any) => <BillingCell text={costText(item, currency)} billing={item.upstream} note={isFixedCost(item) ? "固定采购" : undefined} /> },
     {
       title: "毛利", key: "profit", width: 128, align: "right",
-      sorter: (a: any, b: any) => Number(values(a).profitUsd || 0) - Number(values(b).profitUsd || 0),
+      sorter: (a: any, b: any) => Number(values(a).profit || 0) - Number(values(b).profit || 0),
       render: (_: any, item: any) => {
-        const profit = values(item).profitUsd;
+        const profit = values(item).profit;
         const tone = amountTone(profit);
         return <span className="reconciliation-table-amount">
-          <strong className={tone ? `reconciliation-amount--${tone}` : ""}>{profit == null ? "待核算" : money(profit, rate)}</strong>
+          <strong className={tone ? `reconciliation-amount--${tone}` : ""}>{profit == null ? "待核算" : amountText(profit, currency)}</strong>
           {profit == null ? null : <SettlementNote item={item} />}
         </span>;
       },
     },
     {
       title: "毛利率", key: "margin", width: 94, align: "right",
-      sorter: (a: any, b: any) => Number(values(a).marginRate || 0) - Number(values(b).marginRate || 0),
+      sorter: (a: any, b: any) => Number(values(a).margin || 0) - Number(values(b).margin || 0),
       render: (_: any, item: any) => {
-        const margin = values(item).marginRate;
+        const margin = values(item).margin;
         const tone = amountTone(margin, { positive: "" });
         return <span className={tone ? `reconciliation-table-amount reconciliation-amount--${tone}` : "reconciliation-table-amount"}>{percent(margin)}</span>;
       },
@@ -119,7 +119,7 @@ export function ReconList({ results, list, rate, upstreams, compact, error, ownS
         ? <>
           <div className="reconciliation-mobile-list">
             {list.pageItems.map((item: any) => <RuleMobileItem
-              key={item.rule?.id} item={item} rate={rate} upstreams={upstreams}
+              key={item.rule?.id} item={item} currency={currency} upstreams={upstreams}
               onDetail={() => onDetail(item)} onRetry={() => onRetry(item)}
               retrying={retryingRuleIds.has(item.rule?.id)} retryError={ruleRetryErrors[item.rule?.id]}
               expanded={expandedRuleId === item.rule?.id} onExpand={() => list.toggleExpanded(item.rule?.id)}
@@ -144,7 +144,7 @@ export function ReconList({ results, list, rate, upstreams, compact, error, ownS
           expandable={{
             expandedRowKeys: expandedRuleId ? [expandedRuleId] : [],
             rowExpandable: expandable,
-            expandedRowRender: (item: any) => <SegmentHistory item={item} rate={rate} compact={false} onDetail={() => onDetail(item)} />,
+            expandedRowRender: (item: any) => <SegmentHistory item={item} currency={currency} compact={false} onDetail={() => onDetail(item)} />,
             onExpand: (expanded: boolean, item: any) => list.setExpandedRuleId(expanded ? item.rule?.id : null),
             expandRowByClick: true,
           }}

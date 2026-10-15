@@ -4388,8 +4388,8 @@ test("U05未来snapshot保存原ruleEvidence，随后配置/成员变化不能�
   assert.doesNotMatch(JSON.stringify(evidence), /accessToken|password|apiKey|admin|pat/);
 });
 
-async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", channelsByRule = { rr_live: [1], rr_two: [2], rr_three: [3] }, ...options } = {}) {
-  t.mock.method(Date, "now", () => Date.parse(now));
+async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", clock = null, channelsByRule = { rr_live: [1], rr_two: [2], rr_three: [3] }, ...options } = {}) {
+  t.mock.method(Date, "now", clock || (() => Date.parse(now)));
   const channels = Array.from({ length: 10 }, (_, index) => ({ id: index + 1, name: `渠道 ${index + 1}`, status: 1, revision: `r${index + 1}` }));
   const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_two", "rr_three"],
     ownChannels: () => channels.filter((channel) => !channel.missing), channelsByRule, ...options });
@@ -4414,7 +4414,11 @@ test("U05真实NewAPI默认完整昨日：3/10全局known覆盖、局部重试�
   assert.ok(full.results.every((row) => row.billingTimezone.state === "verified" && row.calculation.profitUsd === 1.5));
   assert.deepEqual([full.coverage.knownChannelCount, full.coverage.accountedChannelCount, full.coverage.state, full.coverage.wholeSiteState], [10, 3, "partial", "unverified"]);
   assert.equal(full.windowGroups.length, 1);
-  assert.deepEqual(full.commonSummary.totals, { knownIncomeUsd: 7.5, knownCostUsd: 3, confirmedProfitUsd: 4.5, confirmedMarginRate: 0.6, profitComplete: false, notCountedCostRuleIds: [] });
+  // 一个汇率都没设置：按系统原值（USD）显示，也不提示缺汇率。
+  assert.deepEqual(full.commonSummary.totals, { knownIncomeUsd: 7.5, knownCostUsd: 3, confirmedProfitUsd: 4.5, confirmedMarginRate: 0.6, profitComplete: false, notCountedCostRuleIds: [],
+    display: { currency: "USD", knownIncome: 7.5, knownCost: 3, confirmedProfit: 4.5, confirmedMarginRate: 0.6 } });
+  assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["USD", []]);
+  assert.equal(full.unaccountedUpstream, undefined, "没要求账号级对比时不附带");
   const selected = await f.module.queryRules({ ruleIds: ["rr_live"] });
   assert.equal(selected.results.length, 1);
   assert.equal(selected.windowGroups[0].totals.knownIncomeUsd, 2.5, "局部group totals仅含本次选中规则");
@@ -4422,6 +4426,119 @@ test("U05真实NewAPI默认完整昨日：3/10全局known覆盖、局部重试�
   assert.deepEqual([selected.windowGroups[0].coverage.knownChannelCount, selected.windowGroups[0].coverage.accountedChannelCount], [10, 3]);
   assert.equal(f.state.statCalls.length, 6, "局部force=false可复用已有本窗账单");
   assert.ok(full.coverage.channels.find((channel) => channel.channelId === 9).actions.some((action) => action.href === "/stations?action=connect&ownStationId=own&channelIds=9"));
+});
+
+// 账号级用量替身：记录调用，按站点返回扣费。
+function accountUsageStub(usdByStation, { delayMs = 0 } = {}) {
+  const calls = [];
+  const stationUsageCost = async (rt, station, range) => {
+    calls.push({ stationId: station.id, ...range });
+    if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    const usd = usdByStation[station.id];
+    if (usd instanceof Error) throw usd;
+    return { usd, mode: "api", error: "should-not-leak" };
+  };
+  return { calls, stationUsageCost };
+}
+
+test("3b 核算按人民币：收入按本站汇率、成本按上游汇率；未纳入核算的上游消费 = 账号扣费 − 已核算成本", async (t) => {
+  const f = await completedDayFixture(t);
+  f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
+  f.stations.find((station) => station.id === "upstream").cnyPerUsd = 6;
+  const usage = accountUsageStub({ upstream: 5 });
+  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: usage.stationUsageCost });
+  const full = await module.queryRules({}, { accountUsage: true });
+  assert.deepEqual(full.results[0].rates, { income: { stationId: "own", cnyPerUsd: 7, source: "configured" },
+    cost: { stationId: "upstream", cnyPerUsd: 6, source: "configured" }, costBasis: "usage" });
+  assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["CNY", []]);
+  const display = full.commonSummary.totals.display;
+  assert.deepEqual([display.currency, display.knownIncome, display.knownCost, display.confirmedProfit], ["CNY", 52.5, 18, 34.5], "每条 $2.5×7 − $1×6");
+  assert.ok(Math.abs(display.confirmedMarginRate - 34.5 / 52.5) < 1e-9);
+  assert.equal(full.commonSummary.totals.confirmedProfitUsd, 4.5, "USD 原始口径不变");
+  const unaccounted = full.unaccountedUpstream;
+  assert.deepEqual([unaccounted.state, unaccounted.currency, unaccounted.total], ["complete", "CNY", 12], "账号扣费 $5 − 已核算 $3，按上游汇率 6");
+  assert.deepEqual(unaccounted.accounts.map((item) => [item.stationId, item.accountUsd, item.accountedUsd, item.unaccountedUsd, item.account, item.accounted, item.ruleIds.length]),
+    [["upstream", 5, 3, 2, 30, 18, 3]]);
+  assert.deepEqual(unaccounted.window, { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z"), timezone: "Asia/Shanghai", preset: "yesterday" });
+  assert.deepEqual([unaccounted.fixedStations, unaccounted.excludedStations], [[], []]);
+  assert.ok(!JSON.stringify(unaccounted).includes("should-not-leak"), "上游错误原文不进响应");
+  assert.deepEqual(usage.calls.map((call) => [call.stationId, call.startMs, call.endMs, call.tz, call.today]),
+    [["upstream", Date.parse("2026-10-07T16:00:00Z"), Date.parse("2026-10-08T16:00:00Z"), "Asia/Shanghai", false]], "同窗只取一次");
+  // 缓存期内重读不再取上游；只有页面「刷新」才重新读。
+  await module.queryRules({}, { accountUsage: true });
+  assert.equal(usage.calls.length, 1);
+  await module.queryRules({}, { accountUsage: "refresh", force: true });
+  assert.equal(usage.calls.length, 2);
+  // 按关联查询和没要求时都不附带，也不取上游。
+  const selected = await module.queryRules({ ruleIds: ["rr_live"] }, { accountUsage: true });
+  assert.equal(selected.unaccountedUpstream, undefined);
+  assert.equal(usage.calls.length, 2);
+});
+
+test("3b 固定采购上游：核算成本记 0，不用它的汇率；账号级对比只列为固定采购", async (t) => {
+  const f = await completedDayFixture(t);
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  upstream.fixedPurchases = [{ amount: 300, days: 30 }];
+  const usage = accountUsageStub({ upstream: 5 });
+  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: usage.stationUsageCost });
+  let full = await module.queryRules({}, { accountUsage: true });
+  assert.equal(full.results[0].rates.costBasis, "fixed");
+  assert.deepEqual(full.commonSummary.totals.display, { currency: "USD", knownIncome: 7.5, knownCost: 0, confirmedProfit: 7.5, confirmedMarginRate: 1 });
+  assert.deepEqual([full.unaccountedUpstream.state, full.unaccountedUpstream.total, full.unaccountedUpstream.accounts], ["complete", 0, []]);
+  assert.deepEqual(full.unaccountedUpstream.fixedStations, [{ id: "upstream", name: "上游" }]);
+  f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
+  full = await module.queryRules({}, { accountUsage: true });
+  assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["CNY", []], "只需要本站汇率");
+  assert.deepEqual([full.commonSummary.totals.display.knownIncome, full.commonSummary.totals.display.confirmedProfit], [52.5, 52.5]);
+  assert.equal(usage.calls.length, 0);
+});
+
+test("3b 只设置了部分汇率：整页仍按 USD 原值显示，并列出还没设置的站点", async (t) => {
+  const f = await completedDayFixture(t);
+  f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
+  const full = await f.module.queryRules();
+  assert.equal(full.displayCurrency, "USD");
+  assert.deepEqual(full.unconfiguredRateStations, [{ id: "upstream", name: "上游" }]);
+  assert.equal(full.commonSummary.totals.display.currency, "USD");
+  assert.equal(full.commonSummary.totals.display.confirmedProfit, 4.5);
+});
+
+test("3b 账号用量读取失败或超时：核算照常返回，失败记为不可用，超时记为读取中", async (t) => {
+  const f = await completedDayFixture(t);
+  const failing = accountUsageStub({ upstream: new Error("token sk-secret rejected") });
+  const failed = await createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: failing.stationUsageCost })
+    .queryRules({}, { accountUsage: true });
+  assert.equal(failed.results.length, 3);
+  assert.equal(failed.unaccountedUpstream.state, "partial");
+  assert.deepEqual([failed.unaccountedUpstream.accounts[0].state, failed.unaccountedUpstream.accounts[0].accountUsd], ["unavailable", null]);
+  assert.ok(!JSON.stringify(failed.unaccountedUpstream).includes("sk-secret"));
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const slow = accountUsageStub({ upstream: 5 }, { delayMs: 60000 });
+  const pending = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: slow.stationUsageCost }).queryRules({}, { accountUsage: true });
+  for (let i = 0; i < 50 && slow.calls.length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  for (let i = 0; i < 200; i += 1) { await new Promise((resolve) => setImmediate(resolve)); t.mock.timers.tick(100); }
+  const response = await pending;
+  assert.deepEqual([response.unaccountedUpstream.state, response.unaccountedUpstream.total], ["pending", null]);
+  assert.equal(response.unaccountedUpstream.accounts[0].state, "pending");
+});
+
+test("3b 实时窗口：各关联截止点不同仍归同一组，共同汇总和账号级对比照常给出", async (t) => {
+  let tick = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => (tick += 1) });
+  const usage = accountUsageStub({ upstream: 4 });
+  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: usage.stationUsageCost });
+  const today = await module.queryRules({ preset: "today" }, { accountUsage: true });
+  assert.equal(today.results.length, 3);
+  assert.ok(new Set(today.results.map((row) => row.window.endMs)).size > 1, "截止点逐条不同");
+  assert.equal(today.windowGroups.length, 1);
+  assert.equal(today.windowGroups[0].window.preset, "today");
+  assert.equal(today.windowGroups[0].window.endMs, Math.min(...today.results.map((row) => row.window.endMs)));
+  assert.ok(today.commonSummary);
+  assert.equal(today.unaccountedUpstream.window.preset, "today");
+  assert.deepEqual(usage.calls.map((call) => [call.startMs, call.today]), [[Date.parse("2026-10-08T16:00:00Z"), true]]);
+  // 下一次轮询截止点后移，同一预设仍命中账号用量缓存。
+  await module.queryRules({ preset: "today" }, { accountUsage: true });
+  assert.equal(usage.calls.length, 1);
 });
 
 test("U05首次局部缺其余账单证据为unknown，0规则仍0/10；凭据/Key业务变化不能借旧cache变accounted", async (t) => {

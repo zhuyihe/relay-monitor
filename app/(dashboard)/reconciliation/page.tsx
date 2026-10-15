@@ -5,14 +5,14 @@ import "../../styles/pages/reconciliation.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, App, Button, DatePicker, Drawer, Grid } from "antd";
 import { readWorkflowDestination } from "../../../lib/client";
-import type { KnownChannelCoverage, ReconciliationSummary, ReconciliationWindowGroup, WorkflowDestination } from "../../../lib/client";
+import type { KnownChannelCoverage, ReconciliationCurrency, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream, WorkflowDestination } from "../../../lib/client";
 import { summarizeReconciliationFreshness } from "../../../lib/reconciliation-view";
 import { NAV_LABELS } from "../../../lib/brand";
 import AppState from "../../components/app-state";
 import { Seg } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
 import { useDrawerEscape } from "../../components/drawer-escape";
-import { PRESETS, formatRecentTime, formatTime, formatWindow, iso, sameWindow, upstreamBillsHref } from "./recon-format";
+import { PRESETS, formatRecentTime, formatTime, formatWindow, iso, sameRequestedWindow, sameWindow, upstreamBillsHref } from "./recon-format";
 import type { ReconWindow } from "./recon-format";
 import { useReconWindow } from "./use-recon-window";
 import { useReconDetail } from "./use-recon-detail";
@@ -27,11 +27,13 @@ const { RangePicker } = DatePicker;
 
 const DESTINATION_TITLE: Record<string, string> = { retry: "重查原账单窗口", conflict: "处理重复销售归属" };
 
-// 所有关联请求的是同一个窗口（起止和时区都相同）时才有共同窗口可显示
+// 所有关联请求的是同一个窗口（时区相同；今天、近 7 天、本月同一起点，各自截止到取数时刻）时才有共同窗口可显示，
+// 实时窗口取最早的截止点
 function commonWindow(results: any[]) {
   const windows = results.map((item: any) => item.requestedWindow || item.window).filter(Boolean);
   const first = windows[0];
-  return first && windows.every((window: any) => window.startMs === first.startMs && window.endMs === first.endMs && window.timezone === first.timezone) ? first : null;
+  if (!first || !windows.every((window: any) => sameRequestedWindow(window, first))) return null;
+  return { ...first, endMs: Math.min(...windows.map((window: any) => window.endMs)) };
 }
 
 export default function ReconciliationPage() {
@@ -45,11 +47,13 @@ export default function ReconciliationPage() {
   const recon = useReconWindow({ onRowReplaced: detailState.replace });
   const { config, data, loading, querying, error, preset, activeWindow, range, summaryStale, summaryError, retryingRuleIds, ruleRetryErrors } = recon;
   const results: any[] = useMemo(() => data?.results || [], [data]);
-  const list = useReconResults({ results, upstreams: config?.upstreams, compact });
+  // 金额默认按系统原值（USD）显示；本站和涉及的上游都设置了汇率时，服务端才让整页按人民币显示
+  const currency: ReconciliationCurrency = data?.displayCurrency === "CNY" ? "CNY" : "USD";
+  const unconfiguredRateStations: { id: string; name: string }[] = data?.unconfiguredRateStations || [];
+  const list = useReconResults({ results, upstreams: config?.upstreams, compact, currency });
   const history = useConfirmedHistory();
   const { detail } = detailState;
 
-  const rate = config?.ownStation?.cnyPerUsd ?? null;
   const workflowRow = results.find((item: any) => item.rule?.id === destination?.ruleId);
   const workflowRule = (config?.rules || []).find((rule: any) => rule.id === destination?.ruleId);
   const conflictIds: string[] = destination?.action === "conflict"
@@ -58,6 +62,7 @@ export default function ReconciliationPage() {
   const windowGroups: ReconciliationWindowGroup[] = data?.windowGroups || [];
   const commonSummary: ReconciliationSummary | null = data?.commonSummary || null;
   const coverage: KnownChannelCoverage | null = data?.coverage || null;
+  const unaccounted: UnaccountedUpstream | null = data?.unaccountedUpstream || null;
   const latestSuccessful = results.filter((item: any) => item.lastSuccessfulAt)
     .reduce((latest: any, item: any) => !latest || Date.parse(item.lastSuccessfulAt) > Date.parse(latest.lastSuccessfulAt) ? item : latest, null);
   const freshness = summarizeReconciliationFreshness(results);
@@ -139,7 +144,7 @@ export default function ReconciliationPage() {
     {history.open
       ? <ReconHistory history={history} compact={compact} rules={config?.rules || []} />
       : detail ? <ReconDetail
-        detail={detail} state={detailState} rate={rate} upstreams={config?.upstreams} compact={compact}
+        detail={detail} state={detailState} currency={currency} upstreams={config?.upstreams} compact={compact}
         conflictIds={conflictIds} results={results}
         retrying={retryingRuleIds.has(detail.rule.id)} retryError={ruleRetryErrors[detail.rule.id]}
         onOpenHistory={openHistory} onRetry={(item) => void recon.retryRule(item)} onOpen={openDetail}
@@ -216,7 +221,7 @@ export default function ReconciliationPage() {
       </p> : null}
     </div>
 
-    {destinationAlert || error || (!config?.ownStation && results.length) || config?.channelsError || summaryError ? <div className="reconciliation-alerts">
+    {destinationAlert || error || (!config?.ownStation && results.length) || config?.channelsError || summaryError || unconfiguredRateStations.length ? <div className="reconciliation-alerts">
       {destinationAlert}
       {error ? <Alert
         type="error" showIcon title="核算数据加载失败 · 当前显示上次结果" description={`${error}。下方窗口与金额属于上次查询，非本次查询结果。`}
@@ -228,6 +233,11 @@ export default function ReconciliationPage() {
         action={<Button size="small" href="/stations">前往配置</Button>}
       /> : null}
       {config?.channelsError ? <Alert type="warning" showIcon title={config.channelsError} /> : null}
+      {unconfiguredRateStations.length ? <Alert
+        type="info" showIcon title="金额按系统原值（美元）显示"
+        description={`部分站点未设置汇率：${unconfiguredRateStations.map((station) => station.name).join("、")}。本站和涉及的上游都设置汇率后，整页按人民币核算。`}
+        action={<Button size="small" href="/stations">去设置汇率</Button>}
+      /> : null}
       {summaryError ? <Alert
         type="warning" showIcon title="全量汇总读取失败 · 摘要仅供参考" description={summaryError}
         action={<Button size="small" onClick={() => void recon.refreshSummary()}>重读全量汇总</Button>}
@@ -235,13 +245,13 @@ export default function ReconciliationPage() {
     </div> : null}
 
     <div className="reconciliation-overview">
-      <ReconSummary summary={commonSummary} reference={reference} />
+      <ReconSummary summary={commonSummary} unaccounted={unaccounted} reference={reference} />
       <ReconWindowGroups groups={windowGroups} reference={reference} />
       <ReconCoverage coverage={coverage} reference={reference} />
     </div>
 
     <ReconList
-      results={results} list={list} rate={rate} upstreams={config?.upstreams} compact={compact} error={error} ownStation={!!config?.ownStation}
+      results={results} list={list} currency={currency} upstreams={config?.upstreams} compact={compact} error={error} ownStation={!!config?.ownStation}
       retryingRuleIds={retryingRuleIds} ruleRetryErrors={ruleRetryErrors} onDetail={openDetail} onRetry={(item) => void recon.retryRule(item)}
     />
 

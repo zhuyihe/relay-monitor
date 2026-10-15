@@ -92,8 +92,20 @@ export type KnownChannelCoverage = {
   channels: { ownSource: OwnSource | null; ownStationId: string; channelId: number; name: string; operatingState: string; ruleIds: string[];
     status: "accounted" | "unlinked" | "not_effective" | "source_unverified" | "billing_missing" | "coverage_unknown" | "duplicate"; issues: string[]; actions: WorkflowAction[] }[];
 };
-export type ReconciliationWindowTotals = { knownIncomeUsd: number | null; knownCostUsd: number | null; confirmedProfitUsd: number | null; confirmedMarginRate: number | null; profitComplete: boolean; notCountedCostRuleIds: string[] };
-export type ReconciliationWindowGroup = { groupKey: string; ownSource: OwnSource | null; window: { startMs: number; endMs: number }; timezones: string[]; amountBasis: ReconciliationAmountBasis; ruleIds: string[]; totals: ReconciliationWindowTotals; coverage: KnownChannelCoverage; actions: WorkflowAction[] };
+// 金额默认按系统原值（USD）显示；本站和各上游都设置了汇率时整页按人民币显示。*Usd 字段始终是账单原币原始口径。
+export type ReconciliationCurrency = "USD" | "CNY";
+export type ReconciliationDisplayTotals = { currency: ReconciliationCurrency; knownIncome: number | null; knownCost: number | null; confirmedProfit: number | null; confirmedMarginRate: number | null };
+export type ReconciliationWindowTotals = { knownIncomeUsd: number | null; knownCostUsd: number | null; confirmedProfitUsd: number | null; confirmedMarginRate: number | null; profitComplete: boolean; notCountedCostRuleIds: string[]; display: ReconciliationDisplayTotals };
+// 未纳入核算的上游消费 = 各按用量计费上游的账号级扣费 − 已计入核算的 Key 成本；只对共同汇总给出。
+export type UnaccountedUpstreamState = "pending" | "partial" | "estimated" | "complete";
+export type UnaccountedUpstream = {
+  state: UnaccountedUpstreamState; currency: ReconciliationCurrency; total: number | null;
+  accounts: { stationId: string; name: string; rate: number | null; mode: string | null; endMs: number | null; state: UnaccountedUpstreamState | "unavailable"; notes: string[]; ruleIds: string[];
+    accountUsd: number | null; accountedUsd: number; unaccountedUsd: number | null; account: number | null; accounted: number; unaccounted: number | null }[];
+  window: { startMs: number; endMs: number; timezone: string; preset: string };
+  fixedStations: { id: string; name: string }[]; excludedStations: { id: string; name: string }[];
+};
+export type ReconciliationWindowGroup = { groupKey: string; ownSource: OwnSource | null; window: { startMs: number; endMs: number; preset?: string }; timezones: string[]; amountBasis: ReconciliationAmountBasis; ruleIds: string[]; totals: ReconciliationWindowTotals; coverage: KnownChannelCoverage; actions: WorkflowAction[] };
 // live 实时（窗口未结束）/ settled 已结账 / ended 已结束（非整日窗口，不结账）/ pending 待结账 / unavailable 不可用；由服务端给出，前端只渲染。
 export type ReconciliationSettlement = "live" | "settled" | "ended" | "pending" | "unavailable";
 export type ReconciliationSummary = { groupKey: string; totals: ReconciliationWindowTotals; coverage: KnownChannelCoverage };

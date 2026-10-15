@@ -1,7 +1,10 @@
 // 账单核算页的展示文案与纯函数：窗口、账单状态、分组倍率、渠道标签。不含 JSX，各组件和 hooks 共用。
 // 时间一律按账单时区显示（lib/format 的 zoned 系列），不用浏览器时区。
 import { EMPTY, formatZonedDateTime, formatZonedTime, formatZonedWindow } from "../../../lib/format";
-import { formatReconciliationMoney as money, mergeReconciliationSegments } from "../../../lib/reconciliation-view";
+import {
+  formatReconciliationAmount, formatReconciliationMoney as money, mergeReconciliationSegments, reconciliationRateFactors, sameReconciliationWindow,
+} from "../../../lib/reconciliation-view";
+import type { ReconciliationCurrency } from "../../../lib/client";
 import { isLiveReconciliationPreset, reconciliationHealthMeta } from "../../../lib/reconciliation-contract";
 
 export type ReconPreset = "today" | "yesterday" | "7d" | "month" | "custom";
@@ -33,7 +36,7 @@ export const COVERAGE_STATUS_LABEL: Record<string, string> = {
 // 服务端给出的结账状态；没有毛利时（待结账、不可用）表格已显示「待核算」，不再重复
 export const SETTLEMENT_LABEL: Record<string, string> = { live: "实时", settled: "已结账", ended: "已结束" };
 
-// 核算页的金额用 formatReconciliationMoney（负数为 "-$1.00"），百分比也用 ASCII 负号，同一页内保持一致
+// 核算页的金额用 formatReconciliationMoney（负数为 "-$1.00" / "-¥1.00"），百分比也用 ASCII 负号，同一页内保持一致
 export function percent(value: any) {
   if (value == null) return EMPTY;
   const number = Number(value);
@@ -45,6 +48,30 @@ function billingStateLabel(state: any) {
 }
 
 const BILLING_STATES = ["complete", "partial", "unavailable", "pending"];
+
+// 金额默认按系统原值（USD）；currency 为 CNY 时收入按本站汇率、成本按该上游自己的汇率折算（服务端已核对都设置了汇率）。
+export const amountText = (value: any, currency: ReconciliationCurrency) => formatReconciliationAmount(value, currency);
+
+// 固定采购的上游：Key 用量不计成本（采购费作为固定成本摊销），核算成本记为 0
+export const isFixedCost = (item: any) => item?.rates?.costBasis === "fixed";
+
+// 某一侧金额的人民币汇率；按 USD 显示时为 null（原值）
+export function sideRate(item: any, side: "income" | "cost", currency: ReconciliationCurrency) {
+  const factors = reconciliationRateFactors(item?.rates, currency);
+  return factors?.currency === "CNY" ? factors[side] : null;
+}
+
+// 显示口径的一侧金额，用于排序；取不到金额为 null
+export function sideAmount(item: any, side: "income" | "cost", currency: ReconciliationCurrency) {
+  if (side === "cost" && isFixedCost(item)) return 0;
+  const billing = side === "income" ? item?.downstream : item?.upstream;
+  const amount = Number(billing?.knownAmountUsd ?? billing?.amountUsd);
+  return Number.isFinite(amount) ? amount * (sideRate(item, side, currency) ?? 1) : null;
+}
+
+export const incomeText = (item: any, currency: ReconciliationCurrency, billing = item?.downstream) => billingAmountText(billing, sideRate(item, "income", currency));
+export const costText = (item: any, currency: ReconciliationCurrency, billing = item?.upstream) => isFixedCost(item)
+  ? amountText(0, currency) : billingAmountText(billing, sideRate(item, "cost", currency));
 
 export function billingAmountText(billing: any, rate: any) {
   if (!BILLING_STATES.includes(billing?.state)) return "— · 旧版待刷新";
@@ -64,6 +91,11 @@ export function billingCoverageText(billing: any) {
 
 export function sameWindow(a: any, b: any) {
   return a?.startMs === b?.startMs && a?.endMs === b?.endMs && a?.timezone === b?.timezone;
+}
+
+// 今天、近 7 天、本月截至取数时刻，各关联截止点不同：同一预设、同一起点和时区就算同一窗口
+export function sameRequestedWindow(a: any, b: any) {
+  return sameWindow(a, b) || a?.timezone === b?.timezone && sameReconciliationWindow(a, b);
 }
 
 // 10/07 00:00 — 10/08 00:00

@@ -1,33 +1,86 @@
 "use client";
-// 核算汇总、按账单窗口分组的小计、已知渠道覆盖。
-// 金额一律按 USD 汇总；reference 表示当前正在核对（查询中、过期或读取失败），只能当参考。
+// 核算汇总、未纳入核算的上游消费、按账单窗口分组的小计、已知渠道覆盖。
+// 金额按服务端定的显示币种（totals.display）汇总；reference 表示当前正在核对（查询中、过期或读取失败），只能当参考。
 import { Alert, Button, Collapse } from "antd";
 import { Panel } from "../../components/panel";
 import { StatusTag } from "../../components/status";
-import type { KnownChannelCoverage, ReconciliationSummary, ReconciliationWindowGroup } from "../../../lib/client";
-import { formatReconciliationMoney as money } from "../../../lib/reconciliation-view";
+import type { KnownChannelCoverage, ReconciliationDisplayTotals, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream } from "../../../lib/client";
 import { RECONCILIATION_BILLING_SOURCE_LABEL } from "../../../lib/reconciliation-contract";
 import { Detail, SummaryMetric } from "./recon-parts";
-import { COVERAGE_STATUS_LABEL, amountTone, channelStateLabel, coverageIssueLabel, formatWindow, iso, percent } from "./recon-format";
+import { COVERAGE_STATUS_LABEL, amountText, amountTone, channelStateLabel, coverageIssueLabel, formatWindow, iso, percent } from "./recon-format";
+
+// 旧响应没有 display 时按 USD 原值显示
+function displayTotals(totals: ReconciliationWindowGroup["totals"]): ReconciliationDisplayTotals {
+  return totals.display || { currency: "USD", knownIncome: totals.knownIncomeUsd, knownCost: totals.knownCostUsd, confirmedProfit: totals.confirmedProfitUsd, confirmedMarginRate: totals.confirmedMarginRate };
+}
 
 function WindowMetrics({ totals }: { totals: ReconciliationWindowGroup["totals"] }) {
+  const display = displayTotals(totals);
   return <div className="reconciliation-summary__metrics">
-    <SummaryMetric label="本站已获取收费（USD）" value={money(totals.knownIncomeUsd, null)} />
-    <SummaryMetric label="已计入上游成本（USD）" value={money(totals.knownCostUsd, null)} />
-    <SummaryMetric label="已确认范围账面毛利" value={money(totals.confirmedProfitUsd, null)} tone={amountTone(totals.confirmedProfitUsd)} />
-    <SummaryMetric label="已确认范围毛利率" value={percent(totals.confirmedMarginRate)} />
+    <SummaryMetric label={`本站已获取收费（${display.currency}）`} value={amountText(display.knownIncome, display.currency)} />
+    <SummaryMetric label={`已计入上游成本（${display.currency}）`} value={amountText(display.knownCost, display.currency)} />
+    <SummaryMetric label="已确认范围账面毛利" value={amountText(display.confirmedProfit, display.currency)} tone={amountTone(display.confirmedProfit)} />
+    <SummaryMetric label="已确认范围毛利率" value={percent(display.confirmedMarginRate)} />
   </div>;
 }
 
-export function ReconSummary({ summary, reference }: { summary: ReconciliationSummary | null; reference: boolean }) {
+const UNACCOUNTED_STATE_LABEL: Record<string, string> = { complete: "已取全", estimated: "估算", partial: "部分", pending: "读取中", unavailable: "读取失败" };
+const unaccountedLevel = (state: string) => state === "complete" ? "good" : state === "pending" ? "info" : "warn";
+
+// 上游账号实际扣费减去已计入核算的 Key 成本：没有建核算关联的 Key、测试和自用消耗都落在这里
+function UnaccountedUpstreamBlock({ data }: { data: UnaccountedUpstream }) {
+  const { currency } = data;
+  const pending = data.state === "pending";
+  const stationNames = (stations: { name: string }[]) => stations.map((station) => station.name).join("、");
+  return <section className="reconciliation-unaccounted" aria-label="未纳入核算的上游消费">
+    <div className="reconciliation-unaccounted__head">
+      <SummaryMetric label={`未纳入核算的上游消费（${currency}）`} value={pending ? "读取中" : amountText(data.total, currency)} />
+      <StatusTag level={unaccountedLevel(data.state)}>{UNACCOUNTED_STATE_LABEL[data.state] || data.state}</StatusTag>
+    </div>
+    <p className="jy-caption">
+      各上游账号的实际扣费（和「我的站点」同一取数）减去已计入核算的 Key 成本。
+      {pending ? "上游用量还在读取，稍后自动重读。" : data.state === "complete" ? "" : data.state === "estimated" ? "部分账号按余额历史或整日用量估算。" : "部分账号没取全，合计只算已取到的部分。"}
+      {data.fixedStations.length ? ` 固定采购的上游不按用量计成本，不在此列：${stationNames(data.fixedStations)}。` : ""}
+      {data.excludedStations.length ? ` 已设为不计入成本：${stationNames(data.excludedStations)}。` : ""}
+    </p>
+    {data.accounts.length ? <Collapse className="reconciliation-coverage__list" items={[{
+      key: "unaccounted-accounts",
+      label: "查看各上游账号",
+      children: <ul className="reconciliation-coverage__channels">
+        {data.accounts.map((account) => <li key={account.stationId} className="reconciliation-coverage__channel">
+          <div className="reconciliation-coverage__heading">
+            <strong>{account.name}</strong>
+            <StatusTag level={unaccountedLevel(account.state)}>{UNACCOUNTED_STATE_LABEL[account.state] || account.state}</StatusTag>
+          </div>
+          <span>
+            账号扣费 {account.state === "pending" ? "读取中" : amountText(account.account, currency)}
+            {" · "}已核算 {amountText(account.accounted, currency)}
+            {" · "}未纳入 {account.state === "pending" ? "—" : amountText(account.unaccounted, currency)}
+          </span>
+          <span className="jy-caption">
+            {account.rate ? `汇率 ¥${account.rate}/$ · ` : ""}核算关联 {account.ruleIds.join("、") || "无"}
+            {account.notes.length ? ` · ${account.notes.join("；")}` : ""}
+          </span>
+        </li>)}
+      </ul>,
+    }]} /> : null}
+  </section>;
+}
+
+export function ReconSummary({ summary, unaccounted, reference }: { summary: ReconciliationSummary | null; unaccounted?: UnaccountedUpstream | null; reference: boolean }) {
+  const currency = summary ? displayTotals(summary.totals).currency : "USD";
   const note = <>
     {summary?.totals.profitComplete ? "已知渠道范围的完整账单。" : "仅已确认范围的金额，不代表全站完整利润。"}
-    金额按 USD 汇总；本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}。今天、近 7 天、本月为截至现在的实时金额，自然日结束后自动结账。
+    {currency === "CNY" ? "金额按人民币汇总，收费按本站汇率、成本按各上游汇率分别折算；" : "金额按系统原值（美元）汇总；"}
+    本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}。今天、近 7 天、本月为截至现在的实时金额，自然日结束后自动结账。
   </>;
   return <Panel title="核算汇总" className="reconciliation-summary" foot={note}>
     {reference
       ? <Alert type="info" showIcon title="全量摘要仅供参考，正在核对当前窗口" description="关联列表保留已读金额；全量读取完成后再显示当前汇总。" />
-      : summary ? <WindowMetrics totals={summary.totals} /> : <p className="reconciliation-summary__empty">暂无共同整日汇总</p>}
+      : summary ? <>
+        <WindowMetrics totals={summary.totals} />
+        {unaccounted ? <UnaccountedUpstreamBlock data={unaccounted} /> : null}
+      </> : <p className="reconciliation-summary__empty">暂无共同整日汇总</p>}
   </Panel>;
 }
 
