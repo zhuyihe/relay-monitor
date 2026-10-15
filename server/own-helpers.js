@@ -89,6 +89,19 @@ export function reconcileUsageCost(apiUsd, historyUsd) {
   return { usd: api, mode: "usage", note: null };
 }
 
+// 一个按用量计费的上游在 [startMs, endMs) 的实际扣费（美元）。用量接口返回 0 或失败时退回余额下降推算。
+// 我的站点的利润和账单核算的「未纳入核算的上游消费」共用，两处的账号级成本才对得上。
+export async function stationUsageCost(rt, station, { startMs, endMs, tz, today = false }) {
+  const historyUsd = () => rt.history?.usedBetween(station.id, startMs, endMs) ?? 0;
+  try {
+    const u = await queryStationUsage(station, { startMs, endMs, granularity: "day", tz, wantToday: today });
+    const apiUsd = today && u.summary ? u.summary.cost : u.models.reduce((a, m) => a + m.cost, 0);
+    return reconcileUsageCost(apiUsd, historyUsd());
+  } catch (err) {
+    return { usd: historyUsd(), mode: "history", note: "用量接口失败，已按余额历史推算", error: err?.message || String(err) };
+  }
+}
+
 /**
  * 转售的管理员/root Key 消费重归：从「管理员消耗（成本）」移入「下游收入」。
  * 对每个 (username, tokenName) 用日志统计接口取窗内消费额度（美元）后汇总。
@@ -126,7 +139,7 @@ export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endM
  * 窗口为 [startMs, now]：余额推算同样截止到 now，日报算昨天时不会混入今天的消耗。
  */
 export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs, now, tz, range, resold }) {
-  const { store, history } = rt;
+  const { store } = rt;
   const r2 = (v) => Math.round(v * 100) / 100;
   try {
     // 渠道列表拉取开销不小，缓存 10 分钟
@@ -161,23 +174,8 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
         .map(async (station) => {
           const chNames = matched.get(station.id)?.channels || ["未直接出现在 New API 渠道 · 按监控数据计费"];
           const item = { stationId: station.id, name: station.name, channels: chNames };
-          const rate = rateSnapshotOf(station);
-          try {
-            const u = await queryStationUsage(station, {
-              startMs, endMs: now, granularity: "day", tz, wantToday: range === "today",
-            });
-            const apiUsd = range === "today" && u.summary ? u.summary.cost : u.models.reduce((a, m) => a + m.cost, 0);
-            const selected = reconcileUsageCost(apiUsd, history.usedBetween(station.id, startMs, now));
-            return { ...item, ...selected, cny: toCny(selected.usd, rate) };
-          } catch (err) {
-            const usd = history.usedBetween(station.id, startMs, now);
-            return {
-              ...item, mode: "history", usd,
-              note: "用量接口失败，已按余额历史推算",
-              error: err?.message || String(err),
-              cny: toCny(usd, rate),
-            };
-          }
+          const selected = await stationUsageCost(rt, station, { startMs, endMs: now, tz, today: range === "today" });
+          return { ...item, ...selected, cny: toCny(selected.usd, rateSnapshotOf(station)) };
         })
     );
     costs.push(...usageCosts);

@@ -9,6 +9,8 @@ import type { ReconPreset, ReconWindow } from "./recon-format";
 
 // 今天每 30 秒重读；近 7 天、本月跨度大、上游取数重，总额分钟级变化不大，5 分钟一次
 const livePollMs = (preset: string) => (preset === "today" ? 30000 : isLivePreset(preset) ? 300000 : null);
+const USAGE_REREAD_LIMIT = 3;
+const USAGE_REREAD_MS = 5000;
 
 export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, row: any) => void }) {
   const [config, setConfig] = useState<any>(null);
@@ -30,6 +32,8 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
   const resultEpoch = useRef(0);
   const rowResultEpoch = useRef(new Map<string, { epoch: number; window: any }>());
   const summaryRequestId = useRef(0);
+  const usageRereads = useRef({ epoch: -1, count: 0 });
+  const [usageRereadTick, setUsageRereadTick] = useState(0);
 
   const loadConfiguration = async () => {
     const requestId = ++configRequestId.current;
@@ -194,8 +198,33 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWindow.preset, pollMs, config]);
 
+  // 上游账号用量取数慢时服务端先回「读取中」：间隔 5 秒静默重读（读缓存，不重算），只换上账号级对比，不动核算行、不进入查询中。
+  // 次数按窗口请求计：每次窗口读取（切换范围、轮询、「刷新」）重新给 3 次；窗口请求变了或正在进行时，这一轮的重读作废。
+  const unaccounted = data?.unaccountedUpstream;
+  useEffect(() => {
+    if (unaccounted?.state !== "pending" || !config) return;
+    const epoch = windowRequestId.current;
+    if (usageRereads.current.epoch !== epoch) usageRereads.current = { epoch, count: 0 };
+    if (usageRereads.current.count >= USAGE_REREAD_LIMIT) return;
+    const window = activeWindow;
+    const timer = setTimeout(async () => {
+      if (epoch !== windowRequestId.current || windowRequestInFlight.current) return;
+      usageRereads.current.count += 1;
+      let next: any = null;
+      try { next = await readWindow(window); } catch { /* 读不到就等下一次 */ }
+      if (epoch !== windowRequestId.current) return;
+      if (next) setData((previous: any) => previous && { ...previous, unaccountedUpstream: next.unaccountedUpstream ?? null });
+      setUsageRereadTick((tick) => tick + 1);
+    }, USAGE_REREAD_MS);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unaccounted, usageRereadTick, config]);
+  // 还会自动重读：次数用完后页面提示点顶栏的刷新。usageRereadTick 每次重读后变化，保证这里读到最新次数。
+  const usageRereading = unaccounted?.state === "pending" && Boolean(config)
+    && (usageRereads.current.epoch !== windowRequestId.current || usageRereads.current.count < USAGE_REREAD_LIMIT);
+
   return {
-    config, data, loading, querying, error, preset, activeWindow, pollMs, range, setRange, summaryStale, summaryError,
+    config, data, loading, querying, error, preset, activeWindow, pollMs, range, setRange, summaryStale, summaryError, usageRereading,
     retryingRuleIds, ruleRetryErrors, loadWindow, refreshSummary, retryRule, initialize, selectPreset, queryCustom,
   };
 }

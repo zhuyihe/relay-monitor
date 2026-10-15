@@ -25,6 +25,11 @@
   font-size: 24px; line-height: 32px; font-weight: 600; color: var(--jy-ink);
   overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
 }
+.reconciliation-unaccounted { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--jy-rule-soft); min-width: 0; }
+.reconciliation-unaccounted__head { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 8px 12px; }
+.reconciliation-unaccounted__head .reconciliation-summary-metric { padding: 0; }
+.reconciliation-unaccounted__head .jy-tag { margin-bottom: 6px; }
+.reconciliation-unaccounted > .jy-caption { margin: 0; }
 .reconciliation-summary__empty { margin: 0; font-size: 13px; line-height: 20px; color: var(--jy-ink-3); }
 
 .reconciliation-amount--success { color: var(--jy-good-ink) !important; }

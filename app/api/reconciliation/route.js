@@ -16,6 +16,6 @@ export const GET = withAuth(async (request, rt) => {
     preset,
     startMs: sp.get("startMs"),
     endMs: sp.get("endMs"),
-  }, { mode: "evaluate", force: sp.get("force") === "true", origin: "page" });
+  }, { mode: "evaluate", force: sp.get("force") === "true", origin: "page", accountUsage: true });
   return json(payload);
 });

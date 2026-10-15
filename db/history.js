@@ -360,6 +360,13 @@ export class History {
     return Math.round(used * 100) / 100;
   }
 
+  // usedBetween 能不能算全 [sinceTs, untilTs)：起点之前要有基线快照，窗口内至少一个快照。
+  // 新加的站点或超出热数据窗口时没有基线，推算出的消耗只是下限（甚至是 0）。
+  covers(stationId, sinceTs, untilTs) {
+    const arr = this.data[stationId] || [];
+    return arr.some((p) => p[0] < sinceTs) && arr.some((p) => p[0] >= sinceTs && p[0] < untilTs);
+  }
+
   // 站点卡片迷你走势图用：等距抽样到 maxPoints 个点，保留最后一个点
   sparkline(stationId, hours = 48, maxPoints = 40) {
     const pts = this.points(stationId, hours);

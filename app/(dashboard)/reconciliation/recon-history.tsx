@@ -95,8 +95,11 @@ function RecordList({ history, compact }: { history: HistoryState; compact: bool
   />;
 }
 
-export function ReconHistory({ history, compact, rules }: { history: HistoryState; compact: boolean; rules: any[] }) {
+export function ReconHistory({ history, compact, rules, upstreams }: { history: HistoryState; compact: boolean; rules: any[]; upstreams?: any[] }) {
   const { records, busy, error, ruleId } = history;
+  // 固定采购的上游现在核算成本记 0；原确认记录保存的是按 Key 用量计的成本和毛利，照原样显示，只加说明。
+  const rule = (history.directory || rules).find((item: any) => item.id === ruleId);
+  const fixedUpstream = upstreams?.find((station: any) => String(station.id) === String(rule?.upstreamStationId))?.costBasis === "fixed";
   const emptyTitle = busy ? "正在读取原确认账单"
     : error ? "历史读取失败，请重试"
       : records ? "所选范围没有已保存的确认账单"
@@ -130,6 +133,9 @@ export function ReconHistory({ history, compact, rules }: { history: HistoryStat
       : null}
     {records?.records.length ? <RecordList history={history} compact={compact} /> : <EmptyState title={emptyTitle} />}
     {records ? <p className="jy-caption">已读取 {records.records.length} 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。</p> : null}
+    {records && fixedUpstream
+      ? <p className="jy-caption">这个关联的上游现在是固定采购，当前核算里上游成本记 0（采购费计入固定成本）；原确认记录的成本和毛利是按 Key 用量算的，不按现在的口径改写。</p>
+      : null}
     {records?.nextCursor ? <Button disabled={history.rangeChanged} loading={busy} onClick={history.loadMore}>读取更多原确认账单</Button> : null}
   </div>;
 }

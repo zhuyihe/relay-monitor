@@ -23,7 +23,10 @@ import { applyScopePolicy, canonicalBillingKey, completedBillingDayWindow, scope
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
-import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationSettlement } from "../lib/reconciliation-view.js";
+import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationSettlement,
+  sameReconciliationWindow, summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
+import { costBasisOf, rateSnapshotOf } from "../lib/profit.js";
+import { selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 
 export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 
@@ -67,6 +70,11 @@ export async function mapWithConcurrency(items, limit, mapper) {
 const TODAY_TTL_MS = 60000;
 const QUERY_TTL_MS = 60000;
 const MAX_RESULT_CACHE_ENTRIES = 200;
+// 账号级上游用量：已结束窗口不会再变，缓存久一些；页面最多等这么久，取不到先返回「读取中」。
+const ACCOUNT_USAGE_TTL_MS = 10 * 60000;
+const ACCOUNT_USAGE_WAIT_MS = 3000;
+const ACCOUNT_USAGE_PENDING_MAX_MS = 2 * 60000;
+const MAX_ACCOUNT_USAGE_ENTRIES = 200;
 const STALE_SCOPE = Symbol("STALE_SCOPE");
 const MAX_SCOPE_ATTEMPTS = 3;
 // 自然日结束 15 分钟后由轮询结账，给上游账单留出落库时间；数据还不完整就 10 分钟后重试。
@@ -171,7 +179,8 @@ export function resolveReconciliationWindow(input = {}, now = Date.now()) {
 }
 
 function publicStation(station) {
-  return station ? { id: station.id, name: station.name, type: station.type, monitorEnabled: station.monitorEnabled !== false, cnyPerUsd: station.cnyPerUsd ?? null } : null;
+  return station ? { id: station.id, name: station.name, type: station.type, monitorEnabled: station.monitorEnabled !== false,
+    cnyPerUsd: station.cnyPerUsd ?? null, costBasis: costBasisOf(station) } : null;
 }
 
 function publicMetadata(metadata) {
@@ -371,8 +380,8 @@ function sourceSnapshot(token, metadata, upstream, downstream) {
   };
 }
 
-// repository 可注入：测试用内存实现替代 MySQL，生产默认走 rt.pool。
-export function createReconciliationModule(rt, { repository = new ReconciliationRepository(rt.pool) } = {}) {
+// repository 可注入：测试用内存实现替代 MySQL，生产默认走 rt.pool。stationUsageCost 是账号级上游用量取数，测试可替换。
+export function createReconciliationModule(rt, { repository = new ReconciliationRepository(rt.pool), stationUsageCost = defaultStationUsageCost } = {}) {
   const resultCache = (rt._reconciliationResultCache ||= new Map());
   const inflight = (rt._reconciliationInflight ||= new Map());
   const metadataCache = (rt._reconciliationMetadataCache ||= new Map());
@@ -386,6 +395,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const verifiedRuleCredentials = new WeakMap();
   const previewReadFacts = new WeakMap();
   const ownIdentities = new Map();
+  const accountUsageCache = new Map();
   // Sub2API 账单过滤能力的核验结果存进库里，重启后不必重新核验。能力变了就丢掉 Key 目录缓存，
   // 目录里带的能力状态和据此算出的成本归属版本随下一次查询更新，不必等 5 分钟缓存过期。
   const billingCapabilityStore = {
@@ -1657,7 +1667,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const resource = registry.resources.get(result.rule.ownStationId);
       const source = result.rule.ownSource && resource?.identity && resource.station ? ownSourceFor(resource.station, resource.identity) : null;
       const provider = registry.resources.get(result.rule.upstreamStationId)?.metadata?.platform || result.rule.provider;
-      const enriched = Object.assign(result, { ownSource: source, scope: result.scope || reconciliationBillingSchedule(result.rule),
+      // 汇率按当前配置（没设置的 source 为 default，页面按 USD 原值显示）；固定采购的上游成本记为 0。
+      // 历史窗口同样用当前汇率，账本阶段再按日快照。
+      const upstream = upstreamStation(result.rule.upstreamStationId);
+      const rates = { income: { stationId: result.rule.ownStationId, ...rateSnapshotOf(upstreamStation(result.rule.ownStationId)) },
+        cost: { stationId: result.rule.upstreamStationId, ...rateSnapshotOf(upstream) }, costBasis: upstream ? costBasisOf(upstream) : "usage" };
+      const enriched = Object.assign(result, { rates, ownSource: source, scope: result.scope || reconciliationBillingSchedule(result.rule),
         billingTimezone: result.billingTimezone || commonBillingTimezone(result.window, [result.upstream, result.downstream]),
         amountBasis: result.amountBasis || { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION, conversion: provider === "sub2api" ? "provider_cost_usd" : provider === "newapi" ? "quota_per_unit" : null } });
@@ -1671,21 +1686,114 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now), cached = resultCache.get(resultKey(rule, window));
       const resource = registry.resources.get(rule.upstreamStationId), key = resource?.metadata?.tokens.find((token) => token.id === rule.tokenId);
       if (!cached || cached.sourceCredential !== currentSourceCredential(rule) || cached.billingCredential !== registry.billingSource.ownerVersion
-        || now - cached.at >= resultTtl(window) || !sameAbsoluteWindow(cached.value.window, window)
+        || now - cached.at >= resultTtl(window) || !sameReconciliationWindow(cached.value.window, window)
         || !key || key.status !== 1 || key.name !== cached.value.rule.tokenName || key.group !== cached.value.rule.fixedGroup
         || reconciliationScopeFingerprint(rule, cached.value.transitionSegments || []) !== reconciliationScopeFingerprint(cached.value.rule, cached.value.transitionSegments || [])) continue;
       coverageFacts.push(factsFor(cached.value));
     }
     const catalogue = rt.onboardingSource?.getSourceCatalogue?.() || null;
     const coverage = deriveKnownChannelCoverage(catalogue, knownRules, coverageFacts);
-    const grouped = summarizeReconciliationWindowGroups(selected, { coverageFor: (window, source) => {
+    // 金额默认按系统原值（USD）显示；本站、各关联上游和账号级对比涉及的上游都设置了汇率时，整页按人民币显示。
+    const upstreams = usageUpstreams();
+    const rateStations = new Map([
+      ...selected.flatMap((row) => [row.rates.income, row.rates.costBasis === "fixed" ? null : row.rates.cost]).filter(Boolean)
+        .map((rate) => [rate.stationId, rate.source === "configured"]),
+      ...[upstreams?.own, ...(upstreams?.usage || [])].filter(Boolean).map((station) => [station.id, rateSnapshotOf(station).source === "configured"]),
+    ]);
+    const displayCurrency = [...rateStations.values()].every(Boolean) ? reconciliationDisplayCurrency(selected) : "USD";
+    // 已经设置了部分汇率时才提示还缺哪些；一个都没设置就是按 USD 看，不打扰。
+    const unconfiguredRateStations = [...rateStations.values()].some(Boolean)
+      ? [...rateStations].filter(([, configured]) => !configured).map(([id]) => ({ id, name: upstreamStation(id)?.name || `已删除的站点（${id}）` })) : [];
+    // 我的站点只摊销开了监控、计入成本、没归档的固定采购站点；关联建在其他固定采购站点上时点名，核算页说明净利也不含它们的采购费。
+    const offProfit = upstreams ? fixedOffProfitStations(selected, { amortizedIds: upstreams.fixed.map((station) => station.id), stationOf: upstreamStation }) : [];
+    const grouped = summarizeReconciliationWindowGroups(selected, { currency: displayCurrency, coverageFor: (window, source) => {
       const sameSource = (value) => source?.namespaceKey ? value?.namespaceKey === source.namespaceKey : !value;
       return deriveKnownChannelCoverage(catalogue && sameSource(catalogue.ownSource) ? catalogue : null,
         knownRules.filter((rule) => sameSource(rule.ownSource)), coverageFacts.filter((result) => sameSource(result.ownSource)), { window });
     } });
     const actions = [...new Map([...selected.flatMap((row) => row.actions), ...coverage.channels.flatMap((channel) => channel.actions)]
       .map((action) => [action.id, action])).values()];
-    return { results: selected, generatedAt: new Date(now).toISOString(), ...grouped, coverage, actions };
+    return { results: selected, generatedAt: new Date(now).toISOString(), ...grouped, coverage, actions, displayCurrency, unconfiguredRateStations, fixedOffProfitStations: offProfit };
+  }
+
+  // 账号级上游用量：和我的站点同一取数（用量接口，返回 0 或失败时按余额历史推算）。实时窗口缓存键只认起点，
+  // 失败的结果只缓存一分钟；force（页面「刷新」）只复用正在进行的取数，上游慢时进行中的取数最多复用两分钟。
+  function accountUsageFor(station, window, { force = false } = {}) {
+    const live = isLiveReconciliationPreset(window.preset), now = Date.now();
+    const key = JSON.stringify([station.id, window.startMs, live ? window.preset : window.endMs, canonicalTimezone(window.timezone), credentialFingerprint(station)]);
+    const cached = accountUsageCache.get(key);
+    if (cached && (cached.pending ? now - cached.at < ACCOUNT_USAGE_PENDING_MAX_MS : !force && now - cached.at < cached.ttl)) return cached;
+    for (const [cachedKey, entry] of accountUsageCache) if (!entry.pending && now - entry.at >= entry.ttl) accountUsageCache.delete(cachedKey);
+    const entry = { at: now, ttl: live ? TODAY_TTL_MS : ACCOUNT_USAGE_TTL_MS, pending: true, value: null };
+    entry.promise = Promise.resolve()
+      .then(() => stationUsageCost(rt, station, { startMs: window.startMs, endMs: window.endMs, tz: window.timezone, today: window.preset === "today" }))
+      .catch(() => ({ usd: null, mode: "unavailable", note: "上游用量读取失败" }))
+      .then((value) => {
+        // 上游错误原文可能回显令牌：只保留固定提示。
+        let { error, ...usage } = value;
+        // 按余额历史推算但历史没覆盖整个时段（新加的站点、sk 密钥站点）：推出来的消耗只是下限，推不出消耗就算读不到。
+        if (usage.mode === "history" && !rt.history?.covers?.(station.id, window.startMs, window.endMs)) {
+          usage = Number(usage.usd) > 0 ? { ...usage, lowerBound: true, note: `${usage.note}；余额历史没覆盖整个时段，金额偏低` }
+            : { usd: null, mode: "unavailable", note: "上游用量读取失败，余额历史也不够推算" };
+        }
+        Object.assign(entry, { pending: false, at: Date.now(), value: { ...usage, endMs: window.endMs },
+          ttl: error || usage.usd == null ? Math.min(entry.ttl, TODAY_TTL_MS) : entry.ttl });
+        return entry;
+      });
+    accountUsageCache.set(key, entry);
+    while (accountUsageCache.size > MAX_ACCOUNT_USAGE_ENTRIES) accountUsageCache.delete(accountUsageCache.keys().next().value);
+    return entry;
+  }
+
+  function usageUpstreams() {
+    const own = ownStation();
+    if (!own) return null;
+    // store.list() 默认已不含归档站点（我的站点的利润也靠这个默认行为排除归档站点）；这里再过滤一次，不依赖 list 的默认参数
+    const { included, excluded } = selectCostUpstreams(rt.store.list().filter((station) => !station.archivedAt), own.id);
+    return { own, usage: included.filter((station) => costBasisOf(station) === "usage"), fixed: included.filter((station) => costBasisOf(station) === "fixed"), excluded };
+  }
+
+  // 和规则取数同时开始读账号用量，读页面时多半已经取到。各关联时区解析出同一个窗口时才会有共同汇总和账号级对比，
+  // 所以只在这种情况下取数，并和 unaccountedUpstreamFor 一样用排序后的第一个时区。
+  function warmAccountUsage(rules, input, now, force) {
+    const upstreams = usageUpstreams();
+    if (!upstreams) return;
+    const windows = [];
+    for (const timezone of [...new Set(rules.map((rule) => rule.timezone))].sort()) {
+      try { windows.push(resolveReconciliationWindow({ ...input, timezone }, now)); } catch { return; }
+    }
+    if (!windows.length || windows.some((window) => window.startMs !== windows[0].startMs || window.endMs !== windows[0].endMs)) return;
+    for (const station of upstreams.usage) accountUsageFor(station, windows[0], { force });
+  }
+
+  // 未纳入核算的上游消费只对共同汇总给出：一个窗口、一个本站来源，账号级扣费才能和核算成本相减。
+  async function unaccountedUpstreamFor(response, input, now) {
+    const summary = response.commonSummary;
+    const group = summary && response.windowGroups.find((item) => item.groupKey === summary.groupKey);
+    const upstreams = usageUpstreams();
+    if (!group || !upstreams) return null;
+    let window;
+    try { window = resolveReconciliationWindow({ ...input, timezone: group.timezones[0] }, now); } catch { return null; }
+    if (window.startMs !== group.window.startMs) return null;
+    const entries = upstreams.usage.map((station) => accountUsageFor(station, window));
+    let timer;
+    await Promise.race([Promise.all(entries.map((entry) => entry.promise)),
+      new Promise((resolve) => { timer = setTimeout(resolve, ACCOUNT_USAGE_WAIT_MS); timer.unref?.(); })]);
+    clearTimeout(timer);
+    const dayAligned = midnight(window.startMs, window.timezone) === window.startMs && midnight(window.endMs, window.timezone) === window.endMs;
+    const attributed = attributeAuthorizationRules({ usageStations: upstreams.usage, rows: response.results, stationOf: (id) => rt.store.get(id),
+      monitorLinks: rt.onboardingSource?.getMonitorLinks?.() || [] });
+    const summarized = summarizeUnaccountedUpstream(upstreams.usage.map((station, index) => ({
+      station: { id: station.id, name: station.name }, rate: rateSnapshotOf(station),
+      usage: entries[index].pending ? null : entries[index].value,
+      approximate: station.type.startsWith("sub2api") && !dayAligned && !isLiveReconciliationPreset(window.preset),
+      ...attributed.get(String(station.id)),
+    })), response.results, { currency: response.displayCurrency });
+    const named = (stations) => stations.map((station) => ({ id: station.id, name: station.name }));
+    // 设为不计入成本的固定采购上游也不按用量计成本，列在固定采购里；不计入成本里只列按用量计费的（建在上面的关联仍计 Key 成本）。
+    const excludedFixed = upstreams.excluded.filter((station) => costBasisOf(station) === "fixed");
+    return { ...summarized, window: { startMs: group.window.startMs, endMs: group.window.endMs, timezone: window.timezone, preset: window.preset },
+      fixedStations: named([...upstreams.fixed, ...excludedFixed]), excludedStations: named(upstreams.excluded.filter((station) => costBasisOf(station) !== "fixed")) };
   }
 
   const api = {
@@ -1842,6 +1950,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const ownerRegistry = await ownerRegistryFor(rules, selected, { observe: options.mode !== "evaluate" });
         const billingSource = ownerRegistry.billingSource;
         const now = Date.now();
+        // 页面全量读取才附带账号级对比（true 复用缓存，"refresh" 是页面「刷新」，重新读上游用量）；按关联重试和后台观测不需要。
+        const accountUsage = [true, "refresh"].includes(options.accountUsage) && !(Array.isArray(ruleIds) && ruleIds.length);
+        if (accountUsage && attempt === 1 && selected.length) warmAccountUsage(selected, input, now, options.accountUsage === "refresh");
+        const respond = async (rows) => {
+          const response = readResponse(knownRules, rules, rows, ownerRegistry, input, now);
+          if (!accountUsage) return response;
+          let unaccountedUpstream = null;
+          try { unaccountedUpstream = await unaccountedUpstreamFor(response, input, now); } catch { /* 账号级对比只是参考，不能拖垮核算结果 */ }
+          return { ...response, unaccountedUpstream };
+        };
         const results = await mapWithConcurrency(selected, MAX_CONCURRENT_RULES, (rule) => {
           // 今天、近 7 天、本月截至取数时刻：规则排队轮到时才定截止点（同 refreshDue），排队久了 Sub2API 实时区间也不会过旧。
           const live = isLiveReconciliationPreset(input.preset);
@@ -1853,10 +1971,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             throw err;
           });
         });
-        if (billingSourceState().version === billingSource.version && !results.includes(STALE_SCOPE)) return readResponse(knownRules, rules, results.filter(Boolean), ownerRegistry, input, now);
-        if (attempt >= MAX_SCOPE_ATTEMPTS) return readResponse(knownRules, rules, selected.map((rule) => pendingResult(rule,
-          resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now), "查询期间成本来源多次变化，下一轮刷新时重新获取")),
-          ownerRegistry, input, now);
+        if (billingSourceState().version === billingSource.version && !results.includes(STALE_SCOPE)) return respond(results.filter(Boolean));
+        if (attempt >= MAX_SCOPE_ATTEMPTS) return respond(selected.map((rule) => pendingResult(rule,
+          resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now), "查询期间成本来源多次变化，下一轮刷新时重新获取")));
       }
     },
     // 每轮观测今天；每条规则按自己的时区，在昨天结束 15 分钟后结账昨天，直到算出毛利为止。
