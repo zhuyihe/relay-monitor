@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, Modal, Select, Space, Typography } from "antd";
 import { api, usd, readWorkflowDestination } from "../../../lib/client";
+import { createRequestId } from "../../../lib/request-id.js";
 import type { AccountReadModel, AccountRecord, AccountKeyScope, AccountAssociation, UnmatchedAssociation, CoverageDeclaration, PublicResource, AccountAuthorizationInput, AccountAuthorizationProbe, AccountAuthorizationResult, AccountAuthorizationRecoveryIntent, WorkflowDestination, UpstreamKeyRead, ResourceIdentityConfirmation } from "../../../lib/client";
 import { Skeleton } from "../../components/data-state";
 import { Icon, Sym } from "../../components/icons";
@@ -250,17 +251,24 @@ export function useAccountCenter({
   useDrawerEscape(!!verificationStation, closeVerification);
   useDrawerEscape(!!authorizationAccount && !authorizationBusy, closeAuthorization);
   const openAuthorization = (account: AccountRecord) => {
-    authorizationEpoch.current += 1; setAuthorizationAccount(account); setAuthorizationTargets(authorizationEligible(account).map((resource) => resource.id!)); setAuthorizationRequestId(crypto.randomUUID()); setAuthorizationProbe(null); setAuthorizationResult(null); setAuthorizationError(""); setReuseAuthorization(false); setPreviouslyUpdatedIds([]); initializeAuthorizationForm(account);
+    let nextRequestId: string;
+    try { nextRequestId = createRequestId(); } catch (err: any) { message.error(err.message); return; }
+    authorizationEpoch.current += 1; setAuthorizationAccount(account); setAuthorizationTargets(authorizationEligible(account).map((resource) => resource.id!)); setAuthorizationRequestId(nextRequestId); setAuthorizationProbe(null); setAuthorizationResult(null); setAuthorizationError(""); setReuseAuthorization(false); setPreviouslyUpdatedIds([]); initializeAuthorizationForm(account);
   };
   const freshAuthorization = () => {
     if (!authorizationAccount) return;
+    let nextRequestId: string;
+    try { nextRequestId = createRequestId(); } catch (err: any) {
+      setAuthorizationProbe(null); setAuthorizationRequestId(""); setAuthorizationError(err.message); return;
+    }
     const saved = authorizationResult?.targets.filter((target) => ["updated", "already_updated"].includes(target.status)).map((target) => target.stationId) || [];
     const remaining = authorizationResult?.targets.filter((target) => !saved.includes(target.stationId) && !authorizationResult.excluded.some((item) => item.stationId === target.stationId)).map((target) => target.stationId);
     setPreviouslyUpdatedIds([...new Set([...previouslyUpdatedIds, ...saved])]); if (remaining) setAuthorizationTargets(remaining);
-    authorizationEpoch.current += 1; setAuthorizationRequestId(crypto.randomUUID()); setAuthorizationProbe(null); setAuthorizationResult(null); setReuseAuthorization(false); initializeAuthorizationForm(authorizationAccount);
+    authorizationEpoch.current += 1; setAuthorizationRequestId(nextRequestId); setAuthorizationProbe(null); setAuthorizationResult(null); setReuseAuthorization(false); initializeAuthorizationForm(authorizationAccount);
   };
   const authorizationInput = async (reuse = reuseAuthorization): Promise<AccountAuthorizationInput> => {
     if (!authorizationAccount || !authorizationTargets.length) throw new Error("请选择明确的更新目标");
+    if (!authorizationRequestId) throw new Error("请求标识无效，请关闭授权窗口后重新打开");
     const intent = { requestId: authorizationRequestId, targetStationIds: [...authorizationTargets] };
     if (reuse) return { ...intent, reuseSavedAuthorization: true };
     const values = await authorizationForm.validateFields();
@@ -859,7 +867,9 @@ export function useAccountCenter({
                 disabled={authorizationBusy}
                 onValuesChange={(changed) => {
                   if (changed.type) authorizationForm.setFieldsValue(changed.type === "sub2api-password" ? { accessToken: "" } : { email: "", password: "" });
-                  authorizationEpoch.current += 1; setAuthorizationProbe(null); setAuthorizationRequestId(crypto.randomUUID()); setAuthorizationError("");
+                  authorizationEpoch.current += 1; setAuthorizationProbe(null); setAuthorizationRequestId("");
+                  try { setAuthorizationRequestId(createRequestId()); setAuthorizationError(""); }
+                  catch (err: any) { setAuthorizationError(err.message); }
                 }}
               >
                 <Form.Item name="type" label="更新授权方式"><Select options={authorizationAccount.identity.provider === "newapi" ? [{ value: "newapi", label: "New API 访问令牌" }] : [{ value: "sub2api", label: "Sub2API 登录令牌" }, { value: "sub2api-password", label: "Sub2API 邮箱与密码" }]} /></Form.Item>
