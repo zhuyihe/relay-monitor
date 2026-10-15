@@ -511,6 +511,22 @@ test("渠道目录失败时配置接口不回显上游错误中的令牌，服�
   assert.doesNotMatch(logged[0], /sk-sensitive-value|test-token/);
 });
 
+test("3b 上游目录带上是否开监控、是否计入成本：核算页据此说明自营业务不摊销哪些固定采购站点的采购费", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => ({ status: 200, text: async () => JSON.stringify({ success: true, data: { total: 0, items: [] } }) }));
+  const own = { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "test-token" };
+  const stations = [own,
+    { id: "monitored", name: "监控", type: "newapi", baseUrl: "https://up.test", fixedPurchases: [{ cny: 30 }] },
+    { id: "grant", name: "授权", type: "newapi", baseUrl: "https://up.test", monitorEnabled: false, includeInProfit: false, fixedPurchases: [{ cny: 30 }] },
+    { id: "excluded", name: "不计入", type: "sub2api", baseUrl: "https://sub.test", includeInProfit: false }];
+  const reconciliation = createReconciliationModule({
+    pool: { async query() { return [[]]; } },
+    store: { list: () => stations, get: (id) => stations.find((station) => station.id === id) },
+  });
+  const { upstreams } = await reconciliation.getConfiguration();
+  assert.deepEqual(upstreams.map(({ id, monitorEnabled, includeInProfit }) => [id, monitorEnabled, includeInProfit]),
+    [["monitored", true, true], ["grant", false, false], ["excluded", true, false]]);
+});
+
 test("同一个上游 Key 不能同时建立两条启用对账规则", async () => {
   const calls = [];
   const repository = new ReconciliationRepository({

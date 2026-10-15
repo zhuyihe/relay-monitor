@@ -120,6 +120,11 @@ test("3b daily page switches to yuan only when every station has a rate, with fi
   await drawer.locator(".ant-drawer-close").click();
   await page.getByRole("group", { name: "核算时间范围" }).getByRole("button", { name: "今天", exact: true }).filter({ visible: true }).click();
   await summary.locator('a[href="/my?range=today"]', { hasText: "自营业务" }).waitFor();
+  assert.doesNotMatch(await summary.innerText(), /自营业务也不计/);
+  // 固定采购的站点没开监控或不计入成本时，自营业务也不摊销它的采购费，页脚点名
+  const offProfit = await openDailyPage(t, { upstreams: [...configuration.upstreams, { id: "fixed-1", name: "Fixed upstream", monitorEnabled: false, includeInProfit: false }],
+    data: dailyResponse(rows, { displayCurrency: "CNY", unaccountedUpstream: unaccountedFor(rows, "CNY") }) });
+  await offProfit.page.getByRole("region", { name: "核算汇总", exact: true }).getByText(/其中「Fixed upstream」没开监控或设为不计入成本，自营业务也不计它的采购费。/).waitFor();
 });
 
 test("3b partially configured rates keep system dollars everywhere and name the stations still missing a rate", async (t) => {

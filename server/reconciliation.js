@@ -179,7 +179,8 @@ export function resolveReconciliationWindow(input = {}, now = Date.now()) {
 }
 
 function publicStation(station) {
-  return station ? { id: station.id, name: station.name, type: station.type, monitorEnabled: station.monitorEnabled !== false, cnyPerUsd: station.cnyPerUsd ?? null, costBasis: costBasisOf(station) } : null;
+  return station ? { id: station.id, name: station.name, type: station.type, monitorEnabled: station.monitorEnabled !== false,
+    includeInProfit: station.includeInProfit !== false, cnyPerUsd: station.cnyPerUsd ?? null, costBasis: costBasisOf(station) } : null;
 }
 
 function publicMetadata(metadata) {
