@@ -53,6 +53,10 @@ test("usedBetween 按 [起点, 终点) 计、与日汇总同一边界，usedSinc
   // 相邻两段不重不漏
   assert.equal(history.usedBetween("a", 1500, 4000) + history.usedBetween("a", 4000, 6000), history.usedBetween("a", 1500, 6000));
   assert.equal(history.usedSince("a", 1500), 4.5);
+  assert.equal(history.covers("a", 1500, 4500), true);
+  assert.equal(history.covers("a", 1000, 4500), false, "起点之前没有基线");
+  assert.equal(history.covers("a", 5500, 6000), false, "窗口内没有快照");
+  assert.equal(history.covers("missing", 1500, 4500), false);
 });
 
 test("永久留存完全跳过原始快照清理", async () => {

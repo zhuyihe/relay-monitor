@@ -53,10 +53,11 @@ export function ReconList({ results, list, currency, upstreams, compact, error, 
       title: "毛利", key: "profit", width: 128, align: "right",
       sorter: (a: any, b: any) => Number(values(a).profit || 0) - Number(values(b).profit || 0),
       render: (_: any, item: any) => {
-        const profit = values(item).profit;
+        // 旧快照缺两侧金额时毛利退回美元原值，按它实际的币种显示
+        const { profit, currency: profitCurrency } = values(item);
         const tone = amountTone(profit);
         return <span className="reconciliation-table-amount">
-          <strong className={tone ? `reconciliation-amount--${tone}` : ""}>{profit == null ? "待核算" : amountText(profit, currency)}</strong>
+          <strong className={tone ? `reconciliation-amount--${tone}` : ""}>{profit == null ? "待核算" : amountText(profit, profitCurrency as ReconciliationCurrency)}</strong>
           {profit == null ? null : <SettlementNote item={item} />}
         </span>;
       },

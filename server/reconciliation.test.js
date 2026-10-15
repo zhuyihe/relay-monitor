@@ -9,7 +9,6 @@ import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconcilia
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
-import { summarizeReconciliationTotals } from "../lib/reconciliation-view.js";
 
 function trustedLegacyRule(rule, stations = [], upstreamAccountId = 7, ownAccountId = 7) {
   const upstream = stations.find((station) => station.id === rule.upstream_station_id) || { type: "newapi", baseUrl: "https://upstream.test" };
@@ -3577,7 +3576,6 @@ test("旧重叠规则保留历史与收入，当前同 Key 成本只列一次且
   assert.equal(results.reduce((sum, result) => sum + result.downstream.knownAmountUsd, 0), 5);
   assert.equal(results[1].upstream.duplicateOfRuleId, rule.id);
   assert.equal(results[1].segments[0].upstream.knownAmountUsd, 1);
-  assert.equal(summarizeReconciliationTotals(results).cost, 1);
 });
 
 // 同 Key 的另一条规则挂在本站第 2 个渠道：同一渠道不能同时归属两条启用规则，否则改规则会被渠道冲突拦下。
@@ -3716,8 +3714,8 @@ test("R03整批共享fresh owner证据，暂时metadata失败不自选唯一owne
   assert.deepEqual(healthy.upstream.unverifiedOwnerRuleIds, ["rr_overlap"]);
   assert.equal(healthy.health.code, "COST_OWNER_UNVERIFIED");
   assert.ok(results.every((result) => result.calculation.profitUsd == null));
-  assert.equal(summarizeReconciliationTotals(results).cost, null);
-  assert.equal(summarizeReconciliationTotals(results).income, 5);
+  assert.ok(results.every((result) => result.upstream.countedAmountUsd == null), "归属未核验时不计任何成本");
+  assert.equal(results.reduce((sum, result) => sum + result.downstream.knownAmountUsd, 0), 5);
   for (const credential of ["Bearer account-seven", "Bearer candidate-seven", "Bearer admin"]) assert.equal(identityCalls.get(credential), 1);
   assert.ok([...f.state.snapshots.values()].every((snapshot) => JSON.parse(snapshot.source).recordType === "observation"));
   failCandidate = true;
@@ -3725,7 +3723,7 @@ test("R03整批共享fresh owner证据，暂时metadata失败不自选唯一owne
   assert.equal(single.upstream.ownershipState, "unknown", "只查一行仍核验未选中的参与owner");
   assert.equal(single.upstream.countedAmountUsd, null);
   const recovered = (await f.module.queryRules(input)).results;
-  assert.equal(summarizeReconciliationTotals(recovered).cost, 1);
+  assert.equal(recovered.reduce((sum, result) => sum + (result.upstream.countedAmountUsd ?? 0), 0), 1);
   assert.ok(recovered.every((result) => result.upstream.knownAmountUsd === 1 && result.calculation.profitUsd == null));
   for (const credential of ["Bearer account-seven", "Bearer candidate-seven", "Bearer admin"]) assert.equal(identityCalls.get(credential), 3);
 });
@@ -4520,6 +4518,47 @@ test("3b 账号用量读取失败或超时：核算照常返回，失败记为�
   const response = await pending;
   assert.deepEqual([response.unaccountedUpstream.state, response.unaccountedUpstream.total], ["pending", null]);
   assert.equal(response.unaccountedUpstream.accounts[0].state, "pending");
+});
+
+test("3b 账号用量走真实取数：sk 密钥站点没有用量接口，余额历史不够时记为读不到，历史不全时金额只是下限", async (t) => {
+  const f = await completedDayFixture(t);
+  f.stations.find((station) => station.id === "upstream").includeInProfit = false;
+  f.stations.push({ id: "keyonly", type: "newapi-key", name: "密钥上游", baseUrl: "https://keyonly.test", apiKey: "sk-keyonly-secret" });
+  const history = { used: 0, covered: false, calls: [] };
+  f.rt.history = { usedBetween: (...args) => { history.calls.push(args); return history.used; }, covers: () => history.covered };
+  const read = () => createReconciliationModule(f.rt, { repository: f.repository }).queryRules({}, { accountUsage: true });
+  let full = await read();
+  assert.deepEqual(full.unaccountedUpstream.excludedStations, [{ id: "upstream", name: "上游" }]);
+  assert.equal(full.commonSummary.totals.knownCostUsd, 3, "设为不计入成本的上游，核算关联仍按 Key 用量计成本");
+  assert.deepEqual(full.unaccountedUpstream.accounts.map((item) => [item.stationId, item.state, item.accountUsd, item.notes]),
+    [["keyonly", "unavailable", null, ["上游用量读取失败，余额历史也不够推算"]]]);
+  assert.deepEqual([full.unaccountedUpstream.state, full.unaccountedUpstream.total], ["partial", 0]);
+  assert.deepEqual(history.calls[0], ["keyonly", Date.parse("2026-10-07T16:00:00Z"), Date.parse("2026-10-08T16:00:00Z")]);
+  history.used = 3;
+  full = await read();
+  assert.deepEqual(full.unaccountedUpstream.accounts.map((item) => [item.state, item.accountUsd, item.notes]),
+    [["partial", 3, ["用量接口失败，已按余额历史推算；余额历史没覆盖整个时段，金额偏低"]]]);
+  assert.deepEqual([full.unaccountedUpstream.state, full.unaccountedUpstream.total], ["partial", 3]);
+  Object.assign(history, { used: 0, covered: true });
+  full = await read();
+  assert.deepEqual(full.unaccountedUpstream.accounts.map((item) => [item.state, item.accountUsd, item.notes]),
+    [["estimated", 0, ["用量接口失败，已按余额历史推算"]]], "历史覆盖整个时段时 0 就是真的没消耗");
+  assert.ok(!JSON.stringify(full).includes("sk-keyonly-secret") && !JSON.stringify(full).includes("sk 密钥模式"));
+});
+
+test("3b 账号用量预热：各关联时区解析出不同窗口时不取数，同一窗口只按一个时区取一次", async (t) => {
+  const f = await completedDayFixture(t);
+  const usage = accountUsageStub({ upstream: 4 });
+  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: usage.stationUsageCost });
+  f.rows[1].timezone = "UTC";
+  const split = await module.queryRules({}, { accountUsage: true });
+  assert.equal(split.commonSummary, null);
+  assert.equal(split.unaccountedUpstream ?? null, null);
+  assert.equal(usage.calls.length, 0, "没有共同汇总就不读账号用量");
+  f.rows[1].timezone = "Asia/Chongqing";
+  const aliased = await module.queryRules({}, { accountUsage: true });
+  assert.ok(aliased.unaccountedUpstream);
+  assert.deepEqual(usage.calls.map((call) => [call.stationId, call.startMs, call.endMs]), [["upstream", Date.parse("2026-10-07T16:00:00Z"), Date.parse("2026-10-08T16:00:00Z")]]);
 });
 
 test("3b 实时窗口：各关联截止点不同仍归同一组，共同汇总和账号级对比照常给出", async (t) => {

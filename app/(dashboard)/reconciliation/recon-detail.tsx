@@ -93,7 +93,7 @@ export function ReconDetail({ detail, state, currency, upstreams, compact, confl
       <Detail label="上游成本" value={fixedCost
         ? `${costText(detail, currency)} · 固定采购：Key 用量 ${billingAmountText(detail.upstream, null)} 不计成本`
         : `${costText(detail, currency)} · ${billingCoverageText(detail.upstream)}`} />
-      <Detail label={calculation.confirmed ? "毛利" : "风险差额（未计入毛利）"} value={amountText(resultValue, currency)} />
+      <Detail label={calculation.confirmed ? "毛利" : "风险差额（未计入毛利）"} value={amountText(resultValue, calculation.currency as ReconciliationCurrency)} />
       <Detail label="毛利率" value={percent(calculation.margin)} />
       {currency === "CNY"
         ? <Detail label="汇率" value={`本站 ¥${detail.rates?.income?.cnyPerUsd}/$ · 上游 ${fixedCost ? "固定采购不计成本" : `¥${detail.rates?.cost?.cnyPerUsd}/$`}`} />

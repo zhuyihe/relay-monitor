@@ -90,7 +90,7 @@ export function SegmentHistory({ item, currency, compact, onDetail }: { item: an
     { title: "上游分组 / 倍率", key: "group", width: 185, render: (_: any, row: any) => <span className="reconciliation-history-group"><strong>{row.group || "分组未知"}</strong><small>{ratioLabel(row.ratio)}{row.ratioSource === "group_catalog" ? " · 目录观察值" : ""}</small></span> },
     { title: "本站收费", key: "income", width: 120, align: "right", render: (_: any, row: any) => <span className="reconciliation-table-amount">{row.window ? incomeText(row, currency) : "—"}</span> },
     { title: "上游成本", key: "cost", width: 120, align: "right", render: (_: any, row: any) => <span className="reconciliation-table-amount">{row.window ? costText(row, currency) : "—"}</span> },
-    { title: "毛利 / 风险差额", key: "profit", width: 145, align: "right", render: (_: any, row: any) => <span className="reconciliation-history-result"><strong className={row.values.confirmed && Number(row.values.profit) < 0 ? "reconciliation-amount--danger" : ""}>{row.window ? amountText(row.result, currency) : "—"}</strong><small>{row.window ? row.values.confirmed ? "毛利" : "风险差额" : "本次窗口外"}</small></span> },
+    { title: "毛利 / 风险差额", key: "profit", width: 145, align: "right", render: (_: any, row: any) => <span className="reconciliation-history-result"><strong className={row.values.confirmed && Number(row.values.profit) < 0 ? "reconciliation-amount--danger" : ""}>{row.window ? amountText(row.result, row.values.currency) : "—"}</strong><small>{row.window ? row.values.confirmed ? "毛利" : "风险差额" : "本次窗口外"}</small></span> },
     { title: "实际毛利率", key: "margin", width: 110, align: "right", render: (_: any, row: any) => <span className="reconciliation-table-amount">{row.window ? percent(row.values.margin) : "—"}</span> },
     { title: "时间依据", key: "timing", width: 135, render: (_: any, row: any) => row.timingSource === "detected" ? <Button type="link" size="small" onClick={onDetail}>待确认 · 去修正</Button> : segmentTimingLabel(row) },
   ];
@@ -101,7 +101,7 @@ export function SegmentHistory({ item, currency, compact, onDetail }: { item: an
       {rows.map((row: any) => <div key={row.id} className="reconciliation-history-mobile__row">
         <div className="reconciliation-history-mobile__heading"><strong>{row.group || "分组未知"} · {ratioLabel(row.ratio)}</strong><span>{segmentTimingLabel(row)}</span></div>
         <div className="reconciliation-history-mobile__period">{segmentPeriod(row, timezone)}{row.window ? ` · 本次核算 ${formatWindow(row.window)}` : " · 查询窗口外"}</div>
-        <div className="reconciliation-history-mobile__figures"><span>收费 <strong>{row.window ? incomeText(row, currency) : "—"}</strong></span><span>成本 <strong>{row.window ? costText(row, currency) : "—"}</strong></span><span>{row.values.confirmed ? "毛利" : "风险差额"} <strong>{row.window ? amountText(row.result, currency) : "—"}</strong></span><span>毛利率 <strong>{row.window ? percent(row.values.margin) : "—"}</strong></span></div>
+        <div className="reconciliation-history-mobile__figures"><span>收费 <strong>{row.window ? incomeText(row, currency) : "—"}</strong></span><span>成本 <strong>{row.window ? costText(row, currency) : "—"}</strong></span><span>{row.values.confirmed ? "毛利" : "风险差额"} <strong>{row.window ? amountText(row.result, row.values.currency) : "—"}</strong></span><span>毛利率 <strong>{row.window ? percent(row.values.margin) : "—"}</strong></span></div>
         {row.timingSource === "detected" ? <Button type="link" size="small" onClick={onDetail}>修正切换时间</Button> : null}
       </div>)}
     </div> : <Table className="reconciliation-history-table" size="small" rowKey={(row: any) => row.id} columns={columns} dataSource={rows} scroll={{ x: 1040 }} pagination={rows.length > 6 ? { pageSize: 6, size: "small", showSizeChanger: false } : false} />}
@@ -127,7 +127,7 @@ export function RuleMobileItem({ item, currency, upstreams, onDetail, onRetry, r
         </span>
         <span className="reconciliation-mobile-row__finance">
           <RowStatus item={item} currency={currency} />
-          <strong className={amountClass(tone)}>{calculation.confirmed ? amountText(calculation.profit, currency) : "待核算"}</strong>
+          <strong className={amountClass(tone)}>{calculation.confirmed ? amountText(calculation.profit, calculation.currency as ReconciliationCurrency) : "待核算"}</strong>
           <span className={amountClass(tone)}>{calculation.confirmed ? percent(calculation.margin) : "—"}</span>
           {calculation.confirmed ? <SettlementNote item={item} /> : null}
         </span>

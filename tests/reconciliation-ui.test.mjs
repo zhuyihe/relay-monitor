@@ -136,21 +136,65 @@ test("3b live today rows share one window although each stops at its own fetch t
   assert.equal(await page.getByText("按各关联时区计算，具体时间见详情", { exact: true }).count(), 0);
 });
 
-test("3b pending upstream account usage re-reads the page at most three times", async (t) => {
-  const reads = [], rows = ratedDailyRows();
+test("3b pending upstream account usage re-reads silently at most three times, and refresh starts a new round", async (t) => {
+  const reads = [], queries = [], rows = ratedDailyRows();
+  const respond = (usage) => ({ ...dailyResponse(rows, { unaccountedUpstream: unaccountedFor(rows, "USD", usage) }), generatedAt: new Date(Date.now()).toISOString() });
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, { ...configuration, rules: rows.map((row) => row.rule) });
-    if (url.pathname === "/api/reconciliation") { reads.push(Object.fromEntries(url.searchParams)); return fulfill(route, { ...dailyResponse(rows, { unaccountedUpstream: unaccountedFor(rows, "USD", reads.length >= 5 ? { usd: 4, mode: "usage" } : null) }), generatedAt: new Date(Date.now()).toISOString() }); }
+    if (url.pathname === "/api/reconciliation") {
+      reads.push(Object.fromEntries(url.searchParams));
+      // 重读慢一点返回，读取期间检查汇总没有切到「仅供参考」
+      if (reads.length > 1) await new Promise((resolve) => setTimeout(resolve, 400));
+      return fulfill(route, respond(reads.length >= 5 ? { usd: 4, mode: "usage" } : null));
+    }
+    if (url.pathname === "/api/reconciliation/query") { queries.push(route.request().postDataJSON()); return fulfill(route, respond(null)); }
     throw new Error("unexpected API: " + url.pathname);
   }, undefined, true);
-  const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
-  const unaccounted = page.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
-  await unaccounted.getByText("读取中", { exact: true }).first().waitFor(); assert.equal(reads.length, 1);
-  for (const expected of [2, 3, 4]) { await page.clock.fastForward(5000); await settle(); assert.equal(reads.length, expected); }
+  const settle = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms));
+  const until = async (check) => { for (let i = 0; i < 100 && !check(); i += 1) await settle(20); assert.ok(check()); };
+  const summary = page.getByRole("region", { name: "核算汇总", exact: true }), unaccounted = summary.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
+  await unaccounted.getByText("读取中", { exact: true }).first().waitFor(); await unaccounted.getByText(/上游用量还在读取，稍后自动重读。/).waitFor(); assert.equal(reads.length, 1);
+  for (const expected of [2, 3, 4]) {
+    await page.clock.fastForward(5000); await until(() => reads.length === expected);
+    assert.equal(await page.getByText("全量摘要仅供参考，正在核对当前窗口", { exact: true }).count(), 0);
+    await summary.locator(".reconciliation-summary-metric", { hasText: "本站已获取收费（USD）" }).getByText("$7.50", { exact: true }).waitFor();
+    await settle(600);
+  }
+  await unaccounted.getByText(/上游用量读取较慢，可点顶栏的刷新重试。/).waitFor();
   await page.clock.fastForward(20000); await settle(); assert.equal(reads.length, 4);
   assert.ok(reads.every((read) => read.preset === "yesterday"));
+  // 「刷新」是新的窗口请求：重新给 3 次重读，读到后不再重读
+  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click(); await until(() => queries.length === 1); assert.equal(queries[0].observe, true);
+  await unaccounted.getByText(/上游用量还在读取，稍后自动重读。/).waitFor();
+  await page.clock.fastForward(5000); await until(() => reads.length === 5);
+  await unaccounted.locator(".reconciliation-summary-metric").getByText("$2.00", { exact: true }).waitFor(); assert.equal(await unaccounted.getByText(/上游用量/).count(), 0);
+  await page.clock.fastForward(20000); await settle(); assert.equal(reads.length, 5);
+});
+
+test("3b unaccounted upstream copy explains partial reads, excluded upstreams and accounts over-accounted by fetch timing", async (t) => {
+  const rows = ratedDailyRows();
+  const summarized = summarizeUnaccountedUpstream([
+    { station: { id: "upstream-1", name: "Fixture upstream" }, rate: configuredRate("upstream-1", 6), usage: { usd: 1, mode: "usage" } },
+    { station: { id: "upstream-2", name: "Second upstream" }, rate: configuredRate("upstream-2", 6), usage: { usd: 3, mode: "history", lowerBound: true, note: "用量接口失败，已按余额历史推算；余额历史没覆盖整个时段，金额偏低" } },
+  ], rows, { currency: "USD" });
+  const { page } = await openDailyPage(t, { data: dailyResponse(rows, { unaccountedUpstream: { ...summarized, window, fixedStations: [], excludedStations: [{ id: "excluded-1", name: "Excluded upstream" }] } }) });
+  const unaccounted = page.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
+  await unaccounted.getByText(/部分账号或关联没取全，合计不准确，展开看各账号说明。/).waitFor(); await unaccounted.getByText(/已核算多于账号扣费的账号（多为取数时刻不同）在合计里按 0 计。/).waitFor();
+  await unaccounted.getByText(/设为不计入成本的上游不做账号级对比：Excluded upstream（建在它上面的核算关联仍按 Key 用量计成本）。/).waitFor();
+  // 合计只加未纳入为正的账号：Second upstream 的 $3（下限），Fixture upstream 的 -$1 按 0 计
+  await unaccounted.locator(".reconciliation-summary-metric").getByText("$3.00", { exact: true }).waitFor();
+  await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游账号" }).click(); await unaccounted.getByText("账号扣费 $1.00 · 已核算 $2.00 · 未纳入 -$1.00", { exact: true }).waitFor();
+  await unaccounted.getByText(/余额历史没覆盖整个时段，金额偏低/).waitFor(); assert.equal(await unaccounted.getByText(/账号扣费截至/).count(), 0);
+});
+
+test("3b live window account usage shows when each upstream account was read", async (t) => {
+  const start = window.endMs, live = { ...window, preset: "today", startMs: start, endMs: start + 3 * 3600000 }, rows = dailyRows(live);
+  const summarized = summarizeUnaccountedUpstream([{ station: { id: "upstream-1", name: "Fixture upstream" }, rate: null, usage: { usd: 9, mode: "usage", endMs: live.endMs - 120000 } }], rows, { currency: "USD" });
+  const { page } = await openDailyPage(t, { data: dailyResponse(rows, { unaccountedUpstream: { ...summarized, window: live, fixedStations: [], excludedStations: [] } }) });
+  const unaccounted = page.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
+  await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游账号" }).click(); await unaccounted.getByText(/账号扣费截至 10\/09 02:58 · 核算关联 rule-1、rule-2、rule-3/).waitFor();
 });
 
 test("daily mobile pagination changes only visible rules and retains global amounts and coverage", async (t) => {
@@ -1119,7 +1163,7 @@ async function openConfirmedHistoryPage(t, options = {}) {
   const page = await openFixturePage(t, async (route) => {
     const request = route.request(), url = new URL(request.url()); reads.push({ path: url.pathname, method: request.method(), params: Object.fromEntries(url.searchParams) });
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, { ...configuration, ownStation: current.rule.archivedAt && options.removeOwnAfterStop ? null : { ...configuration.ownStation, cnyPerUsd: options.rate || null }, rules: [current.rule, archived].filter((rule) => !rule.archivedAt || url.searchParams.get("includeArchived") === "true") });
+    if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, { ...configuration, ...(options.upstreams ? { upstreams: options.upstreams } : {}), ownStation: current.rule.archivedAt && options.removeOwnAfterStop ? null : { ...configuration.ownStation, cnyPerUsd: options.rate || null }, rules: [current.rule, archived].filter((rule) => !rule.archivedAt || url.searchParams.get("includeArchived") === "true") });
     if (url.pathname === "/api/reconciliation" || url.pathname === "/api/reconciliation/query") { if (request.method() === "POST") { const body = request.postDataJSON(); queries.push(body); assert.ok(!body.ruleIds?.some((id) => id === archived.id || current.rule.archivedAt && id === current.rule.id)); } return fulfill(route, response(current.rule.archivedAt ? [] : [current])); }
     if (url.pathname.endsWith("/segments")) return fulfill(route, { segments: current.transitionSegments || [] });
     if (url.pathname.endsWith("/confirmed")) { assert.equal(request.method(), "GET"); historyReads.push({ ruleId: url.pathname.split("/").at(-2), params: Object.fromEntries(url.searchParams) }); return options.history ? options.history(route, historyReads.at(-1), historyReads.length) : fulfill(route, { ruleId: historyReads.at(-1).ruleId, readOnly: true, records, nextCursor: null }); }
@@ -1144,6 +1188,16 @@ test("confirmed history remains discoverable after stopping and reload even with
 test("confirmed history keeps zero and negative original profit and labels incomplete legacy evidence without filling current identity", async (t) => {
   const zero = confirmedHistoryRecord("zero", 0), negative = confirmedHistoryRecord("negative", -1), legacy = confirmedHistoryRecord("legacy"); zero.upstreamSource.tokenName = "old-zero"; negative.upstreamSource.tokenName = "old-negative"; Object.assign(legacy, { ownSource: null, scopeVersion: null, scopeFingerprint: null, billingEffectiveFromMs: null, sourceCompleteness: "legacy_partial" }); legacy.window.timezone = null; legacy.upstreamSource = { provider: null, baseUrl: null, accountId: null, tokenId: null, tokenName: null };
   const { page } = await openConfirmedHistoryPage(t, { records: [zero, negative, legacy], rate: 7 }); await page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(page, drawer); await drawer.locator("tr.ant-table-row", { hasText: "old-zero" }).getByText("$0.00", { exact: true }).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-negative" }).getByText("-$1.00", { exact: true }).waitFor(); const record = await expandConfirmedRecord(drawer, legacy); await record.getByText("旧记录信息不完整", { exact: true }).waitFor(); await record.getByText("原本站来源未保存", { exact: true }).waitFor(); await record.getByText(/原时区未保存/).waitFor(); await record.getByText("原平台未保存 · 原地址未保存 · 账号 未保存", { exact: true }).waitFor(); assert.doesNotMatch(await record.innerText(), /Fixture upstream|upstream-1|New channel 9|¥/);
+});
+
+test("3b confirmed history for a fixed-purchase upstream keeps the original Key-usage cost and explains today's zero cost", async (t) => {
+  const note = /这个关联的上游现在是固定采购，当前核算里上游成本记 0/;
+  const fixed = await openConfirmedHistoryPage(t, { upstreams: configuration.upstreams.map((station) => ({ ...station, costBasis: "fixed" })) });
+  await fixed.page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); let drawer = fixed.page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(fixed.page, drawer);
+  await drawer.getByText(note).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).getByText("$2.00", { exact: true }).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).getByText("$1.00", { exact: true }).waitFor();
+  const usage = await openConfirmedHistoryPage(t, { upstreams: configuration.upstreams.map((station) => ({ ...station, costBasis: "usage" })) });
+  await usage.page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); drawer = usage.page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(usage.page, drawer);
+  await drawer.getByText("已读取 1 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。", { exact: true }).waitFor(); assert.equal(await drawer.getByText(note).count(), 0);
 });
 
 test("confirmed history pagination failure retains read records and retry reuses the opaque cursor without duplicate history", async (t) => {

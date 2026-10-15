@@ -7,7 +7,7 @@ import { StatusTag } from "../../components/status";
 import type { KnownChannelCoverage, ReconciliationDisplayTotals, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream } from "../../../lib/client";
 import { RECONCILIATION_BILLING_SOURCE_LABEL } from "../../../lib/reconciliation-contract";
 import { Detail, SummaryMetric } from "./recon-parts";
-import { COVERAGE_STATUS_LABEL, amountText, amountTone, channelStateLabel, coverageIssueLabel, formatWindow, iso, percent } from "./recon-format";
+import { COVERAGE_STATUS_LABEL, amountText, amountTone, channelStateLabel, coverageIssueLabel, formatRecentTime, formatWindow, isLivePreset, iso, percent } from "./recon-format";
 
 // 旧响应没有 display 时按 USD 原值显示
 function displayTotals(totals: ReconciliationWindowGroup["totals"]): ReconciliationDisplayTotals {
@@ -28,9 +28,13 @@ const UNACCOUNTED_STATE_LABEL: Record<string, string> = { complete: "已取全",
 const unaccountedLevel = (state: string) => state === "complete" ? "good" : state === "pending" ? "info" : "warn";
 
 // 上游账号实际扣费减去已计入核算的 Key 成本：没有建核算关联的 Key、测试和自用消耗都落在这里
-function UnaccountedUpstreamBlock({ data }: { data: UnaccountedUpstream }) {
+// rereading：读取中时页面还会自动重读；次数用完后提示点顶栏的刷新。
+function UnaccountedUpstreamBlock({ data, rereading }: { data: UnaccountedUpstream; rereading: boolean }) {
   const { currency } = data;
   const pending = data.state === "pending";
+  const overAccounted = data.accounts.some((account) => (account.unaccounted ?? 0) < 0);
+  // 截至现在的窗口里，账号扣费按取数时刻截止（缓存期内复用），核算成本截至本次读取，两者可能差几分钟。
+  const live = isLivePreset(data.window.preset);
   const stationNames = (stations: { name: string }[]) => stations.map((station) => station.name).join("、");
   return <section className="reconciliation-unaccounted" aria-label="未纳入核算的上游消费">
     <div className="reconciliation-unaccounted__head">
@@ -39,9 +43,11 @@ function UnaccountedUpstreamBlock({ data }: { data: UnaccountedUpstream }) {
     </div>
     <p className="jy-caption">
       各上游账号的实际扣费（和「我的站点」同一取数）减去已计入核算的 Key 成本。
-      {pending ? "上游用量还在读取，稍后自动重读。" : data.state === "complete" ? "" : data.state === "estimated" ? "部分账号按余额历史或整日用量估算。" : "部分账号没取全，合计只算已取到的部分。"}
+      {pending ? (rereading ? "上游用量还在读取，稍后自动重读。" : "上游用量读取较慢，可点顶栏的刷新重试。")
+        : data.state === "complete" ? "" : data.state === "estimated" ? "部分账号按余额历史或整日用量估算。" : "部分账号或关联没取全，合计不准确，展开看各账号说明。"}
+      {!pending && overAccounted ? " 已核算多于账号扣费的账号（多为取数时刻不同）在合计里按 0 计。" : ""}
       {data.fixedStations.length ? ` 固定采购的上游不按用量计成本，不在此列：${stationNames(data.fixedStations)}。` : ""}
-      {data.excludedStations.length ? ` 已设为不计入成本：${stationNames(data.excludedStations)}。` : ""}
+      {data.excludedStations.length ? ` 设为不计入成本的上游不做账号级对比：${stationNames(data.excludedStations)}（建在它上面的核算关联仍按 Key 用量计成本）。` : ""}
     </p>
     {data.accounts.length ? <Collapse className="reconciliation-coverage__list" items={[{
       key: "unaccounted-accounts",
@@ -58,7 +64,7 @@ function UnaccountedUpstreamBlock({ data }: { data: UnaccountedUpstream }) {
             {" · "}未纳入 {account.state === "pending" ? "—" : amountText(account.unaccounted, currency)}
           </span>
           <span className="jy-caption">
-            {account.rate ? `汇率 ¥${account.rate}/$ · ` : ""}核算关联 {account.ruleIds.join("、") || "无"}
+            {account.rate ? `汇率 ¥${account.rate}/$ · ` : ""}{live && account.endMs ? `账号扣费截至 ${formatRecentTime(account.endMs, data.window.timezone)} · ` : ""}核算关联 {account.ruleIds.join("、") || "无"}
             {account.notes.length ? ` · ${account.notes.join("；")}` : ""}
           </span>
         </li>)}
@@ -67,7 +73,9 @@ function UnaccountedUpstreamBlock({ data }: { data: UnaccountedUpstream }) {
   </section>;
 }
 
-export function ReconSummary({ summary, unaccounted, reference }: { summary: ReconciliationSummary | null; unaccounted?: UnaccountedUpstream | null; reference: boolean }) {
+export function ReconSummary({ summary, unaccounted, usageRereading = false, reference }: {
+  summary: ReconciliationSummary | null; unaccounted?: UnaccountedUpstream | null; usageRereading?: boolean; reference: boolean;
+}) {
   const currency = summary ? displayTotals(summary.totals).currency : "USD";
   const note = <>
     {summary?.totals.profitComplete ? "已知渠道范围的完整账单。" : "仅已确认范围的金额，不代表全站完整利润。"}
@@ -79,7 +87,7 @@ export function ReconSummary({ summary, unaccounted, reference }: { summary: Rec
       ? <Alert type="info" showIcon title="全量摘要仅供参考，正在核对当前窗口" description="关联列表保留已读金额；全量读取完成后再显示当前汇总。" />
       : summary ? <>
         <WindowMetrics totals={summary.totals} />
-        {unaccounted ? <UnaccountedUpstreamBlock data={unaccounted} /> : null}
+        {unaccounted ? <UnaccountedUpstreamBlock data={unaccounted} rereading={usageRereading} /> : null}
       </> : <p className="reconciliation-summary__empty">暂无共同整日汇总</p>}
   </Panel>;
 }

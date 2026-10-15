@@ -45,7 +45,7 @@ export default function ReconciliationPage() {
 
   const detailState = useReconDetail();
   const recon = useReconWindow({ onRowReplaced: detailState.replace });
-  const { config, data, loading, querying, error, preset, activeWindow, range, summaryStale, summaryError, retryingRuleIds, ruleRetryErrors } = recon;
+  const { config, data, loading, querying, error, preset, activeWindow, range, summaryStale, summaryError, usageRereading, retryingRuleIds, ruleRetryErrors } = recon;
   const results: any[] = useMemo(() => data?.results || [], [data]);
   // 金额默认按系统原值（USD）显示；本站和涉及的上游都设置了汇率时，服务端才让整页按人民币显示
   const currency: ReconciliationCurrency = data?.displayCurrency === "CNY" ? "CNY" : "USD";
@@ -142,7 +142,7 @@ export default function ReconciliationPage() {
     title={history.open ? "已确认账单历史" : detail?.rule?.tokenName ? `${detail.rule.tokenName} · 核算详情` : "核算详情"}
   >
     {history.open
-      ? <ReconHistory history={history} compact={compact} rules={config?.rules || []} />
+      ? <ReconHistory history={history} compact={compact} rules={config?.rules || []} upstreams={config?.upstreams} />
       : detail ? <ReconDetail
         detail={detail} state={detailState} currency={currency} upstreams={config?.upstreams} compact={compact}
         conflictIds={conflictIds} results={results}
@@ -245,7 +245,7 @@ export default function ReconciliationPage() {
     </div> : null}
 
     <div className="reconciliation-overview">
-      <ReconSummary summary={commonSummary} unaccounted={unaccounted} reference={reference} />
+      <ReconSummary summary={commonSummary} unaccounted={unaccounted} usageRereading={usageRereading} reference={reference} />
       <ReconWindowGroups groups={windowGroups} reference={reference} />
       <ReconCoverage coverage={coverage} reference={reference} />
     </div>
