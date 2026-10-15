@@ -50,10 +50,8 @@ export default function ReconciliationPage() {
   // 金额默认按系统原值（USD）显示；本站和涉及的上游都设置了汇率时，服务端才让整页按人民币显示
   const currency: ReconciliationCurrency = data?.displayCurrency === "CNY" ? "CNY" : "USD";
   const unconfiguredRateStations: { id: string; name: string }[] = data?.unconfiguredRateStations || [];
-  // 固定采购的关联建在没开监控或不计入成本的站点上时，自营业务页也不摊销这个站点的采购费
-  const fixedOffProfit = [...new Set<string>(results.filter(isFixedCost)
-    .map((item: any) => (config?.upstreams || []).find((station: any) => String(station.id) === String(item.rule?.upstreamStationId)))
-    .filter((station: any) => station && (station.monitorEnabled === false || station.includeInProfit === false)).map((station: any) => station.name))];
+  // 固定采购的关联建在没开监控、不计入成本或已归档的站点上时，自营业务页也不摊销这些站点的采购费（服务端点名）
+  const fixedOffProfit: string[] = (data?.fixedOffProfitStations || []).map((station: { name: string }) => station.name);
   const list = useReconResults({ results, upstreams: config?.upstreams, compact, currency });
   const history = useConfirmedHistory();
   const { detail } = detailState;

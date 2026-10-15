@@ -180,7 +180,7 @@ export function resolveReconciliationWindow(input = {}, now = Date.now()) {
 
 function publicStation(station) {
   return station ? { id: station.id, name: station.name, type: station.type, monitorEnabled: station.monitorEnabled !== false,
-    includeInProfit: station.includeInProfit !== false, cnyPerUsd: station.cnyPerUsd ?? null, costBasis: costBasisOf(station) } : null;
+    cnyPerUsd: station.cnyPerUsd ?? null, costBasis: costBasisOf(station) } : null;
 }
 
 function publicMetadata(metadata) {
@@ -1704,6 +1704,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 已经设置了部分汇率时才提示还缺哪些；一个都没设置就是按 USD 看，不打扰。
     const unconfiguredRateStations = [...rateStations.values()].some(Boolean)
       ? [...rateStations].filter(([, configured]) => !configured).map(([id]) => ({ id, name: upstreamStation(id)?.name || `已删除的站点（${id}）` })) : [];
+    // 固定采购关联的成本记 0，采购费由我的站点按时段摊销；但我的站点只摊销开了监控、计入成本、没归档的站点，
+    // 关联建在其他固定采购站点上时点名，核算页说明净利也不含它们的采购费。
+    const amortized = new Set((upstreams?.fixed || []).filter((station) => !station.archivedAt).map((station) => String(station.id)));
+    const fixedOffProfitStations = upstreams ? [...new Set(selected.filter((row) => row.rates.costBasis === "fixed").map((row) => String(row.rule.upstreamStationId)))]
+      .filter((id) => !amortized.has(id)).map((id) => ({ id, name: upstreamStation(id)?.name || `已删除的站点（${id}）` })) : [];
     const grouped = summarizeReconciliationWindowGroups(selected, { currency: displayCurrency, coverageFor: (window, source) => {
       const sameSource = (value) => source?.namespaceKey ? value?.namespaceKey === source.namespaceKey : !value;
       return deriveKnownChannelCoverage(catalogue && sameSource(catalogue.ownSource) ? catalogue : null,
@@ -1711,7 +1716,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     } });
     const actions = [...new Map([...selected.flatMap((row) => row.actions), ...coverage.channels.flatMap((channel) => channel.actions)]
       .map((action) => [action.id, action])).values()];
-    return { results: selected, generatedAt: new Date(now).toISOString(), ...grouped, coverage, actions, displayCurrency, unconfiguredRateStations };
+    return { results: selected, generatedAt: new Date(now).toISOString(), ...grouped, coverage, actions, displayCurrency, unconfiguredRateStations, fixedOffProfitStations };
   }
 
   // 账号级上游用量：和我的站点同一取数（用量接口，返回 0 或失败时按余额历史推算）。实时窗口缓存键只认起点，
@@ -1787,8 +1792,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       ...attributed.get(String(station.id)),
     })), response.results, { currency: response.displayCurrency });
     const named = (stations) => stations.map((station) => ({ id: station.id, name: station.name }));
+    // 设为不计入成本的固定采购上游也不按用量计成本，列在固定采购里；不计入成本里只列按用量计费的（建在上面的关联仍计 Key 成本）。
+    const excludedFixed = upstreams.excluded.filter((station) => costBasisOf(station) === "fixed");
     return { ...summarized, window: { startMs: group.window.startMs, endMs: group.window.endMs, timezone: window.timezone, preset: window.preset },
-      fixedStations: named(upstreams.fixed), excludedStations: named(upstreams.excluded) };
+      fixedStations: named([...upstreams.fixed, ...excludedFixed]), excludedStations: named(upstreams.excluded.filter((station) => costBasisOf(station) !== "fixed")) };
   }
 
   const api = {

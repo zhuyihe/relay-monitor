@@ -54,7 +54,8 @@ function dailyResponse(rows = dailyRows(), options = {}) {
   const coverage = deriveKnownChannelCoverage(catalogue, rules, rows, { isCompletedWindow });
   const currency = options.displayCurrency || "USD";
   const grouped = summarizeReconciliationWindowGroups(rows, { currency, isCompletedWindow, coverageFor: (range, source) => deriveKnownChannelCoverage(catalogue, rules.filter((rule) => rule.ownSource?.namespaceKey === source?.namespaceKey), rows.filter((row) => row.ownSource?.namespaceKey === source?.namespaceKey), { window: range, isCompletedWindow }) });
-  const extra = { displayCurrency: currency, unconfiguredRateStations: options.unconfiguredRateStations || [], ...(options.unaccountedUpstream ? { unaccountedUpstream: options.unaccountedUpstream } : {}) };
+  const extra = { displayCurrency: currency, unconfiguredRateStations: options.unconfiguredRateStations || [], fixedOffProfitStations: options.fixedOffProfitStations || [],
+    ...(options.unaccountedUpstream ? { unaccountedUpstream: options.unaccountedUpstream } : {}) };
   return { generatedAt: "2026-10-09T03:00:00.000Z", results: rows, ...grouped, coverage, actions: coverage.channels.flatMap((channel) => channel.actions), ...extra };
 }
 async function openDailyPage(t, options = {}) {
@@ -121,10 +122,10 @@ test("3b daily page switches to yuan only when every station has a rate, with fi
   await page.getByRole("group", { name: "核算时间范围" }).getByRole("button", { name: "今天", exact: true }).filter({ visible: true }).click();
   await summary.locator('a[href="/my?range=today"]', { hasText: "自营业务" }).waitFor();
   assert.doesNotMatch(await summary.innerText(), /自营业务也不计/);
-  // 固定采购的站点没开监控或不计入成本时，自营业务也不摊销它的采购费，页脚点名
-  const offProfit = await openDailyPage(t, { upstreams: [...configuration.upstreams, { id: "fixed-1", name: "Fixed upstream", monitorEnabled: false, includeInProfit: false }],
-    data: dailyResponse(rows, { displayCurrency: "CNY", unaccountedUpstream: unaccountedFor(rows, "CNY") }) });
-  await offProfit.page.getByRole("region", { name: "核算汇总", exact: true }).getByText(/其中「Fixed upstream」没开监控或设为不计入成本，自营业务也不计它的采购费。/).waitFor();
+  // 固定采购的站点没开监控、不计入成本或已归档时，自营业务也不摊销它的采购费，按服务端给出的站点点名
+  const offProfit = await openDailyPage(t, { upstreams: ratedUpstreams, data: dailyResponse(rows, { displayCurrency: "CNY", fixedOffProfitStations: [{ id: "fixed-1", name: "Fixed upstream" }],
+    unaccountedUpstream: { ...unaccountedFor(rows, "CNY"), fixedStations: [] } }) });
+  await offProfit.page.getByRole("region", { name: "核算汇总", exact: true }).getByText(/其中「Fixed upstream」没开监控、设为不计入成本或已归档，自营业务也不计它的采购费。/).waitFor();
 });
 
 test("3b partially configured rates keep system dollars everywhere and name the stations still missing a rate", async (t) => {
@@ -202,6 +203,17 @@ test("3b unaccounted upstream copy explains partial reads, excluded upstreams an
   await unaccounted.locator(".reconciliation-summary-metric").getByText("$3.00", { exact: true }).waitFor();
   await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游账号" }).click(); await unaccounted.getByText("账号扣费 $1.00 · 已核算 $2.00 · 未纳入 -$1.00", { exact: true }).waitFor();
   await unaccounted.getByText(/余额历史没覆盖整个时段，金额偏低/).waitFor(); assert.equal(await unaccounted.getByText(/账号扣费截至/).count(), 0);
+  // 多核算的原因按各账号给出：只有汇率不同时说汇率，取数时刻和汇率都有时一起说；不计入成本的上游有多个时说「它们」
+  const reasons = async (overAccounted, excludedStations, caption) => {
+    const accounts = summarized.accounts.map((account, index) => index === 0 ? { ...account, overAccounted } : account);
+    const opened = await openDailyPage(t, { data: dailyResponse(rows, { unaccountedUpstream: { ...summarized, accounts, window, fixedStations: [], excludedStations } }) });
+    const block = opened.page.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
+    await block.getByText(caption).waitFor();
+    return block;
+  };
+  await reasons("rate", [], /已核算多于账号扣费的账号（汇率不同）在合计里按 0 计。/);
+  const mixed = await reasons("mixed", [{ id: "excluded-1", name: "Excluded upstream" }, { id: "excluded-2", name: "Second excluded" }], /已核算多于账号扣费的账号（取数时刻或汇率不同）在合计里按 0 计。/);
+  await mixed.getByText(/设为不计入成本的上游不做账号级对比：Excluded upstream、Second excluded（建在它们上面的核算关联仍按 Key 用量计成本）。/).waitFor();
 });
 
 test("3b live window account usage shows when each upstream account was read", async (t) => {

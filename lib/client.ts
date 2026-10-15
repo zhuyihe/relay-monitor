@@ -101,7 +101,9 @@ export type UnaccountedUpstreamState = "pending" | "partial" | "estimated" | "co
 export type UnaccountedUpstream = {
   state: UnaccountedUpstreamState; currency: ReconciliationCurrency; total: number | null;
   accounts: { stationId: string; name: string; rate: number | null; mode: string | null; endMs: number | null; state: UnaccountedUpstreamState | "unavailable"; notes: string[]; ruleIds: string[];
-    accountUsd: number | null; accountedUsd: number; unaccountedUsd: number | null; account: number | null; accounted: number; unaccounted: number | null }[];
+    accountUsd: number | null; accountedUsd: number; unaccountedUsd: number | null; account: number | null; accounted: number; unaccounted: number | null;
+    // 已核算多于账号扣费（unaccounted < 0）时的原因：取数时刻不同、汇率不同或两者都有
+    overAccounted?: "timing" | "rate" | "mixed" | null }[];
   window: { startMs: number; endMs: number; timezone: string; preset: string };
   fixedStations: { id: string; name: string }[]; excludedStations: { id: string; name: string }[];
 };

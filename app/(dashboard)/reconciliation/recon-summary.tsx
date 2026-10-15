@@ -34,7 +34,10 @@ const unaccountedLevel = (state: string) => state === "complete" ? "good" : stat
 function UnaccountedUpstreamBlock({ data, rereading }: { data: UnaccountedUpstream; rereading: boolean }) {
   const { currency } = data;
   const pending = data.state === "pending";
-  const overAccounted = data.accounts.some((account) => (account.unaccounted ?? 0) < 0);
+  // 已核算多于账号扣费的原因：取数时刻不同、汇率不同或两者都有；旧响应没有 overAccounted 时按取数时刻
+  const overReasons = new Set(data.accounts.filter((account) => (account.unaccounted ?? 0) < 0).map((account) => account.overAccounted || "timing"));
+  const overReason = !overReasons.size ? "" : overReasons.size > 1 || overReasons.has("mixed") ? "取数时刻或汇率不同"
+    : overReasons.has("rate") ? "汇率不同" : "多为取数时刻不同";
   // 截至现在的窗口里，账号扣费按取数时刻截止（缓存期内复用），核算成本截至本次读取，两者可能差几分钟。
   const live = isLivePreset(data.window.preset);
   const stationNames = (stations: { name: string }[]) => stations.map((station) => station.name).join("、");
@@ -47,9 +50,9 @@ function UnaccountedUpstreamBlock({ data, rereading }: { data: UnaccountedUpstre
       各上游账号的实际扣费（和「{NAV_LABELS.my}」同一取数）减去已计入核算的 Key 成本。
       {pending ? (rereading ? "上游用量还在读取，稍后自动重读。" : "上游用量读取较慢，可点顶栏的刷新重试。")
         : data.state === "complete" ? "" : data.state === "estimated" ? "部分账号按余额历史或整日用量估算。" : "部分账号或关联没取全，合计不准确，展开看各账号说明。"}
-      {!pending && overAccounted ? " 已核算多于账号扣费的账号（多为取数时刻不同）在合计里按 0 计。" : ""}
+      {!pending && overReason ? ` 已核算多于账号扣费的账号（${overReason}）在合计里按 0 计。` : ""}
       {data.fixedStations.length ? ` 固定采购的上游不按用量计成本，不在此列：${stationNames(data.fixedStations)}。` : ""}
-      {data.excludedStations.length ? ` 设为不计入成本的上游不做账号级对比：${stationNames(data.excludedStations)}（建在它上面的核算关联仍按 Key 用量计成本）。` : ""}
+      {data.excludedStations.length ? ` 设为不计入成本的上游不做账号级对比：${stationNames(data.excludedStations)}（建在${data.excludedStations.length > 1 ? "它们" : "它"}上面的核算关联仍按 Key 用量计成本）。` : ""}
     </p>
     {data.accounts.length ? <Collapse className="reconciliation-coverage__list" items={[{
       key: "unaccounted-accounts",
@@ -76,7 +79,7 @@ function UnaccountedUpstreamBlock({ data, rereading }: { data: UnaccountedUpstre
 }
 
 // fixedCost：本页有建在固定采购上游上的关联，它们的成本记 0，采购费由自营业务页按时段摊销。
-// fixedOffProfit：其中没开监控或设为不计入成本的站点，自营业务页也不摊销它们的采购费，单独点名。
+// fixedOffProfit：其中没开监控、设为不计入成本或已归档的站点，自营业务页也不摊销它们的采购费，单独点名。
 // preset：当前核算范围；「今天」带到自营业务页，其余用它的默认范围（近 7 天）。
 export function ReconSummary({ summary, unaccounted, usageRereading = false, reference, fixedCost = false, fixedOffProfit = [], preset }: {
   summary: ReconciliationSummary | null; unaccounted?: UnaccountedUpstream | null; usageRereading?: boolean; reference: boolean;
@@ -88,7 +91,7 @@ export function ReconSummary({ summary, unaccounted, usageRereading = false, ref
     {currency === "CNY" ? "金额按人民币汇总，收费按本站、成本按各上游的当前汇率折算（过去的时段也按当前汇率）；" : "金额按系统原值（美元）汇总；"}
     本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}。今天、近 7 天、本月为截至现在的实时金额，自然日结束后自动结账。
     {fixedCost ? <>固定采购上游的成本记 0，采购费不在这里分摊；扣掉固定成本后的净利见<Link href={preset === "today" ? "/my?range=today" : "/my"}>{NAV_LABELS.my}</Link>。
-      {fixedOffProfit.length ? `其中${fixedOffProfit.map((name) => `「${name}」`).join("、")}没开监控或设为不计入成本，${NAV_LABELS.my}也不计它的采购费。` : ""}</> : null}
+      {fixedOffProfit.length ? `其中${fixedOffProfit.map((name) => `「${name}」`).join("、")}没开监控、设为不计入成本或已归档，${NAV_LABELS.my}也不计${fixedOffProfit.length > 1 ? "它们" : "它"}的采购费。` : ""}</> : null}
   </>;
   return <Panel title="核算汇总" className="reconciliation-summary" foot={note}>
     {reference

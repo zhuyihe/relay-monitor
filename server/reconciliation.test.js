@@ -511,22 +511,6 @@ test("渠道目录失败时配置接口不回显上游错误中的令牌，服�
   assert.doesNotMatch(logged[0], /sk-sensitive-value|test-token/);
 });
 
-test("3b 上游目录带上是否开监控、是否计入成本：核算页据此说明自营业务不摊销哪些固定采购站点的采购费", async (t) => {
-  t.mock.method(globalThis, "fetch", async () => ({ status: 200, text: async () => JSON.stringify({ success: true, data: { total: 0, items: [] } }) }));
-  const own = { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "test-token" };
-  const stations = [own,
-    { id: "monitored", name: "监控", type: "newapi", baseUrl: "https://up.test", fixedPurchases: [{ cny: 30 }] },
-    { id: "grant", name: "授权", type: "newapi", baseUrl: "https://up.test", monitorEnabled: false, includeInProfit: false, fixedPurchases: [{ cny: 30 }] },
-    { id: "excluded", name: "不计入", type: "sub2api", baseUrl: "https://sub.test", includeInProfit: false }];
-  const reconciliation = createReconciliationModule({
-    pool: { async query() { return [[]]; } },
-    store: { list: () => stations, get: (id) => stations.find((station) => station.id === id) },
-  });
-  const { upstreams } = await reconciliation.getConfiguration();
-  assert.deepEqual(upstreams.map(({ id, monitorEnabled, includeInProfit }) => [id, monitorEnabled, includeInProfit]),
-    [["monitored", true, true], ["grant", false, false], ["excluded", true, false]]);
-});
-
 test("同一个上游 Key 不能同时建立两条启用对账规则", async () => {
   const calls = [];
   const repository = new ReconciliationRepository({
@@ -4532,10 +4516,36 @@ test("3b 固定采购上游：核算成本记 0，不用它的汇率；账号级
   assert.deepEqual(full.commonSummary.totals.display, { currency: "USD", knownIncome: 7.5, knownCost: 0, confirmedProfit: 7.5, confirmedMarginRate: 1 });
   assert.deepEqual([full.unaccountedUpstream.state, full.unaccountedUpstream.total, full.unaccountedUpstream.accounts], ["complete", 0, []]);
   assert.deepEqual(full.unaccountedUpstream.fixedStations, [{ id: "upstream", name: "上游" }]);
+  assert.deepEqual(full.fixedOffProfitStations, [], "我的站点会摊销它的采购费");
   f.stations.find((station) => station.id === "own").cnyPerUsd = 7;
   full = await module.queryRules({}, { accountUsage: true });
   assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["CNY", []], "只需要本站汇率");
   assert.deepEqual([full.commonSummary.totals.display.knownIncome, full.commonSummary.totals.display.confirmedProfit], [52.5, 52.5]);
+  // 我的站点只摊销开了监控、计入成本、没归档的固定采购站点；关联建在其他固定采购站点上时点名，成本照样记 0
+  const offProfit = [
+    [{ includeInProfit: false }, [{ id: "upstream", name: "上游" }], [], "设为不计入成本的固定采购上游列在固定采购里"],
+    [{ monitorEnabled: false }, [], [], "没开监控的站点不做账号级对比"],
+    [{ archivedAt: "2026-10-01T00:00:00Z" }, [], [], "已归档"],
+  ];
+  for (const [patch, fixedStations, excludedStations, message] of offProfit) {
+    const saved = { ...upstream };
+    Object.assign(upstream, patch);
+    // 测试桩的 list 不按归档和监控过滤，真实 store 默认不列出这两类站点
+    const list = f.rt.store.list;
+    f.rt.store.list = () => list().filter((station) => !station.archivedAt && station.monitorEnabled !== false);
+    full = await module.queryRules({}, { accountUsage: true });
+    f.rt.store.list = list;
+    for (const key of Object.keys(patch)) delete upstream[key];
+    Object.assign(upstream, saved);
+    assert.deepEqual([full.results[0].rates.costBasis, full.commonSummary?.totals.display.knownCost], ["fixed", 0], message);
+    assert.deepEqual(full.fixedOffProfitStations, [{ id: "upstream", name: "上游" }], message);
+    assert.deepEqual([full.unaccountedUpstream?.fixedStations, full.unaccountedUpstream?.excludedStations], [fixedStations, excludedStations], message);
+  }
+  // 测试桩不过滤时也按归档判断
+  upstream.archivedAt = "2026-10-01T00:00:00Z";
+  full = await module.queryRules({}, { accountUsage: true });
+  delete upstream.archivedAt;
+  assert.deepEqual(full.fixedOffProfitStations, [{ id: "upstream", name: "上游" }]);
   assert.equal(usage.calls.length, 0);
 });
 
