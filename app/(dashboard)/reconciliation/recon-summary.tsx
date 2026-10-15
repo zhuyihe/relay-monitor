@@ -91,7 +91,7 @@ export function ReconSummary({ summary, unaccounted, usageRereading = false, ref
   const currency = summary ? displayTotals(summary.totals).currency : "USD";
   const note = <>
     {summary?.totals.profitComplete ? "已知渠道范围的完整账单。" : "仅已确认范围的金额，不代表全站完整利润。"}
-    {currency === "CNY" ? "金额按人民币汇总，收费按本站、成本按各上游的汇率折算（已结账的日子按结账时记下的汇率，其余按当前汇率）；" : "金额按系统原值（美元）汇总；"}
+    {currency === "CNY" ? "金额按人民币汇总，收费按本站、成本按各上游的汇率折算（查单个已结账的自然日时按结账时记下的汇率，其余按当前汇率）；" : "金额按系统原值（美元）汇总；"}
     本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}。今天、近 7 天、本月为截至现在的实时金额，自然日结束后自动结账。
     {fixedCost ? <>固定采购上游的成本记 0，采购费不在这里分摊；扣掉固定成本后的净利见<Link href={preset === "today" ? "/my?range=today" : "/my"}>{NAV_LABELS.my}</Link>。
       {fixedOffProfit.length ? `其中${fixedOffProfit.map((name) => `「${name}」`).join("、")}没开监控、设为不计入成本或已归档，${NAV_LABELS.my}也不计${fixedOffProfit.length > 1 ? "它们" : "它"}的采购费。` : ""}</> : null}

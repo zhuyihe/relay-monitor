@@ -104,7 +104,7 @@ test("3b daily page switches to yuan only when every station has a rate, with fi
   await metric("本站已获取收费（CNY）").getByText("¥52.50", { exact: true }).waitFor(); await metric("已计入上游成本（CNY）").getByText("¥12.00", { exact: true }).waitFor(); await metric("已确认范围账面毛利").getByText("¥40.50", { exact: true }).waitFor();
   assert.doesNotMatch(await summary.locator(".reconciliation-summary__metrics").innerText(), /\$/);
   // 页脚：已结账的日子按结账时的汇率，其余按当前汇率；有固定采购的关联时说明成本记 0，净利去自营业务看
-  await summary.getByText(/收费按本站、成本按各上游的汇率折算（已结账的日子按结账时记下的汇率，其余按当前汇率）/).waitFor();
+  await summary.getByText(/收费按本站、成本按各上游的汇率折算（查单个已结账的自然日时按结账时记下的汇率，其余按当前汇率）/).waitFor();
   await summary.getByText(/固定采购上游的成本记 0，采购费不在这里分摊；扣掉固定成本后的净利见自营业务/).waitFor();
   assert.equal(await summary.getByRole("link", { name: "自营业务", exact: true }).getAttribute("href"), "/my");
   const rowA = page.locator("tr.ant-table-row", { hasText: "Rule A" }), rowC = page.locator("tr.ant-table-row", { hasText: "Rule C" });
@@ -713,6 +713,24 @@ test("上游账单 edits one 核算关联 by a fresh exact preview and one PUT, 
   assert.equal(put.groupId, "rule-edit"); assert.equal(put.previewId, "exact-rule-preview-2"); assert.deepEqual(put.coverageDeclaration, declaration);
   // 保存后重读一次上游账单，不多读
   for (let wait = 0; accountRequests.length <= reads && wait < 50; wait++) await page.waitForTimeout(100); await page.waitForTimeout(500); assert.equal(accountRequests.length, reads + 1);
+});
+
+test("4a 上游账单：固定采购上游的核算关联用途待确认时注明不影响毛利，编辑预览同样说明", async (t) => {
+  const declaration = { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] };
+  const rules = [{ id: "A-active", tokenName: "Key 9", tokenId: 9, upstreamStationId: "A-billing", ownStationId: "own", enabled: true, archivedAt: null, timezone: "Asia/Shanghai", costCoverage: "unknown", coverageDeclaration: declaration, channels: [1, 3].map((channelId) => ({ channelId, name: "Channel " + channelId })) }];
+  const ruleConfiguration = { ownStation: { id: "own", cnyPerUsd: null }, upstreams: [{ id: "A-billing", name: "A billing" }], channels: [1, 2, 3].map((id) => ({ id, name: "Channel " + id, status: 1 })), rules };
+  const model = accountReadFixture(); model.accounts[0].resources.find((resource) => resource.id === "A-billing").fixedPurchases = [{ amount: 300, days: 30 }];
+  const { page, center } = await openAccountsPage(t, { model, ruleConfiguration, mutation(route, mutation) {
+    if (mutation.path === "/api/reconciliation/rules/A-active/preview" && mutation.method === "POST") return fulfill(route, { previewId: "fixed-preview", groupId: "rule-edit", expiresAtMs: Date.now() + 600000,
+      basis: { existingChannelIds: [1, 3], proposedChannelIds: mutation.body.salesChannelIds, timezone: "Asia/Shanghai" }, preview: { scopeChanged: false, costCoverage: "unknown", billingEffectiveFromMs: null } });
+    throw new Error("unexpected rule fixture API: " + mutation.method + " " + mutation.path);
+  } });
+  const account = await expandAccount(center, model.accounts[0]); await account.getByRole("button", { name: /Key 9 · #9/ }).click();
+  await waitForFact(account.locator('[data-rule-id="A-active"]'), "范围版本", "3 · 用途待确认（上游是固定采购，成本记 0，不影响毛利）");
+  await account.getByRole("button", { name: "编辑渠道 A-active", exact: true }).click(); const drawer = page.getByRole("dialog", { name: /^编辑渠道 · / });
+  await drawer.getByText("A billing", { exact: true }).waitFor(); await drawer.getByRole("button", { name: "预览核算关联修改", exact: true }).click();
+  await drawer.getByText("Key 用途待确认；上游是固定采购，成本记 0，不影响毛利", { exact: true }).waitFor();
+  assert.equal(await drawer.getByText("Key 用途待确认，金额作为参考", { exact: true }).count(), 0);
 });
 
 test("上游账单 lets a 核算关联 remove a channel it already shares with another active 核算关联", async (t) => {

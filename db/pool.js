@@ -237,13 +237,14 @@ export async function ensureSchema(pool) {
     settled_at DATETIME(3) NOT NULL,
     PRIMARY KEY (rule_id, bill_date, revision)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
-  await backfillReconciliationLedger(pool);
+  // 搬旧账失败不挡启动：记日志、不写完成标记，下次启动重试。
+  try { await backfillReconciliationLedger(pool); } catch (err) { console.error("  结账账本迁移旧账失败，下次启动重试:", err?.message); }
 }
 
 const LEDGER_BACKFILL_META_KEY = "reconciliation_ledger_backfill_v1";
 
 // 只在首次升级时把旧的单日结账记录搬进账本一次（revision 1、source=migrated）；
-// 中途失败没写标记，下次启动重跑，INSERT IGNORE 跳过已搬的行。
+// 有行没搬成就不写标记，下次启动重跑，INSERT IGNORE 跳过已搬的行。单行失败不挡其余行。
 async function backfillReconciliationLedger(pool) {
   const [markers] = await pool.query("SELECT k FROM meta WHERE k = ?", [LEDGER_BACKFILL_META_KEY]);
   if (markers.length) return;
@@ -251,12 +252,19 @@ async function backfillReconciliationLedger(pool) {
     "SELECT rule_id, health_code, source FROM reconciliation_snapshots WHERE snapshot_key LIKE 'r3:c:%' AND window_kind NOT IN ('today', '7d', 'month')"
   );
   const entries = migratedLedgerEntries(rows);
+  let failed = 0;
   for (const entry of entries) {
-    await pool.query(
-      `INSERT IGNORE INTO reconciliation_ledger (${RECONCILIATION_LEDGER_COLUMNS.join(", ")}) VALUES (${RECONCILIATION_LEDGER_COLUMNS.map(() => "?").join(", ")})`,
-      ledgerInsertValues(entry)
-    );
+    try {
+      await pool.query(
+        `INSERT IGNORE INTO reconciliation_ledger (${RECONCILIATION_LEDGER_COLUMNS.join(", ")}) VALUES (${RECONCILIATION_LEDGER_COLUMNS.map(() => "?").join(", ")})`,
+        ledgerInsertValues(entry)
+      );
+    } catch (err) {
+      failed += 1;
+      console.error(`  结账账本迁移旧账失败（关联 ${entry.ruleId} · ${entry.billDate}），下次启动重试:`, err?.message);
+    }
   }
+  if (failed) return;
   await pool.query(
     "INSERT INTO meta (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)",
     [LEDGER_BACKFILL_META_KEY, JSON.stringify({ completedAt: new Date().toISOString(), migrated: entries.length })]

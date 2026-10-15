@@ -100,6 +100,41 @@ test("结账账本首次升级时搬入旧的单日结账记录并写完成标�
   assert.equal(rerun.some((call) => call.sql.includes("FROM reconciliation_snapshots") || call.sql.includes("INTO reconciliation_ledger")), false);
 });
 
+test("搬旧账失败不挡启动：单行失败照搬其余行、不写完成标记，下次启动重试；读旧记录失败同样只记日志", async (t) => {
+  const logged = [];
+  t.mock.method(console, "error", (...args) => logged.push(args.join(" ")));
+  const pool = schemaPool({ snapshots: [confirmedRow("r1"), confirmedRow("r2")] });
+  const query = pool.query;
+  let failR1 = true;
+  pool.query = async (sql, params) => {
+    if (failR1 && sql.startsWith("INSERT IGNORE INTO reconciliation_ledger") && params[0] === "r1") {
+      pool.calls.push({ sql, params });
+      throw new Error("Out of range value for column 'revenue_usd'");
+    }
+    return query(sql, params);
+  };
+  await ensureSchema(pool);
+  const inserted = () => pool.calls.filter((call) => call.sql.startsWith("INSERT IGNORE INTO reconciliation_ledger")).map((call) => call.params[0]);
+  assert.deepEqual(inserted(), ["r1", "r2"]);
+  assert.equal(pool.calls.some((call) => call.sql.startsWith("INSERT INTO meta")), false);
+  assert.ok(logged.some((line) => line.includes("r1") && line.includes("Out of range")));
+
+  failR1 = false;
+  await ensureSchema(pool);
+  assert.deepEqual(inserted(), ["r1", "r2", "r1", "r2"]);
+  assert.equal(JSON.parse(pool.calls.find((call) => call.sql.startsWith("INSERT INTO meta")).params[1]).migrated, 2);
+
+  const broken = schemaPool();
+  const brokenQuery = broken.query;
+  broken.query = async (sql, params) => {
+    if (sql.includes("FROM reconciliation_snapshots")) throw new Error("Lock wait timeout exceeded");
+    return brokenQuery(sql, params);
+  };
+  await ensureSchema(broken);
+  assert.equal(broken.calls.some((call) => call.sql.startsWith("INSERT INTO meta")), false);
+  assert.ok(logged.some((line) => line.includes("Lock wait timeout")));
+});
+
 test("结账账本表以 (关联, 日期, 版本) 为主键", async () => {
   const pool = schemaPool();
   await ensureSchema(pool);

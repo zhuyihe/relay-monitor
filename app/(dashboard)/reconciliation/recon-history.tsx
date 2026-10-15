@@ -157,6 +157,7 @@ export function ReconHistory({ history, compact, rules, upstreams }: { history: 
       : null}
     {records?.records.length ? <RecordList history={history} compact={compact} /> : <EmptyState title={emptyTitle} />}
     {records ? <p className="jy-caption">已读取 {records.records.length} 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。</p> : null}
+    {records ? <p className="jy-caption">这里只列按自然日结的账；多日自定义区间的确认记录和缺少时区的旧记录不在这里列出（原数据仍保留）。</p> : null}
     {records && fixedUpstream && usageRecords
       ? <p className="jy-caption">这个关联的上游现在是固定采购，当前核算里上游成本记 0（采购费计入固定成本）；没标「固定采购」的原记录是按 Key 用量算的成本和毛利，不按现在的口径改写。</p>
       : null}

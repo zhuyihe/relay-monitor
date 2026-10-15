@@ -5561,3 +5561,38 @@ test("4a 固定采购上游：Key 账单取不到或为空只作参考，毛利 
     }
   }
 });
+
+test("4a 固定采购上游：Key 还有没有其他用途没确认、上游分组目录取不到只作参考，毛利 = 收入、照常结账；按用量计成本的上游仍被挡住", async (t) => {
+  const cases = [
+    ["用途待确认", "COST_COVERAGE_UNKNOWN", {}, (f) => {
+      const row = f.rows.find((rule) => rule.id === "rr_live");
+      row.cost_coverage = "unknown";
+      row.source_binding.coverageDeclaration = { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] };
+    }],
+    ["分组目录取不到", "GROUP_DATA_UNAVAILABLE", { metadataGroups: () => ({ g2: { ratio: 2 } }) }, () => {}],
+  ];
+  for (const [label, code, options, setup] of cases) {
+    for (const fixed of [true, false]) {
+      await t.test(`${label}·${fixed ? "固定采购" : "按用量"}`, async (st) => {
+        const f = await completedDayFixture(st, options);
+        setup(f);
+        if (fixed) f.stations.find((station) => station.id === "upstream").fixedPurchases = [{ amount: 300, days: 30 }];
+        const [row] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" })).results;
+        const issue = row.health.issues.find((item) => item.code === code);
+        assert.ok(issue, JSON.stringify(row.health));
+        if (fixed) {
+          assert.deepEqual([issue.side, issue.reference], ["upstream", true]);
+          assert.deepEqual([row.health.code, row.calculation.profitUsd], ["READY", 2.5], JSON.stringify(row.health));
+        } else {
+          assert.equal(issue.reference, undefined);
+          if (code === "COST_COVERAGE_UNKNOWN") assert.equal(row.calculation.profitUsd, null);
+          assert.notEqual(row.health.code, "READY");
+        }
+        await f.module.refreshDue(Date.now());
+        const ledger = f.state.ledger.filter((entry) => entry.rule_id === "rr_live");
+        assert.equal(ledger.length, fixed || code !== "COST_COVERAGE_UNKNOWN" ? 1 : 0, "固定采购照常结账");
+        if (fixed) assert.deepEqual([ledger[0].cost_basis, ledger[0].detail.result.calculation.profitUsd], ["fixed", 2.5]);
+      });
+    }
+  }
+});

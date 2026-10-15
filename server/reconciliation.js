@@ -1227,23 +1227,25 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (reconciliation === STALE_SCOPE) return STALE_SCOPE;
       let segments = reconciliation.segments;
       let currentSegment = reconciliation.currentSegment;
-      const issues = scopePolicyIssues(rule, window);
+      // 固定采购的上游用量不计成本（采购费作为固定成本），毛利 = 收入：上游 Key 账单取不全、成本归属未核验、
+      // Key 还有没有其他用途、上游分组目录取不到，都只作参考，不挡结账。
+      const costBasis = costBasisOf(upstream);
+      const upstreamSide = (issue) => ({ ...issue, side: "upstream", ...(costBasis === "fixed" ? { reference: true } : {}) });
+      const issues = scopePolicyIssues(rule, window).map((issue) => costBasis === "fixed"
+        ? upstreamSide({ ...issue, detail: "尚未确认该 Key 的全部消费均对应关联渠道" }) : issue);
       if (ownerRegistry.duplicateSales.has(rule.id)) issues.push({ code: "DUPLICATE_CHANNEL_ASSIGNMENT", scope: "rule",
         detail: "同一实际本站渠道归属多条有效核算关联，保留原始金额但不确认重复利润", ruleIds: ownerRegistry.duplicateSales.get(rule.id), observedAt: Date.now() });
       const observedSource = sourceState(rule);
       if (observedSource.status !== "confirmed") issues.push({ code: "SOURCE_BINDING_UNCONFIRMED", scope: "source", detail: "渠道连接已变化或来源尚未核对，当前金额仅供参考", observedAt: Date.now() });
-      // 固定采购的上游用量不计成本（采购费作为固定成本），毛利 = 收入：上游 Key 账单取不全、成本归属未核验都只作参考，不挡结账。
-      const costBasis = costBasisOf(upstream);
-      const upstreamSide = (issue) => ({ ...issue, side: "upstream", ...(costBasis === "fixed" ? { reference: true } : {}) });
       const costOwner = costOwnerFor(rule, canonicalKey, ownerRegistry);
       if (costOwner.state === "unknown") issues.push(upstreamSide({ code: "COST_OWNER_UNVERIFIED", scope: "rule", detail: "参与成本归属的账号身份未能核验，已获取成本仅供参考", ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (costOwner.state === "duplicate") issues.push(upstreamSide({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: "多条有效核算关联使用同一实际 Key，成本只列一次，请核对重复的关联", ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (!ownAvailable) issues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "downstream", detail: "本站管理员 NewAPI 站点不可用", observedAt: Date.now() });
       if (!catalogueObserved && metadata.platform !== "sub2api") {
-        issues.push({
+        issues.push(upstreamSide({
           code: "GROUP_DATA_UNAVAILABLE", scope: "upstream", observedAt: Date.now(),
           detail: metadata.groupError || `当前上游分组目录未返回 ${token.group}`,
-        });
+        }));
       }
       if (reconciliation.transitioned) {
         issues.push({ code: "ROUTE_TRANSITION_DETECTED", scope: "rule", detail: "已按首次检测时间切换分段", observedAt: Date.now() });
