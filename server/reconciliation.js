@@ -24,7 +24,7 @@ import { applyScopePolicy, canonicalBillingKey, completedBillingDayWindow, scope
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationSettlement,
-  sameReconciliationWindow, summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency } from "../lib/reconciliation-view.js";
+  sameReconciliationWindow, summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
 import { costBasisOf, rateSnapshotOf } from "../lib/profit.js";
 import { selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 
@@ -1704,11 +1704,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 已经设置了部分汇率时才提示还缺哪些；一个都没设置就是按 USD 看，不打扰。
     const unconfiguredRateStations = [...rateStations.values()].some(Boolean)
       ? [...rateStations].filter(([, configured]) => !configured).map(([id]) => ({ id, name: upstreamStation(id)?.name || `已删除的站点（${id}）` })) : [];
-    // 固定采购关联的成本记 0，采购费由我的站点按时段摊销；但我的站点只摊销开了监控、计入成本、没归档的站点，
-    // 关联建在其他固定采购站点上时点名，核算页说明净利也不含它们的采购费。
-    const amortized = new Set((upstreams?.fixed || []).filter((station) => !station.archivedAt).map((station) => String(station.id)));
-    const fixedOffProfitStations = upstreams ? [...new Set(selected.filter((row) => row.rates.costBasis === "fixed").map((row) => String(row.rule.upstreamStationId)))]
-      .filter((id) => !amortized.has(id)).map((id) => ({ id, name: upstreamStation(id)?.name || `已删除的站点（${id}）` })) : [];
+    // 我的站点只摊销开了监控、计入成本、没归档的固定采购站点；关联建在其他固定采购站点上时点名，核算页说明净利也不含它们的采购费。
+    const offProfit = upstreams ? fixedOffProfitStations(selected, { amortizedIds: upstreams.fixed.map((station) => station.id), stationOf: upstreamStation }) : [];
     const grouped = summarizeReconciliationWindowGroups(selected, { currency: displayCurrency, coverageFor: (window, source) => {
       const sameSource = (value) => source?.namespaceKey ? value?.namespaceKey === source.namespaceKey : !value;
       return deriveKnownChannelCoverage(catalogue && sameSource(catalogue.ownSource) ? catalogue : null,
@@ -1716,7 +1713,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     } });
     const actions = [...new Map([...selected.flatMap((row) => row.actions), ...coverage.channels.flatMap((channel) => channel.actions)]
       .map((action) => [action.id, action])).values()];
-    return { results: selected, generatedAt: new Date(now).toISOString(), ...grouped, coverage, actions, displayCurrency, unconfiguredRateStations, fixedOffProfitStations };
+    return { results: selected, generatedAt: new Date(now).toISOString(), ...grouped, coverage, actions, displayCurrency, unconfiguredRateStations, fixedOffProfitStations: offProfit };
   }
 
   // 账号级上游用量：和我的站点同一取数（用量接口，返回 0 或失败时按余额历史推算）。实时窗口缓存键只认起点，
@@ -1751,7 +1748,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   function usageUpstreams() {
     const own = ownStation();
     if (!own) return null;
-    const { included, excluded } = selectCostUpstreams(rt.store.list(), own.id);
+    // store.list() 默认已不含归档站点，这里再按归档过滤一次，和我的站点的取数范围保持一致
+    const { included, excluded } = selectCostUpstreams(rt.store.list().filter((station) => !station.archivedAt), own.id);
     return { own, usage: included.filter((station) => costBasisOf(station) === "usage"), fixed: included.filter((station) => costBasisOf(station) === "fixed"), excluded };
   }
 

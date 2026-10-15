@@ -4527,19 +4527,27 @@ test("3b 固定采购上游：核算成本记 0，不用它的汇率；账号级
     [{ monitorEnabled: false }, [], [], "没开监控的站点不做账号级对比"],
     [{ archivedAt: "2026-10-01T00:00:00Z" }, [], [], "已归档"],
   ];
-  for (const [patch, fixedStations, excludedStations, message] of offProfit) {
-    const saved = { ...upstream };
-    Object.assign(upstream, patch);
-    // 测试桩的 list 不按归档和监控过滤，真实 store 默认不列出这两类站点
-    const list = f.rt.store.list;
-    f.rt.store.list = () => list().filter((station) => !station.archivedAt && station.monitorEnabled !== false);
-    full = await module.queryRules({}, { accountUsage: true });
-    f.rt.store.list = list;
-    for (const key of Object.keys(patch)) delete upstream[key];
-    Object.assign(upstream, saved);
-    assert.deepEqual([full.results[0].rates.costBasis, full.commonSummary?.totals.display.knownCost], ["fixed", 0], message);
-    assert.deepEqual(full.fixedOffProfitStations, [{ id: "upstream", name: "上游" }], message);
-    assert.deepEqual([full.unaccountedUpstream?.fixedStations, full.unaccountedUpstream?.excludedStations], [fixedStations, excludedStations], message);
+  // 测试桩的 list 不按归档和监控过滤，这里照真实 store 的选项过滤：默认不列出归档和没开监控的站点
+  const list = f.rt.store.list;
+  const filtered = t.mock.method(f.rt.store, "list", (options = {}) => list(options).filter((station) =>
+    (options.includeArchived || !station.archivedAt) && (options.includeUnmonitored || station.monitorEnabled !== false)));
+  try {
+    for (const [patch, fixedStations, excludedStations, message] of offProfit) {
+      const saved = { ...upstream };
+      Object.assign(upstream, patch);
+      try {
+        full = await module.queryRules({}, { accountUsage: true });
+      } finally {
+        for (const key of Object.keys(patch)) delete upstream[key];
+        Object.assign(upstream, saved);
+      }
+      assert.deepEqual(full.results.map((row) => row.rates.costBasis), ["fixed", "fixed", "fixed"], message);
+      assert.equal(full.commonSummary?.totals.display.knownCost, 0, message);
+      assert.deepEqual(full.fixedOffProfitStations, [{ id: "upstream", name: "上游" }], `${message}：三条关联在同一站点上，只点名一次`);
+      assert.deepEqual([full.unaccountedUpstream?.fixedStations, full.unaccountedUpstream?.excludedStations], [fixedStations, excludedStations], message);
+    }
+  } finally {
+    filtered.mock.restore();
   }
   // 测试桩不过滤时也按归档判断
   upstream.archivedAt = "2026-10-01T00:00:00Z";

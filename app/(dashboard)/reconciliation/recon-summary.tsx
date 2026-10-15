@@ -36,8 +36,8 @@ function UnaccountedUpstreamBlock({ data, rereading }: { data: UnaccountedUpstre
   const pending = data.state === "pending";
   // 已核算多于账号扣费的原因：取数时刻不同、汇率不同或两者都有；旧响应没有 overAccounted 时按取数时刻
   const overReasons = new Set(data.accounts.filter((account) => (account.unaccounted ?? 0) < 0).map((account) => account.overAccounted || "timing"));
-  const overReason = !overReasons.size ? "" : overReasons.size > 1 || overReasons.has("mixed") ? "取数时刻或汇率不同"
-    : overReasons.has("rate") ? "汇率不同" : "多为取数时刻不同";
+  const overReason = !overReasons.size ? "" : overReasons.size > 1 ? "取数时刻或汇率不同"
+    : overReasons.has("mixed") ? "取数时刻和汇率不同" : overReasons.has("rate") ? "汇率不同" : "多为取数时刻不同";
   // 截至现在的窗口里，账号扣费按取数时刻截止（缓存期内复用），核算成本截至本次读取，两者可能差几分钟。
   const live = isLivePreset(data.window.preset);
   const stationNames = (stations: { name: string }[]) => stations.map((station) => station.name).join("、");
