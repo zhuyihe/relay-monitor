@@ -1,5 +1,7 @@
 // 余额历史快照 + 耗尽预测：算法与 v1（lib/history.js）逐字一致。
 // 原始快照可长期保留；内存只保存独立的近期热窗口，日汇总用于长期分析。
+// 日汇总按业务时区划日（lib/business-time.js），与经营分析、利润窗口同一日界线。
+import { businessTimeZone, dayBoundsInTz, dayKeyInTz } from "../lib/business-time.js";
 const MAX_POINTS = 5000; // 每站上限
 const HOT_AGE_MS = 30 * 24 * 3600 * 1000; // 仅运行时热数据窗口
 const MIN_GAP_MS = 30 * 1000; // 相邻快照最小间隔
@@ -12,8 +14,6 @@ const localDayKey = (t) => {
   const d = new Date(Number(t));
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 };
-const localDayStart = (date = new Date()) =>
-  new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 const asIso = (t) => Number.isFinite(Number(t)) ? new Date(Number(t)).toISOString() : null;
 
 function retentionDays(value) {
@@ -31,8 +31,8 @@ function cleanupState(value) {
   };
 }
 
-// rows 必须按 station_id, t 升序。余额下降按后一快照所在自然日计入。
-export function dailyUsageRows(rows, windowStart, windowEnd) {
+// rows 必须按 station_id, t 升序。余额下降按后一快照在业务时区下的自然日计入。
+export function dailyUsageRows(rows, windowStart, windowEnd, tz = businessTimeZone()) {
   const previous = new Map();
   const byDay = new Map();
   for (const row of rows) {
@@ -41,8 +41,9 @@ export function dailyUsageRows(rows, windowStart, windowEnd) {
     const remaining = Number(row.remaining);
     const before = previous.get(id);
     if (t >= windowStart && t < windowEnd) {
-      const key = `${id}\u0000${localDayKey(t)}`;
-      const entry = byDay.get(key) || { stationId: id, date: localDayKey(t), usd: 0 };
+      const date = dayKeyInTz(t, tz);
+      const key = `${id}\u0000${date}`;
+      const entry = byDay.get(key) || { stationId: id, date, usd: 0 };
       const drop = before == null ? 0 : before - remaining;
       if (drop > 0) entry.usd += drop;
       byDay.set(key, entry);
@@ -94,6 +95,8 @@ export class History {
     const [markers] = await this.pool.query("SELECT k FROM meta WHERE k = ?", [ROLLUP_META_KEY]);
     if (markers.length) return;
     // 只在首次升级时全表回填一次；之后每批新快照只重算当天和前一天。
+    // 回填按 MySQL 会话时区划日（部署统一为 Asia/Shanghai，与业务时区一致）；
+    // 两者不一致时，当天和前一天会在下一批快照时按业务时区重算，更早的日子保持回填结果。
     await this.pool.query(`
       INSERT INTO station_daily_usage (station_id, date, used_usd)
       SELECT station_id,
@@ -116,9 +119,10 @@ export class History {
   async refreshDailyUsage(stationIds) {
     const ids = [...new Set(stationIds.map(String))];
     if (!ids.length) return;
-    const todayStart = localDayStart();
-    const windowStart = todayStart - 86400000;
-    const windowEnd = todayStart + 86400000;
+    const tz = businessTimeZone();
+    const today = dayBoundsInTz(Date.now(), tz);
+    const windowStart = dayBoundsInTz(today.startMs - 1, tz).startMs;
+    const windowEnd = today.endMs;
     // 取前一天之前的最后一个点作为基线，保证跨日下降归入后一快照所在日期。
     const [rows] = await this.pool.query(
       `SELECT station_id, t, remaining
@@ -136,10 +140,10 @@ export class History {
        ORDER BY station_id, t`,
       [ids, windowStart, windowEnd, ids, windowStart]
     );
-    const values = dailyUsageRows(rows, windowStart, windowEnd);
+    const values = dailyUsageRows(rows, windowStart, windowEnd, tz);
     await this.pool.query(
       "DELETE FROM station_daily_usage WHERE station_id IN (?) AND date >= ? AND date < ?",
-      [ids, localDayKey(windowStart), localDayKey(windowEnd)]
+      [ids, dayKeyInTz(windowStart, tz), dayKeyInTz(windowEnd, tz)]
     );
     if (values.length) {
       await this.pool.query(
@@ -337,12 +341,19 @@ export class History {
    * 基线取 since 之前的最后一个快照；面板离线期间的消耗会在下一个快照补上。
    */
   usedSince(stationId, sinceTs) {
+    return this.usedBetween(stationId, sinceTs, Infinity);
+  }
+
+  // [sinceTs, untilTs) 内的实际消耗：余额下降按后一快照的时间归属，与日汇总（dailyUsageRows）同一边界，
+  // 正好落在 untilTs 的快照算下一段，相邻两段不重不漏。
+  // 日报算「昨天」时必须有终点，否则会把今天的消耗也算进昨天的成本。
+  usedBetween(stationId, sinceTs, untilTs) {
     const arr = this.data[stationId] || [];
     if (arr.length < 2) return 0;
     let start = 0;
-    for (let i = 0; i < arr.length; i++) if (arr[i][0] <= sinceTs) start = i;
+    for (let i = 0; i < arr.length; i++) if (arr[i][0] < sinceTs) start = i;
     let used = 0;
-    for (let i = start + 1; i < arr.length; i++) {
+    for (let i = start + 1; i < arr.length && arr[i][0] < untilTs; i++) {
       const drop = arr[i - 1][1] - arr[i][1];
       if (drop > 0) used += drop;
     }

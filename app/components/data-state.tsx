@@ -143,11 +143,11 @@ export function Onboarding({
             <div className="eq-mini">
               <span>收入</span>
               <b>{MINUS}</b>
-              <span>用量成本</span>
+              <span>上游成本</span>
               <b>{MINUS}</b>
               <span>固定成本</span>
               <b>=</b>
-              <span>毛利</span>
+              <span>净利</span>
             </div>
           )}
           {figureNote && (

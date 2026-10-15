@@ -57,10 +57,10 @@ export function OverviewTab({
     <>
       <Equation v={v} range={range} onBasis={openBasis} reload={reload} />
       {range === "today" ? (
-        <Panel title="收入与用量成本" caption="按天">
+        <Panel title="收入与上游成本" caption="按天">
           <EmptyState
             title="今天只有一天，没有逐日趋势"
-            desc="切到近 7 天或近 30 天查看每天的收入与毛利；今天每小时的用量在「模型与渠道」里。"
+            desc="切到近 7 天或近 30 天查看每天的收入与净利；今天每小时的用量在「模型与渠道」里。"
             action={<Button onClick={() => onRange("7d")}>看近 7 天</Button>}
           />
         </Panel>
@@ -87,7 +87,7 @@ function Equation({ v, range, onBasis, reload }: { v: OwnView; range: OwnRange; 
   if (!p || p.error) {
     return (
       <Panel title={title} caption={caption}>
-        <ErrorState title="毛利暂时算不出来" error={productErrorMessage(p?.error || "接口没有返回利润数据")} onRetry={() => reload()} />
+        <ErrorState title="利润暂时算不出来" error={productErrorMessage(p?.error || "接口没有返回利润数据")} onRetry={() => reload()} />
       </Panel>
     );
   }
@@ -95,10 +95,11 @@ function Equation({ v, range, onBasis, reload }: { v: OwnView; range: OwnRange; 
   const fixedRows = costs.filter((c) => c.mode === "fixed");
   const usageRows = costs.filter((c) => c.mode !== "fixed");
   const historyCount = usageRows.filter((c) => c.mode === "history").length;
-  const usage = sum(usageRows, (c) => c.cny);
-  const fixed = sum(fixedRows, (c) => c.cny);
+  // 优先用接口算好的两项成本，与毛利、净利同一次舍入
+  const upstream = p.upstreamCostCny ?? sum(usageRows, (c) => c.cny);
+  const fixed = p.fixedCostCny ?? sum(fixedRows, (c) => c.cny);
 
-  // 未配置汇率按 1:1 折算：自营站点没配影响收入，上游没配影响用量成本
+  // 未配置汇率按 1:1 折算：自营站点没配影响收入，上游没配影响上游成本
   const warnings: string[] = p.warnings || [];
   const rateWarn = warnings.find((w) => w.includes("未配置汇率"));
   const noRate = rateWarn
@@ -131,8 +132,8 @@ function Equation({ v, range, onBasis, reload }: { v: OwnView; range: OwnRange; 
         note: revNotes.length ? revNotes : "不含管理员自用",
         href: tabHref(range, "users"),
       }}
-      usage={{
-        value: usage,
+      upstream={{
+        value: upstream,
         approx: !!p.estimated || upstreamNoRate,
         note: historyCount
           ? `${historyCount} 个上游按余额推算`
@@ -142,23 +143,24 @@ function Equation({ v, range, onBasis, reload }: { v: OwnView; range: OwnRange; 
         href: tabHref(range, "models"),
       }}
       fixed={{ value: fixed, note: fixedRows.length ? `${fixedRows.length} 项按天摊销` : "没有固定成本" }}
-      profit={p.profitCny}
+      gross={p.grossProfitCny}
+      net={p.netProfitCny ?? p.profitCny}
       reasons={reasons}
-      partialTail="实际毛利可能高于或低于这里。"
+      partialTail="实际利润可能高于或低于这里。"
     />
   );
 }
 
 // ---- 每日趋势 -------------------------------------------------------------
 
-// 逐日用量成本取自 /api/analytics（与「成本与利润」同一口径），每日收入按当天下游消费占比摊分，
+// 逐日上游成本取自 /api/analytics（与「成本与利润」同一口径），每日收入按当天下游消费占比摊分，
 // 缺记录的日子标成缺失，不补零。
 function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: number | null; reload: () => Promise<unknown> }) {
   const dv = useMemo(() => (costs && !costs.error ? derive(costs, v.d) : null), [costs, v.d]);
-  if (costs === undefined) return <PanelSkeleton title="收入与用量成本" height={220} />;
+  if (costs === undefined) return <PanelSkeleton title="收入与上游成本" height={220} />;
   if (!dv) {
     return (
-      <Panel title="收入与用量成本" caption="按天">
+      <Panel title="收入与上游成本" caption="按天">
         {costs?.error ? (
           <ErrorState title="逐日成本加载失败" error={costs.error} onRetry={() => reload()} />
         ) : (
@@ -172,6 +174,7 @@ function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: 
       rows={dv.rows}
       showRev={dv.hasIncome}
       asOf={asOf}
+      tz={costs.tz || v.d?.tz}
       caption={
         <>
           按天，收入按当天消费占比摊分。

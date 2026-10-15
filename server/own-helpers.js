@@ -3,8 +3,9 @@
 // 约定：不在顶层 import lib/runtime.js；跨请求状态（缓存）一律挂在 rt 字段上。
 import {
   queryStationUsage, queryOwnUsers, queryOwnChannels, queryLogStat, queryOwnFlow,
-  parseDateLabel, fixedPurchases,
 } from "../lib/providers.js";
+import { businessTimeZone, resolveBusinessWindow } from "../lib/business-time.js";
+import { amortizeFixedCost, costBasisOf, purchasesOf, rateSnapshotOf, summarizeProfit, toCny } from "../lib/profit.js";
 
 // 分析结果缓存（admin-keys PUT 改利润口径时要清掉，挂 rt 上跨路由共享）
 export function ownCache(rt) {
@@ -118,9 +119,11 @@ export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endM
 }
 
 /**
- * 利润 = 收入（下游消费 × 自有站售价汇率）− 全部纳入成本的监控上游期内成本。
- * 成本纳入不依赖 New API 渠道列表：固定付费按天摊销；其余按上游实际扣费 × 充值汇率，
+ * 利润口径（lib/profit.js）：毛利 = 收入 − 上游成本；净利 = 毛利 − 固定成本。
+ * 收入 = 下游消费 × 自有站售价汇率。成本纳入不依赖 New API 渠道列表：
+ * 配置了固定付费的上游只按摊销计（固定成本）；其余按上游实际扣费 × 充值汇率（上游成本），
  * 用量接口返回 0 或不可用时退回余额下降推算。渠道 URL 匹配仅用于展示流量归属。
+ * 窗口为 [startMs, now]：余额推算同样截止到 now，日报算昨天时不会混入今天的消耗。
  */
 export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs, now, tz, range, resold }) {
   const { store, history } = rt;
@@ -136,73 +139,54 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
     const { matched, unmatched } = mapCostChannels(upstreams, channels);
 
     const windowDays = (now - startMs) / 86400000;
-    const rateOf = (s) => (s.cnyPerUsd != null && s.cnyPerUsd > 0 ? s.cnyPerUsd : 1);
 
     // 固定成本：无论是否匹配到渠道都计入（服务器租金这类可以完全不填地址）。
-    // 每笔付费按 [购买日, 购买日+天数] 与展示窗口的重叠部分摊销，多笔叠加求和；
-    // 没填日期的按全窗口摊销（自动续费的常驻成本）
+    // 每笔付费按生效区间与展示窗口的重叠毫秒数摊销，多笔叠加求和；没填日期的按全窗口摊销。
     const costs = [];
     for (const s of upstreams) {
-      const purchases = fixedPurchases(s);
+      const purchases = purchasesOf(s);
       if (!purchases.length) continue;
-      let cnySum = 0, active = 0, expired = 0;
-      for (const p of purchases) {
-        const daily = p.amount / p.days;
-        const st = p.startDate ? parseDateLabel(p.startDate, tz) : null;
-        if (st == null) {
-          cnySum += daily * windowDays;
-          active++;
-          continue;
-        }
-        const end = st + p.days * 86400000;
-        cnySum += daily * (Math.max(0, Math.min(now, end) - Math.max(startMs, st)) / 86400000);
-        if (end <= now) expired++;
-        else if (st <= now) active++;
-      }
-      let note = null;
-      if (expired === purchases.length) note = purchases.length > 1 ? "已全部到期" : "已到期";
-      else if (purchases.length > 1) note = `${active}/${purchases.length} 笔生效中`;
-      else if (purchases[0].startDate) {
-        const st0 = parseDateLabel(purchases[0].startDate, tz);
-        if (st0 != null && st0 > startMs) note = `${purchases[0].startDate} 起`;
-      }
+      const fixed = amortizeFixedCost(purchases, { startMs, endMs: now, tz });
       costs.push({
-        stationId: s.id, name: s.name, mode: "fixed", note,
+        stationId: s.id, name: s.name, mode: "fixed", note: fixed.note,
         channels: matched.get(s.id)?.channels || ["未直接出现在 New API 渠道 · 按固定成本计费"],
-        cny: r2(cnySum),
+        cny: fixed.cny,
       });
     }
-    // 按用量：所有纳入成本、且未配置固定成本的监控上游。
+    // 上游成本：所有纳入成本、且按用量计费的监控上游。
     // 是否出现在 New API 渠道列表只影响归属说明，不影响成本纳入。
     const usageCosts = await Promise.all(
       upstreams
-        .filter((station) => fixedPurchases(station).length === 0 && station.type !== "fixed")
+        .filter((station) => costBasisOf(station) === "usage")
         .map(async (station) => {
           const chNames = matched.get(station.id)?.channels || ["未直接出现在 New API 渠道 · 按监控数据计费"];
           const item = { stationId: station.id, name: station.name, channels: chNames };
+          const rate = rateSnapshotOf(station);
           try {
             const u = await queryStationUsage(station, {
               startMs, endMs: now, granularity: "day", tz, wantToday: range === "today",
             });
             const apiUsd = range === "today" && u.summary ? u.summary.cost : u.models.reduce((a, m) => a + m.cost, 0);
-            const selected = reconcileUsageCost(apiUsd, history.usedSince(station.id, startMs));
-            return { ...item, ...selected, cny: r2(selected.usd * rateOf(station)) };
+            const selected = reconcileUsageCost(apiUsd, history.usedBetween(station.id, startMs, now));
+            return { ...item, ...selected, cny: toCny(selected.usd, rate) };
           } catch (err) {
-            const usd = history.usedSince(station.id, startMs);
+            const usd = history.usedBetween(station.id, startMs, now);
             return {
               ...item, mode: "history", usd,
               note: "用量接口失败，已按余额历史推算",
               error: err?.message || String(err),
-              cny: r2(usd * rateOf(station)),
+              cny: toCny(usd, rate),
             };
           }
         })
     );
     costs.push(...usageCosts);
 
-    const ownRate = own.cnyPerUsd != null && own.cnyPerUsd > 0 ? own.cnyPerUsd : 1;
+    const ownRate = rateSnapshotOf(own).cnyPerUsd;
     const incomeCny = r2(incomeUsd * ownRate);
-    const totalCostCny = r2(costs.reduce((a, c) => a + c.cny, 0));
+    const upstreamCostCny = r2(costs.filter((c) => c.mode !== "fixed").reduce((a, c) => a + c.cny, 0));
+    const fixedCostCny = r2(costs.filter((c) => c.mode === "fixed").reduce((a, c) => a + c.cny, 0));
+    const summary = summarizeProfit({ incomeCny, upstreamCostCny, fixedCostCny });
     const unmatchedList = [...unmatched.values()].sort((a, b) => b.enabled - a.enabled || b.total - a.total);
     const unmatchedEnabled = unmatchedList.reduce((a, x) => a + x.enabled, 0);
     const estimatedCosts = costs.filter((c) => c.mode === "history").length;
@@ -210,7 +194,7 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
       .filter((c) => c.mode !== "fixed")
       .map((c) => upstreams.find((s) => s.id === c.stationId))
       .filter(Boolean)]
-      .filter((s, i, all) => (s.cnyPerUsd == null || s.cnyPerUsd <= 0) && all.findIndex((x) => x.id === s.id) === i)
+      .filter((s, i, all) => rateSnapshotOf(s).source === "default" && all.findIndex((x) => x.id === s.id) === i)
       .map((s) => s.name);
     const warnings = [];
     if (unmatchedEnabled) warnings.push(`${unmatchedEnabled} 个启用渠道未直接关联监控站；全部监控上游仍已独立计入成本`);
@@ -218,13 +202,18 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
     if (defaultRateStations.length) warnings.push(`${defaultRateStations.join("、")} 未配置汇率，当前按 1:1 折算`);
     if (excludedUpstreams.length) warnings.push(`${excludedUpstreams.map((s) => s.name).join("、")} 已设置为不计入利润成本`);
     return {
-      incomeCny, totalCostCny,
+      incomeCny,
+      upstreamCostCny,
+      fixedCostCny,
+      ...summary,
+      // 旧字段：总成本 = 上游成本 + 固定成本；profitCny / marginPct 即净利 / 净利率
+      totalCostCny: r2(upstreamCostCny + fixedCostCny),
+      profitCny: summary.netProfitCny,
+      marginPct: summary.netMarginPct,
       adminUsageCny: r2((adminUsageUsd || 0) * ownRate),
       // 转售管理员 Key 计入收入的部分（× 售价汇率），供前端拆分展示
       resoldCny: resold ? r2((resold.resoldUsd || 0) * ownRate) : 0,
       resoldKeys: resold ? resold.breakdown.map((b) => ({ ...b, cny: r2(b.usd * ownRate) })) : [],
-      profitCny: r2(incomeCny - totalCostCny),
-      marginPct: incomeCny > 0 ? Math.round(((incomeCny - totalCostCny) / incomeCny) * 1000) / 10 : null,
       costs: costs.sort((a, b) => b.cny - a.cny),
       unmatched: unmatchedList,
       complete: defaultRateStations.length === 0,
@@ -240,26 +229,12 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
 
 // ---- 展示窗口解析（analytics 与 audit 共用）--------------------------------
 /**
- * 解析 range/tz 查询参数 → 按站点时区自然日切出的展示窗口与上一等长窗口。
- * 上窗整窗左移 spanDays 天：今天 → 昨天同一时刻为止；7/30 天 → 前一个 7/30 天。
+ * 解析 range 查询参数 → 按业务时区自然日切出的展示窗口与上一等长窗口。
+ * 统一用业务时区（lib/business-time.js），不再跟随浏览器传来的 tz：
+ * 同一时刻不同时区的浏览器看到的「今天」必须是同一个窗口，才能和日报、成本页对得上。
  */
-export function resolveOwnWindow(sp) {
-  const range = ["today", "7d", "30d"].includes(sp.get("range")) ? sp.get("range") : "7d";
-  let tz = String(sp.get("tz") || "");
-  try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); } catch { tz = ""; }
-  if (!tz) tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-  const now = Date.now();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz, hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
-  }).formatToParts(new Date(now));
-  const get = (k) => Number(parts.find((x) => x.type === k).value);
-  const midnight = now - ((get("hour") % 24) * 3600 + get("minute") * 60 + get("second")) * 1000 - (now % 1000);
-  const days = range === "30d" ? 29 : range === "7d" ? 6 : 0;
-  const startMs = midnight - days * 86400000;
-  const spanDays = days + 1;
-  const prevStart = startMs - spanDays * 86400000;
-  return { range, tz, now, midnight, days, startMs, spanDays, prevStart, prevEnd: prevStart + (now - startMs) };
+export function resolveOwnWindow(sp, now = Date.now()) {
+  return resolveBusinessWindow(sp.get("range"), now, businessTimeZone());
 }
 
 // ---- 分组 / 渠道口径（/api/data/flow）与环比 --------------------------------

@@ -1,6 +1,7 @@
 // ---- 「我的站点」下游分析（分时段 / 分模型 / 分用户 + 消费预测）------------------
 import { withAuth, json } from "../../../../lib/api.js";
-import { queryOwnData, dateStrInTz, parseDateLabel } from "../../../../lib/providers.js";
+import { queryOwnData } from "../../../../lib/providers.js";
+import { dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../../../lib/business-time.js";
 import { forecastDaily, forecastHourly } from "../../../../lib/forecast.js";
 import {
   ownCache, getOwnUsers, computeResold, computeProfit, computeFlowBreakdown, joinPrev, resolveOwnWindow,
@@ -16,8 +17,10 @@ export const GET = withAuth(async (request, rt) => {
   }
   const sp = new URL(request.url).searchParams;
   // 展示窗口 + 上一等长窗口（环比用来抓「昨天 $11、今天 $152」这类跳变）
-  const { range, tz, now, midnight, startMs, spanDays, prevStart, prevEnd } = resolveOwnWindow(sp);
-  const wideStart = midnight - 34 * 86400000; // 预测需要更长的历史
+  const { range, tz, now, todayLabel, midnight, startMs, spanDays, prevStart, prevEnd } = resolveOwnWindow(sp);
+  // 日期一律按业务时区的日历天推算，不假定一天 24 小时（夏令时切换日也对得上）
+  const dayStartOf = (ms) => dayStartInTz(dayKeyInTz(ms, tz), tz);
+  const wideStart = dayStartInTz(shiftDayLabel(todayLabel, -34), tz); // 预测需要更长的历史
 
   const cache = ownCache(rt);
   const cacheKey = `${range}|${tz}`;
@@ -46,11 +49,12 @@ export const GET = withAuth(async (request, rt) => {
       return [...m.values()].sort((a, b) => b.cost - a.cost);
     };
 
-    // 时段趋势：今天按小时，7/30 天按 tz 自然日
+    // 时段趋势：今天按小时，7/30 天按 tz 自然日。
+    // 小时桶按 UTC 整点切：New API 的 quota_data 本身就是 UTC 整点粒度，半点时区也无法再细分。
     const hourly = range === "today";
     const tmap = new Map();
     for (const r of winModel) {
-      const key = hourly ? Math.floor(r.t / 3600000) * 3600000 : parseDateLabel(dateStrInTz(r.t, tz), tz);
+      const key = hourly ? Math.floor(r.t / 3600000) * 3600000 : dayStartOf(r.t);
       const acc = tmap.get(key) || { t: key, tokens: 0, cost: 0, requests: 0 };
       acc.tokens += r.tokens; acc.cost += r.cost; acc.requests += r.requests;
       tmap.set(key, acc);
@@ -60,13 +64,13 @@ export const GET = withAuth(async (request, rt) => {
     const dmap = new Map();
     for (const r of modelRows) {
       if (r.t >= midnight) continue;
-      const dt = parseDateLabel(dateStrInTz(r.t, tz), tz);
+      const dt = dayStartOf(r.t);
       dmap.set(dt, (dmap.get(dt) || 0) + r.cost);
     }
     const daily = [];
     if (dmap.size) {
       const firstDay = Math.min(...dmap.keys());
-      for (let t = firstDay; t < midnight; t += 86400000) {
+      for (let label = dayKeyInTz(firstDay, tz), t = firstDay; t < midnight; label = shiftDayLabel(label, 1), t = dayStartInTz(label, tz)) {
         daily.push({ t, cost: Math.round((dmap.get(t) || 0) * 10000) / 10000 });
       }
     }
@@ -97,7 +101,7 @@ export const GET = withAuth(async (request, rt) => {
     if (hf) {
       const todaySoFar = modelRows.filter((r) => r.t >= midnight).reduce((a, r) => a + r.cost, 0);
       // 今天预计全天 = 已发生 + 预测里落在今天的剩余小时
-      const dayEndMs = midnight + 86400000;
+      const dayEndMs = dayStartInTz(shiftDayLabel(todayLabel, 1), tz);
       const restToday = hf.points.filter((p) => p.t < dayEndMs).reduce((a, p) => a + p.cost, 0);
       hourlyForecast = {
         past: hourlySeries.slice(-24),

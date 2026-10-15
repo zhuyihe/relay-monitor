@@ -33,7 +33,7 @@ export function ProfitBasis({
   const warnings: string[] = ok ? p.warnings || [] : [];
   const summary = ok ? (
     <>
-      收入 <b>{formatMoney(p.incomeCny)}</b>，成本 <b>{formatMoney(p.totalCostCny)}</b>，{(p.resoldKeys || []).length} 个转售 Key，
+      收入 <b>{formatMoney(p.incomeCny)}</b>，上游成本 <b>{formatMoney(p.upstreamCostCny)}</b>，固定成本 <b>{formatMoney(p.fixedCostCny)}</b>，{(p.resoldKeys || []).length} 个转售 Key，
       {(p.costs || []).length} 个上游计入成本{warnings.length ? `，${warnings.length} 条口径提示` : ""}。
     </>
   ) : (
@@ -57,6 +57,7 @@ export function ProfitBasis({
           <section className="jy-my-section">
             <div className="jy-my-lines">
               <p>收入 = 普通用户消费 × 售价汇率，不含管理员和 root 自用；已标记为转售的管理员 Key 算作收入。</p>
+              <p>毛利 = 收入 − 上游成本；净利 = 毛利 − 固定成本。按用量计费的上游计入上游成本，包月 / 固定采购的摊销计入固定成本。</p>
               <p>成本按各上游自己的口径计入，统计窗口 {+Number(p.windowDays || 0).toFixed(2)} 天。</p>
             </div>
             {warnings.length > 0 && (
@@ -295,10 +296,10 @@ function CostSection({ p }: { p: any }) {
       </h3>
       {costs.length ? (
         <DataTable<any>
-          caption="计入毛利的上游与期内成本"
+          caption="计入利润成本的上游与期内成本"
           rows={costs}
           rowKey={(c, i) => `${c.stationId ?? c.name}-${i}`}
-          empty="没有计入毛利的上游"
+          empty="没有计入利润成本的上游"
           defaultSort={{ key: "cny", dir: "desc" }}
           cols={[
             {
@@ -333,8 +334,8 @@ function CostSection({ p }: { p: any }) {
       ) : (
         <EmptyState
           center={false}
-          title="没有计入毛利的上游"
-          desc="用量成本暂按 ¥0 计。在上游资源里把上游设为计入利润成本后，这里会列出每个上游的期内成本。"
+          title="没有计入利润成本的上游"
+          desc="上游成本和固定成本暂按 ¥0 计。在上游资源里把上游设为计入利润成本后，这里会列出每个上游的期内成本。"
           action={<Button onClick={() => router.push("/stations")}>去上游资源设置</Button>}
         />
       )}

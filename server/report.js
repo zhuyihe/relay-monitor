@@ -1,35 +1,23 @@
 // 每日日报：昨日「我的站点」经营汇总（v1 server.js 日报段的平移）。
 // buildReport/sendReport 供 /api/report/preview、/api/report/send 端点调用；
 // startReportScheduler 由 lib/runtime.js 在初始化时启动，定时器挂在 rt 字段上。
-import { queryOwnData, dateStrInTz, parseDateLabel } from "../lib/providers.js";
+import { queryOwnData } from "../lib/providers.js";
 import { forecastDaily } from "../lib/forecast.js";
 import { BRAND } from "../lib/brand.js";
 import { broadcast } from "../lib/notify.js";
 import { fmtEta } from "../lib/alerts.js";
 import { getOwnUsers, computeResold, computeProfit } from "./own-helpers.js";
+import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
 
-const DEFAULT_REPORT_TIME_ZONE = "Asia/Shanghai";
-const configuredReportTimeZone = process.env.REPORT_TIME_ZONE || DEFAULT_REPORT_TIME_ZONE;
-export const REPORT_TIME_ZONE = (() => {
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: configuredReportTimeZone });
-    return configuredReportTimeZone;
-  } catch {
-    return DEFAULT_REPORT_TIME_ZONE;
-  }
-})();
-
-function shiftDateLabel(label, days) {
-  const [year, month, day] = label.split("-").map(Number);
-  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
-}
+// 日报时区就是业务时区（BUSINESS_TIME_ZONE，兼容旧的 REPORT_TIME_ZONE），与利润页、日汇总同一套日界线
+export const REPORT_TIME_ZONE = businessTimeZone();
 
 // 日报日界线必须与进程/容器时区无关，否则 UTC 部署会在北京时间 08:00 才切换“昨天”。
 export function reportDayWindow(nowMs = Date.now(), tz = REPORT_TIME_ZONE) {
-  const todayLabel = dateStrInTz(nowMs, tz);
-  const dayEnd = parseDateLabel(todayLabel, tz);
-  const dayStart = parseDateLabel(shiftDateLabel(todayLabel, -1), tz);
-  const wideStart = parseDateLabel(shiftDateLabel(todayLabel, -34), tz);
+  const todayLabel = dayKeyInTz(nowMs, tz);
+  const dayEnd = dayStartInTz(todayLabel, tz);
+  const dayStart = dayStartInTz(shiftDayLabel(todayLabel, -1), tz);
+  const wideStart = dayStartInTz(shiftDayLabel(todayLabel, -34), tz);
   return { tz, todayLabel, dayStart, dayEnd, wideStart };
 }
 
@@ -41,7 +29,7 @@ export function reportClock(nowMs = Date.now(), tz = REPORT_TIME_ZONE) {
     minute: "2-digit",
   }).formatToParts(new Date(nowMs));
   const value = (type) => parts.find((p) => p.type === type)?.value || "00";
-  return { today: dateStrInTz(nowMs, tz), hhmm: `${value("hour")}:${value("minute")}` };
+  return { today: dayKeyInTz(nowMs, tz), hhmm: `${value("hour")}:${value("minute")}` };
 }
 
 const rptCny = (v) => "¥" + Number(v ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -102,16 +90,19 @@ export async function buildReport(rt) {
   const profit = await computeProfit(rt, own, incomeUsd, adminUsd, { startMs: dayStart, now: dayEnd, tz, range: "7d", resold });
 
   // 日序列（近 34 天，不含今天）→ 环比与预测
+  // 按日期标签逐日推进（不加 24h），夏令时时区也不会错位
   const dmap = new Map();
   for (const r of modelRows) {
     if (r.t >= dayEnd) continue;
-    const dt = parseDateLabel(dateStrInTz(r.t, tz), tz);
-    dmap.set(dt, (dmap.get(dt) || 0) + r.cost);
+    const label = dayKeyInTz(r.t, tz);
+    dmap.set(label, (dmap.get(label) || 0) + r.cost);
   }
   const daily = [];
   if (dmap.size) {
-    const firstDay = Math.min(...dmap.keys());
-    for (let t = firstDay; t < dayEnd; t += 86400000) daily.push({ t, cost: dmap.get(t) || 0 });
+    const lastLabel = dayKeyInTz(dayStart, tz);
+    for (let label = [...dmap.keys()].sort()[0]; label <= lastLabel; label = shiftDayLabel(label, 1)) {
+      daily.push({ t: dayStartInTz(label, tz), cost: dmap.get(label) || 0 });
+    }
   }
   const prev = daily.length >= 2 ? daily[daily.length - 2].cost : null;
   const avg7 = daily.slice(-7).reduce((a, x) => a + x.cost, 0) / Math.min(7, daily.length || 1);
@@ -134,7 +125,7 @@ export async function buildReport(rt) {
     .filter((u) => u.role < 10)
     .reduce((a, u) => a + u.quotaUsd, 0) * ownRate;
 
-  const dateLabel = dateStrInTz(dayStart, tz);
+  const dateLabel = dayKeyInTz(dayStart, tz);
   const dow = "日一二三四五六"[new Date(`${dateLabel}T00:00:00Z`).getUTCDay()];
   const L = [];
   L.push(`【${BRAND.name}日报】${own.name} · ${dateLabel}（周${dow}）`);
@@ -143,7 +134,8 @@ export async function buildReport(rt) {
   L.push(`昨日消费：${rptCny(totalCost * ownRate)}${prev != null ? `（环比 ${pctDelta(totalCost, prev)}，近7天日均 ${rptCny(avg7 * ownRate)} ${pctDelta(totalCost, avg7)}）` : ""}`);
   L.push(`收入(不含管理员)：${rptCny(incomeUsd * ownRate)} ｜ 管理员消耗：${rptCny(adminUsd * ownRate)}`);
   if (profit && !profit.error) {
-    L.push(`成本：${rptCny(profit.totalCostCny)} ｜ 利润：${rptCny(profit.profitCny)}${profit.marginPct != null ? `（利润率 ${profit.marginPct}%）` : ""}`);
+    L.push(`上游成本：${rptCny(profit.upstreamCostCny)} ｜ 毛利：${rptCny(profit.grossProfitCny)}${profit.grossMarginPct != null ? `（毛利率 ${profit.grossMarginPct}%）` : ""}`);
+    L.push(`固定成本：${rptCny(profit.fixedCostCny)} ｜ 净利：${rptCny(profit.netProfitCny)}${profit.netMarginPct != null ? `（净利率 ${profit.netMarginPct}%）` : ""}`);
     if (profit.warnings?.length) L.push(`口径提示：${profit.warnings.join("；")}`);
   }
   L.push("");
@@ -183,7 +175,7 @@ export async function buildReport(rt) {
   L.push("");
   L.push(`${BRAND.reportSignature} · 统计区间为 ${dateLabel} 00:00–24:00`);
   const html = buildReportHtml(rt, {
-    own, dateLabel, dow, ownRate,
+    own, dateLabel, dow, ownRate, tz,
     totalCost, prev, avg7, incomeUsd, adminUsd, profit,
     totalReqs, totalTokens, activeUsers: byUser.length,
     byModel, byUser, daily, fc, upstreams, balanceTotal,
@@ -222,7 +214,7 @@ function buildReportHtml(rt, d) {
       <div title="${esc(money(x.cost * d.ownRate))}" style="height:${h}px;background:${last ? C.blue : C.blueSoft};border-radius:3px 3px 0 0"></div>
     </td>`;
   }).join("");
-  const fmtMD = (t) => { const dd = new Date(t); return `${dd.getMonth() + 1}/${dd.getDate()}`; };
+  const fmtMD = (t) => { const [, m, dd] = dayKeyInTz(t, d.tz).split("-").map(Number); return `${m}/${dd}`; };
   const trend = days.length ? `
     <div style="background:#fff;border:1px solid ${C.line};border-radius:10px;padding:14px">
       <table width="100%" cellpadding="0" cellspacing="0" style="height:76px"><tr>${trendCols}</tr></table>
@@ -294,6 +286,10 @@ function buildReportHtml(rt, d) {
     </div>` : "";
 
   const profitOk = d.profit && !d.profit.error;
+  // 毛利 = 收入 − 上游成本；净利 = 毛利 − 固定成本（与「我的站点」页同一口径，见 lib/profit.js）
+  const signColor = (v) => (v >= 0 ? C.green : C.red);
+  const marginSub = (pctLabel, pct, costLabel, cost) =>
+    `${pct != null ? `${pctLabel} ${pct}% · ` : ""}${costLabel} ${money(cost)}`;
   return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:${C.bg}">
   <table width="100%" cellpadding="0" cellspacing="0" style="background:${C.bg};padding:18px 0"><tr><td align="center">
   <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%">
@@ -302,8 +298,8 @@ function buildReportHtml(rt, d) {
     <tr><td><table width="100%" cellpadding="0" cellspacing="0"><tr>
       ${kpi("昨日消费", money(d.totalCost * d.ownRate), d.prev != null ? `环比 ${pctDelta(d.totalCost, d.prev)} · 7日均 ${pctDelta(d.totalCost, d.avg7)}` : "", null)}
       ${kpi("收入（不含管理员）", money(d.incomeUsd * d.ownRate), d.adminUsd > 0 ? `管理员另耗 ${money(d.adminUsd * d.ownRate)}` : "", null)}
-      ${kpi("成本", profitOk ? money(d.profit.totalCostCny) : "—", "", null)}
-      ${kpi("利润", profitOk ? money(d.profit.profitCny) : "—", profitOk && d.profit.marginPct != null ? `利润率 ${d.profit.marginPct}%` : "", profitOk && d.profit.profitCny >= 0 ? C.green : C.red)}
+      ${kpi("毛利", profitOk ? money(d.profit.grossProfitCny) : "—", profitOk ? marginSub("毛利率", d.profit.grossMarginPct, "上游成本", d.profit.upstreamCostCny) : "", profitOk ? signColor(d.profit.grossProfitCny) : null)}
+      ${kpi("净利", profitOk ? money(d.profit.netProfitCny) : "—", profitOk ? marginSub("净利率", d.profit.netMarginPct, "固定成本", d.profit.fixedCostCny) : "", profitOk ? signColor(d.profit.netProfitCny) : null)}
     </tr></table></td></tr>
     ${section("近 14 天消费趋势", trend)}
     ${section(`用量：请求 ${d.totalReqs.toLocaleString("en-US")} 次 · 计费 Tokens ${rptTok(d.totalTokens)}（不含缓存读写）· 活跃用户 ${d.activeUsers} 个`, "")}

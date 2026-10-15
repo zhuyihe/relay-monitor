@@ -1,6 +1,6 @@
-// 利润等式条（招牌组件）：收入 − 用量成本 − 固定成本 = 毛利。
+// 利润等式（招牌组件），两行：收入 − 上游成本 = 毛利；毛利 − 固定成本 = 净利。
 // 数据不全时带 ≈ 并在下方说明原因；收入算不出来（没设置自营站点、超出范围、读取失败）时
-// 收入和毛利留空，下方说明原因和下一步，成本照常显示。
+// 收入、毛利和净利留空，下方说明原因和下一步，两项成本照常显示。
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { MINUS, formatMoney, formatPct, splitTotal } from "../../lib/format";
@@ -34,7 +34,7 @@ function Term({
   term,
   empty = "—",
   op,
-  result,
+  kind,
   loading,
 }: {
   label: string;
@@ -42,10 +42,17 @@ function Term({
   term: EqTerm;
   empty?: string;
   op?: string;
-  result?: boolean;
+  // gross：第一行的结果；net：第二行的结果（主结论）；carry：第二行开头承接的毛利，窄屏账单式里隐藏
+  kind?: "gross" | "net" | "carry";
   loading?: boolean;
 }) {
-  const cls = ["jy-eq-term", term.approx && !result ? "is-partial" : "", result ? "jy-eq-result" : ""].filter(Boolean).join(" ");
+  const plain = !kind;
+  const cls = [
+    "jy-eq-term",
+    term.approx && plain ? "is-partial" : "",
+    kind === "gross" || kind === "net" ? "jy-eq-result" : "",
+    kind ? `is-${kind}` : "",
+  ].filter(Boolean).join(" ");
   const inner = (
     <>
       <span className="jy-eq-label">
@@ -61,7 +68,7 @@ function Term({
           <MoneyHero value={term.value} approx={term.approx} />
         )}
       </span>
-      {term.approx && !result && <span className="jy-partial-strip jy-hatch" aria-hidden="true" />}
+      {term.approx && plain && <span className="jy-partial-strip jy-hatch" aria-hidden="true" />}
       <span className="jy-eq-note">{loading ? null : term.note}</span>
     </>
   );
@@ -73,7 +80,7 @@ function Term({
     );
   }
   return (
-    <div className={cls} data-op={op}>
+    <div className={cls} data-op={op} aria-hidden={kind === "carry" ? true : undefined}>
       {inner}
     </div>
   );
@@ -86,14 +93,17 @@ const Op = ({ ch, spoken }: { ch: string; spoken: string }) => (
   </span>
 );
 
+const isLoss = (v: number | null) => v != null && v < 0 && Math.abs(v) >= 0.005;
+
 export function ProfitEquation({
   title,
   caption,
   extra,
   revenue,
-  usage,
+  upstream,
   fixed,
-  profit,
+  gross,
+  net,
   reasons = [],
   unconfigured = false,
   configureHref = "/my",
@@ -101,19 +111,22 @@ export function ProfitEquation({
   profitNote,
   notice,
   loading = false,
-  partialTail = "实际毛利会比这里低。",
+  partialTail = "实际净利会比这里低。",
 }: {
   title: ReactNode;
   caption?: ReactNode;
   extra?: ReactNode;
   revenue: EqTerm;
-  usage: EqTerm;
+  // 按用量计费的上游实际扣费
+  upstream: EqTerm;
+  // 包月/包年付费的摊销
   fixed: EqTerm;
-  // 默认按三项相减
-  profit?: number | null;
+  // 默认按收入 − 上游成本、毛利 − 固定成本现算；接口给了就用接口的，避免两边舍入不一致
+  gross?: number | null;
+  net?: number | null;
   // 数据不完整的原因，每条一句，句号结尾
   reasons?: ReactNode[];
-  // 收入算不出来：收入、毛利留空
+  // 收入算不出来：收入、毛利、净利留空
   unconfigured?: boolean;
   configureHref?: string;
   // 以下三项只在 unconfigured 时使用，默认是"没有设置自营站点"的说法
@@ -121,32 +134,40 @@ export function ProfitEquation({
   profitNote?: ReactNode;
   notice?: ReactNode;
   loading?: boolean;
-  // 不完整说明的最后一句；缺的是成本时毛利偏高，缺的是汇率等时方向不定
+  // 不完整说明的最后一句；缺的是成本时利润偏高，缺的是汇率等时方向不定
   partialTail?: ReactNode;
 }) {
   const rev = unconfigured ? null : revenue.value;
-  const approx = !!((!unconfigured && revenue.approx) || usage.approx || fixed.approx);
-  const partial = approx || reasons.length > 0;
-  const p =
-    profit !== undefined
-      ? profit
-      : rev == null || usage.value == null || fixed.value == null
+  const grossApprox = !!((!unconfigured && revenue.approx) || upstream.approx || reasons.length > 0);
+  const netApprox = grossApprox || !!fixed.approx;
+  const partial = netApprox;
+  const g =
+    gross !== undefined
+      ? gross
+      : rev == null || upstream.value == null
         ? null
-        : rev - usage.value - (fixed.value || 0);
-  const loss = p != null && p < 0 && Math.abs(p) >= 0.005;
-  const margin = rev && p != null ? p / rev : null;
+        : rev - upstream.value;
+  const n =
+    net !== undefined
+      ? net
+      : g == null || fixed.value == null
+        ? null
+        : g - fixed.value;
 
-  let resultNote: ReactNode;
-  if (unconfigured) resultNote = profitNote ?? "设置自营站点后计算";
-  else if (loss) resultNote = <StatusText level="crit">亏损</StatusText>;
-  else if (margin != null) resultNote = `毛利率 ${partial ? "≈ " : ""}${formatPct(margin)}`;
+  const resultNote = (v: number | null, rateLabel: string, approx: boolean): ReactNode => {
+    if (unconfigured) return profitNote ?? "设置自营站点后计算";
+    if (isLoss(v)) return <StatusText level="crit">亏损</StatusText>;
+    if (rev && v != null) return `${rateLabel} ${approx ? "≈ " : ""}${formatPct(v / rev)}`;
+    return undefined;
+  };
 
-  const showFlow = !loading && !unconfigured && !loss && rev != null && rev > 0 && p != null && usage.value != null;
+  const showFlow = !loading && !unconfigured && !isLoss(n) && rev != null && rev > 0 && n != null && upstream.value != null;
   const flow = showFlow
-    ? splitTotal(100, [usage.value / rev, (fixed.value || 0) / rev, p / rev])
+    ? splitTotal(100, [upstream.value / rev, (fixed.value || 0) / rev, n / rev])
     : null;
   const a = partial ? "≈ " : "";
   const per = (v: number) => formatMoney(v);
+  const grossValue = unconfigured ? null : g;
 
   return (
     <section className="jy-panel jy-equation" aria-label={typeof title === "string" ? title : undefined}>
@@ -170,16 +191,31 @@ export function ProfitEquation({
         />
         <Op ch={MINUS} spoken="减" />
         <Term
-          label="用量成本"
+          label="上游成本"
           color="var(--jy-s2)"
-          term={{ ...usage, note: usage.approx && usage.note == null ? "部分数据缺失" : usage.note }}
+          term={{ ...upstream, note: upstream.approx && upstream.note == null ? "部分数据缺失" : upstream.note }}
           op={MINUS}
           loading={loading}
         />
+        <Op ch="=" spoken="等于" />
+        <Term
+          label="毛利"
+          term={{ value: grossValue, approx: grossApprox, note: resultNote(g, "毛利率", grossApprox) }}
+          op="="
+          kind="gross"
+          loading={loading}
+        />
+        <Term label="毛利" term={{ value: grossValue, approx: grossApprox }} kind="carry" loading={loading} />
         <Op ch={MINUS} spoken="减" />
         <Term label="固定成本" color="var(--jy-s3)" term={fixed} op={MINUS} loading={loading} />
         <Op ch="=" spoken="等于" />
-        <Term label="毛利" term={{ value: unconfigured ? null : p, approx: partial, note: resultNote }} op="=" result loading={loading} />
+        <Term
+          label="净利"
+          term={{ value: unconfigured ? null : n, approx: netApprox, note: resultNote(n, "净利率", netApprox) }}
+          op="="
+          kind="net"
+          loading={loading}
+        />
       </div>
       {unconfigured && !loading && (
         <div className="jy-partial-note">
@@ -187,7 +223,7 @@ export function ProfitEquation({
           <span>
             {notice ?? (
               <>
-                还没有设置自营站点，所以收入和毛利暂时无法计算；用量成本和固定成本照常统计。
+                还没有设置自营站点，所以收入、毛利和净利暂时无法计算；上游成本和固定成本照常统计。
                 <Link href={configureHref} className="jy-link">
                   设置自营站点
                 </Link>
@@ -207,7 +243,7 @@ export function ProfitEquation({
             <span>每 ¥100 收入中</span>
             <span>
               <i className="jy-swatch" style={{ background: "var(--jy-s2)" }} />
-              用量成本 <b>{a}{per(flow[0])}</b>
+              上游成本 <b>{a}{per(flow[0])}</b>
             </span>
             <span>
               <i className="jy-swatch" style={{ background: "var(--jy-s3)" }} />
@@ -215,7 +251,7 @@ export function ProfitEquation({
             </span>
             <span>
               <i className="jy-swatch" style={{ background: "var(--jy-s1)" }} />
-              留作毛利 <b>{a}{per(flow[2])}</b>
+              留作净利 <b>{a}{per(flow[2])}</b>
             </span>
           </div>
         </div>
