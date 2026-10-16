@@ -2046,6 +2046,9 @@ test("上游资源抽屉的 Esc 先收起展开的日期面板，再交给抽屉
   await panel.waitFor();
   await page.keyboard.press("Escape");
   await panel.waitFor({ state: "hidden" });
+  // A zero-size appear frame can look hidden before the picker has actually closed.
+  await page.waitForFunction(() => Array.from(document.querySelectorAll(".ant-picker-dropdown")).every((node) =>
+    node.classList.contains("ant-picker-dropdown-hidden") || Array.from(node.classList).some((name) => name.endsWith("-leave"))));
   assert.equal(await drawer.isVisible(), true);
   assert.equal(await page.getByRole("button", { name: "放弃修改", exact: true }).count(), 0);
   // 第二次 Esc 交给抽屉：有未保存的付费记录，先确认是否放弃
