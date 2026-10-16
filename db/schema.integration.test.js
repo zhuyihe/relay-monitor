@@ -180,6 +180,43 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     assert.deepEqual(settings.v, legacySettings);
   });
 
+  await t.test("monitor replacement/removal uses real locked source and link CAS, rolls back and serializes empty-channel append", async () => {
+    const priorCatalogue = await onboarding.getCatalogue(), ownStationId = "workflow-own";
+    const catalogue = { ownStationId, sourceVersion: "workflow-source", ownSource: { namespaceKey: "workflow-ns" },
+      channels: [7001, 7002, 7003].map((id) => ({ id, revision: "rev2", missing: false })) };
+    const a = { ownStationId, channelId: 7001, stationId: "old-a", channelRevision: "rev1", confirmedAt: 1 };
+    const b = { ...a, stationId: "keep-b" }, other = { ...a, channelId: 7002 };
+    const c = { ...a, stationId: "new-c", channelRevision: "rev2", confirmedAt: 2 };
+    const expectedSource = { ownStationId, sourceVersion: "workflow-source", namespaceKey: "workflow-ns",
+      channels: [{ channelId: 7001, channelRevision: "rev2" }] };
+    try {
+      await onboarding.saveCatalogue(catalogue); await onboarding.saveLinks([a, b, other]);
+      const original = await onboarding.listLinks({ ownStationId });
+      let checks = 0;
+      await assert.rejects(onboarding.saveLinks([c], { removals: [a], expectedLinks: original, expectedSource,
+        guard: () => { if (++checks === 2) throw new Error("cancel after delete and insert"); } }), /cancel after/);
+      assert.deepEqual(await onboarding.listLinks({ ownStationId }), original);
+      await onboarding.saveLinks([c], { removals: [a], expectedLinks: original, expectedSource });
+      const after = await onboarding.listLinks({ ownStationId });
+      assert.deepEqual(after.filter((link) => link.channelId === 7001).map((link) => link.stationId), ["keep-b", "new-c"]);
+      assert.deepEqual(after.find((link) => link.channelId === 7002), other);
+      await assert.rejects(onboarding.saveLinks([], { removals: [b], expectedLinks: original, expectedSource }), (error) => error.code === "PREVIEW_BASIS_CHANGED");
+      await onboarding.saveCatalogue({ ...catalogue, sourceVersion: "changed-source" });
+      await assert.rejects(onboarding.saveLinks([], { removals: [b], expectedLinks: after, expectedSource }), (error) => error.code === "PREVIEW_BASIS_CHANGED");
+      assert.deepEqual(await onboarding.listLinks({ ownStationId }), after);
+      await onboarding.saveCatalogue(catalogue);
+      const concurrent = await Promise.allSettled([
+        onboarding.saveLinks([], { removals: [b], expectedLinks: after, expectedSource }),
+        onboarding.saveLinks([], { removals: [c], expectedLinks: after, expectedSource }),
+      ]);
+      assert.equal(concurrent.filter((result) => result.status === "fulfilled").length, 1);
+      assert.equal(concurrent.find((result) => result.status === "rejected").reason.code, "PREVIEW_BASIS_CHANGED");
+      const empty = { ...a, channelId: 7003, channelRevision: "rev2" };
+      await Promise.all([onboarding.saveLinks([empty]), onboarding.saveLinks([{ ...empty, stationId: "second" }])]);
+      assert.deepEqual((await onboarding.listLinks({ ownStationId })).filter((link) => link.channelId === 7003).map((link) => link.stationId), ["old-a", "second"]);
+    } finally { await onboarding.saveCatalogue(priorCatalogue); }
+  });
+
   await t.test("real concurrent appends preserve the union, scope fields and retry effective date", async () => {
     await Promise.all([
       reconciliation.appendChannels("legacy_rule", [{ channelId: 2, name: "Second channel" }],

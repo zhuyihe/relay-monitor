@@ -7,6 +7,7 @@ import { applyScopePolicy, nextBillingEffectiveFrom, canonicalBillingKey, reconc
 import { queryAccountIdentity, queryOwnChannels, queryReconciliationMetadata } from "../lib/providers.js";
 import { createReconciliationModule } from "./reconciliation.js";
 import { handleChannelOnboardingRequest } from "../app/api/channel-onboarding/handler.js";
+import { ChannelOnboardingRepository } from "./channel-onboarding-repository.js";
 
 function fixture(stations = []) {
   let writes = 0;
@@ -669,7 +670,7 @@ test("U03 actual Repository全量入口保留archived/disabled关系；Store真�
   assert.doesNotMatch(JSON.stringify(model), /replacement-pat|sub-jwt|sub-password|sub@example/);
 });
 
-async function genuineBatchFixture(t) {
+async function genuineBatchFixture(t, { realLinks = false } = {}) {
   const state = { now: Date.parse("2026-10-09T07:00:00Z"), rules: [], members: [], created: 0, ruleWrites: 0,
     catalogue: null, links: [], linkGate: null, failLinks: false, failRuleKey: null, requests: [], requestHook: null,
     channels: Array.from({ length: 10 }, (_, index) => index + 1), channelBaseUrls: {}, keys: [9, 10], keyNames: {}, upstreamAccountId: 42 };
@@ -736,7 +737,7 @@ async function genuineBatchFixture(t) {
   const storePool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]], commit: async () => {}, rollback: async () => {}, release() {} }) };
   const store = new Store(storePool), own = await store.add({ type: "newapi", baseUrl: "https://own.test", accessToken: "admin", isOwn: true });
   const supplier = await store.add({ name: "Existing", type: "newapi", baseUrl: "https://up.test", accessToken: "pat", lowBalanceUsd: 20 });
-  const repository = { getCatalogue: async () => state.catalogue, listLinks: async () => structuredClone(state.links),
+  let repository = { getCatalogue: async () => state.catalogue, listLinks: async () => structuredClone(state.links),
     saveCatalogue: async (value) => { state.catalogue = structuredClone(value); },
     async saveLinks(values, { guard } = {}) {
       guard?.(); await state.linkGate?.(values); guard?.();
@@ -745,6 +746,36 @@ async function genuineBatchFixture(t) {
       state.links = [...state.links.filter((value) => !replaced.has(JSON.stringify([value.ownStationId, value.channelId, value.stationId]))), ...structuredClone(values)];
       return structuredClone(values);
     } };
+  if (realLinks) {
+    const query = async (sql, values = [], draft = state) => {
+      await state.linkSqlHook?.(sql, values);
+      if (sql.startsWith("SELECT v FROM meta")) return [state.catalogue ? [{ v: structuredClone(state.catalogue) }] : []];
+      if (sql.startsWith("INSERT INTO meta")) { state.catalogue = JSON.parse(values[1]); return [[]]; }
+      if (sql.startsWith("SELECT * FROM channel_monitor_links")) {
+        let selected = draft.links;
+        if (sql.includes("own_station_id = ?")) selected = selected.filter((link) => link.ownStationId === values[0]);
+        if (sql.includes("channel_id = ?")) selected = selected.filter((link) => link.channelId === values[1]);
+        if (sql.includes(" AND station_id = ?")) selected = selected.filter((link) => link.stationId === values[2]);
+        return [selected.map((link) => ({ own_station_id: link.ownStationId, channel_id: link.channelId, station_id: link.stationId,
+          channel_revision: link.channelRevision, confirmed_at_ms: link.confirmedAt }))];
+      }
+      if (sql.startsWith("DELETE FROM channel_monitor_links")) {
+        draft.links = draft.links.filter((link) => link.ownStationId !== values[0] || link.channelId !== values[1] || link.stationId !== values[2]);
+      } else if (sql.startsWith("INSERT INTO channel_monitor_links")) {
+        const existing = draft.links.find((link) => link.ownStationId === values[0] && link.channelId === values[1] && link.stationId === values[2]);
+        if (existing) { if (existing.channelRevision !== values[3]) existing.confirmedAt = values[4]; existing.channelRevision = values[3]; }
+        else draft.links.push({ ownStationId: values[0], channelId: values[1], stationId: values[2], channelRevision: values[3], confirmedAt: values[4] });
+      }
+      return [[]];
+    };
+    repository = new ChannelOnboardingRepository({ query, getConnection: async () => {
+      let draft;
+      return { beginTransaction: async () => { draft = { links: structuredClone(state.links) }; },
+        query: (sql, values) => query(sql, values, draft),
+        commit: async () => { await state.linkGate?.(draft.links); if (state.failLinks) throw new Error("link save failed"); state.links = draft.links; },
+        rollback: async () => { state.linkRollbacks = (state.linkRollbacks || 0) + 1; }, release() {} };
+    } });
+  }
   const rt = { pool, store };
   async function restart() {
     rt.reconciliation = createReconciliationModule(rt);
@@ -758,6 +789,248 @@ async function genuineBatchFixture(t) {
     reconciliation: { tokenId: keys[index] || 9, coverageDeclaration: { answer: "none" } } })) });
   return { state, rt, store, own, supplier, request, restart, repository };
 }
+
+test("workflow real Store/Repository HTTP replaces A rev1 with C rev2 and preserves unrelated links and bills", async (t) => {
+  const f = await genuineBatchFixture(t, { realLinks: true }), initial = f.request([[1]]);
+  initial.groups[0].reconciliation = null;
+  assert.equal((await f.rt.channelOnboarding.connectBatch(initial)).complete, true);
+  const oldLink = structuredClone(f.state.links[0]);
+  await f.repository.saveLinks([{ ...oldLink, channelId: 2 }]);
+  f.state.channelBaseUrls[1] = "https://replacement.test"; await f.rt.channelOnboarding.sync();
+  assert.equal((await f.rt.channelOnboarding.list()).channels[0].monitor.status, "review_required");
+  const replacement = await f.store.add({ name: "Replacement C", type: "newapi", baseUrl: "https://replacement.test", accessToken: "new-c-pat" });
+  const input = f.request([[1]]); input.selections[0].stationId = replacement.id; input.groups[0].reconciliation = null;
+  input.groups[0].channels[0].removeMonitorStationIds = [f.supplier.id];
+  const before = structuredClone(f.store.data);
+  const http = (operation, body) => handleChannelOnboardingRequest(new Request("http://local/api/channel-onboarding/batch", { method: "POST", body: JSON.stringify(body) }), f.rt, operation);
+  const preview = await (await http("probeBatch", input)).json();
+  assert.deepEqual(preview.groups[0].monitorChanges, [{ channelId: 1, previousStationIds: [f.supplier.id], addedStationIds: [replacement.id], removedStationIds: [f.supplier.id], proposedStationIds: [replacement.id] }]);
+  assert.deepEqual(f.store.data, before); assert.equal(f.state.links.length, 2);
+  const result = await (await http("connectBatch", { ...input, previewId: preview.previewId })).json();
+  assert.equal(result.complete, true, JSON.stringify(result));
+  assert.deepEqual(f.state.links.filter((link) => link.channelId === 1).map((link) => link.stationId), [replacement.id]);
+  assert.deepEqual(f.state.links.find((link) => link.channelId === 2), { ...oldLink, channelId: 2 });
+  assert.equal((await f.rt.channelOnboarding.list()).channels[0].monitor.status, "linked");
+  assert.equal(f.state.ruleWrites, 0); assert.equal(f.store.get(f.supplier.id).accessToken, "pat");
+  const retry = await (await http("connectBatch", { ...input, previewId: preview.previewId })).json();
+  assert.equal(retry.complete, true); assert.equal(f.state.links.length, 2);
+  await f.restart();
+  const recovered = await f.rt.channelOnboarding.recoverBatch(result.retryInput);
+  assert.equal(recovered.complete, true); assert.deepEqual(recovered.groups[0].monitor.stationIds, [replacement.id]);
+});
+
+test("workflow explicit detach needs fresh proof and removes paused, archived and missing targets without their credentials", async (t) => {
+  const f = await genuineBatchFixture(t, { realLinks: true });
+  const archived = await f.store.add({ type: "newapi", baseUrl: "https://archived.test", accessToken: "expired" });
+  await f.store.archive(archived.id); await f.store.update(f.supplier.id, { monitorEnabled: false });
+  const ids = [f.supplier.id, archived.id, "missing-resource"];
+  const revision = f.rt.channelOnboarding.getSourceCatalogue().channels[0].revision;
+  await f.repository.saveLinks(ids.map((stationId) => ({ ownStationId: f.own.id, channelId: 1, stationId, channelRevision: "old-revision", confirmedAt: 1 })));
+  await f.restart();
+  const listed = (await f.rt.channelOnboarding.list()).channels[0].monitor;
+  assert.deepEqual(listed.stationIds, []); assert.equal(listed.links.length, 3);
+  assert.ok(listed.links.find((link) => link.stationId === f.supplier.id).paused);
+  assert.ok(listed.links.find((link) => link.stationId === archived.id).archived);
+  assert.ok(listed.links.find((link) => link.stationId === "missing-resource").missing);
+  f.state.requestHook = async (url) => { assert.equal(url.host, "own.test", "removed resources must never be contacted"); };
+  const input = { requestId: "4a102bfe-f680-4ad8-92ac-26e732b07c9b", ownStationId: f.own.id,
+    selections: [{ selectionId: "detach", monitor: false }], groups: [{ groupId: "detach", selectionId: "detach",
+      channels: [{ channelId: 1, channelRevision: revision, removeMonitorStationIds: ids }], reconciliation: null }] };
+  await assert.rejects(f.rt.channelOnboarding.connectBatch(input), (error) => error.code === "PREVIEW_REQUIRED");
+  const before = structuredClone(f.store.data), preview = await f.rt.channelOnboarding.probeBatch(input);
+  assert.equal(preview.selections[0].station, null); assert.equal(preview.retryInput.selections[0].linkOnly, true);
+  assert.equal(preview.retryInput.selections[0].type, null); assert.equal(preview.retryInput.selections[0].baseUrl, null);
+  assert.equal((await f.rt.channelOnboarding.recoverBatch(preview.retryInput)).complete, false);
+  const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId });
+  assert.equal(result.complete, true, JSON.stringify(result)); assert.equal(result.groups[0].monitor.status, "unlinked");
+  assert.deepEqual(f.state.links, []); assert.deepEqual(f.store.data, before);
+  await f.restart(); assert.equal((await f.rt.channelOnboarding.recoverBatch(result.retryInput)).complete, true);
+  assert.doesNotMatch(JSON.stringify([preview, result]), /expired|accessToken|password|apiKey/);
+});
+
+test("workflow per-channel detach preserves mixed channel configuration in results and recovery", async (t) => {
+  const f = await genuineBatchFixture(t, { realLinks: true }), initial = f.request([[1, 2]]); initial.groups[0].reconciliation = null;
+  await f.rt.channelOnboarding.connectBatch(initial);
+  const input = f.request([[1, 2]]); input.selections = [{ selectionId: "account", monitor: false }]; input.groups[0].reconciliation = null;
+  input.groups[0].channels[0].removeMonitorStationIds = [f.supplier.id];
+  const preview = await f.rt.channelOnboarding.probeBatch(input);
+  const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId });
+  assert.equal(result.complete, true); assert.equal(result.groups[0].monitor.status, "linked");
+  assert.deepEqual(result.groups[0].channels.map((channel) => channel.stationIds), [[], [f.supplier.id]]);
+  assert.deepEqual(f.state.links.map((link) => link.channelId), [2]);
+  const recovered = await f.rt.channelOnboarding.recoverBatch(result.retryInput);
+  assert.equal(recovered.complete, true); assert.deepEqual(recovered.groups[0].channels.map((channel) => channel.stationIds), [[], [f.supplier.id]]);
+});
+
+test("workflow removal intent is bound to the server preview and later edits invalidate a previously completed retry", async (t) => {
+  const f = await genuineBatchFixture(t, { realLinks: true }), initial = f.request([[1]]); initial.groups[0].reconciliation = null;
+  await f.rt.channelOnboarding.connectBatch(initial);
+  await f.repository.saveLinks([{ ...f.state.links[0], stationId: "keep" }]);
+  const input = f.request([[1]]); input.selections = [{ selectionId: "account", monitor: false }]; input.groups[0].reconciliation = null;
+  input.groups[0].channels[0].removeMonitorStationIds = [f.supplier.id];
+  const preview = await f.rt.channelOnboarding.probeBatch(input), changed = structuredClone(input);
+  changed.groups[0].channels[0].removeMonitorStationIds = ["keep"];
+  const rejected = await f.rt.channelOnboarding.connectBatch({ ...changed, previewId: preview.previewId });
+  assert.equal(rejected.complete, false); assert.equal(rejected.groups[0].code, "PREVIEW_BASIS_CHANGED");
+  assert.equal(f.state.links.length, 2);
+  const completed = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId });
+  assert.equal(completed.complete, true);
+  await f.repository.saveLinks([{ ...f.state.links[0], stationId: "new-external" }]);
+  const stale = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId });
+  assert.equal(stale.complete, false); assert.equal(stale.groups[0].code, "PREVIEW_BASIS_CHANGED");
+  assert.deepEqual(f.state.links.map((link) => link.stationId).sort(), ["keep", "new-external"]);
+});
+
+test("workflow coalesced financial Key keeps A on channel 1 and B on channel 2 through partial retry and restart recovery", async (t) => {
+  const f = await genuineBatchFixture(t, { realLinks: true });
+  const b = await f.store.add({ name: "Same account B", type: "newapi", baseUrl: "https://up.test", accessToken: "b-pat" });
+  const input = f.request([[1], [2]], [9, 9]);
+  input.selections.push({ selectionId: "account-b", stationId: b.id, monitor: true }); input.groups[1].selectionId = "account-b";
+  const before = structuredClone(f.store.data), preview = await f.rt.channelOnboarding.probeBatch(input);
+  assert.equal(preview.groups.length, 1, "one actual Key has one financial scope");
+  assert.deepEqual(preview.groups[0].monitorChanges.map((change) => [change.channelId, change.proposedStationIds]), [[1, [f.supplier.id]], [2, [b.id]]]);
+  assert.deepEqual(preview.retryInput.groups[0].channels.map((channel) => [channel.channelId, channel.selectionId]), [[1, "account"], [2, "account-b"]]);
+  assert.deepEqual(f.store.data, before); assert.deepEqual(f.state.links, []);
+  const confirmation = { ...input, previewId: preview.previewId };
+  f.state.failLinks = true;
+  const failedLinks = await f.rt.channelOnboarding.connectBatch(confirmation);
+  assert.equal(failedLinks.complete, false); assert.deepEqual(f.state.links, []);
+  f.state.failLinks = false; f.state.failRuleKey = 9;
+  const partial = await f.rt.channelOnboarding.connectBatch(confirmation);
+  assert.equal(partial.complete, false); assert.equal(partial.groups[0].monitor.status, "linked");
+  const expected = [[1, f.supplier.id], [2, b.id]];
+  assert.deepEqual(f.state.links.map((link) => [link.channelId, link.stationId]), expected);
+  assert.deepEqual(partial.groups[0].channels.map((channel) => [channel.channelId, channel.stationIds]), [[1, [f.supplier.id]], [2, [b.id]]]);
+  const recoveredPartial = await f.rt.channelOnboarding.recoverBatch(partial.retryInput);
+  assert.equal(recoveredPartial.groups[0].monitor.status, "linked");
+  assert.deepEqual(recoveredPartial.groups[0].saved.links.map((link) => [link.channelId, link.stationId]), expected);
+  f.state.failRuleKey = null;
+  const completed = await f.rt.channelOnboarding.connectBatch(confirmation);
+  assert.equal(completed.complete, true, JSON.stringify(completed));
+  assert.deepEqual(f.state.links.map((link) => [link.channelId, link.stationId]), expected);
+  assert.equal(f.state.created, 1); assert.equal(f.state.ruleWrites, 1);
+  assert.deepEqual(f.state.members.map((member) => member.channel_id).sort(), [1, 2]);
+  assert.equal((await f.rt.channelOnboarding.connectBatch(confirmation)).complete, true); assert.equal(f.state.ruleWrites, 1);
+  await f.restart();
+  const recovered = await f.rt.channelOnboarding.recoverBatch(completed.retryInput);
+  assert.equal(recovered.complete, true); assert.deepEqual(recovered.groups[0].channels.map((channel) => channel.stationIds), [[f.supplier.id], [b.id]]);
+  const legacy = structuredClone(completed.retryInput); legacy.groups[0].channels.forEach((channel) => { delete channel.selectionId; });
+  const unknownMapping = await f.rt.channelOnboarding.recoverBatch(legacy);
+  assert.equal(unknownMapping.complete, false); assert.equal(unknownMapping.groups[0].code, "PREVIEW_BASIS_CHANGED");
+  assert.ok(unknownMapping.groups[0].remainingActions.includes("repreview"));
+  assert.deepEqual(f.state.links.map((link) => [link.channelId, link.stationId]), expected);
+});
+
+test("workflow coalesced Key cross-replacement removes B1 and A2 without false resource conflicts", async (t) => {
+  const f = await genuineBatchFixture(t, { realLinks: true });
+  const b = await f.store.add({ name: "Same account B", type: "newapi", baseUrl: "https://up.test", accessToken: "b-pat" });
+  const input = f.request([[1], [2]], [9, 9]);
+  input.selections.push({ selectionId: "account-b", stationId: b.id, monitor: true }); input.groups[1].selectionId = "account-b";
+  await f.repository.saveLinks(input.groups.flatMap((group, index) => group.channels.map((channel) => ({ ownStationId: f.own.id,
+    channelId: channel.channelId, channelRevision: "old-revision", confirmedAt: 1, stationId: index === 0 ? b.id : f.supplier.id }))));
+  input.groups[0].channels[0].removeMonitorStationIds = [b.id]; input.groups[1].channels[0].removeMonitorStationIds = [f.supplier.id];
+  const preview = await f.rt.channelOnboarding.probeBatch(input);
+  assert.equal(preview.groups.length, 1); assert.equal(preview.groups[0].status, "ready");
+  assert.deepEqual(preview.groups[0].monitorChanges.map((change) => [change.channelId, change.previousStationIds, change.removedStationIds, change.proposedStationIds]),
+    [[1, [b.id], [b.id], [f.supplier.id]], [2, [f.supplier.id], [f.supplier.id], [b.id]]]);
+  const completed = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId });
+  assert.equal(completed.complete, true, JSON.stringify(completed));
+  assert.deepEqual(f.state.links.map((link) => [link.channelId, link.stationId]), [[1, f.supplier.id], [2, b.id]]);
+  assert.equal(f.state.created, 1); assert.equal(f.state.ruleWrites, 1);
+  await f.restart(); const recovered = await f.rt.channelOnboarding.recoverBatch(completed.retryInput);
+  assert.equal(recovered.complete, true); assert.deepEqual(recovered.groups[0].channels.map((channel) => channel.stationIds), [[f.supplier.id], [b.id]]);
+});
+
+test("workflow coalesced Key keeps additional monitor selection scoped to its own channel", async (t) => {
+  const f = await genuineBatchFixture(t, { realLinks: true });
+  const b = await f.store.add({ name: "B", type: "newapi", baseUrl: "https://up.test", accessToken: "b-pat" });
+  const extra = await f.store.add({ name: "Extra", type: "newapi", baseUrl: "https://up.test", accessToken: "extra-pat" });
+  const input = f.request([[1], [2]], [9, 9]); input.selections[0].additionalMonitorStationIds = [extra.id];
+  input.selections.push({ selectionId: "account-b", stationId: b.id, monitor: false }); input.groups[1].selectionId = "account-b";
+  const preview = await f.rt.channelOnboarding.probeBatch(input), completed = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId });
+  assert.equal(completed.complete, true, JSON.stringify(completed));
+  assert.deepEqual(f.state.links.map((link) => [link.channelId, link.stationId]).sort(), [[1, f.supplier.id], [1, extra.id]].sort());
+  assert.deepEqual(completed.groups[0].channels.map((channel) => channel.stationIds), [[f.supplier.id, extra.id].sort(), []]);
+  await f.restart(); const recovered = await f.rt.channelOnboarding.recoverBatch(completed.retryInput);
+  assert.equal(recovered.complete, true); assert.deepEqual(recovered.groups[0].channels.map((channel) => channel.stationIds), [[f.supplier.id, extra.id].sort(), []]);
+});
+
+for (const change of ["reinsert-link", "persisted-source"]) {
+  test(`workflow recovery final read catches ${change} during delayed remote identity verification`, async (t) => {
+    const f = await genuineBatchFixture(t, { realLinks: true }), initial = f.request([[1]]); initial.groups[0].reconciliation = null;
+    await f.rt.channelOnboarding.connectBatch(initial); const oldLink = structuredClone(f.state.links[0]);
+    const input = f.request([[1]]); input.selections = [{ selectionId: "account", monitor: false }]; input.groups[0].reconciliation = null;
+    input.groups[0].channels[0].removeMonitorStationIds = [f.supplier.id];
+    const preview = await f.rt.channelOnboarding.probeBatch(input);
+    assert.equal((await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId })).complete, true);
+    assert.deepEqual(f.state.links, []);
+    let injected = false;
+    f.state.requestHook = async (url) => {
+      if (injected || url.host !== "own.test" || url.pathname !== "/api/user/self") return;
+      injected = true;
+      if (change === "reinsert-link") await f.repository.saveLinks([oldLink]);
+      else await f.repository.saveCatalogue({ ...f.state.catalogue, sourceVersion: "changed-during-recovery" });
+    };
+    const recovered = await f.rt.channelOnboarding.recoverBatch(preview.retryInput);
+    assert.equal(injected, true); assert.equal(recovered.complete, false, JSON.stringify(recovered));
+    assert.equal(recovered.groups[0].monitor.status, "pending"); assert.equal(recovered.groups[0].code, "PREVIEW_BASIS_CHANGED");
+    assert.ok(recovered.groups[0].remainingActions.includes("repreview"));
+    if (change === "reinsert-link") {
+      assert.deepEqual(f.state.links, [oldLink]);
+      assert.deepEqual(recovered.groups[0].monitorChanges[0].previousStationIds, [f.supplier.id]);
+      assert.deepEqual(recovered.groups[0].channels[0].stationIds, [f.supplier.id]);
+    }
+    assert.equal(f.store._stationLocks.size, 0);
+  });
+}
+
+for (const conflict of ["link", "sql-source", "runtime-source", "remote-source"]) {
+  test(`workflow explicit detach rejects concurrent ${conflict} changes before publishing`, async (t) => {
+    const f = await genuineBatchFixture(t, { realLinks: true }), initial = f.request([[1]]); initial.groups[0].reconciliation = null;
+    await f.rt.channelOnboarding.connectBatch(initial);
+    const input = f.request([[1]]); input.selections = [{ selectionId: "account", monitor: false }]; input.groups[0].reconciliation = null;
+    input.groups[0].channels[0].removeMonitorStationIds = [f.supplier.id];
+    const preview = await f.rt.channelOnboarding.probeBatch(input), before = structuredClone(f.state.links);
+    if (conflict === "link") await f.repository.saveLinks([{ ...before[0], stationId: "unrelated" }]);
+    if (conflict === "sql-source") f.state.linkSqlHook = async (sql) => { if (sql.includes("SELECT v FROM meta") && sql.includes("FOR UPDATE")) f.state.catalogue.sourceVersion = "other-process-change"; };
+    if (conflict === "runtime-source") { f.state.channelBaseUrls[1] = "https://changed.test"; await f.rt.channelOnboarding.sync(); }
+    if (conflict === "remote-source") f.state.requestHook = async (url) => { if (url.host === "own.test" && url.pathname === "/api/user/self") throw new Error("own account identity unavailable"); };
+    const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId });
+    assert.equal(result.complete, false); assert.equal(result.groups[0].code, "PREVIEW_BASIS_CHANGED");
+    assert.ok(f.state.links.some((link) => link.stationId === f.supplier.id));
+    if (conflict === "link") assert.ok(f.state.links.some((link) => link.stationId === "unrelated"));
+    assert.equal((await f.rt.channelOnboarding.recoverBatch(preview.retryInput)).complete, false);
+  });
+}
+
+test("workflow actual link rollback preserves old memory and original preview retries without duplicate resources", async (t) => {
+  const f = await genuineBatchFixture(t, { realLinks: true }), initial = f.request([[1]]); initial.groups[0].reconciliation = null;
+  await f.rt.channelOnboarding.connectBatch(initial);
+  f.state.channelBaseUrls[1] = "https://replacement.test"; await f.rt.channelOnboarding.sync();
+  const input = f.request([[1]]); input.selections = [{ selectionId: "account", monitor: true,
+    newStation: { type: "newapi", baseUrl: "https://replacement.test", accessToken: "replacement-pat" } }];
+  input.groups[0].channels[0].removeMonitorStationIds = [f.supplier.id];
+  const preview = await f.rt.channelOnboarding.probeBatch(input), confirmation = { ...input, previewId: preview.previewId }, before = structuredClone(f.state.links);
+  f.state.failLinks = true;
+  const failed = await f.rt.channelOnboarding.connectBatch(confirmation);
+  const replacementId = failed.groups[0].saved.stationIds[0]; assert.ok(replacementId); assert.notEqual(replacementId, f.supplier.id);
+  assert.equal(failed.complete, false); assert.ok(failed.groups[0].remainingActions.includes("retry_links"));
+  assert.deepEqual(f.state.links, before); assert.ok(f.state.linkRollbacks > 0);
+  assert.deepEqual((await f.rt.channelOnboarding.list()).channels[0].monitor.stationIds, [f.supplier.id]);
+  assert.equal((await f.rt.channelOnboarding.recoverBatch(failed.retryInput)).complete, false);
+  f.state.failLinks = false; f.state.failRuleKey = 9;
+  const partial = await f.rt.channelOnboarding.connectBatch(confirmation);
+  assert.equal(partial.complete, false); assert.equal(partial.groups[0].monitor.status, "linked");
+  assert.deepEqual(f.state.links.map((link) => link.stationId), [replacementId]);
+  f.state.failRuleKey = null;
+  const result = await f.rt.channelOnboarding.connectBatch(confirmation);
+  assert.equal(result.complete, true, JSON.stringify(result)); assert.equal(f.state.created, 1);
+  assert.deepEqual(f.state.links.map((link) => link.stationId), [replacementId]);
+  assert.equal(f.store.list().length, 3); assert.equal(f.store._stationLocks.size, 0);
+  assert.equal((await f.rt.channelOnboarding.connectBatch(confirmation)).complete, true);
+  assert.equal(f.state.created, 1); assert.equal(f.state.ruleWrites, 1);
+  await f.restart(); assert.equal((await f.rt.channelOnboarding.recoverBatch(result.retryInput)).complete, true);
+});
 
 for (const [type, baseUrl, allowed] of [["newapi", "https://offline.test", true], ["sub2api", "https://up.test", true], ["newapi", "https://up.test/", false]]) {
   test(`F05 actual HTTP isolates Key 9 at ${type} ${baseUrl}, while same-panel uncertainty still blocks`, async (t) => {

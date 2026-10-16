@@ -39,28 +39,31 @@ export type GroupBasis = {
   timezone: string; billingEffectiveFromMs: number | null; coverageDeclaration: CoverageDeclaration;
 };
 export type GroupPreview = { costCoverage: "complete" | "unknown"; billingEffectiveFromMs: number | null; firstQueryableAtMs: number | null; scopeChanged: boolean };
+export type MonitorChange = { channelId: number; previousStationIds: string[]; addedStationIds: string[]; removedStationIds: string[]; proposedStationIds: string[] };
+export type OnboardingChannelIntent = { channelId: number; channelRevision: string; removeMonitorStationIds?: string[]; selectionId?: string };
 export type BatchInput = {
   requestId: string; ownStationId: string;
   selections: { selectionId: string; stationId?: string; newStation?: ConnectionInput; monitor: boolean; additionalMonitorStationIds?: string[]; updateCredentials?: boolean; reconciliationAuthorization?: { stationId?: string; newAuthorization?: ConnectionInput } }[];
-  groups: { groupId: string; selectionId: string; channels: { channelId: number; channelRevision: string }[]; reconciliation: null | { tokenId?: number; timezone?: string; coverageDeclaration: CoverageDeclaration } }[];
+  groups: { groupId: string; selectionId: string; channels: OnboardingChannelIntent[]; reconciliation: null | { tokenId?: number; timezone?: string; coverageDeclaration: CoverageDeclaration } }[];
   previewId?: string;
 };
 export type BatchRecoveryIntent = {
   requestId: string; source: { ownStationId: string; ownSource: OwnSource; sourceVersion: string };
-  selections: { selectionId: string; stationId: string | null; type: ConnectionInput["type"]; baseUrl: string; monitor: boolean; additionalMonitorStationIds: string[]; accountIdentity: AccountIdentity | null; authorizationStationId: string | null; authorizationIdentity: AccountIdentity | null; credentialUpdateRequested: boolean }[];
-  groups: { groupId: string; requestedGroupIds: string[]; selectionIds: string[]; channels: { channelId: number; channelRevision: string }[]; reconciliationRequested: boolean; reconciliation: null | { canonicalKey: string; tokenId: number; timezone: string; coverageDeclaration: CoverageDeclaration; previewEffectiveFromMs: number | null } }[];
+  selections: { selectionId: string; stationId: string | null; type: ConnectionInput["type"] | null; baseUrl: string | null; linkOnly?: boolean; monitor: boolean; additionalMonitorStationIds: string[]; accountIdentity: AccountIdentity | null; authorizationStationId: string | null; authorizationIdentity: AccountIdentity | null; credentialUpdateRequested: boolean }[];
+  groups: { groupId: string; requestedGroupIds: string[]; selectionIds: string[]; channels: OnboardingChannelIntent[]; reconciliationRequested: boolean; reconciliation: null | { canonicalKey: string; tokenId: number; timezone: string; coverageDeclaration: CoverageDeclaration; previewEffectiveFromMs: number | null } }[];
 };
 export type BatchProbe = {
   requestId: string; previewId: string; expiresAtMs: number; source: { ownSource: OwnSource; sourceVersion: string; resourceVersion: string };
   selections: { selectionId: string; station: PublicResource | null; monitor: { status: "verified" | "unavailable"; reason?: string }; authorizationStationId: string | null; accountIdentity: AccountIdentity | null; tokens: SafeToken[]; credentialUpdateRequired: boolean }[];
-  groups: { groupId: string; requestedGroupIds: string[]; selectionIds: string[]; requestedChannelIds: number[]; status: "ready" | "monitor_only" | "unverified" | "unsupported" | "unavailable"; reason?: string; code?: string; basis: GroupBasis; preview: GroupPreview }[];
+  groups: { groupId: string; requestedGroupIds: string[]; selectionIds: string[]; requestedChannelIds: number[]; status: "ready" | "monitor_only" | "unverified" | "unsupported" | "unavailable"; reason?: string; code?: string; basis: GroupBasis; preview: GroupPreview; monitorChanges?: MonitorChange[] }[];
   retryInput: BatchRecoveryIntent;
 };
 export type BatchResult = {
   requestId: string; complete: boolean;
   groups: {
     groupId: string; requestedGroupIds: string[]; canonicalKey: string | null; complete: boolean; code?: string; reason?: string;
-    monitor: { status: "linked" | "not_requested" | "pending" | "unavailable"; stationIds: string[] };
+    monitor: { status: "linked" | "unlinked" | "not_requested" | "pending" | "unavailable"; stationIds: string[] };
+    monitorChanges?: MonitorChange[];
     reconciliation: { status: "configured" | "not_requested" | "unverified" | "unsupported" | "unavailable" | "pending"; ruleId?: string; scopeVersion?: number; billingEffectiveFromMs?: number; reason?: string };
     channels: { channelId: number; channelRevision: string; complete: boolean; stationIds: string[]; ruleId: string | null; code?: string; reason?: string; remainingActions: string[] }[];
     saved: { stationIds: string[]; authorizationStationId: string | null; links: { ownStationId: string; channelId: number; stationId: string; channelRevision: string; confirmedAt?: string }[]; ruleId: string | null; scopeVersion: number | null; billingEffectiveFromMs: number | null };
