@@ -171,6 +171,23 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   const stationLock = (ids, write) => rt.store.withStationLocks ? rt.store.withStationLocks(ids, write) : write();
   const rules = () => rt.reconciliation?.listRules?.() || Promise.resolve([]);
+  const hasRemovals = (group) => group.channels.some((channel) => channel.removeMonitorStationIds?.length);
+  const channelLinks = (values, ownStationId, channels) => values.filter((link) => link.ownStationId === ownStationId
+    && channels.some((channel) => channel.channelId === link.channelId)).map((link) => ({ ...link }))
+    .sort((a, b) => a.channelId - b.channelId || a.stationId.localeCompare(b.stationId));
+  const selectionForChannel = (group, channel) => channel.selectionId || (group.selectionIds.length === 1 ? group.selectionIds[0] : null);
+  const monitorsForChannels = (group, bySelection) => new Map(group.channels.map((channel) =>
+    [channel.channelId, bySelection.get(selectionForChannel(group, channel)) || []]));
+  function monitorChanges(group, before, byChannel = new Map()) {
+    return group.channels.map((channel) => {
+      const stationIds = byChannel.get(channel.channelId) || [];
+      const previousStationIds = before.filter((link) => link.channelId === channel.channelId).map((link) => link.stationId).sort();
+      const removedStationIds = previousStationIds.filter((id) => channel.removeMonitorStationIds?.includes(id));
+      const proposedStationIds = [...new Set([...previousStationIds.filter((id) => !removedStationIds.includes(id)), ...stationIds])].sort();
+      return { channelId: channel.channelId, previousStationIds, addedStationIds: stationIds.filter((id) => !previousStationIds.includes(id)).sort(),
+        removedStationIds, proposedStationIds };
+    });
+  }
 
   function sourceChannel(input) {
     const station = own();
@@ -653,6 +670,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     for (const group of storedGroups) {
       const facts = { previewId, expiresAtMs, basis: frozen(structuredClone(group.basis)),
         preview: frozen(structuredClone(group.preview)), saved: new Map(), roles: group.roles,
+        monitorLinks: group.monitorLinks ? frozen(structuredClone(group.monitorLinks)) : null, savedMonitorLinks: null,
         digest: group.digest, scopeIntent: frozen(structuredClone(group.scopeIntent || null)) };
       const guard = Object.freeze({ basis: facts.basis, preview: facts.preview,
         scopeIntent: facts.scopeIntent,
@@ -669,6 +687,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     return registerPreview(groups.map((group) => ({ groupId: group.groupId, requestedGroupIds: [...group.requestedGroupIds],
       selectionIds: [...group.selectionIds], channels: structuredClone(group.channels), basis: structuredClone(group.basis),
       preview: structuredClone(group.preview), roles: structuredClone(group.roles), scopeIntent: group.scopeIntent,
+      monitorLinks: group.monitorLinks,
       digest: batchGroupDigest(input, group) })), retryInput);
   }
 
@@ -698,8 +717,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       ownSource: source.ownSource, sourceVersion: source.sourceVersion,
       ownStation: publicOnboardingStation(station), upstreams: upstreams.map(publicOnboardingStation), rules: allRules,
       channels: channels.map((channel) => {
-        const monitorLinks = links.filter((link) => link.ownStationId === station.id && link.channelId === Number(channel.id)
-          && rt.store.get(link.stationId) && rt.store.get(link.stationId).monitorEnabled !== false && !rt.store.get(link.stationId).archivedAt);
+        const allMonitorLinks = links.filter((link) => link.ownStationId === station.id && link.channelId === Number(channel.id));
+        const monitorLinks = allMonitorLinks.filter((link) =>
+          rt.store.get(link.stationId) && rt.store.get(link.stationId).monitorEnabled !== false && !rt.store.get(link.stationId).archivedAt);
         const relatedRules = allRules.filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === station.id
           && rule.channels.some((member) => Number(member.channelId) === Number(channel.id)));
         const needsReview = channel.missing || monitorLinks.some((link) => link.channelRevision !== channel.revision);
@@ -707,7 +727,10 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           candidates: upstreams.filter((candidate) => onboardingBaseUrl(candidate.baseUrl)
             && onboardingBaseUrl(candidate.baseUrl) === onboardingBaseUrl(channel.baseUrl)).map((candidate) => candidate.id),
           monitor: { status: needsReview ? "review_required" : monitorLinks.length ? "linked" : "unlinked",
-            stationIds: monitorLinks.map((link) => link.stationId) },
+            stationIds: monitorLinks.map((link) => link.stationId), links: allMonitorLinks.map((link) => {
+              const resource = rt.store.get(link.stationId);
+              return { ...link, paused: resource?.monitorEnabled === false, archived: !!resource?.archivedAt, missing: !resource };
+            }) },
           reconciliation: { status: relatedRules.some((rule) => inspect(rule).status !== "confirmed") ? "review_required"
             : relatedRules.length ? "configured" : "unconfigured", ruleIds: relatedRules.map((rule) => rule.id) },
         };
@@ -830,6 +853,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   }
 
   async function prepareBatchSelection(selection, requested, verificationReads) {
+    if (selection.linkOnly) return { main: null, additional: [], billing: null, billingError: null };
     const selected = selection.stationId ? rt.store.get(selection.stationId) : null;
     if (selection.stationId && (!selected || selected.archivedAt || selected.isOwn || !TYPES.includes(selected.type)
         || selection.monitor && selected.monitorEnabled === false)) throw new Error("所选资源不存在或用途不匹配");
@@ -884,7 +908,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     result.complete = !result.remainingActions.length;
     for (const channel of result.channels) {
       channel.complete = result.complete;
-      channel.stationIds = [...result.monitor.stationIds];
+      const change = result.monitorChanges?.find((item) => item.channelId === channel.channelId);
+      channel.stationIds = [...(change ? ["linked", "unlinked", "not_requested"].includes(result.monitor.status)
+        ? change.proposedStationIds : change.previousStationIds : result.monitor.stationIds)];
       channel.ruleId = result.saved.ruleId;
       channel.remainingActions = [...result.remainingActions];
       if (result.code) channel.code = result.code;
@@ -950,6 +976,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const source = getSourceCatalogue(), sourceStationVersion = stationBusinessVersion(own());
     if (!source.ownSource) throw previewFailure("CHANNEL_CATALOGUE_STALE", "请先同步并核验本站渠道来源");
     const prepared = new Map(), verificationReads = new Map(), metadataReads = new Map(), allRules = await rules();
+    const currentLinks = input.groups.some(hasRemovals) ? await repository.listLinks() : links;
     const readContext = rt.reconciliation?.createPreviewReadContext?.();
     for (const selection of input.selections) {
       try {
@@ -962,7 +989,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     }
     const rawGroups = [];
     for (const requested of input.groups) {
-      const value = prepared.get(requested.selectionId), group = { ...requested, canonicalKey: null, ownNamespaceKey: source.ownSource.namespaceKey,
+      const value = prepared.get(requested.selectionId), group = { ...requested,
+        channels: requested.channels.map((channel) => ({ ...channel, selectionId: requested.selectionId })), canonicalKey: null, ownNamespaceKey: source.ownSource.namespaceKey,
         authorizationIntent: null, status: requested.reconciliation ? "unavailable" : "monitor_only" };
       let billingConnection = null;
       try {
@@ -1059,6 +1087,16 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           group.code = error.code || "FINANCIAL_PREVIEW_FAILED"; group.reason = failure(error, [prepared.get(group.selectionIds[0])?.billing?.connection, own()]);
         }
       }
+      if (hasRemovals(group)) group.monitorLinks = channelLinks(currentLinks, input.ownStationId, group.channels);
+      const monitorBySelection = new Map(group.selectionIds.map((id) => {
+        const value = prepared.get(id);
+        return [id, [...new Set([value.selection.monitor && reusable(value.main)?.id, ...(value.additional || []).map((item) => item.existing.id)].filter(Boolean))]];
+      }));
+      const monitorByChannel = monitorsForChannels(group, monitorBySelection);
+      group.monitorChanges = monitorChanges(group, channelLinks(currentLinks, input.ownStationId, group.channels), monitorByChannel);
+      if (group.channels.some((channel) => channel.removeMonitorStationIds?.some((id) => monitorByChannel.get(channel.channelId).includes(id)))) {
+        group.status = "unavailable"; group.code = "GROUP_CONFLICT"; group.reason = "同一资源不能同时关联和解除，请核对各渠道选择";
+      }
       if (group.status === "ready" && group.reconciliation) {
         group.scopeIntent = normalizeReconciliationScopeIntent("append", group.basis.existingRuleId, {
           tokenId: group.reconciliation.tokenId, salesChannelIds: group.channels.map((channel) => channel.channelId),
@@ -1070,8 +1108,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       selections: input.selections.map((selection) => {
         const value = prepared.get(selection.selectionId), main = value.main, station = reusable(main), billing = value.billing;
         return { selectionId: selection.selectionId, stationId: station?.id || selection.stationId || null,
-          type: main ? station && !selection.updateCredentials ? station.type : main.connection.type : selection.newStation?.type || rt.store.get(selection.stationId)?.type || "newapi",
-          baseUrl: main?.connection.baseUrl || selection.newStation?.baseUrl || rt.store.get(selection.stationId)?.baseUrl || "",
+          type: selection.linkOnly ? null : main ? station && !selection.updateCredentials ? station.type : main.connection.type : selection.newStation?.type || rt.store.get(selection.stationId)?.type || "newapi",
+          baseUrl: selection.linkOnly ? null : main?.connection.baseUrl || selection.newStation?.baseUrl || rt.store.get(selection.stationId)?.baseUrl || "",
+          ...(selection.linkOnly ? { linkOnly: true } : {}),
           monitor: selection.monitor, additionalMonitorStationIds: [...selection.additionalMonitorStationIds], accountIdentity: main?.identity || null,
           authorizationStationId: reusable(billing)?.id || null, authorizationIdentity: billing?.identity || null,
           credentialUpdateRequested: selection.updateCredentials && [main, billing].filter(Boolean)
@@ -1087,14 +1126,21 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       source: { ownSource: source.ownSource, sourceVersion: source.sourceVersion, resourceVersion: sourceStationVersion },
       selections: input.selections.map((selection) => {
         const value = prepared.get(selection.selectionId), primary = reusable(value.main), authorization = reusable(value.billing);
+        const credentialUpdates = [];
+        if (primary && !sameCredentials(primary, value.main.connection)) credentialUpdates.push({ role: "primary", stationId: primary.id });
+        if (authorization && !sameCredentials(authorization, value.billing.connection)
+            && !credentialUpdates.some((target) => target.stationId === authorization.id)) {
+          credentialUpdates.push({ role: "authorization", stationId: authorization.id });
+        }
         return { selectionId: selection.selectionId, station: publicBatchStation(primary || value.main?.connection, value.main?.identity, allRules),
           monitor: { status: value.error ? "unavailable" : "verified", ...(value.error ? { reason: value.error.message } : {}) },
           authorizationStationId: authorization?.id || null, accountIdentity: value.main?.identity || null, tokens: safeTokens(value.billing?.metadata?.tokens),
-          credentialUpdateRequired: !!primary && !sameCredentials(primary, value.main.connection) || !!authorization && !sameCredentials(authorization, value.billing.connection) };
+          credentialUpdates, credentialUpdateRequired: credentialUpdates.length > 0 };
       }),
       groups: groups.map((group) => ({ groupId: group.groupId, requestedGroupIds: [...group.requestedGroupIds], selectionIds: [...group.selectionIds],
         requestedChannelIds: group.channels.map((channel) => channel.channelId), status: group.status,
-        ...(group.reason ? { reason: group.reason } : {}), ...(group.code ? { code: group.code } : {}), basis: group.basis, preview: group.preview })), retryInput };
+        ...(group.reason ? { reason: group.reason } : {}), ...(group.code ? { code: group.code } : {}), basis: group.basis, preview: group.preview,
+        monitorChanges: group.monitorChanges })), retryInput };
     return { input, prepared, groups, record, output };
   }
 
@@ -1132,6 +1178,10 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   }
 
   function currentGroupContext(group, guard, latestRule) {
+    const facts = guardFacts.get(guard);
+    if (facts?.monitorLinks && hash(group.monitorLinks) !== hash(facts.savedMonitorLinks || facts.monitorLinks)) {
+      throw previewFailure("PREVIEW_BASIS_CHANGED", "渠道监控关联已变化，请重新预览");
+    }
     if (group.status === "ready" && latestRule?.enabled === false) throw previewFailure("PREVIEW_BASIS_CHANGED", "原核算关联已停止，请重新预览");
     const source = getSourceCatalogue(), ids = [...new Set([...(latestRule?.channels || []).map((channel) => Number(channel.channelId)),
       ...group.channels.map((channel) => channel.channelId)])].sort((a, b) => a - b);
@@ -1190,8 +1240,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     expirePreviews();
     const original = input.previewId && previews.get(input.previewId);
     if (original && !original.retryInput) throw previewFailure("PREVIEW_REQUIRED", "核算关联编辑预览不能用于批量接入，请重新预览");
-    if (financialRequested && !original && !input.previewId) throw previewFailure("PREVIEW_REQUIRED", "财务接入需要当前服务端预览，请先验证后确认");
-    const state = await batchProbeState(input, { register: !original && !financialRequested });
+    const destructive = input.groups.some(hasRemovals);
+    if ((financialRequested || destructive) && !original && !input.previewId) throw previewFailure("PREVIEW_REQUIRED", "财务接入或解除关联需要当前服务端预览，请先验证后确认");
+    const state = await batchProbeState(input, { register: !original && !financialRequested && !destructive });
     const record = original || state.record;
     if (!record) {
       const recovered = await recoverBatch(state.output.retryInput);
@@ -1226,6 +1277,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     };
     for (const group of state.groups) {
       const originalGroup = record.groups.find((entry) => entry.requestedGroupIds.includes(group.groupId)), result = resultGroup({ ...group, reconciliationRequested: !!group.reconciliation });
+      result.monitorChanges = group.monitorChanges;
       const values = group.selectionIds.map((id) => state.prepared.get(id)), updatesRequested = values.some((value) => value.selection.updateCredentials
         && [value.main, value.billing].filter(Boolean).some((item) => reusable(item) && !sameCredentials(reusable(item), item.connection)));
       const recoveredGroup = recovered.groups.find((entry) => entry.requestedGroupIds.includes(group.groupId));
@@ -1238,7 +1290,10 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           finishGroup(recoveredGroup, recoveredGroup.remainingActions.filter((action) => action !== "repreview"));
         }
       }
-      if (recoveredGroup?.complete && !updatesRequested && originalGroup && originalGroup.digest === batchGroupDigest(input, originalGroup)) {
+      const linkFacts = originalGroup && guardFacts.get(originalGroup.guard);
+      if (recoveredGroup?.complete && !updatesRequested && originalGroup && originalGroup.digest === batchGroupDigest(input, originalGroup)
+          && (!hasRemovals(group) || linkFacts.savedMonitorLinks && hash(group.monitorLinks) === hash(linkFacts.savedMonitorLinks)
+            && sourceVersion() === linkFacts.basis.sourceVersion)) {
         results.push(recoveredGroup); continue;
       }
       if (recoveredGroup && originalGroup?.digest === batchGroupDigest(input, originalGroup)) {
@@ -1249,6 +1304,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       const actions = [];
       let authorization = null, latestRule = null, guard = originalGroup?.guard;
       try {
+        if (hasRemovals(group) && recoveredGroup?.code === "PREVIEW_BASIS_CHANGED") {
+          throw previewFailure("PREVIEW_BASIS_CHANGED", "本站来源已变化，请重新预览");
+        }
         if (!originalGroup || originalGroup.digest !== batchGroupDigest(input, originalGroup)
             || hash([...originalGroup.requestedGroupIds].sort()) !== hash([...group.requestedGroupIds].sort())) {
           throw previewFailure("PREVIEW_BASIS_CHANGED", "本组选择或使用范围与原预览不同，请重新预览");
@@ -1274,11 +1332,11 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             const selection = { ...value.selection, requestId: input.requestId };
             let saved = savedSelections.get(selection.selectionId);
             if (!saved) {
-              const primary = await saveItem(value.main, selection, "primary", guard, assertCurrent);
-              noteSave(primary);
+              const primary = value.main ? await saveItem(value.main, selection, "primary", guard, assertCurrent) : null;
+              if (primary) noteSave(primary);
               saved = { primary, billing: value.billing === value.main ? primary : null };
               savedSelections.set(selection.selectionId, saved);
-              if (!ids.includes(primary.station.id)) newlyCreatedIds.push(primary.station.id);
+              if (primary && !ids.includes(primary.station.id)) newlyCreatedIds.push(primary.station.id);
             }
             if (selection.monitor && !result.saved.stationIds.includes(saved.primary.station.id)) result.saved.stationIds.push(saved.primary.station.id);
             if (group.reconciliation && value.billing && !saved.billing) {
@@ -1291,16 +1349,38 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             if (authorization) result.saved.authorizationStationId = authorization.id;
             assertCurrent();
           }
-          const monitorIds = [...result.saved.stationIds], linksToSave = group.channels.flatMap((channel) => monitorIds.map((stationId) => ({ ownStationId: input.ownStationId,
+          const monitorIds = [...result.saved.stationIds], monitorBySelection = new Map(values.map((value) => {
+            const saved = savedSelections.get(value.selection.selectionId);
+            return [value.selection.selectionId, [...new Set([value.selection.monitor && saved.primary.station.id,
+              ...value.additional.map((item) => item.existing.id)].filter(Boolean))]];
+          }));
+          const monitorByChannel = monitorsForChannels(group, monitorBySelection);
+          const linksToSave = group.channels.flatMap((channel) => monitorByChannel.get(channel.channelId).map((stationId) => ({ ownStationId: input.ownStationId,
             channelId: channel.channelId, stationId, channelRevision: channel.channelRevision, confirmedAt: now() })));
+          const removals = group.channels.flatMap((channel) => (channel.removeMonitorStationIds || []).map((stationId) => ({ ownStationId: input.ownStationId,
+            channelId: channel.channelId, stationId })));
           // Newly published IDs not held by the outer lock are locked before the link transaction.
           await stationLock(newlyCreatedIds, async () => {
             assertCurrent();
-            const confirmed = await repository.saveLinks(linksToSave, { guard: assertCurrent });
+            const facts = guardFacts.get(guard), expectedLinks = facts.monitorLinks && (facts.savedMonitorLinks || facts.monitorLinks);
+            const confirmed = await repository.saveLinks(linksToSave, { guard: assertCurrent, removals, expectedLinks,
+              expectedSource: removals.length ? { ownStationId: input.ownStationId, sourceVersion: guard.basis.sourceVersion,
+                namespaceKey: guard.basis.ownSource.namespaceKey, channels: group.channels } : null });
             const replaced = new Set(confirmed.map((link) => JSON.stringify([link.ownStationId, link.channelId, link.stationId])));
-            links = [...links.filter((link) => !replaced.has(JSON.stringify([link.ownStationId, link.channelId, link.stationId]))), ...confirmed];
+            for (const link of removals) replaced.add(JSON.stringify([link.ownStationId, link.channelId, link.stationId]));
+            const before = expectedLinks || channelLinks(links, input.ownStationId, group.channels);
+            const proposed = channelLinks([...before.filter((link) => !replaced.has(JSON.stringify([link.ownStationId, link.channelId, link.stationId]))), ...confirmed], input.ownStationId, group.channels);
+            links = expectedLinks ? [...links.filter((link) => link.ownStationId !== input.ownStationId || !group.channels.some((channel) => channel.channelId === link.channelId)), ...proposed]
+              : [...links.filter((link) => !replaced.has(JSON.stringify([link.ownStationId, link.channelId, link.stationId]))), ...confirmed];
+            if (facts.monitorLinks) {
+              facts.savedMonitorLinks = proposed;
+              group.monitorLinks = facts.savedMonitorLinks;
+            }
             result.saved.links = confirmed;
-            result.monitor = { status: monitorIds.length ? "linked" : "not_requested", stationIds: monitorIds };
+            result.monitorChanges = monitorChanges(group, facts.monitorLinks || before, monitorByChannel);
+            const proposedIds = [...new Set(proposed.map((link) => link.stationId))];
+            result.monitor = { status: removals.length ? proposedIds.length ? "linked" : "unlinked" : monitorIds.length ? "linked" : "not_requested",
+              stationIds: removals.length ? proposedIds : monitorIds };
           });
         }));
         for (const id of result.saved.stationIds) Promise.resolve(refresh(rt, rt.store.get(id))).catch(() => {});
@@ -1335,8 +1415,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         actions.push(error.code === "AUTHORIZATION_UPDATE_REQUIRED" ? "verify_identity"
           : ["PREVIEW_REQUIRED", "PREVIEW_BASIS_CHANGED", "EFFECTIVE_PREVIEW_CHANGED", "GROUP_CONFLICT"].includes(error.code) ? "repreview"
             : updatesRequested ? "repreview"
-          : result.monitor.status === "linked" || result.monitor.status === "not_requested" ? "retry_rule"
-            : result.saved.stationIds.length ? "retry_links" : "supply_credentials");
+          : result.monitor.status === "linked" || result.monitor.status === "unlinked" || result.monitor.status === "not_requested" ? "retry_rule"
+            : hasRemovals(group) || result.saved.stationIds.length ? "retry_links" : "supply_credentials");
         if (result.monitor.status === "pending") result.monitor.status = "unavailable";
         if (group.reconciliation && result.reconciliation.status !== "configured") {
           result.reconciliation = { ...result.reconciliation, status: result.reconciliation.status === "pending" ? "unavailable" : result.reconciliation.status,
@@ -1375,14 +1455,15 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           if (station.verifiedIdentity && identity && !sameIdentity(station.verifiedIdentity, identity)) return null;
           if (copy.type === "newapi-key" && !(await queryMonitor(copy)).result?.ok) return null;
           if (stationBusinessVersion(rt.store.get(station.id)) !== version) return null;
-          return { station, identity, connection: copy };
+          return { station, identity, connection: copy, resourceVersion: version };
         } catch { return null; }
       })());
       return verified.get(station.id);
     }
     const recovered = new Map();
     for (const selection of intent.selections) {
-      const selectedChannels = intent.groups.filter((group) => group.selectionIds.includes(selection.selectionId)).flatMap((group) => group.channels);
+      if (selection.linkOnly) { recovered.set(selection.selectionId, { primary: null, additional: [], billing: null }); continue; }
+      const selectedChannels = intent.groups.flatMap((group) => group.channels.filter((channel) => selectionForChannel(group, channel) === selection.selectionId));
       async function locate(purpose, expectedIdentity, explicitId, primary = false) {
         const candidates = stations.filter((station) => !station.archivedAt && !station.isOwn
           && (purpose !== "monitor" || station.monitorEnabled !== false)
@@ -1397,7 +1478,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           const marker = station.onboardingOrigin;
           const origin = marker?.requestId === intent.requestId && marker.selectionId === selection.selectionId
             && marker.type === station.type && marker.purpose === purpose && marker.accountKey === accountKeyOf(item.identity);
-          const related = selectedChannels.every((channel) => persistedLinks.some((link) => link.ownStationId === intent.source.ownStationId
+          const related = selectedChannels.length > 0 && selectedChannels.every((channel) => persistedLinks.some((link) => link.ownStationId === intent.source.ownStationId
             && link.channelId === channel.channelId && link.channelRevision === channel.channelRevision && link.stationId === station.id));
           if (station.type === "newapi-key" && !explicitId && !origin) continue;
           if (!explicitId && !origin && !related && primary && !expectedIdentity) continue;
@@ -1434,26 +1515,42 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const results = [];
     for (const group of intent.groups) {
       const result = resultGroup(group), actions = [], selected = group.selectionIds.map((id) => [intent.selections.find((item) => item.selectionId === id), recovered.get(id)]);
-      const monitorIds = [], billing = [];
+      const monitorIds = [], billing = [], monitorBySelection = new Map();
       for (const [selection, value] of selected) {
         if (value?.error) { result.code = value.error.code || "IDENTITY_UNVERIFIED"; result.reason = failure(value.error); actions.push("verify_identity"); continue; }
-        if (!value?.primary) { actions.push(selection.type === "newapi-key" ? "verify_identity" : "supply_credentials"); continue; }
-        if (selection.monitor) monitorIds.push(value.primary.station.id);
-        monitorIds.push(...value.additional.map((item) => item.station.id));
+        if (!value?.primary && !selection.linkOnly) { actions.push(selection.type === "newapi-key" ? "verify_identity" : "supply_credentials"); continue; }
+        const selectedIds = [...new Set([selection.monitor && value.primary.station.id, ...value.additional.map((item) => item.station.id)].filter(Boolean))];
+        monitorBySelection.set(selection.selectionId, selectedIds); monitorIds.push(...selectedIds);
         if (value.billing) billing.push(value.billing);
       }
       const ids = [...new Set(monitorIds)];
+      const mapped = group.channels.every((channel) => selectionForChannel(group, channel));
+      if (!mapped) {
+        result.code = "PREVIEW_BASIS_CHANGED"; result.reason = "原请求未保存逐渠道的资源选择，请重新预览"; actions.push("repreview");
+      }
+      const monitorByChannel = monitorsForChannels(group, monitorBySelection);
       result.saved.stationIds = ids;
       const expectedMonitor = selected.some(([selection]) => selection.monitor || selection.additionalMonitorStationIds.length);
       const sourceValid = sourceMatches && group.channels.every((member) => currentSource.channels.some((channel) => channel.id === member.channelId
         && !channel.missing && channel.revision === member.channelRevision));
       if (!sourceValid) { result.code = "PREVIEW_BASIS_CHANGED"; actions.push("repreview"); }
-      const related = persistedLinks.filter((link) => link.ownStationId === intent.source.ownStationId && ids.includes(link.stationId)
+      const related = persistedLinks.filter((link) => link.ownStationId === intent.source.ownStationId && monitorByChannel.get(link.channelId)?.includes(link.stationId)
         && group.channels.some((channel) => channel.channelId === link.channelId && channel.channelRevision === link.channelRevision));
       result.saved.links = related;
-      const linked = !actions.includes("verify_identity") && !actions.includes("supply_credentials") && group.channels.every((channel) => ids.every((id) => related.some((link) => link.channelId === channel.channelId && link.stationId === id)));
+      const linked = mapped && !actions.includes("verify_identity") && !actions.includes("supply_credentials") && group.channels.every((channel) =>
+        monitorByChannel.get(channel.channelId).every((id) => related.some((link) => link.channelId === channel.channelId && link.stationId === id)));
       result.monitor = { status: !expectedMonitor ? "not_requested" : linked && ids.length ? "linked" : "pending", stationIds: ids };
       if (expectedMonitor && !linked && ids.length) actions.push("retry_links");
+      const before = channelLinks(persistedLinks, intent.source.ownStationId, group.channels);
+      result.monitorChanges = monitorChanges(group, before, monitorByChannel);
+      if (hasRemovals(group)) {
+        const pending = before.some((link) => group.channels.some((channel) => channel.channelId === link.channelId && channel.removeMonitorStationIds?.includes(link.stationId)));
+        if (pending) actions.push("retry_links");
+        if (!pending && linked && sourceValid) {
+          const actualIds = [...new Set(before.map((link) => link.stationId))];
+          result.monitor = { status: actualIds.length ? "linked" : "unlinked", stationIds: actualIds };
+        } else result.monitor.status = "pending";
+      }
       if (billing.length) result.saved.authorizationStationId = billing[0].station.id;
       if (group.reconciliationRequested) {
         if (!group.reconciliation) actions.push("select_key");
@@ -1488,7 +1585,44 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       }
       results.push(finishGroup(result, actions));
     }
-    return { requestId: intent.requestId, complete: results.every((result) => result.complete), groups: results, retryInput: intent };
+    // Remote checks may take seconds. Linearize the recovery answer after them,
+    // using fresh persisted relationships while local source/resource writers wait.
+    const checked = [...recovered.values()].flatMap((value) => [value.primary, ...(value.additional || []), value.billing]).filter(Boolean);
+    return withSourceLock(null, () => stationLock(checked.map((item) => item.station.id), async () => {
+      const [persistedSource, latestRules] = await Promise.all([repository.getCatalogue(), rt.reconciliation?.listRules?.({ includeArchived: true }) || []]);
+      const latestLinks = await repository.listLinks();
+      const latestSource = getSourceCatalogue();
+      for (const [index, group] of intent.groups.entries()) {
+        const result = results[index], current = channelLinks(latestLinks, intent.source.ownStationId, group.channels);
+        const sourceChanged = latestSource.stale || latestSource.sourceVersion !== currentSource.sourceVersion
+          || latestSource.ownSource?.namespaceKey !== currentSource.ownSource?.namespaceKey
+          || persistedSource?.ownStationId !== currentSource.ownSource?.stationId
+          || persistedSource?.sourceVersion !== currentSource.sourceVersion
+          || persistedSource?.ownSource?.namespaceKey !== currentSource.ownSource?.namespaceKey
+          || group.channels.some((member) => !persistedSource?.channels.some((channel) => channel.id === member.channelId
+            && !channel.missing && channel.revision === member.channelRevision));
+        const resourceChanged = group.selectionIds.some((id) => {
+          const value = recovered.get(id);
+          return [value?.primary, ...(value?.additional || []), value?.billing].filter(Boolean).some((item) =>
+            stationBusinessVersion(rt.store.get(item.station.id)) !== item.resourceVersion);
+        });
+        const ruleChanged = result.saved.ruleId && hash(allRules.find((rule) => rule.id === result.saved.ruleId) || null)
+          !== hash(latestRules.find((rule) => rule.id === result.saved.ruleId) || null);
+        if (!sourceChanged && !resourceChanged && !ruleChanged && hash(current) === hash(channelLinks(persistedLinks, intent.source.ownStationId, group.channels))) continue;
+        const monitorBySelection = new Map(group.selectionIds.map((id) => {
+          const selection = intent.selections.find((item) => item.selectionId === id), value = recovered.get(id);
+          return [id, [selection.monitor && value?.primary?.station.id, ...(value?.additional || []).map((item) => item.station.id)].filter(Boolean)];
+        }));
+        const monitorByChannel = monitorsForChannels(group, monitorBySelection);
+        result.code = "PREVIEW_BASIS_CHANGED"; result.reason = "恢复核对期间来源、资源或关联已变化，请重新预览";
+        result.saved.links = current.filter((link) => monitorByChannel.get(link.channelId).includes(link.stationId));
+        result.monitor = { status: "pending", stationIds: [...new Set(current.map((link) => link.stationId))] };
+        result.monitorChanges = monitorChanges(group, current, monitorByChannel);
+        if (group.reconciliationRequested) result.reconciliation = { ...result.reconciliation, status: "pending", reason: result.reason };
+        finishGroup(result, [...result.remainingActions, "repreview"]);
+      }
+      return { requestId: intent.requestId, complete: results.every((result) => result.complete), groups: results, retryInput: intent };
+    }));
   }
 
   function billingStatus(item, requested) {
@@ -1530,7 +1664,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         reason: group.reason || null, tokens: selection.tokens, upstreamStationId: selection.authorizationStationId,
         existingRuleId: group.basis.existingRuleId, existingChannelIds: group.basis.existingChannelIds },
       preview: { ...group.preview, timezone: group.basis.timezone }, channelRevision: input.channelRevision,
-      credentialUpdateRequired: selection.credentialUpdateRequired, batchRetryInput: result.retryInput };
+      credentialUpdates: selection.credentialUpdates, credentialUpdateRequired: selection.credentialUpdateRequired, batchRetryInput: result.retryInput };
   }
 
   async function connect(input) {
