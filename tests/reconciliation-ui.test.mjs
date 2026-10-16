@@ -486,6 +486,74 @@ async function enableBilling(page, drawer, key = "Supplier Key") {
 }
 async function saveOnboarding(drawer) { await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); }
 
+test("saved upstream reuse prioritizes matching accounts from the end of a long list without choosing an ambiguous account", async (t) => {
+  const config = onboardingFixture();
+  config.upstreams[0].name = "碎";
+  config.upstreams.push({ ...config.upstreams[0], id: "upstream-2", name: "同站点账号 B", identity: { provider: "newapi", accountId: "84" } });
+  config.channels[0].candidates = ["upstream-1", "upstream-2"];
+  config.upstreams.unshift(...Array.from({ length: 20 }, (_, id) => ({ id: "other-" + id, name: "Other " + id, type: "newapi", baseUrl: `https://other-${id}.example`, monitorEnabled: true })));
+  const { page, probes, writes } = await openOnboardingPage(t, { config });
+  const drawer = await openOnboardingDrawer(page);
+  assert.equal(await drawer.getByRole("radio", { name: "复用已有上游", exact: true }).isChecked(), true);
+  assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
+  assert.equal(await drawer.getByRole("button", { name: "验证并预览", exact: true }).isDisabled(), true);
+  const select = drawer.getByRole("combobox", { name: "接入上游资源", exact: true });
+  await select.click();
+  const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
+  await dropdown.getByText("已有渠道关联或地址匹配（2）", { exact: true }).waitFor();
+  const choices = await dropdown.locator(".ant-select-item-option-content").allTextContents();
+  assert.match(choices[0], /^碎 · .*账号 42/); assert.match(choices[1], /^同站点账号 B · .*账号 84/);
+  await select.fill("碎"); await dropdown.locator(".ant-select-item-option-content", { hasText: "碎 ·" }).click();
+  await enableBilling(page, drawer); await saveOnboarding(drawer);
+  assert.equal(writes.length, 1); assert.equal(writes[0].selections[0].stationId, "upstream-1");
+  assert.equal(writes[0].selections[0].monitor, true); assert.equal(writes[0].groups[0].reconciliation.tokenId, 7);
+  assert.equal("newStation" in writes[0].selections[0], false); assert.equal(writes[0].selections[0].updateCredentials, false);
+  assert.ok(probes.every((body) => !("newStation" in body.selections[0])));
+});
+
+test("saved upstream reuse stays the default without a matching address and searches all other resources", async (t) => {
+  const config = onboardingFixture(); config.channels[0].baseUrl = "https://unknown.example"; config.channels[0].candidates = [];
+  const { page, writes } = await openOnboardingPage(t, { config });
+  const drawer = await openOnboardingDrawer(page);
+  assert.equal(await drawer.getByRole("radio", { name: "复用已有上游", exact: true }).isChecked(), true);
+  assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
+  const select = drawer.getByRole("combobox", { name: "接入上游资源", exact: true });
+  await select.fill("up.example");
+  const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
+  await dropdown.getByText("其他已保存资源（1）", { exact: true }).waitFor();
+  await dropdown.locator(".ant-select-item-option-content", { hasText: "Fixture upstream" }).click();
+  await verifyOnboarding(drawer); await saveOnboarding(drawer);
+  assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal("newStation" in writes[0].selections[0], false);
+});
+
+test("new authorization explanations and explicit replacement consent remain separate from saved reuse", async (t) => {
+  const { page, writes } = await openOnboardingPage(t, { probe(body, count, config) { return probeResult(body, config, { requireUpdate: !!body.selections[0].newStation }); } });
+  const drawer = await openOnboardingDrawer(page);
+  await drawer.getByRole("radio", { name: "新增上游或更换授权", exact: true }).check();
+  await drawer.getByText("首次新增：填写尚未保存的上游账号或 Key。", { exact: true }).waitFor();
+  await drawer.getByText(/更换凭证：填写同一账号的新凭证/).waitFor();
+  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-replacement");
+  await verifyOnboarding(drawer);
+  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
+  await drawer.getByText("已发现相同账号，确认用本次授权更新已有凭证", { exact: true }).click();
+  await verifyOnboarding(drawer); assert.equal(writes.length, 0);
+  await drawer.getByRole("radio", { name: "复用已有上游", exact: true }).check();
+  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
+  assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
+  await verifyOnboarding(drawer); await saveOnboarding(drawer);
+  assert.equal(writes[0].selections[0].updateCredentials, false); assert.equal("newStation" in writes[0].selections[0], false);
+});
+
+test("empty resource directory explains first authorization and keeps it explicit", async (t) => {
+  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) });
+  const drawer = await openOnboardingDrawer(page);
+  assert.equal(await drawer.getByRole("radio", { name: "新增上游或更换授权", exact: true }).isChecked(), true);
+  assert.equal(await drawer.getByRole("radio", { name: "复用已有上游", exact: true }).isDisabled(), true);
+  await drawer.getByText("首次新增：填写尚未保存的上游账号或 Key。", { exact: true }).waitFor();
+  assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 1);
+  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 0);
+});
+
 test("onboarding without randomUUID keeps valid request IDs within an operation and renews them when reopened", async (t) => {
   const { page, probes, writes } = await openOnboardingPage(t, { config: onboardingFixture(true) });
   await page.evaluate(() => Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined }));
@@ -709,7 +777,7 @@ test("manual discovery keeps a stale catalogue visible and disables new binding"
 
 test("channel search and status filters do not silently select another account", async (t) => {
   const config = onboardingFixture(true, "newapi", [4, 5]); config.channels[1].baseUrl = "https://other.example"; config.channels[1].candidates = ["other-account"]; config.upstreams.push({ id: "other-account", name: "Other account", type: "newapi", baseUrl: "https://other.example", monitorEnabled: true });
-  const { page } = await openOnboardingPage(t, { config }); await page.getByRole("textbox", { name: "搜索接入渠道", exact: true }).fill("local-sales"); const drawer = await openOnboardingDrawer(page, true); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 1); assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
+  const { page } = await openOnboardingPage(t, { config }); await page.getByRole("textbox", { name: "搜索接入渠道", exact: true }).fill("local-sales"); const drawer = await openOnboardingDrawer(page, true); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0); assert.equal(await drawer.getByRole("radio", { name: "复用已有上游", exact: true }).isChecked(), true); assert.equal(await drawer.getByRole("button", { name: "验证并预览", exact: true }).isDisabled(), true); assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
 });
 
 test("five-channel batches fit 320/390/768/1440 widths without root overflow", async (t) => {
