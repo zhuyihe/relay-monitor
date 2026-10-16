@@ -1126,10 +1126,16 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       source: { ownSource: source.ownSource, sourceVersion: source.sourceVersion, resourceVersion: sourceStationVersion },
       selections: input.selections.map((selection) => {
         const value = prepared.get(selection.selectionId), primary = reusable(value.main), authorization = reusable(value.billing);
+        const credentialUpdates = [];
+        if (primary && !sameCredentials(primary, value.main.connection)) credentialUpdates.push({ role: "primary", stationId: primary.id });
+        if (authorization && !sameCredentials(authorization, value.billing.connection)
+            && !credentialUpdates.some((target) => target.stationId === authorization.id)) {
+          credentialUpdates.push({ role: "authorization", stationId: authorization.id });
+        }
         return { selectionId: selection.selectionId, station: publicBatchStation(primary || value.main?.connection, value.main?.identity, allRules),
           monitor: { status: value.error ? "unavailable" : "verified", ...(value.error ? { reason: value.error.message } : {}) },
           authorizationStationId: authorization?.id || null, accountIdentity: value.main?.identity || null, tokens: safeTokens(value.billing?.metadata?.tokens),
-          credentialUpdateRequired: !!primary && !sameCredentials(primary, value.main.connection) || !!authorization && !sameCredentials(authorization, value.billing.connection) };
+          credentialUpdates, credentialUpdateRequired: credentialUpdates.length > 0 };
       }),
       groups: groups.map((group) => ({ groupId: group.groupId, requestedGroupIds: [...group.requestedGroupIds], selectionIds: [...group.selectionIds],
         requestedChannelIds: group.channels.map((channel) => channel.channelId), status: group.status,
@@ -1658,7 +1664,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         reason: group.reason || null, tokens: selection.tokens, upstreamStationId: selection.authorizationStationId,
         existingRuleId: group.basis.existingRuleId, existingChannelIds: group.basis.existingChannelIds },
       preview: { ...group.preview, timezone: group.basis.timezone }, channelRevision: input.channelRevision,
-      credentialUpdateRequired: selection.credentialUpdateRequired, batchRetryInput: result.retryInput };
+      credentialUpdates: selection.credentialUpdates, credentialUpdateRequired: selection.credentialUpdateRequired, batchRetryInput: result.retryInput };
   }
 
   async function connect(input) {

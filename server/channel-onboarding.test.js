@@ -2144,6 +2144,8 @@ test("统一 probe 验证混合上游不保存、取消无副作用且公开响�
   const result = await f.module.probe(f.request({ reconciliation: f.billing() }));
   assert.equal(result.monitor.status, "verified");
   assert.equal(result.reconciliation.status, "ready");
+  assert.deepEqual(result.credentialUpdates, []);
+  assert.equal(result.credentialUpdateRequired, false);
   assert.equal(f.rt.store.list({ includeUnmonitored: true }).length, 1);
   assert.deepEqual(f.state.links, []);
   assert.deepEqual(f.state.rules, []);
@@ -2628,6 +2630,9 @@ test("同地址不同账号不合并，更新同账号授权须明确确认并�
   const preview = await f.module.probe(input);
   assert.equal(preview.station.id, existing.id);
   assert.equal(preview.credentialUpdateRequired, true);
+  assert.deepEqual(preview.credentialUpdates, [{ role: "primary", stationId: existing.id }]);
+  const billingPreview = await f.module.probe({ ...input, reconciliation: f.billing() });
+  assert.deepEqual(billingPreview.credentialUpdates, [{ role: "primary", stationId: existing.id }], "one account used for both purposes has one primary update target");
   const declined = await connectWithPreview(f,input);
   assert.equal(declined.complete, false);
   assert.equal(existing.accessToken, "invalid");
@@ -2654,6 +2659,8 @@ test("Key补授权发现旧专用授权时提示更新，确认后复用且维�
       accessToken: "new-account-secret", userId: "7" } } });
   const preview = await f.module.probe(input);
   assert.equal(preview.credentialUpdateRequired, true);
+  assert.equal(preview.station.id, null);
+  assert.deepEqual(preview.credentialUpdates, [{ role: "authorization", stationId: grant.id }]);
   assert.equal(preview.reconciliation.upstreamStationId, grant.id);
   const completed = await connectWithPreview(f,{ ...input, updateCredentials: true });
   assert.equal(completed.complete, true);
@@ -2663,6 +2670,31 @@ test("Key补授权发现旧专用授权时提示更新，确认后复用且维�
   assert.equal(grant.includeInProfit, false);
   assert.equal(grant.cnyPerUsd, 0.5);
   assert.equal(f.rt.store.list({ includeUnmonitored: true }).length, 3);
+});
+
+test("batch credential update targets keep primary and authorization roles without exposing credentials or saving", async () => {
+  const f = await onboardingFixture();
+  f.state.pages.push({ ...f.state.pages[0], id: 2 }); await f.module.sync();
+  const primary = await f.rt.store.add({ type: "newapi", baseUrl: "https://up.example", accessToken: "old-primary-secret" });
+  const authorization = await f.rt.store.add({ type: "newapi", baseUrl: "https://panel.example", accessToken: "old-billing-secret", monitorEnabled: false });
+  const before = structuredClone(f.rt.store.data);
+  const preview = await f.module.probeBatch({ requestId: "c5e43508-1b84-4c60-8c83-8a294a0d64fa", ownStationId: f.own.id,
+    selections: [{ selectionId: "account", monitor: true,
+      newStation: { type: "newapi", baseUrl: primary.baseUrl, accessToken: "new-primary-secret" } },
+    { selectionId: "key", monitor: true, newStation: { type: "newapi-key", baseUrl: "https://call.example", apiKey: "new-key-secret" },
+      reconciliationAuthorization: { newAuthorization: { type: "newapi", baseUrl: authorization.baseUrl, accessToken: "new-billing-secret" } } }],
+    groups: [{ groupId: "account", selectionId: "account", channels: [{ channelId: 1, channelRevision: f.state.catalogue.channels[0].revision }],
+      reconciliation: { tokenId: 8, coverageDeclaration: { answer: "unknown" } } },
+    { groupId: "key", selectionId: "key", channels: [{ channelId: 2, channelRevision: f.state.catalogue.channels[1].revision }],
+      reconciliation: { coverageDeclaration: { answer: "unknown" } } }] });
+  assert.deepEqual(preview.selections.map((selection) => selection.credentialUpdates), [
+    [{ role: "primary", stationId: primary.id }], [{ role: "authorization", stationId: authorization.id }],
+  ]);
+  assert.ok(preview.selections.every((selection) => selection.credentialUpdateRequired));
+  assert.equal(preview.selections[1].station.id, null);
+  assert.equal(preview.selections[1].authorizationStationId, authorization.id);
+  assert.deepEqual(f.rt.store.data, before); assert.deepEqual(f.state.links, []); assert.deepEqual(f.state.rules, []);
+  assert.doesNotMatch(JSON.stringify(preview), /old-primary-secret|old-billing-secret|new-primary-secret|new-billing-secret|new-key-secret/);
 });
 
 test("新监控的probe与保存均不把账单专用授权误当监控复用", async () => {

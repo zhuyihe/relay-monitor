@@ -16,6 +16,7 @@ const CREDENTIALS: Record<string, string[]> = { newapi: ["accessToken", "userId"
 const STATES: Record<string, string> = { unlinked: "未关联", linked: "已关联", unconfigured: "未配置", configured: "已配置", review_required: "待重新确认", unverified: "账单能力待验证", unsupported: "账单能力不支持", unavailable: "暂不可用", pending: "待完成", not_requested: "保持现有", ready: "可配置对账", monitor_only: "仅监控" };
 const RECOVERY_KEY = "channel-onboarding-recovery-v05";
 const PENDING_KEY = "channel-onboarding-pending-v06";
+type CredentialUpdateTarget = BatchProbe["selections"][number]["credentialUpdates"][number];
 const unknownCoverage = (): CoverageDeclaration => ({ answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] });
 async function request(path: string, body?: any) {
   const response = await fetch(path, { method: body ? "POST" : "GET", credentials: "same-origin", headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
@@ -90,7 +91,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
   const generation = useRef(0);
   const keyGeneration = useRef(0);
   const accountGeneration = useRef(0);
-  const authorizationOrigin = useRef<{ id: string; creating: boolean } | null>(null);
+  const authorizationOrigin = useRef<{ id: string; adoptTarget?: CredentialUpdateTarget["role"] } | null>(null);
   const discoveryInFlight = useRef(false);
   const stale = !catalogue || catalogue.stale || !!directoryError;
   const upstreams: any[] = catalogue?.upstreams || [];
@@ -157,23 +158,29 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
     onComplete: async (next) => {
       generation.current += 1; keyGeneration.current += 1; setApproved(false); setProbe(null); setKeyRead(null);
       const origin = authorizationOrigin.current;
-      if (origin && next.targets.some((target) => target.stationId === origin.id && ["updated", "already_updated"].includes(target.status)) && origin.creating) {
-        setStationId(origin.id); setCreating(false); form.resetFields();
+      if (origin && next.targets.some((target) => target.stationId === origin.id && ["updated", "already_updated"].includes(target.status))) {
+        if (origin.adoptTarget === "primary") { setStationId(origin.id); setCreating(false); form.resetFields(); }
+        else if (origin.adoptTarget === "authorization") { setAuthorizationId(origin.id); authorizationForm.resetFields(); }
       }
       setKeyReadVersion((version) => version + 1); await Promise.all([load(false), loadAccounts()]); await onComplete().catch(() => {});
     },
   });
   const busy = probing || saving || recovering || openingAuthorization || authorization.authorizationBusy;
-  const updateAuthorization = async (id: string, initialAuthorization?: any) => {
+  const updateAuthorization = async (id: string, options: { initialAuthorization?: any; adoptTarget?: CredentialUpdateTarget["role"] } = {}) => {
     setOpeningAuthorization(true); setFailure("");
     try {
       const model = await loadAccounts();
       if (!model) return;
       const account = model.accounts.find((entry) => entry.resources.some((resource) => resource.id === id));
       if (!account) { setFailure("此资源的账号身份尚未确认，请先在上游账单核验账号身份。"); return; }
-      authorizationOrigin.current = { id, creating };
-      authorization.openAuthorization(account, { defaultTargetIds: [id], initialAuthorization });
+      authorizationOrigin.current = { id, adoptTarget: options.adoptTarget };
+      authorization.openAuthorization(account, { defaultTargetIds: [id], initialAuthorization: options.initialAuthorization });
     } finally { setOpeningAuthorization(false); }
+  };
+  const reuseCredentialTarget = (target: CredentialUpdateTarget) => {
+    if (target.role === "primary") { setStationId(target.stationId); setCreating(false); form.resetFields(); }
+    else { setAuthorizationId(target.stationId); authorizationForm.resetFields(); }
+    invalidate(); keyGeneration.current += 1; setKeyRead(null); setKeyError(""); setKeyLoading(false); setProbe(null); setKeyReadVersion((version) => version + 1);
   };
   useEffect(() => {
     if (!openIds.length || !billing || !billingResourceId) return;
@@ -451,7 +458,10 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
         {purposeSelected ? <Button aria-label="验证并预览" style={{ minHeight: 44 }} loading={probing} disabled={!replacementReady || saving || recovering || keyLoading || stale || coverageSourceChanged || (!creating && !stationId && !removalRequested)} onClick={() => void verify()}>{billing && !billingResourceId && !keys.length ? "验证授权并读取 Key" : "验证并预览"}</Button> : null}
         {probe ? <>
           <Alert type={probe.selections.every((selection) => selection.monitor.status === "verified") ? "success" : "warning"} showIcon message={probe.selections.every((selection) => selection.monitor.status === "verified") ? "变更已验证，尚未保存" : "连接待完成"} description={probe.selections.map((selection) => selection.monitor.reason).filter(Boolean).join("；") || "核对本次变化后，点击顶部确认关联。"} />
-          {probe.selections.filter((selection) => selection.credentialUpdateRequired).map((selection) => <Alert key={selection.selectionId} type="warning" showIcon message="此账号已保存" description={<Space direction="vertical"><Text>选择直接复用已有授权，或更新这个账号的授权。</Text><Space wrap><Button disabled={busy || !selection.station?.id} onClick={() => { setStationId(selection.station!.id!); setCreating(false); invalidate(true); }}>复用这个账号</Button><Button disabled={busy || !selection.station?.id} onClick={() => void updateAuthorization(selection.station!.id!, connection(form.getFieldsValue()))}>更新这个账号授权</Button></Space></Space>} />)}
+          {probe.selections.flatMap((selection) => {
+            const targets: CredentialUpdateTarget[] = selection.credentialUpdates ?? (selection.credentialUpdateRequired && selection.station?.id ? [{ role: "primary", stationId: selection.station.id }] : []);
+            return targets.map((target) => <Alert key={`${selection.selectionId}:${target.role}:${target.stationId}`} type="warning" showIcon message={target.role === "primary" ? "此账号已保存" : "账单账号已保存"} description={<Space direction="vertical"><Text>{target.role === "primary" ? "选择直接复用已有授权，或更新这个账号的授权。" : `账单授权：${resourceNames([target.stationId])}。复用或更新这条授权，主 Key 与用途保持不变。`}</Text><Space wrap><Button disabled={busy} onClick={() => reuseCredentialTarget(target)}>{target.role === "primary" ? "复用这个账号" : "复用此账单账号"}</Button><Button disabled={busy} onClick={() => void updateAuthorization(target.stationId, { initialAuthorization: connection((target.role === "primary" ? form : authorizationForm).getFieldsValue()), adoptTarget: target.role })}>{target.role === "primary" ? "更新这个账号授权" : "更新此账单账号授权"}</Button></Space></Space>} />);
+          })}
           {probe.groups.flatMap((group) => group.monitorChanges || []).map((change) => <section key={change.channelId} aria-label={`渠道 ${change.channelId} 的监控变更`}>
             <Text strong>{names([change.channelId])} · 监控变更</Text><div>保留：{resourceNames(change.previousStationIds.filter((id) => change.proposedStationIds.includes(id)))}</div>
             <div>增加：{resourceNames(change.addedStationIds)}{creating && monitor ? `；新资源“${form.getFieldValue("name") || "上游账号"}”` : ""}</div><div>解除：{resourceNames(change.removedStationIds)}</div>

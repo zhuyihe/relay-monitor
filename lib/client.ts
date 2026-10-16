@@ -54,7 +54,7 @@ export type BatchRecoveryIntent = {
 };
 export type BatchProbe = {
   requestId: string; previewId: string; expiresAtMs: number; source: { ownSource: OwnSource; sourceVersion: string; resourceVersion: string };
-  selections: { selectionId: string; station: PublicResource | null; monitor: { status: "verified" | "unavailable"; reason?: string }; authorizationStationId: string | null; accountIdentity: AccountIdentity | null; tokens: SafeToken[]; credentialUpdateRequired: boolean }[];
+  selections: { selectionId: string; station: PublicResource | null; monitor: { status: "verified" | "unavailable"; reason?: string }; authorizationStationId: string | null; accountIdentity: AccountIdentity | null; tokens: SafeToken[]; credentialUpdates: { role: "primary" | "authorization"; stationId: string }[]; credentialUpdateRequired: boolean }[];
   groups: { groupId: string; requestedGroupIds: string[]; selectionIds: string[]; requestedChannelIds: number[]; status: "ready" | "monitor_only" | "unverified" | "unsupported" | "unavailable"; reason?: string; code?: string; basis: GroupBasis; preview: GroupPreview; monitorChanges?: MonitorChange[] }[];
   retryInput: BatchRecoveryIntent;
 };
