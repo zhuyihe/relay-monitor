@@ -3,13 +3,14 @@
 // 用例只调用公开方法；每个用例使用随机的站点、Key 与渠道编号，可以在已有数据的库里重复运行。
 // 运行方提供：
 //   create()                                        每个用例新建（或复用连接池）一个仓库实例
-//   cleanup({ repository, ruleIds, capabilityIdentities })  删除本用例写入的全部规则及其渠道、分段、快照、告警，以及账单能力记录
+//   cleanup({ repository, ruleIds, capabilityIdentities })  删除本用例写入的全部规则及其渠道、分段、快照、告警、账本，以及账单能力记录
 //   inspectSnapshot({ repository, ruleId, snapshotKey })  读取快照行的物理列（segment_id 等没有公开读取方法）
 //   teardown()                                       全部用例结束后释放资源
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import { RECONCILIATION_BILLING_SOURCE, RECONCILIATION_CALCULATION_VERSION } from "../../lib/reconciliation-contract.js";
+import { ledgerEntryForSettlement } from "../../lib/reconciliation-ledger.js";
 import { reconciliationRuleEvidence, reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity } from "../../lib/reconciliation-snapshot.js";
 import { reconciliationOwnerRuleState } from "../reconciliation-repository.js";
 
@@ -137,6 +138,11 @@ function billingSnapshot({ rule, segment, segmentId = segment.id, fingerprint, w
         upstream, downstream, calculation, health, generatedAt },
     },
   };
+}
+
+// 与 persistResult 结账时传给 saveSnapshotsForScope 的 ledger 选项一致：明细取整窗口的快照来源。
+function settlement(snapshot, { resettle = false, ...rates } = {}) {
+  return { entry: ledgerEntryForSettlement(snapshot.ruleId, snapshot.source.result, snapshot.source, rates), resettle };
 }
 
 const CASES = [];
@@ -656,24 +662,18 @@ contract("archiveRule archives once and releases the token and channel keys", as
 contract("saveSnapshot upserts values but keeps the first segment, window kind and window start", async ({ repository, fixture, inspect }) => {
   const rule = await fixture.createRule();
   const snapshotKey = `contract-legacy-${fixture.tag}`;
-  // 旧格式记录没有逻辑窗口，历史接口直接回显行上的 window_kind / window_start_ms / window_end_ms。
   const legacySource = (profitUsd) => ({ recordType: "confirmed", billingSource: RECONCILIATION_BILLING_SOURCE,
     calculationVersion: RECONCILIATION_CALCULATION_VERSION, result: { calculation: { profitUsd } } });
-  const history = () => repository.listConfirmedHistory(rule.id, { startMs: 0, endMs: 10_000 });
 
   assert.equal(await repository.saveSnapshot({ ruleId: rule.id, segmentId: "seg-first", snapshotKey, windowKind: "yesterday", startMs: 1000, endMs: 2000,
     localDate: null, upstreamUsd: 1, healthCode: "READY", healthDetail: null, source: legacySource(1) }), true);
-  let { records } = await history();
-  assert.equal(records.length, 1);
-  assert.deepEqual(records[0].window, { preset: "yesterday", startMs: 1000, endMs: 2000, timezone: null });
-  assert.equal(records[0].calculation.profitUsd, 1);
+  if (inspect) {
+    assert.deepEqual(await inspect(rule.id, snapshotKey), { segmentId: "seg-first", windowKind: "yesterday", windowStartMs: 1000, windowEndMs: 2000,
+      upstreamUsd: 1, healthCode: "READY", healthDetail: null });
+  }
 
   assert.equal(await repository.saveSnapshot({ ruleId: rule.id, segmentId: "seg-second", snapshotKey, windowKind: "custom", startMs: 1500, endMs: 2500,
     localDate: "2026-01-01", upstreamUsd: 2, healthCode: "PARTIAL", healthDetail: "second write", source: legacySource(2) }), true);
-  ({ records } = await history());
-  assert.equal(records.length, 1);
-  assert.deepEqual(records[0].window, { preset: "yesterday", startMs: 1000, endMs: 2500, timezone: null });
-  assert.equal(records[0].calculation.profitUsd, 2);
   if (inspect) {
     assert.deepEqual(await inspect(rule.id, snapshotKey), { segmentId: "seg-first", windowKind: "yesterday", windowStartMs: 1000, windowEndMs: 2500,
       upstreamUsd: 2, healthCode: "PARTIAL", healthDetail: "second write" });
@@ -689,10 +689,6 @@ contract("saveSnapshot upserts values but keeps the first segment, window kind a
     healthCode: "PARTIAL", healthDetail: "x".repeat(301), source: legacySource(4) }), { code: "ER_DATA_TOO_LONG", errno: 1406 });
   await assert.rejects(repository.saveSnapshot({ ruleId: rule.id, snapshotKey: `${snapshotKey}-null`, windowKind: "custom", startMs: 1500, endMs: 2600,
     healthCode: null, source: legacySource(4) }), { code: "ER_BAD_NULL_ERROR", errno: 1048 });
-  ({ records } = await history());
-  assert.equal(records.length, 1);
-  assert.equal(records[0].calculation.profitUsd, 3);
-  assert.equal(records[0].window.endMs, 2500);
   if (inspect) {
     assert.deepEqual(await inspect(rule.id, snapshotKey), { segmentId: "seg-first", windowKind: "yesterday", windowStartMs: 1000, windowEndMs: 2500,
       upstreamUsd: 3, healthCode: "PARTIAL", healthDetail: cjk });
@@ -707,20 +703,24 @@ contract("saveSnapshotsForScope writes nothing for a stale scope, a stale owner 
   const fingerprint = await fixture.fingerprint(rule.id);
   const window = { preset: "yesterday", startMs: Date.UTC(2026, 0, 10), endMs: Date.UTC(2026, 0, 11), timezone: "UTC" };
   const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: "2026-01-11T00:20:00.000Z", profitUsd: 2 });
+  const ledger = settlement(snapshot);
   const latest = () => repository.latestSuccessfulResult(rule.id, window, fingerprint);
 
-  assert.equal(await repository.saveSnapshotsForScope(rule.id, "stale-fingerprint", [snapshot]), false);
-  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { expectedOwnerState: reconciliationOwnerRuleState([]) }), false);
-  assert.equal(await repository.saveSnapshotsForScope(`rr_missing${fixture.tag}`, fingerprint, [snapshot]), false);
-  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { guard: () => false }), false);
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, "stale-fingerprint", [snapshot], { ledger }), false);
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { expectedOwnerState: reconciliationOwnerRuleState([]), ledger }), false);
+  assert.equal(await repository.saveSnapshotsForScope(`rr_missing${fixture.tag}`, fingerprint, [snapshot], { ledger }), false);
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { guard: () => false, ledger }), false);
+  // 守卫在写完快照和账本之后才失败：两者一起回滚。
   let calls = 0;
-  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { guard: () => ++calls === 1 }), false);
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { guard: () => ++calls === 1, ledger }), false);
   assert.equal(calls, 2);
   assert.equal(await latest(), null);
-  assert.deepEqual((await repository.listConfirmedHistory(rule.id, { startMs: window.startMs, endMs: window.startMs + DAY })).records, []);
+  assert.equal(await repository.latestLedgerEntry(rule.id, window), null);
+  assert.deepEqual((await repository.listLedgerHistory(rule.id, { startMs: window.startMs, endMs: window.endMs })).records, []);
 
-  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { expectedOwnerState: await fixture.ownerState(), guard: () => true }), true);
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { expectedOwnerState: await fixture.ownerState(), guard: () => true, ledger }), true);
   assert.equal((await latest()).result.calculation.profitUsd, 2);
+  assert.equal((await repository.latestLedgerEntry(rule.id, window)).revision, 1);
 
   // 规则口径变化后旧口径的保存被拒绝。
   await repository.observeSource(rule.id, { groups: {}, group: "vip", ratio: 2, tokenName: "VIP", detectedAt: window.startMs + HOUR });
@@ -882,28 +882,69 @@ contract("alert state upserts per rule and event, and clearActiveAlerts recovers
 
 // ---- 确认账单历史 ----
 
-contract("listConfirmedHistory keeps one record per logical bill within the requested range", async ({ repository, fixture }) => {
+// ---- 结账账本 ----
+
+contract("the ledger keeps one row per settled day: the same window is not booked twice, a resettle or another window adds a revision", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const other = await fixture.createRule({ tokenId: fixture.token(1), channels: [{ channelId: fixture.channel(2), name: "Other" }] });
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const day = Date.UTC(2026, 0, 10);
+  const window = { preset: "yesterday", startMs: day, endMs: day + DAY, timezone: "UTC" };
+  const snapshot = (overrides) => billingSnapshot({ rule, segment, fingerprint, window, ...overrides });
+  // 单日结账只写账本，不必带快照。
+  const settle = (overrides, options) => repository.saveSnapshotsForScope(rule.id, fingerprint, [], { ledger: settlement(snapshot(overrides), options) });
+  const latest = (query = window) => repository.latestLedgerEntry(rule.id, query);
+  assert.equal(await latest(), null);
+
+  assert.equal(await settle({ generatedAt: "2026-01-11T00:20:00.000Z", profitUsd: 2 }, { revenueRate: 7.1, costRate: null, costBasis: "usage" }), true);
+  const first = await latest();
+  assert.deepEqual({ ...first, detail: undefined }, { ruleId: rule.id, billDate: "2026-01-10", revision: 1, versionId: null, timezone: "UTC",
+    startMs: day, endMs: day + DAY, revenueUsd: 2.25, costUsd: 1, revenueRate: 7.1, costRate: null, costBasis: "usage", source: "settle",
+    detail: undefined, settledAt: "2026-01-11T00:20:00.000Z" });
+  assert.equal(first.detail.result.calculation.profitUsd, 2);
+  assert.equal(first.detail.scopeFingerprint, fingerprint);
+
+  // 同一窗口再次结账（轮询重算、按「自定义」查询）不再记账；重新结账写下一版。
+  assert.equal(await settle({ generatedAt: "2026-01-11T01:00:00.000Z", profitUsd: 3 }), true);
+  assert.equal(await settle({ window: { ...window, preset: "custom" }, generatedAt: "2026-01-11T01:05:00.000Z", profitUsd: 3 }), true);
+  assert.deepEqual([(await latest()).revision, (await latest()).detail.result.calculation.profitUsd], [1, 2]);
+  assert.equal(await settle({ generatedAt: "2026-01-11T02:00:00.000Z", profitUsd: 4 }, { resettle: true, costBasis: "usage" }), true);
+  const second = await latest();
+  assert.deepEqual([second.revision, second.source, second.settledAt, second.revenueRate, second.detail.result.calculation.profitUsd],
+    [2, "resettle", "2026-01-11T02:00:00.000Z", null, 4]);
+
+  // 同一天换了时区（窗口不同）也写下一版；之后按旧窗口查不到，成本取不到时记空。
+  const shanghai = { preset: "yesterday", startMs: day - 8 * HOUR, endMs: day + 16 * HOUR, timezone: "Asia/Shanghai" };
+  const moved = snapshot({ window: shanghai, generatedAt: "2026-01-10T16:30:00.000Z", profitUsd: 5 });
+  moved.source.result.upstream.amountUsd = null;
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [], { ledger: settlement(moved, { costRate: 7.3, costBasis: "fixed" }) }), true);
+  assert.equal(await latest(), null);
+  const third = await latest(shanghai);
+  assert.deepEqual([third.billDate, third.revision, third.source, third.costUsd, third.costRate, third.costBasis], ["2026-01-10", 3, "resettle", null, 7.3, "fixed"]);
+
+  // 不是单个自然日的窗口、别的规则都查不到。
+  assert.equal(await latest({ ...shanghai, endMs: shanghai.endMs + DAY }), null);
+  assert.equal(await latest({ ...shanghai, startMs: shanghai.startMs + HOUR }), null);
+  assert.equal(await repository.latestLedgerEntry(other.id, shanghai), null);
+});
+
+contract("listLedgerHistory lists the newest revision of each settled day inside the range, latest day first", async ({ repository, fixture }) => {
   const rule = await fixture.createRule();
   const [segment] = await repository.listSegments(rule.id);
-  const fingerprint = `contract-history-${fixture.tag}`;
+  const fingerprint = await fixture.fingerprint(rule.id);
   const d1 = Date.UTC(2026, 0, 5), d2 = d1 + DAY, d3 = d2 + DAY;
-  const dayWindow = (startMs) => ({ preset: "custom", startMs, endMs: startMs + DAY, timezone: "UTC" });
-  const save = (options) => repository.saveSnapshot(billingSnapshot({ rule, segment, fingerprint, ...options }));
+  const settle = (startMs, profitUsd, options) => repository.saveSnapshotsForScope(rule.id, fingerprint, [], { ledger: settlement(billingSnapshot({ rule, segment, fingerprint,
+    window: { preset: "custom", startMs, endMs: startMs + DAY, timezone: "UTC" }, generatedAt: new Date(startMs + DAY + profitUsd * 60000).toISOString(), profitUsd }), options) });
+  await settle(d1, 1);
+  await settle(d2, 2);
+  await settle(d2, 22, { resettle: true, revenueRate: 7.2 });
+  await settle(d3, 3);
 
-  // 同一逻辑账单的两个分段行只保留物理窗口结束最晚的一行。
-  await save({ window: dayWindow(d1), rowWindow: { startMs: d1, endMs: d1 + 12 * HOUR }, segmentId: "seg-a", generatedAt: "2026-01-06T00:05:00.000Z", profitUsd: 1 });
-  await save({ window: dayWindow(d1), rowWindow: { startMs: d1 + 12 * HOUR, endMs: d2 }, segmentId: "seg-b", generatedAt: "2026-01-06T00:05:00.000Z", profitUsd: 2 });
-  await save({ window: dayWindow(d2), generatedAt: "2026-01-07T00:05:00.000Z", profitUsd: 3 });
-  await save({ window: dayWindow(d3), generatedAt: "2026-01-08T00:05:00.000Z", profitUsd: 4 });
-  // 观察记录、利润未知、旧计算版本都不进入确认账单历史。
-  await save({ window: dayWindow(d2), segmentId: "seg-observation", recordType: "observation", generatedAt: "2026-01-07T00:06:00.000Z", profitUsd: 30 });
-  await save({ window: dayWindow(d2), segmentId: "seg-unknown", generatedAt: "2026-01-07T00:07:00.000Z", profitUsd: null });
-  await save({ window: dayWindow(d2), segmentId: "seg-v2", generatedAt: "2026-01-07T00:08:00.000Z", profitUsd: 31, calculationVersion: 2 });
-
-  const all = await repository.listConfirmedHistory(rule.id, { startMs: d1, endMs: d3 + DAY });
+  const all = await repository.listLedgerHistory(rule.id, { startMs: d1, endMs: d3 + DAY });
   assert.equal(all.nextCursor, null);
-  assert.deepEqual(all.records.map((record) => [record.window.startMs, record.window.endMs, record.calculation.profitUsd]), [
-    [d3, d3 + DAY, 4], [d2, d2 + DAY, 3], [d1, d1 + DAY, 2],
+  assert.deepEqual(all.records.map((record) => [record.billDate, record.revision, record.settlementSource, record.window.startMs, record.window.endMs, record.calculation.profitUsd]), [
+    ["2026-01-07", 1, "settle", d3, d3 + DAY, 3], ["2026-01-06", 2, "resettle", d2, d2 + DAY, 22], ["2026-01-05", 1, "settle", d1, d1 + DAY, 1],
   ]);
   for (const record of all.records) {
     assert.equal(record.scopeFingerprint, fingerprint);
@@ -911,66 +952,49 @@ contract("listConfirmedHistory keeps one record per logical bill within the requ
     assert.equal(record.window.timezone, "UTC");
     assert.equal(record.upstreamSource.tokenId, rule.tokenId);
   }
-  assert.equal(all.records[2].confirmedAt, "2026-01-06T00:05:00.000Z");
+  assert.deepEqual([all.records[1].confirmedAt, all.records[1].settledRates, all.records[1].costBasis], [new Date(d3 + 22 * 60000).toISOString(), { income: 7.2, cost: null }, "usage"]);
   assert.equal(new Set(all.records.map((record) => record.historyId)).size, 3);
 
-  assert.deepEqual((await repository.listConfirmedHistory(rule.id, { startMs: d2, endMs: d3 + DAY })).records.map((record) => record.window.startMs), [d3, d2]);
-  assert.deepEqual((await repository.listConfirmedHistory(rule.id, { startMs: d1, endMs: d3 + DAY - 1 })).records.map((record) => record.window.startMs), [d2, d1]);
-  assert.deepEqual((await repository.listConfirmedHistory(rule.id, { startMs: d1 + 1, endMs: d2 + DAY })).records.map((record) => record.window.startMs), [d2]);
-  assert.deepEqual((await repository.listConfirmedHistory(`rr_missing${fixture.tag}`, { startMs: d1, endMs: d3 + DAY })).records, []);
+  const days = async (range) => (await repository.listLedgerHistory(rule.id, range)).records.map((record) => record.window.startMs);
+  assert.deepEqual(await days({ startMs: d2, endMs: d3 + DAY }), [d3, d2]);
+  assert.deepEqual(await days({ startMs: d1, endMs: d3 + DAY - 1 }), [d2, d1]);
+  assert.deepEqual(await days({ startMs: d1 + 1, endMs: d2 + DAY }), [d2]);
+  assert.deepEqual((await repository.listLedgerHistory(`rr_missing${fixture.tag}`, { startMs: d1, endMs: d3 + DAY })).records, []);
 });
 
-contract("listConfirmedHistory skips confirmed records whose window had not ended and still fills the page", async ({ repository, fixture }) => {
+contract("listLedgerHistory pages with a (day, rule) cursor that survives a resettle, and rejects invalid options", async ({ repository, fixture }) => {
   const rule = await fixture.createRule();
   const [segment] = await repository.listSegments(rule.id);
-  const fingerprint = `contract-settled-${fixture.tag}`;
-  const d1 = Date.UTC(2026, 2, 10), d2 = d1 + DAY, d3 = d2 + DAY;
-  const save = (window, generatedAt, profitUsd) => repository.saveSnapshot(billingSnapshot({ rule, segment, fingerprint, window, generatedAt, profitUsd }));
-  await save({ preset: "yesterday", startMs: d1, endMs: d2, timezone: "UTC" }, "2026-03-11T00:15:00.000Z", 1);
-  await save({ preset: "yesterday", startMs: d2, endMs: d3, timezone: "UTC" }, "2026-03-12T00:15:00.000Z", 2);
-  // 旧版本写下的今天半天、当天写下的整天窗口、近 7 天都排在前面，但不是结账记录。
-  await save({ preset: "today", startMs: d3, endMs: d3 + 6 * HOUR, timezone: "UTC" }, "2026-03-12T06:00:00.000Z", 30);
-  await save({ preset: "custom", startMs: d3, endMs: d3 + DAY, timezone: "UTC" }, "2026-03-12T20:00:00.000Z", 31);
-  await save({ preset: "7d", startMs: d1, endMs: d3 + 6 * HOUR, timezone: "UTC" }, "2026-03-12T06:00:00.000Z", 32);
-
-  const range = { startMs: d1, endMs: d3 + DAY };
-  assert.deepEqual((await repository.listConfirmedHistory(rule.id, range)).records.map((record) => record.calculation.profitUsd), [2, 1]);
-  const first = await repository.listConfirmedHistory(rule.id, { ...range, limit: 1 });
-  assert.deepEqual(first.records.map((record) => record.calculation.profitUsd), [2]);
-  assert.equal(typeof first.nextCursor, "string");
-  const second = await repository.listConfirmedHistory(rule.id, { ...range, limit: 1, cursor: first.nextCursor });
-  assert.deepEqual(second.records.map((record) => record.calculation.profitUsd), [1]);
-  assert.equal(second.nextCursor, null);
-});
-
-contract("listConfirmedHistory pages with an opaque cursor and rejects invalid options", async ({ repository, fixture }) => {
-  const rule = await fixture.createRule();
-  const [segment] = await repository.listSegments(rule.id);
-  const fingerprint = `contract-pages-${fixture.tag}`;
+  const fingerprint = await fixture.fingerprint(rule.id);
   const d1 = Date.UTC(2026, 1, 1);
-  for (let index = 0; index < 3; index += 1) {
+  const settle = (index, profitUsd, options) => {
     const startMs = d1 + index * DAY;
-    await repository.saveSnapshot(billingSnapshot({ rule, segment, fingerprint, window: { preset: "custom", startMs, endMs: startMs + DAY, timezone: "UTC" },
-      generatedAt: new Date(startMs + DAY + HOUR).toISOString(), profitUsd: index + 1 }));
-  }
+    return repository.saveSnapshotsForScope(rule.id, fingerprint, [], { ledger: settlement(billingSnapshot({ rule, segment, fingerprint,
+      window: { preset: "yesterday", startMs, endMs: startMs + DAY, timezone: "UTC" }, generatedAt: new Date(startMs + DAY + HOUR).toISOString(), profitUsd }), options) });
+  };
+  for (let index = 0; index < 3; index += 1) await settle(index, index + 1);
   const range = { startMs: d1, endMs: d1 + 3 * DAY };
-  const first = await repository.listConfirmedHistory(rule.id, { ...range, limit: 2 });
+  const first = await repository.listLedgerHistory(rule.id, { ...range, limit: 2 });
   assert.deepEqual(first.records.map((record) => record.calculation.profitUsd), [3, 2]);
   assert.equal(typeof first.nextCursor, "string");
-  const second = await repository.listConfirmedHistory(rule.id, { ...range, limit: 2, cursor: first.nextCursor });
+  // 翻页之间重新结账了已经列过的一天：下一页既不重复也不漏。
+  await settle(2, 30, { resettle: true });
+  const second = await repository.listLedgerHistory(rule.id, { ...range, limit: 2, cursor: first.nextCursor });
   assert.deepEqual(second.records.map((record) => record.calculation.profitUsd), [1]);
   assert.equal(second.nextCursor, null);
   const ids = [...first.records, ...second.records].map((record) => record.historyId);
   assert.equal(new Set(ids).size, 3);
-  assert.equal((await repository.listConfirmedHistory(rule.id, { ...range, limit: 3 })).nextCursor, null);
+  assert.equal((await repository.listLedgerHistory(rule.id, { ...range, limit: 3 })).nextCursor, null);
+  assert.deepEqual((await repository.listLedgerHistory(rule.id, { ...range, limit: 1 })).records.map((record) => record.calculation.profitUsd), [30]);
 
   const invalid = { code: "INVALID_REQUEST" };
-  await assert.rejects(repository.listConfirmedHistory(rule.id, { startMs: d1, endMs: d1 }), invalid);
-  await assert.rejects(repository.listConfirmedHistory(rule.id, { startMs: d1, endMs: d1 + 32 * DAY }), invalid);
-  await assert.rejects(repository.listConfirmedHistory(rule.id, { ...range, limit: 0 }), invalid);
-  await assert.rejects(repository.listConfirmedHistory(rule.id, { ...range, limit: "" }), invalid);
-  await assert.rejects(repository.listConfirmedHistory(rule.id, { ...range, cursor: "not a cursor" }), invalid);
-  await assert.rejects(repository.listConfirmedHistory(rule.id, { ...range, cursor: Buffer.from("[1,2]").toString("base64url") }), invalid);
+  await assert.rejects(repository.listLedgerHistory(rule.id, { startMs: d1, endMs: d1 }), invalid);
+  await assert.rejects(repository.listLedgerHistory(rule.id, { startMs: d1, endMs: d1 + 32 * DAY }), invalid);
+  await assert.rejects(repository.listLedgerHistory(rule.id, { ...range, limit: 0 }), invalid);
+  await assert.rejects(repository.listLedgerHistory(rule.id, { ...range, limit: "" }), invalid);
+  await assert.rejects(repository.listLedgerHistory(rule.id, { ...range, cursor: "not a cursor" }), invalid);
+  await assert.rejects(repository.listLedgerHistory(rule.id, { ...range, cursor: Buffer.from("[1,2]").toString("base64url") }), invalid);
+  await assert.rejects(repository.listLedgerHistory(rule.id, { ...range, cursor: Buffer.from('["2026-02-30","r"]').toString("base64url") }), invalid);
 });
 
 // ---- 账单能力核验结果 ----
@@ -1050,10 +1074,22 @@ contract("returned values and saved inputs are independent copies", async ({ rep
   assert.equal(again.result.calculation.profitUsd, 4);
   assert.equal(again.result.window.startMs, day);
 
-  const history = await repository.listConfirmedHistory(rule.id, { startMs: day, endMs: day + DAY });
+  const ledgerSnapshot = billingSnapshot({ rule: stored, segment: segments[0], fingerprint, window: { ...window }, generatedAt: "2026-03-02T00:05:00.000Z", profitUsd: 4 });
+  const ledger = settlement(ledgerSnapshot);
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [], { ledger }), true);
+  ledger.entry.detail.result.calculation.profitUsd = 40;
+  ledger.entry.revenueUsd = 40;
+  const entry = await repository.latestLedgerEntry(rule.id, window);
+  assert.deepEqual([entry.revenueUsd, entry.detail.result.calculation.profitUsd], [2.25, 4]);
+  entry.detail.result.calculation.profitUsd = 41;
+  entry.startMs = 1;
+  const entryAgain = await repository.latestLedgerEntry(rule.id, window);
+  assert.deepEqual([entryAgain.startMs, entryAgain.detail.result.calculation.profitUsd], [day, 4]);
+
+  const history = await repository.listLedgerHistory(rule.id, { startMs: day, endMs: day + DAY });
   history.records[0].calculation.profitUsd = 42;
   history.records[0].window.startMs = 2;
-  const historyAgain = await repository.listConfirmedHistory(rule.id, { startMs: day, endMs: day + DAY });
+  const historyAgain = await repository.listLedgerHistory(rule.id, { startMs: day, endMs: day + DAY });
   assert.equal(historyAgain.records[0].calculation.profitUsd, 4);
   assert.equal(historyAgain.records[0].window.startMs, day);
 

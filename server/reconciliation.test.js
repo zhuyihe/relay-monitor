@@ -4,6 +4,7 @@ import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFing
 import { ReconciliationRepository, reconciliationOwnerRuleState } from "./reconciliation-repository.js";
 import { MemoryReconciliationRepository } from "./test-support/reconciliation-memory-repository.js";
 import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
+import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
 import { Store } from "../db/store.js";
 import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconciliation-scope-policy.js";
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
@@ -1072,8 +1073,20 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
     { id: "s2", rule_id: rule.id, group_name: "g2", group_ratio: 2.6, ratio_observed_at_ms: 1030001, ratio_source: "group_catalog", effective_from_ms: 1030000, effective_to_ms: null, detected_at_ms: 1030000, timing_source: "detected" },
   ];
   const snapshotSources = [];
+  // 单个自然日的结账写进账本：事务里取最新一版再插入，读取时取同一天的最新一版。
+  const ledgerRows = [];
+  const ledgerTop = ([ruleId, billDate]) => ledgerRows.filter((row) => row.rule_id === ruleId && row.bill_date === billDate)
+    .sort((a, b) => b.revision - a.revision).slice(0, 1);
+  const ledgerQuery = (sql, params) => {
+    if (sql.startsWith("INSERT INTO reconciliation_ledger")) {
+      ledgerRows.push(Object.fromEntries(RECONCILIATION_LEDGER_COLUMNS.map((column, index) => [column, params[index]])));
+      return [{ affectedRows: 1 }];
+    }
+    return [ledgerTop(params)];
+  };
   const pool = {
     async query(sql, params) {
+      if (sql.includes("FROM reconciliation_ledger")) return ledgerQuery(sql, params);
       if (sql.includes("SELECT * FROM reconciliation_rules")) return [[rule]];
       if (sql.includes("FROM reconciliation_rule_channels")) return [[{ rule_id: rule.id, channel_id: 1, channel_name: "渠道", channel_status: null }]];
       if (sql.includes("FROM reconciliation_rule_segments")) return [segments];
@@ -1091,6 +1104,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
       return {
         async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
         async query(sql, params) {
+          if (sql.includes("reconciliation_ledger")) return ledgerQuery(sql, params);
           if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) return [[rule]];
           if (sql.includes("FROM reconciliation_rule_channels") && sql.includes("FOR UPDATE")) return [[{ rule_id: rule.id, channel_id: 1, channel_name: "渠道", channel_status: null }]];
           if (sql.includes("effective_to_ms IS NULL") && sql.includes("FOR UPDATE")) return [[segments.find((segment) => segment.effective_to_ms == null)]];
@@ -1198,6 +1212,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
   assert.equal(resettled.results[0].lastConfirmed.upstream.amountUsd, dayAmount);
   assert.equal(resettled.results[0].lastConfirmed.generatedAt, daySuccessAt);
   assert.ok(resettled.results[0].requestedWindow.endMs >= resettled.results[0].window.endMs);
+  assert.deepEqual(ledgerRows.map((row) => [row.revision, row.source]), [[1, "settle"]], "昨天只结一次账，重新结账失败不写新版本");
   now += 86400000;
   const nextDay = await module.queryRules({ ruleIds: [rule.id], preset: "yesterday" }, { force: true });
   assert.equal(nextDay.results[0].upstream.amountUsd, null, "a different local day must not reuse the previous day's confirmed result");
@@ -1893,6 +1908,9 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
   const state = {
     upstreamQuota: 100, ownQuota: 250, statCalls: [], requests: [], snapshots,
     get writes() { return log.snapshotWrites.length; },
+    get ledgerWrites() { return log.ledgerWrites; },
+    // 已提交的账本行，detail 解析成对象。
+    get ledger() { return tables.ledger.map((row) => ({ ...row, detail: JSON.parse(row.detail) })); },
     get alertQueries() { return log.alertCalls.length; },
     get ratioWrites() { return log.ratioWrites.map((entry) => entry.ratio); },
     get channelStateWrites() { return log.channelStateWrites.map((entry) => entry.state); },
@@ -2161,15 +2179,15 @@ test("两侧都已应答的上游空消费异常不能被旧的确认利润掩�
   const input = { ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", ...SETTLED_DAY };
   const confirmed = await module.queryRules(input, { force: true });
   assert.equal(confirmed.results[0].calculation.profitUsd, 1.5);
-  assert.equal(state.writes, 2, "已结束完整日的完整结果保存 observation 与 confirmed 两份记录");
-  const savedSource = [...state.snapshots.values()][0].source;
+  assert.equal(state.writes, 1, "已结束完整日的完整结果记一份 observation");
+  assert.deepEqual(state.ledgerWrites.map((entry) => [entry.revision, entry.source]), [[1, "settle"]], "结账写进账本");
 
   state.upstreamQuota = 0;
   const calls = state.statCalls.length;
   const settled = await module.queryRules(input, { force: true });
   assert.equal(settled.results[0].calculation.profitUsd, 1.5, "已结账的日子再刷新直接读结账记录");
   assert.equal(state.statCalls.length, calls);
-  assert.equal(state.writes, 2);
+  assert.equal(state.writes, 1);
   // 以下都是重新结账（修正切换时间后）的取数。
   const anomaly = await module.queryRules(input, { force: true, resettle: true });
   // 已结束完整日上游为 0 时首要状态是“等待该窗口账单”，空消费异常仍作为本轮 issue 保留。
@@ -2178,8 +2196,8 @@ test("两侧都已应答的上游空消费异常不能被旧的确认利润掩�
   assert.equal(anomaly.results[0].health.stale, false, "两侧都已应答时展示本轮异常，不能回退到旧账单");
   assert.equal(anomaly.results[0].calculation.profitUsd, null);
   assert.equal(anomaly.results[0].calculation.riskDifferenceUsd, 2.5);
-  assert.equal(state.writes, 3, "未确认异常追加 observation，不覆盖 confirmed");
-  assert.ok([...state.snapshots.values()].some((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed"));
+  assert.equal(state.writes, 2, "未确认异常追加 observation，不改写账本");
+  assert.equal(state.ledgerWrites.length, 1);
 
   state.upstreamQuota = null;
   const unavailable = await module.queryRules(input, { force: true, resettle: true });
@@ -2188,7 +2206,8 @@ test("两侧都已应答的上游空消费异常不能被旧的确认利润掩�
   assert.equal(unavailable.results[0].health.stale, false);
   assert.equal(unavailable.results[0].calculation.profitUsd, null);
   assert.equal(unavailable.results[0].lastConfirmed.calculation.profitUsd, 1.5);
-  assert.equal(state.writes, 4);
+  assert.equal(state.writes, 3);
+  assert.equal(state.ledgerWrites.length, 1);
 });
 
 test("多分段两侧取数并行发出", async (t) => {
@@ -2274,7 +2293,8 @@ test("最近确认快照读取失败不丢弃本轮 observation 和 confirmed �
   }, { force: true });
   assert.equal(results[0].calculation.profitUsd, 1.5);
   assert.equal(results[0].lastConfirmed, undefined);
-  assert.equal(state.writes, 2, "参考读取失败不能跳过 observation 与 confirmed 双写");
+  assert.equal(state.writes, 1, "参考读取失败不能跳过 observation");
+  assert.equal(state.ledgerWrites.length, 1, "参考读取失败不能跳过结账");
 });
 
 test("同批规则中快照写入失败只返回该规则的 PERSISTENCE_FAILED", async (t) => {
@@ -2291,7 +2311,8 @@ test("同批规则中快照写入失败只返回该规则的 PERSISTENCE_FAILED"
   assert.equal(results[1].calculation.profitUsd, null);
   assert.equal(results[1].upstream.state, "unavailable");
   assert.equal(results[1].downstream.calculationVersion, 3);
-  assert.equal(state.writes, 2, "正常规则仍须完成 observation 与 confirmed 双写");
+  assert.equal(state.writes, 1, "正常规则仍须写 observation");
+  assert.deepEqual(state.ledgerWrites.map((entry) => entry.ruleId), [rule.id], "正常规则仍须结账，失败的规则不写账本");
 });
 
 test("分段账单查询最多同时推进六个分段", async (t) => {
@@ -3489,7 +3510,8 @@ test("新范围从生效时刻起核算：生效前窗口不取数，跨界窗�
   rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
   const query = async (startMs, endMs) => (await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs, endMs }, { force: true })).results[0];
   const blockers = ["BILLING_SCOPE_NOT_EFFECTIVE", "BILLING_WINDOW_UNCONFIRMED"];
-  const confirmedCount = () => [...state.snapshots.values()].filter((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed").length;
+  // 多日窗口仍写确认快照，单个自然日写进账本。
+  const confirmedCount = () => [...state.snapshots.values()].filter((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed").length + state.ledgerWrites.length;
   let calls = state.statCalls.length;
   const before = await query(effective - 86400000, effective);
   assert.equal(state.statCalls.length, calls, "生效前窗口不向任何一侧取数");
@@ -3988,8 +4010,9 @@ test("Sub2API 密码在账单请求期间变化时，旧扣费不能写快照或
   assert.equal(result.upstream.amountUsd, 2);
   assert.equal(result.calculation.profitUsd, 0.5, "利润只按新授权的实际成本计算");
   assert.equal(result.billingTimezone.state, "verified");
-  assert.equal(state.writes, 2, "只写新授权的 observation 与 confirmed，旧扣费不得落库");
+  assert.equal(state.writes, 1, "只写新授权的 observation，旧扣费不得落库");
   assert.ok([...state.snapshots.values()].every((snapshot) => JSON.parse(snapshot.source).result.upstream.amountUsd === 2));
+  assert.deepEqual(state.ledger.map((row) => [row.cost_usd, row.detail.result.upstream.amountUsd]), [[2, 2]], "账本只记新授权的扣费");
   assert.equal([...rt._reconciliationResultCache.values()][0].value.upstream.amountUsd, 2);
 });
 
@@ -4032,18 +4055,18 @@ test("1c Sub2API 今日实时毛利：页面查询只读不核验不写库，轮
 
   await f.module.refreshDue(now);
   assert.deepEqual(f.repository.log.capabilityWrites.map((entry) => entry.method), ["saveBillingCapability"]);
-  const confirmed = f.sources().filter((source) => source.recordType === "confirmed");
-  assert.deepEqual(confirmed.map((source) => source.window.startMs), [Date.parse("2026-10-09T16:00:00Z")], "只结账昨天，今天的半天不写确认记录");
-  assert.equal(confirmed[0].result.calculation.profitUsd, 0.5);
+  assert.deepEqual(f.sources().filter((source) => source.recordType === "confirmed"), [], "单个自然日结账写账本，不再写确认快照");
+  assert.deepEqual(f.state.ledger.map((row) => [row.bill_date, row.window_start_ms, row.detail.result.calculation.profitUsd]),
+    [["2026-10-10", Date.parse("2026-10-09T16:00:00Z"), 0.5]], "只结账昨天，今天的半天不进账本");
   assert.ok(f.sources().some((source) => source.recordType === "observation" && source.window.startMs === Date.parse("2026-10-10T16:00:00Z")));
 
-  const writes = f.state.writes, controls = f.sub2.controls;
+  const writes = f.state.writes, controls = f.sub2.controls, ledgerWrites = f.state.ledgerWrites.length;
   const after = (await f.module.queryRules(f.today, { mode: "evaluate", origin: "page" })).results[0];
   assert.deepEqual([after.upstream.state, after.upstream.amountUsd, after.calculation.profitUsd], ["complete", 1, 1.5]);
   assert.deepEqual(after.billingTimezone, { state: "verified", timezone: "Asia/Shanghai" });
   assert.ok(!after.health.issues.some((issue) => /BILLING_TIMEZONE|WINDOW/.test(issue.code)));
   assert.equal(after.window.endMs, now, "今天截至当前时刻");
-  assert.equal(f.sub2.controls, controls); assert.equal(f.state.writes, writes);
+  assert.equal(f.sub2.controls, controls); assert.equal(f.state.writes, writes); assert.equal(f.state.ledgerWrites.length, ledgerWrites);
 
   // 存储清空后重启：页面查询只读，不借用进程缓存，也不顺手重新核验或补写能力。
   f.repository.tables.capabilities.splice(0);
@@ -4225,19 +4248,28 @@ function confirmedHistoryFixture() {
       downstream: { state: "complete", amountUsd: 3, knownAmountUsd: 3, channels: [{ channelId: 1, name: "old-one", billingState: "complete", amountUsd: 3, password: "raw-secret" }] },
       calculation: { differenceUsd: 1, profitUsd: 1, marginRate: 1 / 3 }, diagnostic: { apiKey: "raw-secret" } },
     raw: { password: "raw-secret" } };
-  const row = { rule_id: "old-rule", snapshot_key: "old-bill-a", window_kind: "yesterday", window_start_ms: startMs,
-    window_end_ms: endMs, generated_at: new Date("2026-10-08T16:01:01Z"), cursor_generated_at: "2026-10-08 16:01:01", source };
-  const state = { rows: [row], queries: [], fail: false, rule: { id: "old-rule", upstream_station_id: "new-up", own_station_id: "new-own",
+  // 账本行按 mysql2 读出的形状：日期由 DATE_FORMAT 给出字符串，DECIMAL 是字符串，detail 是 JSON 文本。
+  const ledgerRow = ({ ruleId = "old-rule", billDate = "2026-10-08", revision = 1, start = startMs, end = endMs, detail = source,
+    costBasis = "usage", entrySource = "settle", revenueRate = null, costRate = null } = {}) => ({
+    rule_id: ruleId, bill_date: billDate, revision, version_id: null, timezone: "Asia/Shanghai", window_start_ms: start, window_end_ms: end,
+    revenue_usd: String(detail?.result?.downstream?.amountUsd ?? 3), cost_usd: "2.00000000", revenue_rate: revenueRate == null ? null : String(revenueRate),
+    cost_rate: costRate == null ? null : String(costRate), cost_basis: costBasis, source: entrySource, detail: JSON.stringify(detail),
+    settled_at: "2026-10-08 16:01:00.000000" });
+  const state = { rows: [ledgerRow()], queries: [], fail: false, rule: { id: "old-rule", upstream_station_id: "new-up", own_station_id: "new-own",
     token_id: 99, token_name: "new-name", timezone: "UTC", scope_version: 2, enabled: 0, archived_at: new Date("2026-10-09T00:00:00Z") } };
   const pool = { async getConnection() { assert.fail("history must not open a write transaction"); }, async query(sql, params = []) {
     state.queries.push({ sql, params });
-    assert.ok(sql.startsWith("SELECT") || sql.startsWith("WITH"), "history/configuration only read");
+    assert.ok(sql.startsWith("SELECT"), "history/configuration only read");
     if (state.fail) throw new Error("database failure raw-secret");
-    if (sql.includes("WITH evidence AS")) {
-      assert.match(sql, /ROW_NUMBER\(\) OVER/); assert.match(sql, /WHERE logical_rank = 1 AND logical_start >= \? AND logical_end <= \?/);
-      const filtered = state.rows.filter((entry) => entry.rule_id === params[0]);
-      const start = params.length > 4 ? filtered.findIndex((entry) => entry.snapshot_key === params[8]) + 1 : 0;
-      return [filtered.slice(start, start + params.at(-1))];
+    if (sql.includes("FROM reconciliation_ledger")) {
+      assert.match(sql, /revision = \(SELECT MAX\(revision\) FROM reconciliation_ledger m WHERE m\.rule_id = l\.rule_id AND m\.bill_date = l\.bill_date\)/);
+      assert.match(sql, /ORDER BY bill_date DESC, rule_id DESC LIMIT \?/);
+      const [ruleId, from, to] = params, after = params.length > 4 ? [params[3], params[5]] : null;
+      const latest = (row) => !state.rows.some((other) => other.rule_id === row.rule_id && other.bill_date === row.bill_date && other.revision > row.revision);
+      const rows = state.rows.filter((row) => row.rule_id === ruleId && row.window_start_ms >= from && row.window_end_ms <= to && latest(row)
+        && (!after || row.bill_date < after[0] || (row.bill_date === after[0] && row.rule_id < after[1])))
+        .sort((a, b) => b.bill_date.localeCompare(a.bill_date) || b.rule_id.localeCompare(a.rule_id));
+      return [rows.slice(0, params.at(-1))];
     }
     if (sql.includes("FROM reconciliation_rule_channels")) return [[{ rule_id: "old-rule", channel_id: 2, channel_name: "new-two" }]];
     if (sql.includes("FROM reconciliation_rules")) return [[state.rule].filter((rule) => (!params.length || rule.id === params[0])
@@ -4246,12 +4278,13 @@ function confirmedHistoryFixture() {
   } };
   const rt = { pool, store: { list: () => [], get: () => null, auth: { isDefault: false } },
     sessions: { verify: (token) => token === "valid" ? { v: 1 } : null, sessionVersion: () => 1 } };
-  return { state, rt, row, source, window, module: createReconciliationModule(rt), repository: new ReconciliationRepository(pool) };
+  return { state, rt, ledgerRow, source, window, module: createReconciliationModule(rt), repository: new ReconciliationRepository(pool) };
 }
 
-test("U05已归档规则历史保留原scope/source/window/members且白名单不泄漏raw，零上游零写", async (t) => {
+test("U05已归档规则历史读账本：保留原scope/source/window/members且白名单不泄漏raw，零上游零写", async (t) => {
   const f = confirmedHistoryFixture();
   t.mock.method(globalThis, "fetch", async () => { assert.fail("history must not query upstream"); });
+  f.state.rows[0] = f.ledgerRow({ revenueRate: 7.1, costBasis: "fixed" });
   const result = await f.module.getConfirmedHistory("old-rule", { startMs: f.window.startMs, endMs: f.window.endMs });
   assert.equal(result.readOnly, true); assert.equal(result.records.length, 1);
   const record = result.records[0];
@@ -4261,74 +4294,72 @@ test("U05已归档规则历史保留原scope/source/window/members且白名单�
   assert.deepEqual(record.channels, [{ channelId: 1, name: "old-one" }]); assert.equal(record.sourceCompleteness, "complete");
   assert.doesNotMatch(JSON.stringify(result), /raw-secret|accessToken|password|apiKey|new-two|new-name|diagnostic/);
   assert.equal(record.calculation.profitUsd, 1); assert.equal(record.downstream.amountUsd, 3);
-  assert.ok(f.state.queries.every(({ sql }) => !sql.includes("FOR UPDATE") && !sql.includes("scopeFingerprint =")));
+  assert.deepEqual([record.billDate, record.revision, record.settlementSource, record.confirmedAt, record.costBasis],
+    ["2026-10-08", 1, "settle", "2026-10-08T16:01:00.000Z", "fixed"]);
+  assert.deepEqual(record.settledRates, { income: 7.1, cost: null });
+  assert.ok(f.state.queries.every(({ sql }) => !sql.includes("FOR UPDATE") && !sql.includes("reconciliation_snapshots")));
   f.state.fail = true;
   await assert.rejects(f.module.getConfirmedHistory("old-rule", { startMs: f.window.startMs, endMs: f.window.endMs }),
     (error) => error.code === "HISTORY_UNAVAILABLE" && !error.message.includes("raw-secret"));
 });
 
-test("U05历史真实长epoch原窗口JSON不被physical半段替换，同logical账单historyId稳定", async (t) => {
+test("U05账本历史每天只给最新一版，窗口以账本行为准，同一版historyId稳定、换版即变", async (t) => {
   const f = confirmedHistoryFixture();
   t.mock.method(globalThis, "fetch", async () => { assert.fail("history must not query upstream"); });
-  const window = { preset: "yesterday", startMs: 1791417600000, endMs: 1791504000000, timezone: "UTC" };
-  const source = { ...f.source, window, scopeFingerprint: "original-scope", resultGeneratedAt: "2026-10-09T00:00:00Z",
+  // 原记录里的窗口和账本行不一致时以账本行为准（账本行是结账时按自然日写下的）。
+  const drifted = { ...f.source, window: { ...f.window, startMs: f.window.startMs + 1000, timezone: "UTC" },
     result: { ...f.source.result, calculation: { profitUsd: 4 } } };
-  const midpoint = window.startMs + 12 * 3600000;
-  const records = [];
-  for (const [snapshot_key, window_start_ms, window_end_ms] of [
-    ["original-a", window.startMs, midpoint], ["original-z", midpoint, window.endMs],
-  ]) {
-    // Feed each possible SQL representative separately; collapse/range are verified by the MySQL engine cases.
-    f.state.rows = [{ ...f.row, snapshot_key, window_start_ms, window_end_ms, source: JSON.stringify(source) }];
-    const result = await f.module.getConfirmedHistory("old-rule", { startMs: window.startMs, endMs: window.endMs });
-    assert.equal(result.records.length, 1);
-    const record = result.records[0];
-    assert.deepEqual(record.window, window);
-    assert.deepEqual(record.upstream.window, window); assert.deepEqual(record.downstream.window, window);
-    assert.equal(record.calculation.profitUsd, 4); assert.equal(record.scopeFingerprint, "original-scope");
-    assert.doesNotMatch(JSON.stringify(result), /raw-secret|new-name|new-two/);
-    records.push(record);
-  }
-  assert.equal(records[0].historyId, records[1].historyId);
-  assert.ok(f.state.queries.every(({ sql }) => sql.startsWith("SELECT") || sql.startsWith("WITH")));
+  f.state.rows = [f.ledgerRow(), f.ledgerRow({ revision: 2, entrySource: "resettle", detail: drifted })];
+  const first = await f.module.getConfirmedHistory("old-rule", { startMs: f.window.startMs, endMs: f.window.endMs });
+  assert.equal(first.records.length, 1);
+  const [record] = first.records;
+  assert.deepEqual([record.revision, record.settlementSource, record.calculation.profitUsd], [2, "resettle", 4]);
+  assert.deepEqual(record.window, f.window); assert.deepEqual(record.upstream.window, f.window); assert.deepEqual(record.downstream.window, f.window);
+  const again = await f.module.getConfirmedHistory("old-rule", { startMs: f.window.startMs, endMs: f.window.endMs });
+  assert.equal(again.records[0].historyId, record.historyId);
+  f.state.rows.push(f.ledgerRow({ revision: 3, entrySource: "resettle", detail: drifted }));
+  const third = await f.module.getConfirmedHistory("old-rule", { startMs: f.window.startMs, endMs: f.window.endMs });
+  assert.equal(third.records[0].revision, 3); assert.notEqual(third.records[0].historyId, record.historyId);
+  assert.ok(f.state.queries.every(({ sql }) => sql.startsWith("SELECT")));
 });
 
-test("U05历史storage cursor/limit+1分页与legacy distinct ID，0及负profit原样保留", async () => {
+test("U05账本历史游标(日期,规则)与limit+1分页，0及负profit原样保留，迁移的旧账信息不全时标出", async () => {
   const f = confirmedHistoryFixture();
-  const first = { ...structuredClone(f.row), snapshot_key: "old-bill-z", source: { ...structuredClone(f.source), result: { ...structuredClone(f.source.result), calculation: { profitUsd: 0 } } } };
-  const second = { ...structuredClone(f.row), snapshot_key: "old-bill-y", source: { ...structuredClone(f.source), scopeFingerprint: "second-scope", result: { ...structuredClone(f.source.result), calculation: { profitUsd: -1 } } } };
-  f.state.rows = [first, second];
-  const options = { startMs: f.window.startMs, endMs: f.window.endMs, limit: 1 };
-  const page1 = await f.repository.listConfirmedHistory("old-rule", options);
+  const withProfit = (profitUsd) => ({ ...structuredClone(f.source), result: { ...structuredClone(f.source.result), calculation: { profitUsd } } });
+  const previous = { start: f.window.startMs - 86400000, end: f.window.startMs };
+  f.state.rows = [f.ledgerRow({ detail: withProfit(0) }), f.ledgerRow({ billDate: "2026-10-07", ...previous, detail: withProfit(-1) })];
+  const options = { startMs: f.window.startMs - 86400000, endMs: f.window.endMs, limit: 1 };
+  const page1 = await f.repository.listLedgerHistory("old-rule", options);
   assert.equal(page1.records[0].calculation.profitUsd, 0); assert.ok(page1.nextCursor);
-  assert.deepEqual(JSON.parse(Buffer.from(page1.nextCursor, "base64url")), [f.window.endMs, "2026-10-08 16:01:01", "old-bill-z"]);
-  const page2 = await f.repository.listConfirmedHistory("old-rule", { ...options, cursor: page1.nextCursor });
-  assert.equal(page2.records[0].calculation.profitUsd, -1); assert.equal(page2.nextCursor, null);
+  assert.deepEqual(JSON.parse(Buffer.from(page1.nextCursor, "base64url")), ["2026-10-08", "old-rule"]);
+  const page2 = await f.repository.listLedgerHistory("old-rule", { ...options, cursor: page1.nextCursor });
+  assert.equal(page2.records[0].calculation.profitUsd, -1); assert.equal(page2.records[0].billDate, "2026-10-07"); assert.equal(page2.nextCursor, null);
   assert.notEqual(page1.records[0].historyId, page2.records[0].historyId);
   assert.equal(f.state.queries[0].params.at(-1), 2);
-  const legacy = { ...f.row, source: { ...f.source, window: null, ruleEvidence: null, scopeFingerprint: null, resultGeneratedAt: null } };
-  const a = reconciliationConfirmedHistoryRecord(legacy), b = reconciliationConfirmedHistoryRecord({ ...legacy, snapshot_key: "other-legacy" });
-  assert.notEqual(a.historyId, b.historyId); assert.equal(a.sourceCompleteness, "legacy_partial");
-  assert.equal(a.window.timezone, null); assert.equal(a.upstreamSource.accountId, null);
-  assert.deepEqual(a.channels, [{ channelId: 1, name: "old-one" }]);
-  const sameLogical = reconciliationConfirmedHistoryRecord({ ...f.row, snapshot_key: "another-segment", window_start_ms: f.window.startMs + 1000 });
-  assert.equal(sameLogical.historyId, reconciliationConfirmedHistoryRecord(f.row).historyId);
-  f.state.rows = ["legacy-null-z", "legacy-null-y"].map((snapshot_key) => ({ ...legacy, snapshot_key, source: { ...legacy.source, window: f.window } }));
-  const nullFacts = await f.module.getConfirmedHistory("old-rule", { startMs: f.window.startMs, endMs: f.window.endMs });
-  assert.equal(nullFacts.records.length, 2);
-  assert.notEqual(nullFacts.records[0].historyId, nullFacts.records[1].historyId, "原scope/generation显式JSON null仍以saved row区分");
-  assert.ok(nullFacts.records.every((record) => record.sourceCompleteness === "legacy_partial" && record.upstreamSource.accountId == null));
+  assert.deepEqual(f.state.queries[1].params.slice(3, 6), ["2026-10-08", "2026-10-08", "old-rule"]);
+  // 迁移的旧账：原来源没存全时照样列出，标成信息不完整，不拿当前配置去补。
+  const legacy = { ...f.source, ruleEvidence: null, scopePolicy: null, scopeFingerprint: null };
+  f.state.rows = [f.ledgerRow({ detail: legacy, costBasis: null, entrySource: "migrated" }), f.ledgerRow({ billDate: "2026-10-07", ...previous, detail: legacy, costBasis: null, entrySource: "migrated" })];
+  const migrated = await f.module.getConfirmedHistory("old-rule", { ...options, limit: 20 });
+  assert.equal(migrated.records.length, 2);
+  assert.notEqual(migrated.records[0].historyId, migrated.records[1].historyId);
+  assert.ok(migrated.records.every((record) => record.sourceCompleteness === "legacy_partial" && record.upstreamSource.accountId == null
+    && record.settlementSource === "migrated" && record.costBasis === null && record.window.timezone === "Asia/Shanghai"));
+  const a = reconciliationConfirmedHistoryRecord({ rule_id: "old-rule", snapshot_key: "a", window_kind: "yesterday", window_start_ms: f.window.startMs,
+    window_end_ms: f.window.endMs, generated_at: new Date("2026-10-08T16:01:01Z"), source: { ...f.source, window: null, ruleEvidence: null, scopeFingerprint: null, resultGeneratedAt: null } });
+  assert.equal(a.sourceCompleteness, "legacy_partial"); assert.equal(a.window.timezone, null); assert.deepEqual(a.channels, [{ channelId: 1, name: "old-one" }]);
 });
 
 test("U05历史请求31日默认/最大与数量cap，非法参数在数据库读取前拒绝", async (t) => {
   const f = confirmedHistoryFixture(), now = Date.parse("2026-10-09T00:00:00Z");
   t.mock.method(Date, "now", () => now);
   await f.module.getConfirmedHistory("old-rule");
-  const query = f.state.queries.find(({ sql }) => sql.includes("WITH evidence AS"));
+  const query = f.state.queries.find(({ sql }) => sql.includes("FROM reconciliation_ledger"));
   assert.deepEqual(query.params, ["old-rule", now - 31 * 86400000, now, 21]);
   await f.module.getConfirmedHistory("old-rule", { limit: 100 }); assert.equal(f.state.queries.at(-1).params.at(-1), 51);
   for (const input of [{ startMs: now - 32 * 86400000, endMs: now }, { startMs: now, endMs: now }, { limit: 0 },
-    { limit: 1.5 }, { cursor: "bad" }, { cursor: Buffer.from(JSON.stringify([1, "2026-02-31 00:00:00", "a"])).toString("base64url") }, { endMs: "" }]) {
+    { limit: 1.5 }, { cursor: "bad" }, { cursor: Buffer.from(JSON.stringify(["2026-02-31", "a"])).toString("base64url") },
+    { cursor: Buffer.from(JSON.stringify([1, "2026-10-08 16:01:01", "old-bill-z"])).toString("base64url") }, { endMs: "" }]) {
     const before = f.state.queries.length;
     await assert.rejects(f.module.getConfirmedHistory("old-rule", input), (error) => error.code === "INVALID_REQUEST");
     assert.equal(f.state.queries.length, before);
@@ -4376,13 +4407,16 @@ test("U05未来snapshot保存原ruleEvidence，随后配置/成员变化不能�
   const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000000 }] });
   trustedLegacyRule(f.rule, f.stations, 7, 1);
   await f.module.queryRules({ ruleIds: [f.rule.id], preset: "custom", timezone: "Asia/Shanghai", ...SETTLED_DAY }, { force: true });
-  const snapshot = [...f.state.snapshots.values()].find((row) => JSON.parse(row.source).recordType === "confirmed");
-  assert.ok(snapshot);
-  const evidence = JSON.parse(snapshot.source).ruleEvidence;
+  // 单个自然日的结账存在账本行的 detail 里。
+  const [row] = f.repository.tables.ledger;
+  assert.ok(row);
+  const evidence = JSON.parse(row.detail).ruleEvidence;
   assert.deepEqual(evidence.upstreamIdentity, { provider: "newapi", baseUrl: "https://upstream.test", accountId: "7" });
   assert.deepEqual(evidence.channels, [{ channelId: 1, name: "渠道" }]); assert.equal(evidence.tokenName, "stable");
   f.rule.token_name = "new-name"; f.rule.scope_version = 2; f.stations[0].baseUrl = "https://new-up.test";
-  assert.deepEqual(JSON.parse(snapshot.source).ruleEvidence, evidence);
+  assert.deepEqual(JSON.parse(f.repository.tables.ledger[0].detail).ruleEvidence, evidence);
+  const [history] = (await f.module.getConfirmedHistory(f.rule.id, { startMs: SETTLED_DAY.startMs, endMs: SETTLED_DAY.endMs })).records;
+  assert.deepEqual([history.upstreamSource.tokenName, history.upstreamSource.baseUrl], ["stable", "https://upstream.test"], "历史账单按结账时的原账展示");
   assert.doesNotMatch(JSON.stringify(evidence), /accessToken|password|apiKey|admin|pat/);
 });
 
@@ -4819,7 +4853,8 @@ test("U05轮询结账：昨天结束满15分钟才写昨天整日confirmed，结
   // rr_three 今天零点才创建并生效：核算起点恰为昨天结束，昨天没有账可结。
   Object.assign(f.rows[2], { created_at: new Date(yesterday.endMs), billing_effective_from_ms: yesterday.endMs });
   const sources = () => [...f.state.snapshots.values()].map((snapshot) => ({ ruleId: snapshot.rule_id, ...JSON.parse(snapshot.source) }));
-  const confirmed = () => sources().filter((source) => source.recordType === "confirmed");
+  // 结账写进账本，快照表只留观测记录。
+  const confirmed = () => f.state.ledger.map((row) => ({ ruleId: row.rule_id, ...row.detail }));
   const yesterdayCalls = () => f.state.statCalls.filter((call) => call.end === yesterday.endMs / 1000 - 1).length;
   const settlements = () => [...f.rt._reconciliationSettlements].map(([key, entry]) => [key, entry.settled, entry.retryAt]).sort();
   const key = (ruleId) => `${ruleId}:${yesterday.startMs}:Asia/Shanghai`;
@@ -4852,8 +4887,8 @@ test("U05轮询结账：昨天结束满15分钟才写昨天整日confirmed，结
   now = yesterday.endMs + 60 * 60000;
   await f.module.refreshDue(now);
   assert.equal(yesterdayCalls(), 8, "已结清的昨天不再取数");
-  assert.equal(confirmed().length, 2, "今天的窗口始终只写 observation");
-  assert.ok(sources().filter((source) => source.window.startMs === yesterday.endMs).every((source) => source.recordType === "observation"));
+  assert.equal(confirmed().length, 2, "已结清的昨天不再写账本");
+  assert.ok(sources().every((source) => source.recordType === "observation"), "快照表只写 observation");
 });
 
 test("U05结账等待期：昨天结束未满15分钟手动查询只给实时毛利不写确认，满15分钟轮询不复用该缓存、重新取数后结账", async (t) => {
@@ -4861,7 +4896,7 @@ test("U05结账等待期：昨天结束未满15分钟手动查询只给实时毛
   const yesterday = { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") }; // 上海 10-08 整日
   let now = yesterday.endMs + 14 * 60000 + 30000; // 上海 10-09 00:14:30
   t.mock.method(Date, "now", () => now);
-  const confirmedRows = () => [...f.state.snapshots.values()].filter((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed");
+  const confirmedRows = () => f.state.ledger;
   const yesterdayCalls = () => f.state.statCalls.filter((call) => call.end === yesterday.endMs / 1000 - 1).length;
 
   f.state.upstreamQuota = 50; // 上游账单还在陆续入账
@@ -4875,7 +4910,7 @@ test("U05结账等待期：昨天结束未满15分钟手动查询只给实时毛
   await f.module.refreshDue(now);
   assert.equal(yesterdayCalls(), calls + 6, "结账重新取昨天，不复用等待期的缓存");
   assert.equal(confirmedRows().length, 3);
-  assert.ok(confirmedRows().every((row) => row.upstream_usd === 1), "确认账单用的是满 15 分钟后的上游金额");
+  assert.ok(confirmedRows().every((row) => row.cost_usd === 1), "结账用的是满 15 分钟后的上游金额");
   const settled = await f.module.queryRules({ preset: "yesterday" });
   assert.ok(settled.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled"));
   assert.equal(yesterdayCalls(), calls + 6, "结账结果进入缓存，随后的查询直接复用");
@@ -5226,10 +5261,9 @@ test("1b页面查询只读：昨天和今天都给出毛利，但不开写事务
 test("1b已结账的昨天：页面查询直接读结账记录不再取数，上游事后变动不影响；重启后也以结账记录为准", async (t) => {
   const f = await completedDayFixture(t);
   await f.module.refreshDue(Date.now());
-  const confirmed = () => [...f.state.snapshots.values()].filter((row) => JSON.parse(row.source).recordType === "confirmed");
-  assert.equal(confirmed().length, 3, "轮询结掉昨天");
+  assert.equal(f.state.ledger.length, 3, "轮询结掉昨天");
   f.rt._reconciliationResultCache.clear();
-  const calls = f.state.statCalls.length, writes = f.state.writes;
+  const calls = f.state.statCalls.length, writes = f.state.writes, ledgerWrites = f.state.ledgerWrites.length;
   f.state.upstreamQuota = 50; // 上游事后又补了账，已结账的日子不跟着变
   const page = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
   assert.equal(f.state.statCalls.length, calls, "已结账的昨天不打上游");
@@ -5244,17 +5278,18 @@ test("1b已结账的昨天：页面查询直接读结账记录不再取数，上
   assert.ok(again.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled" && row.settledAt));
   assert.equal(f.state.statCalls.length, calls, "重启后也不打上游");
   assert.equal(f.state.writes, writes, "页面查询不追加任何快照");
+  assert.equal(f.state.ledgerWrites.length, ledgerWrites, "也不写账本");
 });
 
-test("1b窗口结束不满15分钟写下的旧确认记录不算结账：只读查询重新取数", async (t) => {
+test("1b单个自然日只认账本：快照表里迁移没搬的旧确认记录（窗口结束不满15分钟写下）不算结账，只读查询重新取数", async (t) => {
   const f = await completedDayFixture(t);
   await f.module.refreshDue(Date.now());
-  // 1a 之前窗口一结束就写确认记录，把结账记录改成这种早写的样子。
-  for (const row of f.state.snapshots.values()) {
-    const source = JSON.parse(row.source);
-    if (source.recordType !== "confirmed") continue;
+  // 1a 之前窗口一结束就写确认记录，迁移不搬这种早写的记录：把账本行挪回快照表、改成早写的样子。
+  for (const row of f.repository.tables.ledger.splice(0)) {
+    const source = { ...JSON.parse(row.detail), recordType: "confirmed" };
     source.resultGeneratedAt = source.result.generatedAt = "2026-10-08T16:05:00.000Z";
-    row.source = JSON.stringify(source);
+    await f.repository.saveSnapshot({ ruleId: row.rule_id, snapshotKey: `legacy-${row.rule_id}`, windowKind: "yesterday",
+      startMs: row.window_start_ms, endMs: row.window_end_ms, healthCode: source.result.health.code, source });
   }
   f.rt._reconciliationResultCache.clear();
   const calls = f.state.statCalls.length;
@@ -5265,7 +5300,7 @@ test("1b窗口结束不满15分钟写下的旧确认记录不算结账：只读�
 });
 
 const COMPLETED_YESTERDAY = { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") }; // completedDayFixture 的上海 10-08 整日
-const confirmedRows = (f) => [...f.state.snapshots.values()].filter((row) => JSON.parse(row.source).recordType === "confirmed");
+const confirmedRows = (f) => f.state.ledger;
 const yesterdayStatCalls = (f) => f.state.statCalls.filter((call) => call.end === COMPLETED_YESTERDAY.endMs / 1000 - 1).length;
 
 test("结账后改关联、换查账凭据：已结账的昨天查询和刷新都沿用结账记录，轮询也不再结一次账", async (t) => {
@@ -5284,7 +5319,7 @@ test("结账后改关联、换查账凭据：已结账的昨天查询和刷新�
   f.rt._reconciliationSettlements.clear(); // 内存里的结账表丢了，轮询会再来结昨天
   await f.module.refreshDue(Date.now());
   assert.equal(yesterdayStatCalls(f), calls, "已结账的昨天不再取数");
-  assert.equal(confirmedRows(f).length, rows, "不按新口径再写一份结账记录");
+  assert.equal(confirmedRows(f).length, rows, "不按新口径再写一版账");
   assert.deepEqual([...f.rt._reconciliationSettlements.values()].map((entry) => entry.settled), [true, true, true]);
 });
 
@@ -5296,7 +5331,7 @@ test("重启后轮询认出已有结账记录：不重新取昨天、不再结�
   await createReconciliationModule(rt, { repository: f.repository }).refreshDue(Date.now());
   assert.equal(yesterdayStatCalls(f), calls);
   assert.equal(confirmedRows(f).length, 3);
-  assert.ok(confirmedRows(f).every((row) => f.repository.log.snapshotWrites.filter((entry) => entry.snapshotKey === row.snapshot_key).length === 1), `writes ${writes} -> ${f.state.writes}`);
+  assert.deepEqual(f.state.ledgerWrites.map((entry) => [entry.revision, entry.source]), Array(3).fill([1, "settle"]), `writes ${writes} -> ${f.state.writes}`);
   assert.deepEqual([...rt._reconciliationSettlements.values()].map((entry) => entry.settled), [true, true, true]);
 });
 
@@ -5337,7 +5372,8 @@ test("修正切换时间后下一轮轮询重新结账昨天，以新结账记�
   const calls = yesterdayStatCalls(f), rows = confirmedRows(f).length;
   await f.module.refreshDue(now);
   assert.ok(yesterdayStatCalls(f) > calls, "重新结账要重新取昨天");
-  assert.equal(confirmedRows(f).length, rows + 1, "按新分段写一份新的结账记录");
+  assert.equal(confirmedRows(f).length, rows + 1, "按新分段写下一版账");
+  assert.deepEqual(f.state.ledgerWrites.at(-1), { ruleId: "rr_live", billDate: "2026-10-08", revision: 2, source: "resettle" });
   assert.equal(f.rt._reconciliationResettles.has("rr_live"), false);
   const after = await yesterday();
   assert.ok(after.settledAt > before.settledAt, "以新结账记录为准");
@@ -5474,4 +5510,89 @@ test("1b接口：GET 和 POST 默认只读零写入，只有带 observe:true 的
     const sources = [...f.state.snapshots.values()].map((row) => JSON.parse(row.source));
     assert.ok(sources.length >= 3 && sources.every((source) => source.recordType === "observation"), "「刷新」观测今天并写观测记录");
   } finally { hooks.deregister(); delete globalThis.__p1bRuntime; }
+});
+
+test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率、改成固定采购，已结账的昨天照旧；当时没设的汇率按当前配置", async (t) => {
+  const f = await completedDayFixture(t);
+  const own = f.stations.find((station) => station.id === "own"), upstream = f.stations.find((station) => station.id === "upstream");
+  own.cnyPerUsd = 7.1;
+  await f.module.refreshDue(Date.now());
+  assert.deepEqual(f.state.ledger.map((row) => [row.bill_date, row.revision, row.source, row.revenue_usd, row.cost_usd, row.revenue_rate, row.cost_rate, row.cost_basis]),
+    Array(3).fill(["2026-10-08", 1, "settle", 2.5, 1, 7.1, null, "usage"]));
+  own.cnyPerUsd = 8; upstream.cnyPerUsd = 6.5; upstream.fixedPurchases = [{ amount: 300, days: 30 }];
+  f.rt._reconciliationResultCache.clear();
+  const { results } = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
+  assert.equal(results.length, 3);
+  for (const row of results) {
+    assert.deepEqual([row.settlement, row.calculation.profitUsd], ["settled", 1.5], "已结账的毛利不按固定采购重算");
+    assert.deepEqual(row.rates, { income: { stationId: "own", cnyPerUsd: 7.1, source: "configured" },
+      cost: { stationId: "upstream", cnyPerUsd: 6.5, source: "configured" }, costBasis: "usage" });
+    assert.deepEqual(row.ledger, { billDate: "2026-10-08", revision: 1, source: "settle", settledAt: row.settledAt, rates: { income: 7.1, cost: null }, costBasis: "usage" });
+  }
+  // 今天还没结账，按当前配置：固定采购、成本记 0。
+  const today = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "evaluate", origin: "page" })).results[0];
+  assert.deepEqual([today.rates.costBasis, today.rates.income.cnyPerUsd, today.ledger], ["fixed", 8, undefined]);
+});
+
+test("4a 固定采购上游：Key 账单取不到或为空只作参考，毛利 = 收入、按本站时区照常结账；按用量计成本的上游仍被挡住", async (t) => {
+  for (const [label, quota] of [["取不到", null], ["为空", 0]]) {
+    for (const fixed of [true, false]) {
+      await t.test(`${label}·${fixed ? "固定采购" : "按用量"}`, async (st) => {
+        const f = await completedDayFixture(st);
+        if (fixed) f.stations.find((station) => station.id === "upstream").fixedPurchases = [{ amount: 300, days: 30 }];
+        f.state.upstreamQuota = quota;
+        const [row] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" })).results;
+        const upstreamIssues = row.health.issues.filter((issue) => issue.side === "upstream");
+        assert.ok(upstreamIssues.length, JSON.stringify(row.health));
+        if (fixed) {
+          assert.deepEqual([row.health.code, row.calculation.profitUsd, row.costBasis], ["READY", 2.5, "fixed"], JSON.stringify(row.health));
+          assert.ok(upstreamIssues.every((issue) => issue.reference === true));
+          assert.deepEqual(row.billingTimezone, { state: "verified", timezone: "Asia/Shanghai" }, "成本不取自上游账单，只看本站一侧的时区");
+        } else {
+          assert.equal(row.calculation.profitUsd, null);
+          assert.notEqual(row.health.code, "READY");
+          assert.ok(upstreamIssues.every((issue) => !issue.reference));
+        }
+        await f.module.refreshDue(Date.now());
+        const ledger = f.state.ledger.filter((entry) => entry.rule_id === "rr_live");
+        assert.deepEqual(ledger.map((entry) => [entry.cost_usd, entry.cost_basis, entry.revenue_usd, entry.detail.result.calculation.profitUsd]),
+          fixed ? [[quota == null ? null : 0, "fixed", 2.5, 2.5]] : [], "固定采购照常结账，成本记原始 Key 用量（取不到为空）");
+      });
+    }
+  }
+});
+
+test("4a 固定采购上游：Key 还有没有其他用途没确认、上游分组目录取不到只作参考，毛利 = 收入、照常结账；按用量计成本的上游仍被挡住", async (t) => {
+  const cases = [
+    ["用途待确认", "COST_COVERAGE_UNKNOWN", {}, (f) => {
+      const row = f.rows.find((rule) => rule.id === "rr_live");
+      row.cost_coverage = "unknown";
+      row.source_binding.coverageDeclaration = { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] };
+    }],
+    ["分组目录取不到", "GROUP_DATA_UNAVAILABLE", { metadataGroups: () => ({ g2: { ratio: 2 } }) }, () => {}],
+  ];
+  for (const [label, code, options, setup] of cases) {
+    for (const fixed of [true, false]) {
+      await t.test(`${label}·${fixed ? "固定采购" : "按用量"}`, async (st) => {
+        const f = await completedDayFixture(st, options);
+        setup(f);
+        if (fixed) f.stations.find((station) => station.id === "upstream").fixedPurchases = [{ amount: 300, days: 30 }];
+        const [row] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" })).results;
+        const issue = row.health.issues.find((item) => item.code === code);
+        assert.ok(issue, JSON.stringify(row.health));
+        if (fixed) {
+          assert.deepEqual([issue.side, issue.reference], ["upstream", true]);
+          assert.deepEqual([row.health.code, row.calculation.profitUsd], ["READY", 2.5], JSON.stringify(row.health));
+        } else {
+          assert.equal(issue.reference, undefined);
+          if (code === "COST_COVERAGE_UNKNOWN") assert.equal(row.calculation.profitUsd, null);
+          assert.notEqual(row.health.code, "READY");
+        }
+        await f.module.refreshDue(Date.now());
+        const ledger = f.state.ledger.filter((entry) => entry.rule_id === "rr_live");
+        assert.equal(ledger.length, fixed || code !== "COST_COVERAGE_UNKNOWN" ? 1 : 0, "固定采购照常结账");
+        if (fixed) assert.deepEqual([ledger[0].cost_basis, ledger[0].detail.result.calculation.profitUsd], ["fixed", 2.5]);
+      });
+    }
+  }
 });

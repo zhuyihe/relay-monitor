@@ -120,9 +120,11 @@ export function ReconDetail({ detail, state, currency, upstreams, compact, confl
       </> : null}
     </div>
 
+    {/* 固定采购的上游成本记 0：上游账单和成本归属的问题只作参考，不影响毛利。 */}
     {(detail.health?.issues || []).map((issue: any, index: number) => <Alert
-      key={`${issue.code}-${index}`} type={reconciliationHealthMeta(issue.code).tone === "error" ? "error" : "warning"} showIcon
-      title={healthLabel(issue.code)} description={issue.detail}
+      key={`${issue.code}-${index}`} type={issue.reference ? "info" : reconciliationHealthMeta(issue.code).tone === "error" ? "error" : "warning"} showIcon
+      title={issue.reference ? `${healthLabel(issue.code)}（仅供参考）` : healthLabel(issue.code)}
+      description={issue.reference ? `${String(issue.detail || "").replace(/[。.]$/, "")}。上游是固定采购，成本记 0，不影响毛利。` : issue.detail}
     />)}
 
     {pendingSegments.length ? <section className="reconciliation-transition" aria-label="修正分组切换时间">

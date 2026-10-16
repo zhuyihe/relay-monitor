@@ -10,8 +10,8 @@ import { useDrawerEscape } from "../../components/drawer-escape";
 
 const { Text } = Typography;
 
-// seq 由打开方每次递增：同一条关联再次打开时也重新读取、重置表单
-export type AssociationEditTarget = { ruleId: string; title: string; seq: number };
+// seq 由打开方每次递增：同一条关联再次打开时也重新读取、重置表单；fixedCost 表示上游是固定采购（成本记 0）
+export type AssociationEditTarget = { ruleId: string; title: string; seq: number; fixedCost?: boolean };
 
 const ANSWERS = ["none", "other_use", "unknown"];
 const OTHER_USES = ["own_channels", "external", "unspecified"];
@@ -63,6 +63,7 @@ export function AssociationEditor({ target, compact, onClose, onSaved }: {
         <AssociationEditorBody
           key={`${target.ruleId}:${target.seq}`}
           ruleId={target.ruleId}
+          fixedCost={!!target.fixedCost}
           onBusyChange={setBusy}
           onDone={() => { setBusy(false); onClose(); void onSaved().catch(() => {}); }}
         />
@@ -72,7 +73,7 @@ export function AssociationEditor({ target, compact, onClose, onSaved }: {
 }
 
 // 每次打开都是新的表单实例，不会带出上一次未保存的选择
-function AssociationEditorBody({ ruleId, onBusyChange, onDone }: { ruleId: string; onBusyChange: (busy: boolean) => void; onDone: () => void }) {
+function AssociationEditorBody({ ruleId, fixedCost, onBusyChange, onDone }: { ruleId: string; fixedCost: boolean; onBusyChange: (busy: boolean) => void; onDone: () => void }) {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const coverageAnswer = Form.useWatch("coverageAnswer", form);
@@ -253,7 +254,8 @@ function AssociationEditorBody({ ruleId, onBusyChange, onDone }: { ruleId: strin
                 <Text>最终渠道：{preview.basis.proposedChannelIds.map((id) => `#${id}`).join("、")}</Text>
                 <Text>释放渠道：{preview.basis.existingChannelIds.filter((id) => !preview.basis.proposedChannelIds.includes(id)).map((id) => `#${id}`).join("、") || "无"}；原账单保留。</Text>
                 <Text>{preview.preview.scopeChanged ? "确认后立即生效；今天尚未结账的部分按新配置重算，已结账的日子不变。" : `生效时间：${formatTime(preview.preview.billingEffectiveFromMs, preview.basis.timezone)}（${preview.basis.timezone}），范围未变化。`}</Text>
-                <Text>{preview.preview.costCoverage === "complete" ? "已声明这把 Key 没有其他用途" : "Key 用途待确认，金额作为参考"}</Text>
+                <Text>{preview.preview.costCoverage === "complete" ? "已声明这把 Key 没有其他用途"
+                  : fixedCost ? "Key 用途待确认；上游是固定采购，成本记 0，不影响毛利" : "Key 用途待确认，金额作为参考"}</Text>
               </Space>
             }
           />

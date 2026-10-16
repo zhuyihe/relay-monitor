@@ -1,7 +1,9 @@
 // 上游渠道对账的持久化层：只保存规则、聚合快照、告警状态和账单能力核验结果，绝不复制站点凭据。
-import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset } from "../lib/reconciliation-contract.js";
-import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
-import { applyScopePolicy, isCompletedBillingWindow, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, normalizeSuccessfulResult } from "../lib/reconciliation-contract.js";
+import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
+import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
+  ledgerInsertValues } from "../lib/reconciliation-ledger.js";
+import { applyScopePolicy, billingDayOf, isCompletedBillingWindow, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 
 export function uid(prefix) {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}${Date.now().toString(36).slice(-4)}`;
@@ -18,22 +20,6 @@ export function asJson(value) {
     try { return JSON.parse(value); } catch { return null; }
   }
   return value;
-}
-
-export function normalizeSuccessfulResult(result, healthCode) {
-  const calculation = result?.calculation;
-  if (!calculation || calculation.profitUsd !== undefined || calculation.riskDifferenceUsd !== undefined) return result;
-  const differenceUsd = calculation.differenceUsd ?? null;
-  const confirmed = (result.health?.code || healthCode) === "READY" && differenceUsd != null;
-  return {
-    ...result,
-    calculation: {
-      ...calculation,
-      profitUsd: confirmed ? differenceUsd : null,
-      riskDifferenceUsd: confirmed ? null : differenceUsd,
-      marginRate: confirmed ? calculation.marginRate ?? null : null,
-    },
-  };
 }
 
 export function activeTokenKey(input) {
@@ -108,8 +94,6 @@ export function snapshotGeneratedAt(source) {
 
 // 结账记录只认已结束的自然日窗口；旧版本把今天的半天、近 7 天也写成过 confirmed，读取时一并排除。
 // 有逻辑窗口但没存生成时间的旧记录，只要窗口是现在已结束的完整自然日就认。
-// 更早的记录没有逻辑窗口和生成时间，无从判断时区，只按行上的 window_kind 排除今天和近 7 天。
-const LIVE_WINDOW_KINDS = new Set(["today", "7d"]);
 export function isSettledConfirmedSource(source, window = source?.window, now = Date.now()) {
   const generatedAt = Date.parse(source?.resultGeneratedAt);
   return isCompletedBillingWindow(window && { startMs: Number(window.startMs), endMs: Number(window.endMs), timezone: window.timezone },
@@ -156,21 +140,13 @@ export function normalizeConfirmedHistoryOptions(input = {}, now = Date.now()) {
   const requestedLimit = input.limit == null ? 20 : Number(input.limit);
   if (!Number.isSafeInteger(startMs) || !Number.isSafeInteger(endMs) || endMs <= startMs || endMs - startMs > 31 * 86400000
     || !Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || input.startMs === "" || input.endMs === "" || input.limit === "") throw invalid();
-  let after = null;
-  if (input.cursor != null) {
-    try {
-      if (typeof input.cursor !== "string" || input.cursor.length > 1024 || !/^[A-Za-z0-9_-]+$/.test(input.cursor)) throw invalid();
-      const decoded = Buffer.from(input.cursor, "base64url");
-      if (decoded.toString("base64url") !== input.cursor) throw invalid();
-      after = JSON.parse(decoded.toString("utf8"));
-      if (!Array.isArray(after) || after.length !== 3 || !Number.isSafeInteger(after[0])
-        || typeof after[1] !== "string" || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(after[1])
-        || new Date(`${after[1].replace(" ", "T")}Z`).toISOString().slice(0, 19).replace("T", " ") !== after[1]
-        || typeof after[2] !== "string" || !after[2].length || after[2].length > 128) throw invalid();
-    } catch { throw invalid(); }
-  }
+  const after = input.cursor == null ? null : decodeLedgerCursor(input.cursor);
+  if (input.cursor != null && !after) throw invalid();
   return { startMs, endMs, limit: Math.min(50, requestedLimit), cursor: input.cursor ?? null, after };
 }
+
+const LEDGER_SELECT = RECONCILIATION_LEDGER_COLUMNS.map((column) => column === "bill_date" ? "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date"
+  : column === "settled_at" ? "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at" : column).join(", ");
 
 export class ReconciliationRepository {
   constructor(pool) {
@@ -661,7 +637,8 @@ export class ReconciliationRepository {
     return true;
   }
 
-  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null } = {}) {
+  // ledger：{ entry, resettle } 时在同一事务里记账。已有同一窗口的账就不再记，除非是重新结账（revision + 1）。
+  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null } = {}) {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
@@ -700,6 +677,20 @@ export class ReconciliationRepository {
         if (sameRecordType && (savedEnd > incomingEnd
           || (savedEnd === incomingEnd && snapshotGeneratedAt(savedSource) > snapshotGeneratedAt(incomingSource)))) continue;
         await this.saveSnapshot(snapshot, conn);
+      }
+      if (ledger?.entry) {
+        // 同快照：规则行锁已把同一规则的记账串行，普通读就能看到已提交的版本，不加锁避免间隙锁死锁。
+        const [latest] = await conn.query(
+          "SELECT revision, timezone, window_start_ms, window_end_ms FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? ORDER BY revision DESC LIMIT 1",
+          [ruleId, ledger.entry.billDate]
+        );
+        const top = latest[0];
+        const sameWindow = top && top.timezone === ledger.entry.timezone
+          && Number(top.window_start_ms) === ledger.entry.startMs && Number(top.window_end_ms) === ledger.entry.endMs;
+        if (ledger.resettle || !sameWindow) {
+          await conn.query(`INSERT INTO reconciliation_ledger (${RECONCILIATION_LEDGER_COLUMNS.join(", ")}) VALUES (${RECONCILIATION_LEDGER_COLUMNS.map(() => "?").join(", ")})`,
+            ledgerInsertValues({ ...ledger.entry, ruleId, revision: top ? Number(top.revision) + 1 : 1, source: top ? "resettle" : "settle" }));
+        }
       }
       if (guard && !guard()) { await conn.rollback(); return false; }
       await conn.commit();
@@ -775,7 +766,7 @@ export class ReconciliationRepository {
     return this.latestRecord(ruleId, window, scopeFingerprint, "confirmed");
   }
 
-  // 某个窗口最近一次结账，不管当时的关联口径和查询方式：结账后改关联、换 Key、换凭据都不改已结账的日子。
+  // 多日完整窗口最近一次结账（单个自然日读账本，见 latestLedgerEntry），不管当时的关联口径和查询方式。
   async latestSettlement(ruleId, window) {
     const [rows] = await this.pool.query(
       `SELECT * FROM reconciliation_snapshots
@@ -790,53 +781,31 @@ export class ReconciliationRepository {
     return this.latestRecord(ruleId, window, scopeFingerprint, "observation");
   }
 
-  async listConfirmedHistory(ruleId, input = {}) {
-    const { startMs, endMs, limit, after: initialCursor } = normalizeConfirmedHistoryOptions(input);
-    // SQL 判断不了"按时区的自然日"，所以分批取、在 JS 里滤掉非结账窗口，凑够 limit + 1 条或取完为止。
-    const settled = [];
-    for (let after = initialCursor; ;) {
-      const rows = await this.#confirmedHistoryBatch(ruleId, startMs, endMs, after, limit + 1);
-      settled.push(...rows.filter((row) => Number(row.has_logical_window) ? isSettledConfirmedSource(asJson(row.source), {
-        startMs: row.logical_start, endMs: row.logical_end, timezone: row.saved_timezone }) : !LIVE_WINDOW_KINDS.has(row.window_kind)));
-      if (settled.length > limit || rows.length <= limit) break;
-      const tail = rows.at(-1);
-      after = [Number(tail.window_end_ms), tail.cursor_generated_at, tail.snapshot_key];
-    }
-    const page = settled.slice(0, limit), last = page.at(-1);
-    return { records: page.map(reconciliationConfirmedHistoryRecord), nextCursor: settled.length > limit && last
-      ? Buffer.from(JSON.stringify([Number(last.window_end_ms), last.cursor_generated_at, last.snapshot_key])).toString("base64url") : null };
+  // 某个自然日的最新一版账，窗口（时区和起止）必须一致：结账后改关联、换 Key、换凭据都不改已结账的日子。
+  async latestLedgerEntry(ruleId, window) {
+    const billDate = billingDayOf(window);
+    if (!billDate) return null;
+    const [rows] = await this.pool.query(
+      `SELECT ${LEDGER_SELECT} FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? ORDER BY revision DESC LIMIT 1`,
+      [ruleId, billDate]
+    );
+    const entry = rows.length ? ledgerEntryFromRow(rows[0]) : null;
+    return entry && entry.timezone === window.timezone && entry.startMs === window.startMs && entry.endMs === window.endMs ? entry : null;
   }
 
-  async #confirmedHistoryBatch(ruleId, startMs, endMs, after, size) {
-    const cursorFilter = after ? "AND (window_end_ms < ? OR (window_end_ms = ? AND generated_at < ?) OR (window_end_ms = ? AND generated_at = ? AND snapshot_key < ?))" : "";
+  // 已结账历史：每天只列最新一版，窗口落在请求范围内。按 (bill_date, rule_id) 倒序分页。
+  async listLedgerHistory(ruleId, input = {}) {
+    const { startMs, endMs, limit, after } = normalizeConfirmedHistoryOptions(input);
     const [rows] = await this.pool.query(
-      `WITH evidence AS (
-         SELECT s.*, source->>'$.window.startMs' AS saved_start, source->>'$.window.endMs' AS saved_end,
-           source->>'$.window.timezone' AS saved_timezone, source->>'$.scopeFingerprint' AS saved_scope,
-           source->>'$.resultGeneratedAt' AS saved_generation,
-           JSON_TYPE(source->'$.window.startMs') IN ('INTEGER','UNSIGNED INTEGER','DOUBLE')
-             AND JSON_TYPE(source->'$.window.endMs') IN ('INTEGER','UNSIGNED INTEGER','DOUBLE')
-             AND CAST(source->>'$.window.endMs' AS SIGNED) > CAST(source->>'$.window.startMs' AS SIGNED) AS has_logical_window
-         FROM reconciliation_snapshots s WHERE rule_id = ? AND source->>'$.recordType' = 'confirmed'
-           AND COALESCE(source->>'$.billingSource',source->>'$.downstream.billingSource') = 'channel-log-stat'
-           AND CAST(COALESCE(source->>'$.calculationVersion',source->>'$.downstream.calculationVersion') AS UNSIGNED) = 3
-           AND JSON_TYPE(source->'$.result.calculation.profitUsd') IN ('INTEGER','UNSIGNED INTEGER','DOUBLE')
-       ), logical AS (
-         SELECT evidence.*, IF(has_logical_window,CAST(saved_start AS SIGNED),window_start_ms) AS logical_start,
-           IF(has_logical_window,CAST(saved_end AS SIGNED),window_end_ms) AS logical_end,
-           IF(has_logical_window AND JSON_TYPE(source->'$.scopeFingerprint') = 'STRING' AND saved_scope <> ''
-             AND JSON_TYPE(source->'$.resultGeneratedAt') = 'STRING' AND saved_generation <> '',
-             '',snapshot_key) AS separate_record
-         FROM evidence
-       ), ranked AS (
-         SELECT logical.*, ROW_NUMBER() OVER (
-           PARTITION BY logical_start,logical_end,saved_timezone,saved_scope,saved_generation,separate_record
-           ORDER BY window_end_ms DESC,generated_at DESC,snapshot_key DESC) AS logical_rank FROM logical
-       ) SELECT *, DATE_FORMAT(generated_at,'%Y-%m-%d %H:%i:%s') AS cursor_generated_at FROM ranked
-         WHERE logical_rank = 1 AND logical_start >= ? AND logical_end <= ? ${cursorFilter}
-         ORDER BY window_end_ms DESC,generated_at DESC,snapshot_key DESC LIMIT ?`,
-      [ruleId, startMs, endMs, ...(after ? [after[0], after[0], after[1], after[0], after[1], after[2]] : []), size]
+      `SELECT ${LEDGER_SELECT} FROM reconciliation_ledger l
+       WHERE rule_id = ? AND window_start_ms >= ? AND window_end_ms <= ?
+         AND revision = (SELECT MAX(revision) FROM reconciliation_ledger m WHERE m.rule_id = l.rule_id AND m.bill_date = l.bill_date)
+         ${after ? "AND (bill_date < ? OR (bill_date = ? AND rule_id < ?))" : ""}
+       ORDER BY bill_date DESC, rule_id DESC LIMIT ?`,
+      [ruleId, startMs, endMs, ...(after ? [after[0], after[0], after[1]] : []), limit + 1]
     );
-    return rows;
+    const entries = rows.map(ledgerEntryFromRow);
+    const page = entries.slice(0, limit);
+    return { records: page.map(ledgerHistoryRecord), nextCursor: entries.length > limit ? encodeLedgerCursor(page.at(-1)) : null };
   }
 }

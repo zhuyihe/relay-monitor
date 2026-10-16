@@ -2,12 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ensureSchema } from "./pool.js";
 
-function schemaPool({ columns = [], indexes = [] } = {}) {
+const DAY = 86400000;
+const START = Date.UTC(2026, 9, 8, 16);
+
+function schemaPool({ columns = [], indexes = [], meta = [], snapshots = [] } = {}) {
   const calls = [];
   return {
     calls,
     async query(sql, params = []) {
       calls.push({ sql, params });
+      if (sql.startsWith("SELECT k FROM meta")) return [meta.includes(params[0]) ? [{ k: params[0] }] : []];
+      if (sql.includes("FROM reconciliation_snapshots")) return [snapshots];
+      if (sql.startsWith("INSERT INTO meta")) meta.push(params[0]);
       if (sql.includes("information_schema.COLUMNS")) {
         return [columns.includes(params[1]) ? [{}] : []];
       }
@@ -64,4 +70,75 @@ test("新关联迁移可重跑且旧规则不切换自然日策略", async () =>
   assert.ok(links.sql.includes("PRIMARY KEY (own_station_id, channel_id, station_id)"));
   assert.equal(links.sql.includes("token"), false);
   assert.equal(pool.calls.some((call) => /UPDATE reconciliation_rules/.test(call.sql)), false);
+});
+
+function confirmedRow(ruleId, { startMs = START, generatedAt = new Date(START + DAY + 20 * 60000).toISOString() } = {}) {
+  const window = { preset: "yesterday", timezone: "Asia/Shanghai", startMs, endMs: startMs + DAY };
+  return { rule_id: ruleId, health_code: "READY", source: JSON.stringify({ calculationVersion: 3, billingSource: "channel-log-stat",
+    recordType: "confirmed", window, resultGeneratedAt: generatedAt,
+    result: { window, generatedAt, upstream: { amountUsd: 7 }, downstream: { amountUsd: 10 },
+      calculation: { differenceUsd: 3, profitUsd: 3, marginRate: 0.3 }, health: { code: "READY" } } }) };
+}
+
+test("结账账本首次升级时搬入旧的单日结账记录并写完成标记，之后不再重搬", async () => {
+  const pool = schemaPool({ snapshots: [confirmedRow("r1"), confirmedRow("r1", { generatedAt: new Date(START + DAY + 60000).toISOString() }),
+    confirmedRow("r2", { startMs: START - DAY })] });
+  await ensureSchema(pool);
+  const select = pool.calls.find((call) => call.sql.includes("FROM reconciliation_snapshots"));
+  assert.match(select.sql, /snapshot_key LIKE 'r3:c:%'/);
+  const inserts = pool.calls.filter((call) => call.sql.startsWith("INSERT IGNORE INTO reconciliation_ledger"));
+  assert.deepEqual(inserts.map((call) => call.params.slice(0, 3)), [["r1", "2026-10-09", 1], ["r2", "2026-10-08", 1]]);
+  assert.ok(inserts.every((call) => call.params[12] === "migrated"));
+  const marker = pool.calls.find((call) => call.sql.startsWith("INSERT INTO meta"));
+  assert.equal(marker.params[0], "reconciliation_ledger_backfill_v1");
+  assert.equal(JSON.parse(marker.params[1]).migrated, 2);
+  assert.ok(pool.calls.indexOf(marker) > pool.calls.indexOf(inserts.at(-1)));
+
+  const before = pool.calls.length;
+  await ensureSchema(pool);
+  const rerun = pool.calls.slice(before);
+  assert.equal(rerun.some((call) => call.sql.includes("FROM reconciliation_snapshots") || call.sql.includes("INTO reconciliation_ledger")), false);
+});
+
+test("搬旧账失败不挡启动：单行失败照搬其余行、不写完成标记，下次启动重试；读旧记录失败同样只记日志", async (t) => {
+  const logged = [];
+  t.mock.method(console, "error", (...args) => logged.push(args.join(" ")));
+  const pool = schemaPool({ snapshots: [confirmedRow("r1"), confirmedRow("r2")] });
+  const query = pool.query;
+  let failR1 = true;
+  pool.query = async (sql, params) => {
+    if (failR1 && sql.startsWith("INSERT IGNORE INTO reconciliation_ledger") && params[0] === "r1") {
+      pool.calls.push({ sql, params });
+      throw new Error("Out of range value for column 'revenue_usd'");
+    }
+    return query(sql, params);
+  };
+  await ensureSchema(pool);
+  const inserted = () => pool.calls.filter((call) => call.sql.startsWith("INSERT IGNORE INTO reconciliation_ledger")).map((call) => call.params[0]);
+  assert.deepEqual(inserted(), ["r1", "r2"]);
+  assert.equal(pool.calls.some((call) => call.sql.startsWith("INSERT INTO meta")), false);
+  assert.ok(logged.some((line) => line.includes("r1") && line.includes("Out of range")));
+
+  failR1 = false;
+  await ensureSchema(pool);
+  assert.deepEqual(inserted(), ["r1", "r2", "r1", "r2"]);
+  assert.equal(JSON.parse(pool.calls.find((call) => call.sql.startsWith("INSERT INTO meta")).params[1]).migrated, 2);
+
+  const broken = schemaPool();
+  const brokenQuery = broken.query;
+  broken.query = async (sql, params) => {
+    if (sql.includes("FROM reconciliation_snapshots")) throw new Error("Lock wait timeout exceeded");
+    return brokenQuery(sql, params);
+  };
+  await ensureSchema(broken);
+  assert.equal(broken.calls.some((call) => call.sql.startsWith("INSERT INTO meta")), false);
+  assert.ok(logged.some((line) => line.includes("Lock wait timeout")));
+});
+
+test("结账账本表以 (关联, 日期, 版本) 为主键", async () => {
+  const pool = schemaPool();
+  await ensureSchema(pool);
+  const ledger = pool.calls.find((call) => call.sql.includes("CREATE TABLE IF NOT EXISTS reconciliation_ledger"));
+  assert.ok(ledger.sql.includes("PRIMARY KEY (rule_id, bill_date, revision)"));
+  assert.ok(pool.calls.indexOf(ledger) < pool.calls.findIndex((call) => call.sql.startsWith("SELECT k FROM meta")));
 });

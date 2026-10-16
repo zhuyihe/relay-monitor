@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, Modal, Select, Space, Typography } from "antd";
 import { api, usd, readWorkflowDestination } from "../../../lib/client";
 import { createRequestId } from "../../../lib/request-id.js";
+import { costBasisOf } from "../../../lib/profit.js";
 import type { AccountReadModel, AccountRecord, AccountKeyScope, AccountAssociation, UnmatchedAssociation, CoverageDeclaration, PublicResource, AccountAuthorizationInput, AccountAuthorizationProbe, AccountAuthorizationResult, AccountAuthorizationRecoveryIntent, WorkflowDestination, UpstreamKeyRead, ResourceIdentityConfirmation } from "../../../lib/client";
 import { Skeleton } from "../../components/data-state";
 import { Icon, Sym } from "../../components/icons";
@@ -461,6 +462,8 @@ export function useAccountCenter({
   // 一条核算关联：这把 Key 在某个本站下归属的渠道。动作只放在有效关联上，停止后保留为历史
   const renderAssociation = (key: AccountKeyScope, association: AccountAssociation) => {
     const active = association.status === "active";
+    // 固定采购的上游成本记 0，Key 还有没有其他用途不影响毛利
+    const fixedCost = costBasisOf(stations.find((station) => station.id === association.upstreamStationId)) === "fixed";
     return (
       <li key={association.ruleId} data-rule-id={association.ruleId} className={`jy-accounts-association${focusRuleId === association.ruleId ? " is-focused" : ""}`}>
         <div className="jy-accounts-line">
@@ -476,12 +479,12 @@ export function useAccountCenter({
             ? <><dt>生效时间</dt><dd>{formatAt(association.accountingStartMs ?? association.billingEffectiveFromMs, association.timezone)}</dd></>
             : <><dt>停止时间</dt><dd>{formatAt(association.stoppedAt, association.timezone)}</dd></>}
           <dt>Key 的其他用途</dt><dd>{otherUseText(association.coverageDeclaration)}</dd>
-          <dt>范围版本</dt><dd>{association.scopeVersion} · {association.costCoverage === "complete" ? "用途已确认" : "用途待确认，毛利标为待确认"}</dd>
+          <dt>范围版本</dt><dd>{association.scopeVersion} · {association.costCoverage === "complete" ? "用途已确认" : fixedCost ? "用途待确认（上游是固定采购，成本记 0，不影响毛利）" : "用途待确认，毛利标为待确认"}</dd>
         </dl>
         {conflictBanner(association)}
         {active ? (
           <div className="jy-accounts-actions">
-            <Button size="small" disabled={purposeLocked} aria-label={`编辑渠道 ${association.ruleId}`} onClick={() => setEditTarget({ ruleId: association.ruleId, title: keyTitle(key), seq: ++editSeq.current })}>编辑渠道</Button>
+            <Button size="small" disabled={purposeLocked} aria-label={`编辑渠道 ${association.ruleId}`} onClick={() => setEditTarget({ ruleId: association.ruleId, title: keyTitle(key), seq: ++editSeq.current, fixedCost })}>编辑渠道</Button>
             <Button size="small" disabled={purposeLocked} aria-label={`更换 Key ${association.ruleId}`} onClick={() => openWorkflow(`/stations?action=coverage&ruleId=${encodeURIComponent(association.ruleId)}`)}>更换 Key</Button>
             <Button size="small" danger disabled={purposeLocked} aria-label={`停止核算关联 ${association.ruleId}`} onClick={() => { setPurposeError(""); setPurposeTarget({ keyLabel: keyTitle(key), association }); }}>停止核算</Button>
           </div>
