@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, List, Select, Space, Tag, Typography } from "antd";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, List, Radio, Select, Space, Tag, Typography } from "antd";
 import { api } from "../../lib/client";
 import { createRequestId } from "../../lib/request-id.js";
+import { groupOnboardingResources } from "../../lib/channel-onboarding.js";
 import type { BatchInput, BatchProbe, BatchRecoveryIntent, BatchResult, ConnectionInput, CoverageDeclaration, WorkflowDestination, SourceCatalogueProjection } from "../../lib/client";
 import { useDrawerEscape } from "./drawer-escape";
 
@@ -83,6 +84,16 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
   const main = upstreams.find((item) => item.id === stationId);
   const requiresAuthorization = (creating ? formType : main?.type) === "newapi-key";
   const channels: any[] = catalogue?.channels || [];
+  const resourceGroups = useMemo(() => {
+    const selected = new Set(openIds);
+    return groupOnboardingResources(upstreams, channels.filter((channel) => selected.has(channel.id)));
+  }, [upstreams, channels, openIds]);
+  const resourceOption = (station: any) => ({ value: station.id, label: stationLabel(station), baseUrl: station.baseUrl,
+    searchText: `${stationLabel(station)} ${station.baseUrl}` });
+  const resourceOptions = [
+    { label: `已有渠道关联或地址匹配（${resourceGroups.matched.length}）`, options: resourceGroups.matched.map(resourceOption) },
+    { label: `其他已保存资源（${resourceGroups.others.length}）`, options: resourceGroups.others.map(resourceOption) },
+  ].filter((group) => group.options.length);
   const source: SourceCatalogueProjection["ownSource"] = catalogue?.ownSource || null;
   const coverageSourceChanged = !!(coverageRule?.ownSource && source && coverageRule.ownSource.namespaceKey !== source.namespaceKey);
   const names = (ids: number[]) => ids.map((id) => channels.find((entry) => entry.id === id)?.name || `#${id}`).join("、") || "无";
@@ -127,7 +138,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
     const linked = candidates.map((id) => upstreams.find((item) => item.id === id));
     const sameAccount = linked[0]?.identity && linked.every((item) => item?.type !== "newapi-key" && item?.identity?.provider === linked[0].identity.provider && String(item?.identity?.accountId) === String(linked[0].identity.accountId) && item?.baseUrl === linked[0].baseUrl && item?.monitorEnabled === linked[0].monitorEnabled);
     const existing = upstreams.find((item) => candidates[0] && candidates.every((id) => id === candidates[0]) && item.id === candidates[0]) || (sameAccount ? linked[0] : undefined);
-    setStationId(existing?.id); setCreating(!existing); setMonitor(existing?.monitorEnabled !== false);
+    setStationId(existing?.id); setCreating(!upstreams.length); setMonitor(existing?.monitorEnabled !== false);
     form.resetFields(); form.setFieldsValue({ name: entries[0]?.name || "上游账号", baseUrl: entries[0]?.baseUrl || "", type: "newapi" });
     authorizationForm.resetFields(); authorizationForm.setFieldsValue({ name: `${entries[0]?.name || "上游"}账单授权`, baseUrl: entries[0]?.baseUrl || "", type: "newapi" });
   };
@@ -247,8 +258,14 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
         {stale ? <Alert type="warning" showIcon message="目录已过期，请重新发现后验证" /> : null}{failure ? <Alert type="error" showIcon message={failure} /> : null}
         {result ? <Alert type={result.complete ? "success" : "warning"} showIcon message={result.complete ? "全部请求步骤已保存" : "接入尚有待完成步骤，已保存部分会继续复用"} description={<Space direction="vertical">{result.groups.map((group) => <div key={group.groupId}><Text strong>{names(group.channels.map((entry) => entry.channelId))} · {group.complete ? "已完成" : "待完成"}</Text><div>监控：{STATES[group.monitor.status]}；对账：{STATES[group.reconciliation.status]}</div><div>{group.reason || group.reconciliation.reason}</div><div>已保存资源：{group.saved.stationIds.join("、") || "无"}{group.saved.authorizationStationId ? `；账单授权：${group.saved.authorizationStationId}` : ""}{group.saved.ruleId ? `；核算关联：${group.saved.ruleId}` : ""}</div>{group.channels.filter((entry) => !entry.complete).map((entry) => <div key={entry.channelId}>{names([entry.channelId])}：{entry.reason || "请重新预览并补齐剩余步骤"}</div>)}{group.remainingActions.length ? <Text type="secondary">下一步：{group.remainingActions.includes("supply_credentials") ? "补充尚未保存的授权，然后重新预览" : group.remainingActions.includes("select_key") ? "选择实际 Key 后重新预览" : "重新预览后重试未完成步骤"}</Text> : null}</div>)}{retryInput ? <Button disabled={busy} onClick={() => void recover(retryInput)}>核对已保存结果</Button> : null}</Space>} /> : null}
         {coverageRule ? <Alert type="info" showIcon message="核对既有 Key 的完整用途" description={<div>原核算关联 {coverageRule.id} · 上游 Key {coverageRule.tokenId} · 原成员 {names((coverageRule.channels || []).map((channel: any) => channel.channelId))}。本次范围已包含已知漏接渠道，请核对完整用途后重新预览。<Space wrap><Button href={`/stations?action=scope&ruleId=${encodeURIComponent(coverageRule.id)}`}>查看原范围与历史</Button><Button disabled={busy} onClick={() => stopForNewKey(coverageRule)}>隔离站外调用后关联新 Key</Button></Space></div>} /> : null}
-        <Checkbox checked={creating} disabled={busy || !!coverageRule} onChange={(event) => { setCreating(event.target.checked); invalidate(true); }}>填写或更新上游授权</Checkbox>
-        {creating ? <Form name="channel-onboarding" form={form} layout="vertical" requiredMark={false} disabled={busy} onValuesChange={(changed) => changeForm(changed, form)}><Form.Item name="type" label="监控方式"><Select options={TYPES} /></Form.Item><Form.Item name="name" label="上游资源名称" rules={[{ required: true, message: "请输入资源名称" }]}><Input /></Form.Item><Form.Item name="baseUrl" label="上游站点地址" rules={[{ required: true, message: "请输入站点地址" }]}><Input placeholder="https://upstream.example.com" /></Form.Item><CredentialFields type={formType} /></Form> : <div><Text strong>上游账号或 Key 资源</Text><Select aria-label="接入上游资源" style={{ width: "100%", marginTop: 8 }} showSearch optionFilterProp="label" value={stationId} disabled={busy || !!coverageRule} placeholder="复用已有账号或 Key，无需重填凭证" options={upstreams.map((item) => ({ value: item.id, label: stationLabel(item) }))} onChange={(id) => { setStationId(id); setAuthorizationId("self"); setMonitor(upstreams.find((item) => item.id === id)?.monitorEnabled !== false); invalidate(true); }} /></div>}
+        <Radio.Group aria-label="上游接入方式" value={creating ? "authorize" : "saved"} disabled={busy || !!coverageRule} onChange={(event) => { setCreating(event.target.value === "authorize"); invalidate(true); }}>
+          <Space direction="vertical">
+            <Radio value="saved" disabled={!upstreams.length} style={{ minHeight: 40 }}>复用已有上游</Radio>
+            <Radio value="authorize" style={{ minHeight: 40 }}>新增上游或更换授权</Radio>
+          </Space>
+        </Radio.Group>
+        {creating ? <Alert type="info" showIcon message="何时需要填写授权" description={<div><div>首次新增：填写尚未保存的上游账号或 Key。</div><div>更换凭证：填写同一账号的新凭证；验证识别到已有账号后，需明确确认更新，保存时复用原资源。</div><div>已有可用授权时，选择“复用已有上游”，无需重复填写。</div></div>} /> : <Text type="secondary">直接使用已保存的地址和凭证，无需再次填写。匹配资源排在前面，也可输入名称或地址搜索全部资源。</Text>}
+        {creating ? <Form name="channel-onboarding" form={form} layout="vertical" requiredMark={false} disabled={busy} onValuesChange={(changed) => changeForm(changed, form)}><Form.Item name="type" label="监控方式"><Select options={TYPES} /></Form.Item><Form.Item name="name" label="上游资源名称" rules={[{ required: true, message: "请输入资源名称" }]}><Input /></Form.Item><Form.Item name="baseUrl" label="上游站点地址" rules={[{ required: true, message: "请输入站点地址" }]}><Input placeholder="https://upstream.example.com" /></Form.Item><CredentialFields type={formType} /></Form> : <div><Text strong>上游账号或 Key 资源</Text><Select<string> aria-label="接入上游资源" style={{ width: "100%", marginTop: 8 }} showSearch optionFilterProp="searchText" value={stationId} disabled={busy || !!coverageRule} placeholder="输入名称或地址查找已保存资源" options={resourceOptions} optionRender={(option) => <div style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}><div>{option.label}</div><Text type="secondary">{option.data.baseUrl}</Text></div>} onChange={(id) => { setStationId(id); setAuthorizationId("self"); setMonitor(upstreams.find((item) => item.id === id)?.monitorEnabled !== false); invalidate(true); }} />{main ? <Text type="secondary">已选择“{main.name}”，验证时复用其已保存授权。只有需要更换凭证时才选择“新增上游或更换授权”。</Text> : <Text type="secondary">请选择要复用的账号；地址匹配仅供查找，请核对账号。需要新账号时再选择“新增上游或更换授权”。</Text>}</div>}
         <Checkbox checked={monitor} disabled={busy || !creating && main?.monitorEnabled === false || (creating ? formType : main?.type) === "newapi-key"} onChange={(event) => { setMonitor(event.target.checked); invalidate(); }}>关联余额监控</Checkbox>{!monitor && billing ? <Text type="secondary">仅使用账号账单授权；已有资源的监控用途保持原设置。</Text> : null}
         <Collapse size="small" items={[{ key: "extra", label: "同时关联其他已有监控资源（可选）", children: <Select aria-label="其他监控资源" mode="multiple" style={{ width: "100%" }} value={additionalIds} disabled={busy} options={upstreams.filter((item) => item.monitorEnabled !== false && item.id !== stationId).map((item) => ({ value: item.id, label: item.name }))} onChange={(ids) => { setAdditionalIds(ids); invalidate(); }} /> }]} />
         {additionalIds.length ? <Alert type="warning" showIcon message="核对整体监控成本" description="账号余额与 Key 额度可能覆盖同一消费。将沿用各资源的整体成本纳入设置，请核对是否重复计入；Key 对账的成本只算一次，整体监控成本设置需要另行核对。" /> : null}
