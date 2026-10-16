@@ -682,6 +682,7 @@ test("returning from a new pure Key to a saved account clears the hidden dedicat
   const { page, probes, writes } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page);
   await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check(); await drawer.getByRole("button", { name: "新增上游账号", exact: true }).click();
   await drawer.getByLabel("监控方式", { exact: true }).click(); await page.getByText("New API · Key 额度", { exact: true }).last().click();
+  await drawer.getByRole("combobox", { name: "接入账单授权", exact: true }).click(); await page.getByText("补充账号账单授权", { exact: true }).last().click();
   await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-abandoned-dedicated-authorization"); await drawer.getByRole("button", { name: "返回复用已有上游", exact: true }).click();
   assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0); assert.equal(await drawer.getByLabel("账单站点地址", { exact: true }).count(), 0);
   await chooseKey(page, drawer); await verifyOnboarding(drawer); await saveOnboarding(drawer);

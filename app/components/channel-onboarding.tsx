@@ -367,7 +367,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
   const changeForm = (changed: any, target: any) => {
     if (changed.type) {
       const allowed = CREDENTIALS[changed.type] || []; target.setFieldsValue(Object.fromEntries(["accessToken", "userId", "apiKey", "email", "password"].filter((key) => !allowed.includes(key)).map((key) => [key, ""])));
-      if (target === form) { setMonitor(monitorMode === "add" || monitorMode === "replace"); if (billing) setAuthorizationId(changed.type === "newapi-key" ? upstreams.some((resource) => resource.type !== "newapi-key") ? "" : "new" : "self"); }
+      if (target === form && billing) setAuthorizationId(changed.type === "newapi-key" ? upstreams.some((resource) => resource.type !== "newapi-key") ? "" : "new" : "self");
     }
     if (Object.keys(changed).some((key) => key !== "name")) invalidate(true);
   };
