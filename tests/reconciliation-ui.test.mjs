@@ -689,6 +689,23 @@ test("returning from a new pure Key to a saved account clears the hidden dedicat
   assert.equal(probes.length, 1); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal("reconciliationAuthorization" in probes[0].selections[0], false); assert.equal("reconciliationAuthorization" in writes[0].selections[0], false); assert.doesNotMatch(JSON.stringify(writes), /fixture-abandoned-dedicated-authorization/);
 });
 
+test("billing-only purpose survives opening a new account and returning to saved reuse", async (t) => {
+  const { page, writes } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page);
+  await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).uncheck(); await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check();
+  await drawer.getByRole("button", { name: "新增上游账号", exact: true }).click(); assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isChecked(), false);
+  await drawer.getByRole("button", { name: "返回复用已有上游", exact: true }).click(); assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isChecked(), false);
+  await enableBilling(page, drawer); await saveOnboarding(drawer); assert.equal(writes[0].selections[0].monitor, false); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal("newStation" in writes[0].selections[0], false); assert.deepEqual(writes[0].selections[0].additionalMonitorStationIds, []);
+});
+
+test("billing-only purpose survives selecting a different saved account", async (t) => {
+  const config = onboardingFixture(); config.upstreams.push({ ...config.upstreams[0], id: "account-B", name: "Account B", baseUrl: "https://b.example", identity: { provider: "newapi", accountId: "84" } });
+  const { page, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page);
+  await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).uncheck(); await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check();
+  await drawer.getByRole("combobox", { name: "接入上游资源", exact: true }).fill("Account B"); await page.getByText("Account B · New API · 账号余额 · 账号 84", { exact: true }).last().click();
+  assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isChecked(), false); await enableBilling(page, drawer, "New Key"); await saveOnboarding(drawer);
+  assert.equal(writes[0].selections[0].monitor, false); assert.equal(writes[0].selections[0].stationId, "account-B"); assert.equal(writes[0].groups[0].reconciliation.tokenId, 8); assert.equal("reconciliationAuthorization" in writes[0].selections[0], false); assert.deepEqual(writes[0].selections[0].additionalMonitorStationIds, []);
+});
+
 test("partial additional Key monitoring preserves the primary account billing authorization when retried", async (t) => {
   const config = onboardingFixture(); config.upstreams.push({ id: "extra-key", name: "Additional pure Key", type: "newapi-key", baseUrl: "https://up.example", monitorEnabled: true });
   const { page, probes, writes } = await openOnboardingPage(t, { config, connect(body, count, probe) {
