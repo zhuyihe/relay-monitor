@@ -58,7 +58,7 @@ test("F02 legacy helper rejects unknown hint reuse after a normal Store identity
   const f = await legacyUpstreamFixture(t);
   await f.store.update(f.station.id, { userId: "2" }); assert.equal(f.station.verifiedIdentity, null);
   const before = structuredClone(f.store.data), writes = f.state.writes;
-  await assert.rejects(connectNewApiUpstream(f.rt, { ...f.input, accessToken: "legacy-B" }), /旧资源身份/);
+  await assert.rejects(connectNewApiUpstream(f.rt, { ...f.input, accessToken: "legacy-B" }), { code: "IDENTITY_CONFLICT" });
   assert.ok(f.state.requests.some((request) => request.token === "Bearer legacy-A"));
   assert.deepEqual(f.store.data, before); assert.equal(f.state.writes, writes);
 });
@@ -89,7 +89,7 @@ test("F02 legacy helper keeps same-panel different actual accounts separate", as
 
 test("F02 legacy helper cannot reuse stored verified identity when current credentials fail", async (t) => {
   const f = await legacyUpstreamFixture(t), before = structuredClone(f.store.data); f.state.failCandidate = true;
-  await assert.rejects(connectNewApiUpstream(f.rt, f.input), /旧资源身份/);
+  await assert.rejects(connectNewApiUpstream(f.rt, f.input), { code: "IDENTITY_CONFLICT" });
   assert.deepEqual(f.store.data, before); assert.equal(f.state.writes, 0);
 });
 
@@ -102,7 +102,7 @@ for (const patch of [{ accessToken: "edited-A" }, { monitorEnabled: false }]) {
         afterEdit = structuredClone(f.store.data); writes = f.state.writes;
       }
     };
-    await assert.rejects(connectNewApiUpstream(f.rt, f.input), /候选资源配置已变化/);
+    await assert.rejects(connectNewApiUpstream(f.rt, f.input), { code: "AUTHORIZATION_CHANGED" });
     assert.deepEqual(f.store.data, afterEdit); assert.equal(f.state.writes, writes);
   });
 }
@@ -320,7 +320,7 @@ test("U04 genuine Provider+Store+关系Repository HTTP probe零保存，三个el
   assert.doesNotMatch(JSON.stringify(probe), /replacement-A|st_u04_a1-A|denied-A|forged|authorizationUpdateRef|password|digest/);
   assert.deepEqual(f.store.data, before); assert.equal(f.state.commits, 0);
   const wrong = await f.http("probeAccountAuthorization", { ...f.input, requestId: "wrong", authorization: { ...f.input.authorization, accessToken: "replacement-B" } });
-  assert.equal(wrong.status, 400); assert.equal((await wrong.json()).code, "ACCOUNT_IDENTITY_CHANGED"); assert.equal(f.state.commits, 0);
+  assert.equal(wrong.status, 400); assert.equal((await wrong.json()).code, "AUTHORIZATION_ACCOUNT_MISMATCH"); assert.equal(f.state.commits, 0);
   const result = await (await f.http("updateAccountAuthorization", { ...input, previewId: probe.previewId })).json();
   assert.equal(result.complete, false); assert.equal(result.targets.length, Object.keys(f.ids).length);
   assert.equal(result.targets.filter((target) => target.status === "updated").length, 3);
@@ -1991,7 +1991,7 @@ test("legacy account with identical PAT can be reused without a stored user ID",
 test("failed provider verification is redacted and cannot persist a monitor", async () => {
   const state = fixture();
   await assert.rejects(connectNewApiUpstream(state.rt, input, async () => { throw new Error("token secret-pat denied"); }), (err) => !err.message.includes("secret-pat"));
-  await assert.rejects(connectNewApiUpstream(state.rt, input, async () => ({})), /无法确认上游账号身份/);
+  await assert.rejects(connectNewApiUpstream(state.rt, input, async () => ({})), { code: "USER_ID_REQUIRED" });
   assert.equal(state.writes(), 0);
 });
 
@@ -2460,7 +2460,7 @@ test("未验证 total 的缺项保留原目录状态，TTL过期阻断新精确�
   assert.equal(f.module.inspectSource(f.state.rules[0]).status, "confirmed");
   f.state.now += 5 * 60000 + 1;
   assert.equal(f.module.inspectSource(f.state.rules[0]).status, "unavailable");
-  await assert.rejects(f.module.probe({ ...f.request(), stationId: f.state.links[0].stationId, newStation: undefined }), /目录已过期/);
+  await assert.rejects(f.module.probe({ ...f.request(), stationId: f.state.links[0].stationId, newStation: undefined }), { code: "CHANNEL_CATALOGUE_STALE" });
 });
 
 test("Sub2 首次选实际 Key 后核验已结束完整日，JWT和密码模式均能解锁账单配置", async () => {
@@ -2766,4 +2766,20 @@ test("接入失败边界独立脱敏对账错误中的本站旧值、现值和�
     assert.equal(JSON.stringify(result).includes(secret), false);
   }
   assert.equal(result.retryInput.stationId, result.saved.stationIds[0]);
+});
+
+test("渠道列表：还没设置自营站点、也从没读到过渠道时返回空列表，不报错", async (t) => {
+  const fail = async () => { throw new Error("must not request upstreams"); };
+  t.mock.method(globalThis, "fetch", fail);
+  const store = { list: () => [], get: () => undefined };
+  const rt = { store, reconciliation: { listRules: async () => [] } };
+  const repository = { getCatalogue: async () => null, listLinks: async () => [], saveLinks: fail, saveCatalogue: fail };
+  rt.channelOnboarding = await createChannelOnboardingModule(rt, { repository, now: () => Date.parse("2026-10-09T07:00:00Z"),
+    queryChannels: fail, queryIdentity: fail, queryMetadata: fail, queryMonitor: fail }).load();
+  const listed = await rt.channelOnboarding.list();
+  assert.deepEqual(listed.channels, []);
+  assert.equal(listed.ownStation, null);
+  const synced = await rt.channelOnboarding.sync();
+  assert.deepEqual(synced.channels, []);
+  assert.equal(synced.errorCode, "OWN_STATION_UNSET");
 });

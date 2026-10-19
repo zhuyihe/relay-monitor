@@ -5,6 +5,20 @@ import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, 
   ledgerInsertValues } from "../lib/reconciliation-ledger.js";
 import { applyScopePolicy, billingDayOf, isCompletedBillingWindow, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 
+// MySQL 版和测试用的内存版（server/test-support）抛同一个码、同一句话；页面按码归类成用户看的话（lib/error-copy.js），这里的话只给开发看
+const REPOSITORY_ERRORS = Object.freeze({
+  RULE_NOT_FOUND: "这条绑定已解除",
+  CURRENT_SEGMENT_MISSING: "这条绑定缺少当前的倍率时段",
+  RESOURCE_CHANGED: "这一段前面没有倍率变化，不能改时间",
+  TRANSITION_TIME_OUT_OF_RANGE: "改的时间要在前后两次倍率变化之间",
+  SOURCE_BINDING_UNCONFIRMED: "上游账号或自营站点变了，请确认这条绑定",
+  LEGACY_IDENTITY_UNVERIFIED: "以前的绑定没记下上游账号，请确认这条绑定的上游账号和自营站点",
+});
+
+export function repositoryError(code) {
+  return Object.assign(new Error(REPOSITORY_ERRORS[code]), { code });
+}
+
 export function uid(prefix) {
   return `${prefix}_${Math.random().toString(36).slice(2, 9)}${Date.now().toString(36).slice(-4)}`;
 }
@@ -277,7 +291,7 @@ export class ReconciliationRepository {
     try {
       await conn.beginTransaction();
       const [rows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
-      if (!rows.length) throw new Error("核算关联不存在或已归档");
+      if (!rows.length) throw repositoryError("RULE_NOT_FOUND");
       const [channelRows] = await conn.query("SELECT * FROM reconciliation_rule_channels WHERE rule_id = ? FOR UPDATE", [id]);
       const existing = ruleFromRow(rows[0], channelRows);
       input = applyScopePolicy(existing, input, Date.now(), { append });
@@ -293,7 +307,7 @@ export class ReconciliationRepository {
           input.billingPolicy, input.scopeVersion, input.billingEffectiveFrom, input.costCoverage,
           input.provider, input.canonicalKey, JSON.stringify(serializeRuleSourceBinding(input)), id]
       );
-      if (!result.affectedRows) throw new Error("核算关联不存在或已归档");
+      if (!result.affectedRows) throw repositoryError("RULE_NOT_FOUND");
       // 保留仍在关联里的渠道行（连同已观测到的状态列），只删掉移除的、插入新增的。
       const kept = new Set(channelRows.map((row) => Number(row.channel_id)));
       const channelIds = input.channels.map((channel) => Number(channel.channelId));
@@ -336,7 +350,7 @@ export class ReconciliationRepository {
       const rule = ruleFromRow(rows[0], channels);
       if (reconciliationScopeFingerprint(rule, segments.map(segmentFromRow)) !== expectedScopeFingerprint) { await conn.commit(); return null; }
       if ((rule.canonicalKey && rule.canonicalKey !== canonicalKey) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource?.namespaceKey)) {
-        throw Object.assign(new Error("原始账号或本站来源已变化，请明确确认新范围"), { code: "SOURCE_BINDING_UNCONFIRMED" });
+        throw repositoryError("SOURCE_BINDING_UNCONFIRMED");
       }
       if (!rule.canonicalKey || !rule.ownSource) {
         const [history] = await conn.query("SELECT source FROM reconciliation_snapshots WHERE rule_id = ? ORDER BY generated_at DESC LIMIT 1", [id]);
@@ -346,7 +360,7 @@ export class ReconciliationRepository {
         const observed = channels.some((channel) => channel.status_observed_at_ms != null) || segments.some((segment) => segment.timing_source === "detected"
           || (segment.ratio_source === "group_catalog" && Number(segment.ratio_observed_at_ms) > Number(segment.effective_from_ms)));
         if (!originalMatches && !(allowInitialAnchoring && !history.length && !observed)) {
-          throw Object.assign(new Error("旧核算关联缺少可信原始身份，保留金额参考；请明确确认新的账号和本站范围"), { code: "LEGACY_IDENTITY_UNVERIFIED" });
+          throw repositoryError("LEGACY_IDENTITY_UNVERIFIED");
         }
         await conn.query("UPDATE reconciliation_rules SET provider = ?, canonical_key = ?, source_binding = ? WHERE id = ? AND archived_at IS NULL",
           [rule.provider || provider, rule.canonicalKey || canonicalKey, JSON.stringify(serializeRuleSourceBinding({ ...rule, ownSource: rule.ownSource || ownSource })), id]);
@@ -419,7 +433,7 @@ export class ReconciliationRepository {
       const [rules] = await conn.query(
         "SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]
       );
-      if (!rules.length) throw new Error("核算关联不存在或已停止");
+      if (!rules.length) throw repositoryError("RULE_NOT_FOUND");
       const [rows] = await conn.query(
         `SELECT * FROM reconciliation_rule_segments
          WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC, effective_to_ms IS NOT NULL DESC, effective_to_ms ASC FOR UPDATE`, [ruleId]
@@ -436,7 +450,7 @@ export class ReconciliationRepository {
         if (Number(result.affectedRows || 0)) row.group_ratio = knownRatio;
       }
       const current = rows.find((row) => row.effective_to_ms == null);
-      if (!current) throw new Error("核算关联缺少当前分段");
+      if (!current) throw repositoryError("CURRENT_SEGMENT_MISSING");
       const currentRatio = current.group_ratio == null ? null : Number(current.group_ratio);
       const nextRatio = ratio == null ? null : Number(ratio);
       const sameGroup = current.group_name === group;
@@ -487,7 +501,7 @@ export class ReconciliationRepository {
          WHERE rule_id = ? AND effective_to_ms IS NULL FOR UPDATE`, [ruleId]
       );
       const current = rows[0];
-      if (!current) throw new Error("核算关联缺少当前分段");
+      if (!current) throw repositoryError("CURRENT_SEGMENT_MISSING");
       const currentRatio = current.group_ratio == null ? null : Number(current.group_ratio);
       const nextRatio = ratio == null ? null : Number(ratio);
       const sameGroup = current.group_name === group;
@@ -542,11 +556,11 @@ export class ReconciliationRepository {
         effectiveFrom: Number(row.effective_from_ms),
       }));
       const index = segments.findIndex((segment) => segment.id === segmentId);
-      if (index <= 0) throw new Error("只能修正有前序分段的切换时间");
+      if (index <= 0) throw repositoryError("RESOURCE_CHANGED");
       const previous = segments[index - 1];
       const next = segments[index + 1];
       if (!Number.isFinite(at) || at <= previous.effectiveFrom || (next && at >= next.effectiveFrom)) {
-        throw new Error("切换时间必须位于相邻分段之间");
+        throw repositoryError("TRANSITION_TIME_OUT_OF_RANGE");
       }
       await conn.query(
         `UPDATE reconciliation_rule_segments
@@ -573,7 +587,7 @@ export class ReconciliationRepository {
       const [rules] = await conn.query(
         "SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]
       );
-      if (!rules.length) throw new Error("核算关联不存在或已停止");
+      if (!rules.length) throw repositoryError("RULE_NOT_FOUND");
       for (const state of states) await conn.query(
         `UPDATE reconciliation_rule_channels
          SET status_changed_at_ms = CASE WHEN channel_status <=> ? THEN status_changed_at_ms ELSE ? END,

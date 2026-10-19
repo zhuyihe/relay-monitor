@@ -19,6 +19,10 @@ const DAY = 24 * HOUR;
 const EFFECTIVE_FROM = 1_700_000_000_000;
 const UPSTREAM_IDENTITY = { provider: "newapi", baseUrl: "https://upstream.contract.invalid", accountId: "42" };
 
+// 两个仓库抛同一个码和同一句话（server/reconciliation-repository.js 的 repositoryError）
+const notFound = { code: "RULE_NOT_FOUND", message: "这条绑定已解除" };
+const noPrevious = { code: "RESOURCE_CHANGED", message: "这一段前面没有倍率变化，不能改时间" };
+const outOfRange = { code: "TRANSITION_TIME_OUT_OF_RANGE", message: "改的时间要在前后两次倍率变化之间" };
 const randomInt = (min, span) => min + Math.floor(Math.random() * span);
 const sortConflicts = (list) => [...list].sort((a, b) => a.channelId - b.channelId || a.ruleId.localeCompare(b.ruleId));
 const alertColumns = (row) => row && Object.fromEntries(["rule_id", "event_code", "active", "first_seen_at", "last_seen_at", "last_notified_at", "recovered_at"]
@@ -337,10 +341,10 @@ contract("updateRule keeps surviving channel rows with their status, replaces th
   assert.equal(renamed.scopeVersion, 3);
   assert.equal(renamed.billingEffectiveFrom, readded.billingEffectiveFrom);
 
-  await assert.rejects(repository.updateRule(`rr_missing${fixture.tag}`, { tokenName: "x" }), /核算关联不存在或已归档/);
+  await assert.rejects(repository.updateRule(`rr_missing${fixture.tag}`, { tokenName: "x" }), notFound);
   const archived = await fixture.createRule({ tokenId: fixture.token(5), channels: [{ channelId: fixture.channel(5), name: "Five" }] });
   await repository.archiveRule(archived.id);
-  await assert.rejects(repository.updateRule(archived.id, { tokenName: "x" }), /核算关联不存在或已归档/);
+  await assert.rejects(repository.updateRule(archived.id, { tokenName: "x" }), notFound);
 });
 
 contract("updateRule rolls back the rule and the deleted channel set on a duplicate channel key", async ({ repository, fixture }) => {
@@ -527,9 +531,9 @@ contract("observeSource backfills, splits on group or ratio change and records t
   assert.equal(stored.tokenName, "Free token");
   assert.deepEqual(await repository.listSegments(rule.id), unknownRatio.segments);
 
-  await assert.rejects(repository.observeSource(`rr_missing${fixture.tag}`, { groups, group: "vip", ratio: 2, tokenName: "x", detectedAt: t5 }), /核算关联不存在或已停止/);
+  await assert.rejects(repository.observeSource(`rr_missing${fixture.tag}`, { groups, group: "vip", ratio: 2, tokenName: "x", detectedAt: t5 }), notFound);
   await repository.archiveRule(rule.id);
-  await assert.rejects(repository.observeSource(rule.id, { groups, group: "vip", ratio: 2, tokenName: "x", detectedAt: t5 }), /核算关联不存在或已停止/);
+  await assert.rejects(repository.observeSource(rule.id, { groups, group: "vip", ratio: 2, tokenName: "x", detectedAt: t5 }), notFound);
 });
 
 contract("reconcileCurrentSegment backfills and splits segments without touching the rule row", async ({ repository, fixture }) => {
@@ -568,7 +572,7 @@ contract("reconcileCurrentSegment backfills and splits segments without touching
   assert.deepEqual(ratioChange.currentSegment && [ratioChange.currentSegment.group, ratioChange.currentSegment.ratio, ratioChange.currentSegment.effectiveFrom], ["pro", 5, t4]);
   assert.deepEqual((await repository.transitionSegment(rule.id, { group: "pro", ratio: 5, detectedAt: t4 + HOUR })), ratioChange.segments);
 
-  await assert.rejects(repository.reconcileCurrentSegment(`rr_missing${fixture.tag}`, { group: "vip", ratio: 1, detectedAt: t4 }), /核算关联缺少当前分段/);
+  await assert.rejects(repository.reconcileCurrentSegment(`rr_missing${fixture.tag}`, { group: "vip", ratio: 1, detectedAt: t4 }), { code: "CURRENT_SEGMENT_MISSING", message: "这条绑定缺少当前的倍率时段" });
 });
 
 contract("a transition detected before the current segment started closes it at zero length, ordered before the open segment", async ({ repository, fixture }) => {
@@ -592,11 +596,11 @@ contract("correctTransition moves a transition between its neighbours only", asy
   const { segments } = await repository.observeSource(rule.id, { groups: {}, group: "pro", ratio: 3, tokenName: "Pro", detectedAt: t2 });
   const [first, middle, last] = segments;
 
-  await assert.rejects(repository.correctTransition(rule.id, first.id, EFFECTIVE_FROM + HOUR), /只能修正有前序分段的切换时间/);
-  await assert.rejects(repository.correctTransition(rule.id, `rs_missing${fixture.tag}`, EFFECTIVE_FROM + HOUR), /只能修正有前序分段的切换时间/);
-  await assert.rejects(repository.correctTransition(rule.id, middle.id, EFFECTIVE_FROM), /切换时间必须位于相邻分段之间/);
-  await assert.rejects(repository.correctTransition(rule.id, middle.id, t2), /切换时间必须位于相邻分段之间/);
-  await assert.rejects(repository.correctTransition(rule.id, middle.id, Number.NaN), /切换时间必须位于相邻分段之间/);
+  await assert.rejects(repository.correctTransition(rule.id, first.id, EFFECTIVE_FROM + HOUR), noPrevious);
+  await assert.rejects(repository.correctTransition(rule.id, `rs_missing${fixture.tag}`, EFFECTIVE_FROM + HOUR), noPrevious);
+  await assert.rejects(repository.correctTransition(rule.id, middle.id, EFFECTIVE_FROM), outOfRange);
+  await assert.rejects(repository.correctTransition(rule.id, middle.id, t2), outOfRange);
+  await assert.rejects(repository.correctTransition(rule.id, middle.id, Number.NaN), outOfRange);
   assert.deepEqual(await repository.listSegments(rule.id), segments);
 
   const corrected = await repository.correctTransition(rule.id, middle.id, t1 - HOUR);
@@ -635,9 +639,9 @@ contract("updateChannelStates records status, observation time and the time the 
   const listed = (await fixture.mine()).find((item) => item.id === rule.id);
   assert.deepEqual(listed.channels, (await repository.getRule(rule.id)).channels);
 
-  await assert.rejects(repository.updateChannelStates(`rr_missing${fixture.tag}`, [{ channelId: c1, state: "enabled" }], t3), /核算关联不存在或已停止/);
+  await assert.rejects(repository.updateChannelStates(`rr_missing${fixture.tag}`, [{ channelId: c1, state: "enabled" }], t3), notFound);
   await repository.archiveRule(rule.id);
-  await assert.rejects(repository.updateChannelStates(rule.id, [{ channelId: c1, state: "enabled" }], t3), /核算关联不存在或已停止/);
+  await assert.rejects(repository.updateChannelStates(rule.id, [{ channelId: c1, state: "enabled" }], t3), notFound);
 });
 
 contract("archiveRule archives once and releases the token and channel keys", async ({ repository, fixture }) => {

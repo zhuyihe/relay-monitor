@@ -1,5 +1,6 @@
 // "需要处理"列表：紧急在前，每条一句话说清对象、问题和下一步。
 import type { ReactNode } from "react";
+import { NOTHING_TO_HANDLE } from "../../lib/format";
 import { Sym } from "./icons";
 import { LEVEL_LABEL, StatusSym } from "./status";
 
@@ -16,8 +17,8 @@ export type AttentionItem = {
 
 export function AttentionList({
   items,
-  emptyTitle = "一切正常",
-  emptyDesc = "没有需要处理的上游资源。",
+  emptyTitle = NOTHING_TO_HANDLE,
+  emptyDesc,
   more,
 }: {
   items: AttentionItem[];

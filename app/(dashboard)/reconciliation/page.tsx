@@ -1,34 +1,43 @@
 "use client";
-// 账单核算：只读查看每条核算关联在所选窗口的本站收费、上游成本和毛利。
-// 页面查询不写库、不产生告警；「刷新」和单行「重试」才让服务端观测并保存。接入、编辑、停止都到上游账单处理。
+// 每日利润：只读查看每条绑定在所选日期里的收入、上游成本和毛利。
+// 页面查询不写库、不产生提醒；「刷新」和单行「重新读取」才让服务端读取并保存。去绑定、改绑定、解除绑定都到上游账单。
+// 用语按 design/ui-copy-spec.md；报错原文只放进「查看详细原因」（§8.2）。
 import "../../styles/pages/reconciliation.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, App, Button, DatePicker, Drawer, Grid } from "antd";
 import { readWorkflowDestination } from "../../../lib/client";
+import { BINDING_COPY } from "../../../lib/channel-onboarding.js";
+import { DESTINATION_CHANGED } from "../../../lib/workflow-actions";
 import type { KnownChannelCoverage, ReconciliationCurrency, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream, WorkflowDestination } from "../../../lib/client";
-import { summarizeReconciliationFreshness } from "../../../lib/reconciliation-view";
-import { NAV_LABELS } from "../../../lib/brand";
+import { reconciliationKeyNamer, reconciliationRowFlags } from "../../../lib/reconciliation-view";
+import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
+import { OWN_STATION_UNSET, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, RATE_UNSET_USD, formatAsOf, formatDayZone, refreshFailedText } from "../../../lib/format";
 import AppState from "../../components/app-state";
+import { ErrorState, PanelSkeleton } from "../../components/data-state";
+import { describeError, failureText } from "../../../lib/error-copy";
+import { ErrorDetail } from "../../components/error-detail";
 import { Seg } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
 import { useDrawerEscape } from "../../components/drawer-escape";
-import { PRESETS, formatRecentTime, formatTime, formatWindow, isFixedCost, iso, sameRequestedWindow, sameWindow, upstreamBillsHref } from "./recon-format";
+import { PRESETS, RECON_BUTTONS, SETUP_HREF, formatWindow, isFixedCost, sameRequestedWindow, sameWindow } from "./recon-format";
 import type { ReconWindow } from "./recon-format";
 import { useReconWindow } from "./use-recon-window";
 import { useReconDetail } from "./use-recon-detail";
 import { useReconResults } from "./use-recon-results";
 import { useConfirmedHistory } from "./use-confirmed-history";
 import { ReconCoverage, ReconSummary, ReconWindowGroups } from "./recon-summary";
+import type { SummaryStale } from "./recon-summary";
 import { ReconList } from "./recon-list";
-import { ConflictRules, ReconDetail } from "./recon-detail";
+import { ReconDetail } from "./recon-detail";
 import { ReconHistory } from "./recon-history";
 
 const { RangePicker } = DatePicker;
 
-const DESTINATION_TITLE: Record<string, string> = { retry: "重查原账单窗口", conflict: "处理重复销售归属" };
+// 从提醒或上游账单的链接进来时，链接指的那条绑定对不上（§8.1、§8.2）
+const REMOVED = describeError({ code: "RULE_NOT_FOUND" }).text;
 
-// 所有关联请求的是同一个窗口（时区相同；今天、近 7 天、本月同一起点，各自截止到取数时刻）时才有共同窗口可显示，
-// 实时窗口取最早的截止点
+// 所有绑定请求的是同一段时间（时区相同；今天、近 7 天、本月同一起点，各自截止到取数时刻）时才有共同的日期可显示，
+// 截至现在的取最早的截止点
 function commonWindow(results: any[]) {
   const windows = results.map((item: any) => item.requestedWindow || item.window).filter(Boolean);
   const first = windows[0];
@@ -36,21 +45,27 @@ function commonWindow(results: any[]) {
   return { ...first, endMs: Math.min(...windows.map((window: any) => window.endMs)) };
 }
 
+// 页面选的日期范围是否就是 data 读的那个
+const sameRange = (a: ReconWindow | null, b: ReconWindow) => !!a && a.preset === b.preset && a.startMs === b.startMs && a.endMs === b.endMs;
+
 export default function ReconciliationPage() {
   const { message } = App.useApp();
   const compact = !Grid.useBreakpoint().md;
   const [destination, setDestination] = useState<WorkflowDestination | null>(null);
   const [workflowError, setWorkflowError] = useState("");
+  const [destinationClosed, setDestinationClosed] = useState(false);
   const destinationResolved = useRef(false);
 
   const detailState = useReconDetail();
   const recon = useReconWindow({ onRowReplaced: detailState.replace });
-  const { config, data, loading, querying, error, preset, activeWindow, range, summaryStale, summaryError, usageRereading, retryingRuleIds, ruleRetryErrors } = recon;
+  const { config, data, loading, querying, error, preset, activeWindow, loadedWindow, range, summaryStale, summaryError, usageRereading, retryingRuleIds, ruleRetryErrors } = recon;
   const results: any[] = useMemo(() => data?.results || [], [data]);
-  // 金额默认按系统原值（USD）显示；本站和涉及的上游都设置了汇率时，服务端才让整页按人民币显示
+  // 列表、抽屉和链接提示里同一把 Key 同一个名字：同名的都加上编号（§3.1）
+  const keyName = useMemo(() => reconciliationKeyNamer(results.map((item) => item.rule)), [results]);
+  // 金额默认按系统原值（USD）显示；自营站点和涉及的上游都设置了汇率时，服务端才让整页按人民币显示
   const currency: ReconciliationCurrency = data?.displayCurrency === "CNY" ? "CNY" : "USD";
   const unconfiguredRateStations: { id: string; name: string }[] = data?.unconfiguredRateStations || [];
-  // 固定采购的关联建在没开监控、不计入成本或已归档的站点上时，自营业务页也不摊销这些站点的采购费（服务端点名）
+  // 包月上游暂停监控、不算进利润或已归档时，自营业务页也不算它们的固定成本（服务端点名）
   const fixedOffProfit: string[] = (data?.fixedOffProfitStations || []).map((station: { name: string }) => station.name);
   const list = useReconResults({ results, upstreams: config?.upstreams, compact, currency });
   const history = useConfirmedHistory();
@@ -58,19 +73,22 @@ export default function ReconciliationPage() {
 
   const workflowRow = results.find((item: any) => item.rule?.id === destination?.ruleId);
   const workflowRule = (config?.rules || []).find((rule: any) => rule.id === destination?.ruleId);
-  const conflictIds: string[] = destination?.action === "conflict"
-    ? [...new Set<string>((workflowRow?.health?.issues || []).flatMap((issue: any) => issue.ruleIds || []).concat(destination.ruleId || []))]
-    : [];
   const windowGroups: ReconciliationWindowGroup[] = data?.windowGroups || [];
   const commonSummary: ReconciliationSummary | null = data?.commonSummary || null;
   const coverage: KnownChannelCoverage | null = data?.coverage || null;
   const unaccounted: UnaccountedUpstream | null = data?.unaccountedUpstream || null;
-  const latestSuccessful = results.filter((item: any) => item.lastSuccessfulAt)
-    .reduce((latest: any, item: any) => !latest || Date.parse(item.lastSuccessfulAt) > Date.parse(latest.lastSuccessfulAt) ? item : latest, null);
-  const freshness = summarizeReconciliationFreshness(results);
   const sharedWindow = commonWindow(results);
-  const displayTimezone = sharedWindow?.timezone || "Asia/Shanghai";
-  const reference = Boolean(data && (error || querying || summaryStale || retryingRuleIds.size));
+  const businessTimezone: string | undefined = data?.tz;
+  const asOf = data?.generatedAt ? Date.parse(data.generatedAt) : NaN;
+  const asOfText = Number.isFinite(asOf) ? formatAsOf(asOf, businessTimezone) : "";
+  // 换了日期范围、新数据还没回来：旧数字属于别的日期，汇总不显示，列表变淡
+  const switching = Boolean(data && querying && !sameRange(loadedWindow, activeWindow));
+  // 读的不是现在选的日期（还没点「查询」，或换范围没读到）：日期前写「当前显示」
+  const elsewhere = Boolean(loadedWindow && (loadedWindow.preset !== preset || !sameRange(loadedWindow, activeWindow)));
+  const summaryState: SummaryStale = switching ? { kind: "switching" }
+    : error ? null
+      : summaryError ? { kind: "failed", asOf: Number.isFinite(asOf) ? asOf : null, timezone: businessTimezone, raw: summaryError }
+        : summaryStale ? { kind: "reading" } : null;
 
   const openDetail = (item: any) => { history.close(); void detailState.open(item); };
   const openHistory = (id?: string) => { detailState.clear(); history.show(id); };
@@ -78,15 +96,14 @@ export default function ReconciliationPage() {
   const drawerOpen = history.open || !!detail;
   useDrawerEscape(drawerOpen, closeDrawer);
 
-  // 首屏：读处理目标（来自告警或上游账单的深链），按目标决定初始窗口
+  // 首屏：读链接里要处理的那条（来自提醒或上游账单），按它决定初始日期
   useEffect(() => {
     const target = readWorkflowDestination(window.location.search, "reconciliation");
     setDestination(target);
     void recon.initialize((current: any): ReconWindow => {
       const rule = current?.rules?.find((item: any) => item.id === target?.ruleId);
       if (target?.error) setWorkflowError(target.error);
-      else if (target && !rule) setWorkflowError("此核算关联已删除或不在当前目录中，请刷新事项后重新打开；已保存的历史账单仍可从历史入口查看。");
-      else if (target?.action === "retry" && (!rule.enabled || rule.archivedAt)) setWorkflowError("此核算关联已停止核算，不能重查新账单；可读取原确认历史。");
+      else if (target && (!rule || !rule.enabled || rule.archivedAt)) setWorkflowError(REMOVED);
       return target?.action === "retry" && target.window && !target.error && rule?.enabled && !rule.archivedAt
         ? { preset: "custom", startMs: target.window.startMs, endMs: target.window.endMs }
         : { preset: "yesterday" };
@@ -95,43 +112,53 @@ export default function ReconciliationPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 第一次读到数据后定位到那条，打开计算明细；之后的单行重新读取不再重复打开
   useEffect(() => {
     if (!destination || destinationResolved.current || !data || !config || workflowError) return;
     destinationResolved.current = true;
     if (destination.action === "retry" && !sameWindow(destination.window, workflowRow?.requestedWindow || workflowRow?.window)) {
-      setWorkflowError("当前关联的请求窗口或时区已变化，请刷新事项后从当前账单重新打开。");
+      setWorkflowError(DESTINATION_CHANGED);
       return;
     }
     if (workflowRow) { list.setExpandedRuleId(workflowRow.rule.id); openDetail(workflowRow); }
-  // 目标只在首个当前公共响应完成后定位，后续行重试不重复打开抽屉。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [destination, data, config, workflowError]);
 
   const rangeControl = useMemo(
-    () => <div className="jy-range"><Seg label="核算时间范围" options={PRESETS} value={preset} onChange={recon.selectPreset} /></div>,
+    () => <div className="jy-range"><Seg label="时间范围" options={PRESETS} value={preset} onChange={recon.selectPreset} /></div>,
     // selectPreset 每次渲染新建，但只依赖 preset
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [preset],
   );
-  const asOf = data?.generatedAt ? Date.parse(data.generatedAt) : NaN;
-  // 首屏读完配置、定下初始窗口之前不放出时间范围和刷新，免得早点的预设被初始化覆盖、和显示的数据错位
+  // 首屏读完配置、定下初始日期之前不放出时间范围和刷新，免得早点的预设被初始化覆盖、和显示的数据错位
   const ready = !loading && !!config;
   useShellPage({
     onRefresh: ready ? () => recon.loadWindow(activeWindow, true, true) : undefined,
     asOf: Number.isFinite(asOf) ? asOf : null,
     range: ready ? rangeControl : undefined,
     autoRefreshMs: recon.pollMs,
+    tz: businessTimezone,
   });
 
   const queryCustom = async () => {
-    if (!(await recon.queryCustom())) message.warning("请先选择开始与结束时间");
+    if (!(await recon.queryCustom())) message.warning("请选开始和结束日期");
   };
 
-  if (loading) return <AppState kind="loading" title="正在读取账单核算" description="正在汇总上游实际消费与本站渠道收费。" />;
-
-  if (!config && error) {
-    return <AppState kind="error" title="无法加载账单核算" description={error} actions={<Button type="primary" onClick={() => window.location.reload()}>重新加载</Button>} />;
+  if (loading) {
+    return <div className="jy-page reconciliation-page">
+      <PanelSkeleton title="汇总" lines={3} />
+      <PanelSkeleton title="绑定列表" lines={6} />
+    </div>;
   }
+
+  // 整块读不到（§8.1）：「读不到每日利润：原因。」原因按报错归类，原文收进「查看详细原因」
+  const blockError = (onRefresh: () => void) => <div className="jy-page reconciliation-page">
+    <ErrorState center title={failureText(`读不到${NAV_LABELS.reconciliation}`, error)} extra={<>
+      <Button type="primary" loading={querying} onClick={onRefresh}>{RECON_BUTTONS.refresh}</Button>
+      <ErrorDetail raw={error} />
+    </>} />
+  </div>;
+  if (!config && error) return blockError(() => window.location.reload());
 
   const drawer = <Drawer
     className="jy-drawer reconciliation-drawer"
@@ -141,13 +168,13 @@ export default function ReconciliationPage() {
     onClose={closeDrawer}
     keyboard={false}
     destroyOnHidden
-    title={history.open ? "已确认账单历史" : detail?.rule?.tokenName ? `${detail.rule.tokenName} · 核算详情` : "核算详情"}
+    title={history.open ? RECON_BUTTONS.history : detail?.rule ? `${keyName(detail.rule)} · 计算明细` : "计算明细"}
   >
     {history.open
-      ? <ReconHistory history={history} compact={compact} rules={config?.rules || []} upstreams={config?.upstreams} />
+      ? <ReconHistory history={history} compact={compact} rules={config?.rules || []} upstreams={config?.upstreams} businessTimezone={businessTimezone} />
       : detail ? <ReconDetail
-        detail={detail} state={detailState} currency={currency} upstreams={config?.upstreams} compact={compact}
-        conflictIds={conflictIds} results={results}
+        detail={detail} state={detailState} currency={currency} upstreams={config?.upstreams} businessTimezone={businessTimezone} compact={compact}
+        results={results} keyName={keyName}
         retrying={retryingRuleIds.has(detail.rule.id)} retryError={ruleRetryErrors[detail.rule.id]}
         onOpenHistory={openHistory} onRetry={(item) => void recon.retryRule(item)} onOpen={openDetail}
         onCorrect={() => void detailState.correctTransition(() => recon.loadWindow(activeWindow, true))}
@@ -157,105 +184,93 @@ export default function ReconciliationPage() {
   if (!config?.ownStation && !results.length && !history.open) {
     return <>
       <AppState
-        kind="empty" title="还不能开始核算" description="请先在上游资源中标记一个自己的 NewAPI 管理员站点，用于读取本站渠道收费。"
+        kind="empty" title={OWN_STATION_UNSET_TITLE} description={OWN_STATION_UNSET_HINT}
         actions={<>
-          <Button type="primary" href="/stations">前往上游资源</Button>
-          <Button onClick={() => openHistory()}>查看已确认账单历史</Button>
+          <Button type="primary" href={SETUP_HREF}>{RECON_BUTTONS.setup}</Button>
+          <Button onClick={() => openHistory()}>{RECON_BUTTONS.history}</Button>
         </>}
       />
       {drawer}
     </>;
   }
 
-  if (!data && error) {
-    return <AppState kind="error" title="无法读取核算数据" description={error} actions={<Button type="primary" loading={querying} onClick={() => recon.loadWindow(activeWindow, true)}>重新查询</Button>} />;
-  }
+  if (!data && error) return blockError(() => void recon.loadWindow(activeWindow, true));
 
-  const windowCaption = sharedWindow ? formatWindow(sharedWindow) : results.length ? "按各关联时区计算，具体时间见详情" : "选择时间范围后查询";
-  const freshnessText = !results.length ? null
-    : reference ? `上次成功窗口：${sharedWindow ? formatWindow(sharedWindow) : "见各关联详情"}（仅供参考）`
-      : freshness.staleCount ? `${freshness.staleCount} 条关联数据已过期${sharedWindow && freshness.coverageEndMs != null ? ` · 最早金额覆盖至 ${formatTime(freshness.coverageEndMs, sharedWindow.timezone)}` : ""}`
-        : latestSuccessful ? `最近成功：${formatRecentTime(latestSuccessful.lastSuccessfulAt, latestSuccessful.window?.timezone)}（${latestSuccessful.window?.timezone || "Asia/Shanghai"}）`
-          : "暂未成功（当前读取失败）";
+  const windowCaption = sharedWindow ? formatWindow(sharedWindow) : "";
+  const dayZone = sharedWindow ? formatDayZone(sharedWindow.timezone, businessTimezone) : "";
+  const shownCaption = switching ? "读取中" : elsewhere && windowCaption ? `当前显示：${windowCaption}` : windowCaption;
 
-  const destinationAlert = destination ? <Alert
-    type={workflowError ? "warning" : "info"} showIcon
-    title={workflowError || DESTINATION_TITLE[destination.action] || "查看当前范围生效时间"}
-    description={workflowError ? undefined : <div className="reconciliation-destination">
-      核算关联 {destination.ruleId}{destination.window ? ` · ${iso(destination.window.startMs)} — ${iso(destination.window.endMs)}（${destination.window.timezone}）` : ""}
-      {destination.action === "conflict" ? <div>
-        涉及关联：{conflictIds.join("、") || "当前未发现冲突"}。逐条核对后到上游账单停止其中一条；只是渠道重复时，也可以编辑渠道移除重复的渠道。历史账单保留。
-        <ConflictRules ids={conflictIds} results={results} onOpen={openDetail} />
-      </div> : null}
-    </div>}
+  // 链接指的那条：要重新读取的写这天和它的问题；对不上的写一句话（§8.1）；处理重复、开始统计的旧链接只打开计算明细
+  const retryStatus = workflowRow ? reconciliationRowFlags(workflowRow, currency).displayStatus : null;
+  // 换了日期范围以后列表里这条已经不是链接那天，不再放「重新读取」
+  const retryHere = Boolean(workflowRow && destination?.action === "retry" && sameWindow(destination.window, workflowRow.requestedWindow || workflowRow.window));
+  const destinationAlert = destination && !destinationClosed && (workflowError || (destination.action === "retry" && workflowRow)) ? <Alert
+    type={workflowError ? "warning" : "info"} showIcon closable={{ "aria-label": "关闭" }} onClose={() => setDestinationClosed(true)}
+    title={workflowError || `${keyName(workflowRow.rule)} · ${formatWindow(destination.window)}`}
+    description={!workflowError && retryStatus?.state === "action" ? retryStatus.title : undefined}
     action={<div className="reconciliation-button-row">
-      {!workflowError && destination.action === "retry" && workflowRow && sameWindow(destination.window, workflowRow.requestedWindow || workflowRow.window)
-        ? <Button loading={retryingRuleIds.has(workflowRow.rule.id)} onClick={() => void recon.retryRule(workflowRow)}>重查该窗口账单</Button>
-        : null}
-      {!workflowError && destination.action !== "retry" && workflowRule ? <Button href={upstreamBillsHref(workflowRule.id, destination.action === "conflict")}>去上游账单处理</Button> : null}
-      {workflowRule ? <Button onClick={() => openHistory(workflowRule.id)}>原确认历史</Button> : null}
-      <Button onClick={() => window.location.reload()}>刷新处理目标</Button>
-      <Button href="/reconciliation">返回当前账单</Button>
+      {!workflowError && retryHere ? <Button size="small" loading={retryingRuleIds.has(workflowRow.rule.id)} onClick={() => void recon.retryRule(workflowRow)}>{RECON_BUTTONS.retry}</Button> : null}
+      {workflowError && workflowError !== REMOVED ? <Button size="small" href="/reconciliation">{RECON_BUTTONS.refresh}</Button> : null}
+      {workflowRule ? <Button size="small" onClick={() => openHistory(workflowRule.id)}>{RECON_BUTTONS.history}</Button> : null}
     </div>}
   /> : null;
+
+  const alerts = <>
+    {destinationAlert}
+    {error ? <Alert
+      type="warning" showIcon title={refreshFailedText(Number.isFinite(asOf) ? asOf : null, businessTimezone)} description={<ErrorDetail raw={error} />}
+      action={<Button size="small" loading={querying} onClick={() => void recon.loadWindow(activeWindow, true)}>{RECON_BUTTONS.refresh}</Button>}
+    /> : null}
+    {!config?.ownStation && results.length ? <Alert type="warning" showIcon title={OWN_STATION_UNSET} action={<Button size="small" href={SETUP_HREF}>{RECON_BUTTONS.setup}</Button>} /> : null}
+    {/* 和渠道绑定里同一句「读不到自营站点的渠道：原因。」（§8.1） */}
+    {config?.channelsError ? <Alert type="warning" showIcon title={failureText(BINDING_COPY.channelsUnreadable, { code: config.channelsErrorCode, error: config.channelsError })}
+      description={<ErrorDetail raw={config.channelsError} />} /> : null}
+    {unconfiguredRateStations.length ? <Alert
+      type="info" showIcon title={RATE_UNSET_USD}
+      description={`没设置汇率的：${unconfiguredRateStations.map((station) => station.name).join("、")}`}
+      action={<Button size="small" href={SETUP_HREF}>{RECON_BUTTONS.setup}</Button>}
+    /> : null}
+  </>;
+  const hasAlerts = Boolean(destinationAlert || error || (!config?.ownStation && results.length) || config?.channelsError || unconfiguredRateStations.length);
 
   return <div className="jy-page reconciliation-page">
     <div className="reconciliation-head">
       <div className="jy-toolbar">
         {preset === "custom"
           ? <div className="reconciliation-custom">
-            <RangePicker showTime value={range} onChange={(value) => recon.setRange(value)} aria-label="自定义核算时间" />
+            <RangePicker showTime value={range} onChange={(value) => recon.setRange(value)} aria-label="自定义时间范围" />
             <Button type="primary" className="reconciliation-query-action" loading={querying} onClick={() => void queryCustom()}>查询</Button>
-            {activeWindow.preset !== "custom" && results.length ? <span className="jy-caption">当前显示：{windowCaption}</span> : null}
+            {switching || (elsewhere && windowCaption) ? <span className="jy-caption">{shownCaption}</span> : null}
           </div>
-          : <span className="reconciliation-window">{windowCaption}</span>}
-        {sharedWindow ? <span className="jy-caption">{sharedWindow.timezone}</span> : null}
+          : shownCaption ? <span className="reconciliation-window">{shownCaption}</span> : null}
+        {dayZone && !switching ? <span className="jy-caption">{dayZone}</span> : null}
         <div className="reconciliation-head__actions">
-          <Button onClick={() => openHistory()}>查看已确认账单历史</Button>
+          <Button onClick={() => openHistory()}>{RECON_BUTTONS.history}</Button>
           <Button href="/analytics">{NAV_LABELS.analytics}</Button>
-          <Button type="primary" href="/stations?view=bills">去上游账单</Button>
+          <Button type="primary" href="/stations?view=bills">去{STATION_TABS.bills}</Button>
         </div>
       </div>
-      <p className="jy-caption">实际 Key 账单与本站渠道收费，按原来源和绝对窗口核算；接入、编辑或停止核算关联请到上游账单</p>
-      {data ? <p className="reconciliation-freshness jy-caption">
-        <span>{reference ? "参考结果生成" : "显示结果生成"}：{formatRecentTime(data.generatedAt, displayTimezone, true)}（{displayTimezone}）</span>
-        {freshnessText ? <span>{freshnessText}</span> : null}
-      </p> : null}
+      <p className="jy-caption">每天的收入、上游成本和毛利。去绑定、改绑定、解除绑定请到{STATION_TABS.bills}。</p>
     </div>
 
-    {destinationAlert || error || (!config?.ownStation && results.length) || config?.channelsError || summaryError || unconfiguredRateStations.length ? <div className="reconciliation-alerts">
-      {destinationAlert}
-      {error ? <Alert
-        type="error" showIcon title="核算数据加载失败 · 当前显示上次结果" description={`${error}。下方窗口与金额属于上次查询，非本次查询结果。`}
-        action={<Button size="small" onClick={() => recon.loadWindow(activeWindow, true)}>重试</Button>}
-      /> : null}
-      {!config?.ownStation && results.length ? <Alert
-        type="warning" showIcon title="本站管理员站点未配置"
-        description="本站收费当前不可获取；已保存的核算关联仍显示可用的上游成本与历史参考。请先配置本站管理员站点后再接入或编辑核算关联。"
-        action={<Button size="small" href="/stations">前往配置</Button>}
-      /> : null}
-      {config?.channelsError ? <Alert type="warning" showIcon title={config.channelsError} /> : null}
-      {unconfiguredRateStations.length ? <Alert
-        type="info" showIcon title="金额按系统原值（美元）显示"
-        description={`部分站点未设置汇率：${unconfiguredRateStations.map((station) => station.name).join("、")}。本站和涉及的上游都设置汇率后，整页按人民币核算。`}
-        action={<Button size="small" href="/stations">去设置汇率</Button>}
-      /> : null}
-      {summaryError ? <Alert
-        type="warning" showIcon title="全量汇总读取失败 · 摘要仅供参考" description={summaryError}
-        action={<Button size="small" onClick={() => void recon.refreshSummary()}>重读全量汇总</Button>}
-      /> : null}
-    </div> : null}
+    {hasAlerts ? <div className="reconciliation-alerts">{alerts}</div> : null}
 
     <div className="reconciliation-overview">
-      <ReconSummary summary={commonSummary} unaccounted={unaccounted} usageRereading={usageRereading} reference={reference} fixedCost={results.some(isFixedCost)} fixedOffProfit={fixedOffProfit} preset={activeWindow.preset} />
-      <ReconWindowGroups groups={windowGroups} reference={reference} />
-      <ReconCoverage coverage={coverage} reference={reference} />
+      <ReconSummary
+        summary={commonSummary} results={results} coverage={coverage} currency={currency} grouped={!commonSummary && windowGroups.length > 0}
+        unaccounted={unaccounted} usageRereading={usageRereading} stale={summaryState} onRefresh={() => void recon.refreshSummary()}
+        fixedCost={results.some(isFixedCost)} fixedOffProfit={fixedOffProfit} preset={activeWindow.preset}
+      />
+      {!commonSummary && !switching ? <ReconWindowGroups groups={windowGroups} results={results} businessTimezone={businessTimezone} stale={Boolean(error || summaryStale || summaryError)} /> : null}
+      {switching ? null : <ReconCoverage coverage={coverage} />}
     </div>
 
-    <ReconList
-      results={results} list={list} currency={currency} upstreams={config?.upstreams} compact={compact} error={error} ownStation={!!config?.ownStation}
-      retryingRuleIds={retryingRuleIds} ruleRetryErrors={ruleRetryErrors} onDetail={openDetail} onRetry={(item) => void recon.retryRule(item)}
-    />
+    <div className={switching ? "reconciliation-switching" : undefined} aria-busy={switching || undefined}>
+      <ReconList
+        results={results} keyName={keyName} list={list} currency={currency} upstreams={config?.upstreams} compact={compact} error={error} ownStation={!!config?.ownStation} asOf={asOfText}
+        retryingRuleIds={retryingRuleIds} ruleRetryErrors={ruleRetryErrors} onDetail={openDetail} onRetry={(item) => void recon.retryRule(item)}
+      />
+    </div>
 
     {drawer}
   </div>;
