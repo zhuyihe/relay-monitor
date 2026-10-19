@@ -11,7 +11,7 @@ import { ErrorDetail } from "../../components/error-detail";
 import { StatusTag } from "../../components/status";
 import type { KnownChannelCoverage, ReconciliationCurrency, ReconciliationDisplayTotals, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream } from "../../../lib/client";
 import { EMPTY, RATE_UNSET_USD, formatAsOf, formatDayZone, formatPct, formatRate, refreshFailedText } from "../../../lib/format";
-import { reconciliationChannelStatus, reconciliationCoverageText } from "../../../lib/reconciliation-contract";
+import { reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../../../lib/reconciliation-contract";
 import { reconciliationChannelName, reconciliationChannelTag, reconciliationNotCountedCostText } from "../../../lib/reconciliation-view";
 import { NAV_LABELS } from "../../../lib/brand";
 import { SummaryMetric } from "./recon-parts";
@@ -59,7 +59,7 @@ function UnaccountedUpstreamBlock({ data, rereading }: { data: UnaccountedUpstre
     </div>
     <p className="jy-caption">
       上游扣费（和「{NAV_LABELS.my}」读的是同一个数）减去已算进利润的上游成本。
-      {pending ? (rereading ? "上游暂时读不到，系统会自动再读。" : "上游暂时读不到，可以点「刷新」再读。")
+      {pending ? (rereading ? `${reconciliationIssue("UPSTREAM_DATA_UNAVAILABLE").hint}。` : `上游暂时读不到，可以点「${RECON_BUTTONS.refresh}」再读。`)
         : data.state === "estimated" ? "≈ 部分上游按余额变化估算。" : data.state === "partial" ? "部分上游没读全。" : ""}
       {!pending && over ? "有的上游已算进利润的多于上游扣费，合计里按 0 算。" : ""}
       {data.fixedStations.length ? `计入固定成本的上游不在这里：${stationNames(data.fixedStations)}。` : ""}

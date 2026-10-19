@@ -513,6 +513,20 @@ test("渠道目录失败时配置接口不回显上游错误中的令牌，服�
   assert.doesNotMatch(logged[0], /sk-sensitive-value|test-token/);
 });
 
+test("渠道目录连不上时，详细原因和 code 说的是同一件事", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => { throw new TypeError("fetch failed"); });
+  t.mock.method(console, "error", () => {});
+  const own = { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "test-token" };
+  const reconciliation = createReconciliationModule({
+    pool: { async query() { return [[]]; } },
+    store: { list: () => [own], get: () => own },
+  });
+
+  const configuration = await reconciliation.getConfiguration();
+  assert.equal(configuration.channelsErrorCode, "NETWORK_UNREACHABLE");
+  assert.equal(configuration.channelsError, "无法连接到站点");
+});
+
 test("同一个上游 Key 不能同时建立两条启用对账规则", async () => {
   const calls = [];
   const repository = new ReconciliationRepository({

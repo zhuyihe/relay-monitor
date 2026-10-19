@@ -9,9 +9,9 @@ import type { ConfirmedHistoryRecord } from "../../../lib/client";
 import { EMPTY, FIXED_COST_TEXT, formatPct, formatZonedDateTime, refreshFailedText } from "../../../lib/format";
 import { failureText } from "../../../lib/error-copy";
 import { INCOMPLETE_DAY_TEXT } from "../../../lib/reconciliation-contract";
-import { formatReconciliationMoney as money, reconciliationBillingText, reconciliationChannelName, reconciliationKeyName } from "../../../lib/reconciliation-view";
+import { formatReconciliationMoney as money, reconciliationBillingText, reconciliationChannelName, reconciliationKeyName, reconciliationKeyNamer } from "../../../lib/reconciliation-view";
 import { Detail } from "./recon-parts";
-import { RECON_BUTTONS, formatWindow, rateLine, upstreamName } from "./recon-format";
+import { RECON_BUTTONS, RECON_COPY, formatWindow, rateLine, upstreamName } from "./recon-format";
 import type { useConfirmedHistory } from "./use-confirmed-history";
 
 const { RangePicker } = DatePicker;
@@ -50,7 +50,7 @@ function RecordDetails({ record }: { record: ConfirmedHistoryRecord }) {
     {incomplete(record) ? <Alert type="warning" showIcon title={INCOMPLETE_DAY_TEXT} /> : null}
     <Detail label="时间" value={dayText(record)} />
     <Detail label="Key" value={keyText(record)} />
-    <Detail label="收入" value={<>{reconciliationBillingText(record.downstream)}<small>{record.channels.length ? `来自自营站点 ${record.channels.length} 个渠道的收费记录` : EMPTY}</small></>} />
+    <Detail label="收入" value={<>{reconciliationBillingText(record.downstream)}<small>{record.channels.length ? RECON_COPY.incomeSource(record.channels.length) : EMPTY}</small></>} />
     <Detail label="上游成本" value={costText(record)} />
     <Detail label="毛利" value={money(record.calculation.profitUsd, null)} />
     <Detail label="毛利率" value={formatPct(record.calculation.marginRate)} />
@@ -131,6 +131,7 @@ export function ReconHistory({ history, compact, rules, upstreams, businessTimez
   const fixedUpstream = upstreams?.find((station: any) => String(station.id) === String(rule?.upstreamStationId))?.costBasis === "fixed";
   const usageRecords = !!records?.records.some((record) => !fixedRecord(record));
   const ended = (item: any) => item.archivedAt || !item.enabled;
+  const keyName = reconciliationKeyNamer(directory);
 
   return <div className="reconciliation-confirmed">
     <p className="jy-caption">每天固定后不会再变，也不算进上面的汇总。默认看最近 31 天，一次最多查 31 天。</p>
@@ -147,7 +148,7 @@ export function ReconHistory({ history, compact, rules, upstreams, businessTimez
         placeholder="选择绑定（含已解除）" onChange={history.chooseRule}
         options={directory.map((item: any) => ({
           value: item.id,
-          label: `${reconciliationKeyName(item)} · ${upstreamName(item, upstreams)} · ${ended(item) ? "已解除绑定" : "在用"}`,
+          label: `${keyName(item)} · ${upstreamName(item, upstreams)} · ${ended(item) ? "已解除绑定" : "在用"}`,
         }))}
       />
     </div>

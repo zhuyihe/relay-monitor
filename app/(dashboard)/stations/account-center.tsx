@@ -14,7 +14,7 @@ import { BINDING_COPY } from "../../../lib/channel-onboarding.js";
 import { ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText } from "../../../lib/error-copy.js";
 import { EMPTY, FIXED_COST_TEXT, NOTHING_TO_HANDLE, RATE_UNSET_PARITY, formatAsOf, formatDayZone, formatRate, formatUsd, formatZonedDateTime, formatZonedRange, refreshFailedText } from "../../../lib/format";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, coverageAnswerOption, fillIssueCopy, reconciliationChannelStatus, reconciliationIssue } from "../../../lib/reconciliation-contract.js";
-import { reconciliationChannelName, reconciliationKeyName } from "../../../lib/reconciliation-view.js";
+import { reconciliationChannelName, reconciliationKeyName, reconciliationKeyNamer } from "../../../lib/reconciliation-view.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowActionMeta } from "../../../lib/workflow-actions.js";
 import { Skeleton } from "../../components/data-state";
 import { ErrorDetail, notice, noteOf } from "../../components/error-detail";
@@ -387,7 +387,8 @@ export function useAccountCenter({
     return `${option.label}：${names.join("、")}`;
   };
   const ownStationName = (id: string) => stations.find((station) => station.id === id)?.name || EMPTY;
-  const keyTitle = (key: AccountKeyScope) => reconciliationKeyName(key);
+  // 这一页的 Key 名：各上游账号下的 Key 和没对上上游的绑定放在一起比，同名的都加上编号（§3.1）
+  const keyTitle: (key: AccountKeyScope | AccountAssociation | UnmatchedAssociation) => string = reconciliationKeyNamer([...(accountModel?.accounts || []).flatMap((account) => account.keys), ...(accountModel?.unmatchedAssociations || [])]);
   const purposeLocked = loadingAccounts || !!accountError || authorizationBusy;
 
   // ---- 片段 ------------------------------------------------------------------
@@ -416,7 +417,7 @@ export function useAccountCenter({
       <div key={resource.id} data-resource-id={resource.id} className="jy-accounts-resource">
         <div className="jy-accounts-line">
           <b>{resource.name}</b>
-          {!resource.purposes.monitor ? <span className="jy-tag jy-tag--muted">{PAUSE.label}</span> : null}
+          {!resource.purposes.monitor ? <span className="jy-tag jy-tag--muted">{BINDING_COPY.monitorPaused}</span> : null}
           {resource.archivedAt ? <span className="jy-tag jy-tag--muted">{BINDING_COPY.archived}</span> : null}
           {resource.purposes.billingRuleIds.length ? <span className="jy-tag jy-tag--info">{BINDING_COPY.bindingCount(resource.purposes.billingRuleIds.length)}</span> : null}
         </div>
@@ -455,7 +456,7 @@ export function useAccountCenter({
     ].filter((item): item is { title: string; detail: string } => !!item);
     // 和它重复的那几条：按 Key 和自营站点说，不显示编号
     const others = association.conflictRuleIds.map(locateAssociation).filter((item) => !!item)
-      .map((item) => `${reconciliationKeyName(item.key || item.association)} · 自营站点 ${ownStationName(item.association.ownStationId)}`);
+      .map((item) => `${keyTitle(item.key || item.association)} · ${BINDING_COPY.ownStation} ${ownStationName(item.association.ownStationId)}`);
     return (
       <div className="jy-banner" role="status">
         <Sym kind="warn" />
@@ -476,7 +477,7 @@ export function useAccountCenter({
     return (
       <li key={association.ruleId} data-rule-id={association.ruleId} className={`jy-accounts-association${focusRuleId === association.ruleId ? " is-focused" : ""}`}>
         <div className="jy-accounts-line">
-          <b>自营站点 {ownStationName(association.ownStationId)}</b>
+          <b>{BINDING_COPY.ownStation} {ownStationName(association.ownStationId)}</b>
           {association.conflict ? <>{" "}<span className="jy-tag jy-tag--crit">{COPY.needsAction}</span></>
             : !active ? <>{" "}<span className="jy-tag jy-tag--muted">{COPY.unbound}</span></> : null}
         </div>
@@ -504,7 +505,7 @@ export function useAccountCenter({
   const renderUnmatched = (association: UnmatchedAssociation) => {
     const issue = UNMATCHED_ISSUES[association.reason] || OWNER_UNVERIFIED;
     const upstream = stations.find((station) => station.id === association.upstreamStationId);
-    const keyLabel = reconciliationKeyName(association);
+    const keyLabel = keyTitle(association);
     const actions = (accountModel?.actions || []).filter((action) => action.ruleId === association.ruleId
       || (!action.ruleId && action.stationId === association.upstreamStationId && ["verify_identity", "verify_capability"].includes(action.kind)));
     return (
@@ -517,7 +518,7 @@ export function useAccountCenter({
         <p className="jy-caption">{issue.title}{issue.detail ? `：${issue.detail}` : ""}</p>
         <dl className="jy-accounts-facts">
           <dt>上游</dt><dd>{upstream?.name || EMPTY}</dd>
-          <dt>自营站点</dt><dd>{ownStationName(association.ownStationId)}</dd>
+          <dt>{BINDING_COPY.ownStation}</dt><dd>{ownStationName(association.ownStationId)}</dd>
           <dt>{COPY.channels}</dt><dd>{channelNames(association.channels)}</dd>
           <dt>开始统计</dt><dd>{formatAt(association.accountingStartMs ?? association.billingEffectiveFromMs, association.timezone)}</dd>
         </dl>
@@ -648,7 +649,7 @@ export function useAccountCenter({
             {inspectTargets.length ? inspectTargets.map((station) => (
               <div key={station.id} className="jy-accounts-resource">
                 <div className="jy-accounts-line"><b>{station.name}</b></div>
-                <p className="jy-caption">{[station.monitorEnabled === false ? PAUSE.label : "", station.balance?.ok ? `余额 ${formatUsd(station.balance.remaining)}` : station.balance ? COPY.balanceUnread : COPY.notRead].filter(Boolean).join(" · ")}</p>
+                <p className="jy-caption">{[station.monitorEnabled === false ? BINDING_COPY.monitorPaused : "", station.balance?.ok ? `余额 ${formatUsd(station.balance.remaining)}` : station.balance ? COPY.balanceUnread : COPY.notRead].filter(Boolean).join(" · ")}</p>
                 <div className="jy-accounts-actions">
                   <Button size="small" disabled={!types.length} onClick={() => openEditor(station)}>{COPY.editUpstream}</Button>
                   {station.monitorEnabled !== false && !station.archivedAt ? <Button size="small" onClick={() => openTrend(station)}>{INSPECT.label}</Button> : null}
@@ -889,7 +890,7 @@ export function useAccountCenter({
               <p>{COPY.unbindHint}</p>
               <dl className="jy-accounts-facts">
                 <dt>Key</dt><dd>{purposeTarget.keyLabel || EMPTY}</dd>
-                <dt>自营站点</dt><dd>{ownStationName(purposeTarget.association.ownStationId)}</dd>
+                <dt>{BINDING_COPY.ownStation}</dt><dd>{ownStationName(purposeTarget.association.ownStationId)}</dd>
                 <dt>{COPY.freedChannels}</dt><dd>{channelNames(purposeTarget.association.channels)}</dd>
               </dl>
             </>

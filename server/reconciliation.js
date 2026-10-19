@@ -20,7 +20,7 @@ import {
   RECONCILIATION_ISSUE_PRIORITY,
   isLiveReconciliationPreset,
 } from "../lib/reconciliation-contract.js";
-import { OWN_STATION_UNSET } from "../lib/format.js";
+import { OWN_STATION_UNSET, UPSTREAM_GONE } from "../lib/format.js";
 import { errorText } from "../lib/error-copy.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
@@ -1768,7 +1768,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const displayCurrency = [...rateStations.values()].every(Boolean) ? reconciliationDisplayCurrency(selected) : "USD";
     // 已经设置了部分汇率时才提示还缺哪些；一个都没设置就是按 USD 看，不打扰。
     const unconfiguredRateStations = [...rateStations.values()].some(Boolean)
-      ? [...rateStations].filter(([, configured]) => !configured).map(([id]) => ({ id, name: upstreamStation(id)?.name || `已删除的上游（${id}）` })) : [];
+      ? [...rateStations].filter(([, configured]) => !configured).map(([id]) => ({ id, name: upstreamStation(id)?.name || `${UPSTREAM_GONE}（${id}）` })) : [];
     // 我的站点只摊销开了监控、计入成本、没归档的固定采购站点；关联建在其他固定采购站点上时点名，核算页说明净利也不含它们的采购费。
     const offProfit = upstreams ? fixedOffProfitStations(selected, { amortizedIds: upstreams.fixed.map((station) => station.id), stationOf: upstreamStation }) : [];
     const grouped = summarizeReconciliationWindowGroups(selected, { currency: displayCurrency, coverageFor: (window, source) => {
@@ -1875,9 +1875,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // 认得出登录信息不对、连不上、地址不对的，用连接测试的码；其余用 OWN_CHANNEL_UNAVAILABLE（按没有权限说）。
           const failure = describeConnectionFailure(err?.message || String(err), own);
           console.error("本站渠道目录读取失败:", failure.diagnostic);
-          channelsError = "这份登录信息没有读取权限，需要超级管理员的访问令牌";
-          channelsErrorCode = err?.code
-            || (["AUTHENTICATION_FAILED", "NETWORK_UNREACHABLE", "ENDPOINT_MISMATCH"].includes(failure.code) ? failure.code : "OWN_CHANNEL_UNAVAILABLE");
+          // 「查看详细原因」里的那句和 code 说的是同一件事：认得出的用连接测试的固定说法，其余按没有权限说。
+          const known = ["AUTHENTICATION_FAILED", "NETWORK_UNREACHABLE", "ENDPOINT_MISMATCH"].includes(failure.code);
+          channelsError = known ? failure.message : "这份登录信息没有读取权限，需要超级管理员的访问令牌";
+          channelsErrorCode = err?.code || (known ? failure.code : "OWN_CHANNEL_UNAVAILABLE");
         }
       }
       return { ownStation: publicStation(own), upstreams, channels, channelsError, channelsErrorCode, rules };

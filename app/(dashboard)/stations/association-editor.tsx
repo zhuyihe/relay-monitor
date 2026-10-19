@@ -10,11 +10,12 @@ import { BINDING_COPY } from "../../../lib/channel-onboarding.js";
 import { describeError, failureText } from "../../../lib/error-copy.js";
 import { EMPTY, formatDayZone, refreshFailedText } from "../../../lib/format";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, coverageAnswerOption, coverageDeclarationOf, reconciliationIssue } from "../../../lib/reconciliation-contract.js";
-import { reconciliationChannelName, reconciliationChannelTag, reconciliationKeyName } from "../../../lib/reconciliation-view.js";
+import { reconciliationChannelName, reconciliationChannelTag, reconciliationKeyNamer } from "../../../lib/reconciliation-view.js";
 import { HISTORY_KEPT, workflowActionMeta } from "../../../lib/workflow-actions.js";
 import { Skeleton } from "../../components/data-state";
 import { useDrawerEscape } from "../../components/drawer-escape";
-import { ErrorDetail } from "../../components/error-detail";
+import { ErrorDetail, noteOf } from "../../components/error-detail";
+import type { ErrorNote } from "../../components/error-detail";
 
 const { Text } = Typography;
 
@@ -92,9 +93,6 @@ export function AssociationEditor({ target, compact, businessTz, onClose, onSave
   );
 }
 
-// 界面上的一句话 + 只给「查看详细原因」的原文
-type Problem = { text: string; raw?: unknown };
-
 // 每次打开都是新的表单实例，不会带出上一次未保存的选择
 function AssociationEditorBody({ ruleId, fixedCost, businessTz, onBusyChange, onDone }: { ruleId: string; fixedCost: boolean; businessTz?: string; onBusyChange: (busy: boolean) => void; onDone: () => void }) {
   const { message } = App.useApp();
@@ -103,14 +101,14 @@ function AssociationEditorBody({ ruleId, fixedCost, businessTz, onBusyChange, on
   const salesChannelIds: number[] | undefined = Form.useWatch("salesChannelIds", form);
   const [config, setConfig] = useState<any>(null);
   const [rule, setRule] = useState<any>(null);
-  const [loadError, setLoadError] = useState<Problem | null>(null);
+  const [loadError, setLoadError] = useState<ErrorNote | null>(null);
   // 渠道列表上次读到的时间（浏览器时钟）；刷新失败时写「刷新失败，数据截至 14:30。」
   const [channelsAsOf, setChannelsAsOf] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [preview, setPreview] = useState<RuleEditPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [formError, setFormError] = useState<Problem | null>(null);
+  const [formError, setFormError] = useState<ErrorNote | null>(null);
   const previewEpoch = useRef(0);
   const loadEpoch = useRef(0);
 
@@ -126,7 +124,7 @@ function AssociationEditorBody({ ruleId, fixedCost, businessTz, onBusyChange, on
         setRule(found);
       }
       if (!next.channelsError) setChannelsAsOf(Date.now());
-      // 渠道列表刷新失败时保留上次读到的列表；channelsError 是原文，只进「查看详细原因」
+      // 渠道列表刷新失败时保留上次读到的列表；channelsError 是固定说法，只进「查看详细原因」，按 channelsErrorCode 归类
       setConfig((previous: any) => next.channelsError && previous ? { ...next, channels: previous.channels } : next);
     } catch (err: any) {
       if (current !== loadEpoch.current) return;
@@ -156,7 +154,7 @@ function AssociationEditorBody({ ruleId, fixedCost, businessTz, onBusyChange, on
       setPreviewing(true);
       const next: RuleEditPreview = await api(`/api/reconciliation/rules/${encodeURIComponent(ruleId)}/preview`, { body: input(values) });
       if (current === previewEpoch.current) setPreview(next);
-    } catch (err: any) { if (!err.errorFields) setFormError({ text: describeError(err).text, raw: describeError(err).raw }); setPreview(null); }
+    } catch (err: any) { if (!err.errorFields) setFormError(noteOf(err)); setPreview(null); }
     finally { setPreviewing(false); }
   };
   const save = async (values: any) => {
@@ -184,10 +182,12 @@ function AssociationEditorBody({ ruleId, fixedCost, businessTz, onBusyChange, on
 
   const original: number[] = (rule.channels || []).map((channel: any) => Number(channel.channelId));
   // 与服务端一致：别的有效绑定已经用了的渠道不能再选。原来就重复绑定的渠道保持可去掉，并提示去掉一条
+  // 在用的绑定一起比 Key 名，同名的都加上编号（§3.1）
+  const keyName = reconciliationKeyNamer((config?.rules || []).filter((item: any) => item.enabled && !item.archivedAt));
   const occupied = new Map<number, string>();
   for (const other of config?.rules || []) {
     if (!other.enabled || other.archivedAt || other.id === rule.id) continue;
-    for (const channel of other.channels || []) occupied.set(Number(channel.channelId), reconciliationKeyName(other));
+    for (const channel of other.channels || []) occupied.set(Number(channel.channelId), keyName(other));
   }
   const occupiedNote = (id: number) => {
     const occupiedBy = occupied.get(id);
@@ -196,6 +196,8 @@ function AssociationEditorBody({ ruleId, fixedCost, businessTz, onBusyChange, on
   };
   const directory: any[] = config?.channels || [];
   const unread = !!config?.channelsError && !directory.length;
+  // 渠道列表读不到的原因：接口给的是固定说法加 code；这次刷新本身失败时是那个报错
+  const channelsFailure = typeof config?.channelsError === "string" ? { code: config.channelsErrorCode, error: config.channelsError } : config?.channelsError;
   const missing = (rule.channels || []).filter((channel: any) => !directory.some((entry: any) => Number(entry.id) === Number(channel.channelId)));
   const options = [
     ...directory.map((channel: any) => {
@@ -231,7 +233,7 @@ function AssociationEditorBody({ ruleId, fixedCost, businessTz, onBusyChange, on
       <Space orientation="vertical" size={16} style={{ width: "100%", minWidth: 0, overflowWrap: "anywhere" }}>
         <dl className="jy-accounts-facts">
           <dt>上游</dt><dd>{upstream?.name || EMPTY}</dd>
-          <dt>Key</dt><dd>{reconciliationKeyName(rule)}</dd>
+          <dt>Key</dt><dd>{keyName(rule)}</dd>
           {dayZone ? <><dt>时区</dt><dd>{dayZone}</dd></> : null}
         </dl>
         <Alert type="info" showIcon title={COPY.fixedFields} description={COPY.swapHint} />
@@ -254,8 +256,8 @@ function AssociationEditorBody({ ruleId, fixedCost, businessTz, onBusyChange, on
           </Form.Item>
           {config?.channelsError ? (
             <Alert type="warning" showIcon
-              title={directory.length && channelsAsOf ? refreshFailedText(channelsAsOf, businessTz) : failureText(BINDING_COPY.channelsUnreadable, config.channelsError)}
-              description={<ErrorDetail raw={config.channelsError} />} action={refreshButton} />
+              title={directory.length && channelsAsOf ? refreshFailedText(channelsAsOf, businessTz) : failureText(BINDING_COPY.channelsUnreadable, channelsFailure)}
+              description={<ErrorDetail raw={describeError(channelsFailure).raw} />} action={refreshButton} />
           ) : null}
         </div>
         <div>

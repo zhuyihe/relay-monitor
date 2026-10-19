@@ -20,7 +20,6 @@ const AUTHORIZATION_RECOVERY_KEY = "account-authorization-recovery-v05";
 const AUTHORIZATION_RECOVERY_EVENT = "account-authorization-recovery";
 // 按钮名和完成提示（§3.5，lib/workflow-actions.js）
 const UPDATE_LOGIN = workflowActionMeta("update_authorization")!;
-const PAUSE = workflowActionMeta("pause_monitor")!;
 // 更新登录信息独有的话，只在这一处写
 const COPY = Object.freeze({
   confirmUpdate: "确认更新",
@@ -175,7 +174,8 @@ export function useAccountAuthorization({ compact, accountModel, stations, disab
   };
   const refreshAuthorizationResult = async (next: AccountAuthorizationResult) => {
     try { await onComplete(next); }
-    catch { setAuthorizationError({ text: `${BINDING_COPY.saved}；${BINDING_COPY.pageNotUpdated}`, notice: true }); }
+    // 没全部更新上时，结果里已经写了哪些没更新上，这里只说页面没跟着更新
+    catch { setAuthorizationError({ text: next.complete ? `${BINDING_COPY.saved}；${BINDING_COPY.pageNotUpdated}` : BINDING_COPY.pageNotUpdated, notice: true }); }
   };
   const recoverAuthorization = async (saved = authorizationRecovery, restore = false) => {
     if (!saved) return;
@@ -251,7 +251,7 @@ export function useAccountAuthorization({ compact, accountModel, stations, disab
                   disabled={authorizationBusy || authorizationResult?.complete}
                   onChange={(event) => { setAuthorizationTargets(event.target.checked ? [...authorizationTargets, resource.id!] : authorizationTargets.filter((id) => id !== resource.id)); authorizationEpoch.current += 1; setAuthorizationProbe(null); }}
                 >
-                  <Text>{resource.name}{!resource.purposes.monitor ? ` · ${PAUSE.label}` : ""}{resource.verification !== "verified" ? ` · ${COPY.ownerUnknownTarget}` : ""}</Text>
+                  <Text>{resource.name}{!resource.purposes.monitor ? ` · ${BINDING_COPY.monitorPaused}` : ""}{resource.verification !== "verified" ? ` · ${COPY.ownerUnknownTarget}` : ""}</Text>
                 </Checkbox>
               </div>
             ))}

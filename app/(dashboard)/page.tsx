@@ -11,6 +11,7 @@ import { App, Button } from "antd";
 import { api, rateOf, statusOf, threshold } from "../../lib/client";
 import type { WorkflowAction } from "../../lib/client";
 import { attentionStationIds, buildOverviewActions } from "../../lib/overview-actions";
+import { workflowActionMeta } from "../../lib/workflow-actions";
 import { describeConnectionFailure } from "../../lib/connection-test";
 import { formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd, formatZonedTime, parseDay, refreshFailedText } from "../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, shiftDayLabel } from "../../lib/business-time";
@@ -564,7 +565,7 @@ function AttentionPanel({
           <Sym kind="warn" />
           <span className="jy-ov-banner-text">{workflowError}</span>
           <Button size="small" onClick={onReloadWorkflow}>
-            刷新
+            {workflowActionMeta("refresh")!.label}
           </Button>
         </div>
       ) : null}

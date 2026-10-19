@@ -4,18 +4,17 @@
 import { useRef } from "react";
 import { Alert, Button, DatePicker, Select } from "antd";
 import { EMPTY, formatDayZone, formatPct, formatZonedDateTime } from "../../../lib/format";
-import { reconciliationAccountingStart } from "../../../lib/reconciliation-contract";
+import { reconciliationAccountingStart, reconciliationIssue } from "../../../lib/reconciliation-contract";
 import {
   hasReconciliationHistory,
   mergeReconciliationChannels,
   reconciliationAccountingStartText,
-  reconciliationKeyName,
   reconciliationRowFlags,
 } from "../../../lib/reconciliation-view";
 import { ErrorDetail } from "../../components/error-detail";
 import { ChannelBreakdown, Detail, IssueAction, LossTag } from "./recon-parts";
 import {
-  RECON_BUTTONS, RETRY_FAILED_TEXT, amountText, costText, currentGroup, currentRatioLabel, formatWindow, incomeText, isFixedCost, ratioChangeText, ratioLabel, rateText,
+  RECON_BUTTONS, RECON_COPY, RETRY_FAILED_TEXT, amountText, costText, currentGroup, currentRatioLabel, formatWindow, incomeText, isFixedCost, ratioChangeText, ratioLabel, rateText,
   ruleHistory, segmentPeriod, upstreamName,
 } from "./recon-format";
 import type { useReconDetail } from "./use-recon-detail";
@@ -29,19 +28,19 @@ const conflictRuleIds = (detail: any) => [...new Set<string>((detail?.health?.is
   .filter((issue: any) => CONFLICT_CODES.has(issue.code)).flatMap((issue: any) => issue.ruleIds || []))]
   .filter((id) => id !== detail?.rule?.id);
 
-export function ConflictRules({ ids, results, onOpen }: { ids: string[]; results: any[]; onOpen: (row: any) => void }) {
+export function ConflictRules({ ids, results, keyName, onOpen }: { ids: string[]; results: any[]; keyName: (rule: any) => string; onOpen: (row: any) => void }) {
   return <div className="reconciliation-button-row">
     {ids.map((id) => {
       const row = results.find((item: any) => item.rule?.id === id);
       return row
-        ? <Button key={id} onClick={() => onOpen(row)}>查看 {reconciliationKeyName(row.rule)}</Button>
+        ? <Button key={id} onClick={() => onOpen(row)}>查看 {keyName(row.rule)}</Button>
         : <span key={id} className="jy-caption">有一条绑定已解除</span>;
     })}
   </div>;
 }
 
-export function ReconDetail({ detail, state, currency, upstreams, businessTimezone, compact, results, retrying, retryError, onOpenHistory, onRetry, onOpen, onCorrect }: {
-  detail: any; state: DetailState; currency: ReconciliationCurrency; upstreams: any; businessTimezone?: string; compact: boolean; results: any[];
+export function ReconDetail({ detail, state, currency, upstreams, businessTimezone, compact, results, keyName, retrying, retryError, onOpenHistory, onRetry, onOpen, onCorrect }: {
+  detail: any; state: DetailState; currency: ReconciliationCurrency; upstreams: any; businessTimezone?: string; compact: boolean; results: any[]; keyName: (rule: any) => string;
   retrying: boolean; retryError?: string; onOpenHistory: (id: string) => void; onRetry: (item: any) => void; onOpen: (row: any) => void; onCorrect: () => void;
 }) {
   const timingRef = useRef<HTMLElement>(null);
@@ -73,8 +72,8 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
       type="warning" showIcon title={status.title}
       description={status.detail || status.moreCount > 0 || otherConflicts.length ? <>
         {status.detail ? <div>{status.detail}</div> : null}
-        {status.moreCount > 0 ? <div>还有 {status.moreCount} 个问题</div> : null}
-        {otherConflicts.length ? <ConflictRules ids={otherConflicts} results={results} onOpen={onOpen} /> : null}
+        {status.moreCount > 0 ? <div>{RECON_COPY.moreIssues(status.moreCount)}</div> : null}
+        {otherConflicts.length ? <ConflictRules ids={otherConflicts} results={results} keyName={keyName} onOpen={onOpen} /> : null}
       </> : undefined}
       action={<IssueAction size="small" action={status.action} onDetail={showTiming} />}
     /> : null}
@@ -86,11 +85,11 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
     <div className="reconciliation-detail-grid">
       <Detail label="时间" value={<>{formatWindow(requested)}{dayZone ? <small>{dayZone}</small> : null}</>} />
       <Detail label="上游" value={upstreamName(detail.rule, upstreams)} />
-      <Detail label="Key" value={reconciliationKeyName(detail.rule)} />
+      <Detail label="Key" value={keyName(detail.rule)} />
       <Detail label="分组 / 倍率" value={`${currentGroup(detail)} · ${currentRatioLabel(detail)}`} />
-      <Detail label="收入" value={<>{incomeText(detail, currency)}<small>{channels.length ? `来自自营站点 ${channels.length} 个渠道的收费记录` : "这条绑定还没有渠道"}</small></>} />
+      <Detail label="收入" value={<>{incomeText(detail, currency)}<small>{channels.length ? RECON_COPY.incomeSource(channels.length) : RECON_COPY.noChannels}</small></>} />
       <Detail label="上游成本" value={<>{costText(detail, currency)}{fixedCost ? null
-        : <small>来自 Key「{reconciliationKeyName(detail.rule)}」的用量记录{ratioChange ? `；${ratioChange}` : ""}</small>}</>} />
+        : <small>来自 Key「{keyName(detail.rule)}」的用量记录{ratioChange ? `；${ratioChange}` : ""}</small>}</>} />
       <Detail label="毛利" value={<>{amountText(profit, profitCurrency as ReconciliationCurrency)} <LossTag show={flags.negative} /></>} />
       <Detail label="毛利率" value={formatPct(margin)} />
       <Detail label="汇率" value={rateText(detail, currency, timezone)} />
@@ -100,8 +99,8 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
     </div>
     <p className="jy-caption">毛利 = 收入 − 上游成本；毛利率 = 毛利 ÷ 收入。{hasReconciliationHistory(ruleHistory(detail)) ? "倍率变了的日子分两段算。" : ""}</p>
 
-    {pendingSegments.length ? <section ref={timingRef} className="reconciliation-transition" aria-label="改时间">
-      <h3>倍率变化的时间是系统估的</h3>
+    {pendingSegments.length ? <section ref={timingRef} className="reconciliation-transition" aria-label={RECON_BUTTONS.correctTiming}>
+      <h3>{reconciliationIssue("SEGMENT_TIMING_UNCONFIRMED").hint}</h3>
       <p className="jy-caption">填上倍率实际变化的时间，受影响的日子会重算。</p>
       <div className="reconciliation-transition__controls">
         <Select
@@ -113,7 +112,7 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
           }))}
         />
         <DatePicker showTime={{ format: "HH:mm" }} format="YYYY年M月D日 HH:mm" value={state.transitionAt} onChange={(value) => state.setTransitionAt(value)} placeholder="倍率变化的时间" />
-        <Button loading={state.correcting} onClick={onCorrect}>改时间</Button>
+        <Button loading={state.correcting} onClick={onCorrect}>{RECON_BUTTONS.correctTiming}</Button>
       </div>
     </section> : null}
 

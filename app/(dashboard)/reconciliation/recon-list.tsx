@@ -12,7 +12,6 @@ import {
   hasReconciliationHistory,
   mergeReconciliationChannels,
   reconciliationChannelName,
-  reconciliationKeyName,
   reconciliationRowFlags,
 } from "../../../lib/reconciliation-view";
 import { IssueAction, LossTag, RowStatus, RuleMobileItem, SegmentHistory } from "./recon-parts";
@@ -30,15 +29,15 @@ const expandable = (item: any) => hasReconciliationHistory(ruleHistory(item));
 // 绑定渠道的地方（§3.1 渠道绑定）
 const CONNECT_HREF = "/stations?view=onboarding";
 
-export function ReconList({ results, list, currency, upstreams, compact, error, ownStation, asOf, retryingRuleIds, ruleRetryErrors, onDetail, onRetry }: {
-  results: any[]; list: ListState; currency: ReconciliationCurrency; upstreams: any; compact: boolean; error: unknown; ownStation: boolean; asOf: string;
+export function ReconList({ results, keyName: ruleKeyName, list, currency, upstreams, compact, error, ownStation, asOf, retryingRuleIds, ruleRetryErrors, onDetail, onRetry }: {
+  results: any[]; keyName: (rule: any) => string; list: ListState; currency: ReconciliationCurrency; upstreams: any; compact: boolean; error: unknown; ownStation: boolean; asOf: string;
   retryingRuleIds: Set<string>; ruleRetryErrors: Record<string, string>; onDetail: (item: any) => void; onRetry: (item: any) => void;
 }) {
   const { counts, filtered, currentPage, pageSize, expandedRuleId } = list;
   const flags = (item: any) => reconciliationRowFlags(item, currency);
   const sortAmount = (side: "income" | "cost") => (a: any, b: any) => (sideAmount(a, side, currency) ?? 0) - (sideAmount(b, side, currency) ?? 0);
   const sortValue = (key: "profit" | "margin") => (a: any, b: any) => Number(flags(a).values[key] ?? 0) - Number(flags(b).values[key] ?? 0);
-  const keyName = (item: any) => reconciliationKeyName(item.rule);
+  const keyName = (item: any) => ruleKeyName(item.rule);
 
   // 金额列紧跟上游和 Key，桌面宽度下不横向滚动也能看到毛利；操作列固定在右侧
   const columns: any[] = [
@@ -111,14 +110,14 @@ export function ReconList({ results, list, currency, upstreams, compact, error, 
   const calm = asOf ? `${NOTHING_TO_HANDLE}${asOf}。` : NOTHING_TO_HANDLE;
 
   const body = !results.length
-    ? <EmptyState title="还没有绑定" desc="把上游的 Key 和自营站点的渠道绑定后，这里每天算一次利润。" action={<Button type="primary" disabled={!ownStation} href={CONNECT_HREF}>去绑定</Button>} />
+    ? <EmptyState title="还没有绑定" desc="把上游的 Key 和自营站点的渠道绑定后，这里每天算一次利润。" action={<Button type="primary" disabled={!ownStation} href={CONNECT_HREF}>{RECON_BUTTONS.connect}</Button>} />
     : !filtered.length
       ? <EmptyState title={list.statusFilter === "attention" && !list.search ? calm : "没有匹配的绑定"} action={<Button onClick={list.showAll}>查看全部绑定</Button>} />
       : compact
         ? <>
           <div className="reconciliation-mobile-list">
             {list.pageItems.map((item: any) => <RuleMobileItem
-              key={item.rule?.id} item={item} currency={currency} upstreams={upstreams}
+              key={item.rule?.id} item={item} keyName={keyName(item)} currency={currency} upstreams={upstreams}
               onDetail={() => onDetail(item)} onRetry={() => onRetry(item)}
               retrying={retryingRuleIds.has(item.rule?.id)} retryError={ruleRetryErrors[item.rule?.id]}
               expanded={expandedRuleId === item.rule?.id} onExpand={() => list.toggleExpanded(item.rule?.id)}
@@ -143,7 +142,7 @@ export function ReconList({ results, list, currency, upstreams, compact, error, 
           expandable={{
             expandedRowKeys: expandedRuleId ? [expandedRuleId] : [],
             rowExpandable: expandable,
-            expandedRowRender: (item: any) => <SegmentHistory item={item} currency={currency} compact={false} onDetail={() => onDetail(item)} />,
+            expandedRowRender: (item: any) => <SegmentHistory item={item} keyName={keyName(item)} currency={currency} compact={false} onDetail={() => onDetail(item)} />,
             onExpand: (expanded: boolean, item: any) => list.setExpandedRuleId(expanded ? item.rule?.id : null),
             expandRowByClick: true,
           }}

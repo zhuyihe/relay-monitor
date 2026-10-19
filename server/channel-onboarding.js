@@ -9,6 +9,7 @@ import { ChannelOnboardingRepository } from "./channel-onboarding-repository.js"
 import { workflowAction } from "../lib/workflow-actions.js";
 import { reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { OWN_STATION_UNSET } from "../lib/format.js";
+import { reconciliationKeyName } from "../lib/reconciliation-view.js";
 import { businessTimeZone } from "../lib/business-time.js";
 import { refreshStation } from "./refresh.js";
 import { normalizeReconciliationScopeIntent } from "./reconciliation.js";
@@ -345,7 +346,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         // 核算关联逐条列出（有效的在前，再按最近修改），上游账单在这一层编辑渠道、停止核算
         const associations = [...related].sort((a, b) => Number(active(b)) - Number(active(a))
           || (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0) || a.id.localeCompare(b.id)).map(associationOf);
-        account.keys.push({ canonicalKey, tokenId: rule.tokenId, tokenName: rule.tokenName || `Key ${rule.tokenId}`,
+        account.keys.push({ canonicalKey, tokenId: rule.tokenId, tokenName: rule.tokenName || reconciliationKeyName(rule),
           ruleIds: related.map((item) => item.id).sort(), activeRuleIds: current.map((item) => item.id).sort(), scopeAmbiguous: ambiguous, associations,
           channels: [...members.values()].sort((a, b) => a.ownStationId.localeCompare(b.ownStationId) || a.channelId - b.channelId),
           costCoverage: !ambiguous && rule.costCoverage === "complete" ? "complete" : "unknown", coverageDeclaration: ambiguous ? { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } : coverage,
@@ -383,7 +384,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const unmatchedAssociations = allRules.filter((rule) => active(rule) && !placed.has(rule.id)).map((rule) => {
       const station = stationById.get(rule.upstreamStationId);
       const reason = !station ? "missing_resource" : !storedIdentity(station) ? "unverified_resource" : rule.canonicalKey ? "key_changed" : "unanchored";
-      return { ...associationOf(rule), reason, tokenId: rule.tokenId, tokenName: rule.tokenName || `Key ${rule.tokenId}` };
+      return { ...associationOf(rule), reason, tokenId: rule.tokenId, tokenName: rule.tokenName || reconciliationKeyName(rule) };
     }).sort((a, b) => a.ruleId.localeCompare(b.ruleId));
     const unlinked = channels.filter((channel) => !channel.missing && channel.reconciliation.status === "unconfigured").map((channel) => channel.id);
     if (source.ownSource && unlinked.length) actions.push(workflowAction("connect_channels", { ownStationId: source.ownSource.stationId, channelIds: unlinked }));

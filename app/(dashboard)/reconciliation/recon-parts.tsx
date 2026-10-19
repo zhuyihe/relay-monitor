@@ -17,11 +17,10 @@ import {
   reconciliationCalculationValues as calculationValues,
   reconciliationChannelName,
   reconciliationChannelTag,
-  reconciliationKeyName,
   reconciliationRowFlags,
 } from "../../../lib/reconciliation-view";
 import {
-  RECON_BUTTONS, RETRY_FAILED_TEXT, amountText, channelStateSummary, costText, currentGroup, currentRatioLabel, formatWindow, incomeText, ratioLabel, ruleHistory, segmentPeriod,
+  RECON_BUTTONS, RECON_COPY, RETRY_FAILED_TEXT, amountText, channelStateSummary, costText, currentGroup, currentRatioLabel, formatWindow, incomeText, ratioLabel, ruleHistory, segmentPeriod,
   segmentTimingLabel, sideRate, upstreamName,
 } from "./recon-format";
 import type { ReconciliationCurrency } from "../../../lib/client";
@@ -54,7 +53,7 @@ export function RowStatus({ item, currency }: { item: any; currency: Reconciliat
       {status.revised ? <StatusTag level="info">改过</StatusTag> : null}
     </span>
     {note ? <small className="reconciliation-status-note">{note}</small> : null}
-    {status.state === "action" && status.moreCount > 0 ? <small className="reconciliation-status-note">还有 {status.moreCount} 个问题</small> : null}
+    {status.state === "action" && status.moreCount > 0 ? <small className="reconciliation-status-note">{RECON_COPY.moreIssues(status.moreCount)}</small> : null}
   </span>;
 }
 
@@ -80,7 +79,7 @@ export function IssueAction({ action, onDetail, target, ...button }: { action: a
 export function ChannelBreakdown({ item, currency }: { item: any; currency: ReconciliationCurrency }) {
   const rate = sideRate(item, "income", currency);
   const channels = mergeReconciliationChannels(item?.rule?.channels, item?.downstream?.channels);
-  if (!channels.length) return <p className="jy-caption">这条绑定还没有渠道。</p>;
+  if (!channels.length) return <p className="jy-caption">{RECON_COPY.noChannels}。</p>;
   return (
     <div className="reconciliation-channel-list">
       {channels.map((channel: any) => {
@@ -100,8 +99,8 @@ export function ChannelBreakdown({ item, currency }: { item: any; currency: Reco
   );
 }
 
-// 倍率变化：每次变化一行，金额只算所选日期里的部分；时间是系统估的可以去改
-export function SegmentHistory({ item, currency, compact, onDetail }: { item: any; currency: ReconciliationCurrency; compact: boolean; onDetail: () => void }) {
+// 倍率变化：每次变化一行，金额只算所选日期里的部分；时间是系统估的可以去改。keyName 是列表里这把 Key 的名字（同名的已加编号）
+export function SegmentHistory({ item, keyName, currency, compact, onDetail }: { item: any; keyName: string; currency: ReconciliationCurrency; compact: boolean; onDetail: () => void }) {
   const timezone = item.window?.timezone || item.rule?.timezone;
   const segments = ruleHistory(item).slice().reverse();
   // 每段用这条绑定的汇率和成本算法
@@ -112,7 +111,7 @@ export function SegmentHistory({ item, currency, compact, onDetail }: { item: an
   const inRange = (row: any, text: ReactNode) => row.window ? text : EMPTY;
   const profitText = (row: any) => row.values.confirmed ? amountText(row.values.profit, row.values.currency) : EMPTY;
   const timing = (row: any) => row.timingSource === "detected"
-    ? <span className="reconciliation-history-timing">{segmentTimingLabel(row)}<Button type="link" size="small" onClick={onDetail}>改时间</Button></span>
+    ? <span className="reconciliation-history-timing">{segmentTimingLabel(row)}<Button type="link" size="small" onClick={onDetail}>{RECON_BUTTONS.correctTiming}</Button></span>
     : segmentTimingLabel(row);
   const columns: any[] = [
     { title: "时间", key: "period", width: 225, render: (_: any, row: any) => <span className="reconciliation-history-period"><strong>{segmentPeriod(row, timezone)}</strong><small>{row.window ? `算进 ${formatWindow(row.window)}` : "不在所选日期内"}</small></span> },
@@ -124,21 +123,21 @@ export function SegmentHistory({ item, currency, compact, onDetail }: { item: an
     { title: "变化时间", key: "timing", width: 200, render: (_: any, row: any) => timing(row) },
   ];
 
-  return <section className="reconciliation-history" aria-label={`${reconciliationKeyName(item.rule)} 的倍率变化`}>
+  return <section className="reconciliation-history" aria-label={`${keyName} 的倍率变化`}>
     <div className="reconciliation-history__intro"><strong>倍率变化 · {rows.length - 1} 次</strong><span>金额只算所选日期里的部分。</span></div>
     {compact ? <div className="reconciliation-history-mobile">
       {rows.map((row: any) => <div key={row.id} className="reconciliation-history-mobile__row">
         <div className="reconciliation-history-mobile__heading"><strong>{row.group || EMPTY} · {ratioLabel(row.ratio)}</strong><span>{segmentTimingLabel(row)}</span></div>
         <div className="reconciliation-history-mobile__period">{segmentPeriod(row, timezone)}{row.window ? ` · 算进 ${formatWindow(row.window)}` : " · 不在所选日期内"}</div>
         <div className="reconciliation-history-mobile__figures"><span>收入 <strong>{inRange(row, incomeText(row, currency))}</strong></span><span>上游成本 <strong>{inRange(row, costText(row, currency))}</strong></span><span>毛利 <strong>{inRange(row, profitText(row))}</strong></span><span>毛利率 <strong>{inRange(row, row.values.confirmed ? formatPct(row.values.margin) : EMPTY)}</strong></span></div>
-        {row.timingSource === "detected" ? <Button type="link" size="small" onClick={onDetail}>改时间</Button> : null}
+        {row.timingSource === "detected" ? <Button type="link" size="small" onClick={onDetail}>{RECON_BUTTONS.correctTiming}</Button> : null}
       </div>)}
     </div> : <Table className="reconciliation-history-table" size="small" rowKey={(row: any) => row.id} columns={columns} dataSource={rows} scroll={{ x: 1045 }} pagination={rows.length > 6 ? { pageSize: 6, size: "small", showSizeChanger: false } : false} />}
   </section>;
 }
 
-export function RuleMobileItem({ item, currency, upstreams, onDetail, onRetry, retrying, retryError, expanded, onExpand }: {
-  item: any; currency: ReconciliationCurrency; upstreams: any; onDetail: () => void; onRetry: () => void; retrying: boolean; retryError?: string; expanded: boolean; onExpand: () => void;
+export function RuleMobileItem({ item, keyName, currency, upstreams, onDetail, onRetry, retrying, retryError, expanded, onExpand }: {
+  item: any; keyName: string; currency: ReconciliationCurrency; upstreams: any; onDetail: () => void; onRetry: () => void; retrying: boolean; retryError?: string; expanded: boolean; onExpand: () => void;
 }) {
   const rule = item.rule || {};
   const channels = mergeReconciliationChannels(rule.channels, item.downstream?.channels);
@@ -148,11 +147,11 @@ export function RuleMobileItem({ item, currency, upstreams, onDetail, onRetry, r
   const hasHistory = hasReconciliationHistory(history);
   const channelStates = channelStateSummary(channels);
   return <div className="reconciliation-mobile-item">
-    <button type="button" className="reconciliation-mobile-row" onClick={onDetail} aria-label={`查看 ${reconciliationKeyName(rule)} 的计算明细`}>
+    <button type="button" className="reconciliation-mobile-row" onClick={onDetail} aria-label={`查看 ${keyName} 的计算明细`}>
       <span className="reconciliation-mobile-row__top">
         <span className="reconciliation-mobile-row__identity">
           <strong>{upstreamName(rule, upstreams)}</strong>
-          <span>Key：{reconciliationKeyName(rule)}</span>
+          <span>Key：{keyName}</span>
           <span>分组 / 倍率：{currentGroup(item)} · {currentRatioLabel(item)}</span>
         </span>
         <span className="reconciliation-mobile-row__finance">
@@ -167,11 +166,11 @@ export function RuleMobileItem({ item, currency, upstreams, onDetail, onRetry, r
       {channels.length ? <span className="reconciliation-mobile-row__channels">{channels.map(reconciliationChannelName).join("、")}{channelStates ? ` · ${channelStates}` : ""}</span> : null}
     </button>
     <div className="reconciliation-mobile-actions">
-      <Button type="link" loading={retrying} aria-label={`${RECON_BUTTONS.retry} ${reconciliationKeyName(rule)}`} onClick={onRetry}>{RECON_BUTTONS.retry}</Button>
-      <IssueAction type="link" action={flags.displayStatus.action} onDetail={onDetail} target={reconciliationKeyName(rule)} />
+      <Button type="link" loading={retrying} aria-label={`${RECON_BUTTONS.retry} ${keyName}`} onClick={onRetry}>{RECON_BUTTONS.retry}</Button>
+      <IssueAction type="link" action={flags.displayStatus.action} onDetail={onDetail} target={keyName} />
       {hasHistory ? <Button type="link" onClick={onExpand} aria-expanded={expanded}>{expanded ? "收起倍率变化" : `查看倍率变化 · ${history.length - 1} 次`}</Button> : null}
     </div>
     {retryError ? <Alert type="error" showIcon title={RETRY_FAILED_TEXT} description={<ErrorDetail raw={retryError} />} action={<Button size="small" onClick={onRetry}>{RECON_BUTTONS.retry}</Button>} className="reconciliation-mobile-alert" /> : null}
-    {hasHistory && expanded ? <SegmentHistory item={item} currency={currency} compact onDetail={onDetail} /> : null}
+    {hasHistory && expanded ? <SegmentHistory item={item} keyName={keyName} currency={currency} compact onDetail={onDetail} /> : null}
   </div>;
 }

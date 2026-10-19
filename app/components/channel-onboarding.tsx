@@ -6,14 +6,14 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNod
 import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, List, Radio, Select, Space, Tag, Typography } from "antd";
 import { api } from "../../lib/client";
 import { createRequestId } from "../../lib/request-id.js";
-import { BINDING_COPY, CREDENTIAL_FIELDS as FIELDS, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_REQUIRED, UPSTREAM_TYPES as TYPES, groupOnboardingResources } from "../../lib/channel-onboarding.js";
+import { BINDING_COPY, CREDENTIAL_FIELDS as FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, UPSTREAM_TYPES as TYPES, groupOnboardingResources } from "../../lib/channel-onboarding.js";
 import { onboardingKeyContext, onboardingMonitorIds, retainOnboardingRequest } from "../../lib/onboarding-workflow.js";
 import type { AccountReadModel, BatchInput, BatchProbe, BatchRecoveryIntent, BatchResult, ConnectionInput, CoverageDeclaration, SourceCatalogueProjection, UpstreamKeyRead, WorkflowDestination } from "../../lib/client";
 import { NAV_LABELS, STATION_TABS } from "../../lib/brand";
 import { ERROR_CATEGORIES, describeError, failureText, requiredRule } from "../../lib/error-copy.js";
-import { EMPTY, OWN_STATION_UNSET, formatAsOf, formatDayZone, formatZonedDateTime, refreshFailedText } from "../../lib/format";
+import { EMPTY, OWN_STATION_UNSET, UPSTREAM_GONE, formatAsOf, formatDayZone, formatZonedDateTime, refreshFailedText } from "../../lib/format";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, coverageAnswerOption, coverageDeclarationOf, reconciliationChannelStatus, reconciliationIssue } from "../../lib/reconciliation-contract.js";
-import { reconciliationChannelName, reconciliationChannelTag, reconciliationKeyName } from "../../lib/reconciliation-view.js";
+import { reconciliationChannelName, reconciliationChannelTag, reconciliationKeyNamer } from "../../lib/reconciliation-view.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../../lib/workflow-actions.js";
 import { useAccountAuthorization } from "./account-authorization";
 import { useDrawerEscape } from "./drawer-escape";
@@ -42,6 +42,10 @@ const ACCOUNTED = channelStatusLabel("accounted");
 const UNLINKED = channelStatusLabel("unlinked");
 const NEEDS_ACTION = channelStatusLabel("source_unverified");
 const MONITOR_ONLY = channelStatusLabel("monitor_only");
+// 渠道列表里一行的状态（§5.6）：要重新确认的先说「需处理」，再看是否算进利润、是否只看余额；状态筛选按同一个判断
+const ROW_STATES = Object.freeze({ attention: NEEDS_ACTION, unlinked: UNLINKED, monitor: MONITOR_ONLY, configured: ACCOUNTED });
+const rowState = (entry: any): keyof typeof ROW_STATES => entry.monitor?.status === "review_required" || entry.reconciliation?.status === "review_required" ? "attention"
+  : entry.reconciliation?.status === "configured" ? "configured" : entry.monitor?.status === "linked" ? "monitor" : "unlinked";
 const UNSUPPORTED = channelStatusLabel("unsupported");
 
 
@@ -67,24 +71,20 @@ const COPY = Object.freeze({
   searchPlaceholder: "搜索渠道、地址或分组",
   statusFilter: "状态",
   allChannels: "全部渠道",
-  unmatched: "没对上上游的渠道",
   selectFiltered: "选中筛出来的渠道（最多 100 个）",
   selectChannel: (name: string) => `选择「${name}」`,
   selected: (count: number) => `已选 ${count} 个渠道`,
   // 抽屉顶部：这些渠道现在绑了什么
   current: "现在的设置",
   currentKeep: " · 不改的部分保持不变",
-  ownStation: "自营站点",
   channels: "渠道",
   group: "分组",
   upstreamAccount: "上游账号",
   account: "账号",
-  pausedMonitor: "暂停监控",
   existing: "已绑定",
   adding: "这次加",
-  allBound: "全部渠道",
+  allBound: "绑定后这把 Key 的渠道",
   upstream: "上游",
-  upstreamGone: "已删除的上游",
   loginInfo: "登录信息",
   binding: "绑定",
   nextStep: "下一步",
@@ -138,7 +138,7 @@ const COPY = Object.freeze({
   channelKey: (name: string) => `「${name}」的 Key`,
   chooseKey: "选择 Key",
   // 测试读取之后
-  scopeChanged: "这把 Key 绑定的渠道有变化，请看一下下面的全部渠道，再测试读取一次。",
+  scopeChanged: "这把 Key 绑定的渠道有变化，请看一下下面列出的渠道，再测试读取一次。",
   credentialTitle: Object.freeze({ primary: "这个上游账号已经保存过", authorization: "读账单用的上游账号已经保存过" }),
   credentialPrimary: "可以直接用已保存的登录信息，或者用这次填的更新它。",
   credentialAuthorization: (name: string) => `读账单用的是「${name}」。可以直接用它，或者用这次填的更新它；Key 和用途不变。`,
@@ -182,7 +182,7 @@ function connection(values: any): ConnectionInput {
 }
 // 上游的名字；类型名只在选类型处出现（§3.7），这里写账号和是否暂停监控（§3.3）
 function stationLabel(station: any) {
-  return `${station.name}${station.identity?.accountId ? ` · ${COPY.account} ${station.identity.accountId}` : ""}${station.monitorEnabled === false ? ` · ${COPY.pausedMonitor}` : ""}`;
+  return `${station.name}${station.identity?.accountId ? ` · ${COPY.account} ${station.identity.accountId}` : ""}${station.monitorEnabled === false ? ` · ${BINDING_COPY.monitorPaused}` : ""}`;
 }
 // 渠道列表多久没更新（§8.1）：从来没读到写「读不到」，刷新失败写「刷新失败，数据截至」，否则写隔了多久
 function staleText(syncedAt: unknown, failed: boolean, tz?: string, now = Date.now()) {
@@ -298,14 +298,16 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
   const coverageSourceChanged = !!(coverageRule?.ownSource && source && coverageRule.ownSource.namespaceKey !== source.namespaceKey);
   const names = (ids: number[]) => ids.map((id) => reconciliationChannelName(channels.find((entry) => entry.id === id) || { id })).join("、") || EMPTY;
   // 上游的名字：已经删掉的写「已删除的上游」；保存结果里还没读到的写「已保存」
-  const resourceNames = (ids: string[], fallback: string = COPY.upstreamGone) => ids.map((id) => upstreams.find((item) => item.id === id)?.name || fallback).join("、") || EMPTY;
+  const resourceNames = (ids: string[], fallback: string = UPSTREAM_GONE) => ids.map((id) => upstreams.find((item) => item.id === id)?.name || fallback).join("、") || EMPTY;
   const keys = keyRead?.tokens || probe?.selections.flatMap((selection) => selection.tokens) || [];
   const keyRefs = keys.map((key) => ({ tokenName: key.name, tokenId: key.id }));
-  const keyName = (id: number) => reconciliationKeyName({ tokenName: keys.find((item) => item.id === id)?.name, tokenId: id }, keyRefs);
+  // 这一页的 Key 名：读到的 Key 和已有的绑定放在一起比，同名的都加上编号（§3.1）
+  const pageKeyName = reconciliationKeyNamer([...keyRefs, ...(catalogue?.rules || [])]);
+  const keyName = (id: number) => pageKeyName({ tokenName: keys.find((item) => item.id === id)?.name, tokenId: id });
   const keyOptions = [...new Map(keys.map((key) => [key.id, key])).values()].map((key) => ({ value: key.id, disabled: key.status !== 1 || key.crossGroupRetry || key.group === "auto", label: `${keyName(key.id)} · ${COPY.group} ${key.group || EMPTY}${key.status !== 1 ? ` · ${COPY.keyDisabled}` : key.crossGroupRetry || key.group === "auto" ? ` · ${COPY.keyCrossGroup}` : ""}` }));
   const groups = new Map<string, number[]>();
   for (const id of openIds) { const key = billing ? String((splitKeys ? channelKeys[id] : tokenId) || "pending") : "monitor"; groups.set(key, [...(groups.get(key) || []), id]); }
-  const filtered = channels.filter((entry) => (status === "all" || status === "attention" && (entry.monitor?.status !== "linked" || entry.reconciliation?.status !== "configured") || status === "unlinked" && entry.monitor?.status !== "linked" || status === "configured" && entry.reconciliation?.status === "configured") && `${entry.name} ${entry.id} ${entry.baseUrl} ${(entry.groups || []).join(" ")}`.toLowerCase().includes(search.trim().toLowerCase()));
+  const filtered = channels.filter((entry) => (status === "all" || rowState(entry) === status) && `${entry.name} ${entry.id} ${entry.baseUrl} ${(entry.groups || []).join(" ")}`.toLowerCase().includes(search.trim().toLowerCase()));
   // 报错的下一步按钮（§8.2）：去设置自营站点，或给已选的上游更新登录信息；别的类在原处改了再试
   const errorAction = (kind: string | null) => {
     if (kind === "setup_own_station") return { label: SETUP.label, href: SETUP.href! };
@@ -535,6 +537,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
   const buildInput = async (): Promise<BatchInput> => {
     if (!requestId) throw notice(ERROR_CATEGORIES.expired.text);
     if (!purposeSelected) throw notice(ONBOARDING_PURPOSE_REQUIRED);
+    if (creating && formType === "newapi-key" && !monitor) throw notice(ONBOARDING_KEY_ONLY_MONITOR);
     if (monitorMode === "replace" && !monitor && !additionalIds.length) throw notice(COPY.replaceRequired);
     const selection: BatchInput["selections"][number] = { selectionId: "primary", monitor, additionalMonitorStationIds: additionalIds, updateCredentials: false };
     const linkOnly = !monitor && !additionalIds.length && !billing && removalRequested;
@@ -602,9 +605,6 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
   const canSave = purposeSelected && replacementReady && approved && !stale && !coverageSourceChanged && !busy && !keyLoading && !!(creating || stationId || removalRequested) && !!probe && Date.now() < probe.expiresAtMs && !(billing && groups.has("pending") && keys.length > 0);
   const refreshButton = <Button loading={refreshing} disabled={busy} onClick={() => void load(true)}>{REFRESH}</Button>;
   const syncDescribed = syncFailure ? describeError(syncFailure) : null;
-  // 渠道列表里一行的状态（§5.6）：要重新确认的先说「需处理」，再看是否算进利润、是否只看余额
-  const rowStatus = (entry: any) => entry.monitor?.status === "review_required" || entry.reconciliation?.status === "review_required" ? NEEDS_ACTION
-    : entry.reconciliation?.status === "configured" ? ACCOUNTED : entry.monitor?.status === "linked" ? MONITOR_ONLY : UNLINKED;
   // 保存结果里一组的两种用途
   const purposeLine = (group: BatchResult["groups"][number]) => [
     group.monitor.status !== "not_requested" ? `${ONBOARDING_PURPOSES.monitor}：${MONITOR_RESULT[group.monitor.status] || COPY.pending}` : "",
@@ -612,7 +612,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
   ].filter(Boolean).join("；");
   const savedLine = (group: BatchResult["groups"][number]) => {
     const rule = group.saved.ruleId ? (catalogue?.rules || []).find((item: any) => item.id === group.saved.ruleId) : null;
-    return `${COPY.upstream}：${resourceNames(group.saved.stationIds, BINDING_COPY.saved)}${group.saved.authorizationStationId ? `；${COPY.loginInfo}：${resourceNames([group.saved.authorizationStationId], BINDING_COPY.saved)}` : ""}${group.saved.ruleId ? `；${COPY.binding}：${rule ? reconciliationKeyName(rule) : BINDING_COPY.saved}` : ""}`;
+    return `${COPY.upstream}：${resourceNames(group.saved.stationIds, BINDING_COPY.saved)}${group.saved.authorizationStationId ? `；${COPY.loginInfo}：${resourceNames([group.saved.authorizationStationId], BINDING_COPY.saved)}` : ""}${group.saved.ruleId ? `；${COPY.binding}：${rule ? pageKeyName(rule) : BINDING_COPY.saved}` : ""}`;
   };
   const allVerified = !!probe && probe.selections.every((selection) => selection.monitor.status === "verified");
   // 按钮上写着渠道名时可以换行；抽屉里的小按钮在手机上加高
@@ -623,13 +623,13 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
   return <>
     {!openIds.length && failure ? <ProblemAlert problem={failure} onClose={() => setFailure(null)} style={{ marginBottom: 16 }} /> : null}
     {workflowError ? <ProblemAlert problem={workflowError} type="warning" style={{ marginBottom: 16 }} extra={<><Button onClick={() => window.location.reload()}>{REFRESH}</Button><Button href="/stations">{COPY.back}</Button></>} /> : null}
-    {destination?.action === "source" && !workflowError ? <section aria-label={REVIEW_SOURCE} style={{ marginBottom: 16, overflowWrap: "anywhere" }}><Alert type={stale ? "warning" : "info"} showIcon title={stale ? staleText(catalogue?.syncedAt, !!syncFailure, catalogue?.tz) : SOURCE.title} description={<div><div>{COPY.ownStation}：{source ? `${catalogue?.ownStation?.name || EMPTY} · ${source.baseUrl}` : EMPTY}</div><div>{COPY.channels}：{names(channels.map((channel) => channel.id))}</div><Text type="secondary">{SOURCE.detail}</Text><ErrorDetail raw={syncDescribed?.raw} /></div>} action={refreshButton} /></section> : null}
+    {destination?.action === "source" && !workflowError ? <section aria-label={REVIEW_SOURCE} style={{ marginBottom: 16, overflowWrap: "anywhere" }}><Alert type={stale ? "warning" : "info"} showIcon title={stale ? staleText(catalogue?.syncedAt, !!syncFailure, catalogue?.tz) : SOURCE.title} description={<div><div>{BINDING_COPY.ownStation}：{source ? `${catalogue?.ownStation?.name || EMPTY} · ${source.baseUrl}` : EMPTY}</div><div>{COPY.channels}：{names(channels.map((channel) => channel.id))}</div><Text type="secondary">{SOURCE.detail}</Text><ErrorDetail raw={syncDescribed?.raw} /></div>} action={refreshButton} /></section> : null}
     <Collapse style={{ marginBottom: 16 }} defaultActiveKey={["connections"]} items={[{ key: "connections", label: `${STATION_TABS.onboarding} · ${channels.length}`, extra: <Button aria-label={REFRESH} style={{ minHeight: 40 }} size="small" loading={refreshing} onKeyDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); void load(true); }}>{REFRESH}</Button>, children: <Space direction="vertical" style={{ width: "100%" }} size={12}>
       <Text type="secondary">{COPY.intro}</Text>
       {stale && catalogue ? (catalogue.ownStation ? <Alert type="warning" showIcon title={staleText(catalogue.syncedAt, !!syncFailure, catalogue.tz)} description={<div>{syncDescribed ? <div>{syncDescribed.text}</div> : null}<div>{COPY.refreshFirst}</div><ErrorDetail raw={syncDescribed?.raw} /></div>} action={refreshButton} /> : null)
         : directoryError ? <Alert type="error" showIcon title={failureText(BINDING_COPY.channelsUnreadable, directoryError)} description={<ErrorDetail raw={syncDescribed?.raw} />} action={refreshButton} /> : null}
       {catalogue?.syncedAt && !stale ? <Text type="secondary">{formatAsOf(catalogue.syncedAt, catalogue.tz)}</Text> : null}
-      <div className="page-toolbar" style={{ width: "100%" }}><Input aria-label={COPY.search} placeholder={COPY.searchPlaceholder} allowClear value={search} onChange={(event) => setSearch(event.target.value)} style={{ flex: "1 1 200px", minWidth: 0 }} /><Select aria-label={COPY.statusFilter} value={status} onChange={setStatus} style={{ minWidth: 130 }} options={[{ value: "all", label: COPY.allChannels }, { value: "attention", label: NEEDS_ACTION }, { value: "unlinked", label: COPY.unmatched }, { value: "configured", label: ACCOUNTED }]} /><Button disabled={busy || refreshing || stale || !selectedIds.length} style={{ minHeight: 44 }} onClick={() => open(selectedIds)}>{selectedIds.length ? `${CONNECT.label}（${selectedIds.length} 个渠道）` : CONNECT.label}</Button>{pendingRecovery ? <Button style={wrapButton} loading={recovering} disabled={!catalogue || busy} onClick={() => void recover(pendingRecovery, true)}>{COPY.finish}：{pendingNames(pendingRecovery)}</Button> : null}</div>
+      <div className="page-toolbar" style={{ width: "100%" }}><Input aria-label={COPY.search} placeholder={COPY.searchPlaceholder} allowClear value={search} onChange={(event) => setSearch(event.target.value)} style={{ flex: "1 1 200px", minWidth: 0 }} /><Select aria-label={COPY.statusFilter} value={status} onChange={setStatus} style={{ minWidth: 130 }} options={[{ value: "all", label: COPY.allChannels }, ...Object.entries(ROW_STATES).map(([value, label]) => ({ value, label }))]} /><Button disabled={busy || refreshing || stale || !selectedIds.length} style={{ minHeight: 44 }} onClick={() => open(selectedIds)}>{selectedIds.length ? `${CONNECT.label}（${selectedIds.length} 个渠道）` : CONNECT.label}</Button>{pendingRecovery ? <Button style={wrapButton} loading={recovering} disabled={!catalogue || busy} onClick={() => void recover(pendingRecovery, true)}>{COPY.finish}：{pendingNames(pendingRecovery)}</Button> : null}</div>
       {pendingRequests.length > 1 ? <section aria-label={COPY.pending}><Text strong>{COPY.pending}（{pendingRequests.length}）</Text>{pendingRequests.map((intent) => <div key={intent.requestId} style={{ marginTop: 8 }}><Button style={wrapButton} disabled={busy} onClick={() => void recover(intent, true)}>{COPY.finish}：{pendingNames(intent)}</Button></div>)}</section> : null}
       {authorization.recoveryButton}
       {filtered.length ? <Checkbox checked={filtered.every((entry) => selectedIds.includes(entry.id))} indeterminate={filtered.some((entry) => selectedIds.includes(entry.id)) && !filtered.every((entry) => selectedIds.includes(entry.id))} disabled={stale || busy} onChange={(event) => setSelectedIds(event.target.checked ? [...new Set([...selectedIds, ...filtered.map((entry) => entry.id)])].slice(0, 100) : selectedIds.filter((id) => !filtered.some((entry) => entry.id === id)))}>{COPY.selectFiltered}</Checkbox> : null}
@@ -639,7 +639,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
         const tag = reconciliationChannelTag(entry);
         const pending = pendingForChannel(entry.id);
         const action = pending ? COPY.finish : onboardingMonitorIds(entry).length || entry.reconciliation?.ruleIds?.length ? EDIT : CONNECT.label;
-        return <List.Item style={{ display: "flex", flexWrap: "wrap", gap: 12 }}><Checkbox aria-label={COPY.selectChannel(name)} disabled={stale || busy} checked={selectedIds.includes(entry.id)} onChange={(event) => setSelectedIds(event.target.checked ? [...selectedIds, entry.id].slice(0, 100) : selectedIds.filter((id) => id !== entry.id))} /><div style={{ flex: "1 1 200px", minWidth: 0, overflowWrap: "anywhere" }}><Space wrap><Text strong>{name}</Text>{tag ? <Tag>{tag}</Tag> : null}</Space><div><Text type="secondary">{COPY.group}：{entry.groups?.join("、") || EMPTY}</Text></div><div><Text type="secondary">{entry.baseUrl || COPY.noBaseUrl}</Text></div><Text>{rowStatus(entry)}</Text></div><Button style={{ minHeight: 44 }} disabled={refreshing || stale || busy} onClick={() => { if (pending) void recover(pending, true); else open([entry.id]); }} aria-label={`${action}「${name}」`}>{action}</Button></List.Item>;
+        return <List.Item style={{ display: "flex", flexWrap: "wrap", gap: 12 }}><Checkbox aria-label={COPY.selectChannel(name)} disabled={stale || busy} checked={selectedIds.includes(entry.id)} onChange={(event) => setSelectedIds(event.target.checked ? [...selectedIds, entry.id].slice(0, 100) : selectedIds.filter((id) => id !== entry.id))} /><div style={{ flex: "1 1 200px", minWidth: 0, overflowWrap: "anywhere" }}><Space wrap><Text strong>{name}</Text>{tag ? <Tag>{tag}</Tag> : null}</Space><div><Text type="secondary">{COPY.group}：{entry.groups?.join("、") || EMPTY}</Text></div><div><Text type="secondary">{entry.baseUrl || COPY.noBaseUrl}</Text></div><Text>{ROW_STATES[rowState(entry)]}</Text></div><Button style={{ minHeight: 44 }} disabled={refreshing || stale || busy} onClick={() => { if (pending) void recover(pending, true); else open([entry.id]); }} aria-label={`${action}「${name}」`}>{action}</Button></List.Item>;
       }} />
     </Space> }]} />
     <Drawer title={CONNECT.label} aria-label={CONNECT.label} open={openIds.length > 0} width={compact ? "100%" : 600} closable={!busy} maskClosable={!busy} keyboard={false} onClose={closeDrawer} extra={!purposeSelected && (hasMonitorLinks || hasSavedBilling) ? <Button style={{ minHeight: 44 }} disabled={busy} onClick={closeDrawer}>{COPY.close}</Button> : <Button style={{ minHeight: 44 }} type="primary" loading={saving} disabled={!canSave} onClick={() => void save()}>{result ? COPY.finish : COPY.confirm}</Button>}>
@@ -647,9 +647,9 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
         <section aria-label={COPY.current}><Text strong>{COPY.selected(openIds.length)}</Text><div><Text type="secondary">{names(openIds)}</Text></div>
           {hasMonitorLinks || hasSavedBilling ? <><div style={{ marginTop: 12 }}><Text strong>{COPY.current}</Text><Text type="secondary">{COPY.currentKeep}</Text></div>{selectedChannels.map((channel) => <div key={channel.id} style={{ marginTop: 8 }}>
             {openIds.length > 1 ? <Text strong>{reconciliationChannelName(channel)}</Text> : null}<div>{ONBOARDING_PURPOSES.monitor}：{resourceNames(onboardingMonitorIds(channel))}</div>
-            <div>{ONBOARDING_PURPOSES.billing}：{channel.reconciliation?.ruleIds?.length ? channel.reconciliation.ruleIds.map((id: string) => { const rule = catalogue.rules.find((entry: any) => entry.id === id); return rule ? `${resourceNames([rule.upstreamStationId])} · ${reconciliationKeyName(rule)} · ${names(rule.channels.map((entry: any) => entry.channelId))}` : BINDING_COPY.saved; }).join("；") : UNLINKED}</div>
+            <div>{ONBOARDING_PURPOSES.billing}：{channel.reconciliation?.ruleIds?.length ? channel.reconciliation.ruleIds.map((id: string) => { const rule = catalogue.rules.find((entry: any) => entry.id === id); return rule ? `${resourceNames([rule.upstreamStationId])} · ${pageKeyName(rule)} · ${names(rule.channels.map((entry: any) => entry.channelId))}` : BINDING_COPY.saved; }).join("；") : UNLINKED}</div>
           </div>)}
-          <Space wrap style={{ marginTop: 8 }}>{currentResourceIds.map((id) => { const resource = upstreams.find((entry) => entry.id === id); return resource && resource.type !== "newapi-key" ? <Button key={id} size="small" style={smallButton} disabled={busy} onClick={() => void updateAuthorization(id)}>{UPDATE_AUTH}「{resource.name}」</Button> : null; })}{ruleIdsOpen.map((id) => { const rule = catalogue.rules.find((entry: any) => entry.id === id); return <Button key={id} size="small" style={smallButton} href={workflowAction("edit_binding", { ruleId: id }).href!}>{EDIT}：{rule ? reconciliationKeyName(rule) : BINDING_COPY.saved}</Button>; })}</Space></> : null}
+          <Space wrap style={{ marginTop: 8 }}>{currentResourceIds.map((id) => { const resource = upstreams.find((entry) => entry.id === id); return resource && resource.type !== "newapi-key" ? <Button key={id} size="small" style={smallButton} disabled={busy} onClick={() => void updateAuthorization(id)}>{UPDATE_AUTH}「{resource.name}」</Button> : null; })}{ruleIdsOpen.map((id) => { const rule = catalogue.rules.find((entry: any) => entry.id === id); return <Button key={id} size="small" style={smallButton} href={workflowAction("edit_binding", { ruleId: id }).href!}>{EDIT}：{rule ? pageKeyName(rule) : BINDING_COPY.saved}</Button>; })}</Space></> : null}
         </section>
         {stale ? <Alert type="warning" showIcon title={ERROR_CATEGORIES.expired.text} action={refreshButton} /> : null}{failure ? <ProblemAlert problem={failure} /> : null}
         {accountsError ? <ProblemAlert problem={accountsError} type="warning" extra={<Button disabled={busy} onClick={() => void loadAccounts()}>{REFRESH}</Button>} /> : null}
@@ -657,7 +657,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
           const reason = group.reason || group.reconciliation.reason;
           return <div key={group.groupId}><Text strong>{names(group.channels.map((entry) => entry.channelId))} · {group.complete ? BINDING_COPY.saved : COPY.pending}</Text><div>{purposeLine(group)}</div>{reason || group.code ? <div>{describeError({ code: group.code, reason }).text}<ErrorDetail raw={reason} /></div> : null}<div>{savedLine(group)}</div>{group.channels.filter((entry) => !entry.complete).map((entry) => <div key={entry.channelId}>{names([entry.channelId])}：{entry.reason || entry.code ? describeError({ code: entry.code, reason: entry.reason }).text : ERROR_CATEGORIES.changed.text}<ErrorDetail raw={entry.reason} /></div>)}{group.remainingActions.length ? <Text type="secondary">{COPY.nextStep}：{group.remainingActions.includes("supply_credentials") ? COPY.supplyCredentials : group.remainingActions.includes("select_key") ? describeError({ code: "KEY_REQUIRED" }).text : ERROR_CATEGORIES.changed.text}</Text> : null}</div>;
         })}{retryInput ? <Button disabled={busy} onClick={() => void recover(retryInput)}>{COPY.viewSaved}</Button> : null}</Space>} /> : null}
-        {coverageRule ? <Alert type="info" showIcon title={COVERAGE_QUESTION} description={<div><div>{FIELDS.apiKey.label}：{reconciliationKeyName(coverageRule)} · {COPY.channels}：{names((coverageRule.channels || []).map((channel: any) => Number(channel.channelId)))}</div><div>{COVERAGE.detail}</div><Space wrap><Button href={workflowAction("edit_binding", { ruleId: coverageRule.id }).href!}>{EDIT}</Button><Button disabled={busy} onClick={() => stopForNewKey(coverageRule)}>{SWAP}</Button></Space></div>} /> : null}
+        {coverageRule ? <Alert type="info" showIcon title={COVERAGE_QUESTION} description={<div><div>{FIELDS.apiKey.label}：{pageKeyName(coverageRule)} · {COPY.channels}：{names((coverageRule.channels || []).map((channel: any) => Number(channel.channelId)))}</div><div>{COVERAGE.detail}</div><Space wrap><Button href={workflowAction("edit_binding", { ruleId: coverageRule.id }).href!}>{EDIT}</Button><Button disabled={busy} onClick={() => stopForNewKey(coverageRule)}>{SWAP}</Button></Space></div>} /> : null}
         {hasMonitorLinks || hasSavedBilling ? <div><Text strong>{COPY.monitorHeading}</Text><Radio.Group aria-label={COPY.monitorModeAria} style={{ display: "block", marginTop: 8 }} value={monitorMode} disabled={busy || !!coverageRule} onChange={(event) => changeMonitorMode(event.target.value)}><Space wrap><Radio value="keep" style={radioStyle}>{COPY.modes.keep}</Radio><Radio value="add" style={radioStyle}>{COPY.modes.add}</Radio>{hasMonitorLinks ? <><Radio value="replace" style={radioStyle}>{COPY.modes.replace}</Radio><Radio value="remove" style={radioStyle}>{COPY.modes.remove}</Radio></> : null}</Space></Radio.Group></div> : null}
         {creating || monitorMode === "add" || monitorMode === "replace" || billing ? <>
           <div><Space wrap><Text strong>{creating ? COPY.newUpstream : COPY.useSaved}</Text>{!coverageRule && upstreams.length ? <Button size="small" style={smallButton} disabled={busy} onClick={changeResourceMode}>{creating ? COPY.useSaved : COPY.newUpstream}</Button> : null}</Space></div>
@@ -672,7 +672,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
         {monitorMode === "remove" ? <section aria-label={COPY.removeAria}>{selectedChannels.map((channel) => <div key={channel.id}><Text strong>{reconciliationChannelName(channel)}</Text><Checkbox.Group style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }} value={removals[channel.id] || []} options={onboardingMonitorIds(channel).map((id) => ({ value: id, label: COPY.removeLabel(resourceNames([id])) }))} disabled={busy} onChange={(ids) => { setRemovals((previous) => ({ ...previous, [channel.id]: ids as string[] })); invalidate(); }} /></div>)}</section> : null}
         {additionalIds.length ? <Alert type="warning" showIcon title={COPY.doubleCost} /> : null}
         <Checkbox checked={billing} disabled={busy} onChange={(event) => configureBilling(event.target.checked)}>{hasSavedBilling ? `${EDIT}（${ONBOARDING_PURPOSES.billing}）` : COPY.billingCheckbox}</Checkbox>
-        {!purposeSelected && !hasMonitorLinks && !hasSavedBilling ? <Alert type="warning" showIcon title={ONBOARDING_PURPOSE_REQUIRED} description={COPY.noKeyNeeded} /> : null}
+        {!purposeSelected && !hasMonitorLinks && !hasSavedBilling ? <Alert type="warning" showIcon title={ONBOARDING_PURPOSE_REQUIRED} description={ONBOARDING_PURPOSE_HINT} /> : null}
         {billing && groups.has("pending") ? <Text type="secondary">{COPY.noKeyNeeded}</Text> : null}
         {billing ? <>
           {requiresAuthorization ? <div><Text strong>{COPY.keyAccount}</Text><Select aria-label={COPY.keyAccount} style={{ width: "100%", marginTop: 8 }} value={authorizationId || undefined} placeholder={COPY.keyAccountPlaceholder} disabled={busy} showSearch optionFilterProp="label" options={[...billingCandidates.matched, ...billingCandidates.others].map((item) => ({ value: item.id, label: `${stationLabel(item)} · ${item.baseUrl}` })).concat([{ value: "new", label: COPY.newAuthorization }])} onChange={(id) => { setAuthorizationId(id); invalidate(true); }} />{billingResourceId && !currentResourceIds.includes(billingResourceId) ? <Button size="small" style={{ ...smallButton, marginTop: 8 }} disabled={busy} onClick={() => void updateAuthorization(billingResourceId)}>{UPDATE_AUTH}「{resourceNames([billingResourceId])}」</Button> : null}</div> : <Text type="secondary">{COPY.authHint}</Text>}
@@ -709,7 +709,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
             : `${group.preview.billingEffectiveFromMs != null ? reconciliationChannelStatus("not_effective", { start: formatZonedDateTime(group.preview.billingEffectiveFromMs, group.basis.timezone) }).label : COPY.unverified}${zone ? `（${zone}）` : ""}`;
           return <Alert key={group.groupId} type={group.status === "ready" ? "info" : "warning"} showIcon title={group.code === "KEY_REQUIRED" ? COPY.noKey : group.basis.existingRuleId ? COPY.joinExisting : PREVIEW_STATE[group.status] || BINDING_COPY.preview} description={<Space direction="vertical">{group.reason || group.code ? <div><Text>{describeError({ code: group.code, reason: group.reason }).text}</Text><ErrorDetail raw={group.reason} /></div> : null}<Text>{COPY.upstreamAccount}：{group.basis.accountIdentity ? `${group.basis.accountIdentity.baseUrl} · ${COPY.account} ${group.basis.accountIdentity.accountId}` : EMPTY}</Text><Text>{FIELDS.apiKey.label}：{group.basis.tokenId ? keyName(group.basis.tokenId) : EMPTY}</Text><Text>{COPY.existing}：{names(group.basis.existingChannelIds)}；{COPY.adding}：{names(group.requestedChannelIds)}</Text><Text>{COPY.allBound}：{names(group.basis.proposedChannelIds)}</Text><Text>{start}</Text><Text>{COPY.costOnce}{group.preview.costCoverage !== "complete" ? `；${COPY.coverageUnanswered}` : ""}</Text></Space>} />;
         }) : probe.groups.filter((group) => group.reason).map((group) => <Alert key={group.groupId} type="warning" showIcon title={COPY.pending} description={<div>{describeError({ code: group.code, reason: group.reason }).text}<ErrorDetail raw={group.reason} /></div>} />)}
-          <Collapse size="small" items={[{ key: "basis", label: COPY.details, children: <Space direction="vertical"><Text>{COPY.ownStation}：{catalogue?.ownStation?.name || EMPTY} · {source?.baseUrl || EMPTY}</Text>{selectedChannels.map((channel) => <Text key={channel.id}>{reconciliationChannelName(channel)} · {COPY.group} {channel.groups?.join("、") || EMPTY}</Text>)}</Space> }]} />
+          <Collapse size="small" items={[{ key: "basis", label: COPY.details, children: <Space direction="vertical"><Text>{BINDING_COPY.ownStation}：{catalogue?.ownStation?.name || EMPTY} · {source?.baseUrl || EMPTY}</Text>{selectedChannels.map((channel) => <Text key={channel.id}>{reconciliationChannelName(channel)} · {COPY.group} {channel.groups?.join("、") || EMPTY}</Text>)}</Space> }]} />
           {!approved && !probe.selections.some((selection) => selection.credentialUpdateRequired) ? <Text type="warning">{ERROR_CATEGORIES.changed.text}</Text> : null}
         </> : null}
       </Space>

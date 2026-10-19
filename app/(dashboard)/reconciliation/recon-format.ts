@@ -1,6 +1,6 @@
 // 每日利润页的展示文案与纯函数：日期、金额格子、分组倍率、渠道。不含 JSX，各组件和 hooks 共用。
 // 用语按 design/ui-copy-spec.md；时间一律按这条绑定算一天的时区显示（lib/format 的 zoned 系列），不用浏览器时区。
-import { EMPTY, FIXED_COST_TEXT, RATE_UNSET_USD, formatRate, formatZonedDateTime, formatZonedWindow } from "../../../lib/format";
+import { EMPTY, FIXED_COST_TEXT, RATE_UNSET_USD, UPSTREAM_GONE, formatRate, formatZonedDateTime, formatZonedWindow } from "../../../lib/format";
 import {
   formatReconciliationAmount, mergeReconciliationSegments, reconciliationBillingText, reconciliationChannelTag, reconciliationRateFactors,
   reconciliationRatioChange, sameReconciliationWindow,
@@ -31,6 +31,14 @@ export const RETRY_FAILED_TEXT = "重新读取没完成，请稍后再试";
 const actionLabel = (kind: string) => workflowActionMeta(kind)!.label;
 export const RECON_BUTTONS = Object.freeze({
   refresh: actionLabel("refresh"), retry: actionLabel("retry_bill"), setup: actionLabel("setup_own_station"), history: actionLabel("open_history"),
+  correctTiming: actionLabel("correct_timing"), connect: actionLabel("connect_channels"),
+});
+
+// 列表、计算明细和以前的每日记录里共用的几句
+export const RECON_COPY = Object.freeze({
+  moreIssues: (count: number) => `还有 ${count} 个问题`,
+  noChannels: "这条绑定还没有渠道",
+  incomeSource: (count: number) => `来自自营站点 ${count} 个渠道的收费记录`,
 });
 // 「去设置」去哪：和需处理里的那个按钮同一个地址
 export const SETUP_HREF = workflowAction("setup_own_station").href!;
@@ -99,11 +107,11 @@ export const formatRecentTime = (value: any, timezone?: string) => formatZonedDa
 export function upstreamName(rule: any, upstreams: any) {
   if (!Array.isArray(upstreams)) return "上游账号暂时读不到";
   const station = upstreams.find((item) => String(item.id) === String(rule?.upstreamStationId));
-  return station?.name || "已删除的上游";
+  return station?.name || UPSTREAM_GONE;
 }
 
 export function ratioLabel(value: any) {
-  return value == null ? "暂时读不到" : `${value}×`;
+  return value == null ? reconciliationIssue("GROUP_DATA_UNAVAILABLE").ratio : `${value}×`;
 }
 
 // 一次倍率的起止：「10月9日 14:30–10月10日 0:00」，还在用的写「10月9日 14:30 至今」

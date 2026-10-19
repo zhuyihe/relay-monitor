@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationNotCountedCostText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
-import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_REQUIRED, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
+import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
 import { EMPTY, FIXED_COST_TEXT, MINUS, OWN_STATION_UNSET_TITLE, RATE_UNSET_USD, formatAsOf, formatDayZone, formatRate, formatZonedDateTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy, reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
@@ -697,7 +697,7 @@ test("billing-only configured channel keeps monitoring unchanged and prefills it
 test("saved account reads its Key directory and complete scope before one final preview", async (t) => {
   const { page, probes, writes, reads } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page);
   await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check(); await chooseKey(page, drawer);
-  await drawer.getByText("全部渠道：渠道 #1、渠道 #2、渠道 #3、New channel", { exact: true }).waitFor();
+  await drawer.getByText("绑定后这把 Key 的渠道：渠道 #1、渠道 #2、渠道 #3、New channel", { exact: true }).waitFor();
   await drawer.getByRole("combobox", { name: COVERAGE_QUESTION, exact: true }).click(); await page.getByText(ONLY_THESE, { exact: true }).last().click();
   assert.equal(probes.length, 0); assert.equal(writes.length, 0);
   const directoryReads = reads.filter((entry) => entry.path.endsWith("/keys")); assert.equal(directoryReads.length, 1); assert.equal(directoryReads[0].query, "?force=true");
@@ -877,6 +877,17 @@ test("returning from a new pure Key to a saved account clears the hidden dedicat
   assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0); assert.equal(await drawer.locator("form#channel-onboarding-authorization").count(), 0);
   await chooseKey(page, drawer); await verifyOnboarding(drawer); await saveOnboarding(drawer);
   assert.equal(probes.length, 1); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal("reconciliationAuthorization" in probes[0].selections[0], false); assert.equal("reconciliationAuthorization" in writes[0].selections[0], false); assert.doesNotMatch(JSON.stringify(writes), /fixture-abandoned-dedicated-authorization/);
+});
+
+test("a new pure Key upstream asks for balance monitoring before any test read", async (t) => {
+  const { page, probes, writes } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page);
+  await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).uncheck(); await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check();
+  await drawer.getByRole("button", { name: NEW_UPSTREAM, exact: true }).click();
+  await drawer.getByLabel(CREDENTIAL_FIELDS.type.label, { exact: true }).click(); await page.getByText(upstreamType("newapi-key"), { exact: true }).last().click();
+  await drawer.getByRole("button", { name: TEST_READ, exact: true }).click();
+  // 页面上直接说要选「看余额」，不发测试读取、也不说页面过期
+  await drawer.getByText(ONBOARDING_KEY_ONLY_MONITOR, { exact: true }).waitFor();
+  assert.equal(probes.length, 0); assert.equal(writes.length, 0); assert.equal(await drawer.getByText(ERROR_CATEGORIES.expired.text).count(), 0);
 });
 
 test("billing-only purpose survives opening a new account and returning to saved reuse", async (t) => {
@@ -1070,8 +1081,8 @@ test("discovery refresh preserves the panel state for Enter, Space and click", {
 test("five existing-account channels choose one Key and confirm one genuine batch without credentials", async (t) => {
   const { page, probes, writes } = await openOnboardingPage(t, { config: onboardingFixture(true, "newapi", [4, 5, 6, 7, 8]) });
   const drawer = await openOnboardingDrawer(page, true); assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0);
-  // 预览里写这把 Key 绑定后的全部渠道：已绑定的 #1–#3 加上这次的五个
-  await enableBilling(page, drawer); await drawer.locator(".ant-alert-description").getByText("全部渠道：渠道 #1、渠道 #2、渠道 #3、New channel、New channel 5、New channel 6、New channel 7、New channel 8", { exact: true }).waitFor();
+  // 预览里写绑定后这把 Key 的渠道：已绑定的 #1–#3 加上这次的五个
+  await enableBilling(page, drawer); await drawer.locator(".ant-alert-description").getByText("绑定后这把 Key 的渠道：渠道 #1、渠道 #2、渠道 #3、New channel、New channel 5、New channel 6、New channel 7、New channel 8", { exact: true }).waitFor();
   await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].selections.length, 1); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal(writes[0].groups.length, 1); assert.deepEqual(writes[0].groups[0].channels.map((entry) => entry.channelId), [4, 5, 6, 7, 8]); assert.equal(writes[0].groups[0].reconciliation.tokenId, 7); assert.equal(writes[0].groups[0].reconciliation.coverageDeclaration.answer, "none"); assert.ok(writes[0].previewId); assert.equal(probes.length, 1); assert.equal(probes[0].groups[0].reconciliation.tokenId, 7); assert.equal("newStation" in writes[0].selections[0], false);
 });
 
@@ -1134,7 +1145,7 @@ test("onboarding requires a purpose and recovers by selecting balance monitoring
   const { page, probes, writes } = await openOnboardingPage(t);
   const drawer = await openOnboardingDrawer(page);
   await drawer.getByRole("checkbox", { name: ONBOARDING_PURPOSES.monitor, exact: true }).uncheck();
-  await drawer.getByText(ONBOARDING_PURPOSE_REQUIRED, { exact: true }).waitFor();
+  await drawer.getByText(ONBOARDING_PURPOSE_REQUIRED, { exact: true }).waitFor(); await drawer.getByText(ONBOARDING_PURPOSE_HINT, { exact: true }).waitFor();
   assert.equal(await drawer.getByRole("button", { name: TEST_READ, exact: true }).count(), 0);
   assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isDisabled(), true);
   assert.equal(probes.length, 0); assert.equal(writes.length, 0);
@@ -1830,6 +1841,16 @@ test("account center preserves mixed accounts, original resource IDs, dedicated 
   assert.equal(mutations.length, 0); assert.equal(probes.length, 0); assert.equal(writes.length, 0);
 });
 
+// 同一页里两把 Key 同名时（§3.1）：名字后面都加上编号，按钮也按带编号的名字点
+test("same-name Keys in one account list both carry their Key number", async (t) => {
+  const model = accountReadFixture(); model.accounts[0].keys[1].tokenName = "Key 9";
+  const { center, mutations } = await openAccountsPage(t, { model }); const a = await expandAccount(center, model.accounts[0]);
+  await keyRow(a, "Key 9（Key #9）").waitFor(); await keyRow(a, "Key 9（Key #10）").waitFor(); assert.equal(await keyRow(a, "Key 9").count(), 0);
+  await keyRow(a, "Key 9（Key #9）").click(); await a.getByRole("button", { name: `${EDIT_BINDING} Key 9（Key #9） · Own station`, exact: true }).waitFor();
+  await keyRow(a, "Key 9（Key #10）").click(); await keyRow(a, "Key 9（Key #10）").getByText("已解除绑定", { exact: true }).waitFor(); await waitForFact(a.locator('[data-rule-id="A-stopped"]'), "渠道", "Channel 2");
+  assert.equal(mutations.length, 0);
+});
+
 test("account search and attention filters preserve relationships and open only the original complete editor object", async (t) => {
   const search = (center) => center.getByRole("textbox", { name: `搜索${STATION_TABS.bills}` });
   const { page, center, model, mutations } = await openAccountsPage(t); await search(center).fill("A-monitor-1"); await center.getByText(accountCaption(1, 0)).waitFor(); const a = await expandAccount(center, model.accounts[0]);
@@ -1946,7 +1967,7 @@ async function expandConfirmedRecord(drawer, record, compact = false) { const bu
 // 展开的记录里一项：左边名称，右边写法（Detail，recon-parts.tsx）
 async function historyFact(record, label, value) { await record.locator(".reconciliation-detail").filter({ has: record.page().locator(".reconciliation-detail__label").filter({ hasText: exactText(label) }) }).locator(".reconciliation-detail__value").filter({ hasText: exactText(value) }).first().waitFor(); }
 
-test("confirmed history preserves Oct8 original scope, sources and members independently of current channel 9 and group history", async (t) => {
+test("confirmed history shows the Oct8 time, Key and channels it was fixed with, not current channel 9 or source details", async (t) => {
   const { page, reads, historyReads, records } = await openConfirmedHistoryPage(t, { groupHistory: true }); const summary = page.locator(".reconciliation-summary"), before = await summary.innerText(); const row = page.locator("tr.ant-table-row", { hasText: "Rule A" }).first(); await row.focus(); await page.keyboard.press("Enter"); await page.getByRole("region", { name: "Rule A 的倍率变化", exact: true }).getByText("倍率变化 · 1 次", { exact: true }).waitFor(); await row.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click(); const detail = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true }); await detail.getByRole("region", { name: "各渠道收入", exact: true }).getByText("New channel 9", { exact: true }).waitFor(); await detail.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); const record = await expandConfirmedRecord(drawer, records[0]); await drawer.locator(`tr.ant-table-row[data-row-key="${records[0].historyId}"]`).getByText("old-1、old-2、old-3", { exact: true }).waitFor(); await historyFact(record, "时间", formatZonedWindow(records[0].window)); await historyFact(record, "Key", "old-name"); await record.getByText("来自自营站点 3 个渠道的收费记录", { exact: true }).waitFor();
   // A1：来源（平台、地址、账号、namespace）和范围版本不再上页面（§11）
   assert.doesNotMatch(await record.innerText(), /New channel 9|new-name|范围版本|old-own|old-up\.test|newapi|namespace/); assert.equal(await summary.innerText(), before); assert.deepEqual(historyReads[0], { ruleId: "rule-1", params: { limit: "20" } }); assert.ok(reads.some((read) => read.params.includeArchived === "true")); assert.ok(historyReads.every((read) => read.params.limit === "20"));

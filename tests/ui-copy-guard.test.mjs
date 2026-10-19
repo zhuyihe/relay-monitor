@@ -21,7 +21,9 @@ const FILES = [
   "app/components/account-authorization.tsx",
   "app/components/attention-list.tsx",
   "app/components/error-detail.tsx",
+  "app/(dashboard)/page.tsx",
   "app/components/use-workflow-actions.ts",
+  "app/components/workflow-copy.ts",
   "lib/reconciliation-view.js",
   "lib/reconciliation-contract.js",
   "lib/workflow-actions.js",
@@ -37,6 +39,12 @@ const FORBIDDEN = [
   "快照", "账本", "迁移", "旧账", "兜底", "降级", "轮询", "采集", "留存", "回归", "回测", "精算", "推算",
   "中转站", "本站", "阈值", "耗尽", "摊销", "待办", "待处理", "待核算", "已核验", "已取全", "原币", "归属", "覆盖",
 ];
+
+// 余额总览和余额那几句随 A2 一起改（§3.3）：这些文件里暂时放过下面这些词，A2 改完就删掉这一项
+const DEFERRED = {
+  "app/(dashboard)/page.tsx": ["查询失败", "尚未查询", "摊销", "耗尽", "阈值", "口径", "推算"],
+  "app/components/workflow-copy.ts": ["查询失败"],
+};
 
 // §3.7 的类型名和输入框名，以及 Key、ID、Token；文案表里的 {channel} 这类占位符填的是名称和时间。去掉这些后不该再有英文字母。
 // 「API」只许出现在类型名和 Key 说明里的上游页面名「API 密钥」中，单独写的「API」「API 地址」算后端用语
@@ -81,7 +89,7 @@ function visibleTexts(file) {
 
 test("界面文字不出现 §3.6 的词", () => {
   const hits = FILES.flatMap((file) => visibleTexts(file).flatMap(([line, text]) => FORBIDDEN
-    .filter((word) => text.includes(word)).map((word) => `${file}:${line}「${word}」${text}`)));
+    .filter((word) => text.includes(word) && !DEFERRED[file]?.includes(word)).map((word) => `${file}:${line}「${word}」${text}`)));
   assert.deepEqual(hits, []);
 });
 

@@ -9,12 +9,12 @@ import { readWorkflowDestination } from "../../../lib/client";
 import { BINDING_COPY } from "../../../lib/channel-onboarding.js";
 import { DESTINATION_CHANGED } from "../../../lib/workflow-actions";
 import type { KnownChannelCoverage, ReconciliationCurrency, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream, WorkflowDestination } from "../../../lib/client";
-import { reconciliationKeyName, reconciliationRowFlags } from "../../../lib/reconciliation-view";
+import { reconciliationKeyNamer, reconciliationRowFlags } from "../../../lib/reconciliation-view";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
 import { OWN_STATION_UNSET, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, RATE_UNSET_USD, formatAsOf, formatDayZone, refreshFailedText } from "../../../lib/format";
 import AppState from "../../components/app-state";
 import { ErrorState, PanelSkeleton } from "../../components/data-state";
-import { failureText } from "../../../lib/error-copy";
+import { describeError, failureText } from "../../../lib/error-copy";
 import { ErrorDetail } from "../../components/error-detail";
 import { Seg } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
@@ -34,7 +34,7 @@ import { ReconHistory } from "./recon-history";
 const { RangePicker } = DatePicker;
 
 // 从提醒或上游账单的链接进来时，链接指的那条绑定对不上（§8.1、§8.2）
-const REMOVED = "这条绑定已解除";
+const REMOVED = describeError({ code: "RULE_NOT_FOUND" }).text;
 
 // 所有绑定请求的是同一段时间（时区相同；今天、近 7 天、本月同一起点，各自截止到取数时刻）时才有共同的日期可显示，
 // 截至现在的取最早的截止点
@@ -60,6 +60,8 @@ export default function ReconciliationPage() {
   const recon = useReconWindow({ onRowReplaced: detailState.replace });
   const { config, data, loading, querying, error, preset, activeWindow, loadedWindow, range, summaryStale, summaryError, usageRereading, retryingRuleIds, ruleRetryErrors } = recon;
   const results: any[] = useMemo(() => data?.results || [], [data]);
+  // 列表、抽屉和链接提示里同一把 Key 同一个名字：同名的都加上编号（§3.1）
+  const keyName = useMemo(() => reconciliationKeyNamer(results.map((item) => item.rule)), [results]);
   // 金额默认按系统原值（USD）显示；自营站点和涉及的上游都设置了汇率时，服务端才让整页按人民币显示
   const currency: ReconciliationCurrency = data?.displayCurrency === "CNY" ? "CNY" : "USD";
   const unconfiguredRateStations: { id: string; name: string }[] = data?.unconfiguredRateStations || [];
@@ -166,13 +168,13 @@ export default function ReconciliationPage() {
     onClose={closeDrawer}
     keyboard={false}
     destroyOnHidden
-    title={history.open ? RECON_BUTTONS.history : detail?.rule ? `${reconciliationKeyName(detail.rule)} · 计算明细` : "计算明细"}
+    title={history.open ? RECON_BUTTONS.history : detail?.rule ? `${keyName(detail.rule)} · 计算明细` : "计算明细"}
   >
     {history.open
       ? <ReconHistory history={history} compact={compact} rules={config?.rules || []} upstreams={config?.upstreams} businessTimezone={businessTimezone} />
       : detail ? <ReconDetail
         detail={detail} state={detailState} currency={currency} upstreams={config?.upstreams} businessTimezone={businessTimezone} compact={compact}
-        results={results}
+        results={results} keyName={keyName}
         retrying={retryingRuleIds.has(detail.rule.id)} retryError={ruleRetryErrors[detail.rule.id]}
         onOpenHistory={openHistory} onRetry={(item) => void recon.retryRule(item)} onOpen={openDetail}
         onCorrect={() => void detailState.correctTransition(() => recon.loadWindow(activeWindow, true))}
@@ -204,7 +206,7 @@ export default function ReconciliationPage() {
   const retryHere = Boolean(workflowRow && destination?.action === "retry" && sameWindow(destination.window, workflowRow.requestedWindow || workflowRow.window));
   const destinationAlert = destination && !destinationClosed && (workflowError || (destination.action === "retry" && workflowRow)) ? <Alert
     type={workflowError ? "warning" : "info"} showIcon closable={{ "aria-label": "关闭" }} onClose={() => setDestinationClosed(true)}
-    title={workflowError || `${reconciliationKeyName(workflowRow.rule)} · ${formatWindow(destination.window)}`}
+    title={workflowError || `${keyName(workflowRow.rule)} · ${formatWindow(destination.window)}`}
     description={!workflowError && retryStatus?.state === "action" ? retryStatus.title : undefined}
     action={<div className="reconciliation-button-row">
       {!workflowError && retryHere ? <Button size="small" loading={retryingRuleIds.has(workflowRow.rule.id)} onClick={() => void recon.retryRule(workflowRow)}>{RECON_BUTTONS.retry}</Button> : null}
@@ -265,7 +267,7 @@ export default function ReconciliationPage() {
 
     <div className={switching ? "reconciliation-switching" : undefined} aria-busy={switching || undefined}>
       <ReconList
-        results={results} list={list} currency={currency} upstreams={config?.upstreams} compact={compact} error={error} ownStation={!!config?.ownStation} asOf={asOfText}
+        results={results} keyName={keyName} list={list} currency={currency} upstreams={config?.upstreams} compact={compact} error={error} ownStation={!!config?.ownStation} asOf={asOfText}
         retryingRuleIds={retryingRuleIds} ruleRetryErrors={ruleRetryErrors} onDetail={openDetail} onRetry={(item) => void recon.retryRule(item)}
       />
     </div>
