@@ -1,25 +1,32 @@
 "use client";
-// 核算窗口的读取、全量汇总和单行重试。
-// 页面查询只读：切换时间范围用 POST /query 跳过缓存重算但不写库；只有「刷新」和单行「重试」带 observe 让服务端观测并保存。
+// 每日利润页的读取、汇总和单行「重新读取」。
+// 页面查询只读：切换时间范围用 POST /query 跳过缓存重算但不写库；只有「刷新」和单行「重新读取」带 observe 让服务端读取并保存。
+// error 存报错本身（带 code、status），整块读不到时页面按它归类成一句（lib/error-copy.js）；summaryError、ruleRetryErrors 存的是报错原文，
+// 页面只放进「查看详细原因」（design/ui-copy-spec.md §8.2）。
 // 多个请求可能交错返回：windowRequestId 丢弃过期的窗口响应，resultEpoch / rowResultEpoch 保证较新的单行结果不被较早的全量响应覆盖。
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../../lib/client";
-import { isLivePreset, sameWindow } from "./recon-format";
+import { ERROR_CATEGORIES } from "../../../lib/error-copy";
+import { caughtError, isLivePreset, sameWindow } from "./recon-format";
 import type { ReconPreset, ReconWindow } from "./recon-format";
 
 // 今天每 30 秒重读；近 7 天、本月跨度大、上游取数重，总额分钟级变化不大，5 分钟一次
 const livePollMs = (preset: string) => (preset === "today" ? 30000 : isLivePreset(preset) ? 300000 : null);
 const USAGE_REREAD_LIMIT = 3;
 const USAGE_REREAD_MS = 5000;
+// 报错没有原文时的那一句（§8.2「其他」）
+const OTHER_ERROR = ERROR_CATEGORIES.other.text;
 
 export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, row: any) => void }) {
   const [config, setConfig] = useState<any>(null);
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [querying, setQuerying] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>(null);
   const [preset, setPreset] = useState<ReconPreset>("yesterday");
   const [activeWindow, setActiveWindow] = useState<ReconWindow>({ preset: "yesterday" });
+  // data 是哪个时间范围读到的：切换范围、新数据还没回来时，页面据此不把上一个范围的数字当成这次的
+  const [loadedWindow, setLoadedWindow] = useState<ReconWindow | null>(null);
   const [range, setRange] = useState<any>(null);
   const [summaryStale, setSummaryStale] = useState(false);
   const [summaryError, setSummaryError] = useState("");
@@ -69,11 +76,11 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
       if (newerRows.size) void refreshSummary(window, windowEpoch);
       else setSummaryStale(false);
     } catch (err: any) {
-      if (requestId === summaryRequestId.current && windowEpoch === windowRequestId.current) setSummaryError(err?.message || "全量汇总读取失败");
+      if (requestId === summaryRequestId.current && windowEpoch === windowRequestId.current) setSummaryError(err?.message || OTHER_ERROR);
     }
   };
 
-  // force 跳过缓存重算，仍然只读；observe 让服务端立即观测并写库，只有「刷新」和单行「重试」这类明确操作才用。
+  // force 跳过缓存重算，仍然只读；observe 让服务端立即观测并写库，只有「刷新」和单行「重新读取」这类明确操作才用。
   const loadWindow = async (window = activeWindow, force = false, observe = false) => {
     if (!force && windowRequestInFlight.current) return null;
     const requestId = ++windowRequestId.current;
@@ -97,6 +104,7 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
           });
           return { ...next, results: rows };
         });
+        setLoadedWindow(window);
         setSummaryError("");
         const hasNewerRows = (next.results || []).some((item: any) => {
           const current = rowResultEpoch.current.get(String(item.rule?.id));
@@ -104,12 +112,12 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
         });
         setSummaryStale(hasNewerRows);
         if (hasNewerRows) void refreshSummary(window, requestId);
-        setError("");
+        setError(null);
         return next;
       }
       return null;
     } catch (err: any) {
-      if (requestId === windowRequestId.current) setError(err?.message || "核算数据加载失败");
+      if (requestId === windowRequestId.current) setError(caughtError(err));
       return null;
     } finally {
       if (requestId === windowRequestId.current) {
@@ -145,7 +153,7 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
       onRowReplaced(id, replacement);
       void refreshSummary(activeWindow, requestWindowEpoch);
     } catch (err: any) {
-      if (requestId === ruleRetryRequestId.current.get(id) && requestWindowEpoch === windowRequestId.current) setRuleRetryErrors((previous) => ({ ...previous, [id]: err?.message || "重试失败，请稍后再试" }));
+      if (requestId === ruleRetryRequestId.current.get(id) && requestWindowEpoch === windowRequestId.current) setRuleRetryErrors((previous) => ({ ...previous, [id]: err?.message || OTHER_ERROR }));
     } finally {
       if (requestId === ruleRetryRequestId.current.get(id)) setRetryingRuleIds((previous) => {
         const next = new Set(previous);
@@ -163,7 +171,7 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
       setActiveWindow(initial); setPreset(initial.preset);
       await loadWindow(initial);
     } catch (err: any) {
-      setError(err?.message || "初始化失败");
+      setError(caughtError(err));
       setLoading(false);
     }
   };
@@ -198,7 +206,7 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWindow.preset, pollMs, config]);
 
-  // 上游账号用量取数慢时服务端先回「读取中」：间隔 5 秒静默重读（读缓存，不重算），只换上账号级对比，不动核算行、不进入查询中。
+  // 上游账号用量取数慢时服务端先回「读取中」：间隔 5 秒静默重读（读缓存，不重算），只换上「没算进利润的上游成本」，不动绑定列表、不进入查询中。
   // 次数按窗口请求计：每次窗口读取（切换范围、轮询、「刷新」）重新给 3 次；窗口请求变了或正在进行时，这一轮的重读作废。
   const unaccounted = data?.unaccountedUpstream;
   useEffect(() => {
@@ -224,7 +232,7 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
     && (usageRereads.current.epoch !== windowRequestId.current || usageRereads.current.count < USAGE_REREAD_LIMIT);
 
   return {
-    config, data, loading, querying, error, preset, activeWindow, pollMs, range, setRange, summaryStale, summaryError, usageRereading,
+    config, data, loading, querying, error, preset, activeWindow, loadedWindow, pollMs, range, setRange, summaryStale, summaryError, usageRereading,
     retryingRuleIds, ruleRetryErrors, loadWindow, refreshSummary, retryRule, initialize, selectPreset, queryCustom,
   };
 }

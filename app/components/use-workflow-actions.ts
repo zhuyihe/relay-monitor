@@ -1,6 +1,6 @@
 "use client";
-// 上游账单与账单核算产生的待办：侧栏计数、运营总览、上游资源页共用一份，保证三处条数一致。
-// 两路分别缓存 5 分钟，重复读取直接用缓存；某一路读取失败时保留上次读到的事项。
+// 上游账单与每日利润产生的需处理事项：侧栏计数、运营总览、上游资源页共用一份，保证三处条数一致。
+// 两路分别缓存 5 分钟，重复读取直接用缓存；某一路读取失败时保留上次读到的事项，并记下上次读到的时间。
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { api } from "../../lib/client";
 import type { WorkflowAction } from "../../lib/client";
@@ -19,6 +19,8 @@ type WorkflowState = {
   bills: WorkflowAction[];
   failed: Record<Source, boolean>;
   at: Record<Source, number>;
+  // 上次读成功的时间，读取失败时用来写「刷新失败，数据截至 14:30」
+  okAt: Record<Source, number>;
   loading: boolean;
 };
 
@@ -27,6 +29,7 @@ const INITIAL: WorkflowState = {
   bills: [],
   failed: { accounts: false, bills: false },
   at: { accounts: 0, bills: 0 },
+  okAt: { accounts: 0, bills: 0 },
   loading: false,
 };
 let state = INITIAL;
@@ -53,6 +56,7 @@ function loadSource(source: Source, force: boolean): Promise<void> {
       ...(actions ? { [source]: actions } : {}),
       failed: { ...state.failed, [source]: !actions },
       at: { ...state.at, [source]: Date.now() },
+      ...(actions ? { okAt: { ...state.okAt, [source]: Date.now() } } : {}),
     });
   })().finally(() => {
     delete inflight[source];
@@ -69,7 +73,7 @@ export function loadWorkflowActions(force = false, sources: readonly Source[] = 
 // 上游资源页读到新的上游账单后直接更新，不必再请求一次
 export function publishAccountActions(actions: WorkflowAction[] | undefined) {
   if (Array.isArray(actions)) {
-    update({ accounts: actions, failed: { ...state.failed, accounts: false }, at: { ...state.at, accounts: Date.now() } });
+    update({ accounts: actions, failed: { ...state.failed, accounts: false }, at: { ...state.at, accounts: Date.now() }, okAt: { ...state.okAt, accounts: Date.now() } });
   }
 }
 
@@ -88,9 +92,13 @@ export function useWorkflowActions(enabled = true, sources: readonly Source[] = 
     if (enabled) void loadWorkflowActions(false, sourceKey.split(",") as Source[]);
   }, [enabled, sourceKey]);
   const actions = useMemo(() => [...snapshot.accounts, ...snapshot.bills], [snapshot.accounts, snapshot.bills]);
+  const failed = ALL_SOURCES.filter((source) => snapshot.failed[source]);
+  // 读取失败时，界面写「刷新失败，数据截至 …」；从来没读到过的写 null，界面写「读不到」
+  const staleAsOf = failed.length && failed.every((source) => snapshot.okAt[source]) ? Math.min(...failed.map((source) => snapshot.okAt[source])) : null;
   return {
     actions,
-    error: snapshot.failed.accounts || snapshot.failed.bills ? "部分账号或账单事项未能更新，保留上次已读事项。" : "",
+    failed: failed.length > 0,
+    staleAsOf,
     loading: snapshot.loading,
     reload: () => loadWorkflowActions(true),
   };

@@ -11,6 +11,7 @@ import type { MenuProps } from "antd";
 import { api, cny, fmtTokens, readWorkflowDestination, statusOf } from "../../../lib/client";
 import { actionsByStation, buildOverviewActions } from "../../../lib/overview-actions";
 import { formatMoney, formatUsd } from "../../../lib/format";
+import { STATION_TABS } from "../../../lib/brand";
 import ChannelOnboarding from "../../components/channel-onboarding";
 import { EmptyState, ErrorState, Skeleton } from "../../components/data-state";
 import { Icon, Sym } from "../../components/icons";
@@ -930,9 +931,9 @@ export default function StationsPage() {
 
       <Tabs<View>
         tabs={[
-          { key: "list", label: "资源列表" },
-          { key: "onboarding", label: "渠道接入" },
-          { key: "bills", label: "上游账单" },
+          { key: "list", label: STATION_TABS.list },
+          { key: "onboarding", label: STATION_TABS.onboarding },
+          { key: "bills", label: STATION_TABS.bills },
         ]}
         active={view}
         onChange={setView}

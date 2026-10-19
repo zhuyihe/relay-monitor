@@ -505,7 +505,8 @@ test("渠道目录失败时配置接口不回显上游错误中的令牌，服�
 
   const configuration = await reconciliation.getConfiguration();
   assert.equal(configuration.channels.length, 0);
-  assert.match(configuration.channelsError, /本站渠道目录读取失败/);
+  assert.equal(configuration.channelsError, "这份登录信息没有读取权限，需要超级管理员的访问令牌");
+  assert.equal(configuration.channelsErrorCode, "OWN_CHANNEL_UNAVAILABLE");
   assert.doesNotMatch(JSON.stringify(configuration), /sk-sensitive-value|test-token/);
   assert.equal(logged.length, 1, "失败原因要留在服务端日志里便于排查");
   assert.match(logged[0], /本站渠道目录读取失败:.*rejected/);
@@ -580,8 +581,8 @@ test("停止对账规则原子释放 Key 和渠道声明，并返回释放摘要
   assert.match(calls.find((call) => call.sql?.startsWith("UPDATE reconciliation_rules")).sql, /active_token_key = NULL/);
   assert.match(calls.find((call) => call.sql?.startsWith("UPDATE reconciliation_rule_channels")).sql, /active_channel_key = NULL/);
   assert.deepEqual(calls.filter((call) => typeof call === "string"), ["begin", "commit", "release"]);
-  await assert.rejects(() => module.archiveRule("rr_missing"), /不存在或已停止/);
-  await assert.rejects(() => module.archiveRule("rr_release"), /不存在或已停止/);
+  await assert.rejects(() => module.archiveRule("rr_missing"), { code: "RULE_NOT_FOUND" });
+  await assert.rejects(() => module.archiveRule("rr_release"), { code: "RULE_NOT_FOUND" });
 });
 
 test("停止对账规则遇到并发归档时不释放渠道且返回错误", async () => {
@@ -615,7 +616,7 @@ test("停止对账规则遇到并发归档时不释放渠道且返回错误", as
   };
   const module = createReconciliationModule({ pool, store: { list: () => [], get: () => null } });
 
-  await assert.rejects(() => module.archiveRule("rr_race"), /不存在或已停止/);
+  await assert.rejects(() => module.archiveRule("rr_race"), { code: "RULE_NOT_FOUND" });
   assert.equal(calls.some((call) => typeof call === "string" && call.startsWith("UPDATE reconciliation_rule_channels")), false);
   assert.deepEqual(calls.filter((call) => ["begin", "commit", "release"].includes(call)), ["begin", "commit", "release"]);
 });
@@ -635,7 +636,7 @@ test("预设窗口都不会结束在当前时刻之后，自定义窗口超过�
     assert.ok(resolveReconciliationWindow({ preset, timezone: "Asia/Shanghai" }, now).endMs <= now, preset);
   }
   assert.equal(resolveReconciliationWindow({ preset: "today", timezone: "Asia/Shanghai" }, now).endMs, now);
-  assert.throws(() => resolveReconciliationWindow({ preset: "custom", timezone: "Asia/Shanghai", startMs: now - 1, endMs: now + 1 }, now), /不能超过当前时间/);
+  assert.throws(() => resolveReconciliationWindow({ preset: "custom", timezone: "Asia/Shanghai", startMs: now - 1, endMs: now + 1 }, now), { code: "TIME_RANGE_FUTURE" });
 });
 
 test("昨天和近 7 天对账窗口保留原有结束时间语义", () => {
@@ -679,7 +680,7 @@ test("本月从时区当地 1 日零点到当前时刻，跨夏令时多一小�
   assert.equal(month.startMs, Date.parse("2026-09-30T22:00:00.000Z"));
   assert.equal(month.endMs, lastHour);
   assert.ok(month.endMs - month.startMs > 31 * 86400000);
-  assert.throws(() => resolveReconciliationWindow({ preset: "custom", timezone: "Europe/Berlin", startMs: month.startMs, endMs: month.endMs }, lastHour), /不能超过 31 天/);
+  assert.throws(() => resolveReconciliationWindow({ preset: "custom", timezone: "Europe/Berlin", startMs: month.startMs, endMs: month.endMs }, lastHour), { code: "TIME_RANGE_TOO_LONG" });
   assert.equal(resolveReconciliationWindow({ preset: "bogus", timezone: "Asia/Shanghai" }, now).preset, "yesterday");
 });
 
@@ -707,7 +708,7 @@ test("编辑规则不能替换上游账号或 Key，且拒绝发生在元数据�
   const input = { upstreamStationId: "upstream-a", tokenId: 10, salesChannelIds: [1], timezone: "Asia/Shanghai" };
   await assert.rejects(
     () => module.updateRule(rule.id, input),
-    (error) => error.code === "RULE_IDENTITY_IMMUTABLE" && /核算关联的身份/.test(error.message)
+    { code: "RULE_IDENTITY_IMMUTABLE" }
   );
   assert.equal(queries, 2);
 });
@@ -787,7 +788,7 @@ test("自定义对账窗口使用半开区间并拒绝超过 31 天", () => {
   );
   assert.throws(
     () => resolveReconciliationWindow({ preset: "custom", startMs, endMs: endMs + 1 }, endMs),
-    /不能超过当前时间/
+    { code: "TIME_RANGE_FUTURE" }
   );
 });
 
@@ -905,7 +906,7 @@ test("统计接口不会绕过已变更的固定 Key 元数据", async (t) => {
   }, { force: true });
   const result = results[0];
   assert.equal(result.health.code, "KEY_INVALID_OR_DENIED");
-  assert.match(result.health.detail, /名称已变化/);
+  assert.match(result.health.detail, /改名了/);
 });
 
 test("短于一秒的分段标记为不可核算，且不调用上游 stat 或本站收费接口", async (t) => {
@@ -1001,7 +1002,7 @@ test("同名上游 Key 无法唯一归属时 fail closed，不能请求 stat 或
   const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id) } });
   const { results } = await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000, endMs: 2000 }, { force: true });
   assert.equal(results[0].health.code, "KEY_INVALID_OR_DENIED");
-  assert.match(results[0].health.detail, /名称不唯一/);
+  assert.match(results[0].health.detail, /同名/);
   assert.equal(results[0].calculation.differenceUsd, null);
 });
 
@@ -2811,7 +2812,7 @@ test("R02有旧历史但无原身份时，当前verifiedIdentity不能倒推原�
   const segments = structuredClone(f.segments);
   const result = (await f.module.queryRules({ preset: "custom", startMs: 1000000, endMs: 1060000 }, { force: true })).results[0];
   assert.equal(result.health.code, "LEGACY_IDENTITY_UNVERIFIED");
-  assert.match(result.health.detail, /确认新的账号和本站范围/);
+  assert.match(result.health.detail, /请确认这条绑定的上游账号和自营站点/);
   assert.equal(result.calculation.profitUsd, null);
   assert.equal(result.upstream.knownAmountUsd, 1);
   assert.equal(result.downstream.knownAmountUsd, 2.5);
@@ -4517,25 +4518,25 @@ test("3b 未开监控的站点上的核算关联：渠道接到 Key 监控站点
   let unaccounted = (await module.queryRules({}, { accountUsage: true })).unaccountedUpstream;
   assert.deepEqual(unaccounted.accounts.map((item) => [item.stationId, item.state, item.accountUsd, item.accountedUsd, item.unaccountedUsd, item.ruleIds]),
     [["key", "partial", 5, 0, 5, []]], "地址相同不能确认是同一账号");
-  assert.deepEqual(unaccounted.accounts[0].notes, ["未开监控的站点「上游」上的核算关联 rr_live、rr_two、rr_three 无法确认是否属于这个账号，未纳入金额可能偏高；在渠道接入里把对应渠道的监控关联到这个站点后可确认"]);
+  assert.deepEqual(unaccounted.accounts[0].notes, ["暂停监控的上游「上游」上的绑定还没确认属于哪个上游账号，没算进利润的上游成本可能偏高；到「渠道绑定」里把渠道对上这个上游后就能确认"]);
   assert.deepEqual([unaccounted.state, unaccounted.excludedStations], ["partial", []], "授权站点没开监控，不算设为不计入成本的上游");
   const links = [1, 2, 3].map((channelId) => ({ ownStationId: "own", channelId, stationId: "key", channelRevision: `r${channelId}` }));
   f.rt.onboardingSource.getMonitorLinks = () => links;
   unaccounted = (await module.queryRules({}, { accountUsage: true })).unaccountedUpstream;
   assert.deepEqual(unaccounted.accounts.map((item) => [item.state, item.accountedUsd, item.unaccountedUsd, item.ruleIds, item.notes]),
-    [["complete", 3, 2, ["rr_live", "rr_two", "rr_three"], ["已核算含未开监控的站点「上游」上的核算关联 rr_live、rr_two、rr_three"]]]);
+    [["complete", 3, 2, ["rr_live", "rr_two", "rr_three"], ["已算进利润的部分含暂停监控的上游「上游」上的绑定"]]]);
   assert.deepEqual([unaccounted.state, unaccounted.total], ["complete", 2]);
   links.splice(1);
   unaccounted = (await module.queryRules({}, { accountUsage: true })).unaccountedUpstream;
   assert.deepEqual(unaccounted.accounts.map((item) => [item.state, item.accountedUsd, item.ruleIds]), [["partial", 1, ["rr_live"]]], "只有接了监控的渠道上的关联才归属");
-  assert.deepEqual(unaccounted.accounts[0].notes, ["已核算含未开监控的站点「上游」上的核算关联 rr_live",
-    "未开监控的站点「上游」上的核算关联 rr_two、rr_three 无法确认是否属于这个账号，未纳入金额可能偏高；在渠道接入里把对应渠道的监控关联到这个站点后可确认"]);
+  assert.deepEqual(unaccounted.accounts[0].notes, ["已算进利润的部分含暂停监控的上游「上游」上的绑定",
+    "暂停监控的上游「上游」上的绑定还没确认属于哪个上游账号，没算进利润的上游成本可能偏高；到「渠道绑定」里把渠道对上这个上游后就能确认"]);
   assert.equal(usage.calls.length, 1);
   // 监控关联不要求地址相同：Key 监控换成另一个地址，接了监控的渠道仍归属，其余没有同地址的候选，不再标出
   f.stations.find((station) => station.id === "key").baseUrl = "https://api.upstream.test/";
   unaccounted = (await module.queryRules({}, { accountUsage: true })).unaccountedUpstream;
   assert.deepEqual(unaccounted.accounts.map((item) => [item.state, item.accountedUsd, item.ruleIds, item.notes]),
-    [["complete", 1, ["rr_live"], ["已核算含未开监控的站点「上游」上的核算关联 rr_live"]]]);
+    [["complete", 1, ["rr_live"], ["已算进利润的部分含暂停监控的上游「上游」上的绑定"]]]);
   assert.equal(usage.calls.length, 2, "账号用量按缓存复用，站点地址变了才重新取");
 });
 
@@ -4631,13 +4632,13 @@ test("3b 账号用量走真实取数：sk 密钥站点没有用量接口，余�
   assert.deepEqual(full.unaccountedUpstream.excludedStations, [{ id: "upstream", name: "上游" }]);
   assert.equal(full.commonSummary.totals.knownCostUsd, 3, "设为不计入成本的上游，核算关联仍按 Key 用量计成本");
   assert.deepEqual(full.unaccountedUpstream.accounts.map((item) => [item.stationId, item.state, item.accountUsd, item.notes]),
-    [["keyonly", "unavailable", null, ["上游用量读取失败，余额历史也不够推算"]]]);
+    [["keyonly", "unavailable", null, ["上游暂时读不到，系统会自动再读"]]]);
   assert.deepEqual([full.unaccountedUpstream.state, full.unaccountedUpstream.total], ["partial", 0]);
   assert.deepEqual(history.calls[0], ["keyonly", Date.parse("2026-10-07T16:00:00Z"), Date.parse("2026-10-08T16:00:00Z")]);
   history.used = 3;
   full = await read();
   assert.deepEqual(full.unaccountedUpstream.accounts.map((item) => [item.state, item.accountUsd, item.notes]),
-    [["partial", 3, ["用量接口失败，已按余额历史推算；余额历史没覆盖整个时段，金额偏低"]]]);
+    [["partial", 3, ["用量接口失败，已按余额历史推算；历史数据不够，金额偏低"]]]);
   assert.deepEqual([full.unaccountedUpstream.state, full.unaccountedUpstream.total], ["partial", 3]);
   Object.assign(history, { used: 0, covered: true });
   full = await read();
@@ -4802,9 +4803,9 @@ test("U05最新已结束窗口等待账单：zero/失败均保留该日，真实
     for (const row of late.results) {
       assert.equal(row.window.preset, "yesterday"); assert.equal(row.window.startMs, Date.parse("2026-10-07T16:00:00Z"));
       assert.equal(row.downstream.amountUsd, 2.5);
-      const action = row.actions.find((item) => item.kind === "retry_bill");
-      assert.deepEqual(action.window, { startMs: row.window.startMs, endMs: row.window.endMs, timezone: row.window.timezone });
-      assert.ok(action.href.includes(`startMs=${row.window.startMs}&endMs=${row.window.endMs}&timezone=Asia%2FShanghai`));
+      // 7 天内系统会自己再读：这天还是「实时」，只提示还没读全，不出「重新读取」的待办（§4、§5.3）
+      assert.equal(row.displayStatus.state, "live"); assert.deepEqual(row.displayStatus.hints.map((hint) => hint.text), ["这天的账单还没读全"]);
+      assert.equal(row.actions.some((item) => item.kind === "retry_bill"), false);
     }
     assert.equal(late.commonSummary?.totals.confirmedProfitUsd ?? null, null);
     assert.equal(late.coverage.accountedChannelCount, 0);
@@ -4840,7 +4841,8 @@ test("U05真实Provider+module DST23/25小时、生效前窗口保留完整请�
   assert.equal([...f.state.snapshots.values()].some((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed" && JSON.parse(snapshot.source).window?.endMs === Date.parse("2026-10-08T16:00:00Z")), false);
   const notEffective = before.coverage.channels.find((channel) => channel.channelId === 1);
   assert.equal(notEffective.status, "not_effective"); assert.deepEqual(notEffective.issues, ["BILLING_SCOPE_NOT_EFFECTIVE"]);
-  assert.ok(notEffective.actions.some((action) => action.kind === "wait_effective" && action.href === "/stations?action=scope&ruleId=rr_live"));
+  // 还没开始统计不用人处理：渠道写「从 X 开始统计」，不出按钮（§5.6）
+  assert.deepEqual(notEffective.actions, []);
 });
 
 test("U05轮询结账：昨天结束满15分钟才写昨天整日confirmed，结清后不再取数，无利润10分钟后重试，核算起点不早于昨天结束不结账", async (t) => {
@@ -5159,7 +5161,7 @@ test("U06非法zone/token、own/pureKey不触发accountprobe；存userId不能�
   }
   for (const patch of [{ type: "newapi-key" }, { type: "newapi", isOwn: true }]) {
     Object.assign(f.station, patch);
-    await assert.rejects(f.module.getUpstreamKeys("resource", { force: true, tokenId: 9 }), /上游站点不存在/);
+    await assert.rejects(f.module.getUpstreamKeys("resource", { force: true, tokenId: 9 }), { code: "UPSTREAM_NOT_FOUND" });
   }
   assert.equal(f.state.requests.length, 0);
   Object.assign(f.station, { type: "newapi", isOwn: false, userId: 7 });
@@ -5234,12 +5236,12 @@ test("U06真实withAuth keys GET：登录/zone/token/drift400、原default500、
     assert.equal(body.version, "deployment-v1"); assert.doesNotMatch(JSON.stringify(body), /raw-|saved-secret|accessToken|password/);
     f.state.quota = null;
     const statError = await get("?tokenId=9"); assert.equal(statError.status, 503);
-    assert.deepEqual(await statError.json(), { error: "Key 账单能力暂时无法核验，请检查授权或稍后重试", code: "KEY_PROBE_UNAVAILABLE", retryable: true });
+    assert.deepEqual(await statError.json(), { error: "上游暂时读不到，请稍后再试", code: "KEY_PROBE_UNAVAILABLE", retryable: true });
     f.state.quota = 0;
     f.state.directoryError = true; f.rt._reconciliationMetadataCache.clear();
     const oldError = await get(); assert.equal(oldError.status, 500); assert.deepEqual(Object.keys(await oldError.json()), ["error"]);
     const selectedError = await get("?tokenId=9"); assert.equal(selectedError.status, 503);
-    assert.deepEqual(await selectedError.json(), { error: "Key 目录暂时无法读取，请检查权限或稍后重试", code: "KEY_METADATA_UNAVAILABLE", retryable: true });
+    assert.deepEqual(await selectedError.json(), { error: "读不到这个上游的 Key 列表", code: "KEY_METADATA_UNAVAILABLE", retryable: true });
     const partial = await get("?force=true"); assert.equal(partial.status, 200); assert.equal((await partial.json()).capability.reason, "KEY_METADATA_UNAVAILABLE");
     f.state.directoryError = false; f.state.onRequest = () => { f.station.authVersion += 1; f.state.onRequest = null; };
     const changed = await get("?force=true"); assert.equal(changed.status, 400); assert.equal((await changed.json()).code, "RESOURCE_CHANGED");
@@ -5251,7 +5253,8 @@ test("1b页面查询只读：昨天和今天都给出毛利，但不开写事务
   const f = await completedDayFixture(t);
   const page = (preset) => f.module.queryRules({ preset }, { mode: "evaluate", origin: "page" });
   const yesterday = await page("yesterday");
-  assert.ok(yesterday.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled"));
+  // 页面查询不结账：结账账本里还没有昨天，昨天仍是「实时」，旧的 settlement 字段写已结束
+  assert.ok(yesterday.results.every((row) => row.calculation.profitUsd === 1.5 && row.displayStatus.state === "live" && row.settlement === "ended"));
   const today = await page("today");
   assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "live"));
   assert.deepEqual(f.state.commits.map((tx) => tx.name), [], "页面查询不开写事务");
@@ -5412,7 +5415,7 @@ test("1b未锚定的旧规则：页面查询显示等待首次观测且不锚定
   const page = () => f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" });
   const before = await page();
   assert.equal(before.results[0].health.code, "PENDING");
-  assert.match(before.results[0].health.detail, /等待首次观测/);
+  assert.equal(before.results[0].health.detail, "读取中");
   assert.equal(before.results[0].calculation.profitUsd, null);
   assert.deepEqual(f.state.commits.map((tx) => tx.name), [], "只读查询不锚定身份");
   assert.deepEqual(f.state.statCalls, [], "还没观测过就不取上下游账单");

@@ -1,151 +1,124 @@
 "use client";
-// 核算详情抽屉正文：窗口、来源、范围版本、金额和计算依据、健康问题、渠道收费明细。
-// 「修正切换时间」是页面只读的唯一例外，其余处理都跳到上游账单。
-import { Alert, Button, Collapse, DatePicker, Select } from "antd";
+// 计算明细（抽屉正文）：这天是哪种状态、要处理什么，收入、上游成本、毛利怎么来的，各渠道收入。
+// 只用白话（design/ui-copy-spec.md §9）；「改时间」是页面只读的唯一例外，其余处理都由按钮去对应页面。
+import { useRef } from "react";
+import { Alert, Button, DatePicker, Select } from "antd";
+import { EMPTY, formatDayZone, formatPct, formatZonedDateTime } from "../../../lib/format";
+import { reconciliationAccountingStart } from "../../../lib/reconciliation-contract";
 import {
-  reconciliationBillingBasis,
-  reconciliationCalculationValues as calculationValues,
+  hasReconciliationHistory,
+  mergeReconciliationChannels,
+  reconciliationAccountingStartText,
+  reconciliationKeyName,
   reconciliationRowFlags,
 } from "../../../lib/reconciliation-view";
+import { ErrorDetail } from "../../components/error-detail";
+import { ChannelBreakdown, Detail, IssueAction, LossTag } from "./recon-parts";
 import {
-  RECONCILIATION_BILLING_SOURCE,
-  RECONCILIATION_BILLING_SOURCE_LABEL,
-  reconciliationHealthMeta,
-} from "../../../lib/reconciliation-contract";
-import { ChannelBreakdown, Detail } from "./recon-parts";
-import {
-  amountText, billingAmountText, billingCoverageText, channelLabel, costText, currentRatioLabel, formatRecentTime, formatWindow,
-  formatWindowWithZone, healthLabel, incomeText, isFixedCost, iso, percent, rowHasConflict, sameWindow, sideAmount, upstreamBillsHref, upstreamName,
+  RECON_BUTTONS, RETRY_FAILED_TEXT, amountText, costText, currentGroup, currentRatioLabel, formatWindow, incomeText, isFixedCost, ratioChangeText, ratioLabel, rateText,
+  ruleHistory, segmentPeriod, upstreamName,
 } from "./recon-format";
 import type { useReconDetail } from "./use-recon-detail";
 import type { ReconciliationCurrency } from "../../../lib/client";
 
 type DetailState = ReturnType<typeof useReconDetail>;
 
-// 冲突处理目标涉及的每条关联：在当前结果里就能打开核对，不在了就标明已不可用
+// 重复绑定涉及的另外几条（服务端在重复的问题里带上 ruleIds）：还在列表里的可以直接打开看，不在了就写已解除
+const CONFLICT_CODES = new Set(["CANONICAL_KEY_CONFLICT", "DUPLICATE_CHANNEL_ASSIGNMENT"]);
+const conflictRuleIds = (detail: any) => [...new Set<string>((detail?.health?.issues || [])
+  .filter((issue: any) => CONFLICT_CODES.has(issue.code)).flatMap((issue: any) => issue.ruleIds || []))]
+  .filter((id) => id !== detail?.rule?.id);
+
 export function ConflictRules({ ids, results, onOpen }: { ids: string[]; results: any[]; onOpen: (row: any) => void }) {
   return <div className="reconciliation-button-row">
     {ids.map((id) => {
       const row = results.find((item: any) => item.rule?.id === id);
-      return row ? <Button key={id} onClick={() => onOpen(row)}>核对 {id}</Button> : <span key={id} className="jy-caption">已不可用：{id}</span>;
+      return row
+        ? <Button key={id} onClick={() => onOpen(row)}>查看 {reconciliationKeyName(row.rule)}</Button>
+        : <span key={id} className="jy-caption">有一条绑定已解除</span>;
     })}
   </div>;
 }
 
-function HealthAlert({ detail, currency }: { detail: any; currency: ReconciliationCurrency }) {
-  const meta = reconciliationHealthMeta(detail.health?.code);
-  const negative = reconciliationRowFlags(detail, currency).negative;
-  const type = meta.tone === "error" || negative ? "error" : detail.health?.code === "READY" ? "success" : "warning";
-  const title = meta.tone === "error" ? detail.health?.label || meta.label : negative ? "这条核算关联毛利为负" : detail.health?.label;
-  return <Alert type={type} showIcon title={title} description={detail.health?.detail || "数据来源正常"} />;
-}
-
-export function ReconDetail({ detail, state, currency, upstreams, compact, conflictIds, results, retrying, retryError, onOpenHistory, onRetry, onOpen, onCorrect }: {
-  detail: any; state: DetailState; currency: ReconciliationCurrency; upstreams: any; compact: boolean; conflictIds: string[]; results: any[];
+export function ReconDetail({ detail, state, currency, upstreams, businessTimezone, compact, results, retrying, retryError, onOpenHistory, onRetry, onOpen, onCorrect }: {
+  detail: any; state: DetailState; currency: ReconciliationCurrency; upstreams: any; businessTimezone?: string; compact: boolean; results: any[];
   retrying: boolean; retryError?: string; onOpenHistory: (id: string) => void; onRetry: (item: any) => void; onOpen: (row: any) => void; onCorrect: () => void;
 }) {
-  const calculation = calculationValues(detail.calculation, detail.health, detail, currency);
-  const original = calculationValues(detail.calculation, detail.health, detail, "USD");
-  const fixedCost = isFixedCost(detail);
+  const timingRef = useRef<HTMLElement>(null);
+  const flags = reconciliationRowFlags(detail, currency);
+  const status = flags.displayStatus;
+  const { profit, margin, currency: profitCurrency } = flags.values;
   const requested = detail.requestedWindow || detail.window;
+  const timezone = detail.window?.timezone || detail.rule?.timezone;
+  const dayZone = formatDayZone(timezone, businessTimezone);
+  const channels = mergeReconciliationChannels(detail.rule?.channels, detail.downstream?.channels);
+  const fixedCost = isFixedCost(detail);
+  const ratioChange = ratioChangeText(detail, timezone);
+  const start = reconciliationAccountingStart(detail.rule);
+  const revisions = Number(detail.ledger?.revision) - 1;
   const pendingSegments = state.transitionSegments.filter((segment: any) => segment.timingSource === "detected");
-  const basis = (billing: any) => reconciliationBillingBasis(detail.segments?.length === 1 ? billing : { state: billing?.state, amountUsd: billing?.amountUsd, knownAmountUsd: billing?.knownAmountUsd });
-  const resultValue = calculation.confirmed ? calculation.profit : calculation.riskDifference;
-  const originalResult = original.confirmed ? original.profit : original.riskDifference;
-  const reference = detail.lastConfirmed ? { ...detail.lastConfirmed, rates: detail.rates } : null;
+  const otherConflicts = status.state === "action" ? conflictRuleIds(detail) : [];
+  // 「改时间」在本页下面：滚过去，不另开页面
+  const showTiming = pendingSegments.length ? () => timingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }) : undefined;
 
   return <div className="reconciliation-detail-body">
     <div className="reconciliation-button-row">
-      <Button onClick={() => onOpenHistory(detail.rule.id)}>查看已确认账单历史</Button>
-      <Button loading={retrying} onClick={() => onRetry(detail)}>重查该窗口账单</Button>
-      <Button href={upstreamBillsHref(detail.rule.id, rowHasConflict(detail))}>去上游账单处理</Button>
+      <Button onClick={() => onOpenHistory(detail.rule.id)}>{RECON_BUTTONS.history}</Button>
+      <Button loading={retrying} onClick={() => onRetry(detail)}>{RECON_BUTTONS.retry}</Button>
     </div>
-    {retryError ? <Alert type="error" showIcon title={retryError} /> : null}
-    {conflictIds.includes(detail.rule.id)
-      ? <Alert type="warning" showIcon title="重复销售归属待处理" description={<>涉及关联：{conflictIds.join("、")}。<ConflictRules ids={conflictIds} results={results} onOpen={onOpen} /></>} />
-      : null}
-    {detail.actions?.length
-      ? <div className="reconciliation-button-row">{detail.actions.map((action: any) => <Button key={action.id} href={action.href}>{action.label}</Button>)}</div>
-      : null}
-    <HealthAlert detail={detail} currency={currency} />
+    {retryError ? <Alert type="error" showIcon title={RETRY_FAILED_TEXT} description={<ErrorDetail raw={retryError} />} /> : null}
 
-    <div className="reconciliation-detail-grid">
-      <Detail label="请求窗口" value={formatWindowWithZone(requested)} />
-      <Detail label="返回账单实际窗口" value={formatWindowWithZone(detail.window)} />
-      {detail.upstream?.window && !sameWindow(detail.upstream.window, detail.window) ? <Detail label="上游原账单窗口" value={formatWindowWithZone(detail.upstream.window)} /> : null}
-      {detail.downstream?.window && !sameWindow(detail.downstream.window, detail.window) ? <Detail label="本站原账单窗口" value={formatWindowWithZone(detail.downstream.window)} /> : null}
-      {detail.health?.stale ? <Detail label="成功金额覆盖窗口" value={formatWindowWithZone(detail.lastSuccessfulWindow || detail.window)} /> : null}
-      <Detail label="上游账号" value={upstreamName(detail.rule, upstreams)} />
-      <Detail label="上游 Key / 分组" value={`${detail.rule?.tokenName || "—"} · ${detail.upstream?.group || detail.currentSegment?.group || detail.rule?.fixedGroup || "—"}`} />
-      <Detail label="关联销售渠道" value={(detail.rule?.channels?.length ? detail.rule.channels : detail.downstream?.channels || []).map(channelLabel).join("、") || "未配置渠道"} />
-      {detail.scope ? <>
-        <Detail label="当前核算范围版本" value={String(detail.scope.scopeVersion ?? "未知")} />
-        <Detail label="生效时间" value={iso(detail.scope.billingEffectiveFromMs)} />
-        <Detail label="首次结账" value={iso(detail.scope.firstQueryableAtMs)} />
-        {detail.scope.accountedFromMs != null ? <Detail label="本窗口核算起点" value={iso(detail.scope.accountedFromMs)} /> : null}
-        {detail.scope.recalculated ? <Detail label="配置变更" value="已按新配置重算（修改前尚未结账的时段也按当前配置计算）" /> : null}
-      </> : null}
-      {detail.billingTimezone
-        ? <Detail label="账单时区能力" value={`${detail.billingTimezone.timezone} · ${detail.billingTimezone.state === "verified" ? "已核验" : "待核验，原金额仅供参考"}${detail.billingTimezone.reason ? ` · ${detail.billingTimezone.reason}` : ""}`} />
-        : null}
-      <Detail label="当前倍率" value={currentRatioLabel(detail)} />
-      <Detail label="本站收费" value={`${incomeText(detail, currency)} · ${billingCoverageText(detail.downstream)}`} />
-      <Detail label="上游成本" value={fixedCost
-        ? `${costText(detail, currency)} · 固定采购：Key 用量 ${billingAmountText(detail.upstream, null)} 不计成本`
-        : `${costText(detail, currency)} · ${billingCoverageText(detail.upstream)}`} />
-      <Detail label={calculation.confirmed ? "毛利" : "风险差额（未计入毛利）"} value={amountText(resultValue, calculation.currency as ReconciliationCurrency)} />
-      <Detail label="毛利率" value={percent(calculation.margin)} />
-      {currency === "CNY"
-        ? <Detail label="汇率" value={`本站 ¥${detail.rates?.income?.cnyPerUsd}/$ · 上游 ${fixedCost ? "固定采购不计成本" : `¥${detail.rates?.cost?.cnyPerUsd}/$`}`} />
-        : null}
-    </div>
-
-    <Collapse size="small" ghost className="reconciliation-basis" items={[{
-      key: "billing-basis",
-      label: "查看原始账单与计算依据",
-      children: <div className="reconciliation-detail-grid">
-        <Detail label="本站收费（美元原值）" value={basis(detail.downstream)} />
-        <Detail label={fixedCost ? "上游 Key 用量（美元原值，固定采购不计成本）" : "上游成本（美元原值）"} value={basis(detail.upstream)} />
-        <Detail label={calculation.confirmed ? "毛利（美元原值）" : "风险差额（美元原值）"} value={reconciliationBillingBasis({ state: "complete", amountUsd: originalResult })} />
-        <p className="jy-caption">毛利 = 本站收费 − 上游成本；毛利率 = 毛利 ÷ 本站收费。计算使用未舍入金额，跨分段时先分别核算再汇总。{currency === "CNY" ? "按人民币显示时，收费按本站、成本按该上游的当前汇率分别折算后相减。" : ""}</p>
-      </div>,
-    }]} />
-
-    <div className="reconciliation-detail-grid">
-      <Detail label="本站收费来源" value={detail.downstream?.knownAmountUsd == null && detail.downstream?.amountUsd == null ? "未取得" : detail.downstream.billingSource === RECONCILIATION_BILLING_SOURCE ? RECONCILIATION_BILLING_SOURCE_LABEL : "旧版来源（待重新核算）"} />
-      <Detail label="渠道账单覆盖" value={billingCoverageText(detail.downstream)} />
-      {detail.lastConfirmed ? <>
-        <Detail label="最近完整账单（仅参考）" value={`${formatRecentTime(detail.lastConfirmed.generatedAt, detail.lastConfirmed.window?.timezone, true)} · ${formatWindow(detail.lastConfirmed.window)}`} />
-        <Detail label="参考收费 / 成本" value={`${amountText(sideAmount(reference, "income", currency), currency)} / ${amountText(sideAmount(reference, "cost", currency), currency)}（不计入当前汇总）`} />
-      </> : null}
-    </div>
-
-    {/* 固定采购的上游成本记 0：上游账单和成本归属的问题只作参考，不影响毛利。 */}
-    {(detail.health?.issues || []).map((issue: any, index: number) => <Alert
-      key={`${issue.code}-${index}`} type={issue.reference ? "info" : reconciliationHealthMeta(issue.code).tone === "error" ? "error" : "warning"} showIcon
-      title={issue.reference ? `${healthLabel(issue.code)}（仅供参考）` : healthLabel(issue.code)}
-      description={issue.reference ? `${String(issue.detail || "").replace(/[。.]$/, "")}。上游是固定采购，成本记 0，不影响毛利。` : issue.detail}
+    {/* 需处理只露出最要紧的一条和它的按钮，其余收起成「还有 N 个问题」（§4） */}
+    {status.state === "action" ? <Alert
+      type="warning" showIcon title={status.title}
+      description={status.detail || status.moreCount > 0 || otherConflicts.length ? <>
+        {status.detail ? <div>{status.detail}</div> : null}
+        {status.moreCount > 0 ? <div>还有 {status.moreCount} 个问题</div> : null}
+        {otherConflicts.length ? <ConflictRules ids={otherConflicts} results={results} onOpen={onOpen} /> : null}
+      </> : undefined}
+      action={<IssueAction size="small" action={status.action} onDetail={showTiming} />}
+    /> : null}
+    {status.hints.map((hint: any) => <Alert
+      key={hint.code} type="info" showIcon title={hint.text}
+      action={<IssueAction size="small" action={hint.action} onDetail={showTiming} />}
     />)}
 
-    {pendingSegments.length ? <section className="reconciliation-transition" aria-label="修正分组切换时间">
-      <h3>分组切换时间待确认</h3>
-      <p className="jy-caption">系统按观测时间推断了切换点；填入实际切换时间后，按新分段重新核算。</p>
+    <div className="reconciliation-detail-grid">
+      <Detail label="时间" value={<>{formatWindow(requested)}{dayZone ? <small>{dayZone}</small> : null}</>} />
+      <Detail label="上游" value={upstreamName(detail.rule, upstreams)} />
+      <Detail label="Key" value={reconciliationKeyName(detail.rule)} />
+      <Detail label="分组 / 倍率" value={`${currentGroup(detail)} · ${currentRatioLabel(detail)}`} />
+      <Detail label="收入" value={<>{incomeText(detail, currency)}<small>{channels.length ? `来自自营站点 ${channels.length} 个渠道的收费记录` : "这条绑定还没有渠道"}</small></>} />
+      <Detail label="上游成本" value={<>{costText(detail, currency)}{fixedCost ? null
+        : <small>来自 Key「{reconciliationKeyName(detail.rule)}」的用量记录{ratioChange ? `；${ratioChange}` : ""}</small>}</>} />
+      <Detail label="毛利" value={<>{amountText(profit, profitCurrency as ReconciliationCurrency)} <LossTag show={flags.negative} /></>} />
+      <Detail label="毛利率" value={formatPct(margin)} />
+      <Detail label="汇率" value={rateText(detail, currency, timezone)} />
+      {status.state === "settled" ? <Detail label="固定于" value={formatZonedDateTime(status.settledAt, timezone)} /> : null}
+      {start != null && requested && start > requested.startMs ? <Detail label="开始统计" value={reconciliationAccountingStartText(detail.rule, timezone)} /> : null}
+      {revisions > 0 ? <Detail label="改过" value={`改过 ${revisions} 次`} /> : null}
+    </div>
+    <p className="jy-caption">毛利 = 收入 − 上游成本；毛利率 = 毛利 ÷ 收入。{hasReconciliationHistory(ruleHistory(detail)) ? "倍率变了的日子分两段算。" : ""}</p>
+
+    {pendingSegments.length ? <section ref={timingRef} className="reconciliation-transition" aria-label="改时间">
+      <h3>倍率变化的时间是系统估的</h3>
+      <p className="jy-caption">填上倍率实际变化的时间，受影响的日子会重算。</p>
       <div className="reconciliation-transition__controls">
         <Select
-          value={state.transitionSegmentId} onChange={state.setTransitionSegmentId} placeholder="选择待确认的切换分段"
+          value={state.transitionSegmentId} onChange={state.setTransitionSegmentId} placeholder="选择要改的那次倍率变化"
           style={{ minWidth: compact ? "100%" : 230 }}
           options={pendingSegments.map((segment: any) => ({
             value: segment.id,
-            label: `${segment.group} · ${formatWindow(segment.window || { startMs: segment.effectiveFrom, endMs: segment.effectiveTo ?? Date.now(), timezone: detail.window?.timezone || detail.rule?.timezone })}`,
+            label: `${segment.group || EMPTY} · ${ratioLabel(segment.ratio)} · ${segmentPeriod(segment, timezone)}`,
           }))}
         />
-        <DatePicker showTime value={state.transitionAt} onChange={(value) => state.setTransitionAt(value)} placeholder="实际切换时间" />
-        <Button loading={state.correcting} onClick={onCorrect}>修正切换时间</Button>
+        <DatePicker showTime={{ format: "HH:mm" }} format="YYYY年M月D日 HH:mm" value={state.transitionAt} onChange={(value) => state.setTransitionAt(value)} placeholder="倍率变化的时间" />
+        <Button loading={state.correcting} onClick={onCorrect}>改时间</Button>
       </div>
     </section> : null}
 
-    <section className="reconciliation-channels" aria-label="渠道收费明细">
-      <h3>渠道收费明细</h3>
+    <section className="reconciliation-channels" aria-label="各渠道收入">
+      <h3>各渠道收入</h3>
       <ChannelBreakdown item={detail} currency={currency} />
     </section>
   </div>;
