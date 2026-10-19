@@ -15,6 +15,9 @@ function linkFromRow(row) {
   };
 }
 
+const linkSet = (links) => JSON.stringify(links.map((link) => [link.stationId, link.channelRevision, link.confirmedAt])
+  .sort(([a], [b]) => a.localeCompare(b)));
+
 export class ChannelOnboardingRepository {
   constructor(pool) {
     this.pool = pool;
@@ -31,7 +34,7 @@ export class ChannelOnboardingRepository {
     return rows.map(linkFromRow);
   }
 
-  async saveLinks(links, { guard = null } = {}) {
+  async saveLinks(links, { guard = null, removals = [], expectedLinks = null, expectedSource = null } = {}) {
     const unique = new Map();
     for (const input of links) {
       const channelId = Number(input.channelId);
@@ -48,11 +51,47 @@ export class ChannelOnboardingRepository {
       };
       unique.set(JSON.stringify([link.ownStationId, channelId, link.stationId]), link);
     }
-    if (!unique.size) return [];
+    const removed = new Map();
+    for (const input of removals) {
+      if (!input.ownStationId || !input.stationId || !Number.isSafeInteger(input.channelId) || input.channelId <= 0 || !Array.isArray(expectedLinks)) {
+        throw new Error("要去掉的看余额绑定不完整");
+      }
+      const link = { ownStationId: String(input.ownStationId), channelId: input.channelId, stationId: String(input.stationId) };
+      const key = JSON.stringify([link.ownStationId, link.channelId, link.stationId]);
+      if (unique.has(key)) throw new Error("同一个上游不能同时加上又去掉");
+      removed.set(key, link);
+    }
+    if (!unique.size && !removed.size) return [];
+    const channels = new Map();
+    for (const link of [...unique.values(), ...removed.values()]) channels.set(JSON.stringify([link.ownStationId, link.channelId]), link);
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
       guard?.();
+      // 渠道还没有任何绑定时也先锁住已保存的渠道列表，所有写入都排在同一把锁后面
+      const [catalogueRows] = await conn.query("SELECT v FROM meta WHERE k = ? FOR UPDATE", [CATALOGUE_KEY]);
+      if (expectedSource) {
+        const catalogue = catalogueRows.length ? asJson(catalogueRows[0].v) : null;
+        if (!catalogue || catalogue.ownStationId !== expectedSource.ownStationId || catalogue.sourceVersion !== expectedSource.sourceVersion
+            || catalogue.ownSource?.namespaceKey !== expectedSource.namespaceKey || expectedSource.channels.some((expected) => !catalogue.channels.some((channel) =>
+              channel.id === expected.channelId && channel.revision === expected.channelRevision && !channel.missing))) {
+          throw Object.assign(new Error("自营站点的渠道列表变了，请重新预览"), { code: "PREVIEW_BASIS_CHANGED" });
+        }
+      }
+      // 只加不删的调用也锁同样的渠道范围，顺序一致，免得互相等死
+      for (const [, channel] of [...channels].sort(([a], [b]) => a.localeCompare(b))) {
+        const [rows] = await conn.query(
+          "SELECT * FROM channel_monitor_links WHERE own_station_id = ? AND channel_id = ? ORDER BY station_id FOR UPDATE",
+          [channel.ownStationId, channel.channelId]
+        );
+        if (expectedLinks && linkSet(rows.map(linkFromRow)) !== linkSet(expectedLinks.filter((link) => link.ownStationId === channel.ownStationId && link.channelId === channel.channelId))) {
+          throw Object.assign(new Error("渠道看余额绑的上游变了，请重新预览"), { code: "PREVIEW_BASIS_CHANGED" });
+        }
+      }
+      for (const link of removed.values()) {
+        await conn.query("DELETE FROM channel_monitor_links WHERE own_station_id = ? AND channel_id = ? AND station_id = ?",
+          [link.ownStationId, link.channelId, link.stationId]);
+      }
       for (const link of unique.values()) {
         await conn.query(
           `INSERT INTO channel_monitor_links

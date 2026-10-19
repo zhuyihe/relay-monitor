@@ -4,30 +4,30 @@
 // 绑定的写操作只在这里；上游列表与编辑抽屉仍由页面持有。用语按 design/ui-copy-spec.md，报错按 lib/error-copy.js 归类，原文只放进「查看详细原因」。
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, Modal, Select, Space, Typography } from "antd";
+import { Alert, App, Button, Collapse, Drawer, Input, Modal, Select, Space, Typography } from "antd";
 import { api, readWorkflowDestination } from "../../../lib/client";
-import { createRequestId } from "../../../lib/request-id.js";
 import { costBasisOf } from "../../../lib/profit.js";
-import type { AccountReadModel, AccountRecord, AccountKeyScope, AccountAssociation, UnmatchedAssociation, CoverageDeclaration, PublicResource, AccountAuthorizationInput, AccountAuthorizationProbe, AccountAuthorizationResult, AccountAuthorizationRecoveryIntent, WorkflowDestination, UpstreamKeyRead, ResourceIdentityConfirmation } from "../../../lib/client";
+import type { AccountReadModel, AccountRecord, AccountKeyScope, AccountAssociation, UnmatchedAssociation, CoverageDeclaration, PublicResource, WorkflowDestination, UpstreamKeyRead, ResourceIdentityConfirmation } from "../../../lib/client";
 import { STATION_TABS } from "../../../lib/brand.js";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time.js";
 import { BINDING_COPY } from "../../../lib/channel-onboarding.js";
-import { ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText, requiredText } from "../../../lib/error-copy.js";
+import { ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText } from "../../../lib/error-copy.js";
 import { EMPTY, FIXED_COST_TEXT, NOTHING_TO_HANDLE, RATE_UNSET_PARITY, formatAsOf, formatDayZone, formatRate, formatUsd, formatZonedDateTime, formatZonedRange, refreshFailedText } from "../../../lib/format";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, coverageAnswerOption, fillIssueCopy, reconciliationChannelStatus, reconciliationIssue } from "../../../lib/reconciliation-contract.js";
 import { reconciliationChannelName, reconciliationKeyName } from "../../../lib/reconciliation-view.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowActionMeta } from "../../../lib/workflow-actions.js";
 import { Skeleton } from "../../components/data-state";
-import { ErrorDetail } from "../../components/error-detail";
+import { ErrorDetail, notice, noteOf } from "../../components/error-detail";
+import type { ErrorNote } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { CountBadge } from "../../components/panel";
 import { publishAccountActions } from "../../components/use-workflow-actions";
 import { useDrawerEscape } from "../../components/drawer-escape";
+import { useAccountAuthorization } from "../../components/account-authorization";
 import { AssociationEditor } from "./association-editor";
 import type { AssociationEditTarget } from "./association-editor";
 
 const { Text } = Typography;
-const AUTHORIZATION_RECOVERY_KEY = "account-authorization-recovery-v05";
 // 按钮名和完成提示（§3.5，lib/workflow-actions.js）
 const PAUSE = workflowActionMeta("pause_monitor")!;
 const RESUME = workflowActionMeta("resume_monitor")!;
@@ -51,10 +51,8 @@ const COPY = Object.freeze({
   pausedHint: "暂停监控时不刷新余额，绑定照常算利润。",
   pauseText: "暂停后不再刷新这个上游的余额，随时可以恢复；绑定照常算利润。",
   resumeText: "恢复后接着刷新这个上游的余额。",
-  archived: "已归档",
   unbound: "已解除绑定",
   notBound: "没绑定",
-  bindingCount: (n: number) => `绑定 ${n} 条`,
   activeCount: (n: number) => `${n} 条在用`,
   inProfit: "算进利润",
   notInProfit: "不算进利润",
@@ -72,7 +70,6 @@ const COPY = Object.freeze({
   archivedHint: "另有归档的上游，点上方「显示归档的上游」查看。",
   showArchived: "显示归档的上游",
   hideArchived: "隐藏归档的上游",
-  recover: `查看上次${UPDATE_LOGIN.label}的结果`,
   searchPlaceholder: "搜索上游、上游账号、Key、渠道",
   allAccounts: "全部上游账号",
   accountCount: (n: number) => `${n} 个上游账号`,
@@ -85,7 +82,6 @@ const COPY = Object.freeze({
   noMatchedBindings: "没有匹配的绑定。",
   unverifiedTitle: "只用 Key 的上游，和还没确认上游账号的上游",
   unverifiedSub: "这些上游还不能确认属于哪个上游账号，所以单独列出；绑定照常保留。",
-  keyOnly: "只用 Key",
   ownerUnknown: "还没确认上游账号",
   matchedChannels: "对上的渠道",
   noMatchedUpstreams: "没有匹配的上游。",
@@ -115,68 +111,19 @@ const COPY = Object.freeze({
   upstreamCost: (amount: string) => `上游成本 ${amount}`,
   probeIncomplete: "这段时间的用量记录没读全",
   probeHint: "这里只是测试读取，不改利润。",
-  confirmUpdate: "确认更新",
-  loginOnceTitle: "登录信息只填一次，选好要更新的上游",
-  loginOnceDetail: "其他设置、绑定和以前的每日记录都不变。自营站点、只用 Key 的上游、其他上游账号和归档的上游不跟着更新。",
-  updatedBefore: (names: string) => `已更新，这次不再改：${names}`,
-  type: "类型",
-  required: requiredText,
-  reuse: "用已保存的登录信息，不用再填。",
-  targets: "要更新的上游",
-  ownerUnknownTarget: "还没确认上游账号，预览后才能加进来",
-  notFollowing: "不跟着更新",
-  otherAccount: "其他上游账号",
-  repreview: "重新预览",
-  previewTitle: "预览，还没保存",
-  affectedUpstreams: "会一起更新的上游",
-  affectedBindings: (n: number) => `用到它的绑定 ${n} 条`,
-  someNotUpdated: (n: number) => `有 ${n} 个上游没更新上，已更新的不变`,
-  alreadyUpdated: "已更新过，不用再改",
-  checkResult: "查看保存结果",
-  refill: "请重新填写登录信息。",
-  refillButton: "重新填写登录信息",
-  chooseTargets: "请选择要更新的上游",
   chooseBinding: "请选择要解除的绑定",
   ownExcluded: "自营站点不在这里改",
-  accountMissing: "找不到上次更新的上游账号，请刷新后再试。",
   profit: "利润",
   channels: "渠道",
   bindings: "绑定",
   freedChannels: "解除后空出来的渠道",
 });
-// 只在选类型的地方出现的类型名和填写处说明（§3.7）
-const AUTHORIZATION_TYPES: Record<string, { label: string; field?: string; help: string }> = {
-  newapi: { label: "New API 账号", field: "访问令牌", help: "在上游后台「个人设置」里生成，用来读取余额和用量记录" },
-  sub2api: { label: "Sub2API 账号（登录令牌）", field: "登录令牌", help: "登录 Sub2API 后拿到的一串字符，用来读取余额和用量记录" },
-  "sub2api-password": { label: "Sub2API 账号（邮箱密码）", help: "你在上游登录用的邮箱和密码" },
-};
 // 还没归到 Key 下的绑定：为什么、怎么办（§5.2 的问题文案）
 const UNMATCHED_ISSUES: Record<UnmatchedAssociation["reason"], { title: string; detail: string }> = {
   unverified_resource: OWNER_UNVERIFIED,
   unanchored: reconciliationIssue("LEGACY_IDENTITY_UNVERIFIED"),
   key_changed: reconciliationIssue("SOURCE_BINDING_UNCONFIRMED"),
   missing_resource: { title: ERROR_CATEGORIES.not_found.text, detail: COPY.missingUpstreamDetail },
-};
-
-// 界面上的一条报错：text 是归类后的那一句，raw 是原文，只进「查看详细原因」；notice 表示是本页自己的提示，不是接口报错
-type ErrorNote = { text: string; raw?: unknown; notice?: boolean };
-// 本页自己的提示也用 throw 传出去：带 notice 的原样显示，不再归类
-const notice = (text: string) => Object.assign(new Error(text), { notice: true });
-const noteOf = (err: any): ErrorNote => {
-  if (err?.notice) return { text: err.message, notice: true };
-  const { text, raw } = describeError(err);
-  // 原文和归类后的那句一样时（服务端已给出界面上的话），不再放「查看详细原因」
-  return { text, raw: raw && raw !== text ? raw : undefined };
-};
-// 「不跟着更新」的原因按码归类（lib/error-copy.js）
-const exclusionNote = (item: { reason?: string; code?: string }): ErrorNote => noteOf(item);
-// 更新登录信息后每个上游的结果；没更新上的按原因归类，原文进「查看详细原因」
-const authorizationTargetNote = (target: AccountAuthorizationResult["targets"][number]): ErrorNote => {
-  if (target.status === "updated") return { text: UPDATE_LOGIN.done };
-  if (target.status === "already_updated") return { text: COPY.alreadyUpdated };
-  if (target.status === "repreview_required") return { text: ERROR_CATEGORIES.changed.text };
-  // 标题已说「没更新上」，这里只写原因；不跟着更新的按具体原因的码说
-  return noteOf(target.code === "TARGET_EXCLUDED" ? { code: target.exclusionCode, reason: target.reason } : target);
 };
 
 type AccountCenterProps = {
@@ -232,19 +179,9 @@ export function useAccountCenter({
   const [verificationError, setVerificationError] = useState<ErrorNote | null>(null);
   const verificationEpoch = useRef(0);
   const accountReadEpoch = useRef(0);
-  const [authorizationAccount, setAuthorizationAccount] = useState<AccountRecord | null>(null);
-  const [authorizationTargets, setAuthorizationTargets] = useState<string[]>([]);
-  const [authorizationRequestId, setAuthorizationRequestId] = useState("");
-  const [authorizationProbe, setAuthorizationProbe] = useState<AccountAuthorizationProbe | null>(null);
-  const [authorizationResult, setAuthorizationResult] = useState<AccountAuthorizationResult | null>(null);
-  const [authorizationError, setAuthorizationError] = useState<ErrorNote | null>(null);
-  const [authorizationBusy, setAuthorizationBusy] = useState(false);
-  const [reuseAuthorization, setReuseAuthorization] = useState(false);
-  const [previouslyUpdatedIds, setPreviouslyUpdatedIds] = useState<string[]>([]);
-  const [authorizationRecovery, setAuthorizationRecovery] = useState<{ accountKey: string; retryInput: AccountAuthorizationRecoveryIntent } | null>(null);
-  const [authorizationForm] = Form.useForm();
-  const authorizationType = Form.useWatch("type", authorizationForm) || "newapi";
-  const authorizationEpoch = useRef(0);
+  const { openAuthorization, authorizationBusy, authorizationEligible, recoveryButton: authorizationRecoveryButton, overlay: authorizationOverlay } = useAccountAuthorization({
+    compact, accountModel, stations, disabled: loadingAccounts, onComplete: reload, onRecoveryError: setAccountError,
+  });
   const [purposeTarget, setPurposeTarget] = useState<{ resource?: PublicResource; monitorEnabled?: boolean; keyLabel?: string; association?: AccountAssociation } | null>(null);
   const [purposeBusy, setPurposeBusy] = useState(false);
   const [purposeError, setPurposeError] = useState<ErrorNote | null>(null);
@@ -270,13 +207,7 @@ export function useAccountCenter({
 
   useEffect(() => {
     setDestination(readWorkflowDestination(window.location.search, "stations"));
-    try {
-      const stored = JSON.parse(sessionStorage.getItem(AUTHORIZATION_RECOVERY_KEY) || "null");
-      if (/^[a-f0-9]{64}$/.test(stored?.accountKey || "") && typeof stored.retryInput?.requestId === "string" && Array.isArray(stored.retryInput.targetStationIds) && stored.retryInput.targetStationIds.every((id: any) => typeof id === "string")) {
-        setAuthorizationRecovery({ accountKey: stored.accountKey, retryInput: { requestId: stored.retryInput.requestId, targetStationIds: [...stored.retryInput.targetStationIds] } });
-      }
-    } catch { /* 不阻断上游账单读取。 */ }
-    return () => { authorizationEpoch.current += 1; accountReadEpoch.current += 1; };
+    return () => { accountReadEpoch.current += 1; };
   }, []);
 
   useEffect(() => {
@@ -388,94 +319,8 @@ export function useAccountCenter({
     verificationEpoch.current += 1; setVerificationStation(null); setVerification(null); openEditor(original);
   };
 
-  const rememberAuthorization = (accountKey: string, intent: AccountAuthorizationRecoveryIntent | null) => {
-    const safe = intent ? { accountKey, retryInput: { requestId: intent.requestId, targetStationIds: [...intent.targetStationIds] } } : null;
-    setAuthorizationRecovery(safe);
-    try { if (safe) sessionStorage.setItem(AUTHORIZATION_RECOVERY_KEY, JSON.stringify(safe)); else sessionStorage.removeItem(AUTHORIZATION_RECOVERY_KEY); } catch { /* 当前抽屉里仍能查看保存结果。 */ }
-  };
-  const authorizationName = (id: string) => accountModel?.accounts.flatMap((account) => account.resources).find((resource) => resource.id === id)?.name || accountModel?.unverifiedResources.find((resource) => resource.id === id)?.name || stations.find((station) => station.id === id)?.name || id;
-  const authorizationEligible = (account: AccountRecord) => account.resources.filter((resource) => !resource.archivedAt && resource.type !== "newapi-key" && !stations.some((station) => station.id === resource.id && station.isOwn));
-  const initializeAuthorizationForm = (account: AccountRecord) => {
-    authorizationForm.resetFields();
-    authorizationForm.setFieldsValue({ type: account.identity.provider === "newapi" ? "newapi" : authorizationEligible(account)[0]?.type || "sub2api" });
-  };
-  const closeAuthorization = () => {
-    authorizationEpoch.current += 1; setAuthorizationAccount(null); setAuthorizationProbe(null); authorizationForm.resetFields();
-  };
-  // 两个抽屉里都有下拉框：Esc 由抽屉自己处理（#413）
+  // 抽屉里有下拉框：Esc 由抽屉自己处理（#413）
   useDrawerEscape(!!verificationStation, closeVerification);
-  useDrawerEscape(!!authorizationAccount && !authorizationBusy, closeAuthorization);
-  const openAuthorization = (account: AccountRecord) => {
-    let nextRequestId: string;
-    try { nextRequestId = createRequestId(); } catch (err: any) { message.error(errorText(err)); return; }
-    authorizationEpoch.current += 1; setAuthorizationAccount(account); setAuthorizationTargets(authorizationEligible(account).map((resource) => resource.id!)); setAuthorizationRequestId(nextRequestId); setAuthorizationProbe(null); setAuthorizationResult(null); setAuthorizationError(null); setReuseAuthorization(false); setPreviouslyUpdatedIds([]); initializeAuthorizationForm(account);
-  };
-  const freshAuthorization = () => {
-    if (!authorizationAccount) return;
-    let nextRequestId: string;
-    try { nextRequestId = createRequestId(); } catch (err: any) {
-      setAuthorizationProbe(null); setAuthorizationRequestId(""); setAuthorizationError(noteOf(err)); return;
-    }
-    const saved = authorizationResult?.targets.filter((target) => ["updated", "already_updated"].includes(target.status)).map((target) => target.stationId) || [];
-    const remaining = authorizationResult?.targets.filter((target) => !saved.includes(target.stationId) && !authorizationResult.excluded.some((item) => item.stationId === target.stationId)).map((target) => target.stationId);
-    setPreviouslyUpdatedIds([...new Set([...previouslyUpdatedIds, ...saved])]); if (remaining) setAuthorizationTargets(remaining);
-    authorizationEpoch.current += 1; setAuthorizationRequestId(nextRequestId); setAuthorizationProbe(null); setAuthorizationResult(null); setReuseAuthorization(false); initializeAuthorizationForm(authorizationAccount);
-  };
-  const authorizationInput = async (reuse = reuseAuthorization): Promise<AccountAuthorizationInput> => {
-    if (!authorizationAccount || !authorizationTargets.length) throw notice(COPY.chooseTargets);
-    if (!authorizationRequestId) throw notice(ERROR_CATEGORIES.expired.text);
-    const intent = { requestId: authorizationRequestId, targetStationIds: [...authorizationTargets] };
-    if (reuse) return { ...intent, reuseSavedAuthorization: true };
-    const values = await authorizationForm.validateFields();
-    return { ...intent, authorization: { type: values.type, baseUrl: authorizationAccount.identity.baseUrl,
-      ...(values.type === "sub2api-password" ? { email: values.email, password: values.password } : { accessToken: values.accessToken }),
-      ...(values.type === "newapi" ? { userId: authorizationAccount.identity.accountId } : {}) } };
-  };
-  const probeAuthorization = async (reuse = reuseAuthorization) => {
-    const current = ++authorizationEpoch.current; setAuthorizationError(null); setAuthorizationBusy(true);
-    try {
-      const input = await authorizationInput(reuse);
-      if (current !== authorizationEpoch.current) return;
-      const next: AccountAuthorizationProbe = await api(`/api/channel-onboarding/accounts/${encodeURIComponent(authorizationAccount!.accountKey)}/authorization/probe`, { body: input });
-      if (current !== authorizationEpoch.current) return;
-      setAuthorizationProbe(next); setReuseAuthorization(reuse); rememberAuthorization(next.accountKey, next.retryInput);
-      if (reuse) authorizationForm.resetFields();
-    } catch (err: any) {
-      if (current !== authorizationEpoch.current) return;
-      setAuthorizationProbe(null);
-      if (!err.errorFields) {
-        const note = noteOf(err);
-        if (reuse) { freshAuthorization(); setAuthorizationError({ ...note, text: `${note.text}。${COPY.refill}` }); }
-        else setAuthorizationError(note);
-      }
-    } finally { setAuthorizationBusy(false); }
-  };
-  const acceptAuthorizationResult = (next: AccountAuthorizationResult) => {
-    setAuthorizationResult(next); setAuthorizationProbe(null); setReuseAuthorization(true); authorizationForm.resetFields();
-    rememberAuthorization(next.accountKey, next.complete ? null : next.retryInput);
-    if (next.complete) message.success(UPDATE_LOGIN.done);
-  };
-  const recoverAuthorization = async (saved = authorizationRecovery, restore = false) => {
-    if (!saved) return;
-    const account = accountModel?.accounts.find((item) => item.accountKey === saved.accountKey);
-    if (restore && !account) { setAccountError({ text: COPY.accountMissing, notice: true }); return; }
-    if (restore && account) { openAuthorization(account); setAuthorizationRequestId(saved.retryInput.requestId); setAuthorizationTargets(saved.retryInput.targetStationIds); }
-    setAuthorizationBusy(true); setAuthorizationError(null);
-    try { acceptAuthorizationResult(await api(`/api/channel-onboarding/accounts/${encodeURIComponent(saved.accountKey)}/authorization/recover`, { body: saved.retryInput })); }
-    catch (err: any) { setAuthorizationError(noteOf(err)); }
-    finally { setAuthorizationBusy(false); }
-  };
-  const confirmAuthorization = async () => {
-    if (!authorizationProbe || Date.now() >= authorizationProbe.expiresAtMs) { setAuthorizationProbe(null); setAuthorizationError({ text: describeError({ code: "PREVIEW_REQUIRED" }).text, notice: true }); return; }
-    setAuthorizationBusy(true); setAuthorizationError(null);
-    const accountKey = authorizationAccount!.accountKey, intent = { requestId: authorizationRequestId, targetStationIds: [...authorizationTargets] };
-    try { acceptAuthorizationResult(await api(`/api/channel-onboarding/accounts/${encodeURIComponent(accountKey)}/authorization`, { body: { ...await authorizationInput(), previewId: authorizationProbe.previewId } })); await reload(); }
-    catch (err: any) {
-      setAuthorizationProbe(null); setAuthorizationError({ text: failureText("保存失败", err), raw: describeError(err).raw });
-      try { const recovered: AccountAuthorizationResult = await api(`/api/channel-onboarding/accounts/${encodeURIComponent(accountKey)}/authorization/recover`, { body: intent }); acceptAuthorizationResult(recovered); if (recovered.complete) setAuthorizationError(null); }
-      catch { rememberAuthorization(accountKey, intent); }
-    } finally { setAuthorizationBusy(false); }
-  };
   const confirmPurpose = async () => {
     if (!purposeTarget) return;
     setPurposeBusy(true); setPurposeError(null);
@@ -572,8 +417,8 @@ export function useAccountCenter({
         <div className="jy-accounts-line">
           <b>{resource.name}</b>
           {!resource.purposes.monitor ? <span className="jy-tag jy-tag--muted">{PAUSE.label}</span> : null}
-          {resource.archivedAt ? <span className="jy-tag jy-tag--muted">{COPY.archived}</span> : null}
-          {resource.purposes.billingRuleIds.length ? <span className="jy-tag jy-tag--info">{COPY.bindingCount(resource.purposes.billingRuleIds.length)}</span> : null}
+          {resource.archivedAt ? <span className="jy-tag jy-tag--muted">{BINDING_COPY.archived}</span> : null}
+          {resource.purposes.billingRuleIds.length ? <span className="jy-tag jy-tag--info">{BINDING_COPY.bindingCount(resource.purposes.billingRuleIds.length)}</span> : null}
         </div>
         <p className="jy-caption">{resource.baseUrl}</p>
         <p className="jy-caption">余额提醒线：{resource.lowBalanceUsd == null ? COPY.globalLine : formatUsd(resource.lowBalanceUsd)}；汇率：{formatRate(resource.cnyPerUsd) || RATE_UNSET_PARITY}；{resource.includeInProfit ? COPY.inProfit : COPY.notInProfit}{resource.noRenewal ? `；${COPY.noRenewal}` : ""}</p>
@@ -847,9 +692,7 @@ export function useAccountCenter({
           <Button aria-pressed={showArchived} onClick={() => setShowArchived((current) => !current)}>
             {showArchived ? COPY.hideArchived : COPY.showArchived}
           </Button>
-          {authorizationRecovery ? (
-            <Button disabled={loadingAccounts || authorizationBusy} onClick={() => void recoverAuthorization(authorizationRecovery, true)}>{COPY.recover}</Button>
-          ) : null}
+          {authorizationRecoveryButton}
         </div>
         {accountError ? (
           <div className="jy-banner" role="alert">
@@ -900,7 +743,7 @@ export function useAccountCenter({
             const actions = accountModel?.actions.filter((action) => action.stationId === resource.id) || [];
             return (
               <div key={resource.id} data-unverified-resource-id={resource.id} className="jy-accounts-unverified-item">
-                <span className="jy-tag jy-tag--warn">{resource.type === "newapi-key" ? COPY.keyOnly : COPY.ownerUnknown}</span>
+                <span className="jy-tag jy-tag--warn">{resource.type === "newapi-key" ? BINDING_COPY.keyOnly : COPY.ownerUnknown}</span>
                 {renderAccountResource(resource)}
                 <p className="jy-caption">{COPY.matchedChannels}：{channelNames(accountModel?.channels.filter((channel) => channel.monitor.stationIds.includes(resource.id!)) || [])}</p>
                 <p className="jy-accounts-pending">{COPY.needsAction}：{actions.map((action) => action.label).join("、") || TEST_READ.label}</p>
@@ -976,7 +819,7 @@ export function useAccountCenter({
                       <Alert type="warning" showIcon title={testReadText({ ok: false, reason: errorText({ code: "KEY_METADATA_UNAVAILABLE" }) })} description={COPY.keyListUnread} />
                     ) : (
                       <>
-                        <Select aria-label={COPY.chooseKey} style={{ width: "100%" }} value={verificationTokenId} disabled={verificationBusy} placeholder={COPY.chooseKey} options={verification.tokens.map((key) => ({ value: key.id, label: [reconciliationKeyName({ tokenName: key.name, tokenId: key.id }), key.maskedKey || "", key.group ? COPY.group(key.group) : ""].filter(Boolean).join(" · "), disabled: key.status !== 1 }))} onChange={(tokenId) => { verificationEpoch.current += 1; setVerificationTokenId(tokenId); setVerification((previous) => previous ? { ...previous, probe: null } : null); setVerificationError(null); }} />
+                        <Select aria-label={COPY.chooseKey} style={{ width: "100%" }} value={verificationTokenId} disabled={verificationBusy} placeholder={COPY.chooseKey} options={verification.tokens.map((key, _, all) => ({ value: key.id, label: [reconciliationKeyName({ tokenName: key.name, tokenId: key.id }, all.map((other) => ({ tokenName: other.name, tokenId: other.id }))), key.maskedKey || "", key.group ? COPY.group(key.group) : ""].filter(Boolean).join(" · "), disabled: key.status !== 1 }))} onChange={(tokenId) => { verificationEpoch.current += 1; setVerificationTokenId(tokenId); setVerification((previous) => previous ? { ...previous, probe: null } : null); setVerificationError(null); }} />
                         <Button disabled={verificationTokenId == null || verificationBusy} loading={verificationBusy} onClick={() => void verifyUpstream()}>{COPY.testReadSelected}</Button>
                         {!verification.tokens.length ? <Text type="secondary">{COPY.noTokens}</Text> : null}
                       </>
@@ -990,7 +833,7 @@ export function useAccountCenter({
                       <Alert
                         type={verification.probe.complete && verification.probe.billingTimezone?.state === "verified" ? "info" : "warning"}
                         showIcon
-                        title={`${reconciliationKeyName({ tokenName: verification.tokens.find((key) => key.id === verification.probe!.tokenId)?.name, tokenId: verification.probe.tokenId })} 的上游成本`}
+                        title={`${reconciliationKeyName({ tokenName: verification.tokens.find((key) => key.id === verification.probe!.tokenId)?.name, tokenId: verification.probe.tokenId }, verification.tokens.map((other) => ({ tokenName: other.name, tokenId: other.id })))} 的上游成本`}
                         description={
                           <div>
                             <div>{formatZonedRange(verification.probe.window.startMs, verification.probe.window.endMs, businessTz)}{formatDayZone(verification.probe.window.timezone, businessTz) ? `（${formatDayZone(verification.probe.window.timezone, businessTz)}）` : ""}</div>
@@ -1009,119 +852,7 @@ export function useAccountCenter({
         ) : null}
       </Drawer>
 
-      <Drawer
-        className="jy-drawer"
-        title={`${UPDATE_LOGIN.label}${authorizationAccount ? ` · 上游账号 ${authorizationAccount.identity.accountId}` : ""}`}
-        open={!!authorizationAccount}
-        size={compact ? "100%" : 600}
-        closable={!authorizationBusy}
-        mask={{ closable: !authorizationBusy }}
-        keyboard={false}
-        onClose={closeAuthorization}
-        extra={<Button type="primary" aria-label={`确认${UPDATE_LOGIN.label}`} loading={authorizationBusy} disabled={!authorizationProbe || !authorizationProbe.targets.length || authorizationResult?.complete || Date.now() >= (authorizationProbe?.expiresAtMs || 0)} onClick={() => void confirmAuthorization()}>{COPY.confirmUpdate}</Button>}
-      >
-        {authorizationAccount ? (
-          <Space orientation="vertical" size={16} style={{ width: "100%", minWidth: 0, overflowWrap: "anywhere" }}>
-            <Text strong>{authorizationAccount.identity.baseUrl} · 上游账号 {authorizationAccount.identity.accountId}</Text>
-            <Alert type="info" showIcon title={COPY.loginOnceTitle} description={COPY.loginOnceDetail} />
-            {authorizationError ? <Alert type="error" showIcon title={authorizationError.text} description={authorizationError.raw ? <ErrorDetail raw={authorizationError.raw} /> : undefined} /> : null}
-            {previouslyUpdatedIds.length ? <Text type="secondary">{COPY.updatedBefore(previouslyUpdatedIds.map(authorizationName).join("、"))}</Text> : null}
-            {!reuseAuthorization && !authorizationResult?.complete ? (
-              <Form
-                name="account-authorization"
-                form={authorizationForm}
-                layout="vertical"
-                disabled={authorizationBusy}
-                onValuesChange={(changed) => {
-                  if (changed.type) authorizationForm.setFieldsValue(changed.type === "sub2api-password" ? { accessToken: "" } : { email: "", password: "" });
-                  authorizationEpoch.current += 1; setAuthorizationProbe(null); setAuthorizationRequestId("");
-                  try { setAuthorizationRequestId(createRequestId()); setAuthorizationError(null); }
-                  catch (err: any) { setAuthorizationError(noteOf(err)); }
-                }}
-              >
-                <Form.Item name="type" label={COPY.type}><Select options={(authorizationAccount.identity.provider === "newapi" ? ["newapi"] : ["sub2api", "sub2api-password"]).map((value) => ({ value, label: AUTHORIZATION_TYPES[value].label }))} /></Form.Item>
-                {authorizationType === "sub2api-password" ? (
-                  <>
-                    <Form.Item name="email" label="登录邮箱" extra={AUTHORIZATION_TYPES["sub2api-password"].help} rules={[{ required: true, message: COPY.required("登录邮箱") }]}><Input autoComplete="username" /></Form.Item>
-                    <Form.Item name="password" label="登录密码" rules={[{ required: true, message: COPY.required("登录密码") }]}><Input.Password autoComplete="off" /></Form.Item>
-                  </>
-                ) : (
-                  <Form.Item name="accessToken" label={AUTHORIZATION_TYPES[authorizationType]?.field || AUTHORIZATION_TYPES.newapi.field} extra={AUTHORIZATION_TYPES[authorizationType]?.help || AUTHORIZATION_TYPES.newapi.help} rules={[{ required: true, message: COPY.required(AUTHORIZATION_TYPES[authorizationType]?.field || AUTHORIZATION_TYPES.newapi.field!) }]}><Input.Password autoComplete="off" /></Form.Item>
-                )}
-              </Form>
-            ) : !authorizationResult?.complete ? <Text>{COPY.reuse}</Text> : null}
-            <div>
-              <Text strong>{COPY.targets}</Text>
-              {[...authorizationEligible(authorizationAccount), ...(accountModel?.unverifiedResources || []).filter((resource) => resource.type !== "newapi-key" && !resource.archivedAt && resource.baseUrl === authorizationAccount.identity.baseUrl && resource.type.startsWith("sub2api") === (authorizationAccount.identity.provider === "sub2api"))].map((resource) => (
-                <div key={resource.id}>
-                  <Checkbox
-                    aria-label={`更新 ${resource.name}`}
-                    checked={authorizationTargets.includes(resource.id!)}
-                    disabled={authorizationBusy || authorizationResult?.complete}
-                    onChange={(event) => { setAuthorizationTargets(event.target.checked ? [...authorizationTargets, resource.id!] : authorizationTargets.filter((id) => id !== resource.id)); authorizationEpoch.current += 1; setAuthorizationProbe(null); }}
-                  >
-                    <Text>{resource.name}{!resource.purposes.monitor ? ` · ${PAUSE.label}` : ""}{resource.verification !== "verified" ? ` · ${COPY.ownerUnknownTarget}` : ""}</Text>
-                  </Checkbox>
-                </div>
-              ))}
-            </div>
-            <Text type="secondary">{COPY.notFollowing}：{[...authorizationAccount.resources.filter((resource) => resource.archivedAt).map((resource) => `${resource.name}（${COPY.archived}）`), ...(accountModel?.accounts || []).filter((account) => account.accountKey !== authorizationAccount.accountKey && account.identity.baseUrl === authorizationAccount.identity.baseUrl).flatMap((account) => account.resources.map((resource) => `${resource.name}（${COPY.otherAccount}）`)), ...(accountModel?.unverifiedResources || []).filter((resource) => resource.type === "newapi-key").map((resource) => `${resource.name}（${COPY.keyOnly}）`), ...stations.filter((station) => station.isOwn).map((station) => `${station.name}（自营站点）`)].join("、") || EMPTY}</Text>
-            {!authorizationResult?.complete ? <Button aria-label={reuseAuthorization ? COPY.repreview : BINDING_COPY.preview} loading={authorizationBusy} onClick={() => void probeAuthorization()}>{reuseAuthorization ? COPY.repreview : BINDING_COPY.preview}</Button> : null}
-            {authorizationProbe ? (
-              <Alert
-                type="info"
-                showIcon
-                title={COPY.previewTitle}
-                description={
-                  <Space orientation="vertical">
-                    {authorizationProbe.targets.map((target) => {
-                      const from = AUTHORIZATION_TYPES[target.currentType]?.label, to = AUTHORIZATION_TYPES[target.newType]?.label;
-                      return <Text key={target.stationId}>{authorizationName(target.stationId)}{from && to && from !== to ? ` · ${from} → ${to}` : ""} · {COPY.bindingCount(target.billingRuleIds.length)}</Text>;
-                    })}
-                    {authorizationProbe.excluded.map((target) => {
-                      const note = exclusionNote(target);
-                      return <div key={target.stationId}><Text type="warning">{COPY.notFollowing} {authorizationName(target.stationId)}：{note.text}</Text><ErrorDetail raw={note.raw} /></div>;
-                    })}
-                    <Text>{COPY.affectedUpstreams}：{authorizationProbe.impact.monitorStationIds.map(authorizationName).join("、") || EMPTY}</Text>
-                    <Text>{COPY.affectedBindings(authorizationProbe.impact.billingRuleIds.length)}</Text>
-                    <Text>{COPY.channels}：{authorizationProbe.impact.channels.map((channel) => `${reconciliationChannelName(channel)}（自营站点 ${ownStationName(channel.ownStationId)}）`).join("、") || EMPTY}</Text>
-                  </Space>
-                }
-              />
-            ) : null}
-            {authorizationResult ? (
-              <Alert
-                type={authorizationResult.complete ? "success" : "warning"}
-                showIcon
-                title={authorizationResult.complete ? UPDATE_LOGIN.done : COPY.someNotUpdated(authorizationResult.targets.filter((target) => !["updated", "already_updated"].includes(target.status)).length)}
-                description={
-                  <Space orientation="vertical">
-                    {authorizationResult.targets.map((target) => {
-                      const note = authorizationTargetNote(target);
-                      return (
-                        <div key={target.stationId} data-authorization-target={target.stationId}>
-                          <Text strong>{authorizationName(target.stationId)}：{note.text}</Text>
-                          <ErrorDetail raw={note.raw} />
-                        </div>
-                      );
-                    })}
-                    {authorizationResult.excluded.map((target) => {
-                      const note = exclusionNote(target);
-                      return <div key={target.stationId}><Text type="warning">{COPY.notFollowing} {authorizationName(target.stationId)}：{note.text}</Text><ErrorDetail raw={note.raw} /></div>;
-                    })}
-                    {!authorizationResult.complete ? (
-                      <>
-                        <Button disabled={authorizationBusy} onClick={() => void recoverAuthorization({ accountKey: authorizationResult.accountKey, retryInput: authorizationResult.retryInput })}>{COPY.checkResult}</Button>
-                        <Button disabled={authorizationBusy} onClick={() => { freshAuthorization(); setAuthorizationError(null); }}>{COPY.refillButton}</Button>
-                      </>
-                    ) : null}
-                  </Space>
-                }
-              />
-            ) : null}
-          </Space>
-        ) : null}
-      </Drawer>
+      {authorizationOverlay}
 
       <Modal
         title={purposeTarget?.resource ? `${purposeLabel}「${purposeTarget.resource.name}」？` : `${UNBIND.label}？`}

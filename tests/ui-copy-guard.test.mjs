@@ -18,6 +18,7 @@ const FILES = [
   "app/(dashboard)/stations/account-center.tsx",
   "app/(dashboard)/stations/association-editor.tsx",
   "app/components/channel-onboarding.tsx",
+  "app/components/account-authorization.tsx",
   "app/components/attention-list.tsx",
   "app/components/error-detail.tsx",
   "app/components/use-workflow-actions.ts",
@@ -26,6 +27,7 @@ const FILES = [
   "lib/workflow-actions.js",
   "lib/error-copy.js",
   "lib/channel-onboarding.js",
+  "lib/onboarding-workflow.js",
 ];
 
 // §3.6 里不分场合都不能上界面的词。「范围」「关联」「授权」「资源」「站点」「完整」这类要看场合的，靠逐条改文案，不在这里卡。

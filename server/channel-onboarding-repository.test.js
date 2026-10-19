@@ -16,14 +16,17 @@ function memoryPool() {
         confirmed_at_ms: previous?.channel_revision === values[3] ? previous.confirmed_at_ms : values[4],
       });
     } else if (sql.startsWith("SELECT * FROM channel_monitor_links")) {
-      if (sql.includes("channel_id = ?")) return [[links.get(key(values))].filter(Boolean)];
+      if (sql.includes("channel_id = ?") && values.length === 3) return [[links.get(key(values))].filter(Boolean)];
       let rows = [...links.values()];
       let index = 0;
-      if (sql.includes("own_station_id = ?")) rows = rows.filter((row) => row.own_station_id === values[index++]);
+      if (sql.includes("own_station_id = ?")) { const ownStationId = values[index++]; rows = rows.filter((row) => row.own_station_id === ownStationId); }
+      if (sql.includes("channel_id = ?")) { const channelId = values[index++]; rows = rows.filter((row) => row.channel_id === channelId); }
       if (sql.includes("station_id = ?") && !sql.includes("own_station_id = ?")) {
         rows = rows.filter((row) => row.station_id === values[index]);
       } else if (sql.includes(" AND station_id = ?")) rows = rows.filter((row) => row.station_id === values[index]);
       return [rows];
+    } else if (sql.startsWith("DELETE FROM channel_monitor_links")) {
+      links.delete(key(values));
     } else if (sql.startsWith("SELECT v FROM meta")) {
       return [state.meta.has(values[0]) ? [{ v: JSON.stringify(state.meta.get(values[0])) }] : []];
     } else if (sql.startsWith("INSERT INTO meta")) {
@@ -143,4 +146,39 @@ test("整组关联在SQL前和commit前复核server guard，过期证据不发�
   } }), /before commit/);
   assert.equal(checks, 2);
   assert.deepEqual(await repository.listLinks(), []);
+});
+
+test("explicit replacement atomically removes only selected links and keeps other channels and stations", async () => {
+  const pool = memoryPool(), repository = new ChannelOnboardingRepository(pool);
+  const kept = { ...link, stationId: "keep" }, unrelated = { ...link, channelId: 8 };
+  await repository.saveLinks([link, kept, unrelated]);
+  const replacement = { ...link, stationId: "replacement", channelRevision: "rev2", confirmedAt: 2000 };
+  const before = await repository.listLinks();
+  assert.deepEqual(await repository.saveLinks([replacement], { removals: [link], expectedLinks: before }), [replacement]);
+  assert.deepEqual((await repository.listLinks()).map((item) => [item.channelId, item.stationId]).sort(), [[7, "keep"], [7, "replacement"], [8, "supplier"]]);
+  const locks = pool.calls.filter((call) => call.sql.includes("FOR UPDATE"));
+  assert.ok(locks.some((call) => call.sql.includes("meta")));
+  assert.ok(locks.some((call) => call.values[1] === 7));
+  await assert.rejects(repository.saveLinks([], { removals: [kept], expectedLinks: before }), (error) => error.code === "PREVIEW_BASIS_CHANGED");
+  assert.equal((await repository.listLinks()).length, 3);
+});
+
+test("explicit removal rolls back deletion and replacement on commit or source/version guard failure", async () => {
+  const pool = memoryPool(), repository = new ChannelOnboardingRepository(pool);
+  const catalogue = { ownStationId: "own", sourceVersion: "s1", ownSource: { namespaceKey: "ns" }, channels: [{ id: 7, revision: "rev2", missing: false }] };
+  await repository.saveCatalogue(catalogue); await repository.saveLinks([link]);
+  const options = { removals: [link], expectedLinks: [link], expectedSource: { ownStationId: "own", sourceVersion: "s1", namespaceKey: "ns", channels: [{ channelId: 7, channelRevision: "rev2" }] } };
+  pool.failCommit = true;
+  await assert.rejects(repository.saveLinks([{ ...link, stationId: "replacement", channelRevision: "rev2" }], options), /commit failure/);
+  assert.deepEqual(await repository.listLinks(), [link]);
+  pool.failCommit = false;
+  await repository.saveCatalogue({ ...catalogue, sourceVersion: "s2" });
+  await assert.rejects(repository.saveLinks([], options), (error) => error.code === "PREVIEW_BASIS_CHANGED");
+  assert.deepEqual(await repository.listLinks(), [link]);
+  await repository.saveCatalogue(catalogue);
+  let checks = 0;
+  await assert.rejects(repository.saveLinks([], { ...options, guard: () => { if (++checks === 2) throw new Error("guard changed after deletion"); } }), /after deletion/);
+  assert.deepEqual(await repository.listLinks(), [link]);
+  assert.deepEqual(await repository.saveLinks([], options), []);
+  assert.deepEqual(await new ChannelOnboardingRepository(pool).listLinks(), []);
 });
