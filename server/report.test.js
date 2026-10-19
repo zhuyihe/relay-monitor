@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../db/store.js";
-import { reportDayWindow, startReportScheduler } from "./report.js";
+import { reportDayWindow, sendReport, startReportScheduler } from "./report.js";
 
 const START = Date.parse("2026-10-08T01:00:00Z"); // 北京时间 09:00
 
@@ -167,6 +167,21 @@ test("没有启用渠道时不标记已发送，用户设置不能覆盖发送�
   await h.rt.store.updateSettings({ dailyReport: { time: "10:00", lastSent: "forged", delivery: { attempts: 0 } } });
   assert.deepEqual(h.rt.store.settings.dailyReport.delivery, delivery);
   assert.equal(h.rt.store.settings.dailyReport.lastSent, null);
+});
+
+test("立即发送：没有启用渠道时直接报错，不去读上游生成日报", async (t) => {
+  const h = setup(t, { channels: [] });
+  await assert.rejects(sendReport(h.rt), { message: "没有启用的日报通知渠道" });
+  assert.equal(globalThis.fetch.mock.callCount(), 0);
+});
+
+test("立即发送：返回每个渠道的结果列表", async (t) => {
+  const h = setup(t);
+  h.failures.add("b");
+  const sent = await sendReport(h.rt);
+  assert.equal(sent.ok, true);
+  assert.deepEqual(sent.results.map(({ id, ok }) => ({ id, ok })), [{ id: "a", ok: true }, { id: "b", ok: false }]);
+  assert.deepEqual(h.deliveries, ["a", "b"]);
 });
 
 for (const kind of ["generation", "partial"]) {

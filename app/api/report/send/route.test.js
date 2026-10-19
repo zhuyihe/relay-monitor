@@ -15,10 +15,25 @@ async function sendRoute(sendReport) {
   try { return await import("./route.js"); } finally { hook.deregister(); }
 }
 
-test("立即发送日报：results 是每个通知方式的结果列表，不再多包一层", async () => {
+const request = () => new Request("https://local.test/api/report/send", { method: "POST", body: "{}" });
+
+test("立即发送日报：results 是每个通知方式的结果列表，不再多包一层", async (t) => {
+  t.after(() => { delete globalThis.__reportSendStub; });
+  const rt = { store: {} };
   const results = [{ id: "a", name: "钉钉", ok: true }, { id: "b", name: "Telegram", ok: false, error: "Unauthorized" }];
-  const { POST } = await sendRoute(async () => ({ ok: true, results }));
-  const response = await POST(new Request("https://local.test/api/report/send", { method: "POST", body: "{}" }), {});
+  const calls = [];
+  const { POST } = await sendRoute(async (...args) => { calls.push(args); return { ok: true, results }; });
+  const response = await POST(request(), rt);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true, results });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], rt);
+});
+
+test("立即发送日报：生成或发送前出错时返回 400 和这句话", async (t) => {
+  t.after(() => { delete globalThis.__reportSendStub; });
+  const { POST } = await sendRoute(async () => { throw new Error("没有启用的日报通知渠道"); });
+  const response = await POST(request(), {});
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "没有启用的日报通知渠道" });
 });

@@ -322,11 +322,16 @@ function reportChannels(rt, channelIds) {
   return rt.store.channels.filter((c) => c.enabled !== false && (!ids.length || ids.includes(c.id)));
 }
 
+const NO_REPORT_CHANNELS = "没有启用的日报通知渠道";
+
 // 立即发送日报（/api/report/send 的主体）。与 v1 一致：手动发送不占用 lastSent，
 // 不影响当天的定时发送。构建失败会抛错，由调用方决定响应状态码。
+// 没有可发的渠道时先报错，不去读上游生成日报；和定时发送用同一句话。
 export async function sendReport(rt, channelIds) {
+  const channels = reportChannels(rt, channelIds);
+  if (!channels.length) throw new Error(NO_REPORT_CHANNELS);
   const { title, text, html } = await buildReport(rt);
-  const results = await broadcast(reportChannels(rt, channelIds), title, text, { event: "daily-report", html });
+  const results = await broadcast(channels, title, text, { event: "daily-report", html });
   return { ok: true, results };
 }
 
@@ -359,7 +364,7 @@ export function startReportScheduler(rt) {
       // 先写本次尝试，重启后仍遵守次数上限；写库失败时不开始外部发送。
       await rt.store.saveReportDelivery(structuredClone(delivery));
       const channels = reportChannels(rt);
-      if (!channels.length) throw new Error("没有启用的日报通知渠道");
+      if (!channels.length) throw new Error(NO_REPORT_CHANNELS);
       const successful = new Set(delivery.successfulChannelIds);
       const pending = channels.filter((channel) => !successful.has(channel.id));
       if (pending.length) {
