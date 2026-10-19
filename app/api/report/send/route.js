@@ -5,8 +5,8 @@ import { sendReport } from "../../../../server/report.js";
 
 export const POST = withAuth(async (request, rt) => {
   try {
-    const results = await sendReport(rt);
-    return json({ ok: true, results });
+    // sendReport 已经返回 { ok: true, results }，原样交给页面；再包一层页面就读不到 results 列表
+    return json(await sendReport(rt));
   } catch (err) {
     return json({ error: err?.message || String(err) }, 400);
   }
