@@ -1,7 +1,12 @@
 // 前端 API 客户端与展示工具函数（从 v1 app.js 平移，行为逐字对齐）
+import { ERROR_CATEGORIES } from "./error-copy.js";
 
 // ---- API（401 自动跳登录）---------------------------------------------------
 // 同源 fetch + JSON；未登录（401）时跳转登录页（登录接口本身的 401 是密码错误，不跳转）
+// 接口出错时抛出的 Error 带上接口给的 code 和 HTTP 状态，界面用 lib/error-copy.js 的 describeError 归类后显示（§8.2）；
+// message 是接口原文，只放进「查看详细原因」。
+export type ApiError = Error & { code?: string; status?: number; retryable?: boolean; nextPreview?: any };
+
 export async function api(path: string, opts: { method?: string; body?: any } = {}): Promise<any> {
   const res = await fetch(path, {
     headers: opts.body ? { "Content-Type": "application/json" } : {},
@@ -14,7 +19,14 @@ export async function api(path: string, opts: { method?: string; body?: any } = 
     throw new Error("未登录");
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const error: ApiError = new Error(data.error || `HTTP ${res.status}`);
+    error.status = res.status;
+    if (data.code) error.code = data.code;
+    if (data.retryable != null) error.retryable = data.retryable;
+    if (data.nextPreview != null) error.nextPreview = data.nextPreview;
+    throw error;
+  }
   return data;
 }
 
@@ -97,7 +109,7 @@ export type KnownChannelCoverage = {
   label: "known-channel-coverage"; state: "complete_known" | "partial" | "unknown"; catalogueState: "verified" | "unknown"; wholeSiteState: "unverified";
   knownChannelCount: number; accountedChannelCount: number;
   channels: { ownSource: OwnSource | null; ownStationId: string; channelId: number; name: string; operatingState: string; ruleIds: string[];
-    status: "accounted" | "unlinked" | "not_effective" | "source_unverified" | "billing_missing" | "coverage_unknown" | "duplicate"; issues: string[]; actions: WorkflowAction[] }[];
+    status: "accounted" | "unlinked" | "not_effective" | "source_unverified" | "billing_missing" | "coverage_unknown" | "duplicate" | "monitor_only" | "unsupported"; issues: string[]; actions: WorkflowAction[] }[];
 };
 // 金额默认按系统原值（USD）显示；本站和各上游都设置了汇率时整页按人民币显示。*Usd 字段始终是账单原币原始口径。
 export type ReconciliationCurrency = "USD" | "CNY";
@@ -119,9 +131,11 @@ export type ReconciliationWindowGroup = { groupKey: string; ownSource: OwnSource
 export type ReconciliationSettlement = "live" | "settled" | "ended" | "pending" | "unavailable";
 export type ReconciliationSummary = { groupKey: string; totals: ReconciliationWindowTotals; coverage: KnownChannelCoverage };
 export type WorkflowAction = {
-  id: string; kind: "verify_identity" | "update_authorization" | "verify_capability" | "connect_channels" | "confirm_coverage" | "wait_effective" | "review_source" | "inspect_balance" | "retry_bill" | "review_conflict";
-  label: string; accountKey: string | null; stationId: string | null; ruleId: string | null; ownStationId: string | null;
-  channelIds: number[]; window: { startMs: number; endMs: number; timezone: string } | null; href: string;
+  // 种类和按钮文字只在 lib/workflow-actions.js 定义（ACTIONS）
+  id: string; kind: "verify_identity" | "update_authorization" | "verify_capability" | "connect_channels" | "confirm_coverage" | "review_source" | "inspect_balance" | "retry_bill" | "review_conflict"
+    | "edit_binding" | "correct_timing" | "refresh" | "swap_key" | "unbind" | "delete_upstream" | "view_detail" | "setup_own_station";
+  label: string; title?: string; detail?: string; code?: string; accountKey: string | null; stationId: string | null; ruleId: string | null; ownStationId: string | null;
+  channelIds: number[]; window: { startMs: number; endMs: number; timezone: string } | null; href: string | null;
 };
 export type WorkflowDestination = {
   action: string; ruleId: string | null; stationId: string | null; accountKey: string | null; ownStationId: string | null;
@@ -138,25 +152,27 @@ export type UpstreamKeyRead = {
     currency: string; amountUsd: number | null; knownAmountUsd: number | null; actualCostUsd: number | null; quotaUnits: number | null; quotaPerUnit: number | null;
     capability: BillingCapability | null; billingTimezone: BillingTimezone | null };
 };
+// 链接里的参数不对（旧链接、手改过）时只写一句「页面已过期」（design/ui-copy-spec.md §8.2），不说是哪个参数
+const DESTINATION_EXPIRED = `${ERROR_CATEGORIES.expired.text}。`;
 export function readWorkflowDestination(search: string, page: "stations" | "reconciliation"): WorkflowDestination | null {
   const params = new URLSearchParams(search), action = params.get("action") || "inspect";
   if (!params.has("action") && !params.has("stationId") && !params.has("accountKey")) return null;
   const result: WorkflowDestination = { action, ruleId: params.get("ruleId"), stationId: params.get("stationId"), accountKey: params.get("accountKey"), ownStationId: params.get("ownStationId"), channelIds: [], window: null, error: "" };
   const allowed = page === "stations" ? ["connect", "verify", "authorization", "verify-billing", "coverage", "source", "inspect", "scope", "conflict"] : ["retry", "conflict", "scope"];
-  if (!allowed.includes(action)) result.error = "无法识别此处理入口，请刷新后从当前事项重新打开。";
-  else if (page === "stations" && ["scope", "conflict"].includes(action) && !result.ruleId) result.error = "缺少要处理的核算关联，请从当前事项重新打开。";
+  if (!allowed.includes(action)) result.error = DESTINATION_EXPIRED;
+  else if (page === "stations" && ["scope", "conflict"].includes(action) && !result.ruleId) result.error = DESTINATION_EXPIRED;
   const channelIds = params.get("channelIds");
   if (channelIds != null) {
     const values = channelIds.split(",");
-    if (values.some((value) => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1)) result.error = "渠道参数无效，请从当前渠道目录重新选择。";
-    else { result.channelIds = [...new Set(values.map(Number))]; if (result.channelIds.length > 100) result.error = "本次最多选择 100 个渠道，请从当前目录分批选择。"; }
+    if (values.some((value) => !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1)) result.error = DESTINATION_EXPIRED;
+    else { result.channelIds = [...new Set(values.map(Number))]; if (result.channelIds.length > 100) result.error = DESTINATION_EXPIRED; }
   }
   if (action === "retry") {
     const start = params.get("startMs"), end = params.get("endMs"), timezone = params.get("timezone");
-    if (!start || !end || !/^\d+$/.test(start) || !/^\d+$/.test(end) || !Number.isSafeInteger(Number(start)) || !Number.isSafeInteger(Number(end)) || !Number.isFinite(new Date(Number(start)).valueOf()) || !Number.isFinite(new Date(Number(end)).valueOf()) || Number(end) <= Number(start) || !timezone) result.error = "账单窗口参数无效，请从原账单窗口重新打开。";
+    if (!start || !end || !/^\d+$/.test(start) || !/^\d+$/.test(end) || !Number.isSafeInteger(Number(start)) || !Number.isSafeInteger(Number(end)) || !Number.isFinite(new Date(Number(start)).valueOf()) || !Number.isFinite(new Date(Number(end)).valueOf()) || Number(end) <= Number(start) || !timezone) result.error = DESTINATION_EXPIRED;
     else {
       try { new Intl.DateTimeFormat("zh-CN", { timeZone: timezone }).format(); result.window = { startMs: Number(start), endMs: Number(end), timezone }; }
-      catch { result.error = "账单时区参数无效，请从原账单窗口重新打开。"; }
+      catch { result.error = DESTINATION_EXPIRED; }
     }
   }
   return result;
@@ -188,16 +204,16 @@ export type AccountKeyScope = {
   billingEffectiveFromMs: number | null; firstQueryableAtMs: number | null;
 };
 export type AccountRecord = { accountKey: string; siteKey: string; identity: AccountIdentity; resources: PublicResource[]; keys: AccountKeyScope[]; actions: WorkflowAction[] };
-export type AccountReadModel = { accounts: AccountRecord[]; unverifiedResources: PublicResource[]; unmatchedAssociations?: UnmatchedAssociation[]; channels: PublicCatalogueChannel[]; actions: WorkflowAction[]; generatedAt: string };
+export type AccountReadModel = { accounts: AccountRecord[]; unverifiedResources: PublicResource[]; unmatchedAssociations?: UnmatchedAssociation[]; channels: PublicCatalogueChannel[]; actions: WorkflowAction[]; generatedAt: string; tz?: string };
 export type AccountAuthorizationRecoveryIntent = { requestId: string; targetStationIds: string[] };
 export type AccountAuthorizationInput = AccountAuthorizationRecoveryIntent & { authorization?: { type: "newapi" | "sub2api" | "sub2api-password"; baseUrl: string; accessToken?: string; userId?: string; email?: string; password?: string }; reuseSavedAuthorization?: boolean; previewId?: string };
 export type AccountAuthorizationImpact = { monitorStationIds: string[]; billingRuleIds: string[]; channels: { ownStationId: string; channelId: number; name: string }[] };
 export type AccountAuthorizationProbe = {
   requestId: string; previewId: string; expiresAtMs: number; accountKey: string; identity: AccountIdentity;
   targets: { stationId: string; authVersion: number; resourceVersion: string; currentType: string; newType: string; purposes: PublicResource["purposes"]; monitorChannelIds: number[]; billingRuleIds: string[]; billingChannelIds: number[] }[];
-  excluded: { stationId: string; reason: string }[]; impact: AccountAuthorizationImpact; retryInput: AccountAuthorizationRecoveryIntent;
+  excluded: { stationId: string; code?: string; reason: string }[]; impact: AccountAuthorizationImpact; retryInput: AccountAuthorizationRecoveryIntent;
 };
-export type AccountAuthorizationResult = { requestId: string; accountKey: string; complete: boolean; targets: { stationId: string; status: "updated" | "already_updated" | "failed" | "repreview_required"; savedAuthVersion: number | null; code?: string; reason?: string; remainingActions: string[] }[]; excluded: { stationId: string; reason: string }[]; impact: AccountAuthorizationImpact; retryInput: AccountAuthorizationRecoveryIntent };
+export type AccountAuthorizationResult = { requestId: string; accountKey: string; complete: boolean; targets: { stationId: string; status: "updated" | "already_updated" | "failed" | "repreview_required"; savedAuthVersion: number | null; code?: string; exclusionCode?: string; reason?: string; remainingActions: string[] }[]; excluded: { stationId: string; code?: string; reason: string }[]; impact: AccountAuthorizationImpact; retryInput: AccountAuthorizationRecoveryIntent };
 
 // ---- 工具（与 v1 app.js 完全一致）-------------------------------------------
 export const usd = (n: any) => "$" + Number(n ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });

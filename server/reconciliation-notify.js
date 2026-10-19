@@ -1,6 +1,6 @@
 // 渠道对账使用独立的告警去重状态，但复用已有推送渠道。
 import { broadcast } from "../lib/notify.js";
-import { reconciliationHealthMeta } from "../lib/reconciliation-contract.js";
+import { reconciliationIssue } from "../lib/reconciliation-contract.js";
 
 export async function notifyReconciliationHealth(rt, repo, rule, result) {
   const now = Date.now();
@@ -22,8 +22,8 @@ export async function notifyReconciliationHealth(rt, repo, rule, result) {
     return;
   }
 
-  // 过渡期只推送 error 色调（Key 失效、账单不可用等）；提醒类只记录状态，第 5 阶段并入告警中心后按开关处理。
-  const notify = reconciliationHealthMeta(code).tone === "error";
+  // 过渡期只推送码表里标了 push 的几种（Key 被拒、账单读不到等）；其余只记录状态。整个文件在 E 里删掉，改成日报里的一行。
+  const notify = reconciliationIssue(code).push;
   await repo.setAlertState(rule.id, code, {
     active: true,
     firstSeenAt: now,

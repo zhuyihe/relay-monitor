@@ -1,17 +1,28 @@
 "use client";
-// 核算汇总、未纳入核算的上游消费、按账单窗口分组的小计、已知渠道覆盖。
-// 金额按服务端定的显示币种（totals.display）汇总；reference 表示当前正在核对（查询中、过期或读取失败），只能当参考。
+// 汇总、没算进利润的上游成本、算一天的时区不同时的分组小计、渠道。
+// 金额按服务端定的显示币种（totals.display）汇总；stale 时数字是之前读到的（刷新失败或还在读取），旁边写「数据截至」；
+// 换了日期范围还没读回来时，旧数字属于别的日期，不显示，用骨架占位。
+// 用语按 design/ui-copy-spec.md §5.6、§11：不显示内部 ID、来源和计法。
 import { Alert, Button, Collapse } from "antd";
 import Link from "next/link";
 import { Panel } from "../../components/panel";
+import { Skeleton } from "../../components/data-state";
+import { ErrorDetail } from "../../components/error-detail";
 import { StatusTag } from "../../components/status";
-import type { KnownChannelCoverage, ReconciliationDisplayTotals, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream } from "../../../lib/client";
-import { RECONCILIATION_BILLING_SOURCE_LABEL } from "../../../lib/reconciliation-contract";
+import type { KnownChannelCoverage, ReconciliationCurrency, ReconciliationDisplayTotals, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream } from "../../../lib/client";
+import { EMPTY, RATE_UNSET_USD, formatAsOf, formatDayZone, formatPct, formatRate, refreshFailedText } from "../../../lib/format";
+import { reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../../../lib/reconciliation-contract";
+import { reconciliationChannelName, reconciliationChannelTag, reconciliationNotCountedCostText } from "../../../lib/reconciliation-view";
 import { NAV_LABELS } from "../../../lib/brand";
-import { Detail, SummaryMetric } from "./recon-parts";
-import { COVERAGE_STATUS_LABEL, amountText, amountTone, channelStateLabel, coverageIssueLabel, formatRecentTime, formatWindow, isLivePreset, iso, percent } from "./recon-format";
+import { SummaryMetric } from "./recon-parts";
+import { RECON_BUTTONS, amountText, formatWindow, isLivePreset } from "./recon-format";
 
-// 旧响应没有 display 时按 USD 原值显示
+// 汇总不是这次读到的（§8.1）：failed 刷新失败，写「刷新失败，数据截至 14:30。」[刷新]，原文收进「查看详细原因」；
+// reading 还在读，数字照旧、写「读取中」；switching 换了日期范围还没读回来，数字不显示
+export type SummaryStale = { kind: "switching" | "failed" | "reading"; asOf?: number | null; timezone?: string; raw?: string } | null;
+const staleText = (stale: NonNullable<SummaryStale>) => stale.kind !== "failed" ? "读取中" : refreshFailedText(stale.asOf, stale.timezone);
+
+// 旧响应没有 display 时按美元显示
 function displayTotals(totals: ReconciliationWindowGroup["totals"]): ReconciliationDisplayTotals {
   return totals.display || { currency: "USD", knownIncome: totals.knownIncomeUsd, knownCost: totals.knownCostUsd, confirmedProfit: totals.confirmedProfitUsd, confirmedMarginRate: totals.confirmedMarginRate };
 }
@@ -19,143 +30,159 @@ function displayTotals(totals: ReconciliationWindowGroup["totals"]): Reconciliat
 function WindowMetrics({ totals }: { totals: ReconciliationWindowGroup["totals"] }) {
   const display = displayTotals(totals);
   return <div className="reconciliation-summary__metrics">
-    <SummaryMetric label={`本站已获取收费（${display.currency}）`} value={amountText(display.knownIncome, display.currency)} />
-    <SummaryMetric label={`已计入上游成本（${display.currency}）`} value={amountText(display.knownCost, display.currency)} />
-    <SummaryMetric label="已确认范围账面毛利" value={amountText(display.confirmedProfit, display.currency)} tone={amountTone(display.confirmedProfit)} />
-    <SummaryMetric label="已确认范围毛利率" value={percent(display.confirmedMarginRate)} />
+    <SummaryMetric label="收入" value={amountText(display.knownIncome, display.currency)} />
+    <SummaryMetric label="上游成本" value={amountText(display.knownCost, display.currency)} />
+    <SummaryMetric label="毛利" value={amountText(display.confirmedProfit, display.currency)} />
+    <SummaryMetric label="毛利率" value={formatPct(display.confirmedMarginRate)} />
   </div>;
 }
 
-const UNACCOUNTED_STATE_LABEL: Record<string, string> = { complete: "已取全", estimated: "估算", partial: "部分", pending: "读取中", unavailable: "读取失败" };
-const unaccountedLevel = (state: string) => state === "complete" ? "good" : state === "pending" ? "info" : "warn";
+// 没算进利润的上游成本的状态（§7、§11）：读全了不加标签；估算在数字前加「≈」
+const UNACCOUNTED_STATE_LABEL: Record<string, string> = { partial: "没读全", pending: "读取中", unavailable: "读不到" };
+const unaccountedTag = (state: string) => state === "complete" || state === "estimated" ? null
+  : <StatusTag level={state === "pending" ? "info" : "warn"}>{UNACCOUNTED_STATE_LABEL[state] || EMPTY}</StatusTag>;
+const approx = (state: string, text: string) => state === "estimated" && text !== EMPTY ? `≈ ${text}` : text;
 
-// 上游账号实际扣费减去已计入核算的 Key 成本：没有建核算关联的 Key、测试和自用消耗都落在这里
-// rereading：读取中时页面还会自动重读；次数用完后提示点顶栏的刷新。
+// 上游扣费减去已算进利润的上游成本：没绑定的 Key、测试和自用的花费都落在这里。
+// rereading：读取中时页面还会自动再读；次数用完后提示点「刷新」。差额的原因写在各上游的说明里（view 的 notes）。
 function UnaccountedUpstreamBlock({ data, rereading }: { data: UnaccountedUpstream; rereading: boolean }) {
   const { currency } = data;
   const pending = data.state === "pending";
-  // 已核算多于账号扣费的原因：取数时刻不同、汇率不同或两者都有（mixed）；旧响应没有 overAccounted 时按取数时刻。
-  // 每个账号都有的原因直接说，只有部分账号有的说「部分还有」，两种原因各有账号单独占着时说「或」
-  const overReasons = new Set(data.accounts.filter((account) => (account.unaccounted ?? 0) < 0).map((account) => account.overAccounted || "timing"));
-  const mixed = overReasons.has("mixed"), timing = overReasons.has("timing"), rate = overReasons.has("rate");
-  const overReason = !overReasons.size ? "" : timing && rate ? "取数时刻或汇率不同"
-    : timing ? (mixed ? "多为取数时刻不同，部分还有汇率不同" : "多为取数时刻不同")
-    : rate ? (mixed ? "汇率不同，部分还有取数时刻不同" : "汇率不同") : "取数时刻和汇率不同";
-  // 截至现在的窗口里，账号扣费按取数时刻截止（缓存期内复用），核算成本截至本次读取，两者可能差几分钟。
+  const over = data.accounts.some((account) => (account.unaccounted ?? 0) < 0);
+  // 截至现在的日期范围里，上游扣费按上次读到的时间截止，和这次读取可能差几分钟
   const live = isLivePreset(data.window.preset);
   const stationNames = (stations: { name: string }[]) => stations.map((station) => station.name).join("、");
-  return <section className="reconciliation-unaccounted" aria-label="未纳入核算的上游消费">
+  return <section className="reconciliation-unaccounted" aria-label="没算进利润的上游成本">
     <div className="reconciliation-unaccounted__head">
-      <SummaryMetric label={`未纳入核算的上游消费（${currency}）`} value={pending ? "读取中" : amountText(data.total, currency)} />
-      <StatusTag level={unaccountedLevel(data.state)}>{UNACCOUNTED_STATE_LABEL[data.state] || data.state}</StatusTag>
+      <SummaryMetric label="没算进利润的上游成本" value={pending ? "读取中" : approx(data.state, amountText(data.total, currency))} />
+      {pending ? null : unaccountedTag(data.state)}
     </div>
     <p className="jy-caption">
-      各上游账号的实际扣费（和「{NAV_LABELS.my}」同一取数）减去已计入核算的 Key 成本。
-      {pending ? (rereading ? "上游用量还在读取，稍后自动重读。" : "上游用量读取较慢，可点顶栏的刷新重试。")
-        : data.state === "complete" ? "" : data.state === "estimated" ? "部分账号按余额历史或整日用量估算。" : "部分账号或关联没取全，合计不准确，展开看各账号说明。"}
-      {!pending && overReason ? ` 已核算多于账号扣费的账号（${overReason}）在合计里按 0 计。` : ""}
-      {data.fixedStations.length ? ` 固定采购的上游不按用量计成本，不在此列：${stationNames(data.fixedStations)}。` : ""}
-      {data.excludedStations.length ? ` 设为不计入成本的上游不做账号级对比：${stationNames(data.excludedStations)}（建在${data.excludedStations.length > 1 ? "它们" : "它"}上面的核算关联仍按 Key 用量计成本）。` : ""}
+      上游扣费（和「{NAV_LABELS.my}」读的是同一个数）减去已算进利润的上游成本。
+      {pending ? (rereading ? `${reconciliationIssue("UPSTREAM_DATA_UNAVAILABLE").hint}。` : `上游暂时读不到，可以点「${RECON_BUTTONS.refresh}」再读。`)
+        : data.state === "estimated" ? "≈ 部分上游按余额变化估算。" : data.state === "partial" ? "部分上游没读全。" : ""}
+      {!pending && over ? "有的上游已算进利润的多于上游扣费，合计里按 0 算。" : ""}
+      {data.fixedStations.length ? `计入固定成本的上游不在这里：${stationNames(data.fixedStations)}。` : ""}
+      {data.excludedStations.length ? `不算进利润的上游不在这里：${stationNames(data.excludedStations)}（绑在${data.excludedStations.length > 1 ? "它们" : "它"}上面的 Key 仍按用量算上游成本）。` : ""}
     </p>
     {data.accounts.length ? <Collapse className="reconciliation-coverage__list" items={[{
       key: "unaccounted-accounts",
-      label: "查看各上游账号",
+      label: "查看各上游",
       children: <ul className="reconciliation-coverage__channels">
-        {data.accounts.map((account) => <li key={account.stationId} className="reconciliation-coverage__channel">
-          <div className="reconciliation-coverage__heading">
-            <strong>{account.name}</strong>
-            <StatusTag level={unaccountedLevel(account.state)}>{UNACCOUNTED_STATE_LABEL[account.state] || account.state}</StatusTag>
-          </div>
-          <span>
-            账号扣费 {account.state === "pending" ? "读取中" : amountText(account.account, currency)}
-            {" · "}已核算 {amountText(account.accounted, currency)}
-            {" · "}未纳入 {account.state === "pending" ? "—" : amountText(account.unaccounted, currency)}
-          </span>
-          <span className="jy-caption">
-            {account.rate ? `汇率 ¥${account.rate}/$ · ` : ""}{live && account.endMs ? `账号扣费截至 ${formatRecentTime(account.endMs, data.window.timezone)} · ` : ""}核算关联 {account.ruleIds.join("、") || "无"}
-            {account.notes.length ? ` · ${account.notes.join("；")}` : ""}
-          </span>
-        </li>)}
+        {data.accounts.map((account) => {
+          const accountPending = account.state === "pending";
+          const asOf = live && account.endMs ? formatAsOf(account.endMs, data.window.timezone) : "";
+          const caption = [account.rate ? formatRate(account.rate) : "", asOf, ...account.notes].filter(Boolean).join("；");
+          return <li key={account.stationId} className="reconciliation-coverage__channel">
+            <div className="reconciliation-coverage__heading">
+              <strong>{account.name}</strong>
+              {unaccountedTag(account.state)}
+            </div>
+            <span>
+              上游扣费 {accountPending ? "读取中" : approx(account.state, amountText(account.account, currency))}
+              {" · "}已算进利润 {amountText(account.accounted, currency)}
+              {" · "}没算进利润 {accountPending ? EMPTY : approx(account.state, amountText(account.unaccounted, currency))}
+            </span>
+            {caption ? <span className="jy-caption">{caption}</span> : null}
+          </li>;
+        })}
       </ul>,
     }]} /> : null}
   </section>;
 }
 
-// fixedCost：本页有建在固定采购上游上的关联，它们的成本记 0，采购费由自营业务页按时段摊销。
-// fixedOffProfit：其中没开监控、设为不计入成本或已归档的站点，自营业务页也不摊销它们的采购费，单独点名。
-// preset：当前核算范围；「今天」带到自营业务页，其余用它的默认范围（近 7 天）。
-export function ReconSummary({ summary, unaccounted, usageRereading = false, reference, fixedCost = false, fixedOffProfit = [], preset }: {
-  summary: ReconciliationSummary | null; unaccounted?: UnaccountedUpstream | null; usageRereading?: boolean; reference: boolean;
+// fixedCost：本页有包月上游上的绑定，它们的上游成本写「计入固定成本」，费用在自营业务页按天平摊。
+// fixedOffProfit：其中暂停监控、不算进利润或已归档的上游，自营业务页也不算它们的固定成本，单独点名。
+// preset：当前日期范围；「今天」带到自营业务页，其余用它的默认范围（近 7 天）。
+// grouped：没法放在一起汇总（算一天的时区不同、或有绑定的来源还没确认），分组小计写在下面。
+export function ReconSummary({ summary, results, coverage, currency, grouped = false, unaccounted, usageRereading = false, stale, onRefresh, fixedCost = false, fixedOffProfit = [], preset }: {
+  summary: ReconciliationSummary | null; results: any[]; coverage: KnownChannelCoverage | null; currency: ReconciliationCurrency; grouped?: boolean;
+  unaccounted?: UnaccountedUpstream | null; usageRereading?: boolean; stale: SummaryStale; onRefresh?: () => void;
   fixedCost?: boolean; fixedOffProfit?: string[]; preset?: string;
 }) {
-  const currency = summary ? displayTotals(summary.totals).currency : "USD";
+  if (stale?.kind === "switching") {
+    return <Panel title="汇总" className="reconciliation-summary">
+      <div aria-busy="true" className="jy-stack" style={{ gap: 10 }}>
+        <span className="sr-only">读取中</span>
+        <Skeleton height={44} />
+        <Skeleton width="60%" />
+      </div>
+    </Panel>;
+  }
+  const coverageText = reconciliationCoverageText(summary?.coverage || coverage);
+  const notCounted = summary ? reconciliationNotCountedCostText(summary.totals.notCountedCostRuleIds, results) : "";
   const note = <>
-    {summary?.totals.profitComplete ? "已知渠道范围的完整账单。" : "仅已确认范围的金额，不代表全站完整利润。"}
-    {currency === "CNY" ? "金额按人民币汇总，收费按本站、成本按各上游的汇率折算（查单个已结账的自然日时按结账时记下的汇率，其余按当前汇率）；" : "金额按系统原值（美元）汇总；"}
-    本站收费来源：{RECONCILIATION_BILLING_SOURCE_LABEL}。今天、近 7 天、本月为截至现在的实时金额，自然日结束后自动结账。
-    {fixedCost ? <>固定采购上游的成本记 0，采购费不在这里分摊；扣掉固定成本后的净利见<Link href={preset === "today" ? "/my?range=today" : "/my"}>{NAV_LABELS.my}</Link>。
-      {fixedOffProfit.length ? `其中${fixedOffProfit.map((name) => `「${name}」`).join("、")}没开监控、设为不计入成本或已归档，${NAV_LABELS.my}也不计${fixedOffProfit.length > 1 ? "它们" : "它"}的采购费。` : ""}</> : null}
+    {coverageText ? `${coverageText}。` : ""}
+    {currency === "CNY" ? "按各自设置的汇率换算成人民币（已固定的日子按固定时记下的汇率）。" : `${RATE_UNSET_USD}。`}
+    {preset && isLivePreset(preset) ? "今天的数字还会变，过了零点自动固定。" : ""}
+    {fixedCost ? <>包月上游的上游成本写「计入固定成本」；扣掉固定成本后的净利见<Link href={preset === "today" ? "/my?range=today" : "/my"}>{NAV_LABELS.my}</Link>。
+      {fixedOffProfit.length ? `其中${fixedOffProfit.map((name) => `「${name}」`).join("、")}暂停监控、不算进利润或已归档，${NAV_LABELS.my}也不算${fixedOffProfit.length > 1 ? "它们" : "它"}的固定成本。` : ""}</> : null}
   </>;
-  return <Panel title="核算汇总" className="reconciliation-summary" foot={note}>
-    {reference
-      ? <Alert type="info" showIcon title="全量摘要仅供参考，正在核对当前窗口" description="关联列表保留已读金额；全量读取完成后再显示当前汇总。" />
-      : summary ? <>
-        <WindowMetrics totals={summary.totals} />
-        {unaccounted ? <UnaccountedUpstreamBlock data={unaccounted} rereading={usageRereading} /> : null}
-      </> : <p className="reconciliation-summary__empty">暂无共同整日汇总</p>}
+  return <Panel title="汇总" className="reconciliation-summary" foot={note}>
+    {stale ? <Alert
+      type={stale.kind === "failed" ? "warning" : "info"} showIcon title={staleText(stale)}
+      description={stale.raw ? <ErrorDetail raw={stale.raw} /> : undefined}
+      action={stale.kind === "failed" && onRefresh ? <Button size="small" onClick={onRefresh}>{RECON_BUTTONS.refresh}</Button> : undefined}
+    /> : null}
+    {summary ? <>
+      <WindowMetrics totals={summary.totals} />
+      {notCounted ? <p className="jy-caption">{notCounted}</p> : null}
+      {unaccounted ? <UnaccountedUpstreamBlock data={unaccounted} rereading={usageRereading} /> : null}
+    </> : <p className="reconciliation-summary__empty">{EMPTY}{grouped ? <span className="jy-caption">这几条绑定没法放在一起汇总，分开写在下面</span> : null}</p>}
   </Panel>;
 }
 
-// 关联分属不同账单窗口（时区或起止不同）时逐组列出，组内金额只在本组口径下相加
-export function ReconWindowGroups({ groups, reference }: { groups: ReconciliationWindowGroup[]; reference: boolean }) {
+// 绑定算一天的时区或起止不同时逐组列出，组内金额只在本组里相加；和业务时区一样的组不写时区
+// 有共同汇总时只有一组，就是上面的汇总，不再列出
+export function ReconWindowGroups({ groups, results, businessTimezone, stale }: {
+  groups: ReconciliationWindowGroup[]; results: any[]; businessTimezone?: string; stale: boolean;
+}) {
   if (!groups.length) return null;
-  return <Collapse className="reconciliation-window-groups" items={groups.map((group) => ({
-    key: group.groupKey,
-    label: <span>账单窗口 · {formatWindow({ ...group.window, timezone: group.timezones[0] })} · {group.timezones.join(" / ")}{reference ? " · 参考" : ""}</span>,
-    children: <div className="reconciliation-window-group">
-      <div className="reconciliation-detail-grid">
-        <Detail label="绝对窗口" value={`${iso(group.window.startMs)} — ${iso(group.window.endMs)}`} />
-        <Detail label="本站来源" value={group.ownSource ? `${group.ownSource.provider} · ${group.ownSource.baseUrl} · 账号 ${group.ownSource.accountId} · ${group.ownSource.namespaceKey}` : "来源待核对"} />
-        <Detail label="金额口径" value={`${group.amountBasis.currency} · ${group.amountBasis.billingSource} · 计算版本 ${group.amountBasis.calculationVersion} · ${group.amountBasis.conversion || "换算依据待核验"}`} />
-        <Detail label="核算关联" value={group.ruleIds.join("、")} />
-      </div>
-      <WindowMetrics totals={group.totals} />
-      <p className="jy-caption">
-        {reference ? "本组金额仅供参考。" : group.totals.profitComplete ? "已知范围完整账单。" : "已确认范围小计，完整性待确认。"}
-        {" "}已核算 {group.coverage.accountedChannelCount}/{group.coverage.knownChannelCount} 个已知渠道。
-        {group.totals.notCountedCostRuleIds.length ? `未计入成本的关联：${group.totals.notCountedCostRuleIds.join("、")}。` : ""}
-      </p>
-    </div>,
-  }))} />;
+  return <Collapse className="reconciliation-window-groups" items={groups.map((group) => {
+    const timezone = group.timezones[0];
+    const zone = group.timezones.length === 1 ? formatDayZone(timezone, businessTimezone) : "";
+    const coverageText = reconciliationCoverageText(group.coverage);
+    return {
+      key: group.groupKey,
+      label: <span>{formatWindow({ ...group.window, timezone })}{zone ? ` · ${zone}` : ""}{stale ? " · 数据可能不是最新" : ""}</span>,
+      children: <div className="reconciliation-window-group">
+        <WindowMetrics totals={group.totals} />
+        <p className="jy-caption">
+          {coverageText ? `${coverageText}。` : ""}
+          {reconciliationNotCountedCostText(group.totals.notCountedCostRuleIds, results)}
+        </p>
+      </div>,
+    };
+  })} />;
 }
 
-// 覆盖统计按全部已知渠道计算，不随搜索、筛选和分页变化
-export function ReconCoverage({ coverage, reference }: { coverage: KnownChannelCoverage | null; reference: boolean }) {
-  if (!coverage) return null;
-  return <section className="reconciliation-coverage" aria-label="已知渠道覆盖">
-    <Alert
-      type={coverage.state === "complete_known" ? "success" : "warning"}
-      showIcon
-      title={`${reference ? "参考 · " : ""}已知渠道覆盖：已核算 ${coverage.accountedChannelCount}/${coverage.knownChannelCount}`}
-      description={`${coverage.catalogueState === "verified" ? "当前目录已核验" : "当前目录覆盖未知"}；全站历史渠道全集未核验。搜索、筛选和分页不改变此覆盖统计。`}
-    />
-    <Collapse className="reconciliation-coverage__list" items={[{
+// 渠道汇总按全部渠道算，不随搜索、筛选和翻页变化；默认收起，只看没算进来的
+export function ReconCoverage({ coverage }: { coverage: KnownChannelCoverage | null }) {
+  const title = reconciliationCoverageText(coverage);
+  if (!coverage || !title) return null;
+  const pending = coverage.channels.filter((channel) => channel.status !== "accounted");
+  return <section className="reconciliation-coverage" aria-label="渠道">
+    <Alert type={pending.length ? "warning" : "success"} showIcon title={title} />
+    {pending.length ? <Collapse className="reconciliation-coverage__list" items={[{
       key: "known-coverage",
-      label: "查看全部已知渠道与未核算原因",
+      label: "查看没算进来的",
       children: <ul className="reconciliation-coverage__channels">
-        {coverage.channels.map((channel, index) => <li key={`${channel.ownSource?.namespaceKey || channel.ownStationId}:${channel.channelId}:${index}`} className="reconciliation-coverage__channel">
-          <div className="reconciliation-coverage__heading">
-            <strong>{channel.name} · ID {channel.channelId}</strong>
-            <StatusTag level={channel.status === "accounted" ? "good" : "warn"}>{COVERAGE_STATUS_LABEL[channel.status] || channel.status}</StatusTag>
-          </div>
-          <span className="jy-caption">{channelStateLabel[channel.operatingState] || "状态未知"} · 本站 {channel.ownStationId} · 核算关联 {channel.ruleIds.join("、") || "无"}</span>
-          {channel.issues.length ? <span>{channel.issues.map(coverageIssueLabel).join("；")}</span> : null}
-          {channel.actions.length ? <div className="reconciliation-coverage__actions">
-            <span className="jy-caption">待处理：{channel.actions.map((action) => action.label).join("；")}</span>
-            {channel.actions.map((action) => <Button key={action.id} size="small" href={action.href}>{action.label}</Button>)}
-          </div> : null}
-        </li>)}
+        {pending.map((channel, index) => {
+          const tag = reconciliationChannelTag(channel);
+          const status = reconciliationChannelStatus(channel.status, { channel: reconciliationChannelName(channel) }, channel.issues);
+          return <li key={`${channel.ownSource?.namespaceKey || channel.ownStationId}:${channel.channelId}:${index}`} className="reconciliation-coverage__channel">
+            <div className="reconciliation-coverage__heading">
+              <strong>{reconciliationChannelName(channel)}</strong>
+              <StatusTag level={status.needsAction ? "warn" : "info"}>{status.label}</StatusTag>
+              {tag ? <StatusTag level="warn">{tag}</StatusTag> : null}
+            </div>
+            {status.reason ? <span>{status.reason}</span> : null}
+            {channel.actions.length ? <div className="reconciliation-coverage__actions">
+              {channel.actions.map((action) => <Button key={action.id} size="small" href={action.href}>{action.label}</Button>)}
+            </div> : null}
+          </li>;
+        })}
       </ul>,
-    }]} />
+    }]} /> : null}
   </section>;
 }

@@ -5,6 +5,7 @@ import { handleChannelOnboardingRequest } from "./handler.js";
 import { createChannelOnboardingModule } from "../../../server/channel-onboarding.js";
 import { Store } from "../../../db/store.js";
 import { queryAccountIdentity } from "../../../lib/providers.js";
+import { businessTimeZone } from "../../../lib/business-time.js";
 
 async function liveOnboarding(dependencies = {}) {
   const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]],
@@ -114,20 +115,20 @@ test("U06 authenticated GET/sync真实Provider来源DTO，默认零读写且失�
     const initialWrites = writes, before = structuredClone(store.data), initial = await (await get()).json();
     assert.deepEqual(initial, { ownSource: null, sourceVersion: rt.channelOnboarding.getSourceCatalogue().sourceVersion,
       ownStation: { id: own.id, name: "Own", type: "newapi", baseUrl: own.baseUrl, monitorEnabled: true, identity: null },
-      upstreams: [], rules: [], channels: [], syncedAt: null, stale: true, error: null });
+      upstreams: [], rules: [], channels: [], syncedAt: null, stale: true, error: null, errorCode: null, tz: businessTimeZone() });
     assert.equal(requests.length, 0); assert.equal(writes, initialWrites); assert.equal(catalogueWrites, 0);
     const synced = await (await sync()).json(), namespaceKey = createHash("sha256")
       .update(JSON.stringify(["newapi", own.baseUrl, "41"])).digest("hex");
     assert.deepEqual(synced.ownSource, { stationId: own.id, provider: "newapi", baseUrl: own.baseUrl, accountId: "41", namespaceKey });
     assert.match(synced.sourceVersion, /^[a-f0-9]{64}$/); assert.equal(synced.stale, false); assert.equal(synced.syncedAt, now);
-    assert.deepEqual(Object.keys(synced).sort(), ["channels", "error", "ownSource", "ownStation", "rules", "sourceVersion", "stale", "syncedAt", "upstreams"]);
+    assert.deepEqual(Object.keys(synced).sort(), ["channels", "error", "errorCode", "ownSource", "ownStation", "rules", "sourceVersion", "stale", "syncedAt", "tz", "upstreams"]);
     assert.equal(requests.length, 2); assert.equal(catalogueWrites, 1); assert.equal(writes, initialWrites);
     assert.deepEqual(await (await get()).json(), synced); assert.equal(requests.length, 2);
     assert.deepEqual(store.data, before, "source sync does not backfill Store identity");
     await store.update(own.id, { accessToken: "u06-own-b-pat" });
     const savedWrites = writes; failIdentity = true;
     const failed = await (await sync()).json();
-    assert.equal(failed.stale, true); assert.ok(failed.error); assert.deepEqual(failed.ownSource, synced.ownSource);
+    assert.equal(failed.stale, true); assert.ok(failed.error); assert.equal(failed.errorCode, "UPSTREAM_AUTH_DENIED"); assert.deepEqual(failed.ownSource, synced.ownSource);
     assert.notEqual(failed.sourceVersion, synced.sourceVersion); assert.equal(catalogueWrites, 1); assert.equal(writes, savedWrites);
     const failedRequests = requests.length;
     assert.deepEqual(await (await get()).json(), failed); assert.equal(requests.length, failedRequests);
@@ -265,7 +266,7 @@ test("HTTP拒绝坏JSON，不回显包含密码的解析错误", async () => {
   const bad = new Request("http://localhost/api/channel-onboarding", { method: "POST", body: "private-password is not JSON" });
   const response = await handleChannelOnboardingRequest(bad, { channelOnboarding: {} }, "connect");
   assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "请求格式无效", code: "INVALID_REQUEST" });
+  assert.deepEqual(await response.json(), { error: "页面已过期，请刷新后重新打开", code: "INVALID_REQUEST" });
 });
 
 test("HTTP目录查询/即时同步调用公开模块，未初始化明确503", async () => {
@@ -273,7 +274,8 @@ test("HTTP目录查询/即时同步调用公开模块，未初始化明确503", 
     sync: async () => ({ channels: [{ id: 1 }], stale: false }) } };
   assert.deepEqual(await (await handleChannelOnboardingRequest(request(), rt, "list")).json(), { channels: [], stale: true });
   assert.deepEqual(await (await handleChannelOnboardingRequest(request(), rt, "sync")).json(), { channels: [{ id: 1 }], stale: false });
-  assert.equal((await handleChannelOnboardingRequest(request(), {}, "list")).status, 503);
+  const notReady = await handleChannelOnboardingRequest(request(), {}, "list");
+  assert.equal(notReady.status, 503); assert.equal((await notReady.json()).code, "NOT_READY");
 });
 
 test("HTTP批量与recover薄入口保留每组partial，并只把body作为业务输入", async () => {

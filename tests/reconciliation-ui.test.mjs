@@ -5,8 +5,13 @@ import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
-import { normalizeBatchInput } from "../lib/channel-onboarding.js";
+import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationNotCountedCostText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
+import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
+import { EMPTY, FIXED_COST_TEXT, MINUS, OWN_STATION_UNSET_TITLE, RATE_UNSET_USD, formatAsOf, formatDayZone, formatRate, formatZonedDateTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
+import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy, reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
+import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
+import { ERROR_CATEGORIES, describeError, failureText } from "../lib/error-copy.js";
+import { NAV_LABELS, STATION_TABS } from "../lib/brand.js";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
@@ -72,14 +77,20 @@ async function openDailyPage(t, options = {}) {
   }, options.viewport, false, null, options.path);
   return { page, reads, queries, initial };
 }
+// 页面上的话都来自共用的常量和函数（design/ui-copy-spec.md），这里只填测试数据对应的数字
+const coverageText = (known, accounted) => reconciliationCoverageText({ knownChannelCount: known, accountedChannelCount: accounted });
+// 汇总里的一项：按标签整句找，「上游成本」不会找到「没算进利润的上游成本」，「毛利」不会找到「毛利率」
+const summaryMetric = (scope, label) => scope.locator(".reconciliation-summary-metric").filter({ has: scope.page().getByText(label, { exact: true }) });
+// 计算明细里一项的值
+const detailValue = (scope, label) => scope.locator(".reconciliation-detail").filter({ has: scope.page().getByText(label, { exact: true }) }).locator(".reconciliation-detail__value");
 
 test("daily billing defaults to complete yesterday and global 3/10 coverage survives search and status filters", async (t) => {
-  const { page, reads } = await openDailyPage(t); const summary = page.getByRole("region", { name: "核算汇总", exact: true });
+  const { page, reads } = await openDailyPage(t); const summary = page.getByRole("region", { name: "汇总", exact: true });
   assert.deepEqual(reads[0], { preset: "yesterday" }); await summary.getByText("$7.50", { exact: true }).waitFor(); await summary.getByText("$4.50", { exact: true }).waitFor(); assert.equal(await summary.getByText(/¥/).count(), 0);
-  const coverage = page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.getByText("已知渠道覆盖：已核算 3/10", { exact: true }).waitFor();
-  await page.getByRole("textbox", { name: "搜索上游、Key、渠道名称或 ID", exact: true }).fill("Rule A"); assert.equal(await page.locator("tr.ant-table-row").count(), 1); await summary.getByText("$7.50", { exact: true }).waitFor();
-  await page.getByText("负毛利 0", { exact: true }).click(); await page.getByText("没有匹配的核算关联", { exact: true }).waitFor(); await coverage.getByText("已知渠道覆盖：已核算 3/10", { exact: true }).waitFor();
-  await coverage.locator(".ant-collapse-header", { hasText: "查看全部已知渠道与未核算原因" }).click(); await coverage.getByText("渠道 9 · ID 9", { exact: true }).waitFor(); assert.ok((await coverage.textContent()).includes("尚未建立核算关联")); assert.equal(reads.length, 1);
+  const coverage = page.getByRole("region", { name: "渠道", exact: true }); await coverage.getByText(coverageText(10, 3), { exact: true }).waitFor();
+  await page.getByRole("textbox", { name: "搜索上游、Key、渠道名或渠道 ID", exact: true }).fill("Rule A"); assert.equal(await page.locator("tr.ant-table-row").count(), 1); await summary.getByText("$7.50", { exact: true }).waitFor();
+  await page.getByRole("group", { name: "状态筛选" }).getByRole("button", { name: "亏损 0", exact: true }).click(); await page.getByText("没有匹配的绑定", { exact: true }).waitFor(); await coverage.getByText(coverageText(10, 3), { exact: true }).waitFor();
+  await coverage.locator(".ant-collapse-header", { hasText: "查看没算进来的" }).click(); await coverage.getByText("渠道 9", { exact: true }).waitFor(); assert.ok((await coverage.textContent()).includes("没绑定")); assert.equal(reads.length, 1);
 });
 
 // 3b：汇率都设置了才整页按人民币；收费按本站汇率、成本按该上游汇率；固定采购成本记 0
@@ -100,51 +111,54 @@ function unaccountedFor(rows, currency, usage = { usd: 4, mode: "usage" }) {
 test("3b daily page switches to yuan only when every station has a rate, with fixed purchases at zero cost", async (t) => {
   const rows = ratedDailyRows();
   const { page } = await openDailyPage(t, { upstreams: ratedUpstreams, data: dailyResponse(rows, { displayCurrency: "CNY", unaccountedUpstream: unaccountedFor(rows, "CNY") }) });
-  const summary = page.getByRole("region", { name: "核算汇总", exact: true }), metric = (label) => summary.locator(".reconciliation-summary-metric", { hasText: label });
-  await metric("本站已获取收费（CNY）").getByText("¥52.50", { exact: true }).waitFor(); await metric("已计入上游成本（CNY）").getByText("¥12.00", { exact: true }).waitFor(); await metric("已确认范围账面毛利").getByText("¥40.50", { exact: true }).waitFor();
+  const summary = page.getByRole("region", { name: "汇总", exact: true }), metric = (label) => summaryMetric(summary, label);
+  await metric("收入").getByText("¥52.50", { exact: true }).waitFor(); await metric("上游成本").getByText("¥12.00", { exact: true }).waitFor(); await metric("毛利").getByText("¥40.50", { exact: true }).waitFor();
   assert.doesNotMatch(await summary.locator(".reconciliation-summary__metrics").innerText(), /\$/);
-  // 页脚：已结账的日子按结账时的汇率，其余按当前汇率；有固定采购的关联时说明成本记 0，净利去自营业务看
-  await summary.getByText(/收费按本站、成本按各上游的汇率折算（查单个已结账的自然日时按结账时记下的汇率，其余按当前汇率）/).waitFor();
-  await summary.getByText(/固定采购上游的成本记 0，采购费不在这里分摊；扣掉固定成本后的净利见自营业务/).waitFor();
-  assert.equal(await summary.getByRole("link", { name: "自营业务", exact: true }).getAttribute("href"), "/my");
+  // 页脚：已固定的日子按固定时记下的汇率，其余按各自设置的汇率；有包月上游的绑定时说明上游成本写「计入固定成本」，净利去自营业务看
+  await summary.getByText("按各自设置的汇率换算成人民币（已固定的日子按固定时记下的汇率）。").waitFor();
+  await summary.getByText(`包月上游的上游成本写「${FIXED_COST_TEXT}」；扣掉固定成本后的净利见${NAV_LABELS.my}。`).waitFor();
+  assert.equal(await summary.getByRole("link", { name: NAV_LABELS.my, exact: true }).getAttribute("href"), "/my");
   const rowA = page.locator("tr.ant-table-row", { hasText: "Rule A" }), rowC = page.locator("tr.ant-table-row", { hasText: "Rule C" });
   await rowA.getByText("¥17.50", { exact: true }).waitFor(); await rowA.getByText("¥6.00", { exact: true }).waitFor(); await rowA.getByText("¥11.50", { exact: true }).waitFor();
-  await rowC.getByText("Fixed upstream", { exact: true }).waitFor(); assert.match(await rowC.locator(".reconciliation-table-amount", { hasText: "固定采购" }).innerText(), /^¥0\.00\s*固定采购$/); assert.equal(await rowC.getByText("¥17.50", { exact: true }).count(), 2);
-  // 未纳入核算的上游消费：账号扣费 $4 − 已核算 $2，按该上游汇率 6 折算
-  const unaccounted = summary.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
-  await unaccounted.locator(".reconciliation-summary-metric").getByText("¥12.00", { exact: true }).waitFor(); await unaccounted.getByText(/固定采购的上游不按用量计成本，不在此列：Fixed upstream/).waitFor();
-  await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游账号" }).click(); await unaccounted.getByText("账号扣费 ¥24.00 · 已核算 ¥12.00 · 未纳入 ¥12.00", { exact: true }).waitFor(); await unaccounted.getByText(/汇率 ¥6\/\$ · 核算关联 rule-1、rule-2/).waitFor();
-  await page.getByRole("button", { name: "查看 Rule A 的核算详情", exact: true }).click(); let drawer = page.getByRole("dialog", { name: "Rule A · 核算详情", exact: true });
-  await drawer.getByText("本站 ¥7/$ · 上游 ¥6/$", { exact: true }).waitFor(); await drawer.locator(".ant-collapse-header", { hasText: "查看原始账单与计算依据" }).click(); await drawer.getByText("1.5 USD", { exact: true }).waitFor(); await drawer.locator(".ant-drawer-close").click();
-  await page.getByRole("button", { name: "查看 Rule C 的核算详情", exact: true }).click(); drawer = page.getByRole("dialog", { name: "Rule C · 核算详情", exact: true });
-  await drawer.getByText("¥0.00 · 固定采购：Key 用量 $1.00 不计成本", { exact: true }).waitFor(); await drawer.getByText("本站 ¥7/$ · 上游 固定采购不计成本", { exact: true }).waitFor();
+  // 包月上游的上游成本一格只写「计入固定成本」，不写金额（§3.2）；毛利 = 收入
+  await rowC.getByText("Fixed upstream", { exact: true }).waitFor(); assert.equal(await rowC.locator(".reconciliation-table-amount", { hasText: FIXED_COST_TEXT }).innerText(), FIXED_COST_TEXT); assert.equal(await rowC.getByText("¥17.50", { exact: true }).count(), 2);
+  // 没算进利润的上游成本：上游扣费 $4 − 已算进利润 $2，按该上游汇率 6 折算
+  const unaccounted = summary.getByRole("region", { name: "没算进利润的上游成本", exact: true });
+  await unaccounted.locator(".reconciliation-summary-metric").getByText("¥12.00", { exact: true }).waitFor(); await unaccounted.getByText("计入固定成本的上游不在这里：Fixed upstream。").waitFor();
+  await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游" }).click(); await unaccounted.getByText("上游扣费 ¥24.00 · 已算进利润 ¥12.00 · 没算进利润 ¥12.00", { exact: true }).waitFor(); await unaccounted.getByText(formatRate(6), { exact: true }).waitFor();
+  await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click(); let drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true });
+  await detailValue(drawer, "汇率").getByText(`收入按 ${formatRate(7)}，上游成本按 ${formatRate(6)}`, { exact: true }).waitFor();
+  // 计算明细只写白话（§9）：上游成本按上游汇率折算、写明来自哪把 Key 的用量；毛利按两边分别折算后相减
+  assert.match(await detailValue(drawer, "上游成本").innerText(), /^¥6\.00\s*来自 Key「Rule A」的用量记录$/); assert.equal(await detailValue(drawer, "毛利").innerText(), "¥11.50"); await drawer.locator(".ant-drawer-close").click();
+  await page.getByRole("button", { name: "查看 Rule C 的计算明细", exact: true }).click(); drawer = page.getByRole("dialog", { name: "Rule C · 计算明细", exact: true });
+  assert.equal(await detailValue(drawer, "上游成本").innerText(), FIXED_COST_TEXT); assert.equal(await detailValue(drawer, "汇率").innerText(), formatRate(7));
   // 看「今天」时，去自营业务的链接也带上今天
   await drawer.locator(".ant-drawer-close").click();
-  await page.getByRole("group", { name: "核算时间范围" }).getByRole("button", { name: "今天", exact: true }).filter({ visible: true }).click();
-  await summary.locator('a[href="/my?range=today"]', { hasText: "自营业务" }).waitFor();
-  assert.doesNotMatch(await summary.innerText(), /自营业务也不计/);
-  // 固定采购的站点没开监控、不计入成本或已归档时，自营业务也不摊销它的采购费，按服务端给出的站点点名
+  await page.getByRole("group", { name: "时间范围" }).getByRole("button", { name: "今天", exact: true }).filter({ visible: true }).click();
+  await summary.locator('a[href="/my?range=today"]', { hasText: NAV_LABELS.my }).waitFor();
+  assert.doesNotMatch(await summary.innerText(), new RegExp(`${NAV_LABELS.my}也不算`));
+  // 包月上游暂停监控、不算进利润或已归档时，自营业务也不算它的固定成本，按服务端给出的上游点名
   const offProfit = await openDailyPage(t, { upstreams: ratedUpstreams, data: dailyResponse(rows, { displayCurrency: "CNY", fixedOffProfitStations: [{ id: "fixed-1", name: "Fixed upstream" }],
     unaccountedUpstream: { ...unaccountedFor(rows, "CNY"), fixedStations: [] } }) });
-  await offProfit.page.getByRole("region", { name: "核算汇总", exact: true }).getByText(/其中「Fixed upstream」没开监控、设为不计入成本或已归档，自营业务也不计它的采购费。/).waitFor();
+  await offProfit.page.getByRole("region", { name: "汇总", exact: true }).getByText(`其中「Fixed upstream」暂停监控、不算进利润或已归档，${NAV_LABELS.my}也不算它的固定成本。`).waitFor();
   const twoOff = await openDailyPage(t, { upstreams: ratedUpstreams, data: dailyResponse(rows, { displayCurrency: "CNY",
     fixedOffProfitStations: [{ id: "fixed-1", name: "Fixed upstream" }, { id: "fixed-2", name: "Second fixed" }], unaccountedUpstream: { ...unaccountedFor(rows, "CNY"), fixedStations: [] } }) });
-  await twoOff.page.getByRole("region", { name: "核算汇总", exact: true }).getByText(/其中「Fixed upstream」、「Second fixed」没开监控、设为不计入成本或已归档，自营业务也不计它们的采购费。/).waitFor();
+  await twoOff.page.getByRole("region", { name: "汇总", exact: true }).getByText(`其中「Fixed upstream」、「Second fixed」暂停监控、不算进利润或已归档，${NAV_LABELS.my}也不算它们的固定成本。`).waitFor();
 });
 
 test("3b partially configured rates keep system dollars everywhere and name the stations still missing a rate", async (t) => {
   const rows = ratedDailyRows(); for (const row of rows.slice(0, 2)) row.rates.cost = defaultRate("upstream-1");
   const { page } = await openDailyPage(t, { upstreams: ratedUpstreams, data: dailyResponse(rows, { unconfiguredRateStations: [{ id: "upstream-1", name: "Fixture upstream" }], unaccountedUpstream: unaccountedFor(rows, "USD") }) });
-  await page.getByText("金额按系统原值（美元）显示", { exact: true }).waitFor(); await page.getByText(/部分站点未设置汇率：Fixture upstream/).waitFor();
-  const summary = page.getByRole("region", { name: "核算汇总", exact: true }), metric = (label) => summary.locator(".reconciliation-summary-metric", { hasText: label });
-  await metric("本站已获取收费（USD）").getByText("$7.50", { exact: true }).waitFor(); await metric("已计入上游成本（USD）").getByText("$2.00", { exact: true }).waitFor(); await metric("已确认范围账面毛利").getByText("$5.50", { exact: true }).waitFor();
-  await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$1.50", { exact: true }).waitFor(); assert.match(await page.locator("tr.ant-table-row", { hasText: "Rule C" }).locator(".reconciliation-table-amount", { hasText: "固定采购" }).innerText(), /^\$0\.00\s*固定采购$/);
-  await summary.getByRole("region", { name: "未纳入核算的上游消费", exact: true }).locator(".reconciliation-summary-metric").getByText("$2.00", { exact: true }).waitFor();
-  await summary.getByText(/金额按系统原值（美元）汇总；.*固定采购上游的成本记 0/).waitFor();
+  await page.getByText(RATE_UNSET_USD, { exact: true }).waitFor(); await page.getByText("没设置汇率的：Fixture upstream", { exact: true }).waitFor();
+  const summary = page.getByRole("region", { name: "汇总", exact: true }), metric = (label) => summaryMetric(summary, label);
+  await metric("收入").getByText("$7.50", { exact: true }).waitFor(); await metric("上游成本").getByText("$2.00", { exact: true }).waitFor(); await metric("毛利").getByText("$5.50", { exact: true }).waitFor();
+  await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$1.50", { exact: true }).waitFor(); assert.equal(await page.locator("tr.ant-table-row", { hasText: "Rule C" }).locator(".reconciliation-table-amount", { hasText: FIXED_COST_TEXT }).innerText(), FIXED_COST_TEXT);
+  await summary.getByRole("region", { name: "没算进利润的上游成本", exact: true }).locator(".reconciliation-summary-metric").getByText("$2.00", { exact: true }).waitFor();
+  await summary.getByText(new RegExp(`${RATE_UNSET_USD}。.*包月上游的上游成本写「${FIXED_COST_TEXT}」`)).waitFor();
   assert.doesNotMatch(await page.locator(".reconciliation-page").innerText(), /¥/);
   // 一个汇率都没设置时不提示
-  const next = await openDailyPage(t, { data: dailyResponse(dailyRows()) }); await next.page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$2.50", { exact: true }).waitFor(); assert.equal(await next.page.getByText("金额按系统原值（美元）显示", { exact: true }).count(), 0);
-  assert.equal(await next.page.getByText(/固定采购上游的成本记 0/).count(), 0, "没有固定采购的关联时不提");
+  const next = await openDailyPage(t, { data: dailyResponse(dailyRows()) }); await next.page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$2.50", { exact: true }).waitFor(); assert.equal(await next.page.getByText(RATE_UNSET_USD, { exact: true }).count(), 0);
+  assert.equal(await next.page.getByText(/包月上游的上游成本写/).count(), 0, "没有包月上游的绑定时不提");
 });
 
 test("3b live today rows share one window although each stops at its own fetch time", async (t) => {
@@ -152,8 +166,10 @@ test("3b live today rows share one window although each stops at its own fetch t
   const later = { ...rows[1].window, endMs: start + 3 * 3600000 + 1500 };
   Object.assign(rows[1], { window: later, requestedWindow: later }); rows[1].downstream.window = rows[1].upstream.window = later;
   const { page } = await openDailyPage(t, { data: dailyResponse(rows) });
-  assert.equal(await page.locator(".ant-collapse-header", { hasText: /^账单窗口/ }).count(), 1); await page.getByRole("region", { name: "核算汇总", exact: true }).locator(".reconciliation-summary-metric", { hasText: "本站已获取收费（USD）" }).getByText("$7.50", { exact: true }).waitFor();
-  assert.equal(await page.getByText("按各关联时区计算，具体时间见详情", { exact: true }).count(), 0);
+  // 三条请求的是同一个「今天」，只出一份汇总，不逐组列出；日期取最早的截止点
+  await summaryMetric(page.getByRole("region", { name: "汇总", exact: true }), "收入").getByText("$7.50", { exact: true }).waitFor(); assert.equal(await page.locator(".reconciliation-window-groups").count(), 0);
+  assert.equal(await page.locator(".reconciliation-window").innerText(), formatZonedWindow({ ...window, preset: "today", startMs: start, endMs: start + 3 * 3600000 }));
+  assert.equal(await page.getByText("这几条绑定没法放在一起汇总，分开写在下面", { exact: true }).count(), 0);
 });
 
 test("3b pending upstream account usage re-reads silently at most three times, and refresh starts a new round", async (t) => {
@@ -174,22 +190,23 @@ test("3b pending upstream account usage re-reads silently at most three times, a
   }, undefined, true);
   const settle = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms));
   const until = async (check) => { for (let i = 0; i < 100 && !check(); i += 1) await settle(20); assert.ok(check()); };
-  const summary = page.getByRole("region", { name: "核算汇总", exact: true }), unaccounted = summary.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
-  await unaccounted.getByText("读取中", { exact: true }).first().waitFor(); await unaccounted.getByText(/上游用量还在读取，稍后自动重读。/).waitFor(); assert.equal(reads.length, 1);
+  const summary = page.getByRole("region", { name: "汇总", exact: true }), unaccounted = summary.getByRole("region", { name: "没算进利润的上游成本", exact: true });
+  await unaccounted.getByText("读取中", { exact: true }).first().waitFor(); await unaccounted.getByText(/上游暂时读不到，系统会自动再读。/).waitFor(); assert.equal(reads.length, 1);
   for (const expected of [2, 3, 4]) {
     await page.clock.fastForward(5000); await until(() => reads.length === expected);
-    assert.equal(await page.getByText("全量摘要仅供参考，正在核对当前窗口", { exact: true }).count(), 0);
-    await summary.locator(".reconciliation-summary-metric", { hasText: "本站已获取收费（USD）" }).getByText("$7.50", { exact: true }).waitFor();
+    // 只重读上游扣费，汇总不提示「读取中」或刷新失败
+    assert.equal(await summary.locator(".ant-alert").count(), 0);
+    await summaryMetric(summary, "收入").getByText("$7.50", { exact: true }).waitFor();
     await settle(600);
   }
-  await unaccounted.getByText(/上游用量读取较慢，可点顶栏的刷新重试。/).waitFor();
+  await unaccounted.getByText(/上游暂时读不到，可以点「刷新」再读。/).waitFor();
   await page.clock.fastForward(20000); await settle(); assert.equal(reads.length, 4);
   assert.ok(reads.every((read) => read.preset === "yesterday"));
   // 「刷新」是新的窗口请求：重新给 3 次重读，读到后不再重读
   await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click(); await until(() => queries.length === 1); assert.equal(queries[0].observe, true);
-  await unaccounted.getByText(/上游用量还在读取，稍后自动重读。/).waitFor();
+  await unaccounted.getByText(/上游暂时读不到，系统会自动再读。/).waitFor();
   await page.clock.fastForward(5000); await until(() => reads.length === 5);
-  await unaccounted.locator(".reconciliation-summary-metric").getByText("$2.00", { exact: true }).waitFor(); assert.equal(await unaccounted.getByText(/上游用量/).count(), 0);
+  await unaccounted.locator(".reconciliation-summary-metric").getByText("$2.00", { exact: true }).waitFor(); assert.equal(await unaccounted.getByText(/上游暂时读不到/).count(), 0);
   await page.clock.fastForward(20000); await settle(); assert.equal(reads.length, 5);
 });
 
@@ -200,128 +217,182 @@ test("3b unaccounted upstream copy explains partial reads, excluded upstreams an
     { station: { id: "upstream-2", name: "Second upstream" }, rate: configuredRate("upstream-2", 6), usage: { usd: 3, mode: "history", lowerBound: true, note: "用量接口失败，已按余额历史推算；余额历史没覆盖整个时段，金额偏低" } },
   ], rows, { currency: "USD" });
   const { page } = await openDailyPage(t, { data: dailyResponse(rows, { unaccountedUpstream: { ...summarized, window, fixedStations: [], excludedStations: [{ id: "excluded-1", name: "Excluded upstream" }] } }) });
-  const unaccounted = page.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
-  await unaccounted.getByText(/部分账号或关联没取全，合计不准确，展开看各账号说明。/).waitFor(); await unaccounted.getByText(/已核算多于账号扣费的账号（多为取数时刻不同）在合计里按 0 计。/).waitFor();
-  await unaccounted.getByText(/设为不计入成本的上游不做账号级对比：Excluded upstream（建在它上面的核算关联仍按 Key 用量计成本）。/).waitFor();
-  // 合计只加未纳入为正的账号：Second upstream 的 $3（下限），Fixture upstream 的 -$1 按 0 计
+  const unaccounted = page.getByRole("region", { name: "没算进利润的上游成本", exact: true });
+  await unaccounted.getByText(/部分上游没读全。/).waitFor(); await unaccounted.getByText(/有的上游已算进利润的多于上游扣费，合计里按 0 算。/).waitFor();
+  await unaccounted.getByText(/不算进利润的上游不在这里：Excluded upstream（绑在它上面的 Key 仍按用量算上游成本）。/).waitFor();
+  // 合计只加没算进利润为正的上游：Second upstream 的 $3（下限），Fixture upstream 的 −$1 按 0 算
   await unaccounted.locator(".reconciliation-summary-metric").getByText("$3.00", { exact: true }).waitFor();
-  await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游账号" }).click(); await unaccounted.getByText("账号扣费 $1.00 · 已核算 $2.00 · 未纳入 -$1.00", { exact: true }).waitFor();
-  await unaccounted.getByText(/余额历史没覆盖整个时段，金额偏低/).waitFor(); assert.equal(await unaccounted.getByText(/账号扣费截至/).count(), 0);
-  // 多核算的原因按各账号给出：只有汇率不同时说汇率，每个账号两者都有时说「和」，只有部分账号还有另一种原因时说「部分还有」，
-  // 两种原因各有账号单独占着时说「或」；旧响应没有 overAccounted 时按取数时刻；不计入成本的上游有多个时说「它们」
-  const reasons = async (overAccounted, excludedStations, caption, second = {}) => {
-    const accounts = summarized.accounts.map((account, index) => index === 0 ? { ...account, overAccounted } : { ...account, ...second });
-    const opened = await openDailyPage(t, { data: dailyResponse(rows, { unaccountedUpstream: { ...summarized, accounts, window, fixedStations: [], excludedStations } }) });
-    const block = opened.page.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
-    await block.getByText(caption).waitFor();
+  await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游" }).click(); await unaccounted.getByText(`上游扣费 $1.00 · 已算进利润 $2.00 · 没算进利润 ${MINUS}$1.00`, { exact: true }).waitFor();
+  // 只是取数时刻不同：写在这个上游自己的说明里
+  await unaccounted.getByText("已算进利润的多于上游扣费：上游的扣费可能还没记全", { exact: true }).waitFor();
+  await unaccounted.getByText(/余额历史没覆盖整个时段，金额偏低/).waitFor(); assert.equal(await unaccounted.getByText(/数据截至/).count(), 0);
+  // 多算的原因写在各上游自己的说明里：只是取数时刻不同、只是汇率不同、两者都有各一句；不算进利润的上游有多个时说「它们」。
+  // 按人民币看时，绑定的上游成本按 costRate 折算，这个上游按 1 美元 = 6 元，上游扣费为 usd
+  const reasons = async (kind, usd, costRate, note, excludedStations = []) => {
+    const rated = ratedDailyRows(); for (const row of rated.slice(0, 2)) row.rates.cost = configuredRate("upstream-1", costRate);
+    const result = summarizeUnaccountedUpstream([{ station: { id: "upstream-1", name: "Fixture upstream" }, rate: configuredRate("upstream-1", 6), usage: { usd, mode: "usage" } }], rated, { currency: "CNY" });
+    assert.equal(result.accounts[0].overAccounted, kind);
+    const opened = await openDailyPage(t, { upstreams: ratedUpstreams, data: dailyResponse(rated, { displayCurrency: "CNY", unaccountedUpstream: { ...result, window, fixedStations: [], excludedStations } }) });
+    const block = opened.page.getByRole("region", { name: "没算进利润的上游成本", exact: true });
+    await block.getByText(/有的上游已算进利润的多于上游扣费，合计里按 0 算。/).waitFor();
+    await block.locator(".ant-collapse-header", { hasText: "查看各上游" }).click();
+    // 说明排在汇率之后、句末就是这一句，取数时刻那句不会被当成「两者都有」那句的一部分
+    await block.getByText(new RegExp(`^${formatRate(6)}；(.+；)?${note}$`)).waitFor();
     return block;
   };
-  await reasons("rate", [], /已核算多于账号扣费的账号（汇率不同）在合计里按 0 计。/);
-  await reasons(undefined, [], /已核算多于账号扣费的账号（多为取数时刻不同）在合计里按 0 计。/);
-  await reasons("rate", [], /已核算多于账号扣费的账号（取数时刻或汇率不同）在合计里按 0 计。/, { unaccountedUsd: -1, unaccounted: -1, overAccounted: "timing" });
-  await reasons("mixed", [], /已核算多于账号扣费的账号（多为取数时刻不同，部分还有汇率不同）在合计里按 0 计。/, { unaccountedUsd: -1, unaccounted: -1, overAccounted: "timing" });
-  await reasons("mixed", [], /已核算多于账号扣费的账号（汇率不同，部分还有取数时刻不同）在合计里按 0 计。/, { unaccounted: -1, overAccounted: "rate" });
-  const mixed = await reasons("mixed", [{ id: "excluded-1", name: "Excluded upstream" }, { id: "excluded-2", name: "Second excluded" }], /已核算多于账号扣费的账号（取数时刻和汇率不同）在合计里按 0 计。/);
-  await mixed.getByText(/设为不计入成本的上游不做账号级对比：Excluded upstream、Second excluded（建在它们上面的核算关联仍按 Key 用量计成本）。/).waitFor();
+  await reasons("timing", 1, 6, "已算进利润的多于上游扣费：上游的扣费可能还没记全");
+  await reasons("rate", 2.1, 7, "已算进利润的多于上游扣费：两边汇率不同");
+  const mixed = await reasons("mixed", 1.5, 7, "已算进利润的多于上游扣费：上游的扣费可能还没记全，两边汇率也不同", [{ id: "excluded-1", name: "Excluded upstream" }, { id: "excluded-2", name: "Second excluded" }]);
+  await mixed.getByText(/不算进利润的上游不在这里：Excluded upstream、Second excluded（绑在它们上面的 Key 仍按用量算上游成本）。/).waitFor();
 });
 
 test("3b live window account usage shows when each upstream account was read", async (t) => {
   const start = window.endMs, live = { ...window, preset: "today", startMs: start, endMs: start + 3 * 3600000 }, rows = dailyRows(live);
   const summarized = summarizeUnaccountedUpstream([{ station: { id: "upstream-1", name: "Fixture upstream" }, rate: null, usage: { usd: 9, mode: "usage", endMs: live.endMs - 120000 } }], rows, { currency: "USD" });
   const { page } = await openDailyPage(t, { data: dailyResponse(rows, { unaccountedUpstream: { ...summarized, window: live, fixedStations: [], excludedStations: [] } }) });
-  const unaccounted = page.getByRole("region", { name: "未纳入核算的上游消费", exact: true });
-  await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游账号" }).click(); await unaccounted.getByText(/账号扣费截至 10\/09 02:58 · 核算关联 rule-1、rule-2、rule-3/).waitFor();
+  const unaccounted = page.getByRole("region", { name: "没算进利润的上游成本", exact: true });
+  await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游" }).click(); await unaccounted.getByText(formatAsOf(live.endMs - 120000, live.timezone), { exact: true }).waitFor();
 });
 
 test("daily mobile pagination changes only visible rules and retains global amounts and coverage", async (t) => {
   const rows = Array.from({ length: 5 }, (_, index) => rule(`rule-${index + 1}`, `Rule ${String.fromCharCode(65 + index)}`, 2.5)); const { page, reads } = await openDailyPage(t, { data: dailyResponse(rows), viewport: { width: 390, height: 844 } });
-  const summary = page.getByRole("region", { name: "核算汇总", exact: true }), coverage = page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await summary.getByText("$12.50", { exact: true }).waitFor(); await coverage.getByText("已知渠道覆盖：已核算 5/10", { exact: true }).waitFor(); assert.equal(await page.locator(".reconciliation-mobile-item").count(), 4);
-  await page.getByRole("button", { name: "下一页", exact: false }).click(); await page.locator(".reconciliation-mobile-item", { hasText: "Rule E" }).waitFor(); assert.equal(await page.locator(".reconciliation-mobile-item").count(), 1); await summary.getByText("$12.50", { exact: true }).waitFor(); await coverage.getByText("已知渠道覆盖：已核算 5/10", { exact: true }).waitFor(); assert.equal(reads.length, 1);
+  const summary = page.getByRole("region", { name: "汇总", exact: true }), coverage = page.getByRole("region", { name: "渠道", exact: true }); await summary.getByText("$12.50", { exact: true }).waitFor(); await coverage.getByText(coverageText(10, 5), { exact: true }).waitFor(); assert.equal(await page.locator(".reconciliation-mobile-item").count(), 4);
+  await page.getByRole("button", { name: "下一页", exact: false }).click(); await page.locator(".reconciliation-mobile-item", { hasText: "Rule E" }).waitFor(); assert.equal(await page.locator(".reconciliation-mobile-item").count(), 1); await summary.getByText("$12.50", { exact: true }).waitFor(); await coverage.getByText(coverageText(10, 5), { exact: true }).waitFor(); assert.equal(reads.length, 1);
 });
+
+// 没法放在一起汇总时，汇总写「—」和一句说明，分组逐个列在下面；组名写这天，和业务时区不同的组写按哪个时区算一天
+const GROUPED_CAPTION = "这几条绑定没法放在一起汇总，分开写在下面";
+async function assertGroupedSummary(page) {
+  const empty = page.getByRole("region", { name: "汇总", exact: true }).locator(".reconciliation-summary__empty");
+  await empty.getByText(GROUPED_CAPTION, { exact: true }).waitFor(); assert.equal(await empty.textContent(), `${EMPTY}${GROUPED_CAPTION}`);
+}
+const windowCaption = async (page) => { const caption = page.locator(".reconciliation-window"); await caption.waitFor(); return caption.innerText(); };
 
 test("daily billing keeps absolute Shanghai and UTC groups separate and combines only verified equal windows", async (t) => {
   const rows = dailyRows(); rows[1] = rule("rule-2", "Rule B", 2.5, { preset: "yesterday", timezone: "UTC", startMs: Date.parse("2026-10-08T00:00:00Z"), endMs: Date.parse("2026-10-09T00:00:00Z") });
-  const { page } = await openDailyPage(t, { data: dailyResponse(rows) }); const summary = page.getByRole("region", { name: "核算汇总", exact: true }); await summary.getByText("暂无共同整日汇总", { exact: true }).waitFor(); assert.equal(await summary.getByText("$7.50", { exact: true }).count(), 0);
-  const groups = page.locator(".ant-collapse-header", { hasText: /^账单窗口/ }); assert.equal(await groups.count(), 2); await groups.first().focus(); await page.keyboard.press("Enter"); await page.getByText("2026-10-07T16:00:00.000Z — 2026-10-08T16:00:00.000Z", { exact: true }).waitFor();
+  const { page } = await openDailyPage(t, { data: dailyResponse(rows) }); const summary = page.getByRole("region", { name: "汇总", exact: true }); await assertGroupedSummary(page); assert.equal(await summary.getByText("$7.50", { exact: true }).count(), 0);
+  const groups = page.locator(".reconciliation-window-groups .ant-collapse-item"); assert.equal(await groups.count(), 2);
+  const shanghaiLabel = formatZonedWindow(window), utcLabel = `${formatZonedWindow(rows[1].window)} · ${formatDayZone("UTC")}`;
+  const shanghai = groups.filter({ has: page.getByText(shanghaiLabel, { exact: true }) }), utc = groups.filter({ has: page.getByText(utcLabel, { exact: true }) }); assert.equal(await shanghai.count(), 1); assert.equal(await utc.count(), 1);
+  await utc.locator(".ant-collapse-header").focus(); await page.keyboard.press("Enter"); await summaryMetric(utc, "收入").getByText("$2.50", { exact: true }).waitFor(); await summaryMetric(utc, "上游成本").getByText("$1.00", { exact: true }).waitFor();
+  await shanghai.locator(".ant-collapse-header").focus(); await page.keyboard.press("Enter"); await summaryMetric(shanghai, "收入").getByText("$5.00", { exact: true }).waitFor();
   const combined = dailyRows(); combined[1] = rule("rule-2", "Rule B", 2.5, { ...window, timezone: "Asia/Singapore" });
-  const next = await openDailyPage(t, { data: dailyResponse(combined), query(route, body) { assert.equal(body.preset, "today"); const today = dailyRows({ ...window, preset: "today", startMs: window.endMs, endMs: Date.parse("2026-10-09T03:00:00Z") }); for (const row of today) row.calculation = { profitUsd: null, marginRate: null, riskDifferenceUsd: 1.5 }; return fulfill(route, dailyResponse(today)); } }); await next.page.getByRole("region", { name: "核算汇总", exact: true }).getByText("$7.50", { exact: true }).waitFor(); assert.equal(await next.page.locator(".ant-collapse-header", { hasText: /^账单窗口/ }).count(), 1); await next.page.locator(".ant-collapse-header", { hasText: /账单窗口.*Asia\/Shanghai \/ Asia\/Singapore/ }).waitFor();
-  await next.page.getByRole("group", { name: "核算时间范围" }).getByRole("button", { name: "今天", exact: true }).filter({ visible: true }).click(); const todaySummary = next.page.getByRole("region", { name: "核算汇总", exact: true }); await todaySummary.locator(".reconciliation-summary-metric", { hasText: "已确认范围账面毛利" }).getByText("—", { exact: true }).waitFor(); await todaySummary.locator(".reconciliation-summary-metric", { hasText: "本站已获取收费（USD）" }).getByText("$7.50", { exact: true }).waitFor(); assert.equal(next.queries[0].preset, "today");
+  const next = await openDailyPage(t, { data: dailyResponse(combined), query(route, body) { assert.equal(body.preset, "today"); const today = dailyRows({ ...window, preset: "today", startMs: window.endMs, endMs: Date.parse("2026-10-09T03:00:00Z") }); for (const row of today) row.calculation = { profitUsd: null, marginRate: null, riskDifferenceUsd: 1.5 }; return fulfill(route, dailyResponse(today)); } });
+  // 起止相同、时区都核实过的两种时区合成一个汇总，不再分组
+  const nextSummary = next.page.getByRole("region", { name: "汇总", exact: true }); await summaryMetric(nextSummary, "收入").getByText("$7.50", { exact: true }).waitFor(); assert.equal(await next.page.locator(".reconciliation-window-groups").count(), 0); assert.equal(await nextSummary.locator(".reconciliation-summary__empty").count(), 0);
+  await next.page.getByRole("group", { name: "时间范围" }).getByRole("button", { name: "今天", exact: true }).filter({ visible: true }).click(); const todaySummary = next.page.getByRole("region", { name: "汇总", exact: true }); await summaryMetric(todaySummary, "毛利").getByText(EMPTY, { exact: true }).waitFor(); await summaryMetric(todaySummary, "收入").getByText("$7.50", { exact: true }).waitFor(); assert.equal(next.queries[0].preset, "today");
 });
 
 test("daily row retry uses one selected query then reloads full GET before showing current aggregates", async (t) => {
   let reload, ready; const started = new Promise((resolve) => { ready = resolve; }); const initial = dailyResponse();
   const { page, reads, queries } = await openDailyPage(t, { data: initial, read(route, count) { if (count === 1) return fulfill(route, initial); return new Promise((resolve) => { reload = { route, resolve }; ready(); }); }, query(route, body) { assert.deepEqual(body.ruleIds, ["rule-1"]); const rows = dailyRows(); rows[0] = rule("rule-1", "Rule A", 4); return fulfill(route, dailyResponse([rows[0]], { rules: initial.results.map((row) => row.rule) })); } });
-  await page.getByRole("button", { name: /重试.*Rule A/ }).click(); await started; await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$4.00", { exact: true }).waitFor(); await page.getByText("全量摘要仅供参考，正在核对当前窗口", { exact: true }).waitFor(); assert.deepEqual(reads[1], { preset: "yesterday" }); assert.equal(queries.length, 1); assert.deepEqual([queries[0].startMs, queries[0].endMs], [window.startMs, window.endMs]);
-  const full = dailyRows(); full[0] = rule("rule-1", "Rule A", 4); reload.resolve(fulfill(reload.route, dailyResponse(full))); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("$9.00", { exact: true }).waitFor(); await page.getByRole("region", { name: "已知渠道覆盖", exact: true }).getByText("已知渠道覆盖：已核算 3/10", { exact: true }).waitFor();
+  const summary = page.getByRole("region", { name: "汇总", exact: true });
+  await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await started; await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$4.00", { exact: true }).waitFor(); await summary.locator(".ant-alert", { hasText: "读取中" }).waitFor(); assert.deepEqual(reads[1], { preset: "yesterday" }); assert.equal(queries.length, 1); assert.deepEqual([queries[0].startMs, queries[0].endMs], [window.startMs, window.endMs]);
+  const full = dailyRows(); full[0] = rule("rule-1", "Rule A", 4); reload.resolve(fulfill(reload.route, dailyResponse(full))); await summary.getByText("$9.00", { exact: true }).waitFor(); assert.equal(await summary.locator(".ant-alert").count(), 0); await page.getByRole("region", { name: "渠道", exact: true }).getByText(coverageText(10, 3), { exact: true }).waitFor();
 });
 
 test("daily summary re-read ignores an earlier aggregate when another row finishes during it", async (t) => {
   const gets = [], retries = new Map(), initial = dailyResponse(); let getReady; const getStarted = new Promise((resolve) => { getReady = resolve; });
   const { page, reads } = await openDailyPage(t, { data: initial, read(route, count) { if (count === 1) return fulfill(route, initial); return new Promise((resolve) => { gets.push({ route, resolve }); getReady(); }); }, query(route, body) { return new Promise((resolve) => retries.set(body.ruleIds[0], { route, resolve })); } });
-  await page.getByRole("button", { name: /重试.*Rule A/ }).click(); await page.getByRole("button", { name: /重试.*Rule B/ }).click(); const rows = dailyRows(); rows[0] = rule("rule-1", "Rule A", 4); retries.get("rule-1").resolve(fulfill(retries.get("rule-1").route, dailyResponse([rows[0]]))); await getStarted;
+  await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await page.getByRole("button", { name: "重新读取 Rule B", exact: true }).click(); const rows = dailyRows(); rows[0] = rule("rule-1", "Rule A", 4); retries.get("rule-1").resolve(fulfill(retries.get("rule-1").route, dailyResponse([rows[0]]))); await getStarted;
   rows[1] = rule("rule-2", "Rule B", 5); retries.get("rule-2").resolve(fulfill(retries.get("rule-2").route, dailyResponse([rows[1]]))); await page.waitForFunction(() => document.querySelectorAll(".ant-btn-loading-icon").length === 0); assert.equal(reads.length, 3);
-  const earlier = dailyRows(); earlier[0] = rows[0]; gets[0].resolve(fulfill(gets[0].route, dailyResponse(earlier))); await page.locator("tr.ant-table-row", { hasText: "Rule B" }).getByText("$5.00", { exact: true }).waitFor(); await page.getByText("全量摘要仅供参考，正在核对当前窗口", { exact: true }).waitFor();
-  gets[1].resolve(fulfill(gets[1].route, dailyResponse(rows))); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("$11.50", { exact: true }).waitFor();
+  const summary = page.getByRole("region", { name: "汇总", exact: true });
+  const earlier = dailyRows(); earlier[0] = rows[0]; gets[0].resolve(fulfill(gets[0].route, dailyResponse(earlier))); await page.locator("tr.ant-table-row", { hasText: "Rule B" }).getByText("$5.00", { exact: true }).waitFor(); await summary.locator(".ant-alert", { hasText: "读取中" }).waitFor();
+  gets[1].resolve(fulfill(gets[1].route, dailyResponse(rows))); await summary.getByText("$11.50", { exact: true }).waitFor();
 });
 
 test("daily full-summary read failure keeps successful row and retries full GET without another financial query", async (t) => {
   const rows = dailyRows(); let successful = false;
   const { page, reads, queries } = await openDailyPage(t, { read(route, count) { if (count === 2) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture summary unavailable" }) }); return fulfill(route, dailyResponse(rows)); }, query(route) { rows[0] = rule("rule-1", "Rule A", 4); successful = true; return fulfill(route, dailyResponse([rows[0]])); } });
-  await page.getByRole("button", { name: /重试.*Rule A/ }).click(); await page.getByText("全量汇总读取失败 · 摘要仅供参考", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$4.00", { exact: true }).waitFor(); assert.equal(successful, true); await page.getByRole("button", { name: "重读全量汇总", exact: true }).click(); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("$9.00", { exact: true }).waitFor(); assert.equal(queries.length, 1); assert.equal(reads.length, 3); assert.ok(reads.every((read) => read.preset === "yesterday"));
+  const summary = page.getByRole("region", { name: "汇总", exact: true });
+  await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await summary.getByText(refreshFailedText(Date.parse("2026-10-09T03:00:00.000Z")), { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$4.00", { exact: true }).waitFor(); assert.equal(successful, true);
+  await summary.getByRole("button", { name: "刷新", exact: true }).click(); await summary.getByText("$9.00", { exact: true }).waitFor(); assert.equal(await summary.locator(".ant-alert").count(), 0); assert.equal(queries.length, 1); assert.equal(reads.length, 3); assert.ok(reads.every((read) => read.preset === "yesterday"));
 });
 
 test("daily coverage retains disabled and missing known channels and zero active rules after stopping", async (t) => {
   const rows = dailyRows(), channels = Array.from({ length: 10 }, (_, index) => ({ id: index + 1, name: `渠道 ${index + 1}`, status: index === 1 ? 2 : 1, missing: index === 8 }));
   rows[1].downstream.channels[0].state = "manual_disabled"; rows[2].rule.channels = [{ channelId: 9, name: "渠道 9" }]; rows[2].downstream.channels[0] = { ...rows[2].downstream.channels[0], channelId: 9, name: "渠道 9", state: "missing" }; rows[2].health = { code: "SOURCE_BINDING_UNCONFIRMED", issues: [{ code: "SOURCE_BINDING_UNCONFIRMED", detail: "原渠道已缺失，需要核对来源" }] }; rows[2].calculation = { profitUsd: null, riskDifferenceUsd: 1.5, marginRate: null };
   const data = dailyResponse(rows, { catalogue: { channels } }); const { page } = await openDailyPage(t, { data, query(route) { return fulfill(route, dailyResponse([], { rules: rows.map((row) => ({ ...row.rule, enabled: false, archivedAt: "2026-10-09T03:00:00.000Z" })), catalogue: { channels } })); } });
-  const coverage = page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.getByText("已知渠道覆盖：已核算 2/10", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule C" }).getByText("$2.50", { exact: true }).waitFor();
-  await coverage.locator(".ant-collapse-header").click(); await coverage.getByText("渠道 9 · ID 9", { exact: true }).waitFor(); assert.ok((await coverage.textContent()).includes("已缺失")); assert.ok((await coverage.textContent()).includes("手动禁用"));
-  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click(); await page.getByText("还没有有效的核算关联", { exact: true }).waitFor(); await coverage.getByText("已知渠道覆盖：已核算 0/10", { exact: true }).waitFor(); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("暂无共同整日汇总", { exact: true }).waitFor();
+  const disabledTag = reconciliationIssue("SALES_CHANNEL_DISABLED").tag, missingTag = reconciliationIssue("SALES_CHANNEL_MISSING").tag;
+  const coverage = page.getByRole("region", { name: "渠道", exact: true }); await coverage.getByText(coverageText(10, 2), { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule C" }).getByText("$2.50", { exact: true }).waitFor();
+  // 停用、删除的渠道仍算在已知渠道里，列表的渠道一栏写「已停用 1」「已删除 1」
+  assert.equal(await page.locator("tr.ant-table-row", { hasText: "Rule B" }).locator(".reconciliation-table-channels small").textContent(), `${disabledTag} 1`);
+  assert.equal(await page.locator("tr.ant-table-row", { hasText: "Rule C" }).locator(".reconciliation-table-channels small").textContent(), `${missingTag} 1`);
+  // 「查看没算进来的」只列没算进利润的渠道：停用但算进了利润的渠道 2 不在里面；删除的渠道 9 名字旁标「已删除」（§4）
+  await coverage.locator(".ant-collapse-header").click(); const missing = coverage.locator(".reconciliation-coverage__channel").filter({ has: page.getByText("渠道 9", { exact: true }) });
+  await missing.getByText("需处理", { exact: true }).waitFor(); await missing.getByText(reconciliationIssue("SOURCE_BINDING_UNCONFIRMED").title, { exact: true }).waitFor(); assert.equal(await coverage.getByText("渠道 2", { exact: true }).count(), 0);
+  await missing.locator(".reconciliation-coverage__heading").getByText(missingTag, { exact: true }).waitFor();
+  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click(); await page.getByText("还没有绑定", { exact: true }).waitFor(); await coverage.getByText(coverageText(10, 0), { exact: true }).waitFor();
+  assert.equal(await page.getByRole("region", { name: "汇总", exact: true }).locator(".reconciliation-summary__empty").textContent(), EMPTY);
 });
 
 test("daily duplicate sales and shared Key costs use server totals while raw row evidence remains visible", async (t) => {
   const rows = dailyRows(); rows[1].rule.channels = structuredClone(rows[0].rule.channels); rows[1].downstream.channels = structuredClone(rows[0].downstream.channels); rows[1].upstream.countedAmountUsd = null; rows[1].upstream.ownershipState = "duplicate";
   for (const row of rows.slice(0, 2)) { row.calculation = { profitUsd: null, riskDifferenceUsd: 1.5, marginRate: null }; row.health = { code: "DUPLICATE_CHANNEL_ASSIGNMENT", issues: [{ code: "DUPLICATE_CHANNEL_ASSIGNMENT", detail: "rule-1、rule-2 重复归属" }] }; }
-  const { page } = await openDailyPage(t, { data: dailyResponse(rows) }); const summary = page.getByRole("region", { name: "核算汇总", exact: true }); await summary.getByText("$5.00", { exact: true }).waitFor(); await summary.getByText("$2.00", { exact: true }).waitFor(); await summary.getByText("$1.50", { exact: true }).waitFor();
-  const rowB = page.locator("tr.ant-table-row", { hasText: "Rule B" }); await rowB.getByText("$2.50", { exact: true }).waitFor(); await rowB.getByText("$1.00", { exact: true }).waitFor(); await rowB.getByText("待核算", { exact: true }).waitFor();
-  await page.locator(".ant-collapse-header", { hasText: /^账单窗口/ }).click(); await page.getByText(/未计入成本的关联：rule-2/).waitFor(); const coverage = page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.locator(".ant-collapse-header").click(); await coverage.getByText("重复归属", { exact: true }).waitFor();
+  // 汇总按服务端合计：重复的渠道收入只算一次，没算进来的那份上游成本不加，毛利只加能算出来的
+  const { page } = await openDailyPage(t, { data: dailyResponse(rows) }); const summary = page.getByRole("region", { name: "汇总", exact: true }); await summaryMetric(summary, "收入").getByText("$5.00", { exact: true }).waitFor(); await summaryMetric(summary, "上游成本").getByText("$2.00", { exact: true }).waitFor(); await summaryMetric(summary, "毛利").getByText("$1.50", { exact: true }).waitFor();
+  // 有共同汇总时不列分组，没算进来的那份上游成本在汇总里点名
+  await summary.getByText(reconciliationNotCountedCostText(["rule-2"], rows), { exact: true }).waitFor();
+  const duplicate = reconciliationIssue("DUPLICATE_CHANNEL_ASSIGNMENT");
+  const rowB = page.locator("tr.ant-table-row", { hasText: "Rule B" }); await rowB.getByText("$2.50", { exact: true }).waitFor(); await rowB.getByText("$1.00", { exact: true }).waitFor(); await rowB.getByText("需处理", { exact: true }).waitFor(); await rowB.getByText(duplicate.plain, { exact: true }).waitFor();
+  const coverage = page.getByRole("region", { name: "渠道", exact: true }); await coverage.locator(".ant-collapse-header").click(); const channel = coverage.locator(".reconciliation-coverage__channel").filter({ has: page.getByText("渠道 1", { exact: true }) });
+  await channel.getByText("需处理", { exact: true }).waitFor(); await channel.getByText(fillIssueCopy(duplicate.title, duplicate.plain, { channel: "渠道 1" }), { exact: true }).waitFor(); assert.equal(await channel.getByRole("link", { name: workflowActionMeta("review_conflict").label, exact: true }).getAttribute("href"), workflowAction("review_conflict", { ruleId: "rule-1" }).href);
 });
 
 test("daily Sub2API unverified timezone keeps zero and actual dollar reference without confirmed day profit", async (t) => {
   const row = dailyRows()[0]; row.amountBasis = { ...amountBasis, conversion: "provider_cost_usd" }; row.billingTimezone = { state: "unverified", timezone: "Asia/Shanghai", reason: "BILLING_TIMEZONE_UNVERIFIED" }; row.upstream = { ...row.upstream, state: "partial", amountUsd: null, knownAmountUsd: 0, countedAmountUsd: 0, quotaPerUnit: null }; row.calculation = { profitUsd: null, marginRate: null, riskDifferenceUsd: 2.5 }; row.health = { code: "BILLING_TIMEZONE_UNVERIFIED", issues: [{ code: "BILLING_TIMEZONE_UNVERIFIED", detail: "当前部署自然日边界尚未核验" }] };
-  const { page } = await openDailyPage(t, { data: dailyResponse([row]) }); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("暂无共同整日汇总", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).locator("td", { hasText: "$0.00 · 部分" }).waitFor();
-  await page.getByRole("button", { name: "查看 Rule A 的核算详情", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "Rule A · 核算详情", exact: true }); await drawer.getByText(/Asia\/Shanghai · 待核验，原金额仅供参考/).waitFor(); await drawer.locator(".ant-collapse-header", { hasText: "查看原始账单与计算依据" }).click(); await drawer.getByText("0 USD（部分）", { exact: true }).waitFor(); assert.equal(await drawer.getByText("确认利润", { exact: true }).count(), 0);
+  const { page } = await openDailyPage(t, { data: dailyResponse([row]) }); await assertGroupedSummary(page); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).locator("td", { hasText: "$0.00（没读全）" }).waitFor();
+  await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true }); await drawer.locator(".ant-alert", { hasText: reconciliationIssue("BILLING_TIMEZONE_UNVERIFIED").title }).waitFor();
+  assert.match(await detailValue(drawer, "上游成本").innerText(), /^\$0\.00（没读全）\s*来自 Key「Rule A」的用量记录$/); assert.equal((await detailValue(drawer, "毛利").innerText()).trim(), EMPTY); assert.equal(await drawer.getByText("确认利润", { exact: true }).count(), 0);
 });
 
 test("daily late bill and new scope retain requested yesterday and expose first full bill schedule", async (t) => {
   const row = dailyRows()[0]; row.upstream = { ...row.upstream, amountUsd: 0, knownAmountUsd: 0, countedAmountUsd: 0 }; row.calculation = { profitUsd: null, riskDifferenceUsd: 2.5, marginRate: null }; row.health = { code: "WAITING_FOR_BILL", issues: [{ code: "WAITING_FOR_BILL", detail: "最新已结束日账单尚未就绪" }] }; row.scope = { scopeVersion: 2, billingEffectiveFromMs: Date.parse("2026-10-09T16:00:00Z"), firstFullDayStartMs: Date.parse("2026-10-09T16:00:00Z"), firstQueryableAtMs: Date.parse("2026-10-10T16:00:00Z") };
-  const { page, queries } = await openDailyPage(t, { data: dailyResponse([row]) }); await page.getByText("等待该窗口账单", { exact: true }).waitFor(); await page.getByRole("button", { name: "查看 Rule A 的核算详情", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "Rule A · 核算详情", exact: true }); await drawer.getByText("2026-10-09T16:00:00.000Z", { exact: true }).waitFor(); await drawer.getByText("2026-10-10T16:00:00.000Z", { exact: true }).waitFor(); await drawer.locator(".ant-drawer-close").click();
-  const retried = page.waitForResponse((response) => response.url().endsWith("/api/reconciliation/query")); await page.getByRole("button", { name: /重试.*Rule A/ }).click(); await retried; assert.deepEqual([queries[0].preset, queries[0].startMs, queries[0].endMs], ["custom", window.startMs, window.endMs]);
+  // 页面按绑定的生效方式和生效时间算「开始统计」（rule.billingPolicy / billingEffectiveFrom），不读 scope
+  row.rule.billingPolicy = "immediate"; row.rule.billingEffectiveFrom = Date.parse("2026-10-09T16:00:00Z");
+  // 这天过去 7 天还没读全，读取类问题变成需处理
+  const { page, queries } = await openDailyPage(t, { data: dailyResponse([row]) }); const rowA = page.locator("tr.ant-table-row", { hasText: "Rule A" }); await rowA.getByText("需处理", { exact: true }).waitFor(); await rowA.getByText(reconciliationIssue("WAITING_FOR_BILL").title, { exact: true }).waitFor();
+  await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true }); await detailValue(drawer, "开始统计").waitFor();
+  assert.equal(await detailValue(drawer, "时间").innerText(), formatZonedWindow(window)); assert.equal(await detailValue(drawer, "开始统计").innerText(), "10月10日"); await drawer.locator(".ant-drawer-close").click();
+  const retried = page.waitForResponse((response) => response.url().endsWith("/api/reconciliation/query")); await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await retried; assert.deepEqual([queries[0].preset, queries[0].startMs, queries[0].endMs], ["custom", window.startMs, window.endMs]);
 });
 
 test("daily groups display exact 23/25-hour DST boundaries and work by keyboard at four widths", async (t) => {
-  for (const [width, start, end] of [[320, "2026-03-08T05:00:00Z", "2026-03-09T04:00:00Z"], [390, "2026-11-01T04:00:00Z", "2026-11-02T05:00:00Z"], [768, "2026-03-08T05:00:00Z", "2026-03-09T04:00:00Z"], [1440, "2026-11-01T04:00:00Z", "2026-11-02T05:00:00Z"]]) {
-    const row = dailyRows({ preset: "yesterday", timezone: "America/New_York", startMs: Date.parse(start), endMs: Date.parse(end) })[0]; const { page } = await openDailyPage(t, { data: dailyResponse([row]), viewport: { width, height: 900 } });
-    const group = page.locator(".ant-collapse-header", { hasText: /^账单窗口/ }); await group.focus(); await page.keyboard.press("Enter"); await page.getByText(`${new Date(start).toISOString()} — ${new Date(end).toISOString()}`, { exact: true }).waitFor();
-    const coverage = page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.locator(".ant-collapse-header").focus(); await page.keyboard.press("Enter"); await coverage.getByText("渠道 9 · ID 9", { exact: true }).waitFor(); await page.waitForFunction(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth); assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth));
+  for (const [width, start, end, day] of [[320, "2026-03-08T05:00:00Z", "2026-03-09T04:00:00Z", "3月8日"], [390, "2026-11-01T04:00:00Z", "2026-11-02T05:00:00Z", "11月1日"], [768, "2026-03-08T05:00:00Z", "2026-03-09T04:00:00Z", "3月8日"], [1440, "2026-11-01T04:00:00Z", "2026-11-02T05:00:00Z", "11月1日"]]) {
+    const range = { preset: "yesterday", timezone: "America/New_York", startMs: Date.parse(start), endMs: Date.parse(end) };
+    const row = dailyRows(range)[0]; const { page } = await openDailyPage(t, { data: dailyResponse([row]), viewport: { width, height: 900 } });
+    // 23、25 小时的一天按北美东部时间正好是一整天，只写日期，旁边写按哪个时区算一天
+    const zone = formatDayZone("America/New_York"); assert.equal(formatZonedWindow(range), day); assert.equal(await windowCaption(page), day); await page.locator(".reconciliation-head").getByText(zone, { exact: true }).waitFor();
+    const coverage = page.getByRole("region", { name: "渠道", exact: true }); await coverage.locator(".ant-collapse-header").focus(); await page.keyboard.press("Enter"); await coverage.getByText("渠道 9", { exact: true }).waitFor(); await page.waitForFunction(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth); assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth));
+    await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).focus(); await page.keyboard.press("Enter"); const drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true });
+    assert.match(await detailValue(drawer, "时间").innerText(), new RegExp(`^${day}\\s*${zone}$`));
   }
 });
 
 test("daily mismatched provider window shows original returned interval and never confirms requested day profit", async (t) => {
   const row = dailyRows()[0], actual = { ...window, startMs: window.startMs - 86400000, endMs: window.endMs - 86400000 }; row.window = actual; row.upstream.window = actual; row.downstream.window = actual; row.calculation = { profitUsd: null, riskDifferenceUsd: 1.5, marginRate: null }; row.health = { code: "BILLING_WINDOW_MISMATCH", issues: [{ code: "BILLING_WINDOW_MISMATCH", detail: "上游返回原账单区间与请求窗口不同" }] };
-  const { page } = await openDailyPage(t, { data: dailyResponse([row]) }); await page.getByRole("region", { name: "核算汇总", exact: true }).getByText("暂无共同整日汇总", { exact: true }).waitFor(); await page.locator(".ant-collapse-header", { hasText: /^账单窗口/ }).click(); await page.getByText("2026-10-06T16:00:00.000Z — 2026-10-07T16:00:00.000Z", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "查看 Rule A 的核算详情", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "Rule A · 核算详情", exact: true }); await drawer.getByText("返回账单实际窗口", { exact: true }).waitFor(); assert.ok((await drawer.textContent()).includes("10/07 00:00")); assert.ok((await drawer.textContent()).includes("10/09 00:00")); assert.equal(await drawer.getByText("确认利润", { exact: true }).count(), 0);
+  // 页面和计算明细写请求的这天，分组写上游实际返回的那天
+  const { page } = await openDailyPage(t, { data: dailyResponse([row]) }); await assertGroupedSummary(page); assert.equal(await windowCaption(page), formatZonedWindow(window));
+  await page.locator(".reconciliation-window-groups .ant-collapse-header").getByText(formatZonedWindow(actual), { exact: true }).waitFor(); assert.notEqual(formatZonedWindow(actual), formatZonedWindow(window));
+  await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true }); await drawer.locator(".ant-alert", { hasText: reconciliationIssue("BILLING_WINDOW_MISMATCH").title }).waitFor();
+  assert.equal(await detailValue(drawer, "时间").innerText(), formatZonedWindow(window)); assert.equal((await detailValue(drawer, "毛利").innerText()).trim(), EMPTY); assert.equal(await drawer.getByText("确认利润", { exact: true }).count(), 0);
 });
 
 test("daily unknown catalogue and unknown-source retained members do not become full-site coverage", async (t) => {
   const rows = dailyRows(), rules = rows.map((row) => row.rule); rules.push({ ...rules[0], id: "legacy-unknown", enabled: false, ownSource: null, channels: [{ channelId: 9, name: "旧来源渠道 9" }] });
-  const { page } = await openDailyPage(t, { data: dailyResponse(rows, { rules, catalogue: { stale: true } }) }); const coverage = page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.getByText("已知渠道覆盖：已核算 0/11", { exact: true }).waitFor(); assert.ok((await coverage.textContent()).includes("当前目录覆盖未知")); assert.ok((await coverage.textContent()).includes("全站历史渠道全集未核验")); await coverage.locator(".ant-collapse-header").click(); await coverage.getByText("渠道 9 · ID 9", { exact: true }).waitFor(); await coverage.getByText("旧来源渠道 9 · ID 9", { exact: true }).waitFor();
+  const { page } = await openDailyPage(t, { data: dailyResponse(rows, { rules, catalogue: { stale: true } }) }); const coverage = page.getByRole("region", { name: "渠道", exact: true }); await coverage.getByText(coverageText(11, 0), { exact: true }).waitFor();
+  // 渠道目录不是最新、旧绑定来源不明：一个也不算进利润，也不当成「没绑定」，都要先确认来源
+  await coverage.locator(".ant-collapse-header").click(); await coverage.getByText("渠道 9", { exact: true }).waitFor(); await coverage.getByText("旧来源渠道 9", { exact: true }).waitFor();
+  const listed = coverage.locator(".reconciliation-coverage__channel"); assert.equal(await listed.count(), 11); assert.equal(await coverage.getByText("没绑定", { exact: true }).count(), 0);
+  const legacy = listed.filter({ has: page.getByText("旧来源渠道 9", { exact: true }) }); await legacy.getByText("需处理", { exact: true }).waitFor(); await legacy.getByText(reconciliationIssue("SOURCE_BINDING_UNCONFIRMED").title, { exact: true }).waitFor();
 });
 
 test("daily zero and negative confirmed subtotals remain numeric while unknown whole-Key use is reference", async (t) => {
-  const rows = [rule("rule-1", "Rule A", 1), rule("rule-2", "Rule B", 0)]; const { page } = await openDailyPage(t, { data: dailyResponse(rows) }); const summary = page.getByRole("region", { name: "核算汇总", exact: true }); await summary.getByText("-$1.00", { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$0.00", { exact: true }).waitFor();
+  const rows = [rule("rule-1", "Rule A", 1), rule("rule-2", "Rule B", 0)]; const { page } = await openDailyPage(t, { data: dailyResponse(rows) }); const summary = page.getByRole("region", { name: "汇总", exact: true }); await summaryMetric(summary, "毛利").getByText(`${MINUS}$1.00`, { exact: true }).waitFor(); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$0.00", { exact: true }).waitFor();
   const unknown = dailyRows()[0]; unknown.rule.costCoverage = "unknown"; unknown.rule.coverageDeclaration = { answer: "other_use", otherUse: "external", uncoveredOwnChannelIds: [] }; unknown.calculation = { profitUsd: null, riskDifferenceUsd: 1.5, marginRate: null }; unknown.health = { code: "COST_COVERAGE_UNKNOWN", issues: [{ code: "COST_COVERAGE_UNKNOWN", detail: "同 Key 仍有站外调用" }] };
-  const next = await openDailyPage(t, { data: dailyResponse([unknown]) }); const row = next.page.locator("tr.ant-table-row", { hasText: "Rule A" }); await row.getByText("$2.50", { exact: true }).waitFor(); await row.getByText("$1.00", { exact: true }).waitFor(); await row.getByText("待核算", { exact: true }).waitFor(); const coverage = next.page.getByRole("region", { name: "已知渠道覆盖", exact: true }); await coverage.locator(".ant-collapse-header").click(); await coverage.getByText("Key 用途待确认", { exact: true }).waitFor(); await coverage.getByText("待处理：核对这把 Key 的全部用途", { exact: true }).waitFor();
+  const next = await openDailyPage(t, { data: dailyResponse([unknown]) }); const row = next.page.locator("tr.ant-table-row", { hasText: "Rule A" }); await row.getByText("$2.50", { exact: true }).waitFor(); await row.getByText("$1.00", { exact: true }).waitFor(); await row.getByText("需处理", { exact: true }).waitFor(); await row.getByText(COVERAGE_QUESTION, { exact: true }).waitFor();
+  const coverage = next.page.getByRole("region", { name: "渠道", exact: true }); await coverage.locator(".ant-collapse-header").click(); const channel = coverage.locator(".reconciliation-coverage__channel").filter({ has: next.page.getByText("渠道 1", { exact: true }) });
+  await channel.getByText("需处理", { exact: true }).waitFor(); await channel.getByText(COVERAGE_QUESTION, { exact: true }).waitFor(); assert.equal(await channel.getByRole("link", { name: workflowActionMeta("confirm_coverage").label, exact: true }).getAttribute("href"), workflowAction("confirm_coverage", { ruleId: "rule-1" }).href);
 });
 
 const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} } };
@@ -361,30 +432,44 @@ async function fulfill(route, body) {
   await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
 }
 
+// 从提醒或上游账单的链接进来：链接里的日期对不上、绑定已解除、地址坏了，都在页面顶上写一句话（§8.1）
+const destinationAlert = (page, title) => page.locator(".reconciliation-alerts .ant-alert").filter({ has: page.getByText(title, { exact: true }) });
+const DESTINATION_EXPIRED = `${ERROR_CATEGORIES.expired.text}。`, DESTINATION_REMOVED = "这条绑定已解除";
+
 test("workflow retry destination verifies the original absolute window and retries it once before full re-read", async (t) => {
   const path = `/reconciliation?action=retry&ruleId=rule-1&startMs=${window.startMs}&endMs=${window.endMs}&timezone=Asia%2FShanghai`;
   const { page, reads, queries } = await openDailyPage(t, { path });
-  const drawer = page.getByRole("dialog", { name: "Rule A · 核算详情", exact: true }); await drawer.waitFor();
+  const drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true }); await drawer.waitFor();
   assert.deepEqual(reads[0], { preset: "custom", startMs: String(window.startMs), endMs: String(window.endMs) });
-  assert.equal(queries.length, 0); await drawer.getByRole("button", { name: "重查该窗口账单", exact: true }).click();
+  // 顶上写这条和链接那天，放「重新读取」
+  await destinationAlert(page, `Rule A · ${formatZonedWindow(window)}`).getByRole("button", { name: "重新读取", exact: true }).waitFor();
+  assert.equal(queries.length, 0); await drawer.getByRole("button", { name: "重新读取", exact: true }).click();
   await page.waitForFunction(() => !document.querySelector(".ant-btn-loading"));
   assert.deepEqual(queries, [{ preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: ["rule-1"], observe: true }]);
   assert.deepEqual(reads[1], reads[0]);
 });
 
 test("workflow rejects invalid, deleted and changed-zone bill destinations with a usable reload", async (t) => {
-  for (const suffix of ["action=unknown&ruleId=rule-1", "action=scope&ruleId=deleted-rule", `action=retry&ruleId=rule-1&startMs=${window.startMs}&endMs=${window.endMs}&timezone=UTC`, "action=retry&ruleId=rule-1&startMs=bad&endMs=1&timezone=Asia%2FShanghai"]) {
+  for (const [suffix, title] of [["action=unknown&ruleId=rule-1", DESTINATION_EXPIRED], ["action=scope&ruleId=deleted-rule", DESTINATION_REMOVED], [`action=retry&ruleId=rule-1&startMs=${window.startMs}&endMs=${window.endMs}&timezone=UTC`, DESTINATION_CHANGED], ["action=retry&ruleId=rule-1&startMs=bad&endMs=1&timezone=Asia%2FShanghai", DESTINATION_EXPIRED]]) {
     const { page, queries } = await openDailyPage(t, { path: "/reconciliation?" + suffix });
-    await page.getByRole("button", { name: "刷新处理目标", exact: true }).waitFor(); assert.equal(queries.length, 0); assert.equal(await page.getByRole("dialog").count(), 0);
-    assert.equal(await page.getByRole("button", { name: "重查该窗口账单", exact: true }).count(), 0);
+    const alert = destinationAlert(page, title); await alert.waitFor();
+    // 已解除的那条刷新也回不来，不放「刷新」；其余的「刷新」回到每日利润重新打开
+    if (title === DESTINATION_REMOVED) assert.equal(await alert.getByRole("link", { name: "刷新", exact: true }).count(), 0);
+    else assert.equal(await alert.getByRole("link", { name: "刷新", exact: true }).getAttribute("href"), "/reconciliation");
+    assert.equal(queries.length, 0); assert.equal(await page.getByRole("dialog").count(), 0);
+    assert.equal(await page.getByRole("button", { name: "重新读取", exact: true }).count(), 0);
   }
 });
 
 test("workflow scope and conflict destinations expose saved history and all conflict rule corrections", async (t) => {
-  const scope = await openDailyPage(t, { path: "/reconciliation?action=scope&ruleId=rule-1" });
-  const drawer = scope.page.getByRole("dialog", { name: "Rule A · 核算详情", exact: true }); await drawer.getByText("生效时间", { exact: true }).waitFor(); await drawer.getByText("首次结账", { exact: true }).waitFor(); await drawer.getByRole("button", { name: "查看已确认账单历史", exact: true }).waitFor();
+  const scopedRows = dailyRows(); scopedRows[0].rule.billingPolicy = "immediate"; scopedRows[0].rule.billingEffectiveFrom = window.startMs + 6 * 3600000;
+  const scope = await openDailyPage(t, { path: "/reconciliation?action=scope&ruleId=rule-1", data: dailyResponse(scopedRows) });
+  const drawer = scope.page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true });
+  assert.equal(await detailValue(drawer, "开始统计").innerText(), reconciliationAccountingStartText(scopedRows[0].rule, window.timezone)); await drawer.getByRole("button", { name: "以前的每日记录", exact: true }).waitFor();
   const rows = dailyRows(); for (const row of rows.slice(0, 2)) row.health = { code: "DUPLICATE_CHANNEL_ASSIGNMENT", issues: [{ code: "DUPLICATE_CHANNEL_ASSIGNMENT", ruleIds: ["rule-1", "rule-2"], detail: "销售渠道重复归属" }] };
-  const conflict = await openDailyPage(t, { path: "/reconciliation?action=conflict&ruleId=rule-1", data: dailyResponse(rows) }); const detail = conflict.page.getByRole("dialog", { name: "Rule A · 核算详情", exact: true }); await detail.getByText("重复销售归属待处理", { exact: true }).waitFor(); await detail.getByRole("button", { name: "核对 rule-2", exact: true }).click(); const second = conflict.page.getByRole("dialog", { name: "Rule B · 核算详情", exact: true }); const fix = second.getByRole("link", { name: "去上游账单处理", exact: true }); await fix.waitFor(); assert.equal(await fix.getAttribute("href"), "/stations?action=conflict&ruleId=rule-2");
+  const conflict = await openDailyPage(t, { path: "/reconciliation?action=conflict&ruleId=rule-1", data: dailyResponse(rows) }); const detail = conflict.page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true });
+  await detail.getByText(reconciliationRowFlags(rows[0]).displayStatus.title, { exact: true }).waitFor(); await detail.getByRole("button", { name: "查看 Rule B", exact: true }).click();
+  const second = conflict.page.getByRole("dialog", { name: "Rule B · 计算明细", exact: true }); const fix = second.getByRole("link", { name: workflowActionMeta("review_conflict").label, exact: true }); await fix.waitFor(); assert.equal(await fix.getAttribute("href"), "/stations?action=conflict&ruleId=rule-2");
 });
 
 function onboardingFixture(existing = true, type = "newapi", ids = [4]) {
@@ -526,74 +611,106 @@ async function openOnboardingPage(t, options = {}) {
     if (options.loseResponseAt === writes.length) return route.abort("failed");
     return fulfill(route, latestResult);
   }, options.onboardingPath || "/stations?view=onboarding");
-  if (config.stale) await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).waitFor();
-  else await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click({ trial: true });
+  const channelButton = newChannelButton(page);
+  if (config.stale) await channelButton.waitFor();
+  else await channelButton.click({ trial: true });
   return { page, config, probes, writes, reads, recoveries };
 }
+// 渠道绑定的话：按钮名来自 lib/workflow-actions.js，其余在 app/components/channel-onboarding.tsx 的 COPY 表（tsx 测试里引用不到，照抄原句）
+const CONNECT = workflowActionMeta("connect_channels").label, EDIT_BINDING = workflowActionMeta("edit_binding").label, TEST_READ = workflowActionMeta("verify_identity").label, REFRESH = workflowActionMeta("refresh").label, RETRY = workflowActionMeta("retry_bill").label;
+// 单条「重新读取」没成时那一句：和 app/(dashboard)/reconciliation/recon-format.ts 的 RETRY_FAILED_TEXT 一致（§8.1）
+const RETRY_FAILED = "重新读取没完成，请稍后再试";
+const UPDATE_AUTH = workflowActionMeta("update_authorization").label, USE_SAVED = "用已有上游", NEW_UPSTREAM = "新增上游", CREATE_HINT = "保存后，别的渠道也能直接用这个上游。";
+const CONFIRM_BINDING = "确认绑定", PROBE_OK = `${testReadText({ ok: true, bill: false })}，还没保存`, ACCESS_TOKEN = "访问令牌";
+const BILLING_CHECKBOX = `同时${ONBOARDING_PURPOSES.billing}（绑定 Key）`, ONLY_THESE = COVERAGE_ANSWERS.find((entry) => entry.value === "none").label;
+const connectButton = (name, action = CONNECT) => `${action}「${name}」`;
+const keyOption = (name, group = "upstream-group") => `${name} · 分组 ${group}`;
+// 已经看余额或算利润的渠道按钮是「改绑定「X」」，其余是「去绑定「X」」
+const newChannelButton = (page) => page.getByRole("button", { name: new RegExp(`^(${CONNECT}|${EDIT_BINDING})「New channel」$`) });
 async function openOnboardingDrawer(page, batch = false) {
-  if (batch) { await page.getByText("选择当前筛选渠道（最多 100 个）", { exact: true }).click(); await page.getByRole("button", { name: "批量接入所选渠道", exact: true }).click(); }
-  else await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click();
-  return page.getByRole("dialog", { name: "接入监控与对账" });
+  if (batch) { await page.getByText("选中筛出来的渠道（最多 100 个）", { exact: true }).click(); await page.getByRole("button", { name: new RegExp(`^${CONNECT}（\\d+ 个渠道）$`) }).click(); }
+  else await newChannelButton(page).click();
+  return page.getByRole("dialog", { name: CONNECT, exact: true });
 }
+// 模拟接口立刻返回时，antd 按钮的加载图标会停在退场动画里（看不见，但名字前多一个「loading」），按名字找按钮时允许它
+const settledButton = (label) => new RegExp(`^(loading )?${label}$`);
 async function verifyOnboarding(drawer) {
-  const button = drawer.getByRole("button", { name: "验证并预览", exact: true });
+  const button = drawer.getByRole("button", { name: settledButton(TEST_READ) });
   await button.scrollIntoViewIfNeeded();
   const devBadge = drawer.page().getByRole("button", { name: "Collapse issues badge", exact: true });
   if (await devBadge.isVisible()) await devBadge.click();
   const response = drawer.page().waitForResponse((response) => new URL(response.url()).pathname === "/api/channel-onboarding/batch/probe");
-  await button.click(); await response; await drawer.getByText("变更已验证，尚未保存", { exact: true }).waitFor();
+  await button.click(); await response; await drawer.getByText(PROBE_OK, { exact: true }).waitFor();
 }
-async function chooseKey(page, drawer, name = "Supplier Key", id = name === "New Key" ? 8 : 7) { const select = drawer.getByRole("combobox", { name: "接入上游 Key", exact: true }); await select.click(); await page.getByText(name + " · Key #" + id + " · 上游分组 upstream-group", { exact: true }).last().click(); }
+async function chooseKey(page, drawer, name = "Supplier Key") { await drawer.getByRole("combobox", { name: "Key", exact: true }).click(); await page.getByText(keyOption(name), { exact: true }).last().click(); }
+// 已绑定过 Key 的渠道勾的是「改绑定（算利润）」；新填的登录信息要先测试读取一次才列得出 Key
 async function enableBilling(page, drawer, key = "Supplier Key") {
-  await drawer.getByRole("checkbox", { name: /^(同时配置 Key 对账|调整已有 Key 对账)$/ }).check();
-  const select = drawer.getByRole("combobox", { name: "接入上游 Key", exact: true });
+  await drawer.getByRole("checkbox", { name: new RegExp(`^(${BILLING_CHECKBOX}|${EDIT_BINDING}（${ONBOARDING_PURPOSES.billing}）)$`) }).check();
+  const select = drawer.getByRole("combobox", { name: "Key", exact: true });
   if (await select.isDisabled() && await drawer.locator("form").count()) await verifyOnboarding(drawer);
   await chooseKey(page, drawer, key);
-  await drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }).click(); await page.getByText("没有", { exact: true }).last().click();
-  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true); await verifyOnboarding(drawer);
+  await drawer.getByRole("combobox", { name: COVERAGE_QUESTION, exact: true }).click(); await page.getByText(ONLY_THESE, { exact: true }).last().click();
+  assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isDisabled(), true); await verifyOnboarding(drawer);
 }
-async function saveOnboarding(drawer) { await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); }
+async function saveOnboarding(drawer) { await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).click(); await drawer.waitFor({ state: "hidden" }); }
+// 报错只写归类后的那句（§8.2），原文收在「查看详细原因」里：找到收着这段原文的那一处，核对它前面写的那句
+async function problemShown(scope, raw, code) {
+  const detail = scope.locator("details.jy-error-detail", { has: scope.page().getByText(raw, { exact: true }) }).first();
+  await detail.waitFor();
+  assert.equal(await detail.evaluate((node) => node.parentElement.firstChild.textContent), describeError({ code, reason: raw }).text);
+}
+// 填访问令牌的输入框；补账单登录信息时旁边还有一个同名的「访问令牌」下拉框，只认输入框
+const tokenField = (scope) => scope.locator("input[type=password]").and(scope.getByLabel(ACCESS_TOKEN, { exact: true }));
+// 页面顶部「接着做完：渠道名」接着上次没做完的；抽屉里的「接着做完」把剩下的保存掉
+const FINISH = "接着做完", RESUME = new RegExp(`^${FINISH}：`);
+// 只看余额时不出现算利润的预览：上游账号、从哪天开始算、同一把 Key 只算一次
+const BILLING_PREVIEW = /上游账号：|从现在开始算利润|开始统计|上游成本只算一次/;
+// 渠道绑定抽屉里其余的字段和按钮名（和 app/components/channel-onboarding.tsx 的 COPY 一致）
+const MONITOR = ONBOARDING_PURPOSES.monitor, EDIT_BILLING = `${EDIT_BINDING}（${ONBOARDING_PURPOSES.billing}）`, RESUME_MONITOR = workflowActionMeta("resume_monitor").label;
+const KEY_ACCOUNT = "这把 Key 属于哪个上游账号", NEW_AUTHORIZATION = "填一个新的访问令牌", REUSE_SAVED = "用已保存的", CREDENTIAL_TITLE = { primary: "这个上游账号已经保存过", authorization: "读账单用的上游账号已经保存过" };
+const UPDATE_FIXTURE = connectButton("Fixture upstream", UPDATE_AUTH), PARTIAL = "还有几步没做完，做完的会保留", upstreamType = (value) => UPSTREAM_TYPES.find((entry) => entry.value === value).label;
+const apiKeyField = (scope) => scope.locator("input[type=password]").and(scope.getByLabel(CREDENTIAL_FIELDS.apiKey.label, { exact: true }));
 
 test("configured channel management preserves monitors and Key billing without a preview or write", async (t) => {
   const config = onboardingFixture(); config.channels[0].monitor = { status: "linked", stationIds: ["upstream-1"] }; config.channels[0].reconciliation = { status: "configured", ruleIds: ["rule-1"] }; config.rules[0].channels.push({ channelId: 4, name: "New channel" });
   const { page, probes, writes, reads } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page);
-  await drawer.getByText("当前配置", { exact: true }).waitFor(); await drawer.getByText("监控：Fixture upstream", { exact: true }).waitFor();
-  await drawer.getByText(/对账：Fixture upstream · Key #7 · #1、#2、#3、New channel/).waitFor();
-  assert.equal(await drawer.getByRole("radio", { name: "保留现有监控", exact: true }).isChecked(), true);
-  assert.equal(await drawer.getByRole("checkbox", { name: "调整已有 Key 对账", exact: true }).isChecked(), false);
-  assert.equal(await drawer.getByRole("button", { name: "验证并预览", exact: true }).count(), 0);
+  await drawer.getByText("现在的设置", { exact: true }).waitFor(); await drawer.getByText(`${MONITOR}：Fixture upstream`, { exact: true }).waitFor();
+  await drawer.getByText(`${ONBOARDING_PURPOSES.billing}：Fixture upstream · Supplier Key · 渠道 #1、渠道 #2、渠道 #3、New channel`, { exact: true }).waitFor();
+  assert.equal(await drawer.getByRole("radio", { name: "不改", exact: true }).isChecked(), true);
+  assert.equal(await drawer.getByRole("checkbox", { name: EDIT_BILLING, exact: true }).isChecked(), false);
+  assert.equal(await drawer.getByRole("button", { name: TEST_READ, exact: true }).count(), 0);
   const done = drawer.getByRole("button", { name: "完成", exact: true }); assert.equal(await done.isEnabled(), true);
-  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).count(), 0); await done.click(); await drawer.waitFor({ state: "hidden" });
+  assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).count(), 0); await done.click(); await drawer.waitFor({ state: "hidden" });
   assert.equal(probes.length, 0); assert.equal(writes.length, 0); assert.equal(reads.filter((entry) => entry.path.endsWith("/keys")).length, 0);
 });
 
 test("billing-only configured channel keeps monitoring unchanged and prefills its Key coverage and timezone when edited", async (t) => {
   const config = onboardingFixture(); config.channels[0].reconciliation = { status: "configured", ruleIds: ["rule-1"] }; config.rules[0].channels.push({ channelId: 4, name: "New channel" }); config.rules[0].timezone = "UTC";
   const { page, probes, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page);
-  assert.equal(await drawer.getByRole("radio", { name: "保留现有监控", exact: true }).isChecked(), true); assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).count(), 0);
-  assert.equal(await drawer.getByRole("button", { name: "验证并预览", exact: true }).count(), 0); assert.equal(writes.length, 0);
-  await drawer.getByRole("checkbox", { name: "调整已有 Key 对账", exact: true }).check(); await drawer.getByText("Supplier Key · Key #7 · 上游分组 upstream-group", { exact: true }).waitFor();
-  await drawer.getByText("没有", { exact: true }).waitFor(); assert.equal(probes.length, 0); await verifyOnboarding(drawer); await saveOnboarding(drawer);
+  assert.equal(await drawer.getByRole("radio", { name: "不改", exact: true }).isChecked(), true); assert.equal(await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).count(), 0);
+  assert.equal(await drawer.getByRole("button", { name: TEST_READ, exact: true }).count(), 0); assert.equal(writes.length, 0);
+  await drawer.getByRole("checkbox", { name: EDIT_BILLING, exact: true }).check(); await drawer.getByText(keyOption("Supplier Key"), { exact: true }).waitFor();
+  await drawer.getByText(ONLY_THESE, { exact: true }).waitFor(); assert.equal(probes.length, 0); await verifyOnboarding(drawer); await saveOnboarding(drawer);
   assert.equal(probes.length, 1); assert.equal(writes[0].selections[0].monitor, false); assert.equal(writes[0].groups[0].reconciliation.tokenId, 7); assert.equal(writes[0].groups[0].reconciliation.timezone, "UTC"); assert.equal(writes[0].groups[0].reconciliation.coverageDeclaration.answer, "none"); assert.deepEqual(config.channels[0].monitor.stationIds, []);
 });
 
 test("saved account reads its Key directory and complete scope before one final preview", async (t) => {
   const { page, probes, writes, reads } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check(); await chooseKey(page, drawer);
-  await drawer.getByText("以上渠道：#1、#2、#3、New channel", { exact: true }).waitFor();
-  await drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }).click(); await page.getByText("没有", { exact: true }).last().click();
+  await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check(); await chooseKey(page, drawer);
+  await drawer.getByText("绑定后这把 Key 的渠道：渠道 #1、渠道 #2、渠道 #3、New channel", { exact: true }).waitFor();
+  await drawer.getByRole("combobox", { name: COVERAGE_QUESTION, exact: true }).click(); await page.getByText(ONLY_THESE, { exact: true }).last().click();
   assert.equal(probes.length, 0); assert.equal(writes.length, 0);
   const directoryReads = reads.filter((entry) => entry.path.endsWith("/keys")); assert.equal(directoryReads.length, 1); assert.equal(directoryReads[0].query, "?force=true");
   await verifyOnboarding(drawer); assert.equal(probes.length, 1); assert.equal(probes[0].groups[0].reconciliation.coverageDeclaration.answer, "none");
-  await drawer.getByText("实际 Key：Supplier Key · Key #7", { exact: true }).waitFor(); await drawer.getByText("实际账单账号：https://up.example · 账号 42", { exact: true }).waitFor(); await saveOnboarding(drawer); assert.equal(writes.length, 1);
+  await drawer.getByText("Key：Supplier Key", { exact: true }).waitFor(); await drawer.getByText("上游账号：https://up.example · 账号 42", { exact: true }).waitFor(); await saveOnboarding(drawer); assert.equal(writes.length, 1);
 });
 
 test("duplicate Key names remain distinguishable by ID in selection and final preview", async (t) => {
   const tokens = onboardingTokens.map((token) => ({ ...token, name: "default" }));
   const { page, writes } = await openOnboardingPage(t, { tokens }); const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check(); await drawer.getByRole("combobox", { name: "接入上游 Key", exact: true }).click();
-  await page.getByText("default · Key #7 · 上游分组 upstream-group", { exact: true }).last().waitFor(); await page.getByText("default · Key #8 · 上游分组 upstream-group", { exact: true }).last().click();
-  await verifyOnboarding(drawer); await drawer.getByText("实际 Key：default · Key #8", { exact: true }).waitFor(); await saveOnboarding(drawer); assert.equal(writes[0].groups[0].reconciliation.tokenId, 8);
+  await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check(); await drawer.getByRole("combobox", { name: CREDENTIAL_FIELDS.apiKey.label, exact: true }).click();
+  await page.getByText(keyOption("default（Key #7）"), { exact: true }).last().waitFor(); await page.getByText(keyOption("default（Key #8）"), { exact: true }).last().click();
+  await verifyOnboarding(drawer); await drawer.getByText("Key：default（Key #8）", { exact: true }).waitFor(); await saveOnboarding(drawer); assert.equal(writes[0].groups[0].reconciliation.tokenId, 8);
 });
 
 test("late directory responses cannot replace the newly selected account Keys", async (t) => {
@@ -603,10 +720,10 @@ test("late directory responses cannot replace the newly selected account Keys", 
     const id = path.split("/")[4]; if (id === "upstream-1") await holdFirst;
     return fulfill(route, onboardingDirectory(config, id, id === "account-B" ? [{ id: 8, name: "Account B Key", group: "upstream-group", status: 1 }] : onboardingTokens));
   } });
-  const drawer = await openOnboardingDrawer(page), firstRequest = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith("/upstream-1/keys")); await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check(); await firstRequest;
-  await drawer.getByRole("combobox", { name: "接入上游资源", exact: true }).fill("Account B"); await page.getByText("Account B · New API · 账号余额 · 账号 84", { exact: true }).last().click();
+  const drawer = await openOnboardingDrawer(page), firstRequest = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith("/upstream-1/keys")); await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check(); await firstRequest;
+  await drawer.getByRole("combobox", { name: "上游", exact: true }).fill("Account B"); await page.getByText("Account B · 账号 84", { exact: true }).last().click();
   await chooseKey(page, drawer, "Account B Key", 8); const late = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/upstream-1/keys")); releaseFirst(); await late;
-  await drawer.getByRole("combobox", { name: "接入上游 Key", exact: true }).click(); const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)"); await dropdown.getByText("Account B Key · Key #8 · 上游分组 upstream-group", { exact: true }).waitFor(); assert.equal(await dropdown.getByText("Supplier Key · Key #7 · 上游分组 upstream-group", { exact: true }).count(), 0); await page.keyboard.press("Escape");
+  await drawer.getByRole("combobox", { name: CREDENTIAL_FIELDS.apiKey.label, exact: true }).click(); const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)"); await dropdown.getByText(keyOption("Account B Key"), { exact: true }).waitFor(); assert.equal(await dropdown.getByText(keyOption("Supplier Key"), { exact: true }).count(), 0); await page.keyboard.press("Escape");
   await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes[0].selections[0].stationId, "account-B"); assert.equal(writes[0].groups[0].reconciliation.tokenId, 8);
 });
 
@@ -615,44 +732,44 @@ test("unreadable account Key directory explains authorization retry without clai
   const { page, probes, writes, reads } = await openOnboardingPage(t, { keyDirectory(route, path, reads, config) {
     const result = onboardingDirectory(config, "upstream-1"); if (++attempts === 1) { result.tokens = []; result.capability = { ...result.capability, state: "unverified", reason: "KEY_METADATA_UNAVAILABLE" }; } return fulfill(route, result);
   } });
-  const drawer = await openOnboardingDrawer(page); await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check(); await drawer.getByText("Key 目录暂不可读，请检查账号授权后重试。", { exact: true }).waitFor();
-  assert.equal(await drawer.getByText("此账号尚无可用 Key，请先在上游创建实际调用 Key。", { exact: true }).count(), 0); assert.equal(probes.length, 0); assert.equal(writes.length, 0);
-  await drawer.getByRole("button", { name: "重试读取 Key", exact: true }).click(); await chooseKey(page, drawer); assert.equal(reads.filter((entry) => entry.path.endsWith("/keys")).length, 2);
+  const drawer = await openOnboardingDrawer(page); await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check(); await drawer.getByText(failureText("读不到这个账号的 Key", { code: "KEY_METADATA_UNAVAILABLE" }), { exact: true }).waitFor();
+  assert.equal(await drawer.getByText("这个账号里还没有能用的 Key，请先在上游建一把。", { exact: true }).count(), 0); assert.equal(probes.length, 0); assert.equal(writes.length, 0);
+  await drawer.getByRole("button", { name: REFRESH, exact: true }).click(); await chooseKey(page, drawer); assert.equal(reads.filter((entry) => entry.path.endsWith("/keys")).length, 2);
   await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes.length, 1);
 });
 
 test("pure Key billing never selects an unrelated first account automatically", async (t) => {
   const config = onboardingFixture(true, "newapi-key"); config.upstreams.unshift({ id: "unrelated", name: "Unrelated account", type: "sub2api", baseUrl: "https://unrelated.example", monitorEnabled: true, identity: { provider: "sub2api", accountId: "99" } });
   const { page, probes, writes, reads } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check();
-  await drawer.getByText("选择实际账号，地址匹配仅作提示", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: "接入账单授权", exact: true }).inputValue(), "");
-  assert.equal(await drawer.getByRole("combobox", { name: "接入上游 Key", exact: true }).isDisabled(), true);
+  await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check();
+  await drawer.getByText("选实际的上游账号，地址对得上只是提示", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: KEY_ACCOUNT, exact: true }).inputValue(), "");
+  assert.equal(await drawer.getByRole("combobox", { name: CREDENTIAL_FIELDS.apiKey.label, exact: true }).isDisabled(), true);
   assert.equal(reads.filter((entry) => entry.path.endsWith("/keys")).length, 0); assert.equal(probes.length, 0); assert.equal(writes.length, 0);
 });
 
 test("monitor replacement previews every old link and removes only the selected channel links on confirmation", async (t) => {
   const config = onboardingFixture(); config.upstreams.push({ ...config.upstreams[0], id: "old-extra", name: "Old additional monitor" }, { ...config.upstreams[0], id: "replacement", name: "Replacement monitor", identity: { provider: "newapi", accountId: "84" } }); config.channels[0].monitor = { status: "linked", stationIds: ["upstream-1", "old-extra"] };
   const { page, probes, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("radio", { name: "更换监控", exact: true }).check(); await drawer.getByRole("combobox", { name: "接入上游资源", exact: true }).fill("Replacement monitor"); await page.getByText("Replacement monitor · New API · 账号余额 · 账号 84", { exact: true }).last().click();
-  await verifyOnboarding(drawer); const changes = drawer.getByRole("region", { name: "渠道 4 的监控变更", exact: true }); await changes.getByText("解除：Fixture upstream、Old additional monitor", { exact: true }).waitFor(); await changes.getByText("增加：Replacement monitor", { exact: true }).waitFor();
+  await drawer.getByRole("radio", { name: "换上游", exact: true }).check(); await drawer.getByRole("combobox", { name: "上游", exact: true }).fill("Replacement monitor"); await page.getByText("Replacement monitor · 账号 84", { exact: true }).last().click();
+  await verifyOnboarding(drawer); const changes = drawer.getByRole("region", { name: "「New channel」看余额的变化", exact: true }); await changes.getByText("去掉：Fixture upstream、Old additional monitor", { exact: true }).waitFor(); await changes.getByText("加上：Replacement monitor", { exact: true }).waitFor();
   assert.equal(writes.length, 0); assert.deepEqual(probes[0].groups[0].channels[0].removeMonitorStationIds, ["upstream-1", "old-extra"]); await saveOnboarding(drawer);
   assert.equal(writes[0].selections[0].stationId, "replacement"); assert.deepEqual(config.channels[0].monitor.stationIds, ["replacement"]); assert.equal(writes[0].groups[0].reconciliation, null);
 });
 
 test("monitor removal needs no new resource and requires an explicit guarded link preview", async (t) => {
   const config = onboardingFixture(); config.channels[0].monitor = { status: "linked", stationIds: ["upstream-1"] }; config.channels[0].reconciliation = { status: "configured", ruleIds: ["rule-1"] };
-  const { page, probes, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page); await drawer.getByRole("radio", { name: "解除监控", exact: true }).check();
-  assert.equal(await drawer.getByRole("checkbox", { name: "解除 Fixture upstream", exact: true }).isChecked(), true); assert.equal(await drawer.getByRole("combobox", { name: "接入上游资源", exact: true }).count(), 0);
-  await verifyOnboarding(drawer); await drawer.getByRole("region", { name: "渠道 4 的监控变更", exact: true }).getByText("解除：Fixture upstream", { exact: true }).waitFor();
+  const { page, probes, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page); await drawer.getByRole("radio", { name: "去掉上游", exact: true }).check();
+  assert.equal(await drawer.getByRole("checkbox", { name: "去掉「Fixture upstream」", exact: true }).isChecked(), true); assert.equal(await drawer.getByRole("combobox", { name: "上游", exact: true }).count(), 0);
+  await verifyOnboarding(drawer); await drawer.getByRole("region", { name: "「New channel」看余额的变化", exact: true }).getByText("去掉：Fixture upstream", { exact: true }).waitFor();
   assert.equal(writes.length, 0); assert.equal("stationId" in probes[0].selections[0], false); assert.equal("newStation" in probes[0].selections[0], false); assert.equal(probes[0].selections[0].monitor, false);
   assert.deepEqual(probes[0].groups[0].channels[0].removeMonitorStationIds, ["upstream-1"]); await saveOnboarding(drawer); assert.deepEqual(config.channels[0].monitor.stationIds, []); assert.deepEqual(config.channels[0].reconciliation.ruleIds, ["rule-1"]);
 });
 
 test("paused replacement target cannot silently become removal of the existing monitor", async (t) => {
   const config = onboardingFixture(); config.channels[0].monitor = { status: "linked", stationIds: ["upstream-1"] }; config.upstreams.push({ ...config.upstreams[0], id: "paused", name: "Paused replacement", monitorEnabled: false });
-  const { page, probes, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page); await drawer.getByRole("radio", { name: "更换监控", exact: true }).check();
-  await drawer.getByRole("combobox", { name: "接入上游资源", exact: true }).fill("Paused replacement"); await page.getByText("Paused replacement · New API · 账号余额 · 账号 42 · 监控暂停 / 未启用", { exact: true }).last().click();
-  await drawer.getByText("此资源的监控已暂停，启用后可直接关联。", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("button", { name: "验证并预览", exact: true }).isDisabled(), true); assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
+  const { page, probes, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page); await drawer.getByRole("radio", { name: "换上游", exact: true }).check();
+  await drawer.getByRole("combobox", { name: "上游", exact: true }).fill("Paused replacement"); await page.getByText("Paused replacement · 账号 42 · 暂停监控", { exact: true }).last().click();
+  await drawer.getByText("这个上游暂停了监控，恢复后就能看余额。", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("button", { name: TEST_READ, exact: true }).isDisabled(), true); assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isDisabled(), true);
   assert.equal(probes.length, 0); assert.equal(writes.length, 0); assert.deepEqual(config.channels[0].monitor.stationIds, ["upstream-1"]);
 });
 
@@ -662,22 +779,22 @@ test("paused resource explains activation and reuses its settings before channel
     if (path === "/api/stations/upstream-1" && route.request().method() === "PUT") { const body = route.request().postDataJSON(); mutations.push(body); config.upstreams[0].monitorEnabled = body.monitorEnabled; config.upstreams[0].resourceVersion += "-enabled"; return fulfill(route, { ok: true }); }
     throw new Error("unexpected paused fixture API: " + path);
   } });
-  const drawer = await openOnboardingDrawer(page); await drawer.getByText("此资源的监控已暂停，启用后可直接关联。", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isDisabled(), true);
-  await drawer.getByRole("button", { name: "启用此资源监控", exact: true }).click(); const confirmation = page.getByRole("dialog", { name: "启用“Fixture upstream”监控？", exact: true }); await confirmation.getByRole("button", { name: "启用监控", exact: true }).click(); await confirmation.waitFor({ state: "hidden" });
+  const drawer = await openOnboardingDrawer(page); await drawer.getByText("这个上游暂停了监控，恢复后就能看余额。", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).isDisabled(), true);
+  await drawer.getByRole("button", { name: RESUME_MONITOR, exact: true }).click(); const confirmation = page.getByRole("dialog", { name: `${RESUME_MONITOR}「Fixture upstream」？`, exact: true }); await confirmation.getByRole("button", { name: RESUME_MONITOR, exact: true }).click(); await confirmation.waitFor({ state: "hidden" });
   assert.deepEqual(mutations, [{ monitorEnabled: true, expectedAuthVersion: 1, expectedResourceVersion: "resource-upstream-1" }]); assert.equal(config.upstreams[0].includeInProfit, true); assert.equal(config.upstreams[0].lowBalanceUsd, 27);
-  assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isChecked(), true); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes[0].selections[0].stationId, "upstream-1");
+  assert.equal(await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).isChecked(), true); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes[0].selections[0].stationId, "upstream-1");
 });
 
 test("multiple unfinished saves survive unrelated previews and resume their own operation", async (t) => {
   const { page, writes, recoveries } = await openOnboardingPage(t, { config: onboardingFixture(true, "newapi", [4, 5]), connect(body, count, probe) { return batchResult(body, probe, false); } });
-  const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer); await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("接入尚有待完成步骤，已保存部分会继续复用", { exact: true }).waitFor(); await drawer.locator(".ant-drawer-close").click(); await drawer.waitFor({ state: "hidden" });
-  await page.getByRole("button", { name: "接入渠道 New channel 5", exact: true }).click(); await verifyOnboarding(drawer);
+  const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer); await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).click(); await drawer.getByText(PARTIAL, { exact: true }).waitFor(); await drawer.locator(".ant-drawer-close").click(); await drawer.waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: connectButton("New channel 5"), exact: true }).click(); await verifyOnboarding(drawer);
   let pending = await page.evaluate(() => JSON.parse(sessionStorage.getItem("channel-onboarding-pending-v06"))); assert.equal(pending.length, 1); assert.equal(pending[0].requestId, writes[0].requestId);
-  await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("接入尚有待完成步骤，已保存部分会继续复用", { exact: true }).waitFor(); await drawer.locator(".ant-drawer-close").click(); await drawer.waitFor({ state: "hidden" });
+  await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).click(); await drawer.getByText(PARTIAL, { exact: true }).waitFor(); await drawer.locator(".ant-drawer-close").click(); await drawer.waitFor({ state: "hidden" });
   pending = await page.evaluate(() => JSON.parse(sessionStorage.getItem("channel-onboarding-pending-v06"))); assert.deepEqual(pending.map((entry) => entry.requestId), writes.map((entry) => entry.requestId)); assert.doesNotMatch(JSON.stringify(pending), /accessToken|apiKey|password/);
-  await page.reload(); const pendingList = page.getByRole("region", { name: "待完成接入", exact: true }), resume = pendingList.getByRole("button"); await resume.first().waitFor(); assert.equal(await resume.count(), 2);
-  const channelResume = page.getByRole("button", { name: "接入渠道 New channel 5", exact: true }); assert.equal(await channelResume.textContent(), "继续完成"); await channelResume.click(); await drawer.getByText("接入尚有待完成步骤，已保存部分会继续复用", { exact: true }).waitFor(); assert.equal(recoveries[0].requestId, writes[1].requestId); assert.deepEqual(recoveries[0].groups[0].channels.map((channel) => channel.channelId), [5]);
-  await drawer.locator(".ant-drawer-close").click(); await drawer.waitFor({ state: "hidden" }); await pendingList.getByRole("button", { name: "继续完成：New channel", exact: true }).click(); await drawer.getByText("接入尚有待完成步骤，已保存部分会继续复用", { exact: true }).waitFor(); assert.equal(recoveries[1].requestId, writes[0].requestId); assert.equal(writes.length, 2);
+  await page.reload(); const pendingList = page.getByRole("region", { name: "还没做完", exact: true }), resume = pendingList.getByRole("button"); await resume.first().waitFor(); assert.equal(await resume.count(), 2);
+  const channelResume = page.getByRole("button", { name: connectButton("New channel 5", FINISH), exact: true }); assert.equal(await channelResume.textContent(), FINISH); await channelResume.click(); await drawer.getByText(PARTIAL, { exact: true }).waitFor(); assert.equal(recoveries[0].requestId, writes[1].requestId); assert.deepEqual(recoveries[0].groups[0].channels.map((channel) => channel.channelId), [5]);
+  await drawer.locator(".ant-drawer-close").click(); await drawer.waitFor({ state: "hidden" }); await pendingList.getByRole("button", { name: `${FINISH}：New channel`, exact: true }).click(); await drawer.getByText(PARTIAL, { exact: true }).waitFor(); assert.equal(recoveries[1].requestId, writes[0].requestId); assert.equal(writes.length, 2);
 });
 
 test("shared authorization update preserves the channel draft and Escape closes only the top drawer", async (t) => {
@@ -689,26 +806,26 @@ test("shared authorization update preserves the channel draft and Escape closes 
     authorizationWrites.push(body); config.upstreams[0].authVersion += 1; config.upstreams[0].resourceVersion += "-updated";
     return fulfill(route, { requestId: body.requestId, accountKey: account.accountKey, complete: true, targets: [{ stationId: target.id, status: "updated", savedAuthVersion: 2, remainingActions: [] }], excluded: [], impact, retryInput: { requestId: body.requestId, targetStationIds: body.targetStationIds } });
   } });
-  const drawer = await openOnboardingDrawer(page); await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check(); await chooseKey(page, drawer); await drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }).click(); await page.getByText("没有", { exact: true }).last().click();
-  await drawer.getByRole("button", { name: "更新此账号授权", exact: true }).click(); const authorization = page.getByRole("dialog", { name: "更新账号授权 · 42", exact: true }); await authorization.waitFor();
-  await page.keyboard.press("Escape"); await authorization.waitFor({ state: "hidden" }); assert.equal(await drawer.isVisible(), true); assert.equal(await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).isChecked(), true); await drawer.getByText("Supplier Key · Key #7 · 上游分组 upstream-group", { exact: true }).waitFor();
-  await drawer.getByRole("button", { name: "更新此账号授权", exact: true }).click(); await authorization.getByLabel("更新访问令牌", { exact: true }).fill("fixture-updated-pat"); await previewAuthorization(authorization); await confirmAccountAuthorization(authorization);
+  const drawer = await openOnboardingDrawer(page); await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check(); await chooseKey(page, drawer); await drawer.getByRole("combobox", { name: COVERAGE_QUESTION, exact: true }).click(); await page.getByText(ONLY_THESE, { exact: true }).last().click();
+  await drawer.getByRole("button", { name: UPDATE_FIXTURE, exact: true }).click(); const authorization = authorizationDialog(page, "42"); await authorization.waitFor();
+  await page.keyboard.press("Escape"); await authorization.waitFor({ state: "hidden" }); assert.equal(await drawer.isVisible(), true); assert.equal(await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).isChecked(), true); await drawer.getByText(keyOption("Supplier Key"), { exact: true }).waitFor();
+  await drawer.getByRole("button", { name: UPDATE_FIXTURE, exact: true }).click(); await authorization.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fixture-updated-pat"); await previewAuthorization(authorization); await confirmAccountAuthorization(authorization);
   assert.deepEqual(authorizationProbes[0].targetStationIds, ["upstream-1"]); assert.deepEqual(authorizationWrites[0].targetStationIds, ["upstream-1"]); assert.equal(authorizationWrites[0].previewId, "shared-auth-preview"); assert.equal(writes.length, 0); assert.equal(probes.length, 0);
-  await authorization.locator(".ant-drawer-close").click(); await authorization.waitFor({ state: "hidden" }); assert.equal(await drawer.isVisible(), true); await drawer.getByText("Supplier Key · Key #7 · 上游分组 upstream-group", { exact: true }).waitFor();
+  await authorization.locator(".ant-drawer-close").click(); await authorization.waitFor({ state: "hidden" }); assert.equal(await drawer.isVisible(), true); await drawer.getByText(keyOption("Supplier Key"), { exact: true }).waitFor();
   await verifyOnboarding(drawer); assert.equal(probes[0].groups[0].reconciliation.tokenId, 7); assert.equal(probes[0].groups[0].reconciliation.coverageDeclaration.answer, "none"); await saveOnboarding(drawer); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal("newStation" in writes[0].selections[0], false);
 });
 
 test("updating an existing billing account preserves the new primary pure Key draft", async (t) => {
   const config = onboardingFixture(), auth = onboardingAuthorizationFixture(config);
   const { page, probes, writes } = await openOnboardingPage(t, { config, accountOperation: auth.accountOperation }); const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("button", { name: "新增上游账号", exact: true }).click(); await drawer.getByLabel("监控方式", { exact: true }).click(); await page.getByText("New API · Key 额度", { exact: true }).last().click();
-  await drawer.getByLabel("上游资源名称", { exact: true }).fill("Primary Key draft"); await drawer.getByLabel("上游 API Key", { exact: true }).fill("fixture-primary-key-secret"); await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check();
-  await drawer.getByRole("combobox", { name: "接入账单授权", exact: true }).click(); await page.getByText("Fixture upstream · New API · 账号余额 · 账号 42 · https://up.example", { exact: true }).last().click(); await chooseKey(page, drawer, "New Key");
-  await drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }).click(); await page.getByText("没有", { exact: true }).last().click();
-  await drawer.getByRole("button", { name: "更新账单账号授权", exact: true }).click(); const authorization = page.getByRole("dialog", { name: "更新账号授权 · 42", exact: true });
-  await authorization.getByLabel("更新访问令牌", { exact: true }).fill("fixture-billing-account-pat"); await previewAuthorization(authorization); await confirmAccountAuthorization(authorization); await authorization.locator(".ant-drawer-close").click(); await authorization.waitFor({ state: "hidden" });
-  assert.equal(await drawer.getByLabel("上游 API Key", { exact: true }).inputValue(), "fixture-primary-key-secret"); assert.equal(await drawer.getByLabel("上游资源名称", { exact: true }).inputValue(), "Primary Key draft");
-  assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isChecked(), true); assert.equal(await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).isChecked(), true); await drawer.getByText("New Key · Key #8 · 上游分组 upstream-group", { exact: true }).waitFor(); await drawer.getByText("没有", { exact: true }).waitFor();
+  await drawer.getByRole("button", { name: NEW_UPSTREAM, exact: true }).click(); await drawer.getByLabel(CREDENTIAL_FIELDS.type.label, { exact: true }).click(); await page.getByText(upstreamType("newapi-key"), { exact: true }).last().click();
+  await drawer.getByLabel(CREDENTIAL_FIELDS.name.label, { exact: true }).fill("Primary Key draft"); await apiKeyField(drawer).fill("fixture-primary-key-secret"); await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check();
+  await drawer.getByRole("combobox", { name: KEY_ACCOUNT, exact: true }).click(); await page.getByText("Fixture upstream · 账号 42 · https://up.example", { exact: true }).last().click(); await chooseKey(page, drawer, "New Key");
+  await drawer.getByRole("combobox", { name: COVERAGE_QUESTION, exact: true }).click(); await page.getByText(ONLY_THESE, { exact: true }).last().click();
+  await drawer.getByRole("button", { name: UPDATE_FIXTURE, exact: true }).click(); const authorization = authorizationDialog(page, "42");
+  await authorization.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fixture-billing-account-pat"); await previewAuthorization(authorization); await confirmAccountAuthorization(authorization); await authorization.locator(".ant-drawer-close").click(); await authorization.waitFor({ state: "hidden" });
+  assert.equal(await apiKeyField(drawer).inputValue(), "fixture-primary-key-secret"); assert.equal(await drawer.getByLabel(CREDENTIAL_FIELDS.name.label, { exact: true }).inputValue(), "Primary Key draft");
+  assert.equal(await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).isChecked(), true); assert.equal(await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).isChecked(), true); await drawer.getByText(keyOption("New Key"), { exact: true }).waitFor(); await drawer.getByText(ONLY_THESE, { exact: true }).waitFor();
   assert.equal(writes.length, 0); await verifyOnboarding(drawer); await saveOnboarding(drawer);
   assert.equal(probes.at(-1).selections[0].newStation.type, "newapi-key"); assert.equal(writes[0].selections[0].newStation.apiKey, "fixture-primary-key-secret"); assert.equal("stationId" in writes[0].selections[0], false); assert.deepEqual(writes[0].selections[0].reconciliationAuthorization, { stationId: "upstream-1" }); assert.equal(writes[0].groups[0].reconciliation.tokenId, 8); assert.equal(writes[0].groups[0].reconciliation.coverageDeclaration.answer, "none"); assert.deepEqual(auth.authorizationWrites[0].targetStationIds, ["upstream-1"]);
 });
@@ -720,10 +837,10 @@ test("updating a duplicate primary account explicitly adopts the saved resource"
     if (body.selections[0].newStation) { selection.station.id = "upstream-1"; selection.credentialUpdates = [{ role: "primary", stationId: "upstream-1" }]; selection.credentialUpdateRequired = true; }
     return next;
   } });
-  const drawer = await openOnboardingDrawer(page); await drawer.getByRole("button", { name: "新增上游账号", exact: true }).click(); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-duplicate-primary-pat"); await verifyOnboarding(drawer);
-  await drawer.getByRole("button", { name: "更新这个账号授权", exact: true }).click(); const authorization = page.getByRole("dialog", { name: "更新账号授权 · 42", exact: true });
-  assert.equal(await authorization.getByLabel("更新访问令牌", { exact: true }).inputValue(), "fixture-duplicate-primary-pat"); await previewAuthorization(authorization); await confirmAccountAuthorization(authorization); await authorization.locator(".ant-drawer-close").click(); await authorization.waitFor({ state: "hidden" });
-  assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0); await drawer.getByText("Fixture upstream · New API · 账号余额 · 账号 42", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isChecked(), true);
+  const drawer = await openOnboardingDrawer(page); await drawer.getByRole("button", { name: NEW_UPSTREAM, exact: true }).click(); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fixture-duplicate-primary-pat"); await verifyOnboarding(drawer);
+  await drawer.getByRole("button", { name: UPDATE_AUTH, exact: true }).click(); const authorization = authorizationDialog(page, "42");
+  assert.equal(await authorization.getByLabel(ACCESS_TOKEN, { exact: true }).inputValue(), "fixture-duplicate-primary-pat"); await previewAuthorization(authorization); await confirmAccountAuthorization(authorization); await authorization.locator(".ant-drawer-close").click(); await authorization.waitFor({ state: "hidden" });
+  assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0); await drawer.getByText("Fixture upstream · 账号 42", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).isChecked(), true);
   await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal("newStation" in writes[0].selections[0], false); assert.deepEqual(auth.authorizationWrites[0].targetStationIds, ["upstream-1"]);
 });
 
@@ -735,47 +852,58 @@ for (const action of ["reuse", "update", "failed update"]) {
       if (body.selections[0].reconciliationAuthorization?.newAuthorization) { selection.station.id = null; selection.credentialUpdates = [{ role: "authorization", stationId: "upstream-1" }]; selection.credentialUpdateRequired = true; }
       return next;
     } });
-    const drawer = await openOnboardingDrawer(page); await drawer.getByRole("button", { name: "新增上游账号", exact: true }).click(); await drawer.getByLabel("监控方式", { exact: true }).click(); await page.getByText("New API · Key 额度", { exact: true }).last().click();
-    await drawer.getByLabel("上游 API Key", { exact: true }).fill("fixture-primary-key-secret"); await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check(); await drawer.getByRole("combobox", { name: "接入账单授权", exact: true }).click(); await page.getByText("补充账号账单授权", { exact: true }).last().click(); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-duplicate-billing-pat");
-    await verifyOnboarding(drawer); await drawer.getByText("账单账号已保存", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("button", { name: "复用这个账号", exact: true }).count(), 0); assert.equal(await drawer.getByRole("button", { name: "更新这个账号授权", exact: true }).count(), 0);
-    await chooseKey(page, drawer, "New Key"); await drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }).click(); await page.getByText("没有", { exact: true }).last().click();
-    if (action === "reuse") await drawer.getByRole("button", { name: "复用此账单账号", exact: true }).click();
+    const drawer = await openOnboardingDrawer(page); await drawer.getByRole("button", { name: NEW_UPSTREAM, exact: true }).click(); await drawer.getByLabel(CREDENTIAL_FIELDS.type.label, { exact: true }).click(); await page.getByText(upstreamType("newapi-key"), { exact: true }).last().click();
+    await apiKeyField(drawer).fill("fixture-primary-key-secret"); await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check(); await drawer.getByRole("combobox", { name: KEY_ACCOUNT, exact: true }).click(); await page.getByText(NEW_AUTHORIZATION, { exact: true }).last().click(); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fixture-duplicate-billing-pat");
+    await verifyOnboarding(drawer); await drawer.getByText(CREDENTIAL_TITLE.authorization, { exact: true }).waitFor(); assert.equal(await drawer.getByText(CREDENTIAL_TITLE.primary, { exact: true }).count(), 0); assert.equal(await drawer.getByRole("button", { name: REUSE_SAVED, exact: true }).count(), 1); assert.equal(await drawer.getByRole("button", { name: UPDATE_AUTH, exact: true }).count(), 1);
+    await chooseKey(page, drawer, "New Key"); await drawer.getByRole("combobox", { name: COVERAGE_QUESTION, exact: true }).click(); await page.getByText(ONLY_THESE, { exact: true }).last().click();
+    if (action === "reuse") await drawer.getByRole("button", { name: REUSE_SAVED, exact: true }).click();
     else {
-      await drawer.getByRole("button", { name: "更新此账单账号授权", exact: true }).click(); const authorization = page.getByRole("dialog", { name: "更新账号授权 · 42", exact: true });
-      assert.equal(await authorization.getByLabel("更新访问令牌", { exact: true }).inputValue(), "fixture-duplicate-billing-pat"); await previewAuthorization(authorization); await confirmAccountAuthorization(authorization); await authorization.locator(".ant-drawer-close").click(); await authorization.waitFor({ state: "hidden" }); assert.deepEqual(auth.authorizationWrites[0].targetStationIds, ["upstream-1"]);
+      await drawer.getByRole("button", { name: UPDATE_AUTH, exact: true }).click(); const authorization = authorizationDialog(page, "42");
+      assert.equal(await authorization.getByLabel(ACCESS_TOKEN, { exact: true }).inputValue(), "fixture-duplicate-billing-pat"); await previewAuthorization(authorization); await confirmAccountAuthorization(authorization); await authorization.locator(".ant-drawer-close").click(); await authorization.waitFor({ state: "hidden" }); assert.deepEqual(auth.authorizationWrites[0].targetStationIds, ["upstream-1"]);
     }
-    assert.equal(await drawer.getByLabel("上游 API Key", { exact: true }).inputValue(), "fixture-primary-key-secret"); assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isChecked(), true); assert.equal(await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).isChecked(), true); assert.equal(writes.length, 0);
-    if (action === "failed update") { assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).inputValue(), "fixture-duplicate-billing-pat"); await drawer.getByText("补充账号账单授权", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true); return; }
-    assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0); await drawer.getByText("New Key · Key #8 · 上游分组 upstream-group", { exact: true }).waitFor(); await drawer.getByText("没有", { exact: true }).waitFor(); await verifyOnboarding(drawer); await saveOnboarding(drawer);
+    assert.equal(await apiKeyField(drawer).inputValue(), "fixture-primary-key-secret"); assert.equal(await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).isChecked(), true); assert.equal(await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).isChecked(), true); assert.equal(writes.length, 0);
+    if (action === "failed update") { assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).inputValue(), "fixture-duplicate-billing-pat"); await drawer.getByText(NEW_AUTHORIZATION, { exact: true }).waitFor(); assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isDisabled(), true); return; }
+    assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0); await drawer.getByText(keyOption("New Key"), { exact: true }).waitFor(); await drawer.getByText(ONLY_THESE, { exact: true }).waitFor(); await verifyOnboarding(drawer); await saveOnboarding(drawer);
     assert.equal(writes[0].selections[0].newStation.type, "newapi-key"); assert.equal(writes[0].selections[0].newStation.apiKey, "fixture-primary-key-secret"); assert.equal("stationId" in writes[0].selections[0], false); assert.deepEqual(writes[0].selections[0].reconciliationAuthorization, { stationId: "upstream-1" }); assert.equal(writes[0].groups[0].reconciliation.tokenId, 8); assert.equal(writes[0].groups[0].reconciliation.coverageDeclaration.answer, "none"); assert.equal(auth.authorizationWrites.length, action === "reuse" ? 0 : 1);
   });
 }
 
 test("returning from a new pure Key to a saved account clears the hidden dedicated billing authorization", async (t) => {
   const { page, probes, writes } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check(); await drawer.getByRole("button", { name: "新增上游账号", exact: true }).click();
-  await drawer.getByLabel("监控方式", { exact: true }).click(); await page.getByText("New API · Key 额度", { exact: true }).last().click();
-  await drawer.getByRole("combobox", { name: "接入账单授权", exact: true }).click(); await page.getByText("补充账号账单授权", { exact: true }).last().click();
-  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-abandoned-dedicated-authorization"); await drawer.getByRole("button", { name: "返回复用已有上游", exact: true }).click();
-  assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0); assert.equal(await drawer.getByLabel("账单站点地址", { exact: true }).count(), 0);
+  await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check(); await drawer.getByRole("button", { name: NEW_UPSTREAM, exact: true }).click();
+  await drawer.getByLabel(CREDENTIAL_FIELDS.type.label, { exact: true }).click(); await page.getByText(upstreamType("newapi-key"), { exact: true }).last().click();
+  await drawer.getByRole("combobox", { name: KEY_ACCOUNT, exact: true }).click(); await page.getByText(NEW_AUTHORIZATION, { exact: true }).last().click();
+  await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fixture-abandoned-dedicated-authorization"); await drawer.getByRole("button", { name: USE_SAVED, exact: true }).click();
+  assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0); assert.equal(await drawer.locator("form#channel-onboarding-authorization").count(), 0);
   await chooseKey(page, drawer); await verifyOnboarding(drawer); await saveOnboarding(drawer);
   assert.equal(probes.length, 1); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal("reconciliationAuthorization" in probes[0].selections[0], false); assert.equal("reconciliationAuthorization" in writes[0].selections[0], false); assert.doesNotMatch(JSON.stringify(writes), /fixture-abandoned-dedicated-authorization/);
 });
 
+test("a new pure Key upstream asks for balance monitoring before any test read", async (t) => {
+  const { page, probes, writes } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page);
+  await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).uncheck(); await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check();
+  await drawer.getByRole("button", { name: NEW_UPSTREAM, exact: true }).click();
+  await drawer.getByLabel(CREDENTIAL_FIELDS.type.label, { exact: true }).click(); await page.getByText(upstreamType("newapi-key"), { exact: true }).last().click();
+  await drawer.getByRole("button", { name: TEST_READ, exact: true }).click();
+  // 页面上直接说要选「看余额」，不发测试读取、也不说页面过期
+  await drawer.getByText(ONBOARDING_KEY_ONLY_MONITOR, { exact: true }).waitFor();
+  assert.equal(probes.length, 0); assert.equal(writes.length, 0); assert.equal(await drawer.getByText(ERROR_CATEGORIES.expired.text).count(), 0);
+});
+
 test("billing-only purpose survives opening a new account and returning to saved reuse", async (t) => {
   const { page, writes } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).uncheck(); await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check();
-  await drawer.getByRole("button", { name: "新增上游账号", exact: true }).click(); assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isChecked(), false);
-  await drawer.getByRole("button", { name: "返回复用已有上游", exact: true }).click(); assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isChecked(), false);
+  await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).uncheck(); await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check();
+  await drawer.getByRole("button", { name: NEW_UPSTREAM, exact: true }).click(); assert.equal(await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).isChecked(), false);
+  await drawer.getByRole("button", { name: USE_SAVED, exact: true }).click(); assert.equal(await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).isChecked(), false);
   await enableBilling(page, drawer); await saveOnboarding(drawer); assert.equal(writes[0].selections[0].monitor, false); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal("newStation" in writes[0].selections[0], false); assert.deepEqual(writes[0].selections[0].additionalMonitorStationIds, []);
 });
 
 test("billing-only purpose survives selecting a different saved account", async (t) => {
   const config = onboardingFixture(); config.upstreams.push({ ...config.upstreams[0], id: "account-B", name: "Account B", baseUrl: "https://b.example", identity: { provider: "newapi", accountId: "84" } });
   const { page, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).uncheck(); await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check();
-  await drawer.getByRole("combobox", { name: "接入上游资源", exact: true }).fill("Account B"); await page.getByText("Account B · New API · 账号余额 · 账号 84", { exact: true }).last().click();
-  assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isChecked(), false); await enableBilling(page, drawer, "New Key"); await saveOnboarding(drawer);
+  await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).uncheck(); await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check();
+  await drawer.getByRole("combobox", { name: "上游", exact: true }).fill("Account B"); await page.getByText("Account B · 账号 84", { exact: true }).last().click();
+  assert.equal(await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).isChecked(), false); await enableBilling(page, drawer, "New Key"); await saveOnboarding(drawer);
   assert.equal(writes[0].selections[0].monitor, false); assert.equal(writes[0].selections[0].stationId, "account-B"); assert.equal(writes[0].groups[0].reconciliation.tokenId, 8); assert.equal("reconciliationAuthorization" in writes[0].selections[0], false); assert.deepEqual(writes[0].selections[0].additionalMonitorStationIds, []);
 });
 
@@ -787,10 +915,10 @@ test("partial additional Key monitoring preserves the primary account billing au
     if (count === 1) { group.reconciliation = { status: "pending", reason: "附加监控已保存，账号账单待重试" }; group.remainingActions = ["retry_rule"]; }
     return result;
   } });
-  const drawer = await openOnboardingDrawer(page); await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).uncheck(); await drawer.getByText("同时关联其他已有监控资源（可选）", { exact: true }).click(); await drawer.getByRole("combobox", { name: "其他监控资源", exact: true }).click(); await page.getByText("Additional pure Key · New API · Key 额度", { exact: true }).last().click();
-  await enableBilling(page, drawer); await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("附加监控已保存，账号账单待重试", { exact: true }).waitFor();
-  await drawer.getByText("Fixture upstream · New API · 账号余额 · 账号 42", { exact: true }).waitFor(); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
-  await verifyOnboarding(drawer); await drawer.getByRole("button", { name: "重试未完成步骤", exact: true }).click(); await drawer.waitFor({ state: "hidden" });
+  const drawer = await openOnboardingDrawer(page); await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).uncheck(); await drawer.getByText("同时看其他上游的余额（可选）", { exact: true }).click(); await drawer.getByRole("combobox", { name: "其他上游", exact: true }).click(); await page.getByText("Additional pure Key", { exact: true }).last().click();
+  await enableBilling(page, drawer); await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).click(); await problemShown(drawer, "附加监控已保存，账号账单待重试");
+  await drawer.getByText("Fixture upstream · 账号 42", { exact: true }).waitFor(); assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0);
+  await verifyOnboarding(drawer); await drawer.getByRole("button", { name: FINISH, exact: true }).click(); await drawer.waitFor({ state: "hidden" });
   assert.equal(writes.length, 2); assert.ok(probes.every((body) => body.selections[0].stationId === "upstream-1")); assert.ok(writes.every((body) => body.selections[0].monitor === false && body.selections[0].stationId === "upstream-1")); assert.deepEqual(writes[1].selections[0].additionalMonitorStationIds, ["extra-key"]); assert.equal(writes[1].groups[0].reconciliation.tokenId, 7); assert.equal("reconciliationAuthorization" in writes[1].selections[0], false);
 });
 
@@ -802,13 +930,13 @@ test("saved upstream reuse prioritizes matching accounts from the end of a long 
   config.upstreams.unshift(...Array.from({ length: 20 }, (_, id) => ({ id: "other-" + id, name: "Other " + id, type: "newapi", baseUrl: `https://other-${id}.example`, monitorEnabled: true })));
   const { page, probes, writes } = await openOnboardingPage(t, { config });
   const drawer = await openOnboardingDrawer(page);
-  await drawer.getByText("复用已有上游", { exact: true }).waitFor();
-  assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
-  assert.equal(await drawer.getByRole("button", { name: "验证并预览", exact: true }).isDisabled(), true);
-  const select = drawer.getByRole("combobox", { name: "接入上游资源", exact: true });
+  await drawer.getByText(USE_SAVED, { exact: true }).waitFor();
+  assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0);
+  assert.equal(await drawer.getByRole("button", { name: TEST_READ, exact: true }).isDisabled(), true);
+  const select = drawer.getByRole("combobox", { name: "上游", exact: true });
   await select.click();
   const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
-  await dropdown.getByText("已有渠道关联或地址匹配（2）", { exact: true }).waitFor();
+  await dropdown.getByText("地址对得上的上游（2）", { exact: true }).waitFor();
   const choices = await dropdown.locator(".ant-select-item-option-content").allTextContents();
   assert.match(choices[0], /^碎 · .*账号 42/); assert.match(choices[1], /^同站点账号 B · .*账号 84/);
   await select.fill("碎"); await dropdown.locator(".ant-select-item-option-content", { hasText: "碎 ·" }).click();
@@ -823,12 +951,12 @@ test("saved upstream reuse stays the default without a matching address and sear
   const config = onboardingFixture(); config.channels[0].baseUrl = "https://unknown.example"; config.channels[0].candidates = [];
   const { page, writes } = await openOnboardingPage(t, { config });
   const drawer = await openOnboardingDrawer(page);
-  await drawer.getByText("复用已有上游", { exact: true }).waitFor();
-  assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
-  const select = drawer.getByRole("combobox", { name: "接入上游资源", exact: true });
+  await drawer.getByText(USE_SAVED, { exact: true }).waitFor();
+  assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0);
+  const select = drawer.getByRole("combobox", { name: "上游", exact: true });
   await select.fill("up.example");
   const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
-  await dropdown.getByText("其他已保存资源（1）", { exact: true }).waitFor();
+  await dropdown.getByText("其他上游（1）", { exact: true }).waitFor();
   await dropdown.locator(".ant-select-item-option-content", { hasText: "Fixture upstream" }).click();
   await verifyOnboarding(drawer); await saveOnboarding(drawer);
   assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal("newStation" in writes[0].selections[0], false);
@@ -837,18 +965,19 @@ test("saved upstream reuse stays the default without a matching address and sear
 test("duplicate account creation directs reuse or shared authorization update without rotating credentials in the batch", async (t) => {
   const { page, writes } = await openOnboardingPage(t, { probe(body, count, config) { return probeResult(body, config, { requireUpdate: !!body.selections[0].newStation }); } });
   const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("button", { name: "新增上游账号", exact: true }).click();
-  await drawer.getByText("首次填写后保存，其他渠道可直接复用。", { exact: true }).waitFor();
-  await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-replacement");
+  await drawer.getByRole("button", { name: NEW_UPSTREAM, exact: true }).click();
+  await drawer.getByText(CREATE_HINT, { exact: true }).waitFor();
+  await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fixture-replacement");
   await verifyOnboarding(drawer);
-  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
-  await drawer.getByText("此账号已保存", { exact: true }).waitFor();
-  assert.equal(await drawer.getByRole("button", { name: "更新这个账号授权", exact: true }).count(), 1);
-  assert.equal(await drawer.getByText("已发现相同账号，确认用本次授权更新已有凭证", { exact: true }).count(), 0);
+  assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isDisabled(), true);
+  // 同一个上游账号已经存过：只能用已保存的，或者另开「更新登录信息」确认，不在这里顺手换掉
+  await drawer.getByText("这个上游账号已经保存过", { exact: true }).waitFor();
+  assert.equal(await drawer.getByRole("button", { name: UPDATE_AUTH, exact: true }).count(), 1);
+  assert.equal(await drawer.getByRole("checkbox", { name: /更新/ }).count(), 0);
   assert.equal(writes.length, 0);
-  await drawer.getByRole("button", { name: "复用这个账号", exact: true }).click();
-  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
-  assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
+  await drawer.getByRole("button", { name: "用已保存的", exact: true }).click();
+  assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isDisabled(), true);
+  assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0);
   await verifyOnboarding(drawer); await saveOnboarding(drawer);
   assert.equal(writes[0].selections[0].updateCredentials, false); assert.equal("newStation" in writes[0].selections[0], false);
 });
@@ -856,10 +985,10 @@ test("duplicate account creation directs reuse or shared authorization update wi
 test("empty resource directory explains first authorization and keeps it explicit", async (t) => {
   const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) });
   const drawer = await openOnboardingDrawer(page);
-  await drawer.getByText("新增上游账号或 Key", { exact: true }).waitFor();
-  assert.equal(await drawer.getByRole("button", { name: "返回复用已有上游", exact: true }).count(), 0);
-  await drawer.getByText("首次填写后保存，其他渠道可直接复用。", { exact: true }).waitFor();
-  assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 1);
+  await drawer.getByText(NEW_UPSTREAM, { exact: true }).waitFor();
+  assert.equal(await drawer.getByRole("button", { name: USE_SAVED, exact: true }).count(), 0);
+  await drawer.getByText(CREATE_HINT, { exact: true }).waitFor();
+  assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 1);
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 0);
 });
 
@@ -885,9 +1014,9 @@ test("onboarding without browser cryptography does not partially open a drawer o
     Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined });
     Object.defineProperty(globalThis.crypto, "getRandomValues", { configurable: true, value: undefined });
   });
-  await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click();
-  await page.getByText("当前浏览器无法生成请求标识，请更新浏览器后重试", { exact: true }).waitFor();
-  assert.equal(await page.getByRole("dialog", { name: "接入监控与对账", exact: true }).count(), 0);
+  await page.getByRole("button", { name: connectButton("New channel"), exact: true }).click();
+  await page.getByText(failureText("打开失败", { code: "BROWSER_UNSUPPORTED" }), { exact: true }).waitFor();
+  assert.equal(await page.getByRole("dialog", { name: CONNECT, exact: true }).count(), 0);
   assert.equal(probes.length, 0); assert.equal(writes.length, 0);
 });
 
@@ -916,13 +1045,14 @@ test("discovery refresh preserves the panel state for Enter, Space and click", {
     if (shellFallback[url.pathname]) return fulfill(route, shellFallback[url.pathname]);
     throw new Error("unexpected fixture API: " + url.pathname);
   });
-  // 渠道接入只在「上游资源 › 渠道接入」标签里
+  // 渠道绑定只在「上游资源 › 渠道绑定」标签里
   await page.goto(`${baseURL}/stations?view=onboarding`, { timeout: 30000 });
-  const discovery = page.getByRole("button", { name: "发现新渠道", exact: true });
+  // 「渠道绑定 · N」标题右边的「刷新」重新读自营站点的渠道
+  const discovery = page.locator(".ant-collapse-header").getByRole("button", { name: REFRESH, exact: true });
   const header = page.locator(".ant-collapse-item").filter({ has: discovery }).locator(".ant-collapse-header");
-  const settled = () => page.waitForFunction(() => !document.querySelector('button[aria-label="发现新渠道"]')?.classList.contains("ant-btn-loading"));
+  const settled = () => page.locator(`.ant-collapse-header button[aria-label="${REFRESH}"].ant-btn-loading`).waitFor({ state: "detached" });
   await discovery.waitFor();
-  await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click({ trial: true });
+  await page.getByRole("button", { name: connectButton("New channel"), exact: true }).click({ trial: true });
   await settled();
   assert.equal(await header.getAttribute("aria-expanded"), "true");
   for (const expanded of ["true", "false"]) {
@@ -950,8 +1080,9 @@ test("discovery refresh preserves the panel state for Enter, Space and click", {
 
 test("five existing-account channels choose one Key and confirm one genuine batch without credentials", async (t) => {
   const { page, probes, writes } = await openOnboardingPage(t, { config: onboardingFixture(true, "newapi", [4, 5, 6, 7, 8]) });
-  const drawer = await openOnboardingDrawer(page, true); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
-  await enableBilling(page, drawer); await drawer.getByText("完整范围：#1、#2、#3、New channel、New channel 5、New channel 6、New channel 7、New channel 8", { exact: true }).waitFor();
+  const drawer = await openOnboardingDrawer(page, true); assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0);
+  // 预览里写绑定后这把 Key 的渠道：已绑定的 #1–#3 加上这次的五个
+  await enableBilling(page, drawer); await drawer.locator(".ant-alert-description").getByText("绑定后这把 Key 的渠道：渠道 #1、渠道 #2、渠道 #3、New channel、New channel 5、New channel 6、New channel 7、New channel 8", { exact: true }).waitFor();
   await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].selections.length, 1); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal(writes[0].groups.length, 1); assert.deepEqual(writes[0].groups[0].channels.map((entry) => entry.channelId), [4, 5, 6, 7, 8]); assert.equal(writes[0].groups[0].reconciliation.tokenId, 7); assert.equal(writes[0].groups[0].reconciliation.coverageDeclaration.answer, "none"); assert.ok(writes[0].previewId); assert.equal(probes.length, 1); assert.equal(probes[0].groups[0].reconciliation.tokenId, 7); assert.equal("newStation" in writes[0].selections[0], false);
 });
 
@@ -961,7 +1092,7 @@ test("different saved resource IDs for the same verified account reuse one exist
   config.channels[0].monitor = { status: "linked", stationIds: ["upstream-1"] };
   config.channels[1].monitor = { status: "linked", stationIds: ["upstream-2"] };
   const { page, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page, true);
-  assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
+  assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0);
   await enableBilling(page, drawer); await saveOnboarding(drawer);
   assert.equal(writes.length, 1); assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal(writes[0].selections[0].monitor, false); assert.equal("newStation" in writes[0].selections[0], false); assert.equal(writes[0].groups.length, 1); assert.deepEqual(writes[0].groups[0].channels.map((entry) => entry.channelId), [4, 5]); assert.deepEqual(config.channels.map((channel) => channel.monitor.stationIds), [["upstream-1"], ["upstream-2"]]);
 });
@@ -972,21 +1103,21 @@ test("different Keys remain explicit groups and partial saves recover after relo
     if (count === 1) { result.complete = false; const second = result.groups[1]; second.complete = false; second.saved.ruleId = null; second.reconciliation = { status: "pending", reason: "第二把 Key 账单配置保存失败" }; second.channels.forEach((entry) => { entry.complete = false; entry.ruleId = null; entry.remainingActions = ["retry_rule"]; }); second.remainingActions = ["repreview"]; }
     return result;
   } });
-  const drawer = await openOnboardingDrawer(page, true); await drawer.getByText("同时配置 Key 对账", { exact: true }).click(); await chooseKey(page, drawer); await drawer.getByText("这些渠道使用不同 Key，分别指定", { exact: true }).click();
-  await drawer.getByRole("combobox", { name: "渠道 5 的上游 Key", exact: true }).click(); await page.getByText("New Key · Key #8 · 上游分组 upstream-group", { exact: true }).last().click(); await verifyOnboarding(drawer);
-  await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("第二把 Key 账单配置保存失败", { exact: true }).waitFor(); assert.equal(writes.length, 1); assert.deepEqual(writes[0].groups.map((group) => group.reconciliation.tokenId), [7, 8]);
-  await page.reload(); await page.getByRole("button", { name: "恢复上次接入", exact: true }).click(); await drawer.getByText("第二把 Key 账单配置保存失败", { exact: true }).waitFor();
+  const drawer = await openOnboardingDrawer(page, true); await drawer.getByText(BILLING_CHECKBOX, { exact: true }).click(); await chooseKey(page, drawer); await drawer.getByText("这些渠道用的 Key 不一样，分别选", { exact: true }).click();
+  await drawer.getByRole("combobox", { name: "「New channel 5」的 Key", exact: true }).click(); await page.getByText(keyOption("New Key"), { exact: true }).last().click(); await verifyOnboarding(drawer);
+  await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).click(); await drawer.getByText("还有几步没做完，做完的会保留", { exact: true }).waitFor(); await problemShown(drawer, "第二把 Key 账单配置保存失败"); assert.equal(writes.length, 1); assert.deepEqual(writes[0].groups.map((group) => group.reconciliation.tokenId), [7, 8]);
+  await page.reload(); await page.getByRole("button", { name: RESUME }).click(); await problemShown(drawer, "第二把 Key 账单配置保存失败");
   assert.equal(recoveries[0].requestId, writes[0].requestId); assert.deepEqual(recoveries[0].groups.map((group) => group.channels.map((entry) => entry.channelId)), [[4], [5]]); assert.equal("accessToken" in recoveries[0].selections[0], false); assert.equal("saved" in recoveries[0], false); assert.equal(recoveries[0].groups.length, 2);
-  await verifyOnboarding(drawer); await drawer.getByRole("button", { name: "重试未完成步骤", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 2); assert.equal(writes[1].selections[0].stationId, "upstream-1"); assert.deepEqual(writes[1].groups.map((group) => group.channels.map((entry) => entry.channelId)), [[4], [5]]);
+  await verifyOnboarding(drawer); await drawer.getByRole("button", { name: FINISH, exact: true }).click(); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 2); assert.equal(writes[1].selections[0].stationId, "upstream-1"); assert.deepEqual(writes[1].groups.map((group) => group.channels.map((entry) => entry.channelId)), [[4], [5]]);
 });
 
 test("new New API credentials are entered once and keyboard cancellation after a probe creates nothing", async (t) => {
   const { page, probes, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) });
-  const drawer = await openOnboardingDrawer(page); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-new-pat"); await enableBilling(page, drawer);
-  await drawer.getByRole("button", { name: "确认关联", exact: true }).click({ trial: true }); assert.equal(writes.length, 0); assert.equal(probes.at(-1).selections[0].newStation.accessToken, "fixture-new-pat");
+  const drawer = await openOnboardingDrawer(page); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fixture-new-pat"); await enableBilling(page, drawer);
+  await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).click({ trial: true }); assert.equal(writes.length, 0); assert.equal(probes.at(-1).selections[0].newStation.accessToken, "fixture-new-pat");
   // 下拉框展开时 Esc 只收起下拉框；紧接着（收起动画还没结束）再按 Esc 要能关掉抽屉（#413）
-  const scope = drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }); await scope.click(); await page.waitForFunction(() => document.querySelector('[aria-label="Key 消费范围"][aria-expanded="true"]'));
-  await page.keyboard.press("Escape"); await page.waitForFunction(() => document.querySelector('[aria-label="Key 消费范围"][aria-expanded="false"]')); assert.equal(await drawer.isVisible(), true);
+  const scope = drawer.getByRole("combobox", { name: COVERAGE_QUESTION, exact: true }); await scope.click(); await page.waitForFunction((label) => document.querySelector(`[aria-label="${label}"][aria-expanded="true"]`), COVERAGE_QUESTION);
+  await page.keyboard.press("Escape"); await page.waitForFunction((label) => document.querySelector(`[aria-label="${label}"][aria-expanded="false"]`), COVERAGE_QUESTION); assert.equal(await drawer.isVisible(), true);
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 0);
   // 刚打开、焦点还没进抽屉时 Esc 也能关
   await openOnboardingDrawer(page); await drawer.waitFor(); await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 0);
@@ -994,7 +1125,7 @@ test("new New API credentials are entered once and keyboard cancellation after a
 
 test("monitor-only onboarding needs no Key and submits one batch", async (t) => {
   const { page, writes } = await openOnboardingPage(t); const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer);
-  assert.equal(await drawer.getByText(/实际账单账号|生效时间：|同一 Key 成本/).count(), 0);
+  assert.equal(await drawer.getByText(BILLING_PREVIEW).count(), 0);
   await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].selections[0].monitor, true); assert.equal(writes[0].groups[0].reconciliation, null);
 });
 
@@ -1005,20 +1136,20 @@ test("monitor-only preview preserves an actual channel verification failure", as
     return probe;
   } });
   const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer);
-  await drawer.getByText("监控关联待完成", { exact: true }).waitFor();
-  await drawer.getByText("渠道版本已变化，请重新发现", { exact: true }).waitFor();
-  assert.equal(await drawer.getByText(/实际账单账号|同一 Key 成本/).count(), 0);
+  await drawer.locator(".ant-alert-warning").getByText("还没做完", { exact: true }).waitFor();
+  await problemShown(drawer, "渠道版本已变化，请重新发现", "CHANNEL_CHANGED");
+  assert.equal(await drawer.getByText(BILLING_PREVIEW).count(), 0);
 });
 
 test("onboarding requires a purpose and recovers by selecting balance monitoring", async (t) => {
   const { page, probes, writes } = await openOnboardingPage(t);
   const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).uncheck();
-  await drawer.getByText("请选择余额监控或 Key 对账。", { exact: true }).waitFor();
-  assert.equal(await drawer.getByRole("button", { name: "验证并预览", exact: true }).count(), 0);
-  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
+  await drawer.getByRole("checkbox", { name: ONBOARDING_PURPOSES.monitor, exact: true }).uncheck();
+  await drawer.getByText(ONBOARDING_PURPOSE_REQUIRED, { exact: true }).waitFor(); await drawer.getByText(ONBOARDING_PURPOSE_HINT, { exact: true }).waitFor();
+  assert.equal(await drawer.getByRole("button", { name: TEST_READ, exact: true }).count(), 0);
+  assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isDisabled(), true);
   assert.equal(probes.length, 0); assert.equal(writes.length, 0);
-  await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).check();
+  await drawer.getByRole("checkbox", { name: ONBOARDING_PURPOSES.monitor, exact: true }).check();
   await verifyOnboarding(drawer); await saveOnboarding(drawer);
   assert.equal(writes.length, 1); assert.equal(writes[0].selections[0].monitor, true);
 });
@@ -1030,24 +1161,26 @@ test("pending Key billing can be deselected to save only balance monitoring", as
     return probe;
   } });
   const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check();
+  await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check();
   await verifyOnboarding(drawer);
-  await drawer.getByText("Key 对账待配置", { exact: true }).waitFor();
-  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
-  await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).uncheck();
+  await drawer.getByText("还没绑定 Key", { exact: true }).waitFor(); await problemShown(drawer, "请选择实际使用的上游 Key", "KEY_REQUIRED");
+  assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isDisabled(), true);
+  await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).uncheck();
   await verifyOnboarding(drawer); await saveOnboarding(drawer);
   assert.equal(writes.length, 1); assert.equal(writes[0].groups[0].reconciliation, null);
 });
 
 test("Sub2API password mode clears hidden credentials and preserves unsupported billing as partial", async (t) => {
   const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false), billingStatus: "unsupported", connect(body, count, probe) { const result = batchResult(body, probe, false); result.groups[0].reconciliation = { status: "unsupported", reason: "当前部署账单能力不支持" }; return result; } });
-  const drawer = await openOnboardingDrawer(page); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("hidden-old-pat"); await drawer.getByLabel("监控方式", { exact: true }).click(); await page.getByText("Sub2API · 账号密码", { exact: true }).last().click(); await drawer.getByLabel("上游登录邮箱", { exact: true }).fill("fixture@example.test"); await drawer.getByLabel("上游登录密码", { exact: true }).fill("fixture-password");
-  await drawer.getByText("同时配置 Key 对账", { exact: true }).click(); await verifyOnboarding(drawer); await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("当前部署账单能力不支持", { exact: true }).waitFor();
+  const drawer = await openOnboardingDrawer(page); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("hidden-old-pat"); await drawer.getByLabel("类型", { exact: true }).click(); await page.getByText("Sub2API 账号（邮箱密码）", { exact: true }).last().click(); await drawer.getByLabel("登录邮箱", { exact: true }).fill("fixture@example.test"); await drawer.getByLabel("登录密码", { exact: true }).fill("fixture-password");
+  await drawer.getByText(BILLING_CHECKBOX, { exact: true }).click(); await verifyOnboarding(drawer); await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).click();
+  // 余额已保存，账单读不到的那一半留着没做完
+  await drawer.getByText(`${ONBOARDING_PURPOSES.monitor}：已保存；${ONBOARDING_PURPOSES.billing}：${reconciliationChannelStatus("unsupported").label}`, { exact: true }).waitFor(); await problemShown(drawer, "当前部署账单能力不支持");
   assert.equal(writes[0].selections[0].newStation.type, "sub2api-password"); assert.equal("accessToken" in writes[0].selections[0].newStation, false); assert.equal(writes[0].selections[0].newStation.password, "fixture-password");
 });
 
 test("pure Key monitor supplements one dedicated billing authorization", async (t) => {
-  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(true, "newapi-key") }); const drawer = await openOnboardingDrawer(page); await drawer.getByText("同时配置 Key 对账", { exact: true }).click(); await drawer.getByRole("combobox", { name: "接入账单授权", exact: true }).click(); await page.getByText("补充账号账单授权", { exact: true }).last().click(); await drawer.getByText("账单授权只补一次", { exact: true }).waitFor(); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-billing-pat"); await verifyOnboarding(drawer); await chooseKey(page, drawer); await verifyOnboarding(drawer); await saveOnboarding(drawer);
+  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(true, "newapi-key") }); const drawer = await openOnboardingDrawer(page); await drawer.getByText(BILLING_CHECKBOX, { exact: true }).click(); await drawer.getByRole("combobox", { name: "这把 Key 属于哪个上游账号", exact: true }).click(); await page.getByText("填一个新的访问令牌", { exact: true }).last().click(); await drawer.getByText("访问令牌只填一次", { exact: true }).waitFor(); await tokenField(drawer).fill("fixture-billing-pat"); await verifyOnboarding(drawer); await chooseKey(page, drawer); await verifyOnboarding(drawer); await saveOnboarding(drawer);
   assert.equal(writes[0].selections[0].stationId, "upstream-1"); assert.equal(writes[0].selections[0].reconciliationAuthorization.newAuthorization.accessToken, "fixture-billing-pat");
 });
 
@@ -1058,35 +1191,37 @@ test("pure Key recovery after reload reuses the saved dedicated billing authoriz
     if (count === 1) { config.upstreams.push({ id: "billing-auth", name: "Saved billing account", type: "newapi", monitorEnabled: false, baseUrl: "https://up.example", identity: { provider: "newapi", accountId: "42" } }); result.groups[0].reason = "授权已保存，规则待完成"; }
     return result;
   } });
-  const drawer = await openOnboardingDrawer(page); await drawer.getByText("同时配置 Key 对账", { exact: true }).click(); await drawer.getByRole("combobox", { name: "接入账单授权", exact: true }).click(); await page.getByText("补充账号账单授权", { exact: true }).last().click(); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-billing-pat"); await verifyOnboarding(drawer); await chooseKey(page, drawer); await verifyOnboarding(drawer); await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("授权已保存，规则待完成", { exact: true }).waitFor();
-  await page.reload(); await page.getByRole("button", { name: "恢复上次接入", exact: true }).click(); await drawer.getByText("授权已保存，规则待完成", { exact: true }).waitFor(); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0);
-  await verifyOnboarding(drawer); assert.equal(probes.at(-1).selections[0].reconciliationAuthorization.stationId, "billing-auth"); assert.equal(recoveries[0].selections[0].accountIdentity, null); await drawer.getByRole("button", { name: "重试未完成步骤", exact: true }).click(); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 2); assert.equal("newAuthorization" in writes[1].selections[0].reconciliationAuthorization, false);
+  const drawer = await openOnboardingDrawer(page); await drawer.getByText(BILLING_CHECKBOX, { exact: true }).click(); await drawer.getByRole("combobox", { name: "这把 Key 属于哪个上游账号", exact: true }).click(); await page.getByText("填一个新的访问令牌", { exact: true }).last().click(); await tokenField(drawer).fill("fixture-billing-pat"); await verifyOnboarding(drawer); await chooseKey(page, drawer); await verifyOnboarding(drawer); await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).click(); await problemShown(drawer, "授权已保存，规则待完成");
+  await page.reload(); await page.getByRole("button", { name: RESUME }).click(); await problemShown(drawer, "授权已保存，规则待完成"); assert.equal(await tokenField(drawer).count(), 0);
+  await verifyOnboarding(drawer); assert.equal(probes.at(-1).selections[0].reconciliationAuthorization.stationId, "billing-auth"); assert.equal(recoveries[0].selections[0].accountIdentity, null); await drawer.getByRole("button", { name: FINISH, exact: true }).click(); await drawer.waitFor({ state: "hidden" }); assert.equal(writes.length, 2); assert.equal("newAuthorization" in writes[1].selections[0].reconciliationAuthorization, false);
 });
 
 test("additional account and Key monitors retain their explicit overlap warning", async (t) => {
   const config = onboardingFixture(); config.upstreams.push({ id: "key-monitor", name: "Extra Key monitor", type: "newapi-key", monitorEnabled: true, baseUrl: "https://up.example" });
-  const { page, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page); await drawer.getByText("同时关联其他已有监控资源（可选）", { exact: true }).click(); await drawer.getByRole("combobox", { name: "其他监控资源", exact: true }).click(); await page.getByText("Extra Key monitor · New API · Key 额度", { exact: true }).last().click(); await drawer.getByText("核对整体监控成本", { exact: true }).waitFor(); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.deepEqual(writes[0].selections[0].additionalMonitorStationIds, ["key-monitor"]);
+  const { page, writes } = await openOnboardingPage(t, { config }); const drawer = await openOnboardingDrawer(page); await drawer.getByText("同时看其他上游的余额（可选）", { exact: true }).click(); await drawer.getByRole("combobox", { name: "其他上游", exact: true }).click(); await page.getByText("Extra Key monitor", { exact: true }).last().click(); await drawer.getByText(`同一个上游账号的余额和 Key 额度可能是同一笔花费，绑定只算一次上游成本；${NAV_LABELS.analytics}里要不要算两次，请到上游设置看「算进利润」开关。`, { exact: true }).waitFor(); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.deepEqual(writes[0].selections[0].additionalMonitorStationIds, ["key-monitor"]);
 });
 
 test("connection edits invalidate proof while a display-name edit preserves it", async (t) => {
-  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) }); const drawer = await openOnboardingDrawer(page); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-pat"); await verifyOnboarding(drawer); await drawer.getByLabel("上游资源名称", { exact: true }).fill("Renamed"); assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isEnabled(), true); await drawer.getByLabel("上游站点地址", { exact: true }).fill("https://another.example"); assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true); assert.equal(writes.length, 0);
+  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) }); const drawer = await openOnboardingDrawer(page); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fixture-pat"); await verifyOnboarding(drawer); await drawer.getByLabel("上游名称", { exact: true }).fill("Renamed"); assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isEnabled(), true); await drawer.getByLabel("站点地址", { exact: true }).fill("https://another.example"); assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isDisabled(), true); assert.equal(writes.length, 0);
 });
 
 test("same-account credentials never bypass the separate authorization update confirmation", async (t) => {
   const { page, writes, recoveries } = await openOnboardingPage(t, { config: onboardingFixture(false), requireUpdate: true });
-  const drawer = await openOnboardingDrawer(page); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-replacement"); await verifyOnboarding(drawer);
-  assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true); await drawer.getByRole("button", { name: "更新这个账号授权", exact: true }).waitFor();
-  assert.equal(writes.length, 0); assert.equal(recoveries.length, 0); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).inputValue(), "fixture-replacement");
+  const drawer = await openOnboardingDrawer(page); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fixture-replacement"); await verifyOnboarding(drawer);
+  assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isDisabled(), true); await drawer.getByRole("button", { name: UPDATE_AUTH, exact: true }).waitFor();
+  assert.equal(writes.length, 0); assert.equal(recoveries.length, 0); assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).inputValue(), "fixture-replacement");
 });
 
 test("manual discovery keeps a stale catalogue visible and disables new binding", async (t) => {
   const { page } = await openOnboardingPage(t, { discovery(route, reads, config) { return fulfill(route, reads.filter((entry) => entry.path.endsWith("/sync")).length > 1 ? { ...config, stale: true, error: "fixture catalogue unavailable" } : config); } });
-  await page.getByRole("button", { name: "发现新渠道", exact: true }).click(); await page.getByText("渠道目录读取失败，正在显示上次发现的渠道", { exact: true }).waitFor(); assert.equal(await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).isDisabled(), true);
+  // 刷新失败时还列着上次读到的渠道，写「刷新失败，数据截至…」，要刷新成功才能绑定
+  await page.locator(".ant-collapse-header").getByRole("button", { name: REFRESH, exact: true }).click(); const stale = page.locator(".ant-alert-warning").filter({ has: page.getByText(refreshFailedText("2026-10-09T06:00:00.000Z"), { exact: true }) }); await stale.waitFor();
+  await stale.getByText("刷新后才能绑定", { exact: true }).waitFor(); await page.getByText("New channel", { exact: true }).waitFor(); assert.equal(await page.getByRole("button", { name: connectButton("New channel"), exact: true }).isDisabled(), true);
 });
 
 test("channel search and status filters do not silently select another account", async (t) => {
   const config = onboardingFixture(true, "newapi", [4, 5]); config.channels[1].baseUrl = "https://other.example"; config.channels[1].candidates = ["other-account"]; config.upstreams.push({ id: "other-account", name: "Other account", type: "newapi", baseUrl: "https://other.example", monitorEnabled: true });
-  const { page } = await openOnboardingPage(t, { config }); await page.getByRole("textbox", { name: "搜索接入渠道", exact: true }).fill("local-sales"); const drawer = await openOnboardingDrawer(page, true); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0); await drawer.getByText("复用已有上游", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("button", { name: "验证并预览", exact: true }).isDisabled(), true); assert.equal(await drawer.getByRole("button", { name: "确认关联", exact: true }).isDisabled(), true);
+  const { page } = await openOnboardingPage(t, { config }); await page.getByRole("textbox", { name: "搜索渠道", exact: true }).fill("local-sales"); const drawer = await openOnboardingDrawer(page, true); assert.equal(await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).count(), 0); await drawer.getByText(USE_SAVED, { exact: true }).waitFor(); assert.equal(await drawer.getByRole("button", { name: TEST_READ, exact: true }).isDisabled(), true); assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).isDisabled(), true);
 });
 
 test("five-channel batches fit 320/390/768/1440 widths without root overflow", async (t) => {
@@ -1095,6 +1230,14 @@ test("five-channel batches fit 320/390/768/1440 widths without root overflow", a
     const drawer = await openOnboardingDrawer(page, true); await enableBilling(page, drawer); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true); await saveOnboarding(drawer); assert.equal(writes.length, 1); await page.close();
   }
 });
+
+// 改绑定抽屉（app/(dashboard)/stations/association-editor.tsx 的 COPY 表，tsx 测试里引用不到，照抄原句）
+const BINDING_TARGET = "Key 9 · Own station", EDIT_DRAWER = new RegExp(`^${EDIT_BINDING} · `), EDIT_AFTER = "改后的渠道", EDIT_REMOVED = "去掉的渠道", EDIT_PREVIEW_TITLE = "预览，还没保存";
+const COVERAGE_UNKNOWN = reconciliationIssue("COST_COVERAGE_UNKNOWN"), CHANNEL_TWICE = reconciliationIssue("DUPLICATE_CHANNEL_ASSIGNMENT"), KEY_TWICE = reconciliationIssue("CANONICAL_KEY_CONFLICT");
+const editBindingButton = (scope, target = BINDING_TARGET) => scope.getByRole("button", { name: `${EDIT_BINDING} ${target}`, exact: true });
+// 上游账单里一把 Key 的折叠行：Key 名后跟状态标签（app/(dashboard)/stations/account-center.tsx 的 COPY.activeCount / needsAction / unbound / notBound）
+const keyRow = (scope, name) => scope.getByRole("button", { name: new RegExp(`(?:^|\\s)${name} (?:\\d+ 条在用|需处理|已解除绑定|没绑定)`) });
+const ariaExpanded = (label, expanded) => [({ label, expanded }) => [...document.querySelectorAll("[aria-label]")].some((node) => node.getAttribute("aria-label") === label && node.getAttribute("aria-expanded") === expanded), { label, expanded }];
 
 test("上游账单 edits one 核算关联 by a fresh exact preview and one PUT, and Esc closes the editor on open and right after a dropdown", async (t) => {
   const declaration = { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] };
@@ -1108,26 +1251,31 @@ test("上游账单 edits one 核算关联 by a fresh exact preview and one PUT, 
     if (mutation.path === "/api/reconciliation/rules/A-active" && mutation.method === "PUT") return fulfill(route, { rule: { ...rules[0], channels: mutation.body.salesChannelIds.map((channelId) => ({ channelId })) } });
     throw new Error("unexpected rule fixture API: " + mutation.method + " " + mutation.path);
   } });
-  const account = await expandAccount(center, model.accounts[0]); await account.getByRole("button", { name: /Key 9 · #9/ }).click();
-  const edit = account.getByRole("button", { name: "编辑渠道 A-active", exact: true }), drawer = page.getByRole("dialog", { name: /^编辑渠道 · / });
-  await edit.waitFor(); assert.equal(await account.getByRole("button", { name: "编辑渠道 A-history", exact: true }).count(), 0);
+  const account = await expandAccount(center, model.accounts[0]); await keyRow(account, "Key 9").click();
+  const edit = editBindingButton(account.locator('[data-rule-id="A-active"]')), drawer = page.getByRole("dialog", { name: EDIT_DRAWER });
+  // 解除过的绑定只读：有「已解除绑定」标签，没有任何按钮
+  await edit.waitFor(); const history = account.locator('[data-rule-id="A-history"]'); await history.getByText("已解除绑定", { exact: true }).waitFor(); assert.equal(await history.getByRole("button").count(), 0);
   // 刚打开、焦点还没进抽屉时 Esc 也能关
   await edit.click(); await drawer.waitFor(); await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
   // 下拉框展开时 Esc 只收起下拉框；紧接着（收起动画还没结束）再按 Esc 要能关掉抽屉（#413）
-  await edit.click(); const uses = drawer.getByRole("combobox", { name: "Key 的其他用途", exact: true }); await uses.click(); await page.waitForFunction(() => document.querySelector('[aria-label="Key 的其他用途"][aria-expanded="true"]'));
-  await page.keyboard.press("Escape"); await page.waitForFunction(() => document.querySelector('[aria-label="Key 的其他用途"][aria-expanded="false"]')); assert.equal(await drawer.isVisible(), true);
+  await edit.click(); const uses = drawer.getByRole("combobox", { name: COVERAGE_QUESTION, exact: true }); await uses.click(); await page.waitForFunction(...ariaExpanded(COVERAGE_QUESTION, "true"));
+  await page.keyboard.press("Escape"); await page.waitForFunction(...ariaExpanded(COVERAGE_QUESTION, "false")); assert.equal(await drawer.isVisible(), true);
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(mutations.length, 0);
-  await edit.click(); await drawer.getByText("A billing", { exact: true }).waitFor(); await drawer.getByText("Asia/Shanghai", { exact: true }).waitFor();
-  await drawer.locator('.ant-select-selection-item[title="Channel 1 · ID 1"] .ant-select-selection-item-remove').click();
-  await drawer.getByLabel("本站销售渠道", { exact: true }).click(); assert.equal(await page.locator(".ant-select-item-option-disabled", { hasText: "Channel 2 · ID 2（已用于 B Key）" }).count(), 1);
-  await page.getByText("Channel 4 · ID 4", { exact: true }).last().click(); await drawer.getByLabel("本站销售渠道", { exact: true }).press("Escape"); assert.equal(await drawer.isVisible(), true);
-  const previewButton = drawer.getByRole("button", { name: "预览核算关联修改", exact: true }), confirm = drawer.getByRole("button", { name: "确认修改核算关联", exact: true });
-  await previewButton.click(); await drawer.getByText("最终渠道：#3、#4", { exact: true }).waitFor(); await drawer.getByText("释放渠道：#1；原账单保留。", { exact: true }).waitFor(); assert.equal(mutations.filter((entry) => entry.method === "PUT").length, 0);
+  // 上游和 Key 只读显示；时区等于业务时区（Asia/Shanghai）时不写
+  await edit.click(); await waitForFact(drawer, "上游", "A billing"); await waitForFact(drawer, "Key", "Key 9");
+  assert.equal(await drawer.locator("dt").filter({ hasText: exactText("时区") }).count(), 0); assert.equal(await drawer.getByText("Asia/Shanghai").count(), 0);
+  await drawer.locator('.ant-select-selection-item[title="Channel 1"] .ant-select-selection-item-remove').click();
+  await drawer.getByLabel("渠道", { exact: true }).click(); assert.equal(await page.locator(".ant-select-item-option-disabled", { hasText: "Channel 2（已绑了别的 Key：B Key）" }).count(), 1);
+  await page.getByText("Channel 4", { exact: true }).last().click(); await drawer.getByLabel("渠道", { exact: true }).press("Escape"); assert.equal(await drawer.isVisible(), true);
+  const previewButton = drawer.getByRole("button", { name: BINDING_COPY.preview, exact: true }), confirm = drawer.getByRole("button", { name: EDIT_BINDING, exact: true });
+  await previewButton.click(); const previewAlert = drawer.locator(".ant-alert").filter({ hasText: EDIT_PREVIEW_TITLE }); await previewAlert.getByText(`${EDIT_AFTER}：Channel 3、Channel 4`, { exact: true }).waitFor(); await previewAlert.getByText(`${EDIT_REMOVED}：Channel 1；${HISTORY_KEPT}。`, { exact: true }).waitFor();
+  // 回答「不确定」时预览说明利润先不算
+  await previewAlert.getByText(COVERAGE_UNKNOWN.title + COVERAGE_UNKNOWN.detail, { exact: true }).waitFor(); assert.equal(mutations.filter((entry) => entry.method === "PUT").length, 0);
   // 预览后再改渠道：旧预览作废，确认前必须按当前选择重新预览
-  await drawer.locator('.ant-select-selection-item[title="Channel 4 · ID 4"] .ant-select-selection-item-remove').click(); await confirm.waitFor({ state: "detached" });
-  await drawer.getByLabel("本站销售渠道", { exact: true }).click(); await page.getByText("Channel 4 · ID 4", { exact: true }).last().click(); await drawer.getByLabel("本站销售渠道", { exact: true }).press("Escape");
-  await previewButton.click(); await drawer.getByText("最终渠道：#3、#4", { exact: true }).waitFor(); await confirm.waitFor();
-  const reads = accountRequests.length; await confirm.click(); await drawer.waitFor({ state: "hidden" }); await page.getByText("核算关联已更新", { exact: true }).waitFor();
+  await drawer.locator('.ant-select-selection-item[title="Channel 4"] .ant-select-selection-item-remove').click(); await confirm.waitFor({ state: "detached" });
+  await drawer.getByLabel("渠道", { exact: true }).click(); await page.getByText("Channel 4", { exact: true }).last().click(); await drawer.getByLabel("渠道", { exact: true }).press("Escape");
+  await previewButton.click(); await drawer.getByText(`${EDIT_AFTER}：Channel 3、Channel 4`, { exact: true }).waitFor(); await confirm.waitFor();
+  const reads = accountRequests.length; await confirm.click(); await drawer.waitFor({ state: "hidden" }); await page.locator(".ant-message").getByText(workflowActionMeta("edit_binding").done, { exact: true }).waitFor();
   assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["POST", "/api/reconciliation/rules/A-active/preview"], ["POST", "/api/reconciliation/rules/A-active/preview"], ["PUT", "/api/reconciliation/rules/A-active"]]);
   const put = mutations[2].body; assert.deepEqual(put.salesChannelIds, [3, 4]); assert.equal(put.tokenId, 9); assert.equal(put.upstreamStationId, "A-billing"); assert.equal(put.timezone, "Asia/Shanghai");
   assert.equal(put.groupId, "rule-edit"); assert.equal(put.previewId, "exact-rule-preview-2"); assert.deepEqual(put.coverageDeclaration, declaration);
@@ -1145,12 +1293,14 @@ test("4a 上游账单：固定采购上游的核算关联用途待确认时注�
       basis: { existingChannelIds: [1, 3], proposedChannelIds: mutation.body.salesChannelIds, timezone: "Asia/Shanghai" }, preview: { scopeChanged: false, costCoverage: "unknown", billingEffectiveFromMs: null } });
     throw new Error("unexpected rule fixture API: " + mutation.method + " " + mutation.path);
   } });
-  const account = await expandAccount(center, model.accounts[0]); await account.getByRole("button", { name: /Key 9 · #9/ }).click();
-  await waitForFact(account.locator('[data-rule-id="A-active"]'), "范围版本", "3 · 用途待确认（上游是固定采购，成本记 0，不影响毛利）");
-  await account.getByRole("button", { name: "编辑渠道 A-active", exact: true }).click(); const drawer = page.getByRole("dialog", { name: /^编辑渠道 · / });
-  await drawer.getByText("A billing", { exact: true }).waitFor(); await drawer.getByRole("button", { name: "预览核算关联修改", exact: true }).click();
-  await drawer.getByText("Key 用途待确认；上游是固定采购，成本记 0，不影响毛利", { exact: true }).waitFor();
-  assert.equal(await drawer.getByText("Key 用途待确认，金额作为参考", { exact: true }).count(), 0);
+  const account = await expandAccount(center, model.accounts[0]); await keyRow(account, "Key 9").click(); const active = account.locator('[data-rule-id="A-active"]');
+  // 固定成本的上游：写明上游成本计入固定成本；Key 用途照常显示，但不再说「利润先不算」
+  await waitForFact(active, "上游成本", FIXED_COST_TEXT); await waitForFact(active, COVERAGE_QUESTION, `${COVERAGE_ANSWERS.find((entry) => entry.value === "own_channels").label}：Channel 2`);
+  await editBindingButton(active).click(); const drawer = page.getByRole("dialog", { name: EDIT_DRAWER });
+  await waitForFact(drawer, "上游", "A billing"); await drawer.getByRole("button", { name: BINDING_COPY.preview, exact: true }).click();
+  const previewAlert = drawer.locator(".ant-alert").filter({ hasText: EDIT_PREVIEW_TITLE }); await previewAlert.getByText(`${EDIT_AFTER}：Channel 1、Channel 3`, { exact: true }).waitFor();
+  // 预览里不提「这把 Key 还给别处用吗？…利润先不算」：上游成本是固定的，Key 的其他用途不影响利润
+  assert.equal(await previewAlert.getByText(COVERAGE_UNKNOWN.title + COVERAGE_UNKNOWN.detail, { exact: true }).count(), 0); assert.equal(await previewAlert.getByText(COVERAGE_UNKNOWN.title).count(), 0);
 });
 
 test("上游账单 lets a 核算关联 remove a channel it already shares with another active 核算关联", async (t) => {
@@ -1165,44 +1315,51 @@ test("上游账单 lets a 核算关联 remove a channel it already shares with a
     if (mutation.path === "/api/reconciliation/rules/A-active" && mutation.method === "PUT") return fulfill(route, { rule: { ...rules[0], channels: mutation.body.salesChannelIds.map((channelId) => ({ channelId })) } });
     throw new Error("unexpected rule fixture API: " + mutation.method + " " + mutation.path);
   } });
-  const account = await expandAccount(center, model.accounts[0]); await account.getByRole("button", { name: /Key 9 · #9/ }).click(); const active = account.locator('[data-rule-id="A-active"]');
-  await active.getByText("渠道 #3 同时归属 C-dup，收入会被重复计算；停止其中一条，或编辑渠道移除重复的渠道。", { exact: true }).waitFor();
-  await active.getByRole("button", { name: "编辑渠道 A-active", exact: true }).click(); const drawer = page.getByRole("dialog", { name: /^编辑渠道 · / });
-  const duplicate = drawer.locator('.ant-select-selection-item[title="Channel 3 · ID 3（与 C Key 重复，需移除）"]'); await duplicate.waitFor();
+  const account = await expandAccount(center, model.accounts[0]); await keyRow(account, "Key 9").click(); const active = account.locator('[data-rule-id="A-active"]');
+  // 只有渠道重复（Key 没重复）：只说渠道绑了两把 Key，并指出和哪条重复
+  const banner = active.locator(".jy-banner"); await banner.locator("b").filter({ hasText: exactText(fillIssueCopy(CHANNEL_TWICE.title, CHANNEL_TWICE.plain, { channel: "Channel 3" })) }).waitFor();
+  await banner.getByText(`：${CHANNEL_TWICE.detail}`, { exact: true }).waitFor(); assert.equal(await banner.getByText(KEY_TWICE.title, { exact: true }).count(), 0);
+  await editBindingButton(active).click(); const drawer = page.getByRole("dialog", { name: EDIT_DRAWER });
+  const duplicate = drawer.locator('.ant-select-selection-item[title="Channel 3（已绑了别的 Key：C Key，去掉一条）"]'); await duplicate.waitFor();
   await duplicate.locator(".ant-select-selection-item-remove").click(); await duplicate.waitFor({ state: "detached" });
-  await drawer.getByLabel("本站销售渠道", { exact: true }).click(); assert.equal(await page.locator(".ant-select-item-option", { hasText: "Channel 3 · ID 3（与 C Key 重复，需移除）" }).count(), 1); await drawer.getByLabel("本站销售渠道", { exact: true }).press("Escape");
-  await drawer.getByRole("button", { name: "预览核算关联修改", exact: true }).click(); await drawer.getByText("最终渠道：#1", { exact: true }).waitFor(); await drawer.getByRole("button", { name: "确认修改核算关联", exact: true }).click(); await drawer.waitFor({ state: "hidden" });
+  await drawer.getByLabel("渠道", { exact: true }).click(); assert.equal(await page.locator(".ant-select-item-option:not(.ant-select-item-option-disabled)", { hasText: "Channel 3（已绑了别的 Key：C Key，去掉一条）" }).count(), 1); await drawer.getByLabel("渠道", { exact: true }).press("Escape");
+  await drawer.getByRole("button", { name: BINDING_COPY.preview, exact: true }).click(); await drawer.getByText(`${EDIT_AFTER}：Channel 1`, { exact: true }).waitFor(); await drawer.getByRole("button", { name: EDIT_BINDING, exact: true }).click(); await drawer.waitFor({ state: "hidden" });
   assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["POST", "/api/reconciliation/rules/A-active/preview"], ["PUT", "/api/reconciliation/rules/A-active"]]); assert.deepEqual(mutations[1].body.salesChannelIds, [1]); assert.equal(mutations[1].body.previewId, "dup-preview");
 });
 
 test("账单核算 is read-only: no create or edit entry, fixes link back to 上游账单", async (t) => {
-  const { page } = await openDailyPage(t), writeLike = /^(添加|编辑|停止|更换|操作)/;
+  // Rule A、Rule B 渠道重复（需处理），Rule C 正常：只有需处理的行才有去上游账单处理的链接
+  const rows = dailyRows(); for (const row of rows.slice(0, 2)) row.health = { code: "DUPLICATE_CHANNEL_ASSIGNMENT", issues: [{ code: "DUPLICATE_CHANNEL_ASSIGNMENT", ruleIds: ["rule-1", "rule-2"], detail: "销售渠道重复归属" }] };
+  const { page } = await openDailyPage(t, { data: dailyResponse(rows) }), writeLike = new RegExp(`^(添加|编辑|停止|更换|操作|${[EDIT_BINDING, CONNECT, workflowActionMeta("swap_key").label, workflowActionMeta("unbind").label].join("|")})`);
+  const FIX = workflowActionMeta("review_conflict").label, fixHref = (ruleId) => workflowAction("review_conflict", { ruleId }).href;
+  await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("需处理", { exact: true }).waitFor();
   assert.equal(await page.getByRole("button", { name: writeLike }).count(), 0); assert.equal(await page.getByText("编辑当前范围").count(), 0);
-  assert.equal(await page.getByRole("dialog", { name: "接入监控与对账" }).count(), 0);
-  assert.equal(await page.getByRole("link", { name: "去上游账单", exact: true }).getAttribute("href"), "/stations?view=bills");
-  const rowLinks = await page.getByRole("link", { name: "去上游账单处理 Rule A 的核算关联", exact: true }).evaluateAll((links) => links.map((link) => link.getAttribute("href")));
-  assert.ok(rowLinks.length > 0); assert.deepEqual([...new Set(rowLinks)], ["/stations?action=scope&ruleId=rule-1"]);
-  await page.getByRole("button", { name: "查看 Rule A 的核算详情", exact: true }).click(); const detail = page.getByRole("dialog", { name: "Rule A · 核算详情", exact: true }), fix = detail.getByRole("link", { name: "去上游账单处理", exact: true });
-  assert.equal(await fix.getAttribute("href"), "/stations?action=scope&ruleId=rule-1"); assert.equal(await detail.getByRole("button", { name: writeLike }).count(), 0);
+  assert.equal(await page.getByRole("dialog", { name: CONNECT }).count(), 0);
+  assert.equal(await page.getByRole("link", { name: `去${STATION_TABS.bills}`, exact: true }).getAttribute("href"), "/stations?view=bills");
+  const rowLinks = await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByRole("link", { name: `${FIX} Rule A`, exact: true }).evaluateAll((links) => links.map((link) => link.getAttribute("href")));
+  assert.deepEqual(rowLinks, [fixHref("rule-1")]); assert.equal(fixHref("rule-1"), "/stations?action=conflict&ruleId=rule-1");
+  assert.equal(await page.locator("tr.ant-table-row", { hasText: "Rule C" }).locator('a[href^="/stations"]').count(), 0);
+  await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click(); const detail = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true }), fix = detail.getByRole("link", { name: FIX, exact: true });
+  assert.equal(await fix.getAttribute("href"), fixHref("rule-1")); assert.equal(await detail.getByRole("button", { name: writeLike }).count(), 0);
   // 核算页不再嵌渠道接入：不读接入目录，也没有任何接入写请求
   const calls = onboardingRequests.get(page); assert.equal(calls.filter((call) => call.pathname === "/api/channel-onboarding").length, 0); assert.deepEqual(calls.filter((call) => call.method !== "GET"), []);
 });
 
 test("a lost batch response recovers persisted results without returned browser IDs or another confirm", async (t) => {
   const { page, writes, recoveries } = await openOnboardingPage(t, { loseResponseAt: 1 });
-  const drawer = await openOnboardingDrawer(page); await enableBilling(page, drawer); await drawer.getByRole("button", { name: "确认关联", exact: true }).click(); await drawer.getByText("全部请求步骤已保存", { exact: true }).waitFor();
-  assert.equal(writes.length, 1); assert.equal(recoveries.length, 1); assert.equal(recoveries[0].requestId, writes[0].requestId); assert.equal(recoveries[0].selections[0].stationId, "upstream-1"); assert.equal("saved" in recoveries[0], false); assert.equal(await drawer.getByRole("button", { name: "重试未完成步骤", exact: true }).isDisabled(), true);
+  const drawer = await openOnboardingDrawer(page); await enableBilling(page, drawer); await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).click(); await drawer.getByText(workflowActionMeta("connect_channels").done, { exact: true }).waitFor();
+  assert.equal(writes.length, 1); assert.equal(recoveries.length, 1); assert.equal(recoveries[0].requestId, writes[0].requestId); assert.equal(recoveries[0].selections[0].stationId, "upstream-1"); assert.equal("saved" in recoveries[0], false); assert.equal(await drawer.getByRole("button", { name: settledButton(FINISH) }).isDisabled(), true);
 });
 
 test("a new billing-only account is confirmed without creating another monitor", async (t) => {
-  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) }); const drawer = await openOnboardingDrawer(page); await drawer.getByLabel("上游系统访问令牌", { exact: true }).fill("fixture-billing-only"); await drawer.getByText("关联余额监控", { exact: true }).click(); await enableBilling(page, drawer); await saveOnboarding(drawer); assert.equal(writes[0].selections[0].monitor, false); assert.equal(writes[0].selections[0].newStation.accessToken, "fixture-billing-only");
+  const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) }); const drawer = await openOnboardingDrawer(page); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fixture-billing-only"); await drawer.getByText(ONBOARDING_PURPOSES.monitor, { exact: true }).click(); await enableBilling(page, drawer); await saveOnboarding(drawer); assert.equal(writes[0].selections[0].monitor, false); assert.equal(writes[0].selections[0].newStation.accessToken, "fixture-billing-only");
 });
 
 test("switching a billing-only new account authorization type does not silently enable monitoring", async (t) => {
   const { page, writes } = await openOnboardingPage(t, { config: onboardingFixture(false) }); const drawer = await openOnboardingDrawer(page);
-  await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).uncheck(); await drawer.getByRole("checkbox", { name: "同时配置 Key 对账", exact: true }).check();
-  await drawer.getByLabel("监控方式", { exact: true }).click(); await page.getByText("Sub2API · 账号密码", { exact: true }).last().click(); await drawer.getByLabel("上游登录邮箱", { exact: true }).fill("billing-only@example.test"); await drawer.getByLabel("上游登录密码", { exact: true }).fill("fixture-billing-only-password");
-  assert.equal(await drawer.getByRole("checkbox", { name: "关联余额监控", exact: true }).isChecked(), false); await enableBilling(page, drawer); await saveOnboarding(drawer);
+  await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).uncheck(); await drawer.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).check();
+  await drawer.getByLabel(CREDENTIAL_FIELDS.type.label, { exact: true }).click(); await page.getByText(upstreamType("sub2api-password"), { exact: true }).last().click(); await drawer.getByLabel(CREDENTIAL_FIELDS.email.label, { exact: true }).fill("billing-only@example.test"); await drawer.getByLabel(CREDENTIAL_FIELDS.password.label, { exact: true }).fill("fixture-billing-only-password");
+  assert.equal(await drawer.getByRole("checkbox", { name: MONITOR, exact: true }).isChecked(), false); await enableBilling(page, drawer); await saveOnboarding(drawer);
   assert.equal(writes[0].selections[0].monitor, false); assert.equal(writes[0].selections[0].newStation.type, "sub2api-password"); assert.equal("accessToken" in writes[0].selections[0].newStation, false); assert.deepEqual(writes[0].selections[0].additionalMonitorStationIds, []);
 });
 
@@ -1212,11 +1369,11 @@ test("the resources page retains the same batch entry and original resource conf
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
     throw new Error("unexpected station fixture API: " + path);
   } });
-  await page.goto(baseURL + "/stations?view=onboarding"); const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].groups[0].channels[0].channelId, 4); await page.getByRole("tab", { name: "资源列表", exact: true }).click(); await page.getByRole("button", { name: "新增上游资源", exact: true }).first().click(); await page.getByRole("dialog", { name: "新增上游资源", exact: true }).waitFor();
+  await page.goto(baseURL + "/stations?view=onboarding"); const drawer = await openOnboardingDrawer(page); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(writes.length, 1); assert.equal(writes[0].groups[0].channels[0].channelId, 4); await page.getByRole("tab", { name: STATION_TABS.list, exact: true }).click(); await page.getByRole("button", { name: "新增上游资源", exact: true }).first().click(); await page.getByRole("dialog", { name: "新增上游资源", exact: true }).waitFor();
 });
 
 test("catalogue sync occurs on entry and manual discovery, without page-minute polling", async (t) => {
-  const { page, reads } = await openOnboardingPage(t, { clock: true }); assert.equal(reads.filter((entry) => entry.path.endsWith("/sync")).length, 1); await page.clock.fastForward(70000); assert.equal(reads.filter((entry) => entry.path.endsWith("/sync")).length, 1); await page.getByRole("button", { name: "发现新渠道", exact: true }).click(); await page.getByRole("button", { name: "接入渠道 New channel", exact: true }).click({ trial: true }); assert.equal(reads.filter((entry) => entry.path.endsWith("/sync")).length, 2);
+  const { page, reads } = await openOnboardingPage(t, { clock: true }); assert.equal(reads.filter((entry) => entry.path.endsWith("/sync")).length, 1); await page.clock.fastForward(70000); assert.equal(reads.filter((entry) => entry.path.endsWith("/sync")).length, 1); await page.locator(".ant-collapse-header").getByRole("button", { name: REFRESH, exact: true }).click(); await page.getByRole("button", { name: connectButton("New channel"), exact: true }).click({ trial: true }); assert.equal(reads.filter((entry) => entry.path.endsWith("/sync")).length, 2);
 });
 
 // Public shapes and facts from server/channel-onboarding.test.js accountReadFixture/U03 cases.
@@ -1229,7 +1386,7 @@ function accountReadFixture() {
   const member = (channelId) => ({ ownSource: source, ownStationId: "own", channelId, name: "Channel " + channelId });
   const aIdentity = identity("newapi", "A"), bIdentity = identity("newapi", "B"), subIdentity = identity("sub2api", "A");
   const aKey = hash(["newapi", "https://same.test", "A"]), bKey = hash(["newapi", "https://same.test", "B"]), subKey = hash(["sub2api", "https://same.test", "A"]);
-  const action = (kind, label, target = {}) => ({ id: kind + ":" + hash(target), kind, label, accountKey: null, stationId: null, ruleId: null, ownStationId: null, channelIds: [], window: null, href: "/stations", ...target });
+  const action = (kind, target = {}) => ({ id: kind + ":" + hash(target), kind, label: workflowActionMeta(kind).label, accountKey: null, stationId: null, ruleId: null, ownStationId: null, channelIds: [], window: null, href: "/stations", ...target });
   const channelRef = (channelId) => ({ channelId, name: "Channel " + channelId });
   const association = (ruleId, extra = {}) => ({ ruleId, status: "active", upstreamStationId: null, ownStationId: "own", timezone: "Asia/Shanghai", channels: [channelRef(1)], costCoverage: "unknown",
     coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] }, scopeVersion: 3, billingEffectiveFromMs: 1791561600000, accountingStartMs: 1791561600000, conflict: false, conflictRuleIds: [], stoppedAt: null, ...extra });
@@ -1241,14 +1398,14 @@ function accountReadFixture() {
       resource("A-monitor-1", aIdentity, { lowBalanceUsd: 27, cnyPerUsd: 0.7, includeInProfit: false, noRenewal: true, balance: { ok: false, remaining: 10, account: null, error: "403 [已隐藏] [已隐藏] [已隐藏]" } }), resource("A-monitor-2", aIdentity, { purposes: { monitor: true, billingRuleIds: ["A-stopped"] } })],
     keys: [key("A", 9, { ruleIds: ["A-active", "A-history"], channels: [member(1), member(3)], associations: [association("A-active", { upstreamStationId: "A-billing", channels: [channelRef(1), channelRef(3)] }), stopped("A-history", { upstreamStationId: "A-archived" })] }),
       key("A", 10, { ruleIds: ["A-stopped"], activeRuleIds: [], channels: [member(2)], associations: [stopped("A-stopped", { upstreamStationId: "A-monitor-2", channels: [channelRef(2)] })] })],
-    actions: [action("update_authorization", "更新账号授权", { accountKey: aKey, href: `/stations?action=authorization&accountKey=${aKey}` }), action("confirm_coverage", "核对这把 Key 的全部用途", { accountKey: aKey, ruleId: "A-active", ownStationId: "own", channelIds: [2], href: "/stations?action=coverage&ruleId=A-active" })] };
+    actions: [action("update_authorization", { accountKey: aKey, href: `/stations?action=authorization&accountKey=${aKey}` }), action("confirm_coverage", { accountKey: aKey, ruleId: "A-active", ownStationId: "own", channelIds: [2], href: "/stations?action=coverage&ruleId=A-active" })] };
   const b = { accountKey: bKey, siteKey: a.siteKey, identity: bIdentity, resources: [resource("B-monitor", bIdentity)], keys: [key("B", 9, { costCoverage: "complete", coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] }, channels: [member(2)],
-    associations: [association("B-active", { upstreamStationId: "B-monitor", channels: [channelRef(2)], costCoverage: "complete", coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] } })] })], actions: [action("inspect_balance", "查看余额与监控", { accountKey: bKey, stationId: "B-monitor" })] };
+    associations: [association("B-active", { upstreamStationId: "B-monitor", channels: [channelRef(2)], costCoverage: "complete", coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] } })] })], actions: [action("inspect_balance", { accountKey: bKey, stationId: "B-monitor" })] };
   const sub = { accountKey: subKey, siteKey: hash(["sub2api", "https://same.test"]), identity: subIdentity, resources: [resource("Sub-JWT", subIdentity, { type: "sub2api" }), resource("Sub-password", subIdentity, { type: "sub2api-password", hasAccessToken: false, hasPassword: true })], keys: [], actions: [] };
   const unverifiedResources = [resource("pure-key", null, { type: "newapi-key", hasAccessToken: false, hasApiKey: true }), resource("unknown-legacy", null)];
   const channels = [1, 2, 3].map((id) => ({ id, name: "Channel " + id, type: 1, status: id === 2 ? 2 : 1, baseUrl: "https://same.test", groups: ["sales"], revision: "revision-" + id, missing: id === 3,
     monitor: { status: id === 1 ? "linked" : "unlinked", stationIds: id === 1 ? ["A-monitor-1", "A-monitor-2", "pure-key"] : [] }, reconciliation: { status: "configured", ruleIds: id === 1 ? ["A-active"] : id === 2 ? ["B-active", "A-stopped"] : ["A-history"] } }));
-  return { accounts: [a, b, sub], unverifiedResources, channels, actions: [...a.actions, ...b.actions, action("connect_channels", "接入这些渠道", { stationId: "pure-key", ownStationId: "own", channelIds: [1], href: "/stations?action=connect&ownStationId=own&channelIds=1" }), action("verify_identity", "核验账号身份", { stationId: "unknown-legacy", ownStationId: "own", href: "/stations?action=verify&stationId=unknown-legacy" })], generatedAt: "2026-10-09T07:00:00.000Z" };
+  return { accounts: [a, b, sub], unverifiedResources, channels, actions: [...a.actions, ...b.actions, action("connect_channels", { stationId: "pure-key", ownStationId: "own", channelIds: [1], href: "/stations?action=connect&ownStationId=own&channelIds=1" }), action("verify_identity", { stationId: "unknown-legacy", ownStationId: "own", href: "/stations?action=verify&stationId=unknown-legacy" })], generatedAt: "2026-10-09T07:00:00.000Z" };
 }
 // 账号卡片里的事实按 dt/dd 成对展示：等到这一项的值出现
 const exactText = (text) => new RegExp(`^\\s*${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`);
@@ -1272,13 +1429,13 @@ async function openAccountsPage(t, options = {}) {
     throw new Error("unexpected account fixture API: " + path);
   } });
   const { page } = onboarded;
-  // 账号、Key 与核算关联在「上游账单」标签里；接入类事项落到「渠道接入」标签，上游账单此时不可见
+  // 上游账号、Key 与绑定在「上游账单」标签里；绑定类事项落到「渠道绑定」标签，上游账单此时不可见
   const path = options.path || "/stations?view=bills", onboardingDestination = /[?&]action=(?:connect|coverage|source)(?:&|$)/.test(path);
   // 预载的渠道接入页也读过一次账号；计数从目标页开始
   accountRequests.length = 0;
-  await page.goto(baseURL + path); const center = page.getByRole("region", { name: "上游账单" }); if (onboardingDestination) await page.getByRole("tab", { name: "渠道接入", selected: true }).waitFor(); else if (options.initialFailure) await center.getByRole("button", { name: "重试上游账单", exact: true }).waitFor(); else if (!options.path) await center.getByText(/显示 3\/3 个已核验账号/).waitFor(); else await center.getByText(/显示 .* 个已核验账号/).waitFor();
+  await page.goto(baseURL + path); const center = page.getByRole("region", { name: STATION_TABS.bills }); if (onboardingDestination) await page.getByRole("tab", { name: STATION_TABS.onboarding, selected: true }).waitFor(); else if (options.initialFailure) await center.getByRole("button", { name: `${REFRESH}${STATION_TABS.bills}`, exact: true }).waitFor(); else if (!options.path) await center.getByText(/^3 个上游账号；/).waitFor(); else await center.getByText(/^\d+ 个上游账号/).waitFor();
   if (/action=verify(?:&|-billing&)/.test(options.path || "") && !options.path.includes("stationId=deleted")) {
-    const verification = page.getByRole("dialog", { name: /^核验账号与账单能力/ }); await verification.waitFor();
+    const verification = page.getByRole("dialog", { name: new RegExp(`^${TEST_READ} · `) }); await verification.waitFor();
     await page.waitForFunction((dialog) => !dialog.closest(".ant-drawer")?.getAnimations({ subtree: true }).some((animation) => animation.playState === "running" && animation.effect?.getTiming().iterations !== Infinity), await verification.elementHandle());
   }
   const badge = page.getByRole("button", { name: "Collapse issues badge", exact: true }); if (await badge.isVisible()) await badge.click();
@@ -1289,28 +1446,43 @@ async function expandAccount(center, account) { await center.locator(`[data-site
 test("workflow channel and complete-Key destinations reuse one batch confirmation with known ninth channel", async (t) => {
   const config = onboardingFixture(true, "newapi", [1, 2, 3, 4, 9]); config.rules[0].channels = [1, 2, 3].map((channelId) => ({ channelId, name: "Sales " + channelId })); config.rules[0].coverageDeclaration = { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [9] }; config.rules[0].timezone = "UTC";
   const opened = await openAccountsPage(t, { config, path: "/stations?action=coverage&ruleId=rule-1" });
-  const drawer = opened.page.getByRole("dialog", { name: "接入监控与对账", exact: true }); await drawer.getByText("本次选择 4 个渠道", { exact: true }).waitFor(); assert.equal(await drawer.getByLabel("上游系统访问令牌", { exact: true }).count(), 0); await verifyOnboarding(drawer); await drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }).click(); await opened.page.getByText("没有", { exact: true }).last().click(); await verifyOnboarding(drawer); await saveOnboarding(drawer);
+  const drawer = opened.page.getByRole("dialog", { name: CONNECT, exact: true }); await drawer.getByText("已选 4 个渠道", { exact: true }).waitFor(); assert.equal(await tokenField(drawer).count(), 0); await verifyOnboarding(drawer); await drawer.getByRole("combobox", { name: COVERAGE_QUESTION, exact: true }).click(); await opened.page.getByText(ONLY_THESE, { exact: true }).last().click(); await verifyOnboarding(drawer); await saveOnboarding(drawer);
   assert.equal(opened.writes.length, 1); assert.deepEqual(opened.writes[0].groups[0].channels.map((channel) => channel.channelId), [1, 2, 3, 9]); assert.equal(opened.writes[0].groups[0].reconciliation.tokenId, 7); assert.equal(opened.writes[0].groups[0].reconciliation.timezone, "UTC"); assert.equal(opened.writes[0].groups[0].reconciliation.coverageDeclaration.answer, "none"); assert.equal(opened.writes[0].selections[0].stationId, "upstream-1"); assert.equal(opened.writes[0].selections[0].monitor, false);
-  const connected = await openAccountsPage(t, { path: "/stations?action=connect&ownStationId=own-1&channelIds=4" }); const single = connected.page.getByRole("dialog", { name: "接入监控与对账", exact: true }); await single.getByText("本次选择 1 个渠道", { exact: true }).waitFor(); await verifyOnboarding(single); await saveOnboarding(single); assert.equal(connected.writes.length, 1);
+  const connected = await openAccountsPage(t, { path: "/stations?action=connect&ownStationId=own-1&channelIds=4" }); const single = connected.page.getByRole("dialog", { name: CONNECT, exact: true }); await single.getByText("已选 1 个渠道", { exact: true }).waitFor(); await verifyOnboarding(single); await saveOnboarding(single); assert.equal(connected.writes.length, 1);
 });
 
+// 渠道绑定页打不开处理目标时（§8.2）：顶部一条提示，带「刷新」和回到渠道绑定的「返回」，不打开抽屉
+async function destinationProblem(page, title) {
+  const alert = page.locator(".ant-alert").filter({ has: page.locator(".ant-alert-title").filter({ hasText: exactText(title) }) });
+  await alert.waitFor(); await alert.getByRole("button", { name: REFRESH, exact: true }).waitFor();
+  assert.equal(await alert.getByRole("link", { name: "返回", exact: true }).getAttribute("href"), "/stations");
+  return alert;
+}
 test("workflow stale channel, changed source and stopped coverage destinations keep an actionable reload", async (t) => {
   for (const path of ["/stations?action=connect&ownStationId=own-1&channelIds=999", "/stations?action=connect&ownStationId=another-source&channelIds=4", "/stations?action=coverage&ruleId=stopped-rule", "/stations?action=source&ownStationId=another-source"]) {
-    const opened = await openAccountsPage(t, { path }); await opened.page.getByRole("button", { name: "刷新处理目标", exact: true }).waitFor(); assert.equal(opened.writes.length, 0); assert.equal(opened.probes.length, 0); assert.equal(await opened.page.getByRole("dialog").count(), 0);
+    const opened = await openAccountsPage(t, { path }); await destinationProblem(opened.page, DESTINATION_CHANGED); assert.equal(opened.writes.length, 0); assert.equal(opened.probes.length, 0); assert.equal(await opened.page.getByRole("dialog").count(), 0);
   }
   const config = onboardingFixture(true, "newapi", [1, 2, 3, 4]); config.ownSource = { ...ownSource, accountId: "2", namespaceKey: createHash("sha256").update(JSON.stringify(["newapi", ownSource.baseUrl, "2"])).digest("hex") };
-  const changed = await openAccountsPage(t, { config, path: "/stations?action=coverage&ruleId=rule-1" }); await changed.page.getByText("原核算关联的本站来源与当前核验来源不同，请先核对本站来源；原历史账单不会改归新来源。", { exact: true }).waitFor(); assert.equal(changed.probes.length, 0); assert.equal(changed.writes.length, 0);
+  const changed = await openAccountsPage(t, { config, path: "/stations?action=coverage&ruleId=rule-1" }); const SOURCE = reconciliationIssue("SOURCE_BINDING_UNCONFIRMED");
+  const problem = await destinationProblem(changed.page, SOURCE.title); await problem.getByText(SOURCE.detail, { exact: true }).waitFor();
+  assert.equal(await problem.getByRole("link", { name: workflowActionMeta("review_source").label, exact: true }).getAttribute("href"), workflowAction("review_source", { ownStationId: config.ownStation.id }).href);
+  assert.equal(await changed.page.getByRole("dialog").count(), 0); assert.equal(changed.probes.length, 0); assert.equal(changed.writes.length, 0);
 });
 
 test("workflow balance destination focuses original resource settings and account authorization opens its existing flow", async (t) => {
-  const opened = await openAccountsPage(t, { path: "/stations?stationId=A-monitor-1" }); const focused = opened.page.getByRole("region", { name: "定位原资源余额与监控", exact: true }); await focused.getByText("A-monitor-1", { exact: true }).waitFor(); assert.equal(await focused.getByText("A-monitor-2", { exact: true }).count(), 0); await focused.getByRole("button", { name: "原资源设置", exact: true }).click(); const editor = opened.page.getByRole("dialog", { name: /^编辑上游资源：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("低余额告警阈值（按该资源的余额单位计，可留空）", { exact: true }).inputValue(), "27");
-  const authorized = await openAuthorizationPage(t); await authorized.page.goto(`${baseURL}/stations?action=authorization&accountKey=${authorized.model.accounts[0].accountKey}`); const drawer = authorized.page.getByRole("dialog", { name: "更新账号授权 · 42", exact: true }); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("u06-once"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.equal(authorized.updates.length, 1); assert.deepEqual(authorized.updates[0].targetStationIds.sort(), ["st_u04_a1", "st_u04_a2", "st_u04_billing"]);
+  const opened = await openAccountsPage(t, { path: "/stations?stationId=A-monitor-1" }); const focused = opened.page.getByRole("region", { name: workflowActionMeta("inspect_balance").label, exact: true }); await focused.getByText("A-monitor-1", { exact: true }).waitFor(); assert.equal(await focused.getByText("A-monitor-2", { exact: true }).count(), 0); await focused.getByRole("button", { name: "编辑上游", exact: true }).click(); const editor = opened.page.getByRole("dialog", { name: /^编辑上游资源：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("低余额告警阈值（按该资源的余额单位计，可留空）", { exact: true }).inputValue(), "27");
+  const authorized = await openAuthorizationPage(t); await authorized.page.goto(`${baseURL}/stations?action=authorization&accountKey=${authorized.model.accounts[0].accountKey}`); const drawer = authorized.page.getByRole("dialog", { name: `${UPDATE_AUTH} · 上游账号 42`, exact: true }); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("u06-once"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.equal(authorized.updates.length, 1); assert.deepEqual(authorized.updates[0].targetStationIds.sort(), ["st_u04_a1", "st_u04_a2", "st_u04_billing"]);
 });
 
 test("workflow source destination distinguishes last verified stale namespace and explicit current sync", async (t) => {
   const config = { ...onboardingFixture(), ownSource, sourceVersion: "source-v1", stale: true, error: "source unavailable" }; let current = false;
   const opened = await openAccountsPage(t, { config, path: "/stations?action=source&ownStationId=own-1", discovery(route, reads) { return fulfill(route, current ? { ...config, ownSource: { ...ownSource, accountId: "2", namespaceKey: "new-source-namespace" }, sourceVersion: "source-v2", stale: false, error: null } : config); } });
-  const source = opened.page.getByRole("region", { name: "核对本站来源", exact: true }); await source.getByText("目录已过期，以下为最后核验来源", { exact: true }).waitFor(); assert.ok((await source.textContent()).includes("实际账号 1")); current = true; await source.getByRole("button", { name: "读取最新本站渠道", exact: true }).click(); await source.getByText("当前已核验本站来源", { exact: true }).waitFor(); assert.ok((await source.textContent()).includes("实际账号 2")); assert.equal(opened.writes.length, 0); assert.equal(opened.probes.length, 0);
+  // 自营站点的账号号不再上页面（§3.3）：过期时标题写「刷新失败，数据截至 …」，原因原文收在「查看详细原因」；手动刷新读到最新后改为确认绑定的提示
+  const SOURCE = reconciliationIssue("SOURCE_BINDING_UNCONFIRMED"), title = (text) => source.locator(".ant-alert-title").filter({ hasText: exactText(text) });
+  const source = opened.page.getByRole("region", { name: workflowActionMeta("review_source").label, exact: true }); await title(refreshFailedText(config.syncedAt, config.tz)).waitFor();
+  assert.ok((await source.textContent()).includes(`自营站点：${EMPTY} · ${ownSource.baseUrl}`)); assert.equal(await source.locator("details.jy-error-detail").filter({ hasText: config.error }).count(), 1);
+  current = true; await source.getByRole("button", { name: REFRESH, exact: true }).click(); await title(SOURCE.title).waitFor(); await source.getByText(SOURCE.detail, { exact: true }).waitFor();
+  assert.equal(await source.locator("details.jy-error-detail").count(), 0); assert.equal(await title(refreshFailedText(config.syncedAt, config.tz)).count(), 0); assert.equal(opened.writes.length, 0); assert.equal(opened.probes.length, 0);
 });
 
 function keyVerificationFixture(provider = "newapi", timezone = "UTC", selected = false) {
@@ -1322,6 +1494,11 @@ function keyVerificationFixture(provider = "newapi", timezone = "UTC", selected 
     probe: selected ? { tokenId: 9, state: "complete", complete: true, window: timezone === "UTC" ? { startMs: 1791417600000, endMs: 1791504000000, timezone } : { startMs: 1791388800000, endMs: 1791475200000, timezone }, currency: "USD", amountUsd: provider === "newapi" ? 0 : 3.25, knownAmountUsd: provider === "newapi" ? 0 : 3.25, actualCostUsd: provider === "sub2api" ? 3.25 : null, quotaUnits: provider === "newapi" ? 0 : null, quotaPerUnit: provider === "newapi" ? 100 : null, capability, billingTimezone } : null };
 }
 
+// 测试读取抽屉（§3.5）：标题「测试读取 · 上游名」，读到上游账号写「能读到上游账号 N」，下面一个「确认」把这个上游归到这个上游账号下
+const verificationDialog = (page, name) => page.getByRole("dialog", { name: `${TEST_READ} · ${name}`, exact: true });
+const confirmIdentityButton = (drawer) => drawer.getByRole("button", { name: settledButton("确认") });
+const IDENTITY_READ = (accountId) => `能读到上游账号 ${accountId}`;
+const VERIFY_KEY = "选一把 Key", VERIFY_SELECTED = "测试读取选中的 Key", SWAP_KEY = workflowActionMeta("swap_key").label;
 for (const width of [320, 390, 768, 1440]) {
   test(`F06 legacy account identity is explicitly confirmed without channels at ${width}px`, async (t) => {
     const model = accountReadFixture(), original = model.unverifiedResources.find((resource) => resource.id === "unknown-legacy");
@@ -1339,14 +1516,13 @@ for (const width of [320, 390, 768, 1440]) {
           identity: read.identity, resources: [resource], keys: [], actions: [] }]; model.unverifiedResources = [];
         return fulfill(route, { stationId: original.id, identity: read.identity, accountKey, resourceVersion: resource.resourceVersion });
       } });
-    const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · unknown-legacy", exact: true });
-    assert.equal(await drawer.getByRole("button", { name: "确认保存账号身份", exact: true }).count(), 0);
-    await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click();
-    await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); assert.equal(opened.mutations.length, 0);
-    const confirm = drawer.getByRole("button", { name: "确认保存账号身份", exact: true });
+    const drawer = verificationDialog(opened.page, "unknown-legacy"), confirm = confirmIdentityButton(drawer);
+    assert.equal(await confirm.count(), 0);
+    await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click();
+    await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); assert.equal(opened.mutations.length, 0);
     await confirm.focus(); await opened.page.keyboard.press("Enter"); await drawer.waitFor({ state: "hidden" });
-    await opened.center.getByText(/显示 1\/1 个已核验账号/).waitFor();
-    await opened.center.getByRole("button", { name: "更新账号授权 newapi 42", exact: true }).waitFor();
+    await opened.center.getByText(/^1 个上游账号；0 个上游还没确认上游账号/).waitFor();
+    await opened.center.getByRole("button", { name: `${UPDATE_AUTH} 上游账号 42`, exact: true }).waitFor();
     assert.equal(opened.mutations.length, 1); assert.equal(opened.writes.length, 0);
     assert.equal(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
   });
@@ -1357,14 +1533,16 @@ test("F06 a rejected identity save remains retryable and requires a new read bef
     readonlyAPI(route) { return fulfill(route, keyVerificationFixture()); }, mutation(route) {
       return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: "RESOURCE_CHANGED", error: "资源配置已变化，请重新核验" }) });
     } });
-  const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · unknown-legacy", exact: true });
-  await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click();
-  await drawer.getByRole("button", { name: "确认保存账号身份", exact: true }).click();
-  await drawer.getByText("资源配置已变化，请重新核验", { exact: true }).waitFor();
-  assert.equal(await drawer.getByRole("button", { name: "确认保存账号身份", exact: true }).count(), 0);
-  await drawer.getByRole("button", { name: /实际核验账号与 Key 目录/ }).click();
-  await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor();
-  await drawer.getByRole("button", { name: /确认保存账号身份/ }).waitFor();
+  const drawer = verificationDialog(opened.page, "unknown-legacy"), confirm = confirmIdentityButton(drawer);
+  await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click();
+  await confirm.click();
+  // 保存被拒：写「保存失败：内容有变化，请重新预览。」，接口原文收在「查看详细原因」
+  const rejected = alertWithTitle(drawer, failureText("保存失败", { code: "RESOURCE_CHANGED", error: "资源配置已变化，请重新核验" })); await rejected.waitFor();
+  assert.equal(await rejected.locator("details.jy-error-detail").filter({ hasText: "资源配置已变化，请重新核验" }).count(), 1);
+  assert.equal(await confirm.count(), 0);
+  await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click();
+  await alertTitle(drawer, IDENTITY_READ("42")).waitFor();
+  await confirm.waitFor();
   assert.equal(opened.mutations.length, 1); assert.equal(opened.writes.length, 0);
 });
 test("workflow identity and selected-Key read preserve actual zero and separate Sub2 date capability from timezone", async (t) => {
@@ -1372,24 +1550,26 @@ test("workflow identity and selected-Key read preserve actual zero and separate 
     const reads = []; const opened = await openAccountsPage(t, { path: `/stations?action=${action}&stationId=${stationId}`, readonlyAPI(route, path) {
       assert.equal(path, `/api/reconciliation/upstreams/${stationId}/keys`); const params = Object.fromEntries(new URL(route.request().url()).searchParams); reads.push(params); return fulfill(route, keyVerificationFixture(provider, params.timezone, !!params.tokenId));
     } });
-    const drawer = opened.page.getByRole("dialog", { name: `核验账号与账单能力 · ${stationId}`, exact: true }); await drawer.waitFor(); await drawer.getByRole("textbox", { name: "核验账单时区", exact: true }).fill(timezone); await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click(); await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); await drawer.getByRole("combobox", { name: "核验实际 Key", exact: true }).click(); await opened.page.getByText(`actual-key · #9 · ${provider === "newapi" ? "g" : "无分组"}`, { exact: true }).last().click(); await drawer.getByRole("button", { name: "核验所选 Key 账单", exact: true }).click(); await drawer.getByText(provider === "newapi" ? "所选 Key 原统计" : "所选 Key 扣费参考", { exact: true }).waitFor();
-    assert.deepEqual(reads, [{ force: "true", timezone }, { force: "true", timezone, tokenId: "9" }]); assert.ok((await drawer.textContent()).includes(provider === "newapi" ? "原金额：$0.00" : "原金额：$3.25")); assert.ok((await drawer.textContent()).includes("此处不确认利润")); if (provider === "sub2api") { assert.ok((await drawer.textContent()).includes("本次 Key / 日期能力：已支持")); assert.ok((await drawer.textContent()).includes("未核验，原金额仅供参考")); } assert.equal(opened.mutations.length, 0); assert.equal(opened.writes.length, 0);
+    // Key 下拉写「名称 · 分组 g」，没有分组时只写名称；读出来的上游成本是 0 也照写 $0.00
+    const drawer = verificationDialog(opened.page, stationId); await drawer.waitFor(); await drawer.getByRole("textbox", { name: "时区", exact: true }).fill(timezone); await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click(); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); await drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }).click(); await opened.page.getByText(provider === "newapi" ? "actual-key · 分组 g" : "actual-key", { exact: true }).last().click(); await drawer.getByRole("button", { name: settledButton(VERIFY_SELECTED) }).click(); await alertTitle(drawer, "actual-key 的上游成本").waitFor();
+    assert.deepEqual(reads, [{ force: "true", timezone }, { force: "true", timezone, tokenId: "9" }]); assert.ok((await drawer.textContent()).includes(provider === "newapi" ? "上游成本 $0.00" : "上游成本 $3.25")); assert.ok((await drawer.textContent()).includes("这里只是测试读取，不改利润。")); if (provider === "sub2api") { await drawer.getByText(testReadText({ ok: true }), { exact: true }).waitFor(); await drawer.getByText(reconciliationIssue("BILLING_TIMEZONE_UNVERIFIED").title, { exact: true }).waitFor(); } assert.equal(opened.mutations.length, 0); assert.equal(opened.writes.length, 0);
   }
 });
 
 test("workflow unreadable Key directory remains partial and pure-Key fallback uses the full original editor", async (t) => {
   const opened = await openAccountsPage(t, { path: "/stations?action=verify&stationId=unknown-legacy", readonlyAPI(route) {
     const partial = keyVerificationFixture(); Object.assign(partial, { quotaPerUnit: null, version: "", groups: {}, tokens: [], capability: { state: "unverified", currency: "USD", window: "second", reason: "KEY_METADATA_UNAVAILABLE" }, billingTimezone: { state: "unverified", timezone: "Asia/Shanghai", reason: "KEY_METADATA_UNAVAILABLE" } }); return fulfill(route, partial);
-  } }); const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · unknown-legacy", exact: true }); await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click(); await drawer.getByText("Key 目录无法读取，请检查目录权限或稍后重试", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: "核验实际 Key", exact: true }).count(), 0); assert.equal(opened.mutations.length, 0);
-  const pure = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=pure-key", readonlyAPI() { assert.fail("pure Key must not enter account probe"); } }); const pureDrawer = pure.page.getByRole("dialog", { name: "核验账号与账单能力 · pure-key", exact: true }); await pureDrawer.getByText("纯 Key 保持独立，不能推断所属账号", { exact: true }).waitFor(); await pureDrawer.getByRole("button", { name: "补充原资源授权", exact: true }).click(); const editor = pure.page.getByRole("dialog", { name: /^编辑上游资源：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel("名称", { exact: true }).inputValue(), "pure-key"); assert.equal(pure.mutations.length, 0);
+  } }); const drawer = verificationDialog(opened.page, "unknown-legacy"); await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click(); await alertTitle(drawer, testReadText({ ok: false, reason: describeError({ code: "KEY_METADATA_UNAVAILABLE" }).text })).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }).count(), 0); assert.equal(opened.mutations.length, 0);
+  const pure = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=pure-key", readonlyAPI() { assert.fail("pure Key must not enter account probe"); } }); const pureDrawer = verificationDialog(pure.page, "pure-key"); await alertTitle(pureDrawer, "只有一把 Key，读不到上游账号").waitFor(); await pureDrawer.getByRole("button", { name: UPDATE_AUTH, exact: true }).click(); const editor = pure.page.getByRole("dialog", { name: /^编辑上游资源：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel("名称", { exact: true }).inputValue(), "pure-key"); assert.equal(pure.mutations.length, 0);
 });
 
 test("workflow external Key use stops the old rule before selecting a new Key while unknown use stays reference", async (t) => {
   const config = onboardingFixture(true, "newapi", [1, 2, 3, 4]); config.rules[0].channels = [1, 2, 3].map((channelId) => ({ channelId })); config.rules[0].coverageDeclaration = { answer: "other_use", otherUse: "external", uncoveredOwnChannelIds: [] };
-  const opened = await openAccountsPage(t, { config, path: "/stations?action=coverage&ruleId=rule-1", mutation(route, mutation) { assert.equal(mutation.path, "/api/reconciliation/rules/rule-1"); assert.equal(mutation.method, "DELETE"); config.rules[0].enabled = false; return fulfill(route, { ok: true }); } }); const drawer = opened.page.getByRole("dialog", { name: "接入监控与对账", exact: true }); await drawer.getByText("核对既有 Key 的完整用途", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: "接入上游 Key", exact: true }).isDisabled(), true);
-  await drawer.getByRole("button", { name: "隔离站外调用后关联新 Key", exact: true }).click(); const confirm = opened.page.getByRole("dialog", { name: "停止旧 Key 核算后重新关联？", exact: true }); await confirm.getByText(/原账、旧范围与监控资源保留/).waitFor(); assert.equal(opened.writes.length, 0); await confirm.getByRole("button", { name: "停止旧关联并选择新 Key", exact: true }).click(); await confirm.waitFor({ state: "hidden" }); assert.equal(opened.mutations.length, 1);
-  await verifyOnboarding(drawer); await chooseKey(opened.page, drawer, "New Key"); await verifyOnboarding(drawer); await drawer.getByRole("combobox", { name: "Key 消费范围", exact: true }).click(); await opened.page.getByText("没有", { exact: true }).last().click(); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(opened.writes.length, 1); assert.equal(opened.writes[0].groups[0].reconciliation.tokenId, 8); assert.equal(opened.writes[0].selections[0].stationId, "upstream-1");
-  const unknown = await openAccountsPage(t, { config: onboardingFixture(true, "newapi", [1, 2, 3, 4]), path: "/stations?action=coverage&ruleId=rule-1" }); const unknownDrawer = unknown.page.getByRole("dialog", { name: "接入监控与对账", exact: true }); await verifyOnboarding(unknownDrawer); await unknownDrawer.getByText(/保留成本与收入参考，账面毛利待确认/).waitFor(); await unknownDrawer.getByRole("button", { name: "验证并预览", exact: true }).waitFor(); assert.equal(unknown.mutations.length, 0); assert.equal(unknown.writes.length, 0); assert.equal(unknown.probes[0].groups[0].reconciliation.coverageDeclaration.answer, "unknown");
+  const opened = await openAccountsPage(t, { config, path: "/stations?action=coverage&ruleId=rule-1", mutation(route, mutation) { assert.equal(mutation.path, "/api/reconciliation/rules/rule-1"); assert.equal(mutation.method, "DELETE"); config.rules[0].enabled = false; return fulfill(route, { ok: true }); } }); const drawer = opened.page.getByRole("dialog", { name: CONNECT, exact: true }); await alertTitle(drawer, COVERAGE_QUESTION).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: "Key", exact: true }).isDisabled(), true);
+  // 「换 Key」先确认：站外也在用就给站外单开一把 Key，旧 Key 以前的每日记录还在
+  await drawer.getByRole("button", { name: SWAP_KEY, exact: true }).click(); const confirm = opened.page.getByRole("dialog", { name: `${SWAP_KEY}？`, exact: true }); await confirm.getByText(`站外也在用的话，先在上游给站外单开一把 Key。换成新 Key 后，旧 Key ${HISTORY_KEPT}。`, { exact: true }).waitFor(); assert.equal(opened.writes.length, 0); await confirm.getByRole("button", { name: SWAP_KEY, exact: true }).click(); await confirm.waitFor({ state: "hidden" }); assert.equal(opened.mutations.length, 1);
+  await verifyOnboarding(drawer); await chooseKey(opened.page, drawer, "New Key"); await verifyOnboarding(drawer); await drawer.getByRole("combobox", { name: COVERAGE_QUESTION, exact: true }).click(); await opened.page.getByText(ONLY_THESE, { exact: true }).last().click(); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(opened.writes.length, 1); assert.equal(opened.writes[0].groups[0].reconciliation.tokenId, 8); assert.equal(opened.writes[0].selections[0].stationId, "upstream-1");
+  const unknown = await openAccountsPage(t, { config: onboardingFixture(true, "newapi", [1, 2, 3, 4]), path: "/stations?action=coverage&ruleId=rule-1" }); const unknownDrawer = unknown.page.getByRole("dialog", { name: CONNECT, exact: true }); await verifyOnboarding(unknownDrawer); await unknownDrawer.getByText(`回答「${COVERAGE_QUESTION}」之前，利润先不算`).waitFor(); await unknownDrawer.getByRole("button", { name: settledButton(TEST_READ) }).waitFor(); assert.equal(unknown.mutations.length, 0); assert.equal(unknown.writes.length, 0); assert.equal(unknown.probes[0].groups[0].reconciliation.coverageDeclaration.answer, "unknown");
 });
 
 test("workflow overview merges stable public actions and preserves prior actions on a partial read failure", async (t) => {
@@ -1398,12 +1578,21 @@ test("workflow overview merges stable public actions and preserves prior actions
     if (path === "/api/own/analytics") return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture analytics unavailable" }) });
     assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
   } });
-  await opened.page.goto(baseURL); const region = opened.page.getByRole("region", { name: "需要处理", exact: true }); await region.getByRole("link", { name: /^更新账号授权（/ }).waitFor(); assert.equal(await region.getByRole("link", { name: /^核对这把 Key 的全部用途（/ }).count(), 1); const before = await region.getByRole("listitem").count(); await region.getByRole("button", { name: "刷新处理事项", exact: true }).click(); await region.getByText("部分账号或账单事项未能更新，保留上次已读事项。", { exact: true }).waitFor(); assert.equal(await region.getByRole("listitem").count(), before); const href = await region.getByRole("link", { name: /^更新账号授权（/ }).getAttribute("href"); assert.equal(href, opened.model.accounts[0].actions[0].href); assert.equal(opened.mutations.length, 0); assert.ok(reads >= 3);
+  await opened.page.goto(baseURL); const region = opened.page.getByRole("region", { name: "需要处理", exact: true }); const authLink = new RegExp(`^${UPDATE_AUTH}（`); await region.getByRole("link", { name: authLink }).waitFor(); assert.equal(await region.getByRole("link", { name: new RegExp(`^${workflowActionMeta("confirm_coverage").label}（`) }).count(), 1); const before = await region.getByRole("listitem").count(); await region.getByRole("button", { name: "刷新处理事项", exact: true }).click();
+  // 有一处没读到：写「刷新失败，数据截至 …。」，上次读到的事项照常列出
+  await region.locator(".jy-ov-banner-text").filter({ hasText: /^刷新失败，数据截至 .+。$/ }).waitFor(); assert.equal(await region.getByRole("listitem").count(), before); const href = await region.getByRole("link", { name: authLink }).getAttribute("href"); assert.equal(href, opened.model.accounts[0].actions[0].href); assert.equal(opened.mutations.length, 0); assert.ok(reads >= 3);
 });
 
 test("workflow read failures and deleted verification targets expose a safe retry with no save", async (t) => {
-  let calls = 0; const opened = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=unknown-legacy", readonlyAPI(route) { calls += 1; if (calls === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "KEY_PROBE_UNAVAILABLE", retryable: true, error: "账号身份暂时无法核验，请检查授权或稍后重试" }) }); return fulfill(route, keyVerificationFixture("newapi", "Asia/Shanghai")); } }); const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · unknown-legacy", exact: true }); await drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }).click(); await drawer.getByRole("button", { name: "刷新处理目标", exact: true }).waitFor(); await drawer.getByRole("button", { name: /实际核验账号与 Key 目录/ }).click(); await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); assert.equal(calls, 2); assert.equal(opened.mutations.length, 0);
-  for (const path of ["/stations?action=verify&stationId=deleted", "/stations?action=authorization&accountKey=deleted", "/stations?stationId=deleted"]) { const unavailable = await openAccountsPage(t, { path }); await unavailable.page.getByRole("button", { name: "刷新处理目标", exact: true }).waitFor(); assert.equal(await unavailable.page.getByRole("dialog").count(), 0); assert.equal(unavailable.mutations.length, 0); }
+  let calls = 0; const opened = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=unknown-legacy", readonlyAPI(route) { calls += 1; if (calls === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "KEY_PROBE_UNAVAILABLE", retryable: true, error: "账号身份暂时无法核验，请检查授权或稍后重试" }) }); return fulfill(route, keyVerificationFixture("newapi", "Asia/Shanghai")); } }); const drawer = verificationDialog(opened.page, "unknown-legacy"); await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click();
+  // 读不到：写「读不到：」加归类后的原因，原文收在「查看详细原因」，旁边一个「刷新」；再测试读取一次就好
+  const failed = alertWithTitle(drawer, testReadText({ ok: false, reason: describeError({ code: "KEY_PROBE_UNAVAILABLE" }).text })); await failed.waitFor(); await failed.getByRole("button", { name: REFRESH, exact: true }).waitFor(); assert.equal(await failed.locator("details.jy-error-detail").filter({ hasText: "账号身份暂时无法核验，请检查授权或稍后重试" }).count(), 1);
+  await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click(); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); assert.equal(calls, 2); assert.equal(opened.mutations.length, 0);
+  // 处理目标不在了：顶部一条提示（上游没了写「找不到这个上游。」，上游账号变了写「这条已经变了」），带「刷新」和「返回上游列表」，不打开抽屉
+  for (const [path, title] of [["/stations?action=verify&stationId=deleted", `${ERROR_CATEGORIES.not_found.text}。`], ["/stations?action=authorization&accountKey=deleted", DESTINATION_CHANGED], ["/stations?stationId=deleted", `${ERROR_CATEGORIES.not_found.text}。`]]) {
+    const unavailable = await openAccountsPage(t, { path }); const banner = unavailable.page.locator(".jy-banner[role=alert]").filter({ has: unavailable.page.locator("b").filter({ hasText: exactText(title) }) }); await banner.waitFor(); await banner.getByRole("button", { name: REFRESH, exact: true }).waitFor();
+    assert.equal(await banner.getByRole("link", { name: `返回${STATION_TABS.list}`, exact: true }).getAttribute("href"), "/stations"); assert.equal(await unavailable.page.getByRole("dialog").count(), 0); assert.equal(unavailable.mutations.length, 0);
+  }
 });
 
 test("workflow verification keyboard and financial source links fit 320/390/768/1440 widths", async (t) => {
@@ -1414,14 +1603,14 @@ test("workflow verification keyboard and financial source links fit 320/390/768/
       if (path === "/api/own/analytics") return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "还没有标记「我的中转站」" }) });
       throw new Error("unexpected financial navigation fixture: " + path);
     } });
-    const drawer = opened.page.getByRole("dialog", { name: "核验账号与账单能力 · Sub-password", exact: true }); const directory = drawer.getByRole("button", { name: "实际核验账号与 Key 目录", exact: true }); await directory.focus(); await opened.page.keyboard.press("Enter"); await drawer.getByText("本次实际账号已核验：42", { exact: true }).waitFor(); const key = drawer.getByRole("combobox", { name: "核验实际 Key", exact: true }); await key.focus(); await opened.page.keyboard.press("ArrowDown"); await opened.page.keyboard.press("Enter"); const probe = drawer.getByRole("button", { name: "核验所选 Key 账单", exact: true }); await probe.focus(); await opened.page.keyboard.press("Enter"); await drawer.getByText("所选 Key 扣费参考", { exact: true }).waitFor();
+    const drawer = verificationDialog(opened.page, "Sub-password"); const directory = drawer.getByRole("button", { name: settledButton(TEST_READ) }); await directory.focus(); await opened.page.keyboard.press("Enter"); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); const key = drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }); await key.focus(); await opened.page.keyboard.press("ArrowDown"); await opened.page.keyboard.press("Enter"); const probe = drawer.getByRole("button", { name: settledButton(VERIFY_SELECTED) }); await probe.focus(); await opened.page.keyboard.press("Enter"); await alertTitle(drawer, "actual-key 的上游成本").waitFor();
     await opened.page.waitForFunction((dialog) => !dialog.closest(".ant-drawer")?.getAnimations({ subtree: true }).some((animation) => animation.playState === "running" && animation.effect?.getTiming().iterations !== Infinity), await drawer.elementHandle());
     const overflow = await opened.page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
       elements: [...document.querySelectorAll("body *")].filter((node) => node.getBoundingClientRect().right > document.documentElement.clientWidth + 1).slice(0, 8)
         .map((node) => ({ tag: node.tagName, className: node.className, right: node.getBoundingClientRect().right, text: node.textContent?.slice(0, 100) })) }));
     assert.ok(overflow.scroll <= overflow.client, JSON.stringify({ width, ...overflow }));
     await drawer.locator(".ant-drawer-close").focus(); await opened.page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
-    await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText("监控估算来源", { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.getByRole("region", { name: "核算汇总", exact: true }).waitFor(); await opened.page.getByRole("link", { name: "监控估算", exact: true }).last().waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); assert.equal(opened.mutations.length, 0); await opened.page.context().browser().close();
+    await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText("监控估算来源", { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.getByRole("region", { name: "汇总", exact: true }).waitFor(); await opened.page.getByRole("link", { name: NAV_LABELS.analytics, exact: true }).last().waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); assert.equal(opened.mutations.length, 0); await opened.page.context().browser().close();
   }
 });
 
@@ -1492,21 +1681,33 @@ async function openAuthorizationPage(t, options = {}) {
   originalStations = opened.originalStations;
   return { ...opened, probes, updates, recoveries };
 }
+// 更新登录信息（§3.7）：账号卡片里的按钮写「更新登录信息 上游账号 N」，抽屉标题「更新登录信息 · 上游账号 N」
+const authorizationDialog = (page, accountId) => page.getByRole("dialog", { name: `${UPDATE_AUTH} · 上游账号 ${accountId}`, exact: true });
+const authorizationConfirm = (drawer) => drawer.getByRole("button", { name: `确认${UPDATE_AUTH}`, exact: true });
+const alertTitle = (scope, text) => scope.locator(".ant-alert-title").filter({ hasText: typeof text === "string" ? exactText(text) : text });
+// 带这个标题的整条提示（标题和「查看详细原因」在同一条里）
+const alertWithTitle = (scope, text) => scope.locator(".ant-alert").filter({ has: scope.page().locator(".ant-alert-title").filter({ hasText: exactText(text) }) });
+const REFILL_TITLE = (code) => `${describeError({ code }).text}。请重新填写登录信息。`;
 async function openAccountAuthorization(page, center, account) {
-  const expanded = await expandAccount(center, account); await expanded.getByRole("button", { name: `更新账号授权 ${account.identity.provider} ${account.identity.accountId}`, exact: true }).click();
-  return page.getByRole("dialog", { name: `更新账号授权 · ${account.identity.accountId}`, exact: true });
+  const expanded = await expandAccount(center, account); await expanded.getByRole("button", { name: `${UPDATE_AUTH} 上游账号 ${account.identity.accountId}`, exact: true }).click();
+  return authorizationDialog(page, account.identity.accountId);
 }
-async function previewAuthorization(drawer) { await drawer.getByRole("button", { name: "预览授权更新", exact: true }).click(); await drawer.getByText("授权更新预览，尚未保存", { exact: true }).waitFor(); }
-async function confirmAccountAuthorization(drawer) { const button = drawer.getByRole("button", { name: "确认更新所选授权", exact: true }); await button.click(); await drawer.getByText(/本次所选目标已完成授权更新|部分目标尚未更新，已保存目标保留/).waitFor(); await drawer.locator(".ant-drawer-close").waitFor(); }
+// 已有保存结果时预览按钮写「重新预览」，沿用已保存的登录信息
+async function previewAuthorization(drawer, again = false) { await drawer.getByRole("button", { name: again ? "重新预览" : BINDING_COPY.preview, exact: true }).click(); await alertTitle(drawer, "预览，还没保存").waitFor(); }
+// 确认后预览卡片收起、抽屉恢复可关闭，再等结果标题：全部更新上，或「有 N 个上游没更新上」
+async function confirmAccountAuthorization(drawer) {
+  await authorizationConfirm(drawer).click(); await alertTitle(drawer, "预览，还没保存").waitFor({ state: "hidden" }); await drawer.locator(".ant-drawer-close").waitFor();
+  await alertTitle(drawer, new RegExp(`^(${workflowActionMeta("update_authorization").done}|有 \\d+ 个上游没更新上，已更新的不变)$`)).waitFor();
+}
 
 test("account authorization without randomUUID renews IDs on input changes and confirms the preview ID", async (t) => {
   const { page, center, model, probes, updates } = await openAuthorizationPage(t);
   await page.evaluate(() => Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined }));
   const drawer = await openAccountAuthorization(page, center, model.accounts[0]);
-  await drawer.getByLabel("更新访问令牌", { exact: true }).fill("first-fixture-pat"); await previewAuthorization(drawer);
+  await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("first-fixture-pat"); await previewAuthorization(drawer);
   const first = probes[0].requestId;
   assert.match(first, /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i);
-  await drawer.getByLabel("更新访问令牌", { exact: true }).fill("second-fixture-pat"); await previewAuthorization(drawer);
+  await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("second-fixture-pat"); await previewAuthorization(drawer);
   assert.notEqual(probes[1].requestId, first);
   assert.match(probes[1].requestId, /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i);
   await confirmAccountAuthorization(drawer);
@@ -1520,88 +1721,113 @@ test("account authorization without browser cryptography does not partially open
     Object.defineProperty(globalThis.crypto, "getRandomValues", { configurable: true, value: undefined });
   });
   await openAccountAuthorization(page, center, model.accounts[0]);
-  await center.getByText("当前浏览器无法生成请求标识，请更新浏览器后重试", { exact: true }).waitFor();
-  assert.equal(await page.getByRole("dialog", { name: "更新账号授权 · 42", exact: true }).count(), 0);
+  // 报错按码归类后显示「浏览器太旧」那一句（原文「当前浏览器无法生成请求标识…」不在提示里），写在页面顶部，不说成刷新失败
+  await center.getByText(describeError({ code: "BROWSER_UNSUPPORTED" }).text, { exact: true }).waitFor();
+  assert.equal(await center.getByText(/刷新失败/).count(), 0);
+  assert.equal(await authorizationDialog(page, "42").count(), 0);
   assert.equal(probes.length, 0); assert.equal(updates.length, 0);
 });
 
 test("account authorization inputs once and confirms three explicit targets while excluding same-site B, own, archived and pure Key", async (t) => {
   const { page, center, model, probes, updates, originalStations } = await openAuthorizationPage(t), account = model.accounts[0]; const before = originalStations.map((resource) => ({ id: resource.id, userId: resource.userId, costAliases: resource.costAliases, lowBalanceUsd: resource.lowBalanceUsd, cnyPerUsd: resource.cnyPerUsd, includeInProfit: resource.includeInProfit, noRenewal: resource.noRenewal }));
-  const drawer = await openAccountAuthorization(page, center, account); assert.equal(await drawer.locator('input[type="password"]').count(), 1); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("one-new-pat"); await previewAuthorization(drawer);
+  const drawer = await openAccountAuthorization(page, center, account); assert.equal(await drawer.locator('input[type="password"]').count(), 1); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("one-new-pat"); await previewAuthorization(drawer);
   assert.deepEqual(probes[0].targetStationIds, ["st_u04_billing", "st_u04_a1", "st_u04_a2"]); assert.deepEqual(probes[0].authorization, { type: "newapi", baseUrl: "https://same.test", accessToken: "one-new-pat", userId: "42" });
   const stored = await page.evaluate(() => JSON.parse(sessionStorage.getItem("account-authorization-recovery-v05"))); assert.deepEqual(stored, { accountKey: account.accountKey, retryInput: { requestId: probes[0].requestId, targetStationIds: probes[0].targetStationIds } }); assert.doesNotMatch(JSON.stringify(stored), /pat|authorization|previewId|marker/);
-  await drawer.getByText(/排除记录：.*已归档.*其他账号.*纯 Key.*本站/).waitFor(); await drawer.getByText("影响核算关联：rule_u04", { exact: true }).waitFor(); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); assert.equal(await drawer.locator('[data-authorization-target]').count(), 3); assert.equal(await drawer.locator('input[type="password"]').count(), 0); assert.equal(await page.evaluate(() => sessionStorage.getItem("account-authorization-recovery-v05")), null);
+  // 「不跟着更新」按名字列出归档、同站其他上游账号、只用 Key 和自营站点；影响只写绑定条数，不写绑定编号
+  await drawer.getByText(/^不跟着更新：.*A-archived（已归档）.*B-monitor（其他上游账号）.*pure-key（只用 Key）.*Own station（自营站点）$/).waitFor(); await drawer.getByText("用到它的绑定 1 条", { exact: true }).waitFor(); assert.equal(await drawer.getByText(/rule_u04/).count(), 0);
+  await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); assert.equal(await drawer.locator('[data-authorization-target]').count(), 3); assert.equal(await drawer.locator('input[type="password"]').count(), 0); assert.equal(await page.evaluate(() => sessionStorage.getItem("account-authorization-recovery-v05")), null);
   assert.deepEqual(originalStations.map((resource) => ({ id: resource.id, userId: resource.userId, costAliases: resource.costAliases, lowBalanceUsd: resource.lowBalanceUsd, cnyPerUsd: resource.cnyPerUsd, includeInProfit: resource.includeInProfit, noRenewal: resource.noRenewal })), before); assert.equal(model.accounts[1].resources[0].authVersion, 1);
 });
 
 test("Sub2API JWT and password switches clear hidden authorization and invalidate the previous preview", async (t) => {
   const { page, center, model, probes, updates } = await openAuthorizationPage(t); const drawer = await openAccountAuthorization(page, center, model.accounts[2]);
-  await drawer.getByLabel("更新访问令牌", { exact: true }).fill("old-jwt-input"); await previewAuthorization(drawer); await drawer.getByRole("combobox", { name: "更新授权方式", exact: true }).click(); await page.getByText("Sub2API 邮箱与密码", { exact: true }).last().click(); assert.equal(await drawer.getByRole("button", { name: "确认更新所选授权", exact: true }).isDisabled(), true);
-  await drawer.getByLabel("更新登录邮箱", { exact: true }).fill("new@example.test"); await drawer.getByLabel("更新登录密码", { exact: true }).fill("temporary-password"); await previewAuthorization(drawer); assert.equal(probes[1].authorization.accessToken, undefined);
-  await drawer.getByRole("combobox", { name: "更新授权方式", exact: true }).click(); await page.getByText("Sub2API 登录令牌", { exact: true }).last().click(); assert.equal(await drawer.getByLabel("更新访问令牌", { exact: true }).inputValue(), ""); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("new-jwt-input"); await previewAuthorization(drawer); assert.deepEqual(probes[2].authorization, { type: "sub2api", baseUrl: "https://same.test", accessToken: "new-jwt-input" }); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); assert.notEqual(probes[0].requestId, probes[2].requestId);
-  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); await center.locator(`[data-account-key="${model.accounts[2].accountKey}"]`).getByRole("button", { name: "更新账号授权 sub2api A", exact: true }).click(); await drawer.getByRole("combobox", { name: "更新授权方式", exact: true }).click(); await page.getByText("Sub2API 邮箱与密码", { exact: true }).last().click(); assert.equal(await drawer.getByLabel("更新登录邮箱", { exact: true }).inputValue(), ""); assert.equal(await drawer.getByLabel("更新登录密码", { exact: true }).inputValue(), ""); await drawer.getByLabel("更新登录邮箱", { exact: true }).fill("final@example.test"); await drawer.getByLabel("更新登录密码", { exact: true }).fill("final-password"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.deepEqual(updates[1].authorization, { type: "sub2api-password", baseUrl: "https://same.test", email: "final@example.test", password: "final-password" });
+  const TOKEN = "登录令牌", TYPE = "类型", PASSWORD_TYPE = "Sub2API 账号（邮箱密码）", TOKEN_TYPE = "Sub2API 账号（登录令牌）";
+  await drawer.getByLabel(TOKEN, { exact: true }).fill("old-jwt-input"); await previewAuthorization(drawer); await drawer.getByRole("combobox", { name: TYPE, exact: true }).click(); await page.getByText(PASSWORD_TYPE, { exact: true }).last().click(); assert.equal(await authorizationConfirm(drawer).isDisabled(), true);
+  await drawer.getByLabel("登录邮箱", { exact: true }).fill("new@example.test"); await drawer.getByLabel("登录密码", { exact: true }).fill("temporary-password"); await previewAuthorization(drawer); assert.equal(probes[1].authorization.accessToken, undefined);
+  await drawer.getByRole("combobox", { name: TYPE, exact: true }).click(); await page.getByText(TOKEN_TYPE, { exact: true }).last().click(); assert.equal(await drawer.getByLabel(TOKEN, { exact: true }).inputValue(), ""); await drawer.getByLabel(TOKEN, { exact: true }).fill("new-jwt-input"); await previewAuthorization(drawer); assert.deepEqual(probes[2].authorization, { type: "sub2api", baseUrl: "https://same.test", accessToken: "new-jwt-input" }); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); assert.notEqual(probes[0].requestId, probes[2].requestId);
+  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); await center.locator(`[data-account-key="${model.accounts[2].accountKey}"]`).getByRole("button", { name: `${UPDATE_AUTH} 上游账号 A`, exact: true }).click(); await drawer.getByRole("combobox", { name: TYPE, exact: true }).click(); await page.getByText(PASSWORD_TYPE, { exact: true }).last().click(); assert.equal(await drawer.getByLabel("登录邮箱", { exact: true }).inputValue(), ""); assert.equal(await drawer.getByLabel("登录密码", { exact: true }).inputValue(), ""); await drawer.getByLabel("登录邮箱", { exact: true }).fill("final@example.test"); await drawer.getByLabel("登录密码", { exact: true }).fill("final-password"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.deepEqual(updates[1].authorization, { type: "sub2api-password", baseUrl: "https://same.test", email: "final@example.test", password: "final-password" });
 });
 
 test("partial authorization reload uses readonly recovery before a new saved-donor preview and one confirmation", async (t) => {
-  const { page, center, model, probes, updates, recoveries } = await openAuthorizationPage(t, { partial: true }); let drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("partial-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); await drawer.locator('[data-authorization-target="st_u04_a2"]').getByText("A-monitor-2：更新失败", { exact: true }).waitFor();
-  await page.reload(); await center.getByRole("button", { name: "恢复上次授权更新", exact: true }).click(); drawer = page.getByRole("dialog", { name: "更新账号授权 · 42", exact: true }); await drawer.getByText("A-monitor-1：已保存，无需重复更新", { exact: true }).waitFor(); assert.equal(probes.length, 1); assert.equal(updates.length, 1); assert.equal(recoveries.length, 1); assert.deepEqual(recoveries[0], { requestId: probes[0].requestId, targetStationIds: probes[0].targetStationIds });
-  await drawer.getByRole("button", { name: "重新验证并补未完成", exact: true }).click(); await drawer.getByText("授权更新预览，尚未保存", { exact: true }).waitFor(); assert.equal(probes[1].reuseSavedAuthorization, true); assert.equal(probes[1].authorization, undefined); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a1").authVersion, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a2").authVersion, 2);
+  // 没更新上的上游按原因归类后显示（lib/error-copy.js），原文进「查看详细原因」
+  const failed = describeError({ status: "failed", code: "AUTHORIZATION_UPDATE_FAILED", reason: "保存失败，请稍后重试" });
+  const { page, center, model, probes, updates, recoveries } = await openAuthorizationPage(t, { partial: true }); let drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("partial-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer);
+  const a2 = drawer.locator('[data-authorization-target="st_u04_a2"]'); await a2.getByText(`A-monitor-2：${failed.text}`, { exact: true }).waitFor(); assert.equal(await a2.locator("details.jy-error-detail").filter({ hasText: failed.raw }).count(), 1);
+  await page.reload(); await center.getByRole("button", { name: `查看上次${UPDATE_AUTH}的结果`, exact: true }).click(); drawer = authorizationDialog(page, "42"); await drawer.getByText("A-monitor-1：已更新过，不用再改", { exact: true }).waitFor(); assert.equal(probes.length, 1); assert.equal(updates.length, 1); assert.equal(recoveries.length, 1); assert.deepEqual(recoveries[0], { requestId: probes[0].requestId, targetStationIds: probes[0].targetStationIds });
+  await previewAuthorization(drawer, true); assert.equal(probes[1].reuseSavedAuthorization, true); assert.equal(probes[1].authorization, undefined); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a1").authVersion, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a2").authVersion, 2);
 });
 
 test("authorization response loss reads saved outcomes without submitting the update again", async (t) => {
-  const { page, center, model, updates, recoveries } = await openAuthorizationPage(t, { loseResponse: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("response-loss-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); await drawer.getByText("A-billing：已保存，无需重复更新", { exact: true }).waitFor(); assert.equal(updates.length, 1); assert.equal(recoveries.length, 1); assert.equal(await page.evaluate(() => sessionStorage.getItem("account-authorization-recovery-v05")), null);
+  const { page, center, model, updates, recoveries } = await openAuthorizationPage(t, { loseResponse: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("response-loss-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); await drawer.getByText("A-billing：已更新过，不用再改", { exact: true }).waitFor(); assert.equal(updates.length, 1); assert.equal(recoveries.length, 1); assert.equal(await page.evaluate(() => sessionStorage.getItem("account-authorization-recovery-v05")), null);
 });
 
 test("an invalid saved donor starts a new authorization operation for only unfinished targets", async (t) => {
-  const { page, center, model, probes, updates } = await openAuthorizationPage(t, { partial: true, invalidDonor: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("initial-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); await drawer.getByRole("button", { name: "重新验证并补未完成", exact: true }).click(); await drawer.getByText(/请重新输入授权，已开始新的更新操作/).waitFor(); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("replacement-pat"); await previewAuthorization(drawer); assert.notEqual(probes[2].requestId, probes[0].requestId); assert.deepEqual(probes[2].targetStationIds, ["st_u04_a2"]); await drawer.getByText(/已确认更新，本次不再改写：.*A-monitor-1/).waitFor(); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a1").authVersion, 2);
+  const { page, center, model, probes, updates } = await openAuthorizationPage(t, { partial: true, invalidDonor: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("initial-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer);
+  // 已保存的登录信息用不了：提示重新填写，原文收在「查看详细原因」
+  await drawer.getByRole("button", { name: "重新预览", exact: true }).click(); const refill = alertWithTitle(drawer, REFILL_TITLE("AUTHORIZATION_UNVERIFIED")); await refill.waitFor(); assert.equal(await refill.locator("details.jy-error-detail").filter({ hasText: "已保存授权验证失败" }).count(), 1);
+  await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("replacement-pat"); await previewAuthorization(drawer); assert.notEqual(probes[2].requestId, probes[0].requestId); assert.deepEqual(probes[2].targetStationIds, ["st_u04_a2"]); await drawer.getByText(/^已更新，这次不再改：.*A-monitor-1/).waitFor(); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a1").authVersion, 2);
 });
 
 test("unknown authorization targets are opt-in and exclusions never count as updated resources", async (t) => {
-  const { page, center, model, probes, updates } = await openAuthorizationPage(t); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); const unknown = drawer.getByRole("checkbox", { name: "更新目标 unknown-legacy", exact: true }); assert.equal(await unknown.isChecked(), false); await unknown.check(); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("checked-pat"); await previewAuthorization(drawer); assert.equal(probes[0].targetStationIds.includes("st_u04_unknown"), true); await drawer.getByText("排除 unknown-legacy：账号身份未核验，已排除", { exact: true }).waitFor(); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); await drawer.getByText("部分目标尚未更新，已保存目标保留", { exact: true }).waitFor(); await drawer.locator('[data-authorization-target="st_u04_unknown"]').getByText("unknown-legacy：更新失败", { exact: true }).waitFor(); assert.equal(await drawer.getByText("本次所选目标已完成授权更新", { exact: true }).count(), 0);
-  await drawer.getByRole("button", { name: "重新输入授权，开始新的更新", exact: true }).click(); assert.equal(await drawer.getByRole("checkbox", { name: "更新目标 A-monitor-1", exact: true }).isChecked(), false); assert.equal(await drawer.getByRole("checkbox", { name: "更新目标 A-monitor-2", exact: true }).isChecked(), false); assert.equal(await drawer.getByRole("checkbox", { name: "更新目标 A-billing", exact: true }).isChecked(), false); assert.equal(await unknown.isChecked(), false); assert.equal(updates.length, 1);
+  const excludedText = describeError({ reason: "账号身份未核验，已排除" }).text;
+  const { page, center, model, probes, updates } = await openAuthorizationPage(t); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); const unknown = drawer.getByRole("checkbox", { name: "更新 unknown-legacy", exact: true }); assert.equal(await unknown.isChecked(), false); await unknown.check(); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("checked-pat"); await previewAuthorization(drawer); assert.equal(probes[0].targetStationIds.includes("st_u04_unknown"), true); await drawer.getByText(`不跟着更新 unknown-legacy：${excludedText}`, { exact: true }).waitFor(); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); await alertTitle(drawer, "有 1 个上游没更新上，已更新的不变").waitFor(); await drawer.locator('[data-authorization-target="st_u04_unknown"]').getByText(`unknown-legacy：${excludedText}`, { exact: true }).waitFor(); assert.equal(await alertTitle(drawer, workflowActionMeta("update_authorization").done).count(), 0);
+  await drawer.getByRole("button", { name: "重新填写登录信息", exact: true }).click(); assert.equal(await drawer.getByRole("checkbox", { name: "更新 A-monitor-1", exact: true }).isChecked(), false); assert.equal(await drawer.getByRole("checkbox", { name: "更新 A-monitor-2", exact: true }).isChecked(), false); assert.equal(await drawer.getByRole("checkbox", { name: "更新 A-billing", exact: true }).isChecked(), false); assert.equal(await unknown.isChecked(), false); assert.equal(updates.length, 1);
 });
 
 test("authorization from same-site account B cannot update account A and requires a fresh valid preview", async (t) => {
-  const { page, center, model, updates } = await openAuthorizationPage(t); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("account-B"); await drawer.getByRole("button", { name: "预览授权更新", exact: true }).click(); await drawer.getByText("替换授权属于另一个账号，请另行接入", { exact: true }).waitFor(); assert.equal(await drawer.getByRole("button", { name: "确认更新所选授权", exact: true }).isDisabled(), true); assert.equal(updates.length, 0); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("correct-account-A"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1);
+  const { page, center, model, updates } = await openAuthorizationPage(t); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("account-B"); await drawer.getByRole("button", { name: BINDING_COPY.preview, exact: true }).click();
+  const changed = alertWithTitle(drawer, describeError({ code: "ACCOUNT_IDENTITY_CHANGED" }).text); await changed.waitFor(); assert.equal(await changed.locator("details.jy-error-detail").filter({ hasText: "替换授权属于另一个账号，请另行接入" }).count(), 1);
+  assert.equal(await authorizationConfirm(drawer).isDisabled(), true); assert.equal(updates.length, 0); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("correct-account-A"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1);
 });
 
 test("authorization with no saved donor requests fresh input and a new operation without a preview bypass", async (t) => {
-  const { page, center, model, probes, updates } = await openAuthorizationPage(t, { noDonor: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("failed-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); await drawer.getByRole("button", { name: "重新验证并补未完成", exact: true }).click(); await drawer.getByText(/尚无已确认更新的授权可复用/).waitFor(); assert.equal(updates.length, 1); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("fresh-pat"); await previewAuthorization(drawer); assert.notEqual(probes[2].requestId, probes[0].requestId); assert.equal(probes[2].targetStationIds.length, 3); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2);
+  const { page, center, model, probes, updates } = await openAuthorizationPage(t, { noDonor: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("failed-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer);
+  await drawer.getByRole("button", { name: "重新预览", exact: true }).click(); const refill = alertWithTitle(drawer, REFILL_TITLE("SAVED_AUTHORIZATION_UNAVAILABLE")); await refill.waitFor(); assert.equal(await refill.locator("details.jy-error-detail").filter({ hasText: "尚无已确认更新的授权可复用" }).count(), 1); assert.equal(updates.length, 1);
+  await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fresh-pat"); await previewAuthorization(drawer); assert.notEqual(probes[2].requestId, probes[0].requestId); assert.equal(probes[2].targetStationIds.length, 3); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2);
 });
 
 test("pause and re-enable retain complete resource settings while stopping one 核算关联 leaves other monitors and history intact", async (t) => {
-  const { page, center, model, mutations, originalStations } = await openAuthorizationPage(t); let a = await expandAccount(center, model.accounts[0]); const resource = () => a.locator('[data-resource-id="st_u04_a1"]'); await resource().getByRole("button", { name: "暂停监控 A-monitor-1", exact: true }).click(); let modal = page.getByRole("dialog", { name: "暂停「A-monitor-1」监控？", exact: true }); await modal.getByText(/Key 账单核算继续/).waitFor(); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" }); await page.reload(); await center.getByText(/显示 3\/3/).waitFor(); a = await expandAccount(center, model.accounts[0]); await resource().getByText("监控暂停 / 未启用", { exact: true }).waitFor(); assert.equal(await page.locator(".resource-list-card").getByText("A-monitor-1", { exact: true }).count(), 0);
-  await resource().getByRole("button", { name: "查看原资源设置 A-monitor-1", exact: true }).click(); const editor = page.getByRole("dialog", { name: /^编辑上游资源：/ }); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("成本渠道匹配别名", { exact: true }).inputValue(), "kept_alias"); await editor.getByRole("button", { name: /取\s*消/ }).click();
-  await resource().getByRole("button", { name: "启用监控 A-monitor-1", exact: true }).click(); modal = page.getByRole("dialog", { name: "启用「A-monitor-1」监控？", exact: true }); await waitForFact(modal, "现有成本设置", "不纳入"); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" }); await resource().getByText("余额监控", { exact: true }).waitFor(); assert.equal(originalStations.find((entry) => entry.id === "st_u04_a1").includeInProfit, false);
-  await a.getByRole("button", { name: /Key 9 · #9/ }).click(); await a.getByRole("button", { name: "停止核算关联 rule_u04", exact: true }).click(); modal = page.getByRole("dialog", { name: "停止这条核算关联？", exact: true }); await waitForFact(modal, "释放的本站渠道", "Channel 1 #1、Channel 3 #3（Own station）"); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" });
-  await a.locator('[data-rule-id="rule_u04"]').getByText("已停止", { exact: true }).waitFor(); await a.locator('[data-rule-id="rule_history"]').getByText("已停止", { exact: true }).waitFor(); await a.getByRole("button", { name: /Key 9 · #9/ }).getByText("已停止核算", { exact: true }).waitFor(); assert.equal(await a.getByRole("button", { name: "停止核算关联 rule_u04", exact: true }).count(), 0); assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["PUT", "/api/stations/st_u04_a1"], ["PUT", "/api/stations/st_u04_a1"], ["DELETE", "/api/reconciliation/rules/rule_u04"]]); assert.equal(model.accounts[0].resources.find((entry) => entry.id === "st_u04_a2").monitorEnabled, true); assert.equal(model.accounts[0].keys[0].ruleIds.includes("rule_history"), true); assert.equal(await center.getByRole("button", { name: /暂停监控 st_u04_own/ }).count(), 0);
+  const PAUSE = workflowActionMeta("pause_monitor"), RESUMED = workflowActionMeta("resume_monitor"), UNBIND = workflowActionMeta("unbind"), pauseTag = () => resource().locator(".jy-tag").filter({ hasText: exactText(PAUSE.label) });
+  const { page, center, model, mutations, originalStations } = await openAuthorizationPage(t); let a = await expandAccount(center, model.accounts[0]); const resource = () => a.locator('[data-resource-id="st_u04_a1"]'); await resource().getByRole("button", { name: `${PAUSE.label} A-monitor-1`, exact: true }).click(); let modal = page.getByRole("dialog", { name: `${PAUSE.label}「A-monitor-1」？`, exact: true }); await modal.getByText("暂停后不再刷新这个上游的余额，随时可以恢复；绑定照常算利润。", { exact: true }).waitFor(); await modal.getByRole("button", { name: `确认${PAUSE.label}`, exact: true }).click(); await modal.waitFor({ state: "hidden" }); await page.reload(); await center.getByText(/^3 个上游账号；/).waitFor(); a = await expandAccount(center, model.accounts[0]); await pauseTag().waitFor(); await resource().getByText("暂停监控时不刷新余额，绑定照常算利润。", { exact: true }).waitFor(); assert.equal(await page.locator(".resource-list-card").getByText("A-monitor-1", { exact: true }).count(), 0);
+  await resource().getByRole("button", { name: "编辑上游 A-monitor-1", exact: true }).click(); const editor = page.getByRole("dialog", { name: /^编辑上游资源：/ }); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("成本渠道匹配别名", { exact: true }).inputValue(), "kept_alias"); await editor.getByRole("button", { name: /取\s*消/ }).click();
+  await resource().getByRole("button", { name: `${RESUMED.label} A-monitor-1`, exact: true }).click(); modal = page.getByRole("dialog", { name: `${RESUMED.label}「A-monitor-1」？`, exact: true }); await waitForFact(modal, "利润", "不算进利润"); await modal.getByRole("button", { name: `确认${RESUMED.label}`, exact: true }).click(); await modal.waitFor({ state: "hidden" }); await resource().getByRole("button", { name: `${PAUSE.label} A-monitor-1`, exact: true }).waitFor(); assert.equal(await pauseTag().count(), 0); assert.equal(originalStations.find((entry) => entry.id === "st_u04_a1").includeInProfit, false);
+  // 解除绑定：确认框按 Key、自营站点和空出来的渠道说，不写绑定编号
+  await keyRow(a, "Key 9").click(); await a.getByRole("button", { name: `${UNBIND.label} Key 9 · Own station`, exact: true }).click(); modal = page.getByRole("dialog", { name: `${UNBIND.label}？`, exact: true }); await waitForFact(modal, "Key", "Key 9"); await waitForFact(modal, "自营站点", "Own station"); await waitForFact(modal, "解除后空出来的渠道", "Channel 1、Channel 3"); await modal.getByRole("button", { name: `确认${UNBIND.label}`, exact: true }).click(); await modal.waitFor({ state: "hidden" });
+  await a.locator('[data-rule-id="rule_u04"]').getByText("已解除绑定", { exact: true }).waitFor(); await a.locator('[data-rule-id="rule_history"]').getByText("已解除绑定", { exact: true }).waitFor(); await keyRow(a, "Key 9").getByText("已解除绑定", { exact: true }).waitFor(); assert.equal(await a.getByRole("button", { name: `${UNBIND.label} Key 9 · Own station`, exact: true }).count(), 0); assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["PUT", "/api/stations/st_u04_a1"], ["PUT", "/api/stations/st_u04_a1"], ["DELETE", "/api/reconciliation/rules/rule_u04"]]); assert.equal(model.accounts[0].resources.find((entry) => entry.id === "st_u04_a2").monitorEnabled, true); assert.equal(model.accounts[0].keys[0].ruleIds.includes("rule_history"), true); assert.equal(await center.getByRole("button", { name: new RegExp(`${PAUSE.label} Own station`) }).count(), 0);
 });
 
 test("authorization target changes invalidate preview and keyboard cancellation works at 320/390/768/1440 without overflow", async (t) => {
   for (const width of [320, 390, 768, 1440]) {
-    const { page, center, model, updates } = await openAuthorizationPage(t, { viewport: { width, height: 900 } }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel("更新访问令牌", { exact: true }).fill("width-pat"); await previewAuthorization(drawer); const target = drawer.getByRole("checkbox", { name: "更新目标 A-monitor-2", exact: true }); await target.focus(); await page.keyboard.press("Space"); assert.equal(await drawer.getByRole("button", { name: "确认更新所选授权", exact: true }).isDisabled(), true); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `authorization overflow at ${width}`); await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(updates.length, 0);
+    const { page, center, model, updates } = await openAuthorizationPage(t, { viewport: { width, height: 900 } }); // 320px 时「预览」按钮正好落在 Next 开发模式左下角的悬浮标记下面（只在开发服务器上有），先把它藏起来
+    await page.addStyleTag({ content: "nextjs-portal { display: none !important; }" }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("width-pat"); await previewAuthorization(drawer); const target = drawer.getByRole("checkbox", { name: "更新 A-monitor-2", exact: true }); await target.focus(); await page.keyboard.press("Space"); assert.equal(await authorizationConfirm(drawer).isDisabled(), true); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `authorization overflow at ${width}`); await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(updates.length, 0);
   }
 });
 
+// 上游账单（account-center.tsx）的写法：上游卡片写「余额提醒线 / 汇率 / 算不算进利润」，绑定写「渠道 / 开始统计 / 这把 Key 还给别处用吗？」，按钮名后跟「Key · 自营站点」
+const PAUSE_MONITOR = workflowActionMeta("pause_monitor").label, UNBIND_LABEL = workflowActionMeta("unbind").label, SWAP_LABEL = workflowActionMeta("swap_key").label;
+const OWN_CHANNELS_ANSWER = COVERAGE_ANSWERS.find((entry) => entry.value === "own_channels").label, OWNER_UNVERIFIED = reconciliationIssue("COST_OWNER_UNVERIFIED");
+const accountCaption = (accounts, unverified, unmatched) => new RegExp(`^${accounts} 个上游账号；${unverified} 个上游还没确认上游账号${unmatched == null ? "" : `；${unmatched} 条绑定还没归到 Key 下`} · `);
 test("account center preserves mixed accounts, original resource IDs, dedicated purpose and independent pure Keys", async (t) => {
   const model = accountReadFixture(); model.accounts[1].actions[0].href = "/stations?stationId=B-monitor";
   const { page, center, mutations, probes, writes } = await openAccountsPage(t, { model });
   assert.equal(await center.locator("[data-site-key]").count(), 2); const a = await expandAccount(center, model.accounts[0]), b = await expandAccount(center, model.accounts[1]), sub = await expandAccount(center, model.accounts[2]);
   assert.equal(await a.locator("[data-resource-id]").count(), 3); assert.equal(await b.locator("[data-resource-id='B-monitor']").count(), 1); assert.equal(await sub.locator("[data-resource-id]").count(), 2);
-  const dedicated = a.locator("[data-resource-id='A-billing']"); await dedicated.getByText("监控暂停 / 未启用", { exact: true }).waitFor(); await dedicated.getByRole("button", { name: "查看原资源设置 A-billing", exact: true }).waitFor(); assert.equal(await page.locator(".resource-list-card").getByText("A-billing", { exact: true }).count(), 0); await a.getByText(/提醒阈值：\$27.00；折算汇率：0.7 RMB\/USD；成本设置：不纳入；不再续费/).waitFor();
-  assert.equal(await a.locator("[data-resource-id='pure-key']").count(), 0); await center.locator("[data-unverified-resource-id='pure-key']").getByText("关联本站渠道：Channel 1 #1", { exact: true }).waitFor(); await center.locator("[data-unverified-resource-id='unknown-legacy']").getByText("账号身份待核验", { exact: true }).waitFor(); assert.equal(await center.locator("[data-resource-id='own']").count(), 0);
-  await a.getByRole("button", { name: /Key 9 · #9/ }).click(); const active = a.locator('[data-rule-id="A-active"]'); await waitForFact(active, "本站渠道", "Channel 1 · #1、Channel 3 · #3"); await waitForFact(active, "范围版本", "3 · 用途待确认，毛利标为待确认"); await waitForFact(active, "Key 的其他用途", "本站其他渠道 #2");
-  const history = a.locator('[data-rule-id="A-history"]'); await history.getByText("已停止", { exact: true }).waitFor(); assert.equal(await history.getByRole("button").count(), 0); assert.ok(await active.evaluate((node) => node.compareDocumentPosition(document.querySelector('[data-rule-id="A-history"]')) & Node.DOCUMENT_POSITION_FOLLOWING));
-  await a.getByRole("button", { name: /Key 10 · #10/ }).click(); await a.getByRole("button", { name: /Key 10 · #10/ }).getByText("已停止核算", { exact: true }).waitFor(); await waitForFact(a.locator('[data-rule-id="A-stopped"]'), "本站渠道", "Channel 2 · #2"); assert.equal(await a.getByRole("button", { name: "编辑渠道 A-stopped", exact: true }).count(), 0);
-  await page.getByRole("button", { name: "查看归档资源", exact: true }).click(); await a.locator("[data-resource-id='A-archived']").waitFor(); assert.doesNotMatch(await center.innerText(), /余额合计|总余额|\$30\.00/);
-  // 本站资源不进上游账单，仍在资源列表里
-  await page.getByRole("tab", { name: "资源列表", exact: true }).click(); await page.getByText("自营", { exact: true }).waitFor(); await page.getByRole("tab", { name: "上游账单", exact: true }).click(); await center.waitFor();
+  // 暂停监控的上游：标签「暂停监控」，按钮「编辑上游 名称」；提醒线、汇率、算不算进利润、不再续费写在一行
+  const dedicated = a.locator("[data-resource-id='A-billing']"); await dedicated.locator(".jy-tag").filter({ hasText: exactText(PAUSE_MONITOR) }).waitFor(); await dedicated.getByRole("button", { name: "编辑上游 A-billing", exact: true }).waitFor(); assert.equal(await page.locator(".resource-list-card").getByText("A-billing", { exact: true }).count(), 0); await a.getByText(`余额提醒线：$27.00；汇率：${formatRate(0.7)}；不算进利润；不再续费`, { exact: true }).waitFor();
+  assert.equal(await a.locator("[data-resource-id='pure-key']").count(), 0); await center.locator("[data-unverified-resource-id='pure-key']").getByText("对上的渠道：Channel 1", { exact: true }).waitFor(); await center.locator("[data-unverified-resource-id='unknown-legacy']").locator(".jy-tag").filter({ hasText: exactText("还没确认上游账号") }).waitFor(); assert.equal(await center.locator("[data-resource-id='own']").count(), 0);
+  // 绑定只写渠道、开始统计和「这把 Key 还给别处用吗？」的回答；没答完整时补「利润先不算」，不再显示范围版本
+  await keyRow(a, "Key 9").click(); const active = a.locator('[data-rule-id="A-active"]'); await waitForFact(active, "渠道", "Channel 1、Channel 3"); await waitForFact(active, COVERAGE_QUESTION, `${OWN_CHANNELS_ANSWER}：Channel 2；利润先不算`); assert.equal(await active.locator("dt").filter({ hasText: /范围版本/ }).count(), 0);
+  const history = a.locator('[data-rule-id="A-history"]'); await history.getByText("已解除绑定", { exact: true }).waitFor(); assert.equal(await history.getByRole("button").count(), 0); assert.ok(await active.evaluate((node) => node.compareDocumentPosition(document.querySelector('[data-rule-id="A-history"]')) & Node.DOCUMENT_POSITION_FOLLOWING));
+  await keyRow(a, "Key 10").click(); await keyRow(a, "Key 10").getByText("已解除绑定", { exact: true }).waitFor(); await waitForFact(a.locator('[data-rule-id="A-stopped"]'), "渠道", "Channel 2"); assert.equal(await a.getByRole("button", { name: `${EDIT_BINDING} Key 10 · Own station`, exact: true }).count(), 0);
+  await page.getByRole("button", { name: "显示归档的上游", exact: true }).click(); await a.locator("[data-resource-id='A-archived']").waitFor(); assert.doesNotMatch(await center.innerText(), /余额合计|总余额|\$30\.00/);
+  // 自营站点不进上游账单，仍在上游列表里
+  await page.getByRole("tab", { name: STATION_TABS.list, exact: true }).click(); await page.getByText("自营", { exact: true }).waitFor(); await page.getByRole("tab", { name: STATION_TABS.bills, exact: true }).click(); await center.waitFor();
   const destinations = [
-    { scope: a, label: "更新账号授权", params: { action: "authorization", accountKey: model.accounts[0].accountKey } },
-    { scope: a, label: "核对这把 Key 的全部用途", params: { action: "coverage", ruleId: "A-active" } },
-    { scope: b, label: "查看余额与监控", params: { stationId: "B-monitor" } },
-    { scope: center.locator("[data-unverified-resource-id='pure-key']"), label: "接入这些渠道", params: { action: "connect", ownStationId: "own", channelIds: "1" } },
-    { scope: center.locator("[data-unverified-resource-id='unknown-legacy']"), label: "核验账号身份", params: { action: "verify", stationId: "unknown-legacy" } },
+    { scope: a, label: UPDATE_AUTH, params: { action: "authorization", accountKey: model.accounts[0].accountKey } },
+    { scope: a, label: workflowActionMeta("confirm_coverage").label, params: { action: "coverage", ruleId: "A-active" } },
+    { scope: b, label: workflowActionMeta("inspect_balance").label, params: { stationId: "B-monitor" } },
+    { scope: center.locator("[data-unverified-resource-id='pure-key']"), label: CONNECT, params: { action: "connect", ownStationId: "own", channelIds: "1" } },
+    { scope: center.locator("[data-unverified-resource-id='unknown-legacy']"), label: TEST_READ, params: { action: "verify", stationId: "unknown-legacy" } },
   ];
   const allowedHrefs = [];
   for (const { scope, label, params } of destinations) {
@@ -1609,35 +1835,49 @@ test("account center preserves mixed accounts, original resource IDs, dedicated 
     assert.equal(target.origin, new URL(baseURL).origin); assert.equal(target.pathname, "/stations"); assert.deepEqual(Object.fromEntries(target.searchParams), params); allowedHrefs.push(href);
   }
   assert.deepEqual((await center.getByRole("link").evaluateAll((links) => links.map((link) => link.getAttribute("href")))).sort(), allowedHrefs.sort());
-  // 更换 Key 只在有效关联上，走渠道接入的 coverage 流程
-  for (const id of ["A-history", "A-stopped"]) assert.equal(await a.getByRole("button", { name: "更换 Key " + id, exact: true }).count(), 0);
-  await a.getByRole("button", { name: "更换 Key A-active", exact: true }).click(); await page.getByRole("tab", { name: "渠道接入", selected: true }).waitFor();
+  // 「换 Key」只在在用的绑定上，走渠道绑定里回答「这把 Key 还给别处用吗？」的流程
+  for (const id of ["A-history", "A-stopped"]) assert.equal(await a.locator(`[data-rule-id="${id}"]`).getByRole("button", { name: new RegExp(`^${SWAP_LABEL} `) }).count(), 0);
+  await a.getByRole("button", { name: `${SWAP_LABEL} Key 9 · Own station`, exact: true }).click(); await page.getByRole("tab", { name: STATION_TABS.onboarding, selected: true }).waitFor();
   assert.equal(mutations.length, 0); assert.equal(probes.length, 0); assert.equal(writes.length, 0);
 });
 
+// 同一页里两把 Key 同名时（§3.1）：名字后面都加上编号，按钮也按带编号的名字点
+test("same-name Keys in one account list both carry their Key number", async (t) => {
+  const model = accountReadFixture(); model.accounts[0].keys[1].tokenName = "Key 9";
+  const { center, mutations } = await openAccountsPage(t, { model }); const a = await expandAccount(center, model.accounts[0]);
+  await keyRow(a, "Key 9（Key #9）").waitFor(); await keyRow(a, "Key 9（Key #10）").waitFor(); assert.equal(await keyRow(a, "Key 9").count(), 0);
+  await keyRow(a, "Key 9（Key #9）").click(); await a.getByRole("button", { name: `${EDIT_BINDING} Key 9（Key #9） · Own station`, exact: true }).waitFor();
+  await keyRow(a, "Key 9（Key #10）").click(); await keyRow(a, "Key 9（Key #10）").getByText("已解除绑定", { exact: true }).waitFor(); await waitForFact(a.locator('[data-rule-id="A-stopped"]'), "渠道", "Channel 2");
+  assert.equal(mutations.length, 0);
+});
+
 test("account search and attention filters preserve relationships and open only the original complete editor object", async (t) => {
-  const { page, center, model, mutations } = await openAccountsPage(t); await center.getByRole("textbox", { name: "搜索上游账单" }).fill("A-monitor-1"); await center.getByText(/显示 1\/3 个已核验账号/).waitFor(); const a = await expandAccount(center, model.accounts[0]);
-  await a.getByRole("button", { name: "查看原资源设置 A-monitor-1", exact: true }).click(); const editor = page.getByRole("dialog", { name: /^编辑上游资源：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("成本渠道匹配别名", { exact: true }).inputValue(), "kept_alias"); await editor.getByRole("button", { name: /取\s*消/ }).click(); await editor.waitFor({ state: "hidden" });
-  await center.getByRole("textbox", { name: "搜索上游账单" }).fill("Sub-password"); const sub = await expandAccount(center, model.accounts[2]); await sub.getByRole("button", { name: "查看原资源设置 Sub-password", exact: true }).click(); await editor.waitFor(); assert.equal(await editor.getByLabel("登录邮箱", { exact: true }).inputValue(), "saved-sub@example.test"); await editor.getByRole("button", { name: /取\s*消/ }).click(); await editor.waitFor({ state: "hidden" });
-  await center.getByRole("textbox", { name: "搜索上游账单" }).fill("Key 10"); await expandAccount(center, model.accounts[0]); await a.getByRole("button", { name: /Key 10 · #10/ }).click(); await a.getByText("Channel 2 · #2", { exact: true }).waitFor(); assert.equal(await a.locator("[data-resource-id]").count(), 3);
-  await center.getByRole("textbox", { name: "搜索上游账单" }).fill(""); await center.getByRole("combobox", { name: "上游账单状态" }).click(); await page.getByText("需处理", { exact: true }).last().click(); await center.getByText(/显示 1\/3 个已核验账号/).waitFor(); assert.equal(await center.getByRole("button", { name: /账号 B / }).count(), 0);
-  await center.getByRole("textbox", { name: "搜索上游账单" }).fill("pure-key"); await center.getByText(/显示 0\/3 个已核验账号；待核验资源 1\/2/).waitFor(); await center.locator("[data-unverified-resource-id='pure-key']").waitFor(); assert.equal(mutations.length, 0);
+  const search = (center) => center.getByRole("textbox", { name: `搜索${STATION_TABS.bills}` });
+  const { page, center, model, mutations } = await openAccountsPage(t); await search(center).fill("A-monitor-1"); await center.getByText(accountCaption(1, 0)).waitFor(); const a = await expandAccount(center, model.accounts[0]);
+  await a.getByRole("button", { name: "编辑上游 A-monitor-1", exact: true }).click(); const editor = page.getByRole("dialog", { name: /^编辑上游资源：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel("用户 ID（New-Api-User）", { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("成本渠道匹配别名", { exact: true }).inputValue(), "kept_alias"); await editor.getByRole("button", { name: /取\s*消/ }).click(); await editor.waitFor({ state: "hidden" });
+  await search(center).fill("Sub-password"); const sub = await expandAccount(center, model.accounts[2]); await sub.getByRole("button", { name: "编辑上游 Sub-password", exact: true }).click(); await editor.waitFor(); assert.equal(await editor.getByLabel("登录邮箱", { exact: true }).inputValue(), "saved-sub@example.test"); await editor.getByRole("button", { name: /取\s*消/ }).click(); await editor.waitFor({ state: "hidden" });
+  await search(center).fill("Key 10"); await expandAccount(center, model.accounts[0]); await keyRow(a, "Key 10").click(); await a.getByText("Channel 2", { exact: true }).waitFor(); assert.equal(await a.locator("[data-resource-id]").count(), 3);
+  await search(center).fill(""); await center.getByRole("combobox", { name: "筛选上游账号" }).click(); await page.getByText("需处理", { exact: true }).last().click(); await center.getByText(accountCaption(1, 2)).waitFor(); assert.equal(await center.getByRole("button", { name: /账号 B / }).count(), 0);
+  await search(center).fill("pure-key"); await center.getByText(accountCaption(0, 1)).waitFor(); await center.locator("[data-unverified-resource-id='pure-key']").waitFor(); assert.equal(mutations.length, 0);
 });
 
 test("duplicate ownership deep link expands both active 核算关联 and never shows one scope as unified", async (t) => {
   const model = accountReadFixture(), key = model.accounts[0].keys[0]; Object.assign(key, { activeRuleIds: ["A-active", "A-conflict"], ruleIds: ["A-active", "A-conflict", "A-history"], scopeAmbiguous: true, costCoverage: "unknown", coverageDeclaration: { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] }, scopeVersion: null, billingEffectiveFromMs: null, firstQueryableAtMs: null }); key.channels.push({ ownSource: null, ownStationId: "old-own", channelId: 1, name: "Legacy channel 1" });
   Object.assign(key.associations[0], { conflict: true, conflictRuleIds: ["A-conflict"], keyConflictRuleIds: ["A-conflict"], channelConflictRuleIds: [], duplicateChannelIds: [] }); key.associations.splice(1, 0, { ...key.associations[0], ruleId: "A-conflict", ownStationId: "old-own", scopeVersion: 1, channels: [{ channelId: 1, name: "Legacy channel 1" }], conflictRuleIds: ["A-active"], keyConflictRuleIds: ["A-active"] });
   const { center } = await openAccountsPage(t, { model, path: "/stations?action=conflict&ruleId=A-conflict" }); const a = center.locator(`[data-account-key="${model.accounts[0].accountKey}"]`), scope = a.locator(`[data-canonical-key="${key.canonicalKey}"]`);
-  await a.getByRole("button", { name: /Key 9 · #9/ }).getByText("重复归属", { exact: true }).waitFor();
-  const first = scope.locator('[data-rule-id="A-active"]'), second = scope.locator('[data-rule-id="A-conflict"]'); await first.getByText("与关联 A-conflict 重复归属", { exact: true }).waitFor(); await second.getByText("与关联 A-active 重复归属", { exact: true }).waitFor();
-  await second.getByText("本站 old-own", { exact: true }).waitFor(); await waitForFact(second, "本站渠道", "Legacy channel 1 · #1"); assert.match(await second.getAttribute("class"), /is-focused/); assert.doesNotMatch(await first.getAttribute("class"), /is-focused/);
-  await first.getByText("与 A-conflict 是同一把实际 Key，成本会被重复计算，只能停止其中一条。", { exact: true }).waitFor(); await second.getByText("与 A-active 是同一把实际 Key，成本会被重复计算，只能停止其中一条。", { exact: true }).waitFor();
-  // 范围版本只按关联各自显示，Key 头上不给一个合并后的版本或时间
-  await waitForFact(first, "范围版本", "3 · 用途待确认，毛利标为待确认"); await waitForFact(second, "范围版本", "1 · 用途待确认，毛利标为待确认");
-  assert.equal(await scope.locator("dt").filter({ hasText: exactText("范围版本") }).count(), 3); assert.equal(await scope.locator("[data-rule-id]").count(), 3);
-  assert.doesNotMatch(await a.getByRole("button", { name: /Key 9 · #9/ }).innerText(), /范围版本|生效|停止时间/);
-  for (const id of ["A-active", "A-conflict"]) { await scope.getByRole("button", { name: "编辑渠道 " + id, exact: true }).waitFor(); await scope.getByRole("button", { name: "停止核算关联 " + id, exact: true }).waitFor(); }
-  assert.equal(await scope.locator('[data-rule-id="A-history"]').getByText("重复归属").count(), 0);
+  await keyRow(a, "Key 9").locator(".jy-tag").filter({ hasText: exactText("需处理") }).waitFor();
+  // 两条重复的绑定都标「需处理」，各写「这把 Key 绑了两次」和对方是哪条（按 Key 和自营站点说；自营站点已不在时写「—」，不写编号）
+  const first = scope.locator('[data-rule-id="A-active"]'), second = scope.locator('[data-rule-id="A-conflict"]');
+  for (const [binding, other] of [[first, `Key 9 · 自营站点 ${EMPTY}`], [second, "Key 9 · 自营站点 Own station"]]) {
+    await binding.locator(".jy-tag").filter({ hasText: exactText("需处理") }).waitFor(); const banner = binding.locator(".jy-banner");
+    await banner.locator("p").filter({ hasText: exactText(`${KEY_TWICE.title}：${KEY_TWICE.detail}`) }).waitFor(); assert.equal(await banner.getByText(/同时绑了两把 Key/).count(), 0); await banner.getByText(`和它重复的：${other}`, { exact: true }).waitFor();
+  }
+  await second.locator("b").filter({ hasText: exactText(`自营站点 ${EMPTY}`) }).waitFor(); await waitForFact(second, "渠道", "Legacy channel 1"); assert.match(await second.getAttribute("class"), /is-focused/); assert.doesNotMatch(await first.getAttribute("class"), /is-focused/);
+  // 开始统计 / 解除时间只按绑定各自显示，Key 头上不给一个合并后的时间
+  assert.equal(await scope.locator("dt").filter({ hasText: exactText("开始统计") }).count(), 2); assert.equal(await scope.locator("dt").filter({ hasText: exactText("解除时间") }).count(), 1); assert.equal(await scope.locator("[data-rule-id]").count(), 3);
+  assert.doesNotMatch(await keyRow(a, "Key 9").innerText(), /开始统计|解除时间|范围/);
+  for (const [binding, target] of [[first, "Key 9 · Own station"], [second, `Key 9 · ${EMPTY}`]]) { await binding.getByRole("button", { name: `${EDIT_BINDING} ${target}`, exact: true }).waitFor(); await binding.getByRole("button", { name: `${UNBIND_LABEL} ${target}`, exact: true }).waitFor(); }
+  const history = scope.locator('[data-rule-id="A-history"]'); assert.equal(await history.getByText("需处理").count(), 0); assert.equal(await history.locator(".jy-banner").count(), 0);
 });
 
 test("active 核算关联 outside verified Keys stay listed with their reason, verification link and a working stop", async (t) => {
@@ -1651,37 +1891,42 @@ test("active 核算关联 outside verified Keys stay listed with their reason, v
   const { page, center, mutations } = await openAccountsPage(t, { model, path: "/stations?action=conflict&ruleId=A-active", mutation(route, mutation) {
     assert.deepEqual([mutation.method, mutation.path], ["DELETE", "/api/reconciliation/rules/U-gone"]); model.unmatchedAssociations = model.unmatchedAssociations.filter((item) => item.ruleId !== "U-gone"); return fulfill(route, { ok: true });
   } });
-  // 冲突的另一方不在任何 Key 下：不按账号筛选，两边都看得到
-  await center.getByText(/显示 3\/3 个已核验账号；待核验资源 2\/2；未归到 Key 的核算关联 2\/2/).waitFor();
-  const section = center.locator("[data-unmatched-associations]"), legacy = section.locator('[data-rule-id="U-legacy"]'), gone = section.locator('[data-rule-id="U-gone"]');
-  const active = center.locator(`[data-account-key="${model.accounts[0].accountKey}"] [data-rule-id="A-active"]`); await active.getByText("渠道 #3 同时归属 U-legacy，收入会被重复计算；停止其中一条，或编辑渠道移除重复的渠道。", { exact: true }).waitFor(); assert.match(await active.getAttribute("class"), /is-focused/);
-  await legacy.getByText("Legacy Key · #9", { exact: true }).waitFor(); await legacy.getByText("重复归属", { exact: true }).waitFor(); await legacy.getByText("渠道 #3 同时归属 A-active，收入会被重复计算；停止其中一条，或编辑渠道移除重复的渠道。", { exact: true }).waitFor();
-  await waitForFact(legacy, "上游资源", "unknown-legacy"); await waitForFact(legacy, "本站", "Own station"); await waitForFact(legacy, "本站渠道", "Channel 3 · #3");
-  assert.equal(await legacy.getByRole("link", { name: "核验账号身份", exact: true }).getAttribute("href"), "/stations?action=verify&stationId=unknown-legacy");
-  await gone.getByText("上游资源已删除", { exact: true }).waitFor(); await waitForFact(gone, "上游资源", "deleted-station"); assert.equal(await gone.getByRole("link").count(), 0);
-  await center.getByRole("textbox", { name: "搜索上游账单" }).fill("Gone Key"); await center.getByText(/未归到 Key 的核算关联 1\/2/).waitFor(); assert.equal(await legacy.count(), 0);
-  await gone.getByRole("button", { name: "停止核算关联 U-gone", exact: true }).click(); const modal = page.getByRole("dialog", { name: "停止这条核算关联？", exact: true });
-  await waitForFact(modal, "Key", "Gone Key · #5"); await waitForFact(modal, "释放的本站渠道", "Channel 4 #4（Own station）"); await modal.getByRole("button", { name: "确认用途操作", exact: true }).click(); await modal.waitFor({ state: "hidden" });
-  await gone.waitFor({ state: "detached" }); await center.getByRole("textbox", { name: "搜索上游账单" }).fill(""); await legacy.waitFor(); await center.getByText(/未归到 Key 的核算关联 1\/1/).waitFor();
+  // 冲突的另一方不在任何 Key 下：不按上游账号筛选，两边都看得到
+  await center.getByText(accountCaption(3, 2, 2)).waitFor();
+  const section = center.locator("[data-unmatched-associations]"), legacy = section.locator('[data-rule-id="U-legacy"]'), gone = section.locator('[data-rule-id="U-gone"]'), channelTwice = fillIssueCopy(CHANNEL_TWICE.title, CHANNEL_TWICE.plain, { channel: "Channel 3" });
+  const active = center.locator(`[data-account-key="${model.accounts[0].accountKey}"] [data-rule-id="A-active"]`); await active.locator(".jy-banner p").filter({ hasText: exactText(`${channelTwice}：${CHANNEL_TWICE.detail}`) }).waitFor(); await active.getByText("和它重复的：Legacy Key · 自营站点 Own station", { exact: true }).waitFor(); assert.match(await active.getAttribute("class"), /is-focused/);
+  await legacy.locator("b").filter({ hasText: exactText("Legacy Key") }).waitFor(); await legacy.locator(".jy-tag").filter({ hasText: exactText("需处理") }).waitFor(); await legacy.getByText(`${OWNER_UNVERIFIED.title}：${OWNER_UNVERIFIED.detail}`, { exact: true }).waitFor();
+  await legacy.locator(".jy-banner p").filter({ hasText: exactText(`${channelTwice}：${CHANNEL_TWICE.detail}`) }).waitFor(); await legacy.getByText("和它重复的：Key 9 · 自营站点 Own station", { exact: true }).waitFor();
+  await waitForFact(legacy, "上游", "unknown-legacy"); await waitForFact(legacy, "自营站点", "Own station"); await waitForFact(legacy, "渠道", "Channel 3");
+  assert.equal(await legacy.getByRole("link", { name: TEST_READ, exact: true }).getAttribute("href"), "/stations?action=verify&stationId=unknown-legacy");
+  // 上游已删除：写「找不到这个上游：…请解除绑定」，上游一栏写「—」，不给处理链接，只能解除绑定
+  await gone.getByText(`${ERROR_CATEGORIES.not_found.text}：上游已删除，这条绑定读不到上游成本，请解除绑定`, { exact: true }).waitFor(); await waitForFact(gone, "上游", EMPTY); assert.equal(await gone.getByRole("link").count(), 0);
+  await center.getByRole("textbox", { name: `搜索${STATION_TABS.bills}` }).fill("Gone Key"); await center.getByText(accountCaption(0, 0, 1)).waitFor(); assert.equal(await legacy.count(), 0);
+  await gone.getByRole("button", { name: `${UNBIND_LABEL} Gone Key · Own station`, exact: true }).click(); const modal = page.getByRole("dialog", { name: `${UNBIND_LABEL}？`, exact: true });
+  await waitForFact(modal, "Key", "Gone Key"); await waitForFact(modal, "自营站点", "Own station"); await waitForFact(modal, "解除后空出来的渠道", "Channel 4"); await modal.getByRole("button", { name: `确认${UNBIND_LABEL}`, exact: true }).click(); await modal.waitFor({ state: "hidden" });
+  await gone.waitFor({ state: "detached" }); await center.getByRole("textbox", { name: `搜索${STATION_TABS.bills}` }).fill(""); await legacy.waitFor(); await center.getByText(accountCaption(3, 2, 1)).waitFor(); assert.equal(await section.locator("[data-rule-id]").count(), 1);
   assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["DELETE", "/api/reconciliation/rules/U-gone"]]);
 });
 
 test("account read failure retains the last public relationships and retry restores the center", async (t) => {
-  const { center, accountRequests, mutations } = await openAccountsPage(t, { accounts(route, count, model) { return count === 2 ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "上游账单暂不可用" }) }) : fulfill(route, model); } });
-  await center.getByRole("button", { name: "刷新上游账单", exact: true }).click(); await center.getByText("上游账单刷新失败，正在显示上次结果", { exact: true }).waitFor(); await center.getByRole("button", { name: /账号 B / }).waitFor(); await center.getByRole("button", { name: "重试上游账单", exact: true }).click(); await center.getByText("上游账单刷新失败，正在显示上次结果", { exact: true }).waitFor({ state: "hidden" }); assert.deepEqual(accountRequests, ["GET", "GET", "GET"]); assert.equal(mutations.length, 0);
+  const { center, model, accountRequests, mutations } = await openAccountsPage(t, { accounts(route, count, model) { return count === 2 ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "上游账单暂不可用" }) }) : fulfill(route, model); } });
+  // 刷新没读到：写「刷新失败，数据截至 …。」和归类后的原因，上次读到的上游账号照常列出；横幅里的「刷新」再读一次
+  await center.getByRole("button", { name: settledButton(REFRESH) }).click(); const banner = center.locator(".jy-banner[role=alert]"); await banner.locator("b").filter({ hasText: exactText(refreshFailedText(model.generatedAt)) }).waitFor(); await banner.getByText(describeError(Object.assign(new Error("上游账单暂不可用"), { status: 503 })).text, { exact: true }).waitFor(); await banner.locator("details.jy-error-detail").filter({ hasText: "上游账单暂不可用" }).waitFor();
+  await center.getByRole("button", { name: /账号 B / }).waitFor(); await center.getByRole("button", { name: `${REFRESH}${STATION_TABS.bills}`, exact: true }).click(); await banner.waitFor({ state: "hidden" }); assert.deepEqual(accountRequests, ["GET", "GET", "GET"]); assert.equal(mutations.length, 0);
 });
 
 test("an initial account read failure offers a working retry without affecting original monitoring resources", async (t) => {
   const { page, center, accountRequests } = await openAccountsPage(t, { initialFailure: true, accounts(route, count, model) { return count === 1 ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "上游账单暂不可用" }) }) : fulfill(route, model); } });
-  // 资源列表照常可用
-  await page.getByRole("tab", { name: "资源列表", exact: true }).click(); await page.getByText("自营", { exact: true }).waitFor(); await page.getByRole("tab", { name: "上游账单", exact: true }).click();
-  await center.getByRole("button", { name: "重试上游账单", exact: true }).click(); await center.getByText(/显示 3\/3 个已核验账号/).waitFor(); assert.deepEqual(accountRequests, ["GET", "GET"]);
+  await center.locator(".jy-banner[role=alert] b").filter({ hasText: exactText(`读不到${STATION_TABS.bills}：${describeError(Object.assign(new Error("上游账单暂不可用"), { status: 503 })).text}。`) }).waitFor();
+  // 上游列表照常可用
+  await page.getByRole("tab", { name: STATION_TABS.list, exact: true }).click(); await page.getByText("自营", { exact: true }).waitFor(); await page.getByRole("tab", { name: STATION_TABS.bills, exact: true }).click();
+  await center.getByRole("button", { name: `${REFRESH}${STATION_TABS.bills}`, exact: true }).click(); await center.getByText(/^3 个上游账号；/).waitFor(); assert.deepEqual(accountRequests, ["GET", "GET"]);
 });
 
 test("account and Key expansion works by keyboard across 320/390/768/1440 widths without root overflow", async (t) => {
   for (const width of [320, 390, 768, 1440]) {
-    const { page, center, model } = await openAccountsPage(t, { viewport: { width, height: 900 } }); const site = center.locator(`[data-site-key="${model.accounts[0].siteKey}"]`), accountButton = site.getByRole("button", { name: /账号 A / }); await accountButton.focus(); await page.keyboard.press("Enter"); const a = center.locator(`[data-account-key="${model.accounts[0].accountKey}"]`); await a.waitFor(); const keyButton = a.getByRole("button", { name: /Key 9 · #9/ }); await keyButton.focus(); await page.keyboard.press("Enter"); await a.getByText("Channel 1 · #1、Channel 3 · #3", { exact: true }).waitFor();
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `account center overflow at ${width}`); await keyButton.focus(); await page.keyboard.press("Enter"); await a.getByText("Channel 1 · #1、Channel 3 · #3", { exact: true }).waitFor({ state: "hidden" });
+    const { page, center, model } = await openAccountsPage(t, { viewport: { width, height: 900 } }); const site = center.locator(`[data-site-key="${model.accounts[0].siteKey}"]`), accountButton = site.getByRole("button", { name: /账号 A / }); await accountButton.focus(); await page.keyboard.press("Enter"); const a = center.locator(`[data-account-key="${model.accounts[0].accountKey}"]`); await a.waitFor(); const keyButton = keyRow(a, "Key 9"); await keyButton.focus(); await page.keyboard.press("Enter"); await a.getByText("Channel 1、Channel 3", { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `account center overflow at ${width}`); await keyButton.focus(); await page.keyboard.press("Enter"); await a.getByText("Channel 1、Channel 3", { exact: true }).waitFor({ state: "hidden" });
   }
 });
 
@@ -1710,61 +1955,78 @@ async function openConfirmedHistoryPage(t, options = {}) {
   const stopElsewhere = () => Object.assign(current.rule, { enabled: false, archivedAt: "2026-10-09T00:00:00Z" });
   return { page, reads, historyReads, queries, records, stopElsewhere };
 }
-async function chooseConfirmedHistoryRule(page, drawer, label = "Rule A · 当前关联 · rule-1") { await drawer.getByRole("combobox", { name: "历史核算关联", exact: true }).click(); await page.getByText(label, { exact: true }).last().click(); }
-async function expandConfirmedRecord(drawer, record, compact = false) { const button = compact ? drawer.getByRole("button", { name: new RegExp((record.upstreamSource.tokenName ?? "原 Key 名称未保存") + " · 原范围") }).first() : drawer.locator("tr.ant-table-row", { hasText: record.upstreamSource.tokenName || "原 Key 名称未保存" }).first(); await button.focus(); await drawer.page().keyboard.press("Enter"); return drawer.locator(`[data-history-id="${record.historyId}"]`); }
+// 以前的每日记录（recon-history.tsx）：抽屉标题和入口按钮都是「以前的每日记录」，绑定下拉写「Key · 上游 · 在用 / 已解除绑定」
+const HISTORY = workflowActionMeta("open_history").label, HISTORY_UPSTREAM = configuration.upstreams[0].name;
+const historyOption = (key, ended = false) => `${key} · ${HISTORY_UPSTREAM} · ${ended ? "已解除绑定" : "在用"}`;
+const historyCount = (n) => `${n} 条每日记录 · 按美元显示。只列每天的记录，以前的数据还在。`;
+const HISTORY_FIXED_NOTE = `这个上游现在计入固定成本；没标「${FIXED_COST_TEXT}」的日子是当时按用量算的上游成本，不改。`;
+// 记录里没有 Key 名称和 ID 时写「—」，不拿现在的绑定去补
+const historyKey = (record) => record.upstreamSource.tokenName || (record.upstreamSource.tokenId != null ? `Key #${record.upstreamSource.tokenId}` : EMPTY);
+async function chooseConfirmedHistoryRule(page, drawer, label = historyOption("Rule A")) { await drawer.getByRole("combobox", { name: "绑定", exact: true }).click(); await page.getByText(label, { exact: true }).last().click(); }
+async function expandConfirmedRecord(drawer, record, compact = false) { const button = compact ? drawer.getByRole("button", { name: new RegExp(` · ${historyKey(record).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`) }).first() : drawer.locator(`tr.ant-table-row[data-row-key="${record.historyId}"]`); await button.focus(); await drawer.page().keyboard.press("Enter"); return drawer.locator(`[data-history-id="${record.historyId}"]`); }
+// 展开的记录里一项：左边名称，右边写法（Detail，recon-parts.tsx）
+async function historyFact(record, label, value) { await record.locator(".reconciliation-detail").filter({ has: record.page().locator(".reconciliation-detail__label").filter({ hasText: exactText(label) }) }).locator(".reconciliation-detail__value").filter({ hasText: exactText(value) }).first().waitFor(); }
 
-test("confirmed history preserves Oct8 original scope, sources and members independently of current channel 9 and group history", async (t) => {
-  const { page, reads, historyReads, records } = await openConfirmedHistoryPage(t, { groupHistory: true }); const summary = page.locator(".reconciliation-summary"), before = await summary.innerText(); const row = page.locator("tr.ant-table-row", { hasText: "Rule A" }).first(); await row.focus(); await page.keyboard.press("Enter"); await page.getByText("分组与倍率历史 · 2 段", { exact: true }).waitFor(); await row.getByRole("button", { name: "查看 Rule A 的核算详情", exact: true }).click(); const detail = page.getByRole("dialog", { name: "Rule A · 核算详情", exact: true }); await detail.getByText("New channel 9 · ID 9", { exact: false }).first().waitFor(); await detail.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "已确认账单历史", exact: true }); const record = await expandConfirmedRecord(drawer, records[0]); await record.getByText("old-1 · ID 1、old-2 · ID 2、old-3 · ID 3", { exact: true }).waitFor(); await record.getByText("newapi · https://old-up.test · 账号 7", { exact: true }).waitFor(); await record.getByText(/old-own-namespace/).waitFor(); await record.getByText("old-name · #9 · 范围版本 1", { exact: true }).waitFor(); assert.doesNotMatch(await record.innerText(), /New channel 9|new-name|范围版本 2/); assert.equal(await summary.innerText(), before); assert.deepEqual(historyReads[0], { ruleId: "rule-1", params: { limit: "20" } }); assert.ok(reads.some((read) => read.params.includeArchived === "true")); assert.ok(historyReads.every((read) => read.params.limit === "20"));
+test("confirmed history shows the Oct8 time, Key and channels it was fixed with, not current channel 9 or source details", async (t) => {
+  const { page, reads, historyReads, records } = await openConfirmedHistoryPage(t, { groupHistory: true }); const summary = page.locator(".reconciliation-summary"), before = await summary.innerText(); const row = page.locator("tr.ant-table-row", { hasText: "Rule A" }).first(); await row.focus(); await page.keyboard.press("Enter"); await page.getByRole("region", { name: "Rule A 的倍率变化", exact: true }).getByText("倍率变化 · 1 次", { exact: true }).waitFor(); await row.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click(); const detail = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true }); await detail.getByRole("region", { name: "各渠道收入", exact: true }).getByText("New channel 9", { exact: true }).waitFor(); await detail.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); const record = await expandConfirmedRecord(drawer, records[0]); await drawer.locator(`tr.ant-table-row[data-row-key="${records[0].historyId}"]`).getByText("old-1、old-2、old-3", { exact: true }).waitFor(); await historyFact(record, "时间", formatZonedWindow(records[0].window)); await historyFact(record, "Key", "old-name"); await record.getByText("来自自营站点 3 个渠道的收费记录", { exact: true }).waitFor();
+  // A1：来源（平台、地址、账号、namespace）和范围版本不再上页面（§11）
+  assert.doesNotMatch(await record.innerText(), /New channel 9|new-name|范围版本|old-own|old-up\.test|newapi|namespace/); assert.equal(await summary.innerText(), before); assert.deepEqual(historyReads[0], { ruleId: "rule-1", params: { limit: "20" } }); assert.ok(reads.some((read) => read.params.includeArchived === "true")); assert.ok(historyReads.every((read) => read.params.limit === "20"));
 });
 
 test("confirmed history remains discoverable after stopping and reload even without an own station", async (t) => {
-  const { page, reads, historyReads, stopElsewhere } = await openConfirmedHistoryPage(t, { removeOwnAfterStop: true }); stopElsewhere(); await page.reload(); await page.getByText("还不能开始核算", { exact: true }).waitFor(); await page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(page, drawer, "Rule A · 已停止 / 归档 · rule-1"); await drawer.getByText("已读取 1 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。", { exact: true }).waitFor(); assert.equal(reads.filter((read) => read.method !== "GET" && read.path !== "/api/reconciliation/query").length, 0); assert.equal(historyReads.length, 1); assert.ok(reads.some((read) => read.params.includeArchived === "true")); assert.ok(reads.filter((read) => read.path.endsWith("/confirmed")).every((read) => read.method === "GET"));
+  const { page, reads, historyReads, stopElsewhere } = await openConfirmedHistoryPage(t, { removeOwnAfterStop: true }); stopElsewhere(); await page.reload(); await page.getByText(OWN_STATION_UNSET_TITLE, { exact: true }).waitFor(); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(page, drawer, historyOption("Rule A", true)); await drawer.getByText(historyCount(1), { exact: true }).waitFor(); assert.equal(reads.filter((read) => read.method !== "GET" && read.path !== "/api/reconciliation/query").length, 0); assert.equal(historyReads.length, 1); assert.ok(reads.some((read) => read.params.includeArchived === "true")); assert.ok(reads.filter((read) => read.path.endsWith("/confirmed")).every((read) => read.method === "GET"));
 });
 
 test("confirmed history keeps zero and negative original profit and labels incomplete legacy evidence without filling current identity", async (t) => {
   const zero = confirmedHistoryRecord("zero", 0), negative = confirmedHistoryRecord("negative", -1), legacy = confirmedHistoryRecord("legacy"); zero.upstreamSource.tokenName = "old-zero"; negative.upstreamSource.tokenName = "old-negative"; Object.assign(legacy, { ownSource: null, scopeVersion: null, scopeFingerprint: null, billingEffectiveFromMs: null, sourceCompleteness: "legacy_partial" }); legacy.window.timezone = null; legacy.upstreamSource = { provider: null, baseUrl: null, accountId: null, tokenId: null, tokenName: null };
-  const { page } = await openConfirmedHistoryPage(t, { records: [zero, negative, legacy], rate: 7 }); await page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(page, drawer); await drawer.locator("tr.ant-table-row", { hasText: "old-zero" }).getByText("$0.00", { exact: true }).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-negative" }).getByText("-$1.00", { exact: true }).waitFor(); const record = await expandConfirmedRecord(drawer, legacy); await record.getByText("旧记录信息不完整", { exact: true }).waitFor(); await record.getByText("原本站来源未保存", { exact: true }).waitFor(); await record.getByText(/原时区未保存/).waitFor(); await record.getByText("原平台未保存 · 原地址未保存 · 账号 未保存", { exact: true }).waitFor(); assert.doesNotMatch(await record.innerText(), /Fixture upstream|upstream-1|New channel 9|¥/);
+  const { page } = await openConfirmedHistoryPage(t, { records: [zero, negative, legacy], rate: 7 }); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(page, drawer); await drawer.locator("tr.ant-table-row", { hasText: "old-zero" }).getByText("$0.00", { exact: true }).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-negative" }).getByText(`${MINUS}$1.00`, { exact: true }).waitFor();
+  // 早期记录缺来源和时区：行上和展开后都写「这天的数据不完整」；没记下的 Key 写「—」，不拿现在的绑定去补
+  await drawer.locator(`tr.ant-table-row[data-row-key="${legacy.historyId}"]`).getByText(INCOMPLETE_DAY_TEXT, { exact: true }).waitFor(); const record = await expandConfirmedRecord(drawer, legacy); await record.getByText(INCOMPLETE_DAY_TEXT, { exact: true }).waitFor(); await historyFact(record, "Key", EMPTY); await historyFact(record, "汇率", EMPTY); assert.doesNotMatch(await record.innerText(), /Fixture upstream|upstream-1|New channel 9|Rule A|new-name|¥/);
 });
 
 test("3b confirmed history for a fixed-purchase upstream keeps the original Key-usage cost and explains today's zero cost", async (t) => {
-  const note = /这个关联的上游现在是固定采购，当前核算里上游成本记 0/;
+  const note = HISTORY_FIXED_NOTE;
   const fixed = await openConfirmedHistoryPage(t, { upstreams: configuration.upstreams.map((station) => ({ ...station, costBasis: "fixed" })) });
-  await fixed.page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); let drawer = fixed.page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(fixed.page, drawer);
-  await drawer.getByText(note).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).getByText("$2.00", { exact: true }).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).getByText("$1.00", { exact: true }).waitFor();
+  await fixed.page.getByRole("button", { name: HISTORY, exact: true }).click(); let drawer = fixed.page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(fixed.page, drawer);
+  await drawer.getByText(note, { exact: true }).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).getByText("$2.00", { exact: true }).waitFor(); await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).getByText("$1.00", { exact: true }).waitFor();
   const usage = await openConfirmedHistoryPage(t, { upstreams: configuration.upstreams.map((station) => ({ ...station, costBasis: "usage" })) });
-  await usage.page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); drawer = usage.page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(usage.page, drawer);
-  await drawer.getByText("已读取 1 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。", { exact: true }).waitFor(); assert.equal(await drawer.getByText(note).count(), 0);
+  await usage.page.getByRole("button", { name: HISTORY, exact: true }).click(); drawer = usage.page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(usage.page, drawer);
+  await drawer.getByText(historyCount(1), { exact: true }).waitFor(); assert.equal(await drawer.getByText(note, { exact: true }).count(), 0);
 });
 
 test("4a ledger history shows each record's settle-time cost basis, revision and rates; the fixed note only covers Key-usage records", async (t) => {
-  const note = /这个关联的上游现在是固定采购，当前核算里上游成本记 0/, fixedUpstreams = configuration.upstreams.map((station) => ({ ...station, costBasis: "fixed" }));
+  const note = HISTORY_FIXED_NOTE, fixedUpstreams = configuration.upstreams.map((station) => ({ ...station, costBasis: "fixed" }));
   const fixed = { ...confirmedHistoryRecord("ledger-fixed", 3), billDate: "2026-10-08", revision: 2, settlementSource: "resettle", settledRates: { income: 7.1, cost: null }, costBasis: "fixed" }; fixed.upstreamSource = { ...fixed.upstreamSource, tokenName: "fixed-key" };
   const migrated = { ...confirmedHistoryRecord("ledger-migrated"), billDate: "2026-10-07", revision: 1, settlementSource: "migrated", settledRates: { income: null, cost: null }, costBasis: null }; migrated.upstreamSource = { ...migrated.upstreamSource, tokenName: "migrated-key" };
   const mixed = await openConfirmedHistoryPage(t, { records: [fixed, migrated], upstreams: fixedUpstreams });
-  await mixed.page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); let drawer = mixed.page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(mixed.page, drawer);
-  await drawer.getByText(note).waitFor(); const fixedRow = drawer.locator("tr.ant-table-row", { hasText: "fixed-key" }), migratedRow = drawer.locator("tr.ant-table-row", { hasText: "migrated-key" });
-  assert.match(await fixedRow.locator(".reconciliation-table-amount", { hasText: "固定采购" }).innerText(), /^\$0\.00\s*固定采购$/); await fixedRow.getByText("第 2 版 · 重新结账", { exact: true }).waitFor(); await fixedRow.getByText("$3.00", { exact: true }).waitFor();
-  await migratedRow.getByText("迁移的旧账", { exact: true }).waitFor(); await migratedRow.getByText("$2.00", { exact: true }).waitFor(); assert.equal(await migratedRow.getByText("固定采购").count(), 0);
-  let record = await expandConfirmedRecord(drawer, fixed); await record.getByText("$5.00 / $0.00 / $3.00", { exact: true }).waitFor(); await record.getByText("固定采购，成本记 0（当天 Key 用量 $2.00，不计入毛利）", { exact: true }).waitFor(); await record.getByText("第 2 版 · 重新结账", { exact: true }).waitFor(); await record.getByText("本站 ¥7.1/$ · 上游 未设置", { exact: true }).waitFor();
-  record = await expandConfirmedRecord(drawer, migrated); await record.getByText("$3.00 / $2.00 / $1.00", { exact: true }).waitFor(); await record.getByText("迁移的旧账", { exact: true }).waitFor(); await record.getByText("旧账未记录", { exact: true }).waitFor(); assert.doesNotMatch(await record.innerText(), /成本计法|未设置/);
+  await mixed.page.getByRole("button", { name: HISTORY, exact: true }).click(); let drawer = mixed.page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(mixed.page, drawer);
+  await drawer.getByText(note, { exact: true }).waitFor(); const fixedRow = drawer.locator("tr.ant-table-row", { hasText: "fixed-key" }), migratedRow = drawer.locator("tr.ant-table-row", { hasText: "migrated-key" });
+  // 固定时计入固定成本的那天：上游成本一格写「计入固定成本」，不写金额（§3.2）；重新固定过的写「改过 N 次」（§4）
+  await fixedRow.getByText(FIXED_COST_TEXT, { exact: true }).waitFor(); assert.equal(await fixedRow.getByText("$2.00", { exact: true }).count(), 0); assert.equal(await fixedRow.getByText("$0.00", { exact: true }).count(), 0); await fixedRow.getByText("改过 1 次", { exact: true }).waitFor(); await fixedRow.getByText("$3.00", { exact: true }).waitFor();
+  // 以前的数据（迁移的旧账）按用量算，没改过，不加说明
+  await migratedRow.getByText("$2.00", { exact: true }).waitFor(); assert.equal(await migratedRow.getByText(FIXED_COST_TEXT).count(), 0); assert.equal(await migratedRow.getByText(/改过/).count(), 0);
+  let record = await expandConfirmedRecord(drawer, fixed); await historyFact(record, "收入", "$5.00来自自营站点 3 个渠道的收费记录"); await historyFact(record, "上游成本", FIXED_COST_TEXT); await historyFact(record, "毛利", "$3.00"); await historyFact(record, "改过", "改过 1 次"); await historyFact(record, "汇率", `${formatRate(7.1)}，${formatZonedDateTime(fixed.confirmedAt, fixed.window.timezone)} 固定时记下`); assert.doesNotMatch(await record.innerText(), /\$2\.00/);
+  record = await expandConfirmedRecord(drawer, migrated); await historyFact(record, "收入", "$3.00来自自营站点 3 个渠道的收费记录"); await historyFact(record, "上游成本", "$2.00"); await historyFact(record, "毛利", "$1.00"); await historyFact(record, "汇率", EMPTY); assert.doesNotMatch(await record.innerText(), new RegExp(`成本计法|未设置|改过|${FIXED_COST_TEXT}`));
   const onlyFixed = await openConfirmedHistoryPage(t, { records: [fixed], upstreams: fixedUpstreams });
-  await onlyFixed.page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); drawer = onlyFixed.page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(onlyFixed.page, drawer);
-  await drawer.getByText("已读取 1 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。", { exact: true }).waitFor(); assert.equal(await drawer.getByText(note).count(), 0, "全是固定采购结的账时不需要说明");
+  await onlyFixed.page.getByRole("button", { name: HISTORY, exact: true }).click(); drawer = onlyFixed.page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(onlyFixed.page, drawer);
+  await drawer.getByText(historyCount(1), { exact: true }).waitFor(); assert.equal(await drawer.getByText(note, { exact: true }).count(), 0, "全是计入固定成本的日子时不需要说明");
 });
 
 test("confirmed history pagination failure retains read records and retry reuses the opaque cursor without duplicate history", async (t) => {
   const first = confirmedHistoryRecord(), second = confirmedHistoryRecord("saved-negative", -1), cursor = Buffer.from(JSON.stringify([first.window.endMs, "2026-10-08 16:01:01", "old-bill-z"])).toString("base64url"); let failed = false;
-  const { page, historyReads } = await openConfirmedHistoryPage(t, { history(route, read) { if (read.params.cursor && !failed) { failed = true; return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "HISTORY_UNAVAILABLE", error: "确认账单历史暂不可用", retryable: true }) }); } return fulfill(route, { ruleId: read.ruleId, readOnly: true, records: read.params.cursor ? [second] : [first], nextCursor: read.params.cursor ? null : cursor }); } }); await page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(page, drawer); await drawer.getByRole("button", { name: "读取更多原确认账单", exact: true }).click(); await drawer.getByText("确认账单历史读取失败", { exact: true }).waitFor(); assert.equal(await drawer.locator("tr.ant-table-row").count(), 1); await drawer.getByRole("button", { name: "重试确认账单历史", exact: true }).click(); await drawer.getByText("已读取 2 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。", { exact: true }).waitFor(); assert.deepEqual(historyReads[1], historyReads[2]); assert.equal(historyReads[2].params.cursor, cursor); assert.equal(await drawer.getByRole("button", { name: "读取更多原确认账单", exact: true }).count(), 0);
+  const { page, historyReads } = await openConfirmedHistoryPage(t, { history(route, read) { if (read.params.cursor && !failed) { failed = true; return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "HISTORY_UNAVAILABLE", error: "确认账单历史暂不可用", retryable: true }) }); } return fulfill(route, { ruleId: read.ruleId, readOnly: true, records: read.params.cursor ? [second] : [first], nextCursor: read.params.cursor ? null : cursor }); } }); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); const before = Date.now(); await chooseConfirmedHistoryRule(page, drawer); await drawer.getByText(historyCount(1), { exact: true }).waitFor(); const after = Date.now(); await drawer.getByRole("button", { name: "加载更多", exact: true }).click();
+  // 已经读到一页时，失败写「刷新失败，数据截至 …」（上一次读到的时间），原因收在「查看详细原因」里；刷新按原 cursor 再读一次
+  const failure = drawer.locator(".ant-alert", { has: page.locator("details.jy-error-detail") }); await failure.waitFor(); assert.ok([refreshFailedText(before), refreshFailedText(after)].includes(await failure.locator(".ant-alert-title").innerText()), await failure.locator(".ant-alert-title").innerText()); assert.equal(await failure.getByText("确认账单历史暂不可用", { exact: true }).count(), 1); assert.equal(await drawer.locator("tr.ant-table-row").count(), 1); await failure.getByRole("button", { name: REFRESH, exact: true }).click(); await drawer.getByText(historyCount(2), { exact: true }).waitFor(); assert.deepEqual(historyReads[1], historyReads[2]); assert.equal(historyReads[2].params.cursor, cursor); assert.equal(await drawer.getByRole("button", { name: "加载更多", exact: true }).count(), 0);
 });
 
 test("confirmed history rule changes ignore a late response from the previous rule", async (t) => {
   let deferred, ready; const started = new Promise((resolve) => { ready = resolve; }); const original = confirmedHistoryRecord(), other = confirmedHistoryRecord("other-rule"); other.upstreamSource.tokenName = "saved-other-rule";
-  const { page } = await openConfirmedHistoryPage(t, { history(route, read) { if (read.ruleId === "rule-1") return new Promise((resolve) => { deferred = { route, resolve }; ready(); }); return fulfill(route, { ruleId: read.ruleId, readOnly: true, records: [other], nextCursor: null }); } }); await page.getByRole("button", { name: "查看已确认账单历史", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "已确认账单历史", exact: true }); await chooseConfirmedHistoryRule(page, drawer); await started; await chooseConfirmedHistoryRule(page, drawer, "new-name · 已停止 / 归档 · old-rule"); await drawer.locator("tr.ant-table-row", { hasText: "saved-other-rule" }).waitFor(); deferred.resolve(fulfill(deferred.route, { ruleId: "rule-1", readOnly: true, records: [original], nextCursor: null })); await page.waitForResponse((response) => response.url().includes("/rule-1/confirmed")); assert.equal(await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).count(), 0);
+  const { page } = await openConfirmedHistoryPage(t, { history(route, read) { if (read.ruleId === "rule-1") return new Promise((resolve) => { deferred = { route, resolve }; ready(); }); return fulfill(route, { ruleId: read.ruleId, readOnly: true, records: [other], nextCursor: null }); } }); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(page, drawer); await started; await chooseConfirmedHistoryRule(page, drawer, historyOption("new-name", true)); await drawer.locator("tr.ant-table-row", { hasText: "saved-other-rule" }).waitFor(); deferred.resolve(fulfill(deferred.route, { ruleId: "rule-1", readOnly: true, records: [original], nextCursor: null })); await page.waitForResponse((response) => response.url().includes("/rule-1/confirmed")); assert.equal(await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).count(), 0);
 });
 
 test("confirmed history selector and record expansion support keyboard at 320/390/768/1440 without root overflow", async (t) => {
   for (const width of [320, 390, 768, 1440]) {
-    const { page, records } = await openConfirmedHistoryPage(t, { viewport: { width, height: 900 } }); const entry = page.getByRole("button", { name: "查看已确认账单历史", exact: true }); await entry.focus(); await page.keyboard.press("Enter"); const drawer = page.getByRole("dialog", { name: "已确认账单历史", exact: true }), select = drawer.getByRole("combobox", { name: "历史核算关联", exact: true }); await drawer.waitFor(); await page.waitForFunction(() => !document.querySelector(".ant-drawer-open .ant-drawer-content-wrapper")?.getAnimations({ subtree: true }).some((animation) => animation.playState === "running")); await select.focus(); await page.keyboard.press("ArrowDown"); await page.keyboard.press("Enter"); await drawer.getByText("已读取 1 条原确认记录 · 仅 USD 原账，不使用当前汇率换算。", { exact: true }).waitFor(); const record = await expandConfirmedRecord(drawer, records[0], width < 768); await record.getByText("old-name · #9 · 范围版本 1", { exact: true }).waitFor(); await page.waitForFunction(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `confirmed history overflow at ${width}`); if (width < 768) assert.equal(await drawer.locator(".ant-drawer-body").evaluate((element) => element.scrollWidth <= element.clientWidth), true, `confirmed history drawer overflow at ${width}`); await drawer.locator(".ant-drawer-close").focus(); await page.keyboard.press("Enter"); await drawer.waitFor({ state: "hidden" });
+    const { page, records } = await openConfirmedHistoryPage(t, { viewport: { width, height: 900 } }); const entry = page.getByRole("button", { name: HISTORY, exact: true }); await entry.focus(); await page.keyboard.press("Enter"); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }), select = drawer.getByRole("combobox", { name: "绑定", exact: true }); await drawer.waitFor(); await page.waitForFunction(() => !document.querySelector(".ant-drawer-open .ant-drawer-content-wrapper")?.getAnimations({ subtree: true }).some((animation) => animation.playState === "running")); await select.focus(); await page.keyboard.press("ArrowDown"); await page.keyboard.press("Enter"); await drawer.getByText(historyCount(1), { exact: true }).waitFor(); const record = await expandConfirmedRecord(drawer, records[0], width < 768); await historyFact(record, "Key", "old-name"); await page.waitForFunction(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `confirmed history overflow at ${width}`); if (width < 768) assert.equal(await drawer.locator(".ant-drawer-body").evaluate((element) => element.scrollWidth <= element.clientWidth), true, `confirmed history drawer overflow at ${width}`); await drawer.locator(".ant-drawer-close").focus(); await page.keyboard.press("Enter"); await drawer.waitFor({ state: "hidden" });
   }
 });
 
@@ -1793,8 +2055,8 @@ test("two rule retries retain both independently returned amounts", async (t) =>
   await rowB.getByText("$20.00", { exact: true }).waitFor();
   const retryAStarted = new Promise((resolve) => requestStarted.set("rule-1", resolve));
   const retryBStarted = new Promise((resolve) => requestStarted.set("rule-2", resolve));
-  await rowA.getByRole("button", { name: /重试.*Rule A/ }).click();
-  await rowB.getByRole("button", { name: /重试.*Rule B/ }).click();
+  await rowA.getByRole("button", { name: `${RETRY} Rule A`, exact: true }).click();
+  await rowB.getByRole("button", { name: `${RETRY} Rule B`, exact: true }).click();
   await retryAStarted;
   await retryBStarted;
   deferred.get("rule-1").resolve(fulfill(deferred.get("rule-1").route, cachedResponse(initial, [rule("rule-1", "Rule A", 101)])));
@@ -1803,7 +2065,8 @@ test("two rule retries retain both independently returned amounts", async (t) =>
   await page.locator("tr", { hasText: "$41.00" }).waitFor();
 });
 
-test("a same-preset refresh marks old totals as reference until its replacement arrives", async (t) => {
+// 同一日期范围刷新时，列表和汇总都还是上次读到的、彼此对得上，汇总照旧显示、不加「读取中」；新数据回来后一起换掉
+test("a same-preset refresh keeps old totals beside the old rows until its replacement arrives", async (t) => {
   let deferred;
   let startQuery;
   const queryStarted = new Promise((resolve) => { startQuery = resolve; });
@@ -1823,13 +2086,13 @@ test("a same-preset refresh marks old totals as reference until its replacement 
   await summary.getByText("$57.00", { exact: true }).waitFor();
   await page.getByRole("button", { name: "刷新当前页面数据" }).click();
   await queryStarted;
-  await page.getByText("全量摘要仅供参考，正在核对当前窗口", { exact: true }).waitFor();
   await page.locator("tr", { hasText: "$10.00" }).waitFor();
-  await summary.getByText("$60.00", { exact: true }).waitFor({ state: "hidden" });
+  await summary.getByText("$57.00", { exact: true }).waitFor();
+  assert.equal(await summary.locator(".ant-alert").count(), 0); assert.equal(await summary.getByText("$63.00", { exact: true }).count(), 0);
   deferred.resolve(fulfill(deferred.route, response([rule("rule-1", "Rule A", 11), rule("rule-2", "Rule B", 21), rule("rule-3", "Rule C", 31)])));
-  await page.getByText("全量摘要仅供参考，正在核对当前窗口", { exact: true }).waitFor({ state: "hidden" });
   await summary.getByText("$63.00", { exact: true }).waitFor();
   await page.locator("tr", { hasText: "$11.00" }).waitFor();
+  assert.equal(await summary.getByText("$57.00", { exact: true }).count(), 0); assert.equal(await summary.locator(".ant-alert").count(), 0);
 });
 
 test("a later retry may finish before an earlier retry without losing either result", async (t) => {
@@ -1849,8 +2112,8 @@ test("a later retry may finish before an earlier retry without losing either res
   });
   const readyA = new Promise((resolve) => started.set("rule-1", resolve));
   const readyB = new Promise((resolve) => started.set("rule-2", resolve));
-  await page.locator("tr", { hasText: "Rule A" }).getByRole("button", { name: /重试.*Rule A/ }).click();
-  await page.locator("tr", { hasText: "Rule B" }).getByRole("button", { name: /重试.*Rule B/ }).click();
+  await page.locator("tr", { hasText: "Rule A" }).getByRole("button", { name: `${RETRY} Rule A`, exact: true }).click();
+  await page.locator("tr", { hasText: "Rule B" }).getByRole("button", { name: `${RETRY} Rule B`, exact: true }).click();
   await Promise.all([readyA, readyB]);
   deferred.get("rule-2").resolve(fulfill(deferred.get("rule-2").route, cachedResponse(initial, [rule("rule-2", "Rule B", 42)])));
   await page.locator("tr", { hasText: "$42.00" }).waitFor();
@@ -1877,8 +2140,8 @@ test("one failed retry leaves another rule's successful result and controls usab
   const readyB = new Promise((resolve) => started.set("rule-2", resolve));
   const rowA = page.locator("tr", { hasText: "Rule A" });
   const rowB = page.locator("tr", { hasText: "Rule B" });
-  const retryAButton = rowA.getByRole("button", { name: /重试.*Rule A/ });
-  const retryBButton = rowB.getByRole("button", { name: /重试.*Rule B/ });
+  const retryAButton = rowA.getByRole("button", { name: `${RETRY} Rule A`, exact: true });
+  const retryBButton = rowB.getByRole("button", { name: `${RETRY} Rule B`, exact: true });
   await retryAButton.click();
   await retryBButton.click();
   await Promise.all([readyA, readyB]);
@@ -1886,8 +2149,12 @@ test("one failed retry leaves another rule's successful result and controls usab
   await rowB.getByText("$43.00", { exact: true }).waitFor();
   await retryBButton.locator(".ant-btn-loading-icon").waitFor({ state: "hidden" });
   deferred.get("rule-1").resolve(deferred.get("rule-1").route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "fixture retry failure" }) }));
-  await rowA.getByText("fixture retry failure", { exact: true }).waitFor();
+  // 行里写「重新读取没完成，请稍后再试」（recon-format.ts RETRY_FAILED_TEXT，§8.1），原文收在「查看详细原因」里
+  const failure = rowA.locator("details.jy-error-detail", { has: page.getByText("fixture retry failure", { exact: true }) });
+  await failure.waitFor();
+  assert.equal(await failure.evaluate((node) => node.parentElement.firstChild.textContent), RETRY_FAILED);
   await rowB.getByText("$43.00", { exact: true }).waitFor();
+  assert.equal(await retryAButton.isDisabled(), false); assert.equal(await retryBButton.isDisabled(), false);
 });
 
 test("a late single-rule response from an old window cannot replace a newer window", async (t) => {
@@ -1910,10 +2177,10 @@ test("a late single-rule response from an old window cannot replace a newer wind
   });
   const oldRetryStarted = new Promise((resolve) => { started.oldRetry = resolve; });
   const newWindowStarted = new Promise((resolve) => { started.newWindow = resolve; });
-  const retryAButton = page.locator("tr", { hasText: "Rule A" }).getByRole("button", { name: /重试.*Rule A/ });
+  const retryAButton = page.locator("tr", { hasText: "Rule A" }).getByRole("button", { name: `${RETRY} Rule A`, exact: true });
   await retryAButton.click();
   await oldRetryStarted;
-  await page.getByRole("group", { name: "核算时间范围" }).getByRole("button", { name: "近 7 天", exact: true }).filter({ visible: true }).click();
+  await page.getByRole("group", { name: "时间范围", exact: true }).getByRole("button", { name: "近 7 天", exact: true }).filter({ visible: true }).click();
   await newWindowStarted;
   deferred.newWindow.resolve(fulfill(deferred.newWindow.route, response([rule("rule-1", "Rule A", 70, newWindow), rule("rule-2", "Rule B", 80, newWindow), rule("rule-3", "Rule C", 90, newWindow)])));
   await page.locator("tr", { hasText: "$70.00" }).waitFor();
@@ -1951,7 +2218,7 @@ test("a bulk response replaces a newer retry when their actual windows differ", 
   await summary.getByText("$60.00", { exact: true }).waitFor();
   await page.getByRole("button", { name: "刷新当前页面数据" }).click();
   await bulkStarted;
-  await page.locator("tr", { hasText: "Rule A" }).getByRole("button", { name: /重试.*Rule A/ }).click();
+  await page.locator("tr", { hasText: "Rule A" }).getByRole("button", { name: `${RETRY} Rule A`, exact: true }).click();
   await retryStarted;
   const retryDelivery = fulfill(retry.route, cachedResponse(initial, [rule("rule-1", "Rule A", 101)]));
   retry.resolve(retryDelivery);
@@ -1986,7 +2253,7 @@ test("a late bulk response for the same window preserves a newer rule retry", as
     return fulfill(route, { message: "unexpected API request" });
   });
   const rowA = page.locator("tr", { hasText: "Rule A" });
-  const retryAButton = rowA.getByRole("button", { name: /重试.*Rule A/ });
+  const retryAButton = rowA.getByRole("button", { name: `${RETRY} Rule A`, exact: true });
   const summary = page.locator(".reconciliation-summary");
   await page.getByRole("button", { name: "刷新当前页面数据" }).click();
   await bulkStarted;
@@ -2026,16 +2293,17 @@ async function verifyMobileRefreshAndRetry(t, width) {
   const summary = page.locator(".reconciliation-summary");
   await cardA.waitFor();
   if (!(await cardA.textContent())?.includes("$10.00")) throw new Error(`unexpected mobile card: ${await cardA.textContent()}`);
-  await cardA.getByRole("button", { name: "重试当前关联", exact: true }).click();
+  await cardA.getByRole("button", { name: `${RETRY} Rule A`, exact: true }).click();
   await retryRequestStarted;
   retry.resolve(fulfill(retry.route, cachedResponse(initial, [rule("rule-1", "Rule A", 101)])));
   await cardA.getByText("$101.00").waitFor();
   await summary.getByText("$151.00", { exact: true }).waitFor();
   await page.getByRole("button", { name: "刷新当前页面数据" }).click();
   await refreshRequestStarted;
+  // 同一日期范围刷新时卡片和汇总都还是上次读到的、彼此对得上，汇总照旧显示、不加「读取中」
   await cardA.getByText("$101.00").waitFor();
-  await page.getByText("全量摘要仅供参考，正在核对当前窗口", { exact: true }).waitFor();
-  await summary.getByText("$151.00", { exact: true }).waitFor({ state: "hidden" });
+  await summary.getByText("$151.00", { exact: true }).waitFor();
+  assert.equal(await summary.locator(".ant-alert").count(), 0);
   refresh.resolve(fulfill(refresh.route, response([rule("rule-1", "Rule A", 11), rule("rule-2", "Rule B", 21), rule("rule-3", "Rule C", 31)])));
   await cardA.getByText("$11.00").waitFor();
   await summary.getByText("$63.00", { exact: true }).waitFor();
@@ -2065,7 +2333,7 @@ test("本月 queries the month window, live windows poll read-only on their own 
   }, undefined, true);
   const advance = async (ms) => { skewMs += ms; await page.clock.fastForward(ms); };
   const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
-  const presets = page.getByRole("group", { name: "核算时间范围" });
+  const presets = page.getByRole("group", { name: "时间范围", exact: true });
   const freshness = (title) => page.locator(`.jy-freshness[title="${title}"]`).waitFor();
 
   // 昨天是已结束的窗口，不轮询

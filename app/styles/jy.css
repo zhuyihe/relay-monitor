@@ -500,6 +500,12 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-state h3 { margin: 0; font-size: 14px; line-height: 22px; font-weight: 500; color: var(--jy-ink); display: flex; align-items: center; gap: 8px; }
 .jy-state p { margin: 0; font-size: 13px; line-height: 20px; }
 .jy-state .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.jy-error-detail { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
+.jy-error-detail summary { cursor: pointer; width: fit-content; }
+.jy-error-detail summary:focus-visible { outline: none; box-shadow: var(--jy-focus-ring); border-radius: var(--jy-r1); }
+.jy-error-detail__body { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 6px; }
+.jy-error-detail__body strong { font-weight: 500; color: var(--jy-ink-2); }
+.jy-error-detail__body pre { margin: 0; max-width: 100%; white-space: pre-wrap; word-break: break-all; font: inherit; color: var(--jy-ink-2); background: var(--jy-sunken); border-radius: var(--jy-r1); padding: 6px 8px; }
 .jy-skeleton { border-radius: var(--jy-r1); background: linear-gradient(90deg, var(--jy-sunken) 0%, var(--jy-rule-soft) 50%, var(--jy-sunken) 100%); background-size: 200% 100%; animation: jy-shimmer 1.2s ease-in-out infinite; }
 @keyframes jy-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 

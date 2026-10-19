@@ -13,7 +13,7 @@ import { applyScopePolicy, billingDayOf, isScopedBillingPolicy, serializeRuleSou
 import { RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues } from "../../lib/reconciliation-ledger.js";
 import {
   uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, segmentFromRow,
-  snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions,
+  snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
 } from "../reconciliation-repository.js";
 
 const JSON_COLUMNS = new Set(["source_binding", "source", "capability", "detail"]);
@@ -202,7 +202,7 @@ export class MemoryReconciliationRepository {
     await this.#transaction("updateRule", async (tx) => {
       await this.#lock(tx, `rule:${id}`);
       const entry = this.#ruleEntry(tx, id);
-      if (!entry) throw new Error("核算关联不存在或已归档");
+      if (!entry) throw repositoryError("RULE_NOT_FOUND");
       const existing = ruleFromRow(entry.row, this.#channelsOf(tx, id, "id"));
       input = applyScopePolicy(existing, input, Date.now(), { append });
       if (guard) guard(existing, existing.channels, input);
@@ -214,7 +214,7 @@ export class MemoryReconciliationRepository {
         cost_coverage: input.costCoverage ?? null, provider: input.provider ?? null, canonical_key: input.canonicalKey ?? null,
         source_binding: JSON.stringify(serializeRuleSourceBinding(input)),
       });
-      if (!affected) throw new Error("核算关联不存在或已归档");
+      if (!affected) throw repositoryError("RULE_NOT_FOUND");
       // 与 MySQL 版一致：保留仍在关联里的渠道行（含状态列），只删移除的、插入新增的。
       const current = this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, id));
       const channelIds = new Set(input.channels.map((channel) => Number(channel.channelId)));
@@ -244,7 +244,7 @@ export class MemoryReconciliationRepository {
       const rule = ruleFromRow(entry.row, channels);
       if (reconciliationScopeFingerprint(rule, segments.map(segmentFromRow)) !== expectedScopeFingerprint) return false;
       if ((rule.canonicalKey && rule.canonicalKey !== canonicalKey) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource?.namespaceKey)) {
-        throw Object.assign(new Error("原始账号或本站来源已变化，请明确确认新范围"), { code: "SOURCE_BINDING_UNCONFIRMED" });
+        throw repositoryError("SOURCE_BINDING_UNCONFIRMED");
       }
       if (!rule.canonicalKey || !rule.ownSource) {
         const history = this.#rows("snapshots", tx).map(({ row }) => row).filter((row) => sameText(row.rule_id, id))
@@ -255,7 +255,7 @@ export class MemoryReconciliationRepository {
         const observed = channels.some((channel) => channel.status_observed_at_ms != null) || segments.some((segment) => segment.timing_source === "detected"
           || (segment.ratio_source === "group_catalog" && Number(segment.ratio_observed_at_ms) > Number(segment.effective_from_ms)));
         if (!originalMatches && !(allowInitialAnchoring && !history.length && !observed)) {
-          throw Object.assign(new Error("旧核算关联缺少可信原始身份，保留金额参考；请明确确认新的账号和本站范围"), { code: "LEGACY_IDENTITY_UNVERIFIED" });
+          throw repositoryError("LEGACY_IDENTITY_UNVERIFIED");
         }
         this.#update(tx, "rules", [entry], {
           provider: (rule.provider || provider) ?? null, canonical_key: (rule.canonicalKey || canonicalKey) ?? null,
@@ -299,7 +299,7 @@ export class MemoryReconciliationRepository {
     const outcome = await this.#transaction("observeSource", async (tx) => {
       await this.#lock(tx, `rule:${ruleId}`);
       const rule = this.#ruleEntry(tx, ruleId);
-      if (!rule) throw new Error("核算关联不存在或已停止");
+      if (!rule) throw repositoryError("RULE_NOT_FOUND");
       const rows = this.#segmentsOf(tx, ruleId).map(({ row }) => ({ ...row }));
       let ratioBackfilled = false;
       for (const row of rows) {
@@ -310,7 +310,7 @@ export class MemoryReconciliationRepository {
         if (affected) row.group_ratio = knownRatio;
       }
       const current = rows.find((row) => row.effective_to_ms == null);
-      if (!current) throw new Error("核算关联缺少当前分段");
+      if (!current) throw repositoryError("CURRENT_SEGMENT_MISSING");
       const currentRatio = current.group_ratio == null ? null : Number(current.group_ratio);
       const nextRatio = ratio == null ? null : Number(ratio);
       const sameGroup = current.group_name === group;
@@ -337,7 +337,7 @@ export class MemoryReconciliationRepository {
     const outcome = await this.#transaction("reconcileCurrentSegment", async (tx) => {
       await this.#lock(tx, `rule:${ruleId}`);
       const current = this.#segmentsOf(tx, ruleId).map(({ row }) => ({ ...row })).find((row) => row.effective_to_ms == null);
-      if (!current) throw new Error("核算关联缺少当前分段");
+      if (!current) throw repositoryError("CURRENT_SEGMENT_MISSING");
       const currentRatio = current.group_ratio == null ? null : Number(current.group_ratio);
       const nextRatio = ratio == null ? null : Number(ratio);
       const sameGroup = current.group_name === group;
@@ -366,10 +366,10 @@ export class MemoryReconciliationRepository {
       await this.#lock(tx, `rule:${ruleId}`);
       const entries = this.#segmentsOf(tx, ruleId);
       const index = entries.findIndex(({ row }) => row.id === segmentId);
-      if (index <= 0) throw new Error("只能修正有前序分段的切换时间");
+      if (index <= 0) throw repositoryError("RESOURCE_CHANGED");
       const previous = entries[index - 1], next = entries[index + 1];
       if (!Number.isFinite(at) || at <= Number(previous.row.effective_from_ms) || (next && at >= Number(next.row.effective_from_ms))) {
-        throw new Error("切换时间必须位于相邻分段之间");
+        throw repositoryError("TRANSITION_TIME_OUT_OF_RANGE");
       }
       this.#update(tx, "segments", [previous], { effective_to_ms: at });
       this.#update(tx, "segments", [entries[index]], { effective_from_ms: at, timing_source: "operator_confirmed" });
@@ -380,7 +380,7 @@ export class MemoryReconciliationRepository {
   async updateChannelStates(ruleId, states, observedAt = Date.now()) {
     await this.#transaction("updateChannelStates", async (tx) => {
       await this.#lock(tx, `rule:${ruleId}`);
-      if (!this.#ruleEntry(tx, ruleId)) throw new Error("核算关联不存在或已停止");
+      if (!this.#ruleEntry(tx, ruleId)) throw repositoryError("RULE_NOT_FOUND");
       for (const state of states) {
         this.log.channelStateWrites.push({ ruleId, channelId: state.channelId, state: state.state ?? null, observedAt });
         const entries = this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, ruleId) && Number(row.channel_id) === Number(state.channelId));

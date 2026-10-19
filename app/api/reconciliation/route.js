@@ -1,5 +1,5 @@
 import { withAuth, json } from "../../../lib/api.js";
-import { createReconciliationModule, RECONCILIATION_PRESETS } from "../../../server/reconciliation.js";
+import { createReconciliationModule, RECONCILIATION_PRESETS, reconciliationErrorResponse } from "../../../server/reconciliation.js";
 
 function moduleFor(rt) {
   return rt.reconciliation ||= createReconciliationModule(rt);
@@ -11,11 +11,17 @@ export const GET = withAuth(async (request, rt) => {
   const sp = new URL(request.url).searchParams;
   const ruleIds = String(sp.get("ruleIds") || "").split(",").map((id) => id.trim()).filter(Boolean);
   const preset = RECONCILIATION_PRESETS.includes(sp.get("preset")) ? sp.get("preset") : "yesterday";
-  const payload = await moduleFor(rt).queryRules({
-    ruleIds: ruleIds.length ? ruleIds : null,
-    preset,
-    startMs: sp.get("startMs"),
-    endMs: sp.get("endMs"),
-  }, { mode: "evaluate", force: sp.get("force") === "true", origin: "page", accountUsage: true });
-  return json(payload);
+  try {
+    return json(await moduleFor(rt).queryRules({
+      ruleIds: ruleIds.length ? ruleIds : null,
+      preset,
+      startMs: sp.get("startMs"),
+      endMs: sp.get("endMs"),
+    }, { mode: "evaluate", force: sp.get("force") === "true", origin: "page", accountUsage: true }));
+  }
+  catch (error) {
+    const failure = reconciliationErrorResponse(error);
+    if (!failure) throw error;
+    return json(failure.body, failure.status);
+  }
 });

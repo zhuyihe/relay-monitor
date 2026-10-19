@@ -9,6 +9,6 @@ export const POST = withAuth(async (request, rt) => {
     if (result.created) refreshStation(rt, rt.store.get(result.station.id)).catch(() => {});
     return json(result);
   } catch (err) {
-    return json({ error: err?.message || "接入账号失败，请稍后重试" }, 400);
+    return json({ error: err?.message || "操作没完成，请稍后再试", code: err?.code || "ONBOARDING_FAILED" }, 400);
   }
 });

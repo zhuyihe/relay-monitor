@@ -6,6 +6,11 @@ import { onboardingBaseUrl, publicOnboardingStation, onboardingConnectionPatch, 
 import { stationBusinessVersion } from "../db/store.js";
 import { completedBillingDayWindow, canonicalBillingKey, applyScopePolicy, normalizeRuleSourceBinding, reconciliationBillingSchedule } from "../lib/reconciliation-scope-policy.js";
 import { ChannelOnboardingRepository } from "./channel-onboarding-repository.js";
+import { workflowAction } from "../lib/workflow-actions.js";
+import { reconciliationIssue } from "../lib/reconciliation-contract.js";
+import { OWN_STATION_UNSET } from "../lib/format.js";
+import { reconciliationKeyName } from "../lib/reconciliation-view.js";
+import { businessTimeZone } from "../lib/business-time.js";
 import { refreshStation } from "./refresh.js";
 import { normalizeReconciliationScopeIntent } from "./reconciliation.js";
 
@@ -13,15 +18,15 @@ import { normalizeReconciliationScopeIntent } from "./reconciliation.js";
 export async function connectNewApiUpstream(rt, input, queryMetadata = queryNewApiReconciliationMetadata, queryIdentity = queryAccountIdentity) {
   const baseUrl = onboardingBaseUrl(input?.baseUrl);
   const accessToken = String(input?.accessToken || "").trim();
-  if (!baseUrl) throw new Error("请填写有效的上游站点根地址");
-  if (!accessToken) throw new Error("请填写上游账号的系统访问令牌");
+  if (!baseUrl) throw previewFailure("INVALID_BASE_URL", "站点地址不对，请填上游网站的根地址");
+  if (!accessToken) throw previewFailure("ACCESS_TOKEN_REQUIRED", "请填访问令牌");
   const connection = { type: "newapi", baseUrl, accessToken, userId: String(input?.userId || "").trim() };
   let metadata;
   try { metadata = await queryMetadata(connection); } catch (err) {
-    throw new Error(describeConnectionFailure(err?.message || String(err), connection).diagnostic);
+    throw failureError(err, connection, "ONBOARDING_FAILED");
   }
   const userId = String(metadata.userId || "").trim();
-  if (!userId) throw new Error("无法确认上游账号身份，请填写用户 ID 后重试");
+  if (!userId) throw previewFailure("USER_ID_REQUIRED", "读不到上游账号，请填用户 ID 再测试读取");
   const identity = accountIdentity(connection, metadata);
 
   const pending = (rt._newApiOnboardingChain || Promise.resolve()).then(async () => {
@@ -36,7 +41,7 @@ export async function connectNewApiUpstream(rt, input, queryMetadata = queryNewA
       if (!currentIdentity) unknown = true;
       if (!sameIdentity(currentIdentity, identity)) continue;
       if (candidate.station.verifiedIdentity && !sameIdentity(candidate.station.verifiedIdentity, currentIdentity)) {
-        throw previewFailure("ACCOUNT_IDENTITY_CHANGED", "旧资源的实际账号身份已变化，请重新确认关联");
+        throw previewFailure("ACCOUNT_IDENTITY_CHANGED", "已保存的上游现在读到的是另一个上游账号，请去确认");
       }
       matches.push(candidate.station);
     }
@@ -44,14 +49,14 @@ export async function connectNewApiUpstream(rt, input, queryMetadata = queryNewA
       for (const candidate of candidates) {
         const station = rt.store.get(candidate.station.id);
         if (authVersion(station) !== candidate.version || stationBusinessVersion(station) !== candidate.resourceVersion) {
-          throw previewFailure("AUTHORIZATION_CHANGED", "候选资源配置已变化，请重新验证");
+          throw previewFailure("AUTHORIZATION_CHANGED", "已保存的上游在这期间改过，请重新预览");
         }
       }
     };
     const save = async () => {
       assertCurrent();
       if (matches.length > 1 || !matches.length && unknown) {
-        throw previewFailure("IDENTITY_CONFLICT", "旧资源身份尚无法唯一确认，请先在资源设置中核对授权，或在渠道接入中明确选择资源并核验");
+        throw previewFailure("IDENTITY_CONFLICT", "同一地址下有几个已保存的上游，分不清是哪个上游账号；请选定一个上游再测试读取");
       }
       const station = matches[0] || await rt.store.add({ ...connection, userId, name: String(input?.name || "").trim() || "上游账号" },
         { verifiedIdentity: identity, guard: assertCurrent });
@@ -84,17 +89,17 @@ const previewFailure = (code, message) => Object.assign(new Error(message), { co
 function ownSourceIdentity(station, identity) {
   const baseUrl = onboardingBaseUrl(identity?.baseUrl), accountId = String(identity?.accountId || "").trim();
   if (identity?.provider !== "newapi" || !accountId || baseUrl !== onboardingBaseUrl(station.baseUrl)) {
-    throw Object.assign(new Error("本站未提供可验证的稳定账号身份"), { code: "OWN_IDENTITY_UNVERIFIED" });
+    throw Object.assign(new Error("自营站点没有返回能确认的账号，需要超级管理员的访问令牌"), { code: "OWN_IDENTITY_UNVERIFIED" });
   }
   return { stationId: station.id, provider: "newapi", baseUrl, accountId, namespaceKey: hash(["newapi", baseUrl, accountId]) };
 }
 
 function connectionInput(input, { authorization = false } = {}) {
   if (!input || !TYPES.includes(input.type) || authorization && !ACCOUNT_TYPES.includes(input.type)) {
-    throw new Error("请选择支持的上游类型");
+    throw previewFailure("UNSUPPORTED_UPSTREAM_TYPE", "请选上游类型");
   }
   const baseUrl = onboardingBaseUrl(input.baseUrl);
-  if (!baseUrl) throw new Error("请填写有效的上游站点根地址");
+  if (!baseUrl) throw previewFailure("INVALID_BASE_URL", "站点地址不对，请填上游网站的根地址");
   const connection = { type: input.type, baseUrl, name: String(input.name || "上游账号").trim(), isOwn: false };
   const fields = input.type === "newapi" ? ["accessToken", "userId"]
     : input.type === "newapi-key" ? ["apiKey"] : input.type === "sub2api" ? ["accessToken"] : ["email", "password"];
@@ -140,7 +145,19 @@ function safeTokens(tokens = []) {
 }
 
 function failure(error, connections = []) {
-  return describeConnectionFailure(error?.message || error || "接入失败", connections).diagnostic;
+  return describeConnectionFailure(error?.message || error || "操作没完成", connections).diagnostic;
+}
+
+// 读上游失败时的错误：原文进「查看详细原因」，码给界面归类（§8.2）。上游给了码就用它的；连不上、地址不对用连接测试的码；
+// 其余用 fallback（不在 lib/error-copy.js 里映射），界面再按原文里的关键词分出没有权限、繁忙等。
+function failureCode(error, connections, fallback) {
+  if (error?.code) return error.code;
+  const { code } = describeConnectionFailure(error?.message || error || "操作没完成", connections);
+  return ["NETWORK_UNREACHABLE", "ENDPOINT_MISMATCH"].includes(code) ? code : fallback;
+}
+
+function failureError(error, connections, fallback) {
+  return previewFailure(failureCode(error, connections, fallback), failure(error, connections));
 }
 
 export function createChannelOnboardingModule(rt, dependencies = {}) {
@@ -152,7 +169,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   const queryMonitor = dependencies.queryMonitor || queryStation;
   const refresh = dependencies.refresh || refreshStation;
   const now = dependencies.now || Date.now;
-  let catalogue = null, links = [], syncError = null;
+  let catalogue = null, links = [], syncError = null, syncErrorCode = null;
   const previews = new Map(), guardFacts = new WeakMap();
   const own = () => rt.store.list().find((station) => station.isOwn && station.type === "newapi") || null;
   const resources = () => rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && TYPES.includes(station.type));
@@ -191,11 +208,11 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   function sourceChannel(input) {
     const station = own();
-    if (!station || input.ownStationId !== station.id) throw new Error("本站配置已变化，请重新发现渠道");
-    if (stale()) throw Object.assign(new Error("渠道目录已过期，请同步后重新确认"), { code: "CHANNEL_CATALOGUE_STALE" });
+    if (!station || input.ownStationId !== station.id) throw previewFailure("OWN_STATION_CHANGED", "自营站点改过，请刷新渠道列表");
+    if (stale()) throw Object.assign(new Error("渠道列表太久没刷新，请刷新后再确认"), { code: "CHANNEL_CATALOGUE_STALE" });
     const channel = catalogue.channels.find((item) => Number(item.id) === Number(input.channelId));
     if (!channel || channel.missing || channel.revision !== input.channelRevision) {
-      throw Object.assign(new Error("渠道连接配置已变化，请重新确认"), { code: "CHANNEL_SOURCE_CHANGED" });
+      throw Object.assign(new Error("渠道在自营站点里改过，请重新预览"), { code: "CHANNEL_SOURCE_CHANGED" });
     }
     return channel;
   }
@@ -215,7 +232,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const confirmed = available && sameNamespace && (!hasBinding || entries.every(([, binding, revision, missing]) => binding && binding === revision && !missing));
     const status = !available ? "unavailable" : confirmed ? "confirmed" : "review_required";
     return { version: hash([sourceVersion(), catalogue?.sourceVersion || null, rule.ownSource?.namespaceKey || null, entries]), status,
-      issues: confirmed ? [] : [{ code: "SOURCE_BINDING_UNCONFIRMED", detail: "渠道来源已变化或待核对，当前金额仅供参考" }] };
+      issues: confirmed ? [] : [{ code: "SOURCE_BINDING_UNCONFIRMED", detail: reconciliationIssue("SOURCE_BINDING_UNCONFIRMED").detail }] };
   }
 
   function sourceInspectorForRead() {
@@ -244,22 +261,6 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const source = getSourceCatalogue(), inspect = sourceInspectorForRead(), accounts = new Map(), unverifiedResources = [], actions = [];
     const active = (rule) => rule.enabled && !rule.archivedAt;
     const channelIds = (members) => [...new Set(members.map((member) => Number(member.channelId)))].sort((a, b) => a - b);
-    function action(kind, target = {}) {
-      const value = { kind, accountKey: null, stationId: null, ruleId: null, ownStationId: null, channelIds: [], window: null, ...target };
-      value.channelIds = [...new Set(value.channelIds)].sort((a, b) => a - b);
-      const routes = {
-        verify_identity: ["核验账号身份", { action: "verify", stationId: value.stationId }],
-        update_authorization: ["更新账号授权", { action: "authorization", accountKey: value.accountKey }],
-        verify_capability: ["核验账单能力", { action: "verify-billing", stationId: value.stationId }],
-        connect_channels: ["接入这些渠道", { action: "connect", ownStationId: value.ownStationId, channelIds: value.channelIds.join(",") }],
-        confirm_coverage: ["核对这把 Key 的全部用途", { action: "coverage", ruleId: value.ruleId }],
-        review_source: ["核对本站来源", { action: "source", ownStationId: value.ownStationId }],
-        inspect_balance: ["查看余额与监控", value.stationId ? { stationId: value.stationId } : { accountKey: value.accountKey }],
-      };
-      const [label, query] = routes[kind];
-      return { id: `${kind}:${hash(value)}`, ...value, label,
-        href: `/stations?${new URLSearchParams(query)}` };
-    }
     for (const station of stations) {
       const identity = storedIdentity(station), baseUrl = onboardingBaseUrl(station.baseUrl);
       const resource = publicBatchStation(station, identity, allRules);
@@ -268,7 +269,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       if (!identity) {
         unverifiedResources.push(resource);
         const members = savedLinks.filter((link) => link.stationId === station.id && link.ownStationId === source.ownSource?.stationId);
-        actions.push(action(station.type === "newapi-key" ? members.length ? "connect_channels" : "verify_capability" : "verify_identity",
+        actions.push(workflowAction(station.type === "newapi-key" ? members.length ? "connect_channels" : "verify_capability" : "verify_identity",
           { stationId: station.id, ownStationId: source.ownSource?.stationId || null, channelIds: channelIds(members) }));
         continue;
       }
@@ -303,7 +304,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       const conflictRuleIds = others([...keyConflictRuleIds, ...channelConflictRuleIds]);
       return { ruleId: item.id, status: live ? "active" : "stopped", upstreamStationId: item.upstreamStationId,
         ownStationId: item.ownStationId, timezone: item.timezone,
-        channels: (item.channels || []).map((channel) => ({ channelId: Number(channel.channelId), name: channel.name || channel.channelName || `渠道 ${channel.channelId}` }))
+        channels: (item.channels || []).map((channel) => ({ channelId: Number(channel.channelId), name: channel.name || channel.channelName || `渠道 #${channel.channelId}` }))
           .sort((a, b) => a.channelId - b.channelId),
         costCoverage: item.costCoverage === "complete" ? "complete" : "unknown",
         coverageDeclaration: normalizeRuleSourceBinding({ version: 2, coverageDeclaration: item.coverageDeclaration }, item.costCoverage).coverageDeclaration,
@@ -317,7 +318,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       for (const rule of allRules.filter((rule) => ids.has(rule.upstreamStationId))) {
         const station = rt.store.get(rule.upstreamStationId);
         if (!rule.canonicalKey || rule.canonicalKey !== canonicalBillingKey(station, account.identity, rule.tokenId)) {
-          account.actions.push(action("verify_capability", { accountKey: account.accountKey, stationId: station.id, ruleId: rule.id }));
+          account.actions.push(workflowAction("verify_capability", { accountKey: account.accountKey, stationId: station.id, ruleId: rule.id }));
           continue;
         }
         if (!keyRules.has(rule.canonicalKey)) keyRules.set(rule.canonicalKey, []);
@@ -331,7 +332,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         for (const item of related) for (const channel of item.channels || []) {
           const key = JSON.stringify([item.ownSource?.namespaceKey || item.ownStationId, Number(channel.channelId)]);
           members.set(key, { ownSource: item.ownSource ? normalizeRuleSourceBinding({ version: 2, ownSource: item.ownSource }).ownSource : null,
-            ownStationId: item.ownStationId, channelId: Number(channel.channelId), name: channel.name || channel.channelName || `渠道 ${channel.channelId}` });
+            ownStationId: item.ownStationId, channelId: Number(channel.channelId), name: channel.name || channel.channelName || `渠道 #${channel.channelId}` });
         }
         const coverage = normalizeRuleSourceBinding({ version: 2, coverageDeclaration: rule.coverageDeclaration }, rule.costCoverage).coverageDeclaration;
         const scope = (item) => hash([item.ownSource?.namespaceKey || item.ownStationId, channelIds(item.channels || []),
@@ -345,23 +346,23 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         // 核算关联逐条列出（有效的在前，再按最近修改），上游账单在这一层编辑渠道、停止核算
         const associations = [...related].sort((a, b) => Number(active(b)) - Number(active(a))
           || (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0) || a.id.localeCompare(b.id)).map(associationOf);
-        account.keys.push({ canonicalKey, tokenId: rule.tokenId, tokenName: rule.tokenName || `Key ${rule.tokenId}`,
+        account.keys.push({ canonicalKey, tokenId: rule.tokenId, tokenName: rule.tokenName || reconciliationKeyName(rule),
           ruleIds: related.map((item) => item.id).sort(), activeRuleIds: current.map((item) => item.id).sort(), scopeAmbiguous: ambiguous, associations,
           channels: [...members.values()].sort((a, b) => a.ownStationId.localeCompare(b.ownStationId) || a.channelId - b.channelId),
           costCoverage: !ambiguous && rule.costCoverage === "complete" ? "complete" : "unknown", coverageDeclaration: ambiguous ? { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } : coverage,
           scopeVersion: ambiguous ? null : rule.scopeVersion || 1, billingEffectiveFromMs: ambiguous ? null : effective,
           firstQueryableAtMs: ambiguous ? null : firstQueryableAtMs });
-        if (current.length && (ambiguous || rule.costCoverage !== "complete")) account.actions.push(action("confirm_coverage",
+        if (current.length && (ambiguous || rule.costCoverage !== "complete")) account.actions.push(workflowAction("confirm_coverage",
           { accountKey: account.accountKey, ruleId: rule.id, ownStationId: rule.ownStationId, channelIds: coverage.uncoveredOwnChannelIds }));
       }
       for (const resource of account.resources) {
-        if (resource.monitorEnabled) account.actions.push(action("inspect_balance", { accountKey: account.accountKey, stationId: resource.id }));
+        if (resource.monitorEnabled) account.actions.push(workflowAction("inspect_balance", { accountKey: account.accountKey, stationId: resource.id }));
         if (!resource.archivedAt && resource.balance?.ok === false && describeConnectionFailure(resource.balance.error).code === "AUTHENTICATION_FAILED") {
-          account.actions.push(action("update_authorization", { accountKey: account.accountKey }));
+          account.actions.push(workflowAction("update_authorization", { accountKey: account.accountKey }));
         }
         const members = savedLinks.filter((link) => link.stationId === resource.id);
         if (!resource.archivedAt && members.length && !allRules.some((rule) => active(rule) && ids.has(rule.upstreamStationId))) {
-          account.actions.push(action("verify_capability", { accountKey: account.accountKey, stationId: resource.id, channelIds: channelIds(members) }));
+          account.actions.push(workflowAction("verify_capability", { accountKey: account.accountKey, stationId: resource.id, channelIds: channelIds(members) }));
         }
       }
       account.actions = [...new Map(account.actions.map((item) => [item.id, item])).values()];
@@ -383,41 +384,41 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const unmatchedAssociations = allRules.filter((rule) => active(rule) && !placed.has(rule.id)).map((rule) => {
       const station = stationById.get(rule.upstreamStationId);
       const reason = !station ? "missing_resource" : !storedIdentity(station) ? "unverified_resource" : rule.canonicalKey ? "key_changed" : "unanchored";
-      return { ...associationOf(rule), reason, tokenId: rule.tokenId, tokenName: rule.tokenName || `Key ${rule.tokenId}` };
+      return { ...associationOf(rule), reason, tokenId: rule.tokenId, tokenName: rule.tokenName || reconciliationKeyName(rule) };
     }).sort((a, b) => a.ruleId.localeCompare(b.ruleId));
     const unlinked = channels.filter((channel) => !channel.missing && channel.reconciliation.status === "unconfigured").map((channel) => channel.id);
-    if (source.ownSource && unlinked.length) actions.push(action("connect_channels", { ownStationId: source.ownSource.stationId, channelIds: unlinked }));
+    if (source.ownSource && unlinked.length) actions.push(workflowAction("connect_channels", { ownStationId: source.ownSource.stationId, channelIds: unlinked }));
     if (own() && (source.stale || channels.some((channel) => channel.reconciliation.status === "review_required"))) {
-      actions.push(action("review_source", { ownStationId: own().id, channelIds: channels.map((channel) => channel.id) }));
+      actions.push(workflowAction("review_source", { ownStationId: own().id, channelIds: channels.map((channel) => channel.id) }));
     }
     return { accounts: [...accounts.values()].sort((a, b) => a.accountKey.localeCompare(b.accountKey)),
       unverifiedResources: unverifiedResources.sort((a, b) => a.id.localeCompare(b.id)), unmatchedAssociations, channels,
-      actions: [...new Map(actions.map((item) => [item.id, item])).values()], generatedAt: new Date(now()).toISOString() };
+      actions: [...new Map(actions.map((item) => [item.id, item])).values()], generatedAt: new Date(now()).toISOString(), tz: businessTimeZone() };
   }
 
   async function confirmResourceIdentity(stationId, input) {
     const station = rt.store.get(stationId), expected = input?.identity;
     if (!station || station.archivedAt || station.isOwn || !ACCOUNT_TYPES.includes(station.type)) {
-      throw previewFailure("INVALID_RESOURCE", "请选择未归档的上游账号资源");
+      throw previewFailure("INVALID_RESOURCE", "找不到这个上游：已删除、已归档，或不是上游账号");
     }
     if (typeof input?.resourceVersion !== "string" || !input.resourceVersion
         || !["newapi", "sub2api"].includes(expected?.provider) || typeof expected?.baseUrl !== "string"
         || typeof expected?.accountId !== "string" || !expected.accountId.trim()) {
-      throw previewFailure("INVALID_REQUEST", "请先核验当前资源的实际账号身份");
+      throw previewFailure("IDENTITY_UNVERIFIED", "请先测试读取，确认这个上游现在是哪个上游账号");
     }
     const version = input.resourceVersion, expectedAuthVersion = station.authVersion || 1, connection = structuredClone(station);
     const assertCurrent = () => {
       if (stationBusinessVersion(rt.store.get(stationId)) !== version) {
-        throw previewFailure("RESOURCE_CHANGED", "资源配置已变化，请重新核验");
+        throw previewFailure("RESOURCE_CHANGED", "这个上游在这期间改过，请重新预览");
       }
     };
     assertCurrent();
     let identity;
     try { identity = await queryIdentity(connection); }
-    catch (error) { throw previewFailure("IDENTITY_VERIFICATION_FAILED", failure(error, [station, connection])); }
+    catch (error) { throw failureError(error, [station, connection], "IDENTITY_VERIFICATION_FAILED"); }
     assertCurrent();
     if (!sameIdentity(identity, expected) || storedIdentity(station) && !sameIdentity(storedIdentity(station), identity)) {
-      throw previewFailure("ACCOUNT_IDENTITY_CHANGED", "实际账号身份已变化，请重新核验并确认");
+      throw previewFailure("ACCOUNT_IDENTITY_CHANGED", "读到的上游账号和要确认的不一样，请去确认");
     }
     return stationLock([stationId], async () => {
       assertCurrent();
@@ -430,7 +431,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   }
 
   function authorizationInput(accountKey, input, recovery = false) {
-    const invalid = () => { throw previewFailure("INVALID_REQUEST", "请填写有效的账号、操作编号和明确的授权更新目标"); };
+    const invalid = () => { throw previewFailure("INVALID_REQUEST", "请求里缺少上游账号、操作编号或要更新的上游"); };
     if (!/^[a-f0-9]{64}$/.test(accountKey || "") || !input || typeof input.requestId !== "string" || !input.requestId.trim()
       || input.requestId.length > 64 || !Array.isArray(input.targetStationIds) || !input.targetStationIds.length
       || input.targetStationIds.some((id) => typeof id !== "string" || !id.trim() || id.length > 128)) invalid();
@@ -446,14 +447,15 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     return { ...intent, authorization, reuseSavedAuthorization: input.reuseSavedAuthorization === true, previewId: input.previewId };
   }
 
+  // 更新登录信息时不跟着更新的上游：码给界面归类，reason 是界面上「不跟着更新：」后面那句（design/ui-copy-spec.md 五）。
   function authorizationExcluded(station, identity = null) {
-    if (!station) return "资源已不存在，请重新选择";
-    if (station.isOwn) return "本站来源不参与上游账号授权更新";
-    if (station.archivedAt) return "已归档资源不参与授权更新";
-    if (!ACCOUNT_TYPES.includes(station.type)) return "纯 Key 或其它资源不参与账号授权更新";
+    if (!station) return { code: "INVALID_RESOURCE", reason: "找不到这个上游" };
+    if (station.isOwn) return { code: "OWN_STATION_EXCLUDED", reason: "自营站点不在这里更新" };
+    if (station.archivedAt) return { code: "UPSTREAM_ARCHIVED", reason: "这个上游已归档" };
+    if (!ACCOUNT_TYPES.includes(station.type)) return { code: "KEY_ONLY_EXCLUDED", reason: "只用 Key 的上游不跟着更新" };
     if (identity && (onboardingBaseUrl(station.baseUrl) !== identity.baseUrl
       || station.type.startsWith("sub2api") !== (identity.provider === "sub2api")
-      || storedIdentity(station) && !sameIdentity(storedIdentity(station), identity))) return "该资源属于其它站点或账号";
+      || storedIdentity(station) && !sameIdentity(storedIdentity(station), identity))) return { code: "ACCOUNT_MISMATCH", reason: "属于别的上游账号" };
     return null;
   }
 
@@ -473,7 +475,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const relatedLinks = savedLinks.filter((link) => selected.has(link.stationId)), relatedRules = allRules.filter((rule) => selected.has(rule.upstreamStationId));
     const channels = new Map(), add = (ownStationId, channelId, name) => {
       const channel = catalogue?.ownStationId === ownStationId && catalogue.channels.find((item) => Number(item.id) === Number(channelId));
-      channels.set(JSON.stringify([ownStationId, Number(channelId)]), { ownStationId, channelId: Number(channelId), name: channel?.name || name || `渠道 ${channelId}` });
+      channels.set(JSON.stringify([ownStationId, Number(channelId)]), { ownStationId, channelId: Number(channelId), name: channel?.name || name || `渠道 #${channelId}` });
     };
     for (const link of relatedLinks) add(link.ownStationId, link.channelId);
     for (const rule of relatedRules) for (const member of rule.channels || []) add(rule.ownStationId, member.channelId, member.name);
@@ -489,39 +491,41 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   async function prepareAuthorization(accountKey, input) {
     const operation = savedAuthorization(accountKey, input.requestId);
-    if (operation.conflict) throw previewFailure("OPERATION_CHANGED", "该操作的已保存授权配置不一致，请重新输入并预览");
+    if (operation.conflict) throw previewFailure("OPERATION_CHANGED", "这次操作已保存的登录信息前后不一样，请重新填写并预览");
     let connection = input.authorization;
     if (!connection) {
-      if (!operation.donor) throw previewFailure("SAVED_AUTHORIZATION_UNAVAILABLE", "没有可复用的已保存授权，请重新输入授权");
+      if (!operation.donor) throw previewFailure("SAVED_AUTHORIZATION_UNAVAILABLE", "没有能沿用的已保存登录信息，请重新填写登录信息");
       connection = onboardingConnectionPatch(structuredClone(operation.donor));
     }
     const original = structuredClone(connection), identityConnection = structuredClone(connection);
     let identity;
     try { identity = await queryIdentity(identityConnection); }
     catch (error) { throw previewFailure("AUTHORIZATION_UNVERIFIED", failure(error, [original, identityConnection])); }
-    if (accountKeyOf(identity) !== accountKey) throw previewFailure("ACCOUNT_IDENTITY_CHANGED", "替换授权属于另一个账号，请另行接入");
+    if (accountKeyOf(identity) !== accountKey) throw previewFailure("AUTHORIZATION_ACCOUNT_MISMATCH", "这份登录信息是另一个上游账号的，请新增上游");
     connection = onboardingConnectionPatch({ ...connection, userId: connection.type === "newapi" ? identity.accountId : "" });
     const digest = hash(connection);
     if (operation.donor && !sameCredentials(operation.donor, connection)
       || [...previews.values()].some((record) => record.authorization?.accountKey === accountKey && record.authorization.requestId === input.requestId
         && record.expiresAtMs > now() && record.authorization.digest !== digest)) {
-      throw previewFailure("OPERATION_CHANGED", "同一操作不能改用不同授权，请恢复已保存结果或开始新的更新");
+      throw previewFailure("OPERATION_CHANGED", "同一次操作不能换成另一份登录信息，请接着上次没做完的，或重新开始更新");
     }
     const targets = [], excluded = [], versions = {};
     for (const id of input.targetStationIds) {
-      const station = rt.store.get(id), reason = authorizationExcluded(station, identity);
-      if (reason) { excluded.push({ stationId: id, reason }); continue; }
+      const station = rt.store.get(id), skipped = authorizationExcluded(station, identity);
+      if (skipped) { excluded.push({ stationId: id, ...skipped }); continue; }
       const version = resourceVersionOf(station), copy = structuredClone(station);
       try {
         const actual = storedIdentity(station) || await queryIdentity(copy);
         if (!sameIdentity(actual, identity) || station.verifiedIdentity && !sameIdentity(actual, station.verifiedIdentity)) {
-          excluded.push({ stationId: id, reason: "当前授权的实际账号不匹配，请核验后另行关联" }); continue;
+          excluded.push({ stationId: id, code: "ACCOUNT_IDENTITY_CHANGED", reason: reconciliationIssue("SOURCE_BINDING_UNCONFIRMED").title }); continue;
         }
-        if (stationBusinessVersion(rt.store.get(id)) !== version.resourceVersion) throw previewFailure("RESOURCE_CHANGED", "资源配置已变化，请重新预览");
+        if (stationBusinessVersion(rt.store.get(id)) !== version.resourceVersion) throw previewFailure("RESOURCE_CHANGED", "这个上游在这期间改过，请重新预览");
         versions[id] = version;
         targets.push({ stationId: id, ...version, currentType: station.type, newType: connection.type,
           purposes: { monitor: station.monitorEnabled !== false, billingRuleIds: [] }, monitorChannelIds: [], billingRuleIds: [], billingChannelIds: [] });
-      } catch (error) { excluded.push({ stationId: id, reason: failure(error, [station, copy]) }); }
+      } catch (error) {
+        excluded.push({ stationId: id, code: failureCode(error, [station, copy], "IDENTITY_VERIFICATION_FAILED"), reason: failure(error, [station, copy]) });
+      }
     }
     const relations = await authorizationRelations(targets.map((target) => target.stationId));
     for (const target of targets) {
@@ -531,7 +535,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       target.billingChannelIds = [...new Set(related.flatMap((rule) => (rule.channels || []).map((member) => Number(member.channelId))))].sort((a, b) => a - b);
     }
     if (targets.some((target) => stationBusinessVersion(rt.store.get(target.stationId)) !== versions[target.stationId].resourceVersion)) {
-      throw previewFailure("PREVIEW_BASIS_CHANGED", "验证期间资源配置已变化，请重新预览");
+      throw previewFailure("PREVIEW_BASIS_CHANGED", "测试读取期间上游改过，请重新预览");
     }
     return { connection, identity, digest, targets, excluded, versions, relations };
   }
@@ -553,12 +557,12 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const identity = operation.donor && storedIdentity(operation.donor)
       || rt.store.list({ includeUnmonitored: true, includeArchived: true }).map(storedIdentity).find((value) => accountKeyOf(value) === accountKey);
     const excluded = [], targets = intent.targetStationIds.map((id) => {
-      const station = rt.store.get(id), reason = authorizationExcluded(station, identity);
-      if (reason) { excluded.push({ stationId: id, reason }); return { stationId: id, status: "failed", savedAuthVersion: null,
-        code: "TARGET_EXCLUDED", reason, remainingActions: ["select_target"] }; }
+      const station = rt.store.get(id), skipped = authorizationExcluded(station, identity);
+      if (skipped) { excluded.push({ stationId: id, ...skipped }); return { stationId: id, status: "failed", savedAuthVersion: null,
+        code: "TARGET_EXCLUDED", exclusionCode: skipped.code, reason: skipped.reason, remainingActions: ["select_target"] }; }
       if (operation.donor && operation.saved.some((item) => item.id === id)) return { stationId: id, status: "already_updated", savedAuthVersion: station.authVersion || 1, remainingActions: [] };
       return { stationId: id, status: "repreview_required", savedAuthVersion: null,
-        code: operation.conflict ? "OPERATION_CHANGED" : "PREVIEW_REQUIRED", reason: operation.conflict ? "已保存授权配置不一致，请重新核验" : "授权更新尚未确认，请重新预览",
+        code: operation.conflict ? "OPERATION_CHANGED" : "PREVIEW_REQUIRED", reason: operation.conflict ? "已保存的登录信息前后不一样，请重新预览" : "登录信息还没更新完，请重新预览",
         remainingActions: operation.donor ? ["repreview"] : ["supply_credentials", "repreview"] };
     });
     const relations = await authorizationRelations(intent.targetStationIds.filter((id) => !excluded.some((item) => item.stationId === id)));
@@ -575,28 +579,29 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       return recovered;
     }
     if (proof.accountKey !== accountKey || proof.requestId !== input.requestId
-      || hash([...proof.targetStationIds].sort()) !== hash([...input.targetStationIds].sort())) throw previewFailure("OPERATION_CHANGED", "更新目标或操作已变化，请重新预览");
+      || hash([...proof.targetStationIds].sort()) !== hash([...input.targetStationIds].sort())) throw previewFailure("OPERATION_CHANGED", "要更新的上游或这次操作变了，请重新预览");
     const prepared = await prepareAuthorization(accountKey, input);
-    if (prepared.digest !== proof.digest) throw previewFailure("OPERATION_CHANGED", "确认授权与预览不一致，请重新预览");
+    if (prepared.digest !== proof.digest) throw previewFailure("OPERATION_CHANGED", "确认时的登录信息和预览时不一样，请重新预览");
     const results = [], excluded = [...prepared.excluded], relations = await authorizationRelations(proof.targets.map((target) => target.stationId));
     const versions = { ...proof.versions, ...Object.fromEntries(record.authorizationSaved) };
     const ownStation = own(), participating = [...Object.keys(versions), ownStation?.id];
     await withSourceLock(null, () => stationLock(participating, async () => {
       const latest = await authorizationRelations(proof.targets.map((target) => target.stationId));
       const guard = () => {
-        if (record.expiresAtMs <= now() || !previews.has(record.previewId)) throw previewFailure("PREVIEW_BASIS_CHANGED", "授权预览已过期，请恢复后重新预览");
+        if (record.expiresAtMs <= now() || !previews.has(record.previewId)) throw previewFailure("PREVIEW_BASIS_CHANGED", "预览已过期，请接着上次没做完的，再重新预览");
         if (sourceVersion() !== proof.sourceVersion || relations.version !== proof.relationshipVersion || latest.version !== proof.relationshipVersion) {
-          throw previewFailure("PREVIEW_BASIS_CHANGED", "关联或用途影响已变化，请重新预览");
+          throw previewFailure("PREVIEW_BASIS_CHANGED", "绑定或要更新的上游变了，请重新预览");
         }
         if (Object.entries(versions).some(([id, version]) => stationBusinessVersion(rt.store.get(id)) !== version.resourceVersion)) {
-          throw previewFailure("RESOURCE_CHANGED", "参与资源已变化，请重新预览");
+          throw previewFailure("RESOURCE_CHANGED", "要更新的上游改过，请重新预览");
         }
       };
       for (const id of input.targetStationIds) {
         const target = proof.targets.find((item) => item.stationId === id), verified = prepared.targets.find((item) => item.stationId === id);
         if (!target || !verified) {
-          results.push({ stationId: id, status: "failed", savedAuthVersion: null, code: "TARGET_EXCLUDED",
-            reason: excluded.find((item) => item.stationId === id)?.reason || "该目标未包含在原预览中，请重新选择", remainingActions: ["verify_identity", "repreview"] }); continue;
+          const skipped = excluded.find((item) => item.stationId === id);
+          results.push({ stationId: id, status: "failed", savedAuthVersion: null, code: "TARGET_EXCLUDED", exclusionCode: skipped?.code || "RESOURCE_CHANGED",
+            reason: skipped?.reason || "预览里没有这个上游，请重新选择", remainingActions: ["verify_identity", "repreview"] }); continue;
         }
         try {
           guard(); const station = rt.store.get(id), operation = savedAuthorization(accountKey, input.requestId);
@@ -611,7 +616,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         } catch (error) {
           const repreview = ["RESOURCE_CHANGED", "AUTHORIZATION_CHANGED", "PREVIEW_BASIS_CHANGED"].includes(error.code);
           results.push({ stationId: id, status: repreview ? "repreview_required" : "failed", savedAuthVersion: null,
-            code: error.code || "AUTHORIZATION_UPDATE_FAILED", reason: failure(error, [prepared.connection, rt.store.get(id)]), remainingActions: ["repreview"] });
+            code: failureCode(error, [prepared.connection, rt.store.get(id)], "AUTHORIZATION_UPDATE_FAILED"), reason: failure(error, [prepared.connection, rt.store.get(id)]), remainingActions: ["repreview"] });
         }
       }
     }));
@@ -632,16 +637,16 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     expirePreviews();
     const value = previews.get(previewId);
     const group = value?.groups.find((entry) => entry.requestedGroupIds.includes(groupId));
-    if (!group) throw previewFailure("PREVIEW_REQUIRED", "请重新验证并确认完整 Key 范围");
+    if (!group) throw previewFailure("PREVIEW_REQUIRED", "这把 Key 绑哪些渠道还没预览，请重新预览后确认");
     return group.guard;
   }
 
   function assertPreviewGuard(guard, { basis, preview, postSaveResourceVersions } = {}) {
     const facts = guardFacts.get(guard);
     if (!facts || !previews.has(facts.previewId) || facts.expiresAtMs <= now()) {
-      throw previewFailure("PREVIEW_REQUIRED", "预览已过期，请恢复已保存结果后重新验证");
+      throw previewFailure("PREVIEW_REQUIRED", "预览已过期，请接着上次没做完的，再重新预览");
     }
-    const changed = () => { throw previewFailure("PREVIEW_BASIS_CHANGED", "来源、资源或 Key 范围已变化，请重新预览"); };
+    const changed = () => { throw previewFailure("PREVIEW_BASIS_CHANGED", "自营站点、上游或这把 Key 绑的渠道变了，请重新预览"); };
     if (!basis || !preview || stale() || sourceVersion() !== facts.basis.sourceVersion
         || catalogue.ownSource.namespaceKey !== facts.basis.ownSource.namespaceKey) changed();
     const approved = Object.fromEntries([...facts.saved].map(([id, saved]) => [id, saved.version]));
@@ -703,7 +708,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         || target.stationId && target.stationId !== station.id || target.type !== station.type
         || !sameIdentity(target.identity, item.identity) && (target.identity || item.identity)
         || item.identity && !sameIdentity(station.verifiedIdentity, item.identity)) {
-      throw previewFailure("PREVIEW_BASIS_CHANGED", "保存目标与原预览的身份或用途不一致，请重新预览");
+      throw previewFailure("PREVIEW_BASIS_CHANGED", "要保存的上游和预览时的上游账号或用途不一样，请重新预览");
     }
     facts.saved.set(station.id, { selectionId, role, identity: item.identity, credentialUpdated,
       version: { authVersion: station.authVersion || 1, resourceVersion: stationBusinessVersion(station) } });
@@ -712,7 +717,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   async function list() {
     const station = own(), allRules = await rules(), upstreams = resources();
     const source = getSourceCatalogue(), inspect = sourceInspectorForRead();
-    const channels = catalogue?.ownStationId === station?.id ? catalogue.channels : [];
+    // 没有自营站点时两边都是 undefined，不能当成「读到的就是这个站点的渠道」
+    const channels = station && catalogue && catalogue.ownStationId === station.id ? catalogue.channels : [];
     return {
       ownSource: source.ownSource, sourceVersion: source.sourceVersion,
       ownStation: publicOnboardingStation(station), upstreams: upstreams.map(publicOnboardingStation), rules: allRules,
@@ -735,7 +741,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             : relatedRules.length ? "configured" : "unconfigured", ruleIds: relatedRules.map((rule) => rule.id) },
         };
       }),
-      syncedAt: catalogue?.syncedAt || null, stale: stale(), error: syncError,
+      syncedAt: catalogue?.syncedAt || null, stale: stale(), error: syncError, errorCode: syncErrorCode, tz: businessTimeZone(),
     };
   }
 
@@ -743,7 +749,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     if (rt._channelOnboardingSync) return rt._channelOnboardingSync;
     const pending = (async () => {
       const station = own();
-      if (!station) { syncError = "请先配置我的 New API 站点"; return list(); }
+      if (!station) { syncError = OWN_STATION_UNSET; syncErrorCode = "OWN_STATION_UNSET"; return list(); }
       const resourceVersion = stationBusinessVersion(station), connection = structuredClone(station);
       try {
         const ownSource = ownSourceIdentity(connection, await queryIdentity(connection));
@@ -754,7 +760,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           baseUrl: channel.baseUrl, groups: channel.groups || [], revision: revisionOf(ownSource.namespaceKey, channel), missing: false,
         }));
         await withSourceLock(null, () => stationLock([station.id], async () => {
-          if (stationBusinessVersion(own()) !== resourceVersion) throw new Error("本站授权在同步期间发生变化，请重试");
+          if (stationBusinessVersion(own()) !== resourceVersion) throw previewFailure("OWN_STATION_CHANGED", "刷新渠道列表期间自营站点改过，请再刷新一次");
           const previous = catalogue?.ownSource?.namespaceKey === ownSource.namespaceKey ? catalogue.channels : [];
           const ids = new Set(nextChannels.map((channel) => channel.id));
           const value = { ownStationId: station.id, ownSource, sourceVersion: ownVersion(station, ownSource), syncedAt: now(),
@@ -763,12 +769,12 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
               .map((channel) => channels.totalValidated === true ? { ...channel, missing: true } : channel)] };
           await repository.saveCatalogue(value);
           catalogue = value;
-          syncError = null;
+          syncError = null; syncErrorCode = null;
           rt._reconciliationResultCache?.clear();
           rt.reconciliation?.invalidateSources?.();
           delete rt._ownChannelsCache;
         }));
-      } catch (error) { syncError = failure(error, [connection]); }
+      } catch (error) { syncError = failure(error, [connection]); syncErrorCode = failureCode(error, [connection], "SYNC_FAILED"); }
       return list();
     })().finally(() => { rt._channelOnboardingSync = null; });
     rt._channelOnboardingSync = pending;
@@ -793,28 +799,28 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     let metadata = null, metadataError = null, identity = null;
     if (ACCOUNT_TYPES.includes(copy.type)) {
       try { identity = await queryIdentity(copy); } catch (error) {
-        metadataError = new Error(failure(error, [connection, copy]));
+        metadataError = failureError(error, [connection, copy], "VERIFICATION_FAILED");
       }
       if (identity && existing?.verifiedIdentity && !sameIdentity(identity, existing.verifiedIdentity)) {
-        throw Object.assign(new Error("资源的实际账号身份已变化，请重新确认关联"), { code: "ACCOUNT_IDENTITY_CHANGED" });
+        throw Object.assign(new Error("这个上游现在读到的是另一个上游账号，请去确认"), { code: "ACCOUNT_IDENTITY_CHANGED" });
       }
       try { metadata = await queryMetadata(copy); } catch (error) {
-        metadataError = new Error(failure(error, [connection, copy]));
+        metadataError = failureError(error, [connection, copy], "VERIFICATION_FAILED");
       }
       if (metadata && identity && !sameIdentity(identity, accountIdentity(copy, metadata))) {
-        throw Object.assign(new Error("账号身份在验证期间发生变化，请重新验证"), { code: "ACCOUNT_IDENTITY_CHANGED" });
+        throw Object.assign(new Error("测试读取期间上游账号变了，请去确认"), { code: "ACCOUNT_IDENTITY_CHANGED" });
       }
       if (metadata && !identity) {
         metadata = null;
-        metadataError = new Error("账号身份未核验或在验证期间发生变化，请重新验证");
+        metadataError = previewFailure("IDENTITY_UNVERIFIED", "还没确认是哪个上游账号，请重新测试读取");
       }
     }
     if (!metadata) {
       const previous = structuredClone(copy);
       try {
         const observation = await queryMonitor(copy);
-        if (!observation.result?.ok) throw new Error(observation.result?.error || metadataError);
-      } catch (error) { throw new Error(failure(error, [connection, previous, copy])); }
+        if (!observation.result?.ok) throw observation.result?.error ? new Error(observation.result.error) : metadataError || new Error("读不到余额");
+      } catch (error) { throw failureError(error, [connection, previous, copy], "VERIFICATION_FAILED"); }
     }
     return { connection: copy, existing, version, resourceVersion, expectedAuthVersion, metadata, metadataError, identity };
   }
@@ -837,17 +843,17 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         try { identity = await queryIdentity(structuredClone(candidate)); } catch { unknown = true; continue; }
         if (!item.identity || !sameIdentity(identity, item.identity)) continue;
         if (candidate.verifiedIdentity && !sameIdentity(candidate.verifiedIdentity, identity)) {
-          throw Object.assign(new Error("旧资源的实际账号身份已变化，请重新确认关联"), { code: "ACCOUNT_IDENTITY_CHANGED" });
+          throw Object.assign(new Error("已保存的上游现在读到的是另一个上游账号，请去确认"), { code: "ACCOUNT_IDENTITY_CHANGED" });
         }
       }
       if (authVersion(rt.store.get(candidate.id)) !== basis.version
           || stationBusinessVersion(rt.store.get(candidate.id)) !== basis.resourceVersion) {
-        throw Object.assign(new Error("候选资源配置已变化，请重新验证"), { code: "AUTHORIZATION_CHANGED" });
+        throw Object.assign(new Error("已保存的上游在这期间改过，请重新预览"), { code: "AUTHORIZATION_CHANGED" });
       }
       matches.push({ candidate, candidateIdentity: identity, ...basis });
     }
     if (matches.length > 1 || !matches.length && unknown) {
-      throw Object.assign(new Error("旧资源身份尚无法唯一确认，请明确选择资源并核验"), { code: "IDENTITY_CONFLICT" });
+      throw Object.assign(new Error("同一地址下有几个已保存的上游，分不清是哪个上游账号；请选定一个上游再测试读取"), { code: "IDENTITY_CONFLICT" });
     }
     if (matches.length) Object.assign(item, matches[0]);
   }
@@ -856,14 +862,14 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     if (selection.linkOnly) return { main: null, additional: [], billing: null, billingError: null };
     const selected = selection.stationId ? rt.store.get(selection.stationId) : null;
     if (selection.stationId && (!selected || selected.archivedAt || selected.isOwn || !TYPES.includes(selected.type)
-        || selection.monitor && selected.monitorEnabled === false)) throw new Error("所选资源不存在或用途不匹配");
+        || selection.monitor && selected.monitorEnabled === false)) throw previewFailure("INVALID_RESOURCE", "找不到这个上游，或它没开看余额");
     const main = await verify(selected || connectionInput(selection.newStation, { authorization: !selection.monitor }), selected, verificationReads);
     const additional = [];
     for (const id of selection.additionalMonitorStationIds.filter((id) => id !== selected?.id)) {
       const station = rt.store.get(id);
-      if (!station || station.archivedAt || station.isOwn || station.monitorEnabled === false || !TYPES.includes(station.type)) throw new Error("额外监控资源不可用");
+      if (!station || station.archivedAt || station.isOwn || station.monitorEnabled === false || !TYPES.includes(station.type)) throw previewFailure("INVALID_RESOURCE", "找不到要一起看余额的上游");
       const item = await verify(station, station, verificationReads);
-      if (main.identity && item.identity && !sameIdentity(main.identity, item.identity)) throw new Error("额外监控资源属于不同账号");
+      if (main.identity && item.identity && !sameIdentity(main.identity, item.identity)) throw previewFailure("ACCOUNT_MISMATCH", "要一起看余额的上游属于别的上游账号");
       additional.push(item);
     }
     let billing = null, billingError = null;
@@ -872,21 +878,21 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       try {
         if (authorization?.stationId) {
           const station = rt.store.get(authorization.stationId);
-          if (!station || station.archivedAt || station.isOwn || !ACCOUNT_TYPES.includes(station.type)) throw new Error("账单授权不存在");
+          if (!station || station.archivedAt || station.isOwn || !ACCOUNT_TYPES.includes(station.type)) throw previewFailure("INVALID_RESOURCE", "找不到读账单用的上游");
           billing = station.id === selected?.id ? main : await verify(station, station, verificationReads);
         } else if (authorization?.newAuthorization) {
-          if (main.connection.type !== "newapi-key") throw new Error("只有独立 Key 监控可以新增专用账号授权");
+          if (main.connection.type !== "newapi-key") throw previewFailure("INVALID_SELECTION", "只有只用 Key 的上游可以另填读账单用的登录信息");
           billing = await verify(connectionInput(authorization.newAuthorization, { authorization: true }), null, verificationReads);
         } else if (ACCOUNT_TYPES.includes(main.connection.type)) billing = main;
-      } catch (error) { billingError = failure(error, [authorization?.newAuthorization, rt.store.get(authorization?.stationId)]); }
+      } catch (error) { billingError = failureError(error, [authorization?.newAuthorization, rt.store.get(authorization?.stationId)], "VERIFICATION_FAILED"); }
     }
-    if (main.identity && billing?.identity && !sameIdentity(main.identity, billing.identity)) throw new Error("监控和账单授权属于不同账号");
+    if (main.identity && billing?.identity && !sameIdentity(main.identity, billing.identity)) throw previewFailure("MONITOR_ACCOUNT_MISMATCH", "看余额和读账单用的登录信息不是同一个上游账号");
     await resolveCandidate(main, selection.monitor ? "monitor" : "authorization");
     if (billing && billing !== main) await resolveCandidate(billing, "authorization");
     for (const item of [main, ...additional, billing].filter(Boolean)) {
       const station = reusable(item);
       if (station && stationBusinessVersion(rt.store.get(station.id)) !== item.resourceVersion) {
-        throw previewFailure("PREVIEW_BASIS_CHANGED", "验证期间资源配置已变化，请重新预览");
+        throw previewFailure("PREVIEW_BASIS_CHANGED", "测试读取期间上游改过，请重新预览");
       }
     }
     return { main, additional, billing, billingError };
@@ -974,7 +980,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   async function batchProbeState(input, { register = true } = {}) {
     const source = getSourceCatalogue(), sourceStationVersion = stationBusinessVersion(own());
-    if (!source.ownSource) throw previewFailure("CHANNEL_CATALOGUE_STALE", "请先同步并核验本站渠道来源");
+    if (!source.ownSource) throw previewFailure("CHANNEL_CATALOGUE_STALE", "请先刷新渠道列表，确认自营站点");
     const prepared = new Map(), verificationReads = new Map(), metadataReads = new Map(), allRules = await rules();
     const currentLinks = input.groups.some(hasRemovals) ? await repository.listLinks() : links;
     const readContext = rt.reconciliation?.createPreviewReadContext?.();
@@ -983,8 +989,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         const value = await prepareBatchSelection(selection, input.groups.some((group) => group.selectionId === selection.selectionId && group.reconciliation), verificationReads);
         prepared.set(selection.selectionId, { ...value, selection });
       } catch (error) {
-        prepared.set(selection.selectionId, { selection, error: previewFailure(error.code || "VERIFICATION_FAILED",
-          failure(error, [selection.newStation, selection.reconciliationAuthorization?.newAuthorization, rt.store.get(selection.stationId), own()])) });
+        prepared.set(selection.selectionId, { selection, error: failureError(error,
+          [selection.newStation, selection.reconciliationAuthorization?.newAuthorization, rt.store.get(selection.stationId), own()], "VERIFICATION_FAILED") });
       }
     }
     const rawGroups = [];
@@ -997,7 +1003,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         if (value.error) throw value.error;
         for (const channel of requested.channels) sourceChannel({ ownStationId: input.ownStationId, ...channel });
         if (stationBusinessVersion(own()) !== sourceStationVersion || sourceVersion() !== source.sourceVersion) {
-          throw previewFailure("PREVIEW_BASIS_CHANGED", "验证期间本站来源已变化，请重新预览");
+          throw previewFailure("PREVIEW_BASIS_CHANGED", "测试读取期间自营站点改过，请重新预览");
         }
         if (requested.reconciliation) {
           const billing = value.billing && { ...value.billing, metadata: null };
@@ -1016,22 +1022,25 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             billingConnection = observation.connection;
             billing.metadata = structuredClone(await observation.promise);
             if (!sameIdentity(billing.identity, accountIdentity(billing.connection, billing.metadata))) {
-              throw previewFailure("ACCOUNT_IDENTITY_CHANGED", "账号身份在验证期间发生变化，请重新验证");
+              throw previewFailure("ACCOUNT_IDENTITY_CHANGED", "测试读取期间上游账号变了，请去确认");
             }
             group.billingMetadata = billing.metadata;
           }
-          group.status = billingStatus(billing, true).status;
-          if (value.billingError) group.reason = value.billingError;
-          else if (group.status !== "ready") group.reason = billingStatus(billing, true).reason;
+          const status = billingStatus(billing, true);
+          group.status = status.status;
+          if (value.billingError) Object.assign(group, { code: value.billingError.code, reason: value.billingError.message });
+          else if (group.status !== "ready") Object.assign(group, { code: status.code, reason: status.reason });
           const token = billing?.metadata?.tokens?.find((item) => Number(item.id) === requested.reconciliation.tokenId);
           if (token && billing.connection.type.startsWith("sub2api") && billing.metadata.capability?.state === "unverified") {
             try {
               const observation = await queryStat(structuredClone(billing.connection), { token, metadata: billing.metadata,
                 capabilityStore: capabilityStore(), ...completedBillingDayWindow(group.reconciliation.timezone, now()) });
               billing.metadata.capability = observation.capability || { state: "unverified", reason: "DEPLOYMENT_NOT_VERIFIED" };
-              group.status = billingStatus(billing, true).status;
-              group.reason = billingStatus(billing, true).reason;
-            } catch (error) { group.reason = failure(error, [billing.connection]); }
+              const status = billingStatus(billing, true);
+              Object.assign(group, { status: status.status, code: status.code, reason: status.reason });
+            } catch (error) {
+              Object.assign(group, { code: failureCode(error, [billing.connection], "VERIFICATION_FAILED"), reason: failure(error, [billing.connection]) });
+            }
           }
           if (token && billing.identity) group.intentCanonicalKey = canonicalBillingKey(billing.connection, billing.metadata, token.id);
           if (group.status === "ready" && token && billing.identity) {
@@ -1040,18 +1049,19 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             group.authorizationIntent = authorization?.stationId || value.selection.stationId && !authorization?.newAuthorization
               ? null : hash(onboardingConnectionPatch(billing.connection));
           } else if (group.status === "ready") {
-            group.status = "unavailable"; group.code = "KEY_REQUIRED"; group.reason = "请选择实际使用的上游 Key";
+            group.status = "unavailable"; group.code = "KEY_REQUIRED"; group.reason = "请选择 Key";
           }
           for (const item of [value.main, ...value.additional, value.billing].filter(Boolean)) {
             const station = reusable(item);
             if (station && stationBusinessVersion(rt.store.get(station.id)) !== item.resourceVersion) {
-              throw previewFailure("PREVIEW_BASIS_CHANGED", "验证期间资源配置已变化，请重新预览");
+              throw previewFailure("PREVIEW_BASIS_CHANGED", "测试读取期间上游改过，请重新预览");
             }
           }
         }
       } catch (error) {
-        group.status = "unavailable"; group.code = error.code || "VERIFICATION_FAILED";
-        group.reason = failure(error, [value.main?.connection, value.billing?.connection, billingConnection, own()]);
+        const connections = [value.main?.connection, value.billing?.connection, billingConnection, own()];
+        group.status = "unavailable"; group.code = failureCode(error, connections, "VERIFICATION_FAILED");
+        group.reason = failure(error, connections);
       }
       rawGroups.push(group);
     }
@@ -1084,7 +1094,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           group.preview = financial.preview; group.existingRule = financial.existingRule;
         } catch (error) {
           group.status = error.code === "BILLING_CAPABILITY_UNVERIFIED" ? "unverified" : "unavailable";
-          group.code = error.code || "FINANCIAL_PREVIEW_FAILED"; group.reason = failure(error, [prepared.get(group.selectionIds[0])?.billing?.connection, own()]);
+          const connections = [prepared.get(group.selectionIds[0])?.billing?.connection, own()];
+          group.code = failureCode(error, connections, "FINANCIAL_PREVIEW_FAILED"); group.reason = failure(error, connections);
         }
       }
       if (hasRemovals(group)) group.monitorLinks = channelLinks(currentLinks, input.ownStationId, group.channels);
@@ -1095,7 +1106,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       const monitorByChannel = monitorsForChannels(group, monitorBySelection);
       group.monitorChanges = monitorChanges(group, channelLinks(currentLinks, input.ownStationId, group.channels), monitorByChannel);
       if (group.channels.some((channel) => channel.removeMonitorStationIds?.some((id) => monitorByChannel.get(channel.channelId).includes(id)))) {
-        group.status = "unavailable"; group.code = "GROUP_CONFLICT"; group.reason = "同一资源不能同时关联和解除，请核对各渠道选择";
+        group.status = "unavailable"; group.code = "GROUP_CONFLICT"; group.reason = "同一个上游不能既绑定又解除，请看一下各渠道的选择";
       }
       if (group.status === "ready" && group.reconciliation) {
         group.scopeIntent = normalizeReconciliationScopeIntent("append", group.basis.existingRuleId, {
@@ -1133,7 +1144,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           credentialUpdates.push({ role: "authorization", stationId: authorization.id });
         }
         return { selectionId: selection.selectionId, station: publicBatchStation(primary || value.main?.connection, value.main?.identity, allRules),
-          monitor: { status: value.error ? "unavailable" : "verified", ...(value.error ? { reason: value.error.message } : {}) },
+          monitor: { status: value.error ? "unavailable" : "verified", ...(value.error ? { code: value.error.code, reason: value.error.message } : {}) },
           authorizationStationId: authorization?.id || null, accountIdentity: value.main?.identity || null, tokens: safeTokens(value.billing?.metadata?.tokens),
           credentialUpdates, credentialUpdateRequired: credentialUpdates.length > 0 };
       }),
@@ -1150,7 +1161,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   async function probeRuleEdit(id, input) {
     const existing = (await rules()).find((rule) => rule.id === id && !rule.archivedAt);
-    if (!existing) throw previewFailure("RULE_NOT_FOUND", "核算关联不存在或已归档");
+    if (!existing) throw previewFailure("RULE_NOT_FOUND", "这条绑定已解除");
     const source = getSourceCatalogue(), sourceConnection = structuredClone(own());
     const upstream = structuredClone(rt.store.get(existing.upstreamStationId));
     const versions = Object.fromEntries([sourceConnection, upstream].filter(Boolean).map((station) => [station.id, stationBusinessVersion(station)]));
@@ -1164,7 +1175,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       if (!latest || originalRule(existing) !== originalRule(financial.existingRule) || originalRule(existing) !== originalRule(latest)
           || getSourceCatalogue().stale || sourceVersion() !== source.sourceVersion
           || Object.entries(versions).some(([stationId, version]) => stationBusinessVersion(rt.store.get(stationId)) !== version)) {
-        throw previewFailure("PREVIEW_BASIS_CHANGED", "核算关联、来源或授权在验证期间变化，请重新预览");
+        throw previewFailure("PREVIEW_BASIS_CHANGED", "测试读取期间绑定、自营站点或登录信息改过，请重新预览");
       }
       const groupId = "rule-edit";
       const record = registerPreview([{ groupId, requestedGroupIds: [groupId], selectionIds: [], roles: [],
@@ -1173,22 +1184,22 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       return { previewId: record.previewId, groupId, expiresAtMs: record.expiresAtMs,
         existingRule: financial.existingRule, basis: financial.basis, preview: financial.preview };
     } catch (error) {
-      throw previewFailure(error.code || "RULE_PREVIEW_FAILED", failure(error, [sourceConnection, upstream, own(), rt.store.get(existing.upstreamStationId)]));
+      throw failureError(error, [sourceConnection, upstream, own(), rt.store.get(existing.upstreamStationId)], "RULE_PREVIEW_FAILED");
     }
   }
 
   function currentGroupContext(group, guard, latestRule) {
     const facts = guardFacts.get(guard);
     if (facts?.monitorLinks && hash(group.monitorLinks) !== hash(facts.savedMonitorLinks || facts.monitorLinks)) {
-      throw previewFailure("PREVIEW_BASIS_CHANGED", "渠道监控关联已变化，请重新预览");
+      throw previewFailure("PREVIEW_BASIS_CHANGED", "渠道看余额绑的上游变了，请重新预览");
     }
-    if (group.status === "ready" && latestRule?.enabled === false) throw previewFailure("PREVIEW_BASIS_CHANGED", "原核算关联已停止，请重新预览");
+    if (group.status === "ready" && latestRule?.enabled === false) throw previewFailure("PREVIEW_BASIS_CHANGED", "这条绑定已解除，请重新预览");
     const source = getSourceCatalogue(), ids = [...new Set([...(latestRule?.channels || []).map((channel) => Number(channel.channelId)),
       ...group.channels.map((channel) => channel.channelId)])].sort((a, b) => a - b);
     const channelRevisions = {};
     for (const id of ids) {
       const channel = source.channels.find((item) => item.id === id);
-      if (!channel || channel.missing) throw previewFailure("PREVIEW_BASIS_CHANGED", "完整渠道范围的来源已变化，请重新预览");
+      if (!channel || channel.missing) throw previewFailure("PREVIEW_BASIS_CHANGED", "绑定的渠道在自营站点里改过，请重新预览");
       channelRevisions[id] = channel.revision;
     }
     const resourceVersions = Object.fromEntries([...new Set([...Object.keys(guard.basis.resourceVersions),
@@ -1211,13 +1222,14 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   async function persistBatchItem(item, selection, role, guard, assertCurrent) {
     let station = reusable(item), saved = false, credentialUpdated = false;
     if (station) {
-      if (station.archivedAt || station.isOwn || role === "primary" && selection.monitor && station.monitorEnabled === false) throw new Error("资源用途已变化");
+      // 这两处故意不带码：connectBatchNow 对没码的错误会再查一次预览前提，变了就按「请重新预览」处理。
+      if (station.archivedAt || station.isOwn || role === "primary" && selection.monitor && station.monitorEnabled === false) throw new Error("这个上游的用途改过，请重新预览");
       const protectedAdditional = guardFacts.get(guard).roles.some((entry) => entry.role === "additional" && entry.stationId === station.id);
       const options = { verifiedIdentity: item.identity, expectedAuthVersion: item.expectedAuthVersion,
         expectedResourceVersion: item.resourceVersion, guard: assertCurrent };
       if (selection.updateCredentials && !sameCredentials(station, item.connection)) {
-        if (protectedAdditional) throw previewFailure("PREVIEW_BASIS_CHANGED", "额外监控资源不能随主授权保存一起修改");
-        if (!sameIdentity(item.candidateIdentity || item.identity, item.identity)) throw new Error("更新授权必须属于同一账号");
+        if (protectedAdditional) throw previewFailure("PREVIEW_BASIS_CHANGED", "一起看余额的上游不能跟着改登录信息，请重新预览");
+        if (!sameIdentity(item.candidateIdentity || item.identity, item.identity)) throw new Error("新的登录信息属于别的上游账号");
         station = await rt.store.updateLocked(station.id, onboardingConnectionPatch(item.connection), options);
         saved = true; credentialUpdated = true;
       } else if (item.identity && !sameIdentity(station.verifiedIdentity, item.identity) && !protectedAdditional) {
@@ -1239,9 +1251,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const sourceConnection = structuredClone(own());
     expirePreviews();
     const original = input.previewId && previews.get(input.previewId);
-    if (original && !original.retryInput) throw previewFailure("PREVIEW_REQUIRED", "核算关联编辑预览不能用于批量接入，请重新预览");
+    if (original && !original.retryInput) throw previewFailure("PREVIEW_REQUIRED", "改绑定的预览不能用来绑定新渠道，请重新预览");
     const destructive = input.groups.some(hasRemovals);
-    if ((financialRequested || destructive) && !original && !input.previewId) throw previewFailure("PREVIEW_REQUIRED", "财务接入或解除关联需要当前服务端预览，请先验证后确认");
+    if ((financialRequested || destructive) && !original && !input.previewId) throw previewFailure("PREVIEW_REQUIRED", "算利润或解除绑定要先预览，请预览后再确认");
     const state = await batchProbeState(input, { register: !original && !financialRequested && !destructive });
     const record = original || state.record;
     if (!record) {
@@ -1305,14 +1317,14 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       let authorization = null, latestRule = null, guard = originalGroup?.guard;
       try {
         if (hasRemovals(group) && recoveredGroup?.code === "PREVIEW_BASIS_CHANGED") {
-          throw previewFailure("PREVIEW_BASIS_CHANGED", "本站来源已变化，请重新预览");
+          throw previewFailure("PREVIEW_BASIS_CHANGED", "自营站点变了，请重新预览");
         }
         if (!originalGroup || originalGroup.digest !== batchGroupDigest(input, originalGroup)
             || hash([...originalGroup.requestedGroupIds].sort()) !== hash([...group.requestedGroupIds].sort())) {
-          throw previewFailure("PREVIEW_BASIS_CHANGED", "本组选择或使用范围与原预览不同，请重新预览");
+          throw previewFailure("PREVIEW_BASIS_CHANGED", "这次选的和预览时不一样，请重新预览");
         }
         if (values.some((value) => value.error) || group.code === "GROUP_CONFLICT") {
-          throw previewFailure(group.code || values.find((value) => value.error).error.code, group.reason || "资源验证失败");
+          throw previewFailure(group.code || values.find((value) => value.error).error.code, group.reason || "测试读取没成功");
         }
         const ids = [...new Set([...Object.keys(guard.basis.resourceVersions), ...Object.keys(guard.postSaveResourceVersions)])];
         await withSourceLock(null, () => stationLock(ids, async () => {
@@ -1325,7 +1337,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           assertCurrent();
           if (values.some((value) => !value.selection.updateCredentials && [value.main, value.billing].filter(Boolean)
               .some((item) => reusable(item) && !sameCredentials(reusable(item), item.connection)))) {
-            throw previewFailure("AUTHORIZATION_UPDATE_REQUIRED", "旧资源授权与本次输入不同，请明确确认更新授权");
+            throw previewFailure("AUTHORIZATION_UPDATE_REQUIRED", "已有这个上游账号，这次填的登录信息和保存的不一样，请确认要不要更新登录信息");
           }
           const newlyCreatedIds = [];
           for (const value of values) {
@@ -1387,7 +1399,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         if (group.reconciliation) {
           if (group.code === "KEY_REQUIRED" || !group.reconciliation.tokenId) actions.push("select_key");
           else if (group.status !== "ready" || !authorization) {
-            result.reconciliation = { status: ["unverified", "unsupported", "unavailable"].includes(group.status) ? group.status : "unavailable", reason: group.reason };
+            result.reconciliation = { status: ["unverified", "unsupported", "unavailable"].includes(group.status) ? group.status : "unavailable",
+              reason: group.reason, ...(group.code ? { code: group.code } : {}) };
             actions.push(["GROUP_CONFLICT", "RULE_DISABLED", "PREVIEW_BASIS_CHANGED"].includes(group.code) ? "repreview" : "verify_capability");
           } else {
             // The financial service owns its source → Store → Repository locks.
@@ -1406,12 +1419,14 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           }
         }
       } catch (error) {
-        if (!error.code && guard) {
+        // 没有码的错误和「绑定在这期间变了」（STALE_SCOPE）都再对一次预览：预览后改过的，按「内容有变化」说
+        if ((!error.code || error.code === "STALE_SCOPE") && guard) {
           try { assertPreviewGuard(guard, currentGroupContext(group, guard, latestRule)); }
           catch (changed) { error = changed; }
         }
-        result.code = error.code || "ONBOARDING_FAILED";
-        result.reason = failure(error, [sourceConnection, own(), ...values.flatMap((value) => [value.main?.connection, value.billing?.connection])]);
+        const connections = [sourceConnection, own(), ...values.flatMap((value) => [value.main?.connection, value.billing?.connection])];
+        result.code = failureCode(error, connections, "ONBOARDING_FAILED");
+        result.reason = failure(error, connections);
         actions.push(error.code === "AUTHORIZATION_UPDATE_REQUIRED" ? "verify_identity"
           : ["PREVIEW_REQUIRED", "PREVIEW_BASIS_CHANGED", "EFFECTIVE_PREVIEW_CHANGED", "GROUP_CONFLICT"].includes(error.code) ? "repreview"
             : updatesRequested ? "repreview"
@@ -1420,7 +1435,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         if (result.monitor.status === "pending") result.monitor.status = "unavailable";
         if (group.reconciliation && result.reconciliation.status !== "configured") {
           result.reconciliation = { ...result.reconciliation, status: result.reconciliation.status === "pending" ? "unavailable" : result.reconciliation.status,
-            reason: result.reason };
+            reason: result.reason, code: result.code };
         }
       }
       results.push(finishGroup(result, actions));
@@ -1487,20 +1502,22 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         const original = matches.filter((item) => item.origin);
         const related = matches.filter((item) => item.related);
         const chosen = original.length ? original : related.length ? related : matches.filter((item) => explicitId || expectedIdentity || !primary);
-        if (chosen.length > 1) throw previewFailure("IDENTITY_CONFLICT", "已保存资源身份不唯一，请明确选择并核验");
+        if (chosen.length > 1) throw previewFailure("IDENTITY_CONFLICT", "已保存的上游里有几个对得上，请选定一个再测试读取");
         return chosen[0] || null;
       }
       try {
         const primary = await locate(selection.monitor ? "monitor" : "billing", selection.accountIdentity, selection.stationId, true);
         if (primary && ACCOUNT_TYPES.includes(primary.station.type) && !selection.accountIdentity) {
-          recovered.set(selection.selectionId, { error: previewFailure("LEGACY_IDENTITY_UNVERIFIED", "原账号身份未核验，请重新验证") });
+          recovered.set(selection.selectionId, { error: previewFailure("LEGACY_IDENTITY_UNVERIFIED", "还没确认这把 Key 属于哪个上游账号，请测试读取") });
           continue;
         }
         const additional = [];
         for (const id of selection.additionalMonitorStationIds) {
           const station = rt.store.get(id), item = station && await verifySaved(station);
           if (!item || station.archivedAt || station.isOwn || station.monitorEnabled === false
-              || selection.accountIdentity && item.identity && !sameIdentity(item.identity, selection.accountIdentity)) throw new Error("额外监控资源待核验");
+              || selection.accountIdentity && item.identity && !sameIdentity(item.identity, selection.accountIdentity)) {
+            throw previewFailure("IDENTITY_UNVERIFIED", "一起看余额的上游还没确认是哪个上游账号，请测试读取");
+          }
           additional.push(item);
         }
         let billing = null;
@@ -1526,7 +1543,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       const ids = [...new Set(monitorIds)];
       const mapped = group.channels.every((channel) => selectionForChannel(group, channel));
       if (!mapped) {
-        result.code = "PREVIEW_BASIS_CHANGED"; result.reason = "原请求未保存逐渠道的资源选择，请重新预览"; actions.push("repreview");
+        result.code = "PREVIEW_BASIS_CHANGED"; result.reason = "上次提交没记下每个渠道选的上游，请重新预览"; actions.push("repreview");
       }
       const monitorByChannel = monitorsForChannels(group, monitorBySelection);
       result.saved.stationIds = ids;
@@ -1560,7 +1577,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           try {
             const owner = billing[0], metadata = await queryMetadata(structuredClone(owner.connection));
             if (!sameIdentity(owner.identity, accountIdentity(owner.connection, metadata)) || !metadata.tokens.some((token) => Number(token.id) === bill.tokenId)
-                || canonicalBillingKey(owner.station, metadata, bill.tokenId) !== bill.canonicalKey) throw new Error("原财务 Key 身份待核验");
+                || canonicalBillingKey(owner.station, metadata, bill.tokenId) !== bill.canonicalKey) throw previewFailure("IDENTITY_UNVERIFIED", "还没确认这把 Key 属于哪个上游账号");
             const matches = allRules.filter((rule) => !rule.archivedAt && rule.enabled && rule.canonicalKey === bill.canonicalKey
               && rule.ownStationId === intent.source.ownStationId && rule.ownSource?.namespaceKey === intent.source.ownSource.namespaceKey
                && rule.tokenId === bill.tokenId && rule.timezone === bill.timezone && inspectSource(rule).status === "confirmed"
@@ -1569,7 +1586,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
                 && rule.sourceBinding?.[channel.channelId] === channel.channelRevision));
             if (matches.length === 1 && sourceValid) {
               const rule = matches[0], actual = rt.store.get(rule.upstreamStationId), actualIdentity = actual && await verifySaved(actual);
-              if (!actualIdentity || !sameIdentity(actualIdentity.identity, owner.identity)) throw new Error("核算关联的原授权身份待核验");
+              if (!actualIdentity || !sameIdentity(actualIdentity.identity, owner.identity)) throw previewFailure("IDENTITY_UNVERIFIED", "绑定用的上游还没确认是哪个上游账号");
               result.saved.ruleId = rule.id; result.saved.scopeVersion = rule.scopeVersion;
               result.saved.billingEffectiveFromMs = rule.billingEffectiveFrom;
               result.reconciliation = { status: "configured", ruleId: rule.id, scopeVersion: rule.scopeVersion, billingEffectiveFromMs: rule.billingEffectiveFrom };
@@ -1580,13 +1597,12 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       }
       if (selected.some(([selection]) => selection.credentialUpdateRequested)) {
         result.code = "CREDENTIAL_UPDATE_UNCONFIRMED";
-        result.reason = "关联已保存，授权更新结果尚未确认，请重新预览";
+        result.reason = "已保存；登录信息有没有更新好还没确认，请重新预览";
         actions.push("repreview");
       }
       results.push(finishGroup(result, actions));
     }
-    // Remote checks may take seconds. Linearize the recovery answer after them,
-    // using fresh persisted relationships while local source/resource writers wait.
+    // 远程检查可能要几秒。检查完再按刚读出的已保存绑定给出恢复结果，这期间本地对渠道和上游的写入先等着
     const checked = [...recovered.values()].flatMap((value) => [value.primary, ...(value.additional || []), value.billing]).filter(Boolean);
     return withSourceLock(null, () => stationLock(checked.map((item) => item.station.id), async () => {
       const [persistedSource, latestRules] = await Promise.all([repository.getCatalogue(), rt.reconciliation?.listRules?.({ includeArchived: true }) || []]);
@@ -1614,7 +1630,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           return [id, [selection.monitor && value?.primary?.station.id, ...(value?.additional || []).map((item) => item.station.id)].filter(Boolean)];
         }));
         const monitorByChannel = monitorsForChannels(group, monitorBySelection);
-        result.code = "PREVIEW_BASIS_CHANGED"; result.reason = "恢复核对期间来源、资源或关联已变化，请重新预览";
+        result.code = "PREVIEW_BASIS_CHANGED"; result.reason = "接着上次做的时候，自营站点、上游或绑定变了，请重新预览";
         result.saved.links = current.filter((link) => monitorByChannel.get(link.channelId).includes(link.stationId));
         result.monitor = { status: "pending", stationIds: [...new Set(current.map((link) => link.stationId))] };
         result.monitorChanges = monitorChanges(group, current, monitorByChannel);
@@ -1625,17 +1641,20 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     }));
   }
 
+  // 读账单的状态：status 给流程用，code 给界面归类（lib/error-copy.js），reason 是原文。
+  // capability.reason 是机器码、message 是后端说法，都不上界面；读不全账单时按 §5.2「还没确认能读到这个上游的完整账单」说。
   function billingStatus(item, requested) {
     if (!requested) return { status: "not_requested" };
-    if (!item) return { status: "unavailable", reason: "请在同一入口补充账号账单授权" };
-    if (!item.metadata) return { status: "unavailable", reason: failure(item.metadataError, [item.connection]) };
+    if (!item) return { status: "unavailable", code: "BILLING_AUTHORIZATION_REQUIRED", reason: "要读账单，还需要这个上游账号的访问令牌" };
+    if (!item.metadata) return { status: "unavailable", code: failureCode(item.metadataError, [item.connection], "VERIFICATION_FAILED"),
+      reason: failure(item.metadataError, [item.connection]) };
     const capability = item.metadata.capability?.state || "unverified";
-    return { status: capability === "supported" ? "ready" : capability,
-      reason: capability === "supported" ? null : item.metadata.capability?.reason || "账单能力尚未验证" };
+    if (capability === "supported") return { status: "ready", code: null, reason: null };
+    return { status: capability, code: "BILLING_CAPABILITY_UNVERIFIED", reason: reconciliationIssue("UPSTREAM_CAPABILITY_UNVERIFIED").title };
   }
 
   function singleBatchInput(input) {
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw previewFailure("INVALID_REQUEST", "接入请求格式无效");
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw previewFailure("INVALID_REQUEST", "页面已过期，请刷新后重新打开");
     const previous = input.previewId && previews.get(input.previewId);
     const requestId = input.requestId || previous?.retryInput?.requestId || randomUUID();
     const authorization = input.reconciliation;
@@ -1654,21 +1673,21 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
 
   async function probe(input) {
     const result = await probeBatch(singleBatchInput(input)), selection = result.selections[0], group = result.groups[0];
-    if (selection.monitor.status === "unavailable") throw previewFailure(group.code || "ONBOARDING_FAILED", selection.monitor.reason);
+    if (selection.monitor.status === "unavailable") throw previewFailure(selection.monitor.code || group.code || "ONBOARDING_FAILED", selection.monitor.reason);
     if (["CHANNEL_CATALOGUE_STALE", "CHANNEL_SOURCE_CHANGED", "PREVIEW_BASIS_CHANGED"].includes(group.code)) {
       throw previewFailure(group.code, group.reason);
     }
     return { requestId: result.requestId, previewId: result.previewId, groupId: group.groupId, expiresAtMs: result.expiresAtMs,
       station: selection.station, monitor: selection.monitor,
       reconciliation: { status: input.reconciliation ? group.code === "KEY_REQUIRED" ? "ready" : group.status : "not_requested",
-        reason: group.reason || null, tokens: selection.tokens, upstreamStationId: selection.authorizationStationId,
+        reason: group.reason || null, code: group.code || null, tokens: selection.tokens, upstreamStationId: selection.authorizationStationId,
         existingRuleId: group.basis.existingRuleId, existingChannelIds: group.basis.existingChannelIds },
       preview: { ...group.preview, timezone: group.basis.timezone }, channelRevision: input.channelRevision,
       credentialUpdates: selection.credentialUpdates, credentialUpdateRequired: selection.credentialUpdateRequired, batchRetryInput: result.retryInput };
   }
 
   async function connect(input) {
-    if (input?.reconciliation && !input.previewId) throw previewFailure("PREVIEW_REQUIRED", "财务接入需要当前服务端预览，请先验证后确认");
+    if (input?.reconciliation && !input.previewId) throw previewFailure("PREVIEW_REQUIRED", "算利润要先预览，请预览后再确认");
     const result = await connectBatch(singleBatchInput(input)), group = result.groups[0];
     if (!group.saved.stationIds.length && group.monitor.status === "unavailable" && group.reason
         && !["PREVIEW_REQUIRED", "PREVIEW_BASIS_CHANGED", "EFFECTIVE_PREVIEW_CHANGED"].includes(group.code)) {

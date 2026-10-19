@@ -1,4 +1,4 @@
-/* 账单核算页：只放本页特有的布局，通用外观（面板、分段、表格、抽屉）用 jy.css */
+/* 每日利润页：只放本页特有的布局，通用外观（面板、分段、表格、抽屉）用 jy.css */
 
 /* 页头：窗口说明、操作按钮、口径说明和数据新鲜度 */
 .reconciliation-head { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -7,12 +7,12 @@
 .reconciliation-head__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 .reconciliation-window { font-size: 14px; line-height: 22px; color: var(--jy-ink); font-variant-numeric: tabular-nums; }
 .reconciliation-custom { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
-.reconciliation-freshness { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; font-variant-numeric: tabular-nums; }
-
 .reconciliation-alerts,
 .reconciliation-overview { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .reconciliation-overview { gap: 16px; }
-.reconciliation-destination { display: flex; flex-direction: column; gap: 8px; overflow-wrap: anywhere; }
+/* 换了日期范围、新数据还没回来：列表是别的日期的，变淡且不能点 */
+.reconciliation-switching { opacity: .5; pointer-events: none; transition: opacity .2s; }
+@media (prefers-reduced-motion: reduce) { .reconciliation-switching { transition: none; } }
 .reconciliation-button-row { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
 
 /* 汇总四项：宽屏一行四列，窄屏两列 */
@@ -32,9 +32,6 @@
 .reconciliation-unaccounted > .jy-caption { margin: 0; }
 .reconciliation-summary__empty { margin: 0; font-size: 13px; line-height: 20px; color: var(--jy-ink-3); }
 
-.reconciliation-amount--success { color: var(--jy-good-ink) !important; }
-.reconciliation-amount--danger { color: var(--jy-crit-ink) !important; }
-
 /* 按账单窗口分组的小计、已知渠道覆盖 */
 .reconciliation-window-groups.ant-collapse,
 .reconciliation-coverage__list.ant-collapse { background: var(--jy-sheet); border-color: var(--jy-rule); border-radius: var(--jy-r2); }
@@ -48,14 +45,15 @@
 .reconciliation-coverage__heading strong { font-weight: 600; color: var(--jy-ink); }
 .reconciliation-coverage__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 
-/* 键值明细：详情抽屉、分组小计、原确认记录共用 */
+/* 键值明细：计算明细、分组小计、以前的每日记录共用 */
 .reconciliation-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; min-width: 0; }
 .reconciliation-detail-grid > .jy-caption { grid-column: 1 / -1; margin: 0; }
 .reconciliation-detail { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .reconciliation-detail__label { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
 .reconciliation-detail__value { font-size: 14px; line-height: 22px; color: var(--jy-ink); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.reconciliation-detail__value small { display: block; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
 
-/* 核算关联列表 */
+/* 绑定列表 */
 .reconciliation-list-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 0 24px 16px; min-width: 0; }
 .reconciliation-search.ant-input-affix-wrapper { flex: 1 1 240px; max-width: 360px; }
 .reconciliation-list-tools .jy-seg { overflow-x: auto; }
@@ -83,14 +81,16 @@
 .reconciliation-table-channels { color: var(--jy-ink-2); }
 .reconciliation-table-amount { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .reconciliation-table-amount > small { white-space: normal; text-align: right; }
-.reconciliation-settlement { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); font-weight: 400; white-space: nowrap; }
-.reconciliation-status-stack { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.reconciliation-status-stack { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.reconciliation-status-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.reconciliation-status-note { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); font-weight: 400; overflow-wrap: anywhere; }
 
 .reconciliation-row-actions { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .reconciliation-row-actions__buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 0 2px; }
-.reconciliation-row-actions__error { font-size: 12px; line-height: 18px; color: var(--jy-crit-ink); text-align: center; }
+.reconciliation-row-actions__error { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 12px; line-height: 18px; color: var(--jy-crit-ink); text-align: center; }
+.reconciliation-row-actions__error .jy-error-detail { text-align: left; }
 
-/* 分组与倍率历史：表格行展开或移动卡片展开 */
+/* 倍率变化：表格行展开或手机卡片展开 */
 .reconciliation-history { padding: 12px 16px 16px; background: var(--jy-sunken); border-left: 2px solid var(--jy-cobalt); }
 .reconciliation-history__intro { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-bottom: 8px; font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
 .reconciliation-history__intro strong { font-size: 14px; font-weight: 600; color: var(--jy-ink); }
@@ -98,12 +98,10 @@
 .reconciliation-history-table .ant-table-thead > tr > th,
 .reconciliation-history-table .ant-table-tbody > tr > td { padding: 8px 10px; font-size: 12px; line-height: 18px; }
 .reconciliation-history-period,
-.reconciliation-history-group,
-.reconciliation-history-result { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-variant-numeric: tabular-nums; }
+.reconciliation-history-group { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-variant-numeric: tabular-nums; }
 .reconciliation-history-period small,
-.reconciliation-history-group small,
-.reconciliation-history-result small { font-size: 12px; color: var(--jy-ink-3); }
-.reconciliation-history-result { align-items: flex-end; }
+.reconciliation-history-group small { font-size: 12px; color: var(--jy-ink-3); }
+.reconciliation-history-timing { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0 4px; }
 .reconciliation-history-mobile { display: flex; flex-direction: column; background: var(--jy-sheet); }
 .reconciliation-history-mobile__row { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-top: 1px solid var(--jy-rule-soft); }
 .reconciliation-history-mobile__heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; font-size: 14px; }
@@ -113,7 +111,7 @@
 .reconciliation-history-mobile__figures span { display: flex; flex-direction: column; gap: 2px; color: var(--jy-ink-3); }
 .reconciliation-history-mobile__figures strong { font-size: 14px; color: var(--jy-ink); overflow-wrap: anywhere; }
 
-/* 移动端核算关联卡片 */
+/* 手机上的绑定卡片 */
 .reconciliation-mobile-list { display: flex; flex-direction: column; border-top: 1px solid var(--jy-rule-soft); }
 .reconciliation-mobile-item { border-bottom: 1px solid var(--jy-rule-soft); }
 .reconciliation-mobile-row {
@@ -156,11 +154,9 @@
 .reconciliation-channel__figures { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; font-variant-numeric: tabular-nums; }
 .reconciliation-channel__figures strong { font-weight: 600; color: var(--jy-ink); }
 
-/* 详情抽屉 */
+/* 计算明细抽屉 */
 .reconciliation-drawer .ant-drawer-title { overflow-wrap: anywhere; }
 .reconciliation-detail-body { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.reconciliation-basis.ant-collapse > .ant-collapse-item > .ant-collapse-header { padding-inline: 0; }
-.reconciliation-basis.ant-collapse .ant-collapse-content-box { padding-inline: 0 !important; }
 .reconciliation-transition,
 .reconciliation-channels { display: flex; flex-direction: column; gap: 8px; padding-top: 16px; border-top: 1px solid var(--jy-rule-soft); }
 .reconciliation-transition h3,
@@ -168,7 +164,7 @@
 .reconciliation-transition > .jy-caption { margin: 0; }
 .reconciliation-transition__controls { display: flex; flex-wrap: wrap; gap: 8px; }
 
-/* 已确认账单历史（抽屉内） */
+/* 以前的每日记录（抽屉内） */
 .reconciliation-confirmed { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .reconciliation-confirmed > .jy-caption { margin: 0; }
 .reconciliation-confirmed > .ant-btn { align-self: flex-start; }

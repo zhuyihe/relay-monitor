@@ -11,8 +11,9 @@ import { App, Button } from "antd";
 import { api, rateOf, statusOf, threshold } from "../../lib/client";
 import type { WorkflowAction } from "../../lib/client";
 import { attentionStationIds, buildOverviewActions } from "../../lib/overview-actions";
+import { workflowActionMeta } from "../../lib/workflow-actions";
 import { describeConnectionFailure } from "../../lib/connection-test";
-import { formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd, formatZonedTime, parseDay } from "../../lib/format";
+import { formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd, formatZonedTime, parseDay, refreshFailedText } from "../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, shiftDayLabel } from "../../lib/business-time";
 import { AttentionList } from "../components/attention-list";
 import { Sym } from "../components/icons";
@@ -99,8 +100,8 @@ export default function OverviewPage() {
   const [moneyAt, setMoneyAt] = useState<number | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [trendStation, setTrendStation] = useState<any>(null);
-  // 上游账单与账单核算产生的待办：与侧栏计数、上游资源页共用一份
-  const { actions: workflowActions, error: workflowError, loading: workflowLoading, reload: reloadWorkflowActions } = useWorkflowActions();
+  // 上游账单与每日利润产生的需处理事项：与侧栏计数、上游资源页共用一份
+  const { actions: workflowActions, failed: workflowFailed, staleAsOf: workflowAsOf, loading: workflowLoading, reload: reloadWorkflowActions } = useWorkflowActions();
   const rangeRef = useRef(range);
   rangeRef.current = range;
 
@@ -223,6 +224,12 @@ export default function OverviewPage() {
     tz: money?.own?.tz || money?.fallback?.tz,
   });
 
+  const businessTz = money?.own?.tz || money?.fallback?.tz || DEFAULT_BUSINESS_TIME_ZONE;
+  const workflowError = !workflowFailed
+    ? ""
+    : workflowAsOf
+      ? refreshFailedText(workflowAsOf, businessTz)
+      : "读不到上游账单和每日利润里需要处理的事。";
   const critDays = Number(rules?.etaDays) > 0 ? Number(rules.etaDays) : 3;
   const current = money && money.range === range ? money : null;
   const rangeName = RANGE_NAME[range];
@@ -460,7 +467,7 @@ function AttentionPanel({
             {i > 0 ? "、" : ""}
             {o.workflow ? (
               <Link href={o.href} className="jy-caption-link">
-                {o.label}
+                {actionPhrase(o)}
               </Link>
             ) : (
               actionPhrase(o)
@@ -478,7 +485,7 @@ function AttentionPanel({
         key: a.id,
         level: a.level,
         who: workflowOwner(a, nameOf),
-        what: workflowProblem(a.kind),
+        what: workflowProblem(a),
         desc: workflowDetail(a),
         note: noteOf(a),
         actions: open(a),
@@ -558,13 +565,12 @@ function AttentionPanel({
           <Sym kind="warn" />
           <span className="jy-ov-banner-text">{workflowError}</span>
           <Button size="small" onClick={onReloadWorkflow}>
-            重读处理事项
+            {workflowActionMeta("refresh")!.label}
           </Button>
         </div>
       ) : null}
       <AttentionList
         items={items}
-        emptyDesc="上游资源余额充足、查询正常，近期没有到期的固定成本，账号与账单也没有待办。"
         more={
           hidden > 0 ? (
             <>
