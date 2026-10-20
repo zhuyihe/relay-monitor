@@ -6,7 +6,9 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { App, Dropdown } from "antd";
 import { api } from "../../lib/client";
-import { formatZonedTime } from "../../lib/format";
+import { formatAsOf, formatAsOfTime } from "../../lib/format";
+import { failureText } from "../../lib/error-copy";
+import { workflowActionMeta } from "../../lib/workflow-actions";
 import { BRAND, formatPageTitle, NAV_LABELS } from "../../lib/brand";
 import { NAV_GROUPS, NAV_ITEMS, navItemFor } from "../../lib/nav";
 import { buildOverviewActions } from "../../lib/overview-actions";
@@ -27,12 +29,16 @@ const STALE_MS = 10 * 60_000;
 const autoRefreshHint = (ms: number | null | undefined) => ms === null ? "当前时间范围不自动刷新，可点右侧刷新"
   : `数据每 ${ms == null ? "60 秒" : ms % 60_000 === 0 ? `${ms / 60_000} 分钟` : `${Math.round(ms / 1000)} 秒`}自动刷新`;
 
-const hhmm = (ts: number) => {
-  const d = new Date(ts);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+// 「数据截至 14:20，已经 10 分钟没更新。」（§8.1）；一小时以上写小时
+const staleText = (asOf: number, now: number, tz: string | undefined) => {
+  const minutes = Math.floor((now - asOf) / 60_000);
+  const gap = minutes < 60 ? `${minutes} 分钟` : `${Math.floor(minutes / 60)} 小时`;
+  return `${formatAsOf(asOf, tz, now)}，已经 ${gap}没更新。`;
 };
+// 页面没给业务时区时按浏览器所在时区写，和原来一样
+const localTz = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-// 运营总览的待处理条数：与总览页"需要处理"同一套规则。
+// 运营总览的需处理条数：与总览页「需处理」同一套规则。
 // 账号与账单待办只读总览、上游资源页已经取到的那份：账单待办要在服务端跑一遍全部核算，
 // 不能让每个页面的侧栏都去触发
 function useAttentionCount(enabled: boolean) {
@@ -150,7 +156,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     try {
       await page.onRefresh();
     } catch (e: any) {
-      message.error(e?.message || "刷新失败");
+      message.error(failureText(`${workflowActionMeta("refresh")!.label}失败`, e));
     } finally {
       setRefreshing(false);
     }
@@ -202,7 +208,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       {count > 0 && (
                         <>
                           <span className="jy-nav-count" aria-hidden="true">{count}</span>
-                          <span className="sr-only">，{count} 项需要处理</span>
+                          <span className="sr-only">，需处理 {count} 项</span>
                         </>
                       )}
                     </Link>
@@ -221,7 +227,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </button>
           </div>
           <div className="jy-sider-foot">
-            <span className="grow">v{pkg.version}</span>
+            <span className="grow">软件版本 {pkg.version}</span>
             <button
               type="button"
               className="jy-collapse-btn"
@@ -254,11 +260,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             {asOf != null && (
               <span
                 className={`jy-freshness${stale ? " is-stale" : ""}`}
-                title={stale ? "数据已超过 10 分钟未更新，可点右侧刷新" : autoRefreshHint(page.autoRefreshMs)}
+                title={stale ? staleText(asOf, now, page.tz || localTz()) : autoRefreshHint(page.autoRefreshMs)}
               >
                 <i className="dot" aria-hidden="true" />
                 <span className="txt">数据截至</span>
-                <span className="jy-num">{page.tz ? formatZonedTime(asOf, page.tz) : hhmm(asOf)}</span>
+                <span className="jy-num">{formatAsOfTime(asOf, page.tz || localTz(), now)}</span>
               </span>
             )}
             {!passwordChangeRequired && page.onRefresh && (

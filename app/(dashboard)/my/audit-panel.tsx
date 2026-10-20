@@ -59,7 +59,7 @@ export function AuditPanel({ audit, auditing, auditError, auditRows, setAuditRow
               {audit ? "重新精算" : "开始精算"}
             </Button>
           </div>
-          {auditError && <ErrorState title="精算失败" error={auditError} onRetry={run} />}
+          {auditError && <ErrorState what="按明细细算没完成" error={auditError} onRetry={run} />}
           {!audit ? (
             !auditError && (
               <div className="jy-my-lines">

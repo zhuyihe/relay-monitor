@@ -45,11 +45,6 @@
 .jy-stations-skeleton { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
 
 /* 抽屉 */
-.jy-stations-guide { margin: 0 0 16px; padding: 12px; border-radius: var(--jy-r2); background: var(--jy-sunken); font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
-.jy-stations-guide > b { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: var(--jy-ink); }
-.jy-stations-guide dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; }
-.jy-stations-guide dt { color: var(--jy-ink-3); white-space: nowrap; }
-.jy-stations-guide dd { margin: 0; }
 .jy-stations-switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--jy-ink); }
 .jy-stations-hint { margin: 8px 0 0; }
 .jy-stations-purchase { display: grid; grid-template-columns: minmax(0, 1fr) 96px 150px auto; gap: 8px; margin-bottom: 8px; align-items: center; }

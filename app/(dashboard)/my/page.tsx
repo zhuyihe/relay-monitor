@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "antd";
 import { api } from "../../../lib/client";
+import { NAV_LABELS } from "../../../lib/brand";
 import { formatHhmm } from "../../../lib/format";
 import { ErrorState, Onboarding, PanelSkeleton } from "../../components/data-state";
 import { Icon, Sym } from "../../components/icons";
@@ -184,7 +185,7 @@ export default function MyStationPage() {
       return (
         <div className="jy-page">
           <Panel label="自营业务">
-            <ErrorState center title="自营业务数据加载失败" error={currentErr.error} onRetry={() => load(true)} />
+            <ErrorState center what={`读不到${NAV_LABELS.my}数据`} error={currentErr.error} onRetry={() => load(true)} />
           </Panel>
         </div>
       );

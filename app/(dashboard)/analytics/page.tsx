@@ -11,7 +11,8 @@ import { Button, Checkbox } from "antd";
 import { NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { describeError } from "../../../lib/error-copy";
-import { formatDays, formatMoney } from "../../../lib/format";
+import { BALANCE_STATE_TEXT, formatDays, formatMoney } from "../../../lib/format";
+import { runwayLevel, WATCH_DAYS } from "../../../lib/overview-actions";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
 import { EmptyState, ErrorState, PanelSkeleton, Skeleton } from "../../components/data-state";
 import type { TipRow } from "../../components/float-tip";
@@ -48,7 +49,6 @@ const RANGE_OPTIONS = [
 ];
 // 接口 days 上限 365：自定义开始日期最早到 364 天前
 const MAX_DAYS = 365;
-const WARN_DAYS = 7;
 const POLL_MS = 30000;
 const EQ_TITLE = "期内成本与利润";
 const COVERAGE_ID = "analytics-coverage";
@@ -277,7 +277,7 @@ export default function AnalyticsPage() {
     return (
       <div className="jy-page">
         <Panel title={EQ_TITLE} extra={archiveToggle}>
-          <ErrorState title="成本分析暂时无法加载" error={loadError} onRetry={retry} center />
+          <ErrorState what="读不到成本数据" error={loadError} onRetry={retry} center />
         </Panel>
       </div>
     );
@@ -630,7 +630,9 @@ function HeatPanel({
 
 function RunwayPanel({ dv, critDays, metaFailed }: { dv: Derived; critDays: number; metaFailed: boolean }) {
   const items: RunwayItem[] = dv.runway.map((s) => {
-    const level = s.days <= critDays ? "crit" : s.days < WARN_DAYS ? "warn" : "good";
+    // 分档和上游列表、运营总览同一套（runwayLevel）；文案整体随 A2-3 改
+    const level = runwayLevel(s.days, { etaDays: critDays }) ?? "muted";
+    const state = level === "crit" || level === "warn" ? BALANCE_STATE_TEXT.soon : undefined;
     const suffix = s.archived ? "（已归档）" : "";
     const burn = Number.isFinite(s.burnCny) ? formatMoney(s.burnCny) : "—";
     const tip: TipRow[] = [
@@ -638,16 +640,16 @@ function RunwayPanel({ dv, critDays, metaFailed }: { dv: Derived; critDays: numb
       ["可用", formatDays(s.days)],
     ];
     if (s.basis) tip.push(["推算依据", s.basis]);
-    return { key: s.id, name: `${s.name}${suffix}`, sub: `日均消耗 ${burn}`, days: s.days, level, tip };
+    return { key: s.id, name: `${s.name}${suffix}`, sub: `日均消耗 ${burn}`, days: s.days, level, state, tip };
   });
   const caption = metaFailed
     ? `告警规则读取失败，按 ${critDays} 天内为紧急`
-    : `按近期消耗推算，${critDays} 天内为紧急，${WARN_DAYS} 天内需注意`;
+    : `按近期消耗推算，${critDays} 天内为紧急，${WATCH_DAYS} 天内需注意`;
   return (
     <Panel title="可用天数" caption={caption} body={items.length ? false : true}>
       {items.length ? (
         <div className="jy-analytics-runway">
-          <Runway items={items} critDays={critDays} warnDays={WARN_DAYS} />
+          <Runway items={items} critDays={critDays} warnDays={WATCH_DAYS} />
         </div>
       ) : (
         <EmptyState

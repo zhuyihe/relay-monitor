@@ -153,10 +153,7 @@ export default function ReconciliationPage() {
 
   // 整块读不到（§8.1）：「读不到每日利润：原因。」原因按报错归类，原文收进「查看详细原因」
   const blockError = (onRefresh: () => void) => <div className="jy-page reconciliation-page">
-    <ErrorState center title={failureText(`读不到${NAV_LABELS.reconciliation}`, error)} extra={<>
-      <Button type="primary" loading={querying} onClick={onRefresh}>{RECON_BUTTONS.refresh}</Button>
-      <ErrorDetail raw={error} />
-    </>} />
+    <ErrorState center what={`读不到${NAV_LABELS.reconciliation}`} error={error} onRetry={onRefresh} retrying={querying} />
   </div>;
   if (!config && error) return blockError(() => window.location.reload());
 

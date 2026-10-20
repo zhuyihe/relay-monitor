@@ -1,6 +1,7 @@
 "use client";
-// 上游资源：列表 + 编辑抽屉 + 单项刷新 / 重新测试 / 归档 / 恢复 / 彻底删除 + 余额趋势。
+// 上游资源：上游列表 + 编辑页 + 单个刷新 / 测试读取 / 归档 / 恢复 / 删除上游 + 余额趋势。
 // 请求与旧版逐一对应（端点、方法、载荷不变）；页面标题、刷新按钮、数据截至时间交给外壳。
+// 用语按 design/ui-copy-spec.md：共用的叫法从 lib/ 取，只在本页出现的写在下面的 COPY 里。
 import "../../styles/pages/stations.css";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
@@ -8,15 +9,18 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
 import type { MenuProps } from "antd";
-import { api, cny, fmtTokens, readWorkflowDestination } from "../../../lib/client";
-import { actionsByStation, buildOverviewActions } from "../../../lib/overview-actions";
-import { formatMoney, formatUsd } from "../../../lib/format";
-import { STATION_TABS } from "../../../lib/brand";
-import { testReadText } from "../../../lib/workflow-actions";
-import { ONBOARDING_TYPES } from "../../../lib/channel-onboarding.js";
+import { api, readWorkflowDestination } from "../../../lib/client";
+import { actionsByStation, buildOverviewActions, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
+import { basisText, EMPTY, formatAsOfTime, formatCompact, formatMoney, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, RATE_UNSET, refreshFailedText } from "../../../lib/format";
+import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
+import { balanceMoneyOf } from "../../../lib/profit";
+import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
+import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions";
+import { failureText, refreshAllText, refreshOneText } from "../../../lib/error-copy";
+import { CREDENTIAL_FIELDS, ONBOARDING_TYPES, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES } from "../../../lib/channel-onboarding.js";
 import ChannelOnboarding from "../../components/channel-onboarding";
 import { EmptyState, ErrorState, Skeleton } from "../../components/data-state";
-import { ErrorDetail } from "../../components/error-detail";
+import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { Panel } from "../../components/panel";
 import { RunwayTrack } from "../../components/runway";
@@ -26,17 +30,8 @@ import { Spark } from "../../components/spark";
 import { LEVEL_ORDER, StatusText } from "../../components/status";
 import { useUrlParams, useUrlState } from "../../components/use-url-state";
 import { useWorkflowActions } from "../../components/use-workflow-actions";
-import TrendModal from "../trend-modal";
-import {
-  MAX_DAYS,
-  WARN_DAYS,
-  buildStationView,
-  critDaysOf,
-  fmtClock,
-  relTime,
-  resultIssue,
-  syncTime,
-} from "./model";
+import TrendModal, { TREND_TEXT } from "../trend-modal";
+import { buildStationView, resultIssue, testBalanceText, TYPES_MISSING_TEXT } from "./model";
 import type { StationCheck, StationView } from "./model";
 import { useAccountCenter } from "./account-center";
 import { StationDrawer } from "./station-drawer";
@@ -56,8 +51,80 @@ const ASSOCIATION_ACTIONS = ["scope", "conflict"];
 type Sort = (typeof SORTS)[number];
 const COLS = 7;
 
+const REFRESH = workflowActionMeta("refresh").label;
+const DELETE = workflowActionMeta("delete_upstream");
+const TEST_READ = workflowActionMeta("verify_identity").label;
+const FIXED_TYPE = UPSTREAM_TYPES.find((t) => t.value === "fixed")?.label || "";
+
+// 只在上游列表出现的说法（design/ui-copy-spec.md §3.3、§3.5、§6、§8.1）
+const COPY = Object.freeze({
+  readFailed: `读不到${STATION_TABS.list}`,
+  refreshFailed: `${REFRESH}失败`,
+  // 上游类型、汇率这些设置读不到时，还能看列表，只是不能新增、编辑
+  metaFailed: TYPES_MISSING_TEXT,
+  metaStale: "读不到最新的上游类型，先按上次读到的显示",
+  testReadOk: (name: string, text: string) => `「${name}」${text}`,
+  archive: "归档",
+  archiveTitle: (name: string) => `归档「${name}」？`,
+  archiveWhat: "不再刷新和提醒，历史数据保留。",
+  archiveWhere: "归档后不出现在运营总览里，可以在「已归档」里恢复。",
+  archiveDone: (name: string) => `已归档「${name}」`,
+  archiveGone: "这个上游已经归档或删除了",
+  archiveFailed: "归档失败",
+  toDelete: `改为${DELETE.label}…`,
+  restore: "恢复",
+  restoreOne: (name: string) => `恢复 ${name}`,
+  restoreDone: (name: string) => `已恢复「${name}」，正在读取余额`,
+  restoreFailed: "恢复失败",
+  deleteTitle: (name: string) => `${DELETE.label}「${name}」？`,
+  deleteWhat: "删除后不能恢复",
+  deleteDesc: "这个上游的设置和历史数据会一起删掉。只想不再刷新和提醒，用「归档」。",
+  deleteConfirm: "输入这个上游的名字确认：",
+  deleteConfirmAria: (name: string) => `输入「${name}」确认${DELETE.label}`,
+  deleteDone: (name: string) => `${DELETE.done}「${name}」`,
+  deleteGone: "这个上游已经删除了",
+  deleteFailed: "删除失败",
+  edit: "编辑",
+  editOne: (name: string) => `编辑 ${name}`,
+  refreshOne: (name: string) => `${REFRESH} ${name}`,
+  more: "更多操作",
+  moreOf: (name: string) => `${name} 的更多操作`,
+  trend: TREND_TEXT.title,
+  trendOf: TREND_TEXT.of,
+  trendSpan: "近 48 小时",
+  trendTip: "近 48 小时的余额，点开看余额趋势",
+  own: "自营站点",
+  notInProfit: "不算进利润",
+  noRenewal: "不再续费",
+  demo: "演示",
+  noAddress: `还没填${CREDENTIAL_FIELDS.baseUrl.label}`,
+  refreshing: "正在刷新",
+  asOf: (time: string) => `数据截至 ${time}`,
+  today: (money: string) => `今天花费 ${money}`,
+  todayTokens: (tokens: string) => `今天 ${tokens} Token`,
+  loading: "正在加载",
+  emptyDesc: "加上上游、填好登录信息后，这里显示每个上游的余额、日均花费和可用天数。",
+  pausedTitle: "没有在看余额的上游",
+  pausedDesc: (n: number) => `另有 ${n} 个上游暂停了监控，可以在「${STATION_TABS.bills}」里恢复监控。`,
+  archivedOnlyTitle: "没有在用的上游",
+  archivedOnlyDesc: (n: number) => `另有 ${n} 个已归档的上游，可以在「已归档」里恢复。`,
+  noMatch: "没有符合条件的上游。",
+  clearFilters: "清除筛选",
+  col: Object.freeze({ name: "上游", status: "状态", balance: "余额", burn: "日均花费", days: "可用天数", asOf: "数据截至", actions: "操作" }),
+  views: "上游资源的标签页",
+  search: "搜索名称或地址",
+  searchAria: "搜索上游",
+  byStatus: "按状态筛选",
+  byType: "按类型筛选",
+  allTypes: "全部类型",
+  filter: Object.freeze({ all: "全部", attention: "需处理", ok: "无需处理", archived: "已归档" }),
+  unownedBefore: (n: number) => `另有 ${n} 件需处理的事不在某一个上游上，在`,
+  unownedAfter: "里处理。",
+  cancel: "取消",
+});
+
 // 与 buildOverviewActions 的 stationId 同一口径，保证“需处理”与总览的待办完全对得上
-const actionKey = (s: any) => String(s.id || String(s?.name || "").trim() || "未命名资源");
+const actionKey = (s: any) => String(s.id || stationDisplayName(s));
 
 // 渠道接入目录里的资源及其用到的字段（与服务端目录同口径：四种账号类型，含本站来源）
 const onboardingSig = (list: any[]) =>
@@ -114,19 +181,21 @@ export default function StationsPage() {
   const [loadingList, setLoadingList] = useState(true);
   // 每次读取资源后递增，上游账单随之重读
   const [accountsToken, setAccountsToken] = useState(0);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<Error | null>(null);
   const [loadingMeta, setLoadingMeta] = useState(true);
-  const [metaError, setMetaError] = useState<string | null>(null);
+  const [metaError, setMetaError] = useState<Error | null>(null);
+  // 业务时区（接口返回的 tz）：数据截至、归档日期、固定成本到期都按它写
+  const [tz, setTz] = useState<string>(DEFAULT_BUSINESS_TIME_ZONE);
   const [refreshingAll, setRefreshingAll] = useState(false);
   const [refreshingIds, setRefreshingIds] = useState<Record<string, boolean>>({});
   const [retestingIds, setRetestingIds] = useState<Record<string, boolean>>({});
   const [restoringIds, setRestoringIds] = useState<Record<string, boolean>>({});
-  // 列表内“重新测试连接”的结果只存在本地，不写库（同旧版）
+  // 列表内「测试读取」的结果只存在本地，不写库（同旧版）
   const [stationChecks, setStationChecks] = useState<Record<string, StationCheck>>({});
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
 
   const [trendStation, setTrendStation] = useState<any>(null);
-  // 资源生命周期：默认归档保留历史；物理删除必须在独立危险流程中输入确认词
+  // 上游的去留：默认归档，历史数据保留；删除上游要在单独的确认框里输入上游的名字
   const [archiveTarget, setArchiveTarget] = useState<any>(null);
   const [purgeTarget, setPurgeTarget] = useState<any>(null);
   const [purgeConfirm, setPurgeConfirm] = useState("");
@@ -188,12 +257,13 @@ export default function StationsPage() {
       const r = await api("/api/stations?includeUnmonitored=true&includeArchived=true");
       setStations(r.stations);
       setSettings(r.settings);
+      if (r.tz) setTz(r.tz);
       setLoaded(true);
       setLoadError(null);
       setRefreshedAt(Date.now());
       return r.stations as any[];
     } catch (e: any) {
-      setLoadError(e.message || "上游资源加载失败");
+      setLoadError(e);
       throw e;
     } finally {
       reloading.current -= 1;
@@ -210,7 +280,7 @@ export default function StationsPage() {
       setRules(m.rules);
       setMetaError(null);
     } catch (e: any) {
-      setMetaError(e.message || "资源配置加载失败");
+      setMetaError(e);
       throw e;
     } finally {
       setLoadingMeta(false);
@@ -232,31 +302,37 @@ export default function StationsPage() {
     return () => clearInterval(t);
   }, [settings.refreshIntervalSec, reload]);
 
-  // 外壳的刷新只重新读取；向上游同步余额是工具栏的“同步全部”
+  // 外壳的刷新只重新读取；向上游重新读余额是工具栏的「刷新」
   useShellPage({
     onRefresh: () => Promise.all([reload(), metaError || !types.length ? loadMeta() : null]),
     asOf: refreshedAt,
+    tz,
   });
 
   const openEditor = (s: any | null, trigger?: HTMLElement | null) => drawerRef.current?.open(s, trigger);
 
-  // /stations?edit=<id>：数据和类型都到齐后打开对应资源的抽屉，然后把参数从地址栏去掉；找不到就静默忽略
+  // /stations?edit=<id>：数据和类型都到齐后打开对应上游的抽屉，然后把参数从地址栏去掉；找不到就静默忽略。
+  // edit=new 打开「新增上游」（运营总览的空状态用）
   useEffect(() => {
     if (!editParam || !loaded || loadingMeta) return;
-    const target = stations.find((x) => String(x.id) === editParam);
-    if (target) openEditor(target, null);
+    const target = editParam === "new" ? null : stations.find((x) => String(x.id) === editParam);
+    if (target || (editParam === "new" && types.length)) openEditor(target || null, null);
     setParams({ edit: null });
   }, [editParam, loaded, loadingMeta]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onRefreshAll = async () => {
     setRefreshingAll(true);
     try {
-      await api("/api/refresh", { method: "POST", body: {} });
-      // /api/refresh 只返回在监控的资源；重新读取完整列表，归档与暂停监控的资源一并保留
-      await reload();
-      message.success("已刷新全部");
-    } catch {
-      message.error("刷新失败");
+      const r = await api("/api/refresh", { method: "POST", body: {} });
+      // /api/refresh 只返回在监控的上游；重新读取完整列表，归档与暂停监控的上游一并保留。
+      // 刷新已经做完：读列表失败时由列表顶上的「读取失败」交代，这里照旧报刷新结果
+      await reload().catch(() => {});
+      // 和运营总览同一句：有读不到余额的说几个
+      const done = refreshAllText(r?.stations);
+      if (done.failed) message.warning(done.text);
+      else message.success(done.text);
+    } catch (e) {
+      message.error(failureText(COPY.refreshFailed, e));
     } finally {
       setRefreshingAll(false);
     }
@@ -268,9 +344,11 @@ export default function StationsPage() {
       const r = await api(`/api/stations/${s.id}/refresh`, { method: "POST", body: {} });
       setStations((list) => list.map((x) => (x.id === s.id ? { ...x, ...(r.station || {}), balance: r.balance } : x)));
       setAccountsToken((n) => n + 1);
-      if (!r.balance.ok) message.error(`${s.name}：${resultIssue(r.balance).text}`);
-    } catch (e: any) {
-      message.error(e.message);
+      const done = refreshOneText(stationDisplayName(s), r.balance);
+      if (done.ok) message.success(done.text);
+      else message.warning(done.text);
+    } catch (e) {
+      message.error(failureText(COPY.refreshFailed, e));
     } finally {
       setRefreshingIds((m) => ({ ...m, [s.id]: false }));
     }
@@ -283,7 +361,7 @@ export default function StationsPage() {
       return rest;
     });
     try {
-      // 只传资源 ID 与类型；测试接口从已保存资源的内存副本读取凭证，不写库、不刷新、不告警
+      // 只传上游 ID 与类型；测试接口用已保存的登录信息读取，不写库、不刷新、不告警
       const result = await api("/api/stations/test", {
         body: { stationId: station.id, type: station.type },
       });
@@ -305,7 +383,7 @@ export default function StationsPage() {
           currency: result.currency || null,
         },
       } : item)));
-      message.success(`${station.name} 已验证连接，当前展示已更新`);
+      message.success(COPY.testReadOk(stationDisplayName(station), testReadText({ ok: true, balance: testBalanceText(result) || "", bill: false })));
     } catch (e: any) {
       const issue = resultIssue(e);
       setStationChecks((checks) => ({ ...checks, [station.id]: { issue, checkedAt: new Date().toISOString() } }));
@@ -319,29 +397,30 @@ export default function StationsPage() {
     setArchiving(true);
     try {
       const result = await api(`/api/stations/${archiveTarget.id}`, { method: "DELETE" });
-      if (!result.ok) throw new Error(result.error || "资源不存在或已归档");
-      message.success(`已归档「${archiveTarget.name}」，监测历史会继续保留用于分析`);
+      if (result.ok) message.success(COPY.archiveDone(stationDisplayName(archiveTarget)));
+      else message.warning(COPY.archiveGone);
       setArchiveTarget(null);
       await reload();
-    } catch (e: any) {
-      message.error(e.message || "归档失败");
+    } catch (e) {
+      message.error(failureText(COPY.archiveFailed, e));
     } finally {
       setArchiving(false);
     }
   };
 
   const onPurge = async () => {
-    if (!purgeTarget || purgeConfirm !== "DELETE") return;
+    if (!purgeTarget || !purgeMatches) return;
     setPurging(true);
     try {
+      // 界面上输入的是上游的名字；接口的确认词不变
       const result = await api(`/api/stations/${purgeTarget.id}?purge=true`, { method: "DELETE", body: { confirm: "DELETE" } });
-      if (!result.ok) throw new Error(result.error || "资源不存在或已删除");
-      message.success(`已彻底删除「${purgeTarget.name}」及其监测历史`);
+      if (result.ok) message.success(COPY.deleteDone(stationDisplayName(purgeTarget)));
+      else message.warning(COPY.deleteGone);
       setPurgeTarget(null);
       setPurgeConfirm("");
       await reload();
-    } catch (e: any) {
-      message.error(e.message || "彻底删除失败");
+    } catch (e) {
+      message.error(failureText(COPY.deleteFailed, e));
     } finally {
       setPurging(false);
     }
@@ -352,16 +431,19 @@ export default function StationsPage() {
     setRestoringIds((m) => ({ ...m, [s.id]: true }));
     try {
       await api(`/api/stations/${s.id}`, { method: "PUT", body: { archived: false } });
-      message.success(`已恢复「${s.name}」，正在查询余额…`);
+      message.success(COPY.restoreDone(stationDisplayName(s)));
       setTimeout(() => reload().catch(() => {}), 800);
       await reload();
-    } catch (e: any) {
-      message.error(e.message || "恢复失败");
+    } catch (e) {
+      message.error(failureText(COPY.restoreFailed, e));
     } finally {
       setRestoringIds((m) => ({ ...m, [s.id]: false }));
     }
   };
 
+  // 删除上游要输入这个上游的名字（§3.5），前后空格不算
+  const purgeName = purgeTarget ? stationDisplayName(purgeTarget) : "";
+  const purgeMatches = !!purgeTarget && purgeConfirm.trim() === purgeName;
   const openPurge = (s: any) => {
     setPurgeTarget(s);
     setPurgeConfirm("");
@@ -388,18 +470,18 @@ export default function StationsPage() {
     return { todosById: actionsByStation(all), unowned: all.filter((a: any) => !a.stationId || !ids.has(String(a.stationId))).length };
   }, [listed, rules, settings, workflowActions]);
 
-  const critDays = critDaysOf(rules);
+  const critDays = etaWindowDays(rules);
   const views = useMemo(() => {
     const now = Date.now();
     return listed.map((s) => buildStationView(s, {
       settings,
-      critDays,
-      typeName: (t) => types.find((x) => x.value === t)?.label || t,
+      rules,
+      tz,
       check: stationChecks[s.id],
       attention: !s.archivedAt && todosById.has(actionKey(s)),
       now,
     }));
-  }, [listed, settings, critDays, types, stationChecks, todosById]);
+  }, [listed, settings, rules, tz, stationChecks, todosById]);
 
   const live = views.filter((v) => !v.archived);
   const archived = views.filter((v) => v.archived);
@@ -497,7 +579,7 @@ export default function StationsPage() {
     return (
       <span className="jy-stations-todos">
         {list.map((a: any) => (
-          <button key={a.id} type="button" className="link" onClick={() => openTodo(a.href)} aria-label={`${a.label}（${v.s.name}）`}>
+          <button key={a.id} type="button" className="link" onClick={() => openTodo(a.href)} aria-label={`${a.label}（${stationDisplayName(v.s)}）`}>
             {a.label}
           </button>
         ))}
@@ -515,62 +597,49 @@ export default function StationsPage() {
     const s = v.s;
     const b = s.balance;
     const account = !v.fixed && b?.ok ? b.account : null;
-    const renewal = s.type === "sub2api-password" && s.tokenInfo?.expiresAt
-      ? `令牌有效至 ${fmtClock(s.tokenInfo.expiresAt)}，到期自动续期`
-      : null;
     return (
       <div className="jy-res-name">
         <div className="jy-stations-name-line">
-          <button type="button" className="link" onClick={(e) => openEditor(s, e.currentTarget)}>{s.name}</button>
-          {s.isOwn ? <em className="jy-tag jy-tag--type jy-stations-flag">自营</em> : null}
-          {s.includeInProfit === false ? <em className="jy-tag jy-tag--type jy-stations-flag">不计利润成本</em> : null}
-          {s.noRenewal ? <em className="jy-tag jy-tag--type jy-stations-flag">不再续费</em> : null}
-          {s.demo ? <em className="jy-tag jy-tag--type jy-stations-flag">演示</em> : null}
+          <button type="button" className="link" onClick={(e) => openEditor(s, e.currentTarget)}>{stationDisplayName(s)}</button>
+          {s.isOwn ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.own}</em> : null}
+          {s.includeInProfit === false ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.notInProfit}</em> : null}
+          {s.noRenewal ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.noRenewal}</em> : null}
+          {s.demo ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.demo}</em> : null}
         </div>
+        {/* 下面一行只写地址；类型名在编辑页和「按类型筛选」里看 */}
         <span title={s.baseUrl || undefined}>
-          {v.typeLabel} · {v.host || (v.fixed ? "不访问接口" : "未填写地址")}
+          {v.fixed ? FIXED_TYPE : v.host || COPY.noAddress}
         </span>
         {account ? <span title={account}>{account}</span> : null}
-        {renewal ? <span title={renewal}>{renewal}</span> : null}
       </div>
     );
   };
 
+  // 正常时不标状态（§2），只在有话要说时写
   const statusCell = (v: StationView) => (
     <>
-      <StatusText level={v.level}>{v.statusLabel}</StatusText>
+      {v.statusLabel ? <StatusText level={v.level}>{v.statusLabel}</StatusText> : null}
       {!v.issue && v.statusNote ? <span className="jy-stations-sub">{v.statusNote}</span> : null}
       {todoLinks(v)}
     </>
   );
 
-  // 余额与总览同一口径：设了汇率的是美元额度，主数字显示折算后的人民币，原币放在下方；
-  // 没设汇率的按人民币直接显示，并注明未设置汇率（不再把同一个数同时写成 $ 和 ¥）
-  const hasRate = (v: StationView) => Number(v.s.cnyPerUsd) > 0;
+  // 余额的写法和运营总览同一处（balanceMoneyOf）：按上游自己的币种写，设了汇率下面写「约 ¥88.56」，
+  // 没设置汇率下面写「没设置汇率」，悬停是整句
   const balanceCell = (v: StationView) => {
     const b = v.s.balance;
-    if (v.fixed) return <span className="jy-muted">不适用</span>;
-    if (!b?.ok) return <span className="jy-muted">—</span>;
-    const rem = Number(b.remaining);
+    if (v.fixed || !b?.ok) return <span className="jy-muted">{EMPTY}</span>;
+    const m = balanceMoneyOf(v.s, Number(b.remaining));
     return (
       <>
-        {hasRate(v) ? (
-          <>
-            {formatMoney(rem * v.rate)}
-            <span className="jy-sub-money">原币 {formatUsd(rem)}</span>
-          </>
-        ) : (
-          <>
-            {formatMoney(rem)}
-            <span className="jy-sub-money" title="折算成本与利润时按 1:1 计算，可在编辑里设置汇率">未设置汇率</span>
-          </>
-        )}
+        {m.text}
+        <span className="jy-sub-money" title={m.note}>{m.cny || RATE_UNSET}</span>
         {sparkButton(v)}
       </>
     );
   };
 
-  // 近 48 小时走势本身就是余额趋势的入口；没有足够数据点时只能从“更多”菜单打开
+  // 近 48 小时的小图本身就是余额趋势的入口；数据不够两个点时只能从「更多操作」打开
   const sparkButton = (v: StationView, withLabel = false) => {
     const pts = v.s.spark;
     if (v.fixed || v.archived || !v.s.balance?.ok || !Array.isArray(pts) || pts.length < 2) return null;
@@ -578,11 +647,11 @@ export default function StationsPage() {
       <button
         type="button"
         className="jy-spark-btn"
-        title="近 48 小时余额走势，点击查看详细趋势"
-        aria-label={`查看 ${v.s.name} 的余额趋势`}
+        title={COPY.trendTip}
+        aria-label={COPY.trendOf(stationDisplayName(v.s))}
         onClick={() => setTrendStation(v.s)}
       >
-        {withLabel ? <span>近 48 小时</span> : null}
+        {withLabel ? <span>{COPY.trendSpan}</span> : null}
         <Spark pts={pts} width={withLabel ? 120 : 88} />
       </button>
     );
@@ -591,31 +660,30 @@ export default function StationsPage() {
   const burnCell = (v: StationView) => {
     const s = v.s;
     const b = s.balance;
-    if (v.archived) return <span className="jy-muted">—</span>;
+    if (v.archived) return <span className="jy-muted">{EMPTY}</span>;
     if (v.fixed && v.fx) {
+      // 固定成本按天平摊；笔数句和运营总览、成本估算同一处（fixedCostNowOf）
       return (
         <>
           {formatMoney(v.fx.daily)}
-          <span className="jy-sub-money">
-            生效 {v.fx.active}/{v.fx.total} 笔{v.fx.pendingStart ? `，待生效 ${v.fx.pendingStart} 笔` : ""}
-          </span>
+          {v.fx.note ? <span className="jy-sub-money">{v.fx.note}</span> : null}
         </>
       );
     }
     const p = s.prediction;
-    // tokens 数放到悬停提示里，单元格只留金额，避免把表格撑出横向滚动
-    const today = b?.ok && s.todayUsed != null ? `今日 ${s.todayIsEstimate ? "≈" : ""}${cny(s.todayUsed * v.rate)}` : null;
-    const todayTokens = today && s.todayTokens != null ? `今日 ${fmtTokens(s.todayTokens)} tokens` : undefined;
+    // Token 数放到悬停提示里，单元格只留金额，避免把表格撑出横向滚动
+    const today = b?.ok && s.todayUsed != null ? COPY.today(formatMoney(s.todayUsed * v.rate, { approx: !!s.todayIsEstimate })) : null;
+    const todayTokens = today && s.todayTokens != null ? COPY.todayTokens(formatCompact(s.todayTokens)) : undefined;
     let main;
-    if (p?.burnPerDay === 0) main = <span className="jy-muted">{p.basis || "近期"}无消耗</span>;
+    if (p?.burnPerDay === 0) main = <span className="jy-muted">{NO_SPEND_TEXT}</span>;
     else if (p?.burnPerDay > 0) {
       main = (
         <>
           {formatMoney(p.burnPerDay * v.rate, { approx: true })}
-          <span className="jy-sub-money">依据：{p.basis || "估算"}</span>
+          <span className="jy-sub-money">{basisText(p.basis)}</span>
         </>
       );
-    } else main = <span className="jy-muted">—</span>;
+    } else main = <span className="jy-muted">{EMPTY}</span>;
     return (
       <>
         {main}
@@ -632,51 +700,40 @@ export default function StationsPage() {
         level={v.runway.level}
         failed={v.runway.failed}
         critDays={critDays}
-        warnDays={WARN_DAYS}
-        maxDays={MAX_DAYS}
       />
       <span className="v">{v.runway.text}</span>
     </div>
-  ) : <span className="jy-muted">—</span>);
+  ) : <span className="jy-muted">{EMPTY}</span>);
 
-  const syncCell = (v: StationView) => {
-    const b = v.s.balance;
-    if (v.fixed) return <span className="jy-muted">不同步</span>;
-    if (refreshingIds[v.s.id]) return <span className="jy-muted">同步中…</span>;
-    if (v.issue) return <StatusText level="crit">{v.checkedAt ? `${syncTime(v.checkedAt)} 失败` : "失败"}</StatusText>;
-    if (b?.checkedAt) {
-      return (
-        <>
-          {syncTime(b.checkedAt)}
-          <span className="jy-stations-sub">
-            {relTime(b.checkedAt)}
-          </span>
-        </>
-      );
-    }
-    return <span className="jy-muted">尚未查询</span>;
+  // 「数据截至」一格（§3.6、§6）：当天写「14:30」，不是当天写「10月9日 14:30」；读不到时状态那格已经写了原因
+  const asOfCell = (v: StationView) => {
+    if (v.fixed) return <span className="jy-muted">{EMPTY}</span>;
+    if (refreshingIds[v.s.id]) return <span className="jy-muted">{COPY.refreshing}</span>;
+    if (!v.checkedAt) return <span className="jy-muted">{EMPTY}</span>;
+    const time = formatAsOfTime(v.checkedAt, tz);
+    return v.issue ? <StatusText level="crit">{time}</StatusText> : <>{time}</>;
   };
 
   const moreItems = (v: StationView): MenuProps["items"] => {
     const s = v.s;
     if (v.archived) {
       return [
-        { key: "edit", label: "编辑", icon: <Icon name="edit" /> },
-        ...(!v.fixed ? [{ key: "trend", label: "余额趋势", icon: <Icon name="chart" /> }] : []),
+        { key: "edit", label: COPY.edit, icon: <Icon name="edit" /> },
+        ...(!v.fixed ? [{ key: "trend", label: COPY.trend, icon: <Icon name="chart" /> }] : []),
         { type: "divider" as const },
-        { key: "purge", label: "彻底删除…", danger: true, icon: <Icon name="trash" /> },
+        { key: "purge", label: `${DELETE.label}…`, danger: true, icon: <Icon name="trash" /> },
       ];
     }
     return [
       ...(!v.fixed
         ? [
-            { key: "refresh", label: "刷新", icon: <Icon name="refresh" />, disabled: !!refreshingIds[s.id] },
-            { key: "trend", label: "余额趋势", icon: <Icon name="chart" /> },
+            { key: "refresh", label: REFRESH, icon: <Icon name="refresh" />, disabled: !!refreshingIds[s.id] },
+            { key: "trend", label: COPY.trend, icon: <Icon name="chart" /> },
             { type: "divider" as const },
           ]
         : []),
-      { key: "archive", label: "归档…", icon: <Icon name="archive" /> },
-      { key: "purge", label: "彻底删除…", danger: true, icon: <Icon name="trash" /> },
+      { key: "archive", label: `${COPY.archive}…`, icon: <Icon name="archive" /> },
+      { key: "purge", label: `${DELETE.label}…`, danger: true, icon: <Icon name="trash" /> },
     ];
   };
 
@@ -694,8 +751,8 @@ export default function StationsPage() {
       <button
         type="button"
         className="jy-icon-btn jy-icon-btn--sm"
-        title="更多操作"
-        aria-label={`${v.s.name} 的更多操作`}
+        title={COPY.more}
+        aria-label={COPY.moreOf(stationDisplayName(v.s))}
         onClick={(e: MouseEvent<HTMLButtonElement>) => { moreTriggerRef.current = e.currentTarget; }}
       >
         <Icon name="more" />
@@ -709,20 +766,20 @@ export default function StationsPage() {
       size="small"
       icon={<Icon name="restore" />}
       loading={!!restoringIds[v.s.id]}
-      aria-label={`恢复 ${v.s.name}`}
+      aria-label={COPY.restoreOne(stationDisplayName(v.s))}
       onClick={() => onRestore(v.s)}
     >
-      恢复
+      {COPY.restore}
     </Button>
   ) : (
     <Button
       type="text"
       size="small"
       icon={<Icon name="edit" />}
-      aria-label={`编辑 ${v.s.name}`}
+      aria-label={COPY.editOne(stationDisplayName(v.s))}
       onClick={(e) => openEditor(v.s, e.currentTarget)}
     >
-      编辑
+      {COPY.edit}
     </Button>
   ));
 
@@ -734,11 +791,11 @@ export default function StationsPage() {
         <Sym kind="crit" />
         <div className="jy-stations-issue-body">
           <b>{testReadText({ ok: false, reason: issue.text })}</b>
-          <span>最近检查：{relTime(v.checkedAt)}</span>
+          {v.checkedAt ? <span>{COPY.asOf(formatAsOfTime(v.checkedAt, tz))}</span> : null}
           <ErrorDetail raw={issue.raw} />
         </div>
         <Button size="small" icon={<Icon name="test" />} loading={!!retestingIds[v.s.id]} onClick={() => onRetest(v.s)}>
-          重新测试连接
+          {TEST_READ}
         </Button>
       </div>
     );
@@ -747,7 +804,7 @@ export default function StationsPage() {
   // ---- 列表主体 -------------------------------------------------------------
   const addButton = (
     <Button type="primary" icon={<Icon name="plus" />} disabled={!canAdd} onClick={(e) => openEditor(null, e.currentTarget)}>
-      新增上游资源
+      {UPSTREAM_FORM_TEXT.create}
     </Button>
   );
 
@@ -755,33 +812,33 @@ export default function StationsPage() {
   if (!loaded && !loadError) {
     body = (
       <div className="jy-stations-skeleton" aria-busy="true">
-        <span className="sr-only">正在加载上游资源…</span>
+        <span className="sr-only">{COPY.loading}</span>
         {[0, 1, 2, 3].map((i) => <Skeleton key={i} height={40} />)}
       </div>
     );
   } else if (!loaded) {
-    body = <ErrorState title="上游资源暂时无法加载" error={loadError} onRetry={retryAll} />;
+    body = <ErrorState what={COPY.readFailed} error={loadError} onRetry={retryAll} />;
   } else if (!stations.length) {
     body = (
       <EmptyState
-        title="还没有上游资源"
-        desc="添加上游资源并填写连接地址与凭证，之后就能看到余额、消耗和预计可用天数。"
+        title={NO_UPSTREAM_TEXT}
+        desc={COPY.emptyDesc}
         action={addButton}
       />
     );
   } else if (!live.length && filter !== "archived" && paused.length) {
     body = (
       <EmptyState
-        title="没有正在监控的上游资源"
-        desc={`另有 ${paused.length} 个资源已暂停监控，可在「上游账单」标签中重新启用。`}
+        title={COPY.pausedTitle}
+        desc={COPY.pausedDesc(paused.length)}
         action={addButton}
       />
     );
   } else if (!live.length && filter !== "archived") {
     body = (
       <EmptyState
-        title="还没有在用的上游资源"
-        desc={`另有 ${archived.length} 个已归档资源，可在「已归档」中恢复。`}
+        title={COPY.archivedOnlyTitle}
+        desc={COPY.archivedOnlyDesc(archived.length)}
         action={addButton}
       />
     );
@@ -790,21 +847,21 @@ export default function StationsPage() {
       <>
         <div className="jy-table-wrap has-mobile">
           <table className="jy-data jy-stations-table">
-            <caption className="sr-only">上游资源列表</caption>
+            <caption className="sr-only">{STATION_TABS.list}</caption>
             <thead>
               <tr>
-                <th scope="col" className="jy-stations-pin-l">资源</th>
-                <th scope="col">状态</th>
-                <th scope="col" className="r">余额</th>
-                <th scope="col" className="r">日均消耗</th>
+                <th scope="col" className="jy-stations-pin-l">{COPY.col.name}</th>
+                <th scope="col">{COPY.col.status}</th>
+                <th scope="col" className="r">{COPY.col.balance}</th>
+                <th scope="col" className="r">{COPY.col.burn}</th>
                 <th scope="col" aria-sort={ariaSort}>
                   <button type="button" className="jy-stations-sort" onClick={() => setSort(nextSort[sort])}>
-                    可用天数
+                    {COPY.col.days}
                     {sort ? <Icon name={sort === "days" ? "sort" : "sort-down"} /> : null}
                   </button>
                 </th>
-                <th scope="col">最近同步</th>
-                <th scope="col" className="r jy-stations-pin-r">操作</th>
+                <th scope="col">{COPY.col.asOf}</th>
+                <th scope="col" className="r jy-stations-pin-r">{COPY.col.actions}</th>
               </tr>
             </thead>
             <tbody>
@@ -818,7 +875,7 @@ export default function StationsPage() {
                       <td className="r">{balanceCell(v)}</td>
                       <td className="r">{burnCell(v)}</td>
                       <td>{runwayCell(v)}</td>
-                      <td>{syncCell(v)}</td>
+                      <td>{asOfCell(v)}</td>
                       <td className="r jy-stations-pin-r">
                         <div className="jy-row-actions">
                           {primaryAction(v)}
@@ -837,37 +894,35 @@ export default function StationsPage() {
               {!rows.length ? (
                 <tr>
                   <td colSpan={COLS} className="jy-empty-row">
-                    没有符合条件的上游资源。
-                    {filtered ? <Button type="link" onClick={clearFilters}>清除筛选</Button> : null}
+                    {COPY.noMatch}
+                    {filtered ? <Button type="link" onClick={clearFilters}>{COPY.clearFilters}</Button> : null}
                   </td>
                 </tr>
               ) : null}
             </tbody>
           </table>
         </div>
-        <ul className="jy-m-list" aria-label="上游资源列表">
+        <ul className="jy-m-list" aria-label={STATION_TABS.list}>
           {rows.map((v) => {
             const b = v.s.balance;
+            const name = stationDisplayName(v.s);
+            const money = !v.fixed && b?.ok ? balanceMoneyOf(v.s, Number(b.remaining)) : null;
             return (
               <li key={v.id}>
-                <span className="m-top" title={v.s.name}>{v.s.name}</span>
-                <StatusText level={v.level}>{v.statusLabel}</StatusText>
+                <span className="m-top" title={name}>{name}</span>
+                {v.statusLabel ? <StatusText level={v.level}>{v.statusLabel}</StatusText> : null}
                 {todoLinks(v)}
                 <div className="m-sub">
                   {v.fixed ? (
-                    <span>日均 <b>{v.fx ? formatMoney(v.fx.daily) : "—"}</b></span>
-                  ) : !b?.ok ? (
-                    <span>余额 <b>—</b></span>
-                  ) : hasRate(v) ? (
-                    <span>余额 <b>{formatMoney(Number(b.remaining) * v.rate)}</b>（{formatUsd(Number(b.remaining))}）</span>
+                    <span>{COPY.col.burn} <b>{v.fx ? formatMoney(v.fx.daily) : EMPTY}</b></span>
                   ) : (
-                    <span>余额 <b>{formatMoney(Number(b.remaining))}</b>（未设汇率）</span>
+                    <span title={money?.note}>{COPY.col.balance} <b>{money ? money.full : EMPTY}</b></span>
                   )}
                   {!v.fixed && !v.archived && v.s.prediction?.burnPerDay > 0 ? (
-                    <span>日均 <b>{formatMoney(v.s.prediction.burnPerDay * v.rate, { approx: true })}</b></span>
+                    <span>{COPY.col.burn} <b>{formatMoney(v.s.prediction.burnPerDay * v.rate, { approx: true })}</b></span>
                   ) : null}
-                  {v.runway ? <span>可用 <b>{v.runway.text}</b></span> : null}
-                  {!v.fixed && b?.checkedAt && !v.issue ? <span>同步 <b>{syncTime(b.checkedAt)}</b></span> : null}
+                  {v.runway ? <span>{COPY.col.days} <b>{v.runway.text}</b></span> : null}
+                  {!v.fixed && v.checkedAt && !v.issue ? <span>{COPY.col.asOf} <b>{formatAsOfTime(v.checkedAt, tz)}</b></span> : null}
                 </div>
                 {sparkButton(v, true) ? <div className="m-spark">{sparkButton(v, true)}</div> : null}
                 {!v.archived && v.issue ? <div className="jy-stations-m-issue">{issueBox(v)}</div> : null}
@@ -879,10 +934,10 @@ export default function StationsPage() {
                       size="small"
                       icon={<Icon name="refresh" />}
                       loading={!!refreshingIds[v.s.id]}
-                      aria-label={`刷新 ${v.s.name}`}
+                      aria-label={COPY.refreshOne(name)}
                       onClick={() => onRefreshOne(v.s)}
                     >
-                      刷新
+                      {REFRESH}
                     </Button>
                   ) : null}
                   {moreButton(v)}
@@ -892,8 +947,8 @@ export default function StationsPage() {
           })}
           {!rows.length ? (
             <li>
-              <span className="jy-muted">没有符合条件的上游资源。</span>
-              {filtered ? <Button type="link" size="small" onClick={clearFilters}>清除筛选</Button> : null}
+              <span className="jy-muted">{COPY.noMatch}</span>
+              {filtered ? <Button type="link" size="small" onClick={clearFilters}>{COPY.clearFilters}</Button> : null}
             </li>
           ) : null}
         </ul>
@@ -903,24 +958,27 @@ export default function StationsPage() {
 
   return (
     <div className="jy-page jy-stations">
+      {/* 刷新失败但有上次读到的数据（§8.1）：「刷新失败，数据截至 14:30。」+ 原因，原文只进「查看详细原因」 */}
       {loadError && loaded ? (
         <div className="jy-banner" role="alert">
           <Sym kind="warn" />
           <div className="jy-stations-banner-body">
-            <b>资源数据刷新失败，正在显示上次成功加载的数据</b>
-            <p className="jy-caption">{loadError}</p>
+            <b>{refreshFailedText(refreshedAt, tz)}</b>
+            <p className="jy-caption">{noteOf(loadError).text}</p>
+            <ErrorDetail raw={noteOf(loadError).raw} />
           </div>
-          <Button size="small" onClick={() => { reload().catch(() => {}); }}>重试</Button>
+          <Button size="small" loading={loadingList} onClick={() => { reload().catch(() => {}); }}>{REFRESH}</Button>
         </div>
       ) : null}
       {metaError ? (
         <div className="jy-banner" role="alert">
           <Sym kind="warn" />
           <div className="jy-stations-banner-body">
-            <b>{types.length ? "资源配置刷新失败，正在使用上次成功加载的配置" : "资源配置暂时无法加载，暂不能添加或编辑资源"}</b>
-            <p className="jy-caption">{metaError}</p>
+            <b>{types.length ? COPY.metaStale : COPY.metaFailed}</b>
+            <p className="jy-caption">{noteOf(metaError).text}</p>
+            <ErrorDetail raw={noteOf(metaError).raw} />
           </div>
-          <Button size="small" loading={loadingMeta} onClick={() => { loadMeta().catch(() => {}); }}>重试</Button>
+          <Button size="small" loading={loadingMeta} onClick={() => { loadMeta().catch(() => {}); }}>{REFRESH}</Button>
         </div>
       ) : null}
       {accounts.top}
@@ -934,7 +992,7 @@ export default function StationsPage() {
         active={view}
         onChange={setView}
         idPrefix="stations"
-        label="上游资源视图"
+        label={COPY.views}
       />
       {/* 外层包一层：隐藏的标签面板不参与页面的间距；渠道接入与上游账单首次打开后保持挂载，切换标签不丢状态 */}
       <div>
@@ -943,40 +1001,36 @@ export default function StationsPage() {
             <Input
               prefix={<Icon name="search" />}
               allowClear
-              placeholder="搜索名称或地址"
-              aria-label="搜索上游资源"
+              placeholder={COPY.search}
+              aria-label={COPY.searchAria}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
             <Seg<Filter>
-              label="按状态筛选"
+              label={COPY.byStatus}
               value={filter}
               onChange={setFilter}
-              options={[
-                { value: "all", label: "全部", count: counts.all },
-                { value: "attention", label: "需处理", count: counts.attention },
-                { value: "ok", label: "无需处理", count: counts.ok },
-                { value: "archived", label: "已归档", count: counts.archived },
-              ]}
+              options={FILTERS.map((value) => ({ value, label: COPY.filter[value], count: counts[value] }))}
             />
             <Select
               className="jy-stations-type"
-              aria-label="按类型筛选"
+              aria-label={COPY.byType}
               value={typeFilter}
               onChange={(value: string) => setTypeFilter(value)}
-              options={[{ value: "", label: "全部类型" }, ...types.map((t) => ({ value: t.value, label: t.label }))]}
+              options={[{ value: "", label: COPY.allTypes }, ...types.map((t) => ({ value: t.value, label: t.label }))]}
             />
             <span className="spacer" />
-            <Button icon={<Icon name="refresh" />} loading={refreshingAll} onClick={onRefreshAll}>同步全部</Button>
+            {/* 向每个在看余额的上游重新读一遍余额；顶栏的刷新只重新读本页 */}
+            <Button icon={<Icon name="refresh" />} loading={refreshingAll} onClick={onRefreshAll}>{REFRESH}</Button>
             {addButton}
           </div>
 
           {filter === "attention" && unowned > 0 ? (
             <p className="jy-caption jy-stations-unowned">
-              另有 {unowned} 项账号与账单待办不归属单个资源，在<Link className="jy-link" href="/">运营总览</Link>处理。
+              {COPY.unownedBefore(unowned)}<Link className="jy-link" href="/">{NAV_LABELS.home}</Link>{COPY.unownedAfter}
             </p>
           ) : null}
-          <Panel body={false} label="上游资源列表">{body}</Panel>
+          <Panel body={false} label={STATION_TABS.list}>{body}</Panel>
         </TabPanel>
 
         <TabPanel idPrefix="stations" tabKey="onboarding" active={view === "onboarding"} keepMounted>
@@ -992,20 +1046,20 @@ export default function StationsPage() {
       </div>
 
       <Modal
-        title={archiveTarget ? `归档「${archiveTarget.name}」？` : "归档资源"}
+        title={archiveTarget ? COPY.archiveTitle(stationDisplayName(archiveTarget)) : COPY.archive}
         open={!!archiveTarget}
         onCancel={() => setArchiveTarget(null)}
         onOk={onArchive}
-        okText="归档资源"
-        cancelText="取消"
+        okText={COPY.archive}
+        cancelText={COPY.cancel}
         confirmLoading={archiving}
         width={480}
       >
         <div className="jy-banner jy-banner--info">
           <Sym kind="info" />
           <div className="jy-stations-banner-body">
-            <b>归档会停止刷新与告警，但不会删除监测历史。</b>
-            <p className="jy-caption">归档后的资源默认不出现在实时总览，历史成本仍可用于长期分析。</p>
+            <b>{COPY.archiveWhat}</b>
+            <p className="jy-caption">{COPY.archiveWhere}</p>
           </div>
         </div>
         <Button
@@ -1018,37 +1072,38 @@ export default function StationsPage() {
             setArchiveTarget(null);
           }}
         >
-          改为彻底删除资源及其监测历史…
+          {COPY.toDelete}
         </Button>
       </Modal>
 
       <Modal
-        title={purgeTarget ? `彻底删除「${purgeTarget.name}」？` : "彻底删除资源"}
+        title={purgeTarget ? COPY.deleteTitle(purgeName) : DELETE.label}
         open={!!purgeTarget}
         onCancel={() => { setPurgeTarget(null); setPurgeConfirm(""); }}
         onOk={onPurge}
-        okText="永久删除"
-        cancelText="取消"
+        okText={DELETE.label}
+        cancelText={COPY.cancel}
         confirmLoading={purging}
-        okButtonProps={{ danger: true, disabled: purgeConfirm !== "DELETE" }}
+        okButtonProps={{ danger: true, disabled: !purgeMatches }}
         width={480}
       >
         <div className="jy-banner jy-banner--crit">
           <Sym kind="crit" />
           <div className="jy-stations-banner-body">
-            <b>此操作不可恢复</b>
-            <p className="jy-caption">资源配置、原始监测快照与用于长期分析的历史都会被永久删除。</p>
+            <b>{COPY.deleteWhat}</b>
+            <p className="jy-caption">{COPY.deleteDesc}</p>
           </div>
         </div>
         <div className="jy-stations-confirm">
-          <label className="jy-caption" htmlFor="jy-stations-purge-input">请输入 <code>DELETE</code> 以确认：</label>
+          <label className="jy-caption" htmlFor="jy-stations-purge-input">{COPY.deleteConfirm}<b>{purgeName}</b></label>
           <Input
             id="jy-stations-purge-input"
             autoFocus
-            aria-label="输入 DELETE 确认彻底删除资源"
+            aria-label={COPY.deleteConfirmAria(purgeName)}
             value={purgeConfirm}
             onChange={(event) => setPurgeConfirm(event.target.value)}
-            placeholder="DELETE"
+            onPressEnter={() => { if (purgeMatches && !purging) onPurge(); }}
+            placeholder={purgeName}
             autoComplete="off"
           />
         </div>
@@ -1056,7 +1111,7 @@ export default function StationsPage() {
 
       {accounts.overlays}
 
-      <TrendModal station={trendCur} onClose={() => setTrendStation(null)} etaDaysRule={rules.etaDays ?? 3} />
+      <TrendModal station={trendCur} onClose={() => setTrendStation(null)} settings={settings} rules={rules} />
 
       <StationDrawer ref={drawerRef} types={types} onSaved={onSaved} />
     </div>

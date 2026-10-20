@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNod
 import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, List, Radio, Select, Space, Tag, Typography } from "antd";
 import { api } from "../../lib/client";
 import { createRequestId } from "../../lib/request-id.js";
-import { BINDING_COPY, CREDENTIAL_FIELDS as FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, ONBOARDING_TYPES as TYPES, UPSTREAM_FORM_TEXT, groupOnboardingResources } from "../../lib/channel-onboarding.js";
+import { BINDING_COPY, CREDENTIAL_FIELDS as FIELDS, ONBOARDING_KEY_ONLY_MONITOR, credentialFieldOf, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, ONBOARDING_TYPES as TYPES, UPSTREAM_FORM_TEXT, groupOnboardingResources } from "../../lib/channel-onboarding.js";
 import { onboardingKeyContext, onboardingMonitorIds, retainOnboardingRequest } from "../../lib/onboarding-workflow.js";
 import type { AccountReadModel, BatchInput, BatchProbe, BatchRecoveryIntent, BatchResult, ConnectionInput, CoverageDeclaration, SourceCatalogueProjection, UpstreamKeyRead, WorkflowDestination } from "../../lib/client";
 import { NAV_LABELS, STATION_TABS } from "../../lib/brand";
@@ -193,7 +193,7 @@ function staleText(syncedAt: unknown, failed: boolean, tz?: string, now = Date.n
   return COPY.notUpdated(syncedAt, minutes < 60 ? `${minutes} 分钟` : minutes < 1440 ? `${Math.floor(minutes / 60)} 小时` : `${Math.floor(minutes / 1440)} 天`, tz);
 }
 function CredentialFields({ type }: { type: string }) {
-  const token = type === "newapi" ? FIELDS.accessToken : FIELDS.loginToken;
+  const token = credentialFieldOf(type, "accessToken");
   return <>
     {type === "newapi" || type === "sub2api" ? <Form.Item name="accessToken" label={token.label} extra={token.hint} rules={[requiredRule(token.label)]}><Input.Password autoComplete="off" /></Form.Item> : null}
     {type === "newapi" ? <Form.Item name="userId" label={FIELDS.userId.label} extra={FIELDS.userId.hint}><Input /></Form.Item> : null}

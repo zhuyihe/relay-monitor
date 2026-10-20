@@ -363,7 +363,7 @@ export default function UsagePage() {
         {filterBar}
         {errMsg ? (
           <Panel label="用量数据">
-            <ErrorState title="用量数据暂时无法读取" error={errMsg} onRetry={() => void load(true)} />
+            <ErrorState what="读不到用量数据" error={errMsg} onRetry={() => void load(true)} />
           </Panel>
         ) : (
           <>

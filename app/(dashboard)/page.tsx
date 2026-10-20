@@ -1,21 +1,23 @@
 "use client";
-// 运营总览：利润等式 + 需要处理 + 上游余量 + 收入 / 上游成本排行。
-// 利润口径与"我的中转站"一致（/api/own/analytics 的 profit：毛利 = 收入 − 上游成本，净利 = 毛利 − 固定成本）；
-// 没设置自营站点时，成本退回 /api/analytics 统计。时间窗口按接口返回的业务时区显示。
-// 需要处理、上游余量来自 /api/stations，规则与侧栏的待处理计数共用 buildOverviewActions。
+// 运营总览：利润等式 + 需处理 + 上游余量 + 收入 / 上游成本排行。
+// 利润口径与「自营业务」一致（/api/own/analytics 的 profit：毛利 = 收入 − 上游成本，净利 = 毛利 − 固定成本）；
+// 没设置自营站点时，成本退回 /api/analytics 统计。时间范围按接口返回的业务时区显示。
+// 需处理、上游余量来自 /api/stations：需处理和侧栏的计数共用 buildOverviewActions，余量的档位和上游列表共用 balanceViewOf。
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { App, Button } from "antd";
 import { api } from "../../lib/client";
+import { NAV_LABELS, STATION_TABS } from "../../lib/brand";
 import type { WorkflowAction } from "../../lib/client";
-import { attentionStationIds, balanceStateOf, buildOverviewActions, lowLineOf } from "../../lib/overview-actions";
-import { rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
+import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActions, etaWindowDays, lowLineOf, stationDisplayName, WATCH_DAYS } from "../../lib/overview-actions";
+import { balanceMoneyOf, rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
-import { describeError, errorText } from "../../lib/error-copy";
-import { BALANCE_STATE_TEXT, COST_MODE_TEXT, formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd, formatZonedTime, parseDay, refreshFailedText, soonText } from "../../lib/format";
-import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, shiftDayLabel } from "../../lib/business-time";
+import { asSentence, describeError, errorText, failureText, refreshAllText, refreshOneText } from "../../lib/error-copy";
+import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, formatAsOf, formatDays, formatMoney, formatZonedDate, formatZonedTime, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
+import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../lib/business-time";
+import { UPSTREAM_FORM_TEXT } from "../../lib/channel-onboarding";
 import { AttentionList } from "../components/attention-list";
 import { Sym } from "../components/icons";
 import type { AttentionItem } from "../components/attention-list";
@@ -31,56 +33,100 @@ import { Runway } from "../components/runway";
 import type { RunwayItem } from "../components/runway";
 import { useShellPage } from "../components/shell-context";
 import { LEVEL_ORDER } from "../components/status";
-import type { Level } from "../components/status";
 import { useUrlState } from "../components/use-url-state";
 import { useWorkflowActions } from "../components/use-workflow-actions";
 import { actionPhrase, workflowDetail, workflowOwner, workflowProblem } from "../components/workflow-copy";
-import TrendModal from "./trend-modal";
+import TrendModal, { TREND_TEXT } from "./trend-modal";
 import "../styles/pages/overview.css";
 
 const RANGES = ["today", "7d", "30d"] as const;
 type Range = (typeof RANGES)[number];
-const RANGE_OPTIONS = [
-  { value: "today", label: "今天" },
-  { value: "7d", label: "近 7 天" },
-  { value: "30d", label: "近 30 天" },
-];
+const RANGE_OPTIONS = RANGES.map((value) => ({ value, label: RANGE_TEXT[value] }));
 const RANGE_DAYS: Record<Range, number> = { today: 1, "7d": 7, "30d": 30 };
-const RANGE_NAME: Record<Range, string> = { today: "今日", "7d": "近 7 天", "30d": "近 30 天" };
 
-const RUNWAY_MAX_DAYS = 14;
-const RUNWAY_WARN_DAYS = 7;
 const RUNWAY_LIMIT = 8;
 const TOP_USERS = 5;
+const REFRESH = workflowActionMeta("refresh")!.label;
+
+// 运营总览独有的话，只在这一处写；用语按 design/ui-copy-spec.md
+const COPY = Object.freeze({
+  business: (range: string) => `${range}经营`,
+  income: (range: string) => `${range}收入`,
+  upstreamCost: (range: string) => `${range}上游成本`,
+  todayCaption: (time: string) => `0:00–${time}`,
+  sinceCaption: (date: string) => `${date}–今天`,
+  readBusinessFailed: "读不到经营数据",
+  profitFailed: "利润暂时算不出",
+  costFailed: "成本暂时算不出",
+  readFailed: (what: string) => `读不到${what}`,
+  upstreamCount: (n: number) => `${n} 个上游`,
+  fixedCount: (n: number) => `${n} 个上游，按天平摊`,
+  noFixed: "没有固定成本",
+  gapReason: (name: string, days: number) => `${name} 缺 ${days} 天的花费记录。`,
+  gapTip: (days: number) => `${days} 天没有花费记录`,
+  costPartialTail: "实际成本会比这里高。",
+  profitPartialTail: "实际数字可能与这里有出入。",
+  fromUsers: (n: number) => `来自 ${n} 位下游用户`,
+  workflowUnreadable: "读不到上游账单和每日利润里需处理的事。",
+  attention: "需处理",
+  attentionOrder: "最要紧的在前",
+  refreshAttention: `${REFRESH}需处理的事`,
+  refreshOne: (name: string) => `${REFRESH} ${name}`,
+  refreshFailed: `${REFRESH}失败`,
+  edit: "编辑",
+  editOne: (name: string) => `编辑 ${name}`,
+  trend: TREND_TEXT.title,
+  trendOf: TREND_TEXT.of,
+  others: (n: number) => `另有 ${n} 项：`,
+  collapse: "收起",
+  expand: (n: number) => `展开其余 ${n} 项`,
+  healthy: (n: number) => `其余 ${n} 个上游没有要处理的事`,
+  balance: (text: string) => `余额 ${text}`,
+  lowLine: (text: string) => `余额提醒线 ${text}`,
+  available: (days: string) => `可用${days}`,
+  burnSentence: (balance: string, burn: string, basis: string) => `余额 ${balance}，日均花费 ${burn}，${basis}。`,
+  expiresIn: (n: number) => `${n} 天后到期`,
+  fixedSentence: (date: string) => `最近一笔 ${date}到期。要续上，再记一笔固定成本；不再续费可以在编辑里标记。`,
+  runway: "上游余量",
+  runwayEmptyTitle: "还没有按余额计费的上游",
+  runwayEmptyDesc: "加上上游后，这里显示每个上游还能用多少天。",
+  balanceTotal: "余额合计",
+  excludesUnreadable: (n: number) => `，不含 ${n} 个读不到余额的上游`,
+  runwayLines: (crit: number, watch: number) => (watch > crit
+    ? `竖线是提醒天数：可用天数在 ${crit} 天以内标红，${watch} 天以内标黄。`
+    : `竖线是提醒天数：可用天数在 ${crit} 天以内标红。`),
+  runwayLimit: (n: number) => `这里只列最要紧的 ${n} 个。`,
+  rulesWhereBefore: "提醒天数在",
+  rulesWhereAfter: "的提醒规则里改。",
+  noRenewal: "不再续费",
+  tip: Object.freeze({ reason: "原因", balance: "余额", burn: "日均花费", days: "可用天数", basis: "怎么估的", renewal: "续费", requests: "请求数", how: "怎么算的", note: "说明" }),
+  byUser: "按下游用户",
+  byUpstream: "按上游",
+  unnamedUser: "未命名用户",
+  otherUsers: (n: number) => `其他 ${n} 位用户`,
+  resold: "转售 Key",
+  total: "合计",
+  incomeUnit: "收入",
+  costUnit: "上游成本",
+  noIncome: "这段时间还没有下游用户产生收入。",
+  noCost: "这段时间按用量计费的上游没有产生成本。",
+});
 
 const r2 = (v: number) => Math.round(v * 100) / 100;
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
-// 相对时间："N 秒前 / N 分钟前 / N 小时前"
-function relTime(iso: string | null | undefined): string {
-  if (!iso) return "从未";
-  const d = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (d < 60) return `${Math.max(0, Math.floor(d))} 秒前`;
-  if (d < 3600) return `${Math.floor(d / 60)} 分钟前`;
-  if (d < 86400) return `${Math.floor(d / 3600)} 小时前`;
-  return `${Math.floor(d / 86400)} 天前`;
-}
+// 余额的写法和上游列表同一处（balanceMoneyOf）：设了汇率写「$12.30（约 ¥88.56）」，没设按 1:1 写「¥12.30（没设置汇率）」
+const balanceText = (s: any, v: number) => balanceMoneyOf(s, v).text;
+const balanceWithCny = (s: any, v: number) => balanceMoneyOf(s, v).full;
 
-// 站点余额按站点自己的单位显示；配了汇率的站点是美元额度
-const rateOf = (s: any) => rateSnapshotOf(s).cnyPerUsd;
-const balanceText = (s: any, v: number) => (rateOf(s) !== 1 ? formatUsd(v) : formatMoney(v));
-const balanceWithCny = (s: any, v: number) =>
-  rateOf(s) !== 1 ? `${formatUsd(v)}，约 ${formatMoney(v * rateOf(s))}` : formatMoney(v);
-
-// 利润等式标题下的时间说明：按业务时区（接口返回的 tz）划日，与浏览器所在时区无关
-function windowCaption(range: Range, data: any): string {
+// 利润等式标题下的时间说明（§6）：今天写「0:00–14:30」，近 7 天写「10月14日–今天」。
+// 按业务时区（接口返回的 tz）划日，与浏览器所在时区无关
+function rangeCaption(range: Range, data: any): string {
   const tz = data?.tz || DEFAULT_BUSINESS_TIME_ZONE;
   const now = Date.now();
-  const end = formatZonedTime(now, tz);
-  if (range === "today") return `今日 00:00 至 ${end}`;
-  const days = RANGE_DAYS[range];
-  const startLabel = data?.startMs != null ? dayKeyInTz(data.startMs, tz) : data?.start || shiftDayLabel(dayKeyInTz(now, tz), -(days - 1));
-  return `${formatMonthDay(parseDay(startLabel))} 00:00 至 今天 ${end}，共 ${days} 天`;
+  if (range === "today") return COPY.todayCaption(formatZonedTime(now, tz));
+  const startLabel = data?.start || shiftDayLabel(dayKeyInTz(now, tz), -(RANGE_DAYS[range] - 1));
+  return COPY.sinceCaption(formatZonedDate(data?.startMs ?? dayStartInTz(startLabel, tz), tz, now));
 }
 
 type Money =
@@ -95,8 +141,9 @@ export default function OverviewPage() {
   const [rules, setRules] = useState<any>({});
   const [settings, setSettings] = useState<any>({ refreshIntervalSec: 60, lowBalanceUsd: 5 });
   const [stations, setStations] = useState<any[] | null>(null);
-  const [stationsErr, setStationsErr] = useState<string | null>(null);
+  const [stationsErr, setStationsErr] = useState<Error | null>(null);
   const [stationsAt, setStationsAt] = useState<number | null>(null);
+  const [stationsTz, setStationsTz] = useState<string | null>(null);
   const [money, setMoney] = useState<Money | null>(null);
   const [moneyErr, setMoneyErr] = useState<Error | null>(null);
   const [moneyAt, setMoneyAt] = useState<number | null>(null);
@@ -107,24 +154,24 @@ export default function OverviewPage() {
   const rangeRef = useRef(range);
   rangeRef.current = range;
 
-  // 两个加载函数都返回错误信息（成功返回 null），顶栏刷新据此提示
-  const loadStations = useCallback(async (): Promise<string | null> => {
+  // 两个加载函数都返回报错（成功返回 null），顶栏刷新据此提示
+  const loadStations = useCallback(async (): Promise<Error | null> => {
     try {
       const r = await api("/api/stations");
       setStations(Array.isArray(r?.stations) ? r.stations : []);
       if (r?.settings) setSettings(r.settings);
+      if (r?.tz) setStationsTz(r.tz);
       setStationsErr(null);
       setStationsAt(Date.now());
       return null;
     } catch (e: any) {
-      const msg = e?.message || "上游资源加载失败";
-      setStationsErr(msg);
-      return msg;
+      setStationsErr(e);
+      return e;
     }
   }, []);
 
   // 经营数据：优先自营站点口径；没标记自营站点时只统计成本
-  const loadMoney = useCallback(async (r: Range): Promise<string | null> => {
+  const loadMoney = useCallback(async (r: Range): Promise<Error | null> => {
     try {
       // 窗口按服务端的业务时区划日，不传浏览器时区
       const own = await api(`/api/own/analytics?range=${r}`);
@@ -138,7 +185,7 @@ export default function OverviewPage() {
       // 没设置自营站点（接口带 OWN_STATION_UNSET）时只统计成本
       if (describeError(e).category !== "unset") {
         setMoneyErr(e);
-        return e?.message || "经营数据加载失败";
+        return e;
       }
       try {
         const fallback = await api(`/api/analytics?days=${RANGE_DAYS[r]}&includeArchived=true`);
@@ -150,7 +197,7 @@ export default function OverviewPage() {
       } catch (e2: any) {
         if (rangeRef.current !== r) return null;
         setMoneyErr(e2);
-        return e2?.message || "成本数据加载失败";
+        return e2;
       }
     }
   }, []);
@@ -187,27 +234,27 @@ export default function OverviewPage() {
     };
   }, [intervalSec, loadStations, loadMoney]);
 
-  // 刷新全部上游后重新加载本页；重新加载失败时抛错由顶栏提示，部分上游查询失败时如实说明
+  // 刷新全部上游后重新加载本页；重新加载失败时抛错由顶栏提示，有上游读不到余额时如实说明
   const onRefresh = async () => {
     const r = await api("/api/refresh", { method: "POST", body: {} });
     const [stationsLoadErr, moneyLoadErr] = await Promise.all([loadStations(), loadMoney(rangeRef.current), reloadWorkflowActions()]);
     const err = stationsLoadErr || moneyLoadErr;
-    if (err) throw new Error(`已刷新上游，但本页数据加载失败：${err}`);
-    const list: any[] = Array.isArray(r?.stations) ? r.stations : [];
-    // 口径与「需要处理」一致：自营站点的余额不在那里列出，这里也不计
-    const failed = list.filter((s) => !s.archivedAt && !s.isOwn && s.balance && !s.balance.ok).length;
-    if (failed) message.warning(`已刷新上游资源，其中 ${failed} 个余额查询失败，见「需要处理」`);
-    else message.success("已刷新全部上游资源");
+    if (err) throw err;
+    const done = refreshAllText(r?.stations);
+    if (done.failed) message.warning(done.text);
+    else message.success(done.text);
   };
 
-  const syncOne = async (s: any) => {
+  const refreshOne = async (s: any) => {
     setSyncingId(s.id);
     try {
-      await api(`/api/stations/${s.id}/refresh`, { method: "POST", body: {} });
+      const r = await api(`/api/stations/${s.id}/refresh`, { method: "POST", body: {} });
       await loadStations();
-      message.success(`已同步 ${s.name}`);
+      const done = refreshOneText(stationDisplayName(s), r?.balance);
+      if (done.ok) message.success(done.text);
+      else message.warning(done.text);
     } catch (e: any) {
-      message.error(e?.message || "同步失败");
+      message.error(failureText(COPY.refreshFailed, e));
     } finally {
       setSyncingId(null);
     }
@@ -222,18 +269,17 @@ export default function OverviewPage() {
     onRefresh,
     asOf: asOfs.length ? Math.min(...asOfs) : null,
     range: rangePicker,
-    tz: money?.own?.tz || money?.fallback?.tz,
+    tz: money?.own?.tz || money?.fallback?.tz || stationsTz || undefined,
   });
 
-  const businessTz = money?.own?.tz || money?.fallback?.tz || DEFAULT_BUSINESS_TIME_ZONE;
+  const businessTz = money?.own?.tz || money?.fallback?.tz || stationsTz || DEFAULT_BUSINESS_TIME_ZONE;
   const workflowError = !workflowFailed
     ? ""
     : workflowAsOf
       ? refreshFailedText(workflowAsOf, businessTz)
-      : "读不到上游账单和每日利润里需要处理的事。";
-  const critDays = Number(rules?.etaDays) > 0 ? Number(rules.etaDays) : 3;
+      : COPY.workflowUnreadable;
   const current = money && money.range === range ? money : null;
-  const rangeName = RANGE_NAME[range];
+  const rangeName = RANGE_TEXT[range];
 
   return (
     <div className="jy-page">
@@ -249,9 +295,11 @@ export default function OverviewPage() {
           workflowError={workflowError}
           workflowLoading={workflowLoading}
           onReloadWorkflow={() => void reloadWorkflowActions()}
+          tz={businessTz}
+          asOf={stationsAt}
           syncingId={syncingId}
           onRetry={loadStations}
-          onSync={syncOne}
+          onSync={refreshOne}
           onEdit={(s) => router.push(`/stations?edit=${encodeURIComponent(s.id)}`)}
           onTrend={setTrendStation}
         />
@@ -259,18 +307,18 @@ export default function OverviewPage() {
           stations={stations}
           error={stationsErr}
           settings={settings}
-          critDays={critDays}
+          rules={rules}
           onRetry={loadStations}
           onTrend={setTrendStation}
         />
       </div>
 
       <div className="jy-grid-2 jy-grid-even">
-        <RevenuePanel title={`${rangeName}收入`} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
-        <CostPanel title={`${rangeName}上游成本`} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
+        <RevenuePanel title={COPY.income(rangeName)} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
+        <CostPanel title={COPY.upstreamCost(rangeName)} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
       </div>
 
-      <TrendModal station={trendStation} onClose={() => setTrendStation(null)} etaDaysRule={critDays} />
+      <TrendModal station={trendStation} onClose={() => setTrendStation(null)} settings={settings} rules={rules} />
     </div>
   );
 }
@@ -278,15 +326,15 @@ export default function OverviewPage() {
 // ---- 利润等式 ---------------------------------------------------------------
 
 function Equation({ range, money, error, onRetry }: { range: Range; money: Money | null; error: Error | null; onRetry: () => void }) {
-  const title = `${RANGE_NAME[range]}经营`;
+  const title = COPY.business(RANGE_TEXT[range]);
   if (error && !money) {
     return (
       <Panel title={title}>
-        <ErrorState title="经营数据加载失败" error={error} onRetry={onRetry} />
+        <ErrorState what={COPY.readBusinessFailed} error={error} onRetry={onRetry} />
       </Panel>
     );
   }
-  const caption = windowCaption(range, money?.own || money?.fallback);
+  const caption = rangeCaption(range, money?.own || money?.fallback);
   if (!money) {
     const blank: EqTerm = { value: null };
     return <ProfitEquation title={title} caption={caption} revenue={blank} upstream={blank} fixed={blank} loading />;
@@ -295,7 +343,7 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
   if (money.unconfigured) {
     const fb = money.fallback || {};
     const list: any[] = (fb.stations || []).filter((s: any) => s.includeInProfit);
-    // 与利润口径一致：配了固定付费的上游只按摊销计（costBasis = fixed），余额下降不算上游成本
+    // 与利润口径一致：记了固定成本的上游只按天平摊（costBasis = fixed），余额下降不算上游成本
     const usageList = list.filter((s) => !s.isOwn && s.costBasis !== "fixed");
     const fixedList = list.filter((s) => s.fixedCny > 0);
     const usageIds = new Set(usageList.map((s) => s.id));
@@ -309,16 +357,16 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
         upstream={{
           value: r2(sum(usageList.map((s) => Number(s.totalCny) || 0))),
           approx: gaps.length > 0,
-          note: `${usageList.length} 个上游资源`,
+          note: COPY.upstreamCount(usageList.length),
           href: "/analytics",
         }}
         fixed={{
           value: r2(sum(fixedList.map((s) => Number(s.fixedCny) || 0))),
-          note: fixedList.length ? `${fixedList.length} 项，按天摊销` : "没有固定成本",
+          note: fixedList.length ? COPY.fixedCount(fixedList.length) : COPY.noFixed,
           href: "/stations",
         }}
-        reasons={gaps.map((g) => `${g.stationName} 缺 ${g.missingDays} 天的消耗记录。`)}
-        partialTail="实际成本会比这里高。"
+        reasons={gaps.map((g) => COPY.gapReason(g.stationName, g.missingDays))}
+        partialTail={COPY.costPartialTail}
       />
     );
   }
@@ -328,14 +376,14 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
   if (profit.error) {
     return (
       <Panel title={title} caption={caption}>
-        <ErrorState title="利润暂时算不出来" error={profit.error} onRetry={onRetry} />
+        <ErrorState what={COPY.profitFailed} error={profit.error} onRetry={onRetry} />
       </Panel>
     );
   }
   const costs: any[] = profit.costs || [];
   const usageCosts = costs.filter((c) => c.mode !== "fixed");
   const fixedCosts = costs.filter((c) => c.mode === "fixed");
-  const ownRateMissing = !(Number(own.station?.cnyPerUsd) > 0);
+  const ownRateMissing = rateSnapshotOf(own.station).source !== "configured";
   const users = (own.byUser || []).filter((u: any) => !u.isAdmin).length;
   // 只有估算和没设置汇率 / 售价会让数字不准；其余提示放到成本面板底部
   const { reasons } = splitProfitWarnings(profit);
@@ -346,30 +394,30 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
       revenue={{
         value: profit.incomeCny ?? null,
         approx: ownRateMissing,
-        note: ownRateMissing ? "未设置汇率，按 1:1 折算" : `来自 ${users} 位下游用户`,
+        note: ownRateMissing ? SELL_PRICE_UNSET : COPY.fromUsers(users),
         // 带上同一个时间范围，自营业务默认是近 7 天
         href: range === "7d" ? "/my" : `/my?range=${range}`,
       }}
       upstream={{
         value: profit.upstreamCostCny ?? r2(sum(usageCosts.map((c) => Number(c.cny) || 0))),
         approx: !!profit.estimated || (!profit.complete && !ownRateMissing),
-        note: `${usageCosts.length} 个上游资源`,
+        note: COPY.upstreamCount(usageCosts.length),
         href: "/analytics",
       }}
       fixed={{
         value: profit.fixedCostCny ?? r2(sum(fixedCosts.map((c) => Number(c.cny) || 0))),
-        note: fixedCosts.length ? `${fixedCosts.length} 项，按天摊销` : "没有固定成本",
+        note: fixedCosts.length ? COPY.fixedCount(fixedCosts.length) : COPY.noFixed,
         href: "/stations",
       }}
       gross={profit.grossProfitCny}
       net={profit.netProfitCny ?? profit.profitCny}
       reasons={reasons}
-      partialTail="实际数字可能与这里有出入。"
+      partialTail={COPY.profitPartialTail}
     />
   );
 }
 
-// ---- 需要处理 ---------------------------------------------------------------
+// ---- 需处理 -----------------------------------------------------------------
 
 function AttentionPanel({
   stations,
@@ -380,6 +428,8 @@ function AttentionPanel({
   workflowError,
   workflowLoading,
   onReloadWorkflow,
+  tz,
+  asOf,
   syncingId,
   onRetry,
   onSync,
@@ -387,13 +437,15 @@ function AttentionPanel({
   onTrend,
 }: {
   stations: any[] | null;
-  error: string | null;
+  error: Error | null;
   rules: any;
   settings: any;
   workflowActions: WorkflowAction[];
   workflowError: string;
   workflowLoading: boolean;
   onReloadWorkflow: () => void;
+  tz: string;
+  asOf: number | null;
   syncingId: string | null;
   onRetry: () => void;
   onSync: (s: any) => void;
@@ -413,21 +465,21 @@ function AttentionPanel({
   const [expanded, setExpanded] = useState(false);
   const extra = (
     <>
-      <span className="jy-caption">紧急在前，同级按耗尽时间</span>
-      <Button size="small" loading={workflowLoading} onClick={onReloadWorkflow}>
-        刷新处理事项
+      <span className="jy-caption">{COPY.attentionOrder}</span>
+      <Button size="small" loading={workflowLoading} onClick={onReloadWorkflow} aria-label={COPY.refreshAttention}>
+        {REFRESH}
       </Button>
     </>
   );
   if (!stations) {
     if (error) {
       return (
-        <Panel title="需要处理">
-          <ErrorState title="上游资源加载失败" error={error} onRetry={onRetry} />
+        <Panel title={COPY.attention}>
+          <ErrorState what={COPY.readFailed(STATION_TABS.list)} error={error} onRetry={onRetry} />
         </Panel>
       );
     }
-    return <PanelSkeleton title="需要处理" lines={4} />;
+    return <PanelSkeleton title={COPY.attention} lines={4} />;
   }
 
   // 每条的第一个操作是带边框的按钮，其余是链接样式（与设计稿一致）
@@ -436,7 +488,7 @@ function AttentionPanel({
       {label}
     </Button>
   );
-  const names = new Map(stations.filter(Boolean).map((s) => [String(s.id), s.name || s.id]));
+  const names = new Map(stations.filter(Boolean).map((s) => [String(s.id), stationDisplayName(s)]));
   const nameOf = (id: string) => names.get(id);
   // 账号与账单待办是真实链接（可复制、可在新标签打开），普通点击在本站内跳转（不整页刷新），按钮名就是要做的动作
   const open = (a: any, primary = true) => (
@@ -459,7 +511,7 @@ function AttentionPanel({
     if (!a.others?.length) return undefined;
     return (
       <>
-        另有 {a.others.length} 项：
+        {COPY.others(a.others.length)}
         {a.others.map((o: any, i: number) => (
           <Fragment key={o.id}>
             {i > 0 ? "、" : ""}
@@ -491,20 +543,20 @@ function AttentionPanel({
     }
     const s = a.station;
     const name = a.stationName;
-    const rate = rateOf(s);
+    const rate = rateSnapshotOf(s).cnyPerUsd;
     const bal = Number(s.balance?.remaining) || 0;
     const burn = Number(s.prediction?.burnPerDay) || 0;
     const eta = s.prediction?.etaDays;
-    const sync = btn("立即同步", () => onSync(s), { loading: syncingId === s.id, primary: true, aria: `立即同步 ${name}` });
-    const edit = (primary = false) => btn("编辑", () => onEdit(s), { primary, aria: `编辑 ${name}` });
-    const trend = btn("查看趋势", () => onTrend(s), { primary: true, aria: `查看 ${name} 的余额趋势` });
+    const sync = btn(REFRESH, () => onSync(s), { loading: syncingId === s.id, primary: true, aria: COPY.refreshOne(name) });
+    const edit = (primary = false) => btn(COPY.edit, () => onEdit(s), { primary, aria: COPY.editOne(name) });
+    const trend = btn(COPY.trend, () => onTrend(s), { primary: true, aria: COPY.trendOf(name) });
     let what: ReactNode;
     let desc: ReactNode;
     let buttons: ReactNode;
     switch (a.kind) {
       case "query-failed": {
         what = BALANCE_STATE_TEXT.unreadable;
-        desc = `${errorText(s.balance)}，最近查询 ${relTime(s.balance?.checkedAt)}。`;
+        desc = asSentence(errorText(s.balance));
         buttons = (
           <>
             {sync}
@@ -517,9 +569,9 @@ function AttentionPanel({
       case "balance-low": {
         const low = a.kind === "balance-low";
         what = low ? BALANCE_STATE_TEXT.low : BALANCE_STATE_TEXT.empty;
-        const parts = [`当前余额 ${balanceWithCny(s, bal)}`];
-        if (low) parts.push(`提醒线 ${balanceText(s, lowLineOf(s, settings))}`);
-        if (low && eta != null && burn > 0) parts.push(`可用${formatDays(eta)}`);
+        const parts = [COPY.balance(balanceWithCny(s, bal))];
+        if (low) parts.push(COPY.lowLine(balanceText(s, lowLineOf(s, settings))));
+        if (low && eta != null && burn > 0) parts.push(COPY.available(formatDays(eta)));
         desc = `${parts.join("，")}。`;
         buttons = (
           <>
@@ -531,8 +583,7 @@ function AttentionPanel({
       }
       case "eta-soon": {
         what = soonText(a.etaDays);
-        const basis = s.prediction?.basis ? `（${s.prediction.basis}）` : "";
-        desc = `当前余额 ${balanceWithCny(s, bal)}，日均消耗 ${formatMoney(burn * rate)}${basis}。`;
+        desc = COPY.burnSentence(balanceWithCny(s, bal), formatMoney(burn * rate), basisText(s.prediction?.basis));
         buttons = (
           <>
             {trend}
@@ -542,8 +593,8 @@ function AttentionPanel({
         break;
       }
       default: {
-        what = `${a.daysRemaining} 天后到期`;
-        desc = `最近一笔付费在 ${formatMonthDay(a.endAt)} ${formatHhmm(a.endAt)} 到期。续费请追加付费记录；不再续费可在编辑里标记。`;
+        what = COPY.expiresIn(a.daysRemaining);
+        desc = COPY.fixedSentence(formatZonedDate(a.endAt, tz));
         buttons = edit(true);
       }
     }
@@ -553,26 +604,27 @@ function AttentionPanel({
   const hidden = actions.all.length - actions.visible.length;
   // 每个资源最多一行待处理，剩下的就是状态正常的，用一句话交代其余资源
   const busy = attentionStationIds(actions.all);
-  const healthy = stations.filter((s) => s && !s.isOwn && !busy.has(String(s.id || s.name))).length;
-  const healthyNote = healthy > 0 ? <span className="jy-caption">其余 {healthy} 个上游资源状态正常</span> : null;
+  const healthy = stations.filter((s) => s && !s.isOwn && !busy.has(String(s.id || stationDisplayName(s)))).length;
+  const healthyNote = healthy > 0 ? <span className="jy-caption">{COPY.healthy(healthy)}</span> : null;
   return (
-    <Panel title="需要处理" badge={<CountBadge count={actions.all.length} />} extra={extra} body={false}>
+    <Panel title={COPY.attention} badge={<CountBadge count={actions.all.length} />} extra={extra} body={false}>
       {workflowError ? (
         <div className="jy-banner jy-ov-banner" role="status">
           <Sym kind="warn" />
           <span className="jy-ov-banner-text">{workflowError}</span>
           <Button size="small" onClick={onReloadWorkflow}>
-            {workflowActionMeta("refresh")!.label}
+            {REFRESH}
           </Button>
         </div>
       ) : null}
       <AttentionList
         items={items}
+        emptyDesc={asOf ? `${formatAsOf(asOf, tz)}。` : undefined}
         more={
           hidden > 0 ? (
             <>
               <button type="button" className="jy-attention-toggle" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
-                {expanded ? "收起" : `展开其余 ${hidden} 项`}
+                {expanded ? COPY.collapse : COPY.expand(hidden)}
               </button>
               {expanded ? healthyNote : null}
             </>
@@ -591,106 +643,89 @@ function RunwayPanel({
   stations,
   error,
   settings,
-  critDays,
+  rules,
   onRetry,
   onTrend,
 }: {
   stations: any[] | null;
-  error: string | null;
+  error: Error | null;
   settings: any;
-  critDays: number;
+  rules: any;
   onRetry: () => void;
   onTrend: (s: any) => void;
 }) {
   const router = useRouter();
+  const critDays = etaWindowDays(rules);
   const allLink = (
     <Link className="jy-caption-link" href="/stations">
-      全部上游资源
+      {STATION_TABS.list}
     </Link>
   );
   const rows = useMemo(() => {
     const list = (stations || []).filter((s) => !s.isOwn && s.type !== "fixed" && !s.archivedAt);
     return list.map((s) => {
-      const st = balanceStateOf(s, settings);
-      const failed = st === "error";
-      const rate = rateOf(s);
+      // 档位、颜色、可用天数和上游列表同一个判断（balanceViewOf）
+      const view = balanceViewOf(s, { settings, rules });
+      const failed = view.state === "unreadable";
+      const rate = rateSnapshotOf(s).cnyPerUsd;
       const p = s.prediction;
       const bal = s.balance?.ok ? Number(s.balance.remaining) : null;
-      let days: number | null = null;
-      let daysLabel: string | undefined;
-      if (p && Number(p.burnPerDay) === 0) {
-        days = RUNWAY_MAX_DAYS;
-        daysLabel = "近期无消耗";
-      } else if (p?.etaDays != null) {
-        days = Math.max(0, Number(p.etaDays));
-      } else {
-        daysLabel = st === "pending" ? "等待查询" : "数据积累中";
-      }
-
-      let level: Level = st === "danger" ? "crit" : st === "warn" ? "warn" : "good";
-      if (days != null && !daysLabel) {
-        if (days <= critDays) level = "crit";
-        else if (days <= RUNWAY_WARN_DAYS && level === "good") level = "warn";
-      }
-      if (failed) level = "crit";
-      else if (st === "pending" || (days == null && level === "good")) level = "muted";
+      const name = stationDisplayName(s);
+      const state = view.state ? BALANCE_STATE_TEXT[view.state] : undefined;
 
       let tip: TipRow[];
       if (failed) {
-        tip = [
-          ["状态", "查询失败"],
-          ["原因", errorText(s.balance)],
-          ["最近查询", relTime(s.balance?.checkedAt)],
-        ];
+        tip = [[COPY.tip.reason, errorText(s.balance)]];
       } else {
         tip = [
-          ["余额", bal == null ? "尚未查询" : balanceWithCny(s, bal)],
-          ["日均消耗", p?.burnPerDay != null ? formatMoney(Number(p.burnPerDay) * rate) : "—"],
-          ["可用", daysLabel ?? formatDays(days)],
+          [COPY.tip.balance, bal == null ? BALANCE_STATE_TEXT.pending : balanceWithCny(s, bal)],
+          [COPY.tip.burn, p?.burnPerDay != null ? formatMoney(Number(p.burnPerDay) * rate) : EMPTY],
+          [COPY.tip.days, balanceDaysText(view)],
         ];
-        if (p?.basis) tip.push(["依据", p.basis]);
+        if (view.days != null && view.days !== Infinity && view.days > 0) tip.push([COPY.tip.basis, basisText(p?.basis)]);
       }
-      if (s.noRenewal) tip.push(["续费", "已标记不再续费"]);
+      if (s.noRenewal) tip.push([COPY.tip.renewal, COPY.noRenewal]);
 
-      const sub = bal == null ? "尚未查询" : `${balanceText(s, bal)}${s.noRenewal ? "，不再续费" : ""}`;
       const item: RunwayItem = {
         key: String(s.id),
         name: (
-          <button type="button" className="jy-ov-name" onClick={() => onTrend(s)} aria-label={`${s.name}，查看余额趋势`}>
-            {s.name}
+          <button type="button" className="jy-ov-name" onClick={() => onTrend(s)} aria-label={COPY.trendOf(name)}>
+            {name}
           </button>
         ),
-        tipTitle: s.name,
-        sub,
-        days,
+        tipTitle: name,
+        sub: bal == null ? undefined : `${balanceText(s, bal)}${s.noRenewal ? `，${COPY.noRenewal}` : ""}`,
+        days: view.days,
         failed,
-        level,
-        daysLabel,
+        level: view.level,
+        state,
+        // 余额用完时天数写「—」，只看档位名（和上游列表、余额趋势同一个写法）
+        daysLabel: balanceDaysText(view),
         tip,
       };
       return { item, cny: bal == null || failed ? null : bal * rate };
     });
-  }, [stations, settings, critDays, onTrend]);
+  }, [stations, settings, rules, onTrend]);
 
   if (!stations) {
     if (error) {
       return (
-        <Panel title="上游余量" extra={allLink}>
-          <ErrorState title="上游资源加载失败" error={error} onRetry={onRetry} />
+        <Panel title={COPY.runway} extra={allLink}>
+          <ErrorState what={COPY.readFailed(STATION_TABS.list)} error={error} onRetry={onRetry} />
         </Panel>
       );
     }
-    return <PanelSkeleton title="上游余量" lines={5} />;
+    return <PanelSkeleton title={COPY.runway} lines={5} />;
   }
   if (!rows.length) {
     return (
-      <Panel title="上游余量" extra={allLink}>
+      <Panel title={COPY.runway} extra={allLink}>
         <EmptyState
-          title="还没有按余额计费的上游资源"
-          desc="添加上游资源后，这里会显示每个上游还能用多少天。"
+          title={COPY.runwayEmptyTitle}
+          desc={COPY.runwayEmptyDesc}
           action={
-            <Button size="small" onClick={() => router.push("/stations")}>
-              添加上游资源
+            <Button size="small" onClick={() => router.push("/stations?edit=new")}>
+              {UPSTREAM_FORM_TEXT.create}
             </Button>
           }
         />
@@ -709,24 +744,24 @@ function RunwayPanel({
   const total = sum(rows.map((r) => r.cny ?? 0));
   const sub = (
     <>
-      可用余额合计 <b className="jy-num">{formatMoney(total)}</b>
-      {failedN > 0 && <span className="jy-caption">，不含 {failedN} 个查询失败的上游</span>}
+      {COPY.balanceTotal} <b className="jy-num">{formatMoney(total)}</b>
+      {failedN > 0 && <span className="jy-caption">{COPY.excludesUnreadable(failedN)}</span>}
     </>
   );
   const foot = (
     <>
-      竖线为告警阈值：少于 {critDays} 天为紧急，少于 {RUNWAY_WARN_DAYS} 天为注意。
-      {rows.length > RUNWAY_LIMIT && `这里只列最紧急的 ${RUNWAY_LIMIT} 个。`}
-      紧急阈值可在
+      {COPY.runwayLines(critDays, WATCH_DAYS)}
+      {rows.length > RUNWAY_LIMIT && COPY.runwayLimit(RUNWAY_LIMIT)}
+      {COPY.rulesWhereBefore}
       <Link href="/notifications" className="jy-link">
-        告警中心
+        {NAV_LABELS.notifications}
       </Link>
-      修改。
+      {COPY.rulesWhereAfter}
     </>
   );
   return (
-    <Panel title="上游余量" extra={allLink} sub={sub} foot={foot} body={false}>
-      <Runway items={shown.map((r) => r.item)} critDays={critDays} warnDays={RUNWAY_WARN_DAYS} maxDays={RUNWAY_MAX_DAYS} />
+    <Panel title={COPY.runway} extra={allLink} sub={sub} foot={foot} body={false}>
+      <Runway items={shown.map((r) => r.item)} critDays={critDays} />
     </Panel>
   );
 }
@@ -754,7 +789,7 @@ function MoneyPanelShell({
     if (error) {
       return (
         <Panel title={title} caption={caption}>
-          <ErrorState title="数据加载失败" error={error} onRetry={onRetry} />
+          <ErrorState what={COPY.readFailed(title)} error={error} onRetry={onRetry} />
         </Panel>
       );
     }
@@ -774,43 +809,47 @@ function RevenuePanel({ title, money, error, onRetry }: { title: string; money: 
     if (money.unconfigured) {
       return (
         <div className="jy-empty-inline">
-          <p style={{ margin: 0 }}>还没有设置自营站点，暂时无法统计收入。</p>
-          <Button size="small" onClick={() => router.push("/my")}>
-            设置自营站点
+          <p style={{ margin: 0 }}>
+            <strong>{OWN_STATION_UNSET_TITLE}</strong>：{OWN_STATION_UNSET_HINT}
+          </p>
+          <Button size="small" onClick={() => router.push("/stations")}>
+            {workflowActionMeta("setup_own_station")!.label}
           </Button>
         </div>
       );
     }
     const own = money.own || {};
     const profit = own.profit || {};
-    const ownRate = Number(own.station?.cnyPerUsd) > 0 ? Number(own.station.cnyPerUsd) : 1;
+    // 没设置汇率时按 1:1 折算，合计前加「约」（和别处同一个判断：rateSnapshotOf）
+    const ownRateNow = rateSnapshotOf(own.station);
+    const ownRate = ownRateNow.cnyPerUsd;
     const users = (own.byUser || [])
       .filter((u: any) => !u.isAdmin)
-      .map((u: any) => ({ name: String(u.user || "未命名用户"), value: r2((Number(u.cost) || 0) * ownRate), requests: u.requests }))
+      .map((u: any) => ({ name: String(u.user || COPY.unnamedUser), value: r2((Number(u.cost) || 0) * ownRate), requests: u.requests }))
       .filter((u: any) => u.value > 0)
       .sort((a: any, b: any) => b.value - a.value);
     const items: HBarItem[] = users.slice(0, TOP_USERS).map((u: any) => ({
       key: `u-${u.name}`,
       name: u.name,
       value: u.value,
-      tipExtra: u.requests != null ? [["请求数", Number(u.requests).toLocaleString("en-US")]] : undefined,
+      tipExtra: u.requests != null ? [[COPY.tip.requests, Number(u.requests).toLocaleString("en-US")]] : undefined,
     }));
     const rest = users.slice(TOP_USERS);
-    if (rest.length) items.push({ key: "rest", name: `其他 ${rest.length} 位用户`, value: r2(sum(rest.map((u: any) => u.value))) });
-    if (Number(profit.resoldCny) > 0) items.push({ key: "resold", name: "转售的管理员 Key", value: Number(profit.resoldCny) });
+    if (rest.length) items.push({ key: "rest", name: COPY.otherUsers(rest.length), value: r2(sum(rest.map((u: any) => u.value))) });
+    if (Number(profit.resoldCny) > 0) items.push({ key: "resold", name: COPY.resold, value: Number(profit.resoldCny) });
     const income = profit.incomeCny ?? r2(sum(items.map((i) => i.value ?? 0)));
     return (
       <HBars
         items={items}
         color="var(--jy-s1)"
-        unitName="收入"
-        empty="这段时间还没有下游用户产生收入。"
-        total={items.length ? { label: "合计", value: formatMoney(income, { approx: !(Number(own.station?.cnyPerUsd) > 0) }) } : undefined}
+        unitName={COPY.incomeUnit}
+        empty={COPY.noIncome}
+        total={items.length ? { label: COPY.total, value: formatMoney(income, { approx: ownRateNow.source !== "configured" }) } : undefined}
       />
     );
   }, [money, router]);
   return (
-    <MoneyPanelShell title={title} caption="按下游用户" money={money} error={error} onRetry={onRetry}>
+    <MoneyPanelShell title={title} caption={COPY.byUser} money={money} error={error} onRetry={onRetry}>
       {content}
     </MoneyPanelShell>
   );
@@ -834,7 +873,7 @@ function CostPanel({ title, money, error, onRetry }: { title: string; money: Mon
           key: String(s.id),
           name: s.name,
           value: Number(s.totalCny) || 0,
-          tipExtra: gaps.has(s.id) ? [["缺数", `${gaps.get(s.id)} 天没有记录`]] : undefined,
+          tipExtra: gaps.has(s.id) ? [[COPY.tip.note, COPY.gapTip(gaps.get(s.id)!)]] : undefined,
         }))
         .sort((a: HBarItem, b: HBarItem) => (b.value ?? 0) - (a.value ?? 0));
       const approx = list.some((s: any) => gaps.has(s.id));
@@ -848,7 +887,7 @@ function CostPanel({ title, money, error, onRetry }: { title: string; money: Mon
         key: String(c.stationId),
         name: c.name,
         value: Number(c.cny) || 0,
-        tipExtra: c.note ? [["怎么算的", c.note]] : COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT] ? [["怎么算的", COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT]]] : undefined,
+        tipExtra: c.note ? [[COPY.tip.how, c.note]] : COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT] ? [[COPY.tip.how, COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT]]] : undefined,
       }))
       .sort((a: HBarItem, b: HBarItem) => (b.value ?? 0) - (a.value ?? 0));
     const { notes } = splitProfitWarnings(profit);
@@ -858,21 +897,21 @@ function CostPanel({ title, money, error, onRetry }: { title: string; money: Mon
   return (
     <MoneyPanelShell
       title={title}
-      caption="按上游资源"
+      caption={COPY.byUpstream}
       money={money}
       error={error}
       onRetry={onRetry}
       foot={view?.notes?.length ? view.notes.join("") : undefined}
     >
       {view?.error ? (
-        <ErrorState title="成本暂时算不出来" error={view.error} />
+        <ErrorState what={COPY.costFailed} error={view.error} />
       ) : view ? (
         <HBars
           items={view.items}
           color="var(--jy-s2)"
-          unitName="上游成本"
-          empty="这段时间按用量计费的上游没有产生成本。"
-          total={view.items.length ? { label: "合计", value: formatMoney(view.total, { approx: view.approx }) } : undefined}
+          unitName={COPY.costUnit}
+          empty={COPY.noCost}
+          total={view.items.length ? { label: COPY.total, value: formatMoney(view.total, { approx: view.approx }) } : undefined}
         />
       ) : null}
     </MoneyPanelShell>

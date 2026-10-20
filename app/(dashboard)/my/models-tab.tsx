@@ -100,7 +100,7 @@ function UpstreamCost({ v, reload }: { v: OwnView; reload: () => Promise<unknown
   if (!p || p.error) {
     return (
       <Panel title="上游成本" caption="按上游">
-        <ErrorState title="上游成本暂时算不出来" error={p?.error || "接口没有返回利润数据"} onRetry={() => reload()} />
+        <ErrorState what="上游成本暂时算不出" error={p?.error || "接口没有返回利润数据"} onRetry={() => reload()} />
       </Panel>
     );
   }
@@ -240,7 +240,7 @@ function Flow({ v, reload }: { v: OwnView; reload: () => Promise<unknown> }) {
   if (flow.error) {
     return (
       <Panel title="分组与渠道">
-        <ErrorState title="分组和渠道数据暂时取不到" error={flow.error} onRetry={() => reload()} />
+        <ErrorState what="读不到分组和渠道" error={flow.error} onRetry={() => reload()} />
       </Panel>
     );
   }
