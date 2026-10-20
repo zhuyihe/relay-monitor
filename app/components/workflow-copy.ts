@@ -1,6 +1,6 @@
 // 运营总览「需要处理」一行的文字。标题、说明、按钮名都由服务端按 lib/workflow-actions.js 生成好，这里只负责拼起来。
 import { NAV_LABELS, STATION_TABS } from "../../lib/brand";
-import { BALANCE_STATE_TEXT, formatDays, formatZonedWindow } from "../../lib/format";
+import { BALANCE_STATE_TEXT, formatZonedWindow, soonText } from "../../lib/format";
 
 export function workflowProblem(action: any): string {
   return action?.title || action?.label || "";
@@ -33,7 +33,7 @@ export function actionPhrase(action: any): string {
     case "balance-low":
       return BALANCE_STATE_TEXT.low;
     case "eta-soon":
-      return `${BALANCE_STATE_TEXT.soon}，可用${formatDays(action.etaDays)}`;
+      return soonText(action.etaDays);
     case "fixed-expiring":
       return `${action.daysRemaining} 天后到期`;
     default:

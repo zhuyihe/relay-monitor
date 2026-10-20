@@ -272,7 +272,7 @@
 - `fmtTokens` 直接调 `formatCompact`。
 
 **`lib/profit.js`**
-- **固定成本的笔数句（§7）。**只写不为 0 的，例如「3 笔在用，1 笔还没开始，1 笔已到期」；全部到期写「已到期」；只有一笔、在时间范围中途才开始的写「10月12日起」（往年带年份）。
+- **固定成本的笔数句（§7）。**只写不为 0 的，例如「3 笔在用，1 笔还没开始，1 笔已到期」；全部到期写「已到期」；只有一笔、在时间范围中途才开始或还没开始的写「10月12日起」（往年带年份），从范围开始前就在用的不写。spec §7 同步写明了这一条。
 - **开始时刻正好等于时间范围终点的一笔，算「还没开始」。**
 - **新增 `splitProfitWarnings`。**利润提示按码分两类：估算、没设置汇率、没设置售价是「原因」，其余是「说明」。
 
@@ -301,16 +301,24 @@
 - 利润怎么算原来认「已到期」这几个字，现在按 `expired === total` 判断。
 
 **上游类型表（§3.7）**
-- `lib/channel-onboarding.js` 的 `UPSTREAM_TYPES` 加上「固定成本 / 不读取上游，只记固定成本」，每项带 `needs`。
-- 渠道绑定能选的几种 `ONBOARDING_TYPES` 由它派生。
+- `lib/channel-onboarding.js` 的 `UPSTREAM_TYPES` 加上「固定成本 / 不读取上游，只记固定成本」，整张表冻结。每项带两个字段：
+  - `needs`：要填的登录信息；
+  - `account`：是不是账号类，能读账单、能开账单权限，只用一把 Key 的不是。
+- 由它派生：
+  - 渠道绑定能选的几种 `ONBOARDING_TYPES`；
+  - 账号类的类型值 `ACCOUNT_TYPE_VALUES`。
 - 下面这些地方都改成读这张表：
   - `lib/providers.js` 的 `STATION_TYPES`，经 `/api/meta` 给到上游列表和编辑页，形状不变，名字换成 §3.7；
   - 批量接入的类型校验和要填的项；
+  - `onboardingConnectionPatch` 清理登录字段；
+  - 服务端渠道绑定的类型校验和要填的项（`server/channel-onboarding.js`）；
+  - 账单读取认哪些类型（`server/reconciliation.js`）；
+  - 渠道绑定组件的 `CREDENTIALS`；
   - 上游列表、上游账单里写死的四种类型。
 - 新增 `UPSTREAM_FORM_TEXT`（新增上游 / 编辑上游 / 编辑上游：上游名）。这一批只有渠道绑定用上，其余页面在各自的 PR 里改。
 
 **运营总览「需要处理」**
-- `workflow-copy.ts` 合并行里的短语，和总览余额行的标题，都改用 `BALANCE_STATE_TEXT`：
+- `workflow-copy.ts` 合并行里的短语，和总览余额行的标题，都改用 `BALANCE_STATE_TEXT`。快用完那一句两处共用 `soonText`：
   - 读不到余额；
   - 余额用完；
   - 余额偏低；
@@ -319,13 +327,49 @@
 **行为变化**
 - 日报正文里的「口径提示」、成本明细说明原样拼的是上面这些句子，会跟着变。日报自己写的话留给 A3。
 - 官方渠道不再按类型分行，`unmatched` 少了几行，渠道名照旧都在。
+- 运营总览成本条的「怎么算的」：原来只有带说明的行才有。现在按用量算的行也写一句「按用量算」，固定成本行写笔数句。
 
 **守护**
 - 扫描范围加上 `lib/format.js`、`lib/overview-actions.js`、`lib/profit.js`、`lib/client.ts`、`server/own-helpers.js`。
 - 删掉 `workflow-copy.ts` 的 DEFERRED。
 - 允许 §6 的「按 UTC 时间算一天」。
+- §3.4 不用的「缓存读写」「缓存读」「缓存写」加进禁用词（只有还没纳入扫描的 `my/audit-panel.tsx` 在用，A2-3 改）。
+- 对账界面用例里的成本说明固定数据换成现在服务端产出的那句。
 
 **留到后面**
-- **A2-2：**`stations/model.ts` 的 `CONNECTION_GUIDANCE` 并进类型表的 hint 和 `CREDENTIAL_FIELDS`，删掉 `SHORT_TYPE`；运营总览其余的句子和 DEFERRED。
-- **A2-3：**`my/shared.tsx` 的 `MODE_LABEL` 改用 `COST_MODE_TEXT`。
-- **A3：**日报自己那句「另有 N 组渠道未直接关联监控站」。
+- **A2-2（运营总览、上游列表、公用组件）**
+  - 类型表：
+    - `stations/model.ts` 的 `CONNECTION_GUIDANCE` 并进类型表的 hint 和 `CREDENTIAL_FIELDS`，删掉 `SHORT_TYPE`；
+    - `account-authorization.tsx` 按账号来源写死的可选类型改成从类型表派生；
+    - 上游列表、编辑页接上 `UPSTREAM_FORM_TEXT`。
+  - 可用天数：
+    - `page.tsx`、`stations/model.ts` 本地的天数上限、7 天线、分档改用 `RUNWAY_MAX_DAYS`、`WATCH_DAYS`、`etaWindowDays`、`runwayLevel`；
+    - 算不出天数的按 `null` 写「—」；天数 ≤ 0 时不再同时写「不到 1 小时」和余额用完。
+  - 运营总览：
+    - 本地的 `rateOf` 别名和 `ownRateMissing` 改用 `rateSnapshotOf`；
+    - 自营站点那句改用 `SELL_PRICE_UNSET`；
+    - 「（近3小时）」改用 `basisText`；
+    - 删掉其余的句子和 DEFERRED。
+  - 用词：
+    - 「tokens」改写「Token」；
+    - `stations/model.ts` 里的「生效中」「已全部到期」「无法计算」「已耗尽」；
+    - 未命名的上游统一用 `stationDisplayName`；
+    - 定下「没有需要处理的事」里「需要处理」这个词怎么处理。
+- **A2-3（成本估算、用量分析、自营业务）**
+  - `my/shared.tsx` 的 `MODE_LABEL` 改用 `COST_MODE_TEXT`，Token 说明改用 `TOKEN_NOTE`。
+  - 用量分析：
+    - 可用天数改用 `runwayLevel`，正好 7 天从绿变黄；
+    - 「推算依据」「按近期消耗推算」改用 `basisText`。
+  - 自营业务：
+    - 「利润口径」「个上游按余额推算」；
+    - 利润怎么算的「N 条口径提示」改用 `splitProfitWarnings`；
+    - `my/audit-panel.tsx` 的缓存叫法。
+  - 时间范围接上 `RANGE_TEXT`，没有上游接上 `NO_UPSTREAM_TEXT`，售价接上 `formatSellPrice`。
+- **A3（日报、告警、推送）**
+  - 日报自己那句「另有 N 组渠道未直接关联监控站」。
+  - 日报 `server/report.js`：
+    - 自己的成本来源表（「余额推算≈」等）改用 `COST_MODE_TEXT`；
+    - 「预计…后耗尽」改用 `formatDays`；
+    - 内联的汇率改用 `rateSnapshotOf`；
+    - 「口径提示：」改按 `warningCodes` 分类。
+  - 告警 `lib/alerts.js` 自己的 `fmtEta` 和过时的注释（「与前端 statusOf 一致」）。

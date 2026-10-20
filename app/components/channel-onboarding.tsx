@@ -163,7 +163,8 @@ const BILLING_RESULT: Record<string, string> = { configured: ACCOUNTED, unverifi
 // 测试读取后每把 Key 的预览标题
 const PREVIEW_STATE: Record<string, string> = { ready: COPY.ready, monitor_only: MONITOR_ONLY, unverified: COPY.unverified, unsupported: UNSUPPORTED, unavailable: UNSUPPORTED };
 
-const CREDENTIALS: Record<string, string[]> = { newapi: ["accessToken", "userId"], "newapi-key": ["apiKey"], sub2api: ["accessToken"], "sub2api-password": ["email", "password"] };
+// 每类要填的登录信息取类型表的 needs
+const CREDENTIALS: Record<string, readonly string[]> = Object.fromEntries(TYPES.map((item) => [item.value, item.needs]));
 const RECOVERY_KEY = "channel-onboarding-recovery-v05";
 const PENDING_KEY = "channel-onboarding-pending-v06";
 type CredentialUpdateTarget = BatchProbe["selections"][number]["credentialUpdates"][number];

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { queryNewApiReconciliationMetadata, queryReconciliationMetadata, queryAccountIdentity, queryKeyReconciliationStat, queryOwnChannels, queryStation } from "../lib/providers.js";
 import { describeConnectionFailure } from "../lib/connection-test.js";
-import { onboardingBaseUrl, publicOnboardingStation, onboardingConnectionPatch, normalizeBatchInput,
+import { onboardingBaseUrl, publicOnboardingStation, onboardingConnectionPatch, normalizeBatchInput, ONBOARDING_TYPES, ACCOUNT_TYPE_VALUES,
   coalesceVerifiedBatchGroups, normalizeBatchRecoveryIntent } from "../lib/channel-onboarding.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { completedBillingDayWindow, canonicalBillingKey, applyScopePolicy, normalizeRuleSourceBinding, reconciliationBillingSchedule } from "../lib/reconciliation-scope-policy.js";
@@ -68,8 +68,9 @@ export async function connectNewApiUpstream(rt, input, queryMetadata = queryNewA
   return pending;
 }
 
-const ACCOUNT_TYPES = ["newapi", "sub2api", "sub2api-password"];
-const TYPES = [...ACCOUNT_TYPES, "newapi-key"];
+// 类型从 lib/channel-onboarding.js 的类型表派生（§3.7）
+const ACCOUNT_TYPES = ACCOUNT_TYPE_VALUES;
+const TYPES = ONBOARDING_TYPES.map((item) => item.value);
 const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const authFields = ["type", "baseUrl", "accessToken", "userId", "apiKey", "email", "password"];
 const authVersion = (station) => hash([station?.authVersion || 1, ...authFields.map((field) => station?.[field] || "")]);
@@ -101,10 +102,10 @@ function connectionInput(input, { authorization = false } = {}) {
   const baseUrl = onboardingBaseUrl(input.baseUrl);
   if (!baseUrl) throw previewFailure("INVALID_BASE_URL", "站点地址不对，请填上游网站的根地址");
   const connection = { type: input.type, baseUrl, name: String(input.name || "上游账号").trim(), isOwn: false };
-  const fields = input.type === "newapi" ? ["accessToken", "userId"]
-    : input.type === "newapi-key" ? ["apiKey"] : input.type === "sub2api" ? ["accessToken"] : ["email", "password"];
-  for (const field of fields) connection[field] = String(input[field] || "").trim();
-  if (input.type === "sub2api-password") connection.password = String(input.password || "");
+  // 要填的登录信息看类型表的 needs；密码原样保留，其余去掉首尾空格
+  for (const field of ONBOARDING_TYPES.find((item) => item.value === input.type).needs) {
+    connection[field] = field === "password" ? String(input[field] || "") : String(input[field] || "").trim();
+  }
   for (const field of ["cnyPerUsd", "lowBalanceUsd", "noRenewal", "includeInProfit", "costAliases"]) {
     if (field in input) connection[field] = input[field];
   }

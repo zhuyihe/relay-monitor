@@ -214,7 +214,7 @@ test("3b unaccounted upstream copy explains partial reads, excluded upstreams an
   const rows = ratedDailyRows();
   const summarized = summarizeUnaccountedUpstream([
     { station: { id: "upstream-1", name: "Fixture upstream" }, rate: configuredRate("upstream-1", 6), usage: { usd: 1, mode: "usage" } },
-    { station: { id: "upstream-2", name: "Second upstream" }, rate: configuredRate("upstream-2", 6), usage: { usd: 3, mode: "history", lowerBound: true, note: "用量接口失败，已按余额历史推算；余额历史没覆盖整个时段，金额偏低" } },
+    { station: { id: "upstream-2", name: "Second upstream" }, rate: configuredRate("upstream-2", 6), usage: { usd: 3, mode: "history", lowerBound: true, note: "读不到用量，改按余额变化估算；历史数据不够，金额偏低" } },
   ], rows, { currency: "USD" });
   const { page } = await openDailyPage(t, { data: dailyResponse(rows, { unaccountedUpstream: { ...summarized, window, fixedStations: [], excludedStations: [{ id: "excluded-1", name: "Excluded upstream" }] } }) });
   const unaccounted = page.getByRole("region", { name: "没算进利润的上游成本", exact: true });
@@ -225,7 +225,7 @@ test("3b unaccounted upstream copy explains partial reads, excluded upstreams an
   await unaccounted.locator(".ant-collapse-header", { hasText: "查看各上游" }).click(); await unaccounted.getByText(`上游扣费 $1.00 · 已算进利润 $2.00 · 没算进利润 ${MINUS}$1.00`, { exact: true }).waitFor();
   // 只是取数时刻不同：写在这个上游自己的说明里
   await unaccounted.getByText("已算进利润的多于上游扣费：上游的扣费可能还没记全", { exact: true }).waitFor();
-  await unaccounted.getByText(/余额历史没覆盖整个时段，金额偏低/).waitFor(); assert.equal(await unaccounted.getByText(/数据截至/).count(), 0);
+  await unaccounted.getByText(/历史数据不够，金额偏低/).waitFor(); assert.equal(await unaccounted.getByText(/数据截至/).count(), 0);
   // 多算的原因写在各上游自己的说明里：只是取数时刻不同、只是汇率不同、两者都有各一句；不算进利润的上游有多个时说「它们」。
   // 按人民币看时，绑定的上游成本按 costRate 折算，这个上游按 1 美元 = 6 元，上游扣费为 usd
   const reasons = async (kind, usd, costRate, note, excludedStations = []) => {

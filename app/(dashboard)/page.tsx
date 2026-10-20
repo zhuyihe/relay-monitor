@@ -14,7 +14,7 @@ import { attentionStationIds, balanceStateOf, buildOverviewActions, lowLineOf } 
 import { rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
 import { describeConnectionFailure } from "../../lib/connection-test";
-import { BALANCE_STATE_TEXT, COST_MODE_TEXT, formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd, formatZonedTime, parseDay, refreshFailedText } from "../../lib/format";
+import { BALANCE_STATE_TEXT, COST_MODE_TEXT, formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd, formatZonedTime, parseDay, refreshFailedText, soonText } from "../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, shiftDayLabel } from "../../lib/business-time";
 import { AttentionList } from "../components/attention-list";
 import { Sym } from "../components/icons";
@@ -532,7 +532,7 @@ function AttentionPanel({
         break;
       }
       case "eta-soon": {
-        what = `${BALANCE_STATE_TEXT.soon}，可用${formatDays(a.etaDays)}`;
+        what = soonText(a.etaDays);
         const basis = s.prediction?.basis ? `（${s.prediction.basis}）` : "";
         desc = `当前余额 ${balanceWithCny(s, bal)}，日均消耗 ${formatMoney(burn * rate)}${basis}。`;
         buttons = (

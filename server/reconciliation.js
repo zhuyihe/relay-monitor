@@ -30,7 +30,7 @@ import { applyScopePolicy, canonicalBillingKey, completedBillingDayWindow, scope
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow, billingDayOf } from "../lib/reconciliation-scope-policy.js";
 import { RECONCILIATION_SETTLE_DELAY_MS as SETTLE_DELAY_MS, ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
 import { stationBusinessVersion } from "../db/store.js";
-import { onboardingBaseUrl, normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
+import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationSettlement, reconciliationDisplayStatus,
   sameReconciliationWindow, summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
 import { costBasisOf, rateSnapshotOf } from "../lib/profit.js";
@@ -452,7 +452,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   };
   // 观测时锚定身份失败的原因：只读计算不锚定，沿用最近一次观测的结论。
   const identityIssues = new Map();
-  const billingStation = (station) => station && ["newapi", "sub2api", "sub2api-password"].includes(station.type) && !station.isOwn;
+  const billingStation = (station) => station && ACCOUNT_TYPE_VALUES.includes(station.type) && !station.isOwn;
   const billingPanel = (station) => station && JSON.stringify([station.type.startsWith("sub2api") ? "sub2api" : "newapi", onboardingBaseUrl(station.baseUrl)]);
   function createPreviewReadContext() {
     const context = {};
@@ -473,7 +473,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
   const billingSourceState = () => {
     const stations = rt.store.list({ includeUnmonitored: true, includeArchived: true })
-      .filter((station) => ["newapi", "sub2api", "sub2api-password"].includes(station.type))
+      .filter((station) => ACCOUNT_TYPE_VALUES.includes(station.type))
       .sort((a, b) => a.id.localeCompare(b.id));
     return { stationIds: stations.map((station) => station.id),
       version: createHash("sha256").update(JSON.stringify([rt._reconciliationBillingGeneration || 0,
