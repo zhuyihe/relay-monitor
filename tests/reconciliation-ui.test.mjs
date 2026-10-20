@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationNotCountedCostText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
 import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
-import { EMPTY, FIXED_COST_TEXT, MINUS, OWN_STATION_UNSET_TITLE, RATE_UNSET_USD, formatAsOf, formatDayZone, formatRate, formatZonedDateTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
+import { EMPTY, FIXED_COST_TEXT, MINUS, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RATE_UNSET_USD, formatAsOf, formatDayZone, formatRate, formatZonedDateTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy, reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
 import { ERROR_CATEGORIES, describeError, failureText } from "../lib/error-copy.js";
@@ -1600,7 +1600,7 @@ test("workflow verification keyboard and financial source links fit 320/390/768/
     const opened = await openAccountsPage(t, { viewport: { width, height: 900 }, path: "/stations?action=verify-billing&stationId=Sub-password", readonlyAPI(route, path) {
       if (path.endsWith("/keys")) { const params = new URL(route.request().url()).searchParams; return fulfill(route, keyVerificationFixture("sub2api", params.get("timezone"), params.has("tokenId"))); }
       if (path === "/api/analytics") return fulfill(route, { days: 30, start: "2026-09-09", end: "2026-10-08", selection: { includeArchived: false, stationCount: 0, archivedStationCount: 0 }, coverage: { earliestDate: null, latestDate: null, availableDays: 0, requestedDays: 30, monitoredStationCount: 0, isComplete: false, stationGaps: [] }, stations: [], daily: [], fixedDaily: [], heatmap: [], heatmapAvailable: false, heatmapAvailability: { available: false, reason: "no-cost-stations", coverage: null }, generatedAt: "2026-10-09T03:00:00Z" });
-      if (path === "/api/own/analytics") return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "还没有标记「我的中转站」" }) });
+      if (path === "/api/own/analytics") return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }) });
       throw new Error("unexpected financial navigation fixture: " + path);
     } });
     const drawer = verificationDialog(opened.page, "Sub-password"); const directory = drawer.getByRole("button", { name: settledButton(TEST_READ) }); await directory.focus(); await opened.page.keyboard.press("Enter"); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); const key = drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }); await key.focus(); await opened.page.keyboard.press("ArrowDown"); await opened.page.keyboard.press("Enter"); const probe = drawer.getByRole("button", { name: settledButton(VERIFY_SELECTED) }); await probe.focus(); await opened.page.keyboard.press("Enter"); await alertTitle(drawer, "actual-key 的上游成本").waitFor();

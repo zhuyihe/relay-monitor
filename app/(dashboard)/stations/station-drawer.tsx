@@ -7,7 +7,9 @@ import type { ReactNode, Ref } from "react";
 import dayjs from "dayjs";
 import { App, Button, DatePicker, Drawer, Form, Grid, Input, Select, Switch } from "antd";
 import { api } from "../../../lib/client";
+import { testReadText } from "../../../lib/workflow-actions";
 import { useDrawerEscape } from "../../components/drawer-escape";
+import { ErrorDetail } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { StatusText } from "../../components/status";
 import type { Level } from "../../components/status";
@@ -183,10 +185,10 @@ export function StationDrawer({
       if (type !== "fixed") payload.baseUrl = String(values.baseUrl || "").trim();
       for (const field of fields) payload[field] = values[field] ?? "";
       const result = await api("/api/stations/test", { body: payload });
-      setConnectionTest(result.ok ? result : { ok: false, ...resultIssue(result, result.message, values) });
+      setConnectionTest(result.ok ? result : { ok: false, issue: resultIssue(result) });
       setTestedFingerprint(fingerprint);
     } catch (e: any) {
-      setConnectionTest({ ok: false, ...resultIssue(null, e.message || "请求失败", values) });
+      setConnectionTest({ ok: false, issue: resultIssue(e) });
       setTestedFingerprint(fingerprint);
     } finally {
       setTesting(false);
@@ -296,16 +298,8 @@ export function StationDrawer({
     testResult = (
       <div className="jy-test-result jy-test-result--bad">
         <Sym kind="crit" />
-        <b>{connectionTest.category}：{connectionTest.message}</b>
-        <span>{connectionTest.action}</span>
-        {connectionTest.diagnostic ? (
-          <div>
-            <details className="jy-stations-diag">
-              <summary>查看脱敏诊断</summary>
-              <span>{connectionTest.diagnostic}</span>
-            </details>
-          </div>
-        ) : null}
+        <b>{testReadText({ ok: false, reason: connectionTest.issue?.text })}</b>
+        {connectionTest.issue?.raw ? <div><ErrorDetail raw={connectionTest.issue.raw} /></div> : null}
       </div>
     );
   } else if (editing && !unchangedEdit) {

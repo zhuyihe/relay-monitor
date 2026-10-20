@@ -20,7 +20,8 @@ import { useShellPage } from "../../components/shell-context";
 import { useUrlState } from "../../components/use-url-state";
 import { ModelsTab } from "./models-tab";
 import { OverviewTab } from "./overview-tab";
-import { RANGES, RANGE_OPTIONS, TABS, deriveOwn, isUnconfigured, productErrorMessage } from "./shared";
+import { describeError } from "../../../lib/error-copy";
+import { RANGES, RANGE_OPTIONS, TABS, deriveOwn } from "./shared";
 import type { MyTab, OwnRange } from "./shared";
 import { UsersTab } from "./users-tab";
 
@@ -40,14 +41,14 @@ export default function MyStationPage() {
   const [data, setData] = useState<any>(null);
   // 与 data 同一范围的逐日上游成本；undefined 是还在取，取不到时是 { error }，只影响趋势图
   const [costs, setCosts] = useState<any>(undefined);
-  const [err, setErr] = useState<{ range: string; msg: string } | null>(null);
+  const [err, setErr] = useState<{ range: string; error: Error } | null>(null);
   const [unconfigured, setUnconfigured] = useState(false);
   const [asOf, setAsOf] = useState<number | null>(null);
 
   // 日志精算（开销大，只在点按钮时才翻日志）
   const [audit, setAudit] = useState<any>(null);
   const [auditing, setAuditing] = useState(false);
-  const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditError, setAuditError] = useState<Error | null>(null);
   const [auditRows, setAuditRows] = useState(4000);
   const [auditOpen, setAuditOpen] = useState(false);
 
@@ -70,7 +71,7 @@ export default function MyStationPage() {
     const costReq =
       r === "today"
         ? Promise.resolve(null)
-        : api(`/api/analytics?days=${r === "7d" ? 7 : 30}`).catch((e: any) => ({ error: productErrorMessage(e) }));
+        : api(`/api/analytics?days=${r === "7d" ? 7 : 30}`).catch((e: any) => ({ error: e }));
     try {
       const res = await api(`/api/own/analytics?range=${r}`);
       // 新的逐日成本回来前先沿用上一份成功的，免得每次轮询趋势图都闪一下
@@ -93,15 +94,15 @@ export default function MyStationPage() {
       setAsOf(Date.now());
     } catch (e: any) {
       if (rangeRef.current !== r) return;
-      // 没标记自营站点是引导场景，不当错误处理
-      if (isUnconfigured(e)) {
+      // 没设置自营站点是引导场景，不当错误处理（接口带 OWN_STATION_UNSET，lib/error-copy.js）
+      if (describeError(e).category === "unset") {
         setUnconfigured(true);
         setErr(null);
         return;
       }
-      setErr({ range: r, msg: productErrorMessage(e) });
+      setErr({ range: r, error: e });
       // 顶栏刷新要拿到失败，由外壳提示
-      if (rethrow) throw new Error(productErrorMessage(e));
+      if (rethrow) throw e;
     }
   }, []);
 
@@ -134,7 +135,7 @@ export default function MyStationPage() {
       if (rangeRef.current === r) setAudit(res);
     } catch (e: any) {
       if (rangeRef.current === r) {
-        setAuditError(productErrorMessage(e));
+        setAuditError(e);
         setAudit(null);
       }
     } finally {
@@ -183,7 +184,7 @@ export default function MyStationPage() {
       return (
         <div className="jy-page">
           <Panel label="自营业务">
-            <ErrorState center title="自营业务数据加载失败" error={currentErr.msg} onRetry={() => load(true)} />
+            <ErrorState center title="自营业务数据加载失败" error={currentErr.error} onRetry={() => load(true)} />
           </Panel>
         </div>
       );
@@ -224,7 +225,7 @@ export default function MyStationPage() {
           <Sym kind="warn" />
           <div>
             最新数据获取失败，显示的是 {formatHhmm(asOf)} 的数据。
-            <span className="jy-sub-money">{currentErr.msg}</span>
+            <span className="jy-sub-money">{currentErr.error.message}</span>
           </div>
           <Button size="small" className="jy-my-banner-action" onClick={() => load(true)}>
             重试

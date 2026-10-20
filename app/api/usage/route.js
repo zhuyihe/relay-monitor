@@ -1,6 +1,7 @@
 // ---- 用量统计（分模型 / 分时间）------------------------------------------------
 import { withAuth, json } from "../../../lib/api.js";
 import { queryStationUsage } from "../../../lib/providers.js";
+import { errorCodeOf } from "../../../lib/error-copy.js";
 
 // 各站点用量接口逐个查开销不小，按范围缓存 60 秒（缓存挂 rt 上，不用模块级变量）
 export const GET = withAuth(async (request, rt) => {
@@ -47,7 +48,8 @@ export const GET = withAuth(async (request, rt) => {
       });
       return { ...meta, ok: true, ...u };
     } catch (err) {
-      return { ...meta, ok: false, error: err?.message || String(err) };
+      // code 给界面归类（§8.2），error 是原文（lib/providers.js 已打码）
+      return { ...meta, ok: false, error: err?.message || String(err), code: errorCodeOf(err) };
     }
   }));
   await store.save(); // sub2api 密码模式可能在查询中轮换了令牌

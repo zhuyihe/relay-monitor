@@ -10,6 +10,7 @@ import Link from "next/link";
 import { Button, Checkbox } from "antd";
 import { NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
+import { describeError } from "../../../lib/error-copy";
 import { formatDays, formatMoney } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
 import { EmptyState, ErrorState, PanelSkeleton, Skeleton } from "../../components/data-state";
@@ -56,7 +57,7 @@ type Snapshot = {
   data: any;
   own: any;
   ownStatus: OwnStatus;
-  ownError: string | null;
+  ownError: Error | null;
   // 这份数据对应的查询条件；与当前选择不一致时说明正在切换
   query: string;
   // 服务端按业务时区算出的天数
@@ -93,7 +94,7 @@ export default function AnalyticsPage() {
   const includeArchived = sp.get("archived") === "1";
 
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<Error | null>(null);
   const [asOf, setAsOf] = useState<number | null>(null);
   const [critDays, setCritDays] = useState(3);
   const [metaFailed, setMetaFailed] = useState(false);
@@ -120,21 +121,21 @@ export default function AnalyticsPage() {
       if (a.status === "rejected") {
         // 保留上一次成功的数据，页面顶部提示刷新失败
         error = a.reason?.message || "成本分析加载失败";
-        setLoadError(error);
+        setLoadError(a.reason);
       } else {
         let ownStatus: OwnStatus = "not-applicable";
         let own: any = null;
-        let ownError: string | null = null;
+        let ownError: Error | null = null;
         if (d <= 30) {
           if (o.status === "fulfilled") {
             own = o.value;
             ownStatus = "available";
           } else {
-            const message = String(o.reason?.message || "自营收入分析加载失败");
-            if (message.startsWith("还没有标记「我的中转站」")) ownStatus = "missing";
+            // 没设置自营站点（接口带 OWN_STATION_UNSET）不算出错
+            if (describeError(o.reason).category === "unset") ownStatus = "missing";
             else {
               ownStatus = "error";
-              ownError = message;
+              ownError = o.reason;
             }
           }
         }
@@ -312,7 +313,7 @@ export default function AnalyticsPage() {
         <div className="jy-banner" role="alert">
           <Sym kind="warn" />
           <div className="jy-analytics-banner-body">
-            <span>成本分析刷新失败，正在显示上次成功加载的数据。{loadError}</span>
+            <span>成本分析刷新失败，正在显示上次成功加载的数据。{loadError.message}</span>
             <Button size="small" onClick={retry}>
               重试
             </Button>
@@ -463,7 +464,7 @@ function Equation({
     profitNote = "收入读取失败";
     notice = (
       <>
-        自营收入暂时无法读取，当前只统计成本。{snap.ownError}
+        自营收入暂时无法读取，当前只统计成本。{snap.ownError?.message}
         {retryBtn}
       </>
     );

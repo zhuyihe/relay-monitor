@@ -1,6 +1,6 @@
 // POST /api/stations/test —— 使用临时连接信息验证上游，不写库、不刷新、不触发告警。
 import { withAuth, json } from "../../../../lib/api.js";
-import { describeConnectionFailure } from "../../../../lib/connection-test.js";
+import { describeError } from "../../../../lib/error-copy.js";
 import { queryStation, STATION_TYPES } from "../../../../lib/providers.js";
 
 const CONNECTION_FIELDS = ["baseUrl", "accessToken", "apiKey", "userId", "email", "password"];
@@ -41,18 +41,23 @@ function testStation(body, saved) {
 export const POST = withAuth(async (request, rt) => {
   const body = (await request.json().catch(() => null)) || {};
   const saved = findSavedStation(rt.store, text(body.stationId));
-  if (body.stationId && !saved) return json({ error: "未找到要编辑的上游资源" }, 404);
+  if (body.stationId && !saved) return json({ error: "找不到这个上游", code: "UPSTREAM_NOT_FOUND" }, 404);
 
   const station = testStation(body, saved);
   if (!STATION_TYPES.some((item) => item.value === station.type)) {
-    return json({ error: "无效的中转站类型" }, 400);
+    return json({ error: "请选上游类型", code: "UNSUPPORTED_UPSTREAM_TYPE" }, 400);
   }
   if (station.type === "fixed") {
     return json({ ok: true, message: "固定成本不访问外部接口，无需测试连接。" });
   }
 
   const { result } = await queryStation(station);
-  if (!result.ok) return json({ ok: false, ...describeConnectionFailure(result.error, station) });
+  if (!result.ok) {
+    // 归类和界面同一套（lib/error-copy.js §8.2）：category 类名、message 界面上那一句、action 下一步按钮的动作键；
+    // diagnostic 是脱敏后的原文（lib/providers.js 已打码），只进「查看详细原因」
+    const { category, text, action } = describeError({ code: result.code, message: result.error });
+    return json({ ok: false, code: result.code, category, message: text, action, diagnostic: result.error });
+  }
 
   return json({
     ok: true,

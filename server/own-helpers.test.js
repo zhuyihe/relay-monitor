@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   aggregateFlow, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
-  reconcileUsageCost, resolveOwnWindow, selectCostUpstreams,
+  reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
 } from "./own-helpers.js";
 import { History } from "../db/history.js";
 import { dayStartInTz } from "../lib/business-time.js";
@@ -53,6 +53,17 @@ test("账单专用授权硬排除成本，不能被 includeInProfit 覆盖", () 
   const result = selectCostUpstreams([own, grant, monitored], own.id);
   assert.deepEqual(result.included, [monitored]);
   assert.deepEqual(result.excluded, []);
+});
+
+test("读不到用量时改按余额历史，并带上报错的码", async () => {
+  const rt = { history: { usedBetween: () => 1.5 } };
+  const window = { startMs: 0, endMs: 86_400_000, tz: "Asia/Shanghai" };
+  const keyOnly = await stationUsageCost(rt, { id: "k", type: "newapi-key", baseUrl: "https://key.test", apiKey: "sk-x" }, window);
+  assert.equal(keyOnly.usd, 1.5);
+  assert.equal(keyOnly.mode, "history");
+  assert.equal(keyOnly.errorCode, "UPSTREAM_FEATURE_UNSUPPORTED");
+  const unknown = await stationUsageCost(rt, { id: "u", type: "mystery", baseUrl: "https://u.test" }, window);
+  assert.equal(unknown.errorCode, "UNSUPPORTED_UPSTREAM_TYPE");
 });
 
 test("用量接口有有效成本时保持接口口径", () => {

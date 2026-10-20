@@ -3,6 +3,8 @@
 // 于是 Claude 这类缓存占九成的模型会显示成「token 近零、消费很大」。本接口翻消费日志
 // 明细把真实 token 与长上下文请求算出来，开销大，按需触发并缓存 5 分钟。
 import { withAuth, json } from "../../../../lib/api.js";
+import { errorCodeOf } from "../../../../lib/error-copy.js";
+import { OWN_STATION_UNSET } from "../../../../lib/format.js";
 import { queryOwnLogAudit } from "../../../../lib/providers.js";
 import { resolveOwnWindow } from "../../../../server/own-helpers.js";
 
@@ -12,9 +14,7 @@ export const GET = withAuth(async (request, rt) => {
   const { store } = rt;
   const own = store.list().find((s) => s.isOwn && s.type === "newapi");
   if (!own) {
-    return json({
-      error: "还没有标记「我的中转站」：添加/编辑你的 New API 站点，勾选「这是我自己的中转站」（需管理员令牌）",
-    }, 400);
+    return json({ error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }, 400);
   }
   const sp = new URL(request.url).searchParams;
   const { range, tz, now, startMs } = resolveOwnWindow(sp);
@@ -46,6 +46,7 @@ export const GET = withAuth(async (request, rt) => {
     cache.set(cacheKey, { at: Date.now(), payload });
     return json(payload);
   } catch (err) {
-    return json({ error: err?.message || String(err) }, 502);
+    // 读自营站点没成：带上游给的码，没有就按「自营站点暂时读不到」说（lib/error-copy.js §8.2）
+    return json({ error: err?.message || String(err), code: errorCodeOf(err, "OWN_STATION_UNAVAILABLE") }, 502);
   }
 });

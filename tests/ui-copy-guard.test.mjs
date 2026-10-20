@@ -34,12 +34,22 @@ const FILES = [
   "lib/overview-actions.js",
   "lib/profit.js",
   "lib/client.ts",
+  "lib/providers.js",
+  "lib/connection-test.js",
+  "lib/api.js",
+  "lib/cap.js",
   "server/own-helpers.js",
+  "db/store.js",
+  "app/api/meta/route.js",
+  ...["admin-keys", "analytics", "audit"].map((name) => `app/api/own/${name}/route.js`),
+  ...["", "/test", "/[id]", "/[id]/history", "/[id]/refresh"].map((dir) => `app/api/stations${dir}/route.js`),
+  "app/api/stations/[id]/purge.js",
 ];
 
 // §3.6 里不分场合都不能上界面的词。「范围」「关联」「授权」「资源」「站点」「完整」这类要看场合的，靠逐条改文案，不在这里卡。
+// 「版本」只卡 §3.6、§9 不显示的那几种；「软件版本」（§11）和「对方的版本不支持这项功能」（§8.2）照用
 const FORBIDDEN = [
-  "核算", "结账", "自然日", "窗口", "分段", "生效", "版本", "口径", "计法", "证据", "能力", "核验", "核对", "凭证", "凭据",
+  "核算", "结账", "自然日", "窗口", "分段", "生效", "范围版本", "计算版本", "授权版本", "配置版本", "版本号", "口径", "计法", "证据", "能力", "核验", "核对", "凭证", "凭据",
   "仅供参考", "待获取", "获取中", "不可用", "读取失败", "查询失败", "尚未查询", "数据已过期", "最后刷新", "更新于", "最近成功",
   "快照", "账本", "迁移", "旧账", "兜底", "降级", "轮询", "采集", "留存", "回归", "回测", "精算", "推算",
   "中转站", "本站", "阈值", "耗尽", "摊销", "待办", "待处理", "待核算", "已核验", "已取全", "原币", "归属", "覆盖",
@@ -63,11 +73,12 @@ function skipped(node) {
     if (ts.isImportDeclaration(parent) || ts.isExportDeclaration(parent) || ts.isTypeNode(parent)) return true;
     // 日期选择框的 format 是格式串
     if (ts.isJsxAttribute(parent) && parent.name.getText() === "format") return true;
-    // 只跳过造报错对象的：new Error、TypeError，和带 code 的 batchError、repositoryError（页面按 code 归类，原话只进「详情」）；
+    // 只跳过造报错对象的：new Error、TypeError，和带 code 的 batchError、repositoryError、providerError、newApiResponseError、
+    // catalogueError（页面按 code 归类，原话只进「详情」）；
     // setError 这类存的是要显示的话，照样扫
     if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
       const callee = parent.expression.getText();
-      if (/^console\./.test(callee) || /^((Type|Range|Syntax)?Error|batchError|repositoryError)$/.test(callee)) return true;
+      if (/^console\./.test(callee) || /^((Type|Range|Syntax)?Error|batchError|repositoryError|providerError|newApiResponseError|catalogueError)$/.test(callee)) return true;
     }
   }
   return false;

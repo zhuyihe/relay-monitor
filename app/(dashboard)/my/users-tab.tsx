@@ -7,7 +7,7 @@ import { ErrorState } from "../../components/data-state";
 import { Icon } from "../../components/icons";
 import { CountBadge, Panel } from "../../components/panel";
 import { StatusText } from "../../components/status";
-import { DataTable, Delta, RANGE_LABEL, TOKEN_NOTE, deltaSortValue, money, perM, productErrorMessage, sum, totalsNote } from "./shared";
+import { DataTable, Delta, RANGE_LABEL, TOKEN_NOTE, deltaSortValue, money, perM, sum, totalsNote } from "./shared";
 import type { Col, OwnRange, OwnView, UsageRow } from "./shared";
 
 export function UsersTab({ v, range, reload }: { v: OwnView; range: OwnRange; reload: () => Promise<unknown> }) {
@@ -159,7 +159,7 @@ function UserGroups({ v, reload }: { v: OwnView; reload: () => Promise<unknown> 
   if (flow.error) {
     return (
       <Panel title="用户 × 分组">
-        <ErrorState title="分组和渠道数据暂时取不到" error={productErrorMessage(flow.error)} onRetry={() => reload()} />
+        <ErrorState title="分组和渠道数据暂时取不到" error={flow.error} onRetry={() => reload()} />
       </Panel>
     );
   }

@@ -1,5 +1,7 @@
 // ---- 管理员/root API Key 转售标记 ---------------------------------------------
 import { withAuth, json } from "../../../../lib/api.js";
+import { errorCodeOf } from "../../../../lib/error-copy.js";
+import { OWN_STATION_UNSET } from "../../../../lib/format.js";
 import { queryAdminTokens } from "../../../../lib/providers.js";
 import { ownCache, getOwnUsers } from "../../../../server/own-helpers.js";
 
@@ -7,7 +9,7 @@ import { ownCache, getOwnUsers } from "../../../../server/own-helpers.js";
 export const GET = withAuth(async (request, rt) => {
   const { store } = rt;
   const own = store.list().find((s) => s.isOwn && s.type === "newapi");
-  if (!own) return json({ error: "还没有标记「我的中转站」（需 New API 管理员令牌）" }, 400);
+  if (!own) return json({ error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }, 400);
   try {
     const users = await getOwnUsers(rt, own);
     const admins = (users || []).filter((u) => u.role >= 10);
@@ -31,13 +33,15 @@ export const GET = withAuth(async (request, rt) => {
         accounts.push({
           username: u.username, role: u.role, enumerable: false,
           error: err?.message || String(err),
+          errorCode: errorCodeOf(err),
           tokens: names.map((name) => ({ name, flagged: true, usedUsd: null })),
         });
       }
     }
     return json({ accounts });
   } catch (err) {
-    return json({ error: err?.message || String(err) }, 502);
+    // 读自营站点没成：带上游给的码，没有就按「自营站点暂时读不到」说（lib/error-copy.js §8.2）
+    return json({ error: err?.message || String(err), code: errorCodeOf(err, "OWN_STATION_UNAVAILABLE") }, 502);
   }
 });
 
@@ -45,7 +49,7 @@ export const GET = withAuth(async (request, rt) => {
 export const PUT = withAuth(async (request, rt) => {
   const { store } = rt;
   const own = store.list().find((s) => s.isOwn && s.type === "newapi");
-  if (!own) return json({ error: "还没有标记「我的中转站」" }, 400);
+  if (!own) return json({ error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }, 400);
   const body = await request.json().catch(() => ({}));
   const keys = Array.isArray(body?.keys) ? body.keys : [];
   await store.update(own.id, { resoldAdminKeys: keys });

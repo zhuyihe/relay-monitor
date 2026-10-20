@@ -31,8 +31,6 @@
 .jy-stations-issue > .jy-sym { width: 14px; height: 14px; margin-top: 3px; color: var(--jy-crit); flex: none; }
 .jy-stations-issue-body { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
 .jy-stations-issue-body b { font-size: 13px; line-height: 20px; font-weight: 500; color: var(--jy-crit-ink); }
-.jy-stations-diag summary { cursor: pointer; color: var(--jy-ink-2); min-height: 24px; display: flex; align-items: center; }
-.jy-stations-diag > span { display: block; overflow-wrap: anywhere; color: var(--jy-ink-2); }
 
 .jy-stations-sort {
   display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none;

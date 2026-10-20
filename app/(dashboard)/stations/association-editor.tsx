@@ -124,7 +124,7 @@ function AssociationEditorBody({ ruleId, fixedCost, businessTz, onBusyChange, on
         setRule(found);
       }
       if (!next.channelsError) setChannelsAsOf(Date.now());
-      // 渠道列表刷新失败时保留上次读到的列表；channelsError 是固定说法，只进「查看详细原因」，按 channelsErrorCode 归类
+      // 渠道列表刷新失败时保留上次读到的列表；channelsError 是脱敏后的原文，只进「查看详细原因」，按 channelsErrorCode 归类
       setConfig((previous: any) => next.channelsError && previous ? { ...next, channels: previous.channels } : next);
     } catch (err: any) {
       if (current !== loadEpoch.current) return;
@@ -196,7 +196,7 @@ function AssociationEditorBody({ ruleId, fixedCost, businessTz, onBusyChange, on
   };
   const directory: any[] = config?.channels || [];
   const unread = !!config?.channelsError && !directory.length;
-  // 渠道列表读不到的原因：接口给的是固定说法加 code；这次刷新本身失败时是那个报错
+  // 渠道列表读不到的原因：接口给的是脱敏原文加 code；这次刷新本身失败时是那个报错
   const channelsFailure = typeof config?.channelsError === "string" ? { code: config.channelsErrorCode, error: config.channelsError } : config?.channelsError;
   const missing = (rule.channels || []).filter((channel: any) => !directory.some((entry: any) => Number(entry.id) === Number(channel.channelId)));
   const options = [
