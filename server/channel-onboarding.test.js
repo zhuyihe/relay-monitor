@@ -125,7 +125,7 @@ async function accountReadFixture(t) {
   const pure = await add("pure-key", { type: "newapi-key", apiKey: "independent-key" });
   const unknown = await add("unknown-legacy", { userId: "A" });
   const archived = await add("A-archived", {}, identities.A); await store.archive(archived.id);
-  a1.balance = { ok: false, error: "403 A-monitor-1-pat old-access old-refresh", remaining: 10, raw: { password: "private-raw" },
+  a1.balance = { ok: false, code: "UPSTREAM_AUTH_DENIED", error: "403 A-monitor-1-pat old-access old-refresh", remaining: 10, raw: { password: "private-raw" },
     accessToken: "private-balance", diagnostics: { password: "private-diagnostics" }, account: { password: "private-object" } };
   a1.s2Tokens = { accessToken: "old-access", refreshToken: "old-refresh" }; a1.alertState = { errorCount: 9, privateAlert: true };
   a1.onboardingOrigin = { requestId: "private-origin" }; a1.authorizationUpdateRef = { requestId: "private-update" };
@@ -545,6 +545,25 @@ test("U03 actual Store本地全量账号视图同域A/B分离，两old monitor�
   const immediate = (await f.rt.channelOnboarding.listAccounts()).accounts.find((account) => account.identity.accountId === "A").keys.find((item) => item.tokenId === 9);
   assert.equal(immediate.billingEffectiveFromMs, Date.parse("2026-10-09T05:00:00Z"));
   assert.equal(immediate.firstQueryableAtMs, Date.parse("2026-10-08T16:00:00Z"));
+});
+
+test("读余额失败时，登录信息不对、没有权限、开了两步验证给「更新登录信息」，人机验证、连不上、只有状态数字不给", async (t) => {
+  const f = await accountReadFixture(t);
+  const cases = [
+    [{ code: "AUTHENTICATION_FAILED", error: "401 Unauthorized" }, true],
+    [{ code: "UPSTREAM_AUTH_DENIED", error: "403 Forbidden" }, true],
+    [{ code: "TWO_FACTOR_ENABLED", error: "requires_2fa" }, true],
+    [{ error: "无权进行此操作，access token 无效" }, true],
+    [{ code: "CAPTCHA_REQUIRED", error: "需要人机验证" }, false],
+    [{ code: "NETWORK_UNREACHABLE", error: "The operation was aborted due to timeout" }, false],
+    [{ error: "The operation was aborted due to timeout" }, false],
+    [{ error: "403 old-access" }, false],
+  ];
+  for (const [balance, expected] of cases) {
+    f.a1.balance = { ok: false, ...balance };
+    const model = await f.rt.channelOnboarding.listAccounts();
+    assert.equal(model.actions.some((action) => action.kind === "update_authorization"), expected, JSON.stringify(balance));
+  }
 });
 
 test("U03 public历史关系保留，0active标历史，多active口径冲突不制造统一scope，未知legacy不伪造canonicalKey", async (t) => {

@@ -373,3 +373,65 @@
     - 内联的汇率改用 `rateSnapshotOf`；
     - 「口径提示：」改按 `warningCodes` 分类。
   - 告警 `lib/alerts.js` 自己的 `fmtEta` 和过时的注释（「与前端 statusOf 一致」）。
+
+## A2-1b · 报错归类
+
+报错统一按码归类（§8.2）。读上游、接口、存储出错时在出错的地方给码，页面和接口都用 `lib/error-copy.js` 的 `describeError` 认是哪一类；原文只进「查看详细原因」。原文里的 401、500 这些数字不再当关键词认。
+
+**读上游（`lib/providers.js`）**
+- 每个出错的地方用 `providerError(code, 脱敏原文)` 抛出，`queryStation` 的结果和 `balance` 带上 `code`。
+- HTTP 状态：401 → 登录信息不对；403 → 没有权限；404 → 地址或类型不对；429 和 5xx → 上游繁忙；其余不给码，按原文归类。
+- 连不上、超时 → 连不上；地址解析不了 → 地址或类型不对。
+- 缺登录信息、两步验证、人机验证、数据看板没开、对方版本太旧各有自己的码。
+- 删掉 `httpErrorMessage`、`reconciliationProviderError`。
+
+**测试读取（`/api/stations/test`、上游列表、上游详情）**
+
+`lib/connection-test.js` 只留脱敏 `connectionDiagnostic`，自己那套分类删掉，改用 `describeError`。
+
+| 原来 | 现在 |
+|---|---|
+| 连接信息不完整：连接信息不完整 + 「请检查站点地址，以及……」 | 读不到：登录信息没填全，请到上游里补上 |
+| 凭证或权限问题：凭证无效、已过期或没有所需权限 + 一句建议 | 读不到：登录信息不对或过期了 / 这份登录信息没有读取权限，需要超级管理员的访问令牌 |
+| 地址或类型不匹配：站点地址或平台类型不匹配 + 一句建议 | 读不到：地址或类型可能不对，请检查后再填 |
+| 网络连接问题：无法连接到站点 + 一句建议 | 读不到：连不上这个地址，检查地址有没有填错；还不行请联系技术同事 |
+| 连接测试失败：连接测试未通过 + 一句建议 | 读不到：§8.2 对应那一类的话（繁忙、内容不对、人机验证、其他） |
+| 查看脱敏诊断 | 查看详细原因（`ErrorDetail`） |
+
+- 接口返回 `code`、`category`（类名）、`message`（上表那一句）、`action`（下一步的动作键）和 `diagnostic`（脱敏原文）。
+- 运营总览余额读不到的原因改用 `errorText`。
+
+**接口**
+
+| 原来 | 现在 |
+|---|---|
+| 未找到该中转站 / 未找到要编辑的上游资源（404） | 找不到这个上游 + `UPSTREAM_NOT_FOUND` |
+| 无效的中转站类型（400） | 请选上游类型 + `UNSUPPORTED_UPSTREAM_TYPE` |
+| 还没有标记「我的中转站」（需 New API 管理员令牌）等三种写法（自营接口 400） | 还没设置自营站点：在上游资源里编辑你的 New API 站点，打开「这是我的自营站点」。+ `OWN_STATION_UNSET` |
+| 读自营站点失败（502，只有原文） | 原文 + 上游给的码，没有就带 `OWN_STATION_UNAVAILABLE`（自营站点暂时读不到，请稍后再试） |
+| 服务器错误（没兜住的异常没有原文时） | 去掉；500 带原文和报错自己的码 |
+| 服务初始化失败（500） | 同一句，改成 503 + `NOT_READY` |
+| 保存失败，请稍后重试（只有原文） | 同一句 + `SAVE_FAILED`（界面说「没存上，请稍后再试」） |
+| 未命名中转站 | 未命名上游 |
+
+- `withAuth`、`withRuntime` 共用一个外壳（`lib/api.js`）。
+- 成本、转售明细、利润、流向的报错加 `errorCode`（`server/own-helpers.js`，由 `errorCodeOf` 给出）；`/api/usage` 的报错带 `code`。
+
+**页面**
+- 自营业务页、成本分析页、运营总览按码认「还没设置自营站点」（`describeError(e).category === "unset"`），不再认「还没有标记」这几个字。
+- 删掉 `my/shared.tsx` 的 `productErrorMessage`、`isUnconfigured`。页面状态里存报错对象，句子和「查看详细原因」在 A2-2、A2-3 换。
+
+**渠道绑定（`server/channel-onboarding.js`）**
+- 读上游失败时认登录、权限两类，不再看文字。
+- 写入前的复查扩到所有码，只有「需要重新预览」那四种不复查。
+- 登录、权限两类给「更新登录信息」，两步验证算登录类，人机验证不给。
+
+**守护**
+- 扫描范围加上 `lib/providers.js`、`lib/connection-test.js`、`lib/api.js`、`lib/cap.js`、`db/store.js`、`/api/meta`、自营接口、上游接口。
+- 「版本」只挡 §3.6、§9 不显示的几种：范围版本、计算版本、授权版本、配置版本、版本号。「软件版本」（§11）和「对方的版本不支持这项功能」（§8.2）照用。
+- 读上游的几种报错原文（`providerError`、`newApiResponseError`、`catalogueError` 等）只给开发看，不扫。
+
+**留到后面**
+- 新增上游时「请填写站点地址」那句没动。
+- 成本分析页、自营业务页的报错横幅和提示还显示原文，A2-3 换成 `errorText` 和 `ErrorDetail`；运营总览、公用 `ErrorState` 在 A2-2 换。
+- `lib/alerts.js`、`server/report.js`、`lib/notify.js` 的文字留给 A3。

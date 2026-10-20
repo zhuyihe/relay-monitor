@@ -17,7 +17,7 @@ export const GET = withAuth(async (request, rt) => {
 export const POST = withAuth(async (request, rt) => {
   const b = (await request.json().catch(() => null)) || {};
   if (!b.type || !STATION_TYPES.some((t) => t.value === b.type))
-    return json({ error: "无效的中转站类型" }, 400);
+    return json({ error: "请选上游类型", code: "UNSUPPORTED_UPSTREAM_TYPE" }, 400);
   if (!b.baseUrl && b.type !== "fixed") return json({ error: "请填写站点地址" }, 400);
   const s = await rt.store.add(b);
   rt._ownCache?.clear();

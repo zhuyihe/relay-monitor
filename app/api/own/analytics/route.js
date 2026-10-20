@@ -1,5 +1,6 @@
 // ---- 「我的站点」下游分析（分时段 / 分模型 / 分用户 + 消费预测）------------------
 import { withAuth, json } from "../../../../lib/api.js";
+import { OWN_STATION_UNSET } from "../../../../lib/format.js";
 import { queryOwnData } from "../../../../lib/providers.js";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../../../lib/business-time.js";
 import { forecastDaily, forecastHourly } from "../../../../lib/forecast.js";
@@ -11,9 +12,7 @@ export const GET = withAuth(async (request, rt) => {
   const { store } = rt;
   const own = store.list().find((s) => s.isOwn && s.type === "newapi");
   if (!own) {
-    return json({
-      error: "还没有标记「我的中转站」：添加/编辑你的 New API 站点，勾选「这是我自己的中转站」（需管理员令牌）",
-    }, 400);
+    return json({ error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }, 400);
   }
   const sp = new URL(request.url).searchParams;
   // 展示窗口 + 上一等长窗口（环比用来抓「昨天 $11、今天 $152」这类跳变）
@@ -162,6 +161,7 @@ export const GET = withAuth(async (request, rt) => {
     cache.set(cacheKey, { at: Date.now(), payload });
     return json(payload);
   } catch (err) {
-    return json({ error: err?.message || String(err) }, 502);
+    // 读自营站点没成：带上游给的码，没有就按「自营站点暂时读不到」说（lib/error-copy.js §8.2）
+    return json({ error: err?.message || String(err), code: err?.code || "OWN_STATION_UNAVAILABLE" }, 502);
   }
 });

@@ -19,7 +19,7 @@ export const AUDIT_ROWS = [
 export type AuditProps = {
   audit: any;
   auditing: boolean;
-  auditError: string | null;
+  auditError: Error | null;
   auditRows: number;
   setAuditRows: (n: number) => void;
   run: () => void;

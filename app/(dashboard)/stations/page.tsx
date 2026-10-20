@@ -12,9 +12,11 @@ import { api, cny, fmtTokens, readWorkflowDestination } from "../../../lib/clien
 import { actionsByStation, buildOverviewActions } from "../../../lib/overview-actions";
 import { formatMoney, formatUsd } from "../../../lib/format";
 import { STATION_TABS } from "../../../lib/brand";
+import { testReadText } from "../../../lib/workflow-actions";
 import { ONBOARDING_TYPES } from "../../../lib/channel-onboarding.js";
 import ChannelOnboarding from "../../components/channel-onboarding";
 import { EmptyState, ErrorState, Skeleton } from "../../components/data-state";
+import { ErrorDetail } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { Panel } from "../../components/panel";
 import { RunwayTrack } from "../../components/runway";
@@ -266,7 +268,7 @@ export default function StationsPage() {
       const r = await api(`/api/stations/${s.id}/refresh`, { method: "POST", body: {} });
       setStations((list) => list.map((x) => (x.id === s.id ? { ...x, ...(r.station || {}), balance: r.balance } : x)));
       setAccountsToken((n) => n + 1);
-      if (!r.balance.ok) message.error(`${s.name}：${resultIssue(null, r.balance.error).message}`);
+      if (!r.balance.ok) message.error(`${s.name}：${resultIssue(r.balance).text}`);
     } catch (e: any) {
       message.error(e.message);
     } finally {
@@ -286,7 +288,7 @@ export default function StationsPage() {
         body: { stationId: station.id, type: station.type },
       });
       if (!result.ok) {
-        const issue = resultIssue(result, result.message);
+        const issue = resultIssue(result);
         setStationChecks((checks) => ({ ...checks, [station.id]: { issue, checkedAt: new Date().toISOString() } }));
         return;
       }
@@ -305,7 +307,7 @@ export default function StationsPage() {
       } : item)));
       message.success(`${station.name} 已验证连接，当前展示已更新`);
     } catch (e: any) {
-      const issue = resultIssue(null, e.message || "请求失败");
+      const issue = resultIssue(e);
       setStationChecks((checks) => ({ ...checks, [station.id]: { issue, checkedAt: new Date().toISOString() } }));
     } finally {
       setRetestingIds((ids) => ({ ...ids, [station.id]: false }));
@@ -731,15 +733,9 @@ export default function StationsPage() {
       <div className="jy-stations-issue">
         <Sym kind="crit" />
         <div className="jy-stations-issue-body">
-          <b>{issue.category}：{issue.message}</b>
-          {issue.action ? <span>{issue.action}</span> : null}
+          <b>{testReadText({ ok: false, reason: issue.text })}</b>
           <span>最近检查：{relTime(v.checkedAt)}</span>
-          {issue.diagnostic ? (
-            <details className="jy-stations-diag">
-              <summary>查看脱敏诊断</summary>
-              <span>{issue.diagnostic}</span>
-            </details>
-          ) : null}
+          <ErrorDetail raw={issue.raw} />
         </div>
         <Button size="small" icon={<Icon name="test" />} loading={!!retestingIds[v.s.id]} onClick={() => onRetest(v.s)}>
           重新测试连接

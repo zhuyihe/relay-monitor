@@ -16,7 +16,7 @@ import { Seg } from "../../components/seg";
 import { TrendPanel } from "../../components/trend-panel";
 import { derive } from "../analytics/derive";
 import { ProfitBasis } from "./profit-basis";
-import { DataTable, RANGE_LABEL, TOKEN_NOTE, productErrorMessage, sum } from "./shared";
+import { DataTable, RANGE_LABEL, TOKEN_NOTE, sum } from "./shared";
 import type { MyTab, OwnRange, OwnView } from "./shared";
 
 // 利润等式里各项跳到哪个标签页看明细（保留当前时间范围）
@@ -88,7 +88,7 @@ function Equation({ v, range, onBasis, reload }: { v: OwnView; range: OwnRange; 
   if (!p || p.error) {
     return (
       <Panel title={title} caption={caption}>
-        <ErrorState title="利润暂时算不出来" error={productErrorMessage(p?.error || "接口没有返回利润数据")} onRetry={() => reload()} />
+        <ErrorState title="利润暂时算不出来" error={p?.error || "接口没有返回利润数据"} onRetry={() => reload()} />
       </Panel>
     );
   }

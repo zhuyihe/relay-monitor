@@ -10,7 +10,7 @@ import { EmptyState, ErrorState } from "../../components/data-state";
 import { Icon, Sym } from "../../components/icons";
 import { CountBadge, Panel } from "../../components/panel";
 import { StatusTag } from "../../components/status";
-import { DataTable, MODE_LABEL, ROLE_LABEL, productErrorMessage } from "./shared";
+import { DataTable, MODE_LABEL, ROLE_LABEL } from "./shared";
 import type { OwnView } from "./shared";
 
 // GET /api/own/admin-keys 的账号与 Key
@@ -90,7 +90,7 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
   const keys: any[] = p.resoldKeys || [];
   const [mgrOpen, setMgrOpen] = useState(false);
   const [mgrLoading, setMgrLoading] = useState(false);
-  const [mgrError, setMgrError] = useState<string | null>(null);
+  const [mgrError, setMgrError] = useState<Error | null>(null);
   const [accounts, setAccounts] = useState<AdminAccount[] | null>(null);
   const [addInputs, setAddInputs] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -102,7 +102,7 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
       const r = await api("/api/own/admin-keys");
       setAccounts(r.accounts);
     } catch (e: any) {
-      setMgrError(productErrorMessage(e));
+      setMgrError(e);
     } finally {
       setMgrLoading(false);
     }
@@ -152,7 +152,7 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
       setAccounts(null);
       await reload();
     } catch (e: any) {
-      message.error(productErrorMessage(e));
+      message.error(e.message);
     } finally {
       setSaving(false);
     }

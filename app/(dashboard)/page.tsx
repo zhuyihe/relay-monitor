@@ -13,7 +13,7 @@ import type { WorkflowAction } from "../../lib/client";
 import { attentionStationIds, balanceStateOf, buildOverviewActions, lowLineOf } from "../../lib/overview-actions";
 import { rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
-import { describeConnectionFailure } from "../../lib/connection-test";
+import { describeError, errorText } from "../../lib/error-copy";
 import { BALANCE_STATE_TEXT, COST_MODE_TEXT, formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd, formatZonedTime, parseDay, refreshFailedText, soonText } from "../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, shiftDayLabel } from "../../lib/business-time";
 import { AttentionList } from "../components/attention-list";
@@ -98,7 +98,7 @@ export default function OverviewPage() {
   const [stationsErr, setStationsErr] = useState<string | null>(null);
   const [stationsAt, setStationsAt] = useState<number | null>(null);
   const [money, setMoney] = useState<Money | null>(null);
-  const [moneyErr, setMoneyErr] = useState<string | null>(null);
+  const [moneyErr, setMoneyErr] = useState<Error | null>(null);
   const [moneyAt, setMoneyAt] = useState<number | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [trendStation, setTrendStation] = useState<any>(null);
@@ -135,10 +135,10 @@ export default function OverviewPage() {
       return null;
     } catch (e: any) {
       if (rangeRef.current !== r) return null;
-      const msg = String(e?.message || "");
-      if (!msg.includes("还没有标记")) {
-        setMoneyErr(msg || "经营数据加载失败");
-        return msg || "经营数据加载失败";
+      // 没设置自营站点（接口带 OWN_STATION_UNSET）时只统计成本
+      if (describeError(e).category !== "unset") {
+        setMoneyErr(e);
+        return e?.message || "经营数据加载失败";
       }
       try {
         const fallback = await api(`/api/analytics?days=${RANGE_DAYS[r]}&includeArchived=true`);
@@ -149,9 +149,8 @@ export default function OverviewPage() {
         return null;
       } catch (e2: any) {
         if (rangeRef.current !== r) return null;
-        const msg2 = e2?.message || "成本数据加载失败";
-        setMoneyErr(msg2);
-        return msg2;
+        setMoneyErr(e2);
+        return e2?.message || "成本数据加载失败";
       }
     }
   }, []);
@@ -278,7 +277,7 @@ export default function OverviewPage() {
 
 // ---- 利润等式 ---------------------------------------------------------------
 
-function Equation({ range, money, error, onRetry }: { range: Range; money: Money | null; error: string | null; onRetry: () => void }) {
+function Equation({ range, money, error, onRetry }: { range: Range; money: Money | null; error: Error | null; onRetry: () => void }) {
   const title = `${RANGE_NAME[range]}经营`;
   if (error && !money) {
     return (
@@ -504,9 +503,8 @@ function AttentionPanel({
     let buttons: ReactNode;
     switch (a.kind) {
       case "query-failed": {
-        const issue = describeConnectionFailure(s.balance?.error, s);
         what = BALANCE_STATE_TEXT.unreadable;
-        desc = `${issue.message}，最近查询 ${relTime(s.balance?.checkedAt)}。`;
+        desc = `${errorText(s.balance)}，最近查询 ${relTime(s.balance?.checkedAt)}。`;
         buttons = (
           <>
             {sync}
@@ -639,10 +637,9 @@ function RunwayPanel({
 
       let tip: TipRow[];
       if (failed) {
-        const issue = describeConnectionFailure(s.balance?.error, s);
         tip = [
           ["状态", "查询失败"],
-          ["原因", issue.message],
+          ["原因", errorText(s.balance)],
           ["最近查询", relTime(s.balance?.checkedAt)],
         ];
       } else {
@@ -748,7 +745,7 @@ function MoneyPanelShell({
   title: string;
   caption: string;
   money: Money | null;
-  error: string | null;
+  error: Error | null;
   onRetry: () => void;
   children?: ReactNode;
   foot?: ReactNode;
@@ -770,7 +767,7 @@ function MoneyPanelShell({
   );
 }
 
-function RevenuePanel({ title, money, error, onRetry }: { title: string; money: Money | null; error: string | null; onRetry: () => void }) {
+function RevenuePanel({ title, money, error, onRetry }: { title: string; money: Money | null; error: Error | null; onRetry: () => void }) {
   const router = useRouter();
   const content = useMemo(() => {
     if (!money) return null;
@@ -819,7 +816,7 @@ function RevenuePanel({ title, money, error, onRetry }: { title: string; money: 
   );
 }
 
-function CostPanel({ title, money, error, onRetry }: { title: string; money: Money | null; error: string | null; onRetry: () => void }) {
+function CostPanel({ title, money, error, onRetry }: { title: string; money: Money | null; error: Error | null; onRetry: () => void }) {
   const view = useMemo(() => {
     if (!money) return null;
     if (money.unconfigured) {

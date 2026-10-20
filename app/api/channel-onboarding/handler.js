@@ -1,4 +1,4 @@
-import { describeConnectionFailure } from "../../../lib/connection-test.js";
+import { connectionDiagnostic } from "../../../lib/connection-test.js";
 
 // Auth is provided by the route wrapper; this seam keeps request/result tests isolated.
 export async function handleChannelOnboardingRequest(request, rt, operation, params = {}) {
@@ -28,7 +28,7 @@ export async function handleChannelOnboardingRequest(request, rt, operation, par
       ...(Array.isArray(body?.selections) ? body.selections.flatMap((selection) => [selection?.newStation,
         selection?.reconciliationAuthorization?.newAuthorization, rt.store?.get?.(selection?.stationId),
         rt.store?.get?.(selection?.authorizationStationId), rt.store?.get?.(selection?.reconciliationAuthorization?.stationId)]) : [])];
-    const reason = describeConnectionFailure(error?.message || "操作没完成，请稍后再试", connections).diagnostic;
+    const reason = connectionDiagnostic(error?.message || "操作没完成，请稍后再试", connections);
     return Response.json({ error: reason, code: error?.code || "ONBOARDING_FAILED" }, { status: 400 });
   }
 }

@@ -1,10 +1,11 @@
 // 上游资源页的纯数据部分：连接字段常量、错误描述、固定成本汇总、每行的展示模型。
 // 不含 JSX，表格、移动卡片、抽屉共用同一份计算，避免三处口径不一致。
 import { usd } from "../../../lib/client";
-import { describeConnectionFailure } from "../../../lib/connection-test";
 import { formatDays, formatMonthDay } from "../../../lib/format";
 import { balanceStateOf } from "../../../lib/overview-actions";
 import { rateSnapshotOf } from "../../../lib/profit";
+import { noteOf } from "../../components/error-detail";
+import type { ErrorNote } from "../../components/error-detail";
 import { LEVEL_ORDER } from "../../components/status";
 import type { Level } from "../../components/status";
 
@@ -68,33 +69,25 @@ const SHORT_TYPE: Record<string, string> = {
   fixed: "固定成本",
 };
 
-export type ConnectionIssue = {
-  code?: string;
-  category: string;
-  message: string;
-  action: string;
-  diagnostic?: string;
-};
+// 读不到余额、测试读取没成时界面上的那条：text 是归类后的一句（§8.2），raw 是原文，只进「查看详细原因」
+export type ConnectionIssue = ErrorNote;
 
-export type ConnectionTestResult = ConnectionIssue & {
+export type ConnectionTestResult = {
   ok: boolean;
+  message?: string;
   latencyMs?: number;
   account?: string | null;
   remaining?: number;
   currency?: string | null;
+  issue?: ConnectionIssue;
 };
 
 export type StationCheck = { issue: ConnectionIssue; checkedAt: string };
 
-export function resultIssue(result: Partial<ConnectionIssue> | null | undefined, fallback: unknown, station: any = {}): ConnectionIssue {
-  const described = describeConnectionFailure(fallback, station);
-  return {
-    code: result?.code || described.code,
-    category: result?.category || described.category,
-    message: result?.message || described.message,
-    action: result?.action || described.action,
-    diagnostic: result?.diagnostic || described.diagnostic,
-  };
+// 和别处报错同一套归类（noteOf）。source 是余额 { code, error }、测试读取的结果 { code, diagnostic }，或接口报错
+export function resultIssue(source: any): ConnectionIssue {
+  if (source instanceof Error || !source || typeof source !== "object") return noteOf(source);
+  return noteOf({ code: source.code, message: source.diagnostic ?? source.error });
 }
 
 export function testBalanceText(result: ConnectionTestResult) {
@@ -252,14 +245,14 @@ export function buildStationView(
   }
 
   const b = s.balance;
-  const issue = check?.issue || (b && !b.ok ? resultIssue(null, b.error) : null);
+  const issue = check?.issue || (b && !b.ok ? resultIssue(b) : null);
   const checkedAt = check?.checkedAt || b?.checkedAt || null;
   if (archived) {
     return { ...base, level: "muted", statusLabel: "已归档", statusNote: archivedNote(s), issue: null, checkedAt, sortDays: null, runway: null, fx: null };
   }
   if (issue) {
     return {
-      ...base, level: "crit", statusLabel: "查询失败", statusNote: issue.message, issue, checkedAt, sortDays: null,
+      ...base, level: "crit", statusLabel: "查询失败", statusNote: issue.text, issue, checkedAt, sortDays: null,
       runway: { days: null, level: "crit", failed: true, text: "无法计算" }, fx: null,
     };
   }

@@ -9,7 +9,7 @@ async function updateStation(request, rt, params) {
   const b = (await request.json().catch(() => null)) || {};
   const options = { expectedAuthVersion: b.expectedAuthVersion, expectedResourceVersion: b.expectedResourceVersion };
   if ("type" in b && !STATION_TYPES.some((t) => t.value === b.type))
-    return json({ error: "无效的中转站类型" }, 400);
+    return json({ error: "请选上游类型", code: "UNSUPPORTED_UPSTREAM_TYPE" }, 400);
   let s;
   try {
     s = await rt.store.update(params.id, b, options);
@@ -17,7 +17,7 @@ async function updateStation(request, rt, params) {
     if (["AUTHORIZATION_CHANGED", "RESOURCE_CHANGED"].includes(error.code)) return json({ error: error.message, code: error.code }, 400);
     throw error;
   }
-  if (!s) return json({ error: "未找到该中转站" }, 404);
+  if (!s) return json({ error: "找不到这个上游", code: "UPSTREAM_NOT_FOUND" }, 404);
   rt._ownCache?.clear();
   delete rt._ownChannelsCache;
   delete rt._ownUsersCache;

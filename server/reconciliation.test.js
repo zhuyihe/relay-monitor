@@ -505,8 +505,9 @@ test("渠道目录失败时配置接口不回显上游错误中的令牌，服�
 
   const configuration = await reconciliation.getConfiguration();
   assert.equal(configuration.channels.length, 0);
-  assert.equal(configuration.channelsError, "这份登录信息没有读取权限，需要超级管理员的访问令牌");
-  assert.equal(configuration.channelsErrorCode, "OWN_CHANNEL_UNAVAILABLE");
+  // 上游 500 按繁忙说；详细原因是脱敏后的原文
+  assert.match(configuration.channelsError, /rejected/);
+  assert.equal(configuration.channelsErrorCode, "UPSTREAM_REQUEST_FAILED");
   assert.doesNotMatch(JSON.stringify(configuration), /sk-sensitive-value|test-token/);
   assert.equal(logged.length, 1, "失败原因要留在服务端日志里便于排查");
   assert.match(logged[0], /本站渠道目录读取失败:.*rejected/);
@@ -524,7 +525,7 @@ test("渠道目录连不上时，详细原因和 code 说的是同一件事", as
 
   const configuration = await reconciliation.getConfiguration();
   assert.equal(configuration.channelsErrorCode, "NETWORK_UNREACHABLE");
-  assert.equal(configuration.channelsError, "无法连接到站点");
+  assert.equal(configuration.channelsError, "fetch failed");
 });
 
 test("同一个上游 Key 不能同时建立两条启用对账规则", async () => {
@@ -5253,7 +5254,10 @@ test("U06真实withAuth keys GET：登录/zone/token/drift400、原default500、
     assert.deepEqual(await statError.json(), { error: "上游暂时读不到，请稍后再试", code: "KEY_PROBE_UNAVAILABLE", retryable: true });
     f.state.quota = 0;
     f.state.directoryError = true; f.rt._reconciliationMetadataCache.clear();
-    const oldError = await get(); assert.equal(oldError.status, 500); assert.deepEqual(Object.keys(await oldError.json()), ["error"]);
+    // 没兜住的 500 带上原报错的码，界面按码归类（lib/api.js）
+    const oldError = await get(); assert.equal(oldError.status, 500); const oldBody = await oldError.json();
+    assert.deepEqual(Object.keys(oldBody), ["error", "code"]); assert.equal(oldBody.code, "UPSTREAM_AUTH_DENIED");
+    assert.doesNotMatch(oldBody.error, /raw-secret/);
     const selectedError = await get("?tokenId=9"); assert.equal(selectedError.status, 503);
     assert.deepEqual(await selectedError.json(), { error: "读不到这个上游的 Key 列表", code: "KEY_METADATA_UNAVAILABLE", retryable: true });
     const partial = await get("?force=true"); assert.equal(partial.status, 200); assert.equal((await partial.json()).capability.reason, "KEY_METADATA_UNAVAILABLE");

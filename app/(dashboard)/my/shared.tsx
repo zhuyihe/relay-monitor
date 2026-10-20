@@ -26,16 +26,6 @@ export const ROLE_LABEL: Record<number, string> = { 10: "管理员", 100: "root"
 // 看板的 token 只有 prompt + completion，不含缓存读写，倍率也不体现
 export const TOKEN_NOTE = "看板口径：prompt + completion，不含缓存读写（缓存与倍率见「日志精算」）";
 
-// 后端文案还是旧叫法，统一换成术语表里的"自营站点"
-export const productErrorMessage = (error: any) =>
-  String(error?.message || error || "请求失败")
-    .replaceAll("「我的中转站」", "自营站点")
-    .replaceAll("我的中转站", "自营站点")
-    .replaceAll("这是我自己的中转站", "这是我的自营站点");
-
-// 没标记自营站点时接口回 400"还没有标记…"：这是引导场景，不是错误
-export const isUnconfigured = (error: any) => String(error?.message || error || "").startsWith("还没有标记");
-
 // 有效单价：¥ / 百万计费 token。这一列高得离谱的行，通常是缓存写入、长上下文或高倍率在计价
 export const perM = (costCny: number, tokens: number) => (tokens > 0 ? formatUnitPrice(costCny / (tokens / 1e6)) : EMPTY);
 

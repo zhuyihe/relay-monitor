@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { queryNewApiReconciliationMetadata, queryReconciliationMetadata, queryAccountIdentity, queryKeyReconciliationStat, queryOwnChannels, queryStation } from "../lib/providers.js";
-import { describeConnectionFailure } from "../lib/connection-test.js";
+import { connectionDiagnostic } from "../lib/connection-test.js";
+import { describeError, errorCodeOf } from "../lib/error-copy.js";
 import { onboardingBaseUrl, publicOnboardingStation, onboardingConnectionPatch, normalizeBatchInput, ONBOARDING_TYPES, ACCOUNT_TYPE_VALUES,
   coalesceVerifiedBatchGroups, normalizeBatchRecoveryIntent } from "../lib/channel-onboarding.js";
 import { stationBusinessVersion } from "../db/store.js";
@@ -146,15 +147,14 @@ function safeTokens(tokens = []) {
 }
 
 function failure(error, connections = []) {
-  return describeConnectionFailure(error?.message || error || "操作没完成", connections).diagnostic;
+  return connectionDiagnostic(error || "操作没完成", connections);
 }
 
-// 读上游失败时的错误：原文进「查看详细原因」，码给界面归类（§8.2）。上游给了码就用它的；连不上、地址不对用连接测试的码；
-// 其余用 fallback（不在 lib/error-copy.js 里映射），界面再按原文里的关键词分出没有权限、繁忙等。
+// 读上游失败时的错误：原文进「查看详细原因」，码给界面归类（§8.2）。读上游的地方给了码就用它的（lib/providers.js）；
+// 没码但原文看得出连不上的给 NETWORK_UNREACHABLE；其余用 fallback（兜底码，界面再按原文里的关键词分出没有权限、繁忙等）。
 function failureCode(error, connections, fallback) {
   if (error?.code) return error.code;
-  const { code } = describeConnectionFailure(error?.message || error || "操作没完成", connections);
-  return ["NETWORK_UNREACHABLE", "ENDPOINT_MISMATCH"].includes(code) ? code : fallback;
+  return errorCodeOf(error) === "NETWORK_UNREACHABLE" ? "NETWORK_UNREACHABLE" : fallback;
 }
 
 function failureError(error, connections, fallback) {
@@ -358,7 +358,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       }
       for (const resource of account.resources) {
         if (resource.monitorEnabled) account.actions.push(workflowAction("inspect_balance", { accountKey: account.accountKey, stationId: resource.id }));
-        if (!resource.archivedAt && resource.balance?.ok === false && describeConnectionFailure(resource.balance.error).code === "AUTHENTICATION_FAILED") {
+        // 读余额失败、归到「登录信息不对或过期」「没有权限」（§8.2）时给「更新登录信息」；被人机验证拦下不给，要改登录方式
+        if (!resource.archivedAt && resource.balance?.ok === false
+          && ["auth", "permission"].includes(describeError({ code: resource.balance.code, message: resource.balance.error }).category)) {
           account.actions.push(workflowAction("update_authorization", { accountKey: account.accountKey }));
         }
         const members = savedLinks.filter((link) => link.stationId === resource.id);
@@ -929,10 +931,11 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
   function publicBatchStation(station, identity, allRules) {
     if (!station) return null;
     const balance = station.balance && Object.fromEntries(["ok", "remaining", "used", "total", "currency", "account", "checkedAt", "latencyMs",
-      "todayUsed", "todayRequests", "todayTokens", "error"].filter((field) => field in station.balance).map((field) => {
+      "todayUsed", "todayRequests", "todayTokens", "error", "code"].filter((field) => field in station.balance).map((field) => {
       const value = station.balance[field];
       return [field, ["currency", "account", "checkedAt", "error"].includes(field) ? typeof value === "string" ? failure(value, [station]) : null
-        : field === "ok" ? value === true : typeof value === "number" && Number.isFinite(value) ? value : null];
+        : field === "code" ? typeof value === "string" ? value : null
+          : field === "ok" ? value === true : typeof value === "number" && Number.isFinite(value) ? value : null];
     }));
     return { id: station.id || null, name: station.name || "上游账号", type: station.type, baseUrl: station.baseUrl,
       monitorEnabled: station.monitorEnabled !== false, archivedAt: station.archivedAt || null,
@@ -1420,8 +1423,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           }
         }
       } catch (error) {
-        // 没有码的错误和「绑定在这期间变了」（STALE_SCOPE）都再对一次预览：预览后改过的，按「内容有变化」说
-        if ((!error.code || error.code === "STALE_SCOPE") && guard) {
+        // 没做成都再对一次预览（读上游失败现在也带码，见 lib/providers.js）：预览后改过的，按「内容有变化」说；
+        // 本来就要重新预览的报错不再对，留住它更具体的那句
+        if (guard && !["PREVIEW_REQUIRED", "PREVIEW_BASIS_CHANGED", "EFFECTIVE_PREVIEW_CHANGED", "GROUP_CONFLICT"].includes(error.code)) {
           try { assertPreviewGuard(guard, currentGroupContext(group, guard, latestRule)); }
           catch (changed) { error = changed; }
         }

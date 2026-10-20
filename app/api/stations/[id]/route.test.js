@@ -55,6 +55,20 @@ test("公共PUT明确映射CAS，忽略伪造identity/markers/guard，restore保
   assert.equal(station.name, "Renamed");
 });
 
+test("PUT 找不到上游和上游类型不对时带码，界面按码说（lib/error-copy.js）", async () => {
+  const { PUT } = await stationRoute();
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]],
+    commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const rt = { store: new Store(pool), history: { predict: () => null, sparkline: () => [], usedSince: () => 0 } };
+  const send = (id, body) => PUT(new Request(`https://local.test/api/stations/${id}`, { method: "PUT", body: JSON.stringify(body) }), rt, { id });
+  const missing = await send("no-such-station", { name: "x" });
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: "找不到这个上游", code: "UPSTREAM_NOT_FOUND" });
+  const badType = await send("no-such-station", { type: "not-a-type" });
+  assert.equal(badType.status, 400);
+  assert.deepEqual(await badType.json(), { error: "请选上游类型", code: "UNSUPPORTED_UPSTREAM_TYPE" });
+});
+
 test("U04 actual authenticated GET显式includeUnmonitored可重载暂停和专用授权完整编辑数据，默认/非法值不开放全量", async (t) => {
   const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]],
     commit: async () => {}, rollback: async () => {}, release() {} }) };
@@ -167,7 +181,7 @@ test("authenticated PUT暂停、SQL重载和启用保留原成本设置，CAS及
       const saved = structuredClone(documents), beforeRequests = requests;
       failCommit = true;
       const failed = await send({ monitorEnabled: false, ...options });
-      assert.equal(failed.status, 500); assert.equal((await failed.json()).error, "保存失败，请稍后重试");
+      assert.equal(failed.status, 500); assert.deepEqual(await failed.json(), { error: "保存失败，请稍后重试", code: "SAVE_FAILED" });
       assert.equal(station.monitorEnabled, true); assert.equal(station.includeInProfit, includeInProfit);
       assert.deepEqual(documents, saved);
       failCommit = false;

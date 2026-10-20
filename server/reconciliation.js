@@ -21,11 +21,11 @@ import {
   isLiveReconciliationPreset,
 } from "../lib/reconciliation-contract.js";
 import { OWN_STATION_UNSET, UPSTREAM_GONE } from "../lib/format.js";
-import { errorText } from "../lib/error-copy.js";
+import { errorCodeOf, errorText } from "../lib/error-copy.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
-import { describeConnectionFailure } from "../lib/connection-test.js";
+import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow, billingDayOf } from "../lib/reconciliation-scope-policy.js";
 import { RECONCILIATION_SETTLE_DELAY_MS as SETTLE_DELAY_MS, ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
@@ -1795,8 +1795,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       .then(() => stationUsageCost(rt, station, { startMs: window.startMs, endMs: window.endMs, tz: window.timezone, today: window.preset === "today" }))
       .catch(() => ({ usd: null, mode: "unavailable", note: issueText("UPSTREAM_DATA_UNAVAILABLE") }))
       .then((value) => {
-        // 上游错误原文可能回显令牌：只保留固定提示。
-        let { error, ...usage } = value;
+        // 上游错误原文可能回显令牌：只保留固定提示；errorCode 是 own-helpers 给自营页用的，这里不往外带。
+        let { error, errorCode, ...usage } = value;
         // 按余额历史推算但历史没覆盖整个时段（新加的站点、sk 密钥站点）：推出来的消耗只是下限，推不出消耗就算读不到。
         if (usage.mode === "history" && !rt.history?.covers?.(station.id, window.startMs, window.endMs)) {
           usage = Number(usage.usd) > 0 ? { ...usage, lowerBound: true, note: `${usage.note}；历史数据不够，金额偏低` }
@@ -1871,14 +1871,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       let channelsError = null, channelsErrorCode = null;
       if (own) {
         try { channels = await ownChannelsFor(own, { force: forceChannels }); } catch (err) {
-          // 上游错误原文可能回显令牌：接口只返回固定提示和 code（界面按 code 归类），服务端日志只记脱敏后的原因。
-          // 认得出登录信息不对、连不上、地址不对的，用连接测试的码；其余用 OWN_CHANNEL_UNAVAILABLE（按没有权限说）。
-          const failure = describeConnectionFailure(err?.message || String(err), own);
-          console.error("本站渠道目录读取失败:", failure.diagnostic);
-          // 「查看详细原因」里的那句和 code 说的是同一件事：认得出的用连接测试的固定说法，其余按没有权限说。
-          const known = ["AUTHENTICATION_FAILED", "NETWORK_UNREACHABLE", "ENDPOINT_MISMATCH"].includes(failure.code);
-          channelsError = known ? failure.message : "这份登录信息没有读取权限，需要超级管理员的访问令牌";
-          channelsErrorCode = err?.code || (known ? failure.code : "OWN_CHANNEL_UNAVAILABLE");
+          // 上游错误原文可能回显令牌：只返回脱敏后的原文（进「查看详细原因」）和 code（界面按 code 归类，§8.2）。
+          // 读渠道的地方给了码就用它的；没码的按原文补码，认不出的按没有权限说（OWN_CHANNEL_UNAVAILABLE）。
+          channelsError = connectionDiagnostic(err, own);
+          console.error("本站渠道目录读取失败:", channelsError);
+          channelsErrorCode = err?.code || errorCodeOf(err) || "OWN_CHANNEL_UNAVAILABLE";
         }
       }
       return { ownStation: publicStation(own), upstreams, channels, channelsError, channelsErrorCode, rules };

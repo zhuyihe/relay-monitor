@@ -7,6 +7,7 @@ import {
 import { businessTimeZone, resolveBusinessWindow } from "../lib/business-time.js";
 import { amortizeFixedCost, costBasisOf, purchasesOf, rateSnapshotOf, summarizeProfit, toCny } from "../lib/profit.js";
 import { COST_MODE_TEXT, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../lib/format.js";
+import { errorCodeOf } from "../lib/error-copy.js";
 
 // 上游在自营站点的渠道里找不到对应地址时，成本明细「渠道」一栏的写法（成本来源另有一栏）
 const NO_MATCHED_CHANNEL = "没有对上的渠道";
@@ -103,7 +104,7 @@ export async function stationUsageCost(rt, station, { startMs, endMs, tz, today 
     const apiUsd = today && u.summary ? u.summary.cost : u.models.reduce((a, m) => a + m.cost, 0);
     return reconcileUsageCost(apiUsd, historyUsd());
   } catch (err) {
-    return { usd: historyUsd(), mode: "history", note: `读不到用量，改${COST_MODE_TEXT.history}`, error: err?.message || String(err) };
+    return { usd: historyUsd(), mode: "history", note: `读不到用量，改${COST_MODE_TEXT.history}`, error: err?.message || String(err), errorCode: err?.code || errorCodeOf(err) };
   }
 }
 
@@ -123,7 +124,7 @@ export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endM
       resoldUsd += usd;
       breakdown.push({ username: k.username, tokenName: k.tokenName, usd: Math.round(usd * 10000) / 10000 });
     } catch (err) {
-      breakdown.push({ username: k.username, tokenName: k.tokenName, usd: 0, error: err?.message || String(err) });
+      breakdown.push({ username: k.username, tokenName: k.tokenName, usd: 0, error: err?.message || String(err), errorCode: err?.code || errorCodeOf(err) });
     }
   }));
   resoldUsd = Math.round(resoldUsd * 10000) / 10000;
@@ -232,7 +233,8 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
       windowDays: Math.round(windowDays * 10) / 10,
     };
   } catch (err) {
-    return { error: err?.message || String(err) };
+    // error 是原文，只给「查看详细原因」；归类看 errorCode（lib/error-copy.js）
+    return { error: err?.message || String(err), errorCode: err?.code || errorCodeOf(err) };
   }
 }
 
@@ -306,6 +308,7 @@ export async function computeFlowBreakdown(own, { startMs, endMs, prevStartMs, p
       prevWindow: { startMs: prevStartMs, endMs: prevEndMs },
     };
   } catch (err) {
-    return { error: err?.message || String(err) };
+    // error 是原文，只给「查看详细原因」；归类看 errorCode（lib/error-copy.js）
+    return { error: err?.message || String(err), errorCode: err?.code || errorCodeOf(err) };
   }
 }

@@ -222,8 +222,8 @@ export class Store {
           await this._writeNow(change.data, change.guard);
         } catch (err) {
           if (change.guard && ["AUTHORIZATION_CHANGED", "RESOURCE_CHANGED", "PREVIEW_BASIS_CHANGED"].includes(err?.code)) throw err;
-          // API 只返回操作失败，不回显可能包含凭证的数据库错误。
-          throw new Error("保存失败，请稍后重试", { cause: err });
+          // API 只返回操作失败，不回显可能包含凭证的数据库错误；界面按 SAVE_FAILED 说「没存上」（lib/error-copy.js）
+          throw Object.assign(new Error("保存失败，请稍后重试", { cause: err }), { code: "SAVE_FAILED" });
         }
       }
       change.publish?.();
@@ -450,7 +450,7 @@ export class Store {
   async add(input, { verifiedIdentity = null, onboardingOrigin, guard } = {}) {
     const station = {
       id: uid("st"),
-      name: String(input.name || "未命名中转站").trim(),
+      name: String(input.name || "未命名上游").trim(),
       type: input.type,
       baseUrl: String(input.baseUrl || "").trim(),
       monitorEnabled: input.monitorEnabled !== false,
