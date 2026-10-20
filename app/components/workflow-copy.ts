@@ -1,6 +1,6 @@
 // 运营总览「需要处理」一行的文字。标题、说明、按钮名都由服务端按 lib/workflow-actions.js 生成好，这里只负责拼起来。
 import { NAV_LABELS, STATION_TABS } from "../../lib/brand";
-import { formatDays, formatZonedWindow } from "../../lib/format";
+import { BALANCE_STATE_TEXT, formatDays, formatZonedWindow } from "../../lib/format";
 
 export function workflowProblem(action: any): string {
   return action?.title || action?.label || "";
@@ -25,15 +25,15 @@ export function workflowOwner(action: any, nameOf: (id: string) => string | unde
 export function actionPhrase(action: any): string {
   if (action.workflow) return action.title || action.label;
   switch (action.kind) {
-    // 余额这几种的说法随 A2 和总览的余额行一起改（§3.3）
+    // 余额这几种用 §3.3 的档位名，和总览的余额行同一份
     case "query-failed":
-      return "余额查询失败";
+      return BALANCE_STATE_TEXT.unreadable;
     case "balance-danger":
-      return "余额已用完";
+      return BALANCE_STATE_TEXT.empty;
     case "balance-low":
-      return "余额低于提醒线";
+      return BALANCE_STATE_TEXT.low;
     case "eta-soon":
-      return `预计 ${formatDays(action.etaDays)}后用完`;
+      return `${BALANCE_STATE_TEXT.soon}，可用${formatDays(action.etaDays)}`;
     case "fixed-expiring":
       return `${action.daysRemaining} 天后到期`;
     default:

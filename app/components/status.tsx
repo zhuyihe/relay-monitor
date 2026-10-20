@@ -40,7 +40,7 @@ export function StatusSym({ level }: { level: Level }) {
   return <Sym kind={SYM[level]} className={`jy-status--${level}`} />;
 }
 
-// lib/client.ts 的 statusOf（pending / error / danger / warn / ok）→ 展示等级
+// lib/overview-actions.js 的 balanceStateOf（pending / error / danger / warn / ok）→ 展示等级
 export function levelOfStatus(status: string): Level {
   if (status === "error" || status === "danger") return "crit";
   if (status === "warn") return "warn";

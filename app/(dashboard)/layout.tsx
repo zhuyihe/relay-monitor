@@ -5,7 +5,7 @@ import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState }
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { App, Dropdown } from "antd";
-import { api, statusOf } from "../../lib/client";
+import { api } from "../../lib/client";
 import { formatZonedTime } from "../../lib/format";
 import { BRAND, formatPageTitle, NAV_LABELS } from "../../lib/brand";
 import { NAV_GROUPS, NAV_ITEMS, navItemFor } from "../../lib/nav";
@@ -62,7 +62,6 @@ function useAttentionCount(enabled: boolean) {
     return buildOverviewActions(source.stations, {
       rules: source.meta?.rules || {},
       settings: source.meta?.settings || {},
-      statusOf,
       workflowActions,
     }).all.length;
   }, [enabled, source, workflowActions]);

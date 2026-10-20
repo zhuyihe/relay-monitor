@@ -8,10 +8,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
 import type { MenuProps } from "antd";
-import { api, cny, fmtTokens, readWorkflowDestination, statusOf } from "../../../lib/client";
+import { api, cny, fmtTokens, readWorkflowDestination } from "../../../lib/client";
 import { actionsByStation, buildOverviewActions } from "../../../lib/overview-actions";
 import { formatMoney, formatUsd } from "../../../lib/format";
 import { STATION_TABS } from "../../../lib/brand";
+import { ONBOARDING_TYPES } from "../../../lib/channel-onboarding.js";
 import ChannelOnboarding from "../../components/channel-onboarding";
 import { EmptyState, ErrorState, Skeleton } from "../../components/data-state";
 import { Icon, Sym } from "../../components/icons";
@@ -57,10 +58,9 @@ const COLS = 7;
 const actionKey = (s: any) => String(s.id || String(s?.name || "").trim() || "未命名资源");
 
 // 渠道接入目录里的资源及其用到的字段（与服务端目录同口径：四种账号类型，含本站来源）
-const ONBOARDING_TYPES = ["newapi", "newapi-key", "sub2api", "sub2api-password"];
 const onboardingSig = (list: any[]) =>
   list
-    .filter((s) => ONBOARDING_TYPES.includes(s.type))
+    .filter((s) => ONBOARDING_TYPES.some((item) => item.value === s.type))
     .map((s) =>
       [s.id, s.name, s.type, s.baseUrl, s.archivedAt ?? "", s.monitorEnabled !== false, !!s.isOwn, s.authVersion ?? "", s.verifiedIdentity?.provider ?? "", s.verifiedIdentity?.accountId ?? ""].join("|"),
     )
@@ -380,7 +380,7 @@ export default function StationsPage() {
 
   const { todosById, unowned } = useMemo(() => {
     const live = listed.filter((s) => !s.archivedAt);
-    const all = buildOverviewActions(live, { rules, settings, statusOf, workflowActions }).all;
+    const all = buildOverviewActions(live, { rules, settings, workflowActions }).all;
     const ids = new Set(live.map(actionKey));
     // 按账号或核算关联归类、不落在单个资源上的待办只在运营总览处理，这里交代条数
     return { todosById: actionsByStation(all), unowned: all.filter((a: any) => !a.stationId || !ids.has(String(a.stationId))).length };

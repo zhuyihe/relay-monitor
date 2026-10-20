@@ -10,7 +10,7 @@ import { costBasisOf } from "../../../lib/profit.js";
 import type { AccountReadModel, AccountRecord, AccountKeyScope, AccountAssociation, UnmatchedAssociation, CoverageDeclaration, PublicResource, WorkflowDestination, UpstreamKeyRead, ResourceIdentityConfirmation } from "../../../lib/client";
 import { STATION_TABS } from "../../../lib/brand.js";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time.js";
-import { BINDING_COPY } from "../../../lib/channel-onboarding.js";
+import { BINDING_COPY, ONBOARDING_TYPES } from "../../../lib/channel-onboarding.js";
 import { ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText } from "../../../lib/error-copy.js";
 import { EMPTY, FIXED_COST_TEXT, NOTHING_TO_HANDLE, RATE_UNSET_PARITY, formatAsOf, formatDayZone, formatRate, formatUsd, formatZonedDateTime, formatZonedRange, refreshFailedText } from "../../../lib/format";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, coverageAnswerOption, fillIssueCopy, reconciliationChannelStatus, reconciliationIssue } from "../../../lib/reconciliation-contract.js";
@@ -219,7 +219,7 @@ export function useAccountCenter({
     if (["verify", "verify-billing"].includes(destination.action)) {
       const original = stations.find((station) => station.id === destination.stationId && !station.archivedAt);
       if (!original) { setWorkflowError(`${ERROR_CATEGORIES.not_found.text}。`); return; }
-      if (!["newapi", "newapi-key", "sub2api", "sub2api-password"].includes(original.type)) { setWorkflowError(COPY.unsupported); return; }
+      if (!ONBOARDING_TYPES.some((item) => item.value === original.type)) { setWorkflowError(COPY.unsupported); return; }
       openVerification(original);
     } else if (destination.action === "authorization") {
       if (!account || account.accountKey !== destination.accountKey || !authorizationEligible(account).length) { setWorkflowError(DESTINATION_CHANGED); return; }

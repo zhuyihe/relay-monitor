@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { Button } from "antd";
 import { EMPTY, WEEKDAYS, formatCompact, formatInt, formatMoney, formatMonthDay } from "../../../lib/format";
+import { rateSnapshotOf, splitProfitWarnings } from "../../../lib/profit";
 import { EmptyState, ErrorState, PanelSkeleton } from "../../components/data-state";
 import { ForecastChart } from "../../components/forecast-chart";
 import { HBars } from "../../components/hbars";
@@ -99,19 +100,10 @@ function Equation({ v, range, onBasis, reload }: { v: OwnView; range: OwnRange; 
   const upstream = p.upstreamCostCny ?? sum(usageRows, (c) => c.cny);
   const fixed = p.fixedCostCny ?? sum(fixedRows, (c) => c.cny);
 
-  // 未配置汇率按 1:1 折算：自营站点没配影响收入，上游没配影响上游成本
-  const warnings: string[] = p.warnings || [];
-  const rateWarn = warnings.find((w) => w.includes("未配置汇率"));
-  const noRate = rateWarn
-    ? rateWarn
-        .replace(/\s*未配置汇率.*$/, "")
-        .split("、")
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : [];
-  const ownNoRate = !(Number(v.d.station?.cnyPerUsd) > 0);
-  const upstreamNoRate = noRate.some((n) => n !== v.d.station?.name) || (!p.complete && !rateWarn);
-  const reasons = warnings.filter((w) => w.includes("推算") || w.includes("汇率")).map((w) => `${w}。`);
+  // 没设置售价影响收入，上游没设置汇率影响上游成本；都由接口给出，不解析提示文字
+  const ownNoRate = rateSnapshotOf(v.d.station).source === "default";
+  const upstreamNoRate = (p.rateUnsetStations || []).length > 0;
+  const { reasons } = splitProfitWarnings(p);
 
   const revNotes: ReactNode[] = [];
   if ((p.resoldCny || 0) > 0) revNotes.push(<span key="r">含转售 Key {formatMoney(p.resoldCny)}</span>);

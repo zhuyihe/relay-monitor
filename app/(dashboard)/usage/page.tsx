@@ -6,7 +6,8 @@ import "../../styles/pages/usage.css";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Button, Grid, Select } from "antd";
 import { Bar, Column } from "@ant-design/plots";
-import { api, cny4, fmtTokens, rateOf } from "../../../lib/client";
+import { api, cny4, fmtTokens } from "../../../lib/client";
+import { rateSnapshotOf } from "../../../lib/profit";
 import { palette, SERIES_KEYS } from "../../../lib/design-tokens";
 import { useThemeMode } from "../../providers";
 import ChartBox from "../chart-box";
@@ -188,7 +189,7 @@ export default function UsagePage() {
     // 跨上游汇总：按模型名合并（用量成本按各上游充值汇率折算成 ¥）
     const mmap = new Map<string, any>();
     for (const s of okSts) {
-      const rate = rateOf(s);
+      const rate = rateSnapshotOf(s).cnyPerUsd;
       for (const m of s.models || []) {
         const acc = mmap.get(m.model) || { model: m.model, tokens: 0, cost: 0, requests: 0, inputTokens: 0, outputTokens: 0, hasIO: false };
         acc.tokens += m.tokens || 0;
@@ -227,7 +228,7 @@ export default function UsagePage() {
     // 每个上游在各时间桶的 tokens，供"按上游"堆叠使用
     const perStation = new Map<string, Map<string, number>>();
     for (const s of okSts) {
-      const rate = rateOf(s);
+      const rate = rateSnapshotOf(s).cnyPerUsd;
       const own = new Map<string, number>();
       for (const p of s.trend || []) {
         const k = bucketKey(p);
@@ -248,7 +249,7 @@ export default function UsagePage() {
     let totTokens: number, totCost: number, totReqs: number;
     if (current.range === "today") {
       totTokens = okSts.reduce((a: number, s: any) => a + (s.summary?.tokens ?? (s.models || []).reduce((x: number, m: any) => x + m.tokens, 0)), 0);
-      totCost = okSts.reduce((a: number, s: any) => a + (s.summary?.cost ?? (s.models || []).reduce((x: number, m: any) => x + m.cost, 0)) * rateOf(s), 0);
+      totCost = okSts.reduce((a: number, s: any) => a + (s.summary?.cost ?? (s.models || []).reduce((x: number, m: any) => x + m.cost, 0)) * rateSnapshotOf(s).cnyPerUsd, 0);
       totReqs = okSts.reduce((a: number, s: any) => a + (s.summary?.requests ?? (s.models || []).reduce((x: number, m: any) => x + m.requests, 0)), 0);
     } else {
       const src: any[] = current.range === "24h" ? buckets : models;

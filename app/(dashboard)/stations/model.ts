@@ -1,8 +1,10 @@
 // 上游资源页的纯数据部分：连接字段常量、错误描述、固定成本汇总、每行的展示模型。
 // 不含 JSX，表格、移动卡片、抽屉共用同一份计算，避免三处口径不一致。
-import { fmtEta, rateOf, statusOf, usd } from "../../../lib/client";
+import { usd } from "../../../lib/client";
 import { describeConnectionFailure } from "../../../lib/connection-test";
 import { formatDays, formatMonthDay } from "../../../lib/format";
+import { balanceStateOf } from "../../../lib/overview-actions";
+import { rateSnapshotOf } from "../../../lib/profit";
 import { LEVEL_ORDER } from "../../components/status";
 import type { Level } from "../../components/status";
 
@@ -217,7 +219,7 @@ export function buildStationView(
     fixed,
     typeLabel: SHORT_TYPE[s.type] || ctx.typeName(s.type),
     host: hostOf(s.baseUrl),
-    rate: rateOf(s),
+    rate: rateSnapshotOf(s).cnyPerUsd,
     attention,
   };
 
@@ -264,7 +266,7 @@ export function buildStationView(
   if (!b) {
     return { ...base, level: "muted", statusLabel: "待刷新", statusNote: "尚未查询", issue: null, checkedAt, sortDays: null, runway: null, fx: null };
   }
-  const st = statusOf(s, settings);
+  const st = balanceStateOf(s, settings);
   const p = s.prediction;
   const burn = p?.burnPerDay;
   const eta = p?.etaDays;
@@ -292,7 +294,7 @@ export function buildStationView(
       if (st !== "warn") statusLabel = etaLevel === "crit" ? "即将耗尽" : "7 天内耗尽";
     }
   }
-  if (burn > 0 && eta != null) statusNote = `预计 ${fmtEta(eta)}后用完`;
+  if (burn > 0 && eta != null) statusNote = `可用${formatDays(eta)}`;
   // 不再续费的资源与自营站点不做余额提醒（与运营总览一致），只保留文字
   if ((s.noRenewal || s.isOwn) && (level === "crit" || level === "warn")) {
     level = "muted";

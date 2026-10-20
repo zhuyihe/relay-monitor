@@ -26,7 +26,7 @@ test("用量接口返回零但余额下降时改用历史成本", () => {
   assert.deepEqual(reconcileUsageCost(0, 34.24), {
     usd: 34.24,
     mode: "history",
-    note: "用量接口返回 0，已按余额历史推算",
+    note: "用量是 0，改按余额变化估算",
   });
 });
 
@@ -142,4 +142,48 @@ test("利润拆成毛利与净利：固定付费上游只按摊销计，余额�
   assert.equal(p.profitCny, 76);
   assert.equal(p.marginPct, 76);
   assert.deepEqual(p.costs.map((c) => [c.stationId, c.mode]), [["u", "history"], ["f", "fixed"]]);
+  const f = p.costs.find((c) => c.mode === "fixed");
+  assert.deepEqual([f.active, f.expired, f.upcoming, f.total], [1, 0, 0, 1]);
+  assert.deepEqual(p.costs.map((c) => c.channels), [["没有对上的渠道"], ["没有对上的渠道"]]);
+  assert.deepEqual(p.warningCodes, ["estimated_cost"]);
+  assert.deepEqual(p.warnings, ["1 个上游按余额变化估算"]);
+  assert.deepEqual(p.rateUnsetStations, []);
+  assert.equal(p.complete, true);
+});
+
+test("利润提示：售价和汇率分开说，按码返回，没设置汇率的上游单独列出", async () => {
+  const SH = "Asia/Shanghai";
+  const startMs = dayStartInTz("2026-10-13", SH);
+  const now = startMs + 86400000;
+  const own = { id: "own", name: "自营", isOwn: true, type: "newapi" };
+  const usage = { id: "u", name: "按量上游", type: "newapi-key", baseUrl: "https://u.test" };
+  const rated = { id: "r", name: "有汇率", type: "newapi-key", cnyPerUsd: 7 };
+  // 固定成本不用汇率，没设置也不提
+  const fixed = { id: "f", name: "包月上游", type: "newapi-key", fixedPurchases: [{ amount: 300, days: 30, startDate: "2026-09-01" }] };
+  const off = { id: "x", name: "不算的上游", type: "newapi-key", includeInProfit: false };
+  const history = new History({ query: async () => [[]] });
+  history.data.u = [[startMs - 1000, 10], [now - 1000, 9]];
+  const channels = [
+    { name: "直连", baseUrl: "", status: 1, type: 1 },
+    { name: "直连 2", baseUrl: "", status: 1, type: 14 },
+    { name: "u 渠道", baseUrl: "https://u.test", status: 1, type: 1 },
+  ];
+  const rt = { store: { list: () => [own, usage, rated, fixed, off] }, history, _ownChannelsCache: { at: Date.now(), stationId: "own", list: channels } };
+  const p = await computeProfit(rt, own, 10, 0, { startMs, now, tz: SH, range: "7d", resold: null });
+  assert.equal(p.error, undefined);
+  assert.deepEqual(p.warningCodes, ["unmatched_channels", "estimated_cost", "sell_price_unset", "rate_unset", "excluded_upstreams"]);
+  assert.deepEqual(p.warnings, [
+    "2 个在用的渠道没对上上游；已添加的上游照常算成本",
+    "2 个上游按余额变化估算",
+    "自营 没设置售价，暂按 1 美元额度 = 1 元算",
+    "按量上游 没设置汇率，暂按 1 美元 = 1 元算",
+    "不算的上游 不算进利润",
+  ]);
+  assert.deepEqual(p.rateUnsetStations, [{ id: "u", name: "按量上游" }]);
+  assert.equal(p.complete, false);
+  // 官方渠道不分类型合成一行
+  assert.deepEqual(p.unmatched.map((u) => [u.label, u.enabled, u.total]), [["官方渠道", 2, 2]]);
+  const f = p.costs.find((c) => c.mode === "fixed");
+  assert.deepEqual([f.active, f.expired, f.upcoming, f.total, f.note], [0, 1, 0, 1, "已到期"]);
+  assert.deepEqual(p.costs.find((c) => c.stationId === "u").channels, ["u 渠道"]);
 });

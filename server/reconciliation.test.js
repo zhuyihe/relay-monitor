@@ -4652,12 +4652,12 @@ test("3b 账号用量走真实取数：sk 密钥站点没有用量接口，余�
   history.used = 3;
   full = await read();
   assert.deepEqual(full.unaccountedUpstream.accounts.map((item) => [item.state, item.accountUsd, item.notes]),
-    [["partial", 3, ["用量接口失败，已按余额历史推算；历史数据不够，金额偏低"]]]);
+    [["partial", 3, ["读不到用量，改按余额变化估算；历史数据不够，金额偏低"]]]);
   assert.deepEqual([full.unaccountedUpstream.state, full.unaccountedUpstream.total], ["partial", 3]);
   Object.assign(history, { used: 0, covered: true });
   full = await read();
   assert.deepEqual(full.unaccountedUpstream.accounts.map((item) => [item.state, item.accountUsd, item.notes]),
-    [["estimated", 0, ["用量接口失败，已按余额历史推算"]]], "历史覆盖整个时段时 0 就是真的没消耗");
+    [["estimated", 0, ["读不到用量，改按余额变化估算"]]], "历史覆盖整个时段时 0 就是真的没消耗");
   assert.ok(!JSON.stringify(full).includes("sk-keyonly-secret") && !JSON.stringify(full).includes("sk 密钥模式"));
 });
 
