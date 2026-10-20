@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { EMPTY, formatDeltaPct, formatMoney, formatUnitPrice } from "../../../lib/format";
-import { rateOf } from "../../../lib/client";
+import { rateSnapshotOf } from "../../../lib/profit";
 import { Icon } from "../../components/icons";
 
 export const RANGES = ["today", "7d", "30d"] as const;
@@ -57,7 +57,7 @@ export type UsageRow = {
 
 // 接口里的消费金额都是美元额度，统一 × 自营站点售价汇率；profit 已经是人民币
 export function deriveOwn(d: any) {
-  const rate = rateOf(d.station);
+  const rate = rateSnapshotOf(d.station).cnyPerUsd;
   const toCny = (list: any[]): UsageRow[] =>
     (list || []).map((r) => ({ ...r, cost: (r.cost || 0) * rate, prevCost: (r.prevCost || 0) * rate }));
   const models = toCny(d.byModel);

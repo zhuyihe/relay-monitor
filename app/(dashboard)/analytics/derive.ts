@@ -4,7 +4,7 @@
 // 日期按接口返回的业务时区划分，与浏览器时区无关。缺记录的日子标成缺失，不补零。纯函数，不依赖 React。
 import { dayKeyInTz } from "../../../lib/business-time";
 import { formatMonthDay, isoDay, parseDay } from "../../../lib/format";
-import { splitByCumulative } from "../../../lib/profit";
+import { rateSnapshotOf, splitByCumulative } from "../../../lib/profit";
 import type { TrendRow } from "../../components/trend-panel";
 
 export const r2 = (v: number) => Math.round(v * 100) / 100;
@@ -73,8 +73,6 @@ export type MixItem = {
 };
 
 export type HeatReason = "range-not-supported" | "no-cost-stations" | "incomplete-raw-history" | null;
-
-const rateOf = (s: any) => (s && s.cnyPerUsd != null && s.cnyPerUsd > 0 ? s.cnyPerUsd : 1);
 
 export function derive(data: any, own: any) {
   const stations: any[] = Array.isArray(data?.stations) ? data.stations : [];
@@ -200,7 +198,7 @@ export function derive(data: any, own: any) {
       name: s.name,
       archived: !!s.archivedAt,
       days: Number(s.runway.etaDays),
-      burnCny: Number(s.runway.burnPerDay) * rateOf(s),
+      burnCny: Number(s.runway.burnPerDay) * rateSnapshotOf(s).cnyPerUsd,
       basis: s.runway.basis || null,
     }))
     .sort((a, b) => a.days - b.days);

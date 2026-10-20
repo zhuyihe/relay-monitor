@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNod
 import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, List, Radio, Select, Space, Tag, Typography } from "antd";
 import { api } from "../../lib/client";
 import { createRequestId } from "../../lib/request-id.js";
-import { BINDING_COPY, CREDENTIAL_FIELDS as FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, UPSTREAM_TYPES as TYPES, groupOnboardingResources } from "../../lib/channel-onboarding.js";
+import { BINDING_COPY, CREDENTIAL_FIELDS as FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, ONBOARDING_TYPES as TYPES, UPSTREAM_FORM_TEXT, groupOnboardingResources } from "../../lib/channel-onboarding.js";
 import { onboardingKeyContext, onboardingMonitorIds, retainOnboardingRequest } from "../../lib/onboarding-workflow.js";
 import type { AccountReadModel, BatchInput, BatchProbe, BatchRecoveryIntent, BatchResult, ConnectionInput, CoverageDeclaration, SourceCatalogueProjection, UpstreamKeyRead, WorkflowDestination } from "../../lib/client";
 import { NAV_LABELS, STATION_TABS } from "../../lib/brand";
@@ -102,7 +102,7 @@ const COPY = Object.freeze({
   removeLabel: (name: string) => `去掉「${name}」`,
   // 选上游：用已保存的，或者新增一个
   useSaved: "用已有上游",
-  newUpstream: "新增上游",
+  newUpstream: UPSTREAM_FORM_TEXT.create,
   createHint: "保存后，别的渠道也能直接用这个上游。",
   savedLogin: "用已保存的登录信息",
   matchHint: "地址对得上不一定是同一个账号，请选实际用的那个。",
@@ -163,7 +163,8 @@ const BILLING_RESULT: Record<string, string> = { configured: ACCOUNTED, unverifi
 // 测试读取后每把 Key 的预览标题
 const PREVIEW_STATE: Record<string, string> = { ready: COPY.ready, monitor_only: MONITOR_ONLY, unverified: COPY.unverified, unsupported: UNSUPPORTED, unavailable: UNSUPPORTED };
 
-const CREDENTIALS: Record<string, string[]> = { newapi: ["accessToken", "userId"], "newapi-key": ["apiKey"], sub2api: ["accessToken"], "sub2api-password": ["email", "password"] };
+// 每类要填的登录信息取类型表的 needs
+const CREDENTIALS: Record<string, readonly string[]> = Object.fromEntries(TYPES.map((item) => [item.value, item.needs]));
 const RECOVERY_KEY = "channel-onboarding-recovery-v05";
 const PENDING_KEY = "channel-onboarding-pending-v06";
 type CredentialUpdateTarget = BatchProbe["selections"][number]["credentialUpdates"][number];

@@ -286,7 +286,8 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
 function CostSection({ p }: { p: any }) {
   const router = useRouter();
   const costs: any[] = p.costs || [];
-  const warnMode = (c: any) => c.mode === "history" || c.note === "已到期" || c.note === "已全部到期";
+  // 固定成本全部到期按笔数判断，不认 note 的文字
+  const warnMode = (c: any) => c.mode === "history" || (c.total > 0 && c.expired === c.total);
   return (
     <section className="jy-my-section">
       <h3 className="jy-my-h3">

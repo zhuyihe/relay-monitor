@@ -8,12 +8,13 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { App, Button } from "antd";
-import { api, rateOf, statusOf, threshold } from "../../lib/client";
+import { api } from "../../lib/client";
 import type { WorkflowAction } from "../../lib/client";
-import { attentionStationIds, buildOverviewActions } from "../../lib/overview-actions";
+import { attentionStationIds, balanceStateOf, buildOverviewActions, lowLineOf } from "../../lib/overview-actions";
+import { rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
 import { describeConnectionFailure } from "../../lib/connection-test";
-import { formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd, formatZonedTime, parseDay, refreshFailedText } from "../../lib/format";
+import { BALANCE_STATE_TEXT, COST_MODE_TEXT, formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd, formatZonedTime, parseDay, refreshFailedText, soonText } from "../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, shiftDayLabel } from "../../lib/business-time";
 import { AttentionList } from "../components/attention-list";
 import { Sym } from "../components/icons";
@@ -66,6 +67,7 @@ function relTime(iso: string | null | undefined): string {
 }
 
 // 站点余额按站点自己的单位显示；配了汇率的站点是美元额度
+const rateOf = (s: any) => rateSnapshotOf(s).cnyPerUsd;
 const balanceText = (s: any, v: number) => (rateOf(s) !== 1 ? formatUsd(v) : formatMoney(v));
 const balanceWithCny = (s: any, v: number) =>
   rateOf(s) !== 1 ? `${formatUsd(v)}，约 ${formatMoney(v * rateOf(s))}` : formatMoney(v);
@@ -336,10 +338,8 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
   const fixedCosts = costs.filter((c) => c.mode === "fixed");
   const ownRateMissing = !(Number(own.station?.cnyPerUsd) > 0);
   const users = (own.byUser || []).filter((u: any) => !u.isAdmin).length;
-  // 只有"推算"和"汇率按 1:1"会让数字不准；未关联渠道、不计入利润是口径说明，放到成本面板底部
-  const reasons = ((profit.warnings || []) as string[])
-    .filter((w) => /推算|汇率/.test(w))
-    .map((w) => (/[。！？]$/.test(w) ? w : `${w}。`));
+  // 只有估算和没设置汇率 / 售价会让数字不准；其余提示放到成本面板底部
+  const { reasons } = splitProfitWarnings(profit);
   return (
     <ProfitEquation
       title={title}
@@ -406,7 +406,6 @@ function AttentionPanel({
       buildOverviewActions(stations || [], {
         rules,
         settings,
-        statusOf,
         workflowActions,
       }),
     [stations, rules, settings, workflowActions],
@@ -506,7 +505,7 @@ function AttentionPanel({
     switch (a.kind) {
       case "query-failed": {
         const issue = describeConnectionFailure(s.balance?.error, s);
-        what = "余额查询失败";
+        what = BALANCE_STATE_TEXT.unreadable;
         desc = `${issue.message}，最近查询 ${relTime(s.balance?.checkedAt)}。`;
         buttons = (
           <>
@@ -519,10 +518,10 @@ function AttentionPanel({
       case "balance-danger":
       case "balance-low": {
         const low = a.kind === "balance-low";
-        what = low ? "余额低于提醒线" : "余额已用完";
+        what = low ? BALANCE_STATE_TEXT.low : BALANCE_STATE_TEXT.empty;
         const parts = [`当前余额 ${balanceWithCny(s, bal)}`];
-        if (low) parts.push(`提醒线 ${balanceText(s, threshold(s, settings))}`);
-        if (low && eta != null && burn > 0) parts.push(`预计 ${formatDays(eta)}后用完`);
+        if (low) parts.push(`提醒线 ${balanceText(s, lowLineOf(s, settings))}`);
+        if (low && eta != null && burn > 0) parts.push(`可用${formatDays(eta)}`);
         desc = `${parts.join("，")}。`;
         buttons = (
           <>
@@ -533,7 +532,7 @@ function AttentionPanel({
         break;
       }
       case "eta-soon": {
-        what = `预计 ${formatDays(a.etaDays)}后用完`;
+        what = soonText(a.etaDays);
         const basis = s.prediction?.basis ? `（${s.prediction.basis}）` : "";
         desc = `当前余额 ${balanceWithCny(s, bal)}，日均消耗 ${formatMoney(burn * rate)}${basis}。`;
         buttons = (
@@ -614,7 +613,7 @@ function RunwayPanel({
   const rows = useMemo(() => {
     const list = (stations || []).filter((s) => !s.isOwn && s.type !== "fixed" && !s.archivedAt);
     return list.map((s) => {
-      const st = statusOf(s, settings);
+      const st = balanceStateOf(s, settings);
       const failed = st === "error";
       const rate = rateOf(s);
       const p = s.prediction;
@@ -852,12 +851,10 @@ function CostPanel({ title, money, error, onRetry }: { title: string; money: Mon
         key: String(c.stationId),
         name: c.name,
         value: Number(c.cny) || 0,
-        tipExtra: c.note ? [["口径", c.note]] : c.mode === "history" ? [["口径", "按余额变化推算"]] : undefined,
+        tipExtra: c.note ? [["怎么算的", c.note]] : COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT] ? [["怎么算的", COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT]]] : undefined,
       }))
       .sort((a: HBarItem, b: HBarItem) => (b.value ?? 0) - (a.value ?? 0));
-    const notes = ((profit.warnings || []) as string[])
-      .filter((w) => !/推算|汇率/.test(w))
-      .map((w) => (/[。！？]$/.test(w) ? w : `${w}。`));
+    const { notes } = splitProfitWarnings(profit);
     return { items, total: sum(items.map((i) => i.value ?? 0)), approx: !!profit.estimated, notes };
   }, [money]);
 

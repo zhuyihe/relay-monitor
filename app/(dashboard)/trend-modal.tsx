@@ -5,8 +5,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import { Button, Modal } from "antd";
-import { api, rateOf, fmtTokens } from "../../lib/client";
-import { axisMoney, formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd } from "../../lib/format";
+import { api, fmtTokens } from "../../lib/client";
+import { rateSnapshotOf } from "../../lib/profit";
+import { axisMoney, basisText, formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd } from "../../lib/format";
 import { clamp, niceTicks } from "../../lib/chart-math";
 import { ChartTip, TipBody } from "../components/float-tip";
 import { useElementWidth } from "../components/use-width";
@@ -30,12 +31,6 @@ const H = 240;
 const HOUR = 3_600_000;
 
 const at = (ms: number) => `${formatMonthDay(ms)} ${formatHhmm(ms)}`;
-
-// 服务端给的估算依据：近3小时 / 近12小时 / 回归
-function basisText(basis: string | undefined) {
-  if (!basis || basis === "回归") return "按近期走势估算";
-  return `按${basis.replace(/(\d+)/, " $1 ")}的消耗估算`;
-}
 
 // 横轴刻度：按跨度选 1 小时到 7 天的整点间隔，保证每个标签至少有 72px；
 // 带预测的 30 天能拉到 60 天，窄屏上 7 天也放不下时按整周加大间隔
@@ -277,7 +272,7 @@ export default function TrendModal({
       });
   }, [stationId, hours, retry]);
 
-  const rate = station ? rateOf(station) : 1;
+  const rate = rateSnapshotOf(station).cnyPerUsd;
   const pred = data?.prediction;
   const burn = pred?.burnPerDay > 0 ? pred.burnPerDay * rate : 0;
   const points: [number, number][] = useMemo(

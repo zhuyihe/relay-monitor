@@ -6,6 +6,10 @@ import {
 } from "../lib/providers.js";
 import { businessTimeZone, resolveBusinessWindow } from "../lib/business-time.js";
 import { amortizeFixedCost, costBasisOf, purchasesOf, rateSnapshotOf, summarizeProfit, toCny } from "../lib/profit.js";
+import { COST_MODE_TEXT, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../lib/format.js";
+
+// 上游在自营站点的渠道里找不到对应地址时，成本明细「渠道」一栏的写法（成本来源另有一栏）
+const NO_MATCHED_CHANNEL = "没有对上的渠道";
 
 // 分析结果缓存（admin-keys PUT 改利润口径时要清掉，挂 rt 上跨路由共享）
 export function ownCache(rt) {
@@ -59,7 +63,8 @@ export function mapCostChannels(upstreams, channels) {
       entry.channels.push(ch.name);
       matched.set(station.id, entry);
     } else {
-      const label = cu || `官方 / 内置渠道（type ${ch.type}）`;
+      // 没填地址的是直连模型厂商的官方渠道，不分类型合成一行
+      const label = cu || "官方渠道";
       const entry = unmatched.get(label) || { label, names: [], enabled: 0, total: 0 };
       entry.names.push(ch.name);
       entry.total++;
@@ -84,7 +89,7 @@ export function reconcileUsageCost(apiUsd, historyUsd) {
   const api = Number.isFinite(Number(apiUsd)) ? Math.max(0, Number(apiUsd)) : 0;
   const history = Number.isFinite(Number(historyUsd)) ? Math.max(0, Number(historyUsd)) : 0;
   if (api <= 0 && history > 0) {
-    return { usd: history, mode: "history", note: "用量接口返回 0，已按余额历史推算" };
+    return { usd: history, mode: "history", note: `用量是 0，改${COST_MODE_TEXT.history}` };
   }
   return { usd: api, mode: "usage", note: null };
 }
@@ -98,7 +103,7 @@ export async function stationUsageCost(rt, station, { startMs, endMs, tz, today 
     const apiUsd = today && u.summary ? u.summary.cost : u.models.reduce((a, m) => a + m.cost, 0);
     return reconcileUsageCost(apiUsd, historyUsd());
   } catch (err) {
-    return { usd: historyUsd(), mode: "history", note: "用量接口失败，已按余额历史推算", error: err?.message || String(err) };
+    return { usd: historyUsd(), mode: "history", note: `读不到用量，改${COST_MODE_TEXT.history}`, error: err?.message || String(err) };
   }
 }
 
@@ -160,9 +165,11 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
       const purchases = purchasesOf(s);
       if (!purchases.length) continue;
       const fixed = amortizeFixedCost(purchases, { startMs, endMs: now, tz });
+      // 笔数随项返回，页面按笔数判断是否到期，不认 note 的文字
       costs.push({
         stationId: s.id, name: s.name, mode: "fixed", note: fixed.note,
-        channels: matched.get(s.id)?.channels || ["未直接出现在 New API 渠道 · 按固定成本计费"],
+        active: fixed.active, expired: fixed.expired, upcoming: fixed.upcoming, total: fixed.total,
+        channels: matched.get(s.id)?.channels || [NO_MATCHED_CHANNEL],
         cny: fixed.cny,
       });
     }
@@ -172,7 +179,7 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
       upstreams
         .filter((station) => costBasisOf(station) === "usage")
         .map(async (station) => {
-          const chNames = matched.get(station.id)?.channels || ["未直接出现在 New API 渠道 · 按监控数据计费"];
+          const chNames = matched.get(station.id)?.channels || [NO_MATCHED_CHANNEL];
           const item = { stationId: station.id, name: station.name, channels: chNames };
           const selected = await stationUsageCost(rt, station, { startMs, endMs: now, tz, today: range === "today" });
           return { ...item, ...selected, cny: toCny(selected.usd, rateSnapshotOf(station)) };
@@ -188,17 +195,19 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
     const unmatchedList = [...unmatched.values()].sort((a, b) => b.enabled - a.enabled || b.total - a.total);
     const unmatchedEnabled = unmatchedList.reduce((a, x) => a + x.enabled, 0);
     const estimatedCosts = costs.filter((c) => c.mode === "history").length;
-    const defaultRateStations = [own, ...costs
-      .filter((c) => c.mode !== "fixed")
-      .map((c) => upstreams.find((s) => s.id === c.stationId))
-      .filter(Boolean)]
-      .filter((s, i, all) => rateSnapshotOf(s).source === "default" && all.findIndex((x) => x.id === s.id) === i)
-      .map((s) => s.name);
-    const warnings = [];
-    if (unmatchedEnabled) warnings.push(`${unmatchedEnabled} 个启用渠道未直接关联监控站；全部监控上游仍已独立计入成本`);
-    if (estimatedCosts) warnings.push(`${estimatedCosts} 个上游使用余额历史推算成本`);
-    if (defaultRateStations.length) warnings.push(`${defaultRateStations.join("、")} 未配置汇率，当前按 1:1 折算`);
-    if (excludedUpstreams.length) warnings.push(`${excludedUpstreams.map((s) => s.name).join("、")} 已设置为不计入利润成本`);
+    // 自营站点没设置售价影响收入，按用量算的上游没设置汇率影响上游成本，两件事分开说
+    const ownPriceUnset = rateSnapshotOf(own).source === "default";
+    const rateUnsetStations = upstreams
+      .filter((s) => rateSnapshotOf(s).source === "default" && costs.some((c) => c.mode !== "fixed" && c.stationId === s.id))
+      .map((s) => ({ id: s.id, name: s.name }));
+    // warnings 是给人看的句子，warningCodes 和它一一对应，页面按码分类，不认文字
+    const warnings = [], warningCodes = [];
+    const warn = (code, text) => { warningCodes.push(code); warnings.push(text); };
+    if (unmatchedEnabled) warn("unmatched_channels", `${unmatchedEnabled} 个在用的渠道没对上上游；已添加的上游照常算成本`);
+    if (estimatedCosts) warn("estimated_cost", `${estimatedCosts} 个上游${COST_MODE_TEXT.history}`);
+    if (ownPriceUnset) warn("sell_price_unset", `${own.name} ${SELL_PRICE_UNSET}`);
+    if (rateUnsetStations.length) warn("rate_unset", `${rateUnsetStations.map((s) => s.name).join("、")} ${RATE_UNSET_PARITY}`);
+    if (excludedUpstreams.length) warn("excluded_upstreams", `${excludedUpstreams.map((s) => s.name).join("、")} 不算进利润`);
     return {
       incomeCny,
       upstreamCostCny,
@@ -214,10 +223,12 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
       resoldKeys: resold ? resold.breakdown.map((b) => ({ ...b, cny: r2(b.usd * ownRate) })) : [],
       costs: costs.sort((a, b) => b.cny - a.cny),
       unmatched: unmatchedList,
-      complete: defaultRateStations.length === 0,
+      complete: !ownPriceUnset && rateUnsetStations.length === 0,
       estimated: estimatedCosts > 0,
       excludedStationIds: excludedUpstreams.map((s) => s.id),
+      rateUnsetStations,
       warnings,
+      warningCodes,
       windowDays: Math.round(windowDays * 10) / 10,
     };
   } catch (err) {

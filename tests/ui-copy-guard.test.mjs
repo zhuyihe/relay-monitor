@@ -30,6 +30,11 @@ const FILES = [
   "lib/error-copy.js",
   "lib/channel-onboarding.js",
   "lib/onboarding-workflow.js",
+  "lib/format.js",
+  "lib/overview-actions.js",
+  "lib/profit.js",
+  "lib/client.ts",
+  "server/own-helpers.js",
 ];
 
 // §3.6 里不分场合都不能上界面的词。「范围」「关联」「授权」「资源」「站点」「完整」这类要看场合的，靠逐条改文案，不在这里卡。
@@ -38,17 +43,19 @@ const FORBIDDEN = [
   "仅供参考", "待获取", "获取中", "不可用", "读取失败", "查询失败", "尚未查询", "数据已过期", "最后刷新", "更新于", "最近成功",
   "快照", "账本", "迁移", "旧账", "兜底", "降级", "轮询", "采集", "留存", "回归", "回测", "精算", "推算",
   "中转站", "本站", "阈值", "耗尽", "摊销", "待办", "待处理", "待核算", "已核验", "已取全", "原币", "归属", "覆盖",
+  // §3.4：缓存只写「缓存」
+  "缓存读写", "缓存读", "缓存写",
 ];
 
 // 余额总览和余额那几句随 A2 一起改（§3.3）：这些文件里暂时放过下面这些词，A2 改完就删掉这一项
 const DEFERRED = {
   "app/(dashboard)/page.tsx": ["查询失败", "尚未查询", "摊销", "耗尽", "阈值", "口径", "推算"],
-  "app/components/workflow-copy.ts": ["查询失败"],
 };
 
 // §3.7 的类型名和输入框名，以及 Key、ID、Token；文案表里的 {channel} 这类占位符填的是名称和时间。去掉这些后不该再有英文字母。
-// 「API」只许出现在类型名和 Key 说明里的上游页面名「API 密钥」中，单独写的「API」「API 地址」算后端用语
-const ALLOWED_ENGLISH = /New API|Sub2API|「API 密钥」|Key|ID|Token|sk-|https?:\/\/[\w./-]+|\{\w+\}/g;
+// 「API」只许出现在类型名和 Key 说明里的上游页面名「API 密钥」中，单独写的「API」「API 地址」算后端用语；
+// 「UTC 时间」是 §6 那句「按 UTC 时间算一天」
+const ALLOWED_ENGLISH = /New API|Sub2API|「API 密钥」|Key|ID|Token|UTC 时间|sk-|https?:\/\/[\w./-]+|\{\w+\}/g;
 const CJK = /[一-鿿]/;
 
 function skipped(node) {
