@@ -358,9 +358,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       }
       for (const resource of account.resources) {
         if (resource.monitorEnabled) account.actions.push(workflowAction("inspect_balance", { accountKey: account.accountKey, stationId: resource.id }));
-        // 读余额失败、归到「登录信息不对或过期」「没有权限」（§8.2）时给「更新登录信息」；被人机验证拦下不给，要改登录方式
+        // 读余额失败、§8.2 的下一步是「更新登录信息」时（登录信息不对或过期、没有权限、被人机验证拦下）给这个待办
         if (!resource.archivedAt && resource.balance?.ok === false
-          && ["auth", "permission"].includes(describeError({ code: resource.balance.code, message: resource.balance.error }).category)) {
+          && describeError({ code: resource.balance.code, message: resource.balance.error }).action === "update_authorization") {
           account.actions.push(workflowAction("update_authorization", { accountKey: account.accountKey }));
         }
         const members = savedLinks.filter((link) => link.stationId === resource.id);

@@ -547,14 +547,15 @@ test("U03 actual Store本地全量账号视图同域A/B分离，两old monitor�
   assert.equal(immediate.firstQueryableAtMs, Date.parse("2026-10-08T16:00:00Z"));
 });
 
-test("读余额失败时，登录信息不对、没有权限、开了两步验证给「更新登录信息」，人机验证、连不上、只有状态数字不给", async (t) => {
+test("读余额失败时，登录信息不对、没有权限、开了两步验证、被人机验证拦下给「更新登录信息」，连不上、只有状态数字不给", async (t) => {
   const f = await accountReadFixture(t);
   const cases = [
     [{ code: "AUTHENTICATION_FAILED", error: "401 Unauthorized" }, true],
     [{ code: "UPSTREAM_AUTH_DENIED", error: "403 Forbidden" }, true],
     [{ code: "TWO_FACTOR_ENABLED", error: "requires_2fa" }, true],
     [{ error: "无权进行此操作，access token 无效" }, true],
-    [{ code: "CAPTCHA_REQUIRED", error: "需要人机验证" }, false],
+    [{ code: "CAPTCHA_REQUIRED", error: "需要人机验证" }, true],
+    [{ error: "blocked by turnstile" }, true],
     [{ code: "NETWORK_UNREACHABLE", error: "The operation was aborted due to timeout" }, false],
     [{ error: "The operation was aborted due to timeout" }, false],
     [{ error: "403 old-access" }, false],
@@ -1021,6 +1022,22 @@ for (const conflict of ["link", "sql-source", "runtime-source", "remote-source"]
     assert.equal((await f.rt.channelOnboarding.recoverBatch(preview.retryInput)).complete, false);
   });
 }
+
+// 读上游、保存的报错现在都带码，写入时出错也要再对一次预览：预览已经不作数了，就按「需要重新预览」说
+test("写入时的报错带码、预览又刚好过期：再对一次预览，按需要重新预览说", async (t) => {
+  const f = await genuineBatchFixture(t), input = f.request([[1]]);
+  const probe = await f.rt.channelOnboarding.probeBatch(input);
+  let reached = false;
+  f.state.linkGate = async () => {
+    reached = true; f.state.now += 11 * 60000;
+    throw Object.assign(new Error("connect ECONNREFUSED"), { code: "NETWORK_UNREACHABLE" });
+  };
+  const result = await f.rt.channelOnboarding.connectBatch({ ...input, previewId: probe.previewId });
+  assert.equal(reached, true); assert.equal(result.complete, false);
+  assert.equal(result.groups[0].code, "PREVIEW_REQUIRED", JSON.stringify(result));
+  assert.ok(result.groups[0].remainingActions.includes("repreview"), JSON.stringify(result));
+  assert.equal(f.state.ruleWrites, 0); assert.deepEqual(f.state.links, []);
+});
 
 test("workflow actual link rollback preserves old memory and original preview retries without duplicate resources", async (t) => {
   const f = await genuineBatchFixture(t, { realLinks: true }), initial = f.request([[1]]); initial.groups[0].reconciliation = null;

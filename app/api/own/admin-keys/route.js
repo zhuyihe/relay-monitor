@@ -33,7 +33,7 @@ export const GET = withAuth(async (request, rt) => {
         accounts.push({
           username: u.username, role: u.role, enumerable: false,
           error: err?.message || String(err),
-          errorCode: err?.code || errorCodeOf(err),
+          errorCode: errorCodeOf(err),
           tokens: names.map((name) => ({ name, flagged: true, usedUsd: null })),
         });
       }
@@ -41,7 +41,7 @@ export const GET = withAuth(async (request, rt) => {
     return json({ accounts });
   } catch (err) {
     // 读自营站点没成：带上游给的码，没有就按「自营站点暂时读不到」说（lib/error-copy.js §8.2）
-    return json({ error: err?.message || String(err), code: err?.code || "OWN_STATION_UNAVAILABLE" }, 502);
+    return json({ error: err?.message || String(err), code: errorCodeOf(err, "OWN_STATION_UNAVAILABLE") }, 502);
   }
 });
 

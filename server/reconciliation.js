@@ -1872,10 +1872,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (own) {
         try { channels = await ownChannelsFor(own, { force: forceChannels }); } catch (err) {
           // 上游错误原文可能回显令牌：只返回脱敏后的原文（进「查看详细原因」）和 code（界面按 code 归类，§8.2）。
-          // 读渠道的地方给了码就用它的；没码的按原文补码，认不出的按没有权限说（OWN_CHANNEL_UNAVAILABLE）。
+          // 码由 errorCodeOf 给：带着认得的码就用它，没有的按原文补，认不出的按没有权限说（OWN_CHANNEL_UNAVAILABLE）。
           channelsError = connectionDiagnostic(err, own);
           console.error("本站渠道目录读取失败:", channelsError);
-          channelsErrorCode = err?.code || errorCodeOf(err) || "OWN_CHANNEL_UNAVAILABLE";
+          channelsErrorCode = errorCodeOf(err, "OWN_CHANNEL_UNAVAILABLE");
         }
       }
       return { ownStation: publicStation(own), upstreams, channels, channelsError, channelsErrorCode, rules };

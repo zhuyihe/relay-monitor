@@ -1,5 +1,6 @@
 // ---- 「我的站点」下游分析（分时段 / 分模型 / 分用户 + 消费预测）------------------
 import { withAuth, json } from "../../../../lib/api.js";
+import { errorCodeOf } from "../../../../lib/error-copy.js";
 import { OWN_STATION_UNSET } from "../../../../lib/format.js";
 import { queryOwnData } from "../../../../lib/providers.js";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../../../lib/business-time.js";
@@ -162,6 +163,6 @@ export const GET = withAuth(async (request, rt) => {
     return json(payload);
   } catch (err) {
     // 读自营站点没成：带上游给的码，没有就按「自营站点暂时读不到」说（lib/error-copy.js §8.2）
-    return json({ error: err?.message || String(err), code: err?.code || "OWN_STATION_UNAVAILABLE" }, 502);
+    return json({ error: err?.message || String(err), code: errorCodeOf(err, "OWN_STATION_UNAVAILABLE") }, 502);
   }
 });
