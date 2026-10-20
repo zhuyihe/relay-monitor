@@ -11,7 +11,7 @@ import { App, Button } from "antd";
 import { api } from "../../lib/client";
 import { NAV_LABELS, STATION_TABS } from "../../lib/brand";
 import type { WorkflowAction } from "../../lib/client";
-import { attentionStationIds, balanceViewOf, buildOverviewActions, etaWindowDays, lowLineOf, stationDisplayName, WATCH_DAYS } from "../../lib/overview-actions";
+import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActions, etaWindowDays, lowLineOf, stationDisplayName, WATCH_DAYS } from "../../lib/overview-actions";
 import { balanceMoneyOf, rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
 import { asSentence, describeError, errorText, failureText, refreshAllText, refreshOneText } from "../../lib/error-copy";
@@ -278,7 +278,6 @@ export default function OverviewPage() {
     : workflowAsOf
       ? refreshFailedText(workflowAsOf, businessTz)
       : COPY.workflowUnreadable;
-  const critDays = etaWindowDays(rules);
   const current = money && money.range === range ? money : null;
   const rangeName = RANGE_TEXT[range];
 
@@ -319,7 +318,7 @@ export default function OverviewPage() {
         <CostPanel title={COPY.upstreamCost(rangeName)} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
       </div>
 
-      <TrendModal station={trendStation} onClose={() => setTrendStation(null)} etaDaysRule={critDays} />
+      <TrendModal station={trendStation} onClose={() => setTrendStation(null)} settings={settings} rules={rules} />
     </div>
   );
 }
@@ -681,7 +680,7 @@ function RunwayPanel({
         tip = [
           [COPY.tip.balance, bal == null ? BALANCE_STATE_TEXT.pending : balanceWithCny(s, bal)],
           [COPY.tip.burn, p?.burnPerDay != null ? formatMoney(Number(p.burnPerDay) * rate) : EMPTY],
-          [COPY.tip.days, formatDays(view.days)],
+          [COPY.tip.days, balanceDaysText(view)],
         ];
         if (view.days != null && view.days !== Infinity && view.days > 0) tip.push([COPY.tip.basis, basisText(p?.basis)]);
       }
@@ -700,8 +699,8 @@ function RunwayPanel({
         failed,
         level: view.level,
         state,
-        // 余额用完时天数写「—」，只看档位名
-        daysLabel: view.state === "empty" ? EMPTY : undefined,
+        // 余额用完时天数写「—」，只看档位名（和上游列表、余额趋势同一个写法）
+        daysLabel: balanceDaysText(view),
         tip,
       };
       return { item, cny: bal == null || failed ? null : bal * rate };
@@ -821,7 +820,9 @@ function RevenuePanel({ title, money, error, onRetry }: { title: string; money: 
     }
     const own = money.own || {};
     const profit = own.profit || {};
-    const ownRate = Number(own.station?.cnyPerUsd) > 0 ? Number(own.station.cnyPerUsd) : 1;
+    // 没设置汇率时按 1:1 折算，合计前加「约」（和别处同一个判断：rateSnapshotOf）
+    const ownRateNow = rateSnapshotOf(own.station);
+    const ownRate = ownRateNow.cnyPerUsd;
     const users = (own.byUser || [])
       .filter((u: any) => !u.isAdmin)
       .map((u: any) => ({ name: String(u.user || COPY.unnamedUser), value: r2((Number(u.cost) || 0) * ownRate), requests: u.requests }))
@@ -843,7 +844,7 @@ function RevenuePanel({ title, money, error, onRetry }: { title: string; money: 
         color="var(--jy-s1)"
         unitName={COPY.incomeUnit}
         empty={COPY.noIncome}
-        total={items.length ? { label: COPY.total, value: formatMoney(income, { approx: !(Number(own.station?.cnyPerUsd) > 0) }) } : undefined}
+        total={items.length ? { label: COPY.total, value: formatMoney(income, { approx: ownRateNow.source !== "configured" }) } : undefined}
       />
     );
   }, [money, router]);

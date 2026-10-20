@@ -609,6 +609,7 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
    | 余额三档的名字（含「还没读取」「读不到余额」） | `lib/format.js` 的 `BALANCE_STATE_TEXT`；哪一档由 `lib/overview-actions.js` 的 `balanceStateOf` 判断 | `stations/model.ts`、`workflow-copy.ts`、告警规则、`lib/alerts.js`、`status.tsx` 各自的写法；`lib/client.ts` 的 `statusOf` |
    | 可用天数的写法（§3.3） | `lib/format.js` 的 `formatDays` | `lib/client.ts`、`lib/alerts.js` 的 `fmtEta` |
    | 快用完的天数、7 天线、可用天数分档 | `lib/overview-actions.js` 的 `etaWindowDays`、`WATCH_DAYS`、`runwayLevel` | 总览、上游列表、成本估算、日报里各写一份 |
+   | 上游余额在哪一档、标什么颜色，可用天数一格写什么（余额用完写「—」，旁边标「余额用完」） | `lib/overview-actions.js` 的 `balanceViewOf`、`balanceDaysText`；运营总览「上游余量」、上游列表、余额趋势都用，也看余额提醒线 | 各页自己判断余额用完、只按天数分档 |
    | 成本来源名（§3.3） | `lib/format.js` 的 `COST_MODE_TEXT` | `my/shared.tsx` 的 `MODE_LABEL`、`server/own-helpers.js` 里的说法 |
    | 时间范围名（§6） | `lib/format.js` 的 `RANGE_TEXT` | 总览、成本估算、自营业务各写一份 |
    | Token 大数、金额 | `lib/format.js` 的 `formatCompact`、`formatUsd`、`formatCny` | `lib/client.ts` 的 `fmtTokens`、`usd`、`cny` |

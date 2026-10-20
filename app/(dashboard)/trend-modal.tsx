@@ -8,9 +8,9 @@ import { Modal } from "antd";
 import { api, fmtTokens } from "../../lib/client";
 import { balanceMoneyOf, rateSnapshotOf } from "../../lib/profit";
 import {
-  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatDays, formatHhmm, formatMoney, formatMonthDay, NO_SPEND_TEXT, RATE_UNSET,
+  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatHhmm, formatMoney, formatMonthDay, RATE_UNSET,
 } from "../../lib/format";
-import { runwayLevel, stationDisplayName } from "../../lib/overview-actions";
+import { balanceDaysText, balanceViewOf, stationDisplayName } from "../../lib/overview-actions";
 import { clamp, niceTicks } from "../../lib/chart-math";
 import { ErrorState } from "../components/data-state";
 import { ChartTip, TipBody } from "../components/float-tip";
@@ -263,11 +263,14 @@ function BalanceChart({ points, proj, label }: { points: [number, number][]; pro
 export default function TrendModal({
   station,
   onClose,
-  etaDaysRule = 3,
+  settings,
+  rules,
 }: {
   station: any | null;
   onClose: () => void;
-  etaDaysRule?: number;
+  // 余额提醒线和提醒天数，和打开它的页面用同一份
+  settings?: any;
+  rules?: any;
 }) {
   const [range, setRange] = useState<Range>("72");
   const [data, setData] = useState<any>(null);
@@ -325,12 +328,13 @@ export default function TrendModal({
   }, [points, burn, pred]);
 
   const b = station?.balance;
-  const empty = b?.ok && b.remaining <= 0;
-  const etaDays = pred?.etaDays;
   const money = b?.ok ? balanceMoneyOf(station, b.remaining) : null;
-  // 和上游列表同一套分档（runwayLevel）；不再续费的和自营站点不提醒
-  const runway = burn > 0 && !(station?.noRenewal || station?.isOwn) ? runwayLevel(etaDays, { etaDays: etaDaysRule }) : null;
-  const level = runway === "crit" || runway === "warn" ? runway : null;
+  // 档位、颜色、可用天数和上游列表、运营总览同一个判断（balanceViewOf），估算用弹窗刚读到的那份；
+  // 不再续费的和自营站点不上颜色，也不标档位
+  const view = station ? balanceViewOf(pred ? { ...station, prediction: pred } : station, { settings, rules }) : null;
+  const empty = view?.state === "empty";
+  const level = view?.level === "crit" || view?.level === "warn" ? view.level : null;
+  const stateText = level && (view?.state === "empty" || view?.state === "low" || view?.state === "soon") ? BALANCE_STATE_TEXT[view.state] : null;
   const today = [
     station?.todayTokens != null ? COPY.todayTokens(fmtTokens(station.todayTokens)) : null,
     station?.todayRequests != null ? COPY.todayRequests(station.todayRequests.toLocaleString("en-US")) : null,
@@ -374,14 +378,13 @@ export default function TrendModal({
             </div>
             <div>
               <dt>{COPY.days}</dt>
-              <dd className="fig">{empty ? BALANCE_STATE_TEXT.empty : burn > 0 && etaDays != null ? formatDays(etaDays) : EMPTY}</dd>
+              <dd className="fig">{balanceDaysText(view)}</dd>
               {!empty && burn > 0 && pred?.etaAt ? <dd>{COPY.emptyAt(at(new Date(pred.etaAt).getTime()))}</dd> : null}
-              {!empty && pred && !(burn > 0) ? <dd>{NO_SPEND_TEXT}</dd> : null}
-              {!empty && level ? (
+              {stateText ? (
                 <dd>
                   <span className={`jy-status jy-status--${level}`}>
-                    <Sym kind={level} />
-                    {BALANCE_STATE_TEXT.soon}
+                    <Sym kind={level!} />
+                    {stateText}
                   </span>
                 </dd>
               ) : null}

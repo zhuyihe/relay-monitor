@@ -324,8 +324,9 @@ export default function StationsPage() {
     setRefreshingAll(true);
     try {
       const r = await api("/api/refresh", { method: "POST", body: {} });
-      // /api/refresh 只返回在监控的上游；重新读取完整列表，归档与暂停监控的上游一并保留
-      await reload();
+      // /api/refresh 只返回在监控的上游；重新读取完整列表，归档与暂停监控的上游一并保留。
+      // 刷新已经做完：读列表失败时由列表顶上的「读取失败」交代，这里照旧报刷新结果
+      await reload().catch(() => {});
       // 和运营总览同一句：有读不到余额的说几个
       const done = refreshAllText(r?.stations);
       if (done.failed) message.warning(done.text);
@@ -1110,7 +1111,7 @@ export default function StationsPage() {
 
       {accounts.overlays}
 
-      <TrendModal station={trendCur} onClose={() => setTrendStation(null)} etaDaysRule={critDays} />
+      <TrendModal station={trendCur} onClose={() => setTrendStation(null)} settings={settings} rules={rules} />
 
       <StationDrawer ref={drawerRef} types={types} onSaved={onSaved} />
     </div>

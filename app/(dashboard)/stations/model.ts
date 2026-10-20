@@ -1,7 +1,7 @@
 // 上游列表的纯数据部分：登录信息字段、报错归类、每行的展示模型。
 // 不含 JSX，表格、手机列表、编辑页共用同一份计算；余额分档、固定成本笔数、可用天数都用 lib/ 里和运营总览同一份的函数。
 import { BALANCE_STATE_TEXT, EMPTY, formatDays, formatMoney, formatUsd, formatZonedDate } from "../../../lib/format";
-import { balanceViewOf, etaWindowDays } from "../../../lib/overview-actions";
+import { balanceDaysText, balanceViewOf, etaWindowDays } from "../../../lib/overview-actions";
 import { fixedCostNowOf, purchasesOf, rateSnapshotOf } from "../../../lib/profit";
 import { noteOf } from "../../components/error-detail";
 import type { ErrorNote } from "../../components/error-detail";
@@ -158,13 +158,13 @@ export function buildStationView(
     return { ...base, level: view.level, statusLabel: BALANCE_STATE_TEXT[view.state], statusNote: null, issue: null, checkedAt, sortDays: null, runway: null, fx: null };
   }
   const { days, level } = view;
-  let statusNote: string | null = null;
-  if (Number(s.prediction?.burnPerDay) > 0 && days != null && view.state !== "empty") statusNote = COPY.available(days);
+  // 「快用完」后面跟「可用约 N 天」（§3.3）；正常、余额偏低时天数只在可用天数一格里写
+  let statusNote: string | null = view.state === "soon" && days != null ? COPY.available(days) : null;
   // 不再续费的和自营站点不提醒余额（balanceViewOf 已把颜色降掉），这里交代一句
   if (view.state && level === "muted" && (s.noRenewal || s.isOwn)) statusNote = s.noRenewal ? COPY.noRenewal : COPY.own;
   const runway: RunwayView = days == null
     ? { days: null, level: "muted", text: EMPTY }
-    : { days, level, text: view.state === "empty" ? BALANCE_STATE_TEXT.empty : formatDays(days) };
+    : { days, level, text: balanceDaysText(view) };
   return {
     ...base,
     level,
