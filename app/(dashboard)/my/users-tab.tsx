@@ -159,7 +159,7 @@ function UserGroups({ v, reload }: { v: OwnView; reload: () => Promise<unknown> 
   if (flow.error) {
     return (
       <Panel title="用户 × 分组">
-        <ErrorState title="分组和渠道数据暂时取不到" error={flow.error} onRetry={() => reload()} />
+        <ErrorState what="读不到分组和渠道" error={flow.error} onRetry={() => reload()} />
       </Panel>
     );
   }

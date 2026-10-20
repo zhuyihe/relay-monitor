@@ -6,7 +6,7 @@ import { Alert, App, Button, Checkbox, Drawer, Form, Input, Select, Space, Typog
 import { api } from "../../lib/client";
 import type { AccountReadModel, AccountRecord, AccountAuthorizationInput, AccountAuthorizationProbe, AccountAuthorizationResult, AccountAuthorizationRecoveryIntent } from "../../lib/client";
 import { createRequestId } from "../../lib/request-id.js";
-import { BINDING_COPY, CREDENTIAL_FIELDS, UPSTREAM_TYPES, onboardingBaseUrl } from "../../lib/channel-onboarding.js";
+import { BINDING_COPY, CREDENTIAL_FIELDS, UPSTREAM_TYPES, credentialFieldOf, onboardingBaseUrl } from "../../lib/channel-onboarding.js";
 import { ERROR_CATEGORIES, describeError, failureText, requiredRule } from "../../lib/error-copy.js";
 import { EMPTY } from "../../lib/format";
 import { reconciliationChannelName } from "../../lib/reconciliation-view.js";
@@ -199,7 +199,7 @@ export function useAccountAuthorization({ compact, accountModel, stations, disab
     } finally { setAuthorizationBusy(false); }
   };
 
-  const tokenField = authorizationType === "newapi" ? CREDENTIAL_FIELDS.accessToken : CREDENTIAL_FIELDS.loginToken;
+  const tokenField = credentialFieldOf(authorizationType, "accessToken");
   const recoveryButton = authorizationRecovery ? <Button disabled={disabled || authorizationBusy} onClick={() => void recoverAuthorization(authorizationRecovery, true)}>{COPY.recover}</Button> : null;
   const overlay = (
     <Drawer

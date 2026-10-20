@@ -1,14 +1,18 @@
 "use client";
-// 余额趋势详情弹窗（共享组件）：运营总览与上游资源页点击余额走势时打开。
-// 上方四个读数，下方是余额折线：实线为历史，虚线按当前消耗速度往后推到用完（最多推一个查看窗口）。
-// 数据：GET /api/stations/:id/history?hours=；金额按资源的充值汇率折算成 ¥。
+// 余额趋势弹窗（共享组件）：运营总览和上游列表点「余额趋势」时打开。
+// 上方四个读数，下方是余额折线：实线是读到的余额，虚线按日均花费往后估到用完（最多估一个查看范围）。
+// 数据：GET /api/stations/:id/history?hours=；图和花费按上游设置的汇率折成 ¥，没设置时按 1 美元 = 1 元；当前余额和上游列表同一种写法（balanceMoneyOf）。
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
-import { Button, Modal } from "antd";
+import { Modal } from "antd";
 import { api, fmtTokens } from "../../lib/client";
-import { rateSnapshotOf } from "../../lib/profit";
-import { axisMoney, basisText, formatDays, formatHhmm, formatMoney, formatMonthDay, formatUsd } from "../../lib/format";
+import { balanceMoneyOf, rateSnapshotOf } from "../../lib/profit";
+import {
+  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatDays, formatHhmm, formatMoney, formatMonthDay, NO_SPEND_TEXT, RATE_UNSET,
+} from "../../lib/format";
+import { runwayLevel, stationDisplayName } from "../../lib/overview-actions";
 import { clamp, niceTicks } from "../../lib/chart-math";
+import { ErrorState } from "../components/data-state";
 import { ChartTip, TipBody } from "../components/float-tip";
 import { useElementWidth } from "../components/use-width";
 import { Seg } from "../components/seg";
@@ -22,6 +26,34 @@ const RANGES = [
   { label: "近 30 天", value: "720" },
 ] as const;
 type Range = (typeof RANGES)[number]["value"];
+
+// 弹窗的名字：运营总览和上游列表的按钮、弹窗标题都用这一份
+export const TREND_TEXT = Object.freeze({
+  title: "余额趋势",
+  of: (name: string) => `${name} 的余额趋势`,
+});
+
+// 只在这个弹窗出现的说法（design/ui-copy-spec.md §3.3）
+const COPY = Object.freeze({
+  balance: "余额",
+  estimated: "估算余额",
+  now: "现在",
+  about: (time: string) => `约 ${time}`,
+  emptyAt: (time: string) => `约 ${time} 用完`,
+  current: "当前余额",
+  today: "今天花费",
+  todayTokens: (tokens: string) => `${tokens} Token`,
+  todayRequests: (count: string) => `${count} 次请求`,
+  burn: "日均花费",
+  notEnough: "读到的余额还太少，暂时估不出",
+  days: "可用天数",
+  range: "查看范围",
+  readFailed: "读不到余额趋势",
+  loading: "正在读取余额记录…",
+  tooFew: (range: string) => `${range}还画不出余额趋势`,
+  tooFewDesc: "至少读到两次余额，这里才会画出余额的变化。",
+  chart: (name: string, range: string, emptyAt: string) => `${name} ${range}的余额趋势${emptyAt ? `，${emptyAt}` : ""}`,
+});
 
 const L = 52;
 const R = 16;
@@ -78,7 +110,7 @@ function BalanceChart({ points, proj, label }: { points: [number, number][]; pro
     [points, w, t1, yt.hi],
   );
 
-  // 可悬停的点：全部历史点，外加推算终点
+  // 可悬停的点：全部历史点，外加估算的终点
   const count = n + (proj ? 1 : 0);
   const pointAt = (i: number): [number, number] => (i < n ? points[i] : [proj!.t, proj!.v]);
   const nearest = (t: number) => {
@@ -114,13 +146,13 @@ function BalanceChart({ points, proj, label }: { points: [number, number][]; pro
   const hp = hover != null ? pointAt(hover) : null;
   const isProj = hover != null && hover >= n;
   const hx = hp ? x(hp[0]) : 0;
-  const tipTitle = hp ? (isProj ? `约 ${at(hp[0])}` : at(hp[0])) : "";
+  const tipTitle = hp ? (isProj ? COPY.about(at(hp[0])) : at(hp[0])) : "";
   const tipRows: [string, string, string?][] = hp
     ? isProj
-      ? [[proj!.hitsZero ? "预计余额用完" : "推算余额", formatMoney(hp[1]), "var(--jy-ink-3)"]]
-      : [["余额", formatMoney(hp[1]), "var(--jy-s1)"]]
+      ? [[proj!.hitsZero ? BALANCE_STATE_TEXT.empty : COPY.estimated, formatMoney(hp[1]), "var(--jy-ink-3)"]]
+      : [[COPY.balance, formatMoney(hp[1]), "var(--jy-s1)"]]
     : [];
-  // 用完的时间写在图例里：写在点旁边会压到斜着落下来的推算线
+  // 用完的时间写在图例里：写在点旁边会压到斜着落下来的估算线
   const zx = proj?.hitsZero ? x(proj.t) : 0;
 
   return (
@@ -129,15 +161,16 @@ function BalanceChart({ points, proj, label }: { points: [number, number][]; pro
         <div className="jy-legend">
           <span>
             <i className="line-key" style={{ background: "var(--jy-s1)" }} />
-            余额
+            {COPY.balance}
           </span>
           <span>
             <i className="line-key line-key--dash" />
-            按当前消耗速度推算
+            {COPY.estimated}
           </span>
           {proj.hitsZero && (
             <span>
-              <Sym kind="crit" className="jy-status--crit" />约 {at(proj.t)} 用完
+              <Sym kind="crit" className="jy-status--crit" />
+              {COPY.emptyAt(at(proj.t))}
             </span>
           )}
         </div>
@@ -181,7 +214,7 @@ function BalanceChart({ points, proj, label }: { points: [number, number][]; pro
                     y={T + 12}
                     textAnchor={x(last[0]) + 36 > w ? "end" : "start"}
                   >
-                    现在
+                    {COPY.now}
                   </text>
                   <path
                     className="series"
@@ -226,7 +259,7 @@ function BalanceChart({ points, proj, label }: { points: [number, number][]; pro
   );
 }
 
-// station 为 null 时不渲染（弹窗关闭）；传入列表里的最新资源对象，读数随轮询更新
+// station 为 null 时不渲染（弹窗关闭）；传入列表里的最新上游对象，读数随轮询更新。etaDaysRule 是提醒天数，可用天数在它以内标红
 export default function TrendModal({
   station,
   onClose,
@@ -238,26 +271,26 @@ export default function TrendModal({
 }) {
   const [range, setRange] = useState<Range>("72");
   const [data, setData] = useState<any>(null);
-  const [err, setErr] = useState("");
+  const [err, setErr] = useState<unknown>(null);
   const [loading, setLoading] = useState(false);
   const [retry, setRetry] = useState(0);
-  const seq = useRef(0); // 丢弃过期响应：快速切换资源或范围时，慢的那次不能覆盖后打开的图
+  const seq = useRef(0); // 丢弃过期响应：快速切换上游或范围时，慢的那次不能覆盖后打开的图
   const stationId = station?.id ?? null;
   const hours = Number(range);
 
-  // 打开（或换资源）时重置范围与数据
+  // 打开（或换上游）时重置范围与数据
   useEffect(() => {
     if (!stationId) return;
     setRange("72");
     setData(null);
-    setErr("");
+    setErr(null);
   }, [stationId]);
 
   useEffect(() => {
     if (!stationId) return;
     const s = ++seq.current;
     setLoading(true);
-    setErr("");
+    setErr(null);
     api(`/api/stations/${stationId}/history?hours=${hours}`)
       .then((r) => {
         if (s === seq.current) setData(r);
@@ -265,7 +298,7 @@ export default function TrendModal({
       .catch((e) => {
         if (s !== seq.current) return;
         setData(null);
-        setErr(e.message);
+        setErr(e);
       })
       .finally(() => {
         if (s === seq.current) setLoading(false);
@@ -280,7 +313,7 @@ export default function TrendModal({
     [data, rate],
   );
 
-  // 推算段最多延伸一个历史窗口的长度，避免把历史压扁
+  // 估算段最多延伸一个查看范围的长度，避免把读到的那段压扁
   const proj: Proj | null = useMemo(() => {
     if (points.length < 2 || !(burn > 0) || pred?.etaDays == null) return null;
     const t0 = points[0][0];
@@ -294,17 +327,20 @@ export default function TrendModal({
   const b = station?.balance;
   const empty = b?.ok && b.remaining <= 0;
   const etaDays = pred?.etaDays;
-  const level = etaDays == null || !(burn > 0) ? null : etaDays <= etaDaysRule ? "crit" : etaDays <= 7 ? "warn" : null;
+  const money = b?.ok ? balanceMoneyOf(station, b.remaining) : null;
+  // 和上游列表同一套分档（runwayLevel）；不再续费的和自营站点不提醒
+  const runway = burn > 0 && !(station?.noRenewal || station?.isOwn) ? runwayLevel(etaDays, { etaDays: etaDaysRule }) : null;
+  const level = runway === "crit" || runway === "warn" ? runway : null;
   const today = [
-    station?.todayTokens != null ? `${fmtTokens(station.todayTokens)} tokens` : null,
-    station?.todayRequests != null ? `${station.todayRequests.toLocaleString("en-US")} 次请求` : null,
+    station?.todayTokens != null ? COPY.todayTokens(fmtTokens(station.todayTokens)) : null,
+    station?.todayRequests != null ? COPY.todayRequests(station.todayRequests.toLocaleString("en-US")) : null,
   ].filter(Boolean);
   const rangeLabel = RANGES.find((r) => r.value === range)?.label;
 
   return (
     <Modal
       className="responsive-modal trend-modal"
-      title={station ? `${station.name} 的余额趋势` : ""}
+      title={station ? TREND_TEXT.of(stationDisplayName(station)) : ""}
       open={!!station}
       onCancel={() => {
         seq.current++;
@@ -318,33 +354,34 @@ export default function TrendModal({
         <div className="jy-trend">
           <dl className="jy-trend-figs">
             <div>
-              <dt>当前余额</dt>
-              <dd className="fig">{b?.ok ? formatMoney(b.remaining * rate) : "—"}</dd>
-              {b && !b.ok ? <dd>最近一次查询失败</dd> : null}
-              {b?.ok && rate !== 1 ? <dd>站点余额 {formatUsd(b.remaining)}</dd> : null}
+              <dt>{COPY.current}</dt>
+              <dd className="fig">{money ? money.text : EMPTY}</dd>
+              {money
+                ? <dd title={money.note}>{money.cny || RATE_UNSET}</dd>
+                : <dd>{b ? BALANCE_STATE_TEXT.unreadable : BALANCE_STATE_TEXT.pending}</dd>}
             </div>
             <div>
-              <dt>今日消耗</dt>
+              <dt>{COPY.today}</dt>
               <dd className="fig">
-                {station.todayUsed != null ? formatMoney(station.todayUsed * rate, { approx: !!station.todayIsEstimate }) : "—"}
+                {station.todayUsed != null ? formatMoney(station.todayUsed * rate, { approx: !!station.todayIsEstimate }) : EMPTY}
               </dd>
               {today.length ? <dd>{today.join("，")}</dd> : null}
             </div>
             <div>
-              <dt>日均消耗</dt>
-              <dd className="fig">{burn > 0 ? formatMoney(burn) : pred ? formatMoney(0) : "—"}</dd>
-              <dd>{pred ? basisText(pred.basis) : "查询次数不足，暂无法估算"}</dd>
+              <dt>{COPY.burn}</dt>
+              <dd className="fig">{burn > 0 ? formatMoney(burn) : pred ? formatMoney(0) : EMPTY}</dd>
+              <dd>{pred ? basisText(pred.basis) : COPY.notEnough}</dd>
             </div>
             <div>
-              <dt>预计可用</dt>
-              <dd className="fig">{empty ? "已用完" : burn > 0 && etaDays != null ? formatDays(etaDays) : "—"}</dd>
-              {!empty && burn > 0 && pred?.etaAt ? <dd>约 {at(new Date(pred.etaAt).getTime())} 用完</dd> : null}
-              {!empty && pred && !(burn > 0) ? <dd>近期没有消耗</dd> : null}
+              <dt>{COPY.days}</dt>
+              <dd className="fig">{empty ? BALANCE_STATE_TEXT.empty : burn > 0 && etaDays != null ? formatDays(etaDays) : EMPTY}</dd>
+              {!empty && burn > 0 && pred?.etaAt ? <dd>{COPY.emptyAt(at(new Date(pred.etaAt).getTime()))}</dd> : null}
+              {!empty && pred && !(burn > 0) ? <dd>{NO_SPEND_TEXT}</dd> : null}
               {!empty && level ? (
                 <dd>
                   <span className={`jy-status jy-status--${level}`}>
                     <Sym kind={level} />
-                    {level === "crit" ? `${etaDaysRule} 天内用完` : "7 天内用完"}
+                    {BALANCE_STATE_TEXT.soon}
                   </span>
                 </dd>
               ) : null}
@@ -352,35 +389,26 @@ export default function TrendModal({
           </dl>
 
           <div className="jy-trend-bar">
-            <Seg<Range> options={[...RANGES]} value={range} onChange={setRange} label="查看范围" size="sm" />
+            <Seg<Range> options={[...RANGES]} value={range} onChange={setRange} label={COPY.range} size="sm" />
           </div>
 
           <div className="jy-trend-body" aria-busy={loading}>
-            {err ? (
-              <div className="jy-state jy-state--center">
-                <h3>
-                  <Sym kind="crit" className="jy-status--crit" />
-                  趋势没有读取成功
-                </h3>
-                <p>{err}</p>
-                <Button size="small" onClick={() => setRetry((n) => n + 1)}>
-                  重新读取
-                </Button>
-              </div>
+            {err !== null ? (
+              <ErrorState center what={COPY.readFailed} error={err} onRetry={() => setRetry((n) => n + 1)} retrying={loading} />
             ) : !data ? (
               <div className="jy-state jy-state--center">
-                <p>正在读取余额记录…</p>
+                <p>{COPY.loading}</p>
               </div>
             ) : points.length < 2 ? (
               <div className="jy-state jy-state--center">
-                <h3>{rangeLabel}还没有形成走势</h3>
-                <p>完成至少两次成功的余额查询后，这里会显示余额变化。</p>
+                <h3>{COPY.tooFew(rangeLabel || "")}</h3>
+                <p>{COPY.tooFewDesc}</p>
               </div>
             ) : (
               <BalanceChart
                 points={points}
                 proj={proj}
-                label={`${station.name} ${rangeLabel}的余额走势${proj?.hitsZero ? `，按当前速度约 ${at(proj.t)} 用完` : ""}`}
+                label={COPY.chart(stationDisplayName(station), rangeLabel || "", proj?.hitsZero ? COPY.emptyAt(at(proj.t)) : "")}
               />
             )}
           </div>

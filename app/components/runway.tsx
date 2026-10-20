@@ -1,8 +1,9 @@
 "use client";
-// 上游余量跑道：每个上游一条 0–14 天的轨道，竖线是紧急 / 注意阈值。
-// 查询失败的上游用虚线空轨道，明确写"余额未知"，不画成 0。
+// 上游余量：每个上游一条 0–14 天的条，按可用天数画；两条竖线是提醒天数和 7 天（§3.3）。
+// 读不到余额的上游画虚线空条，不画成 0；档位名（余额偏低 / 快用完 / 余额用完 / 读不到余额）由调用方按 balanceViewOf 给。
 import type { ReactNode } from "react";
 import { formatDays } from "../../lib/format";
+import { etaWindowDays, RUNWAY_MAX_DAYS, WATCH_DAYS } from "../../lib/overview-actions";
 import { TipBody, useFloatTip } from "./float-tip";
 import type { TipRow } from "./float-tip";
 import { StatusText } from "./status";
@@ -13,10 +14,13 @@ export type RunwayItem = {
   name: ReactNode;
   // 名称下方的小字，一般是余额
   sub?: ReactNode;
+  // 可用天数：Infinity 是近期没有花费，null 是算不出（写「—」）
   days: number | null;
   failed?: boolean;
   level: Level;
-  // 天数列的替代文字（如"无消耗"）
+  // 档位名，跟在天数后面；正常时不给
+  state?: ReactNode;
+  // 天数列的替代文字；不给时按 formatDays 写
   daysLabel?: ReactNode;
   tip?: TipRow[];
   tipTitle?: ReactNode;
@@ -44,20 +48,21 @@ export function RunwayTrack({
   level,
   failed,
   critDays,
-  warnDays,
-  maxDays = 14,
+  warnDays = WATCH_DAYS,
+  maxDays = RUNWAY_MAX_DAYS,
   mini,
 }: {
   days: number | null;
   level: Level;
   failed?: boolean;
   critDays: number;
-  warnDays: number;
+  // 黄线默认 7 天；不大于提醒天数时不画
+  warnDays?: number;
   maxDays?: number;
   mini?: boolean;
 }) {
   const fillCls = level === "crit" ? " is-crit" : level === "warn" ? " is-warn" : "";
-  const w = days == null ? 0 : Math.max(mini ? 2 : 1.5, (Math.min(days, maxDays) / maxDays) * 100);
+  const w = days == null || !(days >= 0) ? 0 : Math.max(mini ? 2 : 1.5, (Math.min(days, maxDays) / maxDays) * 100);
   return (
     <div className={`jy-track${mini ? " jy-mini-track" : ""}${failed ? " is-unknown" : ""}`}>
       {!failed && days != null && <span className={`fill${fillCls}`} style={{ width: `${w}%` }} />}
@@ -69,9 +74,9 @@ export function RunwayTrack({
 
 export function Runway({
   items,
-  critDays = 3,
-  warnDays = 7,
-  maxDays = 14,
+  critDays = etaWindowDays(null),
+  warnDays = WATCH_DAYS,
+  maxDays = RUNWAY_MAX_DAYS,
 }: {
   items: RunwayItem[];
   critDays?: number;
@@ -87,21 +92,12 @@ export function Runway({
           <li key={s.key} tabIndex={s.tip ? 0 : undefined} {...(s.tip ? bind(() => <TipBody title={s.tipTitle ?? s.name} rows={s.tip} />) : {})}>
             <div className="who">
               <strong title={typeof s.name === "string" ? s.name : typeof s.tipTitle === "string" ? s.tipTitle : undefined}>{s.name}</strong>
-              <span>{s.failed ? "余额未知" : s.sub}</span>
+              <span>{s.sub}</span>
             </div>
             <RunwayTrack days={s.days} level={s.level} failed={s.failed} critDays={critDays} warnDays={warnDays} maxDays={maxDays} />
             <div className="days">
-              {s.failed ? (
-                <>
-                  <span className="jy-muted">无法计算</span>
-                  <StatusText level="crit">查询失败</StatusText>
-                </>
-              ) : (
-                <>
-                  <b>{s.daysLabel ?? formatDays(s.days)}</b>
-                  {(s.level === "crit" || s.level === "warn") && <StatusText level={s.level} />}
-                </>
-              )}
+              <b>{s.daysLabel ?? formatDays(s.days)}</b>
+              {s.state && <StatusText level={s.level}>{s.state}</StatusText>}
             </div>
           </li>
         ))}

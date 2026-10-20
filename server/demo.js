@@ -15,11 +15,11 @@ const PORT = process.env.PORT || 3000;
 const MOCK_BASE = `http://${HOST}:${PORT}/mock`;
 // drain 单位：美元/分钟（换算成 $/天 约为 ×1440）
 const MOCK_ACCOUNTS = {
-  "np-pro": { name: "演示·Pro账号", grantUsd: 200, baseUsedUsd: 41.2, drain: 0.006 },
+  "np-pro": { name: "演示·主力账号", grantUsd: 200, baseUsedUsd: 41.2, drain: 0.006 },
   "np-key": { name: "演示·Key账号", grantUsd: 50, baseUsedUsd: 18.6, drain: 0.0025 },
   "s2-team": { name: "演示·拼车团队", grantUsd: 100, baseUsedUsd: 63.5, drain: 0.0045 },
-  "s2-low": { name: "演示·即将耗尽", grantUsd: 20, baseUsedUsd: 17.4, drain: 0.002 },
-  "s2-pw": { name: "演示·账密登录", grantUsd: 150, baseUsedUsd: 25.8, drain: 0.0055 },
+  "s2-low": { name: "演示·快用完", grantUsd: 20, baseUsedUsd: 17.4, drain: 0.002 },
+  "s2-pw": { name: "演示·邮箱密码登录", grantUsd: 150, baseUsedUsd: 25.8, drain: 0.0055 },
 };
 
 function mockState(acc) {
@@ -88,8 +88,8 @@ export function mockNewApiTokenList(request) {
 export function mockNewApiSelfGroups(request) {
   if (!hasAuth(request)) return unauthorized();
   return { status: 200, body: { success: true, data: {
-    oai: { ratio: 2.3, desc: "OpenAI 固定分组" },
-    gemini_mixed: { ratio: 1.2, desc: "Gemini 混合分组" },
+    oai: { ratio: 2.3, desc: "固定模型分组" },
+    gemini_mixed: { ratio: 1.2, desc: "混合模型分组" },
   } } };
 }
 
@@ -264,11 +264,11 @@ export function mockNewApiDataUsers(request) {
 // (用户, 分组, 模型, 渠道) 聚合，无时间维度。演示数据刻意让 claude 分组单价高、
 // 便宜渠道与贵渠道并存，好在面板上看出「分组倍率」「换渠道」两类涨幅。
 const MOCK_FLOW = [
-  { username: "alice", use_group: "default", model_name: "claude-sonnet-4-5", channel_id: 1, channel_name: "上游A-高速", w: 5 },
-  { username: "alice", use_group: "vip", model_name: "claude-sonnet-4-5", channel_id: 2, channel_name: "上游A-备用", w: 2.2 },
-  { username: "bob", use_group: "default", model_name: "gpt-4o", channel_id: 1, channel_name: "上游A-高速", w: 3 },
+  { username: "alice", use_group: "default", model_name: "claude-sonnet-4-5", channel_id: 1, channel_name: "上游甲·高速", w: 5 },
+  { username: "alice", use_group: "vip", model_name: "claude-sonnet-4-5", channel_id: 2, channel_name: "上游甲·备用", w: 2.2 },
+  { username: "bob", use_group: "default", model_name: "gpt-4o", channel_id: 1, channel_name: "上游甲·高速", w: 3 },
   { username: "bob", use_group: "vip", model_name: "gpt-4o", channel_id: 3, channel_name: "拼车团队", w: 1.4 },
-  { username: "carol", use_group: "default", model_name: "deepseek-v3", channel_id: 4, channel_name: "官方直连-DeepSeek", w: 1.5 },
+  { username: "carol", use_group: "default", model_name: "deepseek-v3", channel_id: 4, channel_name: "官方直连", w: 1.5 },
   { username: "dave", use_group: "internal", model_name: "gemini-2.5-pro", channel_id: 5, channel_name: "包月自建", w: 0.8 },
 ];
 
@@ -308,10 +308,10 @@ export function mockNewApiDataFlow(request) {
 // claude 行走 anthropic 语义：prompt_tokens 只是未命中缓存的输入，缓存读写在 other 里，
 // 正是「看板 token 栏近零、额度栏很大」的成因；grok 行带长上下文与 matched_tier。
 const MOCK_LOG_SHAPES = [
-  { model: "claude-sonnet-4-5", user: "alice", group: "default", channel: 1, channelName: "上游A-高速", claude: true, prompt: 900, completion: 1200, cacheRead: 180000, cacheWrite: 9000, modelRatio: 5, completionRatio: 5 },
+  { model: "claude-sonnet-4-5", user: "alice", group: "default", channel: 1, channelName: "上游甲·高速", claude: true, prompt: 900, completion: 1200, cacheRead: 180000, cacheWrite: 9000, modelRatio: 5, completionRatio: 5 },
   { model: "grok-4.6", user: "bob", group: "vip", channel: 3, channelName: "拼车团队", claude: false, prompt: 260000, completion: 1800, cacheRead: 0, cacheWrite: 0, modelRatio: 2, completionRatio: 3, tier: ">200k" },
-  { model: "gpt-4o", user: "bob", group: "default", channel: 1, channelName: "上游A-高速", claude: false, prompt: 12000, completion: 900, cacheRead: 4000, cacheWrite: 0, modelRatio: 2.5, completionRatio: 4 },
-  { model: "deepseek-v3", user: "carol", group: "default", channel: 4, channelName: "官方直连-DeepSeek", claude: false, prompt: 5000, completion: 700, cacheRead: 0, cacheWrite: 0, modelRatio: 0.14, completionRatio: 2 },
+  { model: "gpt-4o", user: "bob", group: "default", channel: 1, channelName: "上游甲·高速", claude: false, prompt: 12000, completion: 900, cacheRead: 4000, cacheWrite: 0, modelRatio: 2.5, completionRatio: 4 },
+  { model: "deepseek-v3", user: "carol", group: "default", channel: 4, channelName: "官方直连", claude: false, prompt: 5000, completion: 700, cacheRead: 0, cacheWrite: 0, modelRatio: 0.14, completionRatio: 2 },
 ];
 
 function mockLogRows(startSec, endSec) {
@@ -414,10 +414,10 @@ export function mockNewApiChannelList(request) {
     body: {
       success: true, message: "",
       data: { items: [
-        { id: 1, name: "上游A-高速", type: 1, status: 1, base_url: `${local}/newapi/np-pro` },
-        { id: 2, name: "上游A-备用", type: 1, status: 2, base_url: `${local}/newapi/np-pro` },
+        { id: 1, name: "上游甲·高速", type: 1, status: 1, base_url: `${local}/newapi/np-pro` },
+        { id: 2, name: "上游甲·备用", type: 1, status: 2, base_url: `${local}/newapi/np-pro` },
         { id: 3, name: "拼车团队", type: 14, status: 1, base_url: `${local}/sub2api/s2-team` },
-        { id: 4, name: "官方直连-DeepSeek", type: 43, status: 1, base_url: "" },
+        { id: 4, name: "官方直连", type: 43, status: 1, base_url: "" },
         { id: 5, name: "包月自建", type: 14, status: 1, base_url: "http://10.0.0.8:13800" },
       ], total: 5 },
     },
@@ -452,18 +452,18 @@ export async function seedDemo(rt) {
   const local = MOCK_BASE;
   if (rt.store.list().length === 0) {
     const demos = [
-      { name: "Pro 中转站（演示）", type: "newapi", baseUrl: `${local}/newapi/np-pro`, accessToken: "demo-token", userId: "1" },
+      { name: "主力上游（演示）", type: "newapi", baseUrl: `${local}/newapi/np-pro`, accessToken: "demo-token", userId: "1" },
       { name: "Key 计费站（演示）", type: "newapi-key", baseUrl: `${local}/newapi/np-key`, apiKey: "sk-demo-key" },
       { name: "拼车团队（演示）", type: "sub2api", baseUrl: `${local}/sub2api/s2-team`, accessToken: "demo-jwt" },
-      { name: "低余额告警（演示）", type: "sub2api", baseUrl: `${local}/sub2api/s2-low`, accessToken: "demo-jwt", lowBalanceUsd: 5 },
+      { name: "余额偏低（演示）", type: "sub2api", baseUrl: `${local}/sub2api/s2-low`, accessToken: "demo-jwt", lowBalanceUsd: 5 },
     ];
     for (const d of demos) await rt.store.add({ ...d, demo: true });
   }
-  // 追加「账密自动续期」演示站（仅当全部是演示站且还没有该类型时）
+  // 追加「邮箱密码登录」演示站（仅当全部是演示站且还没有该类型时）
   const list = rt.store.list();
   if (list.every((s) => s.demo) && !list.some((s) => s.type === "sub2api-password")) {
     await rt.store.add({
-      name: "账密自动续期（演示）",
+      name: "邮箱密码登录（演示）",
       type: "sub2api-password",
       baseUrl: `${local}/sub2api/s2-pw`,
       email: "demo@example.com",

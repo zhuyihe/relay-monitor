@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { purgeStation } from "./purge.js";
 import { registerHooks } from "node:module";
 import { Store, stationBusinessVersion } from "../../../../db/store.js";
+import { businessTimeZone } from "../../../../lib/business-time.js";
 
 async function stationRoute() {
   // Replace only the Next/runtime authentication adapter; execute the actual PUT handler and Store.
@@ -115,6 +116,7 @@ test("U04 actual authenticated GET显式includeUnmonitored可重载暂停和专�
       assert.deepEqual((await (await get(query)).json()).stations.map((station) => station.id), [own.id]);
     }
     const full = await (await get("?includeUnmonitored=true")).json();
+    assert.equal(full.tz, businessTimeZone());
     assert.deepEqual(full.stations.map((station) => station.id), [own.id, paused.id, dedicated.id]);
     const monitor = full.stations.find((station) => station.id === paused.id), billing = full.stations.find((station) => station.id === dedicated.id);
     for (const field of ["id", "userId", "costAliases", "lowBalanceUsd", "cnyPerUsd", "noRenewal", "fixedPurchases", "monitorEnabled", "includeInProfit"]) assert.deepEqual(monitor[field], paused[field]);

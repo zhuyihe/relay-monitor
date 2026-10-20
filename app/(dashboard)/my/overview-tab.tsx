@@ -88,7 +88,7 @@ function Equation({ v, range, onBasis, reload }: { v: OwnView; range: OwnRange; 
   if (!p || p.error) {
     return (
       <Panel title={title} caption={caption}>
-        <ErrorState title="利润暂时算不出来" error={p?.error || "接口没有返回利润数据"} onRetry={() => reload()} />
+        <ErrorState what="利润暂时算不出" error={p?.error || "接口没有返回利润数据"} onRetry={() => reload()} />
       </Panel>
     );
   }
@@ -154,7 +154,7 @@ function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: 
     return (
       <Panel title="收入与上游成本" caption="按天">
         {costs?.error ? (
-          <ErrorState title="逐日成本加载失败" error={costs.error} onRetry={() => reload()} />
+          <ErrorState what="读不到逐日成本" error={costs.error} onRetry={() => reload()} />
         ) : (
           <EmptyState title="暂时没有逐日成本" desc="稍后刷新再看。" />
         )}

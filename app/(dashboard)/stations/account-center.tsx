@@ -134,7 +134,7 @@ type AccountCenterProps = {
   compact: boolean;
   loaded: boolean;
   loadingList: boolean;
-  loadError: string | null;
+  loadError: Error | null;
   reload: () => Promise<void>;
   // 页面每次读取上游列表后递增，上游账单随之重读
   reloadToken: number;

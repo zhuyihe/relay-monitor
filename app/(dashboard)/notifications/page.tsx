@@ -697,7 +697,7 @@ export default function NotificationsPage() {
       {/* 告警规则 */}
       {notifFailed ? (
         <Panel title="告警规则">
-          <ErrorState title="告警规则和通知渠道暂时无法加载" error={notifErr} onRetry={loadNotif} />
+          <ErrorState what="读不到告警规则和通知渠道" error={notifErr} onRetry={loadNotif} />
         </Panel>
       ) : (
         <Panel
@@ -829,7 +829,7 @@ export default function NotificationsPage() {
       {/* 通知渠道 */}
       {notifFailed ? (
         <Panel title="通知渠道">
-          <ErrorState title="通知渠道暂时无法加载" error={notifErr} onRetry={loadNotif} />
+          <ErrorState what="读不到通知渠道" error={notifErr} onRetry={loadNotif} />
         </Panel>
       ) : (
         <Panel
@@ -919,7 +919,7 @@ export default function NotificationsPage() {
         <PanelSkeleton title="每日日报" lines={3} />
       ) : !metaLoaded ? (
         <Panel title="每日日报">
-          <ErrorState title="日报设置暂时无法加载" error={metaErr} onRetry={loadMeta} />
+          <ErrorState what="读不到日报设置" error={metaErr} onRetry={loadMeta} />
         </Panel>
       ) : (
         <Panel

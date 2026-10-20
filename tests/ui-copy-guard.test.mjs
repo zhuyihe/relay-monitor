@@ -1,6 +1,6 @@
 // 界面文案守护（design/ui-copy-spec.md §12.6）：扫描页面里给用户看的字，命中 §3.6 的词或多余的英文就失败。
 // 含中文的字符串和 JSX 里的文字算界面文字；注释、import、类型、console 和 Error 的参数（只给开发看，§12.4）不扫。
-// 范围跟着文案改动一批批扩大：先管每日利润、上游账单、渠道绑定、改绑定和「需要处理」列表。
+// 范围跟着文案改动一批批扩大：每日利润、上游资源、运营总览、公用组件已纳入。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
@@ -15,15 +15,10 @@ const filesIn = (dir) => readdirSync(join(ROOT, dir)).filter((name) => /\.(tsx?|
 
 const FILES = [
   ...filesIn("app/(dashboard)/reconciliation"),
-  "app/(dashboard)/stations/account-center.tsx",
-  "app/(dashboard)/stations/association-editor.tsx",
-  "app/components/channel-onboarding.tsx",
-  "app/components/account-authorization.tsx",
-  "app/components/attention-list.tsx",
-  "app/components/error-detail.tsx",
-  "app/(dashboard)/page.tsx",
-  "app/components/use-workflow-actions.ts",
-  "app/components/workflow-copy.ts",
+  ...filesIn("app/(dashboard)/stations"),
+  ...filesIn("app/components"),
+  ...["page.tsx", "layout.tsx", "trend-modal.tsx", "chart-box.tsx"].map((name) => `app/(dashboard)/${name}`),
+  "server/demo.js",
   "lib/reconciliation-view.js",
   "lib/reconciliation-contract.js",
   "lib/workflow-actions.js",
@@ -56,11 +51,6 @@ const FORBIDDEN = [
   // §3.4：缓存只写「缓存」
   "缓存读写", "缓存读", "缓存写",
 ];
-
-// 余额总览和余额那几句随 A2 一起改（§3.3）：这些文件里暂时放过下面这些词，A2 改完就删掉这一项
-const DEFERRED = {
-  "app/(dashboard)/page.tsx": ["查询失败", "尚未查询", "摊销", "耗尽", "阈值", "口径", "推算"],
-};
 
 // §3.7 的类型名和输入框名，以及 Key、ID、Token；文案表里的 {channel} 这类占位符填的是名称和时间。去掉这些后不该再有英文字母。
 // 「API」只许出现在类型名和 Key 说明里的上游页面名「API 密钥」中，单独写的「API」「API 地址」算后端用语；
@@ -107,7 +97,7 @@ function visibleTexts(file) {
 
 test("界面文字不出现 §3.6 的词", () => {
   const hits = FILES.flatMap((file) => visibleTexts(file).flatMap(([line, text]) => FORBIDDEN
-    .filter((word) => text.includes(word) && !DEFERRED[file]?.includes(word)).map((word) => `${file}:${line}「${word}」${text}`)));
+    .filter((word) => text.includes(word)).map((word) => `${file}:${line}「${word}」${text}`)));
   assert.deepEqual(hits, []);
 });
 

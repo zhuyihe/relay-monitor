@@ -1,8 +1,11 @@
 // 加载、出错、空数据、首次使用：每个面板都用同一套说法和样式。
-// 出错时说清楚哪里出了问题并给"重试"；空状态告诉用户下一步能做什么。
+// 出错时说清楚读不到什么、为什么，并给「刷新」；空状态告诉用户下一步能做什么。
 import type { CSSProperties, ReactNode } from "react";
 import { Button } from "antd";
 import { MINUS } from "../../lib/format";
+import { failureSentence } from "../../lib/error-copy.js";
+import { workflowActionMeta } from "../../lib/workflow-actions.js";
+import { ErrorDetail, noteOf } from "./error-detail";
 import { Sym } from "./icons";
 import { Panel } from "./panel";
 
@@ -51,33 +54,37 @@ export function PanelSkeleton({
   );
 }
 
+// 整块读不到（design/ui-copy-spec.md §8.1）：一句「读不到经营数据：原因。」，what 是前半句，原因按 §8.2 归类；
+// 原文只进「查看详细原因」。给了 onRetry 就放「刷新」按钮。
 export function ErrorState({
-  title = "数据加载失败",
+  what,
   error,
   onRetry,
+  retrying = false,
   center = false,
   extra,
 }: {
-  title?: ReactNode;
+  what: string;
   error?: unknown;
   onRetry?: () => void;
+  retrying?: boolean;
   center?: boolean;
   extra?: ReactNode;
 }) {
-  const msg = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const note = noteOf(error);
   return (
     <div className={`jy-state${center ? " jy-state--center" : ""}`} role="alert">
       <h3>
         <Sym kind="crit" className="jy-status--crit" />
-        {title}
+        {failureSentence(what, note.text)}
       </h3>
-      {msg && <p>{msg}</p>}
       {(onRetry || extra) && (
         <div className="actions">
-          {onRetry && <Button onClick={onRetry}>重试</Button>}
+          {onRetry && <Button type="primary" loading={retrying} onClick={onRetry}>{workflowActionMeta("refresh").label}</Button>}
           {extra}
         </div>
       )}
+      <ErrorDetail raw={note.raw} />
     </div>
   );
 }

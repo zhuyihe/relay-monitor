@@ -1,73 +1,35 @@
-// 上游资源页的纯数据部分：连接字段常量、错误描述、固定成本汇总、每行的展示模型。
-// 不含 JSX，表格、移动卡片、抽屉共用同一份计算，避免三处口径不一致。
-import { usd } from "../../../lib/client";
-import { formatDays, formatMonthDay } from "../../../lib/format";
-import { balanceStateOf } from "../../../lib/overview-actions";
-import { rateSnapshotOf } from "../../../lib/profit";
+// 上游列表的纯数据部分：登录信息字段、报错归类、每行的展示模型。
+// 不含 JSX，表格、手机列表、编辑页共用同一份计算；余额分档、固定成本笔数、可用天数都用 lib/ 里和运营总览同一份的函数。
+import { BALANCE_STATE_TEXT, EMPTY, formatDays, formatMoney, formatUsd, formatZonedDate } from "../../../lib/format";
+import { balanceViewOf, etaWindowDays } from "../../../lib/overview-actions";
+import { fixedCostNowOf, purchasesOf, rateSnapshotOf } from "../../../lib/profit";
 import { noteOf } from "../../components/error-detail";
 import type { ErrorNote } from "../../components/error-detail";
-import { LEVEL_ORDER } from "../../components/status";
 import type { Level } from "../../components/status";
 
-export const DAY_MS = 86400000;
+const DAY_MS = 86400000;
+
+// 只在上游列表出现的说法（design/ui-copy-spec.md §3.3、§7）
+const COPY = {
+  archived: "已归档",
+  archivedOn: (date: string) => `归档于 ${date}`,
+  fixedNone: "还没有固定成本记录",
+  fixedExpired: "已到期",
+  fixedRenew: "要续上，再记一笔固定成本",
+  fixedUpcoming: "还没开始",
+  fixedEndsIn: (days: number) => `${days} 天后到期`,
+  fixedNextEnd: (date: string) => `最近一笔 ${date}到期`,
+  fixedLeft: (days: number) => `还剩 ${days} 天`,
+  available: (days: number) => `可用${formatDays(days)}`,
+  noRenewal: "不再续费，不再提醒",
+  own: "自营站点，不提醒余额",
+};
+
+// 读不到上游类型时（/api/meta 失败）：列表页的横幅和编辑页的提示同一句
+export const TYPES_MISSING_TEXT = "读不到上游类型，暂时不能新增或编辑上游";
 
 export const CONNECTION_FIELDS = new Set(["type", "baseUrl", "accessToken", "apiKey", "userId", "email", "password"]);
 export const CONNECTION_INPUT_FIELDS = ["baseUrl", "accessToken", "apiKey", "userId", "email", "password"] as const;
-
-export type ConnectionGuidance = {
-  title: string;
-  credentials: string;
-  address: string;
-  lifecycle: string;
-  test: string;
-};
-
-export const CONNECTION_GUIDANCE: Record<string, ConnectionGuidance> = {
-  newapi: {
-    title: "New API · 系统访问令牌",
-    credentials: "需要系统访问令牌和用户 ID。令牌通常在 New API 后台的「个人设置」中获取，用户 ID 可在同页查看。",
-    address: "填写站点根地址，例如 https://relay.example.com；不要填写 /api/user/self、管理后台或具体接口路径。",
-    lifecycle: "令牌由上游站点管理；过期、撤销或权限变化后，需要手动更新后重新验证。",
-    test: "测试只读取当前账户额度，不会保存凭证、刷新资源或触发告警。",
-  },
-  "newapi-key": {
-    title: "New API · sk 密钥",
-    credentials: "需要一个可用的 sk- API 密钥，通常从站点的令牌/密钥管理页创建。",
-    address: "填写站点根地址，例如 https://relay.example.com；不要填写 /v1 或 /dashboard/billing 等路径。",
-    lifecycle: "密钥的有效期和权限由上游站点控制；失效或被撤销后需替换为新的密钥。",
-    test: "测试通过 OpenAI 兼容计费接口读取额度，不会写入资源或触发告警。",
-  },
-  sub2api: {
-    title: "Sub2API · 登录令牌",
-    credentials: "需要登录后的访问令牌（JWT），通常在浏览器已登录状态下，从站点账户接口请求的 Authorization 头中获取。",
-    address: "填写站点根地址，例如 https://relay.example.com；不要填写 /api/v1/auth/me 等具体接口路径。",
-    lifecycle: "JWT 过期、退出登录或被吊销后需手动更换。若希望自动续期，请选择账号密码模式。",
-    test: "测试会验证 JWT 是否能读取账户余额，不会保存令牌或触发刷新、告警。",
-  },
-  "sub2api-password": {
-    title: "Sub2API · 账号密码自动续期",
-    credentials: "需要可登录的邮箱和密码。保存后，平台会在访问令牌临近过期时自动刷新，无法刷新时再重新登录。",
-    address: "填写站点根地址，例如 https://relay.example.com；不要填写登录接口或管理后台路径。",
-    lifecycle: "测试只临时验证邮箱和密码，不保存测试期间产生的令牌；保存资源后才会启用自动续期。开启两步验证的账号无法自动登录。",
-    test: "测试会完成一次临时登录并读取余额，不写入数据库、不刷新资源，也不触发告警。",
-  },
-  fixed: {
-    title: "固定成本 · 不访问接口",
-    credentials: "不需要令牌、密钥、邮箱或密码。",
-    address: "不需要填写站点地址；成本通过下方的付费记录按天摊销。",
-    lifecycle: "没有令牌续期行为；到期后添加新的付费记录即可继续计入成本。",
-    test: "固定成本不测试连接，也不会访问任何外部接口。",
-  },
-};
-
-// 表格里的类型名：接口返回的 label 带括号说明，列表里太长，这里给短名；未知类型退回 label
-const SHORT_TYPE: Record<string, string> = {
-  newapi: "New API",
-  "newapi-key": "New API 密钥",
-  sub2api: "Sub2API",
-  "sub2api-password": "Sub2API 账密",
-  fixed: "固定成本",
-};
 
 // 读不到余额、测试读取没成时界面上的那条：text 是归类后的一句（§8.2），raw 是原文，只进「查看详细原因」
 export type ConnectionIssue = ErrorNote;
@@ -90,35 +52,12 @@ export function resultIssue(source: any): ConnectionIssue {
   return noteOf({ code: source.code, message: source.diagnostic ?? source.error });
 }
 
+// 测试读取读到的余额，按上游自己的币种写（§3.3）：美元「$12.30」，人民币「¥12.30」，别的只写数
 export function testBalanceText(result: ConnectionTestResult) {
-  if (!Number.isFinite(Number(result.remaining))) return null;
+  if (result.remaining == null || !Number.isFinite(Number(result.remaining))) return null;
   const amount = Number(result.remaining);
-  return result.currency === "USD"
-    ? `余额 ${usd(amount)}`
-    : `余额 ${amount.toLocaleString("zh-CN", { maximumFractionDigits: 2 })}${result.currency ? ` ${result.currency}` : ""}`;
-}
-
-export function relTime(iso: any) {
-  if (!iso) return "从未";
-  const d = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (d < 60) return `${Math.max(0, Math.floor(d))} 秒前`;
-  if (d < 3600) return `${Math.floor(d / 60)} 分钟前`;
-  return `${Math.floor(d / 3600)} 小时前`;
-}
-
-export function fmtClock(ts: any) {
-  const d = new Date(ts);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-// 最近同步列：当天只写时分，跨天补日期，免得把昨天的数据看成刚同步
-export function syncTime(ts: any) {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "—";
-  const p = (n: number) => String(n).padStart(2, "0");
-  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
-  return d.toDateString() === new Date().toDateString() ? hm : `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+  if (result.currency === "USD") return formatUsd(amount);
+  return formatMoney(amount, { symbol: result.currency === "CNY" ? "¥" : "" });
 }
 
 export function hostOf(baseUrl: any) {
@@ -131,49 +70,9 @@ export function hostOf(baseUrl: any) {
   }
 }
 
-// 与总览 buildOverviewActions 的窗口一致：规则里的 etaDays，缺省 3 天
-export function critDaysOf(rules: any) {
-  const v = Number(rules?.etaDays);
-  return Number.isFinite(v) && v > 0 ? v : 3;
-}
-export const WARN_DAYS = 7;
-export const MAX_DAYS = 14;
+export type FixedNow = ReturnType<typeof fixedCostNowOf>;
 
-// 固定成本汇总（逐笔判断生效 / 待生效 / 到期，与旧版口径一致）
-export type FixedSummary = {
-  total: number;
-  daily: number;
-  active: number;
-  pendingStart: number;
-  nextEnd: number | null;
-  remain: number | null;
-  expiredAll: boolean;
-};
-export function fixedSummary(s: any, now = Date.now()): FixedSummary {
-  const ps = Array.isArray(s.fixedPurchases) ? s.fixedPurchases : [];
-  let daily = 0, active = 0, pendingStart = 0, nextEnd: number | null = null;
-  for (const p of ps) {
-    const d = p.amount > 0 && p.days > 0 ? p.amount / p.days : 0;
-    if (!p.startDate) { daily += d; active++; continue; }
-    const st = Date.parse(p.startDate + "T00:00:00");
-    const end = st + p.days * DAY_MS;
-    if (st > now) { pendingStart++; continue; }
-    if (end > now) {
-      daily += d; active++;
-      if (nextEnd == null || end < nextEnd) nextEnd = end;
-    }
-  }
-  return {
-    total: ps.length,
-    daily,
-    active,
-    pendingStart,
-    nextEnd,
-    remain: nextEnd == null ? null : Math.ceil((nextEnd - now) / DAY_MS),
-    expiredAll: ps.length > 0 && active === 0 && pendingStart === 0,
-  };
-}
-
+// 可用天数一格：days 给进度条，text 是格子里的字
 export type RunwayView = { days: number | null; level: Level; failed?: boolean; text: string } | null;
 
 export type StationView = {
@@ -181,128 +80,105 @@ export type StationView = {
   id: string;
   archived: boolean;
   fixed: boolean;
-  typeLabel: string;
   host: string;
   level: Level;
+  // 状态名；正常时是空串，界面不标（§2 第 5 条）
   statusLabel: string;
   statusNote: string | null;
   issue: ConnectionIssue | null;
   checkedAt: string | null;
+  // 折人民币用的汇率，没设置时是 1（§7）
   rate: number;
-  // 排序用的可用天数；null 表示无法计算，排在最后
+  // 排序用的可用天数；null 表示算不出，排在最后
   sortDays: number | null;
   runway: RunwayView;
-  fx: FixedSummary | null;
+  fx: FixedNow | null;
   attention: boolean;
 };
 
-const runwayLevel = (days: number, critDays: number): Level => (days <= critDays ? "crit" : days <= WARN_DAYS ? "warn" : "good");
-
 export function buildStationView(
   s: any,
-  ctx: { settings: any; critDays: number; typeName: (t: string) => string; check?: StationCheck; attention: boolean; now: number },
+  ctx: { settings: any; rules: any; tz: string; check?: StationCheck; attention: boolean; now: number },
 ): StationView {
-  const { settings, critDays, check, attention, now } = ctx;
+  const { settings, rules, tz, check, attention, now } = ctx;
   const archived = !!s.archivedAt;
   const fixed = s.type === "fixed";
-  const base = {
-    s,
-    id: String(s.id),
-    archived,
-    fixed,
-    typeLabel: SHORT_TYPE[s.type] || ctx.typeName(s.type),
-    host: hostOf(s.baseUrl),
-    rate: rateSnapshotOf(s).cnyPerUsd,
-    attention,
+  const base = { s, id: String(s.id), archived, fixed, host: hostOf(s.baseUrl), rate: rateSnapshotOf(s).cnyPerUsd, attention };
+  const archivedRow = {
+    level: "muted" as Level,
+    statusLabel: COPY.archived,
+    statusNote: Number.isFinite(Date.parse(s.archivedAt)) ? COPY.archivedOn(formatZonedDate(s.archivedAt, tz, now)) : null,
+    issue: null,
+    sortDays: null,
+    runway: null,
   };
 
   if (fixed) {
-    const fx = fixedSummary(s, now);
+    const fx = fixedCostNowOf(purchasesOf(s), { now, tz });
+    if (archived) return { ...base, ...archivedRow, checkedAt: null, fx };
+    const remain = fx.nextEnd == null ? null : Math.ceil((fx.nextEnd - now) / DAY_MS);
+    const soon = remain != null && remain <= etaWindowDays(rules);
     let level: Level = "good";
-    let statusLabel = "生效中";
-    let statusNote: string | null = fx.nextEnd != null ? `最近一笔 ${formatMonthDay(fx.nextEnd)}到期` : null;
-    if (fx.expiredAll) {
+    let statusLabel = "";
+    let statusNote: string | null = fx.note || (fx.nextEnd != null ? COPY.fixedNextEnd(formatZonedDate(fx.nextEnd, tz, now)) : null);
+    if (!fx.total) {
       level = "muted";
-      statusLabel = "已到期";
-      statusNote = "已全部到期，续费请追加付费记录";
-    } else if (!fx.total) {
-      level = "muted";
-      statusLabel = "无付费记录";
+      statusLabel = COPY.fixedNone;
       statusNote = null;
-    } else if (fx.active === 0 && fx.pendingStart > 0) {
+    } else if (!fx.active && !fx.upcoming) {
       level = "muted";
-      statusLabel = "待生效";
-    } else if (fx.remain != null && fx.remain <= critDays) {
-      // 标记为不再续费的不再提醒到期（与运营总览一致）
+      statusLabel = COPY.fixedExpired;
+      statusNote = COPY.fixedRenew;
+    } else if (!fx.active) {
+      level = "muted";
+      statusLabel = COPY.fixedUpcoming;
+    } else if (soon) {
+      // 不再续费的不提醒到期（和运营总览一致）
       level = s.noRenewal ? "muted" : "warn";
-      statusLabel = `${fx.remain} 天后到期`;
+      statusLabel = COPY.fixedEndsIn(remain);
     }
-    const runway: RunwayView = fx.remain != null
-      ? { days: fx.remain, level: fx.remain <= critDays ? "warn" : "good", text: `剩 ${fx.remain} 天` }
-      : { days: null, level: "muted", text: fx.expiredAll ? "已到期" : fx.active === 0 && fx.pendingStart > 0 ? "待生效" : "暂无到期日" };
-    if (archived) return { ...base, level: "muted", statusLabel: "已归档", statusNote: archivedNote(s), issue: null, checkedAt: null, sortDays: null, runway: null, fx };
-    return { ...base, level, statusLabel, statusNote, issue: null, checkedAt: null, sortDays: fx.remain, runway, fx };
+    const runway: RunwayView = remain == null
+      ? null
+      : { days: remain, level: soon ? (s.noRenewal ? "muted" : "warn") : "good", text: COPY.fixedLeft(remain) };
+    return { ...base, level, statusLabel, statusNote, issue: null, checkedAt: null, sortDays: remain, runway, fx };
   }
 
   const b = s.balance;
   const issue = check?.issue || (b && !b.ok ? resultIssue(b) : null);
   const checkedAt = check?.checkedAt || b?.checkedAt || null;
-  if (archived) {
-    return { ...base, level: "muted", statusLabel: "已归档", statusNote: archivedNote(s), issue: null, checkedAt, sortDays: null, runway: null, fx: null };
-  }
+  if (archived) return { ...base, ...archivedRow, checkedAt, fx: null };
   if (issue) {
     return {
-      ...base, level: "crit", statusLabel: "查询失败", statusNote: issue.text, issue, checkedAt, sortDays: null,
-      runway: { days: null, level: "crit", failed: true, text: "无法计算" }, fx: null,
+      ...base, level: "crit", statusLabel: BALANCE_STATE_TEXT.unreadable, statusNote: issue.text, issue, checkedAt, sortDays: null,
+      runway: { days: null, level: "crit", failed: true, text: EMPTY }, fx: null,
     };
   }
-  if (!b) {
-    return { ...base, level: "muted", statusLabel: "待刷新", statusNote: "尚未查询", issue: null, checkedAt, sortDays: null, runway: null, fx: null };
+  const view = balanceViewOf(s, { settings, rules });
+  if (view.state === "pending" || view.state === "unreadable") {
+    return { ...base, level: view.level, statusLabel: BALANCE_STATE_TEXT[view.state], statusNote: null, issue: null, checkedAt, sortDays: null, runway: null, fx: null };
   }
-  const st = balanceStateOf(s, settings);
-  const p = s.prediction;
-  const burn = p?.burnPerDay;
-  const eta = p?.etaDays;
-  let runway: RunwayView;
-  if (st === "danger") runway = { days: 0, level: "crit", text: "已耗尽" };
-  else if (burn === 0) runway = { days: Infinity, level: "good", text: "无消耗" };
-  else if (eta != null && Number.isFinite(Number(eta))) runway = { days: Number(eta), level: runwayLevel(Number(eta), critDays), text: formatDays(eta) };
-  else runway = { days: null, level: "muted", text: "无法计算" };
-
-  let level: Level = "good";
-  let statusLabel = "正常";
+  const { days, level } = view;
   let statusNote: string | null = null;
-  if (st === "danger") {
-    level = "crit";
-    statusLabel = "已耗尽";
-  } else if (st === "warn") {
-    level = "warn";
-    statusLabel = "余额偏低";
-  }
-  // 再看耗尽预测，取两者中更严重的：阈值内算紧急，7 天内算注意（与运营总览、上游余量同一口径）
-  if (burn > 0 && eta != null) {
-    const etaLevel = runwayLevel(Number(eta), critDays);
-    if (etaLevel !== "good" && LEVEL_ORDER[etaLevel] < LEVEL_ORDER[level]) {
-      level = etaLevel;
-      if (st !== "warn") statusLabel = etaLevel === "crit" ? "即将耗尽" : "7 天内耗尽";
-    }
-  }
-  if (burn > 0 && eta != null) statusNote = `可用${formatDays(eta)}`;
-  // 不再续费的资源与自营站点不做余额提醒（与运营总览一致），只保留文字
-  if ((s.noRenewal || s.isOwn) && (level === "crit" || level === "warn")) {
-    level = "muted";
-    statusNote = s.noRenewal ? "已标记不再续费，不再提醒" : "自营站点不做余额提醒";
-  }
-  const sortDays = runway && runway.days != null ? runway.days : null;
-  return { ...base, level, statusLabel, statusNote, issue: null, checkedAt, sortDays, runway, fx: null };
+  if (Number(s.prediction?.burnPerDay) > 0 && days != null && view.state !== "empty") statusNote = COPY.available(days);
+  // 不再续费的和自营站点不提醒余额（balanceViewOf 已把颜色降掉），这里交代一句
+  if (view.state && level === "muted" && (s.noRenewal || s.isOwn)) statusNote = s.noRenewal ? COPY.noRenewal : COPY.own;
+  const runway: RunwayView = days == null
+    ? { days: null, level: "muted", text: EMPTY }
+    : { days, level, text: view.state === "empty" ? BALANCE_STATE_TEXT.empty : formatDays(days) };
+  return {
+    ...base,
+    level,
+    statusLabel: view.state ? BALANCE_STATE_TEXT[view.state] : "",
+    statusNote,
+    issue: null,
+    checkedAt,
+    sortDays: days,
+    runway,
+    fx: null,
+  };
 }
 
-function archivedNote(s: any) {
-  const t = Date.parse(s.archivedAt);
-  return Number.isFinite(t) ? `归档于 ${formatMonthDay(t)}` : null;
-}
-
-// 驱动连接测试 / 保存门槛的指纹：只含连接字段，其它字段改动不要求重新测试
+// 决定要不要重新测试读取、能不能保存的指纹：只含登录信息，其它字段改动不要求重新测试
 export function connectionFingerprint(values: any, stationId: any, needs: string[]) {
   const type = String(values.type || "").trim();
   const fingerprint: Record<string, string | null> = {

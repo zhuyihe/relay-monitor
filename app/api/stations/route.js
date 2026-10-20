@@ -1,5 +1,6 @@
 // GET /api/stations（列表）+ POST /api/stations（新增）——对应 v1 server.js 同名路由
 import { withAuth, json } from "../../../lib/api.js";
+import { businessTimeZone } from "../../../lib/business-time.js";
 import { STATION_TYPES } from "../../../lib/providers.js";
 import { redact } from "../../../server/stations.js";
 import { refreshStation } from "../../../server/refresh.js";
@@ -11,6 +12,8 @@ export const GET = withAuth(async (request, rt) => {
   return json({
     stations: rt.store.list({ includeArchived, includeUnmonitored }).map((s) => redact(rt, s)),
     settings: rt.store.settings,
+    // 业务时区：页面上的「数据截至」和固定成本的到期日按它写（design/ui-copy-spec.md §6）
+    tz: businessTimeZone(),
   });
 });
 

@@ -215,7 +215,7 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
               正在拉取管理员账号的 Key…
             </p>
           ) : mgrError ? (
-            <ErrorState title="管理员账号的 Key 拉取失败" error={mgrError} onRetry={fetchAccounts} />
+            <ErrorState what="读不到管理员账号的 Key" error={mgrError} onRetry={fetchAccounts} />
           ) : !accounts || !accounts.length ? (
             <EmptyState center={false} title="没有找到管理员或 root 账号" desc="转售 Key 只能从 role ≥ 10 的账号里选。" />
           ) : (

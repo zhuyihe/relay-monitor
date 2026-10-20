@@ -368,7 +368,7 @@ export default function SettingsPage() {
     <Panel title="账户安全" badge={<Dirty show={accountDirty} />}>
       {meError ? (
         <div className="jy-settings-inline-error">
-          <ErrorState title="账户信息暂时无法读取" error={meError} onRetry={() => void loadMe()} />
+          <ErrorState what="读不到账户信息" error={meError} onRetry={() => void loadMe()} />
         </div>
       ) : null}
       <form className="jy-settings-form" onSubmit={onChangePassword} noValidate aria-describedby={pwErrors.form ? `${uid}-pw-form` : undefined}>
@@ -480,7 +480,7 @@ export default function SettingsPage() {
         settingsFailed ? (
           // 三组都依赖同一次读取，失败时合成一处提示，避免同一原因重复三遍
           <Panel title="运行设置">
-            <ErrorState title="系统设置暂时无法读取" error={settingsError} onRetry={() => void loadSettings()} />
+            <ErrorState what="读不到系统设置" error={settingsError} onRetry={() => void loadSettings()} />
           </Panel>
         ) : !settingsLoaded ? (
           <>
@@ -553,7 +553,7 @@ export default function SettingsPage() {
               {settingsError ? (
                 // 已有数据时重新读取失败：保留当前内容，只在本组提示
                 <div className="jy-settings-inline-error">
-                  <ErrorState title="历史概况暂时无法更新" error={settingsError} onRetry={() => void loadSettings("none")} />
+                  <ErrorState what="读不到历史概况" error={settingsError} onRetry={() => void loadSettings("none")} />
                 </div>
               ) : null}
               <div className="jy-field">
@@ -658,7 +658,7 @@ export default function SettingsPage() {
         <Panel title="关于">
           {metaError ? (
             <div className="jy-settings-inline-error">
-              <ErrorState title="系统信息暂时无法读取" error={metaError} onRetry={() => void loadMeta()} />
+              <ErrorState what="读不到系统信息" error={metaError} onRetry={() => void loadMeta()} />
             </div>
           ) : null}
           <dl className="jy-kv jy-settings-about">
