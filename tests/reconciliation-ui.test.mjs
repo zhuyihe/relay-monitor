@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationNotCountedCostText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
-import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
+import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
 import { BALANCE_STATE_TEXT, EMPTY, FIXED_COST_TEXT, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RANGE_TEXT, formatDayKey, RATE_UNSET_PARITY, RATE_UNSET_USD, SELL_PRICE_UNSET, formatAsOf, formatCompact, formatDayZone, formatRate, formatZonedDateTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy, reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
@@ -2660,4 +2660,71 @@ test("告警中心：规则名取余额档位的共用叫法，区块名按规�
   await result.getByText(`${NOTIFICATIONS_COPY.reportNotSent}：${ERROR_CATEGORIES.other.text}`, { exact: true }).waitFor();
   await result.getByText("查看详细原因", { exact: true }).waitFor();
   assert.doesNotMatch(await result.innerText(), /发送$|没有启用的日报通知渠道/m);
+});
+
+test("告警中心通知方式：接口不回传密钥；只改名字也能保存、不提交密钥；改了地址没重填时说清楚、不关弹窗", async (t) => {
+  const code = "ENDPOINT_CHANGED_SECRET_REQUIRED";
+  const telegram = { id: "c1", name: "运维群", type: "telegram", enabled: true, config: { botToken: "", chatId: "42", apiBase: "" }, hasSecret: { botToken: true } };
+  const channelTypes = [{ value: "telegram", label: "Telegram 机器人", fields: [
+    { key: "botToken", label: "Bot Token", required: true, secret: true },
+    { key: "chatId", label: "Chat ID", required: true },
+    { key: "apiBase", label: "API 地址（可选，默认官方）", required: false, endpoint: true },
+  ] }];
+  const puts = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), method = route.request().method();
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels: [telegram], rules: { onLow: true, channelsFor: {} }, channelTypes });
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture({ dailyReport: { enabled: false, time: "09:00", channelIds: [] } }));
+    if (url.pathname === "/api/notifications/channels/c1" && method === "PUT") {
+      const body = route.request().postDataJSON(); puts.push(body);
+      return body.config.apiBase ? failJSON(route, 400, { error: errorText({ code }), code }) : fulfill(route, { channel: { ...telegram, name: body.name } });
+    }
+    throw new Error("unexpected notifications fixture API: " + method + " " + url.pathname);
+  }, undefined, false, null, "/notifications");
+  const openEdit = async () => {
+    await page.getByRole("button", { name: NOTIFICATIONS_COPY.editAria("运维群"), exact: true }).first().click();
+    const dialog = page.getByRole("dialog", { name: NOTIFICATIONS_COPY.editTitle, exact: true }); await dialog.waitFor();
+    return dialog;
+  };
+  let dialog = await openEdit();
+  // 密钥框从空开始，写「已保存」，下面说不填就接着用
+  const token = dialog.getByLabel("Bot Token", { exact: true });
+  assert.equal(await token.inputValue(), "");
+  assert.equal(await token.getAttribute("placeholder"), SECRET_FIELD_TEXT.saved);
+  await dialog.getByText(SECRET_FIELD_TEXT.keep(" Bot Token"), { exact: true }).waitFor();
+  await dialog.getByLabel(NOTIFICATIONS_COPY.name, { exact: true }).fill("运维群2");
+  await dialog.getByRole("button", { name: NOTIFICATIONS_COPY.save }).click();
+  await dialog.waitFor({ state: "hidden" });
+  assert.deepEqual(puts[0], { name: "运维群2", type: "telegram", config: { botToken: "", chatId: "42", apiBase: "" } });
+
+  dialog = await openEdit();
+  await dialog.getByLabel("API 地址（可选，默认官方）", { exact: true }).fill("https://evil.example");
+  await dialog.getByRole("button", { name: NOTIFICATIONS_COPY.save }).click();
+  await page.getByText(`${NOTIFICATIONS_COPY.saveFailed}：${errorText({ code })}。`, { exact: true }).waitFor();
+  assert.equal(await dialog.isVisible(), true);
+  assert.equal(puts[1].config.botToken, "");
+});
+
+test("编辑上游改了地址的站点：留空的令牌不带过去，测试读取说「换了地址…请重新填」", async (t) => {
+  const code = "ENDPOINT_CHANGED_SECRET_REQUIRED";
+  const tests = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname, method = route.request().method();
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations: [{ id: "s1", name: "Alpha 上游", type: "newapi", baseUrl: "https://alpha.test", userId: "7", hasAccessToken: true, monitorEnabled: true, balance: { ok: true, remaining: 10, checkedAt: "2026-10-09T07:00:00.000Z" }, prediction: null, spark: [] }], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/stations/test" && method === "POST") {
+      tests.push(route.request().postDataJSON());
+      return fulfill(route, { ok: false, code, category: "other", message: errorText({ code }), action: null });
+    }
+    throw new Error("unexpected API: " + method + " " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations?edit=s1");
+  const drawer = page.getByRole("dialog", { name: UPSTREAM_FORM_TEXT.editTitle("Alpha 上游"), exact: true }); await drawer.waitFor();
+  await drawer.getByLabel(CREDENTIAL_FIELDS.baseUrl.label, { exact: true }).fill("https://evil.test");
+  await drawer.getByRole("button", { name: TEST_READ }).click();
+  await drawer.getByText(testReadText({ ok: false, reason: errorText({ code }) }), { exact: true }).waitFor();
+  assert.equal(tests[0].baseUrl, "https://evil.test");
+  assert.equal(tests[0].accessToken, "");
 });

@@ -1,10 +1,10 @@
 // 站点响应拼装助手（v1 server.js redact 的平移版，改为显式接收 rt）。
-// 隐藏敏感凭证，仅返回是否已配置
+// 隐藏敏感凭证，仅返回是否已配置；告警的去重状态（alertState，里面有通知发送失败的原文）前端用不到，不返回
 import { businessTimeZone, dayBoundsInTz } from "../lib/business-time.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 
 export function redact(rt, s) {
-  const { accessToken, apiKey, password, s2Tokens, onboardingOrigin, authorizationUpdateRef, ...rest } = s;
+  const { accessToken, apiKey, password, s2Tokens, onboardingOrigin, authorizationUpdateRef, alertState, ...rest } = s;
   const balance = s.balance && !s.balance.ok
     ? { ...s.balance, error: connectionDiagnostic(s.balance.error, s) }
     : s.balance;

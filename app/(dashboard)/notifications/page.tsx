@@ -23,7 +23,8 @@ import { StatusText } from "../../components/status";
 import { TabPanel, Tabs } from "../../components/seg";
 import { COPY } from "./copy";
 
-type ChannelField = { key: string; label: string; required?: boolean };
+// secret：密钥，接口不回传、编辑时不回显，留空表示不变；名单在服务端（lib/notify.js CHANNEL_TYPES），这里不另写
+type ChannelField = { key: string; label: string; required?: boolean; secret?: boolean };
 type ChannelType = { value: string; label: string; fields: ChannelField[] };
 // raw：接口本身出错时的原文，只进「查看详细原因」
 type TestResult = { ok: boolean; text: string; at: number; raw?: unknown };
@@ -37,9 +38,6 @@ const CH_PLATE: Record<string, string> = {
   ntfy: "NF", serverchan: "SC", resend: "RS", smtp: "SM", webhook: "WH",
 };
 
-// 密钥类字段：编辑时不回显，留空提交 = 保持原值（store.updateChannel 对任意键都保留空值原值）。
-// Webhook 地址里带着访问令牌，自定义 Webhook 的请求头常含鉴权信息，一并按密钥处理（审计 V1）
-const SECRET_KEYS = ["botToken", "secret", "token", "sendKey", "apiKey", "password", "deviceKey", "webhook", "url", "headersJson"];
 
 // 提醒规则：事件键（选通知方式用）+ 开关键；名字里的余额四档和上游列表、运营总览同一份（BALANCE_STATE_TEXT）
 const RULES = [
@@ -272,8 +270,8 @@ export default function NotificationsPage() {
     const t = channelTypes.find((x) => x.value === type);
     const cfg: Record<string, string> = {};
     for (const f of t?.fields || []) {
-      const v = channel?.config?.[f.key] || "";
-      cfg[f.key] = SECRET_KEYS.includes(f.key) ? "" : v;
+      // 接口不回传密钥（只给 hasSecret），密钥框一律从空开始
+      cfg[f.key] = f.secret ? "" : channel?.config?.[f.key] || "";
     }
     setEditingCh(channel || null);
     setChType(type);
@@ -310,7 +308,7 @@ export default function NotificationsPage() {
     const t = channelTypes.find((x) => x.value === chType);
     const config = chFormConfig();
     // 必填校验：编辑时密钥不回显，已配置过的空值视为「保持不变」不算缺失
-    const missing = (t?.fields || []).filter((f) => f.required && !config[f.key] && !editingCh?.config?.[f.key]);
+    const missing = (t?.fields || []).filter((f) => f.required && !config[f.key] && !(f.secret && editingCh?.hasSecret?.[f.key]));
     if (missing.length) {
       setChErrors(Object.fromEntries(missing.map((f) => [f.key, requiredText(shortLabel(f.label).trim())])));
       document.getElementById(`${uid}-ch-${missing[0].key}`)?.focus();
@@ -331,19 +329,14 @@ export default function NotificationsPage() {
     }
   };
 
-  // 弹窗内测试：按 type+config 试发未保存的配置；
-  // 编辑时密钥字段不回显，空值用已保存的原值补齐，否则测试必然失败
+  // 弹窗内测试：按这次填的内容试发，不保存；
+  // 编辑时留空的密钥由服务端用已保存的补齐（换了地址的站点就不补，会报「换了地址…请重新填」）
   const testChForm = async () => {
     const config = chFormConfig();
-    if (editingCh?.config) {
-      for (const k of Object.keys(config)) {
-        if (!config[k] && editingCh.config[k]) config[k] = editingCh.config[k];
-      }
-    }
     setChTesting(true);
     setChTest(null);
     try {
-      const r = await api("/api/notifications/test", { body: { type: chType, config } });
+      const r = await api("/api/notifications/test", { body: { channelId: editingCh?.id, type: chType, config } });
       setChTest({ ok: !!r.ok, text: r.ok ? COPY.checkInbox : r.error || "", at: Date.now() });
     } catch (e) {
       setChTest(apiFailure(e));
@@ -1053,8 +1046,8 @@ export default function NotificationsPage() {
           </div>
           {(curType?.fields || []).map((f) => {
             const id = `${uid}-ch-${f.key}`;
-            const secret = SECRET_KEYS.includes(f.key);
-            const saved = secret && !!editingCh?.config?.[f.key];
+            const secret = !!f.secret;
+            const saved = secret && !!editingCh?.hasSecret?.[f.key];
             const val = chConfig[f.key] || "";
             const help = saved
               ? val

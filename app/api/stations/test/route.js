@@ -1,10 +1,12 @@
 // POST /api/stations/test —— 使用临时连接信息验证上游，不写库、不刷新、不触发告警。
 import { withAuth, json } from "../../../../lib/api.js";
 import { describeError } from "../../../../lib/error-copy.js";
+import { sameEndpoint } from "../../../../lib/endpoint.js";
 import { queryStation, STATION_TYPES } from "../../../../lib/providers.js";
+import { UPSTREAM_SECRET_FIELDS } from "../../../../lib/channel-onboarding.js";
 
 const CONNECTION_FIELDS = ["baseUrl", "accessToken", "apiKey", "userId", "email", "password"];
-const PRESERVED_SECRET_FIELDS = new Set(["accessToken", "apiKey", "password"]);
+const PRESERVED_SECRET_FIELDS = new Set(UPSTREAM_SECRET_FIELDS);
 
 function text(value) {
   return String(value || "").trim();
@@ -20,22 +22,33 @@ function findSavedStation(store, stationId) {
   return store.list().find((station) => station.id === stationId) || null;
 }
 
+// 返回 { station, droppedSecret }：droppedSecret 表示换了站点、已保存的密钥没有补上，这次测试不发出去
 function testStation(body, saved) {
   const type = text(body.type || saved?.type);
   const sameType = !!saved && type === saved.type;
+  // 换了站点（协议、主机、端口）就不再沿用已保存的密钥，免得把它发到新地址（lib/endpoint.js）
+  const sameSite = !!saved && (!Object.hasOwn(body, "baseUrl") || sameEndpoint(body.baseUrl, saved.baseUrl));
   const station = { type };
+  let droppedSecret = false;
 
   for (const field of CONNECTION_FIELDS) {
     if (Object.hasOwn(body, field)) {
       const value = connectionValue(field, body[field]);
       // 编辑既有资源时，表单中空的敏感凭证代表“保持不变”；其他连接字段的空值会参与测试。
-      station[field] = value || (sameType && PRESERVED_SECRET_FIELDS.has(field) ? connectionValue(field, saved?.[field]) : "");
+      const keep = sameType && PRESERVED_SECRET_FIELDS.has(field);
+      if (!value && keep && !sameSite && saved?.[field]) droppedSecret = true;
+      station[field] = value || (keep && sameSite ? connectionValue(field, saved?.[field]) : "");
     } else if (sameType) {
-      station[field] = connectionValue(field, saved?.[field]);
+      if (PRESERVED_SECRET_FIELDS.has(field) && !sameSite) {
+        if (saved?.[field]) droppedSecret = true;
+        station[field] = "";
+      } else {
+        station[field] = connectionValue(field, saved?.[field]);
+      }
     }
   }
 
-  return station;
+  return { station, droppedSecret };
 }
 
 export const POST = withAuth(async (request, rt) => {
@@ -43,12 +56,17 @@ export const POST = withAuth(async (request, rt) => {
   const saved = findSavedStation(rt.store, text(body.stationId));
   if (body.stationId && !saved) return json({ error: "找不到这个上游", code: "UPSTREAM_NOT_FOUND" }, 404);
 
-  const station = testStation(body, saved);
+  const { station, droppedSecret } = testStation(body, saved);
   if (!STATION_TYPES.some((item) => item.value === station.type)) {
     return json({ error: "请选上游类型", code: "UNSUPPORTED_UPSTREAM_TYPE" }, 400);
   }
   if (station.type === "fixed") {
     return json({ ok: true, message: "固定成本不访问外部接口，无需测试连接。" });
+  }
+  if (droppedSecret) {
+    const code = "ENDPOINT_CHANGED_SECRET_REQUIRED";
+    const { category, text, action } = describeError({ code });
+    return json({ ok: false, code, category, message: text, action });
   }
 
   const { result } = await queryStation(station);
