@@ -35,13 +35,18 @@ test("登录：用户名或密码不对时 401 带 LOGIN_FAILED，试太多次�
   assert.deepEqual(await wrong.json(), { error: errorText({ code: "LOGIN_FAILED" }), code: "LOGIN_FAILED" });
   assert.deepEqual(rt.sessions.calls, [["failure", "1.2.3.4"]]);
 
-  const locked = await POST(post("/api/auth/login", { username: "admin", password: "right" }), { store: store(), sessions: sessions(true) });
+  // 锁定时连密码都不比对，也不再记失败次数
+  const lockedRt = { store: store(), sessions: sessions(true) };
+  const locked = await POST(post("/api/auth/login", { username: "admin", password: "right" }), lockedRt);
   assert.equal(locked.status, 429);
   assert.deepEqual(await locked.json(), { error: errorText({ code: "LOGIN_RATE_LIMITED" }), code: "LOGIN_RATE_LIMITED" });
+  assert.deepEqual(lockedRt.sessions.calls, []);
 
-  const ok = await POST(post("/api/auth/login", { username: "admin", password: "right" }), { store: store(), sessions: sessions() });
+  const okRt = { store: store(), sessions: sessions() };
+  const ok = await POST(post("/api/auth/login", { username: "admin", password: "right" }), okRt);
   assert.equal(ok.status, 200);
   assert.deepEqual(await ok.json(), { ok: true, username: "admin", isDefaultPassword: false });
+  assert.deepEqual(okRt.sessions.calls, [["success", "1.2.3.4"]]);
   assert.equal(errorText({ code: "LOGIN_FAILED" }), "用户名或密码不对");
   assert.equal(errorText({ code: "LOGIN_RATE_LIMITED" }), "试了太多次，请 5 分钟后再试");
 });

@@ -8,10 +8,10 @@ import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import Link from "next/link";
 import { App, Button, Input, InputNumber, Select } from "antd";
-import { BRAND, NAV_LABELS } from "../../../lib/brand";
+import { BRAND, NAV_LABELS, VERSION_LABEL } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
-import { describeError, errorText, failureSentence, failureText, requiredText } from "../../../lib/error-copy";
+import { consoleFailureText, describeError, errorText, requiredText } from "../../../lib/error-copy";
 import { EMPTY, formatInt, formatZonedDateTime } from "../../../lib/format";
 import { Panel } from "../../components/panel";
 import { Dirty, ErrorState, PanelSkeleton } from "../../components/data-state";
@@ -236,7 +236,7 @@ export default function SettingsPage() {
       if (!r.history) void loadSettings("none");
       message.success(COPY.saved);
     } catch (e) {
-      message.error(failureText(COPY.saveFailed, e));
+      message.error(consoleFailureText(COPY.saveFailed, e));
     } finally {
       setSavingGroup(null);
     }
@@ -301,7 +301,7 @@ export default function SettingsPage() {
         onOk: () => persistSettings("retention", true, nextRetention),
       });
     } catch (e) {
-      message.error(failureText(COPY.previewFailed, e));
+      message.error(consoleFailureText(COPY.previewFailed, e));
     } finally {
       setPreviewingCleanup(false);
     }
@@ -353,6 +353,8 @@ export default function SettingsPage() {
   const restricted = !!me?.isDefaultPassword;
   // 上次自动清理没完成：服务端存的是原文，只进「查看详细原因」
   const cleanupError = history?.cleanup?.lastError || null;
+  // 现在保留多久：一直保留时不再自动清理
+  const keptDays = history?.retentionDays ?? savedRetentionDays;
   // 会话信息回来之前不确定是否处于"首次改密"模式，先用骨架占位，避免其他分组闪现后又消失
   const showOthers = meLoaded && !restricted;
   const settingsFailed = !settingsLoaded && !settingsLoading && !!settingsError;
@@ -375,7 +377,7 @@ export default function SettingsPage() {
           <div className="jy-banner jy-banner--crit" role="alert" id={`${uid}-pw-form`}>
             <Sym kind="crit" />
             <div className="jy-banner__body">
-              <b>{failureSentence(COPY.changeFailed, pwFormNote.text)}</b>
+              <b>{consoleFailureText(COPY.changeFailed, pwErrors.form)}</b>
               <ErrorDetail raw={pwFormNote.raw} />
             </div>
           </div>
@@ -627,10 +629,11 @@ export default function SettingsPage() {
                 <section aria-labelledby={`${uid}-cleanup`}>
                   <h3 id={`${uid}-cleanup`}>{COPY.cleanup}</h3>
                   {cleanupError ? (
-                    <div className="jy-err">
+                    <div className="jy-err jy-settings-cleanup-err">
                       <Sym kind="crit" />
                       <div>
                         {COPY.cleanupFailed}
+                        {keptDays != null ? COPY.cleanupRetry : ""}
                         <ErrorDetail raw={cleanupError} />
                       </div>
                     </div>
@@ -639,7 +642,7 @@ export default function SettingsPage() {
                   )}
                   <dl className="jy-kv">
                     <dt>{COPY.keep}</dt>
-                    <dd>{settingsLoaded ? COPY.policy(history?.retentionDays ?? savedRetentionDays) : COPY.reading}</dd>
+                    <dd>{settingsLoaded ? COPY.policy(keptDays) : COPY.reading}</dd>
                     <dt>{COPY.lastCheck}</dt>
                     <dd>{formatDateTime(history?.cleanup?.lastRunAt, tz)}</dd>
                     <dt>{COPY.lastDeleted}</dt>
@@ -672,7 +675,7 @@ export default function SettingsPage() {
               <b>{BRAND.productName}</b>
               <span className="jy-caption">{COPY.productHint}</span>
             </dd>
-            <dt>{COPY.version}</dt>
+            <dt>{VERSION_LABEL}</dt>
             <dd>
               <code className="jy-settings-code">{versionText}</code>
               <span className="jy-caption">{COPY.versionHint}</span>

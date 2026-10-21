@@ -9,7 +9,7 @@ import { api } from "../../lib/client";
 import { formatAsOf, formatAsOfTime } from "../../lib/format";
 import { failureText } from "../../lib/error-copy";
 import { workflowActionMeta } from "../../lib/workflow-actions";
-import { BRAND, formatPageTitle, NAV_LABELS } from "../../lib/brand";
+import { BRAND, formatPageTitle, NAV_LABELS, VERSION_LABEL } from "../../lib/brand";
 import { NAV_GROUPS, NAV_ITEMS, navItemFor } from "../../lib/nav";
 import { buildOverviewActions } from "../../lib/overview-actions";
 import BrandMark from "../components/brand-mark";
@@ -227,7 +227,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </button>
           </div>
           <div className="jy-sider-foot">
-            <span className="grow">软件版本 {pkg.version}</span>
+            <span className="grow">{VERSION_LABEL} {pkg.version}</span>
             <button
               type="button"
               className="jy-collapse-btn"

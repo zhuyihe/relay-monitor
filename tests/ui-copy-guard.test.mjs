@@ -22,6 +22,7 @@ const FILES = [
   // app/ 下全部页面和组件；接口在下面逐个列，app/mock 是演示用的假上游，不上界面
   ...walk("app", ["app/api", "app/mock"]),
   "server/demo.js",
+  "lib/brand.js",
   "lib/reconciliation-view.js",
   "lib/reconciliation-contract.js",
   "lib/workflow-actions.js",

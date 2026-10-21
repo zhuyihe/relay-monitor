@@ -94,6 +94,11 @@
   margin-top: 28px;
 }
 
+/* 按钮下面一块：出错页的「查看详细原因」 */
+.detail {
+  margin-top: 16px;
+}
+
 .primaryAction,
 .secondaryAction {
   display: inline-flex;

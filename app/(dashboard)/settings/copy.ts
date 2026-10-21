@@ -53,8 +53,9 @@ export const COPY = Object.freeze({
   rows: (n: string) => `${n} 条`,
   none: "还没有",
   cleanup: "最近自动清理",
-  // 清理是系统自己的事，不按读上游的几类报错说；原文进「查看详细原因」
-  cleanupFailed: "上次自动清理没完成，下次自动清理时会再试",
+  // 清理是系统自己的事，不按读上游的几类报错说；原文进「查看详细原因」。设了保留天数才会再清理，才说「会再试」
+  cleanupFailed: "上次自动清理没完成",
+  cleanupRetry: "，下次自动清理时会再试",
   cleanupHint: "设了保留天数，系统才会自动删掉更早的记录",
   lastCheck: "上次检查",
   lastDeleted: "上次删掉",
@@ -77,7 +78,6 @@ export const COPY = Object.freeze({
   // 关于（§11：构建标识 → 软件版本，版本号后面括号里是给技术同事看的编号）
   product: "产品",
   productHint: "当前运行的管理控制台",
-  version: "软件版本",
   versionHint: "出问题时把这一行发给技术同事",
   metaFailed: "读不到系统信息",
 });

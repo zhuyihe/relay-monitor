@@ -2,7 +2,8 @@
 // 炬元控制台登录页：桌面双区建立品牌信任，移动端收敛为单列表单。
 // 登录失败时在表单顶部说明原因，按接口给的码处理（design/ui-copy-spec.md §8.2）：
 // 用户名或密码不对时标红两个输入框，试太多次、连不上时只说原因，不标红，免得误导用户去改输入。
-// 只在本页出现的话都在下面的 COPY 里；报错的说法、漏填提示从 lib/error-copy.js 取
+// 只在本页出现的话都在同目录的 copy.ts 里；报错的说法、漏填提示从 lib/error-copy.js 取。
+// 这是控制台自己的接口：除了这两个码，报错按 consoleErrorText 说，不按读上游的几类关键词猜
 import "../styles/pages/login.css";
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -11,37 +12,22 @@ import type { InputRef } from "antd";
 import { CheckOutlined, LockOutlined, UserOutlined } from "@ant-design/icons";
 import { api } from "../../lib/client";
 import { BRAND } from "../../lib/brand";
-import { describeError, errorText, failureSentence, requiredRule } from "../../lib/error-copy";
+import { CONSOLE_UNREACHABLE, consoleFailureText, describeError, errorText, requiredRule } from "../../lib/error-copy";
 import BrandMark from "../components/brand-mark";
 import { ErrorDetail, noteOf } from "../components/error-detail";
 import { Sym } from "../components/icons";
+import { COPY } from "./copy";
 
-const COPY = Object.freeze({
-  lead: "上游的余额和花费、自营站点的收入和利润，都在这一个控制台里看。",
-  capsLabel: "能做什么",
-  caps: Object.freeze(["看清每个上游的余额和可用天数", "每天算出收入、成本和利润", "余额快用完时及时提醒"]),
-  foot: "每一笔上游花费都看得清",
-  title: `登录${BRAND.productName}`,
-  subtitle: "用管理员账号登录。",
-  username: "用户名",
-  password: "密码",
-  submit: "登录",
-  failed: "登录失败",
-  // 浏览器连不上控制台（断网、服务没起来），不是接口报错
-  offline: "连不上控制台，请检查网络后再试",
-  notice: "只有这个控制台的管理员可以登录。",
-});
 
 // 表单顶部那一句；fields：要不要标红输入框；raw：原文，只进「查看详细原因」
 type LoginError = { text: string; fields: boolean; raw?: unknown };
 
 function loginErrorOf(e: any): LoginError {
-  if (e instanceof TypeError) return { text: COPY.offline, fields: false };
+  if (e instanceof TypeError) return { text: CONSOLE_UNREACHABLE, fields: false };
   const { code } = describeError(e);
   if (code === "LOGIN_FAILED") return { text: errorText(e), fields: true };
   if (code === "LOGIN_RATE_LIMITED") return { text: errorText(e), fields: false };
-  const note = noteOf(e);
-  return { text: failureSentence(COPY.failed, note.text), fields: false, raw: note.raw };
+  return { text: consoleFailureText(COPY.failed, e), fields: false, raw: noteOf(e).raw };
 }
 
 export default function LoginPage() {

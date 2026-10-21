@@ -3,7 +3,7 @@
 // 只在挂载时加载一次、不注册顶栏刷新：自动重载会冲掉正在输入的数字（沿用 v1 的取舍）。
 // 提醒规则改了马上保存：开关、通知方式的选择改动即保存，数字输入在离开输入框或按回车时保存。
 // 只在本页出现的话都在同目录的 copy.ts 里；规则名里的余额四档、漏填提示、报错的说法从共用的地方取。
-// 通知方式自己的报错（发送失败的原因）照原文显示，归类留给 A3。
+// 通知方式自己的报错（发送失败的原因）照原文显示，归类留给 A3；控制台自己的接口出错按 consoleErrorText 说，原文进「查看详细原因」。
 import "../../styles/pages/notifications.css";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
@@ -12,11 +12,12 @@ import dayjs from "dayjs";
 import { NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
-import { failureText, requiredText } from "../../../lib/error-copy";
+import { SECRET_FIELD_TEXT } from "../../../lib/channel-onboarding";
+import { consoleErrorText, consoleFailureText, requiredText } from "../../../lib/error-copy";
 import { BALANCE_STATE_TEXT, formatDayKey, formatZonedTime } from "../../../lib/format";
 import { CountBadge, Panel } from "../../components/panel";
 import { Dirty, ErrorState, PanelSkeleton } from "../../components/data-state";
-import { noteOf } from "../../components/error-detail";
+import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { StatusText } from "../../components/status";
 import { TabPanel, Tabs } from "../../components/seg";
@@ -24,7 +25,11 @@ import { COPY } from "./copy";
 
 type ChannelField = { key: string; label: string; required?: boolean };
 type ChannelType = { value: string; label: string; fields: ChannelField[] };
-type TestResult = { ok: boolean; text: string; at: number };
+// raw：接口本身出错时的原文，只进「查看详细原因」
+type TestResult = { ok: boolean; text: string; at: number; raw?: unknown };
+
+// 接口本身出错（不是通知方式发送失败）：按控制台自己的说法，原文留着给「查看详细原因」
+const apiFailure = (e: unknown, at = Date.now()): TestResult => ({ ok: false, text: consoleErrorText(e), at, raw: noteOf(e).raw });
 
 // 通知方式的图标（类型名取接口返回的 channelTypes，这里只有图标上的缩写）
 const CH_PLATE: Record<string, string> = {
@@ -78,8 +83,9 @@ type RuleForm = {
   errRetry: number | null;
 };
 
-// 测试发送结果：图标 + 文字 + 底色，不单靠颜色
+// 测试发送结果：图标 + 文字 + 底色，不单靠颜色。发出去了写「14:30 发送」，没发出去只写时刻
 function ResultBox({ r, okTitle, tz }: { r: TestResult; okTitle: string; tz: string }) {
+  const time = formatZonedTime(r.at, tz);
   return (
     <div className={`jy-test-result${r.ok ? "" : " jy-test-result--bad"}`}>
       <Sym kind={r.ok ? "good" : "crit"} />
@@ -87,8 +93,9 @@ function ResultBox({ r, okTitle, tz }: { r: TestResult; okTitle: string; tz: str
       <span>
         {r.text}
         {r.text ? "；" : ""}
-        {COPY.sentAt(formatZonedTime(r.at, tz))}
+        {r.ok ? COPY.sentAt(time) : time}
       </span>
+      <ErrorDetail raw={r.raw} />
     </div>
   );
 }
@@ -222,7 +229,7 @@ export default function NotificationsPage() {
       await api(`/api/notifications/channels/${c.id}`, { method: "PUT", body: { enabled: next } });
       setChannels((list) => list.map((x) => (x.id === c.id ? { ...x, enabled: next } : x)));
     } catch (e) {
-      message.error(failureText(COPY.saveFailed, e));
+      message.error(consoleFailureText(COPY.saveFailed, e));
     }
   };
 
@@ -232,8 +239,7 @@ export default function NotificationsPage() {
       const r = await api("/api/notifications/test", { body: { channelId: c.id } });
       setRowTests((m) => ({ ...m, [c.id]: { ok: !!r.ok, text: r.ok ? COPY.sentTo(c.name) : r.error || "", at: Date.now() } }));
     } catch (e) {
-      // 接口本身出错（不是通知方式发送失败）：按 §8.2 归类
-      setRowTests((m) => ({ ...m, [c.id]: { ok: false, text: noteOf(e).text, at: Date.now() } }));
+      setRowTests((m) => ({ ...m, [c.id]: apiFailure(e) }));
     } finally {
       setRowTesting(null);
     }
@@ -252,7 +258,7 @@ export default function NotificationsPage() {
           await reloadChannels();
           message.success(COPY.deleted);
         } catch (e) {
-          message.error(failureText(COPY.deleteFailed, e));
+          message.error(consoleFailureText(COPY.deleteFailed, e));
         }
       },
     });
@@ -317,9 +323,9 @@ export default function NotificationsPage() {
       else await api("/api/notifications/channels", { body: payload });
       setChOpen(false);
       await reloadChannels();
-      message.success(COPY.saved);
+      message.success(editingCh ? COPY.saved : COPY.added);
     } catch (e) {
-      message.error(failureText(COPY.saveFailed, e));
+      message.error(consoleFailureText(COPY.saveFailed, e));
     } finally {
       setChSaving(false);
     }
@@ -340,7 +346,7 @@ export default function NotificationsPage() {
       const r = await api("/api/notifications/test", { body: { type: chType, config } });
       setChTest({ ok: !!r.ok, text: r.ok ? COPY.checkInbox : r.error || "", at: Date.now() });
     } catch (e) {
-      setChTest({ ok: false, text: noteOf(e).text, at: Date.now() });
+      setChTest(apiFailure(e));
     } finally {
       setChTesting(false);
     }
@@ -365,7 +371,7 @@ export default function NotificationsPage() {
         setRuleErrors((e) => ({ ...e, errThreshold: "" }));
       }
     } catch (e) {
-      message.error(failureText(COPY.saveFailed, e));
+      message.error(consoleFailureText(COPY.saveFailed, e));
     }
   };
 
@@ -378,7 +384,7 @@ export default function NotificationsPage() {
       setChannelsFor(r.rules?.channelsFor || {});
       setRulesSavedAt(Date.now());
     } catch (e) {
-      message.error(failureText(COPY.saveFailed, e));
+      message.error(consoleFailureText(COPY.saveFailed, e));
       setChannelsFor(rules?.channelsFor || {});
     }
   };
@@ -417,7 +423,7 @@ export default function NotificationsPage() {
     if (f.etaVal == null && rules.onEta) errs.eta = requiredText(COPY.etaLabel);
     if (f.errThreshold == null && rules.onError) errs.errThreshold = requiredText(COPY.errLabel);
     if (f.renotify == null) errs.renotify = `${requiredText(COPY.renotify)}${COPY.renotifyZero}`;
-    if (f.errRetry == null) errs.errRetry = `${requiredText(COPY.retryLabel)}${COPY.retryZero}`;
+    if (f.errRetry == null) errs.errRetry = `${requiredText(COPY.retry)}${COPY.retryZero}`;
     setRuleErrors(errs);
     if (Object.keys(errs).length) return;
     setRulesSaving(true);
@@ -445,7 +451,7 @@ export default function NotificationsPage() {
       setErrRetry(keep(f.errRetry, Number(r.rules?.errorRetrySec ?? 30)));
       setRulesSavedAt(Date.now());
     } catch (e) {
-      message.error(failureText(COPY.saveFailed, e));
+      message.error(consoleFailureText(COPY.saveFailed, e));
     } finally {
       setRulesSaving(false);
     }
@@ -478,7 +484,7 @@ export default function NotificationsPage() {
       syncDrForm(r.settings);
       message.success(COPY.saved);
     } catch (e) {
-      message.error(failureText(COPY.saveFailed, e));
+      message.error(consoleFailureText(COPY.saveFailed, e));
     } finally {
       setDrSaving(false);
     }
@@ -492,7 +498,7 @@ export default function NotificationsPage() {
       setReportTab("html");
       setReportOpen(true);
     } catch (e) {
-      message.error(failureText(COPY.previewFailed, e));
+      message.error(consoleFailureText(COPY.previewFailed, e));
     } finally {
       setPreviewing(false);
     }
@@ -507,12 +513,13 @@ export default function NotificationsPage() {
       const ok = results.filter((x) => x.ok).length;
       setSendResult({
         ok: ok > 0,
-        text: COPY.reportSent(ok, results.length),
+        text: ok > 0 ? COPY.reportSent(ok, results.length) : COPY.reportNotSent,
         at: Date.now(),
         fails: results.filter((x) => !x.ok).map((x) => `${x.name || x.id}：${x.error || COPY.sendFailed}`),
       });
     } catch (e) {
-      setSendResult({ ok: false, text: noteOf(e).text, at: Date.now(), fails: [] });
+      // 发之前就出错（例如没有能发的通知方式）：按控制台自己的说法，原文进「查看详细原因」（这类报错的码留给 A3）
+      setSendResult({ ...apiFailure(e), text: `${COPY.reportNotSent}：${consoleErrorText(e)}`, fails: [] });
     } finally {
       setSending(false);
     }
@@ -537,6 +544,7 @@ export default function NotificationsPage() {
           <span className="jy-caption">{formatZonedTime(t.at, tz)}</span>
         </StatusText>
         {!t.ok && t.text && <span className="jy-caption">{t.text}</span>}
+        {!t.ok && <ErrorDetail raw={t.raw} />}
       </span>
     );
   };
@@ -590,6 +598,7 @@ export default function NotificationsPage() {
           <Space.Compact>
             <InputNumber
               id={`${uid}-eta`}
+              aria-label={COPY.etaLabel}
               onBlur={commitRules}
               onPressEnter={commitRules}
               min={0}
@@ -630,6 +639,7 @@ export default function NotificationsPage() {
           <label htmlFor={`${uid}-errThreshold`}>{COPY.errBefore}</label>
           <InputNumber
             id={`${uid}-errThreshold`}
+            aria-label={COPY.errLabel}
             onBlur={commitRules}
             onPressEnter={commitRules}
             min={1}
@@ -989,10 +999,11 @@ export default function NotificationsPage() {
               <div className={`jy-test-result${sendResult.ok ? "" : " jy-test-result--bad"}`}>
                 <Sym kind={sendResult.ok ? "good" : "crit"} />
                 <b>{sendResult.text}</b>
-                <span>{COPY.sentAt(formatZonedTime(sendResult.at, tz))}</span>
+                <span>{sendResult.ok ? COPY.sentAt(formatZonedTime(sendResult.at, tz)) : formatZonedTime(sendResult.at, tz)}</span>
                 {sendResult.fails.map((f) => (
                   <span key={f}>{f}</span>
                 ))}
+                <ErrorDetail raw={sendResult.raw} />
               </div>
             )}
           </div>
@@ -1047,8 +1058,8 @@ export default function NotificationsPage() {
             const val = chConfig[f.key] || "";
             const help = saved
               ? val
-                ? COPY.replaceSecret(shortLabel(f.label))
-                : COPY.keepSecret(shortLabel(f.label))
+                ? SECRET_FIELD_TEXT.replace(shortLabel(f.label))
+                : SECRET_FIELD_TEXT.keep(shortLabel(f.label))
               : undefined;
             return (
               <Form.Item
@@ -1064,7 +1075,7 @@ export default function NotificationsPage() {
                   <Input.Password
                     id={id}
                     autoComplete="new-password"
-                    placeholder={saved ? COPY.secretSaved : undefined}
+                    placeholder={saved ? SECRET_FIELD_TEXT.saved : undefined}
                     value={val}
                     onChange={(e) => onChFieldChange(f.key, e.target.value)}
                   />

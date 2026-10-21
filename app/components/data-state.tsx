@@ -2,7 +2,7 @@
 // 出错时说清楚读不到什么、为什么，并给「刷新」；空状态告诉用户下一步能做什么。
 import type { CSSProperties, ReactNode } from "react";
 import { Button } from "antd";
-import { MINUS, refreshFailedText } from "../../lib/format";
+import { LOADING_TEXT, MINUS, refreshFailedText } from "../../lib/format";
 import { failureSentence } from "../../lib/error-copy.js";
 import { workflowActionMeta } from "../../lib/workflow-actions.js";
 import { ErrorDetail, noteOf } from "./error-detail";
@@ -37,9 +37,9 @@ export function PanelSkeleton({
   className?: string;
 }) {
   return (
-    <Panel title={title} className={className} label={typeof title === "string" ? undefined : "正在加载"}>
+    <Panel title={title} className={className} label={typeof title === "string" ? undefined : LOADING_TEXT}>
       <div aria-busy="true" aria-live="polite">
-        <span className="sr-only">正在加载</span>
+        <span className="sr-only">{LOADING_TEXT}</span>
         {height ? (
           <Skeleton height={height} />
         ) : (
