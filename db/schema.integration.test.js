@@ -7,9 +7,11 @@ import { ReconciliationRepository, reconciliationOwnerRuleState } from "../serve
 import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues } from "../lib/reconciliation-ledger.js";
 import { defineReconciliationRepositoryContract } from "../server/test-support/reconciliation-repository-contract.js";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { Store } from "./store.js";
 import { isCiphertext, secretKeyOf } from "./secrets.js";
-import { resetSecrets } from "./reset-secrets.js";
 
 // Opt-in only: this fixture replaces tables in this one disposable local schema.
 // Never load .env or fall back to the application's connection defaults.
@@ -525,14 +527,18 @@ test("登录信息加密保存：明文库配上密钥启动后只剩密文，�
   const SECRETS = /fixture-mail|fixture-password-secret|fixture-jwt-secret|fixture-bot-secret|fixture-plain-session/;
   const dump = async () => JSON.stringify([(await pool.query("SELECT id, doc FROM stations"))[0],
     (await pool.query("SELECT k, v FROM meta WHERE k IN (?) ORDER BY k", [META_KEYS]))[0]]);
-  const keyA = secretKeyOf(Buffer.alloc(32, 3).toString("base64")), keyB = secretKeyOf(Buffer.alloc(32, 5).toString("base64"));
+  const KEY_A = Buffer.alloc(32, 3).toString("base64"), KEY_B = Buffer.alloc(32, 5).toString("base64");
+  const keyA = secretKeyOf(KEY_A), keyB = secretKeyOf(KEY_B);
+  // 恢复脚本按部署说明那样从命令行跑；工作目录换到临时目录，免得读到仓库里的 .env
+  const resetCli = (...args) => spawnSync(process.execPath, [fileURLToPath(new URL("./reset-secrets.js", import.meta.url)), ...args],
+    { cwd: tmpdir(), encoding: "utf8", env: { ...process.env, RELAY_SECRET_KEY: KEY_B, RELAY_SECRET_KEY_FILE: "" } });
 
   // 没配密钥：照旧明文，会话密钥原样沿用
   assert.equal((await new Store(pool).load()).sessionSecret, "fixture-plain-session");
   assert.match(await dump(), /fixture-password-secret/);
 
   const first = await new Store(pool, { secretKey: keyA }).load();
-  assert.deepEqual(first.secretReport, { encrypted: true, keyId: keyA.id, converted: 4, sessionRotated: true });
+  assert.deepEqual(first.secretReport, { encrypted: true, keyId: keyA.id, converted: 4, rotated: ["session_secret"] });
   const sealed = await dump();
   assert.doesNotMatch(sealed, SECRETS);
   const [[row]] = await pool.query("SELECT doc FROM stations WHERE id = ?", [station.id]);
@@ -550,9 +556,14 @@ test("登录信息加密保存：明文库配上密钥启动后只剩密文，�
   await assert.rejects(new Store(pool).load(), (err) => err.code === "SECRET_KEY_MISSING");
   assert.equal(await dump(), sealed, "启动中止时不写库");
 
-  const report = await resetSecrets(pool, { secretKey: keyB, apply: true });
-  assert.equal(report.cleared.length, 4);
-  assert.equal(report.sessionReset, true);
+  const preview = resetCli();
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.match(preview.stdout, /上游「加密用例」：登录密码、登录邮箱、自动登录拿到的令牌/);
+  assert.match(preview.stdout, new RegExp(`编号 ${keyA.id} 的密钥加密的，现在配置的密钥编号是 ${keyB.id}`));
+  assert.equal(await dump(), sealed, "不加 --yes 不改库");
+  const cleared = resetCli("--yes");
+  assert.equal(cleared.status, 0, cleared.stderr);
+  assert.match(cleared.stdout, /已清空下面这些解不开的登录信息/);
   const third = await new Store(pool, { secretKey: keyB }).load();
   assert.deepEqual([third.get(station.id).password, third.get(station.id).s2Tokens, third.channels[0].config.botToken, third.channels[0].config.chatId], ["", null, "", "42"]);
   assert.notEqual(third.sessionSecret, first.sessionSecret);

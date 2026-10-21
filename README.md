@@ -104,7 +104,7 @@ echo "RELAY_SECRET_KEY=$(openssl rand -base64 32)" >> .env
 docker compose up -d
 ```
 
-加密的细节、开启后的收尾、密钥丢了怎么办，见 [deploy/README.md「登录信息加密」](deploy/README.md#登录信息加密)。
+已经在跑的部署：先确认 compose 文件里有 `- RELAY_SECRET_KEY=${RELAY_SECRET_KEY:-}` 这一行（Watchtower 不会更新 compose 文件），否则 `.env` 里的密钥传不进容器。整目录备份时排除 `.env`，别让密钥和 `mysql-data/` 进同一份备份。开启后的收尾、密钥丢了怎么办，见 [deploy/README.md「登录信息加密」](deploy/README.md#登录信息加密)。
 
 - **relay-monitor**：面板本体（启动顺序：迁移脚本 → Next standalone 服务）；数据全部在 MySQL，容器无状态、升级不丢数据
 - **watchtower**：自动拉取新镜像并重启面板；页面「设置 → 关于」可查看运行版本与构建 commit

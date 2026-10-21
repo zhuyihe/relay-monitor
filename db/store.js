@@ -6,8 +6,8 @@ import { ALERT_EVENT_KEYS, DEFAULT_RULES } from "../lib/alerts.js";
 import { createHash, randomBytes } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
 import { endpointChangedError, sameEndpoint, staleSecrets } from "../lib/endpoint.js";
-import { resolveChannelConfig } from "../lib/notify.js";
-import { hasSecretValue, isCiphertext, openText, sealText, secretSlots, SESSION_SECRET_AAD, slotText, slotValue } from "./secrets.js";
+import { knownChannelConfig, resolveChannelConfig } from "../lib/notify.js";
+import { canOpen, hasSecretValue, isCiphertext, META_SECRETS, metaAad, openText, sealText, secretSlots, secretText, secretValue } from "./secrets.js";
 
 export function stationBusinessVersion(station) {
   if (!station) return null;
@@ -101,14 +101,25 @@ function sanitizeResoldKeys(input) {
   return out;
 }
 
-// mysql2 的 JSON 列可能返回已解析对象或字符串，统一成对象（db/reset-secrets.js 也用）
-export function asDoc(v) {
+// mysql2 的 JSON 列可能返回已解析对象或字符串，统一成对象
+function asDoc(v) {
   return typeof v === "string" ? JSON.parse(v) : v;
 }
 
 // JSON 列里的字符串标量（会话密钥）：mysql2 多半已经解析成不带引号的字符串，拿到原始 JSON 文本（带引号）时才再 parse
-export function asScalar(v) {
+function asScalar(v) {
   return typeof v === "string" && v.startsWith('"') ? JSON.parse(v) : v;
+}
+
+// 读 stations 全部行和 meta 里 Store 管的几行，Store.load() 和 db/reset-secrets.js 共用
+const META_SECRET_KEYS = new Set(META_SECRETS.map((item) => item.key));
+export async function readStoreRows(pool) {
+  const [stationRows] = await pool.query("SELECT id, doc FROM stations ORDER BY pos, created_at");
+  const [metaRows] = await pool.query("SELECT k, v FROM meta WHERE k IN (?)", [["settings", "auth", "notifications", ...META_SECRET_KEYS]]);
+  return {
+    stations: stationRows.map((r) => asDoc(r.doc)),
+    meta: Object.fromEntries(metaRows.map((r) => [r.k, META_SECRET_KEYS.has(r.k) ? asScalar(r.v) : asDoc(r.v)])),
+  };
 }
 
 // This value comes from server-side verification, never from station input.
@@ -150,9 +161,10 @@ export class Store {
     // 密文复用：每一处上次写库时的 { text, sealed }。内容没变就沿用那份密文，免得每次刷新都把所有站点改写一遍；
     // 写库失败也不用回滚，那份密文本身是有效的
     this._sealed = new Map();
-    this._sessionSecret = null;
-    // 这次启动加密了几处原来明文的登录信息、会话密钥是否换了新的（lib/runtime.js 写启动日志）
-    this.secretReport = { encrypted: !!secretKey, keyId: secretKey?.id || null, converted: 0, sessionRotated: false };
+    // meta 里整行加密的那几项（db/secrets.js 的 META_SECRETS），例如会话密钥
+    this._metaSecrets = {};
+    // 这次启动加密了几处原来明文的登录信息、换了哪几项 meta 密钥（lib/runtime.js 写启动日志）
+    this.secretReport = { encrypted: !!secretKey, keyId: secretKey?.id || null, converted: 0, rotated: [] };
     // The runtime has one Store instance.  Source edits and reconciliation
     // observation commits use this short-lived, per-station boundary; network
     // requests deliberately happen before it is acquired.
@@ -169,15 +181,14 @@ export class Store {
     // DB 读取失败（连接/权限/损坏）→ 直接抛错中止启动，绝不带着空状态运行
     //（那会在首次 save() 时覆盖掉现有站点凭证——与 v1.15.1 的保护语义一致）
     // pos 保持 v1 的数组插入顺序（created_at 在批量迁移时同秒，排序不稳定）
-    const [stationRows] = await this.pool.query("SELECT id, doc FROM stations ORDER BY pos, created_at");
-    const [metaRows] = await this.pool.query("SELECT k, v FROM meta WHERE k IN ('settings','auth','notifications','session_secret')");
-    const meta = Object.fromEntries(metaRows.map((r) => [r.k, r.k === "session_secret" ? asScalar(r.v) : asDoc(r.v)]));
-    const stations = stationRows.map((r) => asDoc(r.doc));
+    const { stations, meta } = await readStoreRows(this.pool);
     const channels = Array.isArray(meta.notifications?.channels) ? meta.notifications.channels : [];
     // 先解开加密的登录信息：缺密钥、密钥不对、数据被改过都直接抛错中止启动，这时还什么都没写
     //（绝不把解不开的字段置空了接着跑，后面的 save() 会把登录信息永久覆盖）
     this._openSecrets({ stations, notifications: { channels } });
-    const sessionSecret = this._openSessionSecret(meta.session_secret);
+    const metaSecrets = this._openMetaSecrets(meta);
+    // 通知方式的配置只留字段表里的键（S1 起新填的也只收这些）：字段表以外的旧键发送时用不到，留着就一直明文存着
+    for (const channel of channels) if (channel?.config) channel.config = knownChannelConfig(channel.type, channel.config);
     this.data = {
       stations,
       settings: { ...DEFAULT_SETTINGS, ...(meta.settings || {}) },
@@ -187,7 +198,7 @@ export class Store {
         rules: { ...DEFAULT_RULES, ...(meta.notifications?.rules || {}) },
       },
     };
-    this._sessionSecret = sessionSecret;
+    this._metaSecrets = metaSecrets;
     this.data.settings.historyRetentionDays =
       normalizeHistoryRetentionDays(this.data.settings.historyRetentionDays);
     // v2.2：旧规则没有渠道绑定字段；归一化成 5 个事件键齐全的独立对象
@@ -265,7 +276,7 @@ export class Store {
 
   // 签登录 cookie 用的会话密钥，和站点、通知方式一起加密存在 meta 表
   get sessionSecret() {
-    return this._sessionSecret;
+    return this._metaSecrets.session_secret ?? null;
   }
 
   _openSecrets(data) {
@@ -275,22 +286,30 @@ export class Store {
         if (this._secretKey && hasSecretValue(value)) this.secretReport.converted += 1;
         continue;
       }
-      const text = openText(this._secretKey, value, slot.aad);
-      slot.owner[slot.key] = slotValue(slot, text);
+      // 从上游读回来的（余额里的账号名）解不开就清空：它可能只是上游给的、长得像密文的字符串，下次刷新会重写
+      if (slot.derived && !canOpen(this._secretKey, value, slot.aad)) { slot.owner[slot.key] = slot.empty; continue; }
+      const text = openText(this._secretKey, value, slot.aad, slot.where);
+      slot.owner[slot.key] = secretValue(text);
       this._sealed.set(slot.aad, { text, sealed: value });
     }
   }
 
-  _openSessionSecret(value) {
-    if (isCiphertext(value)) {
-      const text = openText(this._secretKey, value, SESSION_SECRET_AAD);
-      this._sealed.set(SESSION_SECRET_AAD, { text, sealed: value });
-      return text;
+  _openMetaSecrets(meta) {
+    const values = {};
+    for (const { key, label, rotate } of META_SECRETS) {
+      const value = meta[key];
+      if (isCiphertext(value)) {
+        const text = openText(this._secretKey, value, metaAad(key), label);
+        this._sealed.set(metaAad(key), { text, sealed: value });
+        values[key] = secretValue(text);
+      } else if (value && !(this._secretKey && rotate)) {
+        values[key] = String(value);
+      } else {
+        if (value) this.secretReport.rotated.push(key);
+        values[key] = randomBytes(32).toString("hex");
+      }
     }
-    if (value && !this._secretKey) return String(value);
-    // 第一次加密时换一个新的：旧备份、binlog 里的明文会话密钥就作废了，代价是大家重新登录一次
-    if (value) this.secretReport.sessionRotated = true;
-    return randomBytes(32).toString("hex");
+    return values;
   }
 
   _sealOne(aad, text) {
@@ -303,22 +322,23 @@ export class Store {
 
   // 要写库的那份：配了密钥就对副本加密，内存里的对象不动；没配就原样写
   _seal(data) {
-    if (!this._secretKey) return { stations: data.stations, notifications: data.notifications, sessionSecret: this._sessionSecret };
-    const copy = {
-      stations: data.stations.map((s) => ({ ...s })),
-      notifications: { ...data.notifications, channels: (data.notifications?.channels || []).map((c) =>
-        c?.config && typeof c.config === "object" ? { ...c, config: { ...c.config } } : c) },
-    };
-    const used = new Set([SESSION_SECRET_AAD]);
+    if (!this._secretKey) return { stations: data.stations, notifications: data.notifications, meta: this._metaSecrets };
+    const copy = structuredClone({ stations: data.stations, notifications: data.notifications });
+    const used = new Set();
     for (const slot of secretSlots(copy)) {
       const value = slot.owner[slot.key];
       if (!hasSecretValue(value)) continue;
-      slot.owner[slot.key] = this._sealOne(slot.aad, slotText(slot, value));
+      slot.owner[slot.key] = this._sealOne(slot.aad, secretText(value));
       used.add(slot.aad);
     }
-    const sessionSecret = this._sessionSecret && this._sealOne(SESSION_SECRET_AAD, this._sessionSecret);
+    const meta = {};
+    for (const { key } of META_SECRETS) {
+      if (!hasSecretValue(this._metaSecrets[key])) continue;
+      meta[key] = this._sealOne(metaAad(key), secretText(this._metaSecrets[key]));
+      used.add(metaAad(key));
+    }
     for (const aad of this._sealed.keys()) if (!used.has(aad)) this._sealed.delete(aad);
-    return { ...copy, sessionSecret };
+    return { ...copy, meta };
   }
 
   async _writeNow(data = this.data, guard) {
@@ -341,7 +361,7 @@ export class Store {
         ["settings", JSON.stringify(data.settings)],
         ["auth", JSON.stringify(data.auth)],
         ["notifications", JSON.stringify(sealed.notifications)],
-        ...(sealed.sessionSecret ? [["session_secret", JSON.stringify(sealed.sessionSecret)]] : []),
+        ...META_SECRETS.filter(({ key }) => hasSecretValue(sealed.meta[key])).map(({ key }) => [key, JSON.stringify(sealed.meta[key])]),
       ];
       await conn.query(
         "INSERT INTO meta (k, v) VALUES ? ON DUPLICATE KEY UPDATE v = VALUES(v)",
