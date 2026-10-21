@@ -5,7 +5,7 @@ import { hashPassword } from "../lib/auth.js";
 import { ALERT_EVENT_KEYS, DEFAULT_RULES } from "../lib/alerts.js";
 import { createHash } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
-import { sameEndpoint } from "../lib/endpoint.js";
+import { endpointChangedError, sameEndpoint, staleSecrets } from "../lib/endpoint.js";
 import { resolveChannelConfig } from "../lib/notify.js";
 
 export function stationBusinessVersion(station) {
@@ -232,7 +232,8 @@ export class Store {
       return change.value;
     });
     // 队列恢复与本次操作的返回值分开：调用方仍能收到失败。
-    this._saveChain = pending.catch((err) => console.error("保存失败:", err?.cause?.code || err?.message));
+    // 只记真的没写进库的（SAVE_FAILED）；提交前就被拒绝的（换了地址没重填、配置已变化）不是保存失败
+    this._saveChain = pending.catch((err) => { if (err?.code === "SAVE_FAILED") console.error("保存失败:", err?.cause?.code || err?.message); });
     return pending;
   }
 
@@ -517,11 +518,8 @@ export class Store {
       for (const f of fields) if (f in patch) s[f] = String(patch[f] ?? "").trim();
       if ("password" in patch) s.password = String(patch.password ?? "");
       if (s.type !== before.type) clearHiddenCredentials(s);
-      // 换了站点（协议、主机、端口）：已保存的令牌、密码、Key 不沿用，这次没重新填就不让保存，免得下次刷新发到新地址
-      if (before.baseUrl && !sameEndpoint(before.baseUrl, s.baseUrl)
-        && UPSTREAM_SECRET_FIELDS.some((f) => s[f] && !(f in patch && String(patch[f] ?? "")))) {
-        throw Object.assign(new Error("换了地址，已保存的密钥需要重新填"), { code: "ENDPOINT_CHANGED_SECRET_REQUIRED" });
-      }
+      // 换了站点（协议、主机、端口；原来没填地址也算）：已保存的令牌、密码、Key 不沿用，这次没重新填就不让保存，免得下次刷新发到新地址
+      if (!sameEndpoint(before.baseUrl, s.baseUrl) && staleSecrets(UPSTREAM_SECRET_FIELDS, s, patch).length) throw endpointChangedError();
       if ("lowBalanceUsd" in patch) s.lowBalanceUsd = numOrNull(patch.lowBalanceUsd);
       if ("cnyPerUsd" in patch) s.cnyPerUsd = numOrNull(patch.cnyPerUsd);
       if ("costAliases" in patch) s.costAliases = sanitizeCostAliases(patch.costAliases);

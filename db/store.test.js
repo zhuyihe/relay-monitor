@@ -626,6 +626,17 @@ test("换了上游地址的站点（协议、主机、端口）：已保存的�
   assert.equal(store.get(station.id).accessToken, "");
 });
 
+test("换了上游地址又改了类型：新类型还要用的旧令牌不沿用；用不到的旧凭证本来就清掉，填齐新类型要的就能保存", async () => {
+  const store = await new Store(fakePool()).load();
+  const station = await store.add({ type: "newapi", name: "甲", baseUrl: "https://a.example", accessToken: "tok-a", userId: "7" });
+  // New API 账号 → Sub2API 登录令牌：两种都用 accessToken，换了站点就要重填
+  await assert.rejects(store.update(station.id, { type: "sub2api", baseUrl: "https://b.example" }), (err) => err.code === "ENDPOINT_CHANGED_SECRET_REQUIRED");
+  assert.deepEqual([store.get(station.id).type, store.get(station.id).accessToken], ["newapi", "tok-a"]);
+  // → Sub2API 邮箱密码：旧令牌随类型清掉，填了邮箱密码就行
+  await store.update(station.id, { type: "sub2api-password", baseUrl: "https://b.example", email: "a@b.c", password: "pw" });
+  assert.deepEqual([store.get(station.id).accessToken, store.get(station.id).password], ["", "pw"]);
+});
+
 test("通知方式编辑：密钥留空沿用，其他字段留空就清空，不认识的字段不收；换了地址又没重填密钥就不保存", async () => {
   const store = await new Store(fakePool()).load();
   const ch = await store.addChannel({ type: "smtp", name: "邮件", config: { host: "smtp.qq.com", username: "me", password: "app-pass", from: "a", to: "b", junk: "x" } });

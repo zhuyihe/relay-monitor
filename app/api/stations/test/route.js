@@ -1,9 +1,9 @@
 // POST /api/stations/test —— 使用临时连接信息验证上游，不写库、不刷新、不触发告警。
 import { withAuth, json } from "../../../../lib/api.js";
 import { describeError } from "../../../../lib/error-copy.js";
-import { sameEndpoint } from "../../../../lib/endpoint.js";
+import { sameEndpoint, staleSecrets } from "../../../../lib/endpoint.js";
 import { queryStation, STATION_TYPES } from "../../../../lib/providers.js";
-import { UPSTREAM_SECRET_FIELDS } from "../../../../lib/channel-onboarding.js";
+import { UPSTREAM_SECRET_FIELDS, UPSTREAM_TYPES } from "../../../../lib/channel-onboarding.js";
 
 const CONNECTION_FIELDS = ["baseUrl", "accessToken", "apiKey", "userId", "email", "password"];
 const PRESERVED_SECRET_FIELDS = new Set(UPSTREAM_SECRET_FIELDS);
@@ -22,32 +22,30 @@ function findSavedStation(store, stationId) {
   return store.list().find((station) => station.id === stationId) || null;
 }
 
-// 返回 { station, droppedSecret }：droppedSecret 表示换了站点、已保存的密钥没有补上，这次测试不发出去
+// 返回 { station, droppedSecret }：droppedSecret 表示换了站点、这种类型要填的已保存密钥没有重新给出，这次测试不发出去
 function testStation(body, saved) {
   const type = text(body.type || saved?.type);
   const sameType = !!saved && type === saved.type;
   // 换了站点（协议、主机、端口）就不再沿用已保存的密钥，免得把它发到新地址（lib/endpoint.js）
   const sameSite = !!saved && (!Object.hasOwn(body, "baseUrl") || sameEndpoint(body.baseUrl, saved.baseUrl));
+  const keepSecrets = sameType && sameSite;
   const station = { type };
-  let droppedSecret = false;
 
   for (const field of CONNECTION_FIELDS) {
+    const secret = PRESERVED_SECRET_FIELDS.has(field);
     if (Object.hasOwn(body, field)) {
       const value = connectionValue(field, body[field]);
       // 编辑既有资源时，表单中空的敏感凭证代表“保持不变”；其他连接字段的空值会参与测试。
-      const keep = sameType && PRESERVED_SECRET_FIELDS.has(field);
-      if (!value && keep && !sameSite && saved?.[field]) droppedSecret = true;
-      station[field] = value || (keep && sameSite ? connectionValue(field, saved?.[field]) : "");
+      station[field] = value || (secret && keepSecrets ? connectionValue(field, saved?.[field]) : "");
     } else if (sameType) {
-      if (PRESERVED_SECRET_FIELDS.has(field) && !sameSite) {
-        if (saved?.[field]) droppedSecret = true;
-        station[field] = "";
-      } else {
-        station[field] = connectionValue(field, saved?.[field]);
-      }
+      station[field] = secret && !keepSecrets ? "" : connectionValue(field, saved?.[field]);
     }
   }
 
+  // 只看这种类型要填的密钥：老数据里残留的、用不到的字段照样不发，但不因此卡住
+  const needs = UPSTREAM_TYPES.find((item) => item.value === type)?.needs || [];
+  const droppedSecret = sameType && !sameSite
+    && staleSecrets(UPSTREAM_SECRET_FIELDS.filter((field) => needs.includes(field)), saved, body).length > 0;
   return { station, droppedSecret };
 }
 

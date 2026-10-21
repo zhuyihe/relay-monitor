@@ -40,6 +40,14 @@ test("POST /api/notifications/test：留空的密钥用已保存的补齐；换�
   assert.deepEqual(await moved.json(), { error: errorText({ code: "ENDPOINT_CHANGED_SECRET_REQUIRED" }), code: "ENDPOINT_CHANGED_SECRET_REQUIRED" });
   assert.equal(sent.length, 1);
 
+  // 换了地址时请求里不带密钥字段、或者给 null，也不补
+  for (const config of [{ chatId: "42", apiBase: "https://evil.example" }, { botToken: null, chatId: "42", apiBase: "https://evil.example" }]) {
+    const res = await POST(post({ channelId: "c1", type: "telegram", config }), rt);
+    assert.equal(res.status, 400);
+    assert.equal((await res.json()).code, "ENDPOINT_CHANGED_SECRET_REQUIRED");
+  }
+  assert.equal(sent.length, 1);
+
   const retyped = await POST(post({ channelId: "c1", type: "webhook", config: { url: "https://evil.example" } }), rt);
   assert.equal(retyped.status, 400);
   assert.equal((await retyped.json()).code, "INVALID_REQUEST");
