@@ -89,7 +89,7 @@ npm run build && npm start        # 打开 http://127.0.0.1:3000，账号 admin 
 v1 的 `data/` 目录（stations.json / history.json / secret.key）可一次性导入：
 
 1. 设环境变量 `V1_DATA_DIR` 指向 v1 的 data 目录（Docker 场景把目录只读挂载进容器）
-2. 启动（或 `npm run db:migrate`）：**库为空才导入**，幂等、绝不覆盖已有数据；会话密钥一并沿用，已登录设备不掉线
+2. 启动（或 `npm run db:migrate`）：**库为空才导入**，幂等、绝不覆盖已有数据；会话密钥一并沿用，已登录设备不掉线（配了 `RELAY_SECRET_KEY` 时第一次启动会换新会话密钥，要重新登录一次）
 3. 导入完成后可移除 `V1_DATA_DIR` 配置
 
 ## Docker 部署（含 Watchtower 自动更新）
@@ -98,9 +98,13 @@ v1 的 `data/` 目录（stations.json / history.json / secret.key）可一次性
 
 ```bash
 mkdir -p ~/relay-monitor && cd ~/relay-monitor
-# 下载 deploy/docker-compose.yml，填好 DB_* 环境变量（连接你自有的 MySQL），然后：
+# 下载 deploy/docker-compose.yml，填好 DB_* 环境变量（连接你自有的 MySQL），
+# 再在同目录的 .env 里配上登录信息加密密钥（单独备份好）：
+echo "RELAY_SECRET_KEY=$(openssl rand -base64 32)" >> .env
 docker compose up -d
 ```
+
+已经在跑的部署：先确认 compose 文件里有 `- RELAY_SECRET_KEY=${RELAY_SECRET_KEY:-}` 这一行（Watchtower 不会更新 compose 文件），否则 `.env` 里的密钥传不进容器。整目录备份时排除 `.env`，别让密钥和 `mysql-data/` 进同一份备份。开启后的收尾、密钥丢了怎么办，见 [deploy/README.md「登录信息加密」](deploy/README.md#登录信息加密)。
 
 - **relay-monitor**：面板本体（启动顺序：迁移脚本 → Next standalone 服务）；数据全部在 MySQL，容器无状态、升级不丢数据
 - **watchtower**：自动拉取新镜像并重启面板；页面「设置 → 关于」可查看运行版本与构建 commit
@@ -131,7 +135,7 @@ relay-monitor/
 │   └── login/            登录页
 ├── server/               后台常驻逻辑：refresh.js 刷新循环 / report.js 日报 / demo.js 演示站
 ├── lib/                  与 v1 同源：providers / alerts / notify / smtp / forecast / auth + runtime 单例
-├── db/                   MySQL 层：pool / store（写透缓存）/ history / migrate（v1 导入）
+├── db/                   MySQL 层：pool / store（写透缓存）/ history / migrate（v1 导入）/ secrets（登录信息加密）/ reset-secrets（密钥丢了时清掉解不开的）
 ├── instrumentation.ts    服务启动钩子：初始化 + 定时刷新 + 日报调度
 └── public/               PWA manifest / 图标 / service worker
 ```
@@ -139,7 +143,7 @@ relay-monitor/
 ## 安全说明
 
 - 面板密码以 scrypt 哈希存储；会话为 HMAC-SHA256 签名的 HttpOnly Cookie
-- 上游的令牌、Key、密码保存在你自有的 MySQL（`stations` 表），通知方式的密钥和会话密钥保存在 `meta` 表——查询上游、发通知都需要它们。**目前是明文保存**，请妥善保护数据库和备份的访问权限（加密保存在后续版本加入）
+- 上游的令牌、Key、密码、登录邮箱保存在你自有的 MySQL（`stations` 表），通知方式的密钥和会话密钥保存在 `meta` 表。配置 `RELAY_SECRET_KEY` 后用 AES-256-GCM 加密保存，只在读写数据库时加解密；**没配时是明文保存**，启动日志和「系统设置」页顶会提醒。加密只防数据库或备份单独外泄，密钥要和备份分开放（见 [deploy/README.md](deploy/README.md#登录信息加密)）
 - 接口不回传上游的令牌、Key、密码，也不回传通知方式的密钥，只告诉前端「已保存」
 - 改了上游或通知方式的地址（协议、主机、端口任一变了），已保存的令牌、密码不会带过去，要重新填，避免被发到新地址
 - 日志只记报错的码和一句话，不打印数据库语句和参数

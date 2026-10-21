@@ -2600,6 +2600,27 @@ test("系统设置改密码：按接口给的码把报错放到对应的输入�
   assert.equal(posts.length, 3);
 });
 
+test("系统设置：接口说登录信息没加密时页顶提示一条（不写环境变量名）；加密了、或者老接口不带这个字段时不提示", async (t) => {
+  for (const [secretsEncrypted, shown] of [[false, true], [true, false], [undefined, false]]) {
+    const page = await openFixturePage(t, async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/auth/me") return fulfill(route, { username: "admin", isDefaultPassword: false });
+      if (url.pathname === "/api/settings") return fulfill(route, { ...settingsFixture(), ...(secretsEncrypted === undefined ? {} : { secretsEncrypted }) });
+      if (url.pathname === "/api/meta") return fulfill(route, metaFixture());
+      throw new Error("unexpected settings fixture API: " + url.pathname);
+    }, undefined, false, null, "/settings");
+    // 骨架屏的区块名一样，要等读到设置后才有的输入框
+    await page.getByLabel(SETTINGS_COPY.interval, { exact: true }).waitFor();
+    const notice = page.locator(".jy-banner", { hasText: SETTINGS_COPY.plainSecrets });
+    assert.equal(await notice.count(), shown ? 1 : 0, String(secretsEncrypted));
+    if (shown) {
+      await notice.getByText(SETTINGS_COPY.plainSecretsHint, { exact: true }).waitFor();
+      assert.doesNotMatch(await notice.innerText(), /RELAY_SECRET_KEY|[A-Za-z]/);
+    }
+    await page.close();
+  }
+});
+
 test("登录页按码说：用户名或密码不对时标红输入框，试太多次时不标红，别的报错按控制台自己的说法写「登录失败：原因。」", async (t) => {
   const answers = [
     (route) => failJSON(route, 401, { error: errorText({ code: "LOGIN_FAILED" }), code: "LOGIN_FAILED" }),

@@ -1,5 +1,6 @@
 // GET/PUT /api/settings —— 更新全局设置；历史留存变更可能需要不可逆删除确认。
-// 返回带业务时区 tz：页面上历史记录的日期时间按它写（design/ui-copy-spec.md §6）
+// 返回带业务时区 tz：页面上历史记录的日期时间按它写（design/ui-copy-spec.md §6）；
+// secretsEncrypted：登录信息是否加密保存（没配 RELAY_SECRET_KEY 时为 false，页顶提示一条，§8.1）
 import { withAuth, json } from "../../../lib/api.js";
 import { businessTimeZone } from "../../../lib/business-time.js";
 import { restartPolling, refreshAll } from "../../../server/refresh.js";
@@ -11,7 +12,7 @@ function parseRetentionDays(value) {
 }
 
 export const GET = withAuth(async (request, rt) => {
-  return json({ settings: rt.store.settings, history: await rt.history.getSummary(), tz: businessTimeZone() });
+  return json({ settings: rt.store.settings, history: await rt.history.getSummary(), tz: businessTimeZone(), secretsEncrypted: rt.store.secretsEncrypted });
 });
 
 export const PUT = withAuth(async (request, rt) => {
@@ -57,5 +58,5 @@ export const PUT = withAuth(async (request, rt) => {
   }
   // 新设或缩短为有限期限时立即执行一次；同一策略的普通保存仍遵守每日一次的节奏。
   if (needsImmediateCleanup) await rt.history.runScheduledCleanup({ force: true });
-  return json({ settings, history: await rt.history.getSummary(), tz: businessTimeZone() });
+  return json({ settings, history: await rt.history.getSummary(), tz: businessTimeZone(), secretsEncrypted: rt.store.secretsEncrypted });
 });
