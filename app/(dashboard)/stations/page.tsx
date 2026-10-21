@@ -11,7 +11,7 @@ import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
 import type { MenuProps } from "antd";
 import { api, readWorkflowDestination } from "../../../lib/client";
 import { actionsByStation, buildOverviewActions, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
-import { basisText, EMPTY, formatAsOfTime, formatCompact, formatMoney, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, RATE_UNSET } from "../../../lib/format";
+import { basisText, EMPTY, formatAsOfTime, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, RATE_UNSET } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { balanceMoneyOf } from "../../../lib/profit";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
@@ -102,7 +102,6 @@ const COPY = Object.freeze({
   asOf: (time: string) => `数据截至 ${time}`,
   today: (money: string) => `今天花费 ${money}`,
   todayTokens: (tokens: string) => `今天 ${tokens} Token`,
-  loading: "正在加载",
   emptyDesc: "加上上游、填好登录信息后，这里显示每个上游的余额、日均花费和可用天数。",
   pausedTitle: "没有在看余额的上游",
   pausedDesc: (n: number) => `另有 ${n} 个上游暂停了监控，可以在「${STATION_TABS.bills}」里恢复监控。`,
@@ -812,7 +811,7 @@ export default function StationsPage() {
   if (!loaded && !loadError) {
     body = (
       <div className="jy-stations-skeleton" aria-busy="true">
-        <span className="sr-only">{COPY.loading}</span>
+        <span className="sr-only">{LOADING_TEXT}</span>
         {[0, 1, 2, 3].map((i) => <Skeleton key={i} height={40} />)}
       </div>
     );

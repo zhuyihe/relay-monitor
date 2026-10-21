@@ -2,7 +2,7 @@
 // 出错时说清楚读不到什么、为什么，并给「刷新」；空状态告诉用户下一步能做什么。
 import type { CSSProperties, ReactNode } from "react";
 import { Button } from "antd";
-import { MINUS, refreshFailedText } from "../../lib/format";
+import { LOADING_TEXT, MINUS, refreshFailedText } from "../../lib/format";
 import { failureSentence } from "../../lib/error-copy.js";
 import { workflowActionMeta } from "../../lib/workflow-actions.js";
 import { ErrorDetail, noteOf } from "./error-detail";
@@ -37,9 +37,9 @@ export function PanelSkeleton({
   className?: string;
 }) {
   return (
-    <Panel title={title} className={className} label={typeof title === "string" ? undefined : "正在加载"}>
+    <Panel title={title} className={className} label={typeof title === "string" ? undefined : LOADING_TEXT}>
       <div aria-busy="true" aria-live="polite">
-        <span className="sr-only">正在加载</span>
+        <span className="sr-only">{LOADING_TEXT}</span>
         {height ? (
           <Skeleton height={height} />
         ) : (
@@ -87,6 +87,17 @@ export function ErrorState({
       <ErrorDetail raw={note.raw} />
     </div>
   );
+}
+
+// 表单里有没保存的改动：标在区块标题旁边。告警中心、系统设置共用这一个
+export const DIRTY_TEXT = "未保存";
+export function Dirty({ show }: { show: boolean }) {
+  return show ? (
+    <span className="jy-dirty">
+      <i aria-hidden="true" />
+      {DIRTY_TEXT}
+    </span>
+  ) : null;
 }
 
 // 刷新失败、页面还显示着上次读到的数据时，页顶那一条（design/ui-copy-spec.md §8.1）：

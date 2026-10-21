@@ -2,6 +2,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { withAuth, json } from "../../../lib/api.js";
+import { businessTimeZone } from "../../../lib/business-time.js";
 import { STATION_TYPES } from "../../../lib/providers.js";
 import { CHANNEL_TYPES } from "../../../lib/notify.js";
 
@@ -25,5 +26,7 @@ export const GET = withAuth(async (request, rt) => {
     settings: rt.store.settings,
     rules: rt.store.rules,
     app: await getAppInfo(),
+    // 业务时区：告警中心的「已保存 14:30」、日报的日期按它写（design/ui-copy-spec.md §6）
+    tz: businessTimeZone(),
   });
 });

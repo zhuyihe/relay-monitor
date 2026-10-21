@@ -1,15 +1,18 @@
+// 找不到页面（design/ui-copy-spec.md §8.1）：「找不到这个页面。」[返回运营总览]，页面名取 lib/brand.js
 import Link from "next/link";
+import { NAV_LABELS } from "../lib/brand";
 import AppState, { appStateStyles } from "./components/app-state";
+
+const COPY = Object.freeze({ title: "找不到这个页面。", back: `返回${NAV_LABELS.home}` });
 
 export default function NotFound() {
   return (
     <AppState
       kind="not-found"
-      title="没有找到这个页面"
-      description="链接可能已经失效，或页面地址输入有误。你可以返回运营总览继续工作。"
+      title={COPY.title}
       actions={
         <Link className={appStateStyles.primaryAction} href="/">
-          返回运营总览
+          {COPY.back}
         </Link>
       }
     />

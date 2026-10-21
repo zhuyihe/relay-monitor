@@ -6,8 +6,12 @@ export type AppStateKind = "loading" | "empty" | "error" | "not-found";
 
 type AppStateProps = {
   actions?: ReactNode;
-  description: string;
+  // 按钮下面的一块，例如出错页的「查看详细原因」（和 ErrorState 一样放在按钮下面）
+  detail?: ReactNode;
+  // 出错页、404 按 design/ui-copy-spec.md §8.1 只写一句，不再另加说明
+  description?: string;
   kind: AppStateKind;
+  // 加载中只给读屏用，界面上只有转圈（§8.1「首次加载不写字」）
   title: string;
 };
 
@@ -33,7 +37,7 @@ function StateSymbol({ kind }: { kind: AppStateKind }) {
   );
 }
 
-export default function AppState({ actions, description, kind, title }: AppStateProps) {
+export default function AppState({ actions, description, detail, kind, title }: AppStateProps) {
   const isLoading = kind === "loading";
   const isError = kind === "error";
 
@@ -42,14 +46,14 @@ export default function AppState({ actions, description, kind, title }: AppState
       <section
         className={styles.panel}
         aria-live={isLoading ? "polite" : undefined}
-        aria-busy={isLoading || undefined}
         role={isError ? "alert" : isLoading ? "status" : undefined}
       >
         <StateSymbol kind={kind} />
-        <p className={styles.eyebrow}>{BRAND.productName}</p>
-        <h1>{title}</h1>
-        <p className={styles.description}>{description}</p>
+        {isLoading ? null : <p className={styles.eyebrow}>{BRAND.productName}</p>}
+        <h1 className={isLoading ? "sr-only" : undefined}>{title}</h1>
+        {description ? <p className={styles.description}>{description}</p> : null}
         {actions ? <div className={styles.actions}>{actions}</div> : null}
+        {detail ? <div className={styles.detail}>{detail}</div> : null}
       </section>
     </div>
   );

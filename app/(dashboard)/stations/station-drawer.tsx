@@ -12,7 +12,8 @@ import { failureText, requiredText } from "../../../lib/error-copy";
 import { formatRate, RATE_UNSET_PARITY } from "../../../lib/format";
 import { NAV_LABELS } from "../../../lib/brand";
 import { stationDisplayName } from "../../../lib/overview-actions";
-import { CREDENTIAL_FIELDS, credentialFieldOf, UPSTREAM_FORM_TEXT } from "../../../lib/channel-onboarding.js";
+import { CREDENTIAL_FIELDS, credentialFieldOf, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT } from "../../../lib/channel-onboarding.js";
+import { Dirty } from "../../components/data-state";
 import { useDrawerEscape } from "../../components/drawer-escape";
 import { ErrorDetail } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
@@ -46,7 +47,6 @@ const COPY = Object.freeze({
   discardDesc: "关闭后，这次填的内容不会保存。",
   discard: "放弃修改",
   keepEditing: "接着改",
-  dirty: "有没保存的修改",
   cancel: "取消",
   save: "保存",
   saved: "已保存",
@@ -69,9 +69,6 @@ const COPY = Object.freeze({
   changedDesc: `保存前请重新${TEST_READ}，确认新的登录信息能读到余额。`,
   hintUnchanged: `只有改了登录信息才要重新${TEST_READ}`,
   hintCreate: `先${TEST_READ}，读到了才能新增`,
-  secretSaved: "已保存",
-  secretReplace: (label: string) => `保存后换掉原来的${label}`,
-  secretKeep: (label: string) => `不填就接着用已保存的${label}`,
   // 分区
   basics: "基本信息",
   login: "登录信息",
@@ -408,9 +405,9 @@ export function StationDrawer({
         key={name}
         label={field.label}
         name={name}
-        extra={saved ? (replacing ? COPY.secretReplace(field.label) : COPY.secretKeep(field.label)) : field.hint}
+        extra={saved ? (replacing ? SECRET_FIELD_TEXT.replace(field.label) : SECRET_FIELD_TEXT.keep(field.label)) : field.hint}
       >
-        <Input.Password autoComplete="new-password" placeholder={saved ? COPY.secretSaved : placeholder} />
+        <Input.Password autoComplete="new-password" placeholder={saved ? SECRET_FIELD_TEXT.saved : placeholder} />
       </Form.Item>
     );
   };
@@ -458,12 +455,7 @@ export function StationDrawer({
       title={editing ? UPSTREAM_FORM_TEXT.editTitle(stationDisplayName(editing)) : UPSTREAM_FORM_TEXT.create}
       footer={
         <div className="jy-drawer-foot">
-          {dirty ? (
-            <span className="jy-dirty">
-              <i aria-hidden="true" />
-              {COPY.dirty}
-            </span>
-          ) : null}
+          <Dirty show={dirty} />
           <span className="spacer" />
           <Button onClick={requestClose} disabled={saving}>{COPY.cancel}</Button>
           <Button

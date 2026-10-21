@@ -39,7 +39,8 @@
 .jy-login-heading > p:last-child { margin: 8px 0 0; font-size: 13px; color: var(--jy-ink-3); }
 
 .jy-login-error { margin-bottom: 20px; }
-.jy-login-error > div { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 20px; }
+/* 正文排版用公用的 .jy-banner__body，这里只调字号 */
+.jy-login-error .jy-banner__body { font-size: 13px; line-height: 20px; }
 .jy-login-error b { font-weight: 600; font-size: 14px; }
 
 .jy-login-main .ant-form-item { margin-bottom: 22px; }
