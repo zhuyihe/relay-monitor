@@ -44,14 +44,18 @@ const COPY = {
   times: (n: number) => `${formatInt(n)} 次`,
 };
 
-// 倍率一格：「模型倍率 1.5、分组倍率 1、输出倍率 4」，命中价格档的再写「200k 档 12 次」
+// 价格档名是自营站点给的原文，常见「200k」「0-32k」：数字带 k / m 的按 §7 换成「20 万」「0-3.2 万」，其余原样
+const tierText = (name: unknown) =>
+  String(name).replace(/(\d+(?:\.\d+)?)\s*([kKmM])(?![A-Za-z])/g, (_, n, unit) => formatCompact(Number(n) * (/k/i.test(unit) ? 1e3 : 1e6)));
+
+// 倍率一格：「模型倍率 1.5、分组倍率 1、输出倍率 4」，命中价格档的再写「20 万档 12 次」
 function ratioText(r: any) {
   const parts = [
     r.avgModelRatio != null ? `模型倍率 ${r.avgModelRatio}` : "",
     r.avgGroupRatio != null ? `分组倍率 ${r.avgGroupRatio}` : "",
     r.avgCompletionRatio != null ? `输出倍率 ${r.avgCompletionRatio}` : "",
   ].filter(Boolean);
-  const tiers = (r.tiers || []).map((x: any) => `${x.name} 档 ${formatInt(x.requests)} 次`);
+  const tiers = (r.tiers || []).map((x: any) => `${tierText(x.name)}档 ${formatInt(x.requests)} 次`);
   const text = [parts.join("、"), tiers.join("、")].filter(Boolean).join("；");
   return text || EMPTY;
 }

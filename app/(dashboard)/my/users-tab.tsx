@@ -7,10 +7,34 @@ import { ErrorState } from "../../components/data-state";
 import { Icon } from "../../components/icons";
 import { CountBadge, Panel } from "../../components/panel";
 import { StatusText } from "../../components/status";
-import { COL_TEXT, DataTable, Delta, FLOW_UNREADABLE, TOKEN_NOTE, deltaSortValue, money, perM, sum, totalsNote } from "./shared";
+import { COL_TEXT, DataTable, Delta, FLOW_UNREADABLE, MY_TEXT, TOKEN_NOTE, deltaSortValue, money, perM, sum, totalsNote } from "./shared";
 import type { Col, OwnRange, OwnView, UsageRow } from "./shared";
 
 const GROUPS_TITLE = "用户和分组";
+
+// 只在用户标签页出现的话（design/ui-copy-spec.md §12）；列名、时间范围名、「读不到分组和渠道数据」从共用的地方取
+const COPY = Object.freeze({
+  matched: (n: number) => `匹配的 ${n} 个用户`,
+  shareTitle: "占这个时间范围内全部用户消费的比例",
+  noPrev: "上期的用户数据读不到，没法比",
+  rankTitle: "用户消费排行",
+  search: "搜索用户",
+  noMatch: "没有找到这个用户。",
+  noUsers: "这个时间范围内还没有用户消费。",
+  // 用户余额
+  balTitle: "用户余额",
+  balCaption: "不含管理员和超级管理员",
+  balLead: (n: number) => `共 ${n} 个用户，余额合计`,
+  zeroBal: (n: number) => `另有 ${n} 个用户余额为 0。`,
+  noBal: "没有余额大于 0 的用户。",
+  colBal: "余额",
+  colUsed: "累计消费",
+  colStatus: "状态",
+  disabled: "已禁用",
+  // 用户和分组
+  groupsSub: "按消费从高到低，最多 15 项，用来找出是谁在哪个分组涨了。",
+  groupsCaption: "用户与分组组合的消费",
+});
 
 export function UsersTab({ v, range, reload }: { v: OwnView; range: OwnRange; reload: () => Promise<unknown> }) {
   return (
@@ -41,23 +65,23 @@ function UserTable({ v, range }: { v: OwnView; range: OwnRange }) {
   const cols: Col<UsageRow>[] = [
     {
       key: "user",
-      label: "用户",
+      label: COL_TEXT.user,
       sort: (u) => u.user,
       render: (u) => (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           {u.user}
-          {u.isAdmin && <span className="jy-tag jy-tag--warn">管理员</span>}
+          {u.isAdmin && <span className="jy-tag jy-tag--warn">{MY_TEXT.admin}</span>}
         </span>
       ),
-      foot: q.trim() ? `匹配的 ${shown.length} 个用户` : "合计",
+      foot: q.trim() ? COPY.matched(shown.length) : COL_TEXT.total,
     },
     { key: "req", label: COL_TEXT.requests, num: true, sort: (u) => u.requests, render: (u) => formatInt(u.requests), foot: formatInt(sum(shown, (u) => u.requests)) },
     { key: "tok", label: COL_TEXT.tokens, title: TOKEN_NOTE, num: true, sort: (u) => u.tokens, render: (u) => formatInt(u.tokens), foot: formatInt(shownTokens) },
     { key: "cost", label: COL_TEXT.cost, num: true, sort: (u) => u.cost, render: (u) => money(u.cost), foot: money(shownCost) },
     {
       key: "pct",
-      label: "占比",
-      title: "占这个时间范围内全部用户消费的比例",
+      label: COL_TEXT.share,
+      title: COPY.shareTitle,
       num: true,
       sort: (u) => u.cost,
       render: (u) => (totCost > 0 ? formatPct(u.cost / totCost) : EMPTY),
@@ -67,7 +91,7 @@ function UserTable({ v, range }: { v: OwnView; range: OwnRange }) {
     {
       key: "delta",
       label: COL_TEXT.delta,
-      title: noPrev ? "上期的用户数据读不到，没法比" : prevLabel,
+      title: noPrev ? COPY.noPrev : prevLabel,
       num: true,
       sort: noPrev ? undefined : deltaSortValue,
       render: (u) => (noPrev ? <span className="jy-muted">{EMPTY}</span> : <Delta pct={u.deltaPct} isNew={u.isNew} />),
@@ -76,7 +100,7 @@ function UserTable({ v, range }: { v: OwnView; range: OwnRange }) {
 
   return (
     <Panel
-      title="用户消费排行"
+      title={COPY.rankTitle}
       badge={<CountBadge count={users.length} muted />}
       caption={RANGE_TEXT[range]}
       foot={totalsNote(v, "users")}
@@ -85,8 +109,8 @@ function UserTable({ v, range }: { v: OwnView; range: OwnRange }) {
           <Input
             allowClear
             prefix={<Icon name="search" />}
-            placeholder="搜索用户"
-            aria-label="搜索用户"
+            placeholder={COPY.search}
+            aria-label={COPY.search}
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
@@ -96,11 +120,11 @@ function UserTable({ v, range }: { v: OwnView; range: OwnRange }) {
       <DataTable<UsageRow>
         scroll
         tall
-        caption="用户消费排行"
+        caption={COPY.rankTitle}
         rows={shown}
         rowKey={(u) => String(u.user)}
         defaultSort={{ key: "cost", dir: "desc" }}
-        empty={q.trim() ? "没有找到这个用户。" : "这个时间范围内还没有用户消费。"}
+        empty={q.trim() ? COPY.noMatch : COPY.noUsers}
         cols={cols}
       />
     </Panel>
@@ -119,33 +143,33 @@ function Balances({ v }: { v: OwnView }) {
   const total = sum(list, (u) => u.balanceUsd) * rate;
   return (
     <Panel
-      title="用户余额"
+      title={COPY.balTitle}
       badge={<CountBadge count={list.length} muted />}
-      caption="不含管理员和超级管理员"
+      caption={COPY.balCaption}
       sub={
         <>
-          共 {list.length} 个用户，余额合计 <b>{formatMoney(total)}</b>。
+          {COPY.balLead(list.length)} <b>{formatMoney(total)}</b>。
         </>
       }
-      foot={zeroCount > 0 ? `另有 ${zeroCount} 个用户余额为 0。` : undefined}
+      foot={zeroCount > 0 ? COPY.zeroBal(zeroCount) : undefined}
     >
       <DataTable<any>
         scroll
-        caption="用户余额"
+        caption={COPY.balTitle}
         rows={nonZero}
         rowKey={(u) => String(u.user)}
         defaultSort={{ key: "bal", dir: "desc" }}
-        empty="没有余额大于 0 的用户。"
+        empty={COPY.noBal}
         cols={[
-          { key: "user", label: "用户", sort: (u) => u.user, render: (u) => u.user },
-          { key: "bal", label: "余额", num: true, sort: (u) => u.balanceUsd, render: (u) => money(u.balanceUsd * rate) },
-          { key: "used", label: "累计消费", num: true, sort: (u) => u.usedUsd, render: (u) => formatMoney(u.usedUsd * rate) },
+          { key: "user", label: COL_TEXT.user, sort: (u) => u.user, render: (u) => u.user },
+          { key: "bal", label: COPY.colBal, num: true, sort: (u) => u.balanceUsd, render: (u) => money(u.balanceUsd * rate) },
+          { key: "used", label: COPY.colUsed, num: true, sort: (u) => u.usedUsd, render: (u) => formatMoney(u.usedUsd * rate) },
           {
             key: "status",
-            label: "状态",
+            label: COPY.colStatus,
             sort: (u) => (u.status === 1 ? 0 : 1),
             // 正常的不标（§2 第 5 条），只标被禁用的
-            render: (u) => (u.status === 1 ? null : <StatusText level="muted">已禁用</StatusText>),
+            render: (u) => (u.status === 1 ? null : <StatusText level="muted">{COPY.disabled}</StatusText>),
           },
         ]}
       />
@@ -177,17 +201,17 @@ function UserGroups({ v, reload }: { v: OwnView; reload: () => Promise<unknown> 
     <Panel
       title={GROUPS_TITLE}
       badge={<CountBadge count={rows.length} muted />}
-      sub="按消费从高到低，最多 15 项，用来找出是谁在哪个分组涨了。"
+      sub={COPY.groupsSub}
     >
       <DataTable<UsageRow>
-        caption="用户与分组组合的消费"
+        caption={COPY.groupsCaption}
         rows={rows}
         rowKey={(r) => String(r.key)}
         defaultSort={{ key: "cost", dir: "desc" }}
-        empty="这个时间范围内还没有数据。"
+        empty={MY_TEXT.noData}
         cols={[
-          { key: "user", label: "用户", sort: (r) => split(r.key)[0], render: (r) => split(r.key)[0] },
-          { key: "group", label: "分组", sort: (r) => split(r.key)[1], render: (r) => split(r.key)[1] || <span className="jy-muted">{EMPTY}</span> },
+          { key: "user", label: COL_TEXT.user, sort: (r) => split(r.key)[0], render: (r) => split(r.key)[0] },
+          { key: "group", label: COL_TEXT.group, sort: (r) => split(r.key)[1], render: (r) => split(r.key)[1] || <span className="jy-muted">{EMPTY}</span> },
           { key: "req", label: COL_TEXT.requests, num: true, sort: (r) => r.requests, render: (r) => formatInt(r.requests) },
           { key: "cost", label: COL_TEXT.cost, num: true, sort: (r) => r.cost, render: (r) => money(r.cost) },
           { key: "prev", label: COL_TEXT.prev, title: prevLabel, num: true, sort: (r) => r.prevCost, render: (r) => money(r.prevCost) },

@@ -6,7 +6,7 @@
 // 悬停或用左右方向键逐日查看，十字线同时贯穿两张图。
 import { useId, useMemo, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
-import { axisMoney, formatDayKey, formatMoney, formatMonthDay, formatZonedTime, parseDay, weekdayOfDayKey } from "../../lib/format";
+import { axisMoney, EMPTY, formatDayKey, formatMoney, formatMonthDay, formatZonedTime, parseDay, weekdayOfDayKey } from "../../lib/format";
 import { barPath, clamp, linePath, niceTicks, runs, spreadLabels, xTickIdx } from "../../lib/chart-math";
 import { ChartTip, TipBody } from "./float-tip";
 import type { TipRow } from "./float-tip";
@@ -192,7 +192,8 @@ function TrendChart({
   let spoken = "";
   if (hr) {
     const cost = hr.cost == null ? "数据缺失" : formatMoney(hr.cost, { approx: hr.partial });
-    const profit = hr.profit == null ? "无法计算" : formatMoney(hr.profit, { approx: hr.partial });
+    // 算不出（上游成本缺了）写「—」，原因在上一行「数据缺失」（§7）
+    const profit = hr.profit == null ? EMPTY : formatMoney(hr.profit, { approx: hr.partial });
     if (showRev) tipRows.push(["收入", formatMoney(hr.rev), "var(--jy-s1)"]);
     tipRows.push(["上游成本", cost, "var(--jy-s2)"]);
     tipRows.push(["固定成本", formatMoney(hr.fixed), hasFixed ? "var(--jy-s3)" : undefined]);
@@ -393,7 +394,7 @@ function TrendTable({ rows, showRev, asOfText }: { rows: Row[]; showRev: boolean
   const gross = rev == null ? null : round2(rev - cost);
   const profit = gross == null ? null : round2(gross - fixed);
   const maybe = (v: number | null, partial?: boolean) =>
-    v == null ? <span className="jy-muted">无法计算</span> : formatMoney(v, { approx: partial });
+    v == null ? <span className="jy-muted">{EMPTY}</span> : formatMoney(v, { approx: partial });
   return (
     <div className="jy-table-scroll">
       <table className="jy-data jy-data--compact jy-num">

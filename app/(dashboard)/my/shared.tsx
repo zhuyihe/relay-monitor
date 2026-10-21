@@ -35,6 +35,19 @@ export const COL_TEXT = Object.freeze({
   delta: "环比",
   perM: "每百万 Token 价格",
   perMTitle: "每百万 Token（不含缓存）的价格",
+  user: "用户",
+  group: "分组",
+  share: "占比",
+  total: "合计",
+});
+// 几个标签页都会写的短句（列名以外），只在这一处写
+export const MY_TEXT = Object.freeze({
+  byDay: "按天",
+  noData: "这个时间范围内还没有数据。",
+  topUsers: "消费最多的用户",
+  // 管理员账号（含超级管理员）：用户名旁边的标记，排行里名字后面的括号
+  admin: ROLE_LABEL[10],
+  adminSuffix: `（${ROLE_LABEL[10]}）`,
 });
 // 分组和渠道的数据（flow）读不到时：用户页和模型页同一句
 export const FLOW_UNREADABLE = "读不到分组和渠道数据";

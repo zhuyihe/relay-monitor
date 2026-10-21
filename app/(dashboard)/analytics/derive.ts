@@ -6,7 +6,7 @@
 import { dayKeyInTz } from "../../../lib/business-time.js";
 import { EMPTY, formatDayKey, isoDay, parseDay } from "../../../lib/format.js";
 import { stationDisplayName } from "../../../lib/overview-actions.js";
-import { rateSnapshotOf, splitByCumulative } from "../../../lib/profit.js";
+import { countsInProfit, rateSnapshotOf, splitByCumulative } from "../../../lib/profit.js";
 import type { TrendRow } from "../../components/trend-panel";
 
 export const r2 = (v: number) => Math.round(v * 100) / 100;
@@ -76,7 +76,7 @@ export type HeatReason = "range-not-supported" | "no-cost-stations" | "incomplet
 
 export function derive(data: any, own: any) {
   const stations: any[] = Array.isArray(data?.stations) ? data.stations : [];
-  const upstream = stations.filter((s) => !s.isOwn && s.includeInProfit !== false);
+  const upstream = stations.filter(countsInProfit);
   const upIds = new Set(upstream.map((s) => s.id));
   // 按用量计成本的上游；固定付费上游的余额下降不算成本
   const usageUp = upstream.filter((s) => s.costBasis !== "fixed");

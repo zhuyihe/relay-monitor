@@ -4,7 +4,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { MINUS, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, formatMoney, formatPct, splitTotal } from "../../lib/format";
-import { workflowActionMeta } from "../../lib/workflow-actions";
+import { workflowAction, workflowActionMeta } from "../../lib/workflow-actions";
 import { Icon } from "./icons";
 import { StatusText } from "./status";
 
@@ -126,7 +126,7 @@ export function ProfitEquation({
   net,
   reasons = [],
   unconfigured = false,
-  configureHref = "/stations",
+  configureHref = workflowAction("setup_own_station").href!,
   revenueEmpty = EQ_TEXT.unsetRevenue,
   profitNote,
   notice,
@@ -240,7 +240,8 @@ export function ProfitEquation({
       {unconfigured && !loading && (
         <div className="jy-partial-note">
           <Icon name="info" />
-          <span>
+          {/* 用 div：说明里可能带「查看详细原因」（块级的 details） */}
+          <div>
             {notice ?? (
               <>
                 {OWN_STATION_UNSET_TITLE}，{EQ_TEXT.unsetNotice}{OWN_STATION_UNSET_HINT}
@@ -249,7 +250,7 @@ export function ProfitEquation({
                 </Link>
               </>
             )}
-          </span>
+          </div>
         </div>
       )}
       {flow && (
@@ -279,13 +280,13 @@ export function ProfitEquation({
       {partial && !loading && (
         <div className="jy-partial-note">
           <Icon name="info" />
-          <span>
+          <div>
             数据不完整，带 ≈ 的数字是按已有数据算出的。
             {reasons.map((r, i) => (
               <span key={i}>{r}</span>
             ))}
             {partialTail}
-          </span>
+          </div>
         </div>
       )}
     </section>

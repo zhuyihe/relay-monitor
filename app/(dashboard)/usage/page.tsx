@@ -2,7 +2,7 @@
 // 用量分析：按上游、模型和时段查看 Token 用量。
 // 合计的算法沿用 v1（renderUsageBody）：时间档位、上游筛选、合计、读不到的上游、趋势/各模型图、模型明细。
 // 新增"按上游"分组：各上游的 Token 堆叠柱，颜色跟随上游而不是排名。
-// 只在本页出现的话都在下面的 COPY 里；时间范围名、Token 说明、汇率说明、报错的说法从共用的地方取（design/ui-copy-spec.md §12）
+// 只在本页出现的话都在同目录的 copy.ts 里；时间范围名、Token 说明、汇率和售价说明、报错的说法从共用的地方取（design/ui-copy-spec.md §12）
 import "../../styles/pages/usage.css";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Grid, Select } from "antd";
@@ -10,7 +10,7 @@ import { Bar, Column } from "@ant-design/plots";
 import { api } from "../../../lib/client";
 import { dayKeyInTz } from "../../../lib/business-time";
 import { failureSentence } from "../../../lib/error-copy";
-import { EMPTY, formatCompact, formatUnitPrice, formatZonedDate, formatZonedTime, RANGE_TEXT, RATE_UNSET_PARITY, TOKEN_NOTE } from "../../../lib/format";
+import { EMPTY, formatCompact, formatInt, formatUnitPrice, formatZonedDate, formatZonedTime, RANGE_TEXT, SELL_PRICE_UNSET, TOKEN_NOTE } from "../../../lib/format";
 import { stationDisplayName } from "../../../lib/overview-actions";
 import { rateSnapshotOf } from "../../../lib/profit";
 import { palette, SERIES_KEYS } from "../../../lib/design-tokens";
@@ -24,68 +24,14 @@ import { RangePicker } from "../../components/range-picker";
 import { Seg } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
 import { useUrlState } from "../../components/use-url-state";
+import { COPY } from "./copy";
 
-// 只在用量分析页出现的话，只在这一处写；用语按 design/ui-copy-spec.md §3.4
-const COPY = Object.freeze({
-  range24h: "近 24 小时",
-  stationLabel: "上游",
-  allStations: "全部上游",
-  ownSuffix: "（自营站点）",
-  allHint: "「全部」不含自营站点，可在列表里单独选看",
-  dataLabel: "用量数据",
-  readFailed: "读不到用量数据",
-  trendTitle: "Token 用量趋势",
-  trendTable: "Token 用量趋势的表格",
-  byHour: "按小时汇总",
-  byDay: "按天汇总",
-  groupBy: "分组方式",
-  groupTotal: "合计",
-  groupUpstream: "按上游",
-  viewAs: "显示方式",
-  viewChart: "图表",
-  viewTable: "表格",
-  legend: "图例",
-  modelTitle: "各模型 Token",
-  modelCaption: "按用量从多到少，最多显示 10 项",
-  modelCaptionByDate: "部分上游只能按整天给出各模型的数据，这里算的是昨天和今天",
-  detailTitle: "模型明细",
-  modelCount: (n: number) => `共 ${n} 个模型`,
-  totalsLabel: "用量合计",
-  noData: "用量明细",
-  other: (n: number) => `其他 ${n} 个`,
-  // 列名和悬停提示
-  bucket: "时段",
-  model: "模型",
-  token: "Token",
-  totalToken: "总 Token",
-  inputToken: "输入 Token",
-  outputToken: "输出 Token",
-  inputOutput: "输入/输出",
-  cost: "上游成本",
-  requests: "请求数",
-  total: "合计",
-  // 合计
-  exact: (n: string) => `精确值 ${n}`,
-  noneRead: "一个上游的用量都没读到",
-  sources: "读到的上游",
-  sourcesOf: (n: number) => ` / ${n} 个上游`,
-  failedCount: (n: number) => `${n} 个读不到`,
-  excludeFailed: (n: number) => `不含读不到的 ${n} 个上游`,
-  rateUnset: (n: number) => `${n} 个上游${RATE_UNSET_PARITY}`,
-  failedTitle: "以下上游的用量读不到",
-  failedTitlePartial: "以下上游的用量读不到，合计里不含它们",
-  // 没有数据
-  emptyTitle: "这段时间没有用量",
-  emptyDesc: "换一个时间范围，或在筛选里选别的上游。",
-  allFailedTitle: "所有上游的用量都读不到",
-  allFailedDesc: "各上游读不到的原因见上方；恢复后，下次刷新会自动显示。",
-});
 
 // 时间档位（照抄 v1 USAGE_RANGES）。今天 / 近 7 天 / 近 30 天与总览、自营一致；
 // 用量有小时粒度，所以多一个和余额趋势弹窗同款的「近 24 小时」，从现在往前推 24 小时
 const USAGE_RANGES = [
   { value: "today", label: RANGE_TEXT.today },
-  { value: "24h", label: COPY.range24h },
+  { value: "24h", label: RANGE_TEXT["24h"] },
   { value: "7d", label: RANGE_TEXT["7d"] },
   { value: "30d", label: RANGE_TEXT["30d"] },
 ];
@@ -109,8 +55,6 @@ function truncateLabel(s: any, units = 14): string {
   }
   return String(s);
 }
-
-const num = (n: any) => Number(n ?? 0).toLocaleString("en-US");
 
 // 图表本体固定高度，保证同排两图等高
 const CHART_H = 300;
@@ -321,10 +265,15 @@ export default function UsagePage() {
       totReqs = src.reduce((a, m) => a + m.requests, 0);
     }
     const modelsByDate = current.range === "24h" && okSts.some((s: any) => s.modelsWindow === "date");
-    // 没设置汇率、按 1 比 1 算的上游个数（§7）
-    const rateUnset = okSts.filter((s: any) => rateSnapshotOf(s).source !== "configured").length;
+    // 只选了自营站点：cnyPerUsd 是售价，算出来的是用户消费，不是上游成本（§3.2）
+    const own = sts.length > 0 && sts.every((s: any) => s.isOwn);
+    // 没设置汇率、按 1 比 1 算的上游个数（§7）：只数这段时间有花费的，花费是 0 的不影响合计
+    const spent = (s: any) => (s.summary?.cost || 0) > 0 || (s.models || []).some((m: any) => m.cost > 0) || (s.trend || []).some((p: any) => p.cost > 0);
+    const unrated = okSts.filter((s: any) => spent(s) && rateSnapshotOf(s).source !== "configured");
+    const rateUnset = own ? 0 : unrated.length;
+    const sellPriceUnset = own && unrated.length > 0;
 
-    return { sts, okSts, errSts, models, buckets, perStation, totTokens, totCost, totReqs, modelsByDate, rateUnset };
+    return { sts, okSts, errSts, models, buckets, perStation, totTokens, totCost, totReqs, modelsByDate, own, rateUnset, sellPriceUnset };
   }, [current, station]);
 
   // 分模型图：超过 10 项时后段合并为「其他 N 个」（同 v1 drawUsageModels）
@@ -396,11 +345,13 @@ export default function UsagePage() {
   const trendEmpty = !agg || !agg.buckets.length || agg.buckets.every((b: any) => !b.tokens);
   const kit = useMemo(() => chartKit(dark), [dark]);
 
+  // 钱那一栏的名字：看上游时是上游成本，只看自营站点时是用户消费
+  const costLabel = agg?.own ? COPY.ownCost : COPY.cost;
   // 悬停提示项：Token / 上游成本 / 请求数（同 v1 attachUsageTip 内容）
   const tipItems = [
-    { field: "tokens", name: COPY.token, valueFormatter: (v: any) => num(v) },
-    { field: "cost", name: COPY.cost, valueFormatter: (v: any) => formatUnitPrice(v) },
-    { field: "requests", name: COPY.requests, valueFormatter: (v: any) => num(v) },
+    { field: "tokens", name: COPY.token, valueFormatter: (v: any) => formatInt(v) },
+    { field: "cost", name: costLabel, valueFormatter: (v: any) => formatUnitPrice(v) },
+    { field: "requests", name: COPY.requests, valueFormatter: (v: any) => formatInt(v) },
   ];
 
   const stationSelectId = `${uid}-station`;
@@ -465,7 +416,7 @@ export default function UsagePage() {
             {group === "total" ? (
               <>
                 <th scope="col" className="r">{COPY.token}</th>
-                <th scope="col" className="r">{COPY.cost}</th>
+                <th scope="col" className="r">{costLabel}</th>
                 <th scope="col" className="r">{COPY.requests}</th>
               </>
             ) : (
@@ -484,18 +435,18 @@ export default function UsagePage() {
               <th scope="row" className="jy-usage-rowhead">{b.label}</th>
               {group === "total" ? (
                 <>
-                  <td className="r jy-num">{num(b.tokens)}</td>
+                  <td className="r jy-num">{formatInt(b.tokens)}</td>
                   <td className="r jy-num">{formatUnitPrice(b.cost)}</td>
-                  <td className="r jy-num">{num(b.requests)}</td>
+                  <td className="r jy-num">{formatInt(b.requests)}</td>
                 </>
               ) : (
                 <>
                   {upstream!.series.map((s) => (
                     <td className="r jy-num" key={s.key}>
-                      {num(upstream!.rows.find((r) => r.key === b.key && r.sid === s.key)?.tokens)}
+                      {formatInt(upstream!.rows.find((r) => r.key === b.key && r.sid === s.key)?.tokens)}
                     </td>
                   ))}
-                  <td className="r jy-num">{num(b.tokens)}</td>
+                  <td className="r jy-num">{formatInt(b.tokens)}</td>
                 </>
               )}
             </tr>
@@ -558,7 +509,7 @@ export default function UsagePage() {
             }}
             tooltip={{
               title: (d: any) => d.label,
-              items: [(d: any) => ({ name: d.name, value: num(d.tokens) })],
+              items: [(d: any) => ({ name: d.name, value: formatInt(d.tokens) })],
             }}
           />
         </ChartBox>
@@ -578,18 +529,20 @@ export default function UsagePage() {
           <div>
             <dt>{COPY.totalToken}</dt>
             <dd className="jy-usage-figure">{figure(formatCompact(agg.totTokens))}</dd>
-            {allFailed ? <dd className="jy-caption">{COPY.noneRead}</dd> : <dd className="jy-caption">{COPY.exact(num(agg.totTokens))}</dd>}
+            {allFailed ? <dd className="jy-caption">{COPY.noneRead}</dd> : <dd className="jy-caption">{COPY.exact(formatInt(agg.totTokens))}</dd>}
             {partialNote}
           </div>
           <div>
-            <dt>{COPY.cost}</dt>
+            <dt>{costLabel}</dt>
             <dd className="jy-usage-figure">{figure(formatUnitPrice(agg.totCost))}</dd>
             {!allFailed && agg.rateUnset > 0 && <dd className="jy-caption">{COPY.rateUnset(agg.rateUnset)}</dd>}
+            {!allFailed && agg.sellPriceUnset && <dd className="jy-caption">{SELL_PRICE_UNSET}</dd>}
             {partialNote}
           </div>
           <div>
             <dt>{COPY.requests}</dt>
             <dd className="jy-usage-figure">{figure(formatCompact(agg.totReqs))}</dd>
+            {!allFailed && agg.totReqs >= 1e4 && <dd className="jy-caption">{COPY.exact(formatInt(agg.totReqs))}</dd>}
             {partialNote}
           </div>
           <div>
@@ -612,9 +565,9 @@ export default function UsagePage() {
       {agg.errSts.length > 0 && (
         <div className="jy-banner">
           <Sym kind="warn" />
-          <div className="jy-usage-banner">
+          <div className="jy-banner__body">
             <b>{allFailed ? COPY.failedTitle : COPY.failedTitlePartial}</b>
-            <ul>
+            <ul className="jy-usage-failed">
               {agg.errSts.map((s: any) => {
                 const note = stationErrorOf(s);
                 return (
@@ -723,17 +676,17 @@ export default function UsagePage() {
                         <th scope="col" className="r">{COPY.inputToken}</th>
                         <th scope="col" className="r">{COPY.outputToken}</th>
                         <th scope="col" className="r">{COPY.totalToken}</th>
-                        <th scope="col" className="r">{COPY.cost}</th>
+                        <th scope="col" className="r">{costLabel}</th>
                       </tr>
                     </thead>
                     <tbody>
                       {agg.models.map((m: any) => (
                         <tr key={m.model}>
                           <td className="jy-usage-model">{m.model}</td>
-                          <td className="r jy-num">{num(m.requests)}</td>
-                          <td className="r jy-num">{m.hasIO ? num(m.inputTokens) : EMPTY}</td>
-                          <td className="r jy-num">{m.hasIO ? num(m.outputTokens) : EMPTY}</td>
-                          <td className="r jy-num">{num(m.tokens)}</td>
+                          <td className="r jy-num">{formatInt(m.requests)}</td>
+                          <td className="r jy-num">{m.hasIO ? formatInt(m.inputTokens) : EMPTY}</td>
+                          <td className="r jy-num">{m.hasIO ? formatInt(m.outputTokens) : EMPTY}</td>
+                          <td className="r jy-num">{formatInt(m.tokens)}</td>
                           <td className="r jy-num">{formatUnitPrice(m.cost)}</td>
                         </tr>
                       ))}
@@ -747,15 +700,15 @@ export default function UsagePage() {
                       <span className="jy-num">{formatCompact(m.tokens)}</span>
                       <div className="m-sub">
                         <span>
-                          {COPY.requests} <b>{num(m.requests)}</b>
+                          {COPY.requests} <b>{formatInt(m.requests)}</b>
                         </span>
                         {m.hasIO ? (
                           <span>
-                            {COPY.inputOutput} <b>{num(m.inputTokens)}</b> / <b>{num(m.outputTokens)}</b>
+                            {COPY.inputOutput} <b>{formatInt(m.inputTokens)}</b> / <b>{formatInt(m.outputTokens)}</b>
                           </span>
                         ) : null}
                         <span>
-                          {COPY.cost} <b>{formatUnitPrice(m.cost)}</b>
+                          {costLabel} <b>{formatUnitPrice(m.cost)}</b>
                         </span>
                       </div>
                     </li>

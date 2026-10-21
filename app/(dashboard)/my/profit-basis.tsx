@@ -6,7 +6,8 @@ import { useRouter } from "next/navigation";
 import { App, Button, Checkbox, Input } from "antd";
 import { api } from "../../../lib/client";
 import { rateSnapshotOf } from "../../../lib/profit";
-import { failureText } from "../../../lib/error-copy";
+import { failureSentence, failureText } from "../../../lib/error-copy";
+import { STATION_TABS } from "../../../lib/brand";
 import { COST_MODE_TEXT, SELL_PRICE_UNSET, formatMoney, formatSellPrice, formatZonedRange } from "../../../lib/format";
 import { EmptyState, ErrorState } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
@@ -32,6 +33,8 @@ const COPY = {
   costsTitle: "成本明细",
   costsCaption: "每个上游的成本按它自己的方式算",
   unread: "读不到",
+  // 成本明细里某个上游读用量失败（改按余额变化估算）时，名字下面那句的开头
+  usageUnread: "读不到用量",
 };
 // 服务端给的报错（{ error, errorCode }）归成一句，原文进「查看详细原因」
 const errorNoteOf = (x: any) => noteOf({ code: x.errorCode, message: x.error });
@@ -340,7 +343,7 @@ function CostSection({ p }: { p: any }) {
                 return (
                   <div className="jy-res-name">
                     <b style={{ fontWeight: 500 }}>{c.name}</b>
-                    {note && <span>读不到上游账单：{note.text}</span>}
+                    {note && <span>{failureSentence(COPY.usageUnread, note.text)}</span>}
                     {note && <ErrorDetail raw={note.raw} />}
                   </div>
                 );
@@ -371,7 +374,7 @@ function CostSection({ p }: { p: any }) {
           center={false}
           title="没有算进利润的上游"
           desc="上游成本和固定成本暂按 ¥0 算。在上游资源里把上游设成算进利润后，这里会列出每个上游的成本。"
-          action={<Button onClick={() => router.push("/stations")}>去设置</Button>}
+          action={<Button onClick={() => router.push("/stations")}>{STATION_TABS.list}</Button>}
         />
       )}
     </section>
