@@ -494,15 +494,6 @@ export class MemoryReconciliationRepository {
     if (existing) this.#delete(null, "capabilities", [existing]);
   }
 
-  async renameBillingCapability(from, to) {
-    await this.hooks.beforeCapabilityWrite?.("renameBillingCapability", from);
-    this.log.capabilityWrites.push({ method: "renameBillingCapability", identity: to, from });
-    const existing = this.#capabilityEntry(from);
-    if (!existing || this.#capabilityEntry(to)) return false;
-    this.#update(null, "capabilities", [existing], { identity: to });
-    return true;
-  }
-
   async latestRecord(ruleId, window, scopeFingerprint, recordType) {
     if (!scopeFingerprint) throw new Error("成功账单查询必须指定核算口径");
     await this.#read("latestRecord", [ruleId, window, scopeFingerprint, recordType]);

@@ -1036,23 +1036,6 @@ contract("saving a billing capability never drops other identities, however long
   assert.equal((await repository.getBillingCapability(fresh)).verifiedAt, now);
 });
 
-contract("renaming a billing capability keeps its result in place and never overwrites an existing identity", async ({ repository, fixture }) => {
-  const now = Date.now();
-  const legacy = fixture.capabilityIdentity("legacy"), renamed = fixture.capabilityIdentity("renamed"), taken = fixture.capabilityIdentity("taken");
-  const capability = (verifiedAt) => ({ state: "supported", currency: "USD", window: "natural-day", verifiedAt, reason: "RUNTIME_FILTERS_VERIFIED" });
-  await repository.saveBillingCapability(legacy, capability(now - 400 * DAY));
-  assert.equal(await repository.renameBillingCapability(legacy, renamed), true);
-  assert.equal(await repository.getBillingCapability(legacy), null);
-  assert.equal((await repository.getBillingCapability(renamed)).verifiedAt, now - 400 * DAY, "核验时间照旧，零消费的账号不用重新核验");
-  assert.equal(await repository.renameBillingCapability(legacy, renamed), false, "旧身份已经没有了");
-  // 新身份已经有一行：不覆盖，旧行留着
-  await repository.saveBillingCapability(legacy, capability(now - 1000));
-  await repository.saveBillingCapability(taken, capability(now));
-  assert.equal(await repository.renameBillingCapability(legacy, taken), false);
-  assert.equal((await repository.getBillingCapability(taken)).verifiedAt, now);
-  assert.equal((await repository.getBillingCapability(legacy)).verifiedAt, now - 1000);
-});
-
 // ---- 返回值隔离 ----
 
 contract("returned values and saved inputs are independent copies", async ({ repository, fixture }) => {

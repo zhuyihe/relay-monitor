@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import mysql from "mysql2/promise";
-import { ensureSchema } from "./pool.js";
+import { ensureSchema, rehashBillingCapabilities } from "./pool.js";
+import { billingIdentityFromDigest } from "../lib/providers.js";
 import { ChannelOnboardingRepository } from "../server/channel-onboarding-repository.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState } from "../server/reconciliation-repository.js";
 import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues } from "../lib/reconciliation-ledger.js";
 import { defineReconciliationRepositoryContract } from "../server/test-support/reconciliation-repository-contract.js";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { Store } from "./store.js";
@@ -533,14 +535,19 @@ test("登录信息加密保存：明文库配上密钥启动后只剩密文，�
   const resetCli = (...args) => spawnSync(process.execPath, [fileURLToPath(new URL("./reset-secrets.js", import.meta.url)), ...args],
     { cwd: tmpdir(), encoding: "utf8", env: { ...process.env, RELAY_SECRET_KEY: KEY_B, RELAY_SECRET_KEY_FILE: "" } });
 
-  // 没配密钥：照旧明文，会话密钥原样沿用
-  assert.equal((await new Store(pool).load()).sessionSecret, "fixture-plain-session");
+  // 没配密钥：照旧明文，会话密钥原样沿用；账单身份密钥生成一个，明文存着
+  const plain = await new Store(pool).load();
+  assert.equal(plain.sessionSecret, "fixture-plain-session");
   assert.match(await dump(), /fixture-password-secret/);
+  assert.match(await dump(), new RegExp(plain.billingIdentityKey));
 
   const first = await new Store(pool, { secretKey: keyA }).load();
   assert.deepEqual(first.secretReport, { encrypted: true, keyId: keyA.id, converted: 4, rotated: ["session_secret"] });
   const sealed = await dump();
   assert.doesNotMatch(sealed, SECRETS);
+  // 账单身份密钥第一次加密时不换新（换了库里存的账单能力就对不上了），库里只剩密文
+  assert.equal(first.billingIdentityKey, plain.billingIdentityKey);
+  assert.doesNotMatch(sealed, new RegExp(plain.billingIdentityKey));
   const [[row]] = await pool.query("SELECT doc FROM stations WHERE id = ?", [station.id]);
   assert.ok(isCiphertext(row.doc.password) && isCiphertext(row.doc.email) && isCiphertext(row.doc.s2Tokens));
   const [[session]] = await pool.query("SELECT v FROM meta WHERE k = 'session_secret'");
@@ -573,6 +580,35 @@ test("登录信息加密保存：明文库配上密钥启动后只剩密文，�
   const [[billingKey]] = await pool.query("SELECT v FROM meta WHERE k = 'billing_identity_key'");
   assert.ok(isCiphertext(billingKey.v));
   assert.notEqual(third.billingIdentityKey, second.billingIdentityKey);
+});
+
+test("账单能力表的身份改 HMAC：真库上每一行原地改一次、核验结果和时间照旧，写下标记后不再改", { timeout: 60000 }, async (t) => {
+  const pool = mysql.createPool({ host: process.env.DB_HOST, port, user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD, database: process.env.DB_NAME,
+    connectionLimit: 4, charset: "utf8mb4_unicode_ci", supportBigNumbers: true });
+  const MARKER = "billing_identity_hmac_v1";
+  const clear = async () => { await pool.query("DELETE FROM reconciliation_billing_capabilities"); await pool.query("DELETE FROM meta WHERE k = ?", [MARKER]); };
+  t.after(async () => { await clear(); await pool.end(); });
+  await ensureSchema(pool);
+  await clear();
+  const digests = ["a1", "b2"].map((seed) => createHash("sha256").update(seed).digest("hex"));
+  const capability = (verifiedAt) => ({ state: "supported", currency: "USD", window: "natural-day", verifiedAt, reason: "RUNTIME_FILTERS_VERIFIED" });
+  for (const [index, digest] of digests.entries()) {
+    await pool.query("INSERT INTO reconciliation_billing_capabilities (identity, capability, verified_at) VALUES (?, ?, ?)",
+      [digest, JSON.stringify(capability(1000 + index)), 1000 + index]);
+  }
+  const rehash = (digest) => billingIdentityFromDigest("integration-billing-key", digest);
+  assert.deepEqual(await rehashBillingCapabilities(pool, rehash), { migrated: 2, skipped: false });
+  const rows = async () => (await pool.query("SELECT identity, capability, verified_at AS verifiedAt FROM reconciliation_billing_capabilities ORDER BY verified_at"))[0]
+    .map((row) => [row.identity, row.capability.verifiedAt, Number(row.verifiedAt)]);
+  assert.deepEqual(await rows(), digests.map((digest, index) => [rehash(digest), 1000 + index, 1000 + index]));
+  const [[marker]] = await pool.query("SELECT v FROM meta WHERE k = ?", [MARKER]);
+  assert.equal(marker.v.migrated, 2);
+  // 再跑一次：有标记就不动（S3 之前的版本回滚期间写下的行也不再改）
+  await pool.query("INSERT INTO reconciliation_billing_capabilities (identity, capability, verified_at) VALUES (?, ?, ?)",
+    [createHash("sha256").update("c3").digest("hex"), JSON.stringify(capability(3000)), 3000]);
+  assert.deepEqual(await rehashBillingCapabilities(pool, rehash), { migrated: 0, skipped: true });
+  assert.equal((await rows()).at(-1)[0], createHash("sha256").update("c3").digest("hex"));
 });
 
 // 与 server/reconciliation-repository.contract.test.js 同一组用例：内存实现和 MySQL 必须表现一致。

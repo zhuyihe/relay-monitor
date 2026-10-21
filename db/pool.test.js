@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ensureSchema } from "./pool.js";
+import { ensureSchema, rehashBillingCapabilities } from "./pool.js";
 
 const DAY = 86400000;
 const START = Date.UTC(2026, 9, 8, 16);
@@ -141,4 +141,50 @@ test("结账账本表以 (关联, 日期, 版本) 为主键", async () => {
   const ledger = pool.calls.find((call) => call.sql.includes("CREATE TABLE IF NOT EXISTS reconciliation_ledger"));
   assert.ok(ledger.sql.includes("PRIMARY KEY (rule_id, bill_date, revision)"));
   assert.ok(pool.calls.indexOf(ledger) < pool.calls.findIndex((call) => call.sql.startsWith("SELECT k FROM meta")));
+});
+
+// 账单能力表身份改 HMAC 的一次性迁移：事务里的读写都走 conn；commit 才落下
+function capabilityPool({ identities = [], marker = false, failOn = null } = {}) {
+  const db = { identities: [...identities], marker }, calls = [];
+  let draft;
+  const conn = {
+    beginTransaction: async () => { draft = { identities: [...db.identities], marker: db.marker }; },
+    async query(sql, params = []) {
+      calls.push(sql);
+      if (failOn && sql.startsWith(failOn)) throw Object.assign(new Error("synthetic"), { code: "ER_LOCK_DEADLOCK" });
+      if (sql.startsWith("SELECT k FROM meta")) return [draft.marker ? [{ k: params[0] }] : []];
+      if (sql.startsWith("SELECT identity FROM reconciliation_billing_capabilities")) return [draft.identities.map((identity) => ({ identity }))];
+      if (sql.startsWith("UPDATE reconciliation_billing_capabilities")) draft.identities = draft.identities.map((id) => (id === params[1] ? params[0] : id));
+      if (sql.startsWith("INSERT INTO meta")) draft.marker = true;
+      return [[]];
+    },
+    commit: async () => { db.identities = draft.identities; db.marker = draft.marker; calls.push("COMMIT"); },
+    rollback: async () => { calls.push("ROLLBACK"); },
+    release: () => {},
+  };
+  return { db, calls, getConnection: async () => conn };
+}
+
+test("账单能力表的身份改 HMAC：每一行原地改一次，和完成标记一起提交；有标记就不再改", async () => {
+  const pool = capabilityPool({ identities: ["a".repeat(64), "b".repeat(64)] });
+  const rehash = (digest) => `h(${digest.slice(0, 1)})`;
+  assert.deepEqual(await rehashBillingCapabilities(pool, rehash), { migrated: 2, skipped: false });
+  assert.deepEqual(pool.db.identities, ["h(a)", "h(b)"]);
+  assert.equal(pool.db.marker, true);
+  assert.equal(pool.calls.at(-1), "COMMIT");
+  pool.calls.length = 0;
+  assert.deepEqual(await rehashBillingCapabilities(pool, rehash), { migrated: 0, skipped: true });
+  assert.deepEqual(pool.db.identities, ["h(a)", "h(b)"]);
+  assert.equal(pool.calls.some((sql) => sql.startsWith("UPDATE")), false);
+  // 空表也写标记，以后 S3 之前的版本回滚期间写下的行不再改
+  const empty = capabilityPool();
+  assert.deepEqual(await rehashBillingCapabilities(empty, rehash), { migrated: 0, skipped: false });
+  assert.equal(empty.db.marker, true);
+});
+
+test("账单能力表的身份改 HMAC：中途出错整体回滚、不写标记、抛错挡住启动，下次启动从头再来", async () => {
+  const pool = capabilityPool({ identities: ["a".repeat(64), "b".repeat(64)], failOn: "INSERT INTO meta" });
+  await assert.rejects(rehashBillingCapabilities(pool, (digest) => `h(${digest.slice(0, 1)})`), { code: "ER_LOCK_DEADLOCK" });
+  assert.deepEqual(pool.db, { identities: ["a".repeat(64), "b".repeat(64)], marker: false });
+  assert.equal(pool.calls.at(-1), "ROLLBACK");
 });

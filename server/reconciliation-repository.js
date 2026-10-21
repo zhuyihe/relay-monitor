@@ -765,14 +765,6 @@ export class ReconciliationRepository {
     await this.pool.query("DELETE FROM reconciliation_billing_capabilities WHERE identity = ?", [identity]);
   }
 
-  // S3 之前存的身份是直接 sha256：原地改成 HMAC 身份，那一行的核验结果照旧，不删。
-  // 新身份已经有一行时什么都不改（返回 false），旧行留着，作废时一起删
-  async renameBillingCapability(from, to) {
-    const [result] = await this.pool.query("UPDATE IGNORE reconciliation_billing_capabilities SET identity = ? WHERE identity = ?", [to, from]);
-    // mysql2 的 affectedRows 是匹配到的行数（新身份已有一行、被 IGNORE 跳过时也是 1），要看 changedRows
-    return result.changedRows > 0;
-  }
-
   async latestRecord(ruleId, window, scopeFingerprint, recordType) {
     if (!scopeFingerprint) throw new Error("成功账单查询必须指定核算口径");
     const [rows] = await this.pool.query(

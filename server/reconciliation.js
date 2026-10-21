@@ -445,11 +445,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const billingCapabilityStore = {
     get identityKey() { return rt.store.billingIdentityKey; },
     get: (identity) => repository.getBillingCapability(identity),
-    async rename(from, to) {
-      const renamed = await repository.renameBillingCapability(from, to);
-      if (renamed) metadataCache.clear();
-      return renamed;
-    },
     async set(identity, capability) {
       try { await repository.saveBillingCapability(identity, capability); } finally { metadataCache.clear(); }
     },
