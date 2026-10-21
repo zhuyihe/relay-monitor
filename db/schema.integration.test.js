@@ -513,7 +513,7 @@ test("登录信息加密保存：明文库配上密钥启动后只剩密文，�
   const pool = mysql.createPool({ host: process.env.DB_HOST, port, user: process.env.DB_USER,
     password: process.env.DB_PASSWORD, database: process.env.DB_NAME,
     connectionLimit: 4, charset: "utf8mb4_unicode_ci", supportBigNumbers: true });
-  const META_KEYS = ["settings", "auth", "notifications", "session_secret"];
+  const META_KEYS = ["settings", "auth", "notifications", "session_secret", "billing_identity_key"];
   const clear = async () => { await pool.query("DELETE FROM stations"); await pool.query("DELETE FROM meta WHERE k IN (?)", [META_KEYS]); };
   t.after(async () => { await clear(); await pool.end(); });
   await ensureSchema(pool);
@@ -569,6 +569,10 @@ test("登录信息加密保存：明文库配上密钥启动后只剩密文，�
   assert.notEqual(third.sessionSecret, first.sessionSecret);
   const [[renewed]] = await pool.query("SELECT v FROM meta WHERE k = 'session_secret'");
   assert.ok(isCiphertext(renewed.v));
+  // 账单身份密钥也是新生成、加密保存的
+  const [[billingKey]] = await pool.query("SELECT v FROM meta WHERE k = 'billing_identity_key'");
+  assert.ok(isCiphertext(billingKey.v));
+  assert.notEqual(third.billingIdentityKey, second.billingIdentityKey);
 });
 
 // 与 server/reconciliation-repository.contract.test.js 同一组用例：内存实现和 MySQL 必须表现一致。

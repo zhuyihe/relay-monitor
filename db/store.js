@@ -279,6 +279,11 @@ export class Store {
     return this._metaSecrets.session_secret ?? null;
   }
 
+  // 算 Sub2API 账单能力连接身份的 HMAC 密钥（server/reconciliation.js 交给 lib/providers.js），同样加密存在 meta 表
+  get billingIdentityKey() {
+    return this._metaSecrets.billing_identity_key ?? null;
+  }
+
   _openSecrets(data) {
     for (const slot of secretSlots(data)) {
       const value = slot.owner[slot.key];

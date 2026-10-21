@@ -441,8 +441,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const accountUsageCache = new Map();
   // Sub2API 账单过滤能力的核验结果存进库里，重启后不必重新核验。能力变了就丢掉 Key 目录缓存，
   // 目录里带的能力状态和据此算出的成本归属版本随下一次查询更新，不必等 5 分钟缓存过期。
+  // 库里的身份是用 identityKey（meta 里的账单身份密钥，和登录信息一起加密保存）算的 HMAC，拿到库也撞不出密码（lib/providers.js）
   const billingCapabilityStore = {
+    get identityKey() { return rt.store.billingIdentityKey; },
     get: (identity) => repository.getBillingCapability(identity),
+    async rename(from, to) {
+      const renamed = await repository.renameBillingCapability(from, to);
+      if (renamed) metadataCache.clear();
+      return renamed;
+    },
     async set(identity, capability) {
       try { await repository.saveBillingCapability(identity, capability); } finally { metadataCache.clear(); }
     },
