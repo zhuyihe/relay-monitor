@@ -65,8 +65,26 @@ jobs:
           DB_USER: relay_monitor_test
           DB_PASSWORD: ci-schema-test
 
+  # PR 上也真的构建一次镜像（不推送），在镜像里加载迁移脚本用到的模块：
+  # 镜像只拷了 standalone 产物、db/ 和 lib/，缺文件时启动第一步 node db/migrate.js 就会退出
+  image-smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: relay-monitor:smoke
+      - name: Migration modules load inside the image
+        run: docker run --rm --entrypoint node relay-monitor:smoke --input-type=module -e "await import('/app/db/pool.js'); await import('/app/db/store.js'); console.log('db modules ok')"
+
   build:
-    needs: [verify, schema-verify]
+    needs: [verify, schema-verify, image-smoke]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:

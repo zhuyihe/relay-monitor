@@ -27,8 +27,11 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 # 迁移脚本独立于 Next 构建图（防止真实凭证被文件追踪拷进产物），
-# 启动时链式执行：库为空且配置了 V1_DATA_DIR 才导入，幂等
+# 启动时链式执行：库为空且配置了 V1_DATA_DIR 才导入，幂等。
+# db/pool.js 要引用 lib/ 里的结账账本等纯函数（4a 起），lib/ 不在 standalone 产物里，要一起拷，
+# 否则 node db/migrate.js 找不到模块直接退出，服务起不来（CI 的 image-smoke 会在镜像里加载一次）
 COPY --from=builder /app/db ./db
+COPY --from=builder /app/lib ./lib
 
 # 构建时注入 git commit，页面「关于」显示
 ARG GIT_SHA=dev
