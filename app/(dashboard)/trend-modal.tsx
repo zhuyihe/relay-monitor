@@ -5,10 +5,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import { Modal } from "antd";
-import { api, fmtTokens } from "../../lib/client";
+import { api } from "../../lib/client";
 import { balanceMoneyOf, rateSnapshotOf } from "../../lib/profit";
 import {
-  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatHhmm, formatMoney, formatMonthDay, RATE_UNSET,
+  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatCompact, formatHhmm, formatMoney, formatMonthDay, RANGE_TEXT, RATE_UNSET,
 } from "../../lib/format";
 import { balanceDaysText, balanceViewOf, stationDisplayName } from "../../lib/overview-actions";
 import { clamp, niceTicks } from "../../lib/chart-math";
@@ -18,12 +18,12 @@ import { useElementWidth } from "../components/use-width";
 import { Seg } from "../components/seg";
 import { Sym } from "../components/icons";
 
-// 文案与其他页的时间选项统一用「近 N 小时 / 近 N 天」
+// 时间选项的名字和其他页同一份（RANGE_TEXT）
 const RANGES = [
-  { label: "近 24 小时", value: "24" },
-  { label: "近 3 天", value: "72" },
-  { label: "近 7 天", value: "168" },
-  { label: "近 30 天", value: "720" },
+  { label: RANGE_TEXT["24h"], value: "24" },
+  { label: RANGE_TEXT["3d"], value: "72" },
+  { label: RANGE_TEXT["7d"], value: "168" },
+  { label: RANGE_TEXT["30d"], value: "720" },
 ] as const;
 type Range = (typeof RANGES)[number]["value"];
 
@@ -336,7 +336,7 @@ export default function TrendModal({
   const level = view?.level === "crit" || view?.level === "warn" ? view.level : null;
   const stateText = level && (view?.state === "empty" || view?.state === "low" || view?.state === "soon") ? BALANCE_STATE_TEXT[view.state] : null;
   const today = [
-    station?.todayTokens != null ? COPY.todayTokens(fmtTokens(station.todayTokens)) : null,
+    station?.todayTokens != null ? COPY.todayTokens(formatCompact(station.todayTokens)) : null,
     station?.todayRequests != null ? COPY.todayRequests(station.todayRequests.toLocaleString("en-US")) : null,
   ].filter(Boolean);
   const rangeLabel = RANGES.find((r) => r.value === range)?.label;

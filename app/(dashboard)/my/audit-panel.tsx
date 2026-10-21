@@ -1,13 +1,13 @@
 "use client";
-// 日志精算：翻消费日志明细，补上看板漏计的缓存读写与长上下文请求。
+// 按明细细算：逐条看用量记录，补上汇总里没算的缓存和长对话用量。
 // 开销大，默认收起，点了才请求；结果状态放在页面里，切标签页不丢。
 import { Button } from "antd";
-import { EMPTY, formatCompact, formatInt, formatMoney } from "../../../lib/format";
+import { EMPTY, formatCompact, formatInt, formatMoney, formatZonedRange } from "../../../lib/format";
 import { ErrorState } from "../../components/data-state";
 import { Icon } from "../../components/icons";
 import { Panel } from "../../components/panel";
 import { Seg } from "../../components/seg";
-import { DataTable, TOKEN_NOTE, money, perM } from "./shared";
+import { AUDIT_TITLE, COL_TEXT, DataTable, TOKEN_NOTE, money, perM } from "./shared";
 
 export const AUDIT_ROWS = [
   { value: "2000", label: "2 千条" },
@@ -26,23 +26,54 @@ export type AuditProps = {
   open: boolean;
   setOpen: (o: boolean) => void;
   rate: number;
+  // 业务时区：看过的用量记录从几点到几点，按这个时区写
+  tz?: string;
 };
 
-const when = (ms: number) => new Date(ms).toLocaleString("zh-CN", { hour12: false });
+// 只在这块出现的说法（design/ui-copy-spec.md §11）
+const COPY = {
+  sub: "逐条看用量记录，补上概览没算进去的缓存和长对话用量。",
+  rows: "看多少条",
+  start: "开始细算",
+  again: "重新细算",
+  failed: "读不到用量记录",
+  withCache: "Token（含缓存）",
+  cache: "缓存",
+  long: "长对话",
+  cacheSplit: (read: number, write: number) => `读取 ${formatCompact(read)}，写入 ${formatCompact(write)}`,
+  times: (n: number) => `${formatInt(n)} 次`,
+};
 
-export function AuditPanel({ audit, auditing, auditError, auditRows, setAuditRows, run, open, setOpen, rate }: AuditProps) {
+// 价格档名是自营站点给的原文，常见「200k」「0-32k」：数字带 k / m 的按 §7 换成「20 万」「0-3.2 万」，其余原样
+const tierText = (name: unknown) =>
+  String(name).replace(/(\d+(?:\.\d+)?)\s*([kKmM])(?![A-Za-z])/g, (_, n, unit) => formatCompact(Number(n) * (/k/i.test(unit) ? 1e3 : 1e6)));
+
+// 倍率一格：「模型倍率 1.5、分组倍率 1、输出倍率 4」，命中价格档的再写「20 万档 12 次」
+function ratioText(r: any) {
+  const parts = [
+    r.avgModelRatio != null ? `模型倍率 ${r.avgModelRatio}` : "",
+    r.avgGroupRatio != null ? `分组倍率 ${r.avgGroupRatio}` : "",
+    r.avgCompletionRatio != null ? `输出倍率 ${r.avgCompletionRatio}` : "",
+  ].filter(Boolean);
+  const tiers = (r.tiers || []).map((x: any) => `${tierText(x.name)}档 ${formatInt(x.requests)} 次`);
+  const text = [parts.join("、"), tiers.join("、")].filter(Boolean).join("；");
+  return text || EMPTY;
+}
+
+export function AuditPanel({ audit, auditing, auditError, auditRows, setAuditRows, run, open, setOpen, rate, tz }: AuditProps) {
   const t = audit?.totals || {};
-  const longLabel = audit ? `长上下文（≥${formatCompact(audit.longContextTokens)}）` : "长上下文";
+  const longLabel = audit?.longContextTokens ? `${COPY.long}（${formatCompact(audit.longContextTokens)} Token 以上）` : COPY.long;
+  const range = audit?.fromMs && audit?.toMs ? formatZonedRange(audit.fromMs, audit.toMs, tz) : EMPTY;
   return (
     <Panel
-      title="日志精算"
+      title={AUDIT_TITLE}
       className={open ? undefined : "jy-my-collapsed"}
       extra={
         <Button size="small" aria-expanded={open} icon={<Icon name={open ? "collapse" : "expand"} />} onClick={() => setOpen(!open)}>
           {open ? "收起" : "展开"}
         </Button>
       }
-      sub="翻消费日志明细，补上看板漏计的缓存读、缓存写与长上下文请求。"
+      sub={COPY.sub}
       body={open}
     >
       {open ? (
@@ -50,22 +81,22 @@ export function AuditPanel({ audit, auditing, auditError, auditRows, setAuditRow
           <div className="jy-my-toolbar">
             <Seg<string>
               size="sm"
-              label="扫描条数"
+              label={COPY.rows}
               value={String(auditRows)}
               onChange={(x) => setAuditRows(Number(x))}
               options={AUDIT_ROWS}
             />
             <Button type="primary" loading={auditing} onClick={run}>
-              {audit ? "重新精算" : "开始精算"}
+              {audit ? COPY.again : COPY.start}
             </Button>
           </div>
-          {auditError && <ErrorState what="按明细细算没完成" error={auditError} onRetry={run} />}
+          {auditError && <ErrorState what={COPY.failed} error={auditError} onRetry={run} />}
           {!audit ? (
             !auditError && (
               <div className="jy-my-lines">
                 <p>
-                  看板的 token 只有 prompt + completion；Claude 这类缓存占九成的模型会显示成「token 近零、消费很大」。点「开始精算」按当前范围翻最近{" "}
-                  {formatInt(auditRows)} 条消费日志，算出真实 token、缓存读写与长上下文占比。
+                  上面各表的 Token 不含缓存；缓存占大头的模型会显示成「Token 很少、消费很大」。点「{COPY.start}」，会逐条看这个时间范围里最近{" "}
+                  {formatInt(auditRows)} 条用量记录，算出 Token（含缓存）、缓存和长对话的占比。
                 </p>
               </div>
             )
@@ -73,49 +104,50 @@ export function AuditPanel({ audit, auditing, auditError, auditRows, setAuditRow
             <>
               <dl className="jy-my-stats">
                 <div>
-                  <dt>计费 Token</dt>
+                  <dt>{COL_TEXT.tokens}</dt>
                   <dd>
                     {formatCompact(t.billedTokens || 0)}
-                    <small>看板口径</small>
+                    <small>只算输入和输出</small>
                   </dd>
                 </div>
                 <div>
-                  <dt>真实 Token</dt>
+                  <dt>{COPY.withCache}</dt>
                   <dd>
                     {formatCompact(t.trueTokens || 0)}
-                    <small>含缓存读写</small>
+                    <small>加上缓存</small>
                   </dd>
                 </div>
                 <div>
-                  <dt>缓存读 Token</dt>
+                  <dt>{COPY.cache}</dt>
                   <dd>
-                    {formatCompact(t.cacheReadTokens || 0)}
-                    <small>缓存写 {formatCompact(t.cacheWriteTokens || 0)}</small>
+                    {formatCompact((t.cacheReadTokens || 0) + (t.cacheWriteTokens || 0))}
+                    <small>{COPY.cacheSplit(t.cacheReadTokens || 0, t.cacheWriteTokens || 0)}</small>
                   </dd>
                 </div>
                 <div>
                   <dt>{longLabel}</dt>
                   <dd>
-                    {formatInt(t.longRequests || 0)} 次<small>{formatMoney((t.longCost || 0) * rate)}</small>
+                    {COPY.times(t.longRequests || 0)}
+                    <small>{formatMoney((t.longCost || 0) * rate)}</small>
                   </dd>
                 </div>
               </dl>
               <div className="jy-my-lines">
                 <p>
-                  已扫描 {formatInt(audit.scanned)}
-                  {audit.total != null ? ` / ${formatInt(audit.total)}` : ""} 条日志
-                  {audit.fromMs ? `，覆盖 ${when(audit.fromMs)} 至 ${when(audit.toMs)}` : ""}。
-                  {audit.truncated ? "已按条数上限截断，只统计最近的这部分。" : ""}
+                  看了 {formatInt(audit.scanned)}
+                  {audit.total != null ? ` / ${formatInt(audit.total)}` : ""} 条用量记录
+                  {range !== EMPTY ? `（${range}）` : ""}。
+                  {audit.truncated ? "条数到了上限，只算了最近的这部分。" : ""}
                 </p>
               </div>
               <DataTable<any>
                 scroll
                 tall
-                caption="按模型的日志精算结果"
+                caption="按模型的细算结果"
                 rows={audit.byModel || []}
                 rowKey={(r) => String(r.model)}
                 defaultSort={{ key: "cost", dir: "desc" }}
-                empty="这个时间范围内没有消费日志。"
+                empty="这个时间范围内没有用量记录。"
                 cols={[
                   {
                     key: "model",
@@ -125,18 +157,27 @@ export function AuditPanel({ audit, auditing, auditError, auditRows, setAuditRow
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                         {r.model}
                         {r.anthropicPct >= 50 && (
-                          <span className="jy-tag jy-tag--warn" title="Claude 语义：缓存读写在 prompt_tokens 之外额外计费">
-                            缓存额外计费
+                          <span className="jy-tag jy-tag--warn" title="这个模型的缓存另外收费，不在 Token（不含缓存）里">
+                            缓存另算
                           </span>
                         )}
                       </span>
                     ),
                   },
-                  { key: "req", label: "请求数", num: true, sort: (r) => r.requests, render: (r) => formatInt(r.requests) },
-                  { key: "billed", label: "计费 Token", title: TOKEN_NOTE, num: true, sort: (r) => r.billedTokens, render: (r) => formatCompact(r.billedTokens) },
-                  { key: "true", label: "真实 Token", num: true, sort: (r) => r.trueTokens, render: (r) => formatCompact(r.trueTokens) },
-                  { key: "cr", label: "缓存读", num: true, sort: (r) => r.cacheReadTokens, render: (r) => formatCompact(r.cacheReadTokens) },
-                  { key: "cw", label: "缓存写", num: true, sort: (r) => r.cacheWriteTokens, render: (r) => formatCompact(r.cacheWriteTokens) },
+                  { key: "req", label: COL_TEXT.requests, num: true, sort: (r) => r.requests, render: (r) => formatInt(r.requests) },
+                  { key: "billed", label: COL_TEXT.tokens, title: TOKEN_NOTE, num: true, sort: (r) => r.billedTokens, render: (r) => formatCompact(r.billedTokens) },
+                  { key: "true", label: COPY.withCache, num: true, sort: (r) => r.trueTokens, render: (r) => formatCompact(r.trueTokens) },
+                  {
+                    key: "cache",
+                    label: COPY.cache,
+                    num: true,
+                    sort: (r) => (r.cacheReadTokens || 0) + (r.cacheWriteTokens || 0),
+                    render: (r) => (
+                      <span title={COPY.cacheSplit(r.cacheReadTokens || 0, r.cacheWriteTokens || 0)}>
+                        {formatCompact((r.cacheReadTokens || 0) + (r.cacheWriteTokens || 0))}
+                      </span>
+                    ),
+                  },
                   {
                     key: "long",
                     label: longLabel,
@@ -145,32 +186,25 @@ export function AuditPanel({ audit, auditing, auditError, auditRows, setAuditRow
                     render: (r) =>
                       r.longRequests ? (
                         <>
-                          {formatInt(r.longRequests)} 次<span className="jy-sub-money">{formatMoney(r.longCost * rate)}</span>
+                          {COPY.times(r.longRequests)}<span className="jy-sub-money">{formatMoney(r.longCost * rate)}</span>
                         </>
                       ) : (
                         <span className="jy-muted">{EMPTY}</span>
                       ),
                   },
-                  { key: "cost", label: "消费", num: true, sort: (r) => r.cost, render: (r) => money(r.cost * rate) },
+                  { key: "cost", label: COL_TEXT.cost, num: true, sort: (r) => r.cost, render: (r) => money(r.cost * rate) },
                   {
                     key: "perM",
-                    label: "¥/M 真实",
-                    title: "¥ / 百万真实 token（含缓存）",
+                    label: `${COL_TEXT.perM}（含缓存）`,
+                    title: "每百万 Token（含缓存）的价格",
                     num: true,
                     sort: (r) => (r.trueTokens > 0 ? r.cost / r.trueTokens : null),
                     render: (r) => perM(r.cost * rate, r.trueTokens),
                   },
                   {
                     key: "ratio",
-                    label: "计价倍率",
-                    render: (r) => (
-                      <span className="jy-muted">
-                        {r.avgModelRatio != null ? `模型×${r.avgModelRatio}` : EMPTY}
-                        {r.avgGroupRatio != null ? ` 分组×${r.avgGroupRatio}` : ""}
-                        {r.avgCompletionRatio != null ? ` 输出×${r.avgCompletionRatio}` : ""}
-                        {r.tiers?.length ? `，${r.tiers.map((x: any) => `${x.name}×${x.requests}`).join(" ")}` : ""}
-                      </span>
-                    ),
+                    label: "倍率",
+                    render: (r) => <span className="jy-muted">{ratioText(r)}</span>,
                   },
                 ]}
               />

@@ -6,7 +6,7 @@
 // 悬停或用左右方向键逐日查看，十字线同时贯穿两张图。
 import { useId, useMemo, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
-import { WEEKDAYS, axisMoney, formatMoney, formatMonthDay, formatZonedTime, parseDay } from "../../lib/format";
+import { axisMoney, EMPTY, formatDayKey, formatMoney, formatMonthDay, formatZonedTime, parseDay, weekdayOfDayKey } from "../../lib/format";
 import { barPath, clamp, linePath, niceTicks, runs, spreadLabels, xTickIdx } from "../../lib/chart-math";
 import { ChartTip, TipBody } from "./float-tip";
 import type { TipRow } from "./float-tip";
@@ -29,13 +29,13 @@ export type TrendRow = {
   missing?: boolean;
 };
 
-// gross：毛利；profit：净利
-type Row = TrendRow & { d: Date; gross: number | null; profit: number | null };
+// gross：毛利；profit：净利；dayText：悬停和表格里的日期「10月9日 周五」，往年带年份
+type Row = TrendRow & { d: Date; dayText: string; gross: number | null; profit: number | null };
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
 // asOfText：「截至几点」，按业务时区显示（和日期划分同一时区），不用浏览器时区
 const dayTitle = (r: Row, asOfText?: string | null) =>
-  `${formatMonthDay(r.d)} ${WEEKDAYS[r.d.getDay()]}${r.today && asOfText ? `，截至 ${asOfText}` : ""}`;
+  `${r.dayText}${r.today && asOfText ? `，截至 ${asOfText}` : ""}`;
 const dayLabel = (r: Row) => (r.today ? "今天" : formatMonthDay(r.d));
 
 function Hatch({ id }: { id: string }) {
@@ -45,6 +45,9 @@ function Hatch({ id }: { id: string }) {
     </pattern>
   );
 }
+
+// 面板标题：有收入时写「收入与上游成本」；成本估算页的加载骨架也用这一份
+export const TREND_PANEL_TITLE = Object.freeze({ withRevenue: "收入与上游成本", costOnly: "上游成本" });
 
 export function TrendPanel({
   rows: input,
@@ -74,16 +77,17 @@ export function TrendPanel({
           rev,
           cost,
           d: parseDay(r.date) || new Date(),
+          dayText: `${formatDayKey(r.date, tz)} ${weekdayOfDayKey(r.date)}`,
           gross: rev != null && cost != null ? round2(rev - cost) : null,
           profit: rev != null && cost != null ? round2(rev - cost - (r.fixed || 0)) : null,
         };
       }),
-    [input, showRev],
+    [input, showRev, tz],
   );
 
   return (
     <Panel
-      title={title ?? (showRev ? "收入与上游成本" : "上游成本")}
+      title={title ?? (showRev ? TREND_PANEL_TITLE.withRevenue : TREND_PANEL_TITLE.costOnly)}
       caption={caption}
       extra={
         <Seg<"chart" | "table">
@@ -188,7 +192,8 @@ function TrendChart({
   let spoken = "";
   if (hr) {
     const cost = hr.cost == null ? "数据缺失" : formatMoney(hr.cost, { approx: hr.partial });
-    const profit = hr.profit == null ? "无法计算" : formatMoney(hr.profit, { approx: hr.partial });
+    // 算不出（上游成本缺了）写「—」，原因在上一行「数据缺失」（§7）
+    const profit = hr.profit == null ? EMPTY : formatMoney(hr.profit, { approx: hr.partial });
     if (showRev) tipRows.push(["收入", formatMoney(hr.rev), "var(--jy-s1)"]);
     tipRows.push(["上游成本", cost, "var(--jy-s2)"]);
     tipRows.push(["固定成本", formatMoney(hr.fixed), hasFixed ? "var(--jy-s3)" : undefined]);
@@ -389,7 +394,7 @@ function TrendTable({ rows, showRev, asOfText }: { rows: Row[]; showRev: boolean
   const gross = rev == null ? null : round2(rev - cost);
   const profit = gross == null ? null : round2(gross - fixed);
   const maybe = (v: number | null, partial?: boolean) =>
-    v == null ? <span className="jy-muted">无法计算</span> : formatMoney(v, { approx: partial });
+    v == null ? <span className="jy-muted">{EMPTY}</span> : formatMoney(v, { approx: partial });
   return (
     <div className="jy-table-scroll">
       <table className="jy-data jy-data--compact jy-num">

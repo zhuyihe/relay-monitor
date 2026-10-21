@@ -7,7 +7,7 @@ import { withAuth, json } from "../../../lib/api.js";
 import {
   businessTimeZone, dayKeyInTz, dayRangeInTz, shiftDayLabel, weekdayHourInTz,
 } from "../../../lib/business-time.js";
-import { amortizeFixedCost, costBasisOf, purchasesOf, rateSnapshotOf } from "../../../lib/profit.js";
+import { amortizeFixedCost, costBasisOf, countsInProfit, purchasesOf, rateSnapshotOf } from "../../../lib/profit.js";
 import { hasRawWindowCoverage, summarizeCoverage } from "./coverage.js";
 
 const r2 = (v) => Math.round(v * 100) / 100;
@@ -97,7 +97,7 @@ export const GET = withAuth(async (request, rt) => {
   // 热力图仅有短周期价值，且必须由完整的原始快照覆盖来支撑。
   // 只画按用量计成本的上游：配了固定付费的上游余额下降不算成本（见 costBasisOf）。
   const heatmapStations = monitoredStations.filter(
-    (station) => !station.isOwn && station.includeInProfit !== false && costBasisOf(station) === "usage"
+    (station) => countsInProfit(station) && costBasisOf(station) === "usage"
   );
   let heatmap = [];
   let heatmapAvailability = {

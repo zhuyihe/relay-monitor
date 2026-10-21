@@ -1,21 +1,47 @@
 "use client";
-// 利润口径：收入与成本怎么算、口径提示、转售 Key（含管理器）、每个上游的成本明细。
-// 默认收起：日常看等式就够了，核对口径时才展开。
+// 利润怎么算：收入与成本怎么算、说明、转售 Key（含选择）、每个上游的成本明细。
+// 默认收起：日常看等式就够了，想知道数字怎么来的才展开。
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { App, Button, Checkbox, Input } from "antd";
 import { api } from "../../../lib/client";
-import { formatMoney } from "../../../lib/format";
+import { rateSnapshotOf } from "../../../lib/profit";
+import { failureSentence, failureText } from "../../../lib/error-copy";
+import { STATION_TABS } from "../../../lib/brand";
+import { COST_MODE_TEXT, SELL_PRICE_UNSET, formatMoney, formatSellPrice, formatZonedRange } from "../../../lib/format";
 import { EmptyState, ErrorState } from "../../components/data-state";
+import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { CountBadge, Panel } from "../../components/panel";
 import { StatusTag } from "../../components/status";
-import { DataTable, MODE_LABEL, ROLE_LABEL } from "./shared";
+import { BASIS_TITLE, DataTable, ROLE_LABEL } from "./shared";
 import type { OwnView } from "./shared";
 
 // GET /api/own/admin-keys 的账号与 Key
 type AdminToken = { name: string; status?: number; usedUsd: number | null; flagged: boolean };
 type AdminAccount = { username: string; role: number; enumerable: boolean; error?: string; tokens: AdminToken[] };
+
+// 只在这块出现的说法（design/ui-copy-spec.md §11）
+const COPY = {
+  unreadable: "读不到利润数据，计算明细也看不了。",
+  notes: (n: number) => `，${n} 条说明`,
+  incomplete: "利润数据不完整",
+  estimated: "成本里有估算的数",
+  note: "说明",
+  resold: "转售 Key",
+  pick: "选转售 Key",
+  costsTitle: "成本明细",
+  costsCaption: "每个上游的成本按它自己的方式算",
+  unread: "读不到",
+  // 成本明细里某个上游读用量失败（改按余额变化估算）时，名字下面那句的开头
+  usageUnread: "读不到用量",
+};
+// 服务端给的报错（{ error, errorCode }）归成一句，原文进「查看详细原因」
+const errorNoteOf = (x: any) => noteOf({ code: x.errorCode, message: x.error });
+
+// 自营站点的售价：设置了是「1 美元额度 = 7.2 元」，没设置是空串（界面写 SELL_PRICE_UNSET）
+const sellPriceOf = (station: any) => (rateSnapshotOf(station).source === "configured" && formatSellPrice(station.cnyPerUsd)) || "";
+const modeText = (mode: string) => COST_MODE_TEXT[mode as keyof typeof COST_MODE_TEXT] || "";
 
 export function ProfitBasis({
   v,
@@ -34,15 +60,17 @@ export function ProfitBasis({
   const summary = ok ? (
     <>
       收入 <b>{formatMoney(p.incomeCny)}</b>，上游成本 <b>{formatMoney(p.upstreamCostCny)}</b>，固定成本 <b>{formatMoney(p.fixedCostCny)}</b>，{(p.resoldKeys || []).length} 个转售 Key，
-      {(p.costs || []).length} 个上游计入成本{warnings.length ? `，${warnings.length} 条口径提示` : ""}。
+      {(p.costs || []).length} 个上游算进利润{warnings.length ? COPY.notes(warnings.length) : ""}。
     </>
   ) : (
-    "利润数据暂时取不到，口径明细也无法显示。"
+    COPY.unreadable
   );
+  const sellPrice = sellPriceOf(v.d.station) || SELL_PRICE_UNSET;
+  const span = formatZonedRange(v.d.startMs, v.d.endMs, v.d.tz);
 
   return (
     <Panel
-      title="利润口径"
+      title={BASIS_TITLE}
       className={open ? undefined : "jy-my-collapsed"}
       extra={
         <Button size="small" aria-expanded={open} icon={<Icon name={open ? "collapse" : "expand"} />} onClick={onToggle}>
@@ -56,15 +84,15 @@ export function ProfitBasis({
         <>
           <section className="jy-my-section">
             <div className="jy-my-lines">
-              <p>收入 = 普通用户消费 × 售价汇率，不含管理员和 root 自用；已标记为转售的管理员 Key 算作收入。</p>
-              <p>毛利 = 收入 − 上游成本；净利 = 毛利 − 固定成本。按用量计费的上游计入上游成本，包月 / 固定采购的摊销计入固定成本。</p>
-              <p>成本按各上游自己的口径计入，统计窗口 {+Number(p.windowDays || 0).toFixed(2)} 天。</p>
+              <p>收入 = 普通用户消费 × 售价（{sellPrice}），不含管理员自用；标为转售 Key 的那部分算作收入。</p>
+              <p>毛利 = 收入 − 上游成本；净利 = 毛利 − 固定成本。按用量算的上游算进上游成本；包月或按期付费的上游按天平摊，算进固定成本。</p>
+              <p>每个上游的成本按它自己的方式算，统计 {span}。</p>
             </div>
             {warnings.length > 0 && (
               <div className={`jy-banner${p.complete ? " jy-banner--info" : ""}`} role="status">
                 <Sym kind={p.complete ? "info" : "warn"} />
-                <div>
-                  <strong>{!p.complete ? "利润数据尚不完整" : p.estimated ? "成本中包含估算值" : "口径提示"}</strong>
+                <div className="jy-banner__body">
+                  <strong>{!p.complete ? COPY.incomplete : p.estimated ? COPY.estimated : COPY.note}</strong>
                   <ul className="jy-my-list">
                     {warnings.map((w) => (
                       <li key={w}>{w}。</li>
@@ -88,6 +116,7 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
   const { message } = App.useApp();
   const p = v.profit;
   const keys: any[] = p.resoldKeys || [];
+  const price = sellPriceOf(v.d.station);
   const [mgrOpen, setMgrOpen] = useState(false);
   const [mgrLoading, setMgrLoading] = useState(false);
   const [mgrError, setMgrError] = useState<Error | null>(null);
@@ -152,7 +181,7 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
       setAccounts(null);
       await reload();
     } catch (e: any) {
-      message.error(e.message);
+      message.error(failureText("保存失败", e));
     } finally {
       setSaving(false);
     }
@@ -168,11 +197,11 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
   return (
     <section className="jy-my-section">
       <h3 className="jy-my-h3">
-        转售 Key
+        {COPY.resold}
         <CountBadge count={keys.length} muted />
         <span className="spacer" />
         <Button size="small" aria-expanded={mgrOpen} onClick={toggleManager}>
-          {mgrOpen ? "收起" : "管理转售 Key"}
+          {mgrOpen ? "收起" : COPY.pick}
         </Button>
       </h3>
       {keys.length ? (
@@ -189,22 +218,24 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
             {
               key: "state",
               label: "状态",
-              render: (k) =>
-                k.error ? (
+              render: (k) => {
+                if (!k.error) return <span className="jy-muted">卖给用户用，算进收入</span>;
+                const note = errorNoteOf(k);
+                return (
                   <>
-                    <StatusTag level="warn">查询失败</StatusTag>
-                    <span className="jy-sub-money">{k.error}</span>
+                    <StatusTag level="warn">{COPY.unread}</StatusTag>
+                    <span className="jy-sub-money">{note.text}</span>
+                    <ErrorDetail raw={note.raw} />
                   </>
-                ) : (
-                  <span className="jy-muted">转售给下游，计入收入</span>
-                ),
+                );
+              },
             },
-            { key: "cny", label: "期内收入", num: true, sort: (k) => k.cny || 0, render: (k) => formatMoney(k.cny || 0) },
+            { key: "cny", label: "收入", num: true, sort: (k) => k.cny || 0, render: (k) => formatMoney(k.cny || 0) },
           ]}
         />
       ) : (
         <div className="jy-my-lines">
-          <p>还没有标记转售 Key。若某个管理员或 root 账号的 API Key 实际给了下游，点「管理转售 Key」勾选它，它的消费就会计入收入。</p>
+          <p>还没有标记转售 Key。如果某个管理员或超级管理员账号的 Key 实际是卖给用户用的，点「{COPY.pick}」勾选它，它的消费就会算进收入。</p>
         </div>
       )}
 
@@ -212,29 +243,29 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
         <div className="jy-my-mgr">
           {mgrLoading ? (
             <p className="jy-muted" aria-busy="true" style={{ margin: 0 }}>
-              正在拉取管理员账号的 Key…
+              读取中…
             </p>
           ) : mgrError ? (
             <ErrorState what="读不到管理员账号的 Key" error={mgrError} onRetry={fetchAccounts} />
           ) : !accounts || !accounts.length ? (
-            <EmptyState center={false} title="没有找到管理员或 root 账号" desc="转售 Key 只能从 role ≥ 10 的账号里选。" />
+            <EmptyState center={false} title="没有找到管理员或超级管理员账号" desc="转售 Key 只能从管理员和超级管理员的账号里选。" />
           ) : (
             <>
               <div className="jy-my-lines">
                 <p>
-                  勾选实际转售给下游的 Key，它在期内的消费会从「管理员自用（成本）」改计入「收入 × 售价汇率」。Key
-                  名可能跨账号重名，所以按「账号 + Key 名」定位。
+                  勾选实际卖给用户用的 Key，它的消费会从「管理员自用」改算进「收入」（{price ? `按售价 ${price}` : SELL_PRICE_UNSET}）。不同账号可能有同名 Key，所以按「账号 + Key 名」区分。
                 </p>
               </div>
               {accounts.map((a) => (
                 <div key={a.username} className="jy-my-account">
                   <h4>
                     {a.username}
-                    <span className="jy-tag jy-tag--type">{ROLE_LABEL[a.role] || `role ${a.role}`}</span>
+                    {ROLE_LABEL[a.role] && <span className="jy-tag jy-tag--type">{ROLE_LABEL[a.role]}</span>}
                   </h4>
                   {!a.enumerable && (
                     <div className="jy-my-lines">
-                      <p>此账号无法自动列出 Key（{a.error || "接口限制"}）。若它有转售 Key，请手动填 Key 名：</p>
+                      <p>读不到这个账号的 Key 列表。如果它有转售 Key，请手动填 Key 名：</p>
+                      <ErrorDetail raw={a.error} />
                     </div>
                   )}
                   {a.tokens.length ? (
@@ -247,14 +278,14 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
                     </div>
                   ) : a.enumerable ? (
                     <p className="jy-muted" style={{ margin: 0 }}>
-                      该账号没有 API Key
+                      这个账号没有 Key
                     </p>
                   ) : null}
                   {!a.enumerable && (
                     <div className="jy-my-add">
                       <Input
                         size="small"
-                        placeholder="Key 名（token_name）"
+                        placeholder="Key 名"
                         aria-label={`给 ${a.username} 手动添加 Key 名`}
                         value={addInputs[a.username] || ""}
                         onChange={(e) => setAddInputs((m) => ({ ...m, [a.username]: e.target.value }))}
@@ -291,53 +322,59 @@ function CostSection({ p }: { p: any }) {
   return (
     <section className="jy-my-section">
       <h3 className="jy-my-h3">
-        成本明细
+        {COPY.costsTitle}
         <CountBadge count={costs.length} muted />
-        <span className="jy-caption">按各上游口径计入期内成本</span>
+        <span className="jy-caption">{COPY.costsCaption}</span>
       </h3>
       {costs.length ? (
         <DataTable<any>
-          caption="计入利润成本的上游与期内成本"
+          caption="算进利润的上游和成本"
           rows={costs}
           rowKey={(c, i) => `${c.stationId ?? c.name}-${i}`}
-          empty="没有计入利润成本的上游"
+          empty="没有算进利润的上游"
           defaultSort={{ key: "cny", dir: "desc" }}
           cols={[
             {
               key: "name",
               label: "上游",
               sort: (c) => c.name,
-              render: (c) => (
-                <div className="jy-res-name">
-                  <b style={{ fontWeight: 500 }}>{c.name}</b>
-                  {c.error && <span title={c.error}>{c.error}</span>}
-                </div>
-              ),
+              render: (c) => {
+                const note = c.error ? errorNoteOf(c) : null;
+                return (
+                  <div className="jy-res-name">
+                    <b style={{ fontWeight: 500 }}>{c.name}</b>
+                    {note && <span>{failureSentence(COPY.usageUnread, note.text)}</span>}
+                    {note && <ErrorDetail raw={note.raw} />}
+                  </div>
+                );
+              },
             },
             {
               key: "mode",
-              label: "口径",
-              sort: (c) => MODE_LABEL[c.mode] || c.mode,
+              label: "怎么算的",
+              sort: (c) => modeText(c.mode),
               render: (c) => (
                 <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap" }}>
-                  <span className={`jy-tag ${c.mode === "history" ? "jy-tag--warn" : "jy-tag--type"}`}>
-                    {MODE_LABEL[c.mode] || c.mode}
-                    {c.mode === "history" ? " ≈" : ""}
-                  </span>
+                  {modeText(c.mode) && (
+                    <span className={`jy-tag ${c.mode === "history" ? "jy-tag--warn" : "jy-tag--type"}`}>
+                      {modeText(c.mode)}
+                      {c.mode === "history" ? " ≈" : ""}
+                    </span>
+                  )}
                   {c.note && <span className={`jy-tag ${warnMode(c) ? "jy-tag--warn" : "jy-tag--muted"}`}>{c.note}</span>}
                 </span>
               ),
             },
             { key: "ch", label: "渠道", render: (c) => <span className="jy-muted">{(c.channels || []).join("、")}</span> },
-            { key: "cny", label: "期内成本", num: true, sort: (c) => c.cny, render: (c) => formatMoney(c.cny), foot: formatMoney(p.totalCostCny) },
+            { key: "cny", label: "成本", num: true, sort: (c) => c.cny, render: (c) => formatMoney(c.cny), foot: formatMoney(p.totalCostCny) },
           ]}
         />
       ) : (
         <EmptyState
           center={false}
-          title="没有计入利润成本的上游"
-          desc="上游成本和固定成本暂按 ¥0 计。在上游资源里把上游设为计入利润成本后，这里会列出每个上游的期内成本。"
-          action={<Button onClick={() => router.push("/stations")}>去上游资源设置</Button>}
+          title="没有算进利润的上游"
+          desc="上游成本和固定成本暂按 ¥0 算。在上游资源里把上游设成算进利润后，这里会列出每个上游的成本。"
+          action={<Button onClick={() => router.push("/stations")}>{STATION_TABS.list}</Button>}
         />
       )}
     </section>

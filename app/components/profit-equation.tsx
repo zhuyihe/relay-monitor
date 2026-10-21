@@ -3,9 +3,29 @@
 // 收入、毛利和净利留空，下方说明原因和下一步，两项成本照常显示。
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { MINUS, formatMoney, formatPct, splitTotal } from "../../lib/format";
+import { MINUS, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, formatMoney, formatPct, splitTotal } from "../../lib/format";
+import { workflowAction, workflowActionMeta } from "../../lib/workflow-actions";
 import { Icon } from "./icons";
 import { StatusText } from "./status";
+
+// 运营总览、自营业务和成本估算的利润等式共用的说法，只在这一处写（design/ui-copy-spec.md §3.2、§9）
+export const EQ_TEXT = Object.freeze({
+  business: (range: string) => `${range}经营`,
+  profitFailed: "利润暂时算不出",
+  upstreamCount: (n: number) => `${n} 个上游`,
+  fixedCount: (n: number) => `${n} 个上游，按天平摊`,
+  noFixed: "没有固定成本",
+  partial: "数据不完整",
+  profitPartialTail: "实际数字可能与这里有出入。",
+  // 缺的是上游成本：成本偏低，毛利和净利偏高
+  costPartialTail: "实际成本会比这里高。",
+  profitLowTail: "实际毛利和净利会比这里低。",
+  // 没设置自营站点：收入、毛利、净利留空
+  unsetRevenue: "没设置",
+  unsetRevenueNote: "没有自营站点",
+  unsetProfit: "设置自营站点后才能算",
+  unsetNotice: "收入、毛利和净利暂时算不出；上游成本和固定成本照常算。",
+});
 
 export type EqTerm = {
   value: number | null;
@@ -106,8 +126,8 @@ export function ProfitEquation({
   net,
   reasons = [],
   unconfigured = false,
-  configureHref = "/my",
-  revenueEmpty = "未设置",
+  configureHref = workflowAction("setup_own_station").href!,
+  revenueEmpty = EQ_TEXT.unsetRevenue,
   profitNote,
   notice,
   loading = false,
@@ -155,7 +175,7 @@ export function ProfitEquation({
         : g - fixed.value;
 
   const resultNote = (v: number | null, rateLabel: string, approx: boolean): ReactNode => {
-    if (unconfigured) return profitNote ?? "设置自营站点后计算";
+    if (unconfigured) return profitNote ?? EQ_TEXT.unsetProfit;
     if (isLoss(v)) return <StatusText level="crit">亏损</StatusText>;
     if (rev && v != null) return `${rateLabel} ${approx ? "≈ " : ""}${formatPct(v / rev)}`;
     return undefined;
@@ -185,7 +205,7 @@ export function ProfitEquation({
         <Term
           label="收入"
           color="var(--jy-s1)"
-          term={unconfigured ? { value: null, note: revenue.note ?? "没有自营站点", href: revenue.href } : revenue}
+          term={unconfigured ? { value: null, note: revenue.note ?? EQ_TEXT.unsetRevenueNote, href: revenue.href } : revenue}
           empty={revenueEmpty}
           loading={loading}
         />
@@ -193,7 +213,7 @@ export function ProfitEquation({
         <Term
           label="上游成本"
           color="var(--jy-s2)"
-          term={{ ...upstream, note: upstream.approx && upstream.note == null ? "部分数据缺失" : upstream.note }}
+          term={{ ...upstream, note: upstream.approx && upstream.note == null ? EQ_TEXT.partial : upstream.note }}
           op={MINUS}
           loading={loading}
         />
@@ -220,16 +240,17 @@ export function ProfitEquation({
       {unconfigured && !loading && (
         <div className="jy-partial-note">
           <Icon name="info" />
-          <span>
+          {/* 用 div：说明里可能带「查看详细原因」（块级的 details） */}
+          <div>
             {notice ?? (
               <>
-                还没有设置自营站点，所以收入、毛利和净利暂时无法计算；上游成本和固定成本照常统计。
+                {OWN_STATION_UNSET_TITLE}，{EQ_TEXT.unsetNotice}{OWN_STATION_UNSET_HINT}
                 <Link href={configureHref} className="jy-link">
-                  设置自营站点
+                  {workflowActionMeta("setup_own_station")!.label}
                 </Link>
               </>
             )}
-          </span>
+          </div>
         </div>
       )}
       {flow && (
@@ -259,13 +280,13 @@ export function ProfitEquation({
       {partial && !loading && (
         <div className="jy-partial-note">
           <Icon name="info" />
-          <span>
+          <div>
             数据不完整，带 ≈ 的数字是按已有数据算出的。
             {reasons.map((r, i) => (
               <span key={i}>{r}</span>
             ))}
             {partialTail}
-          </span>
+          </div>
         </div>
       )}
     </section>

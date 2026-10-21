@@ -1,7 +1,10 @@
 "use client";
 // 上游余量：每个上游一条 0–14 天的条，按可用天数画；两条竖线是提醒天数和 7 天（§3.3）。
 // 读不到余额的上游画虚线空条，不画成 0；档位名（余额偏低 / 快用完 / 余额用完 / 读不到余额）由调用方按 balanceViewOf 给。
+// 条下面那段说明（竖线是什么、提醒天数在哪改）和悬停里的行名，运营总览和成本估算共用这一份（RUNWAY_TEXT、RunwayRulesNote）。
+import Link from "next/link";
 import type { ReactNode } from "react";
+import { NAV_LABELS } from "../../lib/brand";
 import { formatDays } from "../../lib/format";
 import { etaWindowDays, RUNWAY_MAX_DAYS, WATCH_DAYS } from "../../lib/overview-actions";
 import { TipBody, useFloatTip } from "./float-tip";
@@ -25,6 +28,33 @@ export type RunwayItem = {
   tip?: TipRow[];
   tipTitle?: ReactNode;
 };
+
+// 可用天数条共用的说法（design/ui-copy-spec.md §3.3）
+export const RUNWAY_TEXT = Object.freeze({
+  lines: (crit: number, watch: number) => (watch > crit
+    ? `竖线是提醒天数：可用天数在 ${crit} 天以内标红，${watch} 天以内标黄。`
+    : `竖线是提醒天数：可用天数在 ${crit} 天以内标红。`),
+  rulesUnread: (crit: number) => `读不到提醒规则，暂按 ${crit} 天算。`,
+  rulesWhereBefore: "提醒天数在",
+  rulesWhereAfter: "的提醒规则里改。",
+  burn: (money: string) => `日均花费 ${money}`,
+  tip: Object.freeze({ reason: "原因", balance: "余额", burn: "日均花费", days: "可用天数", basis: "怎么估的", renewal: "续费" }),
+});
+
+// 条下面的说明：竖线是什么，提醒天数去哪改；children 插在中间（如「这里只列最要紧的 8 个。」）
+export function RunwayRulesNote({ critDays, warnDays = WATCH_DAYS, children }: { critDays: number; warnDays?: number; children?: ReactNode }) {
+  return (
+    <>
+      {RUNWAY_TEXT.lines(critDays, warnDays)}
+      {children}
+      {RUNWAY_TEXT.rulesWhereBefore}
+      <Link href="/notifications" className="jy-link">
+        {NAV_LABELS.notifications}
+      </Link>
+      {RUNWAY_TEXT.rulesWhereAfter}
+    </>
+  );
+}
 
 const pctOf = (d: number, max: number) => `${(d / max) * 100}%`;
 

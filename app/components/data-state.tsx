@@ -2,7 +2,7 @@
 // 出错时说清楚读不到什么、为什么，并给「刷新」；空状态告诉用户下一步能做什么。
 import type { CSSProperties, ReactNode } from "react";
 import { Button } from "antd";
-import { MINUS } from "../../lib/format";
+import { MINUS, refreshFailedText } from "../../lib/format";
 import { failureSentence } from "../../lib/error-copy.js";
 import { workflowActionMeta } from "../../lib/workflow-actions.js";
 import { ErrorDetail, noteOf } from "./error-detail";
@@ -85,6 +85,35 @@ export function ErrorState({
         </div>
       )}
       <ErrorDetail raw={note.raw} />
+    </div>
+  );
+}
+
+// 刷新失败、页面还显示着上次读到的数据时，页顶那一条（design/ui-copy-spec.md §8.1）：
+// 「刷新失败，数据截至 14:30。」+ 归类后的原因，原文只进「查看详细原因」；各页同一个样子
+export function RefreshFailedBanner({
+  asOf,
+  tz,
+  error,
+  onRetry,
+  retrying = false,
+}: {
+  asOf: unknown;
+  tz?: string;
+  error: unknown;
+  onRetry?: () => void;
+  retrying?: boolean;
+}) {
+  const note = noteOf(error);
+  return (
+    <div className="jy-banner" role="alert">
+      <Sym kind="warn" />
+      <div className="jy-banner__body">
+        <b>{refreshFailedText(asOf, tz)}</b>
+        <p className="jy-caption">{note.text}</p>
+        <ErrorDetail raw={note.raw} />
+      </div>
+      {onRetry && <Button size="small" loading={retrying} onClick={onRetry}>{workflowActionMeta("refresh").label}</Button>}
     </div>
   );
 }

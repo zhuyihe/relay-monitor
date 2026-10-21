@@ -510,7 +510,7 @@ export function StationDrawer({
           {isFixed ? (
             <div className="jy-banner jy-banner--info">
               <Sym kind="info" />
-              <div className="jy-stations-banner-body">
+              <div className="jy-banner__body">
                 <b>{COPY.fixedTitle}</b>
                 <p className="jy-caption">{COPY.fixedDesc}</p>
               </div>

@@ -1,36 +1,50 @@
 "use client";
-// 自营业务：自营站点的下游收入、上游成本、毛利与净利，按概览 / 用户 / 模型与渠道分标签。
+// 自营业务：自营站点的用户收入、上游成本、毛利与净利，按概览 / 用户 / 模型与渠道分标签。
 // 数据来自 /api/own/analytics（同范围 60 秒内复用成功结果，约 30 秒自动刷新一次）；
 // 近 7 / 30 天另取 /api/analytics 的逐日上游成本，画每日收入、成本与净利（它慢，不挡着页面先出来）；
 // 时间窗口都按服务端的业务时区划日，不传浏览器时区；
-// 日志精算另走 /api/own/audit，开销大，只在点按钮时请求。
+// 按明细细算另走 /api/own/audit，开销大，只在点按钮时请求。
 import "../../styles/pages/my.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "antd";
 import { api } from "../../../lib/client";
 import { NAV_LABELS } from "../../../lib/brand";
-import { formatHhmm } from "../../../lib/format";
-import { ErrorState, Onboarding, PanelSkeleton } from "../../components/data-state";
-import { Icon, Sym } from "../../components/icons";
+import { OWN_STATION_UNSET_STEP, OWN_STATION_UNSET_TITLE, RANGE_TEXT } from "../../../lib/format";
+import { workflowAction } from "../../../lib/workflow-actions";
+import { ErrorState, Onboarding, PanelSkeleton, RefreshFailedBanner } from "../../components/data-state";
+import { Icon } from "../../components/icons";
 import { Panel } from "../../components/panel";
-import { ProfitEquation } from "../../components/profit-equation";
+import { EQ_TEXT, ProfitEquation } from "../../components/profit-equation";
 import { RangePicker } from "../../components/range-picker";
 import { TabPanel, Tabs } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
+import { TREND_PANEL_TITLE } from "../../components/trend-panel";
 import { useUrlState } from "../../components/use-url-state";
 import { ModelsTab } from "./models-tab";
-import { OverviewTab } from "./overview-tab";
+import { FC_TITLE, OverviewTab } from "./overview-tab";
 import { describeError } from "../../../lib/error-copy";
-import { RANGES, RANGE_OPTIONS, TABS, deriveOwn } from "./shared";
+import { MY_TEXT, RANGES, RANGE_OPTIONS, TABS, TAB_TEXT, deriveOwn } from "./shared";
 import type { MyTab, OwnRange } from "./shared";
 import { UsersTab } from "./users-tab";
 
-const TAB_DEFS: { key: MyTab; label: string }[] = [
-  { key: "overview", label: "概览" },
-  { key: "users", label: "用户" },
-  { key: "models", label: "模型与渠道" },
-];
+const TAB_DEFS: { key: MyTab; label: string }[] = TABS.map((key) => ({ key, label: TAB_TEXT[key] }));
+
+// 没设置自营站点时的「去设置」：名字和去处取动作表（lib/workflow-actions.js）
+const SETUP = workflowAction("setup_own_station");
+
+// 只在这一页出现的说法（design/ui-copy-spec.md §11）；第一步就是共用的「怎么设置」
+const COPY = {
+  setupDesc: "自营业务会汇总自营站点的收入：减去上游成本得出毛利，再减去固定成本得出净利。",
+  setupSteps: [
+    OWN_STATION_UNSET_STEP,
+    { title: "填写超级管理员的访问令牌", desc: "用于读取用户、渠道和用量记录，只读，不会改动自营站点。" },
+    { title: "回到这里查看利润", desc: "设置好后刷新本页，之后每 30 秒自动更新。" },
+  ],
+  setupFigure: "设置完成后，这里会算出毛利和净利，并列出消费最多的用户和模型。",
+  unreadable: "读不到自营站点的数据",
+  tabsLabel: "自营业务视图",
+};
 
 export default function MyStationPage() {
   const router = useRouter();
@@ -46,7 +60,7 @@ export default function MyStationPage() {
   const [unconfigured, setUnconfigured] = useState(false);
   const [asOf, setAsOf] = useState<number | null>(null);
 
-  // 日志精算（开销大，只在点按钮时才翻日志）
+  // 按明细细算（开销大，只在点按钮时才逐条看用量记录）
   const [audit, setAudit] = useState<any>(null);
   const [auditing, setAuditing] = useState(false);
   const [auditError, setAuditError] = useState<Error | null>(null);
@@ -121,7 +135,7 @@ export default function MyStationPage() {
     };
   }, [range, load]);
 
-  // 范围一换，上一次的精算结果就不是这个窗口的了
+  // 范围一换，上一次细算的结果就不是这段时间的了
   useEffect(() => {
     setAudit(null);
     setAuditError(null);
@@ -160,19 +174,15 @@ export default function MyStationPage() {
     return (
       <div className="jy-page">
         <Onboarding
-          title="还没有设置自营站点"
-          desc="自营业务会汇总你自己站点的下游收入：减去上游成本得出毛利，再减去固定成本得出净利。"
-          steps={[
-            { title: "在上游资源中找到你自己的站点", desc: "编辑它，打开“这是我的自营站点”。" },
-            { title: "填写管理员访问令牌", desc: "用于读取下游用户和渠道计费数据，只读，不会改动站点。" },
-            { title: "回到这里查看利润", desc: "设置好后刷新本页，之后每 30 秒自动更新。" },
-          ]}
+          title={OWN_STATION_UNSET_TITLE}
+          desc={COPY.setupDesc}
+          steps={COPY.setupSteps}
           action={
-            <Button type="primary" size="large" onClick={() => router.push("/stations")}>
-              前往上游资源设置
+            <Button type="primary" size="large" onClick={() => router.push(SETUP.href!)}>
+              {SETUP.label}
             </Button>
           }
-          figureNote="设置完成后，这里会算出期内毛利和净利，并列出消费最多的用户和模型。"
+          figureNote={COPY.setupFigure}
         />
       </div>
     );
@@ -184,8 +194,8 @@ export default function MyStationPage() {
     if (currentErr) {
       return (
         <div className="jy-page">
-          <Panel label="自营业务">
-            <ErrorState center what={`读不到${NAV_LABELS.my}数据`} error={currentErr.error} onRetry={() => load(true)} />
+          <Panel label={NAV_LABELS.my}>
+            <ErrorState center what={COPY.unreadable} error={currentErr.error} onRetry={() => load(true)} />
           </Panel>
         </div>
       );
@@ -193,11 +203,11 @@ export default function MyStationPage() {
     const blank = { value: null };
     return (
       <div className="jy-page" aria-busy="true">
-        <ProfitEquation title="期内经营" revenue={blank} upstream={blank} fixed={blank} loading />
-        <PanelSkeleton title="收入与上游成本" height={220} />
+        <ProfitEquation title={EQ_TEXT.business(RANGE_TEXT[range])} revenue={blank} upstream={blank} fixed={blank} loading />
+        <PanelSkeleton title={TREND_PANEL_TITLE.withRevenue} height={220} />
         <div className="jy-grid-2 jy-grid-even">
-          <PanelSkeleton title="消费预测" lines={5} />
-          <PanelSkeleton title="消费最多的用户" lines={5} />
+          <PanelSkeleton title={FC_TITLE} lines={5} />
+          <PanelSkeleton title={MY_TEXT.topUsers} lines={5} />
         </div>
       </div>
     );
@@ -221,27 +231,19 @@ export default function MyStationPage() {
   return (
     <div className="jy-page">
       {currentErr && (
-        // 轮询失败不清空页面，保留上次的数据
-        <div className="jy-banner" role="status">
-          <Sym kind="warn" />
-          <div>
-            最新数据获取失败，显示的是 {formatHhmm(asOf)} 的数据。
-            <span className="jy-sub-money">{currentErr.error.message}</span>
-          </div>
-          <Button size="small" className="jy-my-banner-action" onClick={() => load(true)}>
-            重试
-          </Button>
-        </div>
+        // 自动刷新失败不清空页面，保留上次的数据
+        <RefreshFailedBanner asOf={asOf} tz={data.tz} error={currentErr.error} onRetry={() => load(true)} />
       )}
       <Tabs<MyTab>
         tabs={TAB_DEFS}
         active={tab}
         onChange={setTab}
         idPrefix="my"
-        label="自营业务视图"
+        label={COPY.tabsLabel}
         extra={
+          // 已经设置好：按钮写它去的那一页的名字，不写「去设置」（规范 §3.5 只用于还没设置）
           <Button icon={<Icon name="gear" />} onClick={() => router.push("/stations")}>
-            站点设置
+            {NAV_LABELS.stations}
           </Button>
         }
       />

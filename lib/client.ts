@@ -1,6 +1,5 @@
 // 前端 API 客户端与展示工具函数（从 v1 app.js 平移，行为逐字对齐）
 import { ERROR_CATEGORIES } from "./error-copy.js";
-import { formatCompact } from "./format.js";
 
 // ---- API（401 自动跳登录）---------------------------------------------------
 // 同源 fetch + JSON；未登录（401）时跳转登录页（登录接口本身的 401 是密码错误，不跳转）
@@ -215,12 +214,3 @@ export type AccountAuthorizationProbe = {
   excluded: { stationId: string; code?: string; reason: string }[]; impact: AccountAuthorizationImpact; retryInput: AccountAuthorizationRecoveryIntent;
 };
 export type AccountAuthorizationResult = { requestId: string; accountKey: string; complete: boolean; targets: { stationId: string; status: "updated" | "already_updated" | "failed" | "repreview_required"; savedAuthVersion: number | null; code?: string; exclusionCode?: string; reason?: string; remainingActions: string[] }[]; excluded: { stationId: string; code?: string; reason: string }[]; impact: AccountAuthorizationImpact; retryInput: AccountAuthorizationRecoveryIntent };
-
-// ---- 工具（与 v1 app.js 完全一致）-------------------------------------------
-export const usd = (n: any) => "$" + Number(n ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-export const cny = (n: any) => "¥" + Number(n ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-export const cny4 = (n: any) => "¥" + Number(n ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
-
-// Token 大数：和 lib/format.js 的 formatCompact 同一种写法（万 / 亿），空值按 0
-// 汇率用 lib/profit.js 的 rateSnapshotOf，余额档位和提醒线用 lib/overview-actions.js 的 balanceStateOf / lowLineOf
-export const fmtTokens = (n: any) => formatCompact(Number(n) || 0);

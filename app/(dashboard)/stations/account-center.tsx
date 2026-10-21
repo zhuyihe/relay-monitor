@@ -460,7 +460,7 @@ export function useAccountCenter({
     return (
       <div className="jy-banner" role="status">
         <Sym kind="warn" />
-        <div className="jy-stations-banner-body">
+        <div className="jy-banner__body">
           {issues.map((issue) => <p key={issue.title}><b>{issue.title}</b><span className="jy-caption">{issue.detail ? `：${issue.detail}` : ""}</span></p>)}
           {others.length ? <p className="jy-caption">{COPY.conflictWith([...new Set(others)].join("；"))}</p> : null}
         </div>
@@ -634,7 +634,7 @@ export function useAccountCenter({
       {workflowError ? (
         <div className="jy-banner" role="alert">
           <Sym kind="warn" />
-          <div className="jy-stations-banner-body"><b>{workflowError}</b></div>
+          <div className="jy-banner__body"><b>{workflowError}</b></div>
           <div className="jy-accounts-actions">
             <Button size="small" onClick={() => window.location.reload()}>{REFRESH.label}</Button>
             <Button size="small" href="/stations">返回{STATION_TABS.list}</Button>
@@ -698,7 +698,7 @@ export function useAccountCenter({
         {accountError ? (
           <div className="jy-banner" role="alert">
             <Sym kind="warn" />
-            <div className="jy-stations-banner-body">
+            <div className="jy-banner__body">
               {accountError.notice ? <b>{accountError.text}</b>
                 : accountModel ? <><b>{refreshFailedText(accountModel.generatedAt, businessTz)}</b><p className="jy-caption">{accountError.text}</p></>
                 : <b>{failureSentence(`读不到${STATION_TABS.bills}`, accountError.text)}</b>}
@@ -873,7 +873,7 @@ export function useAccountCenter({
           {purposeError ? (
             <div className="jy-banner jy-banner--crit" role="alert">
               <Sym kind="crit" />
-              <div className="jy-stations-banner-body"><b>{purposeError.text}</b><ErrorDetail raw={purposeError.raw} /></div>
+              <div className="jy-banner__body"><b>{purposeError.text}</b><ErrorDetail raw={purposeError.raw} /></div>
             </div>
           ) : null}
           {purposeTarget?.resource ? (

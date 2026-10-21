@@ -29,7 +29,6 @@
 .jy-my-lines { margin: 0 0 16px; color: var(--jy-ink-2); font-size: 13px; line-height: 20px; }
 .jy-my-lines p { margin: 0; }
 .jy-banner ul.jy-my-list { margin: 4px 0 0; padding-left: 18px; }
-.jy-my-banner-action { margin-left: auto; flex-shrink: 0; }
 
 /* 长表格可以更高一些 */
 .jy-table-scroll.jy-my-tall { max-height: 560px; }

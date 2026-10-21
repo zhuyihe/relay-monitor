@@ -17,6 +17,9 @@ const FILES = [
   ...filesIn("app/(dashboard)/reconciliation"),
   ...filesIn("app/(dashboard)/stations"),
   ...filesIn("app/components"),
+  ...filesIn("app/(dashboard)/my"),
+  ...filesIn("app/(dashboard)/analytics"),
+  ...filesIn("app/(dashboard)/usage"),
   ...["page.tsx", "layout.tsx", "trend-modal.tsx", "chart-box.tsx"].map((name) => `app/(dashboard)/${name}`),
   "server/demo.js",
   "lib/reconciliation-view.js",
@@ -36,6 +39,8 @@ const FILES = [
   "server/own-helpers.js",
   "db/store.js",
   "app/api/meta/route.js",
+  "app/api/analytics/route.js",
+  "app/api/analytics/coverage.js",
   ...["admin-keys", "analytics", "audit"].map((name) => `app/api/own/${name}/route.js`),
   ...["", "/test", "/[id]", "/[id]/history", "/[id]/refresh"].map((dir) => `app/api/stations${dir}/route.js`),
   "app/api/stations/[id]/purge.js",
@@ -48,6 +53,8 @@ const FORBIDDEN = [
   "仅供参考", "待获取", "获取中", "不可用", "读取失败", "查询失败", "尚未查询", "数据已过期", "最后刷新", "更新于", "最近成功",
   "快照", "账本", "迁移", "旧账", "兜底", "降级", "轮询", "采集", "留存", "回归", "回测", "精算", "推算",
   "中转站", "本站", "阈值", "耗尽", "摊销", "待办", "待处理", "待核算", "已核验", "已取全", "原币", "归属", "覆盖",
+  // §3.3、§3.2：「消耗」改「花费」，「期内收入」这类去掉「期内」（单写「期内」会误伤「日期内」），算不出写「—」
+  "消耗", "期内成本", "期内收入", "期内经营", "期内总", "期内消费", "无法计算",
   // §3.4：缓存只写「缓存」
   "缓存读写", "缓存读", "缓存写",
 ];

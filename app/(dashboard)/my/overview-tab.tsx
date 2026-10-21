@@ -1,23 +1,73 @@
 "use client";
-// 概览：利润等式、每日趋势、消费预测、消费最多的用户、利润口径。
+// 概览：利润等式、每日趋势、预计花费、消费最多的用户、利润怎么算。
 import { useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { Button } from "antd";
-import { EMPTY, WEEKDAYS, formatCompact, formatInt, formatMoney, formatMonthDay } from "../../../lib/format";
+import { NAV_LABELS } from "../../../lib/brand";
+import { dayKeyInTz } from "../../../lib/business-time";
+import { EMPTY, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
 import { rateSnapshotOf, splitProfitWarnings } from "../../../lib/profit";
 import { EmptyState, ErrorState, PanelSkeleton } from "../../components/data-state";
 import { ForecastChart } from "../../components/forecast-chart";
 import { HBars } from "../../components/hbars";
 import type { HBarItem } from "../../components/hbars";
 import { Panel } from "../../components/panel";
-import { ProfitEquation } from "../../components/profit-equation";
+import { EQ_TEXT, ProfitEquation } from "../../components/profit-equation";
 import { Seg } from "../../components/seg";
-import { TrendPanel } from "../../components/trend-panel";
+import { TREND_PANEL_TITLE, TrendPanel } from "../../components/trend-panel";
 import { derive } from "../analytics/derive";
 import { ProfitBasis } from "./profit-basis";
-import { DataTable, RANGE_LABEL, TOKEN_NOTE, sum } from "./shared";
+import { BASIS_TITLE, COL_TEXT, DataTable, MY_TEXT, TAB_TEXT, TOKEN_NOTE, sum } from "./shared";
 import type { MyTab, OwnRange, OwnView } from "./shared";
+
+// 只在概览出现的话（design/ui-copy-spec.md §12）；列名、标签名、时间范围名、利润等式和趋势卡片名从共用的地方取
+const COPY = Object.freeze({
+  todayOnly: "今天只有一天，没有逐日趋势",
+  todayOnlyDesc: `切到${RANGE_TEXT["7d"]}或${RANGE_TEXT["30d"]}，看每天的收入和净利；今天每小时的用量在「${TAB_TEXT.models}」里。`,
+  view: (range: string) => `看${range}`,
+  // 利润等式
+  resold: (money: string) => `含转售 Key ${money}`,
+  adminSelf: (money: string) => `管理员自用 ${money} 不算进收入`,
+  noAdminSelf: "不含管理员自用",
+  historyEst: (upstreams: string, n: number) => `${upstreams}，${n} 个按余额变化估算`,
+  noUsageUpstream: "没有按用量算的上游",
+  // 每日趋势
+  dailyFailed: "读不到逐日成本",
+  dailyEmpty: "暂时没有逐日成本",
+  dailyEmptyDesc: "稍后刷新再看。",
+  trendCaption: "按天。每天的收入按当天用户消费的占比分。",
+  // 预计花费
+  fcRange: "预计范围",
+  next24: "未来 24 小时",
+  next7: "未来 7 天",
+  hourlyShort: "小时数据不够",
+  hourlyShortDesc: "有几个小时的消费记录后，这里会估算未来 24 小时每小时的花费。",
+  next24Lead: "未来 24 小时预计",
+  next24Tail: "，阴影是每小时的以往起伏范围。",
+  todaySoFar: "今天已消费",
+  todayEst: "今天全天预计",
+  dailyShortDesc: "有 3 天以上的消费记录后，这里会估算未来 7 天。",
+  next7Lead: "未来 7 天预计",
+  next7Band: (lo: string, hi: string) => `，按以往起伏，预计 ${lo} 到 ${hi}。`,
+  recentTail: "；下面是最近每天的消费。",
+  sampleLead: "按过去",
+  sampleDays: (n: number) => `${n} 天`,
+  sampleTail: "估算",
+  dailyCaption: "每日预计花费与最近 14 天实际消费",
+  colDay: "日期",
+  colKind: "类型",
+  colBand: "以往起伏范围",
+  kind: Object.freeze({ forecast: "预计", actual: "实际" } as const),
+  band: (lo: string, hi: string) => `${lo} 到 ${hi}`,
+  // 消费最多的用户
+  otherUsers: (n: number) => `其他 ${n} 个用户`,
+  allUsers: (n: number) => `全部 ${n} 个用户`,
+  payingUsers: "有消费的用户",
+  userCount: (n: number) => `${n} 个`,
+  noUsers: "这个时间范围内还没有用户消费",
+  noUsersDesc: "换个更长的时间范围看看，或确认用户已经在用自营站点。",
+});
 
 // 利润等式里各项跳到哪个标签页看明细（保留当前时间范围）
 const tabHref = (range: OwnRange, tab: MyTab) => {
@@ -56,13 +106,13 @@ export function OverviewTab({
 
   return (
     <>
-      <Equation v={v} range={range} onBasis={openBasis} reload={reload} />
+      <Equation v={v} range={range} asOf={asOf} onBasis={openBasis} reload={reload} />
       {range === "today" ? (
-        <Panel title="收入与上游成本" caption="按天">
+        <Panel title={TREND_PANEL_TITLE.withRevenue} caption={MY_TEXT.byDay}>
           <EmptyState
-            title="今天只有一天，没有逐日趋势"
-            desc="切到近 7 天或近 30 天查看每天的收入与净利；今天每小时的用量在「模型与渠道」里。"
-            action={<Button onClick={() => onRange("7d")}>看近 7 天</Button>}
+            title={COPY.todayOnly}
+            desc={COPY.todayOnlyDesc}
+            action={<Button onClick={() => onRange("7d")}>{COPY.view(RANGE_TEXT["7d"])}</Button>}
           />
         </Panel>
       ) : (
@@ -81,14 +131,27 @@ export function OverviewTab({
 
 // ---- 利润等式 -------------------------------------------------------------
 
-function Equation({ v, range, onBasis, reload }: { v: OwnView; range: OwnRange; onBasis: () => void; reload: () => Promise<unknown> }) {
+function Equation({
+  v,
+  range,
+  asOf,
+  onBasis,
+  reload,
+}: {
+  v: OwnView;
+  range: OwnRange;
+  asOf: number | null;
+  onBasis: () => void;
+  reload: () => Promise<unknown>;
+}) {
   const p = v.profit;
-  const title = "期内经营";
-  const caption = RANGE_LABEL[range];
+  const title = EQ_TEXT.business(RANGE_TEXT[range]);
+  // 写到数据自己的结束时间：刷新失败、数据停在 14:30 时不跟着时钟往后写
+  const caption = formatSinceToday(v.d.startMs, v.d.tz, v.d.endMs ?? asOf ?? Date.now());
   if (!p || p.error) {
     return (
       <Panel title={title} caption={caption}>
-        <ErrorState what="利润暂时算不出" error={p?.error || "接口没有返回利润数据"} onRetry={() => reload()} />
+        <ErrorState what={EQ_TEXT.profitFailed} error={p?.error} onRetry={() => reload()} />
       </Panel>
     );
   }
@@ -106,8 +169,8 @@ function Equation({ v, range, onBasis, reload }: { v: OwnView; range: OwnRange; 
   const { reasons } = splitProfitWarnings(p);
 
   const revNotes: ReactNode[] = [];
-  if ((p.resoldCny || 0) > 0) revNotes.push(<span key="r">含转售 Key {formatMoney(p.resoldCny)}</span>);
-  if ((p.adminUsageCny || 0) > 0) revNotes.push(<span key="a">管理员自用 {formatMoney(p.adminUsageCny)} 不计入</span>);
+  if ((p.resoldCny || 0) > 0) revNotes.push(<span key="r">{COPY.resold(formatMoney(p.resoldCny))}</span>);
+  if ((p.adminUsageCny || 0) > 0) revNotes.push(<span key="a">{COPY.adminSelf(formatMoney(p.adminUsageCny))}</span>);
 
   return (
     <ProfitEquation
@@ -115,48 +178,48 @@ function Equation({ v, range, onBasis, reload }: { v: OwnView; range: OwnRange; 
       caption={caption}
       extra={
         <button type="button" className="jy-caption-link jy-my-linkbtn" onClick={onBasis}>
-          利润口径
+          {BASIS_TITLE}
         </button>
       }
       revenue={{
         value: p.incomeCny,
         approx: ownNoRate,
-        note: revNotes.length ? revNotes : "不含管理员自用",
+        note: revNotes.length ? revNotes : COPY.noAdminSelf,
         href: tabHref(range, "users"),
       }}
       upstream={{
         value: upstream,
         approx: !!p.estimated || upstreamNoRate,
         note: historyCount
-          ? `${historyCount} 个上游按余额推算`
+          ? COPY.historyEst(EQ_TEXT.upstreamCount(usageRows.length), historyCount)
           : usageRows.length
-            ? `${usageRows.length} 个上游按用量计`
-            : "没有按用量计的上游",
+            ? EQ_TEXT.upstreamCount(usageRows.length)
+            : COPY.noUsageUpstream,
         href: tabHref(range, "models"),
       }}
-      fixed={{ value: fixed, note: fixedRows.length ? `${fixedRows.length} 项按天摊销` : "没有固定成本" }}
+      fixed={{ value: fixed, note: fixedRows.length ? EQ_TEXT.fixedCount(fixedRows.length) : EQ_TEXT.noFixed }}
       gross={p.grossProfitCny}
       net={p.netProfitCny ?? p.profitCny}
       reasons={reasons}
-      partialTail="实际利润可能高于或低于这里。"
+      partialTail={EQ_TEXT.profitPartialTail}
     />
   );
 }
 
 // ---- 每日趋势 -------------------------------------------------------------
 
-// 逐日上游成本取自 /api/analytics（与「成本与利润」同一口径），每日收入按当天下游消费占比摊分，
+// 逐日上游成本取自 /api/analytics（和成本估算页同一份），每日收入按当天用户消费的占比分，
 // 缺记录的日子标成缺失，不补零。
 function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: number | null; reload: () => Promise<unknown> }) {
   const dv = useMemo(() => (costs && !costs.error ? derive(costs, v.d) : null), [costs, v.d]);
-  if (costs === undefined) return <PanelSkeleton title="收入与上游成本" height={220} />;
+  if (costs === undefined) return <PanelSkeleton title={TREND_PANEL_TITLE.withRevenue} height={220} />;
   if (!dv) {
     return (
-      <Panel title="收入与上游成本" caption="按天">
+      <Panel title={TREND_PANEL_TITLE.withRevenue} caption={MY_TEXT.byDay}>
         {costs?.error ? (
-          <ErrorState what="读不到逐日成本" error={costs.error} onRetry={() => reload()} />
+          <ErrorState what={COPY.dailyFailed} error={costs.error} onRetry={() => reload()} />
         ) : (
-          <EmptyState title="暂时没有逐日成本" desc="稍后刷新再看。" />
+          <EmptyState title={COPY.dailyEmpty} desc={COPY.dailyEmptyDesc} />
         )}
       </Panel>
     );
@@ -169,9 +232,9 @@ function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: 
       tz={costs.tz || v.d?.tz}
       caption={
         <>
-          按天，收入按当天消费占比摊分。
+          {COPY.trendCaption}
           <Link className="jy-link" href={`/analytics?range=${dv.rows.length <= 7 ? "7d" : "30d"}`}>
-            成本明细
+            {NAV_LABELS.analytics}
           </Link>
         </>
       }
@@ -179,9 +242,14 @@ function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: 
   );
 }
 
-// ---- 消费预测 -------------------------------------------------------------
+// ---- 预计花费 -------------------------------------------------------------
 
 type FcView = "24h" | "7d";
+
+// 预计花费面板里重复出现的几句（design/ui-copy-spec.md §3.4）
+export const FC_TITLE = "预计花费";
+const FC_ACCURACY = "过去 2 周平均差";
+const FC_TOO_SHORT = "记录不到 3 天，还估算不了";
 
 function ForecastPanel({ v }: { v: OwnView }) {
   const [view, setView] = useState<FcView>("24h");
@@ -191,12 +259,12 @@ function ForecastPanel({ v }: { v: OwnView }) {
   const seg = (
     <Seg<FcView>
       size="sm"
-      label="预测范围"
+      label={COPY.fcRange}
       value={view}
       onChange={setView}
       options={[
-        { value: "24h", label: "未来 24 小时" },
-        { value: "7d", label: "未来 7 天" },
+        { value: "24h", label: COPY.next24 },
+        { value: "7d", label: COPY.next7 },
       ]}
     />
   );
@@ -205,32 +273,33 @@ function ForecastPanel({ v }: { v: OwnView }) {
     const enough = h && (h.past?.length || 0) + (h.next?.length || 0) >= 4 && h.next?.length;
     if (!enough) {
       return (
-        <Panel title="消费预测" extra={seg}>
-          <EmptyState title="小时数据不足" desc="有几个小时的消费记录后，这里会预测未来 24 小时每小时的消费。" />
+        <Panel title={FC_TITLE} extra={seg}>
+          <EmptyState title={COPY.hourlyShort} desc={COPY.hourlyShortDesc} />
         </Panel>
       );
     }
     const points = h.next.map((x: any) => ({ t: x.t, cost: x.cost * rate, lo: x.lo * rate, hi: x.hi * rate }));
     return (
       <Panel
-        title="消费预测"
+        title={FC_TITLE}
         extra={seg}
         sub={
           <>
-            未来 24 小时预计 <b>{formatMoney(h.next24Total * rate, { approx: true })}</b>，阴影是每小时的历史波动范围。
+            {COPY.next24Lead} <b>{formatMoney(h.next24Total * rate, { approx: true })}</b>
+            {COPY.next24Tail}
           </>
         }
         foot={
           <ul className="jy-my-facts">
             <li>
-              今天已消费 <b>{formatMoney(h.todaySoFar * rate)}</b>
+              {COPY.todaySoFar} <b>{formatMoney(h.todaySoFar * rate)}</b>
             </li>
             <li>
-              今天全天预计 <b>{formatMoney(h.todayEst * rate, { approx: true })}</b>
+              {COPY.todayEst} <b>{formatMoney(h.todayEst * rate, { approx: true })}</b>
             </li>
             {h.backtestWapePct != null && (
               <li>
-                24 小时总量回测偏差 <b>±{h.backtestWapePct}%</b>
+                {FC_ACCURACY} <b>±{h.backtestWapePct}%</b>
               </li>
             )}
           </ul>
@@ -245,49 +314,48 @@ function ForecastPanel({ v }: { v: OwnView }) {
   const fcPts: any[] = fc?.points || [];
   if (!hist.length && !fcPts.length) {
     return (
-      <Panel title="消费预测" extra={seg}>
-        <EmptyState title="历史数据不足 3 天，暂无法预测" desc="有 3 天以上的完整消费记录后，这里会预测未来 7 天。" />
+      <Panel title={FC_TITLE} extra={seg}>
+        <EmptyState title={FC_TOO_SHORT} desc={COPY.dailyShortDesc} />
       </Panel>
     );
   }
   const lo = fc ? (fc.nextLo ?? sum(fcPts, (x) => x.lo)) : 0;
   const hi = fc ? (fc.nextHi ?? sum(fcPts, (x) => x.hi)) : 0;
-  type DayRow = { t: number; kind: "预测" | "实际"; cost: number; lo?: number; hi?: number };
-  // 预测在前（明天起），历史在后（昨天起倒序）
+  type DayRow = { t: number; kind: (typeof COPY.kind)[keyof typeof COPY.kind]; cost: number; lo?: number; hi?: number };
+  // 预计在前（明天起），实际在后（昨天起倒序）
   const rows: DayRow[] = [
-    ...fcPts.map((x) => ({ t: x.t, kind: "预测" as const, cost: x.cost * rate, lo: x.lo * rate, hi: x.hi * rate })),
-    ...[...hist].reverse().map((x) => ({ t: x.t, kind: "实际" as const, cost: x.cost * rate })),
+    ...fcPts.map((x) => ({ t: x.t, kind: COPY.kind.forecast, cost: x.cost * rate, lo: x.lo * rate, hi: x.hi * rate })),
+    ...[...hist].reverse().map((x) => ({ t: x.t, kind: COPY.kind.actual, cost: x.cost * rate })),
   ];
+  // t 是业务时区某天的 0 点；取当天中午再换日历日，夏令时那天也不会落到前一天
   const dayName = (t: number) => {
-    const dt = new Date(t);
-    return `${formatMonthDay(dt)} ${WEEKDAYS[dt.getDay()]}`;
+    const key = dayKeyInTz(t + 12 * 3600000, d.tz);
+    return `${formatDayKey(key, d.tz)} ${weekdayOfDayKey(key)}`;
   };
   return (
     <Panel
-      title="消费预测"
+      title={FC_TITLE}
       extra={seg}
       sub={
         fc ? (
           <>
-            未来 7 天预计 <b>{formatMoney(fc.nextTotal * rate, { approx: true })}</b>，按历史波动在 {formatMoney(lo * rate)} 至{" "}
-            {formatMoney(hi * rate)} 之间。
+            {COPY.next7Lead} <b>{formatMoney(fc.nextTotal * rate, { approx: true })}</b>
+            {COPY.next7Band(formatMoney(lo * rate), formatMoney(hi * rate))}
           </>
         ) : (
-          "历史数据不足 3 天，暂无法预测；下面是最近的每日消费。"
+          `${FC_TOO_SHORT}${COPY.recentTail}`
         )
       }
       foot={
         fc ? (
           <ul className="jy-my-facts">
             <li>
-              预测方法 <b>{fc.method}</b>
-            </li>
-            <li>
-              基于 <b>{fc.sampleDays} 天</b>
+              {COPY.sampleLead} <b>{COPY.sampleDays(fc.sampleDays)}</b>
+              {COPY.sampleTail}
             </li>
             {fc.backtestWapePct != null && (
               <li>
-                近 2 周回测日均偏差 <b>±{fc.backtestWapePct}%</b>
+                {FC_ACCURACY} <b>±{fc.backtestWapePct}%</b>
               </li>
             )}
           </ul>
@@ -297,23 +365,23 @@ function ForecastPanel({ v }: { v: OwnView }) {
       <DataTable<DayRow>
         scroll
         compact
-        caption="每日消费预测与最近 14 天实际消费"
+        caption={COPY.dailyCaption}
         rows={rows}
         rowKey={(r) => `${r.kind}${r.t}`}
-        empty="暂无数据"
+        empty={EMPTY}
         cols={[
-          { key: "day", label: "日期", render: (r) => dayName(r.t) },
+          { key: "day", label: COPY.colDay, render: (r) => dayName(r.t) },
           {
             key: "kind",
-            label: "类型",
-            render: (r) => <span className={`jy-tag ${r.kind === "预测" ? "jy-tag--info" : "jy-tag--type"}`}>{r.kind}</span>,
+            label: COPY.colKind,
+            render: (r) => <span className={`jy-tag ${r.kind === COPY.kind.forecast ? "jy-tag--info" : "jy-tag--type"}`}>{r.kind}</span>,
           },
-          { key: "cost", label: "消费", num: true, render: (r) => formatMoney(r.cost, { approx: r.kind === "预测" }) },
+          { key: "cost", label: COL_TEXT.cost, num: true, render: (r) => formatMoney(r.cost, { approx: r.kind === COPY.kind.forecast }) },
           {
             key: "band",
-            label: "历史波动范围",
+            label: COPY.colBand,
             num: true,
-            render: (r) => (r.lo != null ? `${formatMoney(r.lo)} 至 ${formatMoney(r.hi)}` : <span className="jy-muted">{EMPTY}</span>),
+            render: (r) => (r.lo != null ? COPY.band(formatMoney(r.lo), formatMoney(r.hi)) : <span className="jy-muted">{EMPTY}</span>),
           },
         ]}
       />
@@ -329,32 +397,32 @@ function TopUsers({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t:
   const rest = users.slice(5);
   const items: HBarItem[] = top.map((u) => ({
     key: u.user,
-    name: `${u.user}${u.isAdmin ? "（管理员）" : ""}`,
+    name: `${u.user}${u.isAdmin ? MY_TEXT.adminSuffix : ""}`,
     value: u.cost,
     tipExtra: [
-      ["请求", formatInt(u.requests)],
-      ["Token", formatCompact(u.tokens)],
+      [COL_TEXT.requests, formatInt(u.requests)],
+      [COL_TEXT.tokens, formatCompact(u.tokens)],
     ],
   }));
   // 其余用户合成一行，悬停提示里的占比才是占全部消费
   if (rest.length)
     items.push({
       key: "__rest",
-      name: `其他 ${rest.length} 个用户`,
+      name: COPY.otherUsers(rest.length),
       value: sum(rest, (u) => u.cost),
       tipExtra: [
-        ["请求", formatInt(sum(rest, (u) => u.requests))],
-        ["Token", formatCompact(sum(rest, (u) => u.tokens))],
+        [COL_TEXT.requests, formatInt(sum(rest, (u) => u.requests))],
+        [COL_TEXT.tokens, formatCompact(sum(rest, (u) => u.tokens))],
       ],
     });
   return (
     <Panel
-      title="消费最多的用户"
-      caption={RANGE_LABEL[range]}
+      title={MY_TEXT.topUsers}
+      caption={RANGE_TEXT[range]}
       extra={
         users.length ? (
           <button type="button" className="jy-caption-link jy-my-linkbtn" onClick={() => onTab("users")}>
-            全部 {users.length} 个用户
+            {COPY.allUsers(users.length)}
           </button>
         ) : undefined
       }
@@ -362,24 +430,24 @@ function TopUsers({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t:
         // 原页顶部的四项用量总数，放在用户排行下面
         <ul className="jy-my-facts">
           <li>
-            期内消费 <b>{formatMoney(v.totCost)}</b>
+            {COL_TEXT.cost} <b>{formatMoney(v.totCost)}</b>
           </li>
           <li title={TOKEN_NOTE}>
-            计费 Token <b>{formatCompact(v.totTokens)}</b>
+            {COL_TEXT.tokens} <b>{formatCompact(v.totTokens)}</b>
           </li>
           <li>
-            请求 <b>{formatInt(v.totReqs)}</b>
+            {COL_TEXT.requests} <b>{formatInt(v.totReqs)}</b>
           </li>
           <li>
-            活跃用户 <b>{users.length} 个</b>
+            {COPY.payingUsers} <b>{COPY.userCount(users.length)}</b>
           </li>
         </ul>
       }
     >
       {items.length ? (
-        <HBars items={items} color="var(--jy-s1)" unitName="消费" />
+        <HBars items={items} color="var(--jy-s1)" unitName={COL_TEXT.cost} />
       ) : (
-        <EmptyState title="这个时间范围内还没有用户消费" desc="换个更长的时间范围看看，或确认下游用户已经在用自营站点。" />
+        <EmptyState title={COPY.noUsers} desc={COPY.noUsersDesc} />
       )}
     </Panel>
   );
