@@ -102,6 +102,8 @@ export default function SettingsPage() {
   const [history, setHistory] = useState<HistoryHealth | null>(null);
   // 业务时区：接口返回的 tz，历史记录的日期时间按它写
   const [tz, setTz] = useState(DEFAULT_BUSINESS_TIME_ZONE);
+  // 接口明确说没加密才提示；老接口不带这个字段时不提示
+  const [plainSecrets, setPlainSecrets] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsError, setSettingsError] = useState<unknown>(null);
@@ -146,6 +148,7 @@ export default function SettingsPage() {
     try {
       const result = await api("/api/settings");
       applySettings(result.settings, result.history, scope, result.tz);
+      setPlainSecrets(result.secretsEncrypted === false);
       setSettingsError(null);
       setSettingsLoaded(true);
     } catch (e) {
@@ -468,6 +471,16 @@ export default function SettingsPage() {
           <div className="jy-settings-banner-text">
             <b>{errorText({ code: "DEFAULT_PASSWORD_CHANGE_REQUIRED" })}</b>
             <span>{COPY.firstLoginHint}</span>
+          </div>
+        </div>
+      ) : null}
+
+      {plainSecrets ? (
+        <div className="jy-banner" role="status">
+          <Sym kind="warn" />
+          <div className="jy-settings-banner-text">
+            <b>{COPY.plainSecrets}</b>
+            <span>{COPY.plainSecretsHint}</span>
           </div>
         </div>
       ) : null}

@@ -7,6 +7,9 @@ import { ReconciliationRepository, reconciliationOwnerRuleState } from "../serve
 import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues } from "../lib/reconciliation-ledger.js";
 import { defineReconciliationRepositoryContract } from "../server/test-support/reconciliation-repository-contract.js";
+import { Store } from "./store.js";
+import { isCiphertext, secretKeyOf } from "./secrets.js";
+import { resetSecrets } from "./reset-secrets.js";
 
 // Opt-in only: this fixture replaces tables in this one disposable local schema.
 // Never load .env or fall back to the application's connection defaults.
@@ -500,6 +503,61 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     assert.deepEqual(seen, all.records.map((record) => record.billDate));
     assert.equal(new Set(seen).size, 31);
   });
+});
+
+// 登录信息加密保存（db/secrets.js）走一遍真库：mysql2 把 JSON 列里的字符串标量（会话密钥）解析成不带引号的字符串，
+// 密文、明文混着读，和单测里的假库不一样的地方都在这里核对。只动 stations 和 meta 里这几行，跑完删掉
+test("登录信息加密保存：明文库配上密钥启动后只剩密文，重启照常读，换错密钥或没配密钥都中止且不写库，reset 后能启动", { timeout: 60000 }, async (t) => {
+  const pool = mysql.createPool({ host: process.env.DB_HOST, port, user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD, database: process.env.DB_NAME,
+    connectionLimit: 4, charset: "utf8mb4_unicode_ci", supportBigNumbers: true });
+  const META_KEYS = ["settings", "auth", "notifications", "session_secret"];
+  const clear = async () => { await pool.query("DELETE FROM stations"); await pool.query("DELETE FROM meta WHERE k IN (?)", [META_KEYS]); };
+  t.after(async () => { await clear(); await pool.end(); });
+  await ensureSchema(pool);
+  await clear();
+  const station = { id: "secret_fixture", name: "加密用例", type: "sub2api-password", baseUrl: "https://fixture.invalid", accessToken: "", apiKey: "",
+    email: "fixture-mail@example.invalid", password: "fixture-password-secret", s2Tokens: { accessToken: "fixture-jwt-secret", expiresAt: 1 } };
+  const notifications = { channels: [{ id: "ch_fixture", type: "telegram", name: "用例群", enabled: true, config: { botToken: "1:fixture-bot-secret", chatId: "42", apiBase: "" } }], rules: {} };
+  await pool.query("INSERT INTO stations (id, pos, doc) VALUES (?, 0, ?)", [station.id, JSON.stringify(station)]);
+  await pool.query("INSERT INTO meta (k, v) VALUES ?", [[["auth", JSON.stringify({ username: "admin", salt: "s", hash: "h" })],
+    ["notifications", JSON.stringify(notifications)], ["session_secret", JSON.stringify("fixture-plain-session")]]]);
+  const SECRETS = /fixture-mail|fixture-password-secret|fixture-jwt-secret|fixture-bot-secret|fixture-plain-session/;
+  const dump = async () => JSON.stringify([(await pool.query("SELECT id, doc FROM stations"))[0],
+    (await pool.query("SELECT k, v FROM meta WHERE k IN (?) ORDER BY k", [META_KEYS]))[0]]);
+  const keyA = secretKeyOf(Buffer.alloc(32, 3).toString("base64")), keyB = secretKeyOf(Buffer.alloc(32, 5).toString("base64"));
+
+  // 没配密钥：照旧明文，会话密钥原样沿用
+  assert.equal((await new Store(pool).load()).sessionSecret, "fixture-plain-session");
+  assert.match(await dump(), /fixture-password-secret/);
+
+  const first = await new Store(pool, { secretKey: keyA }).load();
+  assert.deepEqual(first.secretReport, { encrypted: true, keyId: keyA.id, converted: 4, sessionRotated: true });
+  const sealed = await dump();
+  assert.doesNotMatch(sealed, SECRETS);
+  const [[row]] = await pool.query("SELECT doc FROM stations WHERE id = ?", [station.id]);
+  assert.ok(isCiphertext(row.doc.password) && isCiphertext(row.doc.email) && isCiphertext(row.doc.s2Tokens));
+  const [[session]] = await pool.query("SELECT v FROM meta WHERE k = 'session_secret'");
+  assert.ok(isCiphertext(session.v));
+
+  const second = await new Store(pool, { secretKey: keyA }).load();
+  assert.deepEqual([second.get(station.id).password, second.get(station.id).email, second.get(station.id).s2Tokens, second.channels[0].config.botToken],
+    [station.password, station.email, station.s2Tokens, "1:fixture-bot-secret"]);
+  assert.equal(second.sessionSecret, first.sessionSecret);
+  assert.equal(await dump(), sealed, "内容没变时沿用原来的密文");
+
+  await assert.rejects(new Store(pool, { secretKey: keyB }).load(), (err) => err.code === "SECRET_KEY_MISMATCH");
+  await assert.rejects(new Store(pool).load(), (err) => err.code === "SECRET_KEY_MISSING");
+  assert.equal(await dump(), sealed, "启动中止时不写库");
+
+  const report = await resetSecrets(pool, { secretKey: keyB, apply: true });
+  assert.equal(report.cleared.length, 4);
+  assert.equal(report.sessionReset, true);
+  const third = await new Store(pool, { secretKey: keyB }).load();
+  assert.deepEqual([third.get(station.id).password, third.get(station.id).s2Tokens, third.channels[0].config.botToken, third.channels[0].config.chatId], ["", null, "", "42"]);
+  assert.notEqual(third.sessionSecret, first.sessionSecret);
+  const [[renewed]] = await pool.query("SELECT v FROM meta WHERE k = 'session_secret'");
+  assert.ok(isCiphertext(renewed.v));
 });
 
 // 与 server/reconciliation-repository.contract.test.js 同一组用例：内存实现和 MySQL 必须表现一致。

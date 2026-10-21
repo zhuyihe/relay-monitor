@@ -75,6 +75,9 @@ export const COPY = Object.freeze({
   changed: "密码已改，请用新密码重新登录",
   changeFailed: "修改失败",
   firstLoginHint: "改完后要重新登录，才能继续用控制台。",
+  // 没配加密密钥时页顶那一条（§8.1）：环境变量名只写在部署说明里
+  plainSecrets: "登录信息还是明文保存",
+  plainSecretsHint: "上游的令牌、密码和通知方式的密钥都没有加密。按部署说明在服务器上配好加密密钥、重启后，会自动加密保存。",
   // 关于（§11：构建标识 → 软件版本，版本号后面括号里是给技术同事看的编号）
   product: "产品",
   productHint: "当前运行的管理控制台",

@@ -26,6 +26,9 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
+      # ---- 登录信息加密（强烈建议）：在本目录的 .env 里写 RELAY_SECRET_KEY=（openssl rand -base64 32 生成）----
+      # 不配就明文保存。密钥要单独备份、别和 mysql-data 放进同一份备份；步骤见 deploy/README.md「登录信息加密」
+      - RELAY_SECRET_KEY=${RELAY_SECRET_KEY:-}
       # ---- v1 数据一次性迁移（可选）：导入完成后可删除这两行 ----
       - V1_DATA_DIR=/app/v1-data
     volumes:

@@ -82,6 +82,9 @@ jobs:
           tags: relay-monitor:smoke
       - name: Migration modules load inside the image
         run: docker run --rm --entrypoint node relay-monitor:smoke --input-type=module -e "await import('/app/db/pool.js'); await import('/app/db/store.js'); console.log('db modules ok')"
+      # 密钥丢了时要在镜像里跑的恢复脚本（deploy/README.md「加密密钥丢了怎么办」）
+      - name: Secret reset script loads inside the image
+        run: docker run --rm --entrypoint node relay-monitor:smoke --input-type=module -e "await import('/app/db/secrets.js'); await import('/app/db/reset-secrets.js'); console.log('secret modules ok')"
 
   build:
     needs: [verify, schema-verify, image-smoke]
