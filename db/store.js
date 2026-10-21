@@ -4,7 +4,9 @@
 import { hashPassword } from "../lib/auth.js";
 import { ALERT_EVENT_KEYS, DEFAULT_RULES } from "../lib/alerts.js";
 import { createHash } from "node:crypto";
-import { onboardingBaseUrl } from "../lib/channel-onboarding.js";
+import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
+import { endpointChangedError, sameEndpoint, staleSecrets } from "../lib/endpoint.js";
+import { resolveChannelConfig } from "../lib/notify.js";
 
 export function stationBusinessVersion(station) {
   if (!station) return null;
@@ -230,7 +232,8 @@ export class Store {
       return change.value;
     });
     // 队列恢复与本次操作的返回值分开：调用方仍能收到失败。
-    this._saveChain = pending.catch((err) => console.error("保存失败:", err?.cause?.code || err?.message));
+    // 只记真的没写进库的（SAVE_FAILED）；提交前就被拒绝的（换了地址没重填、配置已变化）不是保存失败
+    this._saveChain = pending.catch((err) => { if (err?.code === "SAVE_FAILED") console.error("保存失败:", err?.cause?.code || err?.message); });
     return pending;
   }
 
@@ -362,7 +365,8 @@ export class Store {
       type: String(input.type || ""),
       name: String(input.name || "未命名渠道").trim(),
       enabled: input.enabled !== false,
-      config: typeof input.config === "object" && input.config ? input.config : {},
+      // 只留这种类型的字段（lib/notify.js CHANNEL_TYPES）
+      config: resolveChannelConfig(String(input.type || ""), typeof input.config === "object" && input.config ? input.config : {}, {}),
       createdAt: new Date().toISOString(),
     };
     return this._changeNotifications((notifications) => {
@@ -378,11 +382,9 @@ export class Store {
       if ("name" in patch) ch.name = String(patch.name ?? "").trim();
       if ("enabled" in patch) ch.enabled = !!patch.enabled;
       if ("config" in patch && typeof patch.config === "object" && patch.config) {
-        // 空值表示保留原值（前端编辑时不回显密钥）
-        for (const [k, v] of Object.entries(patch.config)) {
-          if (v !== "" && v != null) ch.config[k] = String(v);
-          else if (v === "" && !(k in ch.config)) ch.config[k] = "";
-        }
+        // 只有密钥留空表示保留原值（前端编辑时不回显密钥），其他字段留空就是清空；
+        // 换了站点又没重新填密钥，抛 ENDPOINT_CHANGED_SECRET_REQUIRED（lib/notify.js resolveChannelConfig）
+        ch.config = resolveChannelConfig(ch.type, patch.config, ch.config);
       }
       return ch;
     });
@@ -516,6 +518,8 @@ export class Store {
       for (const f of fields) if (f in patch) s[f] = String(patch[f] ?? "").trim();
       if ("password" in patch) s.password = String(patch.password ?? "");
       if (s.type !== before.type) clearHiddenCredentials(s);
+      // 换了站点（协议、主机、端口；原来没填地址也算）：已保存的令牌、密码、Key 不沿用，这次没重新填就不让保存，免得下次刷新发到新地址
+      if (!sameEndpoint(before.baseUrl, s.baseUrl) && staleSecrets(UPSTREAM_SECRET_FIELDS, s, patch).length) throw endpointChangedError();
       if ("lowBalanceUsd" in patch) s.lowBalanceUsd = numOrNull(patch.lowBalanceUsd);
       if ("cnyPerUsd" in patch) s.cnyPerUsd = numOrNull(patch.cnyPerUsd);
       if ("costAliases" in patch) s.costAliases = sanitizeCostAliases(patch.costAliases);

@@ -607,3 +607,46 @@ test("ordinary pure-Key credential changes invalidate onboarding recovery marker
   await store.update(station.id, { apiKey: "verified-new" }, { onboardingOrigin: { ...origin, requestId: "new-request" } });
   assert.equal(station.onboardingOrigin.requestId, "new-request");
 });
+
+test("换了上游地址的站点（协议、主机、端口）：已保存的令牌不沿用，没重新填就不让保存；只改路径照常", async () => {
+  const store = await new Store(fakePool()).load();
+  const station = await store.add({ type: "newapi", name: "甲", baseUrl: "https://a.example", accessToken: "tok-a", userId: "7" });
+  await assert.rejects(store.update(station.id, { baseUrl: "https://evil.example" }), (err) => err.code === "ENDPOINT_CHANGED_SECRET_REQUIRED");
+  // 换协议也算换站点（前端留空的密钥不提交）
+  await assert.rejects(store.update(station.id, { baseUrl: "http://a.example" }), (err) => err.code === "ENDPOINT_CHANGED_SECRET_REQUIRED");
+  assert.equal(store.get(station.id).baseUrl, "https://a.example");
+  assert.equal(store.get(station.id).accessToken, "tok-a");
+  await store.update(station.id, { baseUrl: "https://a.example/v1/" });
+  assert.equal(store.get(station.id).accessToken, "tok-a");
+  await store.update(station.id, { baseUrl: "https://b.example", accessToken: "tok-b" });
+  assert.equal(store.get(station.id).baseUrl, "https://b.example");
+  assert.equal(store.get(station.id).accessToken, "tok-b");
+  // 显式清空令牌再换地址：旧令牌已经清掉，不会带过去，照常保存
+  await store.update(station.id, { baseUrl: "https://c.example", accessToken: "" });
+  assert.equal(store.get(station.id).accessToken, "");
+});
+
+test("换了上游地址又改了类型：新类型还要用的旧令牌不沿用；用不到的旧凭证本来就清掉，填齐新类型要的就能保存", async () => {
+  const store = await new Store(fakePool()).load();
+  const station = await store.add({ type: "newapi", name: "甲", baseUrl: "https://a.example", accessToken: "tok-a", userId: "7" });
+  // New API 账号 → Sub2API 登录令牌：两种都用 accessToken，换了站点就要重填
+  await assert.rejects(store.update(station.id, { type: "sub2api", baseUrl: "https://b.example" }), (err) => err.code === "ENDPOINT_CHANGED_SECRET_REQUIRED");
+  assert.deepEqual([store.get(station.id).type, store.get(station.id).accessToken], ["newapi", "tok-a"]);
+  // → Sub2API 邮箱密码：旧令牌随类型清掉，填了邮箱密码就行
+  await store.update(station.id, { type: "sub2api-password", baseUrl: "https://b.example", email: "a@b.c", password: "pw" });
+  assert.deepEqual([store.get(station.id).accessToken, store.get(station.id).password], ["", "pw"]);
+});
+
+test("通知方式编辑：密钥留空沿用，其他字段留空就清空，不认识的字段不收；换了地址又没重填密钥就不保存", async () => {
+  const store = await new Store(fakePool()).load();
+  const ch = await store.addChannel({ type: "smtp", name: "邮件", config: { host: "smtp.qq.com", username: "me", password: "app-pass", from: "a", to: "b", junk: "x" } });
+  assert.equal("junk" in store.channels[0].config, false);
+  await store.updateChannel(ch.id, { config: { host: "smtp.qq.com", username: "", password: "", from: "a", to: "b" } });
+  assert.equal(store.channels[0].config.username, "");
+  assert.equal(store.channels[0].config.password, "app-pass");
+  await assert.rejects(store.updateChannel(ch.id, { config: { host: "smtp.evil.example", password: "" } }), (err) => err.code === "ENDPOINT_CHANGED_SECRET_REQUIRED");
+  assert.equal(store.channels[0].config.host, "smtp.qq.com");
+  // 只改名字、开关时不带 config，配置不动
+  await store.updateChannel(ch.id, { name: "新名字", enabled: false });
+  assert.equal(store.channels[0].config.password, "app-pass");
+});

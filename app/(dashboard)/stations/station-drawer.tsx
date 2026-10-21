@@ -12,7 +12,7 @@ import { failureText, requiredText } from "../../../lib/error-copy";
 import { formatRate, RATE_UNSET_PARITY } from "../../../lib/format";
 import { NAV_LABELS } from "../../../lib/brand";
 import { stationDisplayName } from "../../../lib/overview-actions";
-import { CREDENTIAL_FIELDS, credentialFieldOf, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT } from "../../../lib/channel-onboarding.js";
+import { CREDENTIAL_FIELDS, credentialFieldOf, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT, UPSTREAM_SECRET_FIELDS } from "../../../lib/channel-onboarding.js";
 import { Dirty } from "../../components/data-state";
 import { useDrawerEscape } from "../../components/drawer-escape";
 import { ErrorDetail } from "../../components/error-detail";
@@ -301,7 +301,7 @@ export function StationDrawer({
       for (const field of connectionFields) {
         const value = field === "password" ? String(v[field] || "") : String(v[field] ?? "").trim();
         // 编辑时敏感凭证留空表示保持已保存的值；其他当前类型字段按表单值提交
-        if (["accessToken", "apiKey", "password"].includes(field)) {
+        if (UPSTREAM_SECRET_FIELDS.includes(field)) {
           if (value) payload[field] = value;
         } else {
           payload[field] = value;

@@ -1,6 +1,7 @@
 // PUT /api/stations/:id（编辑）+ DELETE /api/stations/:id（删除）——对应 v1 server.js 同名路由
 import { withAuth, json } from "../../../../lib/api.js";
 import { STATION_TYPES } from "../../../../lib/providers.js";
+import { errorText } from "../../../../lib/error-copy.js";
 import { redact } from "../../../../server/stations.js";
 import { refreshStation } from "../../../../server/refresh.js";
 import { purgeStation } from "./purge.js";
@@ -15,6 +16,8 @@ async function updateStation(request, rt, params) {
     s = await rt.store.update(params.id, b, options);
   } catch (error) {
     if (["AUTHORIZATION_CHANGED", "RESOURCE_CHANGED"].includes(error.code)) return json({ error: error.message, code: error.code }, 400);
+    // 换了地址却没重新填密钥（db/store.js updateLocked）
+    if (error.code === "ENDPOINT_CHANGED_SECRET_REQUIRED") return json({ error: errorText(error), code: error.code }, 400);
     throw error;
   }
   if (!s) return json({ error: "找不到这个上游", code: "UPSTREAM_NOT_FOUND" }, 404);
