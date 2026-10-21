@@ -5,10 +5,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
 import { Modal } from "antd";
-import { api, fmtTokens } from "../../lib/client";
+import { api } from "../../lib/client";
 import { balanceMoneyOf, rateSnapshotOf } from "../../lib/profit";
 import {
-  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatHhmm, formatMoney, formatMonthDay, RATE_UNSET,
+  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatCompact, formatHhmm, formatMoney, formatMonthDay, RATE_UNSET,
 } from "../../lib/format";
 import { balanceDaysText, balanceViewOf, stationDisplayName } from "../../lib/overview-actions";
 import { clamp, niceTicks } from "../../lib/chart-math";
@@ -336,7 +336,7 @@ export default function TrendModal({
   const level = view?.level === "crit" || view?.level === "warn" ? view.level : null;
   const stateText = level && (view?.state === "empty" || view?.state === "low" || view?.state === "soon") ? BALANCE_STATE_TEXT[view.state] : null;
   const today = [
-    station?.todayTokens != null ? COPY.todayTokens(fmtTokens(station.todayTokens)) : null,
+    station?.todayTokens != null ? COPY.todayTokens(formatCompact(station.todayTokens)) : null,
     station?.todayRequests != null ? COPY.todayRequests(station.todayRequests.toLocaleString("en-US")) : null,
   ].filter(Boolean);
   const rangeLabel = RANGES.find((r) => r.value === range)?.label;

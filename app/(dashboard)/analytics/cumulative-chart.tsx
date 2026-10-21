@@ -4,7 +4,7 @@
 // 三条线会重叠成一条，这时只画上游成本。缺记录的日子画斜纹带，累计值在那之后带 ≈（按已有数据累加）。
 import { useId, useMemo, useState } from "react";
 import type { KeyboardEvent, PointerEvent } from "react";
-import { WEEKDAYS, axisMoney, formatMoney, formatMonthDay, formatZonedTime, parseDay } from "../../../lib/format";
+import { EMPTY, axisMoney, formatDayKey, formatMoney, formatMonthDay, formatZonedTime, parseDay, weekdayOfDayKey } from "../../../lib/format";
 import { clamp, linePath, niceTicks, runs, spreadLabels, xTickIdx } from "../../../lib/chart-math";
 import { ChartTip, TipBody } from "../../components/float-tip";
 import type { TipRow } from "../../components/float-tip";
@@ -84,7 +84,7 @@ export function CumulativePanel({ rows, asOf, tz }: { rows: TrendRow[]; asOf?: n
   const ends = spreadLabels(series.map((s) => ({ name: s.name, y: y(pts[n - 1]?.[s.key] ?? 0) + 4 })));
   const xIdx = n ? xTickIdx(n, pw) : [];
 
-  const title = (p: Point) => `${formatMonthDay(p.d)} ${WEEKDAYS[p.d.getDay()]}${p.today && asOf ? `，截至 ${formatZonedTime(asOf, tz)}` : ""}`;
+  const title = (p: Point) => `${formatDayKey(p.date, tz)} ${weekdayOfDayKey(p.date)}${p.today && asOf ? `，截至 ${formatZonedTime(asOf, tz)}` : ""}`;
 
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
     if (!w || !n) return;
@@ -114,7 +114,7 @@ export function CumulativePanel({ rows, asOf, tz }: { rows: TrendRow[]; asOf?: n
     const total = formatMoney(hp.total, { approx: hp.approx });
     const usage = formatMoney(hp.usage, { approx: hp.approx });
     const fixed = formatMoney(hp.fixed);
-    const day = hp.dayCost == null ? "用量记录缺失" : formatMoney(r2(hp.dayCost + hp.dayFixed));
+    const day = hp.dayCost == null ? "数据缺失" : formatMoney(r2(hp.dayCost + hp.dayFixed));
     tipRows = hasFixed
       ? [
           ["累计总成本", total, "var(--jy-ink-2)"],
@@ -135,7 +135,7 @@ export function CumulativePanel({ rows, asOf, tz }: { rows: TrendRow[]; asOf?: n
   const last = pts[n - 1];
 
   return (
-    <Panel title="累计成本" caption={hasFixed ? "期内逐日累加" : "期内逐日累加；没有固定成本，总成本即上游成本"}>
+    <Panel title="累计成本" caption={hasFixed ? "逐日累加" : "逐日累加；没有固定成本，总成本就是上游成本"}>
       {(hasFixed || hasToday || hasMissing) && (
         <div className="jy-legend">
           {/* 只有一条线时由线尾标签标明，不再单列图例 */}
@@ -155,7 +155,7 @@ export function CumulativePanel({ rows, asOf, tz }: { rows: TrendRow[]; asOf?: n
           {hasMissing && (
             <span>
               <i className="jy-swatch hatch-swatch" />
-              数据缺失，未计入
+              数据缺失，没算进去
             </span>
           )}
         </div>
@@ -165,7 +165,7 @@ export function CumulativePanel({ rows, asOf, tz }: { rows: TrendRow[]; asOf?: n
         className="jy-chart-stack"
         tabIndex={0}
         role="img"
-        aria-label={`累计成本折线图，期末累计总成本 ${last ? formatMoney(last.total, { approx: last.approx }) : "—"}，可用左右方向键逐日查看`}
+        aria-label={`累计成本折线图，期末累计总成本 ${last ? formatMoney(last.total, { approx: last.approx }) : EMPTY}，可用左右方向键逐日查看`}
         onPointerMove={onPointerMove}
         onPointerLeave={() => setHover(null)}
         onKeyDown={onKeyDown}

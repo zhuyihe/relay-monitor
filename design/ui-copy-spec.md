@@ -612,7 +612,7 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
    | 上游余额在哪一档、标什么颜色，可用天数一格写什么（余额用完写「—」，旁边标「余额用完」） | `lib/overview-actions.js` 的 `balanceViewOf`、`balanceDaysText`；运营总览「上游余量」、上游列表、余额趋势都用，也看余额提醒线 | 各页自己判断余额用完、只按天数分档 |
    | 成本来源名（§3.3） | `lib/format.js` 的 `COST_MODE_TEXT` | `my/shared.tsx` 的 `MODE_LABEL`、`server/own-helpers.js` 里的说法 |
    | 时间范围名（§6） | `lib/format.js` 的 `RANGE_TEXT` | 总览、成本估算、自营业务各写一份 |
-   | Token 大数、金额 | `lib/format.js` 的 `formatCompact`、`formatUsd`、`formatCny` | `lib/client.ts` 的 `fmtTokens`、`usd`、`cny` |
+   | Token 大数、金额 | `lib/format.js` 的 `formatCompact`、`formatUsd`、`formatCny`；小额单价用 `formatUnitPrice` | `lib/client.ts` 的 `fmtTokens`、`usd`、`cny`、`cny4` |
    | 报错归类（§8.2） | `lib/error-copy.js` 的 `describeError`，接口、推送、日报、测试读取都用它；「保存失败：原因。」这类句子用 `failureText`，漏填用 `requiredText`；「详细原因」用 `app/components/error-detail.tsx`；页面自己的提示（不是接口报错）用同一文件的 `notice` 抛出、`noteOf` 读出，不进「详细原因」 | 接口原样返回原文、`message.error(原文)`、`lib/connection-test.js` 的另一套分类 |
    | 汇率写法 | `lib/format.js` 的 `formatRate`、`RATE_UNSET_*`；售价用 `formatSellPrice`。有没有设置汇率由 `lib/profit.js` 的 `rateSnapshotOf` 判断 | 分散在上游编辑页、上游列表、总览、成本估算、`server/own-helpers.js` 的 6 处；`lib/client.ts` 的 `rateOf` |
    | 估算依据 | `lib/format.js` 的 `basisText`，页面、推送、日报共用 | `trend-modal.tsx` 里的那份，总览、上游列表、成本估算里直接显示原始依据的写法 |
@@ -623,6 +623,13 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
    | 刷新之后的提示：「已刷新「上游名」」「读不到「上游名」的余额：原因。」「已刷新，其中 2 个上游读不到余额，见「需处理」」 | `lib/error-copy.js` 的 `refreshOneText`、`refreshAllText`；句末补句号用 `asSentence` | 总览、上游列表各写一份 |
    | 「读不到上游类型，暂时不能新增或编辑上游」 | `app/(dashboard)/stations/model.ts` 的 `TYPES_MISSING_TEXT` | 上游列表的横幅、编辑页的提示各写一份 |
    | 「余额趋势」「上游名 的余额趋势」 | `app/(dashboard)/trend-modal.tsx` 的 `TREND_TEXT` | 总览、上游列表、弹窗标题各写一份 |
+   | 接口按天给的日期「10月9日」（往年带年份）和周几「周五」 | `lib/format.js` 的 `formatDayKey`、`weekdayOfDayKey` | 成本估算、累计成本图、趋势卡片、自营业务各拼「9/22」或「月日 + 星期」 |
+   | 利润等式标题旁的时间「0:00–14:30」「10月14日–今天」 | `lib/format.js` 的 `formatSinceToday` | 运营总览、自营业务各拼一份 |
+   | 利润等式的说法（「N 个上游」「数据不完整」「实际成本会比这里高。」，没设置自营站点时的几句和「去设置」） | `app/components/profit-equation.tsx` 的 `EQ_TEXT`；没设置自营站点时不传 `notice`，用组件默认的那段 | 运营总览、成本估算、自营业务各写一份 |
+   | 可用天数条下面的说明（竖线是提醒天数、提醒天数在告警中心里改、读不到提醒规则）和悬停里的栏名 | `app/components/runway.tsx` 的 `RUNWAY_TEXT`、`RunwayRulesNote` | 运营总览、成本估算各写一份 |
+   | 趋势卡片名「收入与上游成本」「上游成本」 | `app/components/trend-panel.tsx` 的 `TREND_PANEL_TITLE` | 成本估算的加载骨架另写一份 |
+   | 刷新失败、页面还显示着上次数据时页顶那一条 | `app/components/data-state.tsx` 的 `RefreshFailedBanner`（字取 `refreshFailedText`、`noteOf`，样式 `.jy-banner__body`） | 上游列表、成本估算、用量分析、自营业务各拼一份横幅和样式 |
+   | 自营业务几张表的列名、标签名，「利润怎么算」「按明细细算」「读不到分组和渠道数据」 | `app/(dashboard)/my/shared.tsx` 的 `COL_TEXT`、`TAB_TEXT`、`BASIS_TITLE`、`AUDIT_TITLE`、`FLOW_UNREADABLE` | 概览、用户、模型与渠道各写一份 |
 
 2. **不在前端给后端文案打补丁。**后端直接返回最终文字或结构化的码，然后删掉这些补丁：
    - `my/shared.tsx` 把「我的中转站」改写成自营站点、靠匹配「还没有标记…」判断没设置；

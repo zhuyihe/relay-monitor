@@ -11,7 +11,7 @@ import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
 import type { MenuProps } from "antd";
 import { api, readWorkflowDestination } from "../../../lib/client";
 import { actionsByStation, buildOverviewActions, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
-import { basisText, EMPTY, formatAsOfTime, formatCompact, formatMoney, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, RATE_UNSET, refreshFailedText } from "../../../lib/format";
+import { basisText, EMPTY, formatAsOfTime, formatCompact, formatMoney, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, RATE_UNSET } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { balanceMoneyOf } from "../../../lib/profit";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
@@ -19,7 +19,7 @@ import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions"
 import { failureText, refreshAllText, refreshOneText } from "../../../lib/error-copy";
 import { CREDENTIAL_FIELDS, ONBOARDING_TYPES, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES } from "../../../lib/channel-onboarding.js";
 import ChannelOnboarding from "../../components/channel-onboarding";
-import { EmptyState, ErrorState, Skeleton } from "../../components/data-state";
+import { EmptyState, ErrorState, RefreshFailedBanner, Skeleton } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { Panel } from "../../components/panel";
@@ -960,20 +960,12 @@ export default function StationsPage() {
     <div className="jy-page jy-stations">
       {/* 刷新失败但有上次读到的数据（§8.1）：「刷新失败，数据截至 14:30。」+ 原因，原文只进「查看详细原因」 */}
       {loadError && loaded ? (
-        <div className="jy-banner" role="alert">
-          <Sym kind="warn" />
-          <div className="jy-stations-banner-body">
-            <b>{refreshFailedText(refreshedAt, tz)}</b>
-            <p className="jy-caption">{noteOf(loadError).text}</p>
-            <ErrorDetail raw={noteOf(loadError).raw} />
-          </div>
-          <Button size="small" loading={loadingList} onClick={() => { reload().catch(() => {}); }}>{REFRESH}</Button>
-        </div>
+        <RefreshFailedBanner asOf={refreshedAt} tz={tz} error={loadError} retrying={loadingList} onRetry={() => { reload().catch(() => {}); }} />
       ) : null}
       {metaError ? (
         <div className="jy-banner" role="alert">
           <Sym kind="warn" />
-          <div className="jy-stations-banner-body">
+          <div className="jy-banner__body">
             <b>{types.length ? COPY.metaStale : COPY.metaFailed}</b>
             <p className="jy-caption">{noteOf(metaError).text}</p>
             <ErrorDetail raw={noteOf(metaError).raw} />
@@ -1057,7 +1049,7 @@ export default function StationsPage() {
       >
         <div className="jy-banner jy-banner--info">
           <Sym kind="info" />
-          <div className="jy-stations-banner-body">
+          <div className="jy-banner__body">
             <b>{COPY.archiveWhat}</b>
             <p className="jy-caption">{COPY.archiveWhere}</p>
           </div>
@@ -1089,7 +1081,7 @@ export default function StationsPage() {
       >
         <div className="jy-banner jy-banner--crit">
           <Sym kind="crit" />
-          <div className="jy-stations-banner-body">
+          <div className="jy-banner__body">
             <b>{COPY.deleteWhat}</b>
             <p className="jy-caption">{COPY.deleteDesc}</p>
           </div>

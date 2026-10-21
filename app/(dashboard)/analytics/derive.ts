@@ -1,10 +1,12 @@
-// 成本与利润页的数据整理：把 /api/analytics 与 /api/own/analytics 的响应整理成各面板要用的形状。
-// 口径与「我的站点」一致（lib/profit.js）：成本只算上游（非自营且计入利润），¥ 由接口按站点汇率折算；
-// 上游成本只算按用量计费的上游，配了固定付费的上游只计摊销（costBasis = fixed），不重复计入余额下降。
+// 成本估算页的数据整理：把 /api/analytics 与 /api/own/analytics 的响应整理成各面板要用的形状。
+// 算法与「自营业务」一致（lib/profit.js）：成本只算上游（非自营且计入利润），¥ 由接口按各上游的汇率换算；
+// 上游成本只算按用量计费的上游，配了固定付费的上游只按天平摊（costBasis = fixed），不重复算余额下降。
 // 日期按接口返回的业务时区划分，与浏览器时区无关。缺记录的日子标成缺失，不补零。纯函数，不依赖 React。
-import { dayKeyInTz } from "../../../lib/business-time";
-import { formatMonthDay, isoDay, parseDay } from "../../../lib/format";
-import { rateSnapshotOf, splitByCumulative } from "../../../lib/profit";
+// 导入带 .js 后缀，单元测试（tests/analytics-derive.test.mjs）可以直接用 node 跑这个文件
+import { dayKeyInTz } from "../../../lib/business-time.js";
+import { EMPTY, formatDayKey, isoDay, parseDay } from "../../../lib/format.js";
+import { stationDisplayName } from "../../../lib/overview-actions.js";
+import { rateSnapshotOf, splitByCumulative } from "../../../lib/profit.js";
 import type { TrendRow } from "../../components/trend-panel";
 
 export const r2 = (v: number) => Math.round(v * 100) / 100;
@@ -29,30 +31,28 @@ export function validDay(s: string | null | undefined): s is string {
   return !!d && isoDay(d) === s;
 }
 
-export const md = (iso: string | null | undefined) => {
-  const d = iso ? parseDay(iso) : null;
-  return d ? formatMonthDay(d) : "—";
-};
+// 接口按天给的日期「2026-10-09」：今年写「10月9日」，往年带年份；tz 只用来判断「今年」
+export const md = (iso: string | null | undefined, tz?: string) => (iso ? formatDayKey(iso, tz) : EMPTY);
 
-// 连续日期合并成区间：9月1日至9月5日、9月8日
-export function runsText(dates: string[], max = 3) {
+// 连续日期合并成区间：9月1日–9月5日、9月8日
+export function runsText(dates: string[], tz?: string, max = 3) {
   const runs: [string, string][] = [];
   for (const d of dates) {
     const last = runs[runs.length - 1];
     if (last && addDays(last[1], 1) === d) last[1] = d;
     else runs.push([d, d]);
   }
-  const parts = runs.slice(0, max).map(([a, b]) => (a === b ? md(a) : `${md(a)}至${md(b)}`));
+  const parts = runs.slice(0, max).map(([a, b]) => (a === b ? md(a, tz) : `${md(a, tz)}–${md(b, tz)}`));
   return runs.length > max ? `${parts.join("、")}等` : parts.join("、");
 }
 
-// 缺口资源摘要：沿用旧页面"X 缺 N 天；另有 N 个"的写法
+// 缺记录的上游点名：「A 缺 3 天、B 缺 1 天，另有 2 个上游」
 export function gapSummary(gaps: any[], unit = "个上游") {
   if (!gaps.length) return "";
   const labels = gaps.slice(0, 2).map((g) => {
-    const name = g.stationName || g.stationId || "上游";
+    const name = stationDisplayName({ name: g.stationName });
     const n = Number(g.missingDays);
-    return Number.isFinite(n) && n > 0 ? `${name} 缺 ${n} 天` : `${name} 有采集缺口`;
+    return Number.isFinite(n) && n > 0 ? `${name} 缺 ${n} 天` : `${name} 有几段没有记录`;
   });
   const rest = gaps.length - labels.length;
   return `${labels.join("、")}${rest > 0 ? `，另有 ${rest} ${unit}` : ""}`;
@@ -103,25 +103,29 @@ export function derive(data: any, own: any) {
     if (!upIds.has(r.stationId) || !inWindow.has(r.date)) continue;
     fixedBy.set(r.date, (fixedBy.get(r.date) || 0) + (Number(r.cny) || 0));
   }
-  // 固定成本合计取各上游的整段摊销（与「我的站点」同一口径），不用逐日舍入后的值相加；
-  // 再按逐日摊销的累计占比分回每天，趋势表合计、累计图终点与等式里的固定成本分毫不差。
+  // 固定成本合计取各上游整段按天平摊的合计（与「自营业务」同一算法），不用逐日舍入后的值相加；
+  // 再按逐日平摊的累计占比分回每天，趋势表合计、累计图终点与等式里的固定成本分毫不差。
   const fixed = r2(upstream.reduce((a, s) => a + (Number(s.fixedCny) || 0), 0));
+  const fixedCount = upstream.filter((s) => Number(s.fixedCny) > 0).length;
   const fixedRows = splitByCumulative(dates.map((date) => fixedBy.get(date) || 0), fixed);
 
-  // 用"有日汇总记录或出现在覆盖缺口里"识别需要采集用量的上游；纯固定成本的上游两者都不满足，
+  // 用"有日汇总记录或出现在缺记录名单里"识别要记用量的上游；纯固定成本的上游两者都不满足，
   // 配了固定付费的上游已按 costBasis 排除，都不会被误判为缺数据。
   const gapIds = new Set(allGaps.map((g) => g.stationId));
   const monitored = usageUp.filter((s) => withRows.has(s.id) || gapIds.has(s.id));
   const upstreamGaps = allGaps.filter((g) => usageIds.has(g.stationId));
 
   // 日收入：自营分析只给窗口总收入，按每日下游消费占比摊到天（与旧页面同一算法），
-  // 保证收入合计与利润口径一致。
+  // 保证收入合计与利润的算法一致。
   let incomeBy: Map<string, number> | null = null;
   let incomeIssue: string | null = null;
-  // 自营站点没设汇率时按 1:1 折算，收入只是估算
-  const ownNoRate = !!own && !(own.station?.cnyPerUsd > 0);
+  // 自营站点算收入时报的错：{ code, message }，页面按码归类（noteOf），原文只进「查看详细原因」
+  let incomeError: { code: any; message: string } | null = null;
+  // 自营站点没设置售价时按 1 美元额度 = 1 元算，收入只是估算；汇率和别处同一个来源（rateSnapshotOf）
+  const ownRate = rateSnapshotOf(own?.station);
+  const ownNoRate = !!own && ownRate.source !== "configured";
   if (own && own.profit && !own.profit.error && Array.isArray(own.trend)) {
-    const rate = ownNoRate ? 1 : own.station.cnyPerUsd;
+    const rate = ownRate.cnyPerUsd;
     const trendTotal = own.trend.reduce((a: number, t: any) => a + (Number(t.cost) || 0), 0);
     if (trendTotal > 0) {
       const ratio = own.profit.incomeCny / (trendTotal * rate);
@@ -136,12 +140,12 @@ export function derive(data: any, own: any) {
       // 下游没有消费时收入就是 0，照常显示
       incomeBy = new Map();
     } else {
-      incomeIssue = "有收入但缺少逐日消费记录，无法按天分摊。";
+      incomeIssue = "有收入，但没有每天的消费记录，没法分到每天。";
     }
   } else if (own && own.profit?.error) {
-    incomeIssue = String(own.profit.error);
+    incomeError = { code: own.profit.errorCode, message: String(own.profit.error) };
   } else if (own && !Array.isArray(own.trend)) {
-    incomeIssue = "自营站点没有返回逐日消费记录。";
+    incomeIssue = "自营站点没有给出每天的消费记录。";
   }
 
   const missingDates: string[] = [];
@@ -164,7 +168,7 @@ export function derive(data: any, own: any) {
   });
 
   const revenue = incomeBy ? r2(rows.reduce((a, r) => a + (r.rev || 0), 0)) : null;
-  // 自营收入只有 7 / 30 天口径；所选天数不同时，收入是从整段分摊后截取的部分
+  // 自营收入只能取近 7 / 30 天；所选天数不同时，收入是从整段分到每天后截取的部分
   const ownDays = days <= 7 ? 7 : 30;
   const revenueSplit = !!incomeBy && days !== ownDays;
   const usage = r2(rows.reduce((a, r) => a + (r.cost || 0), 0));
@@ -180,7 +184,7 @@ export function derive(data: any, own: any) {
   const mix: MixItem[] = upstream
     .map((s) => ({
       id: s.id,
-      name: s.name,
+      name: stationDisplayName(s),
       archived: !!s.archivedAt,
       usage: usageIds.has(s.id) ? Number(s.totalCny) || 0 : 0,
       fixed: Number(s.fixedCny) || 0,
@@ -190,12 +194,12 @@ export function derive(data: any, own: any) {
     .filter((m) => m.unknown || m.usage + m.fixed > 0)
     .sort((a, b) => Number(a.unknown) - Number(b.unknown) || b.usage + b.fixed - (a.usage + a.fixed));
 
-  // 可用天数：和总览的上游余量同一口径，只列上游（不含自营站点），最紧急的在最上面
+  // 可用天数：和运营总览的可用天数同一算法，只列上游（不含自营站点），最紧急的在最上面
   const runway = stations
     .filter((s) => !s.isOwn && s.runway && s.runway.etaDays != null)
     .map((s) => ({
       id: s.id,
-      name: s.name,
+      name: stationDisplayName(s),
       archived: !!s.archivedAt,
       days: Number(s.runway.etaDays),
       burnCny: Number(s.runway.burnPerDay) * rateSnapshotOf(s).cnyPerUsd,
@@ -204,10 +208,12 @@ export function derive(data: any, own: any) {
     .sort((a, b) => a.days - b.days);
 
   return {
+    tz: (data?.tz as string | undefined) || undefined,
     dates,
     rows,
     hasIncome: !!incomeBy,
     incomeIssue,
+    incomeError,
     revenue,
     revenueApprox: !!incomeBy && (ownNoRate || revenueSplit),
     ownNoRate,
@@ -215,6 +221,7 @@ export function derive(data: any, own: any) {
     ownDays,
     usage,
     fixed,
+    fixedCount,
     usageApprox: missingDates.length > 0 || partialDates.length > 0,
     missingDates,
     partialDates,
@@ -236,7 +243,7 @@ export function derive(data: any, own: any) {
   };
 }
 
-// 消耗时段：接口给的是窗口内每个"星期 × 小时"的合计（weekday 0 = 周一）
+// 花费时段：接口给的是所选时间内每个"星期 × 小时"的合计（weekday 0 = 周一）
 export function deriveHeat(data: any) {
   const days = Math.max(1, Number(data.days) || 1);
   const avail = data.heatmapAvailability;

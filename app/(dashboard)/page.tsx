@@ -9,13 +9,13 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { App, Button } from "antd";
 import { api } from "../../lib/client";
-import { NAV_LABELS, STATION_TABS } from "../../lib/brand";
+import { STATION_TABS } from "../../lib/brand";
 import type { WorkflowAction } from "../../lib/client";
-import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActions, etaWindowDays, lowLineOf, stationDisplayName, WATCH_DAYS } from "../../lib/overview-actions";
+import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActions, etaWindowDays, lowLineOf, stationDisplayName } from "../../lib/overview-actions";
 import { balanceMoneyOf, rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
 import { asSentence, describeError, errorText, failureText, refreshAllText, refreshOneText } from "../../lib/error-copy";
-import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, formatAsOf, formatDays, formatMoney, formatZonedDate, formatZonedTime, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
+import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, formatAsOf, formatDays, formatMoney, formatSinceToday, formatZonedDate, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../lib/business-time";
 import { UPSTREAM_FORM_TEXT } from "../../lib/channel-onboarding";
 import { AttentionList } from "../components/attention-list";
@@ -26,10 +26,10 @@ import type { TipRow } from "../components/float-tip";
 import { HBars } from "../components/hbars";
 import type { HBarItem } from "../components/hbars";
 import { CountBadge, Panel } from "../components/panel";
-import { ProfitEquation } from "../components/profit-equation";
+import { EQ_TEXT, ProfitEquation } from "../components/profit-equation";
 import type { EqTerm } from "../components/profit-equation";
 import { RangePicker } from "../components/range-picker";
-import { Runway } from "../components/runway";
+import { Runway, RunwayRulesNote, RUNWAY_TEXT } from "../components/runway";
 import type { RunwayItem } from "../components/runway";
 import { useShellPage } from "../components/shell-context";
 import { LEVEL_ORDER } from "../components/status";
@@ -50,22 +50,20 @@ const REFRESH = workflowActionMeta("refresh")!.label;
 
 // 运营总览独有的话，只在这一处写；用语按 design/ui-copy-spec.md
 const COPY = Object.freeze({
-  business: (range: string) => `${range}经营`,
+  business: EQ_TEXT.business,
   income: (range: string) => `${range}收入`,
   upstreamCost: (range: string) => `${range}上游成本`,
-  todayCaption: (time: string) => `0:00–${time}`,
-  sinceCaption: (date: string) => `${date}–今天`,
   readBusinessFailed: "读不到经营数据",
-  profitFailed: "利润暂时算不出",
+  profitFailed: EQ_TEXT.profitFailed,
   costFailed: "成本暂时算不出",
   readFailed: (what: string) => `读不到${what}`,
-  upstreamCount: (n: number) => `${n} 个上游`,
-  fixedCount: (n: number) => `${n} 个上游，按天平摊`,
-  noFixed: "没有固定成本",
+  upstreamCount: EQ_TEXT.upstreamCount,
+  fixedCount: EQ_TEXT.fixedCount,
+  noFixed: EQ_TEXT.noFixed,
   gapReason: (name: string, days: number) => `${name} 缺 ${days} 天的花费记录。`,
   gapTip: (days: number) => `${days} 天没有花费记录`,
-  costPartialTail: "实际成本会比这里高。",
-  profitPartialTail: "实际数字可能与这里有出入。",
+  costPartialTail: EQ_TEXT.costPartialTail,
+  profitPartialTail: EQ_TEXT.profitPartialTail,
   fromUsers: (n: number) => `来自 ${n} 位下游用户`,
   workflowUnreadable: "读不到上游账单和每日利润里需处理的事。",
   attention: "需处理",
@@ -92,14 +90,9 @@ const COPY = Object.freeze({
   runwayEmptyDesc: "加上上游后，这里显示每个上游还能用多少天。",
   balanceTotal: "余额合计",
   excludesUnreadable: (n: number) => `，不含 ${n} 个读不到余额的上游`,
-  runwayLines: (crit: number, watch: number) => (watch > crit
-    ? `竖线是提醒天数：可用天数在 ${crit} 天以内标红，${watch} 天以内标黄。`
-    : `竖线是提醒天数：可用天数在 ${crit} 天以内标红。`),
   runwayLimit: (n: number) => `这里只列最要紧的 ${n} 个。`,
-  rulesWhereBefore: "提醒天数在",
-  rulesWhereAfter: "的提醒规则里改。",
   noRenewal: "不再续费",
-  tip: Object.freeze({ reason: "原因", balance: "余额", burn: "日均花费", days: "可用天数", basis: "怎么估的", renewal: "续费", requests: "请求数", how: "怎么算的", note: "说明" }),
+  tip: Object.freeze({ ...RUNWAY_TEXT.tip, requests: "请求数", how: "怎么算的", note: "说明" }),
   byUser: "按下游用户",
   byUpstream: "按上游",
   unnamedUser: "未命名用户",
@@ -124,9 +117,8 @@ const balanceWithCny = (s: any, v: number) => balanceMoneyOf(s, v).full;
 function rangeCaption(range: Range, data: any): string {
   const tz = data?.tz || DEFAULT_BUSINESS_TIME_ZONE;
   const now = Date.now();
-  if (range === "today") return COPY.todayCaption(formatZonedTime(now, tz));
   const startLabel = data?.start || shiftDayLabel(dayKeyInTz(now, tz), -(RANGE_DAYS[range] - 1));
-  return COPY.sinceCaption(formatZonedDate(data?.startMs ?? dayStartInTz(startLabel, tz), tz, now));
+  return formatSinceToday(data?.startMs ?? dayStartInTz(startLabel, tz), tz, now);
 }
 
 type Money =
@@ -749,15 +741,9 @@ function RunwayPanel({
     </>
   );
   const foot = (
-    <>
-      {COPY.runwayLines(critDays, WATCH_DAYS)}
+    <RunwayRulesNote critDays={critDays}>
       {rows.length > RUNWAY_LIMIT && COPY.runwayLimit(RUNWAY_LIMIT)}
-      {COPY.rulesWhereBefore}
-      <Link href="/notifications" className="jy-link">
-        {NAV_LABELS.notifications}
-      </Link>
-      {COPY.rulesWhereAfter}
-    </>
+    </RunwayRulesNote>
   );
   return (
     <Panel title={COPY.runway} extra={allLink} sub={sub} foot={foot} body={false}>

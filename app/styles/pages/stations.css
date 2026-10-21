@@ -40,8 +40,6 @@
 .jy-stations-sort:hover { color: var(--jy-ink); }
 
 .jy-stations-type { width: 200px; }
-.jy-stations-banner-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.jy-stations-banner-body p { margin: 0; }
 .jy-stations-skeleton { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
 
 /* 抽屉 */

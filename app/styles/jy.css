@@ -520,6 +520,9 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-banner--crit .jy-sym { color: var(--jy-crit); }
 .jy-banner--info { background: var(--jy-sunken); }
 .jy-banner--info .jy-sym { color: var(--jy-ink-3); }
+/* 横幅正文：标题一行、说明一行、「查看详细原因」，按钮靠右 */
+.jy-banner__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.jy-banner__body p { margin: 0; }
 
 /* 余额趋势弹窗：四个读数 + 范围切换 + 折线 */
 .jy-trend { display: flex; flex-direction: column; gap: 16px; }

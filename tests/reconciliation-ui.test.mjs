@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationNotCountedCostText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
 import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
-import { EMPTY, FIXED_COST_TEXT, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RATE_UNSET_USD, formatAsOf, formatDayZone, formatRate, formatZonedDateTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
+import { EMPTY, FIXED_COST_TEXT, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RATE_UNSET_PARITY, RATE_UNSET_USD, formatAsOf, formatCompact, formatDayZone, formatRate, formatZonedDateTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy, reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
 import { ERROR_CATEGORIES, describeError, failureText } from "../lib/error-copy.js";
@@ -16,6 +16,8 @@ import { NAV_LABELS, STATION_TABS } from "../lib/brand.js";
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
 const baseURL = process.env.RECONCILIATION_UI_BASE_URL || "http://127.0.0.1:3099";
+// 成本估算页顶上那条「数字怎么来的」说明（analytics/page.tsx 的 COPY.sourceTitle；页面文件不能导出常量）
+const COST_SOURCE_TITLE = "数字怎么来的";
 
 const window = { preset: "yesterday", startMs: 1791388800000, endMs: 1791475200000, timezone: "Asia/Shanghai" };
 const billingSource = { stationId: "own-1", provider: "newapi", baseUrl: "https://own.test", accountId: "1", namespaceKey: "d1a1290bfda92d88694126df4ddb3d0f26a6cca87938341857157cd4cc399d83" };
@@ -1610,7 +1612,7 @@ test("workflow verification keyboard and financial source links fit 320/390/768/
         .map((node) => ({ tag: node.tagName, className: node.className, right: node.getBoundingClientRect().right, text: node.textContent?.slice(0, 100) })) }));
     assert.ok(overflow.scroll <= overflow.client, JSON.stringify({ width, ...overflow }));
     await drawer.locator(".ant-drawer-close").focus(); await opened.page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
-    await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText("监控估算来源", { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.getByRole("region", { name: "汇总", exact: true }).waitFor(); await opened.page.getByRole("link", { name: NAV_LABELS.analytics, exact: true }).last().waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); assert.equal(opened.mutations.length, 0); await opened.page.context().browser().close();
+    await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText(COST_SOURCE_TITLE, { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.getByRole("region", { name: "汇总", exact: true }).waitFor(); await opened.page.getByRole("link", { name: NAV_LABELS.analytics, exact: true }).last().waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); assert.equal(opened.mutations.length, 0); await opened.page.context().browser().close();
   }
 });
 
@@ -2433,4 +2435,82 @@ test("删除上游要输入这个上游的名字：不一致时按钮不能点�
   await dialog.waitFor({ state: "hidden" });
   assert.deepEqual(deletes, [{ query: "?purge=true", body: { confirm: "DELETE" } }]);
   await page.getByText(NO_UPSTREAM_TEXT, { exact: true }).waitFor();
+});
+
+const BUSINESS_TZ = "Asia/Shanghai";
+const shanghaiDay = (ms) => new Intl.DateTimeFormat("en-CA", { timeZone: BUSINESS_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
+const shiftDay = (key, n) => { const d = new Date(key + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+// 成本估算的接口数据：按真实的今天往前排，一个按用量计费的上游每天都有记录
+function costAnalyticsFixture(days) {
+  const end = shanghaiDay(Date.now()), start = shiftDay(end, -(days - 1)), dates = Array.from({ length: days }, (_, i) => shiftDay(start, i));
+  return { days, start, end, tz: BUSINESS_TZ, generatedAt: new Date().toISOString(), selection: { includeArchived: false, stationCount: 1, archivedStationCount: 0 },
+    coverage: { earliestDate: start, latestDate: end, availableDays: days, requestedDays: days, monitoredStationCount: 1, isComplete: true, stationGaps: [] },
+    stations: [{ id: "up-a", name: "Fixture upstream", type: "newapi", cnyPerUsd: 7, totalCny: days * 10, fixedCny: 0, runway: { etaDays: 5, burnPerDay: 1, basis: "近 3 小时" } }],
+    daily: dates.map((date) => ({ stationId: "up-a", date, cny: 10 })), fixedDaily: [], heatmap: [], heatmapAvailable: true, heatmapAvailability: { available: true, reason: null, coverage: null } };
+}
+async function openCostPage(t, own) {
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/analytics") return fulfill(route, costAnalyticsFixture(Number(url.searchParams.get("days")) || 30));
+    if (url.pathname === "/api/own/analytics") return own(route);
+    throw new Error("unexpected cost fixture API: " + url.pathname);
+  }, undefined, false, null, "/analytics");
+  await page.getByText(COST_SOURCE_TITLE, { exact: true }).waitFor();
+  return { page, equation: page.getByRole("region", { name: "成本与利润", exact: true }) };
+}
+const failJSON = (route, status, body) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+
+test("成本估算：收入算不出来时按原因说——没设置自营站点给「去设置」，读不到按码说一句、原文收进「查看详细原因」", async (t) => {
+  const unset = await openCostPage(t, (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }));
+  await unset.equation.getByText("没设置", { exact: true }).waitFor();
+  await unset.equation.getByText(new RegExp(`^${OWN_STATION_UNSET_TITLE}，`)).waitFor();
+  assert.equal(await unset.equation.getByRole("link", { name: workflowActionMeta("setup_own_station").label, exact: true }).getAttribute("href"), "/stations");
+  await unset.page.context().browser().close();
+
+  // 接口报错和接口正常、但算收入时报错，是同一句；状态码 502 也按接口给的码归类
+  const raw = "own upstream said 403 forbidden";
+  for (const own of [(route) => failJSON(route, 502, { error: raw, code: "UPSTREAM_AUTH_DENIED" }),
+    (route) => fulfill(route, { station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7.5 }, profit: { error: raw, errorCode: "UPSTREAM_AUTH_DENIED" }, trend: [], tz: BUSINESS_TZ })]) {
+    const failed = await openCostPage(t, own);
+    const sentence = `读不到自营站点的收入：${ERROR_CATEGORIES.permission.text}。这里只算成本。`;
+    const notice = failed.equation.locator(".jy-partial-note").filter({ hasText: sentence }); await notice.waitFor();
+    await failed.equation.getByText("读不到", { exact: true }).waitFor();
+    await notice.getByRole("button", { name: REFRESH, exact: true }).waitFor();
+    // 原文默认收起，展开「查看详细原因」才看得到
+    assert.equal(await failed.page.getByText(raw, { exact: true }).isVisible(), false);
+    await notice.getByText("查看详细原因", { exact: true }).click(); await failed.page.getByText(raw, { exact: true }).waitFor();
+    await failed.page.context().browser().close();
+  }
+});
+
+test("用量分析：读不到用量的上游按码说一句、原文收起；没设置汇率写明按 1 比 1；后台刷新失败保留上次的数据", async (t) => {
+  const generatedAt = new Date().toISOString(); let fail = false; const reads = [];
+  const usage = { range: "today", granularity: "hour", startMs: Date.now() - 3600000, endMs: Date.now(), tz: BUSINESS_TZ, generatedAt, stations: [
+    { id: "up-a", name: "Fixture upstream", type: "newapi", cnyPerUsd: null, isOwn: false, ok: true, summary: { tokens: 1234567, cost: 1.5, requests: 12 },
+      models: [{ model: "gpt-4o", tokens: 1234567, cost: 1.5, requests: 12 }], trend: [{ t: Date.now() - 3600000, tokens: 1234567, cost: 1.5, requests: 12 }] },
+    { id: "up-b", name: "Broken upstream", type: "newapi", cnyPerUsd: 7, isOwn: false, ok: false, error: "HTTP 401: invalid token", code: "AUTHENTICATION_FAILED" },
+  ] };
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/usage") { reads.push(url.searchParams.get("range")); return fail ? failJSON(route, 502, { error: "gateway boom", code: "UPSTREAM_REQUEST_FAILED" }) : fulfill(route, usage); }
+    throw new Error("unexpected usage fixture API: " + url.pathname);
+  }, undefined, false, null, "/usage");
+  const totalToken = page.getByRole("region", { name: "用量合计", exact: true });
+  await totalToken.getByText(formatCompact(1234567), { exact: true }).waitFor();
+  const failed = page.locator(".jy-usage-banner li"); await failed.waitFor();
+  assert.match(await failed.innerText(), new RegExp(`^Broken upstream：${ERROR_CATEGORIES.auth.text}。`));
+  assert.doesNotMatch(await failed.innerText(), /invalid token/);
+  await page.getByText(`1 个上游${RATE_UNSET_PARITY}`, { exact: true }).waitFor();
+  await page.getByText("不含读不到的 1 个上游", { exact: true }).first().waitFor();
+
+  // 切回标签页时重新读，这次读不到：上次的数字留着，横幅说刷新失败和数据截至的时刻，按码说原因
+  fail = true; const before = reads.length;
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  const banner = page.locator(".jy-banner[role=alert]").filter({ hasText: refreshFailedText(Date.parse(generatedAt), BUSINESS_TZ) }); await banner.waitFor();
+  assert.ok(reads.length > before);
+  await banner.getByText(ERROR_CATEGORIES.busy.text, { exact: true }).waitFor();
+  await totalToken.getByText(formatCompact(1234567), { exact: true }).waitFor();
+  fail = false; await banner.getByRole("button", { name: REFRESH, exact: true }).click(); await banner.waitFor({ state: "detached" });
 });
