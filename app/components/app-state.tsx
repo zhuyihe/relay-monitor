@@ -6,8 +6,10 @@ export type AppStateKind = "loading" | "empty" | "error" | "not-found";
 
 type AppStateProps = {
   actions?: ReactNode;
-  description: string;
+  // 出错页、404 按 design/ui-copy-spec.md §8.1 只写一句，不再另加说明
+  description?: string;
   kind: AppStateKind;
+  // 加载中只给读屏用，界面上只有转圈（§8.1「首次加载不写字」）
   title: string;
 };
 
@@ -46,9 +48,9 @@ export default function AppState({ actions, description, kind, title }: AppState
         role={isError ? "alert" : isLoading ? "status" : undefined}
       >
         <StateSymbol kind={kind} />
-        <p className={styles.eyebrow}>{BRAND.productName}</p>
-        <h1>{title}</h1>
-        <p className={styles.description}>{description}</p>
+        {isLoading ? null : <p className={styles.eyebrow}>{BRAND.productName}</p>}
+        <h1 className={isLoading ? "sr-only" : undefined}>{title}</h1>
+        {description ? <p className={styles.description}>{description}</p> : null}
         {actions ? <div className={styles.actions}>{actions}</div> : null}
       </section>
     </div>

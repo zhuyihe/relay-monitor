@@ -1,25 +1,32 @@
 "use client";
-// 告警中心：告警规则 / 通知渠道 / 每日日报。
-// 只在挂载时加载一次、不注册顶栏刷新：自动重载会冲掉正在输入的阈值（沿用 v1 的取舍）。
-// 告警规则整块即时生效：开关、渠道选择改动即保存，数字输入在离开输入框或按回车时保存。
+// 告警中心：提醒规则 / 通知方式 / 日报。
+// 只在挂载时加载一次、不注册顶栏刷新：自动重载会冲掉正在输入的数字（沿用 v1 的取舍）。
+// 提醒规则改了马上保存：开关、通知方式的选择改动即保存，数字输入在离开输入框或按回车时保存。
+// 只在本页出现的话都在同目录的 copy.ts 里；规则名里的余额四档、漏填提示、报错的说法从共用的地方取。
+// 通知方式自己的报错（发送失败的原因）照原文显示，归类留给 A3。
 import "../../styles/pages/notifications.css";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { App, Button, Checkbox, Form, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
+import { NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
-import { formatHhmm } from "../../../lib/format";
+import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
+import { failureText, requiredText } from "../../../lib/error-copy";
+import { BALANCE_STATE_TEXT, formatDayKey, formatZonedTime } from "../../../lib/format";
 import { CountBadge, Panel } from "../../components/panel";
-import { ErrorState, PanelSkeleton } from "../../components/data-state";
+import { Dirty, ErrorState, PanelSkeleton } from "../../components/data-state";
+import { noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { StatusText } from "../../components/status";
 import { TabPanel, Tabs } from "../../components/seg";
+import { COPY } from "./copy";
 
 type ChannelField = { key: string; label: string; required?: boolean };
 type ChannelType = { value: string; label: string; fields: ChannelField[] };
 type TestResult = { ok: boolean; text: string; at: number };
 
-// 渠道类型铭牌缩写
+// 通知方式的图标（类型名取接口返回的 channelTypes，这里只有图标上的缩写）
 const CH_PLATE: Record<string, string> = {
   telegram: "TG", dingtalk: "DT", wecom: "WC", feishu: "FS", bark: "BK",
   ntfy: "NF", serverchan: "SC", resend: "RS", smtp: "SM", webhook: "WH",
@@ -29,16 +36,16 @@ const CH_PLATE: Record<string, string> = {
 // Webhook 地址里带着访问令牌，自定义 Webhook 的请求头常含鉴权信息，一并按密钥处理（审计 V1）
 const SECRET_KEYS = ["botToken", "secret", "token", "sendKey", "apiKey", "password", "deviceKey", "webhook", "url", "headersJson"];
 
-// 告警规则：事件键（渠道绑定用）+ 开关键
+// 提醒规则：事件键（选通知方式用）+ 开关键；名字里的余额四档和上游列表、运营总览同一份（BALANCE_STATE_TEXT）
 const RULES = [
-  { ev: "low", key: "onLow", title: "余额偏低", desc: "剩余余额低于阈值时通知" },
-  { ev: "exhaust", key: "onExhaust", title: "余额耗尽", desc: "剩余余额归零时通知" },
-  { ev: "error", key: "onError", title: "查询失败", desc: "接口查询出错时通知（令牌失效、上游宕机等）" },
-  { ev: "recover", key: "onRecover", title: "恢复正常", desc: "从异常状态恢复后通知" },
-  { ev: "eta", key: "onEta", title: "耗尽预警", desc: "按消耗速度预计即将耗尽时通知" },
+  { ev: "low", key: "onLow", title: BALANCE_STATE_TEXT.low, desc: COPY.ruleDesc.low },
+  { ev: "exhaust", key: "onExhaust", title: BALANCE_STATE_TEXT.empty, desc: COPY.ruleDesc.exhaust },
+  { ev: "error", key: "onError", title: BALANCE_STATE_TEXT.unreadable, desc: COPY.ruleDesc.error },
+  { ev: "recover", key: "onRecover", title: COPY.recover, desc: COPY.ruleDesc.recover },
+  { ev: "eta", key: "onEta", title: BALANCE_STATE_TEXT.soon, desc: COPY.ruleDesc.eta },
 ];
 
-// 阈值内部按天存储；界面按所选单位展示
+// 提醒天数内部按天存储；界面按所选单位展示
 function etaRuleDisplay(r: any): number {
   const days = Number(r?.etaDays ?? 3);
   return r?.etaUnit === "hours" ? +(days * 24).toFixed(2) : +days.toFixed(2);
@@ -54,20 +61,11 @@ function sameIds(a: string[] = [], b: string[] = []) {
   return a.length === b.length && [...a].sort().join("\n") === [...b].sort().join("\n");
 }
 
-function Dirty({ show }: { show: boolean }) {
-  return show ? (
-    <span className="jy-dirty">
-      <i aria-hidden="true" />
-      未保存
-    </span>
-  ) : null;
-}
-
-// 即时保存的状态：保存中 / 有没保存的输入 / 上次保存时间
-function SaveState({ saving, dirty, at }: { saving: boolean; dirty: boolean; at: number }) {
+// 即时保存的状态：保存中 / 有没保存的输入 / 上次保存时间（按业务时区写）
+function SaveState({ saving, dirty, at, tz }: { saving: boolean; dirty: boolean; at: number; tz: string }) {
   return (
     <span aria-live="polite">
-      {saving ? <span className="jy-dirty">保存中…</span> : dirty ? <Dirty show /> : at ? <span className="jy-dirty">已保存 {formatHhmm(at)}</span> : null}
+      {saving ? <span className="jy-dirty">{COPY.saving}</span> : dirty ? <Dirty show /> : at ? <span className="jy-dirty">{COPY.savedAt(formatZonedTime(at, tz))}</span> : null}
     </span>
   );
 }
@@ -81,15 +79,15 @@ type RuleForm = {
 };
 
 // 测试发送结果：图标 + 文字 + 底色，不单靠颜色
-function ResultBox({ r, okTitle }: { r: TestResult; okTitle: string }) {
+function ResultBox({ r, okTitle, tz }: { r: TestResult; okTitle: string; tz: string }) {
   return (
     <div className={`jy-test-result${r.ok ? "" : " jy-test-result--bad"}`}>
       <Sym kind={r.ok ? "good" : "crit"} />
-      <b>{r.ok ? okTitle : "发送失败"}</b>
+      <b>{r.ok ? okTitle : COPY.sendFailed}</b>
       <span>
         {r.text}
         {r.text ? "；" : ""}
-        {formatHhmm(r.at)} 发送
+        {COPY.sentAt(formatZonedTime(r.at, tz))}
       </span>
     </div>
   );
@@ -111,8 +109,10 @@ export default function NotificationsPage() {
   const [metaLoading, setMetaLoading] = useState(true);
   const [metaErr, setMetaErr] = useState<unknown>(null);
   const [settings, setSettings] = useState<any>({});
+  // 业务时区（/api/meta 的 tz）：「已保存 14:30」「上次定时发送」按它写
+  const [tz, setTz] = useState(DEFAULT_BUSINESS_TIME_ZONE);
 
-  // 规则阈值输入（开关和渠道绑定直接落库，不经过这里）
+  // 规则里的数字输入（开关和通知方式的选择直接落库，不经过这里）
   const [etaVal, setEtaVal] = useState<number | null>(null);
   const [etaUnit, setEtaUnit] = useState<"days" | "hours">("days");
   const [renotify, setRenotify] = useState<number | null>(24);
@@ -189,6 +189,7 @@ export default function NotificationsPage() {
     setMetaErr(null);
     try {
       const m = await api("/api/meta");
+      if (m.tz) setTz(m.tz);
       setSettings(m.settings);
       syncDrForm(m.settings);
       setMetaLoaded(true);
@@ -220,8 +221,8 @@ export default function NotificationsPage() {
     try {
       await api(`/api/notifications/channels/${c.id}`, { method: "PUT", body: { enabled: next } });
       setChannels((list) => list.map((x) => (x.id === c.id ? { ...x, enabled: next } : x)));
-    } catch (e: any) {
-      message.error(e.message);
+    } catch (e) {
+      message.error(failureText(COPY.saveFailed, e));
     }
   };
 
@@ -229,9 +230,10 @@ export default function NotificationsPage() {
     setRowTesting(c.id);
     try {
       const r = await api("/api/notifications/test", { body: { channelId: c.id } });
-      setRowTests((m) => ({ ...m, [c.id]: { ok: !!r.ok, text: r.ok ? `已发送到「${c.name}」` : r.error || "", at: Date.now() } }));
-    } catch (e: any) {
-      setRowTests((m) => ({ ...m, [c.id]: { ok: false, text: e.message, at: Date.now() } }));
+      setRowTests((m) => ({ ...m, [c.id]: { ok: !!r.ok, text: r.ok ? COPY.sentTo(c.name) : r.error || "", at: Date.now() } }));
+    } catch (e) {
+      // 接口本身出错（不是通知方式发送失败）：按 §8.2 归类
+      setRowTests((m) => ({ ...m, [c.id]: { ok: false, text: noteOf(e).text, at: Date.now() } }));
     } finally {
       setRowTesting(null);
     }
@@ -239,18 +241,18 @@ export default function NotificationsPage() {
 
   const deleteChannel = (c: any) => {
     modal.confirm({
-      title: `确定删除渠道「${c.name}」？`,
-      content: "删除后不能恢复。",
-      okText: "删除",
+      title: COPY.removeTitle(c.name),
+      content: COPY.removeBody,
+      okText: COPY.remove,
       okButtonProps: { danger: true },
-      cancelText: "取消",
+      cancelText: COPY.cancel,
       onOk: async () => {
         try {
           await api(`/api/notifications/channels/${c.id}`, { method: "DELETE" });
           await reloadChannels();
-          message.success("已删除");
-        } catch (e: any) {
-          message.error(e.message);
+          message.success(COPY.deleted);
+        } catch (e) {
+          message.error(failureText(COPY.deleteFailed, e));
         }
       },
     });
@@ -304,20 +306,20 @@ export default function NotificationsPage() {
     // 必填校验：编辑时密钥不回显，已配置过的空值视为「保持不变」不算缺失
     const missing = (t?.fields || []).filter((f) => f.required && !config[f.key] && !editingCh?.config?.[f.key]);
     if (missing.length) {
-      setChErrors(Object.fromEntries(missing.map((f) => [f.key, `请填写${shortLabel(f.label).trim()}`])));
+      setChErrors(Object.fromEntries(missing.map((f) => [f.key, requiredText(shortLabel(f.label).trim())])));
       document.getElementById(`${uid}-ch-${missing[0].key}`)?.focus();
       return;
     }
     setChSaving(true);
     try {
-      const payload = { name: chName.trim() || "未命名渠道", type: chType, config };
+      const payload = { name: chName.trim() || COPY.unnamed, type: chType, config };
       if (editingCh) await api(`/api/notifications/channels/${editingCh.id}`, { method: "PUT", body: payload });
       else await api("/api/notifications/channels", { body: payload });
       setChOpen(false);
       await reloadChannels();
-      message.success("已保存");
-    } catch (e: any) {
-      message.error(e.message);
+      message.success(COPY.saved);
+    } catch (e) {
+      message.error(failureText(COPY.saveFailed, e));
     } finally {
       setChSaving(false);
     }
@@ -336,18 +338,18 @@ export default function NotificationsPage() {
     setChTest(null);
     try {
       const r = await api("/api/notifications/test", { body: { type: chType, config } });
-      setChTest({ ok: !!r.ok, text: r.ok ? "请在对应应用里确认是否收到" : r.error || "", at: Date.now() });
-    } catch (e: any) {
-      setChTest({ ok: false, text: e.message, at: Date.now() });
+      setChTest({ ok: !!r.ok, text: r.ok ? COPY.checkInbox : r.error || "", at: Date.now() });
+    } catch (e) {
+      setChTest({ ok: false, text: noteOf(e).text, at: Date.now() });
     } finally {
       setChTesting(false);
     }
   };
 
-  // ---- 告警规则 ---------------------------------------------------------------
+  // ---- 提醒规则 ---------------------------------------------------------------
 
-  // 开关即时落库；只更新 rules，不覆盖未保存的阈值输入
-  // 关闭规则时，它的阈值框会被禁用：清空没保存的话恢复成已保存的值，并清掉报错，免得「未保存」卡住
+  // 开关即时落库；只更新 rules，不覆盖没保存的数字输入
+  // 关闭规则时，它的数字框会被禁用：清空没保存的话恢复成已保存的值，并清掉报错，免得「未保存」卡住
   const toggleRule = async (key: string) => {
     const turningOff = !!rules[key];
     try {
@@ -362,12 +364,12 @@ export default function NotificationsPage() {
         setErrThreshold((v) => v ?? Number(r.rules?.errorThreshold ?? 1));
         setRuleErrors((e) => ({ ...e, errThreshold: "" }));
       }
-    } catch (e: any) {
-      message.error(e.message);
+    } catch (e) {
+      message.error(failureText(COPY.saveFailed, e));
     }
   };
 
-  // 每类告警的渠道绑定：选择即落库；失败时回滚为服务端状态
+  // 每种提醒发到哪些通知方式：选择即落库；失败时回滚为服务端状态
   const saveChannelsFor = async (key: string, ids: string[]) => {
     setChannelsFor((cf) => ({ ...cf, [key]: ids }));
     try {
@@ -375,8 +377,8 @@ export default function NotificationsPage() {
       setRules(r.rules);
       setChannelsFor(r.rules?.channelsFor || {});
       setRulesSavedAt(Date.now());
-    } catch (e: any) {
-      message.error(e.message);
+    } catch (e) {
+      message.error(failureText(COPY.saveFailed, e));
       setChannelsFor(rules?.channelsFor || {});
     }
   };
@@ -412,15 +414,15 @@ export default function NotificationsPage() {
     const f: RuleForm = { etaUnit, etaVal, renotify, errThreshold, errRetry, ...over };
     // 清空视为「未填写」而不是 0；被禁用（规则关闭）的空字段沿用已保存的值，不拦截保存
     const errs: Record<string, string> = {};
-    if (f.etaVal == null && rules.onEta) errs.eta = "请填写耗尽预警阈值";
-    if (f.errThreshold == null && rules.onError) errs.errThreshold = "请填写失败次数";
-    if (f.renotify == null) errs.renotify = "请填写重复提醒间隔，0 表示只提醒一次";
-    if (f.errRetry == null) errs.errRetry = "请填写重试间隔，0 表示关闭";
+    if (f.etaVal == null && rules.onEta) errs.eta = requiredText(COPY.etaLabel);
+    if (f.errThreshold == null && rules.onError) errs.errThreshold = requiredText(COPY.errLabel);
+    if (f.renotify == null) errs.renotify = `${requiredText(COPY.renotify)}${COPY.renotifyZero}`;
+    if (f.errRetry == null) errs.errRetry = `${requiredText(COPY.retryLabel)}${COPY.retryZero}`;
     setRuleErrors(errs);
     if (Object.keys(errs).length) return;
     setRulesSaving(true);
     try {
-      // 只有用户改过阈值才提交 etaDays；否则由服务端保留原值，免得显示用的两位小数把阈值改掉
+      // 只有用户改过提醒天数才提交 etaDays；否则由服务端保留原值，免得显示用的两位小数把它改掉
       const etaEdited = f.etaVal != null && f.etaVal !== etaRuleDisplay({ ...rules, etaUnit: f.etaUnit });
       const val = Number(f.etaVal);
       const r = await api("/api/notifications/rules", {
@@ -442,8 +444,8 @@ export default function NotificationsPage() {
       setErrThreshold(keep(f.errThreshold, Number(r.rules?.errorThreshold ?? 1)));
       setErrRetry(keep(f.errRetry, Number(r.rules?.errorRetrySec ?? 30)));
       setRulesSavedAt(Date.now());
-    } catch (e: any) {
-      message.error(e.message);
+    } catch (e) {
+      message.error(failureText(COPY.saveFailed, e));
     } finally {
       setRulesSaving(false);
     }
@@ -458,7 +460,7 @@ export default function NotificationsPage() {
     setTimeout(() => commitRef.current?.(), 0);
   };
 
-  // ---- 每日日报 ---------------------------------------------------------------
+  // ---- 日报 -------------------------------------------------------------------
 
   const drSaved = settings?.dailyReport || {};
   const drDirty =
@@ -474,9 +476,9 @@ export default function NotificationsPage() {
       });
       setSettings(r.settings);
       syncDrForm(r.settings);
-      message.success("日报设置已保存");
-    } catch (e: any) {
-      message.error(e.message);
+      message.success(COPY.saved);
+    } catch (e) {
+      message.error(failureText(COPY.saveFailed, e));
     } finally {
       setDrSaving(false);
     }
@@ -489,8 +491,8 @@ export default function NotificationsPage() {
       setReport({ text: r.text, html: r.html });
       setReportTab("html");
       setReportOpen(true);
-    } catch (e: any) {
-      message.error(e.message);
+    } catch (e) {
+      message.error(failureText(COPY.previewFailed, e));
     } finally {
       setPreviewing(false);
     }
@@ -505,12 +507,12 @@ export default function NotificationsPage() {
       const ok = results.filter((x) => x.ok).length;
       setSendResult({
         ok: ok > 0,
-        text: `日报已发送：${ok}/${results.length} 个渠道成功`,
+        text: COPY.reportSent(ok, results.length),
         at: Date.now(),
-        fails: results.filter((x) => !x.ok).map((x) => `${x.name || x.id}：${x.error || "发送失败"}`),
+        fails: results.filter((x) => !x.ok).map((x) => `${x.name || x.id}：${x.error || COPY.sendFailed}`),
       });
-    } catch (e: any) {
-      setSendResult({ ok: false, text: e.message, at: Date.now(), fails: [] });
+    } catch (e) {
+      setSendResult({ ok: false, text: noteOf(e).text, at: Date.now(), fails: [] });
     } finally {
       setSending(false);
     }
@@ -522,17 +524,17 @@ export default function NotificationsPage() {
   const typeLabel = (type: string) => channelTypes.find((x) => x.value === type)?.label || type;
   const channelOptions = channels.map((c: any) => ({
     value: c.id,
-    label: c.enabled === false ? `${c.name}（已停用）` : c.name,
+    label: c.enabled === false ? `${c.name}${COPY.disabledSuffix}` : c.name,
   }));
 
   const testCell = (c: any) => {
     const t = rowTests[c.id];
-    if (!t) return <span className="jy-muted">未测试</span>;
+    if (!t) return <span className="jy-muted">{COPY.untested}</span>;
     return (
       <span className="jy-notifications-test">
         <StatusText level={t.ok ? "good" : "crit"}>
-          {t.ok ? "发送成功" : "发送失败"}
-          <span className="jy-caption">{formatHhmm(t.at)}</span>
+          {t.ok ? COPY.sent : COPY.sendFailed}
+          <span className="jy-caption">{formatZonedTime(t.at, tz)}</span>
         </StatusText>
         {!t.ok && t.text && <span className="jy-caption">{t.text}</span>}
       </span>
@@ -541,22 +543,22 @@ export default function NotificationsPage() {
 
   const rowActions = (c: any) => (
     <>
-      <Button type="link" size="small" loading={rowTesting === c.id} onClick={() => testChannel(c)} aria-label={`向「${c.name}」发送测试消息`}>
-        测试
+      <Button type="link" size="small" loading={rowTesting === c.id} onClick={() => testChannel(c)} aria-label={COPY.testAria(c.name)}>
+        {COPY.test}
       </Button>
-      <Button type="link" size="small" onClick={() => openChModal(c)} aria-label={`编辑「${c.name}」`}>
-        编辑
+      <Button type="link" size="small" onClick={() => openChModal(c)} aria-label={COPY.editAria(c.name)}>
+        {COPY.edit}
       </Button>
-      <Button type="link" size="small" danger onClick={() => deleteChannel(c)} aria-label={`删除「${c.name}」`}>
-        删除
+      <Button type="link" size="small" danger onClick={() => deleteChannel(c)} aria-label={COPY.removeAria(c.name)}>
+        {COPY.remove}
       </Button>
     </>
   );
 
   const enabledToggle = (c: any) => (
     <span className="jy-notifications-toggle">
-      <Switch size="small" checked={c.enabled !== false} onChange={() => toggleChannel(c)} aria-label={`启用渠道「${c.name}」`} />
-      <span>{c.enabled !== false ? "已启用" : "已停用"}</span>
+      <Switch size="small" checked={c.enabled !== false} onChange={() => toggleChannel(c)} aria-label={COPY.enable(c.name)} />
+      <span>{c.enabled !== false ? COPY.enabled : COPY.disabled}</span>
     </span>
   );
 
@@ -576,13 +578,15 @@ export default function NotificationsPage() {
       return (
         // 纯文字，不用 flex 容器，否则链接两侧会被 gap 撑开
         <p className="jy-notifications-note">
-          阈值取全局低余额阈值（<Link className="jy-link" href="/settings">系统设置</Link>），单个上游可单独覆盖
+          {COPY.lowBefore}
+          <Link className="jy-link" href="/settings">{NAV_LABELS.settings}</Link>
+          {COPY.lowAfter}
         </p>
       );
     if (ruleKey === "onEta")
       return (
         <div className="jy-notifications-cond">
-          <label htmlFor={`${uid}-eta`}>预计在</label>
+          <label htmlFor={`${uid}-eta`}>{COPY.etaBefore}</label>
           <Space.Compact>
             <InputNumber
               id={`${uid}-eta`}
@@ -601,17 +605,17 @@ export default function NotificationsPage() {
               aria-describedby={ruleErrors.eta ? `${uid}-eta-err` : undefined}
             />
             <Select
-              aria-label="耗尽预警阈值单位"
+              aria-label={COPY.etaUnit}
               value={etaUnit}
               onChange={onEtaUnitChange}
               disabled={off}
               options={[
-                { value: "days", label: "天" },
-                { value: "hours", label: "小时" },
+                { value: "days", label: COPY.day },
+                { value: "hours", label: COPY.hour },
               ]}
             />
           </Space.Compact>
-          <span>内用完时通知</span>
+          <span>{COPY.etaAfter}</span>
           {ruleErrors.eta && (
             <span className="jy-err" id={`${uid}-eta-err`} role="alert">
               <Sym kind="crit" />
@@ -623,14 +627,14 @@ export default function NotificationsPage() {
     if (ruleKey === "onError")
       return (
         <div className="jy-notifications-cond">
-          <label htmlFor={`${uid}-errThreshold`}>连续失败达到</label>
+          <label htmlFor={`${uid}-errThreshold`}>{COPY.errBefore}</label>
           <InputNumber
             id={`${uid}-errThreshold`}
             onBlur={commitRules}
             onPressEnter={commitRules}
             min={1}
             precision={0}
-            suffix="次"
+            suffix={COPY.times}
             value={errThreshold}
             onChange={(v) => {
               setErrThreshold(v as number | null);
@@ -641,7 +645,7 @@ export default function NotificationsPage() {
             aria-invalid={ruleErrors.errThreshold ? true : undefined}
             aria-describedby={ruleErrors.errThreshold ? `${uid}-errThreshold-desc ${uid}-errThreshold-err` : `${uid}-errThreshold-desc`}
           />
-          <span id={`${uid}-errThreshold-desc`}>才通知（1 = 首次失败即通知）</span>
+          <span id={`${uid}-errThreshold-desc`}>{COPY.errAfter}</span>
           {ruleErrors.errThreshold && (
             <span className="jy-err" id={`${uid}-errThreshold-err`} role="alert">
               <Sym kind="crit" />
@@ -657,15 +661,15 @@ export default function NotificationsPage() {
   if (!notifLoaded && !notifErr && notifLoading) {
     return (
       <div className="jy-page">
-        <PanelSkeleton title="告警规则" lines={6} />
-        <PanelSkeleton title="通知渠道" lines={3} />
-        <PanelSkeleton title="每日日报" lines={3} />
+        <PanelSkeleton title={COPY.rules} lines={6} />
+        <PanelSkeleton title={COPY.channels} lines={3} />
+        <PanelSkeleton title={COPY.report} lines={3} />
       </div>
     );
   }
 
   const notifFailed = !notifLoaded && !!notifErr;
-  // 有告警或日报要发，却没有可用的渠道：消息会被静默丢掉，放在页首提醒
+  // 有提醒或日报要发，却没有能用的通知方式：消息会被悄悄丢掉，放在页首提醒
   const wantsDelivery = RULES.some((r) => rules[r.key]) || !!settings?.dailyReport?.enabled;
   const noDelivery = notifLoaded && wantsDelivery && !channels.some((c) => c.enabled !== false);
   const showChannels = () => {
@@ -678,41 +682,39 @@ export default function NotificationsPage() {
         <div className="jy-banner jy-banner--crit" role="alert">
           <Sym kind="crit" />
           <div className="jy-notifications-banner-body">
-            <b>{channels.length ? "通知渠道都已停用，告警不会送达" : "还没有通知渠道，告警不会送达"}</b>
-            <p className="jy-caption">
-              {channels.length ? "至少启用一个渠道，已开启的告警和日报才会发出。" : "添加至少一个渠道，已开启的告警和日报才会发出。"}
-            </p>
+            <b>{channels.length ? COPY.noDeliveryOff : COPY.noDeliveryNone}</b>
+            <p className="jy-caption">{channels.length ? COPY.noDeliveryOffHint : COPY.noDeliveryNoneHint}</p>
           </div>
           {channels.length ? (
             <Button size="small" onClick={showChannels}>
-              查看通知渠道
+              {COPY.showChannels}
             </Button>
           ) : (
             <Button size="small" type="primary" icon={<Icon name="plus" />} onClick={() => openChModal(null)}>
-              添加渠道
+              {COPY.add}
             </Button>
           )}
         </div>
       ) : null}
-      {/* 告警规则 */}
+      {/* 提醒规则 */}
       {notifFailed ? (
-        <Panel title="告警规则">
-          <ErrorState what="读不到告警规则和通知渠道" error={notifErr} onRetry={loadNotif} />
+        <Panel title={COPY.rules}>
+          <ErrorState what={COPY.rulesFailed} error={notifErr} onRetry={loadNotif} />
         </Panel>
       ) : (
         <Panel
-          title="告警规则"
-          badge={<SaveState saving={rulesSaving} dirty={rulesDirty} at={rulesSavedAt} />}
-          caption="改动即时生效；每类告警可单独选择通知渠道，不选则发到所有启用的渠道"
+          title={COPY.rules}
+          badge={<SaveState saving={rulesSaving} dirty={rulesDirty} at={rulesSavedAt} tz={tz} />}
+          caption={COPY.rulesCaption}
           body="flush"
         >
           <div className="jy-table-wrap">
             <table className="jy-data jy-notifications-rules">
               <thead>
                 <tr>
-                  <th className="col-switch">开关</th>
-                  <th>告警与触发条件</th>
-                  <th className="col-to">通知到</th>
+                  <th className="col-switch">{COPY.colSwitch}</th>
+                  <th>{COPY.colRule}</th>
+                  <th className="col-to">{COPY.colTo}</th>
                 </tr>
               </thead>
               <tbody>
@@ -724,8 +726,8 @@ export default function NotificationsPage() {
                       <td className="col-switch">
                         <Switch
                           checked={on}
-                          checkedChildren="开"
-                          unCheckedChildren="关"
+                          checkedChildren={COPY.on}
+                          unCheckedChildren={COPY.off}
                           onChange={() => toggleRule(rule.key)}
                           aria-labelledby={titleId}
                         />
@@ -741,8 +743,8 @@ export default function NotificationsPage() {
                         <Select
                           mode="multiple"
                           allowClear
-                          aria-label={`「${rule.title}」通知到的渠道`}
-                          placeholder={channels.length ? "全部启用渠道" : "还没有通知渠道"}
+                          aria-label={COPY.ruleTo(rule.title)}
+                          placeholder={channels.length ? COPY.allChannels : COPY.noChannels}
                           maxTagCount="responsive"
                           optionFilterProp="label"
                           value={channelsFor[rule.ev] || []}
@@ -760,17 +762,17 @@ export default function NotificationsPage() {
 
           <div className="jy-notifications-pad">
             <fieldset className="jy-fs">
-              <legend>提醒节奏</legend>
-              <p className="fs-desc">对所有已开启的告警生效。</p>
+              <legend>{COPY.pace}</legend>
+              <p className="fs-desc">{COPY.paceHint}</p>
               <div className="jy-two">
                 <div className="jy-field">
-                  <label htmlFor={`${uid}-renotify`}>重复提醒间隔</label>
+                  <label htmlFor={`${uid}-renotify`}>{COPY.renotify}</label>
                   <InputNumber
                     id={`${uid}-renotify`}
                     onBlur={commitRules}
                     onPressEnter={commitRules}
                     min={0}
-                    suffix="小时"
+                    suffix={COPY.hours}
                     value={renotify}
                     onChange={(v) => {
                       setRenotify(v as number | null);
@@ -787,19 +789,19 @@ export default function NotificationsPage() {
                     </span>
                   ) : (
                     <span key="desc" className="jy-caption" id={`${uid}-renotify-desc`}>
-                      同一异常持续存在时，每隔 N 小时再次提醒（0 = 只提醒一次）
+                      {COPY.renotifyHint}
                     </span>
                   )}
                 </div>
                 <div className="jy-field">
-                  <label htmlFor={`${uid}-errRetry`}>失败快速重试</label>
+                  <label htmlFor={`${uid}-errRetry`}>{COPY.retry}</label>
                   <InputNumber
                     id={`${uid}-errRetry`}
                     onBlur={commitRules}
                     onPressEnter={commitRules}
                     min={0}
                     precision={0}
-                    suffix="秒"
+                    suffix={COPY.seconds}
                     value={errRetry}
                     onChange={(v) => {
                       setErrRetry(v as number | null);
@@ -816,7 +818,7 @@ export default function NotificationsPage() {
                     </span>
                   ) : (
                     <span key="desc" className="jy-caption" id={`${uid}-errRetry-desc`}>
-                      查询失败后隔 N 秒立即重试一次以尽快确认，不必等下次轮询（0 = 关闭）
+                      {COPY.retryHint}
                     </span>
                   )}
                 </div>
@@ -826,21 +828,21 @@ export default function NotificationsPage() {
         </Panel>
       )}
 
-      {/* 通知渠道 */}
+      {/* 通知方式 */}
       {notifFailed ? (
-        <Panel title="通知渠道">
-          <ErrorState what="读不到通知渠道" error={notifErr} onRetry={loadNotif} />
+        <Panel title={COPY.channels}>
+          <ErrorState what={COPY.channelsFailed} error={notifErr} onRetry={loadNotif} />
         </Panel>
       ) : (
         <Panel
-          title="通知渠道"
+          title={COPY.channels}
           className="jy-notifications-channels"
           badge={<CountBadge count={channels.length} muted />}
-          caption="告警和日报通过这些渠道推送"
+          caption={COPY.channelsCaption}
           extra={
             channels.length ? (
               <Button icon={<Icon name="plus" />} onClick={() => openChModal(null)}>
-                添加渠道
+                {COPY.add}
               </Button>
             ) : null
           }
@@ -852,11 +854,11 @@ export default function NotificationsPage() {
                 <table className="jy-data">
                   <thead>
                     <tr>
-                      <th>类型</th>
-                      <th>名称</th>
-                      <th>状态</th>
-                      <th>本次测试</th>
-                      <th className="r">操作</th>
+                      <th>{COPY.colType}</th>
+                      <th>{COPY.colName}</th>
+                      <th>{COPY.colStatus}</th>
+                      <th>{COPY.colTest}</th>
+                      <th className="r">{COPY.colActions}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -874,7 +876,7 @@ export default function NotificationsPage() {
                   </tbody>
                 </table>
               </div>
-              <ul className="jy-m-list" aria-label="通知渠道">
+              <ul className="jy-m-list" aria-label={COPY.channels}>
                 {channels.map((c: any) => (
                   <li key={c.id}>
                     <span className="m-top">{c.name}</span>
@@ -891,13 +893,13 @@ export default function NotificationsPage() {
           ) : (
             <div className="jy-empty-inline">
               <div>
-                <b className="jy-notifications-empty-title">还没有通知渠道</b>
-                <p className="jy-notifications-empty-desc">添加至少一个渠道后，告警和日报才能送达。可选的渠道类型：</p>
+                <b className="jy-notifications-empty-title">{COPY.noChannels}</b>
+                <p className="jy-notifications-empty-desc">{COPY.emptyHint}</p>
               </div>
               <ul className="jy-notifications-types">
                 {channelTypes.map((t) => (
                   <li key={t.value}>
-                    <Button onClick={() => openChModal(null, t.value)} aria-label={`添加${t.label}渠道`}>
+                    <Button onClick={() => openChModal(null, t.value)} aria-label={COPY.addType(t.label)}>
                       <span className="jy-notifications-plate" aria-hidden="true">
                         {CH_PLATE[t.value] || "?"}
                       </span>
@@ -907,38 +909,34 @@ export default function NotificationsPage() {
                 ))}
               </ul>
               <Button type="primary" icon={<Icon name="plus" />} onClick={() => openChModal(null)}>
-                添加渠道
+                {COPY.add}
               </Button>
             </div>
           )}
         </Panel>
       )}
 
-      {/* 每日日报 */}
+      {/* 日报：发送时间按业务时区，和每日利润、日汇总同一天界（§6 不另注时区） */}
       {!metaLoaded && metaLoading ? (
-        <PanelSkeleton title="每日日报" lines={3} />
+        <PanelSkeleton title={COPY.report} lines={3} />
       ) : !metaLoaded ? (
-        <Panel title="每日日报">
-          <ErrorState what="读不到日报设置" error={metaErr} onRetry={loadMeta} />
+        <Panel title={COPY.report}>
+          <ErrorState what={COPY.reportFailed} error={metaErr} onRetry={loadMeta} />
         </Panel>
       ) : (
-        <Panel
-          title="每日日报"
-          badge={<Dirty show={drDirty} />}
-          caption="定时汇总昨日自营业务经营情况并推送（时间按服务器时区）"
-        >
+        <Panel title={COPY.report} badge={<Dirty show={drDirty} />} caption={COPY.reportCaption}>
           <Form layout="vertical" requiredMark={false} component="div" className="jy-form jy-notifications-dr">
-            <Form.Item label="启用日报" htmlFor={`${uid}-dr-enabled`} extra="每天在设定时间生成并发送昨日报告">
+            <Form.Item label={COPY.reportEnable} htmlFor={`${uid}-dr-enabled`} extra={COPY.reportEnableHint}>
               <Switch
                 id={`${uid}-dr-enabled`}
                 checked={drEnabled}
-                checkedChildren="开"
-                unCheckedChildren="关"
+                checkedChildren={COPY.on}
+                unCheckedChildren={COPY.off}
                 onChange={setDrEnabled}
               />
             </Form.Item>
             <div className="jy-two">
-              <Form.Item label="发送时间" htmlFor={`${uid}-dr-time`} extra="服务器时区的每日时刻">
+              <Form.Item label={COPY.reportTime} htmlFor={`${uid}-dr-time`} extra={COPY.reportTimeHint}>
                 <TimePicker
                   id={`${uid}-dr-time`}
                   format="HH:mm"
@@ -949,8 +947,8 @@ export default function NotificationsPage() {
                 />
               </Form.Item>
               <Form.Item
-                label={<span id={`${uid}-dr-ch`}>发送渠道</span>}
-                extra="不勾选 = 所有启用的渠道；日报较长，建议勾选邮件渠道"
+                label={<span id={`${uid}-dr-ch`}>{COPY.reportTo}</span>}
+                extra={COPY.reportToHint}
               >
                 {channels.length ? (
                   <div role="group" aria-labelledby={`${uid}-dr-ch`}>
@@ -963,27 +961,27 @@ export default function NotificationsPage() {
                     />
                   </div>
                 ) : (
-                  <span className="jy-muted">{notifFailed ? "通知渠道未能加载" : "先添加通知渠道"}</span>
+                  <span className="jy-muted">{notifFailed ? COPY.channelsFailed : COPY.reportNoChannels}</span>
                 )}
               </Form.Item>
             </div>
           </Form>
           <div className="jy-notifications-actions">
             <Button type="primary" loading={drSaving} onClick={saveDailyReport}>
-              保存日报设置
+              {COPY.save}
             </Button>
             <Button loading={previewing} onClick={previewReport}>
-              预览
+              {COPY.reportPreview}
             </Button>
             <Button loading={sending} onClick={sendReport}>
-              立即发送
+              {COPY.reportSend}
             </Button>
             <span className="jy-caption">
               {drDirty
-                ? "「立即发送」按已保存的渠道设置发送"
+                ? COPY.reportSendHint
                 : drSaved.lastSent
-                  ? `上次定时发送：${drSaved.lastSent}`
-                  : "预览按当前数据生成；立即发送不影响当天的定时发送"}
+                  ? COPY.reportLastSent(formatDayKey(drSaved.lastSent, tz))
+                  : COPY.reportIdleHint}
             </span>
           </div>
           <div aria-live="polite">
@@ -991,7 +989,7 @@ export default function NotificationsPage() {
               <div className={`jy-test-result${sendResult.ok ? "" : " jy-test-result--bad"}`}>
                 <Sym kind={sendResult.ok ? "good" : "crit"} />
                 <b>{sendResult.text}</b>
-                <span>{formatHhmm(sendResult.at)} 发送</span>
+                <span>{COPY.sentAt(formatZonedTime(sendResult.at, tz))}</span>
                 {sendResult.fails.map((f) => (
                   <span key={f}>{f}</span>
                 ))}
@@ -1001,37 +999,37 @@ export default function NotificationsPage() {
         </Panel>
       )}
 
-      {/* 通知渠道弹窗 */}
+      {/* 通知方式弹窗 */}
       <Modal
         open={chOpen}
-        title={editingCh ? "编辑通知渠道" : "添加通知渠道"}
+        title={editingCh ? COPY.editTitle : COPY.addTitle}
         onCancel={() => setChOpen(false)}
         footer={[
           <Button key="cancel" onClick={() => setChOpen(false)}>
-            取消
+            {COPY.cancel}
           </Button>,
           <Button key="save" type="primary" loading={chSaving} onClick={saveChannel}>
-            {editingCh ? "保存修改" : "添加渠道"}
+            {editingCh ? COPY.save : COPY.add}
           </Button>,
         ]}
         destroyOnHidden
       >
-        <p className="jy-caption jy-notifications-modal-intro">默认接收所有告警；可在「告警规则」中按告警类型指定渠道。</p>
+        <p className="jy-caption jy-notifications-modal-intro">{COPY.modalIntro}</p>
         <Form layout="vertical" onFinish={saveChannel} autoComplete="off" className="jy-form">
           <div className="jy-two">
-            <Form.Item label="名称" htmlFor={`${uid}-ch-name`}>
+            <Form.Item label={COPY.name} htmlFor={`${uid}-ch-name`}>
               <Input
                 id={`${uid}-ch-name`}
                 autoComplete="off"
-                placeholder="例如：运维 Telegram 群"
+                placeholder={COPY.namePlaceholder}
                 value={chName}
                 onChange={(e) => setChName(e.target.value)}
               />
             </Form.Item>
             <Form.Item
-              label="渠道类型"
+              label={COPY.type}
               htmlFor={`${uid}-ch-type`}
-              extra={editingCh ? "已创建的渠道不能更改类型" : undefined}
+              extra={editingCh ? COPY.typeLocked : undefined}
             >
               <Select
                 id={`${uid}-ch-type`}
@@ -1049,8 +1047,8 @@ export default function NotificationsPage() {
             const val = chConfig[f.key] || "";
             const help = saved
               ? val
-                ? `保存后替换原来的${shortLabel(f.label)}`
-                : `留空则继续使用已保存的${shortLabel(f.label)}`
+                ? COPY.replaceSecret(shortLabel(f.label))
+                : COPY.keepSecret(shortLabel(f.label))
               : undefined;
             return (
               <Form.Item
@@ -1066,7 +1064,7 @@ export default function NotificationsPage() {
                   <Input.Password
                     id={id}
                     autoComplete="new-password"
-                    placeholder={saved ? "已保存" : undefined}
+                    placeholder={saved ? COPY.secretSaved : undefined}
                     value={val}
                     onChange={(e) => onChFieldChange(f.key, e.target.value)}
                   />
@@ -1079,38 +1077,38 @@ export default function NotificationsPage() {
         </Form>
         <div className="jy-test-row">
           <Button icon={<Icon name="test" />} loading={chTesting} onClick={testChForm}>
-            发送测试
+            {COPY.sendTest}
           </Button>
-          <span className="jy-caption">用当前填写的配置发一条测试消息，不会保存</span>
+          <span className="jy-caption">{COPY.sendTestHint}</span>
         </div>
-        <div aria-live="polite">{chTest && <ResultBox r={chTest} okTitle="测试消息已发送" />}</div>
+        <div aria-live="polite">{chTest && <ResultBox r={chTest} okTitle={COPY.testSent} tz={tz} />}</div>
       </Modal>
 
-      {/* 日报预览弹窗：HTML / 纯文本两个标签页 */}
+      {/* 日报预览弹窗：邮件 / 聊天软件两个标签页 */}
       <Modal
         open={reportOpen}
-        title="日报预览"
+        title={COPY.previewTitle}
         width={720}
         onCancel={() => setReportOpen(false)}
-        footer={<Button onClick={() => setReportOpen(false)}>关闭</Button>}
+        footer={<Button onClick={() => setReportOpen(false)}>{COPY.close}</Button>}
       >
-        <p className="jy-caption jy-notifications-modal-intro">按当前数据生成的昨日报告（实际发送时按设定时间的数据）</p>
+        <p className="jy-caption jy-notifications-modal-intro">{COPY.previewIntro}</p>
         <Tabs
           idPrefix={`${uid}-report`}
-          label="日报格式"
+          label={COPY.previewFormat}
           active={reportTab}
           onChange={(k) => setReportTab(k as "html" | "text")}
           tabs={[
-            { key: "html", label: "HTML（邮件效果）" },
-            { key: "text", label: "纯文本（IM 渠道）" },
+            { key: "html", label: COPY.previewMail },
+            { key: "text", label: COPY.previewText },
           ]}
         />
         <TabPanel idPrefix={`${uid}-report`} tabKey="html" active={reportTab === "html"}>
           <iframe
             className="jy-notifications-frame"
-            title="日报 HTML 预览"
+            title={COPY.previewFrame}
             sandbox=""
-            srcDoc={report?.html || "<p>无 HTML 版本</p>"}
+            srcDoc={report?.html || `<p>${COPY.previewNoMail}</p>`}
           />
         </TabPanel>
         <TabPanel idPrefix={`${uid}-report`} tabKey="text" active={reportTab === "text"}>

@@ -7,14 +7,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationNotCountedCostText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
 import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
-import { EMPTY, FIXED_COST_TEXT, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RANGE_TEXT, RATE_UNSET_PARITY, RATE_UNSET_USD, SELL_PRICE_UNSET, formatAsOf, formatCompact, formatDayZone, formatRate, formatZonedDateTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
+import { BALANCE_STATE_TEXT, EMPTY, FIXED_COST_TEXT, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RANGE_TEXT, formatDayKey, RATE_UNSET_PARITY, RATE_UNSET_USD, SELL_PRICE_UNSET, formatAsOf, formatCompact, formatDayZone, formatRate, formatZonedDateTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy, reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
-import { ERROR_CATEGORIES, describeError, failureSentence, failureText } from "../lib/error-copy.js";
+import { ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText } from "../lib/error-copy.js";
 import { NAV_LABELS, STATION_TABS } from "../lib/brand.js";
 // 成本估算、用量分析页上的字（页面文件不能导出，放在同目录的 copy.ts；node 直接读 .ts）
 import { COPY as ANALYTICS_COPY } from "../app/(dashboard)/analytics/copy.ts";
 import { COPY as USAGE_COPY } from "../app/(dashboard)/usage/copy.ts";
+import { COPY as SETTINGS_COPY } from "../app/(dashboard)/settings/copy.ts";
+import { COPY as NOTIFICATIONS_COPY } from "../app/(dashboard)/notifications/copy.ts";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
@@ -2546,4 +2548,100 @@ test("用量分析：读不到用量的上游按码说一句、原文收起；�
   await ownTotals.getByText(SELL_PRICE_UNSET, { exact: true }).waitFor();
   assert.equal(await ownTotals.getByText(USAGE_COPY.cost, { exact: true }).count(), 0);
   assert.equal(await ownTotals.getByText(RATE_UNSET_PARITY).count(), 0);
+});
+
+// 系统设置、告警中心、登录页的接口数据
+const settingsFixture = () => ({ settings: { refreshIntervalSec: 60, lowBalanceUsd: 5, historyRetentionDays: null },
+  history: { earliestAt: "2026-09-01T01:00:00Z", latestAt: new Date().toISOString(), pointCount: 1234, tableBytes: 2048, retentionDays: null, cleanup: {} }, tz: BUSINESS_TZ });
+const metaFixture = (settings = {}) => ({ types: [], channelTypes: [], rules: {}, settings, app: { version: "2.2.0", commit: "abc1234" }, tz: BUSINESS_TZ });
+
+test("系统设置改密码：按接口给的码把报错放到对应的输入框，原密码不对落在「原密码」下，别的放在表单顶部", async (t) => {
+  const answers = [
+    (route) => failJSON(route, 400, { error: errorText({ code: "WRONG_PASSWORD" }), code: "WRONG_PASSWORD" }),
+    (route) => failJSON(route, 400, { error: errorText({ code: "PASSWORD_TOO_SHORT" }), code: "PASSWORD_TOO_SHORT" }),
+    (route) => failJSON(route, 500, { error: "db write timeout" }),
+  ];
+  const posts = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "admin", isDefaultPassword: false });
+    if (url.pathname === "/api/settings") return fulfill(route, settingsFixture());
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture());
+    if (url.pathname === "/api/auth/password") { posts.push(route.request().postDataJSON()); return answers[posts.length - 1](route); }
+    throw new Error("unexpected settings fixture API: " + url.pathname);
+  }, undefined, false, null, "/settings");
+  // 填了以后标题旁出现「未保存」，区块的读屏名字跟着变，按开头找
+  const account = page.getByRole("region", { name: new RegExp(`^${SETTINGS_COPY.account}`) });
+  const oldInput = account.getByLabel(SETTINGS_COPY.oldPassword, { exact: true }), newInput = account.getByLabel(SETTINGS_COPY.newPassword, { exact: true });
+  const fieldError = async (input) => page.locator(`#${await input.getAttribute("aria-describedby")}`).innerText();
+  const submit = async () => {
+    await oldInput.fill("wrong-one"); await newInput.fill("new-secret"); await account.getByLabel(SETTINGS_COPY.confirmPassword, { exact: true }).fill("new-secret");
+    // 点过一次后 antd 的点击波纹会插进按钮里，读屏名字不再完全一样，按包含找（区块里只有这一个）
+    await account.getByRole("button", { name: SETTINGS_COPY.changePassword }).click();
+  };
+  // 软件版本和侧栏一样写，括号里是编号
+  await page.getByText("2.2.0（abc1234）", { exact: true }).waitFor();
+
+  await submit(); await page.waitForFunction(() => document.querySelector("[aria-invalid=true]"));
+  assert.equal(await oldInput.getAttribute("aria-invalid"), "true");
+  assert.equal(await fieldError(oldInput), errorText({ code: "WRONG_PASSWORD" }));
+  assert.equal(await account.locator(".jy-banner[role=alert]").count(), 0);
+
+  await submit(); await page.waitForFunction(() => document.activeElement?.getAttribute("aria-invalid") === "true" && document.activeElement?.getAttribute("autocomplete") === "new-password");
+  assert.equal(await fieldError(newInput), errorText({ code: "PASSWORD_TOO_SHORT" }));
+
+  await submit();
+  const banner = account.locator(".jy-banner[role=alert]"); await banner.waitFor();
+  assert.match(await banner.innerText(), new RegExp(`^${SETTINGS_COPY.changeFailed}：`));
+  assert.doesNotMatch(await banner.innerText(), /db write timeout/);
+  assert.equal(posts.length, 3);
+});
+
+test("登录页按码说：用户名或密码不对时标红输入框，试太多次时不标红，别的报错写「登录失败：原因。」", async (t) => {
+  const answers = [
+    (route) => failJSON(route, 401, { error: errorText({ code: "LOGIN_FAILED" }), code: "LOGIN_FAILED" }),
+    (route) => failJSON(route, 429, { error: errorText({ code: "LOGIN_RATE_LIMITED" }), code: "LOGIN_RATE_LIMITED" }),
+    (route) => failJSON(route, 500, { error: "session store down" }),
+  ];
+  let calls = 0;
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/login") return answers[calls++](route);
+    throw new Error("unexpected login fixture API: " + url.pathname);
+  }, undefined, false, null, "/login");
+  const login = async () => {
+    await page.getByLabel("用户名", { exact: true }).fill("admin"); await page.getByLabel("密码", { exact: true }).fill("secret");
+    // 同上：点过一次后按钮里有波纹，按包含找
+    await page.getByRole("button", { name: "登录" }).click();
+  };
+  const alert = page.locator(".jy-login-error");
+  const red = () => page.locator(".ant-form-item-has-error").count();
+
+  await login(); await alert.getByText(errorText({ code: "LOGIN_FAILED" }), { exact: true }).waitFor();
+  assert.equal(await red(), 2);
+  await login(); await alert.getByText(errorText({ code: "LOGIN_RATE_LIMITED" }), { exact: true }).waitFor();
+  assert.equal(await red(), 0);
+  await login(); await alert.getByText(new RegExp("^登录失败：")).waitFor();
+  assert.equal(await red(), 0);
+  assert.equal(await alert.getByText("session store down").isVisible(), false);
+  await alert.getByText("查看详细原因", { exact: true }).waitFor();
+});
+
+test("告警中心：规则名取余额四档的共用叫法，区块名按规范，上次定时发送写成「10月20日」", async (t) => {
+  const yesterday = shiftDay(shanghaiDay(Date.now()), -1);
+  const rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: true, etaDays: 3, etaUnit: "days", renotifyHours: 24, errorThreshold: 1, errorRetrySec: 30, channelsFor: {} };
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels: [], rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }] });
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture({ dailyReport: { enabled: true, time: "09:00", channelIds: [], lastSent: yesterday } }));
+    throw new Error("unexpected notifications fixture API: " + url.pathname);
+  }, undefined, false, null, "/notifications");
+  for (const title of [NOTIFICATIONS_COPY.rules, NOTIFICATIONS_COPY.channels, NOTIFICATIONS_COPY.report]) await page.getByRole("region", { name: title, exact: true }).waitFor();
+  const ruleTable = page.locator(".jy-notifications-rules");
+  for (const name of [BALANCE_STATE_TEXT.low, BALANCE_STATE_TEXT.empty, BALANCE_STATE_TEXT.unreadable, NOTIFICATIONS_COPY.recover, BALANCE_STATE_TEXT.soon])
+    await ruleTable.getByText(name, { exact: true }).waitFor();
+  // 打开了提醒却没有通知方式：页首提醒发不出去
+  await page.getByText(NOTIFICATIONS_COPY.noDeliveryNone, { exact: true }).waitFor();
+  await page.getByText(NOTIFICATIONS_COPY.reportLastSent(formatDayKey(yesterday, BUSINESS_TZ)), { exact: true }).waitFor();
 });

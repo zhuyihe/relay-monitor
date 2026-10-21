@@ -1,9 +1,9 @@
 // 界面文案守护（design/ui-copy-spec.md §12.6）：扫描页面里给用户看的字，命中 §3.6 的词或多余的英文就失败。
 // 含中文的字符串和 JSX 里的文字算界面文字；注释、import、类型、console 和 Error 的参数（只给开发看，§12.4）不扫。
-// 范围跟着文案改动一批批扩大：每日利润、上游资源、运营总览、公用组件已纳入。
+// 范围跟着文案改动一批批扩大：A2 结束时 app/ 下全部页面和组件都扫，接口逐个列；推送和日报（lib/alerts.js、server/report.js、lib/notify.js）留给 A3。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,16 +11,16 @@ import { fileURLToPath } from "node:url";
 const ts = createRequire(import.meta.url)("typescript");
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-const filesIn = (dir) => readdirSync(join(ROOT, dir)).filter((name) => /\.(tsx?|jsx?)$/.test(name) && !/\.test\./.test(name)).map((name) => join(dir, name));
+// 一个目录下（含子目录）的源码文件，不含测试；skip 里的子目录不进
+const walk = (dir, skip = []) => readdirSync(join(ROOT, dir), { withFileTypes: true }).flatMap((entry) => {
+  const path = join(dir, entry.name);
+  if (entry.isDirectory()) return skip.includes(path) ? [] : walk(path, skip);
+  return /\.(tsx?|jsx?)$/.test(entry.name) && !/\.test\./.test(entry.name) ? [path] : [];
+});
 
 const FILES = [
-  ...filesIn("app/(dashboard)/reconciliation"),
-  ...filesIn("app/(dashboard)/stations"),
-  ...filesIn("app/components"),
-  ...filesIn("app/(dashboard)/my"),
-  ...filesIn("app/(dashboard)/analytics"),
-  ...filesIn("app/(dashboard)/usage"),
-  ...["page.tsx", "layout.tsx", "trend-modal.tsx", "chart-box.tsx"].map((name) => `app/(dashboard)/${name}`),
+  // app/ 下全部页面和组件；接口在下面逐个列，app/mock 是演示用的假上游，不上界面
+  ...walk("app", ["app/api", "app/mock"]),
   "server/demo.js",
   "lib/reconciliation-view.js",
   "lib/reconciliation-contract.js",
@@ -44,6 +44,7 @@ const FILES = [
   ...["admin-keys", "analytics", "audit"].map((name) => `app/api/own/${name}/route.js`),
   ...["", "/test", "/[id]", "/[id]/history", "/[id]/refresh"].map((dir) => `app/api/stations${dir}/route.js`),
   "app/api/stations/[id]/purge.js",
+  ...walk("app/api/auth"),
 ];
 
 // §3.6 里不分场合都不能上界面的词。「范围」「关联」「授权」「资源」「站点」「完整」这类要看场合的，靠逐条改文案，不在这里卡。

@@ -89,6 +89,17 @@ export function ErrorState({
   );
 }
 
+// 表单里有没保存的改动：标在区块标题旁边。告警中心、系统设置共用这一个
+export const DIRTY_TEXT = "未保存";
+export function Dirty({ show }: { show: boolean }) {
+  return show ? (
+    <span className="jy-dirty">
+      <i aria-hidden="true" />
+      {DIRTY_TEXT}
+    </span>
+  ) : null;
+}
+
 // 刷新失败、页面还显示着上次读到的数据时，页顶那一条（design/ui-copy-spec.md §8.1）：
 // 「刷新失败，数据截至 14:30。」+ 归类后的原因，原文只进「查看详细原因」；各页同一个样子
 export function RefreshFailedBanner({

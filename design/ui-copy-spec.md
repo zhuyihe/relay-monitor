@@ -601,7 +601,7 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
    | 「测试读取」的结果一句（§3.5） | `lib/workflow-actions.js` 的 `testReadText` | 上游账单页、渠道绑定各写一份 |
    | 「刷新失败，数据截至 14:30。」 | `lib/format.js` 的 `refreshFailedText` | 总览、每日利润页、以前的每日记录、上游账单页、渠道绑定、改绑定各写一份 |
    | 渠道绑定和改绑定共用的话（「读不到自营站点的渠道」「请至少选一个渠道」「预览」等），以及「看余额」「算利润」 | `lib/channel-onboarding.js` 的 `BINDING_COPY`、`ONBOARDING_PURPOSES` | 两个页面各写一份 |
-   | 只在一个页面出现的说明 | 该文件顶部的 `COPY` 表，照本文的词写；界面测试要引用的页面（`page.tsx` 不能导出常量），`COPY` 放在同目录的 `copy.ts`，例如成本估算、用量分析 | 散写在 JSX 里，测试里另抄一份 |
+   | 只在一个页面出现的说明 | 该文件顶部的 `COPY` 表，照本文的词写；界面测试要引用的页面（`page.tsx` 不能导出常量），`COPY` 放在同目录的 `copy.ts`，例如成本估算、用量分析、系统设置、告警中心 | 散写在 JSX 里，测试里另抄一份 |
    | 上游类型名 | `lib/channel-onboarding.js` 的 `UPSTREAM_TYPES`（§3.7，含固定成本）；渠道绑定能选的几种由它派生 | `channel-onboarding.tsx`、`stations/model.ts`、`lib/providers.js` 里的三份 |
    | 「新增上游」「编辑上游：上游名」 | `lib/channel-onboarding.js` | 上游列表、编辑页、总览、成本估算、自营业务各写一份 |
    | 填写处的输入框名（§3.7） | `lib/channel-onboarding.js` 的 `CREDENTIAL_FIELDS`；漏填的校验用 `lib/error-copy.js` 的 `requiredRule` | 渠道绑定、更新登录信息弹窗各写一份 |
@@ -630,6 +630,9 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
    | 趋势卡片名「收入与上游成本」「上游成本」 | `app/components/trend-panel.tsx` 的 `TREND_PANEL_TITLE` | 成本估算的加载骨架另写一份 |
    | 刷新失败、页面还显示着上次数据时页顶那一条 | `app/components/data-state.tsx` 的 `RefreshFailedBanner`（字取 `refreshFailedText`、`noteOf`，样式 `.jy-banner__body`） | 上游列表、成本估算、用量分析、自营业务各拼一份横幅和样式 |
    | 算进利润的上游（不是自营站点，没关掉「算进利润」） | `lib/profit.js` 的 `countsInProfit` | 成本接口、成本估算、运营总览各写一份条件 |
+   | 「未保存」标记 | `app/components/data-state.tsx` 的 `Dirty` | 告警中心、系统设置各写一份 |
+   | 登录、改密码的报错（§8.2）：用户名或密码不对、试了太多次、原密码不对、新密码太短 | `lib/error-copy.js` 的 `LOGIN_FAILED`、`LOGIN_RATE_LIMITED`、`WRONG_PASSWORD`、`PASSWORD_TOO_SHORT`；路由按码返回这几句，登录页和系统设置按码把报错放到对应的输入框，本地校验的「新密码至少 6 位」也取这里 | 路由各写原文，页面按原文里有没有「原密码」「新密码」判断 |
+   | 告警中心的规则名 | 余额四档取 `BALANCE_STATE_TEXT`，「恢复正常」在告警中心的 `copy.ts` | 告警中心另写「余额耗尽」「查询失败」「耗尽预警」 |
    | 自营业务几张表的列名、标签名，「利润怎么算」「按明细细算」「读不到分组和渠道数据」 | `app/(dashboard)/my/shared.tsx` 的 `COL_TEXT`、`TAB_TEXT`、`BASIS_TITLE`、`AUDIT_TITLE`、`FLOW_UNREADABLE` | 概览、用户、模型与渠道各写一份 |
 
 2. **不在前端给后端文案打补丁。**后端直接返回最终文字或结构化的码，然后删掉这些补丁：
