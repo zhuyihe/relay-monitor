@@ -1,6 +1,7 @@
 // 界面文案守护（design/ui-copy-spec.md §12.6）：扫描页面里给用户看的字，命中 §3.6 的词或多余的英文就失败。
 // 含中文的字符串和 JSX 里的文字算界面文字；注释、import、类型、console 和 Error 的参数（只给开发看，§12.4）不扫。
-// 范围跟着文案改动一批批扩大：A2 结束时 app/ 下全部页面和组件都扫，接口逐个列；推送和日报（lib/alerts.js、server/report.js、lib/notify.js）留给 A3。
+// 范围跟着文案改动一批批扩大：A2 结束时 app/ 下全部页面和组件都扫，接口逐个列；A3-1 加通知方式的报错（lib/smtp.js、通知和日报的接口），
+// 推送（lib/alerts.js、lib/notify.js）在 A3-2、日报（server/report.js）在 A3-3 加进来。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
@@ -37,6 +38,8 @@ const FILES = [
   "lib/connection-test.js",
   "lib/api.js",
   "lib/cap.js",
+  "lib/smtp.js",
+  "lib/alert-center.js",
   "server/own-helpers.js",
   "db/store.js",
   "app/api/meta/route.js",
@@ -46,6 +49,8 @@ const FILES = [
   ...["", "/test", "/[id]", "/[id]/history", "/[id]/refresh"].map((dir) => `app/api/stations${dir}/route.js`),
   "app/api/stations/[id]/purge.js",
   ...walk("app/api/auth"),
+  ...walk("app/api/notifications"),
+  ...walk("app/api/report"),
 ];
 
 // §3.6 里不分场合都不能上界面的词。「范围」「关联」「授权」「资源」「站点」「完整」这类要看场合的，靠逐条改文案，不在这里卡。
@@ -73,11 +78,11 @@ function skipped(node) {
     // 日期选择框的 format 是格式串
     if (ts.isJsxAttribute(parent) && parent.name.getText() === "format") return true;
     // 只跳过造报错对象的：new Error、TypeError，和带 code 的 batchError、repositoryError、providerError、newApiResponseError、
-    // catalogueError（页面按 code 归类，原话只进「详情」）；
+    // catalogueError、deliveryError（页面按 code 归类，原话只进「详情」）；
     // setError 这类存的是要显示的话，照样扫
     if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
       const callee = parent.expression.getText();
-      if (/^console\./.test(callee) || /^((Type|Range|Syntax)?Error|batchError|repositoryError|providerError|newApiResponseError|catalogueError)$/.test(callee)) return true;
+      if (/^console\./.test(callee) || /^((Type|Range|Syntax)?Error|batchError|repositoryError|providerError|newApiResponseError|catalogueError|deliveryError)$/.test(callee)) return true;
     }
   }
   return false;

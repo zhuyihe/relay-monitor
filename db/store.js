@@ -2,6 +2,7 @@
 // 设计：内存缓存 this.data 保持 v1 数据形状，所有读走内存（同步 getter 不变），
 // 所有写通过 save() 串行化写透 MySQL——消费方（26 个端点/告警/日报）零改动。
 import { hashPassword } from "../lib/auth.js";
+import { UNNAMED_CHANNEL } from "../lib/alert-center.js";
 import { ALERT_EVENT_KEYS, DEFAULT_RULES } from "../lib/alerts.js";
 import { createHash, randomBytes } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
@@ -474,7 +475,7 @@ export class Store {
     const ch = {
       id: uid("ch"),
       type: String(input.type || ""),
-      name: String(input.name || "未命名渠道").trim(),
+      name: String(input.name || "").trim() || UNNAMED_CHANNEL,
       enabled: input.enabled !== false,
       // 只留这种类型的字段（lib/notify.js CHANNEL_TYPES）
       config: resolveChannelConfig(String(input.type || ""), typeof input.config === "object" && input.config ? input.config : {}, {}),
@@ -490,7 +491,7 @@ export class Store {
     return this._changeNotifications((notifications) => {
       const ch = notifications.channels.find((c) => c.id === id);
       if (!ch) return null;
-      if ("name" in patch) ch.name = String(patch.name ?? "").trim();
+      if ("name" in patch) ch.name = String(patch.name ?? "").trim() || UNNAMED_CHANNEL;
       if ("enabled" in patch) ch.enabled = !!patch.enabled;
       if ("config" in patch && typeof patch.config === "object" && patch.config) {
         // 只有密钥留空表示保留原值（前端编辑时不回显密钥），其他字段留空就是清空；

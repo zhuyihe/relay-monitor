@@ -8,6 +8,8 @@ import { broadcast } from "../lib/notify.js";
 import { fmtEta } from "../lib/alerts.js";
 import { getOwnUsers, computeResold, computeProfit } from "./own-helpers.js";
 import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
+import { errorText } from "../lib/error-copy.js";
+import { OWN_STATION_UNSET } from "../lib/format.js";
 
 // 日报时区就是业务时区（BUSINESS_TIME_ZONE，兼容旧的 REPORT_TIME_ZONE），与利润页、日汇总同一套日界线
 export const REPORT_TIME_ZONE = businessTimeZone();
@@ -50,7 +52,7 @@ const pctDelta = (cur, base) => {
 export async function buildReport(rt) {
   const { store, history } = rt;
   const own = store.list().find((s) => s.isOwn && s.type === "newapi");
-  if (!own) throw new Error("还没有标记自营业务站点，无法生成日报");
+  if (!own) throw Object.assign(new Error(OWN_STATION_UNSET), { code: "OWN_STATION_UNSET" });
   const { tz, dayStart, dayEnd, wideStart } = reportDayWindow();
   const ownRate = own.cnyPerUsd != null && own.cnyPerUsd > 0 ? own.cnyPerUsd : 1;
 
@@ -322,14 +324,15 @@ function reportChannels(rt, channelIds) {
   return rt.store.channels.filter((c) => c.enabled !== false && (!ids.length || ids.includes(c.id)));
 }
 
-const NO_REPORT_CHANNELS = "没有启用的日报通知渠道";
+// 没有能发日报的通知方式：带码，页面按码说（lib/error-copy.js REPORT_NO_CHANNELS）
+const noReportChannels = () => Object.assign(new Error(errorText({ code: "REPORT_NO_CHANNELS" })), { code: "REPORT_NO_CHANNELS" });
 
 // 立即发送日报（/api/report/send 的主体）。与 v1 一致：手动发送不占用 lastSent，
 // 不影响当天的定时发送。构建失败会抛错，由调用方决定响应状态码。
 // 没有可发的渠道时先报错，不去读上游生成日报；和定时发送用同一句话。
 export async function sendReport(rt, channelIds) {
   const channels = reportChannels(rt, channelIds);
-  if (!channels.length) throw new Error(NO_REPORT_CHANNELS);
+  if (!channels.length) throw noReportChannels();
   const { title, text, html } = await buildReport(rt);
   const results = await broadcast(channels, title, text, { event: "daily-report", html });
   return { ok: true, results };
@@ -364,7 +367,7 @@ export function startReportScheduler(rt) {
       // 先写本次尝试，重启后仍遵守次数上限；写库失败时不开始外部发送。
       await rt.store.saveReportDelivery(structuredClone(delivery));
       const channels = reportChannels(rt);
-      if (!channels.length) throw new Error(NO_REPORT_CHANNELS);
+      if (!channels.length) throw noReportChannels();
       const successful = new Set(delivery.successfulChannelIds);
       const pending = channels.filter((channel) => !successful.has(channel.id));
       if (pending.length) {

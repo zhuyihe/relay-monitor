@@ -64,3 +64,49 @@ test("PUT /api/notifications/channels/:id：换了地址没重填密钥时 400 �
   const ok = await PUT(request({ name: "x" }), { store: { updateChannel: async () => channel() } }, { id: "c1" });
   assert.deepEqual((await ok.json()).channel.config.botToken, "");
 });
+
+test("POST /api/notifications/test：测试消息写通知方式的名字和业务时区的时间；找不到、没说测哪个、类型认不出都带码", async (t) => {
+  const { POST } = await load("./test/route.js");
+  const sent = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => { sent.push(JSON.parse(init.body)); return new Response(JSON.stringify({ ok: true }), { status: 200 }); });
+  const rt = { store: { channels: [channel()] } };
+
+  assert.equal((await (await POST(post({ channelId: "c1" }), rt)).json()).ok, true);
+  const lines = sent.at(-1).text.split("\n");
+  assert.equal(lines[0], "【测试通知】炬元告警中心");
+  assert.equal(lines[1], "这是一条来自炬元控制台的测试消息。");
+  assert.equal(lines[2], "通知方式：运维群");
+  assert.match(lines[3], /^时间：(\d{4}年)?\d{1,2}月\d{1,2}日 \d{1,2}:\d{2}$/);
+  // 弹窗里填的名字优先；还没保存、也没起名字时写类型名，不写 telegram
+  await POST(post({ channelId: "c1", name: " 值班群 " }), rt);
+  assert.equal(sent.at(-1).text.split("\n")[2], "通知方式：值班群");
+  await POST(post({ type: "telegram", config: { botToken: "1:x", chatId: "1" } }), rt);
+  assert.equal(sent.at(-1).text.split("\n")[2], "通知方式：Telegram 机器人");
+
+  const gone = await POST(post({ channelId: "nope" }), rt);
+  assert.equal(gone.status, 400);
+  assert.deepEqual(await gone.json(), { error: errorText({ code: "NOTIFY_NOT_FOUND" }), code: "NOTIFY_NOT_FOUND" });
+  const empty = await POST(post({}), rt);
+  assert.equal(empty.status, 400);
+  assert.equal((await empty.json()).code, "INVALID_REQUEST");
+  // 类型认不出：照常 200，结果里带码，不发请求
+  const before = sent.length;
+  const unknown = await (await POST(post({ type: "pigeon", config: {} }), rt)).json();
+  assert.deepEqual([unknown.ok, unknown.code], [false, "NOTIFY_TYPE_UNSUPPORTED"]);
+  assert.equal(sent.length, before);
+  // 对方没收下：结果里带平台对应的码，原文另在 error 里
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ ok: false, description: "Unauthorized" }), { status: 401 }));
+  const denied = await (await POST(post({ channelId: "c1" }), rt)).json();
+  assert.deepEqual([denied.ok, denied.code, denied.error], [false, "NOTIFY_AUTH_FAILED", "Unauthorized"]);
+});
+
+test("POST /api/notifications/channels：类型认不出时 400 带码；PUT 已经删了时 404 带码", async () => {
+  const { POST } = await load("./channels/route.js");
+  const bad = await POST(new Request("https://local.test/api/notifications/channels", { method: "POST", body: JSON.stringify({ type: "pigeon" }) }), { store: {} });
+  assert.equal(bad.status, 400);
+  assert.deepEqual(await bad.json(), { error: errorText({ code: "NOTIFY_TYPE_UNSUPPORTED" }), code: "NOTIFY_TYPE_UNSUPPORTED" });
+  const { PUT } = await load("./channels/[id]/route.js");
+  const gone = await PUT(new Request("https://local.test/api/notifications/channels/x", { method: "PUT", body: "{}" }), { store: { updateChannel: async () => null } }, { id: "x" });
+  assert.equal(gone.status, 404);
+  assert.deepEqual(await gone.json(), { error: errorText({ code: "NOTIFY_NOT_FOUND" }), code: "NOTIFY_NOT_FOUND" });
+});

@@ -171,7 +171,7 @@ test("没有启用渠道时不标记已发送，用户设置不能覆盖发送�
 
 test("立即发送：没有启用渠道时直接报错，不去读上游生成日报", async (t) => {
   const h = setup(t, { channels: [] });
-  await assert.rejects(sendReport(h.rt), { message: "没有启用的日报通知渠道" });
+  await assert.rejects(sendReport(h.rt), { code: "REPORT_NO_CHANNELS" });
   assert.equal(globalThis.fetch.mock.callCount(), 0);
 });
 

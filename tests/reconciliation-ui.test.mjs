@@ -12,6 +12,7 @@ import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
 import { CONSOLE_UNREACHABLE, ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText } from "../lib/error-copy.js";
 import { NAV_LABELS, STATION_TABS } from "../lib/brand.js";
+import { CHANNEL_TYPES } from "../lib/notify.js";
 // 成本估算、用量分析页上的字（页面文件不能导出，放在同目录的 copy.ts；node 直接读 .ts）
 import { COPY as ANALYTICS_COPY } from "../app/(dashboard)/analytics/copy.ts";
 import { COPY as USAGE_COPY } from "../app/(dashboard)/usage/copy.ts";
@@ -2660,12 +2661,16 @@ test("登录页按码说：用户名或密码不对时标红输入框，试太�
 test("告警中心：规则名取余额档位的共用叫法，区块名按规范，上次定时发送写成「10月20日」，立即发送没发出去时说清楚", async (t) => {
   const yesterday = shiftDay(shanghaiDay(Date.now()), -1);
   const rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: true, etaDays: 3, etaUnit: "days", renotifyHours: 24, errorThreshold: 1, errorRetrySec: 30, channelsFor: {} };
+  let sends = 0;
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (url.pathname === "/api/notifications") return fulfill(route, { channels: [], rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }] });
     if (url.pathname === "/api/meta") return fulfill(route, metaFixture({ dailyReport: { enabled: true, time: "09:00", channelIds: [], lastSent: yesterday } }));
-    if (url.pathname === "/api/report/send") return failJSON(route, 400, { error: "没有启用的日报通知渠道" });
+    // 第一次：接口没带认得的码；第二次：没有能发日报的通知方式（带码）
+    if (url.pathname === "/api/report/send") return sends++ === 0
+      ? failJSON(route, 400, { error: "boom: 没有启用的日报通知渠道" })
+      : failJSON(route, 400, { error: errorText({ code: "REPORT_NO_CHANNELS" }), code: "REPORT_NO_CHANNELS" });
     throw new Error("unexpected notifications fixture API: " + url.pathname);
   }, undefined, false, null, "/notifications");
   for (const title of [NOTIFICATIONS_COPY.rules, NOTIFICATIONS_COPY.channels, NOTIFICATIONS_COPY.report]) await page.getByRole("region", { name: title, exact: true }).waitFor();
@@ -2678,19 +2683,62 @@ test("告警中心：规则名取余额档位的共用叫法，区块名按规�
   // 「立即发送」在发之前就出错：说没发出去，原文进「查看详细原因」，不写「几点发送」
   await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportSend }).click();
   const result = page.locator(".jy-test-result--bad"); await result.waitFor();
-  await result.getByText(`${NOTIFICATIONS_COPY.reportNotSent}：${ERROR_CATEGORIES.other.text}`, { exact: true }).waitFor();
+  await result.getByText(failureSentence(NOTIFICATIONS_COPY.reportNotSent, ERROR_CATEGORIES.other.text), { exact: true }).waitFor();
   await result.getByText("查看详细原因", { exact: true }).waitFor();
   assert.doesNotMatch(await result.innerText(), /发送$|没有启用的日报通知渠道/m);
+  // 带码时说清楚是哪一种，接口给的就是这句，不再放「查看详细原因」
+  await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportSend }).click();
+  await result.getByText(failureSentence(NOTIFICATIONS_COPY.reportNotSent, errorText({ code: "REPORT_NO_CHANNELS" })), { exact: true }).waitFor();
+  assert.equal(await result.getByText("查看详细原因", { exact: true }).count(), 0);
+});
+
+test("告警中心通知方式没发出去：测试结果、日报发送结果按通知方式的说法写，原文各自进「查看详细原因」；没设置自营站点时预览说清楚、带「去设置」", async (t) => {
+  const channels = [
+    { id: "c1", name: "运维群", type: "telegram", enabled: true, config: { botToken: "", chatId: "42", apiBase: "" }, hasSecret: { botToken: true } },
+    { id: "c2", name: "", type: "dingtalk", enabled: true, config: { webhook: "", secret: "" }, hasSecret: { webhook: true } },
+  ];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels, rules: { onLow: true, channelsFor: {} }, channelTypes: CHANNEL_TYPES });
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture({ dailyReport: { enabled: true, time: "09:00", channelIds: [] } }));
+    // 测试发送：Telegram 说 Token 不对（原文是英文的 Unauthorized）
+    if (url.pathname === "/api/notifications/test") return fulfill(route, { ok: false, error: "Unauthorized", code: "NOTIFY_AUTH_FAILED" });
+    if (url.pathname === "/api/report/send") return fulfill(route, { ok: true, results: [
+      { id: "c1", name: "运维群", ok: false, error: "Unauthorized", code: "NOTIFY_AUTH_FAILED" },
+      { id: "c2", name: "", ok: false, error: "keywords not in content", code: "NOTIFY_KEYWORD_MISSING" },
+    ] });
+    if (url.pathname === "/api/report/preview") return failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
+    throw new Error("unexpected notifications fixture API: " + url.pathname);
+  }, undefined, false, null, "/notifications");
+  // 列表里点「测试」：说通知方式自己的那句，不说上游的「登录信息不对或过期了」，原文进「查看详细原因」
+  await page.getByRole("button", { name: NOTIFICATIONS_COPY.testAria("运维群"), exact: true }).first().click();
+  const cell = page.locator(".jy-notifications-test").first();
+  await cell.getByText(errorText({ code: "NOTIFY_AUTH_FAILED" }), { exact: true }).waitFor();
+  assert.doesNotMatch(await cell.innerText(), new RegExp(ERROR_CATEGORIES.auth.text));
+  await cell.getByText("查看详细原因", { exact: true }).click();
+  await cell.getByText("Unauthorized", { exact: true }).waitFor();
+  // 立即发送：每个没发出去的通知方式一行，没名字的写「未命名通知方式」，各带「查看详细原因」
+  await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportSend }).click();
+  const result = page.locator(".jy-notifications-actions + div .jy-test-result--bad");
+  await result.getByText(NOTIFICATIONS_COPY.reportNotSent, { exact: true }).waitFor();
+  await result.getByText(`运维群：${errorText({ code: "NOTIFY_AUTH_FAILED" })}`).waitFor();
+  await result.getByText(`${NOTIFICATIONS_COPY.unnamed}：${errorText({ code: "NOTIFY_KEYWORD_MISSING" })}`).waitFor();
+  assert.equal(await result.getByText("查看详细原因", { exact: true }).count(), 2);
+  assert.doesNotMatch(await result.innerText(), /c2：/);
+  // 预览：没设置自营站点时直接说 §8.1 那句、带「去设置」，不拼「读不到日报预览：」，显示在日报区块里
+  await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportPreview }).click();
+  await result.getByText(OWN_STATION_UNSET, { exact: true }).waitFor();
+  const setup = workflowAction("setup_own_station");
+  assert.equal(await result.getByRole("link", { name: setup.label, exact: true }).getAttribute("href"), setup.href);
+  assert.doesNotMatch(await result.innerText(), new RegExp(NOTIFICATIONS_COPY.previewFailed));
 });
 
 test("告警中心通知方式：接口不回传密钥；只改名字也能保存、不提交密钥；改了地址没重填时说清楚、不关弹窗", async (t) => {
   const code = "ENDPOINT_CHANGED_SECRET_REQUIRED";
   const telegram = { id: "c1", name: "运维群", type: "telegram", enabled: true, config: { botToken: "", chatId: "42", apiBase: "" }, hasSecret: { botToken: true } };
-  const channelTypes = [{ value: "telegram", label: "Telegram 机器人", fields: [
-    { key: "botToken", label: "Bot Token", required: true, secret: true },
-    { key: "chatId", label: "Chat ID", required: true },
-    { key: "apiBase", label: "API 地址（可选，默认官方）", required: false, endpoint: true },
-  ] }];
+  const channelTypes = CHANNEL_TYPES.filter((type) => type.value === "telegram");
+  const apiBaseLabel = channelTypes[0].fields.find((field) => field.key === "apiBase").label;
   const puts = [];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url()), method = route.request().method();
@@ -2720,7 +2768,7 @@ test("告警中心通知方式：接口不回传密钥；只改名字也能保�
   assert.deepEqual(puts[0], { name: "运维群2", type: "telegram", config: { botToken: "", chatId: "42", apiBase: "" } });
 
   dialog = await openEdit();
-  await dialog.getByLabel("API 地址（可选，默认官方）", { exact: true }).fill("https://evil.example");
+  await dialog.getByLabel(apiBaseLabel, { exact: true }).fill("https://evil.example");
   await dialog.getByRole("button", { name: NOTIFICATIONS_COPY.save }).click();
   await page.getByText(`${NOTIFICATIONS_COPY.saveFailed}：${errorText({ code })}。`, { exact: true }).waitFor();
   assert.equal(await dialog.isVisible(), true);
