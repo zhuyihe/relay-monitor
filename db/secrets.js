@@ -20,10 +20,17 @@ const EMPTY_VALUE = { s2Tokens: null };
 // 从上游读回来的（下次刷新会重写）：明文模式下原样存着上游给的字符串，它可能刚好长得像密文。
 // 解不开就清空，不中止启动
 const DERIVED_PATHS = new Set(["balance.account"]);
-// meta 表里整行加密的：签登录 Cookie 用的会话密钥。没有时生成一个随机值；
-// rotate：第一次加密时换新（旧备份、binlog 里的明文就作废了）。rotated、reset 是启动日志和 db/reset-secrets.js 说的话
-export const META_SECRETS = Object.freeze([Object.freeze({ key: "session_secret", label: "会话密钥", rotate: true,
-  rotated: "会话密钥已换新，之前登录的设备要重新登录", reset: "下次启动时重新生成，所有设备要重新登录" })]);
+// meta 表里整行加密的。没有时生成一个随机值；rotate：第一次加密时换新（旧备份、binlog 里的明文就作废了）。
+// rotated、reset 是启动日志和 db/reset-secrets.js 说的话
+// - 会话密钥：签登录 Cookie 用
+// - 账单身份密钥：算 Sub2API 账单能力的连接身份（lib/providers.js 的 HMAC，升级时 db/pool.js 的 rehashBillingCapabilities 按它改过已有的行）。
+//   不能换新，换了库里存的能力就都对不上了
+export const META_SECRETS = Object.freeze([
+  Object.freeze({ key: "session_secret", label: "会话密钥", rotate: true,
+    rotated: "会话密钥已换新，之前登录的设备要重新登录", reset: "下次启动时重新生成，所有设备要重新登录" }),
+  Object.freeze({ key: "billing_identity_key", label: "账单身份密钥", rotate: false,
+    reset: "下次启动时重新生成。Sub2API 上游能不能按 Key 读账单要重新确认，有消费的那天会自动确认；在那之前，没有消费的日子每日利润算不出来，过后也不会自动补算" }),
+]);
 
 // 这些话只进启动日志和脚本输出，给部署的人看；页面上只说「系统还没准备好」
 const RECOVER = "请换回加密时用的那个密钥；找不回的话，按部署说明运行 node db/reset-secrets.js 清掉解不开的登录信息，再到页面上重新填";

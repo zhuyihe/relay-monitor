@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canOpen, isCiphertext, loadSecretKey, openText, sealText, secretKeyOf, SECRET_TEXT } from "./secrets.js";
+import { canOpen, isCiphertext, loadSecretKey, META_SECRETS, openText, sealText, secretKeyOf, SECRET_TEXT } from "./secrets.js";
 import { Store } from "./store.js";
 import { resetReportLines, resetSecrets } from "./reset-secrets.js";
 
@@ -138,6 +138,25 @@ test("明文库第一次配上密钥启动：登录信息全部改成密文，�
   assert.equal(store.secretsEncrypted, true);
   assert.match(store.sessionSecret, /^[0-9a-f]{64}$/);
   assert.deepEqual(store.secretReport, { encrypted: true, keyId: keyA.id, converted: 5, rotated: ["session_secret"] });
+  // 账单身份密钥：没有时生成，加密保存
+  assert.match(store.billingIdentityKey, /^[0-9a-f]{64}$/);
+  assert.ok(isCiphertext(pool.meta("billing_identity_key")));
+});
+
+test("账单身份密钥：第一次加密时不换新（换了库里存的账单能力就对不上了），重启照旧；明文模式也有一个", async () => {
+  const state = plainState();
+  state.meta.billing_identity_key = "plain-billing-key";
+  const pool = memoryPool(state);
+  const plain = await new Store(pool).load();
+  assert.equal(plain.billingIdentityKey, "plain-billing-key");
+  const encrypted = await new Store(pool, { secretKey: keyA }).load();
+  assert.equal(encrypted.billingIdentityKey, "plain-billing-key");
+  assert.deepEqual(encrypted.secretReport.rotated, ["session_secret"]);
+  assert.ok(isCiphertext(pool.meta("billing_identity_key")));
+  assert.doesNotMatch(pool.dump(), /plain-billing-key/);
+  assert.equal((await new Store(pool, { secretKey: keyA }).load()).billingIdentityKey, "plain-billing-key");
+  const fresh = await new Store(memoryPool({ stations: [], meta: {} })).load();
+  assert.match(fresh.billingIdentityKey, /^[0-9a-f]{64}$/);
 });
 
 test("余额结果里的账号名（可能就是登录邮箱）也加密；上游给的、长得像密文的字符串不会让服务起不来", async () => {
@@ -297,6 +316,7 @@ test("reset-secrets：先列出解不开的、说清密钥编号，不动库；-
     "- 上游「乙」：登录密码、登录邮箱、自动登录拿到的令牌",
     "- 通知方式「运维群」：Bot Token",
     "- 会话密钥：下次启动时重新生成，所有设备要重新登录",
+    `- 账单身份密钥：${META_SECRETS[1].reset}`,
   ];
   // 配了别的密钥：说出两个编号，提醒找得回原来的就不用清
   assert.deepEqual(resetReportLines(dry, { secretKey: keyB }), [
@@ -318,6 +338,7 @@ test("reset-secrets：先列出解不开的、说清密钥编号，不动库；-
   assert.equal(pool.meta("notifications").channels[0].config.botToken, "");
   assert.equal(pool.meta("notifications").channels[0].config.chatId, "42");
   assert.equal(pool.meta("session_secret"), undefined);
+  assert.equal(pool.meta("billing_identity_key"), undefined);
   const store = await new Store(pool, { secretKey: keyB }).load();
   assert.equal(store.get("st_a").accessToken, "");
   assert.match(store.sessionSecret, /^[0-9a-f]{64}$/);

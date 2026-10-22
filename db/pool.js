@@ -211,7 +211,8 @@ export async function ensureSchema(pool) {
     recovered_at BIGINT NULL,
     PRIMARY KEY (rule_id, event_code)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
-  // Sub2API 账单过滤能力核验结果；identity 是上游连接身份的 sha256，不含可还原的凭据。
+  // Sub2API 账单过滤能力核验结果；identity 是上游连接身份的 sha256 再用账单身份密钥做的 HMAC（lib/providers.js），
+  // 拿到库也撞不出登录信息。S3 之前存的是 sha256 本身，升级时由 rehashBillingCapabilities 原地改过来。
   await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_billing_capabilities (
     identity CHAR(64) NOT NULL PRIMARY KEY,
     capability JSON NOT NULL,
@@ -269,4 +270,34 @@ async function backfillReconciliationLedger(pool) {
     "INSERT INTO meta (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)",
     [LEDGER_BACKFILL_META_KEY, JSON.stringify({ completedAt: new Date().toISOString(), migrated: entries.length })]
   );
+}
+
+const BILLING_IDENTITY_META_KEY = "billing_identity_hmac_v1";
+
+// S3：账单能力表的身份从 sha256 改成「对 sha256 再做 HMAC」。rehash 是 lib/providers.js 的 billingIdentityFromDigest 绑上密钥；
+// 表里每一行原地改一次（不删，核验结果和时间照旧），和完成标记在同一个事务里提交，只做一次。
+// 失败就整体回滚并抛错、挡住启动：不然库里还是 sha256，按 HMAC 找不到，零消费的日子在重新核验前结不了账
+export async function rehashBillingCapabilities(pool, rehash) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [markers] = await conn.query("SELECT k FROM meta WHERE k = ? FOR UPDATE", [BILLING_IDENTITY_META_KEY]);
+    if (markers.length) {
+      await conn.rollback();
+      return { migrated: 0, skipped: true };
+    }
+    const [rows] = await conn.query("SELECT identity FROM reconciliation_billing_capabilities FOR UPDATE");
+    for (const { identity } of rows) {
+      await conn.query("UPDATE reconciliation_billing_capabilities SET identity = ? WHERE identity = ?", [rehash(identity), identity]);
+    }
+    await conn.query("INSERT INTO meta (k, v) VALUES (?, ?)",
+      [BILLING_IDENTITY_META_KEY, JSON.stringify({ completedAt: new Date().toISOString(), migrated: rows.length })]);
+    await conn.commit();
+    return { migrated: rows.length, skipped: false };
+  } catch (err) {
+    await conn.rollback().catch(() => {});
+    throw err;
+  } finally {
+    conn.release();
+  }
 }

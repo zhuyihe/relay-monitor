@@ -10,6 +10,7 @@ import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconcilia
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
+import { billingIdentityFromDigest } from "../lib/providers.js";
 
 function trustedLegacyRule(rule, stations = [], upstreamAccountId = 7, ownAccountId = 7) {
   const upstream = stations.find((station) => station.id === rule.upstream_station_id) || { type: "newapi", baseUrl: "https://upstream.test" };
@@ -4058,6 +4059,30 @@ function sub2ReconciliationFixture(t, { baseUrl, costs = {}, ...live }) {
   const restart = () => createReconciliationModule({ pool: f.rt.pool, store: f.rt.store, onboardingSource: f.rt.onboardingSource }, { repository: f.repository });
   return { ...f, sub2, sources, restart, today: { ruleIds: [f.rule.id], preset: "today", timezone: "Asia/Shanghai" } };
 }
+
+test("S3 Sub2API 账单能力：用 Store 的账单身份密钥算 HMAC 身份；升级时改过身份的能力照常用，零消费的日子不用重新核验也算完整账单", async (t) => {
+  const now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-hmac-server.test", costs: {} });
+  // 真的 Store：密钥从它的 getter 来，getter 改了名这里就会失败
+  const conn = { beginTransaction: async () => {}, query: async () => [[]], commit: async () => {}, rollback: async () => {}, release: () => {} };
+  const store = await new Store({ query: async (sql) => [sql.startsWith("SELECT k, v FROM meta") ? [{ k: "auth", v: { username: "admin", salt: "s", hash: "h" } }] : []],
+    getConnection: async () => conn }).load();
+  Object.defineProperty(f.rt.store, "billingIdentityKey", { get: () => store.billingIdentityKey });
+  const digest = createHash("sha256").update(JSON.stringify(["https://sub2-hmac-server.test", "7", "Asia/Shanghai", "token", "jwt", null])).digest("hex");
+  // 升级时 db/pool.js 的 rehashBillingCapabilities 按同一个算法改过身份的那一行
+  const verifiedAt = now - 3 * 86400000;
+  await f.repository.saveBillingCapability(billingIdentityFromDigest(store.billingIdentityKey, digest),
+    { state: "supported", currency: "USD", window: "natural-day", verifiedAt, reason: "RUNTIME_FILTERS_VERIFIED" });
+  f.repository.log.capabilityWrites.length = 0;
+  await f.module.refreshDue(now);
+  assert.equal(f.sub2.controls, 0, "沿用改过身份的核验结果");
+  assert.deepEqual(f.repository.log.capabilityWrites, []);
+  // 零消费的昨天：没有能力就只是参考扣费（partial），要等有消费的那天重新核验；有能力就是完整的 0
+  const yesterday = [...f.state.snapshots.values()].map((row) => JSON.parse(row.source))
+    .find((source) => source.recordType === "observation" && source.window.startMs === Date.parse("2026-10-09T16:00:00Z"));
+  assert.deepEqual([yesterday.result.upstream.state, yesterday.result.upstream.amountUsd], ["complete", 0]);
+});
 
 test("1c Sub2API 今日实时毛利：页面查询只读不核验不写库，轮询核验能力并只结账昨天", async (t) => {
   const now = Date.parse("2026-10-11T01:00:00Z"); // 上海 10-11 09:00
