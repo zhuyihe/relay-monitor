@@ -380,11 +380,12 @@ function Equation({
   const ownName: string = snap.own?.station?.name || COPY.ownStation;
 
   if (dv.hasIncome) {
-    // 收入是估算的两种情况：自营站点没设置售价（按 1 美元额度 = 1 元算）、所选天数和自营收入能取的天数（7 / 30 天）不一致
+    // 没设置售价或兼容旧接口的逐日分配时，明确展示估算原因。
     const revReasons: string[] = [];
     if (dv.ownNoRate) revReasons.push(COPY.ownNoRate(ownName));
+    if (dv.incomeEstimated) revReasons.push(COPY.revenueEstimated);
     if (dv.revenueSplit) revReasons.push(COPY.revenueSplit(dv.ownDays, dv.rows.length));
-    const revNote = dv.ownNoRate ? SELL_PRICE_UNSET : dv.revenueSplit ? COPY.revenueSplitNote(dv.ownDays) : ownName;
+    const revNote = dv.ownNoRate ? SELL_PRICE_UNSET : dv.incomeEstimated ? COPY.revenueEstimatedNote : ownName;
     // 缺的是成本时利润一定偏高；只是收入估算时方向不定
     const tail = reasons.length ? (
       <>

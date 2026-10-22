@@ -1,6 +1,8 @@
 // 告警中心的文字：只在这一页出现的话都在这里，用语按 design/ui-copy-spec.md §3、§11。
 // 规则名里的余额四档取 lib/format.js 的 BALANCE_STATE_TEXT，这里只写「恢复正常」。
 // 页面文件不能导出常量，界面测试要引用这些话，所以放在同目录的 copy.ts（§12）；导入带 .js 后缀，node 可以直接读
+import { UNNAMED_CHANNEL } from "../../../lib/alert-center.js";
+
 export const COPY = Object.freeze({
   // 区块名（§11：告警规则 / 通知渠道 / 每日日报 → 提醒规则 / 通知方式 / 日报）
   rules: "提醒规则",
@@ -97,7 +99,7 @@ export const COPY = Object.freeze({
   modalIntro: "默认收所有提醒；在「提醒规则」里可以按提醒类型指定发到哪里。",
   name: "名字",
   namePlaceholder: "例如：运维群",
-  unnamed: "未命名通知方式",
+  unnamed: UNNAMED_CHANNEL,
   type: "类型",
   typeLocked: "添加后不能改类型",
   sendTest: "发送测试",

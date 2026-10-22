@@ -112,6 +112,31 @@ test("derive: 收入按每天消费分到天；没设置售价时 ownNoRate 只�
   assert.equal(parity.ownNoRate, false);
 });
 
+test("derive: 优先使用真实分日收入，含管理员自用的模型趋势不再改变收入形状", () => {
+  const data = analytics();
+  const own = { station: { cnyPerUsd: 7 }, tz: TZ, profit: { incomeCny: 70 },
+    trend: [{ ...trend(data.start, 1, 100)[0] }, { ...trend(addDays(data.start, 1), 1, 10)[0] }],
+    incomeDaily: [{ date: data.start, incomeCny: 0 }, { date: addDays(data.start, 1), incomeCny: 70 }, { date: data.end, incomeCny: 0 }],
+    incomeDailyApprox: false };
+  const dv = derive(data, own);
+  assert.deepEqual(dv.rows.map((r) => r.rev), [0, 70, 0]);
+  assert.equal(dv.revenue, 70);
+  assert.equal(dv.revenueApprox, false);
+  assert.equal(dv.revenueSplit, false, "真实分日收入截取日期不需要比例估算");
+  assert.equal(dv.incomeEstimated, false);
+});
+
+test("derive: 旧接口完整七天也必须标估算，1 元分七天守恒为 1 元", () => {
+  const data = analytics({ days: 7, end: day("10-07") });
+  const own = { station: { cnyPerUsd: 1 }, tz: TZ, profit: { incomeCny: 1 }, trend: trend(data.start, 7, 1) };
+  const dv = derive(data, own);
+  assert.equal(dv.revenue, 1);
+  assert.equal(dv.revenueSplit, false);
+  assert.equal(dv.incomeEstimated, true);
+  assert.equal(dv.revenueApprox, true);
+  assert.equal(Math.round(dv.rows.reduce((sum, row) => sum + row.rev, 0) * 100), 100);
+});
+
 test("derive: 算收入时报错带上 code 和原文，页面按码归类；没有每天的记录时给一句原因", () => {
   const data = analytics();
   const failed = derive(data, { station: { id: "own-1" }, profit: { error: "HTTP 403 forbidden", errorCode: "UPSTREAM_AUTH_DENIED" }, trend: [] });

@@ -2,6 +2,7 @@
 import { withAuth, json } from "../../../lib/api.js";
 import { queryStationUsage } from "../../../lib/providers.js";
 import { errorCodeOf } from "../../../lib/error-copy.js";
+import { dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../../lib/business-time.js";
 
 // 各站点用量接口逐个查开销不小，按范围缓存 60 秒（缓存挂 rt 上，不用模块级变量）
 export const GET = withAuth(async (request, rt) => {
@@ -26,14 +27,9 @@ export const GET = withAuth(async (request, rt) => {
     startMs = now - 24 * 3600000;
     granularity = "hour";
   } else {
-    // 该时区的今日零点：用当前时刻在该时区的时分秒往回推
-    const p = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz, hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
-    }).formatToParts(new Date(now));
-    const get = (k) => Number(p.find((x) => x.type === k).value);
-    const midnight = now - ((get("hour") % 24) * 3600 + get("minute") * 60 + get("second")) * 1000 - (now % 1000);
+    // 自然日按浏览器时区的日历标签推进；跨夏令时时一天可能是 23 或 25 小时。
     const days = range === "30d" ? 29 : range === "7d" ? 6 : 0;
-    startMs = midnight - days * 86400000;
+    startMs = dayStartInTz(shiftDayLabel(dayKeyInTz(now, tz), -days), tz);
     granularity = range === "today" ? "hour" : "day";
   }
   const endMs = now;

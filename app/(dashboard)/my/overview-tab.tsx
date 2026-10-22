@@ -36,7 +36,8 @@ const COPY = Object.freeze({
   dailyFailed: "读不到逐日成本",
   dailyEmpty: "暂时没有逐日成本",
   dailyEmptyDesc: "稍后刷新再看。",
-  trendCaption: "按天。每天的收入按当天用户消费的占比分。",
+  trendCaption: "按天。收入按当天普通用户消费和转售 Key 消费计算。",
+  trendEstimated: "按天。旧接口没给逐日收入，按全部模型消费的占比估算，包含管理员自用的消费。",
   // 预计花费
   fcRange: "预计范围",
   next24: "未来 24 小时",
@@ -208,7 +209,7 @@ function Equation({
 
 // ---- 每日趋势 -------------------------------------------------------------
 
-// 逐日上游成本取自 /api/analytics（和成本估算页同一份），每日收入按当天用户消费的占比分，
+// 逐日上游成本取自 /api/analytics（和成本估算页同一份），每日收入取自用户和转售消费，
 // 缺记录的日子标成缺失，不补零。
 function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: number | null; reload: () => Promise<unknown> }) {
   const dv = useMemo(() => (costs && !costs.error ? derive(costs, v.d) : null), [costs, v.d]);
@@ -232,7 +233,7 @@ function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: 
       tz={costs.tz || v.d?.tz}
       caption={
         <>
-          {COPY.trendCaption}
+          {dv.incomeEstimated ? COPY.trendEstimated : COPY.trendCaption}
           <Link className="jy-link" href={`/analytics?range=${dv.rows.length <= 7 ? "7d" : "30d"}`}>
             {NAV_LABELS.analytics}
           </Link>

@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ensureSchema, rehashBillingCapabilities } from "./pool.js";
+import { billingCapabilityAliases, wrappedBillingIdentity } from "../lib/billing-capability-storage.js";
+import { createHash, createHmac } from "node:crypto";
 
 const DAY = 86400000;
 const START = Date.UTC(2026, 9, 8, 16);
@@ -46,6 +48,7 @@ test("对账 schema 缺列或索引时使用 MySQL 8 兼容的普通 ALTER", asy
     "ALTER TABLE reconciliation_rules ADD COLUMN canonical_key VARCHAR(255) NULL",
     "ALTER TABLE reconciliation_rules ADD COLUMN source_binding JSON NULL",
     "ALTER TABLE reconciliation_snapshots ADD INDEX idx_reconciliation_snapshot_segment (segment_id)",
+    "ALTER TABLE reconciliation_billing_capabilities ADD COLUMN identity_scheme VARCHAR(24) NOT NULL DEFAULT 'legacy'",
   ]);
   assert.equal(alters.some((sql) => sql.includes("IF NOT EXISTS")), false);
 });
@@ -53,7 +56,7 @@ test("对账 schema 缺列或索引时使用 MySQL 8 兼容的普通 ALTER", asy
 test("对账 schema 已具备列和索引时不重复执行 ALTER", async () => {
   const pool = schemaPool({
     columns: ["channel_status", "status_observed_at_ms", "status_changed_at_ms", "segment_id", "ratio_observed_at_ms", "ratio_source",
-      "billing_policy", "scope_version", "billing_effective_from_ms", "cost_coverage", "provider", "canonical_key", "source_binding"],
+      "billing_policy", "scope_version", "billing_effective_from_ms", "cost_coverage", "provider", "canonical_key", "source_binding", "identity_scheme"],
     indexes: ["idx_reconciliation_snapshot_segment"],
   });
   await ensureSchema(pool);
@@ -143,48 +146,91 @@ test("结账账本表以 (关联, 日期, 版本) 为主键", async () => {
   assert.ok(pool.calls.indexOf(ledger) < pool.calls.findIndex((call) => call.sql.startsWith("SELECT k FROM meta")));
 });
 
-// 账单能力表身份改 HMAC 的一次性迁移：事务里的读写都走 conn；commit 才落下
-function capabilityPool({ identities = [], marker = false, failOn = null } = {}) {
-  const db = { identities: [...identities], marker }, calls = [];
-  let draft;
+// 启动迁移的事务假库：写入草稿，只有 COMMIT 成功才改变已提交行。
+function capabilityPool({ rows = [], marker = false, failOn = null, failAfter = 0 } = {}) {
+  const db = { rows: structuredClone(rows), marker }, calls = [];
+  let draft, matches = 0;
+  const record = (sql) => {
+    calls.push(sql);
+    if (failOn && sql.startsWith(failOn) && matches++ >= failAfter) throw Object.assign(new Error("synthetic"), { code: "ER_LOCK_DEADLOCK" });
+  };
   const conn = {
-    beginTransaction: async () => { draft = { identities: [...db.identities], marker: db.marker }; },
+    beginTransaction: async () => { draft = structuredClone(db); },
     async query(sql, params = []) {
-      calls.push(sql);
-      if (failOn && sql.startsWith(failOn)) throw Object.assign(new Error("synthetic"), { code: "ER_LOCK_DEADLOCK" });
+      record(sql);
       if (sql.startsWith("SELECT k FROM meta")) return [draft.marker ? [{ k: params[0] }] : []];
-      if (sql.startsWith("SELECT identity FROM reconciliation_billing_capabilities")) return [draft.identities.map((identity) => ({ identity }))];
-      if (sql.startsWith("UPDATE reconciliation_billing_capabilities")) draft.identities = draft.identities.map((id) => (id === params[1] ? params[0] : id));
+      if (sql.startsWith("SELECT identity")) return [structuredClone(draft.rows.filter((r) => (r.identity_scheme || "legacy") === params[0]))];
+      if (sql.startsWith("INSERT INTO reconciliation_billing_capabilities")) {
+        const [identity, capability, verified_at, identity_scheme] = params;
+        const incoming = { identity, capability: JSON.parse(capability), verified_at, identity_scheme };
+        const index = draft.rows.findIndex((r) => r.identity.toLowerCase() === identity.toLowerCase());
+        if (index < 0) draft.rows.push(incoming);
+        else if (draft.rows[index].identity_scheme !== "wrapped-v2" || Number(verified_at) > Number(draft.rows[index].verified_at)) draft.rows[index] = incoming;
+      }
+      if (sql.startsWith("DELETE FROM reconciliation_billing_capabilities")) draft.rows = draft.rows.filter((r) => !(r.identity.toLowerCase() === params[0].toLowerCase() && (r.identity_scheme || "legacy") === params[1]));
       if (sql.startsWith("INSERT INTO meta")) draft.marker = true;
       return [[]];
     },
-    commit: async () => { db.identities = draft.identities; db.marker = draft.marker; calls.push("COMMIT"); },
+    commit: async () => { record("COMMIT"); Object.assign(db, draft); },
     rollback: async () => { calls.push("ROLLBACK"); },
     release: () => {},
   };
   return { db, calls, getConnection: async () => conn };
 }
 
-test("账单能力表的身份改 HMAC：每一行原地改一次，和完成标记一起提交；有标记就不再改", async () => {
-  const pool = capabilityPool({ identities: ["a".repeat(64), "b".repeat(64)] });
-  const rehash = (digest) => `h(${digest.slice(0, 1)})`;
-  assert.deepEqual(await rehashBillingCapabilities(pool, rehash), { migrated: 2, skipped: false });
-  assert.deepEqual(pool.db.identities, ["h(a)", "h(b)"]);
+const billingKey = "migration-fixture-key";
+const digestOf = (s) => createHash("sha256").update(s).digest("hex");
+const wrap = (digest) => wrappedBillingIdentity(billingKey, digest);
+const capability = (verifiedAt, reason = "RUNTIME_FILTERS_VERIFIED") => ({ state: "supported", currency: "USD", window: "natural-day", verifiedAt, reason });
+const capabilityRow = (identity, at, scheme = "legacy", reason) => ({ identity, capability: capability(at, reason), verified_at: at, identity_scheme: scheme });
+
+test("账单身份迁移：混合 SHA/HMAC 包装后保留能力和时间，已经包装的行不再改", async () => {
+  const digest = digestOf("sha"), oldHmac = createHmac("sha256", billingKey).update(digestOf("hmac")).digest("hex");
+  const oldWrapped = capabilityRow(wrap(digestOf("done")), 500, "wrapped-v2");
+  const pool = capabilityPool({ rows: [capabilityRow(digest, 1000), capabilityRow(oldHmac, 2000), oldWrapped] });
+  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 2, skipped: false });
+  assert.deepEqual(pool.db.rows, [oldWrapped, capabilityRow(wrap(digest), 1000, "wrapped-v2"), capabilityRow(wrap(oldHmac), 2000, "wrapped-v2")]);
   assert.equal(pool.db.marker, true);
-  assert.equal(pool.calls.at(-1), "COMMIT");
+  const saved = structuredClone(pool.db);
   pool.calls.length = 0;
-  assert.deepEqual(await rehashBillingCapabilities(pool, rehash), { migrated: 0, skipped: true });
-  assert.deepEqual(pool.db.identities, ["h(a)", "h(b)"]);
-  assert.equal(pool.calls.some((sql) => sql.startsWith("UPDATE")), false);
-  // 空表也写标记，以后 S3 之前的版本回滚期间写下的行不再改
-  const empty = capabilityPool();
-  assert.deepEqual(await rehashBillingCapabilities(empty, rehash), { migrated: 0, skipped: false });
-  assert.equal(empty.db.marker, true);
+  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 0, skipped: true });
+  assert.deepEqual(pool.db, saved);
+  assert.equal(pool.calls.some((sql) => sql.startsWith("INSERT") || sql.startsWith("DELETE") || sql.startsWith("UPDATE")), false);
+  assert.ok(pool.calls.every((sql) => !/ledger|snapshots/.test(sql)));
 });
 
-test("账单能力表的身份改 HMAC：中途出错整体回滚、不写标记、抛错挡住启动，下次启动从头再来", async () => {
-  const pool = capabilityPool({ identities: ["a".repeat(64), "b".repeat(64)], failOn: "INSERT INTO meta" });
-  await assert.rejects(rehashBillingCapabilities(pool, (digest) => `h(${digest.slice(0, 1)})`), { code: "ER_LOCK_DEADLOCK" });
-  assert.deepEqual(pool.db, { identities: ["a".repeat(64), "b".repeat(64)], marker: false });
-  assert.equal(pool.calls.at(-1), "ROLLBACK");
+test("旧 marker 不阻止扫描：回滚插入裸 SHA 后重新升级仍包装，避免裸摘要留库", async () => {
+  const digest = digestOf("returned-old-program"), pool = capabilityPool({ marker: true });
+  pool.db.rows.push(capabilityRow(digest, 3000));
+  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 1, skipped: false });
+  assert.deepEqual(pool.db.rows, [capabilityRow(wrap(digest), 3000, "wrapped-v2")]);
+  assert.equal(pool.db.rows.some((r) => r.identity === digest), false);
 });
+
+test("新旧同身份合并总是保留 verified_at 较新的一组能力和时间", async () => {
+  const digest = digestOf("same-account"), [identity] = billingCapabilityAliases(billingKey, digest);
+  for (const legacyAt of [1000, 3000]) {
+    const pool = capabilityPool({ marker: true, rows: [capabilityRow(digest, legacyAt, "legacy", "legacy-row"), capabilityRow(identity, 2000, "wrapped-v2", "new-row")] });
+    await rehashBillingCapabilities(pool, wrap);
+    assert.deepEqual(pool.db.rows, [capabilityRow(identity, Math.max(legacyAt, 2000), "wrapped-v2", legacyAt > 2000 ? "legacy-row" : "new-row")]);
+  }
+});
+
+test("空表或只有 wrapped-v2 的库也写旧兼容栅栏，防止旧 S3 再次包装新身份", async () => {
+  for (const rows of [[], [capabilityRow(wrap(digestOf("wrapped-only")), 1000, "wrapped-v2")]]) {
+    const pool = capabilityPool({ rows });
+    assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 0, skipped: false });
+    assert.equal(pool.db.marker, true);
+    assert.deepEqual(pool.db.rows, rows);
+  }
+});
+
+for (const failOn of ["INSERT INTO reconciliation_billing_capabilities", "DELETE FROM reconciliation_billing_capabilities", "INSERT INTO meta", "COMMIT"]) {
+  test(`账单身份迁移中断整体回滚：${failOn}`, async () => {
+    const rows = [capabilityRow(digestOf("a"), 1000), capabilityRow(digestOf("b"), 2000)];
+    const pool = capabilityPool({ rows, failOn, failAfter: failOn.includes("billing_capabilities") ? 1 : 0 });
+    await assert.rejects(rehashBillingCapabilities(pool, wrap), { code: "ER_LOCK_DEADLOCK" });
+    assert.deepEqual(pool.db, { rows, marker: false });
+    assert.equal(pool.calls.at(-1), "ROLLBACK");
+  });
+}

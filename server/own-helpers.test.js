@@ -2,10 +2,103 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   aggregateFlow, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
-  reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
+  readOwnIncome, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
 } from "./own-helpers.js";
 import { History } from "../db/history.js";
 import { dayStartInTz } from "../lib/business-time.js";
+
+function incomeFixture() {
+  const own = { id: "own", name: "自营", type: "newapi", baseUrl: "https://own.test", accessToken: "test", cnyPerUsd: 7 };
+  const users = [{ id: 1, username: "root", role: 100 }, { id: 2, username: "customer", role: 1 }];
+  const rt = { _ownUsersCache: { at: Date.now(), stationId: own.id, list: users } };
+  const startMs = dayStartInTz("2026-10-13", "Asia/Shanghai");
+  const window = { startMs, endMs: startMs + 2 * 86400000, tz: "Asia/Shanghai" };
+  const rows = [{ key: "root", t: startMs + 3600000, cost: 100 }, { key: "customer", t: startMs + 86400000 + 3600000, cost: 10 }];
+  return { own, users, rt, window, rows };
+}
+
+test("逐日收入跟随真实用户消费，管理员自用日不分走销售日的收入", async () => {
+  const f = incomeFixture();
+  const result = await readOwnIncome(f.rt, f.own, f.rows, f.window);
+  assert.equal(result.incomeUsd, 10);
+  assert.equal(result.adminUsageUsd, 100);
+  assert.deepEqual(result.incomeDaily, [{ date: "2026-10-13", incomeCny: 0 }, { date: "2026-10-14", incomeCny: 70 }]);
+});
+
+test("转售管理员 Key 按实际发生日计收入，窗口合计与分日相加一致", async (t) => {
+  const f = incomeFixture();
+  f.own.resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    calls.push(url);
+    assert.equal(url.pathname, "/api/log/stat");
+    assert.equal(url.searchParams.get("username"), "root");
+    assert.equal(url.searchParams.get("token_name"), "sale");
+    return Response.json({ success: true, data: { quota: Number(url.searchParams.get("start_timestamp")) === f.window.startMs / 1000 ? 20 * 500000 : 0 } });
+  });
+  const result = await readOwnIncome(f.rt, f.own, f.rows, f.window);
+  assert.equal(calls.length, 2);
+  assert.equal(result.incomeUsd, 30);
+  assert.equal(result.adminUsageUsd, 80);
+  assert.equal(result.resold.resoldUsd, 20);
+  assert.deepEqual(result.incomeDaily, [{ date: "2026-10-13", incomeCny: 140 }, { date: "2026-10-14", incomeCny: 70 }]);
+  assert.equal(result.incomeDaily.reduce((sum, d) => sum + d.incomeCny, 0), 210);
+});
+
+test("1 元收入分成 7 天仍合计 1 元，不逐项舍入成 0.98 元", async () => {
+  const f = incomeFixture();
+  f.own.cnyPerUsd = 1;
+  const rows = Array.from({ length: 7 }, (_, i) => ({ key: "customer", t: f.window.startMs + i * 86400000 + 1000, cost: 1 / 7 }));
+  const result = await readOwnIncome(f.rt, f.own, rows, { ...f.window, endMs: f.window.startMs + 7 * 86400000 });
+  assert.equal(Math.round(result.incomeDaily.reduce((sum, d) => sum + d.incomeCny, 0) * 100), 100);
+  assert.ok(result.incomeDaily.every((d) => d.incomeCny === 0.14 || d.incomeCny === 0.15));
+});
+
+test("没读到消费用户的角色时不默认其为客户", async () => {
+  const f = incomeFixture();
+  f.rt._ownUsersCache.list = f.users.filter((u) => u.username !== "root");
+  await assert.rejects(readOwnIncome(f.rt, f.own, f.rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+});
+
+test("必要的角色或转售读取失败时收入不可确认", async (t) => {
+  const f = incomeFixture();
+  t.mock.method(globalThis, "fetch", async () => Response.json({ success: false, message: "unavailable" }, { status: 503 }));
+  await assert.rejects(readOwnIncome({}, f.own, f.rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  f.own.resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
+  await assert.rejects(readOwnIncome(f.rt, f.own, f.rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+});
+
+test("转售记录 HTTP200 但金额缺失时不能当成零收入", async (t) => {
+  const f = incomeFixture();
+  f.own.resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
+  t.mock.method(globalThis, "fetch", async () => Response.json({ success: true, data: {} }));
+  await assert.rejects(readOwnIncome(f.rt, f.own, f.rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+});
+
+test("多个转售 Key 跨多日读取时整个窗口最多四个并发请求", async (t) => {
+  const f = incomeFixture();
+  f.own.resoldAdminKeys = Array.from({ length: 5 }, (_, i) => ({ username: "root", tokenName: `sale-${i}` }));
+  let active = 0, maxActive = 0, calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    active++; calls++; maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setImmediate(resolve));
+    active--;
+    return Response.json({ success: true, data: { quota: 0 } });
+  });
+  await readOwnIncome(f.rt, f.own, f.rows, { ...f.window, endMs: f.window.startMs + 7 * 86400000 });
+  assert.equal(calls, 35);
+  assert.equal(maxActive, 4);
+});
+
+test("实际分日收入保留负向调整，仍与整窗金额守恒", async () => {
+  const f = incomeFixture();
+  f.own.cnyPerUsd = 1;
+  const rows = [{ key: "customer", t: f.window.startMs + 1000, cost: 1 }, { key: "customer", t: f.window.startMs + 86400000 + 1000, cost: -0.25 }];
+  const result = await readOwnIncome(f.rt, f.own, rows, f.window);
+  assert.equal(result.incomeUsd, 0.75);
+  assert.deepEqual(result.incomeDaily.map((d) => d.incomeCny), [1, -0.25]);
+});
 
 test("成本渠道支持主地址、api 后缀和显式别名匹配", () => {
   const publicStation = { id: "public", baseUrl: "https://relay.example.com/" };

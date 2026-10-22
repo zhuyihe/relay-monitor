@@ -24,8 +24,10 @@ export const COPY = Object.freeze({
     `${more ? "另有 " : ""}${n} 天只有部分上游有记录${who ? `（${who}）` : ""}，缺记录的上游这几天的成本没算进去。`,
   noUsageUpstream: "没有按用量计费的上游",
   ownNoRate: (name: string) => `「${name}」${SELL_PRICE_UNSET}。`,
+  revenueEstimated: "旧接口没给逐日收入，按全部模型消费的占比估算；包含管理员自用的消费，每天的收入可能有偏差。",
+  revenueEstimatedNote: "逐日收入按消费占比估算",
   revenueSplit: (ownDays: number, days: number) =>
-    `收入只能按近 7 天或近 30 天取，这里是把近 ${ownDays} 天的收入按每天用户消费的多少分到每天，再取所选的 ${days} 天。`,
+    `从近 ${ownDays} 天的估算收入里，取所选的 ${days} 天。`,
   revenueSplitNote: (ownDays: number) => `从近 ${ownDays} 天的收入里分出`,
   costLowTail: "没算进去的上游成本会让毛利和净利偏高。",
   revenueEstTail: "毛利和净利跟着收入一起是估算的数。",

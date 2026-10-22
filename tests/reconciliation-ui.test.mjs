@@ -12,6 +12,7 @@ import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
 import { CONSOLE_UNREACHABLE, ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText } from "../lib/error-copy.js";
 import { NAV_LABELS, STATION_TABS } from "../lib/brand.js";
+import { CHANNEL_TYPES } from "../lib/notify.js";
 // 成本估算、用量分析页上的字（页面文件不能导出，放在同目录的 copy.ts；node 直接读 .ts）
 import { COPY as ANALYTICS_COPY } from "../app/(dashboard)/analytics/copy.ts";
 import { COPY as USAGE_COPY } from "../app/(dashboard)/usage/copy.ts";
@@ -78,7 +79,8 @@ async function openDailyPage(t, options = {}) {
     if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, { ...configuration, ownStation: { id: "own-1", cnyPerUsd: 7 }, ...(options.upstreams ? { upstreams: options.upstreams } : {}), rules: initial.results.map((row) => row.rule) });
     if (url.pathname === "/api/reconciliation") { reads.push(Object.fromEntries(url.searchParams)); return options.read ? options.read(route, reads.length, initial) : fulfill(route, initial); }
     if (url.pathname === "/api/reconciliation/query") { const body = route.request().postDataJSON(); queries.push(body); return options.query ? options.query(route, body, initial) : fulfill(route, initial); }
-    if (url.pathname.endsWith("/segments")) return fulfill(route, { segments: [] });
+    if (url.pathname.endsWith("/segments")) return fulfill(route, { segments: options.segments || [] });
+    if (options.extraAPI) return options.extraAPI(route, url.pathname);
     throw new Error("unexpected daily fixture API: " + url.pathname);
   }, options.viewport, false, null, options.path);
   return { page, reads, queries, initial };
@@ -89,6 +91,34 @@ const coverageText = (known, accounted) => reconciliationCoverageText({ knownCha
 const summaryMetric = (scope, label) => scope.locator(".reconciliation-summary-metric").filter({ has: scope.page().getByText(label, { exact: true }) });
 // 计算明细里一项的值
 const detailValue = (scope, label) => scope.locator(".reconciliation-detail").filter({ has: scope.page().getByText(label, { exact: true }) }).locator(".reconciliation-detail__value");
+
+test("changing a past transition reports saved time without claiming fixed days were recalculated", async (t) => {
+  let saved = 0;
+  const segment = { id: "past-transition", group: "default", ratio: 1, timingSource: "detected",
+    effectiveFrom: window.startMs, effectiveTo: null };
+  const { page } = await openDailyPage(t, {
+    segments: [segment],
+    query: (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture reload failed" }) }),
+    extraAPI(route, path) {
+      if (path !== "/api/reconciliation/rules/rule-1/transitions/past-transition") throw new Error("unexpected daily fixture API: " + path);
+      assert.equal(route.request().method(), "PUT");
+      saved += 1;
+      return fulfill(route, { segments: [segment] });
+    },
+  });
+  await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true });
+  const timing = drawer.getByRole("region", { name: "改时间", exact: true });
+  await timing.waitFor();
+  await timing.getByText("保存后，未固定的结果按新时间计算。系统会尝试更新昨天的固定记录，更早的固定记录暂不自动更新。", { exact: true }).waitFor();
+  const input = timing.getByPlaceholder("倍率变化的时间");
+  await input.fill("2026年10月8日 09:30");
+  await input.press("Enter");
+  await timing.getByRole("button", { name: "改时间", exact: true }).click();
+  await page.getByText("时间已修改，但最新结果没读到，请重新读取", { exact: true }).waitFor();
+  assert.equal(saved, 1);
+  assert.equal(await page.getByText("已修改，受影响的日子已重算", { exact: true }).count(), 0);
+});
 
 test("daily billing defaults to complete yesterday and global 3/10 coverage survives search and status filters", async (t) => {
   const { page, reads } = await openDailyPage(t); const summary = page.getByRole("region", { name: "汇总", exact: true });
@@ -179,31 +209,41 @@ test("3b live today rows share one window although each stops at its own fetch t
 });
 
 test("3b pending upstream account usage re-reads silently at most three times, and refresh starts a new round", async (t) => {
-  const reads = [], queries = [], rows = ratedDailyRows();
+  const reads = [], queries = [], completedReads = new Set(), rows = ratedDailyRows();
   const respond = (usage) => ({ ...dailyResponse(rows, { unaccountedUpstream: unaccountedFor(rows, "USD", usage) }), generatedAt: new Date(Date.now()).toISOString() });
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, { ...configuration, rules: rows.map((row) => row.rule) });
     if (url.pathname === "/api/reconciliation") {
-      reads.push(Object.fromEntries(url.searchParams));
+      const readNo = reads.push(Object.fromEntries(url.searchParams));
       // 重读慢一点返回，读取期间检查汇总没有切到「仅供参考」
-      if (reads.length > 1) await new Promise((resolve) => setTimeout(resolve, 400));
-      return fulfill(route, respond(reads.length >= 5 ? { usd: 4, mode: "usage" } : null));
+      if (readNo > 1) await new Promise((resolve) => setTimeout(resolve, 400));
+      await fulfill(route, respond(readNo >= 5 ? { usd: 4, mode: "usage" } : null));
+      completedReads.add(readNo);
+      return;
     }
     if (url.pathname === "/api/reconciliation/query") { queries.push(route.request().postDataJSON()); return fulfill(route, respond(null)); }
     throw new Error("unexpected API: " + url.pathname);
   }, undefined, true);
   const settle = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms));
   const until = async (check) => { for (let i = 0; i < 100 && !check(); i += 1) await settle(20); assert.ok(check()); };
+  const advanceUntilRead = async (expected) => {
+    // 请求响应后，React 才安排下一轮。小步推进并让出事件循环，不假设固定延迟已足够应用响应。
+    for (let i = 0; i < 150 && reads.length < expected; i += 1) {
+      await page.clock.fastForward(100);
+      await settle(20);
+    }
+    assert.equal(reads.length, expected);
+    await until(() => completedReads.has(expected));
+  };
   const summary = page.getByRole("region", { name: "汇总", exact: true }), unaccounted = summary.getByRole("region", { name: "没算进利润的上游成本", exact: true });
   await unaccounted.getByText("读取中", { exact: true }).first().waitFor(); await unaccounted.getByText(/上游暂时读不到，系统会自动再读。/).waitFor(); assert.equal(reads.length, 1);
   for (const expected of [2, 3, 4]) {
-    await page.clock.fastForward(5000); await until(() => reads.length === expected);
+    await advanceUntilRead(expected);
     // 只重读上游扣费，汇总不提示「读取中」或刷新失败
     assert.equal(await summary.locator(".ant-alert").count(), 0);
     await summaryMetric(summary, "收入").getByText("$7.50", { exact: true }).waitFor();
-    await settle(600);
   }
   await unaccounted.getByText(/上游暂时读不到，可以点「刷新」再读。/).waitFor();
   await page.clock.fastForward(20000); await settle(); assert.equal(reads.length, 4);
@@ -211,8 +251,10 @@ test("3b pending upstream account usage re-reads silently at most three times, a
   // 「刷新」是新的窗口请求：重新给 3 次重读，读到后不再重读
   await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click(); await until(() => queries.length === 1); assert.equal(queries[0].observe, true);
   await unaccounted.getByText(/上游暂时读不到，系统会自动再读。/).waitFor();
-  await page.clock.fastForward(5000); await until(() => reads.length === 5);
+  await advanceUntilRead(5);
   await unaccounted.locator(".reconciliation-summary-metric").getByText("$2.00", { exact: true }).waitFor(); assert.equal(await unaccounted.getByText(/上游暂时读不到/).count(), 0);
+  // 金额渲染后还要让本次绘制的 effect 清掉 pending 定时器，之后再跨过完整观察期。
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.clock.fastForward(20000); await settle(); assert.equal(reads.length, 5);
 });
 
@@ -688,6 +730,20 @@ test("configured channel management preserves monitors and Key billing without a
   const done = drawer.getByRole("button", { name: "完成", exact: true }); assert.equal(await done.isEnabled(), true);
   assert.equal(await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).count(), 0); await done.click(); await drawer.waitFor({ state: "hidden" });
   assert.equal(probes.length, 0); assert.equal(writes.length, 0); assert.equal(reads.filter((entry) => entry.path.endsWith("/keys")).length, 0);
+});
+
+test("configured binding with unknown coverage says bound without claiming its income is accounted", async (t) => {
+  const config = onboardingFixture();
+  config.channels[0].reconciliation = { status: "configured", ruleIds: ["rule-1"] };
+  Object.assign(config.rules[0], { costCoverage: "unknown", coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] } });
+  const { page, writes } = await openOnboardingPage(t, { config });
+  const row = page.locator(".ant-list-item").filter({ hasText: "New channel" });
+  await row.getByText("已绑定", { exact: true }).waitFor();
+  assert.equal(await row.getByText("已算进利润", { exact: true }).count(), 0);
+  await page.getByRole("combobox", { name: "状态", exact: true }).click();
+  await page.locator(".ant-select-dropdown:visible").getByText("已绑定", { exact: true }).click();
+  await row.getByText("已绑定", { exact: true }).waitFor();
+  assert.equal(writes.length, 0);
 });
 
 test("billing-only configured channel keeps monitoring unchanged and prefills its Key coverage and timezone when edited", async (t) => {
@@ -1478,6 +1534,17 @@ test("workflow stale channel, changed source and stopped coverage destinations k
 test("workflow balance destination focuses original resource settings and account authorization opens its existing flow", async (t) => {
   const opened = await openAccountsPage(t, { path: "/stations?stationId=A-monitor-1" }); const focused = opened.page.getByRole("region", { name: workflowActionMeta("inspect_balance").label, exact: true }); await focused.getByText("A-monitor-1", { exact: true }).waitFor(); assert.equal(await focused.getByText("A-monitor-2", { exact: true }).count(), 0); await focused.getByRole("button", { name: "编辑上游", exact: true }).click(); const editor = opened.page.getByRole("dialog", { name: /^编辑上游：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel(CREDENTIAL_FIELDS.userId.label, { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("余额提醒线", { exact: true }).inputValue(), "27");
   const authorized = await openAuthorizationPage(t); await authorized.page.goto(`${baseURL}/stations?action=authorization&accountKey=${authorized.model.accounts[0].accountKey}`); const drawer = authorized.page.getByRole("dialog", { name: `${UPDATE_AUTH} · 上游账号 42`, exact: true }); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("u06-once"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.equal(authorized.updates.length, 1); assert.deepEqual(authorized.updates[0].targetStationIds.sort(), ["st_u04_a1", "st_u04_a2", "st_u04_billing"]);
+});
+
+test("billing authorization station link opens the verified account and rejects conflicting account identity", async (t) => {
+  const opened = await openAuthorizationPage(t, { path: "/stations?action=authorization&stationId=st_u04_a1" });
+  await authorizationDialog(opened.page, "42").waitFor();
+  assert.equal(opened.probes.length, 0);
+  assert.equal(opened.updates.length, 0);
+  await opened.page.goto(`${baseURL}/stations?action=authorization&stationId=st_u04_a1&accountKey=${opened.model.accounts[1].accountKey}`);
+  await opened.page.locator(".jy-banner[role=alert]").filter({ has: opened.page.locator("b").filter({ hasText: exactText(DESTINATION_CHANGED) }) }).waitFor();
+  assert.equal(await opened.page.getByRole("dialog").count(), 0);
+  assert.equal(opened.updates.length, 0);
 });
 
 test("workflow source destination distinguishes last verified stale namespace and explicit current sync", async (t) => {
@@ -2660,12 +2727,16 @@ test("登录页按码说：用户名或密码不对时标红输入框，试太�
 test("告警中心：规则名取余额档位的共用叫法，区块名按规范，上次定时发送写成「10月20日」，立即发送没发出去时说清楚", async (t) => {
   const yesterday = shiftDay(shanghaiDay(Date.now()), -1);
   const rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: true, etaDays: 3, etaUnit: "days", renotifyHours: 24, errorThreshold: 1, errorRetrySec: 30, channelsFor: {} };
+  let sends = 0;
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (url.pathname === "/api/notifications") return fulfill(route, { channels: [], rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }] });
     if (url.pathname === "/api/meta") return fulfill(route, metaFixture({ dailyReport: { enabled: true, time: "09:00", channelIds: [], lastSent: yesterday } }));
-    if (url.pathname === "/api/report/send") return failJSON(route, 400, { error: "没有启用的日报通知渠道" });
+    // 第一次：接口没带认得的码；第二次：没有能发日报的通知方式（带码）
+    if (url.pathname === "/api/report/send") return sends++ === 0
+      ? failJSON(route, 400, { error: "boom: 没有启用的日报通知渠道" })
+      : failJSON(route, 400, { error: errorText({ code: "REPORT_NO_CHANNELS" }), code: "REPORT_NO_CHANNELS" });
     throw new Error("unexpected notifications fixture API: " + url.pathname);
   }, undefined, false, null, "/notifications");
   for (const title of [NOTIFICATIONS_COPY.rules, NOTIFICATIONS_COPY.channels, NOTIFICATIONS_COPY.report]) await page.getByRole("region", { name: title, exact: true }).waitFor();
@@ -2678,19 +2749,62 @@ test("告警中心：规则名取余额档位的共用叫法，区块名按规�
   // 「立即发送」在发之前就出错：说没发出去，原文进「查看详细原因」，不写「几点发送」
   await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportSend }).click();
   const result = page.locator(".jy-test-result--bad"); await result.waitFor();
-  await result.getByText(`${NOTIFICATIONS_COPY.reportNotSent}：${ERROR_CATEGORIES.other.text}`, { exact: true }).waitFor();
+  await result.getByText(failureSentence(NOTIFICATIONS_COPY.reportNotSent, ERROR_CATEGORIES.other.text), { exact: true }).waitFor();
   await result.getByText("查看详细原因", { exact: true }).waitFor();
   assert.doesNotMatch(await result.innerText(), /发送$|没有启用的日报通知渠道/m);
+  // 带码时说清楚是哪一种，接口给的就是这句，不再放「查看详细原因」
+  await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportSend }).click();
+  await result.getByText(failureSentence(NOTIFICATIONS_COPY.reportNotSent, errorText({ code: "REPORT_NO_CHANNELS" })), { exact: true }).waitFor();
+  assert.equal(await result.getByText("查看详细原因", { exact: true }).count(), 0);
+});
+
+test("告警中心通知方式没发出去：测试结果、日报发送结果按通知方式的说法写，原文各自进「查看详细原因」；没设置自营站点时预览说清楚、带「去设置」", async (t) => {
+  const channels = [
+    { id: "c1", name: "运维群", type: "telegram", enabled: true, config: { botToken: "", chatId: "42", apiBase: "" }, hasSecret: { botToken: true } },
+    { id: "c2", name: "", type: "dingtalk", enabled: true, config: { webhook: "", secret: "" }, hasSecret: { webhook: true } },
+  ];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels, rules: { onLow: true, channelsFor: {} }, channelTypes: CHANNEL_TYPES });
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture({ dailyReport: { enabled: true, time: "09:00", channelIds: [] } }));
+    // 测试发送：Telegram 说 Token 不对（原文是英文的 Unauthorized）
+    if (url.pathname === "/api/notifications/test") return fulfill(route, { ok: false, error: "Unauthorized", code: "NOTIFY_AUTH_FAILED" });
+    if (url.pathname === "/api/report/send") return fulfill(route, { ok: true, results: [
+      { id: "c1", name: "运维群", ok: false, error: "Unauthorized", code: "NOTIFY_AUTH_FAILED" },
+      { id: "c2", name: "", ok: false, error: "keywords not in content", code: "NOTIFY_KEYWORD_MISSING" },
+    ] });
+    if (url.pathname === "/api/report/preview") return failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
+    throw new Error("unexpected notifications fixture API: " + url.pathname);
+  }, undefined, false, null, "/notifications");
+  // 列表里点「测试」：说通知方式自己的那句，不说上游的「登录信息不对或过期了」，原文进「查看详细原因」
+  await page.getByRole("button", { name: NOTIFICATIONS_COPY.testAria("运维群"), exact: true }).first().click();
+  const cell = page.locator(".jy-notifications-test").first();
+  await cell.getByText(errorText({ code: "NOTIFY_AUTH_FAILED" }), { exact: true }).waitFor();
+  assert.doesNotMatch(await cell.innerText(), new RegExp(ERROR_CATEGORIES.auth.text));
+  await cell.getByText("查看详细原因", { exact: true }).click();
+  await cell.getByText("Unauthorized", { exact: true }).waitFor();
+  // 立即发送：每个没发出去的通知方式一行，没名字的写「未命名通知方式」，各带「查看详细原因」
+  await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportSend }).click();
+  const result = page.locator(".jy-notifications-actions + div .jy-test-result--bad");
+  await result.getByText(NOTIFICATIONS_COPY.reportNotSent, { exact: true }).waitFor();
+  await result.getByText(`运维群：${errorText({ code: "NOTIFY_AUTH_FAILED" })}`).waitFor();
+  await result.getByText(`${NOTIFICATIONS_COPY.unnamed}：${errorText({ code: "NOTIFY_KEYWORD_MISSING" })}`).waitFor();
+  assert.equal(await result.getByText("查看详细原因", { exact: true }).count(), 2);
+  assert.doesNotMatch(await result.innerText(), /c2：/);
+  // 预览：没设置自营站点时直接说 §8.1 那句、带「去设置」，不拼「读不到日报预览：」，显示在日报区块里
+  await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportPreview }).click();
+  await result.getByText(OWN_STATION_UNSET, { exact: true }).waitFor();
+  const setup = workflowAction("setup_own_station");
+  assert.equal(await result.getByRole("link", { name: setup.label, exact: true }).getAttribute("href"), setup.href);
+  assert.doesNotMatch(await result.innerText(), new RegExp(NOTIFICATIONS_COPY.previewFailed));
 });
 
 test("告警中心通知方式：接口不回传密钥；只改名字也能保存、不提交密钥；改了地址没重填时说清楚、不关弹窗", async (t) => {
   const code = "ENDPOINT_CHANGED_SECRET_REQUIRED";
   const telegram = { id: "c1", name: "运维群", type: "telegram", enabled: true, config: { botToken: "", chatId: "42", apiBase: "" }, hasSecret: { botToken: true } };
-  const channelTypes = [{ value: "telegram", label: "Telegram 机器人", fields: [
-    { key: "botToken", label: "Bot Token", required: true, secret: true },
-    { key: "chatId", label: "Chat ID", required: true },
-    { key: "apiBase", label: "API 地址（可选，默认官方）", required: false, endpoint: true },
-  ] }];
+  const channelTypes = CHANNEL_TYPES.filter((type) => type.value === "telegram");
+  const apiBaseLabel = channelTypes[0].fields.find((field) => field.key === "apiBase").label;
   const puts = [];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url()), method = route.request().method();
@@ -2720,7 +2834,7 @@ test("告警中心通知方式：接口不回传密钥；只改名字也能保�
   assert.deepEqual(puts[0], { name: "运维群2", type: "telegram", config: { botToken: "", chatId: "42", apiBase: "" } });
 
   dialog = await openEdit();
-  await dialog.getByLabel("API 地址（可选，默认官方）", { exact: true }).fill("https://evil.example");
+  await dialog.getByLabel(apiBaseLabel, { exact: true }).fill("https://evil.example");
   await dialog.getByRole("button", { name: NOTIFICATIONS_COPY.save }).click();
   await page.getByText(`${NOTIFICATIONS_COPY.saveFailed}：${errorText({ code })}。`, { exact: true }).waitFor();
   assert.equal(await dialog.isVisible(), true);

@@ -324,11 +324,12 @@ test("重新标记不再续费会重置单次提醒资格", async () => {
   store.data.stations = [{
     id: "station-1",
     noRenewal: true,
-    alertState: { state: "warn", notifiedAt: 10, noRenewalLowNotifiedAt: 20 },
+    alertState: { state: "warn", notifiedAt: 10, noRenewalLowNotifiedAt: 20, pendingDelivery: { kind: "noRenewalLow", attempts: 1 } },
   }];
 
   await store.update("station-1", { noRenewal: false });
   assert.equal(store.get("station-1").alertState.noRenewalLowNotifiedAt, undefined);
+  assert.equal(store.get("station-1").alertState.pendingDelivery, undefined);
   await store.update("station-1", { noRenewal: true });
   assert.equal(store.get("station-1").noRenewal, true);
 
@@ -649,4 +650,18 @@ test("通知方式编辑：密钥留空沿用，其他字段留空就清空，�
   // 只改名字、开关时不带 config，配置不动
   await store.updateChannel(ch.id, { name: "新名字", enabled: false });
   assert.equal(store.channels[0].config.password, "app-pass");
+});
+
+test("通知投递版本只随实际发送配置改变，不持久化凭据指纹；改名和相同配置不作废重试", async () => {
+  const store = await new Store(fakePool()).load();
+  const ch = await store.addChannel({ type: "smtp", name: "邮件", config: { host: "smtp.example", password: "secret-pass", from: "a@example.com", to: "b@example.com" } });
+  assert.equal(store.channels[0].deliveryVersion, 1);
+  await store.updateChannel(ch.id, { name: "新名字", enabled: false });
+  assert.equal(store.channels[0].deliveryVersion, 1);
+  await store.updateChannel(ch.id, { config: { password: "", to: "b@example.com" } });
+  assert.equal(store.channels[0].deliveryVersion, 1);
+  await store.updateChannel(ch.id, { config: { to: "c@example.com" } });
+  assert.equal(store.channels[0].deliveryVersion, 2);
+  await assert.rejects(store.updateChannel(ch.id, { config: { host: "other.example" } }), { code: "ENDPOINT_CHANGED_SECRET_REQUIRED" });
+  assert.equal(store.channels[0].deliveryVersion, 2);
 });

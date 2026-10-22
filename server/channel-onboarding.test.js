@@ -714,7 +714,7 @@ async function genuineBatchFixture(t, { realLinks = false } = {}) {
     if (sql.includes("reconciliation_billing_capabilities")) {
       if (sql.startsWith("SELECT")) return [capabilities.has(params[0]) ? [{ capability: capabilities.get(params[0]) }] : []];
       if (sql.startsWith("INSERT")) capabilities.set(params[0], params[1]);
-      else if (sql.includes("WHERE identity")) capabilities.delete(params[0]);
+      else if (sql.includes("WHERE identity")) for (const identity of Array.isArray(params[0]) ? params[0] : [params[0]]) capabilities.delete(identity);
       return [{ affectedRows: 1 }];
     }
     if (sql.includes("JOIN reconciliation_rule_channels")) return [draft.members.filter((member) => params[0].includes(member.channel_id)
@@ -756,6 +756,7 @@ async function genuineBatchFixture(t, { realLinks = false } = {}) {
   } };
   const storePool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]], commit: async () => {}, rollback: async () => {}, release() {} }) };
   const store = new Store(storePool), own = await store.add({ type: "newapi", baseUrl: "https://own.test", accessToken: "admin", isOwn: true });
+  store._metaSecrets.billing_identity_key = "genuine-batch-fixture-billing-key"; // fixture 不经 Store.load。
   const supplier = await store.add({ name: "Existing", type: "newapi", baseUrl: "https://up.test", accessToken: "pat", lowBalanceUsd: 20 });
   let repository = { getCatalogue: async () => state.catalogue, listLinks: async () => structuredClone(state.links),
     saveCatalogue: async (value) => { state.catalogue = structuredClone(value); },

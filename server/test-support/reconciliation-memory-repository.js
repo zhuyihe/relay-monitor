@@ -15,6 +15,7 @@ import {
   uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, segmentFromRow,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
 } from "../reconciliation-repository.js";
+import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../../lib/billing-capability-storage.js";
 
 const JSON_COLUMNS = new Set(["source_binding", "source", "capability", "detail"]);
 
@@ -60,8 +61,8 @@ const SCHEMA = {
   },
   capabilities: {
     keys: { PRIMARY: ["identity"] },
-    notNull: ["identity", "capability", "verified_at"],
-    varchar: { identity: 64 },
+    notNull: ["identity", "capability", "verified_at", "identity_scheme"],
+    varchar: { identity: 64, identity_scheme: 24 },
   },
   ledger: {
     keys: { PRIMARY: ["rule_id", "bill_date", "revision"] },
@@ -472,26 +473,28 @@ export class MemoryReconciliationRepository {
     this.#update(null, "alerts", active, { active: 0, recovered_at: bigint(recoveredAt), last_seen_at: bigint(recoveredAt) });
   }
 
-  async getBillingCapability(identity) {
+  async getBillingCapability(identity, scheme = BILLING_CAPABILITY_IDENTITY_SCHEME) {
     await this.#read("getBillingCapability", [identity]);
     const row = this.#capabilityEntry(identity)?.row;
-    return row ? fresh(row).capability : null;
+    return row && sameText(row.identity_scheme ?? "legacy", scheme) ? fresh(row).capability : null;
   }
 
-  async saveBillingCapability(identity, capability) {
+  async saveBillingCapability(identity, capability, scheme = BILLING_CAPABILITY_IDENTITY_SCHEME) {
     await this.hooks.beforeCapabilityWrite?.("saveBillingCapability", identity);
     this.log.capabilityWrites.push({ method: "saveBillingCapability", identity, capability: structuredClone(capability) });
-    const values = { capability: JSON.stringify(capability), verified_at: bigint(capability.verifiedAt) };
+    const values = { capability: JSON.stringify(capability), verified_at: bigint(capability.verifiedAt), identity_scheme: scheme };
     const existing = this.#capabilityEntry(identity);
     if (existing) this.#update(null, "capabilities", [existing], values);
     else this.#insert(null, "capabilities", { identity, ...values });
   }
 
-  async deleteBillingCapability(identity) {
+  async deleteBillingCapability(identity, scheme = BILLING_CAPABILITY_IDENTITY_SCHEME) {
     await this.hooks.beforeCapabilityWrite?.("deleteBillingCapability", identity);
     this.log.capabilityWrites.push({ method: "deleteBillingCapability", identity });
-    const existing = this.#capabilityEntry(identity);
-    if (existing) this.#delete(null, "capabilities", [existing]);
+    const identities = Array.isArray(identity) ? identity : [identity];
+    const existing = this.#rows("capabilities").filter(({ row }) => sameText(row.identity_scheme ?? "legacy", scheme)
+      && identities.some((id) => sameText(row.identity, id)));
+    if (existing.length) this.#delete(null, "capabilities", existing);
   }
 
   async latestRecord(ruleId, window, scopeFingerprint, recordType) {

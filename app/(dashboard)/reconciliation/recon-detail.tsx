@@ -101,7 +101,7 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
 
     {pendingSegments.length ? <section ref={timingRef} className="reconciliation-transition" aria-label={RECON_BUTTONS.correctTiming}>
       <h3>{reconciliationIssue("SEGMENT_TIMING_UNCONFIRMED").hint}</h3>
-      <p className="jy-caption">填上倍率实际变化的时间，受影响的日子会重算。</p>
+      <p className="jy-caption">保存后，未固定的结果按新时间计算。系统会尝试更新昨天的固定记录，更早的固定记录暂不自动更新。</p>
       <div className="reconciliation-transition__controls">
         <Select
           value={state.transitionSegmentId} onChange={state.setTransitionSegmentId} placeholder="选择要改的那次倍率变化"

@@ -115,27 +115,33 @@ export function derive(data: any, own: any) {
   const monitored = usageUp.filter((s) => withRows.has(s.id) || gapIds.has(s.id));
   const upstreamGaps = allGaps.filter((g) => usageIds.has(g.stationId));
 
-  // 日收入：自营分析只给窗口总收入，按每日下游消费占比摊到天（与旧页面同一算法），
-  // 保证收入合计与利润的算法一致。
+  // 新接口给真实分日收入；旧接口只有模型趋势时明确标估算，并保证分日金额合计守恒。
   let incomeBy: Map<string, number> | null = null;
+  let incomeEstimated = false;
   let incomeIssue: string | null = null;
   // 自营站点算收入时报的错：{ code, message }，页面按码归类（noteOf），原文只进「查看详细原因」
   let incomeError: { code: any; message: string } | null = null;
   // 自营站点没设置售价时按 1 美元额度 = 1 元算，收入只是估算；汇率和别处同一个来源（rateSnapshotOf）
   const ownRate = rateSnapshotOf(own?.station);
   const ownNoRate = !!own && ownRate.source !== "configured";
-  if (own && own.profit && !own.profit.error && Array.isArray(own.trend)) {
-    const rate = ownRate.cnyPerUsd;
-    const trendTotal = own.trend.reduce((a: number, t: any) => a + (Number(t.cost) || 0), 0);
+  const hasIncomeDaily = Array.isArray(own?.incomeDaily);
+  if (own?.profit && !own.profit.error && hasIncomeDaily) {
+    incomeBy = new Map();
+    for (const row of own.incomeDaily) incomeBy.set(row.date, (incomeBy.get(row.date) || 0) + Number(row.incomeCny || 0));
+    incomeEstimated = own.incomeDailyApprox === true;
+  } else if (own && own.profit && !own.profit.error && Array.isArray(own.trend)) {
+    incomeEstimated = true;
+    const weights = new Map<string, number>();
+    const tz = own.tz || data.tz;
+    for (const row of own.trend) {
+      const date = dayKeyInTz(row.t, tz);
+      weights.set(date, (weights.get(date) || 0) + (Number(row.cost) || 0));
+    }
+    const entries = [...weights].sort(([a], [b]) => a.localeCompare(b));
+    const trendTotal = entries.reduce((a, [, cost]) => a + cost, 0);
     if (trendTotal > 0) {
-      const ratio = own.profit.incomeCny / (trendTotal * rate);
-      incomeBy = new Map();
-      // 自营趋势的 t 是业务时区零点，按同一时区取日期，浏览器在别的时区也不会错位一天
-      const tz = own.tz || data.tz;
-      for (const t of own.trend) {
-        const key = dayKeyInTz(t.t, tz);
-        incomeBy.set(key, r2((incomeBy.get(key) || 0) + t.cost * rate * ratio));
-      }
+      const parts = splitByCumulative(entries.map(([, cost]) => cost), own.profit.incomeCny);
+      incomeBy = new Map(entries.map(([date], i) => [date, parts[i]]));
     } else if (!(Number(own.profit.incomeCny) > 0)) {
       // 下游没有消费时收入就是 0，照常显示
       incomeBy = new Map();
@@ -168,9 +174,9 @@ export function derive(data: any, own: any) {
   });
 
   const revenue = incomeBy ? r2(rows.reduce((a, r) => a + (r.rev || 0), 0)) : null;
-  // 自营收入只能取近 7 / 30 天；所选天数不同时，收入是从整段分到每天后截取的部分
+  // 旧接口的自定义范围取估算后的一部分；有真实分日收入时，截取日子不会降低准确度。
   const ownDays = days <= 7 ? 7 : 30;
-  const revenueSplit = !!incomeBy && days !== ownDays;
+  const revenueSplit = !!incomeBy && !hasIncomeDaily && days !== ownDays;
   const usage = r2(rows.reduce((a, r) => a + (r.cost || 0), 0));
 
   // 概况：只按有记录的日子算日均与峰值，缺失日不当作零成本拉低平均
@@ -215,7 +221,8 @@ export function derive(data: any, own: any) {
     incomeIssue,
     incomeError,
     revenue,
-    revenueApprox: !!incomeBy && (ownNoRate || revenueSplit),
+    revenueApprox: !!incomeBy && (ownNoRate || incomeEstimated),
+    incomeEstimated,
     ownNoRate,
     revenueSplit,
     ownDays,

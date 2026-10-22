@@ -30,10 +30,22 @@ test("立即发送日报：results 是每个通知方式的结果列表，不再
   assert.equal(calls[0][0], rt);
 });
 
-test("立即发送日报：生成或发送前出错时返回 400 和这句话", async (t) => {
+test("立即发送日报：生成或发送前出错时返回 400，带码给页面按码说", async (t) => {
   t.after(() => { delete globalThis.__reportSendStub; });
-  const { POST } = await sendRoute(async () => { throw new Error("没有启用的日报通知渠道"); });
-  const response = await POST(request(), {});
-  assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "没有启用的日报通知渠道" });
+  const coded = (code, message) => Object.assign(new Error(message), { code });
+  const cases = [
+    // 没有能发日报的通知方式、还没设置自营站点：原样带码
+    [coded("REPORT_NO_CHANNELS", "没有能发日报的通知方式，请先添加或启用一个"), "REPORT_NO_CHANNELS"],
+    [coded("OWN_STATION_UNSET", "还没设置自营站点"), "OWN_STATION_UNSET"],
+    // 读自营站点没成：带上游给的码
+    [coded("AUTHENTICATION_FAILED", "Unauthorized"), "AUTHENTICATION_FAILED"],
+    // 都认不出：按「自营站点暂时读不到」说
+    [new Error("boom"), "OWN_STATION_UNAVAILABLE"],
+  ];
+  for (const [error, code] of cases) {
+    const { POST } = await sendRoute(async () => { throw error; });
+    const response = await POST(request(), {});
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: error.message, code });
+  }
 });

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../db/store.js";
-import { reportDayWindow, sendReport, startReportScheduler } from "./report.js";
+import { buildReport, reportDayWindow, sendReport, startReportScheduler } from "./report.js";
 
 const START = Date.parse("2026-10-08T01:00:00Z"); // 北京时间 09:00
 
@@ -171,7 +171,7 @@ test("没有启用渠道时不标记已发送，用户设置不能覆盖发送�
 
 test("立即发送：没有启用渠道时直接报错，不去读上游生成日报", async (t) => {
   const h = setup(t, { channels: [] });
-  await assert.rejects(sendReport(h.rt), { message: "没有启用的日报通知渠道" });
+  await assert.rejects(sendReport(h.rt), { code: "REPORT_NO_CHANNELS" });
   assert.equal(globalThis.fetch.mock.callCount(), 0);
 });
 
@@ -182,6 +182,43 @@ test("立即发送：返回每个渠道的结果列表", async (t) => {
   assert.equal(sent.ok, true);
   assert.deepEqual(sent.results.map(({ id, ok }) => ({ id, ok })), [{ id: "a", ok: true }, { id: "b", ok: false }]);
   assert.deepEqual(h.deliveries, ["a", "b"]);
+});
+
+test("角色目录读不到时日报生成失败，不能发送虚假的收入和利润", async (t) => {
+  const h = setup(t);
+  const sent = [];
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.host === "notify.example") sent.push(url.pathname);
+    return url.pathname === "/api/user/"
+      ? Response.json({ success: false, message: "unavailable" }, { status: 503 })
+      : Response.json({ success: true, data: [] });
+  });
+  await assert.rejects(sendReport(h.rt), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.deepEqual(sent, []);
+  assert.equal(h.rt.store.settings.dailyReport.lastSent, null);
+});
+
+test("日报与自营分析共用已确认的收入分类，管理员自用不计收入，异步修改售价不混入同一份日报", async (t) => {
+  const h = setup(t);
+  const { dayStart } = reportDayWindow();
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/api/channel/") h.rt.store.list()[0].cnyPerUsd = 2;
+    const data = url.pathname === "/api/user/"
+      ? { items: [{ id: 1, username: "root", role: 100 }, { id: 2, username: "customer", role: 1 }], total: 2 }
+      : url.pathname === "/api/channel/" ? { items: [], total: 0 }
+        : url.pathname.startsWith("/api/data") ? [
+          { username: "root", model_name: "m", created_at: dayStart / 1000 + 3600, quota: 100 * 500000, token_used: 10, count: 1 },
+          { username: "customer", model_name: "m", created_at: dayStart / 1000 + 7200, quota: 10 * 500000, token_used: 10, count: 1 },
+        ] : [];
+    return Response.json({ success: true, data });
+  });
+  const report = await buildReport(h.rt);
+  assert.match(report.text, /收入\(不含管理员自用\)：¥10\.00 ｜ 管理员自用：¥100\.00/);
+  assert.match(report.text, /净利：¥10\.00/);
+  assert.doesNotMatch(report.text, /收入\(不含管理员自用\)：¥110\.00/);
+  assert.match(report.html, /收入（不含管理员自用）/);
 });
 
 for (const kind of ["generation", "partial"]) {

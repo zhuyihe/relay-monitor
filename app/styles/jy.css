@@ -455,6 +455,8 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-test-result .jy-sym { width: 14px; height: 14px; margin-top: 4px; color: var(--jy-good); }
 .jy-test-result b { font-weight: 500; }
 .jy-test-result > span, .jy-test-result > div { grid-column: 2; font-size: 12px; line-height: 18px; color: var(--jy-ink-2); }
+/* 「查看详细原因」「去设置」也放在文字那一列，不挤进图标那一列 */
+.jy-test-result > details, .jy-test-result > a { grid-column: 2; font-size: 12px; line-height: 18px; width: fit-content; }
 .jy-test-result--bad { background: var(--jy-crit-tint); }
 .jy-test-result--bad .jy-sym { color: var(--jy-crit); }
 .jy-test-result--stale { background: var(--jy-warn-tint); }

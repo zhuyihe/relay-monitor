@@ -3,7 +3,8 @@
 // 只在挂载时加载一次、不注册顶栏刷新：自动重载会冲掉正在输入的数字（沿用 v1 的取舍）。
 // 提醒规则改了马上保存：开关、通知方式的选择改动即保存，数字输入在离开输入框或按回车时保存。
 // 只在本页出现的话都在同目录的 copy.ts 里；规则名里的余额四档、漏填提示、报错的说法从共用的地方取。
-// 通知方式自己的报错（发送失败的原因）照原文显示，归类留给 A3；控制台自己的接口出错按 consoleErrorText 说，原文进「查看详细原因」。
+// 通知方式没发出去：按接口给的码说那一句（design/ui-copy-spec.md §8.2 通知方式那张表），原文进「查看详细原因」；
+// 控制台自己的接口出错按 consoleErrorText 说，原文也进「查看详细原因」。
 import "../../styles/pages/notifications.css";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
@@ -13,8 +14,9 @@ import { NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { SECRET_FIELD_TEXT } from "../../../lib/channel-onboarding";
-import { consoleErrorText, consoleFailureText, requiredText } from "../../../lib/error-copy";
+import { consoleErrorText, consoleFailureText, describeError, failureSentence, requiredText } from "../../../lib/error-copy";
 import { BALANCE_STATE_TEXT, formatDayKey, formatZonedTime } from "../../../lib/format";
+import { workflowAction } from "../../../lib/workflow-actions";
 import { CountBadge, Panel } from "../../components/panel";
 import { Dirty, ErrorState, PanelSkeleton } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
@@ -31,6 +33,20 @@ type TestResult = { ok: boolean; text: string; at: number; raw?: unknown };
 
 // 接口本身出错（不是通知方式发送失败）：按控制台自己的说法，原文留着给「查看详细原因」
 const apiFailure = (e: unknown, at = Date.now()): TestResult => ({ ok: false, text: consoleErrorText(e), at, raw: noteOf(e).raw });
+
+// 通知方式发没发出去（测试接口、日报发送结果里的一项 { ok, error, code }）：没发出去时按码说那一句，原文进「查看详细原因」
+const deliveryFailure = (r: any) => {
+  const note = noteOf(r);
+  return { text: note.text, raw: note.raw };
+};
+const deliveryResult = (r: any, okText: string, at = Date.now()): TestResult =>
+  r?.ok ? { ok: true, text: okText, at } : { ok: false, at, ...deliveryFailure(r) };
+
+// 日报区块里那条结果：立即发送的结果，或者预览、发送前就出错。fails 是没发出去的通知方式，各带一个「查看详细原因」；
+// setup 表示还没设置自营站点，带「去设置」
+type ReportFail = { id: string; label: string; text: string; raw?: unknown };
+type ReportResult = TestResult & { kind: "send" | "preview"; fails: ReportFail[]; setup?: boolean };
+const SETUP = workflowAction("setup_own_station");
 
 // 通知方式的图标（类型名取接口返回的 channelTypes，这里只有图标上的缩写）
 const CH_PLATE: Record<string, string> = {
@@ -135,7 +151,7 @@ export default function NotificationsPage() {
   const [drSaving, setDrSaving] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const [sending, setSending] = useState(false);
-  const [sendResult, setSendResult] = useState<(TestResult & { fails: string[] }) | null>(null);
+  const [sendResult, setSendResult] = useState<ReportResult | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
   const [reportTab, setReportTab] = useState<"html" | "text">("html");
   const [report, setReport] = useState<{ text: string; html: string } | null>(null);
@@ -235,7 +251,7 @@ export default function NotificationsPage() {
     setRowTesting(c.id);
     try {
       const r = await api("/api/notifications/test", { body: { channelId: c.id } });
-      setRowTests((m) => ({ ...m, [c.id]: { ok: !!r.ok, text: r.ok ? COPY.sentTo(c.name) : r.error || "", at: Date.now() } }));
+      setRowTests((m) => ({ ...m, [c.id]: deliveryResult(r, COPY.sentTo(c.name)) }));
     } catch (e) {
       setRowTests((m) => ({ ...m, [c.id]: apiFailure(e) }));
     } finally {
@@ -336,8 +352,8 @@ export default function NotificationsPage() {
     setChTesting(true);
     setChTest(null);
     try {
-      const r = await api("/api/notifications/test", { body: { channelId: editingCh?.id, type: chType, config } });
-      setChTest({ ok: !!r.ok, text: r.ok ? COPY.checkInbox : r.error || "", at: Date.now() });
+      const r = await api("/api/notifications/test", { body: { channelId: editingCh?.id, type: chType, name: chName.trim(), config } });
+      setChTest(deliveryResult(r, COPY.checkInbox));
     } catch (e) {
       setChTest(apiFailure(e));
     } finally {
@@ -483,15 +499,25 @@ export default function NotificationsPage() {
     }
   };
 
+  // 预览、立即发送之前就出错：还没设置自营站点时直接说 §8.1 那句、带「去设置」，不再拼「读不到日报预览：」；
+  // 其余按控制台自己的说法拼在 what 后面。都显示在日报区块里，原文进「查看详细原因」
+  const reportFailure = (kind: ReportResult["kind"], what: string, e: unknown): ReportResult => {
+    const failure = apiFailure(e);
+    if (describeError(e).category === "unset") return { ...failure, kind, text: describeError(e).text, fails: [], setup: true };
+    return { ...failure, kind, text: failureSentence(what, failure.text), fails: [] };
+  };
+
   const previewReport = async () => {
     setPreviewing(true);
+    // 上次预览没成的那条换掉；立即发送的结果留着
+    setSendResult((r) => (r?.kind === "preview" ? null : r));
     try {
       const r = await api("/api/report/preview", { method: "POST", body: {} });
       setReport({ text: r.text, html: r.html });
       setReportTab("html");
       setReportOpen(true);
     } catch (e) {
-      message.error(consoleFailureText(COPY.previewFailed, e));
+      setSendResult(reportFailure("preview", COPY.previewFailed, e));
     } finally {
       setPreviewing(false);
     }
@@ -505,14 +531,15 @@ export default function NotificationsPage() {
       const results: any[] = r.results || [];
       const ok = results.filter((x) => x.ok).length;
       setSendResult({
+        kind: "send",
         ok: ok > 0,
         text: ok > 0 ? COPY.reportSent(ok, results.length) : COPY.reportNotSent,
         at: Date.now(),
-        fails: results.filter((x) => !x.ok).map((x) => `${x.name || x.id}：${x.error || COPY.sendFailed}`),
+        fails: results.filter((x) => !x.ok).map((x) => ({ id: String(x.id), label: x.name || COPY.unnamed, ...deliveryFailure(x) })),
       });
     } catch (e) {
-      // 发之前就出错（例如没有能发的通知方式）：按控制台自己的说法，原文进「查看详细原因」（这类报错的码留给 A3）
-      setSendResult({ ...apiFailure(e), text: `${COPY.reportNotSent}：${consoleErrorText(e)}`, fails: [] });
+      // 发之前就出错（没有能发日报的通知方式、还没设置自营站点、读不到自营站点）
+      setSendResult(reportFailure("send", COPY.reportNotSent, e));
     } finally {
       setSending(false);
     }
@@ -994,8 +1021,14 @@ export default function NotificationsPage() {
                 <b>{sendResult.text}</b>
                 <span>{sendResult.ok ? COPY.sentAt(formatZonedTime(sendResult.at, tz)) : formatZonedTime(sendResult.at, tz)}</span>
                 {sendResult.fails.map((f) => (
-                  <span key={f}>{f}</span>
+                  <span key={f.id}>
+                    {f.label}：{f.text}
+                    <ErrorDetail raw={f.raw} />
+                  </span>
                 ))}
+                {sendResult.setup && (
+                  <Link href={SETUP.href!}>{SETUP.label}</Link>
+                )}
                 <ErrorDetail raw={sendResult.raw} />
               </div>
             )}

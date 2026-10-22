@@ -4,7 +4,7 @@
 import {
   queryStationUsage, queryOwnUsers, queryOwnChannels, queryLogStat, queryOwnFlow,
 } from "../lib/providers.js";
-import { businessTimeZone, resolveBusinessWindow } from "../lib/business-time.js";
+import { businessTimeZone, dayKeyInTz, dayRangeInTz, resolveBusinessWindow } from "../lib/business-time.js";
 import { amortizeFixedCost, costBasisOf, purchasesOf, rateSnapshotOf, summarizeProfit, toCny } from "../lib/profit.js";
 import { COST_MODE_TEXT, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../lib/format.js";
 import { errorCodeOf } from "../lib/error-copy.js";
@@ -118,22 +118,96 @@ export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endM
   if (!keys.length) return { incomeUsd, adminUsageUsd, resoldUsd: 0, breakdown: [] };
   const breakdown = [];
   let resoldUsd = 0;
-  await Promise.all(keys.map(async (k) => {
+  // 同一天的 Key 顺序读取；readOwnIncome 最多同时读四天，因此整个窗口最多四个 stat 请求。
+  for (const k of keys) {
     try {
       const usd = await queryLogStat(own, { username: k.username, tokenName: k.tokenName, startMs, endMs });
       resoldUsd += usd;
-      breakdown.push({ username: k.username, tokenName: k.tokenName, usd: Math.round(usd * 10000) / 10000 });
+      breakdown.push({ username: k.username, tokenName: k.tokenName, usd });
     } catch (err) {
       breakdown.push({ username: k.username, tokenName: k.tokenName, usd: 0, error: err?.message || String(err), errorCode: errorCodeOf(err) });
     }
-  }));
-  resoldUsd = Math.round(resoldUsd * 10000) / 10000;
+  }
   return {
     incomeUsd: incomeUsd + resoldUsd,
     // 转售消费本在管理员桶里，移走它；跨接口口径微差时钳到 0，避免负数
     adminUsageUsd: Math.max(0, adminUsageUsd - resoldUsd),
     resoldUsd,
     breakdown: breakdown.sort((a, b) => b.usd - a.usd),
+  };
+}
+
+function incomeUnconfirmed(message, cause) {
+  return Object.assign(new Error(message, cause ? { cause } : undefined), { code: "OWN_INCOME_UNCONFIRMED" });
+}
+
+/**
+ * 按真实用户消费确认收入；角色目录不完整时不能把未知用户当付费客户。
+ * 用户行保留时间维度，管理员自用留在发生的那一天；转售 Key 也按当天的精确窗口读取。
+ * 分日金额按实际金额累计舍入到分，逐日之和与 computeProfit 的收入一致。
+ * 任一必要的角色/转售读取没成即报不可确认，页面和日报不能继续发布看似完整的利润。
+ */
+export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
+  let users;
+  try { users = await getOwnUsers(rt, own); }
+  catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
+  const roles = new Map(users.map((u) => [u.username, u.role]));
+  const adminSet = new Set(users.filter((u) => u.role >= 10).map((u) => u.username));
+  const days = endMs > startMs
+    ? dayRangeInTz(dayKeyInTz(startMs, tz), dayKeyInTz(endMs - 1, tz), tz).map((d) => ({
+        ...d, startMs: Math.max(startMs, d.startMs), endMs: Math.min(endMs, d.endMs), incomeUsd: 0, adminUsageUsd: 0,
+      }))
+    : [];
+  const byDate = new Map(days.map((d) => [d.date, d]));
+  for (const row of userRows) {
+    if (row.t < startMs || row.t >= endMs) continue;
+    if (!roles.has(row.key) && row.cost !== 0) throw incomeUnconfirmed(`用户「${row.key}」的身份没读到，收入和利润暂时算不出`);
+    const day = byDate.get(dayKeyInTz(row.t, tz));
+    if (!day) throw incomeUnconfirmed("用户消费的日期没对上，收入和利润暂时算不出");
+    if (adminSet.has(row.key)) day.adminUsageUsd += row.cost;
+    else day.incomeUsd += row.cost;
+  }
+  for (const key of own.resoldAdminKeys || []) {
+    if (!adminSet.has(key.username)) throw incomeUnconfirmed(`转售 Key 所属用户「${key.username}」的管理员身份没确认`);
+  }
+  // 同时最多读四天，避免 30 天窗口把上游日志接口瞬间打满。
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(4, days.length) }, async () => {
+    while (cursor < days.length) {
+      const day = days[cursor++];
+      day.resold = await computeResold(own, day.incomeUsd, day.adminUsageUsd, day.startMs, day.endMs);
+      const failed = day.resold.breakdown.find((k) => k.error);
+      if (failed) throw incomeUnconfirmed("转售记录没读全，收入和利润暂时算不出", new Error(failed.error));
+      day.incomeUsd = day.resold.incomeUsd;
+      day.adminUsageUsd = day.resold.adminUsageUsd;
+    }
+  }));
+  const incomeUsd = days.reduce((a, d) => a + d.incomeUsd, 0);
+  const adminUsageUsd = days.reduce((a, d) => a + d.adminUsageUsd, 0);
+  const rate = rateSnapshotOf(own).cnyPerUsd;
+  // 对实际金额累计舍入，也保留可能的负向调整；不能用只接受正权重的比例分摊丢掉退款。
+  let cumulativeUsd = 0, previousCents = 0;
+  const incomeDaily = days.map((day) => {
+    cumulativeUsd += day.incomeUsd;
+    const cents = Math.round(cumulativeUsd * rate * 100);
+    const incomeCny = (cents - previousCents) / 100;
+    previousCents = cents;
+    return { date: day.date, incomeCny };
+  });
+  const keys = new Map();
+  for (const day of days) for (const key of day.resold.breakdown) {
+    const id = JSON.stringify([key.username, key.tokenName]);
+    const acc = keys.get(id) || { username: key.username, tokenName: key.tokenName, usd: 0 };
+    acc.usd += key.usd; keys.set(id, acc);
+  }
+  return {
+    users, adminSet, incomeUsd, adminUsageUsd,
+    incomeDaily,
+    resold: {
+      incomeUsd, adminUsageUsd,
+      resoldUsd: days.reduce((a, d) => a + d.resold.resoldUsd, 0),
+      breakdown: [...keys.values()].sort((a, b) => b.usd - a.usd),
+    },
   };
 }
 
