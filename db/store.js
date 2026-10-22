@@ -37,6 +37,13 @@ function authorizationMarker(value, authVersion, type) {
   return { requestId: String(value.requestId), accountKey: String(value.accountKey), authVersion, authorizationType: type };
 }
 
+function resetNoRenewalAlertState(state) {
+  if (!state) return state;
+  const { noRenewalLowNotifiedAt, ...next } = state;
+  if (next.pendingDelivery?.kind === "noRenewalLow") delete next.pendingDelivery;
+  return next;
+}
+
 const DEFAULT_SETTINGS = {
   refreshIntervalSec: 60, // 后台自动刷新间隔
   lowBalanceUsd: 5, // 全局低余额告警阈值（美元）
@@ -477,6 +484,7 @@ export class Store {
       type: String(input.type || ""),
       name: String(input.name || "").trim() || UNNAMED_CHANNEL,
       enabled: input.enabled !== false,
+      deliveryVersion: 1,
       // 只留这种类型的字段（lib/notify.js CHANNEL_TYPES）
       config: resolveChannelConfig(String(input.type || ""), typeof input.config === "object" && input.config ? input.config : {}, {}),
       createdAt: new Date().toISOString(),
@@ -496,7 +504,9 @@ export class Store {
       if ("config" in patch && typeof patch.config === "object" && patch.config) {
         // 只有密钥留空表示保留原值（前端编辑时不回显密钥），其他字段留空就是清空；
         // 换了站点又没重新填密钥，抛 ENDPOINT_CHANGED_SECRET_REQUIRED（lib/notify.js resolveChannelConfig）
-        ch.config = resolveChannelConfig(ch.type, patch.config, ch.config);
+        const config = resolveChannelConfig(ch.type, patch.config, ch.config);
+        if (JSON.stringify(config) !== JSON.stringify(ch.config)) ch.deliveryVersion = (ch.deliveryVersion || 1) + 1;
+        ch.config = config;
       }
       return ch;
     });
@@ -644,8 +654,7 @@ export class Store {
         const noRenewal = s.type !== "fixed" && !!patch.noRenewal;
         if (noRenewal !== !!s.noRenewal && s.alertState) {
           // 每次重新标记都开启一轮新的单次提醒；其他告警去重状态保持不变。
-          const { noRenewalLowNotifiedAt, ...alertState } = s.alertState;
-          s.alertState = alertState;
+          s.alertState = resetNoRenewalAlertState(s.alertState);
         }
         s.noRenewal = noRenewal;
       }
@@ -697,8 +706,7 @@ export class Store {
         publish: () => {
           if ("noRenewal" in fields) {
             // 只重置单次提醒，保留提交期间后台更新的其他告警字段。
-            const { noRenewalLowNotifiedAt, ...alertState } = current.alertState || {};
-            fields.alertState = current.alertState ? alertState : current.alertState;
+            fields.alertState = resetNoRenewalAlertState(current.alertState);
           }
           Object.assign(current, fields);
         },

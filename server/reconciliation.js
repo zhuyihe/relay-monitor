@@ -36,6 +36,7 @@ import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconc
 import { costBasisOf, rateSnapshotOf } from "../lib/profit.js";
 import { businessTimeZone } from "../lib/business-time.js";
 import { selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
+import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 
 export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 
@@ -337,16 +338,16 @@ function healthWithIssues(issues) {
   return { ...base, issues };
 }
 
-function persistenceFailedResult(rule, window) {
+function storageFailedResult(rule, window, code) {
   const observedAt = Date.now();
   const channels = rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null }));
-  const issue = { code: "PERSISTENCE_FAILED", scope: "persistence", detail: issueText("PERSISTENCE_FAILED"), observedAt };
+  const issue = { code, scope: code === "HISTORY_UNAVAILABLE" ? "history" : "persistence", detail: issueText(code), observedAt };
   return {
     rule, window, requestedWindow: window, lastSuccessfulWindow: null, currentSegment: null, segments: [], transitionSegments: [],
     upstream: { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: 1, observedAt, window },
     downstream: { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: rule.channels.length, billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION, observedAt, window, channels },
     calculation: { differenceUsd: null, profitUsd: null, riskDifferenceUsd: null, marginRate: null },
-    health: { ...health("PERSISTENCE_FAILED", issue.detail), issues: [issue] }, generatedAt: new Date().toISOString(),
+    health: { ...health(code, issue.detail), issues: [issue] }, generatedAt: new Date().toISOString(),
   };
 }
 
@@ -441,17 +442,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const accountUsageCache = new Map();
   // Sub2API 账单过滤能力的核验结果存进库里，重启后不必重新核验。能力变了就丢掉 Key 目录缓存，
   // 目录里带的能力状态和据此算出的成本归属版本随下一次查询更新，不必等 5 分钟缓存过期。
-  // 库里的身份是用 identityKey（meta 里的账单身份密钥，和登录信息一起加密保存）算的 HMAC，拿到库也撞不出密码（lib/providers.js）
-  const billingCapabilityStore = {
-    get identityKey() { return rt.store.billingIdentityKey; },
-    get: (identity) => repository.getBillingCapability(identity),
-    async set(identity, capability) {
-      try { await repository.saveBillingCapability(identity, capability); } finally { metadataCache.clear(); }
-    },
-    async delete(identity) {
-      try { await repository.deleteBillingCapability(identity); } finally { metadataCache.clear(); }
-    },
-  };
+  // 存储适配器隐藏版本兼容：provider 只产生进程内摘要，数据库只接收 wrapped-v2 的 HMAC。
+  const billingCapabilityStore = createBillingCapabilityStorage(repository, {
+    key: () => rt.store.billingIdentityKey,
+    onChange: () => metadataCache.clear(),
+  });
   // 观测时锚定身份失败的原因：只读计算不锚定，沿用最近一次观测的结论。
   const identityIssues = new Map();
   const billingStation = (station) => station && ACCOUNT_TYPE_VALUES.includes(station.type) && !station.isOwn;
@@ -478,8 +473,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       .filter((station) => ACCOUNT_TYPE_VALUES.includes(station.type))
       .sort((a, b) => a.id.localeCompare(b.id));
     return { stationIds: stations.map((station) => station.id),
+      // 财务配置同样决定缓存、在途结果和结账口径；编辑固定采购或汇率后必须重新核算未固定窗口。
       version: createHash("sha256").update(JSON.stringify([rt._reconciliationBillingGeneration || 0,
-        stations.map((station) => [station.id, !!station.isOwn, station.archivedAt || null, credentialFingerprint(station)])])).digest("hex") };
+        stations.map((station) => [station.id, !!station.isOwn, station.archivedAt || null, credentialFingerprint(station),
+          costBasisOf(station), rateSnapshotOf(station)])])).digest("hex") };
   };
   const sourceState = (rule) => {
     if (!Object.keys(rule.sourceBinding || {}).length && isScopedBillingPolicy(rule.billingPolicy)) return { version: "missing-confirmation", status: "unavailable" };
@@ -1028,16 +1025,23 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   // 已结账窗口直接读结账结果，不再向上游取数。不看当前关联口径：结账后改关联、换 Key、换凭据，
-  // 已结账的日子都不跟着重算；更正走「修正切换时间」后的重新结账（账本写下一版）。
+  // 已结账的日子都不跟着重算；目前修正切换时间后，仅在轮询时重新结账昨天（账本写下一版）。
   // 单个自然日读账本；多日窗口仍读旧版结账记录。
   async function settledResult(rule, window) {
-    if (billingDayOf(window)) {
-      const entry = await repository.latestLedgerEntry(rule.id, window).catch(() => null);
-      const settlement = entry ? ledgerSettlement(entry) : null;
-      return settlement ? settledFrom(rule, settlement) : null;
+    try {
+      if (billingDayOf(window)) {
+        const entry = await repository.latestLedgerEntry(rule.id, window);
+        if (!entry) return null;
+        const settlement = ledgerSettlement(entry);
+        if (!settlement) throw new Error("Invalid settlement record");
+        return settledFrom(rule, settlement);
+      }
+      const record = await repository.latestSettlement(rule.id, window);
+      return isSettledRecord(record, window) ? settledFrom(rule, record) : null;
+    } catch {
+      // 读取失败不能当成没有固定账，否则会用上游后来补记的金额替代原账。
+      throw codedError("HISTORY_UNAVAILABLE", issueText("HISTORY_UNAVAILABLE"));
     }
-    const record = await repository.latestSettlement(rule.id, window).catch(() => null);
-    return isSettledRecord(record, window) ? settledFrom(rule, record) : null;
   }
 
   // 1a 之前窗口一结束就会写确认记录，那时上游还在入账；结束不满 SETTLE_DELAY_MS 写下的记录不算结账。
@@ -1053,7 +1057,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   function settledFrom(rule, record) {
-    return { ...record.result, rule: { ...rule, fixedGroup: record.result.currentSegment?.group ?? rule.fixedGroup },
+    return { ...record.result, rule: { ...rule, ownSource: record.result.ownSource ?? null,
+      fixedGroup: record.result.currentSegment?.group ?? rule.fixedGroup },
       lastSuccessfulAt: record.generatedAt, lastConfirmed: snapshotReference(record), settledAt: record.generatedAt,
       ...(record.ledger ? { ledger: record.ledger } : {}) };
   }
@@ -1088,6 +1093,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const currentOwn = upstreamStation(rule.ownStationId);
       const upstream = currentUpstream && { ...currentUpstream };
       const own = currentOwn && { ...currentOwn };
+      // 成本计法和两侧汇率来自同一份配置；保存前由 billingSource 的财务版本再次核对。
+      const financialSnapshot = { costBasis: costBasisOf(upstream), income: rateSnapshotOf(own), cost: rateSnapshotOf(upstream) };
       let sourceCredential = observationCredential(rule, upstream, own);
       request.sourceCredential = sourceCredential;
       if (!resettle && isSettleableWindow(window, Date.now())) {
@@ -1254,7 +1261,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       let currentSegment = reconciliation.currentSegment;
       // 固定采购的上游用量不计成本（采购费作为固定成本），毛利 = 收入：上游 Key 账单取不全、成本归属未核验、
       // Key 还有没有其他用途、上游分组目录取不到，都只作参考，不挡结账。
-      const costBasis = costBasisOf(upstream);
+      const costBasis = financialSnapshot.costBasis;
       const upstreamSide = (issue) => ({ ...issue, side: "upstream", ...(costBasis === "fixed" ? { reference: true } : {}) });
       const issues = scopePolicyIssues(rule, window).map((issue) => costBasis === "fixed"
         ? upstreamSide({ ...issue, detail: COVERAGE_QUESTION }) : issue);
@@ -1495,7 +1502,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       if (!observe) return result;
       return (await persistResult(rule, result, origin, metadata, token, {
-        scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource, resettle,
+        scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource, financialSnapshot, resettle,
       })) ? result : STALE_SCOPE;
     };
     // 口径在查询期间变化时，在共享的 in-flight 任务内重跑，加入等待的调用方也只会拿到最新口径的结果。
@@ -1602,7 +1609,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource })) ? unavailable : STALE_SCOPE;
   }
 
-  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, resettle = false } = {}) {
+  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false } = {}) {
     const wholeWindow = { id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health };
     const segmentSnapshots = result.segments?.length ? result.segments : [wholeWindow];
     // 只有结束满 15 分钟的自然日窗口才结账：今天、近 7 天和刚结束的昨天还在变化，只记观测。
@@ -1672,13 +1679,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       };
     };
     // 账本记下结账时的成本计法和汇率：汇率只在当时配置过时才记，没记的读取时按当前配置。
-    const configuredRate = (stationId) => {
-      const rate = rateSnapshotOf(upstreamStation(stationId));
-      return rate.source === "configured" ? rate.cnyPerUsd : null;
-    };
+    const configuredRate = (rate) => rate.source === "configured" ? rate.cnyPerUsd : null;
     const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, sourceFor({ ...wholeWindow, recordType: "confirmed" }), {
-      revenueRate: configuredRate(rule.ownStationId), costRate: configuredRate(rule.upstreamStationId),
-      costBasis: result.costBasis || costBasisOf(upstreamStation(rule.upstreamStationId)) }) : null;
+      revenueRate: configuredRate(financialSnapshot.income), costRate: configuredRate(financialSnapshot.cost),
+      costBasis: financialSnapshot.costBasis }) : null;
     const save = () => repository.saveSnapshotsForScope(rule.id, scopeFingerprint, snapshots.map((segment) => ({
         ruleId: rule.id,
         segmentId: segment.id,
@@ -1729,7 +1733,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   function readResponse(knownRules, rules, results, registry, input, now) {
     const factsFor = (result) => {
       const resource = registry.resources.get(result.rule.ownStationId);
-      const source = result.rule.ownSource && resource?.identity && resource.station ? ownSourceFor(resource.station, resource.identity) : null;
+      // 固定账属于保存时的来源；旧账缺来源时也不能借当前账号补成已核验的财务事实。
+      const source = result.settledAt ? result.ownSource ?? null
+        : result.rule.ownSource && resource?.identity && resource.station ? ownSourceFor(resource.station, resource.identity) : null;
       const provider = registry.resources.get(result.rule.upstreamStationId)?.metadata?.platform || result.rule.provider;
       // 汇率按当前配置（没设置的 source 为 default，页面按 USD 原值显示）；固定采购的上游成本记为 0。
       // 已结账的日子用账本记下的汇率和成本计法，账本没记的（当时没配置、迁移的旧账）按当前配置。
@@ -2037,7 +2043,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           return inspectRule(rule.id, window, { ...(attempt === 1 ? options : { ...options, force: false }), ownerRegistry }).catch((err) => {
             // 列出规则后才被停止的规则从本轮结果中去掉，不能让整个多规则查询失败。
             if (err?.code === "RULE_NOT_FOUND") return null;
-            if (err?.code === "PERSISTENCE_FAILED") return persistenceFailedResult(rule, window);
+            if (["PERSISTENCE_FAILED", "HISTORY_UNAVAILABLE"].includes(err?.code)) return storageFailedResult(rule, window, err.code);
             throw err;
           });
         });

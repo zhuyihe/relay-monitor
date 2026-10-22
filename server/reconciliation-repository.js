@@ -4,6 +4,7 @@ import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } fr
 import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues } from "../lib/reconciliation-ledger.js";
 import { applyScopePolicy, billingDayOf, isCompletedBillingWindow, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../lib/billing-capability-storage.js";
 
 // MySQL 版和测试用的内存版（server/test-support）抛同一个码、同一句话；页面按码归类成用户看的话（lib/error-copy.js），这里的话只给开发看
 const REPOSITORY_ERRORS = Object.freeze({
@@ -140,6 +141,7 @@ export function selectLatestRecord(rows, window, scopeFingerprint, recordType) {
     generatedAt: latest.source.resultGeneratedAt,
     result: {
       ...latest.result,
+      ownSource: latest.result.ownSource || latest.source.ruleEvidence?.ownSource || latest.source.scopePolicy?.ownSource || null,
       window: savedWindow,
       requestedWindow: latest.source.result.requestedWindow || savedWindow,
       lastSuccessfulWindow: recordType === "confirmed" ? latest.source.result.lastSuccessfulWindow || savedWindow : latest.source.result.lastSuccessfulWindow ?? null,
@@ -743,26 +745,28 @@ export class ReconciliationRepository {
   }
 
   // Sub2API 账单过滤能力的核验结果，按上游连接身份的哈希保存，重启后仍有效。
-  async getBillingCapability(identity) {
+  async getBillingCapability(identity, scheme = BILLING_CAPABILITY_IDENTITY_SCHEME) {
     const [rows] = await this.pool.query(
-      "SELECT capability FROM reconciliation_billing_capabilities WHERE identity = ?",
-      [identity]
+      "SELECT capability FROM reconciliation_billing_capabilities WHERE identity = ? AND identity_scheme = ?",
+      [identity, scheme]
     );
     return rows.length ? asJson(rows[0].capability) : null;
   }
 
   // 不按核验时间清理：长期没有消费的账号无法重新核验（核验需要非零扣费），清掉后零消费的日子就结不了账。
   // 换过凭据或时区留下的旧身份只在人工改授权时产生，数量很小。
-  async saveBillingCapability(identity, capability) {
+  async saveBillingCapability(identity, capability, scheme = BILLING_CAPABILITY_IDENTITY_SCHEME) {
     await this.pool.query(
-      `INSERT INTO reconciliation_billing_capabilities (identity, capability, verified_at) VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE capability = VALUES(capability), verified_at = VALUES(verified_at)`,
-      [identity, JSON.stringify(capability), capability.verifiedAt]
+      `INSERT INTO reconciliation_billing_capabilities (identity, capability, verified_at, identity_scheme) VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE capability = VALUES(capability), verified_at = VALUES(verified_at), identity_scheme = VALUES(identity_scheme)`,
+      [identity, JSON.stringify(capability), capability.verifiedAt, scheme]
     );
   }
 
-  async deleteBillingCapability(identity) {
-    await this.pool.query("DELETE FROM reconciliation_billing_capabilities WHERE identity = ?", [identity]);
+  async deleteBillingCapability(identity, scheme = BILLING_CAPABILITY_IDENTITY_SCHEME) {
+    const identities = Array.isArray(identity) ? identity : [identity];
+    if (!identities.length) return;
+    await this.pool.query("DELETE FROM reconciliation_billing_capabilities WHERE identity IN (?) AND identity_scheme = ?", [identities, scheme]);
   }
 
   async latestRecord(ruleId, window, scopeFingerprint, recordType) {

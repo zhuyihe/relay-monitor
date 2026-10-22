@@ -10,7 +10,7 @@ import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconcilia
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
-import { billingIdentityFromDigest } from "../lib/providers.js";
+import { billingCapabilityAliases } from "../lib/billing-capability-storage.js";
 
 function trustedLegacyRule(rule, stations = [], upstreamAccountId = 7, ownAccountId = 7) {
   const upstream = stations.find((station) => station.id === rule.upstream_station_id) || { type: "newapi", baseUrl: "https://upstream.test" };
@@ -77,6 +77,7 @@ function observationRepositoryFixture({ segments, rule = { id: "rr", token_name:
 function sourceStore() {
   const conn = { beginTransaction: async () => {}, query: async () => [[]], commit: async () => {}, rollback: async () => {}, release() {} };
   const store = new Store({ getConnection: async () => conn });
+  store._metaSecrets.billing_identity_key = "source-fixture-billing-key"; // 生产启动由 Store.load 载入，fixture 直接构造。
   store.data.stations = [
     { id: "up", type: "newapi", baseUrl: "https://up.example", accessToken: "old" },
     { id: "own", type: "newapi", isOwn: true, baseUrl: "https://own.example", accessToken: "admin" },
@@ -1979,7 +1980,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     { id: "upstream", name: "上游", type: "newapi", baseUrl: "https://upstream.test", accessToken: "pat", authVersion: 1 },
     { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin", authVersion: 1 },
   ];
-  const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null, channels: [] } };
+  const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null,
+    channels: [], billingIdentityKey: "reconciliation-fixture-billing-key" } };
   return { rule, state, segments, stations, rt, repository, module: createReconciliationModule(rt, { repository }) };
 }
 
@@ -2908,7 +2910,7 @@ function membershipFixture() {
     if (sql.includes("reconciliation_billing_capabilities")) {
       if (sql.startsWith("SELECT")) return [state.capabilities.has(params[0]) ? [{ capability: state.capabilities.get(params[0]) }] : []];
       if (sql.startsWith("INSERT")) { state.capabilities.set(params[0], params[1]); return [{ affectedRows: 1 }]; }
-      if (sql.includes("WHERE identity")) state.capabilities.delete(params[0]);
+      if (sql.includes("WHERE identity")) for (const identity of Array.isArray(params[0]) ? params[0] : [params[0]]) state.capabilities.delete(identity);
       return [{ affectedRows: 1 }];
     }
     if (sql.includes("JOIN reconciliation_rule_channels")) return [target.channels.filter((channel) => params[0].includes(channel.channel_id)
@@ -4060,7 +4062,7 @@ function sub2ReconciliationFixture(t, { baseUrl, costs = {}, ...live }) {
   return { ...f, sub2, sources, restart, today: { ruleIds: [f.rule.id], preset: "today", timezone: "Asia/Shanghai" } };
 }
 
-test("S3 Sub2API 账单能力：用 Store 的账单身份密钥算 HMAC 身份；升级时改过身份的能力照常用，零消费的日子不用重新核验也算完整账单", async (t) => {
+test("S3 Sub2API 账单能力：用 Store 密钥兼容旧 HMAC 的包装身份，零消费的日子不用重新核验也算完整账单", async (t) => {
   const now = Date.parse("2026-10-11T01:00:00Z");
   t.mock.method(Date, "now", () => now);
   const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-hmac-server.test", costs: {} });
@@ -4070,9 +4072,9 @@ test("S3 Sub2API 账单能力：用 Store 的账单身份密钥算 HMAC 身份�
     getConnection: async () => conn }).load();
   Object.defineProperty(f.rt.store, "billingIdentityKey", { get: () => store.billingIdentityKey });
   const digest = createHash("sha256").update(JSON.stringify(["https://sub2-hmac-server.test", "7", "Asia/Shanghai", "token", "jwt", null])).digest("hex");
-  // 升级时 db/pool.js 的 rehashBillingCapabilities 按同一个算法改过身份的那一行
+  // 旧 S3 HMAC 行升级成 W(HMAC(K,D))，和新写的 W(D) 均能由适配器只读找到。
   const verifiedAt = now - 3 * 86400000;
-  await f.repository.saveBillingCapability(billingIdentityFromDigest(store.billingIdentityKey, digest),
+  await f.repository.saveBillingCapability(billingCapabilityAliases(store.billingIdentityKey, digest)[1],
     { state: "supported", currency: "USD", window: "natural-day", verifiedAt, reason: "RUNTIME_FILTERS_VERIFIED" });
   f.repository.log.capabilityWrites.length = 0;
   await f.module.refreshDue(now);
@@ -5116,10 +5118,11 @@ function upstreamReadFixture(t, type = "newapi") {
     if (!sql.includes("reconciliation_billing_capabilities")) assert.fail("Key read must not access SQL");
     if (sql.startsWith("SELECT")) return [capabilities.has(params[0]) ? [{ capability: capabilities.get(params[0]) }] : []];
     if (sql.startsWith("INSERT")) capabilities.set(params[0], params[1]);
-    else if (sql.includes("WHERE identity")) capabilities.delete(params[0]);
+    else if (sql.includes("WHERE identity")) for (const identity of Array.isArray(params[0]) ? params[0] : [params[0]]) capabilities.delete(identity);
     return [{ affectedRows: 1 }];
   }, async getConnection() { assert.fail("Key read must not save"); } };
   const store = new Store(pool);
+  store._metaSecrets.billing_identity_key = "upstream-read-fixture-billing-key";
   store.data.auth = { isDefault: false };
   store.data.stations = [{ id: "resource", type, name: "Old account", baseUrl: `https://u06-${type}-${t.name.length}.test`,
     accessToken: "saved-secret", authVersion: 1, monitorEnabled: false,
@@ -5325,6 +5328,122 @@ test("1b已结账的昨天：页面查询直接读结账记录不再取数，上
   assert.equal(f.state.statCalls.length, calls, "重启后也不打上游");
   assert.equal(f.state.writes, writes, "页面查询不追加任何快照");
   assert.equal(f.state.ledgerWrites.length, ledgerWrites, "也不写账本");
+});
+
+test("固定账读取失败只影响该规则：不把失败当无账重新取数，不缓存失败，重试恢复原账", async (t) => {
+  const f = await completedDayFixture(t);
+  await f.module.refreshDue(Date.now());
+  f.rt._reconciliationResultCache.clear();
+  const ledger = structuredClone(f.state.ledger), calls = f.state.statCalls.length, writes = f.state.writes;
+  f.state.upstreamQuota = 50; // 上游事后补记的金额不能替代固定账。
+  const latest = f.repository.latestLedgerEntry.bind(f.repository);
+  let failing = true;
+  t.mock.method(f.repository, "latestLedgerEntry", async (ruleId, ...args) => {
+    if (ruleId === "rr_live" && failing) throw new Error("temporary SELECT failure: raw-secret");
+    return latest(ruleId, ...args);
+  });
+  for (const mode of ["evaluate", "observe"]) {
+    const response = await f.module.queryRules({ preset: "yesterday" }, { mode, force: true });
+    const failed = response.results.find((row) => row.rule.id === "rr_live");
+    assert.equal(failed.health.code, "HISTORY_UNAVAILABLE");
+    assert.deepEqual([failed.calculation.profitUsd, failed.upstream.knownAmountUsd, failed.downstream.knownAmountUsd], [null, null, null]);
+    assert.ok(response.results.filter((row) => row.rule.id !== "rr_live").every((row) => row.settledAt && row.calculation.profitUsd === 1.5));
+    assert.doesNotMatch(JSON.stringify(response), /raw-secret|temporary SELECT/);
+    assert.ok([...f.rt._reconciliationResultCache].every(([key]) => !key.startsWith("rr_live:")), "读取失败不进入结果缓存");
+  }
+  assert.equal(f.state.statCalls.length, calls, "固定账读取失败也不重新获取两侧财务金额");
+  assert.equal(f.state.writes, writes);
+  assert.deepEqual(f.state.ledger, ledger);
+  failing = false;
+  const recovered = (await f.module.queryRules({ preset: "yesterday", ruleIds: ["rr_live"] }, { mode: "evaluate" })).results[0];
+  assert.deepEqual([recovered.health.code, recovered.calculation.profitUsd, recovered.ledger.revision], ["READY", 1.5, 1]);
+  assert.equal(f.state.statCalls.length, calls);
+});
+
+test("旧多日固定快照保留原来源，读取失败也不降级为上游重新计算", async (t) => {
+  const f = await completedDayFixture(t);
+  const input = { preset: "custom", ruleIds: ["rr_live"], startMs: Date.parse("2026-10-06T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") };
+  const settled = (await f.module.queryRules(input, { mode: "observe", force: true })).results[0];
+  assert.ok(settled.settledAt);
+  f.rt._reconciliationResultCache.clear();
+  f.stations.find((station) => station.id === "own").userId = "2";
+  const fetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/user/self") {
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { id: 2 } }) };
+    }
+    return fetch(input, init);
+  });
+  const original = (await f.module.queryRules(input, { mode: "evaluate", force: true })).results[0];
+  assert.deepEqual(original.ownSource, settled.ownSource, "旧快照也保留保存时账号");
+  const calls = f.state.statCalls.length, writes = f.state.writes;
+  t.mock.method(f.repository, "latestSettlement", async () => { throw new Error("old snapshot SELECT failed"); });
+  const failed = (await f.module.queryRules(input, { mode: "evaluate", force: true })).results[0];
+  assert.equal(failed.health.code, "HISTORY_UNAVAILABLE");
+  assert.equal(failed.calculation.profitUsd, null);
+  assert.equal(f.state.statCalls.length, calls);
+  assert.equal(f.state.writes, writes);
+});
+
+test("固定账存在但内容无法读取时保持不可用，不按没有账重新取数", async (t) => {
+  const f = await completedDayFixture(t);
+  const input = { preset: "yesterday", ruleIds: ["rr_live"] };
+  await f.module.queryRules(input, { mode: "observe", force: true });
+  f.repository.tables.ledger[0].detail = "{}";
+  const calls = f.state.statCalls.length, writes = f.state.writes;
+  const failed = (await f.module.queryRules(input, { mode: "evaluate", force: true })).results[0];
+  assert.deepEqual([failed.health.code, failed.calculation.profitUsd], ["HISTORY_UNAVAILABLE", null]);
+  assert.equal(f.state.statCalls.length, calls);
+  assert.equal(f.state.writes, writes);
+});
+
+test("换本站账号后固定账保留原来源：新旧来源分组，旧收入不并入当前账号", async (t) => {
+  const f = await completedDayFixture(t);
+  await f.module.queryRules({ preset: "yesterday", ruleIds: ["rr_live"] }, { mode: "observe", force: true });
+  const saved = structuredClone(f.state.ledger), source = saved[0].detail.result.ownSource;
+  const store = new Store(f.rt.pool);
+  store.data.stations = f.stations;
+  f.rt.store = store;
+  await store.update("own", { accessToken: "replacement-account-pat", userId: "2" });
+  const fetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/user/self") {
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { id: 2 } }) };
+    }
+    return fetch(input, init);
+  });
+  for (const mode of ["evaluate", "observe"]) {
+    const response = await f.module.queryRules({ preset: "yesterday" }, { mode, force: true });
+    const fixed = response.results.find((row) => row.rule.id === "rr_live");
+    assert.deepEqual(fixed.ownSource, source);
+    assert.deepEqual(fixed.rule.ownSource, source);
+    assert.deepEqual([fixed.health.code, fixed.calculation.profitUsd, fixed.ledger.revision], ["READY", 1.5, 1]);
+    assert.equal(response.windowGroups.length, 2);
+    const oldGroup = response.windowGroups.find((group) => group.ownSource?.namespaceKey === source.namespaceKey);
+    const newGroup = response.windowGroups.find((group) => group.ownSource?.accountId === "2");
+    assert.deepEqual(oldGroup.ruleIds, ["rr_live"]);
+    assert.equal(oldGroup.totals.knownIncomeUsd, 2.5);
+    assert.ok(newGroup && !newGroup.ruleIds.includes("rr_live"));
+    assert.equal(response.commonSummary, null, "不同账号的财务事实不能形成共同汇总");
+  }
+  assert.deepEqual(f.state.ledger, saved);
+});
+
+test("缺原始来源的固定账保持未知，不借当前身份生成共同汇总", async (t) => {
+  const f = await completedDayFixture(t);
+  await f.module.queryRules({ preset: "yesterday", ruleIds: ["rr_live"] }, { mode: "observe", force: true });
+  const entry = f.repository.tables.ledger[0], detail = JSON.parse(entry.detail);
+  delete detail.result.ownSource;
+  delete detail.ruleEvidence.ownSource;
+  delete detail.scopePolicy.ownSource;
+  entry.detail = JSON.stringify(detail);
+  f.rt._reconciliationResultCache.clear();
+  const response = await f.module.queryRules({ preset: "yesterday", ruleIds: ["rr_live"] }, { mode: "evaluate", force: true });
+  assert.equal(response.results[0].calculation.profitUsd, 1.5);
+  assert.equal(response.results[0].ownSource, null);
+  assert.equal(response.commonSummary, null);
 });
 
 test("1b单个自然日只认账本：快照表里迁移没搬的旧确认记录（窗口结束不满15分钟写下）不算结账，只读查询重新取数", async (t) => {
@@ -5578,6 +5697,68 @@ test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率�
   // 今天还没结账，按当前配置：固定采购、成本记 0。
   const today = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "evaluate", origin: "page" })).results[0];
   assert.deepEqual([today.rates.costBasis, today.rates.income.cnyPerUsd, today.ledger], ["fixed", 8, undefined]);
+});
+
+test("结账在途改变成本计法和双边汇率：废弃旧任务，重读后只保存一致的新配置", async (t) => {
+  for (const initialFixed of [true, false]) await t.test(initialFixed ? "固定采购改按用量" : "按用量改固定采购", async (t) => {
+    const wait = holdPoint();
+    let held = false;
+    const f = await completedDayFixture(t, { onRequest: (request) => {
+      if (request.path === "/api/log/self/stat" && !held) { held = true; return wait.hold(); }
+    } });
+    const upstream = f.stations.find((station) => station.id === "upstream"), own = f.stations.find((station) => station.id === "own");
+    upstream.fixedPurchases = initialFixed ? [{ amount: 300, days: 30 }] : [];
+    upstream.cnyPerUsd = 6;
+    own.cnyPerUsd = 7.1;
+    const store = new Store(f.rt.pool);
+    store.data.stations = f.stations;
+    f.rt.store = store;
+    const input = { preset: "yesterday", ruleIds: ["rr_live"] };
+    const pending = f.module.queryRules(input, { mode: "observe", force: true });
+    await wait.reached;
+    await store.update("upstream", { fixedPurchases: initialFixed ? [] : [{ amount: 300, days: 30 }], cnyPerUsd: 6.9 });
+    await store.update("own", { cnyPerUsd: 7.8 });
+    const expectedBasis = initialFixed ? "usage" : "fixed", expectedProfit = initialFixed ? 1.5 : 2.5;
+    const fresh = (await f.module.queryRules(input, { mode: "evaluate" })).results[0];
+    assert.deepEqual([fresh.costBasis, fresh.calculation.profitUsd], [expectedBasis, expectedProfit], "新配置请求不能加入仍挂起的旧财务任务");
+    wait.release();
+    const row = (await pending).results[0];
+    assert.deepEqual([row.health.code, row.costBasis, row.calculation.profitUsd], ["READY", expectedBasis, expectedProfit]);
+    assert.ok(f.state.statCalls.filter((call) => call.side === "upstream").length >= 2, "配置改变后必须重新核算，不能给旧结果换个计法标签");
+    assert.equal(f.state.ledger.length, 1);
+    assert.deepEqual(f.state.ledger.map((entry) => [entry.revision, entry.cost_basis, entry.revenue_rate, entry.cost_rate, entry.detail.result.calculation.profitUsd]),
+      [[1, expectedBasis, 7.8, 6.9, expectedProfit]]);
+    assert.ok([...f.state.snapshots.values()].every((snapshot) => JSON.parse(snapshot.source).result.costBasis === expectedBasis), "旧配置的观察也不能提交");
+    f.rt._reconciliationResultCache.clear();
+    const fixed = (await f.module.queryRules(input, { mode: "evaluate", force: true })).results[0];
+    assert.deepEqual([fixed.calculation.profitUsd, fixed.rates.costBasis, fixed.rates.income.cnyPerUsd, fixed.rates.cost.cnyPerUsd],
+      [expectedProfit, expectedBasis, 7.8, 6.9]);
+  });
+});
+
+test("未固定结果缓存随成本计法和任一侧汇率变化失效，页面不沿用旧利润", async (t) => {
+  const f = await completedDayFixture(t);
+  const store = new Store(f.rt.pool);
+  store.data.stations = f.stations;
+  f.rt.store = store;
+  await store.update("upstream", { cnyPerUsd: 6 });
+  await store.update("own", { cnyPerUsd: 7.1 });
+  const query = () => f.module.queryRules({ preset: "today", ruleIds: ["rr_live"] }, { mode: "evaluate" });
+  assert.equal((await query()).results[0].calculation.profitUsd, 1.5);
+  let calls = f.state.statCalls.length;
+  await store.update("upstream", { fixedPurchases: [{ amount: 300, days: 30 }] });
+  const changed = (await query()).results[0];
+  assert.deepEqual([changed.calculation.profitUsd, changed.rates.costBasis], [2.5, "fixed"]);
+  assert.ok(f.state.statCalls.length > calls);
+  for (const [stationId, rate] of [["own", 7.8], ["upstream", 6.9]]) {
+    calls = f.state.statCalls.length;
+    await store.update(stationId, { cnyPerUsd: rate });
+    const row = (await query()).results[0];
+    assert.ok(f.state.statCalls.length > calls, `${stationId} 汇率修改不能复用旧财务配置的缓存`);
+    assert.equal(stationId === "own" ? row.rates.income.cnyPerUsd : row.rates.cost.cnyPerUsd, rate);
+    assert.equal(row.calculation.profitUsd, 2.5);
+  }
+  assert.equal(f.state.writes, 0, "只读页面计算仍然不写库");
 });
 
 test("4a 固定采购上游：Key 账单取不到或为空只作参考，毛利 = 收入、按本站时区照常结账；按用量计成本的上游仍被挡住", async (t) => {

@@ -215,14 +215,16 @@ export function useAccountCenter({
     if (["connect", "coverage", "source"].includes(destination.action) && !destination.error) return;
     destinationResolved.current = true;
     if (destination.error) { setWorkflowError(destination.error); return; }
-    const account = accountModel.accounts.find((account) => account.accountKey === destination.accountKey || account.resources.some((resource) => resource.id === destination.stationId));
+    const account = accountModel.accounts.find((account) => destination.accountKey
+      ? account.accountKey === destination.accountKey && (!destination.stationId || account.resources.some((resource) => resource.id === destination.stationId))
+      : account.resources.some((resource) => resource.id === destination.stationId));
     if (["verify", "verify-billing"].includes(destination.action)) {
       const original = stations.find((station) => station.id === destination.stationId && !station.archivedAt);
       if (!original) { setWorkflowError(`${ERROR_CATEGORIES.not_found.text}。`); return; }
       if (!ONBOARDING_TYPES.some((item) => item.value === original.type)) { setWorkflowError(COPY.unsupported); return; }
       openVerification(original);
     } else if (destination.action === "authorization") {
-      if (!account || account.accountKey !== destination.accountKey || !authorizationEligible(account).length) { setWorkflowError(DESTINATION_CHANGED); return; }
+      if (!account || (destination.accountKey && account.accountKey !== destination.accountKey) || !authorizationEligible(account).length) { setWorkflowError(DESTINATION_CHANGED); return; }
       openAuthorization(account);
     } else if (["scope", "conflict"].includes(destination.action)) {
       const located = locateAssociation(destination.ruleId!);

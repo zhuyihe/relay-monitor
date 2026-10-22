@@ -38,12 +38,12 @@ const COVERAGE = reconciliationIssue("COST_COVERAGE_UNKNOWN");
 const OWNER = reconciliationIssue("COST_OWNER_UNVERIFIED");
 // 渠道列表里的状态（§5.6）
 const channelStatusLabel = (key: string) => reconciliationChannelStatus(key).label;
-const ACCOUNTED = channelStatusLabel("accounted");
+const BOUND = channelStatusLabel("bound");
 const UNLINKED = channelStatusLabel("unlinked");
 const NEEDS_ACTION = channelStatusLabel("source_unverified");
 const MONITOR_ONLY = channelStatusLabel("monitor_only");
-// 渠道列表里一行的状态（§5.6）：要重新确认的先说「需处理」，再看是否算进利润、是否只看余额；状态筛选按同一个判断
-const ROW_STATES = Object.freeze({ attention: NEEDS_ACTION, unlinked: UNLINKED, monitor: MONITOR_ONLY, configured: ACCOUNTED });
+// 这里读取绑定配置，不读取某一天的财务结果；绑定成功不代表账单已完整计入利润。
+const ROW_STATES = Object.freeze({ attention: NEEDS_ACTION, unlinked: UNLINKED, monitor: MONITOR_ONLY, configured: BOUND });
 const rowState = (entry: any): keyof typeof ROW_STATES => entry.monitor?.status === "review_required" || entry.reconciliation?.status === "review_required" ? "attention"
   : entry.reconciliation?.status === "configured" ? "configured" : entry.monitor?.status === "linked" ? "monitor" : "unlinked";
 const UNSUPPORTED = channelStatusLabel("unsupported");
@@ -159,7 +159,7 @@ const COPY = Object.freeze({
 });
 // 保存结果里两种用途各自的状态（§5.6）；没要的用途不显示
 const MONITOR_RESULT: Record<string, string> = { linked: BINDING_COPY.saved, pending: COPY.pending, unavailable: COPY.pending };
-const BILLING_RESULT: Record<string, string> = { configured: ACCOUNTED, unverified: COPY.unverified, unsupported: UNSUPPORTED, unavailable: UNSUPPORTED, pending: COPY.pending };
+const BILLING_RESULT: Record<string, string> = { configured: BOUND, unverified: COPY.unverified, unsupported: UNSUPPORTED, unavailable: UNSUPPORTED, pending: COPY.pending };
 // 测试读取后每把 Key 的预览标题
 const PREVIEW_STATE: Record<string, string> = { ready: COPY.ready, monitor_only: MONITOR_ONLY, unverified: COPY.unverified, unsupported: UNSUPPORTED, unavailable: UNSUPPORTED };
 

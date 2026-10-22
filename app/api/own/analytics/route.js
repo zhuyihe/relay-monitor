@@ -6,15 +6,24 @@ import { queryOwnData } from "../../../../lib/providers.js";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../../../lib/business-time.js";
 import { forecastDaily, forecastHourly } from "../../../../lib/forecast.js";
 import {
-  ownCache, getOwnUsers, computeResold, computeProfit, computeFlowBreakdown, joinPrev, resolveOwnWindow,
+  ownCache, readOwnIncome, computeProfit, computeFlowBreakdown, joinPrev, resolveOwnWindow,
 } from "../../../../server/own-helpers.js";
+
+// 只在当前请求内比较，不写入缓存键、数据库或响应。
+const ownFinancialVersion = (station) => station ? JSON.stringify([
+  station.id, station.type, station.baseUrl, station.accessToken, station.userId, station.authVersion,
+  station.cnyPerUsd, station.verifiedIdentity, station.resoldAdminKeys || [],
+]) : null;
 
 export const GET = withAuth(async (request, rt) => {
   const { store } = rt;
-  const own = store.list().find((s) => s.isOwn && s.type === "newapi");
+  const configuredOwn = store.list().find((s) => s.isOwn && s.type === "newapi");
+  // 一次响应里的分日收入、利润和售价说明共用配置快照，不混入异步读取期间的编辑。
+  const own = configuredOwn ? { ...configuredOwn, resoldAdminKeys: (configuredOwn.resoldAdminKeys || []).map((key) => ({ ...key })) } : null;
   if (!own) {
     return json({ error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }, 400);
   }
+  const ownVersion = ownFinancialVersion(own);
   const sp = new URL(request.url).searchParams;
   // 展示窗口 + 上一等长窗口（环比用来抓「昨天 $11、今天 $152」这类跳变）
   const { range, tz, now, todayLabel, midnight, startMs, spanDays, prevStart, prevEnd } = resolveOwnWindow(sp);
@@ -74,12 +83,9 @@ export const GET = withAuth(async (request, rt) => {
         daily.push({ t, cost: Math.round((dmap.get(t) || 0) * 10000) / 10000 });
       }
     }
-    // 用户列表：识别管理员（role >= 10）并取各用户余额
-    let ownUsers = null;
-    try {
-      ownUsers = await getOwnUsers(rt, own);
-    } catch { /* 拿不到就退化为不区分管理员 */ }
-    const adminSet = new Set((ownUsers || []).filter((u) => u.role >= 10).map((u) => u.username));
+    const { users: ownUsers, adminSet, incomeUsd, adminUsageUsd, resold, incomeDaily } = await readOwnIncome(
+      rt, own, userRows, { startMs, endMs: now, tz }
+    );
 
     // 小时级序列（近 28 天，缺时补 0，不含当前未完小时）→ 未来 24 小时预测
     // modelRows 本就拉了 35 天：更长的序列让画像与 conformal 校准都有足够原点
@@ -114,14 +120,6 @@ export const GET = withAuth(async (request, rt) => {
     }
 
     const byUser = aggBy(userRows, "user").map((u) => ({ ...u, isAdmin: adminSet.has(u.user) }));
-    // 收入 = 普通用户的期内消费；管理员/root 自己用不产生收入，但上游成本照付
-    const rawIncomeUsd = byUser.filter((u) => !u.isAdmin).reduce((a, u) => a + u.cost, 0);
-    const rawAdminUsd = byUser.filter((u) => u.isAdmin).reduce((a, u) => a + u.cost, 0);
-    // 转售的管理员 Key：其消费改计入收入（详见 computeResold）
-    const resold = await computeResold(own, rawIncomeUsd, rawAdminUsd, startMs, now);
-    const incomeUsd = resold.incomeUsd;
-    const adminUsageUsd = resold.adminUsageUsd;
-
     // 上窗模型行：落在 35 天缓存里就地切，否则用单独拉的那份
     const prevModelRows = prevCovered
       ? modelRows.filter((r) => r.t >= prevStart && r.t < prevEnd)
@@ -156,10 +154,16 @@ export const GET = withAuth(async (request, rt) => {
       daily: daily.slice(-14),
       forecast: forecastDaily(daily, 7),
       hourly: hourlyForecast,
+      // 按实际用户身份和转售消费分日，客户端不再用含管理员自用的模型消费猜收入形状。
+      incomeDaily,
+      incomeDailyApprox: false,
       profit,
       generatedAt: new Date().toISOString(),
     };
-    cache.set(cacheKey, { at: Date.now(), payload });
+    // 编辑配置会清缓存；较早开始的请求可以返回自己的快照，但不能把旧口径重新填回缓存。
+    if (ownFinancialVersion(store.list().find((s) => s.isOwn && s.type === "newapi")) === ownVersion) {
+      cache.set(cacheKey, { at: Date.now(), payload });
+    }
     return json(payload);
   } catch (err) {
     // 读自营站点没成：带上游给的码，没有就按「自营站点暂时读不到」说（lib/error-copy.js §8.2）
