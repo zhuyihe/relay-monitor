@@ -66,6 +66,7 @@ function useAttentionCount(enabled: boolean) {
   return useMemo(() => {
     if (!enabled || !source) return 0;
     return buildOverviewActions(source.stations, {
+      tz: source.meta?.tz || undefined,
       rules: source.meta?.rules || {},
       settings: source.meta?.settings || {},
       workflowActions,

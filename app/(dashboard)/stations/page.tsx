@@ -463,11 +463,11 @@ export default function StationsPage() {
 
   const { todosById, unowned } = useMemo(() => {
     const live = listed.filter((s) => !s.archivedAt);
-    const all = buildOverviewActions(live, { rules, settings, workflowActions }).all;
+    const all = buildOverviewActions(live, { tz, rules, settings, workflowActions }).all;
     const ids = new Set(live.map(actionKey));
     // 按账号或核算关联归类、不落在单个资源上的待办只在运营总览处理，这里交代条数
     return { todosById: actionsByStation(all), unowned: all.filter((a: any) => !a.stationId || !ids.has(String(a.stationId))).length };
-  }, [listed, rules, settings, workflowActions]);
+  }, [listed, tz, rules, settings, workflowActions]);
 
   const critDays = etaWindowDays(rules);
   const views = useMemo(() => {
@@ -1102,7 +1102,7 @@ export default function StationsPage() {
 
       {accounts.overlays}
 
-      <TrendModal station={trendCur} onClose={() => setTrendStation(null)} settings={settings} rules={rules} />
+      <TrendModal station={trendCur} onClose={() => setTrendStation(null)} settings={settings} rules={rules} tz={tz} />
 
       <StationDrawer ref={drawerRef} types={types} onSaved={onSaved} />
     </div>
