@@ -8,11 +8,11 @@ import { Modal } from "antd";
 import { api } from "../../lib/client";
 import { balanceMoneyOf, rateSnapshotOf } from "../../lib/profit";
 import {
-  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatCompact, formatDayKey, formatMoney, formatZonedDateTime, formatZonedTime, RANGE_TEXT, RATE_UNSET,
+  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatCompact, formatMoney, formatZonedDate, formatZonedDateTime, formatZonedTime, RANGE_TEXT, RATE_UNSET,
 } from "../../lib/format";
-import { dayKeyInTz, dayStartInTz, DEFAULT_BUSINESS_TIME_ZONE, shiftDayLabel, tzOffsetMs } from "../../lib/business-time";
+import { isDayStartInTz } from "../../lib/business-time";
 import { balanceDaysText, balanceViewOf, stationDisplayName } from "../../lib/overview-actions";
-import { clamp, niceTicks } from "../../lib/chart-math";
+import { clamp, niceTicks, timeAxisTicks } from "../../lib/chart-math";
 import { ErrorState } from "../components/data-state";
 import { ChartTip, TipBody } from "../components/float-tip";
 import { useElementWidth } from "../components/use-width";
@@ -66,35 +66,11 @@ const HOUR = 3_600_000;
 // 时间都按业务时区写（design/ui-copy-spec.md §6），和浏览器所在时区无关：「10月9日 14:30」
 const at = (ms: number, tz: string) => formatZonedDateTime(ms, tz);
 
-// 业务时区里的整点：本地时刻往下取整到整点（半小时时区也对）
-const hourStartInTz = (t: number, tz: string) => {
-  const local = t + tzOffsetMs(tz, t);
-  return local - (((local % HOUR) + HOUR) % HOUR) - tzOffsetMs(tz, t);
-};
-
-// 横轴刻度：按跨度选 1 小时到 7 天的整点间隔，保证每个标签至少有 72px；
-// 带预测的 30 天能拉到 60 天，窄屏上 7 天也放不下时按整周加大间隔。
-// 按天的刻度落在业务时区每天的 0:00（跨夏令时也对），按小时的落在业务时区的整点
+// 横轴刻度（lib/chart-math.js 的 timeAxisTicks，按业务时区落点），保证每个标签至少有 72px。
+// 0 点写日期「10月10日」，其余写时刻「3:00」
 function timeTicks(t0: number, t1: number, plotW: number, tz: string) {
-  const span = Math.max(HOUR, t1 - t0);
-  const maxTicks = Math.max(2, Math.floor(plotW / 72));
-  const steps = [1, 2, 3, 6, 12, 24, 48, 72, 168].map((h) => h * HOUR);
-  const WEEK = 168 * HOUR;
-  const step = steps.find((s) => span / s <= maxTicks) ?? Math.ceil(span / maxTicks / WEEK) * WEEK;
-  const daily = step >= 24 * HOUR;
-  const ticks: number[] = [];
-  if (daily) {
-    const first = dayKeyInTz(t0, tz), stepDays = Math.round(step / (24 * HOUR));
-    for (let k = 0; ; k += stepDays) {
-      const t = dayStartInTz(shiftDayLabel(first, k), tz);
-      if (t > t1) break;
-      if (t >= t0) ticks.push(t);
-    }
-  } else {
-    for (let t = hourStartInTz(t0, tz); t <= t1; t += step) if (t >= t0) ticks.push(t);
-  }
-  const midnight = (t: number) => dayStartInTz(dayKeyInTz(t, tz), tz) === t;
-  const label = (t: number) => (daily || midnight(t) ? formatDayKey(dayKeyInTz(t, tz), tz) : formatZonedTime(t, tz));
+  const { ticks, daily } = timeAxisTicks(t0, t1, plotW / 72, tz);
+  const label = (t: number) => (daily || isDayStartInTz(t, tz) ? formatZonedDate(t, tz) : formatZonedTime(t, tz));
   return { ticks, label };
 }
 
@@ -208,7 +184,7 @@ function BalanceChart({ points, proj, label, tz }: { points: [number, number][];
                 </text>
               ))}
               {xt.ticks.map((t) => (
-                <text key={t} className="tick-label" x={x(t)} y={H - 8} textAnchor="middle">
+                <text key={t} className="tick-label" data-axis="x" x={x(t)} y={H - 8} textAnchor="middle">
                   {xt.label(t)}
                 </text>
               ))}
@@ -273,15 +249,15 @@ export default function TrendModal({
   onClose,
   settings,
   rules,
-  tz = DEFAULT_BUSINESS_TIME_ZONE,
+  tz,
 }: {
   station: any | null;
   onClose: () => void;
   // 余额提醒线和提醒天数，和打开它的页面用同一份
   settings?: any;
   rules?: any;
-  // 业务时区（接口返回的 tz）：图上的时刻、横轴刻度、预计用完的时间都按它写
-  tz?: string;
+  // 业务时区（接口返回的 tz）：图上的时刻、横轴刻度、预计用完的时间都按它写。必填，免得调用方漏传就退回默认时区
+  tz: string;
 }) {
   const [range, setRange] = useState<Range>("72");
   const [data, setData] = useState<any>(null);

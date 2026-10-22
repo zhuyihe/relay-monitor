@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationNotCountedCostText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
 import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
-import { BALANCE_STATE_TEXT, EMPTY, FIXED_COST_TEXT, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RANGE_TEXT, formatDayKey, RATE_UNSET_PARITY, RATE_UNSET_USD, SELL_PRICE_UNSET, formatAsOf, formatCompact, formatDayZone, formatRate, formatZonedDateTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
+import { BALANCE_STATE_TEXT, EMPTY, FIXED_COST_TEXT, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RANGE_TEXT, formatDayKey, RATE_UNSET_PARITY, RATE_UNSET_USD, SELL_PRICE_UNSET, formatAsOf, formatCompact, formatDayZone, formatRate, formatZonedDateTime, formatZonedTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy, reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
 import { CONSOLE_UNREACHABLE, ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText } from "../lib/error-copy.js";
@@ -2727,15 +2727,15 @@ test("告警中心通知方式：接口不回传密钥；只改名字也能保�
   assert.equal(puts[1].config.botToken, "");
 });
 
-test("余额趋势按业务时区写时间：横轴刻度落在上海的 0 点和整点，预计用完的时刻也按上海时间写，和浏览器所在时区无关", async (t) => {
-  // 上海 10月10日 0:00（UTC 10月9日 16:00）起每小时读一次，预计上海 03:30 用完
-  const T0 = Date.parse("2026-10-09T16:00:00Z"), HOUR = 3_600_000, eta = Date.parse("2026-10-09T19:30:00Z");
+test("余额趋势按业务时区写时间：横轴刻度落在业务时区的 0 点和整点，预计用完的时刻也按业务时区写，和浏览器所在时区无关", async (t) => {
+  // 业务时区用加尔各答（UTC+5:30，不是默认的上海，也不是三个浏览器时区之一）：当地 10月10日 0:00 起每小时读一次，预计当地 3:30 用完
+  const TZ = "Asia/Kolkata", HOUR = 3_600_000, T0 = Date.parse("2026-10-09T18:30:00Z"), eta = T0 + 3.5 * HOUR;
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url()), path = url.pathname;
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (path === "/api/stations") return fulfill(route, { tz: "Asia/Shanghai", stations: [{ id: "s1", name: "Alpha 上游", type: "newapi", baseUrl: "https://alpha.test", userId: "7", hasAccessToken: true, monitorEnabled: true,
+    if (path === "/api/stations") return fulfill(route, { tz: TZ, stations: [{ id: "s1", name: "Alpha 上游", type: "newapi", baseUrl: "https://alpha.test", userId: "7", hasAccessToken: true, monitorEnabled: true,
       balance: { ok: true, remaining: 10, checkedAt: new Date(T0 + 2 * HOUR).toISOString() }, prediction: null, spark: [[T0, 12], [T0 + 2 * HOUR, 10]] }], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
-    if (path === "/api/meta") return fulfill(route, { types: [], rules: {} });
+    if (path === "/api/meta") return fulfill(route, { types: [], rules: {}, tz: TZ });
     if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
     if (path === "/api/stations/s1/history") {
       return fulfill(route, { points: [[T0, 12], [T0 + HOUR, 11], [T0 + 2 * HOUR, 10]], prediction: { burnPerDay: 24, etaDays: 0.06, etaAt: new Date(eta).toISOString() } });
@@ -2744,12 +2744,11 @@ test("余额趋势按业务时区写时间：横轴刻度落在上海的 0 点�
   }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations");
   await page.getByRole("button", { name: "Alpha 上游 的余额趋势", exact: true }).first().click();
   const modal = page.getByRole("dialog", { name: "Alpha 上游 的余额趋势", exact: true }); await modal.waitFor();
-  const emptyAt = `约 ${formatZonedDateTime(eta, "Asia/Shanghai")} 用完`;
-  await modal.getByText(emptyAt, { exact: true }).first().waitFor();
-  const ticks = await modal.locator("svg text.tick-label").allTextContents();
-  // 第一个横轴刻度是上海 10月10日 0 点，写日期；其余整点按上海时间（不会出现 UTC 的 16:00、洛杉矶的 09:00）
-  assert.ok(ticks.includes(formatDayKey("2026-10-10", "Asia/Shanghai")), ticks.join(" "));
-  assert.equal(ticks.some((text) => ["16:00", "17:00", "09:00", "10:00"].includes(text)), false, ticks.join(" "));
+  // 「约 10月10日 3:30 用完」：图例和读数两处
+  await modal.getByText(`约 ${formatZonedDateTime(eta, TZ)} 用完`, { exact: true }).first().waitFor();
+  // 横轴：当地 0 点写日期，其余是当地整点
+  const ticks = await modal.locator('svg text[data-axis="x"]').allTextContents();
+  assert.deepEqual(ticks, [formatDayKey("2026-10-10", TZ), ...[1, 2, 3].map((h) => formatZonedTime(T0 + h * HOUR, TZ))]);
 });
 
 test("编辑上游改了地址的站点：留空的令牌不带过去，测试读取说「换了地址…请重新填」", async (t) => {
