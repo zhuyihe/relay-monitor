@@ -311,7 +311,7 @@ export default function OverviewPage() {
         <CostPanel title={COPY.upstreamCost(rangeName)} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
       </div>
 
-      <TrendModal station={trendStation} onClose={() => setTrendStation(null)} settings={settings} rules={rules} />
+      <TrendModal station={trendStation} onClose={() => setTrendStation(null)} settings={settings} rules={rules} tz={businessTz} />
     </div>
   );
 }
@@ -449,11 +449,12 @@ function AttentionPanel({
   const actions = useMemo(
     () =>
       buildOverviewActions(stations || [], {
+        tz,
         rules,
         settings,
         workflowActions,
       }),
-    [stations, rules, settings, workflowActions],
+    [stations, tz, rules, settings, workflowActions],
   );
   const router = useRouter();
   const [expanded, setExpanded] = useState(false);

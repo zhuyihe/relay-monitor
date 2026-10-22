@@ -2727,6 +2727,31 @@ test("告警中心通知方式：接口不回传密钥；只改名字也能保�
   assert.equal(puts[1].config.botToken, "");
 });
 
+test("余额趋势按业务时区写时间：横轴刻度落在上海的 0 点和整点，预计用完的时刻也按上海时间写，和浏览器所在时区无关", async (t) => {
+  // 上海 10月10日 0:00（UTC 10月9日 16:00）起每小时读一次，预计上海 03:30 用完
+  const T0 = Date.parse("2026-10-09T16:00:00Z"), HOUR = 3_600_000, eta = Date.parse("2026-10-09T19:30:00Z");
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { tz: "Asia/Shanghai", stations: [{ id: "s1", name: "Alpha 上游", type: "newapi", baseUrl: "https://alpha.test", userId: "7", hasAccessToken: true, monitorEnabled: true,
+      balance: { ok: true, remaining: 10, checkedAt: new Date(T0 + 2 * HOUR).toISOString() }, prediction: null, spark: [[T0, 12], [T0 + 2 * HOUR, 10]] }], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    if (path === "/api/meta") return fulfill(route, { types: [], rules: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/stations/s1/history") {
+      return fulfill(route, { points: [[T0, 12], [T0 + HOUR, 11], [T0 + 2 * HOUR, 10]], prediction: { burnPerDay: 24, etaDays: 0.06, etaAt: new Date(eta).toISOString() } });
+    }
+    throw new Error("unexpected API: " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations");
+  await page.getByRole("button", { name: "Alpha 上游 的余额趋势", exact: true }).first().click();
+  const modal = page.getByRole("dialog", { name: "Alpha 上游 的余额趋势", exact: true }); await modal.waitFor();
+  const emptyAt = `约 ${formatZonedDateTime(eta, "Asia/Shanghai")} 用完`;
+  await modal.getByText(emptyAt, { exact: true }).first().waitFor();
+  const ticks = await modal.locator("svg text.tick-label").allTextContents();
+  // 第一个横轴刻度是上海 10月10日 0 点，写日期；其余整点按上海时间（不会出现 UTC 的 16:00、洛杉矶的 09:00）
+  assert.ok(ticks.includes(formatDayKey("2026-10-10", "Asia/Shanghai")), ticks.join(" "));
+  assert.equal(ticks.some((text) => ["16:00", "17:00", "09:00", "10:00"].includes(text)), false, ticks.join(" "));
+});
+
 test("编辑上游改了地址的站点：留空的令牌不带过去，测试读取说「换了地址…请重新填」", async (t) => {
   const code = "ENDPOINT_CHANGED_SECRET_REQUIRED";
   const tests = [];

@@ -8,8 +8,9 @@ import { Modal } from "antd";
 import { api } from "../../lib/client";
 import { balanceMoneyOf, rateSnapshotOf } from "../../lib/profit";
 import {
-  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatCompact, formatHhmm, formatMoney, formatMonthDay, RANGE_TEXT, RATE_UNSET,
+  axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatCompact, formatDayKey, formatMoney, formatZonedDateTime, formatZonedTime, RANGE_TEXT, RATE_UNSET,
 } from "../../lib/format";
+import { dayKeyInTz, dayStartInTz, DEFAULT_BUSINESS_TIME_ZONE, shiftDayLabel, tzOffsetMs } from "../../lib/business-time";
 import { balanceDaysText, balanceViewOf, stationDisplayName } from "../../lib/overview-actions";
 import { clamp, niceTicks } from "../../lib/chart-math";
 import { ErrorState } from "../components/data-state";
@@ -62,37 +63,44 @@ const B = 28;
 const H = 240;
 const HOUR = 3_600_000;
 
-const at = (ms: number) => `${formatMonthDay(ms)} ${formatHhmm(ms)}`;
+// 时间都按业务时区写（design/ui-copy-spec.md §6），和浏览器所在时区无关：「10月9日 14:30」
+const at = (ms: number, tz: string) => formatZonedDateTime(ms, tz);
+
+// 业务时区里的整点：本地时刻往下取整到整点（半小时时区也对）
+const hourStartInTz = (t: number, tz: string) => {
+  const local = t + tzOffsetMs(tz, t);
+  return local - (((local % HOUR) + HOUR) % HOUR) - tzOffsetMs(tz, t);
+};
 
 // 横轴刻度：按跨度选 1 小时到 7 天的整点间隔，保证每个标签至少有 72px；
-// 带预测的 30 天能拉到 60 天，窄屏上 7 天也放不下时按整周加大间隔
-function timeTicks(t0: number, t1: number, plotW: number) {
+// 带预测的 30 天能拉到 60 天，窄屏上 7 天也放不下时按整周加大间隔。
+// 按天的刻度落在业务时区每天的 0:00（跨夏令时也对），按小时的落在业务时区的整点
+function timeTicks(t0: number, t1: number, plotW: number, tz: string) {
   const span = Math.max(HOUR, t1 - t0);
   const maxTicks = Math.max(2, Math.floor(plotW / 72));
   const steps = [1, 2, 3, 6, 12, 24, 48, 72, 168].map((h) => h * HOUR);
   const WEEK = 168 * HOUR;
   const step = steps.find((s) => span / s <= maxTicks) ?? Math.ceil(span / maxTicks / WEEK) * WEEK;
-  const start = new Date(t0);
-  if (step >= 24 * HOUR) start.setHours(0, 0, 0, 0);
-  else start.setMinutes(0, 0, 0);
-  const ticks: number[] = [];
-  for (let t = start.getTime(); t <= t1; t += step) {
-    // 跨夏令时等情况下按本地整点重新对齐
-    const d = new Date(t);
-    if (step >= 24 * HOUR) d.setHours(0, 0, 0, 0);
-    if (d.getTime() >= t0) ticks.push(d.getTime());
-  }
   const daily = step >= 24 * HOUR;
-  const label = (t: number) => {
-    const d = new Date(t);
-    return daily || (d.getHours() === 0 && d.getMinutes() === 0) ? formatMonthDay(d) : formatHhmm(d);
-  };
+  const ticks: number[] = [];
+  if (daily) {
+    const first = dayKeyInTz(t0, tz), stepDays = Math.round(step / (24 * HOUR));
+    for (let k = 0; ; k += stepDays) {
+      const t = dayStartInTz(shiftDayLabel(first, k), tz);
+      if (t > t1) break;
+      if (t >= t0) ticks.push(t);
+    }
+  } else {
+    for (let t = hourStartInTz(t0, tz); t <= t1; t += step) if (t >= t0) ticks.push(t);
+  }
+  const midnight = (t: number) => dayStartInTz(dayKeyInTz(t, tz), tz) === t;
+  const label = (t: number) => (daily || midnight(t) ? formatDayKey(dayKeyInTz(t, tz), tz) : formatZonedTime(t, tz));
   return { ticks, label };
 }
 
 type Proj = { t: number; v: number; hitsZero: boolean };
 
-function BalanceChart({ points, proj, label }: { points: [number, number][]; proj: Proj | null; label: string }) {
+function BalanceChart({ points, proj, label, tz }: { points: [number, number][]; proj: Proj | null; label: string; tz: string }) {
   const [ref, w] = useElementWidth();
   const [hover, setHover] = useState<number | null>(null);
   const n = points.length;
@@ -103,7 +111,7 @@ function BalanceChart({ points, proj, label }: { points: [number, number][]; pro
   const x = (t: number) => L + ((t - t0) / (t1 - t0 || 1)) * pw;
   const yt = niceTicks(0, Math.max(0, ...points.map((p) => p[1])), 4);
   const y = (v: number) => T + (1 - v / yt.hi) * (H - T - B);
-  const xt = timeTicks(t0, t1, pw);
+  const xt = timeTicks(t0, t1, pw, tz);
 
   const line = useMemo(
     () => (w ? points.map((p, i) => `${i ? "L" : "M"}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join("") : ""),
@@ -146,7 +154,7 @@ function BalanceChart({ points, proj, label }: { points: [number, number][]; pro
   const hp = hover != null ? pointAt(hover) : null;
   const isProj = hover != null && hover >= n;
   const hx = hp ? x(hp[0]) : 0;
-  const tipTitle = hp ? (isProj ? COPY.about(at(hp[0])) : at(hp[0])) : "";
+  const tipTitle = hp ? (isProj ? COPY.about(at(hp[0], tz)) : at(hp[0], tz)) : "";
   const tipRows: [string, string, string?][] = hp
     ? isProj
       ? [[proj!.hitsZero ? BALANCE_STATE_TEXT.empty : COPY.estimated, formatMoney(hp[1]), "var(--jy-ink-3)"]]
@@ -170,7 +178,7 @@ function BalanceChart({ points, proj, label }: { points: [number, number][]; pro
           {proj.hitsZero && (
             <span>
               <Sym kind="crit" className="jy-status--crit" />
-              {COPY.emptyAt(at(proj.t))}
+              {COPY.emptyAt(at(proj.t, tz))}
             </span>
           )}
         </div>
@@ -265,12 +273,15 @@ export default function TrendModal({
   onClose,
   settings,
   rules,
+  tz = DEFAULT_BUSINESS_TIME_ZONE,
 }: {
   station: any | null;
   onClose: () => void;
   // 余额提醒线和提醒天数，和打开它的页面用同一份
   settings?: any;
   rules?: any;
+  // 业务时区（接口返回的 tz）：图上的时刻、横轴刻度、预计用完的时间都按它写
+  tz?: string;
 }) {
   const [range, setRange] = useState<Range>("72");
   const [data, setData] = useState<any>(null);
@@ -379,7 +390,7 @@ export default function TrendModal({
             <div>
               <dt>{COPY.days}</dt>
               <dd className="fig">{balanceDaysText(view)}</dd>
-              {!empty && burn > 0 && pred?.etaAt ? <dd>{COPY.emptyAt(at(new Date(pred.etaAt).getTime()))}</dd> : null}
+              {!empty && burn > 0 && pred?.etaAt ? <dd>{COPY.emptyAt(at(new Date(pred.etaAt).getTime(), tz))}</dd> : null}
               {stateText ? (
                 <dd>
                   <span className={`jy-status jy-status--${level}`}>
@@ -411,7 +422,8 @@ export default function TrendModal({
               <BalanceChart
                 points={points}
                 proj={proj}
-                label={COPY.chart(stationDisplayName(station), rangeLabel || "", proj?.hitsZero ? COPY.emptyAt(at(proj.t)) : "")}
+                label={COPY.chart(stationDisplayName(station), rangeLabel || "", proj?.hitsZero ? COPY.emptyAt(at(proj.t, tz)) : "")}
+                tz={tz}
               />
             )}
           </div>
