@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { ensureSchema, rehashBillingCapabilities } from "./pool.js";
-import { billingCapabilityAliases, wrappedBillingIdentity } from "../lib/billing-capability-storage.js";
+import { billingCapabilityAliases, wrapLegacyBillingIdentity, wrappedBillingIdentity } from "../lib/billing-capability-storage.js";
 import { createHash, createHmac } from "node:crypto";
 
 const DAY = 86400000;
@@ -181,6 +181,8 @@ function capabilityPool({ rows = [], marker = false, failOn = null, failAfter = 
 const billingKey = "migration-fixture-key";
 const digestOf = (s) => createHash("sha256").update(s).digest("hex");
 const wrap = (digest) => wrappedBillingIdentity(billingKey, digest);
+// 启动时用的那个（lib/runtime.js）：格式不对的身份返回 null
+const wrapLegacy = (identity) => wrapLegacyBillingIdentity(billingKey, identity);
 const capability = (verifiedAt, reason = "RUNTIME_FILTERS_VERIFIED") => ({ state: "supported", currency: "USD", window: "natural-day", verifiedAt, reason });
 const capabilityRow = (identity, at, scheme = "legacy", reason) => ({ identity, capability: capability(at, reason), verified_at: at, identity_scheme: scheme });
 
@@ -188,12 +190,12 @@ test("账单身份迁移：混合 SHA/HMAC 包装后保留能力和时间，已�
   const digest = digestOf("sha"), oldHmac = createHmac("sha256", billingKey).update(digestOf("hmac")).digest("hex");
   const oldWrapped = capabilityRow(wrap(digestOf("done")), 500, "wrapped-v2");
   const pool = capabilityPool({ rows: [capabilityRow(digest, 1000), capabilityRow(oldHmac, 2000), oldWrapped] });
-  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 2, skipped: false });
+  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 2, skipped: false, invalid: 0 });
   assert.deepEqual(pool.db.rows, [oldWrapped, capabilityRow(wrap(digest), 1000, "wrapped-v2"), capabilityRow(wrap(oldHmac), 2000, "wrapped-v2")]);
   assert.equal(pool.db.marker, true);
   const saved = structuredClone(pool.db);
   pool.calls.length = 0;
-  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 0, skipped: true });
+  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 0, skipped: true, invalid: 0 });
   assert.deepEqual(pool.db, saved);
   assert.equal(pool.calls.some((sql) => sql.startsWith("INSERT") || sql.startsWith("DELETE") || sql.startsWith("UPDATE")), false);
   assert.ok(pool.calls.every((sql) => !/ledger|snapshots/.test(sql)));
@@ -202,7 +204,7 @@ test("账单身份迁移：混合 SHA/HMAC 包装后保留能力和时间，已�
 test("旧 marker 不阻止扫描：回滚插入裸 SHA 后重新升级仍包装，避免裸摘要留库", async () => {
   const digest = digestOf("returned-old-program"), pool = capabilityPool({ marker: true });
   pool.db.rows.push(capabilityRow(digest, 3000));
-  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 1, skipped: false });
+  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 1, skipped: false, invalid: 0 });
   assert.deepEqual(pool.db.rows, [capabilityRow(wrap(digest), 3000, "wrapped-v2")]);
   assert.equal(pool.db.rows.some((r) => r.identity === digest), false);
 });
@@ -219,10 +221,28 @@ test("新旧同身份合并总是保留 verified_at 较新的一组能力和时�
 test("空表或只有 wrapped-v2 的库也写旧兼容栅栏，防止旧 S3 再次包装新身份", async () => {
   for (const rows of [[], [capabilityRow(wrap(digestOf("wrapped-only")), 1000, "wrapped-v2")]]) {
     const pool = capabilityPool({ rows });
-    assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 0, skipped: false });
+    assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 0, skipped: false, invalid: 0 });
     assert.equal(pool.db.marker, true);
     assert.deepEqual(pool.db.rows, rows);
   }
+});
+
+test("格式不对的旧身份跳过并计数，不挡启动；别的行照常包装，下次启动照样跳过", async () => {
+  const digest = digestOf("ok"), broken = capabilityRow("not-a-digest", 1000), notHex = capabilityRow("z".repeat(64), 1500);
+  const pool = capabilityPool({ rows: [broken, capabilityRow(digest, 2000), notHex] });
+  assert.deepEqual(await rehashBillingCapabilities(pool, wrapLegacy), { migrated: 1, skipped: false, invalid: 2 });
+  assert.deepEqual(pool.db.rows, [broken, notHex, capabilityRow(wrap(digest), 2000, "wrapped-v2")]);
+  assert.equal(pool.db.marker, true);
+  assert.deepEqual(await rehashBillingCapabilities(pool, wrapLegacy), { migrated: 0, skipped: true, invalid: 2 });
+  assert.deepEqual(pool.db.rows, [broken, notHex, capabilityRow(wrap(digest), 2000, "wrapped-v2")]);
+});
+
+test("账单身份密钥没就绪时照旧中止启动、整体回滚，不当成格式不对跳过", async () => {
+  const rows = [capabilityRow(digestOf("a"), 1000)];
+  const pool = capabilityPool({ rows });
+  await assert.rejects(rehashBillingCapabilities(pool, (identity) => wrapLegacyBillingIdentity(null, identity)), /账单身份密钥未就绪/);
+  assert.deepEqual(pool.db, { rows, marker: false });
+  assert.equal(pool.calls.at(-1), "ROLLBACK");
 });
 
 for (const failOn of ["INSERT INTO reconciliation_billing_capabilities", "DELETE FROM reconciliation_billing_capabilities", "INSERT INTO meta", "COMMIT"]) {

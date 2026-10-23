@@ -6,7 +6,9 @@ export async function register() {
       const { getRuntime } = await import("./lib/runtime.js");
       await getRuntime();
     } catch (err: any) {
-      console.error(`\n[致命] 服务初始化失败：${err?.message}\n`);
+      // 只记码和那句话（lib/log.js）：数据库直接抛出的报错带着代入了参数的整条 SQL，连那句话也不记
+      const { errorLogLine } = await import("./lib/log.js");
+      console.error(`\n[致命] 服务初始化失败：${errorLogLine(err)}\n`);
       // 生产环境直接退出（重启由容器编排负责）；开发环境保留进程便于排查
       if (process.env.NODE_ENV === "production") process.exit(1);
     }

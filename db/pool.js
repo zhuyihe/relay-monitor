@@ -217,9 +217,10 @@ export async function ensureSchema(pool) {
     identity CHAR(64) NOT NULL PRIMARY KEY,
     capability JSON NOT NULL,
     verified_at BIGINT NOT NULL,
-    identity_scheme VARCHAR(24) NOT NULL DEFAULT 'legacy'
+    identity_scheme VARCHAR(24) NOT NULL DEFAULT '${LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME}'
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
-  await addColumnIfMissing(pool, "reconciliation_billing_capabilities", "identity_scheme", "VARCHAR(24) NOT NULL DEFAULT 'legacy'");
+  await addColumnIfMissing(pool, "reconciliation_billing_capabilities", "identity_scheme",
+    `VARCHAR(24) NOT NULL DEFAULT '${LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME}'`);
   // 结账账本：每条核算关联、每个已结束的自然日一行，只插入不更新；重新结账写 revision + 1。
   // 金额是系统原值（美元）；汇率和成本计法为空表示结账时没有记录，读取时按当前配置。version_id 留给第 6 阶段的关联版本。
   await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_ledger (
@@ -279,6 +280,8 @@ const BILLING_IDENTITY_META_KEY = "billing_identity_hmac_v1";
 // SHA / 旧 S3 HMAC 都无法仅靠摘要区分：把每个 legacy 身份包成 W(x)，显式标为 wrapped-v2。
 // 全局旧标记仅作为旧 S3 程序的迁移栅栏；新程序每次都扫描 legacy，处理回滚期间旧程序新写的行。
 // 能力、核验时间和栅栏同一事务提交；失败整体回滚并挡住启动，不触碰账本或快照。
+// rehash 对格式不对的身份返回 null（lib/billing-capability-storage.js 的 wrapLegacyBillingIdentity）：这种行留在原处、计进 invalid，
+// 不挡启动（它本来就对不上任何上游）。返回 { migrated, skipped, invalid }
 export async function rehashBillingCapabilities(pool, rehash) {
   const conn = await pool.getConnection();
   try {
@@ -288,22 +291,27 @@ export async function rehashBillingCapabilities(pool, rehash) {
       "SELECT identity, capability, verified_at FROM reconciliation_billing_capabilities WHERE identity_scheme = ? FOR UPDATE",
       [LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME]
     );
+    let migrated = 0, invalid = 0;
     for (const { identity, capability, verified_at: verifiedAt } of rows) {
+      const wrapped = rehash(identity);
+      if (!wrapped) { invalid += 1; continue; }
       await conn.query(
         `INSERT INTO reconciliation_billing_capabilities (identity, capability, verified_at, identity_scheme) VALUES (?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
-           capability = IF(identity_scheme <> 'wrapped-v2' OR VALUES(verified_at) > verified_at, VALUES(capability), capability),
-           verified_at = IF(identity_scheme <> 'wrapped-v2' OR VALUES(verified_at) > verified_at, VALUES(verified_at), verified_at),
+           capability = IF(identity_scheme <> ? OR VALUES(verified_at) > verified_at, VALUES(capability), capability),
+           verified_at = IF(identity_scheme <> ? OR VALUES(verified_at) > verified_at, VALUES(verified_at), verified_at),
            identity_scheme = VALUES(identity_scheme)`,
-        [rehash(identity), typeof capability === "string" ? capability : JSON.stringify(capability), verifiedAt, BILLING_CAPABILITY_IDENTITY_SCHEME]
+        [wrapped, typeof capability === "string" ? capability : JSON.stringify(capability), verifiedAt, BILLING_CAPABILITY_IDENTITY_SCHEME,
+          BILLING_CAPABILITY_IDENTITY_SCHEME, BILLING_CAPABILITY_IDENTITY_SCHEME]
       );
+      migrated += 1;
       await conn.query("DELETE FROM reconciliation_billing_capabilities WHERE identity = ? AND identity_scheme = ?",
         [identity, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME]);
     }
     if (!markers.length) await conn.query("INSERT INTO meta (k, v) VALUES (?, ?)",
-      [BILLING_IDENTITY_META_KEY, JSON.stringify({ completedAt: new Date().toISOString(), migrated: rows.length })]);
+      [BILLING_IDENTITY_META_KEY, JSON.stringify({ completedAt: new Date().toISOString(), migrated })]);
     await conn.commit();
-    return { migrated: rows.length, skipped: rows.length === 0 && markers.length > 0 };
+    return { migrated, skipped: migrated === 0 && markers.length > 0, invalid };
   } catch (err) {
     await conn.rollback().catch(() => {});
     throw err;

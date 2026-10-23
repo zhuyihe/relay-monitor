@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
+import { BILLING_CAPABILITY_IDENTITY_SCHEME, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME } from "../../lib/billing-capability-storage.js";
 import { RECONCILIATION_BILLING_SOURCE, RECONCILIATION_CALCULATION_VERSION } from "../../lib/reconciliation-contract.js";
 import { ledgerEntryForSettlement } from "../../lib/reconciliation-ledger.js";
 import { reconciliationRuleEvidence, reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity } from "../../lib/reconciliation-snapshot.js";
@@ -1023,6 +1024,30 @@ contract("billing capabilities round-trip, overwrite and delete by identity", as
   assert.equal((await repository.getBillingCapability(second)).verifiedAt, now - 500);
   await repository.deleteBillingCapability(first);
   await assert.rejects(repository.saveBillingCapability(`${first}0`, capability), { code: "ER_DATA_TOO_LONG" });
+});
+
+contract("billing capabilities are kept apart by identity scheme, and one delete removes several identities of that scheme", async ({ repository, fixture }) => {
+  const now = Date.now();
+  const capability = (verifiedAt) => ({ state: "supported", currency: "USD", window: "natural-day", verifiedAt, reason: "RUNTIME_FILTERS_VERIFIED" });
+  const [a, b, c] = ["scheme-a", "scheme-b", "scheme-c"].map((name) => fixture.capabilityIdentity(name));
+  // 旧格式的行只有按旧格式才读得到；默认读的是新格式
+  await repository.saveBillingCapability(a, capability(now - 2), LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME);
+  assert.equal(await repository.getBillingCapability(a), null);
+  assert.deepEqual(await repository.getBillingCapability(a, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME), capability(now - 2));
+  // 同一身份改存成新格式：只有新格式读得到
+  await repository.saveBillingCapability(a, capability(now - 1));
+  assert.deepEqual(await repository.getBillingCapability(a, BILLING_CAPABILITY_IDENTITY_SCHEME), capability(now - 1));
+  assert.equal(await repository.getBillingCapability(a, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME), null);
+  // 一次删几个身份，只删这个格式的
+  await repository.saveBillingCapability(b, capability(now));
+  await repository.saveBillingCapability(c, capability(now), LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME);
+  await repository.deleteBillingCapability([a, b, c]);
+  assert.equal(await repository.getBillingCapability(a), null);
+  assert.equal(await repository.getBillingCapability(b), null);
+  assert.deepEqual(await repository.getBillingCapability(c, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME), capability(now));
+  await repository.deleteBillingCapability([c.toUpperCase()], LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME);
+  assert.equal(await repository.getBillingCapability(c, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME), null);
+  await repository.deleteBillingCapability([]);
 });
 
 contract("saving a billing capability never drops other identities, however long ago they were verified", async ({ repository, fixture }) => {
