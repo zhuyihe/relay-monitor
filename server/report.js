@@ -5,11 +5,10 @@ import { queryOwnData } from "../lib/providers.js";
 import { forecastDaily } from "../lib/forecast.js";
 import { BRAND } from "../lib/brand.js";
 import { broadcast } from "../lib/notify.js";
-import { fmtEta } from "../lib/alerts.js";
 import { readOwnIncomeOrUnconfirmed, unconfirmedIncomeProfit, computeProfit } from "./own-helpers.js";
 import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
 import { errorText } from "../lib/error-copy.js";
-import { ADMIN_UNMARKED, OWN_STATION_UNSET } from "../lib/format.js";
+import { ADMIN_UNMARKED, OWN_STATION_UNSET, formatDays } from "../lib/format.js";
 
 // 日报时区就是业务时区（BUSINESS_TIME_ZONE，兼容旧的 REPORT_TIME_ZONE），与利润页、日汇总同一套日界线
 export const REPORT_TIME_ZONE = businessTimeZone();
@@ -121,7 +120,7 @@ export async function buildReport(rt) {
     if (!b.ok) return `- ${s.name}：⚠ 查询失败（${b.error || "未知错误"}）`;
     const p = history.predict(s.id);
     let tail = "近期无消耗";
-    if (p && p.etaDays != null) tail = `≈${rptCny(p.burnPerDay * rate)}/天 · 预计 ${fmtEta(p.etaDays)}后耗尽${p.etaDays <= 3 ? " ⚠" : ""}`;
+    if (p && p.etaDays != null) tail = `≈${rptCny(p.burnPerDay * rate)}/天 · 可用${formatDays(p.etaDays)}${p.etaDays <= 3 ? " ⚠" : ""}`;
     return `- ${s.name}：${rptCny(b.remaining * rate)}（${tail}）`;
   });
 
@@ -286,7 +285,7 @@ function buildReportHtml(rt, d) {
       if (b && !b.ok) { status = `查询失败（${b.error || "未知"}）`; warn = true; }
       else if (b) {
         const p = history.predict(s.id);
-        status = p && p.etaDays != null ? `≈${money(p.burnPerDay * rate)}/天 · 预计 ${fmtEta(p.etaDays)}后耗尽` : "近期无消耗";
+        status = p && p.etaDays != null ? `≈${money(p.burnPerDay * rate)}/天 · 可用${formatDays(p.etaDays)}` : "近期无消耗";
         warn = !!(p && p.etaDays != null && p.etaDays <= 3);
       }
       return `<table width="100%" cellpadding="0" cellspacing="0" style="margin:7px 0"><tr>
