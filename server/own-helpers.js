@@ -17,19 +17,36 @@ export function ownCache(rt) {
   return (rt._ownCache ||= new Map());
 }
 
-// 用户列表拉取开销不小（超过 1000 个用户要翻页），缓存 10 分钟；fresh 时不用缓存、重新读一次（遇到缓存里没有的用户时用）。
-// 同一时刻只读一次：并发的请求共用进行中的那次。缓存里的 unknown 记着重读过还是没有的用户名，缓存过期前不再为它们重读
-export async function getOwnUsers(rt, own, { fresh = false } = {}) {
+// 用户列表拉取开销不小（超过 1000 个用户要翻页），缓存 10 分钟。缓存和进行中的读取按自营站点的配置认（地址、账号、令牌改了就是另一份），
+// 记着这次读取是什么时候发出的；同一份配置同一时刻只读一次，并发的请求共用进行中的那次
+const OWN_USERS_TTL_MS = 600000;
+// 重读过还对不上的用户名（改名、删用户、刚降级）1 分钟内不再为它们重读：一直对不上时不每次都整份重读，
+// 在 New API 那边改好后点「刷新」，最多等 1 分钟就能读到
+const UNKNOWN_USER_TTL_MS = 60000;
+
+// 缓存认的那份配置（测试也用它造缓存）
+export const ownUsersKey = (own) => JSON.stringify([own.id, own.type, own.baseUrl, own.userId, own.accessToken]);
+
+// since：只要这个时刻以后发出的读取，缓存和进行中的读取发出得更早就再读一次。返回 { key, startedAt, list, unknown }
+async function readOwnUsers(rt, own, since = 0) {
+  const key = ownUsersKey(own);
   const c = rt._ownUsersCache;
-  if (!fresh && c?.list && c.stationId === own.id && Date.now() - c.at <= 600000) return c.list;
+  if (c?.key === key && c.startedAt >= since && Date.now() - c.startedAt <= OWN_USERS_TTL_MS) return c;
   const inflight = rt._ownUsersInflight;
-  if (inflight?.stationId === own.id) return inflight.promise;
+  if (inflight?.key === key && inflight.startedAt >= since) return inflight.promise;
+  const startedAt = Date.now();
   const promise = queryOwnUsers(own).then((list) => {
-    rt._ownUsersCache = { at: Date.now(), stationId: own.id, list, unknown: new Set() };
-    return list;
+    const entry = { key, startedAt, list, unknown: new Map() };
+    // 读的期间换了配置、又发出了更新的读取，这份就不写缓存
+    if (rt._ownUsersInflight?.promise === promise) rt._ownUsersCache = entry;
+    return entry;
   }).finally(() => { if (rt._ownUsersInflight?.promise === promise) rt._ownUsersInflight = null; });
-  rt._ownUsersInflight = { stationId: own.id, promise };
+  rt._ownUsersInflight = { key, startedAt, promise };
   return promise;
+}
+
+export async function getOwnUsers(rt, own, { since = 0 } = {}) {
+  return (await readOwnUsers(rt, own, since)).list;
 }
 
 export function normalizeCostUrl(url) {
@@ -110,7 +127,7 @@ export async function stationUsageCost(rt, station, { startMs, endMs, tz, today 
     const apiUsd = today && u.summary ? u.summary.cost : u.models.reduce((a, m) => a + m.cost, 0);
     return reconcileUsageCost(apiUsd, historyUsd());
   } catch (err) {
-    return { usd: historyUsd(), mode: "history", note: `读不到用量，改${COST_MODE_TEXT.history}`, error: err?.message || String(err), errorCode: errorCodeOf(err) };
+    return { usd: historyUsd(), mode: "history", note: `读不到用量，改${COST_MODE_TEXT.history}`, ...resultError(err) };
   }
 }
 
@@ -131,7 +148,7 @@ export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endM
       resoldUsd += usd;
       breakdown.push({ username: k.username, tokenName: k.tokenName, usd });
     } catch (err) {
-      breakdown.push({ username: k.username, tokenName: k.tokenName, usd: 0, error: err?.message || String(err), errorCode: errorCodeOf(err) });
+      breakdown.push({ username: k.username, tokenName: k.tokenName, usd: 0, ...resultError(err) });
     }
   }
   return {
@@ -166,26 +183,39 @@ function resultError(err, code = errorCodeOf(err)) {
   return { error: errorDetail(err), errorCode: code };
 }
 
+// 只关乎收入的提示：收入确认不了时收入不显示，这几条也不说
+const INCOME_ONLY_WARNINGS = new Set(["sell_price_unset"]);
+
 /**
  * 收入确认不了时的利润：上游成本、固定成本照常算（按收入 0 调 computeProfit），收入、管理员自用、转售、毛利、净利都是 null，
- * 利润不发布；incomeUnconfirmed 是收入那块的报错。已标记的转售 Key 照常列出（金额是 null），在「利润怎么算」里还能改。
- * 成本也算不出时就是 computeProfit 的 { error, errorCode }，整块报错
+ * 利润不发布；incomeUnconfirmed 是收入那块的报错。只关乎收入的提示（没设置售价）去掉。
+ * 已标记的转售 Key 照常列出（金额是 null），没读到的那几把带上报错，在「利润怎么算」里还能改。
+ * 成本也算不出时就是 computeProfit 的 { error, errorCode }，整块报错，也带上 incomeUnconfirmed
  */
 export async function unconfirmedIncomeProfit(rt, own, err, options) {
+  const incomeUnconfirmed = resultError(err, "OWN_INCOME_UNCONFIRMED");
   const profit = await computeProfit(rt, own, 0, 0, { ...options, resold: null });
-  if (profit.error) return profit;
+  if (profit.error) return { ...profit, incomeUnconfirmed };
+  const kept = profit.warningCodes.map((code, i) => [code, profit.warnings[i]]).filter(([code]) => !INCOME_ONLY_WARNINGS.has(code));
   return {
     ...profit,
     incomeCny: null, adminUsageCny: null, resoldCny: null,
     grossProfitCny: null, netProfitCny: null, grossMarginPct: null, netMarginPct: null, profitCny: null, marginPct: null,
-    resoldKeys: (own.resoldAdminKeys || []).map((key) => ({ username: key.username, tokenName: key.tokenName, usd: null, cny: null })),
-    incomeUnconfirmed: resultError(err, "OWN_INCOME_UNCONFIRMED"),
+    warnings: kept.map(([, text]) => text), warningCodes: kept.map(([code]) => code),
+    resoldKeys: (own.resoldAdminKeys || []).map((key) => {
+      const failed = (err.resoldErrors || []).find((k) => k.username === key.username && k.tokenName === key.tokenName);
+      return { username: key.username, tokenName: key.tokenName, usd: null, cny: null,
+        ...(failed ? { error: failed.error, errorCode: failed.errorCode } : {}) };
+    }),
+    incomeUnconfirmed,
   };
 }
 
-// users：抛出时用的用户列表，读不到是 null（readOwnIncomeOrUnconfirmed 用它，不再读一次）
-function incomeUnconfirmed(message, cause, users = null) {
-  return Object.assign(new Error(message, cause ? { cause } : undefined), { code: "OWN_INCOME_UNCONFIRMED", users });
+
+// users：抛出时用的用户列表，读不到是 null（readOwnIncomeOrUnconfirmed 用它，不再读一次）；
+// resoldErrors：转售记录没读全时没读到的那几把 Key（「利润怎么算」里标出来）
+function incomeUnconfirmed(message, cause, users = null, resoldErrors = null) {
+  return Object.assign(new Error(message, cause ? { cause } : undefined), { code: "OWN_INCOME_UNCONFIRMED", users, resoldErrors });
 }
 
 /**
@@ -195,25 +225,28 @@ function incomeUnconfirmed(message, cause, users = null) {
  * 任一必要的角色/转售读取没成即报不可确认，页面和日报不能继续发布看似完整的利润。
  */
 export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
-  let users;
-  try {
-    // 有消费的用户不在（缓存的）用户列表里、转售 Key 所属的用户在列表里不是管理员：多半是刚注册、刚提成管理员，
-    // 先重读一次用户列表再判断（这次刚读过的不用再读）。重读过还是对不上的名字记在缓存里，缓存过期前不再为它们重读
-    const cached = rt._ownUsersCache;
-    users = await getOwnUsers(rt, own);
-    const missing = (list) => {
-      const roles = new Map(list.map((u) => [u.username, u.role]));
-      return [...new Set([
-        ...userRows.filter((row) => row.t >= startMs && row.t < endMs && row.cost !== 0 && !roles.has(row.key)).map((row) => row.key),
-        ...(own.resoldAdminKeys || []).filter((key) => !(roles.get(key.username) >= 10)).map((key) => key.username),
-      ])];
-    };
-    const justRead = rt._ownUsersCache !== cached;
-    if (!justRead && missing(users).some((name) => !rt._ownUsersCache?.unknown?.has(name))) {
-      users = await getOwnUsers(rt, own, { fresh: true });
-    }
-    for (const name of missing(users)) rt._ownUsersCache?.unknown?.add(name);
-  } catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
+  // 有消费的用户不在用户列表里、转售 Key 所属的用户在列表里不是管理员：多半是刚注册、刚提成管理员，
+  // 要一份这次请求开始以后发出的列表再判断（手里这份就是的话直接用）。重读过还对不上的名字记 1 分钟，这期间不再为它们重读
+  const requestedAt = Date.now();
+  let entry;
+  try { entry = await readOwnUsers(rt, own); }
+  catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
+  const missing = (list) => {
+    const roles = new Map(list.map((u) => [u.username, u.role]));
+    return [...new Set([
+      ...userRows.filter((row) => row.t >= startMs && row.t < endMs && row.cost !== 0 && !roles.has(row.key)).map((row) => row.key),
+      ...(own.resoldAdminKeys || []).filter((key) => !(roles.get(key.username) >= 10)).map((key) => key.username),
+    ])];
+  };
+  const known = (name) => Date.now() - (entry.unknown.get(name) ?? -Infinity) < UNKNOWN_USER_TTL_MS;
+  if (missing(entry.list).some((name) => !known(name))) {
+    // 重读没成：还用手里这份（最多 10 分钟前的），照样能标管理员、算预收
+    try { entry = await readOwnUsers(rt, own, requestedAt); }
+    catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause, entry.list); }
+  }
+  const now = Date.now();
+  for (const name of missing(entry.list)) if (!known(name)) entry.unknown.set(name, now);
+  const users = entry.list;
   const roles = new Map(users.map((u) => [u.username, u.role]));
   const adminSet = new Set(users.filter((u) => u.role >= 10).map((u) => u.username));
   const days = endMs > startMs
@@ -240,7 +273,10 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
       const day = days[cursor++];
       day.resold = await computeResold(own, day.incomeUsd, day.adminUsageUsd, day.startMs, day.endMs);
       const failed = day.resold.breakdown.find((k) => k.error);
-      if (failed) throw incomeUnconfirmed("转售记录没读全，收入和利润暂时算不出", new Error(failed.error), users);
+      if (failed) {
+        throw incomeUnconfirmed(`转售 Key「${failed.username} / ${failed.tokenName}」的记录没读到，收入和利润暂时算不出`,
+          new Error(failed.error), users, day.resold.breakdown.filter((k) => k.error));
+      }
       day.incomeUsd = day.resold.incomeUsd;
       day.adminUsageUsd = day.resold.adminUsageUsd;
     }
@@ -445,7 +481,7 @@ export async function computeFlowBreakdown(own, { startMs, endMs, prevStartMs, p
       prevWindow: { startMs: prevStartMs, endMs: prevEndMs },
     };
   } catch (err) {
-    // error 是原文，只给「查看详细原因」；归类看 errorCode（lib/error-copy.js）
-    return { error: err?.message || String(err), errorCode: errorCodeOf(err) };
+    // error 是原文加上底层原因，只给「查看详细原因」；归类看 errorCode（lib/error-copy.js）
+    return resultError(err);
   }
 }

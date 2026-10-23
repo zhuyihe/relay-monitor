@@ -2554,9 +2554,9 @@ test("成本估算：收入算不出来时按原因说——没设置、超过 3
   for (const own of [(route) => failJSON(route, 502, { error: raw, code: "UPSTREAM_AUTH_DENIED" }),
     (route) => fulfill(route, { station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7.5 }, profit: { error: raw, errorCode: "UPSTREAM_AUTH_DENIED" }, trend: [], tz: BUSINESS_TZ })]) {
     const failed = await openCostPage(t, own);
-    const sentence = `${failureSentence(ANALYTICS_COPY.ownFailed, ERROR_CATEGORIES.permission.text)}${ANALYTICS_COPY.costOnly}`;
+    const sentence = `${failureSentence(INCOME_UNREAD.title, ERROR_CATEGORIES.permission.text)}${INCOME_UNREAD.costOnly}`;
     const notice = failed.equation.locator(".jy-partial-note").filter({ hasText: sentence }); await notice.waitFor();
-    await failed.equation.getByText(ANALYTICS_COPY.ownFailedEmpty, { exact: true }).waitFor();
+    await failed.equation.getByText(INCOME_UNREAD.empty, { exact: true }).waitFor();
     await notice.getByRole("button", { name: REFRESH, exact: true }).waitFor();
     // 原文默认收起，展开「查看详细原因」才看得到
     assert.equal(await failed.page.getByText(raw, { exact: true }).isVisible(), false);
@@ -2577,16 +2577,20 @@ const INCOME_UNCONFIRMED = { error: "用户「newbie」的身份没读到，收�
 const USERS_UNAVAILABLE = { error: "fixture user list unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" };
 const PROFIT_FAILED = "利润暂时算不出"; // profit-equation.tsx 的 EQ_TEXT.profitFailed（组件文件带 JSX，node 读不了）
 function unconfirmedOwnAnalytics(range = "7d", { usersUnavailable = false } = {}) {
-  const endMs = Date.now(), startMs = endMs - 7 * 86400000;
-  return { range, tz: BUSINESS_TZ, startMs, endMs, prevWindow: { startMs: startMs - 7 * 86400000, endMs: startMs, spanDays: 7 },
+  const endMs = Date.now(), span = range === "today" ? 3600000 : 7 * 86400000, startMs = endMs - span;
+  return { range, tz: BUSINESS_TZ, startMs, endMs, prevWindow: { startMs: startMs - span, endMs: startMs, spanDays: span / 86400000 },
     station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7 }, tokenScope: "billed",
     byModel: [{ model: "fixture-model", tokens: 3000, cost: 5, requests: 5 }],
     // 用户列表读不到时谁是管理员标不出，都按普通用户给
     byUser: [{ user: "customer", tokens: 1000, cost: 2, requests: 3, isAdmin: false }, { user: "root", tokens: 2000, cost: 3, requests: 2, isAdmin: !usersUnavailable }],
-    prevUserAvailable: true, flow: null, userBalances: usersUnavailable ? null : [{ user: "customer", balanceUsd: 4, usedUsd: 2, status: 1 }],
+    prevUserAvailable: true, userBalances: usersUnavailable ? null : [{ user: "customer", balanceUsd: 4, usedUsd: 2, status: 1 }],
+    flow: { byGroup: [], byChannel: [], byUserGroup: [], coveredUsd: 0, coveragePct: null, prevWindow: { startMs: startMs - span, endMs: startMs } },
     trend: [], daily: [], forecast: null, hourly: null, incomeDaily: null, incomeDailyApprox: false, generatedAt: new Date().toISOString(),
     profit: { incomeCny: null, adminUsageCny: null, resoldCny: null, grossProfitCny: null, netProfitCny: null, grossMarginPct: null, netMarginPct: null, profitCny: null, marginPct: null,
-      upstreamCostCny: 3.5, fixedCostCny: 1.25, totalCostCny: 4.75, resoldKeys: [], unmatched: [], complete: true, estimated: false, excludedStationIds: [], rateUnsetStations: [], warnings: [], warningCodes: [], windowDays: 7,
+      upstreamCostCny: 3.5, fixedCostCny: 1.25, totalCostCny: 4.75, unmatched: [], complete: true, estimated: false, excludedStationIds: [], rateUnsetStations: [], warnings: [], warningCodes: [], windowDays: 7,
+      // 已标记的转售 Key 照常列出、金额是 null；没读到的那把带报错
+      resoldKeys: [{ username: "root", tokenName: "sale", usd: null, cny: null, error: "fixture stat unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" },
+        { username: "root", tokenName: "promo", usd: null, cny: null }],
       costs: [{ stationId: "up-usage", name: "Usage upstream", channels: ["Sales"], mode: "usage", usd: 0.5, cny: 3.5 },
         { stationId: "up-fixed", name: "Fixed upstream", channels: ["Sales"], mode: "fixed", note: "", active: 1, expired: 0, upcoming: 0, total: 1, cny: 1.25 }],
       incomeUnconfirmed: INCOME_UNCONFIRMED },
@@ -2627,9 +2631,21 @@ test("收入确认不了时：成本估算、自营业务的利润等式收入�
   const page = await openUnconfirmedMyPage(t);
   await expectIncomeUnread(page.getByRole("region", { name: `${RANGE_TEXT["7d"]}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
   assert.equal(await page.getByText(PROFIT_FAILED).count(), 0);
-  // 每日趋势只画上游成本，说明跟着改（overview-tab.tsx 的 COPY.trendNoIncome）
-  await page.getByText(`按天。${INCOME_UNREAD.title}，这里只画上游成本。`).first().waitFor();
+  // 每日趋势只画成本，说明跟着改（overview-tab.tsx 的 COPY.trendNoIncome）
+  await page.getByText(`按天。${INCOME_UNREAD.title}，这里只画成本。`).first().waitFor();
   assert.doesNotMatch(await page.locator("main").innerText(), /NaN|undefined/);
+  // 「利润怎么算」照常打开：收入写「读不到（原因）」，两项成本照常；转售 Key 照常列出、金额写「—」，没读到的那把标「读不到」，照常能选（my/shared.tsx 的 BASIS_TITLE、profit-basis.tsx 的 COPY）
+  await page.getByRole("button", { name: "利润怎么算", exact: true }).click();
+  const basis = page.getByRole("region", { name: "利润怎么算", exact: true });
+  await basis.getByText(`收入 ${INCOME_UNREAD.empty}（${errorText({ code: "OWN_INCOME_UNCONFIRMED" })}），上游成本 ${formatMoney(3.5)}，固定成本 ${formatMoney(1.25)}，2 个转售 Key`, { exact: false }).waitFor();
+  const resold = basis.getByRole("table", { name: "已标记的转售 Key", exact: true });
+  await resold.waitFor();
+  const resoldRow = (token) => resold.locator("tbody tr").filter({ has: page.getByText(token, { exact: true }) });
+  assert.equal((await resoldRow("promo").locator("td").last().textContent()).trim(), EMPTY);
+  assert.equal((await resoldRow("sale").locator("td").last().textContent()).trim(), EMPTY);
+  await resoldRow("sale").getByText("读不到", { exact: true }).waitFor();
+  assert.equal(await resoldRow("promo").getByText("读不到", { exact: true }).count(), 0);
+  assert.equal(await basis.getByRole("button", { name: "选转售 Key", exact: true }).isEnabled(), true);
   // 用户标签页照常列出有消费的用户；收入没算出来，合计只说含多少管理员账号的消费（root 3 美元 × 7）
   await page.getByRole("tab", { name: "用户", exact: true }).click();
   await page.getByText("customer", { exact: true }).first().waitFor();
@@ -2658,6 +2674,10 @@ test("运营总览：收入确认不了时利润等式收入几项写「读不�
   const failed = revenue.locator(".jy-state[role=alert]").filter({ hasText: failureSentence(INCOME_UNREAD.title, errorText({ code: "OWN_INCOME_UNCONFIRMED" })) });
   await failed.waitFor(); await failed.getByRole("button", { name: REFRESH, exact: true }).waitFor();
   assert.doesNotMatch(await revenue.innerText(), /customer|root|¥/);
+  // 上游成本块照常（page.tsx 的 COPY.upstreamCost）：按用量算的上游和合计
+  const cost = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}上游成本`, exact: true });
+  await cost.getByText("Usage upstream", { exact: true }).waitFor();
+  assert.match(await cost.innerText(), new RegExp(formatMoney(3.5).replace(".", "\\.")));
   assert.equal(opened.mutations.length, 0);
 });
 

@@ -38,7 +38,7 @@ const COPY = Object.freeze({
   dailyEmptyDesc: "稍后刷新再看。",
   trendCaption: "按天。收入按当天普通用户消费和转售 Key 消费计算。",
   trendEstimated: "按天。旧接口没给逐日收入，按全部模型消费的占比估算，包含管理员自用的消费。",
-  trendNoIncome: `按天。${INCOME_UNREAD.title}，这里只画上游成本。`,
+  trendNoIncome: `按天。${INCOME_UNREAD.title}，这里只画成本。`,
   // 预计花费
   fcRange: "预计范围",
   next24: "未来 24 小时",
@@ -424,7 +424,7 @@ function TopUsers({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t:
     <Panel
       title={MY_TEXT.topUsers}
       caption={RANGE_TEXT[range]}
-      // 用户列表读不到：管理员标不出，付费用户数也不准（§8.1）
+      // 用户列表读不到：标不出谁是管理员（§8.1）
       sub={v.d.usersUnavailable ? `${ADMIN_UNMARKED}。` : undefined}
       extra={
         users.length ? (

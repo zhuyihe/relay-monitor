@@ -200,22 +200,35 @@ test("立即发送：返回每个渠道的结果列表", async (t) => {
 
 test("角色目录读不到时日报照发：收入、管理员自用、毛利、净利、预收写「没读到」，不写虚假的收入和利润，别的照常", async (t) => {
   const h = setup(t);
+  // 一个包月上游（固定成本 ¥10/天）、一个不算进利润的上游（口径提示）；昨天 root、customer 有消费
+  h.rt.store.data.stations.push(
+    { id: "fixed-up", type: "newapi-key", name: "包月上游", cnyPerUsd: 7, fixedPurchases: [{ amount: 300, days: 30, startDate: "2026-10-01" }] },
+    { id: "skip-up", type: "newapi", name: "不算的上游", includeInProfit: false });
+  const { dayStart } = reportDayWindow();
   const sent = [];
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(input);
     if (url.host === "notify.example") { sent.push(JSON.parse(init.body)); return new Response("{}", { status: 200 }); }
-    return url.pathname === "/api/user/"
-      ? Response.json({ success: false, message: "unavailable" }, { status: 503 })
-      : Response.json({ success: true, data: [] });
+    if (url.pathname === "/api/user/") return Response.json({ success: false, message: "unavailable" }, { status: 503 });
+    if (url.pathname === "/api/data/users") return Response.json({ success: true, data: [
+      { username: "root", created_at: (dayStart + 3600000) / 1000, quota: 2 * 500000, token_used: 1, count: 1 },
+      { username: "customer", created_at: (dayStart + 7200000) / 1000, quota: 1 * 500000, token_used: 1, count: 1 },
+    ] });
+    return Response.json({ success: true, data: [] });
   });
   const result = await sendReport(h.rt);
   assert.equal(result.ok, true);
   assert.equal(sent.length, 2);
   const { body } = sent[0];
   assert.match(body, /收入、管理员自用、毛利、净利：没读到（用户身份或转售记录没读全）/);
-  // 两项成本照常
-  assert.match(body, /上游成本：¥0\.00 ｜ 固定成本：¥0\.00/);
+  // 两项成本、口径提示、成本明细照常
+  assert.match(body, /上游成本：¥0\.00 ｜ 固定成本：¥10\.00/);
+  assert.match(body, /口径提示：不算的上游 不算进利润/);
+  assert.match(body, /■ 成本明细（昨日）[\s\S]*包月上游/);
   assert.match(body, /■ 用户余额合计：没读到（用户身份或转售记录没读全）/);
+  // 用户列表读不到：管理员标不出，排行下面说一句
+  assert.match(body, /1\. root  ¥2\.00[\s\S]*2\. customer  ¥1\.00[\s\S]*（用户身份没读到，管理员没标出）/);
+  assert.doesNotMatch(body, /（管理员）/);
   // 利润不写：没有收入、毛利、净利的数字
   assert.doesNotMatch(body, /收入\(不含管理员自用\)：|毛利：¥|净利：¥/);
   // 别的照常
@@ -227,7 +240,11 @@ test("角色目录读不到时日报照发：收入、管理员自用、毛利�
   const tile = (label) => report.html.match(new RegExp(`${label}</div>\\s*<div[^>]*>([^<]*)</div>\\s*(?:<div[^>]*>([^<]*)</div>)?`));
   assert.deepEqual(tile("收入（不含管理员自用）").slice(1), ["没读到", "用户身份或转售记录没读全"]);
   assert.deepEqual(tile("毛利").slice(1), ["没读到", "上游成本 ¥0.00"]);
-  assert.deepEqual(tile("净利").slice(1), ["没读到", "固定成本 ¥0.00"]);
+  assert.deepEqual(tile("净利").slice(1), ["没读到", "固定成本 ¥10.00"]);
+  assert.match(report.html, /用户余额合计：没读到（用户身份或转售记录没读全）/);
+  assert.match(report.html, /（用户身份没读到，管理员没标出）/);
+  assert.match(report.html, /利润口径[\s\S]*不算的上游 不算进利润/);
+  assert.match(report.html, /成本明细（昨日）[\s\S]*包月上游/);
   assert.doesNotMatch(report.html, /NaN|undefined|null/);
 });
 

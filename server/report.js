@@ -191,7 +191,7 @@ export async function buildReport(rt) {
   L.push(`${BRAND.reportSignature} · 统计区间为 ${dateLabel} 00:00–24:00`);
   const html = buildReportHtml(rt, {
     own, dateLabel, dow, ownRate, tz,
-    totalCost, prev, avg7, incomeUsd, adminUsd, profit, incomeMissing, unconfirmedReason,
+    totalCost, prev, avg7, incomeUsd, adminUsd, profit, incomeMissing, unconfirmedReason, adminUnknown,
     totalReqs, totalTokens, activeUsers: byUser.length,
     byModel, byUser, daily, fc, upstreams, balanceTotal,
     userCount: (ownUsers || []).filter((u) => u.role < 10).length, hasUsers: !!ownUsers,
@@ -260,6 +260,8 @@ function buildReportHtml(rt, d) {
     ? barList(d.byUser.slice(0, 5),
         (u) => `${esc(u.key)}${u.isAdmin ? ` <span style="color:${C.red};font-size:10px">管理员</span>` : ""}`,
         (u) => u.cost, (u) => esc(money(u.cost * d.ownRate)))
+      // 用户列表读不到：管理员标不出（和文字版同一句）
+      + (d.adminUnknown ? `<div style="${font}font-size:11px;color:${C.sub};margin-top:6px">（${esc(ADMIN_UNMARKED)}）</div>` : "")
     : `<div style="${font}font-size:12px;color:${C.sub}">昨日无消费</div>`;
 
   const MODE = { usage: "按用量", fixed: "固定摊销", history: "余额推算≈" };
