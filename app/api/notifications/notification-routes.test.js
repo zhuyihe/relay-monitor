@@ -3,6 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { UNNAMED_CHANNEL } from "../../../lib/alert-rules.js";
+import { NOTIFY_KEYWORD } from "../../../lib/brand.js";
 import { errorText } from "../../../lib/error-copy.js";
 
 async function load(path) {
@@ -75,6 +76,8 @@ test("POST /api/notifications/test：测试消息写通知方式的名字和业�
   assert.equal((await (await POST(post({ channelId: "c1" }), rt)).json()).ok, true);
   const lines = sent.at(-1).text.split("\n");
   assert.equal(lines[0], "【测试通知】炬元告警中心");
+  // 带着推荐给钉钉、飞书机器人设的关键词：测试能过，真推送也能过
+  assert.ok(sent.at(-1).text.includes(NOTIFY_KEYWORD));
   assert.equal(lines[1], "这是一条来自炬元控制台的测试消息。");
   assert.equal(lines[2], "通知方式：运维群");
   assert.match(lines[3], /^时间：(\d{4}年)?\d{1,2}月\d{1,2}日 \d{1,2}:\d{2}$/);
