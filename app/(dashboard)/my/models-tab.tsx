@@ -297,7 +297,7 @@ function Flow({ v, reload }: { v: OwnView; reload: () => Promise<unknown> }) {
   if (flow.error) {
     return (
       <Panel title={COPY.flowTitle}>
-        <ErrorState what={FLOW_UNREADABLE} error={flow.error} onRetry={() => reload()} />
+        <ErrorState what={FLOW_UNREADABLE} error={flow} onRetry={() => reload()} />
       </Panel>
     );
   }

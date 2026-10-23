@@ -6,14 +6,14 @@ import Link from "next/link";
 import { Button } from "antd";
 import { NAV_LABELS } from "../../../lib/brand";
 import { dayKeyInTz } from "../../../lib/business-time";
-import { EMPTY, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
+import { ADMIN_UNMARKED, EMPTY, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
 import { rateSnapshotOf, splitProfitWarnings } from "../../../lib/profit";
 import { EmptyState, ErrorState, PanelSkeleton } from "../../components/data-state";
 import { ForecastChart } from "../../components/forecast-chart";
 import { HBars } from "../../components/hbars";
 import type { HBarItem } from "../../components/hbars";
 import { Panel } from "../../components/panel";
-import { EQ_TEXT, ProfitEquation } from "../../components/profit-equation";
+import { EQ_TEXT, ProfitEquation, incomeUnreadProps } from "../../components/profit-equation";
 import { Seg } from "../../components/seg";
 import { TREND_PANEL_TITLE, TrendPanel } from "../../components/trend-panel";
 import { derive } from "../analytics/derive";
@@ -172,11 +172,14 @@ function Equation({
   const revNotes: ReactNode[] = [];
   if ((p.resoldCny || 0) > 0) revNotes.push(<span key="r">{COPY.resold(formatMoney(p.resoldCny))}</span>);
   if ((p.adminUsageCny || 0) > 0) revNotes.push(<span key="a">{COPY.adminSelf(formatMoney(p.adminUsageCny))}</span>);
+  // 收入确认不了：收入、毛利、净利留空并说原因，两项成本照常（design/ui-copy-spec.md §8.1）
+  const unread = p.incomeUnconfirmed ? incomeUnreadProps(p.incomeUnconfirmed, () => void reload()) : null;
 
   return (
     <ProfitEquation
       title={title}
       caption={caption}
+      {...(unread || {})}
       extra={
         <button type="button" className="jy-caption-link jy-my-linkbtn" onClick={onBasis}>
           {BASIS_TITLE}
@@ -185,7 +188,7 @@ function Equation({
       revenue={{
         value: p.incomeCny,
         approx: ownNoRate,
-        note: revNotes.length ? revNotes : COPY.noAdminSelf,
+        note: unread ? v.d.station?.name : revNotes.length ? revNotes : COPY.noAdminSelf,
         href: tabHref(range, "users"),
       }}
       upstream={{
@@ -420,6 +423,8 @@ function TopUsers({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t:
     <Panel
       title={MY_TEXT.topUsers}
       caption={RANGE_TEXT[range]}
+      // 用户列表读不到：管理员标不出，付费用户数也不准（§8.1）
+      sub={v.d.usersUnavailable ? `${ADMIN_UNMARKED}。` : undefined}
       extra={
         users.length ? (
           <button type="button" className="jy-caption-link jy-my-linkbtn" onClick={() => onTab("users")}>

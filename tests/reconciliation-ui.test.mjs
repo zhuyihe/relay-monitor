@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationNotCountedCostText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
 import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
-import { BALANCE_STATE_TEXT, EMPTY, FIXED_COST_TEXT, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RANGE_TEXT, formatDayKey, RATE_UNSET_PARITY, RATE_UNSET_USD, SELL_PRICE_UNSET, formatAsOf, formatCompact, formatDayZone, formatRate, formatZonedDateTime, formatZonedTime, formatZonedWindow, refreshFailedText } from "../lib/format.js";
+import { ADMIN_UNMARKED, BALANCE_STATE_TEXT, EMPTY, FIXED_COST_TEXT, INCOME_UNREAD, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RANGE_TEXT, formatDayKey, RATE_UNSET_PARITY, RATE_UNSET_USD, SELL_PRICE_UNSET, formatAsOf, formatCompact, formatDayZone, formatRate, formatZonedDateTime, formatZonedTime, formatZonedWindow, formatMoney, refreshFailedText } from "../lib/format.js";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy, reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
 import { CONSOLE_UNREACHABLE, ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText } from "../lib/error-copy.js";
@@ -2571,41 +2571,90 @@ test("成本估算：收入算不出来时按原因说——没设置、超过 3
   assert.equal(await unsplit.equation.getByText("查看详细原因", { exact: true }).count(), 0);
 });
 
-// 收入确认不了时（用户身份或转售记录没读全），/api/own/analytics 照常返回，只有利润那块是 { error, errorCode }
+// 收入确认不了时（用户身份或转售记录没读全），/api/own/analytics 照常返回（server/own-helpers.js 的 unconfirmedIncomeProfit）：
+// 两项成本照常，收入、管理员自用、毛利、净利是 null，原因在 profit.incomeUnconfirmed；用户列表也读不到时多一个 usersUnavailable
 const INCOME_UNCONFIRMED = { error: "用户「newbie」的身份没读到，收入和利润暂时算不出", errorCode: "OWN_INCOME_UNCONFIRMED" };
+const USERS_UNAVAILABLE = { error: "fixture user list unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" };
 const PROFIT_FAILED = "利润暂时算不出"; // profit-equation.tsx 的 EQ_TEXT.profitFailed（组件文件带 JSX，node 读不了）
-function unconfirmedOwnAnalytics(range = "7d") {
+function unconfirmedOwnAnalytics(range = "7d", { usersUnavailable = false } = {}) {
   const endMs = Date.now(), startMs = endMs - 7 * 86400000;
   return { range, tz: BUSINESS_TZ, startMs, endMs, prevWindow: { startMs: startMs - 7 * 86400000, endMs: startMs, spanDays: 7 },
     station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7 }, tokenScope: "billed",
-    byModel: [{ model: "fixture-model", tokens: 1000, cost: 2, requests: 3 }], byUser: [{ user: "customer", tokens: 1000, cost: 2, requests: 3, isAdmin: false }],
-    prevUserAvailable: true, flow: null, userBalances: null, trend: [], daily: [], forecast: null, hourly: null,
-    incomeDaily: null, incomeDailyApprox: false, profit: INCOME_UNCONFIRMED, generatedAt: new Date().toISOString() };
+    byModel: [{ model: "fixture-model", tokens: 3000, cost: 5, requests: 5 }],
+    // 用户列表读不到时谁是管理员标不出，都按普通用户给
+    byUser: [{ user: "customer", tokens: 1000, cost: 2, requests: 3, isAdmin: false }, { user: "root", tokens: 2000, cost: 3, requests: 2, isAdmin: !usersUnavailable }],
+    prevUserAvailable: true, flow: null, userBalances: usersUnavailable ? null : [{ user: "customer", balanceUsd: 4, usedUsd: 2, status: 1 }],
+    trend: [], daily: [], forecast: null, hourly: null, incomeDaily: null, incomeDailyApprox: false, generatedAt: new Date().toISOString(),
+    profit: { incomeCny: null, adminUsageCny: null, resoldCny: null, grossProfitCny: null, netProfitCny: null, grossMarginPct: null, netMarginPct: null, profitCny: null, marginPct: null,
+      upstreamCostCny: 3.5, fixedCostCny: 1.25, totalCostCny: 4.75, resoldKeys: [], unmatched: [], complete: true, estimated: false, excludedStationIds: [], rateUnsetStations: [], warnings: [], warningCodes: [], windowDays: 7,
+      costs: [{ stationId: "up-usage", name: "Usage upstream", channels: ["Sales"], mode: "usage", usd: 0.5, cny: 3.5 },
+        { stationId: "up-fixed", name: "Fixed upstream", channels: ["Sales"], mode: "fixed", note: "", active: 1, expired: 0, upcoming: 0, total: 1, cny: 1.25 }],
+      incomeUnconfirmed: INCOME_UNCONFIRMED },
+    ...(usersUnavailable ? { usersUnavailable: USERS_UNAVAILABLE } : {}) };
 }
-
-test("收入确认不了时：成本估算说「读不到自营站点的收入：用户身份或转售记录没读全」，只算成本；「我的站点」照常打开，只有利润那块写原因", async (t) => {
-  const reason = errorText({ code: "OWN_INCOME_UNCONFIRMED" });
-  const cost = await openCostPage(t, (route) => fulfill(route, { ...unconfirmedOwnAnalytics(), trend: [] }));
-  const notice = cost.equation.locator(".jy-partial-note").filter({ hasText: `${failureSentence(ANALYTICS_COPY.ownFailed, reason)}${ANALYTICS_COPY.costOnly}` });
-  await notice.waitFor();
-  // 原文收起，展开「查看详细原因」才看得到
-  assert.equal(await cost.page.getByText(INCOME_UNCONFIRMED.error, { exact: true }).isVisible(), false);
-  await cost.page.context().browser().close();
-
-  const page = await openFixturePage(t, async (route) => {
+// 利润等式在收入读不到时：收入写「读不到」，毛利、净利留空、下面写「读不到收入」；下方一句原因加「刷新」，原文收起。
+// costs 给了就核对两项成本照常显示（成本估算页的成本来自 /api/analytics，不核对）
+async function expectIncomeUnread(equation, costs = null) {
+  const reason = errorText({ code: "OWN_INCOME_UNCONFIRMED" }), page = equation.page();
+  const notice = equation.locator(".jy-partial-note").filter({ hasText: `${failureSentence(INCOME_UNREAD.title, reason)}${INCOME_UNREAD.costOnly}` });
+  await notice.waitFor(); await notice.getByRole("button", { name: REFRESH, exact: true }).waitFor();
+  assert.equal(await page.getByText(INCOME_UNCONFIRMED.error, { exact: true }).filter({ visible: true }).count(), 0);
+  const term = (label) => equation.locator(".jy-eq-term:not(.is-carry)").filter({ has: page.locator(".jy-eq-label").filter({ hasText: new RegExp(`^${label}$`) }) });
+  const value = async (label) => (await term(label).locator(".jy-eq-value").textContent()).trim();
+  assert.equal(await value("收入"), INCOME_UNREAD.empty);
+  for (const label of ["毛利", "净利"]) { assert.equal(await value(label), EMPTY); assert.equal((await term(label).locator(".jy-eq-note").textContent()).trim(), INCOME_UNREAD.profit); }
+  if (costs) { assert.equal(await value("上游成本"), formatMoney(costs.upstream)); assert.equal(await value("固定成本"), formatMoney(costs.fixed)); }
+  assert.doesNotMatch(await equation.innerText(), /NaN|undefined/);
+}
+async function openUnconfirmedMyPage(t, options) {
+  return openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(url.searchParams.get("range") || "7d"));
+    if (url.pathname === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(url.searchParams.get("range") || "7d", options));
     if (url.pathname === "/api/analytics") return fulfill(route, costAnalyticsFixture(Number(url.searchParams.get("days")) || 7));
     throw new Error("unexpected my fixture API: " + url.pathname);
   }, undefined, false, null, "/my");
-  const failed = page.locator(".jy-state[role=alert]").filter({ hasText: failureSentence(PROFIT_FAILED, reason) });
-  await failed.first().waitFor();
-  await failed.first().getByRole("button", { name: REFRESH, exact: true }).waitFor();
+}
+
+test("收入确认不了时：成本估算、自营业务的利润等式收入几项写「读不到」并说原因，两项成本照常；用户表说合计含管理员账号；用户列表也读不到时说管理员没标出", async (t) => {
+  const cost = await openCostPage(t, (route) => fulfill(route, { ...unconfirmedOwnAnalytics(), trend: [] }));
+  await expectIncomeUnread(cost.equation);
+  await cost.page.context().browser().close();
+
+  // 自营业务默认近 7 天：利润等式叫「近 7 天经营」（profit-equation.tsx 的 EQ_TEXT.business）
+  const page = await openUnconfirmedMyPage(t);
+  await expectIncomeUnread(page.getByRole("region", { name: `${RANGE_TEXT["7d"]}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
+  assert.equal(await page.getByText(PROFIT_FAILED).count(), 0);
   assert.doesNotMatch(await page.locator("main").innerText(), /NaN|undefined/);
-  // 别的照常：用户标签页列出有消费的用户
+  // 用户标签页照常列出有消费的用户；收入没算出来，合计只说含多少管理员账号的消费（root 3 美元 × 7）
   await page.getByRole("tab", { name: "用户", exact: true }).click();
   await page.getByText("customer", { exact: true }).first().waitFor();
+  await page.getByText(`合计含管理员账号的 ${formatMoney(21)}。`).waitFor();
+  await page.context().browser().close();
+
+  // 用户列表也读不到：消费最多的用户、用户表下说管理员没标出；用户余额那块说原因、带刷新，不悄悄消失（shared.tsx 的 MY_TEXT.topUsers、users-tab.tsx 的 COPY.balTitle / balFailed）
+  const blind = await openUnconfirmedMyPage(t, { usersUnavailable: true });
+  await blind.getByRole("region", { name: "消费最多的用户", exact: true }).getByText(`${ADMIN_UNMARKED}。`, { exact: true }).waitFor();
+  await blind.getByRole("tab", { name: "用户", exact: true }).click();
+  const balances = blind.getByRole("region", { name: "用户余额", exact: true }).locator(".jy-state[role=alert]").filter({ hasText: failureSentence("读不到用户余额", errorText(USERS_UNAVAILABLE)) });
+  await balances.waitFor(); await balances.getByRole("button", { name: REFRESH, exact: true }).waitFor();
+  await blind.getByText(`${ADMIN_UNMARKED}。`).first().waitFor();
+  assert.equal(await blind.getByText(/合计含管理员/).count(), 0);
+});
+
+test("运营总览：收入确认不了时利润等式收入几项写「读不到」、两项成本照常；收入面板说原因，不拿用户消费拼出收入合计", async (t) => {
+  const opened = await openAccountsPage(t, { readonlyAPI(route, path) {
+    if (path === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(new URL(route.request().url()).searchParams.get("range") || "today"));
+    assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
+  } });
+  await opened.page.goto(baseURL);
+  // 运营总览默认看今天：利润等式叫「今天经营」，收入面板叫「今天收入」（EQ_TEXT.business、page.tsx 的 COPY.income；组件文件带 JSX，node 读不了）
+  await expectIncomeUnread(opened.page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
+  const revenue = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}收入`, exact: true });
+  const failed = revenue.locator(".jy-state[role=alert]").filter({ hasText: failureSentence(INCOME_UNREAD.title, errorText({ code: "OWN_INCOME_UNCONFIRMED" })) });
+  await failed.waitFor(); await failed.getByRole("button", { name: REFRESH, exact: true }).waitFor();
+  assert.doesNotMatch(await revenue.innerText(), /customer|root|¥/);
+  assert.equal(opened.mutations.length, 0);
 });
 
 test("用量分析：读不到用量的上游按码说一句、原文收起；没设置汇率只数有花费的上游；后台刷新失败保留上次的数据；单独看自营站点按售价说", async (t) => {

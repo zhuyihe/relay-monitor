@@ -2,7 +2,7 @@
 // 自营业务页共用：范围与标签常量、金额换算、环比显示、可排序表格。
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { EMPTY, RANGE_TEXT, TOKEN_NOTE as TOKEN_SCOPE, formatDeltaPct, formatMoney, formatUnitPrice, formatZonedRange } from "../../../lib/format";
+import { ADMIN_UNMARKED, EMPTY, RANGE_TEXT, TOKEN_NOTE as TOKEN_SCOPE, formatDeltaPct, formatMoney, formatUnitPrice, formatZonedRange } from "../../../lib/format";
 import { rateSnapshotOf } from "../../../lib/profit";
 import { Icon } from "../../components/icons";
 
@@ -99,7 +99,13 @@ export function totalsNote(v: OwnView, here: "users" | "models"): string | undef
   const notes: string[] = [];
   // 管理员 Key 转售出去的消费在概览里算收入（服务端 computeResold），只有自用部分不计入
   const resold = Number(v.profit?.resoldCny) || 0;
-  if (here === "users" && adminTot >= 0.005) {
+  if (here === "users" && v.d.usersUnavailable) {
+    // 用户列表读不到：谁是管理员标不出，合计也拆不开（§8.1）
+    notes.push(`${ADMIN_UNMARKED}。`);
+  } else if (here === "users" && adminTot >= 0.005 && (v.profit?.incomeUnconfirmed || v.profit?.error)) {
+    // 收入没算出来：分不清哪些是转售、哪些是自用，只说含多少管理员账号的消费
+    notes.push(`合计含管理员账号的 ${money(adminTot)}。`);
+  } else if (here === "users" && adminTot >= 0.005) {
     if (resold >= 0.005) {
       const self = Number(v.profit?.adminUsageCny) || 0;
       notes.push(

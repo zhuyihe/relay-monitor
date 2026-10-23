@@ -6,7 +6,7 @@ import { queryOwnData } from "../../../../lib/providers.js";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../../../lib/business-time.js";
 import { forecastDaily, forecastHourly } from "../../../../lib/forecast.js";
 import {
-  ownCache, readOwnIncomeOrUnconfirmed, unconfirmedProfit, computeProfit, computeFlowBreakdown, joinPrev, resolveOwnWindow,
+  ownCache, readOwnIncomeOrUnconfirmed, unconfirmedIncomeProfit, computeProfit, computeFlowBreakdown, joinPrev, resolveOwnWindow,
 } from "../../../../server/own-helpers.js";
 
 // 只在当前请求内比较，不写入缓存键、数据库或响应。
@@ -83,8 +83,9 @@ export const GET = withAuth(async (request, rt) => {
         daily.push({ t, cost: Math.round((dmap.get(t) || 0) * 10000) / 10000 });
       }
     }
-    // 收入确认不了时不整页报错：利润那块报错（profit 是 { error, errorCode }），消费、用户、用户余额照常（§8.1）
-    const { users: ownUsers, adminSet, incomeUsd, adminUsageUsd, resold, incomeDaily, unconfirmed } = await readOwnIncomeOrUnconfirmed(
+    // 收入确认不了时不整页报错（§8.1）：收入、毛利、净利是 null，profit.incomeUnconfirmed 说原因，成本、消费、用户照常；
+    // 用户列表也读不到时 usersUnavailable 说原因，没有预收、管理员标不出
+    const { users: ownUsers, adminSet, incomeUsd, adminUsageUsd, resold, incomeDaily, unconfirmed, usersUnavailable } = await readOwnIncomeOrUnconfirmed(
       rt, own, userRows, { startMs, endMs: now, tz }
     );
 
@@ -126,7 +127,9 @@ export const GET = withAuth(async (request, rt) => {
       ? modelRows.filter((r) => r.t >= prevStart && r.t < prevEnd)
       : (prevModelFetched || []);
     const [profit, flow] = await Promise.all([
-      unconfirmed ? unconfirmedProfit(unconfirmed) : computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs, now, tz, range, resold }),
+      unconfirmed
+        ? unconfirmedIncomeProfit(rt, own, unconfirmed, { startMs, now, tz, range })
+        : computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs, now, tz, range, resold }),
       // 分组 / 渠道口径：模型行里看不出「哪个分组涨了」「换到了哪个上游渠道」
       computeFlowBreakdown(own, {
         startMs, endMs: now, prevStartMs: prevStart, prevEndMs: prevEnd,
@@ -145,6 +148,7 @@ export const GET = withAuth(async (request, rt) => {
       byUser: joinPrev(byUser, aggBy(prevUserRows || [], "user"), "user"),
       prevUserAvailable: prevUserRows != null,
       flow,
+      ...(usersUnavailable ? { usersUnavailable } : {}),
       userBalances: ownUsers
         ? ownUsers
             .filter((u) => u.role < 10)

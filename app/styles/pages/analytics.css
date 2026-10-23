@@ -3,9 +3,6 @@
 /* 切换范围或归档开关时保留上一份数据，变淡表示正在更新 */
 .jy-analytics-switching { opacity: .6; transition: opacity .15s ease; }
 
-/* 说明文字里的刷新按钮 */
-.jy-analytics-inline-btn { margin-left: 8px; vertical-align: baseline; }
-
 /* 可用天数面板不带正文内边距（跑道自带左右留白），只补上与标题的间距 */
 .jy-analytics-runway { padding-top: 16px; }
 

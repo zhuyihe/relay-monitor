@@ -233,6 +233,8 @@ a.jy-eq-term:hover { background: var(--jy-sunken); text-decoration: none; color:
   background: var(--jy-sunken); color: var(--jy-ink-2); font-size: 13px; line-height: 20px;
 }
 .jy-partial-note .jy-icon { margin-top: 2px; color: var(--jy-ink-3); }
+/* 利润等式说明里的「刷新」 */
+.jy-eq-inline-btn { margin-left: 8px; vertical-align: baseline; }
 .jy-partial-note ul { margin: 0; padding-left: 18px; }
 .jy-partial-note a { white-space: nowrap; margin-left: 4px; }
 .jy-hatch { background-image: repeating-linear-gradient(135deg, var(--jy-rule) 0 2px, transparent 2px 6px); }

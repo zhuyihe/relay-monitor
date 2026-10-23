@@ -11,21 +11,20 @@ import Link from "next/link";
 import { Button, Checkbox } from "antd";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
-import { describeError, failureSentence } from "../../../lib/error-copy";
+import { describeError } from "../../../lib/error-copy";
 import { BALANCE_STATE_TEXT, basisText, EMPTY, formatDays, formatMoney, NO_UPSTREAM_TEXT, RANGE_TEXT, SELL_PRICE_UNSET } from "../../../lib/format";
 import { etaWindowDays, runwayLevel, stationDisplayName, WATCH_DAYS } from "../../../lib/overview-actions";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
 import { UPSTREAM_FORM_TEXT } from "../../../lib/channel-onboarding";
 import { workflowActionMeta } from "../../../lib/workflow-actions";
 import { EmptyState, ErrorState, PanelSkeleton, RefreshFailedBanner, Skeleton } from "../../components/data-state";
-import { ErrorDetail, noteOf } from "../../components/error-detail";
 import type { TipRow } from "../../components/float-tip";
 import { HBars } from "../../components/hbars";
 import type { HBarItem } from "../../components/hbars";
 import { Heatmap } from "../../components/heatmap";
 import { Sym } from "../../components/icons";
 import { Panel } from "../../components/panel";
-import { EQ_TEXT, ProfitEquation } from "../../components/profit-equation";
+import { EQ_TEXT, ProfitEquation, incomeUnreadProps } from "../../components/profit-equation";
 import type { EqTerm } from "../../components/profit-equation";
 import { RangePicker } from "../../components/range-picker";
 import { Runway, RunwayRulesNote, RUNWAY_TEXT } from "../../components/runway";
@@ -424,7 +423,7 @@ function Equation({
   let profitNote: ReactNode;
   let notice: ReactNode;
   const retryBtn = (
-    <Button size="small" onClick={onRetry} className="jy-analytics-inline-btn">
+    <Button size="small" onClick={onRetry} className="jy-eq-inline-btn">
       {REFRESH}
     </Button>
   );
@@ -441,19 +440,12 @@ function Equation({
       </>
     );
   } else if (snap.ownStatus === "error" || dv.incomeError) {
-    // 读不到自营站点，或连上了但算收入时报错（接口给 { error, errorCode }）：同一个说法
-    const note = noteOf(snap.ownStatus === "error" ? snap.ownError : dv.incomeError);
-    revenueEmpty = COPY.ownFailedEmpty;
+    // 读不到自营站点，或连上了但算收入时报错（接口给 { error, errorCode }）：和运营总览、自营业务同一个说法
+    const unread = incomeUnreadProps(snap.ownStatus === "error" ? snap.ownError : dv.incomeError, onRetry);
+    revenueEmpty = unread.revenueEmpty;
     revenueNote = ownName;
-    profitNote = COPY.ownFailedProfit;
-    notice = (
-      <>
-        {failureSentence(COPY.ownFailed, note.text)}
-        {COPY.costOnly}
-        {retryBtn}
-        <ErrorDetail raw={note.raw} />
-      </>
-    );
+    profitNote = unread.profitNote;
+    notice = unread.notice;
   } else if (snap.ownStatus !== "missing") {
     // 自营站点读到了，但收入没法按天分：原因由 derive 给（incomeIssue 是整句）
     revenueEmpty = COPY.incomeUnsplitEmpty;

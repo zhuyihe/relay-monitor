@@ -1,7 +1,7 @@
 // 成本估算页的文字：只在这一页出现的话都在这里，用语按 design/ui-copy-spec.md。
 // 页面文件不能导出常量，界面测试要引用这些话，所以放在同目录的 copy.ts（§12）；导入带 .js 后缀，node 可以直接读
 import { NAV_LABELS } from "../../../lib/brand.js";
-import { EMPTY, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../../../lib/format.js";
+import { EMPTY, INCOME_UNREAD, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../../../lib/format.js";
 
 export const COPY = Object.freeze({
   eqTitle: "成本与利润",
@@ -37,10 +37,11 @@ export const COPY = Object.freeze({
   longRangeProfit: "收入只能看 30 天以内",
   longRangeNotice: "收入只能按 30 天以内算。超过 30 天时这里只算成本，不拿 30 天的收入和更长时间的成本一起算利润。",
   switchTo: (range: string) => `切换到${range}`,
-  ownFailedEmpty: "读不到",
-  ownFailedProfit: "读不到收入",
-  ownFailed: "读不到自营站点的收入",
-  costOnly: "这里只算成本。",
+  // 读不到自营站点的收入：和运营总览、自营业务同一套说法（lib/format.js INCOME_UNREAD）
+  ownFailedEmpty: INCOME_UNREAD.empty,
+  ownFailedProfit: INCOME_UNREAD.profit,
+  ownFailed: INCOME_UNREAD.title,
+  costOnly: INCOME_UNREAD.costOnly,
   ownStation: "自营站点",
   incomeUnsplitEmpty: "算不出",
   incomeUnsplitProfit: "收入算不出",

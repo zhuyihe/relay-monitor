@@ -6,10 +6,10 @@ import { forecastDaily } from "../lib/forecast.js";
 import { BRAND } from "../lib/brand.js";
 import { broadcast } from "../lib/notify.js";
 import { fmtEta } from "../lib/alerts.js";
-import { readOwnIncomeOrUnconfirmed, unconfirmedProfit, computeProfit } from "./own-helpers.js";
+import { readOwnIncomeOrUnconfirmed, unconfirmedIncomeProfit, computeProfit } from "./own-helpers.js";
 import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
 import { errorText } from "../lib/error-copy.js";
-import { OWN_STATION_UNSET } from "../lib/format.js";
+import { ADMIN_UNMARKED, OWN_STATION_UNSET } from "../lib/format.js";
 
 // 日报时区就是业务时区（BUSINESS_TIME_ZONE，兼容旧的 REPORT_TIME_ZONE），与利润页、日汇总同一套日界线
 export const REPORT_TIME_ZONE = businessTimeZone();
@@ -66,7 +66,10 @@ export async function buildReport(rt) {
   const { users: ownUsers, adminSet, incomeUsd, adminUsageUsd: adminUsd, resold, unconfirmed } = await readOwnIncomeOrUnconfirmed(
     rt, own, userRows, { startMs: dayStart, endMs: dayEnd, tz }
   );
-  const incomeMissing = unconfirmed ? `没读到（${errorText(unconfirmed)}）` : null;
+  // 原因那一句只在这里取一次（lib/error-copy.js）；用户列表也读不到时，管理员标不出
+  const unconfirmedReason = unconfirmed ? errorText({ code: "OWN_INCOME_UNCONFIRMED" }) : null;
+  const incomeMissing = unconfirmed ? `没读到（${unconfirmedReason}）` : null;
+  const adminUnknown = unconfirmed && !ownUsers;
 
   // 昨日聚合
   const agg = (rows) => {
@@ -87,7 +90,7 @@ export async function buildReport(rt) {
   const totalReqs = byModel.reduce((a, m) => a + m.requests, 0);
   // 昨日利润（成本窗口 = 昨日自然日）
   const profit = unconfirmed
-    ? unconfirmedProfit(unconfirmed)
+    ? await unconfirmedIncomeProfit(rt, own, unconfirmed, { startMs: dayStart, now: dayEnd, tz, range: "7d" })
     : await computeProfit(rt, own, incomeUsd, adminUsd, { startMs: dayStart, now: dayEnd, tz, range: "7d", resold });
 
   // 日序列（近 34 天，不含今天）→ 环比与预测
@@ -133,9 +136,15 @@ export async function buildReport(rt) {
   L.push("");
   L.push("■ 经营概览");
   L.push(`昨日消费：${rptCny(totalCost * ownRate)}${prev != null ? `（环比 ${pctDelta(totalCost, prev)}，近7天日均 ${rptCny(avg7 * ownRate)} ${pctDelta(totalCost, avg7)}）` : ""}`);
-  if (incomeMissing) L.push(`收入、管理员自用、毛利、净利：${incomeMissing}`);
-  else L.push(`收入(不含管理员自用)：${rptCny(incomeUsd * ownRate)} ｜ 管理员自用：${rptCny(adminUsd * ownRate)}`);
-  if (profit && !profit.error) {
+  if (incomeMissing) {
+    // 收入确认不了：收入和利润不写数字，两项成本照常（§10）
+    L.push(`收入、管理员自用、毛利、净利：${incomeMissing}`);
+    if (profit && !profit.error) {
+      L.push(`上游成本：${rptCny(profit.upstreamCostCny)} ｜ 固定成本：${rptCny(profit.fixedCostCny)}`);
+      if (profit.warnings?.length) L.push(`口径提示：${profit.warnings.join("；")}`);
+    }
+  } else L.push(`收入(不含管理员自用)：${rptCny(incomeUsd * ownRate)} ｜ 管理员自用：${rptCny(adminUsd * ownRate)}`);
+  if (!incomeMissing && profit && !profit.error) {
     L.push(`上游成本：${rptCny(profit.upstreamCostCny)} ｜ 毛利：${rptCny(profit.grossProfitCny)}${profit.grossMarginPct != null ? `（毛利率 ${profit.grossMarginPct}%）` : ""}`);
     L.push(`固定成本：${rptCny(profit.fixedCostCny)} ｜ 净利：${rptCny(profit.netProfitCny)}${profit.netMarginPct != null ? `（净利率 ${profit.netMarginPct}%）` : ""}`);
     if (profit.warnings?.length) L.push(`口径提示：${profit.warnings.join("；")}`);
@@ -153,6 +162,7 @@ export async function buildReport(rt) {
   L.push("■ Top 用户（按消费）");
   byUser.slice(0, 5).forEach((u, i) => L.push(`${i + 1}. ${u.key}${u.isAdmin ? "（管理员）" : ""}  ${rptCny(u.cost * ownRate)}（${rptTok(u.tokens)} tokens）`));
   if (!byUser.length) L.push("（昨日无消费）");
+  else if (adminUnknown) L.push(`（${ADMIN_UNMARKED}）`);
   if (profit && !profit.error && profit.costs.length) {
     L.push("");
     L.push("■ 成本明细（昨日）");
@@ -181,12 +191,13 @@ export async function buildReport(rt) {
   L.push(`${BRAND.reportSignature} · 统计区间为 ${dateLabel} 00:00–24:00`);
   const html = buildReportHtml(rt, {
     own, dateLabel, dow, ownRate, tz,
-    totalCost, prev, avg7, incomeUsd, adminUsd, profit, incomeMissing,
+    totalCost, prev, avg7, incomeUsd, adminUsd, profit, incomeMissing, unconfirmedReason,
     totalReqs, totalTokens, activeUsers: byUser.length,
     byModel, byUser, daily, fc, upstreams, balanceTotal,
     userCount: (ownUsers || []).filter((u) => u.role < 10).length, hasUsers: !!ownUsers,
   });
-  return { title: `【${BRAND.name}日报】${own.name} ${dateLabel}`, text: L.join("\n"), html };
+  // degraded：收入确认不了，这份是降级的（定时发送先重试，最后一次才发它）
+  return { title: `【${BRAND.name}日报】${own.name} ${dateLabel}`, text: L.join("\n"), html, degraded: !!unconfirmed };
 }
 
 // 邮件安全的 HTML 日报：全内联样式 + 表格排版，图表用色块/条形实现
@@ -290,7 +301,9 @@ function buildReportHtml(rt, d) {
       <span style="color:${C.sub};font-size:11px">${esc(d.fc.method)} · 基于 ${d.fc.sampleDays} 天 · 回测日均偏差 ±${d.fc.backtestWapePct ?? "?"}%</span>
     </div>` : "";
 
-  const profitOk = d.profit && !d.profit.error;
+  // 收入确认不了时利润不写数字：毛利、净利写「没读到」，下面照常写两项成本
+  const profitOk = d.profit && !d.profit.error && !d.incomeMissing;
+  const costsOk = d.profit && !d.profit.error;
   // 毛利 = 收入 − 上游成本；净利 = 毛利 − 固定成本（与「我的站点」页同一口径，见 lib/profit.js）
   const signColor = (v) => (v >= 0 ? C.green : C.red);
   const marginSub = (pctLabel, pct, costLabel, cost) =>
@@ -303,10 +316,14 @@ function buildReportHtml(rt, d) {
     <tr><td><table width="100%" cellpadding="0" cellspacing="0"><tr>
       ${kpi("昨日消费", money(d.totalCost * d.ownRate), d.prev != null ? `环比 ${pctDelta(d.totalCost, d.prev)} · 7日均 ${pctDelta(d.totalCost, d.avg7)}` : "", null)}
       ${d.incomeMissing
-        ? kpi("收入（不含管理员自用）", "没读到", errorText({ code: "OWN_INCOME_UNCONFIRMED" }), null)
+        ? kpi("收入（不含管理员自用）", "没读到", d.unconfirmedReason, null)
         : kpi("收入（不含管理员自用）", money(d.incomeUsd * d.ownRate), d.adminUsd > 0 ? `管理员自用 ${money(d.adminUsd * d.ownRate)}` : "", null)}
-      ${kpi("毛利", profitOk ? money(d.profit.grossProfitCny) : d.incomeMissing ? "没读到" : "—", profitOk ? marginSub("毛利率", d.profit.grossMarginPct, "上游成本", d.profit.upstreamCostCny) : "", profitOk ? signColor(d.profit.grossProfitCny) : null)}
-      ${kpi("净利", profitOk ? money(d.profit.netProfitCny) : d.incomeMissing ? "没读到" : "—", profitOk ? marginSub("净利率", d.profit.netMarginPct, "固定成本", d.profit.fixedCostCny) : "", profitOk ? signColor(d.profit.netProfitCny) : null)}
+      ${kpi("毛利", profitOk ? money(d.profit.grossProfitCny) : d.incomeMissing ? "没读到" : "—",
+        profitOk ? marginSub("毛利率", d.profit.grossMarginPct, "上游成本", d.profit.upstreamCostCny) : d.incomeMissing && costsOk ? `上游成本 ${money(d.profit.upstreamCostCny)}` : "",
+        profitOk ? signColor(d.profit.grossProfitCny) : null)}
+      ${kpi("净利", profitOk ? money(d.profit.netProfitCny) : d.incomeMissing ? "没读到" : "—",
+        profitOk ? marginSub("净利率", d.profit.netMarginPct, "固定成本", d.profit.fixedCostCny) : d.incomeMissing && costsOk ? `固定成本 ${money(d.profit.fixedCostCny)}` : "",
+        profitOk ? signColor(d.profit.netProfitCny) : null)}
     </tr></table></td></tr>
     ${section("近 14 天消费趋势", trend)}
     ${section(`用量：请求 ${d.totalReqs.toLocaleString("en-US")} 次 · 计费 Tokens ${rptTok(d.totalTokens)}（不含缓存读写）· 活跃用户 ${d.activeUsers} 个`, "")}
@@ -377,7 +394,11 @@ export function startReportScheduler(rt) {
       const successful = new Set(delivery.successfulChannelIds);
       const pending = channels.filter((channel) => !successful.has(channel.id));
       if (pending.length) {
-        const { title, text, html } = await buildReport(rt);
+        const { title, text, html, degraded } = await buildReport(rt);
+        // 收入确认不了：先按退避重试，最后一次还是这样才发降级的那份（design/ui-copy-spec.md §10）
+        if (degraded && delivery.attempts < REPORT_MAX_ATTEMPTS) {
+          throw Object.assign(new Error("收入确认不了，稍后再试"), { code: "OWN_INCOME_UNCONFIRMED" });
+        }
         const results = await broadcast(pending, title, text, { event: "daily-report", html });
         for (const result of results) if (result.ok) successful.add(result.id);
       }

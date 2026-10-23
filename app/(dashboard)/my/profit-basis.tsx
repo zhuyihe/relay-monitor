@@ -8,7 +8,7 @@ import { api } from "../../../lib/client";
 import { rateSnapshotOf } from "../../../lib/profit";
 import { failureSentence, failureText } from "../../../lib/error-copy";
 import { STATION_TABS } from "../../../lib/brand";
-import { COST_MODE_TEXT, SELL_PRICE_UNSET, formatMoney, formatSellPrice, formatZonedRange } from "../../../lib/format";
+import { COST_MODE_TEXT, EMPTY, INCOME_UNREAD, SELL_PRICE_UNSET, formatMoney, formatSellPrice, formatZonedRange } from "../../../lib/format";
 import { EmptyState, ErrorState } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
@@ -36,7 +36,6 @@ const COPY = {
   // 成本明细里某个上游读用量失败（改按余额变化估算）时，名字下面那句的开头
   usageUnread: "读不到用量",
 };
-// 服务端给的报错（{ error, errorCode }）整个交给 noteOf：按 errorCode 归成一句，原文进「查看详细原因」
 
 // 自营站点的售价：设置了是「1 美元额度 = 7.2 元」，没设置是空串（界面写 SELL_PRICE_UNSET）
 const sellPriceOf = (station: any) => (rateSnapshotOf(station).source === "configured" && formatSellPrice(station.cnyPerUsd)) || "";
@@ -56,9 +55,11 @@ export function ProfitBasis({
   const p = v.profit;
   const ok = p && !p.error;
   const warnings: string[] = ok ? p.warnings || [] : [];
+  // 收入确认不了：收入写「没读到（原因）」，成本、转售 Key 照常，下面的转售 Key 还能改（§8.1）
+  const unread = ok && p.incomeUnconfirmed ? noteOf(p.incomeUnconfirmed) : null;
   const summary = ok ? (
     <>
-      收入 <b>{formatMoney(p.incomeCny)}</b>，上游成本 <b>{formatMoney(p.upstreamCostCny)}</b>，固定成本 <b>{formatMoney(p.fixedCostCny)}</b>，{(p.resoldKeys || []).length} 个转售 Key，
+      收入 <b>{unread ? `${INCOME_UNREAD.empty}（${unread.text}）` : formatMoney(p.incomeCny)}</b>，上游成本 <b>{formatMoney(p.upstreamCostCny)}</b>，固定成本 <b>{formatMoney(p.fixedCostCny)}</b>，{(p.resoldKeys || []).length} 个转售 Key，
       {(p.costs || []).length} 个上游算进利润{warnings.length ? COPY.notes(warnings.length) : ""}。
     </>
   ) : (
@@ -229,7 +230,8 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
                 );
               },
             },
-            { key: "cny", label: "收入", num: true, sort: (k) => k.cny || 0, render: (k) => formatMoney(k.cny || 0) },
+            // 收入确认不了时金额是 null，写「—」，不写成 0
+            { key: "cny", label: "收入", num: true, sort: (k) => k.cny || 0, render: (k) => (k.cny == null ? EMPTY : formatMoney(k.cny)) },
           ]}
         />
       ) : (

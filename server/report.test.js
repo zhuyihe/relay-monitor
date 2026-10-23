@@ -213,15 +213,65 @@ test("角色目录读不到时日报照发：收入、管理员自用、毛利�
   assert.equal(sent.length, 2);
   const { body } = sent[0];
   assert.match(body, /收入、管理员自用、毛利、净利：没读到（用户身份或转售记录没读全）/);
+  // 两项成本照常
+  assert.match(body, /上游成本：¥0\.00 ｜ 固定成本：¥0\.00/);
   assert.match(body, /■ 用户余额合计：没读到（用户身份或转售记录没读全）/);
-  // 利润不写：没有收入、毛利、净利、上游成本的数字
-  assert.doesNotMatch(body, /收入\(不含管理员自用\)：|毛利：¥|净利：¥|上游成本：/);
+  // 利润不写：没有收入、毛利、净利的数字
+  assert.doesNotMatch(body, /收入\(不含管理员自用\)：|毛利：¥|净利：¥/);
   // 别的照常
   assert.match(body, /■ 用量/);
   assert.match(body, /■ 上游余额/);
   const report = await buildReport(h.rt);
-  assert.match(report.html, /没读到/);
-  assert.doesNotMatch(report.html, /NaN/);
+  assert.equal(report.degraded, true);
+  // 邮件：收入、毛利、净利三格写「没读到」，毛利、净利下面照常写两项成本
+  const tile = (label) => report.html.match(new RegExp(`${label}</div>\\s*<div[^>]*>([^<]*)</div>\\s*(?:<div[^>]*>([^<]*)</div>)?`));
+  assert.deepEqual(tile("收入（不含管理员自用）").slice(1), ["没读到", "用户身份或转售记录没读全"]);
+  assert.deepEqual(tile("毛利").slice(1), ["没读到", "上游成本 ¥0.00"]);
+  assert.deepEqual(tile("净利").slice(1), ["没读到", "固定成本 ¥0.00"]);
+  assert.doesNotMatch(report.html, /NaN|undefined|null/);
+});
+
+test("定时发送：收入确认不了时先按退避重试，最后一次还确认不了才发降级的那份", async (t) => {
+  const h = setup(t);
+  let usersDown = true;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(input);
+    if (url.hostname === "notify.example") { h.deliveries.push(url.pathname.slice(1)); h.sentBodies.push(JSON.parse(init.body)); return new Response("{}", { status: 200 }); }
+    if (url.pathname === "/api/user/") return usersDown ? Response.json({ success: false, message: "unavailable" }, { status: 503 })
+      : Response.json({ success: true, data: { items: [{ id: 1, username: "root", role: 100 }], total: 1 } });
+    return Response.json({ success: true, data: [] });
+  });
+  await h.tick();
+  assert.deepEqual(h.deliveries, [], "第一次先不发");
+  for (const delayMinutes of [1, 2, 4]) {
+    t.mock.timers.tick(delayMinutes * 60000);
+    await h.tick();
+  }
+  assert.deepEqual(h.deliveries, [], "前四次都不发");
+  assert.equal(h.rt.store.settings.dailyReport.delivery.attempts, 4);
+  t.mock.timers.tick(8 * 60000);
+  await h.tick();
+  assert.deepEqual(h.deliveries, ["a", "b"], "第五次照发降级的那份");
+  assert.match(h.sentBodies[0].body, /没读到（用户身份或转售记录没读全）/);
+  assert.equal(h.rt.store.settings.dailyReport.lastSent, h.rt.store.settings.dailyReport.delivery.day);
+});
+
+test("定时发送：收入确认不了时先不发，重试时恢复了就发完整的那份", async (t) => {
+  const h2 = setup(t);
+  let usersDown = true;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(input);
+    if (url.hostname === "notify.example") { h2.deliveries.push(url.pathname.slice(1)); h2.sentBodies.push(JSON.parse(init.body)); return new Response("{}", { status: 200 }); }
+    if (url.pathname === "/api/user/") return usersDown ? Response.json({ success: false, message: "unavailable" }, { status: 503 })
+      : Response.json({ success: true, data: { items: [{ id: 1, username: "root", role: 100 }], total: 1 } });
+    return Response.json({ success: true, data: [] });
+  });
+  await h2.tick();
+  usersDown = false;
+  t.mock.timers.tick(60000);
+  await h2.tick();
+  assert.deepEqual(h2.deliveries, ["a", "b"]);
+  assert.doesNotMatch(h2.sentBodies[0].body, /没读到/);
 });
 
 test("转售记录没读全、用户列表读得到时：收入那几项写「没读到」，预收和管理员标记照常", async (t) => {
