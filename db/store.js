@@ -2,7 +2,7 @@
 // 设计：内存缓存 this.data 保持 v1 数据形状，所有读走内存（同步 getter 不变），
 // 所有写通过 save() 串行化写透 MySQL——消费方（26 个端点/告警/日报）零改动。
 import { hashPassword } from "../lib/auth.js";
-import { UNNAMED_CHANNEL } from "../lib/alert-center.js";
+import { UNNAMED_CHANNEL } from "../lib/alert-rules.js";
 import { ALERT_EVENT_KEYS, DEFAULT_RULES } from "../lib/alerts.js";
 import { createHash, randomBytes } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";

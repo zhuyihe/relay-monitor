@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
+import { UNNAMED_CHANNEL } from "../../../lib/alert-rules.js";
 import { errorText } from "../../../lib/error-copy.js";
 
 async function load(path) {
@@ -81,6 +82,9 @@ test("POST /api/notifications/test：测试消息写通知方式的名字和业�
   await POST(post({ channelId: "c1", name: " 值班群 " }), rt);
   assert.equal(sent.at(-1).text.split("\n")[2], "通知方式：值班群");
   await POST(post({ type: "telegram", config: { botToken: "1:x", chatId: "1" } }), rt);
+  assert.equal(sent.at(-1).text.split("\n")[2], "通知方式：Telegram 机器人");
+  // 存库时没起名字的存成「未命名通知方式」，也按没起名字写类型名
+  await POST(post({ channelId: "c1" }), { store: { channels: [{ ...channel(), name: UNNAMED_CHANNEL }] } });
   assert.equal(sent.at(-1).text.split("\n")[2], "通知方式：Telegram 机器人");
 
   const gone = await POST(post({ channelId: "nope" }), rt);

@@ -2693,6 +2693,7 @@ test("告警中心：规则名取余额档位的共用叫法，区块名按规�
 });
 
 test("告警中心通知方式没发出去：测试结果、日报发送结果按通知方式的说法写，原文各自进「查看详细原因」；没设置自营站点时预览说清楚、带「去设置」", async (t) => {
+  let sends = 0;
   const channels = [
     { id: "c1", name: "运维群", type: "telegram", enabled: true, config: { botToken: "", chatId: "42", apiBase: "" }, hasSecret: { botToken: true } },
     { id: "c2", name: "", type: "dingtalk", enabled: true, config: { webhook: "", secret: "" }, hasSecret: { webhook: true } },
@@ -2704,8 +2705,12 @@ test("告警中心通知方式没发出去：测试结果、日报发送结果�
     if (url.pathname === "/api/meta") return fulfill(route, metaFixture({ dailyReport: { enabled: true, time: "09:00", channelIds: [] } }));
     // 测试发送：Telegram 说 Token 不对（原文是英文的 Unauthorized）
     if (url.pathname === "/api/notifications/test") return fulfill(route, { ok: false, error: "Unauthorized", code: "NOTIFY_AUTH_FAILED" });
-    if (url.pathname === "/api/report/send") return fulfill(route, { ok: true, results: [
+    // 第一次两个都没发出去，第二次只有运维群发出去了
+    if (url.pathname === "/api/report/send") return fulfill(route, { ok: true, results: sends++ === 0 ? [
       { id: "c1", name: "运维群", ok: false, error: "Unauthorized", code: "NOTIFY_AUTH_FAILED" },
+      { id: "c2", name: "", ok: false, error: "keywords not in content", code: "NOTIFY_KEYWORD_MISSING" },
+    ] : [
+      { id: "c1", name: "运维群", ok: true },
       { id: "c2", name: "", ok: false, error: "keywords not in content", code: "NOTIFY_KEYWORD_MISSING" },
     ] });
     if (url.pathname === "/api/report/preview") return failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
@@ -2726,6 +2731,14 @@ test("告警中心通知方式没发出去：测试结果、日报发送结果�
   await result.getByText(`${NOTIFICATIONS_COPY.unnamed}：${errorText({ code: "NOTIFY_KEYWORD_MISSING" })}`).waitFor();
   assert.equal(await result.getByText("查看详细原因", { exact: true }).count(), 2);
   assert.doesNotMatch(await result.innerText(), /c2：/);
+  // 部分发出去了：不是红框，写「N 个通知方式里 M 个发出去了」，没发出去的那个照样一行、带「查看详细原因」
+  await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportSend }).click();
+  const partial = page.locator(".jy-notifications-actions + div .jy-test-result");
+  await partial.getByText(NOTIFICATIONS_COPY.reportSent(1, 2), { exact: true }).waitFor();
+  assert.equal(await partial.evaluate((el) => el.classList.contains("jy-test-result--bad")), false);
+  await partial.getByText(`${NOTIFICATIONS_COPY.unnamed}：${errorText({ code: "NOTIFY_KEYWORD_MISSING" })}`).waitFor();
+  assert.equal(await partial.getByText("查看详细原因", { exact: true }).count(), 1);
+  assert.doesNotMatch(await partial.innerText(), /运维群：/);
   // 预览：没设置自营站点时直接说 §8.1 那句、带「去设置」，不拼「读不到日报预览：」，显示在日报区块里
   await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportPreview }).click();
   await result.getByText(OWN_STATION_UNSET, { exact: true }).waitFor();
