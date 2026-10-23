@@ -23,7 +23,7 @@ const DERIVED_PATHS = new Set(["balance.account"]);
 // meta 表里整行加密的。没有时生成一个随机值；rotate：第一次加密时换新（旧备份、binlog 里的明文就作废了）。
 // rotated、reset 是启动日志和 db/reset-secrets.js 说的话
 // - 会话密钥：签登录 Cookie 用
-// - 账单身份密钥：算 Sub2API 账单能力的连接身份（lib/providers.js 的 HMAC，升级时 db/pool.js 的 rehashBillingCapabilities 按它改过已有的行）。
+// - 账单身份密钥：Sub2API 账单能力存进库时用它包一层 HMAC（lib/billing-capability-storage.js），升级时 db/pool.js 的 rehashBillingCapabilities 用它包旧格式的行。
 //   不能换新，换了库里存的能力就都对不上了
 export const META_SECRETS = Object.freeze([
   Object.freeze({ key: "session_secret", label: "会话密钥", rotate: true,

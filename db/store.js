@@ -287,7 +287,7 @@ export class Store {
     return this._metaSecrets.session_secret ?? null;
   }
 
-  // 算 Sub2API 账单能力连接身份的 HMAC 密钥（server/reconciliation.js 交给 lib/providers.js），同样加密存在 meta 表
+  // 账单身份密钥：Sub2API 账单能力存进库时由能力存储（lib/billing-capability-storage.js）用它包一层 HMAC，同样加密存在 meta 表
   get billingIdentityKey() {
     return this._metaSecrets.billing_identity_key ?? null;
   }
