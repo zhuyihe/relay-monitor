@@ -555,6 +555,7 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
 只推余额提醒；什么时候推的规则和以前一样，只有这几处不同：
 
 - 余额已经用完时不再推「快用完」（原来余额用完后还会补推一条「快用完，可用不到 1 小时」，透支的上游会一直推）。所以关掉「余额用完」这条提醒时，余额用完后就没有提醒了。
+- 「快用完」和页面一样，最近在花钱才提醒：估算的日均花费是 0（近期没有花费）时不推（原来只看估算的可用天数：余额只剩几分钱、每天花不到 1 分钱时，估算把日均花费舍成 0、天数照算，会推一条正文写「近期没有花费」的快用完）。
 - 读余额暂时失败、还没到「连续读不到几次」时，不发「持续告警」（不拿旧的余额档位再提醒一遍）。
 - 上游自己的余额提醒线没填时用全局的，包括旧数据里存成空的（和页面一样）。
 
@@ -579,7 +580,7 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
 | 什么时候 | 标题 |
 |---|---|
 | 余额偏低 / 余额用完 / 读不到余额 | 【炬元告警】上游名 余额偏低 |
-| 快用完 | 【快用完】上游名 可用约 3 天（天数和正文的「可用天数」是同一个；算不出、近期没有花费时只写上游名） |
+| 快用完 | 【快用完】上游名 可用约 3 天（天数和正文的「可用天数」是同一个；算不出时只写上游名） |
 | 持续没处理 | 【持续告警】上游名 仍是「余额偏低」 |
 | 恢复 | 【恢复通知】上游名 已恢复正常 |
 | 日报 | 【炬元日报】（不变） |
@@ -696,7 +697,7 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
    | Key 在列表和下拉里的名字（§3.1，含同名加编号） | `lib/reconciliation-view.js` 的 `reconciliationKeyName`，传同一列表里的其他 Key 才能判断同名 | 渠道绑定、上游账单、测试读取结果各拼一份 |
    | 余额三档的名字（含「还没读取」「读不到余额」） | `lib/format.js` 的 `BALANCE_STATE_TEXT`；哪一档由 `lib/overview-actions.js` 的 `balanceStateOf` 判断 | `stations/model.ts`、`workflow-copy.ts`、告警规则、`lib/alerts.js`、`status.tsx` 各自的写法；`lib/client.ts` 的 `statusOf` |
    | 可用天数的写法（§3.3） | `lib/format.js` 的 `formatDays` | `lib/client.ts`、`lib/alerts.js` 的 `fmtEta` |
-   | 快用完的天数、7 天线、可用天数分档 | `lib/overview-actions.js` 的 `etaWindowDays`、`WATCH_DAYS`、`runwayLevel` | 总览、上游列表、成本估算、日报里各写一份 |
+   | 快用完的天数、7 天线、可用天数分档；最近在没在花钱（在花钱才算快用完） | `lib/overview-actions.js` 的 `etaWindowDays`、`WATCH_DAYS`、`runwayLevel`、`isSpending`；页面和推送的快用完都用 | 总览、上游列表、成本估算、日报里各写一份；推送自己只看天数 |
    | 上游余额在哪一档、标什么颜色，可用天数一格写什么（余额用完写「—」，旁边标「余额用完」） | `lib/overview-actions.js` 的 `balanceViewOf`、`balanceDaysText`；运营总览「上游余量」、上游列表、余额趋势都用，也看余额提醒线 | 各页自己判断余额用完、只按天数分档 |
    | 成本来源名（§3.3） | `lib/format.js` 的 `COST_MODE_TEXT` | `my/shared.tsx` 的 `MODE_LABEL`、`server/own-helpers.js` 里的说法 |
    | 时间范围名（§6） | `lib/format.js` 的 `RANGE_TEXT` | 总览、成本估算、自营业务各写一份 |
