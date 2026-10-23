@@ -2,7 +2,7 @@
 // 设计：内存缓存 this.data 保持 v1 数据形状，所有读走内存（同步 getter 不变），
 // 所有写通过 save() 串行化写透 MySQL——消费方（26 个端点/告警/日报）零改动。
 import { hashPassword } from "../lib/auth.js";
-import { ALERT_EVENT_KEYS, ALERT_RULE_KEYS, DEFAULT_RULES, UNNAMED_CHANNEL } from "../lib/alert-rules.js";
+import { ALERT_EVENT_KEYS, ALERT_RULE_KEYS, DEFAULT_RULES, UNNAMED_CHANNEL, resetNoRenewalAlertState } from "../lib/alert-rules.js";
 import { createHash, randomBytes } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
 import { endpointChangedError, sameEndpoint, staleSecrets } from "../lib/endpoint.js";
@@ -34,19 +34,6 @@ function originMarker(value) {
 function authorizationMarker(value, authVersion, type) {
   if (!value) return null;
   return { requestId: String(value.requestId), accountKey: String(value.accountKey), authVersion, authorizationType: type };
-}
-
-// 重新标记「不再续费」时开启一轮新的单次提醒：清掉单次提醒的发出时间和它的补发任务（lib/alerts.js），其他记录不动
-function resetNoRenewalAlertState(state) {
-  if (!state) return state;
-  const { noRenewalLowNotifiedAt, ...next } = state;
-  if (next.pendingDelivery?.kind === "noRenewalLow") delete next.pendingDelivery;
-  if (next.pendingDeliveries?.noRenewalLow) {
-    const { noRenewalLow, ...rest } = next.pendingDeliveries;
-    if (Object.keys(rest).length) next.pendingDeliveries = rest;
-    else delete next.pendingDeliveries;
-  }
-  return next;
 }
 
 const DEFAULT_SETTINGS = {
@@ -201,7 +188,11 @@ export class Store {
     this._openSecrets({ stations, notifications: { channels } });
     const metaSecrets = this._openMetaSecrets(meta);
     // 通知方式的配置只留字段表里的键（S1 起新填的也只收这些）：字段表以外的旧键发送时用不到，留着就一直明文存着
-    for (const channel of channels) if (channel?.config) channel.config = knownChannelConfig(channel.type, channel.config);
+    for (const channel of channels) {
+      if (channel?.config) channel.config = knownChannelConfig(channel.type, channel.config);
+      // #42 给补发记的「投递版本」，补发改成按 id 认以后没用了；读库时去掉，下次保存就不再存
+      if (channel && "deliveryVersion" in channel) delete channel.deliveryVersion;
+    }
     this.data = {
       stations,
       settings: { ...DEFAULT_SETTINGS, ...(meta.settings || {}) },

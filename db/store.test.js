@@ -5,7 +5,7 @@ import { refreshStation } from "../server/refresh.js";
 import { selectCostUpstreams } from "../server/own-helpers.js";
 import { evaluateStation } from "../lib/alerts.js";
 
-function fakePool(stations = []) {
+function fakePool(stations = [], channels = []) {
   const conn = {
     beginTransaction: async () => {},
     query: async () => [[]],
@@ -22,7 +22,7 @@ function fakePool(stations = []) {
         return [[
           { k: "settings", v: {} },
           { k: "auth", v: { username: "admin", salt: "test", hash: "test" } },
-          { k: "notifications", v: { channels: [], rules: {} } },
+          { k: "notifications", v: { channels: structuredClone(channels), rules: {} } },
         ]];
       }
       return [[]];
@@ -656,3 +656,11 @@ test("通知方式编辑：密钥留空沿用，其他字段留空就清空，�
   assert.equal(store.channels[0].config.password, "app-pass");
 });
 
+
+test("读库时去掉 #42 给通知方式记的投递版本（补发改成按 id 认以后没用了），接口也就不回传", async () => {
+  const store = await new Store(fakePool([], [{ id: "ch-1", type: "webhook", name: "运维群", enabled: true, deliveryVersion: 3, config: { url: "https://hooks.example.com/x" } }])).load();
+  assert.equal("deliveryVersion" in store.channels[0], false);
+  assert.equal(store.channels[0].config.url, "https://hooks.example.com/x");
+  const added = await store.addChannel({ type: "webhook", name: "新的", config: { url: "https://hooks.example.com/y" } });
+  assert.equal("deliveryVersion" in added, false);
+});
