@@ -3,8 +3,11 @@
 // 收入、毛利和净利留空，下方说明原因和下一步，两项成本照常显示。
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { MINUS, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, formatMoney, formatPct, splitTotal } from "../../lib/format";
+import { Button } from "antd";
+import { failureSentence } from "../../lib/error-copy";
+import { INCOME_UNREAD, MINUS, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, formatMoney, formatPct, splitTotal } from "../../lib/format";
 import { workflowAction, workflowActionMeta } from "../../lib/workflow-actions";
+import { ErrorDetail, noteOf } from "./error-detail";
 import { Icon } from "./icons";
 import { StatusText } from "./status";
 
@@ -26,6 +29,29 @@ export const EQ_TEXT = Object.freeze({
   unsetProfit: "设置自营站点后才能算",
   unsetNotice: "收入、毛利和净利暂时算不出；上游成本和固定成本照常算。",
 });
+
+// 读不到自营站点的收入（读取失败、收入确认不了）时利润等式要的几项：收入、毛利、净利留空，两项成本照常；
+// 下方写「读不到自营站点的收入：原因。这里只算成本。」[刷新] 和「查看详细原因」。运营总览、自营业务、成本估算共用
+export function incomeUnreadProps(error: unknown, onRetry?: () => void) {
+  const note = noteOf(error);
+  return {
+    unconfigured: true,
+    revenueEmpty: INCOME_UNREAD.empty,
+    profitNote: INCOME_UNREAD.profit,
+    notice: (
+      <>
+        {failureSentence(INCOME_UNREAD.title, note.text)}
+        {INCOME_UNREAD.costOnly}
+        {onRetry && (
+          <Button size="small" onClick={onRetry} className="jy-eq-inline-btn">
+            {workflowActionMeta("refresh")!.label}
+          </Button>
+        )}
+        <ErrorDetail raw={note.raw} />
+      </>
+    ),
+  };
+}
 
 export type EqTerm = {
   value: number | null;

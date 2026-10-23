@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   aggregateFlow, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
-  readOwnIncome, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
+  getOwnUsers, readOwnIncome, readOwnIncomeOrUnconfirmed, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
+  ownUsersKey, unconfirmedIncomeProfit,
 } from "./own-helpers.js";
 import { History } from "../db/history.js";
 import { dayStartInTz } from "../lib/business-time.js";
@@ -10,7 +11,8 @@ import { dayStartInTz } from "../lib/business-time.js";
 function incomeFixture() {
   const own = { id: "own", name: "自营", type: "newapi", baseUrl: "https://own.test", accessToken: "test", cnyPerUsd: 7 };
   const users = [{ id: 1, username: "root", role: 100 }, { id: 2, username: "customer", role: 1 }];
-  const rt = { _ownUsersCache: { at: Date.now(), stationId: own.id, list: users } };
+  // 缓存是 1 秒前发出的那次读取（比这次请求早），对不上时会重读
+  const rt = { _ownUsersCache: { key: ownUsersKey(own), startedAt: Date.now() - 1000, list: users, unknown: new Map() } };
   const startMs = dayStartInTz("2026-10-13", "Asia/Shanghai");
   const window = { startMs, endMs: startMs + 2 * 86400000, tz: "Asia/Shanghai" };
   const rows = [{ key: "root", t: startMs + 3600000, cost: 100 }, { key: "customer", t: startMs + 86400000 + 3600000, cost: 10 }];
@@ -55,10 +57,203 @@ test("1 元收入分成 7 天仍合计 1 元，不逐项舍入成 0.98 元", asy
   assert.ok(result.incomeDaily.every((d) => d.incomeCny === 0.14 || d.incomeCny === 0.15));
 });
 
-test("没读到消费用户的角色时不默认其为客户", async () => {
+// 用户列表接口：返回 list 里的用户，记下读了几次
+function mockUserList(t, list) {
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    calls.push(url.pathname);
+    if (url.pathname === "/api/user/") return Response.json({ success: true, data: { items: list, total: list.length } });
+    throw new Error(`unexpected path ${url.pathname}`);
+  });
+  return calls;
+}
+
+test("没读到消费用户的角色时不默认其为客户：先重读一次用户列表，还没有才算确认不了", async (t) => {
   const f = incomeFixture();
   f.rt._ownUsersCache.list = f.users.filter((u) => u.username !== "root");
+  const calls = mockUserList(t, f.users.filter((u) => u.username !== "root"));
   await assert.rejects(readOwnIncome(f.rt, f.own, f.rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.deepEqual(calls, ["/api/user/"], "只重读一次");
+});
+
+test("缓存里没有的用户（刚注册就有消费）：重读一次用户列表后照常算收入，缓存也更新", async (t) => {
+  const f = incomeFixture();
+  const newbie = { id: 3, username: "newbie", role: 1 };
+  const calls = mockUserList(t, [...f.users, newbie]);
+  const rows = [...f.rows, { key: "newbie", t: f.window.startMs + 86400000 + 7200000, cost: 5 }];
+  const result = await readOwnIncome(f.rt, f.own, rows, f.window);
+  assert.equal(result.incomeUsd, 15);
+  assert.deepEqual(calls, ["/api/user/"]);
+  assert.ok(f.rt._ownUsersCache.list.some((u) => u.username === "newbie"));
+  // 用户都在缓存里时不重读
+  calls.length = 0;
+  await readOwnIncome(f.rt, f.own, rows, f.window);
+  assert.deepEqual(calls, []);
+});
+
+test("readOwnIncomeOrUnconfirmed：确认不了时不中止，收入是 null；用 readOwnIncome 那次的用户列表，不再读一次；读不到时给原因", async (t) => {
+  // 用户列表读不到：只读了一次（不在外层再读一次），usersUnavailable 带底层原因
+  const f = incomeFixture();
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => { calls += 1; return Response.json({ success: false, message: "unavailable" }, { status: 503 }); });
+  const lost = await readOwnIncomeOrUnconfirmed({}, f.own, f.rows, f.window);
+  assert.equal(lost.unconfirmed.code, "OWN_INCOME_UNCONFIRMED");
+  assert.deepEqual([lost.users, lost.incomeUsd, lost.adminUsageUsd, lost.resold, lost.incomeDaily, lost.adminSet.size], [null, null, null, null, null, 0]);
+  assert.equal(calls, 1);
+  // 原因带上游给的原文（只进「查看详细原因」），按码归类
+  assert.deepEqual(lost.usersUnavailable, { error: "unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" });
+  // 用户列表读得到、转售记录没读全：users 照常给出，管理员照常标
+  f.own.resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
+  const partial = await readOwnIncomeOrUnconfirmed(f.rt, f.own, f.rows, f.window);
+  assert.equal(partial.unconfirmed.code, "OWN_INCOME_UNCONFIRMED");
+  assert.equal(partial.users.length, 2);
+  assert.deepEqual([...partial.adminSet], ["root"]);
+  assert.deepEqual([partial.incomeUsd, partial.usersUnavailable], [null, null]);
+  // 确认得了时和 readOwnIncome 一样，unconfirmed 是 null
+  f.own.resoldAdminKeys = [];
+  const ok = await readOwnIncomeOrUnconfirmed(f.rt, f.own, f.rows, f.window);
+  assert.deepEqual([ok.unconfirmed, ok.incomeUsd], [null, 10]);
+});
+
+// 用户列表接口，每次读取都等 gate 放行；lists 按读取的先后给（不够时用最后一个），host 给别的站点时用 other
+function gatedUserList(t, lists, other = []) {
+  const state = { calls: 0, release: null };
+  let gate = new Promise((resolve) => { state.release = resolve; });
+  state.open = () => { state.release(); gate = Promise.resolve(); };
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    assert.equal(url.pathname, "/api/user/");
+    const list = url.host === "own.test" ? lists[Math.min(state.calls, lists.length - 1)] : other;
+    state.calls += 1;
+    await gate;
+    return Response.json({ success: true, data: { items: list, total: list.length } });
+  });
+  return state;
+}
+
+test("用户列表：同一份配置并发的读取共用一次；要更晚发出的读取时，等进行中的那次读完再发一次，错开到达的几个请求都跟这一次", async (t) => {
+  const f = incomeFixture();
+  let now = Date.parse("2026-10-14T00:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const newbie = { id: 3, username: "newbie", role: 1 };
+  const users = gatedUserList(t, [f.users, [...f.users, newbie]]);
+  const rt = {};
+  const first = getOwnUsers(rt, f.own), second = getOwnUsers(rt, f.own);
+  const later = [];
+  for (let i = 0; i < 3; i += 1) { now += 5; later.push(getOwnUsers(rt, f.own, { since: now })); }
+  assert.equal(users.calls, 1, "进行中的那次还没读完，先等它");
+  users.open();
+  const lists = await Promise.all([first, second, ...later]);
+  assert.equal(users.calls, 2, "错开到达的三个请求合成一次");
+  assert.deepEqual(lists.map((list) => list.length), [2, 2, 3, 3, 3], "后到的拿到的是那之后发出的读取");
+});
+
+// 写错时（缓存只按站点 id 认）这里会一直等着旧地址那次读取：给个超时，让它失败而不是卡住
+test("用户列表：自营站点换了地址，不跟着旧地址那次读取；旧的那次后读完也不写进缓存", { timeout: 5000 }, async (t) => {
+  const f = incomeFixture();
+  let releaseOld;
+  const oldGate = new Promise((resolve) => { releaseOld = resolve; });
+  const hosts = [];
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const { host } = new URL(input);
+    hosts.push(host);
+    if (host === "own.test") { await oldGate; return Response.json({ success: true, data: { items: f.users, total: 2 } }); }
+    return Response.json({ success: true, data: { items: [{ id: 9, username: "other", role: 100 }], total: 1 } });
+  });
+  const rt = {}, moved = { ...f.own, baseUrl: "https://moved.test" };
+  const old = getOwnUsers(rt, f.own);
+  assert.deepEqual((await getOwnUsers(rt, moved)).map((u) => u.username), ["other"]);
+  releaseOld();
+  assert.deepEqual((await old).map((u) => u.username), ["root", "customer"]);
+  assert.equal(rt._ownUsersCache.key, ownUsersKey(moved), "旧地址那次后读完，不覆盖新地址的缓存");
+  await getOwnUsers(rt, moved);
+  assert.deepEqual(hosts, ["own.test", "moved.test"], "新地址的缓存照常用");
+});
+
+test("一直对不上的用户名：重读一次，1 分钟内不再为它重读，过了 1 分钟再读；缓存刚过期时只读一次", async (t) => {
+  const f = incomeFixture();
+  let now = Date.parse("2026-10-14T00:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const users = gatedUserList(t, [f.users]);
+  users.open();
+  f.rt._ownUsersCache.startedAt = now - 1000;
+  const rows = [...f.rows, { key: "ghost", t: f.window.startMs + 7200000, cost: 3 }];
+  await assert.rejects(readOwnIncome(f.rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(users.calls, 1);
+  now += 30000;
+  await assert.rejects(readOwnIncome(f.rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(users.calls, 1, "1 分钟内不再为 ghost 重读");
+  now += 31000;
+  await assert.rejects(readOwnIncome(f.rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(users.calls, 2, "过了 1 分钟再读一次（在 New API 改好后点「刷新」最多等 1 分钟）");
+  // 缓存过期：这次发出的读取就是最新的，不再强制重读第二次
+  now += 600001;
+  await assert.rejects(readOwnIncome(f.rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(users.calls, 3, "缓存过期时只读一次");
+  // 新读取带上上一份还没过期的名字：先为 ghost 重读、20 秒后为 ghost2 重读，再看 ghost 时不用又读一次
+  now += 120000;
+  const ghost2 = [...f.rows, { key: "ghost2", t: f.window.startMs + 7200000, cost: 3 }];
+  await assert.rejects(readOwnIncome(f.rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(users.calls, 4);
+  now += 20000;
+  await assert.rejects(readOwnIncome(f.rt, f.own, ghost2, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(users.calls, 5);
+  now += 10000;
+  await assert.rejects(readOwnIncome(f.rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(users.calls, 5, "ghost 在新读取里也记着，不再为它重读");
+  // 窗口外、消费为 0 的陌生用户不触发重读
+  now += 120000;
+  const quiet = [...f.rows, { key: "zero", t: f.window.startMs + 3600000, cost: 0 }, { key: "outside", t: f.window.endMs + 3600000, cost: 9 }];
+  await readOwnIncome(f.rt, f.own, quiet, f.window);
+  assert.equal(users.calls, 5);
+});
+
+test("跟着别人进行中的读取拿到的列表比这次请求早：缺了刚注册的用户就再读一次，照常算出收入", async (t) => {
+  const f = incomeFixture();
+  let now = Date.parse("2026-10-14T00:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const newbie = { id: 3, username: "newbie", role: 1 };
+  const users = gatedUserList(t, [f.users, [...f.users, newbie]]);
+  const rt = {};
+  // 请求 A 发出读取时 newbie 还没注册；请求 B 拿到了 newbie 的消费，跟着 A 那次读取
+  const a = readOwnIncome(rt, f.own, f.rows, f.window);
+  now += 1000;
+  const rows = [...f.rows, { key: "newbie", t: f.window.startMs + 86400000 + 7200000, cost: 5 }];
+  const b = readOwnIncome(rt, f.own, rows, f.window);
+  users.open();
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.equal(ra.incomeUsd, 10);
+  assert.equal(rb.incomeUsd, 15);
+  assert.equal(users.calls, 2);
+});
+
+test("重读用户列表没成：还用手里那份标管理员、算预收，只说收入确认不了", async (t) => {
+  const f = incomeFixture();
+  t.mock.method(globalThis, "fetch", async () => Response.json({ success: false, message: "unavailable" }, { status: 503 }));
+  const rows = [...f.rows, { key: "newbie", t: f.window.startMs + 7200000, cost: 5 }];
+  const result = await readOwnIncomeOrUnconfirmed(f.rt, f.own, rows, f.window);
+  assert.equal(result.unconfirmed.code, "OWN_INCOME_UNCONFIRMED");
+  assert.equal(result.users.length, 2);
+  assert.deepEqual([...result.adminSet], ["root"]);
+  assert.equal(result.usersUnavailable, null);
+});
+
+test("转售 Key 所属的用户在缓存里还不是管理员（刚提成管理员）：先重读一次用户列表，读到是管理员就照常算", async (t) => {
+  const f = incomeFixture();
+  f.own.resoldAdminKeys = [{ username: "seller", tokenName: "sale" }];
+  f.rt._ownUsersCache.list = [...f.users, { id: 4, username: "seller", role: 1 }];
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    calls.push(url.pathname);
+    if (url.pathname === "/api/user/") return Response.json({ success: true, data: { items: [...f.users, { id: 4, username: "seller", role: 10 }], total: 3 } });
+    if (url.pathname === "/api/log/stat") return Response.json({ success: true, data: { quota: 0 } });
+    throw new Error(`unexpected path ${url.pathname}`);
+  });
+  const result = await readOwnIncome(f.rt, f.own, f.rows, f.window);
+  assert.equal(result.incomeUsd, 10);
+  assert.equal(calls.filter((path) => path === "/api/user/").length, 1);
 });
 
 test("必要的角色或转售读取失败时收入不可确认", async (t) => {
@@ -66,7 +261,13 @@ test("必要的角色或转售读取失败时收入不可确认", async (t) => {
   t.mock.method(globalThis, "fetch", async () => Response.json({ success: false, message: "unavailable" }, { status: 503 }));
   await assert.rejects(readOwnIncome({}, f.own, f.rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
   f.own.resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
-  await assert.rejects(readOwnIncome(f.rt, f.own, f.rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  // 转售记录没读到：原因里说是哪把 Key，没读到的那几把随报错带出去（「利润怎么算」里标出来）
+  await assert.rejects(readOwnIncome(f.rt, f.own, f.rows, f.window), (err) => {
+    assert.equal(err.code, "OWN_INCOME_UNCONFIRMED");
+    assert.match(err.message, /转售 Key「root \/ sale」的记录没读到/);
+    assert.deepEqual(err.resoldErrors.map((k) => [k.username, k.tokenName, typeof k.error, typeof k.errorCode]), [["root", "sale", "string", "string"]]);
+    return true;
+  });
 });
 
 test("转售记录 HTTP200 但金额缺失时不能当成零收入", async (t) => {
@@ -291,3 +492,46 @@ test("利润提示：售价和汇率分开说，按码返回，没设置汇率�
   assert.deepEqual([f.active, f.expired, f.upcoming, f.total, f.note], [0, 1, 0, 1, "已到期"]);
   assert.deepEqual(p.costs.find((c) => c.stationId === "u").channels, ["u 渠道"]);
 });
+
+test("收入确认不了时的利润：两项成本照常算，收入、管理员自用、转售、毛利、净利都是 null；转售 Key 照常列出；原因带底层原文", async () => {
+  const SH = "Asia/Shanghai";
+  const startMs = dayStartInTz("2026-10-13", SH);
+  const now = startMs + 86400000;
+  const own = { id: "own", name: "自营", isOwn: true, type: "newapi", cnyPerUsd: 2, resoldAdminKeys: [{ username: "root", tokenName: "sale" }] };
+  const fixed = { id: "f", name: "包月上游", type: "newapi-key", cnyPerUsd: 7, fixedPurchases: [{ amount: 300, days: 30, startDate: "2026-10-01" }] };
+  const history = new History({ query: async () => [[]] });
+  const rt = { store: { list: () => [own, fixed] }, history, _ownChannelsCache: { at: Date.now(), stationId: "own", list: [] } };
+  const err = Object.assign(new Error("转售记录没读全，收入和利润暂时算不出", { cause: new Error("HTTP 503 stat unavailable") }), { code: "OWN_INCOME_UNCONFIRMED" });
+  const p = await unconfirmedIncomeProfit(rt, own, err, { startMs, now, tz: SH, range: "7d" });
+  assert.equal(p.error, undefined);
+  assert.equal(p.fixedCostCny, 10);
+  assert.equal(p.upstreamCostCny, 0);
+  for (const key of ["incomeCny", "adminUsageCny", "resoldCny", "grossProfitCny", "netProfitCny", "grossMarginPct", "netMarginPct", "profitCny", "marginPct"]) assert.equal(p[key], null, key);
+  assert.deepEqual(p.resoldKeys, [{ username: "root", tokenName: "sale", usd: null, cny: null }]);
+  assert.equal(p.incomeUnconfirmed.errorCode, "OWN_INCOME_UNCONFIRMED");
+  assert.match(p.incomeUnconfirmed.error, /HTTP 503 stat unavailable/);
+  // 没读到的那把转售 Key 带上报错；只关乎收入的提示（没设置售价）不说，别的照常
+  // 同一账号两把转售 Key，只有 sale 没读到；自营站点没设置售价，另有一个不算进利润的上游
+  const unpriced = { ...own, cnyPerUsd: null, resoldAdminKeys: [{ username: "root", tokenName: "sale" }, { username: "root", tokenName: "promo" }] };
+  const skipped = { id: "skip", name: "不算的上游", type: "newapi", includeInProfit: false };
+  const withSkipped = { ...rt, store: { list: () => [unpriced, fixed, skipped] } };
+  const failedKey = Object.assign(new Error("转售 Key「root / sale」的记录没读到"), { code: "OWN_INCOME_UNCONFIRMED",
+    resoldErrors: [{ username: "root", tokenName: "sale", usd: 0, error: "HTTP 503 stat unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" }] });
+  const full = await computeProfit(withSkipped, unpriced, 0, 0, { startMs, now, tz: SH, range: "7d", resold: null });
+  assert.deepEqual(full.warningCodes, ["sell_price_unset", "excluded_upstreams"]);
+  assert.equal(full.complete, false);
+  const q = await unconfirmedIncomeProfit(withSkipped, unpriced, failedKey, { startMs, now, tz: SH, range: "7d" });
+  assert.deepEqual(q.resoldKeys, [
+    { username: "root", tokenName: "sale", usd: null, cny: null, error: "HTTP 503 stat unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" },
+    { username: "root", tokenName: "promo", usd: null, cny: null },
+  ]);
+  // 去掉售价那条以后，提示的文字和码还是一一对上
+  assert.deepEqual([q.warnings, q.warningCodes], [["不算的上游 不算进利润"], ["excluded_upstreams"]]);
+  assert.equal(q.complete, true, "没设置售价只影响收入，不算数据不完整");
+  // 成本也算不出：整块报错，收入确认不了的原因照样带着
+  const broken = { ...rt, store: { list: () => { throw new Error("store down"); } } };
+  const both = await unconfirmedIncomeProfit(broken, own, err, { startMs, now, tz: SH, range: "7d" });
+  assert.match(both.error, /store down/);
+  assert.equal(both.incomeUnconfirmed.errorCode, "OWN_INCOME_UNCONFIRMED");
+});
+

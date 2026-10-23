@@ -67,14 +67,14 @@ export default function MyStationPage() {
   const [auditRows, setAuditRows] = useState(4000);
   const [auditOpen, setAuditOpen] = useState(false);
 
-  // 客户端缓存：同范围 60 秒内直接复用；逐日成本失败的结果不复用，下次照常重取
+  // 客户端缓存：同范围 60 秒内直接复用；逐日成本失败、收入确认不了的结果不复用，下次照常重取（接口也不缓存后者）
   const cacheRef = useRef<Record<string, { at: number; data: any; costs?: any }>>({});
   const rangeRef = useRef<string>(range);
   rangeRef.current = range;
 
   const load = useCallback(async (force: boolean, r: string = rangeRef.current, rethrow = false) => {
     const cached = cacheRef.current[r];
-    if (!force && cached && !cached.costs?.error && Date.now() - cached.at < 60000) {
+    if (!force && cached && !cached.costs?.error && !cached.data?.profit?.incomeUnconfirmed && Date.now() - cached.at < 60000) {
       setData(cached.data);
       setCosts(cached.costs);
       setErr(null);

@@ -23,6 +23,7 @@ const COPY = Object.freeze({
   noUsers: "这个时间范围内还没有用户消费。",
   // 用户余额
   balTitle: "用户余额",
+  balFailed: "读不到用户余额",
   balCaption: "不含管理员和超级管理员",
   balLead: (n: number) => `共 ${n} 个用户，余额合计`,
   zeroBal: (n: number) => `另有 ${n} 个用户余额为 0。`,
@@ -40,7 +41,7 @@ export function UsersTab({ v, range, reload }: { v: OwnView; range: OwnRange; re
   return (
     <>
       <UserTable v={v} range={range} />
-      <Balances v={v} />
+      <Balances v={v} reload={reload} />
       <UserGroups v={v} reload={reload} />
     </>
   );
@@ -133,9 +134,17 @@ function UserTable({ v, range }: { v: OwnView; range: OwnRange }) {
 
 // ---- 用户余额（不含管理员和超级管理员）------------------------------------
 
-function Balances({ v }: { v: OwnView }) {
+function Balances({ v, reload }: { v: OwnView; reload: () => Promise<unknown> }) {
   const { d, rate } = v;
   const list = d.userBalances as any[] | null;
+  // 用户列表读不到：照样有这一块，说原因（§8.1），不悄悄消失
+  if (!list && d.usersUnavailable) {
+    return (
+      <Panel title={COPY.balTitle} caption={COPY.balCaption}>
+        <ErrorState what={COPY.balFailed} error={d.usersUnavailable} onRetry={() => reload()} />
+      </Panel>
+    );
+  }
   if (!list) return null;
   // 余额为 0 的用户只报数量，不占表格
   const nonZero = list.filter((u) => u.balanceUsd > 0.0001);
@@ -186,7 +195,7 @@ function UserGroups({ v, reload }: { v: OwnView; reload: () => Promise<unknown> 
   if (flow.error) {
     return (
       <Panel title={GROUPS_TITLE}>
-        <ErrorState what={FLOW_UNREADABLE} error={flow.error} onRetry={() => reload()} />
+        <ErrorState what={FLOW_UNREADABLE} error={flow} onRetry={() => reload()} />
       </Panel>
     );
   }

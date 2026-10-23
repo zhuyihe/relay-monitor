@@ -15,7 +15,7 @@ import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActio
 import { balanceMoneyOf, countsInProfit, rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
 import { asSentence, describeError, errorText, failureText, refreshAllText, refreshOneText } from "../../lib/error-copy";
-import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, formatAsOf, formatDays, formatMoney, formatSinceToday, formatZonedDate, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
+import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, formatAsOf, formatDays, formatMoney, formatSinceToday, formatZonedDate, INCOME_UNREAD, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../lib/business-time";
 import { UPSTREAM_FORM_TEXT } from "../../lib/channel-onboarding";
 import { AttentionList } from "../components/attention-list";
@@ -26,7 +26,7 @@ import type { TipRow } from "../components/float-tip";
 import { HBars } from "../components/hbars";
 import type { HBarItem } from "../components/hbars";
 import { CountBadge, Panel } from "../components/panel";
-import { EQ_TEXT, ProfitEquation } from "../components/profit-equation";
+import { EQ_TEXT, ProfitEquation, incomeUnreadProps } from "../components/profit-equation";
 import type { EqTerm } from "../components/profit-equation";
 import { RangePicker } from "../components/range-picker";
 import { Runway, RunwayRulesNote, RUNWAY_TEXT } from "../components/runway";
@@ -370,7 +370,7 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
   if (profit.error) {
     return (
       <Panel title={title} caption={caption}>
-        <ErrorState what={COPY.profitFailed} error={profit.error} onRetry={onRetry} />
+        <ErrorState what={COPY.profitFailed} error={profit} onRetry={onRetry} />
       </Panel>
     );
   }
@@ -381,14 +381,17 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
   const users = (own.byUser || []).filter((u: any) => !u.isAdmin).length;
   // 只有估算和没设置汇率 / 售价会让数字不准；其余提示放到成本面板底部
   const { reasons } = splitProfitWarnings(profit);
+  // 收入确认不了：收入、毛利、净利留空并说原因，两项成本照常（design/ui-copy-spec.md §8.1）
+  const unread = profit.incomeUnconfirmed ? incomeUnreadProps(profit.incomeUnconfirmed, onRetry) : null;
   return (
     <ProfitEquation
       title={title}
       caption={caption}
+      {...(unread || {})}
       revenue={{
         value: profit.incomeCny ?? null,
         approx: ownRateMissing,
-        note: ownRateMissing ? SELL_PRICE_UNSET : COPY.fromUsers(users),
+        note: unread ? own.station?.name : ownRateMissing ? SELL_PRICE_UNSET : COPY.fromUsers(users),
         // 带上同一个时间范围，自营业务默认是近 7 天
         href: range === "7d" ? "/my" : `/my?range=${range}`,
       }}
@@ -809,6 +812,10 @@ function RevenuePanel({ title, money, error, onRetry }: { title: string; money: 
     }
     const own = money.own || {};
     const profit = own.profit || {};
+    // 收入没读到（读取失败、收入确认不了）：不拿用户消费去拼收入，说原因（§8.1）
+    if (profit.error || profit.incomeUnconfirmed) {
+      return <ErrorState what={INCOME_UNREAD.title} error={profit.incomeUnconfirmed || profit} onRetry={onRetry} />;
+    }
     // 没设置汇率时按 1:1 折算，合计前加「约」（和别处同一个判断：rateSnapshotOf）
     const ownRateNow = rateSnapshotOf(own.station);
     const ownRate = ownRateNow.cnyPerUsd;
@@ -836,7 +843,7 @@ function RevenuePanel({ title, money, error, onRetry }: { title: string; money: 
         total={items.length ? { label: COPY.total, value: formatMoney(income, { approx: ownRateNow.source !== "configured" }) } : undefined}
       />
     );
-  }, [money, router]);
+  }, [money, router, onRetry]);
   return (
     <MoneyPanelShell title={title} caption={COPY.byUser} money={money} error={error} onRetry={onRetry}>
       {content}
@@ -869,7 +876,7 @@ function CostPanel({ title, money, error, onRetry }: { title: string; money: Mon
       return { items, total: sum(items.map((i) => i.value ?? 0)), approx, notes: [] as string[] };
     }
     const profit = money.own?.profit || {};
-    if (profit.error) return { items: [], total: null, approx: false, notes: [] as string[], error: profit.error };
+    if (profit.error) return { items: [], total: null, approx: false, notes: [] as string[], error: profit };
     const items: HBarItem[] = (profit.costs || [])
       .filter((c: any) => c.mode !== "fixed")
       .map((c: any) => ({

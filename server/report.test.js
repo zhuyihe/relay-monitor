@@ -198,19 +198,124 @@ test("立即发送：返回每个渠道的结果列表", async (t) => {
   assert.deepEqual(h.deliveries, ["a", "b"]);
 });
 
-test("角色目录读不到时日报生成失败，不能发送虚假的收入和利润", async (t) => {
+test("角色目录读不到时日报照发：收入、管理员自用、毛利、净利、预收写「没读到」，不写虚假的收入和利润，别的照常", async (t) => {
   const h = setup(t);
+  // 一个包月上游（固定成本 ¥10/天）、一个不算进利润的上游（口径提示）；昨天 root、customer 有消费
+  h.rt.store.data.stations.push(
+    { id: "fixed-up", type: "newapi-key", name: "包月上游", cnyPerUsd: 7, fixedPurchases: [{ amount: 300, days: 30, startDate: "2026-10-01" }] },
+    { id: "skip-up", type: "newapi", name: "不算的上游", includeInProfit: false });
+  const { dayStart } = reportDayWindow();
   const sent = [];
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(input);
+    if (url.host === "notify.example") { sent.push(JSON.parse(init.body)); return new Response("{}", { status: 200 }); }
+    if (url.pathname === "/api/user/") return Response.json({ success: false, message: "unavailable" }, { status: 503 });
+    if (url.pathname === "/api/data/users") return Response.json({ success: true, data: [
+      { username: "root", created_at: (dayStart + 3600000) / 1000, quota: 2 * 500000, token_used: 1, count: 1 },
+      { username: "customer", created_at: (dayStart + 7200000) / 1000, quota: 1 * 500000, token_used: 1, count: 1 },
+    ] });
+    return Response.json({ success: true, data: [] });
+  });
+  const result = await sendReport(h.rt);
+  assert.equal(result.ok, true);
+  assert.equal(sent.length, 2);
+  const { body } = sent[0];
+  assert.match(body, /收入、管理员自用、毛利、净利：没读到（用户身份或转售记录没读全）/);
+  // 两项成本、口径提示、成本明细照常
+  assert.match(body, /上游成本：¥0\.00 ｜ 固定成本：¥10\.00/);
+  assert.match(body, /口径提示：不算的上游 不算进利润/);
+  assert.match(body, /■ 成本明细（昨日）[\s\S]*包月上游/);
+  assert.match(body, /■ 用户余额合计：没读到（用户身份或转售记录没读全）/);
+  // 用户列表读不到：管理员标不出，排行下面说一句
+  assert.match(body, /1\. root  ¥2\.00[\s\S]*2\. customer  ¥1\.00[\s\S]*（用户身份没读到，管理员没标出）/);
+  assert.doesNotMatch(body, /（管理员）/);
+  // 利润不写：没有收入、毛利、净利的数字
+  assert.doesNotMatch(body, /收入\(不含管理员自用\)：|毛利：¥|净利：¥/);
+  // 别的照常
+  assert.match(body, /■ 用量/);
+  assert.match(body, /■ 上游余额/);
+  const report = await buildReport(h.rt);
+  assert.equal(report.degraded, true);
+  // 邮件：收入、毛利、净利三格写「没读到」，毛利、净利下面照常写两项成本
+  const tile = (label) => report.html.match(new RegExp(`${label}</div>\\s*<div[^>]*>([^<]*)</div>\\s*(?:<div[^>]*>([^<]*)</div>)?`));
+  assert.deepEqual(tile("收入（不含管理员自用）").slice(1), ["没读到", "用户身份或转售记录没读全"]);
+  assert.deepEqual(tile("毛利").slice(1), ["没读到", "上游成本 ¥0.00"]);
+  assert.deepEqual(tile("净利").slice(1), ["没读到", "固定成本 ¥10.00"]);
+  assert.match(report.html, /用户余额合计：没读到（用户身份或转售记录没读全）/);
+  assert.match(report.html, /（用户身份没读到，管理员没标出）/);
+  assert.match(report.html, /利润口径[\s\S]*不算的上游 不算进利润/);
+  assert.match(report.html, /成本明细（昨日）[\s\S]*包月上游/);
+  assert.doesNotMatch(report.html, /NaN|undefined|null/);
+});
+
+test("定时发送：收入确认不了时先按退避重试，最后一次还确认不了才发降级的那份", async (t) => {
+  const h = setup(t);
+  let usersDown = true;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(input);
+    if (url.hostname === "notify.example") { h.deliveries.push(url.pathname.slice(1)); h.sentBodies.push(JSON.parse(init.body)); return new Response("{}", { status: 200 }); }
+    if (url.pathname === "/api/user/") return usersDown ? Response.json({ success: false, message: "unavailable" }, { status: 503 })
+      : Response.json({ success: true, data: { items: [{ id: 1, username: "root", role: 100 }], total: 1 } });
+    return Response.json({ success: true, data: [] });
+  });
+  await h.tick();
+  assert.deepEqual(h.deliveries, [], "第一次先不发");
+  for (const delayMinutes of [1, 2, 4]) {
+    t.mock.timers.tick(delayMinutes * 60000);
+    await h.tick();
+  }
+  assert.deepEqual(h.deliveries, [], "前四次都不发");
+  assert.equal(h.rt.store.settings.dailyReport.delivery.attempts, 4);
+  t.mock.timers.tick(8 * 60000);
+  await h.tick();
+  assert.deepEqual(h.deliveries, ["a", "b"], "第五次照发降级的那份");
+  assert.match(h.sentBodies[0].body, /没读到（用户身份或转售记录没读全）/);
+  assert.equal(h.rt.store.settings.dailyReport.lastSent, h.rt.store.settings.dailyReport.delivery.day);
+});
+
+test("定时发送：收入确认不了时先不发，重试时恢复了就发完整的那份", async (t) => {
+  const h2 = setup(t);
+  let usersDown = true;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(input);
+    if (url.hostname === "notify.example") { h2.deliveries.push(url.pathname.slice(1)); h2.sentBodies.push(JSON.parse(init.body)); return new Response("{}", { status: 200 }); }
+    if (url.pathname === "/api/user/") return usersDown ? Response.json({ success: false, message: "unavailable" }, { status: 503 })
+      : Response.json({ success: true, data: { items: [{ id: 1, username: "root", role: 100 }], total: 1 } });
+    return Response.json({ success: true, data: [] });
+  });
+  await h2.tick();
+  usersDown = false;
+  t.mock.timers.tick(60000);
+  await h2.tick();
+  assert.deepEqual(h2.deliveries, ["a", "b"]);
+  assert.doesNotMatch(h2.sentBodies[0].body, /没读到/);
+});
+
+test("转售记录没读全、用户列表读得到时：收入那几项写「没读到」，预收和管理员标记照常", async (t) => {
+  const h = setup(t);
+  h.rt.store.data.stations[0].resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
+  const { dayStart } = reportDayWindow();
   t.mock.method(globalThis, "fetch", async (input) => {
     const url = new URL(input);
-    if (url.host === "notify.example") sent.push(url.pathname);
-    return url.pathname === "/api/user/"
-      ? Response.json({ success: false, message: "unavailable" }, { status: 503 })
-      : Response.json({ success: true, data: [] });
+    if (url.host === "notify.example") return new Response("{}", { status: 200 });
+    if (url.pathname === "/api/user/") return Response.json({ success: true, data: { items: [
+      { id: 1, username: "root", role: 100, quota: 0, used_quota: 0, status: 1 },
+      { id: 2, username: "customer", role: 1, quota: 5 * 500000, used_quota: 0, status: 1 },
+    ], total: 2 } });
+    if (url.pathname === "/api/data/users") return Response.json({ success: true, data: [
+      { username: "root", created_at: (dayStart + 3600000) / 1000, quota: 2 * 500000, token_used: 1, count: 1 },
+    ] });
+    if (url.pathname === "/api/log/stat") return Response.json({ success: false, message: "unavailable" }, { status: 503 });
+    return Response.json({ success: true, data: [] });
   });
-  await assert.rejects(sendReport(h.rt), { code: "OWN_INCOME_UNCONFIRMED" });
-  assert.deepEqual(sent, []);
-  assert.equal(h.rt.store.settings.dailyReport.lastSent, null);
+  const { text, html } = await buildReport(h.rt);
+  assert.match(text, /收入、管理员自用、毛利、净利：没读到（用户身份或转售记录没读全）/);
+  assert.match(text, /■ 用户余额合计：¥5\.00（预收，1 个用户）/);
+  assert.match(text, /1\. root（管理员）/);
+  // 用户列表读得到：管理员照常标出，不写「管理员没标出」（文字版和邮件版都是）
+  assert.doesNotMatch(text, /管理员没标出/);
+  assert.doesNotMatch(html, /管理员没标出/);
+  assert.match(html, /root <span[^>]*>管理员<\/span>/);
 });
 
 test("日报与自营分析共用已确认的收入分类，管理员自用不计收入，异步修改售价不混入同一份日报", async (t) => {

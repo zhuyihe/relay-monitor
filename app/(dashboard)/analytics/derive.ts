@@ -125,7 +125,10 @@ export function derive(data: any, own: any) {
   const ownRate = rateSnapshotOf(own?.station);
   const ownNoRate = !!own && ownRate.source !== "configured";
   const hasIncomeDaily = Array.isArray(own?.incomeDaily);
-  if (own?.profit && !own.profit.error && hasIncomeDaily) {
+  if (own?.profit?.incomeUnconfirmed) {
+    // 收入确认不了（用户身份或转售记录没读全）：接口照常给成本，收入是 null；不拿含管理员自用的消费去猜每天的收入
+    incomeError = { code: own.profit.incomeUnconfirmed.errorCode, message: String(own.profit.incomeUnconfirmed.error) };
+  } else if (own?.profit && !own.profit.error && hasIncomeDaily) {
     incomeBy = new Map();
     for (const row of own.incomeDaily) incomeBy.set(row.date, (incomeBy.get(row.date) || 0) + Number(row.incomeCny || 0));
     incomeEstimated = own.incomeDailyApprox === true;
