@@ -2605,6 +2605,8 @@ async function expectIncomeUnread(equation, costs = null) {
   for (const label of ["毛利", "净利"]) { assert.equal(await value(label), EMPTY); assert.equal((await term(label).locator(".jy-eq-note").textContent()).trim(), INCOME_UNREAD.profit); }
   if (costs) { assert.equal(await value("上游成本"), formatMoney(costs.upstream)); assert.equal(await value("固定成本"), formatMoney(costs.fixed)); }
   assert.doesNotMatch(await equation.innerText(), /NaN|undefined/);
+  // 原文收在说明里的「查看详细原因」，点开才看得到
+  await notice.getByText("查看详细原因", { exact: true }).click(); await notice.getByText(INCOME_UNCONFIRMED.error, { exact: true }).waitFor();
 }
 async function openUnconfirmedMyPage(t, options) {
   return openFixturePage(t, async (route) => {
@@ -2625,6 +2627,8 @@ test("收入确认不了时：成本估算、自营业务的利润等式收入�
   const page = await openUnconfirmedMyPage(t);
   await expectIncomeUnread(page.getByRole("region", { name: `${RANGE_TEXT["7d"]}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
   assert.equal(await page.getByText(PROFIT_FAILED).count(), 0);
+  // 每日趋势只画上游成本，说明跟着改（overview-tab.tsx 的 COPY.trendNoIncome）
+  await page.getByText(`按天。${INCOME_UNREAD.title}，这里只画上游成本。`).first().waitFor();
   assert.doesNotMatch(await page.locator("main").innerText(), /NaN|undefined/);
   // 用户标签页照常列出有消费的用户；收入没算出来，合计只说含多少管理员账号的消费（root 3 美元 × 7）
   await page.getByRole("tab", { name: "用户", exact: true }).click();

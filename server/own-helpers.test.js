@@ -114,7 +114,7 @@ test("readOwnIncomeOrUnconfirmed：确认不了时不中止，收入是 null；�
   assert.deepEqual([ok.unconfirmed, ok.incomeUsd], [null, 10]);
 });
 
-test("用户列表：并发请求共用进行中的那次；重读过还是没有的用户名，缓存过期前不再为它重读", async (t) => {
+test("用户列表：并发请求共用进行中的那次；重读过还是没有的用户名，缓存过期前不再为它重读；缓存刚过期时只读一次", async (t) => {
   const f = incomeFixture();
   let calls = 0, release;
   const gate = new Promise((resolve) => { release = resolve; });
@@ -135,6 +135,13 @@ test("用户列表：并发请求共用进行中的那次；重读过还是没�
   assert.equal(calls, 1);
   await assert.rejects(readOwnIncome(rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
   assert.equal(calls, 1, "缓存过期前不再为 ghost 重读");
+  // 缓存刚过期：这次读到的就是最新的，不再为 ghost 强制重读第二次；之后照样记着不重读
+  calls = 0;
+  rt._ownUsersCache.at -= 600001;
+  await assert.rejects(readOwnIncome(rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(calls, 1, "缓存过期时只读一次");
+  await assert.rejects(readOwnIncome(rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(calls, 1);
   // 窗口外、消费为 0 的陌生用户不触发重读
   calls = 0;
   const quiet = [...f.rows, { key: "zero", t: f.window.startMs + 3600000, cost: 0 }, { key: "outside", t: f.window.endMs + 3600000, cost: 9 }];

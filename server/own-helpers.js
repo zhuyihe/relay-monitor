@@ -197,9 +197,10 @@ function incomeUnconfirmed(message, cause, users = null) {
 export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
   let users;
   try {
-    users = await getOwnUsers(rt, own);
     // 有消费的用户不在（缓存的）用户列表里、转售 Key 所属的用户在列表里不是管理员：多半是刚注册、刚提成管理员，
-    // 先重读一次用户列表再判断。重读过还是对不上的名字记在缓存里，缓存过期前不再为它们重读
+    // 先重读一次用户列表再判断（这次刚读过的不用再读）。重读过还是对不上的名字记在缓存里，缓存过期前不再为它们重读
+    const cached = rt._ownUsersCache;
+    users = await getOwnUsers(rt, own);
     const missing = (list) => {
       const roles = new Map(list.map((u) => [u.username, u.role]));
       return [...new Set([
@@ -207,10 +208,11 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
         ...(own.resoldAdminKeys || []).filter((key) => !(roles.get(key.username) >= 10)).map((key) => key.username),
       ])];
     };
-    if (missing(users).some((name) => !rt._ownUsersCache?.unknown?.has(name))) {
+    const justRead = rt._ownUsersCache !== cached;
+    if (!justRead && missing(users).some((name) => !rt._ownUsersCache?.unknown?.has(name))) {
       users = await getOwnUsers(rt, own, { fresh: true });
-      for (const name of missing(users)) rt._ownUsersCache?.unknown?.add(name);
     }
+    for (const name of missing(users)) rt._ownUsersCache?.unknown?.add(name);
   } catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
   const roles = new Map(users.map((u) => [u.username, u.role]));
   const adminSet = new Set(users.filter((u) => u.role >= 10).map((u) => u.username));

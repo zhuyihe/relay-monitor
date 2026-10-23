@@ -6,7 +6,7 @@ import Link from "next/link";
 import { Button } from "antd";
 import { NAV_LABELS } from "../../../lib/brand";
 import { dayKeyInTz } from "../../../lib/business-time";
-import { ADMIN_UNMARKED, EMPTY, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
+import { ADMIN_UNMARKED, EMPTY, INCOME_UNREAD, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
 import { rateSnapshotOf, splitProfitWarnings } from "../../../lib/profit";
 import { EmptyState, ErrorState, PanelSkeleton } from "../../components/data-state";
 import { ForecastChart } from "../../components/forecast-chart";
@@ -38,6 +38,7 @@ const COPY = Object.freeze({
   dailyEmptyDesc: "稍后刷新再看。",
   trendCaption: "按天。收入按当天普通用户消费和转售 Key 消费计算。",
   trendEstimated: "按天。旧接口没给逐日收入，按全部模型消费的占比估算，包含管理员自用的消费。",
+  trendNoIncome: `按天。${INCOME_UNREAD.title}，这里只画上游成本。`,
   // 预计花费
   fcRange: "预计范围",
   next24: "未来 24 小时",
@@ -236,7 +237,7 @@ function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: 
       tz={costs.tz || v.d?.tz}
       caption={
         <>
-          {dv.incomeEstimated ? COPY.trendEstimated : COPY.trendCaption}
+          {dv.incomeError ? COPY.trendNoIncome : dv.incomeEstimated ? COPY.trendEstimated : COPY.trendCaption}
           <Link className="jy-link" href={`/analytics?range=${dv.rows.length <= 7 ? "7d" : "30d"}`}>
             {NAV_LABELS.analytics}
           </Link>
