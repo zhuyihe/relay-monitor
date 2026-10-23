@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import mysql from "mysql2/promise";
 import { ensureSchema, rehashBillingCapabilities } from "./pool.js";
-import { billingCapabilityAliases, createBillingCapabilityStorage, wrapLegacyBillingIdentity, wrappedBillingIdentity } from "../lib/billing-capability-storage.js";
+import { billingCapabilityAliases, createBillingCapabilityStorage, wrappedBillingIdentity } from "../lib/billing-capability-storage.js";
 import { ChannelOnboardingRepository } from "../server/channel-onboarding-repository.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState } from "../server/reconciliation-repository.js";
 import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
@@ -603,7 +603,7 @@ test("账单能力身份版本：混合旧格式、回滚再升级、碰撞合�
   await insertLegacy(oldHmac, 2000);
   const repository = new ReconciliationRepository(pool);
   await repository.saveBillingCapability(wrap(digests[2]), cap(2500));
-  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 2, skipped: false, invalid: 0 });
+  assert.deepEqual(await rehashBillingCapabilities(pool, key), { migrated: 2, skipped: false, invalid: 0 });
   const storage = createBillingCapabilityStorage(repository, { key });
   assert.deepEqual(await storage.get(digests[0]), cap(1000));
   assert.deepEqual(await storage.get(digests[1]), cap(2000));
@@ -614,14 +614,14 @@ test("账单能力身份版本：混合旧格式、回滚再升级、碰撞合�
   assert.ok(!(await rows()).some((r) => [digests[0], oldHmac].includes(r[0])));
   assert.equal((await pool.query("SELECT k FROM meta WHERE k = ?", [MARKER]))[0].length, 1, "即使只有新包装行也必须写旧迁移栅栏");
   const once = await rows();
-  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 0, skipped: true, invalid: 0 });
+  assert.deepEqual(await rehashBillingCapabilities(pool, key), { migrated: 0, skipped: true, invalid: 0 });
   assert.deepEqual(await rows(), once, "不二次包装");
   // 已有全局 marker，旧二进制又按默认 legacy 写回 SHA；再次升级必须扫描并合并，保留较新的整组值。
   await insertLegacy(digests[0], 3000);
-  assert.deepEqual(await rehashBillingCapabilities(pool, wrap), { migrated: 1, skipped: false, invalid: 0 });
+  assert.deepEqual(await rehashBillingCapabilities(pool, key), { migrated: 1, skipped: false, invalid: 0 });
   assert.deepEqual(await storage.get(digests[0]), cap(3000));
   await insertLegacy(digests[0], 500);
-  await rehashBillingCapabilities(pool, wrap);
+  await rehashBillingCapabilities(pool, key);
   assert.deepEqual(await storage.get(digests[0]), cap(3000), "较旧 legacy 不覆盖新核验结果");
   // 两个历史别名都存在时删除必须一次移除，不能从另一个别名复活。
   await repository.saveBillingCapability(billingCapabilityAliases(key, digests[1])[0], cap(4000));
@@ -638,9 +638,9 @@ test("账单能力身份版本：混合旧格式、回滚再升级、碰撞合�
         return conn.query(sql, params);
       } };
   } };
-  await assert.rejects(rehashBillingCapabilities(broken, wrap), /synthetic/);
+  await assert.rejects(rehashBillingCapabilities(broken, key), /synthetic/);
   assert.deepEqual(await rows(), before);
-  await rehashBillingCapabilities(pool, wrap);
+  await rehashBillingCapabilities(pool, key);
   assert.deepEqual(await storage.get(digests[0]), cap(5000));
 });
 
@@ -664,8 +664,7 @@ test("账单能力身份版本：S3 的三列旧表带数据升级；格式不�
   await insertOld(s3Identity(d1), 1000);
   await insertOld("not-a-digest", 900);
   await ensureSchema(pool);
-  const rehash = (identity) => wrapLegacyBillingIdentity(key, identity);
-  assert.deepEqual(await rehashBillingCapabilities(pool, rehash), { migrated: 1, skipped: false, invalid: 1 });
+  assert.deepEqual(await rehashBillingCapabilities(pool, key), { migrated: 1, skipped: false, invalid: 1 });
   const repository = new ReconciliationRepository(pool), storage = createBillingCapabilityStorage(repository, { key });
   assert.deepEqual(await storage.get(d1), cap(1000), "S3 存的能力升级后照常读到");
   const [[bad]] = await pool.query("SELECT identity_scheme FROM reconciliation_billing_capabilities WHERE identity = 'not-a-digest'");
@@ -675,7 +674,7 @@ test("账单能力身份版本：S3 的三列旧表带数据升级；格式不�
   await insertOld(s3Identity(d2), 3000);
   await pool.query("DELETE FROM reconciliation_billing_capabilities WHERE identity = ?", [s3Identity(d2)]);
   // 换回新程序：没有要包装的行，W(D2) 又读得到（deploy/README.md 写明的限制）……
-  assert.deepEqual(await rehashBillingCapabilities(pool, rehash), { migrated: 0, skipped: true, invalid: 1 });
+  assert.deepEqual(await rehashBillingCapabilities(pool, key), { migrated: 0, skipped: true, invalid: 1 });
   assert.deepEqual(await storage.get(d2), cap(2000));
   // ……直到下一次作废，两种存法一起删
   await storage.delete(d2);

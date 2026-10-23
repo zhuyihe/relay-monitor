@@ -1,7 +1,7 @@
 // MySQL 连接池（mysql2/promise）。连接参数来自环境变量，见 .env.example
 import mysql from "mysql2/promise";
 import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues, migratedLedgerEntries } from "../lib/reconciliation-ledger.js";
-import { BILLING_CAPABILITY_IDENTITY_SCHEME, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME } from "../lib/billing-capability-storage.js";
+import { BILLING_CAPABILITY_IDENTITY_SCHEME, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME, wrapLegacyBillingIdentity } from "../lib/billing-capability-storage.js";
 
 let _pool = null;
 
@@ -277,12 +277,19 @@ async function backfillReconciliationLedger(pool) {
 
 const BILLING_IDENTITY_META_KEY = "billing_identity_hmac_v1";
 
+// 库里的能力：驱动把 JSON 列读成对象；有的库（或手改过的行）读出来是字符串，解得开、是对象才算数
+function capabilityObject(value) {
+  let parsed = value;
+  if (typeof parsed === "string") { try { parsed = JSON.parse(parsed); } catch { return null; } }
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+}
+
 // SHA / 旧 S3 HMAC 都无法仅靠摘要区分：把每个 legacy 身份包成 W(x)，显式标为 wrapped-v2。
 // 全局旧标记仅作为旧 S3 程序的迁移栅栏；新程序每次都扫描 legacy，处理回滚期间旧程序新写的行。
 // 能力、核验时间和栅栏同一事务提交；失败整体回滚并挡住启动，不触碰账本或快照。
-// rehash 对格式不对的身份返回 null（lib/billing-capability-storage.js 的 wrapLegacyBillingIdentity）：这种行留在原处、计进 invalid，
-// 不挡启动（它本来就对不上任何上游）。返回 { migrated, skipped, invalid }
-export async function rehashBillingCapabilities(pool, rehash) {
+// key 是账单身份密钥，包装用 lib/billing-capability-storage.js 的 wrapLegacyBillingIdentity。身份或能力格式不对的行
+// 留在原处、计进 invalid，不挡启动（它本来就对不上任何上游）；密钥没就绪照旧中止。返回 { migrated, skipped, invalid }
+export async function rehashBillingCapabilities(pool, key) {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -293,15 +300,15 @@ export async function rehashBillingCapabilities(pool, rehash) {
     );
     let migrated = 0, invalid = 0;
     for (const { identity, capability, verified_at: verifiedAt } of rows) {
-      const wrapped = rehash(identity);
-      if (!wrapped) { invalid += 1; continue; }
+      const wrapped = wrapLegacyBillingIdentity(key, identity), value = capabilityObject(capability);
+      if (!wrapped || !value) { invalid += 1; continue; }
       await conn.query(
         `INSERT INTO reconciliation_billing_capabilities (identity, capability, verified_at, identity_scheme) VALUES (?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
            capability = IF(identity_scheme <> ? OR VALUES(verified_at) > verified_at, VALUES(capability), capability),
            verified_at = IF(identity_scheme <> ? OR VALUES(verified_at) > verified_at, VALUES(verified_at), verified_at),
            identity_scheme = VALUES(identity_scheme)`,
-        [wrapped, typeof capability === "string" ? capability : JSON.stringify(capability), verifiedAt, BILLING_CAPABILITY_IDENTITY_SCHEME,
+        [wrapped, JSON.stringify(value), verifiedAt, BILLING_CAPABILITY_IDENTITY_SCHEME,
           BILLING_CAPABILITY_IDENTITY_SCHEME, BILLING_CAPABILITY_IDENTITY_SCHEME]
       );
       migrated += 1;
