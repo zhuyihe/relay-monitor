@@ -68,10 +68,11 @@
 | RELAY_SECRET_KEY 格式不对 | 不是 32 字节的 base64，常见是复制少了几位 | 对照备份重新填 |
 | RELAY_SECRET_KEY_FILE 指向的文件是空的 / 读不到 | 文件没挂载进容器，或者是空的 | 检查挂载和文件内容 |
 | RELAY_SECRET_KEY 和 RELAY_SECRET_KEY_FILE 只能配一个 | 两个都配了 | 删掉一个 |
-| `"code":"ECONNREFUSED"` 或 `"code":"ENOTFOUND"` | 连不上数据库：数据库还没起来，或者地址、端口填错了 | 看 db 容器在不在跑，核对 DB_HOST、DB_PORT |
-| `"code":"ER_ACCESS_DENIED_ERROR"` | 数据库的用户名或密码不对 | 核对 .env 里的 DB_USER、DB_PASSWORD |
-| `"code":"ER_BAD_DB_ERROR"` | 数据库里没有这个库 | 核对 DB_NAME |
-| 码以 `_DENIED_ERROR` 结尾（例如 `ER_TABLEACCESS_DENIED_ERROR`） | 数据库账号没有建表、改表的权限 | 给 DB_USER 授权这个库的全部权限 |
+| `"code":"ECONNREFUSED"`、`"code":"ENOTFOUND"` 或 `"code":"ETIMEDOUT"` | 连不上数据库：数据库还没起来，地址、端口填错了，或者被防火墙挡住 | 看 db 容器在不在跑，核对 DB_HOST、DB_PORT |
+| `"code":"ER_ACCESS_DENIED_ERROR"` | 数据库的用户名或密码不对 | 核对 .env 里的 DB_USER、DB_PASSWORD。compose 里的 MySQL 只在第一次建 mysql-data 时按 .env 建账号，之后改 .env 不会改库里的账号，要和第一次建库时的一致 |
+| `"code":"ER_BAD_DB_ERROR"` | 数据库里没有这个库 | 核对 DB_NAME，同样要和第一次建库时的一致 |
+| `"code":"ER_HOST_NOT_PRIVILEGED"` | 用的是外面的数据库，它不让这台机器登录 | 在数据库里给这台机器的地址授权 |
+| 其他以 `_DENIED_ERROR` 结尾的码（例如 `ER_DBACCESS_DENIED_ERROR`、`ER_TABLEACCESS_DENIED_ERROR`） | 数据库账号没有建表、改表的权限 | 给 DB_USER 授权这个库的全部权限 |
 
 ### 加密密钥丢了怎么办
 
@@ -109,13 +110,13 @@ docker compose up -d relay-monitor
 - 每日利润只自动补结「昨天」，回滚超过一天，期间那几天可能结不了。
 - 回滚到旧版 S3 或更早版本：旧程序不认识新的账单能力身份，Sub2API 上游可能回到未确认，期间没有消费的日子每日利润算不出来。旧程序有消费时重新确认，会按它自己的格式新增能力记录。
 - 换回新镜像启动时，会在同一个事务里将这些旧格式身份包装为 `wrapped-v2`，保留核验结果和核验时间；原来就有的新格式不再包装。同一身份冲突时保留核验时间较新的结果，零消费也能沿用已确认的能力。迁移失败会回滚并中止启动，修复数据库错误后可重试，不会改动固定账或账单快照。
-- 表里格式不对的旧记录（身份不是 64 位十六进制，或者能力那一列不是一条完整的记录，正常不会有）启动时跳过，日志写「跳过 N 条格式不对的旧 Sub2API 账单能力记录（BILLING_IDENTITY_INVALID）」，不挡启动。这些行对不上任何上游，不删也不影响使用，只是每次启动都会这样提示一次。要删的话，先停掉旧程序、启动过一次新镜像，这时表里还标着 `legacy` 的就只剩这些行：
+- 表里格式不对的旧记录（身份不是 64 位十六进制，或者能力那一列被手改坏、读不出一条记录，正常不会有）启动时跳过，日志写「跳过 N 条格式不对的旧 Sub2API 账单能力记录（BILLING_IDENTITY_INVALID）」，不挡启动。这些行对不上任何上游，不删也不影响使用，只是每次启动都会这样提示一次。要删的话，先停掉旧程序、启动过一次新镜像，这时表里还标着 `legacy` 的就只剩这些行：
   ```bash
   docker compose exec db sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" -e "DELETE FROM reconciliation_billing_capabilities WHERE identity_scheme = \"legacy\""'
   ```
 - 回滚期间旧程序作废（删掉）的账单能力，删不到新格式的那一行：换回新镜像后，这个 Sub2API 上游可能又按已确认算。只有回滚期间上游正好改了、不再支持按 Key 读账单时才会遇到：
   - 上游不再给按 Key 的账单：换回后下一轮读账单（通常几分钟内）就会自动作废。
-  - 上游还给账单、只是不再按日期过滤：要等离回滚前最后一次确认满 7 天、又有一天有消费，重新确认没通过才作废。这期间这个上游的每日利润可能算错，换回后留意一下它的每日利润。
+  - 上游还给账单、只是不再按日期或按 Key 过滤：要等离回滚前最后一次确认满 7 天、又有一天有消费，重新确认没通过才作废。这期间这个上游的每日利润可能算错，换回后留意一下它的每日利润。
 - 新增的 `identity_scheme` 列默认 `legacy`，兼容旧程序不带该列的写入；每次启动按行扫描，不靠一次性完成标记跳过。旧 `billing_identity_hmac_v1` 标记会保留或补上，阻止旧 S3 程序再次改写已包装身份。**部署切换前先停止旧程序，不要让不同版本同时连接同一库写账单能力。**
 - S3 之前的程序回滚期间仍可能写入裸 SHA 摘要；重新升级会处理当前表，但旧备份、二进制日志或回滚期间导出的数据仍须按上文清理。重新升级后的安全性不会追溯覆盖这些副本。
 - 库里的数据不会坏，换回新镜像就恢复。

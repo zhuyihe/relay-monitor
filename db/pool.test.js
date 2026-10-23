@@ -161,12 +161,18 @@ function capabilityPool({ rows = [], marker = false, failOn = null, failAfter = 
       if (sql.startsWith("SELECT k FROM meta")) return [draft.marker ? [{ k: params[0] }] : []];
       if (sql.startsWith("SELECT identity")) return [structuredClone(draft.rows.filter((r) => (r.identity_scheme || "legacy") === params[0]))];
       if (sql.startsWith("INSERT INTO reconciliation_billing_capabilities")) {
-        // 参数顺序和 SQL 一致：新行四列，再加 ON DUPLICATE KEY UPDATE 里比的两个版本名
-        const [identity, capability, verified_at, identity_scheme, keepScheme] = params;
+        // 参数顺序和 SQL 一致：新行四列，再加 ON DUPLICATE KEY UPDATE 里两个 IF 各自比的版本名。
+        // 两个赋值看到的都是旧行（verified_at 在它自己那个赋值之前没改）
+        const [identity, capability, verified_at, identity_scheme, capabilityKeep, verifiedKeep] = params;
         const incoming = { identity, capability: JSON.parse(capability), verified_at, identity_scheme };
         const index = draft.rows.findIndex((r) => r.identity.toLowerCase() === identity.toLowerCase());
         if (index < 0) draft.rows.push(incoming);
-        else if (draft.rows[index].identity_scheme !== keepScheme || Number(verified_at) > Number(draft.rows[index].verified_at)) draft.rows[index] = incoming;
+        else {
+          const old = draft.rows[index], newer = Number(verified_at) > Number(old.verified_at);
+          draft.rows[index] = { identity: old.identity,
+            capability: old.identity_scheme !== capabilityKeep || newer ? incoming.capability : old.capability,
+            verified_at: old.identity_scheme !== verifiedKeep || newer ? verified_at : old.verified_at, identity_scheme };
+        }
       }
       if (sql.startsWith("DELETE FROM reconciliation_billing_capabilities")) draft.rows = draft.rows.filter((r) => !(r.identity.toLowerCase() === params[0].toLowerCase() && (r.identity_scheme || "legacy") === params[1]));
       if (sql.startsWith("INSERT INTO meta")) draft.marker = true;

@@ -663,8 +663,11 @@ test("账单能力身份版本：S3 的三列旧表带数据升级；格式不�
     [identity, JSON.stringify(cap(at)), at]);
   await insertOld(s3Identity(d1), 1000);
   await insertOld("not-a-digest", 900);
+  // 能力那一列被手改成 JSON 字符串：驱动读出来是字符串，原样写回会报 ER_INVALID_JSON_TEXT
+  await pool.query("INSERT INTO reconciliation_billing_capabilities (identity, capability, verified_at) VALUES (?, JSON_QUOTE('x'), 950)",
+    [createHash("sha256").update("json-string").digest("hex")]);
   await ensureSchema(pool);
-  assert.deepEqual(await rehashBillingCapabilities(pool, key), { migrated: 1, skipped: false, invalid: 1 });
+  assert.deepEqual(await rehashBillingCapabilities(pool, key), { migrated: 1, skipped: false, invalid: 2 });
   const repository = new ReconciliationRepository(pool), storage = createBillingCapabilityStorage(repository, { key });
   assert.deepEqual(await storage.get(d1), cap(1000), "S3 存的能力升级后照常读到");
   const [[bad]] = await pool.query("SELECT identity_scheme FROM reconciliation_billing_capabilities WHERE identity = 'not-a-digest'");
@@ -674,7 +677,7 @@ test("账单能力身份版本：S3 的三列旧表带数据升级；格式不�
   await insertOld(s3Identity(d2), 3000);
   await pool.query("DELETE FROM reconciliation_billing_capabilities WHERE identity = ?", [s3Identity(d2)]);
   // 换回新程序：没有要包装的行，W(D2) 又读得到（deploy/README.md 写明的限制）……
-  assert.deepEqual(await rehashBillingCapabilities(pool, key), { migrated: 0, skipped: true, invalid: 1 });
+  assert.deepEqual(await rehashBillingCapabilities(pool, key), { migrated: 0, skipped: true, invalid: 2 });
   assert.deepEqual(await storage.get(d2), cap(2000));
   // ……直到下一次作废，两种存法一起删
   await storage.delete(d2);
