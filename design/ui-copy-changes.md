@@ -973,7 +973,7 @@ A2-2、A2-4 留下的两处「按浏览器所在时区算」，改成按业务�
 
 - 哪个平台的哪种回复给哪个码，在 `lib/notify.js` 顶部的对照表；码和那一句在 `lib/error-copy.js`。`deliveryErrorCode` 定先后：没连上对方算连不上（连接被重置也是，不原样带 ECONNRESET）→ 认得的码原样用（`SMTP_TLS_REQUIRED` 这类）→ 其余「没发出去」。原来用的是读上游那套 `errorCodeOf`，会把 Telegram 的「Unauthorized」归成上游的登录信息过期。
 - 推荐的关键词是「炬元」（10-23 用户定）：告警中心落款「炬元告警中心」、测试消息、日报标题「【炬元日报】」和落款「由炬元控制台生成」都带这两个字，日报不用另加落款。原来推荐「炬元告警中心」，照着设了日报会被拒收。关键词只写一处：`lib/brand.js` 的 `NOTIFY_KEYWORD`（取品牌名），测试守着日报和测试消息都带它。
-- 钉钉现网的说明多是中文「错误描述:…;解决方案:…」，只看描述那段（解决方案里会顺带提到「签名」「时间戳」）。Server酱查不到公开的错误码表：回了 200 但不成功一律算「没收下」，HTTP 出错时按 HTTP 状态。
+- 钉钉现网的说明是「错误描述:…;解决方案:…」或「description:…;solution:…」，只看描述那段（解决方案里会顺带提到「签名」「时间戳」）。「签名过期」是服务器时间不准，和时间戳不对一样算「没发出去」，不说成密钥不对。Server酱查不到公开的错误码表：回了 200 但不成功一律算「没收下」，HTTP 出错时按 HTTP 状态。
 - 「没连上对方」原来读上游（`lib/providers.js` 的 `NETWORK_ERROR_CODES`）和通知方式各认一份，合成 `lib/error-copy.js` 的 `connectionFailed`，两边都用。读上游的结果不变（原来就把「fetch failed」整个算连不上）。
 - 「查看详细原因」里，fetch 原来只有一句「fetch failed」；现在后面补上底层原因，例如「fetch failed（connect ECONNREFUSED 127.0.0.1:443）」「fetch failed（UNABLE_TO_VERIFY_LEAF_SIGNATURE：unable to verify the first certificate）」，同样打码（`errorDetail`）。读上游的详细原因还是原样，没跟着改。
 - 接口：`/api/notifications/test` 的结果一定带 `code`（原文照旧在 `error` 里，打过码），类型认不出时照常回 200；找不到通知方式、没说测哪个时 400 带码。新增、编辑通知方式时类型不对、已经删了，带 `NOTIFY_TYPE_UNSUPPORTED`、`NOTIFY_NOT_FOUND`。状态码都不变。
