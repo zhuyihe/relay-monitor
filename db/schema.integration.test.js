@@ -623,6 +623,8 @@ test("账单能力身份版本：混合旧格式、回滚再升级、碰撞合�
   await insertLegacy(digests[0], 500);
   await rehashBillingCapabilities(pool, key);
   assert.deepEqual(await storage.get(digests[0]), cap(3000), "较旧 legacy 不覆盖新核验结果");
+  const [[kept]] = await pool.query("SELECT verified_at AS verifiedAt FROM reconciliation_billing_capabilities WHERE identity = ?", [wrap(digests[0])]);
+  assert.equal(Number(kept.verifiedAt), 3000, "核验时间那一列也没被改成较旧的");
   // 两个历史别名都存在时删除必须一次移除，不能从另一个别名复活。
   await repository.saveBillingCapability(billingCapabilityAliases(key, digests[1])[0], cap(4000));
   await storage.delete(digests[1]);
