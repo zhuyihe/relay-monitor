@@ -81,6 +81,9 @@ test("POST /api/notifications/test：测试消息写通知方式的名字和业�
   assert.equal(lines[1], "这是一条来自炬元控制台的测试消息。");
   assert.equal(lines[2], "通知方式：运维群");
   assert.match(lines[3], /^时间：(\d{4}年)?\d{1,2}月\d{1,2}日 \d{1,2}:\d{2}$/);
+  // 最后一行和推送一样是落款（§10）
+  assert.equal(lines[4], "炬元告警中心");
+  assert.equal(lines.length, 5);
   // 弹窗里填的名字优先；还没保存、也没起名字时写类型名，不写 telegram
   await POST(post({ channelId: "c1", name: " 值班群 " }), rt);
   assert.equal(sent.at(-1).text.split("\n")[2], "通知方式：值班群");

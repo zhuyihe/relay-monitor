@@ -1,4 +1,5 @@
 // 渠道对账使用独立的告警去重状态，但复用已有推送渠道。
+import { BRAND } from "../lib/brand.js";
 import { broadcast } from "../lib/notify.js";
 import { reconciliationIssue } from "../lib/reconciliation-contract.js";
 
@@ -42,6 +43,9 @@ export async function notifyReconciliationHealth(rt, repo, rule, result) {
     `影响渠道：${affected}`,
     `窗口：${new Date(window.startMs || now).toLocaleString("zh-CN", { hour12: false })} — ${new Date(window.endMs || now).toLocaleString("zh-CN", { hour12: false })}`,
     result.health.detail ? `说明：${result.health.detail}` : "",
+    // 和余额推送一样，最后一行是落款（design/ui-copy-spec.md §10）：钉钉、飞书设了关键词「炬元」的机器人靠它收下。
+    // 这个文件在 E 里整个删掉，这里只加这一行，别的不动
+    BRAND.notificationSignature,
   ].filter(Boolean).join("\n");
   await broadcast(rt.store.channels, title, body);
 }

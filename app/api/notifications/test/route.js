@@ -40,7 +40,8 @@ export const POST = withAuth(async (request, rt) => {
   const r = await sendToChannel(
     channel,
     `【测试通知】${BRAND.notificationSignature}`,
-    [`这是一条来自${BRAND.productName}的测试消息。`, `通知方式：${name}`, `时间：${formatZonedDateTime(Date.now(), businessTimeZone())}`].join("\n"),
+    // 最后一行和推送一样是落款（§10），测试能过，真推送也能过
+    [`这是一条来自${BRAND.productName}的测试消息。`, `通知方式：${name}`, `时间：${formatZonedDateTime(Date.now(), businessTimeZone())}`, BRAND.notificationSignature].join("\n"),
     { event: "test" }
   );
   return json(r);
