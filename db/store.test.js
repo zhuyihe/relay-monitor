@@ -5,7 +5,7 @@ import { refreshStation } from "../server/refresh.js";
 import { selectCostUpstreams } from "../server/own-helpers.js";
 import { evaluateStation } from "../lib/alerts.js";
 
-function fakePool(stations = []) {
+function fakePool(stations = [], channels = []) {
   const conn = {
     beginTransaction: async () => {},
     query: async () => [[]],
@@ -22,7 +22,7 @@ function fakePool(stations = []) {
         return [[
           { k: "settings", v: {} },
           { k: "auth", v: { username: "admin", salt: "test", hash: "test" } },
-          { k: "notifications", v: { channels: [], rules: {} } },
+          { k: "notifications", v: { channels: structuredClone(channels), rules: {} } },
         ]];
       }
       return [[]];
@@ -324,12 +324,16 @@ test("重新标记不再续费会重置单次提醒资格", async () => {
   store.data.stations = [{
     id: "station-1",
     noRenewal: true,
-    alertState: { state: "warn", notifiedAt: 10, noRenewalLowNotifiedAt: 20, pendingDelivery: { kind: "noRenewalLow", attempts: 1 } },
+    alertState: { state: "warn", notifiedAt: 10, noRenewalLowNotifiedAt: 20, pendingDelivery: { kind: "noRenewalLow", attempts: 1 },
+      incidents: { noRenewalLow: { kind: "noRenewalLow", attempts: 1 }, eta: { kind: "eta", attempts: 2 } } },
   }];
 
   await store.update("station-1", { noRenewal: false });
   assert.equal(store.get("station-1").alertState.noRenewalLowNotifiedAt, undefined);
   assert.equal(store.get("station-1").alertState.pendingDelivery, undefined);
+  // 单次提醒那件事的记录清掉，别的留着
+  assert.deepEqual(store.get("station-1").alertState.incidents, { eta: { kind: "eta", attempts: 2 } });
+  assert.equal(store.get("station-1").alertState.notifiedAt, 10);
   await store.update("station-1", { noRenewal: true });
   assert.equal(store.get("station-1").noRenewal, true);
 
@@ -652,16 +656,11 @@ test("通知方式编辑：密钥留空沿用，其他字段留空就清空，�
   assert.equal(store.channels[0].config.password, "app-pass");
 });
 
-test("通知投递版本只随实际发送配置改变，不持久化凭据指纹；改名和相同配置不作废重试", async () => {
-  const store = await new Store(fakePool()).load();
-  const ch = await store.addChannel({ type: "smtp", name: "邮件", config: { host: "smtp.example", password: "secret-pass", from: "a@example.com", to: "b@example.com" } });
-  assert.equal(store.channels[0].deliveryVersion, 1);
-  await store.updateChannel(ch.id, { name: "新名字", enabled: false });
-  assert.equal(store.channels[0].deliveryVersion, 1);
-  await store.updateChannel(ch.id, { config: { password: "", to: "b@example.com" } });
-  assert.equal(store.channels[0].deliveryVersion, 1);
-  await store.updateChannel(ch.id, { config: { to: "c@example.com" } });
-  assert.equal(store.channels[0].deliveryVersion, 2);
-  await assert.rejects(store.updateChannel(ch.id, { config: { host: "other.example" } }), { code: "ENDPOINT_CHANGED_SECRET_REQUIRED" });
-  assert.equal(store.channels[0].deliveryVersion, 2);
+
+test("读库时去掉 #42 给通知方式记的投递版本（补发改成按 id 认以后没用了），接口也就不回传", async () => {
+  const store = await new Store(fakePool([], [{ id: "ch-1", type: "webhook", name: "运维群", enabled: true, deliveryVersion: 3, config: { url: "https://hooks.example.com/x" } }])).load();
+  assert.equal("deliveryVersion" in store.channels[0], false);
+  assert.equal(store.channels[0].config.url, "https://hooks.example.com/x");
+  const added = await store.addChannel({ type: "webhook", name: "新的", config: { url: "https://hooks.example.com/y" } });
+  assert.equal("deliveryVersion" in added, false);
 });

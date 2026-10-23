@@ -15,7 +15,7 @@ import {
   uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, segmentFromRow,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
 } from "../reconciliation-repository.js";
-import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../../lib/billing-capability-storage.js";
+import { BILLING_CAPABILITY_IDENTITY_SCHEME, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME } from "../../lib/billing-capability-storage.js";
 
 const JSON_COLUMNS = new Set(["source_binding", "source", "capability", "detail"]);
 
@@ -476,7 +476,7 @@ export class MemoryReconciliationRepository {
   async getBillingCapability(identity, scheme = BILLING_CAPABILITY_IDENTITY_SCHEME) {
     await this.#read("getBillingCapability", [identity]);
     const row = this.#capabilityEntry(identity)?.row;
-    return row && sameText(row.identity_scheme ?? "legacy", scheme) ? fresh(row).capability : null;
+    return row && sameText(row.identity_scheme ?? LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME, scheme) ? fresh(row).capability : null;
   }
 
   async saveBillingCapability(identity, capability, scheme = BILLING_CAPABILITY_IDENTITY_SCHEME) {
@@ -492,7 +492,7 @@ export class MemoryReconciliationRepository {
     await this.hooks.beforeCapabilityWrite?.("deleteBillingCapability", identity);
     this.log.capabilityWrites.push({ method: "deleteBillingCapability", identity });
     const identities = Array.isArray(identity) ? identity : [identity];
-    const existing = this.#rows("capabilities").filter(({ row }) => sameText(row.identity_scheme ?? "legacy", scheme)
+    const existing = this.#rows("capabilities").filter(({ row }) => sameText(row.identity_scheme ?? LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME, scheme)
       && identities.some((id) => sameText(row.identity, id)));
     if (existing.length) this.#delete(null, "capabilities", existing);
   }
