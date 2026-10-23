@@ -154,6 +154,8 @@ test("余额推送拼出来的整句也不出现 §3.6 的词和多余的英文�
   await push({ id: "c", name: "", type: "newapi", balance: { ok: true, remaining: 50 } }, { burnPerDay: 20, etaDays: 2.5 });
   await push({ id: "d", name: "包月上游", type: "newapi", noRenewal: true, balance: { ok: true, remaining: 3 } }, { burnPerDay: 0, etaDays: null });
   assert.equal(sent.length, 7);
+  // 每种都以落款结尾：钉钉、飞书机器人的关键词靠它（§10）
+  assert.deepEqual(sent.map(({ body }) => body.split("\n").at(-1)), sent.map(() => "炬元告警中心"));
   const texts = sent.flatMap(({ title, body }) => [title, ...body.split("\n")]);
   assert.deepEqual(texts.flatMap((text) => FORBIDDEN.filter((word) => text.includes(word)).map((word) => `「${word}」${text}`)), []);
   assert.deepEqual(texts.filter((text) => leftoverEnglish("", text)), []);
