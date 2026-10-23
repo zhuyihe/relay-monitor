@@ -961,7 +961,7 @@ A2-2、A2-4 留下的两处「按浏览器所在时区算」，改成按业务�
 | 什么时候 | 原来 | 现在 |
 |---|---|---|
 | Telegram Token 不对（401、404）、钉钉加签不对或机器人不存在、飞书地址或签名不对、企业微信地址不对、Bark 的 Device Key 找不到、Resend 的 Key 不对、Webhook / ntfy 回 401 / 403 / 404 | 对方原文，例如「Unauthorized」「错误描述:机器人发送签名不匹配;…」 | 通知方式的地址、Token 或密钥不对，请编辑后重新填 |
-| 钉钉、飞书的机器人设了关键词 | 「错误描述:关键词不匹配;…」「keywords not in content」「Key Words Not Found」 | 机器人设了关键词，消息里没有：请把关键词设成「炬元告警中心」 |
+| 钉钉、飞书的机器人设了关键词 | 「错误描述:关键词不匹配;…」「keywords not in content」「Key Words Not Found」 | 机器人设了关键词，消息里没有：请把关键词设成「炬元」 |
 | 对方回了话但没收下（Telegram 机器人被拉黑、聊天找不到，钉钉 IP 白名单、机器人已停用，Resend 发件人域名没验证，Server酱回了错误，邮件服务器一上来就拒绝或收件人被拒，内容太长） | 对方原文 | 对方没收下这条消息，请检查发件人、收件人、群或机器人的设置 |
 | 限流、对方出故障（429、5xx、钉钉 410100 / 130101、飞书 11232、企业微信 45009，SMTP 4xx） | 对方原文 | 对方暂时繁忙，请稍后再试 |
 | 必填的没填 | Telegram 空 Token 会照样去请求、拿回 404；Resend「缺少收件人」 | 这个通知方式没填全，请编辑后补上（不发请求） |
@@ -972,6 +972,7 @@ A2-2、A2-4 留下的两处「按浏览器所在时区算」，改成按业务�
 | 认不出原因 | 原文 | 没发出去，请把详细原因发给技术同事 [查看详细原因] |
 
 - 哪个平台的哪种回复给哪个码，在 `lib/notify.js` 顶部的对照表；码和那一句在 `lib/error-copy.js`。`deliveryErrorCode` 定先后：没连上对方算连不上（连接被重置也是，不原样带 ECONNRESET）→ 认得的码原样用（`SMTP_TLS_REQUIRED` 这类）→ 其余「没发出去」。原来用的是读上游那套 `errorCodeOf`，会把 Telegram 的「Unauthorized」归成上游的登录信息过期。
+- 推荐的关键词是「炬元」（10-23 用户定）：告警中心落款「炬元告警中心」、测试消息、日报标题「【炬元日报】」和落款「由炬元控制台生成」都带这两个字，日报不用另加落款。原来推荐「炬元告警中心」，照着设了日报会被拒收。关键词只写一处：`lib/brand.js` 的 `NOTIFY_KEYWORD`（取品牌名），测试守着日报和测试消息都带它。
 - 钉钉现网的说明多是中文「错误描述:…;解决方案:…」，只看描述那段（解决方案里会顺带提到「签名」「时间戳」）。Server酱查不到公开的错误码表：回了 200 但不成功一律算「没收下」，HTTP 出错时按 HTTP 状态。
 - 「没连上对方」原来读上游（`lib/providers.js` 的 `NETWORK_ERROR_CODES`）和通知方式各认一份，合成 `lib/error-copy.js` 的 `connectionFailed`，两边都用。读上游的结果不变（原来就把「fetch failed」整个算连不上）。
 - 「查看详细原因」里，fetch 原来只有一句「fetch failed」；现在后面补上底层原因，例如「fetch failed（connect ECONNREFUSED 127.0.0.1:443）」「fetch failed（UNABLE_TO_VERIFY_LEAF_SIGNATURE：unable to verify the first certificate）」，同样打码（`errorDetail`）。读上游的详细原因还是原样，没跟着改。

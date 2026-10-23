@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../db/store.js";
+import { BRAND, NOTIFY_KEYWORD } from "../lib/brand.js";
 import { reportDayWindow, sendReport, startReportScheduler } from "./report.js";
 
 const START = Date.parse("2026-10-08T01:00:00Z"); // 北京时间 09:00
@@ -38,13 +39,15 @@ function setup(t, { now = START, own = true, channels = ["a", "b"] } = {}) {
   store.data.notifications.channels = channels.map((id) => ({ id, type: "webhook", name: id, config: { url: `https://notify.example/${id}` } }));
   const rt = { store, history: {} };
   const deliveries = [];
+  const sentBodies = [];
   const failures = new Set();
   const controls = { beforeData: null, afterDelivery: null };
-  t.mock.method(globalThis, "fetch", async (input) => {
+  t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(input);
     if (url.hostname === "notify.example") {
       const id = url.pathname.slice(1);
       deliveries.push(id);
+      sentBodies.push(JSON.parse(init.body));
       controls.afterDelivery?.(id);
       return new Response("{}", { status: failures.has(id) ? 503 : 200 });
     }
@@ -55,7 +58,7 @@ function setup(t, { now = START, own = true, channels = ["a", "b"] } = {}) {
   t.mock.method(globalThis, "setInterval", (fn) => { tick = fn; return 1; });
   t.mock.method(globalThis, "clearInterval", () => {});
   startReportScheduler(rt);
-  return { rt, database, deliveries, failures, controls, tick: () => tick() };
+  return { rt, database, deliveries, sentBodies, failures, controls, tick: () => tick() };
 }
 
 test("日报生成失败不标记已发送，并在计划分钟后重试", async (t) => {
@@ -173,6 +176,17 @@ test("立即发送：没有启用渠道时直接报错，不去读上游生成�
   const h = setup(t, { channels: [] });
   await assert.rejects(sendReport(h.rt), { code: "REPORT_NO_CHANNELS" });
   assert.equal(globalThis.fetch.mock.callCount(), 0);
+});
+
+test("日报的标题和正文都带推荐给机器人设的关键词（炬元），钉钉、飞书设了关键词也能收到", async (t) => {
+  const h = setup(t, { channels: ["a"] });
+  await sendReport(h.rt);
+  const [{ title, body }] = h.sentBodies;
+  assert.equal(NOTIFY_KEYWORD, BRAND.name);
+  assert.ok(title.includes(NOTIFY_KEYWORD), title);
+  assert.ok(body.includes(NOTIFY_KEYWORD), body.slice(0, 80));
+  // 告警中心的落款、日报的落款也都带
+  for (const signature of [BRAND.notificationSignature, BRAND.reportSignature]) assert.ok(signature.includes(NOTIFY_KEYWORD), signature);
 });
 
 test("立即发送：返回每个渠道的结果列表", async (t) => {
