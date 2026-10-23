@@ -6,7 +6,7 @@ import { forecastDaily } from "../lib/forecast.js";
 import { BRAND } from "../lib/brand.js";
 import { broadcast } from "../lib/notify.js";
 import { fmtEta } from "../lib/alerts.js";
-import { readOwnIncome, computeProfit } from "./own-helpers.js";
+import { readOwnIncomeOrUnconfirmed, unconfirmedProfit, computeProfit } from "./own-helpers.js";
 import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
 import { errorText } from "../lib/error-copy.js";
 import { OWN_STATION_UNSET } from "../lib/format.js";
@@ -62,9 +62,11 @@ export async function buildReport(rt) {
     queryOwnData(own, wideStart, dayEnd, "model"),
     queryOwnData(own, dayStart, dayEnd, "user"),
   ]);
-  const { users: ownUsers, adminSet, incomeUsd, adminUsageUsd: adminUsd, resold } = await readOwnIncome(
+  // 收入确认不了时日报照发、利润不写（design/ui-copy-spec.md §10）：收入那几项写「没读到（原因）」，别的照常
+  const { users: ownUsers, adminSet, incomeUsd, adminUsageUsd: adminUsd, resold, unconfirmed } = await readOwnIncomeOrUnconfirmed(
     rt, own, userRows, { startMs: dayStart, endMs: dayEnd, tz }
   );
+  const incomeMissing = unconfirmed ? `没读到（${errorText(unconfirmed)}）` : null;
 
   // 昨日聚合
   const agg = (rows) => {
@@ -84,7 +86,9 @@ export async function buildReport(rt) {
   const totalTokens = byModel.reduce((a, m) => a + m.tokens, 0);
   const totalReqs = byModel.reduce((a, m) => a + m.requests, 0);
   // 昨日利润（成本窗口 = 昨日自然日）
-  const profit = await computeProfit(rt, own, incomeUsd, adminUsd, { startMs: dayStart, now: dayEnd, tz, range: "7d", resold });
+  const profit = unconfirmed
+    ? unconfirmedProfit(unconfirmed)
+    : await computeProfit(rt, own, incomeUsd, adminUsd, { startMs: dayStart, now: dayEnd, tz, range: "7d", resold });
 
   // 日序列（近 34 天，不含今天）→ 环比与预测
   // 按日期标签逐日推进（不加 24h），夏令时时区也不会错位
@@ -129,7 +133,8 @@ export async function buildReport(rt) {
   L.push("");
   L.push("■ 经营概览");
   L.push(`昨日消费：${rptCny(totalCost * ownRate)}${prev != null ? `（环比 ${pctDelta(totalCost, prev)}，近7天日均 ${rptCny(avg7 * ownRate)} ${pctDelta(totalCost, avg7)}）` : ""}`);
-  L.push(`收入(不含管理员自用)：${rptCny(incomeUsd * ownRate)} ｜ 管理员自用：${rptCny(adminUsd * ownRate)}`);
+  if (incomeMissing) L.push(`收入、管理员自用、毛利、净利：${incomeMissing}`);
+  else L.push(`收入(不含管理员自用)：${rptCny(incomeUsd * ownRate)} ｜ 管理员自用：${rptCny(adminUsd * ownRate)}`);
   if (profit && !profit.error) {
     L.push(`上游成本：${rptCny(profit.upstreamCostCny)} ｜ 毛利：${rptCny(profit.grossProfitCny)}${profit.grossMarginPct != null ? `（毛利率 ${profit.grossMarginPct}%）` : ""}`);
     L.push(`固定成本：${rptCny(profit.fixedCostCny)} ｜ 净利：${rptCny(profit.netProfitCny)}${profit.netMarginPct != null ? `（净利率 ${profit.netMarginPct}%）` : ""}`);
@@ -161,6 +166,9 @@ export async function buildReport(rt) {
   if (ownUsers) {
     L.push("");
     L.push(`■ 用户余额合计：${rptCny(balanceTotal)}（预收，${ownUsers.filter((u) => u.role < 10).length} 个用户）`);
+  } else if (incomeMissing) {
+    L.push("");
+    L.push(`■ 用户余额合计：${incomeMissing}`);
   }
   if (fc) {
     L.push("");
@@ -173,7 +181,7 @@ export async function buildReport(rt) {
   L.push(`${BRAND.reportSignature} · 统计区间为 ${dateLabel} 00:00–24:00`);
   const html = buildReportHtml(rt, {
     own, dateLabel, dow, ownRate, tz,
-    totalCost, prev, avg7, incomeUsd, adminUsd, profit,
+    totalCost, prev, avg7, incomeUsd, adminUsd, profit, incomeMissing,
     totalReqs, totalTokens, activeUsers: byUser.length,
     byModel, byUser, daily, fc, upstreams, balanceTotal,
     userCount: (ownUsers || []).filter((u) => u.role < 10).length, hasUsers: !!ownUsers,
@@ -294,9 +302,11 @@ function buildReportHtml(rt, d) {
     <tr><td style="padding:0 12px 8px;${font}font-size:12px;color:${C.sub}">${esc(d.dateLabel)}（周${esc(d.dow)}）· ${esc(BRAND.reportSignature)}</td></tr>
     <tr><td><table width="100%" cellpadding="0" cellspacing="0"><tr>
       ${kpi("昨日消费", money(d.totalCost * d.ownRate), d.prev != null ? `环比 ${pctDelta(d.totalCost, d.prev)} · 7日均 ${pctDelta(d.totalCost, d.avg7)}` : "", null)}
-      ${kpi("收入（不含管理员自用）", money(d.incomeUsd * d.ownRate), d.adminUsd > 0 ? `管理员自用 ${money(d.adminUsd * d.ownRate)}` : "", null)}
-      ${kpi("毛利", profitOk ? money(d.profit.grossProfitCny) : "—", profitOk ? marginSub("毛利率", d.profit.grossMarginPct, "上游成本", d.profit.upstreamCostCny) : "", profitOk ? signColor(d.profit.grossProfitCny) : null)}
-      ${kpi("净利", profitOk ? money(d.profit.netProfitCny) : "—", profitOk ? marginSub("净利率", d.profit.netMarginPct, "固定成本", d.profit.fixedCostCny) : "", profitOk ? signColor(d.profit.netProfitCny) : null)}
+      ${d.incomeMissing
+        ? kpi("收入（不含管理员自用）", "没读到", errorText({ code: "OWN_INCOME_UNCONFIRMED" }), null)
+        : kpi("收入（不含管理员自用）", money(d.incomeUsd * d.ownRate), d.adminUsd > 0 ? `管理员自用 ${money(d.adminUsd * d.ownRate)}` : "", null)}
+      ${kpi("毛利", profitOk ? money(d.profit.grossProfitCny) : d.incomeMissing ? "没读到" : "—", profitOk ? marginSub("毛利率", d.profit.grossMarginPct, "上游成本", d.profit.upstreamCostCny) : "", profitOk ? signColor(d.profit.grossProfitCny) : null)}
+      ${kpi("净利", profitOk ? money(d.profit.netProfitCny) : d.incomeMissing ? "没读到" : "—", profitOk ? marginSub("净利率", d.profit.netMarginPct, "固定成本", d.profit.fixedCostCny) : "", profitOk ? signColor(d.profit.netProfitCny) : null)}
     </tr></table></td></tr>
     ${section("近 14 天消费趋势", trend)}
     ${section(`用量：请求 ${d.totalReqs.toLocaleString("en-US")} 次 · 计费 Tokens ${rptTok(d.totalTokens)}（不含缓存读写）· 活跃用户 ${d.activeUsers} 个`, "")}
@@ -305,7 +315,8 @@ function buildReportHtml(rt, d) {
     ${profitWarnings ? section("利润口径", profitWarnings) : ""}
     ${costRows ? section("成本明细（昨日）", costRows) : ""}
     ${section("上游余额", upRows)}
-    ${d.hasUsers ? section(`用户余额合计：${money(d.balanceTotal)}（预收 · ${d.userCount} 个用户）`, "") : ""}
+    ${d.hasUsers ? section(`用户余额合计：${money(d.balanceTotal)}（预收 · ${d.userCount} 个用户）`, "")
+      : d.incomeMissing ? section(`用户余额合计：${d.incomeMissing}`, "") : ""}
     ${outlook ? section("展望", outlook) : ""}
     <tr><td style="padding:16px 12px;${font}font-size:11px;color:${C.sub}">${esc(BRAND.reportSignature)} · 每日经营日报 · 统计区间为 ${esc(d.dateLabel)} 00:00–24:00</td></tr>
   </table></td></tr></table></body></html>`;

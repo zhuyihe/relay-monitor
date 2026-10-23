@@ -36,8 +36,7 @@ const COPY = {
   // 成本明细里某个上游读用量失败（改按余额变化估算）时，名字下面那句的开头
   usageUnread: "读不到用量",
 };
-// 服务端给的报错（{ error, errorCode }）归成一句，原文进「查看详细原因」
-const errorNoteOf = (x: any) => noteOf({ code: x.errorCode, message: x.error });
+// 服务端给的报错（{ error, errorCode }）整个交给 noteOf：按 errorCode 归成一句，原文进「查看详细原因」
 
 // 自营站点的售价：设置了是「1 美元额度 = 7.2 元」，没设置是空串（界面写 SELL_PRICE_UNSET）
 const sellPriceOf = (station: any) => (rateSnapshotOf(station).source === "configured" && formatSellPrice(station.cnyPerUsd)) || "";
@@ -220,7 +219,7 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
               label: "状态",
               render: (k) => {
                 if (!k.error) return <span className="jy-muted">卖给用户用，算进收入</span>;
-                const note = errorNoteOf(k);
+                const note = noteOf(k);
                 return (
                   <>
                     <StatusTag level="warn">{COPY.unread}</StatusTag>
@@ -339,7 +338,7 @@ function CostSection({ p }: { p: any }) {
               label: "上游",
               sort: (c) => c.name,
               render: (c) => {
-                const note = c.error ? errorNoteOf(c) : null;
+                const note = c.error ? noteOf(c) : null;
                 return (
                   <div className="jy-res-name">
                     <b style={{ fontWeight: 500 }}>{c.name}</b>

@@ -198,19 +198,53 @@ test("立即发送：返回每个渠道的结果列表", async (t) => {
   assert.deepEqual(h.deliveries, ["a", "b"]);
 });
 
-test("角色目录读不到时日报生成失败，不能发送虚假的收入和利润", async (t) => {
+test("角色目录读不到时日报照发：收入、管理员自用、毛利、净利、预收写「没读到」，不写虚假的收入和利润，别的照常", async (t) => {
   const h = setup(t);
   const sent = [];
-  t.mock.method(globalThis, "fetch", async (input) => {
+  t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(input);
-    if (url.host === "notify.example") sent.push(url.pathname);
+    if (url.host === "notify.example") { sent.push(JSON.parse(init.body)); return new Response("{}", { status: 200 }); }
     return url.pathname === "/api/user/"
       ? Response.json({ success: false, message: "unavailable" }, { status: 503 })
       : Response.json({ success: true, data: [] });
   });
-  await assert.rejects(sendReport(h.rt), { code: "OWN_INCOME_UNCONFIRMED" });
-  assert.deepEqual(sent, []);
-  assert.equal(h.rt.store.settings.dailyReport.lastSent, null);
+  const result = await sendReport(h.rt);
+  assert.equal(result.ok, true);
+  assert.equal(sent.length, 2);
+  const { body } = sent[0];
+  assert.match(body, /收入、管理员自用、毛利、净利：没读到（用户身份或转售记录没读全）/);
+  assert.match(body, /■ 用户余额合计：没读到（用户身份或转售记录没读全）/);
+  // 利润不写：没有收入、毛利、净利、上游成本的数字
+  assert.doesNotMatch(body, /收入\(不含管理员自用\)：|毛利：¥|净利：¥|上游成本：/);
+  // 别的照常
+  assert.match(body, /■ 用量/);
+  assert.match(body, /■ 上游余额/);
+  const report = await buildReport(h.rt);
+  assert.match(report.html, /没读到/);
+  assert.doesNotMatch(report.html, /NaN/);
+});
+
+test("转售记录没读全、用户列表读得到时：收入那几项写「没读到」，预收和管理员标记照常", async (t) => {
+  const h = setup(t);
+  h.rt.store.data.stations[0].resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
+  const { dayStart } = reportDayWindow();
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    if (url.host === "notify.example") return new Response("{}", { status: 200 });
+    if (url.pathname === "/api/user/") return Response.json({ success: true, data: { items: [
+      { id: 1, username: "root", role: 100, quota: 0, used_quota: 0, status: 1 },
+      { id: 2, username: "customer", role: 1, quota: 5 * 500000, used_quota: 0, status: 1 },
+    ], total: 2 } });
+    if (url.pathname === "/api/data/users") return Response.json({ success: true, data: [
+      { username: "root", created_at: (dayStart + 3600000) / 1000, quota: 2 * 500000, token_used: 1, count: 1 },
+    ] });
+    if (url.pathname === "/api/log/stat") return Response.json({ success: false, message: "unavailable" }, { status: 503 });
+    return Response.json({ success: true, data: [] });
+  });
+  const { text } = await buildReport(h.rt);
+  assert.match(text, /收入、管理员自用、毛利、净利：没读到（用户身份或转售记录没读全）/);
+  assert.match(text, /■ 用户余额合计：¥5\.00（预收，1 个用户）/);
+  assert.match(text, /1\. root（管理员）/);
 });
 
 test("日报与自营分析共用已确认的收入分类，管理员自用不计收入，异步修改售价不混入同一份日报", async (t) => {

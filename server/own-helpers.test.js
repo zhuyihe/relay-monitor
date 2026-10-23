@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   aggregateFlow, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
-  readOwnIncome, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
+  readOwnIncome, readOwnIncomeOrUnconfirmed, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
 } from "./own-helpers.js";
 import { History } from "../db/history.js";
 import { dayStartInTz } from "../lib/business-time.js";
@@ -55,10 +55,59 @@ test("1 元收入分成 7 天仍合计 1 元，不逐项舍入成 0.98 元", asy
   assert.ok(result.incomeDaily.every((d) => d.incomeCny === 0.14 || d.incomeCny === 0.15));
 });
 
-test("没读到消费用户的角色时不默认其为客户", async () => {
+// 用户列表接口：返回 list 里的用户，记下读了几次
+function mockUserList(t, list) {
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    calls.push(url.pathname);
+    if (url.pathname === "/api/user/") return Response.json({ success: true, data: { items: list, total: list.length } });
+    throw new Error(`unexpected path ${url.pathname}`);
+  });
+  return calls;
+}
+
+test("没读到消费用户的角色时不默认其为客户：先重读一次用户列表，还没有才算确认不了", async (t) => {
   const f = incomeFixture();
   f.rt._ownUsersCache.list = f.users.filter((u) => u.username !== "root");
+  const calls = mockUserList(t, f.users.filter((u) => u.username !== "root"));
   await assert.rejects(readOwnIncome(f.rt, f.own, f.rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.deepEqual(calls, ["/api/user/"], "只重读一次");
+});
+
+test("缓存里没有的用户（刚注册就有消费）：重读一次用户列表后照常算收入，缓存也更新", async (t) => {
+  const f = incomeFixture();
+  const newbie = { id: 3, username: "newbie", role: 1 };
+  const calls = mockUserList(t, [...f.users, newbie]);
+  const rows = [...f.rows, { key: "newbie", t: f.window.startMs + 86400000 + 7200000, cost: 5 }];
+  const result = await readOwnIncome(f.rt, f.own, rows, f.window);
+  assert.equal(result.incomeUsd, 15);
+  assert.deepEqual(calls, ["/api/user/"]);
+  assert.ok(f.rt._ownUsersCache.list.some((u) => u.username === "newbie"));
+  // 用户都在缓存里时不重读
+  calls.length = 0;
+  await readOwnIncome(f.rt, f.own, rows, f.window);
+  assert.deepEqual(calls, []);
+});
+
+test("readOwnIncomeOrUnconfirmed：确认不了时不中止，收入是 null；用户列表读得到就照常给出，读不到是 null", async (t) => {
+  // 用户列表读不到
+  const f = incomeFixture();
+  t.mock.method(globalThis, "fetch", async () => Response.json({ success: false, message: "unavailable" }, { status: 503 }));
+  const lost = await readOwnIncomeOrUnconfirmed({}, f.own, f.rows, f.window);
+  assert.equal(lost.unconfirmed.code, "OWN_INCOME_UNCONFIRMED");
+  assert.deepEqual([lost.users, lost.incomeUsd, lost.adminUsageUsd, lost.resold, lost.incomeDaily, lost.adminSet.size], [null, null, null, null, null, 0]);
+  // 用户列表读得到、转售记录没读全
+  f.own.resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
+  const partial = await readOwnIncomeOrUnconfirmed(f.rt, f.own, f.rows, f.window);
+  assert.equal(partial.unconfirmed.code, "OWN_INCOME_UNCONFIRMED");
+  assert.equal(partial.users.length, 2);
+  assert.deepEqual([...partial.adminSet], ["root"]);
+  assert.equal(partial.incomeUsd, null);
+  // 确认得了时和 readOwnIncome 一样，unconfirmed 是 null
+  f.own.resoldAdminKeys = [];
+  const ok = await readOwnIncomeOrUnconfirmed(f.rt, f.own, f.rows, f.window);
+  assert.deepEqual([ok.unconfirmed, ok.incomeUsd], [null, 10]);
 });
 
 test("必要的角色或转售读取失败时收入不可确认", async (t) => {

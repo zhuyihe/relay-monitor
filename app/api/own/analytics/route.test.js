@@ -73,16 +73,23 @@ for (const userCount of [2, 1101]) {
   });
 }
 
-test("真实自营分析：角色目录 503 返回收入不可确认，不缓存虚假利润", async (t) => {
+test("真实自营分析：角色目录 503 时页面照常打开，只有利润那块报收入确认不了，不缓存这份结果", async (t) => {
   const f = fixture(t, { failUsers: true });
   const { GET } = await ownAnalyticsRoute();
   const res = await GET(new Request("https://local.test/api/own/analytics?range=7d"), f.rt);
   const body = await res.json();
-  assert.equal(res.status, 502);
-  assert.equal(body.code, "OWN_INCOME_UNCONFIRMED");
-  assert.equal(body.profit, undefined);
-  assert.equal(f.rt._ownCache.size, 0);
+  assert.equal(res.status, 200);
+  assert.equal(body.profit.errorCode, "OWN_INCOME_UNCONFIRMED");
+  assert.equal(body.profit.incomeCny, undefined, "不写虚假的收入和利润");
+  assert.equal(body.incomeDaily, null);
+  assert.equal(body.userBalances, null, "用户列表读不到时没有预收");
+  assert.ok(body.byModel.length > 0, "消费照常");
+  assert.deepEqual(body.byUser.map((u) => u.isAdmin), body.byUser.map(() => false));
+  assert.equal(f.rt._ownCache.size, 0, "刷新时要重新读");
   assert.equal(f.rt._ownUsersCache, undefined);
+  // 分析页按利润那块的报错说收入读不到，别的照常算
+  const costs = { days: 7, start: "2026-10-14", end: "2026-10-20", tz: body.tz, stations: [], daily: [] };
+  assert.equal(derive(costs, body).incomeError.code, "OWN_INCOME_UNCONFIRMED");
 });
 
 test("真实自营分析：转售 Key 的收入留在转售发生日，不挪到销售日", async (t) => {

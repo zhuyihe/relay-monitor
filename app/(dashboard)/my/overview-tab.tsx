@@ -152,7 +152,7 @@ function Equation({
   if (!p || p.error) {
     return (
       <Panel title={title} caption={caption}>
-        <ErrorState what={EQ_TEXT.profitFailed} error={p?.error} onRetry={() => reload()} />
+        <ErrorState what={EQ_TEXT.profitFailed} error={p} onRetry={() => reload()} />
       </Panel>
     );
   }

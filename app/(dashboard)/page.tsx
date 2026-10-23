@@ -370,7 +370,7 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
   if (profit.error) {
     return (
       <Panel title={title} caption={caption}>
-        <ErrorState what={COPY.profitFailed} error={profit.error} onRetry={onRetry} />
+        <ErrorState what={COPY.profitFailed} error={profit} onRetry={onRetry} />
       </Panel>
     );
   }
@@ -869,7 +869,7 @@ function CostPanel({ title, money, error, onRetry }: { title: string; money: Mon
       return { items, total: sum(items.map((i) => i.value ?? 0)), approx, notes: [] as string[] };
     }
     const profit = money.own?.profit || {};
-    if (profit.error) return { items: [], total: null, approx: false, notes: [] as string[], error: profit.error };
+    if (profit.error) return { items: [], total: null, approx: false, notes: [] as string[], error: profit };
     const items: HBarItem[] = (profit.costs || [])
       .filter((c: any) => c.mode !== "fixed")
       .map((c: any) => ({

@@ -2571,6 +2571,43 @@ test("成本估算：收入算不出来时按原因说——没设置、超过 3
   assert.equal(await unsplit.equation.getByText("查看详细原因", { exact: true }).count(), 0);
 });
 
+// 收入确认不了时（用户身份或转售记录没读全），/api/own/analytics 照常返回，只有利润那块是 { error, errorCode }
+const INCOME_UNCONFIRMED = { error: "用户「newbie」的身份没读到，收入和利润暂时算不出", errorCode: "OWN_INCOME_UNCONFIRMED" };
+const PROFIT_FAILED = "利润暂时算不出"; // profit-equation.tsx 的 EQ_TEXT.profitFailed（组件文件带 JSX，node 读不了）
+function unconfirmedOwnAnalytics(range = "7d") {
+  const endMs = Date.now(), startMs = endMs - 7 * 86400000;
+  return { range, tz: BUSINESS_TZ, startMs, endMs, prevWindow: { startMs: startMs - 7 * 86400000, endMs: startMs, spanDays: 7 },
+    station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7 }, tokenScope: "billed",
+    byModel: [{ model: "fixture-model", tokens: 1000, cost: 2, requests: 3 }], byUser: [{ user: "customer", tokens: 1000, cost: 2, requests: 3, isAdmin: false }],
+    prevUserAvailable: true, flow: null, userBalances: null, trend: [], daily: [], forecast: null, hourly: null,
+    incomeDaily: null, incomeDailyApprox: false, profit: INCOME_UNCONFIRMED, generatedAt: new Date().toISOString() };
+}
+
+test("收入确认不了时：成本估算说「读不到自营站点的收入：用户身份或转售记录没读全」，只算成本；「我的站点」照常打开，只有利润那块写原因", async (t) => {
+  const reason = errorText({ code: "OWN_INCOME_UNCONFIRMED" });
+  const cost = await openCostPage(t, (route) => fulfill(route, { ...unconfirmedOwnAnalytics(), trend: [] }));
+  const notice = cost.equation.locator(".jy-partial-note").filter({ hasText: `${failureSentence(ANALYTICS_COPY.ownFailed, reason)}${ANALYTICS_COPY.costOnly}` });
+  await notice.waitFor();
+  // 原文收起，展开「查看详细原因」才看得到
+  assert.equal(await cost.page.getByText(INCOME_UNCONFIRMED.error, { exact: true }).isVisible(), false);
+  await cost.page.context().browser().close();
+
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(url.searchParams.get("range") || "7d"));
+    if (url.pathname === "/api/analytics") return fulfill(route, costAnalyticsFixture(Number(url.searchParams.get("days")) || 7));
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+  const failed = page.locator(".jy-state[role=alert]").filter({ hasText: failureSentence(PROFIT_FAILED, reason) });
+  await failed.first().waitFor();
+  await failed.first().getByRole("button", { name: REFRESH, exact: true }).waitFor();
+  assert.doesNotMatch(await page.locator("main").innerText(), /NaN|undefined/);
+  // 别的照常：用户标签页列出有消费的用户
+  await page.getByRole("tab", { name: "用户", exact: true }).click();
+  await page.getByText("customer", { exact: true }).first().waitFor();
+});
+
 test("用量分析：读不到用量的上游按码说一句、原文收起；没设置汇率只数有花费的上游；后台刷新失败保留上次的数据；单独看自营站点按售价说", async (t) => {
   const generatedAt = new Date().toISOString(); let fail = false; const reads = [];
   const hourAgo = Date.now() - 3600000;

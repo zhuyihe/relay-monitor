@@ -17,10 +17,10 @@ export function ownCache(rt) {
   return (rt._ownCache ||= new Map());
 }
 
-// 用户列表拉取开销不小，缓存 10 分钟
-export async function getOwnUsers(rt, own) {
+// 用户列表拉取开销不小，缓存 10 分钟；fresh 时不用缓存、重新读一次（遇到缓存里没有的用户时用）
+export async function getOwnUsers(rt, own, { fresh = false } = {}) {
   const c = rt._ownUsersCache;
-  if (!c?.list || c.stationId !== own.id || Date.now() - c.at > 600000) {
+  if (fresh || !c?.list || c.stationId !== own.id || Date.now() - c.at > 600000) {
     rt._ownUsersCache = { at: Date.now(), stationId: own.id, list: await queryOwnUsers(own) };
   }
   return rt._ownUsersCache.list;
@@ -137,6 +137,29 @@ export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endM
   };
 }
 
+/**
+ * 日报和「我的站点」用的收入：确认不了（OWN_INCOME_UNCONFIRMED）时不中止，别的部分照常给出
+ *（design/ui-copy-spec.md §8.1、§10）。这时收入、管理员自用、转售、分日收入都是 null，利润不算也不发布；
+ * 用户列表读得到就照常用它标管理员、算预收，读不到是 null。别的报错照旧抛出。
+ * 返回 readOwnIncome 的结果，外加 unconfirmed（确认不了时是那个报错，否则 null）
+ */
+export async function readOwnIncomeOrUnconfirmed(rt, own, userRows, window) {
+  try {
+    return { ...(await readOwnIncome(rt, own, userRows, window)), unconfirmed: null };
+  } catch (err) {
+    if (err?.code !== "OWN_INCOME_UNCONFIRMED") throw err;
+    let users = null;
+    try { users = await getOwnUsers(rt, own); } catch { /* 用户列表也读不到：不标管理员、不写预收 */ }
+    const adminSet = new Set((users || []).filter((u) => u.role >= 10).map((u) => u.username));
+    return { users, adminSet, incomeUsd: null, adminUsageUsd: null, resold: null, incomeDaily: null, unconfirmed: err };
+  }
+}
+
+// 收入确认不了时给页面的「利润」：和 computeProfit 读不到时同一个形状（{ error, errorCode }），页面只在利润那块报错
+export function unconfirmedProfit(err) {
+  return { error: err?.message || String(err), errorCode: "OWN_INCOME_UNCONFIRMED" };
+}
+
 function incomeUnconfirmed(message, cause) {
   return Object.assign(new Error(message, cause ? { cause } : undefined), { code: "OWN_INCOME_UNCONFIRMED" });
 }
@@ -149,8 +172,14 @@ function incomeUnconfirmed(message, cause) {
  */
 export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
   let users;
-  try { users = await getOwnUsers(rt, own); }
-  catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
+  try {
+    users = await getOwnUsers(rt, own);
+    // 有消费的用户不在（缓存的）用户列表里：多半是刚注册的，先重读一次用户列表再判断
+    const known = new Set(users.map((u) => u.username));
+    if (userRows.some((row) => row.t >= startMs && row.t < endMs && row.cost !== 0 && !known.has(row.key))) {
+      users = await getOwnUsers(rt, own, { fresh: true });
+    }
+  } catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
   const roles = new Map(users.map((u) => [u.username, u.role]));
   const adminSet = new Set(users.filter((u) => u.role >= 10).map((u) => u.username));
   const days = endMs > startMs

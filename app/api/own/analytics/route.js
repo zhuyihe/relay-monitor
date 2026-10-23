@@ -6,7 +6,7 @@ import { queryOwnData } from "../../../../lib/providers.js";
 import { dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../../../lib/business-time.js";
 import { forecastDaily, forecastHourly } from "../../../../lib/forecast.js";
 import {
-  ownCache, readOwnIncome, computeProfit, computeFlowBreakdown, joinPrev, resolveOwnWindow,
+  ownCache, readOwnIncomeOrUnconfirmed, unconfirmedProfit, computeProfit, computeFlowBreakdown, joinPrev, resolveOwnWindow,
 } from "../../../../server/own-helpers.js";
 
 // 只在当前请求内比较，不写入缓存键、数据库或响应。
@@ -83,7 +83,8 @@ export const GET = withAuth(async (request, rt) => {
         daily.push({ t, cost: Math.round((dmap.get(t) || 0) * 10000) / 10000 });
       }
     }
-    const { users: ownUsers, adminSet, incomeUsd, adminUsageUsd, resold, incomeDaily } = await readOwnIncome(
+    // 收入确认不了时不整页报错：利润那块报错（profit 是 { error, errorCode }），消费、用户、用户余额照常（§8.1）
+    const { users: ownUsers, adminSet, incomeUsd, adminUsageUsd, resold, incomeDaily, unconfirmed } = await readOwnIncomeOrUnconfirmed(
       rt, own, userRows, { startMs, endMs: now, tz }
     );
 
@@ -125,7 +126,7 @@ export const GET = withAuth(async (request, rt) => {
       ? modelRows.filter((r) => r.t >= prevStart && r.t < prevEnd)
       : (prevModelFetched || []);
     const [profit, flow] = await Promise.all([
-      computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs, now, tz, range, resold }),
+      unconfirmed ? unconfirmedProfit(unconfirmed) : computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs, now, tz, range, resold }),
       // 分组 / 渠道口径：模型行里看不出「哪个分组涨了」「换到了哪个上游渠道」
       computeFlowBreakdown(own, {
         startMs, endMs: now, prevStartMs: prevStart, prevEndMs: prevEnd,
@@ -161,7 +162,8 @@ export const GET = withAuth(async (request, rt) => {
       generatedAt: new Date().toISOString(),
     };
     // 编辑配置会清缓存；较早开始的请求可以返回自己的快照，但不能把旧口径重新填回缓存。
-    if (ownFinancialVersion(store.list().find((s) => s.isOwn && s.type === "newapi")) === ownVersion) {
+    // 收入确认不了的那份不缓存：用户点「刷新」时要真的重新读
+    if (!unconfirmed && ownFinancialVersion(store.list().find((s) => s.isOwn && s.type === "newapi")) === ownVersion) {
       cache.set(cacheKey, { at: Date.now(), payload });
     }
     return json(payload);
