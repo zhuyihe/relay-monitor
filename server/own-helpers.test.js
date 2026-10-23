@@ -132,21 +132,25 @@ function gatedUserList(t, lists, other = []) {
   return state;
 }
 
-test("用户列表：同一份配置并发的读取共用一次；要更晚发出的读取时不跟着更早的那次", async (t) => {
+test("用户列表：同一份配置并发的读取共用一次；要更晚发出的读取时，等进行中的那次读完再发一次，错开到达的几个请求都跟这一次", async (t) => {
   const f = incomeFixture();
   let now = Date.parse("2026-10-14T00:00:00Z");
   t.mock.method(Date, "now", () => now);
-  const users = gatedUserList(t, [f.users]);
+  const newbie = { id: 3, username: "newbie", role: 1 };
+  const users = gatedUserList(t, [f.users, [...f.users, newbie]]);
   const rt = {};
   const first = getOwnUsers(rt, f.own), second = getOwnUsers(rt, f.own);
-  now += 1000;
-  const later = getOwnUsers(rt, f.own, { since: now });
-  assert.equal(users.calls, 2, "要更晚发出的读取，不跟着 1 秒前那次");
+  const later = [];
+  for (let i = 0; i < 3; i += 1) { now += 5; later.push(getOwnUsers(rt, f.own, { since: now })); }
+  assert.equal(users.calls, 1, "进行中的那次还没读完，先等它");
   users.open();
-  assert.deepEqual((await Promise.all([first, second, later])).map((list) => list.length), [2, 2, 2]);
+  const lists = await Promise.all([first, second, ...later]);
+  assert.equal(users.calls, 2, "错开到达的三个请求合成一次");
+  assert.deepEqual(lists.map((list) => list.length), [2, 2, 3, 3, 3], "后到的拿到的是那之后发出的读取");
 });
 
-test("用户列表：自营站点换了地址，不跟着旧地址那次读取；旧的那次后读完也不写进缓存", async (t) => {
+// 写错时（缓存只按站点 id 认）这里会一直等着旧地址那次读取：给个超时，让它失败而不是卡住
+test("用户列表：自营站点换了地址，不跟着旧地址那次读取；旧的那次后读完也不写进缓存", { timeout: 5000 }, async (t) => {
   const f = incomeFixture();
   let releaseOld;
   const oldGate = new Promise((resolve) => { releaseOld = resolve; });
@@ -187,11 +191,22 @@ test("一直对不上的用户名：重读一次，1 分钟内不再为它重读
   now += 600001;
   await assert.rejects(readOwnIncome(f.rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
   assert.equal(users.calls, 3, "缓存过期时只读一次");
+  // 新读取带上上一份还没过期的名字：先为 ghost 重读、20 秒后为 ghost2 重读，再看 ghost 时不用又读一次
+  now += 120000;
+  const ghost2 = [...f.rows, { key: "ghost2", t: f.window.startMs + 7200000, cost: 3 }];
+  await assert.rejects(readOwnIncome(f.rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(users.calls, 4);
+  now += 20000;
+  await assert.rejects(readOwnIncome(f.rt, f.own, ghost2, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(users.calls, 5);
+  now += 10000;
+  await assert.rejects(readOwnIncome(f.rt, f.own, rows, f.window), { code: "OWN_INCOME_UNCONFIRMED" });
+  assert.equal(users.calls, 5, "ghost 在新读取里也记着，不再为它重读");
   // 窗口外、消费为 0 的陌生用户不触发重读
   now += 120000;
   const quiet = [...f.rows, { key: "zero", t: f.window.startMs + 3600000, cost: 0 }, { key: "outside", t: f.window.endMs + 3600000, cost: 9 }];
   await readOwnIncome(f.rt, f.own, quiet, f.window);
-  assert.equal(users.calls, 3);
+  assert.equal(users.calls, 5);
 });
 
 test("跟着别人进行中的读取拿到的列表比这次请求早：缺了刚注册的用户就再读一次，照常算出收入", async (t) => {
@@ -496,15 +511,23 @@ test("收入确认不了时的利润：两项成本照常算，收入、管理�
   assert.equal(p.incomeUnconfirmed.errorCode, "OWN_INCOME_UNCONFIRMED");
   assert.match(p.incomeUnconfirmed.error, /HTTP 503 stat unavailable/);
   // 没读到的那把转售 Key 带上报错；只关乎收入的提示（没设置售价）不说，别的照常
-  const unpriced = { ...own, cnyPerUsd: null };
+  // 同一账号两把转售 Key，只有 sale 没读到；自营站点没设置售价，另有一个不算进利润的上游
+  const unpriced = { ...own, cnyPerUsd: null, resoldAdminKeys: [{ username: "root", tokenName: "sale" }, { username: "root", tokenName: "promo" }] };
+  const skipped = { id: "skip", name: "不算的上游", type: "newapi", includeInProfit: false };
+  const withSkipped = { ...rt, store: { list: () => [unpriced, fixed, skipped] } };
   const failedKey = Object.assign(new Error("转售 Key「root / sale」的记录没读到"), { code: "OWN_INCOME_UNCONFIRMED",
     resoldErrors: [{ username: "root", tokenName: "sale", usd: 0, error: "HTTP 503 stat unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" }] });
-  const full = await computeProfit(rt, unpriced, 0, 0, { startMs, now, tz: SH, range: "7d", resold: null });
-  assert.ok(full.warningCodes.includes("sell_price_unset"));
-  const q = await unconfirmedIncomeProfit(rt, unpriced, failedKey, { startMs, now, tz: SH, range: "7d" });
-  assert.deepEqual(q.resoldKeys, [{ username: "root", tokenName: "sale", usd: null, cny: null, error: "HTTP 503 stat unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" }]);
-  assert.deepEqual(q.warningCodes, full.warningCodes.filter((code) => code !== "sell_price_unset"));
-  assert.equal(q.warnings.length, q.warningCodes.length);
+  const full = await computeProfit(withSkipped, unpriced, 0, 0, { startMs, now, tz: SH, range: "7d", resold: null });
+  assert.deepEqual(full.warningCodes, ["sell_price_unset", "excluded_upstreams"]);
+  assert.equal(full.complete, false);
+  const q = await unconfirmedIncomeProfit(withSkipped, unpriced, failedKey, { startMs, now, tz: SH, range: "7d" });
+  assert.deepEqual(q.resoldKeys, [
+    { username: "root", tokenName: "sale", usd: null, cny: null, error: "HTTP 503 stat unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" },
+    { username: "root", tokenName: "promo", usd: null, cny: null },
+  ]);
+  // 去掉售价那条以后，提示的文字和码还是一一对上
+  assert.deepEqual([q.warnings, q.warningCodes], [["不算的上游 不算进利润"], ["excluded_upstreams"]]);
+  assert.equal(q.complete, true, "没设置售价只影响收入，不算数据不完整");
   // 成本也算不出：整块报错，收入确认不了的原因照样带着
   const broken = { ...rt, store: { list: () => { throw new Error("store down"); } } };
   const both = await unconfirmedIncomeProfit(broken, own, err, { startMs, now, tz: SH, range: "7d" });

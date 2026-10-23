@@ -308,10 +308,14 @@ test("转售记录没读全、用户列表读得到时：收入那几项写「�
     if (url.pathname === "/api/log/stat") return Response.json({ success: false, message: "unavailable" }, { status: 503 });
     return Response.json({ success: true, data: [] });
   });
-  const { text } = await buildReport(h.rt);
+  const { text, html } = await buildReport(h.rt);
   assert.match(text, /收入、管理员自用、毛利、净利：没读到（用户身份或转售记录没读全）/);
   assert.match(text, /■ 用户余额合计：¥5\.00（预收，1 个用户）/);
   assert.match(text, /1\. root（管理员）/);
+  // 用户列表读得到：管理员照常标出，不写「管理员没标出」（文字版和邮件版都是）
+  assert.doesNotMatch(text, /管理员没标出/);
+  assert.doesNotMatch(html, /管理员没标出/);
+  assert.match(html, /root <span[^>]*>管理员<\/span>/);
 });
 
 test("日报与自营分析共用已确认的收入分类，管理员自用不计收入，异步修改售价不混入同一份日报", async (t) => {

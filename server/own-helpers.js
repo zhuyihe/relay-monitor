@@ -18,7 +18,8 @@ export function ownCache(rt) {
 }
 
 // 用户列表拉取开销不小（超过 1000 个用户要翻页），缓存 10 分钟。缓存和进行中的读取按自营站点的配置认（地址、账号、令牌改了就是另一份），
-// 记着这次读取是什么时候发出的；同一份配置同一时刻只读一次，并发的请求共用进行中的那次
+// 记着这次读取是什么时候发出的。同一份配置同一时刻只读一次：并发的请求共用进行中的那次；要更新的列表、进行中的那次又发得太早时，
+// 等它读完再发一次，这期间来的请求都跟这一次
 const OWN_USERS_TTL_MS = 600000;
 // 重读过还对不上的用户名（改名、删用户、刚降级）1 分钟内不再为它们重读：一直对不上时不每次都整份重读，
 // 在 New API 那边改好后点「刷新」，最多等 1 分钟就能读到
@@ -27,16 +28,32 @@ const UNKNOWN_USER_TTL_MS = 60000;
 // 缓存认的那份配置（测试也用它造缓存）
 export const ownUsersKey = (own) => JSON.stringify([own.id, own.type, own.baseUrl, own.userId, own.accessToken]);
 
-// since：只要这个时刻以后发出的读取，缓存和进行中的读取发出得更早就再读一次。返回 { key, startedAt, list, unknown }
+// since：只要这个时刻以后发出的读取，缓存和进行中的读取发出得更早就再读一次。返回 { key, startedAt, list, unknown }，
+// unknown 是重读过还对不上的名字和那次读取发出的时间
 async function readOwnUsers(rt, own, since = 0) {
   const key = ownUsersKey(own);
   const c = rt._ownUsersCache;
   if (c?.key === key && c.startedAt >= since && Date.now() - c.startedAt <= OWN_USERS_TTL_MS) return c;
   const inflight = rt._ownUsersInflight;
-  if (inflight?.key === key && inflight.startedAt >= since) return inflight.promise;
-  const startedAt = Date.now();
+  if (inflight?.key === key) {
+    if (inflight.startedAt >= since) return inflight.promise;
+    // 进行中的那次发得太早：等它读完再发一次（那时发出的一定不早于这里要的），这期间来的请求都跟这一次
+    const queued = rt._ownUsersQueued;
+    if (queued?.after === inflight.promise) return queued.promise;
+    const promise = inflight.promise.catch(() => {}).then(() => {
+      if (rt._ownUsersQueued?.promise === promise) rt._ownUsersQueued = null;
+      return readOwnUsers(rt, own, Date.now());
+    });
+    rt._ownUsersQueued = { after: inflight.promise, promise };
+    return promise;
+  }
+  const startedAt = Date.now(), prev = c?.key === key ? c.unknown : null;
   const promise = queryOwnUsers(own).then((list) => {
-    const entry = { key, startedAt, list, unknown: new Map() };
+    // 上一份里记着、还没过期、这次仍然没有的名字带过来，按这次发出的时间记（这次读取也确认了它们还对不上）
+    const names = new Set(list.map((u) => u.username));
+    const unknown = new Map([...(prev || [])].filter(([name, at]) => !names.has(name) && startedAt - at < UNKNOWN_USER_TTL_MS)
+      .map(([name]) => [name, startedAt]));
+    const entry = { key, startedAt, list, unknown };
     // 读的期间换了配置、又发出了更新的读取，这份就不写缓存
     if (rt._ownUsersInflight?.promise === promise) rt._ownUsersCache = entry;
     return entry;
@@ -202,6 +219,8 @@ export async function unconfirmedIncomeProfit(rt, own, err, options) {
     incomeCny: null, adminUsageCny: null, resoldCny: null,
     grossProfitCny: null, netProfitCny: null, grossMarginPct: null, netMarginPct: null, profitCny: null, marginPct: null,
     warnings: kept.map(([, text]) => text), warningCodes: kept.map(([code]) => code),
+    // 数据完不完整只看上游汇率；没设置售价只影响收入，这里不显示收入
+    complete: (profit.rateUnsetStations || []).length === 0,
     resoldKeys: (own.resoldAdminKeys || []).map((key) => {
       const failed = (err.resoldErrors || []).find((k) => k.username === key.username && k.tokenName === key.tokenName);
       return { username: key.username, tokenName: key.tokenName, usd: null, cny: null,
@@ -244,8 +263,7 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
     try { entry = await readOwnUsers(rt, own, requestedAt); }
     catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause, entry.list); }
   }
-  const now = Date.now();
-  for (const name of missing(entry.list)) if (!known(name)) entry.unknown.set(name, now);
+  for (const name of missing(entry.list)) if (!known(name)) entry.unknown.set(name, entry.startedAt);
   const users = entry.list;
   const roles = new Map(users.map((u) => [u.username, u.role]));
   const adminSet = new Set(users.filter((u) => u.role >= 10).map((u) => u.username));
