@@ -10,6 +10,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { App, Button, Checkbox, Form, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
+import { ALERT_RULES } from "../../../lib/alert-rules";
 import { NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
@@ -56,13 +57,13 @@ const CH_PLATE: Record<string, string> = {
 
 
 // 提醒规则：事件键（选通知方式用）+ 开关键；名字里的余额四档和上游列表、运营总览同一份（BALANCE_STATE_TEXT）
-const RULES = [
-  { ev: "low", key: "onLow", title: BALANCE_STATE_TEXT.low, desc: COPY.ruleDesc.low },
-  { ev: "exhaust", key: "onExhaust", title: BALANCE_STATE_TEXT.empty, desc: COPY.ruleDesc.exhaust },
-  { ev: "error", key: "onError", title: BALANCE_STATE_TEXT.unreadable, desc: COPY.ruleDesc.error },
-  { ev: "recover", key: "onRecover", title: COPY.recover, desc: COPY.ruleDesc.recover },
-  { ev: "eta", key: "onEta", title: BALANCE_STATE_TEXT.soon, desc: COPY.ruleDesc.eta },
-];
+// 提醒规则只有一张表（lib/alert-rules.js）：规则名取余额档位的叫法，「恢复正常」和说明在 copy.ts
+const RULES = ALERT_RULES.map((rule) => ({
+  ev: rule.ev,
+  key: rule.key,
+  title: rule.text ? BALANCE_STATE_TEXT[rule.text as keyof typeof BALANCE_STATE_TEXT] : COPY.recover,
+  desc: COPY.ruleDesc[rule.ev as keyof typeof COPY.ruleDesc],
+}));
 
 // 提醒天数内部按天存储；界面按所选单位展示
 function etaRuleDisplay(r: any): number {

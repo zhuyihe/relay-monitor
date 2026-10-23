@@ -2,8 +2,7 @@
 // 设计：内存缓存 this.data 保持 v1 数据形状，所有读走内存（同步 getter 不变），
 // 所有写通过 save() 串行化写透 MySQL——消费方（26 个端点/告警/日报）零改动。
 import { hashPassword } from "../lib/auth.js";
-import { UNNAMED_CHANNEL } from "../lib/alert-rules.js";
-import { ALERT_EVENT_KEYS, DEFAULT_RULES } from "../lib/alerts.js";
+import { ALERT_EVENT_KEYS, ALERT_RULE_KEYS, DEFAULT_RULES, UNNAMED_CHANNEL } from "../lib/alert-rules.js";
 import { createHash, randomBytes } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
 import { endpointChangedError, sameEndpoint, staleSecrets } from "../lib/endpoint.js";
@@ -37,10 +36,16 @@ function authorizationMarker(value, authVersion, type) {
   return { requestId: String(value.requestId), accountKey: String(value.accountKey), authVersion, authorizationType: type };
 }
 
+// 重新标记「不再续费」时开启一轮新的单次提醒：清掉单次提醒的发出时间和它的补发任务（lib/alerts.js），其他记录不动
 function resetNoRenewalAlertState(state) {
   if (!state) return state;
   const { noRenewalLowNotifiedAt, ...next } = state;
   if (next.pendingDelivery?.kind === "noRenewalLow") delete next.pendingDelivery;
+  if (next.pendingDeliveries?.noRenewalLow) {
+    const { noRenewalLow, ...rest } = next.pendingDeliveries;
+    if (Object.keys(rest).length) next.pendingDeliveries = rest;
+    else delete next.pendingDeliveries;
+  }
   return next;
 }
 
@@ -484,7 +489,6 @@ export class Store {
       type: String(input.type || ""),
       name: String(input.name || "").trim() || UNNAMED_CHANNEL,
       enabled: input.enabled !== false,
-      deliveryVersion: 1,
       // 只留这种类型的字段（lib/notify.js CHANNEL_TYPES）
       config: resolveChannelConfig(String(input.type || ""), typeof input.config === "object" && input.config ? input.config : {}, {}),
       createdAt: new Date().toISOString(),
@@ -504,9 +508,7 @@ export class Store {
       if ("config" in patch && typeof patch.config === "object" && patch.config) {
         // 只有密钥留空表示保留原值（前端编辑时不回显密钥），其他字段留空就是清空；
         // 换了站点又没重新填密钥，抛 ENDPOINT_CHANGED_SECRET_REQUIRED（lib/notify.js resolveChannelConfig）
-        const config = resolveChannelConfig(ch.type, patch.config, ch.config);
-        if (JSON.stringify(config) !== JSON.stringify(ch.config)) ch.deliveryVersion = (ch.deliveryVersion || 1) + 1;
-        ch.config = config;
+        ch.config = resolveChannelConfig(ch.type, patch.config, ch.config);
       }
       return ch;
     });
@@ -533,7 +535,7 @@ export class Store {
   async updateRules(patch) {
     return this._changeNotifications((notifications) => {
       const r = notifications.rules;
-      for (const k of ["onLow", "onExhaust", "onError", "onRecover", "onEta"]) {
+      for (const k of ALERT_RULE_KEYS) {
         if (k in patch) r[k] = !!patch[k];
       }
       if ("etaDays" in patch) {
