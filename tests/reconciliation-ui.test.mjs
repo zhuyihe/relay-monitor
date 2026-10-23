@@ -2630,7 +2630,8 @@ test("收入确认不了时：成本估算、自营业务的利润等式收入�
   // 自营业务默认近 7 天：利润等式叫「近 7 天经营」（profit-equation.tsx 的 EQ_TEXT.business）
   const page = await openUnconfirmedMyPage(t);
   await expectIncomeUnread(page.getByRole("region", { name: `${RANGE_TEXT["7d"]}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
-  assert.equal(await page.getByText(PROFIT_FAILED).count(), 0);
+  // 利润那块不整块报错（报错框的标题里没有「利润暂时算不出」；原文收在「查看详细原因」里，可能也带这几个字）
+  assert.equal(await page.locator(".jy-state[role=alert] h3").filter({ hasText: PROFIT_FAILED }).count(), 0);
   // 每日趋势只画成本，说明跟着改（overview-tab.tsx 的 COPY.trendNoIncome）
   await page.getByText(`按天。${INCOME_UNREAD.title}，这里只画成本。`).first().waitFor();
   assert.doesNotMatch(await page.locator("main").innerText(), /NaN|undefined/);
