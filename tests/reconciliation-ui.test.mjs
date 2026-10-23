@@ -2635,7 +2635,7 @@ test("收入确认不了时：成本估算、自营业务的利润等式收入�
   // 每日趋势只画成本，说明跟着改（overview-tab.tsx 的 COPY.trendNoIncome）
   await page.getByText(`按天。${INCOME_UNREAD.title}，这里只画成本。`).first().waitFor();
   assert.doesNotMatch(await page.locator("main").innerText(), /NaN|undefined/);
-  // 「利润怎么算」照常打开：收入写「读不到（原因）」，两项成本照常；转售 Key 照常列出、金额写「—」，没读到的那把标「读不到」，照常能选（my/shared.tsx 的 BASIS_TITLE、profit-basis.tsx 的 COPY）
+  // 「利润怎么算」照常打开：收入写「读不到（原因）」，两项成本照常；转售 Key 照常列出、金额写「—」，没读到的那把标「读不到」，照常能选（lib/format.js 的 BASIS_TITLE、profit-basis.tsx 的 COPY）
   await page.getByRole("button", { name: "利润怎么算", exact: true }).click();
   const basis = page.getByRole("region", { name: "利润怎么算", exact: true });
   await basis.getByText(`收入 ${INCOME_UNREAD.empty}（${errorText({ code: "OWN_INCOME_UNCONFIRMED" })}），上游成本 ${formatMoney(3.5)}，固定成本 ${formatMoney(1.25)}，2 个转售 Key`, { exact: false }).waitFor();

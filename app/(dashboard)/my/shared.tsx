@@ -16,8 +16,8 @@ export type MyTab = (typeof TABS)[number];
 // 标签名：标签栏和页里「去某某标签看」的提示共用
 export const TAB_TEXT: Record<MyTab, string> = { overview: "概览", users: "用户", models: "模型与渠道" };
 
-// 自营业务里几个面板的名字：按钮、标题、提示里提到时同一个说法（design/ui-copy-spec.md §11）
-export const BASIS_TITLE = "利润怎么算";
+// 自营业务里几个面板的名字：按钮、标题、提示里提到时同一个说法（design/ui-copy-spec.md §11）；
+// 「利润怎么算」日报也用，在 lib/format.js 的 BASIS_TITLE
 export const AUDIT_TITLE = "按明细细算";
 
 // 自营站点的账号角色；别的角色不标
