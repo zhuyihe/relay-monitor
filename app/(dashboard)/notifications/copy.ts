@@ -1,7 +1,7 @@
 // 告警中心的文字：只在这一页出现的话都在这里，用语按 design/ui-copy-spec.md §3、§11。
 // 规则名里的余额四档取 lib/format.js 的 BALANCE_STATE_TEXT，这里只写「恢复正常」。
 // 页面文件不能导出常量，界面测试要引用这些话，所以放在同目录的 copy.ts（§12）；导入带 .js 后缀，node 可以直接读
-import { UNNAMED_CHANNEL } from "../../../lib/alert-center.js";
+import { UNNAMED_CHANNEL } from "../../../lib/alert-rules.js";
 
 export const COPY = Object.freeze({
   // 区块名（§11：告警规则 / 通知渠道 / 每日日报 → 提醒规则 / 通知方式 / 日报）

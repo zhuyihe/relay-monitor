@@ -39,7 +39,7 @@ const FILES = [
   "lib/api.js",
   "lib/cap.js",
   "lib/smtp.js",
-  "lib/alert-center.js",
+  "lib/alert-rules.js",
   "server/own-helpers.js",
   "db/store.js",
   "app/api/meta/route.js",
