@@ -325,14 +325,14 @@ test("重新标记不再续费会重置单次提醒资格", async () => {
     id: "station-1",
     noRenewal: true,
     alertState: { state: "warn", notifiedAt: 10, noRenewalLowNotifiedAt: 20, pendingDelivery: { kind: "noRenewalLow", attempts: 1 },
-      pendingDeliveries: { noRenewalLow: { kind: "noRenewalLow", attempts: 1 }, eta: { kind: "eta", attempts: 2 } } },
+      incidents: { noRenewalLow: { kind: "noRenewalLow", attempts: 1 }, eta: { kind: "eta", attempts: 2 } } },
   }];
 
   await store.update("station-1", { noRenewal: false });
   assert.equal(store.get("station-1").alertState.noRenewalLowNotifiedAt, undefined);
   assert.equal(store.get("station-1").alertState.pendingDelivery, undefined);
-  // 单次提醒的补发任务清掉，别的种类留着
-  assert.deepEqual(store.get("station-1").alertState.pendingDeliveries, { eta: { kind: "eta", attempts: 2 } });
+  // 单次提醒那件事的记录清掉，别的留着
+  assert.deepEqual(store.get("station-1").alertState.incidents, { eta: { kind: "eta", attempts: 2 } });
   assert.equal(store.get("station-1").alertState.notifiedAt, 10);
   await store.update("station-1", { noRenewal: true });
   assert.equal(store.get("station-1").noRenewal, true);
