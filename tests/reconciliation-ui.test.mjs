@@ -8,7 +8,7 @@ import { after } from "node:test";
 import assert from "node:assert/strict";
 import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationNotCountedCostText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
 import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
-import { ADMIN_UNMARKED, BALANCE_STATE_TEXT, EMPTY, FIXED_COST_TEXT, INCOME_UNREAD, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RANGE_TEXT, formatDayKey, RATE_UNSET_PARITY, RATE_UNSET_USD, SELL_PRICE_UNSET, formatAsOf, formatCompact, formatDayZone, formatRate, formatSellPrice, formatZonedDateTime, formatZonedTime, formatZonedWindow, formatMoney, refreshFailedText } from "../lib/format.js";
+import { ADMIN_UNMARKED, BALANCE_STATE_TEXT, EMPTY, basisText, FIXED_COST_TEXT, INCOME_UNREAD, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RANGE_TEXT, formatDayKey, RATE_UNSET_PARITY, RATE_UNSET_USD, SELL_PRICE_UNSET, formatAsOf, formatCompact, formatDayZone, formatRate, formatSellPrice, formatZonedDateTime, formatZonedTime, formatZonedWindow, formatMoney, refreshFailedText } from "../lib/format.js";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy, reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
 import { CONSOLE_UNREACHABLE, ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText } from "../lib/error-copy.js";
@@ -2535,6 +2535,63 @@ test("上游编辑页的 Esc 先收起展开的日期面板，再交给抽屉关
   assert.equal(await drawer.isVisible(), true);
   await discard.click();
   await drawer.waitFor({ state: "hidden" });
+});
+
+test("上游列表一行两行字：没有「数据截至」一列，只在数据旧的那一行写；状态格只放状态，要处理的事在行末，编辑挪进「⋯」", async (t) => {
+  const now = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  const station = (id, name, checkedAt, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, cnyPerUsd: 7,
+    balance: { ok: true, remaining: 100, account: `${id}-account`, checkedAt: iso(checkedAt) }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" },
+    spark: [[now - 7200000, 103], [now, 100]], ...extra });
+  const stations = [station("st-fresh", "Fresh 上游", now), station("st-stale", "Stale 上游", now - 3600000), station("st-todo", "Todo 上游", now)];
+  const verify = { id: "verify_identity:st-todo", kind: "verify_identity", label: TEST_READ, title: reconciliationIssue("COST_OWNER_UNVERIFIED").title, detail: "",
+    href: "/stations?action=verify&stationId=st-todo", stationId: "st-todo" };
+  const handler = async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {}, settings: { refreshIntervalSec: 60 } });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [verify] });
+    throw new Error("unexpected API: " + path);
+  };
+  const accounts = (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: iso(now) });
+  const page = await openFixturePage(t, handler, undefined, false, accounts, "/stations");
+  const table = page.locator(".jy-stations-table");
+  const row = (name) => table.locator("tbody tr", { hasText: name }).first();
+  await row("Todo 上游").waitFor();
+  // 列：上游、状态、余额、日均花费、可用天数、操作；没有「数据截至」
+  assert.deepEqual((await table.locator("thead th").allInnerTexts()).map((x) => x.trim()), ["上游", "状态", "余额", "日均花费", "可用天数", "操作"]);
+  // 一行两行字：行高 56 以内；地址和账号名在名称下面同一行
+  for (const name of ["Fresh 上游", "Stale 上游", "Todo 上游"]) { const h = (await row(name).boundingBox()).height; assert.ok(h <= 56, `${name} 一行不超过 56 高（${h}）`); }
+  await row("Fresh 上游").getByText("st-fresh.test · st-fresh-account", { exact: true }).waitFor();
+  // 按哪段花费估的只在悬停里
+  assert.equal(await row("Fresh 上游").getByText(basisText("近 3 小时")).count(), 0);
+  assert.equal(await row("Fresh 上游").locator(`[title="${basisText("近 3 小时")}"]`).count(), 1);
+  // 数据和别的一样新的不写时刻；旧两轮刷新以上的那一行写「数据截至 …」
+  assert.equal(await row("Fresh 上游").getByText(/数据截至/).count(), 0);
+  await row("Stale 上游").getByText(/^数据截至 \d{1,2}:\d{2}$/).waitFor();
+  // 有要处理的事：状态格写「需处理」和这件事的标题，不放链接；行末的按钮就是这件事，「编辑」在「⋯」里
+  const todo = row("Todo 上游");
+  await todo.getByText("需处理", { exact: true }).waitFor();
+  await todo.getByText(verify.title, { exact: true }).waitFor();
+  assert.equal(await todo.locator("td").nth(1).getByRole("button").count(), 0);
+  const action = todo.getByRole("button", { name: `${TEST_READ}（Todo 上游）`, exact: true }); await action.waitFor();
+  assert.equal(await todo.getByRole("button", { name: "编辑 Todo 上游", exact: true }).count(), 0);
+  await todo.getByRole("button", { name: "Todo 上游 的更多操作", exact: true }).click();
+  await page.getByRole("menuitem", { name: "编辑", exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  // 没有要处理的事的行，行末照旧是「编辑」
+  await row("Fresh 上游").getByRole("button", { name: "编辑 Fresh 上游", exact: true }).waitFor();
+
+  // 手机上一张卡片两行：名称、状态、「⋯」；余额 · 可用天数，要处理的那件事的按钮在第二行最右边。小图、刷新、编辑都在「⋯」里
+  const mobile = await openFixturePage(t, handler, { width: 390, height: 844 }, false, accounts, "/stations");
+  const card = (name) => mobile.locator(".jy-m-list li", { hasText: name }).first();
+  await card("Todo 上游").getByRole("button", { name: `${TEST_READ}（Todo 上游）`, exact: true }).waitFor();
+  for (const name of ["Fresh 上游", "Todo 上游"]) assert.ok((await card(name).boundingBox()).height <= 90, `${name} 的卡片两行`);
+  assert.equal(await card("Fresh 上游").getByRole("button", { name: REFRESH }).count(), 0);
+  assert.equal(await card("Fresh 上游").locator(".jy-spark-btn").count(), 0);
+  await card("Stale 上游").getByText(/^数据截至 \d{1,2}:\d{2}$/).waitFor();
+  await card("Fresh 上游").getByRole("button", { name: "Fresh 上游 的更多操作", exact: true }).click();
+  for (const item of ["编辑", REFRESH, "余额趋势"]) await mobile.getByRole("menuitem", { name: item, exact: true }).waitFor();
 });
 
 test("删除上游要输入这个上游的名字：不一致时按钮不能点、回车也不删，一致后才发出删除", async (t) => {
