@@ -1777,7 +1777,7 @@ test("运营总览两行都是 8 + 4：等式和需处理并排、一样高，�
   assert.equal(opened.mutations.length, 0);
 });
 
-test("运营总览手机上没设置自营站点：「收入」那句和「去设置」露在外面、排在前面，上游成本的条收进「按上游看」", async (t) => {
+test("运营总览手机上没设置自营站点：「去设置」只在利润等式里，「收入」小段只写一句短的、排在前面，上游成本的条收进「按上游看」", async (t) => {
   const analytics = costAnalyticsFixture(1); analytics.stations = [0, 1, 2, 3].map((i) => ({ ...analytics.stations[0], id: `up-${i}`, name: `Upstream ${i}`, includeInProfit: true, isOwn: false, costBasis: "usage", totalCny: 10 - i }));
   const opened = await openAccountsPage(t, { readonlyAPI(route, path) {
     if (path === "/api/own/analytics") return failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
@@ -1787,7 +1787,10 @@ test("运营总览手机上没设置自营站点：「收入」那句和「去�
   await opened.page.setViewportSize({ width: 390, height: 844 }); await opened.page.goto(baseURL);
   const money = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
   const revenue = money.getByRole("region", { name: "收入", exact: true });
-  await revenue.getByText(OWN_STATION_UNSET_TITLE).waitFor(); await revenue.getByRole("button", { name: workflowActionMeta("setup_own_station").label, exact: true }).waitFor();
+  // 原因和「去设置」只在等式下面那一处，「收入」小段只写一句短的、不带按钮（同一句话一页只说一次，ui-copy-spec §11）
+  await opened.page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true }).getByRole("link", { name: workflowActionMeta("setup_own_station").label, exact: true }).waitFor();
+  await revenue.getByText("没设置自营站点，见上面的利润等式。", { exact: true }).waitFor();
+  assert.equal(await revenue.getByRole("button").count() + await revenue.getByRole("link").count(), 0);
   // 只有上游成本有条：按钮写「按上游看」（写它收着什么），不写「按用户、按上游看」；收入那句在它前面
   const toggle = money.getByRole("button", { name: "按上游看", exact: true }); await toggle.waitFor();
   assert.equal(await toggle.getAttribute("class"), "jy-more__toggle");
@@ -1829,11 +1832,11 @@ test("运营总览「今天收入和上游成本」：大金额在 1200–1440 �
   assert.equal(await toggle.getAttribute("class"), "jy-more__toggle", "用共用的收起区 More，不是自己写的按钮");
   assert.equal(await money.locator(".jy-hbars li").count(), 0);
   await toggle.click(); assert.equal(await money.locator(".jy-hbars li").count(), 8);
-  // 手机上收入读不到：那一句原因直接露出来，不收进「按用户、按上游看」
+  // 手机上收入读不到：「收入」小段露着一句短的（原因在等式下面），不收进「按用户、按上游看」
   const unread = await openAccountsPage(t, { readonlyAPI: readonly(unconfirmedOwnAnalytics) });
   await unread.page.setViewportSize({ width: 390, height: 844 }); await unread.page.goto(baseURL);
   const unreadMoney = unread.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
-  await unreadMoney.getByRole("region", { name: "收入", exact: true }).locator(".jy-state[role=alert]").filter({ hasText: failureSentence(INCOME_UNREAD.title, errorText({ code: "OWN_INCOME_UNCONFIRMED" })) }).waitFor();
+  await unreadMoney.getByRole("region", { name: "收入", exact: true }).getByText("读不到，原因见上面的利润等式。", { exact: true }).waitFor();
   assert.equal(opened.mutations.length + unread.mutations.length, 0);
 });
 
@@ -3110,8 +3113,10 @@ test("运营总览：收入确认不了时利润等式收入几项写「读不�
   await expectIncomeUnread(opened.page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
   const money = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
   const revenue = money.getByRole("region", { name: "收入", exact: true });
-  const failed = revenue.locator(".jy-state[role=alert]").filter({ hasText: failureSentence(INCOME_UNREAD.title, errorText({ code: "OWN_INCOME_UNCONFIRMED" })) });
-  await failed.waitFor(); await failed.getByRole("button", { name: REFRESH, exact: true }).waitFor();
+  // 原因和「刷新」只在等式下面（上面 expectIncomeUnread 查过）；「收入」小段只写一句短的，不带按钮，也不拿用户消费拼收入（同一句话一页只说一次）
+  await revenue.getByText("读不到，原因见上面的利润等式。", { exact: true }).waitFor();
+  assert.equal(await revenue.getByRole("button").count(), 0);
+  assert.equal(await revenue.locator(".jy-state[role=alert]").count(), 0);
   assert.doesNotMatch(await revenue.innerText(), /customer|root|¥/);
   // 上游成本那一小段照常：按用量算的上游那一行是 ¥3.50；小段标题不带合计（合计只在等式里）
   const cost = money.getByRole("region", { name: "上游成本", exact: true });

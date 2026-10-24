@@ -45,3 +45,5 @@
   .jy-ov .jy-grid-8-4:has(.jy-attention-rest .jy-more__body) { align-items: start; }
   .jy-ov .jy-grid-8-4:has(.jy-attention-rest .jy-more__body) > .jy-panel { height: auto; }
 }
+/* 没设置、读不到、算不出时小段里那一句（原因在上面的利润等式里） */
+.jy-ov-money-note { margin: 0; font-size: 13px; line-height: 20px; }

@@ -15,7 +15,7 @@ import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActio
 import { balanceMoneyOf, countsInProfit, profitApproxOf, rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
 import { asSentence, describeError, errorText, failureText, refreshAllText, refreshOneText } from "../../lib/error-copy";
-import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, formatAsOf, formatDays, formatMoney, formatSinceToday, formatZonedDate, INCOME_UNREAD, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
+import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, formatAsOf, formatDays, formatMoney, formatSinceToday, formatZonedDate, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../lib/business-time";
 import { UPSTREAM_FORM_TEXT } from "../../lib/channel-onboarding";
 import { AttentionList } from "../components/attention-list";
@@ -58,10 +58,13 @@ const COPY = Object.freeze({
   // 「今天收入和上游成本」一块，上下两小段（ui-copy-spec §11、ui-design-spec §5.1）
   money: (range: string) => `${range}收入和上游成本`,
   // 手机上收起条形的按钮写它收着什么（§4.11）：两段都有条形、只有收入、只有上游成本
+  // 没设置、读不到、算不出时小段里只写这一句：原因和按钮只在利润等式下面那一处（ui-copy-spec §11，同一句话一页只说一次）
+  seeEqUnset: "没设置自营站点，见上面的利润等式。",
+  seeEqUnread: "读不到，原因见上面的利润等式。",
+  seeEqFailed: "算不出，原因见上面的利润等式。",
   moneyMore: (users: boolean, upstreams: boolean) => (users && upstreams ? "按用户、按上游看" : users ? "按用户看" : "按上游看"),
   readBusinessFailed: "读不到经营数据",
   profitFailed: EQ_TEXT.profitFailed,
-  costFailed: "成本暂时算不出",
   readFailed: (what: string) => `读不到${what}`,
   upstreamCount: EQ_TEXT.upstreamCount,
   fixedCount: EQ_TEXT.fixedCount,
@@ -279,7 +282,7 @@ export default function OverviewPage() {
       ? refreshFailedText(workflowAsOf, businessTz)
       : COPY.workflowUnreadable;
   const current = money && money.range === range ? money : null;
-  // 同一个函数传下去：收入那段的 useMemo 依赖它，每次渲染换新函数会让每次轮询都重排用户
+  // 同一个函数传下去，不每次渲染换新（利润等式的「刷新」用它）
   const retryMoney = useCallback(() => { void loadMoney(range); }, [loadMoney, range]);
   const rangeName = RANGE_TEXT[range];
 
@@ -321,7 +324,7 @@ export default function OverviewPage() {
           onRetry={loadStations}
           onTrend={setTrendStation}
         />
-        <MoneyPanel title={COPY.money(rangeName)} money={current} error={moneyErr} onRetry={retryMoney} compact={compact} />
+        <MoneyPanel title={COPY.money(rangeName)} money={current} error={moneyErr} compact={compact} />
       </div>
 
       <TrendModal station={trendStation} onClose={() => setTrendStation(null)} settings={settings} rules={rules} tz={businessTz} />
@@ -774,22 +777,21 @@ function MoneyPanelShell({
   title,
   money,
   error,
-  onRetry,
   children,
   foot,
 }: {
   title: string;
   money: Money | null;
   error: Error | null;
-  onRetry: () => void;
   children?: ReactNode;
   foot?: ReactNode;
 }) {
   if (!money) {
     if (error) {
       return (
+        // 经营数据整个读不到：原因和「刷新」在上面的利润等式里，这里只写一句（同一句话一页只说一次）
         <Panel title={title}>
-          <ErrorState what={COPY.readFailed(title)} error={error} onRetry={onRetry} />
+          <p className="jy-muted jy-ov-money-note">{COPY.seeEqUnread}</p>
         </Panel>
       );
     }
@@ -806,30 +808,14 @@ function MoneyPanelShell({
 // bars：body 是条形（手机上收进「按用户、按上游看」）；不是条形时是一句状态（没设置、读不到、没有收入），手机上也直接露出来。
 // 合计不在这里写：收入、上游成本的合计只在利润等式里出现（ui-design-spec §1.4 第 2 条、§5.1）
 type MoneyView = { body: ReactNode; bars: boolean };
-function useRevenueView(money: Money | null, onRetry: () => void): MoneyView | null {
-  const router = useRouter();
+function useRevenueView(money: Money | null): MoneyView | null {
   return useMemo(() => {
     if (!money) return null;
-    if (money.unconfigured) {
-      return {
-        bars: false,
-        body: (
-          <div className="jy-empty-inline">
-            <p style={{ margin: 0 }}>
-              <strong>{OWN_STATION_UNSET_TITLE}</strong>：{OWN_STATION_UNSET_HINT}
-            </p>
-            <Button size="small" onClick={() => router.push("/stations")}>
-              {workflowActionMeta("setup_own_station")!.label}
-            </Button>
-          </div>
-        ),
-      };
-    }
+    // 没设置自营站点、收入读不到：原因和「去设置」「刷新」在上面的利润等式里，这里只写一句
+    if (money.unconfigured) return { bars: false, body: <p className="jy-muted jy-ov-money-note">{COPY.seeEqUnset}</p> };
     const own = money.own || {};
     const profit = own.profit || {};
-    if (profit.error || profit.incomeUnconfirmed) {
-      return { bars: false, body: <ErrorState what={INCOME_UNREAD.title} error={profit.incomeUnconfirmed || profit} onRetry={onRetry} /> };
-    }
+    if (profit.error || profit.incomeUnconfirmed) return { bars: false, body: <p className="jy-muted jy-ov-money-note">{COPY.seeEqUnread}</p> };
     // 没设置汇率时按 1:1 折算（和别处同一个判断：rateSnapshotOf）
     const ownRate = rateSnapshotOf(own.station).cnyPerUsd;
     const users = (own.byUser || [])
@@ -851,7 +837,7 @@ function useRevenueView(money: Money | null, onRetry: () => void): MoneyView | n
       bars: items.length > 0,
       body: <HBars items={items} color="var(--jy-s1)" unitName={COPY.incomeUnit} empty={COPY.noIncome} />,
     };
-  }, [money, router, onRetry]);
+  }, [money]);
 }
 
 // 上游成本那一小段：按上游的条，和要交代的几句（放在块底）
@@ -878,7 +864,8 @@ function useCostView(money: Money | null): (MoneyView & { notes: string[] }) | n
       }));
     } else {
       const profit = money.own?.profit || {};
-      if (profit.error) return { bars: false, body: <ErrorState what={COPY.costFailed} error={profit} />, notes };
+      // 利润算不出：原因在上面的利润等式里，这里只写一句
+      if (profit.error) return { bars: false, body: <p className="jy-muted jy-ov-money-note">{COPY.seeEqFailed}</p>, notes };
       items = (profit.costs || [])
         .filter((c: any) => c.mode !== "fixed")
         .map((c: any) => ({
@@ -904,8 +891,8 @@ function useCostView(money: Money | null): (MoneyView & { notes: string[] }) | n
 // 「今天收入和上游成本」一块，上下两小段「收入 · 按用户」「上游成本 · 按上游」，各列前 3（ui-design-spec §5.1）。
 // 小段标题不带合计：合计只在利润等式里出现。手机上条形收进「按用户、按上游看」；
 // 没设置、读不到、没有收入这些一句话的状态照样露出来（§1.4 第 8 条）
-function MoneyPanel({ title, money, error, onRetry, compact }: { title: string; money: Money | null; error: Error | null; onRetry: () => void; compact: boolean }) {
-  const revenue = useRevenueView(money, onRetry);
+function MoneyPanel({ title, money, error, compact }: { title: string; money: Money | null; error: Error | null; compact: boolean }) {
+  const revenue = useRevenueView(money);
   const cost = useCostView(money);
   const head = (what: string, by: string) => (
     <h3 className="jy-ov-money-head">
@@ -920,7 +907,7 @@ function MoneyPanel({ title, money, error, onRetry, compact }: { title: string; 
     </section>
   );
   return (
-    <MoneyPanelShell title={title} money={money} error={error} onRetry={onRetry} foot={cost?.notes.length ? cost.notes.join("") : undefined}>
+    <MoneyPanelShell title={title} money={money} error={error} foot={cost?.notes.length ? cost.notes.join("") : undefined}>
       {revenue && cost ? (
         compact ? (
           // 收入在前、上游成本在后，和桌面同一个先后：挨着的条形并进一个收起区，一句话的状态照样露在外面
