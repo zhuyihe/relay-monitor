@@ -94,7 +94,7 @@ const COPY = Object.freeze({
   sellPlaceholder: "例如 7.5",
   sellExample: `例如填 7.5 就是「${formatSellPrice(7.5)}」；不填就是「${SELL_PRICE_UNSET}」。`,
   lowBalance: "余额提醒线",
-  lowBalancePlaceholder: "不填就用系统设置里的",
+  lowBalancePlaceholder: "不填就用告警中心里的",
   lowBalanceDesc: "按这个上游自己的余额算，低于它就提醒。",
   aliases: "渠道里用的其他地址",
   aliasesDesc: "自营站点的渠道里填的不是这个上游的公开地址时（比如内网地址、代理地址），每行填一个，才对得上这个上游。",

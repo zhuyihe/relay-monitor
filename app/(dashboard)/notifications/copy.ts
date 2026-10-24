@@ -19,7 +19,6 @@ export const COPY = Object.freeze({
   // 提醒规则
   recover: "恢复正常",
   ruleDesc: Object.freeze({
-    low: "余额低于余额提醒线时通知",
     exhaust: "余额用完时通知",
     error: "读不到余额时通知（登录信息失效、上游出故障等）",
     recover: "从上面几种情况恢复后通知",
@@ -90,7 +89,10 @@ export const COPY = Object.freeze({
   noDeliveryOff: "通知方式都停用了，提醒发不出去",
   noDeliveryOffHint: "至少启用一个通知方式，已打开的提醒和日报才会发出。",
   showChannels: "查看通知方式",
-  emptyHint: "先加一个通知方式，提醒和日报才发得出去。加好以后，余额偏低、余额用完、读不到余额、恢复正常、快用完都会发到这里，提醒规则和日报在这一页再调。可以选这些：",
+  emptyHint: "先加一个通知方式，提醒和日报才发得出去。加好以后，打开的提醒都会发到这里，提醒规则和日报在这一页再调。可以选这些：",
+  // 还没有通知方式时，空状态下面那一小块（ui-copy-spec §8.3）
+  linesTitle: "余额提醒线和提醒天数",
+  linesCaption: "这两个数决定运营总览、上游列表、成本估算里标不标「余额偏低」「快用完」；加了通知方式以后，也按它们提醒。",
   addType: (label: string) => `添加${label}`,
   // 通知方式弹窗
   editTitle: "编辑通知方式",

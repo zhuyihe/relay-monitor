@@ -7,10 +7,6 @@ export const COPY = Object.freeze({
   account: "账户安全",
   about: "关于",
   readFailed: "读不到系统设置",
-  save: "保存",
-  saved: "已保存",
-  saveFailed: "保存失败",
-  loadFirst: "请先刷新，读到当前设置后再保存",
   reading: "读取中…",
   // 刷新与数据
   interval: "自动刷新间隔",

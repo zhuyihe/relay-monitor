@@ -57,7 +57,7 @@ const COPY = Object.freeze({
   inProfit: "算进利润",
   notInProfit: "不算进利润",
   noRenewal: "不再续费",
-  globalLine: "按系统设置",
+  globalLine: "按告警中心的设置",
   profitPaused: "利润先不算",
   editUpstream: "编辑上游",
   editElsewhere: `在「${STATION_TABS.list}」里看余额和改设置。`,

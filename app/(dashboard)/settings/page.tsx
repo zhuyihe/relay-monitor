@@ -4,7 +4,7 @@
 // 修改密码要原密码，照旧按按钮。
 // 只在本页出现的话都在同目录的 copy.ts 里；报错按码说（改密码时按码把报错放到对应的输入框），日期时间按业务时区写
 import "../../styles/pages/settings.css";
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import Link from "next/link";
 import { App, Button, Input, InputNumber, Select } from "antd";
@@ -15,15 +15,13 @@ import { consoleFailureText, describeError, errorText, requiredText } from "../.
 import { EMPTY, formatInt, formatZonedDateTime } from "../../../lib/format";
 import { Panel } from "../../components/panel";
 import { Dirty, ErrorState, PanelSkeleton, SaveState } from "../../components/data-state";
+import { commitOnLeave, useAutoSave, useSaveQueue } from "../../components/use-auto-save";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Sym } from "../../components/icons";
 import { COPY } from "./copy";
 
 const RETENTION_PRESETS = [30, 90, 180, 365];
 
-type Group = "refresh" | "retention";
-// "all"：首次读取/重试，覆盖全部输入；某一组：只回填该组；"none"：只更新已保存值和历史概况
-type ApplyScope = "all" | "none" | Group;
 
 type HistoryHealth = {
   earliestAt?: string | number | null;
@@ -90,11 +88,8 @@ export default function SettingsPage() {
     pwConfirm: `${uid}-pw-confirm`,
   };
 
-  // 运行设置：当前输入值 + 已保存值（用于"未保存"标记和其他组的请求体）
-  const [interval, setIntervalSec] = useState<number | null>(null);
-  const [savedInterval, setSavedInterval] = useState<number | null>(null);
-  const [historyRetentionDays, setHistoryRetentionDays] = useState<number | null>(null);
-  const [savedRetentionDays, setSavedRetentionDays] = useState<number | null>(null);
+  // 运行设置：刷新间隔、保留天数各一组，改了马上保存（app/components/use-auto-save.ts），排在同一个队列里
+  const queue = useSaveQueue();
   const [customRetention, setCustomRetention] = useState(false);
   const [history, setHistory] = useState<HistoryHealth | null>(null);
   // 业务时区：接口返回的 tz，历史记录的日期时间按它写
@@ -105,10 +100,6 @@ export default function SettingsPage() {
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsError, setSettingsError] = useState<unknown>(null);
   const [previewingCleanup, setPreviewingCleanup] = useState(false);
-  const [savingGroup, setSavingGroup] = useState<Group | null>(null);
-  const [fieldErrors, setFieldErrors] = useState<{ interval?: string }>({});
-  // 每组上次存好的时间：标题旁写「已保存 14:30」
-  const [savedAt, setSavedAt] = useState<Record<Group, number>>({ refresh: 0, retention: 0 });
 
   // 账户（/api/auth/me：用户名 + 是否仍是默认密码）
   const [me, setMe] = useState<{ username: string; isDefaultPassword: boolean } | null>(null);
@@ -126,25 +117,42 @@ export default function SettingsPage() {
   const [metaLoaded, setMetaLoaded] = useState(false);
   const [metaError, setMetaError] = useState<unknown>(null);
 
-  const applySettings = useCallback((next: any, nextHistory: HistoryHealth | null | undefined, scope: ApplyScope, nextTz?: string) => {
-    if (nextTz) setTz(nextTz);
-    const retention = next.historyRetentionDays == null ? null : Number(next.historyRetentionDays);
-    setSavedInterval(next.refreshIntervalSec);
-    setSavedRetentionDays(retention);
-    // 只回填本次保存的那一组，别的组里还没保存的输入保持不动
-    if (scope === "all" || scope === "refresh") setIntervalSec(next.refreshIntervalSec);
-    if (scope === "all" || scope === "retention") {
-      setHistoryRetentionDays(retention);
-      setCustomRetention(retention != null && !RETENTION_PRESETS.includes(retention));
-    }
-    if (nextHistory) setHistory(nextHistory);
-  }, []);
+  const isPreset = (days: number | null) => days == null || RETENTION_PRESETS.includes(days);
+  // 保存一组：请求体只带这一组的字段（服务端缺哪项就不动哪项）；服务端可能钳制过（间隔最小 10 秒），以返回值为准
+  const putSettings = async (body: Record<string, unknown>) => {
+    const r = await api("/api/settings", { method: "PUT", body });
+    if (r.tz) setTz(r.tz);
+    if (r.history) setHistory(r.history);
+    else void loadSettings();
+    return r.settings;
+  };
+  const interval = useAutoSave<number | null>(null, {
+    queue,
+    validate: (v) => (v == null ? requiredText(COPY.interval) : v < 10 ? COPY.intervalMin : null),
+    save: async (v) => (await putSettings({ refreshIntervalSec: Number(v) })).refreshIntervalSec,
+  });
+  // 保留天数：缩短时先预览会删多少，再由确认框明确同意不可恢复的删除；取消就回到原来的天数
+  const retention = useAutoSave<number | null>(null, {
+    queue,
+    confirm: (next, saved) => (next != null && (saved == null || next < saved) ? confirmShorten(next) : Promise.resolve(true)),
+    save: async (next, saved) => {
+      const shortening = next != null && (saved == null || next < saved);
+      const r = await putSettings({ historyRetentionDays: next, ...(shortening ? { confirmRetentionCleanup: true } : {}) });
+      return r.historyRetentionDays == null ? null : Number(r.historyRetentionDays);
+    },
+    onRevert: (saved) => setCustomRetention(!isPreset(saved)),
+  });
 
-  const loadSettings = useCallback(async (scope: ApplyScope = "all") => {
+  const loadSettings = useCallback(async () => {
     setSettingsLoading(true);
     try {
       const result = await api("/api/settings");
-      applySettings(result.settings, result.history, scope, result.tz);
+      if (result.tz) setTz(result.tz);
+      const days = result.settings.historyRetentionDays == null ? null : Number(result.settings.historyRetentionDays);
+      interval.sync(result.settings.refreshIntervalSec);
+      retention.sync(days);
+      setCustomRetention((custom) => custom || !isPreset(days));
+      if (result.history) setHistory(result.history);
       setPlainSecrets(result.secretsEncrypted === false);
       setSettingsError(null);
       setSettingsLoaded(true);
@@ -153,7 +161,9 @@ export default function SettingsPage() {
     } finally {
       setSettingsLoading(false);
     }
-  }, [applySettings]);
+  // interval.sync、retention.sync 是稳定的
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const loadMeta = useCallback(async () => {
     setMetaLoaded(false);
@@ -189,113 +199,44 @@ export default function SettingsPage() {
   }, [loadMe, loadMeta, loadSettings]);
 
   const retentionChoice = useMemo(() => {
-    if (historyRetentionDays == null) return "permanent";
-    return RETENTION_PRESETS.includes(historyRetentionDays) ? String(historyRetentionDays) : "custom";
-  }, [historyRetentionDays]);
+    if (customRetention) return "custom";
+    if (retention.value == null) return "permanent";
+    return RETENTION_PRESETS.includes(retention.value) ? String(retention.value) : "custom";
+  }, [customRetention, retention.value]);
 
   // 下拉一改就存；选「自定义…」时先出天数框，离开天数框或按回车时再存
   const setRetentionChoice = (value: string) => {
-    if (value === "permanent") {
-      setHistoryRetentionDays(null);
-      setCustomRetention(false);
-      void onSaveRetention(null);
-      return;
-    }
     if (value === "custom") {
       setCustomRetention(true);
-      setHistoryRetentionDays((current) => current && current > 0 ? current : 30);
+      retention.setValue((current) => (current && current > 0 ? current : 30));
       return;
     }
+    const days = value === "permanent" ? null : Number(value);
     setCustomRetention(false);
-    setHistoryRetentionDays(Number(value));
-    void onSaveRetention(Number(value));
+    retention.setValue(days);
+    void retention.commit(days);
   };
 
-  const busy = savingGroup !== null || previewingCleanup;
-  const refreshDirty = settingsLoaded && interval !== savedInterval;
-  const retentionDirty = settingsLoaded && historyRetentionDays !== savedRetentionDays;
-  const retentionShortening = historyRetentionDays != null && (
-    savedRetentionDays == null || historyRetentionDays < savedRetentionDays
-  );
+  const retentionShortening = retention.value != null && (retention.saved == null || retention.value < retention.saved);
   // 用户名输入框默认留空（留空即不修改），填了不同的名字才算有改动
   const accountDirty = !!(pwOld || pwNew || pwConfirm) || (!!username.trim() && username.trim() !== (me?.username || ""));
 
-  // 保存某一组：请求体只带这一组的字段（服务端缺哪项就不动哪项）。存不进去时这一组回到已保存的值（§8.3）
-  const persistSettings = async (group: Group, confirmRetentionCleanup = false, retentionDays = historyRetentionDays) => {
-    setSavingGroup(group);
-    try {
-      const r = await api("/api/settings", {
-        method: "PUT",
-        body: group === "refresh"
-          ? { refreshIntervalSec: Number(interval) }
-          : { historyRetentionDays: retentionDays, ...(confirmRetentionCleanup ? { confirmRetentionCleanup: true } : {}) },
-      });
-      // 服务端可能钳制过（间隔最小 10 秒），以返回值为准回显
-      applySettings(r.settings, r.history, group, r.tz);
-      if (!r.history) void loadSettings("none");
-      setSavedAt((at) => ({ ...at, [group]: Date.now() }));
-    } catch (e) {
-      message.error(consoleFailureText(COPY.saveFailed, e));
-      revert(group);
-    } finally {
-      setSavingGroup(null);
-    }
-  };
-
-  // 回到已保存的值（存不进去、取消缩短保留天数时）
-  const revert = (group: Group) => {
-    if (group === "refresh") {
-      setIntervalSec(savedInterval);
-      setFieldErrors((prev) => ({ ...prev, interval: undefined }));
-      return;
-    }
-    setHistoryRetentionDays(savedRetentionDays);
-    setCustomRetention(savedRetentionDays != null && !RETENTION_PRESETS.includes(savedRetentionDays));
-  };
-
-  const ensureLoaded = () => {
-    if (settingsLoaded) return true;
-    message.warning(COPY.loadFirst);
-    return false;
-  };
-
-  // 离开输入框或按回车时保存；没改就不存。推迟一拍再读，等输入框把越界值钳好
-  const onCommitRefresh = () => {
-    window.setTimeout(() => commitRefreshRef.current(), 0);
-  };
-  const commitRefreshRef = useRef<() => void>(() => {});
-  commitRefreshRef.current = () => {
-    if (!settingsLoaded || !refreshDirty || savingGroup) return;
-    const err = interval == null ? requiredText(COPY.interval) : interval < 10 ? COPY.intervalMin : undefined;
-    setFieldErrors((prev) => ({ ...prev, interval: err }));
-    if (err) return focusById(ids.interval);
-    void persistSettings("refresh");
-  };
-
-  // 自定义天数：离开天数框或按回车时存
-  const commitRetentionRef = useRef<() => void>(() => {});
-  commitRetentionRef.current = () => {
-    if (customRetention && retentionDirty && !busy) void onSaveRetention(historyRetentionDays);
-  };
-
-  // 缩短保留天数时，先预览会删多少，再由确认操作明确同意不可恢复的删除；取消就回到原来的天数。
-  const onSaveRetention = async (nextRetention: number | null) => {
-    if (!ensureLoaded() || nextRetention === savedRetentionDays) return;
-    const isShortening = nextRetention != null && (
-      savedRetentionDays == null || nextRetention < savedRetentionDays
-    );
-    if (!isShortening) {
-      void persistSettings("retention", false, nextRetention);
-      return;
-    }
-
+  // 缩短前先预览会删多少；确认了才存。预览读不到就不存（回到原来的天数）
+  const confirmShorten = async (nextRetention: number) => {
     setPreviewingCleanup(true);
+    let preview: CleanupPreview;
     try {
-      const result = await api(`/api/settings/history-preview?days=${nextRetention}`);
-      const preview = result.preview as CleanupPreview;
-      const affectedRange = preview.pointCount > 0
-        ? COPY.confirmRange(formatDateTime(preview.earliestAt, tz), formatDateTime(preview.latestAt, tz))
-        : COPY.confirmNone;
+      preview = (await api(`/api/settings/history-preview?days=${nextRetention}`)).preview as CleanupPreview;
+    } catch (e) {
+      message.error(consoleFailureText(COPY.previewFailed, e));
+      return false;
+    } finally {
+      setPreviewingCleanup(false);
+    }
+    const affectedRange = preview.pointCount > 0
+      ? COPY.confirmRange(formatDateTime(preview.earliestAt, tz), formatDateTime(preview.latestAt, tz))
+      : COPY.confirmNone;
+    return new Promise<boolean>((resolve) => {
       modal.confirm({
         title: COPY.confirmTitle,
         content: (
@@ -311,15 +252,10 @@ export default function SettingsPage() {
         okText: COPY.confirmOk,
         okButtonProps: { danger: true },
         cancelText: COPY.cancel,
-        onOk: () => persistSettings("retention", true, nextRetention),
-        onCancel: () => revert("retention"),
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
       });
-    } catch (e) {
-      message.error(consoleFailureText(COPY.previewFailed, e));
-      revert("retention");
-    } finally {
-      setPreviewingCleanup(false);
-    }
+    });
   };
 
   // 修改用户名/密码：先在本地校验必填、长度和两次输入一致，服务端仍会再校验原密码与长度。
@@ -369,7 +305,7 @@ export default function SettingsPage() {
   // 上次自动清理没完成：服务端存的是原文，只进「查看详细原因」
   const cleanupError = history?.cleanup?.lastError || null;
   // 现在保留多久：一直保留时不再自动清理
-  const keptDays = history?.retentionDays ?? savedRetentionDays;
+  const keptDays = history?.retentionDays ?? retention.saved;
   // 会话信息回来之前不确定是否处于"首次改密"模式，先用骨架占位，避免其他分组闪现后又消失
   const showOthers = meLoaded && !restricted;
   const settingsFailed = !settingsLoaded && !settingsLoading && !!settingsError;
@@ -515,26 +451,25 @@ export default function SettingsPage() {
           </>
         ) : (
           <>
-            <Panel title={COPY.refresh} badge={<SaveState saving={savingGroup === "refresh"} dirty={refreshDirty} at={savedAt.refresh} tz={tz} />}>
+            <Panel title={COPY.refresh} badge={<SaveState saving={interval.saving} dirty={interval.dirty} at={interval.savedAt} tz={tz} error={interval.error} />}>
               <div className="jy-field jy-settings-field">
                 <label htmlFor={ids.interval}>{COPY.interval}</label>
                 <InputNumber
                   id={ids.interval}
-                  value={interval}
+                  value={interval.value}
                   onChange={(v) => {
-                    setIntervalSec(v);
-                    if (fieldErrors.interval) setFieldErrors((p) => ({ ...p, interval: undefined }));
+                    interval.setValue(v);
+                    interval.clearInvalid();
                   }}
-                  onBlur={onCommitRefresh}
-                  onPressEnter={onCommitRefresh}
+                  {...commitOnLeave(interval.commit)}
                   min={10}
                   suffix={COPY.seconds}
-                  status={fieldErrors.interval ? "error" : undefined}
-                  aria-invalid={!!fieldErrors.interval}
-                  aria-describedby={`${ids.interval}-desc${fieldErrors.interval ? ` ${ids.interval}-err` : ""}`}
+                  status={interval.invalid ? "error" : undefined}
+                  aria-invalid={!!interval.invalid}
+                  aria-describedby={`${ids.interval}-desc${interval.invalid ? ` ${ids.interval}-err` : ""}`}
                 />
                 <span className="jy-caption" id={`${ids.interval}-desc`}>{COPY.intervalHint}</span>
-                <FieldError id={`${ids.interval}-err`} text={fieldErrors.interval} />
+                <FieldError id={`${ids.interval}-err`} text={interval.invalid || undefined} />
               </div>
               <p className="jy-caption">
                 {COPY.lowLineMovedBefore}
@@ -543,11 +478,11 @@ export default function SettingsPage() {
               </p>
             </Panel>
 
-            <Panel title={COPY.retention} badge={<SaveState saving={savingGroup === "retention" || previewingCleanup} dirty={retentionDirty} at={savedAt.retention} tz={tz} />}>
+            <Panel title={COPY.retention} badge={<SaveState saving={retention.saving || previewingCleanup} dirty={retention.dirty} at={retention.savedAt} tz={tz} error={retention.error} />}>
               {settingsError ? (
                 // 已有数据时重新读取失败：保留当前内容，只在本组提示
                 <div className="jy-settings-inline-error">
-                  <ErrorState what={COPY.overviewFailed} error={settingsError} onRetry={() => void loadSettings("none")} />
+                  <ErrorState what={COPY.overviewFailed} error={settingsError} onRetry={() => void loadSettings()} />
                 </div>
               ) : null}
               <div className="jy-field">
@@ -557,7 +492,7 @@ export default function SettingsPage() {
                     id={ids.retention}
                     value={retentionChoice}
                     onChange={setRetentionChoice}
-                    disabled={!settingsLoaded || busy}
+                    disabled={!settingsLoaded}
                     options={[
                       { value: "permanent", label: COPY.keepForever },
                       ...RETENTION_PRESETS.map((days) => ({ value: String(days), label: COPY.keepDays(days) })),
@@ -568,13 +503,12 @@ export default function SettingsPage() {
                   {customRetention ? (
                     <InputNumber
                       aria-label={COPY.keepCustomLabel}
-                      value={historyRetentionDays}
+                      value={retention.value}
                       onChange={(value) => {
-                        if (value != null) setHistoryRetentionDays(Number(value));
+                        if (value != null) retention.setValue(Number(value));
                       }}
-                      onBlur={() => window.setTimeout(() => commitRetentionRef.current(), 0)}
-                      onPressEnter={() => window.setTimeout(() => commitRetentionRef.current(), 0)}
-                      disabled={!settingsLoaded || busy}
+                      {...commitOnLeave(retention.commit)}
+                      disabled={!settingsLoaded}
                       min={1}
                       precision={0}
                       suffix={COPY.days}
@@ -584,7 +518,7 @@ export default function SettingsPage() {
                 <span className="jy-caption" id={`${ids.retention}-desc`}>
                   {COPY.keepHint}
                 </span>
-                {retentionDirty && retentionShortening ? (
+                {retention.dirty && retentionShortening ? (
                   <span className="jy-settings-note">
                     <Sym kind="warn" />
                     {COPY.keepShorter}

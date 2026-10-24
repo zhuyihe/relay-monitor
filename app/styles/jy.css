@@ -465,6 +465,8 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-test-result--stale .jy-sym { color: var(--jy-warn); }
 .jy-dirty { font-size: 12px; color: var(--jy-ink-3); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .jy-dirty i { width: 6px; height: 6px; border-radius: 50%; background: var(--jy-warn); display: block; }
+/* 改了马上保存、没存上：标题旁那一句，带「查看详细原因」（data-state.tsx 的 SaveState） */
+.jy-save-failed { display: inline-flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 12px; font-weight: 400; }
 .jy-err { font-size: 12px; line-height: 18px; color: var(--jy-crit-ink); display: flex; gap: 6px; align-items: flex-start; }
 .jy-err .jy-sym { margin-top: 3px; }
 
