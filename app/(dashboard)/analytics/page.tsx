@@ -23,6 +23,7 @@ import { HBars } from "../../components/hbars";
 import type { HBarItem } from "../../components/hbars";
 import { Heatmap } from "../../components/heatmap";
 import { Sym } from "../../components/icons";
+import { More } from "../../components/more";
 import { Panel } from "../../components/panel";
 import { EQ_TEXT, ProfitEquation, incomeUnreadProps } from "../../components/profit-equation";
 import type { EqTerm } from "../../components/profit-equation";
@@ -246,13 +247,15 @@ export default function AnalyticsPage() {
     </Checkbox>
   );
 
-  // 本页是估出来的数，按上游账单算的利润在每日利润页
+  // 本页是估出来的数，按上游账单算的利润在每日利润页。默认一行，「数字怎么来的」收起（ui-copy-spec §8.4）
   const sourceNote = (
     <div className="jy-banner jy-banner--info jy-analytics-source">
       <Sym kind="info" />
-      <div className="jy-analytics-source-body">
-        <b>{COPY.sourceTitle}</b>
-        <p>{COPY.sourceBody}</p>
+      <div className="jy-analytics-source-body jy-more-line">
+        <span>{COPY.sourceShort}</span>
+        <More label={COPY.sourceTitle}>
+          <p>{COPY.sourceBody}</p>
+        </More>
       </div>
       <div className="page-toolbar">
         <Button size="small" href="/reconciliation">
@@ -732,72 +735,80 @@ function CoveragePanel({ dv, data, stations }: { dv: Derived; data: any; station
   } else if (!nMissing && !nPartial) {
     lead = COPY.leadFull(days, dv.monitoredCount);
   } else {
-    const parts = [COPY.leadFullDays(days - nMissing - nPartial)];
-    if (nPartial) parts.push(COPY.leadPartialDays(nPartial));
+    const parts = [];
     if (nMissing) parts.push(COPY.leadMissingDays(nMissing));
-    lead = COPY.leadParts(days, parts.join("，"));
+    if (nPartial) parts.push(COPY.leadPartialDays(nPartial));
+    lead = COPY.leadGaps(parts.join("、"), nMissing + nPartial);
   }
-  if (earliest && earliest > data.start) lead += COPY.leadEarliest(md(earliest, tz));
 
   return (
     <div id={COVERAGE_ID} className="jy-analytics-anchor">
-      <Panel title={COPY.panel.coverage} caption={COPY.coverageCaption}>
-        <p className="jy-analytics-lead">{lead}</p>
-        <dl className="jy-kv">
-          <dt>{COPY.kvRange}</dt>
-          <dd>{COPY.window(md(data.start, tz), md(data.end, tz), days)}</dd>
-          <dt>{COPY.kvEarliest}</dt>
-          <dd>{earliest ? md(earliest, tz) : COPY.notYet}</dd>
-          <dt>{COPY.kvMissing}</dt>
-          <dd>{nMissing ? COPY.daysOf(runsText(dv.missingDates, tz, 6), nMissing) : COPY.none}</dd>
-          <dt>{COPY.kvPartial}</dt>
-          <dd>{nPartial ? COPY.daysOf(runsText(dv.partialDates, tz, 6), nPartial) : COPY.none}</dd>
-        </dl>
-        {dv.allGaps.length > 0 && (
-          <div className="jy-table-scroll jy-analytics-gaps">
-            <table className="jy-data jy-data--compact jy-num">
-              <caption className="sr-only">{COPY.gapTable}</caption>
-              <thead>
-                <tr>
-                  <th scope="col">{COPY.colStation}</th>
-                  <th scope="col" className="r">
-                    {COPY.colHave}
-                  </th>
-                  <th scope="col" className="r">
-                    {COPY.colMissing}
-                  </th>
-                  <th scope="col">{COPY.colEarliest}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {dv.allGaps.map((g) => {
-                  const s = byId.get(g.stationId);
-                  const tags = [
-                    s?.isOwn
-                      ? COPY.tagOwn
-                      : s?.includeInProfit === false
-                        ? COPY.tagNoProfit
-                        : s?.costBasis === "fixed"
-                          ? COPY.tagFixed
-                          : "",
-                    g.archivedAt || s?.archivedAt ? COPY.tagArchived : "",
-                  ].filter(Boolean);
-                  return (
-                    <tr key={g.stationId}>
-                      <td>
-                        {stationDisplayName({ name: g.stationName || s?.name })}
-                        {tags.length > 0 && <span className="jy-caption">（{tags.join("，")}）</span>}
-                      </td>
-                      <td className="r">{COPY.dayCount(Number(g.availableDays) || 0)}</td>
-                      <td className="r">{COPY.dayCount(Number(g.missingDays) || 0)}</td>
-                      <td>{g.earliestDate ? md(g.earliestDate, tz) : COPY.notYet}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+      <Panel title={COPY.panel.coverage}>
+        {/* 一句结论 + 按钮同一行，明细默认收起；「查看没算进去的数据」链到这里时展开。
+            没有缺记录时只留结论、不出按钮：按钮名「哪些天、哪些上游缺记录」会和结论矛盾（ui-copy-spec §8.4） */}
+        <div className="jy-more-line">
+          <p className="jy-analytics-lead">{lead}</p>
+          {nMissing + nPartial > 0 && (
+            <More label={COPY.coverageCaption} anchor={COVERAGE_ID}>
+              <p className="jy-analytics-lead">{COPY.gapRule}</p>
+              <dl className="jy-kv">
+                <dt>{COPY.kvRange}</dt>
+                <dd>{COPY.window(md(data.start, tz), md(data.end, tz), days)}</dd>
+                <dt>{COPY.kvEarliest}</dt>
+                <dd>{earliest ? md(earliest, tz) : COPY.notYet}</dd>
+                <dt>{COPY.kvMissing}</dt>
+                <dd>{nMissing ? COPY.daysOf(runsText(dv.missingDates, tz, 6), nMissing) : COPY.none}</dd>
+                <dt>{COPY.kvPartial}</dt>
+                <dd>{nPartial ? COPY.daysOf(runsText(dv.partialDates, tz, 6), nPartial) : COPY.none}</dd>
+              </dl>
+              {dv.allGaps.length > 0 && (
+                <div className="jy-table-scroll jy-analytics-gaps">
+                  <table className="jy-data jy-data--compact jy-num">
+                    <caption className="sr-only">{COPY.gapTable}</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">{COPY.colStation}</th>
+                        <th scope="col" className="r">
+                          {COPY.colHave}
+                        </th>
+                        <th scope="col" className="r">
+                          {COPY.colMissing}
+                        </th>
+                        <th scope="col">{COPY.colEarliest}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dv.allGaps.map((g) => {
+                        const s = byId.get(g.stationId);
+                        const tags = [
+                          s?.isOwn
+                            ? COPY.tagOwn
+                            : s?.includeInProfit === false
+                              ? COPY.tagNoProfit
+                              : s?.costBasis === "fixed"
+                                ? COPY.tagFixed
+                                : "",
+                          g.archivedAt || s?.archivedAt ? COPY.tagArchived : "",
+                        ].filter(Boolean);
+                        return (
+                          <tr key={g.stationId}>
+                            <td>
+                              {stationDisplayName({ name: g.stationName || s?.name })}
+                              {tags.length > 0 && <span className="jy-caption">（{tags.join("，")}）</span>}
+                            </td>
+                            <td className="r">{COPY.dayCount(Number(g.availableDays) || 0)}</td>
+                            <td className="r">{COPY.dayCount(Number(g.missingDays) || 0)}</td>
+                            <td>{g.earliestDate ? md(g.earliestDate, tz) : COPY.notYet}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </More>
+          )}
+        </div>
       </Panel>
     </div>
   );

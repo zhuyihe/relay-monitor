@@ -43,17 +43,17 @@ export const COPY = Object.freeze({
   total: "合计",
   // 合计
   exact: (n: string) => `精确值 ${n}`,
-  noneRead: "一个上游的用量都没读到",
   sources: "读到的上游",
   sourcesOf: (n: number) => ` / ${n} 个上游`,
-  failedCount: (n: number) => `${n} 个读不到`,
-  excludeFailed: (n: number) => `不含读不到的 ${n} 个上游`,
   rateUnset: (n: number) => `${n} 个上游${RATE_UNSET_PARITY}`,
-  failedTitle: "以下上游的用量读不到",
-  failedTitlePartial: "以下上游的用量读不到，合计里不含它们",
+  // 读不到的上游（ui-copy-spec §8.4）：只在这一行说，合计各格不再写；默认一行，「看原因」展开，全都读不到时默认展开
+  // 全都读不到：只有 1 个（或筛到单个上游）时说「这个上游」，筛到自营站点时说自营站点；后面接下一步
+  failedAll: (n: number) => (n === 1 ? "这个上游的用量读不到" : `${n} 个上游的用量都读不到`),
+  failedOwn: "读不到自营站点的用量",
+  failedNext: "，恢复后下次刷新会自动显示。",
+  failedSome: (n: number) => `${n} 个上游的用量读不到，合计里不含${n === 1 ? "它" : "它们"}`,
+  failedWhy: "看原因",
   // 没有数据
   emptyTitle: "这段时间没有用量",
   emptyDesc: "换一个时间范围，或在筛选里选别的上游。",
-  allFailedTitle: "所有上游的用量都读不到",
-  allFailedDesc: "各上游读不到的原因见上方；恢复后，下次刷新会自动显示。",
 });

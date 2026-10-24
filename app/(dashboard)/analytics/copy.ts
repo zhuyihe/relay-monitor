@@ -14,7 +14,9 @@ export const COPY = Object.freeze({
   window: (start: string, end: string, days: number) => `${start}–${end}，共 ${days} 天`,
   // 本页是估出来的数，按上游账单算的利润在每日利润页
   sourceTitle: "数字怎么来的",
-  sourceBody: `上游成本按余额的变化估算，固定成本按付费周期平摊到每天，可用天数按近期花费估算；美元按各上游设置的汇率换成人民币（${RATE_UNSET_PARITY}）。这些是估出来的数，不是上游的实际账单；按上游账单算的每天利润在「${NAV_LABELS.reconciliation}」里看。`,
+  // 顶上那一行（ui-copy-spec §8.4）：收起时只写这一句，「数字怎么来的」展开后才是 sourceBody
+  sourceShort: "这一页的数是按余额变化估出来的，不是上游的实际账单。",
+  sourceBody: `上游成本按余额的变化估算，固定成本按付费周期平摊到每天，可用天数按近期花费估算；美元按各上游设置的汇率换成人民币（${RATE_UNSET_PARITY}）。按上游账单算的每天利润在「${NAV_LABELS.reconciliation}」里看。`,
   emptyDesc: "加上上游后，这里会算成本和利润。",
   emptyArchived: "已归档的上游勾选「包含已归档」后可以看。",
   // 利润等式下面「数据不完整」的原因，每条一句
@@ -84,11 +86,12 @@ export const COPY = Object.freeze({
   coverageCaption: "哪些天、哪些上游缺记录",
   leadNoUsage: "这段时间没有按用量计费的上游记录，只算了固定成本。",
   leadFull: (days: number, n: number) => `所选 ${days} 天，全部 ${n} 个上游每天都有记录，没有漏算。`,
-  leadFullDays: (n: number) => `${n} 天记录齐全`,
+  // 缺记录时收起后只露一句（ui-copy-spec §8.4）：「22 天没有记录、3 天只有部分上游有记录，这几天的上游成本没算全。」一共只缺 1 天时说「这一天」
+  leadMissingDays: (n: number) => `${n} 天没有记录`,
   leadPartialDays: (n: number) => `${n} 天只有部分上游有记录`,
-  leadMissingDays: (n: number) => `${n} 天一个上游的记录都没有`,
-  leadParts: (days: number, parts: string) => `所选 ${days} 天，${parts}。缺记录的日子不当成 0，上游成本只按已有的记录算。`,
-  leadEarliest: (date: string) => `最早的记录是 ${date}，那之前还没开始记。`,
+  leadGaps: (parts: string, days: number) => `${parts}，${days === 1 ? "这一天" : "这几天"}的上游成本没算全。`,
+  // 展开后的第一句
+  gapRule: "缺记录的日子不当成 0，上游成本只按已有的记录算。",
   kvRange: "时间范围",
   kvEarliest: "最早的记录",
   kvMissing: "没有记录的日子",

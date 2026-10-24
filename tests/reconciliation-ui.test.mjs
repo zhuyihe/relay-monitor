@@ -2584,14 +2584,14 @@ function costAnalyticsFixture(days) {
 }
 // 成本估算的可用天数用上游列表的余额和提醒线判断档位（balanceViewOf）：默认余额在提醒线以上、约 5 天，和接口的可用天数一致
 const costStationsFixture = (balance = { ok: true, remaining: 30 }, prediction = { etaDays: 5, burnPerDay: 1 }) => ({ stations: [{ id: "up-a", name: "Fixture upstream", type: "newapi", cnyPerUsd: 7, monitorEnabled: true, balance, prediction, spark: [] }], settings: { lowBalanceUsd: 5 } });
-async function openCostPage(t, own, path = "/analytics", { stations = costStationsFixture(), meta = (route) => fulfill(route, { rules: { etaDays: 3 }, settings: { lowBalanceUsd: 5 } }) } = {}) {
+async function openCostPage(t, own, path = "/analytics", { stations = costStationsFixture(), meta = (route) => fulfill(route, { rules: { etaDays: 3 }, settings: { lowBalanceUsd: 5 } }), analytics = costAnalyticsFixture } = {}) {
   const ownReads = [];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (url.pathname === "/api/stations") return fulfill(route, stations);
     if (url.pathname === "/api/meta") return meta(route);
-    if (url.pathname === "/api/analytics") return fulfill(route, costAnalyticsFixture(Number(url.searchParams.get("days")) || 30));
+    if (url.pathname === "/api/analytics") return fulfill(route, analytics(Number(url.searchParams.get("days")) || 30));
     if (url.pathname === "/api/own/analytics") { ownReads.push(url.searchParams.get("range")); return own(route); }
     throw new Error("unexpected cost fixture API: " + url.pathname);
   }, undefined, false, null, path);
@@ -2599,6 +2599,63 @@ async function openCostPage(t, own, path = "/analytics", { stations = costStatio
   return { page, ownReads, equation: page.getByRole("region", { name: ANALYTICS_COPY.eqTitle, exact: true }) };
 }
 const failJSON = (route, status, body) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+
+test("成本估算：「数字怎么来的」「没算进去的数据」默认收起，只露一行结论；点按钮或页里「查看没算进去的数据」才展开", async (t) => {
+  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
+  // 最早的 3 天上游一条记录都没有：页里会出「查看没算进去的数据」，没算进去的数据那句写「3 天没有记录」
+  const analytics = (days) => {
+    const f = costAnalyticsFixture(days); f.daily = f.daily.slice(3); const earliestDate = f.daily[0].date;
+    f.coverage = { ...f.coverage, earliestDate, availableDays: days - 3, isComplete: false, stationGaps: [{ stationId: "up-a", stationName: "Fixture upstream", availableDays: days - 3, missingDays: 3, earliestDate }] };
+    return f;
+  };
+  const { page } = await openCostPage(t, own, "/analytics", { analytics });
+  // 页顶只露一句（ui-copy-spec §8.4），长说明在按钮后面
+  await page.getByText(ANALYTICS_COPY.sourceShort, { exact: true }).waitFor();
+  assert.equal(await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).count(), 0);
+  const source = page.getByRole("button", { name: ANALYTICS_COPY.sourceTitle, exact: true });
+  assert.equal(await source.getAttribute("aria-expanded"), "false"); await source.click();
+  assert.equal(await source.getAttribute("aria-expanded"), "true");
+  await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).waitFor();
+  await source.click(); assert.equal(await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).count(), 0);
+  // 没算进去的数据：结论一句和按钮在同一行，规则和明细在「哪些天、哪些上游缺记录」后面
+  const coverage = page.locator("#analytics-coverage");
+  const details = coverage.getByRole("button", { name: ANALYTICS_COPY.coverageCaption, exact: true });
+  const lead = coverage.getByText(ANALYTICS_COPY.leadGaps(ANALYTICS_COPY.leadMissingDays(3), 3), { exact: true });
+  await lead.waitFor(); await details.waitFor();
+  const [leadBox, buttonBox] = [await lead.boundingBox(), await details.boundingBox()];
+  assert.ok(Math.abs(leadBox.y + leadBox.height - (buttonBox.y + buttonBox.height)) < 8, "结论和按钮在同一行");
+  assert.equal(await coverage.locator("dl").count(), 0); assert.equal(await coverage.getByText(ANALYTICS_COPY.gapRule).count(), 0);
+  await details.click(); await coverage.locator("dl").getByText(ANALYTICS_COPY.kvRange, { exact: true }).waitFor();
+  await coverage.getByText(ANALYTICS_COPY.gapRule, { exact: true }).waitFor();
+  await details.click(); assert.equal(await coverage.locator("dl").count(), 0);
+  // 点页里真的「查看没算进去的数据」：展开并滚过去；收起后再点同一个链接也展开（地址栏的 # 没变）
+  const link = page.getByRole("link", { name: ANALYTICS_COPY.coverageLink, exact: true }).first();
+  await link.click(); await coverage.locator("dl").waitFor(); assert.equal(await details.getAttribute("aria-expanded"), "true");
+  await details.click(); assert.equal(await coverage.locator("dl").count(), 0);
+  await link.scrollIntoViewIfNeeded(); await link.click(); await coverage.locator("dl").waitFor();
+  // 带着 #analytics-coverage 刷新：那一块等数据读回来才出现，出现后展开并滚到它
+  await page.reload(); await coverage.locator("dl").waitFor(); assert.equal(await details.getAttribute("aria-expanded"), "true");
+  await page.waitForFunction(() => { const r = document.getElementById("analytics-coverage")?.getBoundingClientRect(); return r && r.top >= 0 && r.top < window.innerHeight / 2; });
+});
+
+test("成本估算：没缺记录时「没算进去的数据」只留一句、不出「哪些天、哪些上游缺记录」；只缺 1 天时说「这一天」", async (t) => {
+  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
+  let missing = 0;
+  const analytics = (days) => {
+    const f = costAnalyticsFixture(days); if (!missing) return f;
+    f.daily = f.daily.slice(missing); const earliestDate = f.daily[0].date;
+    f.coverage = { ...f.coverage, earliestDate, availableDays: days - missing, isComplete: false, stationGaps: [{ stationId: "up-a", stationName: "Fixture upstream", availableDays: days - missing, missingDays: missing, earliestDate }] };
+    return f;
+  };
+  const { page } = await openCostPage(t, own, "/analytics", { analytics });
+  const coverage = page.locator("#analytics-coverage");
+  await coverage.getByText(ANALYTICS_COPY.leadFull(30, 1), { exact: true }).waitFor();
+  assert.equal(await coverage.getByRole("button").count(), 0);
+  missing = 1; await page.reload();
+  await coverage.getByText(ANALYTICS_COPY.leadGaps(ANALYTICS_COPY.leadMissingDays(1), 1), { exact: true }).waitFor();
+  assert.match(await coverage.innerText(), /这一天的上游成本没算全/);
+  await coverage.getByRole("button", { name: ANALYTICS_COPY.coverageCaption, exact: true }).waitFor();
+});
 
 test("成本估算的可用天数和运营总览同一个档位：余额在提醒线以下写「余额偏低」，不只按天数写「快用完」", async (t) => {
   const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
@@ -2766,6 +2823,38 @@ test("运营总览：收入确认不了时利润等式收入几项写「读不�
   assert.equal(opened.mutations.length, 0);
 });
 
+test("用量分析：全部上游都读不到时只说一处——黄条默认展开原因，合计只写「—」，下面不再放空状态", async (t) => {
+  const now = Date.now();
+  const usage = { range: "today", granularity: "hour", startMs: now - 3600000, endMs: now, tz: BUSINESS_TZ, generatedAt: new Date(now).toISOString(), stations: [
+    { id: "up-b", name: "Broken upstream", type: "newapi", cnyPerUsd: 7, isOwn: false, ok: false, error: "HTTP 401: invalid token", code: "AUTHENTICATION_FAILED" },
+    { id: "up-c", name: "Busy upstream", type: "newapi", cnyPerUsd: 7, isOwn: false, ok: false, error: "HTTP 503", code: "UPSTREAM_REQUEST_FAILED" },
+  ] };
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/usage") return fulfill(route, usage);
+    throw new Error("unexpected usage fixture API: " + url.pathname);
+  }, undefined, false, null, "/usage");
+  const failedLine = page.locator(".jy-usage-failed-line"); await failedLine.getByText(USAGE_COPY.failedAll(2), { exact: true }).waitFor();
+  // 后面接下一步：恢复后会自己出来，不用做什么
+  assert.match(await failedLine.innerText(), new RegExp(USAGE_COPY.failedNext));
+  const why = failedLine.getByRole("button", { name: USAGE_COPY.failedWhy, exact: true });
+  assert.equal(await why.getAttribute("aria-expanded"), "true");
+  assert.equal(await page.locator(".jy-usage-failed li").count(), 2);
+  const totals = page.getByRole("region", { name: USAGE_COPY.totalsLabel, exact: true });
+  assert.equal(await totals.locator(".jy-usage-figure").filter({ hasText: /^—$/ }).count(), 3);
+  assert.equal(await totals.locator("dl .jy-caption").count(), 0);
+  // 读不到这件事只有黄条一处：不再有「这段时间没有用量」那类空状态
+  assert.equal(await page.getByText(USAGE_COPY.emptyTitle, { exact: true }).count(), 0);
+  assert.equal(await page.getByText(/读不到/).count(), await failedLine.getByText(/读不到/).count());
+  // 只有 1 个上游时说「这个上游」；筛到自营站点时说自营站点，不叫它上游
+  usage.stations = [usage.stations[0]]; await page.reload();
+  await failedLine.getByText(USAGE_COPY.failedAll(1), { exact: true }).waitFor();
+  assert.doesNotMatch(await failedLine.innerText(), /1 个上游/);
+  usage.stations = [{ ...usage.stations[0], id: "own-1", name: "Fixture own", isOwn: true }]; await page.goto(page.url().split("?")[0] + "?station=own-1");
+  await failedLine.getByText(USAGE_COPY.failedOwn, { exact: true }).waitFor();
+});
+
 test("用量分析：读不到用量的上游按码说一句、原文收起；没设置汇率只数有花费的上游；后台刷新失败保留上次的数据；单独看自营站点按售价说", async (t) => {
   const generatedAt = new Date().toISOString(); let fail = false; const reads = [];
   const hourAgo = Date.now() - 3600000;
@@ -2787,11 +2876,18 @@ test("用量分析：读不到用量的上游按码说一句、原文收起；�
   const page = await openFixturePage(t, handler, undefined, false, null, "/usage");
   const totals = page.getByRole("region", { name: USAGE_COPY.totalsLabel, exact: true });
   await totals.getByText(formatCompact(1234567), { exact: true }).waitFor();
+  // 读不到的上游默认只一行（ui-copy-spec §8.4）：「看原因」展开才列出每个上游；合计里那一格不再写「N 个读不到」
+  const failedLine = page.locator(".jy-usage-failed-line"); await failedLine.getByText(USAGE_COPY.failedSome(1), { exact: true }).waitFor();
+  assert.equal(await page.locator(".jy-usage-failed li").count(), 0);
+  assert.equal(await totals.getByText(/个读不到/).count(), 0);
+  const why = failedLine.getByRole("button", { name: USAGE_COPY.failedWhy, exact: true });
+  assert.equal(await why.getAttribute("aria-expanded"), "false"); await why.click(); assert.equal(await why.getAttribute("aria-expanded"), "true");
   const failed = page.locator(".jy-usage-failed li"); await failed.waitFor();
   assert.match(await failed.innerText(), new RegExp(`^${failureSentence("Broken upstream", ERROR_CATEGORIES.auth.text)}`));
   assert.doesNotMatch(await failed.innerText(), /invalid token/);
   await totals.getByText(USAGE_COPY.rateUnset(1), { exact: true }).waitFor();
-  await totals.getByText(USAGE_COPY.excludeFailed(1), { exact: true }).first().waitFor();
+  // 「合计里不含它们」只在黄条那一行说，合计各格下面不再写（ui-copy-spec §8.4）
+  assert.equal(await totals.getByText(/不含读不到/).count(), 0);
   await totals.getByText(USAGE_COPY.cost, { exact: true }).waitFor();
 
   // 切回标签页时重新读，这次读不到：上次的数字留着，横幅说刷新失败和数据截至的时刻，按码说原因
