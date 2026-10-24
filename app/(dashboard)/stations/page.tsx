@@ -601,7 +601,8 @@ export default function StationsPage() {
         <div className="jy-stations-name-line">
           <button type="button" className="link" onClick={(e) => openEditor(s, e.currentTarget)}>{stationDisplayName(s)}</button>
           {s.isOwn ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.own}</em> : null}
-          {s.includeInProfit === false ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.notInProfit}</em> : null}
+          {/* 自营站点本来就不算进利润（countsInProfit），编辑页也不给这个开关，不挂这个标签 */}
+          {!s.isOwn && s.includeInProfit === false ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.notInProfit}</em> : null}
           {s.noRenewal ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.noRenewal}</em> : null}
           {s.demo ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.demo}</em> : null}
         </div>

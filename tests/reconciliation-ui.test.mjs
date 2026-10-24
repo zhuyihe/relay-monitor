@@ -3088,9 +3088,38 @@ test("编辑上游改了地址的站点：留空的令牌不带过去，测试�
   assert.equal(tests[0].accessToken, "");
 });
 
+test("编辑固定成本的上游：用不到的汇率、余额提醒线、其他地址、不再续费藏起来，保存时照原值带上，改回按用量算时还在", async (t) => {
+  const saves = [];
+  const fixed = { id: "box", name: "服务器", type: "fixed", baseUrl: "", includeInProfit: true, costAliases: ["10.0.0.9:8080"], lowBalanceUsd: 3, noRenewal: true, cnyPerUsd: 7.2, monitorEnabled: true,
+    fixedPurchases: [{ amount: 300, days: 30, startDate: "2026-10-01" }], balance: null, prediction: null, spark: [] };
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname, method = route.request().method();
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations: [fixed], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }, { value: "fixed", label: "固定成本", needs: [] }], rules: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/stations/box" && method === "PUT") { saves.push(route.request().postDataJSON()); return fulfill(route, { ok: true }); }
+    throw new Error("unexpected API: " + method + " " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations?edit=box");
+  const drawer = page.getByRole("dialog", { name: UPSTREAM_FORM_TEXT.editTitle("服务器"), exact: true }); await drawer.waitFor();
+  assert.equal(await drawer.getByLabel("汇率", { exact: true }).isVisible(), false); assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).isVisible(), false);
+  assert.equal(await drawer.getByLabel("渠道里用的其他地址", { exact: true }).isVisible(), false); assert.equal(await drawer.getByText("不再续费", { exact: true }).isVisible(), false);
+  // 改成按用量算：原来的值照旧填着（藏起来时没丢）
+  const pickType = async (label) => { await drawer.getByRole("combobox", { name: "类型", exact: true }).click(); await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: label }).first().click(); };
+  await pickType("New API"); await drawer.getByLabel("汇率", { exact: true }).waitFor();
+  assert.equal(await drawer.getByLabel("汇率", { exact: true }).inputValue(), "7.2"); assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).inputValue(), "3");
+  assert.equal(await drawer.getByLabel("渠道里用的其他地址", { exact: true }).inputValue(), "10.0.0.9:8080");
+  // 改回固定成本、改一笔金额后保存：藏起来的四项照原值带上，不清空
+  await pickType("固定成本"); await drawer.getByLabel("第 1 笔金额（¥）", { exact: true }).fill("320");
+  await drawer.getByRole("button", { name: "保存", exact: true }).click();
+  for (let wait = 0; !saves.length && wait < 50; wait++) await page.waitForTimeout(100);
+  assert.equal(saves.length, 1); assert.equal(saves[0].type, "fixed"); assert.equal(saves[0].fixedPurchases[0].amount, "320");
+  assert.equal(saves[0].cnyPerUsd, "7.2"); assert.equal(saves[0].lowBalanceUsd, "3"); assert.deepEqual(saves[0].costAliases, ["10.0.0.9:8080"]); assert.equal(saves[0].noRenewal, true);
+});
+
 test("编辑自营站点：「汇率」那一格叫「售价」，只对上游有用的设置藏起来，保存时照旧带上原来的值", async (t) => {
   const saves = [];
-  const own = { id: "own", name: "我的站", type: "newapi", baseUrl: "https://own.test", userId: "1", hasAccessToken: true, isOwn: true, includeInProfit: false, costAliases: ["10.0.0.8:8080"], lowBalanceUsd: 3, noRenewal: true, cnyPerUsd: 7.5, monitorEnabled: true, balance: { ok: true, remaining: 10, checkedAt: "2026-10-09T07:00:00.000Z" }, prediction: null, spark: [] };
+  const own = { id: "own", name: "我的站", type: "newapi", baseUrl: "https://own.test", userId: "1", hasAccessToken: true, isOwn: true, includeInProfit: true, costAliases: ["10.0.0.8:8080"], lowBalanceUsd: 3, noRenewal: true, cnyPerUsd: 7.5, monitorEnabled: true, balance: { ok: true, remaining: 10, checkedAt: "2026-10-09T07:00:00.000Z" }, prediction: null, spark: [] };
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url()), path = url.pathname, method = route.request().method();
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
@@ -3110,6 +3139,6 @@ test("编辑自营站点：「汇率」那一格叫「售价」，只对上游�
   // 改售价后保存：藏起来的设置照旧带上原来的值，不清空（ui-design-spec §5.2）
   await drawer.getByLabel("售价", { exact: true }).fill("8"); await drawer.getByRole("button", { name: "保存", exact: true }).click();
   for (let wait = 0; !saves.length && wait < 50; wait++) await page.waitForTimeout(100);
-  assert.equal(saves.length, 1); assert.equal(saves[0].cnyPerUsd, "8"); assert.equal(saves[0].isOwn, true); assert.equal(saves[0].includeInProfit, false);
+  assert.equal(saves.length, 1); assert.equal(saves[0].cnyPerUsd, "8"); assert.equal(saves[0].isOwn, true); assert.equal(saves[0].includeInProfit, true);
   assert.deepEqual(saves[0].costAliases, ["10.0.0.8:8080"]); assert.equal(saves[0].lowBalanceUsd, "3"); assert.equal(saves[0].noRenewal, true);
 });

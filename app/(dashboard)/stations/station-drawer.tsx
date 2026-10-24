@@ -301,7 +301,8 @@ export function StationDrawer({
         }))
         .filter((p) => p.amount !== "" || p.days !== ""),
       isOwn: v.type === "newapi" && !!v.isOwn,
-      noRenewal: v.type !== "fixed" && !!v.noRenewal,
+      // 固定成本的上游也照原值带上（藏起来的输入项还在表单里），不在这里清掉
+      noRenewal: !!v.noRenewal,
     };
     if (type !== "fixed") {
       payload.baseUrl = String(v.baseUrl || "").trim();
@@ -531,30 +532,24 @@ export function StationDrawer({
         <fieldset className="jy-fs">
           <legend>{COPY.cost}</legend>
           {!isFixed && <p className="fs-desc">{COPY.costDesc}</p>}
-          {!isFixed && (
-            <Form.Item
-              label={isOwnStation ? COPY.sellPrice : COPY.rate}
-              name="cnyPerUsd"
-              extra={isOwnStation ? (rateText ? COPY.rateNow(rateText) : COPY.sellExample) : `${rateText ? COPY.rateNow(rateText) : COPY.rateExample}${COPY.rateBalance}`}
-            >
-              <Input placeholder={isOwnStation ? COPY.sellPlaceholder : COPY.ratePlaceholder} inputMode="decimal" autoComplete="off" />
-            </Form.Item>
-          )}
-          {!isFixed && (
-            <Form.Item label={COPY.lowBalance} name="lowBalanceUsd" extra={COPY.lowBalanceDesc}>
-              <Input placeholder={COPY.lowBalancePlaceholder} inputMode="decimal" autoComplete="off" />
-            </Form.Item>
-          )}
-          {!isFixed && (
-            <Form.Item label={COPY.aliases} name="costAliasesText" hidden={isOwnStation} extra={COPY.aliasesDesc}>
-              <Input.TextArea autoSize={{ minRows: 2, maxRows: 4 }} placeholder={"例如：10.0.0.8:8080\nhttp://relay.internal"} />
-            </Form.Item>
-          )}
-          {!isFixed && (
-            <Form.Item name="noRenewal" valuePropName="checked" extra={COPY.noRenewalDesc}>
-              <SwitchRow label={COPY.noRenewal} />
-            </Form.Item>
-          )}
+          {/* 固定成本的上游用不到下面几项，只藏起来不拿掉：输入项还登记在表单里，保存时照原值带上，改回按用量算时原来的值还在 */}
+          <Form.Item
+            label={isOwnStation ? COPY.sellPrice : COPY.rate}
+            name="cnyPerUsd"
+            hidden={isFixed}
+            extra={isOwnStation ? (rateText ? COPY.rateNow(rateText) : COPY.sellExample) : `${rateText ? COPY.rateNow(rateText) : COPY.rateExample}${COPY.rateBalance}`}
+          >
+            <Input placeholder={isOwnStation ? COPY.sellPlaceholder : COPY.ratePlaceholder} inputMode="decimal" autoComplete="off" />
+          </Form.Item>
+          <Form.Item label={COPY.lowBalance} name="lowBalanceUsd" hidden={isFixed} extra={COPY.lowBalanceDesc}>
+            <Input placeholder={COPY.lowBalancePlaceholder} inputMode="decimal" autoComplete="off" />
+          </Form.Item>
+          <Form.Item label={COPY.aliases} name="costAliasesText" hidden={isFixed || isOwnStation} extra={COPY.aliasesDesc}>
+            <Input.TextArea autoSize={{ minRows: 2, maxRows: 4 }} placeholder={"例如：10.0.0.8:8080\nhttp://relay.internal"} />
+          </Form.Item>
+          <Form.Item name="noRenewal" valuePropName="checked" hidden={isFixed} extra={COPY.noRenewalDesc}>
+            <SwitchRow label={COPY.noRenewal} />
+          </Form.Item>
           {isFixed && (
             <Form.Item label={COPY.purchasesLabel}>
               {purchases.map((p, i) => (

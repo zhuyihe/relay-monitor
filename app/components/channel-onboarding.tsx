@@ -12,7 +12,7 @@ import type { AccountReadModel, BatchInput, BatchProbe, BatchRecoveryIntent, Bat
 import { NAV_LABELS, STATION_TABS } from "../../lib/brand";
 import { ERROR_CATEGORIES, describeError, failureText, requiredRule } from "../../lib/error-copy.js";
 import { EMPTY, OWN_STATION_UNSET, UPSTREAM_GONE, formatAsOf, formatDayZone, formatZonedDateTime, refreshFailedText } from "../../lib/format";
-import { COVERAGE_ANSWERS, COVERAGE_QUESTION, coverageAnswerOption, coverageDeclarationOf, reconciliationChannelStatus, reconciliationIssue } from "../../lib/reconciliation-contract.js";
+import { COVERAGE_ANSWERS, COVERAGE_QUESTION, COVERAGE_REQUIRED, coverageAnswerOption, coverageDeclarationOf, reconciliationChannelStatus, reconciliationIssue } from "../../lib/reconciliation-contract.js";
 import { reconciliationChannelName, reconciliationChannelTag, reconciliationKeyNamer } from "../../lib/reconciliation-view.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../../lib/workflow-actions.js";
 import { useAccountAuthorization } from "./account-authorization";
@@ -156,7 +156,6 @@ const COPY = Object.freeze({
   costOnce: "同一把 Key 的上游成本只算一次",
   coverageUnanswered: `回答「${COVERAGE_QUESTION}」之前，利润先不算`,
   // 「这把 Key 还给别处用吗？」一开始不选；没选就测试读取时的那句（§8.2），和选了以后选项下面写的话（§5.2）
-  coverageRequired: `请回答「${COVERAGE_QUESTION}」`,
   coverageAfter: Object.freeze<Record<string, string>>({
     own_channels: "把用这把 Key 的渠道都绑上，利润才会算",
     external: "上游成本分不开，利润先不算；给这些渠道换一把单独的 Key 就能算",
@@ -556,7 +555,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
     if (!linkOnly) { if (creating) selection.newStation = connection(await form.validateFields()); else selection.stationId = stationId; }
     if (billing && requiresAuthorization && !authorizationId) throw notice(COPY.keyAccountRequired);
     // 「这把 Key 还给别处用吗？」不替用户选（§5.2）：选好了 Key、还没回答的，先回答再测试读取
-    if (billing && [...groups.keys()].some((key) => key !== "pending" && !coverage[key])) throw notice(COPY.coverageRequired);
+    if (billing && [...groups.keys()].some((key) => key !== "pending" && !coverage[key])) throw notice(COVERAGE_REQUIRED);
     if (billing && requiresAuthorization && authorizationId !== "self") selection.reconciliationAuthorization = authorizationId === "new" ? { newAuthorization: connection(await authorizationForm.validateFields()) } : { stationId: authorizationId };
     return { requestId, ownStationId: catalogue.ownStation.id, selections: [selection], groups: [...groups].map(([key, ids]) => ({
       groupId: `key-${key}`, selectionId: "primary", channels: ids.map((id) => {

@@ -29,10 +29,9 @@ import { CountBadge, Panel } from "../components/panel";
 import { EQ_TEXT, ProfitEquation, incomeUnreadProps } from "../components/profit-equation";
 import type { EqTerm } from "../components/profit-equation";
 import { RangePicker } from "../components/range-picker";
-import { Runway, RunwayRulesNote, RUNWAY_TEXT } from "../components/runway";
+import { compareRunwayItems, Runway, RUNWAY_TEXT, RunwayRulesNote } from "../components/runway";
 import type { RunwayItem } from "../components/runway";
 import { useShellPage } from "../components/shell-context";
-import { LEVEL_ORDER } from "../components/status";
 import { useUrlState } from "../components/use-url-state";
 import { useWorkflowActions } from "../components/use-workflow-actions";
 import { actionPhrase, workflowDetail, workflowOwner, workflowProblem } from "../components/workflow-copy";
@@ -737,12 +736,7 @@ function RunwayPanel({
     );
   }
 
-  const sorted = [...rows].sort(
-    (a, b) =>
-      LEVEL_ORDER[a.item.level] - LEVEL_ORDER[b.item.level] ||
-      Number(!!b.item.failed) - Number(!!a.item.failed) ||
-      (a.item.days ?? Infinity) - (b.item.days ?? Infinity),
-  );
+  const sorted = [...rows].sort((a, b) => compareRunwayItems(a.item, b.item));
   const shown = sorted.slice(0, RUNWAY_LIMIT);
   const failedN = rows.filter((r) => r.item.failed).length;
   const total = sum(rows.map((r) => r.cny ?? 0));

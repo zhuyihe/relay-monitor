@@ -11,7 +11,7 @@ import Link from "next/link";
 import { Button, Checkbox } from "antd";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
-import { describeError } from "../../../lib/error-copy";
+import { describeError, errorText } from "../../../lib/error-copy";
 import { BALANCE_STATE_TEXT, basisText, EMPTY, formatDays, formatMoney, NO_UPSTREAM_TEXT, RANGE_TEXT, SELL_PRICE_UNSET } from "../../../lib/format";
 import { balanceDaysText, balanceViewOf, etaWindowDays, ownStationDisplayName, runwayLevel, stationDisplayName, WATCH_DAYS } from "../../../lib/overview-actions";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
@@ -27,7 +27,7 @@ import { Panel } from "../../components/panel";
 import { EQ_TEXT, ProfitEquation, incomeUnreadProps } from "../../components/profit-equation";
 import type { EqTerm } from "../../components/profit-equation";
 import { RangePicker } from "../../components/range-picker";
-import { Runway, RunwayRulesNote, RUNWAY_TEXT } from "../../components/runway";
+import { compareRunwayItems, Runway, RunwayRulesNote, RUNWAY_TEXT } from "../../components/runway";
 import type { RunwayItem } from "../../components/runway";
 import { useShellPage } from "../../components/shell-context";
 import { TREND_PANEL_TITLE, TrendPanel } from "../../components/trend-panel";
@@ -118,7 +118,11 @@ export default function AnalyticsPage() {
       let [a, o, b] = await Promise.allSettled([api(`/api/analytics?${params}`), fetchOwn(guess), api("/api/stations")]);
       if (my !== seq.current) return null;
       // 读不到上游列表时留着上次的；从来没读到时可用天数照旧只按天数分档
-      if (b.status === "fulfilled") setBalances(Array.isArray(b.value) ? b.value : b.value?.stations || []);
+      if (b.status === "fulfilled") {
+        setBalances(Array.isArray(b.value) ? b.value : b.value?.stations || []);
+        // 余额提醒线以上游列表带回来的为准（每 30 秒更新）；/api/meta 读不到或晚到时也不缺
+        if (b.value?.settings) setSettings(b.value.settings);
+      }
       const d = a.status === "fulfilled" ? Number(a.value?.days) || guessRef.current : guessRef.current;
       // 服务端算出的天数跨了 7/30 天档（本地与业务时区差一天时）：按服务端天数补取一次自营收入
       if (a.status === "fulfilled" && ownRangeOf(d) !== guess) {
@@ -169,7 +173,7 @@ export default function AnalyticsPage() {
     api("/api/meta")
       .then((m) => {
         setRules(m?.rules ?? null);
-        setSettings(m?.settings ?? null);
+        setSettings((current: any) => current ?? m?.settings ?? null);
       })
       .catch(() => setMetaFailed(true));
   }, []);
@@ -629,19 +633,22 @@ function RunwayPanel({ dv, critDays, metaFailed, balances, settings, rules }: { 
     // 档位、颜色、可用天数和运营总览「上游余量」、上游列表同一个判断（balanceViewOf，也看余额提醒线）；
     // 上游列表里找不到这个上游时（比如已归档），照旧只按天数分档
     const station = byId.get(String(s.id));
-    const view = station ? balanceViewOf(station, { settings, rules }) : null;
+    const view = station ? balanceViewOf(station, { settings: settings ?? undefined, rules }) : null;
     const level = view ? view.level : runwayLevel(s.days, { etaDays: critDays }) ?? "muted";
     const state = view ? (view.state ? BALANCE_STATE_TEXT[view.state] : undefined) : level === "crit" || level === "warn" ? BALANCE_STATE_TEXT.soon : undefined;
     const suffix = s.archived ? COPY.archivedSuffix : "";
-    const tip: TipRow[] = [
+    // 读不到余额时和运营总览一样：条画成虚线框，悬停只写原因
+    const failed = view?.state === "unreadable";
+    const days = view ? view.days : s.days;
+    const tip: TipRow[] = failed ? [[RUNWAY_TEXT.tip.reason, errorText(station.balance)]] : [
       [RUNWAY_TEXT.tip.burn, s.burn],
       [RUNWAY_TEXT.tip.days, view ? balanceDaysText(view) : formatDays(s.days)],
     ];
     // 和运营总览一样：算得出天数时才说怎么估的
-    if (s.basis && Number.isFinite(s.days) && s.days > 0) tip.push([RUNWAY_TEXT.tip.basis, basisText(s.basis)]);
+    if (!failed && s.basis && days != null && Number.isFinite(days) && days > 0) tip.push([RUNWAY_TEXT.tip.basis, basisText(s.basis)]);
     // 余额用完时天数写「—」，只看档位名（和运营总览、上游列表同一个写法）
-    return { key: s.id, name: `${s.name}${suffix}`, sub: RUNWAY_TEXT.burn(s.burn), days: view ? view.days : s.days, daysLabel: view ? balanceDaysText(view) : undefined, level, state, tip };
-  });
+    return { key: s.id, name: `${s.name}${suffix}`, sub: RUNWAY_TEXT.burn(s.burn), days, failed, daysLabel: view ? balanceDaysText(view) : undefined, level, state, tip };
+  }).sort(compareRunwayItems);
   const foot = items.length ? (
     <>
       {metaFailed && RUNWAY_TEXT.rulesUnread(critDays)}

@@ -760,7 +760,8 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
    | 动作 → 按钮名、完成提示、跳转 | 新的 `lib/workflow-actions.js` | `lib/reconciliation-view.js`、`server/channel-onboarding.js`、`workflow-copy.ts`、`overview-actions.js` 里的四份动作表 |
    | 页面、标签页名 | `lib/brand.js` | —— |
    | 「去回答」的选项（§5.2） | `lib/reconciliation-contract.js` 的 `COVERAGE_ANSWERS` | 绑定编辑页、渠道绑定流程里各写一份 |
-   | 「去回答」每个选项选了以后那句（§5.2），「请回答「这把 Key 还给别处用吗？」」（§8.2） | 现在只有渠道绑定抽屉用，放在 `app/components/channel-onboarding.tsx` 的 `COPY`；需处理清单（E）也要用时，并进 `COVERAGE_ANSWERS` | —— |
+   | 「去回答」每个选项选了以后那句（§5.2） | 现在只有渠道绑定抽屉用，放在 `app/components/channel-onboarding.tsx` 的 `COPY`；需处理清单（E）也要用时，并进 `COVERAGE_ANSWERS` | —— |
+   | 「请回答「这把 Key 还给别处用吗？」」（§8.2） | `lib/reconciliation-contract.js` 的 `COVERAGE_REQUIRED`，渠道绑定抽屉和服务端报错共用 | —— |
    | 「还没设置自营站点」「没设置汇率」「没有需要处理的事」「计入固定成本」；自营业务引导页的第一步（`OWN_STATION_UNSET_STEP`，`OWN_STATION_UNSET_HINT` 由它拼成） | `lib/format.js` | 页面里各写一份 |
    | 「这天的数据不完整」 | `lib/reconciliation-contract.js` 的 `INCOMPLETE_DAY_TEXT` | 页面里各写一份 |
    | 「这条已经变了，刷新后再看。」 | `lib/workflow-actions.js` 的 `DESTINATION_CHANGED` | 每日利润页、上游账单页、渠道绑定各写一份 |
