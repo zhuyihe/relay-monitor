@@ -1,0 +1,326 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>逐页版式样稿 · 炬元</title>
+<!-- 逐页版式（design/ux/page-layouts.md）的静态样稿。样式取自 d-k.html，另加外壳和 12 列栅格。演示数据，前后不求严丝合缝。截图：screens/layout-*.png -->
+<style>
+:root {
+  --plane: #F4F6F8; --sheet: #FFFFFF; --sunken: #EEF1F5; --rule: #DFE4EA; --rule-soft: #E9EDF2;
+  --ink: #152033; --ink-2: #475467; --ink-3: #667085; --ink-dis: #98A2B3;
+  --cobalt: #3157D5; --cobalt-tint: #EBF0FD;
+  --good: #137A63; --good-tint: #E6F4EF; --warn: #A86400; --warn-ink: #915500; --warn-tint: #FFF4E0;
+  --crit: #C83C3C; --crit-ink: #B42F2F; --crit-tint: #FDECEC;
+  --r1: 4px; --r2: 8px; --r3: 12px;
+  --shadow: 0 8px 24px rgba(21, 32, 51, .12);
+  --font: "IBM Plex Sans", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { font-family: var(--font); font-size: 14px; line-height: 22px; color: var(--ink); background: #D9DEE5; -webkit-font-smoothing: antialiased; padding: 32px; }
+.frame { background: var(--plane); margin: 0 auto 40px; overflow: hidden; position: relative; }
+.frame-label { font-size: 13px; color: #475467; margin: 0 auto 8px; font-weight: 600; }
+.sym { width: 12px; height: 12px; flex: none; display: inline-block; vertical-align: -1px; }
+.icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.caption { font-size: 12px; line-height: 18px; color: var(--ink-3); }
+.sub { font-size: 13px; line-height: 20px; color: var(--ink-3); }
+a { color: var(--cobalt); text-decoration: none; }
+.num { font-variant-numeric: tabular-nums; }
+.spacer { flex: 1; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 15px; border-radius: 6px; border: 1px solid #D0D5DD; background: var(--sheet); color: var(--ink); white-space: nowrap; }
+.btn.sm { height: 28px; padding: 0 10px; font-size: 13px; }
+.btn.primary { background: var(--cobalt); border-color: var(--cobalt); color: #fff; }
+.btn.danger { color: var(--crit-ink); border-color: #F0B4B4; }
+.btn.dis { background: var(--sunken); border-color: var(--rule); color: var(--ink-dis); }
+.btn .spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255,255,255,.45); border-top-color: #fff; }
+.tag { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: var(--r1); font-size: 12px; line-height: 18px; font-weight: 500; white-space: nowrap; }
+.tag.warn { background: var(--warn-tint); color: var(--warn-ink); }
+.tag.info { background: var(--cobalt-tint); color: var(--cobalt); }
+.tag.plain { background: var(--sunken); color: var(--ink-2); font-weight: 400; }
+.tag.muted { background: var(--sunken); color: var(--ink-2); }
+
+/* 背后的页面（只画个轮廓） */
+.page { position: absolute; inset: 0; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+.ghost { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); }
+.ghost i { display: block; height: 10px; border-radius: 5px; background: var(--sunken); margin: 18px 20px; }
+.scrim { position: absolute; inset: 0; background: rgba(15, 20, 27, .36); }
+
+/* 抽屉（antd Drawer：标题、正文滚动、底部吸底） */
+.drawer { position: absolute; top: 0; right: 0; bottom: 0; width: 560px; background: var(--sheet); box-shadow: -6px 0 24px rgba(21, 32, 51, .14); display: flex; flex-direction: column; }
+.d-head { display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 24px; border-bottom: 1px solid var(--rule-soft); flex: none; }
+.d-head h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.d-body { flex: 1; overflow: hidden; padding: 20px 24px; display: flex; flex-direction: column; gap: 18px; }
+.d-foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 12px 24px; border-top: 1px solid var(--rule); background: var(--sheet); }
+.d-foot .sub { margin-right: auto; }
+.facts { display: grid; grid-template-columns: 84px 1fr; gap: 2px 12px; font-size: 13px; }
+.facts span { color: var(--ink-3); }
+.field > label { display: block; font-weight: 500; margin-bottom: 8px; }
+.select { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 36px; padding: 4px 36px 4px 8px; border: 1px solid #D0D5DD; border-radius: 6px; position: relative; }
+.select::after { content: ""; position: absolute; right: 12px; top: 50%; width: 7px; height: 7px; border-right: 1.5px solid var(--ink-3); border-bottom: 1.5px solid var(--ink-3); transform: translateY(-70%) rotate(45deg); }
+.select .chip { background: var(--sunken); border-radius: 4px; padding: 0 6px; font-size: 13px; }
+.select .chip.new { background: var(--cobalt-tint); color: var(--cobalt); }
+.select .ph { color: var(--ink-dis); padding-left: 4px; }
+.select .val { padding-left: 4px; }
+.input { height: 36px; border: 1px solid #D0D5DD; border-radius: 6px; padding: 0 12px; display: flex; align-items: center; color: var(--ink-dis); }
+.radio { display: flex; flex-direction: column; gap: 2px; }
+.radio label { display: grid; grid-template-columns: 16px 1fr; gap: 2px 10px; align-items: start; padding: 7px 10px; border-radius: 6px; }
+.radio label i { width: 16px; height: 16px; border-radius: 50%; border: 1px solid #98A2B3; margin-top: 3px; }
+.radio label.on { background: var(--cobalt-tint); }
+.radio label.on i { border: 5px solid var(--cobalt); }
+.radio label.off { color: var(--ink-dis); }
+.radio label.off i { background: var(--sunken); border-color: var(--rule); }
+.radio label .sub { grid-column: 2; }
+.after { margin-top: 6px; font-size: 13px; color: var(--ink-2); }
+.check { display: grid; grid-template-columns: 16px 1fr; gap: 2px 10px; align-items: start; }
+.check i { width: 16px; height: 16px; border-radius: 4px; border: 1px solid #98A2B3; margin-top: 3px; position: relative; }
+.check.on i { background: var(--cobalt); border-color: var(--cobalt); }
+.check.on i::after { content: ""; position: absolute; left: 4.5px; top: 1.5px; width: 4px; height: 8px; border-right: 2px solid #fff; border-bottom: 2px solid #fff; transform: rotate(45deg); }
+.check .sub { grid-column: 2; }
+.read-ok { display: flex; gap: 8px; align-items: center; margin-top: 8px; font-size: 13px; color: var(--good); }
+.read-ok .sym { color: var(--good); }
+.hint { font-size: 13px; color: var(--ink-3); }
+
+/* 改动、哪几天按什么算（antd Alert 的样子，不另起组件） */
+.box { border-radius: var(--r2); padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+.box.info { background: #F5F7FE; border: 1px solid #D6DEF8; }
+.box.plain { background: var(--sunken); }
+.box h4 { margin: 0; font-size: 14px; font-weight: 600; }
+.rows { display: grid; grid-template-columns: 104px 1fr; gap: 6px 12px; font-size: 13px; line-height: 20px; }
+.rows > span { color: var(--ink-3); }
+.rows .plus { color: var(--good); }
+.rows .minus { color: var(--crit-ink); }
+.rows .warn { color: var(--warn-ink); }
+.day { display: inline-block; padding: 0 6px; border-radius: var(--r1); background: var(--sheet); border: 1px solid var(--rule); font-variant-numeric: tabular-nums; font-size: 12px; line-height: 18px; margin-right: 2px; }
+.progress { height: 4px; border-radius: 2px; background: var(--sunken); overflow: hidden; margin-top: 4px; }
+.progress i { display: block; height: 100%; width: 55%; background: var(--cobalt); }
+
+/* 提示条（message） */
+.toast { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); background: var(--sheet); border-radius: var(--r2); box-shadow: var(--shadow); padding: 9px 16px; display: flex; gap: 8px; align-items: center; font-size: 14px; z-index: 3; white-space: nowrap; }
+.toast .sym { color: var(--good); }
+.toast.warn .sym { color: var(--warn); }
+
+/* 弹窗 */
+.modal { position: absolute; left: 50%; top: 90px; transform: translateX(-50%); width: 480px; background: var(--sheet); border-radius: var(--r3); box-shadow: var(--shadow); }
+.modal-head { padding: 20px 24px 0; display: flex; gap: 12px; align-items: center; }
+.modal-head h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.modal-head .sym { width: 16px; height: 16px; color: var(--warn); }
+.modal-body { padding: 10px 24px 4px 52px; display: flex; flex-direction: column; gap: 8px; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 24px 20px; }
+
+/* 需处理（attention-list） */
+.attention { list-style: none; margin: 0; padding: 0; }
+.attention li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; padding: 12px 16px; background: #FFFBF3; border: 1px solid #F3E3C3; border-radius: var(--r2); }
+.attention li + li { margin-top: 10px; }
+.attention .sym { width: 14px; height: 14px; margin-top: 4px; color: var(--warn); }
+.attention strong { font-weight: 500; }
+.attention p { color: var(--ink-3); font-size: 13px; line-height: 20px; margin: 2px 0 0; }
+.attention .note { margin-top: 4px; font-size: 12px; line-height: 18px; color: var(--ink-2); }
+.attention .note .day { background: var(--sunken); border: 0; }
+
+/* 上游账单卡片 */
+.panel { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); }
+.acct-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--rule-soft); }
+.acct-body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
+.key-head { display: flex; align-items: center; gap: 10px; }
+.bind { border: 1px solid var(--rule); border-radius: var(--r2); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.bind.hl { border-color: var(--cobalt); box-shadow: 0 0 0 3px rgba(49, 87, 213, .14); }
+.bind .facts { grid-template-columns: 168px 1fr; font-size: 13px; }
+.bind-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.history { border-top: 1px dashed var(--rule); padding-top: 10px; }
+.history ol { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.history li { display: grid; grid-template-columns: 112px 1fr; gap: 12px; }
+.history li span { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.linkbtn { color: var(--cobalt); font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+
+/* 每日利润表 */
+.table { width: 100%; border-collapse: collapse; }
+.table th { background: var(--sunken); font-weight: 500; color: var(--ink-2); font-size: 13px; text-align: left; padding: 9px 14px; }
+.table td { padding: 10px 14px; border-top: 1px solid var(--rule-soft); vertical-align: top; }
+.table .r { text-align: right; font-variant-numeric: tabular-nums; }
+.detail { background: #FAFBFC; }
+.detail .rows { grid-template-columns: 84px 1fr; padding: 4px 0; }
+
+/* 标注 */
+.ann { position: absolute; background: #3157D5; color: #fff; font-size: 12px; line-height: 18px; padding: 4px 8px; border-radius: 6px; max-width: 250px; box-shadow: var(--shadow); z-index: 4; }
+.ann::after { content: ""; position: absolute; width: 8px; height: 8px; background: #3157D5; transform: rotate(45deg); }
+.ann.r::after { right: -4px; top: 9px; } .ann.l::after { left: -4px; top: 9px; } .ann.b::after { bottom: -4px; left: 16px; } .ann.t::after { top: -4px; left: 16px; }
+
+/* 用过的 Key（时间线） */
+.tl-title { font-size: 13px; font-weight: 600; color: var(--ink-2); margin-bottom: 6px; }
+.tl ol { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--rule); display: flex; flex-direction: column; gap: 10px; }
+.tl li { position: relative; display: grid; grid-template-columns: 150px 1fr auto; gap: 12px; font-size: 13px; line-height: 20px; }
+.tl li i { position: absolute; left: -20px; top: 5px; width: 10px; height: 10px; border-radius: 50%; background: var(--sheet); border: 2px solid var(--cobalt); }
+.tl li.unk i { border-color: var(--warn); background: var(--warn-tint); }
+.tl li a { font-size: 13px; }
+.tl .when { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.m-tl li { grid-template-columns: 1fr auto; }
+.m-tl li .when { grid-column: 1 / -1; }
+.pick { display: flex; flex-direction: column; border: 1px solid var(--rule); border-radius: var(--r2); }
+.pick .check { padding: 10px 12px; border-top: 1px solid var(--rule-soft); font-size: 13px; }
+.pick .check:first-child { border-top: 0; }
+.pick .check.dis i { background: var(--sunken); border-color: var(--rule); }
+.menu { margin-top: 6px; border: 1px solid var(--rule); border-radius: 6px; box-shadow: var(--shadow); padding: 4px 0; font-size: 13px; }
+.menu .grp { padding: 6px 12px 2px; font-size: 12px; color: var(--ink-3); }
+.menu .opt { padding: 6px 12px; display: flex; justify-content: space-between; gap: 12px; }
+.menu .opt.on { background: var(--cobalt-tint); }
+.menu .opt.dis { color: var(--ink-dis); }
+.menu .opt span { color: var(--ink-3); font-size: 12px; }
+/* 变体并排 */
+.cols { display: grid; gap: 16px; padding: 16px; }
+.cols.c3 { grid-template-columns: repeat(3, 1fr); }
+.cols.c2 { grid-template-columns: repeat(2, 1fr); }
+.v-title { font-size: 12px; font-weight: 600; color: var(--ink-2); margin-bottom: 8px; }
+.card { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); padding: 16px; }
+
+/* 手机 */
+.m .drawer { width: 100%; top: 44px; border-radius: 12px 12px 0 0; }
+.m .d-head { height: 52px; padding: 0 16px; }
+.m .d-body { padding: 16px; gap: 16px; }
+.m .d-foot { padding: 10px 16px 24px; }
+.m .d-foot .btn { height: 44px; flex: 1; }
+.m .rows { grid-template-columns: 1fr; gap: 2px; }
+.m .rows > span { margin-top: 6px; }
+.m .radio label { padding: 10px; }
+</style><style>
+.shell { display: grid; grid-template-columns: 232px minmax(0,1fr); min-height: 100%; }
+.sider { background: #131B2C; color: #C5CCD8; padding: 16px 12px; font-size: 14px; }
+.sider b { display:block; color:#fff; font-size:16px; padding: 4px 8px 18px; }
+.sider .g { font-size: 12px; color: #8B95A6; padding: 14px 12px 6px; }
+.sider .it { height: 38px; display: flex; align-items: center; padding: 0 12px; border-radius: 8px; }
+.sider .it.on { background: rgba(127,156,255,.16); color: #fff; }
+.main { min-width: 0; }
+.top { display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 24px; background: var(--sheet); border-bottom: 1px solid var(--rule); }
+.top h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--sunken); border-radius: 8px; font-size: 13px; }
+.seg span { padding: 3px 12px; border-radius: 6px; color: var(--ink-2); }
+.seg span.on { background: var(--sheet); color: var(--ink); font-weight: 500; }
+.tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--rule); font-size: 14px; color: var(--ink-2); }
+.tabs span { padding: 0 0 10px; }
+.tabs span.on { color: var(--ink); font-weight: 600; border-bottom: 2px solid var(--cobalt); }
+.c { padding: 20px 24px; display: grid; grid-template-columns: repeat(12, minmax(0,1fr)); gap: 20px; align-content: start; }
+.s4 { grid-column: span 4; } .s6 { grid-column: span 6; } .s8 { grid-column: span 8; } .s12 { grid-column: span 12; }
+.p { background: var(--sheet); border: 1px solid var(--rule); border-radius: 8px; padding: 16px 20px; }
+.p h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
+.p h2 small { font-size: 12px; color: var(--ink-3); font-weight: 400; }
+.p h2 .r { margin-left: auto; font-size: 12px; font-weight: 400; color: var(--cobalt); }
+.q { display:inline-grid; place-items:center; width:16px; height:16px; border-radius:50%; border:1px solid var(--ink-dis); color: var(--ink-3); font-size: 11px; font-weight: 500; }
+.eqg { display: grid; grid-template-columns: 1fr 18px 1fr 18px 1.2fr; gap: 6px 10px; align-items: center; }
+.eqg .t span { display:block; font-size: 12px; color: var(--ink-3); } .eqg .t b { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.eqg .op { color: var(--ink-3); font-size: 20px; text-align: center; }
+.eqg .res { background: var(--cobalt-tint); border-radius: 8px; padding: 6px 10px; }
+.one { font-size: 12px; color: var(--ink-3); margin-top: 10px; }
+.kpis { display: grid; grid-template-columns: repeat(4, 1fr); }
+.kpis div { padding: 0 14px; border-left: 1px solid var(--rule); } .kpis div:first-child { border-left: 0; padding-left: 0; }
+.kpis span { display:block; font-size: 12px; color: var(--ink-3); } .kpis b { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.att { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.att li { display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; padding: 8px 0; border-top: 1px solid var(--rule-soft); align-items: start; }
+.att li:first-child { border-top: 0; }
+.att i { width: 10px; height: 10px; margin-top: 5px; background: var(--warn); clip-path: polygon(50% 0,100% 100%,0 100%); }
+.att i.cr { background: var(--crit); clip-path: polygon(50% 0,100% 50%,50% 100%,0 50%); }
+.att p { margin: 1px 0 0; color: var(--ink-3); font-size: 12px; }
+.bars { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.bars li { display: grid; grid-template-columns: 150px 1fr 64px; gap: 10px; align-items: center; padding: 7px 0; border-top: 1px solid var(--rule-soft); }
+.bars li:first-child { border-top: 0; }
+.bars .tr { height: 8px; border-radius: 4px; background: var(--sunken); position: relative; }
+.bars .tr i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: #66708A; }
+.bars .tr i.red { background: var(--crit); }
+.bars b { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hb li { grid-template-columns: 90px 1fr 56px; } .hb .tr i { background: var(--cobalt); } .hb.or .tr i { background: #E86A33; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th { text-align: left; font-weight: 500; color: var(--ink-2); background: var(--sunken); padding: 8px 10px; font-size: 12px; }
+.tbl td { padding: 8px 10px; border-top: 1px solid var(--rule-soft); vertical-align: middle; }
+.tbl .r { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl .sub { font-size: 12px; color: var(--ink-3); display: block; }
+.mini { display:inline-block; width: 56px; height: 14px; vertical-align: middle; background: linear-gradient(170deg, transparent 45%, #C7D2F5 46%, #C7D2F5 55%, transparent 56%); }
+.chart { height: 170px; border-radius: 6px; background: linear-gradient(transparent 49%, var(--rule-soft) 50%, transparent 51%), linear-gradient(transparent 24%, var(--rule-soft) 25%, transparent 26%), linear-gradient(transparent 74%, var(--rule-soft) 75%, transparent 76%); position: relative; }
+.chart svg { position:absolute; inset: 0; width: 100%; height: 100%; }
+.heat { display: grid; grid-template-columns: repeat(12, 1fr); gap: 2px; }
+.heat i { height: 12px; border-radius: 2px; background: #7F9CFF; }
+.tagl { display:inline-flex; height: 20px; white-space: nowrap; justify-self: end; padding: 0 6px; border-radius: 4px; font-size: 12px; align-items:center; }
+.tagl.i { background: var(--cobalt-tint); color: var(--cobalt); } .tagl.w { background: var(--warn-tint); color: var(--warn-ink); } .tagl.g { background: var(--sunken); color: var(--ink-2); }
+.acc { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.acc li { padding: 10px 12px; border-radius: 6px; display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; }
+.acc li.on { background: var(--cobalt-tint); }
+.acc .g { font-size: 12px; color: var(--ink-3); padding: 12px 12px 4px; }
+.mrow { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mk { background: var(--sheet); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; } .mk span { display:block; font-size: 11px; color: var(--ink-3); } .mk b { font-size: 18px; }
+</style></head><body><svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="warn" viewBox="0 0 12 12"><path d="M6 1 11.6 10.8H.4Z" fill="currentColor"/></symbol>
+  <symbol id="good" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.2" fill="currentColor"/></symbol>
+  <symbol id="i-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+  <symbol id="i-chev-d" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="m6 4 4 4-4 4"/></symbol>
+</svg>
+<p class="frame-label" style="width:1440px">L-A · 运营总览：等式 8 + 需处理 4；余量 8 + 今天的钱 4（收入、上游成本两个页签）；≈ 说明一行</p>
+<section class="frame" id="layout-home" style="width:1440px;height:900px"><div class="shell" style="height:900px"><aside class="sider"><b>炬元</b><div class="g">监控</div><div class="it on">运营总览</div><div class="it">上游资源</div><div class="g">经营</div><div class="it">自营业务</div><div class="it">成本和用量</div><div class="it">每日利润</div><div class="g">系统</div><div class="it">告警中心</div><div class="it">系统设置</div></aside><div class="main"><div class="top"><h1>运营总览</h1><span class="seg"><span class="on">今天</span><span>近 7 天</span><span>近 30 天</span></span><span class="spacer"></span><span class="caption">● 数据截至 15:30</span></div><div class="c"><div class="p s8"><h2>今天经营 <small>0:00–15:30</small></h2><div class="eqg"><div class="t"><span>收入</span><b>$1.38</b></div><div class="op">−</div><div class="t"><span>上游成本</span><b>$7.88</b></div><div class="op">=</div><div class="t res"><span>毛利</span><b>−$6.50</b></div>
+<div class="t"><span>毛利</span><b style="font-size:18px">−$6.50</b></div><div class="op">−</div><div class="t"><span>固定成本</span><b style="font-size:18px">¥0.00</b></div><div class="op">=</div><div class="t res"><span>净利</span><b>—</b><span>固定成本按元记，没设置汇率时加减不了</span></div></div>
+<div class="one">3 个上游没设置汇率，金额按美元显示。<a>去设置</a></div></div><div class="p s4"><h2>需处理 <span class="count">9</span></h2><ul class="att"><li><i class="cr"></i><div><b>余额偏低（演示）</b> 余额偏低<p>余额 $2.59，可用约 1 天</p></div><span class="btn sm">余额趋势</span></li>
+<li><i></i><div>拼车团队（演示） 还没确认这把 Key 属于哪个上游账号</div><span class="btn sm">测试读取</span></li>
+<li><i></i><div>邮箱密码登录（演示） 还没确认这把 Key 属于哪个上游账号</div><span class="btn sm">测试读取</span></li>
+<li><i></i><div>我的站 有 1 个渠道还没算利润</div><span class="btn sm">开始算利润</span></li>
+<li><i></i><div>Key 计费站（演示） 还没确认能读到完整账单</div><span class="btn sm">测试读取</span></li></ul><div class="one"><a>还有 4 件</a></div></div>
+<div class="p s8"><h2>上游余量 <small>余额合计 $353.40</small><span class="r">上游列表</span></h2><ul class="bars"><li><span>余额偏低（演示）<span class="caption" style="display:block">$2.59</span></span><span class="tr"><i class="red" style="width:6%"></i></span><b>约 1 天</b></li>
+<li><span>拼车团队（演示）<span class="caption" style="display:block">$36.48</span></span><span class="tr"><i style="width:40%"></i></span><b>约 8 天</b></li>
+<li><span>Key 计费站（演示）<span class="caption" style="display:block">$31.39</span></span><span class="tr"><i style="width:70%"></i></span><b>约 14 天</b></li>
+<li><span>主力上游（演示）<span class="caption" style="display:block">$158.77</span></span><span class="tr"><i style="width:92%"></i></span><b>约 19 天</b></li>
+<li><span>邮箱密码登录（演示）<span class="caption" style="display:block">$124.17</span></span><span class="tr"><i style="width:96%"></i></span><b>约 20 天</b></li></ul></div><div class="p s4"><h2>今天的钱 <small>从哪来、花在哪</small></h2><div class="seg" style="margin-bottom:10px"><span class="on">收入</span><span>上游成本</span></div><ul class="bars hb"><li><span>alice</span><span class="tr"><i style="width:100%"></i></span><b>$0.72</b></li><li><span>bob</span><span class="tr"><i style="width:61%"></i></span><b>$0.44</b></li><li><span>carol</span><span class="tr"><i style="width:31%"></i></span><b>$0.22</b></li></ul><div class="one">合计 $1.38</div></div></div></div></div></section>
+<p class="frame-label" style="width:1440px">L-B · 上游列表：一行两行字、行高 56，一屏 10 行；去掉「数据截至」列，状态列只放状态；自营站点不在这里</p>
+<section class="frame" id="layout-stations" style="width:1440px;height:900px"><div class="shell" style="height:900px"><aside class="sider"><b>炬元</b><div class="g">监控</div><div class="it">运营总览</div><div class="it on">上游资源</div><div class="g">经营</div><div class="it">自营业务</div><div class="it">成本和用量</div><div class="it">每日利润</div><div class="g">系统</div><div class="it">告警中心</div><div class="it">系统设置</div></aside><div class="main"><div class="top"><h1>上游资源</h1><span class="spacer"></span><span class="caption">● 数据截至 15:30</span></div><div style="padding:16px 24px 0"><div class="tabs"><span class="on">上游列表</span><span>渠道绑定</span><span>上游账单</span></div></div>
+<div class="c"><div class="s12" style="display:flex;gap:10px;align-items:center"><div class="input" style="width:260px">搜索名称或地址</div><span class="seg"><span class="on">全部 10</span><span>需处理 4</span><span>已归档 0</span></span><span class="spacer"></span><span class="btn">记固定成本</span><span class="btn primary">加上游</span></div>
+<div class="p s12" style="padding:0;overflow:hidden"><table class="tbl"><thead><tr><th>上游</th><th>状态</th><th class="r">余额</th><th class="r">日均花费</th><th>可用天数</th><th></th><th class="r">操作</th></tr></thead><tbody><tr><td><b>余额偏低（演示）</b><span class="sub">127.0.0.1:3200 · 演示·快用完</span></td><td><span class="tagl w">▲ 余额偏低</span></td><td class="r">$2.59 <span class="mini"></span></td><td class="r">≈ $1.87</td><td><span class="bars" style="display:block"><span class="tr" style="display:block;width:160px;height:8px;border-radius:4px;background:var(--sunken);position:relative"><i style="position:absolute;left:0;top:0;bottom:0;border-radius:4px;width:6%;background:var(--crit)"></i></span></span></td><td class="r"><b>约 1 天</b></td><td class="r"><a>编辑</a>　⋯</td></tr><tr><td><b>拼车团队（演示）</b><span class="sub">127.0.0.1:3200 · 演示·拼车团队</span></td><td></td><td class="r">$36.48 <span class="mini"></span></td><td class="r">≈ $4.70</td><td><span class="bars" style="display:block"><span class="tr" style="display:block;width:160px;height:8px;border-radius:4px;background:var(--sunken);position:relative"><i style="position:absolute;left:0;top:0;bottom:0;border-radius:4px;width:40%;background:#66708A"></i></span></span></td><td class="r"><b>约 8 天</b></td><td class="r"><a>编辑</a>　⋯</td></tr><tr><td><b>Key 计费站（演示）</b><span class="sub">127.0.0.1:3200</span></td><td></td><td class="r">$31.39 <span class="mini"></span></td><td class="r">≈ $2.30</td><td><span class="bars" style="display:block"><span class="tr" style="display:block;width:160px;height:8px;border-radius:4px;background:var(--sunken);position:relative"><i style="position:absolute;left:0;top:0;bottom:0;border-radius:4px;width:70%;background:#66708A"></i></span></span></td><td class="r"><b>约 14 天</b></td><td class="r"><a>编辑</a>　⋯</td></tr><tr><td><b>主力上游（演示）</b><span class="sub">127.0.0.1:3200 · 演示·主力账号</span></td><td></td><td class="r">$158.77 <span class="mini"></span></td><td class="r">≈ $8.21</td><td><span class="bars" style="display:block"><span class="tr" style="display:block;width:160px;height:8px;border-radius:4px;background:var(--sunken);position:relative"><i style="position:absolute;left:0;top:0;bottom:0;border-radius:4px;width:92%;background:#66708A"></i></span></span></td><td class="r"><b>约 19 天</b></td><td class="r"><a>编辑</a>　⋯</td></tr><tr><td><b>邮箱密码登录（演示）</b><span class="sub">127.0.0.1:3200 · 演示·邮箱密码登录</span></td><td></td><td class="r">$124.17 <span class="mini"></span></td><td class="r">≈ $6.09</td><td><span class="bars" style="display:block"><span class="tr" style="display:block;width:160px;height:8px;border-radius:4px;background:var(--sunken);position:relative"><i style="position:absolute;left:0;top:0;bottom:0;border-radius:4px;width:96%;background:#66708A"></i></span></span></td><td class="r"><b>约 20 天</b></td><td class="r"><a>编辑</a>　⋯</td></tr><tr><td><b>余额偏低（演示）</b><span class="sub">127.0.0.1:3200 · 演示·快用完</span></td><td><span class="tagl w">▲ 余额偏低</span></td><td class="r">$2.59 <span class="mini"></span></td><td class="r">≈ $1.87</td><td><span class="bars" style="display:block"><span class="tr" style="display:block;width:160px;height:8px;border-radius:4px;background:var(--sunken);position:relative"><i style="position:absolute;left:0;top:0;bottom:0;border-radius:4px;width:6%;background:var(--crit)"></i></span></span></td><td class="r"><b>约 1 天</b></td><td class="r"><a>编辑</a>　⋯</td></tr><tr><td><b>拼车团队（演示）</b><span class="sub">127.0.0.1:3200 · 演示·拼车团队</span></td><td></td><td class="r">$36.48 <span class="mini"></span></td><td class="r">≈ $4.70</td><td><span class="bars" style="display:block"><span class="tr" style="display:block;width:160px;height:8px;border-radius:4px;background:var(--sunken);position:relative"><i style="position:absolute;left:0;top:0;bottom:0;border-radius:4px;width:40%;background:#66708A"></i></span></span></td><td class="r"><b>约 8 天</b></td><td class="r"><a>编辑</a>　⋯</td></tr><tr><td><b>Key 计费站（演示）</b><span class="sub">127.0.0.1:3200</span></td><td></td><td class="r">$31.39 <span class="mini"></span></td><td class="r">≈ $2.30</td><td><span class="bars" style="display:block"><span class="tr" style="display:block;width:160px;height:8px;border-radius:4px;background:var(--sunken);position:relative"><i style="position:absolute;left:0;top:0;bottom:0;border-radius:4px;width:70%;background:#66708A"></i></span></span></td><td class="r"><b>约 14 天</b></td><td class="r"><a>编辑</a>　⋯</td></tr><tr><td><b>主力上游（演示）</b><span class="sub">127.0.0.1:3200 · 演示·主力账号</span></td><td></td><td class="r">$158.77 <span class="mini"></span></td><td class="r">≈ $8.21</td><td><span class="bars" style="display:block"><span class="tr" style="display:block;width:160px;height:8px;border-radius:4px;background:var(--sunken);position:relative"><i style="position:absolute;left:0;top:0;bottom:0;border-radius:4px;width:92%;background:#66708A"></i></span></span></td><td class="r"><b>约 19 天</b></td><td class="r"><a>编辑</a>　⋯</td></tr><tr><td><b>邮箱密码登录（演示）</b><span class="sub">127.0.0.1:3200 · 演示·邮箱密码登录</span></td><td></td><td class="r">$124.17 <span class="mini"></span></td><td class="r">≈ $6.09</td><td><span class="bars" style="display:block"><span class="tr" style="display:block;width:160px;height:8px;border-radius:4px;background:var(--sunken);position:relative"><i style="position:absolute;left:0;top:0;bottom:0;border-radius:4px;width:96%;background:#66708A"></i></span></span></td><td class="r"><b>约 20 天</b></td><td class="r"><a>编辑</a>　⋯</td></tr></tbody></table></div></div></div></div></section>
+<p class="frame-label" style="width:1440px">L-C · 渠道绑定（K）：只读的一张表，一行一个渠道；没算的给「开始算利润」，没认出的给「指定 Key」</p>
+<section class="frame" id="layout-onboarding" style="width:1440px;height:620px"><div class="shell" style="height:620px"><aside class="sider"><b>炬元</b><div class="g">监控</div><div class="it">运营总览</div><div class="it on">上游资源</div><div class="g">经营</div><div class="it">自营业务</div><div class="it">成本和用量</div><div class="it">每日利润</div><div class="g">系统</div><div class="it">告警中心</div><div class="it">系统设置</div></aside><div class="main"><div class="top"><h1>上游资源</h1><span class="spacer"></span><span class="caption">● 数据截至 15:30</span></div><div style="padding:16px 24px 0"><div class="tabs"><span>上游列表</span><span class="on">渠道绑定</span><span>上游账单</span></div></div>
+<div class="c"><div class="s12 caption" style="font-size:13px">自营站点的 6 个渠道里 2 个在算利润 · 数据截至 15:30</div><div class="p s12" style="padding:0;overflow:hidden"><table class="tbl"><thead><tr><th>渠道</th><th>上游账号</th><th>现在用的 Key</th><th>状态</th><th class="r">操作</th></tr></thead><tbody><tr><td><b>上游甲·高速</b></td><td>演示·主力账号</td><td>oai · 分组 a · 倍率 1.2</td><td><span class="tagl i">在算</span></td><td class="r"></td></tr><tr><td><b>上游乙·标准</b></td><td>演示·主力账号</td><td>team-b · 分组 b · 倍率 1.0</td><td><span class="tagl i">在算</span></td><td class="r"></td></tr><tr><td><b>上游丁</b></td><td>演示·主力账号</td><td>—</td><td><span class="tagl w">没认出 Key</span></td><td class="r"><a>指定 Key</a></td></tr><tr><td><b>拼车团队</b></td><td>—</td><td>—</td><td><span class="tagl g">没算</span></td><td class="r"><a>开始算利润</a></td></tr><tr><td><b>官方直连</b></td><td>—</td><td>—</td><td><span class="tagl g">没算</span></td><td class="r"><a>开始算利润</a></td></tr><tr><td><b>包月自建</b></td><td>—</td><td>—</td><td><span class="tagl g">没算</span></td><td class="r"><a>开始算利润</a></td></tr></tbody></table></div></div></div></div></section>
+<p class="frame-label" style="width:1440px">L-D · 上游账单（K）：左 4 列账号列表、右 8 列选中的账号；还没确认的上游一行一个、能批量测试读取</p>
+<section class="frame" id="layout-bills" style="width:1440px;height:820px"><div class="shell" style="height:820px"><aside class="sider"><b>炬元</b><div class="g">监控</div><div class="it">运营总览</div><div class="it on">上游资源</div><div class="g">经营</div><div class="it">自营业务</div><div class="it">成本和用量</div><div class="it">每日利润</div><div class="g">系统</div><div class="it">告警中心</div><div class="it">系统设置</div></aside><div class="main"><div class="top"><h1>上游资源</h1><span class="spacer"></span><span class="caption">● 数据截至 15:30</span></div><div style="padding:16px 24px 0"><div class="tabs"><span>上游列表</span><span>渠道绑定</span><span class="on">上游账单</span></div></div>
+<div class="c"><div class="p s4"><ul class="acc"><li class="on"><b>演示·主力账号</b><span class="tagl i">只给我的渠道用</span><span class="caption">主力上游 · 3 条绑定</span><span></span></li>
+<li><b>拼车账号</b><span class="tagl g">按 Key 绑</span><span class="caption">拼车团队 · 1 条绑定</span><span></span></li>
+<li><b>邮箱账号</b><span class="tagl w">还没回答</span><span class="caption">邮箱密码登录 · 0 条绑定</span><span></span></li>
+<div class="g">还没确认账号的上游 <a style="float:right">全部测试读取</a></div>
+<li><span>Key 计费站（演示）</span><a>测试读取</a></li><li><span>余额偏低（演示）</span><a>测试读取</a></li></ul></div><div class="p s8"><h2>演示·主力账号 <small>主力上游 · 余额 $158.77</small> <span class="q">?</span><span class="r">找渠道</span></h2><div class="bind" style="margin-top:12px"><div><strong>渠道 上游甲·高速</strong></div><div class="facts"><span>现在用的 Key</span><div>oai-2 · 分组 a · 倍率 1.2（10月24日 14:30 起）</div></div>
+<div class="tl"><div class="tl-title">用过的 Key</div><ol><li><i></i><span class="when">10月24日 14:30 起</span><span>oai-2 · 分组 a · 倍率 1.2　<span class="caption">系统发现</span></span><a>改时间</a></li><li><i></i><span class="when">10月20日 12:44 起</span><span>oai · 分组 a · 倍率 1.2</span><span></span></li></ol></div><div class="bind-actions"><span class="btn sm">指定 Key</span><span class="btn sm danger">解除绑定</span></div></div>
+<div class="bind" style="margin-top:12px"><div><strong>渠道 上游乙·标准</strong></div><div class="facts"><span>现在用的 Key</span><div style="color:var(--warn-ink)">还没认出现在用的是哪把 Key　<a>指定 Key</a></div></div></div></div></div></div></div></section>
+<p class="frame-label" style="width:1440px">L-E · 自营业务：指标一行（最后一格毛利，点去每日利润）；收入图 8 + 用户 4；预计花费 8 + 模型 4</p>
+<section class="frame" id="layout-my" style="width:1440px;height:900px"><div class="shell" style="height:900px"><aside class="sider"><b>炬元</b><div class="g">监控</div><div class="it">运营总览</div><div class="it">上游资源</div><div class="g">经营</div><div class="it on">自营业务</div><div class="it">成本和用量</div><div class="it">每日利润</div><div class="g">系统</div><div class="it">告警中心</div><div class="it">系统设置</div></aside><div class="main"><div class="top"><h1>自营业务</h1><span class="seg"><span>今天</span><span class="on">近 7 天</span><span>近 30 天</span></span><span class="spacer"></span><span class="caption">● 数据截至 15:30</span></div><div style="padding:16px 24px 0;display:flex;align-items:end"><div class="tabs" style="flex:1"><span class="on">概览</span><span>用户</span><span>模型与渠道</span></div><span class="btn sm" style="margin-left:12px">自营站点设置</span></div>
+<div class="c"><div class="p s12"><div class="kpis"><div><span>收入</span><b>$22.06</b></div><div><span>消费的用户</span><b>4</b></div><div><span>请求数</span><b>1,296</b></div><div><span>这段时间毛利</span><b style="color:var(--ink)">−$79.57</b><a class="caption" style="color:var(--cobalt)">去每日利润看</a></div></div></div><div class="p s8"><h2>每天的收入 <small>近 7 天</small></h2><div class="chart"><svg viewBox="0 0 100 40" preserveAspectRatio="none"><polyline fill="none" stroke="#3157D5" stroke-width="1.2" points="0,30 15,24 30,26 45,18 60,20 75,14 90,16 100,12"/></svg></div></div><div class="p s4"><h2>消费最多的用户<span class="r">全部 4 个</span></h2><ul class="bars hb"><li><span>alice</span><span class="tr"><i style="width:100%"></i></span><b>$11.48</b></li><li><span>bob</span><span class="tr"><i style="width:62%"></i></span><b>$7.14</b></li><li><span>carol</span><span class="tr"><i style="width:30%"></i></span><b>$3.44</b></li><li><span>dave（管理员）</span><span class="tr"><i style="width:15%"></i></span><b>$1.71</b></li></ul></div>
+<div class="p s8"><h2>预计花费 <small>未来 24 小时 ≈ $5.11</small></h2><div class="chart" style="height:120px"><svg viewBox="0 0 100 40" preserveAspectRatio="none"><polyline fill="none" stroke="#3157D5" stroke-width="1.2" points="0,30 15,24 30,26 45,18 60,20 75,14 90,16 100,12"/></svg></div></div><div class="p s4"><h2>模型 <small>前 4</small></h2><ul class="bars hb"><li><span>claude-sonnet</span><span class="tr"><i style="width:100%"></i></span><b>$13.88</b></li><li><span>gpt-4o</span><span class="tr"><i style="width:61%"></i></span><b>$8.49</b></li><li><span>deepseek-v3</span><span class="tr"><i style="width:30%"></i></span><b>$4.18</b></li><li><span>gemini-2.5</span><span class="tr"><i style="width:16%"></i></span><b>$2.28</b></li></ul></div>
+<div class="p s12" style="padding:12px 20px"><span class="more"><svg class="icon"><use href="#i-chev"/></svg>利润怎么算</span></div></div></div></div></section>
+<p class="frame-label" style="width:1440px">L-F · 成本和用量（合页）：两个页签；成本页签指标一行、每天成本 8 + 构成 4、可用天数 8 + 花费时段 4；没有等式</p>
+<section class="frame" id="layout-analytics" style="width:1440px;height:900px"><div class="shell" style="height:900px"><aside class="sider"><b>炬元</b><div class="g">监控</div><div class="it">运营总览</div><div class="it">上游资源</div><div class="g">经营</div><div class="it">自营业务</div><div class="it on">成本和用量</div><div class="it">每日利润</div><div class="g">系统</div><div class="it">告警中心</div><div class="it">系统设置</div></aside><div class="main"><div class="top"><h1>成本和用量</h1><span class="seg"><span>近 7 天</span><span class="on">近 30 天</span><span>近 90 天</span></span><span class="spacer"></span><span class="caption">● 数据截至 15:30</span></div><div style="padding:16px 24px 0"><div class="tabs"><span class="on">成本</span><span>用量</span></div></div>
+<div class="c"><div class="p s12"><h2>近 30 天 <small>9月25日–今天</small> <span class="q">?</span></h2><div class="kpis"><div><span>上游成本</span><b>$110.24</b></div><div><span>固定成本</span><b>¥0.00</b></div><div><span>日均</span><b>$13.78</b></div><div><span>预计一个月</span><b>$413.40</b></div></div><div class="one">22 天没有用量记录，没算进去。<a>查看</a></div></div>
+<div class="p s8"><h2>每天的成本 <span class="r"><span class="seg"><span class="on">每天</span><span>累计</span></span></span></h2><div class="chart"><svg viewBox="0 0 100 40" preserveAspectRatio="none"><polyline fill="none" stroke="#E86A33" stroke-width="1.2" points="0,20 15,18 30,22 45,16 60,15 75,19 90,12 100,14"/></svg></div></div><div class="p s4"><h2>成本构成 <small>按上游</small></h2><ul class="bars hb or"><li><span>主力上游</span><span class="tr"><i style="width:100%"></i></span><b>$41.11</b></li><li><span>邮箱密码登录</span><span class="tr"><i style="width:74%"></i></span><b>$30.49</b></li><li><span>拼车团队</span><span class="tr"><i style="width:49%"></i></span><b>$20.27</b></li><li><span>Key 计费站</span><span class="tr"><i style="width:25%"></i></span><b>$10.18</b></li><li><span>余额偏低</span><span class="tr"><i style="width:20%"></i></span><b>$8.16</b></li></ul></div>
+<div class="p s8"><h2>可用天数</h2><ul class="bars"><li><span>余额偏低（演示）<span class="caption" style="display:block">$2.59</span></span><span class="tr"><i class="red" style="width:6%"></i></span><b>约 1 天</b></li>
+<li><span>拼车团队（演示）<span class="caption" style="display:block">$36.48</span></span><span class="tr"><i style="width:40%"></i></span><b>约 8 天</b></li>
+<li><span>Key 计费站（演示）<span class="caption" style="display:block">$31.39</span></span><span class="tr"><i style="width:70%"></i></span><b>约 14 天</b></li>
+<li><span>主力上游（演示）<span class="caption" style="display:block">$158.77</span></span><span class="tr"><i style="width:92%"></i></span><b>约 19 天</b></li>
+<li><span>邮箱密码登录（演示）<span class="caption" style="display:block">$124.17</span></span><span class="tr"><i style="width:96%"></i></span><b>约 20 天</b></li></ul></div><div class="p s4"><h2>花费时段 <small>近 7 天</small></h2><div class="heat"><i style="opacity:0.20"></i><i style="opacity:0.78"></i><i style="opacity:0.53"></i><i style="opacity:0.28"></i><i style="opacity:0.87"></i><i style="opacity:0.62"></i><i style="opacity:0.37"></i><i style="opacity:0.95"></i><i style="opacity:0.70"></i><i style="opacity:0.45"></i><i style="opacity:0.20"></i><i style="opacity:0.78"></i><i style="opacity:0.53"></i><i style="opacity:0.28"></i><i style="opacity:0.87"></i><i style="opacity:0.62"></i><i style="opacity:0.37"></i><i style="opacity:0.95"></i><i style="opacity:0.70"></i><i style="opacity:0.45"></i><i style="opacity:0.20"></i><i style="opacity:0.78"></i><i style="opacity:0.53"></i><i style="opacity:0.28"></i><i style="opacity:0.87"></i><i style="opacity:0.62"></i><i style="opacity:0.37"></i><i style="opacity:0.95"></i><i style="opacity:0.70"></i><i style="opacity:0.45"></i><i style="opacity:0.20"></i><i style="opacity:0.78"></i><i style="opacity:0.53"></i><i style="opacity:0.28"></i><i style="opacity:0.87"></i><i style="opacity:0.62"></i><i style="opacity:0.37"></i><i style="opacity:0.95"></i><i style="opacity:0.70"></i><i style="opacity:0.45"></i><i style="opacity:0.20"></i><i style="opacity:0.78"></i><i style="opacity:0.53"></i><i style="opacity:0.28"></i><i style="opacity:0.87"></i><i style="opacity:0.62"></i><i style="opacity:0.37"></i><i style="opacity:0.95"></i><i style="opacity:0.70"></i><i style="opacity:0.45"></i><i style="opacity:0.20"></i><i style="opacity:0.78"></i><i style="opacity:0.53"></i><i style="opacity:0.28"></i><i style="opacity:0.87"></i><i style="opacity:0.62"></i><i style="opacity:0.37"></i><i style="opacity:0.95"></i><i style="opacity:0.70"></i><i style="opacity:0.45"></i><i style="opacity:0.20"></i><i style="opacity:0.78"></i><i style="opacity:0.53"></i><i style="opacity:0.28"></i><i style="opacity:0.87"></i><i style="opacity:0.62"></i><i style="opacity:0.37"></i><i style="opacity:0.95"></i><i style="opacity:0.70"></i><i style="opacity:0.45"></i><i style="opacity:0.20"></i><i style="opacity:0.78"></i><i style="opacity:0.53"></i><i style="opacity:0.28"></i><i style="opacity:0.87"></i><i style="opacity:0.62"></i><i style="opacity:0.37"></i><i style="opacity:0.95"></i><i style="opacity:0.70"></i><i style="opacity:0.45"></i><i style="opacity:0.20"></i><i style="opacity:0.78"></i><i style="opacity:0.53"></i><i style="opacity:0.28"></i></div><div class="one">每格是一小时的花费，越深越多</div></div></div></div></div></section>
+<p class="frame-label" style="width:1440px">L-G · 每日利润：汇总 8 + 需处理 4；横条拿掉并进需处理；没算进利润的上游成本降成一行；页顶不放主按钮</p>
+<section class="frame" id="layout-recon" style="width:1440px;height:760px"><div class="shell" style="height:760px"><aside class="sider"><b>炬元</b><div class="g">监控</div><div class="it">运营总览</div><div class="it">上游资源</div><div class="g">经营</div><div class="it">自营业务</div><div class="it">成本和用量</div><div class="it on">每日利润</div><div class="g">系统</div><div class="it">告警中心</div><div class="it">系统设置</div></aside><div class="main"><div class="top"><h1>每日利润</h1><span class="seg"><span class="on">今天</span><span>昨天</span><span>近 7 天</span><span>本月</span><span>自定义</span></span><span class="spacer"></span><span class="caption">● 数据截至 15:30</span></div><div class="c"><div class="s12" style="display:flex;align-items:center"><b style="font-size:15px">10月24日（今天）</b><span class="spacer"></span><span class="btn sm">以前的每日记录</span></div>
+<div class="p s8"><h2>汇总</h2><div class="kpis"><div><span>收入</span><b>$9.80</b></div><div><span>上游成本</span><b>$4.30</b></div><div><span>毛利</span><b>$5.50</b></div><div><span>毛利率</span><b>56.1%</b></div></div><div class="one">今天实时 · 另有 $15.55 上游成本没算进利润 <a>查看各上游</a></div></div><div class="p s4"><h2>需处理 <span class="count">2</span></h2><ul class="att"><li><i></i><div>有 4 个渠道还没算利润<p>我的站</p></div><span class="btn sm">开始算利润</span></li><li><i></i><div>没认出这个渠道用的是哪把 Key<p>上游丁 · 主力上游　10月23日</p></div><span class="btn sm">指定 Key</span></li></ul></div>
+<div class="p s12" style="padding:0;overflow:hidden"><div style="padding:14px 20px"><h2 style="margin:0;font-size:15px">绑定 <span class="count">3</span></h2></div><table class="tbl"><thead><tr><th>状态</th><th>渠道 / 上游</th><th class="r">收入</th><th class="r">上游成本</th><th class="r">毛利</th><th class="r">操作</th></tr></thead><tbody><tr><td><span class="tagl i">实时</span></td><td><b>上游甲·高速</b><span class="sub">主力上游 · oai-2</span></td><td class="r">$9.80</td><td class="r">$4.30</td><td class="r"><b>$5.50</b></td><td class="r"><a>计算明细</a></td></tr><tr><td><span class="tagl i">实时</span></td><td><b>上游乙·标准</b><span class="sub">主力上游 · team-b</span></td><td class="r">$6.12</td><td class="r">$2.40</td><td class="r"><b>$3.72</b></td><td class="r"><a>计算明细</a></td></tr><tr><td><span class="tagl i">实时</span></td><td><b>上游丁</b><span class="sub">主力上游 · 没认出 Key</span></td><td class="r">$2.31</td><td class="r">—</td><td class="r"><b>—</b></td><td class="r"><a>计算明细</a></td></tr></tbody></table></div></div></div></div></section>
+<p class="frame-label" style="width:1440px">L-H · 告警中心（在 #61 之上）：提醒规则 8；通知方式和日报 4；提醒节奏收成一行</p>
+<section class="frame" id="layout-notifications" style="width:1440px;height:620px"><div class="shell" style="height:620px"><aside class="sider"><b>炬元</b><div class="g">监控</div><div class="it">运营总览</div><div class="it">上游资源</div><div class="g">经营</div><div class="it">自营业务</div><div class="it">成本和用量</div><div class="it">每日利润</div><div class="g">系统</div><div class="it on">告警中心</div><div class="it">系统设置</div></aside><div class="main"><div class="top"><h1>告警中心</h1><span class="spacer"></span><span class="caption">● 数据截至 15:30</span></div><div class="c"><div class="p s8" style="padding:0;overflow:hidden"><div style="padding:14px 20px"><h2 style="margin:0">提醒规则 <small>改了马上保存</small><span class="r" style="color:var(--ink-3)">已保存 15:30</span></h2></div><table class="tbl"><thead><tr><th>开关</th><th>提醒什么</th><th>发到</th></tr></thead><tbody><tr><td><span class="tagl i">开</span></td><td><b>余额偏低</b><span class="sub">余额低于 [ 5 ] 时提醒</span></td><td><div class="select" style="min-height:28px"><span class="ph">所有启用的通知方式</span></div></td></tr><tr><td><span class="tagl i">开</span></td><td><b>余额用完</b><span class="sub">余额用完时通知</span></td><td><div class="select" style="min-height:28px"><span class="ph">所有启用的通知方式</span></div></td></tr><tr><td><span class="tagl i">开</span></td><td><b>读不到余额</b><span class="sub">连续读不到 [ 1 ] 次才通知</span></td><td><div class="select" style="min-height:28px"><span class="ph">所有启用的通知方式</span></div></td></tr><tr><td><span class="tagl i">开</span></td><td><b>恢复正常</b><span class="sub">从上面几种情况恢复后通知</span></td><td><div class="select" style="min-height:28px"><span class="ph">所有启用的通知方式</span></div></td></tr><tr><td><span class="tagl i">开</span></td><td><b>快用完</b><span class="sub">可用天数在 [ 3 天 ] 以内时提醒</span></td><td><div class="select" style="min-height:28px"><span class="ph">所有启用的通知方式</span></div></td></tr></tbody></table><div style="padding:12px 20px" class="caption">提醒节奏：同一件事每隔 24 小时再提醒一次；读不到余额后隔 30 秒再读一次 <a>改</a></div></div>
+<div class="s4" style="display:flex;flex-direction:column;gap:20px"><div class="p"><h2>通知方式 <span class="count">1</span><span class="r">添加</span></h2><ul class="att"><li><span></span><div><b>运维群</b><p>自定义 Webhook · 测试成功 15:12</p></div><a>⋯</a></li></ul></div>
+<div class="p"><h2>日报</h2><div class="rows" style="grid-template-columns:72px 1fr"><span>启用</span><div><span class="tagl g">关</span></div><span>发送时间</span><div>09:00</div><span>发到</span><div>所有启用的通知方式</div></div><div style="display:flex;gap:8px;margin-top:10px"><span class="btn sm">预览</span><span class="btn sm">立即发送</span></div></div></div></div></div></div></section>
+<p class="frame-label" style="width:1440px">L-I · 系统设置（在 #61 之上）：两栏各 6 列；历史概况收成一行</p>
+<section class="frame" id="layout-settings" style="width:1440px;height:560px"><div class="shell" style="height:560px"><aside class="sider"><b>炬元</b><div class="g">监控</div><div class="it">运营总览</div><div class="it">上游资源</div><div class="g">经营</div><div class="it">自营业务</div><div class="it">成本和用量</div><div class="it">每日利润</div><div class="g">系统</div><div class="it">告警中心</div><div class="it on">系统设置</div></aside><div class="main"><div class="top"><h1>系统设置</h1><span class="spacer"></span><span class="caption">● 数据截至 15:30</span></div><div class="c"><div class="s6" style="display:flex;flex-direction:column;gap:20px"><div class="p"><h2>刷新与数据 <span class="r" style="color:var(--ink-3)">已保存 15:30</span></h2><div class="field"><label style="font-weight:400;font-size:13px">自动刷新间隔</label><div class="input" style="width:160px;color:var(--ink)">60 秒</div></div><div class="one">余额提醒线在<a>告警中心</a>「余额偏低」那一行里设。</div></div>
+<div class="p"><h2>历史数据保留</h2><div class="input" style="width:200px;color:var(--ink)">一直保留（默认）</div><div class="one">10 条记录，最早 10月24日 14:09，占 32 KB <a>查看清理记录</a></div></div></div>
+<div class="s6" style="display:flex;flex-direction:column;gap:20px"><div class="p"><h2>账户安全</h2><div class="rows" style="grid-template-columns:84px 1fr"><span>用户名</span><div>admin</div></div><div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:10px"><div class="input">原密码</div><div class="input">新密码</div></div><div style="margin-top:10px"><span class="btn primary sm">修改密码</span></div></div>
+<div class="p"><h2>关于</h2><div class="rows" style="grid-template-columns:84px 1fr"><span>产品</span><div>炬元控制台</div><span>软件版本</span><div>2.2.0</div></div></div></div></div></div></div></section>
+<p class="frame-label" style="width:390px">L-A 手机 · 运营总览：需处理在前；等式四格两行；余量；收入和成本收起</p>
+<section class="frame m" id="layout-home-m" style="width:390px;height:1300px"><div class="top" style="height:52px;padding:0 16px"><h1 style="font-size:18px">运营总览</h1><span class="spacer"></span><span class="caption">15:30</span></div><div style="padding:12px 16px;display:flex;flex-direction:column;gap:12px"><div class="p" style="padding:14px 16px"><h2>需处理 <span class="count">9</span></h2><ul class="att"><li><i class="cr"></i><div><b>余额偏低（演示）</b> 余额偏低<p>余额 $2.59，可用约 1 天</p></div><span class="btn sm" style="height:36px">余额趋势</span></li>
+<li><i></i><div>拼车团队（演示） 还没确认这把 Key 属于哪个上游账号</div><span class="btn sm" style="height:36px">测试读取</span></li>
+<li><i></i><div>邮箱密码登录（演示） 还没确认这把 Key 属于哪个上游账号</div><span class="btn sm" style="height:36px">测试读取</span></li>
+<li><i></i><div>我的站 有 1 个渠道还没算利润</div><span class="btn sm" style="height:36px">开始算利润</span></li>
+<li><i></i><div>Key 计费站（演示） 还没确认能读到完整账单</div><span class="btn sm" style="height:36px">测试读取</span></li></ul><div class="one"><a>还有 4 件</a></div></div>
+<div class="p" style="padding:14px 16px"><h2>今天经营</h2><div class="mrow"><div class="mk"><span>收入</span><b>$1.38</b></div><div class="mk"><span>上游成本</span><b>$7.88</b></div><div class="mk" style="background:var(--cobalt-tint)"><span>毛利</span><b>−$6.50</b></div><div class="mk" style="background:var(--cobalt-tint)"><span>净利</span><b>—</b></div></div><div class="one">3 个上游没设置汇率，金额按美元显示。<a>去设置</a></div></div>
+<div class="p" style="padding:14px 16px"><h2>上游余量</h2><ul class="bars"><li><span>余额偏低（演示）<span class="caption" style="display:block">$2.59</span></span><span class="tr"><i class="red" style="width:6%"></i></span><b>约 1 天</b></li>
+<li><span>拼车团队（演示）<span class="caption" style="display:block">$36.48</span></span><span class="tr"><i style="width:40%"></i></span><b>约 8 天</b></li>
+<li><span>Key 计费站（演示）<span class="caption" style="display:block">$31.39</span></span><span class="tr"><i style="width:70%"></i></span><b>约 14 天</b></li>
+<li><span>主力上游（演示）<span class="caption" style="display:block">$158.77</span></span><span class="tr"><i style="width:92%"></i></span><b>约 19 天</b></li>
+<li><span>邮箱密码登录（演示）<span class="caption" style="display:block">$124.17</span></span><span class="tr"><i style="width:96%"></i></span><b>约 20 天</b></li></ul></div>
+<div class="p" style="padding:12px 16px"><span class="more"><svg class="icon"><use href="#i-chev"/></svg>今天的钱从哪来、花在哪</span></div></div></section>
+<p class="frame-label" style="width:390px">L-E 手机 · 自营业务：指标两列小格；收入图；用户；利润怎么算收起</p>
+<section class="frame m" id="layout-my-m" style="width:390px;height:900px"><div class="top" style="height:52px;padding:0 16px"><h1 style="font-size:18px">自营业务</h1><span class="spacer"></span><span class="caption">15:30</span></div><div style="padding:12px 16px;display:flex;flex-direction:column;gap:12px"><div class="mrow"><div class="mk"><span>收入</span><b>$22.06</b></div><div class="mk"><span>消费的用户</span><b>4</b></div><div class="mk"><span>请求数</span><b>1,296</b></div><div class="mk"><span>这段时间毛利</span><b>−$79.57</b></div></div>
+<div class="p" style="padding:14px 16px"><h2>每天的收入</h2><div class="chart" style="height:130px"><svg viewBox="0 0 100 40" preserveAspectRatio="none"><polyline fill="none" stroke="#3157D5" stroke-width="1.2" points="0,30 15,24 30,26 45,18 60,20 75,14 90,16 100,12"/></svg></div></div><div class="p" style="padding:14px 16px"><h2>消费最多的用户</h2><ul class="bars hb"><li><span>alice</span><span class="tr"><i style="width:100%"></i></span><b>$11.48</b></li><li><span>bob</span><span class="tr"><i style="width:62%"></i></span><b>$7.14</b></li><li><span>carol</span><span class="tr"><i style="width:30%"></i></span><b>$3.44</b></li><li><span>dave（管理员）</span><span class="tr"><i style="width:15%"></i></span><b>$1.71</b></li></ul></div><div class="p" style="padding:12px 16px"><span class="more"><svg class="icon"><use href="#i-chev"/></svg>利润怎么算</span></div></div></section>
+<p class="frame-label" style="width:390px">L-G 手机 · 每日利润：需处理在前；汇总四格两行；绑定转卡片</p>
+<section class="frame m" id="layout-recon-m" style="width:390px;height:900px"><div class="top" style="height:52px;padding:0 16px"><h1 style="font-size:18px">每日利润</h1><span class="spacer"></span><span class="caption">15:30</span></div><div style="padding:12px 16px;display:flex;flex-direction:column;gap:12px"><div class="p" style="padding:14px 16px"><h2>需处理 <span class="count">2</span></h2><ul class="att"><li><i></i><div>有 4 个渠道还没算利润<p>我的站</p></div><span class="btn sm">开始算利润</span></li><li><i></i><div>没认出这个渠道用的是哪把 Key<p>上游丁 · 主力上游　10月23日</p></div><span class="btn sm">指定 Key</span></li></ul></div><div class="mrow"><div class="mk"><span>收入</span><b>$9.80</b></div><div class="mk"><span>上游成本</span><b>$4.30</b></div><div class="mk"><span>毛利</span><b>$5.50</b></div><div class="mk"><span>毛利率</span><b>56.1%</b></div></div>
+<div class="p" style="padding:14px 16px"><h2>绑定 <span class="count">3</span></h2><ul class="att"><li><span></span><div><b>上游甲·高速</b> <span class="tagl i">实时</span><p>收入 $9.80 · 毛利 $5.50</p></div><a>明细</a></li><li><span></span><div><b>上游乙·标准</b> <span class="tagl i">实时</span><p>收入 $6.12 · 毛利 $3.72</p></div><a>明细</a></li><li><span></span><div><b>上游丁</b> <span class="tagl i">实时</span><p>没认出 Key，成本先不算</p></div><a>明细</a></li></ul></div></div></section>
+
+</body></html>
