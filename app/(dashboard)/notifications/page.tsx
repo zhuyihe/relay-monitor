@@ -143,7 +143,8 @@ export default function NotificationsPage() {
   const toggles = useSaveAction(queue, COPY.groupToggles);
   const ruleForm = useAutoSave<RuleForm, Record<string, string>>(ruleFormOf({}), {
     queue,
-    label: COPY.groupRules,
+    // 没有通知方式时页面上没有「提醒规则」，那一小块里只有提醒天数这一项属于这一组
+    label: notifLoaded && channels.length === 0 ? COPY.etaLabel : COPY.groupRules,
     // 清空视为「未填写」而不是 0；「连续读不到」被禁用（规则关闭）时不拦
     validate: (f) => {
       const errs: Record<string, string> = {};

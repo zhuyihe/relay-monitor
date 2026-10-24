@@ -3066,8 +3066,8 @@ test("改了马上保存：没有通知方式时提醒线和提醒天数也能�
   assert.equal(await eta.inputValue(), "5.00");
   failSettings = false; failRules = false;
   await low.fill("15"); await low.press("Tab"); await wait(puts, 3);
-  // 提醒天数那一组还没存上，「保存失败」还在；它存上以后才消失
-  await lines.getByText(/没存上：/).waitFor();
+  // 提醒天数那一组还没存上，「保存失败」还在，说的是「提醒天数」（这时页面上没有「提醒规则」）；它存上以后才消失
+  await lines.getByText(new RegExp(`^${notSaved(NOTIFICATIONS_COPY.etaLabel)}：`)).waitFor();
   await eta.fill("6"); await eta.press("Tab"); await wait(rulePuts, 3);
   for (let i = 0; i < 20 && await lines.getByText(/没存上：/).count(); i++) await page.waitForTimeout(100);
   assert.equal(await lines.getByText(/没存上：/).count(), 0);
@@ -3194,21 +3194,28 @@ test("改了马上保存（重叠的保存）：排着的旧值不存也不弹�
   assert.deepEqual(puts.slice(before), [{ refreshIntervalSec: 120 }]);
   // 自定义 20：回车后紧接着离开，只预览一次、只弹一个确认框
   await pick(SETTINGS_COPY.keepCustom); await custom.fill("20"); await custom.press("Enter"); await custom.press("Tab");
-  await dialog.waitFor(); await page.waitForTimeout(500);
-  assert.deepEqual(previews, ["365", "20"]); assert.equal(await page.getByRole("dialog", { name: SETTINGS_COPY.confirmTitle, exact: true }).count(), 1);
+  await dialog.waitFor();
   // 确认后存不进去：写「历史数据保留没存上」，回到一直保留
   failRetention = true;
   await dialog.getByRole("button", { name: SETTINGS_COPY.confirmOk, exact: true }).click();
   await retention.getByText(new RegExp(`^${notSaved(SETTINGS_COPY.retention)}：`)).waitFor();
   await retention.locator(`.ant-select-content[title="${SETTINGS_COPY.keepForever}"]`).waitFor();
+  // 点了确认以后，第二次提交（Tab 那一次）也没有冒出来：还是只预览了两次、没有第二个确认框
+  await page.waitForTimeout(800);
+  assert.deepEqual(previews, ["365", "20"]); assert.equal(await page.getByRole("dialog", { name: SETTINGS_COPY.confirmTitle, exact: true }).count(), 0);
   failRetention = false;
-  // 预览读不到：一样写没存上、回到原值，不弹确认框
+  // 先成功存一次 365，把上面的「没存上」清掉
+  await pick(SETTINGS_COPY.keepDays(365)); await dialog.waitFor(); await page.waitForTimeout(400);
+  await dialog.getByRole("button", { name: SETTINGS_COPY.confirmOk, exact: true }).click(); await dialog.waitFor({ state: "hidden" });
+  await until(async () => (await retention.getByText(new RegExp(`^${notSaved(SETTINGS_COPY.retention)}：`)).count()) === 0);
+  assert.equal(await retention.getByText(new RegExp(`^${notSaved(SETTINGS_COPY.retention)}：`)).count(), 0);
+  // 预览读不到：写没存上、回到 365，不弹确认框
   failPreview = true;
   await pick(SETTINGS_COPY.keepDays(90));
-  await until(async () => previews.length >= 3);
+  await until(async () => previews.length >= 4);
   await retention.getByText(new RegExp(`^${notSaved(SETTINGS_COPY.retention)}：`)).waitFor();
   assert.equal(await page.getByRole("dialog", { name: SETTINGS_COPY.confirmTitle, exact: true }).count(), 0);
-  await retention.locator(`.ant-select-content[title="${SETTINGS_COPY.keepForever}"]`).waitFor();
+  await retention.locator(`.ant-select-content[title="${SETTINGS_COPY.keepDays(365)}"]`).waitFor();
 });
 
 test("告警中心通知方式没发出去：测试结果、日报发送结果按通知方式的说法写，原文各自进「查看详细原因」；没设置自营站点时预览说清楚、带「去设置」", async (t) => {

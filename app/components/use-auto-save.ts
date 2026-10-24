@@ -102,7 +102,9 @@ export function useAutoSave<T, E = string>(initial: T, { queue, label, save, equ
     lastRef.current = mine;
     await queue.run(async () => {
       const { save: store, confirm: ask, equals: same, label: name } = optionsRef.current;
+      // 后面还有这一组更新的提交时，显示交给它来定，这次不回滚
       const revert = () => {
+        if (lastRef.current?.seq !== seq) return;
         if (!same(valueRef.current, next)) return;
         setValue(savedRef.current);
         optionsRef.current.onRevert?.(savedRef.current);
@@ -116,6 +118,8 @@ export function useAutoSave<T, E = string>(initial: T, { queue, label, save, equ
         }
         try {
           if (ask && !(await ask(next, savedRef.current))) {
+            // 取消就是回到已保存的值，算「改回原值」，这一组之前的「没存上」也清掉
+            setFailure(null);
             revert();
             return;
           }
