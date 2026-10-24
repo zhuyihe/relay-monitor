@@ -228,10 +228,10 @@ a { color: var(--cobalt); text-decoration: none; }
   </div>
   <div class="scrim"></div>
 </template>
-<p class="frame-label" style="width:1160px">F-A · 运营总览：没做完时顶上是「开始使用」，三步按顺序；现在这一步只有一个主按钮</p>
-<section class="frame" id="first-overview" style="width:1160px;height:700px">
+<p class="frame-label" style="width:1160px">F-A · 运营总览：没做完时第一行是清单 8 列 + 需处理 4 列；等式挪到第二行；现在这一步只有一个主按钮</p>
+<section class="frame" id="first-overview" style="width:1160px;height:660px">
   <div class="topbar"><h1>运营总览</h1><span class="spacer"></span></div>
-  <div class="ov">
+  <div class="ov" style="display:grid;grid-template-columns:2fr 1fr;gap:20px">
     <div class="start">
       <div class="start-head"><h2>开始使用</h2><span class="caption">3 步做完 1 步</span><span class="spacer"></span><a class="caption" style="color:var(--cobalt)">以后再说</a></div>
       <ol class="steps">
@@ -241,11 +241,14 @@ a { color: var(--cobalt); text-decoration: none; }
       </ol>
       <div class="start-foot">还可以：<a>加一个通知方式</a>，出事时发给你。</div>
     </div>
-    <div class="ghostpanel"><i style="width:20%"></i><i style="width:70%"></i><i style="width:55%"></i></div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px"><div class="ghostpanel"><i style="width:30%"></i><i style="width:80%"></i></div><div class="ghostpanel"><i style="width:30%"></i><i style="width:80%"></i></div></div>
+    <div class="ghostpanel"><b style="font-size:15px">需处理</b> <span class="caption">1</span>
+      <ul class="attention" style="margin-top:10px"><li style="background:none;border:0;padding:6px 0;grid-template-columns:16px 1fr"><svg class="sym"><use href="#warn"/></svg><div><strong>余额偏低（演示）</strong><p>余额 $2.59，可用约 1 天</p></div></li></ul>
+      <p class="caption" style="margin-top:8px">清单没做完时，这里不出「有 N 个渠道还没绑定」</p></div>
+    <div class="ghostpanel"><b style="font-size:15px">今天经营</b><p class="caption" style="margin:8px 0 0">今天收入 $1.38。开始算利润以后，这里算毛利和净利。</p><i style="width:60%"></i></div>
+    <div class="ghostpanel"><b style="font-size:15px">上游余量</b><i style="width:80%"></i><i style="width:70%"></i><i style="width:75%"></i></div>
   </div>
-  <div class="ann t" style="left:780px;top:405px">做完的一步写结果，「改」打开同一个抽屉</div>
-  <div class="ann t" style="left:780px;top:455px">还没到的灰着、不放按钮：一次只做一件事</div>
+  <div class="ann t" style="left:120px;top:395px">清单只有三行：占 8 列，右边 4 列放需处理，不撑满一整行（§1.4 第 3 条）</div>
+  <div class="ann t" style="left:120px;top:560px">三步没做完时等式答不全，挪到第二行（§1.4 第 1 条）</div>
 </section>
 <p class="frame-label" style="width:1160px">F-B · 设置自营站点：一个抽屉四处用；只填地址和令牌，离开输入框就自动读</p>
 <section class="frame" id="first-own" style="width:1160px;height:760px">
@@ -257,7 +260,7 @@ a { color: var(--cobalt); text-decoration: none; }
       <div class="field"><label>站点地址</label><div class="input filled">https://my-site.example.com</div></div>
       <div class="field"><label>超级管理员的访问令牌</label><div class="input filled">••••••••••••••••</div>
         <div class="kv-ok"><svg class="sym"><use href="#good"/></svg>能读到：站点「我的站」，120 个用户，6 个渠道</div></div>
-      <div class="more"><svg class="icon"><use href="#i-chev"/></svg>更多设置（名字、售价）</div>
+      <div class="more"><svg class="icon"><use href="#i-chev"/></svg>更多设置</div>
     </div>
     <div class="d-foot"><span class="sub"></span><span class="btn">关闭</span><span class="btn primary">保存</span></div>
   </aside>
@@ -275,7 +278,7 @@ a { color: var(--cobalt); text-decoration: none; }
       <div class="field"><label>站点地址</label><div class="input filled">https://api.example.com</div><div class="kv-info">是 New API 站点</div></div>
       <div class="field"><label>访问令牌</label><div class="input filled">••••••••••••••••</div>
         <div class="kv-ok"><svg class="sym"><use href="#good"/></svg>能读到：账号 演示·主力账号，余额 $158.78</div></div>
-      <div class="more"><svg class="icon"><use href="#i-chev"/></svg>更多设置（名字、汇率、余额提醒线、不再续费、算不算进利润、渠道里用的其他地址）</div>
+      <div class="more"><svg class="icon"><use href="#i-chev"/></svg>更多设置</div>
     </div>
     <div class="d-foot"><span class="sub"></span><span class="btn">关闭</span><span class="btn primary">加上游</span></div>
   </aside>
