@@ -541,6 +541,8 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-more-line { display: flex; flex-direction: row; flex-wrap: wrap; align-items: baseline; column-gap: 12px; }
 .jy-more-line > .jy-more { display: contents; }
 .jy-more-line .jy-more__body { flex-basis: 100%; margin-top: 4px; }
+/* 手机上收起区按钮用负外边距撑到 44 高，展开的内容要离开 12，不盖住按钮下沿 */
+@media (max-width: 767px) { .jy-more__body, .jy-more-line .jy-more__body { margin-top: 12px; } }
 
 /* 余额趋势弹窗：四个读数 + 范围切换 + 折线 */
 .jy-trend { display: flex; flex-direction: column; gap: 16px; }

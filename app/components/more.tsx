@@ -2,6 +2,8 @@
 // 收起区（design/ui-design-spec.md §4.11、ui-copy-spec §8.4）：默认收起，只露一个写明收着什么的文字按钮，展开后内容紧跟在下面。
 // anchor 是页面上那一块的 id（那一块自己带这个 id）：页面里指向「#anchor」的链接会展开它，带着这个地址打开或刷新页面时展开并滚过去。
 // defaultOpen 只给「收着的内容就是这一页要说的事」时用；值变了要重新按它来，调用处给 More 换 key。
+// 换 key 就是重新挂载：用户已经展开或收起的状态回到 defaultOpen，按钮上的焦点也会丢（例如用量分析从「全都读不到」变成「部分读不到」时），这是有意的。
+// 页面要自己控制开合时，加 open／onOpenChange（ui-design-spec §4.11），不另写一套收起。
 import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
 import { Icon } from "./icons";

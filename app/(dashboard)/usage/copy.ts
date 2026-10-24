@@ -47,8 +47,11 @@ export const COPY = Object.freeze({
   sourcesOf: (n: number) => ` / ${n} 个上游`,
   rateUnset: (n: number) => `${n} 个上游${RATE_UNSET_PARITY}`,
   // 读不到的上游（ui-copy-spec §8.4）：只在这一行说，合计各格不再写；默认一行，「看原因」展开，全都读不到时默认展开
-  failedAll: (n: number) => `${n} 个上游的用量都读不到`,
-  failedSome: (n: number) => `${n} 个上游的用量读不到，合计里不含它们`,
+  // 全都读不到：只有 1 个（或筛到单个上游）时说「这个上游」，筛到自营站点时说自营站点；后面接下一步
+  failedAll: (n: number) => (n === 1 ? "这个上游的用量读不到" : `${n} 个上游的用量都读不到`),
+  failedOwn: "读不到自营站点的用量",
+  failedNext: "，恢复后下次刷新会自动显示。",
+  failedSome: (n: number) => `${n} 个上游的用量读不到，合计里不含${n === 1 ? "它" : "它们"}`,
   failedWhy: "看原因",
   // 没有数据
   emptyTitle: "这段时间没有用量",

@@ -86,10 +86,10 @@ export const COPY = Object.freeze({
   coverageCaption: "哪些天、哪些上游缺记录",
   leadNoUsage: "这段时间没有按用量计费的上游记录，只算了固定成本。",
   leadFull: (days: number, n: number) => `所选 ${days} 天，全部 ${n} 个上游每天都有记录，没有漏算。`,
-  // 缺记录时收起后只露一句（ui-copy-spec §8.4）：「22 天没有记录、3 天只有部分上游有记录，这几天的上游成本没算全。」
+  // 缺记录时收起后只露一句（ui-copy-spec §8.4）：「22 天没有记录、3 天只有部分上游有记录，这几天的上游成本没算全。」一共只缺 1 天时说「这一天」
   leadMissingDays: (n: number) => `${n} 天没有记录`,
   leadPartialDays: (n: number) => `${n} 天只有部分上游有记录`,
-  leadGaps: (parts: string) => `${parts}，这几天的上游成本没算全。`,
+  leadGaps: (parts: string, days: number) => `${parts}，${days === 1 ? "这一天" : "这几天"}的上游成本没算全。`,
   // 展开后的第一句
   gapRule: "缺记录的日子不当成 0，上游成本只按已有的记录算。",
   kvRange: "时间范围",

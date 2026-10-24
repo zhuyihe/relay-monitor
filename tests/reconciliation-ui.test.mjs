@@ -2620,7 +2620,7 @@ test("成本估算：「数字怎么来的」「没算进去的数据」默认�
   // 没算进去的数据：结论一句和按钮在同一行，规则和明细在「哪些天、哪些上游缺记录」后面
   const coverage = page.locator("#analytics-coverage");
   const details = coverage.getByRole("button", { name: ANALYTICS_COPY.coverageCaption, exact: true });
-  const lead = coverage.getByText(ANALYTICS_COPY.leadGaps(ANALYTICS_COPY.leadMissingDays(3)), { exact: true });
+  const lead = coverage.getByText(ANALYTICS_COPY.leadGaps(ANALYTICS_COPY.leadMissingDays(3), 3), { exact: true });
   await lead.waitFor(); await details.waitFor();
   const [leadBox, buttonBox] = [await lead.boundingBox(), await details.boundingBox()];
   assert.ok(Math.abs(leadBox.y + leadBox.height - (buttonBox.y + buttonBox.height)) < 8, "结论和按钮在同一行");
@@ -2636,6 +2636,25 @@ test("成本估算：「数字怎么来的」「没算进去的数据」默认�
   // 带着 #analytics-coverage 刷新：那一块等数据读回来才出现，出现后展开并滚到它
   await page.reload(); await coverage.locator("dl").waitFor(); assert.equal(await details.getAttribute("aria-expanded"), "true");
   await page.waitForFunction(() => { const r = document.getElementById("analytics-coverage")?.getBoundingClientRect(); return r && r.top >= 0 && r.top < window.innerHeight / 2; });
+});
+
+test("成本估算：没缺记录时「没算进去的数据」只留一句、不出「哪些天、哪些上游缺记录」；只缺 1 天时说「这一天」", async (t) => {
+  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
+  let missing = 0;
+  const analytics = (days) => {
+    const f = costAnalyticsFixture(days); if (!missing) return f;
+    f.daily = f.daily.slice(missing); const earliestDate = f.daily[0].date;
+    f.coverage = { ...f.coverage, earliestDate, availableDays: days - missing, isComplete: false, stationGaps: [{ stationId: "up-a", stationName: "Fixture upstream", availableDays: days - missing, missingDays: missing, earliestDate }] };
+    return f;
+  };
+  const { page } = await openCostPage(t, own, "/analytics", { analytics });
+  const coverage = page.locator("#analytics-coverage");
+  await coverage.getByText(ANALYTICS_COPY.leadFull(30, 1), { exact: true }).waitFor();
+  assert.equal(await coverage.getByRole("button").count(), 0);
+  missing = 1; await page.reload();
+  await coverage.getByText(ANALYTICS_COPY.leadGaps(ANALYTICS_COPY.leadMissingDays(1), 1), { exact: true }).waitFor();
+  assert.match(await coverage.innerText(), /这一天的上游成本没算全/);
+  await coverage.getByRole("button", { name: ANALYTICS_COPY.coverageCaption, exact: true }).waitFor();
 });
 
 test("成本估算的可用天数和运营总览同一个档位：余额在提醒线以下写「余额偏低」，不只按天数写「快用完」", async (t) => {
@@ -2817,6 +2836,8 @@ test("用量分析：全部上游都读不到时只说一处——黄条默认�
     throw new Error("unexpected usage fixture API: " + url.pathname);
   }, undefined, false, null, "/usage");
   const failedLine = page.locator(".jy-usage-failed-line"); await failedLine.getByText(USAGE_COPY.failedAll(2), { exact: true }).waitFor();
+  // 后面接下一步：恢复后会自己出来，不用做什么
+  assert.match(await failedLine.innerText(), new RegExp(USAGE_COPY.failedNext));
   const why = failedLine.getByRole("button", { name: USAGE_COPY.failedWhy, exact: true });
   assert.equal(await why.getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator(".jy-usage-failed li").count(), 2);
@@ -2826,6 +2847,12 @@ test("用量分析：全部上游都读不到时只说一处——黄条默认�
   // 读不到这件事只有黄条一处：不再有「这段时间没有用量」那类空状态
   assert.equal(await page.getByText(USAGE_COPY.emptyTitle, { exact: true }).count(), 0);
   assert.equal(await page.getByText(/读不到/).count(), await failedLine.getByText(/读不到/).count());
+  // 只有 1 个上游时说「这个上游」；筛到自营站点时说自营站点，不叫它上游
+  usage.stations = [usage.stations[0]]; await page.reload();
+  await failedLine.getByText(USAGE_COPY.failedAll(1), { exact: true }).waitFor();
+  assert.doesNotMatch(await failedLine.innerText(), /1 个上游/);
+  usage.stations = [{ ...usage.stations[0], id: "own-1", name: "Fixture own", isOwn: true }]; await page.goto(page.url().split("?")[0] + "?station=own-1");
+  await failedLine.getByText(USAGE_COPY.failedOwn, { exact: true }).waitFor();
 });
 
 test("用量分析：读不到用量的上游按码说一句、原文收起；没设置汇率只数有花费的上游；后台刷新失败保留上次的数据；单独看自营站点按售价说", async (t) => {

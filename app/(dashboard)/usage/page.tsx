@@ -556,19 +556,26 @@ export default function UsagePage() {
         <div className="jy-banner jy-usage-failed-line">
           <Sym kind="warn" />
           <div className="jy-banner__body jy-more-line">
-            <b>{allFailed ? COPY.failedAll(agg.errSts.length) : COPY.failedSome(agg.errSts.length)}</b>
+            {allFailed ? (
+              <span>
+                <b>{agg.errSts.length === 1 && agg.errSts[0].isOwn ? COPY.failedOwn : COPY.failedAll(agg.errSts.length)}</b>
+                {COPY.failedNext}
+              </span>
+            ) : (
+              <b>{COPY.failedSome(agg.errSts.length)}</b>
+            )}
             <More key={allFailed ? "all" : "some"} label={COPY.failedWhy} defaultOpen={allFailed}>
-            <ul className="jy-usage-failed">
-              {agg.errSts.map((s: any) => {
-                const note = stationErrorOf(s);
-                return (
-                  <li key={s.id}>
-                    {failureSentence(stationDisplayName(s), note.text)}
-                    <ErrorDetail raw={note.raw} />
-                  </li>
-                );
-              })}
-            </ul>
+              <ul className="jy-usage-failed">
+                {agg.errSts.map((s: any) => {
+                  const note = stationErrorOf(s);
+                  return (
+                    <li key={s.id}>
+                      {failureSentence(stationDisplayName(s), note.text)}
+                      <ErrorDetail raw={note.raw} />
+                    </li>
+                  );
+                })}
+              </ul>
             </More>
           </div>
         </div>
