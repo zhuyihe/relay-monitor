@@ -1410,6 +1410,8 @@ test("4a 上游账单：固定采购上游的核算关联用途待确认时注�
   const rules = [{ id: "A-active", tokenName: "Key 9", tokenId: 9, upstreamStationId: "A-billing", ownStationId: "own", enabled: true, archivedAt: null, timezone: "Asia/Shanghai", costCoverage: "unknown", coverageDeclaration: declaration, channels: [1, 3].map((channelId) => ({ channelId, name: "Channel " + channelId })) }];
   const ruleConfiguration = { ownStation: { id: "own", cnyPerUsd: null }, upstreams: [{ id: "A-billing", name: "A billing" }], channels: [1, 2, 3].map((id) => ({ id, name: "Channel " + id, status: 1 })), rules };
   const model = accountReadFixture(); model.accounts[0].resources.find((resource) => resource.id === "A-billing").fixedPurchases = [{ amount: 300, days: 30 }];
+  // 组好模型以后才改成固定成本：服务端这时会按固定成本算，不要求回答（coverageNeedsAnswer），夹具跟着改
+  for (const association of model.accounts[0].keys.flatMap((key) => key.associations).filter((item) => item.upstreamStationId === "A-billing")) association.needsCoverageAnswer = false;
   const { page, center } = await openAccountsPage(t, { model, ruleConfiguration, mutation(route, mutation) {
     if (mutation.path === "/api/reconciliation/rules/A-active/preview" && mutation.method === "POST") return fulfill(route, { previewId: "fixed-preview", groupId: "rule-edit", expiresAtMs: Date.now() + 600000,
       basis: { existingChannelIds: [1, 3], proposedChannelIds: mutation.body.salesChannelIds, timezone: "Asia/Shanghai" }, preview: { scopeChanged: false, costCoverage: "unknown", billingEffectiveFromMs: null } });
