@@ -24,10 +24,9 @@ body {
 .jy-sym { width: 12px; height: 12px; flex: none; display: block; }
 .jy-link { color: var(--jy-cobalt); text-decoration: none; }
 .jy-link:hover { text-decoration: underline; text-underline-offset: 3px; }
-/* 文字按钮：收起区（ui-design-spec §4.11，app/components/more.tsx）和运营总览需处理的「还有 N 件」同一套；焦点框用外壳统一的那个 */
-:is(.jy-more__toggle, .jy-attention-toggle) { display: inline-flex; align-items: center; gap: 2px; padding: 0; border: 0; background: none; color: var(--jy-cobalt); font: inherit; font-size: 13px; cursor: pointer; }
-:is(.jy-more__toggle, .jy-attention-toggle):hover { text-decoration: underline; text-underline-offset: 3px; }
-.jy-attention-toggle { font-size: 12px; line-height: 18px; }
+/* 收起区的文字按钮（ui-design-spec §4.11，app/components/more.tsx）；运营总览需处理的「还有 N 件」也是它。焦点框用外壳统一的那个 */
+.jy-more__toggle { display: inline-flex; align-items: center; gap: 2px; padding: 0; border: 0; background: none; color: var(--jy-cobalt); font: inherit; font-size: 13px; cursor: pointer; }
+.jy-more__toggle:hover { text-decoration: underline; text-underline-offset: 3px; }
 /* 收起区按钮：箭头展开后朝下；手机上点的地方至少 44 高，上下用负外边距抵掉，不撑高那一行 */
 @media (max-width: 767px) { .jy-more__toggle { min-height: 44px; margin-block: -12px; } }
 .jy-more__toggle .jy-icon { width: 14px; height: 14px; transition: transform 160ms; }
@@ -185,6 +184,9 @@ body {
 .jy-grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
 .jy-grid-2 > .jy-panel { height: 100%; }
 .jy-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+/* 12 列栅格里主角 8 列、旁边 4 列（ui-design-spec §1.4 第 3 条）；同一行的两块拉成一样高，1200 以下叠成一列 */
+.jy-grid-8-4 { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 24px; align-items: stretch; }
+.jy-grid-8-4 > .jy-panel { height: 100%; }
 .jy-stack { display: flex; flex-direction: column; gap: 24px; }
 
 /* ─── 利润等式条（招牌） ──────────────────────────────── */
@@ -287,6 +289,11 @@ a.jy-eq-term:hover { background: var(--jy-sunken); text-decoration: none; color:
 .jy-attention .actions { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
 .jy-attention .jy-attention-note { margin-top: 4px; font-size: 12px; line-height: 18px; }
 .jy-attention-more { padding: 0 24px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* 「还有 N 件」点开后在原地接着列：占满一行，列表贴到面板两边，和上面的几条接得上 */
+.jy-attention-rest { flex-basis: 100%; }
+.jy-attention-rest .jy-more__body { margin: 8px -24px 0; }
+.jy-attention-rest .jy-attention li:first-child { border-top: 1px solid var(--jy-rule-soft); }
+.jy-attention-rest .jy-attention-more { padding-bottom: 0; }
 .jy-all-clear { display: flex; gap: 12px; align-items: flex-start; padding: 24px; color: var(--jy-ink-2); }
 .jy-all-clear .jy-sym { width: 14px; height: 14px; margin-top: 4px; color: var(--jy-good); }
 .jy-all-clear strong { display: block; color: var(--jy-ink); font-weight: 500; }
@@ -569,6 +576,7 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 @media (max-width: 1199px) {
   .jy-grid-2:not(.jy-grid-even) { grid-template-columns: minmax(0, 1fr); }
   .jy-grid-3 { grid-template-columns: minmax(0, 1fr); }
+  .jy-grid-8-4 { grid-template-columns: minmax(0, 1fr); }
   .jy-eq-value { font-size: 28px; line-height: 36px; }
   .jy-eq-op { font-size: 28px; line-height: 36px; }
 }
@@ -616,7 +624,7 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-mobile-range .jy-range-wrap { width: 100%; }
   .jy-content { padding: 16px; gap: 16px; }
   .jy-page, .jy-tabpanel, .jy-stack { gap: 16px; }
-  .jy-grid-2, .jy-grid-3 { gap: 16px; }
+  .jy-grid-2, .jy-grid-3, .jy-grid-8-4 { gap: 16px; }
   .jy-panel-head { padding: 16px 16px 0; }
   .jy-panel-body { padding: 12px 16px 16px; }
   .jy-panel-body--flush { padding: 12px 0 0; }

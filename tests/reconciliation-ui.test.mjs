@@ -1724,7 +1724,10 @@ test("workflow overview merges stable public actions and preserves prior actions
     if (path === "/api/own/analytics") return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture analytics unavailable" }) });
     assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
   } });
-  await opened.page.goto(baseURL); const region = opened.page.getByRole("region", { name: "需处理", exact: true }); const authLink = new RegExp(`^${UPDATE_AUTH}（`); await region.getByRole("link", { name: authLink }).waitFor(); assert.equal(await region.getByRole("link", { name: new RegExp(`^${workflowActionMeta("confirm_coverage").label}（`) }).count(), 1); const before = await region.getByRole("listitem").count(); await region.getByRole("button", { name: `${workflowActionMeta("refresh").label}需处理的事`, exact: true }).click();
+  await opened.page.goto(baseURL); const region = opened.page.getByRole("region", { name: "需处理", exact: true }); const authLink = new RegExp(`^${UPDATE_AUTH}（`); await region.getByRole("link", { name: authLink }).waitFor();
+  // 需处理只露 3 条（ui-design-spec §5.1），其余在「还有 N 件」里：点开再数
+  await region.getByRole("button", { name: /^还有 \d+ 件$/ }).click();
+  assert.equal(await region.getByRole("link", { name: new RegExp(`^${workflowActionMeta("confirm_coverage").label}（`) }).count(), 1); const before = await region.getByRole("listitem").count(); await region.getByRole("button", { name: `${workflowActionMeta("refresh").label}需处理的事`, exact: true }).click();
   // 有一处没读到：写「刷新失败，数据截至 …。」，上次读到的事项照常列出
   await region.locator(".jy-ov-banner-text").filter({ hasText: /^刷新失败，数据截至 .+。$/ }).waitFor(); assert.equal(await region.getByRole("listitem").count(), before); const href = await region.getByRole("link", { name: authLink }).getAttribute("href"); assert.equal(href, opened.model.accounts[0].actions[0].href); assert.equal(opened.mutations.length, 0); assert.ok(reads >= 3);
 });
@@ -1740,6 +1743,33 @@ test("运营总览在手机上先列需处理，再是利润等式；桌面照�
     let before = await order(); for (let wait = 0; before !== attentionFirst && wait < 30; wait++) { await opened.page.waitForTimeout(100); before = await order(); }
     assert.equal(before, attentionFirst, `宽 ${width} 时需处理${attentionFirst ? "应在" : "不应在"}利润等式前面`);
   }
+});
+
+test("运营总览两行都是 8 + 4：等式和需处理并排、一样高，需处理露 3 条、其余收进「还有 N 件」；余量和「收入和上游成本」并排", async (t) => {
+  const readonlyAPI = (route, path) => path === "/api/own/analytics" ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture analytics unavailable" }) }) : (assert.equal(path, "/api/history/overview"), fulfill(route, { series: [] }));
+  const opened = await openAccountsPage(t, { readonlyAPI }); await opened.page.setViewportSize({ width: 1440, height: 900 }); await opened.page.goto(baseURL);
+  const page = opened.page;
+  const attention = page.getByRole("region", { name: "需处理", exact: true }), equation = page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true });
+  const runway = page.getByRole("region", { name: "上游余量", exact: true }), money = page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
+  await attention.locator(".jy-attention li").first().waitFor(); await equation.waitFor(); await runway.waitFor(); await money.waitFor();
+  // 同一行：左边 8 列、右边 4 列（宽度约 2:1），上沿对齐、一样高
+  for (const [main, side] of [[equation, attention], [runway, money]]) {
+    const [m, sd] = [await main.boundingBox(), await side.boundingBox()];
+    assert.ok(sd.x > m.x + m.width, "右边那块在左边那块右边");
+    assert.ok(m.width / sd.width > 1.8 && m.width / sd.width < 2.2, `宽度约 2:1（${Math.round(m.width)} / ${Math.round(sd.width)}）`);
+    assert.ok(Math.abs(m.y - sd.y) < 1 && Math.abs(m.height - sd.height) < 1, "上沿对齐、一样高");
+  }
+  // 需处理露 3 条，其余收进「还有 N 件」，点开在原地接着列（收起区 More）
+  const total = Number((await attention.locator(".jy-count-badge").first().innerText()).trim());
+  const shown = attention.locator(".jy-attention:not(.jy-attention-rest .jy-attention) > li");
+  assert.equal(await shown.count(), Math.min(3, total));
+  assert.ok(total > 3, `夹具里的需处理要多于 3 条（${total}）`);
+  const more = attention.getByRole("button", { name: `还有 ${total - 3} 件`, exact: true });
+  assert.equal(await more.getAttribute("aria-expanded"), "false"); assert.equal(await attention.locator(".jy-attention-rest .jy-attention > li").count(), 0);
+  await more.click(); assert.equal(await more.getAttribute("aria-expanded"), "true");
+  assert.equal(await attention.locator(".jy-attention-rest .jy-attention > li").count(), total - 3);
+  // 这里经营数据读不到（夹具），「收入和上游成本」那块照样占着右边 4 列；两小段的内容在「收入确认不了时」那条里查
+  assert.equal(opened.mutations.length, 0);
 });
 
 test("workflow read failures and deleted verification targets expose a safe retry with no save", async (t) => {
@@ -3001,14 +3031,16 @@ test("运营总览：收入确认不了时利润等式收入几项写「读不�
     assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
   } });
   await opened.page.goto(baseURL);
-  // 运营总览默认看今天：利润等式叫「今天经营」，收入面板叫「今天收入」（EQ_TEXT.business、page.tsx 的 COPY.income；组件文件带 JSX，node 读不了）
+  // 运营总览默认看今天：利润等式叫「今天经营」，收入和上游成本合成一块「今天收入和上游成本」，上下两小段「收入」「上游成本」
+  // （EQ_TEXT.business、page.tsx 的 COPY.money；组件文件带 JSX，node 读不了）
   await expectIncomeUnread(opened.page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
-  const revenue = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}收入`, exact: true });
+  const money = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
+  const revenue = money.getByRole("region", { name: "收入", exact: true });
   const failed = revenue.locator(".jy-state[role=alert]").filter({ hasText: failureSentence(INCOME_UNREAD.title, errorText({ code: "OWN_INCOME_UNCONFIRMED" })) });
   await failed.waitFor(); await failed.getByRole("button", { name: REFRESH, exact: true }).waitFor();
   assert.doesNotMatch(await revenue.innerText(), /customer|root|¥/);
-  // 上游成本块照常（page.tsx 的 COPY.upstreamCost）：按用量算的上游和合计
-  const cost = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}上游成本`, exact: true });
+  // 上游成本那一小段照常：按用量算的上游，合计在小段标题里
+  const cost = money.getByRole("region", { name: "上游成本", exact: true });
   await cost.getByText("Usage upstream", { exact: true }).waitFor();
   assert.match(await cost.innerText(), new RegExp(formatMoney(3.5).replace(".", "\\.")));
   assert.equal(opened.mutations.length, 0);

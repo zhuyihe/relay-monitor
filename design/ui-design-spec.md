@@ -417,7 +417,7 @@
 - 按钮是 `<button aria-expanded>`，展开的内容紧跟在它下面，不弹层、不挪页面其他部分。手机上（767 以下）按钮点的地方至少 44 高。
 - 页面里有链接指向收起区（例如「查看没算进去的数据」）时，点链接要展开它并滚过去；带着这个 # 打开或刷新页面时也一样。`<More anchor>` 写的是页面上那一块的 id，要滚到的那一块自己带这个 id。
 - 页面要控制开合时（例如开合状态从外面传进来、定位到某一项时要由程序展开），给 `More` 加 `open`／`onOpenChange`，不另写一套。
-- 用法写在 `app/components/more.tsx` 一处，各页不各写一份；结论和按钮要排在同一行时，外面那一层加 `jy-more-line`（`app/styles/jy.css`）。按钮样式和运营总览需处理的「还有 N 件」（`.jy-attention-toggle`）是同一套。
+- 用法写在 `app/components/more.tsx` 一处，各页不各写一份；结论和按钮要排在同一行时，外面那一层加 `jy-more-line`（`app/styles/jy.css`）。运营总览需处理的「还有 N 件」也是它（版式 PR 3 换过来的）。
 - 报错原文不用它，用 ui-copy-spec §8.2 的「查看详细原因」（`app/components/error-detail.tsx`）。
 
 ## 5. 页面蓝图
