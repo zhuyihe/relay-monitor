@@ -312,6 +312,8 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
 - 没选就测试读取时，写「请回答「这把 Key 还给别处用吗？」」（§8.2）。
 - 测试读取后的预览里，答案不是「只给这些渠道用」时，不写「从现在开始算利润」，改写选项下面那句。
 
+上游列表里，一个上游有上面这些事时：状态格写「需处理」，下一行是这件事的标题（放不下的省略、悬停看全）；行末的按钮就是这件事的按钮（例如「测试读取」），不在状态格里放链接。已经有余额档位（例如「余额偏低」）时，状态格照写档位，事的按钮照样在行末。
+
 不是由某个问题引出的事项（运营总览、上游账单的「需要处理」里用）：
 
 | 标题 | 说明 | 按钮 |
@@ -393,6 +395,7 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
 | 场景 | 写法 |
 |---|---|
 | 数据时间 | 当天写「数据截至 14:30」；不是当天写「数据截至 10月9日 14:30」 |
+| 一行的数据比别的旧（上游列表） | 只在比顶栏的数据截至旧两轮刷新以上的那一行写「数据截至 14:20」（规则同上），前面一个小钟；悬停写「后面几次刷新都没读到这个上游的新数据」。和别的一样新的行不写，表格里也不再有「数据截至」一列 |
 | 日期 | 今年写「10月9日」，往年写「2025年10月9日」 |
 | 一整天 | 只写日期「10月9日」，不写「00:00 – 次日 00:00」 |
 | 日期范围 | 「10月1日–10月7日」，同月也写全两个日期 |
@@ -856,7 +859,7 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
    | 刷新失败、页面还显示着上次数据时页顶那一条 | `app/components/data-state.tsx` 的 `RefreshFailedBanner`（字取 `refreshFailedText`、`noteOf`，样式 `.jy-banner__body`） | 上游列表、成本估算、用量分析、自营业务各拼一份横幅和样式 |
    | 算进利润的上游（不是自营站点，没关掉「算进利润」） | `lib/profit.js` 的 `countsInProfit` | 成本接口、成本估算、运营总览各写一份条件 |
    | 「未保存」标记 | `app/components/data-state.tsx` 的 `Dirty` | 告警中心、系统设置、编辑上游各写一份（编辑上游原来写「有没保存的修改」） |
-   | 收起区：一行结论 + 写明收着什么的按钮，点页内链接时展开（§8.4、ui-design-spec §4.11）。**以后唯一的收起组件**：之后的 PR 不许再自己写收起（antd `Collapse`、自己管开合的按钮、`<details>`），要收起就用 `More`；页面要控制开合时给 `More` 加 `open`／`onOpenChange`，不另写一套。不算收起区、另外留着的：报错原文的「查看详细原因」（`app/components/error-detail.tsx`，§8.2），它收的不是页面内容，是给技术同事看的原文，跟着每一条报错走；表格的展开行（antd `Table` 的 `expandable`，例如每日利润 `recon-list.tsx`、`recon-history.tsx` 的倍率变化），它是表格里那一行的明细，不是页面上的一块；侧栏收起和手机菜单（`app/(dashboard)/layout.tsx`），是导航 | `app/components/more.tsx` 的 `More`；按钮样式 `.jy-more__toggle`（`app/styles/jy.css`） | 要并掉的旧写法，共 7 套。先动到那一页的 PR 就在那个 PR 里换成 `More`：版式 PR 按 #64 §12 的顺序，K、F 这些会大改那一页的 PR 也算，免得新代码照抄旧写法；最晚 7b（重构计划第 7 阶段「后端拆分与测试收尾」的第二步）统一清。① 运营总览需处理的「还有 N 件」`.jy-attention-toggle`（`app/(dashboard)/page.tsx`）——版式 PR 3，这次先和 `.jy-more__toggle` 合成一套样式；② 自营业务 `app/(dashboard)/my/audit-panel.tsx` 的「展开／收起」、`app/(dashboard)/my/profit-basis.tsx` 的两个开关（「展开／收起」那个，开合由 `overview-tab.tsx` 传进来，换的时候用 `open`；另一个是「选转售 Key／收起」的 `mgrOpen`，打开时先读一次列表）——版式 PR 4；③ 每日利润 `app/(dashboard)/reconciliation/recon-summary.tsx` 三处（「查看各上游」「查看没算进来的」两处，加 `ReconWindowGroups` 一处）、`recon-history.tsx` 一处 antd `Collapse`——F，最晚 7b；④ 每日利润手机卡片上自己写的「查看倍率变化 · N 次／收起倍率变化」（`app/(dashboard)/reconciliation/recon-parts.tsx`，和它配对的桌面是表格展开行）——F，最晚 7b；⑤ 渠道绑定 `app/components/channel-onboarding.tsx` 三处 antd `Collapse`（整个渠道列表一处，加另外监控的上游、绑定依据两处）——K1／K2，最晚 7b；⑥ 上游账单 `app/(dashboard)/stations/account-center.tsx` 两处 antd `Collapse`（定位绑定时要由程序展开，换的时候用 `open`）——K1／K2，最晚 7b |
+   | 收起区：一行结论 + 写明收着什么的按钮，点页内链接时展开（§8.4、ui-design-spec §4.11）。**以后唯一的收起组件**：之后的 PR 不许再自己写收起（antd `Collapse`、自己管开合的按钮、`<details>`），要收起就用 `More`；页面要控制开合时给 `More` 加 `open`／`onOpenChange`，不另写一套。不算收起区、另外留着的：报错原文的「查看详细原因」（`app/components/error-detail.tsx`，§8.2），它收的不是页面内容，是给技术同事看的原文，跟着每一条报错走；表格的展开行（antd `Table` 的 `expandable`，例如每日利润 `recon-list.tsx`、`recon-history.tsx` 的倍率变化），它是表格里那一行的明细，不是页面上的一块；侧栏收起和手机菜单（`app/(dashboard)/layout.tsx`），是导航 | `app/components/more.tsx` 的 `More`；按钮样式 `.jy-more__toggle`（`app/styles/jy.css`） | 要并掉的旧写法，下面 ①–⑥ 共 6 项（② 一项含两个文件）。先动到那一页的 PR 就在那个 PR 里换成 `More`：版式 PR 按 #64 §12 的顺序，K、F 这些会大改那一页的 PR 也算，免得新代码照抄旧写法；最晚 7b（重构计划第 7 阶段「后端拆分与测试收尾」的第二步）统一清。① 运营总览需处理的「还有 N 件」`.jy-attention-toggle`（`app/(dashboard)/page.tsx`）——版式 PR 3，这次先和 `.jy-more__toggle` 合成一套样式；② 自营业务 `app/(dashboard)/my/audit-panel.tsx` 的「展开／收起」、`app/(dashboard)/my/profit-basis.tsx` 的两个开关（「展开／收起」那个，开合由 `overview-tab.tsx` 传进来，换的时候用 `open`；另一个是「选转售 Key／收起」的 `mgrOpen`，打开时先读一次列表）——版式 PR 4；③ 每日利润 `app/(dashboard)/reconciliation/recon-summary.tsx` 三处（「查看各上游」「查看没算进来的」两处，加 `ReconWindowGroups` 一处）、`recon-history.tsx` 一处 antd `Collapse`——F，最晚 7b；④ 每日利润手机卡片上自己写的「查看倍率变化 · N 次／收起倍率变化」（`app/(dashboard)/reconciliation/recon-parts.tsx`，和它配对的桌面是表格展开行）——F，最晚 7b；⑤ 渠道绑定 `app/components/channel-onboarding.tsx` 三处 antd `Collapse`（整个渠道列表一处，加另外监控的上游、绑定依据两处）——K1／K2，最晚 7b；⑥ 上游账单 `app/(dashboard)/stations/account-center.tsx` 两处 antd `Collapse`（定位绑定时要由程序展开，换的时候用 `open`）——K1／K2，最晚 7b |
    | 改了马上保存：「保存中…」「已保存 14:30」「保存失败：原因。」，以及什么时候存、失败怎么回滚、几组怎么排队 | `app/components/data-state.tsx` 的 `SaveState`、`SAVE_STATE_TEXT`；`app/components/use-auto-save.ts` 的 `useAutoSave`、`useSaveAction`、`useSaveQueue`、`commitOnLeave` | 告警中心、系统设置各写一份保存逻辑和保存状态 |
    | 已保存的密钥不回显：「已保存」「保存后换掉原来的 X」「不填就接着用已保存的 X」 | `lib/channel-onboarding.js` 的 `SECRET_FIELD_TEXT` | 编辑上游、告警中心各写一份，说法还不一样 |
    | 通知方式发不出去时的那一句（§8.2 通知方式那张表） | 码和话在 `lib/error-copy.js`（`deliveryErrorCode` 定先后：没连上对方 → 认得的码 → 认不出）；哪个平台的哪种回复给哪个码，在 `lib/notify.js` 顶部的对照表 | 发送失败时用读上游的关键词猜（`errorCodeOf`），把 Telegram 的「Unauthorized」说成上游的登录信息过期 |
