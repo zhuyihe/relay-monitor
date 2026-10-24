@@ -5,7 +5,7 @@ import {
   queryStationUsage, queryOwnUsers, queryOwnChannels, queryLogStat, queryOwnFlow,
 } from "../lib/providers.js";
 import { businessTimeZone, dayKeyInTz, dayRangeInTz, resolveBusinessWindow } from "../lib/business-time.js";
-import { amortizeFixedCost, costBasisOf, purchasesOf, rateSnapshotOf, summarizeProfit, toCny } from "../lib/profit.js";
+import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, summarizeProfit, toCny } from "../lib/profit.js";
 import { COST_MODE_TEXT, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../lib/format.js";
 import { errorCodeOf, errorDetail, ownStationErrorCode } from "../lib/error-copy.js";
 import { ownStationDisplayName, stationDisplayName } from "../lib/overview-actions.js";
@@ -395,9 +395,9 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
     const unmatchedEnabled = unmatchedList.reduce((a, x) => a + x.enabled, 0);
     const estimatedCosts = costs.filter((c) => c.mode === "history").length;
     // 自营站点没设置售价影响收入，按用量算的上游没设置汇率影响上游成本，两件事分开说
-    const ownPriceUnset = rateSnapshotOf(own).source === "default";
+    const ownPriceUnset = !isConfiguredRate(rateSnapshotOf(own));
     const rateUnsetStations = upstreams
-      .filter((s) => rateSnapshotOf(s).source === "default" && costs.some((c) => c.mode !== "fixed" && c.stationId === s.id))
+      .filter((s) => !isConfiguredRate(rateSnapshotOf(s)) && costs.some((c) => c.mode !== "fixed" && c.stationId === s.id))
       .map((s) => ({ id: s.id, name: s.name }));
     // warnings 是给人看的句子，warningCodes 和它一一对应，页面按码分类，不认文字
     const warnings = [], warningCodes = [];
