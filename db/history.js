@@ -413,6 +413,8 @@ export class History {
    * 回测依据：合成提速场景下旧 48h 等权回归把 ¥48/天 稀释成 ¥5.4/天
    *（ETA 偏差 10 倍），近窗实际速率精确命中；真实数据上两者误差相当。
    * 返回 { burnPerDay, etaDays, etaAt, basis, samples, spanHours } 或 null。
+   * 日均花费舍到分以后是 0（每天不到半分钱）就当近期没有花费：etaDays、etaAt 是 null，
+   * 不拿没舍的速率算出天数——否则页面写「日均花费 ¥0.00」旁边又标「快用完」，各处说法对不上。
    */
   predict(stationId, windowHours = 48) {
     const all = this.data[stationId] || [];
@@ -450,12 +452,13 @@ export class History {
     }
 
     const burnPerDay = est.burnPerDay;
-    if (burnPerDay < 0.0001) {
+    const shownBurn = Math.round(burnPerDay * 100) / 100;
+    if (!(shownBurn > 0)) {
       return { burnPerDay: 0, etaDays: null, etaAt: null, basis, samples: est.samples, spanHours: Math.round(est.spanHours * 10) / 10 };
     }
     const etaDays = latest[1] / burnPerDay;
     return {
-      burnPerDay: Math.round(burnPerDay * 100) / 100,
+      burnPerDay: shownBurn,
       etaDays: Math.round(etaDays * 10) / 10,
       etaAt: new Date(latest[0] + etaDays * 86400000).toISOString(),
       basis,
