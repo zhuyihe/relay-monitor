@@ -2682,6 +2682,29 @@ test("上游列表：所有上游都旧了（后台刷新卡住）时每一行�
   for (const name of ["A 上游", "B 上游"]) await table.locator("tbody tr", { hasText: name }).first().locator("td").nth(1).getByText(/^数据截至 (\d{1,2}月\d{1,2}日 )?\d{1,2}:\d{2}$/).waitFor();
 });
 
+test("上游列表：测试读取不写库，读成功的那一行在下次刷新列表之前不标「数据截至」，余额是刚读到的", async (t) => {
+  const now = Date.now(), hourAgo = new Date(now - 3600000).toISOString(); const tests = [];
+  const station = { id: "st-x", name: "X 上游", type: "newapi", baseUrl: "https://st-x.test", monitorEnabled: true, cnyPerUsd: 7,
+    balance: { ok: false, error: "HTTP 503", code: "UPSTREAM_REQUEST_FAILED", checkedAt: hourAgo }, prediction: null, spark: [] };
+  const page = await openFixturePage(t, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations: [station], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: new Date(now).toISOString() });
+    if (path === "/api/stations/test") { tests.push(route.request().postDataJSON()); return fulfill(route, { ok: true, latencyMs: 12, account: "x-account", remaining: 50, currency: null }); }
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {}, settings: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    throw new Error("unexpected API: " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: new Date(now).toISOString() }), "/stations");
+  const table = page.locator(".jy-stations-table");
+  const row = table.locator("tbody tr", { hasText: "X 上游" }).first();
+  // 读不到余额：下面一行说原因，带「测试读取」
+  await table.locator(".jy-stations-issue").getByRole("button", { name: TEST_READ }).click();
+  await row.getByText("$50.00", { exact: true }).waitFor();
+  assert.deepEqual(tests, [{ stationId: "st-x", type: "newapi" }]);
+  // 读取时刻还是一小时前的（不拿浏览器的时刻），但显示的是刚读到的余额，这一行不标「数据截至」
+  assert.equal(await row.locator("td").nth(1).getByText(/数据截至/).count(), 0);
+});
+
 test("上游列表手机卡片：没设置汇率时余额照写「（没设置汇率）」，不让人当成人民币；设了汇率只写金额", async (t) => {
   const now = Date.now();
   const station = (id, name, cnyPerUsd) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, cnyPerUsd,

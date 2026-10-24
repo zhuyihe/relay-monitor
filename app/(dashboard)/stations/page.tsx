@@ -185,6 +185,8 @@ export default function StationsPage() {
   const [stations, setStations] = useState<any[]>([]);
   // 服务端返回列表的时刻：判断「数据旧了」的参照（staleAt）
   const [listAt, setListAt] = useState<number | null>(null);
+  // 这次列表之后测试读取成功的上游：页面上显示的是刚读到的余额，下一次刷新列表之前不标「数据旧了」
+  const [testedIds, setTestedIds] = useState<Record<string, true>>({});
   const [settings, setSettings] = useState<any>({ refreshIntervalSec: 60, lowBalanceUsd: 5 });
   const [types, setTypes] = useState<any[]>([]);
   const [rules, setRules] = useState<any>({});
@@ -268,6 +270,7 @@ export default function StationsPage() {
       const r: StationListResponse = await api("/api/stations?includeUnmonitored=true&includeArchived=true");
       setStations(r.stations);
       setListAt(Date.parse(r.generatedAt || "") || null);
+      setTestedIds({});
       setSettings(r.settings);
       if (r.tz) setTz(r.tz);
       setLoaded(true);
@@ -383,8 +386,9 @@ export default function StationsPage() {
         setStationChecks((checks) => ({ ...checks, [station.id]: { issue, checkedAt: new Date().toISOString() } }));
         return;
       }
-      // 读取时刻不改：测试接口不返回服务端的读取时刻，用浏览器的时刻会让「数据旧了」的判断混进浏览器时钟；
-      // 下一次刷新列表时换成服务端读到的
+      // 测试读取不写库：读取时刻不改（不拿浏览器的时刻），这一行在下一次刷新列表之前不标「数据旧了」——
+      // 显示的是刚读到的余额，不是「读得比别的旧」（ui-design-spec §5.2）
+      setTestedIds((ids) => ({ ...ids, [station.id]: true }));
       setStations((list) => list.map((item) => (item.id === station.id ? {
         ...item,
         balance: {
@@ -597,6 +601,7 @@ export default function StationsPage() {
   const readAt = (v: StationView) => (v.fixed || v.archived || v.issue || !v.checkedAt ? NaN : new Date(v.checkedAt).getTime());
   const staleRef = listAt ?? Math.max(0, ...live.map(readAt).filter(Number.isFinite));
   const staleAt = (v: StationView) => {
+    if (testedIds[v.s.id]) return null;
     const at = readAt(v);
     return Number.isFinite(at) && staleRef - at > (2 * refreshSec + 30) * 1000 ? formatAsOf(v.checkedAt, tz) : null;
   };
