@@ -163,9 +163,9 @@ export function normalizeConfirmedHistoryOptions(input = {}, now = Date.now()) {
   return { startMs, endMs, limit: Math.min(50, requestedLimit), cursor: input.cursor ?? null, after };
 }
 
-// 记账时读最新一版只为比内容（ledgerWriteDecision）：不读 detail 这类大列
+// 记账时读最新一版只为比内容和带回固定时刻（ledgerWriteDecision）：不读 detail 这类大列
 const LEDGER_DECISION_SELECT = ["revision", "source", "timezone", "window_start_ms", "window_end_ms", "revenue_usd", "cost_usd",
-  "revenue_rate", "cost_rate", "cost_basis"].join(", ");
+  "revenue_rate", "cost_rate", "cost_basis", "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at"].join(", ");
 const LEDGER_SELECT = RECONCILIATION_LEDGER_COLUMNS.map((column) => column === "bill_date" ? "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date"
   : column === "settled_at" ? "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at" : column).join(", ");
 
@@ -658,8 +658,10 @@ export class ReconciliationRepository {
     return true;
   }
 
-  // ledger：{ entry, resettle } 时在同一事务里记账。写不写、写第几版见 ledgerWriteDecision。
+  // ledger：{ entry, resettle } 时在同一事务里记账。写不写、写第几版见 ledgerWriteDecision；提交以后把这个结论放进 ledger.booked
+  // （其中 settledAt 是账本里这天最新那一版的固定时刻），调用方不用再读一次账本。
   async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null } = {}) {
+    let booked = null;
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
@@ -705,14 +707,15 @@ export class ReconciliationRepository {
           `SELECT ${LEDGER_DECISION_SELECT} FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? ORDER BY revision DESC LIMIT 1`,
           [ruleId, ledger.entry.billDate]
         );
-        const decision = ledgerWriteDecision(latest.length ? ledgerEntryFromRow(latest[0]) : null, ledger.entry, { resettle: ledger.resettle });
-        if (decision.write) {
+        booked = ledgerWriteDecision(latest.length ? ledgerEntryFromRow(latest[0]) : null, ledger.entry, { resettle: ledger.resettle });
+        if (booked.write) {
           await conn.query(`INSERT INTO reconciliation_ledger (${RECONCILIATION_LEDGER_COLUMNS.join(", ")}) VALUES (${RECONCILIATION_LEDGER_COLUMNS.map(() => "?").join(", ")})`,
-            ledgerInsertValues({ ...ledger.entry, ruleId, revision: decision.revision, source: decision.source }));
+            ledgerInsertValues({ ...ledger.entry, ruleId, revision: booked.revision, source: booked.source }));
         }
       }
       if (guard && !guard()) { await conn.rollback(); return false; }
       await conn.commit();
+      if (booked) ledger.booked = booked;
       return true;
     } catch (err) {
       await conn.rollback().catch(() => {});

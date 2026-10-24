@@ -986,6 +986,20 @@ contract("a resettle with the same ledger content adds no revision; a change in 
   // 不是重结：内容变了也不写（已固定的日子不再变）
   assert.equal(await settle({ revenueUsd: 3 }), true);
   assert.equal((await latest())[0], 4);
+
+  // 提交以后把结论放进 ledger.booked：没写时带回账本里最新那一版的固定时刻，写了带这次的
+  const fourth = (await repository.latestLedgerEntry(rule.id, window)).settledAt;
+  const book = async (fields, options) => {
+    const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: new Date(day + DAY + (minutes += 10) * 60000).toISOString(), profitUsd: 1.25 });
+    Object.assign(snapshot.source.result.downstream, { amountUsd: fields.revenueUsd });
+    const ledger = settlement(snapshot, { costBasis: "fixed", revenueRate: 7.2, ...options });
+    assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [], { ledger }), true);
+    return [ledger.booked.write, ledger.booked.revision, ledger.booked.settledAt, snapshot.source.resultGeneratedAt];
+  };
+  const same = await book({ revenueUsd: 2.26 }, { resettle: true });
+  assert.deepEqual(same.slice(0, 3), [false, 4, fourth]);
+  const changed = await book({ revenueUsd: 2.27 }, { resettle: true });
+  assert.deepEqual(changed.slice(0, 3), [true, 5, changed[3]]);
 });
 
 contract("listLedgerHistory lists the newest revision of each settled day inside the range, latest day first", async ({ repository, fixture }) => {

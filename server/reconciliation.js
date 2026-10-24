@@ -1626,6 +1626,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, sourceFor({ ...wholeWindow, recordType: "confirmed" }), {
       revenueRate: configuredRate(financialSnapshot.income), costRate: configuredRate(financialSnapshot.cost),
       costBasis: financialSnapshot.costBasis }) : null;
+    // 记账的结论（ledgerOption.booked）由仓库在提交以后填上
+    const ledgerOption = ledgerEntry ? { entry: ledgerEntry, resettle } : null;
     const save = () => repository.saveSnapshotsForScope(rule.id, scopeFingerprint, snapshots.map((segment) => ({
         ruleId: rule.id,
         segmentId: segment.id,
@@ -1646,7 +1648,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         healthCode: segment.health?.code || result.health.code,
         healthDetail: segment.health?.detail || result.health.detail || null,
         source: sourceFor(segment),
-    })), { expectedOwnerState: billingSource?.expectedOwnerState, guard, ledger: ledgerEntry ? { entry: ledgerEntry, resettle } : null });
+    })), { expectedOwnerState: billingSource?.expectedOwnerState, guard, ledger: ledgerOption });
     // 调用方已核对过口径；写快照的事务会在规则行锁内再按库里的口径核对一次，这里只需挡住已作废的代次。
     if (currentSourceCredential(rule) !== sourceCredential) return false;
     if (saveSnapshots) {
@@ -1660,11 +1662,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         throw codedError("PERSISTENCE_FAILED", issueText("PERSISTENCE_FAILED"));
       }
       if (saved !== true) return false;
-      // 单日记进账本时，固定时刻以账本里最新那一版为准：重结内容相同（B-L1）不写新版，页面仍是原来那个时刻
-      if (settled) {
-        const booked = ledgerEntry ? await repository.latestLedgerEntry(rule.id, result.window).catch(() => null) : null;
-        result.settledAt = booked?.settledAt ?? result.generatedAt;
-      }
+      // 单日记进账本时，固定时刻以账本里最新那一版为准（仓库在记账的事务里带回来）：重结内容相同（B-L1）不写新版，页面仍是原来那个时刻
+      if (settled) result.settledAt = ledgerOption?.booked?.settledAt ?? result.generatedAt;
     }
     if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return false;
     if (currentSourceCredential(rule) !== sourceCredential) return false;

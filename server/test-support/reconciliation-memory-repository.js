@@ -412,6 +412,7 @@ export class MemoryReconciliationRepository {
   }
 
   async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null } = {}) {
+    let booked = null;
     return this.#transaction("saveSnapshotsForScope", async (tx) => {
       if (expectedOwnerState != null) {
         await this.#lock(tx, "*");
@@ -437,15 +438,16 @@ export class MemoryReconciliationRepository {
       }
       if (ledger?.entry) {
         const top = this.#ledgerOf(tx, ruleId, ledger.entry.billDate)[0];
-        const decision = ledgerWriteDecision(top ? ledgerEntryFromRow(ledgerRead(top)) : null, ledger.entry, { resettle: ledger.resettle });
-        if (decision.write) {
-          const values = ledgerInsertValues({ ...ledger.entry, ruleId, revision: decision.revision, source: decision.source });
+        booked = ledgerWriteDecision(top ? ledgerEntryFromRow(ledgerRead(top)) : null, ledger.entry, { resettle: ledger.resettle });
+        if (booked.write) {
+          const values = ledgerInsertValues({ ...ledger.entry, ruleId, revision: booked.revision, source: booked.source });
           const row = Object.fromEntries(RECONCILIATION_LEDGER_COLUMNS.map((column, index) => [column, values[index]]));
           this.log.ledgerWrites.push({ ruleId, billDate: row.bill_date, revision: row.revision, source: row.source });
           this.#insert(tx, "ledger", row);
         }
       }
       if (guard && !guard()) return this.#abort(tx, false);
+      if (booked) ledger.booked = booked;
       return true;
     });
   }

@@ -226,7 +226,8 @@ export function settlementDiffs({ window, now, rules = [], attempts = [null], ge
 // 允许的不同只有 B-L1：重结、窗口相同、内容（按存进表的小数位）也相同，原来写下一版、现在不写
 export function ledgerDiffs(row, entry, resettle) {
   const now = ledgerWriteDecision(row && ledgerEntryFromRow(row), entry, { resettle }), before = legacy.ledgerWrite(row, entry, resettle);
-  const pick = (decision) => decision.write ? decision : { write: false };
+  // 原来只决定写不写、第几版、source；settledAt 是 B2 新带回的，不比
+  const pick = ({ write, revision, source }) => write ? { write, revision, source } : { write: false };
   if (same(pick(now), before)) return [];
   const allowed = resettle && !now.write && before.write && sameLedgerContent(ledgerEntryFromRow(row), entry);
   return [{ family: allowed ? "B-L1" : "ledger write", row, entry, resettle, now, before }];
