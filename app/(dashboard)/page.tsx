@@ -802,15 +802,15 @@ function MoneyPanelShell({
 }
 
 // 收入那一小段：合计和按用户的条。收入没读到（读取失败、收入确认不了）时不拿用户消费去拼收入，说原因（§8.1）
-// bars：body 是条形（手机上可以收进「按用户、按上游看」）；不是条形时是一句状态（没设置、读不到、没有收入），手机上也直接露出来
-type MoneyView = { total: string | null; body: ReactNode; bars: boolean };
+// bars：body 是条形（手机上收进「按用户、按上游看」）；不是条形时是一句状态（没设置、读不到、没有收入），手机上也直接露出来。
+// 合计不在这里写：收入、上游成本的合计只在利润等式里出现（ui-design-spec §1.4 第 2 条、§5.1）
+type MoneyView = { body: ReactNode; bars: boolean };
 function useRevenueView(money: Money | null, onRetry: () => void): MoneyView | null {
   const router = useRouter();
   return useMemo(() => {
     if (!money) return null;
     if (money.unconfigured) {
       return {
-        total: null,
         bars: false,
         body: (
           <div className="jy-empty-inline">
@@ -827,11 +827,10 @@ function useRevenueView(money: Money | null, onRetry: () => void): MoneyView | n
     const own = money.own || {};
     const profit = own.profit || {};
     if (profit.error || profit.incomeUnconfirmed) {
-      return { total: null, bars: false, body: <ErrorState what={INCOME_UNREAD.title} error={profit.incomeUnconfirmed || profit} onRetry={onRetry} /> };
+      return { bars: false, body: <ErrorState what={INCOME_UNREAD.title} error={profit.incomeUnconfirmed || profit} onRetry={onRetry} /> };
     }
-    // 没设置汇率时按 1:1 折算，合计前加「约」（和别处同一个判断：rateSnapshotOf）
-    const ownRateNow = rateSnapshotOf(own.station);
-    const ownRate = ownRateNow.cnyPerUsd;
+    // 没设置汇率时按 1:1 折算（和别处同一个判断：rateSnapshotOf）
+    const ownRate = rateSnapshotOf(own.station).cnyPerUsd;
     const users = (own.byUser || [])
       .filter((u: any) => !u.isAdmin)
       .map((u: any) => ({ name: String(u.user || COPY.unnamedUser), value: r2((Number(u.cost) || 0) * ownRate), requests: u.requests }))
@@ -846,10 +845,8 @@ function useRevenueView(money: Money | null, onRetry: () => void): MoneyView | n
     const rest = users.slice(TOP_N);
     if (rest.length) items.push({ key: "rest", name: COPY.otherUsers(rest.length), value: r2(sum(rest.map((u: any) => u.value))) });
     if (Number(profit.resoldCny) > 0) items.push({ key: "resold", name: COPY.resold, value: Number(profit.resoldCny) });
-    const income = profit.incomeCny ?? r2(sum(items.map((i) => i.value ?? 0)));
-    // 这段时间没有收入时合计照样写（¥0.00，§7），下面一句「这段时间还没有用户产生收入。」
+    // 这段时间没有收入时写一句「这段时间还没有用户产生收入。」（手机上也直接露出来）
     return {
-      total: formatMoney(income, { approx: ownRateNow.source !== "configured" }),
       bars: items.length > 0,
       body: <HBars items={items} color="var(--jy-s1)" unitName={COPY.incomeUnit} empty={COPY.noIncome} />,
     };
@@ -861,7 +858,6 @@ function useCostView(money: Money | null): (MoneyView & { notes: string[] }) | n
   return useMemo(() => {
     if (!money) return null;
     let items: HBarItem[];
-    let approx: boolean;
     let notes: string[] = [];
     if (money.unconfigured) {
       const fb = money.fallback || {};
@@ -879,10 +875,9 @@ function useCostView(money: Money | null): (MoneyView & { notes: string[] }) | n
         value: Number(s.totalCny) || 0,
         tipExtra: gaps.has(s.id) ? [[COPY.tip.note, COPY.gapTip(gaps.get(s.id)!)]] : undefined,
       }));
-      approx = list.some((s: any) => gaps.has(s.id));
     } else {
       const profit = money.own?.profit || {};
-      if (profit.error) return { total: null, bars: false, body: <ErrorState what={COPY.costFailed} error={profit} />, notes };
+      if (profit.error) return { bars: false, body: <ErrorState what={COPY.costFailed} error={profit} />, notes };
       items = (profit.costs || [])
         .filter((c: any) => c.mode !== "fixed")
         .map((c: any) => ({
@@ -892,16 +887,12 @@ function useCostView(money: Money | null): (MoneyView & { notes: string[] }) | n
           tipExtra: c.note ? [[COPY.tip.how, c.note]] : COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT] ? [[COPY.tip.how, COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT]]] : undefined,
         }));
       notes = splitProfitWarnings(profit).notes;
-      // 合计带不带「≈」和同页利润等式的上游成本同一个判断（lib/profit.js）
-      approx = profitApproxOf(profit, money.own?.station).upstream;
     }
     items.sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
-    const total = sum(items.map((i) => i.value ?? 0));
     const rest = items.slice(TOP_N);
     const shown = items.slice(0, TOP_N);
     if (rest.length) shown.push({ key: "rest", name: COPY.otherUpstreams(rest.length), value: r2(sum(rest.map((i) => i.value ?? 0))) });
     return {
-      total: formatMoney(total, { approx }),
       bars: items.length > 0,
       body: <HBars items={shown} color="var(--jy-s2)" unitName={COPY.costUnit} empty={COPY.noCost} />,
       notes,
@@ -909,58 +900,44 @@ function useCostView(money: Money | null): (MoneyView & { notes: string[] }) | n
   }, [money]);
 }
 
-// 「今天收入和上游成本」一块，上下两小段：小段标题带合计，各列前 3（ui-design-spec §5.1）。
-// 手机上只把条形收进「按用户、按上游看」；没设置、读不到、没有收入这些一句话的状态照样露出来（§1.4 第 8 条）
+// 「今天收入和上游成本」一块，上下两小段「收入 · 按用户」「上游成本 · 按上游」，各列前 3（ui-design-spec §5.1）。
+// 小段标题不带合计：合计只在利润等式里出现。手机上条形收进「按用户、按上游看」；
+// 没设置、读不到、没有收入这些一句话的状态照样露出来（§1.4 第 8 条）
 function MoneyPanel({ title, money, error, onRetry, compact }: { title: string; money: Money | null; error: Error | null; onRetry: () => void; compact: boolean }) {
   const revenue = useRevenueView(money, onRetry);
   const cost = useCostView(money);
-  const head = (what: string, total: string | null, by: string) => (
+  const head = (what: string, by: string) => (
     <h3 className="jy-ov-money-head">
       {what}
-      {total ? <b>{total}</b> : null}
-      {compact ? null : <span className="jy-caption">· {by}</span>}
+      <span className="jy-caption">· {by}</span>
     </h3>
+  );
+  const part = (what: string, by: string, view: MoneyView) => (
+    <section aria-label={what}>
+      {head(what, by)}
+      {view.body}
+    </section>
   );
   return (
     <MoneyPanelShell title={title} money={money} error={error} onRetry={onRetry} foot={cost?.notes.length ? cost.notes.join("") : undefined}>
       {revenue && cost ? (
         compact ? (
           <div className="jy-ov-money is-compact">
-            <section aria-label={COPY.incomeUnit}>
-              {head(COPY.incomeUnit, revenue.total, COPY.byUser)}
-              {revenue.bars ? null : revenue.body}
-            </section>
-            <section aria-label={COPY.costUnit}>
-              {head(COPY.costUnit, cost.total, COPY.byUpstream)}
-              {cost.bars ? null : cost.body}
-            </section>
+            {revenue.bars ? null : part(COPY.incomeUnit, COPY.byUser, revenue)}
+            {cost.bars ? null : part(COPY.costUnit, COPY.byUpstream, cost)}
             {revenue.bars || cost.bars ? (
               <More label={COPY.moneyMore}>
-                {revenue.bars ? (
-                  <>
-                    <p className="jy-caption">{COPY.byUser}</p>
-                    {revenue.body}
-                  </>
-                ) : null}
-                {cost.bars ? (
-                  <>
-                    <p className="jy-caption">{COPY.byUpstream}</p>
-                    {cost.body}
-                  </>
-                ) : null}
+                <div className="jy-ov-money">
+                  {revenue.bars ? part(COPY.incomeUnit, COPY.byUser, revenue) : null}
+                  {cost.bars ? part(COPY.costUnit, COPY.byUpstream, cost) : null}
+                </div>
               </More>
             ) : null}
           </div>
         ) : (
           <div className="jy-ov-money">
-            <section aria-label={COPY.incomeUnit}>
-              {head(COPY.incomeUnit, revenue.total, COPY.byUser)}
-              {revenue.body}
-            </section>
-            <section aria-label={COPY.costUnit}>
-              {head(COPY.costUnit, cost.total, COPY.byUpstream)}
-              {cost.body}
-            </section>
+            {part(COPY.incomeUnit, COPY.byUser, revenue)}
+            {part(COPY.costUnit, COPY.byUpstream, cost)}
           </div>
         )
       ) : null}

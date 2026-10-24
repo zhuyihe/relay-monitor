@@ -1772,7 +1772,7 @@ test("运营总览两行都是 8 + 4：等式和需处理并排、一样高，�
   assert.equal(opened.mutations.length, 0);
 });
 
-test("运营总览「今天收入和上游成本」：大金额在 1280、1440 宽时不压到运算符；各列前 3，「其他 N …」等于并掉的几项之和；手机上只收条形，读不到照样露出来", async (t) => {
+test("运营总览「今天收入和上游成本」：大金额在 1280、1440 宽时不压到运算符；小段标题不带合计（合计只在等式里）；各列前 3，「其他 N …」等于并掉的几项之和；手机上只收条形，读不到照样露出来", async (t) => {
   const readonly = (analytics) => (route, path) => path === "/api/own/analytics" ? fulfill(route, analytics(new URL(route.request().url()).searchParams.get("range") || "today")) : (assert.equal(path, "/api/history/overview"), fulfill(route, { series: [] }));
   const opened = await openAccountsPage(t, { readonlyAPI: readonly(bigOwnAnalytics) });
   const page = opened.page;
@@ -1787,18 +1787,19 @@ test("运营总览「今天收入和上游成本」：大金额在 1280、1440 �
     }));
     assert.ok(over.every((x) => x <= 0), `宽 ${width} 时金额超出自己那一格：${over.join(",")}`);
   }
-  // 两小段：标题带合计，各列前 3，多的并成一行，那一行等于并掉的几项之和
+  // 两小段「收入 · 按用户」「上游成本 · 按上游」：标题不带合计（同一个数一页只出现一次，合计在等式里），各列前 3，多的并成一行，那一行等于并掉的几项之和
   const money = page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
   const revenue = money.getByRole("region", { name: "收入", exact: true }), cost = money.getByRole("region", { name: "上游成本", exact: true });
-  await revenue.locator(".jy-ov-money-head").getByText(formatMoney(12345.67), { exact: true }).waitFor();
-  await cost.locator(".jy-ov-money-head").getByText(formatMoney(23456.8), { exact: true }).waitFor();
+  await revenue.locator(".jy-ov-money-head").getByText("· 按用户").waitFor(); await cost.locator(".jy-ov-money-head").getByText("· 按上游").waitFor();
+  assert.equal(await money.locator(".jy-ov-money-head").filter({ hasText: /[¥$]/ }).count(), 0);
+  assert.equal(await money.getByText(formatMoney(12345.67)).count(), 0, "收入合计只在等式里，这块里不再写");
+  assert.equal(await money.getByText(formatMoney(23456.8)).count(), 0, "上游成本合计只在等式里，这块里不再写");
   assert.equal(await revenue.locator(".jy-hbars li").count(), 4); assert.equal(await cost.locator(".jy-hbars li").count(), 4);
   await revenue.locator(".jy-hbars li", { hasText: "其他 2 位用户" }).getByText(formatMoney(21), { exact: true }).waitFor();
   await cost.locator(".jy-hbars li", { hasText: "其他 2 个上游" }).getByText(formatMoney(4456.8), { exact: true }).waitFor();
-  // 手机：两个小段标题带合计露着，条形收进「按用户、按上游看」
+  // 手机：条形收进「按用户、按上游看」
   await page.setViewportSize({ width: 390, height: 844 }); await page.goto(baseURL);
   const toggle = money.getByRole("button", { name: "按用户、按上游看", exact: true }); await toggle.waitFor();
-  await revenue.locator(".jy-ov-money-head").getByText(formatMoney(12345.67), { exact: true }).waitFor();
   assert.equal(await money.locator(".jy-hbars li").count(), 0);
   await toggle.click(); assert.equal(await money.locator(".jy-hbars li").count(), 8);
   // 手机上收入读不到：那一句原因直接露出来，不收进「按用户、按上游看」
@@ -3084,10 +3085,10 @@ test("运营总览：收入确认不了时利润等式收入几项写「读不�
   const failed = revenue.locator(".jy-state[role=alert]").filter({ hasText: failureSentence(INCOME_UNREAD.title, errorText({ code: "OWN_INCOME_UNCONFIRMED" })) });
   await failed.waitFor(); await failed.getByRole("button", { name: REFRESH, exact: true }).waitFor();
   assert.doesNotMatch(await revenue.innerText(), /customer|root|¥/);
-  // 上游成本那一小段照常：按用量算的上游，合计在小段标题里（只查标题，条形里也有这个数）
+  // 上游成本那一小段照常：按用量算的上游那一行是 ¥3.50；小段标题不带合计（合计只在等式里）
   const cost = money.getByRole("region", { name: "上游成本", exact: true });
-  await cost.getByText("Usage upstream", { exact: true }).waitFor();
-  await cost.locator(".jy-ov-money-head").getByText(formatMoney(3.5), { exact: true }).waitFor();
+  await cost.locator(".jy-hbars li", { hasText: "Usage upstream" }).getByText(formatMoney(3.5), { exact: true }).waitFor();
+  assert.equal(await cost.locator(".jy-ov-money-head").filter({ hasText: /[¥$]/ }).count(), 0);
   assert.equal(opened.mutations.length, 0);
 });
 
