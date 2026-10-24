@@ -190,7 +190,7 @@ body {
 .jy-stack { display: flex; flex-direction: column; gap: 24px; }
 
 /* ─── 利润等式条（招牌） ──────────────────────────────── */
-.jy-equation { padding: 20px 24px 24px; }
+.jy-equation { padding: 20px 24px 24px; container: jy-eq / inline-size; }
 .jy-eq-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
 .jy-eq-head h2 { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; }
 .jy-eq-head .spacer { flex: 1; }
@@ -579,6 +579,20 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-grid-8-4 { grid-template-columns: minmax(0, 1fr); }
   .jy-eq-value { font-size: 28px; line-height: 36px; }
   .jy-eq-op { font-size: 28px; line-height: 36px; }
+}
+/* 金额字号按等式这一块自己的宽度缩（容器查询，不看窗口宽度）：运营总览里等式只占 8 列，五位数带「≈」「−」的金额也不压到运算符上 */
+@container jy-eq (max-width: 959px) {
+  .jy-eq-value, .jy-eq-op { font-size: 26px; line-height: 34px; }
+  .jy-eq-value .unit { font-size: 17px; }
+}
+@container jy-eq (max-width: 759px) {
+  .jy-eq-value, .jy-eq-op { font-size: 22px; line-height: 30px; }
+  .jy-eq-value .unit { font-size: 15px; }
+  .jy-eq-term { padding-inline: 8px; }
+}
+@container jy-eq (max-width: 639px) {
+  .jy-eq-value, .jy-eq-op { font-size: 20px; line-height: 28px; }
+  .jy-eq-value .unit { font-size: 14px; }
 }
 @media (max-width: 991px) {
   .jy-shell, .jy-shell.is-collapsed { grid-template-columns: 64px minmax(0, 1fr); }

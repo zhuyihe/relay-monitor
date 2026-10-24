@@ -1772,6 +1772,43 @@ test("运营总览两行都是 8 + 4：等式和需处理并排、一样高，�
   assert.equal(opened.mutations.length, 0);
 });
 
+test("运营总览「今天收入和上游成本」：大金额在 1280、1440 宽时不压到运算符；各列前 3，「其他 N …」等于并掉的几项之和；手机上只收条形，读不到照样露出来", async (t) => {
+  const readonly = (analytics) => (route, path) => path === "/api/own/analytics" ? fulfill(route, analytics(new URL(route.request().url()).searchParams.get("range") || "today")) : (assert.equal(path, "/api/history/overview"), fulfill(route, { series: [] }));
+  const opened = await openAccountsPage(t, { readonlyAPI: readonly(bigOwnAnalytics) });
+  const page = opened.page;
+  for (const width of [1440, 1280]) {
+    await page.setViewportSize({ width, height: 900 }); await page.goto(baseURL);
+    const equation = page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true });
+    await equation.getByText(formatMoney(12345.67), { exact: false }).first().waitFor();
+    // 每个金额都在自己那一格里（不压到旁边的运算符）：金额字号按等式这一块的宽度缩
+    const over = await equation.locator(".jy-eq-term").evaluateAll((terms) => terms.filter((t) => getComputedStyle(t).visibility !== "hidden").map((t) => {
+      const v = t.querySelector(".jy-eq-value"); if (!v) return -1; const r = document.createRange(); r.selectNodeContents(v);
+      return Math.round(r.getBoundingClientRect().right - (t.getBoundingClientRect().right - parseFloat(getComputedStyle(t).paddingRight)));
+    }));
+    assert.ok(over.every((x) => x <= 0), `宽 ${width} 时金额超出自己那一格：${over.join(",")}`);
+  }
+  // 两小段：标题带合计，各列前 3，多的并成一行，那一行等于并掉的几项之和
+  const money = page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
+  const revenue = money.getByRole("region", { name: "收入", exact: true }), cost = money.getByRole("region", { name: "上游成本", exact: true });
+  await revenue.locator(".jy-ov-money-head").getByText(formatMoney(12345.67), { exact: true }).waitFor();
+  await cost.locator(".jy-ov-money-head").getByText(formatMoney(23456.8), { exact: true }).waitFor();
+  assert.equal(await revenue.locator(".jy-hbars li").count(), 4); assert.equal(await cost.locator(".jy-hbars li").count(), 4);
+  await revenue.locator(".jy-hbars li", { hasText: "其他 2 位用户" }).getByText(formatMoney(21), { exact: true }).waitFor();
+  await cost.locator(".jy-hbars li", { hasText: "其他 2 个上游" }).getByText(formatMoney(4456.8), { exact: true }).waitFor();
+  // 手机：两个小段标题带合计露着，条形收进「按用户、按上游看」
+  await page.setViewportSize({ width: 390, height: 844 }); await page.goto(baseURL);
+  const toggle = money.getByRole("button", { name: "按用户、按上游看", exact: true }); await toggle.waitFor();
+  await revenue.locator(".jy-ov-money-head").getByText(formatMoney(12345.67), { exact: true }).waitFor();
+  assert.equal(await money.locator(".jy-hbars li").count(), 0);
+  await toggle.click(); assert.equal(await money.locator(".jy-hbars li").count(), 8);
+  // 手机上收入读不到：那一句原因直接露出来，不收进「按用户、按上游看」
+  const unread = await openAccountsPage(t, { readonlyAPI: readonly(unconfirmedOwnAnalytics) });
+  await unread.page.setViewportSize({ width: 390, height: 844 }); await unread.page.goto(baseURL);
+  const unreadMoney = unread.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
+  await unreadMoney.getByRole("region", { name: "收入", exact: true }).locator(".jy-state[role=alert]").filter({ hasText: failureSentence(INCOME_UNREAD.title, errorText({ code: "OWN_INCOME_UNCONFIRMED" })) }).waitFor();
+  assert.equal(opened.mutations.length + unread.mutations.length, 0);
+});
+
 test("workflow read failures and deleted verification targets expose a safe retry with no save", async (t) => {
   let calls = 0; const opened = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=unknown-legacy", readonlyAPI(route) { calls += 1; if (calls === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "KEY_PROBE_UNAVAILABLE", retryable: true, error: "账号身份暂时无法核验，请检查授权或稍后重试" }) }); return fulfill(route, keyVerificationFixture("newapi", "Asia/Shanghai")); } }); const drawer = verificationDialog(opened.page, "unknown-legacy"); await drawer.getByRole("button", { name: TEST_READ, exact: true }).click();
   // 读不到：写「读不到：」加归类后的原因，原文收在「查看详细原因」，旁边一个「刷新」；再测试读取一次就好
@@ -2958,6 +2995,14 @@ function unconfirmedOwnAnalytics(range = "7d", { usersUnavailable = false } = {}
       incomeUnconfirmed: INCOME_UNCONFIRMED },
     ...(usersUnavailable ? { usersUnavailable: USERS_UNAVAILABLE } : {}) };
 }
+// 运营总览「今天收入和上游成本」用的大金额：收入 ¥12,345.67、上游成本 ¥23,456.80（5 个按用量算的上游）、5 位用户（售价 7，按 1 美元额度 = 7 元算）
+function bigOwnAnalytics(range = "today") {
+  const base = unconfirmedOwnAnalytics(range);
+  const costs = [9000, 6000, 4000, 2456.8, 2000].map((cny, i) => ({ stationId: `up-${i}`, name: `Upstream ${i}`, channels: ["Sales"], mode: "usage", usd: cny / 7, cny }));
+  const { incomeUnconfirmed, ...profit } = base.profit;
+  return { ...base, byUser: [5, 4, 3, 2, 1].map((cost, i) => ({ user: `user${i}`, tokens: 1000, cost, requests: 3, isAdmin: false })),
+    profit: { ...profit, incomeCny: 12345.67, upstreamCostCny: 23456.8, fixedCostCny: 1234.56, totalCostCny: 24691.36, grossProfitCny: -11111.13, netProfitCny: -12345.69, costs } };
+}
 // 利润等式在收入读不到时：收入写「读不到」，毛利、净利留空、下面写「读不到收入」；下方一句原因加「刷新」，原文收起。
 // costs 给了就核对两项成本照常显示（成本估算页的成本来自 /api/analytics，不核对）
 async function expectIncomeUnread(equation, costs = null) {
@@ -3039,10 +3084,10 @@ test("运营总览：收入确认不了时利润等式收入几项写「读不�
   const failed = revenue.locator(".jy-state[role=alert]").filter({ hasText: failureSentence(INCOME_UNREAD.title, errorText({ code: "OWN_INCOME_UNCONFIRMED" })) });
   await failed.waitFor(); await failed.getByRole("button", { name: REFRESH, exact: true }).waitFor();
   assert.doesNotMatch(await revenue.innerText(), /customer|root|¥/);
-  // 上游成本那一小段照常：按用量算的上游，合计在小段标题里
+  // 上游成本那一小段照常：按用量算的上游，合计在小段标题里（只查标题，条形里也有这个数）
   const cost = money.getByRole("region", { name: "上游成本", exact: true });
   await cost.getByText("Usage upstream", { exact: true }).waitFor();
-  assert.match(await cost.innerText(), new RegExp(formatMoney(3.5).replace(".", "\\.")));
+  await cost.locator(".jy-ov-money-head").getByText(formatMoney(3.5), { exact: true }).waitFor();
   assert.equal(opened.mutations.length, 0);
 });
 
