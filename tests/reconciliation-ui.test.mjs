@@ -33,7 +33,25 @@ async function launchBrowser() {
   sharedBrowser = chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
   return sharedBrowser;
 }
-after(async () => { await (await sharedBrowser?.catch(() => null))?.close(); });
+after(async () => { await (await sharedBrowser?.catch(() => null))?.close().catch(() => {}); });
+// 走过加载的按钮：antd 按钮的加载图标退场动画常停在半截（机器忙、打包版里更常见），图标宽 0、透明，看不见，
+// 却留在按钮里（aria-label="loading"），按钮的无障碍名字就成了「loading 确认绑定」。所以按名字找按钮时允许这个前缀：
+// settledButton 给要自己写的地方用；settleButtonLookups 把 getByRole("button", { name: "…", exact: true }) 统一换成它，
+// 每条用例开页面时调用（两处 newPage），新写的用例不用再记着
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const settledButton = (label) => new RegExp(`^(loading )?${escapeRegExp(label)}$`);
+let buttonLookupsSettled = false;
+function settleButtonLookups(page) {
+  if (buttonLookupsSettled) return;
+  buttonLookupsSettled = true;
+  for (const proto of [Object.getPrototypeOf(page), Object.getPrototypeOf(page.locator("body")), Object.getPrototypeOf(page.frameLocator("iframe"))]) {
+    const getByRole = proto.getByRole;
+    proto.getByRole = function (role, options) {
+      if (role === "button" && options?.exact && typeof options.name === "string") return getByRole.call(this, role, { ...options, name: settledButton(options.name), exact: false });
+      return getByRole.call(this, role, options);
+    };
+  }
+}
 const baseURL = process.env.RECONCILIATION_UI_BASE_URL || "http://127.0.0.1:3099";
 
 const window = { preset: "yesterday", startMs: 1791388800000, endMs: 1791475200000, timezone: "Asia/Shanghai" };
@@ -466,6 +484,7 @@ async function openFixturePage(t, handler, viewport, clock = false, onboardingHa
   const context = await browser.newContext({ serviceWorkers: "block", ...(viewport ? { viewport, isMobile: true, hasTouch: true } : {}) });
   t.after(() => context.close());
   const page = await context.newPage(), onboardingCalls = [];
+  settleButtonLookups(page);
   onboardingRequests.set(page, onboardingCalls);
   if (clock) await page.clock.install();
   page.setDefaultTimeout(5_000);
@@ -695,8 +714,6 @@ async function openOnboardingDrawer(page, batch = false) {
   else await newChannelButton(page).click();
   return page.getByRole("dialog", { name: CONNECT, exact: true });
 }
-// 模拟接口立刻返回时，antd 按钮的加载图标会停在退场动画里（看不见，但名字前多一个「loading」），按名字找按钮时允许它
-const settledButton = (label) => new RegExp(`^(loading )?${label}$`);
 async function verifyOnboarding(drawer) {
   const button = drawer.getByRole("button", { name: settledButton(TEST_READ) });
   await button.scrollIntoViewIfNeeded();
@@ -1102,6 +1119,7 @@ test("discovery refresh preserves the panel state for Enter, Space and click", {
   const context = await browser.newContext({ serviceWorkers: "block" });
   t.after(() => context.close());
   const page = await context.newPage();
+  settleButtonLookups(page);
   page.setDefaultTimeout(5_000);
   const catalogue = onboardingFixture();
   const requests = [];
