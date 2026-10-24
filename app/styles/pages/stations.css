@@ -6,17 +6,21 @@
 .jy-stations-table th.jy-stations-pin-l, .jy-stations-table th.jy-stations-pin-r { z-index: 2; }
 .jy-stations-table .jy-res-name { max-width: 280px; }
 .jy-stations-table td { vertical-align: top; }
+/* 一行最多两行字、行高 56 以内（ui-design-spec §5.2）：上下 8 + 20 + 18；要比 jy.css 的 table.jy-data td 具体才盖得住 */
+table.jy-data.jy-stations-table td { padding-block: 8px; }
 .jy-stations-table td.jy-empty-row { text-align: center; vertical-align: middle; }
 
-.jy-stations-name-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }
+.jy-stations-name-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; min-width: 0; line-height: 20px; }
 .jy-stations-flag { height: 20px; padding: 0 6px; font-size: 11px; font-style: normal; }
-.jy-stations-sub { display: block; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); white-space: nowrap; }
-/* 行内账号待办：动词按钮，点开后在本页处理 */
+/* 状态格的下一行：状态的补充、要处理的事的标题、数据比别的旧时的「数据截至」，放不下的省略、悬停看全 */
+.jy-stations-sub { display: flex; align-items: center; gap: 4px; max-width: 200px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); white-space: nowrap; }
+/* 状态格上一行：档位或「需处理」，和别的格子一样 20 高 */
+.jy-stations-table .jy-status { line-height: 20px; }
+.jy-stations-sub .jy-icon { width: 12px; height: 12px; flex: none; }
+.jy-stations-sub > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .jy-stations-unowned { margin: -8px 0 0; }
-.jy-stations-todos { display: flex; flex-wrap: wrap; gap: 0 12px; margin-top: 2px; }
-.jy-stations-todos .link { padding: 0; border: 0; background: none; font: inherit; font-size: 12px; line-height: 20px; color: var(--jy-cobalt); cursor: pointer; white-space: nowrap; }
-.jy-stations-todos .link:hover { text-decoration: underline; }
-.jy-stations-todos .link:focus-visible { outline: 2px solid var(--jy-cobalt); outline-offset: 2px; border-radius: 2px; }
+/* 余额那一格的上一行：余额和近 48 小时的小图 */
+.jy-stations-money { display: flex; justify-content: flex-end; align-items: center; gap: 8px; line-height: 20px; }
 .jy-stations-table .jy-cell-runway { min-height: 22px; }
 
 /* 查询失败的说明行：跨整行，横向滚动时贴左 */
@@ -119,7 +123,7 @@
 
 /* 余额列下的近 48 小时走势：整块是按钮，点开余额趋势 */
 .jy-spark-btn {
-  display: inline-flex; align-items: center; gap: 6px; margin: 4px -4px 0 0; padding: 2px 4px;
+  display: inline-flex; align-items: center; gap: 6px; margin: -2px -4px -2px 0; padding: 2px 4px;
   border: 0; border-radius: var(--jy-r1); background: none; cursor: pointer;
   font: inherit; font-size: 12px; line-height: 18px; color: var(--jy-ink-3);
 }
@@ -129,5 +133,11 @@
 .jy-spark .line { fill: none; stroke: var(--jy-cobalt); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
 .jy-spark .area { fill: var(--jy-cobalt-tint); }
 .jy-spark .dot { fill: var(--jy-cobalt); }
-.jy-m-list .m-spark { grid-column: 1 / -1; }
-.jy-m-list .m-spark .jy-spark-btn { margin: 0 0 0 -4px; }
+/* 手机卡片：上一行名称（点开编辑）、状态、「⋯」 */
+.jy-m-list .m-top.link { padding: 0; border: 0; background: none; font: inherit; font-weight: 500; color: var(--jy-ink); text-align: left; cursor: pointer; }
+.jy-m-list .m-end { display: inline-flex; align-items: center; gap: 4px; }
+.jy-m-list .m-end .jy-icon-btn { width: 44px; height: 44px; margin: -12px -12px -12px 0; }
+/* 第二行最右边：要处理的那件事的按钮，点的地方 44 高，上下用负外边距抵掉，卡片还是两行 */
+.jy-m-list .m-sub { align-items: center; }
+.jy-m-list .m-todo { margin: -12px -8px -12px auto; }
+.jy-m-list .m-todo .ant-btn { min-height: 44px; color: var(--jy-cobalt); }
