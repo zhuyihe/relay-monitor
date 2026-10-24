@@ -7,7 +7,7 @@
 // 控制台自己的接口出错按 consoleErrorText 说，原文也进「查看详细原因」。
 import "../../styles/pages/notifications.css";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { commitOnLeave, useAutoSave, useSaveQueue } from "../../components/use-auto-save";
+import { commitOnLeave, useAutoSave, useSaveAction, useSaveQueue } from "../../components/use-auto-save";
 import Link from "next/link";
 import { App, Button, Checkbox, Form, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
@@ -19,7 +19,7 @@ import { consoleErrorText, consoleFailureText, describeError, failureSentence, r
 import { BALANCE_STATE_TEXT, formatDayKey, formatZonedTime } from "../../../lib/format";
 import { workflowAction } from "../../../lib/workflow-actions";
 import { CountBadge, Panel } from "../../components/panel";
-import { ErrorState, PanelSkeleton, SaveState } from "../../components/data-state";
+import { ErrorState, PanelSkeleton, SAVE_STATE_TEXT, SaveState } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { StatusText } from "../../components/status";
@@ -139,9 +139,11 @@ export default function NotificationsPage() {
   const queue = useSaveQueue();
   const rulesRef = useRef<any>({});
   rulesRef.current = rules;
-  const [toggleSavedAt, setToggleSavedAt] = useState(0);
+  // 开关和「发到哪些通知方式」一点就存，算一组
+  const toggles = useSaveAction(queue, COPY.groupToggles);
   const ruleForm = useAutoSave<RuleForm, Record<string, string>>(ruleFormOf({}), {
     queue,
+    label: COPY.groupRules,
     // 清空视为「未填写」而不是 0；「连续读不到」被禁用（规则关闭）时不拦
     validate: (f) => {
       const errs: Record<string, string> = {};
@@ -172,6 +174,7 @@ export default function NotificationsPage() {
   // 全局余额提醒线：放在「余额偏低」那一行，存在 /api/settings（没有通知方式时放在空状态下面那一小块）
   const low = useAutoSave<number | null>(null, {
     queue,
+    label: COPY.lowLabel,
     validate: (v) => (v == null ? `${requiredText(COPY.lowLabel)}${COPY.lowZero}` : v < 0 ? COPY.lowNegative : null),
     save: async (v) => {
       const r = await api("/api/settings", { method: "PUT", body: { lowBalanceUsd: Number(v) } });
@@ -183,6 +186,7 @@ export default function NotificationsPage() {
   // 日报：开关、发送时间、发到哪里改了就存
   const dr = useAutoSave<DrForm>(drFormOf({}), {
     queue,
+    label: COPY.groupReport,
     save: async (v) => {
       const r = await api("/api/settings", { method: "PUT", body: { dailyReport: v } });
       setSettings(r.settings);
@@ -272,7 +276,7 @@ export default function NotificationsPage() {
       await api(`/api/notifications/channels/${c.id}`, { method: "PUT", body: { enabled: next } });
       setChannels((list) => list.map((x) => (x.id === c.id ? { ...x, enabled: next } : x)));
     } catch (e) {
-      message.error(consoleFailureText(COPY.saveFailed, e));
+      message.error(consoleFailureText(SAVE_STATE_TEXT.failed, e));
     }
   };
 
@@ -368,7 +372,7 @@ export default function NotificationsPage() {
       await reloadChannels();
       message.success(editingCh ? COPY.saved : COPY.added);
     } catch (e) {
-      message.error(consoleFailureText(COPY.saveFailed, e));
+      message.error(consoleFailureText(SAVE_STATE_TEXT.failed, e));
     } finally {
       setChSaving(false);
     }
@@ -393,31 +397,26 @@ export default function NotificationsPage() {
   // ---- 提醒规则 ---------------------------------------------------------------
 
   // 开关即时落库（排在同一个队列里）；只更新 rules 和已保存的数字，不覆盖没保存的数字输入
-  const toggleRule = (key: string) => queue.run(async () => {
-    try {
-      const r = await api("/api/notifications/rules", { method: "PUT", body: { [key]: !rulesRef.current[key] } });
-      setRules(r.rules);
-      ruleForm.sync(ruleFormOf(r.rules));
-      setToggleSavedAt(Date.now());
-    } catch (e) {
-      message.error(consoleFailureText(COPY.saveFailed, e));
+  // 关掉「读不到余额」时「连续读不到几次」那个框会变灰：空着的填回已保存的，报错清掉，免得灰着还是红的、一直「未保存」
+  const toggleRule = (key: string) => toggles.run(async () => {
+    const turningOff = !!rulesRef.current[key];
+    const r = await api("/api/notifications/rules", { method: "PUT", body: { [key]: !turningOff } });
+    setRules(r.rules);
+    ruleForm.sync(ruleFormOf(r.rules));
+    if (turningOff && key === "onError") {
+      ruleForm.setValue((f) => (f.errThreshold == null ? { ...f, errThreshold: ruleForm.saved.errThreshold } : f));
+      ruleForm.clearInvalid();
     }
   });
 
   // 每种提醒发到哪些通知方式：选择即落库；失败时回滚为服务端状态
   const saveChannelsFor = (key: string, ids: string[]) => {
     setChannelsFor((cf) => ({ ...cf, [key]: ids }));
-    return queue.run(async () => {
-      try {
-        const r = await api("/api/notifications/rules", { method: "PUT", body: { channelsFor: { [key]: ids } } });
-        setRules(r.rules);
-        setChannelsFor(r.rules?.channelsFor || {});
-        setToggleSavedAt(Date.now());
-      } catch (e) {
-        message.error(consoleFailureText(COPY.saveFailed, e));
-        setChannelsFor(rulesRef.current?.channelsFor || {});
-      }
-    });
+    return toggles.run(async () => {
+      const r = await api("/api/notifications/rules", { method: "PUT", body: { channelsFor: { [key]: ids } } });
+      setRules(r.rules);
+      setChannelsFor(r.rules?.channelsFor || {});
+    }, () => setChannelsFor(rulesRef.current?.channelsFor || {}));
   };
 
   // 切换单位时把输入值换算过去（两个单位间必然是互换），换算后直接保存。
@@ -442,7 +441,16 @@ export default function NotificationsPage() {
   const ruleErrors: Record<string, string> = { ...(ruleForm.invalid || {}), ...(low.invalid ? { low: low.invalid } : {}) };
   const leaveRules = commitOnLeave(ruleForm.commit);
   const leaveLow = commitOnLeave(low.commit);
-  const rulesSavedAt = Math.max(ruleForm.savedAt, low.savedAt, toggleSavedAt);
+  const rulesSavedAt = Math.max(ruleForm.savedAt, low.savedAt, toggles.savedAt);
+  const rulesSaveState = (
+    <SaveState
+      saving={ruleForm.saving || low.saving || toggles.saving}
+      dirty={ruleForm.dirty || low.dirty}
+      at={rulesSavedAt}
+      tz={tz}
+      failures={[low.failure, ruleForm.failure, toggles.failure]}
+    />
+  );
 
   // ---- 日报 -------------------------------------------------------------------
 
@@ -556,7 +564,8 @@ export default function NotificationsPage() {
   );
 
   // 规则行的附加条件：关闭规则时「连续读不到」那个框禁用；余额提醒线、提醒天数也决定页面上的档位，关掉提醒也照样能改
-  const ruleCondition = (ruleKey: string) => {
+  // inLines：没有通知方式时那一小块里，那里的说明已经说了这两个数管页面上的档位，提醒线下面只留前半句
+  const ruleCondition = (ruleKey: string, inLines = false) => {
     const off = !rules[ruleKey];
     if (ruleKey === "onLow")
       return (
@@ -586,7 +595,7 @@ export default function NotificationsPage() {
               </span>
             )}
           </div>
-          <p className="jy-notifications-note" id={`${uid}-low-desc`}>{COPY.lowHint}</p>
+          <p className="jy-notifications-note" id={`${uid}-low-desc`}>{inLines ? COPY.lowHintWhere : COPY.lowHint}</p>
         </>
       );
     if (ruleKey === "onEta")
@@ -698,7 +707,7 @@ export default function NotificationsPage() {
       ) : (
         <Panel
           title={COPY.rules}
-          badge={<SaveState saving={ruleForm.saving || low.saving} dirty={ruleForm.dirty || low.dirty} at={rulesSavedAt} tz={tz} error={low.error || ruleForm.error} />}
+          badge={rulesSaveState}
           caption={COPY.rulesCaption}
           body="flush"
         >
@@ -907,11 +916,13 @@ export default function NotificationsPage() {
         <Panel
           title={COPY.linesTitle}
           caption={COPY.linesCaption}
-          badge={<SaveState saving={ruleForm.saving || low.saving} dirty={ruleForm.dirty || low.dirty} at={rulesSavedAt} tz={tz} error={low.error || ruleForm.error} />}
+          badge={rulesSaveState}
         >
+          {/* 余额提醒线存在设置里（/api/meta 读）：读不到时就地说、能重试，不然框一直灰着 */}
+          {metaErr && !metaLoaded ? <ErrorState what={COPY.linesFailed} error={metaErr} onRetry={loadMeta} /> : null}
           <div className="jy-notifications-lines">
-            {ruleCondition("onLow")}
-            {ruleCondition("onEta")}
+            {ruleCondition("onLow", true)}
+            {ruleCondition("onEta", true)}
           </div>
         </Panel>
       ) : null}
@@ -924,7 +935,7 @@ export default function NotificationsPage() {
           <ErrorState what={COPY.reportFailed} error={metaErr} onRetry={loadMeta} />
         </Panel>
       ) : (
-        <Panel title={COPY.report} badge={<SaveState saving={dr.saving} dirty={false} at={dr.savedAt} tz={tz} error={dr.error} />} caption={COPY.reportCaption}>
+        <Panel title={COPY.report} badge={<SaveState saving={dr.saving} dirty={false} at={dr.savedAt} tz={tz} failures={[dr.failure]} />} caption={COPY.reportCaption}>
           <Form layout="vertical" requiredMark={false} component="div" className="jy-form jy-notifications-dr">
             <Form.Item label={COPY.reportEnable} htmlFor={`${uid}-dr-enabled`} extra={COPY.reportEnableHint}>
               <Switch

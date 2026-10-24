@@ -128,12 +128,14 @@ export default function SettingsPage() {
   };
   const interval = useAutoSave<number | null>(null, {
     queue,
+    label: COPY.interval,
     validate: (v) => (v == null ? requiredText(COPY.interval) : v < 10 ? COPY.intervalMin : null),
     save: async (v) => (await putSettings({ refreshIntervalSec: Number(v) })).refreshIntervalSec,
   });
   // 保留天数：缩短时先预览会删多少，再由确认框明确同意不可恢复的删除；取消就回到原来的天数
   const retention = useAutoSave<number | null>(null, {
     queue,
+    label: COPY.retention,
     confirm: (next, saved) => (next != null && (saved == null || next < saved) ? confirmShorten(next) : Promise.resolve(true)),
     save: async (next, saved) => {
       const shortening = next != null && (saved == null || next < saved);
@@ -221,15 +223,13 @@ export default function SettingsPage() {
   // 用户名输入框默认留空（留空即不修改），填了不同的名字才算有改动
   const accountDirty = !!(pwOld || pwNew || pwConfirm) || (!!username.trim() && username.trim() !== (me?.username || ""));
 
-  // 缩短前先预览会删多少；确认了才存。预览读不到就不存（回到原来的天数）
+  // 缩短前先预览会删多少；确认了才存。预览读不到就不存（回到原来的天数，算没存上）
   const confirmShorten = async (nextRetention: number) => {
     setPreviewingCleanup(true);
     let preview: CleanupPreview;
+    // 预览读不到时往外抛：不存，标题旁写「历史数据保留没存上：原因。」（useAutoSave 接住）
     try {
       preview = (await api(`/api/settings/history-preview?days=${nextRetention}`)).preview as CleanupPreview;
-    } catch (e) {
-      message.error(consoleFailureText(COPY.previewFailed, e));
-      return false;
     } finally {
       setPreviewingCleanup(false);
     }
@@ -451,7 +451,7 @@ export default function SettingsPage() {
           </>
         ) : (
           <>
-            <Panel title={COPY.refresh} badge={<SaveState saving={interval.saving} dirty={interval.dirty} at={interval.savedAt} tz={tz} error={interval.error} />}>
+            <Panel title={COPY.refresh} badge={<SaveState saving={interval.saving} dirty={interval.dirty} at={interval.savedAt} tz={tz} failures={[interval.failure]} />}>
               <div className="jy-field jy-settings-field">
                 <label htmlFor={ids.interval}>{COPY.interval}</label>
                 <InputNumber
@@ -478,7 +478,7 @@ export default function SettingsPage() {
               </p>
             </Panel>
 
-            <Panel title={COPY.retention} badge={<SaveState saving={retention.saving || previewingCleanup} dirty={retention.dirty} at={retention.savedAt} tz={tz} error={retention.error} />}>
+            <Panel title={COPY.retention} badge={<SaveState saving={retention.saving || previewingCleanup} dirty={retention.dirty} at={retention.savedAt} tz={tz} failures={[retention.failure]} />}>
               {settingsError ? (
                 // 已有数据时重新读取失败：保留当前内容，只在本组提示
                 <div className="jy-settings-inline-error">

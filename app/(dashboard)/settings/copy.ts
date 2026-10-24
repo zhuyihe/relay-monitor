@@ -13,9 +13,9 @@ export const COPY = Object.freeze({
   intervalHint: "系统每隔这么久读一次各上游的余额，最短 10 秒",
   intervalMin: "自动刷新间隔最短 10 秒",
   seconds: "秒",
-  // 余额提醒线挪到告警中心「余额偏低」那一行（ui-copy-spec §8.3），这里一句链过去（中间是链接）
+  // 余额提醒线挪到告警中心（ui-copy-spec §8.3；有通知方式时在「余额偏低」那一行，没有时在空状态下面那一小块），这里一句链过去（中间是链接）
   lowLineMovedBefore: "余额提醒线在",
-  lowLineMovedAfter: "「余额偏低」那一行里设。",
+  lowLineMovedAfter: "里设。",
   // 历史数据保留
   keep: "保留多久",
   keepForever: "一直保留（默认）",
@@ -34,7 +34,6 @@ export const COPY = Object.freeze({
   confirmKeep: (at: string) => `会保留 ${at} 之后的记录。`,
   confirmOk: "确认并保存",
   cancel: "取消",
-  previewFailed: "读不到要删多少条记录",
   overview: "历史概况",
   overviewFailed: "读不到历史概况",
   latest: (at: string) => `最近一条记录：${at}`,

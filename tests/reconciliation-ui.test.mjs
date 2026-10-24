@@ -2816,6 +2816,9 @@ test("用量分析：读不到用量的上游按码说一句、原文收起；�
 // 系统设置、告警中心、登录页的接口数据
 const settingsFixture = () => ({ settings: { refreshIntervalSec: 60, lowBalanceUsd: 5, historyRetentionDays: null },
   history: { earliestAt: "2026-09-01T01:00:00Z", latestAt: new Date().toISOString(), pointCount: 1234, tableBytes: 2048, retentionDays: null, cleanup: {} }, tz: BUSINESS_TZ });
+// 「保存失败」「X没存上」取自 app/components/data-state.tsx 的 SAVE_STATE_TEXT（组件文件带 JSX，node 读不了）
+const SAVE_FAILED = "保存失败";
+const notSaved = (label) => `${label}没存上`;
 const metaFixture = (settings = {}) => ({ types: [], channelTypes: [], rules: {}, settings, app: { version: "2.2.0", commit: "abc1234" }, tz: BUSINESS_TZ });
 
 test("系统设置改密码：按接口给的码把报错放到对应的输入框，原密码不对落在「原密码」下，别的放在表单顶部", async (t) => {
@@ -3055,7 +3058,7 @@ test("改了马上保存：没有通知方式时提醒线和提醒天数也能�
   // 存不进去：回到已保存的 12，标题旁留「保存失败」，下一次存成功才消失
   failSettings = true;
   await low.fill("20"); await low.press("Tab"); await wait(puts, 2);
-  await lines.getByText(/^保存失败：/).waitFor();
+  await lines.getByText(new RegExp(`^${notSaved(NOTIFICATIONS_COPY.lowLabel)}：`)).waitFor();
   assert.equal(await low.inputValue(), "12");
   failRules = true;
   await eta.fill("7"); await eta.press("Tab"); await wait(rulePuts, 2);
@@ -3064,10 +3067,10 @@ test("改了马上保存：没有通知方式时提醒线和提醒天数也能�
   failSettings = false; failRules = false;
   await low.fill("15"); await low.press("Tab"); await wait(puts, 3);
   // 提醒天数那一组还没存上，「保存失败」还在；它存上以后才消失
-  await lines.getByText(/^保存失败：/).waitFor();
+  await lines.getByText(/没存上：/).waitFor();
   await eta.fill("6"); await eta.press("Tab"); await wait(rulePuts, 3);
-  for (let i = 0; i < 20 && await lines.getByText(/^保存失败：/).count(); i++) await page.waitForTimeout(100);
-  assert.equal(await lines.getByText(/^保存失败：/).count(), 0);
+  for (let i = 0; i < 20 && await lines.getByText(/没存上：/).count(); i++) await page.waitForTimeout(100);
+  assert.equal(await lines.getByText(/没存上：/).count(), 0);
 
   // 有通知方式以后：这两个数回到规则那几行里，那一小块不再出现
   channels = [{ id: "c1", name: "运维群", type: "telegram", enabled: true, config: {}, hasSecret: {} }];
@@ -3079,7 +3082,7 @@ test("改了马上保存：没有通知方式时提醒线和提醒天数也能�
   failSettings = true;
   const report = page.getByRole("region", { name: NOTIFICATIONS_COPY.report, exact: true });
   const sw = report.getByRole("switch").first(); await sw.click(); await wait(puts, 4);
-  await report.getByText(/^保存失败：/).waitFor();
+  await report.getByText(/没存上：/).waitFor();
   assert.equal(await sw.getAttribute("aria-checked"), "false");
   failSettings = false;
 
@@ -3090,7 +3093,7 @@ test("改了马上保存：没有通知方式时提醒线和提醒天数也能�
   failSettings = true;
   const before = puts.length;
   await interval.fill("90"); await interval.press("Tab"); await wait(puts, before + 1);
-  await refresh.getByText(/^保存失败：/).waitFor();
+  await refresh.getByText(/没存上：/).waitFor();
   assert.equal(await interval.inputValue(), "60");
   failSettings = false;
   const retention = page.getByRole("region", { name: SETTINGS_COPY.retention, exact: true });
@@ -3103,6 +3106,109 @@ test("改了马上保存：没有通知方式时提醒线和提醒天数也能�
   await retention.locator(`.ant-select-content[title="${SETTINGS_COPY.keepForever}"]`).waitFor();
   await page.waitForTimeout(300);
   assert.equal(puts.length, putsBefore);
+});
+
+test("改了马上保存（重叠的保存）：排着的旧值不存也不弹确认框；失败回到最新已保存的值；保存途中又改的输入不被盖掉；回车再离开只弹一个确认框；预览读不到、确认后存不进去、开关存不进去都写哪一组没存上；读不到提醒线时就地重试", async (t) => {
+  const rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: true, etaDays: 3, etaUnit: "days", renotifyHours: 24, errorThreshold: 1, errorRetrySec: 30, channelsFor: {} };
+  const puts = [], previews = [], rulePuts = [];
+  let slow = 0, failLow = null, failPreview = false, failRetention = false, failRules = false, failMeta = false, channels = [];
+  let settings = { lowBalanceUsd: 5, refreshIntervalSec: 60, historyRetentionDays: null, dailyReport: { enabled: false, time: "09:00", channelIds: [] } };
+  const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), method = route.request().method();
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "admin", isDefaultPassword: false });
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels, rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }] });
+    if (url.pathname === "/api/notifications/rules" && method === "PUT") {
+      rulePuts.push(route.request().postDataJSON());
+      if (failRules) return failJSON(route, 500, { error: "rules write timeout" });
+      Object.assign(rules, route.request().postDataJSON()); return fulfill(route, { rules });
+    }
+    if (url.pathname === "/api/meta") return failMeta ? failJSON(route, 500, { error: "meta down" }) : fulfill(route, metaFixture(settings));
+    if (url.pathname === "/api/settings/history-preview") {
+      previews.push(url.searchParams.get("days"));
+      return failPreview ? failJSON(route, 500, { error: "preview down" }) : fulfill(route, { preview: { retentionDays: 30, cutoffAt: new Date().toISOString(), pointCount: 12, earliestAt: null, latestAt: null } });
+    }
+    if (url.pathname === "/api/settings" && method === "PUT") {
+      const body = route.request().postDataJSON(); puts.push(body);
+      if (slow) await sleep(slow);
+      if (failLow != null && body.lowBalanceUsd === failLow) return failJSON(route, 500, { error: "settings write timeout" });
+      if (failRetention && "historyRetentionDays" in body) return failJSON(route, 500, { error: "cleanup failed" });
+      settings = { ...settings, ...body };
+      return fulfill(route, { settings, history: settingsFixture().history, tz: BUSINESS_TZ });
+    }
+    if (url.pathname === "/api/settings") return fulfill(route, { ...settingsFixture(), settings });
+    throw new Error("unexpected overlap fixture API: " + method + " " + url.pathname);
+  }, undefined, false, null, "/notifications");
+  const until = async (check) => { for (let i = 0; i < 60 && !(await check()); i++) await page.waitForTimeout(100); };
+
+  // 读不到余额提醒线（/api/meta 失败）：那一小块里就地说、能重试，重试成功后框能改
+  failMeta = true; await page.reload();
+  const lines = page.getByRole("region", { name: NOTIFICATIONS_COPY.linesTitle, exact: true }); await lines.waitFor();
+  await lines.getByText(new RegExp(`^${NOTIFICATIONS_COPY.linesFailed}`)).waitFor();
+  const low = lines.getByLabel(NOTIFICATIONS_COPY.lowLabel, { exact: true });
+  assert.equal(await low.isEnabled(), false);
+  failMeta = false; await lines.getByRole("button", { name: workflowActionMeta("refresh").label, exact: true }).click();
+  await until(async () => low.isEnabled()); assert.equal(await low.inputValue(), "5");
+  // 那一小块里提醒线下面只有前半句
+  await lines.getByText(NOTIFICATIONS_COPY.lowHintWhere, { exact: true }).waitFor();
+  assert.equal(await lines.getByText(NOTIFICATIONS_COPY.lowHint, { exact: true }).count(), 0);
+
+  // 重叠：7 慢慢存（会成），途中又提交 9（会失败）→ 回到最新已保存的 7，不是发起时的 5
+  slow = 600; failLow = 9;
+  await low.fill("7"); await low.press("Tab"); await until(async () => puts.length >= 1);
+  await low.fill("9"); await low.press("Tab");
+  await until(async () => puts.length >= 2 && (await lines.getByText(new RegExp(`^${notSaved(NOTIFICATIONS_COPY.lowLabel)}：`)).count()) > 0);
+  assert.equal(await low.inputValue(), "7");
+  // 保存途中又改、还没离开的输入不被盖掉
+  failLow = null;
+  await low.fill("11"); await low.press("Tab"); await page.waitForTimeout(100);
+  await low.fill("13"); await until(async () => puts.length >= 3); await page.waitForTimeout(800);
+  assert.equal(await low.inputValue(), "13");
+  await low.press("Tab"); await until(async () => puts.length >= 4); slow = 0;
+
+  // 有通知方式：开关、「发到」存不进去，标题旁写「提醒开关没存上」，开关回到原样
+  channels = [{ id: "c1", name: "运维群", type: "telegram", enabled: true, config: {}, hasSecret: {} }];
+  await page.reload();
+  const rulesPanel = page.getByRole("region", { name: NOTIFICATIONS_COPY.rules, exact: true }); await rulesPanel.waitFor();
+  failRules = true;
+  const lowSwitch = rulesPanel.getByRole("switch").first(); await lowSwitch.click();
+  await rulesPanel.getByText(new RegExp(`^${notSaved(NOTIFICATIONS_COPY.groupToggles)}：`)).waitFor();
+  assert.equal(await lowSwitch.getAttribute("aria-checked"), "true");
+  failRules = false;
+
+  // 系统设置：刷新间隔慢慢存时，自定义保留天数填 20 回车（排着）、又选 365（排着）→ 只为 365 预览、弹确认框，20 不存
+  await page.goto(new URL("/settings", page.url()).href);
+  const refresh = page.getByRole("region", { name: SETTINGS_COPY.refresh, exact: true });
+  const interval = refresh.getByLabel(SETTINGS_COPY.interval, { exact: true }); await interval.waitFor();
+  const retention = page.getByRole("region", { name: SETTINGS_COPY.retention, exact: true });
+  const pick = async (label) => { await retention.getByLabel(SETTINGS_COPY.keep, { exact: true }).click(); await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: label }).first().click(); };
+  slow = 3000; const before = puts.length;
+  await interval.fill("120"); await interval.press("Tab"); await page.waitForTimeout(100);
+  await pick(SETTINGS_COPY.keepCustom);
+  const custom = retention.getByLabel(SETTINGS_COPY.keepCustomLabel, { exact: true }); await custom.fill("20"); await custom.press("Enter");
+  await pick(SETTINGS_COPY.keepDays(365));
+  const dialog = page.getByRole("dialog", { name: SETTINGS_COPY.confirmTitle, exact: true }); await dialog.waitFor({ timeout: 8000 });
+  assert.deepEqual(previews, ["365"]);
+  await dialog.getByRole("button", { name: SETTINGS_COPY.cancel, exact: true }).click(); await dialog.waitFor({ state: "hidden" });
+  await page.waitForTimeout(300); slow = 0;
+  assert.deepEqual(puts.slice(before), [{ refreshIntervalSec: 120 }]);
+  // 自定义 20：回车后紧接着离开，只预览一次、只弹一个确认框
+  await pick(SETTINGS_COPY.keepCustom); await custom.fill("20"); await custom.press("Enter"); await custom.press("Tab");
+  await dialog.waitFor(); await page.waitForTimeout(500);
+  assert.deepEqual(previews, ["365", "20"]); assert.equal(await page.getByRole("dialog", { name: SETTINGS_COPY.confirmTitle, exact: true }).count(), 1);
+  // 确认后存不进去：写「历史数据保留没存上」，回到一直保留
+  failRetention = true;
+  await dialog.getByRole("button", { name: SETTINGS_COPY.confirmOk, exact: true }).click();
+  await retention.getByText(new RegExp(`^${notSaved(SETTINGS_COPY.retention)}：`)).waitFor();
+  await retention.locator(`.ant-select-content[title="${SETTINGS_COPY.keepForever}"]`).waitFor();
+  failRetention = false;
+  // 预览读不到：一样写没存上、回到原值，不弹确认框
+  failPreview = true;
+  await pick(SETTINGS_COPY.keepDays(90));
+  await until(async () => previews.length >= 3);
+  await retention.getByText(new RegExp(`^${notSaved(SETTINGS_COPY.retention)}：`)).waitFor();
+  assert.equal(await page.getByRole("dialog", { name: SETTINGS_COPY.confirmTitle, exact: true }).count(), 0);
+  await retention.locator(`.ant-select-content[title="${SETTINGS_COPY.keepForever}"]`).waitFor();
 });
 
 test("告警中心通知方式没发出去：测试结果、日报发送结果按通知方式的说法写，原文各自进「查看详细原因」；没设置自营站点时预览说清楚、带「去设置」", async (t) => {
@@ -3196,7 +3302,7 @@ test("告警中心通知方式：接口不回传密钥；只改名字也能保�
   dialog = await openEdit();
   await dialog.getByLabel(apiBaseLabel, { exact: true }).fill("https://evil.example");
   await dialog.getByRole("button", { name: NOTIFICATIONS_COPY.save }).click();
-  await page.getByText(`${NOTIFICATIONS_COPY.saveFailed}：${errorText({ code })}。`, { exact: true }).waitFor();
+  await page.getByText(`${SAVE_FAILED}：${errorText({ code })}。`, { exact: true }).waitFor();
   assert.equal(await dialog.isVisible(), true);
   assert.equal(puts[1].config.botToken, "");
 });
