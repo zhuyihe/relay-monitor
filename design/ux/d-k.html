@@ -162,6 +162,10 @@ a { color: var(--cobalt); text-decoration: none; }
 .tl .when { color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .m-tl li { grid-template-columns: 1fr auto; }
 .m-tl li .when { grid-column: 1 / -1; }
+.pick { display: flex; flex-direction: column; border: 1px solid var(--rule); border-radius: var(--r2); }
+.pick .check { padding: 10px 12px; border-top: 1px solid var(--rule-soft); font-size: 13px; }
+.pick .check:first-child { border-top: 0; }
+.pick .check.dis i { background: var(--sunken); border-color: var(--rule); }
 /* 变体并排 */
 .cols { display: grid; gap: 16px; padding: 16px; }
 .cols.c3 { grid-template-columns: repeat(3, 1fr); }
@@ -447,15 +451,24 @@ a { color: var(--cobalt); text-decoration: none; }
   <div class="ann l" style="left:760px;top:600px">认不出的那段点是黄的，右边就是「指定 Key」</div>
 </section>
 
-<!-- ═══ K-B. 渠道绑定 ═══ -->
-<p class="frame-label" style="width:1160px">K-B · 渠道绑定：不再选 Key；账号没回答过就地问；测试读取后每个渠道一行认出结果</p>
-<section class="frame" id="k-onboarding" style="width:1160px;height:900px">
+<!-- ═══ K-B. 开始算利润 ═══ -->
+<p class="frame-label" style="width:1160px">K-B · 开始算利润：加完上游账号就打开；一打开就自己找渠道，默认勾上；只问一次账号的问题；确认一次</p>
+<section class="frame" id="k-onboarding" style="width:1160px;height:860px">
   <div data-page></div>
   <aside class="drawer">
-    <div class="d-head"><svg class="icon"><use href="#i-close"/></svg><h3>去绑定</h3></div>
+    <div class="d-head"><svg class="icon"><use href="#i-close"/></svg><h3>开始算利润 · 演示·主力账号</h3></div>
     <div class="d-body">
-      <div class="facts"><span>已选 3 个渠道</span><div>上游甲·高速、上游乙·标准、上游丙</div></div>
-      <div class="field"><label>上游账号</label><div class="select"><span class="val">主力上游（演示） · 演示·主力账号</span></div></div>
+      <div class="facts"><span>上游账号</span><div>演示·主力账号（主力上游）</div><span>自营站点</span><div>我的站（演示）</div></div>
+      <div class="field">
+        <label>自营站点里用这个账号 Key 的渠道</label>
+        <div class="pick">
+          <label class="check on"><i></i><span><b>上游甲·高速</b>　<span class="sub">用的是 oai · 分组 a · 倍率 1.2</span></span></label>
+          <label class="check on"><i></i><span><b>上游乙·标准</b>　<span class="sub">用的是 team-b · 分组 b · 倍率 1.0</span></span></label>
+          <label class="check on"><i></i><span><b>上游丁</b>　<span class="sub" style="color:var(--warn-ink)">没认出用的是哪把 Key；先开始算，系统接着认，也可以现在</span> <a>指定 Key</a></span></label>
+          <label class="check dis"><i></i><span><b style="color:var(--ink-dis)">上游丙</b>　<span class="sub">用的 oai 已经算在「上游甲·高速」那条绑定里</span></span></label>
+        </div>
+        <div class="caption" style="margin-top:6px">渠道里填的 Key 换成这个账号的以后，再点「找渠道」。</div>
+      </div>
       <div class="field">
         <label>这个上游账号只给你自己的渠道用吗？</label>
         <div class="radio">
@@ -465,20 +478,13 @@ a { color: var(--cobalt); text-decoration: none; }
         </div>
         <div class="after">换 Key 时系统会自己跟上，不用手动换</div>
       </div>
-      <div><span class="btn">测试读取</span></div>
-      <div class="box plain">
-        <h4>认出了什么</h4>
-        <div class="rows" style="grid-template-columns:96px 1fr">
-          <span>上游甲·高速</span><div><span style="color:var(--good)">●</span> 用的是 oai · 分组 a · 倍率 1.2</div>
-          <span>上游乙·标准</span><div><span style="color:var(--warn)">▲</span> 还没认出用的是哪把 Key。先绑上，系统会接着认；也可以现在指定　<a>指定 Key</a></div>
-          <span>上游丙</span><div style="color:var(--ink-3)">用的 oai 已经算在「上游甲·高速」那条绑定里，这个渠道不能绑</div>
-        </div>
-      </div>
     </div>
-    <div class="d-foot"><span class="sub">绑上 2 个渠道</span><span class="btn">关闭</span><span class="btn primary">确认绑定</span></div>
+    <div class="d-foot"><span class="sub"></span><span class="btn">关闭</span><span class="btn primary">开始算利润（3 个渠道）</span></div>
   </aside>
-  <div class="ann r" style="right:576px;top:200px">账号回答过的，这一块不出现，只在账号名后面写答案</div>
-  <div class="ann r" style="right:576px;top:540px">没认出的也能绑：今天先「实时 · 还在读取」，系统接着认</div>
+  <div class="ann r" style="right:576px;top:150px">一打开就自己找，不用点「测试读取」；找的时候写「正在找用这个账号 Key 的渠道…」</div>
+  <div class="ann r" style="right:576px;top:300px">默认都勾上；没认出 Key 的也能先开始算；已归别的绑定的灰着</div>
+  <div class="ann r" style="right:576px;top:470px">账号回答过的不问，只在标题下写答案和「改」</div>
+  <div class="ann r" style="right:576px;top:800px">完成后落到每日利润「今天」，这几行高亮</div>
 </section>
 
 <!-- ═══ K-C. 认不出：今天、第二天 ═══ -->
