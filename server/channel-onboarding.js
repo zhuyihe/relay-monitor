@@ -321,6 +321,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         channels: (item.channels || []).map((channel) => ({ channelId: Number(channel.channelId), name: channel.name || channel.channelName || `渠道 #${channel.channelId}` }))
           .sort((a, b) => a.channelId - b.channelId),
         costCoverage: item.costCoverage === "complete" ? "complete" : "unknown",
+        // 这条绑定现在要不要回答 Key 用途（coverageNeedsAnswer：固定成本、旧规则不用），页面只读这个，不自己判断
+        needsCoverageAnswer: needsCoverageAnswer(item),
         coverageDeclaration: normalizeRuleSourceBinding({ version: 2, coverageDeclaration: item.coverageDeclaration }, item.costCoverage).coverageDeclaration,
         scopeVersion: item.scopeVersion || 1, billingEffectiveFromMs: Number.isFinite(item.billingEffectiveFrom) ? item.billingEffectiveFrom : null,
         accountingStartMs: schedule?.accountingStartMs ?? null, conflict: conflictRuleIds.length > 0, conflictRuleIds,

@@ -110,7 +110,7 @@ export type KnownChannelCoverage = {
   label: "known-channel-coverage"; state: "complete_known" | "partial" | "unknown"; catalogueState: "verified" | "unknown"; wholeSiteState: "unverified";
   knownChannelCount: number; accountedChannelCount: number;
   channels: { ownSource: OwnSource | null; ownStationId: string; channelId: number; name: string; operatingState: string; ruleIds: string[];
-    status: "accounted" | "unlinked" | "not_effective" | "source_unverified" | "billing_missing" | "coverage_unknown" | "duplicate" | "monitor_only" | "unsupported"; issues: string[]; actions: WorkflowAction[] }[];
+    status: "accounted" | "unlinked" | "not_effective" | "source_unverified" | "billing_missing" | "coverage_unknown" | "duplicate" | "row_attention" | "monitor_only" | "unsupported"; issues: string[]; reason?: string; actions: WorkflowAction[] }[];
 };
 // 金额默认按系统原值（USD）显示；本站和各上游都设置了汇率时整页按人民币显示。*Usd 字段始终是账单原币原始口径。
 export type ReconciliationCurrency = "USD" | "CNY";
@@ -184,7 +184,7 @@ export type PublicCatalogueChannel = {
 // 一条核算关联：一把 Key 在某个本站下归属的渠道范围（停止后保留为历史）
 export type AccountAssociation = {
   ruleId: string; status: "active" | "stopped"; upstreamStationId: string; ownStationId: string; timezone: string;
-  channels: { channelId: number; name: string }[]; costCoverage: string; coverageDeclaration: CoverageDeclaration;
+  channels: { channelId: number; name: string }[]; costCoverage: string; needsCoverageAnswer: boolean; coverageDeclaration: CoverageDeclaration;
   scopeVersion: number; billingEffectiveFromMs: number | null; accountingStartMs: number | null;
   // 有效关联之间的重复归属：同一实际 Key 或同一渠道被多条有效关联认领
   conflict: boolean; conflictRuleIds: string[]; stoppedAt: string | null;

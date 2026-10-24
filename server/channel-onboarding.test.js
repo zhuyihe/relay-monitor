@@ -598,7 +598,7 @@ test("2a 上游账单按 Key 逐条列出核算关联：有效在前，停止的
   const [active, history] = keyOf(model, "A", 9).associations;
   assert.deepEqual(keyOf(model, "A", 9).associations.map((item) => item.ruleId), ["A-active", "A-history"]);
   assert.deepEqual({ ...active, accountingStartMs: undefined }, { ruleId: "A-active", status: "active", upstreamStationId: "A-billing", ownStationId: "own",
-    timezone: "Asia/Shanghai", channels: [{ channelId: 1, name: "Channel 1" }], costCoverage: "unknown",
+    timezone: "Asia/Shanghai", channels: [{ channelId: 1, name: "Channel 1" }], costCoverage: "unknown", needsCoverageAnswer: true,
     coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] }, scopeVersion: 3,
     billingEffectiveFromMs: Date.parse("2026-10-09T16:00:00Z"), accountingStartMs: undefined, conflict: false, conflictRuleIds: [],
     keyConflictRuleIds: [], channelConflictRuleIds: [], duplicateChannelIds: [], stoppedAt: null });
@@ -1226,11 +1226,15 @@ test("渠道绑定：「这把 Key 还给别处用吗？」没答成「只给这
     assert.ok((await actions()).includes("confirm_coverage"), answer);
     assert.ok(!(await actions()).includes("review_source"), answer);
   }
+  const association = async () => (await f.rt.channelOnboarding.listAccounts()).accounts.flatMap((account) => account.keys)
+    .flatMap((key) => key.associations).find((item) => item.ruleId === rule.id);
+  assert.equal((await association()).needsCoverageAnswer, true, "上游账单那一条也说要回答");
   // 旧规则（legacy-v3）不要求回答，和每日利润那一行一样：照旧「已绑定」，也不列「去回答」
   const policy = rule.billing_policy;
   rule.billing_policy = "legacy-v3";
   assert.deepEqual(await status(), ["configured", "configured"]);
   assert.ok(!(await actions()).includes("confirm_coverage"));
+  assert.equal((await association()).needsCoverageAnswer, false);
   rule.billing_policy = policy;
   // 固定成本的上游：成本记 0，答什么都不影响利润，照旧是「已绑定」，也不要人去回答
   const supplier = f.rt.store.get(rule.upstream_station_id);

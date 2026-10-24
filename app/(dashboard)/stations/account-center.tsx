@@ -488,7 +488,7 @@ export function useAccountCenter({
           {active
             ? <><dt>开始统计</dt><dd>{formatAt(association.accountingStartMs ?? association.billingEffectiveFromMs, association.timezone)}</dd></>
             : <><dt>解除时间</dt><dd>{formatAt(association.stoppedAt, association.timezone)}</dd></>}
-          <dt>{COVERAGE_QUESTION}</dt><dd>{otherUseText(association.coverageDeclaration)}{active && !fixedCost && association.costCoverage !== "complete" ? `；${COPY.profitPaused}` : ""}</dd>
+          <dt>{COVERAGE_QUESTION}</dt><dd>{otherUseText(association.coverageDeclaration)}{active && association.needsCoverageAnswer ? `；${COPY.profitPaused}` : ""}</dd>
           {fixedCost ? <><dt>上游成本</dt><dd>{FIXED_COST_TEXT}</dd></> : null}
         </dl>
         {conflictBanner(association)}

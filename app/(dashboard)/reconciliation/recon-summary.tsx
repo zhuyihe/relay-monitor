@@ -178,7 +178,7 @@ export function ReconCoverage({ coverage }: { coverage: KnownChannelCoverage | n
               <StatusTag level={status.needsAction ? "warn" : "info"}>{status.label}</StatusTag>
               {tag ? <StatusTag level="warn">{tag}</StatusTag> : null}
             </div>
-            {status.reason ? <span>{status.reason}</span> : null}
+            {status.reason || channel.reason ? <span>{status.reason || channel.reason}</span> : null}
             {channel.actions.length ? <div className="reconciliation-coverage__actions">
               {channel.actions.map((action) => <Button key={action.id} size="small" href={action.href}>{action.label}</Button>)}
             </div> : null}

@@ -4509,6 +4509,22 @@ test("旧规则（legacy-v3）不要求回答 Key 用途：汇总照加、旁边
   assert.equal(result.coverage.channels.find((channel) => channel.channelId === 2).status, "accounted", "渠道算已算进利润");
 });
 
+test("已固定的那天按固定时的结论：之后把 Key 用途改成「不确定」，那天照样已固定、算进汇总、渠道算已算进利润", async (t) => {
+  const f = await completedDayFixture(t);
+  await f.module.refreshDue(Date.now());
+  assert.equal(f.state.ledger.length, 3, "前提：轮询结掉了昨天");
+  const two = f.rows.find((row) => row.id === "rr_two");
+  two.cost_coverage = "unknown";
+  two.source_binding.coverageDeclaration = { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] };
+  f.rt._reconciliationResultCache?.clear?.();
+  const page = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
+  const row = page.results.find((item) => item.rule.id === "rr_two");
+  assert.deepEqual([row.displayStatus.state, row.calculation.profitUsd], ["settled", 1.5], "那一行仍是已固定 $1.50");
+  const totals = page.windowGroups[0].totals;
+  assert.deepEqual([totals.knownIncomeUsd, totals.knownCostUsd, totals.confirmedProfitUsd, totals.attentionRuleIds, totals.readingRuleIds], [7.5, 3, 4.5, [], []], "汇总照加，旁边那句没有话");
+  assert.equal(page.coverage.channels.find((channel) => channel.channelId === 2).status, "accounted", "渠道也算已算进利润");
+});
+
 test("汇总和渠道那句同一个判断：今天有收入、上游用量还是 0 的绑定，汇总不加，渠道也不算已算进利润，旁边那句说它还在读取", async (t) => {
   const f = await completedDayFixture(t, { now: "2026-10-09T02:00:00Z" }); // 上海 10:00
   const prev = globalThis.fetch; // fixture 已经替换过的 fetch：没拦下的请求都交回去
@@ -4878,7 +4894,7 @@ test("U05实际Shanghai/UTC按绝对窗口分组；同绝对已核验标签可�
   assert.deepEqual(compatible.windowGroups[0].timezones, ["Asia/Shanghai", "Asia/Singapore"]);
   const confirmedCount = () => [...f.state.snapshots.values()].filter((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed").length;
   const confirmedBefore = confirmedCount();
-  const today = await f.module.queryRules({ preset: "today" }, { force: true });
+  const today = await f.module.queryRules({ preset: "today" });
   assert.equal(today.windowGroups.length, 1); assert.ok(today.commonSummary, "today 同绝对窗口、覆盖已核验时进入汇总");
   assert.equal(today.windowGroups[0].totals.confirmedProfitUsd, 4.5); assert.equal(today.commonSummary.totals.confirmedProfitUsd, 4.5);
   assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "live"), "today 给出实时利润，但未结束窗口不结算");
