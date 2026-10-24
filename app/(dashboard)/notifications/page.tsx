@@ -11,7 +11,6 @@ import Link from "next/link";
 import { App, Button, Checkbox, Form, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
 import { ALERT_RULES } from "../../../lib/alert-rules";
-import { NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { SECRET_FIELD_TEXT } from "../../../lib/channel-onboarding";
@@ -19,7 +18,7 @@ import { consoleErrorText, consoleFailureText, describeError, failureSentence, r
 import { BALANCE_STATE_TEXT, formatDayKey, formatZonedTime } from "../../../lib/format";
 import { workflowAction } from "../../../lib/workflow-actions";
 import { CountBadge, Panel } from "../../components/panel";
-import { Dirty, ErrorState, PanelSkeleton } from "../../components/data-state";
+import { ErrorState, PanelSkeleton, SaveState } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { StatusText } from "../../components/status";
@@ -77,18 +76,7 @@ function shortLabel(label: string) {
   return /^[A-Za-z]/.test(s) ? ` ${s}` : s;
 }
 
-function sameIds(a: string[] = [], b: string[] = []) {
-  return a.length === b.length && [...a].sort().join("\n") === [...b].sort().join("\n");
-}
 
-// 即时保存的状态：保存中 / 有没保存的输入 / 上次保存时间（按业务时区写）
-function SaveState({ saving, dirty, at, tz }: { saving: boolean; dirty: boolean; at: number; tz: string }) {
-  return (
-    <span aria-live="polite">
-      {saving ? <span className="jy-dirty">{COPY.saving}</span> : dirty ? <Dirty show /> : at ? <span className="jy-dirty">{COPY.savedAt(formatZonedTime(at, tz))}</span> : null}
-    </span>
-  );
-}
 
 type RuleForm = {
   etaUnit: "days" | "hours";
@@ -143,6 +131,9 @@ export default function NotificationsPage() {
   const [ruleErrors, setRuleErrors] = useState<Record<string, string>>({});
   const [rulesSaving, setRulesSaving] = useState(false);
   const [rulesSavedAt, setRulesSavedAt] = useState(0);
+  // 全局余额提醒线（ui-copy-spec §8.3）：放在「余额偏低」那一行，存在 /api/settings，和规则一起标保存状态
+  const [low, setLow] = useState<number | null>(null);
+  const [lowSaving, setLowSaving] = useState(false);
   const [channelsFor, setChannelsFor] = useState<Record<string, string[]>>({});
 
   // 每日日报表单
@@ -150,6 +141,7 @@ export default function NotificationsPage() {
   const [drTime, setDrTime] = useState("09:00");
   const [drChannelIds, setDrChannelIds] = useState<string[]>([]);
   const [drSaving, setDrSaving] = useState(false);
+  const [drSavedAt, setDrSavedAt] = useState(0);
   const [previewing, setPreviewing] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState<ReportResult | null>(null);
@@ -214,6 +206,7 @@ export default function NotificationsPage() {
       if (m.tz) setTz(m.tz);
       setSettings(m.settings);
       syncDrForm(m.settings);
+      setLow(m.settings?.lowBalanceUsd ?? null);
       setMetaLoaded(true);
     } catch (e) {
       setMetaErr(e);
@@ -466,11 +459,33 @@ export default function NotificationsPage() {
       setRulesSaving(false);
     }
   };
+  // 余额提醒线：离开输入框或按回车时存进 /api/settings；存不进去就回到已保存的值
+  const lowDirty = metaLoaded && low !== (settings?.lowBalanceUsd ?? null);
+  const saveLow = async () => {
+    const err = low == null ? `${requiredText(COPY.lowLabel)}${COPY.lowZero}` : low < 0 ? COPY.lowNegative : "";
+    setRuleErrors((e) => ({ ...e, low: err }));
+    if (err) return;
+    setLowSaving(true);
+    try {
+      const r = await api("/api/settings", { method: "PUT", body: { lowBalanceUsd: Number(low) } });
+      setSettings(r.settings);
+      // 服务端可能钳制过（最小 0）；保存途中又改了的输入保持用户正在输入的内容
+      setLow((cur) => (cur === low ? r.settings?.lowBalanceUsd ?? cur : cur));
+      setRulesSavedAt(Date.now());
+    } catch (e) {
+      message.error(consoleFailureText(COPY.saveFailed, e));
+      setLow(settings?.lowBalanceUsd ?? null);
+    } finally {
+      setLowSaving(false);
+    }
+  };
+
   // 离开输入框或按回车时保存；没改动就不发请求。
   // 推迟一拍再读：输入框失焦时才把越界值钳到范围内，要等这次 onChange 渲染完拿到最新值
   const commitRef = useRef<() => void>(null);
   commitRef.current = () => {
     if (rulesDirty) void saveRules();
+    if (lowDirty) void saveLow();
   };
   const commitRules = () => {
     setTimeout(() => commitRef.current?.(), 0);
@@ -479,22 +494,19 @@ export default function NotificationsPage() {
   // ---- 日报 -------------------------------------------------------------------
 
   const drSaved = settings?.dailyReport || {};
-  const drDirty =
-    metaLoaded &&
-    (drEnabled !== !!drSaved.enabled || drTime !== (drSaved.time || "09:00") || !sameIds(drChannelIds, drSaved.channelIds || []));
 
-  const saveDailyReport = async () => {
+  // 日报的开关、发送时间、发到哪里改了就存（ui-copy-spec §8.3）；over 是刚改、还没进 state 的那一项。存不进去就回到已保存的
+  const saveDailyReport = async (over: Partial<{ enabled: boolean; time: string; channelIds: string[] }>) => {
+    const next = { enabled: drEnabled, time: drTime || "09:00", channelIds: drChannelIds, ...over };
     setDrSaving(true);
     try {
-      const r = await api("/api/settings", {
-        method: "PUT",
-        body: { dailyReport: { enabled: drEnabled, time: drTime || "09:00", channelIds: drChannelIds } },
-      });
+      const r = await api("/api/settings", { method: "PUT", body: { dailyReport: next } });
       setSettings(r.settings);
       syncDrForm(r.settings);
-      message.success(COPY.saved);
+      setDrSavedAt(Date.now());
     } catch (e) {
       message.error(consoleFailureText(COPY.saveFailed, e));
+      syncDrForm(settings);
     } finally {
       setDrSaving(false);
     }
@@ -604,13 +616,37 @@ export default function NotificationsPage() {
   const ruleCondition = (ruleKey: string) => {
     const off = !rules[ruleKey];
     if (ruleKey === "onLow")
+      // 提醒线也决定页面上标不标「余额偏低」，所以关掉提醒也照样能改
       return (
-        // 纯文字，不用 flex 容器，否则链接两侧会被 gap 撑开
-        <p className="jy-notifications-note">
-          {COPY.lowBefore}
-          <Link className="jy-link" href="/settings">{NAV_LABELS.settings}</Link>
-          {COPY.lowAfter}
-        </p>
+        <>
+          <div className="jy-notifications-cond">
+            <label htmlFor={`${uid}-low`}>{COPY.lowBefore}</label>
+            <InputNumber
+              id={`${uid}-low`}
+              aria-label={COPY.lowLabel}
+              onBlur={commitRules}
+              onPressEnter={commitRules}
+              min={0}
+              value={low}
+              onChange={(v) => {
+                setLow(v as number | null);
+                setRuleErrors((e) => ({ ...e, low: "" }));
+              }}
+              disabled={!metaLoaded}
+              status={ruleErrors.low ? "error" : undefined}
+              aria-invalid={ruleErrors.low ? true : undefined}
+              aria-describedby={ruleErrors.low ? `${uid}-low-desc ${uid}-low-err` : `${uid}-low-desc`}
+            />
+            <span>{COPY.lowAfter}</span>
+            {ruleErrors.low && (
+              <span className="jy-err" id={`${uid}-low-err`} role="alert">
+                <Sym kind="crit" />
+                {ruleErrors.low}
+              </span>
+            )}
+          </div>
+          <p className="jy-notifications-note" id={`${uid}-low-desc`}>{COPY.lowHint}</p>
+        </>
       );
     if (ruleKey === "onEta")
       return (
@@ -702,7 +738,9 @@ export default function NotificationsPage() {
   const notifFailed = !notifLoaded && !!notifErr;
   // 有提醒或日报要发，却没有能用的通知方式：消息会被悄悄丢掉，放在页首提醒
   const wantsDelivery = RULES.some((r) => rules[r.key]) || !!settings?.dailyReport?.enabled;
-  const noDelivery = notifLoaded && wantsDelivery && !channels.some((c) => c.enabled !== false);
+  // 还没有通知方式时整页只放一件事（ui-copy-spec §8.3）：先加通知方式，提醒规则和日报等加好以后再出现
+  const noChannelsYet = notifLoaded && channels.length === 0;
+  const noDelivery = notifLoaded && !noChannelsYet && wantsDelivery && !channels.some((c) => c.enabled !== false);
   const showChannels = () => {
     document.querySelector(".jy-notifications-channels")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
@@ -713,29 +751,23 @@ export default function NotificationsPage() {
         <div className="jy-banner jy-banner--crit" role="alert">
           <Sym kind="crit" />
           <div className="jy-notifications-banner-body">
-            <b>{channels.length ? COPY.noDeliveryOff : COPY.noDeliveryNone}</b>
-            <p className="jy-caption">{channels.length ? COPY.noDeliveryOffHint : COPY.noDeliveryNoneHint}</p>
+            <b>{COPY.noDeliveryOff}</b>
+            <p className="jy-caption">{COPY.noDeliveryOffHint}</p>
           </div>
-          {channels.length ? (
-            <Button size="small" onClick={showChannels}>
-              {COPY.showChannels}
-            </Button>
-          ) : (
-            <Button size="small" type="primary" icon={<Icon name="plus" />} onClick={() => openChModal(null)}>
-              {COPY.add}
-            </Button>
-          )}
+          <Button size="small" onClick={showChannels}>
+            {COPY.showChannels}
+          </Button>
         </div>
       ) : null}
       {/* 提醒规则 */}
-      {notifFailed ? (
+      {noChannelsYet ? null : notifFailed ? (
         <Panel title={COPY.rules}>
           <ErrorState what={COPY.rulesFailed} error={notifErr} onRetry={loadNotif} />
         </Panel>
       ) : (
         <Panel
           title={COPY.rules}
-          badge={<SaveState saving={rulesSaving} dirty={rulesDirty} at={rulesSavedAt} tz={tz} />}
+          badge={<SaveState saving={rulesSaving || lowSaving} dirty={rulesDirty || lowDirty} at={rulesSavedAt} tz={tz} />}
           caption={COPY.rulesCaption}
           body="flush"
         >
@@ -948,14 +980,14 @@ export default function NotificationsPage() {
       )}
 
       {/* 日报：发送时间按业务时区，和每日利润、日汇总同一天界（§6 不另注时区） */}
-      {!metaLoaded && metaLoading ? (
+      {noChannelsYet ? null : !metaLoaded && metaLoading ? (
         <PanelSkeleton title={COPY.report} lines={3} />
       ) : !metaLoaded ? (
         <Panel title={COPY.report}>
           <ErrorState what={COPY.reportFailed} error={metaErr} onRetry={loadMeta} />
         </Panel>
       ) : (
-        <Panel title={COPY.report} badge={<Dirty show={drDirty} />} caption={COPY.reportCaption}>
+        <Panel title={COPY.report} badge={<SaveState saving={drSaving} dirty={false} at={drSavedAt} tz={tz} />} caption={COPY.reportCaption}>
           <Form layout="vertical" requiredMark={false} component="div" className="jy-form jy-notifications-dr">
             <Form.Item label={COPY.reportEnable} htmlFor={`${uid}-dr-enabled`} extra={COPY.reportEnableHint}>
               <Switch
@@ -963,7 +995,10 @@ export default function NotificationsPage() {
                 checked={drEnabled}
                 checkedChildren={COPY.on}
                 unCheckedChildren={COPY.off}
-                onChange={setDrEnabled}
+                onChange={(v) => {
+                  setDrEnabled(v);
+                  void saveDailyReport({ enabled: v });
+                }}
               />
             </Form.Item>
             <div className="jy-two">
@@ -974,7 +1009,11 @@ export default function NotificationsPage() {
                   allowClear={false}
                   disabled={!drEnabled}
                   value={drTime ? dayjs(drTime, "HH:mm") : null}
-                  onChange={(d) => setDrTime(d ? d.format("HH:mm") : "")}
+                  onChange={(d) => {
+                    const time = d ? d.format("HH:mm") : "09:00";
+                    setDrTime(time);
+                    void saveDailyReport({ time });
+                  }}
                 />
               </Form.Item>
               <Form.Item
@@ -987,7 +1026,10 @@ export default function NotificationsPage() {
                       className="jy-notifications-checks"
                       value={drChannelIds}
                       disabled={!drEnabled}
-                      onChange={(ids) => setDrChannelIds(ids as string[])}
+                      onChange={(ids) => {
+                        setDrChannelIds(ids as string[]);
+                        void saveDailyReport({ channelIds: ids as string[] });
+                      }}
                       options={channels.map((c) => ({ value: c.id, label: c.name }))}
                     />
                   </div>
@@ -998,9 +1040,6 @@ export default function NotificationsPage() {
             </div>
           </Form>
           <div className="jy-notifications-actions">
-            <Button type="primary" loading={drSaving} onClick={saveDailyReport}>
-              {COPY.save}
-            </Button>
             <Button loading={previewing} onClick={previewReport}>
               {COPY.reportPreview}
             </Button>
@@ -1008,11 +1047,7 @@ export default function NotificationsPage() {
               {COPY.reportSend}
             </Button>
             <span className="jy-caption">
-              {drDirty
-                ? COPY.reportSendHint
-                : drSaved.lastSent
-                  ? COPY.reportLastSent(formatDayKey(drSaved.lastSent, tz))
-                  : COPY.reportIdleHint}
+              {drSaved.lastSent ? COPY.reportLastSent(formatDayKey(drSaved.lastSent, tz)) : COPY.reportIdleHint}
             </span>
           </div>
           <div aria-live="polite">

@@ -3,7 +3,6 @@
 export const COPY = Object.freeze({
   // 区块名（§11：告警阈值 → 余额提醒线，历史数据留存 → 历史数据保留）
   refresh: "刷新与数据",
-  lowLine: "余额提醒线",
   retention: "历史数据保留",
   account: "账户安全",
   about: "关于",
@@ -18,12 +17,9 @@ export const COPY = Object.freeze({
   intervalHint: "系统每隔这么久读一次各上游的余额，最短 10 秒",
   intervalMin: "自动刷新间隔最短 10 秒",
   seconds: "秒",
-  // 余额提醒线（中间是去告警中心的链接）
-  lowLineHintBefore:
-    "余额低于这个数时标「余额偏低」。按各上游自己的余额单位比（设了汇率的按美元额度），不换算；上游单独填了提醒线的，按上游的。提醒的开关和通知方式在",
-  lowLineHintAfter: "里设置",
-  lowLineZero: "；不需要余额偏低的提醒可以填 0",
-  lowLineNegative: "余额提醒线不能小于 0",
+  // 余额提醒线挪到告警中心「余额偏低」那一行（ui-copy-spec §8.3），这里一句链过去（中间是链接）
+  lowLineMovedBefore: "余额提醒线在",
+  lowLineMovedAfter: "「余额偏低」那一行里设。",
   // 历史数据保留
   keep: "保留多久",
   keepForever: "一直保留（默认）",
@@ -32,7 +28,7 @@ export const COPY = Object.freeze({
   keepCustomLabel: "自定义保留天数",
   days: "天",
   keepHint: "保留的是系统定时读到的余额记录，不是每次调用的明细；一直保留会越占越多空间。",
-  keepShorter: "缩短保留天数会删掉更早的记录，保存前会先告诉你要删多少条",
+  keepShorter: "缩短保留天数会删掉更早的记录，删之前会先告诉你要删多少条",
   policy: (days: number | null | undefined) => (days == null ? "一直保留" : `保留 ${days} 天`),
   confirmTitle: "缩短历史数据的保留天数？",
   confirmBody: "早于新期限的余额记录会被删掉，删掉后在控制台里找不回来。",

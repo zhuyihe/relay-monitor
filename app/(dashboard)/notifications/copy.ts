@@ -16,8 +16,6 @@ export const COPY = Object.freeze({
   saved: "已保存",
   added: "已添加",
   deleted: "已删除",
-  saving: "保存中…",
-  savedAt: (time: string) => `已保存 ${time}`,
   // 提醒规则
   recover: "恢复正常",
   ruleDesc: Object.freeze({
@@ -36,9 +34,13 @@ export const COPY = Object.freeze({
   ruleTo: (title: string) => `「${title}」发到哪些通知方式`,
   allChannels: "所有启用的通知方式",
   noChannels: "还没有通知方式",
-  // 余额偏低：提醒线在系统设置里（中间是链接）
-  lowBefore: "提醒线用「",
-  lowAfter: "」里的余额提醒线，单个上游可以另填",
+  // 余额偏低：全局余额提醒线就在这一行（ui-copy-spec §8.3）；币种怎么标 G 再定
+  lowBefore: "余额低于",
+  lowAfter: "时提醒",
+  lowLabel: "余额提醒线",
+  lowHint: "按各上游自己的余额单位比，不换算；单个上游可以在编辑上游里另填。这条线也决定页面上标不标「余额偏低」，关掉提醒也照样标。",
+  lowZero: "；不需要余额偏低的提醒可以填 0",
+  lowNegative: "余额提醒线不能小于 0",
   etaBefore: "可用天数在",
   etaAfter: "以内时提醒",
   etaUnit: "提醒天数的单位",
@@ -86,11 +88,9 @@ export const COPY = Object.freeze({
   cancel: "取消",
   sentTo: (name: string) => `已发送到「${name}」`,
   noDeliveryOff: "通知方式都停用了，提醒发不出去",
-  noDeliveryNone: "还没有通知方式，提醒发不出去",
   noDeliveryOffHint: "至少启用一个通知方式，已打开的提醒和日报才会发出。",
-  noDeliveryNoneHint: "至少添加一个通知方式，已打开的提醒和日报才会发出。",
   showChannels: "查看通知方式",
-  emptyHint: "添加至少一个通知方式，提醒和日报才能发出去。可以选这些：",
+  emptyHint: "先加一个通知方式，提醒和日报才发得出去。加好以后，余额偏低、余额用完、读不到余额、恢复正常、快用完都会发到这里，提醒规则和日报在这一页再调。可以选这些：",
   addType: (label: string) => `添加${label}`,
   // 通知方式弹窗
   editTitle: "编辑通知方式",
@@ -118,7 +118,6 @@ export const COPY = Object.freeze({
   reportNoChannels: "先添加通知方式",
   reportPreview: "预览",
   reportSend: "立即发送",
-  reportSendHint: "「立即发送」按已保存的设置发",
   reportLastSent: (day: string) => `上次定时发送：${day}`,
   reportIdleHint: "预览用的是现在的数据；立即发送不影响当天定时发的那一份",
   reportSent: (ok: number, total: number) => `日报已发送：${total} 个通知方式里 ${ok} 个发出去了`,

@@ -1,10 +1,10 @@
 "use client";
-// 系统设置：刷新与数据、余额提醒线、历史数据保留、账户安全、关于。
-// 每组单独保存；PUT /api/settings 的请求体仍是原来的三个字段，
-// 非本组字段填"已保存的值"，服务端对未变化的值不做任何事（间隔相同不重启调度、保留天数不缩短不清理）。
+// 系统设置：刷新与数据、历史数据保留、账户安全、关于（余额提醒线在告警中心「余额偏低」那一行，ui-copy-spec §8.3）。
+// 刷新间隔、保留天数改了马上保存（数字框离开或回车时、下拉一改就存），PUT /api/settings 只带这一组的字段；
+// 修改密码要原密码，照旧按按钮。
 // 只在本页出现的话都在同目录的 copy.ts 里；报错按码说（改密码时按码把报错放到对应的输入框），日期时间按业务时区写
 import "../../styles/pages/settings.css";
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import Link from "next/link";
 import { App, Button, Input, InputNumber, Select } from "antd";
@@ -14,14 +14,14 @@ import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { consoleFailureText, describeError, errorText, requiredText } from "../../../lib/error-copy";
 import { EMPTY, formatInt, formatZonedDateTime } from "../../../lib/format";
 import { Panel } from "../../components/panel";
-import { Dirty, ErrorState, PanelSkeleton } from "../../components/data-state";
+import { Dirty, ErrorState, PanelSkeleton, SaveState } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Sym } from "../../components/icons";
 import { COPY } from "./copy";
 
 const RETENTION_PRESETS = [30, 90, 180, 365];
 
-type Group = "refresh" | "threshold" | "retention";
+type Group = "refresh" | "retention";
 // "all"：首次读取/重试，覆盖全部输入；某一组：只回填该组；"none"：只更新已保存值和历史概况
 type ApplyScope = "all" | "none" | Group;
 
@@ -83,7 +83,6 @@ export default function SettingsPage() {
   const uid = useId();
   const ids = {
     interval: `${uid}-interval`,
-    low: `${uid}-low`,
     retention: `${uid}-retention`,
     username: `${uid}-username`,
     pwOld: `${uid}-pw-old`,
@@ -94,8 +93,6 @@ export default function SettingsPage() {
   // 运行设置：当前输入值 + 已保存值（用于"未保存"标记和其他组的请求体）
   const [interval, setIntervalSec] = useState<number | null>(null);
   const [savedInterval, setSavedInterval] = useState<number | null>(null);
-  const [low, setLow] = useState<number | null>(null);
-  const [savedLow, setSavedLow] = useState<number | null>(null);
   const [historyRetentionDays, setHistoryRetentionDays] = useState<number | null>(null);
   const [savedRetentionDays, setSavedRetentionDays] = useState<number | null>(null);
   const [customRetention, setCustomRetention] = useState(false);
@@ -109,7 +106,9 @@ export default function SettingsPage() {
   const [settingsError, setSettingsError] = useState<unknown>(null);
   const [previewingCleanup, setPreviewingCleanup] = useState(false);
   const [savingGroup, setSavingGroup] = useState<Group | null>(null);
-  const [fieldErrors, setFieldErrors] = useState<{ interval?: string; low?: string }>({});
+  const [fieldErrors, setFieldErrors] = useState<{ interval?: string }>({});
+  // 每组上次存好的时间：标题旁写「已保存 14:30」
+  const [savedAt, setSavedAt] = useState<Record<Group, number>>({ refresh: 0, retention: 0 });
 
   // 账户（/api/auth/me：用户名 + 是否仍是默认密码）
   const [me, setMe] = useState<{ username: string; isDefaultPassword: boolean } | null>(null);
@@ -131,11 +130,9 @@ export default function SettingsPage() {
     if (nextTz) setTz(nextTz);
     const retention = next.historyRetentionDays == null ? null : Number(next.historyRetentionDays);
     setSavedInterval(next.refreshIntervalSec);
-    setSavedLow(next.lowBalanceUsd);
     setSavedRetentionDays(retention);
     // 只回填本次保存的那一组，别的组里还没保存的输入保持不动
     if (scope === "all" || scope === "refresh") setIntervalSec(next.refreshIntervalSec);
-    if (scope === "all" || scope === "threshold") setLow(next.lowBalanceUsd);
     if (scope === "all" || scope === "retention") {
       setHistoryRetentionDays(retention);
       setCustomRetention(retention != null && !RETENTION_PRESETS.includes(retention));
@@ -196,10 +193,12 @@ export default function SettingsPage() {
     return RETENTION_PRESETS.includes(historyRetentionDays) ? String(historyRetentionDays) : "custom";
   }, [historyRetentionDays]);
 
+  // 下拉一改就存；选「自定义…」时先出天数框，离开天数框或按回车时再存
   const setRetentionChoice = (value: string) => {
     if (value === "permanent") {
       setHistoryRetentionDays(null);
       setCustomRetention(false);
+      void onSaveRetention(null);
       return;
     }
     if (value === "custom") {
@@ -209,11 +208,11 @@ export default function SettingsPage() {
     }
     setCustomRetention(false);
     setHistoryRetentionDays(Number(value));
+    void onSaveRetention(Number(value));
   };
 
   const busy = savingGroup !== null || previewingCleanup;
   const refreshDirty = settingsLoaded && interval !== savedInterval;
-  const lowDirty = settingsLoaded && low !== savedLow;
   const retentionDirty = settingsLoaded && historyRetentionDays !== savedRetentionDays;
   const retentionShortening = historyRetentionDays != null && (
     savedRetentionDays == null || historyRetentionDays < savedRetentionDays
@@ -221,28 +220,37 @@ export default function SettingsPage() {
   // 用户名输入框默认留空（留空即不修改），填了不同的名字才算有改动
   const accountDirty = !!(pwOld || pwNew || pwConfirm) || (!!username.trim() && username.trim() !== (me?.username || ""));
 
-  // 保存某一组。保存期间锁住所有保存按钮：各组请求体里带着别组的"已保存值"，并发会互相覆盖。
+  // 保存某一组：请求体只带这一组的字段（服务端缺哪项就不动哪项）。存不进去时这一组回到已保存的值（§8.3）
   const persistSettings = async (group: Group, confirmRetentionCleanup = false, retentionDays = historyRetentionDays) => {
     setSavingGroup(group);
     try {
       const r = await api("/api/settings", {
         method: "PUT",
-        body: {
-          refreshIntervalSec: Number(group === "refresh" ? interval : savedInterval),
-          lowBalanceUsd: Number(group === "threshold" ? low : savedLow),
-          historyRetentionDays: group === "retention" ? retentionDays : savedRetentionDays,
-          ...(confirmRetentionCleanup ? { confirmRetentionCleanup: true } : {}),
-        },
+        body: group === "refresh"
+          ? { refreshIntervalSec: Number(interval) }
+          : { historyRetentionDays: retentionDays, ...(confirmRetentionCleanup ? { confirmRetentionCleanup: true } : {}) },
       });
-      // 服务端可能钳制过（间隔最小 10 秒、提醒线最小 0），以返回值为准回显
+      // 服务端可能钳制过（间隔最小 10 秒），以返回值为准回显
       applySettings(r.settings, r.history, group, r.tz);
       if (!r.history) void loadSettings("none");
-      message.success(COPY.saved);
+      setSavedAt((at) => ({ ...at, [group]: Date.now() }));
     } catch (e) {
       message.error(consoleFailureText(COPY.saveFailed, e));
+      revert(group);
     } finally {
       setSavingGroup(null);
     }
+  };
+
+  // 回到已保存的值（存不进去、取消缩短保留天数时）
+  const revert = (group: Group) => {
+    if (group === "refresh") {
+      setIntervalSec(savedInterval);
+      setFieldErrors((prev) => ({ ...prev, interval: undefined }));
+      return;
+    }
+    setHistoryRetentionDays(savedRetentionDays);
+    setCustomRetention(savedRetentionDays != null && !RETENTION_PRESETS.includes(savedRetentionDays));
   };
 
   const ensureLoaded = () => {
@@ -251,31 +259,33 @@ export default function SettingsPage() {
     return false;
   };
 
-  const onSaveRefresh = () => {
-    if (!ensureLoaded()) return;
+  // 离开输入框或按回车时保存；没改就不存。推迟一拍再读，等输入框把越界值钳好
+  const onCommitRefresh = () => {
+    window.setTimeout(() => commitRefreshRef.current(), 0);
+  };
+  const commitRefreshRef = useRef<() => void>(() => {});
+  commitRefreshRef.current = () => {
+    if (!settingsLoaded || !refreshDirty || savingGroup) return;
     const err = interval == null ? requiredText(COPY.interval) : interval < 10 ? COPY.intervalMin : undefined;
     setFieldErrors((prev) => ({ ...prev, interval: err }));
     if (err) return focusById(ids.interval);
     void persistSettings("refresh");
   };
 
-  const onSaveThreshold = () => {
-    if (!ensureLoaded()) return;
-    const err = low == null ? `${requiredText(COPY.lowLine)}${COPY.lowLineZero}` : low < 0 ? COPY.lowLineNegative : undefined;
-    setFieldErrors((prev) => ({ ...prev, low: err }));
-    if (err) return focusById(ids.low);
-    void persistSettings("threshold");
+  // 自定义天数：离开天数框或按回车时存
+  const commitRetentionRef = useRef<() => void>(() => {});
+  commitRetentionRef.current = () => {
+    if (customRetention && retentionDirty && !busy) void onSaveRetention(historyRetentionDays);
   };
 
-  // 缩短保留天数时，先预览会删多少，再由确认操作明确同意不可恢复的删除。
-  const onSaveRetention = async () => {
-    if (!ensureLoaded()) return;
-    const nextRetention = historyRetentionDays;
+  // 缩短保留天数时，先预览会删多少，再由确认操作明确同意不可恢复的删除；取消就回到原来的天数。
+  const onSaveRetention = async (nextRetention: number | null) => {
+    if (!ensureLoaded() || nextRetention === savedRetentionDays) return;
     const isShortening = nextRetention != null && (
       savedRetentionDays == null || nextRetention < savedRetentionDays
     );
     if (!isShortening) {
-      void persistSettings("retention");
+      void persistSettings("retention", false, nextRetention);
       return;
     }
 
@@ -302,9 +312,11 @@ export default function SettingsPage() {
         okButtonProps: { danger: true },
         cancelText: COPY.cancel,
         onOk: () => persistSettings("retention", true, nextRetention),
+        onCancel: () => revert("retention"),
       });
     } catch (e) {
       message.error(consoleFailureText(COPY.previewFailed, e));
+      revert("retention");
     } finally {
       setPreviewingCleanup(false);
     }
@@ -487,10 +499,7 @@ export default function SettingsPage() {
 
       {!meLoaded ? (
         <>
-          <div className="jy-grid-2">
-            <PanelSkeleton title={COPY.refresh} lines={2} />
-            <PanelSkeleton title={COPY.lowLine} lines={2} />
-          </div>
+          <PanelSkeleton title={COPY.refresh} lines={2} />
           <PanelSkeleton title={COPY.retention} lines={5} />
         </>
       ) : showOthers ? (
@@ -501,72 +510,40 @@ export default function SettingsPage() {
           </Panel>
         ) : !settingsLoaded ? (
           <>
-            <div className="jy-grid-2">
-              <PanelSkeleton title={COPY.refresh} lines={2} />
-              <PanelSkeleton title={COPY.lowLine} lines={2} />
-            </div>
+            <PanelSkeleton title={COPY.refresh} lines={2} />
             <PanelSkeleton title={COPY.retention} lines={5} />
           </>
         ) : (
           <>
-            <div className="jy-grid-2">
-              <Panel title={COPY.refresh} badge={<Dirty show={refreshDirty} />}>
-                <div className="jy-field jy-settings-field">
-                  <label htmlFor={ids.interval}>{COPY.interval}</label>
-                  <InputNumber
-                    id={ids.interval}
-                    value={interval}
-                    onChange={(v) => {
-                      setIntervalSec(v);
-                      if (fieldErrors.interval) setFieldErrors((p) => ({ ...p, interval: undefined }));
-                    }}
-                    min={10}
-                    suffix={COPY.seconds}
-                    status={fieldErrors.interval ? "error" : undefined}
-                    aria-invalid={!!fieldErrors.interval}
-                    aria-describedby={`${ids.interval}-desc${fieldErrors.interval ? ` ${ids.interval}-err` : ""}`}
-                  />
-                  <span className="jy-caption" id={`${ids.interval}-desc`}>{COPY.intervalHint}</span>
-                  <FieldError id={`${ids.interval}-err`} text={fieldErrors.interval} />
-                </div>
-                <div className="jy-settings-actions">
-                  <Button type="primary" onClick={onSaveRefresh} loading={savingGroup === "refresh"} disabled={busy && savingGroup !== "refresh"}>
-                    {COPY.save}
-                  </Button>
-                </div>
-              </Panel>
+            <Panel title={COPY.refresh} badge={<SaveState saving={savingGroup === "refresh"} dirty={refreshDirty} at={savedAt.refresh} tz={tz} />}>
+              <div className="jy-field jy-settings-field">
+                <label htmlFor={ids.interval}>{COPY.interval}</label>
+                <InputNumber
+                  id={ids.interval}
+                  value={interval}
+                  onChange={(v) => {
+                    setIntervalSec(v);
+                    if (fieldErrors.interval) setFieldErrors((p) => ({ ...p, interval: undefined }));
+                  }}
+                  onBlur={onCommitRefresh}
+                  onPressEnter={onCommitRefresh}
+                  min={10}
+                  suffix={COPY.seconds}
+                  status={fieldErrors.interval ? "error" : undefined}
+                  aria-invalid={!!fieldErrors.interval}
+                  aria-describedby={`${ids.interval}-desc${fieldErrors.interval ? ` ${ids.interval}-err` : ""}`}
+                />
+                <span className="jy-caption" id={`${ids.interval}-desc`}>{COPY.intervalHint}</span>
+                <FieldError id={`${ids.interval}-err`} text={fieldErrors.interval} />
+              </div>
+              <p className="jy-caption">
+                {COPY.lowLineMovedBefore}
+                <Link className="jy-link" href="/notifications">{NAV_LABELS.notifications}</Link>
+                {COPY.lowLineMovedAfter}
+              </p>
+            </Panel>
 
-              <Panel title={COPY.lowLine} badge={<Dirty show={lowDirty} />}>
-                <div className="jy-field jy-settings-field">
-                  <label htmlFor={ids.low}>{COPY.lowLine}</label>
-                  <InputNumber
-                    id={ids.low}
-                    value={low}
-                    onChange={(v) => {
-                      setLow(v);
-                      if (fieldErrors.low) setFieldErrors((p) => ({ ...p, low: undefined }));
-                    }}
-                    min={0}
-                    status={fieldErrors.low ? "error" : undefined}
-                    aria-invalid={!!fieldErrors.low}
-                    aria-describedby={`${ids.low}-desc${fieldErrors.low ? ` ${ids.low}-err` : ""}`}
-                  />
-                  <span className="jy-caption" id={`${ids.low}-desc`}>
-                    {COPY.lowLineHintBefore}
-                    <Link className="jy-link" href="/notifications">{NAV_LABELS.notifications}</Link>
-                    {COPY.lowLineHintAfter}
-                  </span>
-                  <FieldError id={`${ids.low}-err`} text={fieldErrors.low} />
-                </div>
-                <div className="jy-settings-actions">
-                  <Button type="primary" onClick={onSaveThreshold} loading={savingGroup === "threshold"} disabled={busy && savingGroup !== "threshold"}>
-                    {COPY.save}
-                  </Button>
-                </div>
-              </Panel>
-            </div>
-
-            <Panel title={COPY.retention} badge={<Dirty show={retentionDirty} />}>
+            <Panel title={COPY.retention} badge={<SaveState saving={savingGroup === "retention" || previewingCleanup} dirty={retentionDirty} at={savedAt.retention} tz={tz} />}>
               {settingsError ? (
                 // 已有数据时重新读取失败：保留当前内容，只在本组提示
                 <div className="jy-settings-inline-error">
@@ -595,6 +572,8 @@ export default function SettingsPage() {
                       onChange={(value) => {
                         if (value != null) setHistoryRetentionDays(Number(value));
                       }}
+                      onBlur={() => window.setTimeout(() => commitRetentionRef.current(), 0)}
+                      onPressEnter={() => window.setTimeout(() => commitRetentionRef.current(), 0)}
                       disabled={!settingsLoaded || busy}
                       min={1}
                       precision={0}
@@ -611,17 +590,6 @@ export default function SettingsPage() {
                     {COPY.keepShorter}
                   </span>
                 ) : null}
-              </div>
-              {/* 保存按钮紧跟保留天数，下面的历史概况、清理记录只是参考信息 */}
-              <div className="jy-settings-actions">
-                <Button
-                  type="primary"
-                  onClick={() => void onSaveRetention()}
-                  loading={savingGroup === "retention" || previewingCleanup}
-                  disabled={!settingsLoaded || (busy && savingGroup !== "retention" && !previewingCleanup)}
-                >
-                  {COPY.save}
-                </Button>
               </div>
 
               <div className="jy-settings-health">
