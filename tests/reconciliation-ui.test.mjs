@@ -6,14 +6,15 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { after } from "node:test";
 import assert from "node:assert/strict";
-import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationNotCountedCostText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
+import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationDisplayStatus, reconciliationNotCountedText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
 import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
 import { ADMIN_UNMARKED, BALANCE_STATE_TEXT, EMPTY, FIXED_COST_TEXT, INCOME_UNREAD, MINUS, NO_UPSTREAM_TEXT, OWN_STATION_UNSET, OWN_STATION_UNSET_TITLE, RANGE_TEXT, formatDayKey, RATE_UNSET_PARITY, RATE_UNSET_USD, SELL_PRICE_UNSET, formatAsOf, formatCompact, formatDayZone, formatRate, formatSellPrice, formatZonedDateTime, formatZonedTime, formatZonedWindow, formatMoney, refreshFailedText } from "../lib/format.js";
-import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, fillIssueCopy, reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
+import { COVERAGE_ANSWERS, COVERAGE_QUESTION, INCOMPLETE_DAY_TEXT, coverageNeedsAnswer, fillIssueCopy, reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../lib/workflow-actions.js";
 import { CONSOLE_UNREACHABLE, ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText } from "../lib/error-copy.js";
 import { NAV_LABELS, STATION_TABS } from "../lib/brand.js";
 import { CHANNEL_TYPES } from "../lib/notify.js";
+import { costBasisOf } from "../lib/profit.js";
 // 成本估算、用量分析页上的字（页面文件不能导出，放在同目录的 copy.ts；node 直接读 .ts）
 import { COPY as ANALYTICS_COPY } from "../app/(dashboard)/analytics/copy.ts";
 import { COPY as USAGE_COPY } from "../app/(dashboard)/usage/copy.ts";
@@ -63,7 +64,7 @@ const amountBasis = { id: "channel-billing-usd-v3", currency: "USD", billingSour
 
 function rule(id, name, amount, resultWindow = window) {
   return {
-    rule: { id, tokenName: name, upstreamStationId: "upstream-1", ownStationId: "own-1", ownSource: billingSource, enabled: true, costCoverage: "complete", coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] }, fixedGroup: "default", channels: [{ channelId: Number(id.slice(-1)), name: `Channel ${id}` }] },
+    rule: { id, tokenName: name, upstreamStationId: "upstream-1", ownStationId: "own-1", ownSource: billingSource, enabled: true, billingPolicy: "immediate", costCoverage: "complete", coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] }, fixedGroup: "default", channels: [{ channelId: Number(id.slice(-1)), name: `Channel ${id}` }] },
     ownSource: billingSource, amountBasis, billingTimezone: { state: "verified", timezone: resultWindow.timezone }, scope: { scopeVersion: 1, billingEffectiveFromMs: 1791302400000, firstFullDayStartMs: 1791302400000, firstQueryableAtMs: 1791388800000 }, actions: [],
     requestedWindow: resultWindow,
     window: resultWindow,
@@ -347,6 +348,18 @@ async function assertGroupedSummary(page) {
   const empty = page.getByRole("region", { name: "汇总", exact: true }).locator(".reconciliation-summary__empty");
   await empty.getByText(GROUPED_CAPTION, { exact: true }).waitFor(); assert.equal(await empty.textContent(), `${EMPTY}${GROUPED_CAPTION}`);
 }
+// 「今天」读取中的三条，照服务端真能给出的样子：上游用量还是 0，健康码 UPSTREAM_EMPTY_WITH_SALES（读取类），毛利空、
+// 差额是收入减 0；displayStatus 按固定时刻 10月9日 11:00（上海）算好放进去，和服务端一样，不随跑测试的日期变
+function todayReading() {
+  const rows = dailyRows({ ...window, preset: "today", startMs: window.endMs, endMs: Date.parse("2026-10-09T03:00:00Z") });
+  for (const row of rows) {
+    Object.assign(row.upstream, { amountUsd: 0, knownAmountUsd: 0, countedAmountUsd: 0 });
+    row.calculation = { profitUsd: null, marginRate: null, riskDifferenceUsd: row.downstream.amountUsd };
+    row.health = { code: "UPSTREAM_EMPTY_WITH_SALES", issues: [{ code: "UPSTREAM_EMPTY_WITH_SALES", scope: "segment" }] };
+    row.displayStatus = reconciliationDisplayStatus(row, { now: Date.parse("2026-10-09T03:00:00Z") });
+  }
+  return rows;
+}
 const windowCaption = async (page) => { const caption = page.locator(".reconciliation-window"); await caption.waitFor(); return caption.innerText(); };
 
 test("daily billing keeps absolute Shanghai and UTC groups separate and combines only verified equal windows", async (t) => {
@@ -358,10 +371,13 @@ test("daily billing keeps absolute Shanghai and UTC groups separate and combines
   await utc.locator(".ant-collapse-header").focus(); await page.keyboard.press("Enter"); await summaryMetric(utc, "收入").getByText("$2.50", { exact: true }).waitFor(); await summaryMetric(utc, "上游成本").getByText("$1.00", { exact: true }).waitFor();
   await shanghai.locator(".ant-collapse-header").focus(); await page.keyboard.press("Enter"); await summaryMetric(shanghai, "收入").getByText("$5.00", { exact: true }).waitFor();
   const combined = dailyRows(); combined[1] = rule("rule-2", "Rule B", 2.5, { ...window, timezone: "Asia/Singapore" });
-  const next = await openDailyPage(t, { data: dailyResponse(combined), query(route, body) { assert.equal(body.preset, "today"); const today = dailyRows({ ...window, preset: "today", startMs: window.endMs, endMs: Date.parse("2026-10-09T03:00:00Z") }); for (const row of today) row.calculation = { profitUsd: null, marginRate: null, riskDifferenceUsd: 1.5 }; return fulfill(route, dailyResponse(today)); } });
+  const next = await openDailyPage(t, { data: dailyResponse(combined), query(route, body) { assert.equal(body.preset, "today"); const today = todayReading(); return fulfill(route, dailyResponse(today)); } });
   // 起止相同、时区都核实过的两种时区合成一个汇总，不再分组
   const nextSummary = next.page.getByRole("region", { name: "汇总", exact: true }); await summaryMetric(nextSummary, "收入").getByText("$7.50", { exact: true }).waitFor(); assert.equal(await next.page.locator(".reconciliation-window-groups").count(), 0); assert.equal(await nextSummary.locator(".reconciliation-summary__empty").count(), 0);
-  await next.page.getByRole("group", { name: "时间范围" }).getByRole("button", { name: "今天", exact: true }).filter({ visible: true }).click(); const todaySummary = next.page.getByRole("region", { name: "汇总", exact: true }); await summaryMetric(todaySummary, "毛利").getByText(EMPTY, { exact: true }).waitFor(); await summaryMetric(todaySummary, "收入").getByText("$7.50", { exact: true }).waitFor(); assert.equal(next.queries[0].preset, "today");
+  // 「今天」三条都还在读取（上游用量还是 0，服务端写 UPSTREAM_EMPTY_WITH_SALES、毛利空）：汇总三个数都不加，写「—」，旁边一句说 3 条还在读取
+  await next.page.getByRole("group", { name: "时间范围" }).getByRole("button", { name: "今天", exact: true }).filter({ visible: true }).click(); const todaySummary = next.page.getByRole("region", { name: "汇总", exact: true }); await summaryMetric(todaySummary, "毛利").getByText(EMPTY, { exact: true }).waitFor(); await summaryMetric(todaySummary, "收入").getByText(EMPTY, { exact: true }).waitFor(); assert.equal(next.queries[0].preset, "today");
+  const reading = todayReading();
+  await todaySummary.getByText(reconciliationNotCountedText({ attentionRuleIds: [], readingRuleIds: reading.map((row) => row.rule.id) }, reading[0].requestedWindow || reading[0].window), { exact: true }).waitFor();
 });
 
 test("daily row retry uses one selected query then reloads full GET before showing current aggregates", async (t) => {
@@ -410,13 +426,13 @@ test("daily coverage retains disabled and missing known channels and zero active
   assert.equal(await page.getByRole("region", { name: "汇总", exact: true }).locator(".reconciliation-summary__empty").textContent(), EMPTY);
 });
 
-test("daily duplicate sales and shared Key costs use server totals while raw row evidence remains visible", async (t) => {
+test("daily summary adds only computed bindings: the duplicate pair needs attention and is left out, raw row evidence remains visible", async (t) => {
   const rows = dailyRows(); rows[1].rule.channels = structuredClone(rows[0].rule.channels); rows[1].downstream.channels = structuredClone(rows[0].downstream.channels); rows[1].upstream.countedAmountUsd = null; rows[1].upstream.ownershipState = "duplicate";
   for (const row of rows.slice(0, 2)) { row.calculation = { profitUsd: null, riskDifferenceUsd: 1.5, marginRate: null }; row.health = { code: "DUPLICATE_CHANNEL_ASSIGNMENT", issues: [{ code: "DUPLICATE_CHANNEL_ASSIGNMENT", detail: "rule-1、rule-2 重复归属" }] }; }
-  // 汇总按服务端合计：重复的渠道收入只算一次，没算进来的那份上游成本不加，毛利只加能算出来的
-  const { page } = await openDailyPage(t, { data: dailyResponse(rows) }); const summary = page.getByRole("region", { name: "汇总", exact: true }); await summaryMetric(summary, "收入").getByText("$5.00", { exact: true }).waitFor(); await summaryMetric(summary, "上游成本").getByText("$2.00", { exact: true }).waitFor(); await summaryMetric(summary, "毛利").getByText("$1.50", { exact: true }).waitFor();
-  // 有共同汇总时不列分组，没算进来的那份上游成本在汇总里点名
-  await summary.getByText(reconciliationNotCountedCostText(["rule-2"], rows), { exact: true }).waitFor();
+  // 汇总只加算出来的绑定（§4）：重复的两条是需处理，收入、上游成本、毛利都不加，只剩 Rule C，$2.50 − $1.00 = $1.50
+  const { page } = await openDailyPage(t, { data: dailyResponse(rows) }); const summary = page.getByRole("region", { name: "汇总", exact: true }); await summaryMetric(summary, "收入").getByText("$2.50", { exact: true }).waitFor(); await summaryMetric(summary, "上游成本").getByText("$1.00", { exact: true }).waitFor(); await summaryMetric(summary, "毛利").getByText("$1.50", { exact: true }).waitFor();
+  // 有共同汇总时不列分组；旁边一句「其中 X 有 2 条绑定需处理，没算进来。」，两条的金额留在各自那一行
+  await summary.getByText(reconciliationNotCountedText({ attentionRuleIds: ["rule-1", "rule-2"], readingRuleIds: [] }, rows[0].requestedWindow || rows[0].window), { exact: true }).waitFor();
   const duplicate = reconciliationIssue("DUPLICATE_CHANNEL_ASSIGNMENT");
   const rowB = page.locator("tr.ant-table-row", { hasText: "Rule B" }); await rowB.getByText("$2.50", { exact: true }).waitFor(); await rowB.getByText("$1.00", { exact: true }).waitFor(); await rowB.getByText("需处理", { exact: true }).waitFor(); await rowB.getByText(duplicate.plain, { exact: true }).waitFor();
   const coverage = page.getByRole("region", { name: "渠道", exact: true }); await coverage.locator(".ant-collapse-header").click(); const channel = coverage.locator(".reconciliation-coverage__channel").filter({ has: page.getByText("渠道 1", { exact: true }) });
@@ -586,7 +602,10 @@ function onboardingAccounts(config) {
     if (!key) { key = { canonicalKey: rule.canonicalKey, tokenId: rule.tokenId, tokenName: rule.tokenName, ruleIds: [], activeRuleIds: [], scopeAmbiguous: false, channels: [], associations: [], costCoverage: rule.costCoverage, coverageDeclaration: rule.coverageDeclaration, scopeVersion: rule.scopeVersion, billingEffectiveFromMs: null, firstQueryableAtMs: null }; account.keys.push(key); }
     key.ruleIds.push(rule.id); if (rule.enabled && !rule.archivedAt) key.activeRuleIds.push(rule.id);
     key.channels.push(...rule.channels.map((channel) => ({ ...channel, ownStationId: rule.ownStationId, ownSource: rule.ownSource })));
-    key.associations.push({ ruleId: rule.id, status: rule.enabled && !rule.archivedAt ? "active" : "stopped", upstreamStationId: rule.upstreamStationId, ownStationId: rule.ownStationId, timezone: rule.timezone || "Asia/Shanghai", channels: rule.channels, costCoverage: rule.costCoverage, coverageDeclaration: rule.coverageDeclaration, scopeVersion: rule.scopeVersion || 1, billingEffectiveFromMs: null, accountingStartMs: null, conflict: false, conflictRuleIds: [], stoppedAt: rule.archivedAt || null });
+    key.associations.push({ ruleId: rule.id, status: rule.enabled && !rule.archivedAt ? "active" : "stopped", upstreamStationId: rule.upstreamStationId, ownStationId: rule.ownStationId, timezone: rule.timezone || "Asia/Shanghai", channels: rule.channels, costCoverage: rule.costCoverage,
+      // 和服务端一样由 coverageNeedsAnswer 算好；夹具里的绑定没写生效方式的按现在的新绑定算
+      needsCoverageAnswer: coverageNeedsAnswer({ billingPolicy: "immediate", ...rule }, costBasisOf(config.upstreams.find((station) => station.id === rule.upstreamStationId))),
+      coverageDeclaration: rule.coverageDeclaration, scopeVersion: rule.scopeVersion || 1, billingEffectiveFromMs: null, accountingStartMs: null, conflict: false, conflictRuleIds: [], stoppedAt: rule.archivedAt || null });
   }
   return { accounts: [...accounts.values()], unverifiedResources, channels: config.channels, actions: [], generatedAt: "2026-10-09T07:00:00.000Z" };
 }
@@ -1391,6 +1410,8 @@ test("4a 上游账单：固定采购上游的核算关联用途待确认时注�
   const rules = [{ id: "A-active", tokenName: "Key 9", tokenId: 9, upstreamStationId: "A-billing", ownStationId: "own", enabled: true, archivedAt: null, timezone: "Asia/Shanghai", costCoverage: "unknown", coverageDeclaration: declaration, channels: [1, 3].map((channelId) => ({ channelId, name: "Channel " + channelId })) }];
   const ruleConfiguration = { ownStation: { id: "own", cnyPerUsd: null }, upstreams: [{ id: "A-billing", name: "A billing" }], channels: [1, 2, 3].map((id) => ({ id, name: "Channel " + id, status: 1 })), rules };
   const model = accountReadFixture(); model.accounts[0].resources.find((resource) => resource.id === "A-billing").fixedPurchases = [{ amount: 300, days: 30 }];
+  // 组好模型以后才改成固定成本：服务端这时会按固定成本算，不要求回答（coverageNeedsAnswer），夹具跟着改
+  for (const association of model.accounts[0].keys.flatMap((key) => key.associations).filter((item) => item.upstreamStationId === "A-billing")) association.needsCoverageAnswer = false;
   const { page, center } = await openAccountsPage(t, { model, ruleConfiguration, mutation(route, mutation) {
     if (mutation.path === "/api/reconciliation/rules/A-active/preview" && mutation.method === "POST") return fulfill(route, { previewId: "fixed-preview", groupId: "rule-edit", expiresAtMs: Date.now() + 600000,
       basis: { existingChannelIds: [1, 3], proposedChannelIds: mutation.body.salesChannelIds, timezone: "Asia/Shanghai" }, preview: { scopeChanged: false, costCoverage: "unknown", billingEffectiveFromMs: null } });
@@ -1491,8 +1512,10 @@ function accountReadFixture() {
   const aKey = hash(["newapi", "https://same.test", "A"]), bKey = hash(["newapi", "https://same.test", "B"]), subKey = hash(["sub2api", "https://same.test", "A"]);
   const action = (kind, target = {}) => ({ id: kind + ":" + hash(target), kind, label: workflowActionMeta(kind).label, accountKey: null, stationId: null, ruleId: null, ownStationId: null, channelIds: [], window: null, href: "/stations", ...target });
   const channelRef = (channelId) => ({ channelId, name: "Channel " + channelId });
-  const association = (ruleId, extra = {}) => ({ ruleId, status: "active", upstreamStationId: null, ownStationId: "own", timezone: "Asia/Shanghai", channels: [channelRef(1)], costCoverage: "unknown",
+  // needsCoverageAnswer 和服务端一样由 coverageNeedsAnswer 算（这里的绑定都是新绑定、按用量计成本）；extra 里写了就用写的
+  const association = (ruleId, extra = {}) => withCoverageAnswer({ ruleId, status: "active", upstreamStationId: null, ownStationId: "own", timezone: "Asia/Shanghai", channels: [channelRef(1)], costCoverage: "unknown",
     coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] }, scopeVersion: 3, billingEffectiveFromMs: 1791561600000, accountingStartMs: 1791561600000, conflict: false, conflictRuleIds: [], stoppedAt: null, ...extra });
+  const withCoverageAnswer = (value) => ({ ...value, needsCoverageAnswer: value.needsCoverageAnswer ?? coverageNeedsAnswer({ billingPolicy: "immediate", ...value }, "usage") });
   const stopped = (ruleId, extra = {}) => association(ruleId, { status: "stopped", scopeVersion: 1, stoppedAt: "2026-10-01T00:00:00Z", ...extra });
   const key = (accountId, tokenId, extra = {}) => ({ canonicalKey: hash(["newapi", "https://same.test", accountId, tokenId]), tokenId, tokenName: "Key " + tokenId,
     ruleIds: [accountId + "-active"], activeRuleIds: [accountId + "-active"], scopeAmbiguous: false, channels: [member(1)], costCoverage: "unknown", coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] }, scopeVersion: 3, billingEffectiveFromMs: 1791561600000, firstQueryableAtMs: 1791648000000, ...extra });

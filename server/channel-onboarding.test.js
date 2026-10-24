@@ -143,7 +143,7 @@ async function accountReadFixture(t) {
     sourceBinding: Object.fromEntries(ids.map((channelId) => [channelId, `revision-${channelId}`])),
     channels: ids.map((channelId) => ({ channelId, name: `Channel ${channelId}` })), enabled: true, archivedAt: null,
     costCoverage: "unknown", coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] },
-    scopeVersion: 3, timezone: "Asia/Shanghai", billingEffectiveFrom: Date.parse("2026-10-09T16:00:00Z"), ...extra });
+    billingPolicy: "immediate", scopeVersion: 3, timezone: "Asia/Shanghai", billingEffectiveFrom: Date.parse("2026-10-09T16:00:00Z"), ...extra });
   state.rules = [rule("A-active", billing, 9, [1]), rule("A-history", archived, 9, [3], { enabled: false, archivedAt: "2026-10-01T00:00:00Z", scopeVersion: 1 }),
     rule("A-stopped", a2, 10, [2], { enabled: false }), rule("B-active", b, 9, [2], { costCoverage: "complete", coverageDeclaration: { answer: "none" } })];
   const rt = { store, reconciliation: { listRules: async (options) => { assert.equal(options.includeArchived, true); return structuredClone(state.rules); } } };
@@ -598,7 +598,7 @@ test("2a 上游账单按 Key 逐条列出核算关联：有效在前，停止的
   const [active, history] = keyOf(model, "A", 9).associations;
   assert.deepEqual(keyOf(model, "A", 9).associations.map((item) => item.ruleId), ["A-active", "A-history"]);
   assert.deepEqual({ ...active, accountingStartMs: undefined }, { ruleId: "A-active", status: "active", upstreamStationId: "A-billing", ownStationId: "own",
-    timezone: "Asia/Shanghai", channels: [{ channelId: 1, name: "Channel 1" }], costCoverage: "unknown",
+    timezone: "Asia/Shanghai", channels: [{ channelId: 1, name: "Channel 1" }], costCoverage: "unknown", needsCoverageAnswer: true,
     coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] }, scopeVersion: 3,
     billingEffectiveFromMs: Date.parse("2026-10-09T16:00:00Z"), accountingStartMs: undefined, conflict: false, conflictRuleIds: [],
     keyConflictRuleIds: [], channelConflictRuleIds: [], duplicateChannelIds: [], stoppedAt: null });
@@ -1205,6 +1205,42 @@ test("F07 directory reads reevaluate rule source after missing channels, restore
   f.state.now += 6 * 60000; await check("review_required");
   await f.rt.channelOnboarding.sync(); await check("configured");
   assert.equal(f.state.ruleWrites, 1, "source observations do not rewrite financial scope");
+});
+
+test("渠道绑定：「这把 Key 还给别处用吗？」没答成「只给这些渠道用」的算需处理，固定成本的上游答什么都不影响", async (t) => {
+  const f = await genuineBatchFixture(t), input = f.request([[1]]), preview = await f.rt.channelOnboarding.probeBatch(input);
+  assert.equal((await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId })).complete, true);
+  const status = async () => {
+    const results = await Promise.all(["list", "listAccounts"].map((method) => f.rt.channelOnboarding[method]()));
+    return results.map((result) => result.channels.find((channel) => channel.id === 1).reconciliation.status);
+  };
+  const actions = async () => (await f.rt.channelOnboarding.listAccounts()).actions.map((action) => action.kind);
+  assert.deepEqual(await status(), ["configured", "configured"]);
+  const [rule] = f.state.rules;
+  const binding = typeof rule.source_binding === "string" ? JSON.parse(rule.source_binding) : rule.source_binding;
+  for (const answer of ["unknown", "other_use"]) {
+    Object.assign(rule, { cost_coverage: "unknown", source_binding: JSON.stringify({ ...binding,
+      coverageDeclaration: { answer, otherUse: answer === "other_use" ? "external" : null, uncoveredOwnChannelIds: [] } }) });
+    assert.deepEqual(await status(), ["review_required", "review_required"], answer);
+    // 要的是「去回答」，不是「确认来源」：来源本身没问题
+    assert.ok((await actions()).includes("confirm_coverage"), answer);
+    assert.ok(!(await actions()).includes("review_source"), answer);
+  }
+  const association = async () => (await f.rt.channelOnboarding.listAccounts()).accounts.flatMap((account) => account.keys)
+    .flatMap((key) => key.associations).find((item) => item.ruleId === rule.id);
+  assert.equal((await association()).needsCoverageAnswer, true, "上游账单那一条也说要回答");
+  // 旧规则（legacy-v3）不要求回答，和每日利润那一行一样：照旧「已绑定」，也不列「去回答」
+  const policy = rule.billing_policy;
+  rule.billing_policy = "legacy-v3";
+  assert.deepEqual(await status(), ["configured", "configured"]);
+  assert.ok(!(await actions()).includes("confirm_coverage"));
+  assert.equal((await association()).needsCoverageAnswer, false);
+  rule.billing_policy = policy;
+  // 固定成本的上游：成本记 0，答什么都不影响利润，照旧是「已绑定」，也不要人去回答
+  const supplier = f.rt.store.get(rule.upstream_station_id);
+  supplier.fixedPurchases = [{ amount: 30, days: 30 }];
+  assert.deepEqual(await status(), ["configured", "configured"]);
+  assert.ok(!(await actions()).includes("confirm_coverage"));
 });
 
 test("3b 当前有效的监控关联：渠道不在目录、改过上游地址或监控站点停用、归档时不再返回，给出的是副本", async (t) => {
