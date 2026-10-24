@@ -1,5 +1,6 @@
 // 前端 API 客户端与展示工具函数（从 v1 app.js 平移，行为逐字对齐）
 import { ERROR_CATEGORIES } from "./error-copy.js";
+import { isValidTimeZone } from "./business-time.js";
 
 // ---- API（401 自动跳登录）---------------------------------------------------
 // 同源 fetch + JSON；未登录（401）时跳转登录页（登录接口本身的 401 是密码错误，不跳转）
@@ -170,10 +171,8 @@ export function readWorkflowDestination(search: string, page: "stations" | "reco
   if (action === "retry") {
     const start = params.get("startMs"), end = params.get("endMs"), timezone = params.get("timezone");
     if (!start || !end || !/^\d+$/.test(start) || !/^\d+$/.test(end) || !Number.isSafeInteger(Number(start)) || !Number.isSafeInteger(Number(end)) || !Number.isFinite(new Date(Number(start)).valueOf()) || !Number.isFinite(new Date(Number(end)).valueOf()) || Number(end) <= Number(start) || !timezone) result.error = DESTINATION_EXPIRED;
-    else {
-      try { new Intl.DateTimeFormat("zh-CN", { timeZone: timezone }).format(); result.window = { startMs: Number(start), endMs: Number(end), timezone }; }
-      catch { result.error = DESTINATION_EXPIRED; }
-    }
+    else if (isValidTimeZone(timezone)) result.window = { startMs: Number(start), endMs: Number(end), timezone };
+    else result.error = DESTINATION_EXPIRED;
   }
   return result;
 }

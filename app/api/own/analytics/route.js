@@ -3,7 +3,7 @@ import { withAuth, json } from "../../../../lib/api.js";
 import { ownStationErrorCode } from "../../../../lib/error-copy.js";
 import { OWN_STATION_UNSET } from "../../../../lib/format.js";
 import { queryOwnData } from "../../../../lib/providers.js";
-import { dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../../../lib/business-time.js";
+import { dayKeyInTz, dayStartInTz, shiftDayLabel, zonedParts } from "../../../../lib/business-time.js";
 import { forecastDaily, forecastHourly } from "../../../../lib/forecast.js";
 import {
   ownCache, readOwnIncomeOrUnconfirmed, unconfirmedIncomeProfit, computeProfit, computeFlowBreakdown, joinPrev, resolveOwnWindow,
@@ -91,8 +91,7 @@ export const GET = withAuth(async (request, rt) => {
 
     // 小时级序列（近 28 天，缺时补 0，不含当前未完小时）→ 未来 24 小时预测
     // modelRows 本就拉了 35 天：更长的序列让画像与 conformal 校准都有足够原点
-    const hourFmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour12: false, hour: "2-digit" });
-    const hodOf = (ms) => Number(hourFmt.format(new Date(ms))) % 24;
+    const hodOf = (ms) => zonedParts(ms, tz).hour;
     const hmap = new Map();
     for (const r of modelRows) {
       const hk = Math.floor(r.t / 3600000) * 3600000;

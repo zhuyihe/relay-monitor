@@ -1,9 +1,10 @@
 // 上游渠道对账的持久化层：只保存规则、聚合快照、告警状态和账单能力核验结果，绝不复制站点凭据。
-import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, normalizeSuccessfulResult } from "../lib/reconciliation-contract.js";
+import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, normalizeSuccessfulResult, sameReconciliationWindow } from "../lib/reconciliation-contract.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues } from "../lib/reconciliation-ledger.js";
-import { applyScopePolicy, billingDayOf, isCompletedBillingWindow, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+import { applyScopePolicy, isCompletedBillingWindow, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+import { billDayOf } from "../lib/business-time.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../lib/billing-capability-storage.js";
 
 // MySQL 版和测试用的内存版（server/test-support）抛同一个码、同一句话；页面按码归类成用户看的话（lib/error-copy.js），这里的话只给开发看
@@ -117,6 +118,7 @@ export function isSettledConfirmedSource(source, window = source?.window, now = 
 
 // latestRecord 在 SQL 粗筛之后的判定：只认当前账单合同、同一口径、同一窗口的记录，取最新生成的一条。
 // scopeFingerprint 为 null（latestSettlement）时不限口径和查询方式，只认起止和时区都相同的窗口。
+// 这里问的是「旧记录还能不能用」：实时预设允许记录截止得更早，不是两段窗口相等，所以不用 sameReconciliationWindow。
 export function selectLatestRecord(rows, window, scopeFingerprint, recordType) {
   const anyScope = scopeFingerprint == null;
   const exact = rows.map((row) => {
@@ -701,8 +703,7 @@ export class ReconciliationRepository {
           [ruleId, ledger.entry.billDate]
         );
         const top = latest[0];
-        const sameWindow = top && top.timezone === ledger.entry.timezone
-          && Number(top.window_start_ms) === ledger.entry.startMs && Number(top.window_end_ms) === ledger.entry.endMs;
+        const sameWindow = !!top && sameReconciliationWindow({ timezone: top.timezone, startMs: Number(top.window_start_ms), endMs: Number(top.window_end_ms) }, ledger.entry);
         if (ledger.resettle || !sameWindow) {
           await conn.query(`INSERT INTO reconciliation_ledger (${RECONCILIATION_LEDGER_COLUMNS.join(", ")}) VALUES (${RECONCILIATION_LEDGER_COLUMNS.map(() => "?").join(", ")})`,
             ledgerInsertValues({ ...ledger.entry, ruleId, revision: top ? Number(top.revision) + 1 : 1, source: top ? "resettle" : "settle" }));
@@ -801,14 +802,14 @@ export class ReconciliationRepository {
 
   // 某个自然日的最新一版账，窗口（时区和起止）必须一致：结账后改关联、换 Key、换凭据都不改已结账的日子。
   async latestLedgerEntry(ruleId, window) {
-    const billDate = billingDayOf(window);
+    const billDate = billDayOf(window);
     if (!billDate) return null;
     const [rows] = await this.pool.query(
       `SELECT ${LEDGER_SELECT} FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? ORDER BY revision DESC LIMIT 1`,
       [ruleId, billDate]
     );
     const entry = rows.length ? ledgerEntryFromRow(rows[0]) : null;
-    return entry && entry.timezone === window.timezone && entry.startMs === window.startMs && entry.endMs === window.endMs ? entry : null;
+    return entry && sameReconciliationWindow(entry, window) ? entry : null;
   }
 
   // 已结账历史：每天只列最新一版，窗口落在请求范围内。按 (bill_date, rule_id) 倒序分页。

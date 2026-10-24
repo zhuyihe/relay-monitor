@@ -7,7 +7,7 @@ import { BRAND } from "../lib/brand.js";
 import { FONT_STACK, palette } from "../lib/design-tokens.js";
 import { broadcast } from "../lib/notify.js";
 import { readOwnIncomeOrUnconfirmed, unconfirmedIncomeProfit, computeProfit } from "./own-helpers.js";
-import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../lib/business-time.js";
+import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel, zonedParts } from "../lib/business-time.js";
 import { errorText } from "../lib/error-copy.js";
 import {
   ADMIN_UNMARKED, BALANCE_STATE_TEXT, BASIS_TITLE, COST_MODE_TEXT, EMPTY, FORECAST_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT,
@@ -29,14 +29,8 @@ export function reportDayWindow(nowMs = Date.now(), tz = REPORT_TIME_ZONE) {
 }
 
 export function reportClock(nowMs = Date.now(), tz = REPORT_TIME_ZONE) {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: tz,
-    hourCycle: "h23",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).formatToParts(new Date(nowMs));
-  const value = (type) => parts.find((p) => p.type === type)?.value || "00";
-  return { today: dayKeyInTz(nowMs, tz), hhmm: `${value("hour")}:${value("minute")}` };
+  const { hour, minute } = zonedParts(nowMs, tz);
+  return { today: dayKeyInTz(nowMs, tz), hhmm: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` };
 }
 
 // 日报里的字（§10）：文字版和邮件版共用，HTML 里只填数。金额、Token、日期、余额、档位、原因、成本来源、

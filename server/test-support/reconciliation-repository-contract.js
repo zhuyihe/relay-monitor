@@ -919,6 +919,12 @@ contract("the ledger keeps one row per settled day: the same window is not booke
   assert.deepEqual([second.revision, second.source, second.settledAt, second.revenueRate, second.detail.result.calculation.profitUsd],
     [2, "resettle", "2026-01-11T02:00:00.000Z", null, 4]);
 
+  // 起止一样、只是时区名不同（UTC 和 Etc/UTC）也算换了窗口：写下一版，按原来的时区就查不到了
+  const etc = { ...window, timezone: "Etc/UTC" };
+  assert.equal(await settle({ window: etc, generatedAt: "2026-01-11T02:10:00.000Z", profitUsd: 4 }), true);
+  assert.equal(await latest(), null);
+  assert.deepEqual([(await latest(etc)).revision, (await latest(etc)).source, (await latest(etc)).timezone], [3, "resettle", "Etc/UTC"]);
+
   // 同一天换了时区（窗口不同）也写下一版；之后按旧窗口查不到，成本取不到时记空。
   const shanghai = { preset: "yesterday", startMs: day - 8 * HOUR, endMs: day + 16 * HOUR, timezone: "Asia/Shanghai" };
   const moved = snapshot({ window: shanghai, generatedAt: "2026-01-10T16:30:00.000Z", profitUsd: 5 });
@@ -926,7 +932,7 @@ contract("the ledger keeps one row per settled day: the same window is not booke
   assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [], { ledger: settlement(moved, { costRate: 7.3, costBasis: "fixed" }) }), true);
   assert.equal(await latest(), null);
   const third = await latest(shanghai);
-  assert.deepEqual([third.billDate, third.revision, third.source, third.costUsd, third.costRate, third.costBasis], ["2026-01-10", 3, "resettle", null, 7.3, "fixed"]);
+  assert.deepEqual([third.billDate, third.revision, third.source, third.costUsd, third.costRate, third.costBasis], ["2026-01-10", 4, "resettle", null, 7.3, "fixed"]);
 
   // 不是单个自然日的窗口、别的规则都查不到。
   assert.equal(await latest({ ...shanghai, endMs: shanghai.endMs + DAY }), null);
