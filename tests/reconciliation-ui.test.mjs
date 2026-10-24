@@ -35,11 +35,12 @@ async function launchBrowser() {
 }
 after(async () => { await (await sharedBrowser?.catch(() => null))?.close().catch(() => {}); });
 // 走过加载的按钮：antd 按钮的加载图标退场动画常停在半截（机器忙、打包版里更常见），图标宽 0、透明，看不见，
-// 却留在按钮里（aria-label="loading"），按钮的无障碍名字就成了「loading 确认绑定」。所以按名字找按钮时允许这个前缀：
-// settledButton 给要自己写的地方用；settleButtonLookups 把 getByRole("button", { name: "…", exact: true }) 统一换成它，
-// 每条用例开页面时调用（两处 newPage），新写的用例不用再记着
+// 却留在按钮里（aria-label="loading"），按钮已经不在加载了，无障碍名字却成了「loading 确认绑定」。
+// settleButtonLookups 让 getByRole("button", { name: "…", exact: true }) 在原来的准确名字之外，只多认这一种：
+// 名字是「loading 名字」、按钮又不在加载（没有 ant-btn-loading）。真在加载的按钮照旧找不到，和原来按准确名字找一样，
+// 点击、isEnabled、waitFor 都会等到加载结束；用 aria-label 起名的按钮名字不受图标影响，照旧随时找得到。
+// 每条用例开页面时调用（两处 newPage），新写的用例不用再记着；找按钮一律写准确名字，不另写正则
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const settledButton = (label) => new RegExp(`^(loading )?${escapeRegExp(label)}$`);
 let buttonLookupsSettled = false;
 function settleButtonLookups(page) {
   if (buttonLookupsSettled) return;
@@ -47,8 +48,10 @@ function settleButtonLookups(page) {
   for (const proto of [Object.getPrototypeOf(page), Object.getPrototypeOf(page.locator("body")), Object.getPrototypeOf(page.frameLocator("iframe"))]) {
     const getByRole = proto.getByRole;
     proto.getByRole = function (role, options) {
-      if (role === "button" && options?.exact && typeof options.name === "string") return getByRole.call(this, role, { ...options, name: settledButton(options.name), exact: false });
-      return getByRole.call(this, role, options);
+      const exact = getByRole.call(this, role, options);
+      if (role !== "button" || !options?.exact || typeof options.name !== "string") return exact;
+      const stuck = getByRole.call(this, role, { ...options, name: new RegExp(`^loading ${escapeRegExp(options.name)}$`), exact: false });
+      return exact.or(stuck.and(this.locator(":not(.ant-btn-loading)")));
     };
   }
 }
@@ -715,7 +718,7 @@ async function openOnboardingDrawer(page, batch = false) {
   return page.getByRole("dialog", { name: CONNECT, exact: true });
 }
 async function verifyOnboarding(drawer) {
-  const button = drawer.getByRole("button", { name: settledButton(TEST_READ) });
+  const button = drawer.getByRole("button", { name: TEST_READ, exact: true });
   await button.scrollIntoViewIfNeeded();
   const devBadge = drawer.page().getByRole("button", { name: "Collapse issues badge", exact: true });
   if (await devBadge.isVisible()) await devBadge.click();
@@ -1443,7 +1446,7 @@ test("账单核算 is read-only: no create or edit entry, fixes link back to 上
 test("a lost batch response recovers persisted results without returned browser IDs or another confirm", async (t) => {
   const { page, writes, recoveries } = await openOnboardingPage(t, { loseResponseAt: 1 });
   const drawer = await openOnboardingDrawer(page); await enableBilling(page, drawer); await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).click(); await drawer.getByText(workflowActionMeta("connect_channels").done, { exact: true }).waitFor();
-  assert.equal(writes.length, 1); assert.equal(recoveries.length, 1); assert.equal(recoveries[0].requestId, writes[0].requestId); assert.equal(recoveries[0].selections[0].stationId, "upstream-1"); assert.equal("saved" in recoveries[0], false); assert.equal(await drawer.getByRole("button", { name: settledButton(FINISH) }).isDisabled(), true);
+  assert.equal(writes.length, 1); assert.equal(recoveries.length, 1); assert.equal(recoveries[0].requestId, writes[0].requestId); assert.equal(recoveries[0].selections[0].stationId, "upstream-1"); assert.equal("saved" in recoveries[0], false); assert.equal(await drawer.getByRole("button", { name: FINISH, exact: true }).isDisabled(), true);
 });
 
 test("a new billing-only account is confirmed without creating another monitor", async (t) => {
@@ -1602,7 +1605,7 @@ function keyVerificationFixture(provider = "newapi", timezone = "UTC", selected 
 
 // 测试读取抽屉（§3.5）：标题「测试读取 · 上游名」，读到上游账号写「能读到上游账号 N」，下面一个「确认」把这个上游归到这个上游账号下
 const verificationDialog = (page, name) => page.getByRole("dialog", { name: `${TEST_READ} · ${name}`, exact: true });
-const confirmIdentityButton = (drawer) => drawer.getByRole("button", { name: settledButton("确认") });
+const confirmIdentityButton = (drawer) => drawer.getByRole("button", { name: "确认", exact: true });
 const IDENTITY_READ = (accountId) => `能读到上游账号 ${accountId}`;
 const VERIFY_KEY = "选一把 Key", VERIFY_SELECTED = "测试读取选中的 Key", SWAP_KEY = workflowActionMeta("swap_key").label;
 for (const width of [320, 390, 768, 1440]) {
@@ -1624,7 +1627,7 @@ for (const width of [320, 390, 768, 1440]) {
       } });
     const drawer = verificationDialog(opened.page, "unknown-legacy"), confirm = confirmIdentityButton(drawer);
     assert.equal(await confirm.count(), 0);
-    await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click();
+    await drawer.getByRole("button", { name: TEST_READ, exact: true }).click();
     await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); assert.equal(opened.mutations.length, 0);
     await confirm.focus(); await opened.page.keyboard.press("Enter"); await drawer.waitFor({ state: "hidden" });
     await opened.center.getByText(/^1 个上游账号；0 个上游还没确认上游账号/).waitFor();
@@ -1640,13 +1643,13 @@ test("F06 a rejected identity save remains retryable and requires a new read bef
       return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: "RESOURCE_CHANGED", error: "资源配置已变化，请重新核验" }) });
     } });
   const drawer = verificationDialog(opened.page, "unknown-legacy"), confirm = confirmIdentityButton(drawer);
-  await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click();
+  await drawer.getByRole("button", { name: TEST_READ, exact: true }).click();
   await confirm.click();
   // 保存被拒：写「保存失败：内容有变化，请重新预览。」，接口原文收在「查看详细原因」
   const rejected = alertWithTitle(drawer, failureText("保存失败", { code: "RESOURCE_CHANGED", error: "资源配置已变化，请重新核验" })); await rejected.waitFor();
   assert.equal(await rejected.locator("details.jy-error-detail").filter({ hasText: "资源配置已变化，请重新核验" }).count(), 1);
   assert.equal(await confirm.count(), 0);
-  await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click();
+  await drawer.getByRole("button", { name: TEST_READ, exact: true }).click();
   await alertTitle(drawer, IDENTITY_READ("42")).waitFor();
   await confirm.waitFor();
   assert.equal(opened.mutations.length, 1); assert.equal(opened.writes.length, 0);
@@ -1657,7 +1660,7 @@ test("workflow identity and selected-Key read preserve actual zero and separate 
       assert.equal(path, `/api/reconciliation/upstreams/${stationId}/keys`); const params = Object.fromEntries(new URL(route.request().url()).searchParams); reads.push(params); return fulfill(route, keyVerificationFixture(provider, params.timezone, !!params.tokenId));
     } });
     // Key 下拉写「名称 · 分组 g」，没有分组时只写名称；读出来的上游成本是 0 也照写 $0.00
-    const drawer = verificationDialog(opened.page, stationId); await drawer.waitFor(); await drawer.getByRole("textbox", { name: "时区", exact: true }).fill(timezone); await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click(); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); await drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }).click(); await opened.page.getByText(provider === "newapi" ? "actual-key · 分组 g" : "actual-key", { exact: true }).last().click(); await drawer.getByRole("button", { name: settledButton(VERIFY_SELECTED) }).click(); await alertTitle(drawer, "actual-key 的上游成本").waitFor();
+    const drawer = verificationDialog(opened.page, stationId); await drawer.waitFor(); await drawer.getByRole("textbox", { name: "时区", exact: true }).fill(timezone); await drawer.getByRole("button", { name: TEST_READ, exact: true }).click(); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); await drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }).click(); await opened.page.getByText(provider === "newapi" ? "actual-key · 分组 g" : "actual-key", { exact: true }).last().click(); await drawer.getByRole("button", { name: VERIFY_SELECTED, exact: true }).click(); await alertTitle(drawer, "actual-key 的上游成本").waitFor();
     assert.deepEqual(reads, [{ force: "true", timezone }, { force: "true", timezone, tokenId: "9" }]); assert.ok((await drawer.textContent()).includes(provider === "newapi" ? "上游成本 $0.00" : "上游成本 $3.25")); assert.ok((await drawer.textContent()).includes("这里只是测试读取，不改利润。")); if (provider === "sub2api") { await drawer.getByText(testReadText({ ok: true }), { exact: true }).waitFor(); await drawer.getByText(reconciliationIssue("BILLING_TIMEZONE_UNVERIFIED").title, { exact: true }).waitFor(); } assert.equal(opened.mutations.length, 0); assert.equal(opened.writes.length, 0);
   }
 });
@@ -1665,7 +1668,7 @@ test("workflow identity and selected-Key read preserve actual zero and separate 
 test("workflow unreadable Key directory remains partial and pure-Key fallback uses the full original editor", async (t) => {
   const opened = await openAccountsPage(t, { path: "/stations?action=verify&stationId=unknown-legacy", readonlyAPI(route) {
     const partial = keyVerificationFixture(); Object.assign(partial, { quotaPerUnit: null, version: "", groups: {}, tokens: [], capability: { state: "unverified", currency: "USD", window: "second", reason: "KEY_METADATA_UNAVAILABLE" }, billingTimezone: { state: "unverified", timezone: "Asia/Shanghai", reason: "KEY_METADATA_UNAVAILABLE" } }); return fulfill(route, partial);
-  } }); const drawer = verificationDialog(opened.page, "unknown-legacy"); await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click(); await alertTitle(drawer, testReadText({ ok: false, reason: describeError({ code: "KEY_METADATA_UNAVAILABLE" }).text })).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }).count(), 0); assert.equal(opened.mutations.length, 0);
+  } }); const drawer = verificationDialog(opened.page, "unknown-legacy"); await drawer.getByRole("button", { name: TEST_READ, exact: true }).click(); await alertTitle(drawer, testReadText({ ok: false, reason: describeError({ code: "KEY_METADATA_UNAVAILABLE" }).text })).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }).count(), 0); assert.equal(opened.mutations.length, 0);
   const pure = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=pure-key", readonlyAPI() { assert.fail("pure Key must not enter account probe"); } }); const pureDrawer = verificationDialog(pure.page, "pure-key"); await alertTitle(pureDrawer, "只有一把 Key，读不到上游账号").waitFor(); await pureDrawer.getByRole("button", { name: UPDATE_AUTH, exact: true }).click(); const editor = pure.page.getByRole("dialog", { name: /^编辑上游：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel(CREDENTIAL_FIELDS.name.label, { exact: true }).inputValue(), "pure-key"); assert.equal(pure.mutations.length, 0);
 });
 
@@ -1675,7 +1678,7 @@ test("workflow external Key use stops the old rule before selecting a new Key wh
   // 「换 Key」先确认：站外也在用就给站外单开一把 Key，旧 Key 以前的每日记录还在
   await drawer.getByRole("button", { name: SWAP_KEY, exact: true }).click(); const confirm = opened.page.getByRole("dialog", { name: `${SWAP_KEY}？`, exact: true }); await confirm.getByText(`站外也在用的话，先在上游给站外单开一把 Key。换成新 Key 后，旧 Key ${HISTORY_KEPT}。`, { exact: true }).waitFor(); assert.equal(opened.writes.length, 0); await confirm.getByRole("button", { name: SWAP_KEY, exact: true }).click(); await confirm.waitFor({ state: "hidden" }); assert.equal(opened.mutations.length, 1);
   await verifyOnboarding(drawer); await chooseKey(opened.page, drawer, "New Key"); await verifyOnboarding(drawer); await drawer.getByRole("combobox", { name: COVERAGE_QUESTION, exact: true }).click(); await opened.page.getByText(ONLY_THESE, { exact: true }).last().click(); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(opened.writes.length, 1); assert.equal(opened.writes[0].groups[0].reconciliation.tokenId, 8); assert.equal(opened.writes[0].selections[0].stationId, "upstream-1");
-  const unknown = await openAccountsPage(t, { config: onboardingFixture(true, "newapi", [1, 2, 3, 4]), path: "/stations?action=coverage&ruleId=rule-1" }); const unknownDrawer = unknown.page.getByRole("dialog", { name: CONNECT, exact: true }); await verifyOnboarding(unknownDrawer); await unknownDrawer.getByText(`回答「${COVERAGE_QUESTION}」之前，利润先不算`).waitFor(); await unknownDrawer.getByRole("button", { name: settledButton(TEST_READ) }).waitFor(); assert.equal(unknown.mutations.length, 0); assert.equal(unknown.writes.length, 0); assert.equal(unknown.probes[0].groups[0].reconciliation.coverageDeclaration.answer, "unknown");
+  const unknown = await openAccountsPage(t, { config: onboardingFixture(true, "newapi", [1, 2, 3, 4]), path: "/stations?action=coverage&ruleId=rule-1" }); const unknownDrawer = unknown.page.getByRole("dialog", { name: CONNECT, exact: true }); await verifyOnboarding(unknownDrawer); await unknownDrawer.getByText(`回答「${COVERAGE_QUESTION}」之前，利润先不算`).waitFor(); await unknownDrawer.getByRole("button", { name: TEST_READ, exact: true }).waitFor(); assert.equal(unknown.mutations.length, 0); assert.equal(unknown.writes.length, 0); assert.equal(unknown.probes[0].groups[0].reconciliation.coverageDeclaration.answer, "unknown");
 });
 
 test("workflow overview merges stable public actions and preserves prior actions on a partial read failure", async (t) => {
@@ -1690,10 +1693,10 @@ test("workflow overview merges stable public actions and preserves prior actions
 });
 
 test("workflow read failures and deleted verification targets expose a safe retry with no save", async (t) => {
-  let calls = 0; const opened = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=unknown-legacy", readonlyAPI(route) { calls += 1; if (calls === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "KEY_PROBE_UNAVAILABLE", retryable: true, error: "账号身份暂时无法核验，请检查授权或稍后重试" }) }); return fulfill(route, keyVerificationFixture("newapi", "Asia/Shanghai")); } }); const drawer = verificationDialog(opened.page, "unknown-legacy"); await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click();
+  let calls = 0; const opened = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=unknown-legacy", readonlyAPI(route) { calls += 1; if (calls === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "KEY_PROBE_UNAVAILABLE", retryable: true, error: "账号身份暂时无法核验，请检查授权或稍后重试" }) }); return fulfill(route, keyVerificationFixture("newapi", "Asia/Shanghai")); } }); const drawer = verificationDialog(opened.page, "unknown-legacy"); await drawer.getByRole("button", { name: TEST_READ, exact: true }).click();
   // 读不到：写「读不到：」加归类后的原因，原文收在「查看详细原因」，旁边一个「刷新」；再测试读取一次就好
   const failed = alertWithTitle(drawer, testReadText({ ok: false, reason: describeError({ code: "KEY_PROBE_UNAVAILABLE" }).text })); await failed.waitFor(); await failed.getByRole("button", { name: REFRESH, exact: true }).waitFor(); assert.equal(await failed.locator("details.jy-error-detail").filter({ hasText: "账号身份暂时无法核验，请检查授权或稍后重试" }).count(), 1);
-  await drawer.getByRole("button", { name: settledButton(TEST_READ) }).click(); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); assert.equal(calls, 2); assert.equal(opened.mutations.length, 0);
+  await drawer.getByRole("button", { name: TEST_READ, exact: true }).click(); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); assert.equal(calls, 2); assert.equal(opened.mutations.length, 0);
   // 处理目标不在了：顶部一条提示（上游没了写「找不到这个上游。」，上游账号变了写「这条已经变了」），带「刷新」和「返回上游列表」，不打开抽屉
   for (const [path, title] of [["/stations?action=verify&stationId=deleted", `${ERROR_CATEGORIES.not_found.text}。`], ["/stations?action=authorization&accountKey=deleted", DESTINATION_CHANGED], ["/stations?stationId=deleted", `${ERROR_CATEGORIES.not_found.text}。`]]) {
     const unavailable = await openAccountsPage(t, { path }); const banner = unavailable.page.locator(".jy-banner[role=alert]").filter({ has: unavailable.page.locator("b").filter({ hasText: exactText(title) }) }); await banner.waitFor(); await banner.getByRole("button", { name: REFRESH, exact: true }).waitFor();
@@ -1709,7 +1712,7 @@ test("workflow verification keyboard and financial source links fit 320/390/768/
       if (path === "/api/own/analytics") return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }) });
       throw new Error("unexpected financial navigation fixture: " + path);
     } });
-    const drawer = verificationDialog(opened.page, "Sub-password"); const directory = drawer.getByRole("button", { name: settledButton(TEST_READ) }); await directory.focus(); await opened.page.keyboard.press("Enter"); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); const key = drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }); await key.focus(); await opened.page.keyboard.press("ArrowDown"); await opened.page.keyboard.press("Enter"); const probe = drawer.getByRole("button", { name: settledButton(VERIFY_SELECTED) }); await probe.focus(); await opened.page.keyboard.press("Enter"); await alertTitle(drawer, "actual-key 的上游成本").waitFor();
+    const drawer = verificationDialog(opened.page, "Sub-password"); const directory = drawer.getByRole("button", { name: TEST_READ, exact: true }); await directory.focus(); await opened.page.keyboard.press("Enter"); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); const key = drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }); await key.focus(); await opened.page.keyboard.press("ArrowDown"); await opened.page.keyboard.press("Enter"); const probe = drawer.getByRole("button", { name: VERIFY_SELECTED, exact: true }); await probe.focus(); await opened.page.keyboard.press("Enter"); await alertTitle(drawer, "actual-key 的上游成本").waitFor();
     await opened.page.waitForFunction((dialog) => !dialog.closest(".ant-drawer")?.getAnimations({ subtree: true }).some((animation) => animation.playState === "running" && animation.effect?.getTiming().iterations !== Infinity), await drawer.elementHandle());
     const overflow = await opened.page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth,
       elements: [...document.querySelectorAll("body *")].filter((node) => node.getBoundingClientRect().right > document.documentElement.clientWidth + 1).slice(0, 8)
@@ -2017,7 +2020,7 @@ test("active 核算关联 outside verified Keys stay listed with their reason, v
 test("account read failure retains the last public relationships and retry restores the center", async (t) => {
   const { center, model, accountRequests, mutations } = await openAccountsPage(t, { accounts(route, count, model) { return count === 2 ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "上游账单暂不可用" }) }) : fulfill(route, model); } });
   // 刷新没读到：写「刷新失败，数据截至 …。」和归类后的原因，上次读到的上游账号照常列出；横幅里的「刷新」再读一次
-  await center.getByRole("button", { name: settledButton(REFRESH) }).click(); const banner = center.locator(".jy-banner[role=alert]"); await banner.locator("b").filter({ hasText: exactText(refreshFailedText(model.generatedAt)) }).waitFor(); await banner.getByText(describeError(Object.assign(new Error("上游账单暂不可用"), { status: 503 })).text, { exact: true }).waitFor(); await banner.locator("details.jy-error-detail").filter({ hasText: "上游账单暂不可用" }).waitFor();
+  await center.getByRole("button", { name: REFRESH, exact: true }).click(); const banner = center.locator(".jy-banner[role=alert]"); await banner.locator("b").filter({ hasText: exactText(refreshFailedText(model.generatedAt)) }).waitFor(); await banner.getByText(describeError(Object.assign(new Error("上游账单暂不可用"), { status: 503 })).text, { exact: true }).waitFor(); await banner.locator("details.jy-error-detail").filter({ hasText: "上游账单暂不可用" }).waitFor();
   await center.getByRole("button", { name: /账号 B / }).waitFor(); await center.getByRole("button", { name: `${REFRESH}${STATION_TABS.bills}`, exact: true }).click(); await banner.waitFor({ state: "hidden" }); assert.deepEqual(accountRequests, ["GET", "GET", "GET"]); assert.equal(mutations.length, 0);
 });
 
