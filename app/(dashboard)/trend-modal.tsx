@@ -11,7 +11,7 @@ import {
   axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatCompact, formatMoney, formatZonedDate, formatZonedDateTime, formatZonedTime, RANGE_TEXT, RATE_UNSET,
 } from "../../lib/format";
 import { isDayStartInTz } from "../../lib/business-time";
-import { balanceDaysText, balanceViewOf, stationDisplayName } from "../../lib/overview-actions";
+import { balanceDaysText, balanceViewOf, isSpending, stationDisplayName } from "../../lib/overview-actions";
 import { clamp, niceTicks, timeAxisTicks } from "../../lib/chart-math";
 import { ErrorState } from "../components/data-state";
 import { ChartTip, TipBody } from "../components/float-tip";
@@ -297,7 +297,7 @@ export default function TrendModal({
 
   const rate = rateSnapshotOf(station).cnyPerUsd;
   const pred = data?.prediction;
-  const burn = pred?.burnPerDay > 0 ? pred.burnPerDay * rate : 0;
+  const burn = isSpending(pred) ? pred.burnPerDay * rate : 0;
   const points: [number, number][] = useMemo(
     () => (data?.points || []).map((p: any) => [Number(p[0]), p[1] * rate] as [number, number]),
     [data, rate],

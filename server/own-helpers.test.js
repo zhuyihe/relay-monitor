@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  aggregateFlow, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
+  aggregateFlow, computeFlowBreakdown, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
   getOwnUsers, readOwnIncome, readOwnIncomeOrUnconfirmed, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
   ownUsersKey, unconfirmedIncomeProfit,
 } from "./own-helpers.js";
@@ -101,8 +101,8 @@ test("readOwnIncomeOrUnconfirmed：确认不了时不中止，收入是 null；�
   assert.equal(lost.unconfirmed.code, "OWN_INCOME_UNCONFIRMED");
   assert.deepEqual([lost.users, lost.incomeUsd, lost.adminUsageUsd, lost.resold, lost.incomeDaily, lost.adminSet.size], [null, null, null, null, null, 0]);
   assert.equal(calls, 1);
-  // 原因带上游给的原文（只进「查看详细原因」），按码归类
-  assert.deepEqual(lost.usersUnavailable, { error: "unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" });
+  // 原文只进「查看详细原因」；读不到的是自营站点，繁忙说成「自营站点暂时读不到」，不说成上游繁忙
+  assert.deepEqual(lost.usersUnavailable, { error: "unavailable", errorCode: "OWN_STATION_UNAVAILABLE" });
   // 用户列表读得到、转售记录没读全：users 照常给出，管理员照常标
   f.own.resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
   const partial = await readOwnIncomeOrUnconfirmed(f.rt, f.own, f.rows, f.window);
@@ -535,3 +535,24 @@ test("收入确认不了时的利润：两项成本照常算，收入、管理�
   assert.equal(both.incomeUnconfirmed.errorCode, "OWN_INCOME_UNCONFIRMED");
 });
 
+
+test("读自营站点没成时说自营站点：繁忙、连不上、认不出的是「自营站点暂时读不到」，登录信息过期这类照说那一类", async (t) => {
+  const own = { id: "own", type: "newapi", isOwn: true, name: "Own", baseUrl: "https://own.example", accessToken: "t", cnyPerUsd: 1 };
+  const rt = { store: { list: () => [own] }, history: new History({ query: async () => [[]] }) };
+  let reply;
+  t.mock.method(globalThis, "fetch", async () => reply());
+  const window = { startMs: Date.parse("2026-10-07T16:00:00Z"), now: Date.parse("2026-10-08T16:00:00Z"), tz: "Asia/Shanghai", range: "7d", resold: null };
+  const cases = [
+    ["渠道列表 503", () => Response.json({ success: false, message: "unavailable" }, { status: 503 }), "OWN_STATION_UNAVAILABLE"],
+    ["连不上", () => { throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }); }, "OWN_STATION_UNAVAILABLE"],
+    ["登录信息过期", () => Response.json({ success: false, message: "unauthorized" }, { status: 401 }), "AUTHENTICATION_FAILED"],
+  ];
+  for (const [name, fail, code] of cases) {
+    reply = fail;
+    delete rt._ownChannelsCache;
+    const profit = await computeProfit(rt, own, 0, 0, window);
+    assert.equal(profit.errorCode, code, `利润：${name}`);
+    const flow = await computeFlowBreakdown(own, { startMs: window.startMs, endMs: window.now, prevStartMs: window.startMs - 86400000, prevEndMs: window.startMs, totalCostUsd: 0 });
+    assert.equal(flow.errorCode, code, `分组和渠道数据：${name}`);
+  }
+});

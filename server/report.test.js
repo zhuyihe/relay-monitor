@@ -291,6 +291,42 @@ test("定时发送：收入确认不了时先不发，重试时恢复了就发�
   assert.doesNotMatch(h2.sentBodies[0].body, /没读到/);
 });
 
+test("定时发送：成本没读到（自营站点的渠道列表读不到）时也先按退避重试，最后一次还读不到才发降级的那份；中途读到了就发完整的", async (t) => {
+  for (const recover of [false, true]) {
+    await t.test(recover ? "第二次读到了" : "一直读不到", async (st) => {
+      const h = setup(st);
+      let channelsDown = true;
+      st.mock.method(globalThis, "fetch", async (input, init) => {
+        const url = new URL(input);
+        if (url.hostname === "notify.example") { h.deliveries.push(url.pathname.slice(1)); h.sentBodies.push(JSON.parse(init.body)); return new Response("{}", { status: 200 }); }
+        if (url.pathname === "/api/user/") return Response.json({ success: true, data: { items: [{ id: 1, username: "root", role: 100 }], total: 1 } });
+        if (url.pathname === "/api/channel/") return channelsDown ? Response.json({ success: false, message: "unavailable" }, { status: 503 })
+          : Response.json({ success: true, data: { items: [], total: 0 } });
+        return Response.json({ success: true, data: [] });
+      });
+      await h.tick();
+      assert.deepEqual(h.deliveries, [], "第一次先不发");
+      if (recover) {
+        channelsDown = false;
+        st.mock.timers.tick(60000);
+        await h.tick();
+        assert.deepEqual(h.deliveries, ["a", "b"]);
+        assert.doesNotMatch(h.sentBodies[0].body, /没读到/);
+        return;
+      }
+      for (const delayMinutes of [1, 2, 4]) {
+        st.mock.timers.tick(delayMinutes * 60000);
+        await h.tick();
+      }
+      assert.deepEqual(h.deliveries, [], "前四次都不发");
+      st.mock.timers.tick(8 * 60000);
+      await h.tick();
+      assert.deepEqual(h.deliveries, ["a", "b"], "第五次照发降级的那份");
+      assert.match(h.sentBodies[0].body, /上游成本、固定成本、毛利、净利：没读到（自营站点暂时读不到，请稍后再试）/);
+    });
+  }
+});
+
 test("转售记录没读全、用户列表读得到时：收入那几项写「没读到」，预收和管理员标记照常", async (t) => {
   const h = setup(t);
   h.rt.store.data.stations[0].resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
@@ -421,14 +457,22 @@ const USD = 500000; // New API 的 1 美元额度
 const DAY_MS = 86400000;
 const upstream = (id, name, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.example`, accessToken: "t", cnyPerUsd: 7.2, ...extra });
 
-// 一份完整的日报：自营站点售价 7.5，三个用户（root 是管理员）；消费记录从 20 天前起每天 $100，统计的那天 $140。
+// 一份完整的日报：自营站点售价 7.5，四个用户（root 是管理员，carol 这天只调了免费模型）；消费记录从 20 天前起每天 $100，统计的那天 $140。
 // 上游有正常、偏低、快用完（没设汇率、不算进利润）、用完、读不到、还没读取、近期没有花费、归档的，外加一个包月的服务器。
-// prior(i) 是 i 天前那天的消费（美元），null 表示那天没有记录
-function richSetup(t, { now = START, sellPrice = 7.5, prior = () => 100, priorDays = 20, today = { "gpt-4o": 120, "claude-3": 20 }, usersDown = false, channelsDown = false } = {}) {
+// prior(i) 是 i 天前那天的消费（美元），null 表示那天没有记录。别的选项：
+//   rules 提醒规则（store.rules）、predict 覆盖某个上游的估算、used 某个上游按余额变化算出的花费（美元）、
+//   usageDown 这几个上游的用量接口读不到、extraPurchase 服务器再加一笔已到期的、userRows 改这天的用户消费、
+//   upstreams false 时一个上游都没有、ownName 自营站点的名字、usersDown / channelsDown 读不到用户列表 / 渠道列表（给数字就是那个状态码）
+function richSetup(t, {
+  now = START, sellPrice = 7.5, prior = () => 100, priorDays = 20, today = { "gpt-4o": 120, "claude-3": 20 },
+  usersDown = false, channelsDown = false, rules = null, predict = {}, used = {}, usageDown = [], extraPurchase = false,
+  userRows = null, upstreams = true, ownName = "Own",
+} = {}) {
   const h = setup(t, { now, channels: [] });
   const { dayStart } = reportDayWindow();
-  h.rt.store.data.stations[0].cnyPerUsd = sellPrice;
-  h.rt.store.data.stations.push(
+  Object.assign(h.rt.store.data.stations[0], { cnyPerUsd: sellPrice, name: ownName });
+  if (rules) Object.assign(h.rt.store.data.notifications.rules, rules);
+  if (upstreams) h.rt.store.data.stations.push(
     upstream("main", "主力上游", { balance: { ok: true, remaining: 400 } }),
     upstream("spare", "备用上游", { balance: { ok: true, remaining: 4 } }),
     upstream("soon", "快用完上游", { cnyPerUsd: null, includeInProfit: false, balance: { ok: true, remaining: 50 } }),
@@ -437,30 +481,35 @@ function richSetup(t, { now = START, sellPrice = 7.5, prior = () => 100, priorDa
     upstream("fresh", "新上游"),
     upstream("idle", "闲置上游", { balance: { ok: true, remaining: 100 } }),
     upstream("gone", "归档上游", { archivedAt: "2026-10-01T00:00:00.000Z", balance: { ok: true, remaining: 1 } }),
-    { id: "server", name: "服务器", type: "fixed", fixedPurchases: [{ amount: 300, days: 30, startDate: "2026-10-01" }] },
   );
+  h.rt.store.data.stations.push({ id: "server", name: "服务器", type: "fixed", fixedPurchases: [
+    { amount: 300, days: 30, startDate: "2026-10-01" },
+    ...(extraPurchase ? [{ amount: 10, days: 3, startDate: "2026-09-01" }] : []),
+  ] });
   const predictions = {
     main: { burnPerDay: 50, etaDays: 8 }, spare: { burnPerDay: 2.1, etaDays: 1.9 }, soon: { burnPerDay: 10, etaDays: 5 },
-    empty: { burnPerDay: 3, etaDays: 0 }, idle: { burnPerDay: 0, etaDays: null },
+    empty: { burnPerDay: 3, etaDays: 0 }, idle: { burnPerDay: 0, etaDays: null }, ...predict,
   };
-  h.rt.history = { predict: (id) => predictions[id] ?? null, usedBetween: () => 0 };
+  h.rt.history = { predict: (id) => predictions[id] ?? null, usedBetween: (id) => used[id] ?? 0 };
   const sec = (dayOffset, hour = 10) => (dayStart + dayOffset * DAY_MS + hour * 3600000) / 1000;
   const users = [
     { id: 1, username: "root", role: 100, quota: 0, used_quota: 0, status: 1 },
     { id: 2, username: "alice", role: 1, quota: 20 * USD, used_quota: 0, status: 1 },
     { id: 3, username: "bob", role: 1, quota: 6 * USD, used_quota: 0, status: 1 },
+    { id: 4, username: "carol", role: 1, quota: 0, used_quota: 0, status: 1 },
   ];
   const ok = (data) => Response.json({ success: true, data });
-  const down = () => Response.json({ success: false, message: "unavailable" }, { status: 503 });
+  const down = (status = 503) => Response.json({ success: false, message: "unavailable" }, { status });
   t.mock.method(globalThis, "fetch", async (input) => {
     const url = new URL(input);
     if (url.host === "source.example") {
       if (url.pathname === "/api/user/") return usersDown ? down() : ok({ items: users, total: users.length });
-      if (url.pathname === "/api/channel/") return channelsDown ? down() : ok({ items: [], total: 0 });
-      if (url.pathname === "/api/data/users") return ok([
+      if (url.pathname === "/api/channel/") return channelsDown ? down(channelsDown === true ? 503 : channelsDown) : ok({ items: [], total: 0 });
+      if (url.pathname === "/api/data/users") return ok(userRows ?? [
         { username: "alice", created_at: sec(0), quota: 80 * USD, token_used: 5000000, count: 20000 },
         { username: "root", created_at: sec(0), quota: 40 * USD, token_used: 3000000, count: 10000 },
         { username: "bob", created_at: sec(0), quota: 20 * USD, token_used: 2000000, count: 5000 },
+        { username: "carol", created_at: sec(0), quota: 0, token_used: 1000, count: 3 },
       ]);
       if (url.pathname === "/api/data/") {
         const rows = [];
@@ -474,8 +523,11 @@ function richSetup(t, { now = START, sellPrice = 7.5, prior = () => 100, priorDa
       }
       return ok([]);
     }
-    // 上游的用量：主力上游这天用了 $50，别的没有
-    if (url.pathname === "/api/data/self") return ok(url.host === "main.example" ? [{ model_name: "gpt-4o", created_at: sec(0), quota: 50 * USD, token_used: 1, count: 1 }] : []);
+    // 上游的用量：主力上游这天用了 $50，别的没有；usageDown 里的读不到
+    if (url.pathname === "/api/data/self") {
+      if (usageDown.includes(url.host.split(".")[0])) return down();
+      return ok(url.host === "main.example" ? [{ model_name: "gpt-4o", created_at: sec(0), quota: 50 * USD, token_used: 1, count: 1 }] : []);
+    }
     return ok([]);
   });
   return h;
@@ -486,16 +538,11 @@ const tile = (html, label) => {
   const m = html.match(new RegExp(`>${label}</div>\\s*<div[^>]*>([^<]*)</div>\\s*(?:<div[^>]*>(.*?)</div>)?`));
   return m ? [m[1], m[2] ?? ""] : null;
 };
-// 预计花费那几行的数随预测方法变，只看写法
-const BAND = "预计 ¥[\\d,]+\\.\\d\\d( 到 ¥[\\d,]+\\.\\d\\d)?";
-const FORECAST_LINES = new RegExp(`\\n\\n■ 预计花费\\n今天：${BAND}\\n未来 7 天：${BAND}\\n按过去 21 天估算(，过去 2 周平均差 ±\\d+%)?\\n`);
-
 test("日报按 §10 写：标题、统计的那天、经营概览、用量、排行、成本明细、上游余额、预收、预计花费、落款", async (t) => {
   const h = richSetup(t);
   const { title, text } = await buildReport(h.rt);
   assert.equal(title, "【炬元日报】Own 10月7日");
-  assert.match(text, FORECAST_LINES);
-  assert.equal(text.replace(FORECAST_LINES, "\n"), [
+  assert.equal(text, [
     "【炬元日报】Own · 10月7日（周三）",
     "统计的是 10月7日 一整天",
     "",
@@ -536,12 +583,17 @@ test("日报按 §10 写：标题、统计的那天、经营概览、用量、�
     "- 新上游：还没读取",
     "- 闲置上游：$100.00（约 ¥720.00），近期没有花费",
     "",
-    "■ 预收：¥195.00（2 个用户）",
+    "■ 预收：¥195.00（3 个用户）",
+    "",
+    "■ 预计花费",
+    "今天：预计 ¥820.28",
+    "未来 7 天：预计 ¥5,808.00",
+    "按过去 21 天估算，过去 2 周平均差 ±3%",
     "",
     "由炬元控制台生成",
   ].join("\n"));
-  // 不写上游返回的原文、不标 ⚠、归档的上游不列
-  assert.doesNotMatch(text, /Unauthorized|sk-abc|⚠|归档上游/);
+  // 不写上游返回的原文、不标 ⚠、归档的上游不列；carol 这天只调了免费模型（¥0.00），不算有消费的用户、不进排行
+  assert.doesNotMatch(text, /Unauthorized|sk-abc|⚠|归档上游|carol/);
 });
 
 test("日报的邮件版和文字版同样的字：四个格子、近 14 天消费、排行、上游余额的颜色、预收、落款", async (t) => {
@@ -568,7 +620,9 @@ test("日报的邮件版和文字版同样的字：四个格子、近 14 天消�
   assert.match(html, /读不到上游 <span style="color:#B42F2F;font-size:11px">读不到余额（登录信息不对或过期了）<\/span>/);
   assert.match(html, /\$400\.00<div[^>]*>约 ¥2,880\.00<\/div>/);
   assert.match(html, /¥50\.00<div[^>]*>没设置汇率<\/div>/);
-  assert.match(html, />预收：¥195\.00（2 个用户）</);
+  assert.match(html, />预收：¥195\.00（3 个用户）</);
+  // 「利润怎么算」和文字版一样在经营概览里：紧接在四个格子下面，近 14 天消费图在它下面
+  assert.ok(html.indexOf(">利润怎么算<") < html.indexOf(">近 14 天消费<"));
   assert.match(html, />预计花费</);
   assert.match(html, />由炬元控制台生成 · 每日经营日报</);
   assert.doesNotMatch(html, /NaN|undefined|null|⚠|Unauthorized|sk-abc|归档上游|#137a63|#c83c3c/i);
@@ -590,25 +644,33 @@ test("日报：亏损写「−¥…（亏损）」、不写利润率；没设置
 test("日报：成本读不到时收入照写，上游成本、固定成本、毛利、净利合成一行「没读到（原因）」，不写利润说明和成本明细", async (t) => {
   const h = richSetup(t, { channelsDown: true });
   const { text, html, degraded } = await buildReport(h.rt);
-  assert.equal(degraded, false);
-  const reason = "上游暂时繁忙，系统稍后会自动再读";
+  assert.equal(degraded, true, "定时发送先重试");
+  // 读不到的是自营站点的渠道列表：不说成上游繁忙，也不说「系统稍后会自动再读」
+  const reason = "自营站点暂时读不到，请稍后再试";
   assert.match(text, new RegExp(`\\n收入：¥750\\.00 ｜ 管理员自用：¥300\\.00\\n上游成本、固定成本、毛利、净利：没读到（${reason}）\\n\\n■ 用量\\n`));
   assert.doesNotMatch(text, /利润怎么算|■ 成本明细|毛利：¥|净利：¥/);
   assert.deepEqual(tile(html, "收入"), ["¥750.00", "管理员自用 ¥300.00"]);
-  assert.deepEqual(tile(html, "毛利"), ["没读到", reason]);
-  assert.deepEqual(tile(html, "净利"), ["没读到", reason]);
+  assert.deepEqual(tile(html, "毛利"), ["没读到", `上游成本 没读到（${reason}）`]);
+  assert.deepEqual(tile(html, "净利"), ["没读到", `固定成本 没读到（${reason}）`]);
   assert.doesNotMatch(html, />利润怎么算<|>成本明细</);
+});
+
+test("日报：自营站点的渠道列表因为登录信息过期读不到时，照说那一类的话", async (t) => {
+  const h = richSetup(t, { channelsDown: 401 });
+  assert.match((await buildReport(h.rt)).text, /\n上游成本、固定成本、毛利、净利：没读到（登录信息不对或过期了）\n/);
 });
 
 test("日报：收入和成本都读不到时各写一行，原因各说各的；预收、管理员标记也写没读到", async (t) => {
   const h = richSetup(t, { channelsDown: true, usersDown: true });
   const { text, html, degraded } = await buildReport(h.rt);
   assert.equal(degraded, true);
-  assert.match(text, /\n收入、管理员自用、毛利、净利：没读到（用户身份或转售记录没读全）\n上游成本、固定成本：没读到（上游暂时繁忙，系统稍后会自动再读）\n\n■ 用量\n/);
+  assert.match(text, /\n收入、管理员自用、毛利、净利：没读到（用户身份或转售记录没读全）\n上游成本、固定成本：没读到（自营站点暂时读不到，请稍后再试）\n\n■ 用量\n/);
   assert.match(text, /\n3\. bob  ¥150\.00（Token 200 万）\n（用户身份没读到，管理员没标出）\n/);
   assert.match(text, /\n■ 预收：没读到（用户身份或转售记录没读全）\n/);
   assert.deepEqual(tile(html, "收入"), ["没读到", "用户身份或转售记录没读全"]);
-  assert.deepEqual(tile(html, "毛利"), ["没读到", "上游暂时繁忙，系统稍后会自动再读"]);
+  // 邮件说的和文字版是同一件事：收入那格写收入的原因，毛利、净利两格写两项成本没读到和成本的原因
+  assert.deepEqual(tile(html, "毛利"), ["没读到", "上游成本 没读到（自营站点暂时读不到，请稍后再试）"]);
+  assert.deepEqual(tile(html, "净利"), ["没读到", "固定成本 没读到（自营站点暂时读不到，请稍后再试）"]);
 });
 
 test("日报的消费对比：前一天没有消费不写环比；前面不满 7 天、平均是 0 不写前 7 天日均；差不到 0.05% 写持平", async (t) => {
@@ -619,6 +681,8 @@ test("日报的消费对比：前一天没有消费不写环比；前面不满 7
     ["前 7 天都没有记录：两个都不写，不带括号", { prior: (i) => (i <= 7 ? null : 100) }, "消费：¥1,050.00"],
     ["比前 7 天日均低", { prior: () => 200 }, "消费：¥1,050.00（环比 −30.0%；比前 7 天日均 ¥1,500.00 低 30.0%）"],
     ["和前 7 天日均一样", { prior: () => 140 }, "消费：¥1,050.00（环比 0.0%；和前 7 天日均持平）"],
+    ["只差 0.04%：也写持平", { prior: () => 139.944 }, "消费：¥1,050.00（环比 0.0%；和前 7 天日均持平）"],
+    ["差 0.06%：四舍五入是 0.1%，写高多少", { prior: () => 139.916 }, "消费：¥1,050.00（环比 +0.1%；比前 7 天日均 ¥1,049.37 高 0.1%）"],
     ["这天和以前都没有消费", { priorDays: 0, today: {} }, "消费：¥0.00"],
   ];
   for (const [name, options, expected] of cases) {
@@ -635,4 +699,67 @@ test("日报的日期按业务时区写，往年带年份", async (t) => {
   const { title, text } = await buildReport(h.rt);
   assert.equal(title, "【炬元日报】Own 2026年12月31日");
   assert.match(text, /^【炬元日报】Own · 2026年12月31日（周四）\n统计的是 2026年12月31日 一整天\n/);
+});
+
+test("日报的上游余额按告警中心设的提醒天数分档：提醒天数以内红，7 天以内黄，不写死 3 天", async (t) => {
+  await t.test("提醒天数 10、可用 9 天：快用完", async (st) => {
+    const h = richSetup(st, { rules: { etaDays: 10 }, predict: { main: { burnPerDay: 10, etaDays: 9 } } });
+    const { text, html } = await buildReport(h.rt);
+    assert.match(text, /\n- 主力上游：\$400\.00（约 ¥2,880\.00），快用完，日均花费 ≈ ¥72\.00，可用约 9 天\n/);
+    assert.match(html, /主力上游 <span style="color:#B42F2F;font-size:11px">快用完<\/span>/);
+  });
+  await t.test("提醒天数 6、可用 5 天：红色（写死 3 天时是黄色）", async (st) => {
+    const h = richSetup(st, { rules: { etaDays: 6 }, predict: { main: { burnPerDay: 10, etaDays: 5 } } });
+    assert.match((await buildReport(h.rt)).html, /主力上游 <span style="color:#B42F2F;font-size:11px">快用完<\/span>/);
+  });
+});
+
+test("日报：按余额变化估算的上游，金额、上游成本、毛利、净利和利润率都加「≈」，成本明细写说明；固定成本写笔数", async (t) => {
+  // 主力上游的用量接口读不到，改按余额变化估算（这天 $40）；服务器还有一笔已到期的
+  const h = richSetup(t, { usageDown: ["main"], used: { main: 40 }, extraPurchase: true });
+  const { text, html } = await buildReport(h.rt);
+  const lines = text.split("\n");
+  for (const line of [
+    "上游成本：≈ ¥288.00 ｜ 毛利：≈ ¥462.00（毛利率 ≈ 61.6%）",
+    "固定成本：¥10.00 ｜ 净利：≈ ¥452.00（净利率 ≈ 60.3%）",
+    "利润怎么算：1 个上游按余额变化估算。快用完上游 不算进利润。",
+    "- 主力上游  ≈ ¥288.00（读不到用量，改按余额变化估算）",
+    "- 服务器  ¥10.00（1 笔在用，1 笔已到期）",
+  ]) assert.ok(lines.includes(line), line);
+  assert.deepEqual(tile(html, "毛利"), ["≈ ¥462.00", "毛利率 ≈ 61.6% · 上游成本 ≈ ¥288.00"]);
+  assert.match(html, /主力上游 <span[^>]*>读不到用量，改按余额变化估算<\/span>[\s\S]*?≈ ¥288\.00/);
+});
+
+test("日报的预计花费：上下限不一样时写「预计 a 到 b」，准不准那半句照写", async (t) => {
+  const h = richSetup(t, { prior: (i) => (i % 2 ? 80 : 120) });
+  const lines = (await buildReport(h.rt)).text.split("\n");
+  const at = lines.indexOf("■ 预计花费");
+  assert.deepEqual(lines.slice(at + 1, at + 4), [
+    "今天：预计 ¥581.03 到 ¥985.35",
+    "未来 7 天：预计 ¥4,866.15 到 ¥5,547.98",
+    "按过去 21 天估算，过去 2 周平均差 ±25%",
+  ]);
+});
+
+test("日报：这天没有消费、一个上游都没有时写「（这天没有消费）」「（还没有上游）」，邮件里也带括号；管理员自用是 0 时邮件里不写", async (t) => {
+  const h = richSetup(t, { today: {}, priorDays: 0, userRows: [], upstreams: false });
+  const { text, html } = await buildReport(h.rt);
+  assert.match(text, /\n■ 用得最多的模型\n（这天没有消费）\n\n■ 消费最多的用户\n（这天没有消费）\n/);
+  assert.match(text, /\n■ 上游余额\n（还没有上游）\n/);
+  assert.match(text, /\n请求数 0 ｜ Token（不含缓存）0 ｜ 有消费的用户 0 个\n/);
+  assert.equal(html.match(/>（这天没有消费）</g)?.length, 2);
+  assert.match(html, />（还没有上游）</);
+  assert.deepEqual(tile(html, "收入"), ["¥0.00", ""]);
+  // 没有消费记录：不写对比，也不写预计花费
+  assert.match(text, /\n消费：¥0\.00\n/);
+  assert.doesNotMatch(text, /预计花费/);
+});
+
+test("日报：自营站点没起名字时写「自营站点」，不写「未命名上游」", async (t) => {
+  const h = richSetup(t, { ownName: "" });
+  const { title, text, html } = await buildReport(h.rt);
+  assert.equal(title, "【炬元日报】自营站点 10月7日");
+  assert.match(text, /^【炬元日报】自营站点 · 10月7日（周三）\n/);
+  assert.match(html, />炬元 · 自营站点 日报</);
+  assert.doesNotMatch(text + html, /未命名上游/);
 });

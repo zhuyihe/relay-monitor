@@ -13,7 +13,7 @@ import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { describeError } from "../../../lib/error-copy";
 import { BALANCE_STATE_TEXT, basisText, EMPTY, formatDays, formatMoney, NO_UPSTREAM_TEXT, RANGE_TEXT, SELL_PRICE_UNSET } from "../../../lib/format";
-import { etaWindowDays, runwayLevel, stationDisplayName, WATCH_DAYS } from "../../../lib/overview-actions";
+import { etaWindowDays, ownStationDisplayName, runwayLevel, stationDisplayName, WATCH_DAYS } from "../../../lib/overview-actions";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
 import { UPSTREAM_FORM_TEXT } from "../../../lib/channel-onboarding";
 import { workflowActionMeta } from "../../../lib/workflow-actions";
@@ -376,7 +376,7 @@ function Equation({
   };
   const fixed: EqTerm = { value: dv.fixed, note: dv.fixedCount ? EQ_TEXT.fixedCount(dv.fixedCount) : EQ_TEXT.noFixed };
   const reasons = coverageReasons(dv);
-  const ownName: string = snap.own?.station?.name || COPY.ownStation;
+  const ownName: string = ownStationDisplayName(snap.own?.station);
 
   if (dv.hasIncome) {
     // 没设置售价或兼容旧接口的逐日分配时，明确展示估算原因。

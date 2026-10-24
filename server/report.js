@@ -13,7 +13,7 @@ import {
   ADMIN_UNMARKED, BALANCE_STATE_TEXT, BASIS_TITLE, COST_MODE_TEXT, EMPTY, FORECAST_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT,
   OWN_STATION_UNSET, RATE_UNSET, formatCompact, formatDayKey, formatDays, formatDeltaPct, formatMoney, formatPct, weekdayOfDayKey,
 } from "../lib/format.js";
-import { balanceViewOf, burnText, stationDisplayName } from "../lib/overview-actions.js";
+import { balanceViewOf, burnText, ownStationDisplayName, stationDisplayName } from "../lib/overview-actions.js";
 import { balanceMoneyOf, isLoss, profitApproxOf, rateSnapshotOf, splitProfitWarnings } from "../lib/profit.js";
 
 // 日报时区就是业务时区（BUSINESS_TIME_ZONE，兼容旧的 REPORT_TIME_ZONE），与利润页、日汇总同一套日界线
@@ -119,7 +119,8 @@ export async function buildReport(rt) {
   const yRows = modelRows.filter((r) => r.t >= dayStart && r.t < dayEnd);
   const yUserRows = userRows.filter((r) => r.t >= dayStart && r.t < dayEnd);
   const byModel = agg(yRows);
-  const byUser = agg(yUserRows).map((u) => ({ ...u, isAdmin: adminSet.has(u.key) }));
+  // 用户只算这天消费金额大于 0 的：只调了免费模型的不算进「有消费的用户」，也不进排行
+  const byUser = agg(yUserRows).filter((u) => u.cost > 0).map((u) => ({ ...u, isAdmin: adminSet.has(u.key) }));
   // 这一天的利润（成本也只算这一天）
   const profit = unconfirmed
     ? await unconfirmedIncomeProfit(rt, own, unconfirmed, { startMs: dayStart, now: dayEnd, tz, range: "7d" })
@@ -144,8 +145,8 @@ export async function buildReport(rt) {
   const d = reportFigures(rt, {
     own, tz, dayStart, byModel, byUser, daily, profit, ownUsers, incomeUsd, adminUsd, unconfirmed, fc: forecastDaily(daily, 7),
   });
-  // degraded：收入确认不了，这份是降级的（定时发送先重试，最后一次才发它）
-  return { title: d.title, text: reportText(d), html: reportHtml(d), degraded: !!unconfirmed };
+  // degraded：收入或成本没读到，这份是降级的（定时发送先重试，最后一次才发它）
+  return { title: d.title, text: reportText(d), html: reportHtml(d), degraded: !!unconfirmed || !!profit?.error };
 }
 
 // 日报里的每个数按 §10 写好：文字版和邮件版都从这里取，字一样、顺序一样
@@ -155,7 +156,8 @@ function reportFigures(rt, { own, tz, dayStart, byModel, byUser, daily, profit, 
   // 自营站点的金额按售价折成人民币（没设置按 1 比 1，利润说明里有那句）
   const ownRate = rateSnapshotOf(own).cnyPerUsd;
   const money = (usd, opts) => formatMoney(usd * ownRate, opts);
-  const site = stationDisplayName(own);
+  // 自营站点没起名字时写「自营站点」，不写「未命名上游」
+  const site = ownStationDisplayName(own);
   const dayKey = dayKeyInTz(dayStart, tz);
   const day = formatDayKey(dayKey, tz);
   const weekday = weekdayOfDayKey(dayKey);
@@ -335,10 +337,10 @@ function reportHtml(d) {
       <div style="${font}font-size:11px;color:${C.sub}">${esc(label)}</div>
       <div style="${font}font-size:20px;font-weight:700;color:${C.ink};margin-top:2px">${esc(value)}</div>
       ${sub ? `<div style="${font}font-size:11px;color:${C.sub};margin-top:2px">${sub}</div>` : ""}`, "12px 14px")}</td>`;
-  // 毛利、净利：读不到的写「没读到」和原因；收入确认不了、成本读得到时下面照常写成本；
-  // 亏损的数字仍用墨色，利润率换成红色的「亏损」
+  // 毛利、净利两格：下面照常写上游成本、固定成本；成本没读到时写「上游成本 没读到（原因）」，和文字版说的是同一件事。
+  // 收入或成本没读到时数写「没读到」；亏损的数字仍用墨色，利润率换成红色的「亏损」
   const resultKpi = (label, r, costLabel, cost) => {
-    if (d.costReason) return kpi(label, T.unread, esc(d.costReason));
+    if (d.costReason) return kpi(label, T.unread, esc(`${costLabel} ${T.unread}（${d.costReason}）`));
     if (d.incomeReason) return kpi(label, T.unread, esc(`${costLabel} ${cost}`));
     const note = r.note ? (r.note.loss ? tinted(r.note.text, C.crit) : esc(r.note.text)) : "";
     return kpi(label, r.value, dot(note, esc(`${costLabel} ${cost}`)));
@@ -370,7 +372,7 @@ function reportHtml(d) {
         <td width="20%" align="right" style="${font}font-size:12px;color:${C.ink};font-weight:600;white-space:nowrap">${esc(r.money)}</td>
       </tr></table>`).join(""));
   };
-  const none = small(T.noSpend);
+  const none = small(`（${T.noSpend}）`);
   const models = d.models.length ? barList(d.models, (m) => esc(m.name)) : none;
   // 管理员的标记用次要颜色，不标红；用户列表读不到时下面说一句（和文字版同一句）
   const users = d.users.length
@@ -392,7 +394,7 @@ function reportHtml(d) {
       `${esc(b.name)}${b.state ? ` <span style="color:${LEVEL_COLOR[b.level] || C.sub};font-size:11px">${esc(b.state)}</span>` : ""}`
         + `${b.tail ? ` <span style="color:${C.sub};font-size:11px">${esc(b.tail)}</span>` : ""}`,
       b.amount, b.amountSub)).join("")
-    : small(NO_UPSTREAM_TEXT));
+    : small(`（${NO_UPSTREAM_TEXT}）`));
 
   const forecast = d.forecast
     ? card(`<div style="${font}font-size:12px;color:${C.ink};line-height:1.9">${esc(`${T.today}：${d.forecast.today}`)}<br>${esc(`${T.next7}：${d.forecast.next7}`)}<br>
@@ -410,11 +412,11 @@ function reportHtml(d) {
       ${resultKpi(T.gross, d.gross, T.upstreamCost, d.upstream)}
       ${resultKpi(T.net, d.net, T.fixedCost, d.fixed)}
     </tr></table></td></tr>
+    ${d.basis ? section(BASIS_TITLE, small(d.basis, C.ink)) : ""}
     ${trend ? section(T.trend, trend) : ""}
     ${section(`${T.usage}：${dot(...T.usageParts(d.requests, d.tokens, d.payingUsers))}`)}
     ${section(T.topModels, models)}
     ${section(T.topUsers, users)}
-    ${d.basis ? section(BASIS_TITLE, small(d.basis, C.ink)) : ""}
     ${costs ? section(T.costs, costs) : ""}
     ${section(T.balances, balances)}
     ${d.prepaid ? section(`${T.prepaid}：${d.prepaid}`) : ""}
@@ -479,10 +481,8 @@ export function startReportScheduler(rt) {
       const pending = channels.filter((channel) => !successful.has(channel.id));
       if (pending.length) {
         const { title, text, html, degraded } = await buildReport(rt);
-        // 收入确认不了：先按退避重试，最后一次还是这样才发降级的那份（design/ui-copy-spec.md §10）
-        if (degraded && delivery.attempts < REPORT_MAX_ATTEMPTS) {
-          throw Object.assign(new Error("收入确认不了，稍后再试"), { code: "OWN_INCOME_UNCONFIRMED" });
-        }
+        // 收入或成本没读到：先按退避重试，最后一次还是这样才发降级的那份（design/ui-copy-spec.md §10）
+        if (degraded && delivery.attempts < REPORT_MAX_ATTEMPTS) throw new Error("收入或成本没读到，稍后再试");
         const results = await broadcast(pending, title, text, { event: "daily-report", html });
         for (const result of results) if (result.ok) successful.add(result.id);
       }

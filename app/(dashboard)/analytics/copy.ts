@@ -37,7 +37,6 @@ export const COPY = Object.freeze({
   longRangeProfit: "收入只能看 30 天以内",
   longRangeNotice: "收入只能按 30 天以内算。超过 30 天时这里只算成本，不拿 30 天的收入和更长时间的成本一起算利润。",
   switchTo: (range: string) => `切换到${range}`,
-  ownStation: "自营站点",
   incomeUnsplitEmpty: "算不出",
   incomeUnsplitProfit: "收入算不出",
   incomeUnsplit: "收入没法按天算",
