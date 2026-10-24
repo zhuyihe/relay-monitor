@@ -82,7 +82,5 @@ export const POST = withAuth(async (request, rt) => {
     account: result.account || null,
     remaining: result.remaining,
     currency: result.currency || null,
-    // 读到的时刻（服务端时钟）：上游列表测试读取成功后用它当这个上游的读取时刻
-    checkedAt: result.checkedAt || null,
   });
 });

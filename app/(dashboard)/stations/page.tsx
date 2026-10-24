@@ -9,7 +9,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
 import type { MenuProps } from "antd";
-import { api, readWorkflowDestination } from "../../../lib/client";
+import { api, readWorkflowDestination, type StationListResponse } from "../../../lib/client";
 import { actionsByStation, buildOverviewActions, burnText, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
 import { basisText, EMPTY, formatAsOf, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, OWN_STATION_LABEL, RATE_UNSET } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
@@ -265,9 +265,9 @@ export default function StationsPage() {
     reloading.current += 1;
     setLoadingList(true);
     try {
-      const r = await api("/api/stations?includeUnmonitored=true&includeArchived=true");
+      const r: StationListResponse = await api("/api/stations?includeUnmonitored=true&includeArchived=true");
       setStations(r.stations);
-      setListAt(Date.parse(r.generatedAt) || null);
+      setListAt(Date.parse(r.generatedAt || "") || null);
       setSettings(r.settings);
       if (r.tz) setTz(r.tz);
       setLoaded(true);
@@ -383,13 +383,14 @@ export default function StationsPage() {
         setStationChecks((checks) => ({ ...checks, [station.id]: { issue, checkedAt: new Date().toISOString() } }));
         return;
       }
-      // 读取时刻用接口返回的（服务端时钟），不用浏览器的时刻，免得「数据旧了」的判断混进浏览器时钟
+      // 读取时刻不改：测试接口不返回服务端的读取时刻，用浏览器的时刻会让「数据旧了」的判断混进浏览器时钟；
+      // 下一次刷新列表时换成服务端读到的
       setStations((list) => list.map((item) => (item.id === station.id ? {
         ...item,
         balance: {
           ...(item.balance && item.balance.ok ? item.balance : {}),
           ok: true,
-          checkedAt: result.checkedAt || item.balance?.checkedAt || null,
+          checkedAt: item.balance?.checkedAt || null,
           latencyMs: result.latencyMs,
           account: result.account || null,
           remaining: result.remaining,
