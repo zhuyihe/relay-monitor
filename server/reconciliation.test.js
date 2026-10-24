@@ -507,9 +507,9 @@ test("渠道目录失败时配置接口不回显上游错误中的令牌，服�
 
   const configuration = await reconciliation.getConfiguration();
   assert.equal(configuration.channels.length, 0);
-  // 上游 500 按繁忙说；详细原因是脱敏后的原文
+  // 自营站点 500 说「自营站点暂时读不到」，不说成上游繁忙；详细原因是脱敏后的原文
   assert.match(configuration.channelsError, /rejected/);
-  assert.equal(configuration.channelsErrorCode, "UPSTREAM_REQUEST_FAILED");
+  assert.equal(configuration.channelsErrorCode, "OWN_STATION_UNAVAILABLE");
   assert.doesNotMatch(JSON.stringify(configuration), /sk-sensitive-value|test-token/);
   assert.equal(logged.length, 1, "失败原因要留在服务端日志里便于排查");
   assert.match(logged[0], /本站渠道目录读取失败:.*rejected/);
@@ -526,7 +526,8 @@ test("渠道目录连不上时，详细原因和 code 说的是同一件事", as
   });
 
   const configuration = await reconciliation.getConfiguration();
-  assert.equal(configuration.channelsErrorCode, "NETWORK_UNREACHABLE");
+  // 读不到的是自营站点的渠道：连不上说「自营站点暂时读不到」（lib/error-copy.js ownStationErrorCode），详细原因是原文
+  assert.equal(configuration.channelsErrorCode, "OWN_STATION_UNAVAILABLE");
   assert.equal(configuration.channelsError, "fetch failed");
 });
 

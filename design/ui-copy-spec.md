@@ -500,7 +500,8 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
 | 地址或上游类型可能不对 | 地址或类型可能不对，请检查后再填 | —— |
 | 对方的版本不支持 | 对方的版本不支持这项功能 | —— |
 | 一次读不完 | 数量太多，一次读不完，请把详细原因发给技术同事 | 查看详细原因 |
-| 自营站点暂时读不到：读自营站点（渠道列表、用户列表、转售记录、分组和渠道数据）没成，对方繁忙、连不上或认不出原因。登录信息过期、没有权限这类照说各自那一句；不说成上游的问题，也不说「系统稍后会自动再读」 | 自营站点暂时读不到，请稍后再试 | 刷新 |
+| 自营站点暂时读不到：读自营站点（渠道列表、用户列表、转售记录、看板数据、分组和渠道数据）没成，对方繁忙、列表在变、连不上、连接被重置，或者认不出原因。有自己那句话的照说那一句（登录信息过期、没有权限、对方的版本不支持、地址或类型可能不对……）；不说成上游的问题，也不说「系统稍后会自动再读」 | 自营站点暂时读不到，请稍后再试 | 刷新 |
+| 自营站点返回的内容不对（读自营站点时返回的内容看不懂，比如一张登录页、防火墙页） | 自营站点返回的内容不对，请把详细原因发给技术同事 | 查看详细原因 |
 | 用户身份或转售记录没读全 | 用户身份或转售记录没读全 | 刷新 |
 | 保存时没存上 | 保存失败：没存上，请稍后再试。 | —— |
 | 报错其实是 §5.2、§5.3 里的问题 | 按 §5 的标题说（读取类用实时时的提示） | 按 §5 的按钮 |
@@ -775,7 +776,7 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
    | 日期时间 | `lib/format.js` 的 `formatZoned*`、`formatAsOf`（§6）；只有「10月9日」这种日历日才用 `formatMonthDay` | 各处的 `toLocaleString`、ISO 字符串、浏览器时区、页面里的 `relTime` |
    | 上游余额的写法（§7）：设置了汇率写「$12.30」和「约 ¥88.56」，悬停写「按 1 美元 = 7.20 元换算」；没设置时写「¥12.30」，旁边写「没设置汇率」。表格和余额趋势分两行写，句子和手机列表写成一行「$12.30（约 ¥88.56）」「¥12.30（没设置汇率）」 | `lib/profit.js` 的 `balanceMoneyOf` | 上游列表、手机列表、余额趋势各自拼的「站点余额 $…」 |
    | 上游的名字，没填时写「未命名上游」 | `lib/overview-actions.js` 的 `stationDisplayName` | 各页面直接用 `station.name` |
-   | 「自营站点」这一栏的名字；自营站点没起名字时也写它 | `lib/format.js` 的 `OWN_STATION_LABEL`；显示名用 `lib/overview-actions.js` 的 `ownStationDisplayName`（成本估算、日报） | 上游列表、渠道绑定、成本估算各写一份；日报写成「未命名上游」 |
+   | 「自营站点」这一栏的名字；自营站点没起名字时也写它 | `lib/format.js` 的 `OWN_STATION_LABEL`（渠道绑定的 `BINDING_COPY.ownStation`、用量分析的「（自营站点）」都取它）；显示名用 `lib/overview-actions.js` 的 `ownStationDisplayName`（成本估算、日报、利润说明） | 上游列表、渠道绑定、更新登录信息、用量分析、成本估算各写一份；日报写成「未命名上游」 |
    | 登录信息输入框在不同类型下的名字（Sub2API 的访问令牌叫「登录令牌」） | `lib/channel-onboarding.js` 的 `credentialFieldOf`，取的还是 `CREDENTIAL_FIELDS` | 编辑页、渠道绑定、更新登录信息弹窗各判断一次 |
    | 刷新之后的提示：「已刷新「上游名」」「读不到「上游名」的余额：原因。」「已刷新，其中 2 个上游读不到余额，见「需处理」」 | `lib/error-copy.js` 的 `refreshOneText`、`refreshAllText`；句末补句号用 `asSentence` | 总览、上游列表各写一份 |
    | 「读不到上游类型，暂时不能新增或编辑上游」 | `app/(dashboard)/stations/model.ts` 的 `TYPES_MISSING_TEXT` | 上游列表的横幅、编辑页的提示各写一份 |
@@ -805,7 +806,9 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
    | 告警中心的规则名 | 余额三档（余额偏低、余额用完、快用完）和「读不到余额」取 `BALANCE_STATE_TEXT`，「恢复正常」在告警中心的 `copy.ts` | 告警中心另写「余额耗尽」「查询失败」「耗尽预警」 |
    | 自营业务几张表的列名、标签名，「按明细细算」「读不到分组和渠道数据」 | `app/(dashboard)/my/shared.tsx` 的 `COL_TEXT`、`TAB_TEXT`、`AUDIT_TITLE`、`FLOW_UNREADABLE` | 概览、用户、模型与渠道各写一份 |
    | 「利润怎么算」；预计花费下面的「按过去 34 天估算」「过去 2 周平均差 ±8%」 | `lib/format.js` 的 `BASIS_TITLE`、`FORECAST_TEXT`；自营业务和日报共用 | 自营业务的 `my/shared.tsx`、`overview-tab.tsx` 和日报各写一份 |
-   | 哪几项是估算的（加「≈」）、算不算亏损 | `lib/profit.js` 的 `profitApproxOf`、`isLoss`；运营总览、自营业务的利润等式（`profit-equation.tsx`）和日报都用 | 运营总览、自营业务各判断一遍「≈」，两处结论还不一样 |
+   | 哪几项是估算的（加「≈」）、算不算亏损 | `lib/profit.js` 的 `profitApproxOf`、`isLoss`；运营总览（利润等式和上游成本面板的合计）、自营业务的利润等式（`profit-equation.tsx`）和日报都用 | 运营总览、自营业务各判断一遍「≈」，两处结论还不一样 |
+   | 日均花费的写法（§3.3）：在花钱写「≈ ¥15.12」，近期没有花费写「近期没有花费」，估不出来写「—」 | `lib/overview-actions.js` 的 `burnText`（在花钱时的那个数）、`burnCellText`（一格里三种情况都要写的地方）；推送、日报、上游列表、运营总览（需处理和悬停）、余额趋势、成本估算都用 | 各页各拼 `formatMoney(burnPerDay * rate)`，有的不带「≈」，不在花钱时写「¥0.00」 |
+   | 读自营站点没成时给哪个码（§8.2） | `lib/error-copy.js` 的 `ownStationErrorCode`；利润、用户列表、转售记录、分组和渠道数据（`server/own-helpers.js`），自营分析、日报预览和发送、管理员 Key、按明细细算这几个接口，渠道绑定读自营站点的渠道（`server/reconciliation.js`）都用 | 各处用 `errorCodeOf` 兜底各写一份，把自营站点的问题说成「上游暂时繁忙」 |
    | 日报的标题和正文（§10） | `server/report.js` 顶部的 `REPORT_TEXT`，文字版、邮件版共用，HTML 里只填数；金额、Token、日期、余额、档位、原因、成本来源、利润说明用上面这些共用的写法（`formatMoney`、`formatCompact`、`formatDayKey`、`weekdayOfDayKey`、`balanceMoneyOf`、`balanceViewOf`、`errorText`、`COST_MODE_TEXT`、`splitProfitWarnings`） | `server/report.js` 自己的 `rptCny`、`rptTok`、`pctDelta`、两份 `MODE`、自己拼的星期、写死的 3 天 |
 
 2. **不在前端给后端文案打补丁。**后端直接返回最终文字或结构化的码，然后删掉这些补丁：

@@ -11,7 +11,7 @@ import {
   axisMoney, BALANCE_STATE_TEXT, basisText, EMPTY, formatCompact, formatMoney, formatZonedDate, formatZonedDateTime, formatZonedTime, RANGE_TEXT, RATE_UNSET,
 } from "../../lib/format";
 import { isDayStartInTz } from "../../lib/business-time";
-import { balanceDaysText, balanceViewOf, isSpending, stationDisplayName } from "../../lib/overview-actions";
+import { balanceDaysText, balanceViewOf, burnCellText, isSpending, stationDisplayName } from "../../lib/overview-actions";
 import { clamp, niceTicks, timeAxisTicks } from "../../lib/chart-math";
 import { ErrorState } from "../components/data-state";
 import { ChartTip, TipBody } from "../components/float-tip";
@@ -360,7 +360,7 @@ export default function TrendModal({
             </div>
             <div>
               <dt>{COPY.burn}</dt>
-              <dd className="fig">{burn > 0 ? formatMoney(burn) : pred ? formatMoney(0) : EMPTY}</dd>
+              <dd className="fig">{burnCellText(station, pred)}</dd>
               <dd>{pred ? basisText(pred.basis) : COPY.notEnough}</dd>
             </div>
             <div>

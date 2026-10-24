@@ -1,6 +1,6 @@
 // ---- 管理员/root API Key 转售标记 ---------------------------------------------
 import { withAuth, json } from "../../../../lib/api.js";
-import { errorCodeOf } from "../../../../lib/error-copy.js";
+import { ownStationErrorCode } from "../../../../lib/error-copy.js";
 import { OWN_STATION_UNSET } from "../../../../lib/format.js";
 import { queryAdminTokens } from "../../../../lib/providers.js";
 import { ownCache, getOwnUsers } from "../../../../server/own-helpers.js";
@@ -33,15 +33,16 @@ export const GET = withAuth(async (request, rt) => {
         accounts.push({
           username: u.username, role: u.role, enumerable: false,
           error: err?.message || String(err),
-          errorCode: errorCodeOf(err),
+          errorCode: ownStationErrorCode(err),
           tokens: names.map((name) => ({ name, flagged: true, usedUsd: null })),
         });
       }
     }
     return json({ accounts });
   } catch (err) {
-    // 读自营站点没成：带上游给的码，没有就按「自营站点暂时读不到」说（lib/error-copy.js §8.2）
-    return json({ error: err?.message || String(err), code: errorCodeOf(err, "OWN_STATION_UNAVAILABLE") }, 502);
+    // 读自营站点没成：码由 ownStationErrorCode 给（lib/error-copy.js，§8.2）——通用的繁忙、连不上和认不出的说「自营站点暂时读不到」，
+    // 内容不对的说「自营站点返回的内容不对」，有自己那句话的码照旧
+    return json({ error: err?.message || String(err), code: ownStationErrorCode(err) }, 502);
   }
 });
 

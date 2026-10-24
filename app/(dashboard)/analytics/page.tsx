@@ -621,14 +621,13 @@ function RunwayPanel({ dv, critDays, metaFailed }: { dv: Derived; critDays: numb
     const level = runwayLevel(s.days, { etaDays: critDays }) ?? "muted";
     const state = level === "crit" || level === "warn" ? BALANCE_STATE_TEXT.soon : undefined;
     const suffix = s.archived ? COPY.archivedSuffix : "";
-    const burn = Number.isFinite(s.burnCny) ? formatMoney(s.burnCny) : EMPTY;
     const tip: TipRow[] = [
-      [RUNWAY_TEXT.tip.burn, burn],
+      [RUNWAY_TEXT.tip.burn, s.burn],
       [RUNWAY_TEXT.tip.days, formatDays(s.days)],
     ];
     // 和运营总览一样：算得出天数时才说怎么估的
     if (s.basis && Number.isFinite(s.days) && s.days > 0) tip.push([RUNWAY_TEXT.tip.basis, basisText(s.basis)]);
-    return { key: s.id, name: `${s.name}${suffix}`, sub: RUNWAY_TEXT.burn(burn), days: s.days, level, state, tip };
+    return { key: s.id, name: `${s.name}${suffix}`, sub: RUNWAY_TEXT.burn(s.burn), days: s.days, level, state, tip };
   });
   const foot = items.length ? (
     <>

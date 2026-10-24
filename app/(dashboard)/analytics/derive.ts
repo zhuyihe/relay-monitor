@@ -5,7 +5,7 @@
 // 导入带 .js 后缀，单元测试（tests/analytics-derive.test.mjs）可以直接用 node 跑这个文件
 import { dayKeyInTz } from "../../../lib/business-time.js";
 import { EMPTY, formatDayKey, isoDay, parseDay } from "../../../lib/format.js";
-import { stationDisplayName } from "../../../lib/overview-actions.js";
+import { burnCellText, stationDisplayName } from "../../../lib/overview-actions.js";
 import { countsInProfit, rateSnapshotOf, splitByCumulative } from "../../../lib/profit.js";
 import type { TrendRow } from "../../components/trend-panel";
 
@@ -211,7 +211,8 @@ export function derive(data: any, own: any) {
       name: stationDisplayName(s),
       archived: !!s.archivedAt,
       days: Number(s.runway.etaDays),
-      burnCny: Number(s.runway.burnPerDay) * rateSnapshotOf(s).cnyPerUsd,
+      // 日均花费那一格的字，和运营总览、上游列表同一个写法（lib/overview-actions.js）
+      burn: burnCellText(s, s.runway),
       basis: s.runway.basis || null,
     }))
     .sort((a, b) => a.days - b.days);

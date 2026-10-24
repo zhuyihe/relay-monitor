@@ -1,11 +1,11 @@
 // 用量分析页的文字：只在这一页出现的话都在这里，用语按 design/ui-copy-spec.md §3.4。
 // 页面文件不能导出常量，界面测试要引用这些话，所以放在同目录的 copy.ts（§12）；导入带 .js 后缀，node 可以直接读
-import { RATE_UNSET_PARITY } from "../../../lib/format.js";
+import { OWN_STATION_LABEL, RATE_UNSET_PARITY } from "../../../lib/format.js";
 
 export const COPY = Object.freeze({
   stationLabel: "上游",
   allStations: "全部上游",
-  ownSuffix: "（自营站点）",
+  ownSuffix: `（${OWN_STATION_LABEL}）`,
   allHint: "「全部」不含自营站点，可在列表里单独选看",
   dataLabel: "用量数据",
   readFailed: "读不到用量数据",

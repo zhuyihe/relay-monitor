@@ -327,6 +327,49 @@ test("定时发送：成本没读到（自营站点的渠道列表读不到）�
   }
 });
 
+test("定时发送：部分通知方式已经发成功后，收入或成本读不到时也先重试，最后一次才把降级的那份发给还没收到的", async (t) => {
+  for (const missing of ["income", "cost"]) {
+    await t.test(missing === "income" ? "收入读不到" : "成本读不到", async (st) => {
+      const h = setup(st);
+      h.failures.add("b");
+      let down = false;
+      st.mock.method(globalThis, "fetch", async (input, init) => {
+        const url = new URL(input);
+        if (url.hostname === "notify.example") {
+          const id = url.pathname.slice(1);
+          h.deliveries.push(id); h.sentBodies.push(JSON.parse(init.body));
+          return new Response("{}", { status: h.failures.has(id) ? 503 : 200 });
+        }
+        const unavailable = () => Response.json({ success: false, message: "unavailable" }, { status: 503 });
+        if (url.pathname === "/api/user/") return down && missing === "income" ? unavailable()
+          : Response.json({ success: true, data: { items: [{ id: 1, username: "root", role: 100 }], total: 1 } });
+        if (url.pathname === "/api/channel/") return down && missing === "cost" ? unavailable() : Response.json({ success: true, data: { items: [], total: 0 } });
+        return Response.json({ success: true, data: [] });
+      });
+      // 第一次：完整的那份，a 收到、b 没收到
+      await h.tick();
+      assert.deepEqual(h.deliveries, ["a", "b"]);
+      // 之后读不到（用户列表、渠道列表的缓存也过期了）：第二到四次都不发
+      down = true;
+      h.failures.clear();
+      const expireCaches = () => { delete h.rt._ownUsersCache; delete h.rt._ownChannelsCache; };
+      for (const delayMinutes of [1, 2, 4]) {
+        st.mock.timers.tick(delayMinutes * 60000);
+        expireCaches();
+        await h.tick();
+      }
+      assert.deepEqual(h.deliveries, ["a", "b"], "第二到四次都不发");
+      // 第五次：降级的那份只发给还没收到的 b，a 不重发
+      st.mock.timers.tick(8 * 60000);
+      expireCaches();
+      await h.tick();
+      assert.deepEqual(h.deliveries, ["a", "b", "b"]);
+      assert.match(h.sentBodies.at(-1).body, /没读到/);
+      assert.equal(h.rt.store.settings.dailyReport.lastSent, h.rt.store.settings.dailyReport.delivery.day);
+    });
+  }
+});
+
 test("转售记录没读全、用户列表读得到时：收入那几项写「没读到」，预收和管理员标记照常", async (t) => {
   const h = setup(t);
   h.rt.store.data.stations[0].resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
@@ -622,7 +665,8 @@ test("日报的邮件版和文字版同样的字：四个格子、近 14 天消�
   assert.match(html, /¥50\.00<div[^>]*>没设置汇率<\/div>/);
   assert.match(html, />预收：¥195\.00（3 个用户）</);
   // 「利润怎么算」和文字版一样在经营概览里：紧接在四个格子下面，近 14 天消费图在它下面
-  assert.ok(html.indexOf(">利润怎么算<") < html.indexOf(">近 14 天消费<"));
+  const basisAt = html.indexOf(">利润怎么算<"), trendAt = html.indexOf(">近 14 天消费<");
+  assert.ok(basisAt > 0 && trendAt > basisAt, "两块都在，利润怎么算在前");
   assert.match(html, />预计花费</);
   assert.match(html, />由炬元控制台生成 · 每日经营日报</);
   assert.doesNotMatch(html, /NaN|undefined|null|⚠|Unauthorized|sk-abc|归档上游|#137a63|#c83c3c/i);

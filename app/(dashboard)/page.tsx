@@ -11,7 +11,7 @@ import { App, Button } from "antd";
 import { api } from "../../lib/client";
 import { STATION_TABS } from "../../lib/brand";
 import type { WorkflowAction } from "../../lib/client";
-import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActions, burnText, etaWindowDays, isSpending, lowLineOf, stationDisplayName } from "../../lib/overview-actions";
+import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActions, burnCellText, burnText, etaWindowDays, isSpending, lowLineOf, stationDisplayName } from "../../lib/overview-actions";
 import { balanceMoneyOf, countsInProfit, profitApproxOf, rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
 import { asSentence, describeError, errorText, failureText, refreshAllText, refreshOneText } from "../../lib/error-copy";
@@ -676,7 +676,7 @@ function RunwayPanel({
       } else {
         tip = [
           [COPY.tip.balance, bal == null ? BALANCE_STATE_TEXT.pending : balanceWithCny(s, bal)],
-          [COPY.tip.burn, p?.burnPerDay != null ? formatMoney(Number(p.burnPerDay) * rate) : EMPTY],
+          [COPY.tip.burn, burnCellText(s, p)],
           [COPY.tip.days, balanceDaysText(view)],
         ];
         if (view.days != null && view.days !== Infinity && view.days > 0) tip.push([COPY.tip.basis, basisText(p?.basis)]);
@@ -886,7 +886,8 @@ function CostPanel({ title, money, error, onRetry }: { title: string; money: Mon
       }))
       .sort((a: HBarItem, b: HBarItem) => (b.value ?? 0) - (a.value ?? 0));
     const { notes } = splitProfitWarnings(profit);
-    return { items, total: sum(items.map((i) => i.value ?? 0)), approx: !!profit.estimated, notes };
+    // 合计带不带「≈」和同页利润等式的上游成本同一个判断（lib/profit.js）
+    return { items, total: sum(items.map((i) => i.value ?? 0)), approx: profitApproxOf(profit, money.own?.station).upstream, notes };
   }, [money]);
 
   return (
