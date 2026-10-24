@@ -1765,18 +1765,44 @@ test("运营总览两行都是 8 + 4：等式和需处理并排、一样高，�
   assert.equal(await shown.count(), Math.min(2, total));
   assert.ok(total > 2, `夹具里的需处理要多于 2 条（${total}）`);
   const more = attention.getByRole("button", { name: `还有 ${total - 2} 件`, exact: true });
+  assert.equal(await more.getAttribute("class"), "jy-more__toggle", "用共用的收起区 More，不是自己写的按钮");
   assert.equal(await more.getAttribute("aria-expanded"), "false"); assert.equal(await attention.locator(".jy-attention-rest .jy-attention > li").count(), 0);
+  const equationHeight = (await equation.boundingBox()).height;
   await more.click(); assert.equal(await more.getAttribute("aria-expanded"), "true");
+  // 点开以后需处理变长，等式那块照自己的高度，不跟着拉长（去掉 :has 那条规则时这里会失败）
+  const [eqAfter, attAfter] = [(await equation.boundingBox()).height, (await attention.boundingBox()).height];
+  assert.ok(eqAfter <= equationHeight + 1 && eqAfter < attAfter - 100, `点开「还有 N 件」后等式不跟着拉长（点开前 ${Math.round(equationHeight)}，点开后 ${Math.round(eqAfter)}，需处理 ${Math.round(attAfter)}）`);
   assert.equal(await attention.locator(".jy-attention-rest .jy-attention > li").count(), total - 2);
   // 这里经营数据读不到（夹具），「收入和上游成本」那块照样占着右边 4 列；两小段的内容在「收入确认不了时」那条里查
   assert.equal(opened.mutations.length, 0);
 });
 
-test("运营总览「今天收入和上游成本」：大金额在 1280、1440 宽时不压到运算符；小段标题不带合计（合计只在等式里）；各列前 3，「其他 N …」等于并掉的几项之和；手机上只收条形，读不到照样露出来", async (t) => {
+test("运营总览手机上没设置自营站点：「收入」那句和「去设置」露在外面、排在前面，上游成本的条收进「按上游看」", async (t) => {
+  const analytics = costAnalyticsFixture(1); analytics.stations = [0, 1, 2, 3].map((i) => ({ ...analytics.stations[0], id: `up-${i}`, name: `Upstream ${i}`, includeInProfit: true, isOwn: false, costBasis: "usage", totalCny: 10 - i }));
+  const opened = await openAccountsPage(t, { readonlyAPI(route, path) {
+    if (path === "/api/own/analytics") return failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
+    if (path === "/api/analytics") return fulfill(route, analytics);
+    assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
+  } });
+  await opened.page.setViewportSize({ width: 390, height: 844 }); await opened.page.goto(baseURL);
+  const money = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
+  const revenue = money.getByRole("region", { name: "收入", exact: true });
+  await revenue.getByText(OWN_STATION_UNSET_TITLE).waitFor(); await revenue.getByRole("button", { name: workflowActionMeta("setup_own_station").label, exact: true }).waitFor();
+  // 只有上游成本有条：按钮写「按上游看」（写它收着什么），不写「按用户、按上游看」；收入那句在它前面
+  const toggle = money.getByRole("button", { name: "按上游看", exact: true }); await toggle.waitFor();
+  assert.equal(await toggle.getAttribute("class"), "jy-more__toggle");
+  assert.equal(await money.getByRole("button", { name: "按用户、按上游看", exact: true }).count(), 0);
+  assert.ok((await revenue.boundingBox()).y < (await toggle.boundingBox()).y, "收入在前、上游成本在后");
+  assert.equal(await money.locator(".jy-hbars li").count(), 0);
+  await toggle.click(); assert.equal(await money.getByRole("region", { name: "上游成本", exact: true }).locator(".jy-hbars li").count(), 4);
+  assert.equal(opened.mutations.length, 0);
+});
+
+test("运营总览「今天收入和上游成本」：大金额在 1200–1440 宽时不压到运算符；小段标题不带合计（合计只在等式里）；各列前 3，「其他 N …」等于并掉的几项之和；手机上只收条形，读不到照样露出来", async (t) => {
   const readonly = (analytics) => (route, path) => path === "/api/own/analytics" ? fulfill(route, analytics(new URL(route.request().url()).searchParams.get("range") || "today")) : (assert.equal(path, "/api/history/overview"), fulfill(route, { series: [] }));
   const opened = await openAccountsPage(t, { readonlyAPI: readonly(bigOwnAnalytics) });
   const page = opened.page;
-  for (const width of [1440, 1280]) {
+  for (const width of [1440, 1280, 1200]) {
     await page.setViewportSize({ width, height: 900 }); await page.goto(baseURL);
     const equation = page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true });
     await equation.getByText(formatMoney(12345.67), { exact: false }).first().waitFor();
@@ -1795,11 +1821,12 @@ test("运营总览「今天收入和上游成本」：大金额在 1280、1440 �
   assert.equal(await money.getByText(formatMoney(12345.67)).count(), 0, "收入合计只在等式里，这块里不再写");
   assert.equal(await money.getByText(formatMoney(23456.8)).count(), 0, "上游成本合计只在等式里，这块里不再写");
   assert.equal(await revenue.locator(".jy-hbars li").count(), 4); assert.equal(await cost.locator(".jy-hbars li").count(), 4);
-  await revenue.locator(".jy-hbars li", { hasText: "其他 2 位用户" }).getByText(formatMoney(21), { exact: true }).waitFor();
+  await revenue.locator(".jy-hbars li", { hasText: "其他 2 位用户" }).getByText(formatMoney(24.5), { exact: true }).waitFor();
   await cost.locator(".jy-hbars li", { hasText: "其他 2 个上游" }).getByText(formatMoney(4456.8), { exact: true }).waitFor();
   // 手机：条形收进「按用户、按上游看」
   await page.setViewportSize({ width: 390, height: 844 }); await page.goto(baseURL);
   const toggle = money.getByRole("button", { name: "按用户、按上游看", exact: true }); await toggle.waitFor();
+  assert.equal(await toggle.getAttribute("class"), "jy-more__toggle", "用共用的收起区 More，不是自己写的按钮");
   assert.equal(await money.locator(".jy-hbars li").count(), 0);
   await toggle.click(); assert.equal(await money.locator(".jy-hbars li").count(), 8);
   // 手机上收入读不到：那一句原因直接露出来，不收进「按用户、按上游看」
@@ -2644,7 +2671,7 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
     station("st-nospark", "NoSpark 上游", now, { spark: [] }),
     // 名字很长又有两个标签：还是两行字，名字省略
     station("st-long", "一个名字特别特别特别特别特别特别特别长的上游（演示）", now, { demo: true, includeInProfit: false }),
-    // 有档位又有两件事：状态格「余额偏低 · 还有 1 件」，下一行是第一件事的标题，不是档位说明
+    // 有档位又有两件事：状态格「余额偏低 · 还有 1 个问题」，下一行是第一件事的标题，不是档位说明
     station("st-todo", "Todo 上游", now, { balance: { ok: true, remaining: 2, account: "todo-account", checkedAt: iso(now) } }),
     // 只有事、没有档位：「需处理」，排在正常的行前面
     station("st-only", "Only 上游", now),
@@ -3001,7 +3028,8 @@ function bigOwnAnalytics(range = "today") {
   const base = unconfirmedOwnAnalytics(range);
   const costs = [9000, 6000, 4000, 2456.8, 2000].map((cny, i) => ({ stationId: `up-${i}`, name: `Upstream ${i}`, channels: ["Sales"], mode: "usage", usd: cny / 7, cny }));
   const { incomeUnconfirmed, ...profit } = base.profit;
-  return { ...base, byUser: [5, 4, 3, 2, 1].map((cost, i) => ({ user: `user${i}`, tokens: 1000, cost, requests: 3, isAdmin: false })),
+  // 其余两位（2.2 + 1.3）× 7 = ¥24.50，和前 3 名（¥42、¥35、¥21）都不一样：写成「拿第 3 名的数」查得出来
+  return { ...base, byUser: [6, 5, 3, 2.2, 1.3].map((cost, i) => ({ user: `user${i}`, tokens: 1000, cost, requests: 3, isAdmin: false })),
     profit: { ...profit, incomeCny: 12345.67, upstreamCostCny: 23456.8, fixedCostCny: 1234.56, totalCostCny: 24691.36, grossProfitCny: -11111.13, netProfitCny: -12345.69, costs } };
 }
 // 利润等式在收入读不到时：收入写「读不到」，毛利、净利留空、下面写「读不到收入」；下方一句原因加「刷新」，原文收起。

@@ -57,7 +57,8 @@ const COPY = Object.freeze({
   business: EQ_TEXT.business,
   // 「今天收入和上游成本」一块，上下两小段（ui-copy-spec §11、ui-design-spec §5.1）
   money: (range: string) => `${range}收入和上游成本`,
-  moneyMore: "按用户、按上游看",
+  // 手机上收起条形的按钮写它收着什么（§4.11）：两段都有条形、只有收入、只有上游成本
+  moneyMore: (users: boolean, upstreams: boolean) => (users && upstreams ? "按用户、按上游看" : users ? "按用户看" : "按上游看"),
   readBusinessFailed: "读不到经营数据",
   profitFailed: EQ_TEXT.profitFailed,
   costFailed: "成本暂时算不出",
@@ -626,7 +627,7 @@ function AttentionPanel({
           </Button>
         </div>
       ) : null}
-      {/* 露最要紧的 3 条，其余收进「还有 N 件」（收起区 More，ui-design-spec §4.11、§5.1），点开在原地接着列 */}
+      {/* 露最要紧的几条（按等式那块的高度定，现在 2 条），其余收进「还有 N 件」（收起区 More，ui-design-spec §4.11、§5.1），点开在原地接着列 */}
       <AttentionList
         items={actions.visible.map(toItem)}
         emptyDesc={asOf ? `${formatAsOf(asOf, tz)}。` : undefined}
@@ -801,7 +802,7 @@ function MoneyPanelShell({
   );
 }
 
-// 收入那一小段：合计和按用户的条。收入没读到（读取失败、收入确认不了）时不拿用户消费去拼收入，说原因（§8.1）
+// 收入那一小段：按用户的条。收入没读到（读取失败、收入确认不了）时不拿用户消费去拼收入，说原因（§8.1）
 // bars：body 是条形（手机上收进「按用户、按上游看」）；不是条形时是一句状态（没设置、读不到、没有收入），手机上也直接露出来。
 // 合计不在这里写：收入、上游成本的合计只在利润等式里出现（ui-design-spec §1.4 第 2 条、§5.1）
 type MoneyView = { body: ReactNode; bars: boolean };
@@ -853,7 +854,7 @@ function useRevenueView(money: Money | null, onRetry: () => void): MoneyView | n
   }, [money, router, onRetry]);
 }
 
-// 上游成本那一小段：合计、按上游的条，和要交代的几句（放在块底）
+// 上游成本那一小段：按上游的条，和要交代的几句（放在块底）
 function useCostView(money: Money | null): (MoneyView & { notes: string[] }) | null {
   return useMemo(() => {
     if (!money) return null;
@@ -922,17 +923,21 @@ function MoneyPanel({ title, money, error, onRetry, compact }: { title: string; 
     <MoneyPanelShell title={title} money={money} error={error} onRetry={onRetry} foot={cost?.notes.length ? cost.notes.join("") : undefined}>
       {revenue && cost ? (
         compact ? (
+          // 收入在前、上游成本在后，和桌面同一个先后：挨着的条形并进一个收起区，一句话的状态照样露在外面
           <div className="jy-ov-money is-compact">
-            {revenue.bars ? null : part(COPY.incomeUnit, COPY.byUser, revenue)}
-            {cost.bars ? null : part(COPY.costUnit, COPY.byUpstream, cost)}
-            {revenue.bars || cost.bars ? (
-              <More label={COPY.moneyMore}>
+            {revenue.bars && cost.bars ? (
+              <More label={COPY.moneyMore(true, true)}>
                 <div className="jy-ov-money">
-                  {revenue.bars ? part(COPY.incomeUnit, COPY.byUser, revenue) : null}
-                  {cost.bars ? part(COPY.costUnit, COPY.byUpstream, cost) : null}
+                  {part(COPY.incomeUnit, COPY.byUser, revenue)}
+                  {part(COPY.costUnit, COPY.byUpstream, cost)}
                 </div>
               </More>
-            ) : null}
+            ) : (
+              <>
+                {revenue.bars ? <More label={COPY.moneyMore(true, false)}>{part(COPY.incomeUnit, COPY.byUser, revenue)}</More> : part(COPY.incomeUnit, COPY.byUser, revenue)}
+                {cost.bars ? <More label={COPY.moneyMore(false, true)}>{part(COPY.costUnit, COPY.byUpstream, cost)}</More> : part(COPY.costUnit, COPY.byUpstream, cost)}
+              </>
+            )}
           </div>
         ) : (
           <div className="jy-ov-money">

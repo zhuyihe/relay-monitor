@@ -577,22 +577,18 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-grid-2:not(.jy-grid-even) { grid-template-columns: minmax(0, 1fr); }
   .jy-grid-3 { grid-template-columns: minmax(0, 1fr); }
   .jy-grid-8-4 { grid-template-columns: minmax(0, 1fr); }
-  .jy-eq-value { font-size: 28px; line-height: 36px; }
-  .jy-eq-op { font-size: 28px; line-height: 36px; }
 }
-/* 金额字号按等式这一块自己的宽度缩（容器查询，不看窗口宽度）：运营总览里等式只占 8 列，五位数带「≈」「−」的金额也不压到运算符上 */
+/* 金额字号按等式这一块自己的宽度缩（容器查询，不看窗口宽度；ui-design-spec §4.2）：运营总览里等式只占 8 列，
+   五位数带「≈」「−」的金额也不压到运算符上。只用字号刻度里的档：32/40 → 24/32（fs-figure）→ 20/28（fs-title）；
+   「没设置」「读不到」那种空格子和运算符跟金额同字号同行高 */
 @container jy-eq (max-width: 959px) {
-  .jy-eq-value, .jy-eq-op { font-size: 26px; line-height: 34px; }
-  .jy-eq-value .unit { font-size: 17px; }
+  .jy-eq-value, .jy-eq-op, .jy-eq-empty { font-size: 24px; line-height: 32px; }
+  .jy-eq-value .unit { font-size: 16px; }
 }
 @container jy-eq (max-width: 759px) {
-  .jy-eq-value, .jy-eq-op { font-size: 22px; line-height: 30px; }
-  .jy-eq-value .unit { font-size: 15px; }
-  .jy-eq-term { padding-inline: 8px; }
-}
-@container jy-eq (max-width: 639px) {
-  .jy-eq-value, .jy-eq-op { font-size: 20px; line-height: 28px; }
+  .jy-eq-value, .jy-eq-op, .jy-eq-empty { font-size: 20px; line-height: 28px; }
   .jy-eq-value .unit { font-size: 14px; }
+  .jy-eq-term { padding-inline: 8px; }
 }
 @media (max-width: 991px) {
   .jy-shell, .jy-shell.is-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
