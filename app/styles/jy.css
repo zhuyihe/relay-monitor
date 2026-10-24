@@ -653,6 +653,9 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-hbars .name { white-space: normal; overflow-wrap: anywhere; }
   .jy-table-wrap.has-mobile, .jy-table.has-mobile { display: none; }
   .jy-m-list { display: block; }
+  /* 手机列表行末的按钮点的地方至少 44 高（§7）：上游列表、告警中心都用这一处 */
+  .jy-m-list .m-actions .ant-btn { min-height: 44px; }
+  .jy-m-list .m-actions .jy-icon-btn { width: 44px; height: 44px; }
   .jy-toolbar .ant-input-affix-wrapper { width: 100%; }
   .jy-toolbar .spacer { display: none; }
   .jy-toolbar .jy-seg { overflow-x: auto; }

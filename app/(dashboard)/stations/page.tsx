@@ -106,8 +106,8 @@ const COPY = Object.freeze({
   refreshing: "正在刷新",
   // 这个上游的数据比别的上游旧两轮刷新以上时，状态格下一行写「数据截至 14:20」（ui-copy-spec §6）
   staleTip: "后面几次刷新都没读到这个上游的新数据",
-  // 一个上游有几件事（ui-copy-spec §5.2）：状态格「需处理 · 还有 1 件」，「⋯」里「按钮名：标题」
-  moreTodos: (label: string, n: number) => `${label} · 还有 ${n} 件`,
+  // 一个上游有几件事（ui-copy-spec §5.2）：状态格「需处理 · 还有 1 个问题」，「⋯」里「按钮名：标题」
+  moreTodos: (label: string, n: number) => `${label} · 还有 ${n} 个问题`,
   todoItem: (label: string, title: string) => `${label}：${title}`,
   editHint: "点名称打开编辑",
   today: (money: string) => `今天花费 ${money}`,
@@ -183,6 +183,8 @@ export default function StationsPage() {
   const compact = Grid.useBreakpoint().md === false;
 
   const [stations, setStations] = useState<any[]>([]);
+  // 服务端返回列表的时刻：判断「数据旧了」的参照（staleAt）
+  const [listAt, setListAt] = useState<number | null>(null);
   const [settings, setSettings] = useState<any>({ refreshIntervalSec: 60, lowBalanceUsd: 5 });
   const [types, setTypes] = useState<any[]>([]);
   const [rules, setRules] = useState<any>({});
@@ -265,6 +267,7 @@ export default function StationsPage() {
     try {
       const r = await api("/api/stations?includeUnmonitored=true&includeArchived=true");
       setStations(r.stations);
+      setListAt(Date.parse(r.generatedAt) || null);
       setSettings(r.settings);
       if (r.tz) setTz(r.tz);
       setLoaded(true);
@@ -380,13 +383,13 @@ export default function StationsPage() {
         setStationChecks((checks) => ({ ...checks, [station.id]: { issue, checkedAt: new Date().toISOString() } }));
         return;
       }
-      const checkedAt = new Date().toISOString();
+      // 读取时刻用接口返回的（服务端时钟），不用浏览器的时刻，免得「数据旧了」的判断混进浏览器时钟
       setStations((list) => list.map((item) => (item.id === station.id ? {
         ...item,
         balance: {
           ...(item.balance && item.balance.ok ? item.balance : {}),
           ok: true,
-          checkedAt,
+          checkedAt: result.checkedAt || item.balance?.checkedAt || null,
           latencyMs: result.latencyMs,
           account: result.account || null,
           remaining: result.remaining,
@@ -587,13 +590,14 @@ export default function StationsPage() {
   const resourceSig = useMemo(() => onboardingSig(stations), [stations]);
   const nextSync = syncOnboarding(onboardingSync, view, accounts.destinationSeq, resourceSig, loaded, loadingList);
   if (nextSync !== onboardingSync) setOnboardingSync(nextSync);
-  // 这个上游的数据比别的上游里最新的那个旧两轮刷新以上：返回「数据截至 14:20」，否则 null（ui-design-spec §5.2）。
-  // 两边都是服务端读到的时刻，不拿浏览器的时钟比；读不到余额的上游下面另有一行说原因，不再标
+  // 这个上游的数据比服务端此刻旧「2 × 刷新间隔 + 30 秒」以上：返回「数据截至 14:20」，否则 null（ui-design-spec §5.2）。
+  // 30 秒是单次读取超时的余量。两边都是服务端的时刻，不拿浏览器的时钟比；所有上游都旧了、只有一个上游时也照样标。
+  // 接口没给此刻（旧版服务端）时退回到在用上游里最新的读取时刻。读不到余额的上游下面另有一行说原因，不再标
   const readAt = (v: StationView) => (v.fixed || v.archived || v.issue || !v.checkedAt ? NaN : new Date(v.checkedAt).getTime());
-  const newestRead = Math.max(0, ...live.map(readAt).filter(Number.isFinite));
+  const staleRef = listAt ?? Math.max(0, ...live.map(readAt).filter(Number.isFinite));
   const staleAt = (v: StationView) => {
     const at = readAt(v);
-    return Number.isFinite(at) && newestRead - at > 2 * refreshSec * 1000 ? formatAsOf(v.checkedAt, tz) : null;
+    return Number.isFinite(at) && staleRef - at > (2 * refreshSec + 30) * 1000 ? formatAsOf(v.checkedAt, tz) : null;
   };
   const retryAll = () => {
     reload().catch(() => {});
@@ -623,8 +627,8 @@ export default function StationsPage() {
     );
   };
 
-  // 状态格只放状态（ui-design-spec §5.2）：上一行档位，或者只有要处理的事时写「需处理」，几件事时加「· 还有 N 件」；
-  // 下一行按先后只放一样：正在刷新、数据比别的旧、那件事的标题、状态自己的说明。要处理的事的按钮在行末，不在这里
+  // 状态格只放状态（ui-design-spec §5.2）：上一行档位，或者只有要处理的事时写「需处理」，几件事时加「· 还有 N 个问题」；
+  // 下一行按先后只放一样：正在刷新、数据旧了、那件事的标题（读不到余额的行也写）、状态自己的说明。要处理的事的按钮在行末，不在这里
   const statusOf = (v: StationView) => {
     const todos = todosOf(v);
     const todo = todos[0];
@@ -633,8 +637,10 @@ export default function StationsPage() {
     const level = v.statusLabel ? v.level : todo?.level;
     const stale = staleAt(v);
     const title = todo ? workflowProblem(todo) : null;
-    const note = refreshingIds[v.s.id] ? COPY.refreshing : stale || (v.issue ? null : title || v.statusNote);
-    return { label, level, note, stale, title };
+    const refreshing = !!refreshingIds[v.s.id];
+    const note = refreshing ? COPY.refreshing : stale || title || (v.issue ? null : v.statusNote);
+    // 小钟和「后面几次刷新都没读到」那句只跟「数据截至」走，正在刷新时不挂
+    return { label, level, note, stale: refreshing ? null : stale, title };
   };
   // 下一行那一格：放不下的省略，悬停看全；数据旧时前面一个小钟，后面那句说明只给悬停和读屏
   const subLine = (note: string, stale: string | null) => (
@@ -976,7 +982,7 @@ export default function StationsPage() {
                 </div>
                 {todo ? (
                   <div className="m-todo-line">
-                    {title && !v.issue ? <span className="m-title" title={title}>{title}</span> : null}
+                    {title ? <span className="m-title" title={title}>{title}</span> : null}
                     <span className="m-todo">{todo}</span>
                   </div>
                 ) : null}

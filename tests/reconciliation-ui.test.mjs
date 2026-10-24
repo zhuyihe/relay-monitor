@@ -2539,15 +2539,15 @@ test("上游编辑页的 Esc 先收起展开的日期面板，再交给抽屉关
 
 test("上游列表一行两行字：没有「数据截至」一列，只在数据旧的那一行写；状态格只放状态，要处理的事在行末，编辑挪进「⋯」", async (t) => {
   const now = Date.now(), iso = (ms) => new Date(ms).toISOString();
-  // 刷新间隔 30 秒：比最新的那个旧 60 秒以上才算旧。45 秒的不算（门槛写成 1 倍会抓到），90 秒的算（间隔写死 60 会抓到）
+  // 刷新间隔 30 秒：比服务端此刻旧 2 × 30 + 30 = 90 秒以上才算旧。75 秒的不算（门槛少了 2 倍或少了 30 秒都会抓到），150 秒的算（间隔写死 60 会抓到）
   const station = (id, name, readAt, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, cnyPerUsd: 7,
     balance: { ok: true, remaining: 100, account: `${id}-account`, checkedAt: iso(readAt) }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" },
     spark: [[now - 7200000, 103], [now, 100]], ...extra });
   const stations = [
     station("st-fresh", "Fresh 上游", now),
-    station("st-near", "Near 上游", now - 45000),
-    station("st-stale", "Stale 上游", now - 90000),
-    // 读不到余额的那一行下面另有一行说原因，状态格不再标「数据截至」
+    station("st-near", "Near 上游", now - 75000),
+    station("st-stale", "Stale 上游", now - 150000),
+    // 读不到余额的那一行下面另有一行说原因，状态格不再标「数据截至」；它也有要处理的事时，下一行写事的标题
     station("st-broken", "Broken 上游", now - 3600000, { balance: { ok: false, error: "HTTP 401: invalid token", code: "AUTHENTICATION_FAILED", checkedAt: iso(now - 3600000) } }),
     // 没有小图的行：金额和有小图的行上下对齐
     station("st-nospark", "NoSpark 上游", now, { spark: [] }),
@@ -2560,11 +2560,11 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
   ];
   const action = (kind, stationId) => ({ id: `${kind}:${stationId}`, kind, label: TEST_READ, title: reconciliationIssue(kind === "verify_identity" ? "COST_OWNER_UNVERIFIED" : "UPSTREAM_CAPABILITY_UNVERIFIED").title, detail: "",
     href: `/stations?action=${kind === "verify_identity" ? "verify" : "verify-billing"}&stationId=${stationId}`, stationId });
-  const actions = [action("verify_identity", "st-todo"), action("verify_capability", "st-todo"), action("verify_identity", "st-only")];
+  const actions = [action("verify_identity", "st-todo"), action("verify_capability", "st-todo"), action("verify_identity", "st-only"), action("verify_capability", "st-broken")];
   const handler = async (route) => {
     const url = new URL(route.request().url()), path = url.pathname;
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 30, lowBalanceUsd: 5 } });
+    if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 30, lowBalanceUsd: 5 }, generatedAt: iso(now) });
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {}, settings: { refreshIntervalSec: 30, lowBalanceUsd: 5 } });
     if (path === "/api/reconciliation") return fulfill(route, { results: [], actions });
     throw new Error("unexpected API: " + path);
@@ -2593,8 +2593,9 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
   for (const name of ["Fresh 上游", "Near 上游"]) assert.equal(await status(name).getByText(/数据截至/).count(), 0, name);
   await status("Stale 上游").getByText(AS_OF).waitFor();
   assert.equal(await status("Broken 上游").getByText(/数据截至/).count(), 0);
-  // 有档位又有两件事：状态格「余额偏低 · 还有 1 件」，下一行是第一件事的标题；不放链接、按钮
-  await status("Todo 上游").getByText(`${BALANCE_STATE_TEXT.low} · 还有 1 件`, { exact: true }).waitFor();
+  await status("Broken 上游").getByText(actions[3].title, { exact: true }).waitFor();
+  // 有档位又有两件事：状态格「余额偏低 · 还有 1 个问题」，下一行是第一件事的标题；不放链接、按钮
+  await status("Todo 上游").getByText(`${BALANCE_STATE_TEXT.low} · 还有 1 个问题`, { exact: true }).waitFor();
   await status("Todo 上游").getByText(actions[0].title, { exact: true }).waitFor();
   assert.equal(await status("Todo 上游").getByRole("button").count(), 0);
   // 只有事：「需处理」，排在正常的行前面
@@ -2630,6 +2631,8 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
   await card("Only 上游").getByRole("button", { name: `${TEST_READ}（Only 上游）`, exact: true }).waitFor();
   assert.ok((await card("Fresh 上游").boundingBox()).height <= 90, "没有事的卡片两行");
   for (const name of ["Only 上游", "Todo 上游"]) assert.ok((await card(name).boundingBox()).height <= 120, `${name} 的卡片三行`);
+  // 读不到余额又有事：第三行照样写事的标题，不只剩一个按钮
+  await card("Broken 上游").locator(".m-todo-line").getByText(actions[3].title, { exact: true }).waitFor();
   await card("Only 上游").getByText(actions[2].title, { exact: true }).waitFor();
   assert.equal(await card("Fresh 上游").getByRole("button", { name: REFRESH }).count(), 0);
   assert.equal(await card("Fresh 上游").locator(".jy-spark-btn").count(), 0);
@@ -2638,6 +2641,22 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
   assert.ok((await card("Stale 上游").boundingBox()).height <= 110, "最多三行");
   await card("Fresh 上游").getByRole("button", { name: "Fresh 上游 的更多操作", exact: true }).click();
   for (const item of ["编辑", REFRESH, "余额趋势"]) await mobile.getByRole("menuitem", { name: item, exact: true }).waitFor();
+});
+
+test("上游列表：所有上游都旧了（后台刷新卡住）时每一行都标「数据截至」，按服务端此刻比，不按别的上游比", async (t) => {
+  const now = Date.now(), hourAgo = new Date(now - 3600000).toISOString();
+  const station = (id, name) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, cnyPerUsd: 7,
+    balance: { ok: true, remaining: 100, checkedAt: hourAgo }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" }, spark: [] });
+  const page = await openFixturePage(t, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations: [station("st-a", "A 上游"), station("st-b", "B 上游")], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: new Date(now).toISOString() });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {}, settings: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    throw new Error("unexpected API: " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: new Date(now).toISOString() }), "/stations");
+  const table = page.locator(".jy-stations-table");
+  for (const name of ["A 上游", "B 上游"]) await table.locator("tbody tr", { hasText: name }).first().locator("td").nth(1).getByText(/^数据截至 (\d{1,2}月\d{1,2}日 )?\d{1,2}:\d{2}$/).waitFor();
 });
 
 test("上游列表手机卡片：没设置汇率时余额照写「（没设置汇率）」，不让人当成人民币；设了汇率只写金额", async (t) => {
