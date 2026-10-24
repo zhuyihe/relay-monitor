@@ -12,7 +12,8 @@ import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } fr
 import { applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
 import { billDayOf } from "../../lib/business-time.js";
 import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
-import { RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues } from "../../lib/reconciliation-ledger.js";
+import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
+  ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
   uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, segmentFromRow,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
@@ -74,9 +75,8 @@ const SCHEMA = {
 };
 // 账本行按 LEDGER_SELECT 的读法返回：DECIMAL 是定点字符串，DATETIME(3) 经 DATE_FORMAT(%f) 带 6 位小数。
 // 账本的 source 是 VARCHAR（结账来源），不是快照表那样的 JSON 列。
-const DECIMAL_SCALE = { revenue_usd: 8, cost_usd: 8, revenue_rate: 6, cost_rate: 6 };
 const ledgerRead = (row) => ({ ...fresh(row), source: row.source, settled_at: `${row.settled_at}000`,
-  ...Object.fromEntries(Object.entries(DECIMAL_SCALE).map(([column, scale]) => [column, row[column] == null ? null : Number(row[column]).toFixed(scale)])) });
+  ...Object.fromEntries(Object.entries(LEDGER_DECIMAL_SCALE).map(([column, scale]) => [column, ledgerDecimal(row[column], scale)])) });
 const fold = (value) => String(value).normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
 const sameText = (a, b) => a != null && b != null && fold(a) === fold(b);
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
@@ -437,9 +437,9 @@ export class MemoryReconciliationRepository {
       }
       if (ledger?.entry) {
         const top = this.#ledgerOf(tx, ruleId, ledger.entry.billDate)[0];
-        const sameWindow = !!top && sameReconciliationWindow({ timezone: top.timezone, startMs: Number(top.window_start_ms), endMs: Number(top.window_end_ms) }, ledger.entry);
-        if (ledger.resettle || !sameWindow) {
-          const values = ledgerInsertValues({ ...ledger.entry, ruleId, revision: top ? Number(top.revision) + 1 : 1, source: top ? "resettle" : "settle" });
+        const decision = ledgerWriteDecision(top ? ledgerEntryFromRow(ledgerRead(top)) : null, ledger.entry, { resettle: ledger.resettle });
+        if (decision.write) {
+          const values = ledgerInsertValues({ ...ledger.entry, ruleId, revision: decision.revision, source: decision.source });
           const row = Object.fromEntries(RECONCILIATION_LEDGER_COLUMNS.map((column, index) => [column, values[index]]));
           this.log.ledgerWrites.push({ ruleId, billDate: row.bill_date, revision: row.revision, source: row.source });
           this.#insert(tx, "ledger", row);

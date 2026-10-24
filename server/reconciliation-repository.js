@@ -2,8 +2,9 @@
 import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, normalizeSuccessfulResult, sameReconciliationWindow } from "../lib/reconciliation-contract.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
-  ledgerInsertValues } from "../lib/reconciliation-ledger.js";
-import { applyScopePolicy, isCompletedBillingWindow, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+  ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
+import { applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+import { isSettledAt } from "../lib/reconciliation-settlement.js";
 import { billDayOf } from "../lib/business-time.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../lib/billing-capability-storage.js";
 
@@ -109,11 +110,10 @@ export function snapshotGeneratedAt(source) {
 }
 
 // 结账记录只认已结束的自然日窗口；旧版本把今天的半天、近 7 天也写成过 confirmed，读取时一并排除。
-// 有逻辑窗口但没存生成时间的旧记录，只要窗口是现在已结束的完整自然日就认。
+// 有逻辑窗口但没存生成时间的旧记录，只要窗口是现在已结束满等待期的完整自然日就认。
 export function isSettledConfirmedSource(source, window = source?.window, now = Date.now()) {
-  const generatedAt = Date.parse(source?.resultGeneratedAt);
-  return isCompletedBillingWindow(window && { startMs: Number(window.startMs), endMs: Number(window.endMs), timezone: window.timezone },
-    Number.isFinite(generatedAt) ? generatedAt : now);
+  // 和读侧、迁移同一个判断（lib/reconciliation-settlement.js 的 isSettledAt）：生成在结束满等待期以后
+  return !!window && isSettledAt({ startMs: Number(window.startMs), endMs: Number(window.endMs), timezone: window.timezone }, source?.resultGeneratedAt, now);
 }
 
 // latestRecord 在 SQL 粗筛之后的判定：只认当前账单合同、同一口径、同一窗口的记录，取最新生成的一条。
@@ -655,7 +655,7 @@ export class ReconciliationRepository {
     return true;
   }
 
-  // ledger：{ entry, resettle } 时在同一事务里记账。已有同一窗口的账就不再记，除非是重新结账（revision + 1）。
+  // ledger：{ entry, resettle } 时在同一事务里记账。写不写、写第几版见 ledgerWriteDecision。
   async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null } = {}) {
     const conn = await this.pool.getConnection();
     try {
@@ -699,14 +699,13 @@ export class ReconciliationRepository {
       if (ledger?.entry) {
         // 同快照：规则行锁已把同一规则的记账串行，普通读就能看到已提交的版本，不加锁避免间隙锁死锁。
         const [latest] = await conn.query(
-          "SELECT revision, timezone, window_start_ms, window_end_ms FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? ORDER BY revision DESC LIMIT 1",
+          `SELECT ${LEDGER_SELECT} FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? ORDER BY revision DESC LIMIT 1`,
           [ruleId, ledger.entry.billDate]
         );
-        const top = latest[0];
-        const sameWindow = !!top && sameReconciliationWindow({ timezone: top.timezone, startMs: Number(top.window_start_ms), endMs: Number(top.window_end_ms) }, ledger.entry);
-        if (ledger.resettle || !sameWindow) {
+        const decision = ledgerWriteDecision(latest.length ? ledgerEntryFromRow(latest[0]) : null, ledger.entry, { resettle: ledger.resettle });
+        if (decision.write) {
           await conn.query(`INSERT INTO reconciliation_ledger (${RECONCILIATION_LEDGER_COLUMNS.join(", ")}) VALUES (${RECONCILIATION_LEDGER_COLUMNS.map(() => "?").join(", ")})`,
-            ledgerInsertValues({ ...ledger.entry, ruleId, revision: top ? Number(top.revision) + 1 : 1, source: top ? "resettle" : "settle" }));
+            ledgerInsertValues({ ...ledger.entry, ruleId, revision: decision.revision, source: decision.source }));
         }
       }
       if (guard && !guard()) { await conn.rollback(); return false; }

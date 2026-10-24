@@ -12,6 +12,9 @@ import { completedBillingDayWindow, isCompletedBillingWindow, nextBillingEffecti
 import { sameReconciliationWindow } from "../lib/reconciliation-contract.js";
 import { isConfiguredRate, rateSnapshotOf, ratesFor, toCny } from "../lib/profit.js";
 import { resolveReconciliationWindow } from "../server/reconciliation.js";
+import { isSettleableWindow, isSettledAt, settleRetryDelayMs, settlementOutcome, settlementPrecheck } from "../lib/reconciliation-settlement.js";
+import { LEDGER_DECIMAL_SCALE, ledgerDecimal, ledgerEntryFromRow, ledgerWriteDecision, sameLedgerContent } from "../lib/reconciliation-ledger.js";
+import { isSettledConfirmedSource } from "../server/reconciliation-repository.js";
 import { reportClock } from "../server/report.js";
 
 const same = isDeepStrictEqual;
@@ -168,6 +171,74 @@ export function rateDiffs(values = [null, undefined, "", 0, -1, "7.2", 7.2, "abc
             { income: { stationId: ownStationId, ...income }, cost: { stationId: upstreamStationId, ...cost }, costBasis: basis }, legacy.factsRates(result, ledger, stationOf));
         }
       }
+    }
+  }
+  return diffs;
+}
+
+// ---- B2 ----
+
+const SETTLE_DELAY_MS = 15 * 60000;
+
+// 结账判定：一段窗口在某个时刻。只比原来真会传进来的窗口：轮询、读已固定的账、迁移只拿整天的窗口；
+// 原来「旧记录算不算结账」（isSettledRecord）只在读侧门槛放行以后才问。
+// 允许的不同只有 B-S1：仓库挑旧确认记录时，生成在结束到结束满等待期之间的（或没有生成时刻、现在落在这段里），原来认、现在不认
+export function settlementDiffs({ window, now, rules = [], attempts = [null], generatedAts = [null] }) {
+  const diffs = [], push = (family, now_, before, extra = {}) => { if (!same(now_, before)) diffs.push({ family, window, now, ...extra, now_: now_, before }); };
+  const wholeDay = !!billDayOf(window), gate = legacy.readSettledGate(window, now, false);
+  push("isSettleableWindow", isSettleableWindow(window, now), legacy.serverIsSettleableWindow(window, now));
+  for (const resettle of [false, true]) push("readSettled", settlementPrecheck({ window, now, resettle }).readSettled, legacy.readSettledGate(window, now, resettle));
+  if (wholeDay) {
+    for (const rule of rules) {
+      for (const attempt of attempts) push("due", settlementPrecheck({ rule, window, now, attempt }).due, legacy.settlementWindowDue(rule, window, now, attempt) !== null, { rule, attempt });
+    }
+  }
+  if (gate) push("settledRecord", false, legacy.isSettledRecord(null, window));
+  for (const generatedAt of generatedAts) {
+    if (wholeDay) push("migration", isSettledAt(window, generatedAt), legacy.migrationSettled(window.endMs, generatedAt), { generatedAt });
+    if (gate) push("settledRecord", isSettledAt(window, generatedAt), legacy.isSettledRecord({ generatedAt }, window), { generatedAt });
+    const source = { window: { ...window, startMs: String(window.startMs), endMs: String(window.endMs) }, resultGeneratedAt: generatedAt };
+    const repoNow = isSettledConfirmedSource(source, source.window, now), repoBefore = legacy.repositoryIsSettledConfirmedSource(source, source.window, now);
+    if (repoNow !== repoBefore) {
+      const at = Number.isFinite(Date.parse(generatedAt)) ? Date.parse(generatedAt) : now;
+      diffs.push({ family: !repoNow && at >= window.endMs && at < window.endMs + SETTLE_DELAY_MS ? "B-S1" : "repository confirmed source", window, now, generatedAt, now_: repoNow, before: repoBefore });
+    }
+  }
+  for (const profitUsd of [null, 0, 1.5]) {
+    for (const notEffective of [false, true]) {
+      const result = { window, calculation: { profitUsd }, scope: notEffective ? { notEffective } : {} };
+      const { settled, ledger, confirmedSnapshot } = settlementOutcome({ window, result, now });
+      const before = legacy.persistSettlement(result, now);
+      push("outcome", [settled, ledger, ["observation", ...(confirmedSnapshot ? ["confirmed"] : [])]], [before.settled, before.ledgerDay, before.snapshots]);
+    }
+  }
+  push("retryAt", now + settleRetryDelayMs(1), legacy.settleRetryAt(false, now));
+  // 页面「还在读取」：整天的判断、开始时刻是不是 0 点。页面上的窗口来自服务端结果，总写着时区；
+  // 没写时区时原来按上海算、billDayOf 不算整天，碰不到
+  if (window.timezone) {
+    push("view whole day", wholeDay, legacy.viewIsWholeDay(window));
+    push("view midnight", isDayStartInTz(window.startMs, window.timezone), legacy.viewIsMidnight(window.startMs, window.timezone));
+  }
+  return diffs;
+}
+
+// 账本写不写：latest 是库里最新一版的行（DECIMAL 读出来是定点字符串）。
+// 允许的不同只有 B-L1：重结、窗口相同、内容（按存进表的小数位）也相同，原来写下一版、现在不写
+export function ledgerDiffs(row, entry, resettle) {
+  const now = ledgerWriteDecision(row && ledgerEntryFromRow(row), entry, { resettle }), before = legacy.ledgerWrite(row, entry, resettle);
+  const pick = (decision) => decision.write ? decision : { write: false };
+  if (same(pick(now), before)) return [];
+  const allowed = resettle && !now.write && before.write && sameLedgerContent(ledgerEntryFromRow(row), entry);
+  return [{ family: allowed ? "B-L1" : "ledger write", row, entry, resettle, now, before }];
+}
+
+// 内存仓库模拟 DECIMAL：原来用 toFixed（按二进制近似值舍），现在和 MySQL 一样按十进制写法四舍五入。只在正好落在舍入中点上的值不同
+export function decimalDiffs(values) {
+  const diffs = [];
+  for (const value of values) {
+    for (const scale of new Set(Object.values(LEDGER_DECIMAL_SCALE))) {
+      const now = ledgerDecimal(value, scale), before = legacy.memoryDecimal(value, scale);
+      if (now !== before) diffs.push({ value, scale, now, before });
     }
   }
   return diffs;
