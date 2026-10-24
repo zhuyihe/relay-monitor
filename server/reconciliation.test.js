@@ -7,6 +7,8 @@ import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } 
 import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
 import { Store } from "../db/store.js";
 import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconciliation-scope-policy.js";
+import { reconciliationCoverageText } from "../lib/reconciliation-contract.js";
+import { reconciliationNotCountedText } from "../lib/reconciliation-view.js";
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
@@ -4493,6 +4495,42 @@ test("B1 结果缓存按请求比：「今天」过了半分钟再单独重读�
   assert.ok(!selected.coverage.channels.some((channel) => channel.issues.includes("BILLING_EVIDENCE_NOT_QUERIED")));
 });
 
+test("旧规则（legacy-v3）不要求回答 Key 用途：汇总照加、旁边那句不提、渠道算已算进利润、那一行不是需处理，四处一致", async (t) => {
+  const f = await completedDayFixture(t);
+  const legacy = f.rows.find((row) => row.id === "rr_two");
+  Object.assign(legacy, { billing_policy: "legacy-v3", cost_coverage: "unknown" });
+  legacy.source_binding.coverageDeclaration = { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] };
+  const result = await f.module.queryRules();
+  const row = result.results.find((item) => item.rule.id === "rr_two");
+  assert.notEqual(row.displayStatus.state, "action", "每日利润那一行不是需处理");
+  assert.ok(!row.health.issues.some((issue) => issue.code === "COST_COVERAGE_UNKNOWN"));
+  const totals = result.windowGroups[0].totals;
+  assert.deepEqual([totals.knownIncomeUsd, totals.knownCostUsd, totals.confirmedProfitUsd, totals.attentionRuleIds, totals.readingRuleIds], [7.5, 3, 4.5, [], []], "汇总照加，旁边那句没有话");
+  assert.equal(result.coverage.channels.find((channel) => channel.channelId === 2).status, "accounted", "渠道算已算进利润");
+});
+
+test("汇总和渠道那句同一个判断：今天有收入、上游用量还是 0 的绑定，汇总不加，渠道也不算已算进利润，旁边那句说它还在读取", async (t) => {
+  const f = await completedDayFixture(t, { now: "2026-10-09T02:00:00Z" }); // 上海 10:00
+  const prev = globalThis.fetch; // fixture 已经替换过的 fetch：没拦下的请求都交回去
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    // rr_two 那把 Key 今天还没有用量
+    if (url.host === "upstream.test" && url.pathname === "/api/log/self/stat" && url.searchParams.get("token_name") === "stable-rr_two")
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota: 0 } }) };
+    return prev(input, init);
+  });
+  const module = createReconciliationModule(f.rt, { repository: f.repository, stationUsageCost: accountUsageStub({ upstream: 5 }).stationUsageCost });
+  const r = await module.queryRules({ preset: "today" }, { accountUsage: true });
+  const two = r.results.find((row) => row.rule.id === "rr_two");
+  assert.deepEqual([two.displayStatus.state, two.health.code, two.billingTimezone.state, two.calculation.profitUsd], ["live", "UPSTREAM_EMPTY_WITH_SALES", "verified", null], "前提：还在读取，毛利算不出来");
+  const { display, attentionRuleIds, readingRuleIds } = r.commonSummary.totals;
+  assert.deepEqual([display.knownIncome, display.knownCost, display.confirmedProfit, attentionRuleIds, readingRuleIds], [5, 2, 3, [], ["rr_two"]]);
+  assert.equal(reconciliationCoverageText(r.commonSummary.coverage), "10 个渠道里 2 个已算进利润", "汇总没加的，渠道也不算已算进利润");
+  assert.equal(reconciliationNotCountedText(r.commonSummary.totals, r.results[0].requestedWindow, Date.now()), "其中 10月9日 有 1 条绑定还在读取，没算进来。");
+  // 没算进利润的上游成本：扣费 $5，其中算进利润 $2，没算进 $3
+  assert.deepEqual([r.unaccountedUpstream.accounts[0].accountedUsd, r.unaccountedUpstream.accounts[0].unaccountedUsd], [2, 3]);
+});
+
 test("U05真实NewAPI默认完整昨日：3/10全局known覆盖、局部重试复用同窗有效事实且group仅选中金额", async (t) => {
   const f = await completedDayFixture(t);
   const full = await f.module.queryRules();
@@ -4503,7 +4541,7 @@ test("U05真实NewAPI默认完整昨日：3/10全局known覆盖、局部重试�
   assert.deepEqual([full.coverage.knownChannelCount, full.coverage.accountedChannelCount, full.coverage.state, full.coverage.wholeSiteState], [10, 3, "partial", "unverified"]);
   assert.equal(full.windowGroups.length, 1);
   // 一个汇率都没设置：按系统原值（USD）显示，也不提示缺汇率。
-  assert.deepEqual(full.commonSummary.totals, { knownIncomeUsd: 7.5, knownCostUsd: 3, confirmedProfitUsd: 4.5, confirmedMarginRate: 0.6, profitComplete: false, notCountedCostRuleIds: [],
+  assert.deepEqual(full.commonSummary.totals, { knownIncomeUsd: 7.5, knownCostUsd: 3, confirmedProfitUsd: 4.5, confirmedMarginRate: 0.6, profitComplete: false, attentionRuleIds: [], readingRuleIds: [],
     display: { currency: "USD", knownIncome: 7.5, knownCost: 3, confirmedProfit: 4.5, confirmedMarginRate: 0.6 } });
   assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["USD", []]);
   assert.equal(full.unaccountedUpstream, undefined, "没要求账号级对比时不附带");
@@ -4778,7 +4816,8 @@ test("U05昨天有收费而今天disabled/missing仍保留真实金额，stale/�
   assert.deepEqual([actual.coverage.knownChannelCount, actual.coverage.accountedChannelCount], [10, 2]);
   assert.equal(actual.coverage.channels.find((channel) => channel.channelId === 2).operatingState, "manual_disabled");
   assert.equal(actual.coverage.channels.find((channel) => channel.channelId === 9).operatingState, "missing");
-  assert.equal(actual.windowGroups[0].totals.knownIncomeUsd, 7.5);
+  // 汇总只加算出来的绑定（§4）：渠道 3 在自营站点删了、毛利算不出的 rr_three 是需处理，不加，金额留在它自己那一行
+  assert.deepEqual([actual.windowGroups[0].totals.knownIncomeUsd, actual.windowGroups[0].totals.attentionRuleIds], [5, ["rr_three"]]);
   assert.equal(actual.commonSummary, null, "来源待核对的参与规则不形成共同整日汇总");
   f.catalogue.stale = true;
   const stale = await f.module.queryRules();
@@ -4802,13 +4841,16 @@ test("U05重复实际来源渠道收入只按最新成功样本计一次，所�
   }
   assert.deepEqual([actual.coverage.knownChannelCount, actual.coverage.accountedChannelCount], [10, 1]);
   assert.equal(actual.coverage.channels.find((channel) => channel.channelId === 1).status, "duplicate");
-  assert.deepEqual([actual.windowGroups[0].totals.knownIncomeUsd, actual.windowGroups[0].totals.knownCostUsd, actual.windowGroups[0].totals.confirmedProfitUsd], [5, 3, 1.5]);
+  // 重复的两条是需处理，收入、上游成本、毛利都不加，只剩 rr_three：$2.5 − $1 = $1.5，财务一减就对得上
+  assert.deepEqual([actual.windowGroups[0].totals.knownIncomeUsd, actual.windowGroups[0].totals.knownCostUsd, actual.windowGroups[0].totals.confirmedProfitUsd], [2.5, 1, 1.5]);
+  assert.deepEqual(actual.windowGroups[0].totals.attentionRuleIds, ["rr_live", "rr_two"]);
   assert.ok([...f.state.snapshots.values()].filter((row) => ["rr_live", "rr_two"].includes(row.rule_id)).every((row) => JSON.parse(row.source).recordType === "observation"));
   f.rows[1].token_id = f.rows[0].token_id; f.rows[1].token_name = f.rows[0].token_name;
   trustedLegacyRule(f.rows[1], f.stations, 7, 1); f.rows[1].source_binding.channels = { 1: "r1" };
   const shared = await f.module.queryRules({}, { force: true });
-  assert.equal(shared.windowGroups[0].totals.knownCostUsd, 2);
-  assert.deepEqual(shared.windowGroups[0].totals.notCountedCostRuleIds, ["rr_two"]);
+  // 两条共用一把 Key、还都绑着渠道 1：都是需处理，汇总只剩 rr_three 的上游成本
+  assert.equal(shared.windowGroups[0].totals.knownCostUsd, 1);
+  assert.deepEqual(shared.windowGroups[0].totals.attentionRuleIds, ["rr_live", "rr_two"]);
   assert.equal(shared.results.find((row) => row.rule.id === "rr_two").upstream.amountUsd, 1, "重复Key的raw成本仍显示，父级counted金额仅一次");
 });
 
@@ -4818,7 +4860,7 @@ test("U05真实旧规则首次安全锚定共享namespace阻断重复成员，�
   const before = f.rows.map((row) => [row.id, row.scope_version, row.billing_effective_from_ms]);
   const actual = await f.module.queryRules();
   assert.ok(actual.results.filter((row) => row.rule.id !== "rr_three").every((row) => row.calculation.profitUsd == null && row.health.issues.some((issue) => issue.code === "DUPLICATE_CHANNEL_ASSIGNMENT")));
-  assert.equal(actual.windowGroups[0].totals.knownIncomeUsd, 5);
+  assert.equal(actual.windowGroups[0].totals.knownIncomeUsd, 2.5, "重复的两条需处理，不加");
   assert.ok([...f.state.snapshots.values()].filter((row) => row.rule_id !== "rr_three").every((row) => JSON.parse(row.source).recordType === "observation"));
   assert.deepEqual(f.rows.map((row) => [row.id, row.scope_version, row.billing_effective_from_ms]), before, "安全首锚定不推进原范围日期和版本");
 });
@@ -4836,7 +4878,7 @@ test("U05实际Shanghai/UTC按绝对窗口分组；同绝对已核验标签可�
   assert.deepEqual(compatible.windowGroups[0].timezones, ["Asia/Shanghai", "Asia/Singapore"]);
   const confirmedCount = () => [...f.state.snapshots.values()].filter((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed").length;
   const confirmedBefore = confirmedCount();
-  const today = await f.module.queryRules({ preset: "today" });
+  const today = await f.module.queryRules({ preset: "today" }, { force: true });
   assert.equal(today.windowGroups.length, 1); assert.ok(today.commonSummary, "today 同绝对窗口、覆盖已核验时进入汇总");
   assert.equal(today.windowGroups[0].totals.confirmedProfitUsd, 4.5); assert.equal(today.commonSummary.totals.confirmedProfitUsd, 4.5);
   assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "live"), "today 给出实时利润，但未结束窗口不结算");
@@ -4892,7 +4934,7 @@ test("U05真实Provider+module DST23/25小时、生效前窗口保留完整请�
   assert.equal(f.state.statCalls.length, callsBefore, "生效前窗口不向任何一侧取数");
   // 已知成本同样确定为 0：汇总里不能出现“毛利 0、成本未知”的矛盾，也不能写成确认账单。
   assert.ok(before.results.every((row) => row.scope.notEffective === true && row.upstream.knownAmountUsd === 0 && row.upstream.countedAmountUsd === 0 && row.downstream.knownAmountUsd === 0));
-  assert.equal(before.windowGroups.length, 1); assert.equal(before.windowGroups[0].totals.knownCostUsd, 0); assert.deepEqual(before.windowGroups[0].totals.notCountedCostRuleIds, []);
+  assert.equal(before.windowGroups.length, 1); assert.equal(before.windowGroups[0].totals.knownCostUsd, 0); assert.deepEqual(before.windowGroups[0].totals.attentionRuleIds, []);
   assert.equal([...f.state.snapshots.values()].some((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed" && JSON.parse(snapshot.source).window?.endMs === Date.parse("2026-10-08T16:00:00Z")), false);
   const notEffective = before.coverage.channels.find((channel) => channel.channelId === 1);
   assert.equal(notEffective.status, "not_effective"); assert.deepEqual(notEffective.issues, ["BILLING_SCOPE_NOT_EFFECTIVE"]);
@@ -5086,8 +5128,9 @@ test("U05实际Provider返回窗口保留到公开row/segment/snapshot，不可�
       assert.ok(row.health.issues.some((issue) => issue.code === "BILLING_WINDOW_MISMATCH"));
     }
     assert.equal(result.commonSummary, null); assert.equal(result.coverage.accountedChannelCount, 0);
-    assert.equal(result.windowGroups[0].totals.knownIncomeUsd, 7.5);
-    assert.equal(result.windowGroups[0].totals.knownCostUsd, null, "实际另一个窗口的raw成本不能计入所请求共同窗口");
+    // 窗口对不上的都没算出来，三个数都不加
+    assert.deepEqual([result.windowGroups[0].totals.knownIncomeUsd, result.windowGroups[0].totals.knownCostUsd, result.windowGroups[0].totals.confirmedProfitUsd], [null, null, null]);
+    assert.deepEqual(result.windowGroups[0].totals.attentionRuleIds, ["rr_live", "rr_two", "rr_three"]);
     assert.ok([...f.state.snapshots.values()].every((snapshot) => {
       const source = JSON.parse(snapshot.source);
       return source.recordType === "observation" && source.result.upstream.window.endMs === source.window.endMs - 1000;
@@ -5119,8 +5162,9 @@ test("U05 external/unknown全Key用途保留原始金额与实际coverage action
     assert.equal(row.calculation.profitUsd, null); assert.equal(row.upstream.amountUsd, 1); assert.equal(row.downstream.amountUsd, 2.5);
     assert.ok(row.actions.some((action) => action.kind === "confirm_coverage" && action.href === `/stations?action=coverage&ruleId=${row.rule.id}`));
   }
-  assert.equal(actual.windowGroups[0].totals.knownIncomeUsd, 7.5);
-  assert.equal(actual.windowGroups[0].totals.confirmedProfitUsd, 1.5);
+  // 没回答完的两条是需处理，不加：只剩 rr_three，$2.5 − $1 = $1.5（原来收入写 $7.5、毛利写 $1.5，一减对不上）
+  assert.deepEqual([actual.windowGroups[0].totals.knownIncomeUsd, actual.windowGroups[0].totals.knownCostUsd, actual.windowGroups[0].totals.confirmedProfitUsd], [2.5, 1, 1.5]);
+  assert.deepEqual(actual.windowGroups[0].totals.attentionRuleIds, ["rr_live", "rr_two"]);
   assert.equal(actual.windowGroups[0].totals.profitComplete, false);
 });
 

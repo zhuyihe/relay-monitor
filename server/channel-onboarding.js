@@ -8,7 +8,8 @@ import { stationBusinessVersion } from "../db/store.js";
 import { completedBillingDayWindow, canonicalBillingKey, applyScopePolicy, normalizeRuleSourceBinding, reconciliationBillingSchedule } from "../lib/reconciliation-scope-policy.js";
 import { ChannelOnboardingRepository } from "./channel-onboarding-repository.js";
 import { workflowAction } from "../lib/workflow-actions.js";
-import { reconciliationIssue } from "../lib/reconciliation-contract.js";
+import { coverageNeedsAnswer, reconciliationIssue } from "../lib/reconciliation-contract.js";
+import { costBasisOf } from "../lib/profit.js";
 import { OWN_STATION_UNSET } from "../lib/format.js";
 import { reconciliationKeyName } from "../lib/reconciliation-view.js";
 import { businessTimeZone, canonicalTimeZone } from "../lib/business-time.js";
@@ -218,6 +219,18 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     return channel;
   }
 
+  // 「这把 Key 还给别处用吗？」要不要回答，成本计法按上游现在的设置（costBasisOf）
+  const needsCoverageAnswer = (rule) => coverageNeedsAnswer(rule, costBasisOf(rt.store.get(rule.upstreamStationId)));
+
+  // 一个渠道上在用的绑定 → 渠道绑定里的状态（§5.6）：来源没确认、或者 Key 的用途还没答成「只给这些渠道用」就是需处理。
+  // 来源没确认时另外调 onSourceUnconfirmed，渠道列表据此给「确认来源」；只是还没回答的，「去回答」由账号那一层给
+  function bindingStatus(rules, inspect, onSourceUnconfirmed = () => {}) {
+    if (!rules.length) return "unconfigured";
+    const unconfirmed = rules.some((rule) => inspect(rule).status !== "confirmed");
+    if (unconfirmed) onSourceUnconfirmed();
+    return unconfirmed || rules.some(needsCoverageAnswer) ? "review_required" : "configured";
+  }
+
   function inspectSource(rule, channelById) {
     const hasBinding = Object.keys(rule.sourceBinding || {}).length > 0;
     if (!hasBinding && !rule.ownSource) return { version: "legacy", status: "confirmed", issues: [] };
@@ -353,7 +366,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           costCoverage: !ambiguous && rule.costCoverage === "complete" ? "complete" : "unknown", coverageDeclaration: ambiguous ? { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } : coverage,
           scopeVersion: ambiguous ? null : rule.scopeVersion || 1, billingEffectiveFromMs: ambiguous ? null : effective,
           firstQueryableAtMs: ambiguous ? null : firstQueryableAtMs });
-        if (current.length && (ambiguous || rule.costCoverage !== "complete")) account.actions.push(workflowAction("confirm_coverage",
+        if (current.length && (ambiguous || needsCoverageAnswer(rule))) account.actions.push(workflowAction("confirm_coverage",
           { accountKey: account.accountKey, ruleId: rule.id, ownStationId: rule.ownStationId, channelIds: coverage.uncoveredOwnChannelIds }));
       }
       for (const resource of account.resources) {
@@ -372,6 +385,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       account.resources.sort((a, b) => a.id.localeCompare(b.id)); account.keys.sort((a, b) => a.canonicalKey.localeCompare(b.canonicalKey));
       actions.push(...account.actions);
     }
+    let sourceUnconfirmed = false;
     const channels = source.channels.map((channel) => {
       const members = savedLinks.filter((link) => link.ownStationId === source.ownSource?.stationId && link.channelId === Number(channel.id) && rt.store.get(link.stationId));
       const monitored = members.filter((link) => rt.store.get(link.stationId).monitorEnabled !== false && !rt.store.get(link.stationId).archivedAt);
@@ -379,8 +393,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         && (rule.channels || []).some((member) => Number(member.channelId) === Number(channel.id)));
       return { ...channel, baseUrl: onboardingBaseUrl(channel.baseUrl), monitor: { status: channel.missing || monitored.some((link) => link.channelRevision !== channel.revision) ? "review_required" : monitored.length ? "linked" : "unlinked",
         stationIds: [...new Set(members.map((link) => link.stationId))].sort() },
-        reconciliation: { status: related.some((rule) => active(rule) && inspect(rule).status !== "confirmed") ? "review_required"
-          : related.some(active) ? "configured" : "unconfigured", ruleIds: related.map((rule) => rule.id).sort() } };
+        reconciliation: { status: bindingStatus(related.filter(active), inspect, () => { sourceUnconfirmed = true; }), ruleIds: related.map((rule) => rule.id).sort() } };
     });
     // 归不到已核验 Key 下的有效关联仍在核算：单独列出，保留停止入口
     const placed = new Set([...accounts.values()].flatMap((account) => account.keys.flatMap((key) => key.ruleIds)));
@@ -391,7 +404,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     }).sort((a, b) => a.ruleId.localeCompare(b.ruleId));
     const unlinked = channels.filter((channel) => !channel.missing && channel.reconciliation.status === "unconfigured").map((channel) => channel.id);
     if (source.ownSource && unlinked.length) actions.push(workflowAction("connect_channels", { ownStationId: source.ownSource.stationId, channelIds: unlinked }));
-    if (own() && (source.stale || channels.some((channel) => channel.reconciliation.status === "review_required"))) {
+    if (own() && (source.stale || sourceUnconfirmed)) {
       actions.push(workflowAction("review_source", { ownStationId: own().id, channelIds: channels.map((channel) => channel.id) }));
     }
     return { accounts: [...accounts.values()].sort((a, b) => a.accountKey.localeCompare(b.accountKey)),
@@ -740,8 +753,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
               const resource = rt.store.get(link.stationId);
               return { ...link, paused: resource?.monitorEnabled === false, archived: !!resource?.archivedAt, missing: !resource };
             }) },
-          reconciliation: { status: relatedRules.some((rule) => inspect(rule).status !== "confirmed") ? "review_required"
-            : relatedRules.length ? "configured" : "unconfigured", ruleIds: relatedRules.map((rule) => rule.id) },
+          reconciliation: { status: bindingStatus(relatedRules, inspect), ruleIds: relatedRules.map((rule) => rule.id) },
         };
       }),
       syncedAt: catalogue?.syncedAt || null, stale: stale(), error: syncError, errorCode: syncErrorCode, tz: businessTimeZone(),
