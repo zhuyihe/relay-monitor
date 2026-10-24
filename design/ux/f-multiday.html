@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>多天拼装（F）样稿 · 炬元</title>
+<!--
+  多天拼装（计划 F，4b-3）的静态样稿，配 design/ux/f-multiday.md 看。
+  颜色、字号、间距取自 lib/design-tokens.js 和 app/styles/jy.css；样子按现有组件画（panel、status、data-state）。
+  数据是编的，前后对得上：近 7 天 = 10月18日–今天；10月18日–21日已固定，10月22日需处理（gemini-team），10月23日还在读取，今天实时。
+  截图：design/ux/screens/f-*.png（每个 .frame 截一张）。
+-->
+<style>
+:root {
+  --plane: #F4F6F8; --sheet: #FFFFFF; --sunken: #EEF1F5; --rule: #DFE4EA; --rule-soft: #E9EDF2;
+  --ink: #152033; --ink-2: #475467; --ink-3: #667085; --ink-dis: #98A2B3;
+  --cobalt: #3157D5; --cobalt-tint: #EBF0FD;
+  --sider: #131B2C; --sider-ink: #C5CCD8; --sider-ink-3: #8B95A6; --sider-active: rgba(127, 156, 255, .16);
+  --good: #137A63; --warn: #A86400; --warn-ink: #915500; --warn-tint: #FFF4E0;
+  --crit: #C83C3C; --crit-ink: #B42F2F; --crit-tint: #FDECEC;
+  --r1: 4px; --r2: 8px; --r3: 12px;
+  --shadow: 0 8px 24px rgba(21, 32, 51, .12);
+  --font: "IBM Plex Sans", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { font-family: var(--font); font-size: 14px; line-height: 22px; color: var(--ink); background: #D9DEE5; -webkit-font-smoothing: antialiased; padding: 32px; }
+.frame { background: var(--plane); margin: 0 auto 40px; overflow: hidden; position: relative; }
+.frame-label { font-size: 13px; color: #475467; margin: 0 auto 8px; font-weight: 600; }
+.sym { width: 12px; height: 12px; flex: none; display: inline-block; vertical-align: -1px; }
+.icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.caption { font-size: 12px; line-height: 18px; color: var(--ink-3); }
+a { color: var(--cobalt); text-decoration: none; }
+.num { font-variant-numeric: tabular-nums; }
+.c-warn { color: var(--warn-ink); }
+.spacer { flex: 1; }
+
+.shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); }
+.sider { background: var(--sider); color: var(--sider-ink); padding: 16px 12px; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 20px; color: #fff; }
+.brand strong { display: block; font-size: 16px; line-height: 24px; font-weight: 600; }
+.brand small { display: block; font-size: 12px; line-height: 16px; color: var(--sider-ink-3); }
+.brand svg { stroke: #fff; fill: none; stroke-width: 2.2; stroke-linecap: round; }
+.brand svg circle { fill: #fff; stroke: none; }
+.nav-group { font-size: 12px; line-height: 18px; color: var(--sider-ink-3); padding: 16px 12px 6px; }
+.nav-group:first-child { padding-top: 0; }
+.nav a { position: relative; display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; border-radius: var(--r2); color: var(--sider-ink); }
+.nav a.on { background: var(--sider-active); color: #fff; font-weight: 500; }
+.nav a.on::before { content: ""; position: absolute; left: -12px; top: 10px; bottom: 10px; width: 3px; border-radius: 0 3px 3px 0; background: #7F9CFF; }
+.nav-count { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: #C83C3C; color: #fff; font-size: 12px; line-height: 20px; text-align: center; font-weight: 600; }
+.main { min-width: 0; }
+.topbar { display: flex; align-items: center; gap: 16px; height: 56px; padding: 0 24px; background: var(--sheet); border-bottom: 1px solid var(--rule); }
+.topbar h1 { margin: 0; font-size: 20px; line-height: 28px; font-weight: 600; }
+.fresh { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); }
+.fresh i { width: 6px; height: 6px; border-radius: 50%; background: var(--good); }
+.icon-btn { display: inline-grid; place-items: center; width: 36px; height: 36px; color: var(--ink-2); }
+.avatar { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--cobalt-tint); color: var(--cobalt); font-size: 13px; font-weight: 600; }
+.seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--sunken); border-radius: var(--r2); }
+.seg span { padding: 3px 12px; border-radius: 6px; color: var(--ink-2); white-space: nowrap; }
+.seg span.on { background: var(--sheet); color: var(--ink); box-shadow: 0 1px 2px rgba(21, 32, 51, .08); font-weight: 500; }
+.content { padding: 24px; display: flex; flex-direction: column; gap: 24px; }
+.panel { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); }
+.panel-head { display: flex; align-items: baseline; gap: 12px; padding: 20px 24px 0; }
+.panel-head h2 { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; }
+.count { display: inline-grid; place-items: center; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px; background: var(--sunken); color: var(--ink-2); font-size: 12px; font-weight: 600; align-self: center; }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 15px; border-radius: 6px; border: 1px solid #D0D5DD; background: var(--sheet); color: var(--ink); white-space: nowrap; }
+.btn.sm { height: 28px; padding: 0 10px; font-size: 13px; }
+.tag { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: var(--r1); font-size: 12px; line-height: 18px; font-weight: 500; white-space: nowrap; }
+.tag.warn { background: var(--warn-tint); color: var(--warn-ink); }
+.tag.info { background: var(--cobalt-tint); color: var(--cobalt); }
+.tag.muted { background: var(--sunken); color: var(--ink-2); }
+.tag.plain { background: var(--sunken); color: var(--ink-2); font-weight: 400; }
+
+/* 汇总 */
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); padding: 12px 24px 0; }
+.metric { padding: 0 16px; border-left: 1px solid var(--rule); }
+.metric:first-child { border-left: 0; padding-left: 0; }
+.metric span { display: block; font-size: 13px; color: var(--ink-2); }
+.metric b { display: block; font-size: 24px; line-height: 34px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.compo { margin: 14px 24px 0; padding-top: 14px; border-top: 1px solid var(--rule-soft); display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+.compo .text b { font-weight: 500; }
+.compo .text p { margin: 2px 0 0; font-size: 13px; color: var(--ink-2); }
+
+/* 日条：每天一格，形状和颜色一起表示状态 */
+.days { display: flex; flex-direction: column; gap: 4px; }
+.strip { display: flex; gap: 4px; }
+.d { width: 22px; height: 22px; border-radius: 4px; display: grid; place-items: center; position: relative; }
+.d.fixed { background: #AEB7C4; }
+.d.fixed.rev::after { content: ""; position: absolute; right: 2px; top: 2px; width: 5px; height: 5px; border-radius: 50%; background: #fff; }
+.d.live { background: var(--cobalt-tint); box-shadow: inset 0 0 0 1.5px var(--cobalt); }
+.d.read { background: var(--cobalt-tint); box-shadow: inset 0 0 0 1.5px var(--cobalt); background-image: repeating-linear-gradient(135deg, rgba(49,87,213,.25) 0 2px, transparent 2px 5px); }
+.d.act { background: var(--warn-tint); box-shadow: inset 0 0 0 1.5px #E2B766; color: var(--warn); }
+.d.act svg { width: 10px; height: 10px; }
+.d.none { box-shadow: inset 0 0 0 1.5px var(--rule); background: repeating-linear-gradient(135deg, var(--rule-soft) 0 2px, transparent 2px 5px); }
+.d.sel { outline: 2px solid var(--ink); outline-offset: 2px; }
+.strip-labels { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-3); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend .d { width: 12px; height: 12px; border-radius: 3px; }
+.legend .d.act svg { width: 7px; height: 7px; }
+.tip { position: absolute; background: var(--ink); color: #fff; font-size: 12px; line-height: 18px; padding: 6px 10px; border-radius: 6px; box-shadow: var(--shadow); white-space: nowrap; z-index: 3; }
+.tip::after { content: ""; position: absolute; left: 14px; bottom: -4px; width: 8px; height: 8px; background: var(--ink); transform: rotate(45deg); }
+
+/* 按天看 */
+.collapse { margin: 14px 24px 0; border: 1px solid var(--rule); border-radius: var(--r2); }
+.collapse-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; }
+.table { width: 100%; border-collapse: collapse; }
+.table th { background: var(--sunken); font-weight: 500; color: var(--ink-2); font-size: 13px; text-align: left; padding: 9px 14px; }
+.table td { padding: 10px 14px; border-top: 1px solid var(--rule-soft); vertical-align: top; }
+.table .r { text-align: right; font-variant-numeric: tabular-nums; }
+.table tr.total td { border-top: 1px solid var(--rule); font-weight: 600; }
+.foot { padding: 12px 24px 20px; }
+
+.ann { position: absolute; background: #3157D5; color: #fff; font-size: 12px; line-height: 18px; padding: 4px 8px; border-radius: 6px; max-width: 280px; box-shadow: var(--shadow); z-index: 4; }
+.ann::after { content: ""; position: absolute; width: 8px; height: 8px; background: #3157D5; transform: rotate(45deg); }
+.ann.l::after { left: -4px; top: 9px; } .ann.t::after { top: -4px; left: 16px; } .ann.r::after { right: -4px; top: 9px; }
+
+.state-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; }
+.mini .metrics { grid-template-columns: repeat(3, 1fr); }
+.mini .metric b { font-size: 20px; line-height: 28px; }
+.empty { padding: 20px 24px 24px; }
+.empty h3 { margin: 0; font-size: 15px; font-weight: 500; }
+.empty p { margin: 4px 0 12px; color: var(--ink-3); font-size: 13px; }
+.err { display: flex; gap: 10px; align-items: flex-start; padding: 16px 24px 20px; }
+.err .sym { color: var(--crit); margin-top: 5px; }
+
+/* 手机 */
+.m .topbar { height: 52px; padding: 0 12px 0 8px; gap: 10px; }
+.m .topbar h1 { font-size: 18px; }
+.m .content { padding: 16px; gap: 16px; }
+.m .panel-head { padding: 16px 16px 0; }
+.m .metrics { grid-template-columns: 1fr 1fr; padding: 8px 16px 0; row-gap: 10px; }
+.m .metric:nth-child(3) { border-left: 0; padding-left: 0; }
+.m .compo { margin: 12px 16px 0; }
+.m .collapse { margin: 12px 16px 0; }
+.m .foot { padding: 12px 16px 16px; }
+.m-list { list-style: none; margin: 0; padding: 0; }
+.m-list li { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 10px 14px; border-top: 1px solid var(--rule-soft); }
+.m-list li:first-child { border-top: 0; }
+.m-list b { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="warn" viewBox="0 0 12 12"><path d="M6 1 11.6 10.8H.4Z" fill="currentColor"/></symbol>
+  <symbol id="crit" viewBox="0 0 12 12"><path d="M6 .6 11.4 6 6 11.4.6 6Z" fill="currentColor"/></symbol>
+  <symbol id="i-overview" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></symbol>
+  <symbol id="i-stations" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="4.5" rx="1"/><rect x="2" y="9" width="12" height="4.5" rx="1"/></symbol>
+  <symbol id="i-usage" viewBox="0 0 16 16"><path d="M1.5 8.5h3l2-5.5 3 10 2-4.5h3"/></symbol>
+  <symbol id="i-my" viewBox="0 0 16 16"><path d="M2.5 6.5 8 2l5.5 4.5V14h-11Z"/><path d="M6.5 14v-4h3v4"/></symbol>
+  <symbol id="i-analytics" viewBox="0 0 16 16"><path d="M2 14h12"/><path d="M4.5 11V8M8 11V4M11.5 11V6.5"/></symbol>
+  <symbol id="i-recon" viewBox="0 0 16 16"><path d="M2.5 4h7M2.5 8h5M2.5 12h4"/><path d="m9.5 11 1.8 1.8L14 9.5"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 16 16"><path d="M4 7a4 4 0 0 1 8 0v3l1.5 2h-11L4 10Z"/><path d="M6.5 14h3"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.5 8A5.5 5.5 0 1 1 11.9 4.1"/><path d="M13.5 2.2v3.3h-3.3"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11a5.5 5.5 0 0 0 0-11Z" fill="currentColor"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 16 16"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></symbol>
+  <symbol id="i-chev-d" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="m6 4 4 4-4 4"/></symbol>
+</svg>
+
+<!-- ═══ A. 每日利润 · 近 7 天（桌面 1440） ═══ -->
+<p class="frame-label" style="width:1440px">A · 近 7 天：汇总只加算出来的部分，下面一行说清构成；日条一天一格，点一格就看那一天</p>
+<section class="frame" id="f-week" style="width:1440px">
+  <div class="shell">
+    <aside class="sider">
+      <div class="brand"><svg width="28" height="28" viewBox="0 0 32 32"><path d="M7 7H11.5C15.5 7 16 12 21.5 12"/><path d="M7 16H21.5"/><path d="M7 25H11.5C15.5 25 16 20 21.5 20"/><path d="M22 5V27"/><circle cx="5" cy="7" r="2"/><circle cx="5" cy="16" r="2"/><circle cx="5" cy="25" r="2"/></svg><div><strong>炬元</strong><small>控制台</small></div></div>
+      <nav class="nav">
+        <div class="nav-group">监控</div>
+        <a><svg class="icon"><use href="#i-overview"/></svg>运营总览<span class="nav-count">4</span></a>
+        <a><svg class="icon"><use href="#i-stations"/></svg>上游资源</a>
+        <a><svg class="icon"><use href="#i-usage"/></svg>用量分析</a>
+        <div class="nav-group">经营</div>
+        <a><svg class="icon"><use href="#i-my"/></svg>自营业务</a>
+        <a><svg class="icon"><use href="#i-analytics"/></svg>成本估算</a>
+        <a class="on"><svg class="icon"><use href="#i-recon"/></svg>每日利润</a>
+        <div class="nav-group">系统</div>
+        <a><svg class="icon"><use href="#i-bell"/></svg>告警中心</a>
+        <a><svg class="icon"><use href="#i-gear"/></svg>系统设置</a>
+      </nav>
+    </aside>
+    <div class="main">
+      <header class="topbar"><h1>每日利润</h1><div class="seg"><span>今天</span><span>昨天</span><span class="on">近 7 天</span><span>本月</span><span>自定义</span></div><span class="spacer"></span><span class="fresh"><i></i>数据截至 14:32</span><span class="icon-btn"><svg class="icon"><use href="#i-refresh"/></svg></span><span class="icon-btn"><svg class="icon"><use href="#i-theme"/></svg></span><span class="avatar">A</span></header>
+      <div class="content">
+        <div style="display:flex;align-items:center;gap:8px"><span>10月18日–今天</span><span class="spacer"></span><span class="btn">以前的每日记录</span><span class="btn">成本估算</span></div>
+        <section class="panel" style="position:relative">
+          <div class="panel-head"><h2>汇总</h2></div>
+          <div class="metrics"><div class="metric"><span>收入</span><b>¥41.20</b></div><div class="metric"><span>上游成本</span><b>¥16.85</b></div><div class="metric"><span>毛利</span><b>¥24.35</b></div><div class="metric"><span>毛利率</span><b>59.1%</b></div></div>
+          <div class="compo">
+            <div class="days">
+              <div class="strip">
+                <span class="d fixed" title="10月18日 已固定"></span><span class="d fixed" title="10月19日 已固定"></span><span class="d fixed rev" title="10月20日 已固定 · 改过"></span><span class="d fixed" title="10月21日 已固定"></span><span class="d act" title="10月22日 需处理"><svg><use href="#warn"/></svg></span><span class="d read" title="10月23日 还在读取"></span><span class="d live" title="今天 实时"></span>
+              </div>
+              <div class="strip-labels"><span>10月18日</span><span>今天</span></div>
+            </div>
+            <div class="text">
+              <b>4 天已固定，1 天还在读取，今天实时</b>
+              <p>其中 10月22日 有 1 条绑定需处理，没算进来。</p>
+              <div class="legend"><span><i class="d fixed"></i>已固定</span><span><i class="d live"></i>实时</span><span><i class="d read"></i>还在读取</span><span><i class="d act"><svg><use href="#warn"/></svg></i>需处理</span></div>
+            </div>
+          </div>
+          <div class="tip" style="left:72px;top:112px">10月20日 · 已固定 · 改过 · 毛利 ¥3.41</div>
+          <div class="collapse">
+            <div class="collapse-head"><svg class="icon"><use href="#i-chev-d"/></svg><span>按天看</span><span class="spacer"></span><span class="caption">点日期只看那一天</span></div>
+            <table class="table">
+              <thead><tr><th>日期</th><th>状态</th><th class="r">收入</th><th class="r">上游成本</th><th class="r">毛利</th></tr></thead>
+              <tbody>
+                <tr><td><a>10月18日</a> <span class="caption">周六</span></td><td><span class="tag plain">已固定</span></td><td class="r">¥5.20</td><td class="r">¥2.16</td><td class="r">¥3.04</td></tr>
+                <tr><td><a>10月19日</a> <span class="caption">周日</span></td><td><span class="tag plain">已固定</span></td><td class="r">¥4.86</td><td class="r">¥2.01</td><td class="r">¥2.85</td></tr>
+                <tr><td><a>10月20日</a> <span class="caption">周一</span></td><td><span class="tag plain">已固定</span> <span class="tag muted">改过</span></td><td class="r">¥5.92</td><td class="r">¥2.51</td><td class="r">¥3.41</td></tr>
+                <tr><td><a>10月21日</a> <span class="caption">周二</span></td><td><span class="tag plain">已固定</span></td><td class="r">¥6.10</td><td class="r">¥2.48</td><td class="r">¥3.62</td></tr>
+                <tr><td><a>10月22日</a> <span class="caption">周三</span></td><td><span class="tag warn">▲ 需处理</span><div class="caption">1 条绑定没算进来</div></td><td class="r">¥6.31</td><td class="r">¥2.62</td><td class="r">¥3.69</td></tr>
+                <tr><td><a>10月23日–今天</a></td><td><span class="tag info">实时</span><div class="caption">这两天还没固定，合在一起算</div></td><td class="r">¥12.81</td><td class="r">¥5.07</td><td class="r">¥7.74</td></tr>
+                <tr class="total"><td>合计</td><td></td><td class="r">¥41.20</td><td class="r">¥16.85</td><td class="r">¥24.35</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="foot caption">5 个渠道里 3 个已算进利润 · <a>查看没算进来的</a>　已固定的日子按每天固定时记下的汇率；今天的数字还会变，过了零点自动固定。</div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>绑定列表</h2><span class="count">3</span></div>
+          <div style="height:12px"></div>
+          <table class="table">
+            <thead><tr><th style="padding-left:24px">状态</th><th>上游 / Key</th><th class="r">收入</th><th class="r">上游成本</th><th class="r">毛利</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr><td style="padding-left:24px"><span class="tag warn">▲ 需处理</span><div class="caption">其中 10月22日 需处理，没算进来</div><div class="caption">改设置前这天没能固定</div></td><td><strong>主力上游</strong><div class="caption">gemini-team</div></td><td class="r">¥10.40</td><td class="r">¥4.05</td><td class="r">¥6.35</td><td><a>计算明细</a>　<a>重新读取</a></td></tr>
+              <tr><td style="padding-left:24px"><span class="tag info">实时</span><div class="caption">4 天已固定，1 天还在读取，今天实时</div></td><td><strong>主力上游</strong><div class="caption">gpt-team</div></td><td class="r">¥22.56</td><td class="r">¥9.12</td><td class="r"><b>¥13.44</b></td><td><a>计算明细</a></td></tr>
+              <tr><td style="padding-left:24px"><span class="tag info">实时</span><div class="caption">从 10月20日 开始统计 · 2 天已固定，1 天还在读取，今天实时</div></td><td><strong>拼车团队</strong><div class="caption">team-key</div></td><td class="r">¥8.24</td><td class="r">¥3.68</td><td class="r"><b>¥4.56</b></td><td><a>计算明细</a></td></tr>
+            </tbody>
+          </table>
+          <div style="height:12px"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+  <div class="ann l" style="left:1020px;top:286px">加起来对得上：¥41.20 − ¥16.85 = ¥24.35；需处理那部分不在里面，旁边写明</div>
+  <div class="ann l" style="left:760px;top:700px">还没固定的日子和今天合在一起算</div>
+</section>
+
+<!-- ═══ B. 其他几种情况 ═══ -->
+<p class="frame-label" style="width:1160px">B · 其他几种情况：都固定了 / 有两天需处理 / 还没开始统计 / 拼不齐</p>
+<section class="frame" id="f-states" style="width:1160px">
+  <div class="state-grid">
+    <section class="panel mini">
+      <div class="panel-head"><h2>汇总</h2><span class="caption">自定义 10月1日–10月7日</span></div>
+      <div class="metrics"><div class="metric"><span>收入</span><b>¥38.40</b></div><div class="metric"><span>上游成本</span><b>¥15.90</b></div><div class="metric"><span>毛利</span><b>¥22.50</b></div></div>
+      <div class="compo"><div class="days"><div class="strip"><span class="d fixed"></span><span class="d fixed"></span><span class="d fixed"></span><span class="d fixed"></span><span class="d fixed"></span><span class="d fixed"></span><span class="d fixed"></span></div><div class="strip-labels"><span>10月1日</span><span>10月7日</span></div></div><div class="text"><b>7 天已固定</b><p>这几天的数不会再变。</p></div></div>
+      <div style="height:20px"></div>
+    </section>
+    <section class="panel mini">
+      <div class="panel-head"><h2>汇总</h2><span class="caption">自定义 10月8日–10月14日</span></div>
+      <div class="metrics"><div class="metric"><span>收入</span><b>¥29.10</b></div><div class="metric"><span>上游成本</span><b>¥12.02</b></div><div class="metric"><span>毛利</span><b>¥17.08</b></div></div>
+      <div class="compo"><div class="days"><div class="strip"><span class="d fixed"></span><span class="d act"><svg><use href="#warn"/></svg></span><span class="d act"><svg><use href="#warn"/></svg></span><span class="d fixed"></span><span class="d fixed"></span><span class="d fixed"></span><span class="d fixed"></span></div><div class="strip-labels"><span>10月8日</span><span>10月14日</span></div></div><div class="text"><b>5 天已固定</b><p>其中 2 天需处理，没算进来。</p></div></div>
+      <div style="height:20px"></div>
+    </section>
+    <section class="panel mini">
+      <div class="panel-head"><h2>汇总</h2><span class="caption">自定义 10月10日–10月16日</span></div>
+      <div class="empty"><h3>这几天还没开始统计</h3><p>最早的绑定从 10月18日 开始统计；在那之前的日子没有利润可算。</p><span class="btn sm">看近 7 天</span></div>
+    </section>
+    <section class="panel mini">
+      <div class="panel-head"><h2>汇总</h2><span class="caption">本月</span></div>
+      <div class="metrics"><div class="metric"><span>收入</span><b>—</b></div><div class="metric"><span>上游成本</span><b>—</b></div><div class="metric"><span>毛利</span><b>—</b></div></div>
+      <div class="err"><svg class="sym"><use href="#crit"/></svg><div><b style="font-weight:500">这几天的数据不完整，刷新后再看。</b><div class="caption">已固定的日子和还没固定的日子没能拼齐，先不显示合计。</div></div><span class="spacer"></span><span class="btn sm">刷新</span></div>
+    </section>
+  </div>
+</section>
+
+<!-- ═══ C. 本月（31 格）和手机 ═══ -->
+<p class="frame-label" style="width:1160px">C · 本月：一格一天，最多 31 格；格子太多时只标头尾和今天</p>
+<section class="frame" id="f-month" style="width:1160px;padding:16px">
+  <section class="panel">
+    <div class="panel-head"><h2>汇总</h2><span class="caption">本月 · 10月1日–今天</span></div>
+    <div class="metrics"><div class="metric"><span>收入</span><b>¥132.48</b></div><div class="metric"><span>上游成本</span><b>¥54.90</b></div><div class="metric"><span>毛利</span><b>¥77.58</b></div><div class="metric"><span>毛利率</span><b>58.6%</b></div></div>
+    <div class="compo"><div class="days"><div class="strip" id="month-strip"></div><div class="strip-labels"><span>10月1日</span><span>今天</span></div></div><div class="text"><b>4 天已固定，1 天还在读取，今天实时</b><p>其中 10月22日 有 1 条绑定需处理，没算进来。10月18日以前还没开始统计。</p></div></div>
+    <div style="height:20px"></div>
+  </section>
+</section>
+
+<p class="frame-label" style="width:390px">D · 手机：日条换行，按天看变成一行一天的列表</p>
+<section class="frame m" id="f-mobile" style="width:390px">
+  <header class="topbar"><span class="icon-btn"><svg class="icon"><use href="#i-menu"/></svg></span><h1>每日利润</h1><span class="spacer"></span><span class="fresh"><i></i>14:32</span></header>
+  <div class="content">
+    <div class="seg" style="display:flex;overflow:hidden"><span>今天</span><span>昨天</span><span class="on">近 7 天</span><span>本月</span><span>自定义</span></div>
+    <section class="panel">
+      <div class="panel-head"><h2>汇总</h2><span class="caption">10月18日–今天</span></div>
+      <div class="metrics"><div class="metric"><span>收入</span><b>¥41.20</b></div><div class="metric"><span>上游成本</span><b>¥16.85</b></div><div class="metric"><span>毛利</span><b>¥24.35</b></div><div class="metric"><span>毛利率</span><b>59.1%</b></div></div>
+      <div class="compo" style="flex-direction:column;gap:10px">
+        <div class="days"><div class="strip"><span class="d fixed"></span><span class="d fixed"></span><span class="d fixed rev"></span><span class="d fixed"></span><span class="d act"><svg><use href="#warn"/></svg></span><span class="d read"></span><span class="d live"></span></div><div class="strip-labels"><span>10月18日</span><span>今天</span></div></div>
+        <div class="text"><b>4 天已固定，1 天还在读取，今天实时</b><p>其中 10月22日 有 1 条绑定需处理，没算进来。</p></div>
+      </div>
+      <div class="collapse">
+        <div class="collapse-head"><svg class="icon"><use href="#i-chev-d"/></svg><span>按天看</span></div>
+        <ul class="m-list">
+          <li><span><a>10月18日</a> <span class="tag plain">已固定</span></span><b>¥3.04</b><span class="caption">收入 ¥5.20 · 上游成本 ¥2.16</span></li>
+          <li><span><a>10月22日</a> <span class="tag warn">▲ 需处理</span></span><b>¥3.69</b><span class="caption">1 条绑定没算进来</span></li>
+          <li><span><a>10月23日–今天</a> <span class="tag info">实时</span></span><b>¥7.74</b><span class="caption">这两天还没固定，合在一起算</span></li>
+        </ul>
+      </div>
+      <div class="foot caption">5 个渠道里 3 个已算进利润 · <a>查看没算进来的</a></div>
+    </section>
+  </div>
+</section>
+
+<script>
+  // 本月：10月1日–今天（24 格）。20 日以前还没开始统计，20–21 固定，22 需处理，23 还在读取，24 今天
+  const strip = document.getElementById("month-strip");
+  for (let day = 1; day <= 24; day++) {
+    const cell = document.createElement("span");
+    const kind = day < 18 ? "none" : day < 22 ? "fixed" : day === 22 ? "act" : day === 23 ? "read" : "live";
+    cell.className = `d ${kind}`;
+    if (kind === "act") cell.innerHTML = '<svg><use href="#warn"/></svg>';
+    strip.appendChild(cell);
+  }
+</script>
+</body>
+</html>
