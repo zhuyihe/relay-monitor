@@ -2600,6 +2600,32 @@ async function openCostPage(t, own, path = "/analytics", { stations = costStatio
 }
 const failJSON = (route, status, body) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
+test("成本估算：「数字怎么来的」「没算进去的数据」默认收起，点按钮或从链接跳过来才展开", async (t) => {
+  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
+  const { page } = await openCostPage(t, own);
+  // 页顶只露一句（ui-copy-spec §8.4），长说明在按钮后面
+  await page.getByText(ANALYTICS_COPY.sourceShort, { exact: true }).waitFor();
+  assert.equal(await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).count(), 0);
+  const source = page.getByRole("button", { name: ANALYTICS_COPY.sourceTitle, exact: true });
+  assert.equal(await source.getAttribute("aria-expanded"), "false"); await source.click();
+  assert.equal(await source.getAttribute("aria-expanded"), "true");
+  await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).waitFor();
+  await source.click(); assert.equal(await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).count(), 0);
+  // 没算进去的数据：面板只露结论那一句，明细在「哪些天、哪些上游缺记录」后面
+  const coverage = page.locator("#analytics-coverage");
+  const details = coverage.getByRole("button", { name: ANALYTICS_COPY.coverageCaption, exact: true });
+  await details.waitFor(); assert.equal(await coverage.locator("dl").count(), 0);
+  await details.click(); await coverage.locator("dl").getByText(ANALYTICS_COPY.kvRange, { exact: true }).waitFor();
+  await details.click(); assert.equal(await coverage.locator("dl").count(), 0);
+  // 带着 #analytics-coverage 打开时直接展开；页里「查看没算进去的数据」这类链接每点一次都展开（收起后再点也一样）
+  await page.goto(page.url().split("#")[0] + "#analytics-coverage"); await page.reload();
+  await coverage.locator("dl").waitFor(); assert.equal(await details.getAttribute("aria-expanded"), "true");
+  await details.click(); assert.equal(await coverage.locator("dl").count(), 0);
+  await page.evaluate(() => { const a = document.createElement("a"); a.href = "#analytics-coverage"; a.textContent = "去看"; a.id = "probe-link"; document.body.prepend(a); });
+  await page.locator("#probe-link").click();
+  await coverage.locator("dl").waitFor(); assert.equal(await details.getAttribute("aria-expanded"), "true");
+});
+
 test("成本估算的可用天数和运营总览同一个档位：余额在提醒线以下写「余额偏低」，不只按天数写「快用完」", async (t) => {
   const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
   const low = await openCostPage(t, own, "/analytics", { stations: costStationsFixture({ ok: true, remaining: 2 }, { etaDays: 1.5, burnPerDay: 1 }) });
@@ -2787,6 +2813,12 @@ test("用量分析：读不到用量的上游按码说一句、原文收起；�
   const page = await openFixturePage(t, handler, undefined, false, null, "/usage");
   const totals = page.getByRole("region", { name: USAGE_COPY.totalsLabel, exact: true });
   await totals.getByText(formatCompact(1234567), { exact: true }).waitFor();
+  // 读不到的上游默认只一行（ui-copy-spec §8.4）：「看原因」展开才列出每个上游；合计里那一格不再写「N 个读不到」
+  const failedLine = page.locator(".jy-usage-failed-line"); await failedLine.getByText(USAGE_COPY.failedSome(1), { exact: true }).waitFor();
+  assert.equal(await page.locator(".jy-usage-failed li").count(), 0);
+  assert.equal(await totals.getByText(/个读不到/).count(), 0);
+  const why = failedLine.getByRole("button", { name: USAGE_COPY.failedWhy, exact: true });
+  assert.equal(await why.getAttribute("aria-expanded"), "false"); await why.click(); assert.equal(await why.getAttribute("aria-expanded"), "true");
   const failed = page.locator(".jy-usage-failed li"); await failed.waitFor();
   assert.match(await failed.innerText(), new RegExp(`^${failureSentence("Broken upstream", ERROR_CATEGORIES.auth.text)}`));
   assert.doesNotMatch(await failed.innerText(), /invalid token/);

@@ -24,6 +24,13 @@ body {
 .jy-sym { width: 12px; height: 12px; flex: none; display: block; }
 .jy-link { color: var(--jy-cobalt); text-decoration: none; }
 .jy-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+/* 收起区（ui-design-spec §4.11，app/components/more.tsx）：一个写明收着什么的文字按钮，箭头展开后朝下 */
+.jy-more__toggle { display: inline-flex; align-items: center; gap: 2px; padding: 0; border: 0; background: none; color: var(--jy-cobalt); font: inherit; font-size: 13px; cursor: pointer; }
+.jy-more__toggle:hover { text-decoration: underline; text-underline-offset: 3px; }
+.jy-more__toggle:focus-visible { outline: 2px solid var(--jy-cobalt); outline-offset: 2px; border-radius: 2px; }
+.jy-more__toggle .jy-icon { width: 14px; height: 14px; transition: transform 160ms; }
+.jy-more__toggle .jy-icon.is-open { transform: rotate(90deg); }
+.jy-more__body { margin-top: 8px; }
 .jy-shell :is(a, button, [role="tab"], [role="button"]):not(.ant-btn):focus-visible { outline: none; box-shadow: var(--jy-focus-ring); }
 
 /* ─── 外壳 ─────────────────────────────────────────────── */
@@ -530,6 +537,11 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 /* 横幅正文：标题一行、说明一行、「查看详细原因」，按钮靠右 */
 .jy-banner__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .jy-banner__body p { margin: 0; }
+/* 一句结论 + 收起按钮排在同一行，展开的内容另起一行占满（§4.11）：放在结论和 <More> 外面那一层。
+   要写在 .jy-banner__body 后面才盖得住它的竖排 */
+.jy-more-line { display: flex; flex-direction: row; flex-wrap: wrap; align-items: baseline; column-gap: 12px; }
+.jy-more-line > .jy-more { display: contents; }
+.jy-more-line .jy-more__body { flex-basis: 100%; margin-top: 4px; }
 
 /* 余额趋势弹窗：四个读数 + 范围切换 + 折线 */
 .jy-trend { display: flex; flex-direction: column; gap: 16px; }

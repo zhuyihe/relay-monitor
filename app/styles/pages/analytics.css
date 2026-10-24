@@ -22,8 +22,7 @@
 /* 数字怎么来的：估出来的数与上游账单的分界，右侧直达每日利润 */
 .jy-analytics-source { align-items: flex-start; }
 .jy-analytics-source-body { flex: 1; min-width: 0; }
-.jy-analytics-source-body b { font-weight: 500; }
-.jy-analytics-source-body p { margin: 2px 0 0; max-width: 72ch; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-analytics-source-body p { margin: 0; max-width: 72ch; font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
 .jy-analytics-source .page-toolbar { flex: none; }
 @media (max-width: 767px) {
   .jy-analytics-source { flex-wrap: wrap; }

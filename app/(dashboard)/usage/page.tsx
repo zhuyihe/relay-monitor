@@ -16,6 +16,7 @@ import { rateSnapshotOf } from "../../../lib/profit";
 import { palette, SERIES_KEYS } from "../../../lib/design-tokens";
 import { useThemeMode } from "../../providers";
 import ChartBox from "../chart-box";
+import { More } from "../../components/more";
 import { Panel } from "../../components/panel";
 import { EmptyState, ErrorState, PanelSkeleton, RefreshFailedBanner } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
@@ -551,22 +552,18 @@ export default function UsagePage() {
               {agg.okSts.length}
               <span className="jy-usage-unit">{COPY.sourcesOf(agg.sts.length)}</span>
             </dd>
-            {agg.errSts.length > 0 ? (
-              <dd className="jy-status jy-status--warn">
-                <Sym kind="warn" />
-                {COPY.failedCount(agg.errSts.length)}
-              </dd>
-            ) : null}
+            {/* 读不到的个数在下面那一行说，这里不重复（ui-copy-spec §8.4） */}
           </div>
         </dl>
       </Panel>
 
-      {/* 读不到用量的上游（同 v1 usage-errors）：合计里不含它们；原文进「查看详细原因」 */}
+      {/* 读不到用量的上游：合计里不含它们。默认一行，「看原因」展开每个上游的原因，原文进「查看详细原因」（ui-copy-spec §8.4） */}
       {agg.errSts.length > 0 && (
-        <div className="jy-banner">
+        <div className="jy-banner jy-usage-failed-line">
           <Sym kind="warn" />
-          <div className="jy-banner__body">
-            <b>{allFailed ? COPY.failedTitle : COPY.failedTitlePartial}</b>
+          <div className="jy-banner__body jy-more-line">
+            <b>{allFailed ? COPY.failedAll(agg.errSts.length) : COPY.failedSome(agg.errSts.length)}</b>
+            <More label={COPY.failedWhy}>
             <ul className="jy-usage-failed">
               {agg.errSts.map((s: any) => {
                 const note = stationErrorOf(s);
@@ -578,6 +575,7 @@ export default function UsagePage() {
                 );
               })}
             </ul>
+            </More>
           </div>
         </div>
       )}

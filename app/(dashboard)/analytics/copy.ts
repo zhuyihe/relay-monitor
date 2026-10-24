@@ -14,7 +14,9 @@ export const COPY = Object.freeze({
   window: (start: string, end: string, days: number) => `${start}–${end}，共 ${days} 天`,
   // 本页是估出来的数，按上游账单算的利润在每日利润页
   sourceTitle: "数字怎么来的",
-  sourceBody: `上游成本按余额的变化估算，固定成本按付费周期平摊到每天，可用天数按近期花费估算；美元按各上游设置的汇率换成人民币（${RATE_UNSET_PARITY}）。这些是估出来的数，不是上游的实际账单；按上游账单算的每天利润在「${NAV_LABELS.reconciliation}」里看。`,
+  // 顶上那一行（ui-copy-spec §8.4）：收起时只写这一句，「数字怎么来的」展开后才是 sourceBody
+  sourceShort: "这一页的数是按余额变化估出来的，不是上游的实际账单。",
+  sourceBody: `上游成本按余额的变化估算，固定成本按付费周期平摊到每天，可用天数按近期花费估算；美元按各上游设置的汇率换成人民币（${RATE_UNSET_PARITY}）。按上游账单算的每天利润在「${NAV_LABELS.reconciliation}」里看。`,
   emptyDesc: "加上上游后，这里会算成本和利润。",
   emptyArchived: "已归档的上游勾选「包含已归档」后可以看。",
   // 利润等式下面「数据不完整」的原因，每条一句

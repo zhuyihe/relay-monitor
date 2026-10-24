@@ -23,6 +23,7 @@ import { HBars } from "../../components/hbars";
 import type { HBarItem } from "../../components/hbars";
 import { Heatmap } from "../../components/heatmap";
 import { Sym } from "../../components/icons";
+import { More } from "../../components/more";
 import { Panel } from "../../components/panel";
 import { EQ_TEXT, ProfitEquation, incomeUnreadProps } from "../../components/profit-equation";
 import type { EqTerm } from "../../components/profit-equation";
@@ -246,13 +247,15 @@ export default function AnalyticsPage() {
     </Checkbox>
   );
 
-  // 本页是估出来的数，按上游账单算的利润在每日利润页
+  // 本页是估出来的数，按上游账单算的利润在每日利润页。默认一行，「数字怎么来的」收起（ui-copy-spec §8.4）
   const sourceNote = (
     <div className="jy-banner jy-banner--info jy-analytics-source">
       <Sym kind="info" />
-      <div className="jy-analytics-source-body">
-        <b>{COPY.sourceTitle}</b>
-        <p>{COPY.sourceBody}</p>
+      <div className="jy-analytics-source-body jy-more-line">
+        <span>{COPY.sourceShort}</span>
+        <More label={COPY.sourceTitle}>
+          <p>{COPY.sourceBody}</p>
+        </More>
       </div>
       <div className="page-toolbar">
         <Button size="small" href="/reconciliation">
@@ -741,8 +744,10 @@ function CoveragePanel({ dv, data, stations }: { dv: Derived; data: any; station
 
   return (
     <div id={COVERAGE_ID} className="jy-analytics-anchor">
-      <Panel title={COPY.panel.coverage} caption={COPY.coverageCaption}>
+      <Panel title={COPY.panel.coverage}>
         <p className="jy-analytics-lead">{lead}</p>
+        {/* 明细默认收起；「查看没算进去的数据」链到这里时展开（ui-copy-spec §8.4） */}
+        <More label={COPY.coverageCaption} id={COVERAGE_ID}>
         <dl className="jy-kv">
           <dt>{COPY.kvRange}</dt>
           <dd>{COPY.window(md(data.start, tz), md(data.end, tz), days)}</dd>
@@ -798,6 +803,7 @@ function CoveragePanel({ dv, data, stations }: { dv: Derived; data: any; station
             </table>
           </div>
         )}
+        </More>
       </Panel>
     </div>
   );
