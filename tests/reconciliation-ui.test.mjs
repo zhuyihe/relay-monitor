@@ -4,6 +4,7 @@
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { after } from "node:test";
 import assert from "node:assert/strict";
 import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationNotCountedCostText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
 import { BINDING_COPY, CREDENTIAL_FIELDS, ONBOARDING_KEY_ONLY_MONITOR, ONBOARDING_PURPOSES, ONBOARDING_PURPOSE_HINT, ONBOARDING_PURPOSE_REQUIRED, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT, UPSTREAM_TYPES, normalizeBatchInput } from "../lib/channel-onboarding.js";
@@ -22,6 +23,17 @@ import { COPY as LOGIN_COPY } from "../app/login/copy.ts";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
+// 一个测试进程共用一个浏览器：每条用例开自己的 context（cookie、存储、时钟互不影响），用完关掉 context，
+// 进程里的用例都跑完再关浏览器。原来每条用例都单独启动、关闭一次浏览器，这占了每条时间的一大块。
+// 用例中途要关掉某个页面时关它的 context（page.context().close()），不要关浏览器
+let sharedBrowser = null;
+async function launchBrowser() {
+  const current = await sharedBrowser?.catch(() => null);
+  if (current?.isConnected()) return current;
+  sharedBrowser = chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
+  return sharedBrowser;
+}
+after(async () => { await (await sharedBrowser?.catch(() => null))?.close(); });
 const baseURL = process.env.RECONCILIATION_UI_BASE_URL || "http://127.0.0.1:3099";
 
 const window = { preset: "yesterday", startMs: 1791388800000, endMs: 1791475200000, timezone: "Asia/Shanghai" };
@@ -343,7 +355,10 @@ test("daily summary re-read ignores an earlier aggregate when another row finish
   const gets = [], retries = new Map(), initial = dailyResponse(); let getReady; const getStarted = new Promise((resolve) => { getReady = resolve; });
   const { page, reads } = await openDailyPage(t, { data: initial, read(route, count) { if (count === 1) return fulfill(route, initial); return new Promise((resolve) => { gets.push({ route, resolve }); getReady(); }); }, query(route, body) { return new Promise((resolve) => retries.set(body.ruleIds[0], { route, resolve })); } });
   await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await page.getByRole("button", { name: "重新读取 Rule B", exact: true }).click(); const rows = dailyRows(); rows[0] = rule("rule-1", "Rule A", 4); retries.get("rule-1").resolve(fulfill(retries.get("rule-1").route, dailyResponse([rows[0]]))); await getStarted;
-  rows[1] = rule("rule-2", "Rule B", 5); retries.get("rule-2").resolve(fulfill(retries.get("rule-2").route, dailyResponse([rows[1]]))); await page.waitForFunction(() => document.querySelectorAll(".ant-btn-loading-icon").length === 0); assert.equal(reads.length, 3);
+  rows[1] = rule("rule-2", "Rule B", 5); retries.get("rule-2").resolve(fulfill(retries.get("rule-2").route, dailyResponse([rows[1]])));
+  // 等两个按钮都不在加载（按钮上的 ant-btn-loading），不等加载图标消失：打包版里图标的退场动画常停在半截，
+  // 图标已经看不见（宽 0、透明），元素却一直留着
+  await page.waitForFunction(() => !document.querySelector(".ant-btn-loading")); assert.equal(reads.length, 3);
   const summary = page.getByRole("region", { name: "汇总", exact: true });
   const earlier = dailyRows(); earlier[0] = rows[0]; gets[0].resolve(fulfill(gets[0].route, dailyResponse(earlier))); await page.locator("tr.ant-table-row", { hasText: "Rule B" }).getByText("$5.00", { exact: true }).waitFor(); await summary.locator(".ant-alert", { hasText: "读取中" }).waitFor();
   gets[1].resolve(fulfill(gets[1].route, dailyResponse(rows))); await summary.getByText("$11.50", { exact: true }).waitFor();
@@ -447,9 +462,9 @@ const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/a
 // 每个页面收到的渠道接入请求，供只读断言使用
 const onboardingRequests = new WeakMap();
 async function openFixturePage(t, handler, viewport, clock = false, onboardingHandler = null, path = "/reconciliation") {
-  const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
-  t.after(() => browser.close());
+  const browser = await launchBrowser();
   const context = await browser.newContext({ serviceWorkers: "block", ...(viewport ? { viewport, isMobile: true, hasTouch: true } : {}) });
+  t.after(() => context.close());
   const page = await context.newPage(), onboardingCalls = [];
   onboardingRequests.set(page, onboardingCalls);
   if (clock) await page.clock.install();
@@ -1083,9 +1098,9 @@ test("onboarding without browser cryptography does not partially open a drawer o
 });
 
 test("discovery refresh preserves the panel state for Enter, Space and click", { timeout: 45000 }, async (t) => {
-  const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
-  t.after(() => browser.close());
+  const browser = await launchBrowser();
   const context = await browser.newContext({ serviceWorkers: "block" });
+  t.after(() => context.close());
   const page = await context.newPage();
   page.setDefaultTimeout(5_000);
   const catalogue = onboardingFixture();
@@ -1683,7 +1698,7 @@ test("workflow verification keyboard and financial source links fit 320/390/768/
         .map((node) => ({ tag: node.tagName, className: node.className, right: node.getBoundingClientRect().right, text: node.textContent?.slice(0, 100) })) }));
     assert.ok(overflow.scroll <= overflow.client, JSON.stringify({ width, ...overflow }));
     await drawer.locator(".ant-drawer-close").focus(); await opened.page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
-    await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText(ANALYTICS_COPY.sourceTitle, { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.getByRole("region", { name: "汇总", exact: true }).waitFor(); await opened.page.getByRole("link", { name: NAV_LABELS.analytics, exact: true }).last().waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); assert.equal(opened.mutations.length, 0); await opened.page.context().browser().close();
+    await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText(ANALYTICS_COPY.sourceTitle, { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.getByRole("region", { name: "汇总", exact: true }).waitFor(); await opened.page.getByRole("link", { name: NAV_LABELS.analytics, exact: true }).last().waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); assert.equal(opened.mutations.length, 0); await opened.page.context().close();
   }
 });
 
@@ -2540,14 +2555,14 @@ test("成本估算：收入算不出来时按原因说——没设置、超过 3
   await unset.equation.getByText(EQ_UNSET_REVENUE, { exact: true }).waitFor();
   await unset.equation.getByText(new RegExp(`^${OWN_STATION_UNSET_TITLE}，`)).waitFor();
   assert.equal(await unset.equation.getByRole("link", { name: workflowActionMeta("setup_own_station").label, exact: true }).getAttribute("href"), workflowAction("setup_own_station").href);
-  await unset.page.context().browser().close();
+  await unset.page.context().close();
 
   // 超过 30 天：不去读自营收入，只算成本，给「切换到近 30 天」
   const long = await openCostPage(t, () => { throw new Error("unexpected own read for 90 days"); }, "/analytics?range=90d");
   await long.equation.getByText(ANALYTICS_COPY.longRangeNote, { exact: true }).waitFor();
   await long.equation.locator(".jy-partial-note").filter({ hasText: ANALYTICS_COPY.longRangeNotice }).getByRole("link", { name: ANALYTICS_COPY.switchTo(RANGE_TEXT["30d"]), exact: true }).waitFor();
   assert.deepEqual(long.ownReads, []);
-  await long.page.context().browser().close();
+  await long.page.context().close();
 
   // 接口报错和接口正常、但算收入时报错，是同一句；状态码 502 也按接口给的码归类
   const raw = "own upstream said 403 forbidden";
@@ -2561,7 +2576,7 @@ test("成本估算：收入算不出来时按原因说——没设置、超过 3
     // 原文默认收起，展开「查看详细原因」才看得到
     assert.equal(await failed.page.getByText(raw, { exact: true }).isVisible(), false);
     await notice.getByText("查看详细原因", { exact: true }).click(); await failed.page.getByText(raw, { exact: true }).waitFor();
-    await failed.page.context().browser().close();
+    await failed.page.context().close();
   }
 
   // 自营站点读到了，但没有每天的消费记录：收入没法分到每天，说原因，不当成报错
@@ -2625,7 +2640,7 @@ async function openUnconfirmedMyPage(t, options) {
 test("收入确认不了时：成本估算、自营业务的利润等式收入几项写「读不到」并说原因，两项成本照常；用户表说合计含管理员账号；用户列表也读不到时说管理员没标出", async (t) => {
   const cost = await openCostPage(t, (route) => fulfill(route, { ...unconfirmedOwnAnalytics(), trend: [] }));
   await expectIncomeUnread(cost.equation);
-  await cost.page.context().browser().close();
+  await cost.page.context().close();
 
   // 自营业务默认近 7 天：利润等式叫「近 7 天经营」（profit-equation.tsx 的 EQ_TEXT.business）
   const page = await openUnconfirmedMyPage(t);
@@ -2651,7 +2666,7 @@ test("收入确认不了时：成本估算、自营业务的利润等式收入�
   await page.getByRole("tab", { name: "用户", exact: true }).click();
   await page.getByText("customer", { exact: true }).first().waitFor();
   await page.getByText(`合计含管理员账号的 ${formatMoney(21)}。`).waitFor();
-  await page.context().browser().close();
+  await page.context().close();
 
   // 用户列表也读不到：消费最多的用户、用户表下说管理员没标出；用户余额那块说原因、带刷新，不悄悄消失（shared.tsx 的 MY_TEXT.topUsers、users-tab.tsx 的 COPY.balTitle / balFailed）
   const blind = await openUnconfirmedMyPage(t, { usersUnavailable: true });
@@ -2718,7 +2733,7 @@ test("用量分析：读不到用量的上游按码说一句、原文收起；�
   await banner.getByText(ERROR_CATEGORIES.busy.text, { exact: true }).waitFor();
   await totals.getByText(formatCompact(1234567), { exact: true }).waitFor();
   fail = false; await banner.getByRole("button", { name: REFRESH, exact: true }).click(); await banner.waitFor({ state: "detached" });
-  await page.context().browser().close();
+  await page.context().close();
 
   // 只看自营站点：算的是用户消费，没设置售价时写售价那句，不说「上游没设置汇率」
   const own = await openFixturePage(t, handler, undefined, false, null, "/usage?station=own-1");
