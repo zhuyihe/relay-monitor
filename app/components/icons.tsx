@@ -94,6 +94,12 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M8 7.2V11M8 5h.01" />
     </>
   ),
+  clock: (
+    <>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 4.8V8l2.2 1.4" />
+    </>
+  ),
   calendar: (
     <>
       <rect x="2" y="3" width="12" height="11" rx="1.5" />

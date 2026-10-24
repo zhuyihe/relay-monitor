@@ -14,6 +14,8 @@ export const GET = withAuth(async (request, rt) => {
     settings: rt.store.settings,
     // 业务时区：页面上的「数据截至」和固定成本的到期日按它写（design/ui-copy-spec.md §6）
     tz: businessTimeZone(),
+    // 服务端此刻：上游列表拿它和每个上游的读取时刻比，判断「数据旧了」（ui-design-spec §5.2），不用浏览器的时钟
+    generatedAt: new Date().toISOString(),
   });
 });
 

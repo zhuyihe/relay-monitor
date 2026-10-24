@@ -9,9 +9,9 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
 import type { MenuProps } from "antd";
-import { api, readWorkflowDestination } from "../../../lib/client";
+import { api, readWorkflowDestination, type StationListResponse } from "../../../lib/client";
 import { actionsByStation, buildOverviewActions, burnText, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
-import { basisText, EMPTY, formatAsOfTime, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, OWN_STATION_LABEL, RATE_UNSET } from "../../../lib/format";
+import { basisText, EMPTY, formatAsOf, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, OWN_STATION_LABEL, RATE_UNSET } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { balanceMoneyOf } from "../../../lib/profit";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
@@ -30,6 +30,7 @@ import { Spark } from "../../components/spark";
 import { LEVEL_ORDER, StatusText } from "../../components/status";
 import { useUrlParams, useUrlState } from "../../components/use-url-state";
 import { useWorkflowActions } from "../../components/use-workflow-actions";
+import { workflowProblem } from "../../components/workflow-copy";
 import TrendModal, { TREND_TEXT } from "../trend-modal";
 import { buildStationView, resultIssue, testBalanceText, TYPES_MISSING_TEXT } from "./model";
 import type { StationCheck, StationView } from "./model";
@@ -49,12 +50,17 @@ const ONBOARDING_ACTIONS = ["connect", "coverage", "source"];
 // 指向某条核算关联的事项：无论从哪里打开，都切到「上游账单」定位
 const ASSOCIATION_ACTIONS = ["scope", "conflict"];
 type Sort = (typeof SORTS)[number];
-const COLS = 7;
+const COLS = 6;
 
 const REFRESH = workflowActionMeta("refresh").label;
 const DELETE = workflowActionMeta("delete_upstream");
 const TEST_READ = workflowActionMeta("verify_identity").label;
 const FIXED_TYPE = UPSTREAM_TYPES.find((t) => t.value === "fixed")?.label || "";
+
+// 状态格里「需处理」和页顶筛选同一个词（ui-copy-spec §5.2）
+const ATTENTION = "需处理";
+// 名称按钮的读屏提示「点名称打开编辑」：用 aria-describedby，不和行末的「编辑 上游名」重名
+const EDIT_HINT_ID = "stations-edit-hint";
 
 // 只在上游列表出现的说法（design/ui-copy-spec.md §3.3、§3.5、§6、§8.1）
 const COPY = Object.freeze({
@@ -91,7 +97,6 @@ const COPY = Object.freeze({
   moreOf: (name: string) => `${name} 的更多操作`,
   trend: TREND_TEXT.title,
   trendOf: TREND_TEXT.of,
-  trendSpan: "近 48 小时",
   trendTip: "近 48 小时的余额，点开看余额趋势",
   own: OWN_STATION_LABEL,
   notInProfit: "不算进利润",
@@ -99,7 +104,12 @@ const COPY = Object.freeze({
   demo: "演示",
   noAddress: `还没填${CREDENTIAL_FIELDS.baseUrl.label}`,
   refreshing: "正在刷新",
-  asOf: (time: string) => `数据截至 ${time}`,
+  // 这个上游的数据比别的上游旧两轮刷新以上时，状态格下一行写「数据截至 14:20」（ui-copy-spec §6）
+  staleTip: "后面几次刷新都没读到这个上游的新数据",
+  // 一个上游有几件事（ui-copy-spec §5.2）：状态格「需处理 · 还有 1 个问题」，「⋯」里「按钮名：标题」
+  moreTodos: (label: string, n: number) => `${label} · 还有 ${n} 个问题`,
+  todoItem: (label: string, title: string) => `${label}：${title}`,
+  editHint: "点名称打开编辑",
   today: (money: string) => `今天花费 ${money}`,
   todayTokens: (tokens: string) => `今天 ${tokens} Token`,
   emptyDesc: "加上上游、填好登录信息后，这里显示每个上游的余额、日均花费和可用天数。",
@@ -109,14 +119,14 @@ const COPY = Object.freeze({
   archivedOnlyDesc: (n: number) => `另有 ${n} 个已归档的上游，可以在「已归档」里恢复。`,
   noMatch: "没有符合条件的上游。",
   clearFilters: "清除筛选",
-  col: Object.freeze({ name: "上游", status: "状态", balance: "余额", burn: "日均花费", days: "可用天数", asOf: "数据截至", actions: "操作" }),
+  col: Object.freeze({ name: "上游", status: "状态", balance: "余额", burn: "日均花费", days: "可用天数", actions: "操作" }),
   views: "上游资源的标签页",
   search: "搜索名称或地址",
   searchAria: "搜索上游",
   byStatus: "按状态筛选",
   byType: "按类型筛选",
   allTypes: "全部类型",
-  filter: Object.freeze({ all: "全部", attention: "需处理", ok: "无需处理", archived: "已归档" }),
+  filter: Object.freeze({ all: "全部", attention: ATTENTION, ok: "无需处理", archived: "已归档" }),
   unownedBefore: (n: number) => `另有 ${n} 件需处理的事不在某一个上游上，在`,
   unownedAfter: "里处理。",
   cancel: "取消",
@@ -173,6 +183,10 @@ export default function StationsPage() {
   const compact = Grid.useBreakpoint().md === false;
 
   const [stations, setStations] = useState<any[]>([]);
+  // 服务端返回列表的时刻：判断「数据旧了」的参照（staleAt）
+  const [listAt, setListAt] = useState<number | null>(null);
+  // 这次列表之后测试读取成功的上游：页面上显示的是刚读到的余额，下一次刷新列表之前不标「数据旧了」
+  const [testedIds, setTestedIds] = useState<Record<string, true>>({});
   const [settings, setSettings] = useState<any>({ refreshIntervalSec: 60, lowBalanceUsd: 5 });
   const [types, setTypes] = useState<any[]>([]);
   const [rules, setRules] = useState<any>({});
@@ -253,8 +267,10 @@ export default function StationsPage() {
     reloading.current += 1;
     setLoadingList(true);
     try {
-      const r = await api("/api/stations?includeUnmonitored=true&includeArchived=true");
+      const r: StationListResponse = await api("/api/stations?includeUnmonitored=true&includeArchived=true");
       setStations(r.stations);
+      setListAt(Date.parse(r.generatedAt || "") || null);
+      setTestedIds({});
       setSettings(r.settings);
       if (r.tz) setTz(r.tz);
       setLoaded(true);
@@ -292,14 +308,15 @@ export default function StationsPage() {
   }, [loadMeta, reload]);
 
   // 自动刷新跟随全局刷新间隔（下限 10 秒）；标签页在后台时跳过，回到前台的下一拍再拉
+  // 「数据比别的旧」也按它算（staleAt）
+  const refreshSec = Math.max(10, Number(settings.refreshIntervalSec) || 60);
   useEffect(() => {
-    const sec = Math.max(10, Number(settings.refreshIntervalSec) || 60);
     const t = setInterval(() => {
       if (document.hidden) return;
       reload().catch(() => {});
-    }, sec * 1000);
+    }, refreshSec * 1000);
     return () => clearInterval(t);
-  }, [settings.refreshIntervalSec, reload]);
+  }, [refreshSec, reload]);
 
   // 外壳的刷新只重新读取；向上游重新读余额是工具栏的「刷新」
   useShellPage({
@@ -369,13 +386,15 @@ export default function StationsPage() {
         setStationChecks((checks) => ({ ...checks, [station.id]: { issue, checkedAt: new Date().toISOString() } }));
         return;
       }
-      const checkedAt = new Date().toISOString();
+      // 测试读取不写库：读取时刻不改（不拿浏览器的时刻），这一行在下一次刷新列表之前不标「数据旧了」——
+      // 显示的是刚读到的余额，不是「读得比别的旧」（ui-design-spec §5.2）
+      setTestedIds((ids) => ({ ...ids, [station.id]: true }));
       setStations((list) => list.map((item) => (item.id === station.id ? {
         ...item,
         balance: {
           ...(item.balance && item.balance.ok ? item.balance : {}),
           ok: true,
-          checkedAt,
+          checkedAt: item.balance?.checkedAt || null,
           latencyMs: result.latencyMs,
           account: result.account || null,
           remaining: result.remaining,
@@ -469,6 +488,9 @@ export default function StationsPage() {
     return { todosById: actionsByStation(all), unowned: all.filter((a: any) => !a.stationId || !ids.has(String(a.stationId))).length };
   }, [listed, tz, rules, settings, workflowActions]);
 
+  // 这个上游身上要处理的事（利润类、账号类），先后同运营总览
+  const todosOf = (v: StationView) => (v.archived ? [] : (todosById.get(actionKey(v.s)) || []).filter((a: any) => a.workflow));
+
   const critDays = etaWindowDays(rules);
   const views = useMemo(() => {
     const now = Date.now();
@@ -493,6 +515,8 @@ export default function StationsPage() {
     archived: archived.length,
   };
 
+  // 默认排序按需要关注的程度：档位和那几件事里最严重的那个（ui-design-spec §5.2）
+  const rankOf = (v: StationView) => Math.min(LEVEL_ORDER[v.level], ...todosOf(v).map((a: any) => LEVEL_ORDER[a.level as keyof typeof LEVEL_ORDER] ?? Infinity));
   const q = query.trim().toLowerCase();
   const byStatus = filter === "archived" ? archived : filter === "attention" ? live.filter(needsWork) : filter === "ok" ? live.filter((v) => !needsWork(v)) : live;
   const rows = byStatus
@@ -502,7 +526,7 @@ export default function StationsPage() {
       if (sort === "days") return compareDays(a.sortDays, b.sortDays, 1) || String(a.s.name).localeCompare(String(b.s.name), "zh-CN");
       if (sort === "-days") return compareDays(a.sortDays, b.sortDays, -1) || String(a.s.name).localeCompare(String(b.s.name), "zh-CN");
       // 默认：最严重的在前，同级按可用天数升序，再按名称
-      return LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level]
+      return rankOf(a) - rankOf(b)
         || compareDays(a.sortDays, b.sortDays, 1)
         || String(a.s.name).localeCompare(String(b.s.name), "zh-CN");
     });
@@ -571,21 +595,16 @@ export default function StationsPage() {
   const resourceSig = useMemo(() => onboardingSig(stations), [stations]);
   const nextSync = syncOnboarding(onboardingSync, view, accounts.destinationSeq, resourceSig, loaded, loadingList);
   if (nextSync !== onboardingSync) setOnboardingSync(nextSync);
-  const todosOf = (v: StationView) => (v.archived ? [] : (todosById.get(actionKey(v.s)) || []).filter((a: any) => a.workflow));
-  const todoLinks = (v: StationView) => {
-    const list = todosOf(v);
-    if (!list.length) return null;
-    return (
-      <span className="jy-stations-todos">
-        {list.map((a: any) => (
-          <button key={a.id} type="button" className="link" onClick={() => openTodo(a.href)} aria-label={`${a.label}（${stationDisplayName(v.s)}）`}>
-            {a.label}
-          </button>
-        ))}
-      </span>
-    );
+  // 这个上游的数据比服务端此刻旧「2 × 刷新间隔 + 30 秒」以上：返回「数据截至 14:20」，否则 null（ui-design-spec §5.2）。
+  // 30 秒是单次读取超时的余量。两边都是服务端的时刻，不拿浏览器的时钟比；所有上游都旧了、只有一个上游时也照样标。
+  // 接口没给此刻（旧版服务端）时退回到在用上游里最新的读取时刻。读不到余额的上游下面另有一行说原因，不再标
+  const readAt = (v: StationView) => (v.fixed || v.archived || v.issue || !v.checkedAt ? NaN : new Date(v.checkedAt).getTime());
+  const staleRef = listAt ?? Math.max(0, ...live.map(readAt).filter(Number.isFinite));
+  const staleAt = (v: StationView) => {
+    if (testedIds[v.s.id]) return null;
+    const at = readAt(v);
+    return Number.isFinite(at) && staleRef - at > (2 * refreshSec + 30) * 1000 ? formatAsOf(v.checkedAt, tz) : null;
   };
-
   const retryAll = () => {
     reload().catch(() => {});
     if (metaError || !types.length) loadMeta().catch(() => {});
@@ -599,30 +618,53 @@ export default function StationsPage() {
     return (
       <div className="jy-res-name">
         <div className="jy-stations-name-line">
-          <button type="button" className="link" onClick={(e) => openEditor(s, e.currentTarget)}>{stationDisplayName(s)}</button>
+          <button type="button" className="link" title={stationDisplayName(s)} aria-describedby={EDIT_HINT_ID} onClick={(e) => openEditor(s, e.currentTarget)}>{stationDisplayName(s)}</button>
           {s.isOwn ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.own}</em> : null}
           {/* 自营站点本来就不算进利润（countsInProfit），编辑页也不给这个开关，不挂这个标签 */}
           {!s.isOwn && s.includeInProfit === false ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.notInProfit}</em> : null}
           {s.noRenewal ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.noRenewal}</em> : null}
           {s.demo ? <em className="jy-tag jy-tag--type jy-stations-flag">{COPY.demo}</em> : null}
         </div>
-        {/* 下面一行只写地址；类型名在编辑页和「按类型筛选」里看 */}
-        <span title={s.baseUrl || undefined}>
-          {v.fixed ? FIXED_TYPE : v.host || COPY.noAddress}
+        {/* 下面一行写地址 · 账号名，放不下的省略、悬停看全；类型名在编辑页和「按类型筛选」里看 */}
+        <span title={[s.baseUrl, account].filter(Boolean).join(" · ") || undefined}>
+          {[v.fixed ? FIXED_TYPE : v.host || COPY.noAddress, account].filter(Boolean).join(" · ")}
         </span>
-        {account ? <span title={account}>{account}</span> : null}
       </div>
     );
   };
 
-  // 正常时不标状态（§2），只在有话要说时写
-  const statusCell = (v: StationView) => (
-    <>
-      {v.statusLabel ? <StatusText level={v.level}>{v.statusLabel}</StatusText> : null}
-      {!v.issue && v.statusNote ? <span className="jy-stations-sub">{v.statusNote}</span> : null}
-      {todoLinks(v)}
-    </>
+  // 状态格只放状态（ui-design-spec §5.2）：上一行档位，或者只有要处理的事时写「需处理」，几件事时加「· 还有 N 个问题」；
+  // 下一行按先后只放一样：正在刷新、数据旧了、那件事的标题（读不到余额的行也写）、状态自己的说明。要处理的事的按钮在行末，不在这里
+  const statusOf = (v: StationView) => {
+    const todos = todosOf(v);
+    const todo = todos[0];
+    const base = v.statusLabel || (todo ? ATTENTION : "");
+    const label = base && todos.length > 1 ? COPY.moreTodos(base, todos.length - 1) : base;
+    const level = v.statusLabel ? v.level : todo?.level;
+    const stale = staleAt(v);
+    const title = todo ? workflowProblem(todo) : null;
+    const refreshing = !!refreshingIds[v.s.id];
+    const note = refreshing ? COPY.refreshing : stale || title || (v.issue ? null : v.statusNote);
+    // 小钟和「后面几次刷新都没读到」那句只跟「数据截至」走，正在刷新时不挂
+    return { label, level, note, stale: refreshing ? null : stale, title };
+  };
+  // 下一行那一格：放不下的省略，悬停看全；数据旧时前面一个小钟，后面那句说明只给悬停和读屏
+  const subLine = (note: string, stale: string | null) => (
+    <span className="jy-stations-sub" title={stale ? `${note}。${COPY.staleTip}` : note}>
+      {stale ? <Icon name="clock" /> : null}
+      <span>{note}</span>
+      {stale ? <span className="sr-only">。{COPY.staleTip}</span> : null}
+    </span>
   );
+  const statusCell = (v: StationView) => {
+    const { label, level, note, stale } = statusOf(v);
+    return (
+      <>
+        {label ? <StatusText level={level}>{label}</StatusText> : null}
+        {note ? subLine(note, stale) : null}
+      </>
+    );
+  };
 
   // 余额的写法和运营总览同一处（balanceMoneyOf）：按上游自己的币种写，设了汇率下面写「约 ¥88.56」，
   // 没设置汇率下面写「没设置汇率」，悬停是整句
@@ -630,17 +672,20 @@ export default function StationsPage() {
     const b = v.s.balance;
     if (v.fixed || !b?.ok) return <span className="jy-muted">{EMPTY}</span>;
     const m = balanceMoneyOf(v.s, Number(b.remaining));
+    // 上一行近 48 小时的小图在左、余额在右（没有小图的行留同样宽的空位，金额上下对齐），下一行换算或「没设置汇率」
     return (
       <>
-        {m.text}
+        <span className="jy-stations-money">
+          <span className="jy-stations-spark">{sparkButton(v)}</span>
+          {m.text}
+        </span>
         <span className="jy-sub-money" title={m.note}>{m.cny || RATE_UNSET}</span>
-        {sparkButton(v)}
       </>
     );
   };
 
   // 近 48 小时的小图本身就是余额趋势的入口；数据不够两个点时只能从「更多操作」打开
-  const sparkButton = (v: StationView, withLabel = false) => {
+  const sparkButton = (v: StationView) => {
     const pts = v.s.spark;
     if (v.fixed || v.archived || !v.s.balance?.ok || !Array.isArray(pts) || pts.length < 2) return null;
     return (
@@ -651,8 +696,7 @@ export default function StationsPage() {
         aria-label={COPY.trendOf(stationDisplayName(v.s))}
         onClick={() => setTrendStation(v.s)}
       >
-        {withLabel ? <span>{COPY.trendSpan}</span> : null}
-        <Spark pts={pts} width={withLabel ? 120 : 88} />
+        <Spark pts={pts} width={88} />
       </button>
     );
   };
@@ -679,11 +723,12 @@ export default function StationsPage() {
     let main;
     if (p?.burnPerDay === 0) main = <span className="jy-muted">{NO_SPEND_TEXT}</span>;
     else if (burn) {
+      // 按哪段花费估的放进悬停，格子里两行：日均花费、今天花费
       main = (
-        <>
+        <span title={basisText(p.basis) || undefined}>
           {burn}
-          <span className="jy-sub-money">{basisText(p.basis)}</span>
-        </>
+          <span className="sr-only">，{basisText(p.basis)}</span>
+        </span>
       );
     } else main = <span className="jy-muted">{EMPTY}</span>;
     return (
@@ -707,17 +752,14 @@ export default function StationsPage() {
     </div>
   ) : <span className="jy-muted">{EMPTY}</span>);
 
-  // 「数据截至」一格（§3.6、§6）：当天写「14:30」，不是当天写「10月9日 14:30」；读不到时状态那格已经写了原因
-  const asOfCell = (v: StationView) => {
-    if (v.fixed) return <span className="jy-muted">{EMPTY}</span>;
-    if (refreshingIds[v.s.id]) return <span className="jy-muted">{COPY.refreshing}</span>;
-    if (!v.checkedAt) return <span className="jy-muted">{EMPTY}</span>;
-    const time = formatAsOfTime(v.checkedAt, tz);
-    return v.issue ? <StatusText level="crit">{time}</StatusText> : <>{time}</>;
-  };
-
-  const moreItems = (v: StationView): MenuProps["items"] => {
+  // 「⋯」：有要处理的事时，行末放第一件，其余几件放最上面，「编辑」也挪进来；手机上小图和刷新也在这里
+  const moreItems = (v: StationView, mobile = false): MenuProps["items"] => {
     const s = v.s;
+    const [lead, ...rest] = todosOf(v);
+    const head = [
+      ...rest.map((a: any) => ({ key: `todo:${a.id}`, label: COPY.todoItem(a.label, workflowProblem(a)) })),
+      ...(lead || mobile ? [{ key: "edit", label: COPY.edit, icon: <Icon name="edit" /> }] : []),
+    ];
     if (v.archived) {
       return [
         { key: "edit", label: COPY.edit, icon: <Icon name="edit" /> },
@@ -727,6 +769,8 @@ export default function StationsPage() {
       ];
     }
     return [
+      ...head,
+      ...(head.length ? [{ type: "divider" as const }] : []),
       ...(!v.fixed
         ? [
             { key: "refresh", label: REFRESH, icon: <Icon name="refresh" />, disabled: !!refreshingIds[s.id] },
@@ -741,15 +785,17 @@ export default function StationsPage() {
 
   const onMore = (v: StationView, key: string) => {
     const s = v.s;
-    if (key === "refresh") onRefreshOne(s);
+    const todo = key.startsWith("todo:") ? todosOf(v).find((a: any) => `todo:${a.id}` === key) : null;
+    if (todo) openTodo(todo.href);
+    else if (key === "refresh") onRefreshOne(s);
     else if (key === "trend") setTrendStation(s);
     else if (key === "edit") openEditor(s, moreTriggerRef.current);
     else if (key === "archive") setArchiveTarget(s);
     else if (key === "purge") openPurge(s);
   };
 
-  const moreButton = (v: StationView) => (
-    <Dropdown trigger={["click"]} menu={{ items: moreItems(v), onClick: ({ key }) => onMore(v, key) }}>
+  const moreButton = (v: StationView, mobile = false) => (
+    <Dropdown trigger={["click"]} menu={{ items: moreItems(v, mobile), onClick: ({ key }) => onMore(v, key) }}>
       <button
         type="button"
         className="jy-icon-btn jy-icon-btn--sm"
@@ -762,7 +808,17 @@ export default function StationsPage() {
     </Dropdown>
   );
 
-  const primaryAction = (v: StationView) => (v.archived ? (
+  // 行末：有要处理的事时就是那件事的按钮（例如「测试读取」），没有时是「编辑」（ui-design-spec §5.2）
+  const todoAction = (v: StationView) => {
+    const todo = todosOf(v)[0];
+    if (!todo) return null;
+    return (
+      <Button type="text" size="small" aria-label={`${todo.label}（${stationDisplayName(v.s)}）`} onClick={() => openTodo(todo.href)}>
+        {todo.label}
+      </Button>
+    );
+  };
+  const primaryAction = (v: StationView) => todoAction(v) || (v.archived ? (
     <Button
       type="text"
       size="small"
@@ -793,7 +849,7 @@ export default function StationsPage() {
         <Sym kind="crit" />
         <div className="jy-stations-issue-body">
           <b>{testReadText({ ok: false, reason: issue.text })}</b>
-          {v.checkedAt ? <span>{COPY.asOf(formatAsOfTime(v.checkedAt, tz))}</span> : null}
+          {v.checkedAt ? <span>{formatAsOf(v.checkedAt, tz)}</span> : null}
           <ErrorDetail raw={issue.raw} />
         </div>
         <Button size="small" icon={<Icon name="test" />} loading={!!retestingIds[v.s.id]} onClick={() => onRetest(v.s)}>
@@ -847,6 +903,7 @@ export default function StationsPage() {
   } else {
     body = (
       <>
+        <span id={EDIT_HINT_ID} className="sr-only">{COPY.editHint}</span>
         <div className="jy-table-wrap has-mobile">
           <table className="jy-data jy-stations-table">
             <caption className="sr-only">{STATION_TABS.list}</caption>
@@ -862,7 +919,6 @@ export default function StationsPage() {
                     {sort ? <Icon name={sort === "days" ? "sort" : "sort-down"} /> : null}
                   </button>
                 </th>
-                <th scope="col">{COPY.col.asOf}</th>
                 <th scope="col" className="r jy-stations-pin-r">{COPY.col.actions}</th>
               </tr>
             </thead>
@@ -877,7 +933,6 @@ export default function StationsPage() {
                       <td className="r">{balanceCell(v)}</td>
                       <td className="r">{burnCell(v)}</td>
                       <td>{runwayCell(v)}</td>
-                      <td>{asOfCell(v)}</td>
                       <td className="r jy-stations-pin-r">
                         <div className="jy-row-actions">
                           {primaryAction(v)}
@@ -904,47 +959,46 @@ export default function StationsPage() {
             </tbody>
           </table>
         </div>
-        <ul className="jy-m-list" aria-label={STATION_TABS.list}>
+        <ul className="jy-m-list jy-stations-m" aria-label={STATION_TABS.list}>
           {rows.map((v) => {
             const b = v.s.balance;
             const name = stationDisplayName(v.s);
             const money = !v.fixed && b?.ok ? balanceMoneyOf(v.s, Number(b.remaining)) : null;
-            const burn = !v.fixed && !v.archived ? burnText(v.s, v.s.prediction) : null;
+            const { label, level, note, stale, title } = statusOf(v);
+            const todo = todoAction(v);
+            const refreshing = !!refreshingIds[v.s.id];
+            // 手机上一张卡片两行（ui-design-spec §4.7、§5.2）：名称、状态、「⋯」；余额 · 可用天数，后面带正在刷新或数据截至。
+            // 有要处理的事时多一行：那件事的标题（放不下省略）和按钮。余额设了汇率只写金额，没设置汇率照写「（没设置汇率）」，
+            // 不让人当成人民币。小图、刷新、编辑、余额趋势都在「⋯」里，点名称也能编辑
             return (
               <li key={v.id}>
-                <span className="m-top" title={name}>{name}</span>
-                {v.statusLabel ? <StatusText level={v.level}>{v.statusLabel}</StatusText> : null}
-                {todoLinks(v)}
+                <button type="button" className="m-top link" title={name} aria-describedby={EDIT_HINT_ID} onClick={(e) => openEditor(v.s, e.currentTarget)}>{name}</button>
+                <span className="m-end">
+                  {label ? <StatusText level={level}>{label}</StatusText> : null}
+                  {v.archived ? null : moreButton(v, true)}
+                </span>
                 <div className="m-sub">
                   {v.fixed ? (
                     <span>{COPY.col.burn} <b>{v.fx ? formatMoney(v.fx.daily) : EMPTY}</b></span>
                   ) : (
-                    <span title={money?.note}>{COPY.col.balance} <b>{money ? money.full : EMPTY}</b></span>
+                    <span title={money?.cny ? `${money.full}，${money.note}` : money?.note}>{COPY.col.balance} <b>{money ? (money.cny ? money.text : money.full) : EMPTY}</b></span>
                   )}
-                  {burn ? (
-                    <span>{COPY.col.burn} <b>{burn}</b></span>
-                  ) : null}
                   {v.runway ? <span>{COPY.col.days} <b>{v.runway.text}</b></span> : null}
-                  {!v.fixed && v.checkedAt && !v.issue ? <span>{COPY.col.asOf} <b>{formatAsOfTime(v.checkedAt, tz)}</b></span> : null}
+                  {refreshing || stale ? subLine(note!, stale) : null}
                 </div>
-                {sparkButton(v, true) ? <div className="m-spark">{sparkButton(v, true)}</div> : null}
+                {todo ? (
+                  <div className="m-todo-line">
+                    {title ? <span className="m-title" title={title}>{title}</span> : null}
+                    <span className="m-todo">{todo}</span>
+                  </div>
+                ) : null}
                 {!v.archived && v.issue ? <div className="jy-stations-m-issue">{issueBox(v)}</div> : null}
-                <div className="m-actions">
-                  {primaryAction(v)}
-                  {!v.archived && !v.fixed ? (
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<Icon name="refresh" />}
-                      loading={!!refreshingIds[v.s.id]}
-                      aria-label={COPY.refreshOne(name)}
-                      onClick={() => onRefreshOne(v.s)}
-                    >
-                      {REFRESH}
-                    </Button>
-                  ) : null}
-                  {moreButton(v)}
-                </div>
+                {v.archived ? (
+                  <div className="m-actions">
+                    {primaryAction(v)}
+                    {moreButton(v, true)}
+                  </div>
+                ) : null}
               </li>
             );
           })}
