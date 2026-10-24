@@ -166,6 +166,12 @@ a { color: var(--cobalt); text-decoration: none; }
 .pick .check { padding: 10px 12px; border-top: 1px solid var(--rule-soft); font-size: 13px; }
 .pick .check:first-child { border-top: 0; }
 .pick .check.dis i { background: var(--sunken); border-color: var(--rule); }
+.menu { margin-top: 6px; border: 1px solid var(--rule); border-radius: 6px; box-shadow: var(--shadow); padding: 4px 0; font-size: 13px; }
+.menu .grp { padding: 6px 12px 2px; font-size: 12px; color: var(--ink-3); }
+.menu .opt { padding: 6px 12px; display: flex; justify-content: space-between; gap: 12px; }
+.menu .opt.on { background: var(--cobalt-tint); }
+.menu .opt.dis { color: var(--ink-dis); }
+.menu .opt span { color: var(--ink-3); font-size: 12px; }
 /* 变体并排 */
 .cols { display: grid; gap: 16px; padding: 16px; }
 .cols.c3 { grid-template-columns: repeat(3, 1fr); }
@@ -433,7 +439,8 @@ a { color: var(--cobalt); text-decoration: none; }
             <div class="tl-title">用过的 Key</div>
             <ol>
               <li class="unk"><i></i><span class="when">10月25日 09:10 起</span><span style="color:var(--warn-ink)">还没认出是哪把 Key</span><a>指定 Key</a></li>
-              <li><i></i><span class="when">10月21日 10:02 起<br><span class="caption">到 10月25日 09:10</span></span><span>team-b · 分组 b · 倍率 1.0</span><span></span></li>
+              <li><i></i><span class="when">10月23日 18:05 起<br><span class="caption">到 10月25日 09:10</span></span><span>team-b · 分组 b · 倍率 1.0　<span class="caption">按用量认的</span></span><span><a>不对？指定 Key</a>　<a>改时间</a></span></li>
+              <li><i></i><span class="when">10月21日 10:02 起<br><span class="caption">到 10月23日 18:05</span></span><span>team-a · 分组 b · 倍率 1.0</span><span></span></li>
             </ol>
           </div>
           <div class="bind-actions"><span class="btn sm">指定 Key</span><span class="btn sm danger">解除绑定</span><span class="spacer"></span><span class="linkbtn"><svg class="icon"><use href="#i-chev"/></svg>改动记录</span></div>
@@ -448,7 +455,7 @@ a { color: var(--cobalt); text-decoration: none; }
     </div>
   </div>
   <div class="ann l" style="left:760px;top:250px">一段一行，新的在前，先露 3 段；同一把 Key 换了分组、倍率也是新的一段</div>
-  <div class="ann l" style="left:760px;top:600px">认不出的那段点是黄的，右边就是「指定 Key」</div>
+  <div class="ann l" style="left:760px;top:560px">认不出的那段点是黄的，右边就是「指定 Key」；按用量认的标出来，旁边「不对？指定 Key」</div>
 </section>
 
 <!-- ═══ K-B. 开始算利润 ═══ -->
@@ -463,7 +470,9 @@ a { color: var(--cobalt); text-decoration: none; }
         <label>自营站点里用这个账号 Key 的渠道</label>
         <div class="pick">
           <label class="check on"><i></i><span><b>上游甲·高速</b>　<span class="sub">用的是 oai · 分组 a · 倍率 1.2</span></span></label>
-          <label class="check on"><i></i><span><b>上游乙·标准</b>　<span class="sub">用的是 team-b · 分组 b · 倍率 1.0</span></span></label>
+          <label class="check on"><i></i><span><b>上游乙·标准</b>　<span class="sub">用的是 team-b · 分组 b · 倍率 1.0（按用量认的）</span>　<a>不对？指定 Key</a></span></label>
+          <label class="check on"><i></i><span><b>上游戊</b>　<span class="sub" style="color:var(--warn-ink)">有 2 把 Key 都像，没法确定；先开始算，也可以现在</span> <a>指定 Key</a></span></label>
+          <label class="check on"><i></i><span><b>上游己</b>　<span class="sub">还没有请求，有了以后系统接着认</span></span></label>
           <label class="check on"><i></i><span><b>上游丁</b>　<span class="sub" style="color:var(--warn-ink)">没认出用的是哪把 Key；先开始算，系统接着认，也可以现在</span> <a>指定 Key</a></span></label>
           <label class="check dis"><i></i><span><b style="color:var(--ink-dis)">上游丙</b>　<span class="sub">用的 oai 已经算在「上游甲·高速」那条绑定里</span></span></label>
         </div>
@@ -479,11 +488,11 @@ a { color: var(--cobalt); text-decoration: none; }
         <div class="after">换 Key 时系统会自己跟上，不用手动换</div>
       </div>
     </div>
-    <div class="d-foot"><span class="sub"></span><span class="btn">关闭</span><span class="btn primary">开始算利润（3 个渠道）</span></div>
+    <div class="d-foot"><span class="sub"></span><span class="btn">关闭</span><span class="btn primary">开始算利润（5 个渠道）</span></div>
   </aside>
   <div class="ann r" style="right:576px;top:150px">一打开就自己找，不用点「测试读取」；找的时候写「正在找用这个账号 Key 的渠道…」</div>
   <div class="ann r" style="right:576px;top:300px">默认都勾上；没认出 Key 的也能先开始算；已归别的绑定的灰着</div>
-  <div class="ann r" style="right:576px;top:470px">账号回答过的不问，只在标题下写答案和「改」</div>
+  <div class="ann r" style="right:576px;top:560px">账号回答过的不问，只在标题下写答案和「改」</div>
   <div class="ann r" style="right:576px;top:800px">完成后落到每日利润「今天」，这几行高亮</div>
 </section>
 
@@ -510,13 +519,24 @@ a { color: var(--cobalt); text-decoration: none; }
 
 <!-- ═══ K-D. 指定 Key ═══ -->
 <p class="frame-label" style="width:1160px">K-D · 「指定 Key」小窗：选 Key（自动测试读取）、从什么时候起、哪几天按什么算（D 同一块）</p>
-<section class="frame" id="k-assign" style="width:1160px;height:760px">
+<section class="frame" id="k-assign" style="width:1160px;height:980px">
   <div data-page></div>
-  <div class="modal" style="width:560px;top:40px">
+  <div class="modal" style="width:560px;top:20px">
     <div class="modal-head"><h3>指定 Key · 上游乙·标准</h3><span class="spacer"></span><svg class="icon" style="color:var(--ink-3)"><use href="#i-close"/></svg></div>
     <div class="modal-body" style="padding-left:24px;gap:14px">
       <div class="rows" style="grid-template-columns:84px 1fr;background:var(--sunken);padding:10px 12px;border-radius:var(--r2)"><span>上游账号</span><div>演示·主力账号（主力上游）</div><span>渠道</span><div>上游乙·标准</div><span>没认出</span><div>10月25日 09:10 起</div></div>
-      <div class="field"><label>这个渠道用的是哪把 Key？</label><div class="select"><span class="val">team-c · 分组 b · 倍率 1.0</span></div><div class="read-ok"><svg class="sym"><use href="#good"/></svg>能读到账单</div></div>
+      <div class="field"><label>这个渠道用的是哪把 Key？</label><div class="select"><span class="val">team-c（sk-7f…31aa）· 分组 b · 倍率 1.0</span></div>
+        <div class="menu">
+          <div class="grp">可能是这几把</div>
+          <div class="opt on">team-c（sk-7f…31aa）· 分组 b · 倍率 1.0</div>
+          <div class="opt">team-d（sk-c2…9e04）· 分组 b · 倍率 1.0</div>
+          <div class="grp">在用的 Key</div>
+          <div class="opt">oai-2（sk-a1…77b2）· 分组 a · 倍率 1.2</div>
+          <div class="opt dis">oai（sk-90…12fe）· 分组 a · 倍率 1.2<span>已在「上游甲·高速」用着</span></div>
+          <div class="grp">已删除的 Key</div>
+          <div class="opt">team-b（sk-5d…0c3a）· 分组 b<span>已删除 · 最后看到 10月25日</span></div>
+        </div>
+      </div>
       <div class="field"><label>从什么时候起</label>
         <div class="radio">
           <label class="on"><i></i>从没认出的时候起（10月25日 09:10）</label>
@@ -528,8 +548,8 @@ a { color: var(--cobalt); text-decoration: none; }
     </div>
     <div class="modal-foot"><span class="btn">取消</span><span class="btn primary">指定 Key</span></div>
   </div>
-  <div class="ann l" style="left:870px;top:260px">下拉里已在别的渠道用着的 Key 灰掉，写「已在「上游甲·高速」用着」</div>
-  <div class="ann l" style="left:870px;top:420px">纠正认错时，默认是「从这一段开始的时候起」；Sub2API 只能整天，不给选</div>
+  <div class="ann l" style="left:870px;top:260px">分三组：系统觉得像的放最上面；只写打码，不写完整 Key；已删除的从控制台记下的名单里来</div>
+  <div class="ann l" style="left:870px;top:640px">纠正认错时，默认是「从这一段开始的时候起」；Sub2API 只能整天，不给选</div>
 </section>
 
 <!-- ═══ K-E. 账号的问题 ═══ -->
