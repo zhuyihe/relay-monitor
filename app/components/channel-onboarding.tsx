@@ -12,7 +12,7 @@ import type { AccountReadModel, BatchInput, BatchProbe, BatchRecoveryIntent, Bat
 import { NAV_LABELS, STATION_TABS } from "../../lib/brand";
 import { ERROR_CATEGORIES, describeError, failureText, requiredRule } from "../../lib/error-copy.js";
 import { EMPTY, OWN_STATION_UNSET, UPSTREAM_GONE, formatAsOf, formatDayZone, formatZonedDateTime, refreshFailedText } from "../../lib/format";
-import { COVERAGE_ANSWERS, COVERAGE_QUESTION, coverageAnswerOption, coverageDeclarationOf, reconciliationChannelStatus, reconciliationIssue } from "../../lib/reconciliation-contract.js";
+import { COVERAGE_ANSWERS, COVERAGE_QUESTION, COVERAGE_REQUIRED, coverageAnswerOption, coverageDeclarationOf, reconciliationChannelStatus, reconciliationIssue } from "../../lib/reconciliation-contract.js";
 import { reconciliationChannelName, reconciliationChannelTag, reconciliationKeyNamer } from "../../lib/reconciliation-view.js";
 import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowAction, workflowActionMeta } from "../../lib/workflow-actions.js";
 import { useAccountAuthorization } from "./account-authorization";
@@ -115,7 +115,6 @@ const COPY = Object.freeze({
   extraAria: "其他上游",
   doubleCost: `同一个上游账号的余额和 Key 额度可能是同一笔花费，绑定只算一次上游成本；${NAV_LABELS.analytics}里要不要算两次，请到上游设置看「算进利润」开关。`,
   billingCheckbox: `同时${ONBOARDING_PURPOSES.billing}（绑定 Key）`,
-  noKeyNeeded: "只看余额时，不用选 Key",
   authHint: `用这个上游账号的访问令牌读账单和 Key；读不到时点「${UPDATE_AUTH}」。`,
   // New API Key 类型的上游：读账单要用它所属的上游账号
   keyAccount: "这把 Key 属于哪个上游账号",
@@ -150,12 +149,19 @@ const COPY = Object.freeze({
   newUpstreamName: (name: string) => `新上游「${name}」`,
   details: "自营站点和分组",
   notSaved: "还没保存",
-  notSavedYet: `看一下这次的改动，点上方「${CONFIRM}」后才保存。`,
+  notSavedYet: `看一下这次的改动，点下方「${CONFIRM}」后才保存。`,
   noKey: "还没绑定 Key",
   joinExisting: "加到已有绑定",
   startsNow: "从现在开始算利润，今天就能看到；过了零点自动固定。",
   costOnce: "同一把 Key 的上游成本只算一次",
   coverageUnanswered: `回答「${COVERAGE_QUESTION}」之前，利润先不算`,
+  // 「这把 Key 还给别处用吗？」一开始不选；没选就测试读取时的那句（§8.2），和选了以后选项下面写的话（§5.2）
+  coverageAfter: Object.freeze<Record<string, string>>({
+    own_channels: "把用这把 Key 的渠道都绑上，利润才会算",
+    external: "上游成本分不开，利润先不算；给这些渠道换一把单独的 Key 就能算",
+    unspecified: "上游成本分不开，利润先不算；给这些渠道换一把单独的 Key 就能算",
+    unknown: "选「不确定」的话，利润先不算",
+  }),
 });
 // 保存结果里两种用途各自的状态（§5.6）；没要的用途不显示
 const MONITOR_RESULT: Record<string, string> = { linked: BINDING_COPY.saved, pending: COPY.pending, unavailable: COPY.pending };
@@ -168,6 +174,7 @@ const CREDENTIALS: Record<string, readonly string[]> = Object.fromEntries(TYPES.
 const RECOVERY_KEY = "channel-onboarding-recovery-v05";
 const PENDING_KEY = "channel-onboarding-pending-v06";
 type CredentialUpdateTarget = BatchProbe["selections"][number]["credentialUpdates"][number];
+// 还没选 Key 的那一组带一个占位的回答，接口会先说「请选择这条绑定用的 Key」；选好 Key 的组一定是用户自己答的（buildInput 里检查）
 const unknownCoverage = (): CoverageDeclaration => ({ answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] });
 // 接口报错带上 code、status，界面按 describeError 归类
 async function request(path: string, body?: any) {
@@ -324,7 +331,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
     action: { label: REVIEW_SOURCE, href: workflowAction("review_source", { ownStationId }).href! } });
   const invalidate = (credentials = false) => {
     generation.current += 1; setApproved(false); setFailure(null);
-    if (credentials) { keyGeneration.current += 1; setKeyRead(null); setKeyError(null); setKeyLoading(false); setProbe(null); setTokenId(coverageRule?.tokenId); setChannelKeys({}); setCoverage(coverageRule ? { [coverageRule.tokenId]: coverageRule.coverageDeclaration || unknownCoverage() } : {}); setKeyTimezones(coverageRule ? { [coverageRule.tokenId]: coverageRule.timezone } : {}); }
+    if (credentials) { keyGeneration.current += 1; setKeyRead(null); setKeyError(null); setKeyLoading(false); setProbe(null); setTokenId(coverageRule?.tokenId); setChannelKeys({}); setCoverage({}); setKeyTimezones(coverageRule ? { [coverageRule.tokenId]: coverageRule.timezone } : {}); }
   };
   const persistPending = (next: BatchRecoveryIntent[]) => {
     try { sessionStorage.setItem(PENDING_KEY, JSON.stringify(next)); sessionStorage.removeItem(RECOVERY_KEY); } catch { /* 当前页面仍可继续。 */ }
@@ -405,10 +412,11 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
   // 目录由后台同步；这里只在进入页面时立即发现。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const open = (ids: number[]) => {
+  // withBilling：从需处理的「有 N 个渠道还没绑定」进来时，要的就是算利润，「算利润」默认勾上（ui-design-spec §5.2）
+  const open = (ids: number[], { withBilling = false }: { withBilling?: boolean } = {}) => {
     let nextRequestId: string;
     try { nextRequestId = createRequestId(); } catch (err: any) { message.error(failureText(COPY.openFailed, err)); return; }
-    invalidate(true); setTokenId(undefined); setOpenIds(ids); setResult(null); setRetryInput(null); setRequestId(nextRequestId); setAdditionalIds([]); setBilling(false); setCoverage({}); setCoverageRule(null); setKeyTimezones({}); setSplitKeys(false); setAuthorizationId("self"); setRemovals({});
+    invalidate(true); setTokenId(undefined); setOpenIds(ids); setResult(null); setRetryInput(null); setRequestId(nextRequestId); setAdditionalIds([]); setBilling(withBilling); setCoverage({}); setCoverageRule(null); setKeyTimezones({}); setSplitKeys(false); setAuthorizationId("self"); setRemovals({});
     const entries = ids.map((id) => channels.find((entry) => entry.id === id)).filter(Boolean);
     const candidates = entries.map((entry) => entry.monitor?.stationIds?.[0] || (entry.candidates?.length === 1 ? entry.candidates[0]?.id || entry.candidates[0] : undefined));
     const linked = candidates.map((id) => upstreams.find((item) => item.id === id));
@@ -416,6 +424,8 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
     const existing = upstreams.find((item) => candidates[0] && candidates.every((id) => id === candidates[0]) && item.id === candidates[0]) || (sameAccount ? linked[0] : undefined);
     const configured = entries.some((entry) => onboardingMonitorIds(entry).length || entry.reconciliation?.ruleIds?.length);
     setStationId(existing?.id); setCreating(!upstreams.length); setMonitorMode(configured ? "keep" : "add"); setMonitor(!configured && existing?.monitorEnabled !== false);
+    // 只用 Key 的上游读账单要另选上游账号，和勾上「算利润」时一样（configureBilling）
+    if (withBilling && existing?.type === "newapi-key") setAuthorizationId(upstreams.some((resource) => resource.type !== "newapi-key") ? "" : "new");
     form.resetFields(); form.setFieldsValue({ name: entries[0]?.name || COPY.upstreamAccount, baseUrl: entries[0]?.baseUrl || "", type: "newapi" });
     authorizationForm.resetFields(); authorizationForm.setFieldsValue({ name: `${entries[0]?.name || COPY.upstream}${FIELDS.accessToken.label}`, baseUrl: entries[0]?.baseUrl || "", type: "newapi" });
   };
@@ -438,7 +448,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
     const existing = ruleIds.length === 1 ? catalogue.rules.find((rule: any) => rule.id === ruleIds[0] && rule.enabled && !rule.archivedAt && rule.ownSource?.namespaceKey === source?.namespaceKey) : null;
     if (existing && monitorMode === "keep" && upstreams.some((resource) => resource.id === existing.upstreamStationId)) {
       setStationId(existing.upstreamStationId); setCreating(false); setAuthorizationId("self"); setMonitor(false);
-      setTokenId(existing.tokenId); setCoverage({ [existing.tokenId]: existing.coverageDeclaration || unknownCoverage() }); setKeyTimezones({ [existing.tokenId]: existing.timezone || "Asia/Shanghai" });
+      setTokenId(existing.tokenId); setCoverage(existing.coverageDeclaration ? { [existing.tokenId]: existing.coverageDeclaration } : {}); setKeyTimezones({ [existing.tokenId]: existing.timezone || "Asia/Shanghai" });
     }
   };
   const enableMonitor = async (id: string) => {
@@ -495,7 +505,7 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
       return;
     }
     if (rule?.ownSource && source && rule.ownSource.namespaceKey !== source.namespaceKey) { setWorkflowError(sourceProblem(catalogue.ownStation?.id)); return; }
-    open(ids);
+    open(ids, { withBilling: destination.action === "connect" });
     if (rule) {
       setCoverageRule(rule); setCreating(false); setStationId(rule.upstreamStationId); setMonitor(false); setMonitorMode("keep"); setBilling(true); setTokenId(rule.tokenId); setKeyTimezones({ [rule.tokenId]: rule.timezone || "Asia/Shanghai" });
     }
@@ -544,6 +554,8 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
     const linkOnly = !monitor && !additionalIds.length && !billing && removalRequested;
     if (!linkOnly) { if (creating) selection.newStation = connection(await form.validateFields()); else selection.stationId = stationId; }
     if (billing && requiresAuthorization && !authorizationId) throw notice(COPY.keyAccountRequired);
+    // 「这把 Key 还给别处用吗？」不替用户选（§5.2）：选好了 Key、还没回答的，先回答再测试读取
+    if (billing && [...groups.keys()].some((key) => key !== "pending" && !coverage[key])) throw notice(COVERAGE_REQUIRED);
     if (billing && requiresAuthorization && authorizationId !== "self") selection.reconciliationAuthorization = authorizationId === "new" ? { newAuthorization: connection(await authorizationForm.validateFields()) } : { stationId: authorizationId };
     return { requestId, ownStationId: catalogue.ownStation.id, selections: [selection], groups: [...groups].map(([key, ids]) => ({
       groupId: `key-${key}`, selectionId: "primary", channels: ids.map((id) => {
@@ -643,7 +655,9 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
         return <List.Item style={{ display: "flex", flexWrap: "wrap", gap: 12 }}><Checkbox aria-label={COPY.selectChannel(name)} disabled={stale || busy} checked={selectedIds.includes(entry.id)} onChange={(event) => setSelectedIds(event.target.checked ? [...selectedIds, entry.id].slice(0, 100) : selectedIds.filter((id) => id !== entry.id))} /><div style={{ flex: "1 1 200px", minWidth: 0, overflowWrap: "anywhere" }}><Space wrap><Text strong>{name}</Text>{tag ? <Tag>{tag}</Tag> : null}</Space><div><Text type="secondary">{COPY.group}：{entry.groups?.join("、") || EMPTY}</Text></div><div><Text type="secondary">{entry.baseUrl || COPY.noBaseUrl}</Text></div><Text>{ROW_STATES[rowState(entry)]}</Text></div><Button style={{ minHeight: 44 }} disabled={refreshing || stale || busy} onClick={() => { if (pending) void recover(pending, true); else open([entry.id]); }} aria-label={`${action}「${name}」`}>{action}</Button></List.Item>;
       }} />
     </Space> }]} />
-    <Drawer title={CONNECT.label} aria-label={CONNECT.label} open={openIds.length > 0} width={compact ? "100%" : 600} closable={!busy} maskClosable={!busy} keyboard={false} onClose={closeDrawer} extra={!purposeSelected && (hasMonitorLinks || hasSavedBilling) ? <Button style={{ minHeight: 44 }} disabled={busy} onClick={closeDrawer}>{COPY.close}</Button> : <Button style={{ minHeight: 44 }} type="primary" loading={saving} disabled={!canSave} onClick={() => void save()}>{result ? COPY.finish : COPY.confirm}</Button>}>
+    <Drawer title={CONNECT.label} aria-label={CONNECT.label} open={openIds.length > 0} width={compact ? "100%" : 600} closable={!busy} maskClosable={!busy} keyboard={false} onClose={closeDrawer}
+      // 确认按钮吸在抽屉底部，挨着测试读取的结果和预览，看完不用滚回顶上（ui-design-spec §4.8、§5.2）
+      footer={<div style={{ display: "flex", justifyContent: "flex-end" }}>{!purposeSelected && (hasMonitorLinks || hasSavedBilling) ? <Button style={{ minHeight: 44 }} disabled={busy} onClick={closeDrawer}>{COPY.close}</Button> : <Button style={{ minHeight: 44 }} type="primary" loading={saving} disabled={!canSave} onClick={() => void save()}>{result ? COPY.finish : COPY.confirm}</Button>}</div>}>
       <Space direction="vertical" size={16} style={{ width: "100%", overflowWrap: "anywhere" }}>
         <section aria-label={COPY.current}><Text strong>{COPY.selected(openIds.length)}</Text><div><Text type="secondary">{names(openIds)}</Text></div>
           {hasMonitorLinks || hasSavedBilling ? <><div style={{ marginTop: 12 }}><Text strong>{COPY.current}</Text><Text type="secondary">{COPY.currentKeep}</Text></div>{selectedChannels.map((channel) => <div key={channel.id} style={{ marginTop: 8 }}>
@@ -674,7 +688,6 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
         {additionalIds.length ? <Alert type="warning" showIcon title={COPY.doubleCost} /> : null}
         <Checkbox checked={billing} disabled={busy} onChange={(event) => configureBilling(event.target.checked)}>{hasSavedBilling ? `${EDIT}（${ONBOARDING_PURPOSES.billing}）` : COPY.billingCheckbox}</Checkbox>
         {!purposeSelected && !hasMonitorLinks && !hasSavedBilling ? <Alert type="warning" showIcon title={ONBOARDING_PURPOSE_REQUIRED} description={ONBOARDING_PURPOSE_HINT} /> : null}
-        {billing && groups.has("pending") ? <Text type="secondary">{COPY.noKeyNeeded}</Text> : null}
         {billing ? <>
           {requiresAuthorization ? <div><Text strong>{COPY.keyAccount}</Text><Select aria-label={COPY.keyAccount} style={{ width: "100%", marginTop: 8 }} value={authorizationId || undefined} placeholder={COPY.keyAccountPlaceholder} disabled={busy} showSearch optionFilterProp="label" options={[...billingCandidates.matched, ...billingCandidates.others].map((item) => ({ value: item.id, label: `${stationLabel(item)} · ${item.baseUrl}` })).concat([{ value: "new", label: COPY.newAuthorization }])} onChange={(id) => { setAuthorizationId(id); invalidate(true); }} />{billingResourceId && !currentResourceIds.includes(billingResourceId) ? <Button size="small" style={{ ...smallButton, marginTop: 8 }} disabled={busy} onClick={() => void updateAuthorization(billingResourceId)}>{UPDATE_AUTH}「{resourceNames([billingResourceId])}」</Button> : null}</div> : <Text type="secondary">{COPY.authHint}</Text>}
           {requiresAuthorization && authorizationId === "new" ? <><Alert type="info" showIcon title={COPY.authOnceTitle} description={COPY.authOnce} /><Form name="channel-onboarding-authorization" form={authorizationForm} layout="vertical" requiredMark={false} disabled={busy} onValuesChange={(changed) => changeForm(changed, authorizationForm)}><ConnectionFields type={authorizationType} nameLabel={FIELDS.authorizationName.label} types={TYPES.filter((type) => type.value !== "newapi-key")} /></Form></> : null}
@@ -687,10 +700,13 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
           {[...groups].map(([key, ids]) => {
             if (key === "pending") return null;
             const union = scopeIds(Number(key), ids);
-            const declaration = coverage[key] || unknownCoverage();
-            const answer = coverageAnswerOption(declaration)?.value;
+            // 新的 Key 一开始不选（§5.2）；已经回答过的照原来的答案显示
+            const declaration: CoverageDeclaration | undefined = coverage[key];
+            const answer = declaration ? coverageAnswerOption(declaration)?.value : undefined;
+            // 没选时写这一问的说明；选了以后写这个回答的后果，「只给这些渠道用」不写
+            const after = answer ? COPY.coverageAfter[answer] : COVERAGE.detail;
             // 「这把 Key 还给别处用吗？」只问一次，五个回答和改绑定共用 COVERAGE_ANSWERS
-            return <div key={key}><Text strong>{keyName(Number(key))}</Text><div><Text>{COPY.allBound}：{names(union)}</Text></div><Text>{COVERAGE_QUESTION}</Text><Select aria-label={groups.size === 1 ? COVERAGE_QUESTION : `${keyName(Number(key))} · ${COVERAGE_QUESTION}`} style={{ width: "100%", marginTop: 8 }} value={answer} disabled={busy} options={COVERAGE_ANSWERS.map(({ value, label }) => ({ value, label }))} onChange={(value) => { setCoverage((previous) => ({ ...previous, [key]: coverageDeclarationOf(value, declaration.uncoveredOwnChannelIds) as CoverageDeclaration })); invalidate(); }} />{answer === "own_channels" ? <><Text>{BINDING_COPY.uncoveredChannels}</Text><Select aria-label={BINDING_COPY.uncoveredChannels} mode="multiple" style={{ width: "100%", marginTop: 8 }} value={declaration.uncoveredOwnChannelIds} disabled={busy} options={channels.filter((entry) => !union.includes(entry.id)).map((entry) => ({ value: entry.id, label: reconciliationChannelName(entry) }))} onChange={(ids) => { setCoverage((previous) => ({ ...previous, [key]: { ...declaration, uncoveredOwnChannelIds: ids } })); invalidate(); }} /></> : null}{answer !== "none" ? <Text type="secondary">{COVERAGE.detail}</Text> : null}</div>;
+            return <div key={key}><Text strong>{keyName(Number(key))}</Text><div><Text>{COPY.allBound}：{names(union)}</Text></div><Text>{COVERAGE_QUESTION}</Text><Select aria-label={groups.size === 1 ? COVERAGE_QUESTION : `${keyName(Number(key))} · ${COVERAGE_QUESTION}`} style={{ width: "100%", marginTop: 8 }} value={answer} disabled={busy} options={COVERAGE_ANSWERS.map(({ value, label }) => ({ value, label }))} onChange={(value) => { setCoverage((previous) => ({ ...previous, [key]: coverageDeclarationOf(value, declaration?.uncoveredOwnChannelIds || []) as CoverageDeclaration })); invalidate(); }} />{answer === "own_channels" && declaration ? <><Text>{BINDING_COPY.uncoveredChannels}</Text><Select aria-label={BINDING_COPY.uncoveredChannels} mode="multiple" style={{ width: "100%", marginTop: 8 }} value={declaration.uncoveredOwnChannelIds} disabled={busy} options={channels.filter((entry) => !union.includes(entry.id)).map((entry) => ({ value: entry.id, label: reconciliationChannelName(entry) }))} onChange={(ids) => { setCoverage((previous) => ({ ...previous, [key]: { ...declaration, uncoveredOwnChannelIds: ids } })); invalidate(); }} /></> : null}{after ? <Text type="secondary">{after}</Text> : null}</div>;
           })}
         </> : null}
         {purposeSelected ? <Button style={{ minHeight: 44 }} loading={probing} disabled={!replacementReady || saving || recovering || keyLoading || stale || coverageSourceChanged || (!creating && !stationId && !removalRequested)} onClick={() => void verify()}>{TEST_READ}</Button> : null}
@@ -700,15 +716,26 @@ export default function ChannelOnboarding({ compact, onComplete, destination }: 
             const targets: CredentialUpdateTarget[] = selection.credentialUpdates ?? (selection.credentialUpdateRequired && selection.station?.id ? [{ role: "primary", stationId: selection.station.id }] : []);
             return targets.map((target) => <Alert key={`${selection.selectionId}:${target.role}:${target.stationId}`} type="warning" showIcon title={COPY.credentialTitle[target.role === "primary" ? "primary" : "authorization"]} description={<Space direction="vertical"><Text>{target.role === "primary" ? COPY.credentialPrimary : COPY.credentialAuthorization(resourceNames([target.stationId]))}</Text><Space wrap><Button disabled={busy} onClick={() => reuseCredentialTarget(target)}>{COPY.reuseSaved}</Button><Button disabled={busy} onClick={() => void updateAuthorization(target.stationId, { initialAuthorization: connection((target.role === "primary" ? form : authorizationForm).getFieldsValue()), adoptTarget: target.role })}>{UPDATE_AUTH}</Button></Space></Space>} />);
           })}
-          {probe.groups.flatMap((group) => group.monitorChanges || []).map((change) => <section key={change.channelId} aria-label={COPY.changeAria(names([change.channelId]))}>
-            <Text strong>{names([change.channelId])} · {ONBOARDING_PURPOSES.monitor}</Text><div>{COPY.unchanged}：{resourceNames(change.previousStationIds.filter((id) => change.proposedStationIds.includes(id)))}</div>
-            <div>{COPY.added}：{[...change.addedStationIds.map((id) => resourceNames([id])), ...(creating && monitor ? [COPY.newUpstreamName(form.getFieldValue("name") || COPY.upstreamAccount)] : [])].join("、") || EMPTY}</div><div>{COPY.removed}：{resourceNames(change.removedStationIds)}</div>
-          </section>)}
+          {probe.groups.flatMap((group) => group.monitorChanges || []).map((change) => {
+            // 「不变 / 加上 / 去掉」只写有内容的行，三行都空时这一块不显示（ui-design-spec §5.2）
+            const kept = change.previousStationIds.filter((id) => change.proposedStationIds.includes(id));
+            const added = [...change.addedStationIds.map((id) => resourceNames([id])), ...(creating && monitor ? [COPY.newUpstreamName(form.getFieldValue("name") || COPY.upstreamAccount)] : [])];
+            if (!kept.length && !added.length && !change.removedStationIds.length) return null;
+            return <section key={change.channelId} aria-label={COPY.changeAria(names([change.channelId]))}>
+              <Text strong>{names([change.channelId])} · {ONBOARDING_PURPOSES.monitor}</Text>{kept.length ? <div>{COPY.unchanged}：{resourceNames(kept)}</div> : null}
+              {added.length ? <div>{COPY.added}：{added.join("、")}</div> : null}{change.removedStationIds.length ? <div>{COPY.removed}：{resourceNames(change.removedStationIds)}</div> : null}
+            </section>;
+          })}
           {billing ? probe.groups.map((group) => {
           const zone = formatDayZone(group.basis.timezone);
-          const start = group.preview.scopeChanged ? COPY.startsNow
+          // 答案不是「只给这些渠道用」时利润先不算：不说「从现在开始算利润」，写这个回答的后果（§5.2）
+          const counted = group.preview.costCoverage === "complete";
+          const chosen = group.basis.tokenId ? coverage[String(group.basis.tokenId)] : undefined;
+          const chosenAnswer = chosen ? coverageAnswerOption(chosen)?.value : undefined;
+          const after = (chosenAnswer && COPY.coverageAfter[chosenAnswer]) || COPY.coverageUnanswered;
+          const start = group.preview.scopeChanged ? (counted ? COPY.startsNow : "")
             : `${group.preview.billingEffectiveFromMs != null ? reconciliationChannelStatus("not_effective", { start: formatZonedDateTime(group.preview.billingEffectiveFromMs, group.basis.timezone) }).label : COPY.unverified}${zone ? `（${zone}）` : ""}`;
-          return <Alert key={group.groupId} type={group.status === "ready" ? "info" : "warning"} showIcon title={group.code === "KEY_REQUIRED" ? COPY.noKey : group.basis.existingRuleId ? COPY.joinExisting : PREVIEW_STATE[group.status] || BINDING_COPY.preview} description={<Space direction="vertical">{group.reason || group.code ? <div><Text>{describeError({ code: group.code, reason: group.reason }).text}</Text><ErrorDetail raw={group.reason} /></div> : null}<Text>{COPY.upstreamAccount}：{group.basis.accountIdentity ? `${group.basis.accountIdentity.baseUrl} · ${COPY.account} ${group.basis.accountIdentity.accountId}` : EMPTY}</Text><Text>{FIELDS.apiKey.label}：{group.basis.tokenId ? keyName(group.basis.tokenId) : EMPTY}</Text><Text>{COPY.existing}：{names(group.basis.existingChannelIds)}；{COPY.adding}：{names(group.requestedChannelIds)}</Text><Text>{COPY.allBound}：{names(group.basis.proposedChannelIds)}</Text><Text>{start}</Text><Text>{COPY.costOnce}{group.preview.costCoverage !== "complete" ? `；${COPY.coverageUnanswered}` : ""}</Text></Space>} />;
+          return <Alert key={group.groupId} type={group.status === "ready" ? "info" : "warning"} showIcon title={group.code === "KEY_REQUIRED" ? COPY.noKey : group.basis.existingRuleId ? COPY.joinExisting : PREVIEW_STATE[group.status] || BINDING_COPY.preview} description={<Space direction="vertical">{group.reason || group.code ? <div><Text>{describeError({ code: group.code, reason: group.reason }).text}</Text><ErrorDetail raw={group.reason} /></div> : null}<Text>{COPY.upstreamAccount}：{group.basis.accountIdentity ? `${group.basis.accountIdentity.baseUrl} · ${COPY.account} ${group.basis.accountIdentity.accountId}` : EMPTY}</Text><Text>{FIELDS.apiKey.label}：{group.basis.tokenId ? keyName(group.basis.tokenId) : EMPTY}</Text><Text>{COPY.existing}：{names(group.basis.existingChannelIds)}；{COPY.adding}：{names(group.requestedChannelIds)}</Text><Text>{COPY.allBound}：{names(group.basis.proposedChannelIds)}</Text>{start ? <Text>{start}</Text> : null}<Text>{COPY.costOnce}{counted ? "" : `；${after}`}</Text></Space>} />;
         }) : probe.groups.filter((group) => group.reason).map((group) => <Alert key={group.groupId} type="warning" showIcon title={COPY.pending} description={<div>{describeError({ code: group.code, reason: group.reason }).text}<ErrorDetail raw={group.reason} /></div>} />)}
           <Collapse size="small" items={[{ key: "basis", label: COPY.details, children: <Space direction="vertical"><Text>{BINDING_COPY.ownStation}：{catalogue?.ownStation?.name || EMPTY} · {source?.baseUrl || EMPTY}</Text>{selectedChannels.map((channel) => <Text key={channel.id}>{reconciliationChannelName(channel)} · {COPY.group} {channel.groups?.join("、") || EMPTY}</Text>)}</Space> }]} />
           {!approved && !probe.selections.some((selection) => selection.credentialUpdateRequired) ? <Text type="warning">{ERROR_CATEGORIES.changed.text}</Text> : null}

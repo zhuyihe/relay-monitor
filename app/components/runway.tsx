@@ -9,7 +9,7 @@ import { formatDays } from "../../lib/format";
 import { etaWindowDays, RUNWAY_MAX_DAYS, WATCH_DAYS } from "../../lib/overview-actions";
 import { TipBody, useFloatTip } from "./float-tip";
 import type { TipRow } from "./float-tip";
-import { StatusText } from "./status";
+import { LEVEL_ORDER, StatusText } from "./status";
 import type { Level } from "./status";
 
 export type RunwayItem = {
@@ -54,6 +54,11 @@ export function RunwayRulesNote({ critDays, warnDays = WATCH_DAYS, children }: {
       {RUNWAY_TEXT.rulesWhereAfter}
     </>
   );
+}
+
+// 余量列表的排序（运营总览、成本估算共用）：先按档位，同档里读不到余额的在前，再按可用天数从少到多
+export function compareRunwayItems(a: RunwayItem, b: RunwayItem) {
+  return LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] || Number(!!b.failed) - Number(!!a.failed) || (a.days ?? Infinity) - (b.days ?? Infinity);
 }
 
 const pctOf = (d: number, max: number) => `${(d / max) * 100}%`;

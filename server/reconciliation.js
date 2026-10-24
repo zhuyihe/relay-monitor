@@ -16,6 +16,7 @@ import {
   reconciliationIssue,
   fillIssueCopy,
   COVERAGE_QUESTION,
+  COVERAGE_REQUIRED,
   INCOMPLETE_DAY_TEXT,
   RECONCILIATION_ISSUE_PRIORITY,
   isLiveReconciliationPreset,
@@ -44,10 +45,10 @@ const DAY_MS = 86400000;
 const MAX_CONCURRENT_RULES = 6;
 
 export function normalizeReconciliationScopeIntent(kind, targetRuleId, input, { timezone, enabled } = {}) {
-  if (!input?.coverageDeclaration) throw codedError("INVALID_REQUEST", `请回答「${COVERAGE_QUESTION}」`);
+  if (!input?.coverageDeclaration) throw codedError("INVALID_REQUEST", COVERAGE_REQUIRED);
   let coverageDeclaration;
   try { coverageDeclaration = normalizeCoverageDeclaration(input.coverageDeclaration); }
-  catch { throw codedError("INVALID_REQUEST", `请回答「${COVERAGE_QUESTION}」`); }
+  catch { throw codedError("INVALID_REQUEST", COVERAGE_REQUIRED); }
   let zone;
   try { zone = validateTimezone(input?.timezone || timezone); }
   catch { throw codedError("INVALID_REQUEST", "时区不对"); }
