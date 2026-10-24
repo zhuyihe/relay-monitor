@@ -2,8 +2,8 @@
 // 出错时说清楚读不到什么、为什么，并给「刷新」；空状态告诉用户下一步能做什么。
 import type { CSSProperties, ReactNode } from "react";
 import { Button } from "antd";
-import { LOADING_TEXT, MINUS, refreshFailedText } from "../../lib/format";
-import { failureSentence } from "../../lib/error-copy.js";
+import { formatZonedTime, LOADING_TEXT, MINUS, refreshFailedText } from "../../lib/format";
+import { consoleFailureText, failureSentence } from "../../lib/error-copy.js";
 import { workflowActionMeta } from "../../lib/workflow-actions.js";
 import { ErrorDetail, noteOf } from "./error-detail";
 import { Sym } from "./icons";
@@ -98,6 +98,29 @@ export function Dirty({ show }: { show: boolean }) {
       {DIRTY_TEXT}
     </span>
   ) : null;
+}
+
+// 改了马上保存的区块（ui-copy-spec §8.3）：标题旁写保存中 / 哪一组没存上（带「查看详细原因」，这一组再提交一次就清掉）/
+// 有没存进去的输入 / 上次保存时间（按业务时区写）。告警中心、系统设置共用，配 app/components/use-auto-save.ts。
+// failed 是一般的「保存失败」（弹窗里、提示条里用），notSaved 是标题旁那一句的开头
+export const SAVE_STATE_TEXT = Object.freeze({
+  saving: "保存中…",
+  savedAt: (time: string) => `已保存 ${time}`,
+  failed: "保存失败",
+  notSaved: (label: string) => `${label}没存上`,
+});
+export function SaveState({ saving, dirty, at, tz, failures = [] }: {
+  saving: boolean; dirty: boolean; at: number; tz: string; failures?: ({ label: string; error: unknown } | null)[];
+}) {
+  const failure = failures.find(Boolean);
+  return (
+    <span aria-live="polite">
+      {saving ? <span className="jy-dirty">{SAVE_STATE_TEXT.saving}</span>
+        : failure ? <span className="jy-err jy-save-failed" role="alert"><Sym kind="crit" />{consoleFailureText(SAVE_STATE_TEXT.notSaved(failure.label), failure.error)}<ErrorDetail raw={noteOf(failure.error).raw} /></span>
+        : dirty ? <Dirty show />
+        : at ? <span className="jy-dirty">{SAVE_STATE_TEXT.savedAt(formatZonedTime(at, tz))}</span> : null}
+    </span>
+  );
 }
 
 // 刷新失败、页面还显示着上次读到的数据时，页顶那一条（design/ui-copy-spec.md §8.1）：

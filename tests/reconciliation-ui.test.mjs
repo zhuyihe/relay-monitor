@@ -2816,6 +2816,9 @@ test("用量分析：读不到用量的上游按码说一句、原文收起；�
 // 系统设置、告警中心、登录页的接口数据
 const settingsFixture = () => ({ settings: { refreshIntervalSec: 60, lowBalanceUsd: 5, historyRetentionDays: null },
   history: { earliestAt: "2026-09-01T01:00:00Z", latestAt: new Date().toISOString(), pointCount: 1234, tableBytes: 2048, retentionDays: null, cleanup: {} }, tz: BUSINESS_TZ });
+// 「保存失败」「X没存上」取自 app/components/data-state.tsx 的 SAVE_STATE_TEXT（组件文件带 JSX，node 读不了）
+const SAVE_FAILED = "保存失败";
+const notSaved = (label) => `${label}没存上`;
 const metaFixture = (settings = {}) => ({ types: [], channelTypes: [], rules: {}, settings, app: { version: "2.2.0", commit: "abc1234" }, tz: BUSINESS_TZ });
 
 test("系统设置改密码：按接口给的码把报错放到对应的输入框，原密码不对落在「原密码」下，别的放在表单顶部", async (t) => {
@@ -2919,14 +2922,14 @@ test("登录页按码说：用户名或密码不对时标红输入框，试太�
   assert.equal(await red(), 0);
 });
 
-test("告警中心：规则名取余额档位的共用叫法，区块名按规范，上次定时发送写成「10月20日」，立即发送没发出去时说清楚", async (t) => {
+test("告警中心：没有通知方式时整页只放「还没有通知方式」；有了以后规则名取余额档位的共用叫法，上次定时发送写成「10月20日」，立即发送没发出去时说清楚", async (t) => {
   const yesterday = shiftDay(shanghaiDay(Date.now()), -1);
   const rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: true, etaDays: 3, etaUnit: "days", renotifyHours: 24, errorThreshold: 1, errorRetrySec: 30, channelsFor: {} };
-  let sends = 0;
+  let sends = 0, channels = [];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/notifications") return fulfill(route, { channels: [], rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }] });
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels, rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }] });
     if (url.pathname === "/api/meta") return fulfill(route, metaFixture({ dailyReport: { enabled: true, time: "09:00", channelIds: [], lastSent: yesterday } }));
     // 第一次：接口没带认得的码；第二次：没有能发日报的通知方式（带码）
     if (url.pathname === "/api/report/send") return sends++ === 0
@@ -2934,12 +2937,19 @@ test("告警中心：规则名取余额档位的共用叫法，区块名按规�
       : failJSON(route, 400, { error: errorText({ code: "REPORT_NO_CHANNELS" }), code: "REPORT_NO_CHANNELS" });
     throw new Error("unexpected notifications fixture API: " + url.pathname);
   }, undefined, false, null, "/notifications");
+  // 还没有通知方式：只放这一件事（ui-copy-spec §8.3），提醒规则、日报、页首那条都不出
+  await page.getByRole("region", { name: NOTIFICATIONS_COPY.channels, exact: true }).getByText(NOTIFICATIONS_COPY.emptyHint, { exact: true }).waitFor();
+  for (const title of [NOTIFICATIONS_COPY.rules, NOTIFICATIONS_COPY.report]) assert.equal(await page.getByRole("region", { name: title, exact: true }).count(), 0);
+  assert.equal(await page.locator(".jy-banner").count(), 0);
+  // 有了通知方式（但都停用了）：规则、日报出来，页首说通知方式都停用了
+  channels = [{ id: "c1", name: "运维群", type: "telegram", enabled: false, config: {}, hasSecret: {} }];
+  await page.reload();
   for (const title of [NOTIFICATIONS_COPY.rules, NOTIFICATIONS_COPY.channels, NOTIFICATIONS_COPY.report]) await page.getByRole("region", { name: title, exact: true }).waitFor();
   const ruleTable = page.locator(".jy-notifications-rules");
   for (const name of [BALANCE_STATE_TEXT.low, BALANCE_STATE_TEXT.empty, BALANCE_STATE_TEXT.unreadable, NOTIFICATIONS_COPY.recover, BALANCE_STATE_TEXT.soon])
     await ruleTable.getByText(name, { exact: true }).waitFor();
-  // 打开了提醒却没有通知方式：页首提醒发不出去
-  await page.getByText(NOTIFICATIONS_COPY.noDeliveryNone, { exact: true }).waitFor();
+  // 打开了提醒却没有启用的通知方式：页首提醒发不出去
+  await page.getByText(NOTIFICATIONS_COPY.noDeliveryOff, { exact: true }).waitFor();
   await page.getByText(NOTIFICATIONS_COPY.reportLastSent(formatDayKey(yesterday, BUSINESS_TZ)), { exact: true }).waitFor();
   // 「立即发送」在发之前就出错：说没发出去，原文进「查看详细原因」，不写「几点发送」
   await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportSend }).click();
@@ -2951,6 +2961,261 @@ test("告警中心：规则名取余额档位的共用叫法，区块名按规�
   await page.getByRole("button", { name: NOTIFICATIONS_COPY.reportSend }).click();
   await result.getByText(failureSentence(NOTIFICATIONS_COPY.reportNotSent, errorText({ code: "REPORT_NO_CHANNELS" })), { exact: true }).waitFor();
   assert.equal(await result.getByText("查看详细原因", { exact: true }).count(), 0);
+});
+
+test("告警一处设完：余额提醒线在「余额偏低」那一行，离开输入框就存；日报改了就存；系统设置不再有余额提醒线，刷新间隔、保留天数改了马上存", async (t) => {
+  const rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: true, etaDays: 3, etaUnit: "days", renotifyHours: 24, errorThreshold: 1, errorRetrySec: 30, channelsFor: {} };
+  const puts = [];
+  let settings = { lowBalanceUsd: 5, refreshIntervalSec: 60, historyRetentionDays: null, dailyReport: { enabled: false, time: "09:00", channelIds: [] } };
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), method = route.request().method();
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "admin", isDefaultPassword: false });
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels: [{ id: "c1", name: "运维群", type: "telegram", enabled: true, config: {}, hasSecret: {} }], rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }] });
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture(settings));
+    if (url.pathname === "/api/settings" && method === "PUT") {
+      const body = route.request().postDataJSON(); puts.push(body);
+      settings = { ...settings, ...body, ...(body.dailyReport ? { dailyReport: { ...settings.dailyReport, ...body.dailyReport } } : {}) };
+      return fulfill(route, { settings, history: settingsFixture().history, tz: BUSINESS_TZ });
+    }
+    if (url.pathname === "/api/settings") return fulfill(route, { ...settingsFixture(), settings });
+    throw new Error("unexpected alerts fixture API: " + method + " " + url.pathname);
+  }, undefined, false, null, "/notifications");
+  const rulesPanel = page.getByRole("region", { name: NOTIFICATIONS_COPY.rules, exact: true });
+  const low = rulesPanel.getByLabel(NOTIFICATIONS_COPY.lowLabel, { exact: true });
+  await low.waitFor(); assert.equal(await low.inputValue(), "5");
+  await rulesPanel.getByText(NOTIFICATIONS_COPY.lowHint, { exact: true }).waitFor();
+  await low.fill("3"); await low.press("Tab");
+  for (let wait = 0; !puts.length && wait < 50; wait++) await page.waitForTimeout(100);
+  assert.deepEqual(puts[0], { lowBalanceUsd: 3 });
+  await rulesPanel.getByText(/^已保存 /).waitFor();
+  // 日报：打开开关就存，没有「保存」按钮
+  const report = page.getByRole("region", { name: NOTIFICATIONS_COPY.report, exact: true });
+  assert.equal(await report.getByRole("button", { name: NOTIFICATIONS_COPY.save, exact: true }).count(), 0);
+  await report.getByRole("switch").first().click();
+  for (let wait = 0; puts.length < 2 && wait < 50; wait++) await page.waitForTimeout(100);
+  assert.deepEqual(puts[1], { dailyReport: { enabled: true, time: "09:00", channelIds: [] } });
+
+  // 系统设置：没有「余额提醒线」区块，「刷新与数据」下面一句链到告警中心；刷新间隔离开输入框就存，只带这一项
+  await page.goto(new URL("/settings", page.url()).href);
+  const refresh = page.getByRole("region", { name: SETTINGS_COPY.refresh, exact: true });
+  const interval = refresh.getByLabel(SETTINGS_COPY.interval, { exact: true }); await interval.waitFor();
+  assert.equal(await page.getByRole("region", { name: "余额提醒线", exact: true }).count(), 0);
+  assert.equal(await refresh.getByRole("link", { name: NAV_LABELS.notifications, exact: true }).getAttribute("href"), "/notifications");
+  assert.equal(await page.getByRole("button", { name: "保存", exact: true }).count(), 0);
+  await interval.fill("120"); await interval.press("Enter");
+  for (let wait = 0; puts.length < 3 && wait < 50; wait++) await page.waitForTimeout(100);
+  assert.deepEqual(puts[2], { refreshIntervalSec: 120 });
+  await refresh.getByText(/^已保存 /).waitFor();
+  // 保留天数：改长（一直保留 → 不缩短）不用确认，选了就存
+  const retention = page.getByRole("region", { name: SETTINGS_COPY.retention, exact: true });
+  settings = { ...settings, historyRetentionDays: 30 }; await page.reload(); await retention.getByLabel(SETTINGS_COPY.keep, { exact: true }).waitFor();
+  await retention.getByLabel(SETTINGS_COPY.keep, { exact: true }).click();
+  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: SETTINGS_COPY.keepDays(90) }).first().click();
+  for (let wait = 0; puts.length < 4 && wait < 50; wait++) await page.waitForTimeout(100);
+  assert.deepEqual(puts[3], { historyRetentionDays: 90 });
+});
+
+test("改了马上保存：没有通知方式时提醒线和提醒天数也能改；存不进去回到已保存的值并留下「保存失败」；回车后再离开只存一次；一个字一个字地输入不存；缩短保留天数取消就回到原值、不存", async (t) => {
+  const rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: false, etaDays: 3, etaUnit: "days", renotifyHours: 24, errorThreshold: 1, errorRetrySec: 30, channelsFor: {} };
+  const puts = [], rulePuts = [], previews = [];
+  let failSettings = false, failRules = false, channels = [];
+  let settings = { lowBalanceUsd: 5, refreshIntervalSec: 60, historyRetentionDays: null, dailyReport: { enabled: false, time: "09:00", channelIds: [] } };
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), method = route.request().method();
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "admin", isDefaultPassword: false });
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels, rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }] });
+    if (url.pathname === "/api/notifications/rules" && method === "PUT") {
+      rulePuts.push(route.request().postDataJSON());
+      if (failRules) return failJSON(route, 500, { error: "rules write timeout" });
+      Object.assign(rules, route.request().postDataJSON()); return fulfill(route, { rules });
+    }
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture(settings));
+    if (url.pathname === "/api/settings/history-preview") { previews.push(url.searchParams.get("days")); return fulfill(route, { preview: { retentionDays: 30, cutoffAt: new Date().toISOString(), pointCount: 12, earliestAt: null, latestAt: null } }); }
+    if (url.pathname === "/api/settings" && method === "PUT") {
+      const body = route.request().postDataJSON(); puts.push(body);
+      if (failSettings) return failJSON(route, 500, { error: "settings write timeout" });
+      settings = { ...settings, ...body, ...(body.dailyReport ? { dailyReport: { ...settings.dailyReport, ...body.dailyReport } } : {}) };
+      return fulfill(route, { settings, history: settingsFixture().history, tz: BUSINESS_TZ });
+    }
+    if (url.pathname === "/api/settings") return fulfill(route, { ...settingsFixture(), settings });
+    throw new Error("unexpected autosave fixture API: " + method + " " + url.pathname);
+  }, undefined, false, null, "/notifications");
+  const wait = async (list, n) => { for (let i = 0; list.length < n && i < 50; i++) await page.waitForTimeout(100); };
+
+  // 没有通知方式：空状态下面那一小块里有提醒线和提醒天数；「快用完」关着也能改天数
+  const lines = page.getByRole("region", { name: NOTIFICATIONS_COPY.linesTitle, exact: true }); await lines.waitFor();
+  assert.equal(await page.getByRole("region", { name: NOTIFICATIONS_COPY.rules, exact: true }).count(), 0);
+  const eta = lines.getByLabel(NOTIFICATIONS_COPY.etaLabel, { exact: true });
+  assert.equal(await eta.isEnabled(), true);
+  await eta.fill("5"); await eta.press("Tab"); await wait(rulePuts, 1);
+  assert.equal(rulePuts.length, 1); assert.equal(rulePuts[0].etaDays, 5);
+  // 一个字一个字地输入：离开输入框之前不存；回车后紧接着 Tab，只存一次
+  const low = lines.getByLabel(NOTIFICATIONS_COPY.lowLabel, { exact: true });
+  await low.fill(""); await low.pressSequentially("12", { delay: 80 }); await page.waitForTimeout(300);
+  assert.equal(puts.length, 0);
+  await low.press("Enter"); await low.press("Tab"); await wait(puts, 1); await page.waitForTimeout(400);
+  assert.deepEqual(puts, [{ lowBalanceUsd: 12 }]);
+  // 存不进去：回到已保存的 12，标题旁留「保存失败」，下一次存成功才消失
+  failSettings = true;
+  await low.fill("20"); await low.press("Tab"); await wait(puts, 2);
+  await lines.getByText(new RegExp(`^${notSaved(NOTIFICATIONS_COPY.lowLabel)}：`)).waitFor();
+  assert.equal(await low.inputValue(), "12");
+  failRules = true;
+  await eta.fill("7"); await eta.press("Tab"); await wait(rulePuts, 2);
+  for (let i = 0; i < 20 && await eta.inputValue() !== "5.00"; i++) await page.waitForTimeout(100);
+  assert.equal(await eta.inputValue(), "5.00");
+  failSettings = false; failRules = false;
+  await low.fill("15"); await low.press("Tab"); await wait(puts, 3);
+  // 提醒天数那一组还没存上，「保存失败」还在，说的是「提醒天数」（这时页面上没有「提醒规则」）；它存上以后才消失
+  await lines.getByText(new RegExp(`^${notSaved(NOTIFICATIONS_COPY.etaLabel)}：`)).waitFor();
+  await eta.fill("6"); await eta.press("Tab"); await wait(rulePuts, 3);
+  for (let i = 0; i < 20 && await lines.getByText(/没存上：/).count(); i++) await page.waitForTimeout(100);
+  assert.equal(await lines.getByText(/没存上：/).count(), 0);
+
+  // 有通知方式以后：这两个数回到规则那几行里，那一小块不再出现
+  channels = [{ id: "c1", name: "运维群", type: "telegram", enabled: true, config: {}, hasSecret: {} }];
+  await page.reload();
+  const rulesPanel = page.getByRole("region", { name: NOTIFICATIONS_COPY.rules, exact: true }); await rulesPanel.waitFor();
+  assert.equal(await page.getByRole("region", { name: NOTIFICATIONS_COPY.linesTitle, exact: true }).count(), 0);
+  assert.equal(await rulesPanel.getByLabel(NOTIFICATIONS_COPY.etaLabel, { exact: true }).isEnabled(), true);
+  // 日报存不进去：开关回到「关」
+  failSettings = true;
+  const report = page.getByRole("region", { name: NOTIFICATIONS_COPY.report, exact: true });
+  const sw = report.getByRole("switch").first(); await sw.click(); await wait(puts, 4);
+  await report.getByText(/没存上：/).waitFor();
+  assert.equal(await sw.getAttribute("aria-checked"), "false");
+  failSettings = false;
+
+  // 系统设置：刷新间隔存不进去回到 60；缩短保留天数（一直保留 → 90 天）先预览、取消就回到原值，不发 PUT
+  await page.goto(new URL("/settings", page.url()).href);
+  const refresh = page.getByRole("region", { name: SETTINGS_COPY.refresh, exact: true });
+  const interval = refresh.getByLabel(SETTINGS_COPY.interval, { exact: true }); await interval.waitFor();
+  failSettings = true;
+  const before = puts.length;
+  await interval.fill("90"); await interval.press("Tab"); await wait(puts, before + 1);
+  await refresh.getByText(/没存上：/).waitFor();
+  assert.equal(await interval.inputValue(), "60");
+  failSettings = false;
+  const retention = page.getByRole("region", { name: SETTINGS_COPY.retention, exact: true });
+  const putsBefore = puts.length;
+  await retention.getByLabel(SETTINGS_COPY.keep, { exact: true }).click();
+  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: SETTINGS_COPY.keepDays(90) }).first().click();
+  const dialog = page.getByRole("dialog", { name: SETTINGS_COPY.confirmTitle, exact: true }); await dialog.waitFor();
+  assert.deepEqual(previews, ["90"]);
+  await dialog.getByRole("button", { name: SETTINGS_COPY.cancel, exact: true }).click(); await dialog.waitFor({ state: "hidden" });
+  await retention.locator(`.ant-select-content[title="${SETTINGS_COPY.keepForever}"]`).waitFor();
+  await page.waitForTimeout(300);
+  assert.equal(puts.length, putsBefore);
+});
+
+test("改了马上保存（重叠的保存）：排着的旧值不存也不弹确认框；失败回到最新已保存的值；保存途中又改的输入不被盖掉；回车再离开只弹一个确认框；预览读不到、确认后存不进去、开关存不进去都写哪一组没存上；读不到提醒线时就地重试", async (t) => {
+  const rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: true, etaDays: 3, etaUnit: "days", renotifyHours: 24, errorThreshold: 1, errorRetrySec: 30, channelsFor: {} };
+  const puts = [], previews = [], rulePuts = [];
+  let slow = 0, failLow = null, failPreview = false, failRetention = false, failRules = false, failMeta = false, channels = [];
+  let settings = { lowBalanceUsd: 5, refreshIntervalSec: 60, historyRetentionDays: null, dailyReport: { enabled: false, time: "09:00", channelIds: [] } };
+  const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), method = route.request().method();
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "admin", isDefaultPassword: false });
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels, rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }] });
+    if (url.pathname === "/api/notifications/rules" && method === "PUT") {
+      rulePuts.push(route.request().postDataJSON());
+      if (failRules) return failJSON(route, 500, { error: "rules write timeout" });
+      Object.assign(rules, route.request().postDataJSON()); return fulfill(route, { rules });
+    }
+    if (url.pathname === "/api/meta") return failMeta ? failJSON(route, 500, { error: "meta down" }) : fulfill(route, metaFixture(settings));
+    if (url.pathname === "/api/settings/history-preview") {
+      previews.push(url.searchParams.get("days"));
+      return failPreview ? failJSON(route, 500, { error: "preview down" }) : fulfill(route, { preview: { retentionDays: 30, cutoffAt: new Date().toISOString(), pointCount: 12, earliestAt: null, latestAt: null } });
+    }
+    if (url.pathname === "/api/settings" && method === "PUT") {
+      const body = route.request().postDataJSON(); puts.push(body);
+      if (slow) await sleep(slow);
+      if (failLow != null && body.lowBalanceUsd === failLow) return failJSON(route, 500, { error: "settings write timeout" });
+      if (failRetention && "historyRetentionDays" in body) return failJSON(route, 500, { error: "cleanup failed" });
+      settings = { ...settings, ...body };
+      return fulfill(route, { settings, history: settingsFixture().history, tz: BUSINESS_TZ });
+    }
+    if (url.pathname === "/api/settings") return fulfill(route, { ...settingsFixture(), settings });
+    throw new Error("unexpected overlap fixture API: " + method + " " + url.pathname);
+  }, undefined, false, null, "/notifications");
+  const until = async (check) => { for (let i = 0; i < 60 && !(await check()); i++) await page.waitForTimeout(100); };
+
+  // 读不到余额提醒线（/api/meta 失败）：那一小块里就地说、能重试，重试成功后框能改
+  failMeta = true; await page.reload();
+  const lines = page.getByRole("region", { name: NOTIFICATIONS_COPY.linesTitle, exact: true }); await lines.waitFor();
+  await lines.getByText(new RegExp(`^${NOTIFICATIONS_COPY.linesFailed}`)).waitFor();
+  const low = lines.getByLabel(NOTIFICATIONS_COPY.lowLabel, { exact: true });
+  assert.equal(await low.isEnabled(), false);
+  failMeta = false; await lines.getByRole("button", { name: workflowActionMeta("refresh").label, exact: true }).click();
+  await until(async () => low.isEnabled()); assert.equal(await low.inputValue(), "5");
+  // 那一小块里提醒线下面只有前半句
+  await lines.getByText(NOTIFICATIONS_COPY.lowHintWhere, { exact: true }).waitFor();
+  assert.equal(await lines.getByText(NOTIFICATIONS_COPY.lowHint, { exact: true }).count(), 0);
+
+  // 重叠：7 慢慢存（会成），途中又提交 9（会失败）→ 回到最新已保存的 7，不是发起时的 5
+  slow = 600; failLow = 9;
+  await low.fill("7"); await low.press("Tab"); await until(async () => puts.length >= 1);
+  await low.fill("9"); await low.press("Tab");
+  await until(async () => puts.length >= 2 && (await lines.getByText(new RegExp(`^${notSaved(NOTIFICATIONS_COPY.lowLabel)}：`)).count()) > 0);
+  assert.equal(await low.inputValue(), "7");
+  // 保存途中又改、还没离开的输入不被盖掉
+  failLow = null;
+  await low.fill("11"); await low.press("Tab"); await page.waitForTimeout(100);
+  await low.fill("13"); await until(async () => puts.length >= 3); await page.waitForTimeout(800);
+  assert.equal(await low.inputValue(), "13");
+  await low.press("Tab"); await until(async () => puts.length >= 4); slow = 0;
+
+  // 有通知方式：开关、「发到」存不进去，标题旁写「提醒开关没存上」，开关回到原样
+  channels = [{ id: "c1", name: "运维群", type: "telegram", enabled: true, config: {}, hasSecret: {} }];
+  await page.reload();
+  const rulesPanel = page.getByRole("region", { name: NOTIFICATIONS_COPY.rules, exact: true }); await rulesPanel.waitFor();
+  failRules = true;
+  const lowSwitch = rulesPanel.getByRole("switch").first(); await lowSwitch.click();
+  await rulesPanel.getByText(new RegExp(`^${notSaved(NOTIFICATIONS_COPY.groupToggles)}：`)).waitFor();
+  assert.equal(await lowSwitch.getAttribute("aria-checked"), "true");
+  failRules = false;
+
+  // 系统设置：刷新间隔慢慢存时，自定义保留天数填 20 回车（排着）、又选 365（排着）→ 只为 365 预览、弹确认框，20 不存
+  await page.goto(new URL("/settings", page.url()).href);
+  const refresh = page.getByRole("region", { name: SETTINGS_COPY.refresh, exact: true });
+  const interval = refresh.getByLabel(SETTINGS_COPY.interval, { exact: true }); await interval.waitFor();
+  const retention = page.getByRole("region", { name: SETTINGS_COPY.retention, exact: true });
+  const pick = async (label) => { await retention.getByLabel(SETTINGS_COPY.keep, { exact: true }).click(); await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: label }).first().click(); };
+  slow = 3000; const before = puts.length;
+  await interval.fill("120"); await interval.press("Tab"); await page.waitForTimeout(100);
+  await pick(SETTINGS_COPY.keepCustom);
+  const custom = retention.getByLabel(SETTINGS_COPY.keepCustomLabel, { exact: true }); await custom.fill("20"); await custom.press("Enter");
+  await pick(SETTINGS_COPY.keepDays(365));
+  const dialog = page.getByRole("dialog", { name: SETTINGS_COPY.confirmTitle, exact: true }); await dialog.waitFor({ timeout: 8000 });
+  assert.deepEqual(previews, ["365"]);
+  await dialog.getByRole("button", { name: SETTINGS_COPY.cancel, exact: true }).click(); await dialog.waitFor({ state: "hidden" });
+  await page.waitForTimeout(300); slow = 0;
+  assert.deepEqual(puts.slice(before), [{ refreshIntervalSec: 120 }]);
+  // 自定义 20：回车后紧接着离开，只预览一次、只弹一个确认框
+  await pick(SETTINGS_COPY.keepCustom); await custom.fill("20"); await custom.press("Enter"); await custom.press("Tab");
+  await dialog.waitFor();
+  // 确认后存不进去：写「历史数据保留没存上」，回到一直保留
+  failRetention = true;
+  await dialog.getByRole("button", { name: SETTINGS_COPY.confirmOk, exact: true }).click();
+  await retention.getByText(new RegExp(`^${notSaved(SETTINGS_COPY.retention)}：`)).waitFor();
+  await retention.locator(`.ant-select-content[title="${SETTINGS_COPY.keepForever}"]`).waitFor();
+  // 点了确认以后，第二次提交（Tab 那一次）也没有冒出来：还是只预览了两次、没有第二个确认框
+  await page.waitForTimeout(800);
+  assert.deepEqual(previews, ["365", "20"]); assert.equal(await page.getByRole("dialog", { name: SETTINGS_COPY.confirmTitle, exact: true }).count(), 0);
+  failRetention = false;
+  // 先成功存一次 365，把上面的「没存上」清掉
+  await pick(SETTINGS_COPY.keepDays(365)); await dialog.waitFor(); await page.waitForTimeout(400);
+  await dialog.getByRole("button", { name: SETTINGS_COPY.confirmOk, exact: true }).click(); await dialog.waitFor({ state: "hidden" });
+  await until(async () => (await retention.getByText(new RegExp(`^${notSaved(SETTINGS_COPY.retention)}：`)).count()) === 0);
+  assert.equal(await retention.getByText(new RegExp(`^${notSaved(SETTINGS_COPY.retention)}：`)).count(), 0);
+  // 预览读不到：写没存上、回到 365，不弹确认框
+  failPreview = true;
+  await pick(SETTINGS_COPY.keepDays(90));
+  await until(async () => previews.length >= 4);
+  await retention.getByText(new RegExp(`^${notSaved(SETTINGS_COPY.retention)}：`)).waitFor();
+  assert.equal(await page.getByRole("dialog", { name: SETTINGS_COPY.confirmTitle, exact: true }).count(), 0);
+  await retention.locator(`.ant-select-content[title="${SETTINGS_COPY.keepDays(365)}"]`).waitFor();
 });
 
 test("告警中心通知方式没发出去：测试结果、日报发送结果按通知方式的说法写，原文各自进「查看详细原因」；没设置自营站点时预览说清楚、带「去设置」", async (t) => {
@@ -3044,7 +3309,7 @@ test("告警中心通知方式：接口不回传密钥；只改名字也能保�
   dialog = await openEdit();
   await dialog.getByLabel(apiBaseLabel, { exact: true }).fill("https://evil.example");
   await dialog.getByRole("button", { name: NOTIFICATIONS_COPY.save }).click();
-  await page.getByText(`${NOTIFICATIONS_COPY.saveFailed}：${errorText({ code })}。`, { exact: true }).waitFor();
+  await page.getByText(`${SAVE_FAILED}：${errorText({ code })}。`, { exact: true }).waitFor();
   assert.equal(await dialog.isVisible(), true);
   assert.equal(puts[1].config.botToken, "");
 });

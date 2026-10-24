@@ -7,11 +7,11 @@
 // 控制台自己的接口出错按 consoleErrorText 说，原文也进「查看详细原因」。
 import "../../styles/pages/notifications.css";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { commitOnLeave, useAutoSave, useSaveAction, useSaveQueue } from "../../components/use-auto-save";
 import Link from "next/link";
 import { App, Button, Checkbox, Form, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
 import { ALERT_RULES } from "../../../lib/alert-rules";
-import { NAV_LABELS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { SECRET_FIELD_TEXT } from "../../../lib/channel-onboarding";
@@ -19,7 +19,7 @@ import { consoleErrorText, consoleFailureText, describeError, failureSentence, r
 import { BALANCE_STATE_TEXT, formatDayKey, formatZonedTime } from "../../../lib/format";
 import { workflowAction } from "../../../lib/workflow-actions";
 import { CountBadge, Panel } from "../../components/panel";
-import { Dirty, ErrorState, PanelSkeleton } from "../../components/data-state";
+import { ErrorState, PanelSkeleton, SAVE_STATE_TEXT, SaveState } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { StatusText } from "../../components/status";
@@ -62,7 +62,8 @@ const RULES = ALERT_RULES.map((rule) => ({
   ev: rule.ev,
   key: rule.key,
   title: rule.text ? BALANCE_STATE_TEXT[rule.text as keyof typeof BALANCE_STATE_TEXT] : COPY.recover,
-  desc: COPY.ruleDesc[rule.ev as keyof typeof COPY.ruleDesc],
+  // 「余额偏低」那一行下面就是「余额低于 [5] 时提醒」，不再写一遍说明
+  desc: (COPY.ruleDesc as Record<string, string>)[rule.ev] || "",
 }));
 
 // 提醒天数内部按天存储；界面按所选单位展示
@@ -71,24 +72,24 @@ function etaRuleDisplay(r: any): number {
   return r?.etaUnit === "hours" ? +(days * 24).toFixed(2) : +days.toFixed(2);
 }
 
+// 规则里的数字一组存（PUT /api/notifications/rules）；开关和通知方式的选择另外即时存
+const ruleFormOf = (r: any): RuleForm => ({
+  etaUnit: r?.etaUnit === "hours" ? "hours" : "days",
+  etaVal: etaRuleDisplay(r),
+  renotify: Number(r?.renotifyHours ?? 24),
+  errThreshold: Number(r?.errorThreshold ?? 1),
+  errRetry: Number(r?.errorRetrySec ?? 30),
+});
+type DrForm = { enabled: boolean; time: string; channelIds: string[] };
+const drFormOf = (s: any): DrForm => ({ enabled: !!s?.dailyReport?.enabled, time: s?.dailyReport?.time || "09:00", channelIds: s?.dailyReport?.channelIds || [] });
+
 // 字段说明里用的简称：去掉「（可选…）」之类的括注；英文开头时补一个空格
 function shortLabel(label: string) {
   const s = label.replace(/（.*?）/g, "").trim();
   return /^[A-Za-z]/.test(s) ? ` ${s}` : s;
 }
 
-function sameIds(a: string[] = [], b: string[] = []) {
-  return a.length === b.length && [...a].sort().join("\n") === [...b].sort().join("\n");
-}
 
-// 即时保存的状态：保存中 / 有没保存的输入 / 上次保存时间（按业务时区写）
-function SaveState({ saving, dirty, at, tz }: { saving: boolean; dirty: boolean; at: number; tz: string }) {
-  return (
-    <span aria-live="polite">
-      {saving ? <span className="jy-dirty">{COPY.saving}</span> : dirty ? <Dirty show /> : at ? <span className="jy-dirty">{COPY.savedAt(formatZonedTime(at, tz))}</span> : null}
-    </span>
-  );
-}
 
 type RuleForm = {
   etaUnit: "days" | "hours";
@@ -134,22 +135,69 @@ export default function NotificationsPage() {
   // 业务时区（/api/meta 的 tz）：「已保存 14:30」「上次定时发送」按它写
   const [tz, setTz] = useState(DEFAULT_BUSINESS_TIME_ZONE);
 
-  // 规则里的数字输入（开关和通知方式的选择直接落库，不经过这里）
-  const [etaVal, setEtaVal] = useState<number | null>(null);
-  const [etaUnit, setEtaUnit] = useState<"days" | "hours">("days");
-  const [renotify, setRenotify] = useState<number | null>(24);
-  const [errThreshold, setErrThreshold] = useState<number | null>(1);
-  const [errRetry, setErrRetry] = useState<number | null>(30);
-  const [ruleErrors, setRuleErrors] = useState<Record<string, string>>({});
-  const [rulesSaving, setRulesSaving] = useState(false);
-  const [rulesSavedAt, setRulesSavedAt] = useState(0);
+  // 改了马上保存（ui-copy-spec §8.3）：三组（规则里的数字、余额提醒线、日报）和开关、通知方式的选择排在同一个队列里
+  const queue = useSaveQueue();
+  const rulesRef = useRef<any>({});
+  rulesRef.current = rules;
+  // 开关和「发到哪些通知方式」一点就存，算一组
+  const toggles = useSaveAction(queue, COPY.groupToggles);
+  const ruleForm = useAutoSave<RuleForm, Record<string, string>>(ruleFormOf({}), {
+    queue,
+    // 没有通知方式时页面上没有「提醒规则」，那一小块里只有提醒天数这一项属于这一组
+    label: notifLoaded && channels.length === 0 ? COPY.etaLabel : COPY.groupRules,
+    // 清空视为「未填写」而不是 0；「连续读不到」被禁用（规则关闭）时不拦
+    validate: (f) => {
+      const errs: Record<string, string> = {};
+      if (f.etaVal == null) errs.eta = requiredText(COPY.etaLabel);
+      if (f.errThreshold == null && rulesRef.current.onError) errs.errThreshold = requiredText(COPY.errLabel);
+      if (f.renotify == null) errs.renotify = `${requiredText(COPY.renotify)}${COPY.renotifyZero}`;
+      if (f.errRetry == null) errs.errRetry = `${requiredText(COPY.retry)}${COPY.retryZero}`;
+      return Object.keys(errs).length ? errs : null;
+    },
+    save: async (f) => {
+      // 只有用户改过提醒天数才提交 etaDays；否则由服务端保留原值，免得显示用的两位小数把它改掉
+      const etaEdited = f.etaVal != null && f.etaVal !== etaRuleDisplay({ ...rulesRef.current, etaUnit: f.etaUnit });
+      const val = Number(f.etaVal);
+      const r = await api("/api/notifications/rules", {
+        method: "PUT",
+        body: {
+          ...(etaEdited ? { etaDays: f.etaUnit === "hours" ? val / 24 : val } : {}), // 内部统一按天
+          etaUnit: f.etaUnit,
+          renotifyHours: Number(f.renotify),
+          errorThreshold: Number(f.errThreshold ?? rulesRef.current.errorThreshold ?? 1),
+          errorRetrySec: Number(f.errRetry),
+        },
+      });
+      setRules(r.rules);
+      return ruleFormOf(r.rules);
+    },
+  });
+  // 全局余额提醒线：放在「余额偏低」那一行，存在 /api/settings（没有通知方式时放在空状态下面那一小块）
+  const low = useAutoSave<number | null>(null, {
+    queue,
+    label: COPY.lowLabel,
+    validate: (v) => (v == null ? `${requiredText(COPY.lowLabel)}${COPY.lowZero}` : v < 0 ? COPY.lowNegative : null),
+    save: async (v) => {
+      const r = await api("/api/settings", { method: "PUT", body: { lowBalanceUsd: Number(v) } });
+      setSettings(r.settings);
+      dr.sync(drFormOf(r.settings));
+      return r.settings?.lowBalanceUsd ?? v;
+    },
+  });
+  // 日报：开关、发送时间、发到哪里改了就存
+  const dr = useAutoSave<DrForm>(drFormOf({}), {
+    queue,
+    label: COPY.groupReport,
+    save: async (v) => {
+      const r = await api("/api/settings", { method: "PUT", body: { dailyReport: v } });
+      setSettings(r.settings);
+      low.sync(r.settings?.lowBalanceUsd ?? null);
+      return drFormOf(r.settings);
+    },
+  });
   const [channelsFor, setChannelsFor] = useState<Record<string, string[]>>({});
 
-  // 每日日报表单
-  const [drEnabled, setDrEnabled] = useState(false);
-  const [drTime, setDrTime] = useState("09:00");
-  const [drChannelIds, setDrChannelIds] = useState<string[]>([]);
-  const [drSaving, setDrSaving] = useState(false);
+  // 日报的预览、立即发送
   const [previewing, setPreviewing] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState<ReportResult | null>(null);
@@ -171,23 +219,6 @@ export default function NotificationsPage() {
   const [rowTesting, setRowTesting] = useState<string | null>(null);
   const [rowTests, setRowTests] = useState<Record<string, TestResult>>({});
 
-  // 服务端钳制后的规则回显到表单（如 eta 下限 1 小时），否则界面显示的是没生效的输入
-  const syncRuleForm = (r: any) => {
-    setEtaUnit(r?.etaUnit === "hours" ? "hours" : "days");
-    setEtaVal(etaRuleDisplay(r));
-    setRenotify(Number(r?.renotifyHours ?? 24));
-    setErrThreshold(Number(r?.errorThreshold ?? 1));
-    setErrRetry(Number(r?.errorRetrySec ?? 30));
-    setChannelsFor(r?.channelsFor || {});
-    setRuleErrors({});
-  };
-
-  const syncDrForm = (s: any) => {
-    setDrEnabled(!!s?.dailyReport?.enabled);
-    setDrTime(s?.dailyReport?.time || "09:00");
-    setDrChannelIds(s?.dailyReport?.channelIds || []);
-  };
-
   // 两个来源分开加载：任一失败只影响自己的区块
   const loadNotif = useCallback(async () => {
     setNotifLoading(true);
@@ -197,7 +228,8 @@ export default function NotificationsPage() {
       setChannels(n.channels);
       setRules(n.rules);
       setChannelTypes(n.channelTypes);
-      syncRuleForm(n.rules);
+      ruleForm.sync(ruleFormOf(n.rules));
+      setChannelsFor(n.rules?.channelsFor || {});
       setNotifLoaded(true);
     } catch (e) {
       setNotifErr(e);
@@ -213,7 +245,8 @@ export default function NotificationsPage() {
       const m = await api("/api/meta");
       if (m.tz) setTz(m.tz);
       setSettings(m.settings);
-      syncDrForm(m.settings);
+      dr.sync(drFormOf(m.settings));
+      low.sync(m.settings?.lowBalanceUsd ?? null);
       setMetaLoaded(true);
     } catch (e) {
       setMetaErr(e);
@@ -244,7 +277,7 @@ export default function NotificationsPage() {
       await api(`/api/notifications/channels/${c.id}`, { method: "PUT", body: { enabled: next } });
       setChannels((list) => list.map((x) => (x.id === c.id ? { ...x, enabled: next } : x)));
     } catch (e) {
-      message.error(consoleFailureText(COPY.saveFailed, e));
+      message.error(consoleFailureText(SAVE_STATE_TEXT.failed, e));
     }
   };
 
@@ -340,7 +373,7 @@ export default function NotificationsPage() {
       await reloadChannels();
       message.success(editingCh ? COPY.saved : COPY.added);
     } catch (e) {
-      message.error(consoleFailureText(COPY.saveFailed, e));
+      message.error(consoleFailureText(SAVE_STATE_TEXT.failed, e));
     } finally {
       setChSaving(false);
     }
@@ -364,140 +397,71 @@ export default function NotificationsPage() {
 
   // ---- 提醒规则 ---------------------------------------------------------------
 
-  // 开关即时落库；只更新 rules，不覆盖没保存的数字输入
-  // 关闭规则时，它的数字框会被禁用：清空没保存的话恢复成已保存的值，并清掉报错，免得「未保存」卡住
-  const toggleRule = async (key: string) => {
-    const turningOff = !!rules[key];
-    try {
-      const r = await api("/api/notifications/rules", { method: "PUT", body: { [key]: !rules[key] } });
-      setRules(r.rules);
-      setRulesSavedAt(Date.now());
-      if (turningOff && key === "onEta") {
-        setEtaVal((v) => v ?? etaRuleDisplay(r.rules));
-        setRuleErrors((e) => ({ ...e, eta: "" }));
-      }
-      if (turningOff && key === "onError") {
-        setErrThreshold((v) => v ?? Number(r.rules?.errorThreshold ?? 1));
-        setRuleErrors((e) => ({ ...e, errThreshold: "" }));
-      }
-    } catch (e) {
-      message.error(consoleFailureText(COPY.saveFailed, e));
+  // 开关即时落库（排在同一个队列里）；只更新 rules 和已保存的数字，不覆盖没保存的数字输入
+  // 关掉「读不到余额」时「连续读不到几次」那个框会变灰：空着的填回已保存的，报错清掉，免得灰着还是红的、一直「未保存」
+  const toggleRule = (key: string) => toggles.run(async () => {
+    const turningOff = !!rulesRef.current[key];
+    const r = await api("/api/notifications/rules", { method: "PUT", body: { [key]: !turningOff } });
+    setRules(r.rules);
+    ruleForm.sync(ruleFormOf(r.rules));
+    if (turningOff && key === "onError") {
+      ruleForm.setValue((f) => (f.errThreshold == null ? { ...f, errThreshold: ruleForm.saved.errThreshold } : f));
+      ruleForm.clearInvalid();
     }
-  };
+  });
 
   // 每种提醒发到哪些通知方式：选择即落库；失败时回滚为服务端状态
-  const saveChannelsFor = async (key: string, ids: string[]) => {
+  const saveChannelsFor = (key: string, ids: string[]) => {
     setChannelsFor((cf) => ({ ...cf, [key]: ids }));
-    try {
+    return toggles.run(async () => {
       const r = await api("/api/notifications/rules", { method: "PUT", body: { channelsFor: { [key]: ids } } });
       setRules(r.rules);
       setChannelsFor(r.rules?.channelsFor || {});
-      setRulesSavedAt(Date.now());
-    } catch (e) {
-      message.error(consoleFailureText(COPY.saveFailed, e));
-      setChannelsFor(rules?.channelsFor || {});
-    }
+    }, () => setChannelsFor(rulesRef.current?.channelsFor || {}));
   };
 
   // 切换单位时把输入值换算过去（两个单位间必然是互换），换算后直接保存。
-  // 数值没改过时只保存单位（saveRules 不提交 etaDays），显示值按已保存的天数重新换算，
+  // 数值没改过时只保存单位（不提交 etaDays），显示值按已保存的天数重新换算，
   // 不用四舍五入后的值覆盖阈值（5 小时来回切仍是 5 小时）
   const onEtaUnitChange = (u: "days" | "hours") => {
-    if (etaVal === etaRuleDisplay(rules)) {
-      const shown = etaRuleDisplay({ ...rules, etaUnit: u });
-      setEtaVal(shown);
-      setEtaUnit(u);
-      void saveRules({ etaUnit: u, etaVal: shown });
-      return;
+    const f = ruleForm.value;
+    let etaVal = f.etaVal;
+    if (f.etaVal === etaRuleDisplay(rules)) etaVal = etaRuleDisplay({ ...rules, etaUnit: u });
+    else {
+      const v = Number(f.etaVal);
+      if (f.etaVal != null && Number.isFinite(v) && v > 0) etaVal = u === "hours" ? +(v * 24).toFixed(2) : +(v / 24).toFixed(2);
     }
-    const v = Number(etaVal);
-    const next = etaVal != null && Number.isFinite(v) && v > 0 ? (u === "hours" ? +(v * 24).toFixed(2) : +(v / 24).toFixed(2)) : etaVal;
-    setEtaVal(next);
-    setEtaUnit(u);
-    void saveRules({ etaUnit: u, etaVal: next });
+    const next = { ...f, etaUnit: u, etaVal };
+    ruleForm.setValue(next);
+    void ruleForm.commit(next);
   };
-
-  const rulesDirty =
-    notifLoaded &&
-    (etaUnit !== (rules?.etaUnit === "hours" ? "hours" : "days") ||
-      etaVal !== etaRuleDisplay(rules) ||
-      renotify !== Number(rules?.renotifyHours ?? 24) ||
-      errThreshold !== Number(rules?.errorThreshold ?? 1) ||
-      errRetry !== Number(rules?.errorRetrySec ?? 30));
-
-  // over：刚改、还没进 state 的值（切换单位时）
-  const saveRules = async (over: Partial<RuleForm> = {}) => {
-    const f: RuleForm = { etaUnit, etaVal, renotify, errThreshold, errRetry, ...over };
-    // 清空视为「未填写」而不是 0；被禁用（规则关闭）的空字段沿用已保存的值，不拦截保存
-    const errs: Record<string, string> = {};
-    if (f.etaVal == null && rules.onEta) errs.eta = requiredText(COPY.etaLabel);
-    if (f.errThreshold == null && rules.onError) errs.errThreshold = requiredText(COPY.errLabel);
-    if (f.renotify == null) errs.renotify = `${requiredText(COPY.renotify)}${COPY.renotifyZero}`;
-    if (f.errRetry == null) errs.errRetry = `${requiredText(COPY.retry)}${COPY.retryZero}`;
-    setRuleErrors(errs);
-    if (Object.keys(errs).length) return;
-    setRulesSaving(true);
-    try {
-      // 只有用户改过提醒天数才提交 etaDays；否则由服务端保留原值，免得显示用的两位小数把它改掉
-      const etaEdited = f.etaVal != null && f.etaVal !== etaRuleDisplay({ ...rules, etaUnit: f.etaUnit });
-      const val = Number(f.etaVal);
-      const r = await api("/api/notifications/rules", {
-        method: "PUT",
-        body: {
-          ...(etaEdited ? { etaDays: f.etaUnit === "hours" ? val / 24 : val } : {}), // 内部统一按天
-          etaUnit: f.etaUnit,
-          renotifyHours: Number(f.renotify),
-          errorThreshold: Number(f.errThreshold ?? rules.errorThreshold ?? 1),
-          errorRetrySec: Number(f.errRetry),
-        },
-      });
-      setRules(r.rules);
-      // 回显服务端钳制后的值；保存途中又改了的输入保持用户正在输入的内容
-      const keep = <T,>(sent: T, saved: T) => (cur: T) => (cur === sent ? saved : cur);
-      setEtaUnit(keep(f.etaUnit, r.rules?.etaUnit === "hours" ? "hours" : "days"));
-      setEtaVal(keep(f.etaVal, etaRuleDisplay(r.rules)));
-      setRenotify(keep(f.renotify, Number(r.rules?.renotifyHours ?? 24)));
-      setErrThreshold(keep(f.errThreshold, Number(r.rules?.errorThreshold ?? 1)));
-      setErrRetry(keep(f.errRetry, Number(r.rules?.errorRetrySec ?? 30)));
-      setRulesSavedAt(Date.now());
-    } catch (e) {
-      message.error(consoleFailureText(COPY.saveFailed, e));
-    } finally {
-      setRulesSaving(false);
-    }
+  const setRuleField = <K extends keyof RuleForm>(key: K, v: RuleForm[K]) => {
+    ruleForm.setValue((f) => ({ ...f, [key]: v }));
+    ruleForm.clearInvalid();
   };
-  // 离开输入框或按回车时保存；没改动就不发请求。
-  // 推迟一拍再读：输入框失焦时才把越界值钳到范围内，要等这次 onChange 渲染完拿到最新值
-  const commitRef = useRef<() => void>(null);
-  commitRef.current = () => {
-    if (rulesDirty) void saveRules();
-  };
-  const commitRules = () => {
-    setTimeout(() => commitRef.current?.(), 0);
-  };
+  const ruleErrors: Record<string, string> = { ...(ruleForm.invalid || {}), ...(low.invalid ? { low: low.invalid } : {}) };
+  const leaveRules = commitOnLeave(ruleForm.commit);
+  const leaveLow = commitOnLeave(low.commit);
+  const rulesSavedAt = Math.max(ruleForm.savedAt, low.savedAt, toggles.savedAt);
+  const rulesSaveState = (
+    <SaveState
+      saving={ruleForm.saving || low.saving || toggles.saving}
+      dirty={ruleForm.dirty || low.dirty}
+      at={rulesSavedAt}
+      tz={tz}
+      failures={[low.failure, ruleForm.failure, toggles.failure]}
+    />
+  );
 
   // ---- 日报 -------------------------------------------------------------------
 
   const drSaved = settings?.dailyReport || {};
-  const drDirty =
-    metaLoaded &&
-    (drEnabled !== !!drSaved.enabled || drTime !== (drSaved.time || "09:00") || !sameIds(drChannelIds, drSaved.channelIds || []));
 
-  const saveDailyReport = async () => {
-    setDrSaving(true);
-    try {
-      const r = await api("/api/settings", {
-        method: "PUT",
-        body: { dailyReport: { enabled: drEnabled, time: drTime || "09:00", channelIds: drChannelIds } },
-      });
-      setSettings(r.settings);
-      syncDrForm(r.settings);
-      message.success(COPY.saved);
-    } catch (e) {
-      message.error(consoleFailureText(COPY.saveFailed, e));
-    } finally {
-      setDrSaving(false);
-    }
+  // 日报的开关、发送时间、发到哪里改了就存（ui-copy-spec §8.3）
+  const setDr = (over: Partial<DrForm>) => {
+    const next = { ...dr.value, ...over };
+    dr.setValue(next);
+    void dr.commit(next);
   };
 
   // 预览、立即发送之前就出错：还没设置自营站点时直接说 §8.1 那句、带「去设置」，不再拼「读不到日报预览：」；
@@ -600,17 +564,40 @@ export default function NotificationsPage() {
     </span>
   );
 
-  // 规则行的附加条件：关闭规则时整体禁用
-  const ruleCondition = (ruleKey: string) => {
+  // 规则行的附加条件：关闭规则时「连续读不到」那个框禁用；余额提醒线、提醒天数也决定页面上的档位，关掉提醒也照样能改
+  // inLines：没有通知方式时那一小块里，那里的说明已经说了这两个数管页面上的档位，提醒线下面只留前半句
+  const ruleCondition = (ruleKey: string, inLines = false) => {
     const off = !rules[ruleKey];
     if (ruleKey === "onLow")
       return (
-        // 纯文字，不用 flex 容器，否则链接两侧会被 gap 撑开
-        <p className="jy-notifications-note">
-          {COPY.lowBefore}
-          <Link className="jy-link" href="/settings">{NAV_LABELS.settings}</Link>
-          {COPY.lowAfter}
-        </p>
+        <>
+          <div className="jy-notifications-cond">
+            <label htmlFor={`${uid}-low`}>{COPY.lowBefore}</label>
+            <InputNumber
+              id={`${uid}-low`}
+              aria-label={COPY.lowLabel}
+              {...leaveLow}
+              min={0}
+              value={low.value}
+              onChange={(v) => {
+                low.setValue(v as number | null);
+                low.clearInvalid();
+              }}
+              disabled={!metaLoaded}
+              status={ruleErrors.low ? "error" : undefined}
+              aria-invalid={ruleErrors.low ? true : undefined}
+              aria-describedby={ruleErrors.low ? `${uid}-low-desc ${uid}-low-err` : `${uid}-low-desc`}
+            />
+            <span>{COPY.lowAfter}</span>
+            {ruleErrors.low && (
+              <span className="jy-err" id={`${uid}-low-err`} role="alert">
+                <Sym kind="crit" />
+                {ruleErrors.low}
+              </span>
+            )}
+          </div>
+          <p className="jy-notifications-note" id={`${uid}-low-desc`}>{inLines ? COPY.lowHintWhere : COPY.lowHint}</p>
+        </>
       );
     if (ruleKey === "onEta")
       return (
@@ -620,25 +607,19 @@ export default function NotificationsPage() {
             <InputNumber
               id={`${uid}-eta`}
               aria-label={COPY.etaLabel}
-              onBlur={commitRules}
-              onPressEnter={commitRules}
+              {...leaveRules}
               min={0}
               precision={2}
-              value={etaVal}
-              onChange={(v) => {
-                setEtaVal(v as number | null);
-                setRuleErrors((e) => ({ ...e, eta: "" }));
-              }}
-              disabled={off}
+              value={ruleForm.value.etaVal}
+              onChange={(v) => setRuleField("etaVal", v as number | null)}
               status={ruleErrors.eta ? "error" : undefined}
               aria-invalid={ruleErrors.eta ? true : undefined}
               aria-describedby={ruleErrors.eta ? `${uid}-eta-err` : undefined}
             />
             <Select
               aria-label={COPY.etaUnit}
-              value={etaUnit}
+              value={ruleForm.value.etaUnit}
               onChange={onEtaUnitChange}
-              disabled={off}
               options={[
                 { value: "days", label: COPY.day },
                 { value: "hours", label: COPY.hour },
@@ -661,16 +642,12 @@ export default function NotificationsPage() {
           <InputNumber
             id={`${uid}-errThreshold`}
             aria-label={COPY.errLabel}
-            onBlur={commitRules}
-            onPressEnter={commitRules}
+            {...leaveRules}
             min={1}
             precision={0}
             suffix={COPY.times}
-            value={errThreshold}
-            onChange={(v) => {
-              setErrThreshold(v as number | null);
-              setRuleErrors((e) => ({ ...e, errThreshold: "" }));
-            }}
+            value={ruleForm.value.errThreshold}
+            onChange={(v) => setRuleField("errThreshold", v as number | null)}
             disabled={off}
             status={ruleErrors.errThreshold ? "error" : undefined}
             aria-invalid={ruleErrors.errThreshold ? true : undefined}
@@ -702,7 +679,9 @@ export default function NotificationsPage() {
   const notifFailed = !notifLoaded && !!notifErr;
   // 有提醒或日报要发，却没有能用的通知方式：消息会被悄悄丢掉，放在页首提醒
   const wantsDelivery = RULES.some((r) => rules[r.key]) || !!settings?.dailyReport?.enabled;
-  const noDelivery = notifLoaded && wantsDelivery && !channels.some((c) => c.enabled !== false);
+  // 还没有通知方式时整页只放一件事（ui-copy-spec §8.3）：先加通知方式，提醒规则和日报等加好以后再出现
+  const noChannelsYet = notifLoaded && channels.length === 0;
+  const noDelivery = notifLoaded && !noChannelsYet && wantsDelivery && !channels.some((c) => c.enabled !== false);
   const showChannels = () => {
     document.querySelector(".jy-notifications-channels")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
@@ -713,29 +692,23 @@ export default function NotificationsPage() {
         <div className="jy-banner jy-banner--crit" role="alert">
           <Sym kind="crit" />
           <div className="jy-notifications-banner-body">
-            <b>{channels.length ? COPY.noDeliveryOff : COPY.noDeliveryNone}</b>
-            <p className="jy-caption">{channels.length ? COPY.noDeliveryOffHint : COPY.noDeliveryNoneHint}</p>
+            <b>{COPY.noDeliveryOff}</b>
+            <p className="jy-caption">{COPY.noDeliveryOffHint}</p>
           </div>
-          {channels.length ? (
-            <Button size="small" onClick={showChannels}>
-              {COPY.showChannels}
-            </Button>
-          ) : (
-            <Button size="small" type="primary" icon={<Icon name="plus" />} onClick={() => openChModal(null)}>
-              {COPY.add}
-            </Button>
-          )}
+          <Button size="small" onClick={showChannels}>
+            {COPY.showChannels}
+          </Button>
         </div>
       ) : null}
       {/* 提醒规则 */}
-      {notifFailed ? (
+      {noChannelsYet ? null : notifFailed ? (
         <Panel title={COPY.rules}>
           <ErrorState what={COPY.rulesFailed} error={notifErr} onRetry={loadNotif} />
         </Panel>
       ) : (
         <Panel
           title={COPY.rules}
-          badge={<SaveState saving={rulesSaving} dirty={rulesDirty} at={rulesSavedAt} tz={tz} />}
+          badge={rulesSaveState}
           caption={COPY.rulesCaption}
           body="flush"
         >
@@ -767,7 +740,7 @@ export default function NotificationsPage() {
                         <span className="jy-notifications-rule-title" id={titleId}>
                           {rule.title}
                         </span>
-                        <span className="jy-notifications-rule-desc">{rule.desc}</span>
+                        {rule.desc ? <span className="jy-notifications-rule-desc">{rule.desc}</span> : null}
                         {ruleCondition(rule.key)}
                       </td>
                       <td className="col-to">
@@ -800,15 +773,11 @@ export default function NotificationsPage() {
                   <label htmlFor={`${uid}-renotify`}>{COPY.renotify}</label>
                   <InputNumber
                     id={`${uid}-renotify`}
-                    onBlur={commitRules}
-                    onPressEnter={commitRules}
+                    {...leaveRules}
                     min={0}
                     suffix={COPY.hours}
-                    value={renotify}
-                    onChange={(v) => {
-                      setRenotify(v as number | null);
-                      setRuleErrors((e) => ({ ...e, renotify: "" }));
-                    }}
+                    value={ruleForm.value.renotify}
+                    onChange={(v) => setRuleField("renotify", v as number | null)}
                     status={ruleErrors.renotify ? "error" : undefined}
                     aria-invalid={ruleErrors.renotify ? true : undefined}
                     aria-describedby={`${uid}-renotify-desc`}
@@ -828,16 +797,12 @@ export default function NotificationsPage() {
                   <label htmlFor={`${uid}-errRetry`}>{COPY.retry}</label>
                   <InputNumber
                     id={`${uid}-errRetry`}
-                    onBlur={commitRules}
-                    onPressEnter={commitRules}
+                    {...leaveRules}
                     min={0}
                     precision={0}
                     suffix={COPY.seconds}
-                    value={errRetry}
-                    onChange={(v) => {
-                      setErrRetry(v as number | null);
-                      setRuleErrors((e) => ({ ...e, errRetry: "" }));
-                    }}
+                    value={ruleForm.value.errRetry}
+                    onChange={(v) => setRuleField("errRetry", v as number | null)}
                     status={ruleErrors.errRetry ? "error" : undefined}
                     aria-invalid={ruleErrors.errRetry ? true : undefined}
                     aria-describedby={`${uid}-errRetry-desc`}
@@ -947,23 +912,39 @@ export default function NotificationsPage() {
         </Panel>
       )}
 
+      {/* 还没有通知方式：余额提醒线和提醒天数也决定页面上的档位，只在这里放这两个数（有通知方式时在规则那几行里，不两处同时出现） */}
+      {noChannelsYet ? (
+        <Panel
+          title={COPY.linesTitle}
+          caption={COPY.linesCaption}
+          badge={rulesSaveState}
+        >
+          {/* 余额提醒线存在设置里（/api/meta 读）：读不到时就地说、能重试，不然框一直灰着 */}
+          {metaErr && !metaLoaded ? <ErrorState what={COPY.linesFailed} error={metaErr} onRetry={loadMeta} /> : null}
+          <div className="jy-notifications-lines">
+            {ruleCondition("onLow", true)}
+            {ruleCondition("onEta", true)}
+          </div>
+        </Panel>
+      ) : null}
+
       {/* 日报：发送时间按业务时区，和每日利润、日汇总同一天界（§6 不另注时区） */}
-      {!metaLoaded && metaLoading ? (
+      {noChannelsYet ? null : !metaLoaded && metaLoading ? (
         <PanelSkeleton title={COPY.report} lines={3} />
       ) : !metaLoaded ? (
         <Panel title={COPY.report}>
           <ErrorState what={COPY.reportFailed} error={metaErr} onRetry={loadMeta} />
         </Panel>
       ) : (
-        <Panel title={COPY.report} badge={<Dirty show={drDirty} />} caption={COPY.reportCaption}>
+        <Panel title={COPY.report} badge={<SaveState saving={dr.saving} dirty={false} at={dr.savedAt} tz={tz} failures={[dr.failure]} />} caption={COPY.reportCaption}>
           <Form layout="vertical" requiredMark={false} component="div" className="jy-form jy-notifications-dr">
             <Form.Item label={COPY.reportEnable} htmlFor={`${uid}-dr-enabled`} extra={COPY.reportEnableHint}>
               <Switch
                 id={`${uid}-dr-enabled`}
-                checked={drEnabled}
+                checked={dr.value.enabled}
                 checkedChildren={COPY.on}
                 unCheckedChildren={COPY.off}
-                onChange={setDrEnabled}
+                onChange={(v) => setDr({ enabled: v })}
               />
             </Form.Item>
             <div className="jy-two">
@@ -972,9 +953,9 @@ export default function NotificationsPage() {
                   id={`${uid}-dr-time`}
                   format="HH:mm"
                   allowClear={false}
-                  disabled={!drEnabled}
-                  value={drTime ? dayjs(drTime, "HH:mm") : null}
-                  onChange={(d) => setDrTime(d ? d.format("HH:mm") : "")}
+                  disabled={!dr.value.enabled}
+                  value={dr.value.time ? dayjs(dr.value.time, "HH:mm") : null}
+                  onChange={(d) => setDr({ time: d ? d.format("HH:mm") : "09:00" })}
                 />
               </Form.Item>
               <Form.Item
@@ -985,9 +966,9 @@ export default function NotificationsPage() {
                   <div role="group" aria-labelledby={`${uid}-dr-ch`}>
                     <Checkbox.Group
                       className="jy-notifications-checks"
-                      value={drChannelIds}
-                      disabled={!drEnabled}
-                      onChange={(ids) => setDrChannelIds(ids as string[])}
+                      value={dr.value.channelIds}
+                      disabled={!dr.value.enabled}
+                      onChange={(ids) => setDr({ channelIds: ids as string[] })}
                       options={channels.map((c) => ({ value: c.id, label: c.name }))}
                     />
                   </div>
@@ -998,9 +979,6 @@ export default function NotificationsPage() {
             </div>
           </Form>
           <div className="jy-notifications-actions">
-            <Button type="primary" loading={drSaving} onClick={saveDailyReport}>
-              {COPY.save}
-            </Button>
             <Button loading={previewing} onClick={previewReport}>
               {COPY.reportPreview}
             </Button>
@@ -1008,11 +986,7 @@ export default function NotificationsPage() {
               {COPY.reportSend}
             </Button>
             <span className="jy-caption">
-              {drDirty
-                ? COPY.reportSendHint
-                : drSaved.lastSent
-                  ? COPY.reportLastSent(formatDayKey(drSaved.lastSent, tz))
-                  : COPY.reportIdleHint}
+              {drSaved.lastSent ? COPY.reportLastSent(formatDayKey(drSaved.lastSent, tz)) : COPY.reportIdleHint}
             </span>
           </div>
           <div aria-live="polite">
