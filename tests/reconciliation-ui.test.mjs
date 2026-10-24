@@ -2584,13 +2584,13 @@ function costAnalyticsFixture(days) {
 }
 // 成本估算的可用天数用上游列表的余额和提醒线判断档位（balanceViewOf）：默认余额在提醒线以上、约 5 天，和接口的可用天数一致
 const costStationsFixture = (balance = { ok: true, remaining: 30 }, prediction = { etaDays: 5, burnPerDay: 1 }) => ({ stations: [{ id: "up-a", name: "Fixture upstream", type: "newapi", cnyPerUsd: 7, monitorEnabled: true, balance, prediction, spark: [] }], settings: { lowBalanceUsd: 5 } });
-async function openCostPage(t, own, path = "/analytics", { stations = costStationsFixture() } = {}) {
+async function openCostPage(t, own, path = "/analytics", { stations = costStationsFixture(), meta = (route) => fulfill(route, { rules: { etaDays: 3 }, settings: { lowBalanceUsd: 5 } }) } = {}) {
   const ownReads = [];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (url.pathname === "/api/stations") return fulfill(route, stations);
-    if (url.pathname === "/api/meta") return fulfill(route, { rules: { etaDays: 3 }, settings: { lowBalanceUsd: 5 } });
+    if (url.pathname === "/api/meta") return meta(route);
     if (url.pathname === "/api/analytics") return fulfill(route, costAnalyticsFixture(Number(url.searchParams.get("days")) || 30));
     if (url.pathname === "/api/own/analytics") { ownReads.push(url.searchParams.get("range")); return own(route); }
     throw new Error("unexpected cost fixture API: " + url.pathname);
@@ -2605,6 +2605,14 @@ test("成本估算的可用天数和运营总览同一个档位：余额在提�
   const low = await openCostPage(t, own, "/analytics", { stations: costStationsFixture({ ok: true, remaining: 2 }, { etaDays: 1.5, burnPerDay: 1 }) });
   const runway = low.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await runway.getByText(BALANCE_STATE_TEXT.low, { exact: true }).waitFor();
   assert.equal(await runway.getByText(BALANCE_STATE_TEXT.soon, { exact: true }).count(), 0);
+  // 读不到提醒规则（/api/meta 失败）：提醒线用上游列表带回来的，照样是「余额偏低」
+  const noMeta = await openCostPage(t, own, "/analytics", { stations: costStationsFixture({ ok: true, remaining: 2 }, { etaDays: 1.5, burnPerDay: 1 }), meta: (route) => failJSON(route, 500, { error: "boom" }) });
+  const noMetaRunway = noMeta.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await noMetaRunway.getByText(BALANCE_STATE_TEXT.low, { exact: true }).waitFor();
+  assert.equal(await noMetaRunway.getByText(BALANCE_STATE_TEXT.soon, { exact: true }).count(), 0);
+  // 读不到余额：和运营总览一样画成虚线框（is-unknown），不画实心空条
+  const unreadable = await openCostPage(t, own, "/analytics", { stations: costStationsFixture({ ok: false, error: "403" }, { etaDays: 5, burnPerDay: 1 }) });
+  const unreadableRunway = unreadable.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await unreadableRunway.getByText(BALANCE_STATE_TEXT.unreadable, { exact: true }).waitFor();
+  assert.equal(await unreadableRunway.locator(".jy-track.is-unknown").count(), 1); assert.equal(await unreadableRunway.locator(".jy-track .fill").count(), 0);
   // 余额在提醒线以上、约 5 天：还是「快用完」
   const soon = await openCostPage(t, own); const soonRunway = soon.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await soonRunway.getByText(BALANCE_STATE_TEXT.soon, { exact: true }).waitFor();
 });
