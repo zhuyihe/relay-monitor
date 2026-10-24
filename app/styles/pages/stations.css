@@ -7,21 +7,28 @@
 .jy-stations-table .jy-res-name { max-width: 280px; }
 .jy-stations-table td { vertical-align: top; }
 /* 一行最多两行字、行高 56 以内（ui-design-spec §5.2）：上下 8 + 20 + 18；要比 jy.css 的 table.jy-data td 具体才盖得住 */
-table.jy-data.jy-stations-table td { padding-block: 8px; }
+table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-stations-table td.jy-empty-row { text-align: center; vertical-align: middle; }
 
-.jy-stations-name-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; min-width: 0; line-height: 20px; }
+/* 名称和标签一行：标签不折行，放不下时名称省略（56 优先于把名字写全，ui-design-spec §5.2） */
+.jy-stations-name-line { display: flex; align-items: center; gap: 6px; min-width: 0; line-height: 20px; }
+.jy-stations-name-line > button.link { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jy-stations-name-line > .jy-stations-flag { flex: none; }
 .jy-stations-flag { height: 20px; padding: 0 6px; font-size: 11px; font-style: normal; }
 /* 状态格的下一行：状态的补充、要处理的事的标题、数据比别的旧时的「数据截至」，放不下的省略、悬停看全 */
 .jy-stations-sub { display: flex; align-items: center; gap: 4px; max-width: 200px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); white-space: nowrap; }
 /* 状态格上一行：档位或「需处理」，和别的格子一样 20 高 */
-.jy-stations-table .jy-status { line-height: 20px; }
+.jy-stations-table .jy-status { line-height: 20px; white-space: nowrap; }
 .jy-stations-sub .jy-icon { width: 12px; height: 12px; flex: none; }
 .jy-stations-sub > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .jy-stations-unowned { margin: -8px 0 0; }
-/* 余额那一格的上一行：余额和近 48 小时的小图 */
+/* 余额那一格的上一行：近 48 小时的小图在左、余额在右；小图那一格定宽，没有小图的行也留着，金额上下对齐 */
 .jy-stations-money { display: flex; justify-content: flex-end; align-items: center; gap: 8px; line-height: 20px; }
-.jy-stations-table .jy-cell-runway { min-height: 22px; }
+.jy-stations-spark { flex: none; width: 96px; display: flex; }
+/* 日均花费、余额下一行（固定成本的说明也在这里）不折行，放不下省略 */
+.jy-stations-table .jy-sub-money { max-width: 200px; margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jy-stations-table .jy-cell-runway { min-height: 20px; }
+.jy-stations-table .jy-cell-runway .v { line-height: 20px; }
 
 /* 查询失败的说明行：跨整行，横向滚动时贴左 */
 .jy-stations-table tr.has-issue td { border-bottom: 0; }
@@ -110,8 +117,8 @@ table.jy-data.jy-stations-table td { padding-block: 8px; }
 
 @media (max-width: 767px) {
   .jy-stations-type { width: 100%; }
-  .jy-m-list .m-actions .ant-btn { min-height: 44px; }
-  .jy-m-list .m-actions .jy-icon-btn { width: 44px; height: 44px; }
+  .jy-stations-m .m-actions .ant-btn { min-height: 44px; }
+  .jy-stations-m .m-actions .jy-icon-btn { width: 44px; height: 44px; }
   .jy-stations-purchase { grid-template-columns: minmax(0, 1fr) 96px; }
   .jy-stations-onboarding > .ant-collapse > .ant-collapse-item > .ant-collapse-header { padding: 12px 16px; }
   .jy-accounts-toolbar .ant-input-affix-wrapper, .jy-accounts-filter { width: 100%; }
@@ -123,7 +130,7 @@ table.jy-data.jy-stations-table td { padding-block: 8px; }
 
 /* 余额列下的近 48 小时走势：整块是按钮，点开余额趋势 */
 .jy-spark-btn {
-  display: inline-flex; align-items: center; gap: 6px; margin: -2px -4px -2px 0; padding: 2px 4px;
+  display: inline-flex; align-items: center; gap: 6px; margin: -2px 0; padding: 2px 4px;
   border: 0; border-radius: var(--jy-r1); background: none; cursor: pointer;
   font: inherit; font-size: 12px; line-height: 18px; color: var(--jy-ink-3);
 }
@@ -133,11 +140,15 @@ table.jy-data.jy-stations-table td { padding-block: 8px; }
 .jy-spark .line { fill: none; stroke: var(--jy-cobalt); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
 .jy-spark .area { fill: var(--jy-cobalt-tint); }
 .jy-spark .dot { fill: var(--jy-cobalt); }
-/* 手机卡片：上一行名称（点开编辑）、状态、「⋯」 */
-.jy-m-list .m-top.link { padding: 0; border: 0; background: none; font: inherit; font-weight: 500; color: var(--jy-ink); text-align: left; cursor: pointer; }
-.jy-m-list .m-end { display: inline-flex; align-items: center; gap: 4px; }
-.jy-m-list .m-end .jy-icon-btn { width: 44px; height: 44px; margin: -12px -12px -12px 0; }
-/* 第二行最右边：要处理的那件事的按钮，点的地方 44 高，上下用负外边距抵掉，卡片还是两行 */
-.jy-m-list .m-sub { align-items: center; }
-.jy-m-list .m-todo { margin: -12px -8px -12px auto; }
-.jy-m-list .m-todo .ant-btn { min-height: 44px; color: var(--jy-cobalt); }
+/* 手机卡片（只在本页，.jy-stations-m）：上一行名称（点开编辑）、状态、「⋯」 */
+.jy-stations-m .m-top.link { padding: 0; border: 0; background: none; font: inherit; font-weight: 500; color: var(--jy-ink); text-align: left; cursor: pointer; }
+.jy-stations-m .m-end { display: inline-flex; align-items: center; gap: 4px; }
+.jy-stations-m .m-end .jy-icon-btn { width: 44px; height: 44px; margin: -12px -12px -12px 0; }
+/* 第二行：余额 · 可用天数，后面带正在刷新或数据截至 */
+.jy-stations-m .m-sub { align-items: center; }
+.jy-stations-m .m-sub .jy-stations-sub { max-width: none; }
+/* 有要处理的事时的第三行：标题占剩下的地方、放不下省略；最右边那件事的按钮，点的地方 44 高，上下用负外边距抵掉 */
+.jy-stations-m .m-todo-line { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; min-width: 0; }
+.jy-stations-m .m-title { flex: 1 1 0; min-width: 0; font-size: 13px; color: var(--jy-ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jy-stations-m .m-todo { margin: -12px -8px -12px auto; }
+.jy-stations-m .m-todo .ant-btn { min-height: 44px; color: var(--jy-cobalt); }
