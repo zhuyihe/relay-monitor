@@ -13,7 +13,7 @@ import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { describeError } from "../../../lib/error-copy";
 import { BALANCE_STATE_TEXT, basisText, EMPTY, formatDays, formatMoney, NO_UPSTREAM_TEXT, RANGE_TEXT, SELL_PRICE_UNSET } from "../../../lib/format";
-import { etaWindowDays, ownStationDisplayName, runwayLevel, stationDisplayName, WATCH_DAYS } from "../../../lib/overview-actions";
+import { balanceDaysText, balanceViewOf, etaWindowDays, ownStationDisplayName, runwayLevel, stationDisplayName, WATCH_DAYS } from "../../../lib/overview-actions";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
 import { UPSTREAM_FORM_TEXT } from "../../../lib/channel-onboarding";
 import { workflowActionMeta } from "../../../lib/workflow-actions";
@@ -99,6 +99,9 @@ export default function AnalyticsPage() {
   const [asOf, setAsOf] = useState<number | null>(null);
   // 提醒天数和告警中心的提醒规则同一个（etaWindowDays，读不到时按 3 天）
   const [rules, setRules] = useState<any>(null);
+  // 可用天数的档位和运营总览、上游列表同一个判断（balanceViewOf），要上游的余额和余额提醒线
+  const [settings, setSettings] = useState<any>(null);
+  const [balances, setBalances] = useState<any[] | null>(null);
   const critDays = etaWindowDays(rules);
   const [metaFailed, setMetaFailed] = useState(false);
   // 只采用最后一次发出的请求结果，避免快速切换范围时旧响应覆盖新范围
@@ -112,8 +115,10 @@ export default function AnalyticsPage() {
       if (includeArchived) params.set("includeArchived", "true");
       // 两个请求并行，自营收入的天数档先按本地估算的天数挑
       const guess = ownRangeOf(guessRef.current);
-      let [a, o] = await Promise.allSettled([api(`/api/analytics?${params}`), fetchOwn(guess)]);
+      let [a, o, b] = await Promise.allSettled([api(`/api/analytics?${params}`), fetchOwn(guess), api("/api/stations")]);
       if (my !== seq.current) return null;
+      // 读不到上游列表时留着上次的；从来没读到时可用天数照旧只按天数分档
+      if (b.status === "fulfilled") setBalances(Array.isArray(b.value) ? b.value : b.value?.stations || []);
       const d = a.status === "fulfilled" ? Number(a.value?.days) || guessRef.current : guessRef.current;
       // 服务端算出的天数跨了 7/30 天档（本地与业务时区差一天时）：按服务端天数补取一次自营收入
       if (a.status === "fulfilled" && ownRangeOf(d) !== guess) {
@@ -162,7 +167,10 @@ export default function AnalyticsPage() {
 
   useEffect(() => {
     api("/api/meta")
-      .then((m) => setRules(m?.rules ?? null))
+      .then((m) => {
+        setRules(m?.rules ?? null);
+        setSettings(m?.settings ?? null);
+      })
       .catch(() => setMetaFailed(true));
   }, []);
 
@@ -328,7 +336,7 @@ export default function AnalyticsPage() {
 
       {/* 可用天数的进度条在半宽卡片里太窄，窄屏和总览一样先换成单列 */}
       <div className="jy-grid-2">
-        <RunwayPanel dv={dv} critDays={critDays} metaFailed={metaFailed} />
+        <RunwayPanel dv={dv} critDays={critDays} metaFailed={metaFailed} balances={balances} settings={settings} rules={rules} />
         <SummaryPanel dv={dv} days={data.days} />
       </div>
 
@@ -615,19 +623,24 @@ function HeatPanel({
 
 // ---- 可用天数 ------------------------------------------------------------------
 
-function RunwayPanel({ dv, critDays, metaFailed }: { dv: Derived; critDays: number; metaFailed: boolean }) {
+function RunwayPanel({ dv, critDays, metaFailed, balances, settings, rules }: { dv: Derived; critDays: number; metaFailed: boolean; balances: any[] | null; settings: any; rules: any }) {
+  const byId = new Map((balances || []).map((station) => [String(station.id), station]));
   const items: RunwayItem[] = dv.runway.map((s) => {
-    // 分档和上游列表、运营总览同一套（runwayLevel）
-    const level = runwayLevel(s.days, { etaDays: critDays }) ?? "muted";
-    const state = level === "crit" || level === "warn" ? BALANCE_STATE_TEXT.soon : undefined;
+    // 档位、颜色、可用天数和运营总览「上游余量」、上游列表同一个判断（balanceViewOf，也看余额提醒线）；
+    // 上游列表里找不到这个上游时（比如已归档），照旧只按天数分档
+    const station = byId.get(String(s.id));
+    const view = station ? balanceViewOf(station, { settings, rules }) : null;
+    const level = view ? view.level : runwayLevel(s.days, { etaDays: critDays }) ?? "muted";
+    const state = view ? (view.state ? BALANCE_STATE_TEXT[view.state] : undefined) : level === "crit" || level === "warn" ? BALANCE_STATE_TEXT.soon : undefined;
     const suffix = s.archived ? COPY.archivedSuffix : "";
     const tip: TipRow[] = [
       [RUNWAY_TEXT.tip.burn, s.burn],
-      [RUNWAY_TEXT.tip.days, formatDays(s.days)],
+      [RUNWAY_TEXT.tip.days, view ? balanceDaysText(view) : formatDays(s.days)],
     ];
     // 和运营总览一样：算得出天数时才说怎么估的
     if (s.basis && Number.isFinite(s.days) && s.days > 0) tip.push([RUNWAY_TEXT.tip.basis, basisText(s.basis)]);
-    return { key: s.id, name: `${s.name}${suffix}`, sub: RUNWAY_TEXT.burn(s.burn), days: s.days, level, state, tip };
+    // 余额用完时天数写「—」，只看档位名（和运营总览、上游列表同一个写法）
+    return { key: s.id, name: `${s.name}${suffix}`, sub: RUNWAY_TEXT.burn(s.burn), days: view ? view.days : s.days, daysLabel: view ? balanceDaysText(view) : undefined, level, state, tip };
   });
   const foot = items.length ? (
     <>

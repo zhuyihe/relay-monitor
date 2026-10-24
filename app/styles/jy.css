@@ -624,8 +624,17 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-attention li { padding: 14px 16px; grid-template-columns: 16px minmax(0, 1fr); }
   .jy-attention .actions { grid-column: 2; margin-left: -8px; }
   .jy-runway { padding: 4px 16px 16px; }
-  .jy-runway li, .jy-runway-scale { grid-template-columns: 96px minmax(0, 1fr) 76px; gap: 10px; }
-  .jy-runway-scale { padding: 0 16px 4px; }
+  /* 一项两行：名字全写（太长就换行），右边天数和档位；下一行是条（ui-design-spec §4.4） */
+  .jy-runway li { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "who days" "track track"; gap: 6px 12px; }
+  .jy-runway li .who { grid-area: who; }
+  .jy-runway li .days { grid-area: days; align-self: start; }
+  .jy-runway li .jy-track { grid-area: track; }
+  .jy-runway .who strong, .jy-runway .who .jy-ov-name { white-space: normal; overflow-wrap: anywhere; }
+  .jy-runway-scale { grid-template-columns: minmax(0, 1fr); padding: 0 16px 4px; }
+  .jy-runway-scale > span { display: none; }
+  /* 横向条形也一样：名字一行，条和数值在下一行 */
+  .jy-hbars li { grid-template-columns: minmax(0, 1fr); height: auto; gap: 2px; padding: 4px 0; }
+  .jy-hbars .name { white-space: normal; overflow-wrap: anywhere; }
   .jy-table-wrap.has-mobile, .jy-table.has-mobile { display: none; }
   .jy-m-list { display: block; }
   .jy-toolbar .ant-input-affix-wrapper { width: 100%; }

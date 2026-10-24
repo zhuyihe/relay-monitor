@@ -9,7 +9,7 @@ import { App, Button, DatePicker, Drawer, Form, Grid, Input, Select, Switch } fr
 import { api } from "../../../lib/client";
 import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions";
 import { failureText, requiredText } from "../../../lib/error-copy";
-import { formatRate, RATE_UNSET_PARITY } from "../../../lib/format";
+import { formatRate, formatSellPrice, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../../../lib/format";
 import { NAV_LABELS } from "../../../lib/brand";
 import { stationDisplayName } from "../../../lib/overview-actions";
 import { CREDENTIAL_FIELDS, credentialFieldOf, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT, UPSTREAM_SECRET_FIELDS } from "../../../lib/channel-onboarding.js";
@@ -89,6 +89,10 @@ const COPY = Object.freeze({
   rateExample: `例如填 2 就是「${formatRate(2)}」；不填就是「${RATE_UNSET_PARITY}」。`,
   rateNow: (text: string) => `${text}。`,
   rateBalance: "余额提醒照上游自己的余额算。",
+  // 自营站点那一格叫「售价」（§3.2、§7）：存的也是 cnyPerUsd，说的是给用户充 1 美元额度收多少元
+  sellPrice: "售价",
+  sellPlaceholder: "例如 7.5",
+  sellExample: `例如填 7.5 就是「${formatSellPrice(7.5)}」；不填就是「${SELL_PRICE_UNSET}」。`,
   lowBalance: "余额提醒线",
   lowBalancePlaceholder: "不填就用系统设置里的",
   lowBalanceDesc: "按这个上游自己的余额算，低于它就提醒。",
@@ -164,6 +168,7 @@ export function StationDrawer({
   const typedPassword = Form.useWatch("password", form);
   const typed: Record<string, unknown> = { accessToken: typedAccessToken, apiKey: typedApiKey, password: typedPassword };
   const typedRate = Form.useWatch("cnyPerUsd", form);
+  const typedOwn = Form.useWatch("isOwn", form);
 
   const needsFor = (type: string): string[] => types.find((item) => item.value === type)?.needs || [];
 
@@ -243,6 +248,8 @@ export function StationDrawer({
   useDrawerEscape(open && !saving, requestClose);
 
   const isFixed = formType === "fixed";
+  // 自营站点：「算进利润」「渠道里用的其他地址」只对上游有用，藏起来但照旧提交原来的值（Form.Item hidden 仍收集值）；「汇率」改叫「售价」
+  const isOwnStation = formType === "newapi" && !!typedOwn;
   const needs = needsFor(formType);
   const unchangedEdit = !!editing && formFingerprint === initialFingerprint;
   const testPassed = !!connectionTest?.ok && testedFingerprint === formFingerprint;
@@ -432,7 +439,7 @@ export function StationDrawer({
   if (needs.includes("password")) credentialItems.push(secretItem("password", undefined, !!editing?.hasPassword));
 
   const typeHint = types.find((t) => t.value === formType)?.hint;
-  const rateText = formatRate(typedRate);
+  const rateText = isOwnStation ? formatSellPrice(typedRate) : formatRate(typedRate);
   const updatePurchase = (i: number, patch: Record<string, unknown>) =>
     setPurchases((l) => l.map((x, j) => (j === i ? { ...x, ...patch } : x)));
 
@@ -490,7 +497,7 @@ export function StationDrawer({
               <SwitchRow label={COPY.isOwn} />
             </Form.Item>
           )}
-          <Form.Item name="includeInProfit" valuePropName="checked" extra={isFixed ? COPY.inProfitFixed : COPY.inProfitDesc}>
+          <Form.Item name="includeInProfit" valuePropName="checked" hidden={isOwnStation} extra={isFixed ? COPY.inProfitFixed : COPY.inProfitDesc}>
             <SwitchRow label={COPY.inProfit} />
           </Form.Item>
         </fieldset>
@@ -526,11 +533,11 @@ export function StationDrawer({
           {!isFixed && <p className="fs-desc">{COPY.costDesc}</p>}
           {!isFixed && (
             <Form.Item
-              label={COPY.rate}
+              label={isOwnStation ? COPY.sellPrice : COPY.rate}
               name="cnyPerUsd"
-              extra={`${rateText ? COPY.rateNow(rateText) : COPY.rateExample}${COPY.rateBalance}`}
+              extra={isOwnStation ? (rateText ? COPY.rateNow(rateText) : COPY.sellExample) : `${rateText ? COPY.rateNow(rateText) : COPY.rateExample}${COPY.rateBalance}`}
             >
-              <Input placeholder={COPY.ratePlaceholder} inputMode="decimal" autoComplete="off" />
+              <Input placeholder={isOwnStation ? COPY.sellPlaceholder : COPY.ratePlaceholder} inputMode="decimal" autoComplete="off" />
             </Form.Item>
           )}
           {!isFixed && (
@@ -539,7 +546,7 @@ export function StationDrawer({
             </Form.Item>
           )}
           {!isFixed && (
-            <Form.Item label={COPY.aliases} name="costAliasesText" extra={COPY.aliasesDesc}>
+            <Form.Item label={COPY.aliases} name="costAliasesText" hidden={isOwnStation} extra={COPY.aliasesDesc}>
               <Input.TextArea autoSize={{ minRows: 2, maxRows: 4 }} placeholder={"例如：10.0.0.8:8080\nhttp://relay.internal"} />
             </Form.Item>
           )}

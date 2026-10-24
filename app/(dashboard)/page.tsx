@@ -7,7 +7,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { App, Button } from "antd";
+import { App, Button, Grid } from "antd";
 import { api } from "../../lib/client";
 import { STATION_TABS } from "../../lib/brand";
 import type { WorkflowAction } from "../../lib/client";
@@ -127,6 +127,8 @@ type Money =
   | { range: Range; unconfigured: true; own: null; fallback: any };
 
 export default function OverviewPage() {
+  // 手机上需处理放在利润等式前面（ui-design-spec §5.1）：按 DOM 先后排，读屏和键盘也先到需处理
+  const compact = Grid.useBreakpoint().md === false;
   const { message } = App.useApp();
   const router = useRouter();
   const [range, setRange] = useUrlState<Range>("range", "today", RANGES);
@@ -274,28 +276,33 @@ export default function OverviewPage() {
   const current = money && money.range === range ? money : null;
   const rangeName = RANGE_TEXT[range];
 
+  const attention = (
+    <AttentionPanel
+      stations={stations}
+      error={stationsErr}
+      rules={rules}
+      settings={settings}
+      workflowActions={workflowActions}
+      workflowError={workflowError}
+      workflowLoading={workflowLoading}
+      onReloadWorkflow={() => void reloadWorkflowActions()}
+      tz={businessTz}
+      asOf={stationsAt}
+      syncingId={syncingId}
+      onRetry={loadStations}
+      onSync={refreshOne}
+      onEdit={(s) => router.push(`/stations?edit=${encodeURIComponent(s.id)}`)}
+      onTrend={setTrendStation}
+    />
+  );
+
   return (
     <div className="jy-page">
+      {compact ? attention : null}
       <Equation range={range} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
 
       <div className="jy-grid-2">
-        <AttentionPanel
-          stations={stations}
-          error={stationsErr}
-          rules={rules}
-          settings={settings}
-          workflowActions={workflowActions}
-          workflowError={workflowError}
-          workflowLoading={workflowLoading}
-          onReloadWorkflow={() => void reloadWorkflowActions()}
-          tz={businessTz}
-          asOf={stationsAt}
-          syncingId={syncingId}
-          onRetry={loadStations}
-          onSync={refreshOne}
-          onEdit={(s) => router.push(`/stations?edit=${encodeURIComponent(s.id)}`)}
-          onTrend={setTrendStation}
-        />
+        {compact ? null : attention}
         <RunwayPanel
           stations={stations}
           error={stationsErr}
