@@ -13,7 +13,7 @@ import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { describeError } from "../../../lib/error-copy";
 import { BALANCE_STATE_TEXT, basisText, EMPTY, formatDays, formatMoney, NO_UPSTREAM_TEXT, RANGE_TEXT, SELL_PRICE_UNSET } from "../../../lib/format";
-import { etaWindowDays, runwayLevel, stationDisplayName, WATCH_DAYS } from "../../../lib/overview-actions";
+import { etaWindowDays, ownStationDisplayName, runwayLevel, stationDisplayName, WATCH_DAYS } from "../../../lib/overview-actions";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
 import { UPSTREAM_FORM_TEXT } from "../../../lib/channel-onboarding";
 import { workflowActionMeta } from "../../../lib/workflow-actions";
@@ -376,7 +376,7 @@ function Equation({
   };
   const fixed: EqTerm = { value: dv.fixed, note: dv.fixedCount ? EQ_TEXT.fixedCount(dv.fixedCount) : EQ_TEXT.noFixed };
   const reasons = coverageReasons(dv);
-  const ownName: string = snap.own?.station?.name || COPY.ownStation;
+  const ownName: string = ownStationDisplayName(snap.own?.station);
 
   if (dv.hasIncome) {
     // 没设置售价或兼容旧接口的逐日分配时，明确展示估算原因。
@@ -621,14 +621,13 @@ function RunwayPanel({ dv, critDays, metaFailed }: { dv: Derived; critDays: numb
     const level = runwayLevel(s.days, { etaDays: critDays }) ?? "muted";
     const state = level === "crit" || level === "warn" ? BALANCE_STATE_TEXT.soon : undefined;
     const suffix = s.archived ? COPY.archivedSuffix : "";
-    const burn = Number.isFinite(s.burnCny) ? formatMoney(s.burnCny) : EMPTY;
     const tip: TipRow[] = [
-      [RUNWAY_TEXT.tip.burn, burn],
+      [RUNWAY_TEXT.tip.burn, s.burn],
       [RUNWAY_TEXT.tip.days, formatDays(s.days)],
     ];
     // 和运营总览一样：算得出天数时才说怎么估的
     if (s.basis && Number.isFinite(s.days) && s.days > 0) tip.push([RUNWAY_TEXT.tip.basis, basisText(s.basis)]);
-    return { key: s.id, name: `${s.name}${suffix}`, sub: RUNWAY_TEXT.burn(burn), days: s.days, level, state, tip };
+    return { key: s.id, name: `${s.name}${suffix}`, sub: RUNWAY_TEXT.burn(s.burn), days: s.days, level, state, tip };
   });
   const foot = items.length ? (
     <>

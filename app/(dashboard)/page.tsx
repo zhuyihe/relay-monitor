@@ -11,8 +11,8 @@ import { App, Button } from "antd";
 import { api } from "../../lib/client";
 import { STATION_TABS } from "../../lib/brand";
 import type { WorkflowAction } from "../../lib/client";
-import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActions, etaWindowDays, lowLineOf, stationDisplayName } from "../../lib/overview-actions";
-import { balanceMoneyOf, countsInProfit, rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
+import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActions, burnCellText, burnText, etaWindowDays, isSpending, lowLineOf, stationDisplayName } from "../../lib/overview-actions";
+import { balanceMoneyOf, countsInProfit, profitApproxOf, rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
 import { asSentence, describeError, errorText, failureText, refreshAllText, refreshOneText } from "../../lib/error-copy";
 import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, formatAsOf, formatDays, formatMoney, formatSinceToday, formatZonedDate, INCOME_UNREAD, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
@@ -377,7 +377,8 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
   const costs: any[] = profit.costs || [];
   const usageCosts = costs.filter((c) => c.mode !== "fixed");
   const fixedCosts = costs.filter((c) => c.mode === "fixed");
-  const ownRateMissing = rateSnapshotOf(own.station).source !== "configured";
+  // 哪几项是估算的（加「≈」），和自营业务、日报同一个判断（lib/profit.js）
+  const approx = profitApproxOf(profit, own.station);
   const users = (own.byUser || []).filter((u: any) => !u.isAdmin).length;
   // 只有估算和没设置汇率 / 售价会让数字不准；其余提示放到成本面板底部
   const { reasons } = splitProfitWarnings(profit);
@@ -390,14 +391,14 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
       {...(unread || {})}
       revenue={{
         value: profit.incomeCny ?? null,
-        approx: ownRateMissing,
-        note: unread ? own.station?.name : ownRateMissing ? SELL_PRICE_UNSET : COPY.fromUsers(users),
+        approx: approx.income,
+        note: unread ? own.station?.name : approx.income ? SELL_PRICE_UNSET : COPY.fromUsers(users),
         // 带上同一个时间范围，自营业务默认是近 7 天
         href: range === "7d" ? "/my" : `/my?range=${range}`,
       }}
       upstream={{
         value: profit.upstreamCostCny ?? r2(sum(usageCosts.map((c) => Number(c.cny) || 0))),
-        approx: !!profit.estimated || (!profit.complete && !ownRateMissing),
+        approx: approx.upstream,
         note: COPY.upstreamCount(usageCosts.length),
         href: "/analytics",
       }}
@@ -541,9 +542,7 @@ function AttentionPanel({
     }
     const s = a.station;
     const name = a.stationName;
-    const rate = rateSnapshotOf(s).cnyPerUsd;
     const bal = Number(s.balance?.remaining) || 0;
-    const burn = Number(s.prediction?.burnPerDay) || 0;
     const eta = s.prediction?.etaDays;
     const sync = btn(REFRESH, () => onSync(s), { loading: syncingId === s.id, primary: true, aria: COPY.refreshOne(name) });
     const edit = (primary = false) => btn(COPY.edit, () => onEdit(s), { primary, aria: COPY.editOne(name) });
@@ -569,7 +568,7 @@ function AttentionPanel({
         what = low ? BALANCE_STATE_TEXT.low : BALANCE_STATE_TEXT.empty;
         const parts = [COPY.balance(balanceWithCny(s, bal))];
         if (low) parts.push(COPY.lowLine(balanceText(s, lowLineOf(s, settings))));
-        if (low && eta != null && burn > 0) parts.push(COPY.available(formatDays(eta)));
+        if (low && eta != null && isSpending(s.prediction)) parts.push(COPY.available(formatDays(eta)));
         desc = `${parts.join("，")}。`;
         buttons = (
           <>
@@ -581,7 +580,7 @@ function AttentionPanel({
       }
       case "eta-soon": {
         what = soonText(a.etaDays);
-        desc = COPY.burnSentence(balanceWithCny(s, bal), formatMoney(burn * rate), basisText(s.prediction?.basis));
+        desc = COPY.burnSentence(balanceWithCny(s, bal), burnText(s, s.prediction) ?? EMPTY, basisText(s.prediction?.basis));
         buttons = (
           <>
             {trend}
@@ -677,7 +676,7 @@ function RunwayPanel({
       } else {
         tip = [
           [COPY.tip.balance, bal == null ? BALANCE_STATE_TEXT.pending : balanceWithCny(s, bal)],
-          [COPY.tip.burn, p?.burnPerDay != null ? formatMoney(Number(p.burnPerDay) * rate) : EMPTY],
+          [COPY.tip.burn, burnCellText(s, p)],
           [COPY.tip.days, balanceDaysText(view)],
         ];
         if (view.days != null && view.days !== Infinity && view.days > 0) tip.push([COPY.tip.basis, basisText(p?.basis)]);
@@ -887,7 +886,8 @@ function CostPanel({ title, money, error, onRetry }: { title: string; money: Mon
       }))
       .sort((a: HBarItem, b: HBarItem) => (b.value ?? 0) - (a.value ?? 0));
     const { notes } = splitProfitWarnings(profit);
-    return { items, total: sum(items.map((i) => i.value ?? 0)), approx: !!profit.estimated, notes };
+    // 合计带不带「≈」和同页利润等式的上游成本同一个判断（lib/profit.js）
+    return { items, total: sum(items.map((i) => i.value ?? 0)), approx: profitApproxOf(profit, money.own?.station).upstream, notes };
   }, [money]);
 
   return (

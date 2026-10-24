@@ -1,15 +1,17 @@
 // 界面文案守护（design/ui-copy-spec.md §12.6）：扫描页面里给用户看的字，命中 §3.6 的词或多余的英文就失败。
 // 含中文的字符串和 JSX 里的文字算界面文字；注释、import、类型、console 和 Error 的参数（只给开发看，§12.4）不扫。
 // 范围跟着文案改动一批批扩大：A2 结束时 app/ 下全部页面和组件都扫，接口逐个列；A3-1 加通知方式的报错（lib/smtp.js、通知和日报的接口），
-// A3-2 加推送（lib/alerts.js、lib/notify.js），日报（server/report.js）在 A3-3 加进来。
-// 推送的整句是运行时拼出来的，守护扫不到，最后一条测试拿固定数据真的跑一遍再扫。
+// A3-2 加推送（lib/alerts.js、lib/notify.js），A3-3 加日报（server/report.js）。
+// 推送和日报的整句是运行时拼出来的，守护扫不到，最后两条测试拿固定数据真的跑一遍再扫。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Store } from "../db/store.js";
 import { evaluateStation } from "../lib/alerts.js";
+import { buildReport } from "../server/report.js";
 
 const ts = createRequire(import.meta.url)("typescript");
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -45,6 +47,7 @@ const FILES = [
   "lib/alerts.js",
   "lib/notify.js",
   "server/own-helpers.js",
+  "server/report.js",
   "db/store.js",
   "app/api/meta/route.js",
   "app/api/analytics/route.js",
@@ -157,6 +160,61 @@ test("余额推送拼出来的整句也不出现 §3.6 的词和多余的英文�
   // 每种都以落款结尾：钉钉、飞书机器人的关键词靠它（§10）
   assert.deepEqual(sent.map(({ body }) => body.split("\n").at(-1)), sent.map(() => "炬元告警中心"));
   const texts = sent.flatMap(({ title, body }) => [title, ...body.split("\n")]);
+  assert.deepEqual(texts.flatMap((text) => FORBIDDEN.filter((word) => text.includes(word)).map((word) => `「${word}」${text}`)), []);
+  assert.deepEqual(texts.filter((text) => leftoverEnglish("", text)), []);
+});
+
+test("日报拼出来的整句也不出现 §3.6 的词和多余的英文（运行时扫描）", async (t) => {
+  // 北京时间 10月8日 9:00，日报统计 10月7日；名字都用中文，扫出来的英文只会是日报自己的字
+  const dayStart = Date.parse("2026-10-06T16:00:00Z");
+  t.mock.timers.enable({ apis: ["Date"], now: dayStart + 33 * 3600000 });
+  const USD = 500000;
+  const sec = (day, hour = 10) => (dayStart + day * 86400000 + hour * 3600000) / 1000;
+  const scan = async ({ usersDown = false, channelsDown = false } = {}) => {
+    const store = new Store({ getConnection: async () => { throw new Error("不写库"); } });
+    const up = (id, name, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.example`, accessToken: "t", cnyPerUsd: 7.2, ...extra });
+    store.data.stations = [
+      { id: "own", type: "newapi", isOwn: true, name: "自营站", baseUrl: "https://own.example", accessToken: "t", cnyPerUsd: null },
+      up("a", "主力上游", { balance: { ok: true, remaining: 400 } }),
+      up("b", "备用上游", { cnyPerUsd: null, balance: { ok: true, remaining: 4 } }),
+      up("c", "用完上游", { balance: { ok: true, remaining: 0 } }),
+      up("d", "读不到上游", { balance: { ok: false, error: "Unauthorized", code: "AUTHENTICATION_FAILED" } }),
+      up("e", "新上游", { includeInProfit: false }),
+      up("f", "闲置上游", { balance: { ok: true, remaining: 100 } }),
+      { id: "g", name: "服务器", type: "fixed", fixedPurchases: [{ amount: 300, days: 30, startDate: "2026-10-01" }, { amount: 10, days: 3, startDate: "2026-09-01" }] },
+    ];
+    const predictions = { a: { burnPerDay: 50, etaDays: 8 }, b: { burnPerDay: 2, etaDays: 2 }, c: { burnPerDay: 3, etaDays: 0 }, f: { burnPerDay: 0, etaDays: null } };
+    const rt = { store, history: { predict: (id) => predictions[id] ?? null, usedBetween: () => 1 } };
+    const ok = (data) => Response.json({ success: true, data });
+    const down = () => Response.json({ success: false, message: "unavailable" }, { status: 503 });
+    t.mock.method(globalThis, "fetch", async (input) => {
+      const url = new URL(input);
+      if (url.host === "own.example") {
+        if (url.pathname === "/api/user/") return usersDown ? down() : ok({ items: [
+          { id: 1, username: "管理员甲", role: 100, quota: 0, status: 1 }, { id: 2, username: "用户甲", role: 1, quota: 20 * USD, status: 1 },
+        ], total: 2 });
+        if (url.pathname === "/api/channel/") return channelsDown ? down() : ok({ items: [{ id: 1, name: "渠道甲", base_url: "https://x.example", status: 1 }], total: 1 });
+        if (url.pathname === "/api/data/users") return ok([
+          { username: "用户甲", created_at: sec(0), quota: 30 * USD, token_used: 50000, count: 20 },
+          { username: "管理员甲", created_at: sec(0), quota: 60 * USD, token_used: 30000, count: 10 },
+        ]);
+        if (url.pathname === "/api/data/") return ok([
+          ...Array.from({ length: 20 }, (_, i) => ({ model_name: "模型甲", created_at: sec(-20 + i), quota: (60 + i * 3) * USD, token_used: 1000, count: 10 })),
+          { model_name: "模型甲", created_at: sec(0), quota: 70 * USD, token_used: 60000, count: 20 },
+          { model_name: "模型乙", created_at: sec(0), quota: 20 * USD, token_used: 20000, count: 10 },
+        ]);
+        return ok([]);
+      }
+      // 主力上游的用量接口读不到，改按余额变化估算
+      if (url.host === "a.example") return down();
+      return ok([]);
+    });
+    const { title, text, html } = await buildReport(rt);
+    return [title, ...text.split("\n"), ...html.replace(/<[^>]+>/g, "\n").split("\n")].map((line) => line.trim()).filter(Boolean);
+  };
+  // 正常的一份（含亏损、估算、没设置售价和汇率、读不到余额）和收入、成本都读不到的一份
+  const texts = [...await scan(), ...await scan({ usersDown: true, channelsDown: true })];
+  assert.ok(texts.some((text) => text.includes("亏损")) && texts.some((text) => text.includes("没读到")), "两份都跑到了");
   assert.deepEqual(texts.flatMap((text) => FORBIDDEN.filter((word) => text.includes(word)).map((word) => `「${word}」${text}`)), []);
   assert.deepEqual(texts.filter((text) => leftoverEnglish("", text)), []);
 });

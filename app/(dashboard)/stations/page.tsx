@@ -10,8 +10,8 @@ import { useRouter } from "next/navigation";
 import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
 import type { MenuProps } from "antd";
 import { api, readWorkflowDestination } from "../../../lib/client";
-import { actionsByStation, buildOverviewActions, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
-import { basisText, EMPTY, formatAsOfTime, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, RATE_UNSET } from "../../../lib/format";
+import { actionsByStation, buildOverviewActions, burnText, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
+import { basisText, EMPTY, formatAsOfTime, formatCompact, formatMoney, LOADING_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT, OWN_STATION_LABEL, RATE_UNSET } from "../../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { balanceMoneyOf } from "../../../lib/profit";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
@@ -93,7 +93,7 @@ const COPY = Object.freeze({
   trendOf: TREND_TEXT.of,
   trendSpan: "近 48 小时",
   trendTip: "近 48 小时的余额，点开看余额趋势",
-  own: "自营站点",
+  own: OWN_STATION_LABEL,
   notInProfit: "不算进利润",
   noRenewal: "不再续费",
   demo: "演示",
@@ -673,12 +673,14 @@ export default function StationsPage() {
     // Token 数放到悬停提示里，单元格只留金额，避免把表格撑出横向滚动
     const today = b?.ok && s.todayUsed != null ? COPY.today(formatMoney(s.todayUsed * v.rate, { approx: !!s.todayIsEstimate })) : null;
     const todayTokens = today && s.todayTokens != null ? COPY.todayTokens(formatCompact(s.todayTokens)) : undefined;
+    // 日均花费的写法和推送、日报同一个（burnText）
+    const burn = burnText(s, p);
     let main;
     if (p?.burnPerDay === 0) main = <span className="jy-muted">{NO_SPEND_TEXT}</span>;
-    else if (p?.burnPerDay > 0) {
+    else if (burn) {
       main = (
         <>
-          {formatMoney(p.burnPerDay * v.rate, { approx: true })}
+          {burn}
           <span className="jy-sub-money">{basisText(p.basis)}</span>
         </>
       );
@@ -906,6 +908,7 @@ export default function StationsPage() {
             const b = v.s.balance;
             const name = stationDisplayName(v.s);
             const money = !v.fixed && b?.ok ? balanceMoneyOf(v.s, Number(b.remaining)) : null;
+            const burn = !v.fixed && !v.archived ? burnText(v.s, v.s.prediction) : null;
             return (
               <li key={v.id}>
                 <span className="m-top" title={name}>{name}</span>
@@ -917,8 +920,8 @@ export default function StationsPage() {
                   ) : (
                     <span title={money?.note}>{COPY.col.balance} <b>{money ? money.full : EMPTY}</b></span>
                   )}
-                  {!v.fixed && !v.archived && v.s.prediction?.burnPerDay > 0 ? (
-                    <span>{COPY.col.burn} <b>{formatMoney(v.s.prediction.burnPerDay * v.rate, { approx: true })}</b></span>
+                  {burn ? (
+                    <span>{COPY.col.burn} <b>{burn}</b></span>
                   ) : null}
                   {v.runway ? <span>{COPY.col.days} <b>{v.runway.text}</b></span> : null}
                   {!v.fixed && v.checkedAt && !v.issue ? <span>{COPY.col.asOf} <b>{formatAsOfTime(v.checkedAt, tz)}</b></span> : null}

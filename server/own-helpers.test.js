@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  aggregateFlow, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
+  aggregateFlow, computeFlowBreakdown, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
   getOwnUsers, readOwnIncome, readOwnIncomeOrUnconfirmed, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
   ownUsersKey, unconfirmedIncomeProfit,
 } from "./own-helpers.js";
@@ -101,8 +101,8 @@ test("readOwnIncomeOrUnconfirmed：确认不了时不中止，收入是 null；�
   assert.equal(lost.unconfirmed.code, "OWN_INCOME_UNCONFIRMED");
   assert.deepEqual([lost.users, lost.incomeUsd, lost.adminUsageUsd, lost.resold, lost.incomeDaily, lost.adminSet.size], [null, null, null, null, null, 0]);
   assert.equal(calls, 1);
-  // 原因带上游给的原文（只进「查看详细原因」），按码归类
-  assert.deepEqual(lost.usersUnavailable, { error: "unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" });
+  // 原文只进「查看详细原因」；读不到的是自营站点，繁忙说成「自营站点暂时读不到」，不说成上游繁忙
+  assert.deepEqual(lost.usersUnavailable, { error: "unavailable", errorCode: "OWN_STATION_UNAVAILABLE" });
   // 用户列表读得到、转售记录没读全：users 照常给出，管理员照常标
   f.own.resoldAdminKeys = [{ username: "root", tokenName: "sale" }];
   const partial = await readOwnIncomeOrUnconfirmed(f.rt, f.own, f.rows, f.window);
@@ -265,7 +265,8 @@ test("必要的角色或转售读取失败时收入不可确认", async (t) => {
   await assert.rejects(readOwnIncome(f.rt, f.own, f.rows, f.window), (err) => {
     assert.equal(err.code, "OWN_INCOME_UNCONFIRMED");
     assert.match(err.message, /转售 Key「root \/ sale」的记录没读到/);
-    assert.deepEqual(err.resoldErrors.map((k) => [k.username, k.tokenName, typeof k.error, typeof k.errorCode]), [["root", "sale", "string", "string"]]);
+    // 读不到的是自营站点的转售记录：503 说「自营站点暂时读不到」（lib/error-copy.js ownStationErrorCode）
+    assert.deepEqual(err.resoldErrors.map((k) => [k.username, k.tokenName, typeof k.error, k.errorCode]), [["root", "sale", "string", "OWN_STATION_UNAVAILABLE"]]);
     return true;
   });
 });
@@ -535,3 +536,51 @@ test("收入确认不了时的利润：两项成本照常算，收入、管理�
   assert.equal(both.incomeUnconfirmed.errorCode, "OWN_INCOME_UNCONFIRMED");
 });
 
+
+test("读自营站点没成时说自营站点：通用的繁忙、连不上和认不出的是「自营站点暂时读不到」，内容不对的另说，有自己那句话的照旧", async (t) => {
+  const own = { id: "own", type: "newapi", isOwn: true, name: "Own", baseUrl: "https://own.example", accessToken: "t", cnyPerUsd: 1 };
+  const rt = { store: { list: () => [own] }, history: new History({ query: async () => [[]] }) };
+  let reply;
+  t.mock.method(globalThis, "fetch", async () => reply());
+  const window = { startMs: Date.parse("2026-10-07T16:00:00Z"), now: Date.parse("2026-10-08T16:00:00Z"), tz: "Asia/Shanghai", range: "7d", resold: null };
+  const fail = (status, message = "unavailable") => () => Response.json({ success: false, message }, { status });
+  // [情况, 回复, 利润（读渠道列表）的码, 分组和渠道数据的码]
+  const cases = [
+    ["503", fail(503), "OWN_STATION_UNAVAILABLE", "OWN_STATION_UNAVAILABLE"],
+    ["连不上", () => { throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }); }, "OWN_STATION_UNAVAILABLE", "OWN_STATION_UNAVAILABLE"],
+    ["认不出", fail(200, "something odd happened"), "OWN_STATION_UNAVAILABLE", "OWN_STATION_UNAVAILABLE"],
+    ["登录信息过期", fail(401, "unauthorized"), "AUTHENTICATION_FAILED", "AUTHENTICATION_FAILED"],
+    // 404：渠道列表说「地址或类型可能不对」，旧版 New API 没有分组和渠道数据接口说「对方的版本不支持」
+    ["404", fail(404, "not found"), "ENDPOINT_MISMATCH", "UPSTREAM_FEATURE_UNSUPPORTED"],
+  ];
+  for (const [name, answer, profitCode, flowCode] of cases) {
+    reply = answer;
+    delete rt._ownChannelsCache;
+    const profit = await computeProfit(rt, own, 0, 0, window);
+    assert.equal(profit.errorCode, profitCode, `利润：${name}`);
+    const flow = await computeFlowBreakdown(own, { startMs: window.startMs, endMs: window.now, prevStartMs: window.startMs - 86400000, prevEndMs: window.startMs, totalCostUsd: 0 });
+    assert.equal(flow.errorCode, flowCode, `分组和渠道数据：${name}`);
+  }
+  // 渠道列表返回一张网页（登录页、防火墙页）：说「自营站点返回的内容不对」，不说成上游的问题
+  reply = () => new Response("<html>login</html>", { status: 200, headers: { "content-type": "text/html" } });
+  delete rt._ownChannelsCache;
+  assert.equal((await computeProfit(rt, own, 0, 0, window)).errorCode, "OWN_STATION_RESPONSE_INVALID");
+});
+
+test("利润说明里的名字用显示名：自营站点、上游没起名字时写「自营站点」「未命名上游」，句子不缺主语", async () => {
+  const SH = "Asia/Shanghai";
+  const startMs = dayStartInTz("2026-10-13", SH);
+  const now = startMs + 86400000;
+  const own = { id: "own", type: "newapi", isOwn: true, name: "", baseUrl: "https://own.example", accessToken: "t", cnyPerUsd: null };
+  // newapi-key 没有用量明细接口，直接按余额变化估算，不发网络请求
+  const unnamed = { id: "u", name: " ", type: "newapi-key", cnyPerUsd: null };
+  const skipped = { id: "s", name: "", type: "newapi-key", cnyPerUsd: 7, includeInProfit: false };
+  const history = new History({ query: async () => [[]] });
+  history.data.u = [[startMs - 1000, 10], [startMs + 3600000, 9]];
+  const rt = { store: { list: () => [own, unnamed, skipped] }, history, _ownChannelsCache: { at: Date.now(), stationId: "own", list: [] } };
+  const p = await computeProfit(rt, own, 5, 0, { startMs, now, tz: SH, range: "7d", resold: null });
+  assert.equal(p.error, undefined);
+  assert.ok(p.warnings.includes("自营站点 没设置售价，暂按 1 美元额度 = 1 元算"), p.warnings.join(" | "));
+  assert.ok(p.warnings.includes("未命名上游 没设置汇率，暂按 1 美元 = 1 元算"), p.warnings.join(" | "));
+  assert.ok(p.warnings.includes("未命名上游 不算进利润"), p.warnings.join(" | "));
+});

@@ -7,7 +7,8 @@ import {
 import { businessTimeZone, dayKeyInTz, dayRangeInTz, resolveBusinessWindow } from "../lib/business-time.js";
 import { amortizeFixedCost, costBasisOf, purchasesOf, rateSnapshotOf, summarizeProfit, toCny } from "../lib/profit.js";
 import { COST_MODE_TEXT, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../lib/format.js";
-import { errorCodeOf, errorDetail } from "../lib/error-copy.js";
+import { errorCodeOf, errorDetail, ownStationErrorCode } from "../lib/error-copy.js";
+import { ownStationDisplayName, stationDisplayName } from "../lib/overview-actions.js";
 
 // 上游在自营站点的渠道里找不到对应地址时，成本明细「渠道」一栏的写法（成本来源另有一栏）
 const NO_MATCHED_CHANNEL = "没有对上的渠道";
@@ -165,7 +166,7 @@ export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endM
       resoldUsd += usd;
       breakdown.push({ username: k.username, tokenName: k.tokenName, usd });
     } catch (err) {
-      breakdown.push({ username: k.username, tokenName: k.tokenName, usd: 0, ...resultError(err) });
+      breakdown.push({ username: k.username, tokenName: k.tokenName, usd: 0, ...ownStationError(err) });
     }
   }
   return {
@@ -191,13 +192,19 @@ export async function readOwnIncomeOrUnconfirmed(rt, own, userRows, window) {
     const users = err.users ?? null;
     const adminSet = new Set((users || []).filter((u) => u.role >= 10).map((u) => u.username));
     return { users, adminSet, incomeUsd: null, adminUsageUsd: null, resold: null, incomeDaily: null, unconfirmed: err,
-      usersUnavailable: users ? null : resultError(err.cause || err) };
+      usersUnavailable: users ? null : ownStationError(err.cause || err) };
   }
 }
 
 // 给前端的报错（和 computeProfit 读不到时同一个形状）：error 是原文加上底层原因，只进「查看详细原因」；errorCode 用来归类
 function resultError(err, code = errorCodeOf(err)) {
   return { error: errorDetail(err), errorCode: code };
+}
+
+// 读自营站点（渠道列表、用户列表、转售记录、分组和渠道数据）没成时的报错：码由 lib/error-copy.js 的 ownStationErrorCode 给，
+// 出问题的是自营站点，不说成上游的问题；有自己那句话的码（登录信息过期、对方的版本不支持……）照旧
+function ownStationError(err) {
+  return resultError(err, ownStationErrorCode(err));
 }
 
 // 只关乎收入的提示：收入确认不了时收入不显示，这几条也不说
@@ -397,9 +404,10 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
     const warn = (code, text) => { warningCodes.push(code); warnings.push(text); };
     if (unmatchedEnabled) warn("unmatched_channels", `${unmatchedEnabled} 个在用的渠道没对上上游；已添加的上游照常算成本`);
     if (estimatedCosts) warn("estimated_cost", `${estimatedCosts} 个上游${COST_MODE_TEXT.history}`);
-    if (ownPriceUnset) warn("sell_price_unset", `${own.name} ${SELL_PRICE_UNSET}`);
-    if (rateUnsetStations.length) warn("rate_unset", `${rateUnsetStations.map((s) => s.name).join("、")} ${RATE_UNSET_PARITY}`);
-    if (excludedUpstreams.length) warn("excluded_upstreams", `${excludedUpstreams.map((s) => s.name).join("、")} 不算进利润`);
+    // 名字用显示名：没起名字的写「自营站点」「未命名上游」，句子不会缺主语
+    if (ownPriceUnset) warn("sell_price_unset", `${ownStationDisplayName(own)} ${SELL_PRICE_UNSET}`);
+    if (rateUnsetStations.length) warn("rate_unset", `${rateUnsetStations.map(stationDisplayName).join("、")} ${RATE_UNSET_PARITY}`);
+    if (excludedUpstreams.length) warn("excluded_upstreams", `${excludedUpstreams.map(stationDisplayName).join("、")} 不算进利润`);
     return {
       incomeCny,
       upstreamCostCny,
@@ -424,8 +432,9 @@ export async function computeProfit(rt, own, incomeUsd, adminUsageUsd, { startMs
       windowDays: Math.round(windowDays * 10) / 10,
     };
   } catch (err) {
+    // 整块读不到只会是读自营站点的渠道列表没成（各上游的用量读不到时改按余额变化估算，不到这里）。
     // error 是原文，只给「查看详细原因」；归类看 errorCode（lib/error-copy.js）
-    return resultError(err);
+    return ownStationError(err);
   }
 }
 
@@ -500,6 +509,6 @@ export async function computeFlowBreakdown(own, { startMs, endMs, prevStartMs, p
     };
   } catch (err) {
     // error 是原文加上底层原因，只给「查看详细原因」；归类看 errorCode（lib/error-copy.js）
-    return resultError(err);
+    return ownStationError(err);
   }
 }

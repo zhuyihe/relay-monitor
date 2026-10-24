@@ -6,8 +6,8 @@ import Link from "next/link";
 import { Button } from "antd";
 import { NAV_LABELS } from "../../../lib/brand";
 import { dayKeyInTz } from "../../../lib/business-time";
-import { ADMIN_UNMARKED, EMPTY, INCOME_UNREAD, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
-import { rateSnapshotOf, splitProfitWarnings } from "../../../lib/profit";
+import { ADMIN_UNMARKED, BASIS_TITLE, EMPTY, FORECAST_TEXT, INCOME_UNREAD, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
+import { profitApproxOf, splitProfitWarnings } from "../../../lib/profit";
 import { EmptyState, ErrorState, PanelSkeleton } from "../../components/data-state";
 import { ForecastChart } from "../../components/forecast-chart";
 import { HBars } from "../../components/hbars";
@@ -18,7 +18,7 @@ import { Seg } from "../../components/seg";
 import { TREND_PANEL_TITLE, TrendPanel } from "../../components/trend-panel";
 import { derive } from "../analytics/derive";
 import { ProfitBasis } from "./profit-basis";
-import { BASIS_TITLE, COL_TEXT, DataTable, MY_TEXT, TAB_TEXT, TOKEN_NOTE, sum } from "./shared";
+import { COL_TEXT, DataTable, MY_TEXT, TAB_TEXT, TOKEN_NOTE, sum } from "./shared";
 import type { MyTab, OwnRange, OwnView } from "./shared";
 
 // 只在概览出现的话（design/ui-copy-spec.md §12）；列名、标签名、时间范围名、利润等式和趋势卡片名从共用的地方取
@@ -53,9 +53,6 @@ const COPY = Object.freeze({
   next7Lead: "未来 7 天预计",
   next7Band: (lo: string, hi: string) => `，按以往起伏，预计 ${lo} 到 ${hi}。`,
   recentTail: "；下面是最近每天的消费。",
-  sampleLead: "按过去",
-  sampleDays: (n: number) => `${n} 天`,
-  sampleTail: "估算",
   dailyCaption: "每日预计花费与最近 14 天实际消费",
   colDay: "日期",
   colKind: "类型",
@@ -165,9 +162,8 @@ function Equation({
   const upstream = p.upstreamCostCny ?? sum(usageRows, (c) => c.cny);
   const fixed = p.fixedCostCny ?? sum(fixedRows, (c) => c.cny);
 
-  // 没设置售价影响收入，上游没设置汇率影响上游成本；都由接口给出，不解析提示文字
-  const ownNoRate = rateSnapshotOf(v.d.station).source === "default";
-  const upstreamNoRate = (p.rateUnsetStations || []).length > 0;
+  // 没设置售价影响收入，上游没设置汇率影响上游成本；都由接口给出，不解析提示文字。和日报同一个判断（lib/profit.js）
+  const approx = profitApproxOf(p, v.d.station);
   const { reasons } = splitProfitWarnings(p);
 
   const revNotes: ReactNode[] = [];
@@ -188,13 +184,13 @@ function Equation({
       }
       revenue={{
         value: p.incomeCny,
-        approx: ownNoRate,
+        approx: approx.income,
         note: unread ? v.d.station?.name : revNotes.length ? revNotes : COPY.noAdminSelf,
         href: tabHref(range, "users"),
       }}
       upstream={{
         value: upstream,
-        approx: !!p.estimated || upstreamNoRate,
+        approx: approx.upstream,
         note: historyCount
           ? COPY.historyEst(EQ_TEXT.upstreamCount(usageRows.length), historyCount)
           : usageRows.length
@@ -251,9 +247,8 @@ function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: 
 
 type FcView = "24h" | "7d";
 
-// 预计花费面板里重复出现的几句（design/ui-copy-spec.md §3.4）
+// 预计花费面板里重复出现的几句（design/ui-copy-spec.md §3.4）；「按过去 N 天估算」「过去 2 周平均差」和日报共用（FORECAST_TEXT）
 export const FC_TITLE = "预计花费";
-const FC_ACCURACY = "过去 2 周平均差";
 const FC_TOO_SHORT = "记录不到 3 天，还估算不了";
 
 function ForecastPanel({ v }: { v: OwnView }) {
@@ -304,7 +299,7 @@ function ForecastPanel({ v }: { v: OwnView }) {
             </li>
             {h.backtestWapePct != null && (
               <li>
-                {FC_ACCURACY} <b>±{h.backtestWapePct}%</b>
+                {FORECAST_TEXT.accuracy} <b>{FORECAST_TEXT.accuracyPct(h.backtestWapePct)}</b>
               </li>
             )}
           </ul>
@@ -355,12 +350,12 @@ function ForecastPanel({ v }: { v: OwnView }) {
         fc ? (
           <ul className="jy-my-facts">
             <li>
-              {COPY.sampleLead} <b>{COPY.sampleDays(fc.sampleDays)}</b>
-              {COPY.sampleTail}
+              {FORECAST_TEXT.sampleLead} <b>{FORECAST_TEXT.sampleDays(fc.sampleDays)}</b>
+              {FORECAST_TEXT.sampleTail}
             </li>
             {fc.backtestWapePct != null && (
               <li>
-                {FC_ACCURACY} <b>±{fc.backtestWapePct}%</b>
+                {FORECAST_TEXT.accuracy} <b>{FORECAST_TEXT.accuracyPct(fc.backtestWapePct)}</b>
               </li>
             )}
           </ul>

@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { Button } from "antd";
 import { failureSentence } from "../../lib/error-copy";
 import { INCOME_UNREAD, MINUS, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, formatMoney, formatPct, splitTotal } from "../../lib/format";
+import { isLoss } from "../../lib/profit";
 import { workflowAction, workflowActionMeta } from "../../lib/workflow-actions";
 import { ErrorDetail, noteOf } from "./error-detail";
 import { Icon } from "./icons";
@@ -138,8 +139,6 @@ const Op = ({ ch, spoken }: { ch: string; spoken: string }) => (
     <span className="sr-only">{spoken}</span>
   </span>
 );
-
-const isLoss = (v: number | null) => v != null && v < 0 && Math.abs(v) >= 0.005;
 
 export function ProfitEquation({
   title,

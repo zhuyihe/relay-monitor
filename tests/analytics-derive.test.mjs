@@ -76,8 +76,8 @@ test("derive: 缺记录的日子不补 0，部分上游缺的标成部分；固�
   // 成本构成和可用天数不含自营站点；没名字的上游写「未命名上游」，可用天数最紧的在前
   assert.deepEqual(dv.mix.map((m) => [m.name, m.usage + m.fixed]), [["A", 30], ["C", 6], ["未命名上游", 5]]);
   assert.deepEqual(dv.runway.map((r) => [r.name, r.days]), [["A", 2], ["未命名上游", 9]]);
-  // 花费按各上游的汇率换成人民币，没设置汇率的按 1 比 1
-  assert.deepEqual(dv.runway.map((r) => r.burnCny), [7, 2]);
+  // 花费按各上游的汇率换成人民币，没设置汇率的按 1 比 1；写法和运营总览、上游列表一样带「≈」（burnCellText）
+  assert.deepEqual(dv.runway.map((r) => r.burn), ["≈ ¥7.00", "≈ ¥2.00"]);
   assert.equal(dv.hasIncome, false);
   assert.equal(dv.incomeError, null);
   assert.equal(dv.ownNoRate, false);

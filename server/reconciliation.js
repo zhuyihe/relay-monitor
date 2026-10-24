@@ -21,7 +21,7 @@ import {
   isLiveReconciliationPreset,
 } from "../lib/reconciliation-contract.js";
 import { OWN_STATION_UNSET, UPSTREAM_GONE } from "../lib/format.js";
-import { errorCodeOf, errorText } from "../lib/error-copy.js";
+import { errorText, ownStationErrorCode } from "../lib/error-copy.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
@@ -1880,10 +1880,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (own) {
         try { channels = await ownChannelsFor(own, { force: forceChannels }); } catch (err) {
           // 上游错误原文可能回显令牌：只返回脱敏后的原文（进「查看详细原因」）和 code（界面按 code 归类，§8.2）。
-          // 码由 errorCodeOf 给：带着认得的码就用它，没有的按原文补，认不出的按没有权限说（OWN_CHANNEL_UNAVAILABLE）。
+          // 码由 ownStationErrorCode 给（lib/error-copy.js，§8.2），和别处读自营站点没成时一样：
+          // 通用的繁忙、连不上和认不出的说「自营站点暂时读不到」，有自己那句话的码照旧。
           channelsError = connectionDiagnostic(err, own);
           console.error("本站渠道目录读取失败:", channelsError);
-          channelsErrorCode = errorCodeOf(err, "OWN_CHANNEL_UNAVAILABLE");
+          channelsErrorCode = ownStationErrorCode(err);
         }
       }
       return { ownStation: publicStation(own), upstreams, channels, channelsError, channelsErrorCode, rules };
