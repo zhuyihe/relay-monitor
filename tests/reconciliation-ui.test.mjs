@@ -1725,7 +1725,7 @@ test("workflow overview merges stable public actions and preserves prior actions
     assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
   } });
   await opened.page.goto(baseURL); const region = opened.page.getByRole("region", { name: "需处理", exact: true }); const authLink = new RegExp(`^${UPDATE_AUTH}（`); await region.getByRole("link", { name: authLink }).waitFor();
-  // 需处理只露 3 条（ui-design-spec §5.1），其余在「还有 N 件」里：点开再数
+  // 需处理只露前几条（ui-design-spec §5.1），其余在「还有 N 件」里：点开再数
   await region.getByRole("button", { name: /^还有 \d+ 件$/ }).click();
   assert.equal(await region.getByRole("link", { name: new RegExp(`^${workflowActionMeta("confirm_coverage").label}（`) }).count(), 1); const before = await region.getByRole("listitem").count(); await region.getByRole("button", { name: `${workflowActionMeta("refresh").label}需处理的事`, exact: true }).click();
   // 有一处没读到：写「刷新失败，数据截至 …。」，上次读到的事项照常列出
@@ -1745,7 +1745,7 @@ test("运营总览在手机上先列需处理，再是利润等式；桌面照�
   }
 });
 
-test("运营总览两行都是 8 + 4：等式和需处理并排、一样高，需处理露 3 条、其余收进「还有 N 件」；余量和「收入和上游成本」并排", async (t) => {
+test("运营总览两行都是 8 + 4：等式和需处理并排、一样高，需处理按等式的高度露 2 条、其余收进「还有 N 件」；余量和「收入和上游成本」并排", async (t) => {
   const readonlyAPI = (route, path) => path === "/api/own/analytics" ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture analytics unavailable" }) }) : (assert.equal(path, "/api/history/overview"), fulfill(route, { series: [] }));
   const opened = await openAccountsPage(t, { readonlyAPI }); await opened.page.setViewportSize({ width: 1440, height: 900 }); await opened.page.goto(baseURL);
   const page = opened.page;
@@ -1759,15 +1759,15 @@ test("运营总览两行都是 8 + 4：等式和需处理并排、一样高，�
     assert.ok(m.width / sd.width > 1.8 && m.width / sd.width < 2.2, `宽度约 2:1（${Math.round(m.width)} / ${Math.round(sd.width)}）`);
     assert.ok(Math.abs(m.y - sd.y) < 1 && Math.abs(m.height - sd.height) < 1, "上沿对齐、一样高");
   }
-  // 需处理露 3 条，其余收进「还有 N 件」，点开在原地接着列（收起区 More）
+  // 需处理按等式的高度露 2 条，其余收进「还有 N 件」，点开在原地接着列（收起区 More）
   const total = Number((await attention.locator(".jy-count-badge").first().innerText()).trim());
   const shown = attention.locator(".jy-attention:not(.jy-attention-rest .jy-attention) > li");
-  assert.equal(await shown.count(), Math.min(3, total));
-  assert.ok(total > 3, `夹具里的需处理要多于 3 条（${total}）`);
-  const more = attention.getByRole("button", { name: `还有 ${total - 3} 件`, exact: true });
+  assert.equal(await shown.count(), Math.min(2, total));
+  assert.ok(total > 2, `夹具里的需处理要多于 2 条（${total}）`);
+  const more = attention.getByRole("button", { name: `还有 ${total - 2} 件`, exact: true });
   assert.equal(await more.getAttribute("aria-expanded"), "false"); assert.equal(await attention.locator(".jy-attention-rest .jy-attention > li").count(), 0);
   await more.click(); assert.equal(await more.getAttribute("aria-expanded"), "true");
-  assert.equal(await attention.locator(".jy-attention-rest .jy-attention > li").count(), total - 3);
+  assert.equal(await attention.locator(".jy-attention-rest .jy-attention > li").count(), total - 2);
   // 这里经营数据读不到（夹具），「收入和上游成本」那块照样占着右边 4 列；两小段的内容在「收入确认不了时」那条里查
   assert.equal(opened.mutations.length, 0);
 });

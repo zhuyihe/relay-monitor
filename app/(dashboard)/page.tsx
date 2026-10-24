@@ -47,8 +47,9 @@ const RANGE_DAYS: Record<Range, number> = { today: 1, "7d": 7, "30d": 30 };
 const RUNWAY_LIMIT = 8;
 // 「收入和上游成本」那块每小段列前 3，多的并成「其他 N 位用户」「其他 N 个上游」一行（ui-design-spec §5.1）
 const TOP_N = 3;
-// 需处理露 3 条，其余收进「还有 N 件」（ui-design-spec §5.1）
-const ATTENTION_SHOWN = 3;
+// 需处理露几条按利润等式那块的高度定（ui-design-spec §1.4 第 3 条、§5.1）：1440 宽时等式旁边放得下 2 条，
+// 其余收进「还有 N 件」。G 把「≈」说明收成一行、等式变矮以后，按同一条规矩再调
+const ATTENTION_SHOWN = 2;
 const REFRESH = workflowActionMeta("refresh")!.label;
 
 // 运营总览独有的话，只在这一处写；用语按 design/ui-copy-spec.md
