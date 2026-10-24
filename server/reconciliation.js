@@ -982,7 +982,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (!settlement) throw new Error("Invalid settlement record");
         return settledFrom(rule, settlement);
       }
-      // 1a 之前窗口一结束就会写确认记录，那时上游还在入账；结束不满等待期写下的记录不算结账
+      // 结束不满等待期写下的确认记录不算结账（那时上游还在入账）：1a 之前窗口一结束就会写这种记录；现在也写得出来，
+      // 比如多日窗口在等待期满前一刻开始取数、满了以后才保存。B2 起这种记录一律不认
       const record = await repository.latestSettlement(rule.id, window);
       return record && isSettledAt(window, record.generatedAt) ? settledFrom(rule, record) : null;
     } catch {
@@ -1659,7 +1660,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         throw codedError("PERSISTENCE_FAILED", issueText("PERSISTENCE_FAILED"));
       }
       if (saved !== true) return false;
-      if (settled) result.settledAt = result.generatedAt;
+      // 单日记进账本时，固定时刻以账本里最新那一版为准：重结内容相同（B-L1）不写新版，页面仍是原来那个时刻
+      if (settled) {
+        const booked = ledgerEntry ? await repository.latestLedgerEntry(rule.id, result.window).catch(() => null) : null;
+        result.settledAt = booked?.settledAt ?? result.generatedAt;
+      }
     }
     if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return false;
     if (currentSourceCredential(rule) !== sourceCredential) return false;

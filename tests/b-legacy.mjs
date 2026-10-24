@@ -1,7 +1,7 @@
 // B 对拍用的旧实现：B1 合掉的那几份原样留在这里，只给对拍用（tests/b-parity.test.mjs、scripts/b-parity-sweep.mjs），
 // 不要在别处引用。计划 7c 删掉。
 // 每段都是从 main 470a311 原样抄来的，只改了名字（同名的加上出处前缀）和互相引用；出处写在每段前面。
-// 文件末尾 B2 那几段从 main d264434（B1 合并后）抄，用的是 B1 以后的 isCompletedBillingWindow、billDayOf，只对比 B2 自己合掉的部分。
+// 文件末尾 B2 那几段从 main 952c58b（B1、#66 合并后）抄，用的是 B1 以后的 isCompletedBillingWindow、billDayOf，只对比 B2 自己合掉的部分。
 // 下面三个从现在的 lib 引：B1 没改它们（isLiveReconciliationPreset、costBasisOf、rateSnapshotOf）。
 import { isLiveReconciliationPreset } from "../lib/reconciliation-contract.js";
 import { costBasisOf, rateSnapshotOf } from "../lib/profit.js";
@@ -346,7 +346,7 @@ export function toCny(usd, rate) {
   return Number.isFinite(n) ? Math.round(n * r * 100) / 100 : 0;
 }
 
-// ==== B2（main d264434）====
+// ==== B2（main 952c58b）====
 // 下面几段用 B1 以后的现成函数：B2 没改它们。
 
 // ---- 结账判定：server/reconciliation.js:91-93、:457-470、:1000-1004、:1054、:1572-1574、:2029；仓库 :111-117；迁移 lib/reconciliation-ledger.js:82 ----

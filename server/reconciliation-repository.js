@@ -109,10 +109,10 @@ export function snapshotGeneratedAt(source) {
   return String(source?.resultGeneratedAt || "");
 }
 
-// 结账记录只认已结束的自然日窗口；旧版本把今天的半天、近 7 天也写成过 confirmed，读取时一并排除。
-// 有逻辑窗口但没存生成时间的旧记录，只要窗口是现在已结束满等待期的完整自然日就认。
+// 结账记录只认已结束的整天窗口，而且生成在窗口结束满等待期以后；旧版本把今天的半天、近 7 天也写成过 confirmed，读取时一并排除。
+// 和读侧、迁移同一个判断（lib/reconciliation-settlement.js 的 isSettledAt）。没存生成时刻的记录，selectLatestRecord 已经先筛掉了，
+// 走不到这里；now 只是没有生成时刻时的兜底。
 export function isSettledConfirmedSource(source, window = source?.window, now = Date.now()) {
-  // 和读侧、迁移同一个判断（lib/reconciliation-settlement.js 的 isSettledAt）：生成在结束满等待期以后
   return !!window && isSettledAt({ startMs: Number(window.startMs), endMs: Number(window.endMs), timezone: window.timezone }, source?.resultGeneratedAt, now);
 }
 
@@ -163,6 +163,9 @@ export function normalizeConfirmedHistoryOptions(input = {}, now = Date.now()) {
   return { startMs, endMs, limit: Math.min(50, requestedLimit), cursor: input.cursor ?? null, after };
 }
 
+// 记账时读最新一版只为比内容（ledgerWriteDecision）：不读 detail 这类大列
+const LEDGER_DECISION_SELECT = ["revision", "source", "timezone", "window_start_ms", "window_end_ms", "revenue_usd", "cost_usd",
+  "revenue_rate", "cost_rate", "cost_basis"].join(", ");
 const LEDGER_SELECT = RECONCILIATION_LEDGER_COLUMNS.map((column) => column === "bill_date" ? "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date"
   : column === "settled_at" ? "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at" : column).join(", ");
 
@@ -699,7 +702,7 @@ export class ReconciliationRepository {
       if (ledger?.entry) {
         // 同快照：规则行锁已把同一规则的记账串行，普通读就能看到已提交的版本，不加锁避免间隙锁死锁。
         const [latest] = await conn.query(
-          `SELECT ${LEDGER_SELECT} FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? ORDER BY revision DESC LIMIT 1`,
+          `SELECT ${LEDGER_DECISION_SELECT} FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? ORDER BY revision DESC LIMIT 1`,
           [ruleId, ledger.entry.billDate]
         );
         const decision = ledgerWriteDecision(latest.length ? ledgerEntryFromRow(latest[0]) : null, ledger.entry, { resettle: ledger.resettle });
