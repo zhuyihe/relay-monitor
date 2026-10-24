@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>改设置（D）和换 Key（6b）样稿 · 炬元</title>
+<title>改设置（D）和绑定跟着 Key 走（K）样稿 · 炬元</title>
 <!--
-  改设置（计划 D，4b-1b）和换 Key（计划 6b）的静态样稿，配 design/ux/d-config-change.md、design/ux/6b-swap-key.md 看。
+  改设置（计划 D）和绑定跟着 Key 走（计划 K）的静态样稿，配 design/ux/d-config-change.md、design/ux/k-key-segments.md 看。
   颜色、字号、间距取自 lib/design-tokens.js 和 app/styles/jy.css；样子按现有组件画（antd Drawer、Alert、Radio，panel、attention-list、status）。
   数据是编的，前后对得上：今天 = 10月24日，现在 14:30；绑定「我的站 · 主力上游 · oai」从 10月20日 12:44 开始统计，
   10月20日–21日已固定，10月22日、23日还没固定（还在读取），渠道原来只有「上游甲·高速」。
-  截图：design/ux/screens/d-*.png、swap-*.png（每个 .frame 截一张）。
+  截图：design/ux/screens/d-*.png、k-*.png（每个 .frame 截一张）。
 -->
 <style>
 :root {
@@ -152,6 +152,16 @@ a { color: var(--cobalt); text-decoration: none; }
 .ann::after { content: ""; position: absolute; width: 8px; height: 8px; background: #3157D5; transform: rotate(45deg); }
 .ann.r::after { right: -4px; top: 9px; } .ann.l::after { left: -4px; top: 9px; } .ann.b::after { bottom: -4px; left: 16px; } .ann.t::after { top: -4px; left: 16px; }
 
+/* 用过的 Key（时间线） */
+.tl-title { font-size: 13px; font-weight: 600; color: var(--ink-2); margin-bottom: 6px; }
+.tl ol { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--rule); display: flex; flex-direction: column; gap: 10px; }
+.tl li { position: relative; display: grid; grid-template-columns: 150px 1fr auto; gap: 12px; font-size: 13px; line-height: 20px; }
+.tl li i { position: absolute; left: -20px; top: 5px; width: 10px; height: 10px; border-radius: 50%; background: var(--sheet); border: 2px solid var(--cobalt); }
+.tl li.unk i { border-color: var(--warn); background: var(--warn-tint); }
+.tl li a { font-size: 13px; }
+.tl .when { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.m-tl li { grid-template-columns: 1fr auto; }
+.m-tl li .when { grid-column: 1 / -1; }
 /* 变体并排 */
 .cols { display: grid; gap: 16px; padding: 16px; }
 .cols.c3 { grid-template-columns: repeat(3, 1fr); }
@@ -392,127 +402,166 @@ a { color: var(--cobalt); text-decoration: none; }
   </aside>
 </section>
 
-<!-- ═══ S-A. 换 Key 抽屉 ═══ -->
-<p class="frame-label" style="width:1160px">6b-A · 换 Key：就地开抽屉，不跳页、不先解除；选了新 Key 自动测试读取；回答不预先选；「从什么时候起」默认从现在起</p>
-<section class="frame" id="swap-drawer" style="width:1160px;height:1060px">
-  <div data-page></div>
-  <aside class="drawer">
-    <div class="d-head"><svg class="icon"><use href="#i-close"/></svg><h3>换 Key · oai</h3></div>
-    <div class="d-body">
-      <div class="facts"><span>自营站点</span><div>我的站（演示）</div><span>上游</span><div>主力上游（演示）</div><span>渠道</span><div>上游甲·高速　<span class="caption">渠道不变；要改渠道，用「改绑定」</span></div><span>现在的 Key</span><div>oai</div></div>
-      <div class="field">
-        <label>新 Key</label>
-        <div class="select"><span class="val">oai-2 · 分组 oai</span></div>
-        <div class="read-ok"><svg class="sym"><use href="#good"/></svg>能读到账单</div>
-      </div>
-      <div class="field">
-        <label>这把 Key 还给别处用吗？</label>
-        <div class="radio">
-          <label class="on"><i></i>只给这些渠道用</label>
-          <label><i></i>自营站点的其他渠道也在用</label>
-          <label><i></i>站外也在用</label>
-          <label><i></i>别处也在用，说不清是哪</label>
-          <label><i></i>不确定</label>
-        </div>
-      </div>
-      <div class="field">
-        <label>从什么时候起</label>
-        <div class="radio">
-          <label class="on"><i></i>从现在起<span class="sub">旧 Key 算到现在，新 Key 从现在起算</span></label>
-          <label><i></i>今天全天<span class="sub">今天一早其实已经换了，选这个</span></label>
-        </div>
-      </div>
-      <div class="box info">
-        <h4>哪几天按什么算</h4>
-        <div class="rows">
-          <span>今天</span><div>14:30 以前按 oai，之后按 oai-2</div>
-          <span>还没固定的</span><div><span class="day">10月22日</span><span class="day">10月23日</span> 保存时先按 oai 固定</div>
-          <span>已固定的</span><div>不变</div>
-        </div>
-      </div>
-    </div>
-    <div class="d-foot"><span class="sub"></span><span class="btn">关闭</span><span class="btn primary">换 Key</span></div>
-  </aside>
-  <div class="ann r" style="right:576px;top:300px">选项照渠道绑定的写法；现在用的、已绑在别处的 Key 灰掉并写原因</div>
-  <div class="ann r" style="right:576px;top:430px">换 Key 一律重新回答：新 Key 别处用不用，和旧 Key 无关</div>
-  <div class="ann r" style="right:576px;top:740px">和改绑定同一块（D-A），只是「今天」这一行跟着上面的选择变</div>
-</section>
-
-<!-- ═══ S-B. 从什么时候起：四种情况 ═══ -->
-<p class="frame-label" style="width:1160px">6b-B · 「从什么时候起」的四种情况：New API 两个选项 / 今天全天不能选 / Sub2API 只能整天 / 新 Key 今天还算在别的绑定里</p>
-<section class="frame" id="swap-when" style="width:1160px">
-  <div class="cols c2">
-    <div class="card">
-      <div class="v-title">1. New API 上游（默认）</div>
-      <div class="radio">
-        <label class="on"><i></i>从现在起<span class="sub">旧 Key 算到现在，新 Key 从现在起算</span></label>
-        <label><i></i>今天全天<span class="sub">今天一早其实已经换了，选这个</span></label>
-      </div>
-    </div>
-    <div class="card">
-      <div class="v-title">2. 新 Key 今天早些时候还算在别的绑定里</div>
-      <div class="radio">
-        <label class="on"><i></i>从现在起<span class="sub">旧 Key 算到现在，新 Key 从现在起算</span></label>
-        <label class="off"><i></i>今天全天<span class="sub">oai-2 今天早些时候还算在「我的站 · 上游乙」那条绑定里，只能从现在起</span></label>
-      </div>
-    </div>
-    <div class="card">
-      <div class="v-title">3. Sub2API 上游（只能按整天读账单）</div>
-      <div class="rows" style="grid-template-columns:104px 1fr"><span>从什么时候起</span><div>今天全天</div></div>
-      <p class="hint" style="margin:8px 0 0">这个上游只能按整天读账单：今天旧 Key 和新 Key 的用量都算进来，明天起只算新 Key。</p>
-    </div>
-    <div class="card">
-      <div class="v-title">4. Sub2API，新 Key 今天还算在别的绑定里</div>
-      <div class="rows" style="grid-template-columns:104px 1fr"><span>从什么时候起</span><div>明天 0:00 起</div></div>
-      <p class="hint" style="margin:8px 0 0">team-2 今天还算在「我的站 · 上游丙」那条绑定里，明天 0:00 起才换；今天照旧按 team-key 算。</p>
-    </div>
-  </div>
-</section>
-
-<!-- ═══ S-C. 换完以后：上游账单 ═══ -->
-<p class="frame-label" style="width:1160px">6b-C · 换完以后：绑定挪到新 Key 下面并高亮 2 秒；旧 Key 没有绑定了；改动记录多一行</p>
-<section class="frame" id="swap-after" style="width:1160px;height:640px">
-  <div class="toast"><svg class="sym"><use href="#good"/></svg>已换成新 Key，旧 Key 以前的每日记录还在</div>
-  <div style="padding:64px 24px 24px">
+<!-- ═══ K-A. 上游账单 ═══ -->
+<p class="frame-label" style="width:1160px">K-A · 上游账单：账号 → 绑定（一个渠道一张卡）→ 用过的 Key；系统换了 Key 只在这里多一行</p>
+<section class="frame" id="k-bills" style="width:1160px;height:1000px">
+  <div style="padding:24px">
     <div class="panel">
-      <div class="acct-head"><svg class="icon"><use href="#i-chev-d"/></svg><strong>上游账号 1</strong><span class="caption">1 个上游 · 2 把 Key</span></div>
+      <div class="acct-head"><svg class="icon"><use href="#i-chev-d"/></svg><strong>演示·主力账号</strong><span class="caption">主力上游（演示）</span><span class="tag info">只给我的渠道用</span><a class="caption" style="color:var(--cobalt)">改</a><span class="spacer"></span><span class="btn sm">测试读取</span><span class="btn sm">更新登录信息</span></div>
       <div class="acct-body">
-        <div class="key-head"><svg class="icon"><use href="#i-chev-d"/></svg><strong>oai-2</strong><span class="tag info">1 条在用</span></div>
-        <div class="bind hl">
-          <strong>自营站点 我的站（演示）</strong>
-          <div class="facts"><span>渠道</span><div>上游甲·高速</div><span>开始统计</span><div>10月20日 12:44</div><span>这把 Key 还给别处用吗？</span><div>只给这些渠道用</div></div>
-          <div class="bind-actions"><span class="btn sm">改绑定</span><span class="btn sm">换 Key</span><span class="btn sm danger">解除绑定</span></div>
-          <div class="history">
-            <span class="linkbtn"><svg class="icon"><use href="#i-chev-d"/></svg>改动记录</span>
+        <div class="bind">
+          <div><strong>渠道 上游甲·高速</strong><div class="caption">自营站点 我的站（演示）</div></div>
+          <div class="facts"><span>开始统计</span><div>10月20日 12:44</div><span>现在用的 Key</span><div>oai-2 · 分组 a · 倍率 1.2<span class="caption">（10月24日 14:30 起）</span></div></div>
+          <div class="tl">
+            <div class="tl-title">用过的 Key</div>
             <ol>
-              <li><span>10月24日 14:30</span><div>换成 Key oai-2（从现在起）</div></li>
-              <li><span>10月20日 12:44</span><div>开始统计：渠道 上游甲·高速；Key oai</div></li>
+              <li><i></i><span class="when">10月24日 14:30 起</span><span>oai-2 · 分组 a · 倍率 1.2　<span class="caption">系统发现</span></span><a>改时间</a></li>
+              <li><i></i><span class="when">10月22日 09:00 起<br><span class="caption">到 10月24日 14:30</span></span><span>oai · 分组 b · 倍率 1.5　<span class="caption">系统发现</span></span><a>改时间</a></li>
+              <li><i></i><span class="when">10月20日 12:44 起<br><span class="caption">到 10月22日 09:00</span></span><span>oai · 分组 a · 倍率 1.2</span><span></span></li>
             </ol>
           </div>
+          <div class="bind-actions"><span class="btn sm">指定 Key</span><span class="btn sm danger">解除绑定</span><span class="spacer"></span><span class="linkbtn"><svg class="icon"><use href="#i-chev"/></svg>改动记录</span></div>
         </div>
-        <div class="key-head" style="border-top:1px dashed var(--rule);padding-top:12px"><svg class="icon"><use href="#i-chev"/></svg><strong>oai</strong><span class="caption">没有绑定</span></div>
+        <div class="bind">
+          <div><strong>渠道 上游乙·标准</strong><div class="caption">自营站点 我的站（演示）</div></div>
+          <div class="facts"><span>开始统计</span><div>10月21日 10:02</div><span>现在用的 Key</span><div style="color:var(--warn-ink)">还没认出现在用的是哪把 Key　<a>指定 Key</a></div></div>
+          <div class="tl">
+            <div class="tl-title">用过的 Key</div>
+            <ol>
+              <li class="unk"><i></i><span class="when">10月25日 09:10 起</span><span style="color:var(--warn-ink)">还没认出是哪把 Key</span><a>指定 Key</a></li>
+              <li><i></i><span class="when">10月21日 10:02 起<br><span class="caption">到 10月25日 09:10</span></span><span>team-b · 分组 b · 倍率 1.0</span><span></span></li>
+            </ol>
+          </div>
+          <div class="bind-actions"><span class="btn sm">指定 Key</span><span class="btn sm danger">解除绑定</span><span class="spacer"></span><span class="linkbtn"><svg class="icon"><use href="#i-chev"/></svg>改动记录</span></div>
+        </div>
       </div>
     </div>
+    <div class="panel" style="margin-top:16px">
+      <div class="acct-head"><svg class="icon"><use href="#i-chev"/></svg><strong>拼车账号</strong><span class="caption">拼车团队（演示）</span><span class="tag muted">别处也在用 · 按 Key 绑</span><a class="caption" style="color:var(--cobalt)">改</a></div>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <div class="acct-head"><svg class="icon"><use href="#i-chev"/></svg><strong>邮箱账号</strong><span class="caption">邮箱密码登录（演示）</span><span class="tag warn">还没回答</span><a class="caption" style="color:var(--cobalt)">去回答</a></div>
+    </div>
   </div>
-  <div class="ann l" style="left:620px;top:200px">「开始统计」不变：还是同一条绑定，不是新建的</div>
+  <div class="ann l" style="left:760px;top:250px">一段一行，新的在前，先露 3 段；同一把 Key 换了分组、倍率也是新的一段</div>
+  <div class="ann l" style="left:760px;top:600px">认不出的那段点是黄的，右边就是「指定 Key」</div>
 </section>
 
-<!-- ═══ S-D. 每日利润那天 ═══ -->
-<p class="frame-label" style="width:1160px">6b-D · 每日利润：换 Key 那天加一句提示（不改状态）；计算明细里上游成本按 Key 分两段</p>
-<section class="frame" id="swap-daily" style="width:1160px;height:470px">
+<!-- ═══ K-B. 渠道绑定 ═══ -->
+<p class="frame-label" style="width:1160px">K-B · 渠道绑定：不再选 Key；账号没回答过就地问；测试读取后每个渠道一行认出结果</p>
+<section class="frame" id="k-onboarding" style="width:1160px;height:900px">
+  <div data-page></div>
+  <aside class="drawer">
+    <div class="d-head"><svg class="icon"><use href="#i-close"/></svg><h3>去绑定</h3></div>
+    <div class="d-body">
+      <div class="facts"><span>已选 3 个渠道</span><div>上游甲·高速、上游乙·标准、上游丙</div></div>
+      <div class="field"><label>上游账号</label><div class="select"><span class="val">主力上游（演示） · 演示·主力账号</span></div></div>
+      <div class="field">
+        <label>这个上游账号只给你自己的渠道用吗？</label>
+        <div class="radio">
+          <label class="on"><i></i>只给我的渠道用</label>
+          <label><i></i>别处也在用</label>
+          <label><i></i>不确定</label>
+        </div>
+        <div class="after">换 Key 时系统会自己跟上，不用手动换</div>
+      </div>
+      <div><span class="btn">测试读取</span></div>
+      <div class="box plain">
+        <h4>认出了什么</h4>
+        <div class="rows" style="grid-template-columns:96px 1fr">
+          <span>上游甲·高速</span><div><span style="color:var(--good)">●</span> 用的是 oai · 分组 a · 倍率 1.2</div>
+          <span>上游乙·标准</span><div><span style="color:var(--warn)">▲</span> 还没认出用的是哪把 Key。先绑上，系统会接着认；也可以现在指定　<a>指定 Key</a></div>
+          <span>上游丙</span><div style="color:var(--ink-3)">用的 oai 已经算在「上游甲·高速」那条绑定里，这个渠道不能绑</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-foot"><span class="sub">绑上 2 个渠道</span><span class="btn">关闭</span><span class="btn primary">确认绑定</span></div>
+  </aside>
+  <div class="ann r" style="right:576px;top:200px">账号回答过的，这一块不出现，只在账号名后面写答案</div>
+  <div class="ann r" style="right:576px;top:540px">没认出的也能绑：今天先「实时 · 还在读取」，系统接着认</div>
+</section>
+
+<!-- ═══ K-C. 认不出：今天、第二天 ═══ -->
+<p class="frame-label" style="width:1160px">K-C · 认不出：今天只是「实时 · 还在读取」；过了这一天还没认出，进需处理，按钮「指定 Key」</p>
+<section class="frame" id="k-unrecognized" style="width:1160px;height:330px">
+  <div class="cols c2">
+    <div>
+      <div class="v-title">今天（每日利润的一行）</div>
+      <div class="panel" style="overflow:hidden"><table class="table"><tbody>
+        <tr><td style="padding-left:16px"><span class="tag info">实时</span><div class="caption">还在读取</div></td><td><strong>上游乙·标准</strong><div class="caption">主力上游</div></td><td class="r">$4.10</td><td class="r">$0.62</td><td class="r"><b>$3.48</b></td></tr>
+      </tbody></table></div>
+      <p class="caption" style="margin-top:8px">今天读到的部分照算；还没认出的那一段先不算，不进需处理。</p>
+    </div>
+    <div>
+      <div class="v-title">第二天还没认出（需处理清单的一条）</div>
+      <ul class="attention">
+        <li><svg class="sym"><use href="#warn"/></svg><div><strong>没认出这个渠道用的是哪把 Key</strong><p>这段时间的上游成本先不算；指定以后就能算</p><div class="note">上游乙·标准 · 主力上游　<span class="day">10月25日</span></div></div><span class="btn sm">指定 Key</span></li>
+      </ul>
+      <p class="caption" style="margin-top:8px">后来系统自己认出了，这条自己消失，不提示。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ K-D. 指定 Key ═══ -->
+<p class="frame-label" style="width:1160px">K-D · 「指定 Key」小窗：选 Key（自动测试读取）、从什么时候起、哪几天按什么算（D 同一块）</p>
+<section class="frame" id="k-assign" style="width:1160px;height:760px">
+  <div data-page></div>
+  <div class="modal" style="width:560px;top:40px">
+    <div class="modal-head"><h3>指定 Key · 上游乙·标准</h3><span class="spacer"></span><svg class="icon" style="color:var(--ink-3)"><use href="#i-close"/></svg></div>
+    <div class="modal-body" style="padding-left:24px;gap:14px">
+      <div class="rows" style="grid-template-columns:84px 1fr;background:var(--sunken);padding:10px 12px;border-radius:var(--r2)"><span>上游账号</span><div>演示·主力账号（主力上游）</div><span>渠道</span><div>上游乙·标准</div><span>没认出</span><div>10月25日 09:10 起</div></div>
+      <div class="field"><label>这个渠道用的是哪把 Key？</label><div class="select"><span class="val">team-c · 分组 b · 倍率 1.0</span></div><div class="read-ok"><svg class="sym"><use href="#good"/></svg>能读到账单</div></div>
+      <div class="field"><label>从什么时候起</label>
+        <div class="radio">
+          <label class="on"><i></i>从没认出的时候起（10月25日 09:10）</label>
+          <label><i></i>从现在起</label>
+          <label><i></i>从别的时间起</label>
+        </div>
+      </div>
+      <div class="box info"><h4>哪几天按什么算</h4><div class="rows"><span>10月25日 09:10 起</span><div>按 team-c 算</div><span>还没固定的</span><div><span class="day">10月25日</span> 原来算不出，保存后按 team-c 算</div><span>已固定的</span><div>不变</div></div></div>
+    </div>
+    <div class="modal-foot"><span class="btn">取消</span><span class="btn primary">指定 Key</span></div>
+  </div>
+  <div class="ann l" style="left:870px;top:260px">下拉里已在别的渠道用着的 Key 灰掉，写「已在「上游甲·高速」用着」</div>
+  <div class="ann l" style="left:870px;top:420px">纠正认错时，默认是「从这一段开始的时候起」；Sub2API 只能整天，不给选</div>
+</section>
+
+<!-- ═══ K-E. 账号的问题 ═══ -->
+<p class="frame-label" style="width:1160px">K-E · 账号的问题：一个账号问一次；改答案时写清下面的绑定会怎么变</p>
+<section class="frame" id="k-account" style="width:1160px;height:600px">
+  <div data-page></div>
+  <div class="modal" style="width:540px;top:50px">
+    <div class="modal-head"><h3>这个上游账号只给你自己的渠道用吗？</h3><span class="spacer"></span><svg class="icon" style="color:var(--ink-3)"><use href="#i-close"/></svg></div>
+    <div class="modal-body" style="padding-left:24px">
+      <div class="rows" style="grid-template-columns:84px 1fr;background:var(--sunken);padding:10px 12px;border-radius:var(--r2)"><span>上游账号</span><div>演示·主力账号（主力上游）</div><span>绑定的渠道</span><div>上游甲·高速、上游乙·标准 等 3 个渠道</div></div>
+      <div class="radio">
+        <label><i></i>只给我的渠道用</label>
+        <label class="on"><i></i>别处也在用</label>
+        <label><i></i>不确定</label>
+      </div>
+      <div class="after">这个账号下照旧按 Key 绑：每把 Key 单独绑、单独回答，换 Key 要手动换</div>
+      <div class="box plain" style="padding:10px 12px"><div style="font-size:13px">原来答的是「只给我的渠道用」。改了以后，这个账号下的 3 条绑定改成按现在用的 Key 绑；以后换 Key 要手动换，每把 Key 还要回答「这把 Key 还给别处用吗？」</div></div>
+      <div class="hint">今天和以前还没固定的日子按新的回答算；已固定的日子不变。</div>
+    </div>
+    <div class="modal-foot"><span class="btn">取消</span><span class="btn primary">保存</span></div>
+  </div>
+</section>
+
+<!-- ═══ K-F. 每日利润那天 ═══ -->
+<p class="frame-label" style="width:1160px">K-F · 每日利润：绑定名是「渠道 · 上游」；换了 Key 那天一句提示，状态不变；明细的上游成本按段写</p>
+<section class="frame" id="k-daily" style="width:1160px;height:460px">
   <div style="padding:24px">
     <div class="panel" style="overflow:hidden">
       <table class="table">
-        <thead><tr><th style="padding-left:24px">状态</th><th>上游 / Key</th><th class="r">收入</th><th class="r">上游成本</th><th class="r">毛利</th><th>操作</th></tr></thead>
+        <thead><tr><th style="padding-left:24px">状态</th><th>渠道 / 上游</th><th class="r">收入</th><th class="r">上游成本</th><th class="r">毛利</th><th>操作</th></tr></thead>
         <tbody>
-          <tr><td style="padding-left:24px"><span class="tag info">实时</span><div class="caption">今天 14:30 换了 Key</div></td><td><strong>主力上游</strong><div class="caption">oai-2</div></td><td class="r">$9.80</td><td class="r">$4.30</td><td class="r"><b>$5.50</b></td><td><a>计算明细</a></td></tr>
+          <tr><td style="padding-left:24px"><span class="tag info">实时</span><div class="caption">今天 14:30 换了 Key</div></td><td><strong>上游甲·高速</strong><div class="caption">主力上游 · oai-2</div></td><td class="r">$9.80</td><td class="r">$4.30</td><td class="r"><b>$5.50</b></td><td><a>计算明细</a></td></tr>
           <tr class="detail"><td colspan="6" style="padding:12px 24px 16px">
             <div class="rows">
               <span>时间</span><div>10月24日（今天，截至 14:52）</div>
-              <span>收入</span><div>来自自营站点 1 个渠道的收费记录</div>
-              <span>上游成本</span><div>Key oai（到 14:30）$3.20；Key oai-2（14:30 起）$1.10</div>
+              <span>收入</span><div>来自自营站点渠道「上游甲·高速」的收费记录</div>
+              <span>上游成本</span><div>oai（到 14:30）$3.20；oai-2（14:30 起）$1.10</div>
               <span>开始统计</span><div>10月20日 12:44</div>
-              <span>改过</span><div>10月24日 14:30 换成 Key oai-2</div>
             </div>
           </td></tr>
         </tbody>
@@ -521,44 +570,24 @@ a { color: var(--cobalt); text-decoration: none; }
   </div>
 </section>
 
-<!-- ═══ S-E. 只用 Key 的上游 ═══ -->
-<p class="frame-label" style="width:1160px">6b-E · 只用 Key 的上游：新 Key 要粘贴；换了以后上游的余额也按新 Key 读（要用户定）</p>
-<section class="frame" id="swap-keyonly" style="width:1160px;height:420px">
-  <div class="cols c2">
-    <div class="card">
-      <div class="facts"><span>上游</span><div>Key 计费站（演示）<span class="caption">　只用 Key</span></div><span>现在的 Key</span><div>sk-…a1b2</div></div>
-      <div class="field" style="margin-top:16px">
-        <label>新 Key</label>
-        <div class="input">粘贴新 Key</div>
-        <div class="caption" style="margin-top:4px">这个上游只用这一把 Key；换了以后，余额也按新 Key 读。</div>
-        <div class="read-ok"><svg class="sym"><use href="#good"/></svg>能读到余额 $86.20</div>
+<!-- ═══ K-G. 手机 ═══ -->
+<p class="frame-label" style="width:390px">K-G · 手机：用过的 Key 一段两行，时间在上</p>
+<section class="frame m" id="k-mobile" style="width:390px;height:700px">
+  <div style="padding:16px">
+    <div class="bind" style="background:var(--sheet)">
+      <div><strong>渠道 上游甲·高速</strong><div class="caption">自营站点 我的站（演示）</div></div>
+      <div class="facts" style="grid-template-columns:1fr"><span>现在用的 Key</span><div>oai-2 · 分组 a · 倍率 1.2<div class="caption">10月24日 14:30 起</div></div></div>
+      <div class="tl m-tl">
+        <div class="tl-title">用过的 Key</div>
+        <ol>
+          <li><i></i><span class="when">10月24日 14:30 起</span><span>oai-2 · 分组 a · 倍率 1.2　<span class="caption">系统发现</span></span><a>改时间</a></li>
+          <li><i></i><span class="when">10月22日 09:00 起，到 10月24日 14:30</span><span>oai · 分组 b · 倍率 1.5　<span class="caption">系统发现</span></span><a>改时间</a></li>
+          <li><i></i><span class="when">10月20日 12:44 起，到 10月22日 09:00</span><span>oai · 分组 a · 倍率 1.2</span><span></span></li>
+        </ol>
       </div>
-    </div>
-    <div class="card">
-      <div class="v-title">新 Key 读不到时</div>
-      <div class="field">
-        <label>新 Key</label>
-        <div class="input" style="color:var(--ink)">sk-…9f0c</div>
-        <div class="read-ok" style="color:var(--crit-ink)"><svg class="sym" style="color:var(--crit)"><use href="#warn"/></svg>读不到：上游里这把 Key 用不了，可能被关掉、过期或额度用完了</div>
-      </div>
-      <p class="caption" style="margin-top:12px">底部「换 Key」灰着，左边写「先测试读取新 Key」。</p>
+      <div class="bind-actions"><span class="btn" style="height:40px">指定 Key</span><span class="btn danger" style="height:40px">解除绑定</span></div>
     </div>
   </div>
-</section>
-
-<!-- ═══ S-F. 手机 ═══ -->
-<p class="frame-label" style="width:390px">6b-F · 手机：同一个抽屉，从底部升起</p>
-<section class="frame m" id="swap-mobile" style="width:390px;height:844px">
-  <div data-page></div>
-  <aside class="drawer">
-    <div class="d-head"><svg class="icon"><use href="#i-close"/></svg><h3>换 Key · oai</h3></div>
-    <div class="d-body">
-      <div class="field"><label>新 Key</label><div class="select"><span class="val">oai-2 · 分组 oai</span></div><div class="read-ok"><svg class="sym"><use href="#good"/></svg>能读到账单</div></div>
-      <div class="field"><label>这把 Key 还给别处用吗？</label><div class="radio"><label class="on"><i></i>只给这些渠道用</label><label><i></i>自营站点的其他渠道也在用</label><label><i></i>站外也在用</label></div></div>
-      <div class="field"><label>从什么时候起</label><div class="radio"><label class="on"><i></i>从现在起<span class="sub">旧 Key 算到现在，新 Key 从现在起算</span></label><label><i></i>今天全天<span class="sub">今天一早其实已经换了，选这个</span></label></div></div>
-    </div>
-    <div class="d-foot"><span class="btn">关闭</span><span class="btn primary">换 Key</span></div>
-  </aside>
 </section>
 
 <script>
