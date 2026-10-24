@@ -3,10 +3,10 @@
 import { EMPTY, FIXED_COST_TEXT, RATE_UNSET_USD, UPSTREAM_GONE, formatRate, formatZonedDateTime, formatZonedWindow } from "../../../lib/format";
 import {
   formatReconciliationAmount, mergeReconciliationSegments, reconciliationBillingText, reconciliationChannelTag, reconciliationRateFactors,
-  reconciliationRatioChange, sameReconciliationWindow,
+  reconciliationRatioChange,
 } from "../../../lib/reconciliation-view";
 import type { ReconciliationCurrency } from "../../../lib/client";
-import { isLiveReconciliationPreset, reconciliationIssue } from "../../../lib/reconciliation-contract";
+import { isLiveReconciliationPreset, reconciliationIssue, sameReconciliationWindow } from "../../../lib/reconciliation-contract";
 import { ERROR_CATEGORIES } from "../../../lib/error-copy";
 import { workflowAction, workflowActionMeta } from "../../../lib/workflow-actions";
 
@@ -89,13 +89,9 @@ export function rateLine(income: any, cost: any, fixedCost = false) {
   return fixedCost || a === b ? a || EMPTY : `收入按 ${a || EMPTY}，上游成本按 ${b || EMPTY}`;
 }
 
-export function sameWindow(a: any, b: any) {
-  return a?.startMs === b?.startMs && a?.endMs === b?.endMs && a?.timezone === b?.timezone;
-}
-
-// 今天、近 7 天、本月截至取数时刻，各绑定截止点不同：同一预设、同一起点和时区就算同一段时间
+// 今天、近 7 天、本月截至取数时刻，各绑定截止点不同：同一预设、同一起点和时区就算同一段时间；起止和时区都相同的当然也算
 export function sameRequestedWindow(a: any, b: any) {
-  return sameWindow(a, b) || a?.timezone === b?.timezone && sameReconciliationWindow(a, b);
+  return sameReconciliationWindow(a, b) || sameReconciliationWindow(a, b, { asRequested: true });
 }
 
 // 一整天「10月9日」，几天「10月1日–10月7日」，今天「10月16日 0:00–14:30」（§6）

@@ -10,6 +10,7 @@ import { BINDING_COPY } from "../../../lib/channel-onboarding.js";
 import { DESTINATION_CHANGED } from "../../../lib/workflow-actions";
 import type { KnownChannelCoverage, ReconciliationCurrency, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream, WorkflowDestination } from "../../../lib/client";
 import { reconciliationKeyNamer, reconciliationRowFlags } from "../../../lib/reconciliation-view";
+import { sameReconciliationWindow } from "../../../lib/reconciliation-contract";
 import { NAV_LABELS, STATION_TABS } from "../../../lib/brand";
 import { OWN_STATION_UNSET, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, RATE_UNSET_USD, formatAsOf, formatDayZone, refreshFailedText } from "../../../lib/format";
 import AppState from "../../components/app-state";
@@ -19,7 +20,7 @@ import { ErrorDetail } from "../../components/error-detail";
 import { Seg } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
 import { useDrawerEscape } from "../../components/drawer-escape";
-import { PRESETS, RECON_BUTTONS, SETUP_HREF, formatWindow, isFixedCost, sameRequestedWindow, sameWindow } from "./recon-format";
+import { PRESETS, RECON_BUTTONS, SETUP_HREF, formatWindow, isFixedCost, sameRequestedWindow } from "./recon-format";
 import type { ReconWindow } from "./recon-format";
 import { useReconWindow } from "./use-recon-window";
 import { useReconDetail } from "./use-recon-detail";
@@ -116,7 +117,7 @@ export default function ReconciliationPage() {
   useEffect(() => {
     if (!destination || destinationResolved.current || !data || !config || workflowError) return;
     destinationResolved.current = true;
-    if (destination.action === "retry" && !sameWindow(destination.window, workflowRow?.requestedWindow || workflowRow?.window)) {
+    if (destination.action === "retry" && !sameReconciliationWindow(destination.window, workflowRow?.requestedWindow || workflowRow?.window)) {
       setWorkflowError(DESTINATION_CHANGED);
       return;
     }
@@ -200,7 +201,7 @@ export default function ReconciliationPage() {
   // 链接指的那条：要重新读取的写这天和它的问题；对不上的写一句话（§8.1）；处理重复、开始统计的旧链接只打开计算明细
   const retryStatus = workflowRow ? reconciliationRowFlags(workflowRow, currency).displayStatus : null;
   // 换了日期范围以后列表里这条已经不是链接那天，不再放「重新读取」
-  const retryHere = Boolean(workflowRow && destination?.action === "retry" && sameWindow(destination.window, workflowRow.requestedWindow || workflowRow.window));
+  const retryHere = Boolean(workflowRow && destination?.action === "retry" && sameReconciliationWindow(destination.window, workflowRow.requestedWindow || workflowRow.window));
   const destinationAlert = destination && !destinationClosed && (workflowError || (destination.action === "retry" && workflowRow)) ? <Alert
     type={workflowError ? "warning" : "info"} showIcon closable={{ "aria-label": "关闭" }} onClose={() => setDestinationClosed(true)}
     title={workflowError || `${keyName(workflowRow.rule)} · ${formatWindow(destination.window)}`}

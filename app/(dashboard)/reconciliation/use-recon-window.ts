@@ -7,7 +7,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../../lib/client";
 import { ERROR_CATEGORIES } from "../../../lib/error-copy";
-import { caughtError, isLivePreset, sameWindow } from "./recon-format";
+import { sameReconciliationWindow } from "../../../lib/reconciliation-contract";
+import { caughtError, isLivePreset } from "./recon-format";
 import type { ReconPreset, ReconWindow } from "./recon-format";
 
 // 今天每 30 秒重读；近 7 天、本月跨度大、上游取数重，总额分钟级变化不大，5 分钟一次
@@ -66,11 +67,11 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
       if (requestId !== summaryRequestId.current || windowEpoch !== windowRequestId.current) return;
       const newerRows = new Set((next.results || []).filter((row: any) => {
         const current = rowResultEpoch.current.get(String(row.rule?.id));
-        return current?.epoch! > responseEpoch && sameWindow(current?.window, row.window);
+        return current?.epoch! > responseEpoch && sameReconciliationWindow(current?.window, row.window);
       }).map((row: any) => String(row.rule?.id)));
       setData((previous: any) => ({ ...next, results: (next.results || []).map((row: any) => {
         const id = String(row.rule?.id), current = previous?.results?.find((item: any) => String(item.rule?.id) === id);
-        if (newerRows.has(id) && sameWindow(current?.window, row.window)) return current;
+        if (newerRows.has(id) && sameReconciliationWindow(current?.window, row.window)) return current;
         rowResultEpoch.current.set(id, { epoch: responseEpoch, window: row.window }); return row;
       }) }));
       if (newerRows.size) void refreshSummary(window, windowEpoch);
@@ -98,7 +99,7 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
             const previousRow: any = previousRows.get(id);
             const previousWindow = previousRow?.window;
             const nextWindow = item?.window;
-            if (id && rowResultEpoch.current.get(id)?.epoch! > responseEpoch && sameWindow(previousWindow, nextWindow)) return previousRow || item;
+            if (id && rowResultEpoch.current.get(id)?.epoch! > responseEpoch && sameReconciliationWindow(previousWindow, nextWindow)) return previousRow || item;
             if (id) rowResultEpoch.current.set(id, { epoch: responseEpoch, window: item.window });
             return item;
           });
@@ -108,7 +109,7 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
         setSummaryError("");
         const hasNewerRows = (next.results || []).some((item: any) => {
           const current = rowResultEpoch.current.get(String(item.rule?.id));
-          return current?.epoch! > responseEpoch && sameWindow(current?.window, item.window);
+          return current?.epoch! > responseEpoch && sameReconciliationWindow(current?.window, item.window);
         });
         setSummaryStale(hasNewerRows);
         if (hasNewerRows) void refreshSummary(window, requestId);
@@ -142,11 +143,11 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
       const next = await api("/api/reconciliation/query", { method: "POST", body: { preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: [id], observe: true } });
       const replacement = (next?.results || []).find((candidate: any) => String(candidate?.rule?.id) === id);
       const replacementWindow = replacement?.requestedWindow || replacement?.window;
-      if (requestId !== ruleRetryRequestId.current.get(id) || requestWindowEpoch !== windowRequestId.current || !replacement || !sameWindow(window, replacementWindow)) return;
+      if (requestId !== ruleRetryRequestId.current.get(id) || requestWindowEpoch !== windowRequestId.current || !replacement || !sameReconciliationWindow(window, replacementWindow)) return;
       setData((previous: any) => {
         const current = (previous?.results || []).find((candidate: any) => String(candidate?.rule?.id) === id);
         const currentWindow = current?.requestedWindow || current?.window;
-        if (!current || !sameWindow(window, currentWindow)) return previous;
+        if (!current || !sameReconciliationWindow(window, currentWindow)) return previous;
         rowResultEpoch.current.set(id, { epoch: responseEpoch, window: replacement.window });
         return { ...previous, results: previous.results.map((candidate: any) => String(candidate?.rule?.id) === id ? replacement : candidate) };
       });

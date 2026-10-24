@@ -20,6 +20,7 @@ import {
   INCOMPLETE_DAY_TEXT,
   RECONCILIATION_ISSUE_PRIORITY,
   isLiveReconciliationPreset,
+  sameReconciliationWindow,
 } from "../lib/reconciliation-contract.js";
 import { OWN_STATION_UNSET, UPSTREAM_GONE } from "../lib/format.js";
 import { errorText, ownStationErrorCode } from "../lib/error-copy.js";
@@ -28,14 +29,14 @@ import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
-  isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow, billingDayOf } from "../lib/reconciliation-scope-policy.js";
+  isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { RECONCILIATION_SETTLE_DELAY_MS as SETTLE_DELAY_MS, ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationSettlement, reconciliationDisplayStatus,
-  sameReconciliationWindow, summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
-import { costBasisOf, rateSnapshotOf } from "../lib/profit.js";
-import { businessTimeZone } from "../lib/business-time.js";
+  summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
+import { costBasisOf, isConfiguredRate, rateSnapshotOf, ratesFor } from "../lib/profit.js";
+import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyInTz, dayStartInTz, isDayStartInTz, shiftedDayStartInTz } from "../lib/business-time.js";
 import { selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 
@@ -50,7 +51,7 @@ export function normalizeReconciliationScopeIntent(kind, targetRuleId, input, { 
   try { coverageDeclaration = normalizeCoverageDeclaration(input.coverageDeclaration); }
   catch { throw codedError("INVALID_REQUEST", COVERAGE_REQUIRED); }
   let zone;
-  try { zone = validateTimezone(input?.timezone || timezone); }
+  try { zone = checkTimeZone(input?.timezone || timezone); }
   catch { throw codedError("INVALID_REQUEST", "时区不对"); }
   const semantic = { tokenId: finite(input?.tokenId),
     salesChannelIds: [...new Set((Array.isArray(input?.salesChannelIds) ? input.salesChannelIds : []).map(Number)
@@ -96,66 +97,19 @@ function finite(value, fallback = null) {
   return Number.isFinite(number) ? number : fallback;
 }
 
-function validateTimezone(input) {
-  const timezone = String(input || "Asia/Shanghai");
-  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); } catch {
-    throw codedError("TIMEZONE_INVALID", "时区不对");
-  }
-  return timezone;
-}
-
-const canonicalTimezone = (input) => new Intl.DateTimeFormat("en-US", { timeZone: validateTimezone(input) }).resolvedOptions().timeZone;
-const sameAbsoluteWindow = (a, b) => !!a && !!b && a.startMs === b.startMs && a.endMs === b.endMs;
 function commonBillingTimezone(window, sides) {
-  const timezone = canonicalTimezone(window.timezone);
+  const timezone = canonicalTimeZone(window.timezone);
   // 没有任何账单需要取（窗口整段在核算起点之前），也就没有待证明的日界线。
   const verified = sides.every((side) => side?.billingTimezone?.state === "verified"
-    && side.billingTimezone.timezone === timezone && sameAbsoluteWindow(side.window, side.requestedWindow || window));
+    && side.billingTimezone.timezone === timezone && sameReconciliationWindow(side.window, side.requestedWindow || window, { timezone: false }));
   return { state: verified ? "verified" : "unverified", timezone,
     ...(verified ? {} : { reason: "BILLING_TIMEZONE_UNVERIFIED" }) };
-}
-
-function zonedParts(ms, timezone) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone, hour12: false,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-  }).formatToParts(new Date(ms));
-  const get = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
-  return { year: get("year"), month: get("month"), day: get("day"), hour: get("hour") % 24, minute: get("minute"), second: get("second") };
-}
-
-function shiftedCalendarDate(part, days) {
-  const date = new Date(Date.UTC(part.year, part.month - 1, part.day + days));
-  return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
-}
-
-function calendarMidnight(part, timezone) {
-  const wallTime = Date.UTC(part.year, part.month - 1, part.day);
-  let candidate = wallTime;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const observed = zonedParts(candidate, timezone);
-    const observedWallTime = Date.UTC(observed.year, observed.month - 1, observed.day, observed.hour, observed.minute, observed.second);
-    const next = wallTime - (observedWallTime - candidate);
-    if (next === candidate) return candidate;
-    candidate = next;
-  }
-  return candidate;
-}
-
-function midnight(ms, timezone, days = 0) {
-  return calendarMidnight(shiftedCalendarDate(zonedParts(ms, timezone), days), timezone);
-}
-
-function localDate(ms, timezone) {
-  const part = zonedParts(ms, timezone);
-  return `${part.year}-${String(part.month).padStart(2, "0")}-${String(part.day).padStart(2, "0")}`;
 }
 
 export const RECONCILIATION_PRESETS = Object.freeze(["today", "yesterday", "7d", "month", "custom"]);
 
 export function resolveReconciliationWindow(input = {}, now = Date.now()) {
-  const timezone = validateTimezone(input.timezone);
+  const timezone = checkTimeZone(input.timezone);
   const preset = RECONCILIATION_PRESETS.includes(input.preset) ? input.preset : "yesterday";
   let startMs;
   let endMs;
@@ -168,17 +122,16 @@ export function resolveReconciliationWindow(input = {}, now = Date.now()) {
     if (endMs > now) throw codedError("TIME_RANGE_FUTURE", "不能选以后的时间");
     if (endMs - startMs > 31 * DAY_MS) throw codedError("TIME_RANGE_TOO_LONG", "一次最多查 31 天");
   } else {
-    const dayStart = midnight(now, timezone);
+    const dayStart = shiftedDayStartInTz(now, 0, timezone);
     if (preset === "yesterday") {
-      startMs = midnight(now, timezone, -1);
+      startMs = shiftedDayStartInTz(now, -1, timezone);
       endMs = dayStart;
     } else if (preset === "7d") {
-      startMs = midnight(now, timezone, -6);
+      startMs = shiftedDayStartInTz(now, -6, timezone);
       endMs = now;
     } else if (preset === "month") {
       // 本月从当地 1 日零点起；夏令时切换的月份可能比 31 天多一小时，所以 31 天上限只管自定义。
-      const today = zonedParts(now, timezone);
-      startMs = calendarMidnight({ year: today.year, month: today.month, day: 1 }, timezone);
+      startMs = dayStartInTz(`${dayKeyInTz(now, timezone).slice(0, 8)}01`, timezone);
       endMs = now;
     } else {
       startMs = dayStart;
@@ -575,7 +528,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 凭据指纹必须在发请求前取：请求读的是发起时的凭据，等待期间站点可能已被原地改写。
   async function metadataFor(station, { force = false, timezone = "Asia/Shanghai" } = {}) {
     const credential = credentialFingerprint(station);
-    const zone = canonicalTimezone(timezone), cacheKey = `${station.id}:${zone}`;
+    const zone = canonicalTimeZone(timezone), cacheKey = `${station.id}:${zone}`;
     const cached = metadataCache.get(cacheKey);
     if (!force && cached?.credential === credential && Date.now() - cached.at < 5 * 60000) return cached.value;
     const value = await queryReconciliationMetadata({ ...station }, { timezone: zone, capabilityStore: billingCapabilityStore });
@@ -770,7 +723,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       own,
       token,
       metadata,
-      timezone: validateTimezone(input?.timezone || matches[0]?.timezone),
+      timezone: checkTimeZone(input?.timezone || matches[0]?.timezone),
       canonicalKey,
       ownSource: actualOwnSource,
       existingRule: existingRule || matches[0] || null,
@@ -785,7 +738,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const channelIds = [...new Set((Array.isArray(input?.salesChannelIds) ? input.salesChannelIds : [])
       .map(Number).filter((channelId) => Number.isFinite(channelId) && channelId > 0))];
     if (!channelIds.length) throw codedError("CHANNEL_REQUIRED", "请至少选一个渠道");
-    const timezone = validateTimezone(input?.timezone);
+    const timezone = checkTimeZone(input?.timezone);
     const [channels, conflicts] = await Promise.all([
       ownChannelsFor(own, { force: true }),
       repository.findChannelConflicts(channelIds, { excludeRuleId: existing.id }),
@@ -1030,7 +983,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 单个自然日读账本；多日窗口仍读旧版结账记录。
   async function settledResult(rule, window) {
     try {
-      if (billingDayOf(window)) {
+      if (billDayOf(window)) {
         const entry = await repository.latestLedgerEntry(rule.id, window);
         if (!entry) return null;
         const settlement = ledgerSettlement(entry);
@@ -1052,7 +1005,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 上一次成功的结果：单个自然日读账本最新一版，其余窗口读同一口径的确认记录。
   async function previousSuccess(rule, window, billingFingerprint) {
-    if (!billingDayOf(window)) return repository.latestSuccessfulResult(rule.id, window, billingFingerprint);
+    if (!billDayOf(window)) return repository.latestSuccessfulResult(rule.id, window, billingFingerprint);
     const entry = await repository.latestLedgerEntry(rule.id, window);
     return entry ? ledgerSettlement(entry) : null;
   }
@@ -1095,7 +1048,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const upstream = currentUpstream && { ...currentUpstream };
       const own = currentOwn && { ...currentOwn };
       // 成本计法和两侧汇率来自同一份配置；保存前由 billingSource 的财务版本再次核对。
-      const financialSnapshot = { costBasis: costBasisOf(upstream), income: rateSnapshotOf(own), cost: rateSnapshotOf(upstream) };
+      const financialSnapshot = ratesFor({ own, upstream });
       let sourceCredential = observationCredential(rule, upstream, own);
       request.sourceCredential = sourceCredential;
       if (!resettle && isSettleableWindow(window, Date.now())) {
@@ -1337,9 +1290,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const sides = [upstreamResult, downstreamResult].filter((side) => !side.error);
         // 只有上游一侧的窗口或时区对不上时算上游侧问题；本站一侧对不上始终阻断。
         const downstreamSide = downstreamResult.error ? [] : [downstreamResult];
-        if (sides.some((side) => !sameAbsoluteWindow(side.window, segmentWindow))) {
+        const windowMismatch = (side) => !sameReconciliationWindow(side.window, segmentWindow, { timezone: false });
+        if (sides.some(windowMismatch)) {
           const issue = { code: "BILLING_WINDOW_MISMATCH", scope: "segment", detail: issueText("BILLING_WINDOW_MISMATCH"), observedAt: Date.now() };
-          segmentIssues.push(downstreamSide.some((side) => !sameAbsoluteWindow(side.window, segmentWindow)) ? issue : upstreamSide(issue));
+          segmentIssues.push(downstreamSide.some(windowMismatch) ? issue : upstreamSide(issue));
         }
         // 某一侧取数失败时由它自己的错误说明原因，不能再提示去核验时区或能力。
         if (sides.length === 2 && commonBillingTimezone(segmentWindow, sides).state !== "verified") {
@@ -1439,7 +1393,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const sideWindow = (side) => {
         if (segmentResults.length !== 1) return window;
         const [segment] = segmentResults;
-        return isScopedBillingPolicy(rule.billingPolicy) && sameAbsoluteWindow(segment[side].window, segment.window) ? window : segment[side].window;
+        return isScopedBillingPolicy(rule.billingPolicy) && sameReconciliationWindow(segment[side].window, segment.window, { timezone: false }) ? window : segment[side].window;
       };
       const result = {
         rule: { ...rule, tokenName: token.name, fixedGroup: currentSegment.group }, window,
@@ -1616,7 +1570,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 只有结束满 15 分钟的自然日窗口才结账：今天、近 7 天和刚结束的昨天还在变化，只记观测。
     // 关联生效前的日子没有账可结，不结账。单个自然日记进账本，多日窗口仍写确认快照。
     const settled = result.calculation?.profitUsd != null && !result.scope?.notEffective && isSettleableWindow(result.window, Date.now());
-    const ledgerDay = settled && !!billingDayOf(result.window);
+    const ledgerDay = settled && !!billDayOf(result.window);
     const snapshots = ["observation", ...(settled && !ledgerDay ? ["confirmed"] : [])]
       .flatMap((recordType) => segmentSnapshots.map((segment) => ({ ...segment, recordType })));
     // 数据库事务核验规则/分段口径；快照键和失败兜底另用包含两侧站点来源的口径。
@@ -1680,7 +1634,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       };
     };
     // 账本记下结账时的成本计法和汇率：汇率只在当时配置过时才记，没记的读取时按当前配置。
-    const configuredRate = (rate) => rate.source === "configured" ? rate.cnyPerUsd : null;
+    const configuredRate = (rate) => isConfiguredRate(rate) ? rate.cnyPerUsd : null;
     const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, sourceFor({ ...wholeWindow, recordType: "confirmed" }), {
       revenueRate: configuredRate(financialSnapshot.income), costRate: configuredRate(financialSnapshot.cost),
       costBasis: financialSnapshot.costBasis }) : null;
@@ -1691,7 +1645,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         windowKind: result.window.preset,
         startMs: segment.window.startMs,
         endMs: segment.window.endMs,
-        localDate: result.window.preset === "today" ? localDate(result.window.startMs, result.window.timezone) : null,
+        localDate: result.window.preset === "today" ? dayKeyInTz(result.window.startMs, result.window.timezone) : null,
         upstreamQuota: segment.upstream?.quotaUnits ?? null,
         upstreamQuotaPerUnit: segment.upstream?.quotaPerUnit ?? null,
         upstreamUsd: segment.upstream?.amountUsd ?? null,
@@ -1741,9 +1695,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 汇率按当前配置（没设置的 source 为 default，页面按 USD 原值显示）；固定采购的上游成本记为 0。
       // 已结账的日子用账本记下的汇率和成本计法，账本没记的（当时没配置、迁移的旧账）按当前配置。
       const upstream = upstreamStation(result.rule.upstreamStationId), ledger = result.ledger;
-      const rateOf = (stationId, saved) => ({ stationId, ...(saved != null ? { cnyPerUsd: saved, source: "configured" } : rateSnapshotOf(upstreamStation(stationId))) });
-      const rates = { income: rateOf(result.rule.ownStationId, ledger?.rates?.income), cost: rateOf(result.rule.upstreamStationId, ledger?.rates?.cost),
-        costBasis: ledger?.costBasis || result.costBasis || (upstream ? costBasisOf(upstream) : "usage") };
+      const { income, cost, costBasis } = ratesFor({ own: upstreamStation(result.rule.ownStationId), upstream, saved: ledger, costBasis: result.costBasis });
+      const rates = { income: { stationId: result.rule.ownStationId, ...income }, cost: { stationId: result.rule.upstreamStationId, ...cost }, costBasis };
       const enriched = Object.assign(result, { rates, ownSource: source, scope: result.scope || reconciliationBillingSchedule(result.rule),
         billingTimezone: result.billingTimezone || commonBillingTimezone(result.window, [result.upstream, result.downstream]),
         amountBasis: result.amountBasis || { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,
@@ -1760,7 +1713,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now), cached = resultCache.get(resultKey(rule, window));
       const resource = registry.resources.get(rule.upstreamStationId), key = resource?.metadata?.tokens.find((token) => token.id === rule.tokenId);
       if (!cached || cached.sourceCredential !== currentSourceCredential(rule) || cached.billingCredential !== registry.billingSource.ownerVersion
-        || now - cached.at >= resultTtl(window) || !sameReconciliationWindow(cached.value.window, window)
+        || now - cached.at >= resultTtl(window) || !sameReconciliationWindow(cached.value.window, window, { asRequested: true, timezone: false })
         || !key || key.status !== 1 || key.name !== cached.value.rule.tokenName || key.group !== cached.value.rule.fixedGroup
         || reconciliationScopeFingerprint(rule, cached.value.transitionSegments || []) !== reconciliationScopeFingerprint(cached.value.rule, cached.value.transitionSegments || [])) continue;
       coverageFacts.push(factsFor(cached.value));
@@ -1771,8 +1724,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const upstreams = usageUpstreams();
     const rateStations = new Map([
       ...selected.flatMap((row) => [row.rates.income, row.rates.costBasis === "fixed" ? null : row.rates.cost]).filter(Boolean)
-        .map((rate) => [rate.stationId, rate.source === "configured"]),
-      ...[upstreams?.own, ...(upstreams?.usage || [])].filter(Boolean).map((station) => [station.id, rateSnapshotOf(station).source === "configured"]),
+        .map((rate) => [rate.stationId, isConfiguredRate(rate)]),
+      ...[upstreams?.own, ...(upstreams?.usage || [])].filter(Boolean).map((station) => [station.id, isConfiguredRate(rateSnapshotOf(station))]),
     ]);
     const displayCurrency = [...rateStations.values()].every(Boolean) ? reconciliationDisplayCurrency(selected) : "USD";
     // 已经设置了部分汇率时才提示还缺哪些；一个都没设置就是按 USD 看，不打扰。
@@ -1795,7 +1748,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 失败的结果只缓存一分钟；force（页面「刷新」）只复用正在进行的取数，上游慢时进行中的取数最多复用两分钟。
   function accountUsageFor(station, window, { force = false } = {}) {
     const live = isLiveReconciliationPreset(window.preset), now = Date.now();
-    const key = JSON.stringify([station.id, window.startMs, live ? window.preset : window.endMs, canonicalTimezone(window.timezone), credentialFingerprint(station)]);
+    const key = JSON.stringify([station.id, window.startMs, live ? window.preset : window.endMs, canonicalTimeZone(window.timezone), credentialFingerprint(station)]);
     const cached = accountUsageCache.get(key);
     if (cached && (cached.pending ? now - cached.at < ACCOUNT_USAGE_PENDING_MAX_MS : !force && now - cached.at < cached.ttl)) return cached;
     for (const [cachedKey, entry] of accountUsageCache) if (!entry.pending && now - entry.at >= entry.ttl) accountUsageCache.delete(cachedKey);
@@ -1855,7 +1808,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     await Promise.race([Promise.all(entries.map((entry) => entry.promise)),
       new Promise((resolve) => { timer = setTimeout(resolve, ACCOUNT_USAGE_WAIT_MS); timer.unref?.(); })]);
     clearTimeout(timer);
-    const dayAligned = midnight(window.startMs, window.timezone) === window.startMs && midnight(window.endMs, window.timezone) === window.endMs;
+    const dayAligned = isDayStartInTz(window.startMs, window.timezone) && isDayStartInTz(window.endMs, window.timezone);
     const attributed = attributeAuthorizationRules({ usageStations: upstreams.usage, rows: response.results, stationOf: (id) => rt.store.get(id),
       monitorLinks: rt.onboardingSource?.getMonitorLinks?.() || [] });
     const summarized = summarizeUnaccountedUpstream(upstreams.usage.map((station, index) => ({
@@ -1895,7 +1848,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       let zone;
       try {
         if (timezone != null && (typeof timezone !== "string" || !timezone.trim())) throw new Error();
-        zone = canonicalTimezone(timezone);
+        zone = canonicalTimeZone(timezone);
       } catch { throw codedError("INVALID_REQUEST", "时区不对"); }
       const selectedId = tokenId == null ? null : Number(tokenId);
       if (tokenId != null && (typeof tokenId !== "number" && (typeof tokenId !== "string" || !/^\d+$/.test(tokenId))

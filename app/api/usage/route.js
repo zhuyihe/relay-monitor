@@ -2,7 +2,7 @@
 import { withAuth, json } from "../../../lib/api.js";
 import { queryStationUsage } from "../../../lib/providers.js";
 import { errorCodeOf } from "../../../lib/error-copy.js";
-import { dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../../lib/business-time.js";
+import { dayKeyInTz, dayStartInTz, isValidTimeZone, shiftDayLabel } from "../../../lib/business-time.js";
 
 // 各站点用量接口逐个查开销不小，按范围缓存 60 秒（缓存挂 rt 上，不用模块级变量）
 export const GET = withAuth(async (request, rt) => {
@@ -13,8 +13,7 @@ export const GET = withAuth(async (request, rt) => {
   // 用浏览器时区分桶：sub2api 站点面板也是按浏览器时区统计的，
   // 这样「今天」的口径和用户在站点上看到的完全一致
   let tz = String(sp.get("tz") || "");
-  try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); } catch { tz = ""; }
-  if (!tz) tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (!isValidTimeZone(tz)) tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
   const cacheKey = `${range}|${tz}`;
   const hit = usageCache.get(cacheKey);

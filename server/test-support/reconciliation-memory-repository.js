@@ -9,7 +9,9 @@
 // - 单表 UPDATE 的 SET 从左到右求值，后面的表达式读到的是前面刚赋的新值。
 // - 读取结果是新对象，JSON 列像 mysql2 一样解析成新对象，调用方改了也不影响存储。
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../../lib/reconciliation-snapshot.js";
-import { applyScopePolicy, billingDayOf, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
+import { applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
+import { billDayOf } from "../../lib/business-time.js";
+import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues } from "../../lib/reconciliation-ledger.js";
 import {
   uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, segmentFromRow,
@@ -435,8 +437,7 @@ export class MemoryReconciliationRepository {
       }
       if (ledger?.entry) {
         const top = this.#ledgerOf(tx, ruleId, ledger.entry.billDate)[0];
-        const sameWindow = top && top.timezone === ledger.entry.timezone
-          && Number(top.window_start_ms) === ledger.entry.startMs && Number(top.window_end_ms) === ledger.entry.endMs;
+        const sameWindow = !!top && sameReconciliationWindow({ timezone: top.timezone, startMs: Number(top.window_start_ms), endMs: Number(top.window_end_ms) }, ledger.entry);
         if (ledger.resettle || !sameWindow) {
           const values = ledgerInsertValues({ ...ledger.entry, ruleId, revision: top ? Number(top.revision) + 1 : 1, source: top ? "resettle" : "settle" });
           const row = Object.fromEntries(RECONCILIATION_LEDGER_COLUMNS.map((column, index) => [column, values[index]]));
@@ -526,12 +527,12 @@ export class MemoryReconciliationRepository {
   }
 
   async latestLedgerEntry(ruleId, window) {
-    const billDate = billingDayOf(window);
+    const billDate = billDayOf(window);
     if (!billDate) return null;
     await this.#read("latestLedgerEntry", [ruleId, window]);
     const top = this.#ledgerOf(null, ruleId, billDate)[0];
     const entry = top ? ledgerEntryFromRow(ledgerRead(top)) : null;
-    return entry && entry.timezone === window.timezone && entry.startMs === window.startMs && entry.endMs === window.endMs ? entry : null;
+    return entry && sameReconciliationWindow(entry, window) ? entry : null;
   }
 
   async listLedgerHistory(ruleId, input = {}) {

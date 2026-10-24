@@ -11,7 +11,7 @@ import { workflowAction } from "../lib/workflow-actions.js";
 import { reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { OWN_STATION_UNSET } from "../lib/format.js";
 import { reconciliationKeyName } from "../lib/reconciliation-view.js";
-import { businessTimeZone } from "../lib/business-time.js";
+import { businessTimeZone, canonicalTimeZone } from "../lib/business-time.js";
 import { refreshStation } from "./refresh.js";
 import { normalizeReconciliationScopeIntent } from "./reconciliation.js";
 
@@ -1014,8 +1014,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           if (value.billing?.metadata) {
             const canonicalKey = canonicalBillingKey(billing.connection, value.billing.metadata, requested.reconciliation.tokenId);
             const existing = allRules.find((rule) => rule.enabled && !rule.archivedAt && rule.canonicalKey === canonicalKey);
-            const timezone = new Intl.DateTimeFormat("en", { timeZone: requested.reconciliation.timezone || existing?.timezone || "Asia/Shanghai" })
-              .resolvedOptions().timeZone;
+            const timezone = canonicalTimeZone(requested.reconciliation.timezone || existing?.timezone);
             group.reconciliation = { ...requested.reconciliation, timezone };
             const readKey = hash([onboardingConnectionPatch(billing.connection), billing.expectedAuthVersion, billing.resourceVersion, timezone]);
             if (!metadataReads.has(readKey)) {
