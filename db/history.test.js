@@ -163,3 +163,30 @@ test("彻底删除的后台重试连续失败时会继续重排，直到成功",
   assert.equal(retries.length, 0);
   assert.equal(history._removed.has("station"), false);
 });
+
+test("预测：日均花费舍到分以后是 0（每天不到半分钱）就算近期没有花费，不给可用天数；半分钱以上照算", () => {
+  const now = Date.parse("2026-10-24T02:00:00Z");
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    const history = new History({ query: async () => [[]] });
+    // 近 2.5 小时每 30 分钟一个快照，按每天 perDay 美元匀速花，最后剩 $0.01
+    const series = (perDay) => Array.from({ length: 6 }, (_, i) => {
+      const hoursAgo = 2.5 - i * 0.5;
+      return [now - hoursAgo * 3600000, 0.01 + perDay * hoursAgo / 24, 0];
+    });
+    history.data.slow = series(0.004);
+    assert.deepEqual(
+      (({ burnPerDay, etaDays, etaAt }) => ({ burnPerDay, etaDays, etaAt }))(history.predict("slow")),
+      { burnPerDay: 0, etaDays: null, etaAt: null },
+      "原来是日均 0、可用 2.5 天"
+    );
+    history.data.fast = series(0.006);
+    const fast = history.predict("fast");
+    assert.equal(fast.burnPerDay, 0.01);
+    assert.equal(fast.etaDays, 1.7, "天数按没舍的速率算：0.01 ÷ 0.006");
+    assert.ok(fast.etaAt);
+  } finally {
+    Date.now = realNow;
+  }
+});
