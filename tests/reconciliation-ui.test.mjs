@@ -3096,7 +3096,7 @@ test("编辑上游改了地址的站点：留空的令牌不带过去，测试�
   assert.equal(tests[0].accessToken, "");
 });
 
-test("编辑固定成本的上游：用不到的汇率、余额提醒线、其他地址、不再续费藏起来，保存时照原值带上，改回按用量算时还在", async (t) => {
+test("编辑固定成本的上游：用不到的汇率、余额提醒线、其他地址藏起来，保存时照原值带上，改回按用量算时还在；不再续费照旧写 false", async (t) => {
   const saves = [];
   const fixed = { id: "box", name: "服务器", type: "fixed", baseUrl: "", includeInProfit: true, costAliases: ["10.0.0.9:8080"], lowBalanceUsd: 3, noRenewal: true, cnyPerUsd: 7.2, monitorEnabled: true,
     fixedPurchases: [{ amount: 300, days: 30, startDate: "2026-10-01" }], balance: null, prediction: null, spark: [] };
@@ -3117,12 +3117,12 @@ test("编辑固定成本的上游：用不到的汇率、余额提醒线、其�
   await pickType("New API"); await drawer.getByLabel("汇率", { exact: true }).waitFor();
   assert.equal(await drawer.getByLabel("汇率", { exact: true }).inputValue(), "7.2"); assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).inputValue(), "3");
   assert.equal(await drawer.getByLabel("渠道里用的其他地址", { exact: true }).inputValue(), "10.0.0.9:8080");
-  // 改回固定成本、改一笔金额后保存：藏起来的四项照原值带上，不清空
+  // 改回固定成本、改一笔金额后保存：汇率、余额提醒线、其他地址照原值带上；不再续费一律 false（会关掉到期提醒，固定成本的表单里没有这个开关）
   await pickType("固定成本"); await drawer.getByLabel("第 1 笔金额（¥）", { exact: true }).fill("320");
   await drawer.getByRole("button", { name: "保存", exact: true }).click();
   for (let wait = 0; !saves.length && wait < 50; wait++) await page.waitForTimeout(100);
   assert.equal(saves.length, 1); assert.equal(saves[0].type, "fixed"); assert.equal(saves[0].fixedPurchases[0].amount, "320");
-  assert.equal(saves[0].cnyPerUsd, "7.2"); assert.equal(saves[0].lowBalanceUsd, "3"); assert.deepEqual(saves[0].costAliases, ["10.0.0.9:8080"]); assert.equal(saves[0].noRenewal, true);
+  assert.equal(saves[0].cnyPerUsd, "7.2"); assert.equal(saves[0].lowBalanceUsd, "3"); assert.deepEqual(saves[0].costAliases, ["10.0.0.9:8080"]); assert.equal(saves[0].noRenewal, false);
 });
 
 test("编辑自营站点：「汇率」那一格叫「售价」，只对上游有用的设置藏起来，保存时照旧带上原来的值", async (t) => {

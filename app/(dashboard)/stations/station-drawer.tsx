@@ -301,8 +301,8 @@ export function StationDrawer({
         }))
         .filter((p) => p.amount !== "" || p.days !== ""),
       isOwn: v.type === "newapi" && !!v.isOwn,
-      // 固定成本的上游也照原值带上（藏起来的输入项还在表单里），不在这里清掉
-      noRenewal: !!v.noRenewal,
+      // 固定成本的上游一律不「不再续费」：它会关掉到期提醒，而固定成本的表单里没有这个开关（汇率等三项照原值带上）
+      noRenewal: v.type !== "fixed" && !!v.noRenewal,
     };
     if (type !== "fixed") {
       payload.baseUrl = String(v.baseUrl || "").trim();
@@ -532,7 +532,7 @@ export function StationDrawer({
         <fieldset className="jy-fs">
           <legend>{COPY.cost}</legend>
           {!isFixed && <p className="fs-desc">{COPY.costDesc}</p>}
-          {/* 固定成本的上游用不到下面几项，只藏起来不拿掉：输入项还登记在表单里，保存时照原值带上，改回按用量算时原来的值还在 */}
+          {/* 固定成本的上游用不到下面几项，只藏起来不拿掉：汇率、余额提醒线、其他地址保存时照原值带上，改回按用量算时还在；不再续费保存时写 false（见 onSave） */}
           <Form.Item
             label={isOwnStation ? COPY.sellPrice : COPY.rate}
             name="cnyPerUsd"
