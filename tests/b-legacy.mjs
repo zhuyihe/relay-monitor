@@ -1,6 +1,7 @@
 // B 对拍用的旧实现：B1 合掉的那几份原样留在这里，只给对拍用（tests/b-parity.test.mjs、scripts/b-parity-sweep.mjs），
 // 不要在别处引用。计划 7c 删掉。
-// 每段都是从 main 8a437f0 原样抄来的，只改了名字（同名的加上出处前缀）和互相引用；出处写在每段前面。
+// 每段都是从 main 470a311 原样抄来的，只改了名字（同名的加上出处前缀）和互相引用；出处写在每段前面。
+// 下面三个从现在的 lib 引：B1 没改它们（isLiveReconciliationPreset、costBasisOf、rateSnapshotOf）。
 import { isLiveReconciliationPreset } from "../lib/reconciliation-contract.js";
 import { costBasisOf, rateSnapshotOf } from "../lib/profit.js";
 

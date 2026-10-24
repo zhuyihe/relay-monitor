@@ -46,7 +46,8 @@ function commonWindow(results: any[]) {
   return { ...first, endMs: Math.min(...windows.map((window: any) => window.endMs)) };
 }
 
-// 页面选的日期范围是否就是 data 读的那个
+// 页面选的日期范围是否就是 data 读的那个。比的是页面自己的选择状态（预设、起止都要一样，没有时区），
+// 不是两段对账窗口，所以不用 sameReconciliationWindow
 const sameRange = (a: ReconWindow | null, b: ReconWindow) => !!a && a.preset === b.preset && a.startMs === b.startMs && a.endMs === b.endMs;
 
 export default function ReconciliationPage() {

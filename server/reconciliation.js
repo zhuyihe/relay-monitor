@@ -1790,7 +1790,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     for (const timezone of [...new Set(rules.map((rule) => rule.timezone))].sort()) {
       try { windows.push(resolveReconciliationWindow({ ...input, timezone }, now)); } catch { return; }
     }
-    if (!windows.length || windows.some((window) => window.startMs !== windows[0].startMs || window.endMs !== windows[0].endMs)) return;
+    if (!windows.length || windows.some((window) => !sameReconciliationWindow(window, windows[0], { timezone: false }))) return;
     for (const station of upstreams.usage) accountUsageFor(station, windows[0], { force });
   }
 

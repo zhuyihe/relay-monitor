@@ -4481,6 +4481,18 @@ async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", clock = nu
   return { ...f, rows, catalogue, channels };
 }
 
+test("B1 结果缓存按请求比：「今天」过了半分钟再单独重读一条，别的绑定照样用缓存里的账单（截止点不同也是同一段）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  const full = await f.module.queryRules({ preset: "today" });
+  assert.equal(full.results.length, 3);
+  assert.ok(full.results.every((row) => row.window.preset === "today" && row.window.endMs === Date.parse("2026-10-09T03:00:00Z")));
+  now += 30000;
+  const selected = await f.module.queryRules({ preset: "today", ruleIds: ["rr_live"] });
+  assert.equal(selected.coverage.accountedChannelCount, full.coverage.accountedChannelCount, "另外两条绑定的账单从缓存里取到了");
+  assert.ok(!selected.coverage.channels.some((channel) => channel.issues.includes("BILLING_EVIDENCE_NOT_QUERIED")));
+});
+
 test("U05真实NewAPI默认完整昨日：3/10全局known覆盖、局部重试复用同窗有效事实且group仅选中金额", async (t) => {
   const f = await completedDayFixture(t);
   const full = await f.module.queryRules();
