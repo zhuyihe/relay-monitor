@@ -110,12 +110,12 @@ export type KnownChannelCoverage = {
   label: "known-channel-coverage"; state: "complete_known" | "partial" | "unknown"; catalogueState: "verified" | "unknown"; wholeSiteState: "unverified";
   knownChannelCount: number; accountedChannelCount: number;
   channels: { ownSource: OwnSource | null; ownStationId: string; channelId: number; name: string; operatingState: string; ruleIds: string[];
-    status: "accounted" | "unlinked" | "not_effective" | "source_unverified" | "billing_missing" | "coverage_unknown" | "duplicate" | "monitor_only" | "unsupported"; issues: string[]; actions: WorkflowAction[] }[];
+    status: "accounted" | "unlinked" | "not_effective" | "source_unverified" | "billing_missing" | "coverage_unknown" | "duplicate" | "row_attention" | "monitor_only" | "unsupported"; issues: string[]; reason?: string; actions: WorkflowAction[] }[];
 };
 // 金额默认按系统原值（USD）显示；本站和各上游都设置了汇率时整页按人民币显示。*Usd 字段始终是账单原币原始口径。
 export type ReconciliationCurrency = "USD" | "CNY";
 export type ReconciliationDisplayTotals = { currency: ReconciliationCurrency; knownIncome: number | null; knownCost: number | null; confirmedProfit: number | null; confirmedMarginRate: number | null };
-export type ReconciliationWindowTotals = { knownIncomeUsd: number | null; knownCostUsd: number | null; confirmedProfitUsd: number | null; confirmedMarginRate: number | null; profitComplete: boolean; notCountedCostRuleIds: string[]; display?: ReconciliationDisplayTotals };
+export type ReconciliationWindowTotals = { knownIncomeUsd: number | null; knownCostUsd: number | null; confirmedProfitUsd: number | null; confirmedMarginRate: number | null; profitComplete: boolean; attentionRuleIds: string[]; readingRuleIds: string[]; display?: ReconciliationDisplayTotals };
 // 未纳入核算的上游消费 = 各按用量计费上游的账号级扣费 − 已计入核算的 Key 成本；只对共同汇总给出。
 export type UnaccountedUpstreamState = "pending" | "partial" | "estimated" | "complete";
 export type UnaccountedUpstream = {
@@ -184,7 +184,7 @@ export type PublicCatalogueChannel = {
 // 一条核算关联：一把 Key 在某个本站下归属的渠道范围（停止后保留为历史）
 export type AccountAssociation = {
   ruleId: string; status: "active" | "stopped"; upstreamStationId: string; ownStationId: string; timezone: string;
-  channels: { channelId: number; name: string }[]; costCoverage: string; coverageDeclaration: CoverageDeclaration;
+  channels: { channelId: number; name: string }[]; costCoverage: string; needsCoverageAnswer: boolean; coverageDeclaration: CoverageDeclaration;
   scopeVersion: number; billingEffectiveFromMs: number | null; accountingStartMs: number | null;
   // 有效关联之间的重复归属：同一实际 Key 或同一渠道被多条有效关联认领
   conflict: boolean; conflictRuleIds: string[]; stoppedAt: string | null;
