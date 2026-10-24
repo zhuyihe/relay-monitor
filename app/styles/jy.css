@@ -24,10 +24,12 @@ body {
 .jy-sym { width: 12px; height: 12px; flex: none; display: block; }
 .jy-link { color: var(--jy-cobalt); text-decoration: none; }
 .jy-link:hover { text-decoration: underline; text-underline-offset: 3px; }
-/* 收起区（ui-design-spec §4.11，app/components/more.tsx）：一个写明收着什么的文字按钮，箭头展开后朝下 */
-.jy-more__toggle { display: inline-flex; align-items: center; gap: 2px; padding: 0; border: 0; background: none; color: var(--jy-cobalt); font: inherit; font-size: 13px; cursor: pointer; }
-.jy-more__toggle:hover { text-decoration: underline; text-underline-offset: 3px; }
-.jy-more__toggle:focus-visible { outline: 2px solid var(--jy-cobalt); outline-offset: 2px; border-radius: 2px; }
+/* 文字按钮：收起区（ui-design-spec §4.11，app/components/more.tsx）和运营总览需处理的「还有 N 件」同一套；焦点框用外壳统一的那个 */
+:is(.jy-more__toggle, .jy-attention-toggle) { display: inline-flex; align-items: center; gap: 2px; padding: 0; border: 0; background: none; color: var(--jy-cobalt); font: inherit; font-size: 13px; cursor: pointer; }
+:is(.jy-more__toggle, .jy-attention-toggle):hover { text-decoration: underline; text-underline-offset: 3px; }
+.jy-attention-toggle { font-size: 12px; line-height: 18px; }
+/* 收起区按钮：箭头展开后朝下；手机上点的地方至少 44 高，上下用负外边距抵掉，不撑高那一行 */
+@media (max-width: 767px) { .jy-more__toggle { min-height: 44px; margin-block: -12px; } }
 .jy-more__toggle .jy-icon { width: 14px; height: 14px; transition: transform 160ms; }
 .jy-more__toggle .jy-icon.is-open { transform: rotate(90deg); }
 .jy-more__body { margin-top: 8px; }
@@ -285,9 +287,6 @@ a.jy-eq-term:hover { background: var(--jy-sunken); text-decoration: none; color:
 .jy-attention .actions { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
 .jy-attention .jy-attention-note { margin-top: 4px; font-size: 12px; line-height: 18px; }
 .jy-attention-more { padding: 0 24px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.jy-attention-toggle { border: 0; background: none; padding: 0; font: inherit; font-size: 12px; line-height: 18px; color: var(--jy-cobalt); cursor: pointer; }
-.jy-attention-toggle:hover { text-decoration: underline; }
-.jy-attention-toggle:focus-visible { outline: 2px solid var(--jy-cobalt); outline-offset: 2px; border-radius: 2px; }
 .jy-all-clear { display: flex; gap: 12px; align-items: flex-start; padding: 24px; color: var(--jy-ink-2); }
 .jy-all-clear .jy-sym { width: 14px; height: 14px; margin-top: 4px; color: var(--jy-good); }
 .jy-all-clear strong { display: block; color: var(--jy-ink); font-weight: 500; }

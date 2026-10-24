@@ -43,18 +43,14 @@ export const COPY = Object.freeze({
   total: "合计",
   // 合计
   exact: (n: string) => `精确值 ${n}`,
-  noneRead: "一个上游的用量都没读到",
   sources: "读到的上游",
   sourcesOf: (n: number) => ` / ${n} 个上游`,
-  excludeFailed: (n: number) => `不含读不到的 ${n} 个上游`,
   rateUnset: (n: number) => `${n} 个上游${RATE_UNSET_PARITY}`,
-  // 读不到的上游（ui-copy-spec §8.4）：默认一行，「看原因」展开
+  // 读不到的上游（ui-copy-spec §8.4）：只在这一行说，合计各格不再写；默认一行，「看原因」展开，全都读不到时默认展开
   failedAll: (n: number) => `${n} 个上游的用量都读不到`,
   failedSome: (n: number) => `${n} 个上游的用量读不到，合计里不含它们`,
   failedWhy: "看原因",
   // 没有数据
   emptyTitle: "这段时间没有用量",
   emptyDesc: "换一个时间范围，或在筛选里选别的上游。",
-  allFailedTitle: "所有上游的用量都读不到",
-  allFailedDesc: "各上游读不到的原因见上方；恢复后，下次刷新会自动显示。",
 });

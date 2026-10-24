@@ -735,19 +735,20 @@ function CoveragePanel({ dv, data, stations }: { dv: Derived; data: any; station
   } else if (!nMissing && !nPartial) {
     lead = COPY.leadFull(days, dv.monitoredCount);
   } else {
-    const parts = [COPY.leadFullDays(days - nMissing - nPartial)];
-    if (nPartial) parts.push(COPY.leadPartialDays(nPartial));
+    const parts = [];
     if (nMissing) parts.push(COPY.leadMissingDays(nMissing));
-    lead = COPY.leadParts(days, parts.join("，"));
+    if (nPartial) parts.push(COPY.leadPartialDays(nPartial));
+    lead = COPY.leadGaps(parts.join("、"));
   }
-  if (earliest && earliest > data.start) lead += COPY.leadEarliest(md(earliest, tz));
 
   return (
     <div id={COVERAGE_ID} className="jy-analytics-anchor">
       <Panel title={COPY.panel.coverage}>
+        {/* 一句结论 + 按钮同一行，明细默认收起；「查看没算进去的数据」链到这里时展开（ui-copy-spec §8.4） */}
+        <div className="jy-more-line">
         <p className="jy-analytics-lead">{lead}</p>
-        {/* 明细默认收起；「查看没算进去的数据」链到这里时展开（ui-copy-spec §8.4） */}
-        <More label={COPY.coverageCaption} id={COVERAGE_ID}>
+        <More label={COPY.coverageCaption} anchor={COVERAGE_ID}>
+        {nMissing + nPartial > 0 && <p className="jy-analytics-lead">{COPY.gapRule}</p>}
         <dl className="jy-kv">
           <dt>{COPY.kvRange}</dt>
           <dd>{COPY.window(md(data.start, tz), md(data.end, tz), days)}</dd>
@@ -804,6 +805,7 @@ function CoveragePanel({ dv, data, stations }: { dv: Derived; data: any; station
           </div>
         )}
         </More>
+        </div>
       </Panel>
     </div>
   );

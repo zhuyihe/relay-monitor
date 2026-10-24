@@ -10,6 +10,7 @@
 .jy-analytics-anchor { scroll-margin-top: 72px; }
 
 .jy-analytics-lead { margin: 0 0 16px; color: var(--jy-ink-2); }
+.jy-more-line > .jy-analytics-lead { margin: 0; }
 .jy-analytics-gaps { margin-top: 16px; }
 
 /* 花费时段退回近 7 天时的说明 */

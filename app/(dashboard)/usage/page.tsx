@@ -400,11 +400,7 @@ export default function UsagePage() {
   const trendHasData = group === "total" ? !trendEmpty : !!upstream?.series.length && !trendEmpty;
   // 全部上游都读不到时，"没有用量"会被误读为真的没用；合计也不显示 0
   const allFailed = agg.okSts.length === 0 && agg.errSts.length > 0;
-  const partial = agg.okSts.length > 0 && agg.errSts.length > 0;
   const figure = (text: string) => (allFailed ? EMPTY : text);
-  const partialNote = partial ? <dd className="jy-caption">{COPY.excludeFailed(agg.errSts.length)}</dd> : null;
-  const emptyTitle = allFailed ? COPY.allFailedTitle : COPY.emptyTitle;
-  const emptyDesc = allFailed ? COPY.allFailedDesc : COPY.emptyDesc;
   // 整个范围都没有用量时只留一个空状态，不再并排三个空卡片
   const noData = trendEmpty && !agg.models.length;
 
@@ -530,21 +526,18 @@ export default function UsagePage() {
           <div>
             <dt>{COPY.totalToken}</dt>
             <dd className="jy-usage-figure">{figure(formatCompact(agg.totTokens))}</dd>
-            {allFailed ? <dd className="jy-caption">{COPY.noneRead}</dd> : <dd className="jy-caption">{COPY.exact(formatInt(agg.totTokens))}</dd>}
-            {partialNote}
+            {!allFailed && <dd className="jy-caption">{COPY.exact(formatInt(agg.totTokens))}</dd>}
           </div>
           <div>
             <dt>{costLabel}</dt>
             <dd className="jy-usage-figure">{figure(formatUnitPrice(agg.totCost))}</dd>
             {!allFailed && agg.rateUnset > 0 && <dd className="jy-caption">{COPY.rateUnset(agg.rateUnset)}</dd>}
             {!allFailed && agg.sellPriceUnset && <dd className="jy-caption">{SELL_PRICE_UNSET}</dd>}
-            {partialNote}
           </div>
           <div>
             <dt>{COPY.requests}</dt>
             <dd className="jy-usage-figure">{figure(formatCompact(agg.totReqs))}</dd>
             {!allFailed && agg.totReqs >= 1e4 && <dd className="jy-caption">{COPY.exact(formatInt(agg.totReqs))}</dd>}
-            {partialNote}
           </div>
           <div>
             <dt>{COPY.sources}</dt>
@@ -557,13 +550,14 @@ export default function UsagePage() {
         </dl>
       </Panel>
 
-      {/* 读不到用量的上游：合计里不含它们。默认一行，「看原因」展开每个上游的原因，原文进「查看详细原因」（ui-copy-spec §8.4） */}
+      {/* 读不到用量的上游：合计里不含它们，只在这里说一次（合计各格不再写）。默认一行，「看原因」展开每个上游的原因，原文进「查看详细原因」；
+          全都读不到时原因就是这一页要说的事，默认展开，下面也不再放空状态（ui-copy-spec §8.4） */}
       {agg.errSts.length > 0 && (
         <div className="jy-banner jy-usage-failed-line">
           <Sym kind="warn" />
           <div className="jy-banner__body jy-more-line">
             <b>{allFailed ? COPY.failedAll(agg.errSts.length) : COPY.failedSome(agg.errSts.length)}</b>
-            <More label={COPY.failedWhy}>
+            <More key={allFailed ? "all" : "some"} label={COPY.failedWhy} defaultOpen={allFailed}>
             <ul className="jy-usage-failed">
               {agg.errSts.map((s: any) => {
                 const note = stationErrorOf(s);
@@ -580,10 +574,11 @@ export default function UsagePage() {
         </div>
       )}
 
-      {noData ? (
+      {/* 全都读不到时上面黄条已经说了，这里不再放空状态 */}
+      {allFailed && noData ? null : noData ? (
         <Panel title={COPY.noData}>
           <div className="jy-usage-empty jy-usage-empty--short">
-            <EmptyState title={emptyTitle} desc={emptyDesc} />
+            <EmptyState title={COPY.emptyTitle} desc={COPY.emptyDesc} />
           </div>
         </Panel>
       ) : (
@@ -620,7 +615,7 @@ export default function UsagePage() {
             >
               {!trendHasData ? (
                 <div className="jy-usage-empty">
-                  <EmptyState title={emptyTitle} desc={emptyDesc} />
+                  <EmptyState title={COPY.emptyTitle} desc={COPY.emptyDesc} />
                 </div>
               ) : trendView === "table" ? (
                 trendTable
@@ -635,7 +630,7 @@ export default function UsagePage() {
             >
               {!modelChartItems.length ? (
                 <div className="jy-usage-empty">
-                  <EmptyState title={emptyTitle} />
+                  <EmptyState title={COPY.emptyTitle} />
                 </div>
               ) : (
                 <ChartBox h={CHART_H}>
@@ -662,7 +657,7 @@ export default function UsagePage() {
           {/* 模型明细表 */}
           <Panel title={COPY.detailTitle} caption={COPY.modelCount(agg.models.length)} body="flush" foot={TOKEN_NOTE}>
             {!agg.models.length ? (
-              <EmptyState title={emptyTitle} />
+              <EmptyState title={COPY.emptyTitle} />
             ) : (
               <>
                 <div className="jy-table-wrap has-mobile">
