@@ -537,7 +537,8 @@ function AttentionPanel({
     );
   };
 
-  const items: AttentionItem[] = actions.all.map((a: any) => {
+  // 一条事项变成列表里的一行；收进「还有 N 件」的那些只在点开时才拼（RestAttention），需处理上百条时不白做
+  const toItem = (a: any): AttentionItem => {
     if (a.workflow) {
       return {
         key: a.id,
@@ -605,7 +606,7 @@ function AttentionPanel({
       }
     }
     return { key: a.id, level: a.level, who: name, what, desc, note: noteOf(a), actions: buttons };
-  });
+  };
 
   const hidden = actions.all.length - actions.visible.length;
   // 每个资源最多一行待处理，剩下的就是状态正常的，用一句话交代其余资源
@@ -625,12 +626,12 @@ function AttentionPanel({
       ) : null}
       {/* 露最要紧的 3 条，其余收进「还有 N 件」（收起区 More，ui-design-spec §4.11、§5.1），点开在原地接着列 */}
       <AttentionList
-        items={items.slice(0, actions.visible.length)}
+        items={actions.visible.map(toItem)}
         emptyDesc={asOf ? `${formatAsOf(asOf, tz)}。` : undefined}
         more={
           hidden > 0 ? (
             <More label={COPY.moreItems(hidden)} className="jy-attention-rest">
-              <AttentionList items={items.slice(actions.visible.length)} more={healthyNote ?? undefined} />
+              <RestAttention actions={actions.all.slice(actions.visible.length)} toItem={toItem} more={healthyNote ?? undefined} />
             </More>
           ) : (
             healthyNote ?? undefined
@@ -639,6 +640,11 @@ function AttentionPanel({
       />
     </Panel>
   );
+}
+
+// 「还有 N 件」点开以后的那几条：收起区只在点开时渲染它，拼列表项的活也到这时才做
+function RestAttention({ actions, toItem, more }: { actions: any[]; toItem: (a: any) => AttentionItem; more?: ReactNode }) {
+  return <AttentionList items={actions.map(toItem)} more={more} />;
 }
 
 // ---- 上游余量 ---------------------------------------------------------------
