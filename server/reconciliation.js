@@ -34,10 +34,10 @@ import { ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliatio
 import { isSettleableWindow, isSettledAt, settleRetryDelayMs, settlementOutcome, settlementPrecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
-import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationSettlement, reconciliationDisplayStatus,
+import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
 import { costBasisOf, isConfiguredRate, rateSnapshotOf, ratesFor } from "../lib/profit.js";
-import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyInTz, dayStartInTz, isDayStartInTz, shiftedDayStartInTz } from "../lib/business-time.js";
+import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftedDayStartInTz } from "../lib/business-time.js";
 import { selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 
@@ -46,14 +46,27 @@ export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.j
 const DAY_MS = 86400000;
 const MAX_CONCURRENT_RULES = 6;
 
+// 绑定按哪个时区算一天：新建时用传入的，没传用业务时区（BUSINESS_TIME_ZONE，缺省上海）；建好以后不能改——
+// 没传沿用原值，传了别的时区报 TIMEZONE_IMMUTABLE（别名算同一个，存的还是原来的写法）。不合法的报 TIMEZONE_INVALID。
+// 建、改、追加渠道、预览、渠道绑定都经这里定时区，不各自缺省成上海。
+export function ruleTimezoneFor(existing, requested) {
+  if (!existing?.timezone) return checkTimeZone(requested, businessTimeZone());
+  if (requested == null || requested === "") return existing.timezone;
+  if (!sameTimeZone(checkTimeZone(requested), existing.timezone)) {
+    throw codedError("TIMEZONE_IMMUTABLE", "绑定建好以后，按哪个时区算一天不能改；要换的话，解除绑定后重新绑定");
+  }
+  return existing.timezone;
+}
+
+// timezone 是要改的那条绑定现在的时区（新建时不传）
 export function normalizeReconciliationScopeIntent(kind, targetRuleId, input, { timezone, enabled } = {}) {
   if (!input?.coverageDeclaration) throw codedError("INVALID_REQUEST", COVERAGE_REQUIRED);
   let coverageDeclaration;
   try { coverageDeclaration = normalizeCoverageDeclaration(input.coverageDeclaration); }
   catch { throw codedError("INVALID_REQUEST", COVERAGE_REQUIRED); }
   let zone;
-  try { zone = checkTimeZone(input?.timezone || timezone); }
-  catch { throw codedError("INVALID_REQUEST", "时区不对"); }
+  try { zone = ruleTimezoneFor(timezone ? { timezone } : null, input?.timezone); }
+  catch (error) { throw error.code === "TIMEZONE_IMMUTABLE" ? error : codedError("INVALID_REQUEST", "时区不对"); }
   const semantic = { tokenId: finite(input?.tokenId),
     salesChannelIds: [...new Set((Array.isArray(input?.salesChannelIds) ? input.salesChannelIds : []).map(Number)
       .filter((id) => Number.isSafeInteger(id) && id > 0))].sort((a, b) => a - b),
@@ -200,7 +213,7 @@ function channelConflict(conflicts, channels = []) {
 // 对账接口的报错：表里的码按 { error: 原文, code } 和对应状态返回，界面按 code 归类（lib/error-copy.js）。
 // 表外的（没有 code，或数据库、网络这类底层错误码）返回 null，交给 withAuth 记日志、按 500 返回。
 const ERROR_STATUS = Object.freeze(Object.fromEntries([
-  [400, ["INVALID_REQUEST", "TIMEZONE_INVALID", "TIME_RANGE_INVALID", "TIME_RANGE_FUTURE", "TIME_RANGE_TOO_LONG", "OWN_STATION_UNSET", "KEY_REQUIRED",
+  [400, ["INVALID_REQUEST", "TIMEZONE_INVALID", "TIMEZONE_IMMUTABLE", "TIME_RANGE_INVALID", "TIME_RANGE_FUTURE", "TIME_RANGE_TOO_LONG", "OWN_STATION_UNSET", "KEY_REQUIRED",
     "CHANNEL_REQUIRED", "TRANSITION_TIME_OUT_OF_RANGE", "KEY_DISABLED", "KEY_GROUP_UNSUPPORTED", "KEY_INVALID_OR_DENIED", "TOKEN_NAME_AMBIGUOUS", "RULE_IDENTITY_IMMUTABLE", "RESOURCE_CHANGED"]],
   [404, ["RULE_NOT_FOUND", "UPSTREAM_NOT_FOUND"]],
   [409, ["PREVIEW_BASIS_CHANGED", "PREVIEW_REQUIRED", "EFFECTIVE_PREVIEW_CHANGED", "CHANNEL_CONFLICT", "CANONICAL_KEY_CONFLICT", "SOURCE_BINDING_UNCONFIRMED",
@@ -715,7 +728,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       own,
       token,
       metadata,
-      timezone: checkTimeZone(input?.timezone || matches[0]?.timezone),
+      timezone: ruleTimezoneFor(existingRule || matches[0] || null, input?.timezone),
       canonicalKey,
       ownSource: actualOwnSource,
       existingRule: existingRule || matches[0] || null,
@@ -730,7 +743,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const channelIds = [...new Set((Array.isArray(input?.salesChannelIds) ? input.salesChannelIds : [])
       .map(Number).filter((channelId) => Number.isFinite(channelId) && channelId > 0))];
     if (!channelIds.length) throw codedError("CHANNEL_REQUIRED", "请至少选一个渠道");
-    const timezone = checkTimeZone(input?.timezone);
+    const timezone = ruleTimezoneFor(existing, input?.timezone);
     const [channels, conflicts] = await Promise.all([
       ownChannelsFor(own, { force: true }),
       repository.findChannelConflicts(channelIds, { excludeRuleId: existing.id }),
@@ -956,7 +969,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const sourceCredential = currentSourceCredential(existing);
       const billingSource = participatingSource(previewGuard);
       const valid = await validateInput({ ...confirmation, upstreamStationId: existing.upstreamStationId, tokenId: existing.tokenId,
-        salesChannelIds: channelIds, timezone: confirmation.timezone || existing.timezone }, { excludeRuleId: id, existingRule: existing });
+        salesChannelIds: channelIds, timezone: confirmation.timezone }, { excludeRuleId: id, existingRule: existing });
       const fields = financialFields(valid, { ...confirmation, costCoverage: confirmation.costCoverage ?? existing.costCoverage,
         coverageDeclaration: confirmation.coverageDeclaration ?? existing.coverageDeclaration });
       fields.sourceBinding = confirmation.sourceBinding ?? previewGuard?.basis.channelRevisions ?? existing.sourceBinding;
@@ -1127,7 +1140,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         ...evidence,
         downstream: evidence.downstream ?? await downstreamEvidence(),
       }, generation, sourceCredential, billingSource, { save: save && observe });
-      if (!billingStation(upstream)) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", "找不到这个上游，或这个上游读不到账单"), {}, !!rule.canonicalKey && !!rule.ownSource);
+      // 成本计法在下面这些提前返回之前就定：固定成本的毛利不看上游，上游一侧读不到（读不到账单、Key 用不了、
+      // 目录或身份读不到、上游身份变了）时不挡，记成上游侧的参考问题，跳过上游、只取本站接着算。
+      // 本站一侧（来源没确认、渠道重复、本站读不到、没分段）照旧挡；没锚定过的也照旧挡，免得以后锚到别人的 Key 上。
+      const costBasis = financialSnapshot.costBasis;
+      const upstreamOptional = costBasis === "fixed" && !!upstream && !!rule.canonicalKey && !!rule.ownSource;
+      let upstreamProblem = null;
+      if (!billingStation(upstream)) {
+        const problem = health("UPSTREAM_DATA_UNAVAILABLE", "找不到这个上游，或这个上游读不到账单");
+        if (!upstreamOptional) return unavailable(problem, {}, !!rule.canonicalKey && !!rule.ownSource);
+        upstreamProblem = problem;
+      }
 
       const upstreamResource = ownerRegistry.resources.get(rule.upstreamStationId);
       const metadata = upstreamResource?.metadata;
@@ -1138,16 +1161,23 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           : key.name !== rule.tokenName ? "上游里这把 Key 改名了，去确认"
             : !tokenNameIsUnique(metadata, key) ? KEY_NAME_AMBIGUOUS_TEXT
               : key.group === "auto" || key.crossGroupRetry ? KEY_GROUP_TEXT : null;
-        if (detail) return unavailable(health("KEY_INVALID_OR_DENIED", detail), { metadata, token: key }, false);
+        if (detail && !upstreamOptional) return unavailable(health("KEY_INVALID_OR_DENIED", detail), { metadata, token: key }, false);
+        if (detail) upstreamProblem ||= health("KEY_INVALID_OR_DENIED", detail);
       }
       let identity, ownSource;
       identity = upstreamResource?.identity;
       const salesIdentity = ownerRegistry.resources.get(rule.ownStationId)?.identity;
       if (ownAvailable && salesIdentity) ownSource = ownSourceFor(own, salesIdentity);
-      if (!identity) return unavailable(metadataError ? toErrorHealth(metadataError)
-        : health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")), {}, false);
-      const actualKey = canonicalBillingKey(upstream, identity, rule.tokenId);
-      let identityIssue = !ownSource || (rule.canonicalKey && rule.canonicalKey !== actualKey) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource.namespaceKey)
+      if (!identity) {
+        const problem = metadataError ? toErrorHealth(metadataError) : health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"));
+        if (!upstreamOptional) return unavailable(problem, {}, false);
+        upstreamProblem ||= problem;
+      }
+      const actualKey = identity ? canonicalBillingKey(upstream, identity, rule.tokenId) : rule.canonicalKey;
+      // 本站一侧对不上始终挡；上游身份变了是上游一侧的问题，固定成本时只作参考
+      const upstreamChanged = !!rule.canonicalKey && rule.canonicalKey !== actualKey;
+      if (upstreamChanged && upstreamOptional) upstreamProblem ||= health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"));
+      let identityIssue = !ownSource || (upstreamChanged && !upstreamOptional) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource.namespaceKey)
         ? health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")) : null;
       if (!identityIssue && (!rule.canonicalKey || !rule.ownSource) && !observe) {
         // 还没观测过就没有可靠口径，取上下游账单也只是白跑一趟。
@@ -1174,24 +1204,26 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         request.sourceCredential = sourceCredential;
       }
 
-      if (metadataError) return unavailable(identityIssue || toErrorHealth(metadataError), {}, !identityIssue);
-      const token = metadata.tokens.find((item) => item.id === rule.tokenId);
+      if (metadataError && (identityIssue || !upstreamOptional)) return unavailable(identityIssue || toErrorHealth(metadataError), {}, !identityIssue);
+      if (metadataError) upstreamProblem ||= toErrorHealth(metadataError);
+      const token = metadata?.tokens.find((item) => item.id === rule.tokenId);
       if (identityIssue) {
         const upstreamEvidence = token && (!rule.canonicalKey || rule.canonicalKey === actualKey)
           ? await upstreamWindowFor(upstream, metadata, token, window, { readOnly: !observe }).catch(() => null) : null;
         return unavailable(identityIssue, { metadata, token, upstream: upstreamEvidence }, false);
       }
-      const canonicalKey = canonicalBillingKey(upstream, metadata, token.id);
-      if (canonicalKey !== actualKey || canonicalKey !== rule.canonicalKey) {
+      const canonicalKey = upstreamProblem ? rule.canonicalKey : canonicalBillingKey(upstream, metadata, token.id);
+      if (!upstreamProblem && (canonicalKey !== actualKey || canonicalKey !== rule.canonicalKey)) {
         return unavailable(health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")), { metadata, token }, false);
       }
+      const platform = metadata?.platform ?? rule.provider;
       const persistedSegments = await repository.listSegments(rule.id);
       if (!persistedSegments.length) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", INCOMPLETE_DAY_TEXT), { metadata, token });
-      const catalogueObserved = metadata.groupsAvailable && metadata.groups[token.group]?.ratio != null;
+      const catalogueObserved = !upstreamProblem && metadata.groupsAvailable && metadata.groups[token.group]?.ratio != null;
       const currentRatio = catalogueObserved ? metadata.groups[token.group].ratio : null;
       const ratioObservedAt = Date.now();
-      // 只读计算沿用已记录的分段；分组或倍率的切换由下一次观测记录。
-      const reconciliation = !observe ? { segments: persistedSegments, currentSegment: persistedSegments[persistedSegments.length - 1], transitioned: false }
+      // 只读计算沿用已记录的分段；分组或倍率的切换由下一次观测记录。上游读不到时也沿用，不按读不到的目录改分段。
+      const reconciliation = !observe || upstreamProblem ? { segments: persistedSegments, currentSegment: persistedSegments[persistedSegments.length - 1], transitioned: false }
         : await withObservationSourceLock(rule, sourceCredential, () => repository.observeSource(rule.id, {
           groups: metadata.groupsAvailable ? metadata.groups : {},
           group: token.group,
@@ -1204,7 +1236,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       let currentSegment = reconciliation.currentSegment;
       // 固定采购的上游用量不计成本（采购费作为固定成本），毛利 = 收入：上游 Key 账单取不全、成本归属未核验、
       // Key 还有没有其他用途、上游分组目录取不到，都只作参考，不挡结账。
-      const costBasis = financialSnapshot.costBasis;
       const upstreamSide = (issue) => ({ ...issue, side: "upstream", ...(costBasis === "fixed" ? { reference: true } : {}) });
       const issues = scopePolicyIssues(rule, window).map((issue) => costBasis === "fixed"
         ? upstreamSide({ ...issue, detail: COVERAGE_QUESTION }) : issue);
@@ -1216,7 +1247,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (costOwner.state === "unknown") issues.push(upstreamSide({ code: "COST_OWNER_UNVERIFIED", scope: "rule", detail: issueText("COST_OWNER_UNVERIFIED"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (costOwner.state === "duplicate") issues.push(upstreamSide({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: issueText("CANONICAL_KEY_CONFLICT"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (!ownAvailable) issues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "downstream", detail: issueText("OWN_BILLING_UNAVAILABLE"), observedAt: Date.now() });
-      if (!catalogueObserved && metadata.platform !== "sub2api") {
+      if (upstreamProblem) issues.push(upstreamSide({ code: upstreamProblem.code, scope: "upstream", detail: upstreamProblem.detail, observedAt: Date.now() }));
+      else if (!catalogueObserved && platform !== "sub2api") {
         issues.push(upstreamSide({
           code: "GROUP_DATA_UNAVAILABLE", scope: "upstream", observedAt: Date.now(),
           detail: `分组「${token.group}」的倍率暂时读不到`,
@@ -1242,7 +1274,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         .filter(({ segmentWindow }) => segmentWindow);
       // 按 Key 整体取数的关联确认即生效：窗口裁到核算起点（Sub2API 起点当天按全天），整个窗口都在起点之前时金额为 0。
       // 修改关联后的过渡期，修改之前的未结账时段也按当前配置计算，结果带 scope.recalculated 标记。
-      const clipped = isScopedBillingPolicy(rule.billingPolicy) ? accountingWindow(rule, window, metadata.platform) : window;
+      const clipped = isScopedBillingPolicy(rule.billingPolicy) ? accountingWindow(rule, window, platform) : window;
       const applicable = isScopedBillingPolicy(rule.billingPolicy) ? (clipped ? [{ segment: currentSegment, segmentWindow: clipped }] : []) : intersecting;
       let catalogue = null;
       try { if (ownAvailable) catalogue = await ownChannelsFor(own, { force }); } catch {
@@ -1269,7 +1301,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const loadOwnStatus = () => (ownStatus ||= queryNewApiStatus(own));
       const segmentResults = await mapWithConcurrency(applicable, 6, async ({ segment, segmentWindow }) => {
         const [upstreamResult, downstreamResult] = await Promise.all([
-          upstreamWindowFor(upstream, metadata, token, segmentWindow, { readOnly: !observe }).catch((error) => ({ error })),
+          // 上游读不到（只有固定成本会走到这里）：不取上游，问题已经在上面记了一次
+          upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
+            : upstreamWindowFor(upstream, metadata, token, segmentWindow, { readOnly: !observe }).catch((error) => ({ error })),
           (ownAvailable
             ? queryOwnChannelRevenue(own, { channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus: loadOwnStatus })
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
@@ -1289,7 +1323,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           const issue = { code: "BILLING_TIMEZONE_UNVERIFIED", scope: "segment", detail: issueText("BILLING_TIMEZONE_UNVERIFIED"), observedAt: Date.now() };
           segmentIssues.push(commonBillingTimezone(segmentWindow, downstreamSide).state !== "verified" ? issue : upstreamSide(issue));
         }
-        if (upstreamResult.error) segmentIssues.push(upstreamSide({ code: toErrorHealth(upstreamResult.error).code, scope: "segment", detail: toErrorHealth(upstreamResult.error).detail, observedAt: Date.now() }));
+        if (upstreamResult.error && !upstreamResult.skipped) segmentIssues.push(upstreamSide({ code: toErrorHealth(upstreamResult.error).code, scope: "segment", detail: toErrorHealth(upstreamResult.error).detail, observedAt: Date.now() }));
         if (upstreamResult.emptySecondWindow || downstreamResult.emptySecondWindow) {
           const issue = { code: "PENDING", scope: "segment", detail: issueText("PENDING"), observedAt: Date.now() };
           segmentIssues.push(downstreamResult.emptySecondWindow ? issue : upstreamSide(issue));
@@ -1385,11 +1419,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         return isScopedBillingPolicy(rule.billingPolicy) && sameReconciliationWindow(segment[side].window, segment.window, { timezone: false }) ? window : segment[side].window;
       };
       const result = {
-        rule: { ...rule, tokenName: token.name, fixedGroup: currentSegment.group }, window,
+        rule: { ...rule, tokenName: token?.name ?? rule.tokenName, fixedGroup: currentSegment.group }, window,
         ownSource, scope: { ...reconciliationBillingSchedule(rule), recalculated: scopeRecalculatedInWindow(rule, window),
           accountedFromMs: clipped && clipped.startMs > window.startMs ? clipped.startMs : null, notEffective: !applicable.length && isScopedBillingPolicy(rule.billingPolicy) },
         amountBasis: { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,
-          calculationVersion: RECONCILIATION_CALCULATION_VERSION, conversion: metadata.platform === "sub2api" ? "provider_cost_usd" : "quota_per_unit" },
+          calculationVersion: RECONCILIATION_CALCULATION_VERSION, conversion: platform === "sub2api" ? "provider_cost_usd" : "quota_per_unit" },
         // 固定采购的成本不取自上游账单，只要本站一侧证明了时区和日界线。
         billingTimezone: commonBillingTimezone(window, segmentResults.flatMap((segment) => costBasis === "fixed" ? [segment.downstream] : [segment.upstream, segment.downstream])),
         requestedWindow: window,
@@ -1411,7 +1445,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           expectedCount: segmentResults.length,
           observedAt: Date.now(), window: sideWindow("upstream"),
           billingTimezone: commonBillingTimezone(window, segmentResults.map((segment) => segment.upstream)),
-          status: token.status, group: currentSegment.group, ratio: currentRatio,
+          status: token?.status ?? null, group: currentSegment.group, ratio: currentRatio,
         },
         downstream: {
           state: completeDownstream ? "complete" : segmentResults.some((segment) => segment.downstream.knownAmountUsd != null) ? "partial" : segmentResults.some((segment) => segment.downstream.state === "pending") ? "pending" : "unavailable",
@@ -1695,7 +1729,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 界面状态只在这里算一次（实时 / 已固定 / 需处理），按钮和旧的 settlement 字段都从它推出来。
       enriched.displayStatus = reconciliationDisplayStatus(enriched, { now });
       enriched.actions = reconciliationResultActions(enriched, { now, displayStatus: enriched.displayStatus });
-      enriched.settlement = reconciliationSettlement(enriched, { now, displayStatus: enriched.displayStatus });
       return enriched;
     };
     const selected = results.map(factsFor), coverageFacts = [...selected];
