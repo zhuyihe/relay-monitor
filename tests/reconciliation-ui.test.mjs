@@ -3574,6 +3574,7 @@ test("上游列表「这把 Key」说清是哪些渠道：三个以上写「等 
     // 21 号渠道在自营站点里改过名：绑定存下的是旧名，coverage.channels 是现在的名字；另一个自营站点也有 21 号渠道
     if (path === "/api/own/analytics") return failJSON(route, 500, { error: "fixture own analytics unavailable" });
     if (path === "/api/history/overview") return fulfill(route, { series: [] });
+    if (path === "/api/refresh") return fulfill(route, { ok: true });
     if (path === "/api/reconciliation") return fulfill(route, {
       results: [{ rule: { ownStationId: "own-1", channels: [{ channelId: 21, name: "旧名" }, ...[22, 23, 31, 41].map((id) => ({ channelId: id, name: `渠道${id}` }))] } },
         { rule: { ownStationId: "own-old", channels: [{ channelId: 21, name: "旧站渠道" }] } }],
@@ -3582,8 +3583,7 @@ test("上游列表「这把 Key」说清是哪些渠道：三个以上写「等 
       actions });
     throw new Error("unexpected API: " + path);
   };
-  const accounts = (route) => fulfill(route, { accounts: [{ keys: [{ channels: [{ ownStationId: "own-1", channelId: 21, name: "旧名" }] }] }], unverifiedResources: [],
-    channels: [{ id: 21, name: "渠道21", missing: false }], actions: [{ id: "connect", kind: "connect_channels", ownStationId: "own-1", channelIds: [] }], generatedAt: iso(now) });
+  const accounts = (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: iso(now) });
   const page = await openFixturePage(t, handler, undefined, false, accounts, "/stations");
   const table = page.locator(".jy-stations-table");
   const status = (name) => table.locator("tbody tr", { hasText: name }).first().locator("td").nth(1);
