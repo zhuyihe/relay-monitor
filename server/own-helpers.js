@@ -282,7 +282,8 @@ export async function readOwnAdminDirectory(rt, own, { fresh = false } = {}) {
   let entry = await read(fresh ? Date.now() : 0);
   const unconfirmed = (list) => { const admins = adminUsernamesOf(list); return [...new Set(resold.filter((key) => !admins.has(key.username)).map((key) => key.username))]; };
   // 和 readOwnIncome 共用「重读过还对不上的名字 1 分钟内不再为它们重读」（审核 R1 中-2：转售 Key 的主人不是管理员时每次都重读整份用户列表）
-  entry = await confirmUserNames(entry, unconfirmed, (since) => read(since), Date.now());
+  // 结账（fresh）读回来的这份本来就是新发出的，不用再为对不上的名字重读一遍；轮询用的那份缓存才看「1 分钟内重读过没有」
+  entry = fresh ? entry : await confirmUserNames(entry, unconfirmed, (since) => read(since), Date.now());
   // 重读还对不上的转售 Key 所属用户：忽略这条标记（不扣、不报读不到），照常算
   return { users: entry.list, adminSet: adminUsernamesOf(entry.list) };
 }

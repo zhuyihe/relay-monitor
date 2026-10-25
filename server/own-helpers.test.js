@@ -622,3 +622,12 @@ test("转售 Key 的主人不是管理员：重读过还对不上，1 分钟内�
   for (let i = 0; i < 5; i += 1) await readOwnAdminDirectory(f.rt, f.own);
   assert.ok(userReads <= 1, `5 次只读了 ${userReads} 次用户列表`);
 });
+
+test("结账（带 fresh）读用户列表：转售 Key 的主人不是管理员时，每次只读一份新的，不为同一个名字再重读一遍（审核 R1 第三轮中-2）", async (t) => {
+  const f = incomeFixture();
+  f.own.resoldAdminKeys = [{ username: "customer", tokenName: "sale" }];
+  let userReads = 0;
+  t.mock.method(globalThis, "fetch", async () => { userReads += 1; return Response.json({ success: true, data: { items: f.users, total: f.users.length } }); });
+  for (let i = 0; i < 5; i += 1) await readOwnAdminDirectory(f.rt, f.own, { fresh: true });
+  assert.ok(userReads <= 5, `5 次各读一份新的，一共不超过 5 次（以前是 10 次）：${userReads}`);
+});

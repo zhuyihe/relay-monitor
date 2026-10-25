@@ -769,10 +769,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // - 结账（settle）：先要一份现在读的管理员名单；每个来源先查全站这段窗口的总额度（/api/log/stat），是 0 就没有，不翻列表；
   //   不是 0 就翻到窗口终点，累计的行额度合计和总额度相等才用，不等整段重翻。累计只在内存里，重启以后那天整段重翻；
   // - 窗口比记下的短（终点更早）：不能接着用，整段读一次，不记。
-  // 读失败（用户列表、转售 Key 所属用户不是管理员、任何一个来源）直接抛，queryOwnChannelRevenue 把这一段所有渠道当读不到，
-  // 不拿没减的数当收入。管理员名单、转售 Key 变了：键里带转售 Key，名单变了按来源重新算，不沿用旧来源的累计。
+  // 读失败（用户列表、任何一个来源）直接抛，queryOwnChannelRevenue 把这一段所有渠道当读不到，不拿没减的数当收入；
+  // 只有「今天」碰到短暂失败（网络错、5xx、429）时 10 分钟内沿用上一份，沿用的不写进「今天」的收入缓存。管理员名单、转售 Key 变了：键里带转售 Key，名单变了按来源重新算，不沿用旧来源的累计。
   const OWN_EXCLUSION_REUSE_MS = 30000;
   const OWN_EXCLUSION_STALE_OK_MS = 10 * 60000;
+  // 只沿用短暂失败：网络错、5xx、429（读取这一层的码是 NETWORK_UNREACHABLE、UPSTREAM_REQUEST_FAILED）；令牌作废/少权限（401、403）、
+  // 程序算出负数这类不会自己好的不沿用。用户列表那层外面包着 OWN_INCOME_UNCONFIRMED，要看包在里面的原因
+  const isTransientOwnReadFailure = (error) => [error, error?.cause].some((item) => ["NETWORK_UNREACHABLE", "UPSTREAM_REQUEST_FAILED"].includes(item?.code))
+    && ![error, error?.cause].some((item) => ["AUTHENTICATION_FAILED", "UPSTREAM_AUTH_DENIED"].includes(item?.code) || String(item?.code || "").startsWith("ACCESS_TOKEN_"));
   const OWN_EXCLUSION_VERIFIED_REUSE_MS = 10 * 60000;
   const OWN_EXCLUSION_FALLBACK_REUSE_MS = 10 * 60000;
   function ownExclusion(own, window, { settle = false, channelIds = [] } = {}) {
@@ -924,7 +928,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 「今天」读用户列表或管理员日志短暂失败：10 分钟内沿用上一份（只影响今天那一格，不推送），超过才读不到（总指挥 10-25）。令牌作废、少权限照原样抛
       const live = window.endMs > Date.now() - RECONCILIATION_SETTLE_DELAY_MS;
       const lastGood = [...entry.states].sort((a, b) => b.readAt - a.readAt)[0];
-      if (!settle && live && lastGood && !String(error?.code || "").startsWith("ACCESS_TOKEN_") && Date.now() - lastGood.readAt < OWN_EXCLUSION_STALE_OK_MS && covers(lastGood.result.coverage)) return lastGood.result;
+      if (!settle && live && lastGood && isTransientOwnReadFailure(error) && Date.now() - lastGood.readAt < OWN_EXCLUSION_STALE_OK_MS && covers(lastGood.result.coverage)) return { ...lastGood.result, stale: true };
       throw error;
     });
     entry.tail = task.catch(() => {});
@@ -947,10 +951,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const status = await loadStatus().catch(() => null);
       if (status && status.quotaPerUnit === cached.result.quotaPerUnit) return { ...cached.result, window: { ...cached.result.window, endMs: segmentWindow.endMs } };
     }
+    let reusedStale = false; // 管理员自用那一份是读失败后沿用的：这一次的结果不进缓存，不然站点一直没有新消费时超过 10 分钟也不换
     const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus,
-      exclusion: () => ownExclusion(own, segmentWindow, { settle, channelIds }) });
+      exclusion: async () => { const read = await ownExclusion(own, segmentWindow, { settle, channelIds }); if (read.stale) reusedStale = true; return read; } });
     // 只有轮询观测今天会沿用，别的窗口（昨天、结账、自定义、近 7 天、本月）不记
-    if (reuse && result.state === "complete" && !result.emptySecondWindow) {
+    if (reuse && result.state === "complete" && !result.emptySecondWindow && !reusedStale) {
       ownRevenueCache.set(key, { endMs: segmentWindow.endMs, result });
       // 只留今天的：键里有窗口起点，过了零点的旧键不会再用到
       for (const [cachedKey, entry] of ownRevenueCache) if (entry.endMs < segmentWindow.endMs - 2 * DAY_MS) ownRevenueCache.delete(cachedKey);

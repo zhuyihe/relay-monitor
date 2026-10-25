@@ -6,6 +6,7 @@ import {
   reconciliationRatioChange,
 } from "../../../lib/reconciliation-view";
 import type { ReconciliationCurrency } from "../../../lib/client";
+import { adminUsageLineOf } from "../../../lib/admin-usage-text";
 import { isLiveReconciliationPreset, reconciliationIssue, sameReconciliationWindow } from "../../../lib/reconciliation-contract";
 import { ERROR_CATEGORIES } from "../../../lib/error-copy";
 import { workflowAction, workflowActionMeta } from "../../../lib/workflow-actions";
@@ -71,24 +72,9 @@ export function sideAmount(item: any, side: "income" | "cost", currency: Reconci
 // 收入、上游成本一格：读全了只写金额，没读全写「$1.20（没读全）」，没读到写「读取中」「读不到」
 export const incomeText = (item: any, currency: ReconciliationCurrency, billing = item?.downstream) =>
   reconciliationBillingText(billing, sideRate(item, "income", currency));
-// 收入里减掉的管理员自用（用语规范 §9「管理员自用」）：管理员账号自己花的钱（含渠道测试）也记收费记录，不是下游用户花的钱，不算收入，
-// 和运营总览、自营业务同一个规矩；后台看到的渠道用量含这一部分，写出来财务对数时对得上。按账本每一行判断扣没扣（R1 以前固定的账那一行没有这个数），
-// adminUsageDays 是范围里几天扣了、几天没扣（没有这个字段的是单日：账本那一行没有金额就是没扣）。写法：
-//   每天都扣了：「已扣除管理员自用 $0.12」（合计 0 不写）；
-//   有的扣了有的没扣：「已扣除管理员自用 $0.12（部分日子没扣）」，悬停写全句，金额只加扣过的那些天；
-//   一天都没扣：「收入里可能含管理员自用（这几天的账是按以前的规矩固定的，那时还不扣管理员自用）」，只有一天时「这几天」换成「这一天」
-export function adminUsageLine(item: any, currency: ReconciliationCurrency, billing = item?.downstream): { text: string; title?: string } | null {
-  if (billing?.state !== "complete") return null;
-  const raw = billing?.adminUsageAmountUsd;
-  if (raw === null) return null;
-  const days = billing?.adminUsageDays ?? (raw === undefined ? { deducted: 0, undeducted: 1 } : { deducted: 1, undeducted: 0 });
-  const reason = (which: string) => `${which}的账是按以前的规矩固定的，那时还不扣管理员自用`;
-  if (!days.deducted) return { text: `收入里可能含管理员自用（${reason(days.undeducted > 1 ? "这几天" : "这一天")}）` };
-  const usd = Number(raw ?? 0);
-  if (!days.undeducted) return usd > 0 ? { text: `已扣除管理员自用 ${formatReconciliationMoney(usd, sideRate(item, "income", currency))}` } : null;
-  return usd > 0
-    ? { text: `已扣除管理员自用 ${formatReconciliationMoney(usd, sideRate(item, "income", currency))}（部分日子没扣）`, title: "有几天的账是按以前的规矩固定的，那时还不扣管理员自用，这几天的收入里可能含着它" }
-    : { text: `收入里可能含管理员自用（部分日子的账是按以前的规矩固定的，那时还不扣管理员自用）` };
+// 收入里减掉的管理员自用（用语规范 §9「管理员自用」）：写法和判断都在 lib/admin-usage-text.js（有单元测试），这里只把钱按汇率和币种写出来
+export function adminUsageLine(item: any, currency: ReconciliationCurrency, billing = item?.downstream) {
+  return adminUsageLineOf(billing, (usd: number) => formatReconciliationMoney(usd, sideRate(item, "income", currency)));
 }
 export const costText = (item: any, currency: ReconciliationCurrency, billing = item?.upstream) => isFixedCost(item)
   ? FIXED_COST_TEXT : reconciliationBillingText(billing, sideRate(item, "cost", currency));

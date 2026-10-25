@@ -7290,6 +7290,25 @@ test("R1「今天」读用户列表或管理员日志短暂失败：10 分钟内
   assert.notEqual(late.downstream.state, "complete", "超过 10 分钟才读不到");
 });
 
+test("R1「今天」读用户列表碰到 401（令牌坏了）不沿用上一份：马上读不到，不当短暂失败（审核 R1 第三轮低-1）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const prev = globalThis.fetch;
+  let broken = false;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (broken && url.host === "own.test" && url.pathname === "/api/user/") return { status: 401, text: async () => JSON.stringify({ success: false, message: "unauthorized" }) };
+    return prev(input, init);
+  });
+  const today = async () => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  assert.equal((await today()).downstream.state, "complete");
+  broken = true;
+  now += 5 * 60000;
+  f.module.invalidateSources();
+  f.rt._ownUsersCache = null; // 用户列表的 10 分钟缓存也清掉，下一次一定要重新读
+  assert.notEqual((await today()).downstream.state, "complete", "401 不沿用上一份");
+});
+
 test("R1 同一轮几条绑定「今天」的终点差几秒：后定终点的先记下以后，先定终点的那条也能接着用更早的一份，不整段重读（审核 R1 中-4）", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
