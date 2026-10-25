@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { MIN_SECRET_LENGTH } from "../lib/key-fingerprint.js";
+import { MIN_SECRET_LENGTH, WEAK_SECRET_TEXT, secretWeakness } from "../lib/key-fingerprint.js";
 import { resolveDatabase } from "./dsn.js";
 
 export function configError(message) {
@@ -10,7 +10,9 @@ export function configError(message) {
 export function loadConfig(env = process.env) {
   const secret = String(env.RELAY_KEY_AGENT_SECRET ?? "").trim();
   if (!secret) throw configError("没有设置 RELAY_KEY_AGENT_SECRET");
-  if (secret.length < MIN_SECRET_LENGTH) throw configError(`令牌太短（RELAY_KEY_AGENT_SECRET 至少 ${MIN_SECRET_LENGTH} 个字符）`);
+  const weakness = secretWeakness(secret);
+  if (weakness === "SECRET_TOO_SHORT") throw configError(`令牌太短（RELAY_KEY_AGENT_SECRET 至少 ${MIN_SECRET_LENGTH} 个字符）`);
+  if (weakness) throw configError(WEAK_SECRET_TEXT);
   let database;
   try { database = resolveDatabase(env); } catch (e) { throw configError(e.message); }
   const port = env.PORT ? Number(env.PORT) : 8790;

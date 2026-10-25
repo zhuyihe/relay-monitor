@@ -13,7 +13,7 @@ import { createReader } from "./reader.js";
 import { buildSnapshot } from "./snapshot.js";
 import { AVAILABLE_KINDS, TEST_KINDS, openTestDatabase } from "./test-support/databases.js";
 
-const SECRET = `contract-secret-${"x".repeat(32)}`;
+const SECRET = "contract-Zq3v9LmX2rT7wYk1NcB8dHfJ5sGaP4uE";
 const derived = deriveAgentKeys(SECRET);
 const AGENT = new URL("./server.js", import.meta.url).pathname;
 
@@ -46,10 +46,10 @@ async function startAgent(env) {
 
 const fixtureRows = () => [
   { id: 1, type: 1, key: "sk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c", base_url: "https://up.example.com", channel_info: { is_multi_key: false } },
-  { id: 2, type: 1, key: "sk-aaaaaaaaaaaaaaaaaaaa\nsk-bbbbbbbbbbbbbbbbbbbb\n", channel_info: { is_multi_key: true, multi_key_size: 2, multi_key_status_list: { 1: 2 } } },
-  { id: 3, type: 1, key: '["sk-cccccccccccccccccccc","sk-dddddddddddddddddddd"]', channel_info: { is_multi_key: true } },
+  { id: 2, type: 1, key: "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", channel_info: { is_multi_key: true, multi_key_size: 2, multi_key_status_list: { 1: 2 } } },
+  { id: 3, type: 1, key: '["sk-cccccccccccccccccccccccccccccc","sk-dddddddddddddddddddddddddddddd"]', channel_info: { is_multi_key: true } },
   { id: 4, type: 41, key: '{"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----secret"}', channel_info: null },
-  { id: 5, type: 1, key: "sk-eeeeeeeeeeeeeeeeeeee", channel_info: null },
+  { id: 5, type: 1, key: "sk-eeeeeeeeeeeeeeeeeeeeeeeeeeeeee", channel_info: null },
   { id: 6, type: 1, key: "", status: 2 },
   { id: 7, type: 1, key: "AKIAEXAMPLE|secretsecretsecret", channel_info: null },
 ];
@@ -85,7 +85,7 @@ for (const kind of TEST_KINDS) {
 
     await t.test("老版本没有 channel_info 列：照样读，全当单 Key", async (st) => {
       await db.reset({ withChannelInfo: false });
-      await db.seed([{ id: 1, key: "sk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c" }, { id: 2, key: "sk-aaaaaaaaaaaaaaaaaaaa\nsk-bbbbbbbbbbbbbbbbbbbb" }]);
+      await db.seed([{ id: 1, key: "sk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c" }, { id: 2, key: "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }]);
       const reader = readerFor(db.env);
       st.after(() => reader.close());
       const snapshot = snapshotOf(await reader.read(), kind);
@@ -148,7 +148,7 @@ for (const kind of TEST_KINDS) {
         await assert.rejects(down.read(), { code: "DB_UNREACHABLE" });
       });
 
-      await t.test("只读账号：只给 7 列的列级授权能读；少给 channel_info 就是 DB_DENIED", async (st) => {
+      await t.test("只读账号：只给 7 列的列级授权能读；少给 channel_info 退回照样读，少给 key 是 DB_DENIED", async (st) => {
         const name = `ka_${randomBytes(4).toString("hex")}`;
         const password = randomBytes(12).toString("hex");
         try {
@@ -165,10 +165,16 @@ for (const kind of TEST_KINDS) {
         st.after(() => reader.close());
         assert.equal((await reader.read()).length, 2);
         assert.equal(await reader.inspectReadOnly(), true);
+        // 少给 channel_info：退回不含它的 SELECT，照样能读（多 Key 渠道当成单 Key）
         await db.admin.query(`REVOKE SELECT (channel_info) ON \`${db.database}\`.channels FROM '${name}'@'%'`);
         const narrow = readerFor({ KEY_AGENT_DSN: db.goDsn(name, password) });
         st.after(() => narrow.close());
-        await assert.rejects(narrow.read(), { code: "DB_DENIED" });
+        assert.equal((await narrow.read()).length, 2);
+        // 少给别的列（key）：这不是退得回的，回 DB_DENIED
+        await db.admin.query(`REVOKE SELECT (\`key\`) ON \`${db.database}\`.channels FROM '${name}'@'%'`);
+        const noKey = readerFor({ KEY_AGENT_DSN: db.goDsn(name, password) });
+        st.after(() => noKey.close());
+        await assert.rejects(noKey.read(), { code: "DB_DENIED" });
       });
     }
 

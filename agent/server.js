@@ -3,6 +3,7 @@
 import http from "node:http";
 import https from "node:https";
 import { timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { deriveAgentKeys } from "../lib/key-fingerprint.js";
@@ -13,6 +14,9 @@ import { PROTOCOL_VERSION, createSnapshotSource } from "./snapshot.js";
 const UNAUTHORIZED_LOG_LIMIT = 10;
 const UNAUTHORIZED_WINDOW_MS = 60000;
 const MAX_TRACKED_SOURCES = 10000;
+// 所有来源加起来每分钟最多记这么多行令牌不对的日志：来源可以编（开了 KEY_AGENT_TRUST_PROXY 又没有可信代理时）
+const UNAUTHORIZED_GLOBAL_LOG_LIMIT = 100;
+const FLUSH_MIN_INTERVAL_MS = 1000;
 const FAILURE_LOG_REPEAT_MS = 10 * 60000;
 
 const defaultLog = (entry) => process.stdout.write(`${JSON.stringify({ t: new Date().toISOString(), ...entry })}\n`);
@@ -26,6 +30,17 @@ export function tokenMatches(header, expectedToken) {
   return timingSafeEqual(same ? got : Buffer.alloc(want.length), want) && same && !!match;
 }
 
+// Accept-Encoding 里有 gzip（或 *）且质量不是 0
+export function acceptsGzip(header) {
+  for (const part of String(header ?? "").split(",")) {
+    const [name, ...params] = part.trim().toLowerCase().split(";");
+    if (name !== "gzip" && name !== "*") continue;
+    const q = params.map((p) => /^\s*q\s*=\s*([0-9.]+)\s*$/.exec(p)?.[1]).find((v) => v !== undefined);
+    if (q === undefined || Number(q) > 0) return true;
+  }
+  return false;
+}
+
 function etagMatches(header, etag) {
   return String(header ?? "").split(",").some((part) => part.trim().replace(/^W\//, "") === etag);
 }
@@ -36,21 +51,32 @@ export function createAgentServer({ config, reader, now = Date.now, log = defaul
   const failedBySource = new Map();
   let lastFailureLog = { code: null, at: 0 };
 
-  // 401 的限流只管日志：藏在反向代理后面时「来源」就是代理本身，停答会让路人把控制台一起挡在外面。令牌是 256 位，猜不出。
-  // 每个来源每分钟只记前 10 条，这一分钟结束时补一行「又有 N 次」，免得刷屏把重要的日志挤掉
+  // 401 的限流只管日志：藏在反向代理后面时「来源」就是代理本身，停答会让路人把控制台一起挡在外面。令牌是 256 位，猜不出（secret 太弱起不来）。
+  // 每个来源每分钟只记前 10 条，所有来源加起来每分钟最多 100 条，这一分钟结束时补一行「又有 N 次」，免得刷屏把重要的日志挤掉
+  const globalWindow = { start: 0, count: 0 };
+  let lastFlushAt = 0;
   function flushSuppressed(t, force = false) {
+    if (!force && t - lastFlushAt < FLUSH_MIN_INTERVAL_MS) return;
+    lastFlushAt = t;
     for (const [from, entry] of failedBySource) {
       if (!force && t - entry.start < UNAUTHORIZED_WINDOW_MS) continue;
       if (entry.count > UNAUTHORIZED_LOG_LIMIT) log({ ev: "unauthorized_suppressed", from, count: entry.count - UNAUTHORIZED_LOG_LIMIT });
       failedBySource.delete(from);
     }
+    if (globalWindow.count > UNAUTHORIZED_GLOBAL_LOG_LIMIT && (force || t - globalWindow.start >= UNAUTHORIZED_WINDOW_MS)) {
+      log({ ev: "unauthorized_suppressed", from: "*", count: globalWindow.count - UNAUTHORIZED_GLOBAL_LOG_LIMIT });
+    }
+    if (force || t - globalWindow.start >= UNAUTHORIZED_WINDOW_MS) Object.assign(globalWindow, { start: t, count: 0 });
   }
 
   function noteUnauthorized(req) {
+    // X-Forwarded-For 末段是代理加的，但开了 TRUST_PROXY 而代理没清外面传进来的头时它可以是任何东西：不是合法地址就用连进来的地址
     const forwarded = String(req.headers["x-forwarded-for"] ?? "").split(",").map((s) => s.trim()).filter(Boolean).at(-1);
-    const from = config.trustProxy && forwarded ? forwarded : req.socket.remoteAddress ?? "unknown";
+    const from = config.trustProxy && forwarded && isIP(forwarded) ? forwarded : req.socket.remoteAddress ?? "unknown";
     const t = now();
     flushSuppressed(t);
+    if (!globalWindow.start) globalWindow.start = t;
+    globalWindow.count += 1;
     let entry = failedBySource.get(from);
     if (!entry) {
       entry = { start: t, count: 0 };
@@ -58,7 +84,7 @@ export function createAgentServer({ config, reader, now = Date.now, log = defaul
       failedBySource.set(from, entry);
     }
     entry.count += 1;
-    if (entry.count <= UNAUTHORIZED_LOG_LIMIT) log({ ev: "unauthorized", from });
+    if (entry.count <= UNAUTHORIZED_LOG_LIMIT && globalWindow.count <= UNAUTHORIZED_GLOBAL_LOG_LIMIT) log({ ev: "unauthorized", from });
   }
 
   function send(req, res, status, body, headers = {}) {
@@ -95,7 +121,7 @@ export function createAgentServer({ config, reader, now = Date.now, log = defaul
       log({ ev: "req", path, status: 304, channels: snapshot.channelCount, ms: now() - started });
       return send(req, res, 304, null, headers);
     }
-    const gzip = /\bgzip\b/i.test(String(req.headers["accept-encoding"] ?? ""));
+    const gzip = acceptsGzip(req.headers["accept-encoding"]);
     log({ ev: "req", path, status: 200, channels: snapshot.channelCount, ms: now() - started });
     return send(req, res, 200, gzip ? snapshot.gzip : snapshot.body,
       { ...headers, "Content-Type": "application/json; charset=utf-8", ...(gzip ? { "Content-Encoding": "gzip" } : {}) });
@@ -113,7 +139,9 @@ export function createAgentServer({ config, reader, now = Date.now, log = defaul
   server.requestTimeout = 10000;
   server.headersTimeout = 10000;
   server.keepAliveTimeout = 5000;
-  server.maxConnections = 64;
+  // 只发半截请求头的连接 10 秒后被收掉（每 5 秒查一次，默认 30 秒查一次），连接数上限放宽些；直接对外时还是建议放在反向代理后面（部署说明）
+  server.connectionsCheckingInterval = 5000;
+  server.maxConnections = 256;
   // 没有新请求进来时，上一分钟被压下的条数也要补记
   const sweeper = setInterval(() => flushSuppressed(now()), UNAUTHORIZED_WINDOW_MS);
   sweeper.unref();
@@ -130,10 +158,18 @@ async function main() {
     process.stderr.write(`[致命] 读取服务起不来：${err.message}\n`);
     process.exit(1);
   }
-  const reader = createReader(config.database);
+  const reader = createReader(config.database, { onEvent: defaultLog });
   const server = createAgentServer({ config, reader });
+  // 端口被占用这类起不来的事：说一句、退出，不带别的
+  server.on("error", (err) => { process.stderr.write(`[致命] 读取服务起不来：端口 ${config.port} 打不开（${/^[A-Z0-9_]{1,30}$/.test(String(err?.code)) ? err.code : "UNKNOWN"}）\n`); process.exit(1); });
   server.listen(config.port, config.host, () => defaultLog({ ev: "start", db: reader.kind, port: config.port, tls: !!config.tls }));
-  const stop = () => server.close(() => reader.close().finally(() => process.exit(0)));
+  // 停的时候：先不再收新连接、收掉空闲的；还有半截请求的连接最多再等 3 秒就强行关掉，整个最多 10 秒，不让它拖着进程不退出
+  const stop = () => {
+    server.close(() => reader.close().finally(() => process.exit(0)));
+    server.closeIdleConnections();
+    setTimeout(() => server.closeAllConnections(), 3000).unref();
+    setTimeout(() => process.exit(0), 10000).unref();
+  };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
 }

@@ -7,40 +7,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { deriveAgentKeys } from "../lib/key-fingerprint.js";
 import { loadConfig } from "./config.js";
 import { ReadFailure } from "./reader.js";
-import { createAgentServer, tokenMatches } from "./server.js";
+import { acceptsGzip, createAgentServer, tokenMatches } from "./server.js";
 
-const SECRET = "unit-test-secret-0123456789-abcdefghijklmnop";
-const { token } = deriveAgentKeys(SECRET);
-const baseConfig = { secret: SECRET, trustProxy: false, tls: null };
-
-function fakeReader(rows, { kind = "mysql" } = {}) {
-  const state = { reads: 0, rows, error: null };
-  return { state, kind, async read() { state.reads += 1; if (state.error) throw state.error; return state.rows; }, async close() {} };
-}
-
-async function withServer(reader, options, fn) {
-  const logs = [];
-  const clock = { t: 1_700_000_000_000 };
-  const server = createAgentServer({ config: { ...baseConfig, ...options }, reader, now: () => clock.t, log: (entry) => logs.push(entry) });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
-  const get = (path, headers = {}, method = "GET") => new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, path, method, headers, agent: false }, (res) => {
-      const chunks = [];
-      res.on("data", (c) => chunks.push(c));
-      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
-    });
-    req.on("error", reject);
-    req.end();
-  });
-  try { await fn({ get, logs, clock }); } finally { await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }); }
-}
-
-const auth = { Authorization: `Bearer ${token}` };
-const ROWS = [{ id: 1, name: "A", type: 1, status: 1, base_url: "https://x", key: "sk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c", channel_info: null }];
+import { ROWS, SECRET, auth, baseConfig, fakeReader, token, withServer } from "./test-support/server-fixture.js";
 
 test("令牌比较：对的过，缺头、格式不对、长度不对、不对都不过", () => {
   assert.equal(tokenMatches(`Bearer ${token}`, token), true);
@@ -230,4 +201,38 @@ test("开 TLS：配了证书和私钥就走 HTTPS", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("X-Forwarded-For：开了 TRUST_PROXY 也只认合法地址，其余用连进来的地址，随便编的写不进日志和内存", async () => {
+  await withServer(fakeReader(ROWS), { trustProxy: true }, async ({ get, logs }) => {
+    await get("/keys", { "X-Forwarded-For": `1.1.1.1, ${"x".repeat(15000)}` });
+    await get("/keys", { "X-Forwarded-For": "not-an-address" });
+    await get("/keys", { "X-Forwarded-For": "2001:db8::7" });
+    const from = logs.filter((l) => l.ev === "unauthorized").map((l) => l.from);
+    assert.equal(from[0], "127.0.0.1");
+    assert.equal(from[1], "127.0.0.1");
+    assert.equal(from[2], "2001:db8::7");
+  });
+});
+
+test("401 日志：所有来源加起来每分钟最多 100 行，多的补一行「*」的汇总", async () => {
+  await withServer(fakeReader(ROWS), { trustProxy: true }, async ({ get, logs, clock }) => {
+    for (let i = 0; i < 130; i += 1) await get("/keys", { "X-Forwarded-For": `10.0.${Math.floor(i / 200)}.${i % 200}` });
+    assert.equal(logs.filter((l) => l.ev === "unauthorized").length, 100);
+    clock.t += 61000;
+    await get("/keys", { Authorization: "Bearer bad" });
+    assert.deepEqual(logs.filter((l) => l.ev === "unauthorized_suppressed" && l.from === "*").map((l) => l.count), [30]);
+  });
+});
+
+test("Accept-Encoding：gzip 或 * 且质量不是 0 才压缩", () => {
+  for (const yes of ["gzip", "gzip, deflate", "deflate, gzip;q=0.5", "*", "GZIP", "gzip;q=1"]) assert.equal(acceptsGzip(yes), true, yes);
+  for (const no of ["", undefined, "deflate", "gzip;q=0", "gzip; q=0.0", "identity", "br"]) assert.equal(acceptsGzip(no), false, String(no));
+});
+
+test("配置：太弱的 secret 起不来（不同字符少于 16 个、整串重复、全数字、全小写），日志只写一句、不带令牌", () => {
+  for (const weak of ["x".repeat(32), "12345678901234567890123456789012", "abcdefghijklmnopqrstuvwxyzabcdef", "password".repeat(5)]) {
+    assert.throws(() => loadConfig({ RELAY_KEY_AGENT_SECRET: weak }), (e) => e.code === "CONFIG_INVALID" && e.message === "令牌太弱，请用 openssl rand -base64 32 生成" && !e.message.includes(weak));
+  }
+  assert.equal(loadConfig({ RELAY_KEY_AGENT_SECRET: "Zq3v9LmX2rT7wYk1NcB8dHfJ5sGaP4uE" }).port, 8790);
 });

@@ -50,7 +50,9 @@ export function createSnapshotSource({ reader, db, fingerprintKeyBytes, now = Da
   let inflight = null;
   return {
     async get() {
-      if (current && now() - current.readAt < intervalMs) return current;
+      // 时钟往回拨时（age 为负）这份缓存的年龄说不清，重读一次，不让它一直当新的
+      const age = current ? now() - current.readAt : -1;
+      if (current && age >= 0 && age < intervalMs) return current;
       inflight ??= (async () => {
         try {
           current = buildSnapshot(await reader.read(), { db, fingerprintKeyBytes, now: now() });

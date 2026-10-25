@@ -3,7 +3,8 @@
 FROM node:24-alpine AS deps
 WORKDIR /app
 COPY agent/package.json agent/package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund
+# --omit=peer：mysql2 的 peer 依赖（@types/node 之类）用不上，不装；--ignore-scripts：依赖里的安装脚本一个都不跑
+RUN npm ci --omit=dev --omit=peer --ignore-scripts --no-audit --no-fund
 
 FROM node:24-alpine
 ENV NODE_ENV=production
@@ -18,5 +19,5 @@ COPY lib/key-fingerprint.js ./lib/key-fingerprint.js
 WORKDIR /data
 EXPOSE 8790
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["node", "/app/agent/healthcheck.js"]
-# 内存封顶 64 MB；node:sqlite 的实验性警告不打
+# V8 堆上限 64 MB（进程整个约 60–80 MB，容器内存限制请设 128 MB 以上）；node:sqlite 的实验性警告不打
 CMD ["node", "--max-old-space-size=64", "--disable-warning=ExperimentalWarning", "/app/agent/server.js"]

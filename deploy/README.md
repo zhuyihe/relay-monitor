@@ -156,7 +156,7 @@ docker compose up -d relay-monitor
 openssl rand -base64 32
 ```
 
-至少 32 个字符，太短服务起不来。令牌填进读取服务的 `RELAY_KEY_AGENT_SECRET`，控制台那一侧上线后，再把同一串填进控制台的「读取服务令牌」。读取服务用它派生出两把互不相干的密钥：一把当请求令牌，一把算指纹；令牌出现在代理日志里时，推不出指纹密钥。
+**必须用上面这条命令生成，不要自己编。** 令牌错了读取服务一律回 401、不限次数，在网上一直猜的唯一防线就是这串令牌够随机。所以太短（不到 32 个字符）、太弱（不同字符少于 16 个、整串是同一段重复、全是数字、全是小写字母）的，读取服务起不来，日志里只写一句「令牌太短」或「令牌太弱，请用 openssl rand -base64 32 生成」，不带令牌。令牌填进读取服务的 `RELAY_KEY_AGENT_SECRET`，控制台那一侧上线后，再把同一串填进控制台的「读取服务令牌」。读取服务用它派生出两把互不相干的密钥：一把当请求令牌，一把算指纹；令牌出现在代理日志里时，推不出指纹密钥。
 
 ### 2. 加进自营站点的 compose
 
@@ -170,7 +170,7 @@ openssl rand -base64 32
     ports:
       - "127.0.0.1:8790:8790"
     environment:
-      - SQL_DSN=${SQL_DSN}                  # 和 new-api 用同一个；建了只读账号就改成 KEY_AGENT_DSN=…（见下）
+      - SQL_DSN=${SQL_DSN}                  # 把 new-api 那一段里 SQL_DSN 的值抄过来（这里的 ${SQL_DSN} 没设值会悄悄变成 SQLite）；建了只读账号就改成 KEY_AGENT_DSN=…（见下）
       - RELAY_KEY_AGENT_SECRET=第 1 步生成的那一串
     volumes:
       - ./data:/data                        # 只有 SQLite 才要：和 new-api 挂同一个目录、同一个 SQLITE_PATH
@@ -178,12 +178,12 @@ openssl rand -base64 32
 
 - 数据库照 New API 自己的规则选：`SQL_DSN` 以 `postgres://` 或 `postgresql://` 开头是 PostgreSQL，其他非空的是 MySQL，没设是 SQLite（路径照 `SQLITE_PATH`，默认 `one-api.db`）。
 - 镜像和控制台的镜像一样放在 GHCR 上：私有的话先 `docker login ghcr.io`，或者在 GitHub 的包设置里把它改成公开。
-- 其他环境变量：`PORT`（默认 8790）、`HOST`（默认 `0.0.0.0`）。
-- 内存封顶 64 MB。MySQL、PostgreSQL 不需要写目录，可以在这一段里加 `user: node`，不用 root 跑；SQLite 不能加（见下）。
+- 其他环境变量：`PORT`（默认 8790）、`HOST`（默认 `0.0.0.0`）。DSN 的写法和 New API 自己的有几处不同：`SQL_DSN=local` 当 SQLite 用，`postgres://` 认大小写不敏感，MySQL 的库名里的 `%xx` 会解码，`tls=preferred` 当 `tls=true`。
+- 内存：V8 堆上限设成了 64 MB，进程整个约 60–80 MB（1000 个渠道），所以容器的内存限制（`mem_limit`）请设 128 MB 以上，设 64 MB 会被杀。MySQL、PostgreSQL 不需要写目录，可以在这一段里加 `user: node`，不用 root 跑；SQLite 不能加（见下）。
 
 ### 3. 让控制台连得到：HTTPS
 
-控制台只认 `https://` 的读取服务地址，证书照常校验，没有跳过校验的开关。默认地址是「你站的地址 + `/relay-monitor-agent/`」，所以要在你站的反向代理里把这个路径转给读取服务，并且**把前缀去掉**（读取服务自己只认 `/keys` 和 `/healthz`）。
+控制台那一侧上线后只认 `https://` 的读取服务地址，证书照常校验，没有跳过校验的开关。默认地址是「你站的地址 + `/relay-monitor-agent/`」，所以要在你站的反向代理里把这个路径转给读取服务，并且**把前缀去掉**（读取服务自己只认 `/keys` 和 `/healthz`）。
 
 Nginx（放在你站的 `server { … }` 里；`proxy_pass` 末尾那个 `/` 是去掉前缀用的，不能少）：
 
@@ -205,6 +205,8 @@ handle_path /relay-monitor-agent/* {
 
 **没有反向代理**的，读取服务自己也能开 HTTPS：把证书和私钥挂进去，设 `TLS_CERT_FILE`、`TLS_KEY_FILE`（两个都要设），可以直接用站点现有的证书。这时控制台里填「https://你的站点:端口」。证书只在启动时读，续期以后要重启这个容器。不支持明文 HTTP。
 
+**直接对外开端口有一个风险**：读取服务在连接数上限（256）以内，一个只发半截请求头的连接最多占 10 秒；有人开满连接不停地发半截请求就能让它一直答不了别人（不需要令牌）。所以**推荐放在反向代理后面**，由代理挡掉这类连接；不得不直接对外时，用防火墙只放行控制台的出口地址。
+
 `KEY_AGENT_TRUST_PROXY=true` 只影响日志：读取服务把令牌不对的请求按来源地址限制日志条数（每个来源每分钟只记前 10 条，防日志被刷满），藏在代理后面时设上它，来源才取 `X-Forwarded-For` 的最后一个；不设，来源就是代理本身，也不影响使用。令牌不对的请求一律回 401，不管多少次，令牌对的请求不受影响。
 
 ### 4. 数据库账号：建议建只读账号
@@ -214,6 +216,7 @@ handle_path /relay-monitor-agent/* {
 MySQL（`<库>` 换成 New API 的库名，密码自己定）：
 
 ```sql
+-- '%' 是任何地址都能连：能收窄就收窄，例如换成 compose 网络里读取服务的地址或网段
 CREATE USER 'relay_key_agent'@'%' IDENTIFIED BY '换成你生成的密码';
 GRANT SELECT (id, name, type, status, base_url, `key`, channel_info) ON `<库>`.channels TO 'relay_key_agent'@'%';
 ```
@@ -229,9 +232,9 @@ GRANT USAGE ON SCHEMA public TO relay_key_agent;
 GRANT SELECT (id, name, type, status, base_url, "key", channel_info) ON channels TO relay_key_agent;
 ```
 
-连接串写成 `KEY_AGENT_DSN=postgres://relay_key_agent:密码@postgres:5432/<库>`。
+连接串写成 `KEY_AGENT_DSN=postgres://relay_key_agent:密码@postgres:5432/<库>`（密码里有 `@`、`/`、`:`、`#`、`?` 这类字符时要先做百分号编码，或者换个只含字母数字的密码）。
 
-很老的版本的 `channels` 表没有 `channel_info` 列，授权里去掉它就行，读取服务读不到这一列时自动改成只读其余的，全部渠道当成只有一把 Key。
+很老的版本的 `channels` 表没有 `channel_info` 列：授权里去掉它就行（授权的列写 `id, name, type, status, base_url, \`key\``，授权列表里写了不存在的列，MySQL 会建不出这条授权）。读取服务读不到这一列时（列不存在，或者账号没有这一列的权限）自动改成只读其余的，全部渠道当成只有一把 Key，日志里记一行 `channel_info_missing`；之后每 10 分钟再试一次带这一列的，New API 升级补上这一列、账号也有权限以后，会自己用上（日志记 `channel_info_restored`），不用重启。
 
 **不建、直接用 New API 的 `SQL_DSN` 的风险**：读取服务这个进程手里就有 New API 库的读写权限。读取服务万一被人攻破，就等于 New API 的库被攻破，包括用户、令牌、充值记录。读取服务自己做的收窄是：只发一条固定的 `SELECT`、连上以后把会话设成只读、连接池只开 1 个连接。这些挡得住代码出错写库，**挡不住进程被人控制**，所以只读账号是「推荐」，不是可有可无。
 
@@ -248,11 +251,10 @@ curl -s http://127.0.0.1:8790/healthz        # 回 {"ok":true,"v":1}
 docker compose logs --tail 20 relay-key-agent
 ```
 
-带令牌读一次渠道（令牌是第 1 步那一串派生出来的，不是原串；在控制台设好以后控制台会自己读，这里只用来排错）：
+带令牌读一次渠道（请求令牌是第 1 步那一串派生出来的，不是原串；在控制台设好以后控制台会自己读，这里只用来排错）。令牌不要打到终端或 shell 历史里，下面这条直接把它交给 curl，不显示出来：
 
 ```bash
-docker compose exec relay-key-agent node -e 'import("/app/lib/key-fingerprint.js").then(m => console.log(m.deriveAgentKeys(process.env.RELAY_KEY_AGENT_SECRET).token))'
-curl -s -H "Authorization: Bearer 上一行打出来的令牌" http://127.0.0.1:8790/keys
+docker compose exec -T relay-key-agent node -e 'import("/app/lib/key-fingerprint.js").then(m => console.log("Authorization: Bearer " + m.deriveAgentKeys(process.env.RELAY_KEY_AGENT_SECRET).token))' | curl -s -H @- http://127.0.0.1:8790/keys
 ```
 
 回的是每个渠道的 `id`、`name`、`type`、`status`、`baseUrl` 和每把 Key 的打码 `m`、指纹 `f`，看不到完整的 Key。Vertex 的账号文件、AWS 的 `ak|sk` 这类不是一把 Key 的渠道回 `keyless: true`，不给打码。

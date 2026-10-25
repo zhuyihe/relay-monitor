@@ -224,7 +224,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm ci --prefix agent
-      - run: node --test --test-timeout=60000 lib/key-fingerprint.test.js agent/dsn.test.js agent/reader.test.js agent/snapshot.test.js agent/server.test.js agent/reader.contract.test.js
+      - run: node --test --test-timeout=60000 lib/key-fingerprint.test.js agent/dsn.test.js agent/reader.test.js agent/snapshot.test.js agent/server.test.js agent/reader.contract.test.js agent/reader.resilience.test.js
         env:
           KEY_AGENT_TEST_MYSQL_DSN: mysql://root:ci-agent-root@127.0.0.1:3306/relay_key_agent
           KEY_AGENT_TEST_PG_URL: postgres://postgres:ci-agent-pg@127.0.0.1:5432/relay_key_agent
@@ -255,9 +255,22 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18790/keys)" = 401
           docker exec key-agent-smoke node /app/agent/healthcheck.js
           docker logs key-agent-smoke
-      - name: Short secret refuses to start
+      # 镜像里两个数据库驱动都要装全（读取服务按需动态加载，缺了要到真连库时才发现）
+      - name: Database drivers load inside the image
+        run: docker run --rm -w /app --entrypoint node relay-key-agent:smoke --input-type=module -e "await import('mysql2/promise'); await import('pg'); await import('node:sqlite'); console.log('drivers ok')"
+      # 令牌太短、太弱都要起不来：退出码 1，日志里是那一句、不带令牌；镜像没构建出来、docker 自己报错也是非 1 或没有那句，不会假通过
+      - name: Short and weak secrets refuse to start
         run: |
-          if docker run --rm -e RELAY_KEY_AGENT_SECRET=too-short relay-key-agent:smoke; then echo "should not start"; exit 1; fi
+          for secret in too-short "$(printf 'x%.0s' $(seq 1 32))"; do
+            set +e
+            out=$(docker run --rm -e RELAY_KEY_AGENT_SECRET="$secret" relay-key-agent:smoke 2>&1)
+            code=$?
+            set -e
+            echo "$out"
+            test "$code" -eq 1
+            echo "$out" | grep -q '令牌太短\|令牌太弱'
+            if echo "$out" | grep -q -F "$secret"; then echo "the secret must not be logged"; exit 1; fi
+          done
 
   build:
     needs: [verify, unit, ui, schema-verify, image-smoke, agent, agent-image-smoke]

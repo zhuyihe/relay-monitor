@@ -22,16 +22,46 @@
       "fingerprint": "RQAhyc74EsEMrh_kSFccGw"
     },
     {
-      "input": "sk-sk-nested1234567890abcdef",
-      "normalized": "sk-nested1234567890abcdef",
-      "mask": "sk-n…cdef",
-      "fingerprint": "sqFoc0MW0QnczFpazHTqKA"
+      "input": "\r\nsk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c\r\n",
+      "normalized": "AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "mask": "AbC1…9f0c",
+      "fingerprint": "RQAhyc74EsEMrh_kSFccGw"
+    },
+    {
+      "input": "\tsk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c\t",
+      "normalized": "AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "mask": "AbC1…9f0c",
+      "fingerprint": "RQAhyc74EsEMrh_kSFccGw"
+    },
+    {
+      "input": " sk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c ",
+      "normalized": "AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "mask": "AbC1…9f0c",
+      "fingerprint": "RQAhyc74EsEMrh_kSFccGw"
+    },
+    {
+      "input": "sk- AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "normalized": " AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "mask": " AbC…9f0c",
+      "fingerprint": "a6kjEmfXYa2n1m1w1rU5yA"
+    },
+    {
+      "input": "Sk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "normalized": "Sk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "mask": "Sk-A…9f0c",
+      "fingerprint": "uKBPRpLtZwMbkisbEyPeSg"
     },
     {
       "input": "SK-uppercase-prefix-is-not-stripped-123456",
       "normalized": "SK-uppercase-prefix-is-not-stripped-123456",
       "mask": "SK-u…3456",
       "fingerprint": "dg8YyRMd6zkvja-pXUQGBg"
+    },
+    {
+      "input": "sk-sk-nested1234567890abcdefghij",
+      "normalized": "sk-nested1234567890abcdefghij",
+      "mask": "sk-n…ghij",
+      "fingerprint": "CQyJDSeOtzBxFTOCvf3r6Q"
     },
     {
       "input": "AIzaSyD-example_0123456789abcdefghijklmnopq",
@@ -46,16 +76,22 @@
       "fingerprint": "KUE3_vk9cdq4ADTNgSxFzw"
     },
     {
-      "input": "sk-0123456789abcdef",
-      "normalized": "0123456789abcdef",
-      "mask": "0123…cdef",
-      "fingerprint": "joN9EUvdb6_DvheX4Unx6A"
+      "input": "sk-0123456789abcdefghijklmn",
+      "normalized": "0123456789abcdefghijklmn",
+      "mask": "0123…klmn",
+      "fingerprint": "sBCtrJYXw2riIr1TnCQTZQ"
     },
     {
-      "input": "sk-0123456789abcde",
-      "normalized": "0123456789abcde",
+      "input": "sk-0123456789abcdefghijklm",
+      "normalized": "0123456789abcdefghijklm",
       "mask": "…",
-      "fingerprint": "VBVle-PF7DaVitjIeET1CQ"
+      "fingerprint": "1xYDO8EkyVc28cRYHzekGQ"
+    },
+    {
+      "input": "sk-0123456789abcdef",
+      "normalized": "0123456789abcdef",
+      "mask": "…",
+      "fingerprint": "joN9EUvdb6_DvheX4Unx6A"
     },
     {
       "input": "short",
@@ -64,10 +100,10 @@
       "fingerprint": "zBEjHobrMaDc8ocDj4zixQ"
     },
     {
-      "input": "密钥-含中文-0123456789abcdef-结尾",
-      "normalized": "密钥-含中文-0123456789abcdef-结尾",
-      "mask": "密钥-含…f-结尾",
-      "fingerprint": "hR8JJrq6s3MEdk7riYWzkw"
+      "input": "密钥-含中文-0123456789abcdef-结尾-补足二十四位以上",
+      "normalized": "密钥-含中文-0123456789abcdef-结尾-补足二十四位以上",
+      "mask": "密钥-含…四位以上",
+      "fingerprint": "eaMlR013oEYfKytf2QVBOQ"
     },
     {
       "input": "",
@@ -113,6 +149,18 @@
       }
     },
     {
+      "name": "multi tab and nbsp trimmed",
+      "raw": "\tsk-aaaaaaaaaaaaaaaa \nsk-bbbbbbbbbbbbbbbb",
+      "multi": true,
+      "expected": {
+        "keys": [
+          "sk-aaaaaaaaaaaaaaaa",
+          "sk-bbbbbbbbbbbbbbbb"
+        ],
+        "keyless": false
+      }
+    },
+    {
       "name": "multi json array",
       "raw": " [\"sk-aaaaaaaaaaaaaaaa\", \" sk-bbbbbbbbbbbbbbbb \", \"\"] ",
       "multi": true,
@@ -136,6 +184,24 @@
     {
       "name": "multi bad json",
       "raw": "[\"sk-aaaa",
+      "multi": true,
+      "expected": {
+        "keys": [],
+        "keyless": true
+      }
+    },
+    {
+      "name": "multi newline with a pipe line",
+      "raw": "sk-aaaaaaaaaaaaaaaa\nAKIAEXAMPLE|secretsecret",
+      "multi": true,
+      "expected": {
+        "keys": [],
+        "keyless": true
+      }
+    },
+    {
+      "name": "multi newline with a brace line",
+      "raw": "sk-aaaaaaaaaaaaaaaa\n{\"k\":1}",
       "multi": true,
       "expected": {
         "keys": [],
