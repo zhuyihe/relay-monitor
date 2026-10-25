@@ -99,7 +99,10 @@ function channelNamesOf(r: any): WorkflowState["channelNames"] {
   list(r?.channels).forEach((c: any) => { if (!c?.missing) add(current, catalogueOwn, c); });
   // 每日利润
   list(r?.results).forEach((x: any) => list(x?.rule?.channels).forEach((c: any) => add(saved, x?.rule?.ownStationId, c)));
-  [r?.coverage, ...list(r?.groups).map((g: any) => g?.coverage)].forEach((cov: any) => list(cov?.channels).forEach((c: any) => add(current, c?.ownStationId, c)));
+  // coverage 里「自营站点来源没确认」（source_unverified）的那条带的是绑定存下的旧名，和当前那条同一个自营站点 id、渠道 id，算旧名，不然两条按先后互相盖
+  [r?.coverage, ...list(r?.groups).map((g: any) => g?.coverage)].forEach((cov: any) =>
+    list(cov?.channels).forEach((c: any) => add(c?.status === "source_unverified" ? saved : current, c?.ownStationId, c)),
+  );
   return { current, saved };
 }
 

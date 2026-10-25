@@ -2775,6 +2775,13 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
   const mobile = await openFixturePage(t, handler, { width: 390, height: 844 }, false, accounts, "/stations");
   const card = (name) => mobile.locator(".jy-stations-m li", { hasText: name }).first();
   await card("Only 上游").getByRole("button", { name: `${TEST_READ}（Only 上游）`, exact: true }).waitFor();
+  const ids = await mobile.locator("[id]").evaluateAll((els) => els.map((el) => el.id));
+  assert.equal(ids.length, new Set(ids).size, "表格和卡片两份 DOM 里 id 不重复");
+  const todoCardButton = card("Todo 上游").getByRole("button", { name: `${TEST_READ}（Todo 上游）`, exact: true });
+  assert.equal(await todoCardButton.getAttribute("aria-describedby"), null);
+  await todoCardButton.click(); await mobile.waitForTimeout(400);
+  assert.equal(await mobile.getByRole("tooltip").count(), 0, "手机卡片上点按钮不出提示");
+  await mobile.keyboard.press("Escape");
   assert.ok((await card("Fresh 上游").boundingBox()).height <= 90, "没有事的卡片两行");
   for (const name of ["Only 上游", "Todo 上游"]) assert.ok((await card(name).boundingBox()).height <= 120, `${name} 的卡片三行`);
   // 读不到余额又有事：第三行照样写事的标题，不只剩一个按钮
@@ -3565,14 +3572,18 @@ test("上游列表「这把 Key」说清是哪些渠道：三个以上写「等 
     if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: iso(now) });
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
     // 21 号渠道在自营站点里改过名：绑定存下的是旧名，coverage.channels 是现在的名字；另一个自营站点也有 21 号渠道
+    if (path === "/api/own/analytics") return failJSON(route, 500, { error: "fixture own analytics unavailable" });
+    if (path === "/api/history/overview") return fulfill(route, { series: [] });
     if (path === "/api/reconciliation") return fulfill(route, {
       results: [{ rule: { ownStationId: "own-1", channels: [{ channelId: 21, name: "旧名" }, ...[22, 23, 31, 41].map((id) => ({ channelId: id, name: `渠道${id}` }))] } },
         { rule: { ownStationId: "own-old", channels: [{ channelId: 21, name: "旧站渠道" }] } }],
-      coverage: { channels: [{ ownStationId: "own-1", channelId: 21, name: "渠道21" }, { ownStationId: "own-old", channelId: 21, name: "旧站渠道" }] },
+      coverage: { channels: [{ ownStationId: "own-1", channelId: 21, name: "渠道21" }, { ownStationId: "own-old", channelId: 21, name: "旧站渠道" },
+        { ownStationId: "own-1", channelId: 21, name: "旧名", status: "source_unverified" }] },
       actions });
     throw new Error("unexpected API: " + path);
   };
-  const accounts = (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: iso(now) });
+  const accounts = (route) => fulfill(route, { accounts: [{ keys: [{ channels: [{ ownStationId: "own-1", channelId: 21, name: "旧名" }] }] }], unverifiedResources: [],
+    channels: [{ id: 21, name: "渠道21", missing: false }], actions: [{ id: "connect", kind: "connect_channels", ownStationId: "own-1", channelIds: [] }], generatedAt: iso(now) });
   const page = await openFixturePage(t, handler, undefined, false, accounts, "/stations");
   const table = page.locator(".jy-stations-table");
   const status = (name) => table.locator("tbody tr", { hasText: name }).first().locator("td").nth(1);
@@ -3582,12 +3593,14 @@ test("上游列表「这把 Key」说清是哪些渠道：三个以上写「等 
   await status("Soon 上游").getByText("按现在的花法，48 小时以内就会用完", { exact: true }).waitFor();
   await status("Watch 上游").getByText("按现在的花法，7 天以内就会用完", { exact: true }).waitFor();
   await status("New 上游").getByText("渠道「渠道41」用的 Key 还没确认属于哪个上游账号", { exact: true }).waitFor();
-  // 改名以后写现在的名字；刷新几次（重新读每日利润）也不会新旧来回换
-  for (let i = 0; i < 2; i++) {
-    await page.reload();
-    await status("Many 上游").getByText("渠道「渠道21」等 3 个渠道用的 Key 还没确认属于哪个上游账号", { exact: true }).waitFor();
-    assert.equal(await table.getByText(/旧名|旧站渠道/).count(), 0);
-  }
+  // 改名以后写现在的名字；同一页里两路（上游账单、每日利润）先后刷新几次，名字也不来回换。
+  // 不用 page.reload（会清掉模块里的缓存）：从运营总览（两路都读）点顶栏刷新两次，再从侧栏点进上游列表
+  await page.goto(new URL("/", page.url()).href);
+  const refresh = page.getByRole("button", { name: "刷新当前页面数据", exact: true });
+  for (let i = 0; i < 2; i++) { await refresh.waitFor(); await refresh.click(); await page.waitForFunction(() => !document.querySelector(".jy-icon-btn.jy-spinning")); }
+  await page.getByRole("link", { name: "上游资源", exact: true }).first().click();
+  await status("Many 上游").getByText("渠道「渠道21」等 3 个渠道用的 Key 还没确认属于哪个上游账号", { exact: true }).waitFor();
+  assert.equal(await table.getByText(/旧名|旧站渠道/).count(), 0);
 });
 
 test("告警中心提醒节奏在新布局下照常自动保存：展开改数、收起就存上；清空一个框时收不起来、报错一直看得到，改正以后别的数也存上", async (t) => {

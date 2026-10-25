@@ -495,7 +495,8 @@ export default function StationsPage() {
   }, [listed, tz, rules, settings, workflowActions]);
 
   // 「还没确认这把 Key 属于哪个上游账号」：同一个上游下几条绑定都没确认时，总览按种类去重只留一条，渠道要从原始事项里合起来（ui-copy-spec §5.2）
-  const isOwnerTodo = (a: any) => a.code === "COST_OWNER_UNVERIFIED" || (!a.code && a.kind === "verify_identity");
+  // 这类动作只由 COST_OWNER_UNVERIFIED、LEGACY_IDENTITY_UNVERIFIED 引出，标题都是「还没确认这把 Key 属于哪个上游账号」
+  const isOwnerTodo = (a: any) => a.kind === "verify_identity";
   const ownerChannels = useMemo(() => {
     const byStation = new Map<string, Map<string, { own: unknown; id: number }>>();
     for (const a of workflowActions as any[]) {
@@ -679,8 +680,9 @@ export default function StationsPage() {
     const refreshing = !!refreshingIds[v.s.id];
     // 档位自己没有说明时（「还没读取」、部分固定成本状态）退回写事的标题，状态格总说得出为什么
     const note = refreshing ? COPY.refreshing : stale || (v.issue ? null : tier ? v.statusNote || title : title || v.statusNote);
-    // 小钟和「后面几次刷新都没读到」那句只跟「数据截至」走，正在刷新时不挂
-    return { label, level, note, stale: refreshing ? null : stale, title };
+    // 小钟和「后面几次刷新都没读到」那句只跟「数据截至」走，正在刷新时不挂；
+    // titleInCell：下一行写的就是这件事的标题，行末按钮上不再挂一遍提示
+    return { label, level, note, stale: refreshing ? null : stale, title, titleInCell: !!title && note === title };
   };
   // 下一行那一格：放不下的省略，悬停看全；数据旧时前面一个小钟，后面那句说明只给悬停和读屏
   const subLine = (note: string, stale: string | null) => (
@@ -845,10 +847,11 @@ export default function StationsPage() {
   // 行末：有要处理的事时就是那件事的按钮（例如「测试读取」），没有时是「编辑」（ui-design-spec §5.2）
   // 有档位时，状态格的下一行解释档位，这件事的「为什么」放在按钮上：悬停、键盘聚焦都显示（antd Tooltip），读屏由 aria-describedby 念标题。
   // 没有档位的行，标题已经写在状态格里，按钮上不再说一遍。平板触屏看不到悬停：状态格写着「还有 N 个问题」，点按钮打开的抽屉里有原因
-  const todoAction = (v: StationView) => {
+  // mobile：手机卡片上标题已经写在按钮旁边那一行，按钮就是按钮本身（不挂提示：触屏一点提示和抽屉会一起出来；也不和表格那份重复 id）
+  const todoAction = (v: StationView, mobile = false) => {
     const todo = todosOf(v)[0];
     if (!todo) return null;
-    const why = v.statusLabel ? COPY.todoItem(todo.label, todoTitle(todo)) : null;
+    const why = !mobile && !statusOf(v).titleInCell ? COPY.todoItem(todo.label, todoTitle(todo)) : null;
     const whyId = why ? `${uid}-why-${v.s.id}` : undefined;
     const button = (
       <Button type="text" size="small" aria-label={`${todo.label}（${stationDisplayName(v.s)}）`} aria-describedby={whyId} onClick={() => openTodo(todo.href)}>
@@ -1012,7 +1015,7 @@ export default function StationsPage() {
             const name = stationDisplayName(v.s);
             const money = !v.fixed && b?.ok ? balanceMoneyOf(v.s, Number(b.remaining)) : null;
             const { label, level, note, stale, title } = statusOf(v);
-            const todo = todoAction(v);
+            const todo = todoAction(v, true);
             const refreshing = !!refreshingIds[v.s.id];
             // 手机上一张卡片两行（ui-design-spec §4.7、§5.2）：名称、状态、「⋯」；余额 · 可用天数，后面带正在刷新或数据截至。
             // 有要处理的事时多一行：那件事的标题（放不下省略）和按钮。余额设了汇率只写金额，没设置汇率照写「（没设置汇率）」，
