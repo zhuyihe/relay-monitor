@@ -409,8 +409,9 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     if (own() && (source.stale || sourceUnconfirmed)) {
       actions.push(workflowAction("review_source", { ownStationId: own().id, channelIds: channels.map((channel) => channel.id) }));
     }
+    // ownStationId：channels（渠道列表）属于哪个自营站点，前端按「自营站点 id:渠道 id」记渠道名时用（版式 PR 5，总指挥特许只加这一个字段）
     return { accounts: [...accounts.values()].sort((a, b) => a.accountKey.localeCompare(b.accountKey)),
-      unverifiedResources: unverifiedResources.sort((a, b) => a.id.localeCompare(b.id)), unmatchedAssociations, channels,
+      unverifiedResources: unverifiedResources.sort((a, b) => a.id.localeCompare(b.id)), unmatchedAssociations, channels, ownStationId: source.ownSource?.stationId || null,
       actions: [...new Map(actions.map((item) => [item.id, item])).values()], generatedAt: new Date(now()).toISOString(), tz: businessTimeZone() };
   }
 

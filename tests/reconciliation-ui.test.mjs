@@ -3634,6 +3634,10 @@ test("告警中心提醒节奏在新布局下照常自动保存：展开改数�
   // 清空「重复提醒间隔」再点收起：报错，收不起来，报错一直看得到
   await renotify.fill(""); await pace.click(); await page.waitForTimeout(300);
   assert.equal(await pace.getAttribute("aria-expanded"), "true");
+  // 再点一次收起：收不起来，但有反应——焦点跳到出错的那一格
+  await pace.click(); await page.waitForTimeout(200);
+  assert.equal(await pace.getAttribute("aria-expanded"), "true");
+  assert.equal(await renotify.evaluate((el) => el === document.activeElement), true);
   await rulesP.getByText(new RegExp(NOTIFICATIONS_COPY.renotifyZero)).first().waitFor();
   // 去改「提醒天数」：这一组校验不过，没存；报错照样看得到
   const eta = rulesP.getByLabel(NOTIFICATIONS_COPY.etaLabel, { exact: true });

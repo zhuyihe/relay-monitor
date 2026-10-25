@@ -705,6 +705,14 @@ export default function NotificationsPage() {
 
   const paceSummary = COPY.paceSummary(ruleForm.saved.renotify, ruleForm.saved.errRetry);
   const paceShown = paceOpen || paceErr;
+  // 有报错时收不起来；点「收起」要有反应：跳到出错的那一格（不给共用的收起组件加「禁用」，这种情况很少）
+  const onPaceToggle = (next: boolean) => {
+    if (paceErr && !next) {
+      document.getElementById(ruleErrors.renotify ? `${uid}-renotify` : `${uid}-errRetry`)?.focus();
+      return;
+    }
+    setPaceOpen(next);
+  };
   // 版式（ui-design-spec §5.7、#64 第 8 节）：左 8 列提醒规则，右 4 列通知方式和日报；还没有通知方式时整页只放一件事，不分栏。
   // 手机上通知方式在最前：换的是页面里的先后，不只用 CSS 换显示顺序（读屏和键盘跟着看到的先后，§5.1）
   const rulesBlock = (
@@ -776,7 +784,7 @@ export default function NotificationsPage() {
           <div className="jy-notifications-pad jy-more-line">
             {/* 展开以后两个框下面各有说明，这一句不再重复（同一句话一页只说一次） */}
             {paceShown ? null : <span className="jy-caption">{paceSummary}</span>}
-            <More label={COPY.pace} open={paceShown} onOpenChange={(next) => setPaceOpen(paceErr ? true : next)}>
+            <More label={COPY.pace} open={paceShown} onOpenChange={onPaceToggle}>
               <p className="jy-caption jy-notifications-pace-hint">{COPY.paceHint}</p>
               <div className="jy-two">
                 <div className="jy-field">

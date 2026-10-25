@@ -82,7 +82,7 @@ function loadSource(source: Source, force: boolean): Promise<void> {
 export const channelNameKey = (ownStationId: unknown, channelId: unknown) => `${ownStationId ?? ""}:${channelId}`;
 
 // 两路读到的数据里的渠道名；只记有名字的（没有名字的由用的地方按「N 个渠道」说）。
-// 现在的名字：上游账单的渠道列表（channels，是这个自营站点现在的渠道，自营站点 id 取同一份数据里绑定、事项带的那个）、
+// 现在的名字：上游账单的渠道列表（channels，是这个自营站点现在的渠道，自营站点 id 是同一份数据里的 ownStationId）、
 // 每日利润的 coverage.channels（整体的和各组的）。存下的名字：上游账单绑定里的渠道（accounts[].keys[].channels）、每日利润的绑定（results[].rule.channels）。
 // 不引 lib/reconciliation-view：这个文件每页都加载（侧栏计数），不为一个名字把那一大块带进每页
 function channelNamesOf(r: any): WorkflowState["channelNames"] {
@@ -95,8 +95,8 @@ function channelNamesOf(r: any): WorkflowState["channelNames"] {
   // 上游账单
   const keyChannels = list(r?.accounts).flatMap((a: any) => list(a?.keys).flatMap((k: any) => list(k?.channels)));
   keyChannels.forEach((c: any) => add(saved, c?.ownStationId, c));
-  const catalogueOwn = [...keyChannels, ...list(r?.actions)].map((x: any) => x?.ownStationId).find((x: unknown) => x != null);
-  list(r?.channels).forEach((c: any) => { if (!c?.missing) add(current, catalogueOwn, c); });
+  // 渠道列表属于哪个自营站点，只认接口给的那一个（listAccounts 的 ownStationId），不从别处猜
+  list(r?.channels).forEach((c: any) => { if (!c?.missing) add(current, r?.ownStationId, c); });
   // 每日利润
   list(r?.results).forEach((x: any) => list(x?.rule?.channels).forEach((c: any) => add(saved, x?.rule?.ownStationId, c)));
   // coverage 里「自营站点来源没确认」（source_unverified）的那条带的是绑定存下的旧名，和当前那条同一个自营站点 id、渠道 id，算旧名，不然两条按先后互相盖
