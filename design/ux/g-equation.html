@@ -311,7 +311,7 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
               <div class="t"><span><i style="background:var(--good)"></i>固定成本</span><b>¥670.32</b><small>2 个上游，按天平摊</small></div><div class="op">=</div>
               <div class="t net"><span>净利</span><b>¥5,713.38</b><small>净利率 31.0%</small></div>
             </div>
-            <div class="flowbar"><i style="width:65.3%;background:#E8622C"></i><i style="width:3.7%;background:var(--good)"></i><i style="width:31%;background:var(--cobalt)"></i></div>
+            <div class="flowbar"><i style="width:65.3%;background:#E8622C"></i><i style="width:3.6%;background:var(--good)"></i><i style="width:31%;background:var(--cobalt)"></i></div>
             <div class="flowlegend"><span>每 ¥100 收入中</span><span>上游成本 ¥65.35</span><span>固定成本 ¥3.64</span><span>留下净利 ¥31.01</span></div>
             <div class="gapline">其中 1 个渠道需处理，没算进来。另有 ¥104.60 上游成本没算进利润。<a>查看各上游</a></div>
           </section>
@@ -353,7 +353,7 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
             </div>
             <div class="compo">
               <div class="daybar"><i></i><i></i><i></i><i class="warn"></i><i></i><i class="reading"></i><i class="today"></i></div>
-              <div>4 天已固定，1 天还在读取，今天实时<br>其中 1 个渠道需处理，没算进来。另有 ¥104.60 上游成本没算进利润。<a style="color:var(--cobalt)">查看各上游</a></div>
+              <div>5 天已固定，1 天还在读取，今天实时<br>其中 1 个渠道需处理，没算进来。另有 ¥104.60 上游成本没算进利润。<a style="color:var(--cobalt)">查看各上游</a></div>
             </div>
           </section>
           <section class="panel">
@@ -377,14 +377,14 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
       </div>
     </div>
   </div>
-  <div class="ann l" style="left:1030px;top:390px;max-width:330px">固定成本那一格悬停：按现在记的每一笔按天摊，改了固定成本，以前的日子跟着变；毛利按天固定，不受影响</div>
+  <div class="ann l" style="left:1030px;top:390px;max-width:330px">固定成本那一格悬停：按天平摊，那天固定时一起记下；改了固定成本，已固定的日子不变</div>
   <div class="ann t" style="left:1060px;top:790px;max-width:330px">行里只到毛利，固定成本不分到渠道（决定记录第 9 条）</div>
 </section>
 
 <!-- ═══ g-net 三个选项 ═══ -->
-<p class="frame-label" style="width:1440px">g-net · 要用户定：每日利润首屏出不出整段时间的净利（a 不出 / b 多一格 / c 同一道等式，推荐 c）</p>
-<section class="frame" id="g-net" style="width:1440px;height:270px;padding:24px">
-  <div style="display:grid;grid-template-columns:1fr 1fr 1.25fr;gap:20px;align-items:start">
+<p class="frame-label" style="width:1160px">g-net · 要用户定：每日利润首屏出不出整段时间的净利（a 不出 / b 多一格 / c 同一道等式，推荐 c）</p>
+<section class="frame" id="g-net" style="width:1160px;height:480px;padding:24px">
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
     <div class="variant"><h3>(a) 不出：照现在四格</h3>
       <div class="metricsN" style="grid-template-columns:repeat(4,1fr)">
         <div class="mc"><span>收入</span><b>¥18,420.50</b></div><div class="mc"><span>上游成本</span><b>¥12,036.80</b></div><div class="mc"><span>毛利</span><b>¥6,383.70</b></div><div class="mc"><span>毛利率</span><b>34.7%</b></div>
@@ -392,7 +392,7 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
       <div class="vnote">净利只在运营总览，只有今天、近 7 天、近 30 天；本月、上个月的净利没地方看</div></div>
     <div class="variant"><h3>(b) 多一格：五格</h3>
       <div class="metricsN" style="grid-template-columns:repeat(5,1fr)">
-        <div class="mc"><span>收入</span><b>¥18,420</b></div><div class="mc"><span>上游成本</span><b>¥12,037</b></div><div class="mc"><span>毛利</span><b>¥6,384</b><small>34.7%</small></div><div class="mc"><span>固定成本</span><b>¥670</b></div><div class="mc"><span>净利</span><b>¥5,713</b></div>
+        <div class="mc"><span>收入</span><b>¥18,420.50</b></div><div class="mc"><span>上游成本</span><b>¥12,036.80</b></div><div class="mc"><span>毛利</span><b>¥6,383.70</b><small>34.7%</small></div><div class="mc"><span>固定成本</span><b>¥670.32</b></div><div class="mc"><span>净利</span><b>¥5,713.38</b></div>
       </div>
       <div class="vnote">有整段的净利；和运营总览长得不一样，五格里看不出谁减谁</div></div>
     <div class="variant" style="border-color:var(--cobalt);box-shadow:0 0 0 3px rgba(49,87,213,.12)"><h3>(c) 推荐：和运营总览同一道等式</h3>
@@ -404,7 +404,13 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
         <div class="t"><span>固定成本</span><b>¥670.32</b></div><div class="op">=</div>
         <div class="t net"><span>净利</span><b>¥5,713.38</b></div>
       </div>
-      <div class="vnote">有整段的净利；从运营总览点过来同一个样子、同一组数；一个组件两处用。高一行；改了固定成本，以前日子的净利跟着变（悬停说明）</div></div>
+      <div class="vnote">有整段的净利；从运营总览点过来同一个样子、同一组数；一个组件两处用。高一行；没设置汇率时净利也是「—」；固定成本要跟着每天一起固定</div></div>
+    <div class="variant"><h3>(d) 一行字</h3>
+      <div class="metricsN" style="grid-template-columns:repeat(4,1fr)">
+        <div class="mc"><span>收入</span><b>¥18,420.50</b></div><div class="mc"><span>上游成本</span><b>¥12,036.80</b></div><div class="mc"><span>毛利</span><b>¥6,383.70</b></div><div class="mc"><span>毛利率</span><b>34.7%</b></div>
+      </div>
+      <div class="vnote" style="color:var(--ink-2)">扣固定成本 ¥670.32 后，净利 ¥5,713.38</div>
+      <div class="vnote">改动小；净利藏在一行小字里，和运营总览不是同一个样子</div></div>
   </div>
 </section>
 
@@ -423,7 +429,7 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
             <div class="mc"><span>有消费的用户</span><b>128 个</b></div>
             <div class="mc"><span>请求数</span><b>41,230</b></div>
             <div class="mc"><span>Token（不含缓存）</span><b>3.1 亿</b></div>
-            <div class="mc go"><span>毛利</span><b>¥6,383.70</b><small>9 个渠道算进利润 · <a>每日利润 ›</a></small></div>
+            <div class="mc go"><span>毛利</span><b>¥6,383.70</b><small>9 个渠道算进利润（收入 ¥18,420.50）· <a>每日利润 ›</a></small></div>
           </div>
         </section>
         <div style="display:grid;grid-template-columns:2fr 1fr;gap:24px">
@@ -448,8 +454,8 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
         <div style="display:flex;align-items:center"><div class="tabs2" style="flex:1"><span class="on">成本</span><span>用量</span></div><span class="btn" style="margin-left:16px">每日利润</span></div>
         <section class="panel">
           <div class="metrics4">
-            <div class="mc"><span>上游成本</span><b>¥12,141.40</b><small>其中 ¥104.60 没算进利润 ›</small></div>
-            <div class="mc"><span>固定成本</span><b>¥670.32</b><small>2 个上游，按天平摊</small></div>
+            <div class="mc"><span>上游成本</span><b>¥12,141.40</b><small>算进利润 ¥12,036.80 · 没算进利润 ¥104.60 ›</small></div>
+            <div class="mc"><span>固定成本</span><b>¥670.32</b><small>算进利润的 2 个上游，按天平摊</small></div>
             <div class="mc"><span>日均</span><b>¥1,830.25</b><small>上游成本 + 固定成本</small></div>
             <div class="mc"><span>预计一个月</span><b>¥54,907.50</b><small>按近 7 天的日均</small></div>
           </div>
