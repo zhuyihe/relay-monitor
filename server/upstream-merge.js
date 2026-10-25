@@ -33,7 +33,7 @@ export async function estimateGroups(rt, groups, { now }) {
   const tz = businessTimeZone();
   const end = dayKeyInTz(now, tz);
   const start = shiftDayLabel(end, -(Math.max(...ESTIMATE_DAYS) - 1));
-  const counted = (id) => { const station = rt.store.get(id); return costBasisOf(station) === "usage" && countsInProfit(station); };
+  const counted = (id) => { const station = rt.store.getWithMerged(id); return !!station && costBasisOf(station) === "usage" && countsInProfit(station); };
   const ids = [...new Set(groups.flatMap((group) => [group.retained.id, ...group.merged.map((station) => station.id)]))].filter(counted);
   let rows;
   try {
@@ -41,7 +41,7 @@ export async function estimateGroups(rt, groups, { now }) {
   } catch {
     return groups.map(() => null);
   }
-  const cnyOf = (stationId, usd) => round2(Number(usd) * rateSnapshotOf(rt.store.get(stationId)).cnyPerUsd);
+  const cnyOf = (stationId, usd) => round2(Number(usd) * rateSnapshotOf(rt.store.getWithMerged(stationId)).cnyPerUsd);
   return groups.map((group) => {
     if (group.blockers.some((blocker) => blocker.code === "RATE_UNSET_ON_RETAINED")) return null;
     const members = [group.retained, ...group.merged].map((station) => station.id);
@@ -70,7 +70,7 @@ export async function previewUpstreamMerges(rt, { estimate = true, now = Date.no
   const records = await listMergeRecords(rt);
   const counts = mergeCounts(plan);
   const estimates = estimate ? await estimateGroups(rt, plan.groups, { now }) : [];
-  const versionOf = (id) => { const station = rt.store.get(id); return { authVersion: station.authVersion || 1, resourceVersion: stationBusinessVersion(station) }; };
+  const versionOf = (id) => { const station = rt.store.getWithMerged(id); return station ? { authVersion: station.authVersion || 1, resourceVersion: stationBusinessVersion(station) } : { authVersion: 1, resourceVersion: "" }; };
   const groups = plan.groups.map((group, i) => ({ ...group, ...(estimate ? { estimate: estimates[i] } : {}),
     versions: Object.fromEntries([group.retained, ...group.merged].map((station) => [station.id, versionOf(station.id)])) }));
   return { groups, counts, records, generatedAt: now };

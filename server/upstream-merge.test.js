@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyUpstreamMerge, cachedMergeCounts, estimateGroups, invalidateMergeCounts, undoUpstreamMerge } from "./upstream-merge.js";
+import { applyUpstreamMerge, cachedMergeCounts, estimateGroups, invalidateMergeCounts, previewUpstreamMerges as previewUpstreamMerge, undoUpstreamMerge } from "./upstream-merge.js";
 import { businessTimeZone, dayKeyInTz, shiftDayLabel } from "../lib/business-time.js";
 
 const NOW = Date.parse("2026-10-25T06:00:00Z");
@@ -78,5 +78,31 @@ test("入口校验：合并缺编号、不是数组、元素不是字符串，�
   }
   for (const input of [{}, { mergeId: "" }, { mergeId: "  " }, { mergeId: 1 }, { mergeId: null }, { mergeId: ["mg_1"] }]) {
     await assert.rejects(undoUpstreamMerge(rt, input), { code: "UPSTREAM_MERGE_INVALID" }, JSON.stringify(input));
+  }
+});
+
+test("清单算到一半，另一个请求把这一组合掉了：清单照样返回（不是 500），合掉的成员按「合并后的上游」取", async () => {
+  for (const estimate of [true, false]) {
+    const stations = [station("a", "2026-03-01T00:00:00Z"), station("b", "2026-03-02T00:00:00Z")];
+    let merged = false;
+    const visible = () => stations.filter((s) => !s.mergedInto);
+    const rt = {
+      // 和真的 Store 一样：get / list 看不到已合并的，getWithMerged 看得到
+      store: { get: (id) => visible().find((s) => s.id === id), getWithMerged: (id) => stations.find((s) => s.id === id), list: () => visible() },
+      pool: { async query(sql, params) {
+        if (/FROM reconciliation_rules/.test(sql) || /FROM channel_monitor_links/.test(sql)) return [[]];
+        if (/COUNT\(DISTINCT merge_id\)/.test(sql)) return [[{ n: 0 }]];
+        // 计划算完以后读合并记录：这时另一个请求把 b 合进了 a
+        if (/FROM upstream_merge_log/.test(sql)) { if (!merged) { merged = true; stations[1].mergedInto = "a"; } return [[]]; }
+        if (/station_daily_usage/.test(sql)) return [[{ stationId: "b", date: day(0), usd: 1 }].filter((row) => params[0].includes(row.stationId))];
+        throw new Error("unexpected query: " + sql);
+      } },
+    };
+    const result = await previewUpstreamMerge(rt, { estimate, now: NOW });
+    assert.equal(merged, true);
+    assert.equal(result.groups.length, 1, `estimate ${estimate}`);
+    assert.deepEqual(Object.keys(result.groups[0].versions).sort(), ["a", "b"]);
+    assert.notEqual(result.groups[0].versions.b.resourceVersion, "", "合掉的成员的版本号是真的，不是兜底的空值");
+    if (estimate) assert.deepEqual(result.groups[0].estimate.windows[0].before.upstreams.map((u) => [u.stationId, u.counted, u.cny]), [["a", true, 0], ["b", true, 1]]);
   }
 });

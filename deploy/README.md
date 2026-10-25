@@ -171,7 +171,7 @@ docker compose stop relay-monitor
 docker compose run --rm --no-deps relay-monitor node db/k-unmerge.js
 ```
 
-输出会列出要改回的每件事。**看清楚再做下一步。** 只想改回其中一次，加 `--merge 编号`（编号在列出的第一行）。确认后加 `--apply --service-stopped` 真的改（后一个表示你已经停掉了服务：服务还在跑的话，它的内存会把改回去的盖掉，所以不带它脚本不改），再启动：
+输出会列出要改回的每件事。**看清楚再做下一步。** 只想改回其中一次，加 `--merge 编号`（编号在列出的第一行）。确认后加 `--apply --service-stopped` 真的改（后一个表示你已经停掉了服务：服务还在跑的话，它的内存会把改回去的盖掉，所以不带它脚本不改），再启动。**目前没有做「服务在不在跑」的检测，靠 `--service-stopped` 这句自己声明**：如果服务其实还在跑时硬加了它，最坏的后果是——脚本把日志标成「已退回」、库里的上游文档改回去，随后服务把内存里仍是「已合并」的文档又写回库里；之后这次合并在日志里显示已退回，上游实际又是合并状态，既退回不了、页面上也看不出来。所以一定照上面先停服务。
 
 ```bash
 docker compose run --rm --no-deps relay-monitor node db/k-unmerge.js --apply --service-stopped

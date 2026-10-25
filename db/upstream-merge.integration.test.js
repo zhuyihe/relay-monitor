@@ -363,3 +363,46 @@ test("合并重复上游：拿锁后重判、退回时键的守卫、脚本退�
     assert.deepEqual(await dumpAll(pool), frozen);
     assert.equal((await listMerges(pool)).length, 1, "日志还是没退回的状态");
   });});
+
+test("合并重复上游：退回只改还指着留下上游的绑定；拿锁后重判看的是那一刻的成员和别名", { timeout: 60000 }, async (t) => {
+  const pool = mysql.createPool({ host: process.env.DB_HOST, port, user: process.env.DB_USER, password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME, connectionLimit: 8 });
+  t.after(() => pool.end());
+  const racing = (live, before) => ({ pool, store: new Proxy(live, { get: (target, key) => (key === "mergeUpstreams" ? async (input) => { before(target); return target.mergeUpstreams(input); } : Reflect.get(target, key, target)) }) });
+
+  await t.test("合并以后某条绑定被改指了别的上游：退回时它不被改回，没动过的照常改回", async () => {
+    const { ids } = await seedFixture(pool);
+    const live = await new Store(pool, { secretKey }).load();
+    await applyUpstreamMerge({ pool, store: live }, { retainedId: ids.a, mergedIds: [ids.b, ids.c] });
+    await pool.query("UPDATE reconciliation_rules SET upstream_station_id = ?, updated_at = updated_at WHERE id = 'r_b'", [ids.d]);
+    await undoUpstreamMerge({ pool, store: live }, { mergeId: (await listMerges(pool))[0].mergeId });
+    const [rules] = await pool.query("SELECT id, upstream_station_id FROM reconciliation_rules WHERE id IN ('r_b', 'r_c')");
+    const byId = Object.fromEntries(rules.map((rule) => [rule.id, rule.upstream_station_id]));
+    assert.equal(byId.r_b, ids.d, "改指了别的上游的绑定留在那里");
+    assert.equal(byId.r_c, ids.c, "没动过的改回原来的上游");
+  });
+
+  await t.test("计划算完、拿锁之前，被合掉的成员里有一个换了账号：整组作废，换了账号的那个不会被合进来，什么都不写", async () => {
+    const { ids } = await seedFixture(pool);
+    const live = await new Store(pool, { secretKey }).load();
+    const snapshot = await dumpAll(pool);
+    const rt = racing(live, (target) => { target.getWithMerged(ids.c).verifiedIdentity = identity("77"); });
+    await assert.rejects(applyUpstreamMerge(rt, { retainedId: ids.a, mergedIds: [ids.b, ids.c] }), { code: "UPSTREAM_MERGE_STALE" });
+    assert.deepEqual(await dumpAll(pool), snapshot);
+    assert.equal(live.getWithMerged(ids.c).mergedInto, undefined, "换了账号的上游没有被合掉");
+  });
+
+  await t.test("计划算完、拿锁之前，被合掉的成员多了一个内部地址：写进留下的上游的是拿锁那一刻的别名，不是计划时的", async () => {
+    const { ids } = await seedFixture(pool);
+    const live = await new Store(pool, { secretKey }).load();
+    const rt = racing(live, (target) => { target.getWithMerged(ids.b).costAliases = ["http://internal-b", "http://internal-b2"]; });
+    await applyUpstreamMerge(rt, { retainedId: ids.a, mergedIds: [ids.b, ids.c] });
+    const aliases = live.getWithMerged(ids.a).costAliases;
+    assert.ok(aliases.includes("http://internal-b2"), `留下的别名 ${JSON.stringify(aliases)}`);
+    const [[doc]] = await pool.query("SELECT JSON_EXTRACT(doc, '$.costAliases') AS aliases FROM stations WHERE id = ?", [ids.a]);
+    assert.ok(String(typeof doc.aliases === "string" ? doc.aliases : JSON.stringify(doc.aliases)).includes("internal-b2"), "库里也一样");
+    // 合并日志里记的「合并后的别名」也是那一刻的：退回时按它把合并带进来的别名拿掉，留下的回到合并前的样子
+    await undoUpstreamMerge({ pool, store: live }, { mergeId: (await listMerges(pool))[0].mergeId });
+    assert.deepEqual(live.getWithMerged(ids.a).costAliases, ["http://internal-a"], "退回以后留下的别名回到合并前");
+  });
+});

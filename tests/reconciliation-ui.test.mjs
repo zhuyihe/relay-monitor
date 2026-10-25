@@ -4448,6 +4448,11 @@ test("合并重复的上游：合并记录里「退回」先确认，退回后�
   assert.equal(await gone.getByRole("button", { name: "退回", exact: true }).getAttribute("title"), "「主力上游（3）」已经删了，退回不了");
   // 原因也写在这一行下面（悬停提示键盘、读屏、手机读不到）
   await gone.getByText("「主力上游（3）」已经删了，退回不了", { exact: true }).waitFor();
+  // 桌面宽度下原因另起一行，正文不能被压扁（不换行时「并进」那段文字会是 0 宽、逐字竖排，getByText 对 0 宽节点也算可见，所以要量）
+  const text = await gone.locator(".jy-merge-record__text").boundingBox();
+  assert.ok(text.width > 150 && text.height < 40, `正文 ${text.width}×${text.height}`);
+  const why = await gone.locator(".jy-merge-record__why").boundingBox(), when = await gone.locator(".jy-merge-record__when").boundingBox();
+  assert.ok(why.y > when.y + when.height - 1, "原因在下一行");
   await rows.first().getByRole("button", { name: "退回", exact: true }).click();
   const confirm = page.getByRole("dialog", { name: "退回这次合并？", exact: true }); await confirm.waitFor();
   await confirm.getByText("「主力上游（2）」回到上游列表，接着各自读余额；成本估算又会把这个账号重复算。", { exact: true }).waitFor();
@@ -4470,7 +4475,11 @@ test("合并重复的上游：手机上抽屉从底部升起占满，按钮至�
   assert.ok((await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).boundingBox()).height >= 44, "提示条里的「查看」");
   await mergeCard(page, "主力上游").getByRole("button", { name: "合并", exact: true }).click();
   const sheet = page.getByRole("dialog", { name: "合并「主力上游」这一组？", exact: true }); await sheet.waitFor();
-  for (const name of ["取消", "合并"]) assert.ok((await sheet.getByRole("button", { name, exact: true }).boundingBox()).height >= 44, `确认框里的「${name}」`);
+  // 弹窗出现时有缩放动画，这时量到的高度不准（CI 上间歇失败过）：读样式里的最小高度，不量动画中的外框
+  for (const name of ["取消", "合并"]) {
+    const minHeight = await sheet.getByRole("button", { name, exact: true }).evaluate((el) => parseFloat(getComputedStyle(el).minHeight));
+    assert.ok(minHeight >= 44, `确认框里的「${name}」最小高度 ${minHeight}`);
+  }
 });
 
 test("成本估算：总成本下面写「其中 1 个账号加成了 2 个上游，这里重复算了」[去合并]；没有重复时不出现", async (t) => {
