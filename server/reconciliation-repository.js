@@ -4,7 +4,7 @@ import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } fr
 import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
 import { applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
-import { RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
+import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
 import { billDayOf } from "../lib/business-time.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../lib/billing-capability-storage.js";
 
@@ -855,10 +855,11 @@ export class ReconciliationRepository {
   }
 
   // 每小时清一批：beforeDate 以前的、没有重结请求（或请求早已放弃）的行，一次最多 limit 行，删不完下次接着删。走 (bill_date) 索引
-  // 重结请求提出满 requestedBeforeMs 以前的也删（已经放弃的请求，7 天内还没结成的会一直留着）
+  // 重结请求提出满 requestedBeforeMs 以前的也删（已经放弃的请求，7 天内还没结成的会一直留着）；RESETTLE_TOO_OLD、RESETTLE_SHRUNK 的行不删，等人处理
   async pruneSettlementStates(beforeDate, limit = 500, requestedBeforeMs = 0) {
     const [result] = await this.pool.query(
-      "DELETE FROM reconciliation_settlement_state WHERE bill_date < ? AND (resettle_requested_at_ms IS NULL OR resettle_requested_at_ms < ?) LIMIT ?", [beforeDate, requestedBeforeMs, limit]);
+      `DELETE FROM reconciliation_settlement_state WHERE bill_date < ? AND (resettle_requested_at_ms IS NULL OR resettle_requested_at_ms < ?)
+         AND (manual_reason IS NULL OR manual_reason NOT IN (${RESETTLE_KEPT_REASONS.map(() => "?").join(", ")})) LIMIT ?`, [beforeDate, requestedBeforeMs, ...RESETTLE_KEPT_REASONS, limit]);
     return Number(result?.affectedRows) || 0;
   }
 

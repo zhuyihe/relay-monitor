@@ -1381,6 +1381,18 @@ contract("pruneSettlementStates also drops a request made before the given time 
   assert.equal(await repository.pruneSettlementStates("2025-12-01", 500), 0);
 });
 
+contract("pruneSettlementStates never drops RESETTLE_TOO_OLD or RESETTLE_SHRUNK rows (waiting for a person), however old; they go once handled", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const now = Date.UTC(2026, 0, 12, 3);
+  await repository.requestResettle(rule.id, ["2025-10-01"], { now: now - 60 * DAY, manualReason: "RESETTLE_TOO_OLD" });
+  await repository.requestResettle(rule.id, ["2025-10-02"], { now: now - 60 * DAY });
+  const shrunk = { op: "sticky", reason: "RESETTLE_SHRUNK", attempts: 0, manualSince: now - 59 * DAY, nextAttemptAt: null, firstFailedAt: now - 60 * DAY, lastAttemptAt: now - 59 * DAY, sourceVersion: null, detail: { code: "RESETTLE_SHRUNK", side: "revenue" } };
+  await repository.recordSettlementState(rule.id, "2025-10-02", shrunk, now - 59 * DAY, { requestedAt: now - 60 * DAY });
+  await repository.requestResettle(rule.id, ["2025-10-03"], { now: now - 60 * DAY });
+  assert.equal(await repository.pruneSettlementStates("2025-12-01", 500, now - 31 * DAY), 1, "只删放弃了的普通请求");
+  assert.deepEqual((await repository.listSettlementStates([rule.id])).map((row) => [row.billDate, row.manualReason]), [["2025-10-01", "RESETTLE_TOO_OLD"], ["2025-10-02", "RESETTLE_SHRUNK"]]);
+});
+
 contract("correctTransition writes a resettle request for every ended business day between the old and the new time, in the rule's own time zone (DST days included), none before the rule started", async ({ repository, fixture, backdate }) => {
   const rule = await fixture.createRule({ timezone: "America/New_York", initialRatio: 1 });
   assert.ok(backdate, "运行方要提供 backdateRule");

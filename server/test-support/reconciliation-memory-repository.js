@@ -11,7 +11,7 @@
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../../lib/reconciliation-snapshot.js";
 import { applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
 import { billDayOf } from "../../lib/business-time.js";
-import { RESETTLE_REASON_TRANSITION, resettleRequestPlan } from "../../lib/reconciliation-settlement.js";
+import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, resettleRequestPlan } from "../../lib/reconciliation-settlement.js";
 import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
@@ -612,7 +612,7 @@ export class MemoryReconciliationRepository {
   }
 
   async pruneSettlementStates(beforeDate, limit = 500, requestedBeforeMs = 0) {
-    const doomed = this.#rows("settlementState").filter(({ row }) => row.bill_date < beforeDate && (row.resettle_requested_at_ms == null || row.resettle_requested_at_ms < requestedBeforeMs)).slice(0, limit);
+    const doomed = this.#rows("settlementState").filter(({ row }) => row.bill_date < beforeDate && (row.resettle_requested_at_ms == null || row.resettle_requested_at_ms < requestedBeforeMs) && !RESETTLE_KEPT_REASONS.includes(row.manual_reason)).slice(0, limit);
     this.#delete(null, "settlementState", doomed);
     return doomed.length;
   }
