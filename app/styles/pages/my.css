@@ -53,8 +53,6 @@
   .jy-my-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-/* 收起的面板只剩标题和摘要，摘要下补足留白 */
-
 /* 概览的「消费最多的模型」只在桌面放（ui-design-spec §5.3）：手机上模型在「模型与渠道」标签页里看 */
 @media (max-width: 767px) {
   .jy-my-top-models { display: none; }

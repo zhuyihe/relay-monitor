@@ -34,7 +34,7 @@ export type AuditProps = {
 const COPY = {
   sub: "逐条看用量记录，补上概览没算进去的缓存和长对话用量。",
   // 收起区按钮写它收着什么（ui-design-spec §4.11）
-  more: "细算的范围和结果",
+  more: "细算的条数和结果",
   rows: "看多少条",
   start: "开始细算",
   again: "重新细算",

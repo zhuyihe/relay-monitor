@@ -2,9 +2,11 @@
 // 概览：指标行（有消费的用户、请求数、Token）；利润等式；每日收入（8 列）+ 消费最多的用户（4 列）；预计花费（8 列）+ 消费最多的模型（4 列）；利润怎么算（ui-design-spec §5.3）。
 import { useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import Link from "next/link";
 import { Button } from "antd";
+import { NAV_LABELS } from "../../../lib/brand";
 import { dayKeyInTz } from "../../../lib/business-time";
-import { ADMIN_UNMARKED, BASIS_TITLE, EMPTY, FORECAST_TEXT, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
+import { ADMIN_UNMARKED, BASIS_TITLE, EMPTY, FORECAST_TEXT, RANGE_TEXT, SELL_PRICE_UNSET, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
 import { profitApproxOf, splitProfitWarnings } from "../../../lib/profit";
 import { EmptyState, ErrorState } from "../../components/data-state";
 import { ForecastChart } from "../../components/forecast-chart";
@@ -33,6 +35,9 @@ const COPY = Object.freeze({
   // 每日收入：只画收入（这一页回答「钱从哪来」，上游成本在每日利润、成本估算里看）
   incomeTitle: "每日收入",
   incomeCaption: "按天。收入按当天普通用户消费和转售 Key 消费计算。",
+  // 说明末尾去成本估算看上游成本（带当前时间范围）
+  incomeCostLead: "上游成本在",
+  incomeCostTail: "里看。",
   incomeEmpty: "暂时没有逐日收入",
   incomeEmptyDesc: "稍后刷新再看。",
   // 收入读不到：原因和「刷新」在上面的利润等式里，这里只写一句（同一句话一页只说一次）
@@ -59,11 +64,14 @@ const COPY = Object.freeze({
   band: (lo: string, hi: string) => `${lo} 到 ${hi}`,
   // 消费最多的用户、模型（各前 5，多的并成一行）
   otherUsers: (n: number) => `其他 ${n} 个用户`,
-  allUsers: (n: number) => `全部 ${n} 个用户`,
+  // 不带人数：人数在指标行里（同一个数一页只出现一次）
+  allUsers: () => "看全部用户",
   topModels: "消费最多的模型",
   otherModels: (n: number) => `其他 ${n} 个模型`,
   allModels: (n: number) => `全部 ${n} 个模型`,
   noModels: "这个时间范围内还没有模型用量",
+  // 模型的消费含管理员自用，和等式里的收入不是一个数（模型与渠道标签页同一句，shared.tsx totalsNote）
+  modelsInclAdmin: "含管理员自用，和收入不是一个数。",
   payingUsers: "有消费的用户",
   // 指标行（ui-design-spec §5.3）：这次只放利润等式里没有的三个数；收入和「这段时间毛利」等 G 把等式拿掉时再补
   metrics: "这段时间的用量",
@@ -119,7 +127,7 @@ export function OverviewTab({
             />
           </Panel>
         ) : (
-          <IncomeTrend v={v} asOf={asOf} />
+          <IncomeTrend v={v} range={range} asOf={asOf} />
         )}
         <TopUsers v={v} range={range} onTab={onTab} />
       </div>
@@ -215,14 +223,14 @@ function Equation({
 
 // ---- 每日趋势 -------------------------------------------------------------
 
-// 逐日上游成本取自 /api/analytics（和成本估算页同一份），每日收入取自用户和转售消费，
-// 缺记录的日子标成缺失，不补零。
 // 每日收入：取自营站点接口的逐日收入（incomeDaily），只画收入，不再另读 /api/analytics 的逐日上游成本（ui-design-spec §5.3）
-function IncomeTrend({ v, asOf }: { v: OwnView; asOf: number | null }) {
+// 没设置售价时收入是估算：和等式同一个判断（profitApproxOf），数值带「≈」，说明里接上 SELL_PRICE_UNSET
+function IncomeTrend({ v, range, asOf }: { v: OwnView; range: OwnRange; asOf: number | null }) {
   const d = v.d;
   const rows: TrendRow[] = useMemo(() => {
     if (!Array.isArray(d?.incomeDaily)) return [];
-    const today = dayKeyInTz(Date.now(), d.tz);
+    // 「今天」按数据自己的结束时间判断：跨零点后、数据还停在昨天时，最后一天不画成今天
+    const today = dayKeyInTz((d.endMs ?? Date.now()) - 1, d.tz);
     return d.incomeDaily.map((r: any) => ({ date: r.date, rev: Number(r.incomeCny) || 0, cost: null, fixed: 0, today: r.date === today }));
   }, [d]);
   if (d?.profit?.error || d?.profit?.incomeUnconfirmed) {
@@ -239,7 +247,28 @@ function IncomeTrend({ v, asOf }: { v: OwnView; asOf: number | null }) {
       </Panel>
     );
   }
-  return <TrendPanel rows={rows} showCost={false} title={COPY.incomeTitle} asOf={asOf} tz={d.tz} caption={COPY.incomeCaption} />;
+  const revApprox = !!v.profit && profitApproxOf(v.profit, d.station).income;
+  return (
+    <TrendPanel
+      rows={rows}
+      showCost={false}
+      revApprox={revApprox}
+      title={COPY.incomeTitle}
+      asOf={asOf}
+      tz={d.tz}
+      caption={
+        <>
+          {COPY.incomeCaption}
+          {revApprox ? `${SELL_PRICE_UNSET}。` : ""}
+          {COPY.incomeCostLead}
+          <Link className="jy-link" href={`/analytics?range=${range}`}>
+            {NAV_LABELS.analytics}
+          </Link>
+          {COPY.incomeCostTail}
+        </>
+      }
+    />
+  );
 }
 
 // ---- 预计花费 -------------------------------------------------------------
@@ -414,7 +443,7 @@ function Metrics({ v }: { v: OwnView }) {
   );
 }
 
-// 用户排行下面一行：这段时间的消费合计（含管理员自用，和排行的条同一个口径）；有消费的用户、请求数、Token 在指标行里
+// 模型排行下面一行：这段时间的消费合计（按模型加总，含管理员自用），等于模型那几条加起来；有消费的用户、请求数、Token 在指标行里
 const USAGE_FACTS_FOOT = (v: OwnView) => (
   <ul className="jy-my-facts">
     <li>
@@ -490,7 +519,6 @@ function TopUsers({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t:
       allLabel={COPY.allUsers}
       onAll={() => onTab("users")}
       empty={<EmptyState title={COPY.noUsers} desc={COPY.noUsersDesc} />}
-      foot={USAGE_FACTS_FOOT(v)}
     />
   );
 }
@@ -507,7 +535,9 @@ function TopModels({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t
       otherLabel={COPY.otherModels}
       allLabel={COPY.allModels}
       onAll={() => onTab("models")}
+      sub={v.models.length ? COPY.modelsInclAdmin : undefined}
       empty={<EmptyState title={COPY.noModels} />}
+      foot={v.models.length ? USAGE_FACTS_FOOT(v) : undefined}
     />
   );
 }

@@ -1,7 +1,7 @@
 "use client";
 // 利润怎么算：收入与成本怎么算、说明、转售 Key（含选择）、每个上游的成本明细。
 // 默认收起：日常看等式就够了，想知道数字怎么来的才展开。
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { App, Button, Checkbox, Input } from "antd";
 import { api } from "../../../lib/client";
@@ -130,6 +130,9 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
     }
   };
 
+  // 收起区的按钮：「取消」「保存并重算」收起以后把焦点还给它（不然焦点落在已经不在的按钮上，键盘用户要从页头重新找）
+  const mgrBtn = useRef<HTMLButtonElement>(null);
+  const focusToggle = () => requestAnimationFrame(() => mgrBtn.current?.focus());
   const closeManager = () => {
     setMgrOpen(false);
     setAccounts(null);
@@ -173,6 +176,7 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
       message.success(`已保存 ${list.length} 个转售 Key，正在重算利润…`);
       setMgrOpen(false);
       setAccounts(null);
+      focusToggle();
       await reload();
     } catch (e: any) {
       message.error(failureText("保存失败", e));
@@ -230,7 +234,7 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
         </div>
       )}
 
-      <More label={COPY.pick} open={mgrOpen} onOpenChange={onManager}>
+      <More label={COPY.pick} open={mgrOpen} onOpenChange={onManager} buttonRef={mgrBtn}>
         <div className="jy-my-mgr">
           {mgrLoading ? (
             <p className="jy-muted" aria-busy="true" style={{ margin: 0 }}>
@@ -293,7 +297,14 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
                 <Button type="primary" loading={saving} onClick={saveResold}>
                   保存并重算
                 </Button>
-                <Button onClick={closeManager}>取消</Button>
+                <Button
+                  onClick={() => {
+                    closeManager();
+                    focusToggle();
+                  }}
+                >
+                  取消
+                </Button>
               </div>
             </>
           )}

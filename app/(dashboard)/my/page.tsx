@@ -54,7 +54,7 @@ export default function MyStationPage() {
 
   // data 是最近一次成功的结果（可能是上一个范围的，换范围时先留着变淡显示）
   const [data, setData] = useState<any>(null);
-  // 与 data 同一范围的逐日上游成本；undefined 是还在取，取不到时是 { error }，只影响趋势图
+  // 最近一次读取失败（哪个范围、什么错）
   const [err, setErr] = useState<{ range: string; error: Error } | null>(null);
   const [unconfigured, setUnconfigured] = useState(false);
   const [asOf, setAsOf] = useState<number | null>(null);

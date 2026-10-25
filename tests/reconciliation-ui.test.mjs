@@ -3061,17 +3061,21 @@ async function openUnconfirmedMyPage(t, options) {
   }, undefined, false, null, "/my");
 }
 
+// 收入确认了的近 7 天：逐日收入 7 天（最早一天 ¥1,000，往后每天多 ¥100，最后一天是今天），7 个模型（前 5 + 其他 2 个）；
+// sellPrice: false 时自营站点没设置售价（收入按 1 美元额度 = 1 元估算）
+function myLayoutAnalytics(range = "7d", { sellPrice = true } = {}) {
+  const base = bigOwnAnalytics(range), end = shanghaiDay(Date.now());
+  const incomeDaily = Array.from({ length: 7 }, (_, i) => ({ date: shiftDay(end, i - 6), incomeCny: 1000 + i * 100 }));
+  const byModel = [700, 600, 500, 400, 300, 20, 10].map((cost, i) => ({ model: `model-${i}`, tokens: 1000, cost, requests: 3 }));
+  return { ...base, incomeDaily, byModel, ...(sellPrice ? {} : { station: { id: "own-1", name: "Fixture own" } }) };
+}
+
 test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analytics，消费最多的用户、模型各前 5；利润怎么算、选转售 Key、按明细细算都是收起区", async (t) => {
-  // 收入确认了的近 7 天：逐日收入 7 天，7 个模型（前 5 + 其他 2 个）
-  const analytics = (range = "7d") => {
-    const base = bigOwnAnalytics(range), end = shanghaiDay(Date.now());
-    const incomeDaily = Array.from({ length: 7 }, (_, i) => ({ date: shiftDay(end, i - 6), incomeCny: 1000 + i * 100 }));
-    const byModel = [700, 600, 500, 400, 300, 20, 10].map((cost, i) => ({ model: `model-${i}`, tokens: 1000, cost, requests: 3 }));
-    return { ...base, incomeDaily, byModel };
-  };
-  const adminKeys = [];
+  const analytics = myLayoutAnalytics;
+  const adminKeys = [], paths = [];
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
+    paths.push(url.pathname);
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (url.pathname === "/api/own/analytics") return fulfill(route, analytics(url.searchParams.get("range") || "7d"));
     if (url.pathname === "/api/own/admin-keys") { adminKeys.push(route.request().method()); return fulfill(route, { accounts: [{ username: "root", role: 100, enumerable: true, tokens: [{ name: "sale", flagged: true, usedUsd: 1 }] }] }); }
@@ -3088,8 +3092,13 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
   await metrics.getByText("5 个", { exact: true }).waitFor();
   assert.doesNotMatch(await metrics.innerText(), /[¥$]/);
   assert.ok((await metrics.boundingBox()).y < (await region(`${RANGE_TEXT["7d"]}经营`).boundingBox()).y, "指标行在利润等式上面");
-  // 「消费最多的用户」下面只留消费合计，另外三项在指标行里不写两遍
-  assert.deepEqual((await users.locator(".jy-my-facts li").allInnerTexts()).map((x) => x.split(" ")[0]), ["消费"]);
+  // 「消费」合计在「消费最多的模型」下面，等于模型那几条加起来（按模型加总；用户的条按用户加总，可能对不上，所以不放用户下面）
+  assert.equal(await users.locator(".jy-my-facts").count(), 0);
+  assert.deepEqual((await models.locator(".jy-my-facts li").allInnerTexts()).map((x) => x.trim()), [`消费 ${formatMoney(2530 * 7)}`]);
+  await models.getByText("含管理员自用，和收入不是一个数。", { exact: true }).waitFor();
+  // 人数只在指标行里写一次：用户排行右上角不带数字
+  await users.getByRole("button", { name: "看全部用户", exact: true }).waitFor();
+  assert.equal(await users.getByText(/全部 \d+ 个用户/).count(), 0);
   for (const [main, side] of [[income, users], [forecast, models]]) {
     const [m, sd] = [await main.boundingBox(), await side.boundingBox()];
     assert.ok(sd.x > m.x + m.width, "右边那块在左边那块右边");
@@ -3103,6 +3112,14 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
   await income.locator("table").waitFor();
   assert.deepEqual((await income.locator("thead th").allInnerTexts()).map((x) => x.trim()), ["日期", "收入"]);
   assert.equal(await income.locator("tfoot").count(), 0);
+  // 每天的收入照接口的逐日收入写，新的在上；第一行是今天（写「截至」几点），其余几天不写
+  const incomeRows = income.locator("tbody tr");
+  assert.deepEqual((await incomeRows.locator("td:last-child").allInnerTexts()).map((x) => x.trim()), [1600, 1500, 1400, 1300, 1200, 1100, 1000].map((v) => formatMoney(v)));
+  assert.match(await incomeRows.first().locator("td").first().innerText(), /截至/);
+  assert.equal(await incomeRows.locator("td:first-child", { hasText: "截至" }).count(), 1);
+  // 设置了售价：收入是准确数，不带「≈」；说明末尾去成本估算看上游成本，带当前时间范围
+  assert.doesNotMatch(await income.locator("tbody").innerText(), /≈/);
+  assert.equal(await income.getByRole("link", { name: "成本估算", exact: true }).getAttribute("href"), "/analytics?range=7d");
   // 消费最多的模型：前 5 加一行「其他 2 个模型」（等于并掉的两个之和），右上角去「模型与渠道」
   assert.equal(await models.locator(".jy-hbars li").count(), 6);
   await models.locator(".jy-hbars li", { hasText: "其他 2 个模型" }).getByText(formatMoney(30 * 7), { exact: true }).waitFor();
@@ -3117,10 +3134,34 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
   assert.equal(await pick.getAttribute("class"), "jy-more__toggle"); assert.equal(adminKeys.length, 0);
   await pick.click(); await basis.locator(".jy-my-mgr .jy-my-account h4", { hasText: "root" }).waitFor(); assert.deepEqual(adminKeys, ["GET"]);
   await basis.getByRole("button", { name: "取消", exact: true }).click(); assert.equal(await pick.getAttribute("aria-expanded"), "false");
+  // 收起以后焦点回到「选转售 Key」按钮
+  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "选转售 Key");
+  // 换范围、点顶栏刷新：一直没请求过 /api/analytics（逐个记下请求过的路径再查）
+  await page.getByRole("button", { name: RANGE_TEXT["30d"], exact: true }).click();
+  await page.waitForURL(/range=30d/); await income.locator('a[href="/analytics?range=30d"]').waitFor();
+  const ownReads = () => paths.filter((x) => x === "/api/own/analytics").length, before = ownReads();
+  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
+  for (let i = 0; i < 50 && ownReads() === before; i++) await page.waitForTimeout(100);
+  assert.ok(ownReads() > before, "顶栏刷新重读了自营站点接口");
+  assert.ok(paths.includes("/api/own/analytics")); assert.equal(paths.filter((x) => x === "/api/analytics").length, 0);
   // 按明细细算（模型与渠道标签页）：收起区，默认收起
   await page.getByRole("tab", { name: "模型与渠道", exact: true }).click();
-  const audit = page.getByRole("button", { name: "细算的范围和结果", exact: true });
+  const audit = page.getByRole("button", { name: "细算的条数和结果", exact: true });
   await audit.waitFor(); assert.equal(await audit.getAttribute("class"), "jy-more__toggle"); assert.equal(await audit.getAttribute("aria-expanded"), "false");
+  await page.context().close();
+
+  // 没设置售价：收入是估算，和等式同一个判断——每日收入的数值都带「≈」，说明里接上那句原因
+  const unpriced = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") return fulfill(route, myLayoutAnalytics(url.searchParams.get("range") || "7d", { sellPrice: false }));
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+  const estIncome = unpriced.getByRole("region", { name: "每日收入", exact: true });
+  await estIncome.getByText(new RegExp(`${SELL_PRICE_UNSET}。`)).waitFor();
+  await estIncome.getByRole("button", { name: "表格", exact: true }).click();
+  const est = (await estIncome.locator("tbody td:last-child").allInnerTexts()).map((x) => x.trim());
+  assert.equal(est.length, 7); assert.ok(est.every((x) => x.startsWith("≈")), est.join(" "));
 });
 
 test("收入确认不了时：成本估算、自营业务的利润等式收入几项写「读不到」并说原因，两项成本照常；用户表说合计含管理员账号；用户列表也读不到时说管理员没标出", async (t) => {
