@@ -248,22 +248,26 @@ a { color: var(--cobalt); text-decoration: none; }
 .tabs span.on { color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--cobalt); }
 </style>
 
-<p class="frame-label" style="width:1160px">flow-own · 第 1 步 设置自营站点：两栏，填完自动读，保存</p>
-<section class="frame" id="flow-own" style="width:1160px;height:560px">
+<p class="frame-label" style="width:1160px">flow-own · 第 1 步 设置自营站点：三栏，填完自动读，保存（读取服务先在你站的服务器上装好）</p>
+<section class="frame" id="flow-own" style="width:1160px;height:640px">
   <div data-page></div>
   <aside class="drawer">
     <div class="d-head"><svg class="icon"><use href="#i-close"/></svg><h3>设置自营站点</h3></div>
     <div class="d-body">
-      <p class="sub" style="margin:0">填你自己那个 New API 站点的地址和超级管理员的访问令牌。只读，不会改你的站点。</p>
+      <p class="sub" style="margin:0">填你自己那个 New API 站点的地址、超级管理员的访问令牌和读取服务的令牌。都是只读，不会改你的站点。</p>
       <div class="field"><label>站点地址</label><div class="input filled">https://my.example.com</div></div>
       <div class="field"><label>超级管理员的访问令牌</label><div class="input filled">••••••••••••••••</div>
         <div class="kv-ok"><svg class="sym"><use href="#good"/></svg>能读到：站点「我的站」，120 个用户，6 个渠道</div></div>
-      <div class="more"><svg class="icon"><use href="#i-chev"/></svg>更多设置</div>
+      <div class="field"><label>读取服务令牌</label><div class="input filled">••••••••••••</div>
+        <div class="kv-ok"><svg class="sym"><use href="#good"/></svg>能读到：6 个渠道的 Key</div>
+        <div class="more" style="padding-top:2px"><svg class="icon"><use href="#i-chev"/></svg>怎么装（在你站的 docker compose 里加几行）</div></div>
+      <div class="more"><svg class="icon"><use href="#i-chev"/></svg>更多设置（售价、读取服务地址）</div>
     </div>
     <div class="d-foot"><span class="sub"></span><span class="btn">关闭</span><span class="btn primary">保存</span></div>
   </aside>
   <div class="ann r" style="right:576px;top:200px">离开输入框就自己读，不用点「测试读取」</div>
-  <div class="ann r" style="right:576px;top:300px">系统在后面：读站点名、用户、每个渠道和渠道里填的上游地址</div>
+  <div class="ann r" style="right:576px;top:330px">读取服务装在你站服务器上，只交出每个渠道 Key 的打码和指纹；系统拿它和上游的 Key 一把一把对</div>
+  <div class="ann r" style="right:576px;top:470px">读取服务地址默认是「站点地址 + 固定路径」，装在别处时才去「更多设置」改</div>
 </section>
 
 <p class="frame-label" style="width:1160px">flow-upstream · 第 2 步 加上游：两栏，填完自动读出账号和 Key；回答一次账号的问题</p>
@@ -277,7 +281,7 @@ a { color: var(--cobalt); text-decoration: none; }
         <div class="kv-ok"><svg class="sym"><use href="#good"/></svg>能读到：账号 演示·主力账号，余额 $158.78，3 把 Key</div></div>
       <div class="field"><label>这个上游账号只给你自己的渠道用吗？</label>
         <div class="radio">
-          <label class="on"><i></i><span>只给我的渠道用</span><span class="sub">换 Key 时系统会自己跟上，不用手动换</span></label>
+          <label class="on"><i></i><span>只给我的渠道用</span><span class="sub">换 Key 时系统会自己跟上，新渠道系统自己开始算</span></label>
           <label><i></i><span>别处也在用</span></label>
           <label><i></i><span>不确定</span></label>
         </div></div>
@@ -290,44 +294,47 @@ a { color: var(--cobalt); text-decoration: none; }
   <div class="ann r" style="right:576px;top:330px">三个选项一开始都不选（图里是选了以后）；整条流程只问这一件</div>
 </section>
 
-<p class="frame-label" style="width:1160px">flow-start · 第 3 步 开始算利润：加完上游，同一个抽屉接着列出对上的渠道，点一下</p>
-<section class="frame" id="flow-start" style="width:1160px;height:700px">
+<p class="frame-label" style="width:1160px">flow-start · 第 3 步 开始算利润：加完上游，同一个抽屉接着列出用这个上游的 Key 的渠道，点一下</p>
+<section class="frame" id="flow-start" style="width:1160px;height:640px">
   <div data-page></div>
   <aside class="drawer">
     <div class="d-head"><svg class="icon"><use href="#i-close"/></svg><h3>开始算利润 · 演示·主力账号</h3></div>
     <div class="d-body">
-      <p class="sub" style="margin:0">你的站里有 4 个渠道连到这个上游。勾上的从现在开始，每天按「渠道收入 − 这个渠道用的 Key 在上游花的钱」算利润。</p>
+      <p class="sub" style="margin:0">你站里有 4 个渠道用这个上游的 Key。勾上的从现在开始，每天按「渠道收入 − 这个渠道用的 Key 在上游花的钱」算利润。</p>
       <div class="pick">
-        <div class="grp-title">认出了用的哪把 Key</div>
+        <div class="grp-title">全选</div>
         <div class="check on chan"><i></i><div><b>高速 A</b><div class="k">用的 Key：oai · 分组 a · 倍率 1.2</div></div></div>
         <div class="check on chan"><i></i><div><b>标准 B</b><div class="k">用的 Key：team-b · 分组 b · 倍率 1.0</div></div></div>
-        <div class="check on chan"><i></i><div><b>备用 C</b><div class="k">用的 Key：bak · 分组 c · 倍率 0.8</div></div></div>
-        <div class="grp-title">还没认出</div>
-        <div class="check on chan"><i></i><div><b>海外 D</b><div class="w">还没认出用的是哪把 Key，先开始算，系统接着认</div></div></div>
+        <div class="check on chan"><i></i><div><b>备用 C、备用 C2</b><div class="k">同一把 Key：bak · 分组 c · 倍率 0.8（两个渠道一起算）</div></div></div>
+        <div class="check on chan"><i></i><div><b>海外 D</b><div class="k">用的 Key：oai-3 · 分组 a · 倍率 1.2</div></div></div>
       </div>
     </div>
-    <div class="d-foot"><span class="sub"></span><span class="btn">以后再说</span><span class="btn primary">开始算利润（4 个渠道）</span></div>
+    <div class="d-foot"><span class="sub"></span><span class="btn">以后再说</span><span class="btn primary">开始算利润（5 个渠道）</span></div>
   </aside>
-  <div class="ann r" style="right:576px;top:150px">系统在后面：按渠道里填的地址认出连的是这个上游；按请求记录或用量认出用的是哪把 Key</div>
-  <div class="ann r" style="right:576px;top:440px">没认出的也勾着；过了一天还认不出才来找你（「指定 Key」）</div>
-  <div class="ann r" style="right:576px;top:640px">点了就落到每日利润的今天，这几个渠道高亮一下</div>
+  <div class="ann r" style="right:576px;top:150px">系统在后面：拿读取服务读到的每个渠道的 Key 和这个上游的 Key 一把一把对，对上的才列出来，不猜</div>
+  <div class="ann r" style="right:576px;top:330px">两个渠道填了同一把 Key：一行、一个勾，一起算</div>
+  <div class="ann r" style="right:576px;top:580px">点了就落到每日利润的今天，这几个渠道高亮一下</div>
 </section>
 
-<p class="frame-label" style="width:1160px">flow-assign · 例外一：认不出 Key。需处理一条、一个按钮，点开一个小窗</p>
-<section class="frame" id="flow-assign" style="width:1160px;height:620px">
+<p class="frame-label" style="width:1160px">flow-attention · 三种例外：需处理一条、一个按钮。「检查连接」打开设置自营站点的抽屉，停在读取服务那一栏</p>
+<section class="frame" id="flow-attention" style="width:1160px;height:620px">
   <div class="cols c2" style="padding:24px;align-items:start">
-    <div><div class="v-title">需处理里（过了一天还认不出才出现）</div>
-      <ul class="attention"><li><svg class="sym"><use href="#warn"/></svg><div><strong>渠道 海外 D · 演示·主力账号</strong> 没认出这个渠道用的是哪把 Key<p>这段时间的上游成本先不算；指定以后就能算</p><div class="note">从 <span class="day">10月24日</span> 起</div></div><span class="btn sm">指定 Key</span></li></ul>
-      <p class="caption" style="margin-top:12px">只有两种情况找你：这一种，和「登录信息不对或过期了」［更新登录信息］。</p></div>
-    <div class="card" style="padding:0">
-      <div class="modal-head" style="padding:20px 24px 0"><h3>指定 Key · 渠道 海外 D</h3></div>
-      <div style="padding:12px 24px;display:flex;flex-direction:column;gap:14px">
-        <div class="field"><label>这个渠道用的是哪把 Key？</label><div class="input filled" style="justify-content:space-between">oai-3（AbC1…9f0c）· 分组 a · 倍率 1.2<svg class="icon"><use href="#i-chev-d"/></svg></div>
-          <div class="menu"><div class="grp">可能是这几把</div><div class="opt on">oai-3（AbC1…9f0c）<span>分组 a · 倍率 1.2</span></div><div class="grp">在用的 Key</div><div class="opt">team-b<span>分组 b · 倍率 1.0</span></div><div class="opt dis">oai-2<span>已在「高速 A」用着</span></div></div></div>
-        <div class="field"><label>从什么时候起</label><div class="radio"><label class="on"><i></i><span>从没认出的时候起（10月24日 09:10）</span></label><label><i></i><span>从现在起</span></label><label><i></i><span>从别的时间起</span></label></div></div>
+    <div><div class="v-title">需处理里（上游账号只给你自己的渠道用时，只有这三种）</div>
+      <ul class="attention">
+        <li><svg class="sym"><use href="#warn"/></svg><div><strong>读不到你站的渠道 Key</strong><p>从 15:20 起各渠道的利润先不算；连上以后接着算</p></div><span class="btn sm">检查连接</span></li>
+        <li><svg class="sym"><use href="#warn"/></svg><div><strong>渠道「高速 A」用的 Key 不在已加的上游里</strong><p>从 10月25日 15:20 起这个渠道的上游成本算不出；把这把 Key 所在的上游加进来就能算</p></div><span class="btn sm">加上游</span></li>
+        <li><svg class="sym"><use href="#warn"/></svg><div><strong>演示·拼车团队</strong> 登录信息不对或过期了<p>更新之后才能接着读取余额和账单</p></div><span class="btn sm">更新登录信息</span></li>
+      </ul>
+      <p class="caption" style="margin-top:12px">读取服务连续 10 分钟读不到才出现第一条；读不到的这段时间各渠道写「实时 · 还在读取」，不算进汇总，连上以后 Key 没变就照常算。</p></div>
+    <aside class="drawer" style="position:static;width:auto;height:auto;box-shadow:var(--shadow-2, 0 4px 16px rgba(0,0,0,.08));border-radius:var(--r2)">
+      <div class="d-head"><svg class="icon"><use href="#i-close"/></svg><h3>设置自营站点</h3></div>
+      <div class="d-body">
+        <div class="field"><label>读取服务令牌</label><div class="input filled">••••••••••••</div>
+          <div style="color:var(--warn-ink);display:flex;gap:6px;align-items:flex-start"><svg class="sym"><use href="#warn"/></svg>读不到渠道 Key：连不上 https://my.example.com/…（超时）</div>
+          <div class="more" style="padding-top:2px"><svg class="icon"><use href="#i-chev"/></svg>怎么装（在你站的 docker compose 里加几行）</div></div>
       </div>
-      <div class="modal-foot"><span class="btn">取消</span><span class="btn primary">指定 Key</span></div>
-    </div>
+      <div class="d-foot"><span class="sub"></span><span class="btn">关闭</span><span class="btn primary">保存</span></div>
+    </aside>
   </div>
 </section>
 
@@ -338,24 +345,27 @@ a { color: var(--cobalt); text-decoration: none; }
   <div class="two">
     <div class="panel"><div class="ph"><h2>上游</h2><span class="caption">4 个</span></div>
       <ul class="ulist">
-        <li class="on"><b>演示·主力账号</b><span class="tag info">只给我的渠道用</span><span class="sub">4 个渠道在算</span></li>
-        <li><b>演示·拼车团队</b><span class="tag warn">1 个没认出 Key</span><span class="sub">2 个渠道在算</span></li>
+        <li class="on"><b>演示·主力账号</b><span class="tag warn">1 个需处理</span><span class="sub">只给我的渠道用 · 5 个渠道</span></li>
+        <li><b>演示·拼车团队</b><span></span><span class="sub">别处也在用 · 2 个渠道在算</span></li>
         <li><b>演示·Key 计费站</b><span></span><span class="sub">只填了一把 Key · 1 个渠道在算</span></li>
-        <li><b>演示·邮箱密码登录</b><span></span><span class="sub">没有渠道连到它</span></li>
+        <li><b>演示·邮箱密码登录</b><span></span><span class="sub">没有渠道用它的 Key</span></li>
       </ul>
       <div class="grp-title" style="border-radius:0 0 var(--r2) var(--r2)">没对上上游的渠道 · 1 个</div>
-      <ul class="ulist"><li><b>渠道 内网中转</b><span class="btn sm">加上游</span><span class="sub">这个渠道连的上游还没加</span></li></ul>
+      <ul class="ulist"><li><b>渠道 内网中转</b><span class="btn sm">加上游</span><span class="sub">这个渠道用的 Key 不在已加的上游里</span></li></ul>
     </div>
     <div class="panel"><div class="ph"><h2>演示·主力账号</h2><span class="caption">余额 $158.78 · 3 把 Key</span></div>
       <div class="acct-body">
-        <div class="bind"><div class="key-head"><b>高速 A</b><span class="tag plain">在算利润</span><span class="spacer"></span><a class="linkbtn">停止算利润</a></div>
-                    <div class="tl"><div class="tl-title">用过的 Key</div><ol>
-            <li><i></i><span class="when">10月24日 14:30 起（现在）</span><span>oai-2 · 分组 a · 倍率 1.2　<span class="caption">系统发现</span></span><span><a>不对？指定 Key</a>　<a>改时间</a></span></li>
+        <div class="bind"><div class="key-head"><b>高速 A</b><span class="tag warn">需处理</span><span class="spacer"></span><span class="btn sm">加上游</span></div>
+          <div class="tl"><div class="tl-title">用过的 Key</div><ol>
+            <li><i></i><span class="when">10月25日 15:20 起</span><span style="color:var(--warn-ink)">sk-9a…c3f1 · 不在已加的上游里</span><span></span></li>
+            <li><i></i><span class="when">10月24日 14:30 起</span><span>oai-2 · 分组 a · 倍率 1.2</span><span></span></li>
             <li><i></i><span class="when">10月20日 12:44 起</span><span>oai · 分组 a · 倍率 1.2</span><span></span></li>
           </ol></div></div>
-        <div class="bind"><div class="key-head"><b>海外 D</b><span class="tag warn">没认出 Key</span><span class="spacer"></span><span class="btn sm">指定 Key</span></div>
-          <div class="facts"><span>用过的 Key</span><div style="color:var(--warn-ink)">10月24日 09:10 起没认出是哪把 Key；这段时间的上游成本先不算</div></div></div>
-        <div class="more" style="padding:4px 0 0"><svg class="icon"><use href="#i-chev"/></svg>还有 2 个渠道（标准 B、备用 C）</div>
+        <div class="bind"><div class="key-head"><b>海外 D</b><span class="tag plain">在算利润</span><span class="spacer"></span><a class="linkbtn">停止算利润</a></div>
+          <div class="tl"><div class="tl-title">用过的 Key</div><ol>
+            <li><i></i><span class="when">10月25日 09:12 起</span><span>oai-3 · 分组 a · 倍率 1.2　<span class="caption">系统自动开始算</span></span><span></span></li>
+          </ol></div></div>
+        <div class="more" style="padding:4px 0 0"><svg class="icon"><use href="#i-chev"/></svg>还有 3 个渠道（标准 B、备用 C、备用 C2）</div>
       </div></div>
   </div>
 </section>
