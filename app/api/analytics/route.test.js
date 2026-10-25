@@ -199,8 +199,10 @@ test("P0b 花费时段读出来的结果缓存 10 分钟：轮询不再每次读
   const rt = { pool, store: { list: () => stations }, history: { predict: () => null } };
   const { GET } = await analyticsRoute();
   const heat = async (query = "days=7") => (await (await GET(new Request(`https://local.test/api/analytics?${query}`), rt)).json()).heatmap;
-  assert.deepEqual(await heat(), [{ weekday: 2, hour: 0, cny: 14 }]);
-  assert.equal(pointReads, 1);
+  // 同一时刻几个请求：只有一个真去读，其余等它
+  const together = await Promise.all([heat(), heat(), heat()]);
+  assert.ok(together.every((cells) => JSON.stringify(cells) === JSON.stringify([{ weekday: 2, hour: 0, cny: 14 }])));
+  assert.equal(pointReads, 1, "同一个键正在算时合并等待");
   now += 9 * 60000; t.mock.timers.setTime(now);
   stations[0].cnyPerUsd = 8;
   assert.deepEqual(await heat(), [{ weekday: 2, hour: 0, cny: 16 }], "汇率每次请求时再乘，改了马上生效");
