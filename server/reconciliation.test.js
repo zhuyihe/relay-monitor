@@ -5208,7 +5208,7 @@ test("B-L1 重结内容相同不写新版：这次的结果（会进缓存）固
   const settledAt = (await f.repository.latestLedgerEntry("rr_live", { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z"), timezone: "Asia/Shanghai" })).settledAt;
   // 一小时后重结，上游、本站都没变
   now += 3600000;
-  f.rt._reconciliationResettles.add("rr_live");
+  f.rt._reconciliationResettles.set("rr_live", Date.now() - 1);
   await f.module.refreshDue(now);
   assert.equal(f.state.ledger.filter((entry) => entry.rule_id === "rr_live" && entry.bill_date === "2026-10-08").length, 1, "内容相同，不写第 2 版（一小时后回看也开始了，更早的日子另算）");
   const page = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", origin: "page" });
@@ -5780,7 +5780,7 @@ test("module修正切换时间在来源锁内改分段并清空缓存：非强�
   assert.equal(cacheAtEdit, 0, "释放来源锁前已清空本规则缓存");
   assert.deepEqual(segments.map((segment) => [segment.id, segment.effectiveFrom, segment.effectiveTo, segment.timingSource]),
     [["s1", 1000000, 1045000, "operator_confirmed"], ["s2", 1045000, null, "operator_confirmed"]]);
-  assert.deepEqual([...f.rt._reconciliationResettles], [f.rule.id], "修正后本规则已结账的昨天要按新分段重新结账，其它规则不受影响");
+  assert.deepEqual([...f.rt._reconciliationResettles.keys()], [f.rule.id], "修正后本规则已结账的昨天要按新分段重新结账，其它规则不受影响");
 
   const after = await f.module.queryRules(input);
   assert.equal(f.state.statCalls.length, calls + 4, "修正后非强制查询不能复用旧分段缓存");
@@ -6972,6 +6972,70 @@ test("C2a 结账照样核验并记下 Sub2API 的账单能力：只有昨天有�
   assert.ok(f.sub2.controls >= 1, "结昨天时核验了账单能力");
   assert.deepEqual(f.state.ledger.map((row) => row.bill_date), ["2026-10-10"], "昨天结进账本");
   assert.equal(f.repository.tables.settlementState.length, 0);
+});
+
+test("C2a 本地重判看不出来的原因（取账单时才被上游拒绝）：重判说没了、去结还是要人处理，以后到点直接去结、按退避表计次", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    // 目录里这把 Key 好好的，取它的用量时上游却拒绝
+    if (url.host === "upstream.test" && url.pathname === "/api/log/self/stat" && url.searchParams.get("token_name") === "stable") {
+      f.state.statCalls.push({ side: "upstream", start: Number(url.searchParams.get("start_timestamp")), end: Number(url.searchParams.get("end_timestamp")) });
+      return { status: 403, text: async () => JSON.stringify({ success: false, message: "无权进行此操作" }) };
+    }
+    return prev(input, init);
+  });
+  const yesterdayStart = COMPLETED_YESTERDAY.startMs / 1000;
+  const yesterdayReads = () => f.state.statCalls.filter((call) => call.start === yesterdayStart).length;
+  const state = () => f.repository.tables.settlementState.find((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
+  const minute = async (n = 1) => { for (let i = 0; i < n; i += 1) { now += 60000; await f.module.refreshDue(now); } };
+
+  await f.module.refreshDue(now);
+  assert.deepEqual([state().manual_reason, state().attempts], ["KEY_INVALID_OR_DENIED", 0]);
+  await minute(10); // 到点本地重判：目录里看不出问题，记 cleared
+  assert.equal(state().last_detail.cleared, true);
+  let reads = yesterdayReads();
+  await minute(); // 下一轮去结：还是被拒绝，记成本地看不出来，开始计次
+  assert.ok(yesterdayReads() > reads);
+  assert.deepEqual([state().manual_reason, state().attempts, state().last_detail.probeBlind, state().next_attempt_at_ms], ["KEY_INVALID_OR_DENIED", 1, true, now + 10 * 60000]);
+  reads = yesterdayReads();
+  await minute(9);
+  assert.equal(yesterdayReads(), reads, "按退避表等 10 分钟，中间不本地重判、不取账单");
+  await minute();
+  assert.ok(yesterdayReads() > reads, "到点直接去结");
+  assert.deepEqual([state().attempts, state().last_detail.probeBlind, state().next_attempt_at_ms], [2, true, now + 30 * 60000], "第二次没成，按退避表 30 分钟");
+});
+
+test("C2a 本地重判自己出错：按原因还在，10 分钟后再判，不每轮重来", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/token/") {
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: 3, items: [
+        { id: 9, user_id: 7, name: "stable", status: 2, group: "g1", cross_group_retry: false },
+        { id: 10, user_id: 7, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+        { id: 11, user_id: 7, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } }) };
+    }
+    return prev(input, init);
+  });
+  const state = () => f.repository.tables.settlementState.find((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
+  await f.module.refreshDue(now);
+  assert.equal(state().manual_reason, "KEY_INVALID_OR_DENIED");
+  // 本地重判一开头读绑定时库出错
+  const getRule = f.repository.getRule.bind(f.repository);
+  t.mock.method(f.repository, "getRule", async (ruleId) => {
+    if (ruleId === "rr_live") throw Object.assign(new Error("数据库连不上"), { code: "PERSISTENCE_FAILED" });
+    return getRule(ruleId);
+  });
+  t.mock.method(console, "error", () => {});
+  now += 10 * 60000;
+  await f.module.refreshDue(now);
+  assert.deepEqual([state().manual_reason, state().next_attempt_at_ms, state().attempts], ["KEY_INVALID_OR_DENIED", now + 10 * 60000, 0], "推后 10 分钟，不计次数");
+  assert.notEqual(state().last_detail?.cleared, true, "没判出来，不当成原因没了");
 });
 
 test("C2a 每小时清一批状态表：31 天前、没有重结请求的行；一小时内不重复清", async (t) => {
