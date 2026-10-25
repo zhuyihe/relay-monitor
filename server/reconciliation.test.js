@@ -4841,6 +4841,60 @@ test("P1a 沿用渠道收费的边界：额度换算变了、读失败后进入�
   assert.deepEqual(fingerprints().sort(), ["rr_live", "rr_two"]);
 });
 
+test("P1b 轮询按时间重读上游：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟；Key 账单报错、有收入而 Key 用量为 0、目录里找不到 Key，下一轮马上全部重读；页面「刷新」照旧强制", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  let dropKey = false;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    // 这一轮的 Key 目录里没有绑定的 Key 9
+    if (dropKey && url.host === "upstream.test" && url.pathname === "/api/token/") {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: 2, items: [
+        { id: 10, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+        { id: 11, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } }) };
+    }
+    return prev(input, init);
+  });
+  const paths = ["/api/user/self", "/api/status", "/api/user/self/groups", "/api/token/"];
+  const upstreamReads = () => Object.fromEntries(paths.map((path) => [path, f.state.requests.filter((request) => request.host === "upstream.test" && request.path === path).length]));
+  const diff = (before) => { const after = upstreamReads(); return paths.map((path) => after[path] - before[path]); };
+  const round = async (minutes) => { now += minutes * 60000; const before = upstreamReads(); await f.module.refreshDue(now); return diff(before); };
+  const FULL = [1, 1, 1, 1], CATALOGUE = [0, 0, 1, 1], NONE = [0, 0, 0, 0];
+
+  assert.deepEqual(await round(0), FULL, "第一轮全部读");
+  assert.deepEqual(await round(1), NONE, "5 分钟内一样都不读");
+  assert.deepEqual(await round(4), CATALOGUE, "满 5 分钟：只重读分组和 Key 目录，身份和 /api/status 沿用");
+  assert.deepEqual(await round(1), NONE);
+  assert.deepEqual(await round(25), FULL, "满 30 分钟：身份和 /api/status 也重读");
+
+  // 异常一：Key 账单报错 → 下一轮马上全部重读
+  f.state.upstreamQuota = null;
+  assert.deepEqual(await round(1), NONE, "报错这一轮还在缓存期里");
+  f.state.upstreamQuota = 100;
+  assert.deepEqual(await round(1), FULL, "下一轮全部重读");
+  assert.deepEqual(await round(1), NONE, "重读过就不再强制");
+
+  // 异常二：渠道有收入而 Key 用量为 0 → 下一轮马上全部重读
+  f.state.upstreamQuota = 0;
+  assert.deepEqual(await round(1), NONE);
+  f.state.upstreamQuota = 100;
+  assert.deepEqual(await round(1), FULL);
+
+  // 异常三：目录里找不到绑定的 Key（目录到点重读时发现）→ 下一轮马上全部重读，身份也重读
+  dropKey = true;
+  assert.deepEqual(await round(5), CATALOGUE);
+  dropKey = false;
+  assert.deepEqual(await round(1), FULL);
+
+  // 没有异常时一样都不读；页面「刷新」照旧强制全部重读
+  assert.deepEqual(await round(1), NONE);
+  const before = upstreamReads();
+  await f.module.queryRules({ preset: "today", ruleIds: ["rr_live"] }, { mode: "observe", force: true, origin: "manual" });
+  assert.deepEqual(diff(before), FULL);
+});
+
 test("B1 结果缓存按请求比：「今天」过了半分钟再单独重读一条，别的绑定照样用缓存里的账单（截止点不同也是同一段）", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now });

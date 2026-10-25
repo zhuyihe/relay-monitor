@@ -111,6 +111,10 @@ const UNCHANGED_REWRITE_MS = 10 * 60000;
 const OWN_LOG_LOOKBACK_SEC = 120;
 const OWN_LOG_ANCHOR_LAG_SEC = 10 * 60;
 const OWN_LOG_FIRST_LOOKBACK_SEC = 2 * 3600;
+// 上游的分组和 Key 目录、账号身份和 /api/status 多久重读一次（计划 P1b，用户 10-25 选的 B）。
+// 轮询按这个读；出了异常的上游下一轮马上全部重读（staleMetadata）；页面「刷新」照旧强制重读
+const CATALOGUE_TTL_MS = 5 * 60000;
+const IDENTITY_TTL_MS = 30 * 60000;
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -423,6 +427,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const ownActivity = (rt._reconciliationOwnActivity ||= new Map());
   const ownRevenueCache = (rt._reconciliationOwnRevenue ||= new Map());
   const observationWrites = (rt._reconciliationObservationWrites ||= new Map());
+  // 出了异常、下一轮要把分组、Key 目录和身份全部重读的上游：Key 账单报错、渠道有收入而 Key 用量为 0、目录里找不到绑定的 Key
+  const staleMetadata = (rt._reconciliationStaleMetadata ||= new Set());
   const verifiedRuleCredentials = new WeakMap();
   const previewReadFacts = new WeakMap();
   const ownIdentities = new Map();
@@ -552,27 +558,32 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   };
 
   // 凭据指纹必须在发请求前取：请求读的是发起时的凭据，等待期间站点可能已被原地改写。
-  async function metadataFor(station, { force = false, timezone = "Asia/Shanghai" } = {}) {
+  // 分组和 Key 目录 5 分钟内用缓存；过了重读。reuseIdentity（轮询）时，身份和 /api/status 30 分钟内沿用上次读到的，只读分组和 Key 目录
+  async function metadataFor(station, { force = false, timezone = "Asia/Shanghai", reuseIdentity = false } = {}) {
     const credential = credentialFingerprint(station);
     const zone = canonicalTimeZone(timezone), cacheKey = `${station.id}:${zone}`;
-    const cached = metadataCache.get(cacheKey);
-    if (!force && cached?.credential === credential && Date.now() - cached.at < 5 * 60000) return cached.value;
-    const value = await queryReconciliationMetadata({ ...station }, { timezone: zone, capabilityStore: billingCapabilityStore });
-    metadataCache.set(cacheKey, { at: Date.now(), credential, value });
+    const cached = metadataCache.get(cacheKey), now = Date.now();
+    const same = cached?.credential === credential;
+    if (!force && same && now - cached.at < CATALOGUE_TTL_MS) return cached.value;
+    const known = !force && reuseIdentity && same && now - cached.identityAt < IDENTITY_TTL_MS ? { accountId: cached.value.accountId,
+      status: cached.value.platform === "newapi" ? { quotaPerUnit: cached.value.quotaPerUnit, version: cached.value.version } : null } : null;
+    const value = await queryReconciliationMetadata({ ...station }, { timezone: zone, capabilityStore: billingCapabilityStore, known });
+    metadataCache.set(cacheKey, { at: now, identityAt: known ? cached.identityAt : now, credential, value });
     return value;
   }
 
-  async function identityFor(station, { force = false } = {}) {
+  async function identityFor(station, { force = false, maxAgeMs = CATALOGUE_TTL_MS } = {}) {
     const credential = credentialFingerprint(station);
     const cached = identityCache.get(station.id);
-    if (!force && cached?.credential === credential && Date.now() - cached.at < 5 * 60000) return cached.value;
+    if (!force && cached?.credential === credential && Date.now() - cached.at < maxAgeMs) return cached.value;
     const value = await queryAccountIdentity(station);
     identityCache.set(station.id, { at: Date.now(), credential, value });
     return value;
   }
 
-  // 只有观测才强制重读 Key 目录和账号身份；只读查询用 5 分钟缓存，轮询每轮会刷新它。
-  async function ownerRegistryFor(rules, selected, { observe = true } = {}) {
+  // 页面「刷新」（观测）强制重读 Key 目录和账号身份；只读查询用 5 分钟缓存。
+  // 轮询（poll）按时间重读：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟；出了异常的上游（staleMetadata）这一轮强制重读。
+  async function ownerRegistryFor(rules, selected, { observe = true, poll = false } = {}) {
     const billingSource = { ...billingSourceState(), expectedOwnerState: reconciliationOwnerRuleState(rules) };
     const selectedIds = new Set(selected.map((rule) => rule.id));
     const participants = rules.filter((rule) => rule.enabled || selectedIds.has(rule.id));
@@ -585,9 +596,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (!station) throw codedError("COST_OWNER_UNVERIFIED", issueText("COST_OWNER_UNVERIFIED"));
         const timezone = selected.find((rule) => rule.upstreamStationId === id)?.timezone
           || participants.find((rule) => rule.upstreamStationId === id)?.timezone || "Asia/Shanghai";
-        const metadata = billingStation(station) ? await metadataFor(station, { force: observe, timezone }) : null;
+        const force = observe && (!poll || staleMetadata.has(id));
+        const metadata = billingStation(station) ? await metadataFor(station, { force, timezone, reuseIdentity: poll }) : null;
         const identity = metadata ? { provider: metadata.platform, baseUrl: onboardingBaseUrl(station.baseUrl), accountId: String(metadata.accountId ?? metadata.userId) }
-          : await identityFor(station, { force: observe });
+          : await identityFor(station, { force, maxAgeMs: poll ? IDENTITY_TTL_MS : CATALOGUE_TTL_MS });
+        if (force) staleMetadata.delete(id);
         return [id, Object.freeze({ station, resourceVersion, metadata, identity: Object.freeze(identity), error: null })];
       } catch (error) { return [id, Object.freeze({ station, resourceVersion, metadata: null, identity: null, error })]; }
     }));
@@ -1254,6 +1267,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const metadataError = upstreamResource?.error;
       if (metadata) {
         const key = metadata.tokens.find((item) => item.id === rule.tokenId);
+        // 目录里找不到绑定的 Key：下一轮把这个上游的目录和身份全部重读（P1b 的异常之一）
+        if (!key) staleMetadata.add(rule.upstreamStationId);
         const detail = !key ? issueText("KEY_INVALID_OR_DENIED") : key.status !== 1 ? KEY_DISABLED_TEXT
           : key.name !== rule.tokenName ? "上游里这把 Key 改名了，去确认"
             : !tokenNameIsUnique(metadata, key) ? KEY_NAME_AMBIGUOUS_TEXT
@@ -1429,7 +1444,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           const issue = { code: "BILLING_TIMEZONE_UNVERIFIED", scope: "segment", detail: issueText("BILLING_TIMEZONE_UNVERIFIED"), observedAt: Date.now() };
           segmentIssues.push(commonBillingTimezone(segmentWindow, downstreamSide).state !== "verified" ? issue : upstreamSide(issue));
         }
-        if (upstreamResult.error && !upstreamResult.skipped) segmentIssues.push(upstreamSide({ code: toErrorHealth(upstreamResult.error).code, scope: "segment", detail: toErrorHealth(upstreamResult.error).detail, observedAt: Date.now() }));
+        if (upstreamResult.error && !upstreamResult.skipped) {
+          segmentIssues.push(upstreamSide({ code: toErrorHealth(upstreamResult.error).code, scope: "segment", detail: toErrorHealth(upstreamResult.error).detail, observedAt: Date.now() }));
+          // Key 账单报错：可能换了 Key 或身份变了，下一轮全部重读（P1b 的异常之一）
+          staleMetadata.add(rule.upstreamStationId);
+        }
         if (upstreamResult.emptySecondWindow || downstreamResult.emptySecondWindow) {
           const issue = { code: "PENDING", scope: "segment", detail: issueText("PENDING"), observedAt: Date.now() };
           segmentIssues.push(downstreamResult.emptySecondWindow ? issue : upstreamSide(issue));
@@ -1444,7 +1463,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           segmentIssues.push(upstreamSide({ code: "UPSTREAM_CAPABILITY_UNVERIFIED", scope: "upstream", detail: issueText("UPSTREAM_CAPABILITY_UNVERIFIED"), observedAt: Date.now() }));
         }
         const downstreamUsd = downstreamUnavailable ? null : downstreamResult.quotaUnits / downstreamResult.quotaPerUnit;
-        if (!upstreamUnavailable && !downstreamUnavailable && upstreamUsd <= 0 && downstreamUsd > 0) segmentIssues.push(upstreamSide({ code: "UPSTREAM_EMPTY_WITH_SALES", scope: "segment", detail: issueText("UPSTREAM_EMPTY_WITH_SALES"), observedAt: Date.now() }));
+        if (!upstreamUnavailable && !downstreamUnavailable && upstreamUsd <= 0 && downstreamUsd > 0) {
+          segmentIssues.push(upstreamSide({ code: "UPSTREAM_EMPTY_WITH_SALES", scope: "segment", detail: issueText("UPSTREAM_EMPTY_WITH_SALES"), observedAt: Date.now() }));
+          // 渠道有收入而 Key 用量为 0：多半是换了 Key，下一轮全部重读（P1b 的异常之一）
+          staleMetadata.add(rule.upstreamStationId);
+        }
         if (isCompletedBillingWindow(window) && !downstreamUnavailable && downstreamUsd > 0 && (upstreamUnavailable || upstreamUsd === 0)) {
           segmentIssues.push(upstreamSide({ code: "WAITING_FOR_BILL", scope: "upstream", detail: issueText("WAITING_FOR_BILL"), observedAt: Date.now() }));
         }
@@ -2163,7 +2186,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 停用、删除了的绑定不会再写「今天」快照，它们的指纹不留
       const live = new Set(rules.map((rule) => rule.id));
       for (const key of observationWrites.keys()) if (!live.has(key.slice(0, key.indexOf(":")))) observationWrites.delete(key);
-      const ownerRegistry = await ownerRegistryFor(allRules, rules, { observe: true });
+      const ownerRegistry = await ownerRegistryFor(allRules, rules, { observe: true, poll: true });
       await markQuietOwnStations(rules, ownerRegistry);
       for (const [key, entry] of settlements) if (entry.endMs < now - 3 * DAY_MS) settlements.delete(key);
       await mapWithConcurrency(rules, MAX_CONCURRENT_RULES, async (rule) => {
