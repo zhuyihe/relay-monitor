@@ -619,7 +619,7 @@ td.why { max-width: 240px; }
 
 <!-- ═══ dpa-states ═══ -->
 <p class="frame-label" style="width:1440px">dpa-states · 差额那一格的各种写法，和整页的空、刷新失败</p>
-<section class="frame" id="dpa-states" style="width:1440px;height:880px">
+<section class="frame" id="dpa-states" style="width:1440px;height:980px">
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:24px">
     <section class="panel">
       <div class="panel-head" style="padding-bottom:12px"><h2>差额那一格</h2></div>
@@ -633,6 +633,8 @@ td.why { max-width: 240px; }
           <tr><td class="dash">—<small>还在读取</small></td><td>过去还没固定的日子</td></tr>
           <tr><td class="dash">—<small>Sub2API 上游读不到价格</small></td><td>上游是 Sub2API</td></tr>
           <tr><td class="dash">—<small>上游没给 o3-pro 的价格</small></td><td>有模型没价格；几个时「o3-pro 等 3 个模型」</td></tr>
+          <tr><td class="dash">—<small>读不到上游的模型价格</small></td><td>上游没开放模型价格表，或者读不到</td></tr>
+          <tr><td class="dash">—<small>自营站点的记录看不出缓存用了多少</small></td><td>自营站点的记录里没有缓存那几项</td></tr>
           <tr><td class="dash">—<small>这把 Key 别处也在用</small></td><td>上游扣的钱分不出来</td></tr>
           <tr><td class="dash">—<small>这把 Key 的分组会自动换</small></td><td>auto 分组，或者请求在几个分组之间重试过</td></tr>
           <tr><td class="dash">—<small>昨天还没开始算</small></td><td>看今天时，昨天这个渠道还没开始算</td></tr>
