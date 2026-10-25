@@ -59,7 +59,8 @@ jobs:
   # 界面测试全套：打包好的版本开在 3300、连单独的 MySQL，用 Chrome 跑 tests/reconciliation-ui.test.mjs，4 路同时跑（scripts/ui-lanes.mjs）
   ui:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 一路最多 10 分钟（scripts/ui-lanes.mjs），被杀的那一路剩下的再跑最多 10 分钟，加上装依赖、打包约 2 分钟
+    timeout-minutes: 25
     permissions:
       contents: read
     services:
@@ -111,7 +112,8 @@ jobs:
       - run: node scripts/ui-lanes.mjs 4
         env:
           UI_LANES_OUT: ui-lanes-logs
-      - if: failure()
+      # 超时被取消（cancelled）时也传：卡死的那次最需要日志
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: ui-lanes-logs
