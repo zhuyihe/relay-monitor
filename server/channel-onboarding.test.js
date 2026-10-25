@@ -507,6 +507,8 @@ test("U04 ordinary monitor暂停走实际PUT/CAS，仅停监控估算且保留bi
 
 test("U03 actual Store本地全量账号视图同域A/B分离，两old monitor与dedicated保持ID，纯Key/unknown不借关联推断身份", async (t) => {
   const f = await accountReadFixture(t), before = structuredClone(f.store.data), model = await f.rt.channelOnboarding.listAccounts();
+  // 渠道列表属于哪个自营站点：前端按「自营站点 id:渠道 id」记渠道名时用
+  assert.equal(model.ownStationId, "own");
   assert.equal(model.accounts.length, 2); const a = model.accounts.find((account) => account.identity.accountId === "A"), b = model.accounts.find((account) => account.identity.accountId === "B");
   assert.notEqual(a.accountKey, b.accountKey); assert.equal(a.siteKey, b.siteKey);
   assert.equal(a.accountKey, createHash("sha256").update(JSON.stringify(["newapi", "https://same.test", "A"])).digest("hex"));

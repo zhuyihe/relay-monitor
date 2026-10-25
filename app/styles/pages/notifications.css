@@ -26,7 +26,6 @@
   border-radius: var(--jy-r1); background: var(--jy-sunken); color: var(--jy-ink-2);
   font-size: 11px; line-height: 1; font-weight: 600; letter-spacing: .02em;
 }
-.jy-notifications-name { font-weight: 500; }
 .jy-notifications-toggle { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; color: var(--jy-ink-2); }
 .jy-notifications-test { display: inline-flex; flex-direction: column; gap: 2px; }
 .jy-notifications-test .jy-status .jy-caption { font-weight: 400; }
@@ -38,7 +37,6 @@
 .jy-notifications-types .ant-btn { gap: 8px; }
 
 .jy-notifications-dr { margin-bottom: 8px; }
-.jy-notifications-checks { display: flex; flex-direction: column; gap: 4px; }
 .jy-notifications-modal-intro { margin: 0 0 16px; }
 
 /* 邮件 HTML 自带浅色底，预览框固定为浅色画布，不随站点主题（这是"邮件效果"的一部分） */
@@ -62,3 +60,16 @@
 
 /* 还没有通知方式时那一小块：余额提醒线和提醒天数，一行一个（ui-copy-spec §8.3） */
 .jy-notifications-lines { display: flex; flex-direction: column; gap: 12px; }
+
+/* 版式（ui-design-spec §5.7）：左 8 列提醒规则，右 4 列通知方式和日报；手机上通知方式在最前（页面里就换了先后，见 page.tsx） */
+.jy-notifications-side { min-width: 0; }
+/* 通知方式一个一行（4 列里放不下表格），桌面和手机同一个样子 */
+.jy-m-list.jy-notifications-chlist { display: block; }
+.jy-notifications-chlist .m-sub { align-items: center; }
+/* 日报在 4 列里排紧：开关和发送时间一行，发到哪里横排（ui-design-spec §5.7） */
+.jy-notifications-dr-row { display: flex; flex-wrap: wrap; gap: 0 24px; }
+.jy-notifications-dr-to { width: 100%; }
+/* 「还有 N 个通知方式」：和列表左右对齐 */
+.jy-notifications-more { padding: 8px 16px 16px; }
+.jy-notifications-more .jy-more__body { margin: 8px -16px 0; }
+.jy-notifications-pace-hint { margin: 0 0 8px; }

@@ -147,6 +147,10 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-stations-m .m-sub .jy-stations-sub { max-width: none; }
 /* 有要处理的事时的第三行：标题占剩下的地方、放不下省略；最右边那件事的按钮，点的地方 44 高，上下用负外边距抵掉 */
 .jy-stations-m .m-todo-line { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; min-width: 0; }
-.jy-stations-m .m-title { flex: 1 1 0; min-width: 0; font-size: 13px; color: var(--jy-ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 手机上没有悬停提示：标题最多两行，超出再省略 */
+.jy-stations-m .m-title { flex: 1 1 0; min-width: 0; font-size: 13px; line-height: 18px; color: var(--jy-ink-2); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .jy-stations-m .m-todo { margin: -12px -8px -12px auto; }
 .jy-stations-m .m-todo .ant-btn { min-height: 44px; color: var(--jy-cobalt); }
+
+/* 行末按钮外面那一层（提示的触发区），不改按钮的排法 */
+.jy-tip-wrap { display: inline-flex; }

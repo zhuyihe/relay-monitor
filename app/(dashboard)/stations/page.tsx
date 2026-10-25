@@ -3,11 +3,11 @@
 // 请求与旧版逐一对应（端点、方法、载荷不变）；页面标题、刷新按钮、数据截至时间交给外壳。
 // 用语按 design/ui-copy-spec.md：共用的叫法从 lib/ 取，只在本页出现的写在下面的 COPY 里。
 import "../../styles/pages/stations.css";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
+import { App, Button, Dropdown, Grid, Input, Modal, Select, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import { api, readWorkflowDestination, type StationListResponse } from "../../../lib/client";
 import { actionsByStation, buildOverviewActions, burnText, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
@@ -29,7 +29,7 @@ import { useShellPage } from "../../components/shell-context";
 import { Spark } from "../../components/spark";
 import { LEVEL_ORDER, StatusText } from "../../components/status";
 import { useUrlParams, useUrlState } from "../../components/use-url-state";
-import { useWorkflowActions } from "../../components/use-workflow-actions";
+import { channelNameKey, channelNameOf, useWorkflowActions } from "../../components/use-workflow-actions";
 import { workflowProblem } from "../../components/workflow-copy";
 import TrendModal, { TREND_TEXT } from "../trend-modal";
 import { buildStationView, resultIssue, testBalanceText, TYPES_MISSING_TEXT } from "./model";
@@ -108,6 +108,11 @@ const COPY = Object.freeze({
   staleTip: "后面几次刷新都没读到这个上游的新数据",
   // 一个上游有几件事（ui-copy-spec §5.2）：状态格「需处理 · 还有 1 个问题」，「⋯」里「按钮名：标题」
   moreTodos: (label: string, n: number) => `${label} · 还有 ${n} 个问题`,
+  // 「还没确认这把 Key 属于哪个上游账号」放在上游这一行时，「这把 Key」说清是哪些渠道的（ui-copy-spec §5.2）；K 做完这条提示就没了
+  ownerNames: (names: string[]) => `渠道${names.map((n) => `「${n}」`).join("")}用的 Key 还没确认属于哪个上游账号`,
+  ownerMany: (first: string, n: number) => `渠道「${first}」等 ${n} 个渠道用的 Key 还没确认属于哪个上游账号`,
+  ownerCount: (n: number) => `这个上游下 ${n} 个渠道用的 Key 还没确认属于哪个上游账号`,
+  ownerNone: "这个上游的 Key 还没确认属于哪个上游账号",
   todoItem: (label: string, title: string) => `${label}：${title}`,
   editHint: "点名称打开编辑",
   today: (money: string) => `今天花费 ${money}`,
@@ -259,6 +264,7 @@ export default function StationsPage() {
   const drawerRef = useRef<StationDrawerHandle>(null);
   // 更多菜单里的“编辑”：关闭抽屉后焦点回到这一行的更多按钮
   const moreTriggerRef = useRef<HTMLElement | null>(null);
+  const uid = useId();
 
   // 轮询和手动刷新可能重叠，全部落地才算刷新结束
   const reloading = useRef(0);
@@ -478,7 +484,7 @@ export default function StationsPage() {
   const listed = useMemo(() => stations.filter((s) => s.monitorEnabled !== false || s.archivedAt), [stations]);
   const paused = stations.filter((s) => s.monitorEnabled === false && !s.archivedAt);
   // 账号待办由上游账单读到后发布，这里只补读账单待办
-  const { actions: workflowActions } = useWorkflowActions(true, ["bills"]);
+  const { actions: workflowActions, channelNames } = useWorkflowActions(true, ["bills"]);
 
   const { todosById, unowned } = useMemo(() => {
     const live = listed.filter((s) => !s.archivedAt);
@@ -487,6 +493,21 @@ export default function StationsPage() {
     // 按账号或核算关联归类、不落在单个资源上的待办只在运营总览处理，这里交代条数
     return { todosById: actionsByStation(all), unowned: all.filter((a: any) => !a.stationId || !ids.has(String(a.stationId))).length };
   }, [listed, tz, rules, settings, workflowActions]);
+
+  // 「还没确认这把 Key 属于哪个上游账号」：同一个上游下几条绑定都没确认时，总览按种类去重只留一条，渠道要从原始事项里合起来（ui-copy-spec §5.2）
+  // 这类动作只由 COST_OWNER_UNVERIFIED、LEGACY_IDENTITY_UNVERIFIED 引出，标题都是「还没确认这把 Key 属于哪个上游账号」
+  const isOwnerTodo = (a: any) => a.kind === "verify_identity";
+  const ownerChannels = useMemo(() => {
+    const byStation = new Map<string, Map<string, { own: unknown; id: number }>>();
+    for (const a of workflowActions as any[]) {
+      if (!isOwnerTodo(a) || a.stationId == null) continue;
+      const key = String(a.stationId);
+      const list = byStation.get(key) || new Map();
+      for (const id of a.channelIds || []) list.set(channelNameKey(a.ownStationId, id), { own: a.ownStationId, id: Number(id) });
+      byStation.set(key, list);
+    }
+    return byStation;
+  }, [workflowActions]);
 
   // 这个上游身上要处理的事（利润类、账号类），先后同运营总览
   const todosOf = (v: StationView) => (v.archived ? [] : (todosById.get(actionKey(v.s)) || []).filter((a: any) => a.workflow));
@@ -633,20 +654,35 @@ export default function StationsPage() {
     );
   };
 
+  // 一件事在这一行里的标题：「还没确认这把 Key 属于哪个上游账号」要说清是这个上游下哪些渠道的 Key（ui-copy-spec §5.2）
+  const todoTitle = (a: any) => {
+    if (!isOwnerTodo(a)) return workflowProblem(a);
+    const merged = a.stationId != null ? ownerChannels.get(String(a.stationId)) : undefined;
+    const channels = merged?.size ? [...merged.values()] : (a.channelIds || []).map((id: number) => ({ own: a.ownStationId, id: Number(id) }));
+    if (!channels.length) return COPY.ownerNone;
+    const names = channels.map((c: { own: unknown; id: number }) => channelNameOf(channelNames, c.own, c.id)).filter(Boolean) as string[];
+    if (names.length < channels.length) return COPY.ownerCount(channels.length);
+    return names.length <= 2 ? COPY.ownerNames(names) : COPY.ownerMany(names[0], names.length);
+  };
+
   // 状态格只放状态（ui-design-spec §5.2）：上一行档位，或者只有要处理的事时写「需处理」，几件事时加「· 还有 N 个问题」；
-  // 下一行按先后只放一样：正在刷新、数据旧了、那件事的标题（读不到余额的行也写）、状态自己的说明。要处理的事的按钮在行末，不在这里
+  // 有档位又有事时写「余额偏低 · 还有 N 个问题」，N 是事的件数（档位本身不算）。
+  // 下一行按先后只放一样：正在刷新、数据旧了；有档位时是这一档的说明（事的标题不写在这里，免得读起来像在解释档位，标题在行末按钮的悬停和读屏里）；
+  // 没有档位时是那件事的标题；再不然是状态自己的说明。读不到余额的行原因在下面那一行，这里不写。要处理的事的按钮在行末，不在这里
   const statusOf = (v: StationView) => {
     const todos = todosOf(v);
     const todo = todos[0];
-    const base = v.statusLabel || (todo ? ATTENTION : "");
-    const label = base && todos.length > 1 ? COPY.moreTodos(base, todos.length - 1) : base;
-    const level = v.statusLabel ? v.level : todo?.level;
+    const tier = v.statusLabel;
+    const label = tier ? (todos.length ? COPY.moreTodos(tier, todos.length) : tier) : todo ? (todos.length > 1 ? COPY.moreTodos(ATTENTION, todos.length - 1) : ATTENTION) : "";
+    const level = tier ? v.level : todo?.level;
     const stale = staleAt(v);
-    const title = todo ? workflowProblem(todo) : null;
+    const title = todo ? todoTitle(todo) : null;
     const refreshing = !!refreshingIds[v.s.id];
-    const note = refreshing ? COPY.refreshing : stale || title || (v.issue ? null : v.statusNote);
-    // 小钟和「后面几次刷新都没读到」那句只跟「数据截至」走，正在刷新时不挂
-    return { label, level, note, stale: refreshing ? null : stale, title };
+    // 档位自己没有说明时（「还没读取」、部分固定成本状态）退回写事的标题，状态格总说得出为什么
+    const note = refreshing ? COPY.refreshing : stale || (v.issue ? null : tier ? v.statusNote || title : title || v.statusNote);
+    // 小钟和「后面几次刷新都没读到」那句只跟「数据截至」走，正在刷新时不挂；
+    // titleInCell：下一行写的就是这件事的标题，行末按钮上不再挂一遍提示
+    return { label, level, note, stale: refreshing ? null : stale, title, titleInCell: !!title && note === title };
   };
   // 下一行那一格：放不下的省略，悬停看全；数据旧时前面一个小钟，后面那句说明只给悬停和读屏
   const subLine = (note: string, stale: string | null) => (
@@ -757,7 +793,7 @@ export default function StationsPage() {
     const s = v.s;
     const [lead, ...rest] = todosOf(v);
     const head = [
-      ...rest.map((a: any) => ({ key: `todo:${a.id}`, label: COPY.todoItem(a.label, workflowProblem(a)) })),
+      ...rest.map((a: any) => ({ key: `todo:${a.id}`, label: COPY.todoItem(a.label, todoTitle(a)) })),
       ...(lead || mobile ? [{ key: "edit", label: COPY.edit, icon: <Icon name="edit" /> }] : []),
     ];
     if (v.archived) {
@@ -809,14 +845,28 @@ export default function StationsPage() {
   );
 
   // 行末：有要处理的事时就是那件事的按钮（例如「测试读取」），没有时是「编辑」（ui-design-spec §5.2）
-  const todoAction = (v: StationView) => {
+  // 有档位时，状态格的下一行解释档位，这件事的「为什么」放在按钮上：悬停、键盘聚焦都显示（antd Tooltip），读屏由 aria-describedby 念标题。
+  // 没有档位的行，标题已经写在状态格里，按钮上不再说一遍。平板触屏看不到悬停：状态格写着「还有 N 个问题」，点按钮打开的抽屉里有原因
+  // mobile：手机卡片上标题已经写在按钮旁边那一行，按钮就是按钮本身（不挂提示：触屏一点提示和抽屉会一起出来；也不和表格那份重复 id）
+  const todoAction = (v: StationView, mobile = false) => {
     const todo = todosOf(v)[0];
     if (!todo) return null;
-    return (
-      <Button type="text" size="small" aria-label={`${todo.label}（${stationDisplayName(v.s)}）`} onClick={() => openTodo(todo.href)}>
+    const why = !mobile && !statusOf(v).titleInCell ? COPY.todoItem(todo.label, todoTitle(todo)) : null;
+    const whyId = why ? `${uid}-why-${v.s.id}` : undefined;
+    const button = (
+      <Button type="text" size="small" aria-label={`${todo.label}（${stationDisplayName(v.s)}）`} aria-describedby={whyId} onClick={() => openTodo(todo.href)}>
         {todo.label}
       </Button>
     );
+    return why ? (
+      <>
+        {/* 包一层：Tooltip 关着时会去掉子元素上的 aria-describedby；默认只认悬停，这里加上键盘聚焦（焦点事件从按钮冒到这一层） */}
+        <Tooltip title={why} trigger={["hover", "focus"]}>
+          <span className="jy-tip-wrap">{button}</span>
+        </Tooltip>
+        <span id={whyId} className="sr-only">{why}</span>
+      </>
+    ) : button;
   };
   const primaryAction = (v: StationView) => todoAction(v) || (v.archived ? (
     <Button
@@ -965,7 +1015,7 @@ export default function StationsPage() {
             const name = stationDisplayName(v.s);
             const money = !v.fixed && b?.ok ? balanceMoneyOf(v.s, Number(b.remaining)) : null;
             const { label, level, note, stale, title } = statusOf(v);
-            const todo = todoAction(v);
+            const todo = todoAction(v, true);
             const refreshing = !!refreshingIds[v.s.id];
             // 手机上一张卡片两行（ui-design-spec §4.7、§5.2）：名称、状态、「⋯」；余额 · 可用天数，后面带正在刷新或数据截至。
             // 有要处理的事时多一行：那件事的标题（放不下省略）和按钮。余额设了汇率只写金额，没设置汇率照写「（没设置汇率）」，

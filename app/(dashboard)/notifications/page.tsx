@@ -9,7 +9,7 @@ import "../../styles/pages/notifications.css";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { commitOnLeave, useAutoSave, useSaveAction, useSaveQueue } from "../../components/use-auto-save";
 import Link from "next/link";
-import { App, Button, Checkbox, Form, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
+import { App, Button, Form, Grid, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
 import { ALERT_RULES } from "../../../lib/alert-rules";
 import { api } from "../../../lib/client";
@@ -22,6 +22,8 @@ import { CountBadge, Panel } from "../../components/panel";
 import { ErrorState, PanelSkeleton, SAVE_STATE_TEXT, SaveState } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
+import { More } from "../../components/more";
+import { etaRuleDisplay } from "../../components/runway";
 import { StatusText } from "../../components/status";
 import { TabPanel, Tabs } from "../../components/seg";
 import { COPY } from "./copy";
@@ -66,11 +68,6 @@ const RULES = ALERT_RULES.map((rule) => ({
   desc: (COPY.ruleDesc as Record<string, string>)[rule.ev] || "",
 }));
 
-// 提醒天数内部按天存储；界面按所选单位展示
-function etaRuleDisplay(r: any): number {
-  const days = Number(r?.etaDays ?? 3);
-  return r?.etaUnit === "hours" ? +(days * 24).toFixed(2) : +days.toFixed(2);
-}
 
 // 规则里的数字一组存（PUT /api/notifications/rules）；开关和通知方式的选择另外即时存
 const ruleFormOf = (r: any): RuleForm => ({
@@ -141,6 +138,9 @@ export default function NotificationsPage() {
   rulesRef.current = rules;
   // 开关和「发到哪些通知方式」一点就存，算一组
   const toggles = useSaveAction(queue, COPY.groupToggles);
+  const compact = Grid.useBreakpoint().md === false;
+  // 提醒节奏收起区的开合：用户点的；这两个框有报错时强制展开（报错收起来就看不到，整组校验不过、别的数也存不上）
+  const [paceOpen, setPaceOpen] = useState(false);
   const ruleForm = useAutoSave<RuleForm, Record<string, string>>(ruleFormOf({}), {
     queue,
     // 没有通知方式时页面上没有「提醒规则」，那一小块里只有提醒天数这一项属于这一组
@@ -440,6 +440,11 @@ export default function NotificationsPage() {
     ruleForm.clearInvalid();
   };
   const ruleErrors: Record<string, string> = { ...(ruleForm.invalid || {}), ...(low.invalid ? { low: low.invalid } : {}) };
+  // 提醒节奏两个框有报错时强制展开；报错一出就把开合记成「开着」：改正以后不自己收起（收起会卸掉输入框，离开输入框的那次保存就没了），由用户自己收
+  const paceErr = !!(ruleErrors.renotify || ruleErrors.errRetry);
+  useEffect(() => {
+    if (paceErr) setPaceOpen(true);
+  }, [paceErr]);
   const leaveRules = commitOnLeave(ruleForm.commit);
   const leaveLow = commitOnLeave(low.commit);
   const rulesSavedAt = Math.max(ruleForm.savedAt, low.savedAt, toggles.savedAt);
@@ -555,6 +560,23 @@ export default function NotificationsPage() {
     </span>
   );
 
+  // 通知方式一个一行；多时只露规则那块放得下的几个（1440 宽时 2 个：每个约 107 高，露 2 个时右栏正好和规则一样高；和运营总览「需处理」露 2 条同一个做法），启用的在前，其余收进「还有 N 个通知方式」，页面高度不跟着个数涨（ui-design-spec §5.7）
+  const CHANNELS_SHOWN = 2;
+  const channelsSorted = [...channels].sort((a: any, b: any) => Number(a.enabled === false) - Number(b.enabled === false));
+  const channelsLead = channelsSorted.slice(0, CHANNELS_SHOWN);
+  const channelsRest = channelsSorted.slice(CHANNELS_SHOWN);
+  const channelItem = (c: any) => (
+    <li key={c.id}>
+      <span className="m-top">{c.name}</span>
+      {enabledToggle(c)}
+      <div className="m-sub">
+        {plate(c.type)}
+        <span aria-live="polite">{testCell(c)}</span>
+      </div>
+      <div className="m-actions">{rowActions(c)}</div>
+    </li>
+  );
+
   const plate = (type: string) => (
     <span className="jy-notifications-type">
       <span className="jy-notifications-plate" aria-hidden="true">
@@ -665,13 +687,25 @@ export default function NotificationsPage() {
     return null;
   };
 
-  // 首次加载：与真实布局同形的骨架
+  // 首次加载：与真实布局同形的骨架（桌面 8 + 4，手机通知方式在前），数据回来时不跳
   if (!notifLoaded && !notifErr && notifLoading) {
     return (
       <div className="jy-page">
-        <PanelSkeleton title={COPY.rules} lines={6} />
-        <PanelSkeleton title={COPY.channels} lines={3} />
-        <PanelSkeleton title={COPY.report} lines={3} />
+        {compact ? (
+          <>
+            <PanelSkeleton title={COPY.channels} lines={3} />
+            <PanelSkeleton title={COPY.rules} lines={6} />
+            <PanelSkeleton title={COPY.report} lines={3} />
+          </>
+        ) : (
+          <div className="jy-grid-8-4 jy-notifications-grid">
+            <PanelSkeleton title={COPY.rules} lines={6} />
+            <div className="jy-stack jy-notifications-side">
+              <PanelSkeleton title={COPY.channels} lines={3} />
+              <PanelSkeleton title={COPY.report} lines={3} />
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -686,20 +720,20 @@ export default function NotificationsPage() {
     document.querySelector(".jy-notifications-channels")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  return (
-    <div className="jy-page">
-      {noDelivery ? (
-        <div className="jy-banner jy-banner--crit" role="alert">
-          <Sym kind="crit" />
-          <div className="jy-notifications-banner-body">
-            <b>{COPY.noDeliveryOff}</b>
-            <p className="jy-caption">{COPY.noDeliveryOffHint}</p>
-          </div>
-          <Button size="small" onClick={showChannels}>
-            {COPY.showChannels}
-          </Button>
-        </div>
-      ) : null}
+  const paceSummary = COPY.paceSummary(ruleForm.saved.renotify, ruleForm.saved.errRetry);
+  const paceShown = paceOpen || paceErr;
+  // 有报错时收不起来；点「收起」要有反应：跳到出错的那一格（不给共用的收起组件加「禁用」，这种情况很少）
+  const onPaceToggle = (next: boolean) => {
+    if (paceErr && !next) {
+      document.getElementById(ruleErrors.renotify ? `${uid}-renotify` : `${uid}-errRetry`)?.focus();
+      return;
+    }
+    setPaceOpen(next);
+  };
+  // 版式（ui-design-spec §5.7、#64 第 8 节）：左 8 列提醒规则，右 4 列通知方式和日报；还没有通知方式时整页只放一件事，不分栏。
+  // 手机上通知方式在最前：换的是页面里的先后，不只用 CSS 换显示顺序（读屏和键盘跟着看到的先后，§5.1）
+  const rulesBlock = (
+    <>
       {/* 提醒规则 */}
       {noChannelsYet ? null : notifFailed ? (
         <Panel title={COPY.rules}>
@@ -764,10 +798,11 @@ export default function NotificationsPage() {
             </table>
           </div>
 
-          <div className="jy-notifications-pad">
-            <fieldset className="jy-fs">
-              <legend>{COPY.pace}</legend>
-              <p className="fs-desc">{COPY.paceHint}</p>
+          <div className="jy-notifications-pad jy-more-line">
+            {/* 展开以后两个框下面各有说明，这一句不再重复（同一句话一页只说一次） */}
+            {paceShown ? null : <span className="jy-caption">{paceSummary}</span>}
+            <More label={COPY.pace} open={paceShown} onOpenChange={onPaceToggle}>
+              <p className="jy-caption jy-notifications-pace-hint">{COPY.paceHint}</p>
               <div className="jy-two">
                 <div className="jy-field">
                   <label htmlFor={`${uid}-renotify`}>{COPY.renotify}</label>
@@ -819,11 +854,15 @@ export default function NotificationsPage() {
                   )}
                 </div>
               </div>
-            </fieldset>
+            </More>
           </div>
         </Panel>
       )}
 
+    </>
+  );
+  const channelsBlock = (
+    <>
       {/* 通知方式 */}
       {notifFailed ? (
         <Panel title={COPY.channels}>
@@ -846,45 +885,16 @@ export default function NotificationsPage() {
         >
           {channels.length ? (
             <>
-              <div className="jy-table-wrap has-mobile">
-                <table className="jy-data">
-                  <thead>
-                    <tr>
-                      <th>{COPY.colType}</th>
-                      <th>{COPY.colName}</th>
-                      <th>{COPY.colStatus}</th>
-                      <th>{COPY.colTest}</th>
-                      <th className="r">{COPY.colActions}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {channels.map((c: any) => (
-                      <tr key={c.id}>
-                        <td>{plate(c.type)}</td>
-                        <td className="jy-notifications-name">{c.name}</td>
-                        <td>{enabledToggle(c)}</td>
-                        <td aria-live="polite">{testCell(c)}</td>
-                        <td className="r">
-                          <div className="jy-row-actions">{rowActions(c)}</div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <ul className="jy-m-list" aria-label={COPY.channels}>
-                {channels.map((c: any) => (
-                  <li key={c.id}>
-                    <span className="m-top">{c.name}</span>
-                    {enabledToggle(c)}
-                    <div className="m-sub">
-                      {plate(c.type)}
-                      <span aria-live="polite">{testCell(c)}</span>
-                    </div>
-                    <div className="m-actions">{rowActions(c)}</div>
-                  </li>
-                ))}
+              <ul className="jy-m-list jy-notifications-chlist" aria-label={COPY.channels}>
+                {channelsLead.map(channelItem)}
               </ul>
+              {channelsRest.length ? (
+                <More label={COPY.moreChannels(channelsRest.length)} className="jy-notifications-more">
+                  <ul className="jy-m-list jy-notifications-chlist" aria-label={COPY.moreChannels(channelsRest.length)}>
+                    {channelsRest.map(channelItem)}
+                  </ul>
+                </More>
+              ) : null}
             </>
           ) : (
             <div className="jy-empty-inline">
@@ -912,6 +922,10 @@ export default function NotificationsPage() {
         </Panel>
       )}
 
+    </>
+  );
+  const linesBlock = (
+    <>
       {/* 还没有通知方式：余额提醒线和提醒天数也决定页面上的档位，只在这里放这两个数（有通知方式时在规则那几行里，不两处同时出现） */}
       {noChannelsYet ? (
         <Panel
@@ -928,6 +942,10 @@ export default function NotificationsPage() {
         </Panel>
       ) : null}
 
+    </>
+  );
+  const reportBlock = (
+    <>
       {/* 日报：发送时间按业务时区，和每日利润、日汇总同一天界（§6 不另注时区） */}
       {noChannelsYet ? null : !metaLoaded && metaLoading ? (
         <PanelSkeleton title={COPY.report} lines={3} />
@@ -938,17 +956,18 @@ export default function NotificationsPage() {
       ) : (
         <Panel title={COPY.report} badge={<SaveState saving={dr.saving} dirty={false} at={dr.savedAt} tz={tz} failures={[dr.failure]} />} caption={COPY.reportCaption}>
           <Form layout="vertical" requiredMark={false} component="div" className="jy-form jy-notifications-dr">
-            <Form.Item label={COPY.reportEnable} htmlFor={`${uid}-dr-enabled`} extra={COPY.reportEnableHint}>
-              <Switch
-                id={`${uid}-dr-enabled`}
-                checked={dr.value.enabled}
-                checkedChildren={COPY.on}
-                unCheckedChildren={COPY.off}
-                onChange={(v) => setDr({ enabled: v })}
-              />
-            </Form.Item>
-            <div className="jy-two">
-              <Form.Item label={COPY.reportTime} htmlFor={`${uid}-dr-time`} extra={COPY.reportTimeHint}>
+            {/* 4 列里排紧：开关和发送时间一行，发到哪里横排；说明只留「发到哪里」那一句（日报是什么，标题旁已经写了） */}
+            <div className="jy-notifications-dr-row">
+              <Form.Item label={COPY.reportEnable} htmlFor={`${uid}-dr-enabled`}>
+                <Switch
+                  id={`${uid}-dr-enabled`}
+                  checked={dr.value.enabled}
+                  checkedChildren={COPY.on}
+                  unCheckedChildren={COPY.off}
+                  onChange={(v) => setDr({ enabled: v })}
+                />
+              </Form.Item>
+              <Form.Item label={COPY.reportTime} htmlFor={`${uid}-dr-time`}>
                 <TimePicker
                   id={`${uid}-dr-time`}
                   format="HH:mm"
@@ -958,20 +977,27 @@ export default function NotificationsPage() {
                   onChange={(d) => setDr({ time: d ? d.format("HH:mm") : "09:00" })}
                 />
               </Form.Item>
+            </div>
+            <div>
               <Form.Item
                 label={<span id={`${uid}-dr-ch`}>{COPY.reportTo}</span>}
                 extra={COPY.reportToHint}
               >
+                {/* 和提醒规则「发到」那一列同一个选法：一行下拉多选，放不下的写「+N」，通知方式多了日报这块也不变高 */}
                 {channels.length ? (
-                  <div role="group" aria-labelledby={`${uid}-dr-ch`}>
-                    <Checkbox.Group
-                      className="jy-notifications-checks"
-                      value={dr.value.channelIds}
-                      disabled={!dr.value.enabled}
-                      onChange={(ids) => setDr({ channelIds: ids as string[] })}
-                      options={channels.map((c) => ({ value: c.id, label: c.name }))}
-                    />
-                  </div>
+                  <Select
+                    mode="multiple"
+                    allowClear
+                    aria-labelledby={`${uid}-dr-ch`}
+                    placeholder={COPY.allChannels}
+                    maxTagCount="responsive"
+                    optionFilterProp="label"
+                    className="jy-notifications-dr-to"
+                    value={dr.value.channelIds}
+                    disabled={!dr.value.enabled}
+                    onChange={(ids) => setDr({ channelIds: ids as string[] })}
+                    options={channelOptions}
+                  />
                 ) : (
                   <span className="jy-muted">{notifFailed ? COPY.channelsFailed : COPY.reportNoChannels}</span>
                 )}
@@ -979,15 +1005,15 @@ export default function NotificationsPage() {
             </div>
           </Form>
           <div className="jy-notifications-actions">
-            <Button loading={previewing} onClick={previewReport}>
+            <Button loading={previewing} onClick={previewReport} title={COPY.reportPreviewTip} aria-describedby={`${uid}-dr-preview-tip`}>
               {COPY.reportPreview}
             </Button>
-            <Button loading={sending} onClick={sendReport}>
+            <Button loading={sending} onClick={sendReport} title={COPY.reportSendTip} aria-describedby={`${uid}-dr-send-tip`}>
               {COPY.reportSend}
             </Button>
-            <span className="jy-caption">
-              {drSaved.lastSent ? COPY.reportLastSent(formatDayKey(drSaved.lastSent, tz)) : COPY.reportIdleHint}
-            </span>
+            <span id={`${uid}-dr-preview-tip`} className="sr-only">{COPY.reportPreviewTip}</span>
+            <span id={`${uid}-dr-send-tip`} className="sr-only">{COPY.reportSendTip}</span>
+            {drSaved.lastSent ? <span className="jy-caption">{COPY.reportLastSent(formatDayKey(drSaved.lastSent, tz))}</span> : null}
           </div>
           <div aria-live="polite">
             {sendResult && (
@@ -1009,6 +1035,44 @@ export default function NotificationsPage() {
             )}
           </div>
         </Panel>
+      )}
+
+    </>
+  );
+
+  return (
+    <div className="jy-page">
+      {noDelivery ? (
+        <div className="jy-banner jy-banner--crit" role="alert">
+          <Sym kind="crit" />
+          <div className="jy-notifications-banner-body">
+            <b>{COPY.noDeliveryOff}</b>
+            <p className="jy-caption">{COPY.noDeliveryOffHint}</p>
+          </div>
+          <Button size="small" onClick={showChannels}>
+            {COPY.showChannels}
+          </Button>
+        </div>
+      ) : null}
+      {noChannelsYet ? (
+        <>
+          {channelsBlock}
+          {linesBlock}
+        </>
+      ) : compact ? (
+        <>
+          {channelsBlock}
+          {rulesBlock}
+          {reportBlock}
+        </>
+      ) : (
+        <div className="jy-grid-8-4 jy-notifications-grid">
+          {rulesBlock}
+          <div className="jy-stack jy-notifications-side">
+            {channelsBlock}
+            {reportBlock}
+          </div>
+        </div>
       )}
 
       {/* 通知方式弹窗 */}

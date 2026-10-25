@@ -12,12 +12,13 @@ import { BRAND, NAV_LABELS, VERSION_LABEL } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
 import { consoleFailureText, describeError, errorText, requiredText } from "../../../lib/error-copy";
-import { EMPTY, formatInt, formatZonedDateTime } from "../../../lib/format";
+import { EMPTY, formatInt, formatZonedDate, formatZonedDateTime } from "../../../lib/format";
 import { Panel } from "../../components/panel";
 import { Dirty, ErrorState, PanelSkeleton, SaveState } from "../../components/data-state";
 import { commitOnLeave, useAutoSave, useSaveQueue } from "../../components/use-auto-save";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Sym } from "../../components/icons";
+import { More } from "../../components/more";
 import { COPY } from "./copy";
 
 const RETENTION_PRESETS = [30, 90, 180, 365];
@@ -91,6 +92,8 @@ export default function SettingsPage() {
   // 运行设置：刷新间隔、保留天数各一组，改了马上保存（app/components/use-auto-save.ts），排在同一个队列里
   const queue = useSaveQueue();
   const [customRetention, setCustomRetention] = useState(false);
+  // 「历史概况和自动清理」收起区：用户点的；上次自动清理没完成时直接展开（原因就是要说的事）
+  const [healthOpen, setHealthOpen] = useState(false);
   const [history, setHistory] = useState<HistoryHealth | null>(null);
   // 业务时区：接口返回的 tz，历史记录的日期时间按它写
   const [tz, setTz] = useState(DEFAULT_BUSINESS_TIME_ZONE);
@@ -304,6 +307,7 @@ export default function SettingsPage() {
   const restricted = !!me?.isDefaultPassword;
   // 上次自动清理没完成：服务端存的是原文，只进「查看详细原因」
   const cleanupError = history?.cleanup?.lastError || null;
+  const healthShown = healthOpen || !!cleanupError;
   // 现在保留多久：一直保留时不再自动清理
   const keptDays = history?.retentionDays ?? retention.saved;
   // 会话信息回来之前不确定是否处于"首次改密"模式，先用骨架占位，避免其他分组闪现后又消失
@@ -433,171 +437,192 @@ export default function SettingsPage() {
         </div>
       ) : null}
 
-      {!meLoaded ? (
-        <>
-          <PanelSkeleton title={COPY.refresh} lines={2} />
-          <PanelSkeleton title={COPY.retention} lines={5} />
-        </>
-      ) : showOthers ? (
-        settingsFailed ? (
-          // 三组都依赖同一次读取，失败时合成一处提示，避免同一原因重复三遍
-          <Panel title={NAV_LABELS.settings}>
-            <ErrorState what={COPY.readFailed} error={settingsError} onRetry={() => void loadSettings()} />
-          </Panel>
-        ) : !settingsLoaded ? (
-          <>
-            <PanelSkeleton title={COPY.refresh} lines={2} />
-            <PanelSkeleton title={COPY.retention} lines={5} />
-          </>
-        ) : (
-          <>
-            <Panel title={COPY.refresh} badge={<SaveState saving={interval.saving} dirty={interval.dirty} at={interval.savedAt} tz={tz} failures={[interval.failure]} />}>
-              <div className="jy-field jy-settings-field">
-                <label htmlFor={ids.interval}>{COPY.interval}</label>
-                <InputNumber
-                  id={ids.interval}
-                  value={interval.value}
-                  onChange={(v) => {
-                    interval.setValue(v);
-                    interval.clearInvalid();
-                  }}
-                  {...commitOnLeave(interval.commit)}
-                  min={10}
-                  suffix={COPY.seconds}
-                  status={interval.invalid ? "error" : undefined}
-                  aria-invalid={!!interval.invalid}
-                  aria-describedby={`${ids.interval}-desc${interval.invalid ? ` ${ids.interval}-err` : ""}`}
-                />
-                <span className="jy-caption" id={`${ids.interval}-desc`}>{COPY.intervalHint}</span>
-                <FieldError id={`${ids.interval}-err`} text={interval.invalid || undefined} />
-              </div>
-              <p className="jy-caption">
-                {COPY.lowLineMovedBefore}
-                <Link className="jy-link" href="/notifications">{NAV_LABELS.notifications}</Link>
-                {COPY.lowLineMovedAfter}
-              </p>
-            </Panel>
-
-            <Panel title={COPY.retention} badge={<SaveState saving={retention.saving || previewingCleanup} dirty={retention.dirty} at={retention.savedAt} tz={tz} failures={[retention.failure]} />}>
-              {settingsError ? (
-                // 已有数据时重新读取失败：保留当前内容，只在本组提示
-                <div className="jy-settings-inline-error">
-                  <ErrorState what={COPY.overviewFailed} error={settingsError} onRetry={() => void loadSettings()} />
-                </div>
-              ) : null}
-              <div className="jy-field">
-                <label htmlFor={ids.retention}>{COPY.keep}</label>
-                <div className="jy-settings-inline">
-                  <Select
-                    id={ids.retention}
-                    value={retentionChoice}
-                    onChange={setRetentionChoice}
-                    disabled={!settingsLoaded}
-                    options={[
-                      { value: "permanent", label: COPY.keepForever },
-                      ...RETENTION_PRESETS.map((days) => ({ value: String(days), label: COPY.keepDays(days) })),
-                      { value: "custom", label: COPY.keepCustom },
-                    ]}
-                    aria-describedby={`${ids.retention}-desc`}
-                  />
-                  {customRetention ? (
-                    <InputNumber
-                      aria-label={COPY.keepCustomLabel}
-                      value={retention.value}
-                      onChange={(value) => {
-                        if (value != null) retention.setValue(Number(value));
-                      }}
-                      {...commitOnLeave(retention.commit)}
-                      disabled={!settingsLoaded}
-                      min={1}
-                      precision={0}
-                      suffix={COPY.days}
-                    />
-                  ) : null}
-                </div>
-                <span className="jy-caption" id={`${ids.retention}-desc`}>
-                  {COPY.keepHint}
-                </span>
-                {retention.dirty && retentionShortening ? (
-                  <span className="jy-settings-note">
-                    <Sym kind="warn" />
-                    {COPY.keepShorter}
-                  </span>
-                ) : null}
-              </div>
-
-              <div className="jy-settings-health">
-                <section aria-labelledby={`${uid}-health`}>
-                  <h3 id={`${uid}-health`}>{COPY.overview}</h3>
-                  <p className="jy-caption">
-                    {history?.latestAt ? COPY.latest(formatDateTime(history.latestAt, tz)) : COPY.growing}
-                  </p>
-                  <dl className="jy-kv">
-                    <dt>{COPY.earliest}</dt>
-                    <dd>{formatDateTime(history?.earliestAt, tz)}</dd>
-                    <dt>{COPY.count}</dt>
-                    <dd>{history?.pointCount == null ? EMPTY : COPY.rows(formatInt(history.pointCount))}</dd>
-                    <dt>{COPY.size}</dt>
-                    <dd>{formatBytes(history?.tableBytes, !settingsLoaded)}</dd>
-                  </dl>
-                </section>
-                <section aria-labelledby={`${uid}-cleanup`}>
-                  <h3 id={`${uid}-cleanup`}>{COPY.cleanup}</h3>
-                  {cleanupError ? (
-                    <div className="jy-err jy-settings-cleanup-err">
-                      <Sym kind="crit" />
-                      <div>
-                        {COPY.cleanupFailed}
-                        {keptDays != null ? COPY.cleanupRetry : ""}
-                        <ErrorDetail raw={cleanupError} />
-                      </div>
+      {/* 版式（ui-design-spec §5.8、#64 第 9 节）：两栏各 6 列，左边刷新与数据、历史数据保留，右边账户安全、关于；
+          首次登录必须先改密码时只有账户安全一块，不分栏 */}
+      {meLoaded && !showOthers ? (
+        accountPanel
+      ) : (
+        <div className="jy-grid-2 jy-settings-grid">
+          <div className="jy-stack">
+            {!meLoaded ? (
+              <>
+                <PanelSkeleton title={COPY.refresh} lines={2} />
+                <PanelSkeleton title={COPY.retention} lines={5} />
+              </>
+            ) : showOthers ? (
+              settingsFailed ? (
+                // 三组都依赖同一次读取，失败时合成一处提示，避免同一原因重复三遍
+                <Panel title={NAV_LABELS.settings}>
+                  <ErrorState what={COPY.readFailed} error={settingsError} onRetry={() => void loadSettings()} />
+                </Panel>
+              ) : !settingsLoaded ? (
+                <>
+                  <PanelSkeleton title={COPY.refresh} lines={2} />
+                  <PanelSkeleton title={COPY.retention} lines={5} />
+                </>
+              ) : (
+                <>
+                  <Panel title={COPY.refresh} badge={<SaveState saving={interval.saving} dirty={interval.dirty} at={interval.savedAt} tz={tz} failures={[interval.failure]} />}>
+                    <div className="jy-field jy-settings-field">
+                      <label htmlFor={ids.interval}>{COPY.interval}</label>
+                      <InputNumber
+                        id={ids.interval}
+                        value={interval.value}
+                        onChange={(v) => {
+                          interval.setValue(v);
+                          interval.clearInvalid();
+                        }}
+                        {...commitOnLeave(interval.commit)}
+                        min={10}
+                        suffix={COPY.seconds}
+                        status={interval.invalid ? "error" : undefined}
+                        aria-invalid={!!interval.invalid}
+                        aria-describedby={`${ids.interval}-desc${interval.invalid ? ` ${ids.interval}-err` : ""}`}
+                      />
+                      <span className="jy-caption" id={`${ids.interval}-desc`}>{COPY.intervalHint}</span>
+                      <FieldError id={`${ids.interval}-err`} text={interval.invalid || undefined} />
                     </div>
-                  ) : (
-                    <p className="jy-caption">{COPY.cleanupHint}</p>
-                  )}
-                  <dl className="jy-kv">
-                    <dt>{COPY.keep}</dt>
-                    <dd>{settingsLoaded ? COPY.policy(keptDays) : COPY.reading}</dd>
-                    <dt>{COPY.lastCheck}</dt>
-                    <dd>{formatDateTime(history?.cleanup?.lastRunAt, tz)}</dd>
-                    <dt>{COPY.lastDeleted}</dt>
-                    <dd>
-                      {history?.cleanup?.lastDeletedCount == null
-                        ? COPY.none
-                        : COPY.rows(formatInt(history.cleanup.lastDeletedCount))}
-                    </dd>
-                  </dl>
-                </section>
-              </div>
+                    <p className="jy-caption">
+                      {COPY.lowLineMovedBefore}
+                      <Link className="jy-link" href="/notifications">{NAV_LABELS.notifications}</Link>
+                      {COPY.lowLineMovedAfter}
+                    </p>
+                  </Panel>
 
-            </Panel>
-          </>
-        )
-      ) : null}
+                  <Panel title={COPY.retention} badge={<SaveState saving={retention.saving || previewingCleanup} dirty={retention.dirty} at={retention.savedAt} tz={tz} failures={[retention.failure]} />}>
+                    {settingsError ? (
+                      // 已有数据时重新读取失败：保留当前内容，只在本组提示
+                      <div className="jy-settings-inline-error">
+                        <ErrorState what={COPY.overviewFailed} error={settingsError} onRetry={() => void loadSettings()} />
+                      </div>
+                    ) : null}
+                    <div className="jy-field">
+                      <label htmlFor={ids.retention}>{COPY.keep}</label>
+                      <div className="jy-settings-inline">
+                        <Select
+                          id={ids.retention}
+                          value={retentionChoice}
+                          onChange={setRetentionChoice}
+                          disabled={!settingsLoaded}
+                          options={[
+                            { value: "permanent", label: COPY.keepForever },
+                            ...RETENTION_PRESETS.map((days) => ({ value: String(days), label: COPY.keepDays(days) })),
+                            { value: "custom", label: COPY.keepCustom },
+                          ]}
+                          aria-describedby={`${ids.retention}-desc`}
+                        />
+                        {customRetention ? (
+                          <InputNumber
+                            aria-label={COPY.keepCustomLabel}
+                            value={retention.value}
+                            onChange={(value) => {
+                              if (value != null) retention.setValue(Number(value));
+                            }}
+                            {...commitOnLeave(retention.commit)}
+                            disabled={!settingsLoaded}
+                            min={1}
+                            precision={0}
+                            suffix={COPY.days}
+                          />
+                        ) : null}
+                      </div>
+                      <span className="jy-caption" id={`${ids.retention}-desc`}>
+                        {COPY.keepHint}
+                      </span>
+                      {retention.dirty && retentionShortening ? (
+                        <span className="jy-settings-note">
+                          <Sym kind="warn" />
+                          {COPY.keepShorter}
+                        </span>
+                      ) : null}
+                    </div>
 
-      {meLoaded ? accountPanel : <PanelSkeleton title={COPY.account} lines={4} />}
+                    {/* 历史概况、最近自动清理收起来，露一句记录数和最早的日子；上次自动清理没完成时直接展开（原因就是要说的事） */}
+                    <div className="jy-more-line jy-settings-health-line">
+                      {/* 展开以后下面就有记录条数和最早的记录，这一句不再重复；重新读取失败时上面已经写了原因，这一句也不写（不拿上次的数当现在的） */}
+                      {healthShown || settingsError ? null : (
+                        <span className="jy-caption">
+                          {history?.pointCount ? COPY.healthSummary(formatInt(history.pointCount), formatZonedDate(history.earliestAt, tz)) : COPY.healthEmpty}
+                        </span>
+                      )}
+                      <More label={COPY.healthMore} open={healthShown} onOpenChange={setHealthOpen}>
+                        <div className="jy-settings-health">
+                          <section aria-labelledby={`${uid}-health`}>
+                            <h3 id={`${uid}-health`}>{COPY.overview}</h3>
+                            <p className="jy-caption">
+                              {history?.latestAt ? COPY.latest(formatDateTime(history.latestAt, tz)) : COPY.growing}
+                            </p>
+                            <dl className="jy-kv">
+                              <dt>{COPY.earliest}</dt>
+                              <dd>{formatDateTime(history?.earliestAt, tz)}</dd>
+                              <dt>{COPY.count}</dt>
+                              <dd>{history?.pointCount == null ? EMPTY : COPY.rows(formatInt(history.pointCount))}</dd>
+                              <dt>{COPY.size}</dt>
+                              <dd>{formatBytes(history?.tableBytes, !settingsLoaded)}</dd>
+                            </dl>
+                          </section>
+                          <section aria-labelledby={`${uid}-cleanup`}>
+                            <h3 id={`${uid}-cleanup`}>{COPY.cleanup}</h3>
+                            {cleanupError ? (
+                              <div className="jy-err jy-settings-cleanup-err">
+                                <Sym kind="crit" />
+                                <div>
+                                  {COPY.cleanupFailed}
+                                  {keptDays != null ? COPY.cleanupRetry : ""}
+                                  <ErrorDetail raw={cleanupError} />
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="jy-caption">{COPY.cleanupHint}</p>
+                            )}
+                            <dl className="jy-kv">
+                              <dt>{COPY.keep}</dt>
+                              <dd>{settingsLoaded ? COPY.policy(keptDays) : COPY.reading}</dd>
+                              <dt>{COPY.lastCheck}</dt>
+                              <dd>{formatDateTime(history?.cleanup?.lastRunAt, tz)}</dd>
+                              <dt>{COPY.lastDeleted}</dt>
+                              <dd>
+                                {history?.cleanup?.lastDeletedCount == null
+                                  ? COPY.none
+                                  : COPY.rows(formatInt(history.cleanup.lastDeletedCount))}
+                              </dd>
+                            </dl>
+                          </section>
+                        </div>
+                      </More>
+                    </div>
+                  </Panel>
+                </>
+              )
+            ) : null}
 
-      {showOthers ? (
-        <Panel title={COPY.about}>
-          {metaError ? (
-            <div className="jy-settings-inline-error">
-              <ErrorState what={COPY.metaFailed} error={metaError} onRetry={() => void loadMeta()} />
-            </div>
-          ) : null}
-          <dl className="jy-kv jy-settings-about">
-            <dt>{COPY.product}</dt>
-            <dd>
-              <b>{BRAND.productName}</b>
-              <span className="jy-caption">{COPY.productHint}</span>
-            </dd>
-            <dt>{VERSION_LABEL}</dt>
-            <dd>
-              <code className="jy-settings-code">{versionText}</code>
-              <span className="jy-caption">{COPY.versionHint}</span>
-            </dd>
-          </dl>
-        </Panel>
-      ) : null}
+          </div>
+          <div className="jy-stack">
+            {meLoaded ? accountPanel : <PanelSkeleton title={COPY.account} lines={4} />}
+            {showOthers ? (
+              <Panel title={COPY.about}>
+                {metaError ? (
+                  <div className="jy-settings-inline-error">
+                    <ErrorState what={COPY.metaFailed} error={metaError} onRetry={() => void loadMeta()} />
+                  </div>
+                ) : null}
+                <dl className="jy-kv jy-settings-about">
+                  <dt>{COPY.product}</dt>
+                  <dd>
+                    <b>{BRAND.productName}</b>
+                    <span className="jy-caption">{COPY.productHint}</span>
+                  </dd>
+                  <dt>{VERSION_LABEL}</dt>
+                  <dd>
+                    <code className="jy-settings-code">{versionText}</code>
+                    <span className="jy-caption">{COPY.versionHint}</span>
+                  </dd>
+                </dl>
+              </Panel>
+            ) : null}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
