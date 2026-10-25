@@ -7183,6 +7183,21 @@ test("R1 多条绑定各要一个渠道、日志很多：按渠道 stat 只查�
   assert.equal(rootReads().length - before, 0, "过去窗口的管理员日志不再读");
 });
 
+test("R1 结成一天的账（扣过管理员自用）：记下「开始扣管理员自用的第一天」，之后每条结果带上它，页面写「更早的日子没扣」用", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  const metaWrites = [];
+  const original = f.repository.noteAdminUsageDay?.bind(f.repository);
+  f.repository.noteAdminUsageDay = async (day) => { metaWrites.push(day); return original?.(day); };
+  f.repository.adminUsageFirstDay = async () => metaWrites[0] ?? null;
+  await manualYesterday(f);
+  assert.deepEqual(metaWrites, ["2026-10-08"], "结昨天记下 10-08，只记一次");
+  const view = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page" })).results[0];
+  assert.equal(view.downstream.adminUsageLaunchDay, "2026-10-08");
+  await manualYesterday(f);
+  assert.equal(metaWrites.length, 1, "已经记过的不再写");
+});
+
 test("R1 读不到用户列表或管理员日志：这一天算不出收入、不固定，下次重试；不拿没减的数固定进账本", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
@@ -7206,13 +7221,14 @@ test("R1 读不到用户列表或管理员日志：这一天算不出收入、�
   assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 1, "读得到了，下一次固定");
 });
 
-test("R1 转售 Key 所属用户在用户列表里不是管理员：收入确认不了，这一天不固定（和运营总览同一个处理）", async (t) => {
+test("R1 转售 Key 所属用户在用户列表里不是管理员：忽略这条标记，什么都不扣不加，照常固定（总指挥 10-25）", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
   f.stations.find((station) => station.id === "own").resoldAdminKeys = [{ username: "alice", tokenName: "alice-key" }];
   const settled = (await manualYesterday(f)).results[0];
-  assert.equal(settled.calculation.profitUsd, null);
-  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 0);
+  assert.notEqual(settled.calculation.profitUsd, null, "没有「读不到」，能固定");
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 1);
+  assert.equal(settled.downstream.quotaUnits, 250, "收入就是渠道收费，没有额外的扣或加");
 });
 
 test("R1 多天范围按天拼：已经固定的天用账本里存的（扣过管理员自用的）净额，只有没固定的天现读；多天收入是几天每一行加起来", async (t) => {

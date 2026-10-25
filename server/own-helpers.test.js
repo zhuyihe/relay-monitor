@@ -256,6 +256,24 @@ test("转售 Key 所属的用户在缓存里还不是管理员（刚提成管理
   assert.equal(calls.filter((path) => path === "/api/user/").length, 1);
 });
 
+test("转售 Key 所属账号已经不是管理员：重读一次还对不上就忽略这条标记，不报读不到，照常算收入；设置页列出来标 inactive", async (t) => {
+  const f = incomeFixture();
+  f.own.resoldAdminKeys = [{ username: "customer", tokenName: "sale" }];
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    calls.push(url.pathname);
+    if (url.pathname === "/api/user/") return Response.json({ success: true, data: { items: f.users, total: 2 } }); // 重读一次，还是普通用户
+    throw new Error(`不该读转售记录：标记不起作用，没有要读的 Key（${url.pathname}）`);
+  });
+  const result = await readOwnIncome(f.rt, f.own, f.rows, f.window);
+  assert.equal(calls.filter((path) => path === "/api/user/").length, 1, "先重读了一次用户列表");
+  assert.equal(result.incomeUsd, 10, "customer 的消费本来就算收入");
+  assert.equal(result.adminUsageUsd, 100);
+  assert.equal(result.resold.resoldUsd, 0);
+  assert.deepEqual(result.resold.breakdown, [{ username: "customer", tokenName: "sale", usd: 0, inactive: true }]);
+});
+
 test("必要的角色或转售读取失败时收入不可确认", async (t) => {
   const f = incomeFixture();
   t.mock.method(globalThis, "fetch", async () => Response.json({ success: false, message: "unavailable" }, { status: 503 }));

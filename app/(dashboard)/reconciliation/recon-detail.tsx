@@ -51,7 +51,7 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
   const timezone = detail.window?.timezone || detail.rule?.timezone;
   const dayZone = formatDayZone(timezone, businessTimezone);
   const channels = mergeReconciliationChannels(detail.rule?.channels, detail.downstream?.channels);
-  const adminUsage = adminUsageText(detail, currency);
+  const adminUsage = adminUsageText(detail, currency, detail.downstream, timezone);
   const fixedCost = isFixedCost(detail);
   const ratioChange = ratioChangeText(detail, timezone);
   const start = reconciliationAccountingStart(detail.rule);

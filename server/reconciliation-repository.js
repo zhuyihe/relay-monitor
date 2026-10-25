@@ -206,6 +206,8 @@ const LEDGER_DECISION_SELECT = ["revision", "source", "timezone", "window_start_
 const LEDGER_SELECT = RECONCILIATION_LEDGER_COLUMNS.map((column) => column === "bill_date" ? "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date"
   : column === "settled_at" ? "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at" : column).join(", ");
 
+const ADMIN_USAGE_FIRST_DAY_KEY = "own_admin_usage_first_day";
+
 export class ReconciliationRepository {
   constructor(pool) {
     this.pool = pool;
@@ -783,6 +785,21 @@ export class ReconciliationRepository {
   }
 
   // 账本里这些绑定从 sinceDate（含）起有哪些日子。必须带 rule_id IN 走主键前缀：账本没有单独的 bill_date 索引，只按日期查会扫整本账
+  // 「R1 以后固定的账里开始扣管理员自用」的第一天（YYYY-MM-DD）：页面写「更早的日子没扣」用它。第一次有账本记下扣过管理员自用的日子时记，
+  // 只往前挪（比较日期字符串）。读、写都是尽力而为，读不到当没有
+  async adminUsageFirstDay() {
+    try {
+      const [rows] = await this.pool.query("SELECT v FROM meta WHERE k = ?", [ADMIN_USAGE_FIRST_DAY_KEY]);
+      const raw = Array.isArray(rows) ? rows[0]?.v : null;
+      const value = typeof raw === "string" && raw.startsWith("\"") ? JSON.parse(raw) : raw; // 驱动有时把 JSON 列原样给字符串
+      return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+    } catch { return null; }
+  }
+  async noteAdminUsageDay(day) {
+    try {
+      await this.pool.query("INSERT INTO meta (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = IF(JSON_UNQUOTE(v) > JSON_UNQUOTE(VALUES(v)), VALUES(v), v)", [ADMIN_USAGE_FIRST_DAY_KEY, JSON.stringify(day)]);
+    } catch { /* 页面上只是少一个日期，不影响账 */ }
+  }
   async listLedgerDays(ruleIds, sinceDate) {
     if (!ruleIds?.length) return [];
     const [rows] = await this.pool.query(

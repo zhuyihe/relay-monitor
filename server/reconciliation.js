@@ -770,6 +770,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const OWN_EXCLUSION_REUSE_MS = 30000;
   const OWN_EXCLUSION_VERIFIED_REUSE_MS = 10 * 60000;
   const OWN_EXCLUSION_FALLBACK_REUSE_MS = 10 * 60000;
+  // 扣管理员自用的第一天（YYYY-MM-DD）：找到了就一直用，没找到每分钟最多再问一次
+  let adminUsageDayKnown = null, adminUsageDayAt = 0;
+  async function adminUsageLaunchDay() {
+    if (adminUsageDayKnown) return adminUsageDayKnown;
+    if (Date.now() - adminUsageDayAt < 60000) return null;
+    adminUsageDayAt = Date.now();
+    adminUsageDayKnown = (await repository.adminUsageFirstDay?.()) ?? null;
+    return adminUsageDayKnown;
+  }
   function ownExclusion(own, window, { settle = false, channelIds = [] } = {}) {
     const wantedChannels = [...new Set(channelIds.map(Number))];
     // 沿用的结果要覆盖这次要算的渠道：翻页读的是全站所有渠道（"all"），按渠道 stat 读的只有当时要算的那几个
@@ -958,7 +967,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const downstream = entry && ledgerSettlement(entry)?.result?.downstream;
         // 账本那一天的渠道要覆盖现在要算的每个渠道（后来加过渠道的话，那一天缺的渠道不能当 0），而且都是读全了的
         if (!downstream || downstream.state !== "complete" || !wanted.every((id) => downstream.channels?.some((row) => row.channelId === id && row.billingState === "complete" && row.amountUsd != null))) return null;
-        return downstream;
+        return { ...downstream, startMs: piece.startMs };
       } catch { return null; }
     });
     const groups = [];
@@ -970,11 +979,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     });
     const live = await Promise.all(groups.map((group) => ownRevenueWindow(own, rule, { ...segmentWindow, startMs: group.startMs, endMs: group.endMs }, { ...options, reuse: false })));
     // 不满一秒的头尾块读不出东西（emptySecondWindow）：不算一块；整段都是这样的就照原样返回
-    const readable = live.filter((result) => !result.emptySecondWindow);
+    const readable = live.map((result, index) => ({ ...result, startMs: groups[index].startMs })).filter((result) => !result.emptySecondWindow);
     if (!readable.length && !fixed.some(Boolean)) return live[0];
     const merged = stitchChannelRevenue([...fixed.filter(Boolean), ...readable], wanted);
     const first = [...readable, ...fixed.filter(Boolean)].find((result) => result.billingTimezone) ?? {};
-    return { ...merged, billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION,
+    // 页面写「已扣除管理员自用 $x（10月26日起；更早的日子没扣）」要的日期，按绑定的时区取（页面不再算）
+    const { adminUsageFromMs, ...rest } = merged;
+    return { ...rest, adminUsageFromDay: adminUsageFromMs == null ? null : dayKeyInTz(adminUsageFromMs, segmentWindow.timezone),
+      billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION,
       window: segmentWindow, billingTimezone: first.billingTimezone ?? null };
   }
 
@@ -2161,6 +2173,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 这次是真的写了新版（不是 B-L1 内容相同跳过）：result 自己就是刚写进账本的那一版，补上账本的版本号、来源、
         // 固定时刻和汇率，bookedResult 就不用再读一次账本行（安全审核 C2a 低-3）。B-L1 那种情况账本里的版本、来源
         // 可能和这次算出来的不一样（上一版可能是别的触发方式写的），这里判断不了，留给 bookedResult 照旧读一次
+        // 这天的账扣过管理员自用（R1 以后写的账）：记下最早是哪一天，页面写「更早的日子没扣」用（尽力而为）
+        if (ledgerOption?.booked?.write === true && result.downstream?.adminUsageQuotaUnits !== undefined) {
+          const day = billDayOf(result.window);
+          if (!adminUsageDayKnown || day < adminUsageDayKnown) { adminUsageDayKnown = day; repository.noteAdminUsageDay?.(day); }
+        }
         if (ledgerOption?.booked?.write === true) {
           result.ledger = { billDate: billDayOf(result.window), revision: ledgerOption.booked.revision, source: ledgerOption.booked.source,
             settledAt: ledgerOption.booked.settledAt, rates: { income: configuredRate(financialSnapshot.income), cost: configuredRate(financialSnapshot.cost) },
@@ -2602,7 +2619,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 页面全量读取才附带账号级对比（true 复用缓存，"refresh" 是页面「刷新」，重新读上游用量）；按关联重试和后台观测不需要。
         const accountUsage = [true, "refresh"].includes(options.accountUsage) && !(Array.isArray(ruleIds) && ruleIds.length);
         if (accountUsage && attempt === 1 && selected.length) warmAccountUsage(selected, input, now, options.accountUsage === "refresh");
-        const respond = async (rows) => {
+        const respond = async (inputRows) => {
+          // 每条结果带上「开始扣管理员自用的第一天」，页面据此写「更早的日子没扣」；拷一份，不动结果缓存里的
+          const launchDay = await adminUsageLaunchDay();
+          const rows = inputRows.map((row) => launchDay && row?.downstream ? { ...row, downstream: { ...row.downstream, adminUsageLaunchDay: launchDay } } : row);
           const response = readResponse(knownRules, rules, rows, ownerRegistry, input, now);
           if (!accountUsage) return response;
           let unaccountedUpstream = null;

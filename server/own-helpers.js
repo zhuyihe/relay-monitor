@@ -41,6 +41,8 @@ export const dedupeResoldKeys = (keys) => {
   });
 };
 export const resoldAdminKeysOf = (own) => dedupeResoldKeys(own?.resoldAdminKeys);
+// 转售标记只对现在还是管理员的账号起作用：账号后来不是管理员了，它的消费本来就算收入，标记忽略（总指挥 10-25），不报「读不到」、不卡账本
+export const activeResoldKeysOf = (own, adminSet) => resoldAdminKeysOf(own).filter((key) => adminSet.has(key.username));
 
 // since：只要这个时刻以后发出的读取，缓存和进行中的读取发出得更早就再读一次。返回 { key, startedAt, list, unknown }，
 // unknown 是重读过还对不上的名字和那次读取发出的时间
@@ -167,8 +169,7 @@ export async function stationUsageCost(rt, station, { startMs, endMs, tz, today 
  * 对每个 (username, tokenName) 用日志统计接口取窗内消费额度（美元）后汇总。
  * 单个 Key 查询失败记为 0 并附带错误，不影响其余；返回调整后的两个口径 + 明细。
  */
-export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endMs) {
-  const keys = resoldAdminKeysOf(own);
+export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endMs, keys = resoldAdminKeysOf(own)) {
   if (!keys.length) return { incomeUsd, adminUsageUsd, resoldUsd: 0, breakdown: [] };
   const breakdown = [];
   let resoldUsd = 0;
@@ -271,8 +272,7 @@ export async function readOwnAdminDirectory(rt, own, { fresh = false } = {}) {
   let entry = await read(fresh ? Date.now() : 0);
   const unconfirmed = (list) => { const admins = adminUsernamesOf(list); return resold.filter((key) => !admins.has(key.username)); };
   if (unconfirmed(entry.list).length) entry = await read(Date.now());
-  const missing = unconfirmed(entry.list);
-  if (missing.length) throw incomeUnconfirmed(`转售 Key 所属用户「${missing[0].username}」的管理员身份没确认`, null, entry.list);
+  // 重读还对不上的转售 Key 所属用户：忽略这条标记（不扣、不报读不到），照常算
   return { users: entry.list, adminSet: adminUsernamesOf(entry.list) };
 }
 
@@ -320,15 +320,14 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
     if (adminSet.has(row.key)) day.adminUsageUsd += row.cost;
     else day.incomeUsd += row.cost;
   }
-  for (const key of resoldAdminKeysOf(own)) {
-    if (!adminSet.has(key.username)) throw incomeUnconfirmed(`转售 Key 所属用户「${key.username}」的管理员身份没确认`, null, users);
-  }
+  const activeKeys = activeResoldKeysOf(own, adminSet);
+  const inactiveKeys = resoldAdminKeysOf(own).filter((key) => !adminSet.has(key.username));
   // 同时最多读四天，避免 30 天窗口把上游日志接口瞬间打满。
   let cursor = 0;
   await Promise.all(Array.from({ length: Math.min(4, days.length) }, async () => {
     while (cursor < days.length) {
       const day = days[cursor++];
-      day.resold = await computeResold(own, day.incomeUsd, day.adminUsageUsd, day.startMs, day.endMs);
+      day.resold = await computeResold(own, day.incomeUsd, day.adminUsageUsd, day.startMs, day.endMs, activeKeys);
       const failed = day.resold.breakdown.find((k) => k.error);
       if (failed) {
         throw incomeUnconfirmed(`转售 Key「${failed.username} / ${failed.tokenName}」的记录没读到，收入和利润暂时算不出`,
@@ -362,7 +361,8 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
     resold: {
       incomeUsd, adminUsageUsd,
       resoldUsd: days.reduce((a, d) => a + d.resold.resoldUsd, 0),
-      breakdown: [...keys.values()].sort((a, b) => b.usd - a.usd),
+      // 标记已经不起作用的 Key 也列出来（usd 0、inactive），设置页写一句灰字
+      breakdown: [...keys.values()].sort((a, b) => b.usd - a.usd).concat(inactiveKeys.map((key) => ({ username: key.username, tokenName: key.tokenName, usd: 0, inactive: true }))),
     },
   };
 }

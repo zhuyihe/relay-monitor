@@ -1,6 +1,6 @@
 // 每日利润页的展示文案与纯函数：日期、金额格子、分组倍率、渠道。不含 JSX，各组件和 hooks 共用。
 // 用语按 design/ui-copy-spec.md；时间一律按这条绑定算一天的时区显示（lib/format 的 zoned 系列），不用浏览器时区。
-import { EMPTY, FIXED_COST_TEXT, RATE_UNSET_USD, UPSTREAM_GONE, formatRate, formatZonedDateTime, formatZonedWindow } from "../../../lib/format";
+import { EMPTY, FIXED_COST_TEXT, RATE_UNSET_USD, UPSTREAM_GONE, formatDayKey, formatRate, formatZonedDateTime, formatZonedWindow } from "../../../lib/format";
 import {
   formatReconciliationAmount, formatReconciliationMoney, mergeReconciliationSegments, reconciliationBillingText, reconciliationChannelTag, reconciliationRateFactors,
   reconciliationRatioChange,
@@ -71,11 +71,26 @@ export function sideAmount(item: any, side: "income" | "cost", currency: Reconci
 // 收入、上游成本一格：读全了只写金额，没读全写「$1.20（没读全）」，没读到写「读取中」「读不到」
 export const incomeText = (item: any, currency: ReconciliationCurrency, billing = item?.downstream) =>
   reconciliationBillingText(billing, sideRate(item, "income", currency));
-// 收入里减掉的管理员自用（用语规范 §9「其中管理员自用」）：管理员账号自己花的钱（含渠道测试）也记收费记录，不是下游用户花的钱，不算收入，
-// 和运营总览、自营业务同一个规矩；后台看到的渠道用量含这一部分，写出来财务对数时对得上。没有、或这一段读不到换算时不写
-export function adminUsageText(item: any, currency: ReconciliationCurrency, billing = item?.downstream) {
-  const usd = Number(billing?.adminUsageAmountUsd);
-  return Number.isFinite(usd) && usd > 0 ? `其中管理员自用 ${formatReconciliationMoney(usd, sideRate(item, "income", currency))}，不算收入` : null;
+// 收入里减掉的管理员自用（用语规范 §9「管理员自用」）：管理员账号自己花的钱（含渠道测试）也记收费记录，不是下游用户花的钱，不算收入，
+// 和运营总览、自营业务同一个规矩；后台看到的渠道用量含这一部分，写出来财务对数时对得上。四种写法：
+//   都扣了：「已扣除管理员自用 $0.12」（扣了 0 不写）；
+//   多天范围跨过 R1 上线日：「已扣除管理员自用 $0.12（10月26日起；更早的日子没扣）」；
+//   一笔都没扣（范围里的日子都是 R1 以前固定的）：「收入里可能含管理员自用（10月26日以前的日子没扣）」，以前的账没存这个数，分不出有没有；
+// 日期都由服务端给（adminUsageFromDay 范围里第一个扣过的日子，adminUsageLaunchDay 开始扣的第一天），不写死
+export function adminUsageText(item: any, currency: ReconciliationCurrency, billing = item?.downstream, timezone?: string) {
+  if (billing?.state !== "complete") return null;
+  const day = (key: string) => formatDayKey(key, timezone);
+  const before = (key: any) => `收入里可能含管理员自用${key ? `（${day(key)}以前的日子没扣）` : ""}`;
+  const raw = billing?.adminUsageAmountUsd;
+  if (raw === undefined) return before(billing?.adminUsageLaunchDay);
+  const usd = Number(raw);
+  if (raw === null || !Number.isFinite(usd)) return null;
+  if (billing?.adminUsageUndeducted === true) {
+    return usd > 0 && billing?.adminUsageFromDay
+      ? `已扣除管理员自用 ${formatReconciliationMoney(usd, sideRate(item, "income", currency))}（${day(billing.adminUsageFromDay)}起；更早的日子没扣）`
+      : before(billing?.adminUsageFromDay ?? billing?.adminUsageLaunchDay);
+  }
+  return usd > 0 ? `已扣除管理员自用 ${formatReconciliationMoney(usd, sideRate(item, "income", currency))}` : null;
 }
 export const costText = (item: any, currency: ReconciliationCurrency, billing = item?.upstream) => isFixedCost(item)
   ? FIXED_COST_TEXT : reconciliationBillingText(billing, sideRate(item, "cost", currency));
