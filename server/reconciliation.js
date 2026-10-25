@@ -32,7 +32,7 @@ import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
-import { isSettleableWindow, isSettledAt, settleRetryDelayMs, settlementOutcome, settlementPrecheck } from "../lib/reconciliation-settlement.js";
+import { SETTLE_LOOKBACK_MS, isSettleableWindow, isSettledAt, settlementOutcome, settlementPrecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
@@ -45,6 +45,8 @@ import { createBillingCapabilityStorage } from "../lib/billing-capability-storag
 export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 
 const DAY_MS = 86400000;
+// 回看几天：昨天往前到结束满 7 天为止（lib/reconciliation-settlement.js 的 SETTLE_LOOKBACK_MS）
+const SETTLE_LOOKBACK_DAYS = Math.round(SETTLE_LOOKBACK_MS / DAY_MS);
 const MAX_CONCURRENT_RULES = 6;
 
 // 绑定按哪个时区算一天：新建时用传入的，没传用业务时区（BUSINESS_TIME_ZONE，缺省上海）；建好以后不能改——
@@ -419,7 +421,12 @@ function sourceSnapshot(token, metadata, upstream, downstream) {
 }
 
 // repository 可注入：测试用内存实现替代 MySQL，生产默认走 rt.pool。stationUsageCost 是账号级上游用量取数，测试可替换。
-export function createReconciliationModule(rt, { repository = new ReconciliationRepository(rt.pool), stationUsageCost = defaultStationUsageCost } = {}) {
+// 回看（计划 C2a 2.2）的几个参数，测试里注入：
+//   lookbackBudget：每轮最多回看几天（昨天不占），缺省 max(1, ⌈在用绑定数 ÷ 2⌉）；
+//   lookbackTimeMs：每轮回看最多花多久，缺省 min(20 秒, 刷新间隔的三分之一)，已经发出去的那一天照常做完；
+//   lookbackDelayMs：启动后等多久才开始回看（今天、昨天照常），缺省随机 1–5 分钟，几个进程同时重启时不会一起打上游。
+export function createReconciliationModule(rt, { repository = new ReconciliationRepository(rt.pool), stationUsageCost = defaultStationUsageCost,
+  lookbackBudget = null, lookbackTimeMs = null, lookbackDelayMs = 60000 + Math.floor(Math.random() * 4 * 60000) } = {}) {
   const resultCache = (rt._reconciliationResultCache ||= new Map());
   const inflight = (rt._reconciliationInflight ||= new Map());
   const metadataCache = (rt._reconciliationMetadataCache ||= new Map());
@@ -427,7 +434,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const ownChannelsCache = (rt._reconciliationOwnChannelsCache ||= new Map());
   const ownChannelsRequests = (rt._reconciliationOwnChannelsRequests ||= new Map());
   const ruleGenerations = (rt._reconciliationRuleGenerations ||= new Map());
-  const settlements = (rt._reconciliationSettlements ||= new Map());
+  // 回看从什么时候起可以开始（启动后等一会儿）；上一次清理结账状态表的时刻
+  const lookbackFrom = (rt._reconciliationLookbackFrom ??= Date.now() + lookbackDelayMs);
   // 修正过切换时间的规则：下一次结账昨天时重新取数，写一份新的结账记录。
   const resettles = (rt._reconciliationResettles ||= new Set());
   // 轮询省请求和写入（计划 P1a）：
@@ -503,12 +511,31 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     : `${rule.id}:${window.preset}:${window.startMs}:${window.endMs}:${window.timezone}`;
   const resultTtl = (window) => isLiveReconciliationPreset(window.preset) ? TODAY_TTL_MS : QUERY_TTL_MS;
 
-  // 轮询这一轮要不要结这条绑定的昨天（lib/reconciliation-settlement.js 的 settlementPrecheck）；不用结时为 null
-  function settlementWindowDue(rule, now) {
-    let window;
-    try { window = resolveReconciliationWindow({ preset: "yesterday", timezone: rule.timezone }, now); } catch { return null; }
-    const attempt = settlements.get(`${rule.id}:${window.startMs}:${window.timezone}`);
-    return settlementPrecheck({ rule, window, now, attempt }).due ? window : null;
+  // 一条绑定往前第 back 天（1 = 昨天）的窗口，按绑定自己的时区。昨天用 yesterday 预设，和页面、日报的「昨天」是同一个缓存键
+  function completedDayWindow(rule, back, now) {
+    if (back === 1) return resolveReconciliationWindow({ preset: "yesterday", timezone: rule.timezone }, now);
+    return { preset: "custom", startMs: shiftedDayStartInTz(now, -back, rule.timezone), endMs: shiftedDayStartInTz(now, -back + 1, rule.timezone), timezone: rule.timezone };
+  }
+
+  // 结一天（计划 C2a）：轮询回看和手动「重新读取」共用。取数走 inspectRule(settle)；结成了状态行在记账的事务里删掉，
+  // 结不成按 settlementOutcome 记进状态表。返回 inspectRule 的结果（取数出错时是一份读不到的结果）。
+  async function settleDay(rule, window, { origin, ownerRegistry, state = null, resettle = false }) {
+    const billDate = billDayOf(window);
+    let result;
+    try {
+      result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettle: resettle || state?.resettleRequestedAt != null });
+    } catch (err) {
+      if (err?.code === "RULE_NOT_FOUND") throw err;
+      const code = ["PERSISTENCE_FAILED", "HISTORY_UNAVAILABLE"].includes(err?.code) ? err.code : "UPSTREAM_DATA_UNAVAILABLE";
+      result = storageFailedResult(rule, window, code);
+    }
+    if (result === STALE_SCOPE || !billDate) return result;
+    const outcome = settlementOutcome({ window, result, now: Date.now(), state, origin, sourceVersion: ownerRegistry.billingSource.version });
+    try {
+      if (outcome.state?.op === "delete") { if (state) await repository.deleteSettlementState(rule.id, billDate); }
+      else if (outcome.state) await repository.recordSettlementState(rule.id, billDate, outcome.state);
+    } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
+    return result;
   }
 
   function clearRuleResults(ruleId) {
@@ -1140,6 +1167,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
   }
 
+  // 结账（settle）结成单日以后，整个结果按账本里最新那一版返回（金额、版本、固定时刻）：同一天两处一起固定、
+  // 或者重结内容相同（B-L1）没写新版时，这一处不拿自己算出来的数（计划 C2a 2.5）。没结成、多日窗口照旧返回算出来的结果
+  async function bookedResult(rule, result) {
+    if (!billDayOf(result.window) || !settlementOutcome({ window: result.window, result, now: Date.now() }).ledger) return result;
+    return await settledResult(rule, result.window) ?? result;
+  }
+
   // 上一次成功的结果：单个自然日读账本最新一版，其余窗口读同一口径的确认记录。
   async function previousSuccess(rule, window, billingFingerprint) {
     if (!billDayOf(window)) return repository.latestSuccessfulResult(rule.id, window, billingFingerprint);
@@ -1156,8 +1190,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // observe：锚定身份、记录分段切换和渠道状态、写快照、发通知，只由轮询、「刷新」和接入后的首次观测调用。
   // evaluate：只读已持久化的分段和锚定状态来计算，不写库、不通知；页面查询都走这条。
+  // settle：结一个已经结束的日子（轮询回看和手动「重新读取」都走这条，计划 C2a）。强制重取，用已存的分段；
+  //   不写分段、渠道状态、观测快照，不发告警；只按 settlementOutcome 写账本（多日写确认快照），结成了在同一个事务里删掉状态表那一行。
   async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle = false } = {}) {
+    const settle = mode === "settle";
     const observe = mode !== "evaluate";
+    if (settle) force = true;
     if (!ruleGenerations.has(ruleId)) ruleGenerations.set(ruleId, 0);
     const firstRule = await repository.getRule(ruleId);
     if (!firstRule) throw ruleNotFound();
@@ -1165,7 +1203,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const requestCredential = currentSourceCredential(firstRule);
     const requestBilling = ownerRegistry.billingSource;
     const evaluateKey = isLiveReconciliationPreset(window.preset) ? `${cacheKey}:${window.endMs}:${requestCredential}:${requestBilling.ownerVersion}` : `${cacheKey}:${requestCredential}:${requestBilling.ownerVersion}`;
-    const inflightKey = observe ? `${evaluateKey}:observe${resettle ? ":resettle" : ""}` : evaluateKey;
+    const inflightKey = observe ? `${evaluateKey}:${settle ? "settle" : "observe"}${resettle ? ":resettle" : ""}` : evaluateKey;
     const ttl = resultTtl(window);
     const cached = resultCache.get(cacheKey);
     if (!force && (!observe || cached?.observed) && cached?.sourceCredential === requestCredential
@@ -1275,7 +1313,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const unavailable = async (resultHealth, evidence = {}, save = true) => persistUnavailable(rule, window, resultHealth, origin, {
         ...evidence,
         downstream: evidence.downstream ?? await downstreamEvidence(),
-      }, generation, sourceCredential, billingSource, { save: save && observe });
+      }, generation, sourceCredential, billingSource, { save: save && observe && !settle, settle });
       // 成本计法在下面这些提前返回之前就定：固定成本的毛利不看上游，上游一侧读不到（读不到账单、Key 用不了、
       // 目录或身份读不到、上游身份变了）时不挡，记成上游侧的参考问题，跳过上游、只取本站接着算。
       // 本站一侧（来源没确认、渠道重复、本站读不到、没分段）照旧挡；没锚定过的也照旧挡，免得以后锚到别人的 Key 上。
@@ -1365,7 +1403,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const currentRatio = catalogueObserved ? metadata.groups[token.group].ratio : null;
       const ratioObservedAt = Date.now();
       // 只读计算沿用已记录的分段；分组或倍率的切换由下一次观测记录。上游读不到时也沿用，不按读不到的目录改分段。
-      const reconciliation = !observe || upstreamProblem ? { segments: persistedSegments, currentSegment: persistedSegments[persistedSegments.length - 1], transitioned: false }
+      const reconciliation = !observe || settle || upstreamProblem ? { segments: persistedSegments, currentSegment: persistedSegments[persistedSegments.length - 1], transitioned: false }
         : await withObservationSourceLock(rule, sourceCredential, () => repository.observeSource(rule.id, {
           groups: metadata.groupsAvailable ? metadata.groups : {},
           group: token.group,
@@ -1435,7 +1473,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         return channel.state !== stored?.state || !(Number(stored?.stateObservedAt) > Date.now() - UNCHANGED_REWRITE_MS);
       });
       let channelStatesUpdated;
-      if (observe && changedStates.length) try {
+      if (observe && !settle && changedStates.length) try {
         channelStatesUpdated = await withObservationSourceLock(rule, sourceCredential,
           () => repository.updateChannelStates(rule.id, changedStates), billingSource);
       } catch { channelStatesUpdated = null; }
@@ -1637,8 +1675,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       if (!observe) return result;
       return (await persistResult(rule, result, origin, evidenceMetadata, evidenceToken, {
-        scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource, financialSnapshot, resettle,
-      })) ? result : STALE_SCOPE;
+        scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource, financialSnapshot, resettle, settle,
+      })) ? (settle ? await bookedResult(rule, result) : result) : STALE_SCOPE;
     };
     // 口径在查询期间变化时，在共享的 in-flight 任务内重跑，加入等待的调用方也只会拿到最新口径的结果。
     // 编辑会注销本任务的 in-flight 登记：期间已有调用方按新口径另起任务时直接等它，不再重复取数和写快照；
@@ -1744,13 +1782,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource })) ? unavailable : STALE_SCOPE;
   }
 
-  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false } = {}) {
+  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false, settle = false } = {}) {
     const wholeWindow = { id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health };
     const segmentSnapshots = result.segments?.length ? result.segments : [wholeWindow];
     // 只有结束满 15 分钟的自然日窗口才结账：今天、近 7 天和刚结束的昨天还在变化，只记观测。
     // 关联生效前的日子没有账可结，不结账。单个自然日记进账本，多日窗口仍写确认快照。
     const { settled, ledger: ledgerDay, confirmedSnapshot } = settlementOutcome({ window: result.window, result, now: Date.now() });
-    const snapshots = ["observation", ...(confirmedSnapshot ? ["confirmed"] : [])]
+    // 结账（settle）不写观测快照，只写账本或确认快照
+    const snapshots = [...(settle ? [] : ["observation"]), ...(confirmedSnapshot ? ["confirmed"] : [])]
       .flatMap((recordType) => segmentSnapshots.map((segment) => ({ ...segment, recordType })));
     // 数据库事务核验规则/分段口径；快照键和失败兜底另用包含两侧站点来源的口径。
     const guard = () => (ruleGenerations.get(rule.id) || 0) === generation && currentSourceCredential(rule) === sourceCredential
@@ -1851,7 +1890,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 没变不写，但守卫照样过一遍（口径、凭据代次没变才算写过）
       if (unchangedObservation) return guard();
       const saved = await repository.saveSnapshotsForScope(rule.id, scopeFingerprint, rows, {
-        expectedOwnerState: billingSource?.ownerRules ? reconciliationOwnerScope(billingSource.ownerRules, rule.tokenId) : null, guard, ledger: ledgerOption });
+        expectedOwnerState: billingSource?.ownerRules ? reconciliationOwnerScope(billingSource.ownerRules, rule.tokenId) : null, guard, ledger: ledgerOption,
+        // 这天结成了：同一个事务里删掉结账状态表那一行
+        settlement: settled && ledgerDay ? { billDate: billDayOf(result.window) } : null });
       if (saved === true && observationOnly) {
         // 一条绑定只留最新的一份（口径、凭据变了以后旧键不会再用到）；已删除、停用的绑定在 refreshDue 里清
         for (const key of observationWrites.keys()) if (key.startsWith(`${rule.id}:`) && key !== observationKey) observationWrites.delete(key);
@@ -2024,6 +2065,81 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       fixedStations: named([...upstreams.fixed, ...excludedFixed]), excludedStations: named(upstreams.excluded.filter((station) => costBasisOf(station) !== "fixed")) };
   }
 
+  // 一轮结账（计划 C2a 2.2）：先定要结哪些天（planSettlement），再观测今天（refreshDue 里），再结昨天，再回看更早的日子。
+  // 批量读状态表和账本近 8 天有哪些日子（两条查询，不按绑定逐条查）；逐天 precheck 只看状态、不发请求；
+  // 昨天不占预算；回看最多 K 天、最多 T 毫秒，同一个上游同时最多 1 天，某个上游这一轮回看没成就不再给它取别的日子。
+  // upstreams 是这一轮会结账的上游，refreshDue 在读 Key 目录和身份之前把它们记进 staleMetadata 全部重读（计划 P1b）；
+  // 回看只给这些上游结：昨天要结的上游，加上按顺序排在预算以内的那几天的上游，没重读过的上游留到下一轮
+  async function planSettlement(rules, now) {
+    const plan = { yesterday: [], older: [], upstreams: new Set() };
+    if (!rules.length) return plan;
+    const ruleIds = rules.map((rule) => rule.id);
+    let states, ledgerDays;
+    try {
+      [states, ledgerDays] = await Promise.all([repository.listSettlementStates(ruleIds),
+        repository.listLedgerDays(ruleIds, dayKeyInTz(now - (SETTLE_LOOKBACK_DAYS + 2) * DAY_MS, "UTC"))]);
+    } catch (err) { console.error("读结账状态失败:", err?.message || String(err)); return plan; }
+    const stateOf = new Map(states.map((state) => [`${state.ruleId}|${state.billDate}`, state]));
+    const booked = new Set(ledgerDays.map((day) => `${day.ruleId}|${day.billDate}`));
+    const sourceVersion = billingSourceState().version;
+    for (const rule of rules) {
+      for (let back = 1; back <= SETTLE_LOOKBACK_DAYS + 1; back += 1) {
+        let window;
+        try { window = completedDayWindow(rule, back, now); } catch { break; }
+        const billDate = billDayOf(window), key = `${rule.id}|${billDate}`, state = stateOf.get(key) || null;
+        const resettle = back === 1 && resettles.has(rule.id);
+        const { action } = settlementPrecheck({ rule, window, now, state, resettle, ledgerHasDay: booked.has(key), sourceVersion });
+        if (action === "settled" && state) repository.deleteSettlementState(rule.id, billDate).catch(() => {});
+        if (action !== "due") continue;
+        (back === 1 ? plan.yesterday : plan.older).push({ rule, window, state, resettle, requested: state?.resettleRequestedAt != null });
+      }
+    }
+    for (const { rule } of plan.yesterday) plan.upstreams.add(rule.upstreamStationId);
+    if (Date.now() < lookbackFrom) plan.older = [];
+    // 有重结请求的日子排在更早的日子前面；同样先结离今天近的
+    plan.older.sort((a, b) => Number(b.requested) - Number(a.requested) || b.window.startMs - a.window.startMs);
+    plan.budget = lookbackBudget ?? Math.max(1, Math.ceil(rules.length / 2));
+    for (const { rule } of plan.older.slice(0, plan.budget)) plan.upstreams.add(rule.upstreamStationId);
+    plan.older = plan.older.filter((item) => plan.upstreams.has(item.rule.upstreamStationId));
+    return plan;
+  }
+
+  async function settleDue({ yesterday, older, budget }, ownerRegistry) {
+    const settle = async ({ rule, window, state, resettle }) => {
+      const result = await settleDay(rule, window, { origin: "poll", ownerRegistry, state, resettle }).catch(() => null);
+      if (resettle && result?.calculation?.profitUsd != null) resettles.delete(rule.id);
+      return result;
+    };
+    await mapWithConcurrency(yesterday, MAX_CONCURRENT_RULES, settle);
+    if (!older.length) return;
+    const interval = Math.max(60, Number(rt.store?.settings?.refreshIntervalSec) || 60) * 1000;
+    const deadline = Date.now() + (lookbackTimeMs ?? Math.min(20000, Math.floor(interval / 3)));
+    const busy = new Set(), skipped = new Set();
+    let taken = 0;
+    const next = () => {
+      if (taken >= budget || Date.now() >= deadline) return null;
+      const index = older.findIndex((item) => !busy.has(item.rule.upstreamStationId) && !skipped.has(item.rule.upstreamStationId));
+      if (index < 0) return null;
+      taken += 1;
+      return older.splice(index, 1)[0];
+    };
+    await Promise.all(Array.from({ length: MAX_CONCURRENT_RULES }, async () => {
+      for (let item = next(); item; item = next()) {
+        busy.add(item.rule.upstreamStationId);
+        const result = await settle(item);
+        busy.delete(item.rule.upstreamStationId);
+        if (result?.calculation?.profitUsd == null) skipped.add(item.rule.upstreamStationId);
+      }
+    }));
+  }
+
+  // 每小时清一批结账状态表：31 天前的、没有重结请求的行（挂在轮询里，不另起定时器）
+  async function pruneSettlementStates(now) {
+    if (now - (rt._reconciliationLastPrune || 0) < 3600000) return;
+    rt._reconciliationLastPrune = now;
+    try { await repository.pruneSettlementStates(dayKeyInTz(now - 31 * DAY_MS, "UTC")); } catch { /* 下一小时再清 */ }
+  }
+
   const api = {
     async getConfiguration({ forceChannels = false, includeArchived = false } = {}) {
       const own = ownStation();
@@ -2162,8 +2278,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const segments = await withObservationSourceLock(rule, currentSourceCredential(rule), async () => {
           const corrected = await repository.correctTransition(ruleId, segmentId, effectiveAt);
           clearBillingResults(ruleId);
-          // 分段变了，已结账的昨天要按新分段重新结账。
-          for (const key of settlements.keys()) if (key.startsWith(`${ruleId}:`)) settlements.delete(key);
+          // 分段变了，已结账的昨天要按新分段重新结账（C2b 改成按天存进状态表的重结请求）
           resettles.add(ruleId);
           return corrected;
         }, billingSource);
@@ -2195,6 +2310,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // 今天、近 7 天、本月截至取数时刻：规则排队轮到时才定截止点（同 refreshDue），排队久了 Sub2API 实时区间也不会过旧。
           const live = isLiveReconciliationPreset(input.preset);
           const window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, live ? Math.max(now, Date.now()) : now);
+          // 手动「重新读取」一个已经结束的整天：走结账（settle），和轮询回看同一条路；结不成只更新原因，不推后自动的退避（计划 C2a 2.5）
+          const manualSettle = options.mode === "observe" && attempt === 1 && billDayOf(window) && isSettleableWindow(window, Date.now());
+          if (manualSettle) {
+            return repository.listSettlementStates([rule.id]).catch(() => [])
+              .then((states) => settleDay(rule, window, { origin: "manual", ownerRegistry, state: states.find((item) => item.billDate === billDayOf(window)) || null }))
+              .catch((err) => { if (err?.code === "RULE_NOT_FOUND") return null; throw err; });
+          }
           return inspectRule(rule.id, window, { ...(attempt === 1 ? options : { ...options, force: false }), ownerRegistry }).catch((err) => {
             // 列出规则后才被停止的规则从本轮结果中去掉，不能让整个多规则查询失败。
             if (err?.code === "RULE_NOT_FOUND") return null;
@@ -2215,26 +2337,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 停用、删除了的绑定不会再写「今天」快照，它们的指纹不留
       const live = new Set(rules.map((rule) => rule.id));
       for (const key of observationWrites.keys()) if (!live.has(key.slice(0, key.indexOf(":")))) observationWrites.delete(key);
-      // 这一轮要结账的上游先全部重读一遍：写进账本的数一固定就不再变，quota_per_unit 这些不能用 30 分钟前的旧值
-      for (const rule of rules) if (settlementWindowDue(rule, now)) staleMetadata.add(rule.upstreamStationId);
+      // 先定这一轮要结哪些天（只读状态表和账本），要结的上游先全部重读一遍：写进账本的数一固定就不再变，quota_per_unit 这些不能用 30 分钟前的旧值
+      const plan = await planSettlement(rules, now);
+      for (const id of plan.upstreams) staleMetadata.add(id);
       const ownerRegistry = await ownerRegistryFor(allRules, rules, { observe: true, poll: true });
       await markQuietOwnStations(rules, ownerRegistry);
-      for (const [key, entry] of settlements) if (entry.endMs < now - 3 * DAY_MS) settlements.delete(key);
       await mapWithConcurrency(rules, MAX_CONCURRENT_RULES, async (rule) => {
         // 规则排队轮到时才定今天的截止点：实时窗口截至取数时刻，不能用整轮开始时的旧时刻。
         const at = now + Math.max(0, Date.now() - startedAt);
         await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "observe", origin: "poll", ownerRegistry })
           .catch(() => null);
-        const window = settlementWindowDue(rule, now);
-        if (!window) return;
-        // 结账必须重新取数：等待期内手动查询留下的缓存可能是上游入账未完成时的结果。已结账（比如重启前结过）就直接沿用。
-        const resettle = resettles.has(rule.id);
-        const result = await inspectRule(rule.id, window, { mode: "observe", force: true, origin: "poll", ownerRegistry, resettle }).catch(() => null);
-        const settled = result?.calculation?.profitUsd != null;
-        if (settled && resettle) resettles.delete(rule.id);
-        const key = `${rule.id}:${window.startMs}:${window.timezone}`, failures = settled ? 0 : (settlements.get(key)?.failures || 0) + 1;
-        settlements.set(key, { endMs: window.endMs, settled, failures, retryAt: settled ? null : now + settleRetryDelayMs(failures) });
       });
+      await settleDue(plan, ownerRegistry);
+      await pruneSettlementStates(now);
     },
     // 接入关联后立即在后台观测今天一次，不必等下一轮轮询。没有启动后台轮询（测试、脚本）时不观测。
     observeSoon(ruleIds) {
