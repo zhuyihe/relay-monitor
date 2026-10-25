@@ -109,6 +109,78 @@ test("经营分析按业务时区划日：热力图按上海时间分桶、只�
   assert.equal(byId.f.fixedCny, 65);
 });
 
+// 按 SQL 里写的比较符真的筛：基线那条把 t < ? 改成 t <= ?、窗口那条改了边界，这里的结果就跟着变
+function historyPool(points) {
+  const ops = { "<": (a, b) => a < b, "<=": (a, b) => a <= b, ">=": (a, b) => a >= b, ">": (a, b) => a > b };
+  const sorted = [...points].sort((a, b) => a.station_id.localeCompare(b.station_id) || a.t - b.t);
+  return { calls: [], async query(sql, params) {
+    this.calls.push({ sql, params });
+    if (!sql.includes("history_points")) return [[]];
+    const ids = new Set(params[0]);
+    const mine = sorted.filter((row) => ids.has(row.station_id));
+    if (sql.includes("MIN(t)")) {
+      return [[...new Set(mine.map((row) => row.station_id))].map((id) => {
+        const ts = mine.filter((row) => row.station_id === id).map((row) => row.t);
+        return { stationId: id, earliestAt: Math.min(...ts), latestAt: Math.max(...ts) };
+      })];
+    }
+    if (sql.includes("MAX(t) AS t")) {
+      const op = ops[sql.match(/AND t (<=?) \?/)[1]];
+      const latest = new Map();
+      for (const row of mine) if (op(row.t, params[1])) latest.set(row.station_id, row);
+      return [[...latest.values()]];
+    }
+    const [, low, high] = sql.match(/AND t (>=?) \? AND t (<=?) \?/);
+    return [mine.filter((row) => ops[low](row.t, params[1]) && ops[high](row.t, params[2]))];
+  } };
+}
+
+test("花费时段的边界：hh:59 和整点各算各的小时；正好在窗口起点的点和窗口前的基线比；晚于现在的点也算", async (t) => {
+  const NOW = Date.UTC(2026, 9, 14, 4, 0); // 上海 10-14（周三）12:00
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const HOUR = 3600000, DAY = 86400000, startMs = Date.UTC(2026, 9, 7, 16); // 上海 10-08（周四）00:00
+  const at = (ms, remaining) => ({ station_id: "u", t: ms, remaining });
+  const pool = historyPool([
+    at(startMs - HOUR, 100), // 基线
+    at(startMs, 95), // 正好在窗口起点：和基线比掉 5，算 10-08 周四 0 点
+    ...Array.from({ length: 6 }, (_, i) => at(startMs + i * DAY + 3 * HOUR, 95)), // 每天一点，不掉
+    at(startMs + 6 * DAY + 59 * 60000, 94), // 10-14 00:59：掉 1，算 0 点
+    at(startMs + 6 * DAY + HOUR, 92), // 10-14 01:00：掉 2，算 1 点
+    at(startMs + 6 * DAY + 3 * HOUR, 92),
+    at(NOW + 30 * 60000, 91), // 晚于现在：掉 1，照旧算 12 点（原来的写法没有终点）
+  ]);
+  const stations = [{ id: "u", name: "按量上游", type: "newapi", cnyPerUsd: 7 }];
+  const { GET } = await analyticsRoute();
+  const body = await (await GET(new Request("https://local.test/api/analytics?days=7"), { pool, store: { list: () => stations }, history: { predict: () => null } })).json();
+  assert.equal(body.heatmapAvailability.available, true);
+  // weekday 0 = 周一
+  assert.deepEqual(body.heatmap, [{ weekday: 3, hour: 0, cny: 35 }, { weekday: 2, hour: 0, cny: 7 }, { weekday: 2, hour: 1, cny: 14 }, { weekday: 2, hour: 12, cny: 7 }]);
+  const base = pool.calls.find((c) => c.sql.includes("MAX(t) AS t"));
+  assert.match(base.sql, /WHERE station_id IN \(\?\) AND t < \?/, "基线只取窗口起点之前的点");
+  assert.deepEqual(base.params, [["u"], startMs]);
+});
+
+test("哪几天有原始快照：零点那一刻算新的一天，窗口起点前的点不算，晚于现在的点不算", async (t) => {
+  const NOW = Date.UTC(2026, 9, 14, 4, 0); // 上海 10-14 12:00
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const DAY = 86400000, startMs = Date.UTC(2026, 9, 7, 16); // 上海 10-08 00:00
+  const midnights = (id, days) => Array.from({ length: days }, (_, i) => ({ station_id: id, t: startMs + i * DAY, remaining: 50 }));
+  const pool = historyPool([
+    { station_id: "u", t: startMs - 1, remaining: 50 }, { station_id: "v", t: startMs - 1, remaining: 50 }, // 10-07 23:59:59.999：窗口外，只当基线
+    ...midnights("u", 7), // u：10-08 到 10-14 每天只有零点那一个点
+    ...midnights("v", 6), // v：10-08 到 10-13 每天零点，今天只有一个晚于现在的点
+    { station_id: "v", t: NOW + 3600000, remaining: 50 },
+  ]);
+  const stations = [{ id: "u", name: "U", type: "newapi", cnyPerUsd: 7 }, { id: "v", name: "V", type: "newapi", cnyPerUsd: 7 }];
+  const { GET } = await analyticsRoute();
+  const body = await (await GET(new Request("https://local.test/api/analytics?days=7"), { pool, store: { list: () => stations }, history: { predict: () => null } })).json();
+  const coverage = body.heatmapAvailability.coverage;
+  assert.equal(coverage.requestedDays, 7);
+  assert.deepEqual(coverage.stationGaps.map(({ stationId, availableDays, missingDays }) => [stationId, availableDays, missingDays]), [["v", 6, 1]],
+    "u 七天齐（零点的点算当天）；v 今天只有晚于现在的点，不算");
+  assert.equal(body.heatmapAvailability.available, false);
+});
+
 test("固定成本逐日摊销不逐日舍入：站点合计与整段摊销（我的站点口径）一致，小额付费也不会被舍成 0", async (t) => {
   const NOW = Date.UTC(2026, 9, 14, 4, 0); // 上海 10-14 12:00
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
