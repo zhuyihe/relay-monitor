@@ -48,6 +48,13 @@ const DAY_MS = 86400000;
 // 回看几天：昨天往前到结束满 7 天为止（lib/reconciliation-settlement.js 的 SETTLE_LOOKBACK_MS）
 const SETTLE_LOOKBACK_DAYS = Math.round(SETTLE_LOOKBACK_MS / DAY_MS);
 const MAX_CONCURRENT_RULES = 6;
+// 回看时碰到这一类才不再给同一上游取别的日子（方案 6.4：限流 429、超时、连不上）：这几种读账单的原始错误码
+// （UPSTREAM_REQUEST_FAILED、NETWORK_UNREACHABLE……）到了这一层已经被 toErrorHealth 统一收成 UPSTREAM_DATA_UNAVAILABLE
+// （见 providerError），是上游这一刻整体读不到的信号；别的原因（WAITING_FOR_BILL 这天的账单还没读全、要人处理、
+// 改绑定之前还没固定……）只挡这一天，不该连累同一上游别的绑定（安全审核 C2a 低-4）。
+// UPSTREAM_DATA_UNAVAILABLE 也会在「这条规则一直没配出完整分段」时出现（和限流无关），这种情况下误判成「跳过同一上游」
+// 影响很小——没有分段的规则本来就结不出账，多跳过它不会让别的绑定多等
+const UPSTREAM_LOOKBACK_SKIP_CODES = new Set(["UPSTREAM_DATA_UNAVAILABLE"]);
 
 // 绑定按哪个时区算一天：新建时用传入的，没传用业务时区（BUSINESS_TIME_ZONE，缺省上海）；建好以后不能改——
 // 没传沿用原值，传了别的时区报 TIMEZONE_IMMUTABLE（别名算同一个，存的还是原来的写法）。不合法的报 TIMEZONE_INVALID。
@@ -2109,7 +2116,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         try { window = completedDayWindow(rule, back, now); } catch { break; }
         const billDate = billDayOf(window), key = `${rule.id}|${billDate}`, state = stateOf.get(key) || null;
         const resettle = back === 1 && resettles.has(rule.id) && !(resettleRetryAt.get(rule.id) > now);
-        const { action } = settlementPrecheck({ rule, window, now, state, resettle, ledgerHasDay: booked.has(key), sourceVersion });
+        const scopeEditedAt = Number.isFinite(rule.billingEffectiveFrom) ? rule.billingEffectiveFrom : null;
+        const { action } = settlementPrecheck({ rule, window, now, state, resettle, ledgerHasDay: booked.has(key), sourceVersion, scopeEditedAt });
         if (action === "settled" && state) repository.deleteSettlementState(rule.id, billDate).catch(() => {});
         // 要人处理、到了重判的时刻：不进 upstreams（不为它强制重读），settleDue 拿这一轮的目录和身份在本地重判
         if (action === "recheck") plan.recheck.push({ rule, window, state });
@@ -2139,12 +2147,22 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         return undefined;
       }
     };
-    await mapWithConcurrency(recheck, MAX_CONCURRENT_RULES, async ({ rule, window, state }) => {
+    // 同一条绑定这一轮只判一次：挡着的原因是绑定这一刻的配置和元数据决定的，和具体哪一天无关，不用一天判一次
+    // （方案 6.3「不多查库」，安全审核 C2a 低-2：50 条绑定都卡 7 天时，原来一条绑定要判 7 次）
+    const recheckByRule = new Map();
+    for (const item of recheck) {
+      const list = recheckByRule.get(item.rule.id);
+      if (list) list.push(item); else recheckByRule.set(item.rule.id, [item]);
+    }
+    await mapWithConcurrency([...recheckByRule.values()], MAX_CONCURRENT_RULES, async (items) => {
+      const { rule, window } = items[0];
       const probed = await probe(rule, window);
-      // 没判出来：照原因还在处理，10 分钟后再判，不每轮重来
-      const blocker = probed === undefined ? state.manualReason : probed;
-      const next = settlementRecheck({ window, state, blocker, now: Date.now(), sourceVersion });
-      try { await repository.recordSettlementState(rule.id, billDayOf(window), next); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
+      for (const item of items) {
+        // 没判出来：照原因还在处理，10 分钟后再判，不每轮重来
+        const blocker = probed === undefined ? item.state.manualReason : probed;
+        const next = settlementRecheck({ window: item.window, state: item.state, blocker, now: Date.now(), sourceVersion });
+        try { await repository.recordSettlementState(rule.id, billDayOf(item.window), next); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
+      }
     });
     const settle = async ({ rule, window, state, resettle, trigger }) => {
       // 第一次试的日子（没有状态行）先在本地判断：取数前就能看出要人处理的（没回答「这把 Key 还给别处用吗？」、来源没确认……）
@@ -2186,7 +2204,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         busy.delete(item.rule.upstreamStationId);
         // 本地就判出来挡着的：没取账单，不占预算，也不算这个上游没成
         if (result?.blocked) taken -= 1;
-        else if (result?.calculation?.profitUsd == null) skipped.add(item.rule.upstreamStationId);
+        // 方案 6.4：只有碰到限流（429/5xx，UPSTREAM_REQUEST_FAILED）或超时、连不上（NETWORK_UNREACHABLE）才不再给这个
+        // 上游取别的回看日——这两类是这个上游这一刻整体的问题，再取别的日子大概率还是一样。别的没结成的原因（某一天
+        // 自己的问题，比如要人处理、改绑定之前还没固定）只挡这一天，不该连累同一上游别的绑定（安全审核 C2a 低-4）
+        else if (UPSTREAM_LOOKBACK_SKIP_CODES.has(result?.health?.code)) skipped.add(item.rule.upstreamStationId);
       }
     }));
   }
