@@ -1,5 +1,7 @@
 # 炬元控制台改版 · 实施计划
 
+> 记录：2026-09 UI 改版（#14）的施工图，已经做完。现在的页面以[设计规范](../ui-design-spec.md)为准；所有文档从[总目录](../README.md)进。
+
 > 依据：`design/ui-audit.md`（问题清单）、`design/ui-design-spec.md`（规范）、`design/mockups/`（高保真稿）。
 > 本文档是 `feat/ui-redesign` 这个 PR 的施工图：做什么、怎么做、按什么顺序提交、怎么验收，以及明确不做什么。
 
