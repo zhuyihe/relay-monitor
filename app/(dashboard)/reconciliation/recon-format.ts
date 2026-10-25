@@ -71,11 +71,11 @@ export function sideAmount(item: any, side: "income" | "cost", currency: Reconci
 // 收入、上游成本一格：读全了只写金额，没读全写「$1.20（没读全）」，没读到写「读取中」「读不到」
 export const incomeText = (item: any, currency: ReconciliationCurrency, billing = item?.downstream) =>
   reconciliationBillingText(billing, sideRate(item, "income", currency));
-// 收入里减掉的渠道测试（用语规范 §9「其中渠道测试」）：自营站点后台手点的和定时自动的渠道测试也记收费记录，不是用户花的钱，不算收入；
-// 后台看到的渠道用量含这一部分，写出来财务对数时对得上。没有渠道测试、或这一段读不到换算时不写
-export function channelTestText(item: any, currency: ReconciliationCurrency, billing = item?.downstream) {
-  const usd = Number(billing?.testAmountUsd);
-  return Number.isFinite(usd) && usd > 0 ? `其中渠道测试 ${formatReconciliationMoney(usd, sideRate(item, "income", currency))}，不算收入` : null;
+// 收入里减掉的管理员自用（用语规范 §9「其中管理员自用」）：管理员账号自己花的钱（含渠道测试）也记收费记录，不是下游用户花的钱，不算收入，
+// 和运营总览、自营业务同一个规矩；后台看到的渠道用量含这一部分，写出来财务对数时对得上。没有、或这一段读不到换算时不写
+export function adminUsageText(item: any, currency: ReconciliationCurrency, billing = item?.downstream) {
+  const usd = Number(billing?.adminUsageAmountUsd);
+  return Number.isFinite(usd) && usd > 0 ? `其中管理员自用 ${formatReconciliationMoney(usd, sideRate(item, "income", currency))}，不算收入` : null;
 }
 export const costText = (item: any, currency: ReconciliationCurrency, billing = item?.upstream) => isFixedCost(item)
   ? FIXED_COST_TEXT : reconciliationBillingText(billing, sideRate(item, "cost", currency));

@@ -29,6 +29,11 @@ const UNKNOWN_USER_TTL_MS = 60000;
 // 缓存认的那份配置（测试也用它造缓存）
 export const ownUsersKey = (own) => JSON.stringify([own.id, own.type, own.baseUrl, own.userId, own.accessToken]);
 
+// 管理员（role ≥ 10）和转售的管理员 Key 怎么判，只在这里写一份：运营总览、自营业务（readOwnIncome）和每日利润
+// （server/reconciliation.js 的每个渠道收入）都用它——管理员自己花的钱不算收入，标成转售的管理员 Key 照样算收入
+export const adminUsernamesOf = (users) => new Set((users || []).filter((u) => u.role >= 10).map((u) => u.username));
+export const resoldAdminKeysOf = (own) => (Array.isArray(own?.resoldAdminKeys) ? own.resoldAdminKeys : []);
+
 // since：只要这个时刻以后发出的读取，缓存和进行中的读取发出得更早就再读一次。返回 { key, startedAt, list, unknown }，
 // unknown 是重读过还对不上的名字和那次读取发出的时间
 async function readOwnUsers(rt, own, since = 0) {
@@ -155,7 +160,7 @@ export async function stationUsageCost(rt, station, { startMs, endMs, tz, today 
  * 单个 Key 查询失败记为 0 并附带错误，不影响其余；返回调整后的两个口径 + 明细。
  */
 export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endMs) {
-  const keys = Array.isArray(own.resoldAdminKeys) ? own.resoldAdminKeys : [];
+  const keys = resoldAdminKeysOf(own);
   if (!keys.length) return { incomeUsd, adminUsageUsd, resoldUsd: 0, breakdown: [] };
   const breakdown = [];
   let resoldUsd = 0;
@@ -190,7 +195,7 @@ export async function readOwnIncomeOrUnconfirmed(rt, own, userRows, window) {
   } catch (err) {
     if (err?.code !== "OWN_INCOME_UNCONFIRMED") throw err;
     const users = err.users ?? null;
-    const adminSet = new Set((users || []).filter((u) => u.role >= 10).map((u) => u.username));
+    const adminSet = adminUsernamesOf(users);
     return { users, adminSet, incomeUsd: null, adminUsageUsd: null, resold: null, incomeDaily: null, unconfirmed: err,
       usersUnavailable: users ? null : ownStationError(err.cause || err) };
   }
@@ -245,6 +250,25 @@ function incomeUnconfirmed(message, cause, users = null, resoldErrors = null) {
 }
 
 /**
+ * 管理员名单（用户列表里 role ≥ 10，缓存 10 分钟，和运营总览共用同一份缓存）。fresh：要一份现在发出的（结账那一轮用，
+ * 刚提成管理员的人不能漏到固定账里）。转售 Key 所属的用户在列表里不是管理员：多半是刚提成管理员，再读一份新的；
+ * 还是对不上就报读不到（收入确认不了），不拿没确认的名单去扣收入。读不到用户列表也一样抛。
+ */
+export async function readOwnAdminDirectory(rt, own, { fresh = false } = {}) {
+  const resold = resoldAdminKeysOf(own);
+  const read = async (since) => {
+    try { return await readOwnUsers(rt, own, since); }
+    catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
+  };
+  let entry = await read(fresh ? Date.now() : 0);
+  const unconfirmed = (list) => { const admins = adminUsernamesOf(list); return resold.filter((key) => !admins.has(key.username)); };
+  if (unconfirmed(entry.list).length) entry = await read(Date.now());
+  const missing = unconfirmed(entry.list);
+  if (missing.length) throw incomeUnconfirmed(`转售 Key 所属用户「${missing[0].username}」的管理员身份没确认`, null, entry.list);
+  return { users: entry.list, adminSet: adminUsernamesOf(entry.list) };
+}
+
+/**
  * 按真实用户消费确认收入；角色目录不完整时不能把未知用户当付费客户。
  * 用户行保留时间维度，管理员自用留在发生的那一天；转售 Key 也按当天的精确窗口读取。
  * 分日金额按实际金额累计舍入到分，逐日之和与 computeProfit 的收入一致。
@@ -273,7 +297,7 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
   for (const name of missing(entry.list)) if (!known(name)) entry.unknown.set(name, entry.startedAt);
   const users = entry.list;
   const roles = new Map(users.map((u) => [u.username, u.role]));
-  const adminSet = new Set(users.filter((u) => u.role >= 10).map((u) => u.username));
+  const adminSet = adminUsernamesOf(users);
   const days = endMs > startMs
     ? dayRangeInTz(dayKeyInTz(startMs, tz), dayKeyInTz(endMs - 1, tz), tz).map((d) => ({
         ...d, startMs: Math.max(startMs, d.startMs), endMs: Math.min(endMs, d.endMs), incomeUsd: 0, adminUsageUsd: 0,
