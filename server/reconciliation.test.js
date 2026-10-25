@@ -4498,11 +4498,12 @@ test("U05未来snapshot保存原ruleEvidence，随后配置/成员变化不能�
   assert.doesNotMatch(JSON.stringify(evidence), /accessToken|password|apiKey|admin|pat/);
 });
 
-async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", clock = null, channelsByRule = { rr_live: [1], rr_two: [2], rr_three: [3] }, ...options } = {}) {
+// 回看更早的日子缺省不开（启动等待 1 天）：缺省的等待是随机 1–5 分钟，数每轮请求的测试会时有时无地多出回看的请求；要测回看的自己给 lookbackDelayMs
+async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", clock = null, channelsByRule = { rr_live: [1], rr_two: [2], rr_three: [3] }, moduleOptions = {}, ...options } = {}) {
   t.mock.method(Date, "now", clock || (() => Date.parse(now)));
   const channels = Array.from({ length: 10 }, (_, index) => ({ id: index + 1, name: `渠道 ${index + 1}`, status: 1, revision: `r${index + 1}` }));
   const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_two", "rr_three"],
-    ownChannels: () => channels.filter((channel) => !channel.missing), channelsByRule, ...options });
+    ownChannels: () => channels.filter((channel) => !channel.missing), channelsByRule, moduleOptions: { lookbackDelayMs: 24 * 3600000, ...moduleOptions }, ...options });
   const rows = f.repository.tables.rules;
   for (const row of rows) {
     Object.assign(row, { billing_policy: "next-complete-day", scope_version: 1, billing_effective_from_ms: Date.parse("2026-10-06T16:00:00Z"), cost_coverage: "complete" });
