@@ -70,6 +70,7 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<{ text: string; raw: unknown } | null>(null);
+  const [resuming, setResuming] = useState<string | null>(null);
   const seq = useRef(0);
 
   const load = useCallback(async () => {
@@ -117,6 +118,22 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
     }
   }
 
+  // 合不了的那一组的按钮：去一个地方改（处理重复、编辑上游），或就地恢复被暂停的那个上游（改成一样以后回来就能合）
+  async function runAction(action: any) {
+    if (action.kind === "link") { setOpen(false); router.push(action.href); return; }
+    setResuming(action.stationId);
+    try {
+      await api(`/api/stations/${encodeURIComponent(action.stationId)}`, { method: "PUT", body: { monitorEnabled: true } });
+      message.success(action.done);
+      await load();
+      onChanged?.();
+    } catch (error) {
+      message.error(errorText(error));
+    } finally {
+      setResuming(null);
+    }
+  }
+
   const tz = data?.tz;
   const groups = data?.groups || [];
   const records = data?.records || [];
@@ -144,7 +161,7 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
         {view.estimateNote ? <p className="jy-caption">{view.estimateNote}</p> : null}
         {group.canMerge ? <p className="jy-caption">{view.afterMerge}</p> : null}
         <div className="jy-merge-card__actions">
-          {view.conflict ? <Button onClick={() => { setOpen(false); router.push(view.conflict.href); }}>{view.conflict.label}</Button> : null}
+          {view.action ? <Button loading={resuming === view.action.stationId} onClick={() => void runAction(view.action)}>{view.action.label}</Button> : null}
           <Button type="primary" disabled={!group.canMerge} onClick={() => { setFailure(null); setConfirm({ kind: "merge", group }); }}>{MERGE.label}</Button>
         </div>
       </section>

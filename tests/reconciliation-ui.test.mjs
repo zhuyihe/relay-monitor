@@ -4279,6 +4279,11 @@ async function openMergePage(t, model, { viewport, path = "/stations" } = {}) {
       settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, tz: MERGE_TZ, generatedAt: new Date().toISOString(), merge: mergeCountsOf(model) });
     if (p === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {}, settings: {} });
     if (p === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (/^\/api\/stations\/[^/]+$/.test(p) && method === "PUT") {
+      const body = route.request().postDataJSON(); calls.push({ path: p, body });
+      model.groups = model.groups.map((g) => ({ ...g, blockers: g.blockers.filter((b) => b.code !== "MONITOR_MISMATCH"), canMerge: g.blockers.every((b) => b.code === "MONITOR_MISMATCH") }));
+      return fulfill(route, { station: { id: p.split("/").pop() } });
+    }
     if (p === "/api/upstream-merges" && method === "GET") return fulfill(route, { groups: model.groups, records: model.records, counts: mergeCountsOf(model), tz: MERGE_TZ });
     if (p === "/api/upstream-merges" && method === "POST") {
       const body = route.request().postDataJSON(); calls.push({ path: p, body });
@@ -4429,4 +4434,39 @@ test("成本估算：总成本下面写「其中 1 个账号加成了 2 个上�
   const line = page.getByTestId("merge-cost-line");
   await line.getByText("其中 1 个账号加成了 2 个上游，这里算了两遍", { exact: false }).waitFor();
   await line.getByRole("button", { name: "去合并", exact: true }).waitFor();
+});
+
+test("合并重复的上游：另外几种合不了的一项一行，按钮放第一项的；「恢复监控」就地恢复被暂停的那个，改成一样以后「合并」能点", async (t) => {
+  const blocked = mergeGroupOf({ merged: [mergeBrief("m-b", "主力上游（2）")], canMerge: false, blockers: [
+    { code: "MONITOR_MISMATCH", detail: "", monitoredIds: ["m-a"], pausedIds: ["m-b"], differsIds: ["m-b"] },
+    { code: "PROFIT_MISMATCH", detail: "", countedIds: ["m-a"], uncountedIds: ["m-b"], differsIds: ["m-b"] }] });
+  const model = { groups: [blocked], records: [] };
+  const { page, calls } = await openMergePage(t, model);
+  await page.getByTestId("merge-notice").getByText("有 1 组上游是同一个账号，现在还合不了", { exact: true }).waitFor();
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const card = mergeCard(page, "主力上游");
+  await card.getByText("「主力上游」在读余额，「主力上游（2）」暂停了监控，合成一个以后不知道该不该接着读。先把两个改成一样（都恢复监控，或者都暂停），再回来合。", { exact: true }).waitFor();
+  await card.getByText("「主力上游」算进利润，「主力上游（2）」不算进利润，合成一个以后不知道该按哪个算。先在编辑上游里把两个改成一样，再回来合。", { exact: true }).waitFor();
+  assert.equal(await card.getByRole("button", { name: "合并", exact: true }).isDisabled(), true);
+  assert.equal(await card.getByRole("button", { name: "编辑上游", exact: true }).count(), 0, "按钮只放第一项的");
+  await card.getByRole("button", { name: "恢复监控", exact: true }).click();
+  await page.getByText("已恢复监控", { exact: true }).waitFor();
+  assert.deepEqual(calls, [{ path: "/api/stations/m-b", body: { monitorEnabled: true } }]);
+  await card.getByRole("button", { name: "编辑上游", exact: true }).waitFor();
+});
+
+test("合并重复的上游：被合掉的那个记了固定成本时，按钮「编辑上游」打开它；标了转售 Key 的只写说明、没有按钮", async (t) => {
+  const fixed = mergeGroupOf({ merged: [mergeBrief("m-b", "主力上游（2）")], canMerge: false, blockers: [{ code: "MERGED_HAS_FIXED_COST", detail: "", stationId: "m-b" }] });
+  const { page } = await openMergePage(t, { groups: [fixed], records: [] });
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const card = mergeCard(page, "主力上游");
+  await card.getByText("「主力上游（2）」记了固定成本，合掉以后这几笔就不算了。先在「主力上游」上记上同样的固定成本、再从「主力上游（2）」上删掉，再回来合。", { exact: true }).waitFor();
+  await card.getByRole("button", { name: "编辑上游", exact: true }).click();
+  await page.waitForURL((url) => url.pathname === "/stations" && url.searchParams.get("edit") === "m-b");
+  const resold = mergeGroupOf({ merged: [mergeBrief("m-b", "主力上游（2）")], canMerge: false, blockers: [{ code: "MERGED_HAS_RESOLD_KEYS", detail: "", stationId: "m-b" }] });
+  const next = await openMergePage(t, { groups: [resold], records: [] });
+  await next.page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const soldCard = mergeCard(next.page, "主力上游");
+  await soldCard.getByText("「主力上游（2）」上还标着转售 Key，合掉以后这些标记就不算了。先把它上面的转售标记取消，再回来合。", { exact: true }).waitFor();
+  assert.equal(await soldCard.getByRole("button").count(), 1, "只有灰着的「合并」");
 });
