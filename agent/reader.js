@@ -57,8 +57,9 @@ const DB_TIMEOUT_CODES = new Set(["ER_QUERY_TIMEOUT", "ER_STATEMENT_TIMEOUT", "5
 // 账号或服务器的连接数、每小时额度到顶（MySQL 1226 用户额度、1203 / 1040 连接数；PostgreSQL 53300）
 const DB_LIMIT_ERRNO = new Set([1226, 1203, 1040]);
 const DB_LIMIT_CODES = new Set(["ER_USER_LIMIT_REACHED", "ER_TOO_MANY_USER_CONNECTIONS", "ER_CON_COUNT_ERROR", "53300"]);
-// MySQL 的 1226 报错里点名是哪种额度：每小时的（max_questions、max_updates、max_connections）下一个整点才恢复，max_user_connections（同时连接数）不是
-const HOURLY_RESOURCE = /'(max_questions|max_updates|max_connections)'/;
+// MySQL 的 1226 报错里点名是哪种额度（实测 MySQL 8.4 的原文）：每小时的（max_questions、max_updates、max_connections_per_hour）下一个整点才恢复，
+// max_user_connections（同时连接数）不是
+const HOURLY_RESOURCE = /'(max_questions|max_updates|max_connections_per_hour)'/;
 const PG_GONE_MESSAGE = /connection terminated|terminating connection|server closed the connection|connection ended/i;
 const SAFE_DRIVER_CODE = /^[A-Za-z0-9_]{1,40}$/;
 
@@ -142,7 +143,8 @@ async function mysqlSession(database, { queryTimeoutMs, dbTimeLimitMs }) {
   return {
     flavor,
     fetch: (withChannelInfo) => run(selectBody("mysql", withChannelInfo)),
-    inspect: () => run(mysqlAccountSql(version)),
+    // 版本串取不到、认不出：不知道有没有 APPLICABLE_ROLES，角色那一段查不了，不能当没有角色放行，判成 ROLE_UNKNOWN（不查库）
+    inspect: async () => (mysqlFlavor(version) === "unknown" ? [{ scope: "version_unknown" }] : run(mysqlAccountSql(version))),
     judge: (rows) => judgeMysqlAccount(rows, { database: database.database }),
     end: () => conn.end(),
     destroy: () => conn.destroy(),

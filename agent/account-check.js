@@ -17,7 +17,9 @@ export function mysqlHasRoles(version) {
 
 // 权限表和连接数合成一条语句（一次读多发一条语句也要算进每小时的额度）。
 // scope：conn（本会话的 max_user_connections：账号设了的话是账号的上限，没设就是全局值）/ user / schema / table / column / role；grantable 是 IS_GRANTABLE
+// 版本串取不到、认不出时没有合适的语句（不知道角色那一段能不能查），返回 null，调用方按 ROLE_UNKNOWN 处理
 export function mysqlAccountSql(version) {
+  if (!/mariadb/i.test(String(version ?? "")) && !/^\d+\.\d+\.\d+/.test(String(version ?? ""))) return null;
   return [
     "SELECT 'conn' AS scope, CAST(@@session.max_user_connections AS CHAR) AS priv, '' AS tbl, '' AS col, 'NO' AS grantable",
     "UNION ALL SELECT 'user', PRIVILEGE_TYPE, '', '', IS_GRANTABLE FROM information_schema.USER_PRIVILEGES",
@@ -49,6 +51,7 @@ FROM pg_roles r WHERE r.rolname = current_user`;
 export function judgeMysqlAccount(rows, { database }) {
   const home = `${String(database ?? "").toLowerCase()}.channels`;
   const list = rows ?? [];
+  if (list.some((row) => String(row.scope) === "version_unknown")) return "ROLE_UNKNOWN";
   for (const row of list) {
     const scope = String(row.scope), priv = String(row.priv).toUpperCase();
     if (scope === "role") return "ROLE_GRANTED";

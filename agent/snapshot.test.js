@@ -174,3 +174,17 @@ test("没有成功过的结果时出错：直接回失败，不会有 stale", as
   const first = await source.get();
   assert.deepEqual([first.ok, first.stale, first.code], [false, undefined, "DB_DENIED"]);
 });
+
+test("ACCOUNT_TOO_BROAD 不给旧结果（NEVER_STALE_CODES），其它失败才给", async () => {
+  let code = "ACCOUNT_TOO_BROAD";
+  const t = { v: 10 * 60 * MIN };
+  let first = true;
+  const source = sourceWith(async () => { if (first) { first = false; return []; } throw new ReadFailure(code, "X"); }, t);
+  assert.equal((await source.get()).ok, true);
+  t.v += 5 * MIN;
+  const blocked = await source.get();
+  assert.deepEqual([blocked.ok, blocked.code, blocked.stale], [false, "ACCOUNT_TOO_BROAD", undefined]);
+  const other = sourceWith(async () => { throw new ReadFailure("DB_TIMEOUT", "X"); }, { v: 1 });
+  assert.equal((await other.get()).stale, undefined, "没有成功过的结果时也没有 stale");
+  void code;
+});

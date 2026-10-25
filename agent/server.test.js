@@ -141,11 +141,15 @@ test("读库出错、上一份成功的结果还不到 30 分钟：/keys 照样�
     const stale = await get("/keys", auth);
     assert.equal(stale.status, 200);
     assert.equal(stale.headers["x-agent-stale"], "1");
+    assert.equal(stale.headers["x-agent-stale-reason"], "DB_TIMEOUT", "控制台看得到这次读库为什么失败");
     assert.deepEqual(stale.body, good.body, "readAt 是原来那次读库的时刻");
     assert.equal(stale.headers.etag, good.headers.etag);
     const notModified = await get("/keys", { ...auth, "If-None-Match": good.headers.etag });
     assert.equal(notModified.status, 304);
     assert.equal(notModified.headers["x-agent-stale"], "1");
+    assert.equal(notModified.headers["x-agent-stale-reason"], "DB_TIMEOUT", "304 也带");
+    assert.ok(logs.some((l) => l.ev === "req" && l.status === 200 && l.stale === true && l.reason === "DB_TIMEOUT"), "日志里这一行标 stale");
+    assert.ok(logs.some((l) => l.ev === "req" && l.status === 304 && l.stale === true));
     assert.equal(logs.filter((l) => l.ev === "breaker").length, 1);
     clock.t += 30 * 60_000;
     const gone = await get("/keys", auth);
@@ -318,4 +322,17 @@ test("配置：太弱的 secret 起不来（不同字符少于 10 个、整串�
     assert.throws(() => loadConfig({ RELAY_KEY_AGENT_SECRET: weak }), (e) => e.code === "CONFIG_INVALID" && e.message === "令牌太弱，请用 openssl rand -base64 32 生成" && !e.message.includes(weak));
   }
   assert.equal(loadConfig({ RELAY_KEY_AGENT_SECRET: "Zq3v9LmX2rT7wYk1NcB8dHfJ5sGaP4uE" }).port, 8790);
+});
+
+test("账号权限不合格（ACCOUNT_TOO_BROAD）：不给上一份结果，直接 503；别的失败才给 stale", async () => {
+  const reader = fakeReader(ROWS);
+  await withServer(reader, {}, async ({ get, clock }) => {
+    assert.equal((await get("/keys", auth)).status, 200);
+    reader.state.error = new ReadFailure("ACCOUNT_TOO_BROAD", "GRANT_OPTION");
+    clock.t += FIVE_MIN;
+    const res = await get("/keys", auth);
+    assert.equal(res.status, 503, "不安全的状态下不继续给旧结果");
+    assert.equal(JSON.parse(res.body).code, "ACCOUNT_TOO_BROAD");
+    assert.equal(res.headers["x-agent-stale"], undefined);
+  });
 });

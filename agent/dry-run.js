@@ -13,6 +13,7 @@ const ACCOUNT_TEXT = {
   WRITE_PRIVILEGE: "账号对 channels 有写的权限",
   TABLE_WIDE_SELECT: "账号对 channels 整表有 SELECT（不止那 7 列）",
   EXTRA_COLUMNS: "账号能读 channels 里那 7 列以外的列",
+  ROLE_UNKNOWN: "查不到数据库的版本，没法检查账号有没有通过角色拿权限",
   CONNECTION_LIMIT: "账号的连接数上限不是 1（MySQL 的 MAX_USER_CONNECTIONS、PostgreSQL 的 CONNECTION LIMIT 要设成 1）",
   GRANT_OPTION: "账号带着 WITH GRANT OPTION（能把权限转给别人）",
   ROLE_GRANTED: "账号通过角色拿到了权限（只允许直接授予那 7 列的 SELECT）",

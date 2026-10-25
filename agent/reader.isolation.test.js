@@ -49,7 +49,10 @@ test("账号检查（MySQL 的权限表）：只有 USAGE + channels 那 7 列�
 
 test("账号检查的 MySQL 语句：一条语句；MySQL 8 和 MariaDB 带角色那一段，5.7 没有 APPLICABLE_ROLES 就不带", () => {
   for (const version of ["8.4.11", "8.0.36-0ubuntu0.22.04.1", "10.11.6-MariaDB-1:10.11.6+maria~ubu2204", "5.5.5-10.6.16-MariaDB"]) assert.match(mysqlAccountSql(version), /APPLICABLE_ROLES/, version);
-  for (const version of ["5.7.44", "5.7.8", undefined]) assert.doesNotMatch(mysqlAccountSql(version), /APPLICABLE_ROLES/, String(version));
+  for (const version of ["5.7.44", "5.7.8"]) assert.doesNotMatch(mysqlAccountSql(version), /APPLICABLE_ROLES/, String(version));
+  // 版本串取不到、认不出：没有合适的语句（不知道角色那一段能不能查），不当成没有角色放行
+  for (const version of [undefined, "", "weird", null]) assert.equal(mysqlAccountSql(version), null, String(version));
+  assert.equal(judgeMysqlAccount([{ scope: "version_unknown" }], { database: "newapi" }), "ROLE_UNKNOWN");
   for (const version of ["8.4.11", "5.7.44"]) assert.ok(!/;/.test(mysqlAccountSql(version)));
   assert.match(mysqlAccountSql("8.4.11"), /@@session\.max_user_connections/);
 });

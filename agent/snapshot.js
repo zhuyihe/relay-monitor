@@ -15,6 +15,7 @@ const HOUR_MS = 60 * 60 * 1000;
 // 读库出错以后，上一份成功的结果最多再用这么久（响应带 X-Agent-Stale: 1，readAt 还是那次读库的时刻）：
 // 控制台连续几次读不到才算问题，一次瞬时的错不该让它立刻看到 503
 export const STALE_MAX_MS = 30 * 60 * 1000;
+export const NEVER_STALE_CODES = new Set(["ACCOUNT_TOO_BROAD"]);
 
 function parseChannelInfo(value) {
   if (value && typeof value === "object") return value;
@@ -65,9 +66,12 @@ export function createSnapshotSource({ reader, db, fingerprintKeyBytes, now = Da
   let inflight = null;
   let failures = 0;
   let pausedUntil = 0;
-  // 最近一次是失败、但上一份成功的结果还不到 30 分钟：给上一份，标 stale
+  // 最近一次是失败、但上一份成功的结果还不到 30 分钟（从上一次成功读库算起）：给上一份，标 stale，原因码在 staleCode。
+  // 「不该继续读」的失败（账号权限不合格）不给旧结果：不安全的状态下不能继续给东西
   const serve = (t) => {
-    if (current && !current.ok && lastGood && t - lastGood.readAt >= 0 && t - lastGood.readAt < STALE_MAX_MS) return { ...lastGood, stale: true, staleCode: current.code };
+    if (current && !current.ok && !NEVER_STALE_CODES.has(current.code) && lastGood && t - lastGood.readAt >= 0 && t - lastGood.readAt < STALE_MAX_MS) {
+      return { ...lastGood, stale: true, staleCode: current.code };
+    }
     return current;
   };
   return {

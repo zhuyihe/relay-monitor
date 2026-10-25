@@ -134,13 +134,14 @@ export function createAgentServer({ config, reader, now = Date.now, log = defaul
     }
     lastFailureLog = { code: null, at: 0 };
     // stale：这是上一次成功读到的结果（最近一次读库失败了，原因码在日志的 breaker 一行里）
-    const headers = { ETag: snapshot.etag, Vary: "Accept-Encoding", ...(snapshot.stale ? { "X-Agent-Stale": "1" } : {}) };
+    // X-Agent-Stale-Reason：这次读库为什么失败（和 503 体里的 code 同一批固定的原因码，没有新暴露）。304 也带
+    const headers = { ETag: snapshot.etag, Vary: "Accept-Encoding", ...(snapshot.stale ? { "X-Agent-Stale": "1", "X-Agent-Stale-Reason": /^[A-Z_]{1,40}$/.test(snapshot.staleCode) ? snapshot.staleCode : "DB_ERROR" } : {}) };
     if (etagMatches(req.headers["if-none-match"], snapshot.etag)) {
-      log({ ev: "req", path, status: 304, channels: snapshot.channelCount, ms: now() - started });
+      log({ ev: "req", path, status: 304, channels: snapshot.channelCount, ...(snapshot.stale ? { stale: true, reason: snapshot.staleCode } : {}), ms: now() - started });
       return send(req, res, 304, null, headers);
     }
     const gzip = acceptsGzip(req.headers["accept-encoding"]);
-    log({ ev: "req", path, status: 200, channels: snapshot.channelCount, ms: now() - started });
+    log({ ev: "req", path, status: 200, channels: snapshot.channelCount, ...(snapshot.stale ? { stale: true, reason: snapshot.staleCode } : {}), ms: now() - started });
     return send(req, res, 200, gzip ? snapshot.gzip : snapshot.body,
       { ...headers, "Content-Type": "application/json; charset=utf-8", ...(gzip ? { "Content-Encoding": "gzip" } : {}) });
   }

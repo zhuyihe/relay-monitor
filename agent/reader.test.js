@@ -73,7 +73,9 @@ test("DB_LIMIT：报错里点名每小时的额度（max_questions 等）才算 
   const limit = (message, extra = {}) => classifyError({ errno: 1226, code: "ER_USER_LIMIT_REACHED", message, ...extra });
   assert.deepEqual(limit("User 'u' has exceeded the 'max_questions' resource (current value: 120)"), { code: "DB_LIMIT", driver: "ER_USER_LIMIT_REACHED", hourly: true });
   assert.equal(limit("User 'u' has exceeded the 'max_updates' resource (current value: 1)").hourly, true);
-  assert.equal(limit("User 'u' has exceeded the 'max_connections' resource (current value: 5)").hourly, true);
+  // MySQL 8.4 的原文（实测）：每小时连接数那一种点名的是 max_connections_per_hour，后面不是紧跟引号
+  assert.equal(limit("User 'u' has exceeded the 'max_connections_per_hour' resource (current value: 1)").hourly, true);
+  assert.equal(limit("User 'u' has exceeded the 'max_connections' resource (current value: 5)").hourly, false, "没有这种写法，不是每小时的额度");
   assert.equal(limit("User 'u' has exceeded the 'max_user_connections' resource (current value: 1)").hourly, false);
   assert.equal(classifyError({ errno: 1203, message: "User u already has more than 'max_user_connections' active connections" }).hourly, false);
   assert.equal(classifyError({ errno: 1040, code: "ER_CON_COUNT_ERROR", message: "Too many connections" }).hourly, false);
