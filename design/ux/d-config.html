@@ -356,27 +356,21 @@ a { color: var(--cobalt); text-decoration: none; }
   </div>
 </section>
 
-<p class="frame-label" style="width:1160px">d-move · 改时间：一把 Key 在两个在算的渠道之间挪过，定几点挪的（C 的改时间小窗）；改过以后「用过的 Key」那一行也留「改时间」</p>
-<section class="frame" id="d-move" style="width:1160px;height:410px">
+<p class="frame-label" style="width:1160px">d-move · 一把 Key 在两个在算的渠道之间挪过：系统按读到的那一刻切开，不进需处理、没有「改时间」；计算明细写一句（用户 10-25 定）</p>
+<section class="frame" id="d-move" style="width:1160px;height:330px">
   <div class="cols c2" style="padding:24px;align-items:start">
-    <div><div class="v-title">需处理里</div>
-      <ul class="attention"><li><svg class="sym"><use href="#warn"/></svg><div><strong>Key「oai-2」从「高速 A」挪到了「标准 B」，不知道是几点挪的</strong><p>这把 Key 花的钱要按时间分给两个渠道；定了以后那几天重算</p></div><span class="btn sm">改时间</span></li></ul>
-      <div class="v-title" style="margin-top:20px">定了以后，「渠道」页签 · 标准 B · 用过的 Key</div>
+    <div><div class="v-title">「渠道」页签 · 标准 B · 用过的 Key</div>
       <div class="tl card"><ol>
-        <li><i></i><span class="when">10月25日 16:05 起</span><span>oai-2 · 分组 a · 倍率 1.2</span><a>改时间</a></li>
+        <li><i></i><span class="when">10月25日 16:05 起</span><span>oai-2 · 分组 a · 倍率 1.2</span><span></span></li>
         <li><i></i><span class="when">10月20日 12:44 起</span><span>team-b · 分组 b · 倍率 1.0</span><span></span></li>
-      </ol></div></div>
-    <div><div class="v-title">改时间小窗</div>
-      <div class="dlg" style="position:static;transform:none;width:auto">
-        <div class="dlg-head"><h3>改时间</h3><svg class="icon"><use href="#i-close"/></svg></div>
-        <div class="dlg-body">
-          <p class="sub" style="margin:0">Key「oai-2」从「高速 A」挪到了「标准 B」，几点挪的？</p>
-          <div class="field"><div class="input filled">10月25日 16:05</div>
-            <div class="hint" style="margin-top:6px">默认是重新读到的时候；可以改成 10月25日 15:19 到 16:05 之间的任何时刻</div></div>
-          <div class="box info"><div class="rows"><span>哪几天按什么算</span><div><span class="day">10月25日</span> 这把 Key 的钱按这个时刻分给两个渠道，这天重算</div></div></div>
-        </div>
-        <div class="dlg-foot"><span class="sub"></span><span class="btn">取消</span><span class="btn primary">保存</span></div>
+      </ol></div>
+      <p class="caption" style="margin:10px 0 0">高速 A 那边同样多一行。不进需处理，没有要点的按钮。</p></div>
+    <div><div class="v-title">每日利润 · 标准 B · 10月25日 · 计算明细</div>
+      <div class="card"><div class="rows" style="grid-template-columns:84px 1fr">
+        <span>上游成本</span><div>team-b（到 16:05）$2.10；oai-2（16:05 起）$1.30</div>
+        <span></span><div class="hint">Key「oai-2」10月25日 16:05 从「高速 A」挪到「标准 B」：这一刻以前的算给「高速 A」，以后的算给「标准 B」（这一刻是系统读到的，前后最多差一分钟）</div>
       </div></div>
+      <p class="caption" style="margin:10px 0 0">高速 A 这天的明细里写同一句。读不到渠道 Key 的那段时间里挪的，括号里写「这一刻是重新读到的时候，是在 15:19 到 16:05 之间挪的」。</p></div>
   </div>
 </section>
 
@@ -415,7 +409,7 @@ a { color: var(--cobalt); text-decoration: none; }
         <div class="history" style="border-top:0;padding-top:0">
           <div class="more"><svg class="icon"><use href="#i-chev-d"/></svg>改动记录</div>
           <ol>
-            <li><span>10月25日 16:10</span><div>Key oai-3 从 海外 D 挪到 标准 B 的时间定为 10月25日 15:42</div></li>
+            <li><span>10月25日 16:10</span><div>倍率变化时间改成 14:30（标准 B）</div></li>
             <li><span>10月25日 09:12</span><div>系统：新渠道 海外 D 开始算利润</div></li>
             <li><span>10月24日 18:30</span><div>账号的回答改成「只给我的渠道用」</div></li>
             <li><span>10月24日 11:05</span><div>按现在的设置算 10月23日（高速 A）</div></li>
