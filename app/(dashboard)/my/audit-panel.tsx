@@ -4,7 +4,7 @@
 import { Button } from "antd";
 import { EMPTY, formatCompact, formatInt, formatMoney, formatZonedRange } from "../../../lib/format";
 import { ErrorState } from "../../components/data-state";
-import { Icon } from "../../components/icons";
+import { More } from "../../components/more";
 import { Panel } from "../../components/panel";
 import { Seg } from "../../components/seg";
 import { AUDIT_TITLE, COL_TEXT, DataTable, TOKEN_NOTE, money, perM } from "./shared";
@@ -33,6 +33,8 @@ export type AuditProps = {
 // 只在这块出现的说法（design/ui-copy-spec.md §11）
 const COPY = {
   sub: "逐条看用量记录，补上概览没算进去的缓存和长对话用量。",
+  // 收起区按钮写它收着什么（ui-design-spec §4.11）
+  more: "细算的条数和结果",
   rows: "看多少条",
   start: "开始细算",
   again: "重新细算",
@@ -65,18 +67,9 @@ export function AuditPanel({ audit, auditing, auditError, auditRows, setAuditRow
   const longLabel = audit?.longContextTokens ? `${COPY.long}（${formatCompact(audit.longContextTokens)} Token 以上）` : COPY.long;
   const range = audit?.fromMs && audit?.toMs ? formatZonedRange(audit.fromMs, audit.toMs, tz) : EMPTY;
   return (
-    <Panel
-      title={AUDIT_TITLE}
-      className={open ? undefined : "jy-my-collapsed"}
-      extra={
-        <Button size="small" aria-expanded={open} icon={<Icon name={open ? "collapse" : "expand"} />} onClick={() => setOpen(!open)}>
-          {open ? "收起" : "展开"}
-        </Button>
-      }
-      sub={COPY.sub}
-      body={open}
-    >
-      {open ? (
+    <Panel title={AUDIT_TITLE} sub={COPY.sub}>
+      {/* 收起区 More 的受控用法：开合在页面上（切走标签再回来还开着） */}
+      <More label={COPY.more} open={open} onOpenChange={setOpen}>
         <>
           <div className="jy-my-toolbar">
             <Seg<string>
@@ -211,7 +204,7 @@ export function AuditPanel({ audit, auditing, auditError, auditRows, setAuditRow
             </>
           )}
         </>
-      ) : null}
+      </More>
     </Panel>
   );
 }

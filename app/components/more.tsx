@@ -3,13 +3,45 @@
 // anchor 是页面上那一块的 id（那一块自己带这个 id）：页面里指向「#anchor」的链接会展开它，带着这个地址打开或刷新页面时展开并滚过去。
 // defaultOpen 只给「收着的内容就是这一页要说的事」时用；值变了要重新按它来，调用处给 More 换 key。
 // 换 key 就是重新挂载：用户已经展开或收起的状态回到 defaultOpen，按钮上的焦点也会丢（例如用量分析从「全都读不到」变成「部分读不到」时），这是有意的。
-// 页面要自己控制开合时，加 open／onOpenChange（ui-design-spec §4.11），不另写一套收起。
-import { useEffect, useId, useState } from "react";
-import type { ReactNode } from "react";
+// 页面要自己控制开合时（开合状态从外面传进来、别处的链接要把它打开），传 open 和 onOpenChange（受控）；不传 open 时它自己管（ui-design-spec §4.11），不另写一套收起。
+// 一旦传了 open 就一直传（不在受控和不受控之间来回换，和 React 的输入框同一个约定）。
+// 收着的内容里有「取消」「保存」这类会把它收起的按钮时，用 buttonRef 拿到收起区的按钮，收起后把焦点还给它。
+import { useEffect, useId, useRef, useState } from "react";
+import type { ReactNode, Ref } from "react";
 import { Icon } from "./icons";
 
-export function More({ label, anchor, defaultOpen = false, children, className = "" }: { label: string; anchor?: string; defaultOpen?: boolean; children: ReactNode; className?: string }) {
-  const [open, setOpen] = useState(defaultOpen);
+export function More({
+  label,
+  anchor,
+  defaultOpen = false,
+  open: openProp,
+  onOpenChange,
+  buttonRef,
+  children,
+  className = "",
+}: {
+  label: string;
+  anchor?: string;
+  defaultOpen?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  buttonRef?: Ref<HTMLButtonElement>;
+  children: ReactNode;
+  className?: string;
+}) {
+  const [inner, setInner] = useState(defaultOpen);
+  const controlled = openProp !== undefined;
+  const open = controlled ? openProp : inner;
+  // 监听里拿到的总是最新的 onOpenChange 和受控与否，不因为页面每次渲染换新函数就重挂监听
+  // 在 effect 里更新，不在渲染时写 ref
+  const latest = useRef({ controlled, onOpenChange });
+  useEffect(() => {
+    latest.current = { controlled, onOpenChange };
+  });
+  const setOpen = useRef((next: boolean) => {
+    if (!latest.current.controlled) setInner(next);
+    latest.current.onOpenChange?.(next);
+  }).current;
   const bodyId = useId();
   useEffect(() => {
     if (!anchor) return;
@@ -31,10 +63,10 @@ export function More({ label, anchor, defaultOpen = false, children, className =
       window.removeEventListener("hashchange", check);
       document.removeEventListener("click", onClick);
     };
-  }, [anchor]);
+  }, [anchor, setOpen]);
   return (
     <div className={`jy-more ${className}`.trim()}>
-      <button type="button" className="jy-more__toggle" aria-expanded={open} aria-controls={open ? bodyId : undefined} onClick={() => setOpen((v) => !v)}>
+      <button ref={buttonRef} type="button" className="jy-more__toggle" aria-expanded={open} aria-controls={open ? bodyId : undefined} onClick={() => setOpen(!open)}>
         {label}
         <Icon name="expand" className={open ? "is-open" : undefined} />
       </button>

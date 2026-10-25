@@ -2,6 +2,8 @@
 // 收入、上游成本与固定成本趋势（同一纵轴）+ 每日净利柱（共用横轴），一个面板，可切换成表格。
 // 净利 = 收入 − 上游成本 − 固定成本，与利润等式第二行同一口径；表格里另列毛利（收入 − 上游成本）。
 // 没有固定成本时不画固定成本线。
+// showCost=false 时只画收入（自营业务：这一页回答「钱从哪来」，上游成本在每日利润、成本估算里看）：不画成本线、不画每日净利柱，表格只有日期和收入。
+// revApprox：收入是估算（没设置售价），收入的数值都带「≈」；说明由调用方接上原因。
 // 今天未满一天用虚线；缺数据的日子画斜纹带、断线，不补零。
 // 悬停或用左右方向键逐日查看，十字线同时贯穿两张图。
 import { useId, useMemo, useState } from "react";
@@ -52,18 +54,26 @@ export const TREND_PANEL_TITLE = Object.freeze({ withRevenue: "收入与上游�
 export function TrendPanel({
   rows: input,
   showRev = true,
+  showCost = true,
+  revApprox = false,
   asOf,
   tz,
   title,
   caption = "按天，同一纵轴",
+  foot,
 }: {
   rows: TrendRow[];
   showRev?: boolean;
+  showCost?: boolean;
+  /** 收入是估算（没设置售价），收入的数值带「≈」 */
+  revApprox?: boolean;
   asOf?: number | null;
   /** 业务时区（接口返回的 tz），缺省 Asia/Shanghai */
   tz?: string;
   title?: ReactNode;
   caption?: ReactNode;
+  /** 面板底部一行（例如去别的页面看的链接） */
+  foot?: ReactNode;
 }) {
   const [view, setView] = useState<"chart" | "table">("chart");
   const asOfText = asOf ? formatZonedTime(asOf, tz) : null;
@@ -89,6 +99,7 @@ export function TrendPanel({
     <Panel
       title={title ?? (showRev ? TREND_PANEL_TITLE.withRevenue : TREND_PANEL_TITLE.costOnly)}
       caption={caption}
+      foot={foot}
       extra={
         <Seg<"chart" | "table">
           size="sm"
@@ -103,9 +114,9 @@ export function TrendPanel({
       }
     >
       {view === "chart" ? (
-        <TrendChart rows={rows} showRev={showRev} asOfText={asOfText} />
+        <TrendChart rows={rows} showRev={showRev} showCost={showCost} revApprox={revApprox} asOfText={asOfText} />
       ) : (
-        <TrendTable rows={rows} showRev={showRev} asOfText={asOfText} />
+        <TrendTable rows={rows} showRev={showRev} showCost={showCost} revApprox={revApprox} asOfText={asOfText} />
       )}
     </Panel>
   );
@@ -114,19 +125,26 @@ export function TrendPanel({
 function TrendChart({
   rows,
   showRev,
+  showCost,
+  revApprox,
   asOfText,
 }: {
   rows: Row[];
   showRev: boolean;
+  showCost: boolean;
+  revApprox: boolean;
   asOfText?: string | null;
 }) {
   const [stackRef, w] = useElementWidth();
   const [hover, setHover] = useState<number | null>(null);
   const uid = svgId(useId());
   const n = rows.length;
-  const hasMissing = rows.some((r) => r.missing);
+  // 缺的是成本数据：只画收入时不画缺失带
+  const hasMissing = showCost && rows.some((r) => r.missing);
   const hasToday = !!rows[n - 1]?.today;
-  const hasFixed = rows.some((r) => r.fixed > 0);
+  const hasFixed = showCost && rows.some((r) => r.fixed > 0);
+  // 下面的每日净利柱：有收入又有成本时才画
+  const showProfit = showRev && showCost;
 
   const T = 12;
   const L = w < 480 ? 46 : 52;
@@ -137,14 +155,15 @@ function TrendChart({
 
   // 上图：收入、上游成本与固定成本
   const HL = 208;
-  const BL = showRev ? 8 : 28;
+  const BL = showProfit ? 8 : 28;
   const vals = rows.flatMap((r) => [r.rev, r.cost, hasFixed ? r.fixed : null]).filter((v): v is number => v != null);
   const yt = niceTicks(0, Math.max(0, ...vals), 4);
   const y = (v: number) => T + (1 - (v - yt.lo) / (yt.hi - yt.lo)) * (HL - T - BL);
-  const bands = runs(rows.map((r) => !!r.missing));
+  // 缺的是成本数据：只画收入时没有缺失带（图例里也没有「数据缺失」）
+  const bands = showCost ? runs(rows.map((r) => !!r.missing)) : [];
   const series = [
     ...(showRev ? [{ name: "收入", color: "var(--jy-s1)", vals: rows.map((r) => r.rev) }] : []),
-    { name: "上游成本", color: "var(--jy-s2)", vals: rows.map((r) => r.cost) },
+    ...(showCost ? [{ name: "上游成本", color: "var(--jy-s2)", vals: rows.map((r) => r.cost) }] : []),
     ...(hasFixed ? [{ name: "固定成本", color: "var(--jy-s3)", vals: rows.map((r): number | null => r.fixed) }] : []),
   ];
   const lastSolid = hasToday ? n - 2 : n - 1;
@@ -193,11 +212,12 @@ function TrendChart({
   if (hr) {
     const cost = hr.cost == null ? "数据缺失" : formatMoney(hr.cost, { approx: hr.partial });
     // 算不出（上游成本缺了）写「—」，原因在上一行「数据缺失」（§7）
-    const profit = hr.profit == null ? EMPTY : formatMoney(hr.profit, { approx: hr.partial });
-    if (showRev) tipRows.push(["收入", formatMoney(hr.rev), "var(--jy-s1)"]);
-    tipRows.push(["上游成本", cost, "var(--jy-s2)"]);
-    tipRows.push(["固定成本", formatMoney(hr.fixed), hasFixed ? "var(--jy-s3)" : undefined]);
-    if (showRev)
+    const profit = hr.profit == null ? EMPTY : formatMoney(hr.profit, { approx: hr.partial || revApprox });
+    const rev = formatMoney(hr.rev, { approx: revApprox });
+    if (showRev) tipRows.push(["收入", rev, "var(--jy-s1)"]);
+    if (showCost) tipRows.push(["上游成本", cost, "var(--jy-s2)"]);
+    if (showCost) tipRows.push(["固定成本", formatMoney(hr.fixed), hasFixed ? "var(--jy-s3)" : undefined]);
+    if (showProfit)
       tipRows.push([
         "净利",
         hr.profit != null && hr.profit < 0 ? (
@@ -208,7 +228,9 @@ function TrendChart({
           profit
         ),
       ]);
-    spoken = `${dayTitle(hr, asOfText)}：${showRev ? `收入 ${formatMoney(hr.rev)}，` : ""}上游成本 ${cost}，固定成本 ${formatMoney(hr.fixed)}${showRev ? `，净利 ${hr.profit != null && hr.profit < 0 ? "亏损 " : ""}${profit}` : ""}`;
+    spoken = showCost
+      ? `${dayTitle(hr, asOfText)}：${showRev ? `收入 ${rev}，` : ""}上游成本 ${cost}，固定成本 ${formatMoney(hr.fixed)}${showRev ? `，净利 ${hr.profit != null && hr.profit < 0 ? "亏损 " : ""}${profit}` : ""}`
+      : `${dayTitle(hr, asOfText)}：收入 ${rev}`;
   }
 
   const ready = w > 0 && n > 0;
@@ -223,10 +245,12 @@ function TrendChart({
             收入
           </span>
         )}
-        <span>
-          <i className="line-key" style={{ background: "var(--jy-s2)" }} />
-          上游成本
-        </span>
+        {showCost && (
+          <span>
+            <i className="line-key" style={{ background: "var(--jy-s2)" }} />
+            上游成本
+          </span>
+        )}
         {hasFixed && (
           <span>
             <i className="line-key" style={{ background: "var(--jy-s3)" }} />
@@ -251,7 +275,7 @@ function TrendChart({
         className="jy-chart-stack"
         tabIndex={0}
         role="img"
-        aria-label={`${showRev ? "每日收入与上游成本" : "每日上游成本"}${hasFixed ? "、固定成本" : ""}折线图${showRev ? "，以及每日净利柱状图" : ""}，可用左右方向键逐日查看`}
+        aria-label={`${!showCost ? "每日收入" : showRev ? "每日收入与上游成本" : "每日上游成本"}${hasFixed ? "、固定成本" : ""}折线图${showProfit ? "，以及每日净利柱状图" : ""}，可用左右方向键逐日查看`}
         onPointerMove={onPointerMove}
         onPointerLeave={() => setHover(null)}
         onKeyDown={onKeyDown}
@@ -300,7 +324,7 @@ function TrendChart({
                   {e.name}
                 </text>
               ))}
-              {!showRev && xLabels(HL)}
+              {!showProfit && xLabels(HL)}
               {hover != null && (
                 <>
                   <line className="cross" x1={x} x2={x} y1={T} y2={HL - BL} />
@@ -314,7 +338,7 @@ function TrendChart({
             </svg>
           )}
         </div>
-        {showRev && (
+        {showProfit && (
           <>
             <div className="jy-chart-sub">
               <h3>每日净利</h3>
@@ -385,8 +409,22 @@ function TrendChart({
   );
 }
 
-function TrendTable({ rows, showRev, asOfText }: { rows: Row[]; showRev: boolean; asOfText?: string | null }) {
+// showCost=false：只有日期和收入两列，也不写合计行（收入合计在同页的利润等式里，同一个数一页只出现一次）
+function TrendTable({
+  rows,
+  showRev,
+  showCost,
+  revApprox,
+  asOfText,
+}: {
+  rows: Row[];
+  showRev: boolean;
+  showCost: boolean;
+  revApprox: boolean;
+  asOfText?: string | null;
+}) {
   const approx = rows.some((r) => r.missing || r.partial);
+  const revAll = approx || revApprox;
   const sum = (f: (r: Row) => number | null) => round2(rows.reduce((a, r) => a + (f(r) || 0), 0));
   const rev = showRev ? sum((r) => r.rev) : null;
   const cost = sum((r) => r.cost);
@@ -402,10 +440,14 @@ function TrendTable({ rows, showRev, asOfText }: { rows: Row[]; showRev: boolean
           <tr>
             <th scope="col">日期</th>
             {showRev && <th scope="col" className="r">收入</th>}
-            <th scope="col" className="r">上游成本</th>
-            {showRev && <th scope="col" className="r">毛利</th>}
-            <th scope="col" className="r">固定成本</th>
-            {showRev && <th scope="col" className="r">净利</th>}
+            {showCost && (
+              <>
+                <th scope="col" className="r">上游成本</th>
+                {showRev && <th scope="col" className="r">毛利</th>}
+                <th scope="col" className="r">固定成本</th>
+                {showRev && <th scope="col" className="r">净利</th>}
+              </>
+            )}
           </tr>
         </thead>
         <tbody>
@@ -415,24 +457,30 @@ function TrendTable({ rows, showRev, asOfText }: { rows: Row[]; showRev: boolean
             .map((r) => (
               <tr key={r.date}>
                 <td>{dayTitle(r, asOfText)}</td>
-                {showRev && <td className="r">{formatMoney(r.rev)}</td>}
-                <td className="r">{r.cost == null ? <span className="jy-muted">数据缺失</span> : formatMoney(r.cost, { approx: r.partial })}</td>
-                {showRev && <td className="r">{maybe(r.gross, r.partial)}</td>}
-                <td className="r">{formatMoney(r.fixed)}</td>
-                {showRev && <td className="r">{maybe(r.profit, r.partial)}</td>}
+                {showRev && <td className="r">{formatMoney(r.rev, { approx: revApprox })}</td>}
+                {showCost && (
+                  <>
+                    <td className="r">{r.cost == null ? <span className="jy-muted">数据缺失</span> : formatMoney(r.cost, { approx: r.partial })}</td>
+                    {showRev && <td className="r">{maybe(r.gross, r.partial || revApprox)}</td>}
+                    <td className="r">{formatMoney(r.fixed)}</td>
+                    {showRev && <td className="r">{maybe(r.profit, r.partial || revApprox)}</td>}
+                  </>
+                )}
               </tr>
             ))}
         </tbody>
-        <tfoot>
-          <tr>
-            <th scope="row">合计 {rows.length} 天</th>
-            {showRev && <td className="r">{formatMoney(rev)}</td>}
-            <td className="r">{formatMoney(cost, { approx })}</td>
-            {showRev && <td className="r">{formatMoney(gross, { approx })}</td>}
-            <td className="r">{formatMoney(fixed)}</td>
-            {showRev && <td className="r">{formatMoney(profit, { approx })}</td>}
-          </tr>
-        </tfoot>
+        {showCost && (
+          <tfoot>
+            <tr>
+              <th scope="row">合计 {rows.length} 天</th>
+              {showRev && <td className="r">{formatMoney(rev, { approx: revApprox })}</td>}
+              <td className="r">{formatMoney(cost, { approx })}</td>
+              {showRev && <td className="r">{formatMoney(gross, { approx: revAll })}</td>}
+              <td className="r">{formatMoney(fixed)}</td>
+              {showRev && <td className="r">{formatMoney(profit, { approx: revAll })}</td>}
+            </tr>
+          </tfoot>
+        )}
       </table>
     </div>
   );

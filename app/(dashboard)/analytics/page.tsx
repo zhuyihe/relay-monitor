@@ -327,7 +327,8 @@ export default function AnalyticsPage() {
 
       <Equation dv={dv} snap={snap} caption={windowCaption} extra={archiveToggle} href30={href30} onRetry={retry} />
 
-      <TrendPanel rows={dv.rows} showRev={dv.hasIncome} asOf={asOf} tz={tz} />
+      {/* 收入是估算（没设置售价、按占比分到每天）时，趋势图和表格里的收入也带「≈」，和等式同一个判断 */}
+      <TrendPanel rows={dv.rows} showRev={dv.hasIncome} revApprox={dv.revenueApprox} asOf={asOf} tz={tz} />
 
       <div className="jy-grid-2 jy-grid-even">
         <MixPanel dv={dv} />

@@ -522,28 +522,28 @@ export default function UsagePage() {
 
       {/* 合计：总 Token / 上游成本 / 请求数 / 读到的上游 */}
       <Panel label={COPY.totalsLabel} foot={TOKEN_NOTE}>
-        <dl className="jy-usage-kpis">
+        <dl className="jy-kpis">
           <div>
             <dt>{COPY.totalToken}</dt>
-            <dd className="jy-usage-figure">{figure(formatCompact(agg.totTokens))}</dd>
+            <dd className="jy-kpi-figure">{figure(formatCompact(agg.totTokens))}</dd>
             {!allFailed && <dd className="jy-caption">{COPY.exact(formatInt(agg.totTokens))}</dd>}
           </div>
           <div>
             <dt>{costLabel}</dt>
-            <dd className="jy-usage-figure">{figure(formatUnitPrice(agg.totCost))}</dd>
+            <dd className="jy-kpi-figure">{figure(formatUnitPrice(agg.totCost))}</dd>
             {!allFailed && agg.rateUnset > 0 && <dd className="jy-caption">{COPY.rateUnset(agg.rateUnset)}</dd>}
             {!allFailed && agg.sellPriceUnset && <dd className="jy-caption">{SELL_PRICE_UNSET}</dd>}
           </div>
           <div>
             <dt>{COPY.requests}</dt>
-            <dd className="jy-usage-figure">{figure(formatCompact(agg.totReqs))}</dd>
+            <dd className="jy-kpi-figure">{figure(formatCompact(agg.totReqs))}</dd>
             {!allFailed && agg.totReqs >= 1e4 && <dd className="jy-caption">{COPY.exact(formatInt(agg.totReqs))}</dd>}
           </div>
           <div>
             <dt>{COPY.sources}</dt>
-            <dd className="jy-usage-figure">
+            <dd className="jy-kpi-figure">
               {agg.okSts.length}
-              <span className="jy-usage-unit">{COPY.sourcesOf(agg.sts.length)}</span>
+              <span className="jy-kpi-unit">{COPY.sourcesOf(agg.sts.length)}</span>
             </dd>
             {/* 读不到的个数在下面那一行说，这里不重复（ui-copy-spec §8.4） */}
           </div>
