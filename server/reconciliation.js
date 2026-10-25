@@ -32,7 +32,7 @@ import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
-import { SETTLE_LOOKBACK_MS, isSettleableWindow, isSettledAt, settlementOutcome, settlementPrecheck } from "../lib/reconciliation-settlement.js";
+import { SETTLE_LOOKBACK_MS, isSettleableWindow, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
@@ -321,7 +321,7 @@ function healthWithIssues(issues) {
 function storageFailedResult(rule, window, code) {
   const observedAt = Date.now();
   const channels = rule.channels.map((channel) => ({ ...channel, billingState: "unavailable", quotaUnits: null, amountUsd: null, knownAmountUsd: null }));
-  const issue = { code, scope: code === "HISTORY_UNAVAILABLE" ? "history" : "persistence", detail: issueText(code), observedAt };
+  const issue = { code, scope: code === "HISTORY_UNAVAILABLE" ? "history" : code === "PERSISTENCE_FAILED" ? "persistence" : "upstream", detail: issueText(code), observedAt };
   return {
     rule, window, requestedWindow: window, lastSuccessfulWindow: null, currentSegment: null, segments: [], transitionSegments: [],
     upstream: { state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null, successfulCount: 0, expectedCount: 1, observedAt, window },
@@ -438,6 +438,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const lookbackFrom = (rt._reconciliationLookbackFrom ??= Date.now() + lookbackDelayMs);
   // 修正过切换时间的规则：下一次结账昨天时重新取数，写一份新的结账记录。
   const resettles = (rt._reconciliationResettles ||= new Set());
+  // 重结昨天没成时，下次什么时候再试（账本里已有这天，状态表不记；C2b 把重结请求挪进状态表以后删掉）
+  const resettleRetryAt = (rt._reconciliationResettleRetryAt ||= new Map());
   // 轮询省请求和写入（计划 P1a）：
   //   ownActivity：每个自营站点上一轮查「全站有没有新的消费」的时刻，和从什么时候起一直没有新的消费（quietFrom）
   //   ownRevenueCache：今天每段窗口最近一次读全的渠道收费（读到哪一刻为止），全站没有新的消费时直接沿用
@@ -526,8 +528,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettle: resettle || state?.resettleRequestedAt != null, trigger });
     } catch (err) {
       if (err?.code === "RULE_NOT_FOUND") throw err;
-      const code = ["PERSISTENCE_FAILED", "HISTORY_UNAVAILABLE"].includes(err?.code) ? err.code : "UPSTREAM_DATA_UNAVAILABLE";
-      result = storageFailedResult(rule, window, code);
+      const known = ["PERSISTENCE_FAILED", "HISTORY_UNAVAILABLE"].includes(err?.code);
+      if (!known) {
+        // 认不出的异常（程序出错、数据库错）：记日志；手动的照旧抛给页面，轮询的按读不到退避再试
+        console.error("结账出错:", err?.message || String(err));
+        if (origin === "manual") throw err;
+      }
+      result = storageFailedResult(rule, window, known ? err.code : "UPSTREAM_DATA_UNAVAILABLE");
     }
     if (result === STALE_SCOPE || !billDate) return result;
     const outcome = settlementOutcome({ window, result, now: Date.now(), state, origin, sourceVersion: ownerRegistry.billingSource.version });
@@ -1192,7 +1199,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // evaluate：只读已持久化的分段和锚定状态来计算，不写库、不通知；页面查询都走这条。
   // settle：结一个已经结束的日子（轮询回看和手动「重新读取」都走这条，计划 C2a）。强制重取，用已存的分段；
   //   不写分段、渠道状态、观测快照，不发告警；只按 settlementOutcome 写账本（多日写确认快照），结成了在同一个事务里删掉状态表那一行。
-  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle = false, trigger = null } = {}) {
+  // probe（只配 settle）：要人处理的日子到了重判的时刻，只走一遍取数前的判断，不取账单、不写库，返回 { probe: true, blocker }（计划 C2a 2.3）
+  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle = false, trigger = null, probe = false } = {}) {
     const settle = mode === "settle";
     const observe = mode !== "evaluate";
     if (settle) force = true;
@@ -1203,7 +1211,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const requestCredential = currentSourceCredential(firstRule);
     const requestBilling = ownerRegistry.billingSource;
     const evaluateKey = isLiveReconciliationPreset(window.preset) ? `${cacheKey}:${window.endMs}:${requestCredential}:${requestBilling.ownerVersion}` : `${cacheKey}:${requestCredential}:${requestBilling.ownerVersion}`;
-    const inflightKey = observe ? `${evaluateKey}:${settle ? "settle" : "observe"}${resettle ? ":resettle" : ""}` : evaluateKey;
+    const inflightKey = observe ? `${evaluateKey}:${settle ? (probe ? "probe" : "settle") : "observe"}${resettle ? ":resettle" : ""}` : evaluateKey;
     const ttl = resultTtl(window);
     const cached = resultCache.get(cacheKey);
     if (!force && (!observe || cached?.observed) && cached?.sourceCredential === requestCredential
@@ -1215,6 +1223,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 只读计算可以等同一窗口正在进行的观测；观测不能借只读计算的结果跳过写库。
     if (inflight.has(inflightKey)) return inflight.get(inflightKey);
     if (!observe && inflight.has(`${evaluateKey}:observe`)) return inflight.get(`${evaluateKey}:observe`);
+    // 轮询正在结这一天时，只读计算也等它（结出来的就是账本里那一版）
+    if (!observe && inflight.has(`${evaluateKey}:settle`)) return inflight.get(`${evaluateKey}:settle`);
 
     const inspectScope = async (rule, generation, billingSource, request) => {
       if (billingSourceState().version !== billingSource.version) return STALE_SCOPE;
@@ -1226,7 +1236,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const financialSnapshot = ratesFor({ own, upstream });
       let sourceCredential = observationCredential(rule, upstream, own);
       request.sourceCredential = sourceCredential;
-      if (settlementPrecheck({ window, now: Date.now(), resettle }).readSettled) {
+      if (!probe && settlementPrecheck({ window, now: Date.now(), resettle }).readSettled) {
         const settled = await settledResult(rule, window);
         if (settled) return settled;
       }
@@ -1310,10 +1320,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           };
         } catch { return null; }
       };
-      const unavailable = async (resultHealth, evidence = {}, save = true) => persistUnavailable(rule, window, resultHealth, origin, {
+      const unavailable = async (resultHealth, evidence = {}, save = true) => probe ? { probe: true, blocker: resultHealth.code } : persistUnavailable(rule, window, resultHealth, origin, {
         ...evidence,
         downstream: evidence.downstream ?? await downstreamEvidence(),
-      }, generation, sourceCredential, billingSource, { save: save && observe && !settle, settle });
+      }, generation, sourceCredential, billingSource, { save: save && observe && !settle });
       // 成本计法在下面这些提前返回之前就定：固定成本的毛利不看上游，上游一侧读不到（读不到账单、Key 用不了、
       // 目录或身份读不到、上游身份变了）时不挡，记成上游侧的参考问题，跳过上游、只取本站接着算。
       // 本站一侧（来源没确认、渠道重复、本站读不到、没分段）照旧挡；没锚定过的也照旧挡，免得以后锚到别人的 Key 上。
@@ -1356,7 +1366,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (upstreamChanged && upstreamOptional) upstreamProblem ||= health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"));
       let identityIssue = !ownSource || (upstreamChanged && !upstreamOptional) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource.namespaceKey)
         ? health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")) : null;
-      if (!identityIssue && !anchored && !observe) {
+      // 结账（settle）和只读计算一样不锚定：锚定是今天的观测做的事，结账只写账本和状态行（计划 C2a 2.5）
+      if (!identityIssue && !anchored && (!observe || settle)) {
         // 还没观测过就没有可靠口径，取上下游账单也只是白跑一趟。
         if (!identityIssues.has(rule.id)) return pendingResult(rule, window, issueText("PENDING"));
         identityIssue = identityIssues.get(rule.id);
@@ -1388,8 +1399,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // id 相同的 Key 是别人的。Key 名用绑定上存的；面板类型按绑定存的，旧绑定没存就按上游站点的类型
       const evidenceMetadata = upstreamProblem ? null : metadata, evidenceToken = upstreamProblem ? null : token;
       if (identityIssue) {
-        const upstreamEvidence = evidenceToken && (!rule.canonicalKey || rule.canonicalKey === actualKey)
-          ? await upstreamWindowFor(upstream, evidenceMetadata, evidenceToken, window, { readOnly: !observe }).catch(() => null) : null;
+        const upstreamEvidence = !probe && evidenceToken && (!rule.canonicalKey || rule.canonicalKey === actualKey)
+          ? await upstreamWindowFor(upstream, evidenceMetadata, evidenceToken, window, { readOnly: !observe || settle }).catch(() => null) : null;
         return unavailable(identityIssue, { metadata: evidenceMetadata, token: evidenceToken, upstream: upstreamEvidence }, false);
       }
       const canonicalKey = upstreamProblem ? rule.canonicalKey : canonicalBillingKey(upstream, metadata, token.id);
@@ -1456,6 +1467,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 修改关联后的过渡期，修改之前的未结账时段也按当前配置计算，结果带 scope.recalculated 标记。
       const clipped = isScopedBillingPolicy(rule.billingPolicy) ? accountingWindow(rule, window, platform) : window;
       const applicable = isScopedBillingPolicy(rule.billingPolicy) ? (clipped ? [{ segment: currentSegment, segmentWindow: clipped }] : []) : intersecting;
+      // probe 到这里为止：取数前能判断的都判断完了，还挡着的要人处理的原因交回去，不读渠道、不取账单
+      if (probe) return { probe: true, blocker: issues.find((issue) => CALCULATION_BLOCKERS.has(issue.code) && !issue.reference && reasonKindOf(issue.code) !== "retry")?.code ?? null };
       let catalogue = null;
       try { if (ownAvailable) catalogue = await ownChannelsFor(own, { force }); } catch {
         issues.push({ code: "SALES_CHANNEL_STATE_UNKNOWN", scope: "channels", detail: "渠道状态暂时读不到", observedAt: Date.now() });
@@ -1489,7 +1502,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const [upstreamResult, downstreamResult] = await Promise.all([
           // 上游读不到（只有固定成本会走到这里）：不取上游，问题已经在上面记了一次
           upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
-            : upstreamWindowFor(upstream, metadata, token, segmentWindow, { readOnly: !observe }).catch((error) => ({ error })),
+            : upstreamWindowFor(upstream, metadata, token, segmentWindow, { readOnly: !observe || settle }).catch((error) => ({ error })),
           (ownAvailable
             ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue })
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
@@ -1692,6 +1705,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           if (billingSourceState().version !== billingSource.version) return STALE_SCOPE;
           throw error;
         });
+        if (value?.probe) return value;
         if (value !== STALE_SCOPE && (ruleGenerations.get(ruleId) || 0) === generation
           && currentSourceCredential(rule) === request.sourceCredential && billingSourceState().version === billingSource.version) {
           if (value.health.code !== "PENDING") cacheResult(cacheKey, value, request.sourceCredential, billingSource.ownerVersion, observe);
@@ -1891,6 +1905,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const save = async () => {
       // 没变不写，但守卫照样过一遍（口径、凭据代次没变才算写过）
       if (unchangedObservation) return guard();
+      // 结账没成：没有要写的快照也不记账，不开事务、不加锁，只过守卫（状态行由 settleDay 另写）
+      if (settle && !rows.length && !ledgerOption) return guard();
       const saved = await repository.saveSnapshotsForScope(rule.id, scopeFingerprint, rows, {
         expectedOwnerState: billingSource?.ownerRules ? reconciliationOwnerScope(billingSource.ownerRules, rule.tokenId) : null, guard, ledger: ledgerOption,
         // 这天结成了：同一个事务里删掉结账状态表那一行
@@ -2073,7 +2089,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // upstreams 是这一轮会结账的上游，refreshDue 在读 Key 目录和身份之前把它们记进 staleMetadata 全部重读（计划 P1b）；
   // 回看只给这些上游结：昨天要结的上游，加上按顺序排在预算以内的那几天的上游，没重读过的上游留到下一轮
   async function planSettlement(rules, now) {
-    const plan = { yesterday: [], older: [], upstreams: new Set() };
+    const plan = { yesterday: [], older: [], recheck: [], upstreams: new Set() };
     if (!rules.length) return plan;
     const ruleIds = rules.map((rule) => rule.id);
     let states, ledgerDays;
@@ -2089,9 +2105,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         let window;
         try { window = completedDayWindow(rule, back, now); } catch { break; }
         const billDate = billDayOf(window), key = `${rule.id}|${billDate}`, state = stateOf.get(key) || null;
-        const resettle = back === 1 && resettles.has(rule.id);
+        const resettle = back === 1 && resettles.has(rule.id) && !(resettleRetryAt.get(rule.id) > now);
         const { action } = settlementPrecheck({ rule, window, now, state, resettle, ledgerHasDay: booked.has(key), sourceVersion });
         if (action === "settled" && state) repository.deleteSettlementState(rule.id, billDate).catch(() => {});
+        // 要人处理、到了重判的时刻：不进 upstreams（不为它强制重读），settleDue 拿这一轮的目录和身份在本地重判
+        if (action === "recheck") plan.recheck.push({ rule, window, state });
         if (action !== "due") continue;
         (back === 1 ? plan.yesterday : plan.older).push({ rule, window, state, resettle, requested: state?.resettleRequestedAt != null, trigger: back === 1 ? null : "late" });
       }
@@ -2106,10 +2124,24 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return plan;
   }
 
-  async function settleDue({ yesterday, older, budget }, ownerRegistry) {
+  async function settleDue({ yesterday, older, recheck = [], budget }, ownerRegistry) {
+    const sourceVersion = ownerRegistry.billingSource.version;
+    await mapWithConcurrency(recheck, MAX_CONCURRENT_RULES, async ({ rule, window, state }) => {
+      let probed;
+      try { probed = await inspectRule(rule.id, window, { mode: "settle", probe: true, origin: "poll", ownerRegistry }); } catch (err) {
+        if (err?.code !== "RULE_NOT_FOUND") console.error("重判结账状态失败:", err?.message || String(err));
+        return;
+      }
+      if (!probed?.probe) return;
+      const next = settlementRecheck({ window, state, blocker: probed.blocker, now: Date.now(), sourceVersion });
+      try { await repository.recordSettlementState(rule.id, billDayOf(window), next); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
+    });
     const settle = async ({ rule, window, state, resettle, trigger }) => {
       const result = await settleDay(rule, window, { origin: "poll", ownerRegistry, state, resettle, trigger }).catch(() => null);
-      if (resettle && result?.calculation?.profitUsd != null) resettles.delete(rule.id);
+      if (resettle) {
+        if (result?.calculation?.profitUsd != null) { resettles.delete(rule.id); resettleRetryAt.delete(rule.id); }
+        else resettleRetryAt.set(rule.id, Date.now() + settleRetryDelayMs(1, { window, now: Date.now() }));
+      }
       return result;
     };
     await mapWithConcurrency(yesterday, MAX_CONCURRENT_RULES, settle);
@@ -2308,15 +2340,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           try { unaccountedUpstream = await unaccountedUpstreamFor(response, input, now); } catch { /* 账号级对比只是参考，不能拖垮核算结果 */ }
           return { ...response, unaccountedUpstream };
         };
+        // 手动重新读取已经结束的整天时，这几条绑定的状态行一次读出来（不按绑定逐条查）
+        let manualStatesRead = null;
+        const manualStates = () => (manualStatesRead ||= repository.listSettlementStates(selected.map((rule) => rule.id)).catch(() => []));
         const results = await mapWithConcurrency(selected, MAX_CONCURRENT_RULES, (rule) => {
           // 今天、近 7 天、本月截至取数时刻：规则排队轮到时才定截止点（同 refreshDue），排队久了 Sub2API 实时区间也不会过旧。
           const live = isLiveReconciliationPreset(input.preset);
           const window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, live ? Math.max(now, Date.now()) : now);
           // 手动「重新读取」一个已经结束的整天：走结账（settle），和轮询回看同一条路；结不成只更新原因，不推后自动的退避（计划 C2a 2.5）
-          const manualSettle = options.mode === "observe" && attempt === 1 && billDayOf(window) && isSettleableWindow(window, Date.now());
+          const manualSettle = options.mode === "observe" && billDayOf(window) && isSettleableWindow(window, Date.now());
           if (manualSettle) {
-            return repository.listSettlementStates([rule.id]).catch(() => [])
-              .then((states) => settleDay(rule, window, { origin: "manual", ownerRegistry, state: states.find((item) => item.billDate === billDayOf(window)) || null }))
+            return manualStates()
+              .then((states) => settleDay(rule, window, { origin: "manual", ownerRegistry,
+                state: states.find((item) => item.ruleId === rule.id && item.billDate === billDayOf(window)) || null }))
               .catch((err) => { if (err?.code === "RULE_NOT_FOUND") return null; throw err; });
           }
           return inspectRule(rule.id, window, { ...(attempt === 1 ? options : { ...options, force: false }), ownerRegistry }).catch((err) => {
