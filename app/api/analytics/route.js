@@ -9,7 +9,7 @@ import {
 } from "../../../lib/business-time.js";
 import { amortizeFixedCost, costBasisOf, countsInProfit, purchasesOf, rateSnapshotOf } from "../../../lib/profit.js";
 import { hasRawWindowCoverage, summarizeCoverage } from "./coverage.js";
-import { readPointsWithBaseline, usageDrops } from "../../../db/history.js";
+import { forEachPointWithBaseline, usageDropsAccumulator } from "../../../db/history.js";
 
 const r2 = (v) => Math.round(v * 100) / 100;
 const r4 = (v) => Math.round(v * 10000) / 10000;
@@ -37,36 +37,37 @@ function heatSource(rt, stationIds, startMs, nowMs, tz) {
   return value;
 }
 
-// 窗口里的原始快照只读一次，外加每站窗口开始前的最后一个点（db/history.js 的 readPointsWithBaseline，只扫窗口）：
-// 哪几天有快照、每个 15 分钟的余额下降都从这一份算。原来每个点做一次相关子查询找前一个点，会把整段历史读一遍。
+// 窗口里的原始快照只读一次，外加每站窗口开始前的最后一个点（db/history.js 的 forEachPointWithBaseline，只扫窗口）：
+// 边读边算哪几天有快照、每个 15 分钟的余额下降，不把两百多万行留在内存里。
+// 原来每个点做一次相关子查询找前一个点，会把整段历史读一遍。
 async function readHeatSource(pool, stationIds, startMs, nowMs, tz) {
-  const points = await readPointsWithBaseline(pool, stationIds, startMs);
   const rawDates = new Set();
-  let lastSlot = null, lastDay = null;
-  for (const row of points) {
-    const t = Number(row.t);
-    if (t < startMs || t > nowMs) continue;
-    const slot = Math.floor(t / SLOT_MS);
-    // 同一个 15 分钟里的点同一天，不逐点换算日期
-    if (slot !== lastSlot) { lastSlot = slot; lastDay = dayKeyInTz(slot * SLOT_MS, tz); }
-    rawDates.add(`${row.station_id}|${lastDay}`);
-  }
-  const rawDateRows = [...rawDates].map((key) => {
-    const cut = key.lastIndexOf("|");
-    return { stationId: key.slice(0, cut), date: key.slice(cut + 1) };
-  });
-  // 每个 15 分钟里的余额下降（窗口开始以后的点，含窗口里第一个点相对基线的下降），按业务时区的「星期 × 24 + 小时」
-  // 加到这个上游的 168 格里（乘汇率之前的美元）。缓存的只是这一层：每个上游一个 168 格的定长数组，51 个上游约 70 KB。
+  // 每个 15 分钟算完就按业务时区的「星期 × 24 + 小时」加到这个上游的 168 格里（乘汇率之前的美元），不留各个时段。
   // cells 记下各格第一次出现的先后，请求时按这个顺序出结果，和原来按时段逐个累加时的顺序一样。
   const hours = new Map(), cells = [], seen = new Set();
-  for (const { stationId, bucket: slot, usd } of usageDrops(points, startMs, Number.MAX_SAFE_INTEGER, (t) => Math.floor(t / SLOT_MS)).values()) {
-    if (!(usd > 0)) continue;
+  const slotDrops = usageDropsAccumulator(startMs, Number.MAX_SAFE_INTEGER, (t) => Math.floor(t / SLOT_MS), { onBucket: ({ stationId, bucket: slot, usd }) => {
+    if (!(usd > 0)) return;
     const { weekday, hour } = weekdayHourInTz(slot * SLOT_MS, tz);
     const cell = weekday * 24 + hour;
     if (!seen.has(cell)) { seen.add(cell); cells.push(cell); }
     if (!hours.has(stationId)) hours.set(stationId, new Float64Array(168));
     hours.get(stationId)[cell] += usd;
-  }
+  } });
+  let lastSlot = null, lastDay = null;
+  await forEachPointWithBaseline(pool, stationIds, startMs, Number.MAX_SAFE_INTEGER, (row) => {
+    slotDrops.add(row);
+    const t = Number(row.t);
+    if (t < startMs || t > nowMs) return;
+    const slot = Math.floor(t / SLOT_MS);
+    // 同一个 15 分钟里的点同一天，不逐点换算日期
+    if (slot !== lastSlot) { lastSlot = slot; lastDay = dayKeyInTz(slot * SLOT_MS, tz); }
+    rawDates.add(`${row.station_id}|${lastDay}`);
+  });
+  slotDrops.finish();
+  const rawDateRows = [...rawDates].map((key) => {
+    const cut = key.lastIndexOf("|");
+    return { stationId: key.slice(0, cut), date: key.slice(cut + 1) };
+  });
   return { rawDateRows, hours, cells };
 }
 
