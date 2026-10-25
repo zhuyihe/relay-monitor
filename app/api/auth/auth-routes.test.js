@@ -27,12 +27,16 @@ async function route(path) {
 
 const post = (path, body) => new Request(`https://local.test${path}`, { method: "POST", body: JSON.stringify(body) });
 // reserveLoginAttempt 的桩和真实 SessionManager 同一套规则：先判断锁没锁、全站顶没顶（可豁免），再占位；
-// 只有占住位的那次调用才「跑密码校验」，调用方登录成功时调 release() 退回——calls 只记 reserve/release，不记被拒绝的
-const sessions = (locked = false, { siteLimited = false, trustedDevice = false } = {}) => {
+// 只有占住位的那次调用才「跑密码校验」，调用方登录成功时调 release() 退回——calls 只记 reserve/release，不记被拒绝的。
+// sessionVersion 固定是 1；staleDevice 模拟改密码/改用户名以后旧设备 Cookie 版本对不上当前凭证的情况（安全审核 10-25 低-1）
+const sessions = (locked = false, { siteLimited = false, trustedDevice = false, staleDevice = false } = {}) => {
   const calls = [];
   return {
     calls,
-    verify: (token, { device = false } = {}) => (device && trustedDevice ? { t: "device", exp: Infinity } : null),
+    verify: (token, { device = false } = {}) => {
+      if (!device || !trustedDevice) return null;
+      return { t: "device", v: staleDevice ? "old-version" : 1, exp: Infinity };
+    },
     reserveLoginAttempt: (ip, { exemptSiteLimit = false } = {}) => {
       if (locked) return null;
       if (!exemptSiteLimit && siteLimited) return null;
@@ -112,6 +116,15 @@ test("登录：全站上限顶住时也是 429 带 LOGIN_RATE_LIMITED，不跑�
   assert.deepEqual(trustedLockedRt.sessions.calls, []);
 });
 
+test("登录：设备 Cookie 的版本和当前凭证对不上（改过密码或用户名）时不再豁免全站上限（安全审核 10-25 低-1）", async () => {
+  const { POST } = await route("./login/route.js");
+  const staleRt = { store: store(), sessions: sessions(false, { siteLimited: true, trustedDevice: true, staleDevice: true }) };
+  const res = await POST(post("/api/auth/login", { username: "admin", password: "right" }), staleRt);
+  assert.equal(res.status, 429);
+  assert.deepEqual(await res.json(), { error: errorText({ code: "LOGIN_RATE_LIMITED" }), code: "LOGIN_RATE_LIMITED" });
+  assert.deepEqual(staleRt.sessions.calls, [], "版本对不上，当作没有设备 Cookie 处理");
+});
+
 test("登录成功：会话 Cookie 和设备 Cookie 各发一条，不是合并成一条", async () => {
   const { POST } = await route("./login/route.js");
   const rt = { store: store(), sessions: sessions() };
@@ -126,21 +139,39 @@ test("退出登录：只清会话 Cookie，不碰设备 Cookie——这台浏览
   assert.deepEqual(res.headers.getSetCookie(), ["sid="]);
 });
 
-test("改密码：原密码不对带 WRONG_PASSWORD，新密码太短带 PASSWORD_TOO_SHORT，都是 400，不改密码", async () => {
+test("改密码：原密码不对带 WRONG_PASSWORD，新密码太短带 PASSWORD_TOO_SHORT，都是 400，不改密码；只管新设的密码，11 位拒绝、12 位能过（用户 10-25 定，最短提到 12 位）", async () => {
   const { POST } = await route("./password/route.js");
   const changes = [];
   const rt = { store: store({ setPassword: async (...args) => changes.push(args) }), sessions: sessions() };
-  const wrong = await POST(post("/api/auth/password", { oldPassword: "nope", newPassword: "long-enough" }), rt);
+  const wrong = await POST(post("/api/auth/password", { oldPassword: "nope", newPassword: "long-enough-password" }), rt);
   assert.equal(wrong.status, 400);
   assert.deepEqual(await wrong.json(), { error: errorText({ code: "WRONG_PASSWORD" }), code: "WRONG_PASSWORD" });
-  const short = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: "12345" }), rt);
+  // 11 位：拒绝
+  const short = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: "12345678901" }), rt);
   assert.equal(short.status, 400);
   assert.deepEqual(await short.json(), { error: errorText({ code: "PASSWORD_TOO_SHORT" }), code: "PASSWORD_TOO_SHORT" });
   assert.deepEqual(changes, []);
 
-  const ok = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: "123456", username: " boss " }), rt);
+  // 正好 12 位：能过
+  const ok = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: "123456789012", username: " boss " }), rt);
   assert.equal(ok.status, 200);
-  assert.deepEqual(changes, [["boss", "123456"]]);
+  assert.deepEqual(changes, [["boss", "123456789012"]]);
   assert.equal(errorText({ code: "WRONG_PASSWORD" }), "原密码不对");
-  assert.equal(errorText({ code: "PASSWORD_TOO_SHORT" }), "新密码至少 6 位");
+  assert.equal(errorText({ code: "PASSWORD_TOO_SHORT" }), "新密码至少 12 位");
+});
+
+test("改密码成功：响应里连同清会话 Cookie 一起，给当前浏览器发一张按新凭证签的设备 Cookie（安全审核 10-25 低-1）", async () => {
+  const { POST } = await route("./password/route.js");
+  const rt = { store: store({ setPassword: async () => {} }), sessions: sessions() };
+  const res = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: "123456789012" }), rt);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.headers.getSetCookie(), ["sid=", "dev=device-token"]);
+});
+
+test("改密码：只管新设的密码，用老的 6 位短密码登录的账号照样能登录（不追溯检查已有密码）", async () => {
+  const { POST } = await route("./login/route.js");
+  const rt = { store: store(), sessions: sessions() };
+  // 登录路由不导入、不检查 MIN_PASSWORD_LENGTH，密码对不对只看 verifyPassword；这里的桩密码「right」只有 5 位，照样算对
+  const res = await POST(post("/api/auth/login", { username: "admin", password: "right" }), rt);
+  assert.equal(res.status, 200);
 });

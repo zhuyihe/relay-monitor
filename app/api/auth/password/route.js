@@ -15,8 +15,12 @@ export const POST = withAuth(async (request, rt) => {
     return fail("PASSWORD_TOO_SHORT");
   }
   await rt.store.setPassword(username ? String(username).trim() : undefined, String(newPassword));
-  // 会话版本绑定凭证哈希；改密后旧 Cookie 均不再可用。
+  // 会话版本绑定凭证哈希；改密后旧会话 Cookie 均不再可用，要重新登录。
+  // 设备 Cookie 的版本也绑同一个凭证，这台浏览器刚验证过原密码，给它发一张按新凭证签的设备 Cookie：
+  // 重新登录时这台浏览器还认得（不用再打一次全站上限），换一台没登录过的设备照样认不出旧的（安全审核 10-25 低-1）
+  const secure = requestIsSecure(request);
   const res = json({ ok: true, reauthenticate: true });
-  res.headers.set("Set-Cookie", rt.sessions.clearCookieHeader(requestIsSecure(request)));
+  res.headers.append("Set-Cookie", rt.sessions.clearCookieHeader(secure));
+  res.headers.append("Set-Cookie", rt.sessions.deviceCookieHeader(rt.sessions.issueDevice(rt.sessions.sessionVersion(rt.store.auth)), secure));
   return res;
 });
