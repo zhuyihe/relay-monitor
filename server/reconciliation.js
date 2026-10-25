@@ -812,7 +812,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       consumeLogReads.set(own.id, next);
       if (status.state === "on" || status.state === "off") {
         const latestLogMs = ownActivity.get(own.id)?.latest?.createdAtSec != null ? ownActivity.get(own.id).latest.createdAtSec * 1000 - CONSUME_LOG_LOOKBACK_MS : null;
-        const offFromMs = Math.max(previous?.lastOnAt ?? -Infinity, latestLogMs ?? -Infinity);
+        // 上一次读到开着就在一个读取间隔以内：起点只用它（站点的钟快，最新一条日志的时刻会比它晚，取晚了会漏标前面几分钟）；
+        // 没有、或者太旧（重启、停机以后）才看最新一条日志的时刻往前 120 秒，取较晚的
+        const recentOn = previous?.lastOnAt != null && at - previous.lastOnAt <= 2 * CONSUME_LOG_READ_MS;
+        const offFromMs = recentOn ? previous.lastOnAt : Math.max(previous?.lastOnAt ?? -Infinity, latestLogMs ?? -Infinity);
         const periods = applyConsumeLogReading(upstreamStation(own.id)?.consumeLogOffPeriods ?? own.consumeLogOffPeriods, { state: status.state, at },
           { offFromMs: Number.isFinite(offFromMs) ? offFromMs : null });
         if (periods) {

@@ -8294,6 +8294,43 @@ test("R2「重新检查」按钮每次都真读（用户刚去后台打开、30 
   assert.ok(optionReads(f) - reads <= 1, "并发的合成一次");
 });
 
+test("R2 关着的段从哪起算：重启以后（内存里没有读到开着的时刻）取最新一条日志往前 120 秒；站点的钟快时只用上一次读到开着的时刻，不取晚（审核第一轮 中-6、低-5）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  f.state.latestLogProbe = true;
+  const own = () => f.rt.store.get("own"), periods = () => own().consumeLogOffPeriods ?? [];
+  const sec = (ms) => Math.floor(ms / 1000);
+  // 重启以后第一次就读到关着：最新一条消费日志在 1 小时前，起点 = 它往前 120 秒
+  const lastLogMs = now - 3600000;
+  f.state.testLogs.push({ id: 1, channel: 1, quota: 1, created_at: sec(lastLogMs), token_name: "k", username: "root" });
+  f.state.consumeLog = "false";
+  await f.module.refreshDue(now);
+  assert.equal(periods()[0].fromMs, sec(lastLogMs) * 1000 - 120000, "起点取最新一条日志往前 120 秒");
+  // 站点的钟快 10 分钟：先开着读一轮（记下读到开着的时刻），一分钟后关了，最新一条日志的时刻比本机晚 10 分钟——起点不能取到它
+  f.rt.store.update("own", { consumeLogOffPeriods: [] });
+  f.state.consumeLog = "true";
+  now += 5 * 60000;
+  await f.module.recheckConsumeLog(own());
+  const onAt = now;
+  f.state.testLogs.push({ id: 2, channel: 1, quota: 1, created_at: sec(now + 600000), token_name: "k", username: "root" }); // 站点钟快 10 分钟
+  f.state.consumeLog = "false";
+  now += 60000;
+  await f.module.refreshDue(now);
+  await f.module.recheckConsumeLog(own());
+  assert.equal(periods().at(-1).fromMs, onAt, "钟快：起点是上一次读到开着的时刻，不是最新日志的时刻");
+});
+
+test("R2 还没开始统计的日子不被标成需处理（审核第一轮 中-7）：整天在开始统计之前，关着也不碰", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-05T00:00:00Z"), toMs: null }] });
+  const rule = f.rows.find((row) => row.id === "rr_live");
+  rule.billing_effective_from_ms = Date.parse("2026-10-08T16:00:00Z"); // 从今天 0 点起算
+  rule.created_at = new Date("2026-10-08T16:00:00Z");
+  const yesterday = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", ...COMPLETED_YESTERDAY }, { mode: "evaluate", origin: "page", force: true })).results[0];
+  assert.ok(!["OWN_CONSUME_LOG_OFF", "OWN_CONSUME_LOG_GAP"].includes(yesterday.health.code), `昨天在开始统计之前，不说关着：${yesterday.health.code}`);
+});
+
 test("R2 每 5 分钟读一次设置（轮询不强制）：5 分钟内几轮、几条绑定只读一次；设置里别的东西不进任何结果", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
