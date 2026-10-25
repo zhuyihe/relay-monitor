@@ -181,6 +181,41 @@ test("哪几天有原始快照：零点那一刻算新的一天，窗口起点�
   assert.equal(body.heatmapAvailability.available, false);
 });
 
+test("P0b 花费时段读出来的结果缓存 10 分钟：轮询不再每次读原始快照，汇率改了马上生效，过期、换窗口、换上游才重读", async (t) => {
+  let now = Date.UTC(2026, 9, 14, 4, 0); // 上海 10-14 12:00
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const startMs = Date.UTC(2026, 9, 7, 16); // 上海 10-08 00:00
+  const stations = [{ id: "u", name: "按量上游", type: "newapi", cnyPerUsd: 7 }];
+  let pointReads = 0;
+  const pool = { query: async (sql, params) => {
+    if (sql.includes("history_points") && sql.includes("MAX(t) AS t")) { pointReads += 1; return [params[1] === startMs ? [{ station_id: "u", t: startMs - 3600000, remaining: 100 }] : []]; }
+    if (sql.includes("history_points") && !sql.includes("MIN(t)")) {
+      const daily = (i, remaining) => ({ station_id: "u", t: startMs + i * 86400000 + 3600000, remaining });
+      return [[...Array.from({ length: 6 }, (_, i) => daily(i, 100)), { station_id: "u", t: Date.UTC(2026, 9, 13, 16, 30), remaining: 98 }, daily(6, 98)]];
+    }
+    if (sql.includes("MIN(t)")) return [[{ stationId: "u", earliestAt: startMs - 3600000, latestAt: now - 60000 }]];
+    return [[]];
+  } };
+  const rt = { pool, store: { list: () => stations }, history: { predict: () => null } };
+  const { GET } = await analyticsRoute();
+  const heat = async (query = "days=7") => (await (await GET(new Request(`https://local.test/api/analytics?${query}`), rt)).json()).heatmap;
+  assert.deepEqual(await heat(), [{ weekday: 2, hour: 0, cny: 14 }]);
+  assert.equal(pointReads, 1);
+  now += 9 * 60000; t.mock.timers.setTime(now);
+  stations[0].cnyPerUsd = 8;
+  assert.deepEqual(await heat(), [{ weekday: 2, hour: 0, cny: 16 }], "汇率每次请求时再乘，改了马上生效");
+  assert.equal(pointReads, 1, "10 分钟内不再读原始快照");
+  await heat("days=3");
+  assert.equal(pointReads, 2, "换了窗口起点，重读");
+  stations.push({ id: "v", name: "又一个", type: "newapi", cnyPerUsd: 7 });
+  await heat();
+  assert.equal(pointReads, 3, "上游变了，重读");
+  stations.pop();
+  now += 60001; t.mock.timers.setTime(now);
+  await heat();
+  assert.equal(pointReads, 4, "满 10 分钟，重读");
+});
+
 test("固定成本逐日摊销不逐日舍入：站点合计与整段摊销（我的站点口径）一致，小额付费也不会被舍成 0", async (t) => {
   const NOW = Date.UTC(2026, 9, 14, 4, 0); // 上海 10-14 12:00
   t.mock.timers.enable({ apis: ["Date"], now: NOW });
