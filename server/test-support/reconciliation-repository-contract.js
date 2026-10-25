@@ -13,7 +13,7 @@ import { BILLING_CAPABILITY_IDENTITY_SCHEME, LEGACY_BILLING_CAPABILITY_IDENTITY_
 import { RECONCILIATION_BILLING_SOURCE, RECONCILIATION_CALCULATION_VERSION } from "../../lib/reconciliation-contract.js";
 import { ledgerEntryForSettlement } from "../../lib/reconciliation-ledger.js";
 import { reconciliationRuleEvidence, reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity } from "../../lib/reconciliation-snapshot.js";
-import { reconciliationOwnerRuleState } from "../reconciliation-repository.js";
+import { reconciliationOwnerRuleState, reconciliationOwnerScope } from "../reconciliation-repository.js";
 
 const HOUR = 3600000;
 const DAY = 24 * HOUR;
@@ -96,8 +96,8 @@ class Fixture {
     return reconciliationScopeFingerprint(rule, await this.repository.listSegments(ruleId));
   }
 
-  async ownerState() {
-    return reconciliationOwnerRuleState(await this.repository.listRules());
+  async ownerState(tokenId) {
+    return reconciliationOwnerScope(await this.repository.listRules(), tokenId);
   }
 }
 
@@ -712,7 +712,7 @@ contract("saveSnapshotsForScope writes nothing for a stale scope, a stale owner 
   const latest = () => repository.latestSuccessfulResult(rule.id, window, fingerprint);
 
   assert.equal(await repository.saveSnapshotsForScope(rule.id, "stale-fingerprint", [snapshot], { ledger }), false);
-  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { expectedOwnerState: reconciliationOwnerRuleState([]), ledger }), false);
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { expectedOwnerState: { tokenId: rule.tokenId, state: reconciliationOwnerRuleState([]) }, ledger }), false);
   assert.equal(await repository.saveSnapshotsForScope(`rr_missing${fixture.tag}`, fingerprint, [snapshot], { ledger }), false);
   assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { guard: () => false, ledger }), false);
   // 守卫在写完快照和账本之后才失败：两者一起回滚。
@@ -723,7 +723,10 @@ contract("saveSnapshotsForScope writes nothing for a stale scope, a stale owner 
   assert.equal(await repository.latestLedgerEntry(rule.id, window), null);
   assert.deepEqual((await repository.listLedgerHistory(rule.id, { startMs: window.startMs, endMs: window.endMs })).records, []);
 
-  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { expectedOwnerState: await fixture.ownerState(), guard: () => true, ledger }), true);
+  // 只核对同一把 Key 的那一组：之后别的 Key 的绑定变了，按之前的指纹照样能写（P1c）
+  const owners = await fixture.ownerState(rule.tokenId);
+  await fixture.createRule({ tokenId: fixture.token(7), channels: [{ channelId: fixture.channel(7), name: "Other key" }] });
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { expectedOwnerState: owners, guard: () => true, ledger }), true);
   assert.equal((await latest()).result.calculation.profitUsd, 2);
   assert.equal((await repository.latestLedgerEntry(rule.id, window)).revision, 1);
 

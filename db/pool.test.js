@@ -48,6 +48,7 @@ test("对账 schema 缺列或索引时使用 MySQL 8 兼容的普通 ALTER", asy
     "ALTER TABLE reconciliation_rules ADD COLUMN canonical_key VARCHAR(255) NULL",
     "ALTER TABLE reconciliation_rules ADD COLUMN source_binding JSON NULL",
     "ALTER TABLE reconciliation_snapshots ADD INDEX idx_reconciliation_snapshot_segment (segment_id)",
+    "ALTER TABLE reconciliation_rules ADD INDEX idx_reconciliation_rule_token (token_id, archived_at)",
     "ALTER TABLE reconciliation_billing_capabilities ADD COLUMN identity_scheme VARCHAR(24) NOT NULL DEFAULT 'legacy'",
   ]);
   assert.equal(alters.some((sql) => sql.includes("IF NOT EXISTS")), false);
@@ -57,7 +58,7 @@ test("对账 schema 已具备列和索引时不重复执行 ALTER", async () => 
   const pool = schemaPool({
     columns: ["channel_status", "status_observed_at_ms", "status_changed_at_ms", "segment_id", "ratio_observed_at_ms", "ratio_source",
       "billing_policy", "scope_version", "billing_effective_from_ms", "cost_coverage", "provider", "canonical_key", "source_binding", "identity_scheme"],
-    indexes: ["idx_reconciliation_snapshot_segment"],
+    indexes: ["idx_reconciliation_snapshot_segment", "idx_reconciliation_rule_token"],
   });
   await ensureSchema(pool);
   assert.equal(pool.calls.some((call) => call.sql.startsWith("ALTER TABLE")), false);

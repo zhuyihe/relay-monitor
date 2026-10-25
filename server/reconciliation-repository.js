@@ -31,6 +31,12 @@ export function reconciliationOwnerRuleState(rules) {
     .sort(([a], [b]) => a.localeCompare(b)));
 }
 
+// 一条绑定的成本主人只看 token_id 相同的绑定（server/reconciliation.js 的 costOwnerFor）：写快照时只核对、只锁这一组（计划 P1c）
+export function reconciliationOwnerScope(rules, tokenId) {
+  const id = Number(tokenId);
+  return { tokenId: id, state: reconciliationOwnerRuleState(rules.filter((rule) => Number(rule.tokenId) === id)) };
+}
+
 export function asJson(value) {
   if (!value) return null;
   if (typeof value === "string") {
@@ -664,10 +670,21 @@ export class ReconciliationRepository {
     let booked = null;
     const conn = await this.pool.getConnection();
     try {
+      // expectedOwnerState：{ tokenId, state }（reconciliationOwnerScope）。只锁同一把 Key 的绑定：先普通读出这一组的 id
+      // （不加锁，走 idx_reconciliation_rule_token），再按主键锁、锁内再比一次。不直接按 token_id 加锁：二级索引上的锁定读会带间隙锁，
+      // 别的 Key 的绑定插在同一间隙里就要等。
+      // 停用的绑定也读：期望的指纹（reconciliationOwnerScope）是按这一组全部没解除的绑定、连同启用与否算的，两边要是同一个集合；
+      // 停用的那条被重新启用，指纹里它的 enabled 变了，锁内就比得出来。只读启用的，就看不出「停用的那条刚被启用」。
+      // 新加同一把 Key 的启用绑定有唯一键 active_token_key 挡着，建、改绑定也在进程内排队（serializeWrite）。
+      // 这条普通读放在事务外面：事务里第一条一致性读会定下读视图，放在锁前面，下面锁内读快照就看不到等锁期间别人提交的写入了
+      const [ids] = expectedOwnerState != null
+        ? await conn.query("SELECT id FROM reconciliation_rules WHERE token_id = ? AND archived_at IS NULL", [expectedOwnerState.tokenId]) : [[]];
       await conn.beginTransaction();
       if (expectedOwnerState != null) {
-        const [owners] = await conn.query("SELECT * FROM reconciliation_rules WHERE archived_at IS NULL ORDER BY id FOR UPDATE");
-        if (reconciliationOwnerRuleState(owners.map((row) => ruleFromRow(row))) !== expectedOwnerState) {
+        const [owners] = ids.length
+          ? await conn.query("SELECT * FROM reconciliation_rules WHERE id IN (?) AND archived_at IS NULL ORDER BY id FOR UPDATE", [ids.map((row) => row.id)])
+          : [[]];
+        if (reconciliationOwnerRuleState(owners.map((row) => ruleFromRow(row))) !== expectedOwnerState.state) {
           await conn.rollback();
           return false;
         }

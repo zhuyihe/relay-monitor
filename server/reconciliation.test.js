@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow, normalizeReconciliationScopeIntent, ruleTimezoneFor } from "./reconciliation.js";
-import { ReconciliationRepository, reconciliationOwnerRuleState } from "./reconciliation-repository.js";
+import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationOwnerScope } from "./reconciliation-repository.js";
 import { MemoryReconciliationRepository } from "./test-support/reconciliation-memory-repository.js";
 import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
@@ -44,7 +44,7 @@ function observationRepositoryFixture({ segments, rule = { id: "rr", token_name:
         },
         async rollback() { state.rollbacks += 1; }, release() { state.releases += 1; },
         async query(sql, params = []) {
-          if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) return [working.rule.archived_at ? [] : [working.rule]];
+          if (sql.includes("FROM reconciliation_rules") && (sql.includes("FOR UPDATE") || sql.includes("WHERE token_id = ?"))) return [working.rule.archived_at ? [] : [working.rule]];
           if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [working.segments];
           if (sql.startsWith("UPDATE reconciliation_rule_segments SET group_ratio")) {
             if (fail === "ratio") throw new Error("ratio write failed");
@@ -393,7 +393,7 @@ test("R03 Repository核验owner状态并在INSERT前和commit前执行guard，�
       async rollback() { calls.push("rollback"); pending.length = 0; }, release() {},
     }; } });
     const original = await repository.getRule("rr");
-    const expectedOwnerState = reconciliationOwnerRuleState([original]);
+    const expectedOwnerState = reconciliationOwnerScope([original], original.tokenId);
     if (failure === "owner") rule.enabled = 0;
     const saved = await repository.saveSnapshotsForScope("rr", reconciliationScopeFingerprint(original, []), [{ snapshotKey: "observation", source: { recordType: "observation" } }], {
       expectedOwnerState, guard: () => ++guardCalls < (failure === "before" ? 1 : 2),
@@ -1154,7 +1154,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
         async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
         async query(sql, params) {
           if (sql.includes("reconciliation_ledger")) return ledgerQuery(sql, params);
-          if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) return [[rule]];
+          if (sql.includes("FROM reconciliation_rules") && (sql.includes("FOR UPDATE") || sql.includes("WHERE token_id = ?"))) return [[rule]];
           if (sql.includes("FROM reconciliation_rule_channels") && sql.includes("FOR UPDATE")) return [[{ rule_id: rule.id, channel_id: 1, channel_name: "渠道", channel_status: null }]];
           if (sql.includes("effective_to_ms IS NULL") && sql.includes("FOR UPDATE")) return [[segments.find((segment) => segment.effective_to_ms == null)]];
           if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [segments];
@@ -1422,7 +1422,7 @@ test("首次观察到已知倍率会补全当前 legacy 分段，随后切组才
       return {
         async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
         async query(sql, params) {
-          if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) return [[rule]];
+          if (sql.includes("FROM reconciliation_rules") && (sql.includes("FOR UPDATE") || sql.includes("WHERE token_id = ?"))) return [[rule]];
           if (sql.includes("FROM reconciliation_rule_channels") && sql.includes("FOR UPDATE")) return [[{ rule_id: rule.id, channel_id: 1, channel_name: "渠道" }]];
           if (sql.includes("effective_to_ms IS NULL") && sql.includes("FOR UPDATE")) return [[segments.find((segment) => segment.effective_to_ms == null)]];
           if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [segments];
@@ -1643,7 +1643,7 @@ test("查询中修正切换时间后，旧失败任务不会写入或缓存旧�
       return {
         async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
         async query(sql, params) {
-          if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) return [[rule]];
+          if (sql.includes("FROM reconciliation_rules") && (sql.includes("FOR UPDATE") || sql.includes("WHERE token_id = ?"))) return [[rule]];
           if (sql.includes("FROM reconciliation_rule_channels") && sql.includes("FOR UPDATE")) return [[]];
           if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [segments];
           if (sql.includes("FROM reconciliation_snapshots")) return [[]];
@@ -1704,7 +1704,7 @@ test("加入同一 in-flight 查询的调用方在口径变化后也只拿到新
       return {
         async beginTransaction() {}, async commit() {}, async rollback() {}, release() {},
         async query(sql, params) {
-          if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) return [[rule]];
+          if (sql.includes("FROM reconciliation_rules") && (sql.includes("FOR UPDATE") || sql.includes("WHERE token_id = ?"))) return [[rule]];
           if (sql.includes("FROM reconciliation_rule_channels") && sql.includes("FOR UPDATE")) return [[]];
           if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [segments];
           if (sql.includes("FROM reconciliation_snapshots")) return [[]];
@@ -1820,7 +1820,7 @@ function scopeRaceFixture(id, { beforeLookup = null, beforeAlertRead = null, bef
         async beginTransaction() {}, async rollback() {}, release() {},
         async commit() { if (wroteSnapshots) await beforeSnapshotCommit?.(); },
         async query(sql, params) {
-          if (sql.includes("FROM reconciliation_rules") && sql.includes("FOR UPDATE")) return [[rule]];
+          if (sql.includes("FROM reconciliation_rules") && (sql.includes("FOR UPDATE") || sql.includes("WHERE token_id = ?"))) return [[rule]];
           if (sql.includes("FROM reconciliation_rule_channels") && sql.includes("FOR UPDATE")) return [[]];
           if (sql.includes("FROM reconciliation_rule_segments") && sql.includes("FOR UPDATE")) return [segments];
           if (sql.includes("FROM reconciliation_snapshots")) return [[]];
@@ -2575,7 +2575,7 @@ test("upstream unavailable retains persisted segment evidence in the response an
   const snapshotRows = [];
   const pool = {
     async query(sql, params) {
-      if (sql.includes("SELECT * FROM reconciliation_rules")) return [[rule]];
+      if (sql.includes("SELECT * FROM reconciliation_rules") || sql.includes("SELECT id FROM reconciliation_rules WHERE token_id = ?")) return [[rule]];
       if (sql.includes("FROM reconciliation_rule_channels")) return [[]];
       if (sql.includes("FROM reconciliation_rule_segments")) return [[{
         id: "s1", rule_id: rule.id, group_name: "g1", group_ratio: 2.9,

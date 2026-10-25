@@ -4,7 +4,7 @@ import mysql from "mysql2/promise";
 import { ensureSchema, rehashBillingCapabilities } from "./pool.js";
 import { billingCapabilityAliases, createBillingCapabilityStorage, wrappedBillingIdentity } from "../lib/billing-capability-storage.js";
 import { ChannelOnboardingRepository } from "../server/channel-onboarding-repository.js";
-import { ReconciliationRepository, reconciliationOwnerRuleState } from "../server/reconciliation-repository.js";
+import { ReconciliationRepository, reconciliationOwnerScope } from "../server/reconciliation-repository.js";
 import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues } from "../lib/reconciliation-ledger.js";
 import { defineReconciliationRepositoryContract } from "../server/test-support/reconciliation-repository-contract.js";
@@ -382,17 +382,18 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     const rule = await reconciliation.getRule("legacy_rule");
     const segments = await reconciliation.listSegments(rule.id);
     const expectedScope = reconciliationScopeFingerprint(rule, segments);
-    const expectedOwnerState = reconciliationOwnerRuleState(await reconciliation.listRules());
+    const expectedOwnerState = reconciliationOwnerScope(await reconciliation.listRules(), rule.tokenId);
     const snapshot = { ruleId: rule.id, segmentId: segments[0].id, snapshotKey: "owner-obsolete", windowKind: "custom",
       startMs: 5000, endMs: 6000, localDate: null, upstreamUsd: 2, downstreamUsd: 3, differenceUsd: 1,
       marginRate: 1 / 3, healthCode: "READY", source: { recordType: "confirmed", scopeFingerprint: expectedScope } };
-    await reconciliation.createRule({ upstreamStationId: "owner-extra-upstream", ownStationId: "owner-extra-own", tokenId: 108,
+    // 同一把 Key（token_id 相同）多了一条绑定：成本主人可能变了，旧指纹作废
+    await reconciliation.createRule({ upstreamStationId: "owner-extra-upstream", ownStationId: "owner-extra-own", tokenId: rule.tokenId,
       tokenName: "New owner", fixedGroup: "g", timezone: "Asia/Shanghai", channels: [{ channelId: 108, name: "Owner channel" }] });
     let guardCalls = 0;
     assert.equal(await reconciliation.saveSnapshotsForScope(rule.id, expectedScope, [snapshot],
       { expectedOwnerState, guard: () => { guardCalls += 1; return true; } }), false);
     assert.equal(guardCalls, 0);
-    const currentOwners = reconciliationOwnerRuleState(await reconciliation.listRules());
+    const currentOwners = reconciliationOwnerScope(await reconciliation.listRules(), rule.tokenId);
     assert.equal(await reconciliation.saveSnapshotsForScope(rule.id, expectedScope,
       [{ ...snapshot, snapshotKey: "owner-final-guard" }],
       { expectedOwnerState: currentOwners, guard: () => ++guardCalls === 1 }), false);
@@ -401,6 +402,91 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     assert.equal(rows.count, 0);
     const [[original]] = await pool.query("SELECT source FROM reconciliation_snapshots WHERE snapshot_key = 'legacy-confirmed'");
     assert.deepEqual(original.source, legacySource);
+  });
+
+  await t.test("owner lock reads snapshots committed while it was waiting (P1c: the id read stays outside the transaction)", async () => {
+    const rule = await reconciliation.getRule("legacy_rule");
+    const segments = await reconciliation.listSegments(rule.id);
+    const scope = reconciliationScopeFingerprint(rule, segments);
+    const owners = reconciliationOwnerScope(await reconciliation.listRules(), rule.tokenId);
+    const snapshot = (endMs) => ({ ruleId: rule.id, segmentId: segments[0].id, snapshotKey: "owner-read-view", windowKind: "custom",
+      startMs: 7000, endMs, localDate: null, upstreamUsd: 2, downstreamUsd: 3, differenceUsd: 1,
+      marginRate: 1 / 3, healthCode: "READY", source: { recordType: "confirmed", scopeFingerprint: scope, window: { startMs: 7000, endMs } } });
+    // 读完这一组的 id、还没加锁时，另一个连接写进一份更新的快照并提交
+    let between = async () => {
+      between = null;
+      assert.equal(await reconciliation.saveSnapshotsForScope(rule.id, scope, [snapshot(9000)], { expectedOwnerState: owners }), true);
+    };
+    const hooked = { query: (...args) => pool.query(...args), async getConnection() {
+      const conn = await pool.getConnection();
+      return new Proxy(conn, { get(target, prop) {
+        if (prop === "query") return async (sql, params) => {
+          const result = await target.query(sql, params);
+          if (between && String(sql).startsWith("SELECT id FROM reconciliation_rules WHERE token_id")) await between();
+          return result;
+        };
+        const value = target[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    } };
+    await new ReconciliationRepository(hooked).saveSnapshotsForScope(rule.id, scope, [snapshot(8000)], { expectedOwnerState: owners });
+    assert.equal(between, null, "另一个连接确实在空当里写了");
+    const [[row]] = await pool.query("SELECT window_end_ms FROM reconciliation_snapshots WHERE snapshot_key = 'owner-read-view'");
+    assert.equal(Number(row.window_end_ms), 9000, "锁内看得到等锁期间提交的更新快照，旧的不能盖掉新的");
+  });
+
+  await t.test("owner lock reads the whole group regardless of enabled (P1c: a disabled sibling must not shrink the locked read)", async () => {
+    const tokenId = 90210;
+    const enabledRule = await reconciliation.createRule({ upstreamStationId: "owner-enabled-upstream", ownStationId: "owner-enabled-own",
+      tokenId, tokenName: "Shared Key", fixedGroup: "g", timezone: "Asia/Shanghai", channels: [{ channelId: 201, name: "Enabled channel" }] });
+    const disabledRule = await reconciliation.createRule({ upstreamStationId: "owner-disabled-upstream", ownStationId: "owner-disabled-own",
+      tokenId, tokenName: "Shared Key", fixedGroup: "g", timezone: "Asia/Shanghai", channels: [{ channelId: 202, name: "Disabled channel" }], enabled: false });
+    const segments = await reconciliation.listSegments(enabledRule.id);
+    const scope = reconciliationScopeFingerprint(enabledRule, segments);
+    const snapshot = (key) => ({ ruleId: enabledRule.id, segmentId: segments[0].id, snapshotKey: key, windowKind: "custom",
+      startMs: 10000, endMs: 11000, localDate: null, upstreamUsd: 2, downstreamUsd: 3, differenceUsd: 1,
+      marginRate: 1 / 3, healthCode: "READY", source: { recordType: "confirmed", scopeFingerprint: scope } });
+    // 这一组里有一条停用的（disabledRule）：expectedOwnerState 按全部没解除的算，连启用与否也在指纹里
+    const owners = reconciliationOwnerScope(await reconciliation.listRules(), tokenId);
+    assert.deepEqual(JSON.parse(owners.state).map((row) => row[0]).sort(), [disabledRule.id, enabledRule.id].sort());
+    // 只读启用的（审核指出的改坏点）会让锁内读到的集合缺了 disabledRule，指纹永远比不上 owners.state，这条本来就该成功的写入会一直返回 false
+    assert.equal(await reconciliation.saveSnapshotsForScope(enabledRule.id, scope, [snapshot("owner-enabled-group")], { expectedOwnerState: owners }), true);
+    const [[rows]] = await pool.query("SELECT COUNT(*) AS count FROM reconciliation_snapshots WHERE snapshot_key = 'owner-enabled-group'");
+    assert.equal(rows.count, 1);
+    // 那条停用的重新启用：指纹变了，拿着旧的 owners（停用时那份）再写就该失败；拿当下重新算的 owners 才成功
+    await pool.query("UPDATE reconciliation_rules SET enabled = 1, active_token_key = ? WHERE id = ?", [`owner-disabled-upstream:${tokenId}`, disabledRule.id]);
+    assert.equal(await reconciliation.saveSnapshotsForScope(enabledRule.id, scope, [snapshot("owner-enabled-group-stale")], { expectedOwnerState: owners }), false);
+    const currentOwners = reconciliationOwnerScope(await reconciliation.listRules(), tokenId);
+    assert.equal(await reconciliation.saveSnapshotsForScope(enabledRule.id, scope, [snapshot("owner-enabled-group-fresh")], { expectedOwnerState: currentOwners }), true);
+  });
+
+  await t.test("owner lock blocks on a concurrent uncommitted change to the group (P1c: the group read inside the transaction must be FOR UPDATE)", async () => {
+    const tokenId = 90211;
+    const ruleA = await reconciliation.createRule({ upstreamStationId: "owner-lockwait-a", ownStationId: "owner-lockwait-a-own",
+      tokenId, tokenName: "Lockwait Key A", fixedGroup: "g", timezone: "Asia/Shanghai", channels: [{ channelId: 203, name: "A channel" }] });
+    const ruleB = await reconciliation.createRule({ upstreamStationId: "owner-lockwait-b", ownStationId: "owner-lockwait-b-own",
+      tokenId, tokenName: "Lockwait Key B", fixedGroup: "g", timezone: "Asia/Shanghai", channels: [{ channelId: 204, name: "B channel" }] });
+    const segments = await reconciliation.listSegments(ruleA.id);
+    const scope = reconciliationScopeFingerprint(ruleA, segments);
+    const snapshot = { ruleId: ruleA.id, segmentId: segments[0].id, snapshotKey: "owner-lockwait", windowKind: "custom",
+      startMs: 12000, endMs: 13000, localDate: null, upstreamUsd: 2, downstreamUsd: 3, differenceUsd: 1,
+      marginRate: 1 / 3, healthCode: "READY", source: { recordType: "confirmed", scopeFingerprint: scope } };
+    const owners = reconciliationOwnerScope(await reconciliation.listRules(), tokenId);
+    // 另一个连接改了同一组里的另一条绑定（ruleB），先不提交：停用它，这组的指纹就变了
+    const other = await pool.getConnection();
+    await other.beginTransaction();
+    await other.query("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL WHERE id = ?", [ruleB.id]);
+    try {
+      const pending = reconciliation.saveSnapshotsForScope(ruleA.id, scope, [snapshot], { expectedOwnerState: owners });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await other.commit();
+      // 带 FOR UPDATE：等连接 2 提交以后才读，这组的指纹已经变了，拿着提交前的 owners 写不成；去掉 FOR UPDATE 会读到提交前的旧状态，错误地返回 true
+      assert.equal(await pending, false, "锁内要读到另一个连接刚提交的变化，不能用提交前的快照判断");
+    } finally {
+      other.release();
+    }
+    const [[rows]] = await pool.query("SELECT COUNT(*) AS count FROM reconciliation_snapshots WHERE snapshot_key = 'owner-lockwait'");
+    assert.equal(rows.count, 0);
   });
 
   await t.test("snapshot batch SQL failure rolls back every preceding insert", async () => {
