@@ -60,6 +60,7 @@ export function TrendPanel({
   tz,
   title,
   caption = "按天，同一纵轴",
+  foot,
 }: {
   rows: TrendRow[];
   showRev?: boolean;
@@ -71,6 +72,8 @@ export function TrendPanel({
   tz?: string;
   title?: ReactNode;
   caption?: ReactNode;
+  /** 面板底部一行（例如去别的页面看的链接） */
+  foot?: ReactNode;
 }) {
   const [view, setView] = useState<"chart" | "table">("chart");
   const asOfText = asOf ? formatZonedTime(asOf, tz) : null;
@@ -96,6 +99,7 @@ export function TrendPanel({
     <Panel
       title={title ?? (showRev ? TREND_PANEL_TITLE.withRevenue : TREND_PANEL_TITLE.costOnly)}
       caption={caption}
+      foot={foot}
       extra={
         <Seg<"chart" | "table">
           size="sm"

@@ -6,7 +6,7 @@ import Link from "next/link";
 import { Button } from "antd";
 import { NAV_LABELS } from "../../../lib/brand";
 import { dayKeyInTz } from "../../../lib/business-time";
-import { ADMIN_UNMARKED, BASIS_TITLE, EMPTY, FORECAST_TEXT, RANGE_TEXT, SELL_PRICE_UNSET, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
+import { ADMIN_UNMARKED, BASIS_TITLE, EMPTY, FORECAST_TEXT, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
 import { profitApproxOf, splitProfitWarnings } from "../../../lib/profit";
 import { EmptyState, ErrorState } from "../../components/data-state";
 import { ForecastChart } from "../../components/forecast-chart";
@@ -24,7 +24,7 @@ import type { MyTab, OwnRange, OwnView, UsageRow } from "./shared";
 // 只在概览出现的话（design/ui-copy-spec.md §12）；列名、标签名、时间范围名、利润等式和趋势卡片名从共用的地方取
 const COPY = Object.freeze({
   todayOnly: "今天只有一天，没有逐日趋势",
-  todayOnlyDesc: `切到${RANGE_TEXT["7d"]}或${RANGE_TEXT["30d"]}，看每天的收入和净利；今天每小时的用量在「${TAB_TEXT.models}」里。`,
+  todayOnlyDesc: `切到${RANGE_TEXT["7d"]}或${RANGE_TEXT["30d"]}，看每天的收入；今天每小时的用量在「${TAB_TEXT.models}」里。`,
   view: (range: string) => `看${range}`,
   // 利润等式
   resold: (money: string) => `含转售 Key ${money}`,
@@ -34,8 +34,10 @@ const COPY = Object.freeze({
   noUsageUpstream: "没有按用量算的上游",
   // 每日收入：只画收入（这一页回答「钱从哪来」，上游成本在每日利润、成本估算里看）
   incomeTitle: "每日收入",
-  incomeCaption: "按天。收入按当天普通用户消费和转售 Key 消费计算。",
-  // 说明末尾去成本估算看上游成本（带当前时间范围）
+  incomeCaption: "收入按当天普通用户消费和转售 Key 消费计算。",
+  // 没设置售价：原因只在等式下面写一次（同一句话一页只说一次），这里一句短的
+  incomeApprox: "收入是估算，原因见上面的利润等式。",
+  // 面板底部去成本估算看上游成本（带当前时间范围）；收入读不到、没有逐日收入时也放
   incomeCostLead: "上游成本在",
   incomeCostTail: "里看。",
   incomeEmpty: "暂时没有逐日收入",
@@ -70,7 +72,7 @@ const COPY = Object.freeze({
   otherModels: (n: number) => `其他 ${n} 个模型`,
   allModels: (n: number) => `全部 ${n} 个模型`,
   noModels: "这个时间范围内还没有模型用量",
-  // 模型的消费含管理员自用，和等式里的收入不是一个数（模型与渠道标签页同一句，shared.tsx totalsNote）
+  // 模型的消费含管理员自用，和等式里的收入不是一个数（只在有管理员自用时写；模型与渠道标签页同一个意思，shared.tsx totalsNote）
   modelsInclAdmin: "含管理员自用，和收入不是一个数。",
   payingUsers: "有消费的用户",
   // 指标行（ui-design-spec §5.3）：这次只放利润等式里没有的三个数；收入和「这段时间毛利」等 G 把等式拿掉时再补
@@ -79,6 +81,9 @@ const COPY = Object.freeze({
   noUsers: "这个时间范围内还没有用户消费",
   noUsersDesc: "换个更长的时间范围看看，或确认用户已经在用自营站点。",
 });
+
+// 加载骨架用的块名（my/page.tsx），和下面各块同一份
+export const OVERVIEW_TITLES = Object.freeze({ metrics: COPY.metrics, income: COPY.incomeTitle, topModels: COPY.topModels });
 
 // 利润等式里各项跳到哪个标签页看明细（保留当前时间范围）
 const tabHref = (range: OwnRange, tab: MyTab) => {
@@ -224,7 +229,7 @@ function Equation({
 // ---- 每日趋势 -------------------------------------------------------------
 
 // 每日收入：取自营站点接口的逐日收入（incomeDaily），只画收入，不再另读 /api/analytics 的逐日上游成本（ui-design-spec §5.3）
-// 没设置售价时收入是估算：和等式同一个判断（profitApproxOf），数值带「≈」，说明里接上 SELL_PRICE_UNSET
+// 没设置售价时收入是估算：和等式同一个判断（profitApproxOf），数值带「≈」，说明里只写一句短的（原因在等式下面）
 function IncomeTrend({ v, range, asOf }: { v: OwnView; range: OwnRange; asOf: number | null }) {
   const d = v.d;
   const rows: TrendRow[] = useMemo(() => {
@@ -233,16 +238,26 @@ function IncomeTrend({ v, range, asOf }: { v: OwnView; range: OwnRange; asOf: nu
     const today = dayKeyInTz((d.endMs ?? Date.now()) - 1, d.tz);
     return d.incomeDaily.map((r: any) => ({ date: r.date, rev: Number(r.incomeCny) || 0, cost: null, fixed: 0, today: r.date === today }));
   }, [d]);
+  // 去成本估算看上游成本：收入读不到、没有逐日收入时最想看的就是成本，三种情况都放
+  const costFoot = (
+    <>
+      {COPY.incomeCostLead}
+      <Link className="jy-link" href={`/analytics?range=${range}`}>
+        {NAV_LABELS.analytics}
+      </Link>
+      {COPY.incomeCostTail}
+    </>
+  );
   if (d?.profit?.error || d?.profit?.incomeUnconfirmed) {
     return (
-      <Panel title={COPY.incomeTitle} caption={MY_TEXT.byDay}>
+      <Panel title={COPY.incomeTitle} caption={MY_TEXT.byDay} foot={costFoot}>
         <p className="jy-muted" style={{ margin: 0 }}>{COPY.incomeSeeEq}</p>
       </Panel>
     );
   }
   if (!rows.length) {
     return (
-      <Panel title={COPY.incomeTitle} caption={MY_TEXT.byDay}>
+      <Panel title={COPY.incomeTitle} caption={MY_TEXT.byDay} foot={costFoot}>
         <EmptyState title={COPY.incomeEmpty} desc={COPY.incomeEmptyDesc} />
       </Panel>
     );
@@ -254,19 +269,11 @@ function IncomeTrend({ v, range, asOf }: { v: OwnView; range: OwnRange; asOf: nu
       showCost={false}
       revApprox={revApprox}
       title={COPY.incomeTitle}
-      asOf={asOf}
+      // 和等式同一个「截至」：用数据自己的结束时间，不用浏览器收到数据的时刻
+      asOf={d.endMs ?? asOf}
       tz={d.tz}
-      caption={
-        <>
-          {COPY.incomeCaption}
-          {revApprox ? `${SELL_PRICE_UNSET}。` : ""}
-          {COPY.incomeCostLead}
-          <Link className="jy-link" href={`/analytics?range=${range}`}>
-            {NAV_LABELS.analytics}
-          </Link>
-          {COPY.incomeCostTail}
-        </>
-      }
+      caption={revApprox ? `${COPY.incomeCaption}${COPY.incomeApprox}` : COPY.incomeCaption}
+      foot={costFoot}
     />
   );
 }
@@ -417,9 +424,8 @@ function ForecastPanel({ v }: { v: OwnView }) {
   );
 }
 
-// ---- 消费最多的用户 --------------------------------------------------------
+// ---- 指标行 ---------------------------------------------------------------
 
-// 前 5 名排行，多的并成一行（悬停提示里的占比才是占全部消费）；用户和模型共用这一份
 // 指标行：有消费的用户、请求数、Token（不含缓存）。收入、毛利在利润等式里，这里不再写（同一个数一页只出现一次）；
 // G 把 /my 的等式拿掉时再补「收入」和「这段时间毛利 → 每日利润」（ui-design-spec §5.3，分两步做）
 function Metrics({ v }: { v: OwnView }) {
@@ -452,6 +458,9 @@ const USAGE_FACTS_FOOT = (v: OwnView) => (
   </ul>
 );
 
+// ---- 消费最多的用户、模型 --------------------------------------------------
+
+// 前 5 名排行，多的并成一行（悬停提示里的占比才是占全部消费）；用户和模型共用这一份
 function TopPanel({
   title,
   caption,
@@ -535,7 +544,7 @@ function TopModels({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t
       otherLabel={COPY.otherModels}
       allLabel={COPY.allModels}
       onAll={() => onTab("models")}
-      sub={v.models.length ? COPY.modelsInclAdmin : undefined}
+      sub={v.models.length && (v.profit?.adminUsageCny || 0) > 0 ? COPY.modelsInclAdmin : undefined}
       empty={<EmptyState title={COPY.noModels} />}
       foot={v.models.length ? USAGE_FACTS_FOOT(v) : undefined}
     />

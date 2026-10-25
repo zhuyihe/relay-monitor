@@ -19,10 +19,9 @@ import { EQ_TEXT, ProfitEquation } from "../../components/profit-equation";
 import { RangePicker } from "../../components/range-picker";
 import { TabPanel, Tabs } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
-import { TREND_PANEL_TITLE } from "../../components/trend-panel";
 import { useUrlState } from "../../components/use-url-state";
 import { ModelsTab } from "./models-tab";
-import { FC_TITLE, OverviewTab } from "./overview-tab";
+import { FC_TITLE, OVERVIEW_TITLES, OverviewTab } from "./overview-tab";
 import { describeError } from "../../../lib/error-copy";
 import { MY_TEXT, RANGES, RANGE_OPTIONS, TABS, TAB_TEXT, deriveOwn } from "./shared";
 import type { MyTab, OwnRange } from "./shared";
@@ -185,11 +184,16 @@ export default function MyStationPage() {
     const blank = { value: null };
     return (
       <div className="jy-page" aria-busy="true">
+        {/* 和概览同一个版式（指标行、等式、两行 8 + 4），数据回来时不跳 */}
+        <PanelSkeleton title={OVERVIEW_TITLES.metrics} lines={1} />
         <ProfitEquation title={EQ_TEXT.business(RANGE_TEXT[range])} revenue={blank} upstream={blank} fixed={blank} loading />
-        <PanelSkeleton title={TREND_PANEL_TITLE.withRevenue} height={220} />
-        <div className="jy-grid-2 jy-grid-even">
-          <PanelSkeleton title={FC_TITLE} lines={5} />
+        <div className="jy-grid-8-4">
+          <PanelSkeleton title={OVERVIEW_TITLES.income} height={220} />
           <PanelSkeleton title={MY_TEXT.topUsers} lines={5} />
+        </div>
+        <div className="jy-grid-8-4">
+          <PanelSkeleton title={FC_TITLE} lines={5} />
+          <PanelSkeleton title={OVERVIEW_TITLES.topModels} lines={5} className="jy-my-top-models" />
         </div>
       </div>
     );
