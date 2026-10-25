@@ -16,7 +16,9 @@ async function route(path) {
       "export const cookieToken = () => null;", // 够不够「已登录过的浏览器」由 sessions.verify() 的桩决定，这里不用真的解析 Cookie
     ].join("\n") };
     if (url.endsWith("/lib/auth.js")) return { format: "module", shortCircuit: true, source: [
-      "export const verifyPassword = (password) => password === \"right\";",
+      "export class ScryptOverloadedError extends Error {};",
+      // __authTestScryptBusy 模拟 verifyPassword 校验途中（真正进队列那一刻）才发现排满，不是路由开头那次快路径查到的
+      "export const verifyPassword = (password) => { if (globalThis.__authTestScryptBusy) throw new ScryptOverloadedError(); return password === \"right\"; };",
       "export const DEVICE_COOKIE_NAME = \"rm_device\";",
       "export const scryptOverloaded = () => globalThis.__authTestOverloaded === true;",
     ].join("\n") };
@@ -85,6 +87,20 @@ test("登录：scrypt 排满时 429 带 LOGIN_RATE_LIMITED，连判断锁、占�
     assert.deepEqual(rt.sessions.calls, [], "没有占位，不计入任何失败次数");
   } finally {
     globalThis.__authTestOverloaded = false;
+  }
+});
+
+test("登录：verifyPassword 校验途中（真正进队列那一刻）才发现排满，也回 429、退回占位，不算一次失败（安全审核 10-25 第二轮：路由开头那次快路径查不到的情况，真正的拒绝必须在这里接住）", async () => {
+  const { POST } = await route("./login/route.js");
+  globalThis.__authTestScryptBusy = true;
+  try {
+    const rt = { store: store(), sessions: sessions() };
+    const res = await POST(post("/api/auth/login", { username: "admin", password: "right" }), rt);
+    assert.equal(res.status, 429);
+    assert.deepEqual(await res.json(), { error: errorText({ code: "LOGIN_RATE_LIMITED" }), code: "LOGIN_RATE_LIMITED" });
+    assert.deepEqual(rt.sessions.calls, [["reserve", "1.2.3.4"], ["release", "1.2.3.4"]], "占了位又退回，不计入失败——超负荷不是密码错");
+  } finally {
+    globalThis.__authTestScryptBusy = false;
   }
 });
 
@@ -167,4 +183,12 @@ test("改密码成功：响应里连同清会话 Cookie 一起，给当前浏览
   const res = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: "x".repeat(MIN_PASSWORD_LENGTH) }), rt);
   assert.equal(res.status, 200);
   assert.deepEqual(res.headers.getSetCookie(), ["sid=", "dev=device-token"]);
+});
+
+test("登录：MIN_PASSWORD_LENGTH 只管改密码时新设的密码，登录路由不检查长度，老的短密码照样能登录", async () => {
+  const { POST } = await route("./login/route.js");
+  const rt = { store: store(), sessions: sessions() };
+  // 登录路由不导入、不检查 MIN_PASSWORD_LENGTH，密码对不对只看 verifyPassword；这里的桩密码「right」只有 5 位，照样算对
+  const res = await POST(post("/api/auth/login", { username: "admin", password: "right" }), rt);
+  assert.equal(res.status, 200);
 });

@@ -2,7 +2,7 @@
 // 按来源限流，全站失败太多时也会顶住（防分布式乱试，已登录过的浏览器不受这条约束），验证用户名+密码，成功后签发会话 Cookie。
 // 失败时带码（LOGIN_RATE_LIMITED、LOGIN_FAILED），说法取 lib/error-copy.js，登录页按码处理，状态码不变
 import { withRuntime, json, clientIp, cookieToken, requestIsSecure } from "../../../../lib/api.js";
-import { DEVICE_COOKIE_NAME, scryptOverloaded, verifyPassword } from "../../../../lib/auth.js";
+import { DEVICE_COOKIE_NAME, ScryptOverloadedError, scryptOverloaded, verifyPassword } from "../../../../lib/auth.js";
 import { errorText } from "../../../../lib/error-copy.js";
 
 const fail = (code, status) => json({ error: errorText({ code }), code }, status);
@@ -15,14 +15,22 @@ export const POST = withRuntime(async (request, rt) => {
   // 当前凭证（sessionVersion），改密码、改用户名以后旧的设备 Cookie 版本对不上，就不再豁免（安全审核 10-25 低-1）
   const devicePayload = rt.sessions.verify(cookieToken(request, DEVICE_COOKIE_NAME), { device: true });
   const trustedDevice = !!devicePayload && devicePayload.v === version;
-  // scrypt 在跑的已经排满：系统在超负荷，不占用线程池再跑一个，这里不算一次登录失败
+  // 快路径：这里查到排满能省一次「占位又退回」，但不是正确性保证——真正挡住排队无上限的是 verifyPassword
+  // 内部 limitedScrypt 那次判断，下面 catch 里才是必须的那道（安全审核 10-25 第二轮）
   if (scryptOverloaded()) return fail("LOGIN_RATE_LIMITED", 429);
   // 判断「锁没锁、顶没顶」和占一个名额必须在同一次同步调用里做完，不然并发请求会在占位之前就都通过判断（见 reserveLoginAttempt 注释）
   const release = rt.sessions.reserveLoginAttempt(ip, { exemptSiteLimit: trustedDevice });
   if (!release) return fail("LOGIN_RATE_LIMITED", 429);
   const { username, password } = await request.json().catch(() => ({}));
   const userOk = String(username || "") === auth.username;
-  const passOk = await verifyPassword(password || "", auth.salt, auth.hash);
+  let passOk;
+  try {
+    passOk = await verifyPassword(password || "", auth.salt, auth.hash);
+  } catch (err) {
+    if (!(err instanceof ScryptOverloadedError)) throw err;
+    release(); // 超负荷不算一次登录失败，退回占位
+    return fail("LOGIN_RATE_LIMITED", 429);
+  }
   if (!userOk || !passOk) {
     // 失败不用再记一次：占位（reserveLoginAttempt）已经是这次尝试最终的失败记录
     return fail("LOGIN_FAILED", 401);
