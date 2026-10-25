@@ -14,7 +14,7 @@ import { OWN_STATION_UNSET } from "../lib/format.js";
 import { reconciliationKeyName } from "../lib/reconciliation-view.js";
 import { businessTimeZone, canonicalTimeZone } from "../lib/business-time.js";
 import { refreshStation } from "./refresh.js";
-import { normalizeReconciliationScopeIntent } from "./reconciliation.js";
+import { normalizeReconciliationScopeIntent, ruleTimezoneFor } from "./reconciliation.js";
 
 // 验证后才保存。重试和同进程并发接入按上游地址 + 账号身份复用，避免重复监控同一余额。
 export async function connectNewApiUpstream(rt, input, queryMetadata = queryNewApiReconciliationMetadata, queryIdentity = queryAccountIdentity) {
@@ -990,7 +990,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       channelRevisions: Object.fromEntries(group.channels.map((channel) => [channel.channelId, channel.channelRevision])),
       resourceVersions: versions, accountIdentity: null, canonicalKey: null, tokenId: null, keyVersion: null,
       existingRuleId: null, existingScopeVersion: null, existingChannelIds: [], proposedChannelIds: ids,
-      timezone: group.reconciliation?.timezone || "Asia/Shanghai", billingEffectiveFromMs: null,
+      timezone: group.reconciliation?.timezone || businessTimeZone(), billingEffectiveFromMs: null,
       coverageDeclaration: group.reconciliation?.coverageDeclaration || { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } },
     preview: { costCoverage: group.reconciliation?.coverageDeclaration.answer === "none" ? "complete" : "unknown",
       billingEffectiveFromMs: null, firstQueryableAtMs: null, scopeChanged: false } };
@@ -1028,7 +1028,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
           if (value.billing?.metadata) {
             const canonicalKey = canonicalBillingKey(billing.connection, value.billing.metadata, requested.reconciliation.tokenId);
             const existing = allRules.find((rule) => rule.enabled && !rule.archivedAt && rule.canonicalKey === canonicalKey);
-            const timezone = canonicalTimeZone(requested.reconciliation.timezone || existing?.timezone);
+            const timezone = canonicalTimeZone(ruleTimezoneFor(existing, requested.reconciliation.timezone));
             group.reconciliation = { ...requested.reconciliation, timezone };
             const readKey = hash([onboardingConnectionPatch(billing.connection), billing.expectedAuthVersion, billing.resourceVersion, timezone]);
             if (!metadataReads.has(readKey)) {
@@ -1715,7 +1715,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       channelRevision: input.channelRevision, stationId: group.saved.stationIds[0] || input.stationId,
       additionalMonitorStationIds: input.additionalMonitorStationIds || [] };
     if (input.reconciliation) retryInput.reconciliation = { upstreamStationId: group.saved.authorizationStationId || input.reconciliation.upstreamStationId,
-      tokenId: input.reconciliation.tokenId, timezone: input.reconciliation.timezone || "Asia/Shanghai",
+      tokenId: input.reconciliation.tokenId, timezone: input.reconciliation.timezone || null,
       costCoverage: input.reconciliation.costCoverage || "unknown", coverageDeclaration: input.reconciliation.coverageDeclaration,
       previewEffectiveFromMs: result.retryInput.groups[0].reconciliation?.previewEffectiveFromMs ?? null };
     return { complete: group.complete, monitor: group.monitor, reconciliation: group.reconciliation,

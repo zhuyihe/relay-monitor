@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow, normalizeReconciliationScopeIntent } from "./reconciliation.js";
+import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow, normalizeReconciliationScopeIntent, ruleTimezoneFor } from "./reconciliation.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState } from "./reconciliation-repository.js";
 import { MemoryReconciliationRepository } from "./test-support/reconciliation-memory-repository.js";
 import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
@@ -733,7 +733,7 @@ test("编辑规则不能替换上游账号或 Key，且拒绝发生在元数据�
   assert.equal(queries, 2);
 });
 
-test("旧编辑缺少金融proof时拒绝渠道/时区变化，原Key展示与分组无写入", async (t) => {
+test("旧编辑缺少金融proof时拒绝渠道变化；时区建好以后不能改，没传时区沿用原值；原Key展示与分组无写入", async (t) => {
   const { createServer } = await import("node:http");
   const paths = [];
   const server = createServer((request, response) => {
@@ -751,7 +751,7 @@ test("旧编辑缺少金融proof时拒绝渠道/时区变化，原Key展示与�
   t.after(() => server.close());
   const row = {
     id: "rr_mutable", upstream_station_id: "upstream", own_station_id: "own", token_id: 9,
-    token_name: "stable-key", fixed_group: "old-group", timezone: "Asia/Shanghai", enabled: 1, archived_at: null,
+    token_name: "stable-key", fixed_group: "old-group", timezone: "UTC", enabled: 1, archived_at: null,
   };
   const pool = {
     async query(sql) {
@@ -781,7 +781,15 @@ test("旧编辑缺少金融proof时拒绝渠道/时区变化，原Key展示与�
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   const stations = [{ id: "upstream", type: "newapi", baseUrl, accessToken: "upstream-pat" }, { id: "own", type: "newapi", isOwn: true, baseUrl, accessToken: "admin" }];
   const module = createReconciliationModule({ pool, store: { list: () => stations, get: (id) => stations.find((station) => station.id === id) } });
+  // 改时区：先于任何读取就拒绝（C1，TIMEZONE_IMMUTABLE）；别名算同一个时区，不拒
   await assert.rejects(module.updateRule(row.id, { upstreamStationId: "upstream", tokenId: 9, salesChannelIds: [2], timezone: "America/New_York" }),
+    (error) => error.code === "TIMEZONE_IMMUTABLE");
+  assert.deepEqual(paths, []);
+  await assert.rejects(module.updateRule(row.id, { upstreamStationId: "upstream", tokenId: 9, salesChannelIds: [2], timezone: "Etc/UTC" }),
+    (error) => error.code === "PREVIEW_REQUIRED");
+  paths.length = 0;
+  // 没传时区：沿用原值 UTC（原来会被改成上海、当成改了范围），只有渠道变了，照旧要预览
+  await assert.rejects(module.updateRule(row.id, { upstreamStationId: "upstream", tokenId: 9, salesChannelIds: [2] }),
     (error) => error.code === "PREVIEW_REQUIRED");
 
   assert.equal(paths.filter((path) => path === "/api/user/self").length, 2);
@@ -789,7 +797,27 @@ test("旧编辑缺少金融proof时拒绝渠道/时区变化，原Key展示与�
   assert.equal(paths.some((path) => path === "/api/token/" || path === "/api/user/self/groups"), false);
   assert.equal(row.token_name, "stable-key");
   assert.equal(row.fixed_group, "old-group");
-  assert.equal(row.timezone, "Asia/Shanghai");
+  assert.equal(row.timezone, "UTC");
+});
+
+test("C1 绑定的时区：新建没传用业务时区，建好以后不能改——没传沿用原值，别名算同一个，传了别的报 TIMEZONE_IMMUTABLE", (t) => {
+  const saved = process.env.BUSINESS_TIME_ZONE;
+  t.after(() => { if (saved == null) delete process.env.BUSINESS_TIME_ZONE; else process.env.BUSINESS_TIME_ZONE = saved; });
+  process.env.BUSINESS_TIME_ZONE = "America/Los_Angeles";
+  assert.equal(ruleTimezoneFor(null, undefined), "America/Los_Angeles", "新建没传：业务时区，不是写死的上海");
+  assert.equal(ruleTimezoneFor(null, ""), "America/Los_Angeles");
+  assert.equal(ruleTimezoneFor(null, "UTC"), "UTC");
+  assert.throws(() => ruleTimezoneFor(null, "Mars/Base"), (error) => error.code === "TIMEZONE_INVALID");
+  const existing = { timezone: "Asia/Shanghai" };
+  assert.equal(ruleTimezoneFor(existing, undefined), "Asia/Shanghai", "已有的没传：沿用原值，不按业务时区改");
+  assert.equal(ruleTimezoneFor(existing, "PRC"), "Asia/Shanghai", "别名算同一个，存的还是原来的写法");
+  assert.throws(() => ruleTimezoneFor(existing, "UTC"), (error) => error.code === "TIMEZONE_IMMUTABLE");
+  assert.throws(() => ruleTimezoneFor(existing, "Mars/Base"), (error) => error.code === "TIMEZONE_INVALID");
+  // 范围意图：新建没传按业务时区；已有的传了别的时区报 TIMEZONE_IMMUTABLE，不当成「时区不对」
+  const input = { tokenId: 9, salesChannelIds: [2], coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] } };
+  assert.equal(normalizeReconciliationScopeIntent("append", null, input).normalizedAppendIntent.timezone, "America/Los_Angeles");
+  assert.throws(() => normalizeReconciliationScopeIntent("replace", "rr_1", { ...input, upstreamStationId: "up", timezone: "UTC" }, existing),
+    (error) => error.code === "TIMEZONE_IMMUTABLE");
 });
 
 test("自定义对账窗口使用半开区间并拒绝超过 31 天", () => {
@@ -2188,7 +2216,8 @@ test("本月截至取数时刻：给实时毛利、只存 observation，同起�
   assert.deepEqual(results[0].window, { preset: "month", timezone: "Asia/Shanghai", startMs: Date.parse("2026-08-31T16:00:00.000Z"), endMs: now });
   assert.equal(results[0].health.code, "READY");
   assert.equal(results[0].calculation.profitUsd, 1.5);
-  assert.equal(results[0].settlement, "live");
+  assert.equal(results[0].displayStatus.state, "live");
+  assert.equal("settlement" in results[0], false, "旧字段 settlement 已删");
   const saved = repository.tables.snapshots.map((row) => [row.window_kind, JSON.parse(row.source).recordType]);
   assert.deepEqual(saved, [["month", "observation"]], "本月还没结束，不写结账记录");
   const fingerprint = JSON.parse(repository.tables.snapshots[0].source).scopeFingerprint;
@@ -3551,21 +3580,21 @@ test("新范围从生效时刻起核算：生效前窗口不取数，跨界窗�
   assert.ok(state.statCalls.slice(calls).every((call) => call.start === effective / 1000), JSON.stringify(state.statCalls.slice(calls)));
   assert.equal(crossing.scope.accountedFromMs, effective);
   assert.equal(crossing.scope.recalculated, true);
-  assert.equal(crossing.settlement, "settled");
+  assert.equal(crossing.displayStatus.state, "settled");
   assert.ok(!crossing.health.issues.some((issue) => blockers.includes(issue.code)));
   const written = confirmedCount();
   const live = await query(effective + 86400000, now);
   assert.equal(live.upstream.amountUsd, 1);
   assert.equal(live.downstream.amountUsd, 2.5);
   assert.equal(live.calculation.profitUsd, 1.5, "未结束窗口给出实时利润");
-  assert.equal(live.settlement, "live");
+  assert.equal(live.displayStatus.state, "live");
   assert.equal(live.scope.accountedFromMs, null);
   assert.ok(!live.health.issues.some((issue) => blockers.includes(issue.code)));
   assert.equal(confirmedCount(), written, "未结束窗口只保存 observation，不写确认账单");
   const confirmed = await query(effective, effective + 86400000);
   assert.equal(confirmed.calculation.profitUsd, 1.5);
   assert.equal(confirmed.scope.recalculated, false);
-  assert.equal(confirmed.settlement, "settled");
+  assert.equal(confirmed.displayStatus.state, "settled");
   rule.cost_coverage = "unknown";
   assert.equal((await query(effective, effective + 86400000)).settledAt, confirmed.lastSuccessfulAt, "已结账的日子不跟着改覆盖范围重算");
   const unknown = (await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: effective, endMs: effective + 86400000 }, { force: true, resettle: true })).results[0];
@@ -4914,11 +4943,11 @@ test("U05实际Shanghai/UTC按绝对窗口分组；同绝对已核验标签可�
   const today = await f.module.queryRules({ preset: "today" });
   assert.equal(today.windowGroups.length, 1); assert.ok(today.commonSummary, "today 同绝对窗口、覆盖已核验时进入汇总");
   assert.equal(today.windowGroups[0].totals.confirmedProfitUsd, 4.5); assert.equal(today.commonSummary.totals.confirmedProfitUsd, 4.5);
-  assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "live"), "today 给出实时利润，但未结束窗口不结算");
+  assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.displayStatus.state === "live"), "today 给出实时利润，但未结束窗口不结算");
   for (const row of f.rows) Object.assign(row, { billing_policy: "legacy-v3", source_binding: { ...row.source_binding, channels: {} } });
   const custom = await f.module.queryRules({ preset: "custom", startMs: 1000000, endMs: 1060000 }, { force: true });
   assert.equal(custom.results[0].calculation.profitUsd, 1.5, " untouched v3同epoch短区间仍保留原账语义");
-  assert.ok(custom.results.every((row) => row.settlement === "ended"), "早已结束的非完整日 custom 窗口是已结束，不是已结账");
+  assert.ok(custom.results.every((row) => row.displayStatus.state === "live" && !row.settledAt), "早已结束的非完整日 custom 窗口是已结束，不是已结账");
   assert.ok(custom.commonSummary); assert.equal(custom.windowGroups[0].totals.confirmedProfitUsd, 4.5);
   assert.equal(confirmedCount(), confirmedBefore, "today/custom 短窗只保存 observation，不写确认账单");
 });
@@ -5033,7 +5062,7 @@ test("U05结账等待期：昨天结束未满15分钟手动查询只给实时毛
 
   f.state.upstreamQuota = 50; // 上游账单还在陆续入账
   const early = await f.module.queryRules({ preset: "yesterday" });
-  assert.ok(early.results.every((row) => row.calculation.profitUsd === 2 && row.settlement === "live"), "等待期内昨天只是实时金额");
+  assert.ok(early.results.every((row) => row.calculation.profitUsd === 2 && row.displayStatus.state === "live"), "等待期内昨天只是实时金额");
   assert.equal(confirmedRows().length, 0, "等待期内的手动查询不写确认账单");
   const calls = yesterdayCalls();
   assert.equal(calls, 6);
@@ -5044,7 +5073,7 @@ test("U05结账等待期：昨天结束未满15分钟手动查询只给实时毛
   assert.equal(confirmedRows().length, 3);
   assert.ok(confirmedRows().every((row) => row.cost_usd === 1), "结账用的是满 15 分钟后的上游金额");
   const settled = await f.module.queryRules({ preset: "yesterday" });
-  assert.ok(settled.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled"));
+  assert.ok(settled.results.every((row) => row.calculation.profitUsd === 1.5 && row.displayStatus.state === "settled"));
   assert.equal(yesterdayCalls(), calls + 6, "结账结果进入缓存，随后的查询直接复用");
 });
 
@@ -5122,7 +5151,7 @@ test("U05真实withAuth GET/POST默认昨日、显式today实时利润、局部b
     // 显式 today 透传实时利润：进入汇总，但每行都是未结账的 live。
     const today = await (await get("?preset=today")).json(); assert.ok(today.commonSummary);
     assert.equal(today.results[0].window.endMs, Date.now()); assert.equal(today.windowGroups[0].totals.confirmedProfitUsd, 4.5);
-    assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "live"));
+    assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.displayStatus.state === "live"));
     const response = await POST(new Request("http://localhost/api/reconciliation/query", { method: "POST", headers: { cookie: "rm_session=valid" }, body: JSON.stringify({ ruleIds: ["rr_live"] }) }));
     assert.equal(response.status, 200); const one = await response.json();
     assert.equal(one.results[0].window.preset, "yesterday"); assert.equal(one.results.length, 1);
@@ -5390,9 +5419,9 @@ test("1b页面查询只读：昨天和今天都给出毛利，但不开写事务
   const page = (preset) => f.module.queryRules({ preset }, { mode: "evaluate", origin: "page" });
   const yesterday = await page("yesterday");
   // 页面查询不结账：结账账本里还没有昨天，昨天仍是「实时」，旧的 settlement 字段写已结束
-  assert.ok(yesterday.results.every((row) => row.calculation.profitUsd === 1.5 && row.displayStatus.state === "live" && row.settlement === "ended"));
+  assert.ok(yesterday.results.every((row) => row.calculation.profitUsd === 1.5 && row.displayStatus.state === "live" && !row.settledAt));
   const today = await page("today");
-  assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "live"));
+  assert.ok(today.results.every((row) => row.calculation.profitUsd === 1.5 && row.displayStatus.state === "live"));
   assert.deepEqual(f.state.commits.map((tx) => tx.name), [], "页面查询不开写事务");
   assert.deepEqual([f.state.writes, f.state.alertQueries, f.state.channelStateWrites.length, f.state.snapshots.size], [0, 0, 0, 0]);
 });
@@ -5406,7 +5435,7 @@ test("1b已结账的昨天：页面查询直接读结账记录不再取数，上
   f.state.upstreamQuota = 50; // 上游事后又补了账，已结账的日子不跟着变
   const page = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
   assert.equal(f.state.statCalls.length, calls, "已结账的昨天不打上游");
-  assert.ok(page.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled" && row.settledAt && row.lastConfirmed));
+  assert.ok(page.results.every((row) => row.calculation.profitUsd === 1.5 && row.displayStatus.state === "settled" && row.settledAt && row.lastConfirmed));
   const queried = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" });
   assert.equal(f.state.statCalls.length, calls, "「查询」跳过缓存也不重新取已结账的日子");
   assert.ok(queried.results.every((row) => row.calculation.profitUsd === 1.5 && row.settledAt));
@@ -5414,7 +5443,7 @@ test("1b已结账的昨天：页面查询直接读结账记录不再取数，上
   // 重启后内存缓存都没了；来源口径由接入模块持久化，开头就能认出结账记录，不必取数。
   const restarted = { pool: f.rt.pool, store: f.rt.store, onboardingSource: f.rt.onboardingSource };
   const again = await createReconciliationModule(restarted, { repository: f.repository }).queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
-  assert.ok(again.results.every((row) => row.calculation.profitUsd === 1.5 && row.settlement === "settled" && row.settledAt));
+  assert.ok(again.results.every((row) => row.calculation.profitUsd === 1.5 && row.displayStatus.state === "settled" && row.settledAt));
   assert.equal(f.state.statCalls.length, calls, "重启后也不打上游");
   assert.equal(f.state.writes, writes, "页面查询不追加任何快照");
   assert.equal(f.state.ledgerWrites.length, ledgerWrites, "也不写账本");
@@ -5779,7 +5808,7 @@ test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率�
   const { results } = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
   assert.equal(results.length, 3);
   for (const row of results) {
-    assert.deepEqual([row.settlement, row.calculation.profitUsd], ["settled", 1.5], "已结账的毛利不按固定采购重算");
+    assert.deepEqual([row.displayStatus.state, row.calculation.profitUsd], ["settled", 1.5], "已结账的毛利不按固定采购重算");
     assert.deepEqual(row.rates, { income: { stationId: "own", cnyPerUsd: 7.1, source: "configured" },
       cost: { stationId: "upstream", cnyPerUsd: 6.5, source: "configured" }, costBasis: "usage" });
     assert.deepEqual(row.ledger, { billDate: "2026-10-08", revision: 1, source: "settle", settledAt: row.settledAt, rates: { income: 7.1, cost: null }, costBasis: "usage" });
@@ -5877,6 +5906,139 @@ test("4a 固定采购上游：Key 账单取不到或为空只作参考，毛利 
       });
     }
   }
+});
+
+test("C1 成本计法在提前返回之前就定：固定成本、锚定过的上游一侧读不到（Key 用不了、目录或身份读不到、上游账号换了人），只作参考，毛利 = 收入、照常结账，不拿读到的目录当证据；本站一侧、没锚定过的照旧挡；按用量的照旧挡", async (t) => {
+  const reply = (host, pathname, body) => ({ host, pathname, body });
+  const keyDisabled = reply("upstream.test", "/api/token/", { success: true, data: { total: 3, items: [
+    { id: 9, name: "stable", status: 2, group: "g1", cross_group_retry: false },
+    { id: 10, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+    { id: 11, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } });
+  // [说明, 固定成本时要有的上游侧参考问题码, 按用量时的健康码, 设置]
+  const cases = [
+    ["Key 停用了", "KEY_INVALID_OR_DENIED", "KEY_INVALID_OR_DENIED", { replies: [keyDisabled] }],
+    ["Key 目录读不到", "UPSTREAM_DATA_UNAVAILABLE", "UPSTREAM_DATA_UNAVAILABLE", { options: { metadataFailure: true } }],
+    ["上游账号身份读不到", "UPSTREAM_DATA_UNAVAILABLE", "UPSTREAM_DATA_UNAVAILABLE", { replies: [reply("upstream.test", "/api/user/self", { success: false })] }],
+    ["上游账号换了人", "SOURCE_BINDING_UNCONFIRMED", "SOURCE_BINDING_UNCONFIRMED", { replies: [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } })] }],
+    // 换成的 8 号账号里也有一把 id 9 的 Key，名字不同：不能拿它来显示、记账
+    ["上游账号换了人，新账号里 id 相同的 Key 名字不同", "KEY_INVALID_OR_DENIED", "KEY_INVALID_OR_DENIED", { replies: [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } }),
+      reply("upstream.test", "/api/token/", { success: true, data: { total: 1, items: [{ id: 9, name: "别人的 Key", status: 1, group: "g1", cross_group_retry: false }] } })] }],
+    ["本站读不到（本站一侧照旧挡）", null, "OWN_BILLING_UNAVAILABLE", { ownDown: true, blocksFixed: true }],
+    ["本站账号换了人（本站一侧照旧挡）", null, "SOURCE_BINDING_UNCONFIRMED", { blocksFixed: true, replies: [reply("own.test", "/api/user/self", { success: true, data: { id: 9 } })] }],
+    ["没锚定过、上游账号身份读不到（照旧挡）", null, "UPSTREAM_DATA_UNAVAILABLE", { unanchored: "canonicalKey", blocksFixed: true, replies: [reply("upstream.test", "/api/user/self", { success: false })] }],
+    ["只缺本站来源的锚定、Key 停用（照旧挡）", null, "KEY_INVALID_OR_DENIED", { unanchored: "ownSource", blocksFixed: true, replies: [keyDisabled] }],
+  ];
+  for (const [label, referenceCode, usageCode, { replies = [], options = {}, ownDown = false, unanchored = null, blocksFixed = false }] of cases) {
+    for (const fixed of [true, false]) {
+      await t.test(`${label}·${fixed ? "固定成本" : "按用量"}`, async (st) => {
+        const f = await completedDayFixture(st, options);
+        if (fixed) f.stations.find((station) => station.id === "upstream").fixedPurchases = [{ amount: 300, days: 30 }];
+        if (ownDown) f.state.ownQuota = null;
+        const live = f.rows.find((row) => row.id === "rr_live");
+        if (unanchored === "canonicalKey") live.canonical_key = null;
+        if (unanchored === "ownSource") live.source_binding.ownSource = null;
+        if (replies.length) {
+          const prev = globalThis.fetch;
+          st.mock.method(globalThis, "fetch", async (input, init) => {
+            const url = new URL(String(input));
+            const hit = replies.find((item) => item.host === url.host && item.pathname === url.pathname);
+            if (hit) return { status: hit.body.success ? 200 : 500, text: async () => JSON.stringify(hit.body) };
+            return prev(input, init);
+          });
+        }
+        const [row] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" })).results;
+        const passes = fixed && !blocksFixed;
+        if (passes) {
+          assert.deepEqual([row.health.code, row.calculation.profitUsd, row.costBasis], ["READY", 2.5, "fixed"], JSON.stringify(row.health));
+          const upstreamIssues = row.health.issues.filter((issue) => issue.side === "upstream");
+          assert.ok(upstreamIssues.length && upstreamIssues.every((issue) => issue.reference === true), JSON.stringify(row.health.issues));
+          assert.ok(upstreamIssues.some((issue) => issue.code === referenceCode), JSON.stringify(upstreamIssues));
+          assert.equal(f.state.statCalls.filter((call) => call.side === "upstream").length, 0, "上游读不到时不取上游用量");
+          assert.equal(row.rule.tokenName, "stable", "Key 名用绑定上存的，不用读到的目录");
+        } else {
+          assert.deepEqual([row.calculation.profitUsd, row.health.code], [null, usageCode], JSON.stringify(row.health));
+        }
+        // 页面「刷新」（观测）也一样，不出错
+        const [observed] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual" })).results;
+        assert.equal(observed.calculation.profitUsd, passes ? 2.5 : null, JSON.stringify(observed.health));
+        await f.module.refreshDue(Date.now());
+        const ledger = f.state.ledger.filter((entry) => entry.rule_id === "rr_live");
+        assert.deepEqual(ledger.map((entry) => [entry.cost_usd, entry.cost_basis, entry.revenue_usd, entry.detail.result.calculation.profitUsd]),
+          passes ? [[null, "fixed", 2.5, 2.5]] : [], "固定成本照常结账，上游用量没读，成本记空");
+        if (passes) {
+          // 读到的上游身份、Key 不进账本（上游账号可能已经换了人）；以前的每日记录不把这天说成「数据不完整」
+          const { ruleEvidence } = ledger[0].detail;
+          assert.deepEqual([ruleEvidence.upstreamIdentity, ruleEvidence.tokenId, ruleEvidence.tokenName], [null, 9, "stable"]);
+          assert.equal(ledger[0].detail.upstream?.tokenId, undefined, "快照里不记读到的 Key");
+          const history = await f.module.getConfirmedHistory("rr_live", { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") });
+          assert.deepEqual(history.records.map((record) => [record.sourceCompleteness, record.upstreamSource.tokenName]), [["complete", "stable"]]);
+        }
+      });
+    }
+  }
+});
+
+test("C1 第二轮：固定成本、上游账号换了人时，读到的目录不拿来改分段、不拿去读上游用量、不进快照（N1–N3）", async (t) => {
+  const reply = (host, pathname, body) => ({ host, pathname, body });
+  const otherAccount = [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } }),
+    // 8 号账号里也有一把 id 9 的 Key，名字一样，但在别的分组（倍率 2）
+    reply("upstream.test", "/api/token/", { success: true, data: { total: 1, items: [{ id: 9, user_id: 8, name: "stable", status: 1, group: "g2", cross_group_retry: false }] } })];
+  const setup = async (st, replies, options = {}) => {
+    const f = await completedDayFixture(st, options);
+    f.stations.find((station) => station.id === "upstream").fixedPurchases = [{ amount: 300, days: 30 }];
+    const prev = globalThis.fetch;
+    st.mock.method(globalThis, "fetch", async (input, init) => {
+      const url = new URL(String(input));
+      const hit = replies.find((item) => item.host === url.host && item.pathname === url.pathname);
+      if (hit) return { status: hit.body.success ? 200 : 500, text: async () => JSON.stringify(hit.body) };
+      return prev(input, init);
+    });
+    return f;
+  };
+  const segmentsOf = (f) => f.repository.tables.segments.filter((segment) => segment.rule_id === "rr_live")
+    .map((segment) => [segment.group_name, segment.group_ratio, segment.effective_to_ms]);
+
+  await t.test("N3 刷新今天以后，分段和倍率都不变", async (st) => {
+    const f = await setup(st, otherAccount);
+    const before = segmentsOf(f);
+    await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" });
+    await f.module.refreshDue(Date.now());
+    assert.deepEqual(segmentsOf(f), before, "不按别人的 Key 切到 g2");
+    assert.deepEqual(f.state.ratioWrites, []);
+  });
+
+  await t.test("N1 Key 用不了、本站账号也换了人：不拿那把 Key 去读上游用量", async (st) => {
+    const keyDisabled = reply("upstream.test", "/api/token/", { success: true, data: { total: 3, items: [
+      { id: 9, user_id: 7, name: "stable", status: 2, group: "g1", cross_group_retry: false },
+      { id: 10, user_id: 7, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+      { id: 11, user_id: 7, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } });
+    const f = await setup(st, [keyDisabled, reply("own.test", "/api/user/self", { success: true, data: { id: 9 } })]);
+    const [row] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" })).results;
+    assert.equal(row.health.code, "SOURCE_BINDING_UNCONFIRMED");
+    assert.equal(f.state.statCalls.filter((call) => call.side === "upstream").length, 0, "不读上游用量");
+    assert.notEqual(row.upstream?.state, "complete");
+  });
+
+  await t.test("N2 没有分段时提前返回：观测快照里不记别人的 Key", async (st) => {
+    const f = await setup(st, otherAccount);
+    f.repository.tables.segments = f.repository.tables.segments.filter((segment) => segment.rule_id !== "rr_live");
+    await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" });
+    const sources = f.repository.tables.snapshots.filter((row) => row.rule_id === "rr_live")
+      .map((row) => typeof row.source === "string" ? JSON.parse(row.source) : row.source);
+    assert.ok(sources.length, "写了观测快照");
+    assert.ok(sources.every((source) => source.upstream?.group !== "g2" && source.upstream?.ratio !== 2), "不记别人那把 Key 的分组、倍率");
+    assert.ok(sources.every((source) => source.ruleEvidence?.upstreamIdentity == null), "也不记换成的那个上游账号");
+  });
+});
+
+test("C1 固定成本的上游读不到时，面板类型按绑定存的；旧绑定没存就按上游站点的类型（Sub2API 不会被当成 New API）", async (t) => {
+  const f = await completedDayFixture(t, { metadataFailure: true });
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  Object.assign(upstream, { type: "sub2api", fixedPurchases: [{ amount: 300, days: 30 }] });
+  const live = f.rows.find((row) => row.id === "rr_live");
+  live.provider = null;
+  const [row] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" })).results;
+  assert.deepEqual([row.costBasis, row.calculation.profitUsd, row.amountBasis.conversion], ["fixed", 2.5, "provider_cost_usd"], JSON.stringify(row.health));
 });
 
 test("4a 固定采购上游：Key 还有没有其他用途没确认、上游分组目录取不到只作参考，毛利 = 收入、照常结账；按用量计成本的上游仍被挡住", async (t) => {

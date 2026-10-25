@@ -1375,7 +1375,7 @@ test("F03 genuine Sub2API verifies actual Key/date controls independently in eac
     assert.equal(url.host, "up.test");
     if (url.pathname.startsWith("/api/v1/keys/")) return Response.json({ code: 404, data: {} }, { status: 404 });
     const data = url.pathname === "/api/v1/auth/me" ? { id: 42 }
-      : url.pathname === "/api/v1/keys" ? { total: 2, items: [9, 10].map((id) => ({ id, user_id: 42, name: `Key ${id}`, status: "active", group_id: 1 })) }
+      : url.pathname === "/api/v1/keys" ? { total: 3, items: [9, 10, 11].map((id) => ({ id, user_id: 42, name: `Key ${id}`, status: "active", group_id: 1 })) }
         : { total_actual_cost: url.searchParams.get("api_key_id") === String(Number.MAX_SAFE_INTEGER)
           || url.searchParams.get("start_date") > "2026-10-09" || url.searchParams.get("timezone") === "America/New_York" ? 0 : 2 };
     if (url.pathname === "/api/v1/usage/stats") stats.push(Object.fromEntries(url.searchParams));
@@ -1395,9 +1395,14 @@ test("F03 genuine Sub2API verifies actual Key/date controls independently in eac
     assert.ok(stats.some((item) => item.timezone === timezone && item.start_date > "2026-10-09"));
   }
   assert.equal((await f.rt.channelOnboarding.connectBatch({ ...input, previewId: probe.previewId })).complete, true);
-  const zero = f.request([[3]]); zero.groups[0].reconciliation.timezone = "America/New_York";
+  // 还没绑过的 Key 11 按纽约：纽约这边账单全是 0，核验不了
+  const zero = f.request([[3]], [11]); zero.groups[0].reconciliation.timezone = "America/New_York";
   const unverified = await f.rt.channelOnboarding.probeBatch(zero);
   assert.equal(unverified.groups[0].status, "unverified"); assert.equal(f.state.created, 2);
+  // 已经按 UTC 绑好的 Key 9 换成纽约：C1 起绑定建好以后时区不能改
+  const moved = f.request([[3]], [9]); moved.groups[0].reconciliation.timezone = "America/New_York";
+  const immutable = await f.rt.channelOnboarding.probeBatch(moved);
+  assert.deepEqual([immutable.groups[0].status, immutable.groups[0].code], ["unavailable", "TIMEZONE_IMMUTABLE"]); assert.equal(f.state.created, 2);
 });
 
 test("F03 新建 Sub2API 账号在向导里核验的能力，确认保存时按同一身份读到，不会误报预览已变化", async (t) => {
@@ -1916,7 +1921,7 @@ test("U02 actual issuer拒绝取消声明与immutable Key变化，验证途中�
   assert.equal(f.state.ruleWrites, 1); assert.deepEqual(f.state.members.map((member) => member.channel_id), [1, 2]);
 });
 
-test("U02 actual HTTP一次preview一次PUT精确删除/同时增删/时区声明编辑，重启相同配置不延期", async (t) => {
+test("U02 actual HTTP一次preview一次PUT精确删除/同时增删/声明编辑，时区不能改，重启相同配置不延期", async (t) => {
   const f = await genuineBatchFixture(t), initial = f.request([[1, 2]]);
   const firstProbe = await f.rt.channelOnboarding.probeBatch(initial);
   const first = await f.rt.channelOnboarding.connectBatch({ ...initial, previewId: firstProbe.previewId });
@@ -1925,7 +1930,7 @@ test("U02 actual HTTP一次preview一次PUT精确删除/同时增删/时区声�
   const edits = [
     { upstreamStationId: f.supplier.id, tokenId: 9, salesChannelIds: [2], coverageDeclaration: { answer: "none" } },
     { upstreamStationId: f.supplier.id, tokenId: 9, salesChannelIds: [2, 3], coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [1] } },
-    { upstreamStationId: f.supplier.id, tokenId: 9, salesChannelIds: [2, 3], timezone: "UTC", coverageDeclaration: { answer: "unknown" } },
+    { upstreamStationId: f.supplier.id, tokenId: 9, salesChannelIds: [2, 3], coverageDeclaration: { answer: "unknown" } },
   ];
   let saved;
   for (const [index, input] of edits.entries()) {
@@ -1941,6 +1946,10 @@ test("U02 actual HTTP一次preview一次PUT精确删除/同时增删/时区声�
     assert.equal(saved.costCoverage, input.coverageDeclaration.answer === "none" ? "complete" : "unknown");
     assert.deepEqual(f.state.links, links); assert.equal(f.store.list().length, 2);
   }
+  // C1：改时区在预览这一步就拒绝，零写
+  const writes = f.state.ruleWrites;
+  const moved = await POST(request({ ...edits[2], timezone: "UTC" }), f.rt, { id });
+  assert.equal(moved.status, 400); assert.equal((await moved.json()).code, "TIMEZONE_IMMUTABLE"); assert.equal(f.state.ruleWrites, writes);
   f.state.now += 24 * 3600000; await f.restart(); await f.rt.channelOnboarding.sync();
   const repeated = await PUT(request(edits[2]), f.rt, { id });
   assert.equal(repeated.status, 200, JSON.stringify(await repeated.clone().json()));
@@ -1967,8 +1976,10 @@ test("U02 actual HTTP拒绝append跨操作/replace跨target/篡改最终set声�
   ];
   for (const body of bodies) {
     const rejected = await PUT(req(body), f.rt, { id });
-    assert.equal(rejected.status, 409, JSON.stringify(await rejected.clone().json()));
-    assert.equal((await rejected.json()).code, "PREVIEW_BASIS_CHANGED");
+    // 改时区（C1）在核对预览之前就拒绝
+    const [status, code] = body.timezone === "UTC" ? [400, "TIMEZONE_IMMUTABLE"] : [409, "PREVIEW_BASIS_CHANGED"];
+    assert.equal(rejected.status, status, JSON.stringify(await rejected.clone().json()));
+    assert.equal((await rejected.json()).code, code);
   }
   const acrossTarget = await PUT(req({ ...input, tokenId: 10, salesChannelIds: [4, 5], ...proof }), f.rt, { id: otherId });
   assert.equal(acrossTarget.status, 409); assert.ok(["PREVIEW_BASIS_CHANGED", "RULE_IDENTITY_IMMUTABLE"].includes((await acrossTarget.json()).code));
