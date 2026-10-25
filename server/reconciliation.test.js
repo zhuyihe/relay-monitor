@@ -6340,6 +6340,34 @@ test("修正切换时间后下一轮轮询重新结账昨天，以新结账记�
   assert.equal(yesterdayStatCalls(f), settledCalls, "重新结账完成后不再取昨天");
 });
 
+test("C2a 修正切换时间后重结昨天没成：10 分钟后再试，不是每轮都重取", async (t) => {
+  const transition = Date.parse("2026-10-08T04:00:00Z");
+  const f = await completedDayFixture(t, { segments: [{ id: "s1", group: "g1", from: 0, to: transition }, { id: "s2", group: "g1", from: transition }] });
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  await f.module.refreshDue(now);
+  await f.module.correctTransition("rr_live", "s2", transition - 3600000);
+  f.state.upstreamQuota = null; // 上游这时读不到
+  now += 60000;
+  let calls = yesterdayStatCalls(f);
+  await f.module.refreshDue(now);
+  assert.ok(yesterdayStatCalls(f) > calls, "第一次重结照常取");
+  assert.ok(f.rt._reconciliationResettles.has("rr_live"), "没成，请求还在");
+  for (let minute = 1; minute < 10; minute += 1) {
+    now += 60000;
+    calls = yesterdayStatCalls(f);
+    await f.module.refreshDue(now);
+    assert.equal(yesterdayStatCalls(f), calls, `第 ${minute} 分钟不重取`);
+  }
+  f.state.upstreamQuota = 50;
+  now += 60000;
+  calls = yesterdayStatCalls(f);
+  await f.module.refreshDue(now);
+  assert.ok(yesterdayStatCalls(f) > calls, "满 10 分钟再试");
+  assert.equal(f.rt._reconciliationResettles.has("rr_live"), false, "这次成了");
+  assert.deepEqual(f.state.ledgerWrites.at(-1), { ruleId: "rr_live", billDate: "2026-10-08", revision: 2, source: "resettle" });
+});
+
 test("1b同步来源时作废正在进行的计算：查询改用重新取的 Key 目录重算", async (t) => {
   // 第一次取上游账单时停住，模拟计算进行到一半。
   let gate = null, reached, release;
@@ -6846,14 +6874,23 @@ test("C2a 手动「重新读取」过去的整天走结账：结不成只更新�
 
 test("C2a 结账（settle）只写账本和状态行：不写观测快照、渠道状态、分段，不发告警", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
-  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  let ratio = 1;
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 },
+    metadataGroups: () => ({ g1: { ratio }, g2: { ratio: 2 } }) });
   // 先观测一轮今天，把渠道状态、分段、告警这些写好
   await f.module.queryRules({ preset: "today" }, { mode: "observe", force: true, origin: "manual" });
-  const before = { snapshots: f.repository.log.snapshotWrites.length, channels: f.state.channelStateWrites.length, ratios: f.state.ratioWrites.length, alerts: f.state.alertQueries };
+  // 过 11 分钟、分组倍率也变了：这时候观测会重写渠道状态的观测时刻、记一段新倍率；结账一样都不能写
+  now += 11 * 60000;
+  ratio = 1.5;
+  const counts = async () => ({ snapshots: f.repository.log.snapshotWrites.length, channels: f.state.channelStateWrites.length, ratios: f.state.ratioWrites.length,
+    segments: (await f.repository.listSegments("rr_live")).length, alerts: f.state.alertQueries });
+  const before = await counts();
   const result = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual" })).results[0];
   assert.ok(result.settledAt);
-  assert.deepEqual({ snapshots: f.repository.log.snapshotWrites.length, channels: f.state.channelStateWrites.length, ratios: f.state.ratioWrites.length, alerts: f.state.alertQueries },
-    before, "结账不写快照、渠道状态、分段，也不碰告警");
+  assert.deepEqual(await counts(), before, "结账不写快照、渠道状态、分段，也不碰告警");
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" });
+  const observed = await counts();
+  assert.ok(observed.channels > before.channels && observed.segments > before.segments, "对照：同样的情况下观测今天会写渠道状态、记新的一段");
   assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 1);
 });
 
@@ -6869,13 +6906,60 @@ test("C2a 轮询和手动同时固定同一天：账本只有一版，两边都�
   const point = hold;
   const manual = f.module.queryRules(window, { mode: "observe", force: true, origin: "manual" });
   await point.reached;
-  f.state.upstreamQuota = 120; // 上游后来又补了一点：手动那次算出来的数和账本不同
   await f.module.refreshDue(now);
+  f.state.upstreamQuota = 120; // 轮询结完以后上游又补了一点：手动那次接着取到的是 120，算出来的数和账本不同
   point.release();
   const manualResult = (await manual).results[0];
   const rows = f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
   assert.equal(rows.length, 1, "只有一版");
   assert.equal(manualResult.calculation.profitUsd, Number(rows[0].revenue_usd) - Number(rows[0].cost_usd), "手动那边也按账本那一版返回");
+  assert.equal(manualResult.upstream.amountUsd, Number(rows[0].cost_usd), "成本也是账本里那一版，不是手动自己取到的 120");
+});
+
+test("C2a 要人处理的日子到点只在本地重判：还挡着就不取账单、不强制重读、不计次数；原因没了下一轮才去结", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  let keyStatus = 2;
+  const f = await completedDayFixture(t, { clock: () => now });
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/token/") {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: 3, items: [
+        { id: 9, user_id: 7, name: "stable", status: keyStatus, group: "g1", cross_group_retry: false },
+        { id: 10, user_id: 7, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+        { id: 11, user_id: 7, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } }) };
+    }
+    return prev(input, init);
+  });
+  const yesterdayStart = COMPLETED_YESTERDAY.startMs / 1000;
+  const yesterdayReads = () => f.state.statCalls.filter((call) => call.start === yesterdayStart).length;
+  const catalogueReads = () => f.state.requests.filter((request) => request.host === "upstream.test" && request.path === "/api/token/").length;
+  const state = () => f.repository.tables.settlementState.find((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
+
+  await f.module.refreshDue(now);
+  assert.deepEqual([state().manual_reason, state().attempts, state().next_attempt_at_ms], ["KEY_INVALID_OR_DENIED", 0, now + 10 * 60000], "Key 停用了：要人处理");
+
+  // 满 10 分钟：在本地重判，Key 还是停用的——不取这天的账单，也不为它强制重读 Key 目录（目录 5 分钟到期照常读）
+  now += 10 * 60000;
+  let reads = yesterdayReads(), catalogues = catalogueReads();
+  await f.module.refreshDue(now);
+  assert.equal(yesterdayReads() - reads, 0, "不取这天的账单");
+  assert.equal(catalogueReads() - catalogues, 1, "Key 目录只按 5 分钟到期读一次");
+  assert.deepEqual([state().manual_reason, state().attempts, state().next_attempt_at_ms], ["KEY_INVALID_OR_DENIED", 0, now + 10 * 60000], "10 分钟后再判，不计次数");
+
+  // 上游把 Key 启用了：下一次重判发现原因没了，记下来；再下一轮先重读这个上游，再去结
+  keyStatus = 1;
+  now += 10 * 60000;
+  reads = yesterdayReads();
+  await f.module.refreshDue(now);
+  assert.equal(yesterdayReads() - reads, 0, "重判这一轮还不取账单");
+  assert.equal(state().last_detail.cleared, true);
+  now += 60000;
+  await f.module.refreshDue(now);
+  assert.ok(yesterdayReads() > reads, "下一轮去结");
+  assert.equal(state(), undefined, "结成了，状态行删掉");
+  assert.deepEqual(f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => row.bill_date), ["2026-10-08"]);
 });
 
 test("C2a 每小时清一批状态表：31 天前、没有重结请求的行；一小时内不重复清", async (t) => {

@@ -169,7 +169,6 @@ export function normalizeConfirmedHistoryOptions(input = {}, now = Date.now()) {
   return { startMs, endMs, limit: Math.min(50, requestedLimit), cursor: input.cursor ?? null, after };
 }
 
-// 记账时读最新一版只为比内容和带回固定时刻（ledgerWriteDecision）：不读 detail 这类大列
 // 结账状态表的读写（计划 C2a），MySQL 和内存两个仓库共用
 const SETTLEMENT_STATE_SELECT = ["rule_id", "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date", "retry_reason", "manual_reason", "manual_since_ms", "attempts",
   "next_attempt_at_ms", "first_failed_at_ms", "last_attempt_at_ms", "resettle_requested_at_ms", "resettle_reason", "source_version", "last_detail"].join(", ");
@@ -201,6 +200,7 @@ function billDateText(value) {
   return String(value ?? "");
 }
 
+// 记账时读最新一版只为比内容和带回固定时刻（ledgerWriteDecision）：不读 detail 这类大列
 const LEDGER_DECISION_SELECT = ["revision", "source", "timezone", "window_start_ms", "window_end_ms", "revenue_usd", "cost_usd",
   "revenue_rate", "cost_rate", "cost_basis", "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at"].join(", ");
 const LEDGER_SELECT = RECONCILIATION_LEDGER_COLUMNS.map((column) => column === "bill_date" ? "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date"
