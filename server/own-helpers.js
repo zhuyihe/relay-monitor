@@ -80,18 +80,18 @@ function costMatchScore(stUrl, chUrl) {
   return isBareHost(stUrl) && hostOf(chUrl) === stUrl ? 1 : 0;
 }
 
-// 返回与渠道地址最匹配的监控站；显式别名与站点主地址采用相同打分规则。
-export function matchCostStation(upstreams, channelUrl) {
+// 返回与渠道地址得分最高的所有监控站（没有对上的是空数组）；显式别名与站点主地址采用相同打分规则。
+// 同一个网站上有两个账号时，渠道地址对上几个就都算候选，具体是哪一个交给 Key 去分（K2a）
+export function matchCostStations(upstreams, channelUrl) {
   const chUrl = normalizeCostUrl(channelUrl);
-  let station = null, best = 0;
+  let stations = [], best = 0;
   for (const s of upstreams) {
     const urls = [s.baseUrl, ...(Array.isArray(s.costAliases) ? s.costAliases : [])];
-    for (const url of urls) {
-      const score = costMatchScore(normalizeCostUrl(url), chUrl);
-      if (score > best) { best = score; station = s; }
-    }
+    const score = Math.max(0, ...urls.map((url) => costMatchScore(normalizeCostUrl(url), chUrl)));
+    if (score > best) { best = score; stations = [s]; }
+    else if (score === best && score > 0) stations.push(s);
   }
-  return station;
+  return stations;
 }
 
 export function mapCostChannels(upstreams, channels) {
@@ -99,11 +99,13 @@ export function mapCostChannels(upstreams, channels) {
   const unmatched = new Map();
   for (const ch of channels) {
     const cu = normalizeCostUrl(ch.baseUrl);
-    const station = matchCostStation(upstreams, cu);
-    if (station) {
-      const entry = matched.get(station.id) || { station, channels: [] };
-      entry.channels.push(ch.name);
-      matched.set(station.id, entry);
+    const stations = matchCostStations(upstreams, cu);
+    if (stations.length) {
+      for (const station of stations) {
+        const entry = matched.get(station.id) || { station, channels: [] };
+        entry.channels.push(ch.name);
+        matched.set(station.id, entry);
+      }
     } else {
       // 没填地址的是直连模型厂商的官方渠道，不分类型合成一行
       const label = cu || "官方渠道";

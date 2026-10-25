@@ -29,6 +29,7 @@ const FILES = [
   "server/demo.js",
   "lib/brand.js",
   "lib/reconciliation-view.js",
+  "lib/upstream-merge-view.js",
   "lib/reconciliation-contract.js",
   "lib/workflow-actions.js",
   "lib/error-copy.js",

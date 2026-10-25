@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { queryNewApiReconciliationMetadata, queryReconciliationMetadata, queryAccountIdentity, queryKeyReconciliationStat, queryOwnChannels, queryStation } from "../lib/providers.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { describeError, errorCodeOf } from "../lib/error-copy.js";
-import { onboardingBaseUrl, publicOnboardingStation, onboardingConnectionPatch, normalizeBatchInput, ONBOARDING_TYPES, ACCOUNT_TYPE_VALUES,
+import { onboardingBaseUrl, storedIdentity, publicOnboardingStation, onboardingConnectionPatch, normalizeBatchInput, ONBOARDING_TYPES, ACCOUNT_TYPE_VALUES,
   coalesceVerifiedBatchGroups, normalizeBatchRecoveryIntent } from "../lib/channel-onboarding.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { completedBillingDayWindow, canonicalBillingKey, applyScopePolicy, normalizeRuleSourceBinding, reconciliationBillingSchedule } from "../lib/reconciliation-scope-policy.js";
@@ -125,14 +125,6 @@ function accountIdentity(connection, metadata) {
 function sameIdentity(first, second) {
   return !!first && !!second && first.provider === second.provider && first.accountId === second.accountId
     && onboardingBaseUrl(first.baseUrl) === onboardingBaseUrl(second.baseUrl);
-}
-
-function storedIdentity(station) {
-  if (!station || !ACCOUNT_TYPES.includes(station.type)) return null;
-  const identity = station.verifiedIdentity, provider = station.type.startsWith("sub2api") ? "sub2api" : "newapi";
-  const baseUrl = onboardingBaseUrl(station.baseUrl), accountId = String(identity?.accountId || "").trim();
-  return identity?.provider === provider && accountId && baseUrl && onboardingBaseUrl(identity.baseUrl) === baseUrl
-    ? { provider, baseUrl, accountId } : null;
 }
 
 function sameCredentials(first, second) {

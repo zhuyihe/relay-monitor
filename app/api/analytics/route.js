@@ -9,6 +9,8 @@ import {
 } from "../../../lib/business-time.js";
 import { amortizeFixedCost, costBasisOf, countsInProfit, purchasesOf, rateSnapshotOf } from "../../../lib/profit.js";
 import { hasRawWindowCoverage, summarizeCoverage } from "./coverage.js";
+import { dailyUsageRows } from "../../../server/station-usage.js";
+import { cachedMergeCounts } from "../../../server/upstream-merge.js";
 import { forEachPointWithBaseline, usageDropsAccumulator } from "../../../db/history.js";
 
 const r2 = (v) => Math.round(v * 100) / 100;
@@ -107,19 +109,8 @@ export const GET = withAuth(async (request, rt) => {
   const byId = new Map(stations.map((station) => [station.id, station]));
   const rateOf = (station) => rateSnapshotOf(station).cnyPerUsd;
 
-  // 每站每日消耗（$）：从日汇总读取，不随原始历史规模增长而变慢。
-  let dailyRows = [];
-  if (stationIds.length) {
-    [dailyRows] = await pool.query(
-      `SELECT station_id AS stationId,
-              DATE_FORMAT(date, '%Y-%m-%d') AS date,
-              used_usd AS usd
-       FROM station_daily_usage
-       WHERE station_id IN (?) AND date >= ? AND date <= ?
-       ORDER BY date, stationId`,
-      [stationIds, start, end]
-    );
-  }
+  // 每站每日消耗（$）：从日汇总读取，不随原始历史规模增长而变慢（合并上游清单的成本估算读同一份，server/station-usage.js）。
+  const dailyRows = await dailyUsageRows(pool, stationIds, start, end);
 
   let coverageBoundsRows = [];
   if (monitoredStationIds.length) {
@@ -245,6 +236,8 @@ export const GET = withAuth(async (request, rt) => {
     },
     coverage,
     stations: outStations,
+    // 有几个账号加成了几个上游、这里的总成本算了好几遍：成本估算页总成本下面那一行用（读不到是 null）
+    merge: await cachedMergeCounts(rt),
     daily,
     fixedDaily,
     heatmap,

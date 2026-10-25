@@ -35,6 +35,9 @@ import TrendModal, { TREND_TEXT } from "../trend-modal";
 import { buildStationView, resultIssue, testBalanceText, TYPES_MISSING_TEXT } from "./model";
 import type { StationCheck, StationView } from "./model";
 import { useAccountCenter } from "./account-center";
+import { MergeNotice, useMergeUpstreams } from "../../components/merge-upstreams";
+import type { MergeCounts } from "../../components/merge-upstreams";
+import { MERGE_TEXT } from "../../../lib/upstream-merge-view.js";
 import { StationDrawer } from "./station-drawer";
 import type { StationDrawerHandle } from "./station-drawer";
 
@@ -196,6 +199,7 @@ export default function StationsPage() {
   const [types, setTypes] = useState<any[]>([]);
   const [rules, setRules] = useState<any>({});
   const [loaded, setLoaded] = useState(false);
+  const [mergeCounts, setMergeCounts] = useState<MergeCounts>(null);
   const [loadingList, setLoadingList] = useState(true);
   // 每次读取资源后递增，上游账单随之重读
   const [accountsToken, setAccountsToken] = useState(0);
@@ -278,6 +282,7 @@ export default function StationsPage() {
       setListAt(Date.parse(r.generatedAt || "") || null);
       setTestedIds({});
       setSettings(r.settings);
+      setMergeCounts(r.merge ?? null);
       if (r.tz) setTz(r.tz);
       setLoaded(true);
       setLoadError(null);
@@ -292,6 +297,9 @@ export default function StationsPage() {
       setAccountsToken((n) => n + 1);
     }
   }, []);
+
+  // 合并重复的上游：列表顶上的提示和「合并记录」入口；抽屉里合并、退回成功后重读列表
+  const merge = useMergeUpstreams({ onChanged: () => { reload().catch(() => {}); } });
 
   const loadMeta = useCallback(async () => {
     setLoadingMeta(true);
@@ -1096,6 +1104,7 @@ export default function StationsPage() {
       {/* 外层包一层：隐藏的标签面板不参与页面的间距；渠道接入与上游账单首次打开后保持挂载，切换标签不丢状态 */}
       <div>
         <TabPanel idPrefix="stations" tabKey="list" active={view === "list"}>
+          <MergeNotice counts={mergeCounts} onOpen={merge.open} />
           <div className="jy-toolbar">
             <Input
               prefix={<Icon name="search" />}
@@ -1121,6 +1130,12 @@ export default function StationsPage() {
             <span className="spacer" />
             {/* 向每个在看余额的上游重新读一遍余额；顶栏的刷新只重新读本页 */}
             <Button icon={<Icon name="refresh" />} loading={refreshingAll} onClick={onRefreshAll}>{REFRESH}</Button>
+            {/* 合过以后留一项「合并记录」，打开同一个抽屉（只剩记录那一块） */}
+            {(mergeCounts?.records ?? 0) > 0 ? (
+              <Dropdown trigger={["click"]} menu={{ items: [{ key: "records", label: MERGE_TEXT.recordsMenu }], onClick: () => merge.open() }}>
+                <Button aria-label={COPY.more} icon={<Icon name="more" />} />
+              </Dropdown>
+            ) : null}
             {addButton}
           </div>
 
@@ -1213,6 +1228,7 @@ export default function StationsPage() {
       <TrendModal station={trendCur} onClose={() => setTrendStation(null)} settings={settings} rules={rules} tz={tz} />
 
       <StationDrawer ref={drawerRef} types={types} onSaved={onSaved} />
+      {merge.overlay}
     </div>
   );
 }

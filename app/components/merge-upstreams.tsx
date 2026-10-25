@@ -1,0 +1,315 @@
+"use client";
+// 合并重复的上游（K1a，design/ux/k1a-merge.md）：上游列表顶上的提示、成本估算总成本下面那一行、「合并重复的上游」抽屉
+// （一组一张卡片、合并确认、合并记录和退回）。字都在 lib/upstream-merge-view.js，这里只管摆。
+// 两个页面共用同一个抽屉：useMergeUpstreams 给页面一个 open() 和要挂的 overlay，合并或退回成功后调 onChanged 让页面重读。
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { App, Button, Drawer, Grid, Modal } from "antd";
+import { api } from "../../lib/client";
+import { describeError, errorText } from "../../lib/error-copy.js";
+import { MERGE_TEXT, groupView, mergeCostLineText, mergeFailureText, mergeNoticeText, recordView, resumeConfirm } from "../../lib/upstream-merge-view.js";
+import { workflowActionMeta } from "../../lib/workflow-actions.js";
+import { Skeleton } from "./data-state";
+import { ErrorDetail, noteOf } from "./error-detail";
+import { Sym } from "./icons";
+import { More } from "./more";
+import { useDrawerEscape } from "./drawer-escape";
+
+const VIEW = workflowActionMeta("view_merges")!;
+const GO_MERGE = workflowActionMeta("go_merge")!;
+const MERGE = workflowActionMeta("merge_upstream")!;
+const UNDO = workflowActionMeta("undo_merge")!;
+
+export type MergeCounts = { mergeable: number; blocked: number; accounts: number; upstreams: number; records?: number } | null | undefined;
+type Brief = { id: string; name: string };
+type MergeGroup = {
+  key: { provider: string; baseUrl: string; accountId: string };
+  retained: Brief & { baseUrl: string; createdAt: string | null };
+  merged: Brief[];
+  blockers: any[];
+  canMerge: boolean;
+  estimate?: any;
+  rateNote?: any;
+  versions?: Record<string, { authVersion: number; resourceVersion: string }>;
+};
+type MergeRecord = { mergeId: string; mergedAtMs: number; undoneAtMs: number | null; retained: Brief; merged: Brief[]; undoable: boolean; undoBlocked: { detail: string } | null };
+type MergeData = { groups: MergeGroup[]; records: MergeRecord[]; counts: MergeCounts; tz?: string };
+type ResumeTarget = { stationId: string; stationName: string; done: string; label: string; versions?: { authVersion: number; resourceVersion: string } };
+type Confirm = { kind: "merge"; group: MergeGroup } | { kind: "undo"; record: MergeRecord };
+
+// 上游列表顶上那条提示（有要合的才出现；info 样子，不进需处理）
+export function MergeNotice({ counts, onOpen }: { counts: MergeCounts; onOpen: () => void }) {
+  const text = mergeNoticeText(counts);
+  if (!text) return null;
+  return (
+    <div className="jy-banner jy-banner--info jy-merge-notice" role="status" data-testid="merge-notice">
+      <Sym kind="info" />
+      <div className="jy-banner__body"><span>{text}</span></div>
+      <Button type="link" size="small" onClick={onOpen}>{VIEW.label}</Button>
+    </div>
+  );
+}
+
+// 成本估算总成本下面那一行灰字
+export function MergeCostLine({ counts, onOpen }: { counts: MergeCounts; onOpen: () => void }) {
+  const text = mergeCostLineText(counts);
+  if (!text) return null;
+  return (
+    <div className="jy-caption jy-merge-costline" data-testid="merge-cost-line">
+      {text} <Button type="link" size="small" onClick={onOpen}>{GO_MERGE.label}</Button>
+    </div>
+  );
+}
+
+export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}) {
+  const { message } = App.useApp();
+  const router = useRouter();
+  const screens = Grid.useBreakpoint();
+  const compact = screens.md === false;
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<MergeData | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<unknown>(null);
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [busy, setBusy] = useState(false);
+  // refresh：这一组、这次合并在别处变了，不给「再试一次」（只会一直失败），按钮是「刷新」
+  const [failure, setFailure] = useState<{ text: string; raw: unknown; refresh?: boolean } | null>(null);
+  const [resume, setResume] = useState<ResumeTarget | null>(null);
+  const [resumeBusy, setResumeBusy] = useState(false);
+  // refresh：这个上游在清单读出来以后被改过，写一句让人刷新，按钮换成「刷新」
+  const [resumeFailure, setResumeFailure] = useState<{ text: string; raw: unknown; refresh?: boolean } | null>(null);
+  const seq = useRef(0);
+
+  const load = useCallback(async () => {
+    const mine = ++seq.current;
+    setLoading(true);
+    try {
+      const result: MergeData = await api("/api/upstream-merges");
+      if (mine === seq.current) { setData(result); setLoadError(null); }
+      return result;
+    } catch (error) {
+      if (mine === seq.current) setLoadError(error);
+      return null;
+    } finally {
+      if (mine === seq.current) setLoading(false);
+    }
+  }, []);
+
+  // 重新打开先不显示上次的卡片：那是合并、退回之前的样子
+  const openDrawer = useCallback(() => { setOpen(true); setConfirm(null); setFailure(null); setData(null); setLoadError(null); void load(); }, [load]);
+  const closeDrawer = useCallback(() => { if (!busy) { setOpen(false); setConfirm(null); setFailure(null); } }, [busy]);
+  useDrawerEscape(open && !confirm, closeDrawer);
+  useEffect(() => () => { seq.current += 1; }, []);
+
+  async function submit() {
+    if (!confirm || busy) return;
+    const merging = confirm.kind === "merge";
+    setBusy(true);
+    setFailure(null);
+    try {
+      if (confirm.kind === "merge") {
+        await api("/api/upstream-merges", { body: { retainedId: confirm.group.retained.id, mergedIds: confirm.group.merged.map((station) => station.id) } });
+        message.success(MERGE_TEXT.mergedToast(confirm.group.merged.length));
+        // 重读清单失败也不能让合好的那一组还挂在卡片里
+        const merged = confirm.group.retained.id;
+        setData((current) => (current ? { ...current, groups: current.groups.filter((group) => group.retained.id !== merged) } : current));
+      } else {
+        await api("/api/upstream-merges/undo", { body: { mergeId: confirm.record.mergeId } });
+        message.success(MERGE_TEXT.undoneToast);
+      }
+      setConfirm(null);
+      await load();
+      onChanged?.();
+    } catch (error: any) {
+      if (String(error?.code || "").startsWith("UPSTREAM_MERGE_") || error?.status === 409) {
+        // 这一组、这次合并在别处变了：再试只会一直失败，让人刷新（按 §8.2「内容有变化」说）
+        setFailure({ text: merging ? MERGE_TEXT.changedGroup : MERGE_TEXT.changedRecord, raw: noteOf(error).raw, refresh: true });
+      } else {
+        setFailure({ text: mergeFailureText(merging ? "合并" : "退回", errorText(error)), raw: noteOf(error).raw });
+        // 断网、超时：库里到底有没有改成，重读一次清单才知道，页面先跟着现状
+        void load();
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 「刷新」：重读清单、关掉确认框
+  function refreshAfterChange() {
+    setConfirm(null);
+    setFailure(null);
+    void load();
+    onChanged?.();
+  }
+
+  // 合不了的那一组的按钮：去一个地方改（处理重复、编辑上游），或先问一句再就地恢复被暂停的那个上游（改成一样以后回来就能合）
+  function runAction(action: any, group: MergeGroup) {
+    if (action.kind === "link") { setOpen(false); router.push(action.href); return; }
+    setResumeFailure(null);
+    setResume({ stationId: action.stationId, stationName: action.stationName, done: action.done, label: action.label, versions: group.versions?.[action.stationId] });
+  }
+
+  async function submitResume() {
+    if (!resume || resumeBusy) return;
+    setResumeBusy(true);
+    setResumeFailure(null);
+    try {
+      // 带着清单上看到的版本号去改：这个上游在这期间变过就不照旧写回去
+      await api(`/api/stations/${encodeURIComponent(resume.stationId)}`, { method: "PUT", body: { monitorEnabled: true,
+        ...(resume.versions ? { expectedAuthVersion: resume.versions.authVersion, expectedResourceVersion: resume.versions.resourceVersion } : {}) } });
+      message.success(resume.done);
+      setResume(null);
+      await load();
+      onChanged?.();
+    } catch (error: any) {
+      // 版本对不上（这个上游在这期间被改过）：和合并碰上 409 一样，写一句「刷新后再看」，按钮是「刷新」
+      const changed = error?.status === 409 || describeError(error).category === "changed";
+      setResumeFailure({ text: changed ? MERGE_TEXT.changedStation : errorText(error), raw: noteOf(error).raw, refresh: changed });
+      if (!changed) void load();
+    } finally {
+      setResumeBusy(false);
+    }
+  }
+
+  // 恢复监控的确认框里点「刷新」：重读清单、关掉确认框
+  function refreshAfterResume() {
+    setResume(null);
+    setResumeFailure(null);
+    void load();
+    onChanged?.();
+  }
+
+  const tz = data?.tz;
+  const groups = data?.groups || [];
+  const records = data?.records || [];
+
+  const card = (group: MergeGroup) => {
+    const view = groupView(group, { tz });
+    return (
+      <section key={group.retained.id} className={`jy-merge-card${group.canMerge ? "" : " jy-merge-card--blocked"}`} aria-label={view.heading}>
+        <h3 className="jy-merge-card__title">
+          {view.heading} <span className="jy-tag jy-tag--type">{view.count}</span>
+          {group.canMerge ? null : <span className="jy-tag jy-tag--warn">{MERGE_TEXT.cannotMerge}</span>}
+        </h3>
+        <p className="jy-merge-card__line"><b>{view.mergeLine}</b></p>
+        <p className="jy-merge-card__line jy-merge-card__line--soft">{view.whyLine}</p>
+        {group.canMerge ? null : view.blocked.map((text) => <p key={text} className="jy-merge-card__blocked"><b>{text}</b></p>)}
+        <div className="jy-merge-card__rows">
+          {view.noUsageNote ? <p className="jy-caption jy-merge-card__nousage" data-testid="merge-no-usage">{view.noUsageNote}</p> : view.rows.map((row) => (
+            <div key={row.days} className="jy-merge-card__row jy-num">
+              <span className="jy-merge-card__label">{row.label}</span>
+              <span>{row.before} → {row.after}</span>
+            </div>
+          ))}
+          <span className="jy-merge-card__times">{view.times}</span>
+        </div>
+        {view.estimateNote ? <p className="jy-caption">{view.estimateNote}</p> : null}
+        {group.canMerge ? <p className="jy-caption">{view.afterMerge}</p> : null}
+        {group.canMerge && view.rateNote ? <p className="jy-caption" data-testid="merge-rate-note">{view.rateNote}</p> : null}
+        <div className="jy-merge-card__actions">
+          {view.action ? <Button onClick={() => runAction(view.action, group)}>{view.action.label}</Button> : null}
+          <Button type="primary" disabled={!group.canMerge} onClick={() => { setFailure(null); setConfirm({ kind: "merge", group }); }}>{MERGE.label}</Button>
+        </div>
+      </section>
+    );
+  };
+
+  const recordRow = (record: MergeRecord) => {
+    const view = recordView(record, { tz });
+    return (
+      <li key={record.mergeId} className="jy-merge-record">
+        <span className="jy-merge-record__when jy-num">{view.when}</span>
+        <span className="jy-merge-record__text">{view.text}</span>
+        {view.undone ? <span className="jy-caption">{view.undone}</span> : (
+          <Button size="small" disabled={!record.undoable} title={view.blocked || undefined} onClick={() => { setFailure(null); setConfirm({ kind: "undo", record }); }}>{UNDO.label}</Button>
+        )}
+        {/* 退回不了的原因写在这一行下面：悬停提示键盘、读屏、手机都读不到 */}
+        {view.blocked ? <span className="jy-caption jy-merge-record__why">{view.blocked}</span> : null}
+      </li>
+    );
+  };
+
+  const records_block = records.length ? (
+    <More label={MERGE_TEXT.recordsSummary(records.length)} className="jy-merge-records">
+      <ul className="jy-merge-records__list">{records.map(recordRow)}</ul>
+    </More>
+  ) : null;
+
+  const confirmView = confirm?.kind === "merge" ? groupView(confirm.group, { tz }).confirm : confirm ? recordView(confirm.record, { tz }).confirm : null;
+  const confirmLabel = confirm?.kind === "merge" ? MERGE.label : UNDO.label;
+
+  const overlay = (
+    <>
+      <Drawer
+        className="jy-drawer"
+        title={MERGE_TEXT.title}
+        open={open}
+        placement={compact ? "bottom" : "right"}
+        size={compact ? "100%" : 560}
+        keyboard={false}
+        onClose={closeDrawer}
+      >
+        <div className="jy-merge-drawer" data-testid="merge-drawer">
+          <p className="jy-caption">{MERGE_TEXT.intro}</p>
+          {loadError && !data ? (
+            <div className="jy-banner jy-banner--crit" role="alert">
+              <Sym kind="crit" />
+              <div className="jy-banner__body"><b>{MERGE_TEXT.loadFailed}</b><span>{errorText(loadError)}</span><ErrorDetail raw={noteOf(loadError).raw} /></div>
+              <Button size="small" loading={loading} onClick={() => void load()}>{MERGE_TEXT.retry}</Button>
+            </div>
+          ) : !data ? <><Skeleton height={96} /><Skeleton height={96} style={{ marginTop: 12 }} /></> : groups.length ? groups.map(card) : <p className="jy-muted" data-testid="merge-empty">{MERGE_TEXT.empty}</p>}
+          {records_block}
+        </div>
+      </Drawer>
+      <Modal
+        title={confirmView?.title}
+        open={!!confirm}
+        className="jy-merge-modal"
+        onCancel={() => { if (!busy) { setConfirm(null); setFailure(null); } }}
+        closable={!busy}
+        mask={{ closable: !busy }}
+        keyboard={!busy}
+        confirmLoading={busy}
+        onOk={() => (failure?.refresh ? refreshAfterChange() : void submit())}
+        okText={failure?.refresh ? MERGE_TEXT.refresh : failure ? MERGE_TEXT.retry : confirmLabel}
+        cancelText={MERGE_TEXT.confirmCancel}
+        cancelButtonProps={{ disabled: busy }}
+        width={520}
+      >
+        {failure ? (
+          <div className="jy-banner jy-banner--crit" role="alert">
+            <Sym kind="crit" />
+            <div className="jy-banner__body"><b>{failure.text}</b><ErrorDetail raw={failure.raw} /></div>
+          </div>
+        ) : null}
+        {confirmView?.lines.map((line: string) => <p key={line}>{line}</p>)}
+        <p className="jy-caption">{confirmView?.hint}</p>
+      </Modal>
+      <Modal
+        title={resume ? resumeConfirm(resume.stationName).title : ""}
+        open={!!resume}
+        className="jy-merge-modal"
+        onCancel={() => { if (!resumeBusy) { setResume(null); setResumeFailure(null); } }}
+        closable={!resumeBusy}
+        mask={{ closable: !resumeBusy }}
+        keyboard={!resumeBusy}
+        confirmLoading={resumeBusy}
+        onOk={() => (resumeFailure?.refresh ? refreshAfterResume() : void submitResume())}
+        okText={resumeFailure?.refresh ? MERGE_TEXT.refresh : resume ? resumeConfirm(resume.stationName).ok : ""}
+        cancelText={MERGE_TEXT.confirmCancel}
+        cancelButtonProps={{ disabled: resumeBusy }}
+        width={520}
+      >
+        {resumeFailure ? (
+          <div className="jy-banner jy-banner--crit" role="alert">
+            <Sym kind="crit" />
+            <div className="jy-banner__body"><b>{resumeFailure.text}</b><ErrorDetail raw={resumeFailure.raw} /></div>
+          </div>
+        ) : null}
+        <p>{resume ? resumeConfirm(resume.stationName).line : ""}</p>
+      </Modal>
+    </>
+  );
+
+  return { open: openDrawer, overlay };
+}

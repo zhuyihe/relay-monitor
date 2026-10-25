@@ -709,3 +709,35 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 @media (prefers-reduced-motion: reduce) {
   .jy-shell *, .jy-shell *::before, .jy-shell *::after { transition-duration: 0.01ms !important; transition-delay: 0s !important; animation-duration: 0.01ms !important; animation-delay: 0s !important; animation-iteration-count: 1 !important; }
 }
+
+/* 合并重复的上游（K1a，app/components/merge-upstreams.tsx）：抽屉里一组一张卡片，合不了的卡片底色发黄，合并记录收在最下面 */
+.jy-merge-drawer { display: flex; flex-direction: column; gap: 12px; padding-top: 8px; }
+.jy-merge-drawer > p { margin: 0; }
+.jy-merge-card { display: flex; flex-direction: column; gap: 6px; padding: 14px 16px; border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); background: var(--jy-sheet); }
+.jy-merge-card--blocked { background: var(--jy-warn-tint); }
+.jy-merge-card__title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; line-height: 22px; font-weight: 600; }
+.jy-merge-card p { margin: 0; }
+.jy-merge-card__line--soft { color: var(--jy-ink-2); }
+.jy-merge-card__blocked { color: var(--jy-warn-ink); }
+.jy-merge-card__rows { display: grid; grid-template-columns: 1fr auto; align-items: center; row-gap: 2px; column-gap: 16px; }
+.jy-merge-card__row { grid-column: 1; display: flex; gap: 24px; }
+.jy-merge-card__label { min-width: 56px; color: var(--jy-ink-2); }
+.jy-merge-card__nousage { grid-column: 1; grid-row: 1 / span 2; margin: 0; }
+.jy-merge-card__times { grid-column: 2; grid-row: 1 / span 2; font-size: 13px; color: var(--jy-ink-2); text-align: right; }
+.jy-merge-card__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.jy-merge-records { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--jy-rule); }
+.jy-merge-records__list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+/* 有「退回不了」原因的那一行要换行（原因占满一行），桌面也一样：不换行的话「并进」那一段文字会被压成 0 宽 */
+.jy-merge-record { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.jy-merge-record__when { flex: none; color: var(--jy-ink-3); font-size: 13px; }
+.jy-merge-record__text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.jy-merge-record__why { flex-basis: 100%; }
+@media (max-width: 767px) {
+  .jy-merge-card__rows { grid-template-columns: 1fr; }
+  .jy-merge-card__nousage { grid-row: auto; }
+  .jy-merge-card__times { grid-column: 1; grid-row: auto; text-align: left; }
+  .jy-merge-card__actions .ant-btn { min-height: 44px; }
+  .jy-merge-record .ant-btn { min-height: 44px; }
+  /* 提示条里的「查看」「去合并」、确认框里的按钮：手机上点的地方至少 44 高 */
+  .jy-merge-notice .ant-btn, .jy-merge-costline .ant-btn, .jy-merge-modal .ant-btn { min-height: 44px; }
+}
