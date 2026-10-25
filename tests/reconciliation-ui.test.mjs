@@ -3107,7 +3107,8 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
   }
   // 每日收入只画收入：图例里没有上游成本，也没有每日净利；表格只有日期和收入两列、没有合计行（合计在等式里）
   await income.locator(".jy-legend").getByText("收入", { exact: true }).waitFor();
-  assert.equal(await income.getByText("上游成本").count(), 0); assert.equal(await income.getByText("每日净利").count(), 0);
+  // 说明里那句「上游成本在成本估算里看。」不算：只查图例
+  assert.equal(await income.locator(".jy-legend").getByText("上游成本").count(), 0); assert.equal(await income.getByText("每日净利").count(), 0);
   await income.getByRole("button", { name: "表格", exact: true }).click();
   await income.locator("table").waitFor();
   assert.deepEqual((await income.locator("thead th").allInnerTexts()).map((x) => x.trim()), ["日期", "收入"]);
