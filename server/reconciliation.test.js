@@ -4512,6 +4512,72 @@ async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", clock = nu
   return { ...f, rows, catalogue, channels };
 }
 
+test("P1a 轮询省请求和写入：自营 /api/status 每轮一次；全站没有新的消费就沿用渠道收费；渠道状态、「今天」快照没变不写，满 10 分钟照写", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1, 4], rr_two: [2], rr_three: [3] } });
+  let siteQuota = 0;
+  const siteCalls = [];
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !url.searchParams.has("channel")) {
+      siteCalls.push([Number(url.searchParams.get("start_timestamp")), Number(url.searchParams.get("end_timestamp"))]);
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota: siteQuota } }) };
+    }
+    return prev(input, init);
+  });
+  const ownCalls = (path) => f.state.requests.filter((request) => request.host === "own.test" && request.path === path).length;
+  const todayWrites = () => f.repository.log.snapshotWrites.filter((entry) => entry.source?.window?.preset === "today").length;
+  const round = async () => {
+    const before = { status: ownCalls("/api/status"), channel: ownCalls("/api/log/stat"), states: f.state.channelStateWrites.length, today: todayWrites(), site: siteCalls.length };
+    await f.module.refreshDue(now);
+    return { status: ownCalls("/api/status") - before.status, channel: ownCalls("/api/log/stat") - before.channel,
+      states: f.state.channelStateWrites.length - before.states, today: todayWrites() - before.today, site: siteCalls.length - before.site };
+  };
+
+  // 第一轮：没有上一轮可比，照旧逐个渠道读（今天 4 个渠道 + 结昨天 4 个）；三条绑定共用一次 /api/status
+  assert.deepEqual(await round(), { status: 1, channel: 8, states: 4, today: 3, site: 0 });
+  const first = (await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" })).results.map((row) => row.downstream.amountUsd);
+
+  // 一分钟后，全站这段时间没有新的消费：一个渠道请求都不发，沿用；渠道状态没变，不写。
+  // 「今天」快照这一轮还会写一次：第一轮才写下渠道状态的变化时刻，快照里的渠道带上了它（内容真的变了）
+  now += 60000;
+  assert.deepEqual(await round(), { status: 0, channel: 0, states: 0, today: 3, site: 1 });
+  assert.deepEqual(siteCalls.at(-1), [Math.floor((now - 60000) / 1000), Math.floor(now / 1000)], "从上一轮查过的那一秒查到现在");
+  const reused = (await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" })).results;
+  assert.ok(reused.every((row) => row.window.endMs === now && row.downstream.window.endMs === now), "沿用的收费，窗口终点换成这次的");
+  assert.deepEqual(reused.map((row) => row.downstream.amountUsd), first);
+  const fresh = (await f.module.queryRules({ preset: "today" }, { mode: "evaluate", force: true, origin: "manual" })).results;
+  assert.deepEqual(fresh.map((row) => [row.downstream.amountUsd, row.calculation.profitUsd]), reused.map((row) => [row.downstream.amountUsd, row.calculation.profitUsd]),
+    "和现读的一样");
+
+  // 再一分钟，还是没有新的消费：什么都不读、不写
+  now += 60000;
+  assert.deepEqual(await round(), { status: 0, channel: 0, states: 0, today: 0, site: 1 });
+
+  // 又过一分钟，有了新的消费：照旧逐个渠道读，金额变了，「今天」快照照写
+  now += 60000; siteQuota = 5; f.state.ownQuota = 300;
+  assert.deepEqual(await round(), { status: 1, channel: 4, states: 0, today: 3, site: 1 });
+
+  // 再一分钟没有新的消费，但渠道 4 在自营站点里停用了：只写这一个渠道的状态（同一条绑定里的渠道 1 没变，不写）
+  now += 60000; siteQuota = 0;
+  f.channels.find((channel) => channel.id === 4).status = 2;
+  f.rt._reconciliationOwnChannelsCache.clear();
+  assert.deepEqual(await round(), { status: 0, channel: 0, states: 1, today: 1, site: 1 });
+  // 之后满 10 分钟，渠道状态的观测时刻和「今天」快照照写（不发渠道请求）
+  now += 10 * 60000;
+  assert.deepEqual(await round(), { status: 0, channel: 0, states: 4, today: 3, site: 1 });
+
+  // 全站那一次读失败：这一轮照旧逐个读
+  now += 60000;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !url.searchParams.has("channel")) { siteCalls.push(null); return { status: 500, text: async () => "{}" }; }
+    return prev(input, init);
+  });
+  assert.equal((await round()).channel, 4);
+});
+
 test("B1 结果缓存按请求比：「今天」过了半分钟再单独重读一条，别的绑定照样用缓存里的账单（截止点不同也是同一段）", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now });
