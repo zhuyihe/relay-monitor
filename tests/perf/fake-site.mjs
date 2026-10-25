@@ -208,7 +208,8 @@ function* testEvents(s, e, channel = 0) {
   }
 }
 // 用户列表里的角色可以覆盖（R1 审核用）：FAKE_USER_ROLES="1:1,450:100" 把 root 列成普通用户、user450 列成超级管理员，
-// 用来量「管理员很少自己用」的站（夹具默认 root、admin2、ops3 是管理员，也是用得最多的前三个用户）。只改 /api/user/ 列表里的 role
+// 用来量「管理员很少自己用」的站（夹具默认 root、admin2、ops3 是管理员；按用量 root 排第 135、admin2 第 108、ops3 第 81，
+// admin2、ops3 唯一的 Key 都标了转售）。只改 /api/user/ 列表里的 role
 const ROLE_OVERRIDES = new Map((process.env.FAKE_USER_ROLES || "").split(",").filter(Boolean).map((x) => x.split(":").map(Number)));
 const roleOf = (u) => ROLE_OVERRIDES.get(u.id) ?? u.role;
 const testLogItem = ({ n, c, t }) => ({ id: TEST_ID_BASE + n * N_CH + c, user_id: 1, created_at: t, type: 2, content: TEST_NAME, username: "root",
@@ -218,6 +219,19 @@ const testLogItem = ({ n, c, t }) => ({ id: TEST_ID_BASE + n * N_CH + c, user_id
 // 按 username=root 查（可以再加 channel、token_name=模型测试）也要查得到它们，和真 New API 一样
 const testInFilter = (q) => TEST_LOGS && q.get("username") === "root" && !q.get("model_name") && !q.get("group")
   && (!q.get("token_name") || q.get("token_name") === TEST_NAME);
+// 按 username 筛时，从新到旧逐条给出这个用户的事件；整小时里这个用户一条都没有的（按小时预聚合看）整段跳过，
+// 不然 7 天约 70 万条、30 天约 300 万条每个请求都要逐条解一遍，假站点自己就慢到让应用超时（真站点有索引）
+function* userEventsDesc(kFirst, kLast, filter, userIdx) {
+  if (kLast < kFirst) return;
+  agg.ensureHours(Math.floor((nowSec() - epoch0) / HOUR));
+  const userA = agg.userA(), ev = {};
+  for (let H = agg.hourOf(agg.em.tOf(kLast)); H >= agg.hourOf(agg.em.tOf(kFirst)); H--) {
+    if (userIdx >= 0 && H < agg.nh && userA[(H * N_USERS + userIdx) * 3] === 0) continue;
+    const hk0 = Math.max(agg.em.kAt(epoch0 + H * HOUR), kFirst), hk1 = Math.min(agg.em.kAt(epoch0 + (H + 1) * HOUR) - 1, kLast);
+    for (let k = hk1; k >= hk0; k--) { agg.em.decode(k, ev); if (filter(ev)) yield ev; }
+  }
+}
+const userIdxOf = (q) => { const name = q.get("username"); return name ? USERS.findIndex((u) => u.username === name) : -1; };
 const testQuotaIn = (s, e, channel = 0) => { let q = 0; for (const ev of testEvents(s, e, channel)) q += testQuota(ev.c); return q; };
 
 function logItem(ev) {
@@ -284,7 +298,12 @@ function ownSite(rest, q, req) {
       if (TEST_LOGS && tokenName === TEST_NAME) return [200, ok({ quota: testQuotaIn(s, e, channel), rpm: 0, tpm: 0 })];
       if (onlyChannel) quota = channelQuota(agg, [channel], s, e)[channel] + testQuotaIn(s, e, channel);
       else if (!filter) { const all = channelQuota(agg, CHANNELS.map((c) => c.id), s, e); for (let c = 1; c <= N_CH; c++) quota += all[c]; quota += testQuotaIn(s, e); }
-      else { agg.scan(s, e, null, (ev) => { if (filter(ev)) quota += ev.quota; }); if (testInFilter(q)) quota += testQuotaIn(s, e, channel); }
+      else {
+        const ui = userIdxOf(q), userOnly = ui >= 0 && !channel && !q.get("model_name") && !q.get("group") && !tokenName;
+        // 只按 username 筛：整小时走按用户的预聚合，零头逐条
+        agg.scan(s, e, userOnly ? (H) => { quota += agg.userA()[(H * N_USERS + ui) * 3 + 1]; } : null, (ev) => { if (filter(ev)) quota += ev.quota; });
+        if (testInFilter(q)) quota += testQuotaIn(s, e, channel);
+      }
       return [200, ok({ quota, rpm: 0, tpm: 0 })];
     }
     case "/api/log/": {
@@ -311,7 +330,7 @@ function ownSite(rest, q, req) {
       } else if (testInFilter(q)) {
         // root 名下：普通日志和测试日志按时刻（同一秒按编号）从新到旧合起来分页
         const from = (p - 1) * size;
-        const regular = (function* () { const ev = {}; for (let k = kLast; k >= kFirst; k--) { agg.em.decode(k, ev); if (filter(ev)) yield logItem(ev); } })();
+        const regular = (function* () { for (const ev of userEventsDesc(kFirst, kLast, filter, userIdxOf(q))) yield logItem(ev); })();
         const tests = (function* () { for (const ev of testEvents(s, e, num(q.get("channel"), 0))) yield testLogItem(ev); })();
         let a = regular.next(), b = tests.next();
         while (!a.done || !b.done) {
@@ -322,11 +341,8 @@ function ownSite(rest, q, req) {
           total++;
         }
       } else {
-        const ev = {};
         const from = (p - 1) * size;
-        for (let k = kLast; k >= kFirst; k--) {
-          agg.em.decode(k, ev);
-          if (!filter(ev)) continue;
+        for (const ev of userEventsDesc(kFirst, kLast, filter, userIdxOf(q))) {
           if (total >= from && total < from + size) items.push(logItem(ev));
           total++;
         }
