@@ -560,8 +560,8 @@ export default function NotificationsPage() {
     </span>
   );
 
-  // 通知方式一个一行；多时只露规则那块放得下的几个（1440 宽时 4 个，和运营总览「需处理」露 2 条同一个做法），启用的在前，其余收进「还有 N 个通知方式」，页面高度不跟着个数涨（ui-design-spec §5.7）
-  const CHANNELS_SHOWN = 4;
+  // 通知方式一个一行；多时只露规则那块放得下的几个（1440 宽时 2 个：每个约 107 高，露 2 个时右栏正好和规则一样高；和运营总览「需处理」露 2 条同一个做法），启用的在前，其余收进「还有 N 个通知方式」，页面高度不跟着个数涨（ui-design-spec §5.7）
+  const CHANNELS_SHOWN = 2;
   const channelsSorted = [...channels].sort((a: any, b: any) => Number(a.enabled === false) - Number(b.enabled === false));
   const channelsLead = channelsSorted.slice(0, CHANNELS_SHOWN);
   const channelsRest = channelsSorted.slice(CHANNELS_SHOWN);

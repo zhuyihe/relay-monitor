@@ -3530,7 +3530,7 @@ test("告警中心 8 + 4、系统设置两栏（1440）：通知方式一个一�
   assert.equal(await pace.getAttribute("class"), "jy-more__toggle"); assert.equal(await pace.getAttribute("aria-expanded"), "false");
   assert.equal(await rulesP.getByLabel(NOTIFICATIONS_COPY.renotify, { exact: true }).count(), 0);
   await pace.click(); await rulesP.getByLabel(NOTIFICATIONS_COPY.renotify, { exact: true }).waitFor();
-  // 通知方式多时只露前 4 个（启用的在前），其余收进「还有 N 个」：6 个和 12 个时整页一样高
+  // 通知方式多时只露前 2 个（启用的在前），其余收进「还有 N 个」：6 个和 12 个时整页一样高
   const many = (n) => Array.from({ length: n }, (_, i) => ({ id: `c${i}`, name: `通知${i}`, type: "telegram", enabled: i !== 0, config: {}, hasSecret: {} }));
   const pageHeight = async (n) => {
     channels = many(n); await page.reload(); await chP.locator(".jy-notifications-chlist > li").first().waitFor();
@@ -3538,8 +3538,11 @@ test("告警中心 8 + 4、系统设置两栏（1440）：通知方式一个一�
   };
   const h6 = await pageHeight(6), h12 = await pageHeight(12);
   assert.equal(h12, h6, `页面高度不随通知方式个数涨（6 个 ${h6}，12 个 ${h12}）`);
-  assert.equal(await chP.locator(".jy-notifications-chlist > li").count(), 4);
-  await chP.getByRole("button", { name: NOTIFICATIONS_COPY.moreChannels(8), exact: true }).waitFor();
+  assert.equal(await chP.locator(".jy-notifications-chlist > li").count(), 2);
+  await chP.getByRole("button", { name: NOTIFICATIONS_COPY.moreChannels(10), exact: true }).waitFor();
+  // 12 个时规则那块也不被右栏撑出空白：规则最后一行内容（提醒节奏那一句）到面板底边，除了面板自己的下内边距（24），不超过一行字
+  const [rule12, last12] = [await rulesP.boundingBox(), await rulesP.locator(".jy-notifications-pad").boundingBox()];
+  assert.ok((rule12.y + rule12.height) - (last12.y + last12.height) <= 24, `12 个时规则内容下面空了 ${Math.round((rule12.y + rule12.height) - (last12.y + last12.height))}`);
   // 停用的排在后面
   assert.equal(await chP.locator(".jy-notifications-chlist > li").first().getByText("通知1", { exact: true }).count(), 1);
   channels = two;
