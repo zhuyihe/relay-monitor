@@ -5143,6 +5143,47 @@ test("P1b 结账那一轮先重读的是要结账的那条绑定的上游：它�
   assert.equal(Number(entry.cost_usd), f.state.upstreamQuota / 200, "账本用新的 quota_per_unit");
 });
 
+test("C2a 回看也先把要结的上游全部重读：quota_per_unit 在两次轮询之间变了，回看结的那天用新值；没有要结的日子就不重读", async (t) => {
+  // 上海时区 10-09 11:00：昨天是 10-08，更早要回看的是 10-07（10-07 起开始统计）；每轮只回看 1 天
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 1 } });
+  let quotaPerUnit = 100;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/status") {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota_per_unit: quotaPerUnit, version: "v" } }) };
+    }
+    return prev(input, init);
+  });
+  const statusReads = () => f.state.requests.filter((request) => request.host === "upstream.test" && request.path === "/api/status").length;
+  const booked = (day) => f.state.ledger.filter((row) => row.bill_date === day).map((row) => [row.rule_id, Number(row.cost_usd)]).sort();
+
+  await f.module.refreshDue(now);
+  assert.deepEqual(booked("2026-10-08").map(([id]) => id), ["rr_live", "rr_three", "rr_two"], "昨天三条都结了");
+  assert.deepEqual(booked("2026-10-07").map(([id]) => id), ["rr_live"], "回看这一轮只结 1 天");
+  const yesterdayCost = Object.fromEntries(booked("2026-10-08"));
+
+  // 两次轮询之间上游改了 quota_per_unit；这一轮只有回看要结（rr_two 的 10-07），照样现读 /api/status
+  quotaPerUnit = 200;
+  now += 6 * 60000;
+  let before = statusReads();
+  await f.module.refreshDue(now);
+  assert.equal(statusReads() - before, 1, "回看那一轮现读 /api/status");
+  assert.deepEqual(booked("2026-10-07").map(([id]) => id), ["rr_live", "rr_two"]);
+  assert.equal(Object.fromEntries(booked("2026-10-07")).rr_two, yesterdayCost.rr_two / 2, "回看结的那天用新的 quota_per_unit");
+
+  now += 60000;
+  await f.module.refreshDue(now);
+  assert.deepEqual(booked("2026-10-07").map(([id]) => id), ["rr_live", "rr_three", "rr_two"]);
+  // 没有要结的日子了：平常的轮询沿用 /api/status
+  now += 60000;
+  before = statusReads();
+  await f.module.refreshDue(now);
+  assert.equal(statusReads() - before, 0, "没有要结的日子，不重读");
+});
+
 test("B1 结果缓存按请求比：「今天」过了半分钟再单独重读一条，别的绑定照样用缓存里的账单（截止点不同也是同一段）", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now });
