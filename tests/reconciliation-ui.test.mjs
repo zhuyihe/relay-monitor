@@ -2688,15 +2688,17 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
   ];
   const action = (kind, stationId) => ({ id: `${kind}:${stationId}`, kind, label: TEST_READ, title: reconciliationIssue(kind === "verify_identity" ? "COST_OWNER_UNVERIFIED" : "UPSTREAM_CAPABILITY_UNVERIFIED").title, detail: "",
     href: `/stations?action=${kind === "verify_identity" ? "verify" : "verify-billing"}&stationId=${stationId}`, stationId });
-  // st-only 那件「还没确认这把 Key 属于哪个上游账号」带两个渠道：上游这一行里要说清是哪两个渠道的 Key（名字取自每日利润读到的绑定）
-  const actions = [action("verify_identity", "st-todo"), action("verify_capability", "st-todo"), { ...action("verify_identity", "st-only"), channelIds: [11, 12] }, action("verify_capability", "st-broken")];
+  // st-only 有两条「还没确认这把 Key 属于哪个上游账号」（两条绑定，各一个渠道）：总览按种类去重只留一条，上游这一行要把两条的渠道合起来说（名字取自每日利润读到的绑定，按自营站点分开存）
+  const owner = (id, stationId, channelIds) => ({ ...action("verify_identity", stationId), id: `verify_identity:${stationId}:${id}`, ownStationId: "own-1", channelIds });
+  const actions = [action("verify_identity", "st-todo"), action("verify_capability", "st-todo"), owner("a", "st-only", [11]), action("verify_capability", "st-broken"), owner("b", "st-only", [12])];
   const OWNER_NONE = "这个上游的 Key 还没确认属于哪个上游账号", OWNER_TWO = "渠道「高速 A」「标准 B」用的 Key 还没确认属于哪个上游账号";
   const handler = async (route) => {
     const url = new URL(route.request().url()), path = url.pathname;
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 30, lowBalanceUsd: 5 }, generatedAt: iso(now) });
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {}, settings: { refreshIntervalSec: 30, lowBalanceUsd: 5 } });
-    if (path === "/api/reconciliation") return fulfill(route, { results: [{ rule: { channels: [{ channelId: 11, name: "高速 A" }, { channelId: 12, name: "标准 B" }] } }], actions });
+    // 另一个自营站点的同号渠道（换过自营站点）不能把名字盖掉
+    if (path === "/api/reconciliation") return fulfill(route, { results: [{ rule: { ownStationId: "own-1", channels: [{ channelId: 11, name: "高速 A" }, { channelId: 12, name: "标准 B" }] } }, { rule: { ownStationId: "own-old", channels: [{ channelId: 11, name: "旧站渠道" }] } }], actions });
     throw new Error("unexpected API: " + path);
   };
   const accounts = (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: iso(now) });
@@ -2738,9 +2740,17 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
   assert.ok(order.indexOf("Only 上游") < order.indexOf("Fresh 上游"), order.join(","));
   // 行末是第一件事的按钮，键盘也能按；「编辑」挪进「⋯」，第二件事在「⋯」最上面写「按钮名：标题」
   const todo = row("Todo 上游");
-  // 行末按钮的悬停和读屏是「按钮名：标题」，事的标题在这里（这把 Key 不知道是哪些渠道的时，说「这个上游的 Key」）
-  const lead = todo.getByRole("button", { name: `${TEST_READ}：${OWNER_NONE}（Todo 上游）`, exact: true });
-  assert.equal(await lead.getAttribute("title"), `${TEST_READ}：${OWNER_NONE}`);
+  // 有档位时，事的「为什么」在行末按钮上：悬停、键盘聚焦都显示「按钮名：标题」，读屏由 aria-describedby 念同一句；按钮名本身不带标题
+  // （这把 Key 不知道是哪些渠道的时，说「这个上游的 Key」）
+  const lead = todo.getByRole("button", { name: `${TEST_READ}（Todo 上游）`, exact: true });
+  const WHY = `${TEST_READ}：${OWNER_NONE}`;
+  assert.equal(await lead.evaluate((el) => document.getElementById(el.getAttribute("aria-describedby"))?.textContent), WHY);
+  await lead.hover(); await page.getByRole("tooltip").filter({ hasText: WHY }).waitFor();
+  await page.mouse.move(0, 0); await page.getByRole("tooltip").filter({ hasText: WHY }).waitFor({ state: "hidden" });
+  await lead.focus(); await page.getByRole("tooltip").filter({ hasText: WHY }).waitFor();
+  // 没有档位的行：标题已经写在状态格里，按钮上不再说一遍
+  const onlyLead = row("Only 上游").getByRole("button", { name: `${TEST_READ}（Only 上游）`, exact: true });
+  assert.equal(await onlyLead.getAttribute("aria-describedby"), null);
   assert.equal(await todo.getByRole("button", { name: "编辑 Todo 上游", exact: true }).count(), 0);
   await todo.getByRole("button", { name: "Todo 上游 的更多操作", exact: true }).focus(); await page.keyboard.press("Enter");
   const items = page.getByRole("menuitem");
@@ -2764,7 +2774,7 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
   // 手机上一张卡片两行：名称、状态、「⋯」；余额 · 可用天数。有要处理的事时多一行：标题和按钮。小图、刷新、编辑都在「⋯」里
   const mobile = await openFixturePage(t, handler, { width: 390, height: 844 }, false, accounts, "/stations");
   const card = (name) => mobile.locator(".jy-stations-m li", { hasText: name }).first();
-  await card("Only 上游").getByRole("button", { name: `${TEST_READ}：${OWNER_TWO}（Only 上游）`, exact: true }).waitFor();
+  await card("Only 上游").getByRole("button", { name: `${TEST_READ}（Only 上游）`, exact: true }).waitFor();
   assert.ok((await card("Fresh 上游").boundingBox()).height <= 90, "没有事的卡片两行");
   for (const name of ["Only 上游", "Todo 上游"]) assert.ok((await card(name).boundingBox()).height <= 120, `${name} 的卡片三行`);
   // 读不到余额又有事：第三行照样写事的标题，不只剩一个按钮
@@ -3527,6 +3537,134 @@ test("告警中心 8 + 4、系统设置两栏（1440）：通知方式一个一�
   assert.equal(await health.getAttribute("aria-expanded"), "false");
   assert.equal(await ret.getByRole("heading", { name: SETTINGS_COPY.overview, exact: true }).count(), 0);
   await health.click(); await ret.getByRole("heading", { name: SETTINGS_COPY.overview, exact: true }).waitFor();
+});
+
+test("上游列表「这把 Key」说清是哪些渠道：三个以上写「等 N 个」、有一个缺名字时按个数说；档位说明：余额用完、快用完按告警中心设的单位写，档位没说明时退回事的标题", async (t) => {
+  const now = Date.now(), iso = (ms) => new Date(ms).toISOString();
+  const station = (id, name, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, cnyPerUsd: 7,
+    balance: { ok: true, remaining: 100, account: `${id}-account`, checkedAt: iso(now) }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" }, ...extra });
+  const stations = [
+    station("st-many", "Many 上游"),
+    station("st-gap", "Gap 上游"),
+    // 余额用完
+    station("st-empty", "Empty 上游", { balance: { ok: true, remaining: 0, account: "e", checkedAt: iso(now) } }),
+    // 快用完（红）：可用 1 天，提醒天数按小时设成 48 小时
+    station("st-soon", "Soon 上游", { prediction: { etaDays: 1, burnPerDay: 50, basis: "近 3 小时" } }),
+    // 快用完（黄）：可用 5 天
+    station("st-watch", "Watch 上游", { prediction: { etaDays: 5, burnPerDay: 10, basis: "近 3 小时" } }),
+    // 还没读到余额（档位「还没读取」没有说明）又有一件事：下一行退回写事的标题
+    station("st-new", "New 上游", { balance: undefined, prediction: undefined }),
+  ];
+  const owner = (stationId, channelIds) => ({ id: `verify_identity:${stationId}`, kind: "verify_identity", label: TEST_READ, title: reconciliationIssue("COST_OWNER_UNVERIFIED").title, detail: "",
+    href: `/stations?action=verify&stationId=${stationId}`, stationId, ownStationId: "own-1", channelIds });
+  const actions = [owner("st-many", [21, 22, 23]), owner("st-gap", [31, 32]), owner("st-new", [41])];
+  const rules = { etaDays: 2, etaUnit: "hours" };
+  const handler = async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: iso(now) });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    // 21 号渠道在自营站点里改过名：绑定存下的是旧名，coverage.channels 是现在的名字；另一个自营站点也有 21 号渠道
+    if (path === "/api/reconciliation") return fulfill(route, {
+      results: [{ rule: { ownStationId: "own-1", channels: [{ channelId: 21, name: "旧名" }, ...[22, 23, 31, 41].map((id) => ({ channelId: id, name: `渠道${id}` }))] } },
+        { rule: { ownStationId: "own-old", channels: [{ channelId: 21, name: "旧站渠道" }] } }],
+      coverage: { channels: [{ ownStationId: "own-1", channelId: 21, name: "渠道21" }, { ownStationId: "own-old", channelId: 21, name: "旧站渠道" }] },
+      actions });
+    throw new Error("unexpected API: " + path);
+  };
+  const accounts = (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: iso(now) });
+  const page = await openFixturePage(t, handler, undefined, false, accounts, "/stations");
+  const table = page.locator(".jy-stations-table");
+  const status = (name) => table.locator("tbody tr", { hasText: name }).first().locator("td").nth(1);
+  await status("Many 上游").getByText("渠道「渠道21」等 3 个渠道用的 Key 还没确认属于哪个上游账号", { exact: true }).waitFor();
+  await status("Gap 上游").getByText("这个上游下 2 个渠道用的 Key 还没确认属于哪个上游账号", { exact: true }).waitFor();
+  await status("Empty 上游").getByText("充值以后才能接着用", { exact: true }).waitFor();
+  await status("Soon 上游").getByText("按现在的花法，48 小时以内就会用完", { exact: true }).waitFor();
+  await status("Watch 上游").getByText("按现在的花法，7 天以内就会用完", { exact: true }).waitFor();
+  await status("New 上游").getByText("渠道「渠道41」用的 Key 还没确认属于哪个上游账号", { exact: true }).waitFor();
+  // 改名以后写现在的名字；刷新几次（重新读每日利润）也不会新旧来回换
+  for (let i = 0; i < 2; i++) {
+    await page.reload();
+    await status("Many 上游").getByText("渠道「渠道21」等 3 个渠道用的 Key 还没确认属于哪个上游账号", { exact: true }).waitFor();
+    assert.equal(await table.getByText(/旧名|旧站渠道/).count(), 0);
+  }
+});
+
+test("告警中心提醒节奏在新布局下照常自动保存：展开改数、收起就存上；清空一个框时收不起来、报错一直看得到，改正以后别的数也存上", async (t) => {
+  const channels = [{ id: "c1", name: "运维群", type: "telegram", enabled: true, config: {}, hasSecret: {} }];
+  let rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: true, etaDays: 3, etaUnit: "days", renotifyHours: 6, errorThreshold: 1, errorRetrySec: 60, channelsFor: {} };
+  const puts = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), method = route.request().method();
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/notifications/rules" && method === "PUT") { const body = route.request().postDataJSON(); puts.push(body); rules = { ...rules, ...body }; return fulfill(route, { rules }); }
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels, rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }] });
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture({ lowBalanceUsd: 5, dailyReport: { enabled: false, time: "09:00", channelIds: [] } }));
+    throw new Error("unexpected pace fixture API: " + method + " " + url.pathname);
+  }, undefined, false, null, "/notifications");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const rulesP = page.getByRole("region", { name: NOTIFICATIONS_COPY.rules, exact: true });
+  const pace = rulesP.getByRole("button", { name: NOTIFICATIONS_COPY.pace, exact: true });
+  await pace.waitFor();
+  const wait = async (n) => { for (let i = 0; puts.length < n && i < 50; i++) await page.waitForTimeout(100); };
+  // 展开、改「重复提醒间隔」、收起：离开输入框就存，收起不丢；那一句按新存的数写
+  await pace.click();
+  const renotify = rulesP.getByLabel(NOTIFICATIONS_COPY.renotify, { exact: true });
+  await renotify.fill("12");
+  await pace.click(); await wait(1);
+  assert.equal(puts.length, 1); assert.equal(puts[0].renotifyHours, 12);
+  assert.equal(await pace.getAttribute("aria-expanded"), "false");
+  await rulesP.getByText(NOTIFICATIONS_COPY.paceSummary(12, 60), { exact: true }).waitFor();
+  // 展开以后那一句不写（两个框下面各有说明，不说两遍）
+  await pace.click();
+  assert.equal(await rulesP.getByText(NOTIFICATIONS_COPY.paceSummary(12, 60), { exact: true }).count(), 0);
+  // 清空「重复提醒间隔」再点收起：报错，收不起来，报错一直看得到
+  await renotify.fill(""); await pace.click(); await page.waitForTimeout(300);
+  assert.equal(await pace.getAttribute("aria-expanded"), "true");
+  await rulesP.getByText(new RegExp(NOTIFICATIONS_COPY.renotifyZero)).first().waitFor();
+  // 去改「提醒天数」：这一组校验不过，没存；报错照样看得到
+  const eta = rulesP.getByLabel(NOTIFICATIONS_COPY.etaLabel, { exact: true });
+  await eta.fill("5"); await eta.press("Tab"); await page.waitForTimeout(400);
+  assert.equal(puts.length, 1);
+  assert.equal(await renotify.isVisible(), true);
+  // 改正以后，两个数一起存上，可以收起
+  await renotify.fill("8"); await renotify.press("Tab"); await wait(2);
+  assert.equal(puts[1].renotifyHours, 8); assert.equal(puts[1].etaDays, 5);
+  await pace.click(); assert.equal(await pace.getAttribute("aria-expanded"), "false");
+  // 768–1199 单栏：提醒规则、通知方式、日报（页面里的先后，不分栏）
+  await page.setViewportSize({ width: 1000, height: 900 }); await page.reload();
+  await rulesP.getByRole("switch").first().waitFor();
+  const order = await page.locator(".jy-panel").evaluateAll((els) => els.map((el) => el.querySelector("h2")?.textContent?.trim()).filter(Boolean));
+  const at = (name) => order.findIndex((x) => x.startsWith(name));
+  assert.ok(at(NOTIFICATIONS_COPY.rules) < at(NOTIFICATIONS_COPY.channels) && at(NOTIFICATIONS_COPY.channels) < at(NOTIFICATIONS_COPY.report), order.join(" / "));
+  const [r, c] = [await rulesP.boundingBox(), await page.getByRole("region", { name: NOTIFICATIONS_COPY.channels, exact: true }).boundingBox()];
+  assert.ok(Math.abs(r.x - c.x) < 1 && c.y > r.y, "单栏");
+});
+
+test("系统设置：首次登录必须先改密码时只有账户安全一块、不分栏；上次自动清理没完成时历史概况直接展开、上面那一句不写", async (t) => {
+  let isDefaultPassword = true, cleanupFailed = false;
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "admin", isDefaultPassword });
+    if (url.pathname === "/api/settings") {
+      const base = settingsFixture();
+      return fulfill(route, cleanupFailed ? { ...base, history: { ...base.history, cleanup: { lastError: "cleanup timeout", lastRunAt: new Date().toISOString() } } } : base);
+    }
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture());
+    throw new Error("unexpected settings fixture API: " + url.pathname);
+  }, undefined, false, null, "/settings");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const region = (name) => page.getByRole("region", { name, exact: true });
+  await region(SETTINGS_COPY.account).getByRole("button", { name: SETTINGS_COPY.changePassword, exact: true }).waitFor();
+  for (const name of [SETTINGS_COPY.refresh, SETTINGS_COPY.retention, SETTINGS_COPY.about]) assert.equal(await region(name).count(), 0, name);
+  assert.equal(await page.locator(".jy-settings-grid").count(), 0);
+  // 改完密码以后两栏，清理没完成：历史概况直接展开，记录数那一句不写
+  isDefaultPassword = false; cleanupFailed = true; await page.reload();
+  const ret = region(SETTINGS_COPY.retention);
+  await ret.getByRole("heading", { name: SETTINGS_COPY.overview, exact: true }).waitFor();
+  assert.equal(await ret.getByRole("button", { name: SETTINGS_COPY.healthMore, exact: true }).getAttribute("aria-expanded"), "true");
+  assert.equal(await ret.getByText(/^共 .* 条记录，最早/).count(), 0);
+  await ret.getByText(new RegExp(SETTINGS_COPY.cleanupFailed)).first().waitFor();
 });
 
 test("登录页按码说：用户名或密码不对时标红输入框，试太多次时不标红，别的报错按控制台自己的说法写「登录失败：原因。」", async (t) => {

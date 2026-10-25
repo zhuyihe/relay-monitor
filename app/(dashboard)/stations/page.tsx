@@ -3,11 +3,11 @@
 // 请求与旧版逐一对应（端点、方法、载荷不变）；页面标题、刷新按钮、数据截至时间交给外壳。
 // 用语按 design/ui-copy-spec.md：共用的叫法从 lib/ 取，只在本页出现的写在下面的 COPY 里。
 import "../../styles/pages/stations.css";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { App, Button, Dropdown, Grid, Input, Modal, Select } from "antd";
+import { App, Button, Dropdown, Grid, Input, Modal, Select, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import { api, readWorkflowDestination, type StationListResponse } from "../../../lib/client";
 import { actionsByStation, buildOverviewActions, burnText, etaWindowDays, stationDisplayName } from "../../../lib/overview-actions";
@@ -29,7 +29,7 @@ import { useShellPage } from "../../components/shell-context";
 import { Spark } from "../../components/spark";
 import { LEVEL_ORDER, StatusText } from "../../components/status";
 import { useUrlParams, useUrlState } from "../../components/use-url-state";
-import { channelNameKey, useWorkflowActions } from "../../components/use-workflow-actions";
+import { channelNameKey, channelNameOf, useWorkflowActions } from "../../components/use-workflow-actions";
 import { workflowProblem } from "../../components/workflow-copy";
 import TrendModal, { TREND_TEXT } from "../trend-modal";
 import { buildStationView, resultIssue, testBalanceText, TYPES_MISSING_TEXT } from "./model";
@@ -264,6 +264,7 @@ export default function StationsPage() {
   const drawerRef = useRef<StationDrawerHandle>(null);
   // 更多菜单里的“编辑”：关闭抽屉后焦点回到这一行的更多按钮
   const moreTriggerRef = useRef<HTMLElement | null>(null);
+  const uid = useId();
 
   // 轮询和手动刷新可能重叠，全部落地才算刷新结束
   const reloading = useRef(0);
@@ -658,7 +659,7 @@ export default function StationsPage() {
     const merged = a.stationId != null ? ownerChannels.get(String(a.stationId)) : undefined;
     const channels = merged?.size ? [...merged.values()] : (a.channelIds || []).map((id: number) => ({ own: a.ownStationId, id: Number(id) }));
     if (!channels.length) return COPY.ownerNone;
-    const names = channels.map((c: { own: unknown; id: number }) => channelNames[channelNameKey(c.own, c.id)]).filter(Boolean);
+    const names = channels.map((c: { own: unknown; id: number }) => channelNameOf(channelNames, c.own, c.id)).filter(Boolean) as string[];
     if (names.length < channels.length) return COPY.ownerCount(channels.length);
     return names.length <= 2 ? COPY.ownerNames(names) : COPY.ownerMany(names[0], names.length);
   };
@@ -842,20 +843,24 @@ export default function StationsPage() {
   );
 
   // 行末：有要处理的事时就是那件事的按钮（例如「测试读取」），没有时是「编辑」（ui-design-spec §5.2）
+  // 有档位时，状态格的下一行解释档位，这件事的「为什么」放在按钮上：悬停、键盘聚焦都显示（antd Tooltip），读屏由 aria-describedby 念标题。
+  // 没有档位的行，标题已经写在状态格里，按钮上不再说一遍。平板触屏看不到悬停：状态格写着「还有 N 个问题」，点按钮打开的抽屉里有原因
   const todoAction = (v: StationView) => {
     const todo = todosOf(v)[0];
     if (!todo) return null;
-    return (
-      <Button
-        type="text"
-        size="small"
-        title={COPY.todoItem(todo.label, todoTitle(todo))}
-        aria-label={`${COPY.todoItem(todo.label, todoTitle(todo))}（${stationDisplayName(v.s)}）`}
-        onClick={() => openTodo(todo.href)}
-      >
+    const why = v.statusLabel ? COPY.todoItem(todo.label, todoTitle(todo)) : null;
+    const whyId = why ? `${uid}-why-${v.s.id}` : undefined;
+    const button = (
+      <Button type="text" size="small" aria-label={`${todo.label}（${stationDisplayName(v.s)}）`} aria-describedby={whyId} onClick={() => openTodo(todo.href)}>
         {todo.label}
       </Button>
     );
+    return why ? (
+      <>
+        <Tooltip title={why}>{button}</Tooltip>
+        <span id={whyId} className="sr-only">{why}</span>
+      </>
+    ) : button;
   };
   const primaryAction = (v: StationView) => todoAction(v) || (v.archived ? (
     <Button
