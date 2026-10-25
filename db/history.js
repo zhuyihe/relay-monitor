@@ -31,26 +31,60 @@ function cleanupState(value) {
   };
 }
 
-// rows 必须按 station_id, t 升序。余额下降按后一快照在业务时区下的自然日计入。
-export function dailyUsageRows(rows, windowStart, windowEnd, tz = businessTimeZone()) {
+// 窗口 [startMs, endMs) 里的原始快照，外加每个上游窗口开始前的最后一个点（基线），按 station_id, t 升序。
+// 只扫窗口和每站一行基线（主键 (station_id, t) 范围扫 + 按站取 MAX(t)），不随历史总长变慢。
+// 日汇总和经营分析的热力图都从这里读，消耗按 usageDrops 算。
+export async function readPointsWithBaseline(pool, stationIds, startMs, endMs = Number.MAX_SAFE_INTEGER) {
+  const [rows] = await pool.query(
+    `SELECT station_id, t, remaining
+     FROM history_points
+     WHERE station_id IN (?) AND t >= ? AND t < ?
+     UNION ALL
+     SELECT h.station_id, h.t, h.remaining
+     FROM history_points h
+     INNER JOIN (
+       SELECT station_id, MAX(t) AS t
+       FROM history_points
+       WHERE station_id IN (?) AND t < ?
+       GROUP BY station_id
+     ) previous ON previous.station_id = h.station_id AND previous.t = h.t
+     ORDER BY station_id, t`,
+    [stationIds, startMs, endMs, stationIds, startMs]
+  );
+  return rows;
+}
+
+// 余额消耗：rows 必须按 station_id, t 升序。相邻快照余额下降计入后一快照，上升（充值）忽略；
+// 只计后一快照落在 [windowStart, windowEnd) 里的，按 bucketOf(t) 分组。返回 Map：key → { stationId, bucket, usd }
+// 经营分析一次要过几百万个点：相邻点多半同站同组，沿用上一个组，不逐点拼键查表。
+export function usageDrops(rows, windowStart, windowEnd, bucketOf) {
   const previous = new Map();
-  const byDay = new Map();
+  const buckets = new Map();
+  let entry = null;
   for (const row of rows) {
     const id = String(row.station_id ?? row.stationId);
     const t = Number(row.t);
     const remaining = Number(row.remaining);
     const before = previous.get(id);
     if (t >= windowStart && t < windowEnd) {
-      const date = dayKeyInTz(t, tz);
-      const key = `${id}\u0000${date}`;
-      const entry = byDay.get(key) || { stationId: id, date, usd: 0 };
+      const bucket = bucketOf(t);
+      if (!entry || entry.stationId !== id || entry.bucket !== bucket) {
+        const key = `${id}\u0000${bucket}`;
+        entry = buckets.get(key);
+        if (!entry) buckets.set(key, entry = { stationId: id, bucket, usd: 0 });
+      }
       const drop = before == null ? 0 : before - remaining;
       if (drop > 0) entry.usd += drop;
-      byDay.set(key, entry);
     }
     previous.set(id, remaining);
   }
-  return [...byDay.values()].map((row) => ({ ...row, usd: Math.round(row.usd * 10000) / 10000 }));
+  return buckets;
+}
+
+// 余额下降按后一快照在业务时区下的自然日计入。
+export function dailyUsageRows(rows, windowStart, windowEnd, tz = businessTimeZone()) {
+  return [...usageDrops(rows, windowStart, windowEnd, (t) => dayKeyInTz(t, tz)).values()]
+    .map(({ stationId, bucket, usd }) => ({ stationId, date: bucket, usd: Math.round(usd * 10000) / 10000 }));
 }
 
 export class History {
@@ -124,22 +158,7 @@ export class History {
     const windowStart = dayBoundsInTz(today.startMs - 1, tz).startMs;
     const windowEnd = today.endMs;
     // 取前一天之前的最后一个点作为基线，保证跨日下降归入后一快照所在日期。
-    const [rows] = await this.pool.query(
-      `SELECT station_id, t, remaining
-       FROM history_points
-       WHERE station_id IN (?) AND t >= ? AND t < ?
-       UNION ALL
-       SELECT h.station_id, h.t, h.remaining
-       FROM history_points h
-       INNER JOIN (
-         SELECT station_id, MAX(t) AS t
-         FROM history_points
-         WHERE station_id IN (?) AND t < ?
-         GROUP BY station_id
-       ) previous ON previous.station_id = h.station_id AND previous.t = h.t
-       ORDER BY station_id, t`,
-      [ids, windowStart, windowEnd, ids, windowStart]
-    );
+    const rows = await readPointsWithBaseline(this.pool, ids, windowStart, windowEnd);
     const values = dailyUsageRows(rows, windowStart, windowEnd, tz);
     await this.pool.query(
       "DELETE FROM station_daily_usage WHERE station_id IN (?) AND date >= ? AND date < ?",

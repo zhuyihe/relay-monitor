@@ -9,23 +9,13 @@ import {
 } from "../../../lib/business-time.js";
 import { amortizeFixedCost, costBasisOf, countsInProfit, purchasesOf, rateSnapshotOf } from "../../../lib/profit.js";
 import { hasRawWindowCoverage, summarizeCoverage } from "./coverage.js";
+import { readPointsWithBaseline, usageDrops } from "../../../db/history.js";
 
 const r2 = (v) => Math.round(v * 100) / 100;
 const r4 = (v) => Math.round(v * 10000) / 10000;
 // 时区偏移都是 15 分钟的整数倍，按 15 分钟分桶再换算，半点时区也不会分错日期和小时
 const SLOT_MS = 15 * 60 * 1000;
 
-// 热力图仍需原始快照。关联查询利用 (station_id, t) 主键取前一快照，
-// 避免长期留存后 LAG 扫描整张历史表。
-const RECENT_DROPS_SQL = `
-  SELECT h.station_id, h.t, h.remaining,
-         (SELECT previous.remaining
-          FROM history_points previous
-          WHERE previous.station_id = h.station_id AND previous.t < h.t
-          ORDER BY previous.t DESC LIMIT 1) AS prev
-  FROM history_points h
-  WHERE h.t >= ?
-`;
 
 // 自定义范围传开始日期，天数由服务端按业务时区的今天算：前端拿到业务时区之前也能发出同一个请求，
 // 不会因浏览器与业务时区差一天而多拉一次。早于 365 天前按 365 天，晚于今天按 1 天（只看今天）。
@@ -107,15 +97,19 @@ export const GET = withAuth(async (request, rt) => {
   };
   if (days <= 30 && heatmapStations.length) {
     const heatmapStationIds = heatmapStations.map((station) => station.id);
-    const [rawSlotRows] = await pool.query(
-      `SELECT station_id AS stationId, FLOOR(t / ${SLOT_MS}) AS slot
-       FROM history_points
-       WHERE station_id IN (?) AND t >= ? AND t <= ?
-       GROUP BY station_id, slot`,
-      [heatmapStationIds, startMs, nowMs]
-    );
+    // 窗口里的原始快照只读一次，外加每站窗口开始前的最后一个点（db/history.js 的 readPointsWithBaseline，
+    // 只扫窗口）：哪几天有快照、热力图的消耗都从这一份算。原来每个点做一次相关子查询找前一个点，会把整段历史读一遍。
+    const points = await readPointsWithBaseline(pool, heatmapStationIds, startMs);
     const rawDates = new Set();
-    for (const row of rawSlotRows) rawDates.add(`${row.stationId}|${dayKeyInTz(Number(row.slot) * SLOT_MS, tz)}`);
+    let lastSlot = null, lastDay = null;
+    for (const row of points) {
+      const t = Number(row.t);
+      if (t < startMs || t > nowMs) continue;
+      const slot = Math.floor(t / SLOT_MS);
+      // 同一个 15 分钟里的点同一天，不逐点换算日期
+      if (slot !== lastSlot) { lastSlot = slot; lastDay = dayKeyInTz(slot * SLOT_MS, tz); }
+      rawDates.add(`${row.station_id}|${lastDay}`);
+    }
     const rawDateRows = [...rawDates].map((key) => {
       const cut = key.lastIndexOf("|");
       return { stationId: key.slice(0, cut), date: key.slice(cut + 1) };
@@ -141,22 +135,14 @@ export const GET = withAuth(async (request, rt) => {
       coverage: rawCoverage,
     };
     if (available) {
-      const [heatRows] = await pool.query(
-        `SELECT station_id AS stationId,
-                FLOOR(t / ${SLOT_MS}) AS slot,
-                SUM(prev - remaining) AS usd
-         FROM (${RECENT_DROPS_SQL}) x
-         WHERE station_id IN (?) AND prev IS NOT NULL AND prev > remaining
-         GROUP BY stationId, slot`,
-        [startMs, heatmapStationIds]
-      );
+      // 每个 15 分钟里的余额下降（窗口开始以后的点，含窗口里第一个点相对基线的下降），只留有下降的
       const heatMap = new Map();
-      for (const row of heatRows) {
-        const station = byId.get(row.stationId);
-        if (!station) continue;
-        const { weekday, hour } = weekdayHourInTz(Number(row.slot) * SLOT_MS, tz);
+      for (const { stationId, bucket: slot, usd } of usageDrops(points, startMs, Number.MAX_SAFE_INTEGER, (t) => Math.floor(t / SLOT_MS)).values()) {
+        const station = byId.get(stationId);
+        if (!station || !(usd > 0)) continue;
+        const { weekday, hour } = weekdayHourInTz(slot * SLOT_MS, tz);
         const key = `${weekday}|${hour}`;
-        heatMap.set(key, (heatMap.get(key) || 0) + Number(row.usd) * rateOf(station));
+        heatMap.set(key, (heatMap.get(key) || 0) + usd * rateOf(station));
       }
       heatmap = [...heatMap.entries()].map(([key, cny]) => {
         const [weekday, hour] = key.split("|").map(Number);

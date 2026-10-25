@@ -76,12 +76,11 @@ test("经营分析按业务时区划日：热力图按上海时间分桶、只�
   const calls = [];
   const pool = { query: async (sql, params) => {
     calls.push({ sql, params });
-    if (sql.includes("SUM(prev - remaining)")) {
-      // UTC 10-13 16:30 = 上海 10-14 周三 00:30
-      return [[{ stationId: "u", slot: Date.UTC(2026, 9, 13, 16, 30) / SLOT, usd: 2 }]];
-    }
-    if (sql.includes("GROUP BY station_id, slot")) {
-      return [Array.from({ length: 7 }, (_, i) => ({ stationId: "u", slot: (startMs + i * 86400000 + 3600000) / SLOT }))];
+    if (sql.includes("UNION ALL")) {
+      // 窗口前的基线 + 每天一点；UTC 10-13 16:30 = 上海 10-14 周三 00:30 余额掉了 $2，之后一点不变
+      const daily = (i, remaining) => ({ station_id: "u", t: startMs + i * 86400000 + 3600000, remaining });
+      return [[{ station_id: "u", t: startMs - 3600000, remaining: 100 }, ...Array.from({ length: 6 }, (_, i) => daily(i, 100)),
+        { station_id: "u", t: Date.UTC(2026, 9, 13, 16, 30), remaining: 98 }, daily(6, 98)]];
     }
     if (sql.includes("MIN(t)")) return [[{ stationId: "u", earliestAt: startMs - 3600000, latestAt: NOW - 60000 }]];
     return [[]];
@@ -94,8 +93,10 @@ test("经营分析按业务时区划日：热力图按上海时间分桶、只�
   assert.equal(body.tz, "Asia/Shanghai");
   assert.equal(body.start, "2026-10-08");
   assert.equal(body.end, "2026-10-14");
-  const slotCall = calls.find((c) => c.sql.includes("GROUP BY station_id, slot"));
-  assert.deepEqual(slotCall.params, [["u"], startMs, NOW], "包月上游不进热力图，窗口起点是上海零点");
+  const pointCalls = calls.filter((c) => c.sql.includes("history_points") && !c.sql.includes("MIN(t)"));
+  assert.equal(pointCalls.length, 1, "窗口里的原始快照只读一次，不再每个点一次子查询");
+  assert.deepEqual(pointCalls[0].params, [["u"], startMs, Number.MAX_SAFE_INTEGER, ["u"], startMs], "包月上游不进热力图，窗口起点是上海零点");
+  assert.equal(SLOT, 15 * 60 * 1000);
   assert.equal(body.heatmapAvailability.available, true);
   // 2026-10-14 是周三（weekday 0 = 周一）
   assert.deepEqual(body.heatmap, [{ weekday: 2, hour: 0, cny: 14 }]);
