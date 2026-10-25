@@ -31,8 +31,8 @@ import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, r
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
-import { ledgerDecimal, ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
-import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, isSettleableWindow, isSettledAt, reasonKindOf, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
+import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlement } from "../lib/reconciliation-ledger.js";
+import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, isSettleableWindow, resettleShrunk, isSettledAt, reasonKindOf, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
@@ -539,7 +539,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     let result;
     try {
       // 这一天有重结请求（改了切换时间）：不先读已固定的账，重取；请求时刻带进去，写账本的事务里按值比对才消费这条请求
-      result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettleRequestedAt: state?.resettleRequestedAt ?? null, trigger });
+      // confirmShrink：手动「重新读取」就是人确认，重算的数比已固定的少很多也照写（RESETTLE_SHRUNK 的确认框在页面上，C3、E）；
+      // 例外：改了时间太早没自动重算的日子（RESETTLE_TOO_OLD），读出来的数要是又少了一半多，照样先挡下
+      const confirmShrink = origin === "manual" && state?.manualReason !== "RESETTLE_TOO_OLD";
+      result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettleRequestedAt: state?.resettleRequestedAt ?? null, confirmShrink, trigger });
     } catch (err) {
       if (err?.code === "RULE_NOT_FOUND") throw err;
       const known = ["PERSISTENCE_FAILED", "HISTORY_UNAVAILABLE"].includes(err?.code);
@@ -551,11 +554,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       result = storageFailedResult(rule, window, known ? err.code : "UPSTREAM_DATA_UNAVAILABLE");
     }
     if (result === STALE_SCOPE || !billDate) return result;
-    const outcome = settlementOutcome({ window, result, now: Date.now(), state, origin, sourceVersion: ownerRegistry.billingSource.version });
+    // 重结的数比已固定的少很多：没写新版，记成「要人处理、不自动再试」的状态行（RESETTLE_SHRUNK），请求保留在行里
+    const outcome = settlementOutcome({ window, result: result.resettleBlocked ? { health: { code: result.resettleBlocked } } : result, now: Date.now(), state, origin, sourceVersion: ownerRegistry.billingSource.version });
     // 结成了（op: "delete"）：状态行已经在 inspectRule 写账本的同一个事务里删掉了（settlement 选项，见 saveSnapshotsForScope），
     // 这里不用再单独删一次——单独删一次是多发的一条 SQL（审核 C2a 低-1）
     try {
-      if (outcome.state && outcome.state.op !== "delete") await repository.recordSettlementState(rule.id, billDate, outcome.state);
+      // requestedAt：这一行取数前读到的重结请求时刻；行里的和它不一样（取数期间又来了新请求）就不盖
+      if (outcome.state && outcome.state.op !== "delete") await repository.recordSettlementState(rule.id, billDate, outcome.state, Date.now(), { requestedAt: state?.resettleRequestedAt ?? null });
     } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
     return result;
   }
@@ -1200,6 +1205,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return await settledResult(rule, result.window) ?? result;
   }
 
+  // 结账没写新版（重结的数比已固定的少很多）时，结果仍是账本里那一版，但要把原因带给 settleDay
+  const withResettleBlocker = (booked, result) => (result.resettleBlocked ? Object.assign(booked, { resettleBlocked: result.resettleBlocked }) : booked);
+
   // 上一次成功的结果：单个自然日读账本最新一版，其余窗口读同一口径的确认记录。
   async function previousSuccess(rule, window, billingFingerprint) {
     if (!billDayOf(window)) return repository.latestSuccessfulResult(rule.id, window, billingFingerprint);
@@ -1219,7 +1227,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // settle：结一个已经结束的日子（轮询回看和手动「重新读取」都走这条，计划 C2a）。强制重取，用已存的分段；
   //   不写分段、渠道状态、观测快照，不发告警；只按 settlementOutcome 写账本（多日写确认快照），结成了在同一个事务里删掉状态表那一行。
   // probe（只配 settle）：要人处理的日子到了重判的时刻，只走一遍取数前的判断，不取账单、不写库，返回 { probe: true, blocker }（计划 C2a 2.3）
-  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle: resettleOption = false, resettleRequestedAt = null, trigger = null, probe = false } = {}) {
+  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle: resettleOption = false, resettleRequestedAt = null, confirmShrink = false, trigger = null, probe = false } = {}) {
     const settle = mode === "settle";
     // 轮询回看带的是状态行里的请求时刻；resettle: true 是调用方（测试、手动）直接要求重结，没有请求时刻可比
     const resettle = resettleOption || resettleRequestedAt != null;
@@ -1254,7 +1262,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const upstream = currentUpstream && { ...currentUpstream };
       const own = currentOwn && { ...currentOwn };
       // 成本计法和两侧汇率来自同一份配置；保存前由 billingSource 的财务版本再次核对。
-      const financialSnapshot = ratesFor({ own, upstream });
+      // 重结（改了切换时间）只该改分段影响到的金额：汇率和成本计法沿用账本里这天最新一版记下的，不用现在的设置
+      // （不然只改了汇率、读数没变，重结也会写出新的一版，已固定的人民币利润跟着变；和 G「改上游设置，已固定的不变」同一个规矩）。
+      // 账本里记的汇率是空的（当时没设置）就还是按没设置算，不因为现在设了汇率就算「内容变了」
+      let savedLedger = null;
+      if (settle && resettle && !probe) {
+        try { const prior = await repository.latestLedgerEntry(rule.id, window); savedLedger = prior ? ledgerReference(prior) : null; } catch { throw codedError("HISTORY_UNAVAILABLE", issueText("HISTORY_UNAVAILABLE")); }
+      }
+      const financialSnapshot = ratesFor({ own, upstream, saved: savedLedger });
+      if (savedLedger) {
+        const unset = { cnyPerUsd: 1, source: "default" };
+        if (savedLedger.rates?.income == null) financialSnapshot.income = unset;
+        if (savedLedger.rates?.cost == null) financialSnapshot.cost = unset;
+      }
       let sourceCredential = observationCredential(rule, upstream, own);
       request.sourceCredential = sourceCredential;
       if (!probe && settlementPrecheck({ window, now: Date.now(), resettle }).readSettled) {
@@ -1713,8 +1733,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       if (!observe) return result;
       return (await persistResult(rule, result, origin, evidenceMetadata, evidenceToken, {
-        scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource, financialSnapshot, resettle, resettleRequestedAt, settle, trigger,
-      })) ? (settle ? await bookedResult(rule, result) : result) : STALE_SCOPE;
+        scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource, financialSnapshot, resettle, resettleRequestedAt, confirmShrink, settle, trigger,
+      })) ? (settle ? withResettleBlocker(await bookedResult(rule, result), result) : result) : STALE_SCOPE;
     };
     // 口径在查询期间变化时，在共享的 in-flight 任务内重跑，加入等待的调用方也只会拿到最新口径的结果。
     // 编辑会注销本任务的 in-flight 登记：期间已有调用方按新口径另起任务时直接等它，不再重复取数和写快照；
@@ -1821,7 +1841,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource })) ? unavailable : STALE_SCOPE;
   }
 
-  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false, resettleRequestedAt = null, settle = false, trigger = null } = {}) {
+  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false, resettleRequestedAt = null, confirmShrink = false, settle = false, trigger = null } = {}) {
     const wholeWindow = { id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health };
     const segmentSnapshots = result.segments?.length ? result.segments : [wholeWindow];
     // 只有结束满 15 分钟的自然日窗口才结账：今天、近 7 天和刚结束的昨天还在变化，只记观测。
@@ -1898,6 +1918,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, { ...sourceFor({ ...wholeWindow, recordType: "confirmed" }), settlement }, {
       revenueRate: configuredRate(financialSnapshot.income), costRate: configuredRate(financialSnapshot.cost),
       costBasis: financialSnapshot.costBasis }) : null;
+    // 重结读出来的收入或上游成本比账本最新一版少一半以上（日志过了保留期之类）：不写新版，等人确认（手动「重新读取」才覆盖）。
+    // 记 RESETTLE_SHRUNK 的状态行由 settleDay 写；页面上这天还是已固定的旧数
+    if (settle && resettle && !confirmShrink && ledgerEntry) {
+      let prior;
+      try { prior = await repository.latestLedgerEntry(rule.id, result.window); } catch { throw codedError("PERSISTENCE_FAILED", issueText("PERSISTENCE_FAILED")); }
+      if (prior && resettleShrunk(prior, ledgerEntry)) { result.resettleBlocked = "RESETTLE_SHRUNK"; return true; }
+    }
     // 记账的结论（ledgerOption.booked）由仓库在提交以后填上
     const ledgerOption = ledgerEntry ? { entry: ledgerEntry, resettle } : null;
     const rows = snapshots.map((segment) => ({
@@ -2147,7 +2174,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 要人处理、到了重判的时刻：不进 upstreams（不为它强制重读），settleDue 拿这一轮的目录和身份在本地重判
       if (action === "recheck") plan.recheck.push({ rule, window, state });
       if (action !== "due") return;
-      (back === 1 ? plan.yesterday : plan.older).push({ rule, window, state, requested: state?.resettleRequestedAt != null, trigger: back === 1 ? null : "late" });
+      // 有重结请求的日子 trigger 传 null：账本明细里记 transition（persistResult 按 resettle 给），不被 late 盖掉
+      const requested = state?.resettleRequestedAt != null;
+      (back === 1 ? plan.yesterday : plan.older).push({ rule, window, state, requested, trigger: back === 1 || requested ? null : "late" });
     };
     const ruleById = new Map(rules.map((rule) => [rule.id, rule]));
     const seen = new Set();

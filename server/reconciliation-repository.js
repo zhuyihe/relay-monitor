@@ -4,7 +4,7 @@ import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } fr
 import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
 import { applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
-import { RESETTLE_REASON_TRANSITION, isSettledAt, resettleBillDates } from "../lib/reconciliation-settlement.js";
+import { RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
 import { billDayOf } from "../lib/business-time.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../lib/billing-capability-storage.js";
 
@@ -14,6 +14,7 @@ const REPOSITORY_ERRORS = Object.freeze({
   CURRENT_SEGMENT_MISSING: "这条绑定缺少当前的倍率时段",
   RESOURCE_CHANGED: "这一段前面没有倍率变化，不能改时间",
   TRANSITION_TIME_OUT_OF_RANGE: "改的时间要在前后两次倍率变化之间",
+  TRANSITION_TIME_IN_FUTURE: "不能改到以后的时间",
   SOURCE_BINDING_UNCONFIRMED: "上游账号或自营站点变了，请确认这条绑定",
   LEGACY_IDENTITY_UNVERIFIED: "以前的绑定没记下上游账号，请确认这条绑定的上游账号和自营站点",
 });
@@ -607,7 +608,8 @@ export class ReconciliationRepository {
       if (index <= 0) throw repositoryError("RESOURCE_CHANGED");
       const previous = segments[index - 1];
       const next = segments[index + 1];
-      if (!Number.isSafeInteger(at) || at > now || at <= previous.effectiveFrom || (next && at >= next.effectiveFrom)) {
+      if (Number.isSafeInteger(at) && at > now) throw repositoryError("TRANSITION_TIME_IN_FUTURE");
+      if (!Number.isSafeInteger(at) || at <= previous.effectiveFrom || (next && at >= next.effectiveFrom)) {
         throw repositoryError("TRANSITION_TIME_OUT_OF_RANGE");
       }
       await conn.query(
@@ -618,7 +620,10 @@ export class ReconciliationRepository {
          WHERE id IN (?, ?)`,
         [previous.id, at, segmentId, at, segmentId, previous.id, segmentId]
       );
-      await this.requestResettle(ruleId, resettleBillDates(rule, segments[index].effectiveFrom, at, now), { reason: RESETTLE_REASON_TRANSITION, now }, conn);
+      // 31 天以内的日子写重结请求；更早的写一条要人处理的状态行（RESETTLE_TOO_OLD），不自动重结
+      const plan = resettleRequestPlan(rule, segments[index].effectiveFrom, at, now);
+      await this.requestResettle(ruleId, plan.recent, { reason: RESETTLE_REASON_TRANSITION, now }, conn);
+      await this.requestResettle(ruleId, plan.tooOld, { reason: RESETTLE_REASON_TRANSITION, now, manualReason: "RESETTLE_TOO_OLD" }, conn);
       await conn.commit();
     } catch (err) {
       await conn.rollback().catch(() => {});
@@ -803,30 +808,35 @@ export class ReconciliationRepository {
   }
 
   // 结账没成：记下或更新这一行（settlementOutcome 的 state，op 是 retry / manual / sticky）。
-  // 账本里已经有这天的任一版就不写（另一处已经固定了），一条语句判断，不用先读；有重结请求的日子除外（账本里本来就有这天，
-  // 重结没成要照样记下退避，不然每轮都再试一次）。
-  async recordSettlementState(ruleId, billDate, state, now = Date.now()) {
+  // 账本里已经有这天的任一版就不写（另一处已经固定了），一条语句判断，不用先读；调用方读状态行时带着重结请求的日子除外
+  // （requestedAt 不为空：账本里本来就有这天，重结没成要照样记下退避，不然每轮都再试一次——请求在不在由调用方手里的状态行说了算，
+  // 不在这张表上再查一次：同表子查询会让并发写同一天死锁，审核 C2b 低-1）。
+  // 取数期间又来了新的重结请求（行里的请求时刻和 requestedAt 不一样）：这次的失败状态不盖，新请求刚清零的记录留着（审核 C2b 低-5）。
+  async recordSettlementState(ruleId, billDate, state, now = Date.now(), { requestedAt = null } = {}) {
     const values = settlementStateValues(state);
+    const keep = (column) => `${column} = IF(resettle_requested_at_ms <=> ?, VALUES(${column}), ${column})`;
     await this.pool.query(
       `INSERT INTO reconciliation_settlement_state (rule_id, bill_date, ${SETTLEMENT_STATE_WRITE_COLUMNS.join(", ")}, updated_at_ms)
        SELECT ?, ?, ${SETTLEMENT_STATE_WRITE_COLUMNS.map(() => "?").join(", ")}, ? FROM DUAL
-       WHERE NOT EXISTS (SELECT 1 FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ?)
-         OR EXISTS (SELECT 1 FROM reconciliation_settlement_state WHERE rule_id = ? AND bill_date = ? AND resettle_requested_at_ms IS NOT NULL)
-       ON DUPLICATE KEY UPDATE ${SETTLEMENT_STATE_WRITE_COLUMNS.map((column) => `${column} = VALUES(${column})`).join(", ")}, updated_at_ms = VALUES(updated_at_ms)`,
-      [ruleId, billDate, ...values, now, ruleId, billDate, ruleId, billDate]);
+       WHERE ? IS NOT NULL OR NOT EXISTS (SELECT 1 FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ?)
+       ON DUPLICATE KEY UPDATE ${SETTLEMENT_STATE_WRITE_COLUMNS.map(keep).join(", ")}, ${keep("updated_at_ms")}`,
+      [ruleId, billDate, ...values, now, requestedAt, ruleId, billDate, ...Array(SETTLEMENT_STATE_WRITE_COLUMNS.length + 1).fill(requestedAt)]);
   }
 
   // 给这些日子写重结请求（一条多行 INSERT）：改时间、以后改设置、换 Key 的时刻都走这一个。conn 是调用方已经开着的事务连接，没传就直接用连接池。
   // 已有状态行（这天还在退避、等人处理）的重置成「马上可以结」：请求时刻取比原来大的（按值比对才分得出新旧请求），重试和要人处理的记录清掉
-  async requestResettle(ruleId, billDates, { reason = RESETTLE_REASON_TRANSITION, now = Date.now() } = {}, conn = this.pool) {
+  // manualReason：这些日子不自动重结，写一条要人处理的状态行（不会自己消失的那种，比如 RESETTLE_TOO_OLD），请求仍记在行里（不记的话
+  // 这天账本里有，「已固定」的清理会把行删掉），人点「重新读取」才结
+  async requestResettle(ruleId, billDates, { reason = RESETTLE_REASON_TRANSITION, now = Date.now(), manualReason = null } = {}, conn = this.pool) {
     if (!billDates?.length) return 0;
+    const detail = manualReason == null ? null : JSON.stringify({ code: manualReason, side: null });
     await conn.query(
-      `INSERT INTO reconciliation_settlement_state (rule_id, bill_date, resettle_requested_at_ms, resettle_reason, updated_at_ms)
-       VALUES ${billDates.map(() => "(?, ?, ?, ?, ?)").join(", ")}
+      `INSERT INTO reconciliation_settlement_state (rule_id, bill_date, resettle_requested_at_ms, resettle_reason, manual_reason, manual_since_ms, last_detail, updated_at_ms)
+       VALUES ${billDates.map(() => "(?, ?, ?, ?, ?, ?, ?, ?)").join(", ")}
        ON DUPLICATE KEY UPDATE resettle_requested_at_ms = GREATEST(VALUES(resettle_requested_at_ms), COALESCE(resettle_requested_at_ms, 0) + 1),
-         resettle_reason = VALUES(resettle_reason), retry_reason = NULL, manual_reason = NULL, manual_since_ms = NULL, attempts = 0,
-         next_attempt_at_ms = NULL, first_failed_at_ms = NULL, last_detail = NULL, updated_at_ms = VALUES(updated_at_ms)`,
-      billDates.flatMap((date) => [ruleId, date, now, reason, now]));
+         resettle_reason = VALUES(resettle_reason), retry_reason = NULL, manual_reason = VALUES(manual_reason), manual_since_ms = VALUES(manual_since_ms), attempts = 0,
+         next_attempt_at_ms = NULL, first_failed_at_ms = NULL, last_detail = VALUES(last_detail), updated_at_ms = VALUES(updated_at_ms)`,
+      billDates.flatMap((date) => [ruleId, date, now, reason, manualReason, manualReason == null ? null : now, detail, now]));
     return billDates.length;
   }
 

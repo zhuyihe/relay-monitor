@@ -11,7 +11,7 @@
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../../lib/reconciliation-snapshot.js";
 import { applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
 import { billDayOf } from "../../lib/business-time.js";
-import { RESETTLE_REASON_TRANSITION, resettleBillDates } from "../../lib/reconciliation-settlement.js";
+import { RESETTLE_REASON_TRANSITION, resettleRequestPlan } from "../../lib/reconciliation-settlement.js";
 import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
@@ -131,6 +131,7 @@ export class MemoryReconciliationRepository {
 
   // 表里存 snake_case 行；传入的行按引用保存，提交时原地更新，测试持有的引用始终是已提交的数据。
   // hooks（都可以是 async）：
+  //   beforeRequestWrite(plan)        改切换时间的事务里、写重结请求之前，抛错就连分段一起回滚
   //   beforeTransaction(name)          对应 getConnection，事务开始前
   //   beforeRead(name, args)           非事务读取前，可以抛错模拟查询失败
   //   beforeSnapshotWrite(entry, tx)   写快照前，可以抛错模拟写入失败
@@ -383,32 +384,36 @@ export class MemoryReconciliationRepository {
       const index = entries.findIndex(({ row }) => row.id === segmentId);
       if (index <= 0) throw repositoryError("RESOURCE_CHANGED");
       const previous = entries[index - 1], next = entries[index + 1];
-      if (!Number.isSafeInteger(at) || at > now || at <= Number(previous.row.effective_from_ms) || (next && at >= Number(next.row.effective_from_ms))) {
+      if (Number.isSafeInteger(at) && at > now) throw repositoryError("TRANSITION_TIME_IN_FUTURE");
+      if (!Number.isSafeInteger(at) || at <= Number(previous.row.effective_from_ms) || (next && at >= Number(next.row.effective_from_ms))) {
         throw repositoryError("TRANSITION_TIME_OUT_OF_RANGE");
       }
       const oldAt = Number(entries[index].row.effective_from_ms);
       this.#update(tx, "segments", [previous], { effective_to_ms: at });
       this.#update(tx, "segments", [entries[index]], { effective_from_ms: at, timing_source: "operator_confirmed" });
-      this.#requestResettle(tx, ruleId, resettleBillDates(ruleFromRow(ruleRow), oldAt, at, now), { reason: RESETTLE_REASON_TRANSITION, now });
+      const plan = resettleRequestPlan(ruleFromRow(ruleRow), oldAt, at, now);
+      await this.hooks.beforeRequestWrite?.(plan);
+      this.#requestResettle(tx, ruleId, plan.recent, { reason: RESETTLE_REASON_TRANSITION, now });
+      this.#requestResettle(tx, ruleId, plan.tooOld, { reason: RESETTLE_REASON_TRANSITION, now, manualReason: "RESETTLE_TOO_OLD" });
     });
     return this.listSegments(ruleId);
   }
 
   // 同 MySQL 版的 requestResettle：请求时刻取比原来大的，重试和要人处理的记录清掉
-  #requestResettle(tx, ruleId, billDates, { reason, now }) {
+  #requestResettle(tx, ruleId, billDates, { reason, now, manualReason = null }) {
     for (const date of billDates) {
       const existing = this.#settlementEntries(tx, ruleId, date);
-      const reset = { resettle_reason: reason, retry_reason: null, manual_reason: null, manual_since_ms: null, attempts: 0,
-        next_attempt_at_ms: null, first_failed_at_ms: null, last_detail: null, updated_at_ms: now };
+      const reset = { resettle_reason: reason, retry_reason: null, manual_reason: manualReason, manual_since_ms: manualReason == null ? null : now, attempts: 0,
+        next_attempt_at_ms: null, first_failed_at_ms: null, last_detail: manualReason == null ? null : { code: manualReason, side: null }, updated_at_ms: now };
       if (existing.length) this.#update(tx, "settlementState", existing, { ...reset, resettle_requested_at_ms: Math.max(now, Number(existing[0].row.resettle_requested_at_ms ?? 0) + 1) });
       else this.#insert(tx, "settlementState", { rule_id: ruleId, bill_date: date, retry_reason: null, manual_since_ms: null, attempts: 0, source_version: null,
         last_attempt_at_ms: null, ...reset, resettle_requested_at_ms: now });
     }
   }
 
-  async requestResettle(ruleId, billDates, { reason = RESETTLE_REASON_TRANSITION, now = Date.now() } = {}) {
+  async requestResettle(ruleId, billDates, { reason = RESETTLE_REASON_TRANSITION, now = Date.now(), manualReason = null } = {}) {
     if (!billDates?.length) return 0;
-    await this.#transaction("requestResettle", async (tx) => this.#requestResettle(tx, ruleId, billDates, { reason, now }));
+    await this.#transaction("requestResettle", async (tx) => this.#requestResettle(tx, ruleId, billDates, { reason, now, manualReason }));
     return billDates.length;
   }
 
@@ -589,14 +594,14 @@ export class MemoryReconciliationRepository {
     return [...days.values()];
   }
 
-  async recordSettlementState(ruleId, billDate, state, now = Date.now()) {
-    // 账本里已经有这天就不写；有重结请求的日子除外（和 MySQL 版同一个条件）
-    const requested = this.#settlementEntries(null, ruleId, billDate).some(({ row }) => row.resettle_requested_at_ms != null);
-    if (this.#ledgerOf(null, ruleId, billDate).length && !requested) return;
+  async recordSettlementState(ruleId, billDate, state, now = Date.now(), { requestedAt = null } = {}) {
+    // 账本里已经有这天就不写；调用方读状态行时带着重结请求的日子除外（和 MySQL 版同一个条件）
+    if (this.#ledgerOf(null, ruleId, billDate).length && requestedAt == null) return;
     const values = Object.fromEntries(SETTLEMENT_STATE_WRITE_COLUMNS.map((column, index) => [column, settlementStateValues(state)[index]]));
     values.last_detail = JSON.parse(values.last_detail);
     const existing = this.#settlementEntries(null, ruleId, billDate);
-    if (existing.length) this.#update(null, "settlementState", existing, { ...values, updated_at_ms: now });
+    // 行里的请求时刻和调用方读到的不一样（取数期间来了新请求）：不盖
+    if (existing.length) this.#update(null, "settlementState", existing.filter(({ row }) => (row.resettle_requested_at_ms ?? null) === (requestedAt ?? null)), { ...values, updated_at_ms: now });
     else this.#insert(null, "settlementState", { rule_id: ruleId, bill_date: billDate, resettle_requested_at_ms: null, resettle_reason: null, ...values, updated_at_ms: now });
   }
 

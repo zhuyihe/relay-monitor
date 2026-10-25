@@ -5,6 +5,7 @@
 //   create()                                        每个用例新建（或复用连接池）一个仓库实例
 //   cleanup({ repository, ruleIds, capabilityIdentities })  删除本用例写入的全部规则及其渠道、分段、快照、告警、账本，以及账单能力记录
 //   inspectSnapshot({ repository, ruleId, snapshotKey })  读取快照行的物理列（segment_id 等没有公开读取方法）
+//   failRequestWrites({ repository })                让之后写重结请求的那一步抛错，返回恢复的函数（改切换时间的事务里，请求写不进去要连分段一起回滚）
 //   backdateRule({ repository, ruleId, createdAtMs })  把一条绑定的建立时刻改到过去（改时间要写重结请求的日子得在建绑定之后，用例里只能这样造）
 //   teardown()                                       全部用例结束后释放资源
 import assert from "node:assert/strict";
@@ -154,7 +155,7 @@ function settlement(snapshot, { resettle = false, ...rates } = {}) {
 const CASES = [];
 const contract = (title, run) => CASES.push([title, run]);
 
-export function defineReconciliationRepositoryContract({ name, create, cleanup = async () => {}, inspectSnapshot = null, backdateRule = null, teardown = null }) {
+export function defineReconciliationRepositoryContract({ name, create, cleanup = async () => {}, inspectSnapshot = null, backdateRule = null, failRequestWrites = null, teardown = null }) {
   test(`reconciliation repository contract: ${name}`, { timeout: 120000 }, async (t) => {
     if (teardown) t.after(teardown);
     for (const [title, run] of CASES) {
@@ -164,7 +165,8 @@ export function defineReconciliationRepositoryContract({ name, create, cleanup =
         const inspect = inspectSnapshot && ((ruleId, snapshotKey) => inspectSnapshot({ repository, ruleId, snapshotKey }));
         try {
           const backdate = backdateRule && ((ruleId, createdAtMs) => backdateRule({ repository, ruleId, createdAtMs }));
-          await run({ repository, fixture, inspect, backdate });
+          const failRequests = failRequestWrites && (() => failRequestWrites({ repository }));
+          await run({ repository, fixture, inspect, backdate, failRequests });
         } finally {
           await cleanup({ repository, ruleIds: await fixture.collectRuleIds(), capabilityIdentities: [...fixture.capabilityIdentities] });
         }
@@ -1297,7 +1299,7 @@ contract("resettle requests: one multi-row write; a newer request moves the valu
     ["2026-01-08", now, "transition", 0], ["2026-01-09", now, "transition", 0], ["2026-01-10", now, "transition", 0]]);
   // 这天还在退避：再来一次请求，请求时刻变大（同一毫秒也变），重试的记录清掉，马上可以结
   const retry = { op: "retry", reason: "PENDING", attempts: 4, nextAttemptAt: now + HOUR, firstFailedAt: now, lastAttemptAt: now, sourceVersion: "v1", detail: { code: "PENDING" } };
-  await repository.recordSettlementState(rule.id, "2026-01-10", retry, now);
+  await repository.recordSettlementState(rule.id, "2026-01-10", retry, now, { requestedAt: now });
   const kept = await stateOf(repository, rule.id, "2026-01-10");
   assert.deepEqual([kept.retryReason, kept.attempts, kept.resettleRequestedAt], ["PENDING", 4, now], "失败只记退避，请求保留");
   await repository.requestResettle(rule.id, ["2026-01-10"], { now });
@@ -1309,7 +1311,13 @@ contract("resettle requests: one multi-row write; a newer request moves the valu
   const window = { preset: "yesterday", startMs: Date.UTC(2026, 0, 9), endMs: Date.UTC(2026, 0, 10), timezone: "UTC" };
   const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: "2026-01-10T00:20:00.000Z", profitUsd: 2 });
   assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { ledger: settlement(snapshot) }), true);
-  await repository.recordSettlementState(rule.id, "2026-01-09", retry, now + 5);
+  // 带请求的日子由调用方说明（requestedAt 是它读状态行时看到的请求时刻），不在这张表上再查一次（同表子查询会死锁）
+  await repository.recordSettlementState(rule.id, "2026-01-09", { ...retry, attempts: 9 }, now + 4);
+  assert.equal((await stateOf(repository, rule.id, "2026-01-09")).attempts, 0, "账本里有这天、没说有请求：不写");
+  // 行里的请求时刻和调用方读到的不一样（取数期间又来了新请求）：这次的失败状态不盖
+  await repository.recordSettlementState(rule.id, "2026-01-09", { ...retry, attempts: 7 }, now + 5, { requestedAt: now - 1 });
+  assert.equal((await stateOf(repository, rule.id, "2026-01-09")).attempts, 0);
+  await repository.recordSettlementState(rule.id, "2026-01-09", retry, now + 6, { requestedAt: now });
   const requestedAndBooked = await stateOf(repository, rule.id, "2026-01-09");
   assert.deepEqual([requestedAndBooked.retryReason, requestedAndBooked.attempts, requestedAndBooked.resettleRequestedAt], ["PENDING", 4, now]);
 });
@@ -1396,10 +1404,47 @@ contract("correctTransition: archived or unknown rule is RULE_NOT_FOUND and noth
   const { segments } = await repository.observeSource(rule.id, { groups: {}, group: "pro", ratio: 3, tokenName: "Pro", detectedAt: t1 + 10 * HOUR });
   const middle = segments[1];
   await assert.rejects(repository.correctTransition(rule.id, middle.id, t1 + 0.5), outOfRange, "不是整毫秒");
-  await assert.rejects(repository.correctTransition(rule.id, middle.id, Date.now() + HOUR, { now: Date.now() }), outOfRange, "改到未来");
+  await assert.rejects(repository.correctTransition(rule.id, middle.id, Date.now() + HOUR, { now: Date.now() }), { code: "TRANSITION_TIME_IN_FUTURE", message: "不能改到以后的时间" }, "改到未来有自己的码和话");
   await assert.rejects(repository.correctTransition(`rr_missing${fixture.tag}`, middle.id, t1 - HOUR), notFound);
   assert.equal(await repository.archiveRule(rule.id), true);
   await assert.rejects(repository.correctTransition(rule.id, middle.id, t1 - HOUR), notFound, "已解除的绑定不改分段");
   assert.deepEqual((await repository.listSegments(rule.id)).map((segment) => segment.effectiveFrom), segments.map((segment) => segment.effectiveFrom));
   assert.deepEqual(await repository.listSettlementStates([rule.id]), []);
+});
+
+contract("correctTransition changes the segments and writes the resettle requests in one transaction: a failing request write rolls the segments back too", async ({ repository, fixture, backdate, failRequests }) => {
+  assert.ok(backdate && failRequests, "运行方要提供 backdateRule、failRequestWrites");
+  const rule = await fixture.createRule({ timezone: "UTC", initialRatio: 1 });
+  await backdate(rule.id, Date.UTC(2026, 0, 1));
+  const t1 = Date.UTC(2026, 2, 9, 12), t2 = Date.UTC(2026, 2, 12, 12);
+  await repository.observeSource(rule.id, { groups: {}, group: "vip", ratio: 2, tokenName: "VIP", detectedAt: t1 });
+  const { segments } = await repository.observeSource(rule.id, { groups: {}, group: "pro", ratio: 3, tokenName: "Pro", detectedAt: t2 });
+  const restore = failRequests();
+  try {
+    await assert.rejects(repository.correctTransition(rule.id, segments[1].id, Date.UTC(2026, 2, 7, 12), { now: Date.now() }), /request write failed/);
+  } finally { restore(); }
+  assert.deepEqual((await repository.listSegments(rule.id)).map((segment) => [segment.effectiveFrom, segment.effectiveTo]), segments.map((segment) => [segment.effectiveFrom, segment.effectiveTo]), "分段没动");
+  assert.deepEqual(await repository.listSettlementStates([rule.id]), [], "也没有留下请求");
+  // 恢复以后同样的改动成功，请求和分段一起生效
+  await repository.correctTransition(rule.id, segments[1].id, Date.UTC(2026, 2, 7, 12), { now: Date.now() });
+  assert.equal((await repository.listSegments(rule.id))[1].effectiveFrom, Date.UTC(2026, 2, 7, 12));
+  assert.ok((await repository.listSettlementStates([rule.id])).length >= 3);
+});
+
+contract("correctTransition: days older than 31 days get an attention row (RESETTLE_TOO_OLD) that still carries the request; days inside 31 days get a plain request", async ({ repository, fixture, backdate }) => {
+  const rule = await fixture.createRule({ timezone: "UTC", initialRatio: 1 });
+  await backdate(rule.id, Date.UTC(2025, 0, 1));
+  const now = Date.UTC(2026, 9, 9, 3);
+  const t1 = Date.UTC(2026, 8, 20, 4), t2 = Date.UTC(2026, 8, 25, 4); // 19 天前、14 天前
+  await repository.observeSource(rule.id, { groups: {}, group: "vip", ratio: 2, tokenName: "VIP", detectedAt: t1 });
+  const { segments } = await repository.observeSource(rule.id, { groups: {}, group: "pro", ratio: 3, tokenName: "Pro", detectedAt: t2 });
+  await repository.correctTransition(rule.id, segments[1].id, Date.UTC(2026, 7, 30, 4), { now }); // 40 天前
+  const rows = await repository.listSettlementStates([rule.id]);
+  const tooOld = rows.filter((row) => row.manualReason === "RESETTLE_TOO_OLD");
+  const plain = rows.filter((row) => row.manualReason == null);
+  assert.deepEqual([tooOld[0].billDate, tooOld.at(-1).billDate], ["2026-08-30", "2026-09-07"]);
+  assert.deepEqual([plain[0].billDate, plain.at(-1).billDate], ["2026-09-08", "2026-09-20"]);
+  assert.ok(rows.every((row) => row.resettleRequestedAt === now && row.resettleReason === "transition"));
+  assert.deepEqual([tooOld[0].manualSince, tooOld[0].nextAttemptAt, tooOld[0].detail], [now, null, { code: "RESETTLE_TOO_OLD", side: null }]);
+  assert.equal(plain[0].detail, null);
 });

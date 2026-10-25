@@ -5,6 +5,10 @@ import { MemoryReconciliationRepository } from "./test-support/reconciliation-me
 defineReconciliationRepositoryContract({
   name: "memory",
   create: () => new MemoryReconciliationRepository(),
+  failRequestWrites: ({ repository }) => {
+    repository.hooks.beforeRequestWrite = () => { throw new Error("request write failed"); };
+    return () => { delete repository.hooks.beforeRequestWrite; };
+  },
   backdateRule: ({ repository, ruleId, createdAtMs }) => {
     repository.tables.rules.find((row) => row.id === ruleId).created_at = new Date(createdAtMs);
   },
