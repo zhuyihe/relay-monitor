@@ -106,8 +106,10 @@ const STALE_SCOPE = Symbol("STALE_SCOPE");
 const MAX_SCOPE_ATTEMPTS = 3;
 // 轮询里没变的东西多久才重写一次：渠道状态的观测时刻、「今天」观测快照（计划 P1a）
 const UNCHANGED_REWRITE_MS = 10 * 60000;
-// 判断自营站点有没有新的消费：从上一次读到的最新一条日志往前留 120 秒查起（晚写进去不超过这么久的也查得到）；还没读到过的往前 2 小时
+// 判断自营站点有没有新的消费（计划 P1a，审核第二轮）：查的起点不每轮挪，落后「最新一条 − 120 秒」超过 10 分钟才挪一次，
+// 这样每次数条数的范围最多约 12 分钟；晚写进去、时刻不早于起点的日志都数得到。还没读到过日志的从第一次查的时候往前 2 小时起
 const OWN_LOG_LOOKBACK_SEC = 120;
+const OWN_LOG_ANCHOR_LAG_SEC = 10 * 60;
 const OWN_LOG_FIRST_LOOKBACK_SEC = 2 * 3600;
 
 function finite(value, fallback = null) {
@@ -629,11 +631,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return shared ? shared.catch(() => registry.ownStatus.get(key) || load()) : load();
   }
 
-  // 每轮轮询开始时，每个自营站点读一次最新的那条消费日志（编号、站点自己记的时刻），和上一轮读到的比。
-  // 编号没变：上一轮以后没有新的消费日志，今天的渠道收费读到 quietFrom 以后的，这一轮直接沿用（见 ownRevenue）。
-  // 用日志自己的编号和时刻，不用控制台的钟：站点时钟偏慢、日志晚写进去，编号都会变（审核第一轮，总指挥 10-25 定）。
-  // 查的范围从上一次读到的最新一条（站点的时刻）往前 120 秒起；还没读到过日志的，从第一次查的时候往前 2 小时起，之后不挪。
-  // 有新的消费、读失败、换了凭据、第一轮：这一轮照旧逐个渠道读。
+  // 每轮轮询开始时，每个自营站点读一次「从起点以后的消费日志」：最新那一条的编号、时刻，和一共几条（同一个响应）。
+  // 起点和上一轮相同、这三样都没变：上一轮以后没有新的消费日志，今天的渠道收费读到 quietFrom 以后的，这一轮直接沿用（见 ownRevenue）。
+  // 用日志自己的时刻和条数，不用控制台的钟：站点的钟偏慢、日志晚写进去（时刻更早、排不到第一），条数都会变（审核第一、二轮，总指挥 10-25 定）。
+  // 起点从上一次读到的最新一条（站点的时刻）往前 120 秒起，落后超过 10 分钟才往前挪，挪的那一轮照常读；没读到过日志的从第一次查往前 2 小时起，之后不挪。
+  // 有新的消费、读失败、换了凭据、第一轮、起点挪了、接口不给条数（老版本）：这一轮照旧逐个渠道读。
   async function markQuietOwnStations(rules, registry, now = Date.now()) {
     const ownIds = [...new Set(rules.map((rule) => rule.ownStationId))];
     await Promise.all(ownIds.map(async (id) => {
@@ -642,12 +644,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const credential = credentialFingerprint(own), previous = ownActivity.get(id);
       // 换了凭据就不算安静，和 ownRevenue 键里的凭据指纹互为备份
       const known = previous?.credential === credential && previous.read ? previous : null;
-      const sinceSec = known ? (known.latest ? known.latest.createdAtSec - OWN_LOG_LOOKBACK_SEC : known.sinceSec) : Math.floor(now / 1000) - OWN_LOG_FIRST_LOOKBACK_SEC;
-      let latest = null, read = false;
-      try { latest = await queryOwnLatestLog(own, { sinceSec }); read = true; } catch { read = false; }
-      const unchanged = read && known && (latest?.id ?? null) === (known.latest?.id ?? null);
+      const anchor = known?.latest ? known.latest.createdAtSec - OWN_LOG_LOOKBACK_SEC : null;
+      let sinceSec = !known ? Math.floor(now / 1000) - OWN_LOG_FIRST_LOOKBACK_SEC
+        : anchor != null && anchor - known.sinceSec > OWN_LOG_ANCHOR_LAG_SEC ? anchor : known.sinceSec;
+      let page = null, read = false;
+      try { page = await queryOwnLatestLog(own, { sinceSec }); read = true; } catch { read = false; }
+      // 第一次（或读失败、换凭据以后）是从 2 小时前数起的：读到了最新一条，就马上按它重新定起点再读一次，下一轮起就只数十来分钟的日志
+      if (read && !known && page.latest && page.latest.createdAtSec - OWN_LOG_LOOKBACK_SEC - sinceSec > OWN_LOG_ANCHOR_LAG_SEC) {
+        sinceSec = page.latest.createdAtSec - OWN_LOG_LOOKBACK_SEC;
+        try { page = await queryOwnLatestLog(own, { sinceSec }); } catch { read = false; }
+      }
+      const latest = page?.latest ?? null, total = page?.total ?? null;
+      const unchanged = read && !!known && sinceSec === known.sinceSec && total != null && total === known.total
+        && (latest?.id ?? null) === (known.latest?.id ?? null) && (latest?.createdAtSec ?? null) === (known.latest?.createdAtSec ?? null);
       const quietFrom = unchanged ? known.quietFrom ?? known.checkedAt : null;
-      ownActivity.set(id, { credential, checkedAt: now, read, latest, sinceSec, quietFrom });
+      ownActivity.set(id, { credential, checkedAt: now, read, latest, total, sinceSec, quietFrom });
       // coveredFromMs：读到的窗口终点要到这一刻，才包住最新那条日志所在的那一秒（渠道收费按秒、终点那一秒不含，见 unixSecondWindow）
       if (quietFrom != null) registry.ownQuietFrom.set(id, { from: quietFrom, coveredFromMs: latest ? (latest.createdAtSec + 1) * 1000 : null });
     }));
