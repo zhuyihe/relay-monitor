@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  改设置（D）的静态样稿，配 design/ux/d-config-change.md 看。样式照抄 binding-flow.html（同一套令牌和组件样子）。
+  截图：design/ux/screens/d-*.png（每个 .frame 截一张）。
+-->
+<style>
+:root {
+  --plane: #F4F6F8; --sheet: #FFFFFF; --sunken: #EEF1F5; --rule: #DFE4EA; --rule-soft: #E9EDF2;
+  --ink: #152033; --ink-2: #475467; --ink-3: #667085; --ink-dis: #98A2B3;
+  --cobalt: #3157D5; --cobalt-tint: #EBF0FD;
+  --good: #137A63; --good-tint: #E6F4EF; --warn: #A86400; --warn-ink: #915500; --warn-tint: #FFF4E0;
+  --crit: #C83C3C; --crit-ink: #B42F2F; --crit-tint: #FDECEC;
+  --r1: 4px; --r2: 8px; --r3: 12px;
+  --shadow: 0 8px 24px rgba(21, 32, 51, .12);
+  --font: "IBM Plex Sans", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { font-family: var(--font); font-size: 14px; line-height: 22px; color: var(--ink); background: #D9DEE5; -webkit-font-smoothing: antialiased; padding: 32px; }
+.frame { background: var(--plane); margin: 0 auto 40px; overflow: hidden; position: relative; }
+.frame-label { font-size: 13px; color: #475467; margin: 0 auto 8px; font-weight: 600; }
+.sym { width: 12px; height: 12px; flex: none; display: inline-block; vertical-align: -1px; }
+.icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.caption { font-size: 12px; line-height: 18px; color: var(--ink-3); }
+.sub { font-size: 13px; line-height: 20px; color: var(--ink-3); }
+a { color: var(--cobalt); text-decoration: none; }
+.num { font-variant-numeric: tabular-nums; }
+.spacer { flex: 1; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 15px; border-radius: 6px; border: 1px solid #D0D5DD; background: var(--sheet); color: var(--ink); white-space: nowrap; }
+.btn.sm { height: 28px; padding: 0 10px; font-size: 13px; }
+.btn.primary { background: var(--cobalt); border-color: var(--cobalt); color: #fff; }
+.btn.danger { color: var(--crit-ink); border-color: #F0B4B4; }
+.btn.dis { background: var(--sunken); border-color: var(--rule); color: var(--ink-dis); }
+.btn .spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255,255,255,.45); border-top-color: #fff; }
+.tag { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: var(--r1); font-size: 12px; line-height: 18px; font-weight: 500; white-space: nowrap; }
+.tag.warn { background: var(--warn-tint); color: var(--warn-ink); }
+.tag.info { background: var(--cobalt-tint); color: var(--cobalt); }
+.tag.plain { background: var(--sunken); color: var(--ink-2); font-weight: 400; }
+.tag.muted { background: var(--sunken); color: var(--ink-2); }
+
+/* 背后的页面（只画个轮廓） */
+.page { position: absolute; inset: 0; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+.ghost { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); }
+.ghost i { display: block; height: 10px; border-radius: 5px; background: var(--sunken); margin: 18px 20px; }
+.scrim { position: absolute; inset: 0; background: rgba(15, 20, 27, .36); }
+
+/* 抽屉（antd Drawer：标题、正文滚动、底部吸底） */
+.drawer { position: absolute; top: 0; right: 0; bottom: 0; width: 560px; background: var(--sheet); box-shadow: -6px 0 24px rgba(21, 32, 51, .14); display: flex; flex-direction: column; }
+.d-head { display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 24px; border-bottom: 1px solid var(--rule-soft); flex: none; }
+.d-head h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.d-body { flex: 1; overflow: hidden; padding: 20px 24px; display: flex; flex-direction: column; gap: 18px; }
+.d-foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 12px 24px; border-top: 1px solid var(--rule); background: var(--sheet); }
+.d-foot .sub { margin-right: auto; }
+.facts { display: grid; grid-template-columns: 84px 1fr; gap: 2px 12px; font-size: 13px; }
+.facts span { color: var(--ink-3); }
+.field > label { display: block; font-weight: 500; margin-bottom: 8px; }
+.select { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 36px; padding: 4px 36px 4px 8px; border: 1px solid #D0D5DD; border-radius: 6px; position: relative; }
+.select::after { content: ""; position: absolute; right: 12px; top: 50%; width: 7px; height: 7px; border-right: 1.5px solid var(--ink-3); border-bottom: 1.5px solid var(--ink-3); transform: translateY(-70%) rotate(45deg); }
+.select .chip { background: var(--sunken); border-radius: 4px; padding: 0 6px; font-size: 13px; }
+.select .chip.new { background: var(--cobalt-tint); color: var(--cobalt); }
+.select .ph { color: var(--ink-dis); padding-left: 4px; }
+.select .val { padding-left: 4px; }
+.input { height: 36px; border: 1px solid #D0D5DD; border-radius: 6px; padding: 0 12px; display: flex; align-items: center; color: var(--ink-dis); }
+.radio { display: flex; flex-direction: column; gap: 2px; }
+.radio label { display: grid; grid-template-columns: 16px 1fr; gap: 2px 10px; align-items: start; padding: 7px 10px; border-radius: 6px; }
+.radio label i { width: 16px; height: 16px; border-radius: 50%; border: 1px solid #98A2B3; margin-top: 3px; }
+.radio label.on { background: var(--cobalt-tint); }
+.radio label.on i { border: 5px solid var(--cobalt); }
+.radio label.off { color: var(--ink-dis); }
+.radio label.off i { background: var(--sunken); border-color: var(--rule); }
+.radio label .sub { grid-column: 2; }
+.after { margin-top: 6px; font-size: 13px; color: var(--ink-2); }
+.check { display: grid; grid-template-columns: 16px 1fr; gap: 2px 10px; align-items: start; }
+.check i { width: 16px; height: 16px; border-radius: 4px; border: 1px solid #98A2B3; margin-top: 3px; position: relative; }
+.check.on i { background: var(--cobalt); border-color: var(--cobalt); }
+.check.on i::after { content: ""; position: absolute; left: 4.5px; top: 1.5px; width: 4px; height: 8px; border-right: 2px solid #fff; border-bottom: 2px solid #fff; transform: rotate(45deg); }
+.check .sub { grid-column: 2; }
+.read-ok { display: flex; gap: 8px; align-items: center; margin-top: 8px; font-size: 13px; color: var(--good); }
+.read-ok .sym { color: var(--good); }
+.hint { font-size: 13px; color: var(--ink-3); }
+
+/* 改动、哪几天按什么算（antd Alert 的样子，不另起组件） */
+.box { border-radius: var(--r2); padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+.box.info { background: #F5F7FE; border: 1px solid #D6DEF8; }
+.box.plain { background: var(--sunken); }
+.box h4 { margin: 0; font-size: 14px; font-weight: 600; }
+.rows { display: grid; grid-template-columns: 104px 1fr; gap: 6px 12px; font-size: 13px; line-height: 20px; }
+.rows > span { color: var(--ink-3); }
+.rows .plus { color: var(--good); }
+.rows .minus { color: var(--crit-ink); }
+.rows .warn { color: var(--warn-ink); }
+.day { display: inline-block; padding: 0 6px; border-radius: var(--r1); background: var(--sheet); border: 1px solid var(--rule); font-variant-numeric: tabular-nums; font-size: 12px; line-height: 18px; margin-right: 2px; }
+.progress { height: 4px; border-radius: 2px; background: var(--sunken); overflow: hidden; margin-top: 4px; }
+.progress i { display: block; height: 100%; width: 55%; background: var(--cobalt); }
+
+/* 提示条（message） */
+.toast { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); background: var(--sheet); border-radius: var(--r2); box-shadow: var(--shadow); padding: 9px 16px; display: flex; gap: 8px; align-items: center; font-size: 14px; z-index: 3; white-space: nowrap; }
+.toast .sym { color: var(--good); }
+.toast.warn .sym { color: var(--warn); }
+
+/* 弹窗 */
+.modal { position: absolute; left: 50%; top: 90px; transform: translateX(-50%); width: 480px; background: var(--sheet); border-radius: var(--r3); box-shadow: var(--shadow); }
+.modal-head { padding: 20px 24px 0; display: flex; gap: 12px; align-items: center; }
+.modal-head h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.modal-head .sym { width: 16px; height: 16px; color: var(--warn); }
+.modal-body { padding: 10px 24px 4px 52px; display: flex; flex-direction: column; gap: 8px; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 24px 20px; }
+
+/* 需处理（attention-list） */
+.attention { list-style: none; margin: 0; padding: 0; }
+.attention li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; padding: 12px 16px; background: #FFFBF3; border: 1px solid #F3E3C3; border-radius: var(--r2); }
+.attention li + li { margin-top: 10px; }
+.attention .sym { width: 14px; height: 14px; margin-top: 4px; color: var(--warn); }
+.attention strong { font-weight: 500; }
+.attention p { color: var(--ink-3); font-size: 13px; line-height: 20px; margin: 2px 0 0; }
+.attention .note { margin-top: 4px; font-size: 12px; line-height: 18px; color: var(--ink-2); }
+.attention .note .day { background: var(--sunken); border: 0; }
+
+/* 上游账单卡片 */
+.panel { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); }
+.acct-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--rule-soft); }
+.acct-body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
+.key-head { display: flex; align-items: center; gap: 10px; }
+.bind { border: 1px solid var(--rule); border-radius: var(--r2); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.bind.hl { border-color: var(--cobalt); box-shadow: 0 0 0 3px rgba(49, 87, 213, .14); }
+.bind .facts { grid-template-columns: 168px 1fr; font-size: 13px; }
+.bind-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.history { border-top: 1px dashed var(--rule); padding-top: 10px; }
+.history ol { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.history li { display: grid; grid-template-columns: 112px 1fr; gap: 12px; }
+.history li span { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.linkbtn { color: var(--cobalt); font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+
+/* 每日利润表 */
+.table { width: 100%; border-collapse: collapse; }
+.table th { background: var(--sunken); font-weight: 500; color: var(--ink-2); font-size: 13px; text-align: left; padding: 9px 14px; }
+.table td { padding: 10px 14px; border-top: 1px solid var(--rule-soft); vertical-align: top; }
+.table .r { text-align: right; font-variant-numeric: tabular-nums; }
+.detail { background: #FAFBFC; }
+.detail .rows { grid-template-columns: 84px 1fr; padding: 4px 0; }
+
+/* 标注 */
+.ann { position: absolute; background: #3157D5; color: #fff; font-size: 12px; line-height: 18px; padding: 4px 8px; border-radius: 6px; max-width: 250px; box-shadow: var(--shadow); z-index: 4; }
+.ann::after { content: ""; position: absolute; width: 8px; height: 8px; background: #3157D5; transform: rotate(45deg); }
+.ann.r::after { right: -4px; top: 9px; } .ann.l::after { left: -4px; top: 9px; } .ann.b::after { bottom: -4px; left: 16px; } .ann.t::after { top: -4px; left: 16px; }
+
+/* 用过的 Key（时间线） */
+.tl-title { font-size: 13px; font-weight: 600; color: var(--ink-2); margin-bottom: 6px; }
+.tl ol { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--rule); display: flex; flex-direction: column; gap: 10px; }
+.tl li { position: relative; display: grid; grid-template-columns: 150px 1fr auto; gap: 12px; font-size: 13px; line-height: 20px; }
+.tl li i { position: absolute; left: -20px; top: 5px; width: 10px; height: 10px; border-radius: 50%; background: var(--sheet); border: 2px solid var(--cobalt); }
+.tl li.unk i { border-color: var(--warn); background: var(--warn-tint); }
+.tl li a { font-size: 13px; }
+.tl .when { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.m-tl li { grid-template-columns: 1fr auto; }
+.m-tl li .when { grid-column: 1 / -1; }
+.pick { display: flex; flex-direction: column; border: 1px solid var(--rule); border-radius: var(--r2); }
+.pick .check { padding: 10px 12px; border-top: 1px solid var(--rule-soft); font-size: 13px; }
+.pick .check:first-child { border-top: 0; }
+.pick .check.dis i { background: var(--sunken); border-color: var(--rule); }
+.menu { margin-top: 6px; border: 1px solid var(--rule); border-radius: 6px; box-shadow: var(--shadow); padding: 4px 0; font-size: 13px; }
+.menu .grp { padding: 6px 12px 2px; font-size: 12px; color: var(--ink-3); }
+.menu .opt { padding: 6px 12px; display: flex; justify-content: space-between; gap: 12px; }
+.menu .opt.on { background: var(--cobalt-tint); }
+.menu .opt.dis { color: var(--ink-dis); }
+.menu .opt span { color: var(--ink-3); font-size: 12px; }
+/* 变体并排 */
+.cols { display: grid; gap: 16px; padding: 16px; }
+.cols.c3 { grid-template-columns: repeat(3, 1fr); }
+.cols.c2 { grid-template-columns: repeat(2, 1fr); }
+.v-title { font-size: 12px; font-weight: 600; color: var(--ink-2); margin-bottom: 8px; }
+.card { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); padding: 16px; }
+
+/* 手机 */
+.m .drawer { width: 100%; top: 44px; border-radius: 12px 12px 0 0; }
+.m .d-head { height: 52px; padding: 0 16px; }
+.m .d-body { padding: 16px; gap: 16px; }
+.m .d-foot { padding: 10px 16px 24px; }
+.m .d-foot .btn { height: 44px; flex: 1; }
+.m .rows { grid-template-columns: 1fr; gap: 2px; }
+.m .rows > span { margin-top: 6px; }
+.m .radio label { padding: 10px; }
+</style>
+<style>
+.ov { padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+.topbar { display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 24px; background: var(--sheet); border-bottom: 1px solid var(--rule); }
+.topbar h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.chip-tag { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 13px; background: var(--cobalt-tint); color: var(--cobalt); font-size: 12px; font-weight: 500; }
+.start { background: var(--sheet); border: 1px solid #D6DEF8; border-radius: var(--r2); box-shadow: 0 0 0 3px rgba(49,87,213,.06); }
+.start-head { display: flex; align-items: baseline; gap: 12px; padding: 18px 24px 4px; }
+.start-head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.steps { list-style: none; margin: 0; padding: 4px 0; }
+.steps li { display: grid; grid-template-columns: 28px minmax(0,1fr) auto; gap: 4px 14px; align-items: center; padding: 12px 24px; border-top: 1px solid var(--rule-soft); }
+.steps li:first-child { border-top: 0; }
+.steps .n { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 600; background: var(--sunken); color: var(--ink-3); }
+.steps li.cur .n { background: var(--cobalt); color: #fff; }
+.steps li.done .n { background: var(--good-tint); color: var(--good); }
+.steps strong { font-weight: 500; }
+.steps li.todo strong { color: var(--ink-3); }
+.steps p { margin: 2px 0 0; font-size: 13px; color: var(--ink-3); }
+.start-foot { padding: 4px 24px 16px; font-size: 13px; color: var(--ink-3); }
+.ghostpanel { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); padding: 18px 24px; }
+.ghostpanel i { display: block; height: 10px; border-radius: 5px; background: var(--sunken); margin: 10px 0; }
+.more { display: flex; align-items: center; gap: 6px; color: var(--cobalt); font-size: 13px; }
+.strip { background: var(--warn-tint); border-radius: var(--r2); padding: 10px 12px; font-size: 13px; display: flex; flex-direction: column; gap: 8px; }
+.input.filled { color: var(--ink); }
+.kv-ok { font-size: 13px; color: var(--good); display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+.kv-info { font-size: 13px; color: var(--ink-2); margin-top: 6px; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="warn" viewBox="0 0 12 12"><path d="M6 1 11.6 10.8H.4Z" fill="currentColor"/></symbol>
+  <symbol id="good" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.2" fill="currentColor"/></symbol>
+  <symbol id="i-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+  <symbol id="i-chev-d" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="m6 4 4 4-4 4"/></symbol>
+</svg>
+<template id="page">
+  <div class="page">
+    <div class="ghost" style="height:64px"><i style="width:30%"></i></div>
+    <div class="ghost" style="flex:1"><i style="width:60%"></i><i style="width:40%"></i><i style="width:52%"></i><i style="width:35%"></i></div>
+  </div>
+  <div class="scrim"></div>
+</template>
+<style>
+.chan { display: grid; grid-template-columns: 22px minmax(0,1fr); gap: 2px 10px; padding: 10px 12px; border-top: 1px solid var(--rule-soft); font-size: 13px; }
+.chan:first-child { border-top: 0; }
+.chan b { font-weight: 500; font-size: 14px; }
+.chan .k { color: var(--ink-2); }
+.chan .w { color: var(--warn-ink); }
+.grp-title { font-size: 12px; font-weight: 600; color: var(--ink-3); padding: 8px 12px 4px; background: #FAFBFC; border-top: 1px solid var(--rule-soft); }
+.two { display: grid; grid-template-columns: 4fr 8fr; gap: 24px; padding: 24px; }
+.ulist { list-style: none; margin: 0; padding: 0; }
+.ulist li { padding: 12px 16px; border-top: 1px solid var(--rule-soft); display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; }
+.ulist li:first-child { border-top: 0; }
+.ulist li.on { background: var(--cobalt-tint); box-shadow: inset 3px 0 0 var(--cobalt); }
+.ulist .sub { grid-column: 1 / -1; }
+.ph { padding: 16px 20px; border-bottom: 1px solid var(--rule-soft); display: flex; align-items: baseline; gap: 12px; }
+.ph h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.tabs { display: flex; gap: 24px; padding: 0 24px; border-bottom: 1px solid var(--rule); background: var(--sheet); }
+.tabs span { padding: 12px 0; color: var(--ink-2); }
+.tabs span.on { color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--cobalt); }
+</style>
+<style>
+/* 小窗（antd Modal，520 宽，按钮吸底） */
+.dlg { position: absolute; left: 50%; top: 40px; transform: translateX(-50%); width: 520px; background: var(--sheet); border-radius: var(--r3); box-shadow: var(--shadow); display: flex; flex-direction: column; max-height: calc(100% - 80px); }
+.dlg-head { display: flex; align-items: flex-start; gap: 12px; padding: 18px 24px 10px; }
+.dlg-head h3 { margin: 0; font-size: 16px; font-weight: 600; line-height: 24px; }
+.dlg-head .icon { margin-top: 4px; margin-left: auto; color: var(--ink-3); }
+.dlg-body { padding: 0 24px 16px; display: flex; flex-direction: column; gap: 14px; overflow: hidden; }
+.dlg-foot { display: flex; align-items: center; gap: 8px; padding: 12px 24px; border-top: 1px solid var(--rule); }
+.dlg-foot .sub { margin-right: auto; }
+.keyq { border-top: 1px solid var(--rule-soft); padding-top: 10px; }
+.keyq .kn { font-size: 13px; font-weight: 500; }
+.keyq .kn span { color: var(--ink-3); font-weight: 400; }
+.keyq .radio label { padding: 4px 10px; font-size: 13px; }
+.m .dlg { left: 0; right: 0; top: 44px; bottom: 0; transform: none; width: auto; max-height: none; border-radius: 12px 12px 0 0; }
+.m .dlg-body { padding: 0 16px 16px; }
+.m .dlg-foot { padding: 10px 16px 24px; margin-top: auto; }
+.m .dlg-foot .btn { height: 44px; flex: 1; }
+.lbl { font-size: 13px; font-weight: 500; color: var(--ink-2); margin-bottom: 6px; }
+</style>
+
+<p class="frame-label" style="width:1160px">d-account · 账号的问题，改答案：「改动」「哪几天按什么算」改了就出来；改成「别处也在用」时每把 Key 就在同一个小窗里接着问</p>
+<section class="frame" id="d-account" style="width:1160px;height:980px">
+  <div data-page></div>
+  <div class="dlg" style="top:24px;max-height:932px">
+    <div class="dlg-head"><h3>这个上游账号只给你自己的渠道用吗？</h3><svg class="icon"><use href="#i-close"/></svg></div>
+    <div class="dlg-body">
+      <p class="sub" style="margin:0">演示·主力账号 · 高速 A、标准 B 等 4 个渠道在算利润</p>
+      <div class="radio">
+        <label><i></i><span>只给我的渠道用</span></label>
+        <label class="on"><i></i><span>别处也在用</span><span class="sub">每把 Key 还要回答一次「这把 Key 还给别处用吗？」；新渠道系统不会自己开始算</span></label>
+        <label><i></i><span>不确定</span></label>
+      </div>
+      <div class="box plain" style="gap:10px">
+        <div class="lbl" style="margin:0">这个上游下在算的渠道用了 3 把 Key，每把回答一次</div>
+        <div class="keyq" style="border-top:0;padding-top:0"><div class="kn">oai <span>· 高速 A</span></div>
+          <div class="radio"><label class="on"><i></i><span>只给这些渠道用</span></label><label><i></i><span>站外也在用（测试、自用、给别人）</span></label><label><i></i><span>别处也在用，说不清是哪</span></label><label><i></i><span>不确定</span></label></div></div>
+        <div class="keyq"><div class="kn">team-b <span>· 标准 B</span></div><p class="caption" style="margin:2px 0 0">还没回答（四个选项，同上）</p></div>
+        <div class="keyq"><div class="kn">bak <span>· 备用 C、备用 C2</span></div><p class="caption" style="margin:2px 0 0">还没回答（四个选项，同上）</p></div>
+      </div>
+      <div class="box info">
+        <div class="rows">
+          <span>改动</span><div>回答：「只给我的渠道用」改成「别处也在用」<br>这个上游下每把 Key 要回答一次「这把 Key 还给别处用吗？」，回答以前这几个渠道先不算；新渠道不再自己开始算</div>
+          <span>哪几天按什么算</span><div>今天：全天按新回答算<br><span class="day">10月23日</span><span class="day">10月24日</span> 保存时先按原来的回答固定<br>已固定的：不变</div>
+        </div>
+        <label class="check" style="margin-left:116px;font-size:13px"><i></i><span>这几天也按新回答算</span><span class="sub">原来答错了时勾上</span></label>
+      </div>
+    </div>
+    <div class="dlg-foot"><span class="sub">还有 2 把 Key 没回答，可以先保存</span><span class="btn">取消</span><span class="btn primary">保存</span></div>
+  </div>
+  <div class="ann r" style="right:860px;top:150px">打开时照原答案选着；改了才出现下面「改动」和「哪几天按什么算」</div>
+  <div class="ann r" style="right:860px;top:300px">选「别处也在用」，每把 Key 就在这里接着问，不用回头去需处理一条一条答</div>
+  <div class="ann r" style="right:860px;top:640px">原来的回答能算的日子先按原来的固定；本来就算不出的，写「原来算不出利润……保存后按新回答算」，没有勾选</div>
+</section>
+
+<p class="frame-label" style="width:1160px">d-key · 某把 Key 的问题，第一次回答（只在账号别处也在用的上游上）：一行灰字说哪几天按这个回答算，点一次保存</p>
+<section class="frame" id="d-key" style="width:1160px;height:560px">
+  <div data-page></div>
+  <div class="dlg">
+    <div class="dlg-head"><h3>这把 Key 还给别处用吗？</h3><svg class="icon"><use href="#i-close"/></svg></div>
+    <div class="dlg-body">
+      <p class="sub" style="margin:0">演示·拼车团队 · Key team-c · 渠道 标准 B（10月24日 14:30 起换上的）</p>
+      <div class="radio">
+        <label class="on"><i></i><span>只给这些渠道用</span></label>
+        <label><i></i><span>站外也在用（测试、自用、给别人）</span></label>
+        <label><i></i><span>别处也在用，说不清是哪</span></label>
+        <label><i></i><span>不确定</span></label>
+      </div>
+      <p class="hint" style="margin:0">今天和以前还没固定的日子（<span class="day">10月24日</span>）都按这个回答算；已固定的日子不变。</p>
+    </div>
+    <div class="dlg-foot"><span class="sub"></span><span class="btn">取消</span><span class="btn primary">保存</span></div>
+  </div>
+  <div class="ann r" style="right:860px;top:200px">打开时四个都不选（图里是选了以后）</div>
+  <div class="ann r" style="right:860px;top:360px">这几天原来本来算不出利润，不用先固定、不用等，也没有勾选</div>
+</section>
+
+<p class="frame-label" style="width:1160px">d-save · 保存：先按原来的回答固定那几天（最多 15 秒），再存；有没固定成的，提示一句，放进需处理</p>
+<section class="frame" id="d-save" style="width:1160px;height:420px">
+  <div class="cols c2" style="padding:24px;align-items:start">
+    <div><div class="v-title">保存中（小窗关不掉，Esc 也不关）</div>
+      <div class="dlg" style="position:static;transform:none;width:auto">
+        <div class="dlg-foot" style="border-top:0;flex-wrap:wrap"><span class="sub">正在按原来的回答固定 <span class="day">10月23日</span><span class="day">10月24日</span>…</span><span class="btn dis">取消</span><span class="btn primary"><span class="spin"></span>保存</span>
+          <div class="progress" style="flex-basis:100%"><i></i></div></div>
+      </div></div>
+    <div><div class="v-title">结果</div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div class="toast" style="position:static;transform:none;align-self:flex-start"><svg class="sym"><use href="#good"/></svg>已保存</div>
+        <div class="toast warn" style="position:static;transform:none;align-self:flex-start"><svg class="sym"><use href="#warn"/></svg>有 1 天没能固定，已放进需处理</div>
+        <p class="caption" style="margin:0">都固定了：「已保存」，小窗关上，「渠道」页签里改到的那一行高亮 2 秒。<br>有没固定成的：警示样子停 6 秒，侧栏、运营总览的数字同时加一。<br>保存没成：照 §8.2 写在小窗里，小窗不关；已经固定的日子留着。</p>
+      </div></div>
+  </div>
+</section>
+
+<p class="frame-label" style="width:1160px">d-sub2api · Sub2API 上游：一天结束时在算就整天算，不在算就整天不算。开始、停止的地方都写清这一天</p>
+<section class="frame" id="d-sub2api" style="width:1160px;height:320px">
+  <div class="cols c2" style="padding:24px;align-items:start">
+    <div><div class="v-title">「渠道」页签 · 开始算利润（Sub2API 上游）</div>
+      <div class="bind" style="background:var(--sheet)"><div class="key-head"><b>备用 E</b><span class="tag plain">没算利润</span><span class="spacer"></span></div>
+        <div class="k" style="font-size:13px;color:var(--ink-2)">用的 Key：sub-e · 分组 c</div>
+        <div class="bind-actions"><span class="hint">这个上游只能按整天读账单，今天（10月25日）整天算进来</span><span class="spacer"></span><span class="btn sm primary">开始算利润</span></div></div>
+      <p class="caption" style="margin:10px 0 0">每日利润这天写「从 0:00 开始统计（这个上游只能按整天读账单）」。New API 上游没有这句，照现在写「从 14:30 开始统计」。</p></div>
+    <div><div class="v-title">停止算利润的确认框（Sub2API 上游）</div>
+      <div class="modal" style="position:static;transform:none;width:auto">
+        <div class="modal-head"><svg class="sym"><use href="#warn"/></svg><h3>停止算利润「备用 E」？</h3></div>
+        <div class="modal-body"><p style="margin:0">这个上游只能按整天读账单，今天（10月25日）整天不算进这个渠道的利润。以前的每日记录还在，以后可以再点「开始算利润」接着算。</p></div>
+        <div class="modal-foot"><span class="btn">取消</span><span class="btn danger">停止算利润</span></div>
+      </div>
+      <p class="caption" style="margin:10px 0 0">同一天又点「开始算利润」：今天整天算一次。New API 上游的确认框没有第一句，算到点的那一刻。</p></div>
+  </div>
+</section>
+
+<p class="frame-label" style="width:1160px">d-move · 改时间：一把 Key 在两个在算的渠道之间挪过，定几点挪的（C 的改时间小窗）；改过以后「用过的 Key」那一行也留「改时间」</p>
+<section class="frame" id="d-move" style="width:1160px;height:410px">
+  <div class="cols c2" style="padding:24px;align-items:start">
+    <div><div class="v-title">需处理里</div>
+      <ul class="attention"><li><svg class="sym"><use href="#warn"/></svg><div><strong>Key「oai-2」从「高速 A」挪到了「标准 B」，不知道是几点挪的</strong><p>这把 Key 花的钱要按时间分给两个渠道；定了以后那几天重算</p></div><span class="btn sm">改时间</span></li></ul>
+      <div class="v-title" style="margin-top:20px">定了以后，「渠道」页签 · 标准 B · 用过的 Key</div>
+      <div class="tl card"><ol>
+        <li><i></i><span class="when">10月25日 16:05 起</span><span>oai-2 · 分组 a · 倍率 1.2</span><a>改时间</a></li>
+        <li><i></i><span class="when">10月20日 12:44 起</span><span>team-b · 分组 b · 倍率 1.0</span><span></span></li>
+      </ol></div></div>
+    <div><div class="v-title">改时间小窗</div>
+      <div class="dlg" style="position:static;transform:none;width:auto">
+        <div class="dlg-head"><h3>改时间</h3><svg class="icon"><use href="#i-close"/></svg></div>
+        <div class="dlg-body">
+          <p class="sub" style="margin:0">Key「oai-2」从「高速 A」挪到了「标准 B」，几点挪的？</p>
+          <div class="field"><div class="input filled">10月25日 16:05</div>
+            <div class="hint" style="margin-top:6px">默认是重新读到的时候；可以改成 10月25日 15:19 到 16:05 之间的任何时刻</div></div>
+          <div class="box info"><div class="rows"><span>哪几天按什么算</span><div><span class="day">10月25日</span> 这把 Key 的钱按这个时刻分给两个渠道，这天重算</div></div></div>
+        </div>
+        <div class="dlg-foot"><span class="sub"></span><span class="btn">取消</span><span class="btn primary">保存</span></div>
+      </div></div>
+  </div>
+</section>
+
+<p class="frame-label" style="width:1160px">d-unsettled · 没能固定的那天：先「重新读取」按原来的设置再固定；原来的设置怎么也算不出来时，才换成「按现在的设置算」</p>
+<section class="frame" id="d-unsettled" style="width:1160px;height:520px">
+  <div class="cols c2" style="padding:24px;align-items:start">
+    <div><div class="v-title">第一步</div>
+      <ul class="attention"><li><svg class="sym"><use href="#warn"/></svg><div><strong>改设置前这天没能固定</strong><p>这天先不算进汇总；重新读取会按原来的设置再固定一次</p><div class="note"><span class="day">10月23日</span> · 高速 A</div></div><span class="btn sm">重新读取</span></li></ul>
+      <div class="v-title" style="margin-top:20px">第二步（原来的设置还是算不出来，原因要人处理）</div>
+      <ul class="attention"><li><svg class="sym"><use href="#warn"/></svg><div><strong>这天按原来的设置算不出来</strong><p>上游拒绝读取旧 Key「oai」。可以改按现在的设置算这天</p><div class="note"><span class="day">10月23日</span> · 高速 A</div></div><span class="btn sm">按现在的设置算</span></li></ul></div>
+    <div><div class="v-title">按现在的设置算 · 确认框</div>
+      <div class="modal" style="position:static;transform:none;width:auto">
+        <div class="modal-head"><svg class="sym"><use href="#warn"/></svg><h3>按现在的设置算 10月23日？</h3></div>
+        <div class="modal-body"><p style="margin:0">这天会按现在的设置算，算好以后就固定了：</p>
+          <div class="rows"><span>渠道</span><div>高速 A</div><span>那天用的 Key</span><div>oai · 分组 a · 倍率 1.2</div><span>账号的回答</span><div>只给我的渠道用</div></div>
+          <p class="caption" style="margin:0">原来账号答的是「不确定」</p></div>
+        <div class="modal-foot"><span class="btn">取消</span><span class="btn primary">按现在的设置算</span></div>
+      </div></div>
+  </div>
+</section>
+
+<p class="frame-label" style="width:1160px">d-history · 「渠道」页签：账号的回答和「改」在上游标题这一行；「改动记录」在它下面，一个上游一份，默认收起，点开新的在前</p>
+<section class="frame" id="d-history" style="width:1160px;height:680px">
+  <div class="topbar"><h1>上游资源</h1></div>
+  <div class="tabs"><span>上游列表</span><span class="on">渠道</span></div>
+  <div class="two">
+    <div class="panel"><div class="ph"><h2>上游</h2><span class="caption">4 个</span></div>
+      <ul class="ulist">
+        <li class="on"><b>演示·主力账号</b><span></span><span class="sub">只给我的渠道用 · 5 个渠道</span></li>
+        <li><b>演示·拼车团队</b><span></span><span class="sub">别处也在用 · 2 个渠道在算</span></li>
+        <li><b>演示·Key 计费站</b><span></span><span class="sub">只填了一把 Key · 1 个渠道在算</span></li>
+        <li><b>演示·邮箱密码登录</b><span></span><span class="sub">没有渠道用它的 Key</span></li>
+      </ul></div>
+    <div class="panel"><div class="ph"><h2>演示·主力账号</h2><span class="caption">余额 $158.78 · 3 把 Key · 账号只给我的渠道用</span><a class="linkbtn">改</a></div>
+      <div class="acct-body">
+        <div class="history" style="border-top:0;padding-top:0">
+          <div class="more"><svg class="icon"><use href="#i-chev-d"/></svg>改动记录</div>
+          <ol>
+            <li><span>10月25日 16:10</span><div>Key oai-3 从 海外 D 挪到 标准 B 的时间定为 10月25日 15:42</div></li>
+            <li><span>10月25日 09:12</span><div>系统：新渠道 海外 D 开始算利润</div></li>
+            <li><span>10月24日 18:30</span><div>账号的回答改成「只给我的渠道用」</div></li>
+            <li><span>10月24日 11:05</span><div>按现在的设置算 10月23日（高速 A）</div></li>
+            <li><span>10月22日 10:00</span><div>停止算利润：备用 E</div></li>
+            <li><span>10月20日 12:44</span><div>开始算利润：高速 A、标准 B、备用 C、备用 C2</div></li>
+          </ol></div>
+        <div class="bind"><div class="key-head"><b>高速 A</b><span class="tag plain">在算利润</span><span class="spacer"></span><a class="linkbtn">停止算利润</a></div>
+          <div class="tl"><div class="tl-title">用过的 Key</div><ol>
+            <li><i></i><span class="when">10月24日 14:30 起</span><span>oai-2 · 分组 a · 倍率 1.2</span><span></span></li>
+            <li><i></i><span class="when">10月20日 12:44 起</span><span>oai · 分组 a · 倍率 1.2</span><span></span></li>
+          </ol></div></div>
+        <div class="more" style="padding:4px 0 0"><svg class="icon"><use href="#i-chev"/></svg>还有 4 个渠道（标准 B、备用 C、备用 C2、海外 D）</div>
+      </div></div>
+  </div>
+  <div class="ann r" style="left:60px;top:480px;max-width:300px">账号的回答在上游标题这一行，「改」打开 d-account 的小窗</div>
+  <div class="ann r" style="left:60px;top:540px;max-width:300px">换 Key 不写进改动记录，只在渠道的「用过的 Key」里；「系统：」开头的是系统自己做的</div>
+</section>
+
+<p class="frame-label" style="width:390px">d-mobile · 手机：小窗从底部升起占满；两列变一列；按钮吸底、44 高</p>
+<section class="frame m" id="d-mobile" style="width:390px;height:844px">
+  <div data-page></div>
+  <div class="dlg">
+    <div class="dlg-head"><h3>这个上游账号只给你自己的渠道用吗？</h3><svg class="icon"><use href="#i-close"/></svg></div>
+    <div class="dlg-body">
+      <p class="sub" style="margin:0">演示·主力账号 · 高速 A、标准 B 等 4 个渠道在算利润</p>
+      <div class="radio">
+        <label class="on"><i></i><span>只给我的渠道用</span><span class="sub">换 Key 时系统会自己跟上，新渠道系统自己开始算</span></label>
+        <label><i></i><span>别处也在用</span></label>
+        <label><i></i><span>不确定</span></label>
+      </div>
+      <div class="box info">
+        <div class="rows">
+          <span>改动</span><div>回答：「别处也在用」改成「只给我的渠道用」<br>「上游乙·标准」等 2 个新渠道从现在起开始算</div>
+          <span>哪几天按什么算</span><div>今天：全天按新回答算<br><span class="day">10月22日</span> 原来算不出利润（Key「team-b」没回答「这把 Key 还给别处用吗？」），保存后按新回答算<br><span class="day">10月23日</span> 保存时先按原来的回答固定<br>已固定的：不变</div>
+        </div>
+        <label class="check" style="font-size:13px;margin-top:4px"><i></i><span>这几天也按新回答算</span><span class="sub">原来答错了时勾上</span></label>
+      </div>
+    </div>
+    <div class="dlg-foot"><span class="btn">取消</span><span class="btn primary">保存</span></div>
+  </div>
+</section>
+
+<script>
+for (const slot of document.querySelectorAll("[data-page]")) slot.replaceWith(document.getElementById("page").content.cloneNode(true));
+</script>
+</body>
+</html>
