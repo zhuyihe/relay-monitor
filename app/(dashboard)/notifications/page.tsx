@@ -440,6 +440,11 @@ export default function NotificationsPage() {
     ruleForm.clearInvalid();
   };
   const ruleErrors: Record<string, string> = { ...(ruleForm.invalid || {}), ...(low.invalid ? { low: low.invalid } : {}) };
+  // 提醒节奏两个框有报错时强制展开；报错一出就把开合记成「开着」：改正以后不自己收起（收起会卸掉输入框，离开输入框的那次保存就没了），由用户自己收
+  const paceErr = !!(ruleErrors.renotify || ruleErrors.errRetry);
+  useEffect(() => {
+    if (paceErr) setPaceOpen(true);
+  }, [paceErr]);
   const leaveRules = commitOnLeave(ruleForm.commit);
   const leaveLow = commitOnLeave(low.commit);
   const rulesSavedAt = Math.max(ruleForm.savedAt, low.savedAt, toggles.savedAt);
@@ -699,7 +704,7 @@ export default function NotificationsPage() {
   };
 
   const paceSummary = COPY.paceSummary(ruleForm.saved.renotify, ruleForm.saved.errRetry);
-  const paceShown = paceOpen || !!(ruleErrors.renotify || ruleErrors.errRetry);
+  const paceShown = paceOpen || paceErr;
   // 版式（ui-design-spec §5.7、#64 第 8 节）：左 8 列提醒规则，右 4 列通知方式和日报；还没有通知方式时整页只放一件事，不分栏。
   // 手机上通知方式在最前：换的是页面里的先后，不只用 CSS 换显示顺序（读屏和键盘跟着看到的先后，§5.1）
   const rulesBlock = (
@@ -771,7 +776,7 @@ export default function NotificationsPage() {
           <div className="jy-notifications-pad jy-more-line">
             {/* 展开以后两个框下面各有说明，这一句不再重复（同一句话一页只说一次） */}
             {paceShown ? null : <span className="jy-caption">{paceSummary}</span>}
-            <More label={COPY.pace} open={paceShown} onOpenChange={setPaceOpen}>
+            <More label={COPY.pace} open={paceShown} onOpenChange={(next) => setPaceOpen(paceErr ? true : next)}>
               <p className="jy-caption jy-notifications-pace-hint">{COPY.paceHint}</p>
               <div className="jy-two">
                 <div className="jy-field">

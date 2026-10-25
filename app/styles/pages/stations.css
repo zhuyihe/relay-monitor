@@ -150,3 +150,6 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-stations-m .m-title { flex: 1 1 0; min-width: 0; font-size: 13px; color: var(--jy-ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .jy-stations-m .m-todo { margin: -12px -8px -12px auto; }
 .jy-stations-m .m-todo .ant-btn { min-height: 44px; color: var(--jy-cobalt); }
+
+/* 行末按钮外面那一层（提示的触发区），不改按钮的排法 */
+.jy-tip-wrap { display: inline-flex; }

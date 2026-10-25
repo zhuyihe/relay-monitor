@@ -857,7 +857,10 @@ export default function StationsPage() {
     );
     return why ? (
       <>
-        <Tooltip title={why}>{button}</Tooltip>
+        {/* 包一层：Tooltip 关着时会去掉子元素上的 aria-describedby；默认只认悬停，这里加上键盘聚焦（焦点事件从按钮冒到这一层） */}
+        <Tooltip title={why} trigger={["hover", "focus"]}>
+          <span className="jy-tip-wrap">{button}</span>
+        </Tooltip>
         <span id={whyId} className="sr-only">{why}</span>
       </>
     ) : button;
