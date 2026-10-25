@@ -145,6 +145,12 @@ a { color: var(--cobalt); text-decoration: none; }
 .res-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .key-row { display: flex; align-items: center; gap: 10px; padding: 10px 0 0; border-top: 1px dashed var(--rule); }
 .key-row:first-of-type { border-top: 0; }
+.ulist { list-style: none; margin: 0; padding: 0; }
+.ulist li { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 12px 24px; border-top: 1px solid var(--rule-soft); }
+.ulist li.on { background: var(--cobalt-tint); box-shadow: inset 3px 0 0 var(--cobalt); }
+.grp { font-size: 12px; font-weight: 600; color: var(--ink-3); padding: 8px 24px 4px; background: #FAFBFC; border-top: 1px solid var(--rule-soft); }
+.chan { border: 1px solid var(--rule); border-radius: var(--r2); padding: 12px 16px; }
+.tag.plain { background: var(--sunken); color: var(--ink-2); font-weight: 400; }
 .quiet { margin: 12px 24px 0; border: 1px solid var(--rule); border-radius: var(--r2); padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
 
 /* 日报 */
@@ -238,13 +244,15 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
 </template>
 
 <!-- ═══ A. 运营总览（桌面 1440） ═══ -->
-<p class="frame-label" style="width:1440px">A · 运营总览：余额 2 条 + 利润 4 条，同一个对象只占一行；侧栏数字 = 这里的条数，任何页面都一样</p>
-<section class="frame" id="e-overview" style="width:1440px;height:900px">
+<p class="frame-label" style="width:1440px">A · 运营总览：等式 8 列 + 需处理 4 列；余额 2 条 + 利润 4 条，同一个对象只占一行；侧栏数字 = 这里的条数，任何页面都一样</p>
+<section class="frame" id="e-overview" style="width:1440px;height:1060px">
   <div class="shell" data-on="home">
     <div class="sider-slot"></div>
     <div class="main">
       <header class="topbar"><h1>运营总览</h1><div class="seg"><span class="on">今天</span><span>近 7 天</span><span>近 30 天</span></div><span class="spacer"></span><span class="fresh"><i></i>数据截至 14:32</span><span class="icon-btn"><svg class="icon"><use href="#i-refresh"/></svg></span><span class="icon-btn"><svg class="icon"><use href="#i-theme"/></svg></span><span class="avatar">A</span></header>
       <div class="content">
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:24px;align-items:start">
+        <div style="display:flex;flex-direction:column;gap:24px">
         <section class="panel">
           <div class="panel-head"><h2>今天经营</h2><span class="caption">0:00–14:32</span></div>
           <div class="eq">
@@ -255,19 +263,6 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
             <div class="t res"><span>净利</span><b>¥942.48</b></div>
           </div>
         </section>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start">
-          <section class="panel" id="overview-attention">
-            <div class="panel-head"><h2>需处理</h2><span class="count">6</span><span class="spacer"></span><div class="extra"><span class="caption">最要紧的在前</span><span class="btn sm">刷新</span></div></div>
-            <ul class="attention">
-              <li><svg class="sym c-crit"><use href="#crit"/></svg><div><div><strong>云桥 API</strong> 余额偏低，可用约 22 小时</div><p>余额 $2.56（约 ¥18.43），余额提醒线 $5.00。</p></div><div class="actions"><span class="btn sm">余额趋势</span><span class="btn sm link">编辑</span></div></li>
-              <li><svg class="sym c-crit"><use href="#crit"/></svg><div><div><strong>拼车团队</strong> 登录信息不对或过期了</div><p>更新之后才能接着读取余额和账单</p></div><div class="actions"><span class="btn sm">更新登录信息</span></div></li>
-              <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>Key 计费站</strong> 快用完，可用约 5 天</div><p>余额 $31.37（约 ¥225.86），日均花费 ≈ ¥44.10，按近 3 小时的花费估算。</p></div><div class="actions"><span class="btn sm">余额趋势</span><span class="btn sm link">编辑</span></div></li>
-              <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>主力上游 · gemini-team</strong> 这把 Key 还给别处用吗？</div><p>别处也在用的话，上游成本会算多；回答之前，利润先不算</p><div class="note">10月20日起没算进利润</div></div><div class="actions"><span class="btn sm">去回答</span></div></li>
-              <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>主力上游 · gpt-team</strong> 这几天的账单一直没读全</div><div class="note"><span class="day">10月14日</span><span class="day">10月15日</span></div></div><div class="actions"><span class="btn sm">重新读取</span></div></li>
-              <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>我的站</strong> 有 2 个渠道还没绑定</div><p>绑定之后才能算这些渠道的利润</p></div><div class="actions"><span class="btn sm">去绑定</span></div></li>
-            </ul>
-            <div class="more caption">其余 3 个上游没有要处理的事</div>
-          </section>
           <section class="panel">
             <div class="panel-head"><h2>上游余量</h2><span class="spacer"></span><a class="caption" style="color:var(--cobalt)">上游列表</a></div>
             <ul class="runway">
@@ -279,15 +274,28 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
             </ul>
           </section>
         </div>
+          <section class="panel" id="overview-attention">
+            <div class="panel-head"><h2>需处理</h2><span class="count">6</span><span class="spacer"></span><div class="extra"><span class="caption">最要紧的在前</span><span class="btn sm">刷新</span></div></div>
+            <ul class="attention">
+              <li><svg class="sym c-crit"><use href="#crit"/></svg><div><div><strong>云桥 API</strong> 余额偏低，可用约 22 小时</div><p>余额 $2.56（约 ¥18.43），余额提醒线 $5.00。</p></div><div class="actions"><span class="btn sm">余额趋势</span><span class="btn sm link">编辑</span></div></li>
+              <li><svg class="sym c-crit"><use href="#crit"/></svg><div><div><strong>拼车团队</strong> 登录信息不对或过期了</div><p>更新之后才能接着读取余额和账单</p><div class="note">3 个渠道的利润在等它</div></div><div class="actions"><span class="btn sm">更新登录信息</span></div></li>
+              <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>Key 计费站</strong> 快用完，可用约 5 天</div><p>余额 $31.37（约 ¥225.86），日均花费 ≈ ¥44.10，按近 3 小时的花费估算。</p></div><div class="actions"><span class="btn sm">余额趋势</span><span class="btn sm link">编辑</span></div></li>
+              <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>Key team-c（海外 D）</strong> 这把 Key 还给别处用吗？</div><p>别处也在用的话，上游成本会算多；回答之前，利润先不算</p><div class="note">10月20日起没算进利润</div></div><div class="actions"><span class="btn sm">去回答</span></div></li>
+              <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>标准 B</strong> 这几天的账单一直没读全</div><div class="note"><span class="day">10月14日</span><span class="day">10月15日</span></div></div><div class="actions"><span class="btn sm">重新读取</span></div></li>
+              <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div>渠道「高速 A」用的 Key 不在已加的上游里</div><p>从 10月24日 15:20 起这个渠道的上游成本算不出；把这把 Key 所在的上游加进来就能算</p></div><div class="actions"><span class="btn sm">加上游</span></div></li>
+            </ul>
+            <div class="more caption">点开了「还有 4 件」（1440 宽时先露 2 条）· 其余 1 个上游没有要处理的事</div>
+          </section>
+        </div>
       </div>
     </div>
   </div>
   <div class="ann t" style="left:16px;top:540px;max-width:200px">侧栏的数字就是需处理的条数：侧栏自己读清单，进哪一页都一样</div>
-  <div class="ann l" style="left:836px;top:676px">绑定写「上游 · Key」；几天的同一件事合成一条，日期写在附注</div>
+  <div class="ann r" style="left:600px;top:560px;max-width:300px">标题里已经点了渠道名的，前面不再写一遍；几天的同一件事合成一条，日期写在附注</div>
 </section>
 
 <!-- ═══ B. 每日利润（桌面 1440） ═══ -->
-<p class="frame-label" style="width:1440px">B · 每日利润：新的「需处理」区块在汇总和绑定列表之间，只放利润的事（4 条，和日报同一个数）；页顶不放主按钮</p>
+<p class="frame-label" style="width:1440px">B · 每日利润：「需处理」区块在汇总右边 4 列，只放利润的事（4 条，和日报同一个数）；页顶不放主按钮，黄横条拿掉</p>
 <section class="frame" id="e-daily" style="width:1440px;height:1130px">
   <div class="shell" data-on="recon">
     <div class="sider-slot"></div>
@@ -295,71 +303,70 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
       <header class="topbar"><h1>每日利润</h1><div class="seg"><span class="on">今天</span><span>昨天</span><span>近 7 天</span><span>本月</span><span>自定义</span></div><span class="spacer"></span><span class="fresh"><i></i>数据截至 14:32</span><span class="icon-btn"><svg class="icon"><use href="#i-refresh"/></svg></span><span class="icon-btn"><svg class="icon"><use href="#i-theme"/></svg></span><span class="avatar">A</span></header>
       <div class="content">
         <div style="display:flex;align-items:center;gap:8px"><span>10月24日 0:00–14:32</span><span class="spacer"></span><span class="btn">以前的每日记录</span><span class="btn">成本估算</span></div>
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:24px;align-items:start">
         <section class="panel">
           <div class="panel-head"><h2>汇总</h2></div>
           <div class="metrics"><div class="metric"><span>收入</span><b>¥6.84</b></div><div class="metric"><span>上游成本</span><b>¥2.59</b></div><div class="metric"><span>毛利</span><b>¥4.25</b></div><div class="metric"><span>毛利率</span><b>62.1%</b></div></div>
-          <div class="sum-note">其中 2 条绑定需处理，没算进来。　<span class="caption">（汇总怎么写见 F）</span></div>
-          <div class="sum-foot caption">5 个渠道里 1 个已算进利润 · <a>查看没算进来的</a>　今天的数字还会变，过了零点自动固定。</div>
+          <div class="sum-note">其中 4 个渠道需处理，没算进来。</div>
+          <div class="sum-foot caption">今天的数字还会变，过了零点自动固定。</div>
         </section>
         <section class="panel" id="daily-attention">
           <div class="panel-head"><h2>需处理</h2><span class="count">4</span><span class="spacer"></span><div class="extra"><span class="caption">最要紧的在前</span></div></div>
           <ul class="attention">
-            <li><svg class="sym c-crit"><use href="#crit"/></svg><div><div><strong>拼车团队</strong> 登录信息不对或过期了</div><p>更新之后才能接着读取余额和账单</p><div class="note">1 条绑定的利润在等它</div></div><div class="actions"><span class="btn sm">更新登录信息</span></div></li>
-            <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>主力上游 · gemini-team</strong> 这把 Key 还给别处用吗？</div><p>别处也在用的话，上游成本会算多；回答之前，利润先不算</p><div class="note">10月20日起没算进利润</div></div><div class="actions"><span class="btn sm">去回答</span></div></li>
-            <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>主力上游 · gpt-team</strong> 这几天的账单一直没读全</div><div class="note"><span class="day">10月14日</span><span class="day">10月15日</span></div></div><div class="actions"><span class="btn sm">重新读取</span></div></li>
-            <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>我的站</strong> 有 2 个渠道还没绑定</div><p>绑定之后才能算这些渠道的利润</p></div><div class="actions"><span class="btn sm">去绑定</span></div></li>
+            <li><svg class="sym c-crit"><use href="#crit"/></svg><div><div><strong>拼车团队</strong> 登录信息不对或过期了</div><p>更新之后才能接着读取余额和账单</p><div class="note">3 个渠道的利润在等它</div></div><div class="actions"><span class="btn sm">更新登录信息</span></div></li>
+            <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>Key team-c（海外 D）</strong> 这把 Key 还给别处用吗？</div><p>别处也在用的话，上游成本会算多；回答之前，利润先不算</p><div class="note">10月20日起没算进利润</div></div><div class="actions"><span class="btn sm">去回答</span></div></li>
+            <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>标准 B</strong> 这几天的账单一直没读全</div><div class="note"><span class="day">10月14日</span><span class="day">10月15日</span></div></div><div class="actions"><span class="btn sm">重新读取</span></div></li>
+            <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div>渠道「高速 A」用的 Key 不在已加的上游里</div><p>从 10月24日 15:20 起这个渠道的上游成本算不出；把这把 Key 所在的上游加进来就能算</p></div><div class="actions"><span class="btn sm">加上游</span></div></li>
           </ul>
         </section>
+        </div>
         <section class="panel">
-          <div class="panel-head"><h2>绑定列表</h2><span class="count muted">3</span></div>
-          <div style="display:flex;gap:12px;padding:16px 24px"><span class="btn" style="width:360px;justify-content:flex-start;color:var(--ink-dis)">搜索上游、Key、渠道名或渠道 ID</span><div class="seg"><span class="on">全部 3</span><span>需处理 2</span><span>亏损 0</span></div></div>
-          <table class="table"><thead><tr><th>状态</th><th>上游 / Key</th><th class="r">收入</th><th class="r">上游成本</th><th class="r">毛利</th><th>操作</th></tr></thead>
+          <div class="panel-head"><h2>渠道列表</h2><span class="count muted">4</span></div>
+          <div style="display:flex;gap:12px;padding:16px 24px"><span class="btn" style="width:360px;justify-content:flex-start;color:var(--ink-dis)">搜索渠道名、渠道 ID 或上游</span><div class="seg"><span class="on">全部 4</span><span>需处理 3</span><span>亏损 0</span></div></div>
+          <table class="table"><thead><tr><th>状态</th><th>渠道 / 上游</th><th class="r">收入</th><th class="r">上游成本</th><th class="r">毛利</th><th>操作</th></tr></thead>
             <tbody>
-              <tr><td><span class="tag warn">▲ 需处理</span><div class="caption">这把 Key 还给别处用吗？</div></td><td><strong>主力上游</strong><div class="caption">gemini-team</div></td><td class="r num">¥0.00</td><td class="r num">¥2.88</td><td class="r">—</td><td><a>计算明细</a>　<a>去回答</a></td></tr>
-              <tr><td><span class="tag warn">▲ 需处理</span><div class="caption">登录信息不对或过期了</div></td><td><strong>拼车团队</strong><div class="caption">team-key</div></td><td class="r num">¥3.12</td><td class="r">—</td><td class="r">—</td><td><a>计算明细</a>　<a>更新登录信息</a></td></tr>
-              <tr><td><span class="tag info">实时</span></td><td><strong>主力上游</strong><div class="caption">gpt-team</div></td><td class="r num">¥6.84</td><td class="r num">¥2.59</td><td class="r num"><b>¥4.25</b></td><td><a>计算明细</a></td></tr>
+              <tr><td><span class="tag warn">▲ 需处理</span><div class="caption">这把 Key 还给别处用吗？</div></td><td><strong>海外 D</strong><div class="caption">拼车团队 · team-c</div></td><td class="r num">¥0.00</td><td class="r num">¥2.88</td><td class="r">—</td><td><a>计算明细</a>　<a>去回答</a></td></tr>
+              <tr><td><span class="tag warn">▲ 需处理</span><div class="caption">登录信息不对或过期了</div></td><td><strong>备用 C、备用 C2</strong><div class="caption">拼车团队 · bak</div></td><td class="r num">¥3.12</td><td class="r">—</td><td class="r">—</td><td><a>计算明细</a>　<a>更新登录信息</a></td></tr>
+              <tr><td><span class="tag warn">▲ 需处理</span><div class="caption">用的 Key 不在已加的上游里</div></td><td><strong>高速 A</strong><div class="caption">从 15:20 起没对上上游</div></td><td class="r num">¥1.40</td><td class="r">—</td><td class="r">—</td><td><a>计算明细</a>　<a>加上游</a></td></tr>
+              <tr><td><span class="tag info">实时</span></td><td><strong>标准 B</strong><div class="caption">主力上游 · gpt-team</div></td><td class="r num">¥6.84</td><td class="r num">¥2.59</td><td class="r num"><b>¥4.25</b></td><td><a>计算明细</a></td></tr>
             </tbody></table>
           <div style="height:12px"></div>
         </section>
       </div>
     </div>
   </div>
-  <div class="ann l" style="left:380px;top:392px">不跟页面选的日期走：回答的是「现在要做什么」，条数就是日报那一行</div>
-  <div class="ann t" style="left:530px;top:250px">加起来对得上：¥6.84 − ¥2.59 = ¥4.25</div>
+  <div class="ann r" style="left:560px;top:330px;max-width:300px">不跟页面选的日期走：回答的是「现在要做什么」，条数就是日报那一行；汇总旁那句数的是渠道，不是条数</div>
+  <div class="ann t" style="left:330px;top:250px">加起来对得上：¥6.84 − ¥2.59 = ¥4.25</div>
 </section>
 
-<!-- ═══ C. 上游账单（内容区 1160） ═══ -->
-<p class="frame-label" style="width:1160px">C · 上游账单：事写在它的对象上，样子和清单一样；不再写「需处理：去回答」</p>
-<section class="frame" id="e-bills" style="width:1160px;height:900px;padding-top:16px">
-  <section class="panel" style="margin:0 16px">
-    <div class="panel-head"><h2>上游账单</h2><span class="count muted">2</span><span class="spacer"></span><span class="btn sm"><svg class="icon"><use href="#i-refresh"/></svg>刷新</span></div>
-    <p class="caption" style="margin:4px 24px 0">按上游账号看上游、Key 和绑定；改绑定、解除绑定都在这里。</p>
-    <div style="display:flex;gap:12px;padding:16px 24px 0"><span class="btn" style="width:320px;justify-content:flex-start;color:var(--ink-dis)">搜索上游、上游账号、Key、渠道</span><span class="btn">需处理 2 ▾</span><span class="btn">显示归档的上游</span></div>
-    <div class="acct">
-      <div class="acct-head"><svg class="icon"><use href="#i-chev-d"/></svg><strong>上游账号 3</strong><span class="caption">拼车团队 · 1 把 Key</span><span class="tag warn">需处理 1</span></div>
+<!-- ═══ C.「渠道」页签（内容区 1160） ═══ -->
+<p class="frame-label" style="width:1160px">C · 上游资源「渠道」页签：上游的事写在上游标题下面，渠道和 Key 的事写在渠道卡片里；左边有事的上游带条数、排在前面</p>
+<section class="frame" id="e-channels" style="width:1160px;height:520px;padding:16px">
+  <div style="display:grid;grid-template-columns:1fr 2fr;gap:24px;align-items:start">
+    <section class="panel">
+      <div class="panel-head"><h2>上游</h2><span class="caption">5 个</span></div>
+      <ul class="ulist">
+        <li class="on"><div><strong>拼车团队</strong><div class="caption">别处也在用 · 3 个渠道在算</div></div><span class="tag warn">2 个需处理</span></li>
+        <li><div><strong>主力上游</strong><div class="caption">只给我的渠道用 · 2 个渠道在算</div></div><span></span></li>
+        <li><div><strong>云桥 API</strong><div class="caption">只给我的渠道用 · 1 个渠道在算</div></div><span></span></li>
+        <li><div><strong>Key 计费站</strong><div class="caption">只填了一把 Key · 1 个渠道在算</div></div><span></span></li>
+        <li><div><strong>邮箱密码登录</strong><div class="caption">没有渠道用它的 Key</div></div><span></span></li>
+      </ul>
+      <div class="grp">没对上上游的渠道 · 1 个</div>
+      <ul class="ulist"><li><div><strong>渠道 内网中转</strong><div class="caption">这个渠道用的 Key 不在已加的上游里</div></div><span class="btn sm">加上游</span></li></ul>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>拼车团队</h2><span class="caption">余额读不到 · 2 把 Key · 账号别处也在用</span></div>
       <div class="acct-body">
-        <ul class="attention" style="padding:0"><li class="inline crit"><svg class="sym c-crit"><use href="#crit"/></svg><div><div>登录信息不对或过期了</div><p>更新之后才能接着读取余额和账单</p><div class="note">1 条绑定的利润在等它</div></div><div class="actions"><span class="btn sm">更新登录信息</span></div></li></ul>
-        <div class="res-line"><strong>拼车团队</strong><span class="tag info">绑定 1 条</span><span class="caption">余额提醒线：按告警中心的设置；汇率：没设置汇率；算进利润</span><span class="spacer"></span><span class="btn sm">查看余额</span><span class="btn sm">编辑上游</span><span class="btn sm">暂停监控</span></div>
+        <ul class="attention" style="padding:0"><li class="inline crit"><svg class="sym c-crit"><use href="#crit"/></svg><div><div>登录信息不对或过期了</div><p>更新之后才能接着读取余额和账单</p><div class="note">3 个渠道的利润在等它</div></div><div class="actions"><span class="btn sm">更新登录信息</span></div></li></ul>
+        <div class="chan"><div class="key-row" style="border-top:0;padding-top:0"><strong>海外 D</strong><span class="tag warn">需处理</span><span class="caption">用的 Key：team-c · 分组 c</span></div>
+          <ul class="attention" style="padding:10px 0 0"><li class="inline"><svg class="sym c-warn"><use href="#warn"/></svg><div><div>这把 Key 还给别处用吗？</div><p>别处也在用的话，上游成本会算多；回答之前，利润先不算</p><div class="note">10月20日起没算进利润</div></div><div class="actions"><span class="btn sm">去回答</span></div></li></ul></div>
+        <div class="chan"><div class="key-row" style="border-top:0;padding-top:0"><strong>备用 C、备用 C2</strong><span class="tag plain">在算利润</span><span class="caption">用的 Key：bak · 分组 c（两个渠道一起算）</span></div></div>
       </div>
-    </div>
-    <div class="acct">
-      <div class="acct-head"><svg class="icon"><use href="#i-chev-d"/></svg><strong>上游账号 1</strong><span class="caption">主力上游 · 2 把 Key</span><span class="tag warn">需处理 1</span></div>
-      <div class="acct-body">
-        <div class="res-line"><strong>主力上游</strong><span class="tag info">绑定 2 条</span><span class="caption">余额提醒线：按告警中心的设置；汇率：没设置汇率；算进利润</span><span class="spacer"></span><span class="btn sm">查看余额</span><span class="btn sm">编辑上游</span><span class="btn sm">暂停监控</span></div>
-        <div class="key-row"><svg class="icon"><use href="#i-chev-d"/></svg><strong>gemini-team</strong><span class="tag info">1 条在用</span><span class="tag warn">需处理</span><span class="caption">渠道：上游甲·备用</span></div>
-        <ul class="attention" style="padding:0 0 0 26px"><li class="inline"><svg class="sym c-warn"><use href="#warn"/></svg><div><div>这把 Key 还给别处用吗？</div><p>别处也在用的话，上游成本会算多；回答之前，利润先不算</p><div class="note">10月20日起没算进利润</div></div><div class="actions"><span class="btn sm">去回答</span></div></li></ul>
-        <div class="key-row"><svg class="icon"><use href="#i-chev"/></svg><strong>gpt-team</strong><span class="tag info">1 条在用</span><span class="caption">渠道：上游甲·高速</span></div>
-      </div>
-    </div>
-    <div style="margin:20px 24px 0;border-top:1px solid var(--rule-soft);padding-top:16px"><strong style="font-weight:500">只用 Key 的上游，和还没确认上游账号的上游</strong><p class="caption" style="margin:2px 0 0">这些上游还不能确认属于哪个上游账号，所以单独列出；绑定照常保留。</p></div>
-    <div class="quiet" style="margin-bottom:24px">
-      <div style="display:flex;gap:8px;align-items:center"><strong>邮箱密码登录</strong><span class="tag muted">还没确认上游账号</span><span class="spacer"></span><span class="btn sm">编辑上游</span><span class="btn sm">暂停监控</span></div>
-      <div class="caption">http://relay.example.com</div>
-      <div style="display:flex;gap:10px;align-items:center"><span class="caption" style="color:var(--ink-2)">测试读取一次，就会按上游账号列在上面。</span><span class="btn sm">测试读取</span></div>
-    </div>
-  </section>
-  <div class="ann r" style="left:770px;top:150px">筛选和标签带条数，和清单同一份</div>
-  <div class="ann l" style="left:552px;top:845px">没有绑定的上游只写一句，不进清单、不计数</div>
+    </section>
+  </div>
+  <div class="ann l" style="left:420px;top:440px;max-width:340px">左边「2 个需处理」数的是这个上游、它下面渠道和 Key 的条数，和清单同一份</div>
+  <div class="ann l" style="left:790px;top:440px;max-width:330px">「没对上上游的渠道」从没算过，不叫需处理、不计数（流程梳理稿附录 4）</div>
 </section>
 
 <!-- ═══ D. 空、读不到、旧数据、处理完 ═══ -->
@@ -387,17 +394,18 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
       <div class="banner"><svg class="sym"><use href="#warn"/></svg><div style="flex:1"><b>刷新失败，数据截至 14:30。</b><div class="caption">连不上控制台，请检查网络后再试</div></div><span class="btn sm">刷新</span></div>
       <ul class="attention dim">
         <li><svg class="sym c-crit"><use href="#crit"/></svg><div><div><strong>拼车团队</strong> 登录信息不对或过期了</div></div><div class="actions"><span class="btn sm">更新登录信息</span></div></li>
-        <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>主力上游 · gemini-team</strong> 这把 Key 还给别处用吗？</div></div><div class="actions"><span class="btn sm">去回答</span></div></li>
-        <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>我的站</strong> 有 2 个渠道还没绑定</div></div><div class="actions"><span class="btn sm">去绑定</span></div></li>
+        <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>Key team-c（海外 D）</strong> 这把 Key 还给别处用吗？</div></div><div class="actions"><span class="btn sm">去回答</span></div></li>
+        <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>标准 B</strong> 这几天的账单一直没读全</div></div><div class="actions"><span class="btn sm">重新读取</span></div></li>
+        <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div>渠道「高速 A」用的 Key 不在已加的上游里</div></div><div class="actions"><span class="btn sm">加上游</span></div></li>
       </ul>
     </section>
     <section class="panel" style="grid-column:1 / span 2;position:relative;padding-top:48px">
       <div class="toast"><svg class="sym"><use href="#good"/></svg>已保存</div>
-      <div class="panel-head" style="padding-top:0"><h2>需处理</h2><span class="count">5</span><span class="spacer"></span><span class="caption">刚在小窗里回答了「只给这些渠道用」：这条淡出，条数 6 → 5，侧栏、每日利润、上游账单一起变</span></div>
+      <div class="panel-head" style="padding-top:0"><h2>需处理</h2><span class="count">5</span><span class="spacer"></span><span class="caption">刚在小窗里回答了「只给这些渠道用」：这条淡出，条数 6 → 5，侧栏、每日利润、「渠道」页签一起变</span></div>
       <ul class="attention">
-        <li><svg class="sym c-crit"><use href="#crit"/></svg><div><div><strong>拼车团队</strong> 登录信息不对或过期了</div><p>更新之后才能接着读取余额和账单</p></div><div class="actions"><span class="btn sm">更新登录信息</span></div></li>
-        <li class="fading"><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>主力上游 · gemini-team</strong> 这把 Key 还给别处用吗？</div><p>别处也在用的话，上游成本会算多；回答之前，利润先不算</p></div><div class="actions"><span class="btn sm">去回答</span></div></li>
-        <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>主力上游 · gpt-team</strong> 这几天的账单一直没读全</div><div class="note"><span class="day">10月14日</span><span class="day">10月15日</span></div></div><div class="actions"><span class="btn sm">重新读取</span></div></li>
+        <li><svg class="sym c-crit"><use href="#crit"/></svg><div><div><strong>拼车团队</strong> 登录信息不对或过期了</div><p>更新之后才能接着读取余额和账单</p><div class="note">3 个渠道的利润在等它</div></div><div class="actions"><span class="btn sm">更新登录信息</span></div></li>
+        <li class="fading"><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>Key team-c（海外 D）</strong> 这把 Key 还给别处用吗？</div><p>别处也在用的话，上游成本会算多；回答之前，利润先不算</p></div><div class="actions"><span class="btn sm">去回答</span></div></li>
+        <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>标准 B</strong> 这几天的账单一直没读全</div><div class="note"><span class="day">10月14日</span><span class="day">10月15日</span></div></div><div class="actions"><span class="btn sm">重新读取</span></div></li>
       </ul>
     </section>
   </div>
@@ -417,7 +425,7 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
 收入：¥1,000.00 ｜ 管理员自用：¥234.00
 上游成本：¥600.00 ｜ 毛利：¥400.00（毛利率 40.0%）
 固定成本：¥100.00 ｜ 净利：¥300.00（净利率 30.0%）
-利润怎么算：2 个在用的渠道没对上上游；已添加的上游照常算成本。
+利润怎么算：1 个在用的渠道没对上上游；已添加的上游照常算成本。
 <mark>每日利润：有 4 条需处理</mark>
 <mark>去处理：https://console.example.com/reconciliation#attention</mark>
 
@@ -439,7 +447,7 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
           <div class="mail-cell"><span>毛利</span><b>¥400.00</b><div class="caption">毛利率 40.0%</div></div>
           <div class="mail-cell"><span>净利</span><b>¥300.00</b><div class="caption">净利率 30.0%</div></div>
         </div>
-        <div class="mail-line">利润怎么算：2 个在用的渠道没对上上游；已添加的上游照常算成本。</div>
+        <div class="mail-line">利润怎么算：1 个在用的渠道没对上上游；已添加的上游照常算成本。</div>
         <div class="mail-attn"><svg class="sym c-warn"><use href="#warn"/></svg><span style="flex:1">每日利润：有 4 条需处理</span><span class="btn sm primary">去处理</span></div>
       </div>
     </div>
@@ -447,7 +455,7 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
 </section>
 
 <!-- ═══ F. 手机 390 ═══ -->
-<p class="frame-label" style="width:390px">F · 手机：需处理放在利润等式前面，先露 3 条；菜单按钮上带同一个数字</p>
+<p class="frame-label" style="width:390px">F · 手机：需处理放在利润等式前面，先露 2 条；菜单按钮上带同一个数字</p>
 <section class="frame m" id="e-mobile" style="width:390px;height:844px">
   <div class="main">
     <header class="topbar"><span class="icon-btn"><svg class="icon"><use href="#i-menu"/></svg><span class="menu-badge">6</span></span><h1>运营总览</h1><span class="spacer"></span><span class="fresh"><i></i>14:32</span><span class="icon-btn"><svg class="icon"><use href="#i-refresh"/></svg></span></header>
@@ -458,9 +466,8 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
         <ul class="attention">
           <li><svg class="sym c-crit"><use href="#crit"/></svg><div><div><strong>云桥 API</strong> 余额偏低，可用约 22 小时</div><p>余额 $2.56（约 ¥18.43），余额提醒线 $5.00。</p></div><div class="actions"><span class="btn">余额趋势</span></div></li>
           <li><svg class="sym c-crit"><use href="#crit"/></svg><div><div><strong>拼车团队</strong> 登录信息不对或过期了</div><p>更新之后才能接着读取余额和账单</p></div><div class="actions"><span class="btn">更新登录信息</span></div></li>
-          <li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>Key 计费站</strong> 快用完，可用约 5 天</div></div><div class="actions"><span class="btn">余额趋势</span></div></li>
         </ul>
-        <div class="more"><a>展开其余 3 项</a></div>
+        <div class="more"><a>还有 4 件</a></div>
       </section>
       <section class="panel">
         <div class="panel-head"><h2>今天经营</h2><span class="caption">0:00–14:32</span></div>
@@ -468,33 +475,6 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
       </section>
     </div>
   </div>
-</section>
-
-<!-- ═══ G. 去回答（就地小窗） ═══ -->
-<p class="frame-label" style="width:1160px">G · 「去回答」就地弹小窗：只问这一个问题，不进绑定抽屉、不用再测试读取</p>
-<section class="frame" id="e-answer" style="width:1160px;height:560px">
-  <div style="padding:24px;opacity:.9">
-    <section class="panel"><div class="panel-head"><h2>需处理</h2><span class="count">4</span></div>
-      <ul class="attention"><li><svg class="sym c-warn"><use href="#warn"/></svg><div><div><strong>主力上游 · gemini-team</strong> 这把 Key 还给别处用吗？</div><p>别处也在用的话，上游成本会算多；回答之前，利润先不算</p></div><div class="actions"><span class="btn sm">去回答</span></div></li></ul>
-    </section>
-  </div>
-  <div class="scrim"></div>
-  <div class="modal">
-    <div class="modal-head"><h3>这把 Key 还给别处用吗？</h3><span class="spacer"></span><svg class="icon" style="color:var(--ink-3)"><use href="#i-close"/></svg></div>
-    <div class="modal-body">
-      <div class="facts"><span>Key</span><b style="font-weight:500">gemini-team（主力上游）</b><span>绑定的渠道</span><span style="color:var(--ink)">上游甲·备用</span></div>
-      <div class="radio">
-        <label class="on"><i></i>只给这些渠道用</label>
-        <label><i></i>自营站点的其他渠道也在用</label>
-        <label><i></i>站外也在用（测试、自用、给别人）</label>
-        <label><i></i>别处也在用，说不清是哪</label>
-        <label><i></i>不确定</label>
-      </div>
-      <p class="caption" style="margin:0">别处也在用的话，上游成本会算多；回答之前，利润先不算</p>
-    </div>
-    <div class="modal-foot"><span class="btn">取消</span><span class="btn primary">保存</span></div>
-  </div>
-  <div class="ann l" style="left:860px;top:250px">打开时一个都不选，选了才能保存（图里是选好以后）</div>
 </section>
 
 <script>
