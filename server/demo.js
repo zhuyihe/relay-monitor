@@ -356,10 +356,13 @@ export function mockNewApiLogs(request) {
   const startSec = Number(q.get("start_timestamp")) || 0;
   const endSec = Number(q.get("end_timestamp")) || 0;
   let rows = mockLogRows(startSec, endSec);
-  for (const [param, field] of [["model_name", "model_name"], ["username", "username"], ["group", "group"]]) {
+  for (const [param, field] of [["model_name", "model_name"], ["username", "username"], ["group", "group"], ["token_name", "token_name"]]) {
     const v = q.get(param);
     if (v) rows = rows.filter((r) => r[field] === v);
   }
+  // 和真的 New API 一样按 type 筛；渠道测试（R1）按 token_name 读列表，演示站点里没有这样的日志，筛完是空的，只要一页
+  const type = Number(q.get("type") || 0);
+  if (type) rows = rows.filter((r) => r.type === type);
   const page = Math.max(1, Number(q.get("p")) || 1);
   const pageSize = Math.min(100, Math.max(1, Number(q.get("page_size")) || 10));
   const items = rows.slice((page - 1) * pageSize, page * pageSize);

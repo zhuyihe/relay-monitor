@@ -2,7 +2,7 @@
 // 用语按 design/ui-copy-spec.md；时间一律按这条绑定算一天的时区显示（lib/format 的 zoned 系列），不用浏览器时区。
 import { EMPTY, FIXED_COST_TEXT, RATE_UNSET_USD, UPSTREAM_GONE, formatRate, formatZonedDateTime, formatZonedWindow } from "../../../lib/format";
 import {
-  formatReconciliationAmount, mergeReconciliationSegments, reconciliationBillingText, reconciliationChannelTag, reconciliationRateFactors,
+  formatReconciliationAmount, formatReconciliationMoney, mergeReconciliationSegments, reconciliationBillingText, reconciliationChannelTag, reconciliationRateFactors,
   reconciliationRatioChange,
 } from "../../../lib/reconciliation-view";
 import type { ReconciliationCurrency } from "../../../lib/client";
@@ -71,6 +71,12 @@ export function sideAmount(item: any, side: "income" | "cost", currency: Reconci
 // 收入、上游成本一格：读全了只写金额，没读全写「$1.20（没读全）」，没读到写「读取中」「读不到」
 export const incomeText = (item: any, currency: ReconciliationCurrency, billing = item?.downstream) =>
   reconciliationBillingText(billing, sideRate(item, "income", currency));
+// 收入里减掉的渠道测试（用语规范 §9「其中渠道测试」）：自营站点后台手点的和定时自动的渠道测试也记收费记录，不是用户花的钱，不算收入；
+// 后台看到的渠道用量含这一部分，写出来财务对数时对得上。没有渠道测试、或这一段读不到换算时不写
+export function channelTestText(item: any, currency: ReconciliationCurrency, billing = item?.downstream) {
+  const usd = Number(billing?.testAmountUsd);
+  return Number.isFinite(usd) && usd > 0 ? `其中渠道测试 ${formatReconciliationMoney(usd, sideRate(item, "income", currency))}，不算收入` : null;
+}
 export const costText = (item: any, currency: ReconciliationCurrency, billing = item?.upstream) => isFixedCost(item)
   ? FIXED_COST_TEXT : reconciliationBillingText(billing, sideRate(item, "cost", currency));
 
