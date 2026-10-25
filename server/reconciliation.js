@@ -7,6 +7,7 @@ import {
   queryOwnChannelRevenue,
   queryOwnLogSource,
   queryOwnLogSourceTotal,
+  queryOwnUserChannelStat,
   OWN_CHANNEL_TEST_TOKEN_NAMES,
   queryOwnChannels,
   queryOwnLatestLog,
@@ -769,7 +770,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const OWN_EXCLUSION_REUSE_MS = 30000;
   const OWN_EXCLUSION_VERIFIED_REUSE_MS = 10 * 60000;
   const OWN_EXCLUSION_FALLBACK_REUSE_MS = 10 * 60000;
-  function ownExclusion(own, window, { settle = false } = {}) {
+  function ownExclusion(own, window, { settle = false, channelIds = [] } = {}) {
+    const wantedChannels = [...new Set(channelIds.map(Number))];
+    // 沿用的结果要覆盖这次要算的渠道：翻页读的是全站所有渠道（"all"），按渠道 stat 读的只有当时要算的那几个
+    const covers = (coverage) => coverage === "all" || wantedChannels.every((id) => coverage.has(id));
     const resold = resoldAdminKeysOf(own).map((key) => `${key.username}\u0000${key.tokenName}`).sort();
     const key = JSON.stringify([own.id, credentialFingerprint(own), window.startMs, window.timezone, resold]);
     let entry = ownExclusionCache.get(key);
@@ -781,9 +785,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const task = entry.tail.then(async () => {
       const prior = entry.state && entry.state.endMs <= window.endMs ? entry.state : null;
       // 窗口终点比记下的晚得多（从同一天起点查多天范围）不能直接用，要接着翻到新的终点（审核 R1：少减过 49430 额度）
-      if (!settle && prior && Date.now() - prior.readAt < OWN_EXCLUSION_REUSE_MS && window.endMs - prior.endMs < OWN_EXCLUSION_REUSE_MS) return prior.result;
+      if (!settle && prior && Date.now() - prior.readAt < OWN_EXCLUSION_REUSE_MS && window.endMs - prior.endMs < OWN_EXCLUSION_REUSE_MS && covers(prior.result.coverage)) return prior.result;
       // 同一个站点同一天，别的绑定刚对过账：结的是同一段窗口，直接用，不再每条绑定各查一遍（每个站每天每个来源一个 stat）
-      if (settle && prior?.verifiedEndMs === window.endMs && Date.now() - prior.readAt < OWN_EXCLUSION_VERIFIED_REUSE_MS) return prior.result;
+      if (settle && prior?.verifiedEndMs === window.endMs && Date.now() - prior.readAt < OWN_EXCLUSION_VERIFIED_REUSE_MS && covers(prior.result.coverage)) return prior.result;
       const { adminSet } = await readOwnAdminDirectory(rt, own, { fresh: settle });
       const sources = [...[...adminSet].sort().map((name) => ({ kind: "user", name })), ...OWN_CHANNEL_TEST_TOKEN_NAMES.map((name) => ({ kind: "token", name }))];
       const partKey = (source) => `${source.kind}:${source.name}`;
@@ -796,10 +800,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 窗口已经在过去的整段读：翻到一半失败（限流、网络）把进度记下，下一轮从下一页接着翻，不从头（审核 R1：一天约 432 页，限流 360 个/180 秒）
         const closed = window.endMs <= Date.now() - RECONCILIATION_SETTLE_DELAY_MS;
         const pendingKey = JSON.stringify([id, window.endMs]);
-        const read = async (from) => {
+        const read = async (from, shouldContinue = null) => {
           const resume = !from && closed ? entry.pending.get(pendingKey) ?? null : null;
           try {
-            const part = await queryOwnLogSource(own, { ...base, previous: from, resume });
+            const part = await queryOwnLogSource(own, { ...base, previous: from, resume, shouldContinue });
             entry.pending.delete(pendingKey);
             return part;
           } catch (err) {
@@ -807,17 +811,50 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             throw err;
           }
         };
+        // 窗口已经在过去的、整段读用户来源：翻页和按渠道查 stat 挑请求少的（总指挥、审核 10-25）。翻页要 ⌈行数 ÷ 100⌉ 页（行数先用 page_size=1 的
+        // total 拿，老版本不给 total 就只能翻页）；按渠道 stat 是「要算的渠道数 × （1 + 这个用户名下转售的 Key 数）」次，和日志条数无关。
+        // 按渠道 stat 读的只覆盖当时要算的渠道，后面别的绑定要算别的渠道时合起来重读。结果和选法打进日志（debug），方便量。
+        const listBefore = before && before.coverage === undefined ? before : null;
+        // 按渠道 stat 读（只覆盖 channels 这几个渠道）
+        const statRead = async (channels, tokens, total) => {
+          const out = { byChannel: new Map(), byToken: new Map(), byUser: new Map(), seen: total ?? await queryOwnLogSourceTotal(own, base), maxId: null, coverage: new Set(channels) };
+          for (const channel of channels) {
+            const quota = await queryOwnUserChannelStat(own, { name: source.name, channel, startMs: window.startMs, endMs: window.endMs });
+            if (quota) out.byChannel.set(channel, quota);
+            for (const token of tokens) {
+              const tokenQuota = await queryOwnUserChannelStat(own, { name: source.name, channel, tokenName: token, startMs: window.startMs, endMs: window.endMs });
+              if (tokenQuota) { if (!out.byToken.has(token)) out.byToken.set(token, new Map()); out.byToken.get(token).set(channel, tokenQuota); }
+            }
+          }
+          return out;
+        };
+        // 整段读这个来源：翻页读第一页就知道行数（total）；这时觉得翻页比按渠道 stat 贵，就停下改按渠道 stat（第一页已经读了，没有额外请求）
+        const readSmart = async (total) => {
+          if (source.kind !== "user" || !closed || listBefore || !wantedChannels.length) return read(listBefore);
+          const tokens = resoldAdminKeysOf(own).filter((key) => key.username === source.name).map((key) => String(key.tokenName));
+          const channels = [...new Set([...wantedChannels, ...(before?.coverage instanceof Set ? before.coverage : [])])].sort((x, y) => x - y);
+          const statCost = channels.length * (1 + tokens.length);
+          let choice = null;
+          const part = await read(null, ({ total: rows }) => {
+            const pagesCost = rows == null ? Infinity : Math.ceil(rows / 100);
+            choice = { rows, pagesCost, statCost, useStat: statCost < pagesCost };
+            console.debug(`自营收入：管理员日志整段读 来源 ${source.kind}#${[...adminSet].sort().indexOf(source.name)} 行数 ${rows ?? "未知"} 翻页约 ${pagesCost} 次 按渠道 stat ${statCost} 次 → ${choice.useStat ? "按渠道 stat" : "翻页"}`);
+            return !choice.useStat;
+          });
+          return part ?? statRead(channels, tokens, total);
+        };
         let part;
         // 今天（轮询）：渠道测试名字这两个来源只是兜底（测试大多记在管理员名下，管理员那一条已经扣了），10 分钟内读过的不再读，
         // 每轮平时只读管理员那几个来源；结账（settle）一定按总额度对账，那时的数是准的
-        if (!settle) part = source.kind === "token" && before && Date.now() - before.readAt < OWN_EXCLUSION_FALLBACK_REUSE_MS ? before : { ...await read(before), readAt: Date.now() };
+        if (!settle) part = source.kind === "token" && before && Date.now() - before.readAt < OWN_EXCLUSION_FALLBACK_REUSE_MS ? before
+          : { ...await readSmart(null), readAt: Date.now() };
         else {
           const total = await queryOwnLogSourceTotal(own, base);
           if (total === 0) part = { byChannel: new Map(), byToken: new Map(), byUser: new Map(), seen: 0, maxId: null };
           else {
-            part = await read(before);
+            part = await readSmart(total);
             // 累计和总额度对不上：只重翻这一个来源；本来就是整段翻的（没有上一份累计）再翻一遍也一样，不重翻
-            if (part.seen !== total && before) part = await read(null);
+            if (part.seen !== total && listBefore) part = await read(null);
           }
         }
         parts.set(id, part.readAt == null ? { ...part, readAt: Date.now() } : part);
@@ -839,7 +876,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         }
       }
       for (const [channel, quota] of byChannel) if (quota < 0) throw new Error("不算收入的额度算出负数");
-      const result = { byChannel };
+      // 这份结果覆盖哪些渠道：全是翻页读的就是所有渠道；有按渠道 stat 读的，只覆盖那几个渠道的交集
+      let coverage = "all";
+      for (const part of parts.values()) if (part.coverage instanceof Set) coverage = coverage === "all" ? part.coverage : new Set([...coverage].filter((id) => part.coverage.has(id)));
+      const result = { byChannel, coverage };
       if (!entry.state || entry.state.endMs <= window.endMs) entry.state = { parts, result, endMs: window.endMs, readAt: Date.now(), ...(settle ? { verifiedEndMs: window.endMs } : {}) };
       return result;
     });
@@ -863,7 +903,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (status && status.quotaPerUnit === cached.result.quotaPerUnit) return { ...cached.result, window: { ...cached.result.window, endMs: segmentWindow.endMs } };
     }
     const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus,
-      exclusion: () => ownExclusion(own, segmentWindow, { settle }) });
+      exclusion: () => ownExclusion(own, segmentWindow, { settle, channelIds }) });
     // 只有轮询观测今天会沿用，别的窗口（昨天、结账、自定义、近 7 天、本月）不记
     if (reuse && result.state === "complete" && !result.emptySecondWindow) {
       ownRevenueCache.set(key, { endMs: segmentWindow.endMs, result });
@@ -1403,7 +1443,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             ownChannelsFor(own, { force: force && !settle }).catch(() => null),
             mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => queryOwnChannelRevenue(own, {
               channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone,
-              loadStatus: () => ownStatusFor(ownerRegistry, own), exclusion: () => ownExclusion(own, segmentWindow, { settle }),
+              loadStatus: () => ownStatusFor(ownerRegistry, own), exclusion: () => ownExclusion(own, segmentWindow, { settle, channelIds: rule.channels.map((channel) => channel.channelId) }),
             }).catch(() => null)),
           ]);
           const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
