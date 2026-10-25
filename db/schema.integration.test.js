@@ -46,7 +46,7 @@ const legacyLedgerRows = [
 ];
 
 async function seedLegacySchema(pool) {
-  const tables = ["channel_monitor_links", "reconciliation_ledger", "reconciliation_billing_capabilities", "reconciliation_alert_state", "reconciliation_snapshots",
+  const tables = ["channel_monitor_links", "reconciliation_settlement_state", "reconciliation_ledger", "reconciliation_billing_capabilities", "reconciliation_alert_state", "reconciliation_snapshots",
     "reconciliation_rule_segments", "reconciliation_rule_channels", "reconciliation_rules",
     "station_daily_usage", "history_points", "meta", "stations"];
   for (const table of tables) await pool.query(`DROP TABLE IF EXISTS ${table}`);
@@ -791,7 +791,7 @@ defineReconciliationRepositoryContract({
       await contractPool.query("DELETE FROM reconciliation_billing_capabilities WHERE identity IN (?)", [capabilityIdentities]);
     }
     if (!ruleIds.length) return;
-    for (const table of ["reconciliation_alert_state", "reconciliation_snapshots", "reconciliation_ledger", "reconciliation_rule_segments",
+    for (const table of ["reconciliation_alert_state", "reconciliation_snapshots", "reconciliation_ledger", "reconciliation_settlement_state", "reconciliation_rule_segments",
       "reconciliation_rule_channels"]) await contractPool.query(`DELETE FROM ${table} WHERE rule_id IN (?)`, [ruleIds]);
     await contractPool.query("DELETE FROM reconciliation_rules WHERE id IN (?)", [ruleIds]);
   },

@@ -17,10 +17,11 @@ import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor
 import {
   uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, segmentFromRow,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
+  SETTLEMENT_STATE_WRITE_COLUMNS, settlementStateFromRow, settlementStateValues,
 } from "../reconciliation-repository.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME } from "../../lib/billing-capability-storage.js";
 
-const JSON_COLUMNS = new Set(["source_binding", "source", "capability", "detail"]);
+const JSON_COLUMNS = new Set(["source_binding", "source", "capability", "detail", "last_detail"]);
 
 const TABLE_NAMES = {
   rules: "reconciliation_rules",
@@ -30,6 +31,7 @@ const TABLE_NAMES = {
   alerts: "reconciliation_alert_state",
   capabilities: "reconciliation_billing_capabilities",
   ledger: "reconciliation_ledger",
+  settlementState: "reconciliation_settlement_state",
 };
 
 // 与 db/pool.js 的建表语句保持一致。
@@ -71,6 +73,11 @@ const SCHEMA = {
     keys: { PRIMARY: ["rule_id", "bill_date", "revision"] },
     notNull: ["rule_id", "bill_date", "revision", "timezone", "window_start_ms", "window_end_ms", "revenue_usd", "source", "settled_at"],
     varchar: { rule_id: 32, version_id: 32, timezone: 64, cost_basis: 16, source: 24 },
+  },
+  settlementState: {
+    keys: { PRIMARY: ["rule_id", "bill_date"] },
+    notNull: ["rule_id", "bill_date", "attempts", "updated_at_ms"],
+    varchar: { rule_id: 32, retry_reason: 64, manual_reason: 64, resettle_reason: 24, source_version: 64 },
   },
 };
 // 账本行按 LEDGER_SELECT 的读法返回：DECIMAL 是定点字符串，DATETIME(3) 经 DATE_FORMAT(%f) 带 6 位小数。
@@ -130,8 +137,9 @@ export class MemoryReconciliationRepository {
   //   beforeCommit(tx) / afterCommit(tx)
   //   beforeCapabilityWrite(method, identity)  保存或删除账单能力前，可以抛错模拟写入失败
   // tx 是 { name, snapshots: [{ ruleId, snapshotKey, source }], archivedRuleIds }。
-  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], now = () => Date.now(), hooks = {} } = {}) {
-    this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts], capabilities: [...capabilities], ledger: [...ledger] };
+  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], settlementState = [], now = () => Date.now(), hooks = {} } = {}) {
+    this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts], capabilities: [...capabilities], ledger: [...ledger],
+      settlementState: [...settlementState] };
     this.now = now;
     this.hooks = hooks;
     // snapshotWrites / ratioWrites / channelStateWrites 按语句记录，包括之后被回滚的写入。
@@ -411,7 +419,7 @@ export class MemoryReconciliationRepository {
     return this.#saveSnapshot(snapshot, null);
   }
 
-  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null } = {}) {
+  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null, settlement = null } = {}) {
     let booked = null;
     return this.#transaction("saveSnapshotsForScope", async (tx) => {
       // 和 MySQL 仓库一样只锁同一把 Key 的绑定（按 id 排好依次锁），锁内再比。内存仓库没有真的并发，这里的锁只保证调用顺序和 MySQL 一致，测不出锁漏了
@@ -448,6 +456,7 @@ export class MemoryReconciliationRepository {
           this.#insert(tx, "ledger", row);
         }
       }
+      if (settlement?.billDate) this.#delete(tx, "settlementState", this.#settlementEntries(tx, ruleId, settlement.billDate));
       if (guard && !guard()) return this.#abort(tx, false);
       if (booked) ledger.booked = booked;
       return true;
@@ -528,6 +537,47 @@ export class MemoryReconciliationRepository {
 
   async latestObservation(ruleId, window, scopeFingerprint) {
     return this.latestRecord(ruleId, window, scopeFingerprint, "observation");
+  }
+
+  // ---- 结账状态（计划 C2a），和 MySQL 仓库同一套语义 ----
+
+  async listSettlementStates(ruleIds) {
+    if (!ruleIds?.length) return [];
+    this.log.settlementReads = (this.log.settlementReads || 0) + 1;
+    await this.#read("listSettlementStates", [ruleIds]);
+    const wanted = new Set(ruleIds.map(String));
+    return this.#rows("settlementState").map(({ row }) => row).filter((row) => wanted.has(String(row.rule_id))).map((row) => settlementStateFromRow(fresh(row)));
+  }
+
+  // MySQL 那边必须带 rule_id IN 走主键前缀；这里记下收到的条件，契约测试钉住
+  async listLedgerDays(ruleIds, sinceDate) {
+    if (!ruleIds?.length) return [];
+    (this.log.ledgerDayReads ||= []).push({ ruleIds: [...ruleIds], sinceDate });
+    await this.#read("listLedgerDays", [ruleIds, sinceDate]);
+    const wanted = new Set(ruleIds.map(String)), days = new Map();
+    for (const { row } of this.#rows("ledger")) {
+      if (wanted.has(String(row.rule_id)) && row.bill_date >= sinceDate) days.set(`${row.rule_id}|${row.bill_date}`, { ruleId: row.rule_id, billDate: row.bill_date });
+    }
+    return [...days.values()];
+  }
+
+  async recordSettlementState(ruleId, billDate, state, now = Date.now()) {
+    if (this.#ledgerOf(null, ruleId, billDate).length) return;
+    const values = Object.fromEntries(SETTLEMENT_STATE_WRITE_COLUMNS.map((column, index) => [column, settlementStateValues(state)[index]]));
+    values.last_detail = JSON.parse(values.last_detail);
+    const existing = this.#settlementEntries(null, ruleId, billDate);
+    if (existing.length) this.#update(null, "settlementState", existing, { ...values, updated_at_ms: now });
+    else this.#insert(null, "settlementState", { rule_id: ruleId, bill_date: billDate, resettle_requested_at_ms: null, resettle_reason: null, ...values, updated_at_ms: now });
+  }
+
+  async deleteSettlementState(ruleId, billDate) {
+    this.#delete(null, "settlementState", this.#settlementEntries(null, ruleId, billDate));
+  }
+
+  async pruneSettlementStates(beforeDate, limit = 500) {
+    const doomed = this.#rows("settlementState").filter(({ row }) => row.bill_date < beforeDate && row.resettle_requested_at_ms == null).slice(0, limit);
+    this.#delete(null, "settlementState", doomed);
+    return doomed.length;
   }
 
   async latestLedgerEntry(ruleId, window) {
@@ -666,6 +716,10 @@ export class MemoryReconciliationRepository {
 
   #alertEntry(ruleId, eventCode) {
     return this.#rows("alerts").find(({ row }) => sameText(row.rule_id, ruleId) && sameText(row.event_code, eventCode)) || null;
+  }
+
+  #settlementEntries(tx, ruleId, billDate) {
+    return this.#rows("settlementState", tx).filter(({ row }) => sameText(row.rule_id, ruleId) && row.bill_date === billDate);
   }
 
   // 某天的账本行，按 revision 倒序。
