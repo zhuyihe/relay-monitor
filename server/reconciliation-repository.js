@@ -670,12 +670,14 @@ export class ReconciliationRepository {
     let booked = null;
     const conn = await this.pool.getConnection();
     try {
-      await conn.beginTransaction();
       // expectedOwnerState：{ tokenId, state }（reconciliationOwnerScope）。只锁同一把 Key 的绑定：先普通读出这一组的 id
-      // （一致性读，不加锁），再按主键锁、锁内再比一次。rules 表没有 token_id 的索引，按 token_id 加锁会锁住扫过的每一行，又变回锁全表。
+      // （不加锁），再按主键锁、锁内再比一次。rules 表没有 token_id 的索引，按 token_id 加锁会锁住扫过的每一行，又变回锁全表。
       // 新加同一把 Key 的启用绑定有唯一键 active_token_key 挡着，建、改绑定也在进程内排队（serializeWrite）。
+      // 这条普通读放在事务外面：事务里第一条一致性读会定下读视图，放在锁前面，下面锁内读快照就看不到等锁期间别人提交的写入了
+      const [ids] = expectedOwnerState != null
+        ? await conn.query("SELECT id FROM reconciliation_rules WHERE token_id = ? AND archived_at IS NULL", [expectedOwnerState.tokenId]) : [[]];
+      await conn.beginTransaction();
       if (expectedOwnerState != null) {
-        const [ids] = await conn.query("SELECT id FROM reconciliation_rules WHERE token_id = ? AND archived_at IS NULL", [expectedOwnerState.tokenId]);
         const [owners] = ids.length
           ? await conn.query("SELECT * FROM reconciliation_rules WHERE id IN (?) AND archived_at IS NULL ORDER BY id FOR UPDATE", [ids.map((row) => row.id)])
           : [[]];

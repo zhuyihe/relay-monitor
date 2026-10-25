@@ -404,6 +404,37 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     assert.deepEqual(original.source, legacySource);
   });
 
+  await t.test("owner lock reads snapshots committed while it was waiting (P1c: the id read stays outside the transaction)", async () => {
+    const rule = await reconciliation.getRule("legacy_rule");
+    const segments = await reconciliation.listSegments(rule.id);
+    const scope = reconciliationScopeFingerprint(rule, segments);
+    const owners = reconciliationOwnerScope(await reconciliation.listRules(), rule.tokenId);
+    const snapshot = (endMs) => ({ ruleId: rule.id, segmentId: segments[0].id, snapshotKey: "owner-read-view", windowKind: "custom",
+      startMs: 7000, endMs, localDate: null, upstreamUsd: 2, downstreamUsd: 3, differenceUsd: 1,
+      marginRate: 1 / 3, healthCode: "READY", source: { recordType: "confirmed", scopeFingerprint: scope, window: { startMs: 7000, endMs } } });
+    // 读完这一组的 id、还没加锁时，另一个连接写进一份更新的快照并提交
+    let between = async () => {
+      between = null;
+      assert.equal(await reconciliation.saveSnapshotsForScope(rule.id, scope, [snapshot(9000)], { expectedOwnerState: owners }), true);
+    };
+    const hooked = { query: (...args) => pool.query(...args), async getConnection() {
+      const conn = await pool.getConnection();
+      return new Proxy(conn, { get(target, prop) {
+        if (prop === "query") return async (sql, params) => {
+          const result = await target.query(sql, params);
+          if (between && String(sql).startsWith("SELECT id FROM reconciliation_rules WHERE token_id")) await between();
+          return result;
+        };
+        const value = target[prop];
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    } };
+    await new ReconciliationRepository(hooked).saveSnapshotsForScope(rule.id, scope, [snapshot(8000)], { expectedOwnerState: owners });
+    assert.equal(between, null, "另一个连接确实在空当里写了");
+    const [[row]] = await pool.query("SELECT window_end_ms FROM reconciliation_snapshots WHERE snapshot_key = 'owner-read-view'");
+    assert.equal(Number(row.window_end_ms), 9000, "锁内看得到等锁期间提交的更新快照，旧的不能盖掉新的");
+  });
+
   await t.test("snapshot batch SQL failure rolls back every preceding insert", async () => {
     const rule = await reconciliation.getRule("legacy_rule");
     const segments = await reconciliation.listSegments(rule.id);
