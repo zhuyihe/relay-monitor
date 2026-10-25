@@ -8,10 +8,13 @@ import { ReadFailure } from "./reader.js";
 export const PROTOCOL_VERSION = 1;
 // 两次读库之间至少隔这么久（控制台每 5 分钟问一次，比它短一点，免得错过一轮）
 export const MIN_READ_GAP_MS = 4 * 60 * 1000;
-// 断路：出错后停 10 分钟，再错翻倍，最多停 1 小时；DB_LIMIT（连接数、每小时语句额度到顶）停到下一个整点
+// 断路：出错后停 10 分钟，再错翻倍，最多停 1 小时；每小时的额度到顶（max_questions 这类）停到下一个整点
 export const BREAKER_BASE_MS = 10 * 60 * 1000;
 export const BREAKER_MAX_MS = 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+// 读库出错以后，上一份成功的结果最多再用这么久（响应带 X-Agent-Stale: 1，readAt 还是那次读库的时刻）：
+// 控制台连续几次读不到才算问题，一次瞬时的错不该让它立刻看到 503
+export const STALE_MAX_MS = 30 * 60 * 1000;
 
 function parseChannelInfo(value) {
   if (value && typeof value === "object") return value;
@@ -46,11 +49,11 @@ export function failureSnapshot(failure, now) {
   const code = failure instanceof ReadFailure ? failure.code : "DB_ERROR";
   const driver = failure instanceof ReadFailure ? failure.driver : "UNKNOWN";
   const body = Buffer.from(JSON.stringify({ error: "unavailable", code }));
-  return { ok: false, code, driver, body, readAt: now };
+  return { ok: false, code, driver, hourly: failure instanceof ReadFailure && failure.hourly, body, readAt: now };
 }
 
-export function breakerPause(failures, code, t) {
-  if (code === "DB_LIMIT") return HOUR_MS - (t % HOUR_MS);
+export function breakerPause(failures, t, { hourly = false } = {}) {
+  if (hourly) return HOUR_MS - (t % HOUR_MS);
   return Math.min(BREAKER_BASE_MS * 2 ** (failures - 1), BREAKER_MAX_MS);
 }
 
@@ -58,9 +61,15 @@ export function breakerPause(failures, code, t) {
 // paused：KEY_AGENT_PAUSED=1，永远不读库，只回 PAUSED
 export function createSnapshotSource({ reader, db, fingerprintKeyBytes, now = Date.now, minGapMs = MIN_READ_GAP_MS, paused = false, onBreaker = () => {} }) {
   let current = null;
+  let lastGood = null;
   let inflight = null;
   let failures = 0;
   let pausedUntil = 0;
+  // 最近一次是失败、但上一份成功的结果还不到 30 分钟：给上一份，标 stale
+  const serve = (t) => {
+    if (current && !current.ok && lastGood && t - lastGood.readAt >= 0 && t - lastGood.readAt < STALE_MAX_MS) return { ...lastGood, stale: true, staleCode: current.code };
+    return current;
+  };
   return {
     async get() {
       if (paused) return failureSnapshot(new ReadFailure("PAUSED", "PAUSED"), now());
@@ -68,23 +77,23 @@ export function createSnapshotSource({ reader, db, fingerprintKeyBytes, now = Da
       // 时钟往回拨时（age 为负、停到的时刻比最长还远）缓存的年龄说不清，重读一次，不让它一直当新的
       const age = current ? t - current.readAt : -1;
       if (pausedUntil - t > BREAKER_MAX_MS) pausedUntil = 0;
-      if (current && age >= 0 && age < minGapMs && failures === 0) return current;
-      if (current && failures > 0 && t < pausedUntil) return current;
+      if (current && age >= 0 && age < minGapMs && failures === 0) return serve(t);
+      if (current && failures > 0 && t < pausedUntil) return serve(t);
       inflight ??= (async () => {
         try {
-          current = buildSnapshot(await reader.read(), { db, fingerprintKeyBytes, now: now() });
+          current = lastGood = buildSnapshot(await reader.read(), { db, fingerprintKeyBytes, now: now() });
           failures = 0;
           pausedUntil = 0;
         } catch (err) {
           const at = now();
           current = failureSnapshot(err, at);
           failures += 1;
-          pausedUntil = at + breakerPause(failures, current.code, at);
+          pausedUntil = at + breakerPause(failures, at, { hourly: current.hourly });
           onBreaker({ code: current.code, failures, pauseMs: pausedUntil - at });
         } finally {
           inflight = null;
         }
-        return current;
+        return serve(now());
       })();
       return inflight;
     },

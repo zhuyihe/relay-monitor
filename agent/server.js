@@ -97,7 +97,7 @@ export function createAgentServer({ config, reader, now = Date.now, log = defaul
     let entry = failedBySource.get(from);
     if (!entry) {
       entry = { start: t, count: 0 };
-      if (failedBySource.size >= MAX_TRACKED_SOURCES) failedBySource.delete(failedBySource.keys().next().value);
+      if (failedBySource.size >= MAX_TRACKED_SOURCES) failedBySource.clear();
       failedBySource.set(from, entry);
     }
     entry.count += 1;
@@ -133,7 +133,8 @@ export function createAgentServer({ config, reader, now = Date.now, log = defaul
       return send(req, res, 503, snapshot.body, { "Content-Type": "application/json; charset=utf-8" });
     }
     lastFailureLog = { code: null, at: 0 };
-    const headers = { ETag: snapshot.etag, Vary: "Accept-Encoding" };
+    // stale：这是上一次成功读到的结果（最近一次读库失败了，原因码在日志的 breaker 一行里）
+    const headers = { ETag: snapshot.etag, Vary: "Accept-Encoding", ...(snapshot.stale ? { "X-Agent-Stale": "1" } : {}) };
     if (etagMatches(req.headers["if-none-match"], snapshot.etag)) {
       log({ ev: "req", path, status: 304, channels: snapshot.channelCount, ms: now() - started });
       return send(req, res, 304, null, headers);

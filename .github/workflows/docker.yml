@@ -264,15 +264,13 @@ jobs:
         run: docker run --rm -w /app --entrypoint node relay-key-agent:smoke --input-type=module -e "await import('mysql2/promise'); await import('pg'); await import('node:sqlite'); console.log('drivers ok')"
       # --dry-run：镜像的入口把参数传给读取服务；没有库可读时打印失败的原因码、退出码 1；一键停（KEY_AGENT_PAUSED）时只说一句、退出码 0
       - name: Dry run prints the reason and exits
+        # GitHub 的 bash 默认带 -e：`cmd && code=0 || code=$?` 这样接退出码不会让整步提前退出，每条 test / grep 失败都会让这一步失败
         run: |
-          set +e
-          out=$(docker run --rm -e RELAY_KEY_AGENT_SECRET=ciSm0keKd83LmQwRtYx9zPa5vBn7cJf4hGs2 relay-key-agent:smoke --dry-run 2>&1)
-          code=$?
+          out=$(docker run --rm -e RELAY_KEY_AGENT_SECRET=ciSm0keKd83LmQwRtYx9zPa5vBn7cJf4hGs2 relay-key-agent:smoke --dry-run 2>&1) && code=0 || code=$?
           echo "$out"
           test "$code" -eq 1
           echo "$out" | grep -q '读取：失败，原因码'
-          out=$(docker run --rm -e RELAY_KEY_AGENT_SECRET=ciSm0keKd83LmQwRtYx9zPa5vBn7cJf4hGs2 -e KEY_AGENT_PAUSED=1 relay-key-agent:smoke --dry-run 2>&1)
-          code=$?
+          out=$(docker run --rm -e RELAY_KEY_AGENT_SECRET=ciSm0keKd83LmQwRtYx9zPa5vBn7cJf4hGs2 -e KEY_AGENT_PAUSED=1 relay-key-agent:smoke --dry-run 2>&1) && code=0 || code=$?
           echo "$out"
           test "$code" -eq 0
           echo "$out" | grep -q 'KEY_AGENT_PAUSED'

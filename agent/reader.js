@@ -5,7 +5,7 @@
 // - 账号权限比 channels 那几列多就不读（account-check.js）。
 // 报错只在这里看驱动的错误码，往外只给原因码（DB_UNREACHABLE / DB_DENIED / DB_TIMEOUT / DB_LIMIT / TABLE_MISSING / ACCOUNT_TOO_BROAD / DB_ERROR），不带库的报错原文（可能带出主机、账号）
 import { closeSync, existsSync, openSync, readSync } from "node:fs";
-import { MYSQL_ACCOUNT_SQL, PG_ACCOUNT_SQL, judgeMysqlAccount, judgePgAccount, pgConnectionLimit } from "./account-check.js";
+import { PG_ACCOUNT_SQL, mysqlAccountSql, judgeMysqlAccount, judgePgAccount, pgConnectionLimit } from "./account-check.js";
 
 const FULL_COLUMNS = "id, name, type, status, base_url, KEY_COL, channel_info";
 const NO_INFO_COLUMNS = "id, name, type, status, base_url, KEY_COL";
@@ -41,7 +41,7 @@ export function mysqlFlavor(version) {
 export function withTimeLimit(sql, { flavor, limitMs }) {
   if (!limitMs) return sql;
   if (flavor === "mariadb") return `SET STATEMENT max_statement_time=${limitMs / 1000} FOR ${sql}`;
-  if (flavor === "mysql") return sql.replace(/^SELECT /, `SELECT /*+ MAX_EXECUTION_TIME(${limitMs}) */ `);
+  if (flavor === "mysql" || flavor === "unknown") return sql.replace(/^SELECT /, `SELECT /*+ MAX_EXECUTION_TIME(${limitMs}) */ `);
   return sql;
 }
 
@@ -57,6 +57,8 @@ const DB_TIMEOUT_CODES = new Set(["ER_QUERY_TIMEOUT", "ER_STATEMENT_TIMEOUT", "5
 // 账号或服务器的连接数、每小时额度到顶（MySQL 1226 用户额度、1203 / 1040 连接数；PostgreSQL 53300）
 const DB_LIMIT_ERRNO = new Set([1226, 1203, 1040]);
 const DB_LIMIT_CODES = new Set(["ER_USER_LIMIT_REACHED", "ER_TOO_MANY_USER_CONNECTIONS", "ER_CON_COUNT_ERROR", "53300"]);
+// MySQL 的 1226 报错里点名是哪种额度：每小时的（max_questions、max_updates、max_connections）下一个整点才恢复，max_user_connections（同时连接数）不是
+const HOURLY_RESOURCE = /'(max_questions|max_updates|max_connections)'/;
 const PG_GONE_MESSAGE = /connection terminated|terminating connection|server closed the connection|connection ended/i;
 const SAFE_DRIVER_CODE = /^[A-Za-z0-9_]{1,40}$/;
 
@@ -74,8 +76,8 @@ export function classifyError(err) {
   const driver = SAFE_DRIVER_CODE.test(raw) ? raw : "UNKNOWN";
   const c = String(err?.code ?? "");
   const errno = Number(err?.errno);
-  if (err instanceof ReadFailure) return { code: err.code, driver: err.driver };
-  if (DB_LIMIT_ERRNO.has(errno) || DB_LIMIT_CODES.has(c)) return { code: "DB_LIMIT", driver };
+  if (err instanceof ReadFailure) return { code: err.code, driver: err.driver, hourly: err.hourly };
+  if (DB_LIMIT_ERRNO.has(errno) || DB_LIMIT_CODES.has(c)) return { code: "DB_LIMIT", driver, hourly: HOURLY_RESOURCE.test(String(err?.message ?? "")) };
   if (DB_TIMEOUT_ERRNO.has(errno) || DB_TIMEOUT_CODES.has(c)) return { code: "DB_TIMEOUT", driver };
   const timedOut = err?.name === "TimeoutError" || /timeout|timed out/i.test(String(err?.message ?? ""));
   if (UNREACHABLE_NET.has(c) || MYSQL_NO_DB.has(c) || c === "3D000" || c.startsWith("08") || c === "57P01" || c === "57P02" || c === "57P03"
@@ -97,10 +99,12 @@ export function classifyError(err) {
 }
 
 export class ReadFailure extends Error {
-  constructor(code, driver) {
+  // hourly：额度按小时算的那种到顶（max_questions 之类），下一个整点才恢复；连接数满、库整体连接满等走普通断路
+  constructor(code, driver, { hourly = false } = {}) {
     super(code);
     this.code = code;
     this.driver = driver;
+    this.hourly = hourly;
   }
 }
 
@@ -131,13 +135,14 @@ async function mysqlSession(database, { queryTimeoutMs, dbTimeLimitMs }) {
   });
   // 连接被对方断开时 mysql2 会发 error 事件；没人听就是进程崩溃，原因读的时候自然会报
   conn.on("error", () => {});
-  // 握手里的版本串（mysql2 没有公开的取法）。取不到就不带语句级时限，只靠客户端那一道
-  const flavor = mysqlFlavor(conn.connection?._handshakePacket?.serverVersion);
+  // 握手里的版本串（mysql2 没有公开的取法）。取不到（或认不得）也带 MySQL 的提示：不认识它的服务器把它当注释；更老的 MySQL 才不带，只靠客户端那一道
+  const version = conn.connection?._handshakePacket?.serverVersion;
+  const flavor = mysqlFlavor(version);
   const run = async (sql) => (await conn.query({ sql: withTimeLimit(sql, { flavor, limitMs: dbTimeLimitMs }), timeout: queryTimeoutMs }))[0];
   return {
     flavor,
     fetch: (withChannelInfo) => run(selectBody("mysql", withChannelInfo)),
-    inspect: () => run(MYSQL_ACCOUNT_SQL),
+    inspect: () => run(mysqlAccountSql(version)),
     judge: (rows) => judgeMysqlAccount(rows, { database: database.database }),
     end: () => conn.end(),
     destroy: () => conn.destroy(),
@@ -242,6 +247,8 @@ export function createReader(database, { onEvent = () => {}, now = Date.now, dea
         const inspected = await opened.inspect();
         if (opened.connectionLimit) accountInfo = { connectionLimit: opened.connectionLimit(inspected) };
         const verdict = opened.judge(inspected);
+        // 表不存在不是账号的问题：不把「通过」记下来，下次读再查
+        if (verdict === "CHANNELS_MISSING") throw new ReadFailure("TABLE_MISSING", "CHANNELS_MISSING");
         if (verdict) {
           account = { reason: verdict };
           onEvent({ ev: "account_too_broad", reason: verdict });
@@ -274,8 +281,8 @@ export function createReader(database, { onEvent = () => {}, now = Date.now, dea
           return await withDeadline(attempt(), deadlineMs, () => session?.destroy());
         } catch (err) {
           if (err instanceof ReadFailure) throw err;
-          const { code, driver } = classifyError(err);
-          throw new ReadFailure(code, err?.code === "READ_DEADLINE" ? "READ_DEADLINE" : driver);
+          const { code, driver, hourly } = classifyError(err);
+          throw new ReadFailure(code, err?.code === "READ_DEADLINE" ? "READ_DEADLINE" : driver, { hourly });
         } finally {
           inflight = null;
         }

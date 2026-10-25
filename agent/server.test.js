@@ -130,6 +130,30 @@ test("读库失败：503 带原因码，不带驱动报错原文；失败后断�
   });
 });
 
+test("读库出错、上一份成功的结果还不到 30 分钟：/keys 照样回 200 和那份结果，带 X-Agent-Stale: 1；If-None-Match 对得上回 304 也带；超过 30 分钟回 503", async () => {
+  const reader = fakeReader(ROWS);
+  await withServer(reader, {}, async ({ get, clock, logs }) => {
+    const good = await get("/keys", auth);
+    assert.equal(good.status, 200);
+    assert.equal(good.headers["x-agent-stale"], undefined);
+    reader.state.error = new ReadFailure("DB_TIMEOUT", "ER_QUERY_TIMEOUT");
+    clock.t += FIVE_MIN;
+    const stale = await get("/keys", auth);
+    assert.equal(stale.status, 200);
+    assert.equal(stale.headers["x-agent-stale"], "1");
+    assert.deepEqual(stale.body, good.body, "readAt 是原来那次读库的时刻");
+    assert.equal(stale.headers.etag, good.headers.etag);
+    const notModified = await get("/keys", { ...auth, "If-None-Match": good.headers.etag });
+    assert.equal(notModified.status, 304);
+    assert.equal(notModified.headers["x-agent-stale"], "1");
+    assert.equal(logs.filter((l) => l.ev === "breaker").length, 1);
+    clock.t += 30 * 60_000;
+    const gone = await get("/keys", auth);
+    assert.equal(gone.status, 503);
+    assert.equal(JSON.parse(gone.body).code, "DB_TIMEOUT");
+  });
+});
+
 test("/healthz 不要令牌、不碰库；不对的路径 404；/keys 的方法不对 405", async () => {
   const reader = fakeReader(ROWS);
   await withServer(reader, {}, async ({ get, logs }) => {

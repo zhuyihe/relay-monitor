@@ -110,13 +110,14 @@ test("断路：出错后停 10 分钟，再错翻倍，最多 1 小时；停的�
   assert.equal(events.at(-1).pauseMs / MIN, 10, "成功以后断路清零，从 10 分钟重新数");
 });
 
-test("DB_LIMIT（连接数、每小时语句额度到顶）：停到下一个整点；ACCOUNT_TOO_BROAD 按普通断路", async () => {
-  assert.equal(breakerPause(1, "DB_LIMIT", Date.UTC(2026, 0, 1, 10, 20, 0)), 40 * MIN);
-  assert.equal(breakerPause(3, "DB_LIMIT", Date.UTC(2026, 0, 1, 10, 59, 59)), 1000);
-  assert.equal(breakerPause(1, "DB_ERROR", 0), 10 * MIN);
+test("每小时的额度到顶（hourly）：停到下一个整点；同时连接数满等 DB_LIMIT 走普通断路", async () => {
+  assert.equal(breakerPause(1, Date.UTC(2026, 0, 1, 10, 20, 0), { hourly: true }), 40 * MIN);
+  assert.equal(breakerPause(3, Date.UTC(2026, 0, 1, 10, 59, 59), { hourly: true }), 1000);
+  assert.equal(breakerPause(1, 0), 10 * MIN);
+  assert.equal(breakerPause(2, Date.UTC(2026, 0, 1, 10, 20, 0)), 20 * MIN, "没有 hourly 就是普通退避");
   let reads = 0;
   const t = { v: Date.UTC(2026, 0, 1, 10, 20, 0) };
-  const source = sourceWith(async () => { reads += 1; throw new ReadFailure("DB_LIMIT", "ER_USER_LIMIT_REACHED"); }, t);
+  const source = sourceWith(async () => { reads += 1; throw new ReadFailure("DB_LIMIT", "ER_USER_LIMIT_REACHED", { hourly: true }); }, t);
   await source.get();
   t.v = Date.UTC(2026, 0, 1, 10, 59, 59);
   await source.get();
@@ -141,4 +142,35 @@ test("时钟往回拨，断路停到的时刻比最长还远：不让它一直�
   t.v -= 3 * 60 * MIN;
   await source.get();
   assert.equal(reads, 2);
+});
+
+test("读库出错：上一份成功的结果 30 分钟内继续给（标 stale，readAt 还是那次读库的时刻），超过就回失败；恢复以后不再 stale", async () => {
+  let fail = false;
+  const t = { v: 10 * 60 * MIN };
+  const source = sourceWith(async () => { if (fail) throw new ReadFailure("DB_TIMEOUT", "ER_QUERY_TIMEOUT"); return []; }, t);
+  const good = await source.get();
+  assert.equal(good.ok, true);
+  const goodAt = good.readAt;
+  fail = true;
+  t.v += 5 * MIN;
+  const stale = await source.get();
+  assert.deepEqual([stale.ok, stale.stale, stale.staleCode, stale.readAt, stale.etag === good.etag], [true, true, "DB_TIMEOUT", goodAt, true]);
+  t.v += 10 * MIN;
+  assert.equal((await source.get()).stale, true, "断路期间来问，还是上一份");
+  t.v = goodAt + 30 * MIN - 1;
+  const again = await source.get();
+  assert.equal(again.stale, true);
+  t.v = goodAt + 30 * MIN + 1;
+  const expired = await source.get();
+  assert.deepEqual([expired.ok, expired.code], [false, "DB_TIMEOUT"]);
+  fail = false;
+  t.v += 60 * MIN;
+  const back = await source.get();
+  assert.deepEqual([back.ok, back.stale], [true, undefined]);
+});
+
+test("没有成功过的结果时出错：直接回失败，不会有 stale", async () => {
+  const source = sourceWith(async () => { throw new ReadFailure("DB_DENIED", "X"); }, { v: 1 });
+  const first = await source.get();
+  assert.deepEqual([first.ok, first.stale, first.code], [false, undefined, "DB_DENIED"]);
 });

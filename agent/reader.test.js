@@ -62,9 +62,20 @@ test("按握手的版本串分 MySQL / MariaDB / 老 MySQL，语句仍然只有�
   assert.equal(withTimeLimit(body, { flavor: "mysql", limitMs: 500 }), "SELECT /*+ MAX_EXECUTION_TIME(500) */ id FROM channels ORDER BY id");
   assert.equal(withTimeLimit(body, { flavor: "mariadb", limitMs: 500 }), "SET STATEMENT max_statement_time=0.5 FOR SELECT id FROM channels ORDER BY id");
   assert.equal(withTimeLimit(body, { flavor: "old", limitMs: 500 }), body);
-  assert.equal(withTimeLimit(body, { flavor: "unknown", limitMs: 500 }), body);
+  assert.equal(withTimeLimit(body, { flavor: "unknown", limitMs: 500 }), "SELECT /*+ MAX_EXECUTION_TIME(500) */ id FROM channels ORDER BY id", "认不得的版本串也带提示：不认识的服务器把它当注释");
   assert.equal(withTimeLimit(body, { flavor: "mysql", limitMs: 0 }), body);
   assert.equal(selectSql("mysql", true, { flavor: "mysql", limitMs: 500 }), "SELECT /*+ MAX_EXECUTION_TIME(500) */ id, name, type, status, base_url, `key`, channel_info FROM channels ORDER BY id");
   assert.equal(selectSql("mysql", false, { flavor: "mariadb", limitMs: 500 }), "SET STATEMENT max_statement_time=0.5 FOR SELECT id, name, type, status, base_url, `key` FROM channels ORDER BY id");
   assert.ok(!/;/.test(selectSql("mysql", true, { flavor: "mariadb", limitMs: 500 })), "一条语句，不带分号");
+});
+
+test("DB_LIMIT：报错里点名每小时的额度（max_questions 等）才算 hourly，同时连接数满（max_user_connections）、库整体连接满、PostgreSQL 53300 走普通断路", () => {
+  const limit = (message, extra = {}) => classifyError({ errno: 1226, code: "ER_USER_LIMIT_REACHED", message, ...extra });
+  assert.deepEqual(limit("User 'u' has exceeded the 'max_questions' resource (current value: 120)"), { code: "DB_LIMIT", driver: "ER_USER_LIMIT_REACHED", hourly: true });
+  assert.equal(limit("User 'u' has exceeded the 'max_updates' resource (current value: 1)").hourly, true);
+  assert.equal(limit("User 'u' has exceeded the 'max_connections' resource (current value: 5)").hourly, true);
+  assert.equal(limit("User 'u' has exceeded the 'max_user_connections' resource (current value: 1)").hourly, false);
+  assert.equal(classifyError({ errno: 1203, message: "User u already has more than 'max_user_connections' active connections" }).hourly, false);
+  assert.equal(classifyError({ errno: 1040, code: "ER_CON_COUNT_ERROR", message: "Too many connections" }).hourly, false);
+  assert.equal(classifyError({ code: "53300", message: "too many connections for role" }).hourly, false);
 });

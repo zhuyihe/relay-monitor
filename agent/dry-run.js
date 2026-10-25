@@ -13,6 +13,10 @@ const ACCOUNT_TEXT = {
   WRITE_PRIVILEGE: "账号对 channels 有写的权限",
   TABLE_WIDE_SELECT: "账号对 channels 整表有 SELECT（不止那 7 列）",
   EXTRA_COLUMNS: "账号能读 channels 里那 7 列以外的列",
+  CONNECTION_LIMIT: "账号的连接数上限不是 1（MySQL 的 MAX_USER_CONNECTIONS、PostgreSQL 的 CONNECTION LIMIT 要设成 1）",
+  GRANT_OPTION: "账号带着 WITH GRANT OPTION（能把权限转给别人）",
+  ROLE_GRANTED: "账号通过角色拿到了权限（只允许直接授予那 7 列的 SELECT）",
+  ROLE_MEMBERSHIP: "角色是别的角色的成员（只允许直接授予那 7 列的 SELECT）",
 };
 
 export async function runDryRun({ reader, paused = false, write = (line) => process.stdout.write(`${line}\n`), now = Date.now }) {
@@ -26,7 +30,9 @@ export async function runDryRun({ reader, paused = false, write = (line) => proc
     const rows = await reader.read();
     const status = reader.status();
     write(`读取：成功，${rows.length} 个渠道，用时 ${now() - started} 毫秒`);
-    write(status.account === "ok" && reader.kind !== "sqlite" ? "账号权限：只有 channels 表那几列的 SELECT，没有多余的权限" : "账号权限：这个数据库不查账号（SQLite 没有账号）");
+    write(status.account === "ok" && reader.kind !== "sqlite"
+      ? "账号权限检查通过：看到的权限只有 channels 表那几列的 SELECT，连接数上限是 1（单个存储过程的 EXECUTE、代理账号这类查不到，部署说明要求只直接授予那几列）"
+      : "账号权限：这个数据库不查账号（SQLite 没有账号）");
     write(`channel_info 列：${status.withChannelInfo ? "有" : "没有（老版本的表，多 Key 渠道会当成一把 Key）"}`);
     if (status.connectionLimit !== undefined && status.connectionLimit !== 1) write(`提醒：这个角色的连接数上限是 ${status.connectionLimit === -1 ? "没设" : status.connectionLimit}，建议设成 1（ALTER ROLE … CONNECTION LIMIT 1）`);
     return 0;

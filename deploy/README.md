@@ -154,18 +154,18 @@ docker compose up -d relay-monitor
 
 | | 做法 | 谁来保证 |
 |---|---|---|
-| 权限 | 专用账号只有 `channels` 表那 7 列的 `SELECT`；权限比这多（能写、能读别的表、是 New API 自己的账号），读取服务不读 | 数据库（账号权限）；读取服务启动后第一次读之前会再查一遍，不合格就不读 |
+| 权限 | 专用账号只有 `channels` 表那 7 列的 `SELECT`；权限比这多（能写、能读别的表、能转授权限、通过角色拿权限、连接数上限不是 1、是 New API 自己的账号），读取服务不读 | 数据库（账号权限）；读取服务启动后第一次读之前会再查一遍，不合格就不读（只查这一次：权限之后又改了，要重启读取服务才会发现） |
 | 连接数 | 账号的连接数上限设成 1：读取服务出 bug 也开不出第二个连接 | 数据库（MySQL `MAX_USER_CONNECTIONS 1`、PostgreSQL `CONNECTION LIMIT 1`） |
 | 每小时查询数 | MySQL / MariaDB 账号设每小时 120 条语句的上限（正常每小时只有十几条） | 数据库（`MAX_QUERIES_PER_HOUR`；PostgreSQL 没有这一项，靠下面的读取节奏） |
 | 单条查询时限 | 每次读的那条 `SELECT` 自带 0.5 秒的库侧时限，到点由库掐掉（卡在表锁、排在 New API 升级的 `ALTER` 后面也一样），不靠客户端断开 | 读取服务每次带上（MySQL 5.7.8+/8 的 `MAX_EXECUTION_TIME` 提示、MariaDB 的 `SET STATEMENT max_statement_time`、PostgreSQL 的连接参数）；PostgreSQL 建议再给角色设同样的值（下面的 SQL 里有） |
 | 读得少 | 读取服务只在控制台来问、并且离上次读库已经过了 4 分钟时才读（控制台约每 5 分钟问一次）；每次读：连一次库、发 1 条语句、断开，不留连接池和空闲连接 | 读取服务 |
-| 出错不反复试 | 读库出错或超时以后停 10 分钟，再错翻倍，最多停 1 小时；账号的连接数或每小时额度到顶（`DB_LIMIT`）停到下一个整点 | 读取服务 |
-| 占用机器 | compose 里给容器限 `cpus: "0.2"`、`mem_limit: 192m` | Docker |
+| 出错不反复试 | 读库出错或超时以后停 10 分钟，再错翻倍，最多停 1 小时；每小时的语句额度到顶（`DB_LIMIT` 里 `max_questions` 那种）停到下一个整点（最多约一小时）；连接数满等其他 `DB_LIMIT` 照普通退避；读库出错时上一份成功的结果最多再给 30 分钟（响应头 `X-Agent-Stale: 1`） | 读取服务 |
+| 占用机器 | compose 里给容器限 `cpus: "0.2"`、`mem_limit: 192m`（要 Docker Compose v2），日志轮转 | Docker |
 | 一键停 | `KEY_AGENT_PAUSED=1`（或者直接停容器）：不再读库 | 读取服务 |
 
 诚实的边界：连接数、权限、MySQL 的每小时语句数是数据库强制的；查询时限是读取服务带上的，防得了读取服务自己的 bug，防不了「读取服务进程被人完全控制以后，在那唯一的一个连接上故意烧 CPU」，那种情况下只能靠只读 7 列限住能读到的数据、靠你的库监控看 CPU。最坏的正常情况：New API 升级时对 `channels` 表做 `ALTER`，刚好撞上读取服务那几毫秒的读，`ALTER` 最多多等 0.5 秒。
 
-**换 Key 的发现会慢一些**：读取节奏是 5 分钟一次（以前设想的是 1 分钟），所以渠道里换了 Key，控制台最多 5 分钟后才发现，这几分钟的钱在两个渠道之间分得粗一点，合计不变。控制台那一侧「读不到你站的渠道 Key」要连续 3 次读不到（约 15 分钟）才算问题。
+**换 Key 的发现会慢一些**：读取服务按 5 分钟一次的节奏设计（以前设想的是 1 分钟），所以控制台那一侧（K2a、K2b，还没做）上线以后，渠道里换了 Key，它最多要 5 分钟才发现，这几分钟的钱会在两个渠道之间分得粗一点，合计不变；那一侧「读不到你站的渠道 Key」也会改成连续 3 次读不到（约 15 分钟）才算问题。
 
 ### 1. 生成令牌
 
@@ -179,7 +179,7 @@ openssl rand -base64 32
 
 ### 2. 建专用账号（必须）
 
-读取服务**不再接受 New API 自己的数据库账号**：MySQL、PostgreSQL 要先建一个专用账号，`/keys` 才读得出东西。账号的权限比下面写的多，读取服务不读，`/keys` 回 503 `ACCOUNT_TOO_BROAD`（进程不退出、不再连库，改好账号后重启容器）。
+读取服务**不再接受 New API 自己的数据库账号**：MySQL、PostgreSQL 要先建一个专用账号，`/keys` 才读得出东西。账号的权限比下面写的多（包括连接数上限不是 1），读取服务不读，`/keys` 回 503 `ACCOUNT_TOO_BROAD`（进程不退出、不再连库，改好账号后重启容器）。
 
 MySQL 5.7 / 8、MariaDB 10.2+ 都是这样写（`<库>` 换成 New API 的库名，密码自己定）：
 
@@ -203,7 +203,11 @@ GRANT USAGE ON SCHEMA public TO relay_key_agent;
 GRANT SELECT (id, name, type, status, base_url, "key", channel_info) ON channels TO relay_key_agent;
 ```
 
+上面的 `GRANT` 要先连到 New API 的那个库再执行（`psql -d <库>`），不然 `channels` 表在别的库里、授不上。
+
 连接串写成 `KEY_AGENT_DSN=postgres://relay_key_agent:密码@postgres:5432/<库>`（密码里有 `@`、`/`、`:`、`#`、`?` 这类字符时要先做百分号编码，或者换个只含字母数字的密码）。读取服务靠连接参数 `options` 带查询时限；中间如果有 PgBouncer 这类连接池，要在它的配置里加 `ignore_startup_parameters = options`。
+
+**权限检查的范围**：读取服务只在启动后第一次读之前查一次，看的是账号的全局、整库、整表、列级权限、能不能转授权限、有没有通过角色拿权限、连接数上限（MySQL 看 `information_schema`，PostgreSQL 看角色属性、成员关系和 `has_*_privilege`）。它查不到、只能靠你建账号时照上面的 SQL 只授那 7 列的 `SELECT`：单个存储过程的 `EXECUTE`、MySQL 的 `PROXY` 授权、PostgreSQL 的序列权限和 `schema` 上的 `CREATE`、`SET ROLE`。账号的权限之后又改了，要重启读取服务才会发现。
 
 **`channels` 表没有 `channel_info` 列的老版本**：
 
@@ -220,8 +224,13 @@ SQLite 没有账号，读取服务是用只读方式打开库的，代码里不�
   relay-key-agent:
     image: ghcr.io/zhuyihe/relay-monitor-key-agent:latest
     restart: unless-stopped        # 容器反复退出时 Docker 自己会拉长重启的间隔
-    cpus: "0.2"
+    cpus: "0.2"                  # cpus、mem_limit 需要 Docker Compose v2（`docker compose`，不是老的 `docker-compose`）
     mem_limit: 192m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # 反向代理在宿主机上就留这一行；代理也在 Docker 里就删掉它，用同一个网络访问 relay-key-agent:8790
     ports:
       - "127.0.0.1:8790:8790"
@@ -251,11 +260,11 @@ docker compose run --rm relay-key-agent --dry-run
 ```
 数据库类型：mysql
 读取：成功，12 个渠道，用时 3 毫秒
-账号权限：只有 channels 表那几列的 SELECT，没有多余的权限
+账号权限检查通过：看到的权限只有 channels 表那几列的 SELECT，连接数上限是 1（单个存储过程的 EXECUTE、代理账号这类查不到，部署说明要求只直接授予那几列）
 channel_info 列：有
 ```
 
-失败时打印原因码（见第 9 步），账号权限不合格时还会说是哪一类（全局权限、整库、整表、多了列、写权限……），退出码是 1。`--dry-run` 和服务各自连一次、读完就断，不会抢那唯一的连接。
+失败时打印原因码（见第 9 步），账号权限不合格时还会说是哪一类（全局权限、整库、整表、多了列、写权限、连接数上限不是 1、能转授权限、通过角色拿权限……），退出码是 1。`--dry-run` 和服务各自连一次、读完就断，几乎不会抢那唯一的连接（正好撞上服务那几毫秒的读时它会报 `DB_LIMIT`，再跑一次就行）。
 
 ### 5. 让控制台连得到：HTTPS
 
@@ -279,7 +288,7 @@ handle_path /relay-monitor-agent/* {
 }
 ```
 
-**没有反向代理**的，读取服务自己也能开 HTTPS：把证书和私钥挂进去，设 `TLS_CERT_FILE`、`TLS_KEY_FILE`（两个都要设），可以直接用站点现有的证书。这时控制台里填「https://你的站点:端口」。证书只在启动时读，续期以后要重启这个容器。不支持明文 HTTP。
+**没有反向代理**的，读取服务自己也能开 HTTPS：把证书和私钥挂进去，设 `TLS_CERT_FILE`、`TLS_KEY_FILE`（两个都要设），可以直接用站点现有的证书。这时控制台里填「https://你的站点:端口」。证书只在启动时读，续期以后要重启这个容器。注意：不设 `TLS_CERT_FILE` / `TLS_KEY_FILE` 时读取服务自己说的是明文 HTTP（控制台那一侧只认 `https://`），所以要么放在带 HTTPS 的反向代理后面，要么设这两个变量。
 
 **直接对外开端口有一个风险**：读取服务在连接数上限（256）以内，一个只发半截请求头的连接最多占约 15 秒（10 秒的时限加上每 5 秒一次的检查间隔）；有人开满连接不停地发半截请求就能让它一直答不了别人（不需要令牌）。所以**推荐放在反向代理后面**，由代理挡掉这类连接；不得不直接对外时，用防火墙只放行控制台的出口地址。**这类请求不会引起读库**：所有请求都只读内存里的缓存，读库只在令牌对的请求来问、并且缓存已经超过 4 分钟时才发生。
 
@@ -288,7 +297,7 @@ handle_path /relay-monitor-agent/* {
 ### 6. 读取节奏、断路和一键停
 
 - 读库只在**有人带着对的令牌来问、并且离上次读库已经超过 4 分钟**时发生；其余请求（包括 `If-None-Match` 的 304）只读内存里的缓存。读库是同一时刻只有一次。
-- 读库出错或超时以后进入断路：停 10 分钟，再错停 20、40 分钟，最多停 1 小时；这期间来问的请求直接回上次那个失败（503 和原因码），不碰库。读成功一次就清零。`DB_LIMIT`（账号的连接数上限或每小时额度到顶）停到下一个整点。日志里记一行 `breaker`（原因码、第几次、停多久）。
+- 读库出错或超时以后进入断路：停 10 分钟，再错停 20、40 分钟，最多停 1 小时；这期间来问的请求不碰库：回上次的失败（503 和原因码），或者——上一份成功的结果还不到 30 分钟时——回那一份结果，响应头带 `X-Agent-Stale: 1`，`readAt` 还是那次读库的时刻（控制台可以据此显示「读到的是 x 分钟前的」；一次瞬时的错不会让它立刻看到 503）。读成功一次就清零。每小时的语句额度到顶（`max_questions` 那种 `DB_LIMIT`）停到下一个整点（最多约一小时）；连接数满、库整体连接满这类 `DB_LIMIT` 照普通退避。日志里记一行 `breaker`（原因码、第几次、停多久）。
 - 账号权限不合格（`ACCOUNT_TOO_BROAD`）：进程不退出（退出会让容器不停地重启、不停地去连正式库），`/keys` 回 503，不再连库；改好账号后重启容器。
 - 一键停：设 `KEY_AGENT_PAUSED=1` 重启（或者直接停容器）。读取服务不读库，`/keys` 回 503 `PAUSED`，控制台按「读不到你站的渠道 Key」处理，不影响结账以外的任何功能。
 
@@ -325,9 +334,9 @@ docker compose exec -T relay-key-agent node -e 'import("/app/lib/key-fingerprint
 | `DB_UNREACHABLE` | 连不上：库没起来，地址、端口填错，库文件路径不对，被防火墙挡住，连接被掐断；SQLite 是 WAL 模式的库没有 `-wal`（New API 没在跑） | 核对 `KEY_AGENT_DSN` / `SQLITE_PATH`；SQLite 要把 New API 的数据目录挂进来、New API 要在运行 |
 | `DB_DENIED` | 账号或密码不对，或者账号没有读 `channels` 那几列的权限（包括 MySQL 老表没有 `channel_info`，见第 2 步） | 对照第 2 步的授权；SQLite 是数据目录被只读挂载了 |
 | `DB_TIMEOUT` | 那条查询超过 0.5 秒被库掐掉（`channels` 被锁住了、库很忙），SQLite 是等锁超过 0.2 秒 | 一般是 New API 在做大的改表或维护，过一阵自己恢复；长期出现请看库的负载 |
-| `DB_LIMIT` | 账号的连接数上限或每小时语句额度到顶（MySQL 1226 / 1203、PostgreSQL 53300），或者库的总连接数满了 | 读取服务会停到下一个整点；要是持续出现，看是不是别的东西在用这个账号 |
+| `DB_LIMIT` | 账号的连接数上限或每小时语句额度到顶（MySQL 1226 / 1203、PostgreSQL 53300），或者库的总连接数满了 | 额度到顶读取服务停到下一个整点，连接数满照普通退避（最多停 1 小时）；要是持续出现，看是不是别的东西在用这个账号 |
 | `TABLE_MISSING` | 库里没有 `channels` 表 | 连到的不是 New API 的库 |
-| `ACCOUNT_TOO_BROAD` | 账号权限比第 2 步写的多（日志里 `driver` 是简短的类别：`GLOBAL_PRIVILEGE`、`SCHEMA_PRIVILEGE`、`TABLE_PRIVILEGE`、`COLUMN_PRIVILEGE`、`ROLE_ATTRIBUTES`、`OTHER_TABLES`、`WRITE_PRIVILEGE`、`TABLE_WIDE_SELECT`、`EXTRA_COLUMNS`） | 照第 2 步重新建专用账号，重启容器；用 `--dry-run` 看说明 |
+| `ACCOUNT_TOO_BROAD` | 账号权限比第 2 步写的多（日志里 `driver` 是简短的类别：`GLOBAL_PRIVILEGE`、`SCHEMA_PRIVILEGE`、`TABLE_PRIVILEGE`、`COLUMN_PRIVILEGE`、`ROLE_ATTRIBUTES`、`OTHER_TABLES`、`WRITE_PRIVILEGE`、`TABLE_WIDE_SELECT`、`EXTRA_COLUMNS`、`CONNECTION_LIMIT`、`GRANT_OPTION`、`ROLE_GRANTED`、`ROLE_MEMBERSHIP`） | 照第 2 步重新建专用账号，重启容器；用 `--dry-run` 看说明 |
 | `PAUSED` | 设了 `KEY_AGENT_PAUSED=1` | 去掉它、重启 |
 | `DB_ERROR` | 其他没认出来的错 | 看 `docker compose logs relay-key-agent` 里 `driver` 一栏 |
 
