@@ -4253,7 +4253,7 @@ test("编辑自营站点：「汇率」那一格叫「售价」，只对上游�
 // ---- 合并重复的上游（K1a，design/ux/k1a-merge.md 第 9 节验收清单）-------------------------------------
 const MERGE_TZ = "Asia/Shanghai";
 const mergeBrief = (id, name) => ({ id, name });
-const mergeEstimate = (rateConfigured = true) => ({ rateConfigured, windows: [
+const mergeEstimate = () => ({ windows: [
   { days: 7, before: { cny: 3211.2 }, after: { cny: 1070.4 } }, { days: 30, before: { cny: 13982.4 }, after: { cny: 4660.8 } }] });
 const mergeGroupOf = (extra = {}) => ({
   key: { provider: "newapi", baseUrl: "https://api.example.com", accountId: "1024" },
@@ -4265,7 +4265,7 @@ const mergeBlockedGroup = () => mergeGroupOf({
   retained: { id: "k-a", name: "拼车团队", baseUrl: "https://pool.example.net", createdAt: "2026-10-05T02:00:00.000Z" },
   merged: [mergeBrief("k-b", "拼车团队（旧）")], canMerge: false,
   blockers: [{ code: "RULE_KEY_CONFLICT", detail: "", tokenId: 5, tokenName: "oai", ruleId: "rule-oai", stationIds: ["k-a", "k-b"] }],
-  estimate: { rateConfigured: true, windows: [{ days: 7, before: { cny: 16.8 }, after: { cny: 8.4 } }, { days: 30, before: { cny: 72 }, after: { cny: 36 } }] },
+  estimate: { windows: [{ days: 7, before: { cny: 16.8 }, after: { cny: 8.4 } }, { days: 30, before: { cny: 72 }, after: { cny: 36 } }] },
 });
 const mergeCountsOf = (model) => ({ mergeable: model.groups.filter((g) => g.canMerge).length, blocked: model.groups.filter((g) => !g.canMerge).length,
   accounts: model.groups.length, upstreams: model.groups.reduce((n, g) => n + 1 + g.merged.length, 0), records: model.records.length });
@@ -4326,7 +4326,7 @@ test("合并重复的上游：提示写有几组，点「查看」打开抽屉�
   await card.getByText("「主力上游（2）」「主力上游·备用」并进「主力上游」", { exact: true }).waitFor();
   await card.getByText("留下的是最早加的那个（10月3日 加的，余额历史最长）；名字以后可以在编辑上游里改。地址 api.example.com、账号 ID 1024 都一样。", { exact: true }).waitFor();
   await card.getByText("近 7 天", { exact: true }).waitFor(); await card.getByText("¥3,211.20 → ¥1,070.40", { exact: true }).waitFor();
-  await card.getByText("¥13,982.40 → ¥4,660.80", { exact: true }).waitFor(); await card.getByText("同一个账号原来算了 3 遍", { exact: true }).waitFor();
+  await card.getByText("¥13,982.40 → ¥4,660.80", { exact: true }).waitFor(); await card.getByText("这个账号加成了 3 个上游", { exact: true }).waitFor();
   assert.equal(await drawer.getByRole("button", { name: /全部合并/ }).count(), 0);
   // 合不了的那组：标「合不了」，「合并」灰着，写清是哪把 Key 在哪两个上游下，有「处理重复」
   const blocked = mergeCard(page, "拼车团队");
@@ -4377,15 +4377,25 @@ test("合并重复的上游：成本估算算不出时两行写「—」，下�
   assert.equal(await card.getByRole("button", { name: "合并", exact: true }).isEnabled(), true);
 });
 
-test("合并重复的上游：只有合不了的组时提示换一句；「处理重复」去现成的那个地方；没设汇率的写 $", async (t) => {
-  const blocked = mergeBlockedGroup(); blocked.estimate = mergeEstimate(false);
+test("合并重复的上游：只有合不了的组时提示换一句；「处理重复」去现成的那个地方；前后的数带「≈」时照写", async (t) => {
+  const blocked = mergeBlockedGroup(); blocked.estimate = { windows: [{ days: 7, approx: true, before: { cny: 3211.2 }, after: { cny: 1070.4 } }, { days: 30, approx: true, before: { cny: 13982.4 }, after: { cny: 4660.8 } }] };
   const { page } = await openMergePage(t, { groups: [blocked], records: [] });
   await page.getByTestId("merge-notice").getByText("有 1 组上游是同一个账号，现在还合不了", { exact: true }).waitFor();
   await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
   const card = mergeCard(page, "拼车团队");
-  await card.getByText("$3,211.20 → $1,070.40", { exact: true }).waitFor();
+  await card.getByText("≈ ¥3,211.20 → ≈ ¥1,070.40", { exact: true }).waitFor();
   await card.getByRole("button", { name: "处理重复", exact: true }).click();
   await page.waitForURL((url) => url.pathname === "/stations" && url.searchParams.get("action") === "conflict" && url.searchParams.get("ruleId") === "rule-oai");
+});
+
+test("合并重复的上游：前后的数一样时，确认框第二句只写绑定改到哪、每日利润不变", async (t) => {
+  const same = mergeGroupOf({ estimate: { windows: [{ days: 7, before: { cny: 5 }, after: { cny: 5 } }, { days: 30, before: { cny: 21.32 }, after: { cny: 21.32 } }] } });
+  const { page } = await openMergePage(t, { groups: [same], records: [] });
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  await mergeCard(page, "主力上游").getByRole("button", { name: "合并", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "合并「主力上游」这一组？", exact: true }); await confirm.waitFor();
+  await confirm.getByText("绑定改到「主力上游」上，每日利润不变。", { exact: true }).waitFor();
+  assert.equal(await confirm.getByText(/从 .* 变成/).count(), 0);
 });
 
 test("合并重复的上游：合并记录里「退回」先确认，退回后那一行写已退回、不再有按钮，这一组回到清单；退回不了的按钮灰着、悬停写原因", async (t) => {
@@ -4405,7 +4415,7 @@ test("合并重复的上游：合并记录里「退回」先确认，退回后�
   assert.equal(await gone.getByRole("button", { name: "退回", exact: true }).getAttribute("title"), "「主力上游（3）」已经删了，退回不了");
   await rows.first().getByRole("button", { name: "退回", exact: true }).click();
   const confirm = page.getByRole("dialog", { name: "退回这次合并？", exact: true }); await confirm.waitFor();
-  await confirm.getByText("「主力上游（2）」回到上游列表，接着各自读余额；成本估算又会把这个账号算两遍。", { exact: true }).waitFor();
+  await confirm.getByText("「主力上游（2）」回到上游列表，接着各自读余额；成本估算又会把这个账号重复算。", { exact: true }).waitFor();
   await confirm.getByText("合并以后在「主力上游」上加的绑定和改的设置，留在「主力上游」上，不跟着走。", { exact: true }).waitFor();
   await confirm.getByRole("button", { name: "退回", exact: true }).click(); await confirm.waitFor({ state: "hidden" });
   assert.deepEqual(calls, [{ path: "/api/upstream-merges/undo", body: { mergeId: "mg_x" } }]);
@@ -4424,7 +4434,7 @@ test("合并重复的上游：手机上抽屉从底部升起占满，按钮至�
   assert.ok((await mergeCard(page, "主力上游").getByRole("button", { name: "合并", exact: true }).boundingBox()).height >= 44);
 });
 
-test("成本估算：总成本下面写「其中 1 个账号加成了 2 个上游，这里算了两遍」[去合并]；没有重复时不出现", async (t) => {
+test("成本估算：总成本下面写「其中 1 个账号加成了 2 个上游，这里重复算了」[去合并]；没有重复时不出现", async (t) => {
   const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
   const none = await openCostPage(t, own);
   await none.page.getByText(ANALYTICS_COPY.totalCost, { exact: true }).waitFor();
@@ -4432,7 +4442,7 @@ test("成本估算：总成本下面写「其中 1 个账号加成了 2 个上�
   const analytics = (days) => ({ ...costAnalyticsFixture(days), merge: { mergeable: 1, blocked: 0, accounts: 1, upstreams: 2, records: 0 } });
   const { page } = await openCostPage(t, own, "/analytics", { analytics });
   const line = page.getByTestId("merge-cost-line");
-  await line.getByText("其中 1 个账号加成了 2 个上游，这里算了两遍", { exact: false }).waitFor();
+  await line.getByText("其中 1 个账号加成了 2 个上游，这里重复算了", { exact: false }).waitFor();
   await line.getByRole("button", { name: "去合并", exact: true }).waitFor();
 });
 
@@ -4445,8 +4455,8 @@ test("合并重复的上游：另外几种合不了的一项一行，按钮放�
   await page.getByTestId("merge-notice").getByText("有 1 组上游是同一个账号，现在还合不了", { exact: true }).waitFor();
   await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
   const card = mergeCard(page, "主力上游");
-  await card.getByText("「主力上游」在读余额，「主力上游（2）」暂停了监控，合成一个以后不知道该不该接着读。先把两个改成一样（都恢复监控，或者都暂停），再回来合。", { exact: true }).waitFor();
-  await card.getByText("「主力上游」算进利润，「主力上游（2）」不算进利润，合成一个以后不知道该按哪个算。先在编辑上游里把两个改成一样，再回来合。", { exact: true }).waitFor();
+  await card.getByText("「主力上游」在读余额，「主力上游（2）」暂停了监控，合成一个以后不知道该不该接着读。先改成一样（都恢复监控，或者都暂停），再回来合。", { exact: true }).waitFor();
+  await card.getByText("「主力上游」算进利润，「主力上游（2）」不算进利润，合成一个以后不知道该按哪个算。先在编辑上游里改成一样，再回来合。", { exact: true }).waitFor();
   assert.equal(await card.getByRole("button", { name: "合并", exact: true }).isDisabled(), true);
   assert.equal(await card.getByRole("button", { name: "编辑上游", exact: true }).count(), 0, "按钮只放第一项的");
   await card.getByRole("button", { name: "恢复监控", exact: true }).click();

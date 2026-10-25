@@ -3,7 +3,7 @@
 // 上游文档（Store）和绑定、关联（对账仓库的表）在同一个事务里一起改，见 db/store.js 的 mergeUpstreams。
 import { mergedStationPatches, planUpstreamMerges } from "../lib/upstream-merge.js";
 import { businessTimeZone, dayKeyInTz, shiftDayLabel } from "../lib/business-time.js";
-import { isConfiguredRate, rateSnapshotOf } from "../lib/profit.js";
+import { rateSnapshotOf } from "../lib/profit.js";
 import { dailyUsageRows } from "./station-usage.js";
 import { aliasesAfterUndo, applyMergeRows, countMerges, listMerges, MERGE_LOG_KIND, mergeError, newMergeId, readMergeBasis, undoMergeRows } from "../db/upstream-merge-repository.js";
 
@@ -21,7 +21,7 @@ const round2 = (value) => Math.round(value * 100) / 100;
 
 // 合并前后近 7 天、近 30 天的成本估算：读成本估算页同一份数（每站每日消耗 × 上游自己的汇率，逐日四舍五入再加，和页面的总成本一样），
 // 所以合并以后成本估算页的数就等于这里写的「后」。合并前是这个账号下每个上游各算一遍再加起来，合并后只算留下的那个。
-// 一次读 30 天，7 天从里面取；读不到时 estimate 是 null，页面写「—」，不挡合并。
+// 一次读 30 天，7 天从里面取；某天一条记录都没有时这个窗口标 approx（页面带「≈」，和成本估算页同一个判断思路）；读不到时 estimate 是 null，页面写「—」，不挡合并。
 export async function estimateGroups(rt, groups, { now }) {
   const tz = businessTimeZone();
   const end = dayKeyInTz(now, tz);
@@ -34,12 +34,14 @@ export async function estimateGroups(rt, groups, { now }) {
     return groups.map(() => null);
   }
   const cnyOf = (stationId, usd) => round2(Number(usd) * rateSnapshotOf(rt.store.get(stationId)).cnyPerUsd);
-  return groups.map((group) => ({ rateConfigured: isConfiguredRate(rateSnapshotOf(rt.store.get(group.retained.id))), windows: ESTIMATE_DAYS.map((days) => {
+  return groups.map((group) => ({ windows: ESTIMATE_DAYS.map((days) => {
     const from = shiftDayLabel(end, -(days - 1));
     const sums = new Map([group.retained, ...group.merged].map((station) => [station.id, 0]));
     for (const row of rows) if (row.date >= from && sums.has(row.stationId)) sums.set(row.stationId, sums.get(row.stationId) + cnyOf(row.stationId, row.usd));
     const upstreams = [...sums].map(([stationId, cny]) => ({ stationId, cny: round2(cny) }));
-    return { days, before: { cny: round2(upstreams.reduce((sum, item) => sum + item.cny, 0)), upstreams },
+    // 这段时间里有哪一天这个账号下的上游一条记录都没有：和成本估算页一样，数是估算的，带「≈」
+    const covered = new Set(rows.filter((row) => row.date >= from && sums.has(row.stationId)).map((row) => row.date));
+    return { days, approx: covered.size < days, before: { cny: round2(upstreams.reduce((sum, item) => sum + item.cny, 0)), upstreams },
       after: { cny: upstreams[0].cny, upstreams: [upstreams[0]] } };
   }) }));
 }

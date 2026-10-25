@@ -115,7 +115,8 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
     try {
       const { groups } = await previewUpstreamMerges(rt);
       const [week, month] = groups[0].estimate.windows;
-      assert.equal(groups[0].estimate.rateConfigured, false);
+      // 30 天里只有 2 天有记录：和成本估算页一样标估算（approx）
+      assert.deepEqual([week.approx, month.approx], [true, true]);
       assert.deepEqual([week.days, week.before.cny, week.after.cny], [7, 10 * 1 + 10 * 7 + 10 * 1, 10]);
       assert.deepEqual([month.days, month.before.cny, month.after.cny], [30, 110 + 770 + 110, 110]);
       assert.deepEqual(month.before.upstreams.map((u) => [u.stationId, u.cny]), [[ids.a, 110], [ids.b, 770], [ids.c, 110]]);
