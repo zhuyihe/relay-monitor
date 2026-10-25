@@ -514,7 +514,7 @@
 >
 > 环境同 §7.17（开发版、临时库 `relay_monitor_design`，看完已删）。这次从全新的库开始走：先没有自营站点，再一步步设置。步数按「点击 + 填写 + 选择」数，换页签、换页面另数。
 >
-> 已经有设计稿的，只写一句指过去：需处理清单见 E（[e-attention.md](./ux/e-attention.md)），多天拼装见 F，改设置见 D，绑定跟着 Key 走见 K（[k-key-segments.md](./ux/k-key-segments.md)），金额币种见 G。
+> 已经有设计稿的，只写一句指过去：需处理清单见 E（[e-attention.md](./ux/e-attention.md)），多天拼装见 F，改设置见 D，绑定跟着 Key 走见[流程梳理稿](./ux/binding-flow.md)（K 设计稿已经并进去，挪进了[历史文档](./history/k-key-segments.md)），金额币种见 G。
 
 ### 8.1 结论先行
 
