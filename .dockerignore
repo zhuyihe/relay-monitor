@@ -11,3 +11,4 @@ deploy
 .env.*
 !.env.example
 server.md
+Dockerfile.agent

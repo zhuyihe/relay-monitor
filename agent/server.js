@@ -1,0 +1,145 @@
+// 渠道 Key 读取服务：放在自营 New API 旁边，读 channels 表，只对外给打码和 HMAC 指纹，绝不返回完整 Key。
+// GET /keys（要令牌）、GET /healthz（不碰库）。日志只打状态码、渠道数、原因码，不打 Key、令牌、连接串
+import http from "node:http";
+import https from "node:https";
+import { timingSafeEqual } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { deriveAgentKeys } from "../lib/key-fingerprint.js";
+import { loadConfig } from "./config.js";
+import { createReader } from "./reader.js";
+import { PROTOCOL_VERSION, createSnapshotSource } from "./snapshot.js";
+
+const UNAUTHORIZED_LOG_LIMIT = 10;
+const UNAUTHORIZED_WINDOW_MS = 60000;
+const MAX_TRACKED_SOURCES = 10000;
+const FAILURE_LOG_REPEAT_MS = 10 * 60000;
+
+const defaultLog = (entry) => process.stdout.write(`${JSON.stringify({ t: new Date().toISOString(), ...entry })}\n`);
+
+export function tokenMatches(header, expectedToken) {
+  const match = /^Bearer (\S+)$/.exec(String(header ?? ""));
+  const want = Buffer.from(expectedToken, "utf8");
+  const got = Buffer.from(match?.[1] ?? "", "utf8");
+  // 长度不对也拿等长的假串比一遍，不提早返回
+  const same = got.length === want.length;
+  return timingSafeEqual(same ? got : Buffer.alloc(want.length), want) && same && !!match;
+}
+
+function etagMatches(header, etag) {
+  return String(header ?? "").split(",").some((part) => part.trim().replace(/^W\//, "") === etag);
+}
+
+export function createAgentServer({ config, reader, now = Date.now, log = defaultLog }) {
+  const { token, fingerprintKey } = deriveAgentKeys(config.secret);
+  const source = createSnapshotSource({ reader, db: reader.kind, fingerprintKeyBytes: fingerprintKey, now });
+  const failedBySource = new Map();
+  let lastFailureLog = { code: null, at: 0 };
+
+  // 401 的限流只管日志：藏在反向代理后面时「来源」就是代理本身，停答会让路人把控制台一起挡在外面。令牌是 256 位，猜不出。
+  // 每个来源每分钟只记前 10 条，这一分钟结束时补一行「又有 N 次」，免得刷屏把重要的日志挤掉
+  function flushSuppressed(t, force = false) {
+    for (const [from, entry] of failedBySource) {
+      if (!force && t - entry.start < UNAUTHORIZED_WINDOW_MS) continue;
+      if (entry.count > UNAUTHORIZED_LOG_LIMIT) log({ ev: "unauthorized_suppressed", from, count: entry.count - UNAUTHORIZED_LOG_LIMIT });
+      failedBySource.delete(from);
+    }
+  }
+
+  function noteUnauthorized(req) {
+    const forwarded = String(req.headers["x-forwarded-for"] ?? "").split(",").map((s) => s.trim()).filter(Boolean).at(-1);
+    const from = config.trustProxy && forwarded ? forwarded : req.socket.remoteAddress ?? "unknown";
+    const t = now();
+    flushSuppressed(t);
+    let entry = failedBySource.get(from);
+    if (!entry) {
+      entry = { start: t, count: 0 };
+      if (failedBySource.size >= MAX_TRACKED_SOURCES) failedBySource.delete(failedBySource.keys().next().value);
+      failedBySource.set(from, entry);
+    }
+    entry.count += 1;
+    if (entry.count <= UNAUTHORIZED_LOG_LIMIT) log({ ev: "unauthorized", from });
+  }
+
+  function send(req, res, status, body, headers = {}) {
+    res.writeHead(status, { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...headers, ...(body ? { "Content-Length": body.length } : {}) });
+    res.end(req.method === "HEAD" ? undefined : body);
+  }
+  const sendJson = (req, res, status, object) => send(req, res, status, Buffer.from(JSON.stringify(object)), { "Content-Type": "application/json; charset=utf-8" });
+
+  async function handle(req, res) {
+    const started = now();
+    const path = (req.url ?? "").split("?")[0];
+    if (path === "/healthz") {
+      if (req.method !== "GET" && req.method !== "HEAD") return sendJson(req, res, 405, { error: "method_not_allowed" });
+      return sendJson(req, res, 200, { ok: true, v: PROTOCOL_VERSION });
+    }
+    if (path !== "/keys") return sendJson(req, res, 404, { error: "not_found" });
+    if (!tokenMatches(req.headers.authorization, token)) {
+      noteUnauthorized(req);
+      return sendJson(req, res, 401, { error: "unauthorized" });
+    }
+    if (req.method !== "GET" && req.method !== "HEAD") return sendJson(req, res, 405, { error: "method_not_allowed" });
+    const snapshot = await source.get();
+    if (!snapshot.ok) {
+      if (lastFailureLog.code !== snapshot.code || now() - lastFailureLog.at >= FAILURE_LOG_REPEAT_MS) {
+        lastFailureLog = { code: snapshot.code, at: now() };
+        log({ ev: "read_failed", code: snapshot.code, driver: snapshot.driver });
+      }
+      log({ ev: "req", path, status: 503, code: snapshot.code, ms: now() - started });
+      return send(req, res, 503, snapshot.body, { "Content-Type": "application/json; charset=utf-8" });
+    }
+    lastFailureLog = { code: null, at: 0 };
+    const headers = { ETag: snapshot.etag, Vary: "Accept-Encoding" };
+    if (etagMatches(req.headers["if-none-match"], snapshot.etag)) {
+      log({ ev: "req", path, status: 304, channels: snapshot.channelCount, ms: now() - started });
+      return send(req, res, 304, null, headers);
+    }
+    const gzip = /\bgzip\b/i.test(String(req.headers["accept-encoding"] ?? ""));
+    log({ ev: "req", path, status: 200, channels: snapshot.channelCount, ms: now() - started });
+    return send(req, res, 200, gzip ? snapshot.gzip : snapshot.body,
+      { ...headers, "Content-Type": "application/json; charset=utf-8", ...(gzip ? { "Content-Encoding": "gzip" } : {}) });
+  }
+
+  const onRequest = (req, res) => {
+    handle(req, res).catch(() => {
+      // 兜底：任何没想到的错都只回 500，不把报错原文往外送
+      log({ ev: "error", code: "INTERNAL" });
+      if (!res.headersSent) sendJson(req, res, 500, { error: "internal" });
+      else res.destroy();
+    });
+  };
+  const server = config.tls ? https.createServer(config.tls, onRequest) : http.createServer(onRequest);
+  server.requestTimeout = 10000;
+  server.headersTimeout = 10000;
+  server.keepAliveTimeout = 5000;
+  server.maxConnections = 64;
+  // 没有新请求进来时，上一分钟被压下的条数也要补记
+  const sweeper = setInterval(() => flushSuppressed(now()), UNAUTHORIZED_WINDOW_MS);
+  sweeper.unref();
+  server.on("close", () => { clearInterval(sweeper); flushSuppressed(now(), true); });
+  server.flushLogs = () => flushSuppressed(now());
+  return server;
+}
+
+async function main() {
+  let config;
+  try {
+    config = loadConfig();
+  } catch (err) {
+    process.stderr.write(`[致命] 读取服务起不来：${err.message}\n`);
+    process.exit(1);
+  }
+  const reader = createReader(config.database);
+  const server = createAgentServer({ config, reader });
+  server.listen(config.port, config.host, () => defaultLog({ ev: "start", db: reader.kind, port: config.port, tls: !!config.tls }));
+  const stop = () => server.close(() => reader.close().finally(() => process.exit(0)));
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+}
+
+// 直接运行才起服务（测试里 import 它时不起）。argv[1] 可能是软链接路径，两边都取真实路径再比
+const isMain = () => {
+  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); } catch { return false; }
+};
+if (isMain()) main();

@@ -1,0 +1,173 @@
+{
+  "secret": "test-vector-secret-0123456789-abcdefghij",
+  "token": "pb4R2fYpMI8sRn6XIgcZRs2x243xc0AZv3h7NRr8Bxs",
+  "fingerprintKeyHex": "714997c3b1a555f3922df08f72245381dbf8616ce66976608bf47da3a257dd0d",
+  "keys": [
+    {
+      "input": "sk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "normalized": "AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "mask": "AbC1…9f0c",
+      "fingerprint": "RQAhyc74EsEMrh_kSFccGw"
+    },
+    {
+      "input": "  sk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c\n",
+      "normalized": "AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "mask": "AbC1…9f0c",
+      "fingerprint": "RQAhyc74EsEMrh_kSFccGw"
+    },
+    {
+      "input": "AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "normalized": "AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c",
+      "mask": "AbC1…9f0c",
+      "fingerprint": "RQAhyc74EsEMrh_kSFccGw"
+    },
+    {
+      "input": "sk-sk-nested1234567890abcdef",
+      "normalized": "sk-nested1234567890abcdef",
+      "mask": "sk-n…cdef",
+      "fingerprint": "sqFoc0MW0QnczFpazHTqKA"
+    },
+    {
+      "input": "SK-uppercase-prefix-is-not-stripped-123456",
+      "normalized": "SK-uppercase-prefix-is-not-stripped-123456",
+      "mask": "SK-u…3456",
+      "fingerprint": "dg8YyRMd6zkvja-pXUQGBg"
+    },
+    {
+      "input": "AIzaSyD-example_0123456789abcdefghijklmnopq",
+      "normalized": "AIzaSyD-example_0123456789abcdefghijklmnopq",
+      "mask": "AIza…nopq",
+      "fingerprint": "rCvunqFkIDBUkWto4cxN4w"
+    },
+    {
+      "input": "sk-ant-api03-0123456789abcdefghijklmnopqrstuvwxyz-_AAAA",
+      "normalized": "ant-api03-0123456789abcdefghijklmnopqrstuvwxyz-_AAAA",
+      "mask": "ant-…AAAA",
+      "fingerprint": "KUE3_vk9cdq4ADTNgSxFzw"
+    },
+    {
+      "input": "sk-0123456789abcdef",
+      "normalized": "0123456789abcdef",
+      "mask": "0123…cdef",
+      "fingerprint": "joN9EUvdb6_DvheX4Unx6A"
+    },
+    {
+      "input": "sk-0123456789abcde",
+      "normalized": "0123456789abcde",
+      "mask": "…",
+      "fingerprint": "VBVle-PF7DaVitjIeET1CQ"
+    },
+    {
+      "input": "short",
+      "normalized": "short",
+      "mask": "…",
+      "fingerprint": "zBEjHobrMaDc8ocDj4zixQ"
+    },
+    {
+      "input": "密钥-含中文-0123456789abcdef-结尾",
+      "normalized": "密钥-含中文-0123456789abcdef-结尾",
+      "mask": "密钥-含…f-结尾",
+      "fingerprint": "hR8JJrq6s3MEdk7riYWzkw"
+    },
+    {
+      "input": "",
+      "normalized": "",
+      "mask": "…",
+      "fingerprint": "Yl6AkBbS5QbNnBWsktNMSA"
+    }
+  ],
+  "splits": [
+    {
+      "name": "single",
+      "raw": "sk-aaaaaaaaaaaaaaaaaaaa",
+      "multi": false,
+      "expected": {
+        "keys": [
+          "sk-aaaaaaaaaaaaaaaaaaaa"
+        ],
+        "keyless": false
+      }
+    },
+    {
+      "name": "single with newline stays one key",
+      "raw": "sk-aaaaaaaaaaaaaaaa\nsk-bbbbbbbbbbbbbbbb",
+      "multi": false,
+      "expected": {
+        "keys": [
+          "sk-aaaaaaaaaaaaaaaa\nsk-bbbbbbbbbbbbbbbb"
+        ],
+        "keyless": false
+      }
+    },
+    {
+      "name": "multi newline",
+      "raw": "sk-aaaaaaaaaaaaaaaa\r\n sk-bbbbbbbbbbbbbbbb \n\nsk-cccccccccccccccc\n",
+      "multi": true,
+      "expected": {
+        "keys": [
+          "sk-aaaaaaaaaaaaaaaa",
+          "sk-bbbbbbbbbbbbbbbb",
+          "sk-cccccccccccccccc"
+        ],
+        "keyless": false
+      }
+    },
+    {
+      "name": "multi json array",
+      "raw": " [\"sk-aaaaaaaaaaaaaaaa\", \" sk-bbbbbbbbbbbbbbbb \", \"\"] ",
+      "multi": true,
+      "expected": {
+        "keys": [
+          "sk-aaaaaaaaaaaaaaaa",
+          "sk-bbbbbbbbbbbbbbbb"
+        ],
+        "keyless": false
+      }
+    },
+    {
+      "name": "multi json with object",
+      "raw": "[\"sk-aaaaaaaaaaaaaaaa\", {\"private_key\":\"x\"}]",
+      "multi": true,
+      "expected": {
+        "keys": [],
+        "keyless": true
+      }
+    },
+    {
+      "name": "multi bad json",
+      "raw": "[\"sk-aaaa",
+      "multi": true,
+      "expected": {
+        "keys": [],
+        "keyless": true
+      }
+    },
+    {
+      "name": "vertex json single",
+      "raw": "{\"type\":\"service_account\",\"private_key\":\"abc\"}",
+      "multi": false,
+      "expected": {
+        "keys": [],
+        "keyless": true
+      }
+    },
+    {
+      "name": "aws ak|sk",
+      "raw": "AKIAEXAMPLE|secretsecretsecret|us-east-1",
+      "multi": false,
+      "expected": {
+        "keys": [],
+        "keyless": true
+      }
+    },
+    {
+      "name": "empty",
+      "raw": "  \n ",
+      "multi": true,
+      "expected": {
+        "keys": [],
+        "keyless": false
+      }
+    }
+  ]
+}

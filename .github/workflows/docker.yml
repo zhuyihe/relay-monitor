@@ -184,8 +184,83 @@ jobs:
       - name: Login rate-limit preload module loads inside the image
         run: docker run --rm --entrypoint node relay-monitor:smoke --import /app/lib/peer-address.js --input-type=module -e "console.log('peer-address preload ok')"
 
+  # 渠道 Key 读取服务（agent/）连真库的测试：SQLite 本地就有，MySQL、PostgreSQL 各起一个服务容器。
+  # agent/ 自己的依赖（mysql2、pg）装在 agent/node_modules，和镜像里装的一样
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-agent-root
+          MYSQL_DATABASE: relay_key_agent
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pci-agent-root --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-agent-pg
+          POSTGRES_DB: relay_key_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm ci --prefix agent
+      - run: node --test --test-timeout=60000 lib/key-fingerprint.test.js agent/dsn.test.js agent/reader.test.js agent/snapshot.test.js agent/server.test.js agent/reader.contract.test.js
+        env:
+          KEY_AGENT_TEST_MYSQL_DSN: mysql://root:ci-agent-root@127.0.0.1:3306/relay_key_agent
+          KEY_AGENT_TEST_PG_URL: postgres://postgres:ci-agent-pg@127.0.0.1:5432/relay_key_agent
+
+  # 读取服务镜像：PR 上也真的构建一次（不推送），起来跑 /healthz；secret 太短时要起不来
+  agent-image-smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build agent image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.agent
+          load: true
+          tags: relay-key-agent:smoke
+      - name: Image size
+        run: docker image inspect relay-key-agent:smoke --format 'size={{.Size}} bytes'
+      - name: /healthz answers
+        run: |
+          docker run -d --name key-agent-smoke -p 18790:8790 -e RELAY_KEY_AGENT_SECRET=ci-smoke-secret-0123456789-abcdefghijkl relay-key-agent:smoke
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:18790/healthz && break; sleep 1; done
+          curl -sf http://127.0.0.1:18790/healthz | grep -q '"ok":true'
+          # 没带令牌的 /keys 回 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18790/keys)" = 401
+          docker exec key-agent-smoke node /app/agent/healthcheck.js
+          docker logs key-agent-smoke
+      - name: Short secret refuses to start
+        run: |
+          if docker run --rm -e RELAY_KEY_AGENT_SECRET=too-short relay-key-agent:smoke; then echo "should not start"; exit 1; fi
+
   build:
-    needs: [verify, unit, ui, schema-verify, image-smoke]
+    needs: [verify, unit, ui, schema-verify, image-smoke, agent, agent-image-smoke]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -212,3 +287,15 @@ jobs:
             ghcr.io/${{ github.repository }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build and push key agent
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.agent
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-key-agent:latest
+            ghcr.io/${{ github.repository }}-key-agent:${{ github.sha }}
+          cache-from: type=gha,scope=key-agent
+          cache-to: type=gha,mode=max,scope=key-agent
