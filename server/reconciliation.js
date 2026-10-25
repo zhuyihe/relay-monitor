@@ -31,7 +31,7 @@ import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, r
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
-import { ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
+import { ledgerDecimal, ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
 import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, isSettleableWindow, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
@@ -55,6 +55,10 @@ const MAX_CONCURRENT_RULES = 6;
 // UPSTREAM_DATA_UNAVAILABLE 也会在「这条规则一直没配出完整分段」时出现（和限流无关），这种情况下误判成「跳过同一上游」
 // 影响很小——没有分段的规则本来就结不出账，多跳过它不会让别的绑定多等
 const UPSTREAM_LOOKBACK_SKIP_CODES = new Set(["UPSTREAM_DATA_UNAVAILABLE"]);
+// 自营有收入时，上游读不到的结果主码是 WAITING_FOR_BILL，UPSTREAM_DATA_UNAVAILABLE 只在 health.issues 里（上游那一侧）；
+// 所以主码和 issues 都看（审核 C2a 第二轮低-2）
+const upstreamUnavailable = (result) => UPSTREAM_LOOKBACK_SKIP_CODES.has(result?.health?.code)
+  || (result?.health?.issues || []).some((issue) => UPSTREAM_LOOKBACK_SKIP_CODES.has(issue?.code) && issue?.side === "upstream");
 
 // 绑定按哪个时区算一天：新建时用传入的，没传用业务时区（BUSINESS_TIME_ZONE，缺省上海）；建好以后不能改——
 // 没传沿用原值，传了别的时区报 TIMEZONE_IMMUTABLE（别名算同一个，存的还是原来的写法）。不合法的报 TIMEZONE_INVALID。
@@ -1189,7 +1193,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (!billDayOf(result.window) || !settlementOutcome({ window: result.window, result, now: Date.now() }).ledger) return result;
     // persistResult 已经确认这次是真的写了新版（result.ledger 已经按账本的版本、来源、固定时刻补好），result 自己
     // 就是账本里最新那一版，不用再读一次（安全审核 C2a 低-3）；B-L1 那种内容相同没写新版的，result.ledger 没补，照旧读一次
-    if (result.ledger) return result;
+    // 从账本读出来的结果（settledFrom）带最近确认的那份和成功时刻，这里补上，和读出来的一致（审核 C2a 第二轮低-3）
+    if (result.ledger) return Object.assign(result, { lastSuccessfulAt: result.settledAt, lastConfirmed: snapshotReference({ generatedAt: result.settledAt, result }) });
     return await settledResult(rule, result.window) ?? result;
   }
 
@@ -1881,6 +1886,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     };
     // 账本记下结账时的成本计法和汇率：汇率只在当时配置过时才记，没记的读取时按当前配置。
     const configuredRate = (rate) => isConfiguredRate(rate) ? rate.cnyPerUsd : null;
+    const ledgerRate = (rate) => { const value = ledgerDecimal(configuredRate(rate), 6); return value == null ? null : Number(value); };
     // 账本明细里记下这次是怎么结的（计划 C2a 2.6）：poll 轮询结昨天、late 回看更早的日子、manual 手动重新读取、transition 改了切换时间的重结
     const settlement = { trigger: trigger || (resettle ? "transition" : origin === "manual" ? "manual" : "poll") };
     const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, { ...sourceFor({ ...wholeWindow, recordType: "confirmed" }), settlement }, {
@@ -1953,7 +1959,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 可能和这次算出来的不一样（上一版可能是别的触发方式写的），这里判断不了，留给 bookedResult 照旧读一次
         if (ledgerOption?.booked?.write === true) {
           result.ledger = { billDate: billDayOf(result.window), revision: ledgerOption.booked.revision, source: ledgerOption.booked.source,
-            settledAt: ledgerOption.booked.settledAt, rates: { income: configuredRate(financialSnapshot.income), cost: configuredRate(financialSnapshot.cost) },
+            // 汇率按账本的精度（6 位小数）取整，和从账本行读出来的逐字一致（审核 C2a 第二轮低-3）
+            settledAt: ledgerOption.booked.settledAt, rates: { income: ledgerRate(financialSnapshot.income), cost: ledgerRate(financialSnapshot.cost) },
             costBasis: financialSnapshot.costBasis };
         }
       }
@@ -2221,7 +2228,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 方案 6.4：只有碰到限流（429/5xx，UPSTREAM_REQUEST_FAILED）或超时、连不上（NETWORK_UNREACHABLE）才不再给这个
         // 上游取别的回看日——这两类是这个上游这一刻整体的问题，再取别的日子大概率还是一样。别的没结成的原因（某一天
         // 自己的问题，比如要人处理、改绑定之前还没固定）只挡这一天，不该连累同一上游别的绑定（安全审核 C2a 低-4）
-        else if (UPSTREAM_LOOKBACK_SKIP_CODES.has(result?.health?.code)) skipped.add(item.rule.upstreamStationId);
+        else if (upstreamUnavailable(result)) skipped.add(item.rule.upstreamStationId);
       }
     }));
   }
