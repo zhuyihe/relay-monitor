@@ -1,0 +1,441 @@
+// 假站点：一个进程模拟 50 个上游（New API / Sub2API / 只用 Key）和 1 个自营 New API 站点。
+// 用法：node fake-site.mjs   （FAKE_PORT 默认 18950，FAKE_DELAY_MS 默认 50）
+// 地址：上游 http://127.0.0.1:18950/na01 … /s245 … /nk49；自营 http://127.0.0.1:18950/own
+// 控制：GET /__stats[?reset=1] 看/清请求计数；POST /__ctl?delay=50&ratio=old|current&freeze=1|0 改延迟、分组倍率口径、停住「现在」；GET /__health
+// 所有数字来自 lib/model.mjs 的确定性模型：分页、按渠道/按天/按 Key 的统计互相对得上。
+import { createServer } from "node:http";
+import {
+  loadConfig, makeAggregates, makeBalanceModel, channelQuota, tokenCostQuota, accountCostQuota,
+  UPSTREAMS, OWN, CHANNELS, USERS, MODELS, OWN_GROUPS, RULES, QPU, N_CH, N_USERS, HOUR, TZ,
+  dayStartSec, dateKeyOf, PORT, upstreamGroupRatio,
+} from "./lib/model.mjs";
+
+const config = loadConfig();
+const epoch0 = config.epoch0Sec;
+const agg = makeAggregates(epoch0);
+const t0 = Date.now();
+agg.ensureHours(Math.floor((Date.now() / 1000 - epoch0) / HOUR));
+const balances = makeBalanceModel(agg, config);
+console.log(`[fake] 预聚合 ${agg.nh} 小时，用了 ${Date.now() - t0} ms`);
+
+let delayMs = Number(process.env.FAKE_DELAY_MS ?? 50);
+let ratioMode = process.env.FAKE_RATIO_MODE || "current";
+const stats = { total: 0, bytes: 0, byRoute: Object.create(null), bySite: Object.create(null), startedAt: new Date().toISOString() };
+let requestLog = []; // [到达时刻 ms, 路由]，/__stats?detail=1 返回，最多 20 万条
+
+const upByPath = new Map(UPSTREAMS.map((up) => [up.path, up]));
+// freeze：POST /__ctl?freeze=1 以后「现在」停在那一秒，之后不再有新消费、余额不再变（测 P1a 那种「没有新消费就沿用」的轮次）；freeze=0 恢复
+let frozenSec = null;
+// 积压场景用：这些站点（"/na01" 这种路径前缀）一律回 503，像上游挂了；/__ctl?down=/na01,/na02 设、down= 清空
+let downSites = new Set();
+const nowSec = () => frozenSec ?? Math.floor(Date.now() / 1000);
+const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+
+// 上游分组倍率：部分 (上游, 分组) 在 ratioChangeAt 换过倍率；ratio=old 时返回旧倍率（种子脚本建绑定时用）
+const upGroupRatio = (up, group) => upstreamGroupRatio(config, up, group, ratioMode);
+
+function send(res, status, body, headers = {}) {
+  const text = JSON.stringify(body);
+  stats.bytes += text.length;
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(text), ...headers });
+  res.end(text);
+}
+const ok = (data, extra = {}) => ({ success: true, message: "", data, ...extra });
+const s2 = (data) => ({ code: 0, message: "success", data });
+
+// ---- 通用：窗口参数（New API 秒级、含两端） ----
+function secWindow(q) {
+  // 和 New API 一样：end_timestamp 没传或是 0 就不限终点（Number(null) 是 0，不能直接用 num 的默认值）
+  const s = num(q.get("start_timestamp"), 0), e = num(q.get("end_timestamp"), 0) || nowSec();
+  return [s, Math.min(e, nowSec())];
+}
+function pageOf(q) {
+  const p = Math.max(1, num(q.get("p"), 1) || 1);
+  const size = Math.min(100, Math.max(1, num(q.get("page_size"), 10) || 10));
+  return { p, size };
+}
+
+// ---- 余额 ----
+function upstreamBalance(up) {
+  const st = balances.state(up, nowSec());
+  return st;
+}
+
+// ---- New API 上游 ----
+function newApiUpstream(up, rest, q, req) {
+  // /api/status 是公开接口（应用读 quota_per_unit 时不带令牌）
+  if (rest === "/api/status") return [200, ok({ version: "v0.9.6-perf", quota_per_unit: QPU, system_name: up.name })];
+  if (!req.headers.authorization) return [401, { success: false, message: "未授权" }];
+  switch (rest) {
+    case "/api/user/self": {
+      const b = upstreamBalance(up);
+      return [200, ok({ id: up.accountId, username: `acct${up.i}`, display_name: up.name, quota: Math.round(b.remaining),
+        used_quota: Math.round(b.used), request_count: Math.round(b.used / 15000), group: "default" })];
+    }
+    case "/api/user/self/groups": {
+      const groups = {};
+      for (const g of ["default", "vip", "claude", "gpt", "gemini", "svip", "auto"]) groups[g] = { ratio: upGroupRatio(up, g), desc: `${g} 分组` };
+      return [200, ok(groups)];
+    }
+    case "/api/token/": {
+      const { p, size } = pageOf(q);
+      const items = up.tokens.slice((p - 1) * size, p * size).map((t) => ({ id: t.id, user_id: up.accountId, name: t.name, status: 1, group: t.group,
+        cross_group_retry: false, key: `sk-${String(t.id).padStart(4, "0")}****${t.name.slice(-2)}`, used_quota: 0, remain_quota: 0, unlimited_quota: true }));
+      return [200, ok({ page: p, page_size: size, total: up.tokens.length, items })];
+    }
+    case "/api/log/self/stat": {
+      const [s, e] = secWindow(q);
+      const name = q.get("token_name") || "";
+      const token = up.tokens.find((t) => t.name === name);
+      const quota = token ? tokenCostQuota(agg, up, token, s, e) : 0;
+      return [200, ok({ quota, rpm: 0, tpm: 0 })];
+    }
+    case "/api/data/self": {
+      const [s, e] = secWindow(q);
+      return [200, ok(accountHourlyRows(up, s, e))];
+    }
+    default: return [404, { success: false, message: "not found" }];
+  }
+}
+
+// 上游账号按小时、按模型的用量行（/api/data/self 形状）：账号花费按 50/30/20 拆给 3 个模型
+function accountHourlyRows(up, s, e) {
+  const rows = [];
+  const models = [MODELS[up.i % 12], MODELS[(up.i + 3) % 12], MODELS[(up.i + 7) % 12]], shares = [0.5, 0.3, 0.2];
+  const h0 = Math.max(0, agg.hourOf(s)), h1 = agg.hourOf(e);
+  for (let H = h0; H <= h1; H++) {
+    const hs = epoch0 + H * HOUR;
+    if (hs < s || hs > e) continue;
+    const quota = accountCostQuota(agg, up, hs, Math.min(hs + HOUR - 1, nowSec()));
+    if (quota <= 0) continue;
+    models.forEach((model, i) => {
+      const qq = Math.round(quota * shares[i]);
+      rows.push({ model_name: model, created_at: hs, token_used: Math.round(qq * 0.45), quota: qq, count: Math.max(1, Math.round(qq / 15000)) });
+    });
+  }
+  return rows;
+}
+
+// ---- 只用 Key 的上游（OpenAI 兼容计费接口） ----
+function keyUpstream(up, rest, req) {
+  if (!req.headers.authorization) return [401, { error: { message: "missing key" } }];
+  const b = upstreamBalance(up);
+  if (rest === "/dashboard/billing/subscription") return [200, { object: "billing_subscription", hard_limit_usd: Math.round(b.granted / QPU * 100) / 100, access_until: 0 }];
+  if (rest === "/dashboard/billing/usage") return [200, { object: "list", total_usage: Math.round(b.used / QPU * 100) }];
+  return [404, { error: { message: "not found" } }];
+}
+
+// ---- Sub2API 上游 ----
+function sub2Upstream(up, rest, q, req) {
+  if (rest === "/api/v1/settings/public") return [200, s2({ turnstile_enabled: false })];
+  const auth = String(req.headers.authorization || "");
+  if (!auth.startsWith("Bearer ")) return [401, { code: "UNAUTHORIZED", message: "missing token" }];
+  const tz = q.get("timezone") || TZ;
+  const dayWindow = () => {
+    const s = dayStartSec(q.get("start_date"), tz);
+    const endDay = new Date(Date.parse(q.get("end_date") + "T00:00:00Z") + 86400000).toISOString().slice(0, 10);
+    const e = Math.min(dayStartSec(endDay, tz) - 1, nowSec());
+    return [s, e];
+  };
+  if (rest === "/api/v1/auth/me") {
+    const b = upstreamBalance(up);
+    return [200, s2({ id: up.accountId, username: `s2user${up.i}`, email: `s2user${up.i}@example.com`, balance: Math.round(b.remaining / QPU * 100) / 100,
+      total_recharged: Math.round(b.granted / QPU * 100) / 100, frozen_balance: 0 })];
+  }
+  if (rest === "/api/v1/usage/dashboard/stats") {
+    const s = dayStartSec(dateKeyOf(nowSec(), TZ), TZ);
+    const cost = accountCostQuota(agg, up, s, nowSec()) / QPU;
+    return [200, s2({ today_actual_cost: Math.round(cost * 10000) / 10000, today_cost: Math.round(cost * 1.1 * 10000) / 10000,
+      today_requests: Math.round(cost * 50), today_tokens: Math.round(cost * 300000), total_actual_cost: Math.round(upstreamBalance(up).used / QPU * 100) / 100 })];
+  }
+  if (rest === "/api/v1/usage/dashboard/snapshot-v2") {
+    const [s, e] = dayWindow();
+    const hourly = q.get("granularity") === "hour";
+    const trend = [];
+    let total = 0;
+    for (let a = s; a <= e;) {
+      const label = hourly ? new Date((a + 8 * 3600) * 1000).toISOString().slice(0, 13).replace("T", " ") + ":00" : dateKeyOf(a, tz);
+      const b = hourly ? Math.min(a + HOUR - 1, e) : Math.min(dayStartSec(new Date(Date.parse(label + "T00:00:00Z") + 86400000).toISOString().slice(0, 10), tz) - 1, e);
+      const cost = accountCostQuota(agg, up, a, b) / QPU;
+      total += cost;
+      trend.push({ date: label, total_tokens: Math.round(cost * 300000), actual_cost: Math.round(cost * 10000) / 10000, cost: Math.round(cost * 1.1 * 10000) / 10000, requests: Math.round(cost * 50) });
+      a = b + 1;
+    }
+    const models = [0.55, 0.3, 0.15].map((share, i) => ({ model: MODELS[(up.i + i * 4) % 12], total_tokens: Math.round(total * share * 300000),
+      actual_cost: Math.round(total * share * 10000) / 10000, cost: Math.round(total * share * 1.1 * 10000) / 10000, requests: Math.round(total * share * 50),
+      input_tokens: Math.round(total * share * 250000), output_tokens: Math.round(total * share * 50000) }));
+    return [200, s2({ trend, models })];
+  }
+  if (rest === "/api/v1/keys") {
+    const page = Math.max(1, num(q.get("page"), 1)), size = Math.min(100, Math.max(1, num(q.get("page_size"), 20)));
+    const items = up.tokens.slice((page - 1) * size, page * size).map((t) => ({ id: t.id, user_id: up.accountId, name: t.name, status: "active", group_id: t.groupId, key: "sk-****" }));
+    return [200, s2({ items, total: up.tokens.length, page, page_size: size })];
+  }
+  const keyMatch = rest.match(/^\/api\/v1\/keys\/(\d+)$/);
+  if (keyMatch) {
+    const t = up.tokens.find((x) => x.id === Number(keyMatch[1]));
+    return t ? [200, s2({ id: t.id, user_id: up.accountId, name: t.name, status: "active", group_id: t.groupId })] : [404, { code: 404, message: "key not found" }];
+  }
+  if (rest === "/api/v1/usage/stats") {
+    const id = Number(q.get("api_key_id"));
+    const t = up.tokens.find((x) => x.id === id);
+    const [s, e] = dayWindow();
+    const cost = t && e >= s ? tokenCostQuota(agg, up, t, s, e) / QPU : 0;
+    return [200, s2({ total_actual_cost: Math.round(cost * 1e6) / 1e6, total_cost: Math.round(cost * 1.1 * 1e6) / 1e6, total_requests: Math.round(cost * 50), total_tokens: Math.round(cost * 300000) })];
+  }
+  return [404, { code: 404, message: "not found" }];
+}
+
+// ---- 自营站点（New API 管理员） ----
+const LOG_FIELDS_OTHER = (ev) => JSON.stringify({ model_ratio: 1, group_ratio: 1, completion_ratio: 4, cache_tokens: ev.cacheRead, cache_ratio: 0.1,
+  ...(ev.m <= 2 ? { usage_semantic: "anthropic", claude: true } : {}) });
+// 渠道测试日志（R1 审核用，默认关；FAKE_TEST_LOGS=1 打开）：照 New API 的写法——type 2，token_name 和 content 都是
+// 「模型测试」，token_id 0、user_id 1。按「开了定时自动测试、每 10 分钟测一遍全部 300 个渠道」的量：第 n 轮第 c 个渠道在 epoch0 + n*600 + c 秒，
+// 一天 4.32 万条。只在自营站点的 /api/log/、/api/log/stat 里出现；不带筛选、只按渠道筛时算进去，按「模型测试」筛时只出它们
+const TEST_LOGS = process.env.FAKE_TEST_LOGS === "1";
+const TEST_NAME = "模型测试", TEST_PERIOD = 600, TEST_ID_BASE = 2_000_000_000;
+const testQuota = (c) => 2000 + (c % 7) * 500;
+// [s, e] 里的测试日志，时刻从新到旧；channel 不为 0 时只要这个渠道
+function* testEvents(s, e, channel = 0) {
+  if (!TEST_LOGS) return;
+  const lo = Math.max(s, epoch0), hi = Math.min(e, nowSec());
+  if (hi < lo) return;
+  for (let n = Math.floor((hi - epoch0) / TEST_PERIOD); n >= 0 && epoch0 + n * TEST_PERIOD + N_CH >= lo; n--) {
+    for (let c = channel || N_CH; c >= (channel || 1); c--) {
+      const t = epoch0 + n * TEST_PERIOD + c;
+      if (t >= lo && t <= hi) yield { n, c, t };
+    }
+  }
+}
+// 用户列表里的角色可以覆盖（R1 审核用）：FAKE_USER_ROLES="1:1,450:100" 把 root 列成普通用户、user450 列成超级管理员，
+// 用来量「管理员很少自己用」的站（夹具默认 root、admin2、ops3 是管理员，也是用得最多的前三个用户）。只改 /api/user/ 列表里的 role
+const ROLE_OVERRIDES = new Map((process.env.FAKE_USER_ROLES || "").split(",").filter(Boolean).map((x) => x.split(":").map(Number)));
+const roleOf = (u) => ROLE_OVERRIDES.get(u.id) ?? u.role;
+const testLogItem = ({ n, c, t }) => ({ id: TEST_ID_BASE + n * N_CH + c, user_id: 1, created_at: t, type: 2, content: TEST_NAME, username: "root",
+  token_name: TEST_NAME, token_id: 0, model_name: MODELS[c % MODELS.length], quota: testQuota(c), prompt_tokens: 10, completion_tokens: 1,
+  use_time: 1, is_stream: false, channel: c, channel_name: CHANNELS[c - 1].name, group: OWN_GROUPS[0], ip: "", other: "" });
+const testQuotaIn = (s, e, channel = 0) => { let q = 0; for (const ev of testEvents(s, e, channel)) q += testQuota(ev.c); return q; };
+
+function logItem(ev) {
+  const user = USERS[ev.u], token = user.tokens[ev.tok], ch = CHANNELS[ev.c - 1];
+  return { id: ev.k + 1, user_id: user.id, created_at: ev.t, type: 2, content: "", username: user.username, token_name: token.name,
+    token_id: token.id, model_name: MODELS[ev.m], quota: ev.quota, prompt_tokens: ev.prompt, completion_tokens: ev.completion,
+    use_time: 1 + (ev.k % 30), is_stream: ev.k % 3 !== 0, channel: ev.c, channel_name: ch.name, group: OWN_GROUPS[ev.g], ip: "", other: LOG_FIELDS_OTHER(ev) };
+}
+function eventFilter(q) {
+  const model = q.get("model_name"), username = q.get("username"), group = q.get("group"), tokenName = q.get("token_name");
+  const channel = num(q.get("channel"), 0);
+  const userIdx = username ? USERS.findIndex((u) => u.username === username) : -1;
+  if (!model && !username && !group && !tokenName && !channel) return null;
+  const mi = model ? MODELS.indexOf(model) : -1, gi = group ? OWN_GROUPS.indexOf(group) : -1;
+  return (ev) => (!model || ev.m === mi) && (!username || ev.u === userIdx) && (!group || ev.g === gi)
+    && (!channel || ev.c === channel) && (!tokenName || USERS[ev.u].tokens[ev.tok].name === tokenName);
+}
+// 自营站点的全站限流（R1 审核用，默认关；FAKE_OWN_RATE_LIMIT=1 打开）：照 New API 默认 GLOBAL_API_RATE_LIMIT，
+// 同一个来源 180 秒内最多 360 个请求（滑动窗口），超了回 429，带 Retry-After（秒）。被拒的请求数在 /__stats 的 ownRateLimited 里
+const OWN_RATE_LIMIT = process.env.FAKE_OWN_RATE_LIMIT === "1";
+const ownHits = [];
+let ownRateLimited = 0;
+function ownRateLimit() {
+  if (!OWN_RATE_LIMIT) return null;
+  const now = Date.now();
+  while (ownHits.length && now - ownHits[0] >= 180000) ownHits.shift();
+  if (ownHits.length >= 360) { ownRateLimited += 1; return Math.ceil((180000 - (now - ownHits[0])) / 1000); }
+  ownHits.push(now);
+  return null;
+}
+function ownSite(rest, q, req) {
+  const retryAfter = ownRateLimit();
+  if (retryAfter != null) return [429, { success: false, message: "请求过于频繁" }, { "Retry-After": String(retryAfter) }];
+  if (rest === "/api/status") return [200, ok({ version: "v0.9.6-perf", quota_per_unit: QPU, system_name: "自营站点" })];
+  if (!req.headers.authorization) return [401, { success: false, message: "无权进行此操作，未登录且未提供 access token" }];
+  switch (rest) {
+    case "/api/user/self": return [200, ok({ id: 1, username: "root", display_name: "Root", role: 100, quota: 99000000000, used_quota: 1200000000, request_count: 123456 })];
+    case "/api/channel/": {
+      const { p, size } = pageOf(q);
+      const items = CHANNELS.slice((p - 1) * size, p * size).map((c) => ({ id: c.id, name: c.name, type: c.type, status: c.status, base_url: c.baseUrl,
+        group: c.group, models: "", priority: 0, weight: 0, balance: 0, used_quota: 0, created_time: epoch0 }));
+      return [200, ok({ page: p, page_size: size, total: CHANNELS.length, items })];
+    }
+    case "/api/user/": {
+      const { p, size } = pageOf(q);
+      const items = USERS.slice((p - 1) * size, p * size).map((u) => ({ id: u.id, username: u.username, display_name: "", role: roleOf(u), status: u.status,
+        quota: u.quota, used_quota: u.quota * 3, request_count: 1000, group: OWN_GROUPS[u.groups[0]] }));
+      return [200, ok({ page: p, page_size: size, total: USERS.length, items })];
+    }
+    case "/api/token/": {
+      const target = USERS.find((u) => String(u.id) === String(req.headers["new-api-user"])) || USERS[0];
+      const { p, size } = pageOf(q);
+      const items = target.tokens.slice((p - 1) * size, p * size).map((t) => ({ id: t.id, name: t.name, status: 1, group: t.group,
+        used_quota: 5000000, remain_quota: 1000000, unlimited_quota: false, key: "sk-****" }));
+      return [200, ok({ page: p, page_size: size, total: target.tokens.length, items })];
+    }
+    case "/api/log/stat": {
+      const [s, e] = secWindow(q);
+      const filter = eventFilter(q);
+      let quota = 0;
+      const channel = num(q.get("channel"), 0);
+      const onlyChannel = channel && !q.get("model_name") && !q.get("username") && !q.get("group") && !q.get("token_name");
+      const tokenName = q.get("token_name");
+      if (TEST_LOGS && tokenName === TEST_NAME) return [200, ok({ quota: testQuotaIn(s, e, channel), rpm: 0, tpm: 0 })];
+      if (onlyChannel) quota = channelQuota(agg, [channel], s, e)[channel] + testQuotaIn(s, e, channel);
+      else if (!filter) { const all = channelQuota(agg, CHANNELS.map((c) => c.id), s, e); for (let c = 1; c <= N_CH; c++) quota += all[c]; quota += testQuotaIn(s, e); }
+      else agg.scan(s, e, null, (ev) => { if (filter(ev)) quota += ev.quota; });
+      return [200, ok({ quota, rpm: 0, tpm: 0 })];
+    }
+    case "/api/log/": {
+      const [s, e] = secWindow(q);
+      const { p, size } = pageOf(q);
+      const filter = eventFilter(q);
+      const kFirst = agg.em.kAt(Math.max(s, epoch0)), kLast = agg.em.kAt(e + 1) - 1;
+      let items = [], total = 0;
+      if (TEST_LOGS && q.get("token_name") === TEST_NAME) {
+        // 只要测试日志：从新到旧分页
+        const from = (p - 1) * size;
+        for (const ev of testEvents(s, e, num(q.get("channel"), 0))) { if (total >= from && total < from + size) items.push(testLogItem(ev)); total++; }
+      } else if (!filter) {
+        total = Math.max(0, kLast - kFirst + 1);
+        const ev = {};
+        for (let i = (p - 1) * size; i < p * size && kLast - i >= kFirst; i++) items.push(logItem(agg.em.decode(kLast - i, ev)));
+        if (TEST_LOGS) {
+          // 不带筛选时测试日志也在里面：条数加上；第一页按时刻（同一秒按编号）从新到旧合进去。第二页以后只给普通日志（近似，应用只读第一页）
+          let tests = 0; const head = [];
+          for (const ev of testEvents(s, e)) { if (head.length < size) head.push(testLogItem(ev)); tests++; }
+          total += tests;
+          if (p === 1) items = [...items, ...head].sort((a, b) => b.created_at - a.created_at || b.id - a.id).slice(0, size);
+        }
+      } else {
+        const ev = {};
+        const from = (p - 1) * size;
+        for (let k = kLast; k >= kFirst; k--) {
+          agg.em.decode(k, ev);
+          if (!filter(ev)) continue;
+          if (total >= from && total < from + size) items.push(logItem(ev));
+          total++;
+        }
+      }
+      return [200, ok({ page: p, page_size: size, total, items })];
+    }
+    case "/api/data/": case "/api/data/users": {
+      const [s, e] = secWindow(q);
+      const users = rest === "/api/data/users";
+      const rows = [];
+      const nowH = Math.floor((nowSec() - epoch0) / HOUR);
+      const h0 = Math.max(0, Math.ceil((s - epoch0) / HOUR)), h1 = Math.floor((e - epoch0) / HOUR);
+      for (let H = h0; H <= h1; H++) {
+        const hs = epoch0 + H * HOUR;
+        const dims = users ? N_USERS : 12;
+        let vals;
+        if (H < nowH) { agg.ensureHours(H + 1); const arr = users ? agg.userA() : agg.modelA(); vals = (d) => [arr[(H * dims + d) * 3], arr[(H * dims + d) * 3 + 1], arr[(H * dims + d) * 3 + 2]]; }
+        else {
+          const acc = new Float64Array(dims * 3);
+          agg.scan(hs, Math.min(hs + HOUR - 1, nowSec()), null, (ev) => { const d = users ? ev.u : ev.m; acc[d * 3] += 1; acc[d * 3 + 1] += ev.quota; acc[d * 3 + 2] += ev.prompt + ev.completion; });
+          vals = (d) => [acc[d * 3], acc[d * 3 + 1], acc[d * 3 + 2]];
+        }
+        for (let d = 0; d < dims; d++) {
+          const [count, quota, tokens] = vals(d);
+          if (!count) continue;
+          rows.push({ ...(users ? { username: USERS[d].username, user_id: USERS[d].id } : { model_name: MODELS[d] }), created_at: hs, token_used: tokens, count, quota });
+        }
+      }
+      return [200, ok(rows)];
+    }
+    case "/api/data/flow": {
+      const [s, e] = secWindow(q);
+      if (!s || e < s) return [200, { success: false, message: "invalid start_timestamp" }];
+      return [200, ok(flowRows(s, e))];
+    }
+    case "/api/data/self": return [200, ok([])];
+    default: return [404, { success: false, message: "not found" }];
+  }
+}
+
+// 流向（用户, 分组, 模型, 渠道）：整天缓存，零头逐条
+const flowDayCache = new Map();
+function flowKey(ev) { return ((ev.u * 2 + ev.tok) * 12 + ev.m) * (N_CH + 1) + ev.c; }
+function addFlow(map, ev) {
+  const key = flowKey(ev);
+  let v = map.get(key);
+  if (!v) { v = [0, 0, 0, ev.g]; map.set(key, v); }
+  v[0] += 1; v[1] += ev.quota; v[2] += ev.prompt + ev.completion;
+}
+function flowDay(d) {
+  let m = flowDayCache.get(d);
+  if (m) return m;
+  m = new Map();
+  const ds = epoch0 + d * 86400;
+  agg.scan(ds, ds + 86399, null, (ev) => addFlow(m, ev));
+  flowDayCache.set(d, m);
+  return m;
+}
+function flowRows(s, e) {
+  const total = new Map();
+  const merge = (m) => { for (const [k, v] of m) { const t = total.get(k); if (t) { t[0] += v[0]; t[1] += v[1]; t[2] += v[2]; } else total.set(k, [...v]); } };
+  const nowD = Math.floor((nowSec() - epoch0) / 86400);
+  let a = Math.max(s, epoch0);
+  while (a <= e) {
+    const d = Math.floor((a - epoch0) / 86400), ds = epoch0 + d * 86400, de = ds + 86399;
+    if (a === ds && de <= e && d < nowD) { merge(flowDay(d)); a = de + 1; continue; }
+    const b = Math.min(de, e), part = new Map();
+    agg.scan(a, b, null, (ev) => addFlow(part, ev));
+    merge(part);
+    a = b + 1;
+  }
+  const rows = [];
+  for (const [key, v] of total) {
+    const c = key % (N_CH + 1), rest = Math.floor(key / (N_CH + 1)), m = rest % 12, ut = Math.floor(rest / 12), u = Math.floor(ut / 2), tok = ut % 2;
+    const user = USERS[u];
+    rows.push({ username: user.username, use_group: OWN_GROUPS[v[3]], model_name: MODELS[m], channel_id: c, channel_name: CHANNELS[c - 1].name,
+      token_name: user.tokens[tok]?.name || "", count: v[0], quota: v[1], token_used: v[2] });
+  }
+  return rows.sort((x, y) => y.quota - x.quota);
+}
+
+function route(req, url) {
+  const path = url.pathname, q = url.searchParams;
+  if (path === "/__health") return [200, { ok: true, epoch0, nh: agg.nh }];
+  if (path === "/__stats") {
+    const snapshot = { ...JSON.parse(JSON.stringify(stats)), ownRateLimited };
+    if (q.get("detail") === "1") snapshot.log = requestLog;
+    if (q.get("reset") === "1") { stats.total = 0; stats.bytes = 0; stats.byRoute = Object.create(null); stats.bySite = Object.create(null); stats.startedAt = new Date().toISOString(); requestLog = []; }
+    return [200, snapshot];
+  }
+  if (path === "/__ctl") {
+    if (q.has("delay")) delayMs = num(q.get("delay"), delayMs);
+    if (q.has("ratio")) ratioMode = q.get("ratio") === "old" ? "old" : "current";
+    if (q.has("freeze")) frozenSec = q.get("freeze") === "1" ? Math.floor(Date.now() / 1000) : null;
+    if (q.has("down")) downSites = new Set((q.get("down") || "").split(",").filter(Boolean));
+    return [200, { delayMs, ratioMode, frozenSec, down: [...downSites] }];
+  }
+  if (path.startsWith("/hook/")) return [200, { errcode: 0, errmsg: "ok", code: 0 }];
+  const m = path.match(/^(\/(?:na|s2|nk)\d\d|\/own)(\/.*)?$/);
+  if (!m) return [404, { message: "unknown site" }];
+  const site = m[1], rest = m[2] || "/";
+  const key = `${site === "/own" ? "own" : site.slice(1, 3)}:${rest.replace(/\/\d+$/, "/:id")}`;
+  stats.total += 1;
+  stats.byRoute[key] = (stats.byRoute[key] || 0) + 1;
+  stats.bySite[site] = (stats.bySite[site] || 0) + 1;
+  if (requestLog.length < 200000) requestLog.push([Date.now(), key]);
+  if (downSites.has(site)) return [503, { success: false, message: "upstream down (fake)" }];
+  if (site === "/own") return ownSite(rest, q, req);
+  const up = upByPath.get(site);
+  if (!up) return [404, { message: "unknown upstream" }];
+  if (up.kind === "newapi") return newApiUpstream(up, rest, q, req);
+  if (up.kind === "sub2api") return sub2Upstream(up, rest, q, req);
+  return keyUpstream(up, rest, req);
+}
+
+const server = createServer((req, res) => {
+  const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
+  const finish = () => {
+    let status, body, headers;
+    try { [status, body, headers] = route(req, url); }
+    catch (err) { status = 500; body = { success: false, message: String(err?.message || err) }; console.error("[fake]", req.url, err); }
+    send(res, status, body, headers);
+  };
+  const internal = url.pathname.startsWith("/__");
+  req.resume();
+  req.on("end", () => { if (!internal && delayMs > 0) setTimeout(finish, delayMs); else finish(); });
+});
+server.keepAliveTimeout = 30000;
+server.listen(PORT, "127.0.0.1", () => console.log(`[fake] 假站点 http://127.0.0.1:${PORT}，延迟 ${delayMs} ms，倍率口径 ${ratioMode}`));

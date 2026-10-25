@@ -1,0 +1,194 @@
+name: Perf (parity + API/background)
+
+# 对拍（结账）和「接口和后台」性能实测，手动触发。说明见 tests/perf/README.md。
+# 测量脚本用触发时选的分支（默认 main）里的 tests/perf，不用被测版本里的（被测版本可能还没有这个目录）。
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR 号：给了就比这个 PR 的 head 和它与目标分支的分叉点（merge base），下面两个不用填"
+        required: false
+        default: ""
+      base:
+        description: "base：提交 SHA 或分支（不给 PR 时用；空 = main）"
+        required: false
+        default: ""
+      head:
+        description: "head：提交 SHA 或分支（不给 PR 时用；空 = 触发时选的分支）"
+        required: false
+        default: ""
+      parity_days:
+        description: "对拍天数（最近 N 天的账本挪走，base、head 各结一遍再比）"
+        required: false
+        default: "14"
+      history_days:
+        description: "余额历史天数（1–90）；缩短只影响读余额历史的接口，见 README"
+        required: false
+        default: "90"
+      fake_test_logs:
+        description: "假站点带 FAKE_TEST_LOGS=1：自营站点的日志里多出渠道测试日志（token_name「模型测试」）"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: perf-${{ github.ref }}-${{ inputs.pr }}-${{ inputs.base }}-${{ inputs.head }}
+  cancel-in-progress: false
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      mysql:
+        # 8.4 默认开着 binlog（log_bin=ON）和 performance_schema（语句摘要），下面「MySQL 设置」一步会核对
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-perf-root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pci-perf-root --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ci-perf-root
+      DB_NAME: relay_monitor_perf
+      APP_PORT: 3301
+      FAKE_PORT: 18950
+      PERF_OUT: ${{ github.workspace }}/perf-out
+      PERF_BASE_DIR: ${{ github.workspace }}/apps/base
+      PARITY_DAYS: ${{ inputs.parity_days || '14' }}
+      PERF_HISTORY_DAYS: ${{ inputs.history_days || '90' }}
+      FAKE_TEST_LOGS: ${{ inputs.fake_test_logs && '1' || '0' }}
+    steps:
+      - name: Checkout harness (tests/perf)
+        uses: actions/checkout@v4
+        with:
+          path: harness
+
+      - name: Resolve base and head
+        id: refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          BASE: ${{ inputs.base }}
+          HEAD: ${{ inputs.head }}
+        run: |
+          set -euo pipefail
+          sha_of() { gh api "repos/$REPO/commits/$1" --jq .sha; }
+          if [ -n "$PR" ]; then
+            pr_json=$(gh api "repos/$REPO/pulls/$PR")
+            head=$(echo "$pr_json" | jq -r .head.sha)
+            base_ref=$(echo "$pr_json" | jq -r .base.ref)
+            # 和 PR 自己的改动比：base 取 PR head 与目标分支的分叉点，不混进目标分支后来的提交
+            base=$(gh api "repos/$REPO/compare/$base_ref...$head" --jq .merge_base_commit.sha)
+          else
+            base=$(sha_of "${BASE:-main}")
+            head=$(sha_of "${HEAD:-$GITHUB_SHA}")
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "same=$([ "$base" = "$head" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          if [ "$base" = "$head" ]; then echo "PERF_HEAD_DIR=$GITHUB_WORKSPACE/apps/base" >> "$GITHUB_ENV"; else echo "PERF_HEAD_DIR=$GITHUB_WORKSPACE/apps/head" >> "$GITHUB_ENV"; fi
+          echo "base $base，head $head${PR:+（PR #$PR）}"
+
+      - name: Checkout base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.refs.outputs.base }}
+          path: apps/base
+      - name: Checkout head
+        if: steps.refs.outputs.same != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.refs.outputs.head }}
+          path: apps/head
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/*/package-lock.json
+
+      - name: Build base
+        working-directory: apps/base
+        run: npm ci --no-audit --no-fund && npx next build
+      - name: Build head
+        if: steps.refs.outputs.same != 'true'
+        working-directory: apps/head
+        run: npm ci --no-audit --no-fund && npx next build
+
+      - name: MySQL settings and tools
+        run: |
+          docker exec ${{ job.services.mysql.id }} mysql -uroot -p"$DB_PASSWORD" -N -e \
+            "SELECT VERSION(), @@log_bin, @@performance_schema, (SELECT ENABLED FROM performance_schema.setup_consumers WHERE NAME = 'statements_digest')" 2>/dev/null \
+            | tee /dev/stderr | awk '{ if ($2 != 1 || $3 != 1 || $4 != "YES") { print "binlog / performance_schema / 语句摘要没开"; exit 1 } }'
+          command -v lsof > /dev/null || sudo apt-get install -y -qq lsof
+
+      - name: Seed fixture (base)
+        id: seed
+        run: harness/tests/perf/run.sh seed
+
+      - name: Measure base (API + background)
+        id: measure_base
+        if: ${{ !cancelled() && steps.seed.outcome == 'success' }}
+        run: harness/tests/perf/run.sh measure base "$PERF_BASE_DIR"
+
+      # 对拍有不同时这一步标红，但不挡后面的性能测量
+      - name: Parity (settlement ledger, base vs head)
+        id: parity
+        if: ${{ !cancelled() && steps.seed.outcome == 'success' }}
+        run: harness/tests/perf/run.sh parity
+
+      - name: Measure head (API + background)
+        id: measure_head
+        if: ${{ !cancelled() && steps.seed.outcome == 'success' }}
+        run: harness/tests/perf/run.sh measure head "$PERF_HEAD_DIR"
+
+      - name: Compare (comparable numbers only)
+        id: compare
+        if: ${{ !cancelled() && steps.measure_base.outcome == 'success' && steps.measure_head.outcome == 'success' }}
+        run: harness/tests/perf/run.sh compare
+
+      - name: Stop services
+        if: always()
+        run: harness/tests/perf/run.sh stop
+
+      - name: Job summary
+        if: always()
+        env:
+          BASE_SHA: ${{ steps.refs.outputs.base }}
+          HEAD_SHA: ${{ steps.refs.outputs.head }}
+          PR: ${{ inputs.pr }}
+        run: |
+          {
+            echo "base \`${BASE_SHA:0:7}\`，head \`${HEAD_SHA:0:7}\`${PR:+（PR #$PR）}；对拍 $PARITY_DAYS 天，余额历史 $PERF_HISTORY_DAYS 天，假站点测试日志 $FAKE_TEST_LOGS"
+            echo
+            echo '### 各段用时'
+            echo
+            echo '```'
+            cat "$PERF_OUT/timings.txt" 2>/dev/null || echo "（没有）"
+            echo '```'
+            echo
+            cat "$PERF_OUT/parity/parity.md" 2>/dev/null || echo "## 对拍：没有结果"
+            echo
+            cat "$PERF_OUT/compare.md" 2>/dev/null || echo "## 性能对比：没有结果"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-${{ github.run_id }}
+          path: perf-out/
+          if-no-files-found: warn
