@@ -42,4 +42,5 @@ EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s \
   CMD wget -q --spider http://127.0.0.1:8787/ || exit 1
 
-CMD ["sh", "-c", "node db/migrate.js && exec node server.js"]
+# --import ./lib/peer-address.js：登录失败限流按真正连进来的地址算（lib/api.js clientIp；tests/peer-address.test.mjs 守着这一行）
+CMD ["sh", "-c", "node db/migrate.js && exec node --import ./lib/peer-address.js server.js"]
