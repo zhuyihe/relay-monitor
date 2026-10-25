@@ -2,6 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+> 文档从[总目录](design/README.md)进：想知道什么，看哪一份的哪一节。给开发的规矩见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 监控 **sub2api** 与 **new-api** 类中转站余额的自托管面板。
 **v2 技术栈**：Next.js 16 全栈（App Router + Route Handlers）+ Ant Design Pro（antd 6 + pro-components）+ MySQL 持久化，浅色 / 深色双主题。
 
