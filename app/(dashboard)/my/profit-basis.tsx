@@ -30,6 +30,7 @@ const COPY = {
   estimated: "成本里有估算的数",
   note: "说明",
   resold: "转售 Key",
+  resoldInactive: "这个账号已经不是管理员，它的消费本来就算收入，转售标记用不上了",
   pick: "选转售 Key",
   // 收起区按钮写它收着什么（ui-design-spec §4.11、ui-copy-spec §8.4）
   more: "收入和成本怎么算、转售 Key、各上游成本",
@@ -213,6 +214,8 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
               key: "state",
               label: "状态",
               render: (k) => {
+                // 账号后来不是管理员了（用语规范 §8.4）：它的消费本来就算收入，标记不起作用，留着也不碍事，不加按钮
+                if (k.inactive) return <span className="jy-muted">{COPY.resoldInactive}</span>;
                 if (!k.error) return <span className="jy-muted">卖给用户用，算进收入</span>;
                 const note = noteOf(k);
                 return (

@@ -26,8 +26,33 @@ const OWN_USERS_TTL_MS = 600000;
 // 在 New API 那边改好后点「刷新」，最多等 1 分钟就能读到
 const UNKNOWN_USER_TTL_MS = 60000;
 
+// 名单里对不上的名字（刚注册、刚提成管理员、转售 Key 的主人已经不是管理员）：先看手里这份最近有没有为它们重读过，没有才重读一份
+// 这一刻以后发出的；重读过还对不上的名字记下读取发出的时间，1 分钟内不再为它们重读。readOwnIncome 和 readOwnAdminDirectory 共用这一处
+async function confirmUserNames(entry, namesOf, reread, since) {
+  const known = (current, name) => Date.now() - (current.unknown.get(name) ?? -Infinity) < UNKNOWN_USER_TTL_MS;
+  let current = entry;
+  if (namesOf(current.list).some((name) => !known(current, name))) current = await reread(since);
+  for (const name of namesOf(current.list)) if (!known(current, name)) current.unknown.set(name, current.startedAt);
+  return current;
+}
+
 // 缓存认的那份配置（测试也用它造缓存）
 export const ownUsersKey = (own) => JSON.stringify([own.id, own.type, own.baseUrl, own.userId, own.accessToken]);
+
+// 管理员（role ≥ 10）和转售的管理员 Key 怎么判，只在这里写一份：运营总览、自营业务（readOwnIncome）和每日利润
+// （server/reconciliation.js 的每个渠道收入）都用它——管理员自己花的钱不算收入，标成转售的管理员 Key 照样算收入
+export const adminUsernamesOf = (users) => new Set((users || []).filter((u) => u.role >= 10).map((u) => u.username));
+// 同一个账号下同名的 Key 只算一把：存了两条也只扣回一次，不然收入多算一份转售额（审核 R1 中-1）
+export const dedupeResoldKeys = (keys) => {
+  const seen = new Set();
+  return (Array.isArray(keys) ? keys : []).filter((key) => {
+    const id = JSON.stringify([String(key?.username).toLowerCase(), String(key?.tokenName).toLowerCase()]); // 名字不分大小写（接口筛选就是这样）
+    return !seen.has(id) && seen.add(id);
+  });
+};
+export const resoldAdminKeysOf = (own) => dedupeResoldKeys(own?.resoldAdminKeys);
+// 转售标记只对现在还是管理员的账号起作用：账号后来不是管理员了，它的消费本来就算收入，标记忽略（总指挥 10-25），不报「读不到」、不卡账本
+export const activeResoldKeysOf = (own, adminSet) => resoldAdminKeysOf(own).filter((key) => adminSet.has(key.username));
 
 // since：只要这个时刻以后发出的读取，缓存和进行中的读取发出得更早就再读一次。返回 { key, startedAt, list, unknown }，
 // unknown 是重读过还对不上的名字和那次读取发出的时间
@@ -156,8 +181,7 @@ export async function stationUsageCost(rt, station, { startMs, endMs, tz, today 
  * 对每个 (username, tokenName) 用日志统计接口取窗内消费额度（美元）后汇总。
  * 单个 Key 查询失败记为 0 并附带错误，不影响其余；返回调整后的两个口径 + 明细。
  */
-export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endMs) {
-  const keys = Array.isArray(own.resoldAdminKeys) ? own.resoldAdminKeys : [];
+export async function computeResold(own, incomeUsd, adminUsageUsd, startMs, endMs, keys = resoldAdminKeysOf(own)) {
   if (!keys.length) return { incomeUsd, adminUsageUsd, resoldUsd: 0, breakdown: [] };
   const breakdown = [];
   let resoldUsd = 0;
@@ -192,7 +216,7 @@ export async function readOwnIncomeOrUnconfirmed(rt, own, userRows, window) {
   } catch (err) {
     if (err?.code !== "OWN_INCOME_UNCONFIRMED") throw err;
     const users = err.users ?? null;
-    const adminSet = new Set((users || []).filter((u) => u.role >= 10).map((u) => u.username));
+    const adminSet = adminUsernamesOf(users);
     return { users, adminSet, incomeUsd: null, adminUsageUsd: null, resold: null, incomeDaily: null, unconfirmed: err,
       usersUnavailable: users ? null : ownStationError(err.cause || err) };
   }
@@ -230,7 +254,7 @@ export async function unconfirmedIncomeProfit(rt, own, err, options) {
     warnings: kept.map(([, text]) => text), warningCodes: kept.map(([code]) => code),
     // 数据完不完整只看上游汇率；没设置售价只影响收入，这里不显示收入
     complete: (profit.rateUnsetStations || []).length === 0,
-    resoldKeys: (own.resoldAdminKeys || []).map((key) => {
+    resoldKeys: resoldAdminKeysOf(own).map((key) => {
       const failed = (err.resoldErrors || []).find((k) => k.username === key.username && k.tokenName === key.tokenName);
       return { username: key.username, tokenName: key.tokenName, usd: null, cny: null,
         ...(failed ? { error: failed.error, errorCode: failed.errorCode } : {}) };
@@ -244,6 +268,26 @@ export async function unconfirmedIncomeProfit(rt, own, err, options) {
 // resoldErrors：转售记录没读全时没读到的那几把 Key（「利润怎么算」里标出来）
 function incomeUnconfirmed(message, cause, users = null, resoldErrors = null) {
   return Object.assign(new Error(message, cause ? { cause } : undefined), { code: "OWN_INCOME_UNCONFIRMED", users, resoldErrors });
+}
+
+/**
+ * 管理员名单（用户列表里 role ≥ 10，缓存 10 分钟，和运营总览共用同一份缓存）。fresh：要一份现在发出的（结账那一轮用，
+ * 刚提成管理员的人不能漏到固定账里）。转售 Key 所属的用户在列表里不是管理员：多半是刚提成管理员，再读一份新的；
+ * 还是对不上就报读不到（收入确认不了），不拿没确认的名单去扣收入。读不到用户列表也一样抛。
+ */
+export async function readOwnAdminDirectory(rt, own, { fresh = false } = {}) {
+  const resold = resoldAdminKeysOf(own);
+  const read = async (since) => {
+    try { return await readOwnUsers(rt, own, since); }
+    catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
+  };
+  let entry = await read(fresh ? Date.now() : 0);
+  const unconfirmed = (list) => { const admins = adminUsernamesOf(list); return [...new Set(resold.filter((key) => !admins.has(key.username)).map((key) => key.username))]; };
+  // 和 readOwnIncome 共用「重读过还对不上的名字 1 分钟内不再为它们重读」（审核 R1 中-2：转售 Key 的主人不是管理员时每次都重读整份用户列表）
+  // 结账（fresh）读回来的这份本来就是新发出的，不用再为对不上的名字重读一遍；轮询用的那份缓存才看「1 分钟内重读过没有」
+  entry = fresh ? entry : await confirmUserNames(entry, unconfirmed, (since) => read(since), Date.now());
+  // 重读还对不上的转售 Key 所属用户：忽略这条标记（不扣、不报读不到），照常算
+  return { users: entry.list, adminSet: adminUsernamesOf(entry.list) };
 }
 
 /**
@@ -263,19 +307,15 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
     const roles = new Map(list.map((u) => [u.username, u.role]));
     return [...new Set([
       ...userRows.filter((row) => row.t >= startMs && row.t < endMs && row.cost !== 0 && !roles.has(row.key)).map((row) => row.key),
-      ...(own.resoldAdminKeys || []).filter((key) => !(roles.get(key.username) >= 10)).map((key) => key.username),
+      ...resoldAdminKeysOf(own).filter((key) => !(roles.get(key.username) >= 10)).map((key) => key.username),
     ])];
   };
-  const known = (name) => Date.now() - (entry.unknown.get(name) ?? -Infinity) < UNKNOWN_USER_TTL_MS;
-  if (missing(entry.list).some((name) => !known(name))) {
-    // 重读没成：还用手里这份（最多 10 分钟前的），照样能标管理员、算预收
-    try { entry = await readOwnUsers(rt, own, requestedAt); }
-    catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause, entry.list); }
-  }
-  for (const name of missing(entry.list)) if (!known(name)) entry.unknown.set(name, entry.startedAt);
+  const before = entry;
+  try { entry = await confirmUserNames(entry, missing, (since) => readOwnUsers(rt, own, since), requestedAt); }
+  catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause, before.list); }
   const users = entry.list;
   const roles = new Map(users.map((u) => [u.username, u.role]));
-  const adminSet = new Set(users.filter((u) => u.role >= 10).map((u) => u.username));
+  const adminSet = adminUsernamesOf(users);
   const days = endMs > startMs
     ? dayRangeInTz(dayKeyInTz(startMs, tz), dayKeyInTz(endMs - 1, tz), tz).map((d) => ({
         ...d, startMs: Math.max(startMs, d.startMs), endMs: Math.min(endMs, d.endMs), incomeUsd: 0, adminUsageUsd: 0,
@@ -290,15 +330,14 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
     if (adminSet.has(row.key)) day.adminUsageUsd += row.cost;
     else day.incomeUsd += row.cost;
   }
-  for (const key of own.resoldAdminKeys || []) {
-    if (!adminSet.has(key.username)) throw incomeUnconfirmed(`转售 Key 所属用户「${key.username}」的管理员身份没确认`, null, users);
-  }
+  const activeKeys = activeResoldKeysOf(own, adminSet);
+  const inactiveKeys = resoldAdminKeysOf(own).filter((key) => !adminSet.has(key.username));
   // 同时最多读四天，避免 30 天窗口把上游日志接口瞬间打满。
   let cursor = 0;
   await Promise.all(Array.from({ length: Math.min(4, days.length) }, async () => {
     while (cursor < days.length) {
       const day = days[cursor++];
-      day.resold = await computeResold(own, day.incomeUsd, day.adminUsageUsd, day.startMs, day.endMs);
+      day.resold = await computeResold(own, day.incomeUsd, day.adminUsageUsd, day.startMs, day.endMs, activeKeys);
       const failed = day.resold.breakdown.find((k) => k.error);
       if (failed) {
         throw incomeUnconfirmed(`转售 Key「${failed.username} / ${failed.tokenName}」的记录没读到，收入和利润暂时算不出`,
@@ -332,7 +371,8 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
     resold: {
       incomeUsd, adminUsageUsd,
       resoldUsd: days.reduce((a, d) => a + d.resold.resoldUsd, 0),
-      breakdown: [...keys.values()].sort((a, b) => b.usd - a.usd),
+      // 标记已经不起作用的 Key 也列出来（usd 0、inactive），设置页写一句灰字
+      breakdown: [...keys.values()].sort((a, b) => b.usd - a.usd).concat(inactiveKeys.map((key) => ({ username: key.username, tokenName: key.tokenName, usd: 0, inactive: true }))),
     },
   };
 }

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   aggregateFlow, computeFlowBreakdown, computeProfit, joinPrev, mapCostChannels, matchCostStations, normalizeCostUrl,
   getOwnUsers, readOwnIncome, readOwnIncomeOrUnconfirmed, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
-  ownUsersKey, unconfirmedIncomeProfit,
+  ownUsersKey, unconfirmedIncomeProfit, resoldAdminKeysOf, dedupeResoldKeys, readOwnAdminDirectory,
 } from "./own-helpers.js";
 import { History } from "../db/history.js";
 import { dayStartInTz } from "../lib/business-time.js";
@@ -254,6 +254,24 @@ test("转售 Key 所属的用户在缓存里还不是管理员（刚提成管理
   const result = await readOwnIncome(f.rt, f.own, f.rows, f.window);
   assert.equal(result.incomeUsd, 10);
   assert.equal(calls.filter((path) => path === "/api/user/").length, 1);
+});
+
+test("转售 Key 所属账号已经不是管理员：重读一次还对不上就忽略这条标记，不报读不到，照常算收入；设置页列出来标 inactive", async (t) => {
+  const f = incomeFixture();
+  f.own.resoldAdminKeys = [{ username: "customer", tokenName: "sale" }];
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    calls.push(url.pathname);
+    if (url.pathname === "/api/user/") return Response.json({ success: true, data: { items: f.users, total: 2 } }); // 重读一次，还是普通用户
+    throw new Error(`不该读转售记录：标记不起作用，没有要读的 Key（${url.pathname}）`);
+  });
+  const result = await readOwnIncome(f.rt, f.own, f.rows, f.window);
+  assert.equal(calls.filter((path) => path === "/api/user/").length, 1, "先重读了一次用户列表");
+  assert.equal(result.incomeUsd, 10, "customer 的消费本来就算收入");
+  assert.equal(result.adminUsageUsd, 100);
+  assert.equal(result.resold.resoldUsd, 0);
+  assert.deepEqual(result.resold.breakdown, [{ username: "customer", tokenName: "sale", usd: 0, inactive: true }]);
 });
 
 test("必要的角色或转售读取失败时收入不可确认", async (t) => {
@@ -596,4 +614,33 @@ test("利润说明里的名字用显示名：自营站点、上游没起名字�
   assert.ok(p.warnings.includes("自营站点 没设置售价，暂按 1 美元额度 = 1 元算"), p.warnings.join(" | "));
   assert.ok(p.warnings.includes("未命名上游 没设置汇率，暂按 1 美元 = 1 元算"), p.warnings.join(" | "));
   assert.ok(p.warnings.includes("未命名上游 不算进利润"), p.warnings.join(" | "));
+});
+
+test("转售 Key 同一个账号下同名只算一把（大小写不分）：存了两条也只扣回一次（审核 R1 中-1、低-5）", () => {
+  const keys = [{ username: "root", tokenName: "sale" }, { username: "root", tokenName: "sale" }, { username: "Root", tokenName: "SALE" }, { username: "root", tokenName: "other" }, { username: "alice", tokenName: "sale" }];
+  assert.deepEqual(resoldAdminKeysOf({ resoldAdminKeys: keys }).map((key) => [key.username, key.tokenName]), [["root", "sale"], ["root", "other"], ["alice", "sale"]]);
+  assert.deepEqual(dedupeResoldKeys(null), []);
+});
+
+test("转售 Key 的主人不是管理员：重读过还对不上，1 分钟内不再为它重读整份用户列表（审核 R1 中-2）", async (t) => {
+  const f = incomeFixture();
+  f.own.resoldAdminKeys = [{ username: "customer", tokenName: "sale" }];
+  let userReads = 0;
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    assert.equal(url.pathname, "/api/user/");
+    userReads += 1;
+    return Response.json({ success: true, data: { items: f.users, total: f.users.length } });
+  });
+  for (let i = 0; i < 5; i += 1) await readOwnAdminDirectory(f.rt, f.own);
+  assert.ok(userReads <= 1, `5 次只读了 ${userReads} 次用户列表`);
+});
+
+test("结账（带 fresh）读用户列表：转售 Key 的主人不是管理员时，每次只读一份新的，不为同一个名字再重读一遍（审核 R1 第三轮中-2）", async (t) => {
+  const f = incomeFixture();
+  f.own.resoldAdminKeys = [{ username: "customer", tokenName: "sale" }];
+  let userReads = 0;
+  t.mock.method(globalThis, "fetch", async () => { userReads += 1; return Response.json({ success: true, data: { items: f.users, total: f.users.length } }); });
+  for (let i = 0; i < 5; i += 1) await readOwnAdminDirectory(f.rt, f.own, { fresh: true });
+  assert.ok(userReads <= 5, `5 次各读一份新的，一共不超过 5 次（以前是 10 次）：${userReads}`);
 });

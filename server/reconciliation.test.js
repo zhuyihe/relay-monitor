@@ -1107,6 +1107,8 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
       statRequests.push({ tokenName: url.searchParams.get("token_name"), group: url.searchParams.get("group"), start, end: Number(url.searchParams.get("end_timestamp")) });
       body = upstreamBroken ? { success: false, message: "stat unavailable" } : { success: true, data: { quota: start === 1000 ? 0 : 100 } };
     }
+    else if (url.pathname === "/api/user/") body = ownUsersApi(url);
+    else if ((url.pathname === "/api/log/" || url.pathname === "/api/log/stat") && ownSourceRead(url)) body = ownTestLogApi(url);
     else if (url.pathname === "/api/log/stat") {
       assert.equal(url.searchParams.get("channel"), "1");
       assert.equal(url.searchParams.has("channel_id"), false);
@@ -1310,6 +1312,8 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
   const ownServer = serve(ownCounts, (url) => {
     if (url.pathname === "/api/user/self") return { success: true, data: { id: 1 } };
     if (url.pathname === "/api/status") return ownStatusBroken ? { success: false, message: "status unavailable" } : { success: true, data: { quota_per_unit: 100 } };
+    if (url.pathname === "/api/user/") return ownUsersApi(url);
+    if ((url.pathname === "/api/log/" || url.pathname === "/api/log/stat") && ownSourceRead(url)) return ownTestLogApi(url);
     if (url.pathname === "/api/log/stat") return { success: true, data: { quota: 250 } };
     if (url.pathname === "/api/channel/") return { success: true, data: { total: 1, items: [{ id: 1, name: "渠道", status: 1 }] } };
   });
@@ -1354,7 +1358,9 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
     "/api/user/self": 1, "/api/status": 1, "/api/user/self/groups": 1, "/api/token/": 1, "/api/log/self/stat": 4,
   }, "上游身份与 /api/status 只在读取元数据时各探测一次，分段只请求自己的 stat");
   assert.deepEqual(statUsers, ["7", "7", "7", "7"], "分段 stat 复用元数据解析出的 PAT 身份");
-  assert.deepEqual(ownCounts, { "/api/user/self": 1, "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 4 }, "本站身份和 /api/status 每轮只读一次，由各分段共用");
+  // 管理员自用（R1）：每段窗口读 3 个来源（管理员 root、两个渠道测试名字「模型测试」「Model test」）各一次列表，4 段共 12 次；用户列表（管理员名单）一轮共用一次。
+  // 方案里「一段窗口一次，分段时每段各一次」
+  assert.deepEqual(ownCounts, { "/api/user/self": 1, "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 12, "/api/log/": 4, "/api/user/": 1 }, "本站身份和 /api/status 每轮只读一次，由各分段共用");
 
   for (const counts of [upstreamCounts, ownCounts]) for (const path of Object.keys(counts)) delete counts[path];
   ownStatusBroken = true;
@@ -1407,7 +1413,9 @@ test("首次观察到已知倍率会补全当前 legacy 分段，随后切组才
         : url.pathname === "/api/user/self/groups" ? { success: true, data: { AWS_Bedrock3: { ratio: 2.9 }, AWS_Bedrock2: { ratio: 2.6 } } }
           : url.pathname === "/api/token/" ? { success: true, data: { total: 1, items: [{ id: 9, user_id: 7, name: "stable", status: 1, group: currentGroup, cross_group_retry: false }] } }
             : url.pathname === "/api/log/self/stat" ? { success: true, data: { quota: 100 } }
-              : url.pathname === "/api/log/stat" ? { success: true, data: { quota: 100 } }
+              : url.pathname === "/api/user/" ? ownUsersApi(url)
+              : (url.pathname === "/api/log/" || url.pathname === "/api/log/stat") && ownSourceRead(url) ? ownTestLogApi(url)
+                : url.pathname === "/api/log/stat" ? { success: true, data: { quota: 100 } }
                   : url.pathname === "/api/channel/" ? { success: true, data: { items: [{ id: 1, name: "渠道", status: 1 }] } }
                     : { success: false };
     response.writeHead(body.success === false ? 404 : 200, { "Content-Type": "application/json" });
@@ -1929,6 +1937,28 @@ test("快照事务提交后、通知前口径被修正时，不为旧口径记�
 // 已结束的上海完整自然日：只有这种窗口的利润会保存为确认账单。
 const SETTLED_DAY = { startMs: Date.parse("2026-09-18T16:00:00.000Z"), endMs: Date.parse("2026-09-19T16:00:00.000Z") };
 
+// 自营站点管理端日志（own-revenue-plan 第一节）：每日利润每个渠道的收入扣掉管理员自己花的钱，再兜底扣渠道测试（type 2、token_id 0、固定的 token_name）。
+// 列表照 GetAllLogs：按 token_name 或 username 筛（MySQL 默认排序规则不分大小写，所以 model test 也会回来）、起止秒、created_at 与 id 倒序、
+// page_size 上限 100，带 total；stat 是同样筛法的 quota 总和。logs 的每一项：{ id, channel, quota, created_at（秒）, token_name, username（默认 alice，不是管理员）, token_id（默认 0） }
+const ownSourceRead = (url) => !!(url.searchParams.get("token_name") || url.searchParams.get("username"));
+const OWN_USERS = [{ id: 1, username: "root", display_name: "Root", role: 100, status: 1 }, { id: 2, username: "alice", display_name: "", role: 1, status: 1 }];
+// 用户列表：新版 data.items，p=0 当第一页；翻到空页为止
+function ownUsersApi(url, users = OWN_USERS) {
+  const page = Math.max(1, Number(url.searchParams.get("p") || 1)), size = Math.min(100, Number(url.searchParams.get("page_size") || 10));
+  return { success: true, data: { total: users.length, items: users.slice((page - 1) * size, page * size) } };
+}
+function ownTestLogApi(url, logs = []) {
+  const name = url.searchParams.get("token_name"), user = url.searchParams.get("username"), channel = url.searchParams.get("channel");
+  const start = Number(url.searchParams.get("start_timestamp") || 0), end = Number(url.searchParams.get("end_timestamp") || 0) || Infinity;
+  const matched = logs.map((log) => ({ username: "alice", ...log }))
+    .filter((log) => (name == null || String(log.token_name).toLowerCase() === String(name).toLowerCase()) && (user == null || log.username === user) && (channel == null || String(log.channel) === channel) && log.created_at >= start && log.created_at <= end)
+    .sort((a, b) => b.created_at - a.created_at || b.id - a.id);
+  if (url.pathname === "/api/log/stat") return { success: true, data: { quota: matched.reduce((sum, log) => sum + log.quota, 0) } };
+  const size = Math.min(100, Number(url.searchParams.get("page_size") || 10)), page = Math.max(1, Number(url.searchParams.get("p") || 1));
+  const items = matched.slice((page - 1) * size, page * size).map((log) => ({ type: 2, token_id: 0, ...log }));
+  return { success: true, data: { total: matched.length, items } };
+}
+
 function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {} }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
@@ -1973,7 +2003,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     get size() { return tables.snapshots.length; },
   };
   const state = {
-    upstreamQuota: 100, ownQuota: 250, statCalls: [], requests: [], snapshots,
+    upstreamQuota: 100, ownQuota: 250, testLogs: [], ownUsers: OWN_USERS, statCalls: [], requests: [], snapshots,
     get writes() { return log.snapshotWrites.length; },
     get ledgerWrites() { return log.ledgerWrites; },
     // 已提交的账本行，detail 解析成对象。
@@ -2001,7 +2031,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
   };
   t.mock.method(globalThis, "fetch", async (input, init = {}) => {
     const url = new URL(String(input));
-    const request = { host: url.host, path: url.pathname, authorization: init.headers?.Authorization ?? null };
+    const request = { host: url.host, path: url.pathname, authorization: init.headers?.Authorization ?? null, query: url.search, sourceRead: ownSourceRead(url) };
     state.requests.push(request);
     if (onRequest) await onRequest(request);
     if (url.pathname === "/api/status") return reply(200, { success: true, data: { quota_per_unit: 100, version: "v" } });
@@ -2021,6 +2051,11 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
         const items = ownChannels ? ownChannels(request) : [{ id: 1, name: "渠道", status: 1 }];
         return reply(200, { success: true, data: { total: items.length, items } });
       }
+      // 渠道测试日志（R1）：带 token_name 的列表和 stat，不算渠道收费统计，不进 statCalls
+      if ((url.pathname === "/api/log/" || url.pathname === "/api/log/stat") && ownSourceRead(url)) return reply(200, ownTestLogApi(url, state.testLogs));
+      // 最新一条消费日志（轮询判断站点安不安静用，没有筛选条件）：只在 state.latestLogProbe 打开时给，别的测试照旧读不到
+      if (state.latestLogProbe && url.pathname === "/api/log/" && !ownSourceRead(url)) return reply(200, ownTestLogApi(url, state.testLogs));
+      if (url.pathname === "/api/user/") return reply(200, ownUsersApi(url, state.ownUsers));
       if (url.pathname === "/api/log/stat") return stat("own", url, state.ownQuota);
     }
     return reply(404, { success: false });
@@ -2927,7 +2962,9 @@ test("R02本站同源PAT不延期；A换B并同步仍不确认旧A，旧快照�
       const data = url.pathname === "/api/user/self" ? { id: 2 }
         : url.pathname === "/api/status" ? { quota_per_unit: 100 }
           : url.pathname === "/api/channel/" ? { total: 1, items: [{ id: 1, name: "渠道", status: 1 }] }
-            : url.pathname === "/api/log/stat" ? { quota: 500 } : null;
+            : url.pathname === "/api/user/" ? ownUsersApi(url).data
+              : (url.pathname === "/api/log/" || url.pathname === "/api/log/stat") && ownSourceRead(url) ? ownTestLogApi(url).data
+              : url.pathname === "/api/log/stat" ? { quota: 500 } : null;
       return { status: data ? 200 : 404, text: async () => JSON.stringify({ success: !!data, data }) };
     }
     return oldFetch(input, init);
@@ -4537,8 +4574,10 @@ async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", clock = nu
 
 // 自营站点的管理端日志列表替身（计划 P1a 判断有没有新的消费用），照 New API model/log.go GetAllLogs：
 // 按 start_timestamp 筛，按「时刻倒序、再按编号倒序」排，带 total（起点以后一共几条）；clickhouse 时编号换成显示序号（第一条永远是 1）
-function ownLogList(logs, calls = [], { clickhouse = false } = {}) {
+function ownLogList(logs, calls = [], { clickhouse = false, testLogs = [] } = {}) {
   return (url) => {
+    // 渠道测试日志（R1）按 token_name 读，不是 P1a 看全站有没有新消费的那次读，不记进 calls
+    if (ownSourceRead(url)) return { status: 200, text: async () => JSON.stringify(ownTestLogApi(url, testLogs)) };
     const since = Number(url.searchParams.get("start_timestamp"));
     calls.push(since);
     const matched = logs.filter((log) => log.created_at >= since).sort((a, b) => b.created_at - a.created_at || b.id - a.id);
@@ -4559,7 +4598,7 @@ test("P1a 轮询省请求和写入：自营 /api/status 每轮一次；全站没
     if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
     return prev(input, init);
   });
-  const ownCalls = (path) => f.state.requests.filter((request) => request.host === "own.test" && request.path === path).length;
+  const ownCalls = (path) => f.state.requests.filter((request) => request.host === "own.test" && request.path === path && !request.sourceRead).length;
   const todayWrites = () => f.repository.log.snapshotWrites.filter((entry) => entry.source?.window?.preset === "today").length;
   const round = async () => {
     const before = { status: ownCalls("/api/status"), channel: ownCalls("/api/log/stat"), states: f.state.channelStateWrites.length, today: todayWrites(), site: siteCalls.length };
@@ -4607,7 +4646,7 @@ test("P1a 轮询省请求和写入：自营 /api/status 每轮一次；全站没
   now += 60000;
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(String(input));
-    if (url.host === "own.test" && url.pathname === "/api/log/") { siteCalls.push(null); return { status: 500, text: async () => "{}" }; }
+    if (url.host === "own.test" && url.pathname === "/api/log/" && !ownSourceRead(url)) { siteCalls.push(null); return { status: 500, text: async () => "{}" }; }
     return prev(input, init);
   });
   assert.equal((await round()).channel, 4);
@@ -4628,6 +4667,7 @@ test("P1a 自营站点时钟偏慢 10 分钟、日志晚 60 多秒才写进去�
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(String(input));
     if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && ownSourceRead(url)) return { status: 200, text: async () => JSON.stringify(ownTestLogApi(url)) };
     if (url.host === "own.test" && url.pathname === "/api/log/stat") {
       f.state.requests.push({ host: url.host, path: url.pathname });
       const channel = Number(url.searchParams.get("channel")), start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
@@ -4636,7 +4676,7 @@ test("P1a 自营站点时钟偏慢 10 分钟、日志晚 60 多秒才写进去�
     }
     return prev(input, init);
   });
-  const channelReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat").length;
+  const channelReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && !request.sourceRead).length;
   const round = async () => { now += 60000; const before = channelReads(); await f.module.refreshDue(now); return channelReads() - before; };
   const live = async () => (await f.module.queryRules({ preset: "today", ruleIds: ["rr_live"] }, { mode: "evaluate", origin: "page" })).results[0].downstream.amountUsd;
 
@@ -4682,6 +4722,7 @@ test("P1a 审核第二轮：晚 1 秒、ClickHouse 显示序号、钟慢加读�
         const body = JSON.parse(await reply.text());
         return { status: 200, text: async () => JSON.stringify({ success: true, data: body.data.items }) };
       }
+      if (url.host === "own.test" && url.pathname === "/api/log/stat" && ownSourceRead(url)) return { status: 200, text: async () => JSON.stringify(ownTestLogApi(url)) };
       if (url.host === "own.test" && url.pathname === "/api/log/stat") {
         f.state.requests.push({ host: url.host, path: url.pathname });
         if (failChannel) return { status: 500, text: async () => "{}" };
@@ -4691,7 +4732,7 @@ test("P1a 审核第二轮：晚 1 秒、ClickHouse 显示序号、钟慢加读�
       }
       return prev(input, init);
     });
-    const reads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat").length;
+    const reads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && !request.sourceRead).length;
     return {
       f, logs, sec,
       add: (channel, created_at) => logs.push({ id: logs.length + 1, channel, created_at, quota: 100 }),
@@ -4799,7 +4840,7 @@ test("P1a 沿用渠道收费的边界：额度换算变了、读失败后进入�
     }
     return prev(input, init);
   });
-  const channelReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat").length;
+  const channelReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && !request.sourceRead).length;
   const round = async (ms = 60000) => { now += ms; const before = channelReads(); await f.module.refreshDue(now); return channelReads() - before; };
   const today = async () => (await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" })).results;
   const amounts = async () => (await today()).map((row) => row.downstream.amountUsd);
@@ -7398,6 +7439,448 @@ test("C2a 结账时渠道目录用 10 分钟内的缓存：一轮结好几天，
   const settled = f.state.ledger.filter((row) => row.rule_id === "rr_live").length;
   assert.ok(settled >= 3, `这一轮结了好几天：${settled}`);
   assert.ok(channelReads() <= 2, `结 ${settled} 天，渠道目录最多读一两次（今天的观测一次，结账用缓存），实际 ${channelReads()} 次`);
+});
+
+// ---- R1 每日利润的收入扣掉管理员自用（own-revenue-plan 第一节，用户 10-25 定）：收入是渠道的收费统计减掉管理员自己花的钱，转售的管理员 Key 照算收入，
+// 渠道测试（type 2、token_id 0、固定名字）只兜底扣不在管理员名下的；固定进账本的也是减过的 ----
+const ydayStart = COMPLETED_YESTERDAY.startMs / 1000;
+const usage = (id, quota, extra = {}) => ({ id, channel: 1, quota, created_at: ydayStart + 100 + id, token_name: "root-key", username: "root", ...extra });
+const manualYesterday = (f) => f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
+const sourceReads = (f) => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/" && request.sourceRead).length;
+
+test("R1 结账：渠道收费里管理员自己花的钱减掉再固定进账本，计算明细带上减掉的美元；累计和全站总额度相等时不重翻", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  // 渠道 1 的收费统计 250 额度，里面有管理员 root 花的 30 + 20，还有普通用户 alice 的（不减）
+  f.state.testLogs.push(usage(1, 30), usage(2, 20, { token_name: "other-key" }), usage(3, 77, { username: "alice", token_name: "alice-key" }));
+  const settled = (await manualYesterday(f)).results[0];
+  assert.equal(settled.downstream.quotaUnits, 200, "250 − 管理员的 50");
+  assert.equal(settled.downstream.amountUsd, 2);
+  assert.equal(settled.downstream.adminUsageAmountUsd, 0.5, "计算明细：其中管理员自用");
+  const row = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(row.detail.result.downstream.amountUsd, 2, "固定进账本的收入是减过的");
+  assert.equal(row.detail.result.downstream.adminUsageAmountUsd, 0.5);
+  assert.equal(sourceReads(f), 1, "有消费的只有 root：它的累计和全站总额度对上了，没有整段重翻；测试名字下总额度是 0，不翻列表");
+});
+
+test("R1 转售的管理员 Key 照样算收入：它名下的行不减", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  f.stations.find((station) => station.id === "own").resoldAdminKeys = [{ username: "root", tokenName: "resale-key" }];
+  f.state.testLogs.push(usage(1, 30), usage(2, 100, { token_name: "resale-key" }));
+  const settled = (await manualYesterday(f)).results[0];
+  assert.equal(settled.downstream.quotaUnits, 220, "只减 root 自己用的 30，转售那把的 100 照算收入");
+  assert.equal(settled.downstream.adminUsageAmountUsd, 0.3);
+});
+
+test("R1 兜底：渠道测试记录（token_id 0、固定名字）在普通用户名下的才减，在管理员名下的已经在管理员那一条里，不减两次", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  f.state.testLogs.push(
+    usage(1, 30, { token_name: "模型测试" }), // 管理员发起的测试：按管理员减一次
+    usage(2, 20, { token_name: "Model test", username: "alice" }), // 记在普通用户名下的测试：兜底减
+    usage(3, 999, { token_name: "模型测试", username: "alice", token_id: 7 }), // 普通用户自己的 Key 起了同名：token_id 不是 0，不减
+  );
+  const settled = (await manualYesterday(f)).results[0];
+  assert.equal(settled.downstream.quotaUnits, 250 - 30 - 20);
+  assert.equal(settled.downstream.adminUsageAmountUsd, 0.5);
+});
+
+test("R1 不是管理员的不减：用户列表里 role 小于 10 的名下的消费都算收入", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  f.state.testLogs.push(usage(1, 40, { username: "alice", token_name: "alice-key" }));
+  const settled = (await manualYesterday(f)).results[0];
+  assert.equal(settled.downstream.quotaUnits, 250);
+  assert.equal(settled.downstream.adminUsageAmountUsd, 0);
+  assert.equal(sourceReads(f), 0, "root 名下没有消费、测试名字下也没有：结账只查了总额度，没翻列表");
+});
+
+test("R1 结账对账不等（日志晚写、编号比上次小）：整段重翻，晚写的那条也扣掉", async (t) => {
+  let now = Date.parse("2026-10-08T12:00:00Z"); // 上海 10-08 20:00：这天还没过完，先在「今天」里把 root 的累计记下来
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  f.state.testLogs.push(usage(1, 30));
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" });
+  // 之后补进来一条编号更小、时间更早的晚写日志：接着翻（按编号停）碰到旧编号就停，漏了它
+  f.state.testLogs.push(usage(0, 15, { created_at: ydayStart + 50 }));
+  now = Date.parse("2026-10-09T03:00:00Z");
+  const settled = (await manualYesterday(f)).results[0];
+  assert.equal(settled.downstream.adminUsageAmountUsd, 0.45, "累计只有 30，全站总额度是 45，对不上，整段重翻，晚写的 15 也扣了");
+});
+
+test("R1 今天：按各来源上次的编号接着翻，没有新日志时每个来源只翻第一页；新日志只加新的", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  f.state.testLogs.push({ id: 1, channel: 1, quota: 40, created_at: todayStart + 60, token_name: "root-key", username: "root" });
+  const today = async () => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  const first = await today();
+  assert.equal(first.downstream.quotaUnits, 210, "今天的收入减掉了管理员的 40");
+  const afterFirst = sourceReads(f);
+  now += 60000;
+  f.state.testLogs.push({ id: 2, channel: 1, quota: 10, created_at: Math.floor(now / 1000) - 5, token_name: "root-key", username: "root" });
+  const second = await today();
+  assert.equal(second.downstream.quotaUnits, 200, "只加了新的 10，不是重算一遍");
+  assert.equal(sourceReads(f) - afterFirst, 1, "一轮只读管理员 root 那一个来源的一页；渠道测试名字两个兜底来源 10 分钟内读过的不再读");
+  now += 11 * 60000;
+  const afterSecond = sourceReads(f);
+  await today();
+  assert.equal(sourceReads(f) - afterSecond, 1, "过了 10 分钟，兜底来源只用 stat 比一下（全在管理员名下就不翻页），列表只读管理员 root 那一页");
+});
+
+test("R1 今天翻到一半失败（限流）：下一轮从下一页接着翻，翻完再按编号补上中间新写进来的；不会每轮从第 1 页重来（审核 R1 中-2）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  for (let id = 1; id <= 250; id += 1) f.state.testLogs.push({ id, channel: 1, quota: id === 1 || id === 250 ? 1 : 0, created_at: todayStart + id, token_name: "root-key", username: "root" }); // 额度小，只为数页数；第 1 条和最后一条各 1
+  const prev = globalThis.fetch, pages = [];
+  let failPageTwo = true;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/" && url.searchParams.get("username") === "root") {
+      pages.push(Number(url.searchParams.get("p")));
+      if (failPageTwo && url.searchParams.get("p") === "2") return { status: 500, text: async () => "{}" };
+    }
+    return prev(input, init);
+  });
+  const today = async () => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  await today();
+  assert.deepEqual(pages, [1, 2], "第 2 页失败");
+  failPageTwo = false; pages.length = 0;
+  now += 60000;
+  // 失败到下一轮之间又写进来 5 条：终点往后挪了，第 1 页要补，不能漏
+  for (let id = 251; id <= 255; id += 1) f.state.testLogs.push({ id, channel: 1, quota: 1, created_at: Math.floor(now / 1000) - 5, token_name: "root-key", username: "root" });
+  const second = await today();
+  assert.deepEqual(pages, [2, 3, 1], "先从第 2 页接着翻到底（用当时的终点），再按编号补一页新的，没有从第 1 页重来");
+  assert.equal(second.downstream.adminUsageQuotaUnits, 2 + 5, "第 2 页接着翻到的两条加后写进来的 5 条，一条不漏不重");
+});
+
+test("R1 今天翻完补页那次失败：下一轮从补页接着来，用补页的终点，不漏（审核 R1 中-2）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  for (let id = 1; id <= 250; id += 1) f.state.testLogs.push({ id, channel: 1, quota: id === 1 || id === 250 ? 1 : 0, created_at: todayStart + id, token_name: "root-key", username: "root" });
+  const prev = globalThis.fetch;
+  let pageTwoRequests = 0;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/" && url.searchParams.get("username") === "root" && url.searchParams.get("p") === "2") {
+      pageTwoRequests += 1;
+      // 第 1 次：第一轮翻到第 2 页失败；第 3 次：第二轮补页（新写进来的行有两页）补到第 2 页失败
+      if (pageTwoRequests === 1 || pageTwoRequests === 3) return { status: 500, text: async () => "{}" };
+    }
+    return prev(input, init);
+  });
+  const today = async () => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  await today();
+  now += 60000;
+  for (let id = 251; id <= 400; id += 1) f.state.testLogs.push({ id, channel: 1, quota: 1, created_at: Math.floor(now / 1000) - 5, token_name: "root-key", username: "root" });
+  await today();
+  now += 60000;
+  const third = await today();
+  assert.equal(third.downstream.adminUsageQuotaUnits, 2 + 150, "补页失败的下一轮接着补：新写的 150 条一条不漏");
+});
+
+test("R1 多条绑定各要一个渠道、日志很多：按渠道 stat 只查没查过的渠道，第一页只读一次；过去窗口后面的轮询不再发请求（审核 R1 中-3）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  for (let id = 1; id <= 1200; id += 1) f.state.testLogs.push(usage(id, id <= 2 ? 1 : 0, { channel: id % 2 ? 1 : 2 })); // 额度小，只为让页数多；总额度 2
+  const rootReads = () => f.state.requests.filter((request) => request.host === "own.test" && /^\/api\/log\//.test(request.path) && /username=root/.test(request.query));
+  const settle = (ruleId) => f.module.queryRules({ ruleIds: [ruleId], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
+  await settle("rr_live");
+  const afterFirst = rootReads().length;
+  await settle("rr_two");
+  const second = rootReads().slice(afterFirst);
+  assert.ok(second.every((request) => request.path === "/api/log/stat"), `第二条绑定没有再翻页或读第一页：${second.map((r) => r.path).join(",")}`);
+  const statChannels = second.filter((request) => /channel=/.test(request.query)).length;
+  assert.ok(statChannels <= 1, `第二条绑定只补查渠道 2 一次：${statChannels}`);
+  // 过去窗口：页面再看（非结账）不发请求
+  now += 5 * 60000;
+  const before = rootReads().length;
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page", force: true });
+  await f.module.queryRules({ ruleIds: ["rr_two"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page", force: true });
+  assert.equal(rootReads().length - before, 0, "过去窗口的管理员日志不再读");
+});
+
+test("R1 合并补查：绑定从只要渠道 1 到又要渠道 2，已经查过的渠道 1 的数不能丢（审核 R1 低-2）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  const dayBefore = ydayStart - 86400; // 10-07，没固定：每次都现读
+  for (let id = 1; id <= 1200; id += 1) f.state.testLogs.push(usage(id, id <= 2 ? 1 : 0, { channel: id % 2 ? 1 : 2, created_at: dayBefore + 100 + id }));
+  const window = { startMs: COMPLETED_YESTERDAY.startMs - 86400000, endMs: COMPLETED_YESTERDAY.startMs };
+  const view = async (ruleId) => (await f.module.queryRules({ ruleIds: [ruleId], preset: "custom", ...window }, { mode: "evaluate", origin: "page", force: true })).results[0];
+  assert.equal((await view("rr_live")).downstream.adminUsageQuotaUnits, 1, "渠道 1 上管理员自用 1");
+  assert.equal((await view("rr_two")).downstream.adminUsageQuotaUnits, 1, "渠道 2 上也是 1");
+  now += 40000; // 过了 30 秒，不走「刚读过直接用」，要走合并补查那条
+  assert.equal((await view("rr_live")).downstream.adminUsageQuotaUnits, 1, "合并了渠道 2 以后，渠道 1 的数还在");
+});
+
+test("R1 管理员自用扣没扣逐行判断：每天都扣了 / 有扣有没扣 / 一天都没扣，走 queryRules 都带 adminUsageDays，金额只加扣过的天（总指挥 10-25）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z"); // 开始统计 10-07 0 点；昨天 10-08
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  f.state.testLogs.push(usage(1, 30));
+  const day = (from, to) => ({ startMs: Date.parse(from), endMs: Date.parse(to) });
+  const twoDays = day("2026-10-06T16:00:00Z", "2026-10-08T16:00:00Z"), yesterday = day("2026-10-07T16:00:00Z", "2026-10-08T16:00:00Z");
+  const view = async (window) => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", ...window }, { mode: "evaluate", origin: "page", force: true })).results[0].downstream;
+  await manualYesterday(f);
+  // 10-08 是 R1 以后固定的（扣过），10-07 现读（扣了）：每天都扣
+  const all = await view(twoDays);
+  assert.deepEqual([all.adminUsageDays, all.adminUsageAmountUsd], [{ deducted: 2, undeducted: 0 }, 0.3]);
+  // 把 10-08 那一行改成 R1 以前的样子（没有管理员自用这个数）：有扣有没扣，金额只加 10-07 现读的（0）
+  const stored = f.repository.tables.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  const detail = JSON.parse(stored.detail);
+  delete detail.result.downstream.adminUsageQuotaUnits; delete detail.result.downstream.adminUsageAmountUsd; delete detail.result.downstream.adminUsageDays;
+  for (const channel of detail.result.downstream.channels || []) { delete channel.adminUsageQuotaUnits; delete channel.adminUsageAmountUsd; }
+  stored.detail = JSON.stringify(detail);
+  f.module.invalidateSources(); // 结果缓存清掉，下一次从账本读
+  const mixed = await view(twoDays);
+  assert.deepEqual([mixed.adminUsageDays, mixed.adminUsageAmountUsd], [{ deducted: 1, undeducted: 1 }, 0]);
+  // 只看 10-08 一天：账本那一行没有这个数 = 没扣
+  const none = await view(yesterday);
+  assert.equal(none.adminUsageAmountUsd, undefined);
+});
+
+test("R1「今天」读用户列表或管理员日志短暂失败：10 分钟内沿用上一份、不报读不到，超过 10 分钟才读不到（总指挥 10-25）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  f.state.testLogs.push({ id: 1, channel: 1, quota: 40, created_at: todayStart + 60, token_name: "root-key", username: "root" });
+  const prev = globalThis.fetch;
+  let broken = false;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (broken && url.host === "own.test" && (url.pathname === "/api/user/" || ownSourceRead(url))) return { status: 500, text: async () => "{}" };
+    return prev(input, init);
+  });
+  const today = async () => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  const first = await today();
+  assert.equal(first.downstream.quotaUnits, 210);
+  broken = true;
+  now += 5 * 60000;
+  f.module.invalidateSources();
+  const stale = await today();
+  assert.equal(stale.downstream.quotaUnits, 210, "失败：5 分钟内沿用上一份的扣减，照样出数");
+  assert.equal(stale.health.code, "READY");
+  now += 6 * 60000; // 离上一次读到已经 11 分钟
+  const late = await today();
+  assert.notEqual(late.downstream.state, "complete", "超过 10 分钟才读不到");
+});
+
+test("R1 轮询：新消费来了、管理员日志读失败、之后一直没有新消费——沿用的结果不进缓存，第 10 分钟必须读不到（审核第四轮：撤掉「不进缓存」这条用例要失败）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  f.state.testLogs.push({ id: 1, channel: 1, quota: 40, created_at: todayStart + 60, token_name: "root-key", username: "root" });
+  f.state.latestLogProbe = true; // 轮询要读最新一条消费日志，才知道站点安不安静（安静时直接沿用记下的收入）
+  const prev = globalThis.fetch;
+  let broken = false, brokenReads = 0;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (broken && url.host === "own.test" && ownSourceRead(url)) { brokenReads += 1; return { status: 500, text: async () => "{}" }; }
+    return prev(input, init);
+  });
+  const poll = async () => { await f.module.refreshDue(now); return (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", origin: "poll" })).results[0]; };
+  assert.equal((await poll()).downstream.state, "complete");
+  // 一分钟后来了新消费（站点不再「安静」），这时管理员日志读失败：沿用上一份，出数
+  now += 60000;
+  f.state.testLogs.push({ id: 2, channel: 1, quota: 10, created_at: Math.floor(now / 1000) - 5, token_name: "root-key", username: "root" });
+  broken = true;
+  assert.equal((await poll()).downstream.state, "complete", "10 分钟内沿用");
+  // 之后一直没有新消费：沿用的那份不能被当成「没有新消费、结果不变」一直用下去（站点「安静」时轮询会直接沿用记下的收入）
+  now += 5 * 60000;
+  await f.module.refreshDue(now);
+  now += 6 * 60000; // 离上一次读成功已经 11 分钟
+  const reads = brokenReads;
+  await f.module.refreshDue(now);
+  assert.ok(brokenReads > reads, "沿用的结果没进缓存：这一轮要重新去读管理员日志（读不到，今天这一格才会说读不到），不是直接用缓存");
+  assert.notEqual((await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0].downstream.state, "complete", "超过 10 分钟读不到");
+});
+
+test("R1「今天」读用户列表碰到 401（令牌坏了）不沿用上一份：马上读不到，不当短暂失败（审核 R1 第三轮低-1）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const prev = globalThis.fetch;
+  let broken = false;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (broken && url.host === "own.test" && url.pathname === "/api/user/") return { status: 401, text: async () => JSON.stringify({ success: false, message: "unauthorized" }) };
+    return prev(input, init);
+  });
+  const today = async () => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  assert.equal((await today()).downstream.state, "complete");
+  broken = true;
+  now += 5 * 60000;
+  f.module.invalidateSources();
+  f.rt._ownUsersCache = null; // 用户列表的 10 分钟缓存也清掉，下一次一定要重新读
+  assert.notEqual((await today()).downstream.state, "complete", "401 不沿用上一份");
+});
+
+test("R1 同一轮几条绑定「今天」的终点差几秒：后定终点的先记下以后，先定终点的那条也能接着用更早的一份，不整段重读（审核 R1 中-4）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  for (let id = 1; id <= 250; id += 1) f.state.testLogs.push({ id, channel: id % 2 ? 1 : 2, quota: id <= 2 ? 1 : 0, created_at: todayStart + 60 + id, token_name: "root-key", username: "root" });
+  const today = async (ruleId) => (await f.module.queryRules({ ruleIds: [ruleId], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  await today("rr_live"); // 第一轮：整段读（3 页），记下终点 E0
+  now += 60000;
+  await today("rr_live"); // 第二轮里终点晚的先到：E1 = E0 + 60 秒
+  const before = sourceReads(f);
+  now -= 5000; // 终点早 5 秒的另一条绑定后到：终点 E1 − 5 秒，还是晚于 E0
+  await today("rr_two");
+  assert.ok(sourceReads(f) - before <= 1, `接着用 E0 那份，只读新来的一页：${sourceReads(f) - before}`);
+});
+
+test("R1 渠道测试名字兜底来源：测试日志全在管理员名下，不翻一页，每个窗口只用 1 + 管理员数 个 stat；有不在管理员名下的才翻页，扣的数对（审核 CI：三个接口超时）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  const tokenPages = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/" && /token_name=/.test(request.query)).length;
+  const tokenStats = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && /token_name=/.test(request.query)).length;
+  // 渠道测试全记在管理员 root 名下（很多页）
+  for (let id = 1; id <= 250; id += 1) f.state.testLogs.push(usage(id, id <= 2 ? 1 : 0, { token_name: "模型测试", token_id: 0 }));
+  const first = (await manualYesterday(f)).results[0];
+  assert.equal(first.downstream.adminUsageQuotaUnits, 2, "管理员 root 名下的测试扣了 2");
+  assert.equal(tokenPages(), 0, "兜底来源一页都不翻");
+  assert.ok(tokenStats() <= 4, `两个测试名字，各 1 + 1 个管理员 = 4 个 stat：${tokenStats()}`);
+  // 10-07（没固定，每次现读）：有一条测试日志记在普通用户 alice 名下（不在管理员名下）：这个来源才翻页，兜底扣它
+  const dayBefore = ydayStart - 86400;
+  f.state.testLogs.push(usage(1001, 1, { created_at: dayBefore + 100, token_name: "模型测试", token_id: 0 }), usage(1002, 5, { created_at: dayBefore + 101, username: "alice", token_name: "模型测试", token_id: 0 }));
+  const before = tokenPages();
+  const second = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs - 86400000, endMs: COMPLETED_YESTERDAY.startMs }, { mode: "evaluate", origin: "page", force: true })).results[0];
+  assert.ok(tokenPages() > before, "有不在管理员名下的：翻页");
+  assert.equal(second.downstream.adminUsageQuotaUnits, 1 + 5, "root 名下的 1，加兜底扣掉不在管理员名下的 5");
+});
+
+test("R1 读不到用户列表或管理员日志：这一天算不出收入、不固定，下次重试；不拿没减的数固定进账本", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  const prev = globalThis.fetch;
+  let broken = "users";
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && ((broken === "users" && url.pathname === "/api/user/") || (broken === "logs" && ownSourceRead(url)))) return { status: 500, text: async () => "{}" };
+    return prev(input, init);
+  });
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 0, "读不到用户列表：没固定");
+  broken = "logs";
+  now += 10 * 60000;
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 0, "读不到管理员日志：没固定");
+  assert.ok(f.repository.tables.settlementState.some((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08"), "留了状态行，会重试");
+  broken = null;
+  now += 30 * 60000;
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 1, "读得到了，下一次固定");
+});
+
+test("R1 转售 Key 所属用户在用户列表里不是管理员：忽略这条标记，什么都不扣不加，照常固定（总指挥 10-25）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  f.stations.find((station) => station.id === "own").resoldAdminKeys = [{ username: "alice", tokenName: "alice-key" }];
+  const settled = (await manualYesterday(f)).results[0];
+  assert.notEqual(settled.calculation.profitUsd, null, "没有「读不到」，能固定");
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 1);
+  assert.equal(settled.downstream.quotaUnits, 250, "收入就是渠道收费，没有额外的扣或加");
+});
+
+test("R1 多天范围按天拼：已经固定的天用账本里存的（扣过管理员自用的）净额，只有没固定的天现读；多天收入是几天每一行加起来", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z"); // 开始统计 10-07 0 点；昨天 10-08 先固定，10-07 没固定
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  f.state.testLogs.push(usage(1, 30)); // 10-08 里管理员花了 30
+  const settled = (await manualYesterday(f)).results[0];
+  assert.equal(settled.downstream.quotaUnits, 220, "10-08 固定的是减过管理员自用的净额");
+  const twoDays = { startMs: Date.parse("2026-10-06T16:00:00Z"), endMs: COMPLETED_YESTERDAY.endMs };
+  const channelStats = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && !request.sourceRead).length;
+  const before = { stats: channelStats(), sources: sourceReads(f) };
+  const range = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", ...twoDays }, { mode: "evaluate", origin: "page" })).results[0];
+  // 10-07 现读：渠道统计 250、管理员没花（日志都在 10-08）；10-08 用账本里的 220
+  assert.equal(range.downstream.quotaUnits, 250 + 220, "两天每一行加起来：10-07 现读 250 + 10-08 账本 220");
+  assert.equal(channelStats() - before.stats, 1, "渠道收费统计只现读了没固定的 10-07 一天，10-08 没再读");
+  assert.equal(range.downstream.adminUsageAmountUsd, 0.3, "管理员自用也是两天加起来：10-08 账本里的 0.3 加 10-07 的 0");
+  assert.equal(range.downstream.state, "complete");
+});
+
+test("R1 从同一天起点查更长的范围，不能拿刚读的一天的结果：缓存只在终点相差不到 30 秒时沿用（审核 R1 实测少减了 49430 额度）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  f.state.testLogs.push(usage(1, 30), { id: 2, channel: 1, quota: 20, created_at: COMPLETED_YESTERDAY.endMs / 1000 + 100, token_name: "root-key", username: "root" });
+  // 先查昨天（读了一遍，记下「从昨天 0 点到昨天结束」）；30 秒内再查从昨天 0 点到今天早上的范围
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page", force: true });
+  const longer = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs + 6 * 3600000 }, { mode: "evaluate", origin: "page", force: true })).results[0];
+  assert.equal(longer.downstream.adminUsageAmountUsd, 0.5, "两段里管理员花的 30 和 20 都减了；拿昨天那一份只减 30");
+});
+
+test("R1 结账翻到一半失败（限流、网络）：下一轮从下一页接着翻，不从头；这一天这一轮不固定", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  // 要算 3 个渠道、root 一天 250 条（3 页）：翻页（3 次）不比按渠道 stat（3 次）多，走翻页
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1, 2, 3], rr_two: [2], rr_three: [3] }, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  for (let id = 1; id <= 250; id += 1) f.state.testLogs.push(usage(id, 1)); // 都在渠道 1
+  const prev = globalThis.fetch, pages = [];
+  let failPageTwo = true;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    // 只看昨天那段窗口的（今天的观测也会读 root，不是这里要看的）
+    if (url.host === "own.test" && url.pathname === "/api/log/" && url.searchParams.get("username") === "root" && url.searchParams.get("start_timestamp") === String(ydayStart)) {
+      pages.push(Number(url.searchParams.get("p")));
+      if (failPageTwo && url.searchParams.get("p") === "2") return { status: 500, text: async () => "{}" };
+    }
+    return prev(input, init);
+  });
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 0, "翻到一半失败，没固定");
+  assert.deepEqual(pages, [1, 2]);
+  failPageTwo = false; pages.length = 0;
+  now += 10 * 60000;
+  await f.module.refreshDue(now);
+  assert.deepEqual(pages, [2, 3], "从第 2 页接着翻，第 1 页不再读");
+  const row = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(row.detail.result.downstream.quotaUnits, 3 * 250 - 250, "三个渠道各 250，减掉 root 的 250");
+});
+
+test("R1 取数选法：整段读管理员日志，翻页要的页数比按渠道 stat 的次数多时改按渠道 stat（第一页读了就停，不再翻）；少时翻页；结果一样", async (t) => {
+  const run = async (rows) => {
+    let now = Date.parse("2026-10-09T03:00:00Z");
+    const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+    for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+    for (let id = 1; id <= rows; id += 1) f.state.testLogs.push(usage(id, 1));
+    const seen = [];
+    const prev = globalThis.fetch;
+    t.mock.method(globalThis, "fetch", async (input, init) => {
+      const url = new URL(String(input));
+      if (url.host === "own.test" && url.searchParams.get("username") === "root" && url.searchParams.get("start_timestamp") === String(ydayStart)) seen.push(`${url.pathname}?p=${url.searchParams.get("p")}&channel=${url.searchParams.get("channel")}`);
+      return prev(input, init);
+    });
+    const settled = (await manualYesterday(f)).results[0];
+    return { settled, seen };
+  };
+  // 120 行：2 页，要算 1 个渠道 → 按渠道 stat 1 次 < 2 页：读了第一页就停，改查 stat
+  const heavy = await run(120);
+  assert.equal(heavy.settled.downstream.quotaUnits, 250 - 120, "两种办法数一样");
+  assert.deepEqual(heavy.seen.filter((item) => item.startsWith("/api/log/?")), ["/api/log/?p=1&channel=null"], "只读了第一页，没翻第二页");
+  assert.ok(heavy.seen.some((item) => item.startsWith("/api/log/stat?") && item.endsWith("channel=1")), "按渠道查了 stat");
+  // 50 行：1 页，stat 1 次不比 1 页少 → 翻页
+  const light = await run(50);
+  assert.equal(light.settled.downstream.quotaUnits, 250 - 50);
+  assert.ok(!light.seen.some((item) => item.includes("channel=1")), "没有按渠道查 stat");
+});
+
+test("R1 按渠道 stat 读的只覆盖当时要算的渠道：同一个站点同一天别的绑定要算别的渠道时，合起来重读，不拿没覆盖的当 0", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1], rr_two: [2], rr_three: [3] }, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  for (let id = 1; id <= 120; id += 1) f.state.testLogs.push(usage(id, 1, { channel: id % 2 === 0 ? 1 : 2 })); // root 在渠道 1、2 上各 60
+  const manual = (ruleId) => f.module.queryRules({ ruleIds: [ruleId], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
+  const first = (await manual("rr_live")).results[0];
+  assert.equal(first.downstream.quotaUnits, 250 - 60, "渠道 1：250 − root 的 60");
+  const second = (await manual("rr_two")).results[0];
+  assert.equal(second.downstream.quotaUnits, 250 - 60, "渠道 2 也要减 root 的 60，不是 0（第一份只覆盖渠道 1）");
 });
 
 test("C2a 结账（settle）只写账本和状态行：不写观测快照、渠道状态、分段，不发告警", async (t) => {

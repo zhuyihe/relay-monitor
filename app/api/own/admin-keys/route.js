@@ -3,7 +3,7 @@ import { withAuth, json } from "../../../../lib/api.js";
 import { ownStationErrorCode } from "../../../../lib/error-copy.js";
 import { OWN_STATION_UNSET } from "../../../../lib/format.js";
 import { queryAdminTokens } from "../../../../lib/providers.js";
-import { ownCache, getOwnUsers } from "../../../../server/own-helpers.js";
+import { ownCache, getOwnUsers, dedupeResoldKeys } from "../../../../server/own-helpers.js";
 
 // 列出所有管理员/root 账号（role>=10）名下的 API Key，标注哪些已被标记为转售。
 export const GET = withAuth(async (request, rt) => {
@@ -52,7 +52,7 @@ export const PUT = withAuth(async (request, rt) => {
   const own = store.list().find((s) => s.isOwn && s.type === "newapi");
   if (!own) return json({ error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }, 400);
   const body = await request.json().catch(() => ({}));
-  const keys = Array.isArray(body?.keys) ? body.keys : [];
+  const keys = dedupeResoldKeys(body?.keys);
   await store.update(own.id, { resoldAdminKeys: keys });
   ownCache(rt).clear(); // 影响利润口径，清缓存让下次分析重算
   return json({ resoldAdminKeys: own.resoldAdminKeys });
