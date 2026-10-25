@@ -82,6 +82,8 @@ const ALLOWED_ENGLISH = /New API|Sub2API|「API 密钥」|Key|ID|Token|UTC 时�
 // SMTP 服务器的例子、请求头的 JSON 格式），只在这个文件放行，别处照样卡
 const ENGLISH_ALLOWED_IN = Object.freeze({
   "lib/notify.js": /Telegram|Server酱|Resend|SMTP|smtp\.gmail\.com|Webhook|ntfy|JSON 格式|re_ 开头/g,
+  // 新式访问令牌「作废」那句说明里的 nap_ 开头（用语规范 §5.2）
+  "lib/reconciliation-contract.js": /nap_ 开头/g,
 });
 const leftoverEnglish = (file, text) =>
   /[A-Za-z]/.test((ENGLISH_ALLOWED_IN[file] ? text.replace(ENGLISH_ALLOWED_IN[file], "") : text).replace(ALLOWED_ENGLISH, ""));
