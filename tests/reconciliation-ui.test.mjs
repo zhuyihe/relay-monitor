@@ -2764,7 +2764,7 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
   // 手机上一张卡片两行：名称、状态、「⋯」；余额 · 可用天数。有要处理的事时多一行：标题和按钮。小图、刷新、编辑都在「⋯」里
   const mobile = await openFixturePage(t, handler, { width: 390, height: 844 }, false, accounts, "/stations");
   const card = (name) => mobile.locator(".jy-stations-m li", { hasText: name }).first();
-  await card("Only 上游").getByRole("button", { name: `${TEST_READ}（Only 上游）`, exact: true }).waitFor();
+  await card("Only 上游").getByRole("button", { name: `${TEST_READ}：${OWNER_TWO}（Only 上游）`, exact: true }).waitFor();
   assert.ok((await card("Fresh 上游").boundingBox()).height <= 90, "没有事的卡片两行");
   for (const name of ["Only 上游", "Todo 上游"]) assert.ok((await card(name).boundingBox()).height <= 120, `${name} 的卡片三行`);
   // 读不到余额又有事：第三行照样写事的标题，不只剩一个按钮
@@ -3485,7 +3485,8 @@ test("告警中心 8 + 4、系统设置两栏（1440）：通知方式一个一�
   await page.setViewportSize({ width: 1440, height: 900 });
   const region = (name) => page.getByRole("region", { name, exact: true });
   const [rulesP, chP, reportP] = [region(NOTIFICATIONS_COPY.rules), region(NOTIFICATIONS_COPY.channels), region(NOTIFICATIONS_COPY.report)];
-  await rulesP.waitFor(); await chP.waitFor(); await reportP.waitFor();
+  // 等读到数据（骨架的块名一样）：规则的开关、通知方式那一行、日报的开关
+  await rulesP.getByRole("switch").first().waitFor(); await chP.locator(".jy-notifications-chlist > li").first().waitFor(); await reportP.getByRole("switch").first().waitFor();
   // 左 8 列提醒规则；右 4 列通知方式在上、日报在下
   const [r, c, d] = [await rulesP.boundingBox(), await chP.boundingBox(), await reportP.boundingBox()];
   assert.ok(c.x > r.x + r.width && Math.abs(c.x - d.x) < 1, "通知方式、日报在提醒规则右边一栏");
@@ -3505,7 +3506,7 @@ test("告警中心 8 + 4、系统设置两栏（1440）：通知方式一个一�
   await pace.click(); await rulesP.getByLabel(NOTIFICATIONS_COPY.renotify, { exact: true }).waitFor();
   // 手机：通知方式在最前，然后提醒规则、日报（页面里就换了先后，读屏、键盘跟着走）
   await page.setViewportSize({ width: 390, height: 844 }); await page.reload();
-  await chP.waitFor(); await rulesP.waitFor(); await reportP.waitFor();
+  await rulesP.getByRole("switch").first().waitFor(); await chP.locator(".jy-notifications-chlist > li").first().waitFor(); await reportP.getByRole("switch").first().waitFor();
   const order = await page.locator(".jy-page > .jy-panel, .jy-page > section").evaluateAll((els) => els.map((el) => el.getAttribute("aria-label") || el.querySelector("h2")?.textContent?.trim()));
   const at = (name) => order.findIndex((x) => x && x.startsWith(name));
   assert.ok(at(NOTIFICATIONS_COPY.channels) >= 0 && at(NOTIFICATIONS_COPY.channels) < at(NOTIFICATIONS_COPY.rules) && at(NOTIFICATIONS_COPY.rules) < at(NOTIFICATIONS_COPY.report), order.join(" / "));
