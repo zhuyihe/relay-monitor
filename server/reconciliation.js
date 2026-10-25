@@ -799,15 +799,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const base = { kind: source.kind, name: source.name, startMs: window.startMs, endMs: window.endMs };
         // 窗口已经在过去的整段读：翻到一半失败（限流、网络）把进度记下，下一轮从下一页接着翻，不从头（审核 R1：一天约 432 页，限流 360 个/180 秒）
         const closed = window.endMs <= Date.now() - RECONCILIATION_SETTLE_DELAY_MS;
-        const pendingKey = JSON.stringify([id, window.endMs]);
+        // 今天的窗口终点每轮往后挪：进度记在「今天」一份上，接着翻时仍用当时的终点（用新终点，页码会被新写进来的行挤歪、前面几页的新行漏掉），
+        // 翻完再按编号增量补一次到现在（审核 R1 中-2：一个来源一天超过约 360 页，限流下每轮从第 1 页重来永远翻不完）
+        const pendingKey = JSON.stringify(closed ? [id, window.endMs] : [id, "open"]);
         const read = async (from, shouldContinue = null) => {
-          const resume = !from && closed ? entry.pending.get(pendingKey) ?? null : null;
+          const resume = !from ? entry.pending.get(pendingKey) ?? null : null;
+          const readEndMs = resume?.endMs ?? window.endMs;
           try {
-            const part = await queryOwnLogSource(own, { ...base, previous: from, resume, shouldContinue });
+            let part = await queryOwnLogSource(own, { ...base, endMs: readEndMs, previous: from, resume, shouldContinue });
             entry.pending.delete(pendingKey);
+            if (part && readEndMs < window.endMs) part = await queryOwnLogSource(own, { ...base, previous: part });
             return part;
           } catch (err) {
-            if (!from && closed && err?.resume) entry.pending.set(pendingKey, err.resume);
+            if (!from && err?.resume) entry.pending.set(pendingKey, { ...err.resume, endMs: readEndMs });
             throw err;
           }
         };

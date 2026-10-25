@@ -7108,6 +7108,33 @@ test("R1 今天：按各来源上次的编号接着翻，没有新日志时每�
   assert.equal(sourceReads(f) - afterSecond, 3, "过了 10 分钟，兜底来源也接着读一页：root、两个测试名字各一页");
 });
 
+test("R1 今天翻到一半失败（限流）：下一轮从下一页接着翻，翻完再按编号补上中间新写进来的；不会每轮从第 1 页重来（审核 R1 中-2）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  for (let id = 1; id <= 250; id += 1) f.state.testLogs.push({ id, channel: 1, quota: id === 1 || id === 250 ? 1 : 0, created_at: todayStart + id, token_name: "root-key", username: "root" }); // 额度小，只为数页数；第 1 条和最后一条各 1
+  const prev = globalThis.fetch, pages = [];
+  let failPageTwo = true;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/" && url.searchParams.get("username") === "root") {
+      pages.push(Number(url.searchParams.get("p")));
+      if (failPageTwo && url.searchParams.get("p") === "2") return { status: 500, text: async () => "{}" };
+    }
+    return prev(input, init);
+  });
+  const today = async () => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  await today();
+  assert.deepEqual(pages, [1, 2], "第 2 页失败");
+  failPageTwo = false; pages.length = 0;
+  now += 60000;
+  // 失败到下一轮之间又写进来 5 条：终点往后挪了，第 1 页要补，不能漏
+  for (let id = 251; id <= 255; id += 1) f.state.testLogs.push({ id, channel: 1, quota: 1, created_at: Math.floor(now / 1000) - 5, token_name: "root-key", username: "root" });
+  const second = await today();
+  assert.deepEqual(pages, [2, 3, 1], "先从第 2 页接着翻到底（用当时的终点），再按编号补一页新的，没有从第 1 页重来");
+  assert.equal(second.downstream.adminUsageQuotaUnits, 2 + 5, "第 2 页接着翻到的两条加后写进来的 5 条，一条不漏不重");
+});
+
 test("R1 读不到用户列表或管理员日志：这一天算不出收入、不固定，下次重试；不拿没减的数固定进账本", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
