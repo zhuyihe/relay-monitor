@@ -7,7 +7,7 @@
 监控 **sub2api** 与 **new-api** 类中转站余额的自托管面板。
 **v2 技术栈**：Next.js 16 全栈（App Router + Route Handlers）+ Ant Design Pro（antd 6 + pro-components）+ MySQL 持久化，浅色 / 深色双主题。
 
-接上自营的 New API 站点以后，还能按天算每个渠道赚了多少（每日利润）。
+界面上叫「炬元控制台」。接上自营的 New API 站点以后，还能按天算每个渠道赚了多少（每日利润）。
 
 后端逻辑（站点适配、告警、预测、日报）从 v1 平移而来；存储从 JSON 文件升级为 MySQL（余额历史落表，供经营分析 SQL 聚合）。
 
@@ -30,7 +30,7 @@
 - **成本估算**：按余额的变化估出上游成本（不是上游的实际账单），加上按天平摊的固定成本；收入与上游成本的趋势、花费时段（星期 × 小时）、可用天数。
 - **每日利润**：用自营站点各渠道的收费记录和上游每把 Key 的实际账单，算每条绑定每天的毛利（收入 − 上游成本；一条绑定是上游的一把 Key 和用它的渠道）。每天只有三种状态：实时、已固定、需处理（[用语规范](design/ui-copy-spec.md) §4）。这里算的是账面毛利，不是现金收支：控制台没有记采购和现金的账，充值、余额变化和手填的固定成本只能作参考。
 - **告警中心**：
-  - 余额提醒：余额偏低、余额用完、读不到余额、快用完、恢复正常。连续读不到几次才提醒；上游标了「不再续费」，余额偏低只提醒一次；每种提醒可以选发给哪几个通知方式。
+  - 提醒规则：余额偏低、余额用完、读不到余额、快用完、恢复正常。连续读不到几次才提醒；上游标了「不再续费」，余额偏低只提醒一次；每种提醒可以选发给哪几个通知方式。
   - 通知方式 10 种：Telegram、钉钉（加签）、企业微信、飞书（签名）、Bark、ntfy、Server酱、Resend 邮件、SMTP 邮件（零依赖客户端）、自定义 Webhook，每个都能发测试消息。
   - 日报的设置也在这里（日报写什么见下面）。这一页改了马上保存。
 - **系统设置**：刷新间隔、历史数据保留、修改密码、软件版本。
@@ -51,13 +51,13 @@
 
 现在要做三件事，都在「上游资源」里：
 
-1. 设好自营站点：新增或编辑你自己的 New API 站点，打开「这是我的自营站点」；
+1. 设好自营站点：新增或编辑你自己的 New API 站点，填超级管理员的访问令牌，打开「这是我的自营站点」；
 2. 加上游：「新增上游」，填站点地址和登录信息；
-3. 绑定：在「渠道绑定」页签勾上渠道，点「去绑定」，选上游和它的 Key，回答「这把 Key 还给别处用吗？」，确认绑定。
+3. 绑定：在「渠道绑定」页签勾上渠道，点「去绑定」，勾上「算利润」，选上游和它的 Key，回答「这把 Key 还给别处用吗？」（不是固定成本的上游，答「只给这些渠道用」才算利润），确认绑定。另外，每个上游还要在「上游账单」页签里测试读取一次（选一把 Key、填按哪个时区算一天）。
 
-之后「每日利润」按天算每条绑定的毛利。现在从零开始一共约 38 步，明细见[体检](design/ui-audit.md) §8.2 流程一到三。
+之后「每日利润」按天算每条绑定的毛利。现在从零开始一共约 38 步：34 步的明细在[体检](design/ui-audit.md) §8.2 流程一到三，另外 4 步（测试读取那几步）在[流程梳理稿](design/ux/binding-flow.md)第 6 节。
 
-以后会简化成三步：设置自营站点、加上游、开始算利润，一共点或填 9 下，换 Key 不用管，见[流程梳理稿](design/ux/binding-flow.md)。
+以后会简化：先由管你站服务器的人装一次「渠道 Key 读取服务」，然后三步（设置自营站点、加上游、开始算利润），一共点或填 9 下；上游账号答了「只给我的渠道用」的，换 Key 也不用管。见[流程梳理稿](design/ux/binding-flow.md)。
 
 ## 支持的上游类型
 
@@ -71,7 +71,9 @@
 
 ## 运行
 
-不用 Docker、直接跑时，需要一个 **MySQL 8+** 实例（自备）；用 Docker 部署时 MySQL 随 compose 一起起，见下面「Docker 部署」。
+部署说明是按 Docker 写的，上线照下面「Docker 部署」做，MySQL 随 compose 一起起。
+
+不用 Docker、直接跑时，需要一个 **MySQL 8+** 实例（自备）：先在里面建好库和账号，并给这个账号这个库的全部权限（程序只建表，不建库）。[`.env.example`](.env.example) 就是给这种方式用的，它没有 `DB_ROOT_PASSWORD`，不能拿来当 Docker 的 `.env`。
 
 ```bash
 cp .env.example .env.local        # 填入 DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME
@@ -94,7 +96,7 @@ v1 的 `data/` 目录（stations.json / history.json / secret.key）可一次性
 
 ## Docker 部署（含 Watchtower 自动更新）
 
-镜像随 main 分支推送自动构建：`ghcr.io/zhuyihe/relay-monitor:latest`（和 `deploy/docker-compose.yml` 里的一样）。
+镜像随 main 分支推送自动构建：`ghcr.io/zhuyihe/relay-monitor:latest`（和 [`deploy/docker-compose.yml`](deploy/docker-compose.yml) 里的一样）。镜像是公开的，拉的时候不用登录。
 
 ```bash
 mkdir -p ~/relay-monitor && cd ~/relay-monitor
@@ -106,9 +108,11 @@ docker compose up -d
 ```
 
 - 对外只能通过 HTTPS 反向代理开放。compose 把应用端口绑在本机的 `127.0.0.1:8787`，给同一台机器上的反向代理用，不要直接开到公网。
-- `TRUST_PROXY` 默认不开：只有应用端口不能被公网直连、反向代理又会清理外部伪造的转发头时，才设成 `true`。
+- 照上面这样部署（应用端口只绑本机，前面的反向代理覆盖转发头）时，要在 `.env` 里设 `TRUST_PROXY=true` 并重建应用容器，登录用的 Cookie 才会带 `Secure`；这两个条件有一个不满足，就别设。
+- 库名和账号密码第一次启动前就定好：compose 里的 MySQL 只在第一次建 `mysql-data/` 时按 `.env` 建账号，之后改 `.env` 不会改库里的账号。
+- 业务时区在 compose 文件里改（应用的 `BUSINESS_TIME_ZONE` 和 db 的 `TZ` 一起改），写进 `.env` 不起作用。
 - 这几条怎么配、上线前怎么核验，见[部署说明](deploy/README.md)。
-- compose 给 watchtower 挂了 `docker login` 的凭证（`/root/.docker/config.json`），拉私有镜像时用，说明在 compose 的注释里。
+- compose 给 watchtower 挂了 `docker login` 的凭证（`/root/.docker/config.json`），换成私有镜像时才用得上，说明在 compose 的注释里。
 
 已经在跑的部署：先确认 compose 文件里有 `- RELAY_SECRET_KEY=${RELAY_SECRET_KEY:-}` 这一行（Watchtower 不会更新 compose 文件），否则 `.env` 里的密钥传不进容器。整目录备份时排除 `.env`，别让密钥和 `mysql-data/` 进同一份备份。开启后的收尾、密钥丢了怎么办，见 [deploy/README.md「登录信息加密」](deploy/README.md#登录信息加密)。
 
