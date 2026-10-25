@@ -1502,7 +1502,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const [upstreamResult, downstreamResult] = await Promise.all([
           // 上游读不到（只有固定成本会走到这里）：不取上游，问题已经在上面记了一次
           upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
-            : upstreamWindowFor(upstream, metadata, token, segmentWindow, { readOnly: !observe || settle }).catch((error) => ({ error })),
+            // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
+            : upstreamWindowFor(upstream, metadata, token, segmentWindow, { readOnly: !observe }).catch((error) => ({ error })),
           (ownAvailable
             ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue })
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
@@ -2127,21 +2128,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   async function settleDue({ yesterday, older, recheck = [], budget }, ownerRegistry) {
     const sourceVersion = ownerRegistry.billingSource.version;
     await mapWithConcurrency(recheck, MAX_CONCURRENT_RULES, async ({ rule, window, state }) => {
-      let probed;
+      let probed = null;
       try { probed = await inspectRule(rule.id, window, { mode: "settle", probe: true, origin: "poll", ownerRegistry }); } catch (err) {
-        if (err?.code !== "RULE_NOT_FOUND") console.error("重判结账状态失败:", err?.message || String(err));
-        return;
+        if (err?.code === "RULE_NOT_FOUND") return;
+        console.error("重判结账状态失败:", err?.message || String(err));
       }
-      if (!probed?.probe) return;
-      const next = settlementRecheck({ window, state, blocker: probed.blocker, now: Date.now(), sourceVersion });
+      // 没判出来（出错、还没锚定、口径正在改）：照原因还在处理，10 分钟后再判，不每轮重来
+      const blocker = probed?.probe ? probed.blocker : state.manualReason;
+      const next = settlementRecheck({ window, state, blocker, now: Date.now(), sourceVersion });
       try { await repository.recordSettlementState(rule.id, billDayOf(window), next); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
     });
     const settle = async ({ rule, window, state, resettle, trigger }) => {
       const result = await settleDay(rule, window, { origin: "poll", ownerRegistry, state, resettle, trigger }).catch(() => null);
-      if (resettle) {
-        if (result?.calculation?.profitUsd != null) { resettles.delete(rule.id); resettleRetryAt.delete(rule.id); }
-        else resettleRetryAt.set(rule.id, Date.now() + settleRetryDelayMs(1, { window, now: Date.now() }));
-      }
+      // 昨天这一轮结成了（带不带重结标记都一样）：这条绑定的重结请求也就办完了
+      if (trigger == null && result?.calculation?.profitUsd != null) { resettles.delete(rule.id); resettleRetryAt.delete(rule.id); }
+      else if (resettle) resettleRetryAt.set(rule.id, Date.now() + settleRetryDelayMs(1, { window, now: Date.now() }));
       return result;
     };
     await mapWithConcurrency(yesterday, MAX_CONCURRENT_RULES, settle);
@@ -2375,6 +2376,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 停用、删除了的绑定不会再写「今天」快照，它们的指纹不留
       const live = new Set(rules.map((rule) => rule.id));
       for (const key of observationWrites.keys()) if (!live.has(key.slice(0, key.indexOf(":")))) observationWrites.delete(key);
+      // 停用、删除了的绑定不会再结账，重结请求也不留
+      for (const id of [...resettles]) if (!live.has(id)) { resettles.delete(id); resettleRetryAt.delete(id); }
       // 先定这一轮要结哪些天（只读状态表和账本），要结的上游先全部重读一遍：写进账本的数一固定就不再变，quota_per_unit 这些不能用 30 分钟前的旧值
       const plan = await planSettlement(rules, now);
       for (const id of plan.upstreams) staleMetadata.add(id);
