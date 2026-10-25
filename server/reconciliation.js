@@ -437,7 +437,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 回看从什么时候起可以开始（启动后等一会儿）；上一次清理结账状态表的时刻
   const lookbackFrom = (rt._reconciliationLookbackFrom ??= Date.now() + lookbackDelayMs);
   // 修正过切换时间的规则：下一次结账昨天时重新取数，写一份新的结账记录。
-  const resettles = (rt._reconciliationResettles ||= new Set());
+  // 绑定 id → 提出重结的时刻（结账开始以后才提的请求，这次结成了也不能算办完）
+  const resettles = (rt._reconciliationResettles ||= new Map());
   // 重结昨天没成时，下次什么时候再试（账本里已有这天，状态表不记；C2b 把重结请求挪进状态表以后删掉）
   const resettleRetryAt = (rt._reconciliationResettleRetryAt ||= new Map());
   // 轮询省请求和写入（计划 P1a）：
@@ -2139,9 +2140,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       try { await repository.recordSettlementState(rule.id, billDayOf(window), next); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
     });
     const settle = async ({ rule, window, state, resettle, trigger }) => {
+      const startedAt = Date.now();
       const result = await settleDay(rule, window, { origin: "poll", ownerRegistry, state, resettle, trigger }).catch(() => null);
-      // 昨天这一轮结成了（带不带重结标记都一样）：这条绑定的重结请求也就办完了
-      if (trigger == null && result?.calculation?.profitUsd != null) { resettles.delete(rule.id); resettleRetryAt.delete(rule.id); }
+      // 昨天这一轮结成了（带不带重结标记都一样）：这次结账开始以前提的重结请求也就办完了；结账途中才提的留着
+      if (trigger == null && result?.calculation?.profitUsd != null && resettles.has(rule.id) && resettles.get(rule.id) < startedAt) {
+        resettles.delete(rule.id); resettleRetryAt.delete(rule.id);
+      }
       else if (resettle) resettleRetryAt.set(rule.id, Date.now() + settleRetryDelayMs(1, { window, now: Date.now() }));
       return result;
     };
@@ -2314,7 +2318,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           const corrected = await repository.correctTransition(ruleId, segmentId, effectiveAt);
           clearBillingResults(ruleId);
           // 分段变了，已结账的昨天要按新分段重新结账（C2b 改成按天存进状态表的重结请求）
-          resettles.add(ruleId);
+          resettles.set(ruleId, Date.now());
           return corrected;
         }, billingSource);
         if (segments === STALE_SCOPE) throw staleScope();
@@ -2376,8 +2380,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 停用、删除了的绑定不会再写「今天」快照，它们的指纹不留
       const live = new Set(rules.map((rule) => rule.id));
       for (const key of observationWrites.keys()) if (!live.has(key.slice(0, key.indexOf(":")))) observationWrites.delete(key);
-      // 停用、删除了的绑定不会再结账，重结请求也不留
-      for (const id of [...resettles]) if (!live.has(id)) { resettles.delete(id); resettleRetryAt.delete(id); }
+      // 删除了的绑定不会再结账，重结请求也不留（停用的留着，重新启用以后还要重结）
+      const known = new Set(allRules.map((rule) => rule.id));
+      for (const id of [...resettles.keys()]) if (!known.has(id)) { resettles.delete(id); resettleRetryAt.delete(id); }
       // 先定这一轮要结哪些天（只读状态表和账本），要结的上游先全部重读一遍：写进账本的数一固定就不再变，quota_per_unit 这些不能用 30 分钟前的旧值
       const plan = await planSettlement(rules, now);
       for (const id of plan.upstreams) staleMetadata.add(id);
