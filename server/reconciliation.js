@@ -32,7 +32,7 @@ import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
-import { SETTLE_LOOKBACK_MS, isSettleableWindow, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
+import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, isSettleableWindow, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
@@ -429,7 +429,7 @@ function sourceSnapshot(token, metadata, upstream, downstream) {
 
 // repository 可注入：测试用内存实现替代 MySQL，生产默认走 rt.pool。stationUsageCost 是账号级上游用量取数，测试可替换。
 // 回看（计划 C2a 2.2）的几个参数，测试里注入：
-//   lookbackBudget：每轮最多回看几天（昨天不占），缺省 max(1, ⌈在用绑定数 ÷ 2⌉）；
+//   lookbackBudget：每轮最多回看几天（昨天不占），缺省 max(1, ⌈在用绑定数 ÷ 2⌉），再和 SETTLE_LOOKBACK_MAX_PER_ROUND（15）取小的；
 //   lookbackTimeMs：每轮回看最多花多久，缺省 min(20 秒, 刷新间隔的三分之一)，已经发出去的那一天照常做完；
 //   lookbackDelayMs：启动后等多久才开始回看（今天、昨天照常），缺省随机 1–5 分钟，几个进程同时重启时不会一起打上游。
 export function createReconciliationModule(rt, { repository = new ReconciliationRepository(rt.pool), stationUsageCost = defaultStationUsageCost,
@@ -1187,6 +1187,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 或者重结内容相同（B-L1）没写新版时，这一处不拿自己算出来的数（计划 C2a 2.5）。没结成、多日窗口照旧返回算出来的结果
   async function bookedResult(rule, result) {
     if (!billDayOf(result.window) || !settlementOutcome({ window: result.window, result, now: Date.now() }).ledger) return result;
+    // persistResult 已经确认这次是真的写了新版（result.ledger 已经按账本的版本、来源、固定时刻补好），result 自己
+    // 就是账本里最新那一版，不用再读一次（安全审核 C2a 低-3）；B-L1 那种内容相同没写新版的，result.ledger 没补，照旧读一次
+    if (result.ledger) return result;
     return await settledResult(rule, result.window) ?? result;
   }
 
@@ -1262,7 +1265,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (!applicable.length) return null;
         try {
           const [catalogue, results] = await Promise.all([
-            ownChannelsFor(own, { force }).catch(() => null),
+            ownChannelsFor(own, { force: force && !settle }).catch(() => null),
             mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => queryOwnChannelRevenue(own, {
               channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone,
               loadStatus: () => ownStatusFor(ownerRegistry, own),
@@ -1479,7 +1482,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // probe 到这里为止：取数前能判断的都判断完了，还挡着的要人处理的原因交回去，不读渠道、不取账单
       if (probe) return { probe: true, blocker: issues.find((issue) => CALCULATION_BLOCKERS.has(issue.code) && !issue.reference && reasonKindOf(issue.code) !== "retry")?.code ?? null };
       let catalogue = null;
-      try { if (ownAvailable) catalogue = await ownChannelsFor(own, { force }); } catch {
+      // 结账（settle）虽然强制重取账单，渠道目录只用来写渠道状态，不挡结果：用 10 分钟内的缓存，不每结一天就重读一遍（安全审核 C2a 低-3）
+      try { if (ownAvailable) catalogue = await ownChannelsFor(own, { force: force && !settle }); } catch {
         issues.push({ code: "SALES_CHANNEL_STATE_UNKNOWN", scope: "channels", detail: "渠道状态暂时读不到", observedAt: Date.now() });
       }
       const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
@@ -1942,7 +1946,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       if (saved !== true) return false;
       // 单日记进账本时，固定时刻以账本里最新那一版为准（仓库在记账的事务里带回来）：重结内容相同（B-L1）不写新版，页面仍是原来那个时刻
-      if (settled) result.settledAt = ledgerOption?.booked?.settledAt ?? result.generatedAt;
+      if (settled) {
+        result.settledAt = ledgerOption?.booked?.settledAt ?? result.generatedAt;
+        // 这次是真的写了新版（不是 B-L1 内容相同跳过）：result 自己就是刚写进账本的那一版，补上账本的版本号、来源、
+        // 固定时刻和汇率，bookedResult 就不用再读一次账本行（安全审核 C2a 低-3）。B-L1 那种情况账本里的版本、来源
+        // 可能和这次算出来的不一样（上一版可能是别的触发方式写的），这里判断不了，留给 bookedResult 照旧读一次
+        if (ledgerOption?.booked?.write === true) {
+          result.ledger = { billDate: billDayOf(result.window), revision: ledgerOption.booked.revision, source: ledgerOption.booked.source,
+            settledAt: ledgerOption.booked.settledAt, rates: { income: configuredRate(financialSnapshot.income), cost: configuredRate(financialSnapshot.cost) },
+            costBasis: financialSnapshot.costBasis };
+        }
+      }
     }
     if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return false;
     if (currentSourceCredential(rule) !== sourceCredential) return false;
@@ -2129,7 +2143,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (Date.now() < lookbackFrom) plan.older = [];
     // 有重结请求的日子排在更早的日子前面；同样先结离今天近的
     plan.older.sort((a, b) => Number(b.requested) - Number(a.requested) || b.window.startMs - a.window.startMs);
-    plan.budget = lookbackBudget ?? Math.max(1, Math.ceil(rules.length / 2));
+    plan.budget = Math.min(lookbackBudget ?? Math.max(1, Math.ceil(rules.length / 2)), SETTLE_LOOKBACK_MAX_PER_ROUND);
     for (const { rule } of plan.older.slice(0, plan.budget)) plan.upstreams.add(rule.upstreamStationId);
     plan.older = plan.older.filter((item) => plan.upstreams.has(item.rule.upstreamStationId));
     return plan;
