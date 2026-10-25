@@ -769,13 +769,10 @@ export class ReconciliationRepository {
         }
       }
       if (settlement?.billDate) {
-        // 请求按值比对：取数时读到的请求时刻等于现在行里的才删（没有请求的行是 NULL 对 NULL）。取数期间又来了新的重结请求，行留着，
-        // 只把重试、要人处理的记录清掉，下一轮马上再结（新请求不被这一次吃掉）
-        const [removed] = await conn.query("DELETE FROM reconciliation_settlement_state WHERE rule_id = ? AND bill_date = ? AND resettle_requested_at_ms <=> ?",
+        // 请求按值比对：取数时读到的请求时刻等于行里现在的才删（没有请求的行是 NULL 对 NULL）。取数期间又来了新的重结请求，行留着
+        // （写请求时已经把重试、要人处理的记录清掉了，下一轮马上再结），新请求不被这一次吃掉。还是一条 DELETE，不多发语句
+        await conn.query("DELETE FROM reconciliation_settlement_state WHERE rule_id = ? AND bill_date = ? AND resettle_requested_at_ms <=> ?",
           [ruleId, settlement.billDate, settlement.resettleRequestedAt ?? null]);
-        if (!removed.affectedRows) await conn.query(
-          `UPDATE reconciliation_settlement_state SET retry_reason = NULL, manual_reason = NULL, manual_since_ms = NULL, attempts = 0, next_attempt_at_ms = NULL,
-             first_failed_at_ms = NULL, last_detail = NULL WHERE rule_id = ? AND bill_date = ?`, [ruleId, settlement.billDate]);
       }
       if (guard && !guard()) { await conn.rollback(); return false; }
       await conn.commit();

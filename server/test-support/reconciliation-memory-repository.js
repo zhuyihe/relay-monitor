@@ -481,12 +481,9 @@ export class MemoryReconciliationRepository {
         }
       }
       if (settlement?.billDate) {
-        // 请求按值比对（同 MySQL 版）：取数时读到的请求时刻等于现在行里的才删；取数期间又来了新请求，行留着、只清重试和要人处理的记录
-        const entries = this.#settlementEntries(tx, ruleId, settlement.billDate);
-        const matches = entries.filter(({ row }) => (row.resettle_requested_at_ms ?? null) === (settlement.resettleRequestedAt ?? null));
-        if (matches.length) this.#delete(tx, "settlementState", matches);
-        else if (entries.length) this.#update(tx, "settlementState", entries, { retry_reason: null, manual_reason: null, manual_since_ms: null, attempts: 0,
-          next_attempt_at_ms: null, first_failed_at_ms: null, last_detail: null });
+        // 请求按值比对（同 MySQL 版）：取数时读到的请求时刻等于现在行里的才删；取数期间又来了新请求，行留着
+        this.#delete(tx, "settlementState", this.#settlementEntries(tx, ruleId, settlement.billDate)
+          .filter(({ row }) => (row.resettle_requested_at_ms ?? null) === (settlement.resettleRequestedAt ?? null)));
       }
       if (guard && !guard()) return this.#abort(tx, false);
       if (booked) ledger.booked = booked;

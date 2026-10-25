@@ -1330,7 +1330,7 @@ contract("a settlement consumes only the resettle request it read; a request mad
   await repository.requestResettle(rule.id, ["2026-01-08"], { now });
   assert.equal(await book(8, now), true);
   assert.equal(await stateOf(repository, rule.id, "2026-01-08"), undefined);
-  // 取数期间又来了新请求（行里的值比读到的大）：行留着，请求保留，重试记录清掉，下一轮马上再结
+  // 取数期间又来了新请求（行里的值比读到的大）：行留着，请求保留（写新请求时已经把重试记录清掉了），下一轮马上再结
   await repository.requestResettle(rule.id, ["2026-01-09"], { now });
   await repository.recordSettlementState(rule.id, "2026-01-09", retry, now);
   await repository.requestResettle(rule.id, ["2026-01-09"], { now: now + 10 });
