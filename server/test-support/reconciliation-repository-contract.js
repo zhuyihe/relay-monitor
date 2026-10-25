@@ -983,6 +983,9 @@ contract("a resettle with the same ledger content adds no revision; a change in 
   // 重结、只有成本计法变：写
   assert.equal(await settle({ revenueUsd: 2.26 }, { resettle: true, revenueRate: 7.2, costBasis: "fixed" }), true);
   assert.deepEqual(await latest(), [4, "resettle", 2.26, 1, 7.2, "fixed", 1.25]);
+  // 两版都是固定成本、只有 cost_usd 不同：不写（cost_usd 只是读到的 Key 用量，毛利不扣它）
+  assert.equal(await settle({ revenueUsd: 2.26, costUsd: null }, { resettle: true, revenueRate: 7.2, costBasis: "fixed" }), true);
+  assert.equal((await latest())[0], 4);
   // 不是重结：内容变了也不写（已固定的日子不再变）
   assert.equal(await settle({ revenueUsd: 3 }), true);
   assert.equal((await latest())[0], 4);

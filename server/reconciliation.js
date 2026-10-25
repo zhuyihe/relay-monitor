@@ -28,7 +28,7 @@ import { ReconciliationRepository, reconciliationOwnerRuleState, normalizeConfir
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
-import { applyScopePolicy, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
+import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
 import { isSettleableWindow, isSettledAt, settleRetryDelayMs, settlementOutcome, settlementPrecheck } from "../lib/reconciliation-settlement.js";
@@ -1144,11 +1144,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 目录或身份读不到、上游身份变了）时不挡，记成上游侧的参考问题，跳过上游、只取本站接着算。
       // 本站一侧（来源没确认、渠道重复、本站读不到、没分段）照旧挡；没锚定过的也照旧挡，免得以后锚到别人的 Key 上。
       const costBasis = financialSnapshot.costBasis;
-      const upstreamOptional = costBasis === "fixed" && !!upstream && !!rule.canonicalKey && !!rule.ownSource;
+      const anchored = !!rule.canonicalKey && !!rule.ownSource;
+      const upstreamOptional = costBasis === "fixed" && !!upstream && anchored;
       let upstreamProblem = null;
       if (!billingStation(upstream)) {
         const problem = health("UPSTREAM_DATA_UNAVAILABLE", "找不到这个上游，或这个上游读不到账单");
-        if (!upstreamOptional) return unavailable(problem, {}, !!rule.canonicalKey && !!rule.ownSource);
+        if (!upstreamOptional) return unavailable(problem, {}, anchored);
         upstreamProblem = problem;
       }
 
@@ -1179,11 +1180,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (upstreamChanged && upstreamOptional) upstreamProblem ||= health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"));
       let identityIssue = !ownSource || (upstreamChanged && !upstreamOptional) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource.namespaceKey)
         ? health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")) : null;
-      if (!identityIssue && (!rule.canonicalKey || !rule.ownSource) && !observe) {
+      if (!identityIssue && !anchored && !observe) {
         // 还没观测过就没有可靠口径，取上下游账单也只是白跑一趟。
         if (!identityIssues.has(rule.id)) return pendingResult(rule, window, issueText("PENDING"));
         identityIssue = identityIssues.get(rule.id);
-      } else if (!identityIssue && (!rule.canonicalKey || !rule.ownSource)) {
+      } else if (!identityIssue && !anchored) {
         try {
           const segments = await repository.listSegments(rule.id);
           const anchored = await withObservationSourceLock(rule, sourceCredential, () => repository.anchorRuleIdentity(rule.id,
@@ -1216,7 +1217,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (!upstreamProblem && (canonicalKey !== actualKey || canonicalKey !== rule.canonicalKey)) {
         return unavailable(health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")), { metadata, token }, false);
       }
-      const platform = metadata?.platform ?? rule.provider;
+      // 上游一侧读不到（只有固定成本、锚定过的会走到这里）：读到的目录和 Key 不当证据、也不拿来显示——上游账号可能已经换了人，
+      // id 相同的 Key 是别人的。Key 名用绑定上存的；面板类型按绑定存的，旧绑定没存就按上游站点的类型
+      const evidenceMetadata = upstreamProblem ? null : metadata, evidenceToken = upstreamProblem ? null : token;
+      const platform = evidenceMetadata?.platform ?? rule.provider ?? billingProviderOf(upstream);
       const persistedSegments = await repository.listSegments(rule.id);
       if (!persistedSegments.length) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", INCOMPLETE_DAY_TEXT), { metadata, token });
       const catalogueObserved = !upstreamProblem && metadata.groupsAvailable && metadata.groups[token.group]?.ratio != null;
@@ -1419,7 +1423,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         return isScopedBillingPolicy(rule.billingPolicy) && sameReconciliationWindow(segment[side].window, segment.window, { timezone: false }) ? window : segment[side].window;
       };
       const result = {
-        rule: { ...rule, tokenName: token?.name ?? rule.tokenName, fixedGroup: currentSegment.group }, window,
+        rule: { ...rule, tokenName: evidenceToken?.name ?? rule.tokenName, fixedGroup: currentSegment.group }, window,
         ownSource, scope: { ...reconciliationBillingSchedule(rule), recalculated: scopeRecalculatedInWindow(rule, window),
           accountedFromMs: clipped && clipped.startMs > window.startMs ? clipped.startMs : null, notEffective: !applicable.length && isScopedBillingPolicy(rule.billingPolicy) },
         amountBasis: { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,
@@ -1445,7 +1449,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           expectedCount: segmentResults.length,
           observedAt: Date.now(), window: sideWindow("upstream"),
           billingTimezone: commonBillingTimezone(window, segmentResults.map((segment) => segment.upstream)),
-          status: token?.status ?? null, group: currentSegment.group, ratio: currentRatio,
+          status: evidenceToken?.status ?? null, group: currentSegment.group, ratio: currentRatio,
         },
         downstream: {
           state: completeDownstream ? "complete" : segmentResults.some((segment) => segment.downstream.knownAmountUsd != null) ? "partial" : segmentResults.some((segment) => segment.downstream.state === "pending") ? "pending" : "unavailable",
@@ -1479,7 +1483,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         result.lastConfirmed = snapshotReference(previous);
       }
       if (!observe) return result;
-      return (await persistResult(rule, result, origin, metadata, token, {
+      return (await persistResult(rule, result, origin, evidenceMetadata, evidenceToken, {
         scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource, financialSnapshot, resettle,
       })) ? result : STALE_SCOPE;
     };
@@ -1726,7 +1730,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         billingTimezone: result.billingTimezone || commonBillingTimezone(result.window, [result.upstream, result.downstream]),
         amountBasis: result.amountBasis || { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION, conversion: provider === "sub2api" ? "provider_cost_usd" : provider === "newapi" ? "quota_per_unit" : null } });
-      // 界面状态只在这里算一次（实时 / 已固定 / 需处理），按钮和旧的 settlement 字段都从它推出来。
+      // 界面状态只在这里算一次（实时 / 已固定 / 需处理），按钮从它推出来。
       enriched.displayStatus = reconciliationDisplayStatus(enriched, { now });
       enriched.actions = reconciliationResultActions(enriched, { now, displayStatus: enriched.displayStatus });
       return enriched;

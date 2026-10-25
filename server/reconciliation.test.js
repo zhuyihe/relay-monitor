@@ -5908,31 +5908,41 @@ test("4a 固定采购上游：Key 账单取不到或为空只作参考，毛利 
   }
 });
 
-test("C1 成本计法在提前返回之前就定：固定成本的上游 Key 用不了、目录或身份读不到，只作参考，毛利 = 收入、照常结账；本站读不到、没锚定过的照旧挡；按用量的照旧挡", async (t) => {
-  const upstreamReply = (pathname, body) => ({ upstreamPath: pathname, body });
+test("C1 成本计法在提前返回之前就定：固定成本、锚定过的上游一侧读不到（Key 用不了、目录或身份读不到、上游账号换了人），只作参考，毛利 = 收入、照常结账，不拿读到的目录当证据；本站一侧、没锚定过的照旧挡；按用量的照旧挡", async (t) => {
+  const reply = (host, pathname, body) => ({ host, pathname, body });
+  const keyDisabled = reply("upstream.test", "/api/token/", { success: true, data: { total: 3, items: [
+    { id: 9, name: "stable", status: 2, group: "g1", cross_group_retry: false },
+    { id: 10, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+    { id: 11, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } });
+  // [说明, 固定成本时要有的上游侧参考问题码, 按用量时的健康码, 设置]
   const cases = [
-    ["Key 停用了", "KEY_INVALID_OR_DENIED", { reply: upstreamReply("/api/token/", { success: true, data: { total: 3, items: [
-      { id: 9, name: "stable", status: 2, group: "g1", cross_group_retry: false },
-      { id: 10, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
-      { id: 11, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } }) }],
-    ["Key 目录读不到", "UPSTREAM_DATA_UNAVAILABLE", { options: { metadataFailure: true } }],
-    ["上游账号身份读不到", null, { reply: upstreamReply("/api/user/self", { success: false }) }],
-    ["本站读不到（本站一侧照旧挡）", "OWN_BILLING_UNAVAILABLE", { ownDown: true, blocksFixed: true }],
-    ["没锚定过、上游账号身份读不到（照旧挡）", null, { unanchored: true, blocksFixed: true, reply: upstreamReply("/api/user/self", { success: false }) }],
+    ["Key 停用了", "KEY_INVALID_OR_DENIED", "KEY_INVALID_OR_DENIED", { replies: [keyDisabled] }],
+    ["Key 目录读不到", "UPSTREAM_DATA_UNAVAILABLE", "UPSTREAM_DATA_UNAVAILABLE", { options: { metadataFailure: true } }],
+    ["上游账号身份读不到", "UPSTREAM_DATA_UNAVAILABLE", "UPSTREAM_DATA_UNAVAILABLE", { replies: [reply("upstream.test", "/api/user/self", { success: false })] }],
+    ["上游账号换了人", "SOURCE_BINDING_UNCONFIRMED", "SOURCE_BINDING_UNCONFIRMED", { replies: [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } })] }],
+    // 换成的 8 号账号里也有一把 id 9 的 Key，名字不同：不能拿它来显示、记账
+    ["上游账号换了人，新账号里 id 相同的 Key 名字不同", "KEY_INVALID_OR_DENIED", "KEY_INVALID_OR_DENIED", { replies: [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } }),
+      reply("upstream.test", "/api/token/", { success: true, data: { total: 1, items: [{ id: 9, name: "别人的 Key", status: 1, group: "g1", cross_group_retry: false }] } })] }],
+    ["本站读不到（本站一侧照旧挡）", null, "OWN_BILLING_UNAVAILABLE", { ownDown: true, blocksFixed: true }],
+    ["本站账号换了人（本站一侧照旧挡）", null, "SOURCE_BINDING_UNCONFIRMED", { blocksFixed: true, replies: [reply("own.test", "/api/user/self", { success: true, data: { id: 9 } })] }],
+    ["没锚定过、上游账号身份读不到（照旧挡）", null, "UPSTREAM_DATA_UNAVAILABLE", { unanchored: "canonicalKey", blocksFixed: true, replies: [reply("upstream.test", "/api/user/self", { success: false })] }],
+    ["只缺本站来源的锚定、Key 停用（照旧挡）", null, "KEY_INVALID_OR_DENIED", { unanchored: "ownSource", blocksFixed: true, replies: [keyDisabled] }],
   ];
-  for (const [label, code, { reply = null, options = {}, ownDown = false, unanchored = false, blocksFixed = false }] of cases) {
+  for (const [label, referenceCode, usageCode, { replies = [], options = {}, ownDown = false, unanchored = null, blocksFixed = false }] of cases) {
     for (const fixed of [true, false]) {
       await t.test(`${label}·${fixed ? "固定成本" : "按用量"}`, async (st) => {
         const f = await completedDayFixture(st, options);
         if (fixed) f.stations.find((station) => station.id === "upstream").fixedPurchases = [{ amount: 300, days: 30 }];
         if (ownDown) f.state.ownQuota = null;
-        if (unanchored) Object.assign(f.rows.find((row) => row.id === "rr_live"), { canonical_key: null });
-        if (reply) {
+        const live = f.rows.find((row) => row.id === "rr_live");
+        if (unanchored === "canonicalKey") live.canonical_key = null;
+        if (unanchored === "ownSource") live.source_binding.ownSource = null;
+        if (replies.length) {
           const prev = globalThis.fetch;
           st.mock.method(globalThis, "fetch", async (input, init) => {
             const url = new URL(String(input));
-            if (url.host === "upstream.test" && url.pathname === reply.upstreamPath)
-              return { status: reply.body.success ? 200 : 500, text: async () => JSON.stringify(reply.body) };
+            const hit = replies.find((item) => item.host === url.host && item.pathname === url.pathname);
+            if (hit) return { status: hit.body.success ? 200 : 500, text: async () => JSON.stringify(hit.body) };
             return prev(input, init);
           });
         }
@@ -5942,11 +5952,11 @@ test("C1 成本计法在提前返回之前就定：固定成本的上游 Key 用
           assert.deepEqual([row.health.code, row.calculation.profitUsd, row.costBasis], ["READY", 2.5, "fixed"], JSON.stringify(row.health));
           const upstreamIssues = row.health.issues.filter((issue) => issue.side === "upstream");
           assert.ok(upstreamIssues.length && upstreamIssues.every((issue) => issue.reference === true), JSON.stringify(row.health.issues));
-          if (code) assert.ok(upstreamIssues.some((issue) => issue.code === code), JSON.stringify(upstreamIssues));
+          assert.ok(upstreamIssues.some((issue) => issue.code === referenceCode), JSON.stringify(upstreamIssues));
           assert.equal(f.state.statCalls.filter((call) => call.side === "upstream").length, 0, "上游读不到时不取上游用量");
+          assert.equal(row.rule.tokenName, "stable", "Key 名用绑定上存的，不用读到的目录");
         } else {
-          assert.equal(row.calculation.profitUsd, null, JSON.stringify(row.health));
-          assert.notEqual(row.health.code, "READY");
+          assert.deepEqual([row.calculation.profitUsd, row.health.code], [null, usageCode], JSON.stringify(row.health));
         }
         // 页面「刷新」（观测）也一样，不出错
         const [observed] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual" })).results;
@@ -5955,9 +5965,27 @@ test("C1 成本计法在提前返回之前就定：固定成本的上游 Key 用
         const ledger = f.state.ledger.filter((entry) => entry.rule_id === "rr_live");
         assert.deepEqual(ledger.map((entry) => [entry.cost_usd, entry.cost_basis, entry.revenue_usd, entry.detail.result.calculation.profitUsd]),
           passes ? [[null, "fixed", 2.5, 2.5]] : [], "固定成本照常结账，上游用量没读，成本记空");
+        if (passes) {
+          // 读到的上游身份、Key 不进账本（上游账号可能已经换了人）；以前的每日记录不把这天说成「数据不完整」
+          const { ruleEvidence } = ledger[0].detail;
+          assert.deepEqual([ruleEvidence.upstreamIdentity, ruleEvidence.tokenId, ruleEvidence.tokenName], [null, 9, "stable"]);
+          assert.equal(ledger[0].detail.upstream?.tokenId, undefined, "快照里不记读到的 Key");
+          const history = await f.module.getConfirmedHistory("rr_live", { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") });
+          assert.deepEqual(history.records.map((record) => [record.sourceCompleteness, record.upstreamSource.tokenName]), [["complete", "stable"]]);
+        }
       });
     }
   }
+});
+
+test("C1 固定成本的上游读不到时，面板类型按绑定存的；旧绑定没存就按上游站点的类型（Sub2API 不会被当成 New API）", async (t) => {
+  const f = await completedDayFixture(t, { metadataFailure: true });
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  Object.assign(upstream, { type: "sub2api", fixedPurchases: [{ amount: 300, days: 30 }] });
+  const live = f.rows.find((row) => row.id === "rr_live");
+  live.provider = null;
+  const [row] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" })).results;
+  assert.deepEqual([row.costBasis, row.calculation.profitUsd, row.amountBasis.conversion], ["fixed", 2.5, "provider_cost_usd"], JSON.stringify(row.health));
 });
 
 test("4a 固定采购上游：Key 还有没有其他用途没确认、上游分组目录取不到只作参考，毛利 = 收入、照常结账；按用量计成本的上游仍被挡住", async (t) => {
