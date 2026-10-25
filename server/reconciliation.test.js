@@ -6547,6 +6547,7 @@ test("C2b 总指挥定的 3（明显少就不写）：重结读出来的收入�
   assert.deepEqual(revisions(), [[1, 2.5, 1]], "不写新版");
   const blocked = await state();
   assert.deepEqual([blocked.manualReason, blocked.resettleRequestedAt != null, blocked.nextAttemptAt], ["RESETTLE_SHRUNK", true, null], "要人处理、请求还在、不自动再试");
+  assert.equal(blocked.detail?.side, "revenue", "状态行记下少的是收入（页面按它写说明里的「收入」）");
   const page = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", origin: "page" });
   assert.equal(page.results[0].calculation.profitUsd, 1.5, "页面仍是已固定的旧数");
   // 之后的轮询不再自动取这天

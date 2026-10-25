@@ -32,7 +32,7 @@ import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlement } from "../lib/reconciliation-ledger.js";
-import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, isSettleableWindow, resettleShrunk, isSettledAt, reasonKindOf, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
+import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, isSettleableWindow, resettleShrunkSide, isSettledAt, reasonKindOf, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
@@ -555,7 +555,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
     if (result === STALE_SCOPE || !billDate) return result;
     // 重结的数比已固定的少很多：没写新版，记成「要人处理、不自动再试」的状态行（RESETTLE_SHRUNK），请求保留在行里
-    const outcome = settlementOutcome({ window, result: result.resettleBlocked ? { health: { code: result.resettleBlocked } } : result, now: Date.now(), state, origin, sourceVersion: ownerRegistry.billingSource.version });
+    const outcome = settlementOutcome({ window, result: result.resettleBlocked ? { health: { code: result.resettleBlocked, issues: [{ code: result.resettleBlocked, side: result.resettleShrunkSide ?? null }] } } : result, now: Date.now(), state, origin, sourceVersion: ownerRegistry.billingSource.version });
     // 结成了（op: "delete"）：状态行已经在 inspectRule 写账本的同一个事务里删掉了（settlement 选项，见 saveSnapshotsForScope），
     // 这里不用再单独删一次——单独删一次是多发的一条 SQL（审核 C2a 低-1）
     try {
@@ -1206,7 +1206,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   // 结账没写新版（重结的数比已固定的少很多）时，结果仍是账本里那一版，但要把原因带给 settleDay
-  const withResettleBlocker = (booked, result) => (result.resettleBlocked ? Object.assign(booked, { resettleBlocked: result.resettleBlocked }) : booked);
+  const withResettleBlocker = (booked, result) => (result.resettleBlocked ? Object.assign(booked, { resettleBlocked: result.resettleBlocked, resettleShrunkSide: result.resettleShrunkSide ?? null }) : booked);
 
   // 上一次成功的结果：单个自然日读账本最新一版，其余窗口读同一口径的确认记录。
   async function previousSuccess(rule, window, billingFingerprint) {
@@ -1923,7 +1923,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (settle && resettle && !confirmShrink && ledgerEntry) {
       let prior;
       try { prior = await repository.latestLedgerEntry(rule.id, result.window); } catch { throw codedError("PERSISTENCE_FAILED", issueText("PERSISTENCE_FAILED")); }
-      if (prior && resettleShrunk(prior, ledgerEntry)) { result.resettleBlocked = "RESETTLE_SHRUNK"; return true; }
+      const side = prior ? resettleShrunkSide(prior, ledgerEntry) : null;
+      if (side) { result.resettleBlocked = "RESETTLE_SHRUNK"; result.resettleShrunkSide = side; return true; }
     }
     // 记账的结论（ledgerOption.booked）由仓库在提交以后填上
     const ledgerOption = ledgerEntry ? { entry: ledgerEntry, resettle } : null;
