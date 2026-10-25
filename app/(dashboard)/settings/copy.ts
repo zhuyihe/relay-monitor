@@ -35,6 +35,10 @@ export const COPY = Object.freeze({
   confirmOk: "确认并保存",
   cancel: "取消",
   overview: "历史概况",
+  // 「历史概况」「最近自动清理」收进收起区（ui-copy-spec §8.4），收着时露的那一句
+  healthMore: "历史概况和自动清理",
+  healthSummary: (count: string, earliest: string) => `共 ${count} 条记录，最早 ${earliest}`,
+  healthEmpty: "还没有记录",
   overviewFailed: "读不到历史概况",
   latest: (at: string) => `最近一条记录：${at}`,
   growing: "记录会随时间越来越多",

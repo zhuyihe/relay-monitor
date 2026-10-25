@@ -62,3 +62,12 @@
 
 /* 还没有通知方式时那一小块：余额提醒线和提醒天数，一行一个（ui-copy-spec §8.3） */
 .jy-notifications-lines { display: flex; flex-direction: column; gap: 12px; }
+
+/* 版式（ui-design-spec §5.7）：左 8 列提醒规则，右 4 列通知方式和日报；手机上通知方式在最前（页面里就换了先后，见 page.tsx） */
+.jy-notifications-side { min-width: 0; }
+/* 通知方式一个一行（4 列里放不下表格），桌面和手机同一个样子 */
+.jy-m-list.jy-notifications-chlist { display: block; }
+.jy-notifications-chlist .m-sub { align-items: center; }
+/* 日报的三项在 4 列里一项一行 */
+.jy-notifications-side .jy-two { grid-template-columns: minmax(0, 1fr); }
+.jy-notifications-pace-hint { margin: 0 0 8px; }

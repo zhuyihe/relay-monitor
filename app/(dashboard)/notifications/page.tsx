@@ -9,7 +9,7 @@ import "../../styles/pages/notifications.css";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { commitOnLeave, useAutoSave, useSaveAction, useSaveQueue } from "../../components/use-auto-save";
 import Link from "next/link";
-import { App, Button, Checkbox, Form, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
+import { App, Button, Checkbox, Form, Grid, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
 import { ALERT_RULES } from "../../../lib/alert-rules";
 import { api } from "../../../lib/client";
@@ -22,6 +22,7 @@ import { CountBadge, Panel } from "../../components/panel";
 import { ErrorState, PanelSkeleton, SAVE_STATE_TEXT, SaveState } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
+import { More } from "../../components/more";
 import { StatusText } from "../../components/status";
 import { TabPanel, Tabs } from "../../components/seg";
 import { COPY } from "./copy";
@@ -141,6 +142,7 @@ export default function NotificationsPage() {
   rulesRef.current = rules;
   // 开关和「发到哪些通知方式」一点就存，算一组
   const toggles = useSaveAction(queue, COPY.groupToggles);
+  const compact = Grid.useBreakpoint().md === false;
   const ruleForm = useAutoSave<RuleForm, Record<string, string>>(ruleFormOf({}), {
     queue,
     // 没有通知方式时页面上没有「提醒规则」，那一小块里只有提醒天数这一项属于这一组
@@ -686,20 +688,11 @@ export default function NotificationsPage() {
     document.querySelector(".jy-notifications-channels")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  return (
-    <div className="jy-page">
-      {noDelivery ? (
-        <div className="jy-banner jy-banner--crit" role="alert">
-          <Sym kind="crit" />
-          <div className="jy-notifications-banner-body">
-            <b>{COPY.noDeliveryOff}</b>
-            <p className="jy-caption">{COPY.noDeliveryOffHint}</p>
-          </div>
-          <Button size="small" onClick={showChannels}>
-            {COPY.showChannels}
-          </Button>
-        </div>
-      ) : null}
+  const paceSummary = COPY.paceSummary(ruleForm.saved.renotify, ruleForm.saved.errRetry);
+  // 版式（ui-design-spec §5.7、#64 第 8 节）：左 8 列提醒规则，右 4 列通知方式和日报；还没有通知方式时整页只放一件事，不分栏。
+  // 手机上通知方式在最前：换的是页面里的先后，不只用 CSS 换显示顺序（读屏和键盘跟着看到的先后，§5.1）
+  const rulesBlock = (
+    <>
       {/* 提醒规则 */}
       {noChannelsYet ? null : notifFailed ? (
         <Panel title={COPY.rules}>
@@ -764,10 +757,10 @@ export default function NotificationsPage() {
             </table>
           </div>
 
-          <div className="jy-notifications-pad">
-            <fieldset className="jy-fs">
-              <legend>{COPY.pace}</legend>
-              <p className="fs-desc">{COPY.paceHint}</p>
+          <div className="jy-notifications-pad jy-more-line">
+            <span className="jy-caption">{paceSummary}</span>
+            <More label={COPY.pace}>
+              <p className="jy-caption jy-notifications-pace-hint">{COPY.paceHint}</p>
               <div className="jy-two">
                 <div className="jy-field">
                   <label htmlFor={`${uid}-renotify`}>{COPY.renotify}</label>
@@ -819,11 +812,15 @@ export default function NotificationsPage() {
                   )}
                 </div>
               </div>
-            </fieldset>
+            </More>
           </div>
         </Panel>
       )}
 
+    </>
+  );
+  const channelsBlock = (
+    <>
       {/* 通知方式 */}
       {notifFailed ? (
         <Panel title={COPY.channels}>
@@ -846,33 +843,7 @@ export default function NotificationsPage() {
         >
           {channels.length ? (
             <>
-              <div className="jy-table-wrap has-mobile">
-                <table className="jy-data">
-                  <thead>
-                    <tr>
-                      <th>{COPY.colType}</th>
-                      <th>{COPY.colName}</th>
-                      <th>{COPY.colStatus}</th>
-                      <th>{COPY.colTest}</th>
-                      <th className="r">{COPY.colActions}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {channels.map((c: any) => (
-                      <tr key={c.id}>
-                        <td>{plate(c.type)}</td>
-                        <td className="jy-notifications-name">{c.name}</td>
-                        <td>{enabledToggle(c)}</td>
-                        <td aria-live="polite">{testCell(c)}</td>
-                        <td className="r">
-                          <div className="jy-row-actions">{rowActions(c)}</div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <ul className="jy-m-list" aria-label={COPY.channels}>
+              <ul className="jy-m-list jy-notifications-chlist" aria-label={COPY.channels}>
                 {channels.map((c: any) => (
                   <li key={c.id}>
                     <span className="m-top">{c.name}</span>
@@ -912,6 +883,10 @@ export default function NotificationsPage() {
         </Panel>
       )}
 
+    </>
+  );
+  const linesBlock = (
+    <>
       {/* 还没有通知方式：余额提醒线和提醒天数也决定页面上的档位，只在这里放这两个数（有通知方式时在规则那几行里，不两处同时出现） */}
       {noChannelsYet ? (
         <Panel
@@ -928,6 +903,10 @@ export default function NotificationsPage() {
         </Panel>
       ) : null}
 
+    </>
+  );
+  const reportBlock = (
+    <>
       {/* 日报：发送时间按业务时区，和每日利润、日汇总同一天界（§6 不另注时区） */}
       {noChannelsYet ? null : !metaLoaded && metaLoading ? (
         <PanelSkeleton title={COPY.report} lines={3} />
@@ -1009,6 +988,44 @@ export default function NotificationsPage() {
             )}
           </div>
         </Panel>
+      )}
+
+    </>
+  );
+
+  return (
+    <div className="jy-page">
+      {noDelivery ? (
+        <div className="jy-banner jy-banner--crit" role="alert">
+          <Sym kind="crit" />
+          <div className="jy-notifications-banner-body">
+            <b>{COPY.noDeliveryOff}</b>
+            <p className="jy-caption">{COPY.noDeliveryOffHint}</p>
+          </div>
+          <Button size="small" onClick={showChannels}>
+            {COPY.showChannels}
+          </Button>
+        </div>
+      ) : null}
+      {noChannelsYet ? (
+        <>
+          {channelsBlock}
+          {linesBlock}
+        </>
+      ) : compact ? (
+        <>
+          {channelsBlock}
+          {rulesBlock}
+          {reportBlock}
+        </>
+      ) : (
+        <div className="jy-grid-8-4 jy-notifications-grid">
+          {rulesBlock}
+          <div className="jy-stack jy-notifications-side">
+            {channelsBlock}
+            {reportBlock}
+          </div>
+        </div>
       )}
 
       {/* 通知方式弹窗 */}

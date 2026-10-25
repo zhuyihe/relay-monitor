@@ -56,6 +56,9 @@ export const COPY = Object.freeze({
   // 提醒节奏
   pace: "提醒节奏",
   paceHint: "对所有打开的提醒都有效。",
+  // 提醒节奏收起时露的那一句（ui-copy-spec §8.4），按已保存的数写
+  paceSummary: (hours: number, sec: number) =>
+    `${hours > 0 ? `同一件事没好时每 ${hours} 小时再提醒一次` : "同一件事只提醒一次"}；${sec > 0 ? `读不到余额后隔 ${sec} 秒再读一次` : "读不到余额后不马上再读"}。`,
   renotify: "重复提醒间隔",
   renotifyHint: "同一件事一直没好时，每隔几小时再提醒一次。填 0 只提醒一次",
   renotifyZero: "，0 表示只提醒一次",
