@@ -1,9 +1,13 @@
 // B 对拍用的旧实现：B1 合掉的那几份原样留在这里，只给对拍用（tests/b-parity.test.mjs、scripts/b-parity-sweep.mjs），
 // 不要在别处引用。计划 7c 删掉。
 // 每段都是从 main 470a311 原样抄来的，只改了名字（同名的加上出处前缀）和互相引用；出处写在每段前面。
+// 文件末尾 B2 那几段从 main 952c58b（B1、#66 合并后）抄，用的是 B1 以后的 isCompletedBillingWindow、billDayOf，只对比 B2 自己合掉的部分。
 // 下面三个从现在的 lib 引：B1 没改它们（isLiveReconciliationPreset、costBasisOf、rateSnapshotOf）。
 import { isLiveReconciliationPreset } from "../lib/reconciliation-contract.js";
 import { costBasisOf, rateSnapshotOf } from "../lib/profit.js";
+import { isCompletedBillingWindow as b2IsCompletedBillingWindow, reconciliationAccountingStart as b2ReconciliationAccountingStart } from "../lib/reconciliation-scope-policy.js";
+import { billDayOf as b2BillDayOf, dayKeyInTz as b2DayKeyInTz, dayStartInTz as b2DayStartInTz } from "../lib/business-time.js";
+import { sameReconciliationWindow as b2SameReconciliationWindow } from "../lib/reconciliation-contract.js";
 
 const DAY_MS = 86400000;
 
@@ -341,3 +345,74 @@ export function toCny(usd, rate) {
   const r = typeof rate === "number" ? rate : rate?.cnyPerUsd ?? 1;
   return Number.isFinite(n) ? Math.round(n * r * 100) / 100 : 0;
 }
+
+// ==== B2（main 952c58b）====
+// 下面几段用 B1 以后的现成函数：B2 没改它们。
+
+// ---- 结账判定：server/reconciliation.js:91-93、:457-470、:1000-1004、:1054、:1572-1574、:2029；仓库 :111-117；迁移 lib/reconciliation-ledger.js:82 ----
+
+const SETTLE_DELAY_MS = 15 * 60000;
+export const SETTLE_RETRY_MS = 10 * 60000;
+
+export function serverIsSettleableWindow(window, now) {
+  return b2IsCompletedBillingWindow(window, now - SETTLE_DELAY_MS);
+}
+
+// 原来闭包里读 settlements 那张表，这里把读出的那条（entry）当参数传进来
+export function settlementWindowDue(rule, window, now, entry) {
+  if (now < window.endMs + SETTLE_DELAY_MS) return null;
+  const start = b2ReconciliationAccountingStart(rule) ?? Date.parse(rule.createdAt);
+  if (Number.isFinite(start) && start >= window.endMs) return null;
+  return entry && (entry.settled || now < entry.retryAt) ? null : window;
+}
+
+export function isSettledRecord(record, window) {
+  return !!record && new Date(record.generatedAt).getTime() >= window.endMs + SETTLE_DELAY_MS;
+}
+
+// inspectRule 先读已固定的账的条件（:1054）
+export const readSettledGate = (window, now, resettle) => !resettle && serverIsSettleableWindow(window, now);
+
+// persistResult（:1572-1574）
+export function persistSettlement(result, now) {
+  const settled = result.calculation?.profitUsd != null && !result.scope?.notEffective && serverIsSettleableWindow(result.window, now);
+  const ledgerDay = settled && !!b2BillDayOf(result.window);
+  return { settled, ledgerDay, snapshots: ["observation", ...(settled && !ledgerDay ? ["confirmed"] : [])] };
+}
+
+// refreshDue 记下的重试时刻（:2029）
+export const settleRetryAt = (settled, now) => settled ? null : now + SETTLE_RETRY_MS;
+
+export function repositoryIsSettledConfirmedSource(source, window = source?.window, now = Date.now()) {
+  const generatedAt = Date.parse(source?.resultGeneratedAt);
+  return b2IsCompletedBillingWindow(window && { startMs: Number(window.startMs), endMs: Number(window.endMs), timezone: window.timezone },
+    Number.isFinite(generatedAt) ? generatedAt : now);
+}
+
+// 迁移的等待期（只这一个条件；前面的 billDate 等条件没改）
+export const migrationSettled = (endMs, resultGeneratedAt) => {
+  const generatedMs = Date.parse(resultGeneratedAt);
+  return !(!Number.isFinite(generatedMs) || generatedMs < endMs + SETTLE_DELAY_MS);
+};
+
+// ---- 页面「还在读取」的整天：lib/reconciliation-view.js:151-160 ----
+
+export function viewIsMidnight(ms, timezone) {
+  return b2DayStartInTz(b2DayKeyInTz(ms, timezone), timezone) === ms;
+}
+
+export function viewIsWholeDay(window) {
+  if (!Number.isFinite(window?.startMs) || !Number.isFinite(window?.endMs) || window.endMs <= window.startMs) return false;
+  const zone = window.timezone;
+  return viewIsMidnight(window.startMs, zone) && viewIsMidnight(window.endMs, zone) && b2DayKeyInTz(window.startMs, zone) === b2DayKeyInTz(window.endMs - 1, zone);
+}
+
+// ---- 账本写不写：server/reconciliation-repository.js:700-710（内存仓库 :438-446 逐字相同）----
+
+export function ledgerWrite(top, entry, resettle) {
+  const sameWindow = !!top && b2SameReconciliationWindow({ timezone: top.timezone, startMs: Number(top.window_start_ms), endMs: Number(top.window_end_ms) }, entry);
+  return resettle || !sameWindow ? { write: true, revision: top ? Number(top.revision) + 1 : 1, source: top ? "resettle" : "settle" } : { write: false };
+}
+
+// 内存仓库读账本时模拟 DECIMAL：server/test-support/reconciliation-memory-repository.js:79
+export const memoryDecimal = (value, scale) => value == null ? null : Number(value).toFixed(scale);

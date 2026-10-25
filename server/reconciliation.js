@@ -30,7 +30,8 @@ import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, r
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
-import { RECONCILIATION_SETTLE_DELAY_MS as SETTLE_DELAY_MS, ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
+import { ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
+import { isSettleableWindow, isSettledAt, settleRetryDelayMs, settlementOutcome, settlementPrecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationSettlement, reconciliationDisplayStatus,
@@ -89,8 +90,6 @@ const ACCOUNT_USAGE_PENDING_MAX_MS = 2 * 60000;
 const MAX_ACCOUNT_USAGE_ENTRIES = 200;
 const STALE_SCOPE = Symbol("STALE_SCOPE");
 const MAX_SCOPE_ATTEMPTS = 3;
-// 自然日结束 15 分钟后由轮询结账，给上游账单留出落库时间；数据还不完整就 10 分钟后重试。
-const SETTLE_RETRY_MS = 10 * 60000;
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -454,19 +453,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     : `${rule.id}:${window.preset}:${window.startMs}:${window.endMs}:${window.timezone}`;
   const resultTtl = (window) => isLiveReconciliationPreset(window.preset) ? TODAY_TTL_MS : QUERY_TTL_MS;
 
-  // 上游账单在自然日结束后还会陆续入账，结束满 SETTLE_DELAY_MS 才算可结账。
-  function isSettleableWindow(window, now) {
-    return isCompletedBillingWindow(window, now - SETTLE_DELAY_MS);
-  }
-
+  // 轮询这一轮要不要结这条绑定的昨天（lib/reconciliation-settlement.js 的 settlementPrecheck）；不用结时为 null
   function settlementWindowDue(rule, now) {
     let window;
     try { window = resolveReconciliationWindow({ preset: "yesterday", timezone: rule.timezone }, now); } catch { return null; }
-    if (now < window.endMs + SETTLE_DELAY_MS) return null;
-    const start = reconciliationAccountingStart(rule) ?? Date.parse(rule.createdAt);
-    if (Number.isFinite(start) && start >= window.endMs) return null;
-    const entry = settlements.get(`${rule.id}:${window.startMs}:${window.timezone}`);
-    return entry && (entry.settled || now < entry.retryAt) ? null : window;
+    const attempt = settlements.get(`${rule.id}:${window.startMs}:${window.timezone}`);
+    return settlementPrecheck({ rule, window, now, attempt }).due ? window : null;
   }
 
   function clearRuleResults(ruleId) {
@@ -990,17 +982,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (!settlement) throw new Error("Invalid settlement record");
         return settledFrom(rule, settlement);
       }
+      // 结束不满等待期写下的确认记录不算结账（那时上游还在入账）：1a 之前窗口一结束就会写这种记录；现在也写得出来，
+      // 比如多日窗口在等待期满前一刻开始取数、满了以后才保存。B2 起这种记录一律不认
       const record = await repository.latestSettlement(rule.id, window);
-      return isSettledRecord(record, window) ? settledFrom(rule, record) : null;
+      return record && isSettledAt(window, record.generatedAt) ? settledFrom(rule, record) : null;
     } catch {
       // 读取失败不能当成没有固定账，否则会用上游后来补记的金额替代原账。
       throw codedError("HISTORY_UNAVAILABLE", issueText("HISTORY_UNAVAILABLE"));
     }
-  }
-
-  // 1a 之前窗口一结束就会写确认记录，那时上游还在入账；结束不满 SETTLE_DELAY_MS 写下的记录不算结账。
-  function isSettledRecord(record, window) {
-    return !!record && new Date(record.generatedAt).getTime() >= window.endMs + SETTLE_DELAY_MS;
   }
 
   // 上一次成功的结果：单个自然日读账本最新一版，其余窗口读同一口径的确认记录。
@@ -1051,7 +1040,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const financialSnapshot = ratesFor({ own, upstream });
       let sourceCredential = observationCredential(rule, upstream, own);
       request.sourceCredential = sourceCredential;
-      if (!resettle && isSettleableWindow(window, Date.now())) {
+      if (settlementPrecheck({ window, now: Date.now(), resettle }).readSettled) {
         const settled = await settledResult(rule, window);
         if (settled) return settled;
       }
@@ -1569,9 +1558,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const segmentSnapshots = result.segments?.length ? result.segments : [wholeWindow];
     // 只有结束满 15 分钟的自然日窗口才结账：今天、近 7 天和刚结束的昨天还在变化，只记观测。
     // 关联生效前的日子没有账可结，不结账。单个自然日记进账本，多日窗口仍写确认快照。
-    const settled = result.calculation?.profitUsd != null && !result.scope?.notEffective && isSettleableWindow(result.window, Date.now());
-    const ledgerDay = settled && !!billDayOf(result.window);
-    const snapshots = ["observation", ...(settled && !ledgerDay ? ["confirmed"] : [])]
+    const { settled, ledger: ledgerDay, confirmedSnapshot } = settlementOutcome({ window: result.window, result, now: Date.now() });
+    const snapshots = ["observation", ...(confirmedSnapshot ? ["confirmed"] : [])]
       .flatMap((recordType) => segmentSnapshots.map((segment) => ({ ...segment, recordType })));
     // 数据库事务核验规则/分段口径；快照键和失败兜底另用包含两侧站点来源的口径。
     const guard = () => (ruleGenerations.get(rule.id) || 0) === generation && currentSourceCredential(rule) === sourceCredential
@@ -1638,6 +1626,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, sourceFor({ ...wholeWindow, recordType: "confirmed" }), {
       revenueRate: configuredRate(financialSnapshot.income), costRate: configuredRate(financialSnapshot.cost),
       costBasis: financialSnapshot.costBasis }) : null;
+    // 记账的结论（ledgerOption.booked）由仓库在提交以后填上
+    const ledgerOption = ledgerEntry ? { entry: ledgerEntry, resettle } : null;
     const save = () => repository.saveSnapshotsForScope(rule.id, scopeFingerprint, snapshots.map((segment) => ({
         ruleId: rule.id,
         segmentId: segment.id,
@@ -1658,7 +1648,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         healthCode: segment.health?.code || result.health.code,
         healthDetail: segment.health?.detail || result.health.detail || null,
         source: sourceFor(segment),
-    })), { expectedOwnerState: billingSource?.expectedOwnerState, guard, ledger: ledgerEntry ? { entry: ledgerEntry, resettle } : null });
+    })), { expectedOwnerState: billingSource?.expectedOwnerState, guard, ledger: ledgerOption });
     // 调用方已核对过口径；写快照的事务会在规则行锁内再按库里的口径核对一次，这里只需挡住已作废的代次。
     if (currentSourceCredential(rule) !== sourceCredential) return false;
     if (saveSnapshots) {
@@ -1672,7 +1662,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         throw codedError("PERSISTENCE_FAILED", issueText("PERSISTENCE_FAILED"));
       }
       if (saved !== true) return false;
-      if (settled) result.settledAt = result.generatedAt;
+      // 单日记进账本时，固定时刻以账本里最新那一版为准（仓库在记账的事务里带回来）：重结内容相同（B-L1）不写新版，页面仍是原来那个时刻
+      if (settled) result.settledAt = ledgerOption?.booked?.settledAt ?? result.generatedAt;
     }
     if (!await hasCurrentScope(rule.id, scopeFingerprint, generation)) return false;
     if (currentSourceCredential(rule) !== sourceCredential) return false;
@@ -2026,7 +2017,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const result = await inspectRule(rule.id, window, { mode: "observe", force: true, origin: "poll", ownerRegistry, resettle }).catch(() => null);
         const settled = result?.calculation?.profitUsd != null;
         if (settled && resettle) resettles.delete(rule.id);
-        settlements.set(`${rule.id}:${window.startMs}:${window.timezone}`, { endMs: window.endMs, settled, retryAt: settled ? null : now + SETTLE_RETRY_MS });
+        const key = `${rule.id}:${window.startMs}:${window.timezone}`, failures = settled ? 0 : (settlements.get(key)?.failures || 0) + 1;
+        settlements.set(key, { endMs: window.endMs, settled, failures, retryAt: settled ? null : now + settleRetryDelayMs(failures) });
       });
     },
     // 接入关联后立即在后台观测今天一次，不必等下一轮轮询。没有启动后台轮询（测试、脚本）时不观测。

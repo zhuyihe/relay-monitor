@@ -836,6 +836,9 @@ contract("latestSettlement returns the newest settled confirmed record of the ex
   await repository.saveSnapshot(billingSnapshot({ rule: other, segment: otherSegment, fingerprint: await fixture.fingerprint(other.id), window: yesterday,
     generatedAt: "2026-01-12T03:00:00.000Z", profitUsd: 4 }));
   assert.equal(await repository.latestSettlement(rule.id, yesterday), null);
+  // B-S1：窗口结束后、不满等待期（15 分钟）写下的也不算，和读侧、迁移同一个判断（原来仓库这里只要求窗口结束）
+  await save({ segmentId: `seg-soon-${fixture.tag}`, generatedAt: "2026-01-12T00:14:59.999Z", profitUsd: 5 });
+  assert.equal(await repository.latestSettlement(rule.id, yesterday), null);
 
   await save({ generatedAt: "2026-01-12T00:15:00.000Z", profitUsd: 11 });
   assert.equal((await repository.latestSettlement(rule.id, yesterday)).result.calculation.profitUsd, 11);
@@ -940,6 +943,65 @@ contract("the ledger keeps one row per settled day: the same window is not booke
   assert.equal(await repository.latestLedgerEntry(other.id, shanghai), null);
 });
 
+// B-L1：重结出来的账和最新一版内容相同就不写新版。内容只比窗口、成本计法，金额按 DECIMAL(20,8)、汇率按 DECIMAL(12,6) 存进去以后比；
+// 不比明细和结账时刻
+contract("a resettle with the same ledger content adds no revision; a change in amounts, rates or cost basis does", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const day = Date.UTC(2026, 2, 3);
+  const window = { preset: "yesterday", startMs: day, endMs: day + DAY, timezone: "UTC" };
+  let minutes = 20;
+  const settle = ({ revenueUsd = 2.25, costUsd = 1, profitUsd = 1.25 } = {}, options = {}) => {
+    const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: new Date(day + DAY + (minutes += 10) * 60000).toISOString(), profitUsd });
+    snapshot.source.result.downstream.amountUsd = revenueUsd;
+    snapshot.source.result.upstream.amountUsd = costUsd;
+    return repository.saveSnapshotsForScope(rule.id, fingerprint, [], { ledger: settlement(snapshot, { costBasis: "usage", ...options }) });
+  };
+  const latest = async () => {
+    const entry = await repository.latestLedgerEntry(rule.id, window);
+    return [entry.revision, entry.source, entry.revenueUsd, entry.costUsd, entry.revenueRate, entry.costBasis, entry.detail.result.calculation.profitUsd];
+  };
+
+  // 当天没有账时重结：写第 1 版，source 是 settle
+  assert.equal(await settle({}, { resettle: true }), true);
+  assert.deepEqual(await latest(), [1, "settle", 2.25, 1, null, "usage", 1.25]);
+  // 重结、内容相同（明细里的毛利、结账时刻变了）：不写
+  assert.equal(await settle({ profitUsd: 9 }, { resettle: true }), true);
+  assert.deepEqual(await latest(), [1, "settle", 2.25, 1, null, "usage", 1.25]);
+  // 金额舍入以后相同：不写
+  assert.equal(await settle({ revenueUsd: 2.250000004, costUsd: 0.999999996 }, { resettle: true }), true);
+  assert.deepEqual(await latest(), [1, "settle", 2.25, 1, null, "usage", 1.25]);
+  // 重结、只有金额变：写
+  assert.equal(await settle({ revenueUsd: 2.26, profitUsd: 1.26 }, { resettle: true }), true);
+  assert.deepEqual(await latest(), [2, "resettle", 2.26, 1, null, "usage", 1.26]);
+  // 重结、只有汇率从无到有：写；汇率舍入以后相同：不写
+  assert.equal(await settle({ revenueUsd: 2.26 }, { resettle: true, revenueRate: 7.2 }), true);
+  assert.deepEqual(await latest(), [3, "resettle", 2.26, 1, 7.2, "usage", 1.25]);
+  assert.equal(await settle({ revenueUsd: 2.26 }, { resettle: true, revenueRate: 7.2000004 }), true);
+  assert.equal((await latest())[0], 3);
+  // 重结、只有成本计法变：写
+  assert.equal(await settle({ revenueUsd: 2.26 }, { resettle: true, revenueRate: 7.2, costBasis: "fixed" }), true);
+  assert.deepEqual(await latest(), [4, "resettle", 2.26, 1, 7.2, "fixed", 1.25]);
+  // 不是重结：内容变了也不写（已固定的日子不再变）
+  assert.equal(await settle({ revenueUsd: 3 }), true);
+  assert.equal((await latest())[0], 4);
+
+  // 提交以后把结论放进 ledger.booked：没写时带回账本里最新那一版的固定时刻，写了带这次的
+  const fourth = (await repository.latestLedgerEntry(rule.id, window)).settledAt;
+  const book = async (fields, options) => {
+    const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: new Date(day + DAY + (minutes += 10) * 60000).toISOString(), profitUsd: 1.25 });
+    Object.assign(snapshot.source.result.downstream, { amountUsd: fields.revenueUsd });
+    const ledger = settlement(snapshot, { costBasis: "fixed", revenueRate: 7.2, ...options });
+    assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [], { ledger }), true);
+    return [ledger.booked.write, ledger.booked.revision, ledger.booked.settledAt, snapshot.source.resultGeneratedAt];
+  };
+  const same = await book({ revenueUsd: 2.26 }, { resettle: true });
+  assert.deepEqual(same.slice(0, 3), [false, 4, fourth]);
+  const changed = await book({ revenueUsd: 2.27 }, { resettle: true });
+  assert.deepEqual(changed.slice(0, 3), [true, 5, changed[3]]);
+});
+
 contract("listLedgerHistory lists the newest revision of each settled day inside the range, latest day first", async ({ repository, fixture }) => {
   const rule = await fixture.createRule();
   const [segment] = await repository.listSegments(rule.id);
@@ -988,8 +1050,8 @@ contract("listLedgerHistory pages with a (day, rule) cursor that survives a rese
   const first = await repository.listLedgerHistory(rule.id, { ...range, limit: 2 });
   assert.deepEqual(first.records.map((record) => record.calculation.profitUsd), [3, 2]);
   assert.equal(typeof first.nextCursor, "string");
-  // 翻页之间重新结账了已经列过的一天：下一页既不重复也不漏。
-  await settle(2, 30, { resettle: true });
+  // 翻页之间重新结账了已经列过的一天：下一页既不重复也不漏。重结得出的账要和上一版不同才写新版（这里汇率从无到有）
+  await settle(2, 30, { resettle: true, revenueRate: 7.2 });
   const second = await repository.listLedgerHistory(rule.id, { ...range, limit: 2, cursor: first.nextCursor });
   assert.deepEqual(second.records.map((record) => record.calculation.profitUsd), [1]);
   assert.equal(second.nextCursor, null);
@@ -1095,8 +1157,8 @@ contract("returned values and saved inputs are independent copies", async ({ rep
   const fingerprint = await fixture.fingerprint(rule.id);
   const day = Date.UTC(2026, 2, 1);
   const window = { preset: "custom", startMs: day, endMs: day + DAY, timezone: "UTC" };
-  // 传副本：billingSnapshot 会直接引用 window，下面改写保存输入时不能连带改掉查询窗口。
-  const snapshot = billingSnapshot({ rule: stored, segment: segments[0], fingerprint, window: { ...window }, generatedAt: "2026-03-02T00:05:00.000Z", profitUsd: 4 });
+  // 传副本：billingSnapshot 会直接引用 window，下面改写保存输入时不能连带改掉查询窗口。生成在结束满等待期以后才算结账（B-S1）
+  const snapshot = billingSnapshot({ rule: stored, segment: segments[0], fingerprint, window: { ...window }, generatedAt: "2026-03-02T00:15:00.000Z", profitUsd: 4 });
   await repository.saveSnapshot(snapshot);
   snapshot.source.result.calculation.profitUsd = 40;
   snapshot.source.window.startMs = 0;

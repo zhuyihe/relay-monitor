@@ -4495,6 +4495,23 @@ test("B1 结果缓存按请求比：「今天」过了半分钟再单独重读�
   assert.ok(!selected.coverage.channels.some((channel) => channel.issues.includes("BILLING_EVIDENCE_NOT_QUERIED")));
 });
 
+test("B-L1 重结内容相同不写新版：这次的结果（会进缓存）固定时刻也照账本里那一版，不显示成新的时刻", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  await f.module.refreshDue(now);
+  const first = f.state.ledger.filter((entry) => entry.rule_id === "rr_live");
+  assert.equal(first.length, 1, "前提：昨天结了第 1 版");
+  const settledAt = (await f.repository.latestLedgerEntry("rr_live", { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z"), timezone: "Asia/Shanghai" })).settledAt;
+  // 一小时后重结，上游、本站都没变
+  now += 3600000;
+  f.rt._reconciliationResettles.add("rr_live");
+  f.rt._reconciliationSettlements.clear();
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.filter((entry) => entry.rule_id === "rr_live").length, 1, "内容相同，不写第 2 版");
+  const page = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", origin: "page" });
+  assert.deepEqual([page.results[0].displayStatus.state, page.results[0].settledAt], ["settled", settledAt], "固定时刻还是第 1 版的");
+});
+
 test("旧规则（legacy-v3）不要求回答 Key 用途：汇总照加、旁边那句不提、渠道算已算进利润、那一行不是需处理，四处一致", async (t) => {
   const f = await completedDayFixture(t);
   const legacy = f.rows.find((row) => row.id === "rr_two");
