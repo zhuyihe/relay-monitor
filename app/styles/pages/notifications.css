@@ -67,6 +67,10 @@
 /* 通知方式一个一行（4 列里放不下表格），桌面和手机同一个样子 */
 .jy-m-list.jy-notifications-chlist { display: block; }
 .jy-notifications-chlist .m-sub { align-items: center; }
-/* 日报的三项在 4 列里一项一行 */
-.jy-notifications-side .jy-two { grid-template-columns: minmax(0, 1fr); }
+/* 日报在 4 列里排紧：开关和发送时间一行，发到哪里横排（ui-design-spec §5.7） */
+.jy-notifications-dr-row { display: flex; flex-wrap: wrap; gap: 0 24px; }
+.jy-notifications-side .jy-notifications-checks { flex-direction: row; flex-wrap: wrap; gap: 4px 16px; }
+/* 「还有 N 个通知方式」：和列表左右对齐 */
+.jy-notifications-more { padding: 8px 16px 16px; }
+.jy-notifications-more .jy-more__body { margin: 8px -16px 0; }
 .jy-notifications-pace-hint { margin: 0 0 8px; }

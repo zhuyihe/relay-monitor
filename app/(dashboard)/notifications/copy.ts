@@ -70,6 +70,8 @@ export const COPY = Object.freeze({
   // 通知方式
   channelsCaption: "提醒和日报从这些地方发出",
   add: "添加通知方式",
+  // 通知方式多时只露前几个（启用的在前），其余收起，页面不跟着个数涨（ui-design-spec §5.7）
+  moreChannels: (n: number) => `还有 ${n} 个通知方式`,
   untested: "还没测试",
   sent: "发送成功",
   sendFailed: "发送失败",
@@ -118,16 +120,16 @@ export const COPY = Object.freeze({
   // 日报
   reportCaption: "每天定时把昨天自营业务的经营情况发出去",
   reportEnable: "启用日报",
-  reportEnableHint: "每天到了发送时间，发出昨天的日报",
   reportTime: "发送时间",
-  reportTimeHint: "每天几点发",
   reportTo: "发到哪里",
-  reportToHint: "不勾就发到所有启用的通知方式；日报比较长，建议选邮件",
+  reportToHint: "不勾就发到所有启用的通知方式；日报较长，建议选邮件",
   reportNoChannels: "先添加通知方式",
   reportPreview: "预览",
   reportSend: "立即发送",
   reportLastSent: (day: string) => `上次定时发送：${day}`,
-  reportIdleHint: "预览用的是现在的数据；立即发送不影响当天定时发的那一份",
+  // 两个按钮各自的说明，放在悬停和读屏里（4 列里写成一行会折两行，§1.4 第 4 条）
+  reportPreviewTip: "预览用的是现在的数据",
+  reportSendTip: "立即发送不影响当天定时发的那一份",
   reportSent: (ok: number, total: number) => `日报已发送：${total} 个通知方式里 ${ok} 个发出去了`,
   reportNotSent: "日报没发出去",
   previewFailed: "读不到日报预览",

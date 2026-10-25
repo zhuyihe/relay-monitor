@@ -560,6 +560,23 @@ export default function NotificationsPage() {
     </span>
   );
 
+  // 通知方式一个一行；多时只露前几个（启用的在前），其余收进「还有 N 个通知方式」，页面高度不跟着个数涨（ui-design-spec §5.7）
+  const CHANNELS_SHOWN = 4;
+  const channelsSorted = [...channels].sort((a: any, b: any) => Number(a.enabled === false) - Number(b.enabled === false));
+  const channelsLead = channelsSorted.slice(0, CHANNELS_SHOWN);
+  const channelsRest = channelsSorted.slice(CHANNELS_SHOWN);
+  const channelItem = (c: any) => (
+    <li key={c.id}>
+      <span className="m-top">{c.name}</span>
+      {enabledToggle(c)}
+      <div className="m-sub">
+        {plate(c.type)}
+        <span aria-live="polite">{testCell(c)}</span>
+      </div>
+      <div className="m-actions">{rowActions(c)}</div>
+    </li>
+  );
+
   const plate = (type: string) => (
     <span className="jy-notifications-type">
       <span className="jy-notifications-plate" aria-hidden="true">
@@ -869,18 +886,15 @@ export default function NotificationsPage() {
           {channels.length ? (
             <>
               <ul className="jy-m-list jy-notifications-chlist" aria-label={COPY.channels}>
-                {channels.map((c: any) => (
-                  <li key={c.id}>
-                    <span className="m-top">{c.name}</span>
-                    {enabledToggle(c)}
-                    <div className="m-sub">
-                      {plate(c.type)}
-                      <span aria-live="polite">{testCell(c)}</span>
-                    </div>
-                    <div className="m-actions">{rowActions(c)}</div>
-                  </li>
-                ))}
+                {channelsLead.map(channelItem)}
               </ul>
+              {channelsRest.length ? (
+                <More label={COPY.moreChannels(channelsRest.length)} className="jy-notifications-more">
+                  <ul className="jy-m-list jy-notifications-chlist" aria-label={COPY.moreChannels(channelsRest.length)}>
+                    {channelsRest.map(channelItem)}
+                  </ul>
+                </More>
+              ) : null}
             </>
           ) : (
             <div className="jy-empty-inline">
@@ -942,17 +956,18 @@ export default function NotificationsPage() {
       ) : (
         <Panel title={COPY.report} badge={<SaveState saving={dr.saving} dirty={false} at={dr.savedAt} tz={tz} failures={[dr.failure]} />} caption={COPY.reportCaption}>
           <Form layout="vertical" requiredMark={false} component="div" className="jy-form jy-notifications-dr">
-            <Form.Item label={COPY.reportEnable} htmlFor={`${uid}-dr-enabled`} extra={COPY.reportEnableHint}>
-              <Switch
-                id={`${uid}-dr-enabled`}
-                checked={dr.value.enabled}
-                checkedChildren={COPY.on}
-                unCheckedChildren={COPY.off}
-                onChange={(v) => setDr({ enabled: v })}
-              />
-            </Form.Item>
-            <div className="jy-two">
-              <Form.Item label={COPY.reportTime} htmlFor={`${uid}-dr-time`} extra={COPY.reportTimeHint}>
+            {/* 4 列里排紧：开关和发送时间一行，发到哪里横排；说明只留「发到哪里」那一句（日报是什么，标题旁已经写了） */}
+            <div className="jy-notifications-dr-row">
+              <Form.Item label={COPY.reportEnable} htmlFor={`${uid}-dr-enabled`}>
+                <Switch
+                  id={`${uid}-dr-enabled`}
+                  checked={dr.value.enabled}
+                  checkedChildren={COPY.on}
+                  unCheckedChildren={COPY.off}
+                  onChange={(v) => setDr({ enabled: v })}
+                />
+              </Form.Item>
+              <Form.Item label={COPY.reportTime} htmlFor={`${uid}-dr-time`}>
                 <TimePicker
                   id={`${uid}-dr-time`}
                   format="HH:mm"
@@ -962,6 +977,8 @@ export default function NotificationsPage() {
                   onChange={(d) => setDr({ time: d ? d.format("HH:mm") : "09:00" })}
                 />
               </Form.Item>
+            </div>
+            <div>
               <Form.Item
                 label={<span id={`${uid}-dr-ch`}>{COPY.reportTo}</span>}
                 extra={COPY.reportToHint}
@@ -983,15 +1000,15 @@ export default function NotificationsPage() {
             </div>
           </Form>
           <div className="jy-notifications-actions">
-            <Button loading={previewing} onClick={previewReport}>
+            <Button loading={previewing} onClick={previewReport} title={COPY.reportPreviewTip} aria-describedby={`${uid}-dr-preview-tip`}>
               {COPY.reportPreview}
             </Button>
-            <Button loading={sending} onClick={sendReport}>
+            <Button loading={sending} onClick={sendReport} title={COPY.reportSendTip} aria-describedby={`${uid}-dr-send-tip`}>
               {COPY.reportSend}
             </Button>
-            <span className="jy-caption">
-              {drSaved.lastSent ? COPY.reportLastSent(formatDayKey(drSaved.lastSent, tz)) : COPY.reportIdleHint}
-            </span>
+            <span id={`${uid}-dr-preview-tip`} className="sr-only">{COPY.reportPreviewTip}</span>
+            <span id={`${uid}-dr-send-tip`} className="sr-only">{COPY.reportSendTip}</span>
+            {drSaved.lastSent ? <span className="jy-caption">{COPY.reportLastSent(formatDayKey(drSaved.lastSent, tz))}</span> : null}
           </div>
           <div aria-live="polite">
             {sendResult && (

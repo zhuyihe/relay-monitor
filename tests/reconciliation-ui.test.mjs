@@ -3488,7 +3488,8 @@ test("系统设置：接口说登录信息没加密时页顶提示一条（不�
 });
 
 test("告警中心 8 + 4、系统设置两栏（1440）：通知方式一个一行，提醒节奏、历史概况收成一句；手机上通知方式在最前", async (t) => {
-  const channels = [{ id: "c1", name: "运维群", type: "telegram", enabled: true, config: {}, hasSecret: {} }, { id: "c2", name: "老板邮箱", type: "telegram", enabled: false, config: {}, hasSecret: {} }];
+  const two = [{ id: "c1", name: "运维群", type: "telegram", enabled: true, config: {}, hasSecret: {} }, { id: "c2", name: "老板邮箱", type: "telegram", enabled: false, config: {}, hasSecret: {} }];
+  let channels = two;
   const rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: true, etaDays: 3, etaUnit: "days", renotifyHours: 6, errorThreshold: 1, errorRetrySec: 60, channelsFor: {} };
   const handler = async (route) => {
     const url = new URL(route.request().url());
@@ -3509,6 +3510,14 @@ test("告警中心 8 + 4、系统设置两栏（1440）：通知方式一个一�
   assert.ok(c.x > r.x + r.width && Math.abs(c.x - d.x) < 1, "通知方式、日报在提醒规则右边一栏");
   assert.ok(r.width / c.width > 1.8 && r.width / c.width < 2.2, `宽度约 2:1（${Math.round(r.width)} / ${Math.round(c.width)}）`);
   assert.ok(Math.abs(r.y - c.y) < 1 && d.y > c.y + c.height, "上沿对齐，日报在通知方式下面");
+  // 2 个通知方式时，右栏（通知方式 + 日报）和提醒规则底边差不超过一行字：规则那块不被右栏撑出大片空白（§1.4 第 3 条）
+  const ruleContent = await rulesP.locator(".jy-notifications-pad").boundingBox();
+  assert.ok(Math.abs((d.y + d.height) - (r.y + r.height)) <= 24, `两栏底边差（${Math.round((d.y + d.height) - (r.y + r.height))}）`);
+  assert.ok((r.y + r.height) - (ruleContent.y + ruleContent.height) <= 48, `规则那块内容下面的空白（${Math.round((r.y + r.height) - (ruleContent.y + ruleContent.height))}）`);
+  // 日报排紧：开关和发送时间一行；「预览」「立即发送」的说明在悬停和读屏里
+  const [sw, time] = [await reportP.getByRole("switch").first().boundingBox(), await reportP.getByLabel("发送时间", { exact: true }).boundingBox()];
+  assert.ok(Math.abs(sw.y - time.y) < 16 && time.x > sw.x, "开关和发送时间同一行");
+  assert.equal(await reportP.getByRole("button", { name: NOTIFICATIONS_COPY.reportSend }).getAttribute("title"), NOTIFICATIONS_COPY.reportSendTip);
   // 通知方式一个一行（4 列里不放表格）：名字、开关；类型 · 测试结果；测试、编辑、删除常驻
   assert.equal(await chP.locator("table").count(), 0);
   const items = chP.locator(".jy-notifications-chlist > li");
@@ -3521,6 +3530,19 @@ test("告警中心 8 + 4、系统设置两栏（1440）：通知方式一个一�
   assert.equal(await pace.getAttribute("class"), "jy-more__toggle"); assert.equal(await pace.getAttribute("aria-expanded"), "false");
   assert.equal(await rulesP.getByLabel(NOTIFICATIONS_COPY.renotify, { exact: true }).count(), 0);
   await pace.click(); await rulesP.getByLabel(NOTIFICATIONS_COPY.renotify, { exact: true }).waitFor();
+  // 通知方式多时只露前 4 个（启用的在前），其余收进「还有 N 个」：6 个和 12 个时整页一样高
+  const many = (n) => Array.from({ length: n }, (_, i) => ({ id: `c${i}`, name: `通知${i}`, type: "telegram", enabled: i !== 0, config: {}, hasSecret: {} }));
+  const pageHeight = async (n) => {
+    channels = many(n); await page.reload(); await chP.locator(".jy-notifications-chlist > li").first().waitFor();
+    return page.evaluate(() => document.documentElement.scrollHeight);
+  };
+  const h6 = await pageHeight(6), h12 = await pageHeight(12);
+  assert.equal(h12, h6, `页面高度不随通知方式个数涨（6 个 ${h6}，12 个 ${h12}）`);
+  assert.equal(await chP.locator(".jy-notifications-chlist > li").count(), 4);
+  await chP.getByRole("button", { name: NOTIFICATIONS_COPY.moreChannels(8), exact: true }).waitFor();
+  // 停用的排在后面
+  assert.equal(await chP.locator(".jy-notifications-chlist > li").first().getByText("通知1", { exact: true }).count(), 1);
+  channels = two;
   // 手机：通知方式在最前，然后提醒规则、日报（页面里就换了先后，读屏、键盘跟着走）
   await page.setViewportSize({ width: 390, height: 844 }); await page.reload();
   await rulesP.getByRole("switch").first().waitFor(); await chP.locator(".jy-notifications-chlist > li").first().waitFor(); await reportP.getByRole("switch").first().waitFor();
