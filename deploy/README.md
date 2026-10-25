@@ -11,6 +11,16 @@
 
 示例 Compose 将应用端口绑定到宿主机 `127.0.0.1:8787`，供宿主机上的反向代理访问。满足上述代理条件后，在 Compose 使用的 `.env` 中设置 `TRUST_PROXY=true` 并重建应用容器。若反向代理也在 Docker 内，使用同一内部网络访问 `relay-monitor:8787`，并移除应用的 `ports` 映射。
 
+### 登录失败限流按哪个来源算
+
+同一个来源连续输错 10 次密码，锁 5 分钟；锁着的时候密码对了也进不去。「来源」这样算：
+
+- **没开 `TRUST_PROXY`**：按真正连进来的地址。直连时每个访问的人各算各的，别人乱试不会把你锁住。前面有代理时，连进来的都是代理，等于所有人共用一个计数。
+- **开了 `TRUST_PROXY`**：按 `X-Forwarded-For` 的**最后一个**地址，也就是离应用最近的那层代理加上去的。
+  - nginx 推荐用 `proxy_set_header X-Forwarded-For $remote_addr;` 覆盖这个头，不要用 `$proxy_add_x_forwarded_for` 往后追加。两种写法下最后一个地址都对，覆盖更干净。
+  - 隔着好几层代理（比如 CDN 再到 nginx）时，最后一个地址是上一层代理，所有人又共用一个计数。要按真实访问者算，在离应用最近的那层代理上配好 `real_ip`（nginx 的 `set_real_ip_from` 和 `real_ip_header`），再用 `$remote_addr` 覆盖。
+- 启动日志会写现在按什么算：「登录限流按连接地址」或「登录限流按 X-Forwarded-For 的最后一个地址」。看到「登录限流全站共用一个计数」，说明启动命令没带 `--import ./lib/peer-address.js`（镜像自带；自己改过启动命令的要加回来）。
+
 本地 Docker 构建排除 `.env`、`.env.*` 和 `server.md`；公开的 `.env.example` 可以保留。构建阶段不应包含真实数据库或部署凭证。
 
 ## 登录信息加密
