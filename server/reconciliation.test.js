@@ -5,6 +5,7 @@ import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationO
 import { MemoryReconciliationRepository } from "./test-support/reconciliation-memory-repository.js";
 import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
+import { SETTLE_LOOKBACK_MAX_PER_ROUND } from "../lib/reconciliation-settlement.js";
 import { Store } from "../db/store.js";
 import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconciliation-scope-policy.js";
 import { reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
@@ -6870,6 +6871,23 @@ test("C2a 中-2：改绑定之前还没固定的日子，D3 做好以前回看�
   assert.deepEqual(liveLedger(), ["2026-10-07", "2026-10-08"]);
 });
 
+test("C2a 回看每轮最多补 15 个「绑定×天」：积压 18 个只补最新的 15 个，剩下的下一轮接着补；昨天不占这 15 个（审核 C2a 积压场景）", async (t) => {
+  assert.equal(SETTLE_LOOKBACK_MAX_PER_ROUND, 15);
+  let now = Date.parse("2026-10-16T03:00:00Z"); // 上海 10-16 11:00；开始统计 10-07 0 点：昨天 10-15；更早 10-09 到 10-14 共 6 天，三条绑定一共 18 个
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 100, lookbackTimeMs: 60000 } });
+  const booked = () => f.state.ledger.map((row) => row.bill_date);
+  const count = (date) => booked().filter((day) => day === date).length;
+  await f.module.refreshDue(now);
+  assert.equal(count("2026-10-15"), 3, "昨天三条都结了，不占这 15 个");
+  const older = booked().filter((day) => day !== "2026-10-15");
+  assert.equal(older.length, SETTLE_LOOKBACK_MAX_PER_ROUND, "更早的日子这一轮只补 15 个，不是 18 个");
+  assert.equal(count("2026-10-09"), 0, "最老的那天没轮到：新的日子先补");
+  for (const date of ["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14"]) assert.equal(count(date), 3, `${date} 三条都补了`);
+  now += 60000;
+  await f.module.refreshDue(now);
+  assert.equal(count("2026-10-09"), 3, "剩下的下一轮接着补");
+});
+
 test("C2a 回看有时间上限：已经发出去的那一天照常做完，用到时间就停，剩下的下一轮接着取；今天的观测在回看之前做完", async (t) => {
   let now = Date.parse("2026-10-12T03:00:00Z"); // 开始统计 10-07 0 点：10-07 到 10-11 共 5 天，其中 10-11 是昨天
   const order = [];
@@ -6932,6 +6950,36 @@ test("C2a 手动「重新读取」过去的整天走结账：结不成只更新�
   assert.equal(f.repository.tables.settlementState.some((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08"), false, "状态行在记账的事务里删掉");
   assert.deepEqual(f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => [row.bill_date, row.revision, row.source, row.detail.settlement?.trigger]),
     [["2026-10-08", 1, "settle", "manual"]], "账本明细记下是手动结的");
+});
+
+test("C2a 结成新版以后不再读一次账本行：result 自己就是刚写进去的那一版（安全审核 C2a 低-3）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  let reads = 0;
+  const beforeRead = f.repository.hooks.beforeRead;
+  f.repository.hooks.beforeRead = (name, args) => {
+    if (name === "latestLedgerEntry") reads += 1;
+    return beforeRead?.(name, args);
+  };
+  const manual = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
+  const settled = (await manual()).results[0];
+  assert.ok(settled.settledAt, "结成了");
+  assert.equal(reads, 2, "只剩取数前读已固定的账、previousSuccess 两次；写了新版以后 bookedResult 不再多读一次（以前是 3 次）");
+  // 和真的从账本行读出来的 ledgerReference 一样（版本、来源、固定时刻、汇率、成本计法），不是另算一份
+  const row = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.deepEqual(settled.ledger, { billDate: row.bill_date, revision: row.revision, source: row.source, settledAt: settled.settledAt,
+    rates: { income: row.revenue_rate ?? null, cost: row.cost_rate ?? null }, costBasis: row.cost_basis }, "result.ledger 直接补好，和账本里写进去的那一行一致");
+});
+
+test("C2a 结账时渠道目录用 10 分钟内的缓存：一轮结好几天，只读一次渠道目录，不是每天一次（安全审核 C2a 低-3）", async (t) => {
+  let now = Date.parse("2026-10-11T03:00:00Z"); // 开始统计 10-07 0 点：昨天 10-10，更早 10-08、10-09 共三天，三天都没结
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const channelReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/channel/").length;
+  await f.module.refreshDue(now);
+  const settled = f.state.ledger.filter((row) => row.rule_id === "rr_live").length;
+  assert.ok(settled >= 3, `这一轮结了好几天：${settled}`);
+  assert.ok(channelReads() <= 2, `结 ${settled} 天，渠道目录最多读一两次（今天的观测一次，结账用缓存），实际 ${channelReads()} 次`);
 });
 
 test("C2a 结账（settle）只写账本和状态行：不写观测快照、渠道状态、分段，不发告警", async (t) => {
