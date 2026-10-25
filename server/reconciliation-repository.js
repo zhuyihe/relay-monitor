@@ -31,6 +31,12 @@ export function reconciliationOwnerRuleState(rules) {
     .sort(([a], [b]) => a.localeCompare(b)));
 }
 
+// 一条绑定的成本主人只看 token_id 相同的绑定（server/reconciliation.js 的 costOwnerFor）：写快照时只核对、只锁这一组（计划 P1c）
+export function reconciliationOwnerScope(rules, tokenId) {
+  const id = Number(tokenId);
+  return { tokenId: id, state: reconciliationOwnerRuleState(rules.filter((rule) => Number(rule.tokenId) === id)) };
+}
+
 export function asJson(value) {
   if (!value) return null;
   if (typeof value === "string") {
@@ -665,9 +671,15 @@ export class ReconciliationRepository {
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
+      // expectedOwnerState：{ tokenId, state }（reconciliationOwnerScope）。只锁同一把 Key 的绑定：先普通读出这一组的 id
+      // （一致性读，不加锁），再按主键锁、锁内再比一次。rules 表没有 token_id 的索引，按 token_id 加锁会锁住扫过的每一行，又变回锁全表。
+      // 新加同一把 Key 的启用绑定有唯一键 active_token_key 挡着，建、改绑定也在进程内排队（serializeWrite）。
       if (expectedOwnerState != null) {
-        const [owners] = await conn.query("SELECT * FROM reconciliation_rules WHERE archived_at IS NULL ORDER BY id FOR UPDATE");
-        if (reconciliationOwnerRuleState(owners.map((row) => ruleFromRow(row))) !== expectedOwnerState) {
+        const [ids] = await conn.query("SELECT id FROM reconciliation_rules WHERE token_id = ? AND archived_at IS NULL", [expectedOwnerState.tokenId]);
+        const [owners] = ids.length
+          ? await conn.query("SELECT * FROM reconciliation_rules WHERE id IN (?) AND archived_at IS NULL ORDER BY id FOR UPDATE", [ids.map((row) => row.id)])
+          : [[]];
+        if (reconciliationOwnerRuleState(owners.map((row) => ruleFromRow(row))) !== expectedOwnerState.state) {
           await conn.rollback();
           return false;
         }

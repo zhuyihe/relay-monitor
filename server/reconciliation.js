@@ -25,7 +25,7 @@ import {
 } from "../lib/reconciliation-contract.js";
 import { OWN_STATION_UNSET, UPSTREAM_GONE } from "../lib/format.js";
 import { errorText, ownStationErrorCode } from "../lib/error-copy.js";
-import { ReconciliationRepository, reconciliationOwnerRuleState, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
+import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationOwnerScope, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
@@ -603,7 +603,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 轮询（poll）按时间重读：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟（自营站点的身份也是 30 分钟）；
   // 记在 staleMetadata 里的上游这一轮强制全部重读：出了异常的、这一轮要结账的（refreshDue 放进来），读成功才清掉记号。
   async function ownerRegistryFor(rules, selected, { observe = true, poll = false } = {}) {
-    const billingSource = { ...billingSourceState(), expectedOwnerState: reconciliationOwnerRuleState(rules) };
+    // expectedOwnerState 是全部绑定的指纹，只用来作结果缓存的版本；写快照时核对、加锁只看这条绑定同一把 Key 的那一组（ownerScopeFor）
+    const billingSource = { ...billingSourceState(), expectedOwnerState: reconciliationOwnerRuleState(rules), ownerRules: rules };
     const selectedIds = new Set(selected.map((rule) => rule.id));
     const participants = rules.filter((rule) => rule.enabled || selectedIds.has(rule.id));
     const stationIds = [...new Set(participants.flatMap((rule) => [rule.upstreamStationId, rule.ownStationId]))].sort();
@@ -1849,7 +1850,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const save = async () => {
       // 没变不写，但守卫照样过一遍（口径、凭据代次没变才算写过）
       if (unchangedObservation) return guard();
-      const saved = await repository.saveSnapshotsForScope(rule.id, scopeFingerprint, rows, { expectedOwnerState: billingSource?.expectedOwnerState, guard, ledger: ledgerOption });
+      const saved = await repository.saveSnapshotsForScope(rule.id, scopeFingerprint, rows, {
+        expectedOwnerState: billingSource?.ownerRules ? reconciliationOwnerScope(billingSource.ownerRules, rule.tokenId) : null, guard, ledger: ledgerOption });
       if (saved === true && observationOnly) {
         // 一条绑定只留最新的一份（口径、凭据变了以后旧键不会再用到）；已删除、停用的绑定在 refreshDue 里清
         for (const key of observationWrites.keys()) if (key.startsWith(`${rule.id}:`) && key !== observationKey) observationWrites.delete(key);

@@ -414,10 +414,12 @@ export class MemoryReconciliationRepository {
   async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null } = {}) {
     let booked = null;
     return this.#transaction("saveSnapshotsForScope", async (tx) => {
+      // 和 MySQL 仓库一样只锁同一把 Key 的绑定（按 id 排好依次锁），锁内再比
       if (expectedOwnerState != null) {
-        await this.#lock(tx, "*");
-        const owners = this.#rows("rules", tx).map(({ row }) => row).filter((row) => row.archived_at == null).sort((a, b) => compareText(a.id, b.id));
-        if (reconciliationOwnerRuleState(owners.map((row) => ruleFromRow(row))) !== expectedOwnerState) return this.#abort(tx, false);
+        const group = () => this.#rows("rules", tx).map(({ row }) => row)
+          .filter((row) => row.archived_at == null && Number(row.token_id) === Number(expectedOwnerState.tokenId)).sort((a, b) => compareText(a.id, b.id));
+        for (const row of group()) await this.#lock(tx, `rule:${row.id}`);
+        if (reconciliationOwnerRuleState(group().map((row) => ruleFromRow(row))) !== expectedOwnerState.state) return this.#abort(tx, false);
       }
       await this.#lock(tx, `rule:${ruleId}`);
       const entry = this.#ruleEntry(tx, ruleId);

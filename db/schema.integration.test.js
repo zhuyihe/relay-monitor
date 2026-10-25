@@ -4,7 +4,7 @@ import mysql from "mysql2/promise";
 import { ensureSchema, rehashBillingCapabilities } from "./pool.js";
 import { billingCapabilityAliases, createBillingCapabilityStorage, wrappedBillingIdentity } from "../lib/billing-capability-storage.js";
 import { ChannelOnboardingRepository } from "../server/channel-onboarding-repository.js";
-import { ReconciliationRepository, reconciliationOwnerRuleState } from "../server/reconciliation-repository.js";
+import { ReconciliationRepository, reconciliationOwnerScope } from "../server/reconciliation-repository.js";
 import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues } from "../lib/reconciliation-ledger.js";
 import { defineReconciliationRepositoryContract } from "../server/test-support/reconciliation-repository-contract.js";
@@ -382,17 +382,18 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     const rule = await reconciliation.getRule("legacy_rule");
     const segments = await reconciliation.listSegments(rule.id);
     const expectedScope = reconciliationScopeFingerprint(rule, segments);
-    const expectedOwnerState = reconciliationOwnerRuleState(await reconciliation.listRules());
+    const expectedOwnerState = reconciliationOwnerScope(await reconciliation.listRules(), rule.tokenId);
     const snapshot = { ruleId: rule.id, segmentId: segments[0].id, snapshotKey: "owner-obsolete", windowKind: "custom",
       startMs: 5000, endMs: 6000, localDate: null, upstreamUsd: 2, downstreamUsd: 3, differenceUsd: 1,
       marginRate: 1 / 3, healthCode: "READY", source: { recordType: "confirmed", scopeFingerprint: expectedScope } };
-    await reconciliation.createRule({ upstreamStationId: "owner-extra-upstream", ownStationId: "owner-extra-own", tokenId: 108,
+    // 同一把 Key（token_id 相同）多了一条绑定：成本主人可能变了，旧指纹作废
+    await reconciliation.createRule({ upstreamStationId: "owner-extra-upstream", ownStationId: "owner-extra-own", tokenId: rule.tokenId,
       tokenName: "New owner", fixedGroup: "g", timezone: "Asia/Shanghai", channels: [{ channelId: 108, name: "Owner channel" }] });
     let guardCalls = 0;
     assert.equal(await reconciliation.saveSnapshotsForScope(rule.id, expectedScope, [snapshot],
       { expectedOwnerState, guard: () => { guardCalls += 1; return true; } }), false);
     assert.equal(guardCalls, 0);
-    const currentOwners = reconciliationOwnerRuleState(await reconciliation.listRules());
+    const currentOwners = reconciliationOwnerScope(await reconciliation.listRules(), rule.tokenId);
     assert.equal(await reconciliation.saveSnapshotsForScope(rule.id, expectedScope,
       [{ ...snapshot, snapshotKey: "owner-final-guard" }],
       { expectedOwnerState: currentOwners, guard: () => ++guardCalls === 1 }), false);
