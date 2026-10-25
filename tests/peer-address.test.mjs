@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
-import { clientIp, normalizeAddress, peerHeaderName } from "../lib/client-address.js";
+import { clientIp, normalizeAddress, peerHeaderName, rateLimitKey } from "../lib/client-address.js";
 import { LOGIN_FAILURE_LIMIT, LOGIN_FAILURE_MAX_ENTRIES, LOGIN_FAILURE_TTL_MS, LOGIN_LOCK_MS, SessionManager, loginLimitSourceText } from "../lib/auth.js";
 
 const ROOT = new URL("..", import.meta.url);
@@ -16,7 +16,8 @@ test("Dockerfile 的 CMD 和 npm start 都预加载 lib/peer-address.js：漏了
   assert.equal(cmd.length, 1);
   assert.match(cmd[0], /exec node --import \.\/lib\/peer-address\.js server\.js/);
   const start = JSON.parse(readFileSync(new URL("package.json", ROOT), "utf8")).scripts.start;
-  assert.match(start, /NODE_OPTIONS="--import \.\/lib\/peer-address\.js" next start/);
+  // 不用 NODE_OPTIONS：会盖掉用户自己设的（内存上限等），而且 Windows 的 cmd 里这种写法跑不起来（安全审核 10-25 低-5）
+  assert.match(start, /^node --import \.\/lib\/peer-address\.js node_modules\/next\/dist\/bin\/next start$/);
 });
 
 test("clientIp：没开 TRUST_PROXY 按连接地址（只认预加载的随机头名）；开了取 X-Forwarded-For 的最后一个", () => {
@@ -33,6 +34,30 @@ test("clientIp：没开 TRUST_PROXY 按连接地址（只认预加载的随机�
   assert.equal(clientIp(req({}), proxied), "local");
   assert.equal(normalizeAddress(" ::1 "), "::1");
   assert.equal(peerHeaderName({ RELAY_PEER_HEADER: HEADER }), HEADER);
+});
+
+test("clientIp：TRUST_PROXY 下最后一个值先去掉端口再校验是不是地址，不是就退回连接地址（安全审核 10-25 低-1）", () => {
+  const env = { RELAY_PEER_HEADER: HEADER, TRUST_PROXY: "true" };
+  assert.equal(clientIp(req({ "x-forwarded-for": "5.5.5.5:1234", [HEADER]: "9.9.9.9" }), env), "5.5.5.5",
+    "带端口的代理（部分云负载均衡）：去掉端口当地址用，不会每条连接算一个新来源");
+  assert.equal(clientIp(req({ "x-forwarded-for": "[2001:db8::1]:1234", [HEADER]: "9.9.9.9" }), env), rateLimitKey("2001:db8::1"),
+    "方括号 IPv6 带端口：去掉方括号和端口");
+  assert.equal(clientIp(req({ "x-forwarded-for": "[2001:db8::1]", [HEADER]: "9.9.9.9" }), env), rateLimitKey("2001:db8::1"), "方括号 IPv6 不带端口也认");
+  assert.equal(clientIp(req({ "x-forwarded-for": "not-an-address", [HEADER]: "9.9.9.9" }), env), "9.9.9.9", "不是地址、也不是「地址:端口」：退回连接地址");
+  assert.equal(clientIp(req({ "x-forwarded-for": "x".repeat(8000), [HEADER]: "9.9.9.9" }), env), "9.9.9.9", "超长垃圾值同样退回，不会被当成键存起来");
+  assert.equal(clientIp(req({ "x-forwarded-for": "not-an-address" }), env), "local", "垃圾值、也没有连接地址：退回全站一个计数");
+});
+
+test("clientIp / rateLimitKey：IPv6 按 /64 这一段算，换着段里的地址绕不开（安全审核 10-25 中-1）", () => {
+  const env = { RELAY_PEER_HEADER: HEADER };
+  assert.equal(clientIp(req({ [HEADER]: "2001:db8:1:2:3:4:5:6" }), env), clientIp(req({ [HEADER]: "2001:db8:1:2::ffff" }), env),
+    "同一个 /64 里两个地址，算同一个来源");
+  assert.notEqual(clientIp(req({ [HEADER]: "2001:db8:1:2::1" }), env), clientIp(req({ [HEADER]: "2001:db8:1:3::1" }), env),
+    "不同 /64 算不同来源");
+  assert.equal(rateLimitKey("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::/64");
+  assert.equal(rateLimitKey("::1"), "0:0:0:0::/64");
+  assert.equal(rateLimitKey("1.2.3.4"), "1.2.3.4", "IPv4 原样，不分段");
+  assert.equal(rateLimitKey(""), "");
 });
 
 test("启动日志：说清登录限流按什么算，没预加载时警告", (t) => {
@@ -118,11 +143,21 @@ test("预加载以后：连接地址写进随机名字的私有头，客户端�
   for (let i = 0; i < LOGIN_FAILURE_LIMIT; i += 1) await get(port, "127.0.0.1", "/fail");
   assert.equal((await get(port, "127.0.0.1", "/")).locked, true, "这个来源锁了");
   const other = await get(port, "::1", "/");
-  assert.deepEqual([other.ip, other.locked], ["::1", false], "另一个来源照常能登录");
+  assert.notEqual(other.ip, "127.0.0.1", "另一个来源的键不一样");
+  assert.equal(other.locked, false, "照常能登录");
 });
 
 test("预加载时环境变量里已有合法的头名（Next 的子进程）：沿用，不另起一个", async (t) => {
   const { child, port } = await startServer({ RELAY_PEER_HEADER: HEADER });
   t.after(() => child.kill());
   assert.deepEqual(await get(port, "127.0.0.1", "/"), { ip: "127.0.0.1", locked: false, header: HEADER, seen: "127.0.0.1" });
+});
+
+test("两次启动头名不同：每次起服务都随机一个，不是固定值（安全审核 10-25 低-4）", async (t) => {
+  const a = await startServer();
+  t.after(() => a.child.kill());
+  const b = await startServer();
+  t.after(() => b.child.kill());
+  const [headerA, headerB] = await Promise.all([get(a.port, "127.0.0.1", "/"), get(b.port, "127.0.0.1", "/")]);
+  assert.notEqual(headerA.header, headerB.header);
 });
