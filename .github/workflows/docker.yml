@@ -11,9 +11,15 @@ permissions:
   contents: read
   packages: write
 
+# 同一个 PR 连着推，上一次还在跑的取消；main 上的不取消（每次推送都要推镜像）
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -23,11 +29,94 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm test
       - run: npm run typecheck
       - run: npm run build
         env:
           DB_HOST: build-placeholder
+
+  # 单元测试三个时区各跑一遍（业务时区、跨日、夏令时的问题只在某个时区露出来），三个同时跑
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        tz: [Asia/Shanghai, America/Los_Angeles, UTC]
+    name: unit (${{ matrix.tz }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+        env:
+          TZ: ${{ matrix.tz }}
+
+  # 界面测试全套：打包好的版本开在 3300、连单独的 MySQL，用 Chrome 跑 tests/reconciliation-ui.test.mjs，4 路同时跑（scripts/ui-lanes.mjs）
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-ui-root
+          MYSQL_DATABASE: relay_monitor_ui
+          MYSQL_USER: relay_monitor_ui
+          MYSQL_PASSWORD: ci-ui-test
+        # 端口写死：job 级 env 里不能用 job.services 取映射出来的端口（GitHub 的机器上 3306 不会撞）
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pci-ui-root --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      TZ: America/Los_Angeles
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_NAME: relay_monitor_ui
+      DB_USER: relay_monitor_ui
+      DB_PASSWORD: ci-ui-test
+      PLAYWRIGHT_MODULE: /tmp/pw/node_modules/playwright
+      PLAYWRIGHT_CHANNEL: chrome
+      RECONCILIATION_UI_BASE_URL: http://127.0.0.1:3300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # 页面上的中文要有字体，不然量宽度、一行放不放得下的用例不准；Playwright 装在仓库外面，不改 package.json，浏览器用机器上的 Chrome
+      - name: CJK fonts and Playwright
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-cjk > /dev/null
+          npm install --prefix /tmp/pw --no-save --no-audit --no-fund playwright@1.64.1
+      - run: npm run build
+      - run: node db/migrate.js
+      - name: Start the built app on 3300
+        run: |
+          nohup npx next start -p 3300 -H 127.0.0.1 > next-server.log 2>&1 &
+          for i in $(seq 1 120); do curl -sf -o /dev/null http://127.0.0.1:3300/login && break; sleep 1; done
+          for p in /login / /stations /my /analytics /reconciliation /usage /notifications /settings; do curl -s -o /dev/null -m 60 "http://127.0.0.1:3300$p"; done
+      - run: node scripts/ui-lanes.mjs 4
+        env:
+          UI_LANES_OUT: ui-lanes-logs
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-lanes-logs
+          path: |
+            ui-lanes-logs/
+            next-server.log
 
   schema-verify:
     runs-on: ubuntu-latest
@@ -87,7 +176,7 @@ jobs:
         run: docker run --rm --entrypoint node relay-monitor:smoke --input-type=module -e "await import('/app/db/secrets.js'); await import('/app/db/reset-secrets.js'); console.log('secret modules ok')"
 
   build:
-    needs: [verify, schema-verify, image-smoke]
+    needs: [verify, unit, ui, schema-verify, image-smoke]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:

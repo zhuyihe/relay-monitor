@@ -3,7 +3,7 @@
 // when Chromium is unavailable locally.
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
-import test from "node:test";
+import realTest from "node:test";
 import { after } from "node:test";
 import assert from "node:assert/strict";
 import { deriveKnownChannelCoverage, reconciliationAccountingStartText, reconciliationDisplayStatus, reconciliationNotCountedText, reconciliationRowFlags, summarizeReconciliationWindowGroups, summarizeUnaccountedUpstream } from "../lib/reconciliation-view.js";
@@ -21,6 +21,13 @@ import { COPY as USAGE_COPY } from "../app/(dashboard)/usage/copy.ts";
 import { COPY as SETTINGS_COPY } from "../app/(dashboard)/settings/copy.ts";
 import { COPY as NOTIFICATIONS_COPY } from "../app/(dashboard)/notifications/copy.ts";
 import { COPY as LOGIN_COPY } from "../app/login/copy.ts";
+
+// 分几路同时跑（CI、本地测试台）：UI_SHARDS 路时按注册顺序轮流分，这一路只登记 UI_SHARD 那一份；不设就全跑
+const UI_SHARD = Number(process.env.UI_SHARD || 0), UI_SHARDS = Number(process.env.UI_SHARDS || 1);
+let shardIndex = 0;
+const test = UI_SHARDS > 1
+  ? new Proxy(realTest, { apply: (target, self, args) => (shardIndex++ % UI_SHARDS === UI_SHARD ? Reflect.apply(target, self, args) : undefined) })
+  : realTest;
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright");
