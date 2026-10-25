@@ -5,13 +5,13 @@ import { useRef, useState } from "react";
 import { App } from "antd";
 import { api } from "../../../lib/client";
 import { failureText } from "../../../lib/error-copy";
-import { workflowActionMeta } from "../../../lib/workflow-actions";
+import { correctTimingDone } from "../../../lib/workflow-actions";
 
 const detectedSegmentId = (segments: any[]) => segments.find((segment: any) => segment.timingSource === "detected")?.id || null;
 const rulePath = (ruleId: string) => `/api/reconciliation/rules/${encodeURIComponent(ruleId)}`;
 
 export function useReconDetail() {
-  const { message } = App.useApp();
+  const { message, notification } = App.useApp();
   const [detail, setDetail] = useState<any>(null);
   const [transitionAt, setTransitionAt] = useState<any>(null);
   const [transitionSegmentId, setTransitionSegmentId] = useState<string | null>(null);
@@ -56,11 +56,13 @@ export function useReconDetail() {
     let saved = false;
     setCorrecting(true);
     try {
-      await api(`${rulePath(ruleId)}/transitions/${encodeURIComponent(segment.id)}`, { method: "PUT", body: { effectiveAt: transitionAt.valueOf() } });
+      const changed = await api(`${rulePath(ruleId)}/transitions/${encodeURIComponent(segment.id)}`, { method: "PUT", body: { effectiveAt: transitionAt.valueOf() } });
       saved = true;
       if (token !== requestId.current) return;
       setTransitionAt(null);
-      message.success(workflowActionMeta("correct_timing").done);
+      const done = correctTimingDone(changed?.resettle, { timezone: detail?.rule?.timezone });
+      // 有没自动重算的日子：提示要让人看完，点关闭才收起；都重算了的照旧自动消失
+      if (done.persistent) notification.info({ title: done.text, duration: 0 }); else message.success(done.text);
       const next = await reload();
       if (token !== requestId.current) return;
       if (!next) message.warning("时间已修改，但最新结果没读到，请重新读取");
