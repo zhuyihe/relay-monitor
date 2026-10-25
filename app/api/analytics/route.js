@@ -17,15 +17,17 @@ const r4 = (v) => Math.round(v * 10000) / 10000;
 const SLOT_MS = 15 * 60 * 1000;
 
 // 花费时段（热力图）要读窗口里全部原始快照（30 天约 200 万行、1.7 秒），页面每 30 秒轮询一次：
-// 读出来算好的「哪几天有快照」和每个上游 168 格（星期 × 小时）的美元合计按时间缓存 10 分钟，键是上游集合 + 窗口起点 + 时区。
+// 读出来算好的「哪几天有快照」和每个上游 168 格（星期 × 小时）的美元合计按时间缓存 10 分钟，键是上游集合 + 窗口起点 + 时区 + 今天是哪天。
 // 格子按小时，晚 10 分钟没关系；汇率在每次请求时再乘，改了马上生效。重启或过期以后第一次照旧现读。
+// 「今天有没有快照」不用缓存里的：零点刚过时今天可能还没有点，存进去会让「原始历史不完整」挂 10 分钟。今天的由每次现查的最新一点判断。
 // 计划 P2 加按小时的汇总表以后删掉这个缓存。
 const HEAT_CACHE_TTL_MS = 10 * 60 * 1000;
 const HEAT_CACHE_MAX = 32;
 
 function heatSource(rt, stationIds, startMs, nowMs, tz) {
   const cache = (rt._analyticsHeatCache ||= new Map());
-  const key = JSON.stringify([[...stationIds].sort(), startMs, tz]);
+  // 带上今天是哪天：自定义开始日期的键跨零点不变，零点前存的那份不能带到零点后
+  const key = JSON.stringify([[...stationIds].sort(), startMs, tz, dayKeyInTz(nowMs, tz)]);
   const hit = cache.get(key);
   if (hit && nowMs - hit.at < HEAT_CACHE_TTL_MS) return hit.value;
   for (const [cachedKey, entry] of cache) if (nowMs - entry.at >= HEAT_CACHE_TTL_MS) cache.delete(cachedKey);
@@ -151,19 +153,23 @@ export const GET = withAuth(async (request, rt) => {
   };
   if (days <= 30 && heatmapStations.length) {
     const heatmapStationIds = heatmapStations.map((station) => station.id);
-    const { rawDateRows, hours, cells } = await heatSource(rt, heatmapStationIds, startMs, nowMs, tz);
+    const { rawDateRows: cachedDateRows, hours, cells } = await heatSource(rt, heatmapStationIds, startMs, nowMs, tz);
+    // 只看不晚于现在的点：晚于现在的点不算「今天有快照」
     const [rawBoundsRows] = await pool.query(
       `SELECT station_id AS stationId, MIN(t) AS earliestAt, MAX(t) AS latestAt
        FROM history_points
-       WHERE station_id IN (?)
+       WHERE station_id IN (?) AND t <= ?
        GROUP BY station_id`,
-      [heatmapStationIds]
+      [heatmapStationIds, nowMs]
     );
     const rawBounds = new Map(rawBoundsRows.map((row) => [row.stationId, {
       earliestAt: Number(row.earliestAt),
       earliestDate: row.earliestAt != null ? dayKeyInTz(Number(row.earliestAt), tz) : null,
       latestDate: row.latestAt != null ? dayKeyInTz(Number(row.latestAt), tz) : null,
     }]));
+    // 今天以前的从缓存取；今天有没有快照看现查的最新一点（不晚于现在）是不是今天的
+    const rawDateRows = [...cachedDateRows.filter((row) => row.date !== end),
+      ...[...rawBounds].filter(([, bounds]) => bounds.latestDate === end).map(([stationId]) => ({ stationId, date: end }))];
     const rawCoverage = summarizeCoverage(heatmapStations, dayList, rawDateRows, rawBounds);
     // 有一天的快照不等于能计算整段热力图：还需保留窗口起点前的基线。
     const available = hasRawWindowCoverage(rawCoverage, heatmapStations, rawBounds, startMs);
