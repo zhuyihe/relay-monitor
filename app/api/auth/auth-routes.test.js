@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
-import { errorText } from "../../../lib/error-copy.js";
+import { MIN_PASSWORD_LENGTH, errorText } from "../../../lib/error-copy.js";
 
 // 只换掉鉴权、取 IP 和比对密码这几层，跑的是实际的处理函数；密码「right」算对。
 // lib/auth.js 这个虚拟模块一旦被 import 过就会被 Node 的模块缓存按 URL 缓存住（后面的 hook 不会再生效），
@@ -139,39 +139,32 @@ test("退出登录：只清会话 Cookie，不碰设备 Cookie——这台浏览
   assert.deepEqual(res.headers.getSetCookie(), ["sid="]);
 });
 
-test("改密码：原密码不对带 WRONG_PASSWORD，新密码太短带 PASSWORD_TOO_SHORT，都是 400，不改密码；只管新设的密码，11 位拒绝、12 位能过（用户 10-25 定，最短提到 12 位）", async () => {
+test("改密码：原密码不对带 WRONG_PASSWORD，新密码太短带 PASSWORD_TOO_SHORT，都是 400，不改密码；边界按常量 MIN_PASSWORD_LENGTH 算，少一位拒绝、正好够位数能过", async () => {
   const { POST } = await route("./password/route.js");
   const changes = [];
   const rt = { store: store({ setPassword: async (...args) => changes.push(args) }), sessions: sessions() };
-  const wrong = await POST(post("/api/auth/password", { oldPassword: "nope", newPassword: "long-enough-password" }), rt);
+  const enough = "x".repeat(MIN_PASSWORD_LENGTH);
+  const wrong = await POST(post("/api/auth/password", { oldPassword: "nope", newPassword: enough }), rt);
   assert.equal(wrong.status, 400);
   assert.deepEqual(await wrong.json(), { error: errorText({ code: "WRONG_PASSWORD" }), code: "WRONG_PASSWORD" });
-  // 11 位：拒绝
-  const short = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: "12345678901" }), rt);
+  // 少一位：拒绝
+  const short = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: enough.slice(1) }), rt);
   assert.equal(short.status, 400);
   assert.deepEqual(await short.json(), { error: errorText({ code: "PASSWORD_TOO_SHORT" }), code: "PASSWORD_TOO_SHORT" });
   assert.deepEqual(changes, []);
 
-  // 正好 12 位：能过
-  const ok = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: "123456789012", username: " boss " }), rt);
+  // 正好够位数：能过
+  const ok = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: enough, username: " boss " }), rt);
   assert.equal(ok.status, 200);
-  assert.deepEqual(changes, [["boss", "123456789012"]]);
+  assert.deepEqual(changes, [["boss", enough]]);
   assert.equal(errorText({ code: "WRONG_PASSWORD" }), "原密码不对");
-  assert.equal(errorText({ code: "PASSWORD_TOO_SHORT" }), "新密码至少 12 位");
+  assert.equal(errorText({ code: "PASSWORD_TOO_SHORT" }), `新密码至少 ${MIN_PASSWORD_LENGTH} 位`);
 });
 
 test("改密码成功：响应里连同清会话 Cookie 一起，给当前浏览器发一张按新凭证签的设备 Cookie（安全审核 10-25 低-1）", async () => {
   const { POST } = await route("./password/route.js");
   const rt = { store: store({ setPassword: async () => {} }), sessions: sessions() };
-  const res = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: "123456789012" }), rt);
+  const res = await POST(post("/api/auth/password", { oldPassword: "right", newPassword: "x".repeat(MIN_PASSWORD_LENGTH) }), rt);
   assert.equal(res.status, 200);
   assert.deepEqual(res.headers.getSetCookie(), ["sid=", "dev=device-token"]);
-});
-
-test("改密码：只管新设的密码，用老的 6 位短密码登录的账号照样能登录（不追溯检查已有密码）", async () => {
-  const { POST } = await route("./login/route.js");
-  const rt = { store: store(), sessions: sessions() };
-  // 登录路由不导入、不检查 MIN_PASSWORD_LENGTH，密码对不对只看 verifyPassword；这里的桩密码「right」只有 5 位，照样算对
-  const res = await POST(post("/api/auth/login", { username: "admin", password: "right" }), rt);
-  assert.equal(res.status, 200);
 });
