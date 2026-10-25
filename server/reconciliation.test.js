@@ -2016,7 +2016,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
   };
   t.mock.method(globalThis, "fetch", async (input, init = {}) => {
     const url = new URL(String(input));
-    const request = { host: url.host, path: url.pathname, authorization: init.headers?.Authorization ?? null, sourceRead: ownSourceRead(url) };
+    const request = { host: url.host, path: url.pathname, authorization: init.headers?.Authorization ?? null, query: url.search, sourceRead: ownSourceRead(url) };
     state.requests.push(request);
     if (onRequest) await onRequest(request);
     if (url.pathname === "/api/status") return reply(200, { success: true, data: { quota_per_unit: 100, version: "v" } });
@@ -7133,6 +7133,54 @@ test("R1 今天翻到一半失败（限流）：下一轮从下一页接着翻�
   const second = await today();
   assert.deepEqual(pages, [2, 3, 1], "先从第 2 页接着翻到底（用当时的终点），再按编号补一页新的，没有从第 1 页重来");
   assert.equal(second.downstream.adminUsageQuotaUnits, 2 + 5, "第 2 页接着翻到的两条加后写进来的 5 条，一条不漏不重");
+});
+
+test("R1 今天翻完补页那次失败：下一轮从补页接着来，用补页的终点，不漏（审核 R1 中-2）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  for (let id = 1; id <= 250; id += 1) f.state.testLogs.push({ id, channel: 1, quota: id === 1 || id === 250 ? 1 : 0, created_at: todayStart + id, token_name: "root-key", username: "root" });
+  const prev = globalThis.fetch;
+  let pageTwoRequests = 0;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/" && url.searchParams.get("username") === "root" && url.searchParams.get("p") === "2") {
+      pageTwoRequests += 1;
+      // 第 1 次：第一轮翻到第 2 页失败；第 3 次：第二轮补页（新写进来的行有两页）补到第 2 页失败
+      if (pageTwoRequests === 1 || pageTwoRequests === 3) return { status: 500, text: async () => "{}" };
+    }
+    return prev(input, init);
+  });
+  const today = async () => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  await today();
+  now += 60000;
+  for (let id = 251; id <= 400; id += 1) f.state.testLogs.push({ id, channel: 1, quota: 1, created_at: Math.floor(now / 1000) - 5, token_name: "root-key", username: "root" });
+  await today();
+  now += 60000;
+  const third = await today();
+  assert.equal(third.downstream.adminUsageQuotaUnits, 2 + 150, "补页失败的下一轮接着补：新写的 150 条一条不漏");
+});
+
+test("R1 多条绑定各要一个渠道、日志很多：按渠道 stat 只查没查过的渠道，第一页只读一次；过去窗口后面的轮询不再发请求（审核 R1 中-3）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  for (let id = 1; id <= 1200; id += 1) f.state.testLogs.push(usage(id, id <= 2 ? 1 : 0, { channel: id % 2 ? 1 : 2 })); // 额度小，只为让页数多；总额度 2
+  const rootReads = () => f.state.requests.filter((request) => request.host === "own.test" && /^\/api\/log\//.test(request.path) && /username=root/.test(request.query));
+  const settle = (ruleId) => f.module.queryRules({ ruleIds: [ruleId], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
+  await settle("rr_live");
+  const afterFirst = rootReads().length;
+  await settle("rr_two");
+  const second = rootReads().slice(afterFirst);
+  assert.ok(second.every((request) => request.path === "/api/log/stat"), `第二条绑定没有再翻页或读第一页：${second.map((r) => r.path).join(",")}`);
+  const statChannels = second.filter((request) => /channel=/.test(request.query)).length;
+  assert.ok(statChannels <= 1, `第二条绑定只补查渠道 2 一次：${statChannels}`);
+  // 过去窗口：页面再看（非结账）不发请求
+  now += 5 * 60000;
+  const before = rootReads().length;
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page", force: true });
+  await f.module.queryRules({ ruleIds: ["rr_two"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page", force: true });
+  assert.equal(rootReads().length - before, 0, "过去窗口的管理员日志不再读");
 });
 
 test("R1 读不到用户列表或管理员日志：这一天算不出收入、不固定，下次重试；不拿没减的数固定进账本", async (t) => {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   aggregateFlow, computeFlowBreakdown, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
   getOwnUsers, readOwnIncome, readOwnIncomeOrUnconfirmed, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
-  ownUsersKey, unconfirmedIncomeProfit,
+  ownUsersKey, unconfirmedIncomeProfit, resoldAdminKeysOf, dedupeResoldKeys,
 } from "./own-helpers.js";
 import { History } from "../db/history.js";
 import { dayStartInTz } from "../lib/business-time.js";
@@ -583,4 +583,10 @@ test("利润说明里的名字用显示名：自营站点、上游没起名字�
   assert.ok(p.warnings.includes("自营站点 没设置售价，暂按 1 美元额度 = 1 元算"), p.warnings.join(" | "));
   assert.ok(p.warnings.includes("未命名上游 没设置汇率，暂按 1 美元 = 1 元算"), p.warnings.join(" | "));
   assert.ok(p.warnings.includes("未命名上游 不算进利润"), p.warnings.join(" | "));
+});
+
+test("转售 Key 同一个账号下同名只算一把（大小写不分）：存了两条也只扣回一次（审核 R1 中-1、低-5）", () => {
+  const keys = [{ username: "root", tokenName: "sale" }, { username: "root", tokenName: "sale" }, { username: "Root", tokenName: "SALE" }, { username: "root", tokenName: "other" }, { username: "alice", tokenName: "sale" }];
+  assert.deepEqual(resoldAdminKeysOf({ resoldAdminKeys: keys }).map((key) => [key.username, key.tokenName]), [["root", "sale"], ["root", "other"], ["alice", "sale"]]);
+  assert.deepEqual(dedupeResoldKeys(null), []);
 });

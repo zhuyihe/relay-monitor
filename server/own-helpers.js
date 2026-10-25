@@ -32,7 +32,15 @@ export const ownUsersKey = (own) => JSON.stringify([own.id, own.type, own.baseUr
 // 管理员（role ≥ 10）和转售的管理员 Key 怎么判，只在这里写一份：运营总览、自营业务（readOwnIncome）和每日利润
 // （server/reconciliation.js 的每个渠道收入）都用它——管理员自己花的钱不算收入，标成转售的管理员 Key 照样算收入
 export const adminUsernamesOf = (users) => new Set((users || []).filter((u) => u.role >= 10).map((u) => u.username));
-export const resoldAdminKeysOf = (own) => (Array.isArray(own?.resoldAdminKeys) ? own.resoldAdminKeys : []);
+// 同一个账号下同名的 Key 只算一把：存了两条也只扣回一次，不然收入多算一份转售额（审核 R1 中-1）
+export const dedupeResoldKeys = (keys) => {
+  const seen = new Set();
+  return (Array.isArray(keys) ? keys : []).filter((key) => {
+    const id = JSON.stringify([String(key?.username).toLowerCase(), String(key?.tokenName).toLowerCase()]); // 名字不分大小写（接口筛选就是这样）
+    return !seen.has(id) && seen.add(id);
+  });
+};
+export const resoldAdminKeysOf = (own) => dedupeResoldKeys(own?.resoldAdminKeys);
 
 // since：只要这个时刻以后发出的读取，缓存和进行中的读取发出得更早就再读一次。返回 { key, startedAt, list, unknown }，
 // unknown 是重读过还对不上的名字和那次读取发出的时间
@@ -233,7 +241,7 @@ export async function unconfirmedIncomeProfit(rt, own, err, options) {
     warnings: kept.map(([, text]) => text), warningCodes: kept.map(([code]) => code),
     // 数据完不完整只看上游汇率；没设置售价只影响收入，这里不显示收入
     complete: (profit.rateUnsetStations || []).length === 0,
-    resoldKeys: (own.resoldAdminKeys || []).map((key) => {
+    resoldKeys: resoldAdminKeysOf(own).map((key) => {
       const failed = (err.resoldErrors || []).find((k) => k.username === key.username && k.tokenName === key.tokenName);
       return { username: key.username, tokenName: key.tokenName, usd: null, cny: null,
         ...(failed ? { error: failed.error, errorCode: failed.errorCode } : {}) };
@@ -285,7 +293,7 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
     const roles = new Map(list.map((u) => [u.username, u.role]));
     return [...new Set([
       ...userRows.filter((row) => row.t >= startMs && row.t < endMs && row.cost !== 0 && !roles.has(row.key)).map((row) => row.key),
-      ...(own.resoldAdminKeys || []).filter((key) => !(roles.get(key.username) >= 10)).map((key) => key.username),
+      ...resoldAdminKeysOf(own).filter((key) => !(roles.get(key.username) >= 10)).map((key) => key.username),
     ])];
   };
   const known = (name) => Date.now() - (entry.unknown.get(name) ?? -Infinity) < UNKNOWN_USER_TTL_MS;
@@ -312,7 +320,7 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
     if (adminSet.has(row.key)) day.adminUsageUsd += row.cost;
     else day.incomeUsd += row.cost;
   }
-  for (const key of own.resoldAdminKeys || []) {
+  for (const key of resoldAdminKeysOf(own)) {
     if (!adminSet.has(key.username)) throw incomeUnconfirmed(`转售 Key 所属用户「${key.username}」的管理员身份没确认`, null, users);
   }
   // 同时最多读四天，避免 30 天窗口把上游日志接口瞬间打满。

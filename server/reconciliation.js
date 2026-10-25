@@ -780,7 +780,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (!entry) {
       entry = { startMs: window.startMs, tail: Promise.resolve(), state: null, pending: new Map() };
       ownExclusionCache.set(key, entry);
-      for (const [oldKey, old] of ownExclusionCache) if (old.startMs < window.startMs - 2 * DAY_MS) ownExclusionCache.delete(oldKey);
+      // 按真实时间清（比「本月」最长的范围还早的才删）；按本次窗口起点清的话，多天范围里别的块的进度会被删掉（审核 R1 低-2）
+      for (const [oldKey, old] of ownExclusionCache) if (old.startMs < Date.now() - 35 * DAY_MS) ownExclusionCache.delete(oldKey);
     }
     const task = entry.tail.then(async () => {
       const prior = entry.state && entry.state.endMs <= window.endMs ? entry.state : null;
@@ -805,13 +806,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const read = async (from, shouldContinue = null) => {
           const resume = !from ? entry.pending.get(pendingKey) ?? null : null;
           const readEndMs = resume?.endMs ?? window.endMs;
+          let usedEndMs = readEndMs; // 补页那一次失败，进度记的是补页用的终点，不是前面翻的那个（审核 R1 中-2：不然补到一半的页下一轮漏掉）
           try {
             let part = await queryOwnLogSource(own, { ...base, endMs: readEndMs, previous: from, resume, shouldContinue });
             entry.pending.delete(pendingKey);
-            if (part && readEndMs < window.endMs) part = await queryOwnLogSource(own, { ...base, previous: part });
+            if (part && readEndMs < window.endMs) {
+              usedEndMs = window.endMs;
+              part = await queryOwnLogSource(own, { ...base, previous: part });
+            }
             return part;
           } catch (err) {
-            if (!from && err?.resume) entry.pending.set(pendingKey, { ...err.resume, endMs: readEndMs });
+            if (!from && err?.resume) entry.pending.set(pendingKey, { ...err.resume, endMs: usedEndMs });
             throw err;
           }
         };
@@ -820,8 +825,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 按渠道 stat 读的只覆盖当时要算的渠道，后面别的绑定要算别的渠道时合起来重读。结果和选法打进日志（debug），方便量。
         const listBefore = before && before.coverage === undefined ? before : null;
         // 按渠道 stat 读（只覆盖 channels 这几个渠道）
-        const statRead = async (channels, tokens, total) => {
-          const out = { byChannel: new Map(), byToken: new Map(), byUser: new Map(), seen: total ?? await queryOwnLogSourceTotal(own, base), maxId: null, coverage: new Set(channels) };
+        // into：已经按渠道 stat 读过的那一份，只补查它没覆盖的渠道，合进去（不重查已经查过的，审核 R1 中-3）
+        const statRead = async (channels, tokens, total, rows = null, into = null) => {
+          const out = into
+            ? { ...into, byChannel: new Map(into.byChannel), byToken: new Map([...into.byToken].map(([key, value]) => [key, new Map(value)])), coverage: new Set([...into.coverage, ...channels]) }
+            : { byChannel: new Map(), byToken: new Map(), byUser: new Map(), seen: total ?? await queryOwnLogSourceTotal(own, base), maxId: null, coverage: new Set(channels), rows };
           for (const channel of channels) {
             const quota = await queryOwnUserChannelStat(own, { name: source.name, channel, startMs: window.startMs, endMs: window.endMs });
             if (quota) out.byChannel.set(channel, quota);
@@ -836,21 +844,38 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const readSmart = async (total) => {
           if (source.kind !== "user" || !closed || listBefore || !wantedChannels.length) return read(listBefore);
           const tokens = resoldAdminKeysOf(own).filter((key) => key.username === source.name).map((key) => String(key.tokenName));
-          const channels = [...new Set([...wantedChannels, ...(before?.coverage instanceof Set ? before.coverage : [])])].sort((x, y) => x - y);
+          // 已经按渠道 stat 读过：覆盖了要算的渠道就沿用（结账时全站总额度没变才沿用，变了说明有晚到的日志，重读）；
+          // 没覆盖的只补查缺的渠道，不是一条绑定换一次并集就整个重查（K 条单渠道绑定会是 1+2+…+K 次）
+          if (before?.coverage instanceof Set && sameEnd) {
+            const missing = wantedChannels.filter((channel) => !before.coverage.has(channel));
+            if (!missing.length && (total == null || before.seen === total)) return before;
+            const cost = missing.length * (1 + tokens.length);
+            if (before.seen === (total ?? before.seen) && (before.rows == null ? true : cost < Math.ceil(before.rows / 100))) return statRead(missing, tokens, total ?? before.seen, before.rows, before);
+          }
+          const channels = [...new Set(wantedChannels)].sort((x, y) => x - y);
           const statCost = channels.length * (1 + tokens.length);
           let choice = null;
           const part = await read(null, ({ total: rows }) => {
             const pagesCost = rows == null ? Infinity : Math.ceil(rows / 100);
             choice = { rows, pagesCost, statCost, useStat: statCost < pagesCost };
-            console.debug(`自营收入：管理员日志整段读 来源 ${source.kind}#${[...adminSet].sort().indexOf(source.name)} 行数 ${rows ?? "未知"} 翻页约 ${pagesCost} 次 按渠道 stat ${statCost} 次 → ${choice.useStat ? "按渠道 stat" : "翻页"}`);
+            // 选法变了才打一行（不带用户名和站点地址）
+            const line = `${choice.useStat ? "按渠道 stat" : "翻页"}`;
+            if (entry.lastChoice?.get(id) !== line) {
+              (entry.lastChoice ||= new Map()).set(id, line);
+              console.debug(`自营收入：管理员日志整段读 来源 ${source.kind}#${[...adminSet].sort().indexOf(source.name)} 行数 ${rows ?? "未知"} 翻页约 ${pagesCost} 次 按渠道 stat ${statCost} 次 → ${line}`);
+            }
             return !choice.useStat;
           });
-          return part ?? statRead(channels, tokens, total);
+          return part ?? statRead(channels, tokens, total, choice?.rows ?? null);
         };
         let part;
         // 今天（轮询）：渠道测试名字这两个来源只是兜底（测试大多记在管理员名下，管理员那一条已经扣了），10 分钟内读过的不再读，
         // 每轮平时只读管理员那几个来源；结账（settle）一定按总额度对账，那时的数是准的
-        if (!settle) part = source.kind === "token" && before && Date.now() - before.readAt < OWN_EXCLUSION_FALLBACK_REUSE_MS ? before
+        // 过去的窗口（整段在等待期以后才读的）不会再有新日志：读过就一直沿用，只在按渠道 stat 读的那份没覆盖要算的渠道时补查缺的
+        const sameEnd = prior?.endMs === window.endMs; // 沿用的那份读的是同一个终点才能用
+        const doneBefore = before && sameEnd && closed && before.readAt >= window.endMs + RECONCILIATION_SETTLE_DELAY_MS
+          && (!(before.coverage instanceof Set) || wantedChannels.every((channel) => before.coverage.has(channel)));
+        if (!settle) part = doneBefore || (source.kind === "token" && before && Date.now() - before.readAt < OWN_EXCLUSION_FALLBACK_REUSE_MS) ? before
           : { ...await readSmart(null), readAt: Date.now() };
         else {
           const total = await queryOwnLogSourceTotal(own, base);
@@ -872,7 +897,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // 转售的管理员 Key 照样算收入：它名下的行不减
           for (const key of resoldAdminKeysOf(own)) {
             if (key.username !== source.name) continue;
-            for (const [channel, quota] of part.byToken.get(String(key.tokenName)) || []) add(channel, -quota);
+            // 接口按名字筛是不分大小写的（MySQL 默认排序规则），这里也不分，和按渠道 stat、运营总览一致（审核 R1 低-5）
+            for (const [token, channels] of part.byToken) if (token.toLowerCase() === String(key.tokenName).toLowerCase()) for (const [channel, quota] of channels) add(channel, -quota);
           }
         } else {
           // 管理员名下的测试记录已经在管理员那一条里减过了，不减两次
@@ -898,7 +924,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   async function ownRevenueWindow(own, rule, segmentWindow, { loadStatus, registry, reuse, settle = false }) {
     const channelIds = rule.channels.map((channel) => channel.channelId);
     // 键里带凭据指纹，和 markQuietOwnStations 里「换了凭据就不算安静」互为备份：换了自营站点的凭据，任一道都能挡住沿用旧的
-    const key = JSON.stringify([own.id, credentialFingerprint(own), [...channelIds].sort((a, b) => a - b), segmentWindow.startMs, segmentWindow.timezone]);
+    const key = JSON.stringify([own.id, credentialFingerprint(own), [...channelIds].sort((a, b) => a - b), segmentWindow.startMs, segmentWindow.timezone,
+      resoldAdminKeysOf(own).map((item) => `${item.username}\u0000${item.tokenName}`).sort()]); // 转售 Key 改了马上换键（审核 R1 低-6）
     const cached = ownRevenueCache.get(key), quiet = registry?.ownQuietFrom?.get(own.id);
     // 最新那条日志的时刻（站点的钟）也要在记下的那份里：站点时钟偏快时，记下那份读到的时刻还没包住它，照旧现读
     if (reuse && cached && quiet && cached.endMs >= quiet.from && cached.endMs <= segmentWindow.endMs
@@ -1445,10 +1472,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         try {
           const [catalogue, results] = await Promise.all([
             ownChannelsFor(own, { force: force && !settle }).catch(() => null),
-            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => queryOwnChannelRevenue(own, {
-              channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone,
-              loadStatus: () => ownStatusFor(ownerRegistry, own), exclusion: () => ownExclusion(own, segmentWindow, { settle, channelIds: rule.channels.map((channel) => channel.channelId) }),
-            }).catch(() => null)),
+            // 多天的范围也按天拼、带「其中管理员自用」，和别处同一条路（审核 R1 低-3）
+            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => ownRevenue(own, rule, segmentWindow, { loadStatus: () => ownStatusFor(ownerRegistry, own), registry: ownerRegistry, reuse: false, settle })
+              .catch(() => null)),
           ]);
           const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
           const channelsFor = (result) => rule.channels.map((channel) => {
