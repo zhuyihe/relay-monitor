@@ -7401,6 +7401,132 @@ test("R1 读不到用户列表或管理员日志：这一天算不出收入、�
   assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 1, "读得到了，下一次固定");
 });
 
+// ---- 令牌作废、少了权限（own-revenue-plan 第三节、用语规范 §5.2）：马上进需处理，自营站点、上游各一条，不当成读取类等 7 天 ----
+const tokenReply = (status, code, message) => ({ status, text: async () => JSON.stringify({ success: false, message, code }) });
+
+test("令牌作废：自营站点一侧马上进需处理（不是 OWN_BILLING_UNAVAILABLE 等 7 天），说明里列新令牌要勾的权限；结账不固定、状态表记要人处理", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !url.searchParams.get("token_name")) {
+      return tokenReply(401, "ACCESS_TOKEN_LEGACY_RETIRED", "Legacy access tokens have been retired. Create a new access token in security settings");
+    }
+    return prev(input, init);
+  });
+  const manual = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
+  const result = (await manual()).results[0];
+  assert.equal(result.health.code, "ACCESS_TOKEN_LEGACY_RETIRED", "不是读取类的 OWN_BILLING_UNAVAILABLE");
+  const status = result.displayStatus;
+  assert.equal(status.state, "action", "马上进需处理，不等 7 天");
+  assert.equal(status.title, "自营站点的访问令牌已经作废了");
+  assert.equal(status.detail, "New API 升级以后旧式的访问令牌不能用了，要换一个新令牌（nap_ 开头），并勾上这些权限：profile:read、channel:read、log:read、user:read、usage:read");
+  assert.equal(status.action.kind, "update_authorization");
+  // 结账：不固定；状态表记成要人处理（reasonKindOf 读 contract 的 kind，不用特判）
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 0);
+  const row = f.repository.tables.settlementState.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.deepEqual([row.manual_reason, row.retry_reason], ["ACCESS_TOKEN_LEGACY_RETIRED", null]);
+});
+
+// 真实环境里令牌一作废，自营站点除了不用登录的 /api/status 每条路都回 401（少权限都回 403），身份、用户列表、渠道收费统计全读不了：
+// 要出的还是「自营站点的令牌作废/少了权限」，不是「上游账号或自营站点有变化」，也不是读取类的 OWN_BILLING_UNAVAILABLE 等 7 天（审核 #107 中-1）
+for (const [name, status, code, message, title, detailStart] of [
+  ["作废", 401, "ACCESS_TOKEN_LEGACY_RETIRED", "Legacy access tokens have been retired", "自营站点的访问令牌已经作废了", "New API 升级以后旧式的访问令牌不能用了"],
+  ["少权限", 403, "ACCESS_TOKEN_SCOPE_DENIED", "The access token lacks the required permission: log:read", "自营站点的令牌少了「log:read」的权限", "「log:read」是 New API 说少了的那一项"],
+]) {
+  for (const allowSelf of [false, true]) test(`自营站点每条路都${name}${allowSelf ? "（只放过 /api/user/self：身份读得到，用户列表、渠道统计读不到）" : "：身份读不到也说令牌的事"}，主语是自营站点；结账不固定，状态表记要人处理`, async (t) => {
+    let now = Date.parse("2026-10-09T03:00:00Z");
+    const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+    const prev = globalThis.fetch;
+    let broken = false;
+    t.mock.method(globalThis, "fetch", async (input, init) => {
+      const url = new URL(String(input));
+      if (broken && url.host === "own.test" && url.pathname !== "/api/status" && !(allowSelf && url.pathname === "/api/user/self")) return tokenReply(status, code, message);
+      return prev(input, init);
+    });
+    await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" }); // 令牌还好的时候先观测今天（锚定），不结昨天
+    broken = true;
+    f.module.invalidateSources(); // 身份、目录缓存清掉，下一次一定要重新读
+    now += 60 * 60000;
+    const manual = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
+    const result = (await manual()).results[0];
+    assert.equal(result.health.code, code, "不是 SOURCE_BINDING_UNCONFIRMED，也不是 OWN_BILLING_UNAVAILABLE");
+    assert.equal(result.displayStatus.state, "action");
+    assert.equal(result.displayStatus.title, title);
+    assert.ok(result.displayStatus.detail.startsWith(detailStart), result.displayStatus.detail);
+    assert.equal(result.displayStatus.action.kind, "update_authorization");
+    assert.equal(result.displayStatus.action.stationId, "own", "自营站点的令牌坏了，「更新登录信息」去自营站点，不是这条绑定的上游（审核 #107 中-2）");
+    assert.match(result.displayStatus.action.href, /stationId=own/);
+    await f.module.refreshDue(now);
+    assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 0, "不固定");
+    const row = f.repository.tables.settlementState.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+    assert.equal(row?.manual_reason, code, "状态表记要人处理");
+  });
+}
+
+test("自营站点的令牌少了 channel:read：渠道目录读不到说令牌的事，进需处理，不吞成「渠道状态暂时读不到」（审核 #107 低-5）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/channel/") return tokenReply(403, "ACCESS_TOKEN_SCOPE_DENIED", "The access token lacks the required permission: channel:read");
+    return prev(input, init);
+  });
+  const view = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  assert.equal(view.health.code, "ACCESS_TOKEN_SCOPE_DENIED");
+  assert.equal(view.displayStatus.title, "自营站点的令牌少了「channel:read」的权限");
+});
+
+test("整站令牌作废、身份缓存是冷的（先升级 New API 再部署这一版，一启动就是这样）：推送也要出，3 轮只推 1 条（审核 #107 中-1）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = 1; // 三条绑定都在，同一个自营站点
+  f.rt.store.channels = [{ id: "c", type: "webhook", name: "运维群", enabled: true, config: { url: "https://hooks.example.com/x" } }];
+  const sent = [], prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "hooks.example.com") { sent.push(JSON.parse(init.body)); return new Response("{}", { status: 200 }); }
+    if (url.host === "own.test" && url.pathname !== "/api/status") return tokenReply(401, "ACCESS_TOKEN_LEGACY_RETIRED", "Legacy access tokens have been retired");
+    return prev(input, init);
+  });
+  for (let round = 0; round < 3; round += 1) {
+    f.module.invalidateSources(); // 身份、目录缓存是冷的
+    await f.module.refreshDue(now);
+    now += 60000;
+  }
+  assert.equal(sent.length, 1, "整站 401，三轮只推 1 条");
+  assert.equal(sent[0].title, "【炬元告警】自营站点 本站 访问令牌已经作废了");
+});
+
+test("令牌少了权限：上游一侧说是哪个上游、New API 说少的哪一项；不再说「上游拒绝读取这把 Key」；没带码的 403 还是原来的说法", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  const prev = globalThis.fetch;
+  let mode = "scope";
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/log/self/stat") {
+      return mode === "scope" ? tokenReply(403, "ACCESS_TOKEN_SCOPE_DENIED", "The access token lacks the required permission: usage:read")
+        : { status: 403, text: async () => JSON.stringify({ success: false, message: "无权进行此操作" }) };
+    }
+    return prev(input, init);
+  });
+  const query = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
+  let result = (await query()).results[0];
+  assert.equal(result.health.code, "ACCESS_TOKEN_SCOPE_DENIED");
+  assert.equal(result.displayStatus.state, "action");
+  assert.equal(result.displayStatus.title, "上游「上游」的令牌少了「usage:read」的权限");
+  assert.equal(result.displayStatus.detail, "「usage:read」是 New API 说少了的那一项。给令牌补上这项权限，或者换一个带这项权限的令牌");
+  assert.equal(result.displayStatus.action.kind, "update_authorization");
+  // 没带这个码的 403：照旧是「上游拒绝读取这把 Key」
+  mode = "plain";
+  result = (await query()).results[0];
+  assert.equal(result.health.code, "KEY_INVALID_OR_DENIED");
+});
+
 test("R1 转售 Key 所属用户在用户列表里不是管理员：忽略这条标记，什么都不扣不加，照常固定（总指挥 10-25）", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });

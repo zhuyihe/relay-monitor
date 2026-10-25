@@ -1,5 +1,7 @@
 // 对账深模块：把窗口、上游取数、本站收费、快照和告警收敛在一个 Interface 后。
 import { createHash } from "node:crypto";
+import { isAccessTokenError } from "../lib/access-token-scopes.js";
+import { stationDisplayName } from "../lib/overview-actions.js";
 import {
   queryReconciliationMetadata,
   queryNewApiStatus,
@@ -359,8 +361,13 @@ function snapshotReference(record) {
   };
 }
 
-function toErrorHealth(err, own = false) {
+// station：读的是哪个上游，令牌作废、少了权限时说明里要写上游名（用语规范 §5.2）；missingScope 是 New API 说少了的那一项
+function toErrorHealth(err, own = false, station = null) {
   const code = String(err?.code || "");
+  // 令牌作废、少了权限：要人换令牌，不是「上游拒绝读取这把 Key」，也不是等 7 天的读取类（own-revenue-plan 第三节）
+  if (!own && isAccessTokenError(code)) {
+    return { ...health(code, issueText(code)), side: "upstream", stationName: station ? stationDisplayName(station) : "", ...(err?.scope ? { missingScope: err.scope } : {}) };
+  }
   const issue = own ? "OWN_BILLING_UNAVAILABLE" : code === "UPSTREAM_AUTH_DENIED" ? "KEY_INVALID_OR_DENIED"
     : code === "UPSTREAM_FEATURE_UNSUPPORTED" ? "UPSTREAM_FEATURE_UNSUPPORTED" : "UPSTREAM_DATA_UNAVAILABLE";
   return health(issue, issueText(issue));
@@ -371,10 +378,12 @@ function toErrorHealth(err, own = false) {
 // 上游已记进 staleMetadata，下一轮全部重读身份以后再定。连不上、超时这类不在此列，照常报
 const REUSED_IDENTITY_SUSPECT = new Set(["UPSTREAM_AUTH_DENIED", "UPSTREAM_IDENTITY_CHANGED"]);
 function upstreamErrorHealth(err, resource) {
-  return REUSED_IDENTITY_SUSPECT.has(String(err?.code || "")) && resource?.identityReused ? health("PENDING", issueText("PENDING")) : toErrorHealth(err);
+  return REUSED_IDENTITY_SUSPECT.has(String(err?.code || "")) && resource?.identityReused ? health("PENDING", issueText("PENDING")) : toErrorHealth(err, false, resource?.station);
 }
 
 const CALCULATION_BLOCKERS = new Set([
+  "ACCESS_TOKEN_LEGACY_RETIRED",
+  "ACCESS_TOKEN_SCOPE_DENIED",
   "UPSTREAM_FEATURE_UNSUPPORTED",
   "KEY_INVALID_OR_DENIED",
   "UPSTREAM_DATA_UNAVAILABLE",
@@ -1618,7 +1627,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 本站一侧对不上始终挡；上游身份变了是上游一侧的问题，固定成本时只作参考
       const upstreamChanged = !!rule.canonicalKey && rule.canonicalKey !== actualKey;
       if (upstreamChanged && upstreamOptional) upstreamProblem ||= health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"));
-      let identityIssue = !ownSource || (upstreamChanged && !upstreamOptional) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource.namespaceKey)
+      // 自营站点的令牌作废、少了权限：站点上每条路都回 401/403，身份也读不到——这时说的是令牌，不是「上游账号或自营站点有变化」（审核 #107 中-1）
+      const ownTokenError = !ownSource && ownAvailable && isAccessTokenError(ownerRegistry.resources.get(rule.ownStationId)?.error?.code)
+        ? ownerRegistry.resources.get(rule.ownStationId).error : null;
+      let identityIssue = ownTokenError
+        ? { ...health(ownTokenError.code, issueText(ownTokenError.code)), side: "own", ...(ownTokenError.scope ? { missingScope: ownTokenError.scope } : {}) }
+        : !ownSource || (upstreamChanged && !upstreamOptional) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource.namespaceKey)
         ? health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")) : null;
       // 结账（settle）和只读计算一样不锚定：锚定是今天的观测做的事，结账只写账本和状态行（计划 C2a 2.5）
       if (!identityIssue && !anchored && (!observe || settle)) {
@@ -1692,7 +1706,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (costOwner.state === "unknown") issues.push(upstreamSide({ code: "COST_OWNER_UNVERIFIED", scope: "rule", detail: issueText("COST_OWNER_UNVERIFIED"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (costOwner.state === "duplicate") issues.push(upstreamSide({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: issueText("CANONICAL_KEY_CONFLICT"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (!ownAvailable) issues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "downstream", detail: issueText("OWN_BILLING_UNAVAILABLE"), observedAt: Date.now() });
-      if (upstreamProblem) issues.push(upstreamSide({ code: upstreamProblem.code, scope: "upstream", detail: upstreamProblem.detail, observedAt: Date.now() }));
+      if (upstreamProblem) issues.push(upstreamSide({ code: upstreamProblem.code, scope: "upstream", detail: upstreamProblem.detail, observedAt: Date.now(),
+        // 令牌作废、少了权限要说是哪个上游、少的哪一项（审核 #107 低-4：固定成本的上游走这里，原来这两样丢了）
+        ...(upstreamProblem.stationName != null ? { stationName: upstreamProblem.stationName } : {}), ...(upstreamProblem.missingScope ? { missingScope: upstreamProblem.missingScope } : {}) }));
       else if (!catalogueObserved && platform !== "sub2api") {
         issues.push(upstreamSide({
           code: "GROUP_DATA_UNAVAILABLE", scope: "upstream", observedAt: Date.now(),
@@ -1725,8 +1741,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (probe) return { probe: true, blocker: issues.find((issue) => CALCULATION_BLOCKERS.has(issue.code) && !issue.reference && reasonKindOf(issue.code) !== "retry")?.code ?? null };
       let catalogue = null;
       // 结账（settle）虽然强制重取账单，渠道目录只用来写渠道状态，不挡结果：用 10 分钟内的缓存，不每结一天就重读一遍（安全审核 C2a 低-3）
-      try { if (ownAvailable) catalogue = await ownChannelsFor(own, { force: force && !settle }); } catch {
-        issues.push({ code: "SALES_CHANNEL_STATE_UNKNOWN", scope: "channels", detail: "渠道状态暂时读不到", observedAt: Date.now() });
+      try { if (ownAvailable) catalogue = await ownChannelsFor(own, { force: force && !settle }); } catch (error) {
+        // 自营站点的令牌少了 channel:read（或作废）：渠道目录读不到要说令牌的事，不吞成「渠道状态暂时读不到」（审核 #107 低-5）
+        issues.push(isAccessTokenError(error?.code)
+          ? { code: error.code, scope: "channels", side: "own", detail: issueText(error.code), observedAt: Date.now(), ...(error.scope ? { missingScope: error.scope } : {}) }
+          : { code: "SALES_CHANNEL_STATE_UNKNOWN", scope: "channels", detail: "渠道状态暂时读不到", observedAt: Date.now() });
       }
       const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
       const states = rule.channels.map((channel) => {
@@ -1780,7 +1799,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         }
         if (upstreamResult.error && !upstreamResult.skipped) {
           const billHealth = upstreamErrorHealth(upstreamResult.error, upstreamResource);
-          segmentIssues.push(upstreamSide({ code: billHealth.code, scope: "segment", detail: billHealth.detail, observedAt: Date.now() }));
+          segmentIssues.push(upstreamSide({ code: billHealth.code, scope: "segment", detail: billHealth.detail, observedAt: Date.now(),
+            ...(billHealth.stationName != null ? { stationName: billHealth.stationName } : {}), ...(billHealth.missingScope ? { missingScope: billHealth.missingScope } : {}) }));
           // Key 账单报错：可能换了 Key 或身份变了，下一轮全部重读（P1b 的异常之一）
           staleMetadata.add(rule.upstreamStationId);
         }
@@ -1789,7 +1809,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           segmentIssues.push(downstreamResult.emptySecondWindow ? issue : upstreamSide(issue));
         }
         if (downstreamResult.error || (downstreamResult.state !== "complete" && downstreamResult.state !== "pending")) {
-          segmentIssues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "segment", detail: issueText("OWN_BILLING_UNAVAILABLE"), observedAt: Date.now() });
+          // 自营站点的令牌作废、少了权限：要人换令牌，马上进需处理，不再当成读取类（OWN_BILLING_UNAVAILABLE）等 7 天（own-revenue-plan 第三节）
+          const ownToken = isAccessTokenError(downstreamResult.error?.code) ? downstreamResult.error : null;
+          segmentIssues.push(ownToken
+            ? { code: ownToken.code, scope: "segment", side: "own", detail: issueText(ownToken.code), observedAt: Date.now(), ...(ownToken.scope ? { missingScope: ownToken.scope } : {}) }
+            : { code: "OWN_BILLING_UNAVAILABLE", scope: "segment", detail: issueText("OWN_BILLING_UNAVAILABLE"), observedAt: Date.now() });
         }
         const upstreamUnavailable = upstreamResult.error || upstreamResult.emptySecondWindow || upstreamResult.state !== "complete";
         const downstreamUnavailable = downstreamResult.error || downstreamResult.emptySecondWindow || downstreamResult.state !== "complete";
@@ -2056,7 +2080,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (previous) {
       unavailable.lastConfirmed = snapshotReference(previous);
     }
-    if (!save) return unavailable;
+    if (!save) {
+      // 不写库的路上（身份读不到、冷启动时整站令牌作废）也要推：令牌坏了的推送只靠这一处，只推、不清记录（审核 #107 中-1：
+      // 用户先升级 New API 再部署，一启动身份缓存就是冷的，要是这里不推，永远不推）
+      if (isAccessTokenError(resultHealth.code) && !isSettleableWindow(window, Date.now())) {
+        try { await notifyReconciliationHealth(rt, repository, rule, unavailable); } catch (err) { console.error("渠道对账通知失败:", err?.message || String(err)); }
+      }
+      return unavailable;
+    }
     return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource })) ? unavailable : STALE_SCOPE;
   }
 
