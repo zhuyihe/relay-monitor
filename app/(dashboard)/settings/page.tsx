@@ -92,6 +92,8 @@ export default function SettingsPage() {
   // 运行设置：刷新间隔、保留天数各一组，改了马上保存（app/components/use-auto-save.ts），排在同一个队列里
   const queue = useSaveQueue();
   const [customRetention, setCustomRetention] = useState(false);
+  // 「历史概况和自动清理」收起区：用户点的；上次自动清理没完成时直接展开（原因就是要说的事）
+  const [healthOpen, setHealthOpen] = useState(false);
   const [history, setHistory] = useState<HistoryHealth | null>(null);
   // 业务时区：接口返回的 tz，历史记录的日期时间按它写
   const [tz, setTz] = useState(DEFAULT_BUSINESS_TIME_ZONE);
@@ -305,6 +307,7 @@ export default function SettingsPage() {
   const restricted = !!me?.isDefaultPassword;
   // 上次自动清理没完成：服务端存的是原文，只进「查看详细原因」
   const cleanupError = history?.cleanup?.lastError || null;
+  const healthShown = healthOpen || !!cleanupError;
   // 现在保留多久：一直保留时不再自动清理
   const keptDays = history?.retentionDays ?? retention.saved;
   // 会话信息回来之前不确定是否处于"首次改密"模式，先用骨架占位，避免其他分组闪现后又消失
@@ -536,10 +539,13 @@ export default function SettingsPage() {
 
                     {/* 历史概况、最近自动清理收起来，露一句记录数和最早的日子；上次自动清理没完成时直接展开（原因就是要说的事） */}
                     <div className="jy-more-line jy-settings-health-line">
-                      <span className="jy-caption">
-                        {history?.pointCount ? COPY.healthSummary(formatInt(history.pointCount), formatZonedDate(history.earliestAt, tz)) : COPY.healthEmpty}
-                      </span>
-                      <More key={cleanupError ? "err" : "ok"} label={COPY.healthMore} defaultOpen={!!cleanupError}>
+                      {/* 展开以后下面就有记录条数和最早的记录，这一句不再重复；重新读取失败时上面已经写了原因，这一句也不写（不拿上次的数当现在的） */}
+                      {healthShown || settingsError ? null : (
+                        <span className="jy-caption">
+                          {history?.pointCount ? COPY.healthSummary(formatInt(history.pointCount), formatZonedDate(history.earliestAt, tz)) : COPY.healthEmpty}
+                        </span>
+                      )}
+                      <More label={COPY.healthMore} open={healthShown} onOpenChange={setHealthOpen}>
                         <div className="jy-settings-health">
                           <section aria-labelledby={`${uid}-health`}>
                             <h3 id={`${uid}-health`}>{COPY.overview}</h3>

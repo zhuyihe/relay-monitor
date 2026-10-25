@@ -26,7 +26,6 @@
   border-radius: var(--jy-r1); background: var(--jy-sunken); color: var(--jy-ink-2);
   font-size: 11px; line-height: 1; font-weight: 600; letter-spacing: .02em;
 }
-.jy-notifications-name { font-weight: 500; }
 .jy-notifications-toggle { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; color: var(--jy-ink-2); }
 .jy-notifications-test { display: inline-flex; flex-direction: column; gap: 2px; }
 .jy-notifications-test .jy-status .jy-caption { font-weight: 400; }

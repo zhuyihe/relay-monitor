@@ -29,7 +29,7 @@ import { useShellPage } from "../../components/shell-context";
 import { Spark } from "../../components/spark";
 import { LEVEL_ORDER, StatusText } from "../../components/status";
 import { useUrlParams, useUrlState } from "../../components/use-url-state";
-import { useWorkflowActions } from "../../components/use-workflow-actions";
+import { channelNameKey, useWorkflowActions } from "../../components/use-workflow-actions";
 import { workflowProblem } from "../../components/workflow-copy";
 import TrendModal, { TREND_TEXT } from "../trend-modal";
 import { buildStationView, resultIssue, testBalanceText, TYPES_MISSING_TEXT } from "./model";
@@ -493,6 +493,20 @@ export default function StationsPage() {
     return { todosById: actionsByStation(all), unowned: all.filter((a: any) => !a.stationId || !ids.has(String(a.stationId))).length };
   }, [listed, tz, rules, settings, workflowActions]);
 
+  // 「还没确认这把 Key 属于哪个上游账号」：同一个上游下几条绑定都没确认时，总览按种类去重只留一条，渠道要从原始事项里合起来（ui-copy-spec §5.2）
+  const isOwnerTodo = (a: any) => a.code === "COST_OWNER_UNVERIFIED" || (!a.code && a.kind === "verify_identity");
+  const ownerChannels = useMemo(() => {
+    const byStation = new Map<string, Map<string, { own: unknown; id: number }>>();
+    for (const a of workflowActions as any[]) {
+      if (!isOwnerTodo(a) || a.stationId == null) continue;
+      const key = String(a.stationId);
+      const list = byStation.get(key) || new Map();
+      for (const id of a.channelIds || []) list.set(channelNameKey(a.ownStationId, id), { own: a.ownStationId, id: Number(id) });
+      byStation.set(key, list);
+    }
+    return byStation;
+  }, [workflowActions]);
+
   // 这个上游身上要处理的事（利润类、账号类），先后同运营总览
   const todosOf = (v: StationView) => (v.archived ? [] : (todosById.get(actionKey(v.s)) || []).filter((a: any) => a.workflow));
 
@@ -640,11 +654,12 @@ export default function StationsPage() {
 
   // 一件事在这一行里的标题：「还没确认这把 Key 属于哪个上游账号」要说清是这个上游下哪些渠道的 Key（ui-copy-spec §5.2）
   const todoTitle = (a: any) => {
-    if (!(a.code === "COST_OWNER_UNVERIFIED" || (!a.code && a.kind === "verify_identity"))) return workflowProblem(a);
-    const ids: number[] = a.channelIds || [];
-    if (!ids.length) return COPY.ownerNone;
-    const names = ids.map((id) => channelNames[String(id)]).filter(Boolean);
-    if (names.length < ids.length) return COPY.ownerCount(ids.length);
+    if (!isOwnerTodo(a)) return workflowProblem(a);
+    const merged = a.stationId != null ? ownerChannels.get(String(a.stationId)) : undefined;
+    const channels = merged?.size ? [...merged.values()] : (a.channelIds || []).map((id: number) => ({ own: a.ownStationId, id: Number(id) }));
+    if (!channels.length) return COPY.ownerNone;
+    const names = channels.map((c: { own: unknown; id: number }) => channelNames[channelNameKey(c.own, c.id)]).filter(Boolean);
+    if (names.length < channels.length) return COPY.ownerCount(channels.length);
     return names.length <= 2 ? COPY.ownerNames(names) : COPY.ownerMany(names[0], names.length);
   };
 
@@ -661,7 +676,8 @@ export default function StationsPage() {
     const stale = staleAt(v);
     const title = todo ? todoTitle(todo) : null;
     const refreshing = !!refreshingIds[v.s.id];
-    const note = refreshing ? COPY.refreshing : stale || (v.issue ? null : tier ? v.statusNote : title || v.statusNote);
+    // 档位自己没有说明时（「还没读取」、部分固定成本状态）退回写事的标题，状态格总说得出为什么
+    const note = refreshing ? COPY.refreshing : stale || (v.issue ? null : tier ? v.statusNote || title : title || v.statusNote);
     // 小钟和「后面几次刷新都没读到」那句只跟「数据截至」走，正在刷新时不挂
     return { label, level, note, stale: refreshing ? null : stale, title };
   };

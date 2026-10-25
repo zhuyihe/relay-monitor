@@ -41,6 +41,13 @@ export const RUNWAY_TEXT = Object.freeze({
   tip: Object.freeze({ reason: "原因", balance: "余额", burn: "日均花费", days: "可用天数", basis: "怎么估的", renewal: "续费" }),
 });
 
+// 提醒天数内部按天存；告警中心可以按小时设，界面上按所选的单位写（告警中心的输入框、上游列表状态格的说明共用这两个）
+export function etaRuleDisplay(r: any): number {
+  const days = Number(r?.etaDays ?? 3);
+  return r?.etaUnit === "hours" ? +(days * 24).toFixed(2) : +days.toFixed(2);
+}
+export const etaWindowText = (r: any) => `${etaRuleDisplay(r)} ${r?.etaUnit === "hours" ? "小时" : "天"}`;
+
 // 条下面的说明：竖线是什么，提醒天数去哪改；children 插在中间（如「这里只列最要紧的 8 个。」）
 export function RunwayRulesNote({ critDays, warnDays = WATCH_DAYS, children }: { critDays: number; warnDays?: number; children?: ReactNode }) {
   return (

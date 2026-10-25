@@ -70,11 +70,6 @@ export const COPY = Object.freeze({
   // 通知方式
   channelsCaption: "提醒和日报从这些地方发出",
   add: "添加通知方式",
-  colType: "类型",
-  colName: "名字",
-  colStatus: "状态",
-  colTest: "测试结果",
-  colActions: "操作",
   untested: "还没测试",
   sent: "发送成功",
   sendFailed: "发送失败",

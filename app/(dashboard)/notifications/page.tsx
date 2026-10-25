@@ -23,6 +23,7 @@ import { ErrorState, PanelSkeleton, SAVE_STATE_TEXT, SaveState } from "../../com
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import { Icon, Sym } from "../../components/icons";
 import { More } from "../../components/more";
+import { etaRuleDisplay } from "../../components/runway";
 import { StatusText } from "../../components/status";
 import { TabPanel, Tabs } from "../../components/seg";
 import { COPY } from "./copy";
@@ -67,11 +68,6 @@ const RULES = ALERT_RULES.map((rule) => ({
   desc: (COPY.ruleDesc as Record<string, string>)[rule.ev] || "",
 }));
 
-// 提醒天数内部按天存储；界面按所选单位展示
-function etaRuleDisplay(r: any): number {
-  const days = Number(r?.etaDays ?? 3);
-  return r?.etaUnit === "hours" ? +(days * 24).toFixed(2) : +days.toFixed(2);
-}
 
 // 规则里的数字一组存（PUT /api/notifications/rules）；开关和通知方式的选择另外即时存
 const ruleFormOf = (r: any): RuleForm => ({
@@ -143,6 +139,8 @@ export default function NotificationsPage() {
   // 开关和「发到哪些通知方式」一点就存，算一组
   const toggles = useSaveAction(queue, COPY.groupToggles);
   const compact = Grid.useBreakpoint().md === false;
+  // 提醒节奏收起区的开合：用户点的；这两个框有报错时强制展开（报错收起来就看不到，整组校验不过、别的数也存不上）
+  const [paceOpen, setPaceOpen] = useState(false);
   const ruleForm = useAutoSave<RuleForm, Record<string, string>>(ruleFormOf({}), {
     queue,
     // 没有通知方式时页面上没有「提醒规则」，那一小块里只有提醒天数这一项属于这一组
@@ -667,13 +665,25 @@ export default function NotificationsPage() {
     return null;
   };
 
-  // 首次加载：与真实布局同形的骨架
+  // 首次加载：与真实布局同形的骨架（桌面 8 + 4，手机通知方式在前），数据回来时不跳
   if (!notifLoaded && !notifErr && notifLoading) {
     return (
       <div className="jy-page">
-        <PanelSkeleton title={COPY.rules} lines={6} />
-        <PanelSkeleton title={COPY.channels} lines={3} />
-        <PanelSkeleton title={COPY.report} lines={3} />
+        {compact ? (
+          <>
+            <PanelSkeleton title={COPY.channels} lines={3} />
+            <PanelSkeleton title={COPY.rules} lines={6} />
+            <PanelSkeleton title={COPY.report} lines={3} />
+          </>
+        ) : (
+          <div className="jy-grid-8-4 jy-notifications-grid">
+            <PanelSkeleton title={COPY.rules} lines={6} />
+            <div className="jy-stack jy-notifications-side">
+              <PanelSkeleton title={COPY.channels} lines={3} />
+              <PanelSkeleton title={COPY.report} lines={3} />
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -689,6 +699,7 @@ export default function NotificationsPage() {
   };
 
   const paceSummary = COPY.paceSummary(ruleForm.saved.renotify, ruleForm.saved.errRetry);
+  const paceShown = paceOpen || !!(ruleErrors.renotify || ruleErrors.errRetry);
   // 版式（ui-design-spec §5.7、#64 第 8 节）：左 8 列提醒规则，右 4 列通知方式和日报；还没有通知方式时整页只放一件事，不分栏。
   // 手机上通知方式在最前：换的是页面里的先后，不只用 CSS 换显示顺序（读屏和键盘跟着看到的先后，§5.1）
   const rulesBlock = (
@@ -758,8 +769,9 @@ export default function NotificationsPage() {
           </div>
 
           <div className="jy-notifications-pad jy-more-line">
-            <span className="jy-caption">{paceSummary}</span>
-            <More label={COPY.pace}>
+            {/* 展开以后两个框下面各有说明，这一句不再重复（同一句话一页只说一次） */}
+            {paceShown ? null : <span className="jy-caption">{paceSummary}</span>}
+            <More label={COPY.pace} open={paceShown} onOpenChange={setPaceOpen}>
               <p className="jy-caption jy-notifications-pace-hint">{COPY.paceHint}</p>
               <div className="jy-two">
                 <div className="jy-field">

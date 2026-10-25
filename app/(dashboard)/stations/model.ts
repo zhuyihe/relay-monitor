@@ -4,6 +4,7 @@ import { BALANCE_STATE_TEXT, EMPTY, formatMoney, formatUsd, formatZonedDate } fr
 import { balanceDaysText, balanceViewOf, etaWindowDays, lowLineOf, WATCH_DAYS } from "../../../lib/overview-actions";
 import { balanceMoneyOf, fixedCostNowOf, purchasesOf, rateSnapshotOf } from "../../../lib/profit";
 import { noteOf } from "../../components/error-detail";
+import { etaWindowText } from "../../components/runway";
 import type { ErrorNote } from "../../components/error-detail";
 import type { Level } from "../../components/status";
 
@@ -23,7 +24,7 @@ const COPY = {
   noRenewal: "不再续费，不再提醒",
   // 状态格下一行解释余额这一档（ui-copy-spec §3.3）：不写天数，天数在可用天数一格
   tierLow: (line: string) => `低于提醒线 ${line}`,
-  tierSoon: (within: string) => `按现在的花法，不到 ${within}就会用完`,
+  tierSoon: (within: string) => `按现在的花法，${within}以内就会用完`,
   tierEmpty: "充值以后才能接着用",
   own: "自营站点，不提醒余额",
 };
@@ -99,15 +100,13 @@ export type StationView = {
   attention: boolean;
 };
 
-// 提醒天数写成「3 天」，按小时设的写「12 小时」（不到 1 天时）
-const withinText = (days: number) => (days >= 1 ? `${+days.toFixed(1)} 天` : `${Math.max(1, Math.round(days * 24))} 小时`);
-
 // 余额这一档的说明（上游列表状态格的下一行，ui-copy-spec §3.3）：余额偏低说提醒线，快用完说按哪条线算快，用完说要充值
 function tierNoteOf(s: any, view: { state: string | null; level: string }, settings: any, rules: any): string | null {
   if (view.state === "low") return COPY.tierLow(balanceMoneyOf(s, lowLineOf(s, settings)).text);
   if (view.state === "soon") {
+    // 红色按告警中心设的提醒天数（按它的单位写，和告警中心一样）；黄色是固定的 7 天（提醒天数比 7 天长时就是提醒天数）
     const windowDays = etaWindowDays(rules);
-    return COPY.tierSoon(withinText(view.level === "crit" ? windowDays : Math.max(windowDays, WATCH_DAYS)));
+    return COPY.tierSoon(view.level === "crit" || windowDays >= WATCH_DAYS ? etaWindowText(rules) : `${WATCH_DAYS} 天`);
   }
   if (view.state === "empty") return COPY.tierEmpty;
   return null;

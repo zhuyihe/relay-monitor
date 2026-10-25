@@ -22,7 +22,8 @@ type WorkflowState = {
   // 上次读成功的时间，读取失败时用来写「刷新失败，数据截至 14:30」
   okAt: Record<Source, number>;
   loading: boolean;
-  // 渠道 id → 名字：从两路本来就读到的数据里顺手记下，事项只带渠道 id，上游列表要说「渠道「X」用的 Key…」时用（不多发请求）
+  // 「自营站点 id:渠道 id」→ 名字：从两路本来就读到的数据里顺手记下，事项只带渠道 id，上游列表要说「渠道「X」用的 Key…」时用（不多发请求）。
+  // 渠道 id 只在一个自营站点里唯一，换过自营站点时两边的同号渠道不能互相覆盖，所以带上自营站点 id（channelNameKey）
   channelNames: Record<string, string>;
 };
 
@@ -71,16 +72,19 @@ function loadSource(source: Source, force: boolean): Promise<void> {
   return run;
 }
 
-// 上游账单（channels）和每日利润（results[].rule.channels）里的渠道名；只记有名字的（没有名字的由用的地方按「N 个渠道」说），
+export const channelNameKey = (ownStationId: unknown, channelId: unknown) => `${ownStationId ?? ""}:${channelId}`;
+
+// 上游账单（accounts[].keys[].channels，带自营站点 id）和每日利润（results[].rule.channels，自营站点 id 在 rule 上）里的渠道名；
+// 只记有名字的（没有名字的由用的地方按「N 个渠道」说）。
 // 不引 lib/reconciliation-view：这个文件每页都加载（侧栏计数），不为一个名字把那一大块带进每页
 function channelNamesOf(r: any): Record<string, string> {
   const out: Record<string, string> = {};
-  const add = (c: any) => {
+  const add = (own: unknown, c: any) => {
     const id = c?.channelId ?? c?.id;
-    if (id != null && c?.name) out[String(id)] = String(c.name);
+    if (own != null && id != null && c?.name) out[channelNameKey(own, id)] = String(c.name);
   };
-  (Array.isArray(r?.channels) ? r.channels : []).forEach(add);
-  (Array.isArray(r?.results) ? r.results : []).forEach((x: any) => (x?.rule?.channels || []).forEach(add));
+  for (const a of Array.isArray(r?.accounts) ? r.accounts : []) for (const k of a?.keys || []) for (const c of k?.channels || []) add(c?.ownStationId, c);
+  for (const x of Array.isArray(r?.results) ? r.results : []) for (const c of x?.rule?.channels || []) add(x?.rule?.ownStationId, c);
   return out;
 }
 
