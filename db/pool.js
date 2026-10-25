@@ -81,6 +81,18 @@ export async function ensureSchema(pool) {
     PRIMARY KEY (own_station_id, channel_id, station_id),
     INDEX idx_channel_monitor_station (station_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 合并重复上游（K1a）：一次合并改了什么、旧值是什么，一行一件事；回滚（db/k-unmerge.js）照这张表改回
+  await pool.query(`CREATE TABLE IF NOT EXISTS upstream_merge_log (
+    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    merge_id VARCHAR(32) NOT NULL,
+    merged_at_ms BIGINT NOT NULL,
+    retained_id VARCHAR(32) NOT NULL,
+    merged_id VARCHAR(32) NULL,
+    kind VARCHAR(24) NOT NULL,
+    detail JSON NOT NULL,
+    undone_at_ms BIGINT NULL,
+    INDEX idx_upstream_merge_log_merge (merge_id, id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   await pool.query(`CREATE TABLE IF NOT EXISTS history_points (
     station_id VARCHAR(32) NOT NULL,
     t BIGINT NOT NULL,

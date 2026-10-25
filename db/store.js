@@ -257,9 +257,11 @@ export class Store {
       if (!change) return null;
       if (change.data) {
         try {
-          await this._writeNow(change.data, change.guard);
+          await this._writeNow(change.data, change.guard, change.within);
         } catch (err) {
           if (change.guard && ["AUTHORIZATION_CHANGED", "RESOURCE_CHANGED", "PREVIEW_BASIS_CHANGED"].includes(err?.code)) throw err;
+          // 合并上游在同一个事务里改绑定、关联时发现和计划不一样：原样报给调用方，不说成「保存失败」
+          if (change.within && String(err?.code || "").startsWith("UPSTREAM_MERGE_")) throw err;
           // API 只返回操作失败，不回显可能包含凭证的数据库错误；界面按 SAVE_FAILED 说「没存上」（lib/error-copy.js）
           throw Object.assign(new Error("保存失败，请稍后重试", { cause: err }), { code: "SAVE_FAILED" });
         }
@@ -350,7 +352,8 @@ export class Store {
     return { ...copy, meta };
   }
 
-  async _writeNow(data = this.data, guard) {
+  // within(conn)：和上游、meta 一起写的别的表，用同一个连接、同一个事务，commit 之前执行（合并上游用，见 mergeUpstreams）
+  async _writeNow(data = this.data, guard, within) {
     const sealed = this._seal(data);
     const conn = await this.pool.getConnection();
     try {
@@ -376,6 +379,7 @@ export class Store {
         "INSERT INTO meta (k, v) VALUES ? ON DUPLICATE KEY UPDATE v = VALUES(v)",
         [metas]
       );
+      if (within) await within(conn);
       guard?.();
       await conn.commit();
     } catch (err) {
@@ -554,9 +558,10 @@ export class Store {
   }
 
   // ---- 中转站 ----------------------------------------------------------------
-  list({ includeArchived = false, includeUnmonitored = false } = {}) {
+  // 被合并掉的上游（mergedInto）从所有列表里消失：不轮询、不进成本、不进上游列表；只有 get(id) 和 includeMerged 还看得到
+  list({ includeArchived = false, includeUnmonitored = false, includeMerged = false } = {}) {
     return this.data.stations.filter((s) =>
-      (includeArchived || !s.archivedAt) && (includeUnmonitored || s.monitorEnabled !== false)
+      (includeArchived || !s.archivedAt) && (includeUnmonitored || s.monitorEnabled !== false) && (includeMerged || !s.mergedInto)
     );
   }
 
@@ -716,6 +721,27 @@ export class Store {
         data: { ...this.data, stations },
         publish: () => { this.data.stations = stations; },
         value: stations.length < n,
+      };
+    }));
+  }
+
+  // 合并重复的上游：留下的只改成本匹配别名，被合掉的记上 mergedInto；within(conn) 在同一个事务里改绑定、关联、写日志。
+  // 三样一起提交或一起回滚，内存里的上游文档在提交以后才换（publish）
+  async mergeUpstreams({ retainedId, mergedIds, patches, within }) {
+    const stale = () => Object.assign(new Error("上游在这期间变了，请重新看一遍清单"), { code: "UPSTREAM_MERGE_STALE" });
+    return this.withStationLocks([retainedId, ...mergedIds], () => this._saveChange(() => {
+      const retained = this.get(retainedId), merged = mergedIds.map((id) => this.get(id));
+      if (!retained || merged.some((s) => !s) || retained.mergedInto || merged.some((s) => s.mergedInto)
+        || retained.archivedAt || merged.some((s) => s.archivedAt)) throw stale();
+      const next = new Map([[retainedId, { ...retained, ...patches.retained }], ...mergedIds.map((id, i) => [id, { ...merged[i], ...patches.merged[id] }])]);
+      return {
+        data: { ...this.data, stations: this.data.stations.map((s) => next.get(s.id) || s) },
+        within,
+        publish: () => {
+          Object.assign(retained, patches.retained);
+          mergedIds.forEach((id, i) => Object.assign(merged[i], patches.merged[id]));
+        },
+        value: { retained, merged },
       };
     }));
   }
