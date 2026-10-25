@@ -2681,20 +2681,22 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
     station("st-nospark", "NoSpark 上游", now, { spark: [] }),
     // 名字很长又有两个标签：还是两行字，名字省略
     station("st-long", "一个名字特别特别特别特别特别特别特别长的上游（演示）", now, { demo: true, includeInProfit: false }),
-    // 有档位又有两件事：状态格「余额偏低 · 还有 1 个问题」，下一行是第一件事的标题，不是档位说明
+    // 有档位又有两件事：状态格「余额偏低 · 还有 2 个问题」（档位本身不算），下一行解释这一档，事的标题在行末按钮的悬停和读屏里
     station("st-todo", "Todo 上游", now, { balance: { ok: true, remaining: 2, account: "todo-account", checkedAt: iso(now) } }),
     // 只有事、没有档位：「需处理」，排在正常的行前面
     station("st-only", "Only 上游", now),
   ];
   const action = (kind, stationId) => ({ id: `${kind}:${stationId}`, kind, label: TEST_READ, title: reconciliationIssue(kind === "verify_identity" ? "COST_OWNER_UNVERIFIED" : "UPSTREAM_CAPABILITY_UNVERIFIED").title, detail: "",
     href: `/stations?action=${kind === "verify_identity" ? "verify" : "verify-billing"}&stationId=${stationId}`, stationId });
-  const actions = [action("verify_identity", "st-todo"), action("verify_capability", "st-todo"), action("verify_identity", "st-only"), action("verify_capability", "st-broken")];
+  // st-only 那件「还没确认这把 Key 属于哪个上游账号」带两个渠道：上游这一行里要说清是哪两个渠道的 Key（名字取自每日利润读到的绑定）
+  const actions = [action("verify_identity", "st-todo"), action("verify_capability", "st-todo"), { ...action("verify_identity", "st-only"), channelIds: [11, 12] }, action("verify_capability", "st-broken")];
+  const OWNER_NONE = "这个上游的 Key 还没确认属于哪个上游账号", OWNER_TWO = "渠道「高速 A」「标准 B」用的 Key 还没确认属于哪个上游账号";
   const handler = async (route) => {
     const url = new URL(route.request().url()), path = url.pathname;
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 30, lowBalanceUsd: 5 }, generatedAt: iso(now) });
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {}, settings: { refreshIntervalSec: 30, lowBalanceUsd: 5 } });
-    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [{ rule: { channels: [{ channelId: 11, name: "高速 A" }, { channelId: 12, name: "标准 B" }] } }], actions });
     throw new Error("unexpected API: " + path);
   };
   const accounts = (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: iso(now) });
@@ -2721,18 +2723,24 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
   for (const name of ["Fresh 上游", "Near 上游"]) assert.equal(await status(name).getByText(/数据截至/).count(), 0, name);
   await status("Stale 上游").getByText(AS_OF).waitFor();
   assert.equal(await status("Broken 上游").getByText(/数据截至/).count(), 0);
-  await status("Broken 上游").getByText(actions[3].title, { exact: true }).waitFor();
-  // 有档位又有两件事：状态格「余额偏低 · 还有 1 个问题」，下一行是第一件事的标题；不放链接、按钮
-  await status("Todo 上游").getByText(`${BALANCE_STATE_TEXT.low} · 还有 1 个问题`, { exact: true }).waitFor();
-  await status("Todo 上游").getByText(actions[0].title, { exact: true }).waitFor();
+  // 读不到余额也是档位：「读不到余额 · 还有 1 个问题」，原因在下面那一行，状态格下一行不写事的标题
+  await status("Broken 上游").getByText(`${BALANCE_STATE_TEXT.unreadable} · 还有 1 个问题`, { exact: true }).waitFor();
+  assert.equal(await status("Broken 上游").getByText(actions[3].title).count(), 0);
+  // 有档位又有两件事：状态格「余额偏低 · 还有 2 个问题」，下一行解释这一档（提醒线按这个上游自己的币种），不写事的标题；不放链接、按钮
+  await status("Todo 上游").getByText(`${BALANCE_STATE_TEXT.low} · 还有 2 个问题`, { exact: true }).waitFor();
+  await status("Todo 上游").getByText("低于提醒线 $5.00", { exact: true }).waitFor();
+  assert.equal(await status("Todo 上游").getByText(OWNER_NONE).count(), 0);
   assert.equal(await status("Todo 上游").getByRole("button").count(), 0);
-  // 只有事：「需处理」，排在正常的行前面
+  // 只有事：「需处理」，下一行是那件事的标题，说清是哪两个渠道的 Key；排在正常的行前面
   await status("Only 上游").getByText("需处理", { exact: true }).waitFor();
+  await status("Only 上游").getByText(OWNER_TWO, { exact: true }).waitFor();
   const order = (await table.locator("tbody tr .jy-res-name button.link").allInnerTexts());
   assert.ok(order.indexOf("Only 上游") < order.indexOf("Fresh 上游"), order.join(","));
   // 行末是第一件事的按钮，键盘也能按；「编辑」挪进「⋯」，第二件事在「⋯」最上面写「按钮名：标题」
   const todo = row("Todo 上游");
-  const lead = todo.getByRole("button", { name: `${TEST_READ}（Todo 上游）`, exact: true });
+  // 行末按钮的悬停和读屏是「按钮名：标题」，事的标题在这里（这把 Key 不知道是哪些渠道的时，说「这个上游的 Key」）
+  const lead = todo.getByRole("button", { name: `${TEST_READ}：${OWNER_NONE}（Todo 上游）`, exact: true });
+  assert.equal(await lead.getAttribute("title"), `${TEST_READ}：${OWNER_NONE}`);
   assert.equal(await todo.getByRole("button", { name: "编辑 Todo 上游", exact: true }).count(), 0);
   await todo.getByRole("button", { name: "Todo 上游 的更多操作", exact: true }).focus(); await page.keyboard.press("Enter");
   const items = page.getByRole("menuitem");
@@ -2761,7 +2769,7 @@ test("上游列表一行两行字：没有「数据截至」一列，只在数�
   for (const name of ["Only 上游", "Todo 上游"]) assert.ok((await card(name).boundingBox()).height <= 120, `${name} 的卡片三行`);
   // 读不到余额又有事：第三行照样写事的标题，不只剩一个按钮
   await card("Broken 上游").locator(".m-todo-line").getByText(actions[3].title, { exact: true }).waitFor();
-  await card("Only 上游").getByText(actions[2].title, { exact: true }).waitFor();
+  await card("Only 上游").getByText(OWNER_TWO, { exact: true }).waitFor();
   assert.equal(await card("Fresh 上游").getByRole("button", { name: REFRESH }).count(), 0);
   assert.equal(await card("Fresh 上游").locator(".jy-spark-btn").count(), 0);
   // 数据旧又有余额、可用天数：可以折成三行，不再多
@@ -3460,6 +3468,64 @@ test("系统设置：接口说登录信息没加密时页顶提示一条（不�
     }
     await page.close();
   }
+});
+
+test("告警中心 8 + 4、系统设置两栏（1440）：通知方式一个一行，提醒节奏、历史概况收成一句；手机上通知方式在最前", async (t) => {
+  const channels = [{ id: "c1", name: "运维群", type: "telegram", enabled: true, config: {}, hasSecret: {} }, { id: "c2", name: "老板邮箱", type: "telegram", enabled: false, config: {}, hasSecret: {} }];
+  const rules = { onLow: true, onExhaust: true, onError: true, onRecover: false, onEta: true, etaDays: 3, etaUnit: "days", renotifyHours: 6, errorThreshold: 1, errorRetrySec: 60, channelsFor: {} };
+  const handler = async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "admin", isDefaultPassword: false });
+    if (url.pathname === "/api/notifications") return fulfill(route, { channels, rules, channelTypes: [{ value: "telegram", label: "Telegram", fields: [] }] });
+    if (url.pathname === "/api/meta") return fulfill(route, metaFixture({ lowBalanceUsd: 5, dailyReport: { enabled: true, time: "09:00", channelIds: ["c1"] } }));
+    if (url.pathname === "/api/settings") return fulfill(route, settingsFixture());
+    throw new Error("unexpected layout fixture API: " + url.pathname);
+  };
+  const page = await openFixturePage(t, handler, undefined, false, null, "/notifications");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const region = (name) => page.getByRole("region", { name, exact: true });
+  const [rulesP, chP, reportP] = [region(NOTIFICATIONS_COPY.rules), region(NOTIFICATIONS_COPY.channels), region(NOTIFICATIONS_COPY.report)];
+  await rulesP.waitFor(); await chP.waitFor(); await reportP.waitFor();
+  // 左 8 列提醒规则；右 4 列通知方式在上、日报在下
+  const [r, c, d] = [await rulesP.boundingBox(), await chP.boundingBox(), await reportP.boundingBox()];
+  assert.ok(c.x > r.x + r.width && Math.abs(c.x - d.x) < 1, "通知方式、日报在提醒规则右边一栏");
+  assert.ok(r.width / c.width > 1.8 && r.width / c.width < 2.2, `宽度约 2:1（${Math.round(r.width)} / ${Math.round(c.width)}）`);
+  assert.ok(Math.abs(r.y - c.y) < 1 && d.y > c.y + c.height, "上沿对齐，日报在通知方式下面");
+  // 通知方式一个一行（4 列里不放表格）：名字、开关；类型 · 测试结果；测试、编辑、删除常驻
+  assert.equal(await chP.locator("table").count(), 0);
+  const items = chP.locator(".jy-notifications-chlist > li");
+  assert.equal(await items.count(), 2);
+  await items.first().getByText("运维群", { exact: true }).waitFor();
+  for (const name of [NOTIFICATIONS_COPY.testAria("运维群"), NOTIFICATIONS_COPY.editAria("运维群"), NOTIFICATIONS_COPY.removeAria("运维群")]) assert.equal(await items.first().getByRole("button", { name, exact: true }).isVisible(), true, name);
+  // 提醒节奏收成一句（按已保存的数写），两个输入框在收起区里
+  await rulesP.getByText(NOTIFICATIONS_COPY.paceSummary(6, 60), { exact: true }).waitFor();
+  const pace = rulesP.getByRole("button", { name: NOTIFICATIONS_COPY.pace, exact: true });
+  assert.equal(await pace.getAttribute("class"), "jy-more__toggle"); assert.equal(await pace.getAttribute("aria-expanded"), "false");
+  assert.equal(await rulesP.getByLabel(NOTIFICATIONS_COPY.renotify, { exact: true }).count(), 0);
+  await pace.click(); await rulesP.getByLabel(NOTIFICATIONS_COPY.renotify, { exact: true }).waitFor();
+  // 手机：通知方式在最前，然后提醒规则、日报（页面里就换了先后，读屏、键盘跟着走）
+  await page.setViewportSize({ width: 390, height: 844 }); await page.reload();
+  await chP.waitFor(); await rulesP.waitFor(); await reportP.waitFor();
+  const order = await page.locator(".jy-page > .jy-panel, .jy-page > section").evaluateAll((els) => els.map((el) => el.getAttribute("aria-label") || el.querySelector("h2")?.textContent?.trim()));
+  const at = (name) => order.findIndex((x) => x && x.startsWith(name));
+  assert.ok(at(NOTIFICATIONS_COPY.channels) >= 0 && at(NOTIFICATIONS_COPY.channels) < at(NOTIFICATIONS_COPY.rules) && at(NOTIFICATIONS_COPY.rules) < at(NOTIFICATIONS_COPY.report), order.join(" / "));
+
+  // 系统设置：左边刷新与数据、历史数据保留，右边账户安全、关于
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(new URL("/settings", page.url()).href);
+  const sRegion = (name) => page.getByRole("region", { name, exact: true });
+  await page.getByLabel(SETTINGS_COPY.interval, { exact: true }).waitFor();
+  const [refresh, retention, account, about] = await Promise.all([SETTINGS_COPY.refresh, SETTINGS_COPY.retention, SETTINGS_COPY.account, SETTINGS_COPY.about].map((name) => sRegion(name).boundingBox()));
+  assert.ok(Math.abs(refresh.x - retention.x) < 1 && Math.abs(account.x - about.x) < 1 && account.x > refresh.x + refresh.width, "两栏");
+  assert.ok(Math.abs(refresh.width - account.width) < 2, "两栏一样宽");
+  assert.ok(Math.abs(refresh.y - account.y) < 1 && retention.y > refresh.y && about.y > account.y, "上沿对齐，各自上下排");
+  // 历史概况、最近自动清理收起，露一句记录数和最早的日子
+  const ret = sRegion(SETTINGS_COPY.retention);
+  await ret.getByText(/^共 1,234 条记录，最早 \d{1,2}月\d{1,2}日$/).waitFor();
+  const health = ret.getByRole("button", { name: SETTINGS_COPY.healthMore, exact: true });
+  assert.equal(await health.getAttribute("aria-expanded"), "false");
+  assert.equal(await ret.getByRole("heading", { name: SETTINGS_COPY.overview, exact: true }).count(), 0);
+  await health.click(); await ret.getByRole("heading", { name: SETTINGS_COPY.overview, exact: true }).waitFor();
 });
 
 test("登录页按码说：用户名或密码不对时标红输入框，试太多次时不标红，别的报错按控制台自己的说法写「登录失败：原因。」", async (t) => {
