@@ -6783,6 +6783,9 @@ const ledgerDays = (f) => f.state.ledger.map((row) => [row.rule_id, row.bill_dat
 test("C2a 回看：昨天不占预算；更早的日子每轮最多 K 天、同一个上游同时 1 天、这一轮没成就不再给这个上游取；没结成的记进状态表，结成了删掉", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z"); // 上海 10-09 11:00；开始统计是 10-07 0 点，10-07、10-08 两天能结
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 2, lookbackTimeMs: 60000 } });
+  // 自营这边也先读不到（quota 0）：上游账单读不到时不会被重判成「这天的账单还没读全」（那是按天判断的，不挡同一上游别的日子——
+  // 安全审核 C2a 低-4），这里要的是上游整体读不到（UPSTREAM_REQUEST_FAILED），才会触发「这一轮不再给这个上游取别的日子」
+  f.state.ownQuota = 0;
   f.state.upstreamQuota = null; // 上游账单读不到
   // 方案钉住的性能点：每轮只批量读两次（状态表、账本近几天的日期），不按绑定逐条查（安全审核 C2a 低-7）
   const reads = { listSettlementStates: [], listLedgerDays: [] };
@@ -6797,12 +6800,13 @@ test("C2a 回看：昨天不占预算；更早的日子每轮最多 K 天、同�
   assert.ok(reads.listSettlementStates[0][0].length >= 3, "一次性带着这一轮全部绑定的 id（SQL 的 rule_id IN），不是单个 id");
   assert.deepEqual(new Set(reads.listSettlementStates[0][0]), new Set(["rr_live", "rr_two", "rr_three"]));
   assert.deepEqual(states(f), [
-    ["rr_live", "2026-10-07", "WAITING_FOR_BILL", 1],
-    ["rr_live", "2026-10-08", "WAITING_FOR_BILL", 1], ["rr_three", "2026-10-08", "WAITING_FOR_BILL", 1], ["rr_two", "2026-10-08", "WAITING_FOR_BILL", 1],
-  ], "昨天三条都试；更早的那天只试了一天：三条共用一个上游，这一轮它没成就不再取");
+    ["rr_live", "2026-10-07", "UPSTREAM_DATA_UNAVAILABLE", 1],
+    ["rr_live", "2026-10-08", "UPSTREAM_DATA_UNAVAILABLE", 1], ["rr_three", "2026-10-08", "UPSTREAM_DATA_UNAVAILABLE", 1], ["rr_two", "2026-10-08", "UPSTREAM_DATA_UNAVAILABLE", 1],
+  ], "昨天三条都试；更早的那天只试了一天：三条共用一个上游，限流/连不上这一轮它没成就不再取（方案 6.4）");
   assert.deepEqual(ledgerDays(f), []);
 
   // 上游好了，10 分钟后：昨天三条都结；更早的日子预算 2 天，一个上游一次一天
+  f.state.ownQuota = 250;
   f.state.upstreamQuota = 100;
   now += 10 * 60000;
   await f.module.refreshDue(now);
@@ -6817,6 +6821,53 @@ test("C2a 回看：昨天不占预算；更早的日子每轮最多 K 天、同�
   await f.module.refreshDue(now);
   const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
   assert.equal(f.state.statCalls.slice(calls).filter((call) => call.start < todayStart).length, 0, "账本里都有了：只观测今天，不再取过去的日子");
+});
+
+test("C2a 低-4：这天的账单还没读全（WAITING_FOR_BILL，按天判断）不连累同一上游别的日子，只有整个上游读不到才连累（安全审核 C2a 低-4）", async (t) => {
+  let now = Date.parse("2026-10-10T03:00:00Z"); // 上海 10-10 11:00；开始统计 10-07 0 点：昨天 10-09，更早两天 10-08、10-07
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  // 默认自营这边有收入（ownQuota: 250）：上游这边读不到时，按天判断成「这天的账单还没读全」，不是上游整体读不到——
+  // 这种原因只挡这一天，不该让同一上游更早那天也被拖到下一轮（低-4 之前的写法会把两天都拖住，只试一天）
+  f.state.upstreamQuota = null;
+  await f.module.refreshDue(now);
+  assert.deepEqual(states(f).filter((row) => row[0] === "rr_live").map((row) => [row[1], row[2]]),
+    [["2026-10-07", "WAITING_FOR_BILL"], ["2026-10-08", "WAITING_FOR_BILL"], ["2026-10-09", "WAITING_FOR_BILL"]], "昨天和更早两天都试了，没有被同一上游的「账单还没读全」拖住");
+});
+
+test("C2a 中-2：改绑定之前还没固定的日子，D3 做好以前回看不自动结；昨天照旧、手动照常能结（安全审核 C2a 中-2，总指挥 10-25 定）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z"); // 上海 10-09 11:00；开始统计 10-07 0 点：昨天 10-08，更早一天 10-07
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  const OLDER = { startMs: Date.parse("2026-10-06T16:00:00Z"), endMs: Date.parse("2026-10-07T16:00:00Z") }; // 10-07
+  const liveStates = () => states(f).filter((row) => row[0] === "rr_live").map((row) => row[1]);
+  const liveLedger = () => ledgerDays(f).filter((row) => row[0] === "rr_live").map((row) => row[1]).sort();
+  f.state.upstreamQuota = null; // 上游读不到，攒出两天没结
+  await f.module.refreshDue(now);
+  assert.deepEqual(liveLedger(), []);
+  assert.deepEqual(liveStates(), ["2026-10-07", "2026-10-08"], "两天都留了状态行");
+
+  // 改绑定：绑定早就建好了（创建时刻定在两天之前），只是这把绑定的 scope 版本往前走一位，生效时刻晚于这两天结束——
+  // reconciliationAccountingStart 取 createdAt 和 billingEffectiveFrom 两者较早的那个，createdAt 够早时「开始统计之前」
+  // 不会被误判，这条新约束才用得上（不然会被更早的 not_effective 挡住，根本走不到这条判断）
+  const row = f.repository.tables.rules.find((r) => r.id === "rr_live");
+  row.created_at = new Date("2026-10-01T00:00:00Z");
+  row.scope_version = Number(row.scope_version || 1) + 1;
+  row.billing_effective_from_ms = now;
+  f.state.upstreamQuota = 100; // 上游恢复
+  now += 10 * 60000; // 等到退避表第一档的重试时刻
+  await f.module.refreshDue(now);
+  assert.deepEqual(liveLedger(), ["2026-10-08"], "昨天照旧自动结了；更早那天改绑定之前还没固定，回看不自动结");
+  assert.deepEqual(liveStates(), ["2026-10-07"], "这天的状态行还在，没有被回看清掉");
+
+  // 手动「重新读取」照常能结
+  const manual = (window) => f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: window.startMs, endMs: window.endMs }, { mode: "observe", force: true, origin: "manual" });
+  const result = (await manual(OLDER)).results[0];
+  assert.ok(result.settledAt, "手动不受这条约束，照常能结");
+  assert.deepEqual(liveLedger(), ["2026-10-07", "2026-10-08"]);
+  assert.deepEqual(liveStates(), [], "状态行在记账的事务里删掉了");
+  // 再跑一轮回看：两天都已经有账本了，不再触发这条约束
+  now += 60000;
+  await f.module.refreshDue(now);
+  assert.deepEqual(liveLedger(), ["2026-10-07", "2026-10-08"]);
 });
 
 test("C2a 回看有时间上限：已经发出去的那一天照常做完，用到时间就停，剩下的下一轮接着取；今天的观测在回看之前做完", async (t) => {
