@@ -7,7 +7,7 @@ import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } 
 import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
 import { Store } from "../db/store.js";
 import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconciliation-scope-policy.js";
-import { reconciliationCoverageText } from "../lib/reconciliation-contract.js";
+import { reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { reconciliationNotCountedText } from "../lib/reconciliation-view.js";
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
@@ -4075,13 +4075,13 @@ function sub2ReconciliationFixture(t, { baseUrl, costs = {}, ...live }) {
     cost_coverage: "complete", source_binding: { 1: "r1" } });
   f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
   const host = new URL(baseUrl).host, ownFetch = globalThis.fetch;
-  const sub2 = { costs, controls: 0, stats: [], missing: false, onRequest: null };
+  const sub2 = { costs, controls: 0, stats: [], missing: false, onRequest: null, accountId: 7 };
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(input);
     if (url.host !== host) return ownFetch(input, init);
     await sub2.onRequest?.(url);
     const reply = (status, data) => ({ status, text: async () => JSON.stringify({ code: status === 200 ? 0 : 1, data }) });
-    if (url.pathname === "/api/v1/auth/me") return reply(200, { id: 7 });
+    if (url.pathname === "/api/v1/auth/me") return reply(200, { id: sub2.accountId });
     if (url.pathname === "/api/v1/keys") return reply(200, { total: 1, items: [{ id: 9, user_id: 7, name: "stable", status: "active", group_id: 7 }] });
     if (url.pathname.startsWith("/api/v1/keys/")) { sub2.controls += 1; return reply(404, {}); }
     sub2.stats.push(Object.fromEntries(url.searchParams));
@@ -4982,6 +4982,86 @@ test("P1b 沿用身份时上游拒绝读 Key 账单：这一轮先算还在读�
   await f.module.refreshDue(now);
   assert.equal(identityReads() - before, 1, "下一轮现读身份");
   assert.ok((await codes()).includes("KEY_INVALID_OR_DENIED"), "现读身份以后还被拒：才说上游拒绝");
+});
+
+test("P1b Sub2API 沿用身份那一轮读账单时发现账号换了：先算还在读取、不推送，下一轮全量重读再定；auth/me 偶尔超时照常推送", async (t) => {
+  for (const scenario of ["换了账号", "auth/me 超时"]) {
+    await t.test(scenario, async (st) => {
+      let now = Date.parse("2026-10-11T01:00:00Z");
+      st.mock.method(Date, "now", () => now);
+      const f = sub2ReconciliationFixture(st, { baseUrl: `https://sub2-reuse-${scenario === "换了账号" ? "owner" : "timeout"}.test`, costs: { "2026-10-11": 1, "2026-10-10": 2 } });
+      const codes = () => f.repository.tables.alerts.filter((row) => row.rule_id === f.rule.id && Number(row.active) === 1).map((row) => row.event_code);
+      await f.module.refreshDue(now);
+      // 第一轮核验了账单能力，能力变了会清掉 Key 目录缓存；再跑一轮，让目录和身份进缓存
+      now += 60000;
+      await f.module.refreshDue(now);
+      assert.deepEqual(codes(), []);
+      if (scenario === "换了账号") f.sub2.accountId = 8;
+      else f.sub2.onRequest = (url) => { if (url.pathname === "/api/v1/auth/me") throw Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }); };
+      now += 60000;
+      await f.module.refreshDue(now); // 这一轮 Key 目录和身份都沿用缓存，只有读账单时核对 auth/me
+      if (scenario === "换了账号") {
+        assert.deepEqual(codes(), [], "沿用身份时账号对不上：先算还在读取，不推「上游这天的用量记录一直读不到」");
+        let catalogueReads = 0;
+        f.sub2.onRequest = (url) => { if (url.pathname === "/api/v1/keys") catalogueReads += 1; };
+        now += 60000;
+        await f.module.refreshDue(now);
+        assert.ok(catalogueReads > 0, "下一轮全部重读 Key 目录和身份");
+        assert.deepEqual(codes(), [], "重读以后和以前一样卡在读目录那一步（账号对不上），不推送");
+      } else {
+        assert.ok(codes().includes("UPSTREAM_DATA_UNAVAILABLE"), `auth/me 超时不是账号换了：照常推送（${codes()}）`);
+      }
+    });
+  }
+});
+
+test("P1b 分组没读到的那份 Key 目录不缓存：下一轮照常重读，上游恢复了马上就好", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  let groupsDown = false, groupReads = 0;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/user/self/groups") {
+      groupReads += 1;
+      if (groupsDown) return { status: 500, text: async () => JSON.stringify({ success: false, message: "busy" }) };
+    }
+    return prev(input, init);
+  });
+  await f.module.refreshDue(now);
+  groupsDown = true;
+  now += 6 * 60000; // 目录到期，这一轮重读时分组读不到
+  await f.module.refreshDue(now);
+  groupsDown = false;
+  now += 60000;
+  const before = groupReads;
+  await f.module.refreshDue(now);
+  assert.equal(groupReads - before, 1, "分组没读到的那份没进缓存，下一轮照常重读");
+  now += 60000;
+  const after = groupReads;
+  await f.module.refreshDue(now);
+  assert.equal(groupReads - after, 0, "读全了的照常缓存 5 分钟");
+});
+
+test("P1b 上游的 Key 目录不带 user_id：照旧挡住不结，要人处理「对方的版本不支持这项功能」，不说会自动再读", async (t) => {
+  const now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/token/") {
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: 3, items: [
+        { id: 9, name: "stable", status: 1, group: "g1", cross_group_retry: false },
+        { id: 10, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+        { id: 11, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } }) };
+    }
+    return prev(input, init);
+  });
+  const [row] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" })).results;
+  assert.deepEqual([row.health.code, row.calculation.profitUsd], ["UPSTREAM_FEATURE_UNSUPPORTED", null]);
+  assert.equal(reconciliationIssue(row.health.code).kind, "action", "要人处理");
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.length, 0, "不结账");
 });
 
 test("P1b 结账那一轮先把要结的上游全部重读：quota_per_unit 在两次轮询之间变了，账本用新值", async (t) => {

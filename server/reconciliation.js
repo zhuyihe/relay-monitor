@@ -342,17 +342,21 @@ function snapshotReference(record) {
 
 function toErrorHealth(err, own = false) {
   const code = String(err?.code || "");
-  const issue = own ? "OWN_BILLING_UNAVAILABLE" : code === "UPSTREAM_AUTH_DENIED" ? "KEY_INVALID_OR_DENIED" : "UPSTREAM_DATA_UNAVAILABLE";
+  const issue = own ? "OWN_BILLING_UNAVAILABLE" : code === "UPSTREAM_AUTH_DENIED" ? "KEY_INVALID_OR_DENIED"
+    : code === "UPSTREAM_FEATURE_UNSUPPORTED" ? "UPSTREAM_FEATURE_UNSUPPORTED" : "UPSTREAM_DATA_UNAVAILABLE";
   return health(issue, issueText(issue));
 }
 
-// 轮询沿用了不久前的身份（这一轮没现读）时上游拒绝：可能是账号换了，不能马上说「上游拒绝读取这把 Key」并推送。
-// 这一轮先当成还在读取，上游已记进 staleMetadata，下一轮全部重读身份以后再定
+// 轮询沿用了不久前的身份（这一轮没现读）时上游拒绝（New API），或者读账单时核对出账号换了（Sub2API）：
+// 不能马上说「上游拒绝读取这把 Key」「上游这天的用量记录一直读不到」并推送。这一轮先当成还在读取，
+// 上游已记进 staleMetadata，下一轮全部重读身份以后再定。连不上、超时这类不在此列，照常报
+const REUSED_IDENTITY_SUSPECT = new Set(["UPSTREAM_AUTH_DENIED", "UPSTREAM_IDENTITY_CHANGED"]);
 function upstreamErrorHealth(err, resource) {
-  return String(err?.code || "") === "UPSTREAM_AUTH_DENIED" && resource?.identityReused ? health("PENDING", issueText("PENDING")) : toErrorHealth(err);
+  return REUSED_IDENTITY_SUSPECT.has(String(err?.code || "")) && resource?.identityReused ? health("PENDING", issueText("PENDING")) : toErrorHealth(err);
 }
 
 const CALCULATION_BLOCKERS = new Set([
+  "UPSTREAM_FEATURE_UNSUPPORTED",
   "KEY_INVALID_OR_DENIED",
   "UPSTREAM_DATA_UNAVAILABLE",
   "OWN_BILLING_UNAVAILABLE",
@@ -576,7 +580,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const known = !force && reuseIdentity && identityCurrent ? { accountId: cached.value.accountId,
       status: cached.value.platform === "newapi" ? { quotaPerUnit: cached.value.quotaPerUnit, version: cached.value.version } : null } : null;
     const value = await queryReconciliationMetadata({ ...station }, { timezone: zone, capabilityStore: billingCapabilityStore, known });
-    metadataCache.set(cacheKey, { at: now, identityAt: known ? cached.identityAt : now, credential, value });
+    // 只缓存读全了的：分组没读到（groupsAvailable 为 false）的这份不留，下一轮照常重读（读失败的本来就不缓存）
+    if (value?.groupsAvailable === false) metadataCache.delete(cacheKey);
+    else metadataCache.set(cacheKey, { at: now, identityAt: known ? cached.identityAt : now, credential, value });
     return { value, identityReused: !!known };
   }
 

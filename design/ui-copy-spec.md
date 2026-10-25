@@ -314,6 +314,7 @@ New API、Sub2API 只出现在选择类型的地方，别处不用。
 | 还没确认这把 Key 属于哪个上游账号（旧） | 测试读取一次就好 | 测试读取 | COST_OWNER_UNVERIFIED、LEGACY_IDENTITY_UNVERIFIED |
 | 还没确认能读到这个上游的完整账单（旧） | 测试读取一次就好 | 测试读取 | UPSTREAM_CAPABILITY_UNVERIFIED |
 | 还没确认这个上游按哪个时区算一天（旧） | 测试读取一次就好 | 测试读取 | BILLING_TIMEZONE_UNVERIFIED |
+| 对方的版本不支持这项功能 | —— | 查看详细原因 | UPSTREAM_FEATURE_UNSUPPORTED |
 | 这把 Key 绑了两次（旧） | 同一把 Key 的上游成本只能算一次，去掉多余的那条 | 处理重复 | CANONICAL_KEY_CONFLICT |
 | 渠道「X」同时绑了两把 Key（旧） | 同一个渠道的收入只能算一次，去掉多余的那条 | 处理重复 | DUPLICATE_CHANNEL_ASSIGNMENT |
 | 这把 Key 还给别处用吗？ | 别处也在用的话，上游成本会算多；回答之前，利润先不算 | 去回答 | COST_COVERAGE_UNKNOWN |
