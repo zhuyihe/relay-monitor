@@ -34,70 +34,97 @@ function cleanupState(value) {
 // 窗口 [startMs, endMs) 里的原始快照，外加每个上游窗口开始前的最后一个点（基线）：同一站按 t 升序，基线在最前。
 // 两条查询都走主键 (station_id, t)：窗口按主键顺序范围扫（不排序），基线按站取 MAX(t)（每站一行）；
 // 不用 UNION 合成一条，免得几百万行再排一次序。在这里按站合并，基线排在这一站窗口里的点前面。
+// 一行一行交给 onRow，不把窗口里的点全留在内存里（30 天两百多万行全留着要约 300 MB）：
+// 真的 mysql2 连接池（pool.pool 是底层的回调连接池）走流式读；只有 query 的连接池（测试替身）一次读完再逐行交。
 // 日汇总和经营分析的热力图都从这里读，消耗按 usageDrops 算。
-export async function readPointsWithBaseline(pool, stationIds, startMs, endMs = Number.MAX_SAFE_INTEGER) {
-  const [[baseline], [window]] = await Promise.all([
-    pool.query(
-      `SELECT h.station_id, h.t, h.remaining
-       FROM history_points h
-       INNER JOIN (
-         SELECT station_id, MAX(t) AS t
-         FROM history_points
-         WHERE station_id IN (?) AND t < ?
-         GROUP BY station_id
-       ) previous ON previous.station_id = h.station_id AND previous.t = h.t`,
-      [stationIds, startMs]
-    ),
-    pool.query(
-      `SELECT station_id, t, remaining
+export async function forEachPointWithBaseline(pool, stationIds, startMs, endMs, onRow) {
+  const [baseline] = await pool.query(
+    `SELECT h.station_id, h.t, h.remaining
+     FROM history_points h
+     INNER JOIN (
+       SELECT station_id, MAX(t) AS t
        FROM history_points
-       WHERE station_id IN (?) AND t >= ? AND t < ?
-       ORDER BY station_id, t`,
-      [stationIds, startMs, endMs]
-    ),
-  ]);
-  if (!baseline.length) return window;
+       WHERE station_id IN (?) AND t < ?
+       GROUP BY station_id
+     ) previous ON previous.station_id = h.station_id AND previous.t = h.t`,
+    [stationIds, startMs]
+  );
   const before = new Map(baseline.map((row) => [String(row.station_id), row]));
-  const rows = [];
   let station = null;
-  for (const row of window) {
+  const emit = (row) => {
     const id = String(row.station_id);
     if (id !== station) {
       station = id;
-      if (before.has(id)) { rows.push(before.get(id)); before.delete(id); }
+      if (before.has(id)) { onRow(before.get(id)); before.delete(id); }
     }
-    rows.push(row);
+    onRow(row);
+  };
+  const sql = `SELECT station_id, t, remaining
+     FROM history_points
+     WHERE station_id IN (?) AND t >= ? AND t < ?
+     ORDER BY station_id, t`;
+  const params = [stationIds, startMs, endMs];
+  if (typeof pool.pool?.query === "function") {
+    for await (const row of pool.pool.query(sql, params).stream()) emit(row);
+  } else {
+    const [window] = await pool.query(sql, params);
+    for (const row of window) emit(row);
   }
   // 窗口里没有点的上游只有基线，放在最后：usageDrops 只要求同一站按 t 升序，站和站之间的先后不影响结果
-  for (const row of before.values()) rows.push(row);
+  for (const row of before.values()) onRow(row);
+}
+
+export async function readPointsWithBaseline(pool, stationIds, startMs, endMs = Number.MAX_SAFE_INTEGER) {
+  const rows = [];
+  await forEachPointWithBaseline(pool, stationIds, startMs, endMs, (row) => rows.push(row));
   return rows;
 }
 
-// 余额消耗：rows 必须按 station_id, t 升序。相邻快照余额下降计入后一快照，上升（充值）忽略；
-// 只计后一快照落在 [windowStart, windowEnd) 里的，按 bucketOf(t) 分组。返回 Map：key → { stationId, bucket, usd }
-// 经营分析一次要过几百万个点：相邻点多半同站同组，沿用上一个组，不逐点拼键查表。
-export function usageDrops(rows, windowStart, windowEnd, bucketOf) {
+// 余额消耗：行必须同一站按 t 升序。相邻快照余额下降计入后一快照，上升（充值）忽略；
+// 只计后一快照落在 [windowStart, windowEnd) 里的，按 bucketOf(t) 分组（bucketOf 随 t 不减）。
+// 逐行 add，可以边读边算；相邻点多半同站同组，沿用上一个组，不逐点拼键查表。
+// 不给 onBucket：各组留在 buckets（Map：key → { stationId, bucket, usd }）。
+// 给了 onBucket：同一站的行连在一起时，一组算完（换了组或换了站）就交出去、不留，最后 finish() 交出最后一组，
+// 内存只有当前这一组。交出的先后和 buckets 里的先后一样。
+export function usageDropsAccumulator(windowStart, windowEnd, bucketOf, { onBucket = null } = {}) {
   const previous = new Map();
   const buckets = new Map();
   let entry = null;
-  for (const row of rows) {
-    const id = String(row.station_id ?? row.stationId);
-    const t = Number(row.t);
-    const remaining = Number(row.remaining);
-    const before = previous.get(id);
-    if (t >= windowStart && t < windowEnd) {
-      const bucket = bucketOf(t);
-      if (!entry || entry.stationId !== id || entry.bucket !== bucket) {
-        const key = `${id}\u0000${bucket}`;
-        entry = buckets.get(key);
-        if (!entry) buckets.set(key, entry = { stationId: id, bucket, usd: 0 });
+  return {
+    buckets,
+    add(row) {
+      const id = String(row.station_id ?? row.stationId);
+      const t = Number(row.t);
+      const remaining = Number(row.remaining);
+      const before = previous.get(id);
+      if (t >= windowStart && t < windowEnd) {
+        const bucket = bucketOf(t);
+        if (!entry || entry.stationId !== id || entry.bucket !== bucket) {
+          if (onBucket) {
+            if (entry) onBucket(entry);
+            entry = { stationId: id, bucket, usd: 0 };
+          } else {
+            const key = `${id}\u0000${bucket}`;
+            entry = buckets.get(key);
+            if (!entry) buckets.set(key, entry = { stationId: id, bucket, usd: 0 });
+          }
+        }
+        const drop = before == null ? 0 : before - remaining;
+        if (drop > 0) entry.usd += drop;
       }
-      const drop = before == null ? 0 : before - remaining;
-      if (drop > 0) entry.usd += drop;
-    }
-    previous.set(id, remaining);
-  }
-  return buckets;
+      previous.set(id, remaining);
+    },
+    finish() {
+      if (onBucket && entry) onBucket(entry);
+      entry = null;
+    },
+  };
+}
+
+export function usageDrops(rows, windowStart, windowEnd, bucketOf) {
+  const drops = usageDropsAccumulator(windowStart, windowEnd, bucketOf);
+  for (const row of rows) drops.add(row);
+  return drops.buckets;
 }
 
 // 余额下降按后一快照在业务时区下的自然日计入。

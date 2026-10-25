@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { History, dailyUsageRows, readPointsWithBaseline, usageDrops } from "./history.js";
+import { History, dailyUsageRows, forEachPointWithBaseline, readPointsWithBaseline, usageDrops } from "./history.js";
 import { dayStartInTz } from "../lib/business-time.js";
 
 test("日汇总按后一快照归日，充值不计作消耗", () => {
@@ -227,4 +227,23 @@ test("窗口内的原始快照：窗口按主键顺序读，基线每站一行�
     assert.doesNotMatch(sql, /UNION/);
     assert.doesNotMatch(sql, /ORDER BY previous\.t DESC LIMIT 1/, "不再每个点一次相关子查询");
   }
+});
+
+test("真的 mysql2 连接池走流式读：窗口那条一行一行交，不一次读完；基线照样排在这一站最前", async () => {
+  const streamed = [];
+  const pool = {
+    query: async (sql) => {
+      assert.match(sql, /MAX\(t\)/, "窗口那条不走一次读完的 query");
+      return [[{ station_id: "a", t: 4, remaining: 8 }]];
+    },
+    pool: { query: (sql, params) => {
+      streamed.push({ sql, params });
+      return { stream: () => (async function* () { yield { station_id: "a", t: 100, remaining: 7 }; yield { station_id: "b", t: 101, remaining: 6 }; })() };
+    } },
+  };
+  const seen = [];
+  await forEachPointWithBaseline(pool, ["a", "b"], 100, 200, (row) => seen.push(`${row.station_id}@${row.t}`));
+  assert.deepEqual(seen, ["a@4", "a@100", "b@101"]);
+  assert.equal(streamed.length, 1);
+  assert.deepEqual(streamed[0].params, [["a", "b"], 100, 200]);
 });

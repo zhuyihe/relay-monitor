@@ -112,15 +112,19 @@ test("经营分析按业务时区划日：热力图按上海时间分桶、只�
 // 按 SQL 里写的比较符真的筛：基线那条把 t < ? 改成 t <= ?、窗口那条改了边界，这里的结果就跟着变
 function historyPool(points) {
   const ops = { "<": (a, b) => a < b, "<=": (a, b) => a <= b, ">=": (a, b) => a >= b, ">": (a, b) => a > b };
-  const sorted = [...points].sort((a, b) => a.station_id.localeCompare(b.station_id) || a.t - b.t);
   return { calls: [], async query(sql, params) {
     this.calls.push({ sql, params });
+    // 每次现排：测试中途往 points 里加的点也读得到
+    const sorted = [...points].sort((a, b) => a.station_id.localeCompare(b.station_id) || a.t - b.t);
     if (!sql.includes("history_points")) return [[]];
     const ids = new Set(params[0]);
     const mine = sorted.filter((row) => ids.has(row.station_id));
     if (sql.includes("MIN(t)")) {
-      return [[...new Set(mine.map((row) => row.station_id))].map((id) => {
-        const ts = mine.filter((row) => row.station_id === id).map((row) => row.t);
+      // 带了 t <= ? 就只看不晚于那一刻的点
+      const upTo = /AND t <= \?/.test(sql) ? params[1] : Infinity;
+      const known = mine.filter((row) => row.t <= upTo);
+      return [[...new Set(known.map((row) => row.station_id))].map((id) => {
+        const ts = known.filter((row) => row.station_id === id).map((row) => row.t);
         return { stationId: id, earliestAt: Math.min(...ts), latestAt: Math.max(...ts) };
       })];
     }
@@ -179,6 +183,131 @@ test("哪几天有原始快照：零点那一刻算新的一天，窗口起点�
   assert.deepEqual(coverage.stationGaps.map(({ stationId, availableDays, missingDays }) => [stationId, availableDays, missingDays]), [["v", 6, 1]],
     "u 七天齐（零点的点算当天）；v 今天只有晚于现在的点，不算");
   assert.equal(body.heatmapAvailability.available, false);
+});
+
+test("P0b 花费时段读出来的结果缓存 10 分钟：轮询不再每次读原始快照，汇率改了马上生效，过期、换窗口、换上游才重读", async (t) => {
+  let now = Date.UTC(2026, 9, 14, 4, 0); // 上海 10-14 12:00
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const startMs = Date.UTC(2026, 9, 7, 16); // 上海 10-08 00:00
+  const stations = [{ id: "u", name: "按量上游", type: "newapi", cnyPerUsd: 7 }];
+  let pointReads = 0;
+  const pool = { query: async (sql, params) => {
+    if (sql.includes("history_points") && sql.includes("MAX(t) AS t")) { pointReads += 1; return [params[1] === startMs ? [{ station_id: "u", t: startMs - 3600000, remaining: 100 }] : []]; }
+    if (sql.includes("history_points") && !sql.includes("MIN(t)")) {
+      const daily = (i, remaining) => ({ station_id: "u", t: startMs + i * 86400000 + 3600000, remaining });
+      return [[...Array.from({ length: 6 }, (_, i) => daily(i, 100)), { station_id: "u", t: Date.UTC(2026, 9, 13, 16, 30), remaining: 98 }, daily(6, 98)]];
+    }
+    if (sql.includes("MIN(t)")) return [[{ stationId: "u", earliestAt: startMs - 3600000, latestAt: now - 60000 }]];
+    return [[]];
+  } };
+  const rt = { pool, store: { list: () => stations }, history: { predict: () => null } };
+  const { GET } = await analyticsRoute();
+  const heat = async (query = "days=7") => (await (await GET(new Request(`https://local.test/api/analytics?${query}`), rt)).json()).heatmap;
+  // 同一时刻几个请求：只有一个真去读，其余等它
+  const together = await Promise.all([heat(), heat(), heat()]);
+  assert.ok(together.every((cells) => JSON.stringify(cells) === JSON.stringify([{ weekday: 2, hour: 0, cny: 14 }])));
+  assert.equal(pointReads, 1, "同一个键正在算时合并等待");
+  now += 9 * 60000; t.mock.timers.setTime(now);
+  stations[0].cnyPerUsd = 8;
+  assert.deepEqual(await heat(), [{ weekday: 2, hour: 0, cny: 16 }], "汇率每次请求时再乘，改了马上生效");
+  assert.equal(pointReads, 1, "10 分钟内不再读原始快照");
+  await heat("days=3");
+  assert.equal(pointReads, 2, "换了窗口起点，重读");
+  stations.push({ id: "v", name: "又一个", type: "newapi", cnyPerUsd: 7 });
+  await heat();
+  assert.equal(pointReads, 3, "上游变了，重读");
+  stations.pop();
+  now += 59999; t.mock.timers.setTime(now);
+  await heat();
+  assert.equal(pointReads, 3, "9:59.999 还用缓存");
+  now += 1; t.mock.timers.setTime(now);
+  await heat();
+  assert.equal(pointReads, 4, "正好 10:00.000，重读");
+});
+
+test("P0b 「今天有没有快照」不用缓存里的：零点刚过存进去的「今天没有」不会挂 10 分钟；自定义开始日期跨零点也重读", async (t) => {
+  const DAY = 86400000, MIN = 60000;
+  const todayStart = Date.UTC(2026, 9, 13, 16); // 上海 10-14 00:00
+  let now = todayStart + 30000;
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const startMs = todayStart - 6 * DAY; // days=7 的窗口起点：上海 10-08 00:00
+  const points = [{ station_id: "u", t: startMs - MIN, remaining: 100 },
+    ...Array.from({ length: 6 }, (_, i) => ({ station_id: "u", t: startMs + i * DAY + MIN, remaining: 100 }))];
+  const pool = historyPool(points);
+  const stations = [{ id: "u", name: "按量上游", type: "newapi", cnyPerUsd: 7 }];
+  const rt = { pool, store: { list: () => stations }, history: { predict: () => null } };
+  const { GET } = await analyticsRoute();
+  const get = async (query) => (await (await GET(new Request(`https://local.test/api/analytics?${query}`), rt)).json()).heatmapAvailability;
+  const reads = () => pool.calls.filter((call) => call.sql.includes("MAX(t) AS t")).length;
+
+  assert.equal((await get("days=7")).available, false, "零点刚过，今天还没有点");
+  // 一分钟后今天有了第一个点：缓存还在（不重读原始快照），今天照样算有
+  points.push({ station_id: "u", t: todayStart + MIN, remaining: 100 });
+  now += 2 * MIN; t.mock.timers.setTime(now);
+  const after = await get("days=7");
+  assert.equal(reads(), 1, "10 分钟内不重读原始快照");
+  assert.equal(after.available, true, "今天有没有快照按现查的最新一点算");
+
+  // 自定义开始日期：零点前存的那份不能带到零点后
+  const custom = "start=2026-10-08";
+  now = todayStart + DAY - 30000; t.mock.timers.setTime(now); // 上海 10-14 23:59:30
+  await get(custom);
+  const before = reads();
+  now += MIN; t.mock.timers.setTime(now); // 上海 10-15 00:00:30
+  await get(custom);
+  assert.equal(reads(), before + 1, "跨零点换了一天，重读");
+});
+
+test("P0b 花费时段的缓存键带业务时区：同样的窗口起点换了时区也重读", async (t) => {
+  const NOW = Date.UTC(2026, 9, 14, 4, 0);
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const startMs = Date.UTC(2026, 9, 7, 16);
+  const pool = historyPool([{ station_id: "u", t: startMs - 60000, remaining: 100 },
+    ...Array.from({ length: 7 }, (_, i) => ({ station_id: "u", t: startMs + i * 86400000 + 60000, remaining: 100 }))]);
+  const rt = { pool, store: { list: () => [{ id: "u", name: "按量上游", type: "newapi", cnyPerUsd: 7 }] }, history: { predict: () => null } };
+  const { GET } = await analyticsRoute();
+  const reads = () => pool.calls.filter((call) => call.sql.includes("MAX(t) AS t")).length;
+  const previous = process.env.BUSINESS_TIME_ZONE;
+  t.after(() => { if (previous == null) delete process.env.BUSINESS_TIME_ZONE; else process.env.BUSINESS_TIME_ZONE = previous; });
+  process.env.BUSINESS_TIME_ZONE = "Asia/Shanghai";
+  await GET(new Request("https://local.test/api/analytics?days=7"), rt);
+  // 新加坡和上海都是 +8，窗口起点、今天都一样，只有时区不同
+  process.env.BUSINESS_TIME_ZONE = "Asia/Singapore";
+  await GET(new Request("https://local.test/api/analytics?days=7"), rt);
+  assert.equal(reads(), 2);
+});
+
+test("P0b 窗口那条流读到一半出错：同时到的几个请求都拿到错误，缓存不留半份，下一次重读", async (t) => {
+  const NOW = Date.UTC(2026, 9, 14, 4, 0);
+  t.mock.timers.enable({ apis: ["Date"], now: NOW });
+  const startMs = Date.UTC(2026, 9, 7, 16);
+  let fail = true, streams = 0;
+  const rows = Array.from({ length: 7 }, (_, i) => ({ station_id: "u", t: startMs + i * 86400000 + 60000, remaining: 100 }));
+  const pool = {
+    async query(sql) {
+      if (sql.includes("MAX(t) AS t")) return [[{ station_id: "u", t: startMs - 60000, remaining: 100 }]];
+      if (sql.includes("MIN(t)")) return [[{ stationId: "u", earliestAt: startMs - 60000, latestAt: NOW - 60000 }]];
+      return [[]];
+    },
+    pool: { query: () => ({ stream: () => (async function* () {
+      streams += 1;
+      yield rows[0];
+      await new Promise((resolve) => setImmediate(resolve));
+      if (fail) throw Object.assign(new Error("query timeout"), { code: "ER_QUERY_TIMEOUT" });
+      yield* rows.slice(1);
+    })() }) },
+  };
+  const rt = { pool, store: { list: () => [{ id: "u", name: "按量上游", type: "newapi", cnyPerUsd: 7 }] }, history: { predict: () => null } };
+  const { GET } = await analyticsRoute();
+  const get = () => GET(new Request("https://local.test/api/analytics?days=7"), rt);
+  const settled = await Promise.allSettled([get(), get(), get()]);
+  assert.deepEqual(settled.map((item) => item.status), ["rejected", "rejected", "rejected"], "合并等待的几个请求都拿到错误");
+  assert.equal(streams, 1, "只读了一次");
+  assert.equal(rt._analyticsHeatCache.size, 0, "缓存不留半份");
+  fail = false;
+  const body = await (await get()).json();
+  assert.equal(streams, 2, "下一次重读");
+  assert.equal(body.heatmapAvailability.available, true);
 });
 
 test("固定成本逐日摊销不逐日舍入：站点合计与整段摊销（我的站点口径）一致，小额付费也不会被舍成 0", async (t) => {

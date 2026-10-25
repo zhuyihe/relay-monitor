@@ -9,12 +9,69 @@ import {
 } from "../../../lib/business-time.js";
 import { amortizeFixedCost, costBasisOf, countsInProfit, purchasesOf, rateSnapshotOf } from "../../../lib/profit.js";
 import { hasRawWindowCoverage, summarizeCoverage } from "./coverage.js";
-import { readPointsWithBaseline, usageDrops } from "../../../db/history.js";
+import { forEachPointWithBaseline, usageDropsAccumulator } from "../../../db/history.js";
 
 const r2 = (v) => Math.round(v * 100) / 100;
 const r4 = (v) => Math.round(v * 10000) / 10000;
 // 时区偏移都是 15 分钟的整数倍，按 15 分钟分桶再换算，半点时区也不会分错日期和小时
 const SLOT_MS = 15 * 60 * 1000;
+
+// 花费时段（热力图）要读窗口里全部原始快照（30 天约 200 万行、1.7 秒），页面每 30 秒轮询一次：
+// 读出来算好的「哪几天有快照」和每个上游 168 格（星期 × 小时）的美元合计按时间缓存 10 分钟，键是上游集合 + 窗口起点 + 时区 + 今天是哪天。
+// 格子按小时，晚 10 分钟没关系；汇率在每次请求时再乘，改了马上生效。重启或过期以后第一次照旧现读。
+// 「今天有没有快照」不用缓存里的：零点刚过时今天可能还没有点，存进去会让「原始历史不完整」挂 10 分钟。今天的由每次现查的最新一点判断。
+// 计划 P2 加按小时的汇总表以后删掉这个缓存。
+const HEAT_CACHE_TTL_MS = 10 * 60 * 1000;
+const HEAT_CACHE_MAX = 32;
+
+function heatSource(rt, stationIds, startMs, nowMs, tz) {
+  const cache = (rt._analyticsHeatCache ||= new Map());
+  // 带上今天是哪天：自定义开始日期的键跨零点不变，零点前存的那份不能带到零点后
+  const key = JSON.stringify([[...stationIds].sort(), startMs, tz, dayKeyInTz(nowMs, tz)]);
+  const hit = cache.get(key);
+  if (hit && nowMs - hit.at < HEAT_CACHE_TTL_MS) return hit.value;
+  for (const [cachedKey, entry] of cache) if (nowMs - entry.at >= HEAT_CACHE_TTL_MS) cache.delete(cachedKey);
+  while (cache.size >= HEAT_CACHE_MAX) cache.delete(cache.keys().next().value);
+  // 存的是 Promise：同一时刻几个请求只读一次；读失败不留在缓存里
+  const value = readHeatSource(rt.pool, stationIds, startMs, nowMs, tz);
+  cache.set(key, { at: nowMs, value });
+  value.catch(() => { if (cache.get(key)?.value === value) cache.delete(key); });
+  return value;
+}
+
+// 窗口里的原始快照只读一次，外加每站窗口开始前的最后一个点（db/history.js 的 forEachPointWithBaseline，只扫窗口）：
+// 边读边算哪几天有快照、每个 15 分钟的余额下降，不把两百多万行留在内存里。
+// 原来每个点做一次相关子查询找前一个点，会把整段历史读一遍。
+async function readHeatSource(pool, stationIds, startMs, nowMs, tz) {
+  const rawDates = new Set();
+  // 每个 15 分钟算完就按业务时区的「星期 × 24 + 小时」加到这个上游的 168 格里（乘汇率之前的美元），不留各个时段。
+  // cells 记下各格第一次出现的先后，请求时按这个顺序出结果，和原来按时段逐个累加时的顺序一样。
+  const hours = new Map(), cells = [], seen = new Set();
+  const slotDrops = usageDropsAccumulator(startMs, Number.MAX_SAFE_INTEGER, (t) => Math.floor(t / SLOT_MS), { onBucket: ({ stationId, bucket: slot, usd }) => {
+    if (!(usd > 0)) return;
+    const { weekday, hour } = weekdayHourInTz(slot * SLOT_MS, tz);
+    const cell = weekday * 24 + hour;
+    if (!seen.has(cell)) { seen.add(cell); cells.push(cell); }
+    if (!hours.has(stationId)) hours.set(stationId, new Float64Array(168));
+    hours.get(stationId)[cell] += usd;
+  } });
+  let lastSlot = null, lastDay = null;
+  await forEachPointWithBaseline(pool, stationIds, startMs, Number.MAX_SAFE_INTEGER, (row) => {
+    slotDrops.add(row);
+    const t = Number(row.t);
+    if (t < startMs || t > nowMs) return;
+    const slot = Math.floor(t / SLOT_MS);
+    // 同一个 15 分钟里的点同一天，不逐点换算日期
+    if (slot !== lastSlot) { lastSlot = slot; lastDay = dayKeyInTz(slot * SLOT_MS, tz); }
+    rawDates.add(`${row.station_id}|${lastDay}`);
+  });
+  slotDrops.finish();
+  const rawDateRows = [...rawDates].map((key) => {
+    const cut = key.lastIndexOf("|");
+    return { stationId: key.slice(0, cut), date: key.slice(cut + 1) };
+  });
+  return { rawDateRows, hours, cells };
+}
 
 // 自定义范围传开始日期，天数由服务端按业务时区的今天算：前端拿到业务时区之前也能发出同一个请求，
 // 不会因浏览器与业务时区差一天而多拉一次。早于 365 天前按 365 天，晚于今天按 1 天（只看今天）。
@@ -96,35 +153,23 @@ export const GET = withAuth(async (request, rt) => {
   };
   if (days <= 30 && heatmapStations.length) {
     const heatmapStationIds = heatmapStations.map((station) => station.id);
-    // 窗口里的原始快照只读一次，外加每站窗口开始前的最后一个点（db/history.js 的 readPointsWithBaseline，
-    // 只扫窗口）：哪几天有快照、热力图的消耗都从这一份算。原来每个点做一次相关子查询找前一个点，会把整段历史读一遍。
-    const points = await readPointsWithBaseline(pool, heatmapStationIds, startMs);
-    const rawDates = new Set();
-    let lastSlot = null, lastDay = null;
-    for (const row of points) {
-      const t = Number(row.t);
-      if (t < startMs || t > nowMs) continue;
-      const slot = Math.floor(t / SLOT_MS);
-      // 同一个 15 分钟里的点同一天，不逐点换算日期
-      if (slot !== lastSlot) { lastSlot = slot; lastDay = dayKeyInTz(slot * SLOT_MS, tz); }
-      rawDates.add(`${row.station_id}|${lastDay}`);
-    }
-    const rawDateRows = [...rawDates].map((key) => {
-      const cut = key.lastIndexOf("|");
-      return { stationId: key.slice(0, cut), date: key.slice(cut + 1) };
-    });
+    const { rawDateRows: cachedDateRows, hours, cells } = await heatSource(rt, heatmapStationIds, startMs, nowMs, tz);
+    // 只看不晚于现在的点：晚于现在的点不算「今天有快照」
     const [rawBoundsRows] = await pool.query(
       `SELECT station_id AS stationId, MIN(t) AS earliestAt, MAX(t) AS latestAt
        FROM history_points
-       WHERE station_id IN (?)
+       WHERE station_id IN (?) AND t <= ?
        GROUP BY station_id`,
-      [heatmapStationIds]
+      [heatmapStationIds, nowMs]
     );
     const rawBounds = new Map(rawBoundsRows.map((row) => [row.stationId, {
       earliestAt: Number(row.earliestAt),
       earliestDate: row.earliestAt != null ? dayKeyInTz(Number(row.earliestAt), tz) : null,
       latestDate: row.latestAt != null ? dayKeyInTz(Number(row.latestAt), tz) : null,
     }]));
+    // 今天以前的从缓存取；今天有没有快照看现查的最新一点（不晚于现在）是不是今天的
+    const rawDateRows = [...cachedDateRows.filter((row) => row.date !== end),
+      ...[...rawBounds].filter(([, bounds]) => bounds.latestDate === end).map(([stationId]) => ({ stationId, date: end }))];
     const rawCoverage = summarizeCoverage(heatmapStations, dayList, rawDateRows, rawBounds);
     // 有一天的快照不等于能计算整段热力图：还需保留窗口起点前的基线。
     const available = hasRawWindowCoverage(rawCoverage, heatmapStations, rawBounds, startMs);
@@ -134,18 +179,12 @@ export const GET = withAuth(async (request, rt) => {
       coverage: rawCoverage,
     };
     if (available) {
-      // 每个 15 分钟里的余额下降（窗口开始以后的点，含窗口里第一个点相对基线的下降），只留有下降的
-      const heatMap = new Map();
-      for (const { stationId, bucket: slot, usd } of usageDrops(points, startMs, Number.MAX_SAFE_INTEGER, (t) => Math.floor(t / SLOT_MS)).values()) {
-        const station = byId.get(stationId);
-        if (!station || !(usd > 0)) continue;
-        const { weekday, hour } = weekdayHourInTz(slot * SLOT_MS, tz);
-        const key = `${weekday}|${hour}`;
-        heatMap.set(key, (heatMap.get(key) || 0) + usd * rateOf(station));
-      }
-      heatmap = [...heatMap.entries()].map(([key, cny]) => {
-        const [weekday, hour] = key.split("|").map(Number);
-        return { weekday, hour, cny: r2(cny) };
+      // 每格：各上游这一格的美元合计乘它现在的汇率，再相加（汇率改了马上生效）
+      const rated = [...hours].map(([stationId, usd]) => [usd, rateOf(byId.get(stationId))]);
+      heatmap = cells.map((cell) => {
+        let cny = 0;
+        for (const [usd, rate] of rated) if (usd[cell] > 0) cny += usd[cell] * rate;
+        return { weekday: Math.floor(cell / 24), hour: cell % 24, cny: r2(cny) };
       });
     }
   }
