@@ -189,6 +189,8 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_rules", "canonical_key", "VARCHAR(255) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "source_binding", "JSON NULL");
   await addIndexIfMissing(pool, "reconciliation_snapshots", "idx_reconciliation_snapshot_segment", "(segment_id)");
+  // 写快照前「先读出同一把 Key 的那一组绑定」（计划 P1c）走这个索引；解除的绑定也留着，表会越来越大
+  await addIndexIfMissing(pool, "reconciliation_rules", "idx_reconciliation_rule_token", "(token_id, archived_at)");
   // Legacy rules get exactly one open segment. The deterministic 32-byte ID
   // fits this table even if a historic rule ID used its full column width.
   // We deliberately do not invent old transitions or ratios that facts cannot prove.

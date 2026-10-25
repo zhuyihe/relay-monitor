@@ -671,7 +671,10 @@ export class ReconciliationRepository {
     const conn = await this.pool.getConnection();
     try {
       // expectedOwnerState：{ tokenId, state }（reconciliationOwnerScope）。只锁同一把 Key 的绑定：先普通读出这一组的 id
-      // （不加锁），再按主键锁、锁内再比一次。rules 表没有 token_id 的索引，按 token_id 加锁会锁住扫过的每一行，又变回锁全表。
+      // （不加锁，走 idx_reconciliation_rule_token），再按主键锁、锁内再比一次。不直接按 token_id 加锁：二级索引上的锁定读会带间隙锁，
+      // 别的 Key 的绑定插在同一间隙里就要等。
+      // 停用的绑定也读：期望的指纹（reconciliationOwnerScope）是按这一组全部没解除的绑定、连同启用与否算的，两边要是同一个集合；
+      // 停用的那条被重新启用，指纹里它的 enabled 变了，锁内就比得出来。只读启用的，就看不出「停用的那条刚被启用」。
       // 新加同一把 Key 的启用绑定有唯一键 active_token_key 挡着，建、改绑定也在进程内排队（serializeWrite）。
       // 这条普通读放在事务外面：事务里第一条一致性读会定下读视图，放在锁前面，下面锁内读快照就看不到等锁期间别人提交的写入了
       const [ids] = expectedOwnerState != null
