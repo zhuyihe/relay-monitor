@@ -6920,6 +6920,7 @@ test("C2a 要人处理的日子到点只在本地重判：还挡着就不取账�
   let now = Date.parse("2026-10-09T03:00:00Z");
   let keyStatus = 2;
   const f = await completedDayFixture(t, { clock: () => now });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0; // 只看这一条：别的绑定的昨天照常结，不混进账单次数
   const prev = globalThis.fetch;
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(String(input));
@@ -6940,6 +6941,7 @@ test("C2a 要人处理的日子到点只在本地重判：还挡着就不取账�
 
   await f.module.refreshDue(now);
   assert.deepEqual([state().manual_reason, state().attempts, state().next_attempt_at_ms], ["KEY_INVALID_OR_DENIED", 0, now + 10 * 60000], "Key 停用了：要人处理");
+  assert.equal(yesterdayReads(), 0, "第一次试也先在本地判断：挡着的不取这天的账单");
 
   // 满 10 分钟：在本地重判，Key 还是停用的——不取这天的账单，也不为它强制重读 Key 目录（目录 5 分钟到期照常读）
   now += 10 * 60000;
