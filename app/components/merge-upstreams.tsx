@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { App, Button, Drawer, Grid, Modal } from "antd";
 import { api } from "../../lib/client";
-import { errorText } from "../../lib/error-copy.js";
+import { describeError, errorText } from "../../lib/error-copy.js";
 import { MERGE_TEXT, groupView, mergeCostLineText, mergeFailureText, mergeNoticeText, recordView, resumeConfirm } from "../../lib/upstream-merge-view.js";
 import { workflowActionMeta } from "../../lib/workflow-actions.js";
 import { Skeleton } from "./data-state";
@@ -76,7 +76,8 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
   const [failure, setFailure] = useState<{ text: string; raw: unknown; refresh?: boolean } | null>(null);
   const [resume, setResume] = useState<ResumeTarget | null>(null);
   const [resumeBusy, setResumeBusy] = useState(false);
-  const [resumeFailure, setResumeFailure] = useState<{ text: string; raw: unknown } | null>(null);
+  // refresh：这个上游在清单读出来以后被改过，写一句让人刷新，按钮换成「刷新」
+  const [resumeFailure, setResumeFailure] = useState<{ text: string; raw: unknown; refresh?: boolean } | null>(null);
   const seq = useRef(0);
 
   const load = useCallback(async () => {
@@ -161,11 +162,21 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
       await load();
       onChanged?.();
     } catch (error: any) {
-      setResumeFailure({ text: errorText(error), raw: noteOf(error).raw });
-      void load();
+      // 版本对不上（这个上游在这期间被改过）：和合并碰上 409 一样，写一句「刷新后再看」，按钮是「刷新」
+      const changed = error?.status === 409 || describeError(error).category === "changed";
+      setResumeFailure({ text: changed ? MERGE_TEXT.changedStation : errorText(error), raw: noteOf(error).raw, refresh: changed });
+      if (!changed) void load();
     } finally {
       setResumeBusy(false);
     }
+  }
+
+  // 恢复监控的确认框里点「刷新」：重读清单、关掉确认框
+  function refreshAfterResume() {
+    setResume(null);
+    setResumeFailure(null);
+    void load();
+    onChanged?.();
   }
 
   const tz = data?.tz;
@@ -184,7 +195,7 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
         <p className="jy-merge-card__line jy-merge-card__line--soft">{view.whyLine}</p>
         {group.canMerge ? null : view.blocked.map((text) => <p key={text} className="jy-merge-card__blocked"><b>{text}</b></p>)}
         <div className="jy-merge-card__rows">
-          {view.rows.map((row) => (
+          {view.noUsageNote ? <p className="jy-caption jy-merge-card__nousage" data-testid="merge-no-usage">{view.noUsageNote}</p> : view.rows.map((row) => (
             <div key={row.days} className="jy-merge-card__row jy-num">
               <span className="jy-merge-card__label">{row.label}</span>
               <span>{row.before} → {row.after}</span>
@@ -283,8 +294,8 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
         mask={{ closable: !resumeBusy }}
         keyboard={!resumeBusy}
         confirmLoading={resumeBusy}
-        onOk={() => void submitResume()}
-        okText={resume ? resumeConfirm(resume.stationName).ok : ""}
+        onOk={() => (resumeFailure?.refresh ? refreshAfterResume() : void submitResume())}
+        okText={resumeFailure?.refresh ? MERGE_TEXT.refresh : resume ? resumeConfirm(resume.stationName).ok : ""}
         cancelText={MERGE_TEXT.confirmCancel}
         cancelButtonProps={{ disabled: resumeBusy }}
         width={520}

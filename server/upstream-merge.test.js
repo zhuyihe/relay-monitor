@@ -106,3 +106,14 @@ test("清单算到一半，另一个请求把这一组合掉了：清单照样�
     if (estimate) assert.deepEqual(result.groups[0].estimate.windows[0].before.upstreams.map((u) => [u.stationId, u.counted, u.cny]), [["a", true, 0], ["b", true, 1]]);
   }
 });
+
+test("估算：一组里没有按量算进利润的上游时给 noCounted（都不算进利润 / 都按固定成本算），有按量算的是 null", async () => {
+  const rows = [{ stationId: "a", date: day(0), usd: 10 }, { stationId: "b", date: day(0), usd: 4 }];
+  const run = async (a, b) => (await estimateGroups(fakeRt([station("a", "2026-03-01T00:00:00Z", a), station("b", "2026-03-02T00:00:00Z", b)], { rows }), [group()], { now: NOW }))[0];
+  const fixed = { fixedPurchases: [{ amount: 100, days: 30, startDate: null }] };
+  assert.equal((await run(fixed, fixed)).noCounted, "fixed_cost");
+  assert.equal((await run({ includeInProfit: false }, { includeInProfit: false })).noCounted, "not_in_profit");
+  assert.equal((await run({ includeInProfit: false, ...fixed }, { includeInProfit: false })).noCounted, "not_in_profit");
+  assert.equal((await run(fixed, {})).noCounted, null, "被合掉的按量算：有按量算的");
+  assert.equal((await run({}, {})).noCounted, null);
+});

@@ -127,7 +127,7 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
       assert.deepEqual([month.days, month.before.cny, month.after.cny], [30, (1 + 2 + 4 + 8) * 7 + (10 + 20 + 40 + 80) * 7.5, (1 + 2 + 4 + 8) * 7]);
       assert.deepEqual(month.before.upstreams.map((u) => [u.stationId, u.cny, u.counted]), [[ids.a, 105, true], [ids.b, 1125, true], [ids.c, 0, true]]);
       assert.deepEqual(month.after.upstreams.map((u) => u.stationId), [ids.a]);
-      assert.deepEqual(groups[0].rateNote, { retainedRate: 7, others: [{ id: ids.b, rate: 7.5 }] });
+      assert.deepEqual(groups[0].rateNote, { retainedRate: 7, others: [{ id: ids.b, rate: 7.5 }, { id: ids.c, rate: null }] }, "c 没设汇率：也提示");
       // 每一天都有记录时不带 approx
       for (let back = 0; back < 30; back += 1) await pool.query("INSERT IGNORE INTO station_daily_usage (station_id, date, used_usd) VALUES (?, ?, 1)", [ids.a, day(back)]);
       assert.deepEqual((await previewUpstreamMerges(rt)).groups[0].estimate.windows.map((w) => w.approx), [false, false]);

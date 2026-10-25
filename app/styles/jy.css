@@ -722,6 +722,7 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-merge-card__rows { display: grid; grid-template-columns: 1fr auto; align-items: center; row-gap: 2px; column-gap: 16px; }
 .jy-merge-card__row { grid-column: 1; display: flex; gap: 24px; }
 .jy-merge-card__label { min-width: 56px; color: var(--jy-ink-2); }
+.jy-merge-card__nousage { grid-column: 1; grid-row: 1 / span 2; margin: 0; }
 .jy-merge-card__times { grid-column: 2; grid-row: 1 / span 2; font-size: 13px; color: var(--jy-ink-2); text-align: right; }
 .jy-merge-card__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .jy-merge-records { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--jy-rule); }
@@ -733,6 +734,7 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-merge-record__why { flex-basis: 100%; }
 @media (max-width: 767px) {
   .jy-merge-card__rows { grid-template-columns: 1fr; }
+  .jy-merge-card__nousage { grid-row: auto; }
   .jy-merge-card__times { grid-column: 1; grid-row: auto; text-align: left; }
   .jy-merge-card__actions .ant-btn { min-height: 44px; }
   .jy-merge-record .ant-btn { min-height: 44px; }

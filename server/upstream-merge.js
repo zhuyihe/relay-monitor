@@ -45,7 +45,11 @@ export async function estimateGroups(rt, groups, { now }) {
   return groups.map((group) => {
     if (group.blockers.some((blocker) => blocker.code === "RATE_UNSET_ON_RETAINED")) return null;
     const members = [group.retained, ...group.merged].map((station) => station.id);
-    return { windows: ESTIMATE_DAYS.map((days) => {
+    // 这一组没有「按量算进利润」的上游：估算前后都是 0，页面不写「¥0.00 → ¥0.00」（像是没花钱），换一句灰字说明原因。
+    // 汇率、算不算进利润在这一组里是一致的（不一致就是合不了），所以有一个不算进利润就是「都不算进利润」，否则就是都记了固定成本
+    const noCounted = members.some((id) => counted(id)) ? null
+      : members.some((id) => rt.store.getWithMerged(id)?.includeInProfit === false) ? "not_in_profit" : "fixed_cost";
+    return { noCounted, windows: ESTIMATE_DAYS.map((days) => {
       const from = shiftDayLabel(end, -(days - 1));
       const sums = new Map(members.map((id) => [id, 0]));
       const covered = new Set();
