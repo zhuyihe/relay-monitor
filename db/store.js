@@ -746,6 +746,27 @@ export class Store {
     }));
   }
 
+  // 退回一次合并（服务在跑时用）：被合掉的去掉 mergedInto、重新出现，留下的别名改回；within(conn) 同一个事务里把绑定、关联指回去、标日志已退回
+  async unmergeUpstreams({ retainedId, mergedIds, costAliasesOf, within }) {
+    const stale = () => Object.assign(new Error("上游在这期间变了，请刷新后再看"), { code: "UPSTREAM_MERGE_STALE" });
+    return this.withStationLocks([retainedId, ...mergedIds], () => this._saveChange(() => {
+      const retained = this.get(retainedId), merged = mergedIds.map((id) => this.get(id));
+      if (!retained || merged.some((s) => !s || s.mergedInto !== retainedId)) throw stale();
+      const without = (s) => { const { mergedInto, mergedAt, ...rest } = s; return rest; };
+      const costAliases = costAliasesOf(retained.costAliases || []);
+      const next = new Map([[retainedId, { ...retained, costAliases }], ...merged.map((s) => [s.id, without(s)])]);
+      return {
+        data: { ...this.data, stations: this.data.stations.map((s) => next.get(s.id) || s) },
+        within,
+        publish: () => {
+          retained.costAliases = costAliases;
+          for (const s of merged) { delete s.mergedInto; delete s.mergedAt; }
+        },
+        value: { retained, merged },
+      };
+    }));
+  }
+
   async archive(id) {
     return this._changeStation(id, (s) => { s.archivedAt ||= new Date().toISOString(); });
   }

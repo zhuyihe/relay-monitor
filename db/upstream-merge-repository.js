@@ -19,10 +19,10 @@ export const newMergeId = () => `mg_${randomUUID().replaceAll("-", "").slice(0, 
 
 // 合并前对账仓库那一侧的样子（给 planUpstreamMerges 用）：rules 带它现在占着的键，links 只要三个主键列
 export async function readMergeBasis(executor) {
-  const [rules] = await executor.query("SELECT id, upstream_station_id, token_id, enabled, active_token_key, archived_at FROM reconciliation_rules");
+  const [rules] = await executor.query("SELECT id, upstream_station_id, token_id, token_name, enabled, active_token_key, archived_at FROM reconciliation_rules");
   const [links] = await executor.query("SELECT own_station_id, channel_id, station_id FROM channel_monitor_links");
   return {
-    rules: rules.map((row) => ({ id: row.id, upstreamStationId: row.upstream_station_id, tokenId: Number(row.token_id), enabled: !!row.enabled,
+    rules: rules.map((row) => ({ id: row.id, upstreamStationId: row.upstream_station_id, tokenId: Number(row.token_id), tokenName: row.token_name, enabled: !!row.enabled,
       activeKey: row.active_token_key || null })),
     links: links.map((row) => ({ ownStationId: row.own_station_id, channelId: Number(row.channel_id), stationId: row.station_id })),
   };
@@ -41,9 +41,11 @@ async function writeLog(conn, rows) {
 export async function applyMergeRows(conn, group, { mergeId, nowMs, oldRetainedAliases }) {
   const mergedIds = group.merged.map((station) => station.id);
   const retainedId = group.retained.id;
+  const added = group.costAliasesAfter.filter((alias) => !oldRetainedAliases.includes(alias));
   const logs = [
-    logRow(mergeId, nowMs, group, null, MERGE_LOG_KIND.STATION_RETAINED, { id: retainedId, costAliasesBefore: oldRetainedAliases }),
-    ...mergedIds.map((id) => logRow(mergeId, nowMs, group, id, MERGE_LOG_KIND.STATION_MERGED, { id })),
+    logRow(mergeId, nowMs, group, null, MERGE_LOG_KIND.STATION_RETAINED,
+      { id: retainedId, name: group.retained.name, costAliasesBefore: oldRetainedAliases, costAliasesAdded: added }),
+    ...group.merged.map((station) => logRow(mergeId, nowMs, group, station.id, MERGE_LOG_KIND.STATION_MERGED, { id: station.id, name: station.name })),
   ];
 
   const [rules] = await conn.query(
@@ -93,20 +95,33 @@ export async function applyMergeRows(conn, group, { mergeId, nowMs, oldRetainedA
 
 // ---- 回滚 ----------------------------------------------------------------------
 
-// 还没改回的合并，按合并时间从新到旧：[{ mergeId, mergedAtMs, retainedId, mergedIds, rows: [{ id, kind, mergedId, detail }] }]
-export async function listMerges(executor, { mergeId = null } = {}) {
+// 合并，按合并时间从新到旧：[{ mergeId, mergedAtMs, undoneAtMs, retainedId, mergedIds, rows: [{ id, kind, mergedId, detail }] }]
+// 默认只列还没改回的；includeUndone 连改回过的一起列（页面上的合并记录要写「已退回」）
+export async function listMerges(executor, { mergeId = null, includeUndone = false } = {}) {
+  const filters = [];
+  if (!includeUndone) filters.push("undone_at_ms IS NULL");
+  if (mergeId) filters.push("merge_id = ?");
   const [rows] = await executor.query(
     `SELECT id, merge_id, merged_at_ms, retained_id, merged_id, kind, detail, undone_at_ms FROM upstream_merge_log
-     WHERE undone_at_ms IS NULL ${mergeId ? "AND merge_id = ?" : ""} ORDER BY merged_at_ms DESC, id`, mergeId ? [mergeId] : []);
+     ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""} ORDER BY merged_at_ms DESC, merge_id, id`, mergeId ? [mergeId] : []);
   const merges = new Map();
   for (const row of rows) {
-    if (!merges.has(row.merge_id)) merges.set(row.merge_id, { mergeId: row.merge_id, mergedAtMs: Number(row.merged_at_ms), retainedId: row.retained_id, mergedIds: [], rows: [] });
+    if (!merges.has(row.merge_id)) {
+      merges.set(row.merge_id, { mergeId: row.merge_id, mergedAtMs: Number(row.merged_at_ms), undoneAtMs: row.undone_at_ms == null ? null : Number(row.undone_at_ms),
+        retainedId: row.retained_id, mergedIds: [], rows: [] });
+    }
     const merge = merges.get(row.merge_id);
     const detail = typeof row.detail === "string" ? JSON.parse(row.detail) : row.detail;
     merge.rows.push({ id: Number(row.id), kind: row.kind, mergedId: row.merged_id, detail });
     if (row.kind === MERGE_LOG_KIND.STATION_MERGED) merge.mergedIds.push(row.merged_id);
   }
   return [...merges.values()];
+}
+
+// 退回时留下那个的别名：只去掉合并加进去的，合并以后用户自己在留下的上游上加的留着（老日志没有记加了哪些，就改回合并前的）
+export function aliasesAfterUndo(current, detail) {
+  if (!Array.isArray(detail.costAliasesAdded) || !Array.isArray(current)) return detail.costAliasesBefore;
+  return current.filter((alias) => !detail.costAliasesAdded.includes(alias));
 }
 
 // 一次合并要改回的事，每条一句话（先列出来给人看）
@@ -123,12 +138,19 @@ export function describeUndo(merge) {
 }
 
 // 一次合并照日志改回。调用的人先开事务（apply 时才改）。上游文档只改合并时碰过的两个字段，别的（包括加密的登录信息）原样不动。
-export async function undoMergeRows(conn, merge, { nowMs }) {
+// stations: false 时不碰上游文档（服务在跑时由 Store 在同一个事务里改文档，db/store.js 的 unmergeUpstreams）；脚本离线跑，直接改文档
+export async function undoMergeRows(conn, merge, { nowMs, stations = true }) {
   for (const row of merge.rows) {
+    if (row.kind === MERGE_LOG_KIND.STATION_MERGED || row.kind === MERGE_LOG_KIND.STATION_RETAINED) {
+      if (!stations) continue;
+    }
     if (row.kind === MERGE_LOG_KIND.STATION_MERGED) {
       await conn.query("UPDATE stations SET doc = JSON_REMOVE(JSON_REMOVE(doc, '$.mergedInto'), '$.mergedAt') WHERE id = ?", [row.mergedId]);
     } else if (row.kind === MERGE_LOG_KIND.STATION_RETAINED) {
-      await conn.query("UPDATE stations SET doc = JSON_SET(doc, '$.costAliases', CAST(? AS JSON)) WHERE id = ?", [JSON.stringify(row.detail.costAliasesBefore), row.detail.id]);
+      const [[found]] = await conn.query("SELECT JSON_EXTRACT(doc, '$.costAliases') AS aliases FROM stations WHERE id = ?", [row.detail.id]);
+      const current = found ? (typeof found.aliases === "string" ? JSON.parse(found.aliases) : found.aliases) : null;
+      await conn.query("UPDATE stations SET doc = JSON_SET(doc, '$.costAliases', CAST(? AS JSON)) WHERE id = ?",
+        [JSON.stringify(aliasesAfterUndo(current, row.detail)), row.detail.id]);
     } else if (row.kind === MERGE_LOG_KIND.RULE) {
       // 之后这条绑定又改过上游（比如用户改了绑定）就不动它：只改回还指着留下的那个的
       await conn.query("UPDATE reconciliation_rules SET upstream_station_id = ?, active_token_key = ?, updated_at = updated_at WHERE id = ? AND upstream_station_id = ?",

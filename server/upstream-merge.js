@@ -5,7 +5,7 @@ import { mergedStationPatches, planUpstreamMerges } from "../lib/upstream-merge.
 import { businessTimeZone } from "../lib/business-time.js";
 import { rateSnapshotOf, toCny } from "../lib/profit.js";
 import { stationUsageCost } from "./own-helpers.js";
-import { applyMergeRows, mergeError, newMergeId, readMergeBasis } from "../db/upstream-merge-repository.js";
+import { aliasesAfterUndo, applyMergeRows, listMerges, MERGE_LOG_KIND, mergeError, newMergeId, readMergeBasis, undoMergeRows } from "../db/upstream-merge-repository.js";
 
 const DAY = 86400000;
 const ESTIMATE_DAYS = [7, 30];
@@ -43,8 +43,10 @@ export async function estimateGroup(rt, group, { now }) {
 // 清单：{ groups, generatedAt }。估算要读上游的用量（每个上游两个窗口各一次），所以按上游合成的组缓存 5 分钟；
 // estimate: false 只出清单不估算
 export async function previewUpstreamMerges(rt, { estimate = true, now = Date.now() } = {}) {
-  const { groups } = await planNow(rt);
-  if (!estimate) return { groups, generatedAt: now };
+  const plan = await planNow(rt);
+  const { groups } = plan;
+  const records = await listMergeRecords(rt);
+  if (!estimate) return { groups, counts: mergeCounts(plan), records, generatedAt: now };
   const cache = (rt._upstreamMergeEstimates ||= new Map());
   const withEstimate = [];
   for (const group of groups) {
@@ -53,7 +55,7 @@ export async function previewUpstreamMerges(rt, { estimate = true, now = Date.no
     if (!hit || now - hit.at > ESTIMATE_TTL_MS) cache.set(key, { at: now, windows: await estimateGroup(rt, group, { now }) });
     withEstimate.push({ ...group, estimate: cache.get(key).windows });
   }
-  return { groups: withEstimate, generatedAt: now };
+  return { groups: withEstimate, counts: mergeCounts(plan), records, generatedAt: now };
 }
 
 // 合并一组：请求里带的是清单上看到的「留下的、被合掉的」，这里按现在的数据重新算一遍，对不上就不合
@@ -76,4 +78,44 @@ export async function applyUpstreamMerge(rt, { retainedId, mergedIds }, { now = 
   });
   rt._upstreamMergeEstimates?.clear();
   return { mergeId, retainedId, mergedIds: requested, ...rows };
+}
+
+// 清单上有几组能合、几组合不了：上游列表顶上那条提示和成本估算那一行只要这两个数
+export function mergeCounts(plan) {
+  return { mergeable: plan.groups.filter((group) => group.canMerge).length, blocked: plan.groups.filter((group) => !group.canMerge).length };
+}
+
+// 合并记录：每次合并一条，带名字（上游后来删了名字也在日志里）、有没有退回、现在还退不退得回、退不回的原因
+export async function listMergeRecords(rt) {
+  const merges = await listMerges(rt.pool, { includeUndone: true });
+  return merges.map((merge) => {
+    const nameOf = (kind, id) => merge.rows.find((row) => row.kind === kind && (kind === MERGE_LOG_KIND.STATION_RETAINED || row.mergedId === id))?.detail.name ?? id;
+    const retained = { id: merge.retainedId, name: nameOf(MERGE_LOG_KIND.STATION_RETAINED) };
+    const merged = merge.mergedIds.map((id) => ({ id, name: nameOf(MERGE_LOG_KIND.STATION_MERGED, id) }));
+    let undoBlocked = null;
+    if (merge.undoneAtMs == null) {
+      const gone = [retained, ...merged].find((station) => !rt.store.get(station.id));
+      if (gone) undoBlocked = { code: "UPSTREAM_DELETED", detail: `「${gone.name}」已经删了，退回不了`, stationId: gone.id };
+      else if (merged.some((station) => rt.store.get(station.id).mergedInto !== merge.retainedId)) {
+        undoBlocked = { code: "UPSTREAM_CHANGED", detail: "这次合并之后上游又变过，退回不了" };
+      }
+    }
+    return { mergeId: merge.mergeId, mergedAtMs: merge.mergedAtMs, undoneAtMs: merge.undoneAtMs, retained, merged, undoable: merge.undoneAtMs == null && !undoBlocked, undoBlocked };
+  });
+}
+
+// 退回一次合并：和 db/k-unmerge.js --apply 同一段代码（undoMergeRows）；服务在跑，所以上游文档由 Store 在同一个事务里改
+export async function undoUpstreamMerge(rt, { mergeId }, { now = Date.now() } = {}) {
+  const [merge] = await listMerges(rt.pool, { mergeId });
+  if (!merge) throw mergeError("UPSTREAM_MERGE_STALE", "这次合并已经退回了，请刷新后再看");
+  const record = (await listMergeRecords(rt)).find((item) => item.mergeId === mergeId);
+  if (record?.undoBlocked) throw mergeError("UPSTREAM_MERGE_BLOCKED", record.undoBlocked.detail);
+  const detail = merge.rows.find((row) => row.kind === MERGE_LOG_KIND.STATION_RETAINED).detail;
+  await rt.store.unmergeUpstreams({
+    retainedId: merge.retainedId, mergedIds: merge.mergedIds,
+    costAliasesOf: (current) => aliasesAfterUndo(current, detail) || [],
+    within: (conn) => undoMergeRows(conn, merge, { nowMs: now, stations: false }),
+  });
+  rt._upstreamMergeEstimates?.clear();
+  return { mergeId, retainedId: merge.retainedId, mergedIds: merge.mergedIds };
 }
