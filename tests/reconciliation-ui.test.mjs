@@ -22,6 +22,9 @@ import { COPY as SETTINGS_COPY } from "../app/(dashboard)/settings/copy.ts";
 import { COPY as NOTIFICATIONS_COPY } from "../app/(dashboard)/notifications/copy.ts";
 import { COPY as LOGIN_COPY } from "../app/login/copy.ts";
 
+// 每一步操作的默认等待：CI 机器慢、几路同时跑时放宽到 10 秒（UI_STEP_TIMEOUT_MS），本地照旧 5 秒
+const UI_STEP_TIMEOUT_MS = Number(process.env.UI_STEP_TIMEOUT_MS) || 5_000;
+
 // 分几路同时跑（CI、本地测试台）：UI_SHARDS 路时按注册顺序轮流分，这一路只登记 UI_SHARD 那一份；不设就全跑
 const UI_SHARD = Number(process.env.UI_SHARD || 0), UI_SHARDS = Number(process.env.UI_SHARDS || 1);
 let shardIndex = 0;
@@ -513,7 +516,7 @@ async function openFixturePage(t, handler, viewport, clock = false, onboardingHa
   settleButtonLookups(page);
   onboardingRequests.set(page, onboardingCalls);
   if (clock) await page.clock.install();
-  page.setDefaultTimeout(5_000);
+  page.setDefaultTimeout(UI_STEP_TIMEOUT_MS);
   await page.route("**/api/**", async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname.startsWith("/api/channel-onboarding")) {
@@ -1153,7 +1156,7 @@ test("discovery refresh preserves the panel state for Enter, Space and click", {
   t.after(() => context.close());
   const page = await context.newPage();
   settleButtonLookups(page);
-  page.setDefaultTimeout(5_000);
+  page.setDefaultTimeout(UI_STEP_TIMEOUT_MS);
   const catalogue = onboardingFixture();
   const requests = [];
   let syncs = 0;

@@ -88,6 +88,7 @@ jobs:
       PLAYWRIGHT_MODULE: /tmp/pw/node_modules/playwright
       PLAYWRIGHT_CHANNEL: chrome
       RECONCILIATION_UI_BASE_URL: http://127.0.0.1:3300
+      UI_STEP_TIMEOUT_MS: "10000"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
