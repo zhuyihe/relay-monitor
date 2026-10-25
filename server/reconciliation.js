@@ -879,6 +879,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           });
           return part ?? statRead(channels, tokens, total, choice?.rows ?? null);
         };
+        // 渠道测试名字这个来源只是兜底：测试日志大多都记在管理员名下，管理员那一条已经扣了，兜底来源一条都不用扣，翻几百页是白翻（审核 CI：三个接口超时）。
+        // 先用 stat 比一下：这个测试名字在窗口里的总额度 T，和各管理员名下的合计 S（每个管理员一次 stat）；T == S 说明全在管理员名下，
+        // 这个来源不翻页、扣 0；T > S（有不在管理员名下的）才去翻。一共 1 + 管理员数 个 stat，代替几百页
+        const emptyPart = (seen) => ({ byChannel: new Map(), byToken: new Map(), byUser: new Map(), seen, maxId: null });
+        const tokenOnlyInAdmins = async (known) => {
+          const total = known ?? await queryOwnLogSourceTotal(own, base);
+          if (total === 0) return emptyPart(0);
+          let inAdmins = 0;
+          for (const name of adminSet) inAdmins += await queryOwnLogSourceTotal(own, { ...base, username: name });
+          return inAdmins === total ? emptyPart(total) : null;
+        };
         let part;
         // 今天（轮询）：渠道测试名字这两个来源只是兜底（测试大多记在管理员名下，管理员那一条已经扣了），10 分钟内读过的不再读，
         // 每轮平时只读管理员那几个来源；结账（settle）一定按总额度对账，那时的数是准的
@@ -887,10 +898,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const doneBefore = before && sameEnd && closed && before.readAt >= window.endMs + RECONCILIATION_SETTLE_DELAY_MS
           && (!(before.coverage instanceof Set) || wantedChannels.every((channel) => before.coverage.has(channel)));
         if (!settle) part = doneBefore || (source.kind === "token" && before && Date.now() - before.readAt < OWN_EXCLUSION_FALLBACK_REUSE_MS && (!closed || sameEnd)) ? before
-          : { ...await readSmart(null), readAt: Date.now() };
+          : { ...((source.kind === "token" && await tokenOnlyInAdmins(null)) || await readSmart(null)), readAt: Date.now() };
         else {
           const total = await queryOwnLogSourceTotal(own, base);
-          if (total === 0) part = { byChannel: new Map(), byToken: new Map(), byUser: new Map(), seen: 0, maxId: null };
+          if (total === 0) part = emptyPart(0);
+          else if (source.kind === "token" && (part = await tokenOnlyInAdmins(total))) { /* 全在管理员名下：不翻页 */ }
           else {
             part = await readSmart(total);
             // 累计和总额度对不上：只重翻这一个来源；本来就是整段翻的（没有上一份累计）再翻一遍也一样，不重翻

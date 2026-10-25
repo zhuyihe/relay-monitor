@@ -1355,7 +1355,7 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
   assert.deepEqual(statUsers, ["7", "7", "7", "7"], "分段 stat 复用元数据解析出的 PAT 身份");
   // 管理员自用（R1）：每段窗口读 3 个来源（管理员 root、两个渠道测试名字「模型测试」「Model test」）各一次列表，4 段共 12 次；用户列表（管理员名单）一轮共用一次。
   // 方案里「一段窗口一次，分段时每段各一次」
-  assert.deepEqual(ownCounts, { "/api/user/self": 1, "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 4, "/api/log/": 12, "/api/user/": 1 }, "本站身份和 /api/status 每轮只读一次，由各分段共用");
+  assert.deepEqual(ownCounts, { "/api/user/self": 1, "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 12, "/api/log/": 4, "/api/user/": 1 }, "本站身份和 /api/status 每轮只读一次，由各分段共用");
 
   for (const counts of [upstreamCounts, ownCounts]) for (const path of Object.keys(counts)) delete counts[path];
   ownStatusBroken = true;
@@ -7146,7 +7146,7 @@ test("R1 今天：按各来源上次的编号接着翻，没有新日志时每�
   now += 11 * 60000;
   const afterSecond = sourceReads(f);
   await today();
-  assert.equal(sourceReads(f) - afterSecond, 3, "过了 10 分钟，兜底来源也接着读一页：root、两个测试名字各一页");
+  assert.equal(sourceReads(f) - afterSecond, 1, "过了 10 分钟，兜底来源只用 stat 比一下（全在管理员名下就不翻页），列表只读管理员 root 那一页");
 });
 
 test("R1 今天翻到一半失败（限流）：下一轮从下一页接着翻，翻完再按编号补上中间新写进来的；不会每轮从第 1 页重来（审核 R1 中-2）", async (t) => {
@@ -7323,6 +7323,26 @@ test("R1 同一轮几条绑定「今天」的终点差几秒：后定终点的�
   now -= 5000; // 终点早 5 秒的另一条绑定后到：终点 E1 − 5 秒，还是晚于 E0
   await today("rr_two");
   assert.ok(sourceReads(f) - before <= 1, `接着用 E0 那份，只读新来的一页：${sourceReads(f) - before}`);
+});
+
+test("R1 渠道测试名字兜底来源：测试日志全在管理员名下，不翻一页，每个窗口只用 1 + 管理员数 个 stat；有不在管理员名下的才翻页，扣的数对（审核 CI：三个接口超时）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  const tokenPages = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/" && /token_name=/.test(request.query)).length;
+  const tokenStats = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && /token_name=/.test(request.query)).length;
+  // 渠道测试全记在管理员 root 名下（很多页）
+  for (let id = 1; id <= 250; id += 1) f.state.testLogs.push(usage(id, id <= 2 ? 1 : 0, { token_name: "模型测试", token_id: 0 }));
+  const first = (await manualYesterday(f)).results[0];
+  assert.equal(first.downstream.adminUsageQuotaUnits, 2, "管理员 root 名下的测试扣了 2");
+  assert.equal(tokenPages(), 0, "兜底来源一页都不翻");
+  assert.ok(tokenStats() <= 4, `两个测试名字，各 1 + 1 个管理员 = 4 个 stat：${tokenStats()}`);
+  // 10-07（没固定，每次现读）：有一条测试日志记在普通用户 alice 名下（不在管理员名下）：这个来源才翻页，兜底扣它
+  const dayBefore = ydayStart - 86400;
+  f.state.testLogs.push(usage(1001, 1, { created_at: dayBefore + 100, token_name: "模型测试", token_id: 0 }), usage(1002, 5, { created_at: dayBefore + 101, username: "alice", token_name: "模型测试", token_id: 0 }));
+  const before = tokenPages();
+  const second = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs - 86400000, endMs: COMPLETED_YESTERDAY.startMs }, { mode: "evaluate", origin: "page", force: true })).results[0];
+  assert.ok(tokenPages() > before, "有不在管理员名下的：翻页");
+  assert.equal(second.downstream.adminUsageQuotaUnits, 1 + 5, "root 名下的 1，加兜底扣掉不在管理员名下的 5");
 });
 
 test("R1 读不到用户列表或管理员日志：这一天算不出收入、不固定，下次重试；不拿没减的数固定进账本", async (t) => {
