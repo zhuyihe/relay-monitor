@@ -5,7 +5,7 @@
 // 下面三个从现在的 lib 引：B1 没改它们（isLiveReconciliationPreset、costBasisOf、rateSnapshotOf）。
 import { isLiveReconciliationPreset } from "../lib/reconciliation-contract.js";
 import { costBasisOf, rateSnapshotOf } from "../lib/profit.js";
-import { isCompletedBillingWindow as b2IsCompletedBillingWindow, reconciliationAccountingStart as b2ReconciliationAccountingStart } from "../lib/reconciliation-scope-policy.js";
+import { isCompletedBillingWindow as b2IsCompletedBillingWindow } from "../lib/reconciliation-scope-policy.js";
 import { billDayOf as b2BillDayOf, dayKeyInTz as b2DayKeyInTz, dayStartInTz as b2DayStartInTz } from "../lib/business-time.js";
 import { sameReconciliationWindow as b2SameReconciliationWindow } from "../lib/reconciliation-contract.js";
 
@@ -352,19 +352,12 @@ export function toCny(usd, rate) {
 // ---- 结账判定：server/reconciliation.js:91-93、:457-470、:1000-1004、:1054、:1572-1574、:2029；仓库 :111-117；迁移 lib/reconciliation-ledger.js:82 ----
 
 const SETTLE_DELAY_MS = 15 * 60000;
-export const SETTLE_RETRY_MS = 10 * 60000;
 
 export function serverIsSettleableWindow(window, now) {
   return b2IsCompletedBillingWindow(window, now - SETTLE_DELAY_MS);
 }
 
-// 原来闭包里读 settlements 那张表，这里把读出的那条（entry）当参数传进来
-export function settlementWindowDue(rule, window, now, entry) {
-  if (now < window.endMs + SETTLE_DELAY_MS) return null;
-  const start = b2ReconciliationAccountingStart(rule) ?? Date.parse(rule.createdAt);
-  if (Number.isFinite(start) && start >= window.endMs) return null;
-  return entry && (entry.settled || now < entry.retryAt) ? null : window;
-}
+// 「轮询要不要结」（settlementWindowDue）和重试时刻（settleRetryAt）C2a 有意改了（状态表、退避表），不再对拍，那两段删了
 
 export function isSettledRecord(record, window) {
   return !!record && new Date(record.generatedAt).getTime() >= window.endMs + SETTLE_DELAY_MS;
@@ -379,9 +372,6 @@ export function persistSettlement(result, now) {
   const ledgerDay = settled && !!b2BillDayOf(result.window);
   return { settled, ledgerDay, snapshots: ["observation", ...(settled && !ledgerDay ? ["confirmed"] : [])] };
 }
-
-// refreshDue 记下的重试时刻（:2029）
-export const settleRetryAt = (settled, now) => settled ? null : now + SETTLE_RETRY_MS;
 
 export function repositoryIsSettledConfirmedSource(source, window = source?.window, now = Date.now()) {
   const generatedAt = Date.parse(source?.resultGeneratedAt);

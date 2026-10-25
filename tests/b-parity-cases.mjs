@@ -12,7 +12,7 @@ import { completedBillingDayWindow, isCompletedBillingWindow, nextBillingEffecti
 import { sameReconciliationWindow } from "../lib/reconciliation-contract.js";
 import { isConfiguredRate, rateSnapshotOf, ratesFor, toCny } from "../lib/profit.js";
 import { resolveReconciliationWindow } from "../server/reconciliation.js";
-import { isSettleableWindow, isSettledAt, settleRetryDelayMs, settlementOutcome, settlementPrecheck } from "../lib/reconciliation-settlement.js";
+import { isSettleableWindow, isSettledAt, settlementOutcome, settlementPrecheck } from "../lib/reconciliation-settlement.js";
 import { LEDGER_DECIMAL_SCALE, ledgerDecimal, ledgerEntryFromRow, ledgerWriteDecision, sameLedgerContent } from "../lib/reconciliation-ledger.js";
 import { isSettledConfirmedSource } from "../server/reconciliation-repository.js";
 import { reportClock } from "../server/report.js";
@@ -183,16 +183,13 @@ const SETTLE_DELAY_MS = 15 * 60000;
 // 结账判定：一段窗口在某个时刻。只比原来真会传进来的窗口：轮询、读已固定的账、迁移只拿整天的窗口；
 // 原来「旧记录算不算结账」（isSettledRecord）只在读侧门槛放行以后才问。
 // 允许的不同只有 B-S1：仓库挑旧确认记录时，生成在结束到结束满等待期之间的（或没有生成时刻、现在落在这段里），原来认、现在不认
-export function settlementDiffs({ window, now, rules = [], attempts = [null], generatedAts = [null] }) {
+// C2a 起「轮询要不要结」看状态表（settlementPrecheck 的 state），重试间隔按退避表：这两样是有意改的新行为，单测在
+// lib/reconciliation-settlement.test.js、server/reconciliation.test.js 的 C2a 用例里，这里不再和 B2 以前的写法对拍。
+export function settlementDiffs({ window, now, generatedAts = [null] }) {
   const diffs = [], push = (family, now_, before, extra = {}) => { if (!same(now_, before)) diffs.push({ family, window, now, ...extra, now_: now_, before }); };
   const wholeDay = !!billDayOf(window), gate = legacy.readSettledGate(window, now, false);
   push("isSettleableWindow", isSettleableWindow(window, now), legacy.serverIsSettleableWindow(window, now));
   for (const resettle of [false, true]) push("readSettled", settlementPrecheck({ window, now, resettle }).readSettled, legacy.readSettledGate(window, now, resettle));
-  if (wholeDay) {
-    for (const rule of rules) {
-      for (const attempt of attempts) push("due", settlementPrecheck({ rule, window, now, attempt }).due, legacy.settlementWindowDue(rule, window, now, attempt) !== null, { rule, attempt });
-    }
-  }
   if (gate) push("settledRecord", false, legacy.isSettledRecord(null, window));
   for (const generatedAt of generatedAts) {
     if (wholeDay) push("migration", isSettledAt(window, generatedAt), legacy.migrationSettled(window.endMs, generatedAt), { generatedAt });
@@ -212,7 +209,6 @@ export function settlementDiffs({ window, now, rules = [], attempts = [null], ge
       push("outcome", [settled, ledger, ["observation", ...(confirmedSnapshot ? ["confirmed"] : [])]], [before.settled, before.ledgerDay, before.snapshots]);
     }
   }
-  push("retryAt", now + settleRetryDelayMs(1), legacy.settleRetryAt(false, now));
   // 页面「还在读取」：整天的判断、开始时刻是不是 0 点。页面上的窗口来自服务端结果，总写着时区；
   // 没写时区时原来按上海算、billDayOf 不算整天，碰不到
   if (window.timezone) {
