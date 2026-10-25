@@ -5020,6 +5020,45 @@ test("P1b 结账那一轮先把要结的上游全部重读：quota_per_unit 在�
   assert.equal(Number(entry.cost_usd), f.state.upstreamQuota / 200, "账本用新的 quota_per_unit");
 });
 
+test("P1b 结账那一轮先重读的是要结账的那条绑定的上游：它不排第一、在另一个时区，结账前 quota_per_unit 改了，账本照样用新值", async (t) => {
+  // rr_two 改成洛杉矶时区：它的 10-09 在 10-10 07:00Z 结束，07:15Z 以后结账；排在前面的 rr_live（上海）那时早就结完了
+  let now = Date.parse("2026-10-10T06:50:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  f.rows.find((row) => row.id === "rr_two").timezone = "America/Los_Angeles";
+  let quotaPerUnit = 100;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/status") {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota_per_unit: quotaPerUnit, version: "v" } }) };
+    }
+    return prev(input, init);
+  });
+  const statusReads = () => f.state.requests.filter((request) => request.host === "upstream.test" && request.path === "/api/status").length;
+  const settled = (ruleId, day) => f.state.ledger.filter((row) => row.rule_id === ruleId && row.bill_date === day);
+
+  // 06:50 第一轮读了 /api/status（30 分钟内沿用）；之后每 10 分钟一轮
+  await f.module.refreshDue(now);
+  assert.equal(settled("rr_live", "2026-10-09").length, 1, "排在第一的 rr_live 这时已经结完");
+  for (const at of ["07:00", "07:10"]) {
+    now = Date.parse(`2026-10-10T${at}:00Z`);
+    if (at === "07:00") quotaPerUnit = 200; // 两次读 /api/status 之间上游改了 quota_per_unit
+    const before = statusReads();
+    await f.module.refreshDue(now);
+    assert.equal(statusReads() - before, 0, `${at} 平常的轮询沿用 06:50 读的 /api/status`);
+  }
+  assert.equal(settled("rr_two", "2026-10-09").length, 0, "rr_two 的 10-09 还没到结账的时刻");
+  // 07:16：只有 rr_two 要结账（离上次读 /api/status 26 分钟，还没到 30 分钟），它的上游要先重读
+  now = Date.parse("2026-10-10T07:16:00Z");
+  const before = statusReads();
+  await f.module.refreshDue(now);
+  assert.equal(statusReads() - before, 1, "结账那一轮现读 /api/status");
+  const [entry] = settled("rr_two", "2026-10-09");
+  assert.ok(entry, "这一轮结了 rr_two 的 10-09");
+  assert.equal(Number(entry.cost_usd), f.state.upstreamQuota / 200, "账本用新的 quota_per_unit");
+});
+
 test("B1 结果缓存按请求比：「今天」过了半分钟再单独重读一条，别的绑定照样用缓存里的账单（截止点不同也是同一段）", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now });
