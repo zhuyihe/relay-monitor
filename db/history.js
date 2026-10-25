@@ -31,26 +31,45 @@ function cleanupState(value) {
   };
 }
 
-// 窗口 [startMs, endMs) 里的原始快照，外加每个上游窗口开始前的最后一个点（基线），按 station_id, t 升序。
-// 只扫窗口和每站一行基线（主键 (station_id, t) 范围扫 + 按站取 MAX(t)），不随历史总长变慢。
+// 窗口 [startMs, endMs) 里的原始快照，外加每个上游窗口开始前的最后一个点（基线）：同一站按 t 升序，基线在最前。
+// 两条查询都走主键 (station_id, t)：窗口按主键顺序范围扫（不排序），基线按站取 MAX(t)（每站一行）；
+// 不用 UNION 合成一条，免得几百万行再排一次序。在这里按站合并，基线排在这一站窗口里的点前面。
 // 日汇总和经营分析的热力图都从这里读，消耗按 usageDrops 算。
 export async function readPointsWithBaseline(pool, stationIds, startMs, endMs = Number.MAX_SAFE_INTEGER) {
-  const [rows] = await pool.query(
-    `SELECT station_id, t, remaining
-     FROM history_points
-     WHERE station_id IN (?) AND t >= ? AND t < ?
-     UNION ALL
-     SELECT h.station_id, h.t, h.remaining
-     FROM history_points h
-     INNER JOIN (
-       SELECT station_id, MAX(t) AS t
+  const [[baseline], [window]] = await Promise.all([
+    pool.query(
+      `SELECT h.station_id, h.t, h.remaining
+       FROM history_points h
+       INNER JOIN (
+         SELECT station_id, MAX(t) AS t
+         FROM history_points
+         WHERE station_id IN (?) AND t < ?
+         GROUP BY station_id
+       ) previous ON previous.station_id = h.station_id AND previous.t = h.t`,
+      [stationIds, startMs]
+    ),
+    pool.query(
+      `SELECT station_id, t, remaining
        FROM history_points
-       WHERE station_id IN (?) AND t < ?
-       GROUP BY station_id
-     ) previous ON previous.station_id = h.station_id AND previous.t = h.t
-     ORDER BY station_id, t`,
-    [stationIds, startMs, endMs, stationIds, startMs]
-  );
+       WHERE station_id IN (?) AND t >= ? AND t < ?
+       ORDER BY station_id, t`,
+      [stationIds, startMs, endMs]
+    ),
+  ]);
+  if (!baseline.length) return window;
+  const before = new Map(baseline.map((row) => [String(row.station_id), row]));
+  const rows = [];
+  let station = null;
+  for (const row of window) {
+    const id = String(row.station_id);
+    if (id !== station) {
+      station = id;
+      if (before.has(id)) { rows.push(before.get(id)); before.delete(id); }
+    }
+    rows.push(row);
+  }
+  // 窗口里没有点的上游只有基线，放在最后：usageDrops 只要求同一站按 t 升序，站和站之间的先后不影响结果
+  for (const row of before.values()) rows.push(row);
   return rows;
 }
 

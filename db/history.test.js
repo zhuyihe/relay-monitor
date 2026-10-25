@@ -209,14 +209,22 @@ test("余额消耗按组相加：窗口里第一个点和窗口前的基线比�
   assert.deepEqual(dailyUsageRows(rows, start, start + 2 * SLOT, "UTC"), [{ stationId: "a", date: "1970-01-01", usd: 2.5 }, { stationId: "b", date: "1970-01-01", usd: 0.25 }]);
 });
 
-test("窗口内的原始快照只扫窗口，外加每个上游窗口前的最后一个点（一条 SQL，按 station_id, t 排好）", async () => {
+test("窗口内的原始快照：窗口按主键顺序读，基线每站一行，合并后基线排在这一站窗口里的点前面；不用 UNION 再排一次序", async () => {
   const calls = [];
-  const rows = await readPointsWithBaseline({ query: async (sql, params) => { calls.push({ sql, params }); return [[{ station_id: "a", t: 1, remaining: 2 }]]; } }, ["a", "b"], 100);
-  assert.deepEqual(rows, [{ station_id: "a", t: 1, remaining: 2 }]);
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].params, [["a", "b"], 100, Number.MAX_SAFE_INTEGER, ["a", "b"], 100]);
-  assert.match(calls[0].sql, /WHERE station_id IN \(\?\) AND t >= \? AND t < \?/);
-  assert.match(calls[0].sql, /MAX\(t\)[\s\S]*t < \?[\s\S]*GROUP BY station_id/);
-  assert.match(calls[0].sql, /ORDER BY station_id, t\s*$/);
-  assert.doesNotMatch(calls[0].sql, /ORDER BY previous\.t DESC LIMIT 1/, "不再每个点一次相关子查询");
+  const pool = { query: async (sql, params) => {
+    calls.push({ sql, params });
+    if (sql.includes("MAX(t)")) return [[{ station_id: "b", t: 5, remaining: 9 }, { station_id: "a", t: 4, remaining: 8 }, { station_id: "z", t: 3, remaining: 7 }]];
+    return [[{ station_id: "a", t: 100, remaining: 7 }, { station_id: "a", t: 101, remaining: 6 }, { station_id: "b", t: 102, remaining: 5 }, { station_id: "c", t: 103, remaining: 4 }]];
+  } };
+  const rows = await readPointsWithBaseline(pool, ["a", "b", "c", "z"], 100);
+  assert.deepEqual(rows.map((row) => `${row.station_id}@${row.t}`), ["a@4", "a@100", "a@101", "b@5", "b@102", "c@103", "z@3"]);
+  assert.equal(calls.length, 2);
+  const [base, window] = [calls.find((c) => c.sql.includes("MAX(t)")), calls.find((c) => !c.sql.includes("MAX(t)"))];
+  assert.deepEqual(base.params, [["a", "b", "c", "z"], 100]);
+  assert.deepEqual(window.params, [["a", "b", "c", "z"], 100, Number.MAX_SAFE_INTEGER]);
+  assert.match(window.sql, /WHERE station_id IN \(\?\) AND t >= \? AND t < \?\s*ORDER BY station_id, t/);
+  for (const { sql } of calls) {
+    assert.doesNotMatch(sql, /UNION/);
+    assert.doesNotMatch(sql, /ORDER BY previous\.t DESC LIMIT 1/, "不再每个点一次相关子查询");
+  }
 });
