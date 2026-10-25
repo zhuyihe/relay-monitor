@@ -20,6 +20,9 @@ services:
       - BUSINESS_TIME_ZONE=Asia/Shanghai
       # 仅在可信反向代理覆盖转发头且应用不能被公网直连时启用。
       - TRUST_PROXY=${TRUST_PROXY:-false}
+      # 5 分钟内全站登录失败满这个数就全部顶住（防分布式乱试），默认 50；填 0 关掉这道全站上限，只剩单来源的锁。
+      # 被打满时怎么恢复见 deploy/README.md「登录失败限流按哪个来源算」
+      - LOGIN_SITE_FAILURE_LIMIT=${LOGIN_SITE_FAILURE_LIMIT:-50}
       # ---- MySQL（本 compose 的 db 服务，必填）----
       - DB_HOST=db
       - DB_PORT=3306

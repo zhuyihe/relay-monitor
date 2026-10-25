@@ -24,6 +24,14 @@ import { COPY as LOGIN_COPY } from "../app/login/copy.ts";
 
 // 每一步操作的默认等待：CI 机器慢、几路同时跑时放宽到 10 秒（UI_STEP_TIMEOUT_MS），本地照旧 5 秒
 const UI_STEP_TIMEOUT_MS = Number(process.env.UI_STEP_TIMEOUT_MS) || 5_000;
+// 等用例自己造的 Promise（例如「页面已经发出这个请求」，在路由处理里 resolve）：Playwright 的等待管不到它，
+// 页面那一下没发生就会一直等下去，整条用例卡到超时还看不出卡在哪。限时是每一步等待的 3 倍（本地 15 秒、CI 30 秒），到点报出在等什么
+const WITHIN_MS = UI_STEP_TIMEOUT_MS * 3;
+function within(promise, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`等了 ${WITHIN_MS / 1000} 秒还没等到：${label}`)), WITHIN_MS); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 // 分几路同时跑（CI、本地测试台）：UI_SHARDS 路时按注册顺序轮流分，这一路只登记 UI_SHARD 那一份；不设就全跑
 const UI_SHARD = Number(process.env.UI_SHARD || 0), UI_SHARDS = Number(process.env.UI_SHARDS || 1);
@@ -394,14 +402,14 @@ test("daily row retry uses one selected query then reloads full GET before showi
   let reload, ready; const started = new Promise((resolve) => { ready = resolve; }); const initial = dailyResponse();
   const { page, reads, queries } = await openDailyPage(t, { data: initial, read(route, count) { if (count === 1) return fulfill(route, initial); return new Promise((resolve) => { reload = { route, resolve }; ready(); }); }, query(route, body) { assert.deepEqual(body.ruleIds, ["rule-1"]); const rows = dailyRows(); rows[0] = rule("rule-1", "Rule A", 4); return fulfill(route, dailyResponse([rows[0]], { rules: initial.results.map((row) => row.rule) })); } });
   const summary = page.getByRole("region", { name: "汇总", exact: true });
-  await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await started; await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$4.00", { exact: true }).waitFor(); await summary.locator(".ant-alert", { hasText: "读取中" }).waitFor(); assert.deepEqual(reads[1], { preset: "yesterday" }); assert.equal(queries.length, 1); assert.deepEqual([queries[0].startMs, queries[0].endMs], [window.startMs, window.endMs]);
+  await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await within(started, "点「重新读取 Rule A」以后页面重新读整份每日利润"); await page.locator("tr.ant-table-row", { hasText: "Rule A" }).getByText("$4.00", { exact: true }).waitFor(); await summary.locator(".ant-alert", { hasText: "读取中" }).waitFor(); assert.deepEqual(reads[1], { preset: "yesterday" }); assert.equal(queries.length, 1); assert.deepEqual([queries[0].startMs, queries[0].endMs], [window.startMs, window.endMs]);
   const full = dailyRows(); full[0] = rule("rule-1", "Rule A", 4); reload.resolve(fulfill(reload.route, dailyResponse(full))); await summary.getByText("$9.00", { exact: true }).waitFor(); assert.equal(await summary.locator(".ant-alert").count(), 0); await page.getByRole("region", { name: "渠道", exact: true }).getByText(coverageText(10, 3), { exact: true }).waitFor();
 });
 
 test("daily summary re-read ignores an earlier aggregate when another row finishes during it", async (t) => {
   const gets = [], retries = new Map(), initial = dailyResponse(); let getReady; const getStarted = new Promise((resolve) => { getReady = resolve; });
   const { page, reads } = await openDailyPage(t, { data: initial, read(route, count) { if (count === 1) return fulfill(route, initial); return new Promise((resolve) => { gets.push({ route, resolve }); getReady(); }); }, query(route, body) { return new Promise((resolve) => retries.set(body.ruleIds[0], { route, resolve })); } });
-  await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await page.getByRole("button", { name: "重新读取 Rule B", exact: true }).click(); const rows = dailyRows(); rows[0] = rule("rule-1", "Rule A", 4); retries.get("rule-1").resolve(fulfill(retries.get("rule-1").route, dailyResponse([rows[0]]))); await getStarted;
+  await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await page.getByRole("button", { name: "重新读取 Rule B", exact: true }).click(); const rows = dailyRows(); rows[0] = rule("rule-1", "Rule A", 4); retries.get("rule-1").resolve(fulfill(retries.get("rule-1").route, dailyResponse([rows[0]]))); await within(getStarted, "重新读取以后页面再读一次整份每日利润");
   rows[1] = rule("rule-2", "Rule B", 5); retries.get("rule-2").resolve(fulfill(retries.get("rule-2").route, dailyResponse([rows[1]])));
   // 等两个按钮都不在加载（按钮上的 ant-btn-loading），不等加载图标消失：打包版里图标的退场动画常停在半截，
   // 图标已经看不见（宽 0、透明），元素却一直留着
@@ -2288,7 +2296,7 @@ test("confirmed history pagination failure retains read records and retry reuses
 
 test("confirmed history rule changes ignore a late response from the previous rule", async (t) => {
   let deferred, ready; const started = new Promise((resolve) => { ready = resolve; }); const original = confirmedHistoryRecord(), other = confirmedHistoryRecord("other-rule"); other.upstreamSource.tokenName = "saved-other-rule";
-  const { page } = await openConfirmedHistoryPage(t, { history(route, read) { if (read.ruleId === "rule-1") return new Promise((resolve) => { deferred = { route, resolve }; ready(); }); return fulfill(route, { ruleId: read.ruleId, readOnly: true, records: [other], nextCursor: null }); } }); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(page, drawer); await started; await chooseConfirmedHistoryRule(page, drawer, historyOption("new-name", true)); await drawer.locator("tr.ant-table-row", { hasText: "saved-other-rule" }).waitFor(); deferred.resolve(fulfill(deferred.route, { ruleId: "rule-1", readOnly: true, records: [original], nextCursor: null })); await page.waitForResponse((response) => response.url().includes("/rule-1/confirmed")); assert.equal(await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).count(), 0);
+  const { page } = await openConfirmedHistoryPage(t, { history(route, read) { if (read.ruleId === "rule-1") return new Promise((resolve) => { deferred = { route, resolve }; ready(); }); return fulfill(route, { ruleId: read.ruleId, readOnly: true, records: [other], nextCursor: null }); } }); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(page, drawer); await within(started, "打开以前的每日记录后页面去读 rule-1 的记录"); await chooseConfirmedHistoryRule(page, drawer, historyOption("new-name", true)); await drawer.locator("tr.ant-table-row", { hasText: "saved-other-rule" }).waitFor(); deferred.resolve(fulfill(deferred.route, { ruleId: "rule-1", readOnly: true, records: [original], nextCursor: null })); await page.waitForResponse((response) => response.url().includes("/rule-1/confirmed")); assert.equal(await drawer.locator("tr.ant-table-row", { hasText: "old-name" }).count(), 0);
 });
 
 test("confirmed history selector and record expansion support keyboard at 320/390/768/1440 without root overflow", async (t) => {
@@ -2324,8 +2332,8 @@ test("two rule retries retain both independently returned amounts", async (t) =>
   const retryBStarted = new Promise((resolve) => requestStarted.set("rule-2", resolve));
   await rowA.getByRole("button", { name: `${RETRY} Rule A`, exact: true }).click();
   await rowB.getByRole("button", { name: `${RETRY} Rule B`, exact: true }).click();
-  await retryAStarted;
-  await retryBStarted;
+  await within(retryAStarted, "页面发出 Rule A 的重新读取");
+  await within(retryBStarted, "页面发出 Rule B 的重新读取");
   deferred.get("rule-1").resolve(fulfill(deferred.get("rule-1").route, cachedResponse(initial, [rule("rule-1", "Rule A", 101)])));
   await page.locator("tr", { hasText: "$101.00" }).waitFor();
   deferred.get("rule-2").resolve(fulfill(deferred.get("rule-2").route, cachedResponse(initial, [rule("rule-2", "Rule B", 41)])));
@@ -2352,7 +2360,7 @@ test("a same-preset refresh keeps old totals beside the old rows until its repla
   await summary.getByText("$60.00", { exact: true }).waitFor();
   await summary.getByText("$57.00", { exact: true }).waitFor();
   await page.getByRole("button", { name: "刷新当前页面数据" }).click();
-  await queryStarted;
+  await within(queryStarted, "同一时段刷新时页面发出查询");
   await page.locator("tr", { hasText: "$10.00" }).waitFor();
   await summary.getByText("$57.00", { exact: true }).waitFor();
   assert.equal(await summary.locator(".ant-alert").count(), 0); assert.equal(await summary.getByText("$63.00", { exact: true }).count(), 0);
@@ -2381,7 +2389,7 @@ test("a later retry may finish before an earlier retry without losing either res
   const readyB = new Promise((resolve) => started.set("rule-2", resolve));
   await page.locator("tr", { hasText: "Rule A" }).getByRole("button", { name: `${RETRY} Rule A`, exact: true }).click();
   await page.locator("tr", { hasText: "Rule B" }).getByRole("button", { name: `${RETRY} Rule B`, exact: true }).click();
-  await Promise.all([readyA, readyB]);
+  await within(Promise.all([readyA, readyB]), "页面发出 Rule A 和 Rule B 的重新读取");
   deferred.get("rule-2").resolve(fulfill(deferred.get("rule-2").route, cachedResponse(initial, [rule("rule-2", "Rule B", 42)])));
   await page.locator("tr", { hasText: "$42.00" }).waitFor();
   deferred.get("rule-1").resolve(fulfill(deferred.get("rule-1").route, cachedResponse(initial, [rule("rule-1", "Rule A", 102)])));
@@ -2411,7 +2419,7 @@ test("one failed retry leaves another rule's successful result and controls usab
   const retryBButton = rowB.getByRole("button", { name: `${RETRY} Rule B`, exact: true });
   await retryAButton.click();
   await retryBButton.click();
-  await Promise.all([readyA, readyB]);
+  await within(Promise.all([readyA, readyB]), "页面发出 Rule A 和 Rule B 的重新读取");
   deferred.get("rule-2").resolve(fulfill(deferred.get("rule-2").route, cachedResponse(initial, [rule("rule-2", "Rule B", 43)])));
   await rowB.getByText("$43.00", { exact: true }).waitFor();
   await retryBButton.locator(".ant-btn-loading-icon").waitFor({ state: "hidden" });
@@ -2446,9 +2454,9 @@ test("a late single-rule response from an old window cannot replace a newer wind
   const newWindowStarted = new Promise((resolve) => { started.newWindow = resolve; });
   const retryAButton = page.locator("tr", { hasText: "Rule A" }).getByRole("button", { name: `${RETRY} Rule A`, exact: true });
   await retryAButton.click();
-  await oldRetryStarted;
+  await within(oldRetryStarted, "页面发出旧时段 Rule A 的重新读取");
   await page.getByRole("group", { name: "时间范围", exact: true }).getByRole("button", { name: "近 7 天", exact: true }).filter({ visible: true }).click();
-  await newWindowStarted;
+  await within(newWindowStarted, "页面发出新时段的查询");
   deferred.newWindow.resolve(fulfill(deferred.newWindow.route, response([rule("rule-1", "Rule A", 70, newWindow), rule("rule-2", "Rule B", 80, newWindow), rule("rule-3", "Rule C", 90, newWindow)])));
   await page.locator("tr", { hasText: "$70.00" }).waitFor();
   await retryAButton.locator(".ant-btn-loading-icon").waitFor();
@@ -2484,9 +2492,9 @@ test("a bulk response replaces a newer retry when their actual windows differ", 
   const summary = page.locator(".reconciliation-summary");
   await summary.getByText("$60.00", { exact: true }).waitFor();
   await page.getByRole("button", { name: "刷新当前页面数据" }).click();
-  await bulkStarted;
+  await within(bulkStarted, "页面发出整页刷新的查询");
   await page.locator("tr", { hasText: "Rule A" }).getByRole("button", { name: `${RETRY} Rule A`, exact: true }).click();
-  await retryStarted;
+  await within(retryStarted, "页面发出单条的重新读取");
   const retryDelivery = fulfill(retry.route, cachedResponse(initial, [rule("rule-1", "Rule A", 101)]));
   retry.resolve(retryDelivery);
   await retryDelivery;
@@ -2523,9 +2531,9 @@ test("a late bulk response for the same window preserves a newer rule retry", as
   const retryAButton = rowA.getByRole("button", { name: `${RETRY} Rule A`, exact: true });
   const summary = page.locator(".reconciliation-summary");
   await page.getByRole("button", { name: "刷新当前页面数据" }).click();
-  await bulkStarted;
+  await within(bulkStarted, "页面发出整页刷新的查询");
   await retryAButton.click();
-  await retryStarted;
+  await within(retryStarted, "页面发出单条的重新读取");
   retry.resolve(fulfill(retry.route, cachedResponse(initial, [rule("rule-1", "Rule A", 101)])));
   await rowA.getByText("$101.00", { exact: true }).waitFor();
   bulk.resolve(fulfill(bulk.route, response([rule("rule-1", "Rule A", 10), rule("rule-2", "Rule B", 20), rule("rule-3", "Rule C", 30)])));
@@ -2561,12 +2569,12 @@ async function verifyMobileRefreshAndRetry(t, width) {
   await cardA.waitFor();
   if (!(await cardA.textContent())?.includes("$10.00")) throw new Error(`unexpected mobile card: ${await cardA.textContent()}`);
   await cardA.getByRole("button", { name: `${RETRY} Rule A`, exact: true }).click();
-  await retryRequestStarted;
+  await within(retryRequestStarted, "页面发出单条的重新读取");
   retry.resolve(fulfill(retry.route, cachedResponse(initial, [rule("rule-1", "Rule A", 101)])));
   await cardA.getByText("$101.00").waitFor();
   await summary.getByText("$151.00", { exact: true }).waitFor();
   await page.getByRole("button", { name: "刷新当前页面数据" }).click();
-  await refreshRequestStarted;
+  await within(refreshRequestStarted, "页面发出整页刷新");
   // 同一日期范围刷新时卡片和汇总都还是上次读到的、彼此对得上，汇总照旧显示、不加「读取中」
   await cardA.getByText("$101.00").waitFor();
   await summary.getByText("$151.00", { exact: true }).waitFor();

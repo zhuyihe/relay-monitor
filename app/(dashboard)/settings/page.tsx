@@ -11,7 +11,7 @@ import { App, Button, Input, InputNumber, Select } from "antd";
 import { BRAND, NAV_LABELS, VERSION_LABEL } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
-import { consoleFailureText, describeError, errorText, requiredText } from "../../../lib/error-copy";
+import { MIN_PASSWORD_LENGTH, consoleFailureText, describeError, errorText, requiredText } from "../../../lib/error-copy";
 import { EMPTY, formatInt, formatZonedDate, formatZonedDateTime } from "../../../lib/format";
 import { Panel } from "../../components/panel";
 import { Dirty, ErrorState, PanelSkeleton, SaveState } from "../../components/data-state";
@@ -268,7 +268,7 @@ export default function SettingsPage() {
     const errs: PwErrors = {};
     if (!pwOld) errs.old = requiredText(COPY.oldPassword);
     if (!pwNew) errs.next = requiredText(COPY.newPassword);
-    else if (pwNew.length < 6) errs.next = errorText({ code: "PASSWORD_TOO_SHORT" });
+    else if (pwNew.length < MIN_PASSWORD_LENGTH) errs.next = errorText({ code: "PASSWORD_TOO_SHORT" });
     if (!pwConfirm) errs.confirm = requiredText(COPY.confirmPassword);
     else if (pwNew && pwConfirm !== pwNew) errs.confirm = COPY.mismatch;
     setPwErrors(errs);

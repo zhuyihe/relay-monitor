@@ -6823,9 +6823,8 @@ const ledgerDays = (f) => f.state.ledger.map((row) => [row.rule_id, row.bill_dat
 test("C2a 回看：昨天不占预算；更早的日子每轮最多 K 天、同一个上游同时 1 天、这一轮没成就不再给这个上游取；没结成的记进状态表，结成了删掉", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z"); // 上海 10-09 11:00；开始统计是 10-07 0 点，10-07、10-08 两天能结
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 2, lookbackTimeMs: 60000 } });
-  // 自营这边也先读不到（quota 0）：上游账单读不到时不会被重判成「这天的账单还没读全」（那是按天判断的，不挡同一上游别的日子——
-  // 安全审核 C2a 低-4），这里要的是上游整体读不到（UPSTREAM_REQUEST_FAILED），才会触发「这一轮不再给这个上游取别的日子」
-  f.state.ownQuota = 0;
+  // 自营有收入、上游账单读不到：主码是 WAITING_FOR_BILL，UPSTREAM_DATA_UNAVAILABLE 只在 health.issues 的上游那一侧里，
+  // 「同一上游这一轮不再取别的日子」要看 issues（审核 C2a 第二轮低-2）
   f.state.upstreamQuota = null; // 上游账单读不到
   // 方案钉住的性能点：每轮只批量读两次（状态表、账本近几天的日期），不按绑定逐条查（安全审核 C2a 低-7）
   const reads = { listSettlementStates: [], listLedgerDays: [] };
@@ -6840,8 +6839,8 @@ test("C2a 回看：昨天不占预算；更早的日子每轮最多 K 天、同�
   assert.ok(reads.listSettlementStates[0][0].length >= 3, "一次性带着这一轮全部绑定的 id（SQL 的 rule_id IN），不是单个 id");
   assert.deepEqual(new Set(reads.listSettlementStates[0][0]), new Set(["rr_live", "rr_two", "rr_three"]));
   assert.deepEqual(states(f), [
-    ["rr_live", "2026-10-07", "UPSTREAM_DATA_UNAVAILABLE", 1],
-    ["rr_live", "2026-10-08", "UPSTREAM_DATA_UNAVAILABLE", 1], ["rr_three", "2026-10-08", "UPSTREAM_DATA_UNAVAILABLE", 1], ["rr_two", "2026-10-08", "UPSTREAM_DATA_UNAVAILABLE", 1],
+    ["rr_live", "2026-10-07", "WAITING_FOR_BILL", 1],
+    ["rr_live", "2026-10-08", "WAITING_FOR_BILL", 1], ["rr_three", "2026-10-08", "WAITING_FOR_BILL", 1], ["rr_two", "2026-10-08", "WAITING_FOR_BILL", 1],
   ], "昨天三条都试；更早的那天只试了一天：三条共用一个上游，限流/连不上这一轮它没成就不再取（方案 6.4）");
   assert.deepEqual(ledgerDays(f), []);
 
@@ -6863,15 +6862,15 @@ test("C2a 回看：昨天不占预算；更早的日子每轮最多 K 天、同�
   assert.equal(f.state.statCalls.slice(calls).filter((call) => call.start < todayStart).length, 0, "账本里都有了：只观测今天，不再取过去的日子");
 });
 
-test("C2a 低-4：这天的账单还没读全（WAITING_FOR_BILL，按天判断）不连累同一上游别的日子，只有整个上游读不到才连累（安全审核 C2a 低-4）", async (t) => {
+test("C2a 低-4（第二轮低-2 后）：自营有收入、上游读不到时主码是 WAITING_FOR_BILL，issues 里上游那一侧是 UPSTREAM_DATA_UNAVAILABLE——同一上游这一轮只试一个更早的日子", async (t) => {
   let now = Date.parse("2026-10-10T03:00:00Z"); // 上海 10-10 11:00；开始统计 10-07 0 点：昨天 10-09，更早两天 10-08、10-07
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
-  // 默认自营这边有收入（ownQuota: 250）：上游这边读不到时，按天判断成「这天的账单还没读全」，不是上游整体读不到——
-  // 这种原因只挡这一天，不该让同一上游更早那天也被拖到下一轮（低-4 之前的写法会把两天都拖住，只试一天）
+  // 默认自营这边有收入（ownQuota: 250）：上游这边读不到时主码是 WAITING_FOR_BILL（这天的账单还没读全），上游整体读不到的信号在 issues 里，
+  // 回看要看 issues（审核 C2a 第二轮低-2：实测 40 条绑定积压、上游挂着时，只看主码一轮打了 55 次）
   f.state.upstreamQuota = null;
   await f.module.refreshDue(now);
   assert.deepEqual(states(f).filter((row) => row[0] === "rr_live").map((row) => [row[1], row[2]]),
-    [["2026-10-07", "WAITING_FOR_BILL"], ["2026-10-08", "WAITING_FOR_BILL"], ["2026-10-09", "WAITING_FOR_BILL"]], "昨天和更早两天都试了，没有被同一上游的「账单还没读全」拖住");
+    [["2026-10-08", "WAITING_FOR_BILL"], ["2026-10-09", "WAITING_FOR_BILL"]], "昨天试了；更早的只试了最新一天，10-07 这一轮不再给同一个上游取");
 });
 
 test("C2a 中-2：改绑定之前还没固定的日子，D3 做好以前回看不自动结；昨天照旧、手动照常能结（安全审核 C2a 中-2，总指挥 10-25 定）", async (t) => {
@@ -6908,6 +6907,33 @@ test("C2a 中-2：改绑定之前还没固定的日子，D3 做好以前回看�
   now += 60000;
   await f.module.refreshDue(now);
   assert.deepEqual(liveLedger(), ["2026-10-07", "2026-10-08"]);
+});
+
+test("C2a 中-A：这把 Key 还给别处用吗没回答时没结的日子，回答（改了绑定，生效时刻往后推）以后回看能结，按新回答算（总指挥 10-25，D 设计稿 §3.1 第 2 种）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z"); // 开始统计 10-07 0 点：昨天 10-08，更早一天 10-07
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  const live = f.repository.tables.rules.find((r) => r.id === "rr_live");
+  live.created_at = new Date("2026-10-01T00:00:00Z");
+  live.cost_coverage = "unknown";
+  live.source_binding.coverageDeclaration = { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] };
+  const liveStates = () => states(f).filter((row) => row[0] === "rr_live").map((row) => [row[1], row[2]]);
+  const liveLedger = () => f.state.ledger.filter((row) => row.rule_id === "rr_live");
+  await f.module.refreshDue(now);
+  assert.deepEqual(liveLedger(), [], "没回答：结不了");
+  assert.deepEqual(liveStates(), [["2026-10-07", "COST_COVERAGE_UNKNOWN"], ["2026-10-08", "COST_COVERAGE_UNKNOWN"]]);
+
+  // 回答：改成已确认，走 updateRule 的效果——代次往前一位、生效时刻推到现在，晚于这两天结束
+  live.cost_coverage = "complete";
+  delete live.source_binding.coverageDeclaration;
+  live.scope_version = Number(live.scope_version || 1) + 1;
+  live.billing_effective_from_ms = now;
+  now += 10 * 60000;
+  await f.module.refreshDue(now); // 到了重判的时刻：本地看挡着的原因没了，记 cleared
+  now += 60000;
+  await f.module.refreshDue(now); // 下一轮去结
+  assert.deepEqual(liveLedger().map((row) => row.bill_date).sort(), ["2026-10-07", "2026-10-08"], "更早那天也不被 blocked 挡着，两天都结了");
+  assert.ok(liveLedger().every((row) => row.detail.result.calculation.profitUsd != null), "按新回答算出了毛利");
+  assert.deepEqual(liveStates(), []);
 });
 
 test("C2a 回看每轮最多补 15 个「绑定×天」：积压 18 个只补最新的 15 个，剩下的下一轮接着补；昨天不占这 15 个（审核 C2a 积压场景）", async (t) => {
@@ -7008,6 +7034,21 @@ test("C2a 结成新版以后不再读一次账本行：result 自己就是刚写
   const row = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
   assert.deepEqual(settled.ledger, { billDate: row.bill_date, revision: row.revision, source: row.source, settledAt: settled.settledAt,
     rates: { income: row.revenue_rate ?? null, cost: row.cost_rate ?? null }, costBasis: row.cost_basis }, "result.ledger 直接补好，和账本里写进去的那一行一致");
+});
+
+test("C2a 第二轮低-3：result.ledger 的汇率按账本精度（6 位小数）取整、来源是账本里的来源，带 lastConfirmed；和之后从账本读出来的逐字一致", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  f.stations.find((station) => station.id === "own").cnyPerUsd = 7.1234567; // 第 7 位以后账本存不下
+  f.stations.find((station) => station.id === "upstream").cnyPerUsd = 6.5;
+  const window = { startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs };
+  const manual = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", ...window }, { mode: "observe", force: true, origin: "manual" });
+  const written = (await manual()).results[0];
+  assert.equal(written.ledger.rates.income, 7.123457, "按账本的 6 位小数取整");
+  const read = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", ...window }, { mode: "evaluate", origin: "page" })).results[0];
+  assert.deepEqual(written.ledger, read.ledger, "写的那次和之后读出来的逐字一致（汇率、来源、版本、固定时刻）");
+  assert.deepEqual(written.lastConfirmed, read.lastConfirmed, "最近确认的那份也带上");
+  assert.equal(written.lastSuccessfulAt, read.lastSuccessfulAt);
 });
 
 test("C2a 结账时渠道目录用 10 分钟内的缓存：一轮结好几天，只读一次渠道目录，不是每天一次（安全审核 C2a 低-3）", async (t) => {
@@ -7488,13 +7529,13 @@ test("C2a 本地重判看不出来的原因（取账单时才被上游拒绝）�
   let reads = yesterdayReads();
   await minute(); // 下一轮去结：还是被拒绝，记成本地看不出来，开始计次
   assert.ok(yesterdayReads() > reads);
-  assert.deepEqual([state().manual_reason, state().attempts, state().last_detail.probeBlind, state().next_attempt_at_ms], ["KEY_INVALID_OR_DENIED", 1, true, now + 10 * 60000]);
+  assert.deepEqual([state().manual_reason, state().attempts, state().last_detail.probeBlind, state().next_attempt_at_ms], ["KEY_INVALID_OR_DENIED", 1, true, now + 30 * 60000], "这天变成要人处理已经 11 分钟：退避按从第一次失败起过了多久选档，落在 30 分钟档");
   reads = yesterdayReads();
-  await minute(9);
-  assert.equal(yesterdayReads(), reads, "按退避表等 10 分钟，中间不本地重判、不取账单");
+  await minute(29);
+  assert.equal(yesterdayReads(), reads, "按退避表等 30 分钟，中间不本地重判、不取账单");
   await minute();
   assert.ok(yesterdayReads() > reads, "到点直接去结");
-  assert.deepEqual([state().attempts, state().last_detail.probeBlind, state().next_attempt_at_ms], [2, true, now + 30 * 60000], "第二次没成，按退避表 30 分钟");
+  assert.deepEqual([state().attempts, state().last_detail.probeBlind, state().next_attempt_at_ms], [2, true, now + 2 * 60 * 60000], "第二次没成，已经过了 40 分钟以上，落在最高一档 2 小时");
 });
 
 test("C2a 本地重判自己出错：按原因还在，10 分钟后再判，不每轮重来", async (t) => {
