@@ -1078,6 +1078,81 @@ contract("listLedgerHistory pages with a (day, rule) cursor that survives a rese
 
 // ---- 账单能力核验结果 ----
 
+contract("settlement state rows: record, overwrite, list by rule, skip a day already in the ledger, delete and prune in batches", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule(), other = await fixture.createRule({ tokenId: fixture.token(7), channels: [{ channelId: fixture.channel(7), name: "other" }] });
+  const now = Date.UTC(2026, 0, 12, 3);
+  const retry = { op: "retry", reason: "PENDING", attempts: 1, nextAttemptAt: now + 600000, firstFailedAt: now, lastAttemptAt: now,
+    sourceVersion: "v1", detail: { code: "PENDING", side: "upstream" } };
+  await repository.recordSettlementState(rule.id, "2026-01-10", retry, now);
+  await repository.recordSettlementState(other.id, "2026-01-10", retry, now);
+  assert.deepEqual(await repository.listSettlementStates([rule.id]), [{ ruleId: rule.id, billDate: "2026-01-10", retryReason: "PENDING", manualReason: null,
+    manualSince: null, attempts: 1, nextAttemptAt: now + 600000, firstFailedAt: now, lastAttemptAt: now, resettleRequestedAt: null, resettleReason: null,
+    sourceVersion: "v1", detail: { code: "PENDING", side: "upstream" } }]);
+  assert.deepEqual(await repository.listSettlementStates([]), []);
+  // 同一天再记一次：整行换成新的（读取类变成要人处理）
+  const manual = { op: "manual", reason: "KEY_INVALID_OR_DENIED", attempts: 1, manualSince: now + 1, nextAttemptAt: now + 600001, firstFailedAt: now,
+    lastAttemptAt: now + 1, sourceVersion: "v2", detail: { code: "KEY_INVALID_OR_DENIED", side: "upstream" } };
+  await repository.recordSettlementState(rule.id, "2026-01-10", manual, now + 1);
+  const [row] = await repository.listSettlementStates([rule.id]);
+  assert.deepEqual([row.retryReason, row.manualReason, row.manualSince, row.sourceVersion], [null, "KEY_INVALID_OR_DENIED", now + 1, "v2"]);
+  assert.equal((await repository.listSettlementStates([rule.id, other.id])).length, 2);
+
+  // 账本里已经有这天：不写（另一处已经固定了）
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const window = { preset: "yesterday", startMs: Date.UTC(2026, 0, 9), endMs: Date.UTC(2026, 0, 10), timezone: "UTC" };
+  const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: "2026-01-10T00:20:00.000Z", profitUsd: 2 });
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { ledger: settlement(snapshot) }), true);
+  await repository.recordSettlementState(rule.id, "2026-01-09", retry, now);
+  assert.deepEqual((await repository.listSettlementStates([rule.id])).map((item) => item.billDate), ["2026-01-10"]);
+
+  await repository.deleteSettlementState(other.id, "2026-01-10");
+  assert.deepEqual(await repository.listSettlementStates([other.id]), []);
+  await repository.deleteSettlementState(other.id, "2026-01-10");
+
+  // 清理：只删日期早于给定那天的，一次最多 limit 行
+  for (const day of ["2025-12-01", "2025-12-02", "2025-12-03"]) await repository.recordSettlementState(other.id, day, retry, now);
+  assert.equal(await repository.pruneSettlementStates("2025-12-03", 1), 1);
+  assert.equal(await repository.pruneSettlementStates("2025-12-03", 500), 1);
+  assert.equal(await repository.pruneSettlementStates("2025-12-03", 500), 0);
+  assert.deepEqual((await repository.listSettlementStates([other.id])).map((item) => item.billDate), ["2025-12-03"]);
+  assert.deepEqual((await repository.listSettlementStates([rule.id])).map((item) => item.billDate), ["2026-01-10"], "别的日子不动");
+});
+
+contract("a settlement that books the day deletes its state row in the same transaction; a failing guard keeps it", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const window = { preset: "yesterday", startMs: Date.UTC(2026, 0, 10), endMs: Date.UTC(2026, 0, 11), timezone: "UTC" };
+  const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: "2026-01-11T00:20:00.000Z", profitUsd: 2 });
+  const state = { op: "retry", reason: "PENDING", attempts: 2, nextAttemptAt: 1, firstFailedAt: 1, lastAttemptAt: 1, sourceVersion: null, detail: null };
+  await repository.recordSettlementState(rule.id, "2026-01-10", state);
+  let calls = 0;
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot],
+    { ledger: settlement(snapshot), settlement: { billDate: "2026-01-10" }, guard: () => ++calls === 1 }), false);
+  assert.equal((await repository.listSettlementStates([rule.id])).length, 1, "守卫失败：账本和删行一起回滚");
+  assert.equal(await repository.latestLedgerEntry(rule.id, window), null);
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { ledger: settlement(snapshot), settlement: { billDate: "2026-01-10" } }), true);
+  assert.deepEqual(await repository.listSettlementStates([rule.id]), []);
+  assert.equal((await repository.latestLedgerEntry(rule.id, window)).revision, 1);
+});
+
+contract("listLedgerDays lists each booked day once per rule from a date on, only for the given rules", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule(), other = await fixture.createRule({ tokenId: fixture.token(7), channels: [{ channelId: fixture.channel(7), name: "other" }] });
+  const book = async (target, day, profitUsd = 2, resettle = false) => {
+    const [segment] = await repository.listSegments(target.id);
+    const fingerprint = await fixture.fingerprint(target.id);
+    const window = { preset: "yesterday", startMs: Date.UTC(2026, 0, day), endMs: Date.UTC(2026, 0, day + 1), timezone: "UTC" };
+    const snapshot = billingSnapshot({ rule: target, segment, fingerprint, window, generatedAt: `2026-01-${String(day + 1).padStart(2, "0")}T00:20:00.000Z`, profitUsd });
+    assert.equal(await repository.saveSnapshotsForScope(target.id, fingerprint, [snapshot], { ledger: settlement(snapshot, { resettle }) }), true);
+  };
+  await book(rule, 8); await book(rule, 9); await book(rule, 9, 3, true); await book(other, 9);
+  const days = await repository.listLedgerDays([rule.id], "2026-01-09");
+  assert.deepEqual(days, [{ ruleId: rule.id, billDate: "2026-01-09" }], "两版只算一天，早于起点的不要，别的绑定不要");
+  assert.equal((await repository.listLedgerDays([rule.id, other.id], "2026-01-01")).length, 3);
+  assert.deepEqual(await repository.listLedgerDays([], "2026-01-01"), []);
+});
+
 contract("billing capabilities round-trip, overwrite and delete by identity", async ({ repository, fixture }) => {
   const now = Date.now();
   const first = fixture.capabilityIdentity("first"), second = fixture.capabilityIdentity("second");

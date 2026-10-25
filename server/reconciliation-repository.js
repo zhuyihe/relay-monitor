@@ -170,6 +170,37 @@ export function normalizeConfirmedHistoryOptions(input = {}, now = Date.now()) {
 }
 
 // 记账时读最新一版只为比内容和带回固定时刻（ledgerWriteDecision）：不读 detail 这类大列
+// 结账状态表的读写（计划 C2a），MySQL 和内存两个仓库共用
+const SETTLEMENT_STATE_SELECT = ["rule_id", "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date", "retry_reason", "manual_reason", "manual_since_ms", "attempts",
+  "next_attempt_at_ms", "first_failed_at_ms", "last_attempt_at_ms", "resettle_requested_at_ms", "resettle_reason", "source_version", "last_detail"].join(", ");
+export const SETTLEMENT_STATE_WRITE_COLUMNS = Object.freeze(["retry_reason", "manual_reason", "manual_since_ms", "attempts", "next_attempt_at_ms",
+  "first_failed_at_ms", "last_attempt_at_ms", "source_version", "last_detail"]);
+
+const msOrNull = (value) => value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+
+export function settlementStateFromRow(row) {
+  return {
+    ruleId: row.rule_id, billDate: typeof row.bill_date === "string" ? row.bill_date : billDateText(row.bill_date),
+    retryReason: row.retry_reason ?? null, manualReason: row.manual_reason ?? null, manualSince: msOrNull(row.manual_since_ms),
+    attempts: Number(row.attempts) || 0, nextAttemptAt: msOrNull(row.next_attempt_at_ms), firstFailedAt: msOrNull(row.first_failed_at_ms),
+    lastAttemptAt: msOrNull(row.last_attempt_at_ms), resettleRequestedAt: msOrNull(row.resettle_requested_at_ms), resettleReason: row.resettle_reason ?? null,
+    sourceVersion: row.source_version ?? null, detail: asJson(row.last_detail),
+  };
+}
+
+// settlementOutcome 的 state（op 是 retry / manual / sticky）按 SETTLEMENT_STATE_WRITE_COLUMNS 的顺序给出要写的值
+export function settlementStateValues(state) {
+  const retry = state.op === "retry";
+  return [retry ? state.reason : null, retry ? null : state.reason, retry ? null : msOrNull(state.manualSince), Number(state.attempts) || 0,
+    msOrNull(state.nextAttemptAt), msOrNull(state.firstFailedAt), msOrNull(state.lastAttemptAt), state.sourceVersion ?? null,
+    JSON.stringify(state.detail ?? null)];
+}
+
+function billDateText(value) {
+  if (value instanceof Date) return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+  return String(value ?? "");
+}
+
 const LEDGER_DECISION_SELECT = ["revision", "source", "timezone", "window_start_ms", "window_end_ms", "revenue_usd", "cost_usd",
   "revenue_rate", "cost_rate", "cost_basis", "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at"].join(", ");
 const LEDGER_SELECT = RECONCILIATION_LEDGER_COLUMNS.map((column) => column === "bill_date" ? "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date"
@@ -666,7 +697,8 @@ export class ReconciliationRepository {
 
   // ledger：{ entry, resettle } 时在同一事务里记账。写不写、写第几版见 ledgerWriteDecision；提交以后把这个结论放进 ledger.booked
   // （其中 settledAt 是账本里这天最新那一版的固定时刻），调用方不用再读一次账本。
-  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null } = {}) {
+  // settlement：{ billDate } 时这天结成了，同一个事务里删掉结账状态表的那一行（计划 C2a），守卫失败时一起回滚。
+  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null, settlement = null } = {}) {
     let booked = null;
     const conn = await this.pool.getConnection();
     try {
@@ -730,6 +762,7 @@ export class ReconciliationRepository {
             ledgerInsertValues({ ...ledger.entry, ruleId, revision: booked.revision, source: booked.source }));
         }
       }
+      if (settlement?.billDate) await conn.query("DELETE FROM reconciliation_settlement_state WHERE rule_id = ? AND bill_date = ?", [ruleId, settlement.billDate]);
       if (guard && !guard()) { await conn.rollback(); return false; }
       await conn.commit();
       if (booked) ledger.booked = booked;
@@ -738,6 +771,48 @@ export class ReconciliationRepository {
       await conn.rollback().catch(() => {});
       throw err;
     } finally { conn.release(); }
+  }
+
+  // ---- 结账状态（计划 C2a）：每条绑定每个还没固定的日子一行 ----
+
+  // 一轮轮询的批量读：这些绑定的全部状态行（表有上限，正常时接近空），不按绑定逐条查
+  async listSettlementStates(ruleIds) {
+    if (!ruleIds?.length) return [];
+    const [rows] = await this.pool.query(`SELECT ${SETTLEMENT_STATE_SELECT} FROM reconciliation_settlement_state WHERE rule_id IN (?)`, [ruleIds]);
+    return rows.map(settlementStateFromRow);
+  }
+
+  // 账本里这些绑定从 sinceDate（含）起有哪些日子。必须带 rule_id IN 走主键前缀：账本没有单独的 bill_date 索引，只按日期查会扫整本账
+  async listLedgerDays(ruleIds, sinceDate) {
+    if (!ruleIds?.length) return [];
+    const [rows] = await this.pool.query(
+      "SELECT rule_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date FROM reconciliation_ledger WHERE rule_id IN (?) AND bill_date >= ? GROUP BY rule_id, bill_date",
+      [ruleIds, sinceDate]);
+    return rows.map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
+  }
+
+  // 结账没成：记下或更新这一行（settlementOutcome 的 state，op 是 retry / manual / sticky）。
+  // 账本里已经有这天的任一版就不写（另一处已经固定了），一条语句判断，不用先读。
+  async recordSettlementState(ruleId, billDate, state, now = Date.now()) {
+    const values = settlementStateValues(state);
+    await this.pool.query(
+      `INSERT INTO reconciliation_settlement_state (rule_id, bill_date, ${SETTLEMENT_STATE_WRITE_COLUMNS.join(", ")}, updated_at_ms)
+       SELECT ?, ?, ${SETTLEMENT_STATE_WRITE_COLUMNS.map(() => "?").join(", ")}, ? FROM DUAL
+       WHERE NOT EXISTS (SELECT 1 FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ?)
+       ON DUPLICATE KEY UPDATE ${SETTLEMENT_STATE_WRITE_COLUMNS.map((column) => `${column} = VALUES(${column})`).join(", ")}, updated_at_ms = VALUES(updated_at_ms)`,
+      [ruleId, billDate, ...values, now, ruleId, billDate]);
+  }
+
+  // 这天已经固定（账本里有）但状态行还在：删掉。结账成功时的删除在 saveSnapshotsForScope 的事务里做
+  async deleteSettlementState(ruleId, billDate) {
+    await this.pool.query("DELETE FROM reconciliation_settlement_state WHERE rule_id = ? AND bill_date = ?", [ruleId, billDate]);
+  }
+
+  // 每小时清一批：beforeDate 以前的、没有重结请求的行，一次最多 limit 行，删不完下次接着删。走 (bill_date) 索引
+  async pruneSettlementStates(beforeDate, limit = 500) {
+    const [result] = await this.pool.query(
+      "DELETE FROM reconciliation_settlement_state WHERE bill_date < ? AND resettle_requested_at_ms IS NULL LIMIT ?", [beforeDate, limit]);
+    return Number(result?.affectedRows) || 0;
   }
 
   async getAlertState(ruleId, eventCode) {
