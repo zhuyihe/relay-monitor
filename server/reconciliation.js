@@ -6,6 +6,7 @@ import {
   queryKeyReconciliationStat,
   queryOwnChannelRevenue,
   queryOwnChannels,
+  queryOwnLatestLog,
   queryAccountIdentity,
   unixSecondWindow,
 } from "../lib/providers.js";
@@ -103,6 +104,13 @@ const ACCOUNT_USAGE_PENDING_MAX_MS = 2 * 60000;
 const MAX_ACCOUNT_USAGE_ENTRIES = 200;
 const STALE_SCOPE = Symbol("STALE_SCOPE");
 const MAX_SCOPE_ATTEMPTS = 3;
+// 轮询里没变的东西多久才重写一次：渠道状态的观测时刻、「今天」观测快照（计划 P1a）
+const UNCHANGED_REWRITE_MS = 10 * 60000;
+// 判断自营站点有没有新的消费（计划 P1a，审核第二轮）：查的起点不每轮挪，落后「最新一条 − 120 秒」超过 10 分钟才挪一次，
+// 这样每次数条数的范围最多约 14 分钟（往前 720 秒再加一轮间隔）；晚写进去、时刻不早于起点的日志都数得到。还没读到过日志的从第一次查的时候往前 2 小时起
+const OWN_LOG_LOOKBACK_SEC = 120;
+const OWN_LOG_ANCHOR_LAG_SEC = 10 * 60;
+const OWN_LOG_FIRST_LOOKBACK_SEC = 2 * 3600;
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -353,6 +361,12 @@ const CALCULATION_BLOCKERS = new Set([
 ]);
 
 // reference 问题只作参考（如固定采购上游的 Key 账单不全），不挡毛利。
+// 快照内容的指纹：去掉每轮都会变的各种时刻和窗口终点（「今天」的窗口终点就是现在），只看金额、问题、分段这些
+const SNAPSHOT_VOLATILE_KEYS = new Set(["generatedAt", "resultGeneratedAt", "observedAt", "stateObservedAt", "latestLogAtMs", "endMs"]);
+function snapshotContentFingerprint(rows) {
+  return createHash("sha256").update(JSON.stringify(rows, (key, value) => SNAPSHOT_VOLATILE_KEYS.has(key) ? undefined : value)).digest("hex");
+}
+
 function calculationFromAmounts(upstreamUsd, downstreamUsd, issues = []) {
   const differenceUsd = upstreamUsd == null || downstreamUsd == null ? null : downstreamUsd - upstreamUsd;
   const confirmed = differenceUsd != null && !issues.some((issue) => !issue.reference && CALCULATION_BLOCKERS.has(issue.code));
@@ -402,6 +416,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const settlements = (rt._reconciliationSettlements ||= new Map());
   // 修正过切换时间的规则：下一次结账昨天时重新取数，写一份新的结账记录。
   const resettles = (rt._reconciliationResettles ||= new Set());
+  // 轮询省请求和写入（计划 P1a）：
+  //   ownActivity：每个自营站点上一轮查「全站有没有新的消费」的时刻，和从什么时候起一直没有新的消费（quietFrom）
+  //   ownRevenueCache：今天每段窗口最近一次读全的渠道收费（读到哪一刻为止），全站没有新的消费时直接沿用
+  //   observationWrites：每条绑定最近一次写下的「今天」观测快照的内容指纹和写入时刻
+  const ownActivity = (rt._reconciliationOwnActivity ||= new Map());
+  const ownRevenueCache = (rt._reconciliationOwnRevenue ||= new Map());
+  const observationWrites = (rt._reconciliationObservationWrites ||= new Map());
   const verifiedRuleCredentials = new WeakMap();
   const previewReadFacts = new WeakMap();
   const ownIdentities = new Map();
@@ -591,7 +612,81 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     for (const ids of assignments.values()) if (ids.length > 1) for (const id of ids) {
       duplicateSales.set(id, [...new Set([...(duplicateSales.get(id) || []), ...ids])].sort());
     }
-    return { rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, duplicateSales, billingSource: Object.freeze(billingSource) };
+    return { rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, duplicateSales, billingSource: Object.freeze(billingSource),
+      // 这一轮（或这一次查询）里共用的：自营站点的 /api/status；哪些自营站点从什么时候起没有新的消费（只有轮询会填）
+      ownStatus: new Map(), ownQuietFrom: new Map() };
+  }
+
+  // 自营站点的 /api/status（quotaPerUnit）同一个 registry 里只读一次，各绑定共用；读失败不留。
+  // 等着别的绑定发起的那一次、而那一次失败了的，自己再读一次（同时等着的几条共用这一次），不跟着一起失败
+  function ownStatusFor(registry, own) {
+    const key = `${own.id}:${credentialFingerprint(own)}`;
+    const load = () => {
+      const pending = queryNewApiStatus(own);
+      registry.ownStatus.set(key, pending);
+      pending.catch(() => { if (registry.ownStatus.get(key) === pending) registry.ownStatus.delete(key); });
+      return pending;
+    };
+    const shared = registry.ownStatus.get(key);
+    return shared ? shared.catch(() => registry.ownStatus.get(key) || load()) : load();
+  }
+
+  // 每轮轮询开始时，每个自营站点读一次「从起点以后的消费日志」：最新那一条的编号、时刻，和一共几条（同一个响应）。
+  // 起点和上一轮相同、这三样都没变：上一轮以后没有新的消费日志，今天的渠道收费读到 quietFrom 以后的，这一轮直接沿用（见 ownRevenue）。
+  // 用日志自己的时刻和条数，不用控制台的钟：站点的钟偏慢、日志晚写进去（时刻更早、排不到第一），条数都会变（审核第一、二轮，总指挥 10-25 定）。
+  // 起点从上一次读到的最新一条（站点的时刻）往前 120 秒起，落后超过 10 分钟才往前挪，挪的那一轮照常读；没读到过日志的从第一次查往前 2 小时起，之后不挪。
+  // 有新的消费、读失败、换了凭据、第一轮、起点挪了、接口不给条数（老版本）：这一轮照旧逐个渠道读。
+  async function markQuietOwnStations(rules, registry, now = Date.now()) {
+    const ownIds = [...new Set(rules.map((rule) => rule.ownStationId))];
+    await Promise.all(ownIds.map(async (id) => {
+      const own = upstreamStation(id);
+      if (!own?.isOwn || own.type !== "newapi") return;
+      const credential = credentialFingerprint(own), previous = ownActivity.get(id);
+      // 换了凭据就不算安静，和 ownRevenue 键里的凭据指纹互为备份
+      const known = previous?.credential === credential && previous.read ? previous : null;
+      const anchor = known?.latest ? known.latest.createdAtSec - OWN_LOG_LOOKBACK_SEC : null;
+      let sinceSec = !known ? Math.floor(now / 1000) - OWN_LOG_FIRST_LOOKBACK_SEC
+        : anchor != null && anchor - known.sinceSec > OWN_LOG_ANCHOR_LAG_SEC ? anchor : known.sinceSec;
+      let page = null, read = false;
+      try { page = await queryOwnLatestLog(own, { sinceSec }); read = true; } catch { read = false; }
+      // 第一次（或读失败、换凭据以后）是从 2 小时前数起的：读到了最新一条，就马上按它重新定起点再读一次，下一轮起就只数十来分钟的日志
+      if (read && !known && page.latest && page.latest.createdAtSec - OWN_LOG_LOOKBACK_SEC - sinceSec > OWN_LOG_ANCHOR_LAG_SEC) {
+        sinceSec = page.latest.createdAtSec - OWN_LOG_LOOKBACK_SEC;
+        try { page = await queryOwnLatestLog(own, { sinceSec }); } catch { read = false; }
+      }
+      const latest = page?.latest ?? null, total = page?.total ?? null;
+      const unchanged = read && !!known && sinceSec === known.sinceSec && total != null && total === known.total
+        && (latest?.id ?? null) === (known.latest?.id ?? null) && (latest?.createdAtSec ?? null) === (known.latest?.createdAtSec ?? null);
+      const quietFrom = unchanged ? known.quietFrom ?? known.checkedAt : null;
+      ownActivity.set(id, { credential, checkedAt: now, read, latest, total, sinceSec, quietFrom });
+      // coveredFromMs：读到的窗口终点要到这一刻，才包住最新那条日志所在的那一秒（渠道收费按秒、终点那一秒不含，见 unixSecondWindow）
+      if (quietFrom != null) registry.ownQuietFrom.set(id, { from: quietFrom, coveredFromMs: latest ? (latest.createdAtSec + 1) * 1000 : null });
+    }));
+  }
+
+  // 一段窗口的渠道收费。reuse 时（只有轮询观测今天）读全了就记下（读到哪一刻为止）；记下的那份读到的时刻
+  // 不早于这个自营站点没有新消费的起点，就沿用它，窗口终点换成这次的——这段时间里没有新的消费日志，每个渠道的合计都不会变。
+  // 沿用前照样读一次 /api/status（同一轮共用）：额度换算变了、或者读不到，就照旧逐个读，不拿旧的换算算钱。
+  // 这一轮里「查过全站以后、轮到这条绑定之前」那几秒的新消费，下一轮查全站时会发现，再照旧逐个读。
+  async function ownRevenue(own, rule, segmentWindow, { loadStatus, registry, reuse }) {
+    const channelIds = rule.channels.map((channel) => channel.channelId);
+    // 键里带凭据指纹，和 markQuietOwnStations 里「换了凭据就不算安静」互为备份：换了自营站点的凭据，任一道都能挡住沿用旧的
+    const key = JSON.stringify([own.id, credentialFingerprint(own), [...channelIds].sort((a, b) => a - b), segmentWindow.startMs, segmentWindow.timezone]);
+    const cached = ownRevenueCache.get(key), quiet = registry?.ownQuietFrom?.get(own.id);
+    // 最新那条日志的时刻（站点的钟）也要在记下的那份里：站点时钟偏快时，记下那份读到的时刻还没包住它，照旧现读
+    if (reuse && cached && quiet && cached.endMs >= quiet.from && cached.endMs <= segmentWindow.endMs
+      && (quiet.coveredFromMs == null || quiet.coveredFromMs <= cached.endMs)) {
+      const status = await loadStatus().catch(() => null);
+      if (status && status.quotaPerUnit === cached.result.quotaPerUnit) return { ...cached.result, window: { ...cached.result.window, endMs: segmentWindow.endMs } };
+    }
+    const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus });
+    // 只有轮询观测今天会沿用，别的窗口（昨天、结账、自定义、近 7 天、本月）不记
+    if (reuse && result.state === "complete" && !result.emptySecondWindow) {
+      ownRevenueCache.set(key, { endMs: segmentWindow.endMs, result });
+      // 只留今天的：键里有窗口起点，过了零点的旧键不会再用到
+      for (const [cachedKey, entry] of ownRevenueCache) if (entry.endMs < segmentWindow.endMs - 2 * DAY_MS) ownRevenueCache.delete(cachedKey);
+    }
+    return result;
   }
 
   function costOwnerFor(rule, canonicalKey, registry) {
@@ -1073,6 +1168,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             ownChannelsFor(own, { force }).catch(() => null),
             mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => queryOwnChannelRevenue(own, {
               channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone,
+              loadStatus: () => ownStatusFor(ownerRegistry, own),
             }).catch(() => null)),
           ]);
           const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
@@ -1290,26 +1386,32 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const state = catalogue ? (found ? channelState(found.status) : "missing") : "unknown";
         return { ...channel, state, stateObservedAt: Date.now() };
       });
+      // 只写状态变了的渠道；状态没变的，观测时刻最多每 10 分钟刷新一次（读这一列的只有锚定判断，只看有没有）
+      const storedChannels = new Map(rule.channels.map((channel) => [channel.channelId, channel]));
+      const changedStates = states.filter((channel) => {
+        const stored = storedChannels.get(channel.channelId);
+        return channel.state !== stored?.state || !(Number(stored?.stateObservedAt) > Date.now() - UNCHANGED_REWRITE_MS);
+      });
       let channelStatesUpdated;
-      if (observe) try {
+      if (observe && changedStates.length) try {
         channelStatesUpdated = await withObservationSourceLock(rule, sourceCredential,
-          () => repository.updateChannelStates(rule.id, states), billingSource);
+          () => repository.updateChannelStates(rule.id, changedStates), billingSource);
       } catch { channelStatesUpdated = null; }
       if (channelStatesUpdated === STALE_SCOPE) return STALE_SCOPE;
       for (const channel of states) {
         if (channel.state === "manual_disabled" || channel.state === "auto_disabled") issues.push({ code: "SALES_CHANNEL_DISABLED", scope: "channel", channelId: channel.channelId, detail: `渠道「${channel.name}」已停用`, observedAt: Date.now() });
         if (channel.state === "missing") issues.push({ code: "SALES_CHANNEL_MISSING", scope: "channel", channelId: channel.channelId, detail: issueText("SALES_CHANNEL_MISSING", { channel: channel.name }), observedAt: Date.now() });
       }
-      // 各分段共用本轮的一次本站 /api/status 读取；读取失败时每个分段照常按本站账单不可用处理。
-      let ownStatus = null;
-      const loadOwnStatus = () => (ownStatus ||= queryNewApiStatus(own));
+      // 本站 /api/status 同一轮各绑定、各分段共用一次（ownStatusFor）；读取失败时每个分段照常按本站账单不可用处理。
+      const loadOwnStatus = () => ownStatusFor(ownerRegistry, own);
+      const reuseOwnRevenue = observe && origin === "poll" && isLiveReconciliationPreset(window.preset);
       const segmentResults = await mapWithConcurrency(applicable, 6, async ({ segment, segmentWindow }) => {
         const [upstreamResult, downstreamResult] = await Promise.all([
           // 上游读不到（只有固定成本会走到这里）：不取上游，问题已经在上面记了一次
           upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             : upstreamWindowFor(upstream, metadata, token, segmentWindow, { readOnly: !observe }).catch((error) => ({ error })),
           (ownAvailable
-            ? queryOwnChannelRevenue(own, { channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus: loadOwnStatus })
+            ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue })
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
             .catch((error) => ({ error })),
         ]);
@@ -1666,7 +1768,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       costBasis: financialSnapshot.costBasis }) : null;
     // 记账的结论（ledgerOption.booked）由仓库在提交以后填上
     const ledgerOption = ledgerEntry ? { entry: ledgerEntry, resettle } : null;
-    const save = () => repository.saveSnapshotsForScope(rule.id, scopeFingerprint, snapshots.map((segment) => ({
+    const rows = snapshots.map((segment) => ({
         ruleId: rule.id,
         segmentId: segment.id,
         snapshotKey: reconciliationSnapshotRecordIdentity(result.window, billingFingerprint, segment.recordType, segment.id),
@@ -1686,7 +1788,25 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         healthCode: segment.health?.code || result.health.code,
         healthDetail: segment.health?.detail || result.health.detail || null,
         source: sourceFor(segment),
-    })), { expectedOwnerState: billingSource?.expectedOwnerState, guard, ledger: ledgerOption });
+    }));
+    // 「今天」这类只写观测快照的：内容（去掉各种时刻和窗口终点）和上次写的一样、上次写入不到 10 分钟，就不写（计划 P1a）。
+    // 进程活着时页面读结果缓存，不受影响；重启以后读到的「今天」最多是 10 分钟前写的，金额一样。
+    const observationOnly = !ledgerOption && !confirmedSnapshot && isLiveReconciliationPreset(result.window.preset);
+    const observationKey = `${rule.id}:${scopeFingerprint}:${billingFingerprint}`;
+    const observationFingerprint = observationOnly ? snapshotContentFingerprint(rows) : null;
+    const unchangedObservation = observationOnly && observationWrites.get(observationKey)?.fingerprint === observationFingerprint
+      && Date.now() - observationWrites.get(observationKey).at < UNCHANGED_REWRITE_MS;
+    const save = async () => {
+      // 没变不写，但守卫照样过一遍（口径、凭据代次没变才算写过）
+      if (unchangedObservation) return guard();
+      const saved = await repository.saveSnapshotsForScope(rule.id, scopeFingerprint, rows, { expectedOwnerState: billingSource?.expectedOwnerState, guard, ledger: ledgerOption });
+      if (saved === true && observationOnly) {
+        // 一条绑定只留最新的一份（口径、凭据变了以后旧键不会再用到）；已删除、停用的绑定在 refreshDue 里清
+        for (const key of observationWrites.keys()) if (key.startsWith(`${rule.id}:`) && key !== observationKey) observationWrites.delete(key);
+        observationWrites.set(observationKey, { fingerprint: observationFingerprint, at: Date.now() });
+      }
+      return saved;
+    };
     // 调用方已核对过口径；写快照的事务会在规则行锁内再按库里的口径核对一次，这里只需挡住已作废的代次。
     if (currentSourceCredential(rule) !== sourceCredential) return false;
     if (saveSnapshots) {
@@ -2040,7 +2160,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const startedAt = Date.now();
       const allRules = await repository.listRules();
       const rules = allRules.filter((rule) => rule.enabled);
+      // 停用、删除了的绑定不会再写「今天」快照，它们的指纹不留
+      const live = new Set(rules.map((rule) => rule.id));
+      for (const key of observationWrites.keys()) if (!live.has(key.slice(0, key.indexOf(":")))) observationWrites.delete(key);
       const ownerRegistry = await ownerRegistryFor(allRules, rules, { observe: true });
+      await markQuietOwnStations(rules, ownerRegistry);
       for (const [key, entry] of settlements) if (entry.endMs < now - 3 * DAY_MS) settlements.delete(key);
       await mapWithConcurrency(rules, MAX_CONCURRENT_RULES, async (rule) => {
         // 规则排队轮到时才定今天的截止点：实时窗口截至取数时刻，不能用整轮开始时的旧时刻。
@@ -2067,6 +2191,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     invalidateSources() {
       metadataCache.clear();
       identityCache.clear();
+      // P1a 的两张表也清：渠道收费的沿用和「今天」快照的跳写都要从现读重新开始
+      ownRevenueCache.clear();
+      observationWrites.clear();
       clearBillingResults();
     },
     // 接入向导核验 Sub2API Key 时共用同一份能力存储：确认保存时按同一身份读到预览时的核验结果。
