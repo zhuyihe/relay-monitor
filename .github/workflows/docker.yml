@@ -11,9 +11,15 @@ permissions:
   contents: read
   packages: write
 
+# 同一个 PR 连着推，上一次还在跑的取消；main 上的不取消（每次推送都要推镜像）
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -31,6 +37,7 @@ jobs:
   # 单元测试三个时区各跑一遍（业务时区、跨日、夏令时的问题只在某个时区露出来），三个同时跑
   unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     strategy:
@@ -52,6 +59,7 @@ jobs:
   # 界面测试全套：打包好的版本开在 3300、连单独的 MySQL，用 Chrome 跑 tests/reconciliation-ui.test.mjs，4 路同时跑（scripts/ui-lanes.mjs）
   ui:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     services:
@@ -62,8 +70,9 @@ jobs:
           MYSQL_DATABASE: relay_monitor_ui
           MYSQL_USER: relay_monitor_ui
           MYSQL_PASSWORD: ci-ui-test
+        # 端口写死：job 级 env 里不能用 job.services 取映射出来的端口（GitHub 的机器上 3306 不会撞）
         ports:
-          - 3306/tcp
+          - 3306:3306
         options: >-
           --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pci-ui-root --silent"
           --health-interval=10s
@@ -72,7 +81,7 @@ jobs:
     env:
       TZ: America/Los_Angeles
       DB_HOST: 127.0.0.1
-      DB_PORT: ${{ job.services.mysql.ports[3306] }}
+      DB_PORT: 3306
       DB_NAME: relay_monitor_ui
       DB_USER: relay_monitor_ui
       DB_PASSWORD: ci-ui-test
