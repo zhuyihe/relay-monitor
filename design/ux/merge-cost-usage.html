@@ -275,18 +275,19 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
     <div class="main">
       <header class="topbar"><h1>成本和用量</h1><div class="seg"><span>近 7 天</span><span class="on">近 30 天</span><span>近 90 天</span><span>自定义</span></div><span class="spacer"></span><span class="fresh"><i></i>数据截至 14:32</span><span class="avatar">A</span></header>
       <div class="content">
-        <div class="tabbar"><span class="t on">成本</span><span class="q">?</span><span class="t">用量</span><div class="right"><span class="chk"><i></i>包含已归档</span><span class="btn">每日利润</span></div></div>
+        <div class="tabbar"><span class="t on">成本</span><span class="t">用量</span><div class="right"><span class="chk"><i></i>包含已归档</span><span class="btn">每日利润</span></div></div>
+        <div class="oneline" style="border:0;padding:0 2px;background:none">这一页的数是按余额变化估出来的，不是上游的实际账单。<a>数字怎么来的 ›</a></div>
         <section class="panel">
           <div class="metricsN" style="grid-template-columns:repeat(4,1fr)">
             <div class="mc"><span>上游成本</span><b>¥51,830.20</b><small>算进利润 ¥51,402.60 · <a>没算进利润 ¥427.60 ›</a></small></div>
             <div class="mc"><span>固定成本</span><b>¥2,872.80</b><small>算进利润的 2 个上游，按天平摊</small></div>
-            <div class="mc"><span>日均</span><b>¥1,823.43</b><small>上游成本 + 固定成本</small></div>
-            <div class="mc"><span>预计一个月</span><b>¥54,702.90</b><small>按近 30 天的日均</small></div>
+            <div class="mc"><span>日均</span><b>¥1,953.68</b><small>按有记录的 28 天平均</small></div>
+            <div class="mc"><span>预计一个月</span><b>¥58,610.36</b><small>日均 × 30</small></div>
           </div>
-          <div class="oneline">22 天没有记录 <a>查看</a></div>
+          <div class="oneline">2 天没有记录，这几天的上游成本没算全。<a>哪些天、哪些上游缺记录</a></div>
         </section>
         <div style="display:grid;grid-template-columns:2fr 1fr;gap:24px">
-          <section class="panel"><div class="panel-head"><h2>每日成本</h2><span class="spacer"></span><div class="seg"><span class="on">每天</span><span>累计</span></div></div><div class="chartph">上游成本、固定成本按天；悬停写「成本最高的一天」</div></section>
+          <section class="panel"><div class="panel-head"><h2>每日成本</h2><span class="spacer"></span><div class="seg"><span class="on">每天</span><span>累计</span></div></div><div class="chartph">上游成本、固定成本按天；最高那根柱上标「最高 10月21日 ¥2,410.50」</div></section>
           <section class="panel"><div class="panel-head"><h2>成本构成</h2><span class="caption">按上游</span></div><div class="chartph">横向条形，照旧</div></section>
         </div>
         <div style="display:grid;grid-template-columns:2fr 1fr;gap:24px">
@@ -296,8 +297,8 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
       </div>
     </div>
   </div>
-  <div class="ann t" style="left:282px;top:130px;max-width:260px">「数字怎么来的」收进「?」</div>
-  <div class="ann l" style="left:430px;top:272px;max-width:330px">原来那一大张「没算进去的数据」表收成这一行，点开才列</div>
+  <div class="ann l" style="left:800px;top:126px;max-width:300px">「数字怎么来的」照 §8.4 一行；句子随 G 的口径改</div>
+  <div class="ann l" style="left:780px;top:300px;max-width:300px">「没算进去的数据」照 §8.4 一行，挪到第一行下面</div>
 </section>
 
 <!-- ═══ merge-usage ═══ -->
@@ -308,31 +309,32 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
     <div class="main">
       <header class="topbar"><h1>成本和用量</h1><div class="seg"><span>今天</span><span>近 24 小时</span><span class="on">近 7 天</span><span>近 30 天</span></div><span class="spacer"></span><span class="fresh"><i></i>数据截至 14:32</span><span class="avatar">A</span></header>
       <div class="content">
-        <div class="tabbar"><span class="t">成本</span><span class="t on">用量</span><div class="right"><span class="sel">全部上游 <span class="caption">▾</span></span><div class="seg"><span class="on">合计</span><span>按上游</span></div></div></div>
+        <div class="tabbar"><span class="t">成本</span><span class="t on">用量</span><div class="right"><span class="sel">全部上游 <span class="caption">▾</span></span></div></div>
         <section class="panel">
           <div class="metricsN" style="grid-template-columns:repeat(3,1fr)">
-            <div class="mc"><span>Token（不含缓存）</span><b>3.1 亿</b><small>只算输入和输出</small></div>
+            <div class="mc"><span>总 Token</span><b>3.1 亿</b></div>
             <div class="mc"><span>请求数</span><b>41,230</b></div>
             <div class="mc"><span>读到的上游</span><b>3 <span style="font-size:14px;color:var(--ink-3);font-weight:400">/ 5 个上游</span></b></div>
           </div>
-          <div class="oneline"><svg class="sym c-warn"><use href="#warn"/></svg>2 个上游读不到用量，合计里不含它们 <a>看原因 ▴</a></div>
+          <div class="oneline" style="border-top:0;padding-top:0;color:var(--ink-3)">Token（不含缓存）：只算输入和输出</div>
+          <div class="oneline"><svg class="sym c-warn"><use href="#warn"/></svg>2 个上游的用量读不到，合计里不含它们 <a>看原因 ▴</a></div>
           <ul class="fails">
-            <li><span>拼车团队：<span class="c">登录信息不对或过期了</span></span><span class="btn sm">更新登录信息</span></li>
-            <li><span>Key 计费站：<span class="c">对方的版本不支持这项功能</span></span><span class="btn sm">查看详细原因</span></li>
+            <li><span>拼车团队：<span class="c">登录信息不对或过期了。</span> <a style="color:var(--cobalt);font-size:12px">查看详细原因</a></span><span class="btn sm">更新登录信息</span></li>
+            <li><span>Key 计费站：<span class="c">对方的版本不支持这项功能。</span> <a style="color:var(--cobalt);font-size:12px">查看详细原因</a></span><span></span></li>
           </ul>
         </section>
         <div style="display:grid;grid-template-columns:2fr 1fr;gap:24px">
-          <section class="panel"><div class="panel-head"><h2>Token 用量趋势</h2><span class="spacer"></span><div class="seg"><span class="on">按天汇总</span><span>按小时汇总</span></div></div><div class="chartph">照旧</div></section>
+          <section class="panel"><div class="panel-head"><h2>Token 用量趋势</h2><span class="caption">按天汇总</span><span class="spacer"></span><div class="seg"><span class="on">合计</span><span>按上游</span></div><div class="seg" style="margin-left:8px"><span class="on">图表</span><span>表格</span></div></div><div class="chartph">照旧</div></section>
           <section class="panel"><div class="panel-head"><h2>各模型 Token</h2></div><div class="chartph">照旧，最多 10 项</div></section>
         </div>
         <section class="panel"><div class="panel-head"><h2>模型明细</h2><span class="caption">共 18 个模型</span></div>
           <table class="table"><thead><tr><th>模型</th><th class="r">总 Token</th><th class="r">输入/输出</th><th class="r">请求数</th><th class="r">上游成本</th></tr></thead>
-            <tbody><tr><td>gpt-4.1</td><td class="r num">1.2 亿</td><td class="r num">0.9 亿 / 0.3 亿</td><td class="r num">12,840</td><td class="r num">¥18,220.40</td></tr></tbody></table><div style="height:10px"></div></section>
+            <tbody><tr><td>gpt-4.1</td><td class="r num">1.2 亿</td><td class="r num">0.9 亿 / 0.3 亿</td><td class="r num">12,840</td><td class="r num">¥18,220.40</td></tr></tbody></table><div class="oneline">没设置汇率的提示放在这里（写法随 G 的币2）</div></section>
       </div>
     </div>
   </div>
   <div class="ann l" style="left:700px;top:14px;max-width:340px">各页签自己的时间范围；近 7 天、近 30 天切页签时带过去</div>
-  <div class="ann t" style="left:1000px;top:424px;max-width:330px">每一行按原因给一个按钮；暂时读不到的不带按钮，写「下次刷新会再读」</div>
+  <div class="ann t" style="left:1000px;top:448px;max-width:330px">每一行按原因给一个按钮；版本不支持、暂时读不到的不带按钮</div>
 </section>
 
 <!-- ═══ merge-mobile ═══ -->
@@ -342,15 +344,15 @@ pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; paddi
     <header class="topbar"><h1>成本和用量</h1><span class="spacer"></span><span class="fresh"><i></i>14:32</span></header>
     <div class="content">
       <div class="seg" style="display:flex;overflow:hidden"><span>近 7 天</span><span class="on">近 30 天</span><span>近 90 天</span><span>自定义</span></div>
-      <div class="tabbar"><span class="t on">成本</span><span class="q">?</span><span class="t">用量</span><div class="right"><span class="btn">筛选</span></div></div>
+      <div class="tabbar"><span class="t on">成本</span><span class="t">用量</span><div class="right"><span class="btn">筛选</span></div></div>
       <section class="panel">
         <div class="metricsN">
           <div class="mc"><span>上游成本</span><b>¥51,830.20</b><small>没算进利润 ¥427.60</small></div>
           <div class="mc"><span>固定成本</span><b>¥2,872.80</b></div>
-          <div class="mc"><span>日均</span><b>¥1,823.43</b></div>
-          <div class="mc"><span>预计一个月</span><b>¥54,702.90</b></div>
+          <div class="mc"><span>日均</span><b>¥1,953.68</b></div>
+          <div class="mc"><span>预计一个月</span><b>¥58,610.36</b></div>
         </div>
-        <div class="oneline">22 天没有记录 <a>查看</a></div>
+        <div class="oneline">2 天没有记录，这几天的上游成本没算全。</div>
       </section>
       <section class="panel"><div class="panel-head"><h2>每日成本</h2></div><div class="chartph" style="margin:0 16px 16px">一张一屏</div></section>
     </div>
