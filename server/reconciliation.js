@@ -519,11 +519,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 结一天（计划 C2a）：轮询回看和手动「重新读取」共用。取数走 inspectRule(settle)；结成了状态行在记账的事务里删掉，
   // 结不成按 settlementOutcome 记进状态表。返回 inspectRule 的结果（取数出错时是一份读不到的结果）。
-  async function settleDay(rule, window, { origin, ownerRegistry, state = null, resettle = false }) {
+  async function settleDay(rule, window, { origin, ownerRegistry, state = null, resettle = false, trigger = null }) {
     const billDate = billDayOf(window);
     let result;
     try {
-      result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettle: resettle || state?.resettleRequestedAt != null });
+      result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettle: resettle || state?.resettleRequestedAt != null, trigger });
     } catch (err) {
       if (err?.code === "RULE_NOT_FOUND") throw err;
       const code = ["PERSISTENCE_FAILED", "HISTORY_UNAVAILABLE"].includes(err?.code) ? err.code : "UPSTREAM_DATA_UNAVAILABLE";
@@ -1192,7 +1192,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // evaluate：只读已持久化的分段和锚定状态来计算，不写库、不通知；页面查询都走这条。
   // settle：结一个已经结束的日子（轮询回看和手动「重新读取」都走这条，计划 C2a）。强制重取，用已存的分段；
   //   不写分段、渠道状态、观测快照，不发告警；只按 settlementOutcome 写账本（多日写确认快照），结成了在同一个事务里删掉状态表那一行。
-  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle = false } = {}) {
+  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle = false, trigger = null } = {}) {
     const settle = mode === "settle";
     const observe = mode !== "evaluate";
     if (settle) force = true;
@@ -1675,7 +1675,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       if (!observe) return result;
       return (await persistResult(rule, result, origin, evidenceMetadata, evidenceToken, {
-        scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource, financialSnapshot, resettle, settle,
+        scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource, financialSnapshot, resettle, settle, trigger,
       })) ? (settle ? await bookedResult(rule, result) : result) : STALE_SCOPE;
     };
     // 口径在查询期间变化时，在共享的 in-flight 任务内重跑，加入等待的调用方也只会拿到最新口径的结果。
@@ -1782,7 +1782,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource })) ? unavailable : STALE_SCOPE;
   }
 
-  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false, settle = false } = {}) {
+  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false, settle = false, trigger = null } = {}) {
     const wholeWindow = { id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health };
     const segmentSnapshots = result.segments?.length ? result.segments : [wholeWindow];
     // 只有结束满 15 分钟的自然日窗口才结账：今天、近 7 天和刚结束的昨天还在变化，只记观测。
@@ -1853,7 +1853,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     };
     // 账本记下结账时的成本计法和汇率：汇率只在当时配置过时才记，没记的读取时按当前配置。
     const configuredRate = (rate) => isConfiguredRate(rate) ? rate.cnyPerUsd : null;
-    const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, sourceFor({ ...wholeWindow, recordType: "confirmed" }), {
+    // 账本明细里记下这次是怎么结的（计划 C2a 2.6）：poll 轮询结昨天、late 回看更早的日子、manual 手动重新读取、transition 改了切换时间的重结
+    const settlement = { trigger: trigger || (resettle ? "transition" : origin === "manual" ? "manual" : "poll") };
+    const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, { ...sourceFor({ ...wholeWindow, recordType: "confirmed" }), settlement }, {
       revenueRate: configuredRate(financialSnapshot.income), costRate: configuredRate(financialSnapshot.cost),
       costBasis: financialSnapshot.costBasis }) : null;
     // 记账的结论（ledgerOption.booked）由仓库在提交以后填上
@@ -2091,7 +2093,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const { action } = settlementPrecheck({ rule, window, now, state, resettle, ledgerHasDay: booked.has(key), sourceVersion });
         if (action === "settled" && state) repository.deleteSettlementState(rule.id, billDate).catch(() => {});
         if (action !== "due") continue;
-        (back === 1 ? plan.yesterday : plan.older).push({ rule, window, state, resettle, requested: state?.resettleRequestedAt != null });
+        (back === 1 ? plan.yesterday : plan.older).push({ rule, window, state, resettle, requested: state?.resettleRequestedAt != null, trigger: back === 1 ? null : "late" });
       }
     }
     for (const { rule } of plan.yesterday) plan.upstreams.add(rule.upstreamStationId);
@@ -2105,8 +2107,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   async function settleDue({ yesterday, older, budget }, ownerRegistry) {
-    const settle = async ({ rule, window, state, resettle }) => {
-      const result = await settleDay(rule, window, { origin: "poll", ownerRegistry, state, resettle }).catch(() => null);
+    const settle = async ({ rule, window, state, resettle, trigger }) => {
+      const result = await settleDay(rule, window, { origin: "poll", ownerRegistry, state, resettle, trigger }).catch(() => null);
       if (resettle && result?.calculation?.profitUsd != null) resettles.delete(rule.id);
       return result;
     };

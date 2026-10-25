@@ -5163,6 +5163,9 @@ test("C2a 回看也先把要结的上游全部重读：quota_per_unit 在两次�
   await f.module.refreshDue(now);
   assert.deepEqual(booked("2026-10-08").map(([id]) => id), ["rr_live", "rr_three", "rr_two"], "昨天三条都结了");
   assert.deepEqual(booked("2026-10-07").map(([id]) => id), ["rr_live"], "回看这一轮只结 1 天");
+  assert.deepEqual(f.state.ledger.map((row) => [row.rule_id, row.bill_date, row.detail.settlement?.trigger]).sort(),
+    [["rr_live", "2026-10-07", "late"], ["rr_live", "2026-10-08", "poll"], ["rr_three", "2026-10-08", "poll"], ["rr_two", "2026-10-08", "poll"]],
+    "账本明细记下怎么结的：轮询结昨天 poll、回看更早的日子 late");
   const yesterdayCost = Object.fromEntries(booked("2026-10-08"));
 
   // 两次轮询之间上游改了 quota_per_unit；这一轮只有回看要结（rr_two 的 10-07），照样现读 /api/status
@@ -6837,7 +6840,8 @@ test("C2a 手动「重新读取」过去的整天走结账：结不成只更新�
   assert.equal(settled.calculation.profitUsd, 1.5);
   assert.ok(settled.settledAt, "结成了");
   assert.equal(f.repository.tables.settlementState.some((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08"), false, "状态行在记账的事务里删掉");
-  assert.deepEqual(f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => [row.bill_date, row.revision, row.source]), [["2026-10-08", 1, "settle"]]);
+  assert.deepEqual(f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => [row.bill_date, row.revision, row.source, row.detail.settlement?.trigger]),
+    [["2026-10-08", 1, "settle", "manual"]], "账本明细记下是手动结的");
 });
 
 test("C2a 结账（settle）只写账本和状态行：不写观测快照、渠道状态、分段，不发告警", async (t) => {
