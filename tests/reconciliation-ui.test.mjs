@@ -2389,7 +2389,7 @@ test("a later retry may finish before an earlier retry without losing either res
   const readyB = new Promise((resolve) => started.set("rule-2", resolve));
   await page.locator("tr", { hasText: "Rule A" }).getByRole("button", { name: `${RETRY} Rule A`, exact: true }).click();
   await page.locator("tr", { hasText: "Rule B" }).getByRole("button", { name: `${RETRY} Rule B`, exact: true }).click();
-  await Promise.all([readyA, readyB]);
+  await within(Promise.all([readyA, readyB]), "页面发出 Rule A 和 Rule B 的重新读取");
   deferred.get("rule-2").resolve(fulfill(deferred.get("rule-2").route, cachedResponse(initial, [rule("rule-2", "Rule B", 42)])));
   await page.locator("tr", { hasText: "$42.00" }).waitFor();
   deferred.get("rule-1").resolve(fulfill(deferred.get("rule-1").route, cachedResponse(initial, [rule("rule-1", "Rule A", 102)])));
@@ -2419,7 +2419,7 @@ test("one failed retry leaves another rule's successful result and controls usab
   const retryBButton = rowB.getByRole("button", { name: `${RETRY} Rule B`, exact: true });
   await retryAButton.click();
   await retryBButton.click();
-  await Promise.all([readyA, readyB]);
+  await within(Promise.all([readyA, readyB]), "页面发出 Rule A 和 Rule B 的重新读取");
   deferred.get("rule-2").resolve(fulfill(deferred.get("rule-2").route, cachedResponse(initial, [rule("rule-2", "Rule B", 43)])));
   await rowB.getByText("$43.00", { exact: true }).waitFor();
   await retryBButton.locator(".ant-btn-loading-icon").waitFor({ state: "hidden" });
