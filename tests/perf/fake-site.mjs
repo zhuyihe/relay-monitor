@@ -214,6 +214,10 @@ const roleOf = (u) => ROLE_OVERRIDES.get(u.id) ?? u.role;
 const testLogItem = ({ n, c, t }) => ({ id: TEST_ID_BASE + n * N_CH + c, user_id: 1, created_at: t, type: 2, content: TEST_NAME, username: "root",
   token_name: TEST_NAME, token_id: 0, model_name: MODELS[c % MODELS.length], quota: testQuota(c), prompt_tokens: 10, completion_tokens: 1,
   use_time: 1, is_stream: false, channel: c, channel_name: CHANNELS[c - 1].name, group: OWN_GROUPS[0], ip: "", other: "" });
+// 带筛选的查询里测试日志算不算在内：测试日志记在 root（user_id 1）名下、token_name「模型测试」，没有别的模型、分组筛选时，
+// 按 username=root 查（可以再加 channel、token_name=模型测试）也要查得到它们，和真 New API 一样
+const testInFilter = (q) => TEST_LOGS && q.get("username") === "root" && !q.get("model_name") && !q.get("group")
+  && (!q.get("token_name") || q.get("token_name") === TEST_NAME);
 const testQuotaIn = (s, e, channel = 0) => { let q = 0; for (const ev of testEvents(s, e, channel)) q += testQuota(ev.c); return q; };
 
 function logItem(ev) {
@@ -280,7 +284,7 @@ function ownSite(rest, q, req) {
       if (TEST_LOGS && tokenName === TEST_NAME) return [200, ok({ quota: testQuotaIn(s, e, channel), rpm: 0, tpm: 0 })];
       if (onlyChannel) quota = channelQuota(agg, [channel], s, e)[channel] + testQuotaIn(s, e, channel);
       else if (!filter) { const all = channelQuota(agg, CHANNELS.map((c) => c.id), s, e); for (let c = 1; c <= N_CH; c++) quota += all[c]; quota += testQuotaIn(s, e); }
-      else agg.scan(s, e, null, (ev) => { if (filter(ev)) quota += ev.quota; });
+      else { agg.scan(s, e, null, (ev) => { if (filter(ev)) quota += ev.quota; }); if (testInFilter(q)) quota += testQuotaIn(s, e, channel); }
       return [200, ok({ quota, rpm: 0, tpm: 0 })];
     }
     case "/api/log/": {
@@ -303,6 +307,19 @@ function ownSite(rest, q, req) {
           for (const ev of testEvents(s, e)) { if (head.length < size) head.push(testLogItem(ev)); tests++; }
           total += tests;
           if (p === 1) items = [...items, ...head].sort((a, b) => b.created_at - a.created_at || b.id - a.id).slice(0, size);
+        }
+      } else if (testInFilter(q)) {
+        // root 名下：普通日志和测试日志按时刻（同一秒按编号）从新到旧合起来分页
+        const from = (p - 1) * size;
+        const regular = (function* () { const ev = {}; for (let k = kLast; k >= kFirst; k--) { agg.em.decode(k, ev); if (filter(ev)) yield logItem(ev); } })();
+        const tests = (function* () { for (const ev of testEvents(s, e, num(q.get("channel"), 0))) yield testLogItem(ev); })();
+        let a = regular.next(), b = tests.next();
+        while (!a.done || !b.done) {
+          const takeA = b.done || (!a.done && (a.value.created_at > b.value.created_at || (a.value.created_at === b.value.created_at && a.value.id > b.value.id)));
+          const item = takeA ? a.value : b.value;
+          if (takeA) a = regular.next(); else b = tests.next();
+          if (total >= from && total < from + size) items.push(item);
+          total++;
         }
       } else {
         const ev = {};
