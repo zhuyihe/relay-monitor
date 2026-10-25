@@ -4419,7 +4419,7 @@ test("合并重复的上游：手机上抽屉从底部升起占满，按钮至�
   const { page } = await openMergePage(t, { groups: [mergeGroupOf()], records: [] }, { viewport: { width: 390, height: 844 } });
   await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
   const drawer = mergeDrawer(page); await drawer.waitFor();
-  const box = await page.locator(".ant-drawer-content-wrapper").boundingBox();
+  const box = await page.locator(".ant-drawer-content-wrapper").filter({ has: page.getByTestId("merge-drawer") }).boundingBox();
   assert.ok(box.width >= 389 && box.height >= 843, `抽屉占满：${box.width}×${box.height}`);
   assert.ok((await mergeCard(page, "主力上游").getByRole("button", { name: "合并", exact: true }).boundingBox()).height >= 44);
 });
