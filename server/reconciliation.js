@@ -2128,18 +2128,34 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   async function settleDue({ yesterday, older, recheck = [], budget }, ownerRegistry) {
     const sourceVersion = ownerRegistry.billingSource.version;
-    await mapWithConcurrency(recheck, MAX_CONCURRENT_RULES, async ({ rule, window, state }) => {
-      let probed = null;
-      try { probed = await inspectRule(rule.id, window, { mode: "settle", probe: true, origin: "poll", ownerRegistry }); } catch (err) {
-        if (err?.code === "RULE_NOT_FOUND") return;
-        console.error("重判结账状态失败:", err?.message || String(err));
+    // 取数前的判断（inspectRule 的 probe）：还挡着的要人处理的原因码；判不出来（出错、还没锚定、口径正在改）时是 undefined
+    const probe = async (rule, window) => {
+      try {
+        const probed = await inspectRule(rule.id, window, { mode: "settle", probe: true, origin: "poll", ownerRegistry });
+        return probed?.probe ? probed.blocker : undefined;
+      } catch (err) {
+        if (err?.code !== "RULE_NOT_FOUND") console.error("重判结账状态失败:", err?.message || String(err));
+        return undefined;
       }
-      // 没判出来（出错、还没锚定、口径正在改）：照原因还在处理，10 分钟后再判，不每轮重来
-      const blocker = probed?.probe ? probed.blocker : state.manualReason;
+    };
+    await mapWithConcurrency(recheck, MAX_CONCURRENT_RULES, async ({ rule, window, state }) => {
+      const probed = await probe(rule, window);
+      // 没判出来：照原因还在处理，10 分钟后再判，不每轮重来
+      const blocker = probed === undefined ? state.manualReason : probed;
       const next = settlementRecheck({ window, state, blocker, now: Date.now(), sourceVersion });
       try { await repository.recordSettlementState(rule.id, billDayOf(window), next); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
     });
     const settle = async ({ rule, window, state, resettle, trigger }) => {
+      // 第一次试的日子（没有状态行）先在本地判断：取数前就能看出要人处理的（没回答「这把 Key 还给别处用吗？」、来源没确认……）
+      // 直接记下，不取账单。刚上线时回看 7 天的那一批就不会为挡着的绑定白取一遍
+      if (!state && !resettle) {
+        const blocker = await probe(rule, window);
+        if (blocker && reasonKindOf(blocker) !== "retry") {
+          const next = settlementOutcome({ window, result: { health: { code: blocker } }, now: Date.now(), sourceVersion }).state;
+          try { if (next) await repository.recordSettlementState(rule.id, billDayOf(window), next); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
+          return { blocked: true };
+        }
+      }
       const startedAt = Date.now();
       const result = await settleDay(rule, window, { origin: "poll", ownerRegistry, state, resettle, trigger }).catch(() => null);
       // 昨天这一轮结成了（带不带重结标记都一样）：这次结账开始以前提的重结请求也就办完了；结账途中才提的留着
@@ -2167,7 +2183,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         busy.add(item.rule.upstreamStationId);
         const result = await settle(item);
         busy.delete(item.rule.upstreamStationId);
-        if (result?.calculation?.profitUsd == null) skipped.add(item.rule.upstreamStationId);
+        // 本地就判出来挡着的：没取账单，不占预算，也不算这个上游没成
+        if (result?.blocked) taken -= 1;
+        else if (result?.calculation?.profitUsd == null) skipped.add(item.rule.upstreamStationId);
       }
     }));
   }
