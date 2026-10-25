@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  aggregateFlow, computeFlowBreakdown, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
+  aggregateFlow, computeFlowBreakdown, computeProfit, joinPrev, mapCostChannels, matchCostStations, normalizeCostUrl,
   getOwnUsers, readOwnIncome, readOwnIncomeOrUnconfirmed, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
   ownUsersKey, unconfirmedIncomeProfit, resoldAdminKeysOf, dedupeResoldKeys, readOwnAdminDirectory,
 } from "./own-helpers.js";
@@ -329,10 +329,23 @@ test("成本渠道支持主地址、api 后缀和显式别名匹配", () => {
   };
 
   assert.equal(normalizeCostUrl(" HTTPS://Relay.Example.com/ "), "relay.example.com");
-  assert.equal(matchCostStation([publicStation], "https://relay.example.com/api"), publicStation);
-  assert.equal(matchCostStation([internalStation], "http://sub2api-internal/v1"), internalStation);
-  assert.equal(matchCostStation([internalStation], "http://10.0.0.8:8080"), internalStation);
-  assert.equal(matchCostStation([publicStation], "https://other.example.com"), null);
+  assert.deepEqual(matchCostStations([publicStation], "https://relay.example.com/api"), [publicStation]);
+  assert.deepEqual(matchCostStations([internalStation], "http://sub2api-internal/v1"), [internalStation]);
+  assert.deepEqual(matchCostStations([internalStation], "http://10.0.0.8:8080"), [internalStation]);
+  assert.deepEqual(matchCostStations([publicStation], "https://other.example.com"), []);
+});
+
+test("同一个网站上两个账号：渠道地址对上几个就都算候选，得分低的不算", () => {
+  const first = { id: "a1", baseUrl: "https://relay.example.com" };
+  const second = { id: "a2", baseUrl: "https://relay.example.com/" };
+  const viaApi = { id: "a3", baseUrl: "https://relay.example.com/api" };
+  const other = { id: "b1", baseUrl: "https://other.example.com" };
+  assert.deepEqual(matchCostStations([first, second, other], "https://relay.example.com").map((s) => s.id), ["a1", "a2"]);
+  // 地址完全一样（3 分）比只差一个 /api 后缀（2 分）高，后者不进候选
+  assert.deepEqual(matchCostStations([viaApi, first, second], "https://relay.example.com").map((s) => s.id), ["a1", "a2"]);
+  const matched = mapCostChannels([first, second, other], [{ name: "渠道甲", baseUrl: "https://relay.example.com", status: 1 }]).matched;
+  assert.deepEqual([...matched.keys()], ["a1", "a2"]);
+  assert.deepEqual(matched.get("a2").channels, ["渠道甲"]);
 });
 
 test("用量接口返回零但余额下降时改用历史成本", () => {

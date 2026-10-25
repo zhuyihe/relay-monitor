@@ -148,7 +148,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Verify migrations and onboarding SQL on isolated MySQL 8
-        run: node --test db/schema.integration.test.js
+        run: node --test --test-concurrency=1 db/schema.integration.test.js db/upstream-merge.integration.test.js
         env:
           ONBOARDING_SCHEMA_TEST: '1'
           DB_HOST: 127.0.0.1
@@ -177,6 +177,9 @@ jobs:
       # 密钥丢了时要在镜像里跑的恢复脚本（deploy/README.md「加密密钥丢了怎么办」）
       - name: Secret reset script loads inside the image
         run: docker run --rm --entrypoint node relay-monitor:smoke --input-type=module -e "await import('/app/db/secrets.js'); await import('/app/db/reset-secrets.js'); console.log('secret modules ok')"
+      # 合并重复上游以后想改回去要在镜像里跑的脚本（deploy/README.md「合并重复的上游」）；它引用的模块都要在镜像里
+      - name: Upstream unmerge script loads inside the image
+        run: docker run --rm --entrypoint node relay-monitor:smoke --input-type=module -e "await import('/app/db/k-unmerge.js'); await import('/app/db/upstream-merge-repository.js'); console.log('unmerge modules ok')"
       # 登录限流按连接地址算要用的预加载模块：lib/ 漏拷进镜像时，容器实际启动命令（Dockerfile CMD）会直接起不来，这里当场发现
       - name: Login rate-limit preload module loads inside the image
         run: docker run --rm --entrypoint node relay-monitor:smoke --import /app/lib/peer-address.js --input-type=module -e "console.log('peer-address preload ok')"

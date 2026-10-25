@@ -5,31 +5,7 @@ import { refreshStation } from "../server/refresh.js";
 import { selectCostUpstreams } from "../server/own-helpers.js";
 import { evaluateStation } from "../lib/alerts.js";
 
-function fakePool(stations = [], channels = []) {
-  const conn = {
-    beginTransaction: async () => {},
-    query: async () => [[]],
-    commit: async () => {},
-    rollback: async () => {},
-    release: () => {},
-  };
-  return {
-    query: async (sql) => {
-      if (sql.startsWith("SELECT id, doc FROM stations")) {
-        return [stations.map((doc) => ({ id: doc.id, doc }))];
-      }
-      if (sql.startsWith("SELECT k, v FROM meta")) {
-        return [[
-          { k: "settings", v: {} },
-          { k: "auth", v: { username: "admin", salt: "test", hash: "test" } },
-          { k: "notifications", v: { channels: structuredClone(channels), rules: {} } },
-        ]];
-      }
-      return [[]];
-    },
-    getConnection: async () => conn,
-  };
-}
+import { fakePool } from "./test-support/fake-pool.js";
 
 test("旧站点数据升级时默认保持续费", async () => {
   const store = await new Store(fakePool([{ id: "old", name: "旧站点", fixedPurchases: [] }])).load();

@@ -4249,3 +4249,389 @@ test("编辑自营站点：「汇率」那一格叫「售价」，只对上游�
   assert.equal(saves.length, 1); assert.equal(saves[0].cnyPerUsd, "8"); assert.equal(saves[0].isOwn, true); assert.equal(saves[0].includeInProfit, true);
   assert.deepEqual(saves[0].costAliases, ["10.0.0.8:8080"]); assert.equal(saves[0].lowBalanceUsd, "3"); assert.equal(saves[0].noRenewal, true);
 });
+
+// ---- 合并重复的上游（K1a，design/ux/k1a-merge.md 第 9 节验收清单）-------------------------------------
+const MERGE_TZ = "Asia/Shanghai";
+const mergeBrief = (id, name) => ({ id, name });
+const mergeEstimate = () => ({ windows: [
+  { days: 7, before: { cny: 3211.2 }, after: { cny: 1070.4 } }, { days: 30, before: { cny: 13982.4 }, after: { cny: 4660.8 } }] });
+const mergeGroupOf = (extra = {}) => ({
+  key: { provider: "newapi", baseUrl: "https://api.example.com", accountId: "1024" },
+  retained: { id: "m-a", name: "主力上游", baseUrl: "https://api.example.com", createdAt: "2026-10-03T02:00:00.000Z" },
+  merged: [mergeBrief("m-b", "主力上游（2）"), mergeBrief("m-c", "主力上游·备用")],
+  ruleIds: [], linkCount: 0, droppedLinkCount: 0, costAliasesAfter: [], blockers: [], canMerge: true, estimate: mergeEstimate(), rateNote: null,
+  versions: { "m-a": { authVersion: 1, resourceVersion: "v-a" }, "m-b": { authVersion: 2, resourceVersion: "v-b" }, "m-c": { authVersion: 1, resourceVersion: "v-c" } }, ...extra,
+});
+const mergeBlockedGroup = () => mergeGroupOf({
+  retained: { id: "k-a", name: "拼车团队", baseUrl: "https://pool.example.net", createdAt: "2026-10-05T02:00:00.000Z" },
+  merged: [mergeBrief("k-b", "拼车团队（旧）")], canMerge: false,
+  blockers: [{ code: "RULE_KEY_CONFLICT", detail: "", tokenId: 5, tokenName: "oai", ruleId: "rule-oai", stationIds: ["k-a", "k-b"] }],
+  estimate: { windows: [{ days: 7, before: { cny: 16.8 }, after: { cny: 8.4 } }, { days: 30, before: { cny: 72 }, after: { cny: 36 } }] },
+});
+const mergeCountsOf = (model) => ({ mergeable: model.groups.filter((g) => g.canMerge).length, blocked: model.groups.filter((g) => !g.canMerge).length,
+  accounts: model.groups.length, upstreams: model.groups.reduce((n, g) => n + 1 + g.merged.length, 0), records: model.records.length });
+// model.failMerge / failUndo：下一次 POST 回的错（一次性），{ status（默认 409）, ...body }
+async function openMergePage(t, model, { viewport, path = "/stations" } = {}) {
+  const calls = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), p = url.pathname, method = route.request().method();
+    if (p === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (p === "/api/stations") return fulfill(route, { stations: [{ id: "m-a", name: "主力上游", type: "newapi", baseUrl: "https://api.example.com", monitorEnabled: true, balance: { ok: true, remaining: 12.3, checkedAt: new Date().toISOString() }, prediction: null, spark: [] }],
+      settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, tz: MERGE_TZ, generatedAt: new Date().toISOString(), merge: mergeCountsOf(model) });
+    if (p === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {}, settings: {} });
+    if (p === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (/^\/api\/stations\/[^/]+$/.test(p) && method === "PUT") {
+      const body = route.request().postDataJSON(); calls.push({ path: p, body });
+      // model.failResume：「恢复监控」时回的错（一次性），比如版本对不上的 409
+      if (model.failResume) { const { status = 409, ...failure } = model.failResume; model.failResume = null; return failJSON(route, status, failure); }
+      model.groups = model.groups.map((g) => ({ ...g, blockers: g.blockers.filter((b) => b.code !== "MONITOR_MISMATCH"), canMerge: g.blockers.every((b) => b.code === "MONITOR_MISMATCH") }));
+      return fulfill(route, { station: { id: p.split("/").pop() } });
+    }
+    if (p === "/api/upstream-merges" && method === "GET") model.gets = (model.gets || 0) + 1;
+    if (p === "/api/upstream-merges" && method === "GET") return fulfill(route, { groups: model.groups, records: model.records, counts: mergeCountsOf(model), tz: MERGE_TZ });
+    if (p === "/api/upstream-merges" && method === "POST") {
+      const body = route.request().postDataJSON(); calls.push({ path: p, body });
+      if (model.failMerge) { const { status = 409, ...failure } = model.failMerge; model.failMerge = null; return failJSON(route, status, failure); }
+      const group = model.groups.find((g) => g.retained.id === body.retainedId);
+      model.groups = model.groups.filter((g) => g !== group);
+      model.records.unshift({ mergeId: `mg_${calls.length}`, mergedAtMs: Date.parse("2026-10-25T06:30:00Z"), undoneAtMs: null, retained: { id: group.retained.id, name: group.retained.name }, merged: group.merged, undoable: true, undoBlocked: null, group });
+      return fulfill(route, { mergeId: `mg_${calls.length}` });
+    }
+    if (p === "/api/upstream-merges/undo") {
+      const body = route.request().postDataJSON(); calls.push({ path: p, body });
+      if (model.failUndo) { const { status = 409, ...failure } = model.failUndo; model.failUndo = null; return failJSON(route, status, failure); }
+      const record = model.records.find((r) => r.mergeId === body.mergeId); record.undoneAtMs = Date.parse("2026-10-25T07:10:00Z"); record.undoable = false; model.groups.push(record.group);
+      return fulfill(route, { mergeId: body.mergeId });
+    }
+    throw new Error("unexpected API: " + method + " " + p);
+  }, viewport, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: new Date().toISOString() }), path);
+  return { page, calls };
+}
+const mergeDrawer = (page) => page.getByRole("dialog", { name: "合并重复的上游", exact: true });
+const mergeCard = (page, name) => page.locator("section.jy-merge-card").filter({ has: page.getByRole("heading", { name: new RegExp(`^「${name}」这一组`) }) });
+
+test("合并重复的上游：没有要合的、合并记录里也没东西时，上游列表没有提示也没有「合并记录」", async (t) => {
+  const { page } = await openMergePage(t, { groups: [], records: [] });
+  await page.getByRole("button", { name: "主力上游 的更多操作", exact: true }).first().waitFor();
+  assert.equal(await page.getByTestId("merge-notice").count(), 0);
+  assert.equal(await page.getByRole("button", { name: "更多操作", exact: true }).count(), 0);
+});
+
+test("合并重复的上游：提示写有几组，点「查看」打开抽屉；一组一张卡片，没有「全部合并」；合并先确认、确认后这一组消失、合并记录多一行", async (t) => {
+  const model = { groups: [mergeGroupOf(), mergeBlockedGroup()], records: [] };
+  const { page, calls } = await openMergePage(t, model);
+  const notice = page.getByTestId("merge-notice");
+  await notice.getByText("有 2 组上游是同一个账号，合成一个以后成本估算不再重复算", { exact: true }).waitFor();
+  await notice.getByRole("button", { name: "查看", exact: true }).click();
+  const drawer = mergeDrawer(page); await drawer.waitFor();
+  await drawer.getByText("下面每组是同一个上游账号（类型、地址、账号 ID 都一样），被加成了几个上游。合成一个以后，成本估算不再重复算；每日利润不受影响。", { exact: true }).waitFor();
+  const card = mergeCard(page, "主力上游");
+  await card.getByText("3 个上游", { exact: true }).waitFor();
+  await card.getByText("「主力上游（2）」「主力上游·备用」并进「主力上游」", { exact: true }).waitFor();
+  await card.getByText("留下的是最早加的那个（10月3日 加的，余额历史最长）；名字以后可以在编辑上游里改。地址 api.example.com、账号 ID 1024 都一样。", { exact: true }).waitFor();
+  await card.getByText("近 7 天", { exact: true }).waitFor(); await card.getByText("¥3,211.20 → ¥1,070.40", { exact: true }).waitFor();
+  await card.getByText("¥13,982.40 → ¥4,660.80", { exact: true }).waitFor(); await card.getByText("这个账号加成了 3 个上游", { exact: true }).waitFor();
+  assert.equal(await drawer.getByRole("button", { name: /全部合并/ }).count(), 0);
+  // 合不了的那组：标「合不了」，「合并」灰着，写清是哪把 Key 在哪两个上游下，有「处理重复」
+  const blocked = mergeCard(page, "拼车团队");
+  await blocked.getByText("合不了", { exact: true }).waitFor();
+  assert.equal(await blocked.getByRole("button", { name: "合并", exact: true }).isDisabled(), true);
+  await blocked.getByText("「拼车团队」和「拼车团队（旧）」下都绑了 Key「oai」，合成一个以后这把 Key 会算两次。先在需处理里处理「这把 Key 绑了两次」那一条，再回来合。", { exact: true }).waitFor();
+  await blocked.getByRole("button", { name: "处理重复", exact: true }).waitFor();
+  // 合并：先确认
+  await card.getByRole("button", { name: "合并", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "合并「主力上游」这一组？", exact: true }); await confirm.waitFor();
+  await confirm.getByText("「主力上游（2）」「主力上游·备用」会并进「主力上游」：它们从上游列表里消失，不再单独读余额；登录信息、余额历史都留着。", { exact: true }).waitFor();
+  await confirm.getByText("绑定改到「主力上游」上，每日利润不变。成本估算近 30 天从 ¥13,982.40 变成 ¥4,660.80，不再重复算。", { exact: true }).waitFor();
+  await confirm.getByText("合错了可以在「合并记录」里退回。", { exact: true }).waitFor();
+  assert.equal(calls.length, 0);
+  await confirm.getByRole("button", { name: "取消", exact: true }).click(); await confirm.waitFor({ state: "hidden" });
+  assert.equal(calls.length, 0);
+  await card.getByRole("button", { name: "合并", exact: true }).click(); await confirm.waitFor();
+  await confirm.getByRole("button", { name: "合并", exact: true }).click(); await confirm.waitFor({ state: "hidden" });
+  assert.deepEqual(calls, [{ path: "/api/upstream-merges", body: { retainedId: "m-a", mergedIds: ["m-b", "m-c"] } }]);
+  await page.getByText("已合并，上游列表少了 2 个", { exact: true }).waitFor();
+  await card.waitFor({ state: "detached" });
+  // 合并记录：收起区，点开一行一次
+  const records = drawer.getByRole("button", { name: "合并记录（1 次）", exact: true }); await records.click();
+  await drawer.getByText(formatZonedDateTime(Date.parse("2026-10-25T06:30:00Z"), MERGE_TZ), { exact: true }).waitFor();
+  await drawer.getByText("「主力上游（2）」「主力上游·备用」并进「主力上游」", { exact: true }).waitFor();
+  await drawer.getByRole("button", { name: "退回", exact: true }).waitFor();
+});
+
+test("合并重复的上游：碰上 409（这一组在别处变了）写「这一组已经变了，刷新后再看。」，按钮是「刷新」不是「再试一次」，点了关掉确认框、重读清单", async (t) => {
+  const model = { groups: [mergeGroupOf()], records: [], failMerge: { error: "清单变了", code: "UPSTREAM_MERGE_STALE" } };
+  const { page, calls } = await openMergePage(t, model);
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  await mergeCard(page, "主力上游").getByRole("button", { name: "合并", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "合并「主力上游」这一组？", exact: true }); await confirm.waitFor();
+  await confirm.getByRole("button", { name: "合并", exact: true }).click();
+  await confirm.getByText("这一组已经变了，刷新后再看。", { exact: true }).waitFor();
+  assert.equal(await confirm.getByRole("button", { name: "再试一次", exact: true }).count(), 0);
+  // 别处已经合过了：刷新以后这一组不在清单里
+  model.groups = [];
+  await confirm.getByRole("button", { name: "刷新", exact: true }).click(); await confirm.waitFor({ state: "hidden" });
+  assert.equal(calls.length, 1, "没有再发一次合并");
+  await mergeDrawer(page).getByText("没有要合的上游了。", { exact: true }).waitFor();
+});
+
+test("合并重复的上游：别的没成（连不上之类）写「合并没成：原因。什么都没改。」，按钮换成「再试一次」，再点成功", async (t) => {
+  const model = { groups: [mergeGroupOf()], records: [], failMerge: { status: 500, error: "boom" } };
+  const { page, calls } = await openMergePage(t, model);
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  await mergeCard(page, "主力上游").getByRole("button", { name: "合并", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "合并「主力上游」这一组？", exact: true }); await confirm.waitFor();
+  await confirm.getByRole("button", { name: "合并", exact: true }).click();
+  await confirm.getByText("合并没成：操作没完成，请稍后再试。什么都没改。", { exact: true }).waitFor();
+  await confirm.getByRole("button", { name: "再试一次", exact: true }).click(); await confirm.waitFor({ state: "hidden" });
+  assert.equal(calls.length, 2);
+  await page.getByText("已合并，上游列表少了 2 个", { exact: true }).waitFor();
+});
+
+test("合并重复的上游：退回碰上 409 写「这次合并已经变了，刷新后再看。」[刷新]", async (t) => {
+  const group = mergeGroupOf();
+  const record = { mergeId: "mg_x", mergedAtMs: Date.parse("2026-10-20T01:12:00Z"), undoneAtMs: null, retained: { id: "m-a", name: "主力上游" }, merged: [mergeBrief("m-b", "主力上游（2）")], undoable: true, undoBlocked: null, group };
+  const model = { groups: [], records: [record], failUndo: { error: "已经退回了", code: "UPSTREAM_MERGE_STALE" } };
+  const { page } = await openMergePage(t, model);
+  await page.getByRole("button", { name: "更多操作", exact: true }).click();
+  await page.getByRole("menuitem", { name: "合并记录", exact: true }).click();
+  const drawer = mergeDrawer(page); await drawer.getByRole("button", { name: "合并记录（1 次）", exact: true }).click();
+  await drawer.getByRole("button", { name: "退回", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "退回这次合并？", exact: true }); await confirm.waitFor();
+  await confirm.getByRole("button", { name: "退回", exact: true }).click();
+  await confirm.getByText("这次合并已经变了，刷新后再看。", { exact: true }).waitFor();
+  assert.equal(await confirm.getByRole("button", { name: "再试一次", exact: true }).count(), 0);
+  await confirm.getByRole("button", { name: "刷新", exact: true }).click(); await confirm.waitFor({ state: "hidden" });
+});
+
+test("合并重复的上游：成本估算算不出时两行写「—」，下面一句，合并照样能点", async (t) => {
+  const { page } = await openMergePage(t, { groups: [mergeGroupOf({ estimate: null })], records: [] });
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const card = mergeCard(page, "主力上游");
+  await card.getByText("— → —", { exact: true }).first().waitFor();
+  await card.getByText("成本估算暂时算不出，合并照样能做", { exact: true }).waitFor();
+  assert.equal(await card.getByRole("button", { name: "合并", exact: true }).isEnabled(), true);
+});
+
+test("合并重复的上游：只有合不了的组时提示换一句；「处理重复」去现成的那个地方；前后的数带「≈」时照写", async (t) => {
+  const blocked = mergeBlockedGroup(); blocked.estimate = { windows: [{ days: 7, approx: true, before: { cny: 3211.2 }, after: { cny: 1070.4 } }, { days: 30, approx: true, before: { cny: 13982.4 }, after: { cny: 4660.8 } }] };
+  const { page } = await openMergePage(t, { groups: [blocked], records: [] });
+  await page.getByTestId("merge-notice").getByText("有 1 组上游是同一个账号，现在还合不了", { exact: true }).waitFor();
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const card = mergeCard(page, "拼车团队");
+  await card.getByText("≈ ¥3,211.20 → ≈ ¥1,070.40", { exact: true }).waitFor();
+  await card.getByRole("button", { name: "处理重复", exact: true }).click();
+  await page.waitForURL((url) => url.pathname === "/stations" && url.searchParams.get("action") === "conflict" && url.searchParams.get("ruleId") === "rule-oai");
+});
+
+test("合并重复的上游：前后的数一样时，确认框第二句只写绑定改到哪、每日利润不变", async (t) => {
+  const same = mergeGroupOf({ estimate: { windows: [{ days: 7, before: { cny: 5 }, after: { cny: 5 } }, { days: 30, before: { cny: 21.32 }, after: { cny: 21.32 } }] } });
+  const { page } = await openMergePage(t, { groups: [same], records: [] });
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  await mergeCard(page, "主力上游").getByRole("button", { name: "合并", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "合并「主力上游」这一组？", exact: true }); await confirm.waitFor();
+  await confirm.getByText("绑定改到「主力上游」上，每日利润不变。", { exact: true }).waitFor();
+  assert.equal(await confirm.getByText(/从 .* 变成/).count(), 0);
+});
+
+test("合并重复的上游：合并记录里「退回」先确认，退回后那一行写已退回、不再有按钮，这一组回到清单；退回不了的按钮灰着、悬停写原因", async (t) => {
+  const group = mergeGroupOf();
+  const record = (extra) => ({ mergeId: "mg_x", mergedAtMs: Date.parse("2026-10-20T01:12:00Z"), undoneAtMs: null, retained: { id: "m-a", name: "主力上游" }, merged: [mergeBrief("m-b", "主力上游（2）")], undoable: true, undoBlocked: null, group, ...extra });
+  const model = { groups: [], records: [record(), record({ mergeId: "mg_gone", undoable: false, undoBlocked: { code: "UPSTREAM_DELETED", detail: "「主力上游（3）」已经删了，退回不了" } })] };
+  const { page, calls } = await openMergePage(t, model);
+  // 没有要合的组，提示不出现；合并记录入口在「⋯」里
+  assert.equal(await page.getByTestId("merge-notice").count(), 0);
+  await page.getByRole("button", { name: "更多操作", exact: true }).click();
+  await page.getByRole("menuitem", { name: "合并记录", exact: true }).click();
+  const drawer = mergeDrawer(page); await drawer.getByText("没有要合的上游了。", { exact: true }).waitFor();
+  await drawer.getByRole("button", { name: "合并记录（2 次）", exact: true }).click();
+  const rows = drawer.locator("li.jy-merge-record");
+  const gone = rows.nth(1);
+  assert.equal(await gone.getByRole("button", { name: "退回", exact: true }).isDisabled(), true);
+  assert.equal(await gone.getByRole("button", { name: "退回", exact: true }).getAttribute("title"), "「主力上游（3）」已经删了，退回不了");
+  // 原因也写在这一行下面（悬停提示键盘、读屏、手机读不到）
+  await gone.getByText("「主力上游（3）」已经删了，退回不了", { exact: true }).waitFor();
+  // 桌面宽度下原因另起一行，正文不能被压扁（不换行时「并进」那段文字会是 0 宽、逐字竖排，getByText 对 0 宽节点也算可见，所以要量）
+  const text = await gone.locator(".jy-merge-record__text").boundingBox();
+  assert.ok(text.width > 150 && text.height < 40, `正文 ${text.width}×${text.height}`);
+  const why = await gone.locator(".jy-merge-record__why").boundingBox(), when = await gone.locator(".jy-merge-record__when").boundingBox();
+  assert.ok(why.y > when.y + when.height - 1, "原因在下一行");
+  await rows.first().getByRole("button", { name: "退回", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "退回这次合并？", exact: true }); await confirm.waitFor();
+  await confirm.getByText("「主力上游（2）」回到上游列表，接着各自读余额；成本估算又会把这个账号重复算。", { exact: true }).waitFor();
+  await confirm.getByText("合并以后在「主力上游」上加的绑定和改的设置，留在「主力上游」上，不跟着走。", { exact: true }).waitFor();
+  await confirm.getByRole("button", { name: "退回", exact: true }).click(); await confirm.waitFor({ state: "hidden" });
+  assert.deepEqual(calls, [{ path: "/api/upstream-merges/undo", body: { mergeId: "mg_x" } }]);
+  await page.getByText("已退回", { exact: true }).first().waitFor();
+  await rows.first().getByText(`已退回（${formatZonedDateTime(Date.parse("2026-10-25T07:10:00Z"), MERGE_TZ)}）`, { exact: true }).waitFor();
+  assert.equal(await rows.first().getByRole("button", { name: "退回", exact: true }).count(), 0);
+  await mergeCard(page, "主力上游").waitFor();
+});
+
+test("合并重复的上游：手机上抽屉从底部升起占满，按钮至少 44 高", async (t) => {
+  const { page } = await openMergePage(t, { groups: [mergeGroupOf()], records: [] }, { viewport: { width: 390, height: 844 } });
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const drawer = mergeDrawer(page); await drawer.waitFor();
+  const box = await page.locator(".ant-drawer-content-wrapper").filter({ has: page.getByTestId("merge-drawer") }).boundingBox();
+  assert.ok(box.width >= 389 && box.height >= 843, `抽屉占满：${box.width}×${box.height}`);
+  assert.ok((await mergeCard(page, "主力上游").getByRole("button", { name: "合并", exact: true }).boundingBox()).height >= 44);
+  assert.ok((await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).boundingBox()).height >= 44, "提示条里的「查看」");
+  await mergeCard(page, "主力上游").getByRole("button", { name: "合并", exact: true }).click();
+  const sheet = page.getByRole("dialog", { name: "合并「主力上游」这一组？", exact: true }); await sheet.waitFor();
+  // 弹窗出现时有缩放动画，这时量到的高度不准（CI 上间歇失败过）：读样式里的最小高度，不量动画中的外框
+  for (const name of ["取消", "合并"]) {
+    const minHeight = await sheet.getByRole("button", { name, exact: true }).evaluate((el) => parseFloat(getComputedStyle(el).minHeight));
+    assert.ok(minHeight >= 44, `确认框里的「${name}」最小高度 ${minHeight}`);
+  }
+});
+
+test("成本估算：总成本下面写「其中 1 个账号加成了 2 个上游，这里重复算了」[去合并]；没有重复时不出现", async (t) => {
+  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
+  const none = await openCostPage(t, own);
+  await none.page.getByText(ANALYTICS_COPY.totalCost, { exact: true }).waitFor();
+  assert.equal(await none.page.getByTestId("merge-cost-line").count(), 0);
+  const analytics = (days) => ({ ...costAnalyticsFixture(days), merge: { mergeable: 1, blocked: 0, accounts: 1, upstreams: 2, records: 0 } });
+  const { page } = await openCostPage(t, own, "/analytics", { analytics });
+  const line = page.getByTestId("merge-cost-line");
+  await line.getByText("其中 1 个账号加成了 2 个上游，这里重复算了", { exact: false }).waitFor();
+  await line.getByRole("button", { name: "去合并", exact: true }).waitFor();
+});
+
+test("合并重复的上游：另外几种合不了的一项一行，按钮放第一项的；「恢复监控」就地恢复被暂停的那个，改成一样以后「合并」能点", async (t) => {
+  const blocked = mergeGroupOf({ merged: [mergeBrief("m-b", "主力上游（2）")], canMerge: false, blockers: [
+    { code: "MONITOR_MISMATCH", detail: "", monitoredIds: ["m-a"], pausedIds: ["m-b"], differsIds: ["m-b"] },
+    { code: "PROFIT_MISMATCH", detail: "", countedIds: ["m-a"], uncountedIds: ["m-b"], differsIds: ["m-b"] }] });
+  const model = { groups: [blocked], records: [] };
+  const { page, calls } = await openMergePage(t, model);
+  await page.getByTestId("merge-notice").getByText("有 1 组上游是同一个账号，现在还合不了", { exact: true }).waitFor();
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const card = mergeCard(page, "主力上游");
+  await card.getByText("「主力上游」在读余额，「主力上游（2）」暂停了监控，合成一个以后不知道该不该接着读。先改成一样（都恢复监控，或者都暂停），再回来合。", { exact: true }).waitFor();
+  await card.getByText("「主力上游」算进利润，「主力上游（2）」不算进利润，合成一个以后不知道该按哪个算。先在编辑上游里改成一样，再回来合。", { exact: true }).waitFor();
+  assert.equal(await card.getByRole("button", { name: "合并", exact: true }).isDisabled(), true);
+  assert.equal(await card.getByRole("button", { name: "编辑上游", exact: true }).count(), 0, "按钮只放第一项的");
+  await card.getByRole("button", { name: "恢复监控", exact: true }).click();
+  // 先问一句：不是点一下就改
+  const resumeConfirm = page.getByRole("dialog", { name: "恢复监控「主力上游（2）」？", exact: true }); await resumeConfirm.waitFor();
+  await resumeConfirm.getByText("恢复以后接着读它的余额。这一组改成一样以后就能合。", { exact: true }).waitFor();
+  assert.equal(calls.length, 0);
+  await resumeConfirm.getByRole("button", { name: "取消", exact: true }).click(); await resumeConfirm.waitFor({ state: "hidden" });
+  assert.equal(calls.length, 0);
+  await card.getByRole("button", { name: "恢复监控", exact: true }).click(); await resumeConfirm.waitFor();
+  await resumeConfirm.getByRole("button", { name: "恢复监控", exact: true }).click();
+  await page.getByText("已恢复监控", { exact: true }).waitFor();
+  // 带着清单上看到的版本号去改
+  assert.deepEqual(calls, [{ path: "/api/stations/m-b", body: { monitorEnabled: true, expectedAuthVersion: 2, expectedResourceVersion: "v-b" } }]);
+  await card.getByRole("button", { name: "编辑上游", exact: true }).waitFor();
+});
+
+test("合并重复的上游：被合掉的那个记了固定成本时，按钮「编辑上游」打开它；标了转售 Key 的只写说明、没有按钮", async (t) => {
+  const fixed = mergeGroupOf({ merged: [mergeBrief("m-b", "主力上游（2）")], canMerge: false, blockers: [{ code: "MERGED_HAS_FIXED_COST", detail: "", stationId: "m-b" }] });
+  const { page } = await openMergePage(t, { groups: [fixed], records: [] });
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const card = mergeCard(page, "主力上游");
+  await card.getByText("「主力上游（2）」记了固定成本，合掉以后这几笔就不算了。先在「主力上游」上记上同样的固定成本、再从「主力上游（2）」上删掉，再回来合。", { exact: true }).waitFor();
+  await card.getByRole("button", { name: "编辑上游", exact: true }).click();
+  await page.waitForURL((url) => url.pathname === "/stations" && url.searchParams.get("edit") === "m-b");
+  const resold = mergeGroupOf({ merged: [mergeBrief("m-b", "主力上游（2）")], canMerge: false, blockers: [{ code: "MERGED_HAS_RESOLD_KEYS", detail: "", stationId: "m-b" }] });
+  const next = await openMergePage(t, { groups: [resold], records: [] });
+  await next.page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const soldCard = mergeCard(next.page, "主力上游");
+  await soldCard.getByText("「主力上游（2）」上还标着转售 Key，合掉以后这些标记就不算了。先把它上面的转售标记取消，再回来合。", { exact: true }).waitFor();
+  assert.equal(await soldCard.getByRole("button").count(), 1, "只有灰着的「合并」");
+});
+
+test("合并重复的上游：留下的没设汇率、被合掉的设了，合不了，写清汇率，按钮「编辑上游」打开留下的；估算写「—」", async (t) => {
+  const group = mergeGroupOf({ merged: [mergeBrief("m-b", "主力上游（2）")], canMerge: false, estimate: null,
+    blockers: [{ code: "RATE_UNSET_ON_RETAINED", detail: "", stationId: "m-a", mergedRates: [{ id: "m-b", rate: 7.2 }] }] });
+  const { page } = await openMergePage(t, { groups: [group], records: [] });
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const card = mergeCard(page, "主力上游");
+  await card.getByText("「主力上游」没设汇率，「主力上游（2）」设了（1 美元 = 7.20 元），合掉以后这个汇率就不算了。先给「主力上游」设上汇率，再回来合。", { exact: true }).waitFor();
+  await card.getByText("— → —", { exact: true }).first().waitFor();
+  assert.equal(await card.getByRole("button", { name: "合并", exact: true }).isDisabled(), true);
+  await card.getByRole("button", { name: "编辑上游", exact: true }).click();
+  await page.waitForURL((url) => url.pathname === "/stations" && url.searchParams.get("edit") === "m-a");
+});
+
+test("合并重复的上游：两边都设了汇率但不一样，不挡合并，卡片灰字和确认框里写按留下的那个算", async (t) => {
+  const group = mergeGroupOf({ merged: [mergeBrief("m-b", "主力上游（2）")], rateNote: { retainedRate: 7.2, others: [{ id: "m-b", rate: 7.1 }] } });
+  const { page } = await openMergePage(t, { groups: [group], records: [] });
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const card = mergeCard(page, "主力上游");
+  await card.getByTestId("merge-rate-note").getByText("合并以后汇率按「主力上游」的 1 美元 = 7.20 元算（「主力上游（2）」是 7.10 元）。", { exact: true }).waitFor();
+  assert.equal(await card.getByRole("button", { name: "合并", exact: true }).isEnabled(), true);
+  await card.getByRole("button", { name: "合并", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "合并「主力上游」这一组？", exact: true }); await confirm.waitFor();
+  await confirm.getByText("绑定改到「主力上游」上，每日利润不变。合并以后汇率按「主力上游」的 1 美元 = 7.20 元算（「主力上游（2）」是 7.10 元）。成本估算近 30 天从 ¥13,982.40 变成 ¥4,660.80，不再重复算。", { exact: true }).waitFor();
+});
+
+test("合并重复的上游：重新打开抽屉先不显示上次的卡片", async (t) => {
+  const model = { groups: [mergeGroupOf()], records: [] };
+  const { page } = await openMergePage(t, model);
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  await mergeCard(page, "主力上游").waitFor();
+  await page.keyboard.press("Escape");
+  await mergeDrawer(page).waitFor({ state: "hidden" });
+  model.groups = [];
+  await page.route("**/api/upstream-merges", async (route) => { await new Promise((resolve) => setTimeout(resolve, 600)); await route.fallback(); });
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  await mergeDrawer(page).waitFor();
+  assert.equal(await mergeCard(page, "主力上游").count(), 0, "加载期间不显示旧卡片");
+});
+
+test("合并重复的上游：这一组没有按量算进利润的上游时，卡片不写「¥0.00 → ¥0.00」，换一句灰字；确认框只写绑定改到哪、每日利润不变", async (t) => {
+  const zero = (noCounted) => ({ noCounted, windows: [{ days: 7, before: { cny: 0 }, after: { cny: 0 } }, { days: 30, before: { cny: 0 }, after: { cny: 0 } }] });
+  for (const [noCounted, note] of [["fixed_cost", "这一组都按固定成本算，成本估算里没有按用量算的花费，合并前后不变。"], ["not_in_profit", "这一组都不算进利润，成本估算不算它们，合并前后不变。"]]) {
+    const { page } = await openMergePage(t, { groups: [mergeGroupOf({ estimate: zero(noCounted) })], records: [] });
+    await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+    const card = mergeCard(page, "主力上游");
+    await card.getByText(note, { exact: true }).waitFor();
+    await card.getByText("这个账号加成了 3 个上游", { exact: true }).waitFor();
+    assert.equal(await card.getByText("→", { exact: false }).count(), 0, "没有前后的数");
+    assert.equal(await card.getByText("近 7 天", { exact: true }).count(), 0);
+    await card.getByRole("button", { name: "合并", exact: true }).click();
+    const confirm = page.getByRole("dialog", { name: "合并「主力上游」这一组？", exact: true }); await confirm.waitFor();
+    await confirm.getByText("绑定改到「主力上游」上，每日利润不变。", { exact: true }).waitFor();
+    assert.equal(await confirm.getByText(/从 .* 变成/).count(), 0);
+  }
+});
+
+test("合并重复的上游：留下的设了汇率、被合掉的没设（或设的不一样）：不挡合并，卡片和确认框都写合并以后按留下的那个算，没设的写「没设汇率」", async (t) => {
+  const rateNote = { retainedRate: 7.2, others: [{ id: "m-b", rate: null }, { id: "m-c", rate: 7.1 }] };
+  const { page } = await openMergePage(t, { groups: [mergeGroupOf({ rateNote })], records: [] });
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const card = mergeCard(page, "主力上游");
+  const sentence = "合并以后汇率按「主力上游」的 1 美元 = 7.20 元算（「主力上游（2）」没设汇率，「主力上游·备用」是 7.10 元）。";
+  await card.getByTestId("merge-rate-note").getByText(sentence, { exact: true }).waitFor();
+  assert.equal(await card.getByRole("button", { name: "合并", exact: true }).isEnabled(), true);
+  await card.getByRole("button", { name: "合并", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "合并「主力上游」这一组？", exact: true }); await confirm.waitFor();
+  await confirm.getByText(`绑定改到「主力上游」上，每日利润不变。${sentence}成本估算近 30 天从 ¥13,982.40 变成 ¥4,660.80，不再重复算。`, { exact: true }).waitFor();
+});
+
+test("合并重复的上游：点「取消」只关框，不重读清单；「恢复监控」碰上版本对不上写「这个上游刚被改过，刷新后再看。」，按钮是「刷新」，点了重读清单、关掉确认框", async (t) => {
+  const blocked = mergeGroupOf({ merged: [mergeBrief("m-b", "主力上游（2）")], canMerge: false, blockers: [
+    { code: "MONITOR_MISMATCH", detail: "", monitoredIds: ["m-a"], pausedIds: ["m-b"], differsIds: ["m-b"] }] });
+  const model = { groups: [blocked], records: [], failResume: { status: 409, code: "RESOURCE_CHANGED", error: "changed" } };
+  const { page, calls } = await openMergePage(t, model);
+  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
+  const card = mergeCard(page, "主力上游"); await card.waitFor();
+  // 取消只关框
+  await card.getByRole("button", { name: "恢复监控", exact: true }).click();
+  const resumeConfirm = page.getByRole("dialog", { name: "恢复监控「主力上游（2）」？", exact: true }); await resumeConfirm.waitFor();
+  const getsBefore = model.gets;
+  await resumeConfirm.getByRole("button", { name: "取消", exact: true }).click(); await resumeConfirm.waitFor({ state: "hidden" });
+  assert.equal(model.gets, getsBefore, "取消不重读清单");
+  assert.equal(calls.length, 0);
+  // 版本对不上
+  await card.getByRole("button", { name: "恢复监控", exact: true }).click(); await resumeConfirm.waitFor();
+  await resumeConfirm.getByRole("button", { name: "恢复监控", exact: true }).click();
+  await resumeConfirm.getByText("这个上游刚被改过，刷新后再看。", { exact: true }).waitFor();
+  assert.equal(await resumeConfirm.getByRole("button", { name: "恢复监控", exact: true }).count(), 0, "按钮换成「刷新」");
+  assert.equal(calls.length, 1);
+  model.groups = [];
+  await resumeConfirm.getByRole("button", { name: "刷新", exact: true }).click(); await resumeConfirm.waitFor({ state: "hidden" });
+  assert.equal(calls.length, 1, "刷新不再发恢复监控");
+  await mergeDrawer(page).getByText("没有要合的上游了。", { exact: true }).waitFor();
+});

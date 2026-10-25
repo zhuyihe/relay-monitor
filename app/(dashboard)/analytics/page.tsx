@@ -24,6 +24,8 @@ import type { HBarItem } from "../../components/hbars";
 import { Heatmap } from "../../components/heatmap";
 import { Sym } from "../../components/icons";
 import { More } from "../../components/more";
+import { MergeCostLine, useMergeUpstreams } from "../../components/merge-upstreams";
+import type { MergeCounts } from "../../components/merge-upstreams";
 import { Panel } from "../../components/panel";
 import { EQ_TEXT, ProfitEquation, incomeUnreadProps } from "../../components/profit-equation";
 import type { EqTerm } from "../../components/profit-equation";
@@ -183,6 +185,9 @@ export default function AnalyticsPage() {
     setLoading(true);
     return load(query);
   }, [load, query]);
+
+  // 总成本下面那一行「其中 1 个账号加成了 2 个上游……」[去合并]：打开和上游列表同一个抽屉，合并以后重读本页
+  const merge = useMergeUpstreams({ onChanged: () => { retry(); } });
 
   const range = useMemo(
     () => (
@@ -345,12 +350,13 @@ export default function AnalyticsPage() {
       {/* 可用天数的进度条在半宽卡片里太窄，窄屏和总览一样先换成单列 */}
       <div className="jy-grid-2">
         <RunwayPanel dv={dv} critDays={critDays} metaFailed={metaFailed} balances={balances} settings={settings} rules={rules} />
-        <SummaryPanel dv={dv} days={data.days} />
+        <SummaryPanel dv={dv} days={data.days} merge={data.merge} onMerge={merge.open} />
       </div>
 
       <CumulativePanel rows={dv.rows} asOf={asOf} tz={tz} />
 
       <CoveragePanel dv={dv} data={data} stations={stations} />
+      {merge.overlay}
     </div>
   );
 }
@@ -682,7 +688,7 @@ function RunwayPanel({ dv, critDays, metaFailed, balances, settings, rules }: { 
 
 // ---- 成本概况 ------------------------------------------------------------------
 
-function SummaryPanel({ dv, days }: { dv: Derived; days: number }) {
+function SummaryPanel({ dv, days, merge, onMerge }: { dv: Derived; days: number; merge: MergeCounts; onMerge: () => void }) {
   const { kpi } = dv;
   const approx = dv.usageApprox;
   const none = kpi.coveredDays === 0;
@@ -693,6 +699,7 @@ function SummaryPanel({ dv, days }: { dv: Derived; days: number }) {
         <dd>
           {formatMoney(kpi.total, { approx })}
           {kpi.coveredDays < days && <div className="jy-caption">{COPY.coveredOnly(kpi.coveredDays)}</div>}
+          <MergeCostLine counts={merge} onOpen={onMerge} />
         </dd>
         <dt>{COPY.avgCost}</dt>
         <dd>
