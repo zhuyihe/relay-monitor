@@ -4590,7 +4590,7 @@ test("P1a 轮询省请求和写入：自营 /api/status 每轮一次；全站没
   assert.equal((await round()).channel, 4);
 });
 
-test("P1a 自营站点时钟偏慢 10 分钟、日志晚 60 多秒才写进去：编号变了照旧现读，一分钱不少算", async (t) => {
+test("P1a 自营站点时钟偏慢 10 分钟、日志晚 60 多秒才写进去：起点以后的条数变了，照旧现读，一分钱不少算", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now });
   const sec = () => Math.floor(now / 1000);
@@ -4717,6 +4717,28 @@ test("P1a 审核第二轮：晚 1 秒、ClickHouse 显示序号、钟慢加读�
     assert.ok(await s.round() > 0, "有新消费");
     assert.ok(await s.round() > 0, "最新一条离起点超过 10 分钟，起点挪了，这一轮照常读");
     assert.equal(await s.round(), 0, "之后接着沿用");
+  });
+
+  await t.test("起点挪的那一轮：起点以前的几条掉出去、同时补进来同样多条晚到的，条数和最新一条都没变，也照常读", async (st) => {
+    const s = await setup(st);
+    await s.round(); assert.equal(await s.round(), 0);
+    assert.equal(await s.round(11 * 60000), 0);
+    s.add(2, s.sec());
+    assert.ok(await s.round() > 0, "有新消费");
+    const newest = Math.max(...s.logs.map((log) => log.created_at));
+    for (let i = 0; i < 3; i += 1) s.add(1, newest - 30); // 起点挪到 newest−120：开头 3 条掉出去、晚到 3 条补进来
+    assert.ok(await s.round() > 0, "起点挪了，照常读");
+    assert.equal(await s.live(), 4, "晚到的 3 条算进来");
+  });
+
+  await t.test("ClickHouse 同一轮删一条、加一条（时刻落在已读到的范围里）：编号永远是 1、条数不变，只有时刻变了，也照常读", async (st) => {
+    const s = await setup(st, { clickhouse: true });
+    await s.round(); assert.equal(await s.round(), 0);
+    const newest = Math.max(...s.logs.map((log) => log.created_at));
+    s.logs.splice(s.logs.findIndex((log) => log.channel === 3), 1);
+    s.add(1, newest + 11);
+    assert.ok(await s.round() > 0, "时刻变了，照常读");
+    assert.equal(await s.live(), 2);
   });
 
   await t.test("老版本列表不给条数：不当成没有新的消费，每轮照常读", async (st) => {
