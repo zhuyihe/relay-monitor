@@ -2676,14 +2676,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const rule = await repository.getRule(ruleId, { includeArchived: true });
         if (!rule) throw ruleNotFound();
         const billingSource = billingSourceState();
+        let plan = null;
         const segments = await withObservationSourceLock(rule, currentSourceCredential(rule), async () => {
           // 分段和重结请求（改到的每个已结束的业务日各一条）在仓库的同一个事务里写
-          const corrected = await repository.correctTransition(ruleId, segmentId, effectiveAt, { now: Date.now() });
+          const corrected = await repository.correctTransition(ruleId, segmentId, effectiveAt, { now: Date.now(), onPlan: (value) => { plan = value; } });
           clearBillingResults(ruleId);
           return corrected;
         }, billingSource);
         if (segments === STALE_SCOPE) throw staleScope();
-        return segments;
+        // resettle：改到的已结束的日子里，会自动重算的有几天（recent），太早没自动重算的是哪几天（tooOld，日期从早到晚）
+        return { segments, resettle: { recent: plan?.recent.length ?? 0, tooOld: plan?.tooOld ?? [] } };
       });
     },
     async queryRules({ ruleIds = null, ...input } = {}, options = {}) {

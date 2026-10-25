@@ -587,7 +587,7 @@ export class ReconciliationRepository {
 
   // 改一段倍率变化的时间。同一个事务里：改分段，再给 [旧时间, 新时间) 落到的每个已结束的业务日写一条重结请求（计划 C2b，
   // resettleBillDates）；写请求失败连分段一起回滚。绑定不存在或已解除报 RULE_NOT_FOUND；改到未来、不是整毫秒的拒绝。
-  async correctTransition(ruleId, segmentId, effectiveAt, { now = Date.now() } = {}) {
+  async correctTransition(ruleId, segmentId, effectiveAt, { now = Date.now(), onPlan = null } = {}) {
     const at = Number(effectiveAt);
     const conn = await this.pool.getConnection();
     try {
@@ -622,6 +622,7 @@ export class ReconciliationRepository {
       );
       // 31 天以内的日子写重结请求；更早的写一条要人处理的状态行（RESETTLE_TOO_OLD），不自动重结
       const plan = resettleRequestPlan(rule, segments[index].effectiveFrom, at, now);
+      onPlan?.(plan); // 调用方要告诉用户哪几天会自动重算、哪几天太早没算
       await this.requestResettle(ruleId, plan.recent, { reason: RESETTLE_REASON_TRANSITION, now }, conn);
       await this.requestResettle(ruleId, plan.tooOld, { reason: RESETTLE_REASON_TRANSITION, now, manualReason: "RESETTLE_TOO_OLD" }, conn);
       await conn.commit();

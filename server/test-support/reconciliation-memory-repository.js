@@ -374,7 +374,7 @@ export class MemoryReconciliationRepository {
   }
 
   // 同 MySQL 版：改分段和给 [旧时间, 新时间) 落到的每个已结束的业务日写重结请求在同一个事务里
-  async correctTransition(ruleId, segmentId, effectiveAt, { now = Date.now() } = {}) {
+  async correctTransition(ruleId, segmentId, effectiveAt, { now = Date.now(), onPlan = null } = {}) {
     const at = Number(effectiveAt);
     await this.#transaction("correctTransition", async (tx) => {
       await this.#lock(tx, `rule:${ruleId}`);
@@ -392,6 +392,7 @@ export class MemoryReconciliationRepository {
       this.#update(tx, "segments", [previous], { effective_to_ms: at });
       this.#update(tx, "segments", [entries[index]], { effective_from_ms: at, timing_source: "operator_confirmed" });
       const plan = resettleRequestPlan(ruleFromRow(ruleRow), oldAt, at, now);
+      onPlan?.(plan);
       await this.hooks.beforeRequestWrite?.(plan);
       this.#requestResettle(tx, ruleId, plan.recent, { reason: RESETTLE_REASON_TRANSITION, now });
       this.#requestResettle(tx, ruleId, plan.tooOld, { reason: RESETTLE_REASON_TRANSITION, now, manualReason: "RESETTLE_TOO_OLD" });

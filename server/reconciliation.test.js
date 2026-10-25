@@ -5836,7 +5836,7 @@ test("module修正切换时间在来源锁内改分段并清空缓存：非强�
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(cacheAtEdit, null, "修正期间站点编辑须等待来源锁");
   correction.release();
-  const segments = await pending; await edit;
+  const { segments } = await pending; await edit;
   assert.equal(cacheAtEdit, 0, "释放来源锁前已清空本规则缓存");
   assert.deepEqual(segments.map((segment) => [segment.id, segment.effectiveFrom, segment.effectiveTo, segment.timingSource]),
     [["s1", 1000000, 1045000, "operator_confirmed"], ["s2", 1045000, null, "operator_confirmed"]]);
@@ -6549,7 +6549,10 @@ test("C2b 总指挥定的 3：改的时间落到 31 天以前的日子不写请�
     segments: [{ id: "s1", group: "g1", from: 0, to: transition }, { id: "s2", group: "g1", from: transition }] });
   for (const row of f.rows) { row.enabled = row.id === "rr_live" ? 1 : 0; row.billing_effective_from_ms = Date.parse("2026-07-31T16:00:00Z"); }
   // 改到 40 天前（8 月 30 日）：[8/30 12:00, 9/20 12:00) 落到 8/30…9/20 这些天
-  await f.module.correctTransition("rr_live", "s2", Date.parse("2026-08-30T04:00:00Z"));
+  const corrected = await f.module.correctTransition("rr_live", "s2", Date.parse("2026-08-30T04:00:00Z"));
+  assert.equal(corrected.segments.length, 2, "返回新的分段");
+  // 提示要说清哪几天没自动重算：会自动重算的天数、太早的日期（从早到晚）
+  assert.deepEqual([corrected.resettle.tooOld[0], corrected.resettle.tooOld.at(-1), corrected.resettle.recent], ["2026-08-30", "2026-09-07", 13]);
   const rows = await f.repository.listSettlementStates(["rr_live"]);
   const tooOld = rows.filter((row) => row.manualReason === "RESETTLE_TOO_OLD").map((row) => row.billDate);
   const recent = rows.filter((row) => row.manualReason == null).map((row) => row.billDate);
