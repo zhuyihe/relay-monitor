@@ -162,7 +162,7 @@ test("changing a past transition reports saved time without claiming fixed days 
   const drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true });
   const timing = drawer.getByRole("region", { name: "改时间", exact: true });
   await timing.waitFor();
-  await timing.getByText("保存后，未固定的结果按新时间计算。系统会尝试更新昨天的固定记录，更早的固定记录暂不自动更新。", { exact: true }).waitFor();
+  await timing.getByText("保存以后，改到的那几天会按新的时间重新算，已经固定的也一样。31 天以前的不自动重算；要按新的时间算，到每日利润选那天点「重新读取」。", { exact: true }).waitFor();
   const input = timing.getByPlaceholder("倍率变化的时间");
   await input.fill("2026年10月8日 09:30");
   await input.press("Enter");
