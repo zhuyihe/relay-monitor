@@ -6784,7 +6784,18 @@ test("C2a 回看：昨天不占预算；更早的日子每轮最多 K 天、同�
   let now = Date.parse("2026-10-09T03:00:00Z"); // 上海 10-09 11:00；开始统计是 10-07 0 点，10-07、10-08 两天能结
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 2, lookbackTimeMs: 60000 } });
   f.state.upstreamQuota = null; // 上游账单读不到
+  // 方案钉住的性能点：每轮只批量读两次（状态表、账本近几天的日期），不按绑定逐条查（安全审核 C2a 低-7）
+  const reads = { listSettlementStates: [], listLedgerDays: [] };
+  const beforeRead = f.repository.hooks.beforeRead;
+  f.repository.hooks.beforeRead = (name, args) => {
+    if (name in reads) reads[name].push(args);
+    return beforeRead?.(name, args);
+  };
   await f.module.refreshDue(now);
+  assert.equal(reads.listSettlementStates.length, 1, "这一轮只批量读一次状态表，不按绑定逐条查");
+  assert.equal(reads.listLedgerDays.length, 1, "这一轮只批量读一次账本近几天的日期，不按绑定逐条查");
+  assert.ok(reads.listSettlementStates[0][0].length >= 3, "一次性带着这一轮全部绑定的 id（SQL 的 rule_id IN），不是单个 id");
+  assert.deepEqual(new Set(reads.listSettlementStates[0][0]), new Set(["rr_live", "rr_two", "rr_three"]));
   assert.deepEqual(states(f), [
     ["rr_live", "2026-10-07", "WAITING_FOR_BILL", 1],
     ["rr_live", "2026-10-08", "WAITING_FOR_BILL", 1], ["rr_three", "2026-10-08", "WAITING_FOR_BILL", 1], ["rr_two", "2026-10-08", "WAITING_FOR_BILL", 1],
@@ -6892,6 +6903,39 @@ test("C2a 结账（settle）只写账本和状态行：不写观测快照、渠�
   const observed = await counts();
   assert.ok(observed.channels > before.channels && observed.segments > before.segments, "对照：同样的情况下观测今天会写渠道状态、记新的一段");
   assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 1);
+});
+
+test("C2a 固定成功时删状态行只靠记账的同一个事务，不再单独多发一条删除的 SQL（安全审核 C2a 低-1）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  let failUpstream = true;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (failUpstream && url.host === "upstream.test" && url.pathname === "/api/log/self/stat") {
+      return { status: 403, text: async () => JSON.stringify({ success: false, message: "无权进行此操作" }) };
+    }
+    return prev(input, init);
+  });
+  const state = () => f.repository.tables.settlementState.find((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
+  await f.module.refreshDue(now);
+  assert.ok(state(), "第一次结不成，留一行状态");
+  failUpstream = false;
+  // 盯着这个方法：固定成功这条路径不该再单独调它了——状态行跟着账本在同一个事务里删，见 saveSnapshotsForScope 的 settlement 选项
+  const originalDelete = f.repository.deleteSettlementState.bind(f.repository);
+  let deleteCalled = false;
+  f.repository.deleteSettlementState = async (...args) => { deleteCalled = true; return originalDelete(...args); };
+  try {
+    now += 10 * 60000;
+    await f.module.refreshDue(now); // 到点本地重判：目录里看不出问题，记 cleared，这一轮还不去结
+    now += 60000;
+    await f.module.refreshDue(now); // 下一轮才真的去结
+    assert.equal(state(), undefined, "状态行已经被删掉——靠的是记账事务里那次");
+    assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").length, 1, "账本照常写了");
+    assert.equal(deleteCalled, false, "没有再单独调一次删除（以前这里会多发一条 SQL，现在去掉了）");
+  } finally {
+    f.repository.deleteSettlementState = originalDelete;
+  }
 });
 
 test("C2a 轮询和手动同时固定同一天：账本只有一版，两边都返回账本里那一版", async (t) => {

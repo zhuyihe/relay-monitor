@@ -539,9 +539,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
     if (result === STALE_SCOPE || !billDate) return result;
     const outcome = settlementOutcome({ window, result, now: Date.now(), state, origin, sourceVersion: ownerRegistry.billingSource.version });
+    // 结成了（op: "delete"）：状态行已经在 inspectRule 写账本的同一个事务里删掉了（settlement 选项，见 saveSnapshotsForScope），
+    // 这里不用再单独删一次——单独删一次是多发的一条 SQL（审核 C2a 低-1）
     try {
-      if (outcome.state?.op === "delete") { if (state) await repository.deleteSettlementState(rule.id, billDate); }
-      else if (outcome.state) await repository.recordSettlementState(rule.id, billDate, outcome.state);
+      if (outcome.state && outcome.state.op !== "delete") await repository.recordSettlementState(rule.id, billDate, outcome.state);
     } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
     return result;
   }
