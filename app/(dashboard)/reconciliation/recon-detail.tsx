@@ -14,7 +14,7 @@ import {
 import { ErrorDetail } from "../../components/error-detail";
 import { ChannelBreakdown, Detail, IssueAction, LossTag } from "./recon-parts";
 import {
-  RECON_BUTTONS, RECON_COPY, RETRY_FAILED_TEXT, amountText, adminUsageText, costText, currentGroup, currentRatioLabel, formatWindow, incomeText, isFixedCost, ratioChangeText, ratioLabel, rateText,
+  RECON_BUTTONS, RECON_COPY, RETRY_FAILED_TEXT, amountText, adminUsageLine, costText, currentGroup, currentRatioLabel, formatWindow, incomeText, isFixedCost, ratioChangeText, ratioLabel, rateText,
   ruleHistory, segmentPeriod, upstreamName,
 } from "./recon-format";
 import type { useReconDetail } from "./use-recon-detail";
@@ -51,7 +51,7 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
   const timezone = detail.window?.timezone || detail.rule?.timezone;
   const dayZone = formatDayZone(timezone, businessTimezone);
   const channels = mergeReconciliationChannels(detail.rule?.channels, detail.downstream?.channels);
-  const adminUsage = adminUsageText(detail, currency, detail.downstream, timezone);
+  const adminUsage = adminUsageLine(detail, currency);
   const fixedCost = isFixedCost(detail);
   const ratioChange = ratioChangeText(detail, timezone);
   const start = reconciliationAccountingStart(detail.rule);
@@ -88,7 +88,7 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
       <Detail label="上游" value={upstreamName(detail.rule, upstreams)} />
       <Detail label="Key" value={keyName(detail.rule)} />
       <Detail label="分组 / 倍率" value={`${currentGroup(detail)} · ${currentRatioLabel(detail)}`} />
-      <Detail label="收入" value={<>{incomeText(detail, currency)}<small>{channels.length ? RECON_COPY.incomeSource(channels.length) : RECON_COPY.noChannels}</small>{adminUsage ? <small>{adminUsage}</small> : null}</>} />
+      <Detail label="收入" value={<>{incomeText(detail, currency)}<small>{channels.length ? RECON_COPY.incomeSource(channels.length) : RECON_COPY.noChannels}</small>{adminUsage ? <small title={adminUsage.title}>{adminUsage.text}</small> : null}</>} />
       <Detail label="上游成本" value={<>{costText(detail, currency)}{fixedCost ? null
         : <small>来自 Key「{keyName(detail.rule)}」的用量记录{ratioChange ? `；${ratioChange}` : ""}</small>}</>} />
       <Detail label="毛利" value={<>{amountText(profit, profitCurrency as ReconciliationCurrency)} <LossTag show={flags.negative} /></>} />

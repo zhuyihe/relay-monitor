@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   aggregateFlow, computeFlowBreakdown, computeProfit, joinPrev, mapCostChannels, matchCostStation, normalizeCostUrl,
   getOwnUsers, readOwnIncome, readOwnIncomeOrUnconfirmed, reconcileUsageCost, resolveOwnWindow, selectCostUpstreams, stationUsageCost,
-  ownUsersKey, unconfirmedIncomeProfit, resoldAdminKeysOf, dedupeResoldKeys,
+  ownUsersKey, unconfirmedIncomeProfit, resoldAdminKeysOf, dedupeResoldKeys, readOwnAdminDirectory,
 } from "./own-helpers.js";
 import { History } from "../db/history.js";
 import { dayStartInTz } from "../lib/business-time.js";
@@ -607,4 +607,18 @@ test("转售 Key 同一个账号下同名只算一把（大小写不分）：存
   const keys = [{ username: "root", tokenName: "sale" }, { username: "root", tokenName: "sale" }, { username: "Root", tokenName: "SALE" }, { username: "root", tokenName: "other" }, { username: "alice", tokenName: "sale" }];
   assert.deepEqual(resoldAdminKeysOf({ resoldAdminKeys: keys }).map((key) => [key.username, key.tokenName]), [["root", "sale"], ["root", "other"], ["alice", "sale"]]);
   assert.deepEqual(dedupeResoldKeys(null), []);
+});
+
+test("转售 Key 的主人不是管理员：重读过还对不上，1 分钟内不再为它重读整份用户列表（审核 R1 中-2）", async (t) => {
+  const f = incomeFixture();
+  f.own.resoldAdminKeys = [{ username: "customer", tokenName: "sale" }];
+  let userReads = 0;
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    assert.equal(url.pathname, "/api/user/");
+    userReads += 1;
+    return Response.json({ success: true, data: { items: f.users, total: f.users.length } });
+  });
+  for (let i = 0; i < 5; i += 1) await readOwnAdminDirectory(f.rt, f.own);
+  assert.ok(userReads <= 1, `5 次只读了 ${userReads} 次用户列表`);
 });

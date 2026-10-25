@@ -1137,16 +1137,6 @@ contract("a settlement that books the day deletes its state row in the same tran
   assert.equal((await repository.latestLedgerEntry(rule.id, window)).revision, 1);
 });
 
-contract("the first day the ledger deducted admin self-use is remembered and only moves earlier", async ({ repository }) => {
-  assert.equal(await repository.adminUsageFirstDay(), null);
-  await repository.noteAdminUsageDay("2026-10-26");
-  assert.equal(await repository.adminUsageFirstDay(), "2026-10-26");
-  await repository.noteAdminUsageDay("2026-10-28");
-  assert.equal(await repository.adminUsageFirstDay(), "2026-10-26", "later day does not move it");
-  await repository.noteAdminUsageDay("2026-10-24");
-  assert.equal(await repository.adminUsageFirstDay(), "2026-10-24", "earlier day does");
-});
-
 contract("listLedgerDays lists each booked day once per rule from a date on, only for the given rules", async ({ repository, fixture }) => {
   const rule = await fixture.createRule(), other = await fixture.createRule({ tokenId: fixture.token(7), channels: [{ channelId: fixture.channel(7), name: "other" }] });
   const book = async (target, day, profitUsd = 2, resettle = false) => {

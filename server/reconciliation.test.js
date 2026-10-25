@@ -7224,19 +7224,86 @@ test("R1 多条绑定各要一个渠道、日志很多：按渠道 stat 只查�
   assert.equal(rootReads().length - before, 0, "过去窗口的管理员日志不再读");
 });
 
-test("R1 结成一天的账（扣过管理员自用）：记下「开始扣管理员自用的第一天」，之后每条结果带上它，页面写「更早的日子没扣」用", async (t) => {
+test("R1 合并补查：绑定从只要渠道 1 到又要渠道 2，已经查过的渠道 1 的数不能丢（审核 R1 低-2）", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
-  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
-  const metaWrites = [];
-  const original = f.repository.noteAdminUsageDay?.bind(f.repository);
-  f.repository.noteAdminUsageDay = async (day) => { metaWrites.push(day); return original?.(day); };
-  f.repository.adminUsageFirstDay = async () => metaWrites[0] ?? null;
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  const dayBefore = ydayStart - 86400; // 10-07，没固定：每次都现读
+  for (let id = 1; id <= 1200; id += 1) f.state.testLogs.push(usage(id, id <= 2 ? 1 : 0, { channel: id % 2 ? 1 : 2, created_at: dayBefore + 100 + id }));
+  const window = { startMs: COMPLETED_YESTERDAY.startMs - 86400000, endMs: COMPLETED_YESTERDAY.startMs };
+  const view = async (ruleId) => (await f.module.queryRules({ ruleIds: [ruleId], preset: "custom", ...window }, { mode: "evaluate", origin: "page", force: true })).results[0];
+  assert.equal((await view("rr_live")).downstream.adminUsageQuotaUnits, 1, "渠道 1 上管理员自用 1");
+  assert.equal((await view("rr_two")).downstream.adminUsageQuotaUnits, 1, "渠道 2 上也是 1");
+  now += 40000; // 过了 30 秒，不走「刚读过直接用」，要走合并补查那条
+  assert.equal((await view("rr_live")).downstream.adminUsageQuotaUnits, 1, "合并了渠道 2 以后，渠道 1 的数还在");
+});
+
+test("R1 管理员自用扣没扣逐行判断：每天都扣了 / 有扣有没扣 / 一天都没扣，走 queryRules 都带 adminUsageDays，金额只加扣过的天（总指挥 10-25）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z"); // 开始统计 10-07 0 点；昨天 10-08
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  f.state.testLogs.push(usage(1, 30));
+  const day = (from, to) => ({ startMs: Date.parse(from), endMs: Date.parse(to) });
+  const twoDays = day("2026-10-06T16:00:00Z", "2026-10-08T16:00:00Z"), yesterday = day("2026-10-07T16:00:00Z", "2026-10-08T16:00:00Z");
+  const view = async (window) => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", ...window }, { mode: "evaluate", origin: "page", force: true })).results[0].downstream;
   await manualYesterday(f);
-  assert.deepEqual(metaWrites, ["2026-10-08"], "结昨天记下 10-08，只记一次");
-  const view = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page" })).results[0];
-  assert.equal(view.downstream.adminUsageLaunchDay, "2026-10-08");
-  await manualYesterday(f);
-  assert.equal(metaWrites.length, 1, "已经记过的不再写");
+  // 10-08 是 R1 以后固定的（扣过），10-07 现读（扣了）：每天都扣
+  const all = await view(twoDays);
+  assert.deepEqual([all.adminUsageDays, all.adminUsageAmountUsd], [{ deducted: 2, undeducted: 0 }, 0.3]);
+  // 把 10-08 那一行改成 R1 以前的样子（没有管理员自用这个数）：有扣有没扣，金额只加 10-07 现读的（0）
+  const stored = f.repository.tables.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  const detail = JSON.parse(stored.detail);
+  delete detail.result.downstream.adminUsageQuotaUnits; delete detail.result.downstream.adminUsageAmountUsd; delete detail.result.downstream.adminUsageDays;
+  for (const channel of detail.result.downstream.channels || []) { delete channel.adminUsageQuotaUnits; delete channel.adminUsageAmountUsd; }
+  stored.detail = JSON.stringify(detail);
+  f.module.invalidateSources(); // 结果缓存清掉，下一次从账本读
+  const mixed = await view(twoDays);
+  assert.deepEqual([mixed.adminUsageDays, mixed.adminUsageAmountUsd], [{ deducted: 1, undeducted: 1 }, 0]);
+  // 只看 10-08 一天：账本那一行没有这个数 = 没扣
+  const none = await view(yesterday);
+  assert.equal(none.adminUsageAmountUsd, undefined);
+});
+
+test("R1「今天」读用户列表或管理员日志短暂失败：10 分钟内沿用上一份、不报读不到，超过 10 分钟才读不到（总指挥 10-25）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  f.state.testLogs.push({ id: 1, channel: 1, quota: 40, created_at: todayStart + 60, token_name: "root-key", username: "root" });
+  const prev = globalThis.fetch;
+  let broken = false;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (broken && url.host === "own.test" && (url.pathname === "/api/user/" || ownSourceRead(url))) return { status: 500, text: async () => "{}" };
+    return prev(input, init);
+  });
+  const today = async () => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  const first = await today();
+  assert.equal(first.downstream.quotaUnits, 210);
+  broken = true;
+  now += 5 * 60000;
+  f.module.invalidateSources();
+  const stale = await today();
+  assert.equal(stale.downstream.quotaUnits, 210, "失败：5 分钟内沿用上一份的扣减，照样出数");
+  assert.equal(stale.health.code, "READY");
+  now += 6 * 60000; // 离上一次读到已经 11 分钟
+  const late = await today();
+  assert.notEqual(late.downstream.state, "complete", "超过 10 分钟才读不到");
+});
+
+test("R1 同一轮几条绑定「今天」的终点差几秒：后定终点的先记下以后，先定终点的那条也能接着用更早的一份，不整段重读（审核 R1 中-4）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  for (let id = 1; id <= 250; id += 1) f.state.testLogs.push({ id, channel: id % 2 ? 1 : 2, quota: id <= 2 ? 1 : 0, created_at: todayStart + 60 + id, token_name: "root-key", username: "root" });
+  const today = async (ruleId) => (await f.module.queryRules({ ruleIds: [ruleId], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  await today("rr_live"); // 第一轮：整段读（3 页），记下终点 E0
+  now += 60000;
+  await today("rr_live"); // 第二轮里终点晚的先到：E1 = E0 + 60 秒
+  const before = sourceReads(f);
+  now -= 5000; // 终点早 5 秒的另一条绑定后到：终点 E1 − 5 秒，还是晚于 E0
+  await today("rr_two");
+  assert.ok(sourceReads(f) - before <= 1, `接着用 E0 那份，只读新来的一页：${sourceReads(f) - before}`);
 });
 
 test("R1 读不到用户列表或管理员日志：这一天算不出收入、不固定，下次重试；不拿没减的数固定进账本", async (t) => {

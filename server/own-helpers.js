@@ -26,6 +26,16 @@ const OWN_USERS_TTL_MS = 600000;
 // 在 New API 那边改好后点「刷新」，最多等 1 分钟就能读到
 const UNKNOWN_USER_TTL_MS = 60000;
 
+// 名单里对不上的名字（刚注册、刚提成管理员、转售 Key 的主人已经不是管理员）：先看手里这份最近有没有为它们重读过，没有才重读一份
+// 这一刻以后发出的；重读过还对不上的名字记下读取发出的时间，1 分钟内不再为它们重读。readOwnIncome 和 readOwnAdminDirectory 共用这一处
+async function confirmUserNames(entry, namesOf, reread, since) {
+  const known = (current, name) => Date.now() - (current.unknown.get(name) ?? -Infinity) < UNKNOWN_USER_TTL_MS;
+  let current = entry;
+  if (namesOf(current.list).some((name) => !known(current, name))) current = await reread(since);
+  for (const name of namesOf(current.list)) if (!known(current, name)) current.unknown.set(name, current.startedAt);
+  return current;
+}
+
 // 缓存认的那份配置（测试也用它造缓存）
 export const ownUsersKey = (own) => JSON.stringify([own.id, own.type, own.baseUrl, own.userId, own.accessToken]);
 
@@ -270,8 +280,9 @@ export async function readOwnAdminDirectory(rt, own, { fresh = false } = {}) {
     catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
   };
   let entry = await read(fresh ? Date.now() : 0);
-  const unconfirmed = (list) => { const admins = adminUsernamesOf(list); return resold.filter((key) => !admins.has(key.username)); };
-  if (unconfirmed(entry.list).length) entry = await read(Date.now());
+  const unconfirmed = (list) => { const admins = adminUsernamesOf(list); return [...new Set(resold.filter((key) => !admins.has(key.username)).map((key) => key.username))]; };
+  // 和 readOwnIncome 共用「重读过还对不上的名字 1 分钟内不再为它们重读」（审核 R1 中-2：转售 Key 的主人不是管理员时每次都重读整份用户列表）
+  entry = await confirmUserNames(entry, unconfirmed, (since) => read(since), Date.now());
   // 重读还对不上的转售 Key 所属用户：忽略这条标记（不扣、不报读不到），照常算
   return { users: entry.list, adminSet: adminUsernamesOf(entry.list) };
 }
@@ -296,13 +307,9 @@ export async function readOwnIncome(rt, own, userRows, { startMs, endMs, tz }) {
       ...resoldAdminKeysOf(own).filter((key) => !(roles.get(key.username) >= 10)).map((key) => key.username),
     ])];
   };
-  const known = (name) => Date.now() - (entry.unknown.get(name) ?? -Infinity) < UNKNOWN_USER_TTL_MS;
-  if (missing(entry.list).some((name) => !known(name))) {
-    // 重读没成：还用手里这份（最多 10 分钟前的），照样能标管理员、算预收
-    try { entry = await readOwnUsers(rt, own, requestedAt); }
-    catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause, entry.list); }
-  }
-  for (const name of missing(entry.list)) if (!known(name)) entry.unknown.set(name, entry.startedAt);
+  const before = entry;
+  try { entry = await confirmUserNames(entry, missing, (since) => readOwnUsers(rt, own, since), requestedAt); }
+  catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause, before.list); }
   const users = entry.list;
   const roles = new Map(users.map((u) => [u.username, u.role]));
   const adminSet = adminUsernamesOf(users);

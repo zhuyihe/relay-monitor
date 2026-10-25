@@ -550,8 +550,6 @@ export class MemoryReconciliationRepository {
   }
 
   // MySQL 那边必须带 rule_id IN 走主键前缀；这里记下收到的条件，契约测试钉住
-  async adminUsageFirstDay() { return this.adminUsageDay ?? null; }
-  async noteAdminUsageDay(day) { if (!this.adminUsageDay || day < this.adminUsageDay) this.adminUsageDay = day; }
   async listLedgerDays(ruleIds, sinceDate) {
     if (!ruleIds?.length) return [];
     (this.log.ledgerDayReads ||= []).push({ ruleIds: [...ruleIds], sinceDate });

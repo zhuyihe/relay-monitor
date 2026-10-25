@@ -772,17 +772,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 读失败（用户列表、转售 Key 所属用户不是管理员、任何一个来源）直接抛，queryOwnChannelRevenue 把这一段所有渠道当读不到，
   // 不拿没减的数当收入。管理员名单、转售 Key 变了：键里带转售 Key，名单变了按来源重新算，不沿用旧来源的累计。
   const OWN_EXCLUSION_REUSE_MS = 30000;
+  const OWN_EXCLUSION_STALE_OK_MS = 10 * 60000;
   const OWN_EXCLUSION_VERIFIED_REUSE_MS = 10 * 60000;
   const OWN_EXCLUSION_FALLBACK_REUSE_MS = 10 * 60000;
-  // 扣管理员自用的第一天（YYYY-MM-DD）：找到了就一直用，没找到每分钟最多再问一次
-  let adminUsageDayKnown = null, adminUsageDayAt = 0;
-  async function adminUsageLaunchDay() {
-    if (adminUsageDayKnown) return adminUsageDayKnown;
-    if (Date.now() - adminUsageDayAt < 60000) return null;
-    adminUsageDayAt = Date.now();
-    adminUsageDayKnown = (await repository.adminUsageFirstDay?.()) ?? null;
-    return adminUsageDayKnown;
-  }
   function ownExclusion(own, window, { settle = false, channelIds = [] } = {}) {
     const wantedChannels = [...new Set(channelIds.map(Number))];
     // 沿用的结果要覆盖这次要算的渠道：翻页读的是全站所有渠道（"all"），按渠道 stat 读的只有当时要算的那几个
@@ -791,13 +783,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const key = JSON.stringify([own.id, credentialFingerprint(own), window.startMs, window.timezone, resold]);
     let entry = ownExclusionCache.get(key);
     if (!entry) {
-      entry = { startMs: window.startMs, tail: Promise.resolve(), state: null, pending: new Map() };
+      entry = { startMs: window.startMs, tail: Promise.resolve(), states: [], pending: new Map() };
       ownExclusionCache.set(key, entry);
       // 按真实时间清（比「本月」最长的范围还早的才删）；按本次窗口起点清的话，多天范围里别的块的进度会被删掉（审核 R1 低-2）
       for (const [oldKey, old] of ownExclusionCache) if (old.startMs < Date.now() - 35 * DAY_MS) ownExclusionCache.delete(oldKey);
     }
     const task = entry.tail.then(async () => {
-      const prior = entry.state && entry.state.endMs <= window.endMs ? entry.state : null;
+      // 同一个窗口起点留最近几份读到的状态（按终点排）：同一轮里几条绑定的「今天」终点差几秒，后定终点的先记下以后，先定终点的那条也能接着用
+      // 终点不晚于自己的那一份，不用整段重读（审核 R1 中-4）
+      const prior = [...entry.states].reverse().find((state) => state.endMs <= window.endMs) ?? null;
       // 窗口终点比记下的晚得多（从同一天起点查多天范围）不能直接用，要接着翻到新的终点（审核 R1：少减过 49430 额度）
       if (!settle && prior && Date.now() - prior.readAt < OWN_EXCLUSION_REUSE_MS && window.endMs - prior.endMs < OWN_EXCLUSION_REUSE_MS && covers(prior.result.coverage)) return prior.result;
       // 同一个站点同一天，别的绑定刚对过账：结的是同一段窗口，直接用，不再每条绑定各查一遍（每个站每天每个来源一个 stat）
@@ -888,7 +882,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const sameEnd = prior?.endMs === window.endMs; // 沿用的那份读的是同一个终点才能用
         const doneBefore = before && sameEnd && closed && before.readAt >= window.endMs + RECONCILIATION_SETTLE_DELAY_MS
           && (!(before.coverage instanceof Set) || wantedChannels.every((channel) => before.coverage.has(channel)));
-        if (!settle) part = doneBefore || (source.kind === "token" && before && Date.now() - before.readAt < OWN_EXCLUSION_FALLBACK_REUSE_MS) ? before
+        if (!settle) part = doneBefore || (source.kind === "token" && before && Date.now() - before.readAt < OWN_EXCLUSION_FALLBACK_REUSE_MS && (!closed || sameEnd)) ? before
           : { ...await readSmart(null), readAt: Date.now() };
         else {
           const total = await queryOwnLogSourceTotal(own, base);
@@ -923,8 +917,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       let coverage = "all";
       for (const part of parts.values()) if (part.coverage instanceof Set) coverage = coverage === "all" ? part.coverage : new Set([...coverage].filter((id) => part.coverage.has(id)));
       const result = { byChannel, coverage };
-      if (!entry.state || entry.state.endMs <= window.endMs) entry.state = { parts, result, endMs: window.endMs, readAt: Date.now(), ...(settle ? { verifiedEndMs: window.endMs } : {}) };
+      entry.states = [...entry.states.filter((state) => state.endMs !== window.endMs), { parts, result, endMs: window.endMs, readAt: Date.now(), ...(settle ? { verifiedEndMs: window.endMs } : {}) }]
+        .sort((a, b) => a.endMs - b.endMs).slice(-4);
       return result;
+    }).catch((error) => {
+      // 「今天」读用户列表或管理员日志短暂失败：10 分钟内沿用上一份（只影响今天那一格，不推送），超过才读不到（总指挥 10-25）。令牌作废、少权限照原样抛
+      const live = window.endMs > Date.now() - RECONCILIATION_SETTLE_DELAY_MS;
+      const lastGood = [...entry.states].sort((a, b) => b.readAt - a.readAt)[0];
+      if (!settle && live && lastGood && !String(error?.code || "").startsWith("ACCESS_TOKEN_") && Date.now() - lastGood.readAt < OWN_EXCLUSION_STALE_OK_MS && covers(lastGood.result.coverage)) return lastGood.result;
+      throw error;
     });
     entry.tail = task.catch(() => {});
     return task;
@@ -987,9 +988,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (!readable.length && !fixed.some(Boolean)) return live[0];
     const merged = stitchChannelRevenue([...fixed.filter(Boolean), ...readable], wanted);
     const first = [...readable, ...fixed.filter(Boolean)].find((result) => result.billingTimezone) ?? {};
-    // 页面写「已扣除管理员自用 $x（10月26日起；更早的日子没扣）」要的日期，按绑定的时区取（页面不再算）
-    const { adminUsageFromMs, ...rest } = merged;
-    return { ...rest, adminUsageFromDay: adminUsageFromMs == null ? null : dayKeyInTz(adminUsageFromMs, segmentWindow.timezone),
+    return { ...merged,
       billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION,
       window: segmentWindow, billingTimezone: first.billingTimezone ?? null };
   }
@@ -1814,6 +1813,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             knownAmountUsd: downstreamResult.knownAmountUsd,
             // 这段收入里减掉的管理员自用（own-revenue-plan 第一节），计算明细「其中管理员自用 $x，不算收入」用；没有时是 0
             adminUsageQuotaUnits: downstreamResult.adminUsageQuotaUnits ?? 0, adminUsageAmountUsd: downstreamResult.adminUsageAmountUsd ?? null,
+            // 这段里几天扣了管理员自用、几天没扣（R1 以前固定的账没扣）：页面据此写「已扣除…（部分日子没扣）」；现读的一段都是扣了的
+            adminUsageDays: downstreamResult.adminUsageDays ?? { deducted: 1, undeducted: 0 },
             state: downstreamResult.state,
             successfulCount: downstreamResult.successfulCount,
             expectedCount: downstreamResult.expectedCount,
@@ -1904,6 +1905,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // 各段减掉的管理员自用合起来（own-revenue-plan 第一节）：计算明细「其中管理员自用」；有一段换算读不到时整个读不到
           adminUsageQuotaUnits: segmentResults.reduce((sum, segment) => sum + (segment.downstream.adminUsageQuotaUnits ?? 0), 0),
           adminUsageAmountUsd: segmentResults.some((segment) => segment.downstream.adminUsageAmountUsd == null) ? null : segmentResults.reduce((sum, segment) => sum + segment.downstream.adminUsageAmountUsd, 0),
+          adminUsageDays: segmentResults.reduce((sum, segment) => ({ deducted: sum.deducted + (segment.downstream.adminUsageDays?.deducted ?? 1), undeducted: sum.undeducted + (segment.downstream.adminUsageDays?.undeducted ?? 0) }), { deducted: 0, undeducted: 0 }),
           billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION,
           observedAt: Date.now(), window: sideWindow("downstream"),
@@ -2179,11 +2181,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 这次是真的写了新版（不是 B-L1 内容相同跳过）：result 自己就是刚写进账本的那一版，补上账本的版本号、来源、
         // 固定时刻和汇率，bookedResult 就不用再读一次账本行（安全审核 C2a 低-3）。B-L1 那种情况账本里的版本、来源
         // 可能和这次算出来的不一样（上一版可能是别的触发方式写的），这里判断不了，留给 bookedResult 照旧读一次
-        // 这天的账扣过管理员自用（R1 以后写的账）：记下最早是哪一天，页面写「更早的日子没扣」用（尽力而为）
-        if (ledgerOption?.booked?.write === true && result.downstream?.adminUsageQuotaUnits !== undefined) {
-          const day = billDayOf(result.window);
-          if (!adminUsageDayKnown || day < adminUsageDayKnown) { adminUsageDayKnown = day; repository.noteAdminUsageDay?.(day); }
-        }
         if (ledgerOption?.booked?.write === true) {
           result.ledger = { billDate: billDayOf(result.window), revision: ledgerOption.booked.revision, source: ledgerOption.booked.source,
             // 汇率按账本的精度（6 位小数）取整，和从账本行读出来的逐字一致（审核 C2a 第二轮低-3）
@@ -2626,10 +2623,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 页面全量读取才附带账号级对比（true 复用缓存，"refresh" 是页面「刷新」，重新读上游用量）；按关联重试和后台观测不需要。
         const accountUsage = [true, "refresh"].includes(options.accountUsage) && !(Array.isArray(ruleIds) && ruleIds.length);
         if (accountUsage && attempt === 1 && selected.length) warmAccountUsage(selected, input, now, options.accountUsage === "refresh");
-        const respond = async (inputRows) => {
-          // 每条结果带上「开始扣管理员自用的第一天」，页面据此写「更早的日子没扣」；拷一份，不动结果缓存里的
-          const launchDay = await adminUsageLaunchDay();
-          const rows = inputRows.map((row) => launchDay && row?.downstream ? { ...row, downstream: { ...row.downstream, adminUsageLaunchDay: launchDay } } : row);
+        const respond = async (rows) => {
           const response = readResponse(knownRules, rules, rows, ownerRegistry, input, now);
           if (!accountUsage) return response;
           let unaccountedUpstream = null;
