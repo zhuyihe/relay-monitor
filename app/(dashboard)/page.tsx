@@ -15,11 +15,12 @@ import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActio
 import { balanceMoneyOf, countsInProfit, profitApproxOf, rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
 import { asSentence, describeError, errorText, failureText, refreshAllText, refreshOneText } from "../../lib/error-copy";
-import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, formatAsOf, formatDays, formatMoney, formatSinceToday, formatZonedDate, INCOME_UNREAD, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
+import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, formatAsOf, formatDays, formatMoney, formatSinceToday, formatZonedDate, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../lib/business-time";
 import { UPSTREAM_FORM_TEXT } from "../../lib/channel-onboarding";
 import { AttentionList } from "../components/attention-list";
 import { Sym } from "../components/icons";
+import { More } from "../components/more";
 import type { AttentionItem } from "../components/attention-list";
 import { EmptyState, ErrorState, PanelSkeleton } from "../components/data-state";
 import type { TipRow } from "../components/float-tip";
@@ -44,17 +45,26 @@ const RANGE_OPTIONS = RANGES.map((value) => ({ value, label: RANGE_TEXT[value] }
 const RANGE_DAYS: Record<Range, number> = { today: 1, "7d": 7, "30d": 30 };
 
 const RUNWAY_LIMIT = 8;
-const TOP_USERS = 5;
+// 「收入和上游成本」那块每小段列前 3，多的并成「其他 N 位用户」「其他 N 个上游」一行（ui-design-spec §5.1）
+const TOP_N = 3;
+// 需处理露几条按利润等式那块的高度定（ui-design-spec §1.4 第 3 条、§5.1）：1440 宽时等式旁边放得下 2 条，
+// 其余收进「还有 N 件」。G 把「≈」说明收成一行、等式变矮以后，按同一条规矩再调
+const ATTENTION_SHOWN = 2;
 const REFRESH = workflowActionMeta("refresh")!.label;
 
 // 运营总览独有的话，只在这一处写；用语按 design/ui-copy-spec.md
 const COPY = Object.freeze({
   business: EQ_TEXT.business,
-  income: (range: string) => `${range}收入`,
-  upstreamCost: (range: string) => `${range}上游成本`,
+  // 「今天收入和上游成本」一块，上下两小段（ui-copy-spec §11、ui-design-spec §5.1）
+  money: (range: string) => `${range}收入和上游成本`,
+  // 手机上收起条形的按钮写它收着什么（§4.11）：两段都有条形、只有收入、只有上游成本
+  // 没设置、读不到、算不出时小段里只写这一句：原因和按钮只在利润等式下面那一处（ui-copy-spec §11，同一句话一页只说一次）
+  seeEqUnset: "没设置自营站点，见上面的利润等式。",
+  seeEqUnread: "读不到，原因见上面的利润等式。",
+  seeEqFailed: "算不出，原因见上面的利润等式。",
+  moneyMore: (users: boolean, upstreams: boolean) => (users && upstreams ? "按用户、按上游看" : users ? "按用户看" : "按上游看"),
   readBusinessFailed: "读不到经营数据",
   profitFailed: EQ_TEXT.profitFailed,
-  costFailed: "成本暂时算不出",
   readFailed: (what: string) => `读不到${what}`,
   upstreamCount: EQ_TEXT.upstreamCount,
   fixedCount: EQ_TEXT.fixedCount,
@@ -75,8 +85,7 @@ const COPY = Object.freeze({
   trend: TREND_TEXT.title,
   trendOf: TREND_TEXT.of,
   others: (n: number) => `另有 ${n} 项：`,
-  collapse: "收起",
-  expand: (n: number) => `展开其余 ${n} 项`,
+  moreItems: (n: number) => `还有 ${n} 件`,
   healthy: (n: number) => `其余 ${n} 个上游没有要处理的事`,
   balance: (text: string) => `余额 ${text}`,
   lowLine: (text: string) => `余额提醒线 ${text}`,
@@ -96,8 +105,8 @@ const COPY = Object.freeze({
   byUpstream: "按上游",
   unnamedUser: "未命名用户",
   otherUsers: (n: number) => `其他 ${n} 位用户`,
+  otherUpstreams: (n: number) => `其他 ${n} 个上游`,
   resold: "转售 Key",
-  total: "合计",
   incomeUnit: "收入",
   costUnit: "上游成本",
   noIncome: "这段时间还没有用户产生收入。",
@@ -273,6 +282,8 @@ export default function OverviewPage() {
       ? refreshFailedText(workflowAsOf, businessTz)
       : COPY.workflowUnreadable;
   const current = money && money.range === range ? money : null;
+  // 同一个函数传下去，不每次渲染换新（利润等式的「刷新」用它）
+  const retryMoney = useCallback(() => { void loadMoney(range); }, [loadMoney, range]);
   const rangeName = RANGE_TEXT[range];
 
   const attention = (
@@ -296,12 +307,15 @@ export default function OverviewPage() {
   );
 
   return (
-    <div className="jy-page">
+    <div className="jy-page jy-ov">
+      {/* 两行都是 8 + 4（ui-design-spec §5.1）：利润等式 + 需处理；上游余量 + 收入和上游成本。手机上需处理在最前 */}
       {compact ? attention : null}
-      <Equation range={range} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
-
-      <div className="jy-grid-2">
+      <div className="jy-grid-8-4">
+        <Equation range={range} money={current} error={moneyErr} onRetry={retryMoney} />
         {compact ? null : attention}
+      </div>
+
+      <div className="jy-grid-8-4">
         <RunwayPanel
           stations={stations}
           error={stationsErr}
@@ -310,11 +324,7 @@ export default function OverviewPage() {
           onRetry={loadStations}
           onTrend={setTrendStation}
         />
-      </div>
-
-      <div className="jy-grid-2 jy-grid-even">
-        <RevenuePanel title={COPY.income(rangeName)} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
-        <CostPanel title={COPY.upstreamCost(rangeName)} money={current} error={moneyErr} onRetry={() => loadMoney(range)} />
+        <MoneyPanel title={COPY.money(rangeName)} money={current} error={moneyErr} compact={compact} />
       </div>
 
       <TrendModal station={trendStation} onClose={() => setTrendStation(null)} settings={settings} rules={rules} tz={businessTz} />
@@ -463,11 +473,11 @@ function AttentionPanel({
         rules,
         settings,
         workflowActions,
+        limit: ATTENTION_SHOWN,
       }),
     [stations, tz, rules, settings, workflowActions],
   );
   const router = useRouter();
-  const [expanded, setExpanded] = useState(false);
   const extra = (
     <>
       <span className="jy-caption">{COPY.attentionOrder}</span>
@@ -533,8 +543,8 @@ function AttentionPanel({
     );
   };
 
-  const shown = expanded ? actions.all : actions.visible;
-  const items: AttentionItem[] = shown.map((a: any) => {
+  // 一条事项变成列表里的一行；收进「还有 N 件」的那些只在点开时才拼（RestAttention），需处理上百条时不白做
+  const toItem = (a: any): AttentionItem => {
     if (a.workflow) {
       return {
         key: a.id,
@@ -602,7 +612,7 @@ function AttentionPanel({
       }
     }
     return { key: a.id, level: a.level, who: name, what, desc, note: noteOf(a), actions: buttons };
-  });
+  };
 
   const hidden = actions.all.length - actions.visible.length;
   // 每个资源最多一行待处理，剩下的就是状态正常的，用一句话交代其余资源
@@ -620,17 +630,15 @@ function AttentionPanel({
           </Button>
         </div>
       ) : null}
+      {/* 露最要紧的几条（按等式那块的高度定，现在 2 条），其余收进「还有 N 件」（收起区 More，ui-design-spec §4.11、§5.1），点开在原地接着列 */}
       <AttentionList
-        items={items}
+        items={actions.visible.map(toItem)}
         emptyDesc={asOf ? `${formatAsOf(asOf, tz)}。` : undefined}
         more={
           hidden > 0 ? (
-            <>
-              <button type="button" className="jy-attention-toggle" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
-                {expanded ? COPY.collapse : COPY.expand(hidden)}
-              </button>
-              {expanded ? healthyNote : null}
-            </>
+            <More label={COPY.moreItems(hidden)} className="jy-attention-rest">
+              <RestAttention actions={actions.all.slice(actions.visible.length)} toItem={toItem} more={healthyNote ?? undefined} />
+            </More>
           ) : (
             healthyNote ?? undefined
           )
@@ -638,6 +646,11 @@ function AttentionPanel({
       />
     </Panel>
   );
+}
+
+// 「还有 N 件」点开以后的那几条：收起区只在点开时渲染它，拼列表项的活也到这时才做
+function RestAttention({ actions, toItem, more }: { actions: any[]; toItem: (a: any) => AttentionItem; more?: ReactNode }) {
+  return <AttentionList items={actions.map(toItem)} more={more} />;
 }
 
 // ---- 上游余量 ---------------------------------------------------------------
@@ -762,98 +775,77 @@ function RunwayPanel({
 
 function MoneyPanelShell({
   title,
-  caption,
   money,
   error,
-  onRetry,
   children,
   foot,
 }: {
   title: string;
-  caption: string;
   money: Money | null;
   error: Error | null;
-  onRetry: () => void;
   children?: ReactNode;
   foot?: ReactNode;
 }) {
   if (!money) {
     if (error) {
       return (
-        <Panel title={title} caption={caption}>
-          <ErrorState what={COPY.readFailed(title)} error={error} onRetry={onRetry} />
+        // 经营数据整个读不到：原因和「刷新」在上面的利润等式里，这里只写一句（同一句话一页只说一次）
+        <Panel title={title}>
+          <p className="jy-muted jy-ov-money-note">{COPY.seeEqUnread}</p>
         </Panel>
       );
     }
     return <PanelSkeleton title={title} lines={5} />;
   }
   return (
-    <Panel title={title} caption={caption} foot={foot}>
+    <Panel title={title} foot={foot}>
       {children}
     </Panel>
   );
 }
 
-function RevenuePanel({ title, money, error, onRetry }: { title: string; money: Money | null; error: Error | null; onRetry: () => void }) {
-  const router = useRouter();
-  const content = useMemo(() => {
+// 收入那一小段：按用户的条。收入没读到（读取失败、收入确认不了）时不拿用户消费去拼收入，说原因（§8.1）
+// bars：body 是条形（手机上收进「按用户、按上游看」）；不是条形时是一句状态（没设置、读不到、没有收入），手机上也直接露出来。
+// 合计不在这里写：收入、上游成本的合计只在利润等式里出现（ui-design-spec §1.4 第 2 条、§5.1）
+type MoneyView = { body: ReactNode; bars: boolean };
+function useRevenueView(money: Money | null): MoneyView | null {
+  return useMemo(() => {
     if (!money) return null;
-    if (money.unconfigured) {
-      return (
-        <div className="jy-empty-inline">
-          <p style={{ margin: 0 }}>
-            <strong>{OWN_STATION_UNSET_TITLE}</strong>：{OWN_STATION_UNSET_HINT}
-          </p>
-          <Button size="small" onClick={() => router.push("/stations")}>
-            {workflowActionMeta("setup_own_station")!.label}
-          </Button>
-        </div>
-      );
-    }
+    // 没设置自营站点、收入读不到：原因和「去设置」「刷新」在上面的利润等式里，这里只写一句
+    if (money.unconfigured) return { bars: false, body: <p className="jy-muted jy-ov-money-note">{COPY.seeEqUnset}</p> };
     const own = money.own || {};
     const profit = own.profit || {};
-    // 收入没读到（读取失败、收入确认不了）：不拿用户消费去拼收入，说原因（§8.1）
-    if (profit.error || profit.incomeUnconfirmed) {
-      return <ErrorState what={INCOME_UNREAD.title} error={profit.incomeUnconfirmed || profit} onRetry={onRetry} />;
-    }
-    // 没设置汇率时按 1:1 折算，合计前加「约」（和别处同一个判断：rateSnapshotOf）
-    const ownRateNow = rateSnapshotOf(own.station);
-    const ownRate = ownRateNow.cnyPerUsd;
+    if (profit.error || profit.incomeUnconfirmed) return { bars: false, body: <p className="jy-muted jy-ov-money-note">{COPY.seeEqUnread}</p> };
+    // 没设置汇率时按 1:1 折算（和别处同一个判断：rateSnapshotOf）
+    const ownRate = rateSnapshotOf(own.station).cnyPerUsd;
     const users = (own.byUser || [])
       .filter((u: any) => !u.isAdmin)
       .map((u: any) => ({ name: String(u.user || COPY.unnamedUser), value: r2((Number(u.cost) || 0) * ownRate), requests: u.requests }))
       .filter((u: any) => u.value > 0)
       .sort((a: any, b: any) => b.value - a.value);
-    const items: HBarItem[] = users.slice(0, TOP_USERS).map((u: any) => ({
+    const items: HBarItem[] = users.slice(0, TOP_N).map((u: any) => ({
       key: `u-${u.name}`,
       name: u.name,
       value: u.value,
       tipExtra: u.requests != null ? [[COPY.tip.requests, Number(u.requests).toLocaleString("en-US")]] : undefined,
     }));
-    const rest = users.slice(TOP_USERS);
+    const rest = users.slice(TOP_N);
     if (rest.length) items.push({ key: "rest", name: COPY.otherUsers(rest.length), value: r2(sum(rest.map((u: any) => u.value))) });
     if (Number(profit.resoldCny) > 0) items.push({ key: "resold", name: COPY.resold, value: Number(profit.resoldCny) });
-    const income = profit.incomeCny ?? r2(sum(items.map((i) => i.value ?? 0)));
-    return (
-      <HBars
-        items={items}
-        color="var(--jy-s1)"
-        unitName={COPY.incomeUnit}
-        empty={COPY.noIncome}
-        total={items.length ? { label: COPY.total, value: formatMoney(income, { approx: ownRateNow.source !== "configured" }) } : undefined}
-      />
-    );
-  }, [money, router, onRetry]);
-  return (
-    <MoneyPanelShell title={title} caption={COPY.byUser} money={money} error={error} onRetry={onRetry}>
-      {content}
-    </MoneyPanelShell>
-  );
+    // 这段时间没有收入时写一句「这段时间还没有用户产生收入。」（手机上也直接露出来）
+    return {
+      bars: items.length > 0,
+      body: <HBars items={items} color="var(--jy-s1)" unitName={COPY.incomeUnit} empty={COPY.noIncome} />,
+    };
+  }, [money]);
 }
 
-function CostPanel({ title, money, error, onRetry }: { title: string; money: Money | null; error: Error | null; onRetry: () => void }) {
-  const view = useMemo(() => {
+// 上游成本那一小段：按上游的条，和要交代的几句（放在块底）
+function useCostView(money: Money | null): (MoneyView & { notes: string[] }) | null {
+  return useMemo(() => {
     if (!money) return null;
+    let items: HBarItem[];
+    let notes: string[] = [];
     if (money.unconfigured) {
       const fb = money.fallback || {};
       const gaps = new Map<string, number>(
@@ -864,52 +856,82 @@ function CostPanel({ title, money, error, onRetry }: { title: string; money: Mon
       const list = (fb.stations || []).filter(
         (s: any) => s.includeInProfit && !s.isOwn && s.costBasis !== "fixed" && (s.totalCny > 0 || gaps.has(s.id)),
       );
-      const items: HBarItem[] = list
-        .map((s: any) => ({
-          key: String(s.id),
-          name: s.name,
-          value: Number(s.totalCny) || 0,
-          tipExtra: gaps.has(s.id) ? [[COPY.tip.note, COPY.gapTip(gaps.get(s.id)!)]] : undefined,
-        }))
-        .sort((a: HBarItem, b: HBarItem) => (b.value ?? 0) - (a.value ?? 0));
-      const approx = list.some((s: any) => gaps.has(s.id));
-      return { items, total: sum(items.map((i) => i.value ?? 0)), approx, notes: [] as string[] };
+      items = list.map((s: any) => ({
+        key: String(s.id),
+        name: s.name,
+        value: Number(s.totalCny) || 0,
+        tipExtra: gaps.has(s.id) ? [[COPY.tip.note, COPY.gapTip(gaps.get(s.id)!)]] : undefined,
+      }));
+    } else {
+      const profit = money.own?.profit || {};
+      // 利润算不出：原因在上面的利润等式里，这里只写一句
+      if (profit.error) return { bars: false, body: <p className="jy-muted jy-ov-money-note">{COPY.seeEqFailed}</p>, notes };
+      items = (profit.costs || [])
+        .filter((c: any) => c.mode !== "fixed")
+        .map((c: any) => ({
+          key: String(c.stationId),
+          name: c.name,
+          value: Number(c.cny) || 0,
+          tipExtra: c.note ? [[COPY.tip.how, c.note]] : COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT] ? [[COPY.tip.how, COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT]]] : undefined,
+        }));
+      notes = splitProfitWarnings(profit).notes;
     }
-    const profit = money.own?.profit || {};
-    if (profit.error) return { items: [], total: null, approx: false, notes: [] as string[], error: profit };
-    const items: HBarItem[] = (profit.costs || [])
-      .filter((c: any) => c.mode !== "fixed")
-      .map((c: any) => ({
-        key: String(c.stationId),
-        name: c.name,
-        value: Number(c.cny) || 0,
-        tipExtra: c.note ? [[COPY.tip.how, c.note]] : COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT] ? [[COPY.tip.how, COST_MODE_TEXT[c.mode as keyof typeof COST_MODE_TEXT]]] : undefined,
-      }))
-      .sort((a: HBarItem, b: HBarItem) => (b.value ?? 0) - (a.value ?? 0));
-    const { notes } = splitProfitWarnings(profit);
-    // 合计带不带「≈」和同页利润等式的上游成本同一个判断（lib/profit.js）
-    return { items, total: sum(items.map((i) => i.value ?? 0)), approx: profitApproxOf(profit, money.own?.station).upstream, notes };
+    items.sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+    const rest = items.slice(TOP_N);
+    const shown = items.slice(0, TOP_N);
+    if (rest.length) shown.push({ key: "rest", name: COPY.otherUpstreams(rest.length), value: r2(sum(rest.map((i) => i.value ?? 0))) });
+    return {
+      bars: items.length > 0,
+      body: <HBars items={shown} color="var(--jy-s2)" unitName={COPY.costUnit} empty={COPY.noCost} />,
+      notes,
+    };
   }, [money]);
+}
 
+// 「今天收入和上游成本」一块，上下两小段「收入 · 按用户」「上游成本 · 按上游」，各列前 3（ui-design-spec §5.1）。
+// 小段标题不带合计：合计只在利润等式里出现。手机上条形收进「按用户、按上游看」；
+// 没设置、读不到、没有收入这些一句话的状态照样露出来（§1.4 第 8 条）
+function MoneyPanel({ title, money, error, compact }: { title: string; money: Money | null; error: Error | null; compact: boolean }) {
+  const revenue = useRevenueView(money);
+  const cost = useCostView(money);
+  const head = (what: string, by: string) => (
+    <h3 className="jy-ov-money-head">
+      {what}
+      <span className="jy-caption">· {by}</span>
+    </h3>
+  );
+  const part = (what: string, by: string, view: MoneyView) => (
+    <section aria-label={what}>
+      {head(what, by)}
+      {view.body}
+    </section>
+  );
   return (
-    <MoneyPanelShell
-      title={title}
-      caption={COPY.byUpstream}
-      money={money}
-      error={error}
-      onRetry={onRetry}
-      foot={view?.notes?.length ? view.notes.join("") : undefined}
-    >
-      {view?.error ? (
-        <ErrorState what={COPY.costFailed} error={view.error} />
-      ) : view ? (
-        <HBars
-          items={view.items}
-          color="var(--jy-s2)"
-          unitName={COPY.costUnit}
-          empty={COPY.noCost}
-          total={view.items.length ? { label: COPY.total, value: formatMoney(view.total, { approx: view.approx }) } : undefined}
-        />
+    <MoneyPanelShell title={title} money={money} error={error} foot={cost?.notes.length ? cost.notes.join("") : undefined}>
+      {revenue && cost ? (
+        compact ? (
+          // 收入在前、上游成本在后，和桌面同一个先后：挨着的条形并进一个收起区，一句话的状态照样露在外面
+          <div className="jy-ov-money is-compact">
+            {revenue.bars && cost.bars ? (
+              <More label={COPY.moneyMore(true, true)}>
+                <div className="jy-ov-money">
+                  {part(COPY.incomeUnit, COPY.byUser, revenue)}
+                  {part(COPY.costUnit, COPY.byUpstream, cost)}
+                </div>
+              </More>
+            ) : (
+              <>
+                {revenue.bars ? <More label={COPY.moneyMore(true, false)}>{part(COPY.incomeUnit, COPY.byUser, revenue)}</More> : part(COPY.incomeUnit, COPY.byUser, revenue)}
+                {cost.bars ? <More label={COPY.moneyMore(false, true)}>{part(COPY.costUnit, COPY.byUpstream, cost)}</More> : part(COPY.costUnit, COPY.byUpstream, cost)}
+              </>
+            )}
+          </div>
+        ) : (
+          <div className="jy-ov-money">
+            {part(COPY.incomeUnit, COPY.byUser, revenue)}
+            {part(COPY.costUnit, COPY.byUpstream, cost)}
+          </div>
+        )
       ) : null}
     </MoneyPanelShell>
   );

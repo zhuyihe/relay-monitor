@@ -25,3 +25,25 @@
 @media (max-width: 767px) {
   .jy-ov-banner { margin: 12px 16px 0; flex-wrap: wrap; }
 }
+
+/* 收入和上游成本一块（ui-design-spec §5.1）：上下两小段「收入 · 按用户」「上游成本 · 按上游」，合计只在利润等式里 */
+.jy-ov-money { display: flex; flex-direction: column; gap: 20px; }
+.jy-ov-money > section + section { padding-top: 20px; border-top: 1px solid var(--jy-rule-soft); }
+.jy-ov-money-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; margin: 0 0 8px; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--jy-ink-2); }
+/* 手机上只露没设置、读不到、没有收入这类一句话的小段，条形在「按用户、按上游看」里 */
+.jy-ov-money.is-compact { gap: 12px; }
+.jy-ov-money.is-compact > section + section { padding-top: 0; border-top: 0; }
+.jy-ov-money.is-compact .jy-more__body { margin-top: 12px; }
+/* 只在 8 + 4 并排时（1200 以上）：1200 以下叠成一列满宽，照通用的排法 */
+@media (min-width: 1200px) {
+  /* 4 列里名字那一栏给宽一点（条短一点），上游名少被截 */
+  .jy-ov .jy-ov-money .jy-hbars li { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
+  /* 需处理放在 4 列里：按钮挪到文字下面，文字占满一行，不被挤成四五行（和手机上同一个排法） */
+  .jy-ov .jy-grid-8-4 .jy-attention li { grid-template-columns: 16px minmax(0, 1fr); }
+  .jy-ov .jy-grid-8-4 .jy-attention .actions { grid-column: 2; margin-left: -8px; }
+  /* 点开「还有 N 件」以后需处理变长：这一行不再拉成一样高，等式那块照自己的高度，下面不空一大片 */
+  .jy-ov .jy-grid-8-4:has(.jy-attention-rest .jy-more__body) { align-items: start; }
+  .jy-ov .jy-grid-8-4:has(.jy-attention-rest .jy-more__body) > .jy-panel { height: auto; }
+}
+/* 没设置、读不到、算不出时小段里那一句（原因在上面的利润等式里） */
+.jy-ov-money-note { margin: 0; font-size: 13px; line-height: 20px; }
