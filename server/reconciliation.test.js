@@ -1103,6 +1103,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
       statRequests.push({ tokenName: url.searchParams.get("token_name"), group: url.searchParams.get("group"), start, end: Number(url.searchParams.get("end_timestamp")) });
       body = upstreamBroken ? { success: false, message: "stat unavailable" } : { success: true, data: { quota: start === 1000 ? 0 : 100 } };
     }
+    else if ((url.pathname === "/api/log/" || url.pathname === "/api/log/stat") && url.searchParams.get("token_name")) body = ownTestLogApi(url);
     else if (url.pathname === "/api/log/stat") {
       assert.equal(url.searchParams.get("channel"), "1");
       assert.equal(url.searchParams.has("channel_id"), false);
@@ -1305,6 +1306,8 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
   const ownServer = serve(ownCounts, (url) => {
     if (url.pathname === "/api/user/self") return { success: true, data: { id: 1 } };
     if (url.pathname === "/api/status") return ownStatusBroken ? { success: false, message: "status unavailable" } : { success: true, data: { quota_per_unit: 100 } };
+    if (url.pathname === "/api/log/" && url.searchParams.get("token_name")) return ownTestLogApi(url);
+    if (url.pathname === "/api/log/stat" && url.searchParams.get("token_name")) return ownTestLogApi(url);
     if (url.pathname === "/api/log/stat") return { success: true, data: { quota: 250 } };
     if (url.pathname === "/api/channel/") return { success: true, data: { total: 1, items: [{ id: 1, name: "渠道", status: 1 }] } };
   });
@@ -1349,7 +1352,8 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
     "/api/user/self": 1, "/api/status": 1, "/api/user/self/groups": 1, "/api/token/": 1, "/api/log/self/stat": 4,
   }, "上游身份与 /api/status 只在读取元数据时各探测一次，分段只请求自己的 stat");
   assert.deepEqual(statUsers, ["7", "7", "7", "7"], "分段 stat 复用元数据解析出的 PAT 身份");
-  assert.deepEqual(ownCounts, { "/api/user/self": 1, "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 4 }, "本站身份和 /api/status 每轮只读一次，由各分段共用");
+  // 渠道测试日志（R1）：每段窗口、每个名字（「模型测试」「Model test」）读一次列表，4 段共 8 次；这是方案里「一段窗口一次，分段时每段各一次」
+  assert.deepEqual(ownCounts, { "/api/user/self": 1, "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 4, "/api/log/": 8 }, "本站身份和 /api/status 每轮只读一次，由各分段共用");
 
   for (const counts of [upstreamCounts, ownCounts]) for (const path of Object.keys(counts)) delete counts[path];
   ownStatusBroken = true;
@@ -1401,7 +1405,8 @@ test("首次观察到已知倍率会补全当前 legacy 分段，随后切组才
         : url.pathname === "/api/user/self/groups" ? { success: true, data: { AWS_Bedrock3: { ratio: 2.9 }, AWS_Bedrock2: { ratio: 2.6 } } }
           : url.pathname === "/api/token/" ? { success: true, data: { total: 1, items: [{ id: 9, user_id: 7, name: "stable", status: 1, group: currentGroup, cross_group_retry: false }] } }
             : url.pathname === "/api/log/self/stat" ? { success: true, data: { quota: 100 } }
-              : url.pathname === "/api/log/stat" ? { success: true, data: { quota: 100 } }
+              : (url.pathname === "/api/log/" || url.pathname === "/api/log/stat") && url.searchParams.get("token_name") ? ownTestLogApi(url)
+                : url.pathname === "/api/log/stat" ? { success: true, data: { quota: 100 } }
                   : url.pathname === "/api/channel/" ? { success: true, data: { items: [{ id: 1, name: "渠道", status: 1 }] } }
                     : { success: false };
     response.writeHead(body.success === false ? 404 : 200, { "Content-Type": "application/json" });
@@ -1914,6 +1919,20 @@ test("快照事务提交后、通知前口径被修正时，不为旧口径记�
 // 已结束的上海完整自然日：只有这种窗口的利润会保存为确认账单。
 const SETTLED_DAY = { startMs: Date.parse("2026-09-18T16:00:00.000Z"), endMs: Date.parse("2026-09-19T16:00:00.000Z") };
 
+// 自营站点管理端日志里的渠道测试（own-revenue-plan 第一节）：按 New API 的写法，type 2、token_id 0、token_name 是固定的一串。
+// 列表照 GetAllLogs：按 token_name 筛（MySQL 默认排序规则不分大小写，所以 model test 也会回来）、起止秒、created_at 与 id 倒序、page_size 上限 100，
+// 带 total；stat 是同样筛法的 quota 总和。logs 的每一项：{ id, channel, quota, created_at（秒）, token_name, token_id（默认 0） }
+function ownTestLogApi(url, logs = []) {
+  const name = url.searchParams.get("token_name");
+  const start = Number(url.searchParams.get("start_timestamp") || 0), end = Number(url.searchParams.get("end_timestamp") || 0) || Infinity;
+  const matched = logs.filter((log) => String(log.token_name).toLowerCase() === String(name).toLowerCase() && log.created_at >= start && log.created_at <= end)
+    .sort((a, b) => b.created_at - a.created_at || b.id - a.id);
+  if (url.pathname === "/api/log/stat") return { success: true, data: { quota: matched.reduce((sum, log) => sum + log.quota, 0) } };
+  const size = Math.min(100, Number(url.searchParams.get("page_size") || 10)), page = Math.max(1, Number(url.searchParams.get("p") || 1));
+  const items = matched.slice((page - 1) * size, page * size).map((log) => ({ type: 2, token_id: 0, ...log }));
+  return { success: true, data: { total: matched.length, items } };
+}
+
 function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {} }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
@@ -1958,7 +1977,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     get size() { return tables.snapshots.length; },
   };
   const state = {
-    upstreamQuota: 100, ownQuota: 250, statCalls: [], requests: [], snapshots,
+    upstreamQuota: 100, ownQuota: 250, testLogs: [], statCalls: [], requests: [], snapshots,
     get writes() { return log.snapshotWrites.length; },
     get ledgerWrites() { return log.ledgerWrites; },
     // 已提交的账本行，detail 解析成对象。
@@ -1986,7 +2005,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
   };
   t.mock.method(globalThis, "fetch", async (input, init = {}) => {
     const url = new URL(String(input));
-    const request = { host: url.host, path: url.pathname, authorization: init.headers?.Authorization ?? null };
+    const request = { host: url.host, path: url.pathname, authorization: init.headers?.Authorization ?? null, tokenName: url.searchParams.get("token_name") };
     state.requests.push(request);
     if (onRequest) await onRequest(request);
     if (url.pathname === "/api/status") return reply(200, { success: true, data: { quota_per_unit: 100, version: "v" } });
@@ -2006,6 +2025,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
         const items = ownChannels ? ownChannels(request) : [{ id: 1, name: "渠道", status: 1 }];
         return reply(200, { success: true, data: { total: items.length, items } });
       }
+      // 渠道测试日志（R1）：带 token_name 的列表和 stat，不算渠道收费统计，不进 statCalls
+      if ((url.pathname === "/api/log/" || url.pathname === "/api/log/stat") && url.searchParams.get("token_name")) return reply(200, ownTestLogApi(url, state.testLogs));
       if (url.pathname === "/api/log/stat") return stat("own", url, state.ownQuota);
     }
     return reply(404, { success: false });
@@ -2911,7 +2932,8 @@ test("R02本站同源PAT不延期；A换B并同步仍不确认旧A，旧快照�
       const data = url.pathname === "/api/user/self" ? { id: 2 }
         : url.pathname === "/api/status" ? { quota_per_unit: 100 }
           : url.pathname === "/api/channel/" ? { total: 1, items: [{ id: 1, name: "渠道", status: 1 }] }
-            : url.pathname === "/api/log/stat" ? { quota: 500 } : null;
+            : (url.pathname === "/api/log/" || url.pathname === "/api/log/stat") && url.searchParams.get("token_name") ? ownTestLogApi(url).data
+              : url.pathname === "/api/log/stat" ? { quota: 500 } : null;
       return { status: data ? 200 : 404, text: async () => JSON.stringify({ success: !!data, data }) };
     }
     return oldFetch(input, init);
@@ -4519,8 +4541,10 @@ async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", clock = nu
 
 // 自营站点的管理端日志列表替身（计划 P1a 判断有没有新的消费用），照 New API model/log.go GetAllLogs：
 // 按 start_timestamp 筛，按「时刻倒序、再按编号倒序」排，带 total（起点以后一共几条）；clickhouse 时编号换成显示序号（第一条永远是 1）
-function ownLogList(logs, calls = [], { clickhouse = false } = {}) {
+function ownLogList(logs, calls = [], { clickhouse = false, testLogs = [] } = {}) {
   return (url) => {
+    // 渠道测试日志（R1）按 token_name 读，不是 P1a 看全站有没有新消费的那次读，不记进 calls
+    if (url.searchParams.get("token_name")) return { status: 200, text: async () => JSON.stringify(ownTestLogApi(url, testLogs)) };
     const since = Number(url.searchParams.get("start_timestamp"));
     calls.push(since);
     const matched = logs.filter((log) => log.created_at >= since).sort((a, b) => b.created_at - a.created_at || b.id - a.id);
@@ -4541,7 +4565,7 @@ test("P1a 轮询省请求和写入：自营 /api/status 每轮一次；全站没
     if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
     return prev(input, init);
   });
-  const ownCalls = (path) => f.state.requests.filter((request) => request.host === "own.test" && request.path === path).length;
+  const ownCalls = (path) => f.state.requests.filter((request) => request.host === "own.test" && request.path === path && !request.tokenName).length;
   const todayWrites = () => f.repository.log.snapshotWrites.filter((entry) => entry.source?.window?.preset === "today").length;
   const round = async () => {
     const before = { status: ownCalls("/api/status"), channel: ownCalls("/api/log/stat"), states: f.state.channelStateWrites.length, today: todayWrites(), site: siteCalls.length };
@@ -4589,7 +4613,7 @@ test("P1a 轮询省请求和写入：自营 /api/status 每轮一次；全站没
   now += 60000;
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(String(input));
-    if (url.host === "own.test" && url.pathname === "/api/log/") { siteCalls.push(null); return { status: 500, text: async () => "{}" }; }
+    if (url.host === "own.test" && url.pathname === "/api/log/" && !url.searchParams.get("token_name")) { siteCalls.push(null); return { status: 500, text: async () => "{}" }; }
     return prev(input, init);
   });
   assert.equal((await round()).channel, 4);
@@ -4610,6 +4634,7 @@ test("P1a 自营站点时钟偏慢 10 分钟、日志晚 60 多秒才写进去�
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(String(input));
     if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && url.searchParams.get("token_name")) return { status: 200, text: async () => JSON.stringify(ownTestLogApi(url)) };
     if (url.host === "own.test" && url.pathname === "/api/log/stat") {
       f.state.requests.push({ host: url.host, path: url.pathname });
       const channel = Number(url.searchParams.get("channel")), start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
@@ -4618,7 +4643,7 @@ test("P1a 自营站点时钟偏慢 10 分钟、日志晚 60 多秒才写进去�
     }
     return prev(input, init);
   });
-  const channelReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat").length;
+  const channelReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && !request.tokenName).length;
   const round = async () => { now += 60000; const before = channelReads(); await f.module.refreshDue(now); return channelReads() - before; };
   const live = async () => (await f.module.queryRules({ preset: "today", ruleIds: ["rr_live"] }, { mode: "evaluate", origin: "page" })).results[0].downstream.amountUsd;
 
@@ -4664,6 +4689,7 @@ test("P1a 审核第二轮：晚 1 秒、ClickHouse 显示序号、钟慢加读�
         const body = JSON.parse(await reply.text());
         return { status: 200, text: async () => JSON.stringify({ success: true, data: body.data.items }) };
       }
+      if (url.host === "own.test" && url.pathname === "/api/log/stat" && url.searchParams.get("token_name")) return { status: 200, text: async () => JSON.stringify(ownTestLogApi(url)) };
       if (url.host === "own.test" && url.pathname === "/api/log/stat") {
         f.state.requests.push({ host: url.host, path: url.pathname });
         if (failChannel) return { status: 500, text: async () => "{}" };
@@ -4673,7 +4699,7 @@ test("P1a 审核第二轮：晚 1 秒、ClickHouse 显示序号、钟慢加读�
       }
       return prev(input, init);
     });
-    const reads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat").length;
+    const reads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && !request.tokenName).length;
     return {
       f, logs, sec,
       add: (channel, created_at) => logs.push({ id: logs.length + 1, channel, created_at, quota: 100 }),
@@ -4781,7 +4807,7 @@ test("P1a 沿用渠道收费的边界：额度换算变了、读失败后进入�
     }
     return prev(input, init);
   });
-  const channelReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat").length;
+  const channelReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && !request.tokenName).length;
   const round = async (ms = 60000) => { now += ms; const before = channelReads(); await f.module.refreshDue(now); return channelReads() - before; };
   const today = async () => (await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" })).results;
   const amounts = async () => (await today()).map((row) => row.downstream.amountUsd);
@@ -6980,6 +7006,73 @@ test("C2a 结账时渠道目录用 10 分钟内的缓存：一轮结好几天，
   const settled = f.state.ledger.filter((row) => row.rule_id === "rr_live").length;
   assert.ok(settled >= 3, `这一轮结了好几天：${settled}`);
   assert.ok(channelReads() <= 2, `结 ${settled} 天，渠道目录最多读一两次（今天的观测一次，结账用缓存），实际 ${channelReads()} 次`);
+});
+
+// ---- R1 渠道测试不算收入（own-revenue-plan 第一节）：收入是渠道的收费统计减掉渠道测试，固定进账本的也是减过的 ----
+const testLog = (id, quota, extra = {}) => ({ id, channel: 1, quota, created_at: COMPLETED_YESTERDAY.startMs / 1000 + 100 + id, token_name: "模型测试", ...extra });
+
+test("R1 结账：渠道收费里的渠道测试额度减掉再固定进账本，计算明细带上减掉的美元；累计和全站总额度相等时不重翻", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  f.state.testLogs.push(testLog(1, 30), testLog(2, 20), testLog(3, 5, { token_name: "Model test" }));
+  const listReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/" && request.tokenName).length;
+  const manual = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
+  const settled = (await manual()).results[0];
+  // 渠道收费统计 250 额度（含测试），测试 30 + 20 + 5 = 55，收入 195 额度 = 1.95 美元
+  assert.equal(settled.downstream.quotaUnits, 195);
+  assert.equal(settled.downstream.amountUsd, 1.95);
+  assert.equal(settled.downstream.testAmountUsd, 0.55, "计算明细：其中渠道测试");
+  const row = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(row.detail.result.downstream.amountUsd, 1.95, "固定进账本的收入是减过的");
+  assert.equal(row.detail.result.downstream.testAmountUsd, 0.55);
+  assert.equal(listReads(), 2, "累计（两个名字各翻一页）和全站总额度对上了，没有再整段重翻");
+});
+
+test("R1 结账对账不等（有人起了同名的 Key，stat 偏大）：整段重翻，仍然只减 token_id 为 0 的", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  f.state.testLogs.push(testLog(1, 30), testLog(2, 999, { token_id: 7 })); // 用户自己的 Key 也叫「模型测试」
+  const listReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/" && request.tokenName).length;
+  const manual = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
+  const settled = (await manual()).results[0];
+  assert.equal(settled.downstream.quotaUnits, 220, "只减了 token_id 为 0 的 30，用户自己的 Key 那 999 照算收入");
+  assert.ok(listReads() > 2, "全站总额度（1029）和累计（30）不等，整段重翻了一遍");
+});
+
+test("R1 今天：按各名字上次的编号接着翻，没有新测试日志时每个名字只翻第一页；新测试日志只加新的", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  f.state.testLogs.push({ id: 1, channel: 1, quota: 40, created_at: todayStart + 60, token_name: "模型测试" });
+  const listReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/" && request.tokenName).length;
+  const today = async () => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  const first = await today();
+  assert.equal(first.downstream.quotaUnits, 210, "今天的收入减掉了 40 额度的测试");
+  const afterFirst = listReads();
+  now += 60000;
+  f.state.testLogs.push({ id: 2, channel: 1, quota: 10, created_at: Math.floor(now / 1000) - 5, token_name: "模型测试" });
+  const second = await today();
+  assert.equal(second.downstream.quotaUnits, 200, "只加了新的 10，不是重算一遍");
+  assert.equal(listReads() - afterFirst, 2, "一轮每个名字一页");
+});
+
+test("R1 读不到渠道测试日志：这一天算不出收入、不固定，下次重试；不拿没减的数固定进账本", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  const prev = globalThis.fetch;
+  let broken = true;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (broken && url.host === "own.test" && url.searchParams.get("token_name")) return { status: 500, text: async () => "{}" };
+    return prev(input, init);
+  });
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 0, "没固定");
+  assert.ok(f.repository.tables.settlementState.some((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08"), "留了状态行，会重试");
+  broken = false;
+  now += 10 * 60000;
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 1, "读得到了，下一次固定");
 });
 
 test("C2a 结账（settle）只写账本和状态行：不写观测快照、渠道状态、分段，不发告警", async (t) => {

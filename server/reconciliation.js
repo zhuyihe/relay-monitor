@@ -5,6 +5,8 @@ import {
   queryNewApiStatus,
   queryKeyReconciliationStat,
   queryOwnChannelRevenue,
+  queryOwnChannelTestQuota,
+  queryOwnChannelTestQuotaTotal,
   queryOwnChannels,
   queryOwnLatestLog,
   queryAccountIdentity,
@@ -454,6 +456,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   //   observationWrites：每条绑定最近一次写下的「今天」观测快照的内容指纹和写入时刻
   const ownActivity = (rt._reconciliationOwnActivity ||= new Map());
   const ownRevenueCache = (rt._reconciliationOwnRevenue ||= new Map());
+  // ownTestQuota：各自营站点每段窗口里渠道测试日志的累计（按渠道的额度、各名字翻到的最大编号），「今天」接着翻、结账用它对账
+  const ownTestCache = (rt._reconciliationOwnTestQuota ||= new Map());
   const observationWrites = (rt._reconciliationObservationWrites ||= new Map());
   // 出了异常、下一轮要把分组、Key 目录和身份全部重读的上游：Key 账单报错、渠道有收入而 Key 用量为 0、目录里找不到绑定的 Key
   const staleMetadata = (rt._reconciliationStaleMetadata ||= new Set());
@@ -747,11 +751,55 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }));
   }
 
+  // 一段窗口里各渠道的渠道测试额度（own-revenue-plan 第一节），从渠道收入里减掉。测试日志是整个站点的，和哪条绑定无关，
+  // 同一个站点、同一个窗口起点的各条绑定共用一份累计。
+  // - 轮询（今天）：按各名字上次翻到的最大编号接着翻，每个名字平时 1 个请求；30 秒内刚读过的直接沿用（几条绑定同一轮来，
+  //   晚到的那几秒新测试日志下一轮补上，只影响今天的实时数）；
+  // - 结账（settle）：先查全站这段窗口测试名字下的总额度（/api/log/stat），是 0 就没有测试；不是 0 就翻到窗口终点，累计和总额度
+  //   相等才用；不等（漏了、或有人用同名的 Key）整段重翻一遍，用重翻的。累计只在内存里，重启以后那天整段重翻；
+  // - 窗口比记下的短（终点更早）：不能接着用，整段读一次，不记。
+  // 读失败直接抛，queryOwnChannelRevenue 把这一段所有渠道当读不到，不拿没减的数当收入。
+  const OWN_TEST_REUSE_MS = 30000;
+  const OWN_TEST_VERIFIED_REUSE_MS = 10 * 60000;
+  function ownTestQuota(own, window, { settle = false } = {}) {
+    const key = JSON.stringify([own.id, credentialFingerprint(own), window.startMs, window.timezone]);
+    let entry = ownTestCache.get(key);
+    if (!entry) {
+      entry = { startMs: window.startMs, tail: Promise.resolve(), state: null };
+      ownTestCache.set(key, entry);
+      for (const [oldKey, old] of ownTestCache) if (old.startMs < window.startMs - 2 * DAY_MS) ownTestCache.delete(oldKey);
+    }
+    const task = entry.tail.then(async () => {
+      const prior = entry.state && entry.state.endMs <= window.endMs ? entry.state : null;
+      const read = (from) => queryOwnChannelTestQuota(own, { startMs: window.startMs, endMs: window.endMs, previous: from, afterIds: from?.maxIds });
+      const sum = (value) => [...value.byChannel.values()].reduce((total, quota) => total + quota, 0);
+      let result;
+      if (!settle) {
+        if (prior && Date.now() - prior.readAt < OWN_TEST_REUSE_MS) return prior;
+        result = await read(prior);
+      } else if (prior?.verifiedEndMs === window.endMs && Date.now() - prior.readAt < OWN_TEST_VERIFIED_REUSE_MS) {
+        // 同一个站点同一天，别的绑定刚对过账：结的是同一段窗口，直接用，不再每条绑定各查一遍总额度（方案：每个站每天 2 个 stat）
+        return prior;
+      } else {
+        const total = await queryOwnChannelTestQuotaTotal(own, window);
+        if (total === 0) result = { byChannel: new Map(), maxIds: {} };
+        else {
+          result = await read(prior);
+          if (sum(result) !== total) result = await read(null);
+        }
+      }
+      if (!entry.state || entry.state.endMs <= window.endMs) entry.state = { ...result, endMs: window.endMs, readAt: Date.now(), ...(settle ? { verifiedEndMs: window.endMs } : {}) };
+      return result;
+    });
+    entry.tail = task.catch(() => {});
+    return task;
+  }
+
   // 一段窗口的渠道收费。reuse 时（只有轮询观测今天）读全了就记下（读到哪一刻为止）；记下的那份读到的时刻
   // 不早于这个自营站点没有新消费的起点，就沿用它，窗口终点换成这次的——这段时间里没有新的消费日志，每个渠道的合计都不会变。
   // 沿用前照样读一次 /api/status（同一轮共用）：额度换算变了、或者读不到，就照旧逐个读，不拿旧的换算算钱。
   // 这一轮里「查过全站以后、轮到这条绑定之前」那几秒的新消费，下一轮查全站时会发现，再照旧逐个读。
-  async function ownRevenue(own, rule, segmentWindow, { loadStatus, registry, reuse }) {
+  async function ownRevenue(own, rule, segmentWindow, { loadStatus, registry, reuse, settle = false }) {
     const channelIds = rule.channels.map((channel) => channel.channelId);
     // 键里带凭据指纹，和 markQuietOwnStations 里「换了凭据就不算安静」互为备份：换了自营站点的凭据，任一道都能挡住沿用旧的
     const key = JSON.stringify([own.id, credentialFingerprint(own), [...channelIds].sort((a, b) => a - b), segmentWindow.startMs, segmentWindow.timezone]);
@@ -762,7 +810,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const status = await loadStatus().catch(() => null);
       if (status && status.quotaPerUnit === cached.result.quotaPerUnit) return { ...cached.result, window: { ...cached.result.window, endMs: segmentWindow.endMs } };
     }
-    const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus });
+    const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus,
+      testQuota: () => ownTestQuota(own, segmentWindow, { settle }) });
     // 只有轮询观测今天会沿用，别的窗口（昨天、结账、自定义、近 7 天、本月）不记
     if (reuse && result.state === "complete" && !result.emptySecondWindow) {
       ownRevenueCache.set(key, { endMs: segmentWindow.endMs, result });
@@ -1268,7 +1317,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             ownChannelsFor(own, { force: force && !settle }).catch(() => null),
             mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => queryOwnChannelRevenue(own, {
               channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone,
-              loadStatus: () => ownStatusFor(ownerRegistry, own),
+              loadStatus: () => ownStatusFor(ownerRegistry, own), testQuota: () => ownTestQuota(own, segmentWindow, { settle }),
             }).catch(() => null)),
           ]);
           const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
@@ -1518,7 +1567,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
             : upstreamWindowFor(upstream, metadata, token, segmentWindow, { readOnly: !observe }).catch((error) => ({ error })),
           (ownAvailable
-            ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue })
+            ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle })
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
             .catch((error) => ({ error })),
         ]);
@@ -1590,6 +1639,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             quotaPerUnit: downstreamResult.quotaPerUnit,
             amountUsd: downstreamUnavailable ? null : downstreamUsd,
             knownAmountUsd: downstreamResult.knownAmountUsd,
+            // 这段收入里减掉的渠道测试（own-revenue-plan 第一节），计算明细「其中渠道测试 $x，不算收入」用；没有测试时是 0
+            testQuotaUnits: downstreamResult.testQuotaUnits ?? 0, testAmountUsd: downstreamResult.testAmountUsd ?? null,
             state: downstreamResult.state,
             successfulCount: downstreamResult.successfulCount,
             expectedCount: downstreamResult.expectedCount,
@@ -1677,6 +1728,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           knownAmountUsd: completeDownstream ? downstreamUsd : segmentResults.reduce((sum, segment) => sum + (segment.downstream.knownAmountUsd ?? 0), 0) || (segmentResults.some((segment) => segment.downstream.knownAmountUsd != null) ? 0 : null),
           successfulCount: segmentResults.reduce((sum, segment) => sum + segment.downstream.successfulCount, 0),
           expectedCount: segmentResults.reduce((sum, segment) => sum + segment.downstream.expectedCount, 0),
+          // 各段减掉的渠道测试合起来（own-revenue-plan 第一节）：计算明细「其中渠道测试」；有一段换算读不到时整个读不到
+          testQuotaUnits: segmentResults.reduce((sum, segment) => sum + (segment.downstream.testQuotaUnits ?? 0), 0),
+          testAmountUsd: segmentResults.some((segment) => segment.downstream.testAmountUsd == null) ? null : segmentResults.reduce((sum, segment) => sum + segment.downstream.testAmountUsd, 0),
           billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION,
           observedAt: Date.now(), window: sideWindow("downstream"),
