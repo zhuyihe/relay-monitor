@@ -16,6 +16,7 @@ import {
 import {
   RECONCILIATION_BILLING_SOURCE,
   RECONCILIATION_CALCULATION_VERSION,
+  RECONCILIATION_SETTLE_DELAY_MS,
   reconciliationIssueLabel,
   reconciliationIssue,
   fillIssueCopy,
@@ -35,6 +36,7 @@ import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
+import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
 import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, isSettleableWindow, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
@@ -766,18 +768,20 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 不拿没减的数当收入。管理员名单、转售 Key 变了：键里带转售 Key，名单变了按来源重新算，不沿用旧来源的累计。
   const OWN_EXCLUSION_REUSE_MS = 30000;
   const OWN_EXCLUSION_VERIFIED_REUSE_MS = 10 * 60000;
+  const OWN_EXCLUSION_FALLBACK_REUSE_MS = 10 * 60000;
   function ownExclusion(own, window, { settle = false } = {}) {
     const resold = resoldAdminKeysOf(own).map((key) => `${key.username}\u0000${key.tokenName}`).sort();
     const key = JSON.stringify([own.id, credentialFingerprint(own), window.startMs, window.timezone, resold]);
     let entry = ownExclusionCache.get(key);
     if (!entry) {
-      entry = { startMs: window.startMs, tail: Promise.resolve(), state: null };
+      entry = { startMs: window.startMs, tail: Promise.resolve(), state: null, pending: new Map() };
       ownExclusionCache.set(key, entry);
       for (const [oldKey, old] of ownExclusionCache) if (old.startMs < window.startMs - 2 * DAY_MS) ownExclusionCache.delete(oldKey);
     }
     const task = entry.tail.then(async () => {
       const prior = entry.state && entry.state.endMs <= window.endMs ? entry.state : null;
-      if (!settle && prior && Date.now() - prior.readAt < OWN_EXCLUSION_REUSE_MS) return prior.result;
+      // 窗口终点比记下的晚得多（从同一天起点查多天范围）不能直接用，要接着翻到新的终点（审核 R1：少减过 49430 额度）
+      if (!settle && prior && Date.now() - prior.readAt < OWN_EXCLUSION_REUSE_MS && window.endMs - prior.endMs < OWN_EXCLUSION_REUSE_MS) return prior.result;
       // 同一个站点同一天，别的绑定刚对过账：结的是同一段窗口，直接用，不再每条绑定各查一遍（每个站每天每个来源一个 stat）
       if (settle && prior?.verifiedEndMs === window.endMs && Date.now() - prior.readAt < OWN_EXCLUSION_VERIFIED_REUSE_MS) return prior.result;
       const { adminSet } = await readOwnAdminDirectory(rt, own, { fresh: settle });
@@ -786,19 +790,37 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const parts = new Map();
       // 一个来源接一个来源读（不并发）：每段窗口的自营一侧同一时刻只多一个请求，几段并行时总数不会翻倍
       await mapWithConcurrency(sources, 1, async (source) => {
-        const before = prior?.parts.get(partKey(source)) ?? null;
-        const read = (from) => queryOwnLogSource(own, { kind: source.kind, name: source.name, startMs: window.startMs, endMs: window.endMs, previous: from });
+        const id = partKey(source);
+        const before = prior?.parts.get(id) ?? null;
+        const base = { kind: source.kind, name: source.name, startMs: window.startMs, endMs: window.endMs };
+        // 窗口已经在过去的整段读：翻到一半失败（限流、网络）把进度记下，下一轮从下一页接着翻，不从头（审核 R1：一天约 432 页，限流 360 个/180 秒）
+        const closed = window.endMs <= Date.now() - RECONCILIATION_SETTLE_DELAY_MS;
+        const pendingKey = JSON.stringify([id, window.endMs]);
+        const read = async (from) => {
+          const resume = !from && closed ? entry.pending.get(pendingKey) ?? null : null;
+          try {
+            const part = await queryOwnLogSource(own, { ...base, previous: from, resume });
+            entry.pending.delete(pendingKey);
+            return part;
+          } catch (err) {
+            if (!from && closed && err?.resume) entry.pending.set(pendingKey, err.resume);
+            throw err;
+          }
+        };
         let part;
-        if (!settle) part = await read(before);
+        // 今天（轮询）：渠道测试名字这两个来源只是兜底（测试大多记在管理员名下，管理员那一条已经扣了），10 分钟内读过的不再读，
+        // 每轮平时只读管理员那几个来源；结账（settle）一定按总额度对账，那时的数是准的
+        if (!settle) part = source.kind === "token" && before && Date.now() - before.readAt < OWN_EXCLUSION_FALLBACK_REUSE_MS ? before : { ...await read(before), readAt: Date.now() };
         else {
-          const total = await queryOwnLogSourceTotal(own, { kind: source.kind, name: source.name, startMs: window.startMs, endMs: window.endMs });
+          const total = await queryOwnLogSourceTotal(own, base);
           if (total === 0) part = { byChannel: new Map(), byToken: new Map(), byUser: new Map(), seen: 0, maxId: null };
           else {
             part = await read(before);
-            if (part.seen !== total) part = await read(null);
+            // 累计和总额度对不上：只重翻这一个来源；本来就是整段翻的（没有上一份累计）再翻一遍也一样，不重翻
+            if (part.seen !== total && before) part = await read(null);
           }
         }
-        parts.set(partKey(source), part);
+        parts.set(id, part.readAt == null ? { ...part, readAt: Date.now() } : part);
       });
       const byChannel = new Map();
       const add = (channel, quota) => byChannel.set(channel, (byChannel.get(channel) ?? 0) + quota);
@@ -829,7 +851,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 不早于这个自营站点没有新消费的起点，就沿用它，窗口终点换成这次的——这段时间里没有新的消费日志，每个渠道的合计都不会变。
   // 沿用前照样读一次 /api/status（同一轮共用）：额度换算变了、或者读不到，就照旧逐个读，不拿旧的换算算钱。
   // 这一轮里「查过全站以后、轮到这条绑定之前」那几秒的新消费，下一轮查全站时会发现，再照旧逐个读。
-  async function ownRevenue(own, rule, segmentWindow, { loadStatus, registry, reuse, settle = false }) {
+  async function ownRevenueWindow(own, rule, segmentWindow, { loadStatus, registry, reuse, settle = false }) {
     const channelIds = rule.channels.map((channel) => channel.channelId);
     // 键里带凭据指纹，和 markQuietOwnStations 里「换了凭据就不算安静」互为备份：换了自营站点的凭据，任一道都能挡住沿用旧的
     const key = JSON.stringify([own.id, credentialFingerprint(own), [...channelIds].sort((a, b) => a - b), segmentWindow.startMs, segmentWindow.timezone]);
@@ -849,6 +871,40 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       for (const [cachedKey, entry] of ownRevenueCache) if (entry.endMs < segmentWindow.endMs - 2 * DAY_MS) ownRevenueCache.delete(cachedKey);
     }
     return result;
+  }
+
+  // 一段窗口的渠道收入，多天的按天拼（总指挥 10-25 定）：整天的块先看账本，已经固定的用账本里存的按渠道额度（R1 以后存的是扣过管理员自用的净额，
+  // R1 以前固定的日子里是没扣的，不回头改），只有没固定的块现读；连着的没固定的块合成一段读，不一天一天读。这样近 7 天、本月不用把整段日志翻一遍
+  // （撞页数上限、限流）。一天以内（今天、昨天、结账）就是一块，不拼。拼的代码在 lib/reconciliation-stitch.js，以后 F、G 也用。
+  async function ownRevenue(own, rule, segmentWindow, options) {
+    const pieces = splitWindowByDays(segmentWindow);
+    if (pieces.length < 2) return ownRevenueWindow(own, rule, segmentWindow, options);
+    const wanted = rule.channels.map((channel) => channel.channelId);
+    const fixed = await mapWithConcurrency(pieces, 4, async (piece) => {
+      if (!piece.wholeDay) return null;
+      try {
+        const entry = await repository.latestLedgerEntry(rule.id, piece);
+        const downstream = entry && ledgerSettlement(entry)?.result?.downstream;
+        // 账本那一天的渠道要覆盖现在要算的每个渠道（后来加过渠道的话，那一天缺的渠道不能当 0），而且都是读全了的
+        if (!downstream || downstream.state !== "complete" || !wanted.every((id) => downstream.channels?.some((row) => row.channelId === id && row.billingState === "complete" && row.amountUsd != null))) return null;
+        return downstream;
+      } catch { return null; }
+    });
+    const groups = [];
+    pieces.forEach((piece, index) => {
+      if (fixed[index]) return;
+      const last = groups.at(-1);
+      if (last && last.endMs === piece.startMs) last.endMs = piece.endMs;
+      else groups.push({ startMs: piece.startMs, endMs: piece.endMs, index });
+    });
+    const live = await Promise.all(groups.map((group) => ownRevenueWindow(own, rule, { ...segmentWindow, startMs: group.startMs, endMs: group.endMs }, { ...options, reuse: false })));
+    // 不满一秒的头尾块读不出东西（emptySecondWindow）：不算一块；整段都是这样的就照原样返回
+    const readable = live.filter((result) => !result.emptySecondWindow);
+    if (!readable.length && !fixed.some(Boolean)) return live[0];
+    const merged = stitchChannelRevenue([...fixed.filter(Boolean), ...readable], wanted);
+    const first = [...readable, ...fixed.filter(Boolean)].find((result) => result.billingTimezone) ?? {};
+    return { ...merged, billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION,
+      window: segmentWindow, billingTimezone: first.billingTimezone ?? null };
   }
 
   function costOwnerFor(rule, canonicalKey, registry) {

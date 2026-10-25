@@ -7101,7 +7101,11 @@ test("R1 今天：按各来源上次的编号接着翻，没有新日志时每�
   f.state.testLogs.push({ id: 2, channel: 1, quota: 10, created_at: Math.floor(now / 1000) - 5, token_name: "root-key", username: "root" });
   const second = await today();
   assert.equal(second.downstream.quotaUnits, 200, "只加了新的 10，不是重算一遍");
-  assert.equal(sourceReads(f) - afterFirst, 3, "一轮三个来源（root、两个测试名字）各一页");
+  assert.equal(sourceReads(f) - afterFirst, 1, "一轮只读管理员 root 那一个来源的一页；渠道测试名字两个兜底来源 10 分钟内读过的不再读");
+  now += 11 * 60000;
+  const afterSecond = sourceReads(f);
+  await today();
+  assert.equal(sourceReads(f) - afterSecond, 3, "过了 10 分钟，兜底来源也接着读一页：root、两个测试名字各一页");
 });
 
 test("R1 读不到用户列表或管理员日志：这一天算不出收入、不固定，下次重试；不拿没减的数固定进账本", async (t) => {
@@ -7134,6 +7138,62 @@ test("R1 转售 Key 所属用户在用户列表里不是管理员：收入确认
   const settled = (await manualYesterday(f)).results[0];
   assert.equal(settled.calculation.profitUsd, null);
   assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 0);
+});
+
+test("R1 多天范围按天拼：已经固定的天用账本里存的（扣过管理员自用的）净额，只有没固定的天现读；多天收入是几天每一行加起来", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z"); // 开始统计 10-07 0 点；昨天 10-08 先固定，10-07 没固定
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  f.state.testLogs.push(usage(1, 30)); // 10-08 里管理员花了 30
+  const settled = (await manualYesterday(f)).results[0];
+  assert.equal(settled.downstream.quotaUnits, 220, "10-08 固定的是减过管理员自用的净额");
+  const twoDays = { startMs: Date.parse("2026-10-06T16:00:00Z"), endMs: COMPLETED_YESTERDAY.endMs };
+  const channelStats = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && !request.sourceRead).length;
+  const before = { stats: channelStats(), sources: sourceReads(f) };
+  const range = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", ...twoDays }, { mode: "evaluate", origin: "page" })).results[0];
+  // 10-07 现读：渠道统计 250、管理员没花（日志都在 10-08）；10-08 用账本里的 220
+  assert.equal(range.downstream.quotaUnits, 250 + 220, "两天每一行加起来：10-07 现读 250 + 10-08 账本 220");
+  assert.equal(channelStats() - before.stats, 1, "渠道收费统计只现读了没固定的 10-07 一天，10-08 没再读");
+  assert.equal(range.downstream.adminUsageAmountUsd, 0.3, "管理员自用也是两天加起来：10-08 账本里的 0.3 加 10-07 的 0");
+  assert.equal(range.downstream.state, "complete");
+});
+
+test("R1 从同一天起点查更长的范围，不能拿刚读的一天的结果：缓存只在终点相差不到 30 秒时沿用（审核 R1 实测少减了 49430 额度）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  f.state.testLogs.push(usage(1, 30), { id: 2, channel: 1, quota: 20, created_at: COMPLETED_YESTERDAY.endMs / 1000 + 100, token_name: "root-key", username: "root" });
+  // 先查昨天（读了一遍，记下「从昨天 0 点到昨天结束」）；30 秒内再查从昨天 0 点到今天早上的范围
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page", force: true });
+  const longer = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs + 6 * 3600000 }, { mode: "evaluate", origin: "page", force: true })).results[0];
+  assert.equal(longer.downstream.adminUsageAmountUsd, 0.5, "两段里管理员花的 30 和 20 都减了；拿昨天那一份只减 30");
+});
+
+test("R1 结账翻到一半失败（限流、网络）：下一轮从下一页接着翻，不从头；这一天这一轮不固定", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  for (let id = 1; id <= 150; id += 1) f.state.testLogs.push(usage(id, 1)); // root 一天 150 条：两页
+  const prev = globalThis.fetch, pages = [];
+  let failPageTwo = true;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    // 只看昨天那段窗口的（今天的观测也会读 root，不是这里要看的）
+    if (url.host === "own.test" && url.pathname === "/api/log/" && url.searchParams.get("username") === "root" && url.searchParams.get("start_timestamp") === String(ydayStart)) {
+      pages.push(Number(url.searchParams.get("p")));
+      if (failPageTwo && url.searchParams.get("p") === "2") return { status: 500, text: async () => "{}" };
+    }
+    return prev(input, init);
+  });
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live").length, 0, "翻到一半失败，没固定");
+  assert.deepEqual(pages, [1, 2]);
+  failPageTwo = false; pages.length = 0;
+  now += 10 * 60000;
+  await f.module.refreshDue(now);
+  assert.deepEqual(pages, [2], "从第 2 页接着翻，第 1 页不再读");
+  const row = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(row.detail.result.downstream.quotaUnits, 100, "250 − root 的 150");
 });
 
 test("C2a 结账（settle）只写账本和状态行：不写观测快照、渠道状态、分段，不发告警", async (t) => {
