@@ -5,6 +5,7 @@
 //   create()                                        每个用例新建（或复用连接池）一个仓库实例
 //   cleanup({ repository, ruleIds, capabilityIdentities })  删除本用例写入的全部规则及其渠道、分段、快照、告警、账本，以及账单能力记录
 //   inspectSnapshot({ repository, ruleId, snapshotKey })  读取快照行的物理列（segment_id 等没有公开读取方法）
+//   backdateRule({ repository, ruleId, createdAtMs })  把一条绑定的建立时刻改到过去（改时间要写重结请求的日子得在建绑定之后，用例里只能这样造）
 //   teardown()                                       全部用例结束后释放资源
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -153,7 +154,7 @@ function settlement(snapshot, { resettle = false, ...rates } = {}) {
 const CASES = [];
 const contract = (title, run) => CASES.push([title, run]);
 
-export function defineReconciliationRepositoryContract({ name, create, cleanup = async () => {}, inspectSnapshot = null, teardown = null }) {
+export function defineReconciliationRepositoryContract({ name, create, cleanup = async () => {}, inspectSnapshot = null, backdateRule = null, teardown = null }) {
   test(`reconciliation repository contract: ${name}`, { timeout: 120000 }, async (t) => {
     if (teardown) t.after(teardown);
     for (const [title, run] of CASES) {
@@ -162,7 +163,8 @@ export function defineReconciliationRepositoryContract({ name, create, cleanup =
         const fixture = new Fixture(repository);
         const inspect = inspectSnapshot && ((ruleId, snapshotKey) => inspectSnapshot({ repository, ruleId, snapshotKey }));
         try {
-          await run({ repository, fixture, inspect });
+          const backdate = backdateRule && ((ruleId, createdAtMs) => backdateRule({ repository, ruleId, createdAtMs }));
+          await run({ repository, fixture, inspect, backdate });
         } finally {
           await cleanup({ repository, ruleIds: await fixture.collectRuleIds(), capabilityIdentities: [...fixture.capabilityIdentities] });
         }
@@ -1279,4 +1281,125 @@ contract("returned values and saved inputs are independent copies", async ({ rep
   assert.equal(read.state, "supported");
   read.state = "mutated result";
   assert.equal((await repository.getBillingCapability(identity)).state, "supported");
+});
+
+// ---- 重结请求（C2b）：改切换时间写进结账状态表，和改分段同一个事务 ----
+
+const stateOf = async (repository, ruleId, billDate) => (await repository.listSettlementStates([ruleId])).find((row) => row.billDate === billDate);
+
+contract("resettle requests: one multi-row write; a newer request moves the value up and clears retry and manual records; a failed attempt keeps the request and, with a request, is recorded even when the ledger has the day", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const now = Date.UTC(2026, 0, 12, 3);
+  assert.equal(await repository.requestResettle(rule.id, ["2026-01-08", "2026-01-09", "2026-01-10"], { now }), 3);
+  assert.equal(await repository.requestResettle(rule.id, [], { now }), 0);
+  const rows = await repository.listSettlementStates([rule.id]);
+  assert.deepEqual(rows.map((row) => [row.billDate, row.resettleRequestedAt, row.resettleReason, row.attempts]), [
+    ["2026-01-08", now, "transition", 0], ["2026-01-09", now, "transition", 0], ["2026-01-10", now, "transition", 0]]);
+  // 这天还在退避：再来一次请求，请求时刻变大（同一毫秒也变），重试的记录清掉，马上可以结
+  const retry = { op: "retry", reason: "PENDING", attempts: 4, nextAttemptAt: now + HOUR, firstFailedAt: now, lastAttemptAt: now, sourceVersion: "v1", detail: { code: "PENDING" } };
+  await repository.recordSettlementState(rule.id, "2026-01-10", retry, now);
+  const kept = await stateOf(repository, rule.id, "2026-01-10");
+  assert.deepEqual([kept.retryReason, kept.attempts, kept.resettleRequestedAt], ["PENDING", 4, now], "失败只记退避，请求保留");
+  await repository.requestResettle(rule.id, ["2026-01-10"], { now });
+  const again = await stateOf(repository, rule.id, "2026-01-10");
+  assert.deepEqual([again.retryReason, again.manualReason, again.attempts, again.nextAttemptAt, again.firstFailedAt, again.detail, again.resettleRequestedAt], [null, null, 0, null, null, null, now + 1]);
+  // 账本里已经有这天：平常的日子不写状态行，有重结请求的日子照写（重结没成要记退避，不然每轮都再试一次）
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const window = { preset: "yesterday", startMs: Date.UTC(2026, 0, 9), endMs: Date.UTC(2026, 0, 10), timezone: "UTC" };
+  const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: "2026-01-10T00:20:00.000Z", profitUsd: 2 });
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { ledger: settlement(snapshot) }), true);
+  await repository.recordSettlementState(rule.id, "2026-01-09", retry, now + 5);
+  const requestedAndBooked = await stateOf(repository, rule.id, "2026-01-09");
+  assert.deepEqual([requestedAndBooked.retryReason, requestedAndBooked.attempts, requestedAndBooked.resettleRequestedAt], ["PENDING", 4, now]);
+});
+
+contract("a settlement consumes only the resettle request it read; a request made while it ran stays and is due again at once", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const now = Date.UTC(2026, 0, 12, 3);
+  const book = async (day, resettleRequestedAt, extra = {}) => {
+    const window = { preset: "custom", startMs: Date.UTC(2026, 0, day), endMs: Date.UTC(2026, 0, day + 1), timezone: "UTC" };
+    const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: `2026-01-${String(day + 1).padStart(2, "0")}T00:20:00.000Z`, profitUsd: 2 });
+    return repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot],
+      { ledger: settlement(snapshot, { resettle: true }), settlement: { billDate: `2026-01-${String(day).padStart(2, "0")}`, resettleRequestedAt }, ...extra });
+  };
+  const retry = { op: "retry", reason: "PENDING", attempts: 4, nextAttemptAt: now + HOUR, firstFailedAt: now, lastAttemptAt: now, sourceVersion: "v1", detail: { code: "PENDING" } };
+  // 读到的请求就是现在行里的：办完，行删掉
+  await repository.requestResettle(rule.id, ["2026-01-08"], { now });
+  assert.equal(await book(8, now), true);
+  assert.equal(await stateOf(repository, rule.id, "2026-01-08"), undefined);
+  // 取数期间又来了新请求（行里的值比读到的大）：行留着，请求保留，重试记录清掉，下一轮马上再结
+  await repository.requestResettle(rule.id, ["2026-01-09"], { now });
+  await repository.recordSettlementState(rule.id, "2026-01-09", retry, now);
+  await repository.requestResettle(rule.id, ["2026-01-09"], { now: now + 10 });
+  assert.equal(await book(9, now), true);
+  const left = await stateOf(repository, rule.id, "2026-01-09");
+  assert.deepEqual([left.resettleRequestedAt, left.retryReason, left.attempts, left.nextAttemptAt], [now + 10, null, 0, null]);
+  // 没有请求的行（平常的退避）：读到的是 null，办完删掉
+  await repository.recordSettlementState(rule.id, "2026-01-07", retry, now);
+  assert.equal(await book(7, null), true);
+  assert.equal(await stateOf(repository, rule.id, "2026-01-07"), undefined);
+  // 守卫失败：账本和删行一起回滚，请求还在
+  await repository.requestResettle(rule.id, ["2026-01-06"], { now });
+  assert.equal(await book(6, now, { guard: () => false }), false);
+  assert.equal((await stateOf(repository, rule.id, "2026-01-06")).resettleRequestedAt, now);
+});
+
+contract("pruneSettlementStates also drops a request made before the given time (given up long ago) but keeps a recent one", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const now = Date.UTC(2026, 0, 12, 3);
+  await repository.requestResettle(rule.id, ["2025-11-01"], { now: now - 40 * DAY });
+  await repository.requestResettle(rule.id, ["2025-11-02"], { now: now - 2 * DAY });
+  await repository.recordSettlementState(rule.id, "2025-11-03", { op: "retry", reason: "PENDING", attempts: 1, nextAttemptAt: 1, firstFailedAt: 1, lastAttemptAt: 1, sourceVersion: null, detail: null }, now);
+  assert.equal(await repository.pruneSettlementStates("2025-12-01", 500, now - 31 * DAY), 2, "没有请求的和请求早已放弃的");
+  assert.deepEqual((await repository.listSettlementStates([rule.id])).map((row) => row.billDate), ["2025-11-02"]);
+  // 不带第三个参数：有请求的一律不删（和以前一样）
+  await repository.requestResettle(rule.id, ["2025-11-04"], { now: 1 });
+  assert.equal(await repository.pruneSettlementStates("2025-12-01", 500), 0);
+});
+
+contract("correctTransition writes a resettle request for every ended business day between the old and the new time, in the rule's own time zone (DST days included), none before the rule started", async ({ repository, fixture, backdate }) => {
+  const rule = await fixture.createRule({ timezone: "America/New_York", initialRatio: 1 });
+  assert.ok(backdate, "运行方要提供 backdateRule");
+  await backdate(rule.id, Date.UTC(2026, 0, 1));
+  const t1 = Date.UTC(2026, 2, 9, 12), t2 = Date.UTC(2026, 2, 12, 12);
+  await repository.observeSource(rule.id, { groups: {}, group: "vip", ratio: 2, tokenName: "VIP", detectedAt: t1 });
+  const { segments } = await repository.observeSource(rule.id, { groups: {}, group: "pro", ratio: 3, tokenName: "Pro", detectedAt: t2 });
+  const middle = segments[1];
+  const dates = async () => (await repository.listSettlementStates([rule.id])).filter((row) => row.resettleRequestedAt != null).map((row) => [row.billDate, row.resettleReason]);
+  // 纽约 3 月 8 日夏令时开始，那一天只有 23 小时：从 3/9 12:00Z 提前到 3/7 12:00Z，纽约是 3/7 07:00 到 3/9 08:00，落到 3 月 7、8、9 三天
+  const now = Date.now();
+  await repository.correctTransition(rule.id, middle.id, Date.UTC(2026, 2, 7, 12), { now });
+  assert.deepEqual(await dates(), [["2026-03-07", "transition"], ["2026-03-08", "transition"], ["2026-03-09", "transition"]]);
+  assert.deepEqual((await repository.listSegments(rule.id))[1].effectiveFrom, Date.UTC(2026, 2, 7, 12));
+  // 再往后改（旧时间到新时间）：落到的日子是 3/7 到 3/10 之间的，请求时刻比原来的大
+  const before = (await repository.listSettlementStates([rule.id])).find((row) => row.billDate === "2026-03-09").resettleRequestedAt;
+  await repository.correctTransition(rule.id, middle.id, Date.UTC(2026, 2, 10, 12), { now });
+  const rows = await repository.listSettlementStates([rule.id]);
+  assert.deepEqual(rows.filter((row) => row.resettleRequestedAt != null).map((row) => row.billDate), ["2026-03-07", "2026-03-08", "2026-03-09", "2026-03-10"]);
+  assert.ok(rows.find((row) => row.billDate === "2026-03-09").resettleRequestedAt > before);
+  // 整天在绑定开始统计之前的日子不写：建立时刻改到 3/9 以后，再改回去，3/7、3/8 不会有新的请求，3/9 起的有
+  const other = await fixture.createRule({ timezone: "America/New_York", initialRatio: 1, tokenId: fixture.token(3), channels: [{ channelId: fixture.channel(3), name: "late" }] });
+  await backdate(other.id, Date.UTC(2026, 2, 9, 12));
+  await repository.observeSource(other.id, { groups: {}, group: "vip", ratio: 2, tokenName: "VIP", detectedAt: t1 });
+  const { segments: otherSegments } = await repository.observeSource(other.id, { groups: {}, group: "pro", ratio: 3, tokenName: "Pro", detectedAt: t2 });
+  await repository.correctTransition(other.id, otherSegments[1].id, Date.UTC(2026, 2, 7, 12), { now });
+  assert.deepEqual((await repository.listSettlementStates([other.id])).map((row) => row.billDate), ["2026-03-09"], "3/7、3/8 整天在开始统计之前");
+});
+
+contract("correctTransition: archived or unknown rule is RULE_NOT_FOUND and nothing changes; a future or non-integer time is out of range", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ initialRatio: 1 });
+  const t1 = EFFECTIVE_FROM + 10 * HOUR;
+  await repository.observeSource(rule.id, { groups: {}, group: "vip", ratio: 2, tokenName: "VIP", detectedAt: t1 });
+  const { segments } = await repository.observeSource(rule.id, { groups: {}, group: "pro", ratio: 3, tokenName: "Pro", detectedAt: t1 + 10 * HOUR });
+  const middle = segments[1];
+  await assert.rejects(repository.correctTransition(rule.id, middle.id, t1 + 0.5), outOfRange, "不是整毫秒");
+  await assert.rejects(repository.correctTransition(rule.id, middle.id, Date.now() + HOUR, { now: Date.now() }), outOfRange, "改到未来");
+  await assert.rejects(repository.correctTransition(`rr_missing${fixture.tag}`, middle.id, t1 - HOUR), notFound);
+  assert.equal(await repository.archiveRule(rule.id), true);
+  await assert.rejects(repository.correctTransition(rule.id, middle.id, t1 - HOUR), notFound, "已解除的绑定不改分段");
+  assert.deepEqual((await repository.listSegments(rule.id)).map((segment) => segment.effectiveFrom), segments.map((segment) => segment.effectiveFrom));
+  assert.deepEqual(await repository.listSettlementStates([rule.id]), []);
 });

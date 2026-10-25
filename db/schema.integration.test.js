@@ -795,6 +795,9 @@ defineReconciliationRepositoryContract({
       "reconciliation_rule_channels"]) await contractPool.query(`DELETE FROM ${table} WHERE rule_id IN (?)`, [ruleIds]);
     await contractPool.query("DELETE FROM reconciliation_rules WHERE id IN (?)", [ruleIds]);
   },
+  backdateRule: async ({ ruleId, createdAtMs }) => {
+    await contractPool.query("UPDATE reconciliation_rules SET created_at = FROM_UNIXTIME(?) WHERE id = ?", [Math.floor(createdAtMs / 1000), ruleId]);
+  },
   inspectSnapshot: async ({ ruleId, snapshotKey }) => {
     const [[row]] = await contractPool.query(`SELECT segment_id AS segmentId, window_kind AS windowKind, window_start_ms AS windowStartMs,
       window_end_ms AS windowEndMs, upstream_usd AS upstreamUsd, health_code AS healthCode, health_detail AS healthDetail

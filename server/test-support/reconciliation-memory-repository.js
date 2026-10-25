@@ -11,6 +11,7 @@
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../../lib/reconciliation-snapshot.js";
 import { applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
 import { billDayOf } from "../../lib/business-time.js";
+import { RESETTLE_REASON_TRANSITION, resettleBillDates } from "../../lib/reconciliation-settlement.js";
 import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
@@ -371,21 +372,44 @@ export class MemoryReconciliationRepository {
     return (await this.reconcileCurrentSegment(ruleId, input)).segments;
   }
 
-  async correctTransition(ruleId, segmentId, effectiveAt) {
+  // 同 MySQL 版：改分段和给 [旧时间, 新时间) 落到的每个已结束的业务日写重结请求在同一个事务里
+  async correctTransition(ruleId, segmentId, effectiveAt, { now = Date.now() } = {}) {
     const at = Number(effectiveAt);
     await this.#transaction("correctTransition", async (tx) => {
       await this.#lock(tx, `rule:${ruleId}`);
+      const ruleRow = this.#rows("rules", tx).find(({ row }) => sameText(row.id, ruleId))?.row;
+      if (!ruleRow || ruleRow.archived_at != null) throw repositoryError("RULE_NOT_FOUND");
       const entries = this.#segmentsOf(tx, ruleId);
       const index = entries.findIndex(({ row }) => row.id === segmentId);
       if (index <= 0) throw repositoryError("RESOURCE_CHANGED");
       const previous = entries[index - 1], next = entries[index + 1];
-      if (!Number.isFinite(at) || at <= Number(previous.row.effective_from_ms) || (next && at >= Number(next.row.effective_from_ms))) {
+      if (!Number.isSafeInteger(at) || at > now || at <= Number(previous.row.effective_from_ms) || (next && at >= Number(next.row.effective_from_ms))) {
         throw repositoryError("TRANSITION_TIME_OUT_OF_RANGE");
       }
+      const oldAt = Number(entries[index].row.effective_from_ms);
       this.#update(tx, "segments", [previous], { effective_to_ms: at });
       this.#update(tx, "segments", [entries[index]], { effective_from_ms: at, timing_source: "operator_confirmed" });
+      this.#requestResettle(tx, ruleId, resettleBillDates(ruleFromRow(ruleRow), oldAt, at, now), { reason: RESETTLE_REASON_TRANSITION, now });
     });
     return this.listSegments(ruleId);
+  }
+
+  // 同 MySQL 版的 requestResettle：请求时刻取比原来大的，重试和要人处理的记录清掉
+  #requestResettle(tx, ruleId, billDates, { reason, now }) {
+    for (const date of billDates) {
+      const existing = this.#settlementEntries(tx, ruleId, date);
+      const reset = { resettle_reason: reason, retry_reason: null, manual_reason: null, manual_since_ms: null, attempts: 0,
+        next_attempt_at_ms: null, first_failed_at_ms: null, last_detail: null, updated_at_ms: now };
+      if (existing.length) this.#update(tx, "settlementState", existing, { ...reset, resettle_requested_at_ms: Math.max(now, Number(existing[0].row.resettle_requested_at_ms ?? 0) + 1) });
+      else this.#insert(tx, "settlementState", { rule_id: ruleId, bill_date: date, retry_reason: null, manual_since_ms: null, attempts: 0, source_version: null,
+        last_attempt_at_ms: null, ...reset, resettle_requested_at_ms: now });
+    }
+  }
+
+  async requestResettle(ruleId, billDates, { reason = RESETTLE_REASON_TRANSITION, now = Date.now() } = {}) {
+    if (!billDates?.length) return 0;
+    await this.#transaction("requestResettle", async (tx) => this.#requestResettle(tx, ruleId, billDates, { reason, now }));
+    return billDates.length;
   }
 
   async updateChannelStates(ruleId, states, observedAt = Date.now()) {
@@ -456,7 +480,14 @@ export class MemoryReconciliationRepository {
           this.#insert(tx, "ledger", row);
         }
       }
-      if (settlement?.billDate) this.#delete(tx, "settlementState", this.#settlementEntries(tx, ruleId, settlement.billDate));
+      if (settlement?.billDate) {
+        // 请求按值比对（同 MySQL 版）：取数时读到的请求时刻等于现在行里的才删；取数期间又来了新请求，行留着、只清重试和要人处理的记录
+        const entries = this.#settlementEntries(tx, ruleId, settlement.billDate);
+        const matches = entries.filter(({ row }) => (row.resettle_requested_at_ms ?? null) === (settlement.resettleRequestedAt ?? null));
+        if (matches.length) this.#delete(tx, "settlementState", matches);
+        else if (entries.length) this.#update(tx, "settlementState", entries, { retry_reason: null, manual_reason: null, manual_since_ms: null, attempts: 0,
+          next_attempt_at_ms: null, first_failed_at_ms: null, last_detail: null });
+      }
       if (guard && !guard()) return this.#abort(tx, false);
       if (booked) ledger.booked = booked;
       return true;
@@ -562,7 +593,9 @@ export class MemoryReconciliationRepository {
   }
 
   async recordSettlementState(ruleId, billDate, state, now = Date.now()) {
-    if (this.#ledgerOf(null, ruleId, billDate).length) return;
+    // 账本里已经有这天就不写；有重结请求的日子除外（和 MySQL 版同一个条件）
+    const requested = this.#settlementEntries(null, ruleId, billDate).some(({ row }) => row.resettle_requested_at_ms != null);
+    if (this.#ledgerOf(null, ruleId, billDate).length && !requested) return;
     const values = Object.fromEntries(SETTLEMENT_STATE_WRITE_COLUMNS.map((column, index) => [column, settlementStateValues(state)[index]]));
     values.last_detail = JSON.parse(values.last_detail);
     const existing = this.#settlementEntries(null, ruleId, billDate);
@@ -574,8 +607,8 @@ export class MemoryReconciliationRepository {
     this.#delete(null, "settlementState", this.#settlementEntries(null, ruleId, billDate));
   }
 
-  async pruneSettlementStates(beforeDate, limit = 500) {
-    const doomed = this.#rows("settlementState").filter(({ row }) => row.bill_date < beforeDate && row.resettle_requested_at_ms == null).slice(0, limit);
+  async pruneSettlementStates(beforeDate, limit = 500, requestedBeforeMs = 0) {
+    const doomed = this.#rows("settlementState").filter(({ row }) => row.bill_date < beforeDate && (row.resettle_requested_at_ms == null || row.resettle_requested_at_ms < requestedBeforeMs)).slice(0, limit);
     this.#delete(null, "settlementState", doomed);
     return doomed.length;
   }

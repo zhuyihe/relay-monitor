@@ -5,6 +5,9 @@ import { MemoryReconciliationRepository } from "./test-support/reconciliation-me
 defineReconciliationRepositoryContract({
   name: "memory",
   create: () => new MemoryReconciliationRepository(),
+  backdateRule: ({ repository, ruleId, createdAtMs }) => {
+    repository.tables.rules.find((row) => row.id === ruleId).created_at = new Date(createdAtMs);
+  },
   inspectSnapshot: ({ repository, ruleId, snapshotKey }) => {
     const row = repository.tables.snapshots.find((item) => item.rule_id === ruleId && item.snapshot_key === snapshotKey);
     return row ? { segmentId: row.segment_id, windowKind: row.window_kind, windowStartMs: Number(row.window_start_ms), windowEndMs: Number(row.window_end_ms),

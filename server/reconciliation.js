@@ -32,13 +32,13 @@ import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerDecimal, ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
-import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, isSettleableWindow, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
+import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, isSettleableWindow, isSettledAt, reasonKindOf, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
 import { costBasisOf, isConfiguredRate, rateSnapshotOf, ratesFor } from "../lib/profit.js";
-import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftedDayStartInTz } from "../lib/business-time.js";
+import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
 import { selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 
@@ -48,17 +48,20 @@ const DAY_MS = 86400000;
 // 回看几天：昨天往前到结束满 7 天为止（lib/reconciliation-settlement.js 的 SETTLE_LOOKBACK_MS）
 const SETTLE_LOOKBACK_DAYS = Math.round(SETTLE_LOOKBACK_MS / DAY_MS);
 const MAX_CONCURRENT_RULES = 6;
-// 回看时碰到这一类才不再给同一上游取别的日子（方案 6.4：限流 429、超时、连不上）：这几种读账单的原始错误码
-// （UPSTREAM_REQUEST_FAILED、NETWORK_UNREACHABLE……）到了这一层已经被 toErrorHealth 统一收成 UPSTREAM_DATA_UNAVAILABLE
-// （见 providerError），是上游这一刻整体读不到的信号；别的原因（WAITING_FOR_BILL 这天的账单还没读全、要人处理、
-// 改绑定之前还没固定……）只挡这一天，不该连累同一上游别的绑定（安全审核 C2a 低-4）。
-// UPSTREAM_DATA_UNAVAILABLE 也会在「这条规则一直没配出完整分段」时出现（和限流无关），这种情况下误判成「跳过同一上游」
-// 影响很小——没有分段的规则本来就结不出账，多跳过它不会让别的绑定多等
-const UPSTREAM_LOOKBACK_SKIP_CODES = new Set(["UPSTREAM_DATA_UNAVAILABLE"]);
-// 自营有收入时，上游读不到的结果主码是 WAITING_FOR_BILL，UPSTREAM_DATA_UNAVAILABLE 只在 health.issues 里（上游那一侧）；
-// 所以主码和 issues 都看（审核 C2a 第二轮低-2）
-const upstreamUnavailable = (result) => UPSTREAM_LOOKBACK_SKIP_CODES.has(result?.health?.code)
-  || (result?.health?.issues || []).some((issue) => UPSTREAM_LOOKBACK_SKIP_CODES.has(issue?.code) && issue?.side === "upstream");
+// 回看时碰到这一类才不再给同一上游取别的日子（方案 6.4：限流 429、5xx、超时、连不上）：读账单时上游报的原始码，
+// 限流和 5xx 是 UPSTREAM_REQUEST_FAILED，连不上、超时是 NETWORK_UNREACHABLE，这是上游这一刻整体读不到的信号。
+// 原始码在出错的地方（读账单）记进上游一侧的问题 issue.cause，到判断这一层也看得到（C2a 里只剩被统一收成的 UPSTREAM_DATA_UNAVAILABLE，
+// 「这条规则没配出完整分段」之类和限流无关的也会被算进去）；别的原因（WAITING_FOR_BILL 这天的账单还没读全、要人处理、
+// 改绑定之前还没固定、没有分段……）只挡这一天，不连累同一上游别的绑定（审核 C2a 低-4）
+const UPSTREAM_LOOKBACK_SKIP_CAUSES = new Set(["UPSTREAM_REQUEST_FAILED", "NETWORK_UNREACHABLE"]);
+const upstreamUnavailable = (result) => (result?.health?.issues || []).some((issue) => issue?.side === "upstream" && UPSTREAM_LOOKBACK_SKIP_CAUSES.has(issue?.cause));
+
+// 本地重判后原因没变（还是同一个要人处理的原因、同一代配置、同一个变成需处理的时刻）：状态行不用写
+function recheckUnchanged(state, next) {
+  if (!state || next?.op !== "manual" || state.manualReason == null || next.reason !== state.manualReason) return false;
+  return (next.sourceVersion ?? null) === (state.sourceVersion ?? null) && (Number(next.attempts) || 0) === (Number(state.attempts) || 0)
+    && (next.manualSince ?? null) === (state.manualSince ?? null) && JSON.stringify(next.detail ?? null) === JSON.stringify(state.detail ?? null);
+}
 
 // 绑定按哪个时区算一天：新建时用传入的，没传用业务时区（BUSINESS_TIME_ZONE，缺省上海）；建好以后不能改——
 // 没传沿用原值，传了别的时区报 TIMEZONE_IMMUTABLE（别名算同一个，存的还是原来的写法）。不合法的报 TIMEZONE_INVALID。
@@ -447,11 +450,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const ruleGenerations = (rt._reconciliationRuleGenerations ||= new Map());
   // 回看从什么时候起可以开始（启动后等一会儿）；上一次清理结账状态表的时刻
   const lookbackFrom = (rt._reconciliationLookbackFrom ??= Date.now() + lookbackDelayMs);
-  // 修正过切换时间的规则：下一次结账昨天时重新取数，写一份新的结账记录。
-  // 绑定 id → 提出重结的时刻（结账开始以后才提的请求，这次结成了也不能算办完）
-  const resettles = (rt._reconciliationResettles ||= new Map());
-  // 重结昨天没成时，下次什么时候再试（账本里已有这天，状态表不记；C2b 把重结请求挪进状态表以后删掉）
-  const resettleRetryAt = (rt._reconciliationResettleRetryAt ||= new Map());
+  // 要人处理的日子本地重判过、原因没变时不写状态行：下次重判的时刻单独记在这里（key：绑定|日期），重启以后最多多判一次（计划 C2b，审核 C2a 低-2 后一半）
+  const recheckAt = (rt._reconciliationRecheckAt ||= new Map());
+  // 改过切换时间的重结请求不放在内存里：按天存在结账状态表（resettle_requested_at_ms），和改时间在同一个事务里写，重启也不丢（计划 C2b）
   // 轮询省请求和写入（计划 P1a）：
   //   ownActivity：每个自营站点上一轮查「全站有没有新的消费」的时刻，和从什么时候起一直没有新的消费（quietFrom）
   //   ownRevenueCache：今天每段窗口最近一次读全的渠道收费（读到哪一刻为止），全站没有新的消费时直接沿用
@@ -533,11 +534,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 结一天（计划 C2a）：轮询回看和手动「重新读取」共用。取数走 inspectRule(settle)；结成了状态行在记账的事务里删掉，
   // 结不成按 settlementOutcome 记进状态表。返回 inspectRule 的结果（取数出错时是一份读不到的结果）。
-  async function settleDay(rule, window, { origin, ownerRegistry, state = null, resettle = false, trigger = null }) {
+  async function settleDay(rule, window, { origin, ownerRegistry, state = null, trigger = null }) {
     const billDate = billDayOf(window);
     let result;
     try {
-      result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettle: resettle || state?.resettleRequestedAt != null, trigger });
+      // 这一天有重结请求（改了切换时间）：不先读已固定的账，重取；请求时刻带进去，写账本的事务里按值比对才消费这条请求
+      result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettleRequestedAt: state?.resettleRequestedAt ?? null, trigger });
     } catch (err) {
       if (err?.code === "RULE_NOT_FOUND") throw err;
       const known = ["PERSISTENCE_FAILED", "HISTORY_UNAVAILABLE"].includes(err?.code);
@@ -1217,8 +1219,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // settle：结一个已经结束的日子（轮询回看和手动「重新读取」都走这条，计划 C2a）。强制重取，用已存的分段；
   //   不写分段、渠道状态、观测快照，不发告警；只按 settlementOutcome 写账本（多日写确认快照），结成了在同一个事务里删掉状态表那一行。
   // probe（只配 settle）：要人处理的日子到了重判的时刻，只走一遍取数前的判断，不取账单、不写库，返回 { probe: true, blocker }（计划 C2a 2.3）
-  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle = false, trigger = null, probe = false } = {}) {
+  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle: resettleOption = false, resettleRequestedAt = null, trigger = null, probe = false } = {}) {
     const settle = mode === "settle";
+    // 轮询回看带的是状态行里的请求时刻；resettle: true 是调用方（测试、手动）直接要求重结，没有请求时刻可比
+    const resettle = resettleOption || resettleRequestedAt != null;
     const observe = mode !== "evaluate";
     if (settle) force = true;
     if (!ruleGenerations.has(ruleId)) ruleGenerations.set(ruleId, 0);
@@ -1228,7 +1232,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const requestCredential = currentSourceCredential(firstRule);
     const requestBilling = ownerRegistry.billingSource;
     const evaluateKey = isLiveReconciliationPreset(window.preset) ? `${cacheKey}:${window.endMs}:${requestCredential}:${requestBilling.ownerVersion}` : `${cacheKey}:${requestCredential}:${requestBilling.ownerVersion}`;
-    const inflightKey = observe ? `${evaluateKey}:${settle ? (probe ? "probe" : "settle") : "observe"}${resettle ? ":resettle" : ""}` : evaluateKey;
+    const inflightKey = observe ? `${evaluateKey}:${settle ? (probe ? "probe" : "settle") : "observe"}${resettle ? `:resettle${resettleRequestedAt}` : ""}` : evaluateKey;
     const ttl = resultTtl(window);
     const cached = resultCache.get(cacheKey);
     if (!force && (!observe || cached?.observed) && cached?.sourceCredential === requestCredential
@@ -1543,7 +1547,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         }
         if (upstreamResult.error && !upstreamResult.skipped) {
           const billHealth = upstreamErrorHealth(upstreamResult.error, upstreamResource);
-          segmentIssues.push(upstreamSide({ code: billHealth.code, scope: "segment", detail: billHealth.detail, observedAt: Date.now() }));
+          // cause：读账单时上游报的原始码（限流、5xx 是 UPSTREAM_REQUEST_FAILED，连不上、超时是 NETWORK_UNREACHABLE），回看靠它分辨「这个上游这一刻整体读不到」
+          segmentIssues.push(upstreamSide({ code: billHealth.code, scope: "segment", detail: billHealth.detail, observedAt: Date.now(),
+            ...(upstreamResult.error?.code ? { cause: String(upstreamResult.error.code) } : {}) }));
           // Key 账单报错：可能换了 Key 或身份变了，下一轮全部重读（P1b 的异常之一）
           staleMetadata.add(rule.upstreamStationId);
         }
@@ -1707,7 +1713,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       if (!observe) return result;
       return (await persistResult(rule, result, origin, evidenceMetadata, evidenceToken, {
-        scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource, financialSnapshot, resettle, settle, trigger,
+        scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource, financialSnapshot, resettle, resettleRequestedAt, settle, trigger,
       })) ? (settle ? await bookedResult(rule, result) : result) : STALE_SCOPE;
     };
     // 口径在查询期间变化时，在共享的 in-flight 任务内重跑，加入等待的调用方也只会拿到最新口径的结果。
@@ -1815,7 +1821,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource })) ? unavailable : STALE_SCOPE;
   }
 
-  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false, settle = false, trigger = null } = {}) {
+  async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false, resettleRequestedAt = null, settle = false, trigger = null } = {}) {
     const wholeWindow = { id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health };
     const segmentSnapshots = result.segments?.length ? result.segments : [wholeWindow];
     // 只有结束满 15 分钟的自然日窗口才结账：今天、近 7 天和刚结束的昨天还在变化，只记观测。
@@ -1930,7 +1936,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const saved = await repository.saveSnapshotsForScope(rule.id, scopeFingerprint, rows, {
         expectedOwnerState: billingSource?.ownerRules ? reconciliationOwnerScope(billingSource.ownerRules, rule.tokenId) : null, guard, ledger: ledgerOption,
         // 这天结成了：同一个事务里删掉结账状态表那一行
-        settlement: settled && ledgerDay ? { billDate: billDayOf(result.window) } : null });
+        settlement: settled && ledgerDay ? { billDate: billDayOf(result.window), resettleRequestedAt } : null });
       if (saved === true && observationOnly) {
         // 一条绑定只留最新的一份（口径、凭据变了以后旧键不会再用到）；已删除、停用的绑定在 refreshDue 里清
         for (const key of observationWrites.keys()) if (key.startsWith(`${rule.id}:`) && key !== observationKey) observationWrites.delete(key);
@@ -2131,20 +2137,36 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const stateOf = new Map(states.map((state) => [`${state.ruleId}|${state.billDate}`, state]));
     const booked = new Set(ledgerDays.map((day) => `${day.ruleId}|${day.billDate}`));
     const sourceVersion = billingSourceState().version;
+    for (const [key, at] of recheckAt) if (at <= now) recheckAt.delete(key);
+    const visit = (rule, window, back) => {
+      const billDate = billDayOf(window), key = `${rule.id}|${billDate}`, state = stateOf.get(key) || null;
+      const scopeEditedAt = Number.isFinite(rule.billingEffectiveFrom) ? rule.billingEffectiveFrom : null;
+      // 重结请求就在状态行里（state.resettleRequestedAt），precheck 自己看
+      const { action } = settlementPrecheck({ rule, window, now, state, ledgerHasDay: booked.has(key), sourceVersion, scopeEditedAt, recheckNotBefore: recheckAt.get(key) ?? null });
+      if (action === "settled" && state) repository.deleteSettlementState(rule.id, billDate).catch(() => {});
+      // 要人处理、到了重判的时刻：不进 upstreams（不为它强制重读），settleDue 拿这一轮的目录和身份在本地重判
+      if (action === "recheck") plan.recheck.push({ rule, window, state });
+      if (action !== "due") return;
+      (back === 1 ? plan.yesterday : plan.older).push({ rule, window, state, requested: state?.resettleRequestedAt != null, trigger: back === 1 ? null : "late" });
+    };
+    const ruleById = new Map(rules.map((rule) => [rule.id, rule]));
+    const seen = new Set();
     for (const rule of rules) {
       for (let back = 1; back <= SETTLE_LOOKBACK_DAYS + 1; back += 1) {
         let window;
         try { window = completedDayWindow(rule, back, now); } catch { break; }
-        const billDate = billDayOf(window), key = `${rule.id}|${billDate}`, state = stateOf.get(key) || null;
-        const resettle = back === 1 && resettles.has(rule.id) && !(resettleRetryAt.get(rule.id) > now);
-        const scopeEditedAt = Number.isFinite(rule.billingEffectiveFrom) ? rule.billingEffectiveFrom : null;
-        const { action } = settlementPrecheck({ rule, window, now, state, resettle, ledgerHasDay: booked.has(key), sourceVersion, scopeEditedAt });
-        if (action === "settled" && state) repository.deleteSettlementState(rule.id, billDate).catch(() => {});
-        // 要人处理、到了重判的时刻：不进 upstreams（不为它强制重读），settleDue 拿这一轮的目录和身份在本地重判
-        if (action === "recheck") plan.recheck.push({ rule, window, state });
-        if (action !== "due") continue;
-        (back === 1 ? plan.yesterday : plan.older).push({ rule, window, state, resettle, requested: state?.resettleRequestedAt != null, trigger: back === 1 ? null : "late" });
+        seen.add(`${rule.id}|${billDayOf(window)}`);
+        visit(rule, window, back);
       }
+    }
+    // 有重结请求的日子不受回看天数限制（改的时间可能在很久以前）：回看范围以外的，按状态行的日期补进候选
+    for (const state of states) {
+      if (state.resettleRequestedAt == null || seen.has(`${state.ruleId}|${state.billDate}`)) continue;
+      const rule = ruleById.get(state.ruleId);
+      if (!rule) continue;
+      let window;
+      try { window = { preset: "custom", startMs: dayStartInTz(state.billDate, rule.timezone), endMs: dayStartInTz(shiftDayLabel(state.billDate, 1), rule.timezone), timezone: rule.timezone }; } catch { continue; }
+      visit(rule, window, null);
     }
     for (const { rule } of plan.yesterday) plan.upstreams.add(rule.upstreamStationId);
     if (Date.now() < lookbackFrom) plan.older = [];
@@ -2182,13 +2204,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 没判出来：照原因还在处理，10 分钟后再判，不每轮重来
         const blocker = probed === undefined ? item.state.manualReason : probed;
         const next = settlementRecheck({ window: item.window, state: item.state, blocker, now: Date.now(), sourceVersion });
-        try { await repository.recordSettlementState(rule.id, billDayOf(item.window), next); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
+        const billDate = billDayOf(item.window);
+        // 原因没变：不写状态行，只把下次重判的时刻记在进程里（每 10 分钟写一次状态行没有意义）；原因变了、没了才写
+        if (recheckUnchanged(item.state, next)) { recheckAt.set(`${rule.id}|${billDate}`, Number(next.nextAttemptAt)); continue; }
+        recheckAt.delete(`${rule.id}|${billDate}`);
+        try { await repository.recordSettlementState(rule.id, billDate, next); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
       }
     });
-    const settle = async ({ rule, window, state, resettle, trigger }) => {
+    const settle = async ({ rule, window, state, trigger }) => {
       // 第一次试的日子（没有状态行）先在本地判断：取数前就能看出要人处理的（没回答「这把 Key 还给别处用吗？」、来源没确认……）
       // 直接记下，不取账单。刚上线时回看 7 天的那一批就不会为挡着的绑定白取一遍
-      if (!state && !resettle) {
+      if (!state) {
         const blocker = await probe(rule, window);
         if (blocker && reasonKindOf(blocker) !== "retry") {
           const next = settlementOutcome({ window, result: { health: { code: blocker } }, now: Date.now(), sourceVersion }).state;
@@ -2196,14 +2222,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           return { blocked: true };
         }
       }
-      const startedAt = Date.now();
-      const result = await settleDay(rule, window, { origin: "poll", ownerRegistry, state, resettle, trigger }).catch(() => null);
-      // 昨天这一轮结成了（带不带重结标记都一样）：这次结账开始以前提的重结请求也就办完了；结账途中才提的留着
-      if (trigger == null && result?.calculation?.profitUsd != null && resettles.has(rule.id) && resettles.get(rule.id) < startedAt) {
-        resettles.delete(rule.id); resettleRetryAt.delete(rule.id);
-      }
-      else if (resettle) resettleRetryAt.set(rule.id, Date.now() + settleRetryDelayMs(1, { window, now: Date.now() }));
-      return result;
+      // 重结请求在写账本的事务里按值消费（saveSnapshotsForScope）：结成了这条请求就办完了，取数期间才提的新请求留着；
+      // 没结成按 settlementOutcome 记进状态行，退避由状态行管（请求本身保留，7 天不成就放弃）
+      return settleDay(rule, window, { origin: "poll", ownerRegistry, state, trigger }).catch(() => null);
     };
     await mapWithConcurrency(yesterday, MAX_CONCURRENT_RULES, settle);
     if (!older.length) return;
@@ -2237,7 +2258,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   async function pruneSettlementStates(now) {
     if (now - (rt._reconciliationLastPrune || 0) < 3600000) return;
     rt._reconciliationLastPrune = now;
-    try { await repository.pruneSettlementStates(dayKeyInTz(now - 31 * DAY_MS, "UTC")); } catch { /* 下一小时再清 */ }
+    try { await repository.pruneSettlementStates(dayKeyInTz(now - 31 * DAY_MS, "UTC"), 500, now - 31 * DAY_MS); } catch { /* 下一小时再清 */ }
   }
 
   const api = {
@@ -2376,10 +2397,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (!rule) throw ruleNotFound();
         const billingSource = billingSourceState();
         const segments = await withObservationSourceLock(rule, currentSourceCredential(rule), async () => {
-          const corrected = await repository.correctTransition(ruleId, segmentId, effectiveAt);
+          // 分段和重结请求（改到的每个已结束的业务日各一条）在仓库的同一个事务里写
+          const corrected = await repository.correctTransition(ruleId, segmentId, effectiveAt, { now: Date.now() });
           clearBillingResults(ruleId);
-          // 分段变了，已结账的昨天要按新分段重新结账（C2b 改成按天存进状态表的重结请求）
-          resettles.set(ruleId, Date.now());
           return corrected;
         }, billingSource);
         if (segments === STALE_SCOPE) throw staleScope();
@@ -2441,9 +2461,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 停用、删除了的绑定不会再写「今天」快照，它们的指纹不留
       const live = new Set(rules.map((rule) => rule.id));
       for (const key of observationWrites.keys()) if (!live.has(key.slice(0, key.indexOf(":")))) observationWrites.delete(key);
-      // 删除了的绑定不会再结账，重结请求也不留（停用的留着，重新启用以后还要重结）
-      const known = new Set(allRules.map((rule) => rule.id));
-      for (const id of [...resettles.keys()]) if (!known.has(id)) { resettles.delete(id); resettleRetryAt.delete(id); }
       // 先定这一轮要结哪些天（只读状态表和账本），要结的上游先全部重读一遍：写进账本的数一固定就不再变，quota_per_unit 这些不能用 30 分钟前的旧值
       const plan = await planSettlement(rules, now);
       for (const id of plan.upstreams) staleMetadata.add(id);
