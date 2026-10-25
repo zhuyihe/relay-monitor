@@ -534,14 +534,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 结一天（计划 C2a）：轮询回看和手动「重新读取」共用。取数走 inspectRule(settle)；结成了状态行在记账的事务里删掉，
   // 结不成按 settlementOutcome 记进状态表。返回 inspectRule 的结果（取数出错时是一份读不到的结果）。
-  async function settleDay(rule, window, { origin, ownerRegistry, state = null, trigger = null }) {
+  async function settleDay(rule, window, { origin, ownerRegistry, state = null, trigger = null, confirmed = false }) {
     const billDate = billDayOf(window);
     let result;
     try {
       // 这一天有重结请求（改了切换时间）：不先读已固定的账，重取；请求时刻带进去，写账本的事务里按值比对才消费这条请求
-      // confirmShrink：手动「重新读取」就是人确认，重算的数比已固定的少很多也照写（RESETTLE_SHRUNK 的确认框在页面上，C3、E）；
-      // 例外：改了时间太早没自动重算的日子（RESETTLE_TOO_OLD），读出来的数要是又少了一半多，照样先挡下
-      const confirmShrink = origin === "manual" && state?.manualReason !== "RESETTLE_TOO_OLD";
+      // confirmShrink：重算的数比已固定的少很多也照写，只有一种情况：这天的状态行就是 RESETTLE_SHRUNK、而且调用方明说确认了
+      // （页面上的确认框，C3、E 做；在那之前没有人传，手动「重新读取」读出来少了一半多也先挡着）。
+      // 其他日子（普通请求日、RESETTLE_TOO_OLD 的日子）手动读取也照样判，读出来少了一半多先挡下、记 RESETTLE_SHRUNK
+      const confirmShrink = origin === "manual" && confirmed === true && state?.manualReason === "RESETTLE_SHRUNK";
       result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettleRequestedAt: state?.resettleRequestedAt ?? null, confirmShrink, trigger });
     } catch (err) {
       if (err?.code === "RULE_NOT_FOUND") throw err;
@@ -560,7 +561,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 这里不用再单独删一次——单独删一次是多发的一条 SQL（审核 C2a 低-1）
     try {
       // requestedAt：这一行取数前读到的重结请求时刻；行里的和它不一样（取数期间又来了新请求）就不盖
-      if (outcome.state && outcome.state.op !== "delete") await repository.recordSettlementState(rule.id, billDate, outcome.state, Date.now(), { requestedAt: state?.resettleRequestedAt ?? null });
+      // RESETTLE_TOO_OLD 的日子：手动读取没结成（上游出错、来源没确认……）不覆盖这一行，不然「太早、不自动重算」的标记丢了，
+      // 轮询在请求提出 7 天内就会自动去重结 31 天以前的日子；读出来少了一半多（RESETTLE_SHRUNK）才换成那一条
+      const keepTooOld = state?.manualReason === "RESETTLE_TOO_OLD" && !result.resettleBlocked;
+      if (outcome.state && outcome.state.op !== "delete" && !keepTooOld) await repository.recordSettlementState(rule.id, billDate, outcome.state, Date.now(), { requestedAt: state?.resettleRequestedAt ?? null });
     } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
     return result;
   }
@@ -2238,7 +2242,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 原因没变：不写状态行，只把下次重判的时刻记在进程里（每 10 分钟写一次状态行没有意义）；原因变了、没了才写
         if (recheckUnchanged(item.state, next)) { recheckAt.set(`${rule.id}|${billDate}`, Number(next.nextAttemptAt)); continue; }
         recheckAt.delete(`${rule.id}|${billDate}`);
-        try { await repository.recordSettlementState(rule.id, billDate, next); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
+        // requestedAt：这一行里的重结请求时刻（有请求的日子才写得进去，见 recordSettlementState）
+        try { await repository.recordSettlementState(rule.id, billDate, next, Date.now(), { requestedAt: item.state.resettleRequestedAt ?? null }); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
       }
     });
     const settle = async ({ rule, window, state, trigger }) => {
@@ -2467,7 +2472,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           const manualSettle = options.mode === "observe" && billDayOf(window) && isSettleableWindow(window, Date.now());
           if (manualSettle) {
             return manualStates()
-              .then((states) => settleDay(rule, window, { origin: "manual", ownerRegistry,
+              .then((states) => settleDay(rule, window, { origin: "manual", ownerRegistry, confirmed: options.confirmShrink === true,
                 state: states.find((item) => item.ruleId === rule.id && item.billDate === billDayOf(window)) || null }))
               .catch((err) => { if (err?.code === "RULE_NOT_FOUND") return null; throw err; });
           }

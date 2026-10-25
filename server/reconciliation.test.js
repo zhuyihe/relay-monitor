@@ -6555,9 +6555,14 @@ test("C2b 总指挥定的 3（明显少就不写）：重结读出来的收入�
   now += 3 * 3600000;
   await f.module.refreshDue(now);
   assert.equal(f.state.statCalls.slice(calls).filter((call) => call.end === COMPLETED_YESTERDAY.endMs / 1000 - 1).length, 0, "不自动再试");
-  // 手动「重新读取」就是人确认：覆盖
+  // 手动「重新读取」没有确认（页面通用的按钮，C3 的确认框还没做）：照样先挡着，不覆盖
   f.state.ownQuota = 0;
-  const manual = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual" });
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual" });
+  assert.deepEqual(revisions(), [[1, 2.5, 1]], "没确认：不写新版");
+  assert.equal((await state()).manualReason, "RESETTLE_SHRUNK", "仍是要人处理");
+  // 明说确认了（C3 确认框点「重新读取」会传 confirmShrink）：覆盖
+  f.state.ownQuota = 0;
+  const manual = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual", confirmShrink: true });
   assert.ok(manual.results[0].settledAt);
   assert.equal(revisions().at(-1)[1], 0, "手动确认以后写了新版（收入 0）");
   assert.equal(await state(), undefined, "状态行删了");
@@ -6580,10 +6585,87 @@ test("C2b 设计的确认：改了时间太早没自动重算的日子（RESETTL
   assert.deepEqual(ledger(), before, "又少了一半多：没写新版");
   const row = (await f.repository.listSettlementStates(["rr_live"])).find((item) => item.billDate === "2026-10-07");
   assert.equal(row.manualReason, "RESETTLE_SHRUNK");
-  // 这时用户点「重新读取」（确认框确认过）：RESETTLE_SHRUNK 的日子手动读取就是确认，覆盖
-  await manual();
+  // 这时用户在确认框点了「重新读取」（传 confirmShrink）：RESETTLE_SHRUNK 的日子照读到的数覆盖
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: Date.parse("2026-10-06T16:00:00Z"), endMs: Date.parse("2026-10-07T16:00:00Z") }, { mode: "observe", force: true, origin: "manual", confirmShrink: true });
   assert.equal(ledger().at(-1)[1], 0, "确认以后写了新版");
   assert.equal((await f.repository.listSettlementStates(["rr_live"])).some((item) => item.billDate === "2026-10-07"), false);
+});
+
+test("C2b 审核二轮中-1：有重结请求的日子遇到要人处理的原因，原因没了以后本地重判写得进状态行，下一轮就重结", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  let keyStatus = 1;
+  const f = await completedDayFixture(t, { clock: () => now });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/token/") {
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: 3, items: [
+        { id: 9, user_id: 7, name: "stable", status: keyStatus, group: "g1", cross_group_retry: false },
+        { id: 10, user_id: 7, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+        { id: 11, user_id: 7, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } }) };
+    }
+    return prev(input, init);
+  });
+  const revisions = () => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").map((row) => row.revision);
+  const state = () => f.repository.tables.settlementState.find((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
+  await f.module.refreshDue(now);
+  assert.deepEqual(revisions(), [1], "前提：这天已经固定");
+  // 改了时间提了请求，这时 Key 被停用：要人处理，请求留在行里
+  keyStatus = 2;
+  await f.repository.requestResettle("rr_live", ["2026-10-08"], { now });
+  now += 60000;
+  await f.module.refreshDue(now);
+  assert.equal(state()?.manual_reason, "KEY_INVALID_OR_DENIED");
+  assert.ok(state().resettle_requested_at_ms != null, "请求还在");
+  // 人把 Key 启用了：到点本地重判，原因没了——这一步要写得进状态行（有请求的行）
+  keyStatus = 1;
+  now += 10 * 60000;
+  await f.module.refreshDue(now);
+  assert.equal(state()?.last_detail?.cleared, true, "原因没了，写进状态行");
+  now += 60000;
+  f.state.ownQuota = 300; // 重结读到的数和原来不一样，才会写新的一版
+  await f.module.refreshDue(now);
+  assert.deepEqual(revisions(), [1, 2], "下一轮重结，不再卡着");
+  assert.equal(state(), undefined, "请求办完，行删掉");
+});
+
+test("C2b 审核二轮中-2：RESETTLE_TOO_OLD 的日子手动读取没结成不丢「太早」标记，轮询不会去自动重结它；普通请求日手动读取读出来少了一半多也先挡下", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) { row.enabled = row.id === "rr_live" ? 1 : 0; row.billing_effective_from_ms = Date.parse("2026-08-31T16:00:00Z"); }
+  await f.module.refreshDue(now);
+  const ledger = (day) => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === day).map((row) => [row.revision, Number(row.revenue_usd)]);
+  const row = (day) => f.repository.tables.settlementState.find((item) => item.rule_id === "rr_live" && item.bill_date === day);
+  const manual = (day, extra = {}) => f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: Date.parse(`${day}T00:00:00+08:00`), endMs: Date.parse(`${day}T00:00:00+08:00`) + 86400000 }, { mode: "observe", force: true, origin: "manual", ...extra });
+  const day = "2026-10-07";
+  await f.repository.requestResettle("rr_live", [day], { now, manualReason: "RESETTLE_TOO_OLD" });
+  const before = ledger(day);
+  // 手动读取没结成（上游 500）：行不动，仍是「太早」
+  let upstreamStatus = 500;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (upstreamStatus && url.host === "upstream.test" && url.pathname === "/api/log/self/stat") return { status: upstreamStatus, text: async () => JSON.stringify({ success: false, message: "x" }) };
+    return prev(input, init);
+  });
+  await manual(day);
+  assert.equal(row(day)?.manual_reason, "RESETTLE_TOO_OLD", "标记还在");
+  assert.deepEqual(ledger(day), before);
+  // 轮询不会去自动重结它
+  now += 3600000;
+  upstreamStatus = 0;
+  await f.module.refreshDue(now);
+  assert.deepEqual(ledger(day), before, "没有自动重结");
+  assert.equal(row(day)?.manual_reason, "RESETTLE_TOO_OLD");
+  // 普通请求日：手动读取读出来少了一半多，先挡下（不再是「手动就是确认」）
+  const plain = "2026-10-08";
+  await f.repository.requestResettle("rr_live", [plain], { now });
+  const plainBefore = ledger(plain);
+  f.state.ownQuota = 0;
+  await manual(plain);
+  assert.deepEqual(ledger(plain), plainBefore, "少了一半多：没写新版");
+  assert.equal(row(plain)?.manual_reason, "RESETTLE_SHRUNK");
 });
 
 test("C2b 总指挥定的 3：旧值小于 0.5 美元的不判「明显少」（零头不误伤）；少 30% 的照常写新版", async (t) => {

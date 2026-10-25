@@ -1322,6 +1322,19 @@ contract("resettle requests: one multi-row write; a newer request moves the valu
   assert.deepEqual([requestedAndBooked.retryReason, requestedAndBooked.attempts, requestedAndBooked.resettleRequestedAt], ["PENDING", 4, now]);
 });
 
+contract("recordSettlementState with a request only updates that row: when it was deleted meanwhile (a manual read settled the day), no orphan row is inserted", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const now = Date.UTC(2026, 0, 12, 3);
+  const retry = { op: "retry", reason: "PENDING", attempts: 1, nextAttemptAt: now + HOUR, firstFailedAt: now, lastAttemptAt: now, sourceVersion: "v1", detail: { code: "PENDING" } };
+  await repository.requestResettle(rule.id, ["2026-01-10"], { now });
+  await repository.deleteSettlementState(rule.id, "2026-01-10"); // 手动那次同时结成了，行已经删掉
+  await repository.recordSettlementState(rule.id, "2026-01-10", retry, now + 1, { requestedAt: now });
+  assert.equal(await stateOf(repository, rule.id, "2026-01-10"), undefined, "不补插没有请求的孤儿行");
+  // 没有请求的日子（第一次失败）照常插
+  await repository.recordSettlementState(rule.id, "2026-01-11", retry, now + 2);
+  assert.equal((await stateOf(repository, rule.id, "2026-01-11")).attempts, 1);
+});
+
 contract("a settlement consumes only the resettle request it read; a request made while it ran stays and is due again at once", async ({ repository, fixture }) => {
   const rule = await fixture.createRule();
   const [segment] = await repository.listSegments(rule.id);

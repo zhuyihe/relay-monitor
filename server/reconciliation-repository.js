@@ -814,13 +814,22 @@ export class ReconciliationRepository {
   // 取数期间又来了新的重结请求（行里的请求时刻和 requestedAt 不一样）：这次的失败状态不盖，新请求刚清零的记录留着（审核 C2b 低-5）。
   async recordSettlementState(ruleId, billDate, state, now = Date.now(), { requestedAt = null } = {}) {
     const values = settlementStateValues(state);
+    // 调用方读到这一行带着重结请求：只更新这一行（请求时刻还一样才盖）。行已经没了（手动那次同时结成、删掉了）就什么也不做，
+    // 不补插一行没有请求的孤儿行
+    if (requestedAt != null) {
+      const columns = [...SETTLEMENT_STATE_WRITE_COLUMNS, "updated_at_ms"];
+      await this.pool.query(
+        `UPDATE reconciliation_settlement_state SET ${columns.map((column) => `${column} = ?`).join(", ")} WHERE rule_id = ? AND bill_date = ? AND resettle_requested_at_ms = ?`,
+        [...values, now, ruleId, billDate, requestedAt]);
+      return;
+    }
     const keep = (column) => `${column} = IF(resettle_requested_at_ms <=> ?, VALUES(${column}), ${column})`;
     await this.pool.query(
       `INSERT INTO reconciliation_settlement_state (rule_id, bill_date, ${SETTLEMENT_STATE_WRITE_COLUMNS.join(", ")}, updated_at_ms)
        SELECT ?, ?, ${SETTLEMENT_STATE_WRITE_COLUMNS.map(() => "?").join(", ")}, ? FROM DUAL
-       WHERE ? IS NOT NULL OR NOT EXISTS (SELECT 1 FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ?)
+       WHERE NOT EXISTS (SELECT 1 FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ?)
        ON DUPLICATE KEY UPDATE ${SETTLEMENT_STATE_WRITE_COLUMNS.map(keep).join(", ")}, ${keep("updated_at_ms")}`,
-      [ruleId, billDate, ...values, now, requestedAt, ruleId, billDate, ...Array(SETTLEMENT_STATE_WRITE_COLUMNS.length + 1).fill(requestedAt)]);
+      [ruleId, billDate, ...values, now, ruleId, billDate, ...Array(SETTLEMENT_STATE_WRITE_COLUMNS.length + 1).fill(null)]);
   }
 
   // 给这些日子写重结请求（一条多行 INSERT）：改时间、以后改设置、换 Key 的时刻都走这一个。conn 是调用方已经开着的事务连接，没传就直接用连接池。

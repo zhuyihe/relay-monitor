@@ -597,6 +597,8 @@ export class MemoryReconciliationRepository {
   async recordSettlementState(ruleId, billDate, state, now = Date.now(), { requestedAt = null } = {}) {
     // 账本里已经有这天就不写；调用方读状态行时带着重结请求的日子除外（和 MySQL 版同一个条件）
     if (this.#ledgerOf(null, ruleId, billDate).length && requestedAt == null) return;
+    // 带着请求的只更新（行已经没了不补插孤儿行），和 MySQL 版同一个规矩
+    if (requestedAt != null && !this.#settlementEntries(null, ruleId, billDate).length) return;
     const values = Object.fromEntries(SETTLEMENT_STATE_WRITE_COLUMNS.map((column, index) => [column, settlementStateValues(state)[index]]));
     values.last_detail = JSON.parse(values.last_detail);
     const existing = this.#settlementEntries(null, ruleId, billDate);
