@@ -3068,7 +3068,7 @@ function myLayoutAnalytics(range = "7d", { sellPrice = true } = {}) {
   const incomeDaily = Array.from({ length: 7 }, (_, i) => ({ date: shiftDay(end, i - 6), incomeCny: 1000 + i * 100 }));
   const byModel = [700, 600, 500, 400, 300, 20, 10].map((cost, i) => ({ model: `model-${i}`, tokens: 1000, cost, requests: 3 }));
   // 没设置售价：服务端在 profit 里带上 sell_price_unset 那条说明（等式下面写一次）
-  const unpriced = { station: { id: "own-1", name: "Fixture own" }, profit: { ...base.profit, warnings: [SELL_PRICE_UNSET], warningCodes: ["sell_price_unset"] } };
+  const unpriced = { station: { id: "own-1", name: "Fixture own" }, profit: { ...base.profit, adminUsageCny: 3, warnings: [SELL_PRICE_UNSET], warningCodes: ["sell_price_unset"] } };
   return { ...base, incomeDaily, byModel, ...(sellPrice ? {} : unpriced) };
 }
 
@@ -3097,7 +3097,8 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
   // 「消费」合计在「消费最多的模型」下面，等于模型那几条加起来（按模型加总；用户的条按用户加总，可能对不上，所以不放用户下面）
   assert.equal(await users.locator(".jy-my-facts").count(), 0);
   assert.deepEqual((await models.locator(".jy-my-facts li").allInnerTexts()).map((x) => x.trim()), [`消费 ${formatMoney(2530 * 7)}`]);
-  await models.getByText("含管理员自用，和收入不是一个数。", { exact: true }).waitFor();
+  // 管理员自用是 0 时「消费」和收入相等，不写那句（免得让人糊涂）；有管理员自用的情况在下面没设置售价那一页查
+  assert.equal(await models.getByText("含管理员自用，和收入不是一个数。", { exact: true }).count(), 0);
   // 人数只在指标行里写一次：用户排行右上角不带数字
   await users.getByRole("button", { name: "看全部用户", exact: true }).waitFor();
   assert.equal(await users.getByText(/全部 \d+ 个用户/).count(), 0);
@@ -3165,6 +3166,7 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
     throw new Error("unexpected my fixture API: " + url.pathname);
   }, undefined, false, null, "/my");
   const estIncome = unpriced.getByRole("region", { name: "每日收入", exact: true });
+  await unpriced.getByRole("region", { name: "消费最多的模型", exact: true }).getByText("含管理员自用，和收入不是一个数。", { exact: true }).waitFor();
   // 原因那句只在等式下面写一次，每日收入的说明里只写一句短的
   await estIncome.getByText("收入是估算，原因见上面的利润等式。", { exact: false }).waitFor();
   assert.equal((await unpriced.locator("main").innerText()).split(SELL_PRICE_UNSET).length - 1, 1, "「没设置售价」那句全页只出现一次");
