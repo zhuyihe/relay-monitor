@@ -11,19 +11,24 @@ async function route(path) {
       "export const withAuth = (handler) => handler; export const withRuntime = (handler) => handler;",
       "export const json = (value, status = 200) => Response.json(value, { status });",
       "export const clientIp = () => \"1.2.3.4\"; export const requestIsSecure = () => false;",
+      "export const cookieToken = () => null;", // 够不够「已登录过的浏览器」由 sessions.verify() 的桩决定，这里不用真的解析 Cookie
     ].join("\n") };
-    if (url.endsWith("/lib/auth.js")) return { format: "module", shortCircuit: true,
-      source: "export const verifyPassword = (password) => password === \"right\";" };
+    if (url.endsWith("/lib/auth.js")) return { format: "module", shortCircuit: true, source: [
+      "export const verifyPassword = (password) => password === \"right\";",
+      "export const DEVICE_COOKIE_NAME = \"rm_device\";",
+    ].join("\n") };
     return nextLoad(url, context);
   } });
   try { return await import(path); } finally { hook.deregister(); }
 }
 
 const post = (path, body) => new Request(`https://local.test${path}`, { method: "POST", body: JSON.stringify(body) });
-const sessions = (locked = false) => {
+const sessions = (locked = false, { siteLimited = false, trustedDevice = false } = {}) => {
   const calls = [];
-  return { calls, isLocked: () => locked, recordFailure: (ip) => calls.push(["failure", ip]), recordSuccess: (ip) => calls.push(["success", ip]),
-    issue: () => "token", sessionVersion: () => 1, cookieHeader: () => "sid=token", clearCookieHeader: () => "sid=" };
+  return { calls, isLocked: () => locked, isSiteLimited: () => siteLimited, verify: () => trustedDevice ? { exp: Infinity } : null,
+    recordFailure: (ip) => calls.push(["failure", ip]), recordSuccess: (ip) => calls.push(["success", ip]),
+    issue: () => "token", issueDevice: () => "device-token", sessionVersion: () => 1,
+    cookieHeader: () => "sid=token", deviceCookieHeader: () => "dev=device-token", clearCookieHeader: () => "sid=" };
 };
 const store = (extra = {}) => ({ auth: { username: "admin", salt: "s", hash: "h", isDefault: false }, ...extra });
 
@@ -49,6 +54,42 @@ test("登录：用户名或密码不对时 401 带 LOGIN_FAILED，试太多次�
   assert.deepEqual(okRt.sessions.calls, [["success", "1.2.3.4"]]);
   assert.equal(errorText({ code: "LOGIN_FAILED" }), "用户名或密码不对");
   assert.equal(errorText({ code: "LOGIN_RATE_LIMITED" }), "试了太多次，请 5 分钟后再试");
+});
+
+test("登录：全站上限顶住时也是 429 带 LOGIN_RATE_LIMITED，不跑密码校验；已经登录过的浏览器（设备 Cookie）不受这条约束", async () => {
+  const { POST } = await route("./login/route.js");
+
+  // 全站顶住、没有设备 Cookie：连密码都不比对，不记失败次数（和单来源锁一样不占这次失败）
+  const limitedRt = { store: store(), sessions: sessions(false, { siteLimited: true }) };
+  const limited = await POST(post("/api/auth/login", { username: "admin", password: "right" }), limitedRt);
+  assert.equal(limited.status, 429);
+  assert.deepEqual(await limited.json(), { error: errorText({ code: "LOGIN_RATE_LIMITED" }), code: "LOGIN_RATE_LIMITED" });
+  assert.deepEqual(limitedRt.sessions.calls, []);
+
+  // 全站顶住、带着设备 Cookie：豁免这一步，密码校验、记成功/失败都照常
+  const trustedRt = { store: store(), sessions: sessions(false, { siteLimited: true, trustedDevice: true }) };
+  const trusted = await POST(post("/api/auth/login", { username: "admin", password: "right" }), trustedRt);
+  assert.equal(trusted.status, 200);
+  assert.deepEqual(trustedRt.sessions.calls, [["success", "1.2.3.4"]]);
+
+  const trustedWrongRt = { store: store(), sessions: sessions(false, { siteLimited: true, trustedDevice: true }) };
+  const trustedWrong = await POST(post("/api/auth/login", { username: "admin", password: "nope" }), trustedWrongRt);
+  assert.equal(trustedWrong.status, 401);
+  assert.deepEqual(trustedWrongRt.sessions.calls, [["failure", "1.2.3.4"]]);
+});
+
+test("登录成功：会话 Cookie 和设备 Cookie 各发一条，不是合并成一条", async () => {
+  const { POST } = await route("./login/route.js");
+  const rt = { store: store(), sessions: sessions() };
+  const res = await POST(post("/api/auth/login", { username: "admin", password: "right" }), rt);
+  assert.deepEqual(res.headers.getSetCookie(), ["sid=token", "dev=device-token"]);
+});
+
+test("退出登录：只清会话 Cookie，不碰设备 Cookie——这台浏览器退出以后还能豁免全站登录上限", async () => {
+  const { POST } = await route("./logout/route.js");
+  const rt = { sessions: sessions() };
+  const res = await POST(null, rt);
+  assert.deepEqual(res.headers.getSetCookie(), ["sid="]);
 });
 
 test("改密码：原密码不对带 WRONG_PASSWORD，新密码太短带 PASSWORD_TOO_SHORT，都是 400，不改密码", async () => {

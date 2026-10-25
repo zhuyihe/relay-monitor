@@ -238,7 +238,7 @@ export class Store {
     }
     // 初始化面板账号（默认 admin / admin123，登录后请在设置里修改）
     if (!this.data.auth) {
-      const { salt, hash } = hashPassword("admin123");
+      const { salt, hash } = await hashPassword("admin123");
       this.data.auth = { username: "admin", salt, hash, isDefault: true };
       console.log("  已创建默认面板账号：admin / admin123（请登录后在「设置」中修改密码）");
     }
@@ -444,7 +444,7 @@ export class Store {
   }
 
   async setPassword(username, password) {
-    const { salt, hash } = hashPassword(password);
+    const { salt, hash } = await hashPassword(password);
     return this._saveChange(() => {
       const auth = { username: username || this.data.auth.username, salt, hash, isDefault: false };
       return { data: { ...this.data, auth }, publish: () => { this.data.auth = auth; } };
