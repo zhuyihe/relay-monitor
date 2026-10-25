@@ -1208,21 +1208,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (metadataError && (identityIssue || !upstreamOptional)) return unavailable(identityIssue || toErrorHealth(metadataError), {}, !identityIssue);
       if (metadataError) upstreamProblem ||= toErrorHealth(metadataError);
       const token = metadata?.tokens.find((item) => item.id === rule.tokenId);
+      // 上游一侧读不到（只有固定成本、锚定过的会走到这里）：读到的目录和 Key 不当证据、也不拿来显示，也不拿它去读上游用量——上游账号可能已经换了人，
+      // id 相同的 Key 是别人的。Key 名用绑定上存的；面板类型按绑定存的，旧绑定没存就按上游站点的类型
+      const evidenceMetadata = upstreamProblem ? null : metadata, evidenceToken = upstreamProblem ? null : token;
       if (identityIssue) {
-        const upstreamEvidence = token && (!rule.canonicalKey || rule.canonicalKey === actualKey)
-          ? await upstreamWindowFor(upstream, metadata, token, window, { readOnly: !observe }).catch(() => null) : null;
-        return unavailable(identityIssue, { metadata, token, upstream: upstreamEvidence }, false);
+        const upstreamEvidence = evidenceToken && (!rule.canonicalKey || rule.canonicalKey === actualKey)
+          ? await upstreamWindowFor(upstream, evidenceMetadata, evidenceToken, window, { readOnly: !observe }).catch(() => null) : null;
+        return unavailable(identityIssue, { metadata: evidenceMetadata, token: evidenceToken, upstream: upstreamEvidence }, false);
       }
       const canonicalKey = upstreamProblem ? rule.canonicalKey : canonicalBillingKey(upstream, metadata, token.id);
       if (!upstreamProblem && (canonicalKey !== actualKey || canonicalKey !== rule.canonicalKey)) {
         return unavailable(health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")), { metadata, token }, false);
       }
-      // 上游一侧读不到（只有固定成本、锚定过的会走到这里）：读到的目录和 Key 不当证据、也不拿来显示——上游账号可能已经换了人，
-      // id 相同的 Key 是别人的。Key 名用绑定上存的；面板类型按绑定存的，旧绑定没存就按上游站点的类型
-      const evidenceMetadata = upstreamProblem ? null : metadata, evidenceToken = upstreamProblem ? null : token;
       const platform = evidenceMetadata?.platform ?? rule.provider ?? billingProviderOf(upstream);
       const persistedSegments = await repository.listSegments(rule.id);
-      if (!persistedSegments.length) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", INCOMPLETE_DAY_TEXT), { metadata, token });
+      if (!persistedSegments.length) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", INCOMPLETE_DAY_TEXT), { metadata: evidenceMetadata, token: evidenceToken });
       const catalogueObserved = !upstreamProblem && metadata.groupsAvailable && metadata.groups[token.group]?.ratio != null;
       const currentRatio = catalogueObserved ? metadata.groups[token.group].ratio : null;
       const ratioObservedAt = Date.now();

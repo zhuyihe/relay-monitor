@@ -5978,6 +5978,59 @@ test("C1 成本计法在提前返回之前就定：固定成本、锚定过的�
   }
 });
 
+test("C1 第二轮：固定成本、上游账号换了人时，读到的目录不拿来改分段、不拿去读上游用量、不进快照（N1–N3）", async (t) => {
+  const reply = (host, pathname, body) => ({ host, pathname, body });
+  const otherAccount = [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } }),
+    // 8 号账号里也有一把 id 9 的 Key，名字一样，但在别的分组（倍率 2）
+    reply("upstream.test", "/api/token/", { success: true, data: { total: 1, items: [{ id: 9, user_id: 8, name: "stable", status: 1, group: "g2", cross_group_retry: false }] } })];
+  const setup = async (st, replies, options = {}) => {
+    const f = await completedDayFixture(st, options);
+    f.stations.find((station) => station.id === "upstream").fixedPurchases = [{ amount: 300, days: 30 }];
+    const prev = globalThis.fetch;
+    st.mock.method(globalThis, "fetch", async (input, init) => {
+      const url = new URL(String(input));
+      const hit = replies.find((item) => item.host === url.host && item.pathname === url.pathname);
+      if (hit) return { status: hit.body.success ? 200 : 500, text: async () => JSON.stringify(hit.body) };
+      return prev(input, init);
+    });
+    return f;
+  };
+  const segmentsOf = (f) => f.repository.tables.segments.filter((segment) => segment.rule_id === "rr_live")
+    .map((segment) => [segment.group_name, segment.group_ratio, segment.effective_to_ms]);
+
+  await t.test("N3 刷新今天以后，分段和倍率都不变", async (st) => {
+    const f = await setup(st, otherAccount);
+    const before = segmentsOf(f);
+    await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" });
+    await f.module.refreshDue(Date.now());
+    assert.deepEqual(segmentsOf(f), before, "不按别人的 Key 切到 g2");
+    assert.deepEqual(f.state.ratioWrites, []);
+  });
+
+  await t.test("N1 Key 用不了、本站账号也换了人：不拿那把 Key 去读上游用量", async (st) => {
+    const keyDisabled = reply("upstream.test", "/api/token/", { success: true, data: { total: 3, items: [
+      { id: 9, user_id: 7, name: "stable", status: 2, group: "g1", cross_group_retry: false },
+      { id: 10, user_id: 7, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+      { id: 11, user_id: 7, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } });
+    const f = await setup(st, [keyDisabled, reply("own.test", "/api/user/self", { success: true, data: { id: 9 } })]);
+    const [row] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" })).results;
+    assert.equal(row.health.code, "SOURCE_BINDING_UNCONFIRMED");
+    assert.equal(f.state.statCalls.filter((call) => call.side === "upstream").length, 0, "不读上游用量");
+    assert.notEqual(row.upstream?.state, "complete");
+  });
+
+  await t.test("N2 没有分段时提前返回：观测快照里不记别人的 Key", async (st) => {
+    const f = await setup(st, otherAccount);
+    f.repository.tables.segments = f.repository.tables.segments.filter((segment) => segment.rule_id !== "rr_live");
+    await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" });
+    const sources = f.repository.tables.snapshots.filter((row) => row.rule_id === "rr_live")
+      .map((row) => typeof row.source === "string" ? JSON.parse(row.source) : row.source);
+    assert.ok(sources.length, "写了观测快照");
+    assert.ok(sources.every((source) => source.upstream?.group !== "g2" && source.upstream?.ratio !== 2), "不记别人那把 Key 的分组、倍率");
+    assert.ok(sources.every((source) => source.ruleEvidence?.upstreamIdentity == null), "也不记换成的那个上游账号");
+  });
+});
+
 test("C1 固定成本的上游读不到时，面板类型按绑定存的；旧绑定没存就按上游站点的类型（Sub2API 不会被当成 New API）", async (t) => {
   const f = await completedDayFixture(t, { metadataFailure: true });
   const upstream = f.stations.find((station) => station.id === "upstream");
