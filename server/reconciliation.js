@@ -773,6 +773,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 只有「今天」碰到短暂失败（网络错、5xx、429）时 10 分钟内沿用上一份，沿用的不写进「今天」的收入缓存。管理员名单、转售 Key 变了：键里带转售 Key，名单变了按来源重新算，不沿用旧来源的累计。
   const OWN_EXCLUSION_REUSE_MS = 30000;
   const OWN_EXCLUSION_STALE_OK_MS = 10 * 60000;
+  // 同一个窗口起点留 15 分钟内读到的状态（最多 120 份，按终点排）：一轮里几十条绑定读到这里的先后和各自终点的先后不一样，
+  // 只留最近 4 份会被终点晚的挤掉，终点早的那条找不到可以接着用的，整段重读（审核 CI：每轮 474 页）
+  const OWN_EXCLUSION_STATE_KEEP_MS = 15 * 60000, OWN_EXCLUSION_STATE_MAX = 120;
   // 只沿用短暂失败：网络错、5xx、429（读取这一层的码是 NETWORK_UNREACHABLE、UPSTREAM_REQUEST_FAILED）；令牌作废/少权限（401、403）、
   // 程序算出负数这类不会自己好的不沿用。用户列表那层外面包着 OWN_INCOME_UNCONFIRMED，要看包在里面的原因
   const isTransientOwnReadFailure = (error) => [error, error?.cause].some((item) => ["NETWORK_UNREACHABLE", "UPSTREAM_REQUEST_FAILED"].includes(item?.code))
@@ -934,7 +937,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       for (const part of parts.values()) if (part.coverage instanceof Set) coverage = coverage === "all" ? part.coverage : new Set([...coverage].filter((id) => part.coverage.has(id)));
       const result = { byChannel, coverage };
       entry.states = [...entry.states.filter((state) => state.endMs !== window.endMs), { parts, result, endMs: window.endMs, readAt: Date.now(), ...(settle ? { verifiedEndMs: window.endMs } : {}) }]
-        .sort((a, b) => a.endMs - b.endMs).slice(-4);
+        .filter((state, index, list) => Date.now() - state.readAt < OWN_EXCLUSION_STATE_KEEP_MS || index >= list.length - 1)
+        .sort((a, b) => a.endMs - b.endMs).slice(-OWN_EXCLUSION_STATE_MAX);
       return result;
     }).catch((error) => {
       // 「今天」读用户列表或管理员日志短暂失败：10 分钟内沿用上一份（只影响今天那一格，不推送），超过才读不到（总指挥 10-25）。令牌作废、少权限照原样抛

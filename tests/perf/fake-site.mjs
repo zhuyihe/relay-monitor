@@ -277,7 +277,9 @@ function ownSite(rest, q, req) {
       const channel = num(q.get("channel"), 0);
       const onlyChannel = channel && !q.get("model_name") && !q.get("username") && !q.get("group") && !q.get("token_name");
       const tokenName = q.get("token_name");
-      if (TEST_LOGS && tokenName === TEST_NAME) return [200, ok({ quota: testQuotaIn(s, e, channel), rpm: 0, tpm: 0 })];
+      // 测试日志全记在 root 名下（testLogItem 的 username）：带 username 的只有 root 有，别的用户是 0。真 New API 的 stat 两个条件一起筛；
+      // 原来这里不看 username，每个管理员都回全部测试额度，「各管理员合计 = 全部」永远对不上（审核 R1 CI）
+      if (TEST_LOGS && tokenName === TEST_NAME) return [200, ok({ quota: q.get("username") && q.get("username") !== "root" ? 0 : testQuotaIn(s, e, channel), rpm: 0, tpm: 0 })];
       if (onlyChannel) quota = channelQuota(agg, [channel], s, e)[channel] + testQuotaIn(s, e, channel);
       else if (!filter) { const all = channelQuota(agg, CHANNELS.map((c) => c.id), s, e); for (let c = 1; c <= N_CH; c++) quota += all[c]; quota += testQuotaIn(s, e); }
       else agg.scan(s, e, null, (ev) => { if (filter(ev)) quota += ev.quota; });
@@ -290,8 +292,9 @@ function ownSite(rest, q, req) {
       const kFirst = agg.em.kAt(Math.max(s, epoch0)), kLast = agg.em.kAt(e + 1) - 1;
       let items = [], total = 0;
       if (TEST_LOGS && q.get("token_name") === TEST_NAME) {
-        // 只要测试日志：从新到旧分页
+        // 只要测试日志：从新到旧分页；测试日志全记在 root 名下，按别的用户筛是空的
         const from = (p - 1) * size;
+        if (q.get("username") && q.get("username") !== "root") return [200, ok({ page: p, page_size: size, total: 0, items: [] })];
         for (const ev of testEvents(s, e, num(q.get("channel"), 0))) { if (total >= from && total < from + size) items.push(testLogItem(ev)); total++; }
       } else if (!filter) {
         total = Math.max(0, kLast - kFirst + 1);
