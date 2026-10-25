@@ -1351,7 +1351,7 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
   for (const counts of [upstreamCounts, ownCounts]) for (const path of Object.keys(counts)) delete counts[path];
   ownStatusBroken = true;
   const { results: [broken] } = await module.queryRules(window, { force: true });
-  assert.equal(ownCounts["/api/status"], 1, "本站 /api/status 失败时也不会按分段重试");
+  assert.equal(ownCounts["/api/status"], 2, "本站 /api/status 失败时，等着它的几段共用一次重读，不按分段重试（4 段只多 1 次）");
   assert.deepEqual(broken.segments.map((segment) => segment.health.issues.map((issue) => issue.code)), Array(4).fill(["OWN_BILLING_UNAVAILABLE"]));
   assert.equal(broken.downstream.amountUsd, null);
   assert.equal(broken.calculation.profitUsd, null);
@@ -4512,18 +4512,26 @@ async function completedDayFixture(t, { now = "2026-10-09T03:00:00Z", clock = nu
   return { ...f, rows, catalogue, channels };
 }
 
+// 自营站点的管理端日志列表替身：按 start_timestamp 筛，按编号倒序给第一条（计划 P1a 判断有没有新的消费用）
+function ownLogList(logs, calls = []) {
+  return (url) => {
+    const since = Number(url.searchParams.get("start_timestamp"));
+    calls.push(since);
+    const items = logs.filter((log) => log.created_at >= since).sort((a, b) => b.id - a.id).slice(0, 1);
+    return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: items.length, items } }) };
+  };
+}
+
 test("P1a 轮询省请求和写入：自营 /api/status 每轮一次；全站没有新的消费就沿用渠道收费；渠道状态、「今天」快照没变不写，满 10 分钟照写", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1, 4], rr_two: [2], rr_three: [3] } });
-  let siteQuota = 0;
-  const siteCalls = [];
+  const logs = [{ id: 1, created_at: Math.floor(now / 1000) - 600 }], siteCalls = [];
+  const newLog = (created_at = Math.floor(now / 1000) - 1) => logs.push({ id: logs.length + 1, created_at });
+  const siteLogs = ownLogList(logs, siteCalls);
   const prev = globalThis.fetch;
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(String(input));
-    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !url.searchParams.has("channel")) {
-      siteCalls.push([Number(url.searchParams.get("start_timestamp")), Number(url.searchParams.get("end_timestamp"))]);
-      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota: siteQuota } }) };
-    }
+    if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
     return prev(input, init);
   });
   const ownCalls = (path) => f.state.requests.filter((request) => request.host === "own.test" && request.path === path).length;
@@ -4535,15 +4543,16 @@ test("P1a 轮询省请求和写入：自营 /api/status 每轮一次；全站没
       states: f.state.channelStateWrites.length - before.states, today: todayWrites() - before.today, site: siteCalls.length - before.site };
   };
 
-  // 第一轮：没有上一轮可比，照旧逐个渠道读（今天 4 个渠道 + 结昨天 4 个）；三条绑定共用一次 /api/status
-  assert.deepEqual(await round(), { status: 1, channel: 8, states: 4, today: 3, site: 0 });
+  // 第一轮：没有上一轮可比，照旧逐个渠道读（今天 4 个渠道 + 结昨天 4 个）；三条绑定共用一次 /api/status；记下最新一条日志
+  assert.deepEqual(await round(), { status: 1, channel: 8, states: 4, today: 3, site: 1 });
+  assert.equal(siteCalls.at(-1), Math.floor(now / 1000) - 2 * 3600, "还没读到过日志：从现在往前 2 小时查起");
   const first = (await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" })).results.map((row) => row.downstream.amountUsd);
 
-  // 一分钟后，全站这段时间没有新的消费：一个渠道请求都不发，沿用；渠道状态没变，不写。
+  // 一分钟后，全站这段时间没有新的消费：一个渠道请求都不发，沿用（沿用前照样读一次 /api/status，三条绑定共用）；渠道状态没变，不写。
   // 「今天」快照这一轮还会写一次：第一轮才写下渠道状态的变化时刻，快照里的渠道带上了它（内容真的变了）
   now += 60000;
-  assert.deepEqual(await round(), { status: 0, channel: 0, states: 0, today: 3, site: 1 });
-  assert.deepEqual(siteCalls.at(-1), [Math.floor((now - 60000) / 1000), Math.floor(now / 1000)], "从上一轮查过的那一秒查到现在");
+  assert.deepEqual(await round(), { status: 1, channel: 0, states: 0, today: 3, site: 1 });
+  assert.equal(siteCalls.at(-1), logs[0].created_at - 120, "从上一次读到的最新一条（站点的时刻）往前 120 秒查起");
   const reused = (await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" })).results;
   assert.ok(reused.every((row) => row.window.endMs === now && row.downstream.window.endMs === now), "沿用的收费，窗口终点换成这次的");
   assert.deepEqual(reused.map((row) => row.downstream.amountUsd), first);
@@ -4553,29 +4562,170 @@ test("P1a 轮询省请求和写入：自营 /api/status 每轮一次；全站没
 
   // 再一分钟，还是没有新的消费：什么都不读、不写
   now += 60000;
-  assert.deepEqual(await round(), { status: 0, channel: 0, states: 0, today: 0, site: 1 });
+  assert.deepEqual(await round(), { status: 1, channel: 0, states: 0, today: 0, site: 1 });
 
   // 又过一分钟，有了新的消费：照旧逐个渠道读，金额变了，「今天」快照照写
-  now += 60000; siteQuota = 5; f.state.ownQuota = 300;
+  now += 60000; newLog(); f.state.ownQuota = 300;
   assert.deepEqual(await round(), { status: 1, channel: 4, states: 0, today: 3, site: 1 });
 
   // 再一分钟没有新的消费，但渠道 4 在自营站点里停用了：只写这一个渠道的状态（同一条绑定里的渠道 1 没变，不写）
-  now += 60000; siteQuota = 0;
+  now += 60000;
   f.channels.find((channel) => channel.id === 4).status = 2;
   f.rt._reconciliationOwnChannelsCache.clear();
-  assert.deepEqual(await round(), { status: 0, channel: 0, states: 1, today: 1, site: 1 });
+  assert.deepEqual(await round(), { status: 1, channel: 0, states: 1, today: 1, site: 1 });
   // 之后满 10 分钟，渠道状态的观测时刻和「今天」快照照写（不发渠道请求）
   now += 10 * 60000;
-  assert.deepEqual(await round(), { status: 0, channel: 0, states: 4, today: 3, site: 1 });
+  assert.deepEqual(await round(), { status: 1, channel: 0, states: 4, today: 3, site: 1 });
 
   // 全站那一次读失败：这一轮照旧逐个读
   now += 60000;
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(String(input));
-    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !url.searchParams.has("channel")) { siteCalls.push(null); return { status: 500, text: async () => "{}" }; }
+    if (url.host === "own.test" && url.pathname === "/api/log/") { siteCalls.push(null); return { status: 500, text: async () => "{}" }; }
     return prev(input, init);
   });
   assert.equal((await round()).channel, 4);
+});
+
+test("P1a 自营站点时钟偏慢 10 分钟、日志晚 60 多秒才写进去：编号变了照旧现读，一分钱不少算", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  const sec = () => Math.floor(now / 1000);
+  // 每条日志 100 额度（quota_per_unit 100，1 美元）；渠道的收费按日志现算
+  const logs = [1, 2, 3].map((channel, index) => ({ id: index + 1, channel, created_at: sec() - 3600, quota: 100 }));
+  const add = (channel, created_at) => logs.push({ id: logs.length + 1, channel, created_at, quota: 100 });
+  const siteLogs = ownLogList(logs);
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    if (url.host === "own.test" && url.pathname === "/api/log/stat") {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      const channel = Number(url.searchParams.get("channel")), start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
+      const quota = logs.filter((log) => log.channel === channel && log.created_at >= start && log.created_at <= end).reduce((sum, log) => sum + log.quota, 0);
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota } }) };
+    }
+    return prev(input, init);
+  });
+  const channelReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat").length;
+  const round = async () => { now += 60000; const before = channelReads(); await f.module.refreshDue(now); return channelReads() - before; };
+  const live = async () => (await f.module.queryRules({ preset: "today", ruleIds: ["rr_live"] }, { mode: "evaluate", origin: "page" })).results[0].downstream.amountUsd;
+
+  await round();
+  assert.equal(await round(), 0, "没有新日志：沿用");
+  assert.equal(await live(), 1);
+
+  // 站点的钟慢 10 分钟：新日志记的时刻是控制台的 10 分钟前，不在「上一轮到现在」里，但编号变了
+  add(1, sec() - 600);
+  assert.ok(await round() > 0, "照旧现读");
+  assert.equal(await live(), 2, "慢了的那条也算进来");
+  assert.equal(await round(), 0);
+
+  // 日志晚 60 秒才写进去：记的时刻比已经读到的最新一条还早 60 秒，编号照样变（查的范围往前留了 120 秒）
+  add(1, Math.max(...logs.map((log) => log.created_at)) - 60);
+  assert.ok(await round() > 0, "照旧现读");
+  assert.equal(await live(), 3, "晚到的那条也算进来");
+  assert.equal(await round(), 0);
+
+  // 站点的钟快 10 分钟：新日志记的时刻在控制台的「现在」之后，这时窗口还包不住它；之后几轮编号不变，但不能沿用
+  add(1, sec() + 600);
+  assert.ok(await round() > 0);
+  assert.ok(await round() > 0, "最新那条的时刻还没被读到的窗口包住，照旧现读");
+  for (let i = 0; i < 9; i += 1) await round();
+  assert.equal(await live(), 4, "控制台的钟走过那一刻以后算进来");
+  assert.equal(await round(), 0, "包住以后接着沿用");
+});
+
+test("P1a 沿用渠道收费的边界：额度换算变了、读失败后进入安静期、换凭据、同一轮 /api/status 失败、跨零点、分段终点往前改，都照旧现读", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  let ownQuotaPerUnit = 100, failChannelStat = false, failStatusOnce = false;
+  const logs = [{ id: 1, created_at: Math.floor(now / 1000) - 600 }];
+  const newLog = () => logs.push({ id: logs.length + 1, created_at: Math.floor(now / 1000) });
+  const siteLogs = ownLogList(logs);
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && failChannelStat) {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      return { status: 500, text: async () => "{}" };
+    }
+    if (url.host === "own.test" && url.pathname === "/api/status") {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      if (failStatusOnce) {
+        failStatusOnce = false;
+        // 晚一点再失败：其余绑定这时都在等这同一次
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { status: 500, text: async () => "{}" };
+      }
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota_per_unit: ownQuotaPerUnit, version: "v" } }) };
+    }
+    return prev(input, init);
+  });
+  const channelReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat").length;
+  const round = async (ms = 60000) => { now += ms; const before = channelReads(); await f.module.refreshDue(now); return channelReads() - before; };
+  const today = async () => (await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" })).results;
+  const amounts = async () => (await today()).map((row) => row.downstream.amountUsd);
+
+  assert.equal(await round(0), 6, "第一轮：今天 3 个渠道、结昨天 3 个");
+  assert.equal(await round(), 0, "没有新消费：沿用");
+  assert.deepEqual(await amounts(), [2.5, 2.5, 2.5]);
+
+  // 额度换算改了：不拿旧的换算算钱，照旧现读
+  ownQuotaPerUnit = 200;
+  assert.equal(await round(), 3);
+  assert.deepEqual(await amounts(), [1.25, 1.25, 1.25]);
+  assert.equal(await round(), 0, "按新换算记下以后接着沿用");
+
+  // 有新消费、渠道读失败，接着进入安静期：失败那轮没记下，安静期里不能沿用更早的那份
+  newLog(); failChannelStat = true;
+  await round();
+  failChannelStat = false;
+  assert.equal(await round(), 3, "读失败之后的安静期照旧现读");
+  assert.equal(await round(), 0);
+
+  // 换了自营站点的凭据：照旧现读
+  f.stations.find((station) => station.id === "own").accessToken = "admin-2";
+  assert.equal(await round(), 3);
+  assert.equal(await round(), 0);
+
+  // 同一轮共用的 /api/status 那一次失败了：等着它的绑定自己再读一次，不跟着一起失败
+  newLog(); failStatusOnce = true;
+  await round();
+  const failed = (await today()).filter((row) => row.downstream.amountUsd == null);
+  assert.ok(failed.length <= 1, "最多发起那一条失败");
+  await round();
+
+  // 分段终点往前改到上一次读到的时刻之前：同一个起点的那份不能沿用（只有按分段取数的旧口径会切成几段）
+  f.rows.find((row) => row.id === "rr_live").billing_policy = "legacy-v3";
+  await round();
+  assert.equal(await round(), 0, "旧口径一段时照样沿用");
+  const segments = f.repository.tables.segments.filter((segment) => segment.rule_id === "rr_live");
+  const cut = now - 30 * 60000;
+  segments[0].effective_to_ms = cut;
+  f.repository.tables.segments.push({ ...segments[0], id: "s1-late", effective_from_ms: cut, effective_to_ms: null, detected_at_ms: cut });
+  assert.equal(await round(), 2, "rr_live 两段都现读：前一段终点早于上次读到的时刻，不能沿用");
+
+  // 跨零点（上海 10-10 00:00 = 10-09 16:00Z），内容没变：窗口换了一天，照旧现读，「今天」快照照写
+  const writes = () => f.repository.log.snapshotWrites.filter((entry) => entry.source?.window?.preset === "today").length;
+  now = Date.parse("2026-10-09T15:58:30Z");
+  assert.equal(await round(), 1, "零点前一分钟还在沿用（只有 rr_live 已经结束的前一段照旧现读）");
+  const before = writes();
+  assert.ok(await round() >= 3, "新的一天照旧现读");
+  assert.ok(writes() - before >= 3, "新的一天的快照照写");
+
+  // 清缓存（自营站点的身份或渠道目录变了）以后不沿用
+  assert.equal(await round(), 0);
+  f.module.invalidateSources();
+  assert.equal(await round(), 3, "清缓存以后照旧现读");
+
+  // 快照指纹一条绑定只留一份；停用的绑定下一轮清掉
+  const fingerprints = () => [...f.rt._reconciliationObservationWrites.keys()].map((key) => key.slice(0, key.indexOf(":")));
+  assert.deepEqual(fingerprints().sort(), ["rr_live", "rr_three", "rr_two"]);
+  f.rows.find((row) => row.id === "rr_three").enabled = 0;
+  await round();
+  assert.deepEqual(fingerprints().sort(), ["rr_live", "rr_two"]);
 });
 
 test("B1 结果缓存按请求比：「今天」过了半分钟再单独重读一条，别的绑定照样用缓存里的账单（截止点不同也是同一段）", async (t) => {

@@ -6,7 +6,7 @@ import {
   queryKeyReconciliationStat,
   queryOwnChannelRevenue,
   queryOwnChannels,
-  queryOwnSiteQuota,
+  queryOwnLatestLog,
   queryAccountIdentity,
   unixSecondWindow,
 } from "../lib/providers.js";
@@ -106,6 +106,9 @@ const STALE_SCOPE = Symbol("STALE_SCOPE");
 const MAX_SCOPE_ATTEMPTS = 3;
 // 轮询里没变的东西多久才重写一次：渠道状态的观测时刻、「今天」观测快照（计划 P1a）
 const UNCHANGED_REWRITE_MS = 10 * 60000;
+// 判断自营站点有没有新的消费：从上一次读到的最新一条日志往前留 120 秒查起（晚写进去不超过这么久的也查得到）；还没读到过的往前 2 小时
+const OWN_LOG_LOOKBACK_SEC = 120;
+const OWN_LOG_FIRST_LOOKBACK_SEC = 2 * 3600;
 
 function finite(value, fallback = null) {
   const number = Number(value);
@@ -612,19 +615,24 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       ownStatus: new Map(), ownQuietFrom: new Map() };
   }
 
-  // 自营站点的 /api/status（quotaPerUnit）同一个 registry 里只读一次，各绑定共用；读失败不留，下一条绑定再读
+  // 自营站点的 /api/status（quotaPerUnit）同一个 registry 里只读一次，各绑定共用；读失败不留。
+  // 等着别的绑定发起的那一次、而那一次失败了的，自己再读一次（同时等着的几条共用这一次），不跟着一起失败
   function ownStatusFor(registry, own) {
     const key = `${own.id}:${credentialFingerprint(own)}`;
-    if (!registry.ownStatus.has(key)) {
+    const load = () => {
       const pending = queryNewApiStatus(own);
       registry.ownStatus.set(key, pending);
       pending.catch(() => { if (registry.ownStatus.get(key) === pending) registry.ownStatus.delete(key); });
-    }
-    return registry.ownStatus.get(key);
+      return pending;
+    };
+    const shared = registry.ownStatus.get(key);
+    return shared ? shared.catch(() => registry.ownStatus.get(key) || load()) : load();
   }
 
-  // 每轮轮询开始时，每个自营站点问一次「上一轮查过以后，全站有没有新的消费」（/api/log/stat 不带渠道，秒级、两端都含）。
-  // 没有：从 quietFrom 起一直没有新的消费，今天的渠道收费读到 quietFrom 以后的，这一轮直接沿用（见 ownRevenue）。
+  // 每轮轮询开始时，每个自营站点读一次最新的那条消费日志（编号、站点自己记的时刻），和上一轮读到的比。
+  // 编号没变：上一轮以后没有新的消费日志，今天的渠道收费读到 quietFrom 以后的，这一轮直接沿用（见 ownRevenue）。
+  // 用日志自己的编号和时刻，不用控制台的钟：站点时钟偏慢、日志晚写进去，编号都会变（审核第一轮，总指挥 10-25 定）。
+  // 查的范围从上一次读到的最新一条（站点的时刻）往前 120 秒起；还没读到过日志的，从第一次查的时候往前 2 小时起，之后不挪。
   // 有新的消费、读失败、换了凭据、第一轮：这一轮照旧逐个渠道读。
   async function markQuietOwnStations(rules, registry, now = Date.now()) {
     const ownIds = [...new Set(rules.map((rule) => rule.ownStationId))];
@@ -632,30 +640,37 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const own = upstreamStation(id);
       if (!own?.isOwn || own.type !== "newapi") return;
       const credential = credentialFingerprint(own), previous = ownActivity.get(id);
-      let quietFrom = null;
-      if (previous?.credential === credential) {
-        try {
-          const quota = await queryOwnSiteQuota(own, { startSec: Math.floor(previous.checkedAt / 1000), endSec: Math.floor(now / 1000) });
-          if (quota === 0) quietFrom = previous.quietFrom ?? previous.checkedAt;
-        } catch { quietFrom = null; }
-      }
-      ownActivity.set(id, { credential, checkedAt: now, quietFrom });
-      if (quietFrom != null) registry.ownQuietFrom.set(id, quietFrom);
+      // 换了凭据就不算安静，和 ownRevenue 键里的凭据指纹互为备份
+      const known = previous?.credential === credential && previous.read ? previous : null;
+      const sinceSec = known ? (known.latest ? known.latest.createdAtSec - OWN_LOG_LOOKBACK_SEC : known.sinceSec) : Math.floor(now / 1000) - OWN_LOG_FIRST_LOOKBACK_SEC;
+      let latest = null, read = false;
+      try { latest = await queryOwnLatestLog(own, { sinceSec }); read = true; } catch { read = false; }
+      const unchanged = read && known && (latest?.id ?? null) === (known.latest?.id ?? null);
+      const quietFrom = unchanged ? known.quietFrom ?? known.checkedAt : null;
+      ownActivity.set(id, { credential, checkedAt: now, read, latest, sinceSec, quietFrom });
+      // coveredFromMs：读到的窗口终点要到这一刻，才包住最新那条日志所在的那一秒（渠道收费按秒、终点那一秒不含，见 unixSecondWindow）
+      if (quietFrom != null) registry.ownQuietFrom.set(id, { from: quietFrom, coveredFromMs: latest ? (latest.createdAtSec + 1) * 1000 : null });
     }));
   }
 
-  // 一段窗口的渠道收费。读全了就记下（读到哪一刻为止）；reuse 时（只有轮询观测今天）如果记下的那份读到的时刻
+  // 一段窗口的渠道收费。reuse 时（只有轮询观测今天）读全了就记下（读到哪一刻为止）；记下的那份读到的时刻
   // 不早于这个自营站点没有新消费的起点，就沿用它，窗口终点换成这次的——这段时间里没有新的消费日志，每个渠道的合计都不会变。
+  // 沿用前照样读一次 /api/status（同一轮共用）：额度换算变了、或者读不到，就照旧逐个读，不拿旧的换算算钱。
   // 这一轮里「查过全站以后、轮到这条绑定之前」那几秒的新消费，下一轮查全站时会发现，再照旧逐个读。
   async function ownRevenue(own, rule, segmentWindow, { loadStatus, registry, reuse }) {
     const channelIds = rule.channels.map((channel) => channel.channelId);
+    // 键里带凭据指纹，和 markQuietOwnStations 里「换了凭据就不算安静」互为备份：换了自营站点的凭据，任一道都能挡住沿用旧的
     const key = JSON.stringify([own.id, credentialFingerprint(own), [...channelIds].sort((a, b) => a - b), segmentWindow.startMs, segmentWindow.timezone]);
-    const cached = ownRevenueCache.get(key), quietFrom = registry?.ownQuietFrom?.get(own.id);
-    if (reuse && cached && quietFrom != null && cached.endMs >= quietFrom && cached.endMs <= segmentWindow.endMs) {
-      return { ...cached.result, window: { ...cached.result.window, endMs: segmentWindow.endMs } };
+    const cached = ownRevenueCache.get(key), quiet = registry?.ownQuietFrom?.get(own.id);
+    // 最新那条日志的时刻（站点的钟）也要在记下的那份里：站点时钟偏快时，记下那份读到的时刻还没包住它，照旧现读
+    if (reuse && cached && quiet && cached.endMs >= quiet.from && cached.endMs <= segmentWindow.endMs
+      && (quiet.coveredFromMs == null || quiet.coveredFromMs <= cached.endMs)) {
+      const status = await loadStatus().catch(() => null);
+      if (status && status.quotaPerUnit === cached.result.quotaPerUnit) return { ...cached.result, window: { ...cached.result.window, endMs: segmentWindow.endMs } };
     }
     const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus });
-    if (result.state === "complete" && !result.emptySecondWindow) {
+    // 只有轮询观测今天会沿用，别的窗口（昨天、结账、自定义、近 7 天、本月）不记
+    if (reuse && result.state === "complete" && !result.emptySecondWindow) {
       ownRevenueCache.set(key, { endMs: segmentWindow.endMs, result });
       // 只留今天的：键里有窗口起点，过了零点的旧键不会再用到
       for (const [cachedKey, entry] of ownRevenueCache) if (entry.endMs < segmentWindow.endMs - 2 * DAY_MS) ownRevenueCache.delete(cachedKey);
@@ -1771,11 +1786,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const unchangedObservation = observationOnly && observationWrites.get(observationKey)?.fingerprint === observationFingerprint
       && Date.now() - observationWrites.get(observationKey).at < UNCHANGED_REWRITE_MS;
     const save = async () => {
-      if (unchangedObservation) return true;
+      // 没变不写，但守卫照样过一遍（口径、凭据代次没变才算写过）
+      if (unchangedObservation) return guard();
       const saved = await repository.saveSnapshotsForScope(rule.id, scopeFingerprint, rows, { expectedOwnerState: billingSource?.expectedOwnerState, guard, ledger: ledgerOption });
       if (saved === true && observationOnly) {
+        // 一条绑定只留最新的一份（口径、凭据变了以后旧键不会再用到）；已删除、停用的绑定在 refreshDue 里清
+        for (const key of observationWrites.keys()) if (key.startsWith(`${rule.id}:`) && key !== observationKey) observationWrites.delete(key);
         observationWrites.set(observationKey, { fingerprint: observationFingerprint, at: Date.now() });
-        while (observationWrites.size > MAX_RESULT_CACHE_ENTRIES) observationWrites.delete(observationWrites.keys().next().value);
       }
       return saved;
     };
@@ -2132,6 +2149,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const startedAt = Date.now();
       const allRules = await repository.listRules();
       const rules = allRules.filter((rule) => rule.enabled);
+      // 停用、删除了的绑定不会再写「今天」快照，它们的指纹不留
+      const live = new Set(rules.map((rule) => rule.id));
+      for (const key of observationWrites.keys()) if (!live.has(key.slice(0, key.indexOf(":")))) observationWrites.delete(key);
       const ownerRegistry = await ownerRegistryFor(allRules, rules, { observe: true });
       await markQuietOwnStations(rules, ownerRegistry);
       for (const [key, entry] of settlements) if (entry.endMs < now - 3 * DAY_MS) settlements.delete(key);
@@ -2160,6 +2180,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     invalidateSources() {
       metadataCache.clear();
       identityCache.clear();
+      // P1a 的两张表也清：渠道收费的沿用和「今天」快照的跳写都要从现读重新开始
+      ownRevenueCache.clear();
+      observationWrites.clear();
       clearBillingResults();
     },
     // 接入向导核验 Sub2API Key 时共用同一份能力存储：确认保存时按同一身份读到预览时的核验结果。
