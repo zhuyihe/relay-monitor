@@ -124,6 +124,12 @@ export function aliasesAfterUndo(current, detail) {
   return current.filter((alias) => !detail.costAliasesAdded.includes(alias));
 }
 
+// 一共合过几次（含已退回的）：上游列表「⋯」里有没有「合并记录」那一项只看这个
+export async function countMerges(executor) {
+  const [[row]] = await executor.query("SELECT COUNT(DISTINCT merge_id) AS n FROM upstream_merge_log");
+  return Number(row.n);
+}
+
 // 一次合并要改回的事，每条一句话（先列出来给人看）
 export function describeUndo(merge) {
   const lines = [`合并 ${merge.mergeId}：把 ${merge.mergedIds.join("、")} 并进了 ${merge.retainedId}`];

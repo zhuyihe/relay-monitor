@@ -215,4 +215,4 @@ export type AccountAuthorizationProbe = {
 export type AccountAuthorizationResult = { requestId: string; accountKey: string; complete: boolean; targets: { stationId: string; status: "updated" | "already_updated" | "failed" | "repreview_required"; savedAuthVersion: number | null; code?: string; exclusionCode?: string; reason?: string; remainingActions: string[] }[]; excluded: { stationId: string; code?: string; reason: string }[]; impact: AccountAuthorizationImpact; retryInput: AccountAuthorizationRecoveryIntent };
 
 // GET /api/stations：上游列表。generatedAt 是服务端此刻，上游列表拿它判断「数据旧了」（design/ui-design-spec.md §5.2）
-export type StationListResponse = { stations: any[]; settings: Record<string, any>; tz?: string; generatedAt?: string };
+export type StationListResponse = { stations: any[]; settings: Record<string, any>; tz?: string; generatedAt?: string; merge?: { mergeable: number; blocked: number; accounts: number; upstreams: number; records?: number } | null };

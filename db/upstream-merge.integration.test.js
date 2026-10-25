@@ -8,6 +8,7 @@ import { applyUpstreamMerge, listMergeRecords, planNow, previewUpstreamMerges, u
 import { undoMerges } from "./k-unmerge.js";
 import { listMerges } from "./upstream-merge-repository.js";
 import { ReconciliationRepository } from "../server/reconciliation-repository.js";
+import { businessTimeZone, dayKeyInTz, shiftDayLabel } from "../lib/business-time.js";
 
 // Opt-in only: this fixture drops and recreates tables in one disposable local schema (same guard as schema.integration.test.js,
 // except the name may carry a suffix, e.g. relay_monitor_test_k1a, so a local run does not share tables with another test schema).
@@ -60,7 +61,7 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
     await store._changeStation(station.id, (s) => { s.createdAt = CREATED[name]; });
     ids[name] = station.id;
   }
-  await store._changeStation(ids.b, (s) => { s.costAliases = ["http://internal-b"]; });
+  await store._changeStation(ids.b, (s) => { s.costAliases = ["http://internal-b"]; s.cnyPerUsd = 7; });
   await store._changeStation(ids.a, (s) => { s.costAliases = ["http://internal-a"]; });
   const rt = { pool, store };
 
@@ -92,7 +93,7 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
 
   await t.test("清单：一组（a 留下，b、c 并进去），d 是另一个账号不动；只读，什么都不改", async () => {
     const { groups, counts, records } = await previewUpstreamMerges(rt, { estimate: false });
-    assert.deepEqual(counts, { mergeable: 1, blocked: 0 });
+    assert.deepEqual(counts, { mergeable: 1, blocked: 0, accounts: 1, upstreams: 3 });
     assert.deepEqual(records, []);
     assert.equal(groups.length, 1);
     assert.equal(groups[0].retained.id, ids.a);
@@ -103,6 +104,29 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
     assert.deepEqual(groups[0].costAliasesAfter, ["http://internal-a", "http://internal-b"]);
     assert.equal(groups[0].canMerge, true);
     assert.deepEqual(await dumpAll(pool), before);
+  });
+
+  await t.test("合并前后的成本估算：读成本估算页同一份每日消耗，每个上游按自己的汇率，合并后只算留下的", async () => {
+    const today = dayKeyInTz(Date.now(), businessTimeZone());
+    const earlier = shiftDayLabel(today, -10);
+    for (const [date, usd] of [[today, 10], [earlier, 100]]) {
+      for (const id of [ids.a, ids.b, ids.c, ids.d]) await pool.query("INSERT INTO station_daily_usage (station_id, date, used_usd) VALUES (?, ?, ?)", [id, date, usd]);
+    }
+    try {
+      const { groups } = await previewUpstreamMerges(rt);
+      const [week, month] = groups[0].estimate.windows;
+      assert.equal(groups[0].estimate.rateConfigured, false);
+      assert.deepEqual([week.days, week.before.cny, week.after.cny], [7, 10 * 1 + 10 * 7 + 10 * 1, 10]);
+      assert.deepEqual([month.days, month.before.cny, month.after.cny], [30, 110 + 770 + 110, 110]);
+      assert.deepEqual(month.before.upstreams.map((u) => [u.stationId, u.cny]), [[ids.a, 110], [ids.b, 770], [ids.c, 110]]);
+      assert.deepEqual(month.after.upstreams.map((u) => u.stationId), [ids.a]);
+      // 读不到每日消耗时估算是 null，清单本身照出
+      const broken = await previewUpstreamMerges({ ...rt, pool: { query: async (sql, params) => { if (/station_daily_usage/.test(sql)) throw new Error("boom"); return pool.query(sql, params); } } });
+      assert.equal(broken.groups[0].estimate, null);
+      assert.equal(broken.groups.length, 1);
+    } finally {
+      await pool.query("DELETE FROM station_daily_usage");
+    }
   });
 
   await t.test("没有成功的合并时，库里没有合并日志", async () => {
@@ -149,8 +173,8 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
       // 这时再点合并，清单本身就会把这一组挡住（同一把 Key 撞上了），并且写清是哪把 Key、在哪两个上游下（这里是 d 的绑定占着 a:5，所以是 d 和 b）
       await assert.rejects(applyUpstreamMerge(rt, { retainedId: ids.a, mergedIds: [ids.b, ids.c] }), { code: "UPSTREAM_MERGE_BLOCKED" });
       const blocked = await previewUpstreamMerges(rt, { estimate: false });
-      assert.deepEqual(blocked.counts, { mergeable: 0, blocked: 1 });
-      assert.deepEqual(blocked.groups[0].blockers, [{ code: "RULE_KEY_CONFLICT", detail: "Key #5 已经有一条绑定在用", tokenId: 5, tokenName: "Key 5", stationIds: [ids.d, ids.b].sort() }]);
+      assert.deepEqual(blocked.counts, { mergeable: 0, blocked: 1, accounts: 1, upstreams: 3 });
+      assert.deepEqual(blocked.groups[0].blockers, [{ code: "RULE_KEY_CONFLICT", detail: "Key #5 已经有一条绑定在用", tokenId: 5, tokenName: "Key 5", ruleId: "r_b", stationIds: [ids.d, ids.b].sort() }]);
     } finally {
       await pool.query("UPDATE reconciliation_rules SET active_token_key = ?, updated_at = updated_at WHERE id = 'r_d'", [`${ids.d}:9`]);
     }

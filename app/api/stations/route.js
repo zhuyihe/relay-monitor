@@ -4,6 +4,7 @@ import { businessTimeZone } from "../../../lib/business-time.js";
 import { STATION_TYPES } from "../../../lib/providers.js";
 import { redact } from "../../../server/stations.js";
 import { refreshStation } from "../../../server/refresh.js";
+import { cachedMergeCounts } from "../../../server/upstream-merge.js";
 
 export const GET = withAuth(async (request, rt) => {
   const search = new URL(request.url).searchParams;
@@ -12,6 +13,8 @@ export const GET = withAuth(async (request, rt) => {
   return json({
     stations: rt.store.list({ includeArchived, includeUnmonitored }).map((s) => redact(rt, s)),
     settings: rt.store.settings,
+    // 有几组上游是同一个账号、能不能合：上游列表顶上的提示用（读不到是 null）
+    merge: await cachedMergeCounts(rt),
     // 业务时区：页面上的「数据截至」和固定成本的到期日按它写（design/ui-copy-spec.md §6）
     tz: businessTimeZone(),
     // 服务端此刻：上游列表拿它和每个上游的读取时刻比，判断「数据旧了」（ui-design-spec §5.2），不用浏览器的时钟
