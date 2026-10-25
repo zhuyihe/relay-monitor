@@ -346,6 +346,12 @@ function toErrorHealth(err, own = false) {
   return health(issue, issueText(issue));
 }
 
+// 轮询沿用了不久前的身份（这一轮没现读）时上游拒绝：可能是账号换了，不能马上说「上游拒绝读取这把 Key」并推送。
+// 这一轮先当成还在读取，上游已记进 staleMetadata，下一轮全部重读身份以后再定
+function upstreamErrorHealth(err, resource) {
+  return String(err?.code || "") === "UPSTREAM_AUTH_DENIED" && resource?.identityReused ? health("PENDING", issueText("PENDING")) : toErrorHealth(err);
+}
+
 const CALCULATION_BLOCKERS = new Set([
   "KEY_INVALID_OR_DENIED",
   "UPSTREAM_DATA_UNAVAILABLE",
@@ -558,18 +564,24 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   };
 
   // 凭据指纹必须在发请求前取：请求读的是发起时的凭据，等待期间站点可能已被原地改写。
-  // 分组和 Key 目录 5 分钟内用缓存；过了重读。reuseIdentity（轮询）时，身份和 /api/status 30 分钟内沿用上次读到的，只读分组和 Key 目录
-  async function metadataFor(station, { force = false, timezone = "Asia/Shanghai", reuseIdentity = false } = {}) {
+  // 分组和 Key 目录 5 分钟内用缓存；过了重读。reuseIdentity（轮询）时，身份和 /api/status 不满 30 分钟沿用上次读到的，只读分组和 Key 目录；
+  // 满 30 分钟就全部重读，不等目录到期。readMetadata 另外告诉调用方这次用的身份是不是沿用的（identityReused）
+  async function readMetadata(station, { force = false, timezone = "Asia/Shanghai", reuseIdentity = false } = {}) {
     const credential = credentialFingerprint(station);
     const zone = canonicalTimeZone(timezone), cacheKey = `${station.id}:${zone}`;
     const cached = metadataCache.get(cacheKey), now = Date.now();
     const same = cached?.credential === credential;
-    if (!force && same && now - cached.at < CATALOGUE_TTL_MS) return cached.value;
-    const known = !force && reuseIdentity && same && now - cached.identityAt < IDENTITY_TTL_MS ? { accountId: cached.value.accountId,
+    const identityCurrent = same && now - cached.identityAt < IDENTITY_TTL_MS;
+    if (!force && same && now - cached.at < CATALOGUE_TTL_MS && (!reuseIdentity || identityCurrent)) return { value: cached.value, identityReused: true };
+    const known = !force && reuseIdentity && identityCurrent ? { accountId: cached.value.accountId,
       status: cached.value.platform === "newapi" ? { quotaPerUnit: cached.value.quotaPerUnit, version: cached.value.version } : null } : null;
     const value = await queryReconciliationMetadata({ ...station }, { timezone: zone, capabilityStore: billingCapabilityStore, known });
     metadataCache.set(cacheKey, { at: now, identityAt: known ? cached.identityAt : now, credential, value });
-    return value;
+    return { value, identityReused: !!known };
+  }
+
+  async function metadataFor(station, options) {
+    return (await readMetadata(station, options)).value;
   }
 
   async function identityFor(station, { force = false, maxAgeMs = CATALOGUE_TTL_MS } = {}) {
@@ -582,7 +594,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   // 页面「刷新」（观测）强制重读 Key 目录和账号身份；只读查询用 5 分钟缓存。
-  // 轮询（poll）按时间重读：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟；出了异常的上游（staleMetadata）这一轮强制重读。
+  // 轮询（poll）按时间重读：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟（自营站点的身份也是 30 分钟）；
+  // 记在 staleMetadata 里的上游这一轮强制全部重读：出了异常的、这一轮要结账的（refreshDue 放进来），读成功才清掉记号。
   async function ownerRegistryFor(rules, selected, { observe = true, poll = false } = {}) {
     const billingSource = { ...billingSourceState(), expectedOwnerState: reconciliationOwnerRuleState(rules) };
     const selectedIds = new Set(selected.map((rule) => rule.id));
@@ -592,17 +605,24 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const configured = upstreamStation(id);
       const station = configured && { ...configured };
       const resourceVersion = stationBusinessVersion(station);
+      let reused = false;
       try {
         if (!station) throw codedError("COST_OWNER_UNVERIFIED", issueText("COST_OWNER_UNVERIFIED"));
         const timezone = selected.find((rule) => rule.upstreamStationId === id)?.timezone
           || participants.find((rule) => rule.upstreamStationId === id)?.timezone || "Asia/Shanghai";
         const force = observe && (!poll || staleMetadata.has(id));
-        const metadata = billingStation(station) ? await metadataFor(station, { force, timezone, reuseIdentity: poll }) : null;
+        reused = poll && !force;
+        const read = billingStation(station) ? await readMetadata(station, { force, timezone, reuseIdentity: poll }) : null;
+        const metadata = read?.value ?? null;
         const identity = metadata ? { provider: metadata.platform, baseUrl: onboardingBaseUrl(station.baseUrl), accountId: String(metadata.accountId ?? metadata.userId) }
           : await identityFor(station, { force, maxAgeMs: poll ? IDENTITY_TTL_MS : CATALOGUE_TTL_MS });
         if (force) staleMetadata.delete(id);
-        return [id, Object.freeze({ station, resourceVersion, metadata, identity: Object.freeze(identity), error: null })];
-      } catch (error) { return [id, Object.freeze({ station, resourceVersion, metadata: null, identity: null, error })]; }
+        return [id, Object.freeze({ station, resourceVersion, metadata, identity: Object.freeze(identity), identityReused: poll && !!read?.identityReused, error: null })];
+      } catch (error) {
+        // 轮询拿沿用的身份读失败（比如账号换了、目录归属对不上）：下一轮全部重读，不要每轮拿旧身份再失败
+        if (reused) staleMetadata.add(id);
+        return [id, Object.freeze({ station, resourceVersion, metadata: null, identity: null, identityReused: reused, error })];
+      }
     }));
     billingSource.ownerVersion = createHash("sha256").update(JSON.stringify([billingSource.version, billingSource.expectedOwnerState,
       stationIds.map((id) => {
@@ -1281,7 +1301,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const salesIdentity = ownerRegistry.resources.get(rule.ownStationId)?.identity;
       if (ownAvailable && salesIdentity) ownSource = ownSourceFor(own, salesIdentity);
       if (!identity) {
-        const problem = metadataError ? toErrorHealth(metadataError) : health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"));
+        const problem = metadataError ? upstreamErrorHealth(metadataError, upstreamResource) : health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"));
         if (!upstreamOptional) return unavailable(problem, {}, false);
         upstreamProblem ||= problem;
       }
@@ -1316,8 +1336,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         request.sourceCredential = sourceCredential;
       }
 
-      if (metadataError && (identityIssue || !upstreamOptional)) return unavailable(identityIssue || toErrorHealth(metadataError), {}, !identityIssue);
-      if (metadataError) upstreamProblem ||= toErrorHealth(metadataError);
+      if (metadataError && (identityIssue || !upstreamOptional)) return unavailable(identityIssue || upstreamErrorHealth(metadataError, upstreamResource), {}, !identityIssue);
+      if (metadataError) upstreamProblem ||= upstreamErrorHealth(metadataError, upstreamResource);
       const token = metadata?.tokens.find((item) => item.id === rule.tokenId);
       // 上游一侧读不到（只有固定成本、锚定过的会走到这里）：读到的目录和 Key 不当证据、也不拿来显示，也不拿它去读上游用量——上游账号可能已经换了人，
       // id 相同的 Key 是别人的。Key 名用绑定上存的；面板类型按绑定存的，旧绑定没存就按上游站点的类型
@@ -1445,7 +1465,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           segmentIssues.push(commonBillingTimezone(segmentWindow, downstreamSide).state !== "verified" ? issue : upstreamSide(issue));
         }
         if (upstreamResult.error && !upstreamResult.skipped) {
-          segmentIssues.push(upstreamSide({ code: toErrorHealth(upstreamResult.error).code, scope: "segment", detail: toErrorHealth(upstreamResult.error).detail, observedAt: Date.now() }));
+          const billHealth = upstreamErrorHealth(upstreamResult.error, upstreamResource);
+          segmentIssues.push(upstreamSide({ code: billHealth.code, scope: "segment", detail: billHealth.detail, observedAt: Date.now() }));
           // Key 账单报错：可能换了 Key 或身份变了，下一轮全部重读（P1b 的异常之一）
           staleMetadata.add(rule.upstreamStationId);
         }
@@ -2186,6 +2207,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 停用、删除了的绑定不会再写「今天」快照，它们的指纹不留
       const live = new Set(rules.map((rule) => rule.id));
       for (const key of observationWrites.keys()) if (!live.has(key.slice(0, key.indexOf(":")))) observationWrites.delete(key);
+      // 这一轮要结账的上游先全部重读一遍：写进账本的数一固定就不再变，quota_per_unit 这些不能用 30 分钟前的旧值
+      for (const rule of rules) if (settlementWindowDue(rule, now)) staleMetadata.add(rule.upstreamStationId);
       const ownerRegistry = await ownerRegistryFor(allRules, rules, { observe: true, poll: true });
       await markQuietOwnStations(rules, ownerRegistry);
       for (const [key, entry] of settlements) if (entry.endMs < now - 3 * DAY_MS) settlements.delete(key);

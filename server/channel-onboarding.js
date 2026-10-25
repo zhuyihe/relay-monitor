@@ -762,6 +762,12 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     };
   }
 
+  function catalogueContent(value) {
+    if (!value) return null;
+    const { syncedAt, ...content } = value;
+    return JSON.stringify(content);
+  }
+
   async function sync() {
     if (rt._channelOnboardingSync) return rt._channelOnboardingSync;
     const pending = (async () => {
@@ -784,11 +790,16 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
             totalValidated: channels.totalValidated === true, catalogueTotal: channels.catalogueTotal ?? null,
             channels: [...nextChannels, ...previous.filter((channel) => !ids.has(channel.id))
               .map((channel) => channels.totalValidated === true ? { ...channel, missing: true } : channel)] };
+          // 自营站点的身份和渠道目录真的变了，才清核算的上游缓存和结果缓存（P1b）：5 分钟一次的同步每次都清，
+          // 上游身份「30 分钟重读」就走不到了。只比内容，不比同步时刻
+          const changed = catalogueContent(catalogue) !== catalogueContent(value);
           await repository.saveCatalogue(value);
           catalogue = value;
           syncError = null; syncErrorCode = null;
-          rt._reconciliationResultCache?.clear();
-          rt.reconciliation?.invalidateSources?.();
+          if (changed) {
+            rt._reconciliationResultCache?.clear();
+            rt.reconciliation?.invalidateSources?.();
+          }
           delete rt._ownChannelsCache;
         }));
       } catch (error) { syncError = failure(error, [connection]); syncErrorCode = failureCode(error, [connection], "SYNC_FAILED"); }
