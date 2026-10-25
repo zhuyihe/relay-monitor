@@ -108,6 +108,11 @@ const COPY = Object.freeze({
   staleTip: "后面几次刷新都没读到这个上游的新数据",
   // 一个上游有几件事（ui-copy-spec §5.2）：状态格「需处理 · 还有 1 个问题」，「⋯」里「按钮名：标题」
   moreTodos: (label: string, n: number) => `${label} · 还有 ${n} 个问题`,
+  // 「还没确认这把 Key 属于哪个上游账号」放在上游这一行时，「这把 Key」说清是哪些渠道的（ui-copy-spec §5.2）；K 做完这条提示就没了
+  ownerNames: (names: string[]) => `渠道${names.map((n) => `「${n}」`).join("")}用的 Key 还没确认属于哪个上游账号`,
+  ownerMany: (first: string, n: number) => `渠道「${first}」等 ${n} 个渠道用的 Key 还没确认属于哪个上游账号`,
+  ownerCount: (n: number) => `这个上游下 ${n} 个渠道用的 Key 还没确认属于哪个上游账号`,
+  ownerNone: "这个上游的 Key 还没确认属于哪个上游账号",
   todoItem: (label: string, title: string) => `${label}：${title}`,
   editHint: "点名称打开编辑",
   today: (money: string) => `今天花费 ${money}`,
@@ -478,7 +483,7 @@ export default function StationsPage() {
   const listed = useMemo(() => stations.filter((s) => s.monitorEnabled !== false || s.archivedAt), [stations]);
   const paused = stations.filter((s) => s.monitorEnabled === false && !s.archivedAt);
   // 账号待办由上游账单读到后发布，这里只补读账单待办
-  const { actions: workflowActions } = useWorkflowActions(true, ["bills"]);
+  const { actions: workflowActions, channelNames } = useWorkflowActions(true, ["bills"]);
 
   const { todosById, unowned } = useMemo(() => {
     const live = listed.filter((s) => !s.archivedAt);
@@ -633,18 +638,30 @@ export default function StationsPage() {
     );
   };
 
+  // 一件事在这一行里的标题：「还没确认这把 Key 属于哪个上游账号」要说清是这个上游下哪些渠道的 Key（ui-copy-spec §5.2）
+  const todoTitle = (a: any) => {
+    if (!(a.code === "COST_OWNER_UNVERIFIED" || (!a.code && a.kind === "verify_identity"))) return workflowProblem(a);
+    const ids: number[] = a.channelIds || [];
+    if (!ids.length) return COPY.ownerNone;
+    const names = ids.map((id) => channelNames[String(id)]).filter(Boolean);
+    if (names.length < ids.length) return COPY.ownerCount(ids.length);
+    return names.length <= 2 ? COPY.ownerNames(names) : COPY.ownerMany(names[0], names.length);
+  };
+
   // 状态格只放状态（ui-design-spec §5.2）：上一行档位，或者只有要处理的事时写「需处理」，几件事时加「· 还有 N 个问题」；
-  // 下一行按先后只放一样：正在刷新、数据旧了、那件事的标题（读不到余额的行也写）、状态自己的说明。要处理的事的按钮在行末，不在这里
+  // 有档位又有事时写「余额偏低 · 还有 N 个问题」，N 是事的件数（档位本身不算）。
+  // 下一行按先后只放一样：正在刷新、数据旧了；有档位时是这一档的说明（事的标题不写在这里，免得读起来像在解释档位，标题在行末按钮的悬停和读屏里）；
+  // 没有档位时是那件事的标题；再不然是状态自己的说明。读不到余额的行原因在下面那一行，这里不写。要处理的事的按钮在行末，不在这里
   const statusOf = (v: StationView) => {
     const todos = todosOf(v);
     const todo = todos[0];
-    const base = v.statusLabel || (todo ? ATTENTION : "");
-    const label = base && todos.length > 1 ? COPY.moreTodos(base, todos.length - 1) : base;
-    const level = v.statusLabel ? v.level : todo?.level;
+    const tier = v.statusLabel;
+    const label = tier ? (todos.length ? COPY.moreTodos(tier, todos.length) : tier) : todo ? (todos.length > 1 ? COPY.moreTodos(ATTENTION, todos.length - 1) : ATTENTION) : "";
+    const level = tier ? v.level : todo?.level;
     const stale = staleAt(v);
-    const title = todo ? workflowProblem(todo) : null;
+    const title = todo ? todoTitle(todo) : null;
     const refreshing = !!refreshingIds[v.s.id];
-    const note = refreshing ? COPY.refreshing : stale || title || (v.issue ? null : v.statusNote);
+    const note = refreshing ? COPY.refreshing : stale || (v.issue ? null : tier ? v.statusNote : title || v.statusNote);
     // 小钟和「后面几次刷新都没读到」那句只跟「数据截至」走，正在刷新时不挂
     return { label, level, note, stale: refreshing ? null : stale, title };
   };
@@ -757,7 +774,7 @@ export default function StationsPage() {
     const s = v.s;
     const [lead, ...rest] = todosOf(v);
     const head = [
-      ...rest.map((a: any) => ({ key: `todo:${a.id}`, label: COPY.todoItem(a.label, workflowProblem(a)) })),
+      ...rest.map((a: any) => ({ key: `todo:${a.id}`, label: COPY.todoItem(a.label, todoTitle(a)) })),
       ...(lead || mobile ? [{ key: "edit", label: COPY.edit, icon: <Icon name="edit" /> }] : []),
     ];
     if (v.archived) {
@@ -813,7 +830,13 @@ export default function StationsPage() {
     const todo = todosOf(v)[0];
     if (!todo) return null;
     return (
-      <Button type="text" size="small" aria-label={`${todo.label}（${stationDisplayName(v.s)}）`} onClick={() => openTodo(todo.href)}>
+      <Button
+        type="text"
+        size="small"
+        title={COPY.todoItem(todo.label, todoTitle(todo))}
+        aria-label={`${COPY.todoItem(todo.label, todoTitle(todo))}（${stationDisplayName(v.s)}）`}
+        onClick={() => openTodo(todo.href)}
+      >
         {todo.label}
       </Button>
     );

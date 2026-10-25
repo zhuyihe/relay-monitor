@@ -22,6 +22,8 @@ type WorkflowState = {
   // 上次读成功的时间，读取失败时用来写「刷新失败，数据截至 14:30」
   okAt: Record<Source, number>;
   loading: boolean;
+  // 渠道 id → 名字：从两路本来就读到的数据里顺手记下，事项只带渠道 id，上游列表要说「渠道「X」用的 Key…」时用（不多发请求）
+  channelNames: Record<string, string>;
 };
 
 const INITIAL: WorkflowState = {
@@ -31,6 +33,7 @@ const INITIAL: WorkflowState = {
   at: { accounts: 0, bills: 0 },
   okAt: { accounts: 0, bills: 0 },
   loading: false,
+  channelNames: {},
 };
 let state = INITIAL;
 const inflight: Partial<Record<Source, Promise<void>>> = {};
@@ -48,12 +51,14 @@ function loadSource(source: Source, force: boolean): Promise<void> {
   update({ loading: true });
   const run = (async () => {
     let actions: WorkflowAction[] | null = null;
+    let names: Record<string, string> = {};
     try {
       const r = await api(READS[source]);
       actions = r?.actions || [];
+      names = channelNamesOf(r);
     } catch {}
     update({
-      ...(actions ? { [source]: actions } : {}),
+      ...(actions ? { [source]: actions, channelNames: { ...state.channelNames, ...names } } : {}),
       failed: { ...state.failed, [source]: !actions },
       at: { ...state.at, [source]: Date.now() },
       ...(actions ? { okAt: { ...state.okAt, [source]: Date.now() } } : {}),
@@ -64,6 +69,19 @@ function loadSource(source: Source, force: boolean): Promise<void> {
   });
   inflight[source] = run;
   return run;
+}
+
+// 上游账单（channels）和每日利润（results[].rule.channels）里的渠道名；只记有名字的（没有名字的由用的地方按「N 个渠道」说），
+// 不引 lib/reconciliation-view：这个文件每页都加载（侧栏计数），不为一个名字把那一大块带进每页
+function channelNamesOf(r: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  const add = (c: any) => {
+    const id = c?.channelId ?? c?.id;
+    if (id != null && c?.name) out[String(id)] = String(c.name);
+  };
+  (Array.isArray(r?.channels) ? r.channels : []).forEach(add);
+  (Array.isArray(r?.results) ? r.results : []).forEach((x: any) => (x?.rule?.channels || []).forEach(add));
+  return out;
 }
 
 export function loadWorkflowActions(force = false, sources: readonly Source[] = ALL_SOURCES): Promise<void> {
@@ -100,6 +118,7 @@ export function useWorkflowActions(enabled = true, sources: readonly Source[] = 
     failed: failed.length > 0,
     staleAsOf,
     loading: snapshot.loading,
+    channelNames: snapshot.channelNames,
     reload: () => loadWorkflowActions(true),
   };
 }
