@@ -8,6 +8,7 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { deriveAgentKeys } from "../lib/key-fingerprint.js";
 import { loadConfig } from "./config.js";
+import { runDryRun } from "./dry-run.js";
 import { createReader } from "./reader.js";
 import { PROTOCOL_VERSION, createSnapshotSource } from "./snapshot.js";
 
@@ -16,6 +17,7 @@ const UNAUTHORIZED_WINDOW_MS = 60000;
 const MAX_TRACKED_SOURCES = 10000;
 // 所有来源加起来每分钟最多记这么多行令牌不对的日志：来源可以编（开了 KEY_AGENT_TRUST_PROXY 又没有可信代理时）
 const UNAUTHORIZED_GLOBAL_LOG_LIMIT = 100;
+const SUMMARY_LINE_LIMIT = 100;
 const FLUSH_MIN_INTERVAL_MS = 1000;
 const FAILURE_LOG_REPEAT_MS = 10 * 60000;
 
@@ -30,15 +32,24 @@ export function tokenMatches(header, expectedToken) {
   return timingSafeEqual(same ? got : Buffer.alloc(want.length), want) && same && !!match;
 }
 
-// Accept-Encoding 里有 gzip（或 *）且质量不是 0
+// Accept-Encoding 里有 gzip（或 *）且质量不是 0；写明了 gzip 的以它为准（gzip;q=0, * 是不要 gzip）
 export function acceptsGzip(header) {
+  const quality = {};
   for (const part of String(header ?? "").split(",")) {
     const [name, ...params] = part.trim().toLowerCase().split(";");
     if (name !== "gzip" && name !== "*") continue;
     const q = params.map((p) => /^\s*q\s*=\s*([0-9.]+)\s*$/.exec(p)?.[1]).find((v) => v !== undefined);
-    if (q === undefined || Number(q) > 0) return true;
+    quality[name] = q === undefined ? 1 : Number(q);
   }
-  return false;
+  return (quality.gzip ?? quality["*"] ?? 0) > 0;
+}
+
+// 日志里的「来源」：X-Forwarded-For 末段是代理加的，但开了 TRUST_PROXY 而代理没清外面传进来的头时它可以是任何东西：
+// 只认长度不超过 45、只含十六进制数字、冒号、点的合法 IP（带 zone id 的 IPv6 不认），否则用连进来的地址
+const MAX_ADDRESS_LENGTH = 45;
+export function forwardedAddress(header) {
+  const last = String(header ?? "").split(",").map((s) => s.trim()).filter(Boolean).at(-1);
+  return last && last.length <= MAX_ADDRESS_LENGTH && /^[0-9A-Fa-f:.]+$/.test(last) && isIP(last) ? last : null;
 }
 
 function etagMatches(header, etag) {
@@ -47,7 +58,8 @@ function etagMatches(header, etag) {
 
 export function createAgentServer({ config, reader, now = Date.now, log = defaultLog }) {
   const { token, fingerprintKey } = deriveAgentKeys(config.secret);
-  const source = createSnapshotSource({ reader, db: reader.kind, fingerprintKeyBytes: fingerprintKey, now });
+  const source = createSnapshotSource({ reader, db: reader.kind, fingerprintKeyBytes: fingerprintKey, now, paused: !!config.paused,
+    onBreaker: (info) => log({ ev: "breaker", ...info }) });
   const failedBySource = new Map();
   let lastFailureLog = { code: null, at: 0 };
 
@@ -58,11 +70,17 @@ export function createAgentServer({ config, reader, now = Date.now, log = defaul
   function flushSuppressed(t, force = false) {
     if (!force && t - lastFlushAt < FLUSH_MIN_INTERVAL_MS) return;
     lastFlushAt = t;
+    // 每个来源一行「又有 N 次」，一次最多 100 行，再多的合成一行
+    let lines = 0, rest = 0;
     for (const [from, entry] of failedBySource) {
       if (!force && t - entry.start < UNAUTHORIZED_WINDOW_MS) continue;
-      if (entry.count > UNAUTHORIZED_LOG_LIMIT) log({ ev: "unauthorized_suppressed", from, count: entry.count - UNAUTHORIZED_LOG_LIMIT });
+      if (entry.count > UNAUTHORIZED_LOG_LIMIT) {
+        if (lines < SUMMARY_LINE_LIMIT) { log({ ev: "unauthorized_suppressed", from, count: entry.count - UNAUTHORIZED_LOG_LIMIT }); lines += 1; }
+        else rest += entry.count - UNAUTHORIZED_LOG_LIMIT;
+      }
       failedBySource.delete(from);
     }
+    if (rest) log({ ev: "unauthorized_suppressed", from: "others", count: rest });
     if (globalWindow.count > UNAUTHORIZED_GLOBAL_LOG_LIMIT && (force || t - globalWindow.start >= UNAUTHORIZED_WINDOW_MS)) {
       log({ ev: "unauthorized_suppressed", from: "*", count: globalWindow.count - UNAUTHORIZED_GLOBAL_LOG_LIMIT });
     }
@@ -70,9 +88,8 @@ export function createAgentServer({ config, reader, now = Date.now, log = defaul
   }
 
   function noteUnauthorized(req) {
-    // X-Forwarded-For 末段是代理加的，但开了 TRUST_PROXY 而代理没清外面传进来的头时它可以是任何东西：不是合法地址就用连进来的地址
-    const forwarded = String(req.headers["x-forwarded-for"] ?? "").split(",").map((s) => s.trim()).filter(Boolean).at(-1);
-    const from = config.trustProxy && forwarded && isIP(forwarded) ? forwarded : req.socket.remoteAddress ?? "unknown";
+    const forwarded = config.trustProxy ? forwardedAddress(req.headers["x-forwarded-for"]) : null;
+    const from = forwarded ?? String(req.socket.remoteAddress ?? "unknown").slice(0, MAX_ADDRESS_LENGTH + 20);
     const t = now();
     flushSuppressed(t);
     if (!globalWindow.start) globalWindow.start = t;
@@ -139,7 +156,7 @@ export function createAgentServer({ config, reader, now = Date.now, log = defaul
   server.requestTimeout = 10000;
   server.headersTimeout = 10000;
   server.keepAliveTimeout = 5000;
-  // 只发半截请求头的连接 10 秒后被收掉（每 5 秒查一次，默认 30 秒查一次），连接数上限放宽些；直接对外时还是建议放在反向代理后面（部署说明）
+  // 只发半截请求头的连接 10 秒时限、每 5 秒查一次（默认 30 秒查一次），实际最多约 15 秒被收掉，连接数上限放宽些；直接对外时还是建议放在反向代理后面（部署说明）
   server.connectionsCheckingInterval = 5000;
   server.maxConnections = 256;
   // 没有新请求进来时，上一分钟被压下的条数也要补记
@@ -159,10 +176,11 @@ async function main() {
     process.exit(1);
   }
   const reader = createReader(config.database, { onEvent: defaultLog });
+  if (process.argv.includes("--dry-run")) process.exit(await runDryRun({ reader, paused: config.paused }));
   const server = createAgentServer({ config, reader });
   // 端口被占用这类起不来的事：说一句、退出，不带别的
   server.on("error", (err) => { process.stderr.write(`[致命] 读取服务起不来：端口 ${config.port} 打不开（${/^[A-Z0-9_]{1,30}$/.test(String(err?.code)) ? err.code : "UNKNOWN"}）\n`); process.exit(1); });
-  server.listen(config.port, config.host, () => defaultLog({ ev: "start", db: reader.kind, port: config.port, tls: !!config.tls }));
+  server.listen(config.port, config.host, () => defaultLog({ ev: "start", db: reader.kind, port: config.port, tls: !!config.tls, paused: !!config.paused }));
   // 停的时候：先不再收新连接、收掉空闲的；还有半截请求的连接最多再等 3 秒就强行关掉，整个最多 10 秒，不让它拖着进程不退出
   const stop = () => {
     server.close(() => reader.close().finally(() => process.exit(0)));

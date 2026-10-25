@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { MIN_SECRET_LENGTH, WEAK_SECRET_TEXT, secretWeakness } from "../lib/key-fingerprint.js";
+import { SECRET_PROBLEM_TEXT, secretWeakness } from "../lib/key-fingerprint.js";
 import { resolveDatabase } from "./dsn.js";
 
 export function configError(message) {
@@ -11,8 +11,7 @@ export function loadConfig(env = process.env) {
   const secret = String(env.RELAY_KEY_AGENT_SECRET ?? "").trim();
   if (!secret) throw configError("没有设置 RELAY_KEY_AGENT_SECRET");
   const weakness = secretWeakness(secret);
-  if (weakness === "SECRET_TOO_SHORT") throw configError(`令牌太短（RELAY_KEY_AGENT_SECRET 至少 ${MIN_SECRET_LENGTH} 个字符）`);
-  if (weakness) throw configError(WEAK_SECRET_TEXT);
+  if (weakness) throw configError(SECRET_PROBLEM_TEXT[weakness]);
   let database;
   try { database = resolveDatabase(env); } catch (e) { throw configError(e.message); }
   const port = env.PORT ? Number(env.PORT) : 8790;
@@ -24,5 +23,7 @@ export function loadConfig(env = process.env) {
     try { tls = { cert: readFileSync(certFile), key: readFileSync(keyFile) }; } catch { throw configError("读不到 TLS_CERT_FILE 或 TLS_KEY_FILE 指向的文件"); }
   }
   return { secret, database, port, host: String(env.HOST ?? "").trim() || "0.0.0.0", tls,
-    trustProxy: /^(1|true|yes)$/i.test(String(env.KEY_AGENT_TRUST_PROXY ?? "").trim()) };
+    trustProxy: /^(1|true|yes)$/i.test(String(env.KEY_AGENT_TRUST_PROXY ?? "").trim()),
+    // 一键停：不读库，/keys 回 503 PAUSED
+    paused: /^(1|true|yes)$/i.test(String(env.KEY_AGENT_PAUSED ?? "").trim()) };
 }

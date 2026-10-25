@@ -9,9 +9,12 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { loadConfig } from "./config.js";
 import { ReadFailure } from "./reader.js";
-import { acceptsGzip, createAgentServer, tokenMatches } from "./server.js";
+import { acceptsGzip, createAgentServer, forwardedAddress, tokenMatches } from "./server.js";
 
 import { ROWS, SECRET, auth, baseConfig, fakeReader, token, withServer } from "./test-support/server-fixture.js";
+
+const FOUR_MIN = 4 * 60_000;
+const FIVE_MIN = 5 * 60_000;
 
 test("令牌比较：对的过，缺头、格式不对、长度不对、不对都不过", () => {
   assert.equal(tokenMatches(`Bearer ${token}`, token), true);
@@ -49,27 +52,45 @@ test("/keys：200 带 ETag 和打码、指纹；If-None-Match 对上回 304；�
     assert.equal(again.status, 304);
     assert.equal(again.body.length, 0);
     assert.equal((await get("/keys", { ...auth, "If-None-Match": `W/${etag}, "other"` })).status, 304);
-    clock.t += 11000;
+    clock.t += FIVE_MIN;
     assert.equal((await get("/keys", { ...auth, "If-None-Match": etag })).status, 304, "只有读库时刻变了，ETag 不变");
     reader.state.rows = [{ ...ROWS[0], key: "sk-ZZZZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c" }];
-    clock.t += 11000;
+    clock.t += FIVE_MIN;
     const changed = await get("/keys", { ...auth, "If-None-Match": etag });
     assert.equal(changed.status, 200);
     assert.notEqual(changed.headers.etag, etag);
   });
 });
 
-test("/keys：读库最多 10 秒一次，同一时刻只有一次读库在进行", async () => {
+test("/keys：读库最多每 4 分钟一次（再多的请求都只读缓存），同一时刻只有一次读库在进行", async () => {
   const reader = fakeReader(ROWS);
   await withServer(reader, {}, async ({ get, clock }) => {
     await Promise.all([get("/keys", auth), get("/keys", auth), get("/keys", auth)]);
     assert.equal(reader.state.reads, 1);
-    clock.t += 9999;
+    for (let i = 0; i < 20; i += 1) { clock.t += 10_000; await get("/keys", auth); }
+    assert.equal(reader.state.reads, 1, "200 秒内问再多次也不读库");
+    clock.t = 1_700_000_000_000 + FOUR_MIN - 1;
     await get("/keys", auth);
     assert.equal(reader.state.reads, 1);
     clock.t += 2;
     await get("/keys", auth);
     assert.equal(reader.state.reads, 2);
+  });
+});
+
+test("KEY_AGENT_PAUSED：一次库都不读，/keys 回 503 PAUSED；令牌错了照样 401", async () => {
+  const reader = fakeReader(ROWS);
+  assert.equal(loadConfig({ RELAY_KEY_AGENT_SECRET: SECRET, KEY_AGENT_PAUSED: "1" }).paused, true);
+  assert.equal(loadConfig({ RELAY_KEY_AGENT_SECRET: SECRET }).paused, false);
+  await withServer(reader, { paused: true }, async ({ get, clock }) => {
+    for (let i = 0; i < 3; i += 1) {
+      const res = await get("/keys", auth);
+      assert.equal(res.status, 503);
+      assert.deepEqual(JSON.parse(res.body), { error: "unavailable", code: "PAUSED" });
+      clock.t += FIVE_MIN;
+    }
+    assert.equal((await get("/keys", {})).status, 401);
+    assert.equal(reader.state.reads, 0);
   });
 });
 
@@ -82,7 +103,7 @@ test("/keys：Accept-Encoding: gzip 回 gzip，内容一样", async () => {
   });
 });
 
-test("读库失败：503 带原因码，不带驱动报错原文；失败也缓存 10 秒；好了以后恢复", async () => {
+test("读库失败：503 带原因码，不带驱动报错原文；失败后断路停 10 分钟，再错翻倍；好了以后恢复", async () => {
   const reader = fakeReader(ROWS);
   reader.state.error = new ReadFailure("DB_DENIED", "ER_ACCESS_DENIED_ERROR");
   await withServer(reader, {}, async ({ get, clock, logs }) => {
@@ -93,13 +114,18 @@ test("读库失败：503 带原因码，不带驱动报错原文；失败也缓�
     assert.equal(reader.state.reads, 1);
     assert.equal(logs.filter((l) => l.ev === "read_failed").length, 1);
     assert.deepEqual(logs.find((l) => l.ev === "read_failed"), { ev: "read_failed", code: "DB_DENIED", driver: "ER_ACCESS_DENIED_ERROR" });
+    clock.t += 10 * 60_000 - 1;
+    await get("/keys", auth);
+    assert.equal(reader.state.reads, 1, "断路没到时间不读");
     reader.state.error = new Error("password=hunter2 host=10.1.2.3");
-    clock.t += 11000;
+    clock.t += 2;
     const unknown = await get("/keys", auth);
     assert.deepEqual(JSON.parse(unknown.body), { error: "unavailable", code: "DB_ERROR" });
     assert.doesNotMatch(JSON.stringify(logs), /hunter2|10\.1\.2\.3/);
     reader.state.error = null;
-    clock.t += 11000;
+    clock.t += 20 * 60_000 - 1;
+    assert.equal((await get("/keys", auth)).status, 503, "第二次错停 20 分钟");
+    clock.t += 2;
     assert.equal((await get("/keys", auth)).status, 200);
   });
 });
@@ -160,6 +186,18 @@ test("401 的来源：开了 KEY_AGENT_TRUST_PROXY 取 X-Forwarded-For 最后一
   });
 });
 
+test("401 的汇总行：每个来源一行，一次最多 100 行，再多的合成一行「others」", async () => {
+  await withServer(fakeReader(ROWS), { trustProxy: true }, async ({ get, logs, clock }) => {
+    // 150 个来源各 12 次（每个来源记前 10 条、压下 2 条）；全局每分钟只记 100 条
+    for (let source = 0; source < 150; source += 1) for (let i = 0; i < 12; i += 1) await get("/keys", { "X-Forwarded-For": `10.1.${Math.floor(source / 200)}.${source % 200}` });
+    clock.t += 61000;
+    await get("/keys", { Authorization: "Bearer bad" });
+    const summaries = logs.filter((l) => l.ev === "unauthorized_suppressed" && l.from !== "*");
+    assert.ok(summaries.length <= 101, `一次汇总最多 100 行外加 others，实际 ${summaries.length}`);
+    assert.ok(summaries.some((l) => l.from === "others"));
+  });
+});
+
 test("日志里没有令牌、secret、Key", async () => {
   await withServer(fakeReader(ROWS), {}, async ({ get, logs }) => {
     await get("/keys", auth);
@@ -215,6 +253,27 @@ test("X-Forwarded-For：开了 TRUST_PROXY 也只认合法地址，其余用连�
   });
 });
 
+test("X-Forwarded-For 的取法：长度不超过 45、只含十六进制数字冒号点；带 zone id 的 IPv6、超长、混了别的字符都不认", () => {
+  assert.equal(forwardedAddress("1.1.1.1, 203.0.113.9"), "203.0.113.9");
+  assert.equal(forwardedAddress("2001:db8::7"), "2001:db8::7");
+  assert.equal(forwardedAddress("::ffff:192.0.2.128"), "::ffff:192.0.2.128");
+  assert.equal(forwardedAddress(`::1%${"A".repeat(15000)}`), null, "isIP 认的带 zone id 的 IPv6，超长");
+  assert.equal(forwardedAddress("fe80::1%eth0"), null);
+  assert.equal(forwardedAddress("1.1.1.1, ::1%A"), null);
+  assert.equal(forwardedAddress("0000:0000:0000:0000:0000:ffff:255.255.255.255"), "0000:0000:0000:0000:0000:ffff:255.255.255.255");
+  assert.equal(forwardedAddress("0000:0000:0000:0000:0000:ffff:255.255.255.255.1"), null);
+  assert.equal(forwardedAddress(""), null);
+  assert.equal(forwardedAddress(undefined), null);
+});
+
+test("X-Forwarded-For 带超长 zone id：日志里的来源仍是连进来的地址，不超过 45 个字符", async () => {
+  await withServer(fakeReader(ROWS), { trustProxy: true }, async ({ get, logs }) => {
+    await get("/keys", { "X-Forwarded-For": `::1%${"A".repeat(7000)}` });
+    assert.equal(logs[0].from, "127.0.0.1");
+    assert.ok(logs.every((l) => !l.from || l.from.length <= 45));
+  });
+});
+
 test("401 日志：所有来源加起来每分钟最多 100 行，多的补一行「*」的汇总", async () => {
   await withServer(fakeReader(ROWS), { trustProxy: true }, async ({ get, logs, clock }) => {
     for (let i = 0; i < 130; i += 1) await get("/keys", { "X-Forwarded-For": `10.0.${Math.floor(i / 200)}.${i % 200}` });
@@ -226,12 +285,12 @@ test("401 日志：所有来源加起来每分钟最多 100 行，多的补一�
 });
 
 test("Accept-Encoding：gzip 或 * 且质量不是 0 才压缩", () => {
-  for (const yes of ["gzip", "gzip, deflate", "deflate, gzip;q=0.5", "*", "GZIP", "gzip;q=1"]) assert.equal(acceptsGzip(yes), true, yes);
-  for (const no of ["", undefined, "deflate", "gzip;q=0", "gzip; q=0.0", "identity", "br"]) assert.equal(acceptsGzip(no), false, String(no));
+  for (const yes of ["gzip", "gzip, deflate", "deflate, gzip;q=0.5", "*", "GZIP", "gzip;q=1", "*;q=0, gzip", "gzip, *;q=0"]) assert.equal(acceptsGzip(yes), true, yes);
+  for (const no of ["", undefined, "deflate", "gzip;q=0", "gzip; q=0.0", "identity", "br", "gzip;q=0, *", "*, gzip;q=0", "*;q=0"]) assert.equal(acceptsGzip(no), false, String(no));
 });
 
-test("配置：太弱的 secret 起不来（不同字符少于 16 个、整串重复、全数字、全小写），日志只写一句、不带令牌", () => {
-  for (const weak of ["x".repeat(32), "12345678901234567890123456789012", "abcdefghijklmnopqrstuvwxyzabcdef", "password".repeat(5)]) {
+test("配置：太弱的 secret 起不来（不同字符少于 10 个、整串重复、全数字、全小写、全大写、连着 8 位递增），日志只写一句、不带令牌", () => {
+  for (const weak of ["x".repeat(32), "12345678901234567890123456789012", "abcdefghijklmnopqrstuvwxyzabcdef", "password".repeat(5), "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGH", "Zq3v9LmX2rT7wYk1NcB8dHfJ5sGaP4uE01234567"]) {
     assert.throws(() => loadConfig({ RELAY_KEY_AGENT_SECRET: weak }), (e) => e.code === "CONFIG_INVALID" && e.message === "令牌太弱，请用 openssl rand -base64 32 生成" && !e.message.includes(weak));
   }
   assert.equal(loadConfig({ RELAY_KEY_AGENT_SECRET: "Zq3v9LmX2rT7wYk1NcB8dHfJ5sGaP4uE" }).port, 8790);

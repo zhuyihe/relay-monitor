@@ -1,6 +1,6 @@
-// 读库中途出事时读取服务要活着、下一次能读：PostgreSQL 查询中途连接被掐（假 PG 服务）、MySQL 查询超时以后连接不能留在池里（真库，设了环境变量才跑）、
-// 老表没有 channel_info 退回以后隔一阵再试（SQLite）、总时限、关闭不挂住
-import test, { after } from "node:test";
+// 读库中途出事时读取服务要活着、下一次能读：PostgreSQL 查询中途连接被掐（假 PG 服务）、
+// 老表没有 channel_info 退回以后隔一阵再试（SQLite）、总时限、关闭不挂住。MySQL 的卡锁、连接数、额度见 reader.isolation.test.js
+import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -10,8 +10,10 @@ import { resolveDatabase } from "./dsn.js";
 import { createReader } from "./reader.js";
 import { openTestDatabase } from "./test-support/databases.js";
 import { startFakePg } from "./test-support/fake-pg.js";
+import { freePort } from "./test-support/server-fixture.js";
 
-const pgReader = (fake, options) => createReader(resolveDatabase({ SQL_DSN: `postgres://u:SECRETPW@127.0.0.1:${fake.port}/db` }), options);
+// 假 PG 答不了权限检查那条语句，这里关掉检查（检查本身在 reader.isolation.test.js 里测）
+const pgReader = (fake, options) => createReader(resolveDatabase({ SQL_DSN: `postgres://u:SECRETPW@127.0.0.1:${fake.port}/db` }), { checkAccount: false, ...options });
 let pgAvailable = true;
 try { await import("pg"); } catch { pgAvailable = false; }
 
@@ -22,7 +24,7 @@ test("PostgreSQL 查询中途连接被掐断：读取服务不崩，回原因码
   t.after(() => reader.close());
   // 没有人听的 error 事件会让整个测试进程崩掉，所以能走到这里就说明有人接住了
   for (let i = 0; i < 2; i += 1) {
-    await assert.rejects(reader.read(), (err) => ["DB_UNREACHABLE", "DB_ERROR"].includes(err.code) && !/SECRETPW/.test(JSON.stringify(err)) && !/SECRETPW/.test(err.message));
+    await assert.rejects(reader.read(), (err) => err.code === "DB_UNREACHABLE" && !/SECRETPW/.test(JSON.stringify(err)) && !/SECRETPW/.test(err.message));
     await new Promise((resolve) => setTimeout(resolve, 400));
   }
 });
@@ -47,6 +49,30 @@ test("PostgreSQL 查询卡住：总时限一到就放手回 DB_UNREACHABLE，clo
   const closing = Date.now();
   await reader.close();
   assert.ok(Date.now() - closing < 3000, "close() 最多等 2 秒");
+});
+
+test("PostgreSQL：每次读连一次、读完就断；握手带上库侧时限（statement_timeout、lock_timeout、idle_in_transaction_session_timeout）", { skip: !pgAvailable && "没装 pg" }, async (t) => {
+  const fake = await startFakePg("ok");
+  t.after(() => fake.close());
+  const reader = pgReader(fake);
+  t.after(() => reader.close());
+  for (let i = 1; i <= 3; i += 1) {
+    assert.deepEqual(await reader.read(), []);
+    assert.equal(fake.connections, i, `第 ${i} 次读连了一次`);
+    for (let w = 0; w < 20 && fake.open > 0; w += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(fake.open, 0, "读完就断，没有空闲连接留着");
+  }
+  assert.match(fake.startups[0].options, /-c statement_timeout=500\b/);
+  assert.match(fake.startups[0].options, /-c lock_timeout=\d+/);
+  assert.match(fake.startups[0].options, /-c idle_in_transaction_session_timeout=5000/);
+});
+
+test("PostgreSQL 连接被掐的原因码是 DB_UNREACHABLE（不是 DB_ERROR）", { skip: !pgAvailable && "没装 pg" }, async (t) => {
+  const fake = await startFakePg("drop-in-select");
+  t.after(() => fake.close());
+  const reader = pgReader(fake, { deadlineMs: 4000 });
+  t.after(() => reader.close());
+  await assert.rejects(reader.read(), { code: "DB_UNREACHABLE" });
 });
 
 test("老表没有 channel_info：先退回不含它的 SELECT，隔 10 分钟再试带它的，列补上以后用上多 Key 信息", async (t) => {
@@ -90,60 +116,12 @@ test("老表上第二次试带 channel_info 仍然缺列：继续不含它，再
   assert.deepEqual(events, ["channel_info_missing"]);
 });
 
-// MySQL：查询卡住（表被锁）超时以后，连接要丢掉、下一次读重新建连接，不能排在卡住的那条后面一直等
-const mysql = await openTestDatabase("mysql");
-after(() => mysql?.close());
-test("MySQL 查询超时：连接被丢掉，下一次读不会排在卡住的那条后面；解锁后恢复；卡住时 close() 不挂住", { skip: !mysql && "没设 MySQL 的测试库环境变量", timeout: 30000 }, async (t) => {
-  await mysql.reset();
-  await mysql.seed([{ id: 1, key: `sk-${"a".repeat(30)}` }]);
-  const mysqlModule = (await import("mysql2/promise")).default;
-  const url = new URL(process.env.KEY_AGENT_TEST_MYSQL_DSN);
-  const locker = await mysqlModule.createConnection({ host: url.hostname, port: Number(url.port) || 3306, user: decodeURIComponent(url.username), password: decodeURIComponent(url.password), database: url.pathname.slice(1) });
-  t.after(() => locker.end().catch(() => {}));
-  const reader = createReader(resolveDatabase(mysql.env), { queryTimeoutMs: 500, deadlineMs: 4000 });
-  t.after(() => reader.close());
-  assert.equal((await reader.read()).length, 1);
-  await locker.query("LOCK TABLES channels WRITE");
-  try {
-    for (let i = 0; i < 3; i += 1) {
-      const started = Date.now();
-      await assert.rejects(reader.read(), { code: "DB_UNREACHABLE" });
-      assert.ok(Date.now() - started < 4500, `第 ${i + 1} 次读 ${Date.now() - started} ms，没有永久挂住`);
-    }
-    const closing = Date.now();
-    const pending = reader.read().catch(() => null);
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    await reader.close();
-    assert.ok(Date.now() - closing < 3500);
-    await pending;
-  } finally {
-    await locker.query("UNLOCK TABLES");
-  }
-  const fresh = createReader(resolveDatabase(mysql.env), { queryTimeoutMs: 500, deadlineMs: 4000 });
-  t.after(() => fresh.close());
-  assert.equal((await fresh.read()).length, 1);
-});
-
-test("MySQL 老表只给 6 列授权（没有 channel_info 的权限）：1143 也退回，能读", { skip: !mysql && "没设 MySQL 的测试库环境变量", timeout: 30000 }, async (t) => {
-  await mysql.reset({ withChannelInfo: false });
-  await mysql.seed([{ id: 1, key: `sk-${"a".repeat(30)}` }]);
-  const name = `ka_${Math.random().toString(16).slice(2, 10)}`, password = `Pw-${Math.random().toString(16).slice(2)}-Zq3v9L`;
-  try { await mysql.admin.query(`CREATE USER '${name}'@'%' IDENTIFIED BY '${password}'`); } catch { t.diagnostic("建不了账号，跳过"); return; }
-  t.after(() => mysql.admin.query(`DROP USER IF EXISTS '${name}'@'%'`));
-  await mysql.admin.query(`GRANT SELECT (id, name, type, status, base_url, \`key\`) ON \`${mysql.database}\`.channels TO '${name}'@'%'`);
-  const events = [];
-  const reader = createReader(resolveDatabase({ KEY_AGENT_DSN: mysql.goDsn(name, password) }), { onEvent: (event) => events.push(event.ev) });
-  t.after(() => reader.close());
-  assert.equal((await reader.read()).length, 1);
-  assert.deepEqual(events, ["channel_info_missing"]);
-});
-
 test("SIGTERM：有只发了半截请求头的连接时，进程也在几秒内退出", { timeout: 30000 }, async (t) => {
   const db = await openTestDatabase("sqlite");
   t.after(() => db.close());
   await db.reset();
   await db.seed([{ id: 1, key: `sk-${"a".repeat(30)}` }]);
-  const port = 20000 + Math.floor(Math.random() * 20000);
+  const port = await freePort();
   const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", new URL("./server.js", import.meta.url).pathname],
     { env: { PATH: process.env.PATH, RELAY_KEY_AGENT_SECRET: "sigterm-Zq3v9LmX2rT7wYk1NcB8dHfJ5sGaP4uE", PORT: String(port), HOST: "127.0.0.1", ...db.env }, stdio: "ignore" });
   for (let i = 0; i < 100; i += 1) {
@@ -161,4 +139,33 @@ test("SIGTERM：有只发了半截请求头的连接时，进程也在几秒内�
   await once(child, "exit");
   half.destroy();
   assert.ok(Date.now() - started < 9000, `退出用了 ${Date.now() - started} ms`);
+});
+
+test("--dry-run（真进程）：读一次、打印渠道数和耗时、不起服务、退出码 0；读不到时打印原因码、退出码 1；KEY_AGENT_PAUSED 时说一句、退出码 0", { timeout: 30000 }, async (t) => {
+  const db = await openTestDatabase("sqlite");
+  t.after(() => db.close());
+  await db.reset();
+  await db.seed([{ id: 1, key: `sk-${"a".repeat(30)}KEYBODYSECRET` }, { id: 2, key: `sk-${"b".repeat(30)}` }]);
+  const agent = new URL("./server.js", import.meta.url).pathname;
+  const run = async (env, args = ["--dry-run"]) => {
+    const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", agent, ...args],
+      { env: { PATH: process.env.PATH, RELAY_KEY_AGENT_SECRET: "dryRun-Kd83LmQwRtYx9zPa5vBn7cJf4hGs2", PORT: "1", ...env }, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", (c) => { output += c; });
+    child.stderr.on("data", (c) => { output += c; });
+    const [code] = await once(child, "exit");
+    return { code, output };
+  };
+  const ok = await run(db.env);
+  assert.equal(ok.code, 0, ok.output);
+  assert.match(ok.output, /数据库类型：sqlite/);
+  assert.match(ok.output, /读取：成功，2 个渠道，用时 \d+ 毫秒/);
+  assert.match(ok.output, /channel_info 列：有/);
+  assert.doesNotMatch(ok.output, /KEYBODYSECRET|dryRun-Kd83/);
+  const missing = await run({ SQLITE_PATH: `${db.path}.nope` });
+  assert.equal(missing.code, 1);
+  assert.match(missing.output, /读取：失败，原因码 DB_UNREACHABLE/);
+  const paused = await run({ ...db.env, KEY_AGENT_PAUSED: "1" });
+  assert.equal(paused.code, 0);
+  assert.match(paused.output, /KEY_AGENT_PAUSED/);
 });

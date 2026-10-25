@@ -1,9 +1,11 @@
-// 读取服务读真库：SQLite 一直测；MySQL、PostgreSQL 设了环境变量才测（见 test-support/databases.js）
+// 读取服务读真库：SQLite 一直测；MySQL、PostgreSQL 设了环境变量才测（见 test-support/databases.js）。
+// 读库用照部署说明建的专用账号（只有 channels 现有列的 SELECT、连接数上限 1），管理员账号读取服务不读
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { gunzipSync } from "node:zlib";
 import { once } from "node:events";
 import http from "node:http";
@@ -12,13 +14,14 @@ import { resolveDatabase } from "./dsn.js";
 import { createReader } from "./reader.js";
 import { buildSnapshot } from "./snapshot.js";
 import { AVAILABLE_KINDS, TEST_KINDS, openTestDatabase } from "./test-support/databases.js";
+import { freePort } from "./test-support/server-fixture.js";
 
 const SECRET = "contract-Zq3v9LmX2rT7wYk1NcB8dHfJ5sGaP4uE";
 const derived = deriveAgentKeys(SECRET);
 const AGENT = new URL("./server.js", import.meta.url).pathname;
 
 const snapshotOf = (rows, db) => JSON.parse(buildSnapshot(rows, { db, fingerprintKeyBytes: derived.fingerprintKey, now: 1 }).body);
-const readerFor = (env) => createReader(resolveDatabase({ ...env }));
+const readerFor = (env, options) => createReader(resolveDatabase({ ...env }), options);
 
 function httpGet(port, path, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -31,7 +34,7 @@ function httpGet(port, path, headers = {}) {
 }
 
 async function startAgent(env) {
-  const port = 20000 + Math.floor(Math.random() * 20000);
+  const port = await freePort();
   const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", AGENT], {
     env: { PATH: process.env.PATH, RELAY_KEY_AGENT_SECRET: SECRET, PORT: String(port), HOST: "127.0.0.1", ...env }, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
@@ -63,7 +66,7 @@ for (const kind of TEST_KINDS) {
     await t.test("读出单 Key、多 Key（换行、JSON 数组）、keyless、空 Key；响应里只有打码和指纹", async (st) => {
       await db.reset();
       await db.seed(fixtureRows());
-      const reader = readerFor(db.env);
+      const reader = readerFor(await db.agentEnv());
       st.after(() => reader.close());
       const snapshot = snapshotOf(await reader.read(), kind);
       assert.equal(snapshot.db, kind);
@@ -83,11 +86,15 @@ for (const kind of TEST_KINDS) {
       assert.doesNotMatch(JSON.stringify(snapshot), /secretsecret|BEGIN PRIVATE|xxxxxxxx|eeeeeeeeeeee/);
     });
 
-    await t.test("老版本没有 channel_info 列：照样读，全当单 Key", async (st) => {
+    await t.test(kind === "mysql" ? "老版本没有 channel_info 列：MySQL 的列级授权下库回 1143（不管列存不存在），分不清是缺列还是没授权，一律 DB_DENIED，不退回" : "老版本没有 channel_info 列：照样读，全当单 Key", async (st) => {
       await db.reset({ withChannelInfo: false });
       await db.seed([{ id: 1, key: "sk-AbC1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx9f0c" }, { id: 2, key: "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }]);
-      const reader = readerFor(db.env);
+      const reader = readerFor(await db.agentEnv());
       st.after(() => reader.close());
+      if (kind === "mysql") {
+        await assert.rejects(reader.read(), { code: "DB_DENIED", driver: "ER_COLUMNACCESS_DENIED_ERROR" });
+        return;
+      }
       const snapshot = snapshotOf(await reader.read(), kind);
       assert.equal(snapshot.channels.length, 2);
       assert.equal(snapshot.channels[1].keys.length, 1);
@@ -95,8 +102,10 @@ for (const kind of TEST_KINDS) {
     });
 
     await t.test("表不存在 → TABLE_MISSING", async (st) => {
+      await db.reset();
+      const env = await db.agentEnv();
       await db.dropTable();
-      const reader = readerFor(db.env);
+      const reader = readerFor(env);
       st.after(() => reader.close());
       await assert.rejects(reader.read(), { code: "TABLE_MISSING" });
     });
@@ -104,7 +113,7 @@ for (const kind of TEST_KINDS) {
     await t.test("1000 个渠道一次读完", async (st) => {
       await db.reset();
       await db.seed(Array.from({ length: 1000 }, (_, i) => ({ id: i + 1, key: `sk-${randomBytes(24).toString("base64url")}` })));
-      const reader = readerFor(db.env);
+      const reader = readerFor(await db.agentEnv());
       st.after(() => reader.close());
       assert.equal((await reader.read()).length, 1000);
     });
@@ -120,20 +129,41 @@ for (const kind of TEST_KINDS) {
       await t.test("WAL 模式下另一个连接在写时，也读得到新写的", async (st) => {
         await db.reset();
         await db.seed([{ id: 1, key: "sk-first-first-first-first" }]);
-        const reader = readerFor(db.env);
+        const reader = readerFor(await db.agentEnv());
         st.after(() => reader.close());
         assert.equal((await reader.read()).length, 1);
         await db.seed([{ id: 2, key: "sk-second-second-second" }]);
         assert.equal((await reader.read()).length, 2);
       });
-    } else {
-      await t.test("会话是只读的，连接池只有一个连接", async (st) => {
+      await t.test("WAL 模式的库没有 -wal（New API 干净关闭了）：不读，也不会把空的 -wal / -shm 建出来；不是 WAL 模式的库没有 -wal 照样读", async (st) => {
         await db.reset();
-        await db.seed(fixtureRows().slice(0, 1));
+        await db.seed([{ id: 1, key: "sk-first-first-first-first" }]);
+        db.stopNewApi();
+        assert.equal(existsSync(`${db.path}-wal`), false, "前提：最后一个连接关了以后 -wal 没了");
         const reader = readerFor(db.env);
         st.after(() => reader.close());
-        await reader.read();
-        assert.equal(await reader.inspectReadOnly(), true);
+        await assert.rejects(reader.read(), { code: "DB_UNREACHABLE", driver: "SQLITE_NO_WAL" });
+        assert.equal(existsSync(`${db.path}-wal`), false);
+        assert.equal(existsSync(`${db.path}-shm`), false);
+        // 同一个库换成默认的日志模式（不是 WAL）：没有 -wal 是正常的，照样读
+        const plain = new DatabaseSync(db.path);
+        plain.exec("PRAGMA journal_mode=DELETE");
+        plain.close();
+        assert.equal((await reader.read()).length, 1);
+        assert.equal(existsSync(`${db.path}-wal`), false);
+        await db.reset();
+      });
+    } else {
+      await t.test("读一次连一次、读完就断：每次读完库里这个账号一个连接都没有", async (st) => {
+        await db.reset();
+        await db.seed(fixtureRows().slice(0, 1));
+        const account = await db.agentAccount();
+        const reader = readerFor(account.env);
+        st.after(() => reader.close());
+        for (let i = 0; i < 3; i += 1) {
+          assert.equal((await reader.read()).length, 1);
+          assert.equal(await db.connectionsOf(account.name), 0, `第 ${i + 1} 次读完还有连接`);
+        }
       });
     }
 
@@ -148,33 +178,21 @@ for (const kind of TEST_KINDS) {
         await assert.rejects(down.read(), { code: "DB_UNREACHABLE" });
       });
 
-      await t.test("只读账号：只给 7 列的列级授权能读；少给 channel_info 退回照样读，少给 key 是 DB_DENIED", async (st) => {
-        const name = `ka_${randomBytes(4).toString("hex")}`;
-        const password = randomBytes(12).toString("hex");
-        try {
-          await db.admin.query(`CREATE USER '${name}'@'%' IDENTIFIED BY '${password}'`);
-        } catch {
-          st.diagnostic("建不了账号，跳过列级授权的用例");
-          return;
-        }
-        st.after(() => db.admin.query(`DROP USER IF EXISTS '${name}'@'%'`));
+      await t.test("专用账号（7 列列级 SELECT）能读；表有 channel_info 却没给它授权是 DB_DENIED（不退回、不悄悄当单 Key）；少给 key 也是 DB_DENIED", async (st) => {
         await db.reset();
         await db.seed(fixtureRows().slice(0, 2));
-        await db.admin.query(`GRANT SELECT (id, name, type, status, base_url, \`key\`, channel_info) ON \`${db.database}\`.channels TO '${name}'@'%'`);
-        const reader = readerFor({ KEY_AGENT_DSN: db.goDsn(name, password) });
+        const full = await db.agentAccount();
+        const reader = readerFor(full.env);
         st.after(() => reader.close());
         assert.equal((await reader.read()).length, 2);
-        assert.equal(await reader.inspectReadOnly(), true);
-        // 少给 channel_info：退回不含它的 SELECT，照样能读（多 Key 渠道当成单 Key）
-        await db.admin.query(`REVOKE SELECT (channel_info) ON \`${db.database}\`.channels FROM '${name}'@'%'`);
-        const narrow = readerFor({ KEY_AGENT_DSN: db.goDsn(name, password) });
+        const noInfo = await db.agentAccount({ columns: ["id", "type", "key", "status", "name", "base_url"] });
+        const narrow = readerFor(noInfo.env);
         st.after(() => narrow.close());
-        assert.equal((await narrow.read()).length, 2);
-        // 少给别的列（key）：这不是退得回的，回 DB_DENIED
-        await db.admin.query(`REVOKE SELECT (\`key\`) ON \`${db.database}\`.channels FROM '${name}'@'%'`);
-        const noKey = readerFor({ KEY_AGENT_DSN: db.goDsn(name, password) });
-        st.after(() => noKey.close());
-        await assert.rejects(noKey.read(), { code: "DB_DENIED" });
+        await assert.rejects(narrow.read(), { code: "DB_DENIED" });
+        const noKey = await db.agentAccount({ columns: ["id", "type", "status", "name", "base_url", "channel_info"] });
+        const missingKey = readerFor(noKey.env);
+        st.after(() => missingKey.close());
+        await assert.rejects(missingKey.read(), { code: "DB_DENIED" });
       });
     }
 
@@ -209,7 +227,8 @@ for (const kind of TEST_KINDS) {
         rows.push({ id: 2000 + i, type: 1, key: group.join("\n"), channel_info: { is_multi_key: true } });
       }
       await db.seed(rows);
-      const agent = await startAgent(db.env);
+      const agentEnv = await db.agentEnv();
+      const agent = await startAgent(agentEnv);
       try {
         const plain = await httpGet(agent.port, "/keys", { Authorization: `Bearer ${derived.token}` });
         const zipped = await httpGet(agent.port, "/keys", { Authorization: `Bearer ${derived.token}`, "Accept-Encoding": "gzip" });
@@ -230,7 +249,7 @@ for (const kind of TEST_KINDS) {
           assert.ok(!fixedText.includes(key));
         }
         const secrets = [SECRET, derived.token, derived.fingerprintKey.toString("hex"), derived.fingerprintKey.toString("base64url"), derived.fingerprintKey.toString("base64"),
-          ...Object.values(db.env).map(String), ...(db.password ? [db.password] : [])];
+          ...Object.values(agentEnv).map(String), ...Object.values(db.env).map(String), ...(db.password ? [db.password] : [])];
         for (const secret of secrets) assert.ok(!agent.output().includes(secret), "日志里出现了不该出现的东西");
         assert.ok(!bodies.join("").includes("Bearer"));
       } finally {

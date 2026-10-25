@@ -184,16 +184,20 @@ jobs:
       - name: Login rate-limit preload module loads inside the image
         run: docker run --rm --entrypoint node relay-monitor:smoke --import /app/lib/peer-address.js --input-type=module -e "console.log('peer-address preload ok')"
 
-  # 渠道 Key 读取服务（agent/）连真库的测试：SQLite 本地就有，MySQL、PostgreSQL 各起一个服务容器。
+  # 渠道 Key 读取服务（agent/）连真库的测试：SQLite 本地就有，MySQL 三种（8.4、5.7、MariaDB：库侧查询时限的写法各不相同）、PostgreSQL 各起一个服务容器。
   # agent/ 自己的依赖（mysql2、pg）装在 agent/node_modules，和镜像里装的一样
   agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql_image: ["mysql:8.4", "mysql:5.7", "mariadb:10.11"]
     services:
       mysql:
-        image: mysql:8.4
+        image: ${{ matrix.mysql_image }}
         env:
           MYSQL_ROOT_PASSWORD: ci-agent-root
           MYSQL_DATABASE: relay_key_agent
@@ -224,7 +228,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm ci --prefix agent
-      - run: node --test --test-timeout=60000 lib/key-fingerprint.test.js agent/dsn.test.js agent/reader.test.js agent/snapshot.test.js agent/server.test.js agent/reader.contract.test.js agent/reader.resilience.test.js
+      - run: node --test --test-concurrency=1 --test-timeout=60000 lib/key-fingerprint.test.js agent/dsn.test.js agent/reader.test.js agent/snapshot.test.js agent/server.test.js agent/reader.contract.test.js agent/reader.resilience.test.js agent/reader.isolation.test.js
         env:
           KEY_AGENT_TEST_MYSQL_DSN: mysql://root:ci-agent-root@127.0.0.1:3306/relay_key_agent
           KEY_AGENT_TEST_PG_URL: postgres://postgres:ci-agent-pg@127.0.0.1:5432/relay_key_agent
@@ -248,7 +252,7 @@ jobs:
         run: docker image inspect relay-key-agent:smoke --format 'size={{.Size}} bytes'
       - name: /healthz answers
         run: |
-          docker run -d --name key-agent-smoke -p 18790:8790 -e RELAY_KEY_AGENT_SECRET=ci-smoke-secret-0123456789-abcdefghijkl relay-key-agent:smoke
+          docker run -d --name key-agent-smoke -p 18790:8790 -e RELAY_KEY_AGENT_SECRET=ciSm0keKd83LmQwRtYx9zPa5vBn7cJf4hGs2 relay-key-agent:smoke
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:18790/healthz && break; sleep 1; done
           curl -sf http://127.0.0.1:18790/healthz | grep -q '"ok":true'
           # 没带令牌的 /keys 回 401
@@ -258,6 +262,20 @@ jobs:
       # 镜像里两个数据库驱动都要装全（读取服务按需动态加载，缺了要到真连库时才发现）
       - name: Database drivers load inside the image
         run: docker run --rm -w /app --entrypoint node relay-key-agent:smoke --input-type=module -e "await import('mysql2/promise'); await import('pg'); await import('node:sqlite'); console.log('drivers ok')"
+      # --dry-run：镜像的入口把参数传给读取服务；没有库可读时打印失败的原因码、退出码 1；一键停（KEY_AGENT_PAUSED）时只说一句、退出码 0
+      - name: Dry run prints the reason and exits
+        run: |
+          set +e
+          out=$(docker run --rm -e RELAY_KEY_AGENT_SECRET=ciSm0keKd83LmQwRtYx9zPa5vBn7cJf4hGs2 relay-key-agent:smoke --dry-run 2>&1)
+          code=$?
+          echo "$out"
+          test "$code" -eq 1
+          echo "$out" | grep -q '读取：失败，原因码'
+          out=$(docker run --rm -e RELAY_KEY_AGENT_SECRET=ciSm0keKd83LmQwRtYx9zPa5vBn7cJf4hGs2 -e KEY_AGENT_PAUSED=1 relay-key-agent:smoke --dry-run 2>&1)
+          code=$?
+          echo "$out"
+          test "$code" -eq 0
+          echo "$out" | grep -q 'KEY_AGENT_PAUSED'
       # 令牌太短、太弱都要起不来：退出码 1，日志里是那一句、不带令牌；镜像没构建出来、docker 自己报错也是非 1 或没有那句，不会假通过
       - name: Short and weak secrets refuse to start
         run: |

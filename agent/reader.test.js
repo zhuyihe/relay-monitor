@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyError, isMissingColumn, selectSql } from "./reader.js";
+import { classifyError, isMissingColumn, mysqlFlavor, selectSql, withTimeLimit } from "./reader.js";
 
 test("缺 channel_info 这一列：按各库的错误码认，而且报错里要点名 channel_info；别的列缺了、别的错不算", () => {
   const mysqlMissing = "Unknown column 'channel_info' in 'field list'";
@@ -8,8 +8,8 @@ test("缺 channel_info 这一列：按各库的错误码认，而且报错里要
   assert.equal(isMissingColumn({ errno: 1054, message: mysqlMissing }), true);
   assert.equal(isMissingColumn({ code: "42703", message: 'column "channel_info" does not exist' }), true);
   assert.equal(isMissingColumn({ code: "ERR_SQLITE_ERROR", errcode: 1, message: "no such column: channel_info" }), true);
-  // 老表上只给 6 列授权的账号：MySQL 报 1143（没有这一列的权限），也退回
-  assert.equal(isMissingColumn({ code: "ER_COLUMNACCESS_DENIED_ERROR", errno: 1143, message: "SELECT command denied to user 'u'@'h' for column 'channel_info' in table 'channels'" }), true);
+  // 有这一列、账号没给它授权（1143）不是缺列：退回会把多 Key 渠道悄悄当成一把 Key。只认 1054
+  assert.equal(isMissingColumn({ code: "ER_COLUMNACCESS_DENIED_ERROR", errno: 1143, message: "SELECT command denied to user 'u'@'h' for column 'channel_info' in table 'channels'" }), false);
   assert.equal(isMissingColumn({ code: "ER_COLUMNACCESS_DENIED_ERROR", errno: 1143, message: "SELECT command denied to user 'u'@'h' for column 'key' in table 'channels'" }), false);
   assert.equal(isMissingColumn({ code: "ER_BAD_FIELD_ERROR", errno: 1054, message: "Unknown column 'base_url' in 'field list'" }), false, "别的列缺了不能悄悄退");
   assert.equal(isMissingColumn({ code: "ER_NO_SUCH_TABLE", message: "Table 'x.channels' doesn't exist" }), false);
@@ -26,6 +26,12 @@ test("原因码：连不上、被拒、表不存在、其他", () => {
   for (const c of ["ER_NO_SUCH_TABLE", "42P01"]) assert.equal(code({ code: c }), "TABLE_MISSING", c);
   assert.equal(code({ code: "ERR_SQLITE_ERROR", errcode: 1, message: "no such table: channels" }), "TABLE_MISSING");
   assert.equal(code({ code: "ER_PARSE_ERROR" }), "DB_ERROR");
+  // 库自己到点掐掉的、额度到顶的、连接被掐的
+  for (const err of [{ code: "ER_QUERY_TIMEOUT", errno: 3024 }, { errno: 1969 }, { code: "ER_STATEMENT_TIMEOUT" }, { code: "57014" }, { code: "55P03" }]) assert.equal(code(err), "DB_TIMEOUT", JSON.stringify(err));
+  for (const err of [{ code: "ER_USER_LIMIT_REACHED", errno: 1226 }, { errno: 1226 }, { errno: 1203 }, { code: "ER_CON_COUNT_ERROR" }, { code: "53300" }]) assert.equal(code(err), "DB_LIMIT", JSON.stringify(err));
+  for (const err of [{ code: "57P01" }, { code: "57P02" }, new Error("Connection terminated unexpectedly"), new Error("terminating connection due to administrator command")]) assert.equal(code(err), "DB_UNREACHABLE", String(err.message ?? err.code));
+  assert.equal(code({ code: "PROTOCOL_SEQUENCE_TIMEOUT" }), "DB_UNREACHABLE", "客户端自己等不下去，分不清是不是连不上");
+  assert.equal(code({ code: "ERR_SQLITE_ERROR", errcode: 5, message: "database is locked" }), "DB_TIMEOUT");
   assert.equal(code(new Error("boom")), "DB_ERROR");
   assert.equal(code(undefined), "DB_ERROR");
 });
@@ -45,4 +51,20 @@ test("固定的 SELECT：两种库的引号，有无 channel_info", () => {
   assert.equal(selectSql("mysql", true), "SELECT id, name, type, status, base_url, `key`, channel_info FROM channels ORDER BY id");
   assert.equal(selectSql("postgres", true), 'SELECT id, name, type, status, base_url, "key", channel_info FROM channels ORDER BY id');
   assert.equal(selectSql("sqlite", false), 'SELECT id, name, type, status, base_url, "key" FROM channels ORDER BY id');
+});
+
+test("按握手的版本串分 MySQL / MariaDB / 老 MySQL，语句仍然只有一条，库侧时限写在语句里", () => {
+  for (const [version, flavor] of [["8.4.11", "mysql"], ["8.0.36-0ubuntu0.22.04.1", "mysql"], ["5.7.44", "mysql"], ["5.7.8", "mysql"], ["5.7.7-log", "old"], ["5.6.51", "old"], ["5.5.62", "old"],
+    ["10.11.6-MariaDB-1:10.11.6+maria~ubu2204", "mariadb"], ["5.5.5-10.6.16-MariaDB", "mariadb"], ["", "unknown"], [undefined, "unknown"], ["weird", "unknown"], ["9.1.0", "mysql"]]) {
+    assert.equal(mysqlFlavor(version), flavor, String(version));
+  }
+  const body = "SELECT id FROM channels ORDER BY id";
+  assert.equal(withTimeLimit(body, { flavor: "mysql", limitMs: 500 }), "SELECT /*+ MAX_EXECUTION_TIME(500) */ id FROM channels ORDER BY id");
+  assert.equal(withTimeLimit(body, { flavor: "mariadb", limitMs: 500 }), "SET STATEMENT max_statement_time=0.5 FOR SELECT id FROM channels ORDER BY id");
+  assert.equal(withTimeLimit(body, { flavor: "old", limitMs: 500 }), body);
+  assert.equal(withTimeLimit(body, { flavor: "unknown", limitMs: 500 }), body);
+  assert.equal(withTimeLimit(body, { flavor: "mysql", limitMs: 0 }), body);
+  assert.equal(selectSql("mysql", true, { flavor: "mysql", limitMs: 500 }), "SELECT /*+ MAX_EXECUTION_TIME(500) */ id, name, type, status, base_url, `key`, channel_info FROM channels ORDER BY id");
+  assert.equal(selectSql("mysql", false, { flavor: "mariadb", limitMs: 500 }), "SET STATEMENT max_statement_time=0.5 FOR SELECT id, name, type, status, base_url, `key` FROM channels ORDER BY id");
+  assert.ok(!/;/.test(selectSql("mysql", true, { flavor: "mariadb", limitMs: 500 })), "一条语句，不带分号");
 });

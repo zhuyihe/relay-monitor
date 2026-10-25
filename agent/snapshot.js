@@ -1,4 +1,4 @@
-// 把读出来的行变成响应：拆 Key、认 keyless、打码、指纹、ETag、gzip；读库最多 10 秒一次（成功、失败的结果都缓存）。
+// 把读出来的行变成响应：拆 Key、认 keyless、打码、指纹、ETag、gzip；读库有节奏：只有控制台来问、并且离上次读库已经过了 4 分钟才读，出错以后断路停一阵（成功、失败的结果都缓存）。
 // 缓存里只有打码和指纹，读出来的行算完就丢
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
@@ -6,7 +6,12 @@ import { KEYLESS_CHANNEL_TYPES, fingerprintKey, maskKey, splitChannelKeys } from
 import { ReadFailure } from "./reader.js";
 
 export const PROTOCOL_VERSION = 1;
-export const READ_INTERVAL_MS = 10000;
+// 两次读库之间至少隔这么久（控制台每 5 分钟问一次，比它短一点，免得错过一轮）
+export const MIN_READ_GAP_MS = 4 * 60 * 1000;
+// 断路：出错后停 10 分钟，再错翻倍，最多停 1 小时；DB_LIMIT（连接数、每小时语句额度到顶）停到下一个整点
+export const BREAKER_BASE_MS = 10 * 60 * 1000;
+export const BREAKER_MAX_MS = 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 
 function parseChannelInfo(value) {
   if (value && typeof value === "object") return value;
@@ -44,20 +49,38 @@ export function failureSnapshot(failure, now) {
   return { ok: false, code, driver, body, readAt: now };
 }
 
-// 同一时刻只有一次读库；10 秒内的请求用上次的结果
-export function createSnapshotSource({ reader, db, fingerprintKeyBytes, now = Date.now, intervalMs = READ_INTERVAL_MS }) {
+export function breakerPause(failures, code, t) {
+  if (code === "DB_LIMIT") return HOUR_MS - (t % HOUR_MS);
+  return Math.min(BREAKER_BASE_MS * 2 ** (failures - 1), BREAKER_MAX_MS);
+}
+
+// 同一时刻只有一次读库；请求只看缓存，读库只在「有人来问、缓存超过 4 分钟、断路没开」时发生。
+// paused：KEY_AGENT_PAUSED=1，永远不读库，只回 PAUSED
+export function createSnapshotSource({ reader, db, fingerprintKeyBytes, now = Date.now, minGapMs = MIN_READ_GAP_MS, paused = false, onBreaker = () => {} }) {
   let current = null;
   let inflight = null;
+  let failures = 0;
+  let pausedUntil = 0;
   return {
     async get() {
-      // 时钟往回拨时（age 为负）这份缓存的年龄说不清，重读一次，不让它一直当新的
-      const age = current ? now() - current.readAt : -1;
-      if (current && age >= 0 && age < intervalMs) return current;
+      if (paused) return failureSnapshot(new ReadFailure("PAUSED", "PAUSED"), now());
+      const t = now();
+      // 时钟往回拨时（age 为负、停到的时刻比最长还远）缓存的年龄说不清，重读一次，不让它一直当新的
+      const age = current ? t - current.readAt : -1;
+      if (pausedUntil - t > BREAKER_MAX_MS) pausedUntil = 0;
+      if (current && age >= 0 && age < minGapMs && failures === 0) return current;
+      if (current && failures > 0 && t < pausedUntil) return current;
       inflight ??= (async () => {
         try {
           current = buildSnapshot(await reader.read(), { db, fingerprintKeyBytes, now: now() });
+          failures = 0;
+          pausedUntil = 0;
         } catch (err) {
-          current = failureSnapshot(err, now());
+          const at = now();
+          current = failureSnapshot(err, at);
+          failures += 1;
+          pausedUntil = at + breakerPause(failures, current.code, at);
+          onBreaker({ code: current.code, failures, pauseMs: pausedUntil - at });
         } finally {
           inflight = null;
         }
