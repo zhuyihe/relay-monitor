@@ -52,14 +52,13 @@
            - /etc/relay-monitor/secret.key:/run/secrets/relay_secret_key:ro
      ```
 5. 重建应用容器：`docker compose up -d relay-monitor`。
-6. 看日志：`docker compose logs --tail 50 relay-monitor`。应该能看到三行：
-   - 「登录信息加密保存（密钥编号 xxxxxxxx）」
-   - 「已把 N 处明文保存的登录信息改成加密保存」
-   - 「会话密钥已换新，之前登录的设备要重新登录」
+6. 看日志：`docker compose logs --tail 50 relay-monitor`。
+   - **第一次装（库里还没有任何登录信息）**：只有一行「登录信息加密保存（密钥编号 xxxxxxxx）」。库里没有明文可改，也没有旧的会话密钥可换新，下面两行不会出现，第 8 步的收尾也用不着。
+   - **已经在用、现在才开加密**：两到三行——「登录信息加密保存（密钥编号 xxxxxxxx）」、库里存过上游或通知方式的令牌密码时多一行「已把 N 处明文保存的登录信息改成加密保存」、「会话密钥已换新，之前登录的设备要重新登录」。
 
    如果看到的是「登录信息还是明文保存在数据库里」，说明密钥没传进容器，回到第 3 步检查。
 7. 所有设备重新登录一次。
-8. 收尾。加密之前的明文还留在别处，下面三件都要做：
+8. 收尾（只有「已经在用、现在才开加密」才要做；第一次装没有加密之前的明文，跳过这一步）：
    - 清掉 MySQL 的二进制日志。先切到一个新的日志文件，等两秒再清掉之前的（正在写的那个清不掉，所以要先切）：
      ```bash
      docker compose exec db sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "FLUSH BINARY LOGS"; sleep 2; mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "PURGE BINARY LOGS BEFORE NOW()"'
