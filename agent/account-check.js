@@ -51,12 +51,13 @@ export function judgeMysqlAccount(rows, { database }) {
   const list = rows ?? [];
   for (const row of list) {
     const scope = String(row.scope), priv = String(row.priv).toUpperCase();
-    if (String(row.grantable).toUpperCase() === "YES") return "GRANT_OPTION";
     if (scope === "role") return "ROLE_GRANTED";
     if (scope === "user" && priv !== "USAGE") return "GLOBAL_PRIVILEGE";
     if (scope === "schema") return "SCHEMA_PRIVILEGE";
     if (scope === "table") return "TABLE_PRIVILEGE";
     if (scope === "column" && (priv !== "SELECT" || String(row.tbl).toLowerCase() !== home || !ALLOWED.has(String(row.col).toLowerCase()))) return "COLUMN_PRIVILEGE";
+    // 权限本身没问题、但能转授给别人（先判权限：root 这类账号既有全局权限又带 GRANT OPTION，说前一个更要紧）
+    if (String(row.grantable).toUpperCase() === "YES") return "GRANT_OPTION";
   }
   // 账号（或全局）的连接数上限必须是 1：别处还占着连接时，读取服务的新连接才会被库挡回，而不是再开一个。放在权限之后判：
   // New API 自己的账号这类先说权限的事（原因更要紧）
