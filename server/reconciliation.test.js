@@ -6419,9 +6419,9 @@ test("4a 固定采购上游：Key 账单取不到或为空只作参考，毛利 
 test("C1 成本计法在提前返回之前就定：固定成本、锚定过的上游一侧读不到（Key 用不了、目录或身份读不到、上游账号换了人），只作参考，毛利 = 收入、照常结账，不拿读到的目录当证据；本站一侧、没锚定过的照旧挡；按用量的照旧挡", async (t) => {
   const reply = (host, pathname, body) => ({ host, pathname, body });
   const keyDisabled = reply("upstream.test", "/api/token/", { success: true, data: { total: 3, items: [
-    { id: 9, name: "stable", status: 2, group: "g1", cross_group_retry: false },
-    { id: 10, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
-    { id: 11, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } });
+    { id: 9, user_id: 7, name: "stable", status: 2, group: "g1", cross_group_retry: false },
+    { id: 10, user_id: 7, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+    { id: 11, user_id: 7, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } });
   // [说明, 固定成本时要有的上游侧参考问题码, 按用量时的健康码, 设置]
   const cases = [
     ["Key 停用了", "KEY_INVALID_OR_DENIED", "KEY_INVALID_OR_DENIED", { replies: [keyDisabled] }],
@@ -6430,7 +6430,7 @@ test("C1 成本计法在提前返回之前就定：固定成本、锚定过的�
     ["上游账号换了人", "SOURCE_BINDING_UNCONFIRMED", "SOURCE_BINDING_UNCONFIRMED", { replies: [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } })] }],
     // 换成的 8 号账号里也有一把 id 9 的 Key，名字不同：不能拿它来显示、记账
     ["上游账号换了人，新账号里 id 相同的 Key 名字不同", "KEY_INVALID_OR_DENIED", "KEY_INVALID_OR_DENIED", { replies: [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } }),
-      reply("upstream.test", "/api/token/", { success: true, data: { total: 1, items: [{ id: 9, name: "别人的 Key", status: 1, group: "g1", cross_group_retry: false }] } })] }],
+      reply("upstream.test", "/api/token/", { success: true, data: { total: 1, items: [{ id: 9, user_id: 8, name: "别人的 Key", status: 1, group: "g1", cross_group_retry: false }] } })] }],
     ["本站读不到（本站一侧照旧挡）", null, "OWN_BILLING_UNAVAILABLE", { ownDown: true, blocksFixed: true }],
     ["本站账号换了人（本站一侧照旧挡）", null, "SOURCE_BINDING_UNCONFIRMED", { blocksFixed: true, replies: [reply("own.test", "/api/user/self", { success: true, data: { id: 9 } })] }],
     ["没锚定过、上游账号身份读不到（照旧挡）", null, "UPSTREAM_DATA_UNAVAILABLE", { unanchored: "canonicalKey", blocksFixed: true, replies: [reply("upstream.test", "/api/user/self", { success: false })] }],
