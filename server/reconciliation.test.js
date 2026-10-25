@@ -2038,6 +2038,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       }
       // 渠道测试日志（R1）：带 token_name 的列表和 stat，不算渠道收费统计，不进 statCalls
       if ((url.pathname === "/api/log/" || url.pathname === "/api/log/stat") && ownSourceRead(url)) return reply(200, ownTestLogApi(url, state.testLogs));
+      // 最新一条消费日志（轮询判断站点安不安静用，没有筛选条件）：只在 state.latestLogProbe 打开时给，别的测试照旧读不到
+      if (state.latestLogProbe && url.pathname === "/api/log/" && !ownSourceRead(url)) return reply(200, ownTestLogApi(url, state.testLogs));
       if (url.pathname === "/api/user/") return reply(200, ownUsersApi(url, state.ownUsers));
       if (url.pathname === "/api/log/stat") return stat("own", url, state.ownQuota);
     }
@@ -7288,6 +7290,37 @@ test("R1「今天」读用户列表或管理员日志短暂失败：10 分钟内
   now += 6 * 60000; // 离上一次读到已经 11 分钟
   const late = await today();
   assert.notEqual(late.downstream.state, "complete", "超过 10 分钟才读不到");
+});
+
+test("R1 轮询：新消费来了、管理员日志读失败、之后一直没有新消费——沿用的结果不进缓存，第 10 分钟必须读不到（审核第四轮：撤掉「不进缓存」这条用例要失败）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const todayStart = Date.parse("2026-10-08T16:00:00Z") / 1000;
+  f.state.testLogs.push({ id: 1, channel: 1, quota: 40, created_at: todayStart + 60, token_name: "root-key", username: "root" });
+  f.state.latestLogProbe = true; // 轮询要读最新一条消费日志，才知道站点安不安静（安静时直接沿用记下的收入）
+  const prev = globalThis.fetch;
+  let broken = false, brokenReads = 0;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (broken && url.host === "own.test" && ownSourceRead(url)) { brokenReads += 1; return { status: 500, text: async () => "{}" }; }
+    return prev(input, init);
+  });
+  const poll = async () => { await f.module.refreshDue(now); return (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", origin: "poll" })).results[0]; };
+  assert.equal((await poll()).downstream.state, "complete");
+  // 一分钟后来了新消费（站点不再「安静」），这时管理员日志读失败：沿用上一份，出数
+  now += 60000;
+  f.state.testLogs.push({ id: 2, channel: 1, quota: 10, created_at: Math.floor(now / 1000) - 5, token_name: "root-key", username: "root" });
+  broken = true;
+  assert.equal((await poll()).downstream.state, "complete", "10 分钟内沿用");
+  // 之后一直没有新消费：沿用的那份不能被当成「没有新消费、结果不变」一直用下去（站点「安静」时轮询会直接沿用记下的收入）
+  now += 5 * 60000;
+  await f.module.refreshDue(now);
+  now += 6 * 60000; // 离上一次读成功已经 11 分钟
+  const reads = brokenReads;
+  await f.module.refreshDue(now);
+  assert.ok(brokenReads > reads, "沿用的结果没进缓存：这一轮要重新去读管理员日志（读不到，今天这一格才会说读不到），不是直接用缓存");
+  assert.notEqual((await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" })).results[0].downstream.state, "complete", "超过 10 分钟读不到");
 });
 
 test("R1「今天」读用户列表碰到 401（令牌坏了）不沿用上一份：马上读不到，不当短暂失败（审核 R1 第三轮低-1）", async (t) => {
