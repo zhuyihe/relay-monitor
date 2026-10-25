@@ -62,10 +62,11 @@
 - **四个数：**近 7 天（本月）毛利，下面净利；「比预期少赚（已固定的 6 天）」；对不上几个渠道（这几天里有一天对不上，就算这个渠道对不上）；没算进来几个渠道（只有几天没算进来时写「1 个渠道的 10 天」）。
 - **表：**渠道、收入、实付成本、毛利、差额。
   - 范围里有还没固定的日子，所以**不出应付成本那一列**：应付成本只有已固定的日子才有，放进去会和整段的实付成本对不上。
-  - 差额只加已固定的日子，表头写「差额 已固定的 6 天（20日–25日）」；后面写「其中 2 天对不上」。
+  - 差额只加已固定的日子，表头写「差额 已固定的 6 天（10月20日–10月25日）」；已固定的日子不连着时只写「已固定的 6 天」。后面写「其中 2 天对不上」。
   - 收入、实付成本、毛利是整段（含今天到现在）。
 - 范围中间才开始算的渠道，名字下面写「10月24日 开始算」「今天开始算」；只有今天的渠道，差额写「明天出」。
-- 需处理的渠道：没算进来的日子不进合计，那一行写算进来的那几天的数，下面写「10月17日 起没算进利润，上面只是前 16 天」。一天都没算进来的，收入照写、实付成本「读不到」、毛利和差额「—」。
+- 本月里「备用 F」前 16 天算进来了、后 10 天需处理：合计行写「合计（算进来的 8 个渠道；「备用 F」只有前 16 天）」。
+- 需处理的渠道：没算进来的日子不进合计，那一行写算进来的那几天的数，差额下面写那几天「10月1日–10月16日」，原因后面写「10月17日起没算进利润，上面只是前 16 天」。一天都没算进来的，收入照写（不进合计）、实付成本「读不到」、毛利和差额「—」。
 
 ### 2.4 选的范围全在过去、也全固定了
 
@@ -83,14 +84,16 @@
 
 1. 对不上、多扣的，差额大的在前：浅红底，左边一道红线；
 2. 需处理的：左边一道橙线，下面一行写原因和按钮；
-3. 对不上、少扣的：浅蓝底；
+3. 对不上、少扣的：浅蓝底，左边一道蓝线；
 4. 其余，按毛利从大到小。
 
 金额都是黑字（ui-design-spec §5.6）。「对不上」靠差额后面那个小标签和这一行的底色。
 
-### 3.3 筛选
+### 3.3 筛选和数法
 
-表头右边：全部 / 对不上 N / 需处理 N。没有的那一项数字是 0，照样能点。
+表头右边：全部 N / 对不上 N / 需处理 N。没有的那一项数字是 0，照样能点。
+
+全页数的都是渠道，不是行：同一把 Key 的两个渠道合成一行，算 2 个（用语规范 §4，按渠道数）。标题旁的数、「全部 N」、合计行「算进来的 7 个渠道」、顶上「对不上 2 个渠道」都这样数。
 
 ### 3.4 需处理那一行
 
@@ -112,7 +115,8 @@
 **看几天时（dpa-week、dpa-month）：**
 
 - 一天一格，跟着选的范围走，最多 31 格；今天那一格是虚线框，写「明天出」。
-- 上面一句列出对不上的那几天：「9日 多扣 $1.30，24日 多扣 $0.90，25日 多扣 $1.20」。
+- 上面一句列出对不上的那几天：「10月9日 多扣 $1.30，10月24日 多扣 $0.90，10月25日 多扣 $1.20」，后面是「到上游后台查这把 Key」。格子里只写「9日」（用语规范 §6，新）。
+- 看一个月时格子多，「差在哪」占整行、一行格子；一周以内左边一句、右边格子。
 - 点一格，打开那一天的计算明细。
 
 对得上、算不了差额的行点开也一样，格子里是「·」或「—」。
@@ -126,9 +130,9 @@
 | 段 | 写什么 |
 |---|---|
 | 收入 | 来自自营站点「备用 C」的收费记录；其中渠道测试 $0.12，不算收入（§9 已有） |
-| 应付成本 | 一句「这个渠道这天的用量，按上游「拼车团队」的价格和 vip 分组 ×0.8 算：」，下面一张表：模型、用量（输入、输出 Token；用了缓存的多写缓存那一部分）、上游的价格（每百万 Token，输入 / 输出）、按上游价格、× 倍率。最后一行合计。表下面一句「用了缓存的，缓存那部分按上游的缓存价格算。价格是上游的模型价格表，每小时读一次；倍率是这天用的分组倍率。」 |
+| 应付成本 | 一句「这个渠道这天的用量，按上游「拼车团队」的价格和 vip 分组 ×0.8 算：」，下面一张表：模型、用量（输入、输出 Token；用了缓存的多写缓存那一部分）、上游的价格（「每百万 Token $3 / $15」，输入 / 输出）、按上游价格、× 倍率。最后一行合计。表下面一句「用了缓存的，缓存那部分按上游的缓存价格算。价格是上游的模型价格表，每小时读一次；倍率是这天用的分组倍率。」 |
 | 没算进的模型 | 有模型上游没给价格时多这一段：「没算进的模型：o3-pro（输入 12 万、输出 3 万 Token）」。这时这一天的应付成本、差额写「—」 |
-| 实付成本 | 来自上游这把 Key「team-c」这天的扣费记录 |
+| 实付成本 | 来自上游这把 Key「team-c」这天的用量记录（和 §3.2「上游成本」同一个来源） |
 | 差额 | 实付成本 − 应付成本，比应付多 15%。同时超过 $0.05 和应付成本的 2%，算对不上。正常也会差一点（两边记录的时刻不一样、请求重试），超过这条线才标出来 |
 | 毛利 | 收入 − 实付成本 |
 | 倍率、固定于、改过 | 照 §9；倍率这天变过的照「倍率在 14:30 从 1.0 变成 1.2，分两段算」，应付成本那张表按两段各算一遍 |
@@ -179,7 +183,7 @@
 ![](./screens/dpa-m-row.png)
 
 - 时间范围放顶上一排：今天、昨天、近 7 天、本月，自定义收进「⋯」。
-- 顶上一张卡片：毛利（大字）、收入 − 实付成本、毛利率、净利一行；下面一行「昨天比预期少赚 $0.71 · 2 个渠道对不上 [看昨天]」。看已固定的日子时，这一行换成「比预期少赚 $0.71（多扣 $1.20 · 少扣 $0.50）」。
+- 顶上一张卡片：毛利（大字）、收入 − 实付成本、毛利率、净利一行；下面一行「昨天比预期少赚 $0.71 · 2 个渠道对不上 [看昨天]」。看已固定的日子时，这一行换成「比预期少赚 $0.71（多扣 $1.20 · 少扣 $0.50 · 门槛以内 +$0.01）」。
 - 筛选一排：全部、对不上、需处理。
 - 一个渠道一张卡片，排序同桌面：名字和毛利一行；上游、Key 一行；「收入 · 实付」一行；差额一行（今天写「昨天多扣 $1.20 [对不上]」）。需处理的卡片写原因和按钮。
 - 点卡片展开：五个数竖着排，一句怎么算的，近 7 天的小格，按钮「看计算明细」。计算明细整屏打开，内容同桌面。
@@ -189,18 +193,26 @@
 
 这一页要的数。名字是建议，和开发 1 对齐以后两边一起改。钱都是美元原币（`…Usd`），页面按汇率换算；「—」的原因给码，页面查用语规范的字。
 
+几条约定：
+
+- 「算进来的日子」：这一行在这段时间里已固定、还在实时算、没有需处理的那些天。需处理的日子不进这一行的金额，也不进合计。
+- 差额只算已固定的日子；「对不上」按每一行每一天判（同时超过 `gapThreshold` 的两个数）。
+- `null` 的意思：金额读不到或算不出，页面写「—」或「读不到」，原因看同一行的 `gap.reason`、`attention`。
+
 ### 9.1 整页
 
 | 字段 | 是什么 | 用在 |
 |---|---|---|
 | `range` | `{ preset, startMs, endMs, timezone }` | 页顶一句 |
-| `dayCounts` | `{ fixed, reading, today }`：范围里已固定、还在读取、今天各几天 | 页顶一句；决定出不出应付成本那一列（`reading + today == 0` 时出） |
+| `asOf` | 数据截至的时刻；刷新失败时另给 `refreshError: { code, asOf }`（照旧） | 顶栏、刷新失败那一条 |
+| `dayCounts` | `{ fixed, reading, today }`：范围里已固定、还在读取、今天各几天 | 页顶一句；`reading + today == 0` 时出应付成本那一列 |
 | `totals` | `{ incomeUsd, actualCostUsd, grossProfitUsd, grossMarginRate }`：算进来的渠道、算进来的日子 | 第一个数、合计行 |
 | `fixedCostUsd`、`netProfitUsd` | 范围内的固定成本（已固定的日子用那天记下的）和净利 | 毛利下面那一行 |
-| `gap` | `{ days: [startDay, endDay], expectedCostUsd, actualCostUsd, gapUsd, overUsd, underUsd, withinUsd, rowCount }`：只算已固定的日子、算得出应付成本的行；`gapUsd = actualCostUsd − expectedCostUsd = overUsd − underUsd + withinUsd` | 「比预期少赚」那一格、合计行 |
-| `latestSettledGap` | `{ day, gapUsd, mismatchedRowCount }`：看今天时，最近一个已固定的日子 | 今天的第三格、最后一列表头 |
-| `counts` | `{ rows, mismatched, attention, excluded, uncomputable: { [reasonCode]: n } }` | 第三、四格，筛选数字 |
-| `gapThreshold` | `{ usd: 0.05, rate: 0.02 }` | 计算明细、页尾说明里的数，不在页面里另写一份 |
+| `gap` | `{ days: { first, last, count, contiguous }, expectedCostUsd, actualCostUsd, usd, overUsd, underUsd, withinUsd, rowCount }`：只算已固定的日子、算得出应付成本的行。按「一行一天」分三类加：超过门槛多扣的进 `overUsd`，超过门槛少扣的进 `underUsd`（正数），其余进 `withinUsd`（可正可负）；`usd = actualCostUsd − expectedCostUsd = overUsd − underUsd + withinUsd` | 「比预期少赚」那一格、表头「已固定的 6 天（10月20日–10月25日）」（`contiguous` 为假时只写天数）、合计行 |
+| `latestSettledGap` | `{ day, usd, mismatchedRowCount }`：看今天时，最近一个已固定的日子 | 今天的第三格、最后一列表头 |
+| `counts` | `{ channels, countedChannels, mismatchedChannels, attentionChannels, uncomputable: { [reason]: 渠道数 }, mismatchedDays: { over, under } }`：都按渠道数（同一把 Key 的两个渠道算 2 个） | 标题旁的数、筛选、合计行、第三、四格 |
+| `gapThreshold` | `{ usd: 0.05, rate: 0.02 }` | 第三格下面那句、计算明细里的那句；页面不另写一份 |
+| `ownIncomeUnavailable` | 整站收入读不到时 `{ code }`，和运营总览同一份 | 页顶那一条 |
 | `unaccountedUpstreamCostUsd` | 另有多少上游成本没算进利润（已有，F） | 表下面一行 |
 | `unlinkedChannelCount` | 另有几个渠道还没算利润 | 表下面一行 |
 | `rateUnset` | 没设置汇率（已有） | 表下面一行 |
@@ -211,31 +223,27 @@
 |---|---|
 | `rowKey` | 这一行的标识：上游 + Key（几个渠道合用一把 Key 时是同一行） |
 | `channels` | `[{ channelId, name }]` |
-| `upstream` | `{ stationId, name, provider }`；`provider` 决定 Sub2API 那句 |
-| `key` | `{ name, groupName, groupRatio }` |
-| `startedOn` | 开始算的那天（范围中间开始时写「10月24日 开始算」）；今天开始的再给 `startedAt`（时刻，只用在「今天 14:30 开始算」） |
-| `incomeUsd`、`actualCostUsd`、`grossProfitUsd` | 算进来的日子 |
+| `upstream` | `{ stationId, name, provider }` |
+| `key` | `{ name, groupName, groupRatio, upstreamKeyUrl }`；`upstreamKeyUrl` 没有时是 `null`，「到上游后台查这把 Key」不出 |
+| `startedOn`、`startedAt` | 开始算的那天；今天开始的再给时刻（只用在「今天 14:30 开始算」） |
+| `incomeUsd`、`actualCostUsd`、`grossProfitUsd` | 算进来的日子；一天都没算进来时 `actualCostUsd`、`grossProfitUsd` 是 `null` |
+| `uncountedIncomeUsd` | 没算进来的日子里读到的收入（需处理那一行「收入照写」用，不进合计） |
 | `expectedCostUsd` | 只在范围全固定、算得出时有，否则 `null` |
-| `gapUsd`、`gapRate` | 已固定的日子；`gapRate = gapUsd / expectedCostUsd` |
-| `gapState` | `over` / `under`（超过门槛）、`within`、`today`（明天出）、`reading`、`none`（算不了，看 `gapReason`）、`attention` |
-| `gapReason` | `gapState = none` 时的原因码：`UPSTREAM_PRICE_UNSUPPORTED`（Sub2API）、`MODEL_PRICE_MISSING`、`KEY_SHARED`、`GROUP_AUTO`、`NOT_STARTED` |
-| `missingPriceModels` | `MODEL_PRICE_MISSING` 时的模型名 |
-| `mismatchedDays` | 范围里对不上的天数（「其中 2 天对不上」） |
-| `attention` | 需处理时那一条：`{ code, title, detail, action, fromDay, moreCount }`，和需处理清单同一份（E） |
+| `gap` | `{ usd, rate, state, mismatchedDays, days, reason, missingPriceModels }`，只算已固定的日子：`rate = usd ÷ 这几天的应付成本`；`state` 是 `over` / `under`（这几天里有超过门槛的那一天，两种都有时取 `over`）、`within`、`today`（明天出）、`reading`、`none`（算不了）；`reason` 在 `none` 时给：`UPSTREAM_PRICE_UNSUPPORTED`（Sub2API）、`MODEL_PRICE_MISSING`、`KEY_SHARED`、`GROUP_AUTO`、`NOT_STARTED`；`days` 同 9.1 |
+| `attention` | 需处理时那一条：`{ code, title, detail, action, fromDay, moreCount }`，和需处理清单同一份（E）。和 `gap` 分开：一行可以既需处理、又有算进来那几天的差额 |
 | `excludedDays` | 范围里没算进来的天数（「上面只是前 16 天」） |
-| `daily` | 点开那一行用：`[{ day, state, gapUsd, gapState }]`，`state` 是 `fixed` / `reading` / `today` / `attention` / `notStarted`；看一天时给近 7 天，几天时给范围里每一天（最多 31） |
-| `latestSettledGap` | 看今天时这一行最近一个已固定日子的 `{ day, gapUsd, gapState, gapReason }` |
+| `daily` | 点开那一行用：`[{ day, state, gapUsd, gapState, tokens }]`，`state` 是 `fixed` / `reading` / `today` / `attention` / `notStarted`；看一天时给近 7 天，几天时给范围里每一天（最多 31）；`tokens` 是那天的 Token 数（「这天用了 288 万 Token」） |
+| `latestSettledGap` | 看今天时这一行最近一个已固定日子的 `{ day, usd, state, reason }` |
 
 ### 9.3 计算明细（一行、一天）
 
 | 字段 | 是什么 |
 |---|---|
 | `income` | `{ usd, channelTestUsd, byChannel: [{ channelId, usd }] }` |
-| `expected` | `{ usd, groupName, groupRatio, segments, byModel: [{ model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, prices: { input, output, cacheRead, cacheWrite }, beforeRatioUsd, usd }], missingPriceModels: [{ model, inputTokens, outputTokens }], byChannel }`；倍率这天变过时 `segments` 分段，`byModel` 各段各算 |
+| `expected` | `{ usd, groupName, groupRatio, segments, byModel: [{ model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, pricesPerMillion: { input, output, cacheRead, cacheWrite }, beforeRatioUsd, usd }], missingPriceModels: [{ model, inputTokens, outputTokens }], byChannel }`；价格是每百万 Token 多少美元；倍率这天变过时 `segments` 分段，`byModel` 各段各算 |
 | `actual` | `{ usd, keyName }` |
 | `gap` | `{ usd, rate, state }` |
 | `fixedAt`、`revisions` | 已有（§9） |
-| `upstreamKeyUrl` | 上游后台这把 Key 的地址，没有就 `null`，按钮不出 |
 
 ## 10. 验收清单（给审核与测试）
 
