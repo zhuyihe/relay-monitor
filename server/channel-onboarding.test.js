@@ -706,7 +706,7 @@ async function genuineBatchFixture(t, { realLinks = false } = {}) {
     const data = url.pathname === "/api/user/self" ? { id: url.host === "own.test" ? 1 : state.upstreamAccountId, quota: 100, used_quota: 1 }
       : url.pathname === "/api/status" ? { quota_per_unit: 100 }
         : url.pathname === "/api/user/self/groups" ? { g1: { ratio: 1 } }
-          : url.pathname === "/api/token/" ? { total: state.keys.length, items: state.keys.map((id) => ({ id, name: state.keyNames[id] || `Key ${id}`, status: 1, group: "g1", cross_group_retry: false })) }
+          : url.pathname === "/api/token/" ? { total: state.keys.length, items: state.keys.map((id) => ({ id, user_id: state.upstreamAccountId, name: state.keyNames[id] || `Key ${id}`, status: 1, group: "g1", cross_group_retry: false })) }
             : url.pathname === "/api/channel/" ? { total: state.channels.length, items: state.channels.map((id) => ({ id, name: `Channel ${id}`,
               type: 1, status: 1, base_url: state.channelBaseUrls[id] || "https://up.test", group: "g1" })) } : { quota: 100 };
     return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
@@ -2224,6 +2224,33 @@ async function connectWithPreview(f, input) {
   }
   return f.module.connect(input);
 }
+
+test("P1b 渠道同步只在自营站点的身份或渠道目录真变了时才清核算的上游缓存和结果缓存", async () => {
+  const f = await onboardingFixture();
+  let invalidations = 0;
+  f.rt.reconciliation.invalidateSources = () => { invalidations += 1; };
+  f.rt._reconciliationResultCache = new Map([["kept", {}]]);
+  // 5 分钟后再同步一次，目录没变：只更新同步时刻，不清缓存
+  f.state.now += 5 * 60000;
+  await f.module.sync();
+  assert.equal(invalidations, 0);
+  assert.equal(f.rt._reconciliationResultCache.size, 1);
+  assert.equal(f.state.catalogue.syncedAt, f.state.now, "同步时刻照样记下");
+  // 渠道改了名：清
+  f.state.pages[0].name = "Channel renamed";
+  f.state.now += 5 * 60000;
+  await f.module.sync();
+  assert.equal(invalidations, 1);
+  assert.equal(f.rt._reconciliationResultCache.size, 0);
+  // 再同步一次没变：不清
+  f.state.now += 5 * 60000;
+  await f.module.sync();
+  assert.equal(invalidations, 1);
+  // 自营站点换了令牌（授权版本变了）：清
+  await f.rt.store.update(f.own.id, { accessToken: "own-secret-2" });
+  await f.module.sync();
+  assert.equal(invalidations, 2);
+});
 
 test("统一 probe 验证混合上游不保存、取消无副作用且公开响应无凭证", async () => {
   const f = await onboardingFixture();

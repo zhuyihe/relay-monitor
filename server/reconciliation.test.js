@@ -7,7 +7,7 @@ import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } 
 import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
 import { Store } from "../db/store.js";
 import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconciliation-scope-policy.js";
-import { reconciliationCoverageText } from "../lib/reconciliation-contract.js";
+import { reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { reconciliationNotCountedText } from "../lib/reconciliation-view.js";
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
@@ -919,7 +919,7 @@ test("统计接口不会绕过已变更的固定 Key 元数据", async (t) => {
       : url.pathname === "/api/user/self/groups"
         ? { success: true, data: { fixed: { ratio: 1 } } }
         : url.pathname === "/api/token/"
-          ? { success: true, data: { total: 1, items: [{ id: 9, name: "renamed-key", status: 1, group: "fixed", cross_group_retry: false }] } }
+          ? { success: true, data: { total: 1, items: [{ id: 9, user_id: 42, name: "renamed-key", status: 1, group: "fixed", cross_group_retry: false }] } }
           : null;
     assert.notEqual(url.pathname, "/api/log/self/stat", "changed Key must be rejected before stat aggregation");
     response.writeHead(body ? 200 : 404, { "Content-Type": "application/json" });
@@ -966,7 +966,7 @@ test("短于一秒的分段标记为不可核算，且不调用上游 stat 或�
     const body = url.pathname === "/api/status" ? { success: true, data: { quota_per_unit: 100 } }
       : url.pathname === "/api/user/self" ? { success: true, data: { id: 1 } }
         : url.pathname === "/api/user/self/groups" ? { success: true, data: { fixed: { ratio: 1 } } }
-          : url.pathname === "/api/token/" ? { success: true, data: { total: 1, items: [{ id: 9, name: "fixed-key", status: 1, group: "fixed", cross_group_retry: false }] } }
+          : url.pathname === "/api/token/" ? { success: true, data: { total: 1, items: [{ id: 9, user_id: 1, name: "fixed-key", status: 1, group: "fixed", cross_group_retry: false }] } }
             : url.pathname === "/api/channel/" ? { success: true, data: { items: [{ id: 1, name: "渠道", status: 1 }] } }
               : { success: false };
     response.writeHead(body.success === false ? 404 : 200, { "Content-Type": "application/json" });
@@ -1015,8 +1015,8 @@ test("同名上游 Key 无法唯一归属时 fail closed，不能请求 stat 或
           ? { success: true, data: { fixed: { ratio: 1 } } }
           : url.pathname === "/api/token/"
             ? { success: true, data: { total: 2, items: [
-              { id: 9, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
-              { id: 10, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
+              { id: 9, user_id: 42, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
+              { id: 10, user_id: 42, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
             ] } }
             : null;
     assert.notEqual(url.pathname, "/api/log/self/stat", "ambiguous names must not be reconciled");
@@ -1063,8 +1063,8 @@ test("创建规则遇到同名上游 Key 时 fail closed", async (t) => {
       : path === "/api/user/self" ? { success: true, data: { id: 1 } }
         : path === "/api/user/self/groups" ? { success: true, data: { fixed: { ratio: 1 } } }
           : path === "/api/token/" ? { success: true, data: { total: 2, items: [
-            { id: 9, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
-            { id: 10, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
+            { id: 9, user_id: 1, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
+            { id: 10, user_id: 1, name: "duplicate-key", status: 1, group: "fixed", cross_group_retry: false },
           ] } }
             : path === "/api/channel/" ? { success: true, data: { items: Number(url.searchParams.get("p")) <= 1 ? [{ id: 1, name: "渠道", status: 1 }] : [] } }
               : { success: false };
@@ -1097,7 +1097,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
     if (url.pathname === "/api/status") body = { success: true, data: { quota_per_unit: 100 } };
     else if (url.pathname === "/api/user/self") body = { success: true, data: { id: 7 } };
     else if (url.pathname === "/api/user/self/groups") body = { success: true, data: { g1: { ratio: 2.9 }, g2: { ratio: 2.6 } } };
-    else if (url.pathname === "/api/token/") body = { success: true, data: { total: 1, items: [{ id: 9, name: "stable", status: 1, group: "g2", cross_group_retry: false }] } };
+    else if (url.pathname === "/api/token/") body = { success: true, data: { total: 1, items: [{ id: 9, user_id: 7, name: "stable", status: 1, group: "g2", cross_group_retry: false }] } };
     else if (url.pathname === "/api/log/self/stat") {
       statRequests.push({ tokenName: url.searchParams.get("token_name"), group: url.searchParams.get("group"), start, end: Number(url.searchParams.get("end_timestamp")) });
       body = upstreamBroken ? { success: false, message: "stat unavailable" } : { success: true, data: { quota: start === 1000 ? 0 : 100 } };
@@ -1293,7 +1293,7 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
     if (url.pathname === "/api/status") return { success: true, data: { quota_per_unit: 100 } };
     if (url.pathname === "/api/user/self") return { success: true, data: { id: 7 } };
     if (url.pathname === "/api/user/self/groups") return { success: true, data: { g1: { ratio: 1 }, g2: { ratio: 2 } } };
-    if (url.pathname === "/api/token/") return { success: true, data: { total: 1, items: [{ id: 9, name: "stable", status: 1, group: "g2", cross_group_retry: false }] } };
+    if (url.pathname === "/api/token/") return { success: true, data: { total: 1, items: [{ id: 9, user_id: 7, name: "stable", status: 1, group: "g2", cross_group_retry: false }] } };
     if (url.pathname === "/api/log/self/stat") {
       statUsers.push(request.headers["new-api-user"]);
       return { success: true, data: { quota: 100 } };
@@ -1396,7 +1396,7 @@ test("首次观察到已知倍率会补全当前 legacy 分段，随后切组才
     const body = url.pathname === "/api/status" ? { success: true, data: { quota_per_unit: 100 } }
       : url.pathname === "/api/user/self" ? { success: true, data: { id: 7 } }
         : url.pathname === "/api/user/self/groups" ? { success: true, data: { AWS_Bedrock3: { ratio: 2.9 }, AWS_Bedrock2: { ratio: 2.6 } } }
-          : url.pathname === "/api/token/" ? { success: true, data: { total: 1, items: [{ id: 9, name: "stable", status: 1, group: currentGroup, cross_group_retry: false }] } }
+          : url.pathname === "/api/token/" ? { success: true, data: { total: 1, items: [{ id: 9, user_id: 7, name: "stable", status: 1, group: currentGroup, cross_group_retry: false }] } }
             : url.pathname === "/api/log/self/stat" ? { success: true, data: { quota: 100 } }
               : url.pathname === "/api/log/stat" ? { success: true, data: { quota: 100 } }
                   : url.pathname === "/api/channel/" ? { success: true, data: { items: [{ id: 1, name: "渠道", status: 1 }] } }
@@ -1993,7 +1993,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if (url.pathname === "/api/token/") {
         if (metadataFailure) return reply(500, { success: false });
         const distinct = [...new Map(rules.map((item) => [item.token_id, item])).values()];
-        return reply(200, { success: true, data: { total: distinct.length, items: distinct.map((item) => ({ id: item.token_id, name: item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false })) } });
+        return reply(200, { success: true, data: { total: distinct.length, items: distinct.map((item) => ({ id: item.token_id, user_id: init.headers?.["New-Api-User"], name: item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false })) } });
       }
       if (url.pathname === "/api/log/self/stat") return stat("upstream", url, state.upstreamQuota);
     }
@@ -2809,7 +2809,7 @@ test("R02 legacy首次安全锚定先于观察；换账号不写分组、倍率�
     const url = new URL(input);
     if (url.host === "upstream.test" && init?.headers?.Authorization === "Bearer replacement-account") {
       const data = url.pathname === "/api/user/self" ? { id: 8 }
-        : url.pathname === "/api/token/" ? { total: 1, items: [{ id: 9, name: "stable", status: 1, group: "g2", cross_group_retry: false }] }
+        : url.pathname === "/api/token/" ? { total: 1, items: [{ id: 9, user_id: 8, name: "stable", status: 1, group: "g2", cross_group_retry: false }] }
           : url.pathname === "/api/user/self/groups" ? { g2: { ratio: 20 } } : null;
       if (data) return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
     }
@@ -3027,7 +3027,7 @@ async function financialFixture(t, { create = false } = {}) {
     const data = url.pathname === "/api/user/self" ? { id: url.host === "own.test" ? remote.ownAccountId : remote.accountId, quota: 100, used_quota: 1 }
       : url.pathname === "/api/status" ? { quota_per_unit: 100 }
         : url.pathname === "/api/user/self/groups" ? { g1: { ratio: 1 } }
-          : url.pathname === "/api/token/" ? { total: 1, items: [{ id: remote.tokenId, name: "stable", status: 1, group: "g1", cross_group_retry: false }] }
+          : url.pathname === "/api/token/" ? { total: 1, items: [{ id: remote.tokenId, user_id: remote.accountId, name: "stable", status: 1, group: "g1", cross_group_retry: false }] }
             : url.pathname === "/api/channel/" ? { total: remote.channels.length, items: remote.channels.map((id) => ({ id, name: `Channel ${id}`, type: 1, status: 1, base_url: "https://up.test", group: "g1" })) }
               : { quota: 100 };
     return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
@@ -3541,7 +3541,7 @@ test("两个旧资源同账号新金融创建不能绕过proof或产生第二份
     const data = url.pathname === "/api/user/self" ? { id: 42 }
       : url.pathname === "/api/status" ? { quota_per_unit: 100 }
         : url.pathname === "/api/user/self/groups" ? { g1: { ratio: 1 } }
-          : url.pathname === "/api/token/" ? { total: 1, items: [{ id: 9, name: "stable", status: 1, group: "g1", cross_group_retry: false }] }
+          : url.pathname === "/api/token/" ? { total: 1, items: [{ id: 9, user_id: 42, name: "stable", status: 1, group: "g1", cross_group_retry: false }] }
             : { total: 1, items: [{ id: 2, name: "二", status: 1 }] };
     return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
   });
@@ -3917,7 +3917,7 @@ test("换到另一稳定账号的授权不能写入原 Key 的分段或来源历
     }
     if (url.host === "upstream.test" && url.pathname === "/api/token/") {
       return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: 1,
-        items: [{ id: 9, name: "stable", status: 1, group: "g2", cross_group_retry: false }] } }) };
+        items: [{ id: 9, user_id: 8, name: "stable", status: 1, group: "g2", cross_group_retry: false }] } }) };
     }
     return originalFetch(input, init);
   });
@@ -4017,7 +4017,7 @@ test("目录在创建取数期间变化时，即使新的待核对状态稳定�
     const data = url.pathname === "/api/user/self" ? { id: 42 }
       : url.pathname === "/api/status" ? { quota_per_unit: 100 }
         : url.pathname === "/api/user/self/groups" ? { g1: { ratio: 1 } }
-          : url.pathname === "/api/token/" ? { total: 1, items: [{ id: 9, name: "stable", status: 1, group: "g1", cross_group_retry: false }] }
+          : url.pathname === "/api/token/" ? { total: 1, items: [{ id: 9, user_id: 42, name: "stable", status: 1, group: "g1", cross_group_retry: false }] }
             : { total: 1, items: [{ id: 2, name: "二", status: 1 }] };
     return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
   });
@@ -4075,13 +4075,13 @@ function sub2ReconciliationFixture(t, { baseUrl, costs = {}, ...live }) {
     cost_coverage: "complete", source_binding: { 1: "r1" } });
   f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
   const host = new URL(baseUrl).host, ownFetch = globalThis.fetch;
-  const sub2 = { costs, controls: 0, stats: [], missing: false, onRequest: null };
+  const sub2 = { costs, controls: 0, stats: [], missing: false, onRequest: null, accountId: 7 };
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(input);
     if (url.host !== host) return ownFetch(input, init);
     await sub2.onRequest?.(url);
     const reply = (status, data) => ({ status, text: async () => JSON.stringify({ code: status === 200 ? 0 : 1, data }) });
-    if (url.pathname === "/api/v1/auth/me") return reply(200, { id: 7 });
+    if (url.pathname === "/api/v1/auth/me") return reply(200, { id: sub2.accountId });
     if (url.pathname === "/api/v1/keys") return reply(200, { total: 1, items: [{ id: 9, user_id: 7, name: "stable", status: "active", group_id: 7 }] });
     if (url.pathname.startsWith("/api/v1/keys/")) { sub2.controls += 1; return reply(404, {}); }
     sub2.stats.push(Object.fromEntries(url.searchParams));
@@ -4841,6 +4841,304 @@ test("P1a 沿用渠道收费的边界：额度换算变了、读失败后进入�
   assert.deepEqual(fingerprints().sort(), ["rr_live", "rr_two"]);
 });
 
+test("P1b 轮询按时间重读上游：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟；Key 账单报错、有收入而 Key 用量为 0、目录里找不到 Key，下一轮马上全部重读；页面「刷新」照旧强制", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  let dropKey = false;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    // 这一轮的 Key 目录里没有绑定的 Key 9
+    if (dropKey && url.host === "upstream.test" && url.pathname === "/api/token/") {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: 2, items: [
+        { id: 10, user_id: 7, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+        { id: 11, user_id: 7, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } }) };
+    }
+    return prev(input, init);
+  });
+  const paths = ["/api/user/self", "/api/status", "/api/user/self/groups", "/api/token/"];
+  const upstreamReads = () => Object.fromEntries(paths.map((path) => [path, f.state.requests.filter((request) => request.host === "upstream.test" && request.path === path).length]));
+  const diff = (before) => { const after = upstreamReads(); return paths.map((path) => after[path] - before[path]); };
+  const round = async (minutes) => { now += minutes * 60000; const before = upstreamReads(); await f.module.refreshDue(now); return diff(before); };
+  const FULL = [1, 1, 1, 1], CATALOGUE = [0, 0, 1, 1], NONE = [0, 0, 0, 0];
+
+  assert.deepEqual(await round(0), FULL, "第一轮全部读");
+  assert.deepEqual(await round(1), NONE, "5 分钟内一样都不读");
+  assert.deepEqual(await round(4), CATALOGUE, "满 5 分钟：只重读分组和 Key 目录，身份和 /api/status 沿用");
+  assert.deepEqual(await round(1), NONE);
+  assert.deepEqual(await round(25), FULL, "满 30 分钟：身份和 /api/status 也重读");
+
+  // 异常一：Key 账单报错 → 下一轮马上全部重读
+  f.state.upstreamQuota = null;
+  assert.deepEqual(await round(1), NONE, "报错这一轮还在缓存期里");
+  f.state.upstreamQuota = 100;
+  assert.deepEqual(await round(1), FULL, "下一轮全部重读");
+  assert.deepEqual(await round(1), NONE, "重读过就不再强制");
+
+  // 异常二：渠道有收入而 Key 用量为 0 → 下一轮马上全部重读
+  f.state.upstreamQuota = 0;
+  assert.deepEqual(await round(1), NONE);
+  f.state.upstreamQuota = 100;
+  assert.deepEqual(await round(1), FULL);
+
+  // 异常三：目录里找不到绑定的 Key（目录到点重读时发现）→ 下一轮马上全部重读，身份也重读
+  dropKey = true;
+  assert.deepEqual(await round(5), CATALOGUE);
+  dropKey = false;
+  assert.deepEqual(await round(1), FULL);
+
+  // 没有异常时一样都不读；页面「刷新」照旧强制全部重读
+  assert.deepEqual(await round(1), NONE);
+  const before = upstreamReads();
+  await f.module.queryRules({ preset: "today", ruleIds: ["rr_live"] }, { mode: "observe", force: true, origin: "manual" });
+  assert.deepEqual(diff(before), FULL);
+});
+
+test("P1b 身份正好满 30 分钟就重读、不等目录到期；改了凭据下一轮全读；强制读失败记号留着；沿用身份读目录失败、清缓存以后下一轮全读", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  let failPath = null;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === failPath) {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      return { status: 401, text: async () => JSON.stringify({ success: false, message: "unauthorized" }) };
+    }
+    return prev(input, init);
+  });
+  const paths = ["/api/user/self", "/api/status", "/api/user/self/groups", "/api/token/"];
+  const upstreamReads = () => Object.fromEntries(paths.map((path) => [path, f.state.requests.filter((request) => request.host === "upstream.test" && request.path === path).length]));
+  const round = async (ms) => {
+    now += ms;
+    const before = upstreamReads();
+    await f.module.refreshDue(now);
+    const after = upstreamReads();
+    return paths.map((path) => after[path] - before[path]);
+  };
+  const MIN = 60000, FULL = [1, 1, 1, 1], CATALOGUE = [0, 0, 1, 1], NONE = [0, 0, 0, 0];
+
+  assert.deepEqual(await round(0), FULL);
+  assert.deepEqual(await round(29 * MIN + 59000), CATALOGUE, "身份读了 29:59，还沿用");
+  assert.deepEqual(await round(1000), FULL, "正好 30:00：身份到期就重读，目录 1 秒前才读过也不等");
+  assert.deepEqual(await round(MIN), NONE);
+
+  // 改了凭据：缓存不能再用，下一轮全读
+  f.stations[0].accessToken = "pat-2";
+  assert.deepEqual(await round(MIN), FULL, "改了凭据下一轮全读");
+  assert.deepEqual(await round(MIN), NONE);
+
+  // Key 账单报错记了号；强制重读那一轮身份读失败：记号留着，下一轮接着全读
+  f.state.upstreamQuota = null;
+  assert.deepEqual(await round(MIN), NONE);
+  f.state.upstreamQuota = 100;
+  failPath = "/api/user/self";
+  assert.deepEqual(await round(MIN), [1, 0, 0, 0], "强制重读，身份那一步就失败了");
+  failPath = null;
+  assert.deepEqual(await round(MIN), FULL, "失败了记号还在，下一轮接着全读");
+  assert.deepEqual(await round(MIN), NONE, "读成功才清掉");
+
+  // 目录到期、拿沿用的身份读目录失败：记号，下一轮全读（不再每轮拿旧身份重读）
+  failPath = "/api/token/";
+  assert.deepEqual(await round(5 * MIN), CATALOGUE);
+  failPath = null;
+  assert.deepEqual(await round(MIN), FULL, "沿用身份读失败，下一轮全读");
+  assert.deepEqual(await round(MIN), NONE);
+
+  // 自营站点的身份或渠道目录真变了时，渠道同步会清上游缓存：下一轮全读
+  f.module.invalidateSources();
+  assert.deepEqual(await round(MIN), FULL);
+});
+
+test("P1b 沿用身份时上游拒绝读 Key 账单：这一轮先算还在读取，不说「上游拒绝读取这把 Key」；下一轮现读身份以后还被拒才说", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  let denyStat = false;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (denyStat && url.host === "upstream.test" && url.pathname === "/api/log/self/stat") {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      return { status: 401, text: async () => JSON.stringify({ success: false, message: "unauthorized" }) };
+    }
+    return prev(input, init);
+  });
+  // 轮询记下的告警状态：拒绝读取会推送，还在读取不推送
+  const codes = async () => f.repository.tables.alerts.filter((row) => row.rule_id === "rr_live" && Number(row.active) === 1).map((row) => row.event_code);
+  const identityReads = () => f.state.requests.filter((request) => request.host === "upstream.test" && request.path === "/api/user/self").length;
+  await f.module.refreshDue(now);
+  assert.equal((await codes()).includes("KEY_INVALID_OR_DENIED"), false);
+
+  denyStat = true;
+  now += 60000;
+  let before = identityReads();
+  await f.module.refreshDue(now);
+  assert.equal(identityReads() - before, 0, "这一轮沿用身份");
+  assert.equal((await codes()).includes("KEY_INVALID_OR_DENIED"), false, "先算还在读取，不说拒绝，也就不推送");
+
+  now += 60000;
+  before = identityReads();
+  await f.module.refreshDue(now);
+  assert.equal(identityReads() - before, 1, "下一轮现读身份");
+  assert.ok((await codes()).includes("KEY_INVALID_OR_DENIED"), "现读身份以后还被拒：才说上游拒绝");
+});
+
+test("P1b Sub2API 沿用身份那一轮读账单时发现账号换了：先算还在读取、不推送，下一轮全量重读再定；auth/me 偶尔超时照常推送", async (t) => {
+  for (const scenario of ["换了账号", "auth/me 超时"]) {
+    await t.test(scenario, async (st) => {
+      let now = Date.parse("2026-10-11T01:00:00Z");
+      st.mock.method(Date, "now", () => now);
+      const f = sub2ReconciliationFixture(st, { baseUrl: `https://sub2-reuse-${scenario === "换了账号" ? "owner" : "timeout"}.test`, costs: { "2026-10-11": 1, "2026-10-10": 2 } });
+      const codes = () => f.repository.tables.alerts.filter((row) => row.rule_id === f.rule.id && Number(row.active) === 1).map((row) => row.event_code);
+      await f.module.refreshDue(now);
+      // 第一轮核验了账单能力，能力变了会清掉 Key 目录缓存；再跑一轮，让目录和身份进缓存
+      now += 60000;
+      await f.module.refreshDue(now);
+      assert.deepEqual(codes(), []);
+      if (scenario === "换了账号") f.sub2.accountId = 8;
+      else f.sub2.onRequest = (url) => { if (url.pathname === "/api/v1/auth/me") throw Object.assign(new Error("timeout"), { code: "ETIMEDOUT" }); };
+      now += 60000;
+      await f.module.refreshDue(now); // 这一轮 Key 目录和身份都沿用缓存，只有读账单时核对 auth/me
+      if (scenario === "换了账号") {
+        assert.deepEqual(codes(), [], "沿用身份时账号对不上：先算还在读取，不推「上游这天的用量记录一直读不到」");
+        let catalogueReads = 0;
+        f.sub2.onRequest = (url) => { if (url.pathname === "/api/v1/keys") catalogueReads += 1; };
+        now += 60000;
+        await f.module.refreshDue(now);
+        assert.ok(catalogueReads > 0, "下一轮全部重读 Key 目录和身份");
+        assert.deepEqual(codes(), [], "重读以后和以前一样卡在读目录那一步（账号对不上），不推送");
+      } else {
+        assert.ok(codes().includes("UPSTREAM_DATA_UNAVAILABLE"), `auth/me 超时不是账号换了：照常推送（${codes()}）`);
+      }
+    });
+  }
+});
+
+test("P1b 分组没读到的那份 Key 目录不缓存：下一轮照常重读，上游恢复了马上就好", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  let groupsDown = false, groupReads = 0;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/user/self/groups") {
+      groupReads += 1;
+      if (groupsDown) return { status: 500, text: async () => JSON.stringify({ success: false, message: "busy" }) };
+    }
+    return prev(input, init);
+  });
+  await f.module.refreshDue(now);
+  groupsDown = true;
+  now += 6 * 60000; // 目录到期，这一轮重读时分组读不到
+  await f.module.refreshDue(now);
+  groupsDown = false;
+  now += 60000;
+  const before = groupReads;
+  await f.module.refreshDue(now);
+  assert.equal(groupReads - before, 1, "分组没读到的那份没进缓存，下一轮照常重读");
+  now += 60000;
+  const after = groupReads;
+  await f.module.refreshDue(now);
+  assert.equal(groupReads - after, 0, "读全了的照常缓存 5 分钟");
+});
+
+test("P1b 上游的 Key 目录不带 user_id：照旧挡住不结，要人处理「对方的版本不支持这项功能」，不说会自动再读", async (t) => {
+  const now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/token/") {
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { total: 3, items: [
+        { id: 9, name: "stable", status: 1, group: "g1", cross_group_retry: false },
+        { id: 10, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+        { id: 11, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } }) };
+    }
+    return prev(input, init);
+  });
+  const [row] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", force: true, origin: "manual" })).results;
+  assert.deepEqual([row.health.code, row.calculation.profitUsd], ["UPSTREAM_FEATURE_UNSUPPORTED", null]);
+  assert.equal(reconciliationIssue(row.health.code).kind, "action", "要人处理");
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.length, 0, "不结账");
+});
+
+test("P1b 结账那一轮先把要结的上游全部重读：quota_per_unit 在两次轮询之间变了，账本用新值", async (t) => {
+  // 绑定按上海时区算一天；10-09 这天在 16:00Z 结束，过 15 分钟才结账
+  let now = Date.parse("2026-10-09T16:01:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  let quotaPerUnit = 100;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/status") {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota_per_unit: quotaPerUnit, version: "v" } }) };
+    }
+    return prev(input, init);
+  });
+  const statusReads = () => f.state.requests.filter((request) => request.host === "upstream.test" && request.path === "/api/status").length;
+  const settledDay = () => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-09");
+
+  await f.module.refreshDue(now);
+  assert.equal(settledDay().length, 0, "还没到结账的时刻");
+  // 两次轮询之间上游改了 quota_per_unit；目录到期重读时沿用旧的 /api/status
+  quotaPerUnit = 200;
+  now += 6 * 60000;
+  let before = statusReads();
+  await f.module.refreshDue(now);
+  assert.equal(statusReads() - before, 0, "平常的轮询沿用 /api/status");
+  assert.equal(settledDay().length, 0);
+
+  now += 9 * 60000;
+  before = statusReads();
+  await f.module.refreshDue(now);
+  assert.equal(statusReads() - before, 1, "结账那一轮现读 /api/status");
+  const [entry] = settledDay();
+  assert.ok(entry, "这一轮结了账");
+  assert.equal(Number(entry.cost_usd), f.state.upstreamQuota / 200, "账本用新的 quota_per_unit");
+});
+
+test("P1b 结账那一轮先重读的是要结账的那条绑定的上游：它不排第一、在另一个时区，结账前 quota_per_unit 改了，账本照样用新值", async (t) => {
+  // rr_two 改成洛杉矶时区：它的 10-09 在 10-10 07:00Z 结束，07:15Z 以后结账；排在前面的 rr_live（上海）那时早就结完了
+  let now = Date.parse("2026-10-10T06:50:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  f.rows.find((row) => row.id === "rr_two").timezone = "America/Los_Angeles";
+  let quotaPerUnit = 100;
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "upstream.test" && url.pathname === "/api/status") {
+      f.state.requests.push({ host: url.host, path: url.pathname });
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota_per_unit: quotaPerUnit, version: "v" } }) };
+    }
+    return prev(input, init);
+  });
+  const statusReads = () => f.state.requests.filter((request) => request.host === "upstream.test" && request.path === "/api/status").length;
+  const settled = (ruleId, day) => f.state.ledger.filter((row) => row.rule_id === ruleId && row.bill_date === day);
+
+  // 06:50 第一轮读了 /api/status（30 分钟内沿用）；之后每 10 分钟一轮
+  await f.module.refreshDue(now);
+  assert.equal(settled("rr_live", "2026-10-09").length, 1, "排在第一的 rr_live 这时已经结完");
+  for (const at of ["07:00", "07:10"]) {
+    now = Date.parse(`2026-10-10T${at}:00Z`);
+    if (at === "07:00") quotaPerUnit = 200; // 两次读 /api/status 之间上游改了 quota_per_unit
+    const before = statusReads();
+    await f.module.refreshDue(now);
+    assert.equal(statusReads() - before, 0, `${at} 平常的轮询沿用 06:50 读的 /api/status`);
+  }
+  assert.equal(settled("rr_two", "2026-10-09").length, 0, "rr_two 的 10-09 还没到结账的时刻");
+  // 07:16：只有 rr_two 要结账（离上次读 /api/status 26 分钟，还没到 30 分钟），它的上游要先重读
+  now = Date.parse("2026-10-10T07:16:00Z");
+  const before = statusReads();
+  await f.module.refreshDue(now);
+  assert.equal(statusReads() - before, 1, "结账那一轮现读 /api/status");
+  const [entry] = settled("rr_two", "2026-10-09");
+  assert.ok(entry, "这一轮结了 rr_two 的 10-09");
+  assert.equal(Number(entry.cost_usd), f.state.upstreamQuota / 200, "账本用新的 quota_per_unit");
+});
+
 test("B1 结果缓存按请求比：「今天」过了半分钟再单独重读一条，别的绑定照样用缓存里的账单（截止点不同也是同一段）", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now });
@@ -5179,7 +5477,7 @@ test("U05首次局部缺其余账单证据为unknown，0规则仍0/10；凭据/K
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(input);
     if (url.host === "upstream.test" && url.pathname === "/api/token/") return { status: 200, text: async () => JSON.stringify({ success: true,
-      data: { total: 3, items: f.rows.map((row) => ({ id: row.token_id, name: row.id === "rr_two" ? "changed-name" : row.token_name, group: "g1", status: 1 })) } }) };
+      data: { total: 3, items: f.rows.map((row) => ({ id: row.token_id, user_id: 7, name: row.id === "rr_two" ? "changed-name" : row.token_name, group: "g1", status: 1 })) } }) };
     return oldFetch(input, init);
   });
   const keyChanged = await f.module.queryRules({ ruleIds: ["rr_live"] });
@@ -5590,7 +5888,7 @@ function upstreamReadFixture(t, type = "newapi") {
     if (url.pathname === "/api/status") return reply(200, { quota_per_unit: 100, version: "deployment-v1" });
     if (url.pathname === "/api/user/self/groups") return reply(200, { g: { ratio: 1 } });
     if (url.pathname === "/api/token/") return state.directoryError ? reply(403, null)
-      : reply(200, { total: 1, items: [{ id: 9, name: "actual-key", status: 1, group: "g", key: "raw-call-secret" }] });
+      : reply(200, { total: 1, items: [{ id: 9, user_id: init.headers?.["New-Api-User"], name: "actual-key", status: 1, group: "g", key: "raw-call-secret" }] });
     if (url.pathname === "/api/log/self/stat") return reply(200, { quota: state.quota, accessToken: "raw-secret" });
     if (url.pathname === "/api/v1/settings/public") return reply(200, { turnstile_enabled: false });
     if (url.pathname === "/api/v1/auth/login") return reply(200, { access_token: "fresh-auto-jwt", refresh_token: "fresh-auto-refresh", expires_in: 3600 });
@@ -6240,9 +6538,9 @@ test("4a 固定采购上游：Key 账单取不到或为空只作参考，毛利 
 test("C1 成本计法在提前返回之前就定：固定成本、锚定过的上游一侧读不到（Key 用不了、目录或身份读不到、上游账号换了人），只作参考，毛利 = 收入、照常结账，不拿读到的目录当证据；本站一侧、没锚定过的照旧挡；按用量的照旧挡", async (t) => {
   const reply = (host, pathname, body) => ({ host, pathname, body });
   const keyDisabled = reply("upstream.test", "/api/token/", { success: true, data: { total: 3, items: [
-    { id: 9, name: "stable", status: 2, group: "g1", cross_group_retry: false },
-    { id: 10, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
-    { id: 11, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } });
+    { id: 9, user_id: 7, name: "stable", status: 2, group: "g1", cross_group_retry: false },
+    { id: 10, user_id: 7, name: "stable-rr_two", status: 1, group: "g1", cross_group_retry: false },
+    { id: 11, user_id: 7, name: "stable-rr_three", status: 1, group: "g1", cross_group_retry: false }] } });
   // [说明, 固定成本时要有的上游侧参考问题码, 按用量时的健康码, 设置]
   const cases = [
     ["Key 停用了", "KEY_INVALID_OR_DENIED", "KEY_INVALID_OR_DENIED", { replies: [keyDisabled] }],
@@ -6251,7 +6549,7 @@ test("C1 成本计法在提前返回之前就定：固定成本、锚定过的�
     ["上游账号换了人", "SOURCE_BINDING_UNCONFIRMED", "SOURCE_BINDING_UNCONFIRMED", { replies: [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } })] }],
     // 换成的 8 号账号里也有一把 id 9 的 Key，名字不同：不能拿它来显示、记账
     ["上游账号换了人，新账号里 id 相同的 Key 名字不同", "KEY_INVALID_OR_DENIED", "KEY_INVALID_OR_DENIED", { replies: [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } }),
-      reply("upstream.test", "/api/token/", { success: true, data: { total: 1, items: [{ id: 9, name: "别人的 Key", status: 1, group: "g1", cross_group_retry: false }] } })] }],
+      reply("upstream.test", "/api/token/", { success: true, data: { total: 1, items: [{ id: 9, user_id: 8, name: "别人的 Key", status: 1, group: "g1", cross_group_retry: false }] } })] }],
     ["本站读不到（本站一侧照旧挡）", null, "OWN_BILLING_UNAVAILABLE", { ownDown: true, blocksFixed: true }],
     ["本站账号换了人（本站一侧照旧挡）", null, "SOURCE_BINDING_UNCONFIRMED", { blocksFixed: true, replies: [reply("own.test", "/api/user/self", { success: true, data: { id: 9 } })] }],
     ["没锚定过、上游账号身份读不到（照旧挡）", null, "UPSTREAM_DATA_UNAVAILABLE", { unanchored: "canonicalKey", blocksFixed: true, replies: [reply("upstream.test", "/api/user/self", { success: false })] }],
