@@ -5,6 +5,10 @@ import {
   queryNewApiStatus,
   queryKeyReconciliationStat,
   queryOwnChannelRevenue,
+  queryOwnLogSource,
+  queryOwnLogSourceTotal,
+  queryOwnUserChannelStat,
+  OWN_CHANNEL_TEST_TOKEN_NAMES,
   queryOwnChannels,
   queryOwnLatestLog,
   queryAccountIdentity,
@@ -13,6 +17,7 @@ import {
 import {
   RECONCILIATION_BILLING_SOURCE,
   RECONCILIATION_CALCULATION_VERSION,
+  RECONCILIATION_SETTLE_DELAY_MS,
   reconciliationIssueLabel,
   reconciliationIssue,
   fillIssueCopy,
@@ -32,6 +37,7 @@ import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerDecimal, ledgerEntryForSettlement, ledgerSettlement } from "../lib/reconciliation-ledger.js";
+import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
 import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, isSettleableWindow, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
@@ -39,7 +45,7 @@ import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconc
   summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
 import { costBasisOf, isConfiguredRate, rateSnapshotOf, ratesFor } from "../lib/profit.js";
 import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftedDayStartInTz } from "../lib/business-time.js";
-import { selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
+import { readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 
 export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
@@ -458,6 +464,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   //   observationWrites：每条绑定最近一次写下的「今天」观测快照的内容指纹和写入时刻
   const ownActivity = (rt._reconciliationOwnActivity ||= new Map());
   const ownRevenueCache = (rt._reconciliationOwnRevenue ||= new Map());
+  // ownExclusion：各自营站点每段窗口里管理员自用、渠道测试日志的累计（每个来源：按渠道的额度、翻到的最大编号），「今天」接着翻、结账用它对账
+  const ownExclusionCache = (rt._reconciliationOwnExclusion ||= new Map());
   const observationWrites = (rt._reconciliationObservationWrites ||= new Map());
   // 出了异常、下一轮要把分组、Key 目录和身份全部重读的上游：Key 账单报错、渠道有收入而 Key 用量为 0、目录里找不到绑定的 Key
   const staleMetadata = (rt._reconciliationStaleMetadata ||= new Set());
@@ -751,14 +759,207 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }));
   }
 
+  // 一段窗口里各渠道不算收入的额度，从渠道收入里减掉（own-revenue-plan 第一节，用户 10-25 定：和运营总览、自营业务同一个规矩）：
+  // 管理员账号（用户列表里 role ≥ 10，判断在 server/own-helpers.js，和那两处共用）自己花的钱；标成转售的管理员 Key 照样算收入，不减；
+  // 兜底再减渠道测试记录（type 2、token_id 0、「模型测试」/「Model test」）里不在管理员名下的，管理员名下的已经在上一条里，不减两次。
+  // 取数：每个管理员、每个测试名字各是一个「来源」，读管理端日志列表按渠道本地加（stat 不能按渠道分组）。
+  // 日志是整个站点的，和哪条绑定无关，同一个站点、同一个窗口起点的各条绑定共用一份累计。
+  // - 轮询（今天）：按各来源上次翻到的最大编号接着翻，每个来源平时 1 个请求；30 秒内刚读过的直接沿用（几条绑定同一轮来，
+  //   晚到的那几秒下一轮补上，只影响今天的实时数）；
+  // - 结账（settle）：先要一份现在读的管理员名单；每个来源先查全站这段窗口的总额度（/api/log/stat），是 0 就没有，不翻列表；
+  //   不是 0 就翻到窗口终点，累计的行额度合计和总额度相等才用，不等整段重翻。累计只在内存里，重启以后那天整段重翻；
+  // - 窗口比记下的短（终点更早）：不能接着用，整段读一次，不记。
+  // 读失败（用户列表、任何一个来源）直接抛，queryOwnChannelRevenue 把这一段所有渠道当读不到，不拿没减的数当收入；
+  // 只有「今天」碰到短暂失败（网络错、5xx、429）时 10 分钟内沿用上一份，沿用的不写进「今天」的收入缓存。管理员名单、转售 Key 变了：键里带转售 Key，名单变了按来源重新算，不沿用旧来源的累计。
+  const OWN_EXCLUSION_REUSE_MS = 30000;
+  const OWN_EXCLUSION_STALE_OK_MS = 10 * 60000;
+  // 同一个窗口起点留 15 分钟内读到的状态（最多 120 份，按终点排）：一轮里几十条绑定读到这里的先后和各自终点的先后不一样，
+  // 只留最近 4 份会被终点晚的挤掉，终点早的那条找不到可以接着用的，整段重读（审核 CI：每轮 474 页）
+  const OWN_EXCLUSION_STATE_KEEP_MS = 15 * 60000, OWN_EXCLUSION_STATE_MAX = 120;
+  // 只沿用短暂失败：网络错、5xx、429（读取这一层的码是 NETWORK_UNREACHABLE、UPSTREAM_REQUEST_FAILED）；令牌作废/少权限（401、403）、
+  // 程序算出负数这类不会自己好的不沿用。用户列表那层外面包着 OWN_INCOME_UNCONFIRMED，要看包在里面的原因
+  const isTransientOwnReadFailure = (error) => [error, error?.cause].some((item) => ["NETWORK_UNREACHABLE", "UPSTREAM_REQUEST_FAILED"].includes(item?.code))
+    && ![error, error?.cause].some((item) => ["AUTHENTICATION_FAILED", "UPSTREAM_AUTH_DENIED"].includes(item?.code) || String(item?.code || "").startsWith("ACCESS_TOKEN_"));
+  const OWN_EXCLUSION_VERIFIED_REUSE_MS = 10 * 60000;
+  const OWN_EXCLUSION_FALLBACK_REUSE_MS = 10 * 60000;
+  function ownExclusion(own, window, { settle = false, channelIds = [] } = {}) {
+    const wantedChannels = [...new Set(channelIds.map(Number))];
+    // 沿用的结果要覆盖这次要算的渠道：翻页读的是全站所有渠道（"all"），按渠道 stat 读的只有当时要算的那几个
+    const covers = (coverage) => coverage === "all" || wantedChannels.every((id) => coverage.has(id));
+    const resold = resoldAdminKeysOf(own).map((key) => `${key.username}\u0000${key.tokenName}`).sort();
+    const key = JSON.stringify([own.id, credentialFingerprint(own), window.startMs, window.timezone, resold]);
+    let entry = ownExclusionCache.get(key);
+    if (!entry) {
+      entry = { startMs: window.startMs, tail: Promise.resolve(), states: [], pending: new Map() };
+      ownExclusionCache.set(key, entry);
+      // 按真实时间清（比「本月」最长的范围还早的才删）；按本次窗口起点清的话，多天范围里别的块的进度会被删掉（审核 R1 低-2）
+      for (const [oldKey, old] of ownExclusionCache) if (old.startMs < Date.now() - 35 * DAY_MS) ownExclusionCache.delete(oldKey);
+    }
+    const task = entry.tail.then(async () => {
+      // 同一个窗口起点留最近几份读到的状态（按终点排）：同一轮里几条绑定的「今天」终点差几秒，后定终点的先记下以后，先定终点的那条也能接着用
+      // 终点不晚于自己的那一份，不用整段重读（审核 R1 中-4）
+      const prior = [...entry.states].reverse().find((state) => state.endMs <= window.endMs) ?? null;
+      // 窗口终点比记下的晚得多（从同一天起点查多天范围）不能直接用，要接着翻到新的终点（审核 R1：少减过 49430 额度）
+      if (!settle && prior && Date.now() - prior.readAt < OWN_EXCLUSION_REUSE_MS && window.endMs - prior.endMs < OWN_EXCLUSION_REUSE_MS && covers(prior.result.coverage)) return prior.result;
+      // 同一个站点同一天，别的绑定刚对过账：结的是同一段窗口，直接用，不再每条绑定各查一遍（每个站每天每个来源一个 stat）
+      if (settle && prior?.verifiedEndMs === window.endMs && Date.now() - prior.readAt < OWN_EXCLUSION_VERIFIED_REUSE_MS && covers(prior.result.coverage)) return prior.result;
+      const { adminSet } = await readOwnAdminDirectory(rt, own, { fresh: settle });
+      const sources = [...[...adminSet].sort().map((name) => ({ kind: "user", name })), ...OWN_CHANNEL_TEST_TOKEN_NAMES.map((name) => ({ kind: "token", name }))];
+      const partKey = (source) => `${source.kind}:${source.name}`;
+      const parts = new Map();
+      // 一个来源接一个来源读（不并发）：每段窗口的自营一侧同一时刻只多一个请求，几段并行时总数不会翻倍
+      await mapWithConcurrency(sources, 1, async (source) => {
+        const id = partKey(source);
+        const before = prior?.parts.get(id) ?? null;
+        const base = { kind: source.kind, name: source.name, startMs: window.startMs, endMs: window.endMs };
+        // 窗口已经在过去的整段读：翻到一半失败（限流、网络）把进度记下，下一轮从下一页接着翻，不从头（审核 R1：一天约 432 页，限流 360 个/180 秒）
+        const closed = window.endMs <= Date.now() - RECONCILIATION_SETTLE_DELAY_MS;
+        // 今天的窗口终点每轮往后挪：进度记在「今天」一份上，接着翻时仍用当时的终点（用新终点，页码会被新写进来的行挤歪、前面几页的新行漏掉），
+        // 翻完再按编号增量补一次到现在（审核 R1 中-2：一个来源一天超过约 360 页，限流下每轮从第 1 页重来永远翻不完）
+        const pendingKey = JSON.stringify(closed ? [id, window.endMs] : [id, "open"]);
+        const read = async (from, shouldContinue = null) => {
+          const resume = !from ? entry.pending.get(pendingKey) ?? null : null;
+          const readEndMs = resume?.endMs ?? window.endMs;
+          let usedEndMs = readEndMs; // 补页那一次失败，进度记的是补页用的终点，不是前面翻的那个（审核 R1 中-2：不然补到一半的页下一轮漏掉）
+          try {
+            let part = await queryOwnLogSource(own, { ...base, endMs: readEndMs, previous: from, resume, shouldContinue });
+            entry.pending.delete(pendingKey);
+            if (part && readEndMs < window.endMs) {
+              usedEndMs = window.endMs;
+              part = await queryOwnLogSource(own, { ...base, previous: part });
+            }
+            return part;
+          } catch (err) {
+            if (!from && err?.resume) entry.pending.set(pendingKey, { ...err.resume, endMs: usedEndMs });
+            throw err;
+          }
+        };
+        // 窗口已经在过去的、整段读用户来源：翻页和按渠道查 stat 挑请求少的（总指挥、审核 10-25）。翻页要 ⌈行数 ÷ 100⌉ 页（行数先用 page_size=1 的
+        // total 拿，老版本不给 total 就只能翻页）；按渠道 stat 是「要算的渠道数 × （1 + 这个用户名下转售的 Key 数）」次，和日志条数无关。
+        // 按渠道 stat 读的只覆盖当时要算的渠道，后面别的绑定要算别的渠道时合起来重读。结果和选法打进日志（debug），方便量。
+        const listBefore = before && before.coverage === undefined ? before : null;
+        // 按渠道 stat 读（只覆盖 channels 这几个渠道）
+        // into：已经按渠道 stat 读过的那一份，只补查它没覆盖的渠道，合进去（不重查已经查过的，审核 R1 中-3）
+        const statRead = async (channels, tokens, total, rows = null, into = null) => {
+          const out = into
+            ? { ...into, byChannel: new Map(into.byChannel), byToken: new Map([...into.byToken].map(([key, value]) => [key, new Map(value)])), coverage: new Set([...into.coverage, ...channels]) }
+            : { byChannel: new Map(), byToken: new Map(), byUser: new Map(), seen: total ?? await queryOwnLogSourceTotal(own, base), maxId: null, coverage: new Set(channels), rows };
+          for (const channel of channels) {
+            const quota = await queryOwnUserChannelStat(own, { name: source.name, channel, startMs: window.startMs, endMs: window.endMs });
+            if (quota) out.byChannel.set(channel, quota);
+            for (const token of tokens) {
+              const tokenQuota = await queryOwnUserChannelStat(own, { name: source.name, channel, tokenName: token, startMs: window.startMs, endMs: window.endMs });
+              if (tokenQuota) { if (!out.byToken.has(token)) out.byToken.set(token, new Map()); out.byToken.get(token).set(channel, tokenQuota); }
+            }
+          }
+          return out;
+        };
+        // 整段读这个来源：翻页读第一页就知道行数（total）；这时觉得翻页比按渠道 stat 贵，就停下改按渠道 stat（第一页已经读了，没有额外请求）
+        const readSmart = async (total) => {
+          if (source.kind !== "user" || !closed || listBefore || !wantedChannels.length) return read(listBefore);
+          const tokens = resoldAdminKeysOf(own).filter((key) => key.username === source.name).map((key) => String(key.tokenName));
+          // 已经按渠道 stat 读过：覆盖了要算的渠道就沿用（结账时全站总额度没变才沿用，变了说明有晚到的日志，重读）；
+          // 没覆盖的只补查缺的渠道，不是一条绑定换一次并集就整个重查（K 条单渠道绑定会是 1+2+…+K 次）
+          if (before?.coverage instanceof Set && sameEnd) {
+            const missing = wantedChannels.filter((channel) => !before.coverage.has(channel));
+            if (!missing.length && (total == null || before.seen === total)) return before;
+            const cost = missing.length * (1 + tokens.length);
+            if (before.seen === (total ?? before.seen) && (before.rows == null ? true : cost < Math.ceil(before.rows / 100))) return statRead(missing, tokens, total ?? before.seen, before.rows, before);
+          }
+          const channels = [...new Set(wantedChannels)].sort((x, y) => x - y);
+          const statCost = channels.length * (1 + tokens.length);
+          let choice = null;
+          const part = await read(null, ({ total: rows }) => {
+            const pagesCost = rows == null ? Infinity : Math.ceil(rows / 100);
+            choice = { rows, pagesCost, statCost, useStat: statCost < pagesCost };
+            // 选法变了才打一行（不带用户名和站点地址）
+            const line = `${choice.useStat ? "按渠道 stat" : "翻页"}`;
+            if (entry.lastChoice?.get(id) !== line) {
+              (entry.lastChoice ||= new Map()).set(id, line);
+              console.debug(`自营收入：管理员日志整段读 来源 ${source.kind}#${[...adminSet].sort().indexOf(source.name)} 行数 ${rows ?? "未知"} 翻页约 ${pagesCost} 次 按渠道 stat ${statCost} 次 → ${line}`);
+            }
+            return !choice.useStat;
+          });
+          return part ?? statRead(channels, tokens, total, choice?.rows ?? null);
+        };
+        // 渠道测试名字这个来源只是兜底：测试日志大多都记在管理员名下，管理员那一条已经扣了，兜底来源一条都不用扣，翻几百页是白翻（审核 CI：三个接口超时）。
+        // 先用 stat 比一下：这个测试名字在窗口里的总额度 T，和各管理员名下的合计 S（每个管理员一次 stat）；T == S 说明全在管理员名下，
+        // 这个来源不翻页、扣 0；T > S（有不在管理员名下的）才去翻。一共 1 + 管理员数 个 stat，代替几百页
+        const emptyPart = (seen) => ({ byChannel: new Map(), byToken: new Map(), byUser: new Map(), seen, maxId: null });
+        const tokenOnlyInAdmins = async (known) => {
+          const total = known ?? await queryOwnLogSourceTotal(own, base);
+          if (total === 0) return emptyPart(0);
+          let inAdmins = 0;
+          for (const name of adminSet) inAdmins += await queryOwnLogSourceTotal(own, { ...base, username: name });
+          return inAdmins === total ? emptyPart(total) : null;
+        };
+        let part;
+        // 今天（轮询）：渠道测试名字这两个来源只是兜底（测试大多记在管理员名下，管理员那一条已经扣了），10 分钟内读过的不再读，
+        // 每轮平时只读管理员那几个来源；结账（settle）一定按总额度对账，那时的数是准的
+        // 过去的窗口（整段在等待期以后才读的）不会再有新日志：读过就一直沿用，只在按渠道 stat 读的那份没覆盖要算的渠道时补查缺的
+        const sameEnd = prior?.endMs === window.endMs; // 沿用的那份读的是同一个终点才能用
+        const doneBefore = before && sameEnd && closed && before.readAt >= window.endMs + RECONCILIATION_SETTLE_DELAY_MS
+          && (!(before.coverage instanceof Set) || wantedChannels.every((channel) => before.coverage.has(channel)));
+        if (!settle) part = doneBefore || (source.kind === "token" && before && Date.now() - before.readAt < OWN_EXCLUSION_FALLBACK_REUSE_MS && (!closed || sameEnd)) ? before
+          : { ...((source.kind === "token" && await tokenOnlyInAdmins(null)) || await readSmart(null)), readAt: Date.now() };
+        else {
+          const total = await queryOwnLogSourceTotal(own, base);
+          if (total === 0) part = emptyPart(0);
+          else if (source.kind === "token" && (part = await tokenOnlyInAdmins(total))) { /* 全在管理员名下：不翻页 */ }
+          else {
+            part = await readSmart(total);
+            // 累计和总额度对不上：只重翻这一个来源；本来就是整段翻的（没有上一份累计）再翻一遍也一样，不重翻
+            if (part.seen !== total && listBefore) part = await read(null);
+          }
+        }
+        parts.set(id, part.readAt == null ? { ...part, readAt: Date.now() } : part);
+      });
+      const byChannel = new Map();
+      const add = (channel, quota) => byChannel.set(channel, (byChannel.get(channel) ?? 0) + quota);
+      for (const source of sources) {
+        const part = parts.get(partKey(source));
+        for (const [channel, quota] of part.byChannel) add(channel, quota);
+        if (source.kind === "user") {
+          // 转售的管理员 Key 照样算收入：它名下的行不减
+          for (const key of resoldAdminKeysOf(own)) {
+            if (key.username !== source.name) continue;
+            // 接口按名字筛是不分大小写的（MySQL 默认排序规则），这里也不分，和按渠道 stat、运营总览一致（审核 R1 低-5）
+            for (const [token, channels] of part.byToken) if (token.toLowerCase() === String(key.tokenName).toLowerCase()) for (const [channel, quota] of channels) add(channel, -quota);
+          }
+        } else {
+          // 管理员名下的测试记录已经在管理员那一条里减过了，不减两次
+          for (const [user, channels] of part.byUser) if (adminSet.has(user)) for (const [channel, quota] of channels) add(channel, -quota);
+        }
+      }
+      for (const [channel, quota] of byChannel) if (quota < 0) throw new Error("不算收入的额度算出负数");
+      // 这份结果覆盖哪些渠道：全是翻页读的就是所有渠道；有按渠道 stat 读的，只覆盖那几个渠道的交集
+      let coverage = "all";
+      for (const part of parts.values()) if (part.coverage instanceof Set) coverage = coverage === "all" ? part.coverage : new Set([...coverage].filter((id) => part.coverage.has(id)));
+      const result = { byChannel, coverage };
+      entry.states = [...entry.states.filter((state) => state.endMs !== window.endMs), { parts, result, endMs: window.endMs, readAt: Date.now(), ...(settle ? { verifiedEndMs: window.endMs } : {}) }]
+        .filter((state, index, list) => Date.now() - state.readAt < OWN_EXCLUSION_STATE_KEEP_MS || index >= list.length - 1)
+        .sort((a, b) => a.endMs - b.endMs).slice(-OWN_EXCLUSION_STATE_MAX);
+      return result;
+    }).catch((error) => {
+      // 「今天」读用户列表或管理员日志短暂失败：10 分钟内沿用上一份（只影响今天那一格，不推送），超过才读不到（总指挥 10-25）。令牌作废、少权限照原样抛
+      const live = window.endMs > Date.now() - RECONCILIATION_SETTLE_DELAY_MS;
+      const lastGood = [...entry.states].sort((a, b) => b.readAt - a.readAt)[0];
+      if (!settle && live && lastGood && isTransientOwnReadFailure(error) && Date.now() - lastGood.readAt < OWN_EXCLUSION_STALE_OK_MS && covers(lastGood.result.coverage)) return { ...lastGood.result, stale: true };
+      throw error;
+    });
+    entry.tail = task.catch(() => {});
+    return task;
+  }
+
   // 一段窗口的渠道收费。reuse 时（只有轮询观测今天）读全了就记下（读到哪一刻为止）；记下的那份读到的时刻
   // 不早于这个自营站点没有新消费的起点，就沿用它，窗口终点换成这次的——这段时间里没有新的消费日志，每个渠道的合计都不会变。
   // 沿用前照样读一次 /api/status（同一轮共用）：额度换算变了、或者读不到，就照旧逐个读，不拿旧的换算算钱。
   // 这一轮里「查过全站以后、轮到这条绑定之前」那几秒的新消费，下一轮查全站时会发现，再照旧逐个读。
-  async function ownRevenue(own, rule, segmentWindow, { loadStatus, registry, reuse }) {
+  async function ownRevenueWindow(own, rule, segmentWindow, { loadStatus, registry, reuse, settle = false }) {
     const channelIds = rule.channels.map((channel) => channel.channelId);
     // 键里带凭据指纹，和 markQuietOwnStations 里「换了凭据就不算安静」互为备份：换了自营站点的凭据，任一道都能挡住沿用旧的
-    const key = JSON.stringify([own.id, credentialFingerprint(own), [...channelIds].sort((a, b) => a - b), segmentWindow.startMs, segmentWindow.timezone]);
+    const key = JSON.stringify([own.id, credentialFingerprint(own), [...channelIds].sort((a, b) => a - b), segmentWindow.startMs, segmentWindow.timezone,
+      resoldAdminKeysOf(own).map((item) => `${item.username}\u0000${item.tokenName}`).sort()]); // 转售 Key 改了马上换键（审核 R1 低-6）
     const cached = ownRevenueCache.get(key), quiet = registry?.ownQuietFrom?.get(own.id);
     // 最新那条日志的时刻（站点的钟）也要在记下的那份里：站点时钟偏快时，记下那份读到的时刻还没包住它，照旧现读
     if (reuse && cached && quiet && cached.endMs >= quiet.from && cached.endMs <= segmentWindow.endMs
@@ -766,14 +967,51 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const status = await loadStatus().catch(() => null);
       if (status && status.quotaPerUnit === cached.result.quotaPerUnit) return { ...cached.result, window: { ...cached.result.window, endMs: segmentWindow.endMs } };
     }
-    const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus });
+    let reusedStale = false; // 管理员自用那一份是读失败后沿用的：这一次的结果不进缓存，不然站点一直没有新消费时超过 10 分钟也不换
+    const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus,
+      exclusion: async () => { const read = await ownExclusion(own, segmentWindow, { settle, channelIds }); if (read.stale) reusedStale = true; return read; } });
     // 只有轮询观测今天会沿用，别的窗口（昨天、结账、自定义、近 7 天、本月）不记
-    if (reuse && result.state === "complete" && !result.emptySecondWindow) {
+    if (reuse && result.state === "complete" && !result.emptySecondWindow && !reusedStale) {
       ownRevenueCache.set(key, { endMs: segmentWindow.endMs, result });
       // 只留今天的：键里有窗口起点，过了零点的旧键不会再用到
       for (const [cachedKey, entry] of ownRevenueCache) if (entry.endMs < segmentWindow.endMs - 2 * DAY_MS) ownRevenueCache.delete(cachedKey);
     }
     return result;
+  }
+
+  // 一段窗口的渠道收入，多天的按天拼（总指挥 10-25 定）：整天的块先看账本，已经固定的用账本里存的按渠道额度（R1 以后存的是扣过管理员自用的净额，
+  // R1 以前固定的日子里是没扣的，不回头改），只有没固定的块现读；连着的没固定的块合成一段读，不一天一天读。这样近 7 天、本月不用把整段日志翻一遍
+  // （撞页数上限、限流）。一天以内（今天、昨天、结账）就是一块，不拼。拼的代码在 lib/reconciliation-stitch.js，以后 F、G 也用。
+  async function ownRevenue(own, rule, segmentWindow, options) {
+    const pieces = splitWindowByDays(segmentWindow);
+    if (pieces.length < 2) return ownRevenueWindow(own, rule, segmentWindow, options);
+    const wanted = rule.channels.map((channel) => channel.channelId);
+    const fixed = await mapWithConcurrency(pieces, 4, async (piece) => {
+      if (!piece.wholeDay) return null;
+      try {
+        const entry = await repository.latestLedgerEntry(rule.id, piece);
+        const downstream = entry && ledgerSettlement(entry)?.result?.downstream;
+        // 账本那一天的渠道要覆盖现在要算的每个渠道（后来加过渠道的话，那一天缺的渠道不能当 0），而且都是读全了的
+        if (!downstream || downstream.state !== "complete" || !wanted.every((id) => downstream.channels?.some((row) => row.channelId === id && row.billingState === "complete" && row.amountUsd != null))) return null;
+        return { ...downstream, startMs: piece.startMs };
+      } catch { return null; }
+    });
+    const groups = [];
+    pieces.forEach((piece, index) => {
+      if (fixed[index]) return;
+      const last = groups.at(-1);
+      if (last && last.endMs === piece.startMs) last.endMs = piece.endMs;
+      else groups.push({ startMs: piece.startMs, endMs: piece.endMs, index });
+    });
+    const live = await Promise.all(groups.map((group) => ownRevenueWindow(own, rule, { ...segmentWindow, startMs: group.startMs, endMs: group.endMs }, { ...options, reuse: false })));
+    // 不满一秒的头尾块读不出东西（emptySecondWindow）：不算一块；整段都是这样的就照原样返回
+    const readable = live.map((result, index) => ({ ...result, startMs: groups[index].startMs })).filter((result) => !result.emptySecondWindow);
+    if (!readable.length && !fixed.some(Boolean)) return live[0];
+    const merged = stitchChannelRevenue([...fixed.filter(Boolean), ...readable], wanted);
+    const first = [...readable, ...fixed.filter(Boolean)].find((result) => result.billingTimezone) ?? {};
+    return { ...merged,
+      billingSource: RECONCILIATION_BILLING_SOURCE, calculationVersion: RECONCILIATION_CALCULATION_VERSION,
+      window: segmentWindow, billingTimezone: first.billingTimezone ?? null };
   }
 
   function costOwnerFor(rule, canonicalKey, registry) {
@@ -1271,10 +1509,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         try {
           const [catalogue, results] = await Promise.all([
             ownChannelsFor(own, { force: force && !settle }).catch(() => null),
-            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => queryOwnChannelRevenue(own, {
-              channelIds: rule.channels.map((channel) => channel.channelId), startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone,
-              loadStatus: () => ownStatusFor(ownerRegistry, own),
-            }).catch(() => null)),
+            // 多天的范围也按天拼、带「其中管理员自用」，和别处同一条路（审核 R1 低-3）
+            mapWithConcurrency(applicable, 6, ({ window: segmentWindow }) => ownRevenue(own, rule, segmentWindow, { loadStatus: () => ownStatusFor(ownerRegistry, own), registry: ownerRegistry, reuse: false, settle })
+              .catch(() => null)),
           ]);
           const channelById = new Map((catalogue || []).map((channel) => [Number(channel.id), channel]));
           const channelsFor = (result) => rule.channels.map((channel) => {
@@ -1523,7 +1760,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
             : upstreamWindowFor(upstream, metadata, token, segmentWindow, { readOnly: !observe }).catch((error) => ({ error })),
           (ownAvailable
-            ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue })
+            ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle })
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
             .catch((error) => ({ error })),
         ]);
@@ -1595,6 +1832,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             quotaPerUnit: downstreamResult.quotaPerUnit,
             amountUsd: downstreamUnavailable ? null : downstreamUsd,
             knownAmountUsd: downstreamResult.knownAmountUsd,
+            // 这段收入里减掉的管理员自用（own-revenue-plan 第一节），计算明细「其中管理员自用 $x，不算收入」用；没有时是 0
+            adminUsageQuotaUnits: downstreamResult.adminUsageQuotaUnits ?? 0, adminUsageAmountUsd: downstreamResult.adminUsageAmountUsd ?? null,
+            // 这段里几天扣了管理员自用、几天没扣（R1 以前固定的账没扣）：页面据此写「已扣除…（部分日子没扣）」；现读的一段都是扣了的
+            adminUsageDays: downstreamResult.adminUsageDays ?? { deducted: 1, undeducted: 0 },
             state: downstreamResult.state,
             successfulCount: downstreamResult.successfulCount,
             expectedCount: downstreamResult.expectedCount,
@@ -1682,6 +1923,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           knownAmountUsd: completeDownstream ? downstreamUsd : segmentResults.reduce((sum, segment) => sum + (segment.downstream.knownAmountUsd ?? 0), 0) || (segmentResults.some((segment) => segment.downstream.knownAmountUsd != null) ? 0 : null),
           successfulCount: segmentResults.reduce((sum, segment) => sum + segment.downstream.successfulCount, 0),
           expectedCount: segmentResults.reduce((sum, segment) => sum + segment.downstream.expectedCount, 0),
+          // 各段减掉的管理员自用合起来（own-revenue-plan 第一节）：计算明细「其中管理员自用」；有一段换算读不到时整个读不到
+          adminUsageQuotaUnits: segmentResults.reduce((sum, segment) => sum + (segment.downstream.adminUsageQuotaUnits ?? 0), 0),
+          adminUsageAmountUsd: segmentResults.some((segment) => segment.downstream.adminUsageAmountUsd == null) ? null : segmentResults.reduce((sum, segment) => sum + segment.downstream.adminUsageAmountUsd, 0),
+          adminUsageDays: segmentResults.reduce((sum, segment) => ({ deducted: sum.deducted + (segment.downstream.adminUsageDays?.deducted ?? 1), undeducted: sum.undeducted + (segment.downstream.adminUsageDays?.undeducted ?? 0) }), { deducted: 0, undeducted: 0 }),
           billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION,
           observedAt: Date.now(), window: sideWindow("downstream"),
