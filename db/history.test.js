@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { History, dailyUsageRows } from "./history.js";
+import { History, dailyUsageRows, readPointsWithBaseline, usageDrops } from "./history.js";
 import { dayStartInTz } from "../lib/business-time.js";
 
 test("日汇总按后一快照归日，充值不计作消耗", () => {
@@ -188,5 +188,43 @@ test("预测：日均花费舍到分以后是 0（每天不到半分钱）就算
     assert.ok(fast.etaAt);
   } finally {
     Date.now = realNow;
+  }
+});
+
+test("余额消耗按组相加：窗口里第一个点和窗口前的基线比，充值不算，窗口外的点只当基线；几个上游互不串", () => {
+  const SLOT = 15 * 60000, start = 10 * SLOT;
+  const rows = [
+    { station_id: "a", t: start - 60000, remaining: 100 }, // 基线
+    { station_id: "a", t: start, remaining: 99 }, // 和基线比：掉 1
+    { station_id: "a", t: start + 60000, remaining: 98.5 }, // 同一组再掉 0.5
+    { station_id: "a", t: start + SLOT, remaining: 120 }, // 充值：不算，但这一组也出现（0）
+    { station_id: "a", t: start + SLOT + 60000, remaining: 119 }, // 掉 1
+    { station_id: "b", t: start + 30000, remaining: 50 }, // 没有基线：第一个点不算
+    { station_id: "b", t: start + 90000, remaining: 49.75 },
+    { station_id: "b", t: start + 3 * SLOT, remaining: 40 }, // 窗口以外：只更新基线，不计
+  ];
+  const drops = [...usageDrops(rows, start, start + 2 * SLOT, (t) => Math.floor(t / SLOT)).values()];
+  assert.deepEqual(drops, [{ stationId: "a", bucket: 10, usd: 1.5 }, { stationId: "a", bucket: 11, usd: 1 }, { stationId: "b", bucket: 10, usd: 0.25 }]);
+  // 日汇总是同一个算法按自然日分组
+  assert.deepEqual(dailyUsageRows(rows, start, start + 2 * SLOT, "UTC"), [{ stationId: "a", date: "1970-01-01", usd: 2.5 }, { stationId: "b", date: "1970-01-01", usd: 0.25 }]);
+});
+
+test("窗口内的原始快照：窗口按主键顺序读，基线每站一行，合并后基线排在这一站窗口里的点前面；不用 UNION 再排一次序", async () => {
+  const calls = [];
+  const pool = { query: async (sql, params) => {
+    calls.push({ sql, params });
+    if (sql.includes("MAX(t)")) return [[{ station_id: "b", t: 5, remaining: 9 }, { station_id: "a", t: 4, remaining: 8 }, { station_id: "z", t: 3, remaining: 7 }]];
+    return [[{ station_id: "a", t: 100, remaining: 7 }, { station_id: "a", t: 101, remaining: 6 }, { station_id: "b", t: 102, remaining: 5 }, { station_id: "c", t: 103, remaining: 4 }]];
+  } };
+  const rows = await readPointsWithBaseline(pool, ["a", "b", "c", "z"], 100);
+  assert.deepEqual(rows.map((row) => `${row.station_id}@${row.t}`), ["a@4", "a@100", "a@101", "b@5", "b@102", "c@103", "z@3"]);
+  assert.equal(calls.length, 2);
+  const [base, window] = [calls.find((c) => c.sql.includes("MAX(t)")), calls.find((c) => !c.sql.includes("MAX(t)"))];
+  assert.deepEqual(base.params, [["a", "b", "c", "z"], 100]);
+  assert.deepEqual(window.params, [["a", "b", "c", "z"], 100, Number.MAX_SAFE_INTEGER]);
+  assert.match(window.sql, /WHERE station_id IN \(\?\) AND t >= \? AND t < \?\s*ORDER BY station_id, t/);
+  for (const { sql } of calls) {
+    assert.doesNotMatch(sql, /UNION/);
+    assert.doesNotMatch(sql, /ORDER BY previous\.t DESC LIMIT 1/, "不再每个点一次相关子查询");
   }
 });
