@@ -9,6 +9,7 @@ export const POST = withAuth(async (request, rt) => {
   } catch (err) {
     const code = String(err?.code || "");
     if (!code.startsWith("UPSTREAM_MERGE_")) throw err;
-    return json({ error: err.message, code }, 409);
+    // 请求本身不对（缺编号、类型不对）回 400；清单变了、现在不能做回 409
+    return json({ error: err.message, code }, code === "UPSTREAM_MERGE_INVALID" ? 400 : 409);
   }
 });

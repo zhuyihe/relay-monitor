@@ -729,10 +729,13 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
 .jy-merge-record { display: flex; align-items: center; gap: 12px; }
 .jy-merge-record__when { flex: none; color: var(--jy-ink-3); font-size: 13px; }
 .jy-merge-record__text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.jy-merge-record__why { flex-basis: 100%; }
 @media (max-width: 767px) {
   .jy-merge-card__rows { grid-template-columns: 1fr; }
   .jy-merge-card__times { grid-column: 1; grid-row: auto; text-align: left; }
   .jy-merge-card__actions .ant-btn { min-height: 44px; }
   .jy-merge-record { flex-wrap: wrap; }
   .jy-merge-record .ant-btn { min-height: 44px; }
+  /* 提示条里的「查看」「去合并」、确认框里的按钮：手机上点的地方至少 44 高 */
+  .jy-merge-notice .ant-btn, .jy-merge-costline .ant-btn, .jy-merge-modal .ant-btn { min-height: 44px; }
 }

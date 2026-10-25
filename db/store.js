@@ -565,7 +565,13 @@ export class Store {
     );
   }
 
+  // 被合并掉的上游当「找不到」：合并以后没刷新的页面再拿它的 id 来建绑定、改设置，一律落空（合并记录、退回要看它用 getWithMerged）
   get(id) {
+    const station = this.getWithMerged(id);
+    return station && !station.mergedInto ? station : undefined;
+  }
+
+  getWithMerged(id) {
     return this.data.stations.find((s) => s.id === id);
   }
 
@@ -727,12 +733,15 @@ export class Store {
 
   // 合并重复的上游：留下的只改成本匹配别名，被合掉的记上 mergedInto；within(conn) 在同一个事务里改绑定、关联、写日志。
   // 三样一起提交或一起回滚，内存里的上游文档在提交以后才换（publish）
-  async mergeUpstreams({ retainedId, mergedIds, patches, within }) {
+  // patchesFor(retained, merged)：拿到锁以后按内存里这一刻的上游文档重新算改动，算不出（挡着的事又出现了、成员变了）就抛 UPSTREAM_MERGE_STALE，
+  // 算计划和拿锁之间有人给被合掉的上游加了固定成本、暂停了监控，不会被绕过去
+  async mergeUpstreams({ retainedId, mergedIds, patchesFor, within }) {
     const stale = () => Object.assign(new Error("上游在这期间变了，请重新看一遍清单"), { code: "UPSTREAM_MERGE_STALE" });
     return this.withStationLocks([retainedId, ...mergedIds], () => this._saveChange(() => {
-      const retained = this.get(retainedId), merged = mergedIds.map((id) => this.get(id));
+      const retained = this.getWithMerged(retainedId), merged = mergedIds.map((id) => this.getWithMerged(id));
       if (!retained || merged.some((s) => !s) || retained.mergedInto || merged.some((s) => s.mergedInto)
         || retained.archivedAt || merged.some((s) => s.archivedAt)) throw stale();
+      const patches = patchesFor(retained, merged);
       const next = new Map([[retainedId, { ...retained, ...patches.retained }], ...mergedIds.map((id, i) => [id, { ...merged[i], ...patches.merged[id] }])]);
       return {
         data: { ...this.data, stations: this.data.stations.map((s) => next.get(s.id) || s) },
@@ -750,7 +759,7 @@ export class Store {
   async unmergeUpstreams({ retainedId, mergedIds, costAliasesOf, within }) {
     const stale = () => Object.assign(new Error("上游在这期间变了，请刷新后再看"), { code: "UPSTREAM_MERGE_STALE" });
     return this.withStationLocks([retainedId, ...mergedIds], () => this._saveChange(() => {
-      const retained = this.get(retainedId), merged = mergedIds.map((id) => this.get(id));
+      const retained = this.getWithMerged(retainedId), merged = mergedIds.map((id) => this.getWithMerged(id));
       if (!retained || merged.some((s) => !s || s.mergedInto !== retainedId)) throw stale();
       const without = (s) => { const { mergedInto, mergedAt, ...rest } = s; return rest; };
       const costAliases = costAliasesOf(retained.costAliases || []);

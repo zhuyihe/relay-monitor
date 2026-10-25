@@ -45,10 +45,8 @@ const dumpAll = async (pool) => ({
   stations: await dump(pool, "stations", "id"),
 });
 
-test("合并重复上游：文档、绑定、关联、日志同一个事务；账本不动；改回以后和合并前逐字相同", { timeout: 60000 }, async (t) => {
-  const pool = mysql.createPool({ host: process.env.DB_HOST, port, user: process.env.DB_USER, password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME, connectionLimit: 8 });
-  t.after(() => pool.end());
+// 表和数据：a（最早）、b、c 是同一个账号的三个上游，d 是另一个账号；几条绑定、关联、账本、快照、历史点
+async function seedFixture(pool) {
   for (const table of TABLES) await pool.query(`DROP TABLE IF EXISTS ${table}`);
   await ensureSchema(pool);
 
@@ -61,8 +59,8 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
     await store._changeStation(station.id, (s) => { s.createdAt = CREATED[name]; });
     ids[name] = station.id;
   }
-  await store._changeStation(ids.b, (s) => { s.costAliases = ["http://internal-b"]; s.cnyPerUsd = 7; });
-  await store._changeStation(ids.a, (s) => { s.costAliases = ["http://internal-a"]; });
+  await store._changeStation(ids.b, (s) => { s.costAliases = ["http://internal-b"]; s.cnyPerUsd = 7.5; });
+  await store._changeStation(ids.a, (s) => { s.costAliases = ["http://internal-a"]; s.cnyPerUsd = 7; });
   const rt = { pool, store };
 
   const rule = (id, upstream, token, activeKey, canonicalKey = null, extra = {}) => pool.query(
@@ -83,6 +81,14 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
 
   // updated_at 是秒精度，测试跑得比一秒快：先拨到过去，合并要是动了它才看得出来
   await pool.query("UPDATE reconciliation_rules SET updated_at = TIMESTAMP('2026-01-01 00:00:00') + INTERVAL (id = 'r_a') DAY");
+  return { store, ids, rt };
+}
+
+test("合并重复上游：文档、绑定、关联、日志同一个事务；账本不动；改回以后和合并前逐字相同", { timeout: 60000 }, async (t) => {
+  const pool = mysql.createPool({ host: process.env.DB_HOST, port, user: process.env.DB_USER, password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME, connectionLimit: 8 });
+  t.after(() => pool.end());
+  const { store, ids, rt } = await seedFixture(pool);
   // 对账仓库读出来的绑定（页面、结账读的就是这个形状）：合并前后除了上游是谁，逐字相同，顺序也一样
   const reconciliation = new ReconciliationRepository(pool);
   const rulesView = async () => (await reconciliation.listRules({ includeArchived: true })).map((item) => ({ ...item, upstreamStationId: "*" }));
@@ -106,21 +112,25 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
     assert.deepEqual(await dumpAll(pool), before);
   });
 
-  await t.test("合并前后的成本估算：读成本估算页同一份每日消耗，每个上游按自己的汇率，合并后只算留下的", async () => {
+  await t.test("合并前后的成本估算：读成本估算页同一份每日消耗，窗口起点（近 7 天含今天往前 6 天、近 30 天往前 29 天）一天不多一天不少，每个上游按自己的汇率，合并后只算留下的", async () => {
     const today = dayKeyInTz(Date.now(), businessTimeZone());
-    const earlier = shiftDayLabel(today, -10);
-    for (const [date, usd] of [[today, 10], [earlier, 100]]) {
-      for (const id of [ids.a, ids.b, ids.c, ids.d]) await pool.query("INSERT INTO station_daily_usage (station_id, date, used_usd) VALUES (?, ?, ?)", [id, date, usd]);
-    }
+    const day = (n) => shiftDayLabel(today, -n);
+    // 留下的 a（汇率 7）、被合掉的 b（汇率 7.5）、c（没设汇率，没有记录）、别的账号 d：今天、-6、-7、-29、-30 五天，数各不相同，哪一天多算少算都对不上
+    const usage = { [ids.a]: [[0, 1], [6, 2], [7, 4], [29, 8], [30, 16]], [ids.b]: [[0, 10], [6, 20], [7, 40], [29, 80], [30, 160]], [ids.d]: [[0, 1000], [7, 1000]] };
+    for (const [id, rows] of Object.entries(usage)) for (const [back, usd] of rows) await pool.query("INSERT INTO station_daily_usage (station_id, date, used_usd) VALUES (?, ?, ?)", [id, day(back), usd]);
     try {
       const { groups } = await previewUpstreamMerges(rt);
       const [week, month] = groups[0].estimate.windows;
-      // 30 天里只有 2 天有记录：和成本估算页一样标估算（approx）
+      // 只有几天有记录：和成本估算页一样标估算（approx）
       assert.deepEqual([week.approx, month.approx], [true, true]);
-      assert.deepEqual([week.days, week.before.cny, week.after.cny], [7, 10 * 1 + 10 * 7 + 10 * 1, 10]);
-      assert.deepEqual([month.days, month.before.cny, month.after.cny], [30, 110 + 770 + 110, 110]);
-      assert.deepEqual(month.before.upstreams.map((u) => [u.stationId, u.cny]), [[ids.a, 110], [ids.b, 770], [ids.c, 110]]);
+      assert.deepEqual([week.days, week.before.cny, week.after.cny], [7, (1 + 2) * 7 + (10 + 20) * 7.5, (1 + 2) * 7]);
+      assert.deepEqual([month.days, month.before.cny, month.after.cny], [30, (1 + 2 + 4 + 8) * 7 + (10 + 20 + 40 + 80) * 7.5, (1 + 2 + 4 + 8) * 7]);
+      assert.deepEqual(month.before.upstreams.map((u) => [u.stationId, u.cny, u.counted]), [[ids.a, 105, true], [ids.b, 1125, true], [ids.c, 0, true]]);
       assert.deepEqual(month.after.upstreams.map((u) => u.stationId), [ids.a]);
+      assert.deepEqual(groups[0].rateNote, { retainedRate: 7, others: [{ id: ids.b, rate: 7.5 }] });
+      // 每一天都有记录时不带 approx
+      for (let back = 0; back < 30; back += 1) await pool.query("INSERT IGNORE INTO station_daily_usage (station_id, date, used_usd) VALUES (?, ?, 1)", [ids.a, day(back)]);
+      assert.deepEqual((await previewUpstreamMerges(rt)).groups[0].estimate.windows.map((w) => w.approx), [false, false]);
       // 读不到每日消耗时估算是 null，清单本身照出
       const broken = await previewUpstreamMerges({ ...rt, pool: { query: async (sql, params) => { if (/station_daily_usage/.test(sql)) throw new Error("boom"); return pool.query(sql, params); } } });
       assert.equal(broken.groups[0].estimate, null);
@@ -141,7 +151,7 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
     const { applyMergeRows } = await import("./upstream-merge-repository.js");
     await assert.rejects(store.mergeUpstreams({
       retainedId: group.retained.id, mergedIds: group.merged.map((s) => s.id),
-      patches: { retained: { costAliases: ["x"] }, merged: { [ids.b]: { mergedInto: ids.a }, [ids.c]: { mergedInto: ids.a } } },
+      patchesFor: () => ({ retained: { costAliases: ["x"] }, merged: { [ids.b]: { mergedInto: ids.a }, [ids.c]: { mergedInto: ids.a } } }),
       within: (conn) => applyMergeRows(conn, group, { mergeId: "mg_test", nowMs: 1, oldRetainedAliases: [] }),
     }), { code: "UPSTREAM_MERGE_STALE" });
     assert.deepEqual(await dumpAll(pool), before);
@@ -159,7 +169,7 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
     try {
       await assert.rejects(store.mergeUpstreams({
         retainedId: group.retained.id, mergedIds: group.merged.map((s) => s.id),
-        patches: { retained: { costAliases: ["x"] }, merged: { [ids.b]: { mergedInto: ids.a }, [ids.c]: { mergedInto: ids.a } } },
+        patchesFor: () => ({ retained: { costAliases: ["x"] }, merged: { [ids.b]: { mergedInto: ids.a }, [ids.c]: { mergedInto: ids.a } } }),
         within: (conn) => applyMergeRows(conn, group, { mergeId: "mg_test", nowMs: 1, oldRetainedAliases: [] }),
       }), { code: "UPSTREAM_MERGE_CONFLICT" });
       const [[ruleB]] = await pool.query("SELECT upstream_station_id, active_token_key FROM reconciliation_rules WHERE id = 'r_b'");
@@ -171,11 +181,9 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
       assert.equal(store.get(ids.b).mergedInto, undefined);
       assert.deepEqual(store.get(ids.a).costAliases, ["http://internal-a"]);
       assert.deepEqual(await listMerges(pool), []);
-      // 这时再点合并，清单本身就会把这一组挡住（同一把 Key 撞上了），并且写清是哪把 Key、在哪两个上游下（这里是 d 的绑定占着 a:5，所以是 d 和 b）
-      await assert.rejects(applyUpstreamMerge(rt, { retainedId: ids.a, mergedIds: [ids.b, ids.c] }), { code: "UPSTREAM_MERGE_BLOCKED" });
-      const blocked = await previewUpstreamMerges(rt, { estimate: false });
-      assert.deepEqual(blocked.counts, { mergeable: 0, blocked: 1, accounts: 1, upstreams: 3 });
-      assert.deepEqual(blocked.groups[0].blockers, [{ code: "RULE_KEY_CONFLICT", detail: "Key #5 已经有一条绑定在用", tokenId: 5, tokenName: "Key 5", ruleId: "r_b", stationIds: [ids.d, ids.b].sort() }]);
+      // 再点合并：清单按 Key 编号看不出撞（d 的绑定占着 a:5 是这里硬造的），写到那一步由库的唯一键挡住，整个回滚，回 UPSTREAM_MERGE_CONFLICT
+      await assert.rejects(applyUpstreamMerge(rt, { retainedId: ids.a, mergedIds: [ids.b, ids.c] }), { code: "UPSTREAM_MERGE_CONFLICT" });
+      assert.deepEqual(await listMerges(pool), []);
     } finally {
       await pool.query("UPDATE reconciliation_rules SET active_token_key = ?, updated_at = updated_at WHERE id = 'r_d'", [`${ids.d}:9`]);
     }
@@ -219,7 +227,8 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
     assert.equal(docs[ids.b].accessToken, before.stations.find((s) => s.id === ids.b).doc.accessToken);
     // 内存里：b、c 从所有列表消失，get 还能取到
     assert.deepEqual(store.list({ includeUnmonitored: true, includeArchived: true }).map((s) => s.id).sort(), [ids.a, ids.d].sort());
-    assert.equal(store.get(ids.b).mergedInto, ids.a);
+    assert.equal(store.getWithMerged(ids.b).mergedInto, ids.a);
+    assert.equal(store.get(ids.b), undefined);
     assert.deepEqual(store.list({ includeMerged: true }).length, 4);
     // 日志
     const merges = await listMerges(pool);
@@ -231,8 +240,8 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
     // 重新读库：另一个 Store 实例看到的一样，密钥解得开
     const reloaded = await new Store(pool, { secretKey }).load();
     assert.deepEqual(reloaded.list({ includeUnmonitored: true, includeArchived: true }).map((s) => s.id).sort(), [ids.a, ids.d].sort());
-    assert.equal(reloaded.get(ids.b).accessToken, "token-b");
-    assert.equal(reloaded.get(ids.b).mergedInto, ids.a);
+    assert.equal(reloaded.getWithMerged(ids.b).accessToken, "token-b");
+    assert.equal(reloaded.getWithMerged(ids.b).mergedInto, ids.a);
   });
 
   await t.test("合并以后再看清单：没有可合的了；再合同一组报清单变了", async () => {
@@ -301,4 +310,56 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
     await assert.rejects(undoUpstreamMerge(live, { mergeId: record.mergeId }), { code: "UPSTREAM_MERGE_BLOCKED" });
     assert.deepEqual(await dumpAll(pool), frozen);
   });
+
 });
+
+test("合并重复上游：拿锁后重判、退回时键的守卫、脚本退回的检查", { timeout: 60000 }, async (t) => {
+  const pool = mysql.createPool({ host: process.env.DB_HOST, port, user: process.env.DB_USER, password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME, connectionLimit: 8 });
+  t.after(() => pool.end());
+  const { ids } = await seedFixture(pool);
+  await t.test("拿到锁以后重判：计划算完、拿锁之前被合掉的上游被加了固定成本或暂停了监控，合并不会被绕过去，什么都不写", async () => {
+    const live = await new Store(pool, { secretKey }).load();
+    const racing = { pool, store: new Proxy(live, { get: (target, key) => (key === "mergeUpstreams" ? async (input) => {
+      // 在 planNow 之后、Store 拿到锁之前：有人给 b 加了固定成本
+      target.getWithMerged(ids.b).fixedPurchases = [{ amount: 100, days: 30, startDate: null }];
+      return target.mergeUpstreams(input);
+    } : Reflect.get(target, key, target)) }) };
+    const snapshot = await dumpAll(pool);
+    await assert.rejects(applyUpstreamMerge(racing, { retainedId: ids.a, mergedIds: [ids.b, ids.c] }), { code: "UPSTREAM_MERGE_STALE" });
+    assert.deepEqual(await dumpAll(pool), snapshot);
+    assert.equal(live.getWithMerged(ids.b).mergedInto, undefined);
+    assert.deepEqual(await listMerges(pool), []);
+    live.getWithMerged(ids.b).fixedPurchases = [];
+    live.getWithMerged(ids.b).monitorEnabled = false;
+    await assert.rejects(applyUpstreamMerge({ pool, store: live }, { retainedId: ids.a, mergedIds: [ids.b, ids.c] }), { code: "UPSTREAM_MERGE_BLOCKED" }, "清单本身就挡住");
+  });
+
+  await t.test("退回时绑定的键只在还等于合并时写进去的值才改回；合并以后停用的绑定退回后键仍是空的，上游照样指回去", async () => {
+    await pool.query("DELETE FROM upstream_merge_log");
+    const live = await new Store(pool, { secretKey }).load();
+    await applyUpstreamMerge({ pool, store: live }, { retainedId: ids.a, mergedIds: [ids.b, ids.c] });
+    await pool.query("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, updated_at = updated_at WHERE id = 'r_b'");
+    await pool.query("UPDATE reconciliation_rules SET active_token_key = 'changed-by-user', updated_at = updated_at WHERE id = 'r_old'");
+    const { undoMerges } = await import("./k-unmerge.js");
+    await undoMerges(pool, { apply: true });
+    const [rules] = await pool.query("SELECT id, upstream_station_id, active_token_key FROM reconciliation_rules WHERE id IN ('r_b', 'r_old', 'r_c') ORDER BY id");
+    const byId = Object.fromEntries(rules.map((rule) => [rule.id, rule]));
+    assert.deepEqual([byId.r_b.upstream_station_id, byId.r_b.active_token_key], [ids.b, null], "停用的绑定：上游改回、键还是空");
+    assert.deepEqual([byId.r_old.upstream_station_id, byId.r_old.active_token_key], [ids.b, "changed-by-user"], "用户改过的键不被写回旧值");
+    assert.deepEqual([byId.r_c.upstream_station_id, byId.r_c.active_token_key], [ids.c, "canon-6"]);
+    await pool.query("UPDATE reconciliation_rules SET enabled = 1, active_token_key = ?, updated_at = updated_at WHERE id = 'r_b'", [`${ids.b}:5`]);
+    await pool.query("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, updated_at = updated_at WHERE id = 'r_old'");
+  });
+
+  await t.test("脚本退回时上游已经删了：和接口一样拒绝（不留孤儿绑定），一行都不改", async () => {
+    await pool.query("DELETE FROM upstream_merge_log");
+    const live = await new Store(pool, { secretKey }).load();
+    await applyUpstreamMerge({ pool, store: live }, { retainedId: ids.a, mergedIds: [ids.b, ids.c] });
+    await live.remove(ids.b);
+    const frozen = await dumpAll(pool);
+    const { undoMerges } = await import("./k-unmerge.js");
+    await assert.rejects(undoMerges(pool, { apply: true }), { code: "UPSTREAM_MERGE_BLOCKED", message: "「上游 b」已经删了，退回不了" });
+    assert.deepEqual(await dumpAll(pool), frozen);
+    assert.equal((await listMerges(pool)).length, 1, "日志还是没退回的状态");
+  });});

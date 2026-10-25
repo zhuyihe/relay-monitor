@@ -98,6 +98,7 @@ export async function applyMergeRows(conn, group, { mergeId, nowMs, oldRetainedA
 // 合并，按合并时间从新到旧：[{ mergeId, mergedAtMs, undoneAtMs, retainedId, mergedIds, rows: [{ id, kind, mergedId, detail }] }]
 // 默认只列还没改回的；includeUndone 连改回过的一起列（页面上的合并记录要写「已退回」）
 export async function listMerges(executor, { mergeId = null, includeUndone = false } = {}) {
+  if (mergeId !== null && (typeof mergeId !== "string" || !mergeId)) throw mergeError("UPSTREAM_MERGE_INVALID", "合并编号不对");
   const filters = [];
   if (!includeUndone) filters.push("undone_at_ms IS NULL");
   if (mergeId) filters.push("merge_id = ?");
@@ -143,9 +144,19 @@ export function describeUndo(merge) {
   return lines;
 }
 
+// 退回前先看留下的和被合掉的上游还在不在：删了就退回不了（退回会把绑定指回一个不存在的上游，留下孤儿绑定）。服务里退回和脚本退回共用这一道
+export async function assertUndoable(conn, merge) {
+  const [rows] = await conn.query("SELECT id FROM stations WHERE id IN (?)", [[merge.retainedId, ...merge.mergedIds]]);
+  const present = new Set(rows.map((row) => row.id));
+  const nameOf = (id) => merge.rows.find((row) => row.detail?.id === id)?.detail.name ?? id;
+  const gone = [merge.retainedId, ...merge.mergedIds].find((id) => !present.has(id));
+  if (gone) throw mergeError("UPSTREAM_MERGE_BLOCKED", `「${nameOf(gone)}」已经删了，退回不了`);
+}
+
 // 一次合并照日志改回。调用的人先开事务（apply 时才改）。上游文档只改合并时碰过的两个字段，别的（包括加密的登录信息）原样不动。
 // stations: false 时不碰上游文档（服务在跑时由 Store 在同一个事务里改文档，db/store.js 的 unmergeUpstreams）；脚本离线跑，直接改文档
 export async function undoMergeRows(conn, merge, { nowMs, stations = true }) {
+  await assertUndoable(conn, merge);
   for (const row of merge.rows) {
     if (row.kind === MERGE_LOG_KIND.STATION_MERGED || row.kind === MERGE_LOG_KIND.STATION_RETAINED) {
       if (!stations) continue;
@@ -159,8 +170,10 @@ export async function undoMergeRows(conn, merge, { nowMs, stations = true }) {
         [JSON.stringify(aliasesAfterUndo(current, row.detail)), row.detail.id]);
     } else if (row.kind === MERGE_LOG_KIND.RULE) {
       // 之后这条绑定又改过上游（比如用户改了绑定）就不动它：只改回还指着留下的那个的
-      await conn.query("UPDATE reconciliation_rules SET upstream_station_id = ?, active_token_key = ?, updated_at = updated_at WHERE id = ? AND upstream_station_id = ?",
-        [row.detail.upstreamStationId, row.detail.activeTokenKey, row.detail.id, merge.retainedId]);
+      // 键只在还等于合并时写进去的那个值时才改回：合并以后这条绑定停用了、换了 Key，它的键已经不是那个值，不能被写回旧键
+      const guarded = row.detail.newActiveTokenKey !== undefined;
+      await conn.query(`UPDATE reconciliation_rules SET upstream_station_id = ?, active_token_key = ${guarded ? "IF(active_token_key <=> ?, ?, active_token_key)" : "?"}, updated_at = updated_at WHERE id = ? AND upstream_station_id = ?`,
+        [row.detail.upstreamStationId, ...(guarded ? [row.detail.newActiveTokenKey, row.detail.activeTokenKey] : [row.detail.activeTokenKey]), row.detail.id, merge.retainedId]);
     } else if (row.kind === MERGE_LOG_KIND.LINK_MOVED) {
       await conn.query("UPDATE channel_monitor_links SET station_id = ? WHERE own_station_id = ? AND channel_id = ? AND station_id = ?",
         [row.detail.from, row.detail.ownStationId, row.detail.channelId, merge.retainedId]);

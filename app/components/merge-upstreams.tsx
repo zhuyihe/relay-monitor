@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 import { App, Button, Drawer, Grid, Modal } from "antd";
 import { api } from "../../lib/client";
 import { errorText } from "../../lib/error-copy.js";
-import { MERGE_TEXT, groupView, mergeCostLineText, mergeFailureText, mergeNoticeText, recordView } from "../../lib/upstream-merge-view.js";
+import { MERGE_TEXT, groupView, mergeCostLineText, mergeFailureText, mergeNoticeText, recordView, resumeConfirm } from "../../lib/upstream-merge-view.js";
 import { workflowActionMeta } from "../../lib/workflow-actions.js";
 import { Skeleton } from "./data-state";
 import { ErrorDetail, noteOf } from "./error-detail";
@@ -29,9 +29,12 @@ type MergeGroup = {
   blockers: any[];
   canMerge: boolean;
   estimate?: any;
+  rateNote?: any;
+  versions?: Record<string, { authVersion: number; resourceVersion: string }>;
 };
 type MergeRecord = { mergeId: string; mergedAtMs: number; undoneAtMs: number | null; retained: Brief; merged: Brief[]; undoable: boolean; undoBlocked: { detail: string } | null };
 type MergeData = { groups: MergeGroup[]; records: MergeRecord[]; counts: MergeCounts; tz?: string };
+type ResumeTarget = { stationId: string; stationName: string; done: string; label: string; versions?: { authVersion: number; resourceVersion: string } };
 type Confirm = { kind: "merge"; group: MergeGroup } | { kind: "undo"; record: MergeRecord };
 
 // 上游列表顶上那条提示（有要合的才出现；info 样子，不进需处理）
@@ -39,7 +42,7 @@ export function MergeNotice({ counts, onOpen }: { counts: MergeCounts; onOpen: (
   const text = mergeNoticeText(counts);
   if (!text) return null;
   return (
-    <div className="jy-banner jy-banner--info" role="status" data-testid="merge-notice">
+    <div className="jy-banner jy-banner--info jy-merge-notice" role="status" data-testid="merge-notice">
       <Sym kind="info" />
       <div className="jy-banner__body"><span>{text}</span></div>
       <Button type="link" size="small" onClick={onOpen}>{VIEW.label}</Button>
@@ -52,7 +55,7 @@ export function MergeCostLine({ counts, onOpen }: { counts: MergeCounts; onOpen:
   const text = mergeCostLineText(counts);
   if (!text) return null;
   return (
-    <div className="jy-caption" data-testid="merge-cost-line">
+    <div className="jy-caption jy-merge-costline" data-testid="merge-cost-line">
       {text} <Button type="link" size="small" onClick={onOpen}>{GO_MERGE.label}</Button>
     </div>
   );
@@ -69,8 +72,11 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
   const [loadError, setLoadError] = useState<unknown>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<{ text: string; raw: unknown } | null>(null);
-  const [resuming, setResuming] = useState<string | null>(null);
+  // refresh：这一组、这次合并在别处变了，不给「再试一次」（只会一直失败），按钮是「刷新」
+  const [failure, setFailure] = useState<{ text: string; raw: unknown; refresh?: boolean } | null>(null);
+  const [resume, setResume] = useState<ResumeTarget | null>(null);
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [resumeFailure, setResumeFailure] = useState<{ text: string; raw: unknown } | null>(null);
   const seq = useRef(0);
 
   const load = useCallback(async () => {
@@ -88,7 +94,8 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
     }
   }, []);
 
-  const openDrawer = useCallback(() => { setOpen(true); setConfirm(null); setFailure(null); void load(); }, [load]);
+  // 重新打开先不显示上次的卡片：那是合并、退回之前的样子
+  const openDrawer = useCallback(() => { setOpen(true); setConfirm(null); setFailure(null); setData(null); setLoadError(null); void load(); }, [load]);
   const closeDrawer = useCallback(() => { if (!busy) { setOpen(false); setConfirm(null); setFailure(null); } }, [busy]);
   useDrawerEscape(open && !confirm, closeDrawer);
   useEffect(() => () => { seq.current += 1; }, []);
@@ -102,6 +109,9 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
       if (confirm.kind === "merge") {
         await api("/api/upstream-merges", { body: { retainedId: confirm.group.retained.id, mergedIds: confirm.group.merged.map((station) => station.id) } });
         message.success(MERGE_TEXT.mergedToast(confirm.group.merged.length));
+        // 重读清单失败也不能让合好的那一组还挂在卡片里
+        const merged = confirm.group.retained.id;
+        setData((current) => (current ? { ...current, groups: current.groups.filter((group) => group.retained.id !== merged) } : current));
       } else {
         await api("/api/upstream-merges/undo", { body: { mergeId: confirm.record.mergeId } });
         message.success(MERGE_TEXT.undoneToast);
@@ -110,27 +120,51 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
       await load();
       onChanged?.();
     } catch (error: any) {
-      // 清单对不上、退回不了这两类，服务端给的就是写给人看的那一句；其余的按 §8.2 归类
-      const reason = error?.code === "UPSTREAM_MERGE_BLOCKED" && error.message ? error.message : errorText(error);
-      setFailure({ text: mergeFailureText(merging ? "合并" : "退回", reason), raw: noteOf(error).raw });
+      if (String(error?.code || "").startsWith("UPSTREAM_MERGE_") || error?.status === 409) {
+        // 这一组、这次合并在别处变了：再试只会一直失败，让人刷新（按 §8.2「内容有变化」说）
+        setFailure({ text: merging ? MERGE_TEXT.changedGroup : MERGE_TEXT.changedRecord, raw: noteOf(error).raw, refresh: true });
+      } else {
+        setFailure({ text: mergeFailureText(merging ? "合并" : "退回", errorText(error)), raw: noteOf(error).raw });
+        // 断网、超时：库里到底有没有改成，重读一次清单才知道，页面先跟着现状
+        void load();
+      }
     } finally {
       setBusy(false);
     }
   }
 
-  // 合不了的那一组的按钮：去一个地方改（处理重复、编辑上游），或就地恢复被暂停的那个上游（改成一样以后回来就能合）
-  async function runAction(action: any) {
+  // 「刷新」：重读清单、关掉确认框
+  function refreshAfterChange() {
+    setConfirm(null);
+    setFailure(null);
+    void load();
+    onChanged?.();
+  }
+
+  // 合不了的那一组的按钮：去一个地方改（处理重复、编辑上游），或先问一句再就地恢复被暂停的那个上游（改成一样以后回来就能合）
+  function runAction(action: any, group: MergeGroup) {
     if (action.kind === "link") { setOpen(false); router.push(action.href); return; }
-    setResuming(action.stationId);
+    setResumeFailure(null);
+    setResume({ stationId: action.stationId, stationName: action.stationName, done: action.done, label: action.label, versions: group.versions?.[action.stationId] });
+  }
+
+  async function submitResume() {
+    if (!resume || resumeBusy) return;
+    setResumeBusy(true);
+    setResumeFailure(null);
     try {
-      await api(`/api/stations/${encodeURIComponent(action.stationId)}`, { method: "PUT", body: { monitorEnabled: true } });
-      message.success(action.done);
+      // 带着清单上看到的版本号去改：这个上游在这期间变过就不照旧写回去
+      await api(`/api/stations/${encodeURIComponent(resume.stationId)}`, { method: "PUT", body: { monitorEnabled: true,
+        ...(resume.versions ? { expectedAuthVersion: resume.versions.authVersion, expectedResourceVersion: resume.versions.resourceVersion } : {}) } });
+      message.success(resume.done);
+      setResume(null);
       await load();
       onChanged?.();
-    } catch (error) {
-      message.error(errorText(error));
+    } catch (error: any) {
+      setResumeFailure({ text: errorText(error), raw: noteOf(error).raw });
+      void load();
     } finally {
-      setResuming(null);
+      setResumeBusy(false);
     }
   }
 
@@ -160,8 +194,9 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
         </div>
         {view.estimateNote ? <p className="jy-caption">{view.estimateNote}</p> : null}
         {group.canMerge ? <p className="jy-caption">{view.afterMerge}</p> : null}
+        {group.canMerge && view.rateNote ? <p className="jy-caption" data-testid="merge-rate-note">{view.rateNote}</p> : null}
         <div className="jy-merge-card__actions">
-          {view.action ? <Button loading={resuming === view.action.stationId} onClick={() => void runAction(view.action)}>{view.action.label}</Button> : null}
+          {view.action ? <Button onClick={() => runAction(view.action, group)}>{view.action.label}</Button> : null}
           <Button type="primary" disabled={!group.canMerge} onClick={() => { setFailure(null); setConfirm({ kind: "merge", group }); }}>{MERGE.label}</Button>
         </div>
       </section>
@@ -177,6 +212,8 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
         {view.undone ? <span className="jy-caption">{view.undone}</span> : (
           <Button size="small" disabled={!record.undoable} title={view.blocked || undefined} onClick={() => { setFailure(null); setConfirm({ kind: "undo", record }); }}>{UNDO.label}</Button>
         )}
+        {/* 退回不了的原因写在这一行下面：悬停提示键盘、读屏、手机都读不到 */}
+        {view.blocked ? <span className="jy-caption jy-merge-record__why">{view.blocked}</span> : null}
       </li>
     );
   };
@@ -216,13 +253,14 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
       <Modal
         title={confirmView?.title}
         open={!!confirm}
+        className="jy-merge-modal"
         onCancel={() => { if (!busy) { setConfirm(null); setFailure(null); } }}
         closable={!busy}
         mask={{ closable: !busy }}
         keyboard={!busy}
         confirmLoading={busy}
-        onOk={() => void submit()}
-        okText={failure ? MERGE_TEXT.retry : confirmLabel}
+        onOk={() => (failure?.refresh ? refreshAfterChange() : void submit())}
+        okText={failure?.refresh ? MERGE_TEXT.refresh : failure ? MERGE_TEXT.retry : confirmLabel}
         cancelText={MERGE_TEXT.confirmCancel}
         cancelButtonProps={{ disabled: busy }}
         width={520}
@@ -235,6 +273,29 @@ export function useMergeUpstreams({ onChanged }: { onChanged?: () => void } = {}
         ) : null}
         {confirmView?.lines.map((line: string) => <p key={line}>{line}</p>)}
         <p className="jy-caption">{confirmView?.hint}</p>
+      </Modal>
+      <Modal
+        title={resume ? resumeConfirm(resume.stationName).title : ""}
+        open={!!resume}
+        className="jy-merge-modal"
+        onCancel={() => { if (!resumeBusy) { setResume(null); setResumeFailure(null); } }}
+        closable={!resumeBusy}
+        mask={{ closable: !resumeBusy }}
+        keyboard={!resumeBusy}
+        confirmLoading={resumeBusy}
+        onOk={() => void submitResume()}
+        okText={resume ? resumeConfirm(resume.stationName).ok : ""}
+        cancelText={MERGE_TEXT.confirmCancel}
+        cancelButtonProps={{ disabled: resumeBusy }}
+        width={520}
+      >
+        {resumeFailure ? (
+          <div className="jy-banner jy-banner--crit" role="alert">
+            <Sym kind="crit" />
+            <div className="jy-banner__body"><b>{resumeFailure.text}</b><ErrorDetail raw={resumeFailure.raw} /></div>
+          </div>
+        ) : null}
+        <p>{resume ? resumeConfirm(resume.stationName).line : ""}</p>
       </Modal>
     </>
   );
