@@ -37,7 +37,6 @@
 .jy-notifications-types .ant-btn { gap: 8px; }
 
 .jy-notifications-dr { margin-bottom: 8px; }
-.jy-notifications-checks { display: flex; flex-direction: column; gap: 4px; }
 .jy-notifications-modal-intro { margin: 0 0 16px; }
 
 /* 邮件 HTML 自带浅色底，预览框固定为浅色画布，不随站点主题（这是"邮件效果"的一部分） */
@@ -69,7 +68,7 @@
 .jy-notifications-chlist .m-sub { align-items: center; }
 /* 日报在 4 列里排紧：开关和发送时间一行，发到哪里横排（ui-design-spec §5.7） */
 .jy-notifications-dr-row { display: flex; flex-wrap: wrap; gap: 0 24px; }
-.jy-notifications-side .jy-notifications-checks { flex-direction: row; flex-wrap: wrap; gap: 4px 16px; }
+.jy-notifications-dr-to { width: 100%; }
 /* 「还有 N 个通知方式」：和列表左右对齐 */
 .jy-notifications-more { padding: 8px 16px 16px; }
 .jy-notifications-more .jy-more__body { margin: 8px -16px 0; }

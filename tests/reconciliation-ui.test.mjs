@@ -3510,9 +3510,9 @@ test("告警中心 8 + 4、系统设置两栏（1440）：通知方式一个一�
   assert.ok(c.x > r.x + r.width && Math.abs(c.x - d.x) < 1, "通知方式、日报在提醒规则右边一栏");
   assert.ok(r.width / c.width > 1.8 && r.width / c.width < 2.2, `宽度约 2:1（${Math.round(r.width)} / ${Math.round(c.width)}）`);
   assert.ok(Math.abs(r.y - c.y) < 1 && d.y > c.y + c.height, "上沿对齐，日报在通知方式下面");
-  // 2 个通知方式时，右栏（通知方式 + 日报）和提醒规则底边差不超过一行字：规则那块不被右栏撑出大片空白（§1.4 第 3 条）
+  // 2 个通知方式时，规则那块不被右栏撑出大片空白（§1.4 第 3 条）：右栏（通知方式 + 日报）最多比规则长一行字，可以更短（旁边那块下面空着是允许的）
   const ruleContent = await rulesP.locator(".jy-notifications-pad").boundingBox();
-  assert.ok(Math.abs((d.y + d.height) - (r.y + r.height)) <= 24, `两栏底边差（${Math.round((d.y + d.height) - (r.y + r.height))}）`);
+  assert.ok((d.y + d.height) - (r.y + r.height) <= 24, `右栏比规则长了 ${Math.round((d.y + d.height) - (r.y + r.height))}`);
   assert.ok((r.y + r.height) - (ruleContent.y + ruleContent.height) <= 48, `规则那块内容下面的空白（${Math.round((r.y + r.height) - (ruleContent.y + ruleContent.height))}）`);
   // 日报排紧：开关和发送时间一行；「预览」「立即发送」的说明在悬停和读屏里
   const [sw, time] = [await reportP.getByRole("switch").first().boundingBox(), await reportP.getByLabel("发送时间", { exact: true }).boundingBox()];

@@ -122,7 +122,7 @@ export const COPY = Object.freeze({
   reportEnable: "启用日报",
   reportTime: "发送时间",
   reportTo: "发到哪里",
-  reportToHint: "不勾就发到所有启用的通知方式；日报较长，建议选邮件",
+  reportToHint: "不选就发到所有启用的通知方式；日报较长，建议选邮件",
   reportNoChannels: "先添加通知方式",
   reportPreview: "预览",
   reportSend: "立即发送",

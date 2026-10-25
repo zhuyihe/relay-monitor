@@ -9,7 +9,7 @@ import "../../styles/pages/notifications.css";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { commitOnLeave, useAutoSave, useSaveAction, useSaveQueue } from "../../components/use-auto-save";
 import Link from "next/link";
-import { App, Button, Checkbox, Form, Grid, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
+import { App, Button, Form, Grid, Input, InputNumber, Modal, Select, Space, Switch, TimePicker } from "antd";
 import dayjs from "dayjs";
 import { ALERT_RULES } from "../../../lib/alert-rules";
 import { api } from "../../../lib/client";
@@ -983,16 +983,21 @@ export default function NotificationsPage() {
                 label={<span id={`${uid}-dr-ch`}>{COPY.reportTo}</span>}
                 extra={COPY.reportToHint}
               >
+                {/* 和提醒规则「发到」那一列同一个选法：一行下拉多选，放不下的写「+N」，通知方式多了日报这块也不变高 */}
                 {channels.length ? (
-                  <div role="group" aria-labelledby={`${uid}-dr-ch`}>
-                    <Checkbox.Group
-                      className="jy-notifications-checks"
-                      value={dr.value.channelIds}
-                      disabled={!dr.value.enabled}
-                      onChange={(ids) => setDr({ channelIds: ids as string[] })}
-                      options={channels.map((c) => ({ value: c.id, label: c.name }))}
-                    />
-                  </div>
+                  <Select
+                    mode="multiple"
+                    allowClear
+                    aria-labelledby={`${uid}-dr-ch`}
+                    placeholder={COPY.allChannels}
+                    maxTagCount="responsive"
+                    optionFilterProp="label"
+                    className="jy-notifications-dr-to"
+                    value={dr.value.channelIds}
+                    disabled={!dr.value.enabled}
+                    onChange={(ids) => setDr({ channelIds: ids as string[] })}
+                    options={channelOptions}
+                  />
                 ) : (
                   <span className="jy-muted">{notifFailed ? COPY.channelsFailed : COPY.reportNoChannels}</span>
                 )}
