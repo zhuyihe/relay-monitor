@@ -1,25 +1,23 @@
 "use client";
-// 概览：利润等式、每日趋势、预计花费、消费最多的用户、利润怎么算。
+// 概览：指标行（有消费的用户、请求数、Token）；利润等式；每日收入（8 列）+ 消费最多的用户（4 列）；预计花费（8 列）+ 消费最多的模型（4 列）；利润怎么算（ui-design-spec §5.3）。
 import { useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import Link from "next/link";
 import { Button } from "antd";
-import { NAV_LABELS } from "../../../lib/brand";
 import { dayKeyInTz } from "../../../lib/business-time";
-import { ADMIN_UNMARKED, BASIS_TITLE, EMPTY, FORECAST_TEXT, INCOME_UNREAD, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
+import { ADMIN_UNMARKED, BASIS_TITLE, EMPTY, FORECAST_TEXT, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
 import { profitApproxOf, splitProfitWarnings } from "../../../lib/profit";
-import { EmptyState, ErrorState, PanelSkeleton } from "../../components/data-state";
+import { EmptyState, ErrorState } from "../../components/data-state";
 import { ForecastChart } from "../../components/forecast-chart";
 import { HBars } from "../../components/hbars";
 import type { HBarItem } from "../../components/hbars";
 import { Panel } from "../../components/panel";
 import { EQ_TEXT, ProfitEquation, incomeUnreadProps } from "../../components/profit-equation";
 import { Seg } from "../../components/seg";
-import { TREND_PANEL_TITLE, TrendPanel } from "../../components/trend-panel";
-import { derive } from "../analytics/derive";
+import { TrendPanel } from "../../components/trend-panel";
+import type { TrendRow } from "../../components/trend-panel";
 import { ProfitBasis } from "./profit-basis";
 import { COL_TEXT, DataTable, MY_TEXT, TAB_TEXT, TOKEN_NOTE, sum } from "./shared";
-import type { MyTab, OwnRange, OwnView } from "./shared";
+import type { MyTab, OwnRange, OwnView, UsageRow } from "./shared";
 
 // 只在概览出现的话（design/ui-copy-spec.md §12）；列名、标签名、时间范围名、利润等式和趋势卡片名从共用的地方取
 const COPY = Object.freeze({
@@ -32,13 +30,13 @@ const COPY = Object.freeze({
   noAdminSelf: "不含管理员自用",
   historyEst: (upstreams: string, n: number) => `${upstreams}，${n} 个按余额变化估算`,
   noUsageUpstream: "没有按用量算的上游",
-  // 每日趋势
-  dailyFailed: "读不到逐日成本",
-  dailyEmpty: "暂时没有逐日成本",
-  dailyEmptyDesc: "稍后刷新再看。",
-  trendCaption: "按天。收入按当天普通用户消费和转售 Key 消费计算。",
-  trendEstimated: "按天。旧接口没给逐日收入，按全部模型消费的占比估算，包含管理员自用的消费。",
-  trendNoIncome: `按天。${INCOME_UNREAD.title}，这里只画成本。`,
+  // 每日收入：只画收入（这一页回答「钱从哪来」，上游成本在每日利润、成本估算里看）
+  incomeTitle: "每日收入",
+  incomeCaption: "按天。收入按当天普通用户消费和转售 Key 消费计算。",
+  incomeEmpty: "暂时没有逐日收入",
+  incomeEmptyDesc: "稍后刷新再看。",
+  // 收入读不到：原因和「刷新」在上面的利润等式里，这里只写一句（同一句话一页只说一次）
+  incomeSeeEq: "读不到，原因见上面的利润等式。",
   // 预计花费
   fcRange: "预计范围",
   next24: "未来 24 小时",
@@ -59,10 +57,16 @@ const COPY = Object.freeze({
   colBand: "以往起伏范围",
   kind: Object.freeze({ forecast: "预计", actual: "实际" } as const),
   band: (lo: string, hi: string) => `${lo} 到 ${hi}`,
-  // 消费最多的用户
+  // 消费最多的用户、模型（各前 5，多的并成一行）
   otherUsers: (n: number) => `其他 ${n} 个用户`,
   allUsers: (n: number) => `全部 ${n} 个用户`,
+  topModels: "消费最多的模型",
+  otherModels: (n: number) => `其他 ${n} 个模型`,
+  allModels: (n: number) => `全部 ${n} 个模型`,
+  noModels: "这个时间范围内还没有模型用量",
   payingUsers: "有消费的用户",
+  // 指标行（ui-design-spec §5.3）：这次只放利润等式里没有的三个数；收入和「这段时间毛利」等 G 把等式拿掉时再补
+  metrics: "这段时间的用量",
   userCount: (n: number) => `${n} 个`,
   noUsers: "这个时间范围内还没有用户消费",
   noUsersDesc: "换个更长的时间范围看看，或确认用户已经在用自营站点。",
@@ -79,7 +83,6 @@ const tabHref = (range: OwnRange, tab: MyTab) => {
 
 export function OverviewTab({
   v,
-  costs,
   range,
   asOf,
   onRange,
@@ -87,8 +90,6 @@ export function OverviewTab({
   reload,
 }: {
   v: OwnView;
-  // /api/analytics 的逐日上游成本；今天为 null，取不到时是 { error }
-  costs: any;
   range: OwnRange;
   asOf: number | null;
   onRange: (r: OwnRange) => void;
@@ -105,24 +106,29 @@ export function OverviewTab({
 
   return (
     <>
+      <Metrics v={v} />
       <Equation v={v} range={range} asOf={asOf} onBasis={openBasis} reload={reload} />
-      {range === "today" ? (
-        <Panel title={TREND_PANEL_TITLE.withRevenue} caption={MY_TEXT.byDay}>
-          <EmptyState
-            title={COPY.todayOnly}
-            desc={COPY.todayOnlyDesc}
-            action={<Button onClick={() => onRange("7d")}>{COPY.view(RANGE_TEXT["7d"])}</Button>}
-          />
-        </Panel>
-      ) : (
-        <DailyTrend v={v} costs={costs} asOf={asOf} reload={reload} />
-      )}
-      <div className="jy-grid-2 jy-grid-even">
-        <ForecastPanel v={v} />
+      {/* 两行 8 + 4（ui-design-spec §5.3）：每日收入 + 消费最多的用户；预计花费 + 消费最多的模型 */}
+      <div className="jy-grid-8-4">
+        {range === "today" ? (
+          <Panel title={COPY.incomeTitle} caption={MY_TEXT.byDay}>
+            <EmptyState
+              title={COPY.todayOnly}
+              desc={COPY.todayOnlyDesc}
+              action={<Button onClick={() => onRange("7d")}>{COPY.view(RANGE_TEXT["7d"])}</Button>}
+            />
+          </Panel>
+        ) : (
+          <IncomeTrend v={v} asOf={asOf} />
+        )}
         <TopUsers v={v} range={range} onTab={onTab} />
       </div>
+      <div className="jy-grid-8-4">
+        <ForecastPanel v={v} />
+        <TopModels v={v} range={range} onTab={onTab} />
+      </div>
       <div ref={basisRef}>
-        <ProfitBasis v={v} open={basisOpen} onToggle={() => setBasisOpen((o) => !o)} reload={reload} />
+        <ProfitBasis v={v} open={basisOpen} onOpenChange={setBasisOpen} reload={reload} />
       </div>
     </>
   );
@@ -211,36 +217,29 @@ function Equation({
 
 // 逐日上游成本取自 /api/analytics（和成本估算页同一份），每日收入取自用户和转售消费，
 // 缺记录的日子标成缺失，不补零。
-function DailyTrend({ v, costs, asOf, reload }: { v: OwnView; costs: any; asOf: number | null; reload: () => Promise<unknown> }) {
-  const dv = useMemo(() => (costs && !costs.error ? derive(costs, v.d) : null), [costs, v.d]);
-  if (costs === undefined) return <PanelSkeleton title={TREND_PANEL_TITLE.withRevenue} height={220} />;
-  if (!dv) {
+// 每日收入：取自营站点接口的逐日收入（incomeDaily），只画收入，不再另读 /api/analytics 的逐日上游成本（ui-design-spec §5.3）
+function IncomeTrend({ v, asOf }: { v: OwnView; asOf: number | null }) {
+  const d = v.d;
+  const rows: TrendRow[] = useMemo(() => {
+    if (!Array.isArray(d?.incomeDaily)) return [];
+    const today = dayKeyInTz(Date.now(), d.tz);
+    return d.incomeDaily.map((r: any) => ({ date: r.date, rev: Number(r.incomeCny) || 0, cost: null, fixed: 0, today: r.date === today }));
+  }, [d]);
+  if (d?.profit?.error || d?.profit?.incomeUnconfirmed) {
     return (
-      <Panel title={TREND_PANEL_TITLE.withRevenue} caption={MY_TEXT.byDay}>
-        {costs?.error ? (
-          <ErrorState what={COPY.dailyFailed} error={costs.error} onRetry={() => reload()} />
-        ) : (
-          <EmptyState title={COPY.dailyEmpty} desc={COPY.dailyEmptyDesc} />
-        )}
+      <Panel title={COPY.incomeTitle} caption={MY_TEXT.byDay}>
+        <p className="jy-muted" style={{ margin: 0 }}>{COPY.incomeSeeEq}</p>
       </Panel>
     );
   }
-  return (
-    <TrendPanel
-      rows={dv.rows}
-      showRev={dv.hasIncome}
-      asOf={asOf}
-      tz={costs.tz || v.d?.tz}
-      caption={
-        <>
-          {dv.incomeError ? COPY.trendNoIncome : dv.incomeEstimated ? COPY.trendEstimated : COPY.trendCaption}
-          <Link className="jy-link" href={`/analytics?range=${dv.rows.length <= 7 ? "7d" : "30d"}`}>
-            {NAV_LABELS.analytics}
-          </Link>
-        </>
-      }
-    />
-  );
+  if (!rows.length) {
+    return (
+      <Panel title={COPY.incomeTitle} caption={MY_TEXT.byDay}>
+        <EmptyState title={COPY.incomeEmpty} desc={COPY.incomeEmptyDesc} />
+      </Panel>
+    );
+  }
+  return <TrendPanel rows={rows} showCost={false} title={COPY.incomeTitle} asOf={asOf} tz={d.tz} caption={COPY.incomeCaption} />;
 }
 
 // ---- 预计花费 -------------------------------------------------------------
@@ -391,66 +390,124 @@ function ForecastPanel({ v }: { v: OwnView }) {
 
 // ---- 消费最多的用户 --------------------------------------------------------
 
-function TopUsers({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t: MyTab) => void }) {
-  const users = [...v.users].sort((a, b) => b.cost - a.cost);
-  const top = users.slice(0, 5);
-  const rest = users.slice(5);
-  const items: HBarItem[] = top.map((u) => ({
-    key: u.user,
-    name: `${u.user}${u.isAdmin ? MY_TEXT.adminSuffix : ""}`,
-    value: u.cost,
-    tipExtra: [
-      [COL_TEXT.requests, formatInt(u.requests)],
-      [COL_TEXT.tokens, formatCompact(u.tokens)],
-    ],
-  }));
-  // 其余用户合成一行，悬停提示里的占比才是占全部消费
-  if (rest.length)
-    items.push({
-      key: "__rest",
-      name: COPY.otherUsers(rest.length),
-      value: sum(rest, (u) => u.cost),
-      tipExtra: [
-        [COL_TEXT.requests, formatInt(sum(rest, (u) => u.requests))],
-        [COL_TEXT.tokens, formatCompact(sum(rest, (u) => u.tokens))],
-      ],
-    });
+// 前 5 名排行，多的并成一行（悬停提示里的占比才是占全部消费）；用户和模型共用这一份
+// 指标行：有消费的用户、请求数、Token（不含缓存）。收入、毛利在利润等式里，这里不再写（同一个数一页只出现一次）；
+// G 把 /my 的等式拿掉时再补「收入」和「这段时间毛利 → 每日利润」（ui-design-spec §5.3，分两步做）
+function Metrics({ v }: { v: OwnView }) {
+  return (
+    <Panel label={COPY.metrics}>
+      <dl className="jy-kpis">
+        <div>
+          <dt>{COPY.payingUsers}</dt>
+          <dd className="jy-kpi-figure">{COPY.userCount(v.users.length)}</dd>
+        </div>
+        <div>
+          <dt>{COL_TEXT.requests}</dt>
+          <dd className="jy-kpi-figure">{formatInt(v.totReqs)}</dd>
+        </div>
+        <div>
+          <dt title={TOKEN_NOTE}>{COL_TEXT.tokens}</dt>
+          <dd className="jy-kpi-figure">{formatCompact(v.totTokens)}</dd>
+        </div>
+      </dl>
+    </Panel>
+  );
+}
+
+// 用户排行下面一行：这段时间的消费合计（含管理员自用，和排行的条同一个口径）；有消费的用户、请求数、Token 在指标行里
+const USAGE_FACTS_FOOT = (v: OwnView) => (
+  <ul className="jy-my-facts">
+    <li>
+      {COL_TEXT.cost} <b>{formatMoney(v.totCost)}</b>
+    </li>
+  </ul>
+);
+
+function TopPanel({
+  title,
+  caption,
+  sub,
+  rows,
+  nameOf,
+  otherLabel,
+  allLabel,
+  onAll,
+  empty,
+  foot,
+  className,
+}: {
+  className?: string;
+  title: string;
+  caption: string;
+  sub?: ReactNode;
+  rows: UsageRow[];
+  nameOf: (r: UsageRow) => string;
+  otherLabel: (n: number) => string;
+  allLabel: (n: number) => string;
+  onAll: () => void;
+  empty: ReactNode;
+  foot?: ReactNode;
+}) {
+  const sorted = [...rows].sort((a, b) => b.cost - a.cost);
+  const top = sorted.slice(0, 5);
+  const rest = sorted.slice(5);
+  const tip = (list: UsageRow[]): HBarItem["tipExtra"] => [
+    [COL_TEXT.requests, formatInt(sum(list, (r) => r.requests))],
+    [COL_TEXT.tokens, formatCompact(sum(list, (r) => r.tokens))],
+  ];
+  const items: HBarItem[] = top.map((r) => ({ key: nameOf(r), name: nameOf(r), value: r.cost, tipExtra: tip([r]) }));
+  if (rest.length) items.push({ key: "__rest", name: otherLabel(rest.length), value: sum(rest, (r) => r.cost), tipExtra: tip(rest) });
   return (
     <Panel
+      className={className}
+      title={title}
+      caption={caption}
+      sub={sub}
+      extra={
+        sorted.length ? (
+          <button type="button" className="jy-caption-link jy-my-linkbtn" onClick={onAll}>
+            {allLabel(sorted.length)}
+          </button>
+        ) : undefined
+      }
+      foot={foot}
+    >
+      {items.length ? <HBars items={items} color="var(--jy-s1)" unitName={COL_TEXT.cost} /> : empty}
+    </Panel>
+  );
+}
+
+function TopUsers({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t: MyTab) => void }) {
+  return (
+    <TopPanel
       title={MY_TEXT.topUsers}
       caption={RANGE_TEXT[range]}
       // 用户列表读不到：标不出谁是管理员（§8.1）
       sub={v.d.usersUnavailable ? `${ADMIN_UNMARKED}。` : undefined}
-      extra={
-        users.length ? (
-          <button type="button" className="jy-caption-link jy-my-linkbtn" onClick={() => onTab("users")}>
-            {COPY.allUsers(users.length)}
-          </button>
-        ) : undefined
-      }
-      foot={
-        // 原页顶部的四项用量总数，放在用户排行下面
-        <ul className="jy-my-facts">
-          <li>
-            {COL_TEXT.cost} <b>{formatMoney(v.totCost)}</b>
-          </li>
-          <li title={TOKEN_NOTE}>
-            {COL_TEXT.tokens} <b>{formatCompact(v.totTokens)}</b>
-          </li>
-          <li>
-            {COL_TEXT.requests} <b>{formatInt(v.totReqs)}</b>
-          </li>
-          <li>
-            {COPY.payingUsers} <b>{COPY.userCount(users.length)}</b>
-          </li>
-        </ul>
-      }
-    >
-      {items.length ? (
-        <HBars items={items} color="var(--jy-s1)" unitName={COL_TEXT.cost} />
-      ) : (
-        <EmptyState title={COPY.noUsers} desc={COPY.noUsersDesc} />
-      )}
-    </Panel>
+      rows={v.users}
+      nameOf={(u: any) => `${u.user}${u.isAdmin ? MY_TEXT.adminSuffix : ""}`}
+      otherLabel={COPY.otherUsers}
+      allLabel={COPY.allUsers}
+      onAll={() => onTab("users")}
+      empty={<EmptyState title={COPY.noUsers} desc={COPY.noUsersDesc} />}
+      foot={USAGE_FACTS_FOOT(v)}
+    />
+  );
+}
+
+function TopModels({ v, range, onTab }: { v: OwnView; range: OwnRange; onTab: (t: MyTab) => void }) {
+  return (
+    <TopPanel
+      // 手机上不放（#64 第 5 节的手机顺序）：模型在「模型与渠道」标签页里看
+      className="jy-my-top-models"
+      title={COPY.topModels}
+      caption={RANGE_TEXT[range]}
+      rows={v.models}
+      nameOf={(m: any) => String(m.model)}
+      otherLabel={COPY.otherModels}
+      allLabel={COPY.allModels}
+      onAll={() => onTab("models")}
+      empty={<EmptyState title={COPY.noModels} />}
+    />
   );
 }

@@ -1,7 +1,7 @@
 "use client";
 // 自营业务：自营站点的用户收入、上游成本、毛利与净利，按概览 / 用户 / 模型与渠道分标签。
 // 数据来自 /api/own/analytics（同范围 60 秒内复用成功结果，约 30 秒自动刷新一次）；
-// 近 7 / 30 天另取 /api/analytics 的逐日上游成本，画每日收入、成本与净利（它慢，不挡着页面先出来）；
+// 每日收入图只画收入（ui-design-spec §5.3），取的就是这个接口的逐日收入，不再另读慢的 /api/analytics 逐日上游成本；
 // 时间窗口都按服务端的业务时区划日，不传浏览器时区；
 // 按明细细算另走 /api/own/audit，开销大，只在点按钮时请求。
 import "../../styles/pages/my.css";
@@ -55,7 +55,6 @@ export default function MyStationPage() {
   // data 是最近一次成功的结果（可能是上一个范围的，换范围时先留着变淡显示）
   const [data, setData] = useState<any>(null);
   // 与 data 同一范围的逐日上游成本；undefined 是还在取，取不到时是 { error }，只影响趋势图
-  const [costs, setCosts] = useState<any>(undefined);
   const [err, setErr] = useState<{ range: string; error: Error } | null>(null);
   const [unconfigured, setUnconfigured] = useState(false);
   const [asOf, setAsOf] = useState<number | null>(null);
@@ -67,43 +66,26 @@ export default function MyStationPage() {
   const [auditRows, setAuditRows] = useState(4000);
   const [auditOpen, setAuditOpen] = useState(false);
 
-  // 客户端缓存：同范围 60 秒内直接复用；逐日成本失败、收入确认不了的结果不复用，下次照常重取（接口也不缓存后者）
-  const cacheRef = useRef<Record<string, { at: number; data: any; costs?: any }>>({});
+  // 客户端缓存：同范围 60 秒内直接复用；收入确认不了的结果不复用，下次照常重取（接口也不缓存它）
+  const cacheRef = useRef<Record<string, { at: number; data: any }>>({});
   const rangeRef = useRef<string>(range);
   rangeRef.current = range;
 
   const load = useCallback(async (force: boolean, r: string = rangeRef.current, rethrow = false) => {
     const cached = cacheRef.current[r];
-    if (!force && cached && !cached.costs?.error && !cached.data?.profit?.incomeUnconfirmed && Date.now() - cached.at < 60000) {
+    if (!force && cached && !cached.data?.profit?.incomeUnconfirmed && Date.now() - cached.at < 60000) {
       setData(cached.data);
-      setCosts(cached.costs);
       setErr(null);
       setUnconfigured(false);
       setAsOf(cached.at);
       return;
     }
-    // 逐日成本单独等：自营数据先渲染，趋势图晚一点补上
-    const costReq =
-      r === "today"
-        ? Promise.resolve(null)
-        : api(`/api/analytics?days=${r === "7d" ? 7 : 30}`).catch((e: any) => ({ error: e }));
     try {
       const res = await api(`/api/own/analytics?range=${r}`);
-      // 新的逐日成本回来前先沿用上一份成功的，免得每次轮询趋势图都闪一下
-      const entry: { at: number; data: any; costs?: any } = {
-        at: Date.now(),
-        data: res,
-        costs: cached?.costs?.error ? undefined : cached?.costs,
-      };
-      cacheRef.current[r] = entry;
-      costReq.then((cost) => {
-        entry.costs = cost;
-        if (rangeRef.current === r && cacheRef.current[r] === entry) setCosts(cost);
-      });
+      cacheRef.current[r] = { at: Date.now(), data: res };
       // 响应回来时范围已切走则丢弃
       if (rangeRef.current !== r) return;
       setData(res);
-      setCosts(entry.costs);
       setErr(null);
       setUnconfigured(false);
       setAsOf(Date.now());
@@ -166,7 +148,7 @@ export default function MyStationPage() {
     () => (unconfigured ? undefined : <RangePicker value={range} options={RANGE_OPTIONS} onChange={(x) => setRange(x as OwnRange)} />),
     [unconfigured, range, setRange],
   );
-  useShellPage({ onRefresh, asOf, range: rangePicker, tz: costs?.tz || data?.tz });
+  useShellPage({ onRefresh, asOf, range: rangePicker, tz: data?.tz });
 
   const view = useMemo(() => (data ? deriveOwn(data) : null), [data]);
 
@@ -250,7 +232,7 @@ export default function MyStationPage() {
       {/* 外层包一层：隐藏的标签面板不参与页面的间距 */}
       <div className={stale ? "jy-my-busy" : undefined} aria-busy={stale || undefined}>
         <TabPanel idPrefix="my" tabKey="overview" active={tab === "overview"}>
-          <OverviewTab v={view} costs={costs} range={shown} asOf={asOf} onRange={setRange} onTab={setTab} reload={reload} />
+          <OverviewTab v={view} range={shown} asOf={asOf} onRange={setRange} onTab={setTab} reload={reload} />
         </TabPanel>
         <TabPanel idPrefix="my" tabKey="users" active={tab === "users"}>
           <UsersTab v={view} range={shown} reload={reload} />

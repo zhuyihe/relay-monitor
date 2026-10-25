@@ -3056,10 +3056,72 @@ async function openUnconfirmedMyPage(t, options) {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (url.pathname === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(url.searchParams.get("range") || "7d", options));
-    if (url.pathname === "/api/analytics") return fulfill(route, costAnalyticsFixture(Number(url.searchParams.get("days")) || 7));
+    // 每日收入只画收入，取自营站点接口的逐日收入：自营业务不再读慢的 /api/analytics（ui-design-spec §5.3）
     throw new Error("unexpected my fixture API: " + url.pathname);
   }, undefined, false, null, "/my");
 }
+
+test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analytics，消费最多的用户、模型各前 5；利润怎么算、选转售 Key、按明细细算都是收起区", async (t) => {
+  // 收入确认了的近 7 天：逐日收入 7 天，7 个模型（前 5 + 其他 2 个）
+  const analytics = (range = "7d") => {
+    const base = bigOwnAnalytics(range), end = shanghaiDay(Date.now());
+    const incomeDaily = Array.from({ length: 7 }, (_, i) => ({ date: shiftDay(end, i - 6), incomeCny: 1000 + i * 100 }));
+    const byModel = [700, 600, 500, 400, 300, 20, 10].map((cost, i) => ({ model: `model-${i}`, tokens: 1000, cost, requests: 3 }));
+    return { ...base, incomeDaily, byModel };
+  };
+  const adminKeys = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") return fulfill(route, analytics(url.searchParams.get("range") || "7d"));
+    if (url.pathname === "/api/own/admin-keys") { adminKeys.push(route.request().method()); return fulfill(route, { accounts: [{ username: "root", role: 100, enumerable: true, tokens: [{ name: "sale", flagged: true, usedUsd: 1 }] }] }); }
+    // 只画收入以后，自营业务不再读慢的 /api/analytics（请求了就会报错）
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const region = (name) => page.getByRole("region", { name, exact: true });
+  const income = region("每日收入"), users = region("消费最多的用户"), forecast = region("预计花费"), models = region("消费最多的模型");
+  await income.waitFor(); await users.waitFor(); await forecast.waitFor(); await models.waitFor();
+  // 指标行在等式上面，这次只放等式里没有的三格（收入、毛利等 G 再补，同一个数一页只出现一次）
+  const metrics = region("这段时间的用量");
+  assert.deepEqual((await metrics.locator("dt").allInnerTexts()).map((x) => x.trim()), ["有消费的用户", "请求数", "Token（不含缓存）"]);
+  await metrics.getByText("5 个", { exact: true }).waitFor();
+  assert.doesNotMatch(await metrics.innerText(), /[¥$]/);
+  assert.ok((await metrics.boundingBox()).y < (await region(`${RANGE_TEXT["7d"]}经营`).boundingBox()).y, "指标行在利润等式上面");
+  // 「消费最多的用户」下面只留消费合计，另外三项在指标行里不写两遍
+  assert.deepEqual((await users.locator(".jy-my-facts li").allInnerTexts()).map((x) => x.split(" ")[0]), ["消费"]);
+  for (const [main, side] of [[income, users], [forecast, models]]) {
+    const [m, sd] = [await main.boundingBox(), await side.boundingBox()];
+    assert.ok(sd.x > m.x + m.width, "右边那块在左边那块右边");
+    assert.ok(m.width / sd.width > 1.8 && m.width / sd.width < 2.2, `宽度约 2:1（${Math.round(m.width)} / ${Math.round(sd.width)}）`);
+    assert.ok(Math.abs(m.y - sd.y) < 1 && Math.abs(m.height - sd.height) < 1, "上沿对齐、一样高");
+  }
+  // 每日收入只画收入：图例里没有上游成本，也没有每日净利；表格只有日期和收入两列、没有合计行（合计在等式里）
+  await income.locator(".jy-legend").getByText("收入", { exact: true }).waitFor();
+  assert.equal(await income.getByText("上游成本").count(), 0); assert.equal(await income.getByText("每日净利").count(), 0);
+  await income.getByRole("button", { name: "表格", exact: true }).click();
+  await income.locator("table").waitFor();
+  assert.deepEqual((await income.locator("thead th").allInnerTexts()).map((x) => x.trim()), ["日期", "收入"]);
+  assert.equal(await income.locator("tfoot").count(), 0);
+  // 消费最多的模型：前 5 加一行「其他 2 个模型」（等于并掉的两个之和），右上角去「模型与渠道」
+  assert.equal(await models.locator(".jy-hbars li").count(), 6);
+  await models.locator(".jy-hbars li", { hasText: "其他 2 个模型" }).getByText(formatMoney(30 * 7), { exact: true }).waitFor();
+  await models.getByRole("button", { name: "全部 7 个模型", exact: true }).waitFor();
+  // 利润怎么算：摘要不带金额；明细收在共用的收起区里，默认收起
+  const basis = region("利润怎么算");
+  const basisMore = basis.getByRole("button", { name: "收入和成本怎么算、转售 Key、各上游成本", exact: true });
+  assert.equal(await basisMore.getAttribute("class"), "jy-more__toggle"); assert.equal(await basisMore.getAttribute("aria-expanded"), "false");
+  await basisMore.click();
+  // 选转售 Key：也是收起区，点开时才读管理员账号的 Key，「取消」收起
+  const pick = basis.getByRole("button", { name: "选转售 Key", exact: true });
+  assert.equal(await pick.getAttribute("class"), "jy-more__toggle"); assert.equal(adminKeys.length, 0);
+  await pick.click(); await basis.locator(".jy-my-mgr .jy-my-account h4", { hasText: "root" }).waitFor(); assert.deepEqual(adminKeys, ["GET"]);
+  await basis.getByRole("button", { name: "取消", exact: true }).click(); assert.equal(await pick.getAttribute("aria-expanded"), "false");
+  // 按明细细算（模型与渠道标签页）：收起区，默认收起
+  await page.getByRole("tab", { name: "模型与渠道", exact: true }).click();
+  const audit = page.getByRole("button", { name: "细算的范围和结果", exact: true });
+  await audit.waitFor(); assert.equal(await audit.getAttribute("class"), "jy-more__toggle"); assert.equal(await audit.getAttribute("aria-expanded"), "false");
+});
 
 test("收入确认不了时：成本估算、自营业务的利润等式收入几项写「读不到」并说原因，两项成本照常；用户表说合计含管理员账号；用户列表也读不到时说管理员没标出", async (t) => {
   const cost = await openCostPage(t, (route) => fulfill(route, { ...unconfirmedOwnAnalytics(), trend: [] }));
@@ -3071,13 +3133,16 @@ test("收入确认不了时：成本估算、自营业务的利润等式收入�
   await expectIncomeUnread(page.getByRole("region", { name: `${RANGE_TEXT["7d"]}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
   // 利润那块不整块报错（报错框的标题里没有「利润暂时算不出」；原文收在「查看详细原因」里，可能也带这几个字）
   assert.equal(await page.locator(".jy-state[role=alert] h3").filter({ hasText: PROFIT_FAILED }).count(), 0);
-  // 每日趋势只画成本，说明跟着改（overview-tab.tsx 的 COPY.trendNoIncome）
-  await page.getByText(`按天。${INCOME_UNREAD.title}，这里只画成本。`).first().waitFor();
+  // 每日收入只画收入：收入读不到时那块只写一句短的，原因和「刷新」在上面的利润等式里（overview-tab.tsx 的 COPY.incomeSeeEq）
+  await page.getByRole("region", { name: "每日收入", exact: true }).getByText("读不到，原因见上面的利润等式。", { exact: true }).waitFor();
   assert.doesNotMatch(await page.locator("main").innerText(), /NaN|undefined/);
-  // 「利润怎么算」照常打开：收入写「读不到（原因）」，两项成本照常；转售 Key 照常列出、金额写「—」，没读到的那把标「读不到」，照常能选（lib/format.js 的 BASIS_TITLE、profit-basis.tsx 的 COPY）
+  // 「利润怎么算」照常打开（等式里的链接把收起区打开，More 的受控用法）；摘要不再写收入、成本的数（都在等式里），只写几个转售 Key、几个上游算进利润；
+  // 转售 Key 照常列出、金额写「—」，没读到的那把标「读不到」，照常能选（lib/format.js 的 BASIS_TITLE、profit-basis.tsx 的 COPY）
   await page.getByRole("button", { name: "利润怎么算", exact: true }).click();
   const basis = page.getByRole("region", { name: "利润怎么算", exact: true });
-  await basis.getByText(`收入 ${INCOME_UNREAD.empty}（${errorText({ code: "OWN_INCOME_UNCONFIRMED" })}），上游成本 ${formatMoney(3.5)}，固定成本 ${formatMoney(1.25)}，2 个转售 Key`, { exact: false }).waitFor();
+  await basis.getByText(/^2 个转售 Key，\d+ 个上游算进利润/).waitFor();
+  assert.doesNotMatch(await basis.locator(".jy-panel-sub").innerText(), /[¥$]/);
+  assert.equal(await basis.getByRole("button", { name: "收入和成本怎么算、转售 Key、各上游成本", exact: true }).getAttribute("aria-expanded"), "true");
   const resold = basis.getByRole("table", { name: "已标记的转售 Key", exact: true });
   await resold.waitFor();
   const resoldRow = (token) => resold.locator("tbody tr").filter({ has: page.getByText(token, { exact: true }) });
@@ -3144,7 +3209,7 @@ test("用量分析：全部上游都读不到时只说一处——黄条默认�
   assert.equal(await why.getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator(".jy-usage-failed li").count(), 2);
   const totals = page.getByRole("region", { name: USAGE_COPY.totalsLabel, exact: true });
-  assert.equal(await totals.locator(".jy-usage-figure").filter({ hasText: /^—$/ }).count(), 3);
+  assert.equal(await totals.locator(".jy-kpi-figure").filter({ hasText: /^—$/ }).count(), 3);
   assert.equal(await totals.locator("dl .jy-caption").count(), 0);
   // 读不到这件事只有黄条一处：不再有「这段时间没有用量」那类空状态
   assert.equal(await page.getByText(USAGE_COPY.emptyTitle, { exact: true }).count(), 0);

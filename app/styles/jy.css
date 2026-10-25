@@ -187,6 +187,14 @@ body {
 /* 12 列栅格里主角 8 列、旁边 4 列（ui-design-spec §1.4 第 3 条）；同一行的两块拉成一样高，1200 以下叠成一列 */
 .jy-grid-8-4 { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 24px; align-items: stretch; }
 .jy-grid-8-4 > .jy-panel { height: 100%; }
+/* 指标格子：一行几个数（标签、数、下面一行说明），格子之间一道竖线；用量分析的合计、自营业务的指标行共用。手机上两列 */
+.jy-kpis { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 16px 24px; margin: 0; }
+.jy-kpis > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.jy-kpis > div + div { padding-left: 24px; border-left: 1px solid var(--jy-rule-soft); }
+.jy-kpis dt { font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
+.jy-kpis dd { margin: 0; }
+.jy-kpi-figure { font-size: 24px; line-height: 32px; font-weight: 600; color: var(--jy-ink); font-variant-numeric: tabular-nums; }
+.jy-kpi-unit { font-size: 14px; font-weight: 400; color: var(--jy-ink-3); }
 .jy-stack { display: flex; flex-direction: column; gap: 24px; }
 
 /* ─── 利润等式条（招牌） ──────────────────────────────── */
@@ -635,6 +643,9 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-content { padding: 16px; gap: 16px; }
   .jy-page, .jy-tabpanel, .jy-stack { gap: 16px; }
   .jy-grid-2, .jy-grid-3, .jy-grid-8-4 { gap: 16px; }
+  .jy-kpis { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .jy-kpis > div + div { padding-left: 0; border-left: 0; }
+  .jy-kpi-figure { font-size: 20px; line-height: 28px; }
   .jy-panel-head { padding: 16px 16px 0; }
   .jy-panel-body { padding: 12px 16px 16px; }
   .jy-panel-body--flush { padding: 12px 0 0; }

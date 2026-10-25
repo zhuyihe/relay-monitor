@@ -8,9 +8,10 @@ import { api } from "../../../lib/client";
 import { rateSnapshotOf } from "../../../lib/profit";
 import { failureSentence, failureText } from "../../../lib/error-copy";
 import { STATION_TABS } from "../../../lib/brand";
-import { BASIS_TITLE, COST_MODE_TEXT, EMPTY, INCOME_UNREAD, SELL_PRICE_UNSET, formatMoney, formatSellPrice, formatZonedRange } from "../../../lib/format";
+import { BASIS_TITLE, COST_MODE_TEXT, EMPTY, SELL_PRICE_UNSET, formatMoney, formatSellPrice, formatZonedRange } from "../../../lib/format";
 import { EmptyState, ErrorState } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
+import { More } from "../../components/more";
 import { Icon, Sym } from "../../components/icons";
 import { CountBadge, Panel } from "../../components/panel";
 import { StatusTag } from "../../components/status";
@@ -30,6 +31,8 @@ const COPY = {
   note: "说明",
   resold: "转售 Key",
   pick: "选转售 Key",
+  // 收起区按钮写它收着什么（ui-design-spec §4.11、ui-copy-spec §8.4）
+  more: "收入和成本怎么算、转售 Key、各上游成本",
   costsTitle: "成本明细",
   costsCaption: "每个上游的成本按它自己的方式算",
   unread: "读不到",
@@ -41,26 +44,26 @@ const COPY = {
 const sellPriceOf = (station: any) => (rateSnapshotOf(station).source === "configured" && formatSellPrice(station.cnyPerUsd)) || "";
 const modeText = (mode: string) => COST_MODE_TEXT[mode as keyof typeof COST_MODE_TEXT] || "";
 
+// 开合由概览传进来（等式里「利润怎么算」点过来要把它打开），用收起区 More 的受控用法
 export function ProfitBasis({
   v,
   open,
-  onToggle,
+  onOpenChange,
   reload,
 }: {
   v: OwnView;
   open: boolean;
-  onToggle: () => void;
+  onOpenChange: (open: boolean) => void;
   reload: () => Promise<unknown>;
 }) {
   const p = v.profit;
   const ok = p && !p.error;
   const warnings: string[] = ok ? p.warnings || [] : [];
-  // 收入确认不了：收入写「没读到（原因）」，成本、转售 Key 照常，下面的转售 Key 还能改（§8.1）
-  const unread = ok && p.incomeUnconfirmed ? noteOf(p.incomeUnconfirmed) : null;
+  // 收入确认不了时原因在上面的利润等式里；这里成本、转售 Key 照常，下面的转售 Key 还能改（§8.1）
+  // 收入、上游成本、固定成本的数都在上面的利润等式里，这里不再写一遍（同一个数一页只出现一次，ui-design-spec §1.4 第 2 条）
   const summary = ok ? (
     <>
-      收入 <b>{unread ? `${INCOME_UNREAD.empty}（${unread.text}）` : formatMoney(p.incomeCny)}</b>，上游成本 <b>{formatMoney(p.upstreamCostCny)}</b>，固定成本 <b>{formatMoney(p.fixedCostCny)}</b>，{(p.resoldKeys || []).length} 个转售 Key，
-      {(p.costs || []).length} 个上游算进利润{warnings.length ? COPY.notes(warnings.length) : ""}。
+      {(p.resoldKeys || []).length} 个转售 Key，{(p.costs || []).length} 个上游算进利润{warnings.length ? COPY.notes(warnings.length) : ""}。
     </>
   ) : (
     COPY.unreadable
@@ -69,19 +72,9 @@ export function ProfitBasis({
   const span = formatZonedRange(v.d.startMs, v.d.endMs, v.d.tz);
 
   return (
-    <Panel
-      title={BASIS_TITLE}
-      className={open ? undefined : "jy-my-collapsed"}
-      extra={
-        <Button size="small" aria-expanded={open} icon={<Icon name={open ? "collapse" : "expand"} />} onClick={onToggle}>
-          {open ? "收起" : "展开"}
-        </Button>
-      }
-      sub={summary}
-      body={open && ok}
-    >
-      {open && ok ? (
-        <>
+    <Panel title={BASIS_TITLE} sub={summary} body={!!ok}>
+      {ok ? (
+        <More label={COPY.more} open={open} onOpenChange={onOpenChange}>
           <section className="jy-my-section">
             <div className="jy-my-lines">
               <p>收入 = 普通用户消费 × 售价（{sellPrice}），不含管理员自用；标为转售 Key 的那部分算作收入。</p>
@@ -104,7 +97,7 @@ export function ProfitBasis({
           </section>
           <ResoldSection v={v} reload={reload} />
           <CostSection p={p} />
-        </>
+        </More>
       ) : null}
     </Panel>
   );
@@ -142,8 +135,9 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
     setAccounts(null);
     setMgrError(null);
   };
-  const toggleManager = () => {
-    if (mgrOpen) return closeManager();
+  // 「选转售 Key」是收起区：打开时读一次管理员账号的 Key，收起、取消、保存后都关上
+  const onManager = (open: boolean) => {
+    if (!open) return closeManager();
     setMgrOpen(true);
     fetchAccounts();
   };
@@ -199,10 +193,6 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
       <h3 className="jy-my-h3">
         {COPY.resold}
         <CountBadge count={keys.length} muted />
-        <span className="spacer" />
-        <Button size="small" aria-expanded={mgrOpen} onClick={toggleManager}>
-          {mgrOpen ? "收起" : COPY.pick}
-        </Button>
       </h3>
       {keys.length ? (
         <DataTable<any>
@@ -240,7 +230,7 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
         </div>
       )}
 
-      {mgrOpen && (
+      <More label={COPY.pick} open={mgrOpen} onOpenChange={onManager}>
         <div className="jy-my-mgr">
           {mgrLoading ? (
             <p className="jy-muted" aria-busy="true" style={{ margin: 0 }}>
@@ -308,7 +298,7 @@ function ResoldSection({ v, reload }: { v: OwnView; reload: () => Promise<unknow
             </>
           )}
         </div>
-      )}
+      </More>
     </section>
   );
 }
