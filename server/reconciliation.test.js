@@ -6935,6 +6935,7 @@ test("C2a 要人处理的日子到点只在本地重判：还挡着就不取账�
   const yesterdayStart = COMPLETED_YESTERDAY.startMs / 1000;
   const yesterdayReads = () => f.state.statCalls.filter((call) => call.start === yesterdayStart).length;
   const catalogueReads = () => f.state.requests.filter((request) => request.host === "upstream.test" && request.path === "/api/token/").length;
+  const statusReads = () => f.state.requests.filter((request) => request.host === "upstream.test" && request.path === "/api/status").length;
   const state = () => f.repository.tables.settlementState.find((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
 
   await f.module.refreshDue(now);
@@ -6942,10 +6943,11 @@ test("C2a 要人处理的日子到点只在本地重判：还挡着就不取账�
 
   // 满 10 分钟：在本地重判，Key 还是停用的——不取这天的账单，也不为它强制重读 Key 目录（目录 5 分钟到期照常读）
   now += 10 * 60000;
-  let reads = yesterdayReads(), catalogues = catalogueReads();
+  let reads = yesterdayReads(), catalogues = catalogueReads(), statuses = statusReads();
   await f.module.refreshDue(now);
   assert.equal(yesterdayReads() - reads, 0, "不取这天的账单");
   assert.equal(catalogueReads() - catalogues, 1, "Key 目录只按 5 分钟到期读一次");
+  assert.equal(statusReads() - statuses, 0, "不为它强制重读：身份和 /api/status 30 分钟才到期，这一轮不读");
   assert.deepEqual([state().manual_reason, state().attempts, state().next_attempt_at_ms], ["KEY_INVALID_OR_DENIED", 0, now + 10 * 60000], "10 分钟后再判，不计次数");
 
   // 上游把 Key 启用了：下一次重判发现原因没了，记下来；再下一轮先重读这个上游，再去结
@@ -6960,6 +6962,16 @@ test("C2a 要人处理的日子到点只在本地重判：还挡着就不取账�
   assert.ok(yesterdayReads() > reads, "下一轮去结");
   assert.equal(state(), undefined, "结成了，状态行删掉");
   assert.deepEqual(f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => row.bill_date), ["2026-10-08"]);
+});
+
+test("C2a 结账照样核验并记下 Sub2API 的账单能力：只有昨天有消费、今天一直没有，昨天也能结", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-settle-capability.test", costs: { "2026-10-10": 2 } });
+  await f.module.refreshDue(now);
+  assert.ok(f.sub2.controls >= 1, "结昨天时核验了账单能力");
+  assert.deepEqual(f.state.ledger.map((row) => row.bill_date), ["2026-10-10"], "昨天结进账本");
+  assert.equal(f.repository.tables.settlementState.length, 0);
 });
 
 test("C2a 每小时清一批状态表：31 天前、没有重结请求的行；一小时内不重复清", async (t) => {
