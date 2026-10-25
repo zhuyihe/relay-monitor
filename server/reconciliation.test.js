@@ -1376,7 +1376,7 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
   assert.deepEqual(statUsers, ["7", "7", "7", "7"], "分段 stat 复用元数据解析出的 PAT 身份");
   // 管理员自用（R1）：每段窗口读 3 个来源（管理员 root、两个渠道测试名字「模型测试」「Model test」）各一次列表，4 段共 12 次；用户列表（管理员名单）一轮共用一次。
   // 方案里「一段窗口一次，分段时每段各一次」
-  assert.deepEqual(ownCounts, { "/api/user/self": 1, "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 12, "/api/log/": 4, "/api/user/": 1 }, "本站身份和 /api/status 每轮只读一次，由各分段共用");
+  assert.deepEqual(ownCounts, { "/api/user/self": 1, "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 12, "/api/log/": 4, "/api/user/": 1, "/api/option/": 1 }, "本站身份和 /api/status 每轮只读一次，由各分段共用");
 
   for (const counts of [upstreamCounts, ownCounts]) for (const path of Object.keys(counts)) delete counts[path];
   ownStatusBroken = true;
@@ -2067,6 +2067,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     state.requests.push(request);
     if (onRequest) await onRequest(request);
     if (url.pathname === "/api/status") return reply(200, { success: true, data: { quota_per_unit: 100, version: "v" } });
+    // 自营站点的设置（R2）：默认记着收费记录；state.consumeLog 改成 "false" 就是关了，state.optionReply 整个换掉（没权限等）
+    if (url.pathname === "/api/option/") return state.optionReply ? reply(...state.optionReply) : reply(200, { success: true, data: [{ key: "SMTPToken", value: "secret" }, { key: "LogConsumeEnabled", value: state.consumeLog ?? "true" }] });
     if (url.host === "upstream.test") {
       if (url.pathname === "/api/user/self") return reply(200, { success: true, data: { id: 7 } });
       if (url.pathname === "/api/user/self/groups") return reply(200, { success: true, data: metadataGroups ? metadataGroups(request) : { g1: { ratio: 1 }, g2: { ratio: 2 } } });
@@ -2099,6 +2101,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin", authVersion: 1 },
   ];
   const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null,
+    // 只覆盖本测试要用的字段（R2 的 consumeLogOffPeriods 由监控写回站点记录）
+    update: async (stationId, patch) => Object.assign(stations.find((station) => station.id === stationId), patch),
     channels: [], billingIdentityKey: "reconciliation-fixture-billing-key" } };
   // 整站日志读取（V1-a）默认关着：这个夹具的假站点没有不带筛选的 /api/log/；要测它的用例自己传 ownLogIngest: true 和内存桶
   return { rule, state, segments, stations, rt, repository, module: createReconciliationModule(rt, { repository, ownLogStore: new MemoryOwnLogStore(), ownLogIngest: false, ...moduleOptions }) };
@@ -8163,6 +8167,148 @@ test("V1-a 轮询每轮给自营站点读几页整站日志（落后时最多 15
   assert.equal(g.state.requests.filter(isIngest).length, 0);
 });
 
+// ---- R2 自营站点关了收费记录（own-revenue-plan 第二节）----
+const optionReads = (f) => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/option/").length;
+const todayView = (f) => f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" }).then((response) => response.results[0]);
+
+test("R2 读到关着：记下一段还关着的时间（从最后能证明开着的时刻起），今天碰到它：收入读不到、利润先不算，OWN_CONSUME_LOG_OFF；开回来以后段关上，原因变 GAP", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const own = () => f.rt.store.get("own"), periods = () => own().consumeLogOffPeriods ?? [];
+  const first = await todayView(f);
+  assert.deepEqual([first.health.code, periods()], ["READY", []], "开着：没有段，照常算");
+  assert.equal(first.downstream.state, "complete");
+  f.state.consumeLog = "false";
+  now += 60000;
+  const off = await todayView(f);
+  assert.deepEqual(periods(), [{ fromMs: Date.parse("2026-10-09T03:00:00Z"), toMs: null }], "起点是上一次读到开着的时刻");
+  assert.deepEqual([off.health.code, off.calculation.profitUsd], ["OWN_CONSUME_LOG_OFF", null]);
+  assert.notEqual(off.downstream.state, "complete", "关着的时候读出来的收入不当真，更不写 0");
+  assert.equal(off.displayStatus.state, "action");
+  assert.deepEqual([off.displayStatus.title, off.displayStatus.action.label], ["自营站点不记收费记录了", "重新检查"]);
+  // 关着期间每 30 秒以上才再读，段不重复写
+  now += 60000;
+  await todayView(f);
+  assert.equal(periods().length, 1, "还关着：不新开一段");
+  // 开回来：段关上；今天碰到的是已经开回来的那段
+  f.state.consumeLog = "true";
+  now += 60000;
+  const on = await todayView(f);
+  assert.deepEqual(periods(), [{ fromMs: Date.parse("2026-10-09T03:00:00Z"), toMs: now }]);
+  assert.equal(on.health.code, "OWN_CONSUME_LOG_GAP");
+  assert.deepEqual([on.displayStatus.state, on.displayStatus.title, on.displayStatus.action.label], ["action", "这一天自营站点有一段没记收费记录，那段的收入补不回来", ""]);
+});
+
+test("R2 昨天碰到过关着的那一段：不固定、不自动重试、手动重新读取也不固定；没碰到的那天照常固定（永远不按读到的数固定）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  // 10-08 上海时间 10:00–11:00 关过（已经开回来）：这一天碰到，10-07 没碰到
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-08T02:00:00Z"), toMs: Date.parse("2026-10-08T03:00:00Z") }] });
+  await f.module.refreshDue(now);
+  const days = () => f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => row.bill_date).sort();
+  assert.deepEqual(days(), ["2026-10-07"], "没碰到的那天固定了，碰到的 10-08 没固定");
+  const row = f.repository.tables.settlementState.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(row.manual_reason, "OWN_CONSUME_LOG_GAP", "不会自己消失：记下原因");
+  const stats = () => f.state.statCalls.filter((call) => call.start === Date.parse("2026-10-07T16:00:00Z") / 1000).length;
+  const before = stats();
+  now += 3 * 3600000;
+  await f.module.refreshDue(now);
+  assert.equal(stats() - before, 0, "不再自动试，不取 10-08 的账单");
+  const manual = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  assert.equal(manual.health.code, "OWN_CONSUME_LOG_GAP");
+  assert.deepEqual(days(), ["2026-10-07"], "手动重新读取也不固定");
+});
+
+test("R2 读不到设置（令牌少了 option:read、账号不是超级管理员、读取失败）：每天的状态不变、照常固定，没权限的状态记下给设置页说一句", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  f.state.optionReply = [403, { success: false, code: "ACCESS_TOKEN_SCOPE_DENIED", message: "The access token lacks the required permission: option:read" }];
+  await f.module.refreshDue(now);
+  assert.deepEqual(f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => row.bill_date).sort(), ["2026-10-07", "2026-10-08"], "照常固定");
+  assert.deepEqual(f.module.consumeLogStatus("own"), { state: "denied", reason: "scope" });
+  assert.deepEqual(f.rt.store.get("own").consumeLogOffPeriods ?? [], [], "没读到就不记段");
+  f.state.optionReply = [200, { success: false, message: "无权进行此操作，权限不足" }];
+  now += 60000;
+  await f.module.recheckConsumeLog(f.rt.store.get("own"));
+  assert.deepEqual(f.module.consumeLogStatus("own"), { state: "denied", reason: "not_root" });
+  f.state.optionReply = [502, { success: false }];
+  now += 60000;
+  await f.module.recheckConsumeLog(f.rt.store.get("own"));
+  assert.equal(f.module.consumeLogStatus("own").state, "unavailable");
+  f.state.optionReply = null;
+  now += 60000;
+  assert.deepEqual(await f.module.recheckConsumeLog(f.rt.store.get("own")), { state: "on" });
+});
+
+test("R2 站点一层的事项（运营总览、侧栏的需处理列表里）：现在还关着一条「重新检查」，令牌读不到设置一条「更新登录信息」；开回来、没权限以外的都没有；总览里按去处去重只留一条", async (t) => {
+  const { buildOverviewActions } = await import("../lib/overview-actions.js");
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const everything = async () => f.module.queryRules({ preset: "today" }, { mode: "observe", force: true, origin: "manual" });
+  const siteActions = (response) => response.actions.filter((action) => ["recheck_consume_log", "update_authorization"].includes(action.kind));
+  assert.deepEqual(siteActions(await everything()), [], "开着、读得到设置：没有");
+  f.state.consumeLog = "false";
+  now += 60000;
+  const off = await everything();
+  const [recheck] = siteActions(off);
+  assert.deepEqual([recheck.kind, recheck.label, recheck.title], ["recheck_consume_log", "重新检查", "自营站点不记收费记录了"]);
+  assert.equal(recheck.href, "/reconciliation", "没有「去哪处理」：点按钮才再读；地址只给列表去重用，不带参数（带参数打开页面会自动触发写操作）");
+  assert.equal(siteActions(off).filter((action) => action.kind === "recheck_consume_log").length >= 1, true);
+  // 三条绑定每条也有一条同去处的，总览里只剩一条
+  const overview = buildOverviewActions([], { workflowActions: off.actions });
+  assert.equal(overview.all.filter((row) => row.kind === "recheck_consume_log").length, 1, "总览里一个站点一条");
+  // 开回来：不再有（关过的那几天写在各天自己身上，不进清单）
+  f.state.consumeLog = "true";
+  now += 60000;
+  assert.deepEqual(siteActions(await everything()), []);
+  // 令牌读不到设置：一条「更新登录信息」，不是超级管理员时只写后半句
+  f.state.optionReply = [403, { success: false, code: "ACCESS_TOKEN_SCOPE_DENIED", message: "The access token lacks the required permission: option:read" }];
+  now += 60000;
+  const denied = siteActions(await everything()).find((action) => action.code === "OWN_OPTION_READ_DENIED");
+  assert.deepEqual([denied.kind, denied.label, denied.title, denied.stationId], ["update_authorization", "更新登录信息", "自营站点的令牌读不到设置", "own"]);
+  assert.match(denied.detail, /给令牌补上「读设置」的权限，或者换超级管理员的访问令牌。$/);
+  f.state.optionReply = [200, { success: false, message: "无权进行此操作，权限不足" }];
+  now += 60000;
+  const notRoot = siteActions(await everything()).find((action) => action.code === "OWN_OPTION_READ_DENIED");
+  assert.equal(notRoot.detail, "发现不了自营站点不记收费记录了。换超级管理员的访问令牌。");
+});
+
+test("R2「重新检查」按钮每次都真读（用户刚去后台打开、30 秒内回来点，不能回旧结果）；站点开关变了运营总览的缓存也清掉（设计验收必改 1、小改 4）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const { ownCache } = await import("./own-helpers.js");
+  const own = () => f.rt.store.get("own");
+  f.state.consumeLog = "false";
+  assert.deepEqual(await f.module.recheckConsumeLog(own()), { state: "off" });
+  ownCache(f.rt).set("analytics", { at: now }); // 运营总览自营分析的缓存（120 秒）
+  // 用户到后台打开了，5 秒后回来点「重新检查」：要读到开着
+  f.state.consumeLog = "true";
+  now += 5000;
+  assert.deepEqual(await f.module.recheckConsumeLog(own()), { state: "on" }, "30 秒内也真读");
+  assert.equal(ownCache(f.rt).size, 0, "开关变了，运营总览的缓存跟着清");
+  // 同一时刻连点：合成一次（读完 2 秒内回上一次的结果）
+  const reads = optionReads(f);
+  await Promise.all([f.module.recheckConsumeLog(own()), f.module.recheckConsumeLog(own())]);
+  assert.ok(optionReads(f) - reads <= 1, "并发的合成一次");
+});
+
+test("R2 每 5 分钟读一次设置（轮询不强制）：5 分钟内几轮、几条绑定只读一次；设置里别的东西不进任何结果", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  await f.module.refreshDue(now);
+  const reads = optionReads(f);
+  assert.equal(reads, 1, "几条绑定同一轮只读一次");
+  now += 2 * 60000;
+  await f.module.refreshDue(now);
+  assert.equal(optionReads(f), reads, "2 分钟后不再读");
+  now += 4 * 60000;
+  await f.module.refreshDue(now);
+  assert.equal(optionReads(f), reads + 1, "过了 5 分钟再读一次");
+  assert.ok(!JSON.stringify(f.module.consumeLogStatus("own")).includes("secret"));
+});
+
 test("R1 读不到用户列表或管理员日志：这一天算不出收入、不固定，下次重试；不拿没减的数固定进账本", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
@@ -8206,7 +8352,7 @@ test("令牌作废：自营站点一侧马上进需处理（不是 OWN_BILLING_U
   const status = result.displayStatus;
   assert.equal(status.state, "action", "马上进需处理，不等 7 天");
   assert.equal(status.title, "自营站点的访问令牌已经作废了");
-  assert.equal(status.detail, "New API 升级以后旧式的访问令牌不能用了，要换一个新令牌（nap_ 开头），并勾上这些权限：profile:read、channel:read、log:read、user:read、usage:read");
+  assert.equal(status.detail, "New API 升级以后旧式的访问令牌不能用了，要换一个新令牌（nap_ 开头），并勾上这些权限：profile:read、channel:read、log:read、user:read、usage:read、option:read");
   assert.equal(status.action.kind, "update_authorization");
   // 结账：不固定；状态表记成要人处理（reasonKindOf 读 contract 的 kind，不用特判）
   await f.module.refreshDue(now);

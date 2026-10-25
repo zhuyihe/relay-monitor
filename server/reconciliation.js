@@ -13,6 +13,7 @@ import {
   OWN_CHANNEL_TEST_TOKEN_NAMES,
   queryOwnChannels,
   queryOwnLatestLog,
+  queryOwnConsumeLog,
   queryAccountIdentity,
   unixSecondWindow,
 } from "../lib/providers.js";
@@ -31,8 +32,10 @@ import {
   sameReconciliationWindow,
 } from "../lib/reconciliation-contract.js";
 import { OWN_STATION_UNSET, UPSTREAM_GONE } from "../lib/format.js";
+import { CONSUME_LOG_LOOKBACK_MS, applyConsumeLogReading, consumeLogOffOverlap } from "../lib/consume-log.js";
 import { errorText, ownStationErrorCode } from "../lib/error-copy.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationOwnerScope, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
+import { workflowAction } from "../lib/workflow-actions.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 import { OwnLogStore } from "./own-log-store.js";
 import { createOwnLogIngest } from "./own-log-ingest.js";
@@ -51,7 +54,7 @@ import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconc
   summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
 import { costBasisOf, isConfiguredRate, rateSnapshotOf, ratesFor } from "../lib/profit.js";
 import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
-import { readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
+import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 
 export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
@@ -409,6 +412,8 @@ function upstreamErrorHealth(err, resource) {
 const CALCULATION_BLOCKERS = new Set([
   "ACCESS_TOKEN_LEGACY_RETIRED",
   "ACCESS_TOKEN_SCOPE_DENIED",
+  "OWN_CONSUME_LOG_OFF",
+  "OWN_CONSUME_LOG_GAP",
   "UPSTREAM_FEATURE_UNSUPPORTED",
   "KEY_INVALID_OR_DENIED",
   "UPSTREAM_DATA_UNAVAILABLE",
@@ -779,6 +784,75 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 用日志自己的时刻和条数，不用控制台的钟：站点的钟偏慢、日志晚写进去（时刻更早、排不到第一），条数都会变（审核第一、二轮，总指挥 10-25 定）。
   // 起点从上一次读到的最新一条（站点的时刻）往前 120 秒起，落后超过 10 分钟才往前挪，挪的那一轮照常读；没读到过日志的从第一次查往前 2 小时起，之后不挪。
   // 有新的消费、读失败、换了凭据、第一轮、起点挪了、接口不给条数（老版本）：这一轮照旧逐个渠道读。
+  // 自营站点记不记收费记录（own-revenue-plan 第二节）：每个自营站点每 5 分钟读一次设置（轮询、页面看都走这里，结账和「刷新」强制读，
+  // 离上次不到 30 秒的不重复读）；只在开、关变化时往站点记录上写关着的时间段（走 store.update，带站点锁），重启不丢。
+  // 起点是最后一次能证明开着的时刻：内存里最近读到开着的时刻、自营站点最新一条消费日志的时刻（往前留 120 秒，站点的钟）取最晚的；
+  // 都没有就从读到关着那一刻起算。两次读取之间关了几分钟又开了的，读不到，那几分钟的收入会算少（规范里写了，界面不出现）。
+  // 读不到设置（网络、没权限、令牌作废）不改段，也不报错：没权限的状态给设置页说一句（consumeLogStatusOf），其余的原因各自的读取会说。
+  const CONSUME_LOG_READ_MS = 5 * 60000, CONSUME_LOG_FORCE_MS = 30000, CONSUME_LOG_BUTTON_MS = 2000;
+  const consumeLogReads = new Map(); // 站点 id → { credential, checkedAt, status, lastOnAt }
+  const consumeLogInflight = new Map();
+  function consumeLogStatusOf(stationId) {
+    return consumeLogReads.get(stationId)?.status ?? null;
+  }
+  // always：「重新检查」按钮——用户刚到后台打开，回来点，这一次一定要真读（不受 30 秒限制；同一时刻并发的合并成一次，连点只隔 2 秒）
+  async function refreshConsumeLog(own, { force = false, always = false } = {}) {
+    if (!own?.isOwn || own.type !== "newapi") return null;
+    const credential = credentialFingerprint(own);
+    const known = consumeLogReads.get(own.id);
+    const ageLimit = always ? CONSUME_LOG_BUTTON_MS : force ? CONSUME_LOG_FORCE_MS : CONSUME_LOG_READ_MS;
+    if (known && known.credential === credential && Date.now() - known.checkedAt < ageLimit) return known.status;
+    const inflightKey = `${own.id}:${credential}`;
+    if (consumeLogInflight.has(inflightKey)) return consumeLogInflight.get(inflightKey);
+    const task = (async () => {
+      let status;
+      try { status = await queryOwnConsumeLog(own); } catch (err) { status = { state: "unavailable", code: String(err?.code || "") }; }
+      const at = Date.now(), previous = known && known.credential === credential ? known : null;
+      const next = { credential, checkedAt: at, status, lastOnAt: status.state === "on" ? at : previous?.lastOnAt ?? null };
+      consumeLogReads.set(own.id, next);
+      if (status.state === "on" || status.state === "off") {
+        const latestLogMs = ownActivity.get(own.id)?.latest?.createdAtSec != null ? ownActivity.get(own.id).latest.createdAtSec * 1000 - CONSUME_LOG_LOOKBACK_MS : null;
+        const offFromMs = Math.max(previous?.lastOnAt ?? -Infinity, latestLogMs ?? -Infinity);
+        const periods = applyConsumeLogReading(upstreamStation(own.id)?.consumeLogOffPeriods ?? own.consumeLogOffPeriods, { state: status.state, at },
+          { offFromMs: Number.isFinite(offFromMs) ? offFromMs : null });
+        if (periods) {
+          await rt.store.update(own.id, { consumeLogOffPeriods: periods });
+          clearBillingResults(); // 哪些天碰到了关着的段变了，缓存里的结果作废
+          ownCache(rt).clear(); // 运营总览的等式（自营分析缓存 120 秒）也跟着变，不然需处理已经说不记了、等式还照常显示收入
+        }
+      }
+      return status;
+    })().finally(() => consumeLogInflight.delete(inflightKey));
+    consumeLogInflight.set(inflightKey, task);
+    return task;
+  }
+  function ownSiteActions(ruleList) {
+    const out = [];
+    for (const id of new Set(ruleList.filter((rule) => rule.enabled && !rule.archivedAt).map((rule) => rule.ownStationId))) {
+      const own = upstreamStation(id);
+      if (!own?.isOwn || own.type !== "newapi") continue;
+      if ((own.consumeLogOffPeriods || []).some((period) => period.toMs == null)) {
+        out.push(workflowAction("recheck_consume_log", { ownStationId: id, stationId: id }, { code: "OWN_CONSUME_LOG_OFF" }));
+      }
+      const status = consumeLogStatusOf(id);
+      if (status?.state === "denied") {
+        const action = workflowAction("update_authorization", { stationId: id }, { code: "OWN_OPTION_READ_DENIED" });
+        // 不是超级管理员时只写后半句：说明用不带「补权限」的那一句
+        out.push(status.reason === "not_root" ? { ...action, detail: reconciliationIssue("OWN_OPTION_READ_DENIED").detailPlain } : action);
+      }
+    }
+    return out;
+  }
+  // 这条绑定的这段窗口碰没碰到关着的段：碰到还关着的是 OFF（按钮「重新检查」），只碰到已经开回来的是 GAP（这一天永远不固定）
+  async function consumeLogIssueFor(own, rule, window, { force = false } = {}) {
+    await refreshConsumeLog(own, { force }).catch(() => null);
+    const accountingStart = reconciliationAccountingStart(rule) ?? Date.parse(rule.createdAt);
+    const clipped = { startMs: Math.max(window.startMs, Number.isFinite(accountingStart) ? accountingStart : -Infinity), endMs: window.endMs };
+    const overlap = consumeLogOffOverlap(upstreamStation(own.id)?.consumeLogOffPeriods ?? own.consumeLogOffPeriods, clipped);
+    const code = overlap.open ? "OWN_CONSUME_LOG_OFF" : overlap.closed ? "OWN_CONSUME_LOG_GAP" : null;
+    return code ? { code, scope: "downstream", detail: issueText(code), observedAt: Date.now() } : null;
+  }
+
   async function markQuietOwnStations(rules, registry, now = Date.now()) {
     const ownIds = [...new Set(rules.map((rule) => rule.ownStationId))];
     await Promise.all(ownIds.map(async (id) => {
@@ -1811,6 +1885,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (costOwner.state === "unknown") issues.push(upstreamSide({ code: "COST_OWNER_UNVERIFIED", scope: "rule", detail: issueText("COST_OWNER_UNVERIFIED"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (costOwner.state === "duplicate") issues.push(upstreamSide({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: issueText("CANONICAL_KEY_CONFLICT"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (!ownAvailable) issues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "downstream", detail: issueText("OWN_BILLING_UNAVAILABLE"), observedAt: Date.now() });
+      // 自营站点关过收费记录：碰到那一段的窗口，收入读不到、利润先不算（probe 也要看到，不取账单就能判）
+      const consumeLogIssue = ownAvailable ? await consumeLogIssueFor(own, rule, window, { force: force || settle }) : null;
+      if (consumeLogIssue) issues.push(consumeLogIssue);
       if (upstreamProblem) issues.push(upstreamSide({ code: upstreamProblem.code, scope: "upstream", detail: upstreamProblem.detail, observedAt: Date.now(),
         // 令牌作废、少了权限要说是哪个上游、少的哪一项（审核 #107 低-4：固定成本的上游走这里，原来这两样丢了）
         ...(upstreamProblem.stationName != null ? { stationName: upstreamProblem.stationName } : {}), ...(upstreamProblem.missingScope ? { missingScope: upstreamProblem.missingScope } : {}) }));
@@ -1886,7 +1963,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
             : upstreamWindowForSegment(upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId }).catch((error) => ({ error })),
-          (ownAvailable
+          (ownAvailable && consumeLogIssue ? Promise.resolve({ error: codedError(consumeLogIssue.code, consumeLogIssue.detail), consumeLog: true })
+            : ownAvailable
             ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle })
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
             .catch((error) => ({ error })),
@@ -1921,7 +1999,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (downstreamResult.error || (downstreamResult.state !== "complete" && downstreamResult.state !== "pending")) {
           // 自营站点的令牌作废、少了权限：要人换令牌，马上进需处理，不再当成读取类（OWN_BILLING_UNAVAILABLE）等 7 天（own-revenue-plan 第三节）
           const ownToken = isAccessTokenError(downstreamResult.error?.code) ? downstreamResult.error : null;
-          segmentIssues.push(ownToken
+          // 关过收费记录的那一段：问题已经在上面记了一次（OFF / GAP），不再多说「读不到」
+          if (!downstreamResult.consumeLog) segmentIssues.push(ownToken
             ? { code: ownToken.code, scope: "segment", side: "own", detail: issueText(ownToken.code), observedAt: Date.now(), ...(ownToken.scope ? { missingScope: ownToken.scope } : {}) }
             : { code: "OWN_BILLING_UNAVAILABLE", scope: "segment", detail: issueText("OWN_BILLING_UNAVAILABLE"), observedAt: Date.now() });
         }
@@ -2455,7 +2534,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       return deriveKnownChannelCoverage(catalogue && sameSource(catalogue.ownSource) ? catalogue : null,
         knownRules.filter((rule) => sameSource(rule.ownSource)), coverageFacts.filter((result) => sameSource(result.ownSource)), { window });
     } });
-    const actions = [...new Map([...selected.flatMap((row) => row.actions), ...coverage.channels.flatMap((channel) => channel.actions)]
+    // 自营站点一层的事项（用户 10-25 定，不等 E）：现在还关着收费记录的站点一条「重新检查」；令牌读不到设置的站点一条「更新登录信息」。
+    // 各天的原因已经在每条绑定里，这两条是按站点出的，和每条绑定的那条同一个去处（总览里按去处去重，只留一条）
+    const siteActions = ownSiteActions(rules);
+    const actions = [...new Map([...selected.flatMap((row) => row.actions), ...siteActions, ...coverage.channels.flatMap((channel) => channel.actions)]
       .map((action) => [action.id, action])).values()];
     // tz：业务时区。绑定按别的时区算一天时，页面才说明「按 UTC 时间算一天」（design/ui-copy-spec.md §6）。
     return { results: selected, generatedAt: new Date(now).toISOString(), tz: businessTimeZone(), ...grouped, coverage, actions, displayCurrency, unconfiguredRateStations, fixedOffProfitStations: offProfit };
@@ -2919,6 +3001,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     ingestOwnLog: (own) => ownLog.ingestOnce(own),
     ownLogBuckets: (stationId, fromSlotMs, toSlotMs) => (ownLogStore || rt._ownLogStore).listBuckets(stationId, fromSlotMs, toSlotMs),
     upstreamPricing: (station) => upstreamPricing.pricingFor(station),
+    // 自营站点记不记收费记录的最近一次读取结果（{ state: on | off | denied | unavailable, reason? }），没读过是 null；设置页用
+    consumeLogStatus: consumeLogStatusOf,
+    // 马上再读一次站点设置（「重新检查」、设置页）；读完返回结果
+    recheckConsumeLog: (own) => refreshConsumeLog(own, { force: true, always: true }),
     // 接入关联后立即在后台观测今天一次，不必等下一轮轮询。没有启动后台轮询（测试、脚本）时不观测。
     observeSoon(ruleIds) {
       if (!rt._reconciliationPollTimer || !ruleIds?.length) return null;

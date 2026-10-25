@@ -244,7 +244,8 @@ const INCOME_ONLY_WARNINGS = new Set(["sell_price_unset"]);
  * 成本也算不出时就是 computeProfit 的 { error, errorCode }，整块报错，也带上 incomeUnconfirmed
  */
 export async function unconfirmedIncomeProfit(rt, own, err, options) {
-  const incomeUnconfirmed = resultError(err, "OWN_INCOME_UNCONFIRMED");
+  // 自营站点关着收费记录：原因说这个，不说「收入确认不了」（页面「重新检查」按钮靠这个码认）
+  const incomeUnconfirmed = resultError(err, err?.code === "OWN_CONSUME_LOG_OFF" ? "OWN_CONSUME_LOG_OFF" : "OWN_INCOME_UNCONFIRMED");
   const profit = await computeProfit(rt, own, 0, 0, { ...options, resold: null });
   if (profit.error) return { ...profit, incomeUnconfirmed };
   const kept = profit.warningCodes.map((code, i) => [code, profit.warnings[i]]).filter(([code]) => !INCOME_ONLY_WARNINGS.has(code));
