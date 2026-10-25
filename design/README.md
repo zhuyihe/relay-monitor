@@ -4,7 +4,7 @@
 
 - 「现在」是页面上已经这样；「以后」是已经定了、还没做完的，做到哪见[待改总表](./pending.md)。
 - PR 代号：C 是结账可靠性，K（K1a–K2d）是认 Key、渠道跟着 Key 走，D 改设置，E 需处理清单，F 多天拼装，G 金额币种，后面的状态表里有各自的设计稿。[K 设计稿](./ux/k-key-segments.md)是 10-24 的旧稿，大部分已被流程梳理稿取代。
-- 「K 方案」「C 方案」「性能基线」是开发、审核的工作文件，稿子里写的 `~/.cache/…` 路径也一样，都不在仓库里；排期也不在仓库里。
+- 开发的 K 方案、C 方案和审核的性能基线是工作文件，不在仓库里；里面定下的规矩已经写进这里的文档（性能门槛见 [CONTRIBUTING](../CONTRIBUTING.md) 第 4 节）。排期也不在仓库里。
 
 ## 给用户（财务、运营）
 
@@ -37,6 +37,8 @@
 | 一个 PR 怎么做、说明里写什么 | [CONTRIBUTING](../CONTRIBUTING.md) |
 | 性能门槛 | [CONTRIBUTING](../CONTRIBUTING.md) 第 4 节 |
 | 测试怎么跑、什么时候跑三个时区 | [CONTRIBUTING](../CONTRIBUTING.md) 第 5 节 |
+| 审核怎么审、要在生产上跑的脚本怎么交付 | [CONTRIBUTING](../CONTRIBUTING.md) 第 6 节 |
+| 安全上要守什么（完整的 Key、令牌、密码不外泄） | [CONTRIBUTING](../CONTRIBUTING.md) 第 7 节 |
 | 界面上一句话怎么写、写在代码哪里 | [用语规范](./ui-copy-spec.md) §12 |
 | 设计原则，审核时逐页查什么 | [设计规范](./ui-design-spec.md) §1.1–§1.4 |
 | 颜色、字号、间距、组件 | [设计规范](./ui-design-spec.md) §3、§4 |
