@@ -1,5 +1,7 @@
 // 系统设置页的文字：只在这一页出现的话都在这里，用语按 design/ui-copy-spec.md §3、§11。
 // 页面文件不能导出常量，界面测试要引用这些话，所以放在同目录的 copy.ts（§12）；导入带 .js 后缀，node 可以直接读
+import { MIN_PASSWORD_LENGTH } from "../../../lib/error-copy.js";
+
 export const COPY = Object.freeze({
   // 区块名（§11：告警阈值 → 余额提醒线，历史数据留存 → 历史数据保留）
   refresh: "刷新与数据",
@@ -63,7 +65,7 @@ export const COPY = Object.freeze({
   oldPassword: "原密码",
   newPassword: "新密码",
   confirmPassword: "确认新密码",
-  minLength: "至少 6 位",
+  minLength: `至少 ${MIN_PASSWORD_LENGTH} 位`,
   mismatch: "两次填的新密码不一样",
   changePassword: "修改密码",
   changeHint: "改完后所有已登录的设备都会退出，要用新密码重新登录",

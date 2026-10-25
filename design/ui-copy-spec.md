@@ -986,7 +986,7 @@ K 以后（新）：上表 UPSTREAM_DATA_UNAVAILABLE 那一行，7 天后的标�
    | 只给读屏的「正在加载」 | `lib/format.js` 的 `LOADING_TEXT` | 面板骨架、上游列表、整页加载各写一份（整页写的是「加载中」） |
    | 「软件版本」 | `lib/brand.js` 的 `VERSION_LABEL` | 侧栏、系统设置各写一份 |
    | 控制台自己的接口出错时那一句（§8.2） | `lib/error-copy.js` 的 `consoleErrorText`、`consoleFailureText`；连不上控制台是 `CONSOLE_UNREACHABLE` | 登录页自己写「连不上控制台」，系统设置、告警中心按读上游的几类说 |
-   | 登录、改密码的报错（§8.2）：用户名或密码不对、试了太多次、原密码不对、新密码太短 | `lib/error-copy.js` 的 `LOGIN_FAILED`、`LOGIN_RATE_LIMITED`、`WRONG_PASSWORD`、`PASSWORD_TOO_SHORT`；路由按码返回这几句，登录页和系统设置按码把报错放到对应的输入框，本地校验的「新密码至少 6 位」也取这里 | 路由各写原文，页面按原文里有没有「原密码」「新密码」判断 |
+   | 登录、改密码的报错（§8.2）：用户名或密码不对、试了太多次、原密码不对、新密码太短 | `lib/error-copy.js` 的 `LOGIN_FAILED`、`LOGIN_RATE_LIMITED`、`WRONG_PASSWORD`、`PASSWORD_TOO_SHORT`；路由按码返回这几句，登录页和系统设置按码把报错放到对应的输入框，本地校验的「新密码至少 6 位」也取这里（数字是常量 `MIN_PASSWORD_LENGTH`，改了这个数这句话跟着变） | 路由各写原文，页面按原文里有没有「原密码」「新密码」判断 |
    | 告警中心的规则名 | 余额三档（余额偏低、余额用完、快用完）和「读不到余额」取 `BALANCE_STATE_TEXT`，「恢复正常」在告警中心的 `copy.ts` | 告警中心另写「余额耗尽」「查询失败」「耗尽预警」 |
    | 自营业务几张表的列名、标签名，「按明细细算」「读不到分组和渠道数据」 | `app/(dashboard)/my/shared.tsx` 的 `COL_TEXT`、`TAB_TEXT`、`AUDIT_TITLE`、`FLOW_UNREADABLE` | 概览、用户、模型与渠道各写一份 |
    | 「利润怎么算」；预计花费下面的「按过去 34 天估算」「过去 2 周平均差 ±8%」 | `lib/format.js` 的 `BASIS_TITLE`、`FORECAST_TEXT`；自营业务和日报共用 | 自营业务的 `my/shared.tsx`、`overview-tab.tsx` 和日报各写一份 |

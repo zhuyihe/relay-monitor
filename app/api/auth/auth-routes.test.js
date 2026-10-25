@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import { errorText } from "../../../lib/error-copy.js";
 
-// 只换掉鉴权、取 IP 和比对密码这几层，跑的是实际的处理函数；密码「right」算对
+// 只换掉鉴权、取 IP 和比对密码这几层，跑的是实际的处理函数；密码「right」算对。
+// lib/auth.js 这个虚拟模块一旦被 import 过就会被 Node 的模块缓存按 URL 缓存住（后面的 hook 不会再生效），
+// scryptOverloaded 要能在不同测试里切换，就不能把值烤进生成的源码字符串里，得每次调用时读一个全局变量
 async function route(path) {
   const hook = registerHooks({ load(url, context, nextLoad) {
     if (url.endsWith("/lib/api.js")) return { format: "module", shortCircuit: true, source: [
@@ -16,6 +18,7 @@ async function route(path) {
     if (url.endsWith("/lib/auth.js")) return { format: "module", shortCircuit: true, source: [
       "export const verifyPassword = (password) => password === \"right\";",
       "export const DEVICE_COOKIE_NAME = \"rm_device\";",
+      "export const scryptOverloaded = () => globalThis.__authTestOverloaded === true;",
     ].join("\n") };
     return nextLoad(url, context);
   } });
@@ -23,12 +26,22 @@ async function route(path) {
 }
 
 const post = (path, body) => new Request(`https://local.test${path}`, { method: "POST", body: JSON.stringify(body) });
+// reserveLoginAttempt 的桩和真实 SessionManager 同一套规则：先判断锁没锁、全站顶没顶（可豁免），再占位；
+// 只有占住位的那次调用才「跑密码校验」，调用方登录成功时调 release() 退回——calls 只记 reserve/release，不记被拒绝的
 const sessions = (locked = false, { siteLimited = false, trustedDevice = false } = {}) => {
   const calls = [];
-  return { calls, isLocked: () => locked, isSiteLimited: () => siteLimited, verify: () => trustedDevice ? { exp: Infinity } : null,
-    recordFailure: (ip) => calls.push(["failure", ip]), recordSuccess: (ip) => calls.push(["success", ip]),
+  return {
+    calls,
+    verify: (token, { device = false } = {}) => (device && trustedDevice ? { t: "device", exp: Infinity } : null),
+    reserveLoginAttempt: (ip, { exemptSiteLimit = false } = {}) => {
+      if (locked) return null;
+      if (!exemptSiteLimit && siteLimited) return null;
+      calls.push(["reserve", ip]);
+      return () => calls.push(["release", ip]);
+    },
     issue: () => "token", issueDevice: () => "device-token", sessionVersion: () => 1,
-    cookieHeader: () => "sid=token", deviceCookieHeader: () => "dev=device-token", clearCookieHeader: () => "sid=" };
+    cookieHeader: () => "sid=token", deviceCookieHeader: () => "dev=device-token", clearCookieHeader: () => "sid=",
+  };
 };
 const store = (extra = {}) => ({ auth: { username: "admin", salt: "s", hash: "h", isDefault: false }, ...extra });
 
@@ -38,9 +51,10 @@ test("登录：用户名或密码不对时 401 带 LOGIN_FAILED，试太多次�
   const wrong = await POST(post("/api/auth/login", { username: "admin", password: "nope" }), rt);
   assert.equal(wrong.status, 401);
   assert.deepEqual(await wrong.json(), { error: errorText({ code: "LOGIN_FAILED" }), code: "LOGIN_FAILED" });
-  assert.deepEqual(rt.sessions.calls, [["failure", "1.2.3.4"]]);
+  // 占了位但密码不对，没有 release：这次尝试就是最终的失败记录，不用再记一次
+  assert.deepEqual(rt.sessions.calls, [["reserve", "1.2.3.4"]]);
 
-  // 锁定时连密码都不比对，也不再记失败次数
+  // 锁定时连密码都不比对，占位都不会发生
   const lockedRt = { store: store(), sessions: sessions(true) };
   const locked = await POST(post("/api/auth/login", { username: "admin", password: "right" }), lockedRt);
   assert.equal(locked.status, 429);
@@ -51,31 +65,51 @@ test("登录：用户名或密码不对时 401 带 LOGIN_FAILED，试太多次�
   const ok = await POST(post("/api/auth/login", { username: "admin", password: "right" }), okRt);
   assert.equal(ok.status, 200);
   assert.deepEqual(await ok.json(), { ok: true, username: "admin", isDefaultPassword: false });
-  assert.deepEqual(okRt.sessions.calls, [["success", "1.2.3.4"]]);
+  assert.deepEqual(okRt.sessions.calls, [["reserve", "1.2.3.4"], ["release", "1.2.3.4"]]);
   assert.equal(errorText({ code: "LOGIN_FAILED" }), "用户名或密码不对");
   assert.equal(errorText({ code: "LOGIN_RATE_LIMITED" }), "试了太多次，请 5 分钟后再试");
 });
 
-test("登录：全站上限顶住时也是 429 带 LOGIN_RATE_LIMITED，不跑密码校验；已经登录过的浏览器（设备 Cookie）不受这条约束", async () => {
+test("登录：scrypt 排满时 429 带 LOGIN_RATE_LIMITED，连判断锁、占位都不做——不占用这次名额（安全审核 10-25 中-1）", async () => {
+  const { POST } = await route("./login/route.js");
+  globalThis.__authTestOverloaded = true;
+  try {
+    const rt = { store: store(), sessions: sessions() };
+    const res = await POST(post("/api/auth/login", { username: "admin", password: "right" }), rt);
+    assert.equal(res.status, 429);
+    assert.deepEqual(await res.json(), { error: errorText({ code: "LOGIN_RATE_LIMITED" }), code: "LOGIN_RATE_LIMITED" });
+    assert.deepEqual(rt.sessions.calls, [], "没有占位，不计入任何失败次数");
+  } finally {
+    globalThis.__authTestOverloaded = false;
+  }
+});
+
+test("登录：全站上限顶住时也是 429 带 LOGIN_RATE_LIMITED，不跑密码校验；已经登录过的浏览器（设备 Cookie）不受这条约束，单来源的锁仍然约束它", async () => {
   const { POST } = await route("./login/route.js");
 
-  // 全站顶住、没有设备 Cookie：连密码都不比对，不记失败次数（和单来源锁一样不占这次失败）
+  // 全站顶住、没有设备 Cookie：连密码都不比对，不占位（和单来源锁一样不占这次失败）
   const limitedRt = { store: store(), sessions: sessions(false, { siteLimited: true }) };
   const limited = await POST(post("/api/auth/login", { username: "admin", password: "right" }), limitedRt);
   assert.equal(limited.status, 429);
   assert.deepEqual(await limited.json(), { error: errorText({ code: "LOGIN_RATE_LIMITED" }), code: "LOGIN_RATE_LIMITED" });
   assert.deepEqual(limitedRt.sessions.calls, []);
 
-  // 全站顶住、带着设备 Cookie：豁免这一步，密码校验、记成功/失败都照常
+  // 全站顶住、带着设备 Cookie：豁免这一步，密码校验、占位/退回都照常
   const trustedRt = { store: store(), sessions: sessions(false, { siteLimited: true, trustedDevice: true }) };
   const trusted = await POST(post("/api/auth/login", { username: "admin", password: "right" }), trustedRt);
   assert.equal(trusted.status, 200);
-  assert.deepEqual(trustedRt.sessions.calls, [["success", "1.2.3.4"]]);
+  assert.deepEqual(trustedRt.sessions.calls, [["reserve", "1.2.3.4"], ["release", "1.2.3.4"]]);
 
   const trustedWrongRt = { store: store(), sessions: sessions(false, { siteLimited: true, trustedDevice: true }) };
   const trustedWrong = await POST(post("/api/auth/login", { username: "admin", password: "nope" }), trustedWrongRt);
   assert.equal(trustedWrong.status, 401);
-  assert.deepEqual(trustedWrongRt.sessions.calls, [["failure", "1.2.3.4"]]);
+  assert.deepEqual(trustedWrongRt.sessions.calls, [["reserve", "1.2.3.4"]]);
+
+  // 带着设备 Cookie 但单来源已经锁住：设备 Cookie 只豁免全站上限，豁免不了单来源的锁
+  const trustedLockedRt = { store: store(), sessions: sessions(true, { siteLimited: true, trustedDevice: true }) };
+  const trustedLocked = await POST(post("/api/auth/login", { username: "admin", password: "right" }), trustedLockedRt);
+  assert.equal(trustedLocked.status, 429);
+  assert.deepEqual(trustedLockedRt.sessions.calls, []);
 });
 
 test("登录成功：会话 Cookie 和设备 Cookie 各发一条，不是合并成一条", async () => {
