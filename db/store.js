@@ -618,6 +618,9 @@ export class Store {
       s2Tokens: null, // Sub2API 密码模式的令牌缓存 {accessToken, refreshToken, expiresAt}
       alertState: null, // 告警去重状态（含不再续费站点的一次性低余额提醒时间）
       balance: null, // 最近一次查询结果
+      // 渠道 Key 读取服务上一次读成功的时刻（毫秒，K2b）：重启后找不到更精确的「上一次确认是哪把 Key」时，
+      // 兜底当成换 Key 窗口的起点——只要不晚于真正换的那一刻就不会漏钱（总指挥 10-26 定，见 key-agent-identify.js）
+      keyAgentLastSuccessAtMs: null,
     };
     clearHiddenCredentials(station);
     if (onboardingOrigin !== undefined) station.onboardingOrigin = originMarker(onboardingOrigin);
@@ -821,5 +824,13 @@ export class Store {
 
   async setBalance(id, balance) {
     await this._changeStation(id, (s) => { s.balance = balance; });
+  }
+
+  // K2b：读取服务这一轮真的读成功了（不是命中缓存、不是 304 沿用、不带 X-Agent-Stale）就记一次；
+  // 只往前挪，不回退——上一次记的时刻比这次晚就不覆盖（理论上不会发生，稳妥起见还是判一下）
+  async setKeyAgentLastSuccessAt(id, atMs) {
+    await this._changeStation(id, (s) => {
+      if (s.keyAgentLastSuccessAtMs == null || atMs > s.keyAgentLastSuccessAtMs) s.keyAgentLastSuccessAtMs = atMs;
+    });
   }
 }

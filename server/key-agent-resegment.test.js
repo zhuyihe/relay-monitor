@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   planKeyChangeSegments, planMovedKeySegments, planSegmentChanges, splitSub2RecordsAtCutover,
-  keyAgentExceptionIssueOf, KEY_READER_UNREACHABLE_THRESHOLD, detectGroupSplit, detectGroupMerges,
+  keyAgentExceptionIssueOf, KEY_READER_UNREACHABLE_THRESHOLD, detectGroupSplit, detectGroupMerges, safeLastSeenAt,
 } from "./key-agent-resegment.js";
 
 const ref = (tokenId, upstreamStationId = "up1") => ({ upstreamStationId, tokenId });
@@ -37,6 +37,29 @@ test("planKeyChangeSegments：New API 逐条用量能精确定出新 Key 第一�
   assert.equal(plan.kind, "precise");
   assert.equal(plan.cutoverAt, preciseAt);
   assert.equal(plan.windowKeys, undefined, "精确切点时不该再有过渡段");
+});
+
+// ---------- lastSeenAt（a）丢了的兜底：只能往前退，不能往后挪（总指挥 10-26 定，重启场景） ----------
+
+test("safeLastSeenAt：有持久化的「读取服务上一次读成功的时刻」就用它，旧一点也没关系", () => {
+  assert.equal(safeLastSeenAt({ keyAgentLastSuccessAtMs: T("10:00"), segmentEffectiveFrom: T("00:00") }), T("10:00"));
+});
+
+test("safeLastSeenAt：没有持久化的成功时刻（没装过读取服务，或者刚装上还没成功读过）——退到这条绑定当前开着那段的起点，一定不晚于真正换 Key 的那一刻", () => {
+  assert.equal(safeLastSeenAt({ keyAgentLastSuccessAtMs: null, segmentEffectiveFrom: T("00:00") }), T("00:00"));
+});
+
+test("重启场景：a 丢了、退到更早的安全时刻，[a,b) 过渡段依旧盖住真正换 Key 的那一刻 t——不漏 [t,b) 这段新 Key 的花费", () => {
+  // t（真正换 Key，没人知道确切时刻）落在 10:00（上一次读成功）和 14:30（这一轮认出新 Key，b）之间，比如 12:00；
+  // 重启丢了内存里原本该记的、更贴近 t 的 lastSeenAt，只能退到持久化的「上一次读成功」（10:00）
+  const a = safeLastSeenAt({ keyAgentLastSuccessAtMs: T("10:00"), segmentEffectiveFrom: T("00:00") });
+  const t = T("12:00"), b = T("14:30");
+  assert.ok(a <= t, "退到的时刻不晚于真正换 Key 的那一刻，没有往后挪");
+  const plan = planKeyChangeSegments({ lastSeenAt: a, observedAt: b, oldRef: ref(9), newRef: ref(10) });
+  assert.equal(plan.kind, "windowed");
+  assert.equal(plan.windowStart, a);
+  assert.equal(plan.windowEnd, b);
+  assert.ok(plan.windowStart <= t && t < plan.windowEnd, "过渡段整段盖住 t，[t,b) 落在过渡段里——不会被漏在旧段（只有旧 Key）或新段（从 b 起）之外");
 });
 
 test("planKeyChangeSegments：原来没有 Key 的渠道（新渠道、还没有用量）第一次认出 Key——没有旧 Key 可以一起算，直接在认出的那一刻开段", () => {

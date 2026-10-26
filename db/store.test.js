@@ -665,3 +665,15 @@ test("渠道 Key 读取服务配置（K2a）：url 直接存，secret 太短或�
   // 建站点时也一样挡弱令牌
   await assert.rejects(store.add({ name: "x", type: "newapi", baseUrl: "https://x.test", keyAgentSecret: "short" }), (error) => error.code === "SECRET_TOO_SHORT");
 });
+
+test("setKeyAgentLastSuccessAt（K2b）：持久化读取服务上一次读成功的时刻，只往前挪，不回退——晚的覆盖早的，早的不能覆盖晚的", async () => {
+  const store = await new Store(fakePool()).load();
+  const station = await store.add({ name: "自营站", type: "newapi", isOwn: true });
+  assert.equal(station.keyAgentLastSuccessAtMs, null);
+  await store.setKeyAgentLastSuccessAt(station.id, 1000);
+  assert.equal(store.get(station.id).keyAgentLastSuccessAtMs, 1000);
+  await store.setKeyAgentLastSuccessAt(station.id, 2000);
+  assert.equal(store.get(station.id).keyAgentLastSuccessAtMs, 2000, "更晚的覆盖");
+  await store.setKeyAgentLastSuccessAt(station.id, 500);
+  assert.equal(store.get(station.id).keyAgentLastSuccessAtMs, 2000, "更早的不覆盖，不会退回去");
+});

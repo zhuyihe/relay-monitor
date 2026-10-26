@@ -115,6 +115,9 @@ export async function identifyChannelsCached(rt, ownStation, options = {}) {
   const sameStation = cache?.stationId === ownStation.id;
   const result = await identifyChannels(rt, ownStation, { ...options, etag: sameStation ? cache.etag : null });
   trackKeyAgentReachability(rt, ownStation.id, result); // 只在真的问了一次（没命中 4 分钟缓存）才记，不按调用次数记
+  // K2b：这一轮读取服务真的读成功了（200 或 304，都不带 X-Agent-Stale）：持久化这一刻，重启后找不到更精确的
+  // 「上一次确认是哪把 Key」时拿它兜底换 Key 窗口的起点（总指挥 10-26 定：只往前挪不回退，宁可窗口宽一点）
+  if (result.ok && !result.stale) await rt.store.setKeyAgentLastSuccessAt?.(ownStation.id, now)?.catch(() => {});
   if (!result.ok) { rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result, etag: sameStation ? cache.etag : null }; return result; }
   const resolved = result.status === 304 && sameStation && cache.result?.ok
     ? { ...result, channels: cache.result.channels, revealIssues: cache.result.revealIssues }

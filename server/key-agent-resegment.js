@@ -9,6 +9,16 @@
 const keyRefId = (ref) => `${ref.upstreamStationId}:${ref.tokenId}`;
 const sameKeyRef = (a, b) => !!a && !!b && keyRefId(a) === keyRefId(b);
 
+// lastSeenAt（a）丢了的时候（比如控制台重启）兜底用哪个时刻（总指挥 10-26 定）：真正换 Key 的那一刻 t 落在
+// a、b 之间；a 退得越早越安全——只要 a ≤ t 就不漏钱也不重复算（新 Key 换上以前没有用量，老 Key 本来就是这条绑定
+// 自己的，宽出来的那一段，两把 Key 多读到的都是 0，不是多算）；a 只能往前退，不能往后挪，往后挪会把 [t, b) 那段
+// 新 Key 的花费漏掉（旧段只有旧 Key、新段从 b 起，两边都不算）。
+// 优先用读取服务上一次读成功的时刻（持久化的，旧一点也没关系，只会让过渡窗口更宽）；连这个都没有（没装过读取
+// 服务，或者刚装上还没成功读过一次）就用这条绑定当前开着那段的起点，一定不会晚于真正换 Key 的那一刻。
+export function safeLastSeenAt({ keyAgentLastSuccessAtMs, segmentEffectiveFrom }) {
+  return keyAgentLastSuccessAtMs ?? segmentEffectiveFrom;
+}
+
 // 这条绑定的 Key 从 oldRef 变成 newRef，newRef 不是从别的绑定那边挪过来的（凭空出现的新 Key，或者原来就没有 Key）：
 // 算要开的段。preciseAt 给了（New API 逐条用量能精确定出新 Key 第一条用量的时刻）就干净切一刀，没有过渡段；
 // 定不出就开一个 [lastSeenAt, observedAt) 的过渡段，两把 Key 的账单都读——这段时间只有这一个渠道在用这两把 Key，
