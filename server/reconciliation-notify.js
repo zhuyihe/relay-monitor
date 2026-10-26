@@ -77,17 +77,30 @@ async function notifyTokenProblem(rt, repo, rule, result, code) {
 // 什么时候推：对账模块算出「连续读不到超过 24 小时」那一刻（server/reconciliation.js 的 syncOptionUnreadableSince），不是跟着某条绑定某天的结果——
 // 结账中的日子（还没过等待期的窗口）persistResult 不推告警，所以这条由站点那一层直接调
 export const optionAlertKey = (ownStationId) => `opt:${ownStationId}`;
+// 一发现读不到（不管多久、不管会不会推）就记一行：active、first_seen_at 是这一刻，last_notified_at 留空。已经有一行在 active 就不动
+// （保留它原来的 first_seen_at，不会因为重启、按天粒度的账本状态行而往后漂）——重启后第一次检测也会走到这里，不看内存里上一次是什么
+// （审核 R2 第二轮 中-E，总指挥 10-26 定）。推送仍然只在 syncOptionUnreadableSince 看到满 24 小时、这一段还没推过时才做。
+export async function markOptionUnreadableSeen(repo, ownStationId, now = Date.now(), code = "OWN_OPTION_UNREADABLE") {
+  const key = optionAlertKey(ownStationId);
+  return withSiteLock(key, async () => {
+    const previous = await repo.getAlertState(key, code);
+    if (previous?.active) return Number(previous.first_seen_at);
+    await repo.setAlertState(key, code, { active: true, firstSeenAt: now, lastSeenAt: now, lastNotifiedAt: null, recoveredAt: null });
+    return now;
+  });
+}
 export async function notifyOptionUnreadable(rt, repo, ownStationId, code = "OWN_OPTION_UNREADABLE") {
   const key = optionAlertKey(ownStationId);
   const first = await withSiteLock(key, async () => {
     const now = Date.now();
     const previous = await repo.getAlertState(key, code);
-    if (previous?.active) {
-      await repo.setAlertState(key, code, { active: true, firstSeenAt: Number(previous.first_seen_at), lastSeenAt: now,
-        lastNotifiedAt: previous.last_notified_at == null ? null : Number(previous.last_notified_at), recoveredAt: null });
+    const firstSeenAt = previous?.active && previous.first_seen_at != null ? Number(previous.first_seen_at) : now;
+    // 这一段已经推过（markOptionUnreadableSeen 先写的行，或者上一轮已经推了）：只续 last_seen_at，不再推
+    if (previous?.active && previous.last_notified_at != null) {
+      await repo.setAlertState(key, code, { active: true, firstSeenAt, lastSeenAt: now, lastNotifiedAt: Number(previous.last_notified_at), recoveredAt: null });
       return false;
     }
-    await repo.setAlertState(key, code, { active: true, firstSeenAt: now, lastSeenAt: now, lastNotifiedAt: now, recoveredAt: null });
+    await repo.setAlertState(key, code, { active: true, firstSeenAt, lastSeenAt: now, lastNotifiedAt: now, recoveredAt: null });
     return true;
   });
   if (!first) return;

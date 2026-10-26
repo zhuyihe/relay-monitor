@@ -36,7 +36,7 @@ import { CONSUME_LOG_LOOKBACK_MS, applyConsumeLogReading, consumeLogOffOverlap, 
 import { errorText, ownStationErrorCode } from "../lib/error-copy.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationOwnerScope, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { workflowAction } from "../lib/workflow-actions.js";
-import { notifyOptionUnreadable, notifyReconciliationHealth, optionAlertKey } from "./reconciliation-notify.js";
+import { markOptionUnreadableSeen, notifyOptionUnreadable, notifyReconciliationHealth, optionAlertKey } from "./reconciliation-notify.js";
 import { OwnLogStore } from "./own-log-store.js";
 import { createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
@@ -858,7 +858,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 状态行里记的「这天第一次读不到的时刻」（结账时看到的，见 consumeLogSettingNote）：重启不丢；读到了就清
         firstFailedFromState: optionRetryable(status) ? previous?.firstFailedFromState ?? null : null };
       consumeLogReads.set(own.id, next);
-      // 设置从「会自己好的读不到」变成读得到了（开、关、没权限都算）：清掉「设置一直读不到」的告警记录（推送按站点只推一条，下次再读不到才再推）
+      // 设置从「会自己好的读不到」变成读得到了（开、关、没权限都算）：清掉「设置一直读不到」的告警记录（推送按站点只推一条，下次再读不到才再推）。
+      // 重启后第一次读（previous 为空）那种情况交给 syncOptionUnreadableSince 在 observe 轮里补清（这里只看内存里的上一轮，
+      // 免得纯读页面也触发写库——1b 接口零写入的规矩，审核 R2 第二轮 中-E）
       if (previous && optionRetryable(previous.status) && !optionRetryable(status)) repository.clearActiveAlerts(optionAlertKey(own.id), at).catch(() => {});
       if (status.state === "on" || status.state === "off") {
         let latestLogMs = ownActivity.get(own.id)?.latest?.createdAtSec != null ? ownActivity.get(own.id).latest.createdAtSec * 1000 - CONSUME_LOG_LOOKBACK_MS : null;
@@ -929,7 +931,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     : Math.min(...[read?.unavailableSince, read?.firstFailedFromState].filter((value) => value != null));
   // 站点那一层「连续读不到从什么时候起」也从库里拿（审核 R2 增量 中-C）：先取这个站点各绑定状态行里原因是 OWN_OPTION_UNREADABLE 的最早
   // first_failed_at_ms；这样的行都没了（那几天已经固定、行删了）就用告警状态表里这个站点那一条（推送记的）的首次出现时刻。不用新加存储；重启后第一次用到就补上
-  async function syncOptionUnreadableSince(ruleList) {
+  // observe：只有结账 / 轮询这类带观测的调用才写库（一检测到读不到就记一行 active）；纯读页面只读不写，零写入的规矩不破
+  // （1b 接口；审核 R2 第二轮 中-E）。清掉残留的 active 行仍然靠 refreshConsumeLog 里「上一次读不到、这一次读得到」那个内存判断——
+  // 重启后那一刻如果内存刚好是空的，要等真的再读不到一次、又好了才会清；没有再独立补一条「重启后主动查一遍再清」的路径，
+  // 因为那样在正常情况（从没出过问题）也会给每个自营站点多一次告警表查询，和多条「零写入/零告警查询」的用例冲突，取舍报总指挥
+  async function syncOptionUnreadableSince(ruleList, { observe = false } = {}) {
     const byOwn = new Map();
     for (const rule of ruleList) if (rule.enabled && !rule.archivedAt) { if (!byOwn.has(rule.ownStationId)) byOwn.set(rule.ownStationId, []); byOwn.get(rule.ownStationId).push(rule.id); }
     for (const [id, ruleIds] of byOwn) {
@@ -937,17 +943,18 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (!consumeLogReads.has(id)) await refreshConsumeLog(upstreamStation(id)).catch(() => null);
       const read = consumeLogReads.get(id);
       if (!optionRetryable(read?.status)) continue;
+      // 状态行和告警行里早的那个（审核 R2 第二轮 中-E：告警行现在一检测到就写，比按天粒度的状态行准，不能只在没有状态行时才看它）
       let since = null;
       try {
         for (const state of await repository.listSettlementStates(ruleIds)) {
           if (state.retryReason === "OWN_OPTION_UNREADABLE" && state.firstFailedAt != null && (since == null || state.firstFailedAt < since)) since = state.firstFailedAt;
         }
-        if (since == null) {
-          const alert = await repository.getAlertState(optionAlertKey(id), "OWN_OPTION_UNREADABLE");
-          if (alert?.active && Number(alert.first_seen_at) > 0) since = Number(alert.first_seen_at);
-        }
+        const alert = await repository.getAlertState(optionAlertKey(id), "OWN_OPTION_UNREADABLE");
+        if (alert?.active && Number(alert.first_seen_at) > 0 && (since == null || Number(alert.first_seen_at) < since)) since = Number(alert.first_seen_at);
       } catch { continue; }
       if (since != null && (read.firstFailedFromState == null || since < read.firstFailedFromState)) read.firstFailedFromState = since;
+      // 读不到：立刻记一行 active（不等满 24 小时才推的那一刻），first_seen_at 尽量准、不会因为按天粒度的账本状态行往后漂（中-E，只在 observe 轮）
+      if (observe) markOptionUnreadableSeen(repository, id, Date.now()).catch(() => {});
       // 连续读不到超过 24 小时：推一条（按站点只推一条，记在告警状态表 opt:站点 上，重启后站点那一层也从这条拿时刻；设置读得到那一刻清）
       const total = optionUnreadableSince(read);
       if (total != null && Date.now() - total >= OPTION_UNREADABLE_MAX_MS) {
@@ -3069,7 +3076,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const accountUsage = [true, "refresh"].includes(options.accountUsage) && !(Array.isArray(ruleIds) && ruleIds.length);
         if (accountUsage && attempt === 1 && selected.length) warmAccountUsage(selected, input, now, options.accountUsage === "refresh");
         const respond = async (rows) => {
-          await syncOptionUnreadableSince(rules);
+          await syncOptionUnreadableSince(rules, { observe: options.mode !== "evaluate" });
           const response = readResponse(knownRules, rules, await withSettlementNotices(rows, now), ownerRegistry, input, now);
           if (!accountUsage) return response;
           let unaccountedUpstream = null;
@@ -3127,7 +3134,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "observe", origin: "poll", ownerRegistry })
           .catch(() => null);
       });
-      await syncOptionUnreadableSince(rules); // 设置读不到的时刻从库里对一遍（重启后内存里是空的），结账和需处理都用它
+      await syncOptionUnreadableSince(rules, { observe: true }); // 设置读不到的时刻从库里对一遍（重启后内存里是空的），结账和需处理都用它
       await settleDue(plan, ownerRegistry);
       await pruneSettlementStates(now);
       // 自营站点整站日志增量读（应付成本 V1-a）：每轮每个自营站点读几页，额度和断路在 lib/own-request-budget.js；读失败不影响这一轮别的事
