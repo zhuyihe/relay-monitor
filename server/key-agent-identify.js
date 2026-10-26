@@ -114,10 +114,28 @@ export async function identifyChannelsCached(rt, ownStation, options = {}) {
   if (cache && cache.stationId === ownStation.id && now - cache.at < IDENTIFY_CACHE_MS) return cache.result;
   const sameStation = cache?.stationId === ownStation.id;
   const result = await identifyChannels(rt, ownStation, { ...options, etag: sameStation ? cache.etag : null });
+  trackKeyAgentReachability(rt, ownStation.id, result); // 只在真的问了一次（没命中 4 分钟缓存）才记，不按调用次数记
   if (!result.ok) { rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result, etag: sameStation ? cache.etag : null }; return result; }
   const resolved = result.status === 304 && sameStation && cache.result?.ok
     ? { ...result, channels: cache.result.channels, revealIssues: cache.result.revealIssues }
     : result;
   rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result: resolved, etag: result.etag ?? (sameStation ? cache.etag : null) };
   return resolved;
+}
+
+// 例外三（k-plan §6）：连续几次「拿不到新结果」、从什么时候开始——没配置、读不到（连不上/401/503）、
+// 带 X-Agent-Stale 的（读取服务自己读库失败，给的是上一份旧结果）都算拿不到新结果；304（确认没变，读取服务这一轮库读成功）
+// 和真的 200 都算拿到了，清零。只记在 OWN 站点这一级（读取服务挂了是整站的事，不分到每条绑定）；只在内存里，
+// 和 server/reconciliation.js 的 staleMetadata/metadataCache 一个道理，重启清零可以接受——连续 3 次约 10~15 分钟，不是定金额对不对
+function trackKeyAgentReachability(rt, stationId, result) {
+  const tracker = (rt._keyAgentReachability ||= new Map());
+  const state = tracker.get(stationId) || { consecutiveFailures: 0, unreachableSinceMs: null };
+  const failed = !result.ok || result.stale === true;
+  tracker.set(stationId, failed
+    ? { consecutiveFailures: state.consecutiveFailures + 1, unreachableSinceMs: state.unreachableSinceMs ?? Date.now() }
+    : { consecutiveFailures: 0, unreachableSinceMs: null });
+}
+// 查这个站点现在的例外三状态：consecutiveFailures 到 3 就该升成需处理 KEY_READER_UNREACHABLE（调用方按 k-plan §6 的表判）
+export function keyAgentReachability(rt, stationId) {
+  return rt._keyAgentReachability?.get(stationId) || { consecutiveFailures: 0, unreachableSinceMs: null };
 }

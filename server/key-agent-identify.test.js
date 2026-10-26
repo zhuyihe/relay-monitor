@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fingerprintKey, maskKey, deriveAgentKeys } from "../lib/key-fingerprint.js";
-import { identifyChannels, identifyChannelsCached, IDENTIFY_CACHE_MS } from "./key-agent-identify.js";
+import { identifyChannels, identifyChannelsCached, keyAgentReachability, IDENTIFY_CACHE_MS } from "./key-agent-identify.js";
 
 const STRONG_SECRET = "K7m2-xP9q" + "R4t".repeat(10);
 const { fingerprintKey: fpBytes } = deriveAgentKeys(STRONG_SECRET);
@@ -134,4 +134,53 @@ test("identifyChannels：reveal 拿到的完整 Key 只用来算指纹，不出�
   const dump = JSON.stringify(result);
   // 去掉前 4 后 4，中间段不能原样出现在返回结果里（和 k-plan §11.3 的验法一个意思）
   for (const key of [fullKeyA, fullKeyB]) assert.equal(dump.includes(key.slice(7, -4)), false, `${key} 的中间段不该出现在结果里`);
+});
+
+// 例外三（k-plan §6）跨轮状态：读取服务连续拿不到新结果，记在 rt._keyAgentReachability，按真的问了几次记，不按调用次数记
+test("keyAgentReachability：连续读不到（连不上）才累加；命中 4 分钟缓存的调用不算一次新的检查", async (t) => {
+  let fetchCalls = 0;
+  t.mock.method(globalThis, "fetch", async () => { fetchCalls++; throw new Error("连不上"); });
+  const rt = { store: { list: () => [ownStation] } };
+  await identifyChannelsCached(rt, ownStation);
+  assert.equal(fetchCalls, 1);
+  assert.deepEqual(keyAgentReachability(rt, "own"), { consecutiveFailures: 1, unreachableSinceMs: keyAgentReachability(rt, "own").unreachableSinceMs });
+  const since = keyAgentReachability(rt, "own").unreachableSinceMs;
+  assert.equal(typeof since, "number");
+  await identifyChannelsCached(rt, ownStation); // 还在 4 分钟缓存期内，不会真的再问
+  assert.equal(fetchCalls, 1, "缓存期内不重新检查");
+  assert.equal(keyAgentReachability(rt, "own").consecutiveFailures, 1, "没真的检查过，次数不变");
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  await identifyChannelsCached(rt, ownStation);
+  assert.equal(fetchCalls, 2);
+  assert.equal(keyAgentReachability(rt, "own").consecutiveFailures, 2, "过期后真的问了一次，才累加");
+  assert.equal(keyAgentReachability(rt, "own").unreachableSinceMs, since, "第一次失败的时间不跟着变");
+});
+
+test("keyAgentReachability：带 X-Agent-Stale 的 200 也算拿不到新结果；真的 200 和 304 都算拿到了，清零", async (t) => {
+  let step = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    step++;
+    if (step === 1) return { status: 200, headers: { get: (name) => (name.toLowerCase() === "x-agent-stale" ? "1" : null) },
+      json: async () => ({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, keyless: true }] }) };
+    if (step === 2) return { status: 200, headers: { get: (name) => (name.toLowerCase() === "x-agent-stale" ? "1" : null) },
+      json: async () => ({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, keyless: true }] }) };
+    return { status: 200, headers: { get: () => null }, json: async () => ({ v: 1, db: "mysql", readAt: 2, channels: [{ id: 1, keyless: true }] }) };
+  });
+  const rt = { store: { list: () => [ownStation] } };
+  await identifyChannelsCached(rt, ownStation);
+  assert.equal(keyAgentReachability(rt, "own").consecutiveFailures, 1, "带 Stale 的 200 也算拿不到新结果");
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  await identifyChannelsCached(rt, ownStation);
+  assert.equal(keyAgentReachability(rt, "own").consecutiveFailures, 2, "连续第二次还是 Stale，接着累加");
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  await identifyChannelsCached(rt, ownStation);
+  assert.deepEqual(keyAgentReachability(rt, "own"), { consecutiveFailures: 0, unreachableSinceMs: null }, "真的 200（不带 Stale）清零");
+});
+
+test("keyAgentReachability：没配置读取服务，当作拿不到新结果累加；各站点分开记", async (t) => {
+  const otherStation = { id: "own2", isOwn: true, type: "newapi" }; // 没配 keyAgentUrl
+  const rt = { store: { list: () => [ownStation, otherStation] } };
+  await identifyChannelsCached(rt, otherStation);
+  assert.equal(keyAgentReachability(rt, "own2").consecutiveFailures, 1);
+  assert.equal(keyAgentReachability(rt, "own").consecutiveFailures, 0, "没检查过的站点不受影响");
 });
