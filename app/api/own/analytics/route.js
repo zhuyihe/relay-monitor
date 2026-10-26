@@ -1,5 +1,5 @@
 // ---- 「我的站点」下游分析（分时段 / 分模型 / 分用户 + 消费预测）------------------
-import { consumeLogOffOverlap } from "../../../../lib/consume-log.js";
+import { consumeLogOffOverlap, consumeLogStillOff } from "../../../../lib/consume-log.js";
 import { withAuth, json } from "../../../../lib/api.js";
 import { ownStationErrorCode } from "../../../../lib/error-copy.js";
 import { OWN_STATION_UNSET } from "../../../../lib/format.js";
@@ -88,7 +88,7 @@ export const GET = withAuth(async (request, rt) => {
     // 用户列表也读不到时 usersUnavailable 说原因，没有预收、管理员标不出
     const income = await readOwnIncomeOrUnconfirmed(rt, own, userRows, { startMs, endMs: now, tz });
     // 自营站点现在关着收费记录：消费日志不全，按用户消费算出来的收入是少的，不当收入说（用语规范 §8.1「自营站点不记收费记录了」），按钮「重新检查」
-    const logOff = (own.consumeLogOffPeriods || []).some((period) => period.toMs == null);
+    const logOff = consumeLogStillOff(own.consumeLogOffPeriods);
     const { users: ownUsers, adminSet, usersUnavailable } = income;
     const { incomeUsd, adminUsageUsd, resold, incomeDaily, unconfirmed } = logOff
       ? { incomeUsd: null, adminUsageUsd: null, resold: null, incomeDaily: null, unconfirmed: Object.assign(new Error("自营站点不记收费记录了"), { code: "OWN_CONSUME_LOG_OFF" }) }

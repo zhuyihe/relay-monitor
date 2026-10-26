@@ -8320,6 +8320,71 @@ test("R2 关着的段从哪起算：重启以后（内存里没有读到开着�
   assert.equal(periods().at(-1).fromMs, onAt, "钟快：起点是上一次读到开着的时刻，不是最新日志的时刻");
 });
 
+test("R2 停机很久以后第一次读到关着、内存里没有任何证据：单独读一次最新的一条消费日志（不限 2 小时）当起点，只多 1 个请求（审核第一轮 中-2，总指挥 10-26 定）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const sec = (ms) => Math.floor(ms / 1000);
+  const lastLogMs = now - 20 * 3600000; // 20 小时前：停机期间关的，日志停在那
+  f.state.testLogs.push({ id: 1, channel: 1, quota: 1, created_at: sec(lastLogMs), token_name: "k", username: "root" });
+  f.state.latestLogProbe = true;
+  const prev = globalThis.fetch;
+  const latestReads = [];
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/" && !ownSourceRead(url) && url.searchParams.get("page_size") === "1") latestReads.push(url.searchParams.get("start_timestamp"));
+    return prev(input, init);
+  });
+  f.state.consumeLog = "false";
+  await f.module.recheckConsumeLog(f.rt.store.get("own"));
+  assert.equal(f.rt.store.get("own").consumeLogOffPeriods[0].fromMs, sec(lastLogMs) * 1000 - 120000, "起点是最新一条日志往前 120 秒，不是现在");
+  assert.ok(latestReads.includes("0"), "单独读了一次，不带起点限制");
+});
+
+test("R2 结账那一轮读不到站点设置（5xx）：这一天这一轮不固定，按退避再试，读到开着才固定；没权限照常固定（总指挥 10-26 定 B）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const days = () => f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => row.bill_date).sort();
+  f.state.optionReply = [502, { success: false }];
+  await f.module.refreshDue(now);
+  assert.deepEqual(days(), [], "读不到设置：不固定");
+  const row = f.repository.tables.settlementState.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(row?.retry_reason, "OWN_BILLING_UNAVAILABLE", "读取类，按退避再试");
+  f.state.optionReply = null; // 恢复
+  now += 11 * 60000;
+  await f.module.refreshDue(now);
+  assert.ok(days().includes("2026-10-08"), "读到开着以后固定");
+  // 没权限照常固定
+  const g = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const r of g.rows) r.enabled = r.id === "rr_live" ? 1 : 0;
+  g.state.optionReply = [403, { success: false, message: "forbidden" }];
+  await g.module.refreshDue(now);
+  assert.ok(g.state.ledger.some((r) => r.rule_id === "rr_live" && r.bill_date === "2026-10-08"), "没权限照常固定");
+});
+
+test("R2 近 7 天碰到关过的一天：那一天不算，其余天照算，行上有一句说明；整段都碰到才整段需处理（总指挥 10-26 定 A）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z"); // 上海 10-09 11:00；开始统计 10-07 0 点
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const week = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "7d" }, { mode: "evaluate", origin: "page", force: true }).then((r) => r.results[0]);
+  const whole = await week();
+  assert.equal(whole.calculation.profitUsd !== null, true);
+  // 10-08（昨天）上海 10:00–11:00 关过，已经开回来
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-08T02:00:00Z"), toMs: Date.parse("2026-10-08T03:00:00Z") }] });
+  const partial = await week();
+  assert.notEqual(partial.health.code, "OWN_CONSUME_LOG_GAP", "不整段挡住");
+  assert.notEqual(partial.calculation.profitUsd, null, "其余天照算");
+  assert.ok(partial.health.issues.some((issue) => issue.code === "OWN_CONSUME_LOG_GAP_PARTIAL"), "加了一句说明");
+  const dayStart = Date.parse("2026-10-07T16:00:00Z") / 1000, dayEnd = Date.parse("2026-10-08T16:00:00Z") / 1000; // 10-08 整天（上海）
+  f.state.statCalls.length = 0;
+  await week();
+  assert.ok(f.state.statCalls.length > 0 && f.state.statCalls.every((call) => call.end < dayStart || call.start >= dayEnd), "没有任何一次读取覆盖到被碰到的那一天（10-08），其余天分段读");
+  // 整段窗口都碰到（关过的段盖住了从开始统计起的全部）：整段需处理
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-01T00:00:00Z"), toMs: Date.parse("2026-10-09T02:00:00Z") }] });
+  const all = await week();
+  assert.equal(all.health.code, "OWN_CONSUME_LOG_GAP");
+});
+
 test("R2 还没开始统计的日子不被标成需处理（审核第一轮 中-7）：整天在开始统计之前，关着也不碰", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });

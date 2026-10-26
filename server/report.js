@@ -1,6 +1,7 @@
 // 每日日报：自营站点前一天（业务时区的一整天）的经营汇总，字按 design/ui-copy-spec.md §10 写。
 // buildReport/sendReport 供 /api/report/preview、/api/report/send 端点调用；
 // startReportScheduler 由 lib/runtime.js 在初始化时启动，定时器挂在 rt 字段上。
+import { consumeLogIncomeState } from "../lib/consume-log.js";
 import { queryOwnData } from "../lib/providers.js";
 import { forecastDaily } from "../lib/forecast.js";
 import { BRAND } from "../lib/brand.js";
@@ -96,9 +97,13 @@ export async function buildReport(rt) {
     queryOwnData(own, dayStart, dayEnd, "user"),
   ]);
   // 收入确认不了时日报照发、利润不写（design/ui-copy-spec.md §10）：收入那几项写「没读到（原因）」，别的照常
-  const { users: ownUsers, adminSet, incomeUsd, adminUsageUsd: adminUsd, resold, unconfirmed } = await readOwnIncomeOrUnconfirmed(
-    rt, own, userRows, { startMs: dayStart, endMs: dayEnd, tz }
-  );
+  const income = await readOwnIncomeOrUnconfirmed(rt, own, userRows, { startMs: dayStart, endMs: dayEnd, tz });
+  // 自营站点现在关着、或昨天碰到过关着的那一段：消费日志不全，按用户消费算出来的收入是少的，日报不当真报，写原因（用语规范 §8.1「自营站点不记收费记录了」）
+  const logState = consumeLogIncomeState(own.consumeLogOffPeriods, { startMs: dayStart, endMs: dayEnd });
+  const { users: ownUsers, adminSet } = income;
+  const { incomeUsd, adminUsageUsd: adminUsd, resold, unconfirmed } = logState
+    ? { incomeUsd: null, adminUsageUsd: null, resold: null, unconfirmed: Object.assign(new Error("自营站点不记收费记录了"), { code: logState === "off" ? "OWN_CONSUME_LOG_OFF" : "OWN_CONSUME_LOG_GAP" }) }
+    : income;
 
   // 这一天的聚合
   const agg = (rows) => {
@@ -173,7 +178,8 @@ function reportFigures(rt, { own, tz, dayStart, byModel, byUser, daily, profit, 
   };
 
   // 收入、成本、利润：读不到的说原因（§8.2 那一类的话）；估算的数和页面一样加「≈」
-  const incomeReason = unconfirmed ? errorText({ code: "OWN_INCOME_UNCONFIRMED" }) : null;
+  // 收入读不到的原因：关着、关过用自己的说法（关过的那句写「昨天」），别的是收入确认不了
+  const incomeReason = unconfirmed ? (unconfirmed.code === "OWN_CONSUME_LOG_GAP" ? errorText({ code: "OWN_CONSUME_LOG_GAP" }).replace("这一天", "昨天") : errorText({ code: unconfirmed.code === "OWN_CONSUME_LOG_OFF" ? "OWN_CONSUME_LOG_OFF" : "OWN_INCOME_UNCONFIRMED" })) : null;
   const costReason = profit?.error ? errorText(profit) : null;
   const approx = profitApproxOf(profit, own);
   const { reasons, notes } = costReason ? { reasons: [], notes: [] } : splitProfitWarnings(profit);

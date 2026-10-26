@@ -32,7 +32,7 @@ import {
   sameReconciliationWindow,
 } from "../lib/reconciliation-contract.js";
 import { OWN_STATION_UNSET, UPSTREAM_GONE } from "../lib/format.js";
-import { CONSUME_LOG_LOOKBACK_MS, applyConsumeLogReading, consumeLogOffOverlap } from "../lib/consume-log.js";
+import { CONSUME_LOG_LOOKBACK_MS, applyConsumeLogReading, consumeLogOffOverlap, consumeLogStillOff } from "../lib/consume-log.js";
 import { errorText, ownStationErrorCode } from "../lib/error-copy.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationOwnerScope, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { workflowAction } from "../lib/workflow-actions.js";
@@ -811,10 +811,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const next = { credential, checkedAt: at, status, lastOnAt: status.state === "on" ? at : previous?.lastOnAt ?? null };
       consumeLogReads.set(own.id, next);
       if (status.state === "on" || status.state === "off") {
-        const latestLogMs = ownActivity.get(own.id)?.latest?.createdAtSec != null ? ownActivity.get(own.id).latest.createdAtSec * 1000 - CONSUME_LOG_LOOKBACK_MS : null;
+        let latestLogMs = ownActivity.get(own.id)?.latest?.createdAtSec != null ? ownActivity.get(own.id).latest.createdAtSec * 1000 - CONSUME_LOG_LOOKBACK_MS : null;
         // 上一次读到开着就在一个读取间隔以内：起点只用它（站点的钟快，最新一条日志的时刻会比它晚，取晚了会漏标前面几分钟）；
         // 没有、或者太旧（重启、停机以后）才看最新一条日志的时刻往前 120 秒，取较晚的
         const recentOn = previous?.lastOnAt != null && at - previous.lastOnAt <= 2 * CONSUME_LOG_READ_MS;
+        // 读到关着、又没有证据（重启后第一次、停机很久、凭据换过）：单独读一次站点最新的一条消费日志，不限 2 小时（审核第一轮 中-2，总指挥 10-26 定）；
+        // 只在没有证据时多 1 个请求。读不到就退回「现在」
+        const hasPeriodOpen = (upstreamStation(own.id)?.consumeLogOffPeriods ?? own.consumeLogOffPeriods ?? []).some((period) => period.toMs == null);
+        if (status.state === "off" && !hasPeriodOpen && !recentOn && previous?.lastOnAt == null && latestLogMs == null) {
+          try { const page = await queryOwnLatestLog(own, { sinceSec: 0 }); if (page.latest) latestLogMs = page.latest.createdAtSec * 1000 - CONSUME_LOG_LOOKBACK_MS; } catch { /* 退回现在 */ }
+        }
         const offFromMs = recentOn ? previous.lastOnAt : Math.max(previous?.lastOnAt ?? -Infinity, latestLogMs ?? -Infinity);
         const periods = applyConsumeLogReading(upstreamStation(own.id)?.consumeLogOffPeriods ?? own.consumeLogOffPeriods, { state: status.state, at },
           { offFromMs: Number.isFinite(offFromMs) ? offFromMs : null });
@@ -834,7 +840,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     for (const id of new Set(ruleList.filter((rule) => rule.enabled && !rule.archivedAt).map((rule) => rule.ownStationId))) {
       const own = upstreamStation(id);
       if (!own?.isOwn || own.type !== "newapi") continue;
-      if ((own.consumeLogOffPeriods || []).some((period) => period.toMs == null)) {
+      if (consumeLogStillOff(upstreamStation(id)?.consumeLogOffPeriods ?? own.consumeLogOffPeriods)) {
         out.push(workflowAction("recheck_consume_log", { ownStationId: id, stationId: id }, { code: "OWN_CONSUME_LOG_OFF" }));
       }
       const status = consumeLogStatusOf(id);
@@ -847,12 +853,20 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return out;
   }
   // 这条绑定的这段窗口碰没碰到关着的段：碰到还关着的是 OFF（按钮「重新检查」），只碰到已经开回来的是 GAP（这一天永远不固定）
-  async function consumeLogIssueFor(own, rule, window, { force = false } = {}) {
+  async function consumeLogIssueFor(own, rule, window, { force = false, settle = false } = {}) {
     await refreshConsumeLog(own, { force }).catch(() => null);
     const accountingStart = reconciliationAccountingStart(rule) ?? Date.parse(rule.createdAt);
     const clipped = { startMs: Math.max(window.startMs, Number.isFinite(accountingStart) ? accountingStart : -Infinity), endMs: window.endMs };
     const overlap = consumeLogOffOverlap(upstreamStation(own.id)?.consumeLogOffPeriods ?? own.consumeLogOffPeriods, clipped);
     const code = overlap.open ? "OWN_CONSUME_LOG_OFF" : overlap.closed ? "OWN_CONSUME_LOG_GAP" : null;
+    // 结账那一轮读不到站点设置（网络错、5xx、超时这类会自己好的）：这一天这一轮不固定，按 C2a 退避再试；没权限、令牌作废照常固定
+    // （审核第一轮 中-3，总指挥 10-26 定）。要固定的才这样，页面上看（settle 为假）不挡
+    if (!code && settle) {
+      const status = consumeLogStatusOf(own.id);
+      if (status?.state === "unavailable" && ["NETWORK_UNREACHABLE", "UPSTREAM_REQUEST_FAILED", ""].includes(status.code)) {
+        return { code: "OWN_BILLING_UNAVAILABLE", scope: "downstream", detail: issueText("OWN_BILLING_UNAVAILABLE"), observedAt: Date.now() };
+      }
+    }
     return code ? { code, scope: "downstream", detail: issueText(code), observedAt: Date.now() } : null;
   }
 
@@ -1889,8 +1903,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (costOwner.state === "duplicate") issues.push(upstreamSide({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: issueText("CANONICAL_KEY_CONFLICT"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (!ownAvailable) issues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "downstream", detail: issueText("OWN_BILLING_UNAVAILABLE"), observedAt: Date.now() });
       // 自营站点关过收费记录：碰到那一段的窗口，收入读不到、利润先不算（probe 也要看到，不取账单就能判）
-      const consumeLogIssue = ownAvailable ? await consumeLogIssueFor(own, rule, window, { force: force || settle }) : null;
-      if (consumeLogIssue) issues.push(consumeLogIssue);
+      let consumeLogIssue = ownAvailable ? await consumeLogIssueFor(own, rule, window, { force: force || settle, settle }) : null;
+      // 近 7 天、本月这类多天窗口碰到「已经开回来的」关着的那一段：碰到的那几天不算，其余天照算，行上加一句说明（总指挥 10-26 定 A）；
+      // 整个窗口都碰到了、或者这是要固定的窗口（结账、手动重新读取的整天）时照旧挡住。applicable 在下面按天拆开后再定要不要真的挡
+      const partialGapCandidate = consumeLogIssue?.code === "OWN_CONSUME_LOG_GAP" && !billDayOf(window) && !settle;
+      if (consumeLogIssue && !partialGapCandidate) issues.push(consumeLogIssue);
       if (upstreamProblem) issues.push(upstreamSide({ code: upstreamProblem.code, scope: "upstream", detail: upstreamProblem.detail, observedAt: Date.now(),
         // 令牌作废、少了权限要说是哪个上游、少的哪一项（审核 #107 低-4：固定成本的上游走这里，原来这两样丢了）
         ...(upstreamProblem.stationName != null ? { stationName: upstreamProblem.stationName } : {}), ...(upstreamProblem.missingScope ? { missingScope: upstreamProblem.missingScope } : {}) }));
@@ -1922,7 +1939,25 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 修改关联后的过渡期，修改之前的未结账时段也按当前配置计算，结果带 scope.recalculated 标记。
       const clipped = isScopedBillingPolicy(rule.billingPolicy) ? accountingWindow(rule, window, platform) : window;
       const clippedUpstream = isScopedBillingPolicy(rule.billingPolicy) ? accountingUpstreamWindow(rule, window, platform) : window;
-      const applicable = isScopedBillingPolicy(rule.billingPolicy) ? (clipped ? [{ segment: currentSegment, segmentWindow: clipped, upstreamWindow: clippedUpstream }] : []) : intersecting;
+      let applicable = isScopedBillingPolicy(rule.billingPolicy) ? (clipped ? [{ segment: currentSegment, segmentWindow: clipped, upstreamWindow: clippedUpstream }] : []) : intersecting;
+      if (partialGapCandidate) {
+        // 把每段窗口按天切开，去掉碰到关着那一段的天，剩下连着的天并成一段（同一段的几个部分用「段号~序号」区分，快照键不撞）
+        const stationPeriods = upstreamStation(own.id)?.consumeLogOffPeriods ?? own.consumeLogOffPeriods;
+        const kept = applicable.flatMap(({ segment, segmentWindow, upstreamWindow }) => {
+          const days = splitWindowByDays(segmentWindow).filter((piece) => !consumeLogOffOverlap(stationPeriods, piece).closed);
+          const runs = [];
+          for (const piece of days) {
+            const last = runs.at(-1);
+            if (last && last.endMs === piece.startMs) last.endMs = piece.endMs; else runs.push({ startMs: piece.startMs, endMs: piece.endMs, timezone: piece.timezone });
+          }
+          return runs.map((run, index) => ({ segment: index ? { ...segment, id: `${String(segment.id).slice(0, 28)}~${index}` } : segment, segmentWindow: { ...segmentWindow, ...run }, upstreamWindow }));
+        });
+        if (kept.length) {
+          applicable = kept;
+          issues.push({ code: "OWN_CONSUME_LOG_GAP_PARTIAL", scope: "downstream", detail: issueText("OWN_CONSUME_LOG_GAP_PARTIAL"), observedAt: Date.now() });
+          consumeLogIssue = null;
+        } else issues.push(consumeLogIssue);
+      }
       // probe 到这里为止：取数前能判断的都判断完了，还挡着的要人处理的原因交回去，不读渠道、不取账单
       if (probe) return { probe: true, blocker: issues.find((issue) => CALCULATION_BLOCKERS.has(issue.code) && !issue.reference && reasonKindOf(issue.code) !== "retry")?.code ?? null };
       let catalogue = null;
