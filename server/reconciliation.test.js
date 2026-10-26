@@ -72,6 +72,7 @@ function observationRepositoryFixture({ segments, rule = { id: "rr", token_name:
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -279,6 +280,7 @@ test("应用层口径检查后、快照 INSERT 前发生编辑时，原子保存
           if (sql.includes("FROM reconciliation_rules")) return [[{ id: "rr", upstream_station_id: "up", own_station_id: "own", token_id: 1, token_name: "token", fixed_group: "g", timezone: "Asia/Shanghai", enabled: 1, archived_at: null }]];
           if (sql.includes("FROM reconciliation_rule_channels")) return [[{ channel_id: 2, channel_name: "changed" }]];
           if (sql.includes("FROM reconciliation_rule_segments")) return [[{ id: "s1", rule_id: "rr", group_name: "g", group_ratio: 1, effective_from_ms: 1000, effective_to_ms: null, detected_at_ms: 1000, timing_source: "operator_confirmed" }]];
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected query: ${sql}`);
         },
       };
@@ -306,6 +308,7 @@ test("较早成功或未确认快照都不能覆盖更晚的确认快照", async
       if (sql.includes("FROM reconciliation_rule_segments")) return [segments];
       if (sql.includes("FROM reconciliation_snapshots")) return [[{ source: JSON.stringify(source) }]];
       if (sql.includes("INSERT INTO reconciliation_snapshots")) throw new Error("superseded snapshot must not write");
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
   }; } };
@@ -364,6 +367,7 @@ test("双命名空间快照批量写入第二条失败时整个事务回滚", as
       if (inserts === 2) throw new Error("second insert failed");
       return [{ affectedRows: 1 }];
     }
+    if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
     throw new Error(`unexpected query: ${sql}`);
   };
   const pool = { async getConnection() { return {
@@ -390,6 +394,7 @@ test("R03 Repository核验owner状态并在INSERT前和commit前执行guard，�
       if (sql.includes("FROM reconciliation_rules")) return [[rule]];
       if (sql.includes("FROM reconciliation_rule_channels") || sql.includes("FROM reconciliation_rule_segments") || sql.includes("FROM reconciliation_snapshots")) return [[]];
       if (sql.includes("INSERT INTO reconciliation_snapshots")) { pending.push(params[2]); return [{ affectedRows: 1 }]; }
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     };
     const repository = new ReconciliationRepository({ query, async getConnection() { return { query,
@@ -420,6 +425,7 @@ test("observation 单调写入不会覆盖较新的 observation 或确认命名�
     if (sql.includes("FROM reconciliation_rule_segments")) return [[segment]];
     if (sql.includes("SELECT source FROM reconciliation_snapshots")) return [[stored.get(params[1])].filter(Boolean)];
     if (sql.includes("INSERT INTO reconciliation_snapshots")) { inserts += 1; stored.set(params[2], { source: params.at(-1) }); return [{ affectedRows: 1 }]; }
+    if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
     throw new Error(`unexpected query: ${sql}`);
   };
   const pool = { async getConnection() { return { async beginTransaction() {}, async commit() {}, async rollback() {}, release() {}, query }; } };
@@ -571,6 +577,7 @@ test("停止对账规则原子释放 Key 和渠道声明，并返回释放摘要
         { rule_id: "rr_release", channel_id: 1, channel_name: "渠道一" },
         { rule_id: "rr_release", channel_id: 2, channel_name: "渠道二" },
       ]];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -589,6 +596,7 @@ test("停止对账规则原子释放 Key 和渠道声明，并返回释放摘要
             return [{ affectedRows: 2 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
         async commit() { calls.push("commit"); },
@@ -621,6 +629,7 @@ test("停止对账规则遇到并发归档时不释放渠道且返回错误", as
     async query(sql) {
       if (sql.startsWith("SELECT * FROM reconciliation_rules")) return [[rule]];
       if (sql.startsWith("SELECT rule_id, channel_id")) return [[{ rule_id: "rr_race", channel_id: 1, channel_name: "渠道" }]];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -632,6 +641,7 @@ test("停止对账规则遇到并发归档时不释放渠道且返回错误", as
           if (sql.startsWith("UPDATE reconciliation_rules")) return [{ affectedRows: 0 }];
           if (sql.startsWith("UPDATE reconciliation_rule_channels")) throw new Error("channel release must not run");
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
         async commit() { calls.push("commit"); },
@@ -764,6 +774,7 @@ test("旧编辑缺少金融proof时拒绝渠道变化；时区建好以后不能
       if (sql.startsWith("SELECT * FROM reconciliation_rules WHERE id")) return [[row]];
       if (sql.includes("FROM reconciliation_rule_channels")) return [[]];
       if (sql.includes("JOIN reconciliation_rule_channels")) return [[]];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -780,6 +791,7 @@ test("旧编辑缺少金融proof时拒绝渠道变化；时区建好以后不能
           }
           if (sql.startsWith("DELETE FROM reconciliation_rule_channels") || sql.startsWith("INSERT INTO reconciliation_rule_channels")) return [{ affectedRows: 1 }];
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -899,6 +911,7 @@ test("归档规则使当前成本归属的缓存失效", async () => {
         if (sql.includes("FROM reconciliation_rule_channels")) return [[{
           rule_id: "rr-archived", channel_id: 1, channel_name: "渠道",
         }]];
+        if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
         throw new Error(`unexpected query: ${sql}`);
       },
     },
@@ -1183,6 +1196,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1379,6 +1393,7 @@ test("检测到 group 或 ratio 变化时关闭旧分段、保留历史并只打
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -1390,6 +1405,7 @@ test("检测到 group 或 ratio 变化时关闭旧分段、保留历史并只打
           if (sql.startsWith("UPDATE reconciliation_rule_segments")) { rows[0].effective_to_ms = params[0]; return [{ affectedRows: 1 }]; }
           if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) { rows.push({ id: params[0], rule_id: "rr", group_name: params[2], group_ratio: params[3], effective_from_ms: params[6], effective_to_ms: null, detected_at_ms: params[7], timing_source: "detected" }); return [{ affectedRows: 1 }]; }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1456,6 +1472,7 @@ test("首次观察到已知倍率会补全当前 legacy 分段，随后切组才
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1480,6 +1497,7 @@ test("已迁移的倍率未知分段在上游首次返回倍率时补全当前�
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -1491,6 +1509,7 @@ test("已迁移的倍率未知分段在上游首次返回倍率时补全当前�
           if (sql.startsWith("UPDATE reconciliation_rule_segments")) { rows[0].effective_to_ms = params[0]; return [{ affectedRows: 1 }]; }
           if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) { rows.push({ id: params[0], rule_id: "rr", group_name: params[2], group_ratio: params[3], effective_from_ms: params[6], effective_to_ms: null, detected_at_ms: params[7], timing_source: "detected" }); return [{ affectedRows: 1 }]; }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1508,6 +1527,7 @@ test("首次检测已切组时用仍存在的旧组目录倍率补全旧段，�
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -1525,6 +1545,7 @@ test("首次检测已切组时用仍存在的旧组目录倍率补全旧段，�
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1554,6 +1575,7 @@ test("旧组已不在本轮目录时切组不会伪造旧段倍率", async () =>
           if (sql.startsWith("UPDATE reconciliation_rule_segments")) { rows[0].effective_to_ms = params[0]; return [{ affectedRows: 1 }]; }
           if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) { rows.push({ id: params[0], rule_id: "rr", group_name: params[2], group_ratio: params[3], effective_from_ms: params[6], effective_to_ms: null, detected_at_ms: params[7], timing_source: "detected" }); return [{ affectedRows: 1 }]; }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1570,6 +1592,7 @@ test("切回原分组仍保留新的历史分段", async () => {
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -1586,6 +1609,7 @@ test("切回原分组仍保留新的历史分段", async () => {
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1608,6 +1632,7 @@ test("修正切换时间锁定相邻分段，并保留旧快照作为历史证�
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -1625,6 +1650,7 @@ test("修正切换时间锁定相邻分段，并保留旧快照作为历史证�
             return [{ affectedRows: 2 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1681,6 +1707,7 @@ test("查询中修正切换时间后，旧失败任务不会写入或缓存旧�
             return [{ affectedRows: 2 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1742,6 +1769,7 @@ test("加入同一 in-flight 查询的调用方在口径变化后也只拿到新
             return [{ affectedRows: 2 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1785,6 +1813,7 @@ test("查询期间口径持续变化时最多尝试 3 次，本轮返回待获�
         segmentReads += 1;
         return [segments];
       }
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() { throw new Error("口径不一致时不能开启快照写入事务"); },
@@ -1863,6 +1892,7 @@ function scopeRaceFixture(id, { beforeLookup = null, beforeAlertRead = null, bef
             return [{ affectedRows: 2 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -2815,6 +2845,7 @@ test("known catalogue ratios backfill closed legacy segments without changing bo
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -2831,6 +2862,7 @@ test("known catalogue ratios backfill closed legacy segments without changing bo
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -3067,6 +3099,7 @@ function membershipFixture() {
           return [{ affectedRows: 1 }];
         }
         if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) return [{ affectedRows: 1 }];
+        if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
         throw new Error(`Unexpected write: ${sql}`);
       },
       async commit() { state.rules = working.rules; state.channels = working.channels; state.created = working.created; state.ruleWrites = working.ruleWrites; },
@@ -6992,6 +7025,28 @@ test("C3 审核二轮中-2（总指挥定）：当天从 New API 换绑到 Sub2A
   assert.deepEqual([scope.accountedFromMs, scope.upstreamWholeDay], [floor, true]);
   assert.ok(f.state.statCalls.slice(own).some((call) => call.start === floor / 1000), "本站收入从换绑那一刻起取");
   assert.ok(f.sub2.stats.slice(up).some((stat) => stat.api_key_id === "9" && stat.start_date === "2026-10-10"), "上游按整天取");
+});
+
+test("K1c：一段里有几把 Key，上游成本是各取一次再相加（一把在目录里、一把已删按名字取）；分段没带 Key 或只有绑定自己那把时和原来逐字相同", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const live = f.rows.find((row) => row.id === "rr_live");
+  const costOf = () => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").map((row) => Number(row.cost_usd));
+  // 分段表里有绑定自己那一把 Key：和没有 Key 行时一样
+  const segment = f.repository.tables.segments.find((row) => row.rule_id === "rr_live" && row.effective_to_ms == null);
+  f.repository.tables.segmentKeys.push({ segment_id: segment.id, upstream_station_id: live.upstream_station_id, token_id: live.token_id, token_name: live.token_name, key_mask: null, match_source: "initial", active_token_key: null });
+  await f.module.refreshDue(now);
+  assert.deepEqual(costOf(), [1], "一把 Key：上游成本 1（额度 100 ÷ 100）");
+  // 再加一把已经从目录里删掉的 Key（按名字取，每把各取一次）：成本相加
+  f.repository.tables.segmentKeys.push({ segment_id: segment.id, upstream_station_id: live.upstream_station_id, token_id: 77, token_name: "gone-key", key_mask: null, match_source: "fingerprint", active_token_key: null });
+  const calls = f.state.statCalls.length;
+  await f.repository.requestResettle("rr_live", ["2026-10-08"], { now });
+  now += 60000;
+  f.state.upstreamQuota = 100;
+  await f.module.refreshDue(now);
+  assert.deepEqual(costOf(), [1, 2], "两把 Key 各 1 相加，写第 2 版");
+  assert.equal(f.state.statCalls.slice(calls).filter((call) => call.side === "upstream" && call.start === COMPLETED_YESTERDAY.startMs / 1000).length, 2, "每把 Key 取一次");
 });
 
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {

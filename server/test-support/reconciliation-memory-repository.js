@@ -16,7 +16,7 @@ import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
-  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, segmentFromRow,
+  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
   SETTLEMENT_STATE_WRITE_COLUMNS, settlementStateFromRow, settlementStateValues,
 } from "../reconciliation-repository.js";
@@ -33,6 +33,7 @@ const TABLE_NAMES = {
   capabilities: "reconciliation_billing_capabilities",
   ledger: "reconciliation_ledger",
   settlementState: "reconciliation_settlement_state",
+  segmentKeys: "reconciliation_segment_keys",
 };
 
 // 与 db/pool.js 的建表语句保持一致。
@@ -74,6 +75,11 @@ const SCHEMA = {
     keys: { PRIMARY: ["rule_id", "bill_date", "revision"] },
     notNull: ["rule_id", "bill_date", "revision", "timezone", "window_start_ms", "window_end_ms", "revenue_usd", "source", "settled_at"],
     varchar: { rule_id: 32, version_id: 32, timezone: 64, cost_basis: 16, source: 24 },
+  },
+  segmentKeys: {
+    keys: { PRIMARY: ["segment_id", "upstream_station_id", "token_id"], uq_segment_key_active: ["active_token_key"] },
+    notNull: ["segment_id", "upstream_station_id", "token_id", "match_source"],
+    varchar: { segment_id: 32, upstream_station_id: 32, token_name: 160, key_mask: 64, match_source: 16, active_token_key: 255 },
   },
   settlementState: {
     keys: { PRIMARY: ["rule_id", "bill_date"] },
@@ -139,9 +145,9 @@ export class MemoryReconciliationRepository {
   //   beforeCommit(tx) / afterCommit(tx)
   //   beforeCapabilityWrite(method, identity)  保存或删除账单能力前，可以抛错模拟写入失败
   // tx 是 { name, snapshots: [{ ruleId, snapshotKey, source }], archivedRuleIds }。
-  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], settlementState = [], now = () => Date.now(), hooks = {} } = {}) {
+  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], settlementState = [], segmentKeys = [], now = () => Date.now(), hooks = {} } = {}) {
     this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts], capabilities: [...capabilities], ledger: [...ledger],
-      settlementState: [...settlementState] };
+      settlementState: [...settlementState], segmentKeys: [...segmentKeys] };
     this.now = now;
     this.hooks = hooks;
     // snapshotWrites / ratioWrites / channelStateWrites 按语句记录，包括之后被回滚的写入。
@@ -217,6 +223,7 @@ export class MemoryReconciliationRepository {
         effective_from_ms: Number(input.initialEffectiveFromMs ?? (isScopedBillingPolicy(input.billingPolicy) ? 0 : Date.now())),
         effective_to_ms: null, detected_at_ms: Date.now(), timing_source: "operator_confirmed", created_at: createdAt, updated_at: createdAt,
       });
+      this.#refreshSegmentKeys(tx, id);
       if (guard) guard(null, [], isScopedBillingPolicy(input.billingPolicy) ? applyScopePolicy(null, requested) : input);
     });
     return this.getRule(id);
@@ -250,6 +257,7 @@ export class MemoryReconciliationRepository {
         else this.#update(tx, "channels", current.filter(({ row }) => Number(row.channel_id) === Number(channel.channelId)),
           { channel_name: channel.name ?? null, active_channel_key: activeChannelKey(input, channel.channelId) ?? null });
       }
+      this.#refreshSegmentKeys(tx, id);
       if (guard) guard(existing, existing.channels, applyScopePolicy(existing, requested, Date.now(), { append }));
     });
     return this.getRule(id);
@@ -294,7 +302,28 @@ export class MemoryReconciliationRepository {
 
   async listSegments(ruleId) {
     await this.#read("listSegments", [ruleId]);
-    return this.#segmentsOf(null, ruleId).map(({ row }) => segmentFromRow(fresh(row)));
+    const segments = this.#segmentsOf(null, ruleId).map(({ row }) => segmentFromRow(fresh(row)));
+    const keyRows = this.#plain("segmentKeys").filter((row) => segments.some((segment) => segment.id === row.segment_id))
+      .sort((a, b) => Number(a.token_id) - Number(b.token_id));
+    return attachSegmentKeys(segments, keyRows);
+  }
+
+  // 同 MySQL 版 db/segment-keys.js 的 refreshSegmentKeysSql：每段一行 Key，来源是 initial 的跟着 rules 现在的上游和 Key 走，
+  // active_token_key 只给还开着的那段、而且绑定在用时（rules.active_token_key 有值）才有
+  #refreshSegmentKeys(tx, ruleId) {
+    const rule = this.#rows("rules", tx).find(({ row }) => sameText(row.id, ruleId))?.row;
+    if (!rule) return;
+    const segments = this.#segmentsOf(tx, ruleId).map(({ row }) => row);
+    const mine = this.#rows("segmentKeys", tx).filter(({ row }) => segments.some((segment) => segment.id === row.segment_id));
+    // 先全部清掉 active（唯一键），再逐段补行、更新
+    this.#update(tx, "segmentKeys", mine.filter(({ row }) => row.match_source === "initial" && row.active_token_key != null), { active_token_key: null });
+    for (const segment of segments) {
+      const entry = mine.find(({ row }) => row.segment_id === segment.id && row.match_source === "initial");
+      const active = segment.effective_to_ms == null && rule.active_token_key != null ? rule.active_token_key : null;
+      const fields = { upstream_station_id: rule.upstream_station_id, token_id: bigint(rule.token_id), token_name: rule.token_name ?? null };
+      if (entry) this.#update(tx, "segmentKeys", [entry], { ...fields, active_token_key: active });
+      else if (!mine.some(({ row }) => row.segment_id === segment.id)) this.#insert(tx, "segmentKeys", { segment_id: segment.id, ...fields, key_mask: null, match_source: "initial", active_token_key: active });
+    }
   }
 
   async backfillMissingSegmentRatios(ruleId, groups, observedAt = Date.now(), segments = null) {
@@ -451,6 +480,7 @@ export class MemoryReconciliationRepository {
       const affected = entry ? this.#update(tx, "rules", [entry], { enabled: 0, active_token_key: null, archived_at: this.#timestamp(), archived_at_ms: bigint(now) }) : 0;
       if (affected) {
         this.#update(tx, "channels", this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, id)), { active_channel_key: null });
+        this.#refreshSegmentKeys(tx, id);
         tx.record.archivedRuleIds.push(id);
       }
       return affected > 0;
@@ -819,6 +849,7 @@ export class MemoryReconciliationRepository {
       ratio_observed_at_ms: nextRatio == null ? null : bigint(detectedAt), ratio_source: nextRatio == null ? null : "group_catalog",
       effective_from_ms: at, effective_to_ms: null, detected_at_ms: at, timing_source: "detected", created_at: createdAt, updated_at: createdAt,
     });
+    this.#refreshSegmentKeys(tx, ruleId);
   }
 
   async #saveSnapshot(snapshot, tx) {

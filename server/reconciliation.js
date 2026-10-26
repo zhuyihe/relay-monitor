@@ -45,6 +45,7 @@ import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlem
 import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
 import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, RESETTLE_KEPT_REASONS, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
+import { segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
@@ -1136,6 +1137,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     });
   }
 
+  // 一段的上游成本（K1c）：这一段里每把 Key 各取一次再相加（lib/reconciliation-keys.js）。每段只有绑定自己那把（或分段没带 Key）时，
+  // 就是原来的单次取数，结果逐字不变；多把 Key、已删 Key 给 K2b 开段以后用。Key 在别的上游里（K2b 的事）这一版读不了，当 Key 身份对不上
+  async function upstreamWindowForSegment(upstream, metadata, token, segment, window, { readOnly, upstreamStationId }) {
+    const wanted = segmentKeyTokens({ segmentKeys: segment?.keys, ruleToken: token, metadata, upstreamStationId });
+    if (wanted.length === 1 && (wanted[0].own || wanted[0].token?.id === token?.id)) return upstreamWindowFor(upstream, metadata, token, window, { readOnly });
+    if (wanted.some((item) => item.foreign)) throw codedError("UPSTREAM_KEY_UNVERIFIED", "分段里有别的上游的 Key，这一版读不了");
+    return sumKeyStats(await Promise.all(wanted.map((item) => upstreamWindowFor(upstream, metadata, item.token, window, { readOnly }))));
+  }
+
   function tokenNameIsUnique(metadata, token) {
     return metadata.platform === "sub2api" || metadata.tokens.filter((item) => item.name === token.name).length === 1;
   }
@@ -1875,7 +1885,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // 上游读不到（只有固定成本会走到这里）：不取上游，问题已经在上面记了一次
           upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
-            : upstreamWindowFor(upstream, metadata, token, upstreamWindow, { readOnly: !observe }).catch((error) => ({ error })),
+            : upstreamWindowForSegment(upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId }).catch((error) => ({ error })),
           (ownAvailable
             ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle })
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))

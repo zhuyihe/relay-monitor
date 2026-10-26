@@ -24,7 +24,7 @@ if (process.env.ONBOARDING_SCHEMA_TEST !== "1"
 }
 
 const TABLES = ["upstream_merge_log", "channel_monitor_links", "reconciliation_ledger", "reconciliation_billing_capabilities", "reconciliation_alert_state",
-  "reconciliation_snapshots", "reconciliation_rule_segments", "reconciliation_rule_channels", "reconciliation_rules", "station_daily_usage", "history_points", "meta", "stations"];
+  "reconciliation_snapshots", "reconciliation_segment_keys", "reconciliation_rule_segments", "reconciliation_rule_channels", "reconciliation_rules", "station_daily_usage", "history_points", "meta", "stations"];
 const secretKey = secretKeyOf(Buffer.alloc(32, 7).toString("base64"));
 const identity = (accountId) => ({ provider: "newapi", baseUrl: "https://up.example.com", accountId });
 const CREATED = { a: "2026-03-01T00:00:00.000Z", b: "2026-03-02T00:00:00.000Z", c: "2026-03-03T00:00:00.000Z", d: "2026-03-04T00:00:00.000Z" };
@@ -39,6 +39,7 @@ const dumpAll = async (pool) => ({
   links: await dump(pool, "channel_monitor_links", "own_station_id, channel_id, station_id"),
   channels: await dump(pool, "reconciliation_rule_channels", "rule_id, channel_id"),
   segments: await dump(pool, "reconciliation_rule_segments", "id"),
+  segmentKeys: await dump(pool, "reconciliation_segment_keys", "segment_id, upstream_station_id, token_id"),
   snapshots: await dump(pool, "reconciliation_snapshots", "id"),
   ledger: await dump(pool, "reconciliation_ledger", "rule_id, bill_date, revision"),
   history: await dump(pool, "history_points", "station_id, t"),
@@ -75,6 +76,8 @@ async function seedFixture(pool) {
     await pool.query("INSERT INTO channel_monitor_links (own_station_id, channel_id, station_id, channel_revision, confirmed_at_ms) VALUES (?, ?, ?, 'rev', 1000)", [ownId, channel, station]);
   }
   await pool.query("INSERT INTO reconciliation_rule_channels (rule_id, channel_id, channel_name, active_channel_key) VALUES ('r_b', 2, '渠道二', 'own:2')");
+  // 每条绑定补出它的分段和分段的 Key 行（K1c 的启动迁移），合并和退回要把这些行的上游和 active_token_key 一起改
+  await ensureSchema(pool);
   await pool.query(`INSERT INTO reconciliation_ledger (rule_id, bill_date, revision, timezone, window_start_ms, window_end_ms, revenue_usd, cost_usd, source, settled_at)
     VALUES ('r_b', '2026-10-08', 1, 'UTC', 0, 86400000, 10, 6, 'settle', '2026-10-09 00:20:00.000')`);
   await pool.query("INSERT INTO history_points (station_id, t, remaining, used) VALUES (?, 1, 5, 1)", [ids.b]);
@@ -197,6 +200,13 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
     const after = await dumpAll(pool);
     // 账本、快照、规则的渠道、分段、历史点原样
     for (const key of ["ledger", "snapshots", "channels", "segments", "history"]) assert.deepEqual(after[key], before[key], key);
+    // 分段的 Key 行（K1c）：被合掉的上游的绑定，每一段的 Key 行里上游、active_token_key 跟着改；别的绑定原样
+    const keyRows = (dumped, ruleId) => dumped.segmentKeys.filter((row) => dumped.segments.some((segment) => segment.id === row.segment_id && segment.rule_id === ruleId));
+    assert.ok(keyRows(after, "r_b").length > 0);
+    assert.deepEqual(keyRows(after, "r_b").map((row) => [row.upstream_station_id, row.token_id, row.active_token_key]), [[ids.a, 5, `${ids.a}:5`]]);
+    assert.deepEqual(keyRows(after, "r_c").map((row) => [row.upstream_station_id, row.active_token_key]), [[ids.a, "canon-6"]]);
+    assert.deepEqual(keyRows(after, "r_old").map((row) => [row.upstream_station_id, row.active_token_key]), [[ids.a, null]]);
+    for (const id of ["r_a", "r_d"]) assert.deepEqual(keyRows(after, id), keyRows(before, id), id);
     // 绑定：只有 upstream_station_id（和没有 canonical 的 active_token_key）变了
     const ruleOf = (dumped, id) => dumped.rules.find((r) => r.id === id);
     assert.equal(ruleOf(after, "r_b").upstream_station_id, ids.a);
