@@ -467,11 +467,12 @@ test("daily Sub2API unverified timezone keeps zero and actual dollar reference w
 test("daily late bill and new scope retain requested yesterday and expose first full bill schedule", async (t) => {
   const row = dailyRows()[0]; row.upstream = { ...row.upstream, amountUsd: 0, knownAmountUsd: 0, countedAmountUsd: 0 }; row.calculation = { profitUsd: null, riskDifferenceUsd: 2.5, marginRate: null }; row.health = { code: "WAITING_FOR_BILL", issues: [{ code: "WAITING_FOR_BILL", detail: "最新已结束日账单尚未就绪" }] }; row.scope = { scopeVersion: 2, billingEffectiveFromMs: Date.parse("2026-10-09T16:00:00Z"), firstFullDayStartMs: Date.parse("2026-10-09T16:00:00Z"), firstQueryableAtMs: Date.parse("2026-10-10T16:00:00Z") };
   // 页面按绑定的生效方式和生效时间算「开始统计」（rule.billingPolicy / billingEffectiveFrom），不读 scope
-  row.rule.billingPolicy = "immediate"; row.rule.billingEffectiveFrom = Date.parse("2026-10-09T16:00:00Z");
+  // 开始统计永远是那天 0 点（C3）：这天的结果在开始统计之前就不是需处理了，所以让这天是换绑当天（下限晚于 0 点）才有「开始统计」那一行
+  row.rule.billingPolicy = "immediate"; row.rule.billingEffectiveFrom = window.startMs; row.rule.accountingFloorMs = window.startMs + 3 * 3600000;
   // 这天过去 7 天还没读全，读取类问题变成需处理
   const { page, queries } = await openDailyPage(t, { data: dailyResponse([row]) }); const rowA = page.locator("tr.ant-table-row", { hasText: "Rule A" }); await rowA.getByText("需处理", { exact: true }).waitFor(); await rowA.getByText(reconciliationIssue("WAITING_FOR_BILL").title, { exact: true }).waitFor();
   await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true }); await detailValue(drawer, "开始统计").waitFor();
-  assert.equal(await detailValue(drawer, "时间").innerText(), formatZonedWindow(window)); assert.equal(await detailValue(drawer, "开始统计").innerText(), "10月10日"); await drawer.locator(".ant-drawer-close").click();
+  assert.equal(await detailValue(drawer, "时间").innerText(), formatZonedWindow(window)); assert.equal(await detailValue(drawer, "开始统计").innerText(), reconciliationAccountingStartText(row.rule, window.timezone)); await drawer.locator(".ant-drawer-close").click();
   const retried = page.waitForResponse((response) => response.url().endsWith("/api/reconciliation/query")); await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await retried; assert.deepEqual([queries[0].preset, queries[0].startMs, queries[0].endMs], ["custom", window.startMs, window.endMs]);
 });
 
@@ -581,7 +582,7 @@ test("workflow rejects invalid, deleted and changed-zone bill destinations with 
 });
 
 test("workflow scope and conflict destinations expose saved history and all conflict rule corrections", async (t) => {
-  const scopedRows = dailyRows(); scopedRows[0].rule.billingPolicy = "immediate"; scopedRows[0].rule.billingEffectiveFrom = window.startMs + 6 * 3600000;
+  const scopedRows = dailyRows(); scopedRows[0].rule.billingPolicy = "immediate"; scopedRows[0].rule.billingEffectiveFrom = window.startMs + 6 * 3600000; scopedRows[0].rule.accountingFloorMs = window.startMs + 6 * 3600000; // 开始统计永远是 0 点；只有当天换绑的才有下限，晚于 0 点，明细才写「开始统计」
   const scope = await openDailyPage(t, { path: "/reconciliation?action=scope&ruleId=rule-1", data: dailyResponse(scopedRows) });
   const drawer = scope.page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true });
   assert.equal(await detailValue(drawer, "开始统计").innerText(), reconciliationAccountingStartText(scopedRows[0].rule, window.timezone)); await drawer.getByRole("button", { name: "以前的每日记录", exact: true }).waitFor();
@@ -4657,8 +4658,8 @@ test("这天重算的数比原来少了一半多（需处理）：点「重新�
   await dialog.getByRole("button", { name: "重新读取", exact: true }).click(); await read;
   assert.equal(queries.length, 1); assert.equal(queries[0].confirmShrink, true); assert.equal(queries[0].observe, true); assert.deepEqual(queries[0].confirmedAfter, { revenueUsd: 12.4, costUsd: 15.1 }, "带上框里写的重算数");
   // 别的日子（没有这个问题）点「重新读取」不弹框、不带确认
-  await page.getByRole("button", { name: "重新读取 Rule B", exact: true }).click();
-  await page.waitForResponse((response) => response.url().endsWith("/api/reconciliation/query"));
+  const readB = page.waitForResponse((response) => response.url().endsWith("/api/reconciliation/query")); // 点之前先等，免得响应比等待先到
+  await page.getByRole("button", { name: "重新读取 Rule B", exact: true }).click(); await readB;
   assert.equal(queries[1].confirmShrink, undefined); assert.equal(await page.getByRole("dialog").count(), 0);
 });
 
