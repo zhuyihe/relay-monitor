@@ -8125,6 +8125,24 @@ test("V1-b 结账时算应付成本写进账本：这条绑定的渠道的桶 ×
 });
 
 // Key 别处也用（KEY_SHARED）这里不测：现在回答「别处也用」的绑定成本覆盖是 unknown，根本不结账（COST_COVERAGE_UNKNOWN 先拦住），纯函数里留着给 K 的时间分段 Key 用
+test("V1-b 「算应付成本」关着（settings.expectedCost=false）：结账照常，应付成本写「—」加 EXPECTED_COST_OFF，不读桶不读价目表；以后打开也不补算（账本行只插不改）", async (t) => {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd, buckets: [{ slotMs: dayStart + 3600000, channelId: 1, model: "m", upstreamModel: "", group: "g1", semantic: "anthropic", requests: 1, promptTokens: 100, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 1, adminQuota: 0, testQuota: 0 }] }, dayEnd);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2 }], group_ratio: {} };
+  f.rt.store.settings = { expectedCost: false };
+  await f.module.refreshDue(Date.now());
+  const row = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.deepEqual([row.expected_cost_usd, row.gap_reason, row.tokens, row.revenue_usd, row.cost_usd], [null, "EXPECTED_COST_OFF", null, 2.5, 1]);
+  assert.equal(f.state.requests.filter((r) => r.path === "/api/pricing").length, 0, "关着不读价目表");
+  f.rt.store.settings = { expectedCost: true };
+  f.rt._reconciliationResultCache.clear();
+  await f.module.refreshDue(Date.now());
+  assert.equal(f.state.ledger.filter((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08").length, 1, "打开以后不补算、不多一版");
+});
+
 test("V1-b 桶和 R1 的管理员自用对账：结账时桶里这些渠道的管理员自用额度和 R1 实际扣的不一样就打一行 debug（不带用户名、地址）；只打日志不改数", async (t) => {
   const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
   const ownLogStore = new MemoryOwnLogStore();
@@ -8153,6 +8171,7 @@ test("V1-b 算不出的原因写进账本：上游价目表读不到（上游没
   const first = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
   assert.deepEqual([first.expected_cost_usd, first.gap_reason, first.tokens, first.revenue_usd, first.cost_usd], [null, "MODEL_PRICE_UNREADABLE", 100, 2.5, 1], "夹具没给 /api/pricing（404）：读不到；照样结账");
   assert.equal(f.state.ledger.filter((item) => item.bill_date === "2026-10-08").length, 3, "三条绑定都结了");
+  assert.deepEqual([first.detail.expected.reason, first.detail.expected.missingPriceModels], ["MODEL_PRICE_UNREADABLE", []]);
   // 第二天：价目表有了，但 o3 没价格
   f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2 }], group_ratio: {} };
   f.module.upstreamPricing.invalidate?.();
