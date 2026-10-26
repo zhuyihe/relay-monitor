@@ -329,7 +329,7 @@ export class ReconciliationRepository {
           [Math.floor(dayAgo / 1000), dayAgo, input.ownStationId]);
         if (oldRows.some((row) => row.archived_at_ms != null)) {
           const [oldChannels] = await conn.query("SELECT rule_id, channel_id, channel_name FROM reconciliation_rule_channels WHERE rule_id IN (?)", [oldRows.filter((row) => row.archived_at_ms != null).map((row) => row.id)]);
-          accountingFloor = accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels, provider: input.provider },
+          accountingFloor = accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels },
             oldRows.filter((row) => row.archived_at_ms != null).map((row) => ruleFromRow(row, oldChannels.filter((channel) => channel.rule_id === row.id))));
         }
       }

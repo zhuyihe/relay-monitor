@@ -321,7 +321,7 @@ function intersectSegment(window, segment) {
 
 // 按 Key 整体取数的关联从核算起点开始计账。起点是开始那天的 0 点（New API、Sub2API 一样，见 reconciliationAccountingStart）。
 // 已解除的绑定补结解除前的日子（C3）：New API 解除当天金额只算到解除那一刻；Sub2API 只能按整天读，解除当天不算（C③）
-function accountingWindow(rule, window, platform = null) {
+export function accountingWindow(rule, window, platform = null) {
   const start = reconciliationAccountingStart(rule);
   const archivedAt = rule.archivedAtMs == null ? NaN : Number(rule.archivedAtMs);
   if (start == null && !Number.isFinite(archivedAt)) return window;
@@ -329,6 +329,17 @@ function accountingWindow(rule, window, platform = null) {
   const clipEnd = Number.isFinite(archivedAt)
     ? Math.min(window.endMs, (rule.provider ?? platform) === "sub2api" ? startOfBillingDay(archivedAt, window.timezone) : archivedAt) : window.endMs;
   return clipStart < clipEnd ? { ...window, startMs: clipStart, endMs: clipEnd } : null;
+}
+
+// 上游一侧的窗口：Sub2API 只能按整天读账单，所以从起点那天的 0 点起（当天换绑的下限只管本站收入，收入按秒切得开）；
+// 这样当天从 New API 换绑到 Sub2API 时，收入从旧绑定解除那一刻起算只算一次，上游成本是新 Key 全天的（绑上以前一般没有用量）。其余和 accountingWindow 一样
+export function accountingUpstreamWindow(rule, window, platform = null) {
+  const down = accountingWindow(rule, window, platform);
+  if (!down || (rule.provider ?? platform) !== "sub2api") return down;
+  const start = reconciliationAccountingStart(rule);
+  const wholeDay = start == null ? down.startMs : startOfBillingDay(start, window.timezone);
+  const startMs = Math.max(window.startMs, wholeDay);
+  return startMs < down.endMs ? { ...down, startMs } : down;
 }
 
 // 已解除的绑定只有锚定过、按整体取数的才补结（解除前这把 Key 只有它在用）；旧版（legacy）规则和没锚定的不回看
@@ -1800,7 +1811,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 按 Key 整体取数的关联确认即生效：窗口裁到核算起点（Sub2API 起点当天按全天），整个窗口都在起点之前时金额为 0。
       // 修改关联后的过渡期，修改之前的未结账时段也按当前配置计算，结果带 scope.recalculated 标记。
       const clipped = isScopedBillingPolicy(rule.billingPolicy) ? accountingWindow(rule, window, platform) : window;
-      const applicable = isScopedBillingPolicy(rule.billingPolicy) ? (clipped ? [{ segment: currentSegment, segmentWindow: clipped }] : []) : intersecting;
+      const clippedUpstream = isScopedBillingPolicy(rule.billingPolicy) ? accountingUpstreamWindow(rule, window, platform) : window;
+      const applicable = isScopedBillingPolicy(rule.billingPolicy) ? (clipped ? [{ segment: currentSegment, segmentWindow: clipped, upstreamWindow: clippedUpstream }] : []) : intersecting;
       // probe 到这里为止：取数前能判断的都判断完了，还挡着的要人处理的原因交回去，不读渠道、不取账单
       if (probe) return { probe: true, blocker: issues.find((issue) => CALCULATION_BLOCKERS.has(issue.code) && !issue.reference && reasonKindOf(issue.code) !== "retry")?.code ?? null };
       let catalogue = null;
@@ -1836,12 +1848,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 本站 /api/status 同一轮各绑定、各分段共用一次（ownStatusFor）；读取失败时每个分段照常按本站账单不可用处理。
       const loadOwnStatus = () => ownStatusFor(ownerRegistry, own);
       const reuseOwnRevenue = observe && origin === "poll" && isLiveReconciliationPreset(window.preset);
-      const segmentResults = await mapWithConcurrency(applicable, 6, async ({ segment, segmentWindow }) => {
+      const segmentResults = await mapWithConcurrency(applicable, 6, async ({ segment, segmentWindow, upstreamWindow: upstreamOwnWindow }) => {
+        // 上游一侧自己的窗口（Sub2API 当天换绑的那天比本站一侧长，见 accountingUpstreamWindow）
+        const upstreamWindow = upstreamOwnWindow || segmentWindow;
         const [upstreamResult, downstreamResult] = await Promise.all([
           // 上游读不到（只有固定成本会走到这里）：不取上游，问题已经在上面记了一次
           upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
-            : upstreamWindowFor(upstream, metadata, token, segmentWindow, { readOnly: !observe }).catch((error) => ({ error })),
+            : upstreamWindowFor(upstream, metadata, token, upstreamWindow, { readOnly: !observe }).catch((error) => ({ error })),
           (ownAvailable
             ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle })
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
@@ -1851,13 +1865,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const sides = [upstreamResult, downstreamResult].filter((side) => !side.error);
         // 只有上游一侧的窗口或时区对不上时算上游侧问题；本站一侧对不上始终阻断。
         const downstreamSide = downstreamResult.error ? [] : [downstreamResult];
-        const windowMismatch = (side) => !sameReconciliationWindow(side.window, segmentWindow, { timezone: false });
+        const windowMismatch = (side) => !sameReconciliationWindow(side.window, side === upstreamResult ? upstreamWindow : segmentWindow, { timezone: false });
         if (sides.some(windowMismatch)) {
           const issue = { code: "BILLING_WINDOW_MISMATCH", scope: "segment", detail: issueText("BILLING_WINDOW_MISMATCH"), observedAt: Date.now() };
           segmentIssues.push(downstreamSide.some(windowMismatch) ? issue : upstreamSide(issue));
         }
         // 某一侧取数失败时由它自己的错误说明原因，不能再提示去核验时区或能力。
-        if (sides.length === 2 && commonBillingTimezone(segmentWindow, sides).state !== "verified") {
+        if (sides.length === 2 && commonBillingTimezone(segmentWindow, sides.map((side) => ({ ...side, requestedWindow: side === upstreamResult ? upstreamWindow : segmentWindow }))).state !== "verified") {
           const issue = { code: "BILLING_TIMEZONE_UNVERIFIED", scope: "segment", detail: issueText("BILLING_TIMEZONE_UNVERIFIED"), observedAt: Date.now() };
           segmentIssues.push(commonBillingTimezone(segmentWindow, downstreamSide).state !== "verified" ? issue : upstreamSide(issue));
         }
@@ -1904,12 +1918,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             state: upstreamResult.emptySecondWindow ? "pending" : upstreamResult.state || "unavailable",
             quotaUnits: upstreamResult.quotaUnits ?? null, quotaPerUnit: upstreamResult.quotaPerUnit ?? null, amountUsd: null, knownAmountUsd: upstreamResult.knownAmountUsd ?? null,
             successfulCount: upstreamResult.knownAmountUsd != null ? 1 : 0, expectedCount: 1, observedAt: Date.now(),
-            window: upstreamResult.window || segmentWindow, requestedWindow: segmentWindow, billingTimezone: upstreamResult.billingTimezone,
+            window: upstreamResult.window || upstreamWindow, requestedWindow: upstreamWindow, billingTimezone: upstreamResult.billingTimezone,
           } : {
             state: "complete", quotaUnits: upstreamResult.quotaUnits, quotaPerUnit: upstreamResult.quotaPerUnit,
             amountUsd: upstreamUsd, knownAmountUsd: upstreamUsd, successfulCount: 1, expectedCount: 1,
-            observedAt: upstreamResult.latestLogAtMs || Date.now(), window: upstreamResult.window || segmentWindow,
-            requestedWindow: segmentWindow, billingTimezone: upstreamResult.billingTimezone,
+            observedAt: upstreamResult.latestLogAtMs || Date.now(), window: upstreamResult.window || upstreamWindow,
+            requestedWindow: upstreamWindow, billingTimezone: upstreamResult.billingTimezone,
           },
           downstream: downstreamResult.error ? {
             state: "unavailable", quotaUnits: null, quotaPerUnit: null, amountUsd: null, knownAmountUsd: null,
@@ -1981,7 +1995,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         ownSource, scope: { ...reconciliationBillingSchedule(rule), recalculated: scopeRecalculatedInWindow(rule, window),
           accountedFromMs: clipped && clipped.startMs > window.startMs ? clipped.startMs : null,
           // 解除当天只算到解除那一刻（New API）；C④ 在计算明细写「统计到」
-          accountedToMs: clipped && clipped.endMs < window.endMs ? clipped.endMs : null, notEffective: !applicable.length && isScopedBillingPolicy(rule.billingPolicy) },
+          accountedToMs: clipped && clipped.endMs < window.endMs ? clipped.endMs : null,
+          // 上游一侧比本站一侧长（Sub2API 当天换绑）：明细写「这个上游只能按整天读账单，上游成本是这把 Key 全天的」
+          upstreamWholeDay: !!(clipped && clippedUpstream && clippedUpstream.startMs < clipped.startMs), notEffective: !applicable.length && isScopedBillingPolicy(rule.billingPolicy) },
         amountBasis: { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,
           calculationVersion: RECONCILIATION_CALCULATION_VERSION, conversion: platform === "sub2api" ? "provider_cost_usd" : "quota_per_unit" },
         // 固定采购的成本不取自上游账单，只要本站一侧证明了时区和日界线。

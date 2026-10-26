@@ -6968,6 +6968,25 @@ test("C3 Sub2API 上游解除当天不结（只能按整天读），解除前的
   assert.ok(!asked.includes("2026-10-10"), "解除当天连账单都不取");
 });
 
+test("C3 审核二轮中-2（总指挥定）：当天从 New API 换绑到 Sub2API，新绑定那天收入从旧绑定解除那一刻起算，上游成本取这把 Key 全天的；明细标「上游按整天」", async (t) => {
+  const floor = Date.parse("2026-10-10T06:30:00Z"); // 上海 10-10 14:30 换绑
+  let now = floor + 3600000;
+  t.mock.method(Date, "now", () => now);
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-swap.test", costs: { "2026-10-10": 2 }, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  Object.assign(f.rule, { billing_effective_from_ms: floor + 60000, accounting_floor_ms: floor, provider: "sub2api" });
+  f.rule.canonical_key = canonicalBillingKey(f.stations[0], { platform: "sub2api", accountId: 7 }, f.rule.token_id);
+  await f.module.queryRules(f.today, { force: true }); // 核验账单能力
+  now = Date.parse("2026-10-11T01:00:00Z");
+  const own = f.state.statCalls.length, up = f.sub2.stats.length;
+  await f.module.refreshDue(now);
+  const row = f.state.ledger.find((item) => item.bill_date === "2026-10-10");
+  assert.ok(row, "那天结了");
+  const scope = (typeof row.detail === "string" ? JSON.parse(row.detail) : row.detail).result.scope;
+  assert.deepEqual([scope.accountedFromMs, scope.upstreamWholeDay], [floor, true]);
+  assert.ok(f.state.statCalls.slice(own).some((call) => call.start === floor / 1000), "本站收入从换绑那一刻起取");
+  assert.ok(f.sub2.stats.slice(up).some((stat) => stat.api_key_id === "9" && stat.start_date === "2026-10-10"), "上游按整天取");
+});
+
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {
   let now = Date.parse("2026-10-01T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });

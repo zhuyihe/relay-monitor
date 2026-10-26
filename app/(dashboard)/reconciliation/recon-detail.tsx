@@ -12,7 +12,7 @@ import {
   reconciliationRowFlags,
 } from "../../../lib/reconciliation-view";
 import { ErrorDetail } from "../../components/error-detail";
-import { CORRECT_TIMING_HINT } from "../../../lib/workflow-actions";
+import { CORRECT_TIMING_HINT, SUB2API_WHOLE_DAY_COST } from "../../../lib/workflow-actions";
 import { ChannelBreakdown, Detail, IssueAction, LossTag } from "./recon-parts";
 import {
   RECON_BUTTONS, RECON_COPY, RETRY_FAILED_TEXT, amountText, adminUsageLine, costText, currentGroup, currentRatioLabel, formatWindow, incomeText, isFixedCost, ratioChangeText, ratioLabel, rateText,
@@ -92,7 +92,7 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
       <Detail label="分组 / 倍率" value={`${currentGroup(detail)} · ${currentRatioLabel(detail)}`} />
       <Detail label="收入" value={<>{incomeText(detail, currency)}<small>{channels.length ? RECON_COPY.incomeSource(channels.length) : RECON_COPY.noChannels}</small>{adminUsage ? <small title={adminUsage.title}>{adminUsage.text}</small> : null}</>} />
       <Detail label="上游成本" value={<>{costText(detail, currency)}{fixedCost ? null
-        : <small>来自 Key「{keyName(detail.rule)}」的用量记录{ratioChange ? `；${ratioChange}` : ""}</small>}</>} />
+        : <small>来自 Key「{keyName(detail.rule)}」的用量记录{ratioChange ? `；${ratioChange}` : ""}{detail.scope?.upstreamWholeDay ? `。${SUB2API_WHOLE_DAY_COST}` : ""}</small>}</>} />
       <Detail label="毛利" value={<>{amountText(profit, profitCurrency as ReconciliationCurrency)} <LossTag show={flags.negative} /></>} />
       <Detail label="毛利率" value={formatPct(margin)} />
       <Detail label="汇率" value={rateText(detail, currency, timezone)} />

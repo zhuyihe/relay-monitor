@@ -200,7 +200,7 @@ export class MemoryReconciliationRepository {
       // 同一天里更早解除的占着同一个渠道（或同一把 Key）的 New API 绑定：新绑定从那一刻起算（C3，同 MySQL 版）
       const archivedPeers = this.#plain("rules").filter((row) => row.archived_at != null).map((row) => ruleFromRow(fresh(row), this.#channelsOf(tx, row.id)));
       const accountingFloor = isScopedBillingPolicy(input.billingPolicy)
-        ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels, provider: input.provider }, archivedPeers) : null;
+        ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels }, archivedPeers) : null;
       this.#insert(tx, "rules", {
         id, accounting_floor_ms: accountingFloor, upstream_station_id: input.upstreamStationId ?? null, own_station_id: input.ownStationId ?? null, token_id: bigint(input.tokenId),
         token_name: input.tokenName ?? null, fixed_group: input.fixedGroup ?? null, timezone: input.timezone ?? null,
