@@ -1397,6 +1397,11 @@ contract("createRule: a new binding that takes the same channel (or Key) on the 
   assert.equal(unrelated.accountingFloorMs, null, "别的渠道、别的 Key 不受影响");
   const afterSub2 = await fixture.createRule({ tokenId: fixture.token(5), billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(9), name: "S" }] });
   assert.equal(afterSub2.accountingFloorMs, null, "旧的是 Sub2API：解除当天整天不算，新绑定照 0 点");
+  // 新绑定是 Sub2API、旧的是 New API：下限照给（收入按秒切，上游成本取这把 Key 全天的，见 accountingUpstreamWindow）
+  const oldNewApi = await fixture.createRule({ tokenId: fixture.token(10), canonicalKey: `up:${fixture.tag}:floor-n`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(10), name: "N" }] });
+  assert.equal(await repository.archiveRule(oldNewApi.id, { now: at }), true);
+  const toSub2 = await fixture.createRule({ tokenId: fixture.token(6), billingPolicy: "immediate", timezone: "UTC", provider: "sub2api", channels: [{ channelId: fixture.channel(10), name: "N" }] });
+  assert.equal(toSub2.accountingFloorMs, at, "新绑定是 Sub2API：也从旧绑定解除那一刻起算收入");
 });
 
 contract("listSettlementStates with billDates only returns those days", async ({ repository, fixture }) => {
