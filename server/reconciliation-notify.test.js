@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { NOTIFY_KEYWORD } from "../lib/brand.js";
-import { notifyReconciliationHealth } from "./reconciliation-notify.js";
+import { notifyOptionUnreadable, notifyReconciliationHealth } from "./reconciliation-notify.js";
 
 test("利润问题的推送：正文最后一行是落款，带着推荐给机器人设的关键词", async (t) => {
   const sent = [];
@@ -107,18 +107,22 @@ test("令牌坏了的推送：同一个上游一条固定成本（上游读不�
 test("自营站点的设置一直读不到（R2）：同一个自营站点下 3 条绑定只推 1 条，标题、正文照 §10 令牌那一套；没起名字时不写站点那一行", async (t) => {
   const rules = [ruleOf("r1"), ruleOf("r2"), ruleOf("r3")];
   const f = tokenFixture(t, { stations: { up: { id: "up", name: "Foo" }, own: { id: "own", name: "My Site" } }, rules });
-  for (const rule of rules) await notifyReconciliationHealth(f.rt, f.repo, rule, { health: { code: "OWN_OPTION_UNREADABLE", label: "x", issues: [{ code: "OWN_OPTION_UNREADABLE" }] }, window: {} });
+  for (const rule of rules) await notifyOptionUnreadable(f.rt, f.repo, rule.ownStationId);
   assert.equal(f.sent.length, 1, "按站点只推一条");
   assert.equal(f.sent[0].title, "【炬元告警】自营站点 My Site 设置一直读不到");
   const lines = f.sent[0].body.split("\n");
-  assert.deepEqual(lines.slice(0, 4), ["自营站点：My Site", "状态：设置一直读不到", "影响：看不出它还记不记收费记录；利润照常算，要是这段时间关过收费记录，那段的收入会算少", "说明：自营站点恢复以后会自己好；也可以在运营总览的需处理里点「重新检查」"]);
+  assert.deepEqual(lines.slice(0, 4), ["自营站点：My Site", "状态：设置一直读不到", "影响：看不出它还记不记收费记录；利润照常算，要是这段时间里收费记录关过，那段的收入会算少", "说明：自营站点恢复以后会自己好；也可以在运营总览的需处理里点「重新检查」"]);
   assert.match(lines[4], /^时间：/);
   assert.equal(lines.at(-1), "炬元告警中心");
-  // 读通了：随 READY 清掉站点键上的记录
+  // 记在 opt:站点 键上：「今天」每轮的 READY 不清它（清的是 tk: 键），设置读得到那一刻由对账模块清
+  assert.ok(f.states.has("opt:own|OWN_OPTION_UNREADABLE"));
   await notifyReconciliationHealth(f.rt, f.repo, rules[0], { health: { code: "READY", issues: [] }, window: {} });
-  assert.ok(f.cleared.includes("tk:own"));
+  assert.ok(f.states.has("opt:own|OWN_OPTION_UNREADABLE"), "READY 不清它");
+  await f.repo.clearActiveAlerts("opt:own");
+  await notifyOptionUnreadable(f.rt, f.repo, "own");
+  assert.equal(f.sent.length, 2, "清掉以后再读不到才再推");
   const g = tokenFixture(t, { stations: { own: { id: "own" } }, rules: [ruleOf("r1")] });
-  await notifyReconciliationHealth(g.rt, g.repo, ruleOf("r1"), { health: { code: "OWN_OPTION_UNREADABLE", label: "x", issues: [] }, window: {} });
+  await notifyOptionUnreadable(g.rt, g.repo, "own");
   assert.equal(g.sent[0].title, "【炬元告警】自营站点 设置一直读不到");
   assert.equal(g.sent[0].body.split("\n")[0], "状态：设置一直读不到");
 });

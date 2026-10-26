@@ -9009,8 +9009,9 @@ test("R2 设置读不到的 24 小时按状态行里第一次读不到的时刻�
   const restarted = createReconciliationModule(f.rt, { repository: f.repository, ownLogIngest: false });
   await restarted.refreshDue(now);
   assert.deepEqual(f.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date), [], "重启后 12 小时：还没到 24 小时，接着等");
-  // 再 13 小时又重启一次：状态行记的第一次读不到已经过了 24 小时 → 照常固定
+  // 再 13 小时又重启一次：状态行记的第一次读不到已经过了 24 小时 → 照常固定，推一条
   now += 13 * 3600000;
+  f.rt.store.channels = [{ id: "c", type: "webhook", name: "运维群", enabled: true, config: { url: "https://hooks.example.com/x" } }];
   const again = createReconciliationModule(f.rt, { repository: f.repository, ownLogIngest: false });
   await again.refreshDue(now);
   const settled = f.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date).sort();
@@ -9021,10 +9022,18 @@ test("R2 设置读不到的 24 小时按状态行里第一次读不到的时刻�
   const page = await again.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page" });
   assert.ok(page.actions.some((action) => action.code === "OWN_OPTION_UNREADABLE"), "重启后站点那一层也知道读不到太久了");
   assert.ok(page.results[0].ledger.consumeLogSetting, "已固定那天的 ledgerReference 带着那一句的依据（计算明细显示）");
+  // 那几天都固定了、状态行删了以后又重启：需处理那一条还在（从告警状态表里那一条的首次出现时刻拿，审核增量 中-C）；从账本读回的 ledgerReference 也带那一句的依据（低-G）
+  now += 6 * 3600000;
+  const third = createReconciliationModule(f.rt, { repository: f.repository, ownLogIngest: false });
+  f.rt._reconciliationResultCache.clear();
+  const afterRestart = await third.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page" });
+  assert.ok(afterRestart.actions.some((action) => action.code === "OWN_OPTION_UNREADABLE"), "固定以后再重启，需处理那条还在");
+  assert.equal(f.state.requests.filter((request) => request.host === "hooks.example.com").length, 1, "超过 24 小时推了一条、只推一条（记在告警状态表 opt:own 上，之后只刷新最近看到的时刻）");
+  assert.deepEqual([afterRestart.results[0].ledger.consumeLogSetting.state, afterRestart.results[0].ledger.consumeLogSetting.reason], ["unreadable", "too_long"], "从账本读回的也带");
   // 设置读得到了：需处理那条去掉
   f.state.optionReply = null;
   now += 60000;
-  const back = await again.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", origin: "manual", force: true });
+  const back = await third.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", origin: "manual", force: true });
   assert.ok(!back.actions.some((action) => action.code === "OWN_OPTION_UNREADABLE"));
 });
 

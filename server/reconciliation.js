@@ -36,7 +36,7 @@ import { CONSUME_LOG_LOOKBACK_MS, applyConsumeLogReading, consumeLogOffOverlap, 
 import { errorText, ownStationErrorCode } from "../lib/error-copy.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationOwnerScope, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { workflowAction } from "../lib/workflow-actions.js";
-import { notifyReconciliationHealth } from "./reconciliation-notify.js";
+import { notifyOptionUnreadable, notifyReconciliationHealth, optionAlertKey } from "./reconciliation-notify.js";
 import { OwnLogStore } from "./own-log-store.js";
 import { createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
@@ -858,6 +858,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 状态行里记的「这天第一次读不到的时刻」（结账时看到的，见 consumeLogSettingNote）：重启不丢；读到了就清
         firstFailedFromState: optionRetryable(status) ? previous?.firstFailedFromState ?? null : null };
       consumeLogReads.set(own.id, next);
+      // 设置从「会自己好的读不到」变成读得到了（开、关、没权限都算）：清掉「设置一直读不到」的告警记录（推送按站点只推一条，下次再读不到才再推）
+      if (previous && optionRetryable(previous.status) && !optionRetryable(status)) repository.clearActiveAlerts(optionAlertKey(own.id), at).catch(() => {});
       if (status.state === "on" || status.state === "off") {
         let latestLogMs = ownActivity.get(own.id)?.latest?.createdAtSec != null ? ownActivity.get(own.id).latest.createdAtSec * 1000 - CONSUME_LOG_LOOKBACK_MS : null;
         // 上一次读到开着就在一个读取间隔以内：起点只用它（站点的钟快，最新一条日志的时刻会比它晚，取晚了会漏标前面几分钟）；
@@ -925,6 +927,34 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 连续读不到从什么时候起：进程里记的那份，和这天状态行里记的「第一次读不到」取早的（控制台 24 小时内重启过也不会清零，审核 R2 增量 中-B）
   const optionUnreadableSince = (read) => [read?.unavailableSince, read?.firstFailedFromState].filter((value) => value != null).reduce((min, value) => Math.min(min, value), Infinity) === Infinity ? null
     : Math.min(...[read?.unavailableSince, read?.firstFailedFromState].filter((value) => value != null));
+  // 站点那一层「连续读不到从什么时候起」也从库里拿（审核 R2 增量 中-C）：先取这个站点各绑定状态行里原因是 OWN_OPTION_UNREADABLE 的最早
+  // first_failed_at_ms；这样的行都没了（那几天已经固定、行删了）就用告警状态表里这个站点那一条（推送记的）的首次出现时刻。不用新加存储；重启后第一次用到就补上
+  async function syncOptionUnreadableSince(ruleList) {
+    const byOwn = new Map();
+    for (const rule of ruleList) if (rule.enabled && !rule.archivedAt) { if (!byOwn.has(rule.ownStationId)) byOwn.set(rule.ownStationId, []); byOwn.get(rule.ownStationId).push(rule.id); }
+    for (const [id, ruleIds] of byOwn) {
+      // 重启后这一轮还没读过设置（看的全是已固定的日子，不经过结账那条路）：先读一次（5 分钟内有的不重读），不然不知道现在读不读得到
+      if (!consumeLogReads.has(id)) await refreshConsumeLog(upstreamStation(id)).catch(() => null);
+      const read = consumeLogReads.get(id);
+      if (!optionRetryable(read?.status)) continue;
+      let since = null;
+      try {
+        for (const state of await repository.listSettlementStates(ruleIds)) {
+          if (state.retryReason === "OWN_OPTION_UNREADABLE" && state.firstFailedAt != null && (since == null || state.firstFailedAt < since)) since = state.firstFailedAt;
+        }
+        if (since == null) {
+          const alert = await repository.getAlertState(optionAlertKey(id), "OWN_OPTION_UNREADABLE");
+          if (alert?.active && Number(alert.first_seen_at) > 0) since = Number(alert.first_seen_at);
+        }
+      } catch { continue; }
+      if (since != null && (read.firstFailedFromState == null || since < read.firstFailedFromState)) read.firstFailedFromState = since;
+      // 连续读不到超过 24 小时：推一条（按站点只推一条，记在告警状态表 opt:站点 上，重启后站点那一层也从这条拿时刻；设置读得到那一刻清）
+      const total = optionUnreadableSince(read);
+      if (total != null && Date.now() - total >= OPTION_UNREADABLE_MAX_MS) {
+        try { await notifyOptionUnreadable(rt, repository, id); } catch (err) { console.error("自营站点设置读不到的推送失败:", err?.message || String(err)); }
+      }
+    }
+  }
   function consumeLogSettingNote(own, window, state = null) {
     const read = consumeLogReads.get(own.id);
     if (!optionRetryable(read?.status)) return null;
@@ -933,7 +963,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (state?.retryReason === "OWN_OPTION_UNREADABLE" && state.firstFailedAt != null && (read.firstFailedFromState == null || state.firstFailedAt < read.firstFailedFromState)) read.firstFailedFromState = state.firstFailedAt;
     const since = optionUnreadableSince(read);
     const provenOn = read.lastOnAt != null && read.lastOnAt >= window.endMs;
-    const tooLong = (since != null && now - since >= OPTION_UNREADABLE_MAX_MS) || (state?.retryReason === "OWN_OPTION_UNREADABLE" && Number(state.attempts) >= SETTLE_MAX_AUTO_ATTEMPTS);
+    const tooLong = since != null && now - since >= OPTION_UNREADABLE_MAX_MS; // 「自动试满也算」实际碰不到（7 天回看里试不到 130 次），不另判（审核增量 低-E）
     return { state: "unreadable", sinceMs: since, lastOnAt: read.lastOnAt ?? null, provenOn, tooLong, blocked: !provenOn && !tooLong };
   }
 
@@ -3039,6 +3069,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const accountUsage = [true, "refresh"].includes(options.accountUsage) && !(Array.isArray(ruleIds) && ruleIds.length);
         if (accountUsage && attempt === 1 && selected.length) warmAccountUsage(selected, input, now, options.accountUsage === "refresh");
         const respond = async (rows) => {
+          await syncOptionUnreadableSince(rules);
           const response = readResponse(knownRules, rules, await withSettlementNotices(rows, now), ownerRegistry, input, now);
           if (!accountUsage) return response;
           let unaccountedUpstream = null;
@@ -3096,6 +3127,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         await inspectRule(rule.id, resolveReconciliationWindow({ preset: "today", timezone: rule.timezone }, at), { mode: "observe", origin: "poll", ownerRegistry })
           .catch(() => null);
       });
+      await syncOptionUnreadableSince(rules); // 设置读不到的时刻从库里对一遍（重启后内存里是空的），结账和需处理都用它
       await settleDue(plan, ownerRegistry);
       await pruneSettlementStates(now);
       // 自营站点整站日志增量读（应付成本 V1-a）：每轮每个自营站点读几页，额度和断路在 lib/own-request-budget.js；读失败不影响这一轮别的事

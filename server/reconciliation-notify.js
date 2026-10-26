@@ -73,8 +73,12 @@ async function notifyTokenProblem(rt, repo, rule, result, code) {
 }
 
 // 自营站点的设置一直读不到（R2 审核第二轮；用语规范 §10 同一套格式）：按自营站点只推一条，和令牌坏了的推送一样记在站点键上；读通了随 READY 一起清
-async function notifyOptionUnreadable(rt, repo, rule, code) {
-  const key = siteKey("own", rule);
+// 记在自己的站点键 opt:站点id 上（不用 tk:），因为「今天」每轮的 READY 结果会把 tk: 键整个清掉，这条要留到设置读得到那一刻（server/reconciliation.js 的 refreshConsumeLog 清）
+// 什么时候推：对账模块算出「连续读不到超过 24 小时」那一刻（server/reconciliation.js 的 syncOptionUnreadableSince），不是跟着某条绑定某天的结果——
+// 结账中的日子（还没过等待期的窗口）persistResult 不推告警，所以这条由站点那一层直接调
+export const optionAlertKey = (ownStationId) => `opt:${ownStationId}`;
+export async function notifyOptionUnreadable(rt, repo, ownStationId, code = "OWN_OPTION_UNREADABLE") {
+  const key = optionAlertKey(ownStationId);
   const first = await withSiteLock(key, async () => {
     const now = Date.now();
     const previous = await repo.getAlertState(key, code);
@@ -87,7 +91,7 @@ async function notifyOptionUnreadable(rt, repo, rule, code) {
     return true;
   });
   if (!first) return;
-  const station = rt.store.get?.(rule.ownStationId) || null;
+  const station = rt.store.get?.(ownStationId) || null;
   const name = station?.name ? stationDisplayName(station) : "";
   const line = (label, value) => `${label}：${value}`;
   const body = [
@@ -98,7 +102,7 @@ async function notifyOptionUnreadable(rt, repo, rule, code) {
     line(ALERT_TEXT.time, formatZonedDateTime(Date.now(), businessTimeZone())),
     BRAND.notificationSignature,
   ].filter(Boolean).join("\n");
-  await broadcast(rt.store.channels, `【${BRAND.name}告警】${ALERT_TEXT.ownLabel}${name ? ` ${name}` : ""} ${ALERT_TEXT.optionUnreadableStatus}`, body);
+  await broadcast(rt.store.channels || [], `【${BRAND.name}告警】${ALERT_TEXT.ownLabel}${name ? ` ${name}` : ""} ${ALERT_TEXT.optionUnreadableStatus}`, body);
 }
 
 export async function notifyReconciliationHealth(rt, repo, rule, result) {
@@ -113,7 +117,7 @@ export async function notifyReconciliationHealth(rt, repo, rule, result) {
     return;
   }
   if (isAccessTokenError(code)) return notifyTokenProblem(rt, repo, rule, result, code);
-  if (code === "OWN_OPTION_UNREADABLE") return notifyOptionUnreadable(rt, repo, rule, code);
+  if (code === "OWN_OPTION_UNREADABLE") return notifyOptionUnreadable(rt, repo, rule.ownStationId, code);
 
   const previous = await repo.getAlertState(rule.id, code);
   if (previous?.active) {
