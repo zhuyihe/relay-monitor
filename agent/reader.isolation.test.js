@@ -214,7 +214,8 @@ test("MySQL 每小时语句额度：每次读正好 1 条语句（第一次多 1
   assert.equal((await reader.read()).length, 1);
   assert.equal((await reader.read()).length, 1, "第二次读只多 1 条语句");
   await assert.rejects(reader.read(), { code: "DB_LIMIT" });
-  assert.equal(await mysql.connectionsOf(account.name), 0);
+  // 被拒以后库里那条连接要一会儿才消失：等到 0（最多约 3 秒），超时还不是 0 照样失败，真漏连接仍抓得住
+  assert.equal(await eventually(async () => (await mysql.connectionsOf(account.name)) === 0, { tries: 60, ms: 50 }), true, "额度用完被拒以后连接收掉");
 });
 
 test("MySQL 每次读连一次：5 次读，账号累计连接数正好多 5 次", { skip: skipMysql, timeout: 30000 }, async (t) => {
@@ -260,7 +261,7 @@ test("PostgreSQL 账号权限过宽就不读：超级用户、能建库、多一
   t.after(() => goodReader.close());
   assert.equal((await goodReader.read()).length, 1);
   assert.equal(goodReader.status().connectionLimit, 1);
-  assert.equal(await pg.connectionsOf(good.name), 0, "读完就断");
+  assert.equal(await eventually(async () => (await pg.connectionsOf(good.name)) === 0), true, "读完就断");
   const cases = [
     ["能建库", (name) => `ALTER ROLE ${name} CREATEDB`, "ROLE_ATTRIBUTES"],
     ["整表 SELECT", (name) => `GRANT SELECT ON channels TO ${name}`, "TABLE_WIDE_SELECT"],
