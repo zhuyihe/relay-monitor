@@ -8398,7 +8398,7 @@ test("V1-b 结账时算应付成本写进账本：这条绑定的渠道的桶 ×
   assert.deepEqual(page.rows.map((row) => [row.rowKey, row.channels.map((channel) => channel.channelId), row.expectedCostUsd, row.actualCostUsd, row.gap.state, Number(row.gap.usd.toFixed(2))]),
     [["upstream:11", [3], 0, 1, "over", 1], ["upstream:9", [1], 7.2, 1, "under", -6.2], ["upstream:10", [2], 5, 1, "under", -4]]);
   assert.deepEqual(page.pageTotals, { incomeUsd: 7.5, actualCostUsd: 3, grossProfitUsd: 4.5, grossMarginRate: 0.6 });
-  assert.deepEqual([page.gap.expectedCostUsd, page.gap.actualCostUsd, Number(page.gap.usd.toFixed(2)), page.gap.overUsd, Number(page.gap.underUsd.toFixed(2)), page.gap.rowCount, page.gap.days.count], [12.2, 3, -9.2, 1, -10.2, 3, 1]);
+  assert.deepEqual([page.gap.expectedCostUsd, page.gap.actualCostUsd, Number(page.gap.usd.toFixed(2)), page.gap.overUsd, Number(page.gap.underUsd.toFixed(2)), page.gap.rowCount, page.gap.days.count], [12.2, 3, -9.2, 1, 10.2, 3, 1], "underUsd 是正数");
   assert.deepEqual(page.counts, { channels: 3, countedChannels: 3, mismatchedChannels: 3, attentionChannels: 0, uncomputable: {}, mismatchedDays: { over: 1, under: 2 } });
   assert.deepEqual([page.fixedCostUsd, page.netProfitUsd, page.unlinkedChannelCount, page.rateUnset, page.ownIncomeUnavailable, page.asOf != null, page.tz], [0, 4.5, 7, [], null, true, "Asia/Shanghai"], "固定成本 0（没有固定采购的上游）；渠道目录里 10 个渠道只绑了 3 个");
   const dayDetail = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-08" });

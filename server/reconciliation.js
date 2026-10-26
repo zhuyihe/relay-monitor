@@ -3177,14 +3177,30 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [] });
       // 固定成本：固定采购的上游按天平摊（lib/profit.js），换成美元要那个上游设了汇率；有一个没设就给 null（页面写「固定成本算不出，净利先不算」）
+      // 最小改法（审核 #126 M3）：按天摊，已固定的日子按账本那天记的 cost_basis 判要不要摊（fixed 才摊、usage 不摊）、汇率用那天的 cost_rate；
+      // 还没固定的日子（今天、还在读取）按现在的设置摊。注意：摊的「金额」本身还是按现在的购买记录算，改了购买金额过去的日子会跟着变——
+      // 「固定成本本身也按天固定下来」是以后单独一个小 PR 做的事，这里不做
       const fixedStations = usageUpstreams()?.fixed || [];
       let fixedCostUsd = 0;
       // 没设汇率的固定上游：readResponse 的 unconfiguredRateStations 不含固定上游（那条路不摊固定成本，没必要提示），这里单独收集、和它的点名去重合并（审核 #126 M6）
       const fixedRateUnset = [];
+      const dayFactOf = new Map(dayFacts.map((item) => [`${item.ruleId}:${item.billDate}`, item]));
       for (const station of fixedStations) {
         const rate = rateSnapshotOf(station);
         if (!isConfiguredRate(rate)) { fixedCostUsd = null; fixedRateUnset.push({ id: station.id, name: station.name }); continue; }
-        if (fixedCostUsd != null) fixedCostUsd += amortizeFixedCost(purchasesOf(station), { startMs: window.startMs, endMs: Math.min(window.endMs, now), tz }).exact / Number(rate.cnyPerUsd);
+        if (fixedCostUsd == null) continue;
+        const purchases = purchasesOf(station);
+        const boundRuleIds = results.filter((row) => String(row.rule.upstreamStationId) === String(station.id)).map((row) => row.rule.id);
+        for (const day of labels) {
+          const dayStartMs = Math.max(dayStartInTz(day, tz), window.startMs);
+          const dayEndMs = Math.min(shiftedDayStartInTz(dayStartInTz(day, tz), 1, tz), window.endMs, now);
+          if (dayEndMs <= dayStartMs) continue;
+          const dayUsd = amortizeFixedCost(purchases, { startMs: dayStartMs, endMs: dayEndMs, tz }).exact;
+          if (!dayUsd) continue;
+          const fact = boundRuleIds.map((id) => dayFactOf.get(`${id}:${day}`)).find(Boolean);
+          if (fact) { if (fact.costBasis !== "fixed") continue; fixedCostUsd += dayUsd / Number(fact.costRate || rate.cnyPerUsd); }
+          else fixedCostUsd += dayUsd / Number(rate.cnyPerUsd);
+        }
       }
       // 整站收入读不到：从各绑定的 health.issues 扫（不另发请求，运营总览走的是现读一次 computeProfit，这里只有结果里带着的问题可查，
       // 审核 #126 M5 要的「同一份」做不到不额外读站点；改法：自营站点侧的令牌类问题（ACCESS_TOKEN_*）也算进来，不只挑第一条、按最新一个）
