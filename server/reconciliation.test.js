@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 import { resetOwnRequestBudget } from "../lib/own-request-budget.js";
 import { billingCapabilityAliases } from "../lib/billing-capability-storage.js";
+import { maskKey } from "../lib/key-fingerprint.js";
 
 function trustedLegacyRule(rule, stations = [], upstreamAccountId = 7, ownAccountId = 7) {
   const upstream = stations.find((station) => station.id === rule.upstream_station_id) || { type: "newapi", baseUrl: "https://upstream.test" };
@@ -1991,7 +1992,7 @@ function ownTestLogApi(url, logs = []) {
   return { success: true, data: { total: matched.length, items } };
 }
 
-function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {} }) {
+function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
     id, rule_id: "rr_live", group_name: group, group_ratio: ratio,
@@ -2073,7 +2074,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if (url.pathname === "/api/token/") {
         if (metadataFailure) return reply(500, { success: false });
         const distinct = [...new Map(rules.map((item) => [item.token_id, item])).values()];
-        return reply(200, { success: true, data: { total: distinct.length, items: distinct.map((item) => ({ id: item.token_id, user_id: init.headers?.["New-Api-User"], name: item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false })) } });
+        return reply(200, { success: true, data: { total: distinct.length, items: distinct.map((item) => ({ id: item.token_id, user_id: init.headers?.["New-Api-User"], name: item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false,
+          ...(tokenKeyOf ? { key: maskKey(tokenKeyOf(item.token_id)) } : {}) })) } });
       }
       if (url.pathname === "/api/log/self/stat") return stat("upstream", url, state.upstreamQuota);
     }
@@ -2091,12 +2093,19 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if (state.fullLogList && url.pathname === "/api/log/" && !ownSourceRead(url)) return reply(200, ownTestLogApi(url, state.testLogs));
       if (url.pathname === "/api/user/") return reply(200, ownUsersApi(url, state.ownUsers));
       if (url.pathname === "/api/log/stat") return stat("own", url, state.ownQuota);
+      // 渠道 Key 读取服务（K2a/K2b）：只在传了 keyAgent 的测试里有这条路，别的测试这个站点没配，keyAgentConfigOf 直接判没配，不会问
+      if (url.pathname === "/key-agent/keys" && keyAgent) {
+        const channels = typeof keyAgent.channels === "function" ? keyAgent.channels(request) : keyAgent.channels;
+        return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"ka1"' : null) },
+          json: async () => ({ v: 1, db: "mysql", readAt: Date.now(), channels }) };
+      }
     }
     return reply(404, { success: false });
   });
   const stations = [
     { id: "upstream", name: "上游", type: "newapi", baseUrl: "https://upstream.test", accessToken: "pat", authVersion: 1 },
-    { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin", authVersion: 1 },
+    { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin", authVersion: 1,
+      ...(keyAgent ? { keyAgentUrl: "https://own.test/key-agent", keyAgentSecret: keyAgent.secret } : {}) },
   ];
   const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null,
     channels: [], billingIdentityKey: "reconciliation-fixture-billing-key" } };
@@ -7102,6 +7111,57 @@ test("K2b 前置：Sub2API 已删 Key 的减法（非只读）强制重读一次
   const readKeysCalls = sub2.keysCalls;
   await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai", startMs: Date.parse("2026-10-09T16:00:00Z"), endMs: Date.parse("2026-10-10T16:00:00Z") }, { mode: "evaluate", origin: "page" });
   assert.equal(sub2.keysCalls, readKeysCalls, "只读查询不强制重读目录");
+});
+
+// K2b：分组、合组检测接进结账流程（总指挥 10-26 定：不能等 K2c）。下面两条证明接进去以后账本是安全的：
+// 冲突的绑定那几天既不会固定下来（没有账本行），也不会把同一笔钱算给两条绑定（不会出现两条账本行同一天同一把 Key 都算了钱）。
+const KEY_AGENT_SECRET = "K7m2-xP9q" + "R4t".repeat(10);
+
+test("K2b：合组——两条不同绑定这一轮认出的是同一把 Key，账本两条都没有固定下来的行，不会把同一把 Key 的钱算给两条", async (t) => {
+  const now0 = Date.parse("2026-10-11T01:00:00Z"); // 上海 10-11 09:00
+  let now = now0;
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    extraRuleIds: ["rr_b"],
+    channelsByRule: { rr_live: [1], rr_b: [2] },
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    keyAgent: {
+      secret: KEY_AGENT_SECRET,
+      // 渠道 1（rr_live 的）和渠道 2（rr_b 的）这一轮都认出是 token 9 那把——合组了，分不清这把 Key 该算给哪条
+      channels: () => [
+        { id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyNine), f: "unused-when-mask-matches-1" }] },
+        { id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyNine), f: "unused-when-mask-matches-2" }] },
+      ],
+    },
+  });
+  await f.module.refreshDue(now); // 结「昨天」（10-10）
+  assert.deepEqual(f.state.ledger.filter((row) => row.bill_date === "2026-10-10"), [], "两条绑定这天都没有固定下来的行");
+});
+
+test("K2b：分组——一条绑定名下两个渠道，这一轮认出的 Key 不再是同一把，这天不固定、不结账；不相关的别的绑定照常结账", async (t) => {
+  const now0 = Date.parse("2026-10-11T01:00:00Z");
+  let now = now0;
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    extraRuleIds: ["rr_b"], // 只是为了让上游目录真的列出 token 10；rr_b 自己的渠道（3）不在读取服务快照里，不参与这次检测
+    channelsByRule: { rr_live: [1, 2], rr_b: [3] },
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    keyAgent: {
+      secret: KEY_AGENT_SECRET,
+      // rr_live 的渠道 1 认出 token 9（自己原来那把，没变），渠道 2 这一轮认出的是 token 10——组散了
+      channels: () => [
+        { id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyNine), f: "unused-1" }] },
+        { id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyTen), f: "unused-2" }] },
+      ],
+    },
+  });
+  await f.module.refreshDue(now);
+  assert.deepEqual(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-10"), [], "组散了这天不固定、不结账");
+  assert.ok(f.state.ledger.some((row) => row.rule_id === "rr_b" && row.bill_date === "2026-10-10"), "不相关的绑定（渠道没在这次识别结果里）照常结账");
 });
 
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {
