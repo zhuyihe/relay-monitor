@@ -1067,13 +1067,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 已解除的绑定补结某一天（C3）：这天里别的绑定（启用的，或最近也解除了、那段时间还占着的）也占着同一个渠道、或同一把 Key 时，
   // 和启用时一样挡住（DUPLICATE_CHANNEL_ASSIGNMENT、CANONICAL_KEY_CONFLICT），不然同一个渠道的收入、同一把 Key 的成本会在账本里算两遍（审核 C3 中-1）
   function archivedClash(rule, window, registry) {
+    // 这条绑定这天自己的区间：从它的核算起点（含当天换绑的下限）到解除的时刻，不是整天
+    const start = Math.max(window.startMs, reconciliationAccountingStart(rule) ?? window.startMs);
     const end = Math.min(window.endMs, Number(rule.archivedAtMs));
     const sharing = { channel: [], key: [] };
     for (const other of registry.rules) {
       if (other.id === rule.id) continue;
       const otherStart = reconciliationAccountingStart(other) ?? Date.parse(other.createdAt);
       const otherEnd = other.archivedAtMs == null ? Infinity : Number(other.archivedAtMs);
-      if (!(otherStart < end && otherEnd > window.startMs)) continue;
+      if (!(otherStart < end && otherEnd > start)) continue;
       if (other.ownStationId === rule.ownStationId && other.channels.some((channel) => rule.channels.some((mine) => mine.channelId === channel.channelId))) sharing.channel.push(other.id);
       if (rule.canonicalKey && other.canonicalKey === rule.canonicalKey) sharing.key.push(other.id);
     }
@@ -2236,9 +2238,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       costBasis: financialSnapshot.costBasis }) : null;
     // 重结读出来的收入或上游成本比账本最新一版少一半以上（日志过了保留期之类）：不写新版，等人确认（手动「重新读取」才覆盖）。
     // 记 RESETTLE_SHRUNK 的状态行由 settleDay 写；页面上这天还是已固定的旧数
-    // 确认了（confirmShrink）：确认框里写的「重算」数（confirmedAfter）和这次再读到的不一样，照旧挡下、把新的数记下来再让人看一眼，
+    // 确认了（confirmShrink）：确认框里写的「重算」数（confirmedAfter）和这次再读到的不一样、或者根本没带，照旧挡下、把新的数记下来再让人看一眼（直接调接口也绕不过），
     // 不让人没看到的数把已固定的钱换掉（审核 C3 要总指挥定 2）
-    if (settle && resettle && (!confirmShrink || (confirmedAfter && ledgerEntry && !sameShrunkAfter(confirmedAfter, ledgerEntry))) && ledgerEntry) {
+    if (settle && resettle && (!confirmShrink || !confirmedAfter || !sameShrunkAfter(confirmedAfter, ledgerEntry)) && ledgerEntry) {
       let prior;
       try { prior = await repository.latestLedgerEntry(rule.id, result.window); } catch { throw codedError("PERSISTENCE_FAILED", issueText("PERSISTENCE_FAILED")); }
       const shrunk = prior ? resettleShrunkInfo(prior, ledgerEntry, { always: confirmShrink }) : null;

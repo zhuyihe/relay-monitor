@@ -6650,7 +6650,7 @@ test("C2b 总指挥定的 3（明显少就不写）：重结读出来的收入�
   assert.equal((await state()).manualReason, "RESETTLE_SHRUNK", "仍是要人处理");
   // 明说确认了（C3 确认框点「重新读取」会传 confirmShrink）：覆盖
   f.state.ownQuota = 0;
-  const manual = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual", confirmShrink: true });
+  const manual = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual", confirmShrink: true, confirmedAfter: (await state()).detail.shrunk.after });
   assert.ok(manual.results[0].settledAt);
   assert.equal(revisions().at(-1)[1], 0, "手动确认以后写了新版（收入 0）");
   assert.equal(await state(), undefined, "状态行删了");
@@ -6678,7 +6678,7 @@ test("C2b 设计的确认：改了时间太早没自动重算的日子（RESETTL
   const row = (await f.repository.listSettlementStates(["rr_live"])).find((item) => item.billDate === "2026-10-07");
   assert.equal(row.manualReason, "RESETTLE_SHRUNK");
   // 这时用户在确认框点了「重新读取」（传 confirmShrink）：RESETTLE_SHRUNK 的日子照读到的数覆盖
-  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: Date.parse("2026-10-06T16:00:00Z"), endMs: Date.parse("2026-10-07T16:00:00Z") }, { mode: "observe", force: true, origin: "manual", confirmShrink: true });
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: Date.parse("2026-10-06T16:00:00Z"), endMs: Date.parse("2026-10-07T16:00:00Z") }, { mode: "observe", force: true, origin: "manual", confirmShrink: true, confirmedAfter: row.detail.shrunk.after });
   assert.equal(ledger().at(-1)[1], 0, "确认以后写了新版");
   assert.equal((await f.repository.listSettlementStates(["rr_live"])).some((item) => item.billDate === "2026-10-07"), false);
 });
@@ -6785,6 +6785,21 @@ test("C3 审核要总指挥定 2：SHRUNK 确认时再读到的数和确认框�
   assert.equal(await state(), undefined);
 });
 
+test("C3 审核二轮中-3：确认请求不带 confirmedAfter（直接调接口）也再挡一次，不直接写", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) { row.enabled = row.id === "rr_live" ? 1 : 0; row.billing_effective_from_ms = Date.parse("2026-08-31T16:00:00Z"); }
+  await f.module.refreshDue(now);
+  const ledger = () => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").map((row) => Number(row.revenue_usd));
+  f.state.ownQuota = 0;
+  await f.repository.requestResettle("rr_live", ["2026-10-08"], { now });
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual" });
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual", confirmShrink: true });
+  assert.deepEqual(ledger(), [2.5], "没带确认框里的数：不写");
+  const row = (await f.repository.listSettlementStates(["rr_live"])).find((item) => item.billDate === "2026-10-08");
+  assert.equal(row.manualReason, "RESETTLE_SHRUNK");
+});
+
 test("C3 审核 C2b 低-A：确认参数误传给普通请求日或 RESETTLE_TOO_OLD 的日子，照样判「少了一半多」先挡下，只有状态行是 RESETTLE_SHRUNK 的那天才跳过", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
@@ -6792,7 +6807,7 @@ test("C3 审核 C2b 低-A：确认参数误传给普通请求日或 RESETTLE_TOO
   await f.module.refreshDue(now); // 10-08 固定：收入 2.5、成本 1
   const ledger = () => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").map((row) => Number(row.revenue_usd));
   const state = async () => (await f.repository.listSettlementStates(["rr_live"])).find((row) => row.billDate === "2026-10-08");
-  const read = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual", confirmShrink: true });
+  const read = async () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual", confirmShrink: true, confirmedAfter: (await state())?.detail?.shrunk?.after ?? { revenueUsd: 0, costUsd: 1 } });
   f.state.ownQuota = 0;
   // 普通请求日（行里没有 RESETTLE_SHRUNK）
   await f.repository.requestResettle("rr_live", ["2026-10-08"], { now });
@@ -6804,7 +6819,7 @@ test("C3 审核 C2b 低-A：确认参数误传给普通请求日或 RESETTLE_TOO
   await read();
   assert.deepEqual(ledger(), [2.5]);
   assert.equal((await state()).manualReason, "RESETTLE_SHRUNK");
-  // 这时状态行是 RESETTLE_SHRUNK：带确认才覆盖
+  // 这时状态行是 RESETTLE_SHRUNK：带确认才覆盖（确认框写的数和再读到的一样）
   await read();
   assert.deepEqual(ledger(), [2.5, 0], "状态行是 RESETTLE_SHRUNK、带了确认：照读到的数固定");
 });
@@ -6905,6 +6920,23 @@ test("C3 用户 10-26 + 审核对拍 S4a：当天解除又绑回同一渠道，�
   const stat = f.state.statCalls.filter((call) => call.start === COMPLETED_YESTERDAY.startMs / 1000 || call.start === archivedAt / 1000);
   assert.ok(stat.some((call) => call.end === archivedAt / 1000 - 1) && stat.some((call) => call.start === archivedAt / 1000), "两段取数首尾相接，不重叠");
   assert.equal((await f.repository.listSettlementStates(["rr_live"])).length, 0, "没有被挡");
+});
+
+test("C3 审核二轮中-1：当天换绑两次（A→B→C），每条都按自己的核算起点判，不互相挡，三段首尾相接", async (t) => {
+  const a = Date.parse("2026-10-08T02:00:00Z"), b = Date.parse("2026-10-08T06:00:00Z"); // 上海 10:00 和 14:00 换绑
+  let now = b;
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1], rr_two: [1], rr_three: [1] }, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 1 : 0;
+  const row = (id) => f.rows.find((item) => item.id === id);
+  row("rr_live").billing_effective_from_ms = Date.parse("2026-10-06T16:00:00Z");
+  row("rr_two").billing_effective_from_ms = a + 60000; row("rr_two").accounting_floor_ms = a; row("rr_two").archived_at = new Date(b); row("rr_two").archived_at_ms = b; row("rr_two").enabled = 0; row("rr_two").canonical_key = row("rr_two").canonical_key;
+  row("rr_live").archived_at = new Date(a); row("rr_live").archived_at_ms = a; row("rr_live").enabled = 0;
+  row("rr_three").billing_effective_from_ms = b + 60000; row("rr_three").accounting_floor_ms = b;
+  now = Date.parse("2026-10-09T03:00:00Z");
+  await f.module.refreshDue(now);
+  const days = (id) => f.state.ledger.filter((item) => item.rule_id === id && item.bill_date === "2026-10-08").length;
+  assert.deepEqual(["rr_live", "rr_two", "rr_three"].map(days), [1, 1, 1], "三条都结了，没有被挡");
+  assert.equal((await f.repository.listSettlementStates(["rr_live", "rr_two"])).length, 0);
 });
 
 test("C3 审核中-1：别的绑定是解除以后才占上这个渠道的（隔天绑上），已解除的照常补结", async (t) => {
