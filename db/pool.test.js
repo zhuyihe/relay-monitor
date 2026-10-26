@@ -66,6 +66,17 @@ test("对账 schema 已具备列和索引时不重复执行 ALTER", async () => 
   assert.equal(pool.calls.some((call) => call.sql.startsWith("ALTER TABLE")), false);
 });
 
+test("分段记 Key（K1c）：建表一次，启动时只补缺的 Key 行（一条 INSERT … WHERE NOT EXISTS），不重写已有的行", async () => {
+  const pool = schemaPool();
+  await ensureSchema(pool);
+  const sqls = pool.calls.map((call) => call.sql);
+  assert.equal(sqls.filter((sql) => sql.includes("CREATE TABLE IF NOT EXISTS reconciliation_segment_keys")).length, 1);
+  const fills = sqls.filter((sql) => /INSERT INTO reconciliation_segment_keys/.test(sql));
+  assert.equal(fills.length, 1);
+  assert.match(fills[0], /WHERE NOT EXISTS \(SELECT 1 FROM reconciliation_segment_keys k WHERE k\.segment_id = s\.id\)/);
+  assert.equal(sqls.some((sql) => /UPDATE reconciliation_segment_keys/.test(sql)), false);
+});
+
 test("新关联迁移可重跑且旧规则不切换自然日策略", async () => {
   const pool = schemaPool();
   await ensureSchema(pool);

@@ -1404,6 +1404,29 @@ contract("createRule: a new binding that takes the same channel (or Key) on the 
   assert.equal(toSub2.accountingFloorMs, at, "新绑定是 Sub2API：也从旧绑定解除那一刻起算收入");
 });
 
+contract("segment keys (K1c): every segment has its Key row, filled from the rule; a new segment gets one; active_token_key follows the open segment of an enabled rule; the keys are not enumerable (results stay byte-identical)", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:sk`, billingPolicy: "immediate", timezone: "UTC" });
+  const keyOf = (segment) => segment.keys.map((key) => [key.upstreamStationId, key.tokenId, key.tokenName, key.matchSource, key.active]);
+  let segments = await repository.listSegments(rule.id);
+  assert.equal(segments.length, 1);
+  assert.deepEqual(keyOf(segments[0]), [[rule.upstreamStationId, rule.tokenId, rule.tokenName, "initial", true]]);
+  assert.equal(Object.keys(segments[0]).includes("keys"), false, "不进 JSON、不进深比较");
+  assert.equal(JSON.stringify(segments).includes("tokenId"), false);
+  // 倍率变化开新段：新段有自己的 Key 行，旧段的不再是在用的
+  await repository.observeSource(rule.id, { groups: {}, group: "vip", ratio: 2, tokenName: rule.tokenName, detectedAt: Date.now() - 1000 });
+  segments = await repository.listSegments(rule.id);
+  assert.equal(segments.length, 2);
+  assert.deepEqual(segments.map((segment) => keyOf(segment).map((key) => key[4])), [[false], [true]]);
+  // 改绑定的 Key：来源是 initial 的行都跟着走（旧代码整条绑定的历史都按现在这把取）
+  await repository.updateRule(rule.id, { tokenName: "Renamed" });
+  segments = await repository.listSegments(rule.id);
+  assert.deepEqual(segments.map((segment) => segment.keys[0].tokenName), ["Renamed", "Renamed"]);
+  // 解除：没有在用的了
+  assert.equal(await repository.archiveRule(rule.id), true);
+  segments = await repository.listSegments(rule.id);
+  assert.deepEqual(segments.map((segment) => segment.keys[0].active), [false, false]);
+});
+
 contract("listSettlementStates with billDates only returns those days", async ({ repository, fixture }) => {
   const rule = await fixture.createRule();
   const now = Date.UTC(2026, 0, 12, 3);

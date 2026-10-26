@@ -3,6 +3,7 @@ import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, nor
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
+import { refreshSegmentKeysSql } from "../db/segment-keys.js";
 import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
 import { billDayOf } from "../lib/business-time.js";
@@ -91,6 +92,24 @@ export function ruleFromRow(row, channels = []) {
       stateChangedAt: channel.status_changed_at_ms == null ? null : Number(channel.status_changed_at_ms),
     })),
   };
+}
+
+// 写分段的事务里把这条绑定每一段的 Key 行补齐、跟上 rules 现在的 Key 和 active_token_key（db/segment-keys.js）
+async function refreshSegmentKeys(conn, ruleId) {
+  for (const { sql, params } of refreshSegmentKeysSql(ruleId)) await conn.query(sql, params);
+}
+
+// 分段带上它的 Key（segment.keys），不进 JSON、不进深比较（enumerable: false）：这一版每段一把，对外的结果逐字不变（K1c）
+export function attachSegmentKeys(segments, keyRows) {
+  const byId = new Map();
+  for (const row of keyRows) {
+    if (row.segment_id == null) continue;
+    const list = byId.get(row.segment_id) || [];
+    list.push({ upstreamStationId: row.upstream_station_id, tokenId: Number(row.token_id), tokenName: row.token_name ?? null, keyMask: row.key_mask ?? null, matchSource: row.match_source, active: row.active_token_key != null });
+    byId.set(row.segment_id, list);
+  }
+  for (const segment of segments) Object.defineProperty(segment, "keys", { value: byId.get(segment.id) || [], enumerable: false, configurable: true, writable: true });
+  return segments;
 }
 
 export function segmentFromRow(row) {
@@ -355,6 +374,7 @@ export class ReconciliationRepository {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'operator_confirmed')`,
         [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs ?? (isScopedBillingPolicy(input.billingPolicy) ? 0 : Date.now())), Date.now()]
       );
+      await refreshSegmentKeys(conn, id);
       if (guard) guard(null, [], isScopedBillingPolicy(input.billingPolicy) ? applyScopePolicy(null, requested) : input);
       await conn.commit();
     } catch (err) {
@@ -406,6 +426,7 @@ export class ReconciliationRepository {
         );
       }
       if (guard) guard(existing, existing.channels, applyScopePolicy(existing, requested, Date.now(), { append }));
+      await refreshSegmentKeys(conn, id);
       await conn.commit();
     } catch (err) {
       await conn.rollback().catch(() => {});
@@ -457,12 +478,18 @@ export class ReconciliationRepository {
   // 切换检测得比当前分段起点还早时，旧分段收成零长度，和新分段同一起点、常在同一秒创建；
   // 各处都按起点、创建时间排序后让未结束的分段排最后，「最后一段」才总是当前分段。
   async listSegments(ruleId) {
+    // 一条查询连 Key 一起读（LEFT JOIN；每段一行 Key，多 Key 的段会有几行）：平时轮询每条绑定都读它，不能多一条
     const [rows] = await this.pool.query(
-      `SELECT * FROM reconciliation_rule_segments
-       WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC, effective_to_ms IS NOT NULL DESC, effective_to_ms ASC`,
+      `SELECT s.*, k.segment_id AS key_segment_id, k.upstream_station_id AS key_upstream_station_id, k.token_id AS key_token_id,
+         k.token_name AS key_token_name, k.key_mask AS key_key_mask, k.match_source AS key_match_source, k.active_token_key AS key_active_token_key
+       FROM reconciliation_rule_segments s LEFT JOIN reconciliation_segment_keys k ON k.segment_id = s.id
+       WHERE s.rule_id = ? ORDER BY s.effective_from_ms ASC, s.created_at ASC, s.effective_to_ms IS NOT NULL DESC, s.effective_to_ms ASC, k.token_id ASC`,
       [ruleId]
     );
-    return rows.map(segmentFromRow);
+    const segments = [], seen = new Set();
+    for (const row of rows) if (!seen.has(row.id)) { seen.add(row.id); segments.push(segmentFromRow(row)); }
+    return attachSegmentKeys(segments, rows.map((row) => ({ segment_id: row.key_segment_id, upstream_station_id: row.key_upstream_station_id,
+      token_id: row.key_token_id, token_name: row.key_token_name, key_mask: row.key_key_mask, match_source: row.key_match_source, active_token_key: row.key_active_token_key })));
   }
 
   async backfillMissingSegmentRatios(ruleId, groups, observedAt = Date.now(), segments = null) {
@@ -556,6 +583,7 @@ export class ReconciliationRepository {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'detected')`,
           [uid("rs"), ruleId, group, ratio ?? null, nextRatio == null ? null : detectedAt, nextRatio == null ? null : "group_catalog", at, at]
         );
+        await refreshSegmentKeys(conn, ruleId);
         await conn.query(
           "UPDATE reconciliation_rules SET token_name = ?, fixed_group = ? WHERE id = ? AND archived_at IS NULL",
           [tokenName, group, ruleId]
@@ -606,6 +634,7 @@ export class ReconciliationRepository {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'detected')`,
           [uid("rs"), ruleId, group, ratio ?? null, nextRatio == null ? null : detectedAt, nextRatio == null ? null : "group_catalog", at, at]
         );
+        await refreshSegmentKeys(conn, ruleId);
       }
       await conn.commit();
       outcome = { transitioned: !sameGroup || ratioChanged, ratioBackfilled };
@@ -706,6 +735,7 @@ export class ReconciliationRepository {
       );
       if (result.affectedRows) {
         await conn.query("UPDATE reconciliation_rule_channels SET active_channel_key = NULL WHERE rule_id = ?", [id]);
+        await refreshSegmentKeys(conn, id);
       }
       await conn.commit();
     } catch (err) {

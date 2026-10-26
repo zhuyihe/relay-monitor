@@ -597,6 +597,32 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
 
 // 登录信息加密保存（db/secrets.js）走一遍真库：mysql2 把 JSON 列里的字符串标量（会话密钥）解析成不带引号的字符串，
 // 密文、明文混着读，和单测里的假库不一样的地方都在这里核对。只动 stations 和 meta 里这几行，跑完删掉
+test("分段记 Key（K1c）：已有绑定每一段补一行 Key（填 rules 上现在的那把，在用的绑定开着的那段带 active_token_key），重复启动不改任何行，不动账本", { timeout: 60000 }, async () => {
+  const pool = mysql.createPool({ host: process.env.DB_HOST, port, user: process.env.DB_USER, password: process.env.DB_PASSWORD, database: process.env.DB_NAME, connectionLimit: 2 });
+  try {
+    await ensureSchema(pool);
+    await pool.query("DELETE FROM reconciliation_segment_keys WHERE segment_id LIKE 'k1c_%'");
+    await pool.query("DELETE FROM reconciliation_rule_segments WHERE id LIKE 'k1c_%'");
+    await pool.query("DELETE FROM reconciliation_rules WHERE id LIKE 'k1c_%'");
+    await pool.query("INSERT INTO reconciliation_rules (id, upstream_station_id, own_station_id, token_id, token_name, fixed_group, active_token_key) VALUES ('k1c_a','up','own',5,'five','g','up:5'),('k1c_b','up','own',6,'six','g',NULL)");
+    await pool.query("INSERT INTO reconciliation_rule_segments (id, rule_id, group_name, effective_from_ms, effective_to_ms, detected_at_ms) VALUES ('k1c_s1','k1c_a','g',0,100,0),('k1c_s2','k1c_a','h',100,NULL,100),('k1c_s3','k1c_b','g',0,NULL,0)");
+    const ledgerBefore = (await pool.query("SELECT COUNT(*) AS n FROM reconciliation_ledger"))[0][0].n;
+    await ensureSchema(pool);
+    const dump = async () => (await pool.query("SELECT segment_id, upstream_station_id, token_id, token_name, match_source, active_token_key FROM reconciliation_segment_keys WHERE segment_id LIKE 'k1c_%' ORDER BY segment_id"))[0];
+    const first = await dump();
+    assert.deepEqual(first.map((row) => [row.segment_id, row.token_id, row.token_name, row.match_source, row.active_token_key]), [
+      ["k1c_s1", 5, "five", "initial", null], ["k1c_s2", 5, "five", "initial", "up:5"], ["k1c_s3", 6, "six", "initial", null]]);
+    await ensureSchema(pool);
+    assert.deepEqual(await dump(), first, "重复启动不改任何行");
+    assert.equal((await pool.query("SELECT COUNT(*) AS n FROM reconciliation_ledger"))[0][0].n, ledgerBefore, "不动账本");
+  } finally {
+    await pool.query("DELETE FROM reconciliation_segment_keys WHERE segment_id LIKE 'k1c_%'").catch(() => {});
+    await pool.query("DELETE FROM reconciliation_rule_segments WHERE id LIKE 'k1c_%'").catch(() => {});
+    await pool.query("DELETE FROM reconciliation_rules WHERE id LIKE 'k1c_%'").catch(() => {});
+    await pool.end();
+  }
+});
+
 test("登录信息加密保存：明文库配上密钥启动后只剩密文，重启照常读，换错密钥或没配密钥都中止且不写库，reset 后能启动", { timeout: 60000 }, async (t) => {
   const pool = mysql.createPool({ host: process.env.DB_HOST, port, user: process.env.DB_USER,
     password: process.env.DB_PASSWORD, database: process.env.DB_NAME,

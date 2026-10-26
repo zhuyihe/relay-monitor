@@ -1,6 +1,7 @@
 // MySQL 连接池（mysql2/promise）。连接参数来自环境变量，见 .env.example
 import mysql from "mysql2/promise";
 import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues, migratedLedgerEntries } from "../lib/reconciliation-ledger.js";
+import { SEGMENT_KEYS_TABLE_SQL, refreshSegmentKeysSql } from "./segment-keys.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME, LEGACY_BILLING_CAPABILITY_IDENTITY_SCHEME, wrapLegacyBillingIdentity } from "../lib/billing-capability-storage.js";
 
 let _pool = null;
@@ -217,6 +218,9 @@ export async function ensureSchema(pool) {
       UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000, 'legacy'
     FROM reconciliation_rules r
     WHERE NOT EXISTS (SELECT 1 FROM reconciliation_rule_segments s WHERE s.rule_id = r.id)`);
+  // 分段记 Key（K1c）：每段一把 Key，已有的绑定每一段补一行（填 rules 上现在的那把）；重复跑只补缺的，不改账本、不触发重结
+  await pool.query(SEGMENT_KEYS_TABLE_SQL);
+  for (const { sql, params } of refreshSegmentKeysSql()) await pool.query(sql, params);
   await pool.query(`UPDATE reconciliation_snapshots s
     JOIN reconciliation_rule_segments g ON g.rule_id = s.rule_id
     SET s.segment_id = g.id
