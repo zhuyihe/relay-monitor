@@ -38,10 +38,12 @@ export class OwnLogStore {
   }
 
   // 「算应付成本」关→开，进度比昨天 0 点还旧：把进度挪到 toMs，中间这段（原来的 covered_to_ms 到 toMs）记成跳过的缺口，
-  // 不删桶（已经读进来的留着，补算用得上；总指挥 10-26 定第三轮）
+  // 不删桶（已经读进来的留着，补算用得上；总指挥 10-26 定第三轮）。已经有一段没补上的缺口（第二次关→开，中间那段「开着」的
+  // 日子还没来得及补算）：两段缺口并成一段记（偏保守——中间那段原本读全了的日子也会被算成缺口，但不会漏；只记一段，
+  // 不改表结构记多段；审核 R2 #125 第三轮 中-E）
   async skipCursor(stationId, toMs, now = Date.now()) {
     await this.pool.query(
-      "UPDATE own_log_cursor SET disabled_from_ms = covered_to_ms, disabled_to_ms = ?, covered_to_ms = ?, updated_at_ms = ? WHERE station_id = ?",
+      "UPDATE own_log_cursor SET disabled_from_ms = COALESCE(disabled_from_ms, covered_to_ms), disabled_to_ms = ?, covered_to_ms = ?, updated_at_ms = ? WHERE station_id = ?",
       [toMs, toMs, now, stationId]);
     return this.getCursor(stationId);
   }

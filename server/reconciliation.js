@@ -2966,15 +2966,20 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const wasOff = rt.store?.settings?.expectedCostWasOff === true;
       const justTurnedOn = expectedCostOn && wasOff;
       if (!expectedCostOn && !wasOff) await rt.store?.updateSettings?.({ expectedCostWasOff: true })?.catch?.(() => {});
-      else if (justTurnedOn) await rt.store?.updateSettings?.({ expectedCostWasOff: false })?.catch?.(() => {});
       if (ownLogIngest && expectedCostOn) {
+        // 跳不跳只在 ingestOnce 里面判断（只改库，不发请求，排在额度/断路/管理员名单检查前面，一定会跑到）；
+        // 清掉「上一次是关着的」标记要等每个站点都真的判断过（skipChecked），不然某个站点这一轮被额度、断路挡住没走到判断，
+        // 标记却已经清了，下一轮就再也不会跳了（审核 R2 #125 第三轮 中-C）
+        let allSkipChecked = true;
         for (const id of new Set(rules.map((rule) => rule.ownStationId))) {
           const own = upstreamStation(id);
           if (own?.isOwn && own.type === "newapi") {
-            await ownLog.ingestOnce(own, { justTurnedOn }).catch((error) => console.error("自营站点整站日志读取失败:", error?.message || String(error)));
+            const result = await ownLog.ingestOnce(own, { justTurnedOn }).catch((error) => { console.error("自营站点整站日志读取失败:", error?.message || String(error)); return null; });
+            if (!result?.skipChecked) allSkipChecked = false;
             await backfillExpectedCost(own, { now }).catch((error) => console.error("应付成本补算失败:", error?.message || String(error)));
           }
         }
+        if (justTurnedOn && allSkipChecked) await rt.store?.updateSettings?.({ expectedCostWasOff: false })?.catch?.(() => {});
         await ownLog.pruneIfDue();
       }
     },

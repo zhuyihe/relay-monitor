@@ -12,7 +12,7 @@ export class MemoryOwnLogStore {
   async skipCursor(stationId, toMs, now = Date.now()) {
     const cursor = this.cursors.get(stationId);
     if (!cursor) return null;
-    cursor.disabledFromMs = cursor.coveredToMs; cursor.disabledToMs = toMs; cursor.coveredToMs = toMs; cursor.updatedAtMs = now;
+    cursor.disabledFromMs = cursor.disabledFromMs ?? cursor.coveredToMs; cursor.disabledToMs = toMs; cursor.coveredToMs = toMs; cursor.updatedAtMs = now;
     return this.getCursor(stationId);
   }
   async applyWindow(stationId, { fromMs, toMs, buckets }, now = Date.now()) {

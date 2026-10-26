@@ -56,6 +56,9 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
     const at = now();
     const base = ownBase(own);
     const allowance = ingestAllowance(base, { now: at });
+    // 这几处检查没走到跳不跳那一步：skipChecked 不给 true，调用方据此不清「上一次是关着的」标记，下一轮还会再试
+    // （只要这一轮没真的判断过，标记就不能清——不然某个站点一直被额度、断路、管理员名单挡住，关着的那几天就永远跳不过去了；
+    // 审核 R2 #125 第三轮 中-C）
     if (!allowance.allowed) return { skipped: allowance.reason, pages: 0 };
     // 管理员名单读不到这轮不读（进度也不建）：桶里「管理员自用」会算错，而且错了就留在桶里
     let adminSet, resoldKeys;
@@ -64,14 +67,15 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
     let cursor = await store.getCursor(own.id);
     // 只在「算应付成本」关→开这一下才跳：关着那几天本来就不读，不补那段缺口，直接挪到昨天 0 点（总指挥 10-26 定第三轮，决定 C）。
     // 停机、站点读不到、令牌失效造成的掉队，不管多久都不跳，照常按保底慢慢追——那几天的开关本来是开着的，补得上就该补上。
-    // 跳过的缺口记在 cursor 的 disabledFromMs/disabledToMs（结账时这段范围给 EXPECTED_COST_DISABLED），不清桶（已经读进来的留着）
+    // 跳过的缺口记在 cursor 的 disabledFromMs/disabledToMs（结账时这段范围给 EXPECTED_COST_DISABLED），不清桶（已经读进来的留着）。
+    // 这一行跑到了（不管后面读不读得到日志），就算真的判断过了：skipChecked 给 true
     if (justTurnedOn && cursor && cursor.coveredToMs < firstFromMs(at)) {
       cursor = await store.skipCursor(own.id, firstFromMs(at), at);
       log("own-log-ingest", own.id, "off->on, skipped stale progress to yesterday");
     }
     cursor ??= await store.startCursor(own.id, firstFromMs(at), at);
     const horizon = wholeSecond(at - INGEST.LAG_MS);
-    if (cursor.coveredToMs >= horizon) return { skipped: "caught-up", pages: 0, coveredToMs: cursor.coveredToMs };
+    if (cursor.coveredToMs >= horizon) return { skipped: "caught-up", pages: 0, coveredToMs: cursor.coveredToMs, skipChecked: true };
     const behind = horizon - cursor.coveredToMs;
     if (behind > INGEST.LAG_WARN_MS && at - (lagWarnedAt.get(own.id) || 0) >= 3600000) {
       lagWarnedAt.set(own.id, at);
@@ -88,7 +92,7 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
       const fromMs = coveredTo, toMs = Math.max(fromMs + 1000, wholeSecond(Math.min(fromMs + windowMs, horizon)));
       let first;
       try { first = await queryOwnLogWindow(own, { startMs: fromMs, endMs: toMs, page: 1 }); }
-      catch (error) { log("own-log-ingest", own.id, "read failed", error?.code || error?.message); return { pages, windows, coveredToMs: coveredTo, error: error?.code || "read" }; }
+      catch (error) { log("own-log-ingest", own.id, "read failed", error?.code || error?.message); return { pages, windows, coveredToMs: coveredTo, error: error?.code || "read", skipChecked: true }; }
       budget -= 1; pages += 1;
       const total = first.total ?? (first.items.length < INGEST.PAGE_SIZE ? first.items.length : null);
       const needPages = total == null ? INGEST.PAGES_PER_WINDOW + 1 : Math.ceil(total / INGEST.PAGE_SIZE);
@@ -116,18 +120,18 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
         take(next.items);
         more = next.items.length >= INGEST.PAGE_SIZE && (total == null ? page <= INGEST.PAGES_PER_WINDOW + 1 : rows.length < total);
       }
-      if (failed) { log("own-log-ingest", own.id, "read failed", failed?.code || failed?.message); return { pages, windows, coveredToMs: coveredTo, error: failed?.code || "read" }; }
+      if (failed) { log("own-log-ingest", own.id, "read failed", failed?.code || failed?.message); return { pages, windows, coveredToMs: coveredTo, error: failed?.code || "read", skipChecked: true }; }
       if (more) { windowSizes.set(own.id, windowMs); break; } // 额度、时间用完或断路了还没翻完：这个窗口不写，下一轮从头读
       const buckets = accumulateBuckets(rows, { adminSet, resoldKeys });
       const applied = await store.applyWindow(own.id, { fromMs, toMs, buckets: buckets.values() }, now());
-      if (!applied) return { pages, windows, coveredToMs: coveredTo, error: "cursor-moved" }; // 别的进程先写了：下一轮按库里的进度来
+      if (!applied) return { pages, windows, coveredToMs: coveredTo, error: "cursor-moved", skipChecked: true }; // 别的进程先写了：下一轮按库里的进度来
       coveredTo = toMs; windows += 1;
       // 很稀：窗口翻倍（上限 1 小时）
       if (rows.length < INGEST.PAGE_SIZE / 2 && toMs - fromMs >= windowMs) windowMs = Math.min(INGEST.WINDOW_MAX_MS, windowMs * 2);
       windowSizes.set(own.id, windowMs);
     }
     noteIngestUsage(base, pages, now());
-    return { pages, windows, coveredToMs: coveredTo };
+    return { pages, windows, coveredToMs: coveredTo, skipChecked: true };
   }
 
   // 每小时清 35 天前的桶：一批 2000 行，删到不满一批为止（最多 20 批，表再大也不会一直涨）

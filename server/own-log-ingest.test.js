@@ -271,6 +271,44 @@ test("开关关 10 天再打开：传 justTurnedOn 才跳到昨天 0 点，跳�
   assert.equal((await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)).length, 1, "已经读进来的桶没删");
 });
 
+// 审核 R2 #125 第三轮 中-C：这一轮被额度、断路、管理员名单挡住，没真的走到跳不跳那一步时，skipChecked 不给 true——
+// 调用方（server/reconciliation.js）据此不清「上一次是关着的」标记，下一轮还会再试，不会因为撞上这些挡路的原因就永远跳不过去
+test("被额度、管理员名单挡住的那一轮没真的判断过跳不跳：不给 skipChecked，下一轮还会再试（审核 R2 #125 第三轮 中-C）", async (t) => {
+  resetOwnRequestBudget();
+  const oldFrom = YESTERDAY_START - 10 * 86400000;
+  const store = new MemoryOwnLogStore();
+  await store.startCursor("own", oldFrom);
+
+  // 额度不够（断路/限流）：function 在判断跳不跳之前就退出
+  {
+    const { own, rt } = await fakeSite(t, []);
+    for (let i = 0; i < 400; i += 1) noteOwnRequest(own.baseUrl + "/x", { status: 429, elapsedMs: 10, now: NOW });
+    const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
+    const result = await ingest.ingestOnce(own, { justTurnedOn: true });
+    assert.equal(result.skipChecked, undefined, "被断路/限流挡住，没走到跳不跳那一步");
+    assert.equal((await store.getCursor("own")).disabledFromMs, null, "没跳，缺口还没记");
+  }
+  resetOwnRequestBudget();
+
+  // 管理员名单读不到：function 在判断跳不跳之前就退出（现在的站点读不到 /api/user/）
+  {
+    const { own } = await fakeSite(t, []);
+    const bad = { ...own, baseUrl: "http://127.0.0.1:9" };
+    const ingest = createOwnLogIngest({}, { store, now: () => NOW });
+    const result = await ingest.ingestOnce(bad, { justTurnedOn: true });
+    assert.equal(result.skipped, "admins");
+    assert.equal(result.skipChecked, undefined, "被管理员名单挡住，没走到跳不跳那一步");
+    assert.equal((await store.getCursor("own")).disabledFromMs, null, "没跳，缺口还没记");
+  }
+
+  // 这两轮都没真的判断过，下一轮（额度、名单都正常）应该还能跳——不会因为之前被挡住就再也跳不过去
+  const { own, rt } = await fakeSite(t, []);
+  const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
+  const result = await ingest.ingestOnce(own, { justTurnedOn: true });
+  assert.equal(result.skipChecked, true, "这一轮真的走到了跳不跳那一步");
+  assert.ok((await store.getCursor("own")).disabledFromMs != null, "这一轮才真的跳了、记下缺口");
+});
+
 test("管理员名单读不到：这轮不读（桶里的管理员自用会算错）；清理只删 35 天前的桶", async (t) => {
   resetOwnRequestBudget();
   const { own, requests } = await fakeSite(t, [row(1, YESTERDAY_START + 1000)]);
