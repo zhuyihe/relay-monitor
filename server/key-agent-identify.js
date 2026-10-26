@@ -1,14 +1,24 @@
 // 认出快照里每个渠道现在用的是哪把 Key（K2a）。只认、只显示：不开段、不改账，K2b 才按认出的结果写分段。
+import { fingerprintKey } from "../lib/key-fingerprint.js";
 import { fetchKeyAgentSnapshot } from "../lib/key-agent-client.js";
 import { identifyChannel } from "../lib/key-agent-match.js";
-import { queryNewApiReconciliationMetadata } from "../lib/providers.js";
+import { queryNewApiReconciliationMetadata, queryRevealedTokenKeys } from "../lib/providers.js";
 import { keyAgentConfigOf } from "./key-agent.js";
 import { matchCostStations } from "./own-helpers.js";
 
+// 打码对上不止一把候选时，取这几把的完整 Key 精确再分（k-plan §2.2）：有 api_key:reveal 权限就拿到 { tokenId: 完整Key }；
+// 没权限按码返回，不抛（调用方按上游汇总成一条需处理，不是逐渠道）；被限流、网络错等别的失败也按码返回，这一轮当认不出，下一轮再试，不重试、不特殊处理。
+// 算完指纹立刻从这个函数的调用方手里连引用一起丢掉，不缓存、不进日志、不进库（k-plan §11.3）
+async function revealResultOf(revealKeys, station, tokenIds) {
+  try { return { ok: true, keys: await revealKeys(station, tokenIds) }; }
+  catch (error) { return { ok: false, code: error?.code, scope: error?.scope }; }
+}
+
 // 候选上游用地址对（matchCostStations，K1a 改成返回全部最高分候选）；每个候选只读一次 Key 目录（这一轮里共用）；
 // Sub2API 的 Key 列表不给 Key 材料，这一版比不了，候选是 Sub2API 时直接跳过。
-// 返回 { ok, stale, staleReason, channels: [{ channelId, keyless, slots? }] }；channelIds 给了就只认这几个
-export async function identifyChannels(rt, ownStation, { channelIds = null, etag = null, queryMetadata = queryNewApiReconciliationMetadata } = {}) {
+// 返回 { ok, stale, staleReason, channels: [{ channelId, keyless, slots? }], revealIssues }；channelIds 给了就只认这几个。
+// revealIssues：按上游汇总的「少了 api_key:reveal 权限」，还没开始算的渠道只在这一条里列出（不逐渠道报需处理）
+export async function identifyChannels(rt, ownStation, { channelIds = null, etag = null, queryMetadata = queryNewApiReconciliationMetadata, revealKeys = queryRevealedTokenKeys } = {}) {
   const config = keyAgentConfigOf(ownStation);
   if (!config) return { ok: false, code: "KEY_AGENT_NOT_CONFIGURED" };
   const snapshot = await fetchKeyAgentSnapshot({ url: config.url, token: config.token, etag });
@@ -27,15 +37,71 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
     return tokenListCache.get(station.id);
   };
 
-  const channels = [];
+  const channels = [], rawFingerprintOf = new Map(); // `${channelId}:${index}` -> 读取服务给的指纹（第二轮分打码撞了要用）
   for (const channel of snapshot.channels) {
     if (channelIds && !channelIds.includes(Number(channel.id))) continue;
     if (channel.keyless) { channels.push({ channelId: Number(channel.id), keyless: true }); continue; }
     const candidates = matchCostStations(upstreams, channel.baseUrl).filter((station) => station.type === "newapi");
     const tokenLists = await Promise.all(candidates.map(async (station) => ({ stationId: station.id, tokens: await tokensOf(station) })));
-    channels.push(identifyChannel(channel, tokenLists, config.fingerprintKey));
+    const identified = identifyChannel(channel, tokenLists, config.fingerprintKey);
+    for (const slot of identified.slots) rawFingerprintOf.set(`${identified.channelId}:${slot.index}`, channel.keys.find((key) => Number(key.i) === slot.index)?.f);
+    channels.push(identified);
   }
-  return { ok: true, status: 200, stale: snapshot.stale, staleReason: snapshot.staleReason, etag: snapshot.etag, channels };
+
+  // 打码撞了：按上游批量 reveal 一次（同一个上游、这一轮内只问一次，几个渠道的候选合并着问）
+  const revealIssues = [];
+  const neededByStation = new Map();
+  for (const channel of channels) {
+    if (channel.keyless) continue;
+    for (const slot of channel.slots) {
+      if (slot.state !== "ambiguous") continue;
+      for (const match of slot.matches) {
+        if (!neededByStation.has(match.stationId)) neededByStation.set(match.stationId, new Set());
+        neededByStation.get(match.stationId).add(Number(match.tokenId));
+      }
+    }
+  }
+  if (neededByStation.size) {
+    const revealResults = new Map();
+    await Promise.all([...neededByStation].map(async ([stationId, tokenIds]) => {
+      const station = upstreams.find((item) => item.id === stationId);
+      revealResults.set(stationId, station ? await revealResultOf(revealKeys, station, [...tokenIds]) : { ok: false, code: "UPSTREAM_NOT_FOUND" });
+    }));
+    for (const channel of channels) {
+      if (channel.keyless) continue;
+      for (const slot of channel.slots) {
+        if (slot.state !== "ambiguous") continue;
+        const fingerprint = rawFingerprintOf.get(`${channel.channelId}:${slot.index}`);
+        const byStation = new Map();
+        for (const match of slot.matches) byStation.set(match.stationId, [...(byStation.get(match.stationId) || []), match]);
+        const resolved = [];
+        let anyUnreadable = false;
+        for (const [stationId, candidates] of byStation) {
+          const result = revealResults.get(stationId);
+          if (!result.ok) {
+            anyUnreadable = true;
+            // 不另起一种需处理：沿用 #107 那条路已经定好的码（design/ui-copy-spec.md §8.2，这一条还没接进需处理清单，留给接的人用这个码）
+            if (result.code === "ACCESS_TOKEN_SCOPE_DENIED" && result.scope === "api_key:reveal") {
+              let issue = revealIssues.find((item) => item.upstreamStationId === stationId);
+              if (!issue) { issue = { upstreamStationId: stationId, code: "KEY_REVEAL_DENIED", channelIds: [] }; revealIssues.push(issue); }
+              if (!issue.channelIds.includes(channel.channelId)) issue.channelIds.push(channel.channelId);
+            }
+            continue; // 别的失败（限流、网络……）：这一轮当认不出，下一轮再试，不重试、不升需处理
+          }
+          for (const candidate of candidates) {
+            const fullKey = result.keys[candidate.tokenId];
+            if (fullKey != null && fingerprintKey(fullKey, config.fingerprintKey) === fingerprint) resolved.push(candidate);
+          }
+        }
+        if (resolved.length === 1) { slot.state = "identified"; slot.matches = resolved; }
+        else if (resolved.length > 1) { slot.matches = resolved; } // 仍然不止一把（撞的是真指纹，不是打码误判），维持 ambiguous
+        else if (!anyUnreadable) { slot.state = "not_found"; delete slot.matches; } // 候选都读到了、没有一把对上
+        // anyUnreadable 且没解出来：保持 ambiguous，matches 不变，下一轮再试
+      }
+    }
+  }
+
+  return { ok: true, status: 200, stale: snapshot.stale, staleReason: snapshot.staleReason, etag: snapshot.etag, channels, revealIssues };
 }
 
 // 查一次候选上游的 Key 目录要挨个翻页读，不便宜；缓存节奏和读取服务自己的库读节奏一样（k-plan §2.4 的 4 分钟），
@@ -49,7 +115,9 @@ export async function identifyChannelsCached(rt, ownStation, options = {}) {
   const sameStation = cache?.stationId === ownStation.id;
   const result = await identifyChannels(rt, ownStation, { ...options, etag: sameStation ? cache.etag : null });
   if (!result.ok) { rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result, etag: sameStation ? cache.etag : null }; return result; }
-  const resolved = result.status === 304 && sameStation && cache.result?.ok ? { ...result, channels: cache.result.channels } : result;
+  const resolved = result.status === 304 && sameStation && cache.result?.ok
+    ? { ...result, channels: cache.result.channels, revealIssues: cache.result.revealIssues }
+    : result;
   rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result: resolved, etag: result.etag ?? (sameStation ? cache.etag : null) };
   return resolved;
 }
