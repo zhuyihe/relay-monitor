@@ -1,6 +1,6 @@
 # 每日利润「一张对账表」细化稿（样子 A）
 
-> 现在：草稿，等总指挥看。2026-10-26，UI/UX 设计会话。
+> 现在：已定（用户 10-26 看过细化稿），随每日利润重做做。2026-10-26，UI/UX 设计会话。
 >
 > - 用户 10-26 在[整页重做稿](./daily-profit-redesign.md)里选了 A，第 8 节那四件也定了。这份把 A 画全：四种范围、点开那一行、计算明细、各种「—」、空和刷新失败、手机。
 > - 样稿：[daily-profit-a.html](./daily-profit-a.html)，截图在 `screens/dpa-*.png`。几张用同一份演示数据（今天是 10月26日，到 14:32）。数和整页重做稿的样稿不一样，以这份为准。
@@ -129,7 +129,7 @@
 
 | 段 | 写什么 |
 |---|---|
-| 收入 | 来自自营站点「备用 C」的收费记录；其中渠道测试 $0.12，不算收入（§9 已有） |
+| 收入 | 「来自自营站点「备用 C」的收费记录，已扣除管理员自用 $0.12。」管理员自用的几种写法（部分日子没扣、一天都没扣、合计是 0）照用语规范 §9「管理员自用」那一行（R1） |
 | 应付成本 | 一句「这个渠道这天的用量，按上游「拼车团队」的价格和 vip 分组 ×0.8 算：」，下面一张表：模型、用量（输入、输出 Token；用了缓存的多写缓存那一部分）、上游的价格（「每百万 Token $3 / $15」，输入 / 输出）、按上游价格、× 倍率。最后一行合计。表下面一句「用了缓存的，缓存那部分按上游的缓存价格算。价格是上游的模型价格表，每小时读一次；倍率是这天用的分组倍率。」 |
 | 没算进的模型 | 有模型上游没给价格时多这一段：「没算进的模型：o3-pro（输入 12 万、输出 3 万 Token）」。这时这一天的应付成本、差额写「—」 |
 | 实付成本 | 来自上游这把 Key「team-c」这天的用量记录（和 §3.2「上游成本」同一个来源） |
@@ -241,7 +241,7 @@
 
 | 字段 | 是什么 |
 |---|---|
-| `income` | `{ usd, channelTestUsd, byChannel: [{ channelId, usd }] }` |
+| `income` | `{ usd, adminUsage: { usd, deducted }, byChannel: [{ channelId, usd }] }`；`deducted` 是 `all` / `some` / `none`，照 R1 账本每一行扣没扣，页面按它选 §9 那几种写法 |
 | `expected` | `{ usd, groupName, groupRatio, segments, byModel: [{ model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, pricesPerMillion: { input, output, cacheRead, cacheWrite }, beforeRatioUsd, usd }], missingPriceModels: [{ model, inputTokens, outputTokens }], byChannel }`；价格是每百万 Token 多少美元；倍率这天变过时 `segments` 分段，`byModel` 各段各算 |
 | `actual` | `{ usd, keyName }` |
 | `gap` | `{ usd, rate, state }` |
