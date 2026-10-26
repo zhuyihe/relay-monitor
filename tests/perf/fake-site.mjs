@@ -3,12 +3,17 @@
 // 地址：上游 http://127.0.0.1:18950/na01 … /s245 … /nk49；自营 http://127.0.0.1:18951/own（FAKE_OWN_PORT，默认 FAKE_PORT + 1；两个端口同一套路由）
 // 控制：GET /__stats[?reset=1] 看/清请求计数；POST /__ctl?delay=50&ratio=old|current&freeze=1|0 改延迟、分组倍率口径、停住「现在」；GET /__health
 // 所有数字来自 lib/model.mjs 的确定性模型：分页、按渠道/按天/按 Key 的统计互相对得上。
+// 渠道 Key 读取服务（K2a/K2b 量夹具，PERF_KEY_AGENT=on 才接）：GET /key-agent/keys（Bearer、ETag/304、X-Agent-Stale），
+// 每 10 分钟随机换 2~3 个渠道现在用的 Key（走 New API 整号账号的那些）；/__ctl?key_agent_down=1|0 模拟读取服务读库失败（照真协议
+// 沿用上一份成功结果、带 X-Agent-Stale），key_agent_rotate=1 立刻触发一次换 Key（不用等 10 分钟，本机调脚本用）。
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import {
   loadConfig, makeAggregates, makeBalanceModel, channelQuota, tokenCostQuota, accountCostQuota,
   UPSTREAMS, OWN, CHANNELS, USERS, MODELS, OWN_GROUPS, RULES, QPU, N_CH, N_USERS, HOUR, TZ,
-  dayStartSec, dateKeyOf, PORT, OWN_PORT, upstreamGroupRatio,
+  dayStartSec, dateKeyOf, PORT, OWN_PORT, upstreamGroupRatio, tokenKeySecret, channelDefaultToken, channelDefaultSecret, channelUpstream,
 } from "./lib/model.mjs";
+import { maskKey, fingerprintKey, deriveAgentKeys, KEY_AGENT_SECRET } from "./lib/key-agent-protocol.mjs";
 
 const config = loadConfig();
 const epoch0 = config.epoch0Sec;
@@ -34,6 +39,56 @@ let frozenSec = null;
 let downSites = new Set();
 const nowSec = () => frozenSec ?? Math.floor(Date.now() / 1000);
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+
+// ---- 渠道 Key 读取服务（K2a/K2b 量夹具用；PERF_KEY_AGENT=on 才接，照真协议：指纹、打码、304、X-Agent-Stale）----
+// 只装在自营站点这一侧，和真实部署「装在自营 New API 旁边」一个道理，地址指到这个假站点自己的 /key-agent。
+const KEY_AGENT_ON = /^(1|on|true)$/i.test(String(process.env.PERF_KEY_AGENT ?? ""));
+const keyAgentAuth = KEY_AGENT_ON ? deriveAgentKeys(KEY_AGENT_SECRET) : null;
+// 渠道 → 现在用哪个 token id（只记换过的；查不到用 model.mjs 的默认绑定）。只在走 New API 整号账号的渠道里换：
+// 走只用 Key 的上游、Sub2API 的渠道这一版 K2a 本来就认不出（候选只收 type=newapi），换了也看不出区别，不浪费一次随机
+const keyAgentOverride = new Map();
+let keyAgentRotations = 0; // /__stats 报的「换了几次」，量的时候确认真的在换
+let keyAgentDown = false; // POST /__ctl?key_agent_down=1｜0：模拟读取服务那一侧读库失败，照真协议沿用上一份成功结果、带 X-Agent-Stale
+let keyAgentLastGood = null; // { body, etag }
+const ROTATABLE = KEY_AGENT_ON ? CHANNELS.filter((ch) => channelUpstream(ch.id).kind === "newapi" && channelDefaultToken(ch.id)).map((ch) => ch.id) : [];
+function rotateKeyAgentChannels() {
+  const n = 2 + Math.floor(Math.random() * 2); // 2 或 3 个
+  for (let i = 0; i < n && ROTATABLE.length; i++) {
+    const c = ROTATABLE[Math.floor(Math.random() * ROTATABLE.length)];
+    const up = channelUpstream(c);
+    const token = up.tokens[Math.floor(Math.random() * up.tokens.length)];
+    keyAgentOverride.set(c, token.id);
+    keyAgentRotations += 1;
+  }
+}
+if (KEY_AGENT_ON) setInterval(rotateKeyAgentChannels, 10 * 60000).unref?.();
+
+function keyAgentChannelKeys(c) {
+  const up = channelUpstream(c), overrideId = keyAgentOverride.get(c);
+  const tokenId = overrideId ?? channelDefaultToken(c)?.id ?? null;
+  const secret = tokenId != null ? tokenKeySecret(up, tokenId) : channelDefaultSecret(c);
+  return [{ i: 0, m: maskKey(secret), f: fingerprintKey(secret, keyAgentAuth.fingerprintKey) }];
+}
+function keyAgentBuild() {
+  const channels = CHANNELS.map((ch) => ({ id: ch.id, name: ch.name, type: ch.type, status: ch.status, baseUrl: ch.baseUrl, keys: keyAgentChannelKeys(ch.id) }));
+  const body = { v: 1, db: "mysql", readAt: Date.now(), channels };
+  const etag = `"${createHash("sha256").update(JSON.stringify(channels)).digest("hex").slice(0, 16)}"`;
+  return { body, etag };
+}
+function keyAgentSite(req) {
+  if (!KEY_AGENT_ON) return [404, { message: "unknown site" }]; // PERF_KEY_AGENT 没开：和原来一样，这条路不存在
+  if (req.headers.authorization !== `Bearer ${keyAgentAuth.token}`) return [401, { error: "unauthorized" }];
+  const url = new URL(req.url, "http://x");
+  if (url.pathname === "/key-agent/healthz") return [200, { ok: true }];
+  if (url.pathname !== "/key-agent/keys") return [404, { error: "not found" }];
+  if (keyAgentDown && keyAgentLastGood) {
+    return [200, keyAgentLastGood.body, { ETag: keyAgentLastGood.etag, "X-Agent-Stale": "1", "X-Agent-Stale-Reason": "DB_ERROR" }];
+  }
+  const { body, etag } = keyAgentBuild();
+  keyAgentLastGood = { body, etag };
+  if (req.headers["if-none-match"] === etag) return [304, {}, { ETag: etag }];
+  return [200, body, { ETag: etag }];
+}
 
 // 上游分组倍率：部分 (上游, 分组) 在 ratioChangeAt 换过倍率；ratio=old 时返回旧倍率（种子脚本建绑定时用）
 const upGroupRatio = (up, group) => upstreamGroupRatio(config, up, group, ratioMode);
@@ -92,8 +147,10 @@ function newApiUpstream(up, rest, q, req) {
     }
     case "/api/token/": {
       const { p, size } = pageOf(q);
-      const items = up.tokens.slice((p - 1) * size, p * size).map((t) => ({ id: t.id, user_id: up.accountId, name: t.name, status: 1, group: t.group,
-        cross_group_retry: false, key: `sk-${String(t.id).padStart(4, "0")}****${t.name.slice(-2)}`, used_quota: 0, remain_quota: 0, unlimited_quota: true }));
+      // 单数号上游给打码（New API v0.11.4 起）、双数号给完整 Key（旧版）：读取服务那一侧两条认法都要量到（K2a 的指纹/打码两条路）
+      const items = up.tokens.slice((p - 1) * size, p * size).map((t) => { const secret = tokenKeySecret(up, t.id);
+        return { id: t.id, user_id: up.accountId, name: t.name, status: 1, group: t.group,
+          cross_group_retry: false, key: up.i % 2 ? maskKey(secret) : secret, used_quota: 0, remain_quota: 0, unlimited_quota: true }; });
       return [200, ok({ page: p, page_size: size, total: up.tokens.length, items })];
     }
     case "/api/log/self/stat": {
@@ -444,9 +501,9 @@ function route(req, url) {
   const path = url.pathname, q = url.searchParams;
   if (path === "/__health") return [200, { ok: true, epoch0, nh: agg.nh }];
   if (path === "/__stats") {
-    const snapshot = { ...JSON.parse(JSON.stringify(stats)), ownRateLimited, ownLogKinds: { ...ownLogKinds } };
+    const snapshot = { ...JSON.parse(JSON.stringify(stats)), ownRateLimited, ownLogKinds: { ...ownLogKinds }, keyAgentRotations, keyAgentDown };
     if (q.get("detail") === "1") snapshot.log = requestLog;
-    if (q.get("reset") === "1") { stats.total = 0; stats.bytes = 0; stats.byRoute = Object.create(null); stats.bySite = Object.create(null); stats.startedAt = new Date().toISOString(); requestLog = []; ownLogKinds = { all: 0, latest: 0, filtered: 0 }; }
+    if (q.get("reset") === "1") { stats.total = 0; stats.bytes = 0; stats.byRoute = Object.create(null); stats.bySite = Object.create(null); stats.startedAt = new Date().toISOString(); requestLog = []; ownLogKinds = { all: 0, latest: 0, filtered: 0 }; keyAgentRotations = 0; }
     return [200, snapshot];
   }
   if (path === "/__ctl") {
@@ -454,19 +511,22 @@ function route(req, url) {
     if (q.has("ratio")) ratioMode = q.get("ratio") === "old" ? "old" : "current";
     if (q.has("freeze")) frozenSec = q.get("freeze") === "1" ? Math.floor(Date.now() / 1000) : null;
     if (q.has("down")) downSites = new Set((q.get("down") || "").split(",").filter(Boolean));
-    return [200, { delayMs, ratioMode, frozenSec, down: [...downSites] }];
+    if (q.has("key_agent_down")) keyAgentDown = q.get("key_agent_down") === "1";
+    if (q.has("key_agent_rotate")) rotateKeyAgentChannels(); // 手动触发一次换 Key，不用等 10 分钟（本机调脚本用）
+    return [200, { delayMs, ratioMode, frozenSec, down: [...downSites], keyAgentDown }];
   }
   if (path.startsWith("/hook/")) return [200, { errcode: 0, errmsg: "ok", code: 0 }];
-  const m = path.match(/^(\/(?:na|s2|nk)\d\d|\/own)(\/.*)?$/);
+  const m = path.match(/^(\/(?:na|s2|nk)\d\d|\/own|\/key-agent)(\/.*)?$/);
   if (!m) return [404, { message: "unknown site" }];
   const site = m[1], rest = m[2] || "/";
-  const key = `${site === "/own" ? "own" : site.slice(1, 3)}:${rest.replace(/\/\d+$/, "/:id")}`;
+  const key = `${site === "/own" ? "own" : site === "/key-agent" ? "key-agent" : site.slice(1, 3)}:${rest.replace(/\/\d+$/, "/:id")}`;
   stats.total += 1;
   stats.byRoute[key] = (stats.byRoute[key] || 0) + 1;
   stats.bySite[site] = (stats.bySite[site] || 0) + 1;
   const ownLogKind = key === "own:/api/log/" ? (OWN_LOG_FILTERS.some((f) => q.get(f) && q.get(f) !== "0") ? "filtered" : q.get("page_size") === "1" ? "latest" : "all") : null;
   if (ownLogKind) ownLogKinds[ownLogKind] += 1;
   if (requestLog.length < 200000) requestLog.push(ownLogKind ? [Date.now(), key, ownLogKind] : [Date.now(), key]);
+  if (site === "/key-agent") return keyAgentSite(req);
   if (downSites.has(site)) return [503, { success: false, message: "upstream down (fake)" }];
   if (site === "/own") return ownSite(rest, q, req);
   const up = upByPath.get(site);

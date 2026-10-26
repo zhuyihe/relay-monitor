@@ -19,6 +19,7 @@
 | `lib/ps.mjs` | performance_schema 语句摘要的快照和差值、binlog 字节、看门狗（夹具库里跑超过 60 秒的查询直接 `KILL QUERY`） |
 | `lib/metrics.mjs` | 后台稳态窗口折成「每轮结账轮询」 |
 | `lib/kill-queries.mjs` | 停服务时把它留在 MySQL 里还在跑的查询杀掉 |
+| `lib/key-agent-protocol.mjs` | 渠道 Key 读取服务的协议（打码、指纹、从 secret 派生请求令牌和指纹密钥）：和 `lib/key-fingerprint.js` 一字不差，但不从被测版本的代码引——假站点一个进程要跨 base、head 两版用 |
 | `fake-site.mjs` | 假站点：44 个 New API、4 个 Sub2API、2 个只用 Key 的上游和 1 个自营 New API（`/na01`…`/s245`…`/nk49`、`/own`），每个请求延迟 50 ms（`FAKE_DELAY_MS`）。`/__stats[?reset=1&detail=1]` 看请求计数，`/__ctl?delay=` 改延迟 |
 | | 开关：`FAKE_TEST_LOGS=1`（默认关）让自营站点的 `/api/log/`、`/api/log/stat` 里多出渠道测试日志（照 New API 的写法：token_name「模型测试」、token_id 0，每 10 分钟测一遍 300 个渠道） |
 | | 开关：`FAKE_OWN_RATE_LIMIT=1`（默认关）给自营站点加全站限流（同一来源 180 秒 360 个请求，超了回 429 带 Retry-After，被拒的数在 `/__stats` 的 `ownRateLimited`） |
@@ -26,8 +27,9 @@
 | | 开关：`/__ctl?down=/na01,/na02` 让这些上游一律回 503（像上游挂了），`down=` 清空 |
 | | 自营站点单独一个端口 `FAKE_OWN_PORT`（默认 `FAKE_PORT + 1`，同一个进程、同一套路由）：控制台按「主机:端口」给自营站点记 180 秒的请求额度，和上游共用端口的话读上游的请求也会算进自营站点的额度 |
 | | 自营 `/api/log/` 分三类计数：带 `username`/`token_name`/`channel`/`model_name`/`group` 任何一个的是 `filtered`；不带的里 `page_size=1` 的是「上次以后有没有新消费」那一下（`latest`），别的是整站读（`all`）；`/__stats` 的 `ownLogKinds`，`detail=1` 的请求时间线里这类请求多一项类别 |
+| | 开关：`PERF_KEY_AGENT=on`（默认关，见下面「K2a/K2b 场景」）装渠道 Key 读取服务：`GET /key-agent/keys`（Bearer、ETag/304、`X-Agent-Stale`），每 10 分钟随机换 2～3 个渠道现在用的 Key；`/__ctl?key_agent_down=1\|0` 模拟读库失败，`key_agent_rotate=1` 立刻触发一次换 Key（本机调脚本用） |
 | `seed/00-config.mjs` | 定夹具起点（92 天前的 UTC 零点）和哪些（上游, 分组）40 天前换过倍率，写 `$PERF_OUT/fixture/config.json` |
-| `seed/01-base.mjs` | 删库重建、建表（应用的 `ensureSchema`），用应用的 `Store` 写自营站点、面板账号 admin/admin123、通知方式、日报 |
+| `seed/01-base.mjs` | 删库重建、建表（应用的 `ensureSchema`），用应用的 `Store` 写自营站点、面板账号 admin/admin123、通知方式、日报。`PERF_KEY_AGENT=on` 时顺带给自营站点配上读取服务的地址和令牌（被测版本没有这两个字段时 `Store.add` 原样丢掉，不报错——量的就是这个差） |
 | `seed/02-onboard.mjs` | 服务在跑：走「接入渠道」同一条接口建 50 个上游和 80 条绑定 |
 | `seed/03-history.mjs` | 服务停着：创建时间搬回起点，记 11 次倍率变化，灌余额历史（51 站 × 90 天 × 每分钟一点 = 660 万点，不进 binlog），算日汇总 |
 | `seed/04-recon.mjs` | 服务在跑：最近 90 天每天一次 `POST /api/reconciliation/query {observe:true}`，让应用自己结账；再补「今天」观测快照和约 10% 的重结版本 |
@@ -77,6 +79,7 @@ gh workflow run perf.yml -R zhuyihe/relay-monitor -f base=<SHA 或分支> -f hea
 - 不给 `pr`：`base` 空 = main，`head` 空 = 触发时选的分支。
 - `parity_days`：对拍天数，默认 14；`history_days`：余额历史天数，默认 90；`fake_test_logs`：勾上就给假站点带 `FAKE_TEST_LOGS=1`（自营站点多出渠道测试日志），默认不勾。
 - `bindings`：绑定条数，空 = 80；`expected_cost`：勾上 = 量后台前打开「算应付成本」（整站读）；不勾 = 不改开关，用产品默认（V1-a 关；V1-b 起默认开），不等于「关」。见下面「整站读场景」。
+- `key_agent`：勾上 = 假站点装渠道 Key 读取服务（照真协议：指纹、打码、304、`X-Agent-Stale`）、自营站点配上地址和令牌；不勾 = 和现在一样，没有这条路。见下面「K2a/K2b 场景」。
 - 测量脚本用触发时选的分支里的 `tests/perf`，不用被测版本里的。
 - 用时约 22 分钟：两版各装依赖、打包约 40 秒，建夹具约 5 分钟，每次测量约 6.5 分钟，对拍（14 天）约 1 分钟。余额历史用默认的 90 天就在 60 分钟的上限里，不用缩。
 
@@ -99,6 +102,17 @@ gh workflow run perf.yml -R zhuyihe/relay-monitor --ref main -f pr=<号> -f bind
 - **追平用时**：窗口开始和结束各读一次 `own_log_cursor.covered_to_ms`，落后 = 现在 − 120 秒 − 进度；「每分钟追了」= 进度挪了多少 ÷ 过了多久（每过 1 分钟读完几分钟的日志，大于 1 才追得上）。推算从刚打开（进度从昨天 0 点起）到追平 = 刚打开时落后多少 ÷（每分钟追的 − 1）。落后超过 1 小时时每轮最多 15 页、不到 1 小时 6 页，窗口里测到的是哪一段的速度，推算就按哪一段算，只看量级。base 没有 `own_log_cursor` 表（旧版）时写「不适用」。
 - 请求数、占比算可比；落后、追平用时只做参考（随机器快慢和夹具起点变）。这一节只列数，不判超线。
 - 开关写的是**实际值**：量之前、量完以后各读一次 `GET /api/settings` 的 `expectedCost`（旧版没有这个字段写「这个版本没有这个开关」），旁边写这段时间实际看到几个整站读请求。只有实际是关、整站读却不是 0 才标 ⚠、算一项超线。
+
+## K2a/K2b 场景（渠道 Key 读取服务）
+
+```sh
+gh workflow run perf.yml -R zhuyihe/relay-monitor -f pr=<号> -f key_agent=true
+```
+
+- `key_agent=true`（`PERF_KEY_AGENT=on`）：假站点在自营站点自己身上（`FAKE_OWN_PORT`）装一个 `/key-agent`，自营站点配上它的地址和令牌（种子脚本 `seed/01-base.mjs`）。被测版本没有 K2a（`keyAgentUrl`/`keyAgentSecret` 字段、`/key-agent` 这条路都不存在）时，这两步原样跳过、不报错——量的就是「装了读取服务前后，对外请求多了多少」，base（没有 K2a）天然是 0。
+- 协议照 k-plan 第二节：`GET /key-agent/keys` 要带 `Authorization: Bearer <派生的请求令牌>`；没变时带 `If-None-Match` 回 304；每个渠道一个指纹 + 一个打码（单数号上游的 Key 目录给打码、双数号给完整 Key，两条认法都量得到）；`/__ctl?key_agent_down=1` 模拟读取服务读库失败，照协议沿用上一份成功结果、带 `X-Agent-Stale: 1`（CI 默认不触发，本机调脚本用）。
+- 每 10 分钟随机换 2～3 个渠道现在用的 Key（只换走 New API 整号账号的渠道：候选只收这一类，走只用 Key 的上游、Sub2API 的渠道换了也看不出差，不浪费一次随机）。CI 默认的稳态窗口（185 秒）比 10 分钟短，量到的多半是「没变、304」那条路；想量「换了 Key 以后重新认一遍」有多贵，本机把窗口放长（`BG_SEC=1200` 以上）或用 `/__ctl?key_agent_rotate=1` 手动触发。
+- 请求数在 `compare.md`、`summary.md` 的「假站点请求按路由」里自动出现（`key-agent:/keys`），和「整站读」一样走已有的通用对比，没有另写一节。
 
 ## 结果怎么看
 
