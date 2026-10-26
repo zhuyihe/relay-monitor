@@ -114,6 +114,18 @@ export const CHANNELS = Array.from({ length: N_CH }, (_, x) => {
 });
 export function channelUpstream(c) { return channelUp[c]; }
 export function channelRuleIndex(c) { return channelRule[c]; }
+// 渠道 c 绑的那把 token（走只用 Key 的上游、没有绑定时为 null，渠道填的就是 up.apiKey 本身）。
+// 用 ALL_RULES（建绑定时那份完整的，不随 PERF_BINDINGS 缩小）：读取服务看的是上游 New API 自己的 channels 表，
+// 不是控制台「接入了哪些绑定」，缩小夹具时这些渠道照旧要出现在读取服务的响应里
+export function channelDefaultToken(c) { const r = channelRule[c]; return r < 0 ? null : ALL_RULES[r].token; }
+// 这把 token 现在真的填的完整 Key（K2a/K2b 量夹具用，只要确定性、和上游 Key 目录对得上 token id）。
+// 前后 4 位都要是各自 hash 出来的（不能只是把 tokenId 垫在中间）：垫太长会把不同 token 的前 4 位都垫成一样，打码就认不出是哪把
+export function tokenKeySecret(up, tokenId) {
+  const seed = up.i * 1009 + Number(tokenId);
+  const part = (salt) => h32(seed + salt).toString(16).padStart(8, "0");
+  return `sk-${part(0)}${part(333)}${part(777)}`; // 去掉 sk- 后 24 位，刚好够打码（MIN_MASK_LENGTH）
+}
+export function channelDefaultSecret(c) { const token = channelDefaultToken(c); return token ? tokenKeySecret(channelUp[c], token.id) : channelUp[c].apiKey; }
 
 // ---- 自营站点用户 -----------------------------------------------------------
 const zipfCum = new Float64Array(N_USERS);
