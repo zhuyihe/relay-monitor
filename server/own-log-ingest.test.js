@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { INGEST, createOwnLogIngest } from "./own-log-ingest.js";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 import { ownUsersKey } from "./own-helpers.js";
-import { noteOwnRequest, resetOwnRequestBudget, INGEST_RESERVE, OWN_RATE_LIMIT } from "../lib/own-request-budget.js";
+import { noteOwnRequest, resetOwnRequestBudget, INGEST_FLOOR_PER_MIN, INGEST_RESERVE, OWN_RATE_LIMIT } from "../lib/own-request-budget.js";
 import { OWN_LOG_SLOT_MS } from "../lib/own-log-bucket.js";
 
 // 业务时区上海：now 是 10-09 11:00，昨天 0 点是 10-07 16:00Z
@@ -113,13 +113,17 @@ test("额度和断路：别的读取已经用掉大半额度就这轮不读；�
   const store = new MemoryOwnLogStore();
   const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
   for (let i = 0; i < OWN_RATE_LIMIT - INGEST_RESERVE; i += 1) noteOwnRequest(own.baseUrl + "/x", { status: 200, elapsedMs: 10, now: NOW });
-  assert.deepEqual((await ingest.ingestOnce(own)).skipped, "budget", "剩给别人的额度不够：不读");
+  // 剩给别人的额度不够：不是 0，保底每分钟还能发 INGEST_FLOOR_PER_MIN 个（总指挥 10-26 定，不然线上别的读占满时整站读永远发不出）
+  const starved = await ingest.ingestOnce(own);
+  assert.ok(!starved.skipped && starved.pages > 0 && starved.pages <= INGEST_FLOOR_PER_MIN, `额度不够时走保底：${starved.pages} 页`);
+  const coveredAfterStarved = (await store.getCursor("own")).coveredToMs;
+  const beforeBreak = requests.filter((r) => r.path === "/api/log/").length;
   resetOwnRequestBudget();
   fail = 429;
   const broken = await ingest.ingestOnce(own);
   assert.equal(broken.error, "UPSTREAM_REQUEST_FAILED");
-  assert.equal(requests.filter((r) => r.path === "/api/log/").length, 1, "429 以后这轮不再发");
-  assert.equal((await store.getCursor("own")).coveredToMs, YESTERDAY_START, "窗口没写");
+  assert.equal(requests.filter((r) => r.path === "/api/log/").length - beforeBreak, 1, "429 以后这轮不再发");
+  assert.equal((await store.getCursor("own")).coveredToMs, coveredAfterStarved, "窗口没写");
   assert.equal((await ingest.ingestOnce(own)).skipped, "break", "断路期间不读");
   fail = null; resetOwnRequestBudget();
   const ok = await ingest.ingestOnce(own);
@@ -163,6 +167,7 @@ test("很忙的站点（每秒 12 条）追得上：窗口缩到几十秒，每�
   for (; rounds < 40; rounds += 1) {
     resetOwnRequestBudget();
     const result = await ingest.ingestOnce(own);
+    console.log("DEBUG", rounds, JSON.stringify(result), ingest.windowSizes.get("own"));
     if (result.skipped === "caught-up") break;
     assert.ok(result.pages <= INGEST.MAX_PAGES_BEHIND, `每轮最多 15 页：${result.pages}`);
     const cursor = await store.getCursor("own");
@@ -252,4 +257,28 @@ test("管理员名单读不到：这轮不读（桶里的管理员自用会算�
   await store.applyWindow("own", { fromMs: 0, toMs: 1, buckets: [{ slotMs: NOW - 40 * 86400000, channelId: 1, model: "m", upstreamModel: "", group: "g", semantic: "openai", requests: 1 }, { slotMs: NOW - 3600000, channelId: 1, model: "m", upstreamModel: "", group: "g", semantic: "openai", requests: 1 }] });
   assert.equal(await ingest.pruneIfDue(), 1);
   assert.equal(await ingest.pruneIfDue(), 0, "一小时内不再清");
+});
+
+test("保底：别的读取一直占满额度（线上站点忙），整站读每轮也能发出 INGEST_FLOOR_PER_MIN 个请求、窗口接着切小，最后追平（总指挥 10-26 定）", async (t) => {
+  resetOwnRequestBudget();
+  // 落后 2 小时，每 2 分钟一条（60 条），密度不大，保底 2 页/分钟也追得上
+  const logs = []; let id = 1;
+  for (let at = NOW - 2 * 3600000; at < NOW - INGEST.LAG_MS; at += 120000) logs.push(row(id++, at));
+  const { own, rt } = await fakeSite(t, logs);
+  const store = new MemoryOwnLogStore();
+  await store.startCursor("own", NOW - 2 * 3600000);
+  let now = NOW;
+  const ingest = createOwnLogIngest(rt, { store, now: () => now });
+  let rounds = 0;
+  for (; rounds < 60; rounds += 1) {
+    resetOwnRequestBudget();
+    // 模拟别的读取占满这个站点的额度：整站读只能靠保底
+    for (let i = 0; i < OWN_RATE_LIMIT - INGEST_RESERVE; i += 1) noteOwnRequest(own.baseUrl + "/other", { status: 200, elapsedMs: 10, now });
+    const result = await ingest.ingestOnce(own);
+    if (result.skipped === "caught-up") break;
+    assert.ok(result.pages <= INGEST_FLOOR_PER_MIN, `每轮最多保底 ${INGEST_FLOOR_PER_MIN} 页：${result.pages}`);
+  }
+  assert.ok(rounds > 0 && rounds < 60, `保底慢慢追平：${rounds} 轮`);
+  const cursor = await store.getCursor("own");
+  assert.equal(cursor.coveredToMs, now - INGEST.LAG_MS, "最后追平");
 });

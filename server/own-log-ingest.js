@@ -13,7 +13,7 @@
 // 桶里顺手记下管理员自用额度、不在管理员名下的渠道测试额度（和 R1 同一个规矩，server/own-helpers.js 的管理员名单），V1 只用来和 R1 对账打日志。
 // 开关：系统设置「算应付成本」settings.expectedCost（db/store.js，每轮读一次）——只有明确开着才读；默认开，系统设置页上能关（server/reconciliation.js）。
 import { OWN_LOG_SLOT_MS, accumulateBuckets } from "../lib/own-log-bucket.js";
-import { ingestAllowance, ownRequestState } from "../lib/own-request-budget.js";
+import { ingestAllowance, noteIngestUsage, ownRequestState } from "../lib/own-request-budget.js";
 import { queryOwnLogWindow } from "../lib/providers.js";
 import { businessTimeZone, dayStartInTz, dayKeyInTz, shiftedDayStartInTz } from "../lib/business-time.js";
 import { readOwnAdminDirectory, resoldAdminKeysOf } from "./own-helpers.js";
@@ -88,7 +88,12 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
         windowSizes.set(own.id, windowMs);
         continue;
       }
-      if (needPages - 1 > budget) { windowSizes.set(own.id, windowMs); break; } // 这轮剩的额度翻不完这个窗口：下一轮从头读它
+      // 剩的额度翻不完这个窗口：保底时额度很小（可能一直是 2），原地切半窗口接着试，不然会卡在「下一轮从头读」原地打转（总指挥 10-26 定）；
+      // 到了最小窗口还翻不完就只能等下一轮（硬读会超预算）
+      if (needPages - 1 > budget) {
+        if (toMs - fromMs > INGEST.WINDOW_MIN_MS) { windowMs = Math.max(INGEST.WINDOW_MIN_MS, wholeSecond((toMs - fromMs) / 2)); windowSizes.set(own.id, windowMs); continue; }
+        windowSizes.set(own.id, windowMs); break;
+      }
       const seen = new Set(), rows = [];
       const take = (items) => { for (const row of items) { const id = Number(row?.id); if (Number.isFinite(id)) { if (seen.has(id)) continue; seen.add(id); } rows.push(row); } };
       take(first.items);
@@ -111,6 +116,7 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
       if (rows.length < INGEST.PAGE_SIZE / 2 && toMs - fromMs >= windowMs) windowMs = Math.min(INGEST.WINDOW_MAX_MS, windowMs * 2);
       windowSizes.set(own.id, windowMs);
     }
+    noteIngestUsage(base, pages, now());
     return { pages, windows, coveredToMs: coveredTo };
   }
 
