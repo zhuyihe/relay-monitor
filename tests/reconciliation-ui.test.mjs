@@ -4672,6 +4672,8 @@ test("整天在开始统计之前的日子（C②）：状态格写灰字「还�
   const summary = page.getByRole("region", { name: "汇总", exact: true });
   await summaryMetric(summary, "毛利").getByText("$3.00", { exact: true }).waitFor(); // 只加另外两条（各 1.5）
   assert.equal(await summary.getByText(/还在读取|需处理/).count(), 0);
+});
+
 test("改时间以后有几天太早没自动重算：成功提示写出是哪几天、为什么，不自动消失，点关闭才收起（C2b）", async (t) => {
   const segment = { id: "past-transition", group: "default", ratio: 1, timingSource: "detected", effectiveFrom: window.startMs, effectiveTo: null };
   const { page } = await openDailyPage(t, {
