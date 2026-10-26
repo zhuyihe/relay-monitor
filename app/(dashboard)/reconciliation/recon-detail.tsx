@@ -3,7 +3,7 @@
 // 只用白话（design/ui-copy-spec.md §9）；「改时间」是页面只读的唯一例外，其余处理都由按钮去对应页面。
 import { useRef } from "react";
 import { Alert, Button, DatePicker, Select } from "antd";
-import { EMPTY, formatDayZone, formatPct, formatZonedDateTime } from "../../../lib/format";
+import { EMPTY, formatDayZone, formatPct, formatZonedDateTime, formatZonedTime } from "../../../lib/format";
 import { reconciliationAccountingStart, reconciliationIssue } from "../../../lib/reconciliation-contract";
 import {
   hasReconciliationHistory,
@@ -92,7 +92,7 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
       <Detail label="分组 / 倍率" value={`${currentGroup(detail)} · ${currentRatioLabel(detail)}`} />
       <Detail label="收入" value={<>{incomeText(detail, currency)}<small>{channels.length ? RECON_COPY.incomeSource(channels.length) : RECON_COPY.noChannels}</small>{adminUsage ? <small title={adminUsage.title}>{adminUsage.text}</small> : null}</>} />
       <Detail label="上游成本" value={<>{costText(detail, currency)}{fixedCost ? null
-        : <small>来自 Key「{keyName(detail.rule)}」的用量记录{ratioChange ? `；${ratioChange}` : ""}{detail.scope?.upstreamWholeDay ? `。${SUB2API_WHOLE_DAY_COST}` : ""}</small>}</>} />
+        : <small>来自 Key「{keyName(detail.rule)}」的用量记录{ratioChange ? `；${ratioChange}` : ""}{detail.scope?.upstreamWholeDay ? `。${SUB2API_WHOLE_DAY_COST(formatZonedTime(detail.scope.accountedFromMs, timezone))}` : ""}</small>}</>} />
       <Detail label="毛利" value={<>{amountText(profit, profitCurrency as ReconciliationCurrency)} <LossTag show={flags.negative} /></>} />
       <Detail label="毛利率" value={formatPct(margin)} />
       <Detail label="汇率" value={rateText(detail, currency, timezone)} />
