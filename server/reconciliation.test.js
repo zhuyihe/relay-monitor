@@ -7384,7 +7384,7 @@ test("R1 渠道测试名字兜底来源：测试日志全在管理员名下，�
 });
 
 // ---- 应付成本 V1-a：整站日志增量读挂在结账轮询里 ----
-test("V1-a 轮询每轮给自营站点读几页整站日志（最多 6 页），进度和桶落库；默认夹具不开整站读时一个不带筛选的请求都不发", async (t) => {
+test("V1-a 轮询每轮给自营站点读几页整站日志（落后时最多 15 页、追平后 6 页），进度和桶落库；开关关掉不读；默认夹具不开整站读时一个不带筛选的请求都不发", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const yesterdayStart = Date.parse("2026-10-07T16:00:00Z") / 1000;
   resetOwnRequestBudget(); // 额度和断路是进程里一份，前面的用例让 own.test 回过 500，断路器可能还开着
@@ -7397,7 +7397,7 @@ test("V1-a 轮询每轮给自营站点读几页整站日志（最多 6 页），
   const fullReads = () => f.state.requests.filter(isIngest).length;
   await f.module.refreshDue(now);
   const first = fullReads();
-  assert.ok(first > 0 && first <= 6, `这一轮读了 ${first} 页`);
+  assert.ok(first > 0 && first <= 15, `落后 35 小时：这一轮最多 15 页，读了 ${first} 页`);
   const cursor = await ownLogStore.getCursor("own");
   assert.equal(cursor.coveredFromMs, yesterdayStart * 1000, "从昨天 0 点起");
   assert.ok(cursor.coveredToMs > cursor.coveredFromMs);
@@ -7405,7 +7405,17 @@ test("V1-a 轮询每轮给自营站点读几页整站日志（最多 6 页），
   now += 60000;
   resetOwnRequestBudget();
   await f.module.refreshDue(now);
-  assert.ok(fullReads() - first <= 6, "下一轮接着读，还是最多 6 页");
+  assert.ok(fullReads() - first <= 15, "下一轮接着读，还是最多 15 页（追到 1 小时内才回到 6 页，server/own-log-ingest.test.js 有验）");
+  // 关掉的开关（settings.ownLogIngest=false，每轮读一次）：一个整站读请求都不发
+  const beforeOff = fullReads();
+  f.rt.store.settings = { ownLogIngest: false };
+  now += 60000; resetOwnRequestBudget();
+  await f.module.refreshDue(now);
+  assert.equal(fullReads(), beforeOff, "关掉以后不读");
+  f.rt.store.settings = { ownLogIngest: true };
+  now += 60000; resetOwnRequestBudget();
+  await f.module.refreshDue(now);
+  assert.ok(fullReads() > beforeOff, "打开又接着读");
   // 默认不开：一个不带筛选的 /api/log/ 都不发
   const g = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
   g.state.fullLogList = true;

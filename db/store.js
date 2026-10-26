@@ -43,6 +43,8 @@ const DEFAULT_SETTINGS = {
   historyRetentionDays: null,
   // 每日日报：默认按北京时间定时汇总昨日「我的站点」经营情况并推送
   dailyReport: { enabled: false, time: "09:00", channelIds: [], lastSent: null },
+  // 自营站点整站日志增量读（应付成本 V1）的开关：关掉以后一个整站读请求都不发（server/own-log-ingest.js）
+  ownLogIngest: true,
 };
 
 function uid(prefix = "st") {
@@ -412,6 +414,7 @@ export class Store {
           },
         };
       }
+      if ("ownLogIngest" in patch) patch = { ...patch, ownLogIngest: patch.ownLogIngest !== false };
       if ("historyRetentionDays" in patch) {
         patch = {
           ...patch,

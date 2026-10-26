@@ -16,6 +16,12 @@ export const bucketFromRow = (row) => ({ slotMs: Number(row.slot_ms), channelId:
 
 const cursorFromRow = (row) => row ? { stationId: row.station_id, coveredFromMs: Number(row.covered_from_ms), coveredToMs: Number(row.covered_to_ms), updatedAtMs: Number(row.updated_at_ms) } : null;
 
+// 站点彻底删除、或者自营站点换了地址（同一个 id 读另一个站）时：进度和桶一起清掉，不然会从旧进度接着读新站点、两个站的数混在一个桶里
+export async function forgetOwnLog(rt, stationId) {
+  if (!rt?.pool) return;
+  await (rt._ownLogStore ||= new OwnLogStore(rt.pool)).deleteStation(stationId);
+}
+
 export class OwnLogStore {
   constructor(pool) { this.pool = pool; }
 

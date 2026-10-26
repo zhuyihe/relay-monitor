@@ -22,6 +22,7 @@ export const PUT = withAuth(async (request, rt) => {
     patch.refreshIntervalSec = Math.max(10, Number(body.refreshIntervalSec) || 60);
   if (body?.lowBalanceUsd != null)
     patch.lowBalanceUsd = Math.max(0, Number(body.lowBalanceUsd) || 0);
+  if (body && "ownLogIngest" in body) patch.ownLogIngest = body.ownLogIngest !== false; // 整站日志读取的开关（应付成本 V1）
   if (body?.dailyReport && typeof body.dailyReport === "object")
     patch.dailyReport = body.dailyReport; // store 内部做字段校验合并
 
