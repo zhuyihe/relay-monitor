@@ -35,7 +35,7 @@ import { errorText, ownStationErrorCode } from "../lib/error-copy.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationOwnerScope, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 import { OwnLogStore } from "./own-log-store.js";
-import { createOwnLogIngest } from "./own-log-ingest.js";
+import { INGEST, createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
 import { expectedCostForDay } from "../lib/expected-cost-day.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
@@ -2185,11 +2185,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 一条绑定一天的应付成本（V1-b）：桶（整站日志，只读、不发请求）、这一天各段的上游分组倍率、价目表（每小时一次的缓存）、
   // 上游的额度换算；算不出的情况给原因码（lib/expected-cost-day.js）。顺手把桶里的「管理员自用」和 R1 扣的数比一比打一行 debug（V1 只对账，不替换 R1）。
-  // 出任何错都不挡结账：那一天应付成本写「—」加 MODEL_PRICE_UNREADABLE / OWN_LOG_INCOMPLETE 这类原因
+  // 出任何错都不挡结账：那一天应付成本写「—」加 MODEL_PRICE_UNREADABLE / EXPECTED_COST_LAGGING 这类原因
   async function expectedCostForSettlement(rule, result, token) {
     const window = result.window;
     // 「算应付成本」关着：不读桶、不读价目表，直接记原因（关着那几天固定的，以后打开也不补算，用语规范 §8.3）
-    if (rt.store?.settings?.expectedCost === false) return { usd: null, reason: "EXPECTED_COST_OFF", tokens: null, detail: { usd: null, reason: "EXPECTED_COST_OFF", tokens: null, byModel: [], missingPriceModels: [], segments: [], byChannel: [], pricingReadAt: null, quotaPerUnit: null } };
+    if (rt.store?.settings?.expectedCost === false) return { usd: null, reason: "EXPECTED_COST_DISABLED", tokens: null, detail: { usd: null, reason: "EXPECTED_COST_DISABLED", tokens: null, byModel: [], missingPriceModels: [], segments: [], byChannel: [], pricingReadAt: null, quotaPerUnit: null } };
     const upstream = upstreamStation(rule.upstreamStationId), own = upstreamStation(rule.ownStationId);
     const store = ownLogStore || rt._ownLogStore;
     const channelIds = (rule.channels || []).map((channel) => channel.channelId);
@@ -2218,6 +2218,39 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return { usd: expected.usd, reason: expected.reason, tokens: expected.tokens,
       detail: { usd: expected.usd, reason: expected.reason, tokens: expected.tokens, byModel: expected.byModel, missingPriceModels: expected.missingPriceModels, segments: expected.segments, byChannel: expected.byChannel,
         pricingReadAt: pricing?.readAt ?? null, quotaPerUnit } };
+  }
+
+  // 应付成本补算（V1-b，总指挥 10-26 定）：固定那天时整站记录还没读到（EXPECTED_COST_LAGGING），读完以后补一次——只填空着的，不覆盖、不写新版；
+  // 倍率用账本里记的分段，价目表用补的时候读到的，明细写 backfilledAt（计算明细写「X 月 X 日补算的」）。跟在每轮整站读后面，每个自营站点每轮最多补 20 天
+  const BACKFILL_PER_ROUND = 20;
+  async function backfillExpectedCost(own, { now = Date.now() } = {}) {
+    const store = ownLogStore || rt._ownLogStore;
+    const cursor = await store?.getCursor(own.id);
+    if (!cursor) return 0;
+    const rules = (await repository.listRules()).filter((rule) => rule.ownStationId === own.id);
+    const since = dayKeyInTz(now - INGEST.KEEP_DAYS * DAY_MS, businessTimeZone());
+    const lagging = await repository.listLedgerDaysByReason(rules.map((rule) => rule.id), since, "EXPECTED_COST_LAGGING");
+    let filled = 0;
+    for (const { ruleId, billDate } of lagging) {
+      if (filled >= BACKFILL_PER_ROUND) break;
+      const rule = rules.find((item) => item.id === ruleId);
+      if (!rule) continue;
+      const startMs = dayStartInTz(billDate, rule.timezone), endMs = shiftedDayStartInTz(startMs, 1, rule.timezone);
+      if (cursor.coveredToMs < endMs) continue; // 这天还没读完
+      const window = { preset: "custom", startMs, endMs, timezone: rule.timezone };
+      const entry = await repository.latestLedgerEntry(ruleId, window);
+      const saved = entry?.detail?.result;
+      if (!saved || entry.expectedCostUsd != null || entry.gapReason !== "EXPECTED_COST_LAGGING") continue;
+      const expected = await expectedCostForSettlement(rule, { window, segments: saved.segments || [], upstream: saved.upstream, downstream: saved.downstream }, null);
+      if (expected.reason === "EXPECTED_COST_LAGGING") continue;
+      const ok = await repository.fillExpectedCost(ruleId, billDate, { expectedCostUsd: expected.usd, gapReason: expected.reason, tokens: expected.tokens,
+        expected: { ...expected.detail, backfilledAt: new Date(now).toISOString() } });
+      if (!ok) continue;
+      filled += 1;
+      // 页面缓存里这条绑定的结果带着旧的 ledgerReference：清掉，下次读账本
+      for (const key of [...resultCache.keys()]) if (String(key).includes(ruleId)) resultCache.delete(key);
+    }
+    return filled;
   }
 
   async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false, resettleRequestedAt = null, confirmShrink = false, confirmedAfter = null, settle = false, trigger = null } = {}) {
@@ -2928,13 +2961,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (ownLogIngest && rt.store?.settings?.expectedCost === true) {
         for (const id of new Set(rules.map((rule) => rule.ownStationId))) {
           const own = upstreamStation(id);
-          if (own?.isOwn && own.type === "newapi") await ownLog.ingestOnce(own).catch((error) => console.error("自营站点整站日志读取失败:", error?.message || String(error)));
+          if (own?.isOwn && own.type === "newapi") {
+            await ownLog.ingestOnce(own).catch((error) => console.error("自营站点整站日志读取失败:", error?.message || String(error)));
+            await backfillExpectedCost(own, { now }).catch((error) => console.error("应付成本补算失败:", error?.message || String(error)));
+          }
         }
         await ownLog.pruneIfDue();
       }
     },
     // 应付成本 V1-a：整站日志读取和上游价目表，给 V1-b 的结账和只读试算用
     ingestOwnLog: (own) => ownLog.ingestOnce(own),
+    backfillExpectedCost,
     ownLogBuckets: (stationId, fromSlotMs, toSlotMs) => (ownLogStore || rt._ownLogStore).listBuckets(stationId, fromSlotMs, toSlotMs),
     upstreamPricing: (station) => upstreamPricing.pricingFor(station),
     // 接入关联后立即在后台观测今天一次，不必等下一轮轮询。没有启动后台轮询（测试、脚本）时不观测。

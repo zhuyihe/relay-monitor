@@ -7195,7 +7195,7 @@ test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率�
     assert.deepEqual(row.rates, { income: { stationId: "own", cnyPerUsd: 7.1, source: "configured" },
       cost: { stationId: "upstream", cnyPerUsd: 6.5, source: "configured" }, costBasis: "usage" });
     assert.deepEqual(row.ledger, { billDate: "2026-10-08", revision: 1, source: "settle", settledAt: row.settledAt, rates: { income: 7.1, cost: null }, costBasis: "usage",
-      expectedCostUsd: null, gapReason: "OWN_LOG_INCOMPLETE", tokens: 0 }, "夹具默认不开整站读：应付成本算不出，原因是整站日志没读完（V1-b）");
+      expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: 0 }, "夹具默认不开整站读：应付成本算不出，原因是整站日志没读完（V1-b）");
   }
   // 今天还没结账，按当前配置：固定采购、成本记 0。
   const today = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "evaluate", origin: "page" })).results[0];
@@ -8125,7 +8125,7 @@ test("V1-b 结账时算应付成本写进账本：这条绑定的渠道的桶 ×
 });
 
 // Key 别处也用（KEY_SHARED）这里不测：现在回答「别处也用」的绑定成本覆盖是 unknown，根本不结账（COST_COVERAGE_UNKNOWN 先拦住），纯函数里留着给 K 的时间分段 Key 用
-test("V1-b 「算应付成本」关着（settings.expectedCost=false）：结账照常，应付成本写「—」加 EXPECTED_COST_OFF，不读桶不读价目表；以后打开也不补算（账本行只插不改）", async (t) => {
+test("V1-b 「算应付成本」关着（settings.expectedCost=false）：结账照常，应付成本写「—」加 EXPECTED_COST_DISABLED，不读桶不读价目表；以后打开也不补算（账本行只插不改）", async (t) => {
   const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
   const ownLogStore = new MemoryOwnLogStore();
   await ownLogStore.startCursor("own", dayStart, dayStart);
@@ -8135,12 +8135,38 @@ test("V1-b 「算应付成本」关着（settings.expectedCost=false）：结账
   f.rt.store.settings = { expectedCost: false };
   await f.module.refreshDue(Date.now());
   const row = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
-  assert.deepEqual([row.expected_cost_usd, row.gap_reason, row.tokens, row.revenue_usd, row.cost_usd], [null, "EXPECTED_COST_OFF", null, 2.5, 1]);
+  assert.deepEqual([row.expected_cost_usd, row.gap_reason, row.tokens, row.revenue_usd, row.cost_usd], [null, "EXPECTED_COST_DISABLED", null, 2.5, 1]);
   assert.equal(f.state.requests.filter((r) => r.path === "/api/pricing").length, 0, "关着不读价目表");
   f.rt.store.settings = { expectedCost: true };
   f.rt._reconciliationResultCache.clear();
   await f.module.refreshDue(Date.now());
   assert.equal(f.state.ledger.filter((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08").length, 1, "打开以后不补算、不多一版");
+});
+
+test("V1-b 补算：固定那天时整站记录还没读到（EXPECTED_COST_LAGGING），读完以后补一次应付成本——只填空着的、不写新版、明细写补算时刻；补过不再动", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  resetOwnRequestBudget();
+  const ownLogStore = new MemoryOwnLogStore();
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000, ownLogStore, ownLogIngest: true } });
+  f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2 }], group_ratio: {} };
+  // 整站日志：渠道 1 在 10-08 有一条 100 个输入 token 的记录
+  f.state.fullLogList = true;
+  f.state.testLogs.push({ id: 1, type: 2, channel: 1, quota: 1, created_at: (dayStart + 3600000) / 1000, token_name: "k", username: "alice", model_name: "m", prompt_tokens: 100, completion_tokens: 0, other: "{}" });
+  f.rt.store.settings = { expectedCost: true };
+  // 第一轮：先结账（这时还没有整站读的进度 → EXPECTED_COST_LAGGING），再开始读整站日志
+  await f.module.refreshDue(now);
+  const settledRow = () => f.state.ledger.filter((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(settledRow().length, 1);
+  // 一轮一轮读到追平，补算跟着每轮整站读跑
+  for (let i = 0; i < 15 && settledRow()[0].expected_cost_usd == null; i += 1) { now += 60000; resetOwnRequestBudget(); await f.module.refreshDue(now); }
+  const [row] = settledRow();
+  assert.deepEqual([settledRow().length, row.revision, Number(row.expected_cost_usd), row.gap_reason, row.tokens], [1, 1, 2, null, 100], "原地补上（100 token × model_ratio 2 ÷ quota_per_unit 100 = $2），不写新版");
+  assert.ok(row.detail.expected.backfilledAt, "明细记下补算时刻");
+  assert.deepEqual([row.revenue_usd, row.cost_usd], [2.5, 1], "原有金额不动");
+  assert.equal(await f.module.backfillExpectedCost(f.stations.find((station) => station.id === "own"), { now }), 0, "补过不再动");
+  const other = f.state.ledger.find((item) => item.rule_id === "rr_three" && item.bill_date === "2026-10-08");
+  assert.deepEqual([Number(other.expected_cost_usd), other.gap_reason], [0, null], "这天没用量的绑定补成 0");
 });
 
 test("V1-b 桶和 R1 的管理员自用对账：结账时桶里这些渠道的管理员自用额度和 R1 实际扣的不一样就打一行 debug（不带用户名、地址）；只打日志不改数", async (t) => {

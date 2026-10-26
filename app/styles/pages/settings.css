@@ -1,6 +1,10 @@
 /* 系统设置页：只放本页特有的布局，通用外观用 jy.css */
 
 .jy-settings-field .ant-input-number { width: 200px; }
+/* 同一块里两个字段之间空 16px（「自动刷新间隔」和「算应付成本」，设计验收 10-26）；名字和开关同一行，开关不拉满 */
+.jy-settings-field + .jy-settings-field { margin-top: 16px; }
+.jy-settings-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.jy-settings-switch .ant-switch { flex: none; }
 .jy-settings-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .jy-settings-inline .ant-select { width: 180px; }
 .jy-settings-inline .ant-input-number { width: 128px; }

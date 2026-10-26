@@ -493,16 +493,19 @@ export default function SettingsPage() {
                       <FieldError id={`${ids.interval}-err`} text={interval.invalid || undefined} />
                     </div>
                     <div className="jy-field jy-settings-field">
-                      <label htmlFor={ids.expectedCost}>{COPY.expectedCost}</label>
-                      <Switch
-                        id={ids.expectedCost}
-                        checked={expectedCost.value}
-                        onChange={(checked) => {
-                          expectedCost.setValue(checked);
-                          void expectedCost.commit(checked);
-                        }}
-                        aria-describedby={`${ids.expectedCost}-desc`}
-                      />
+                      {/* 名字和开关同一行（设计验收 10-26）：系统设置里只有这一个开关，开关不拉满、一眼看得出是开关 */}
+                      <div className="jy-settings-switch">
+                        <label htmlFor={ids.expectedCost}>{COPY.expectedCost}</label>
+                        <Switch
+                          id={ids.expectedCost}
+                          checked={expectedCost.value}
+                          onChange={(checked) => {
+                            expectedCost.setValue(checked);
+                            void expectedCost.commit(checked);
+                          }}
+                          aria-describedby={`${ids.expectedCost}-desc`}
+                        />
+                      </div>
                       <span className="jy-caption" id={`${ids.expectedCost}-desc`}>{COPY.expectedCostHint}</span>
                       {expectedCost.value && ownLogCoveredTo != null ? (
                         <span className="jy-caption">

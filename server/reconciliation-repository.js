@@ -851,6 +851,27 @@ export class ReconciliationRepository {
     return rows.map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
   }
 
+  // 应付成本补算（V1-b，总指挥 10-26 定）：这些绑定从 sinceDate 起、最新一版原因是 reason 的日子（固定时整站记录还没读到那天的）
+  async listLedgerDaysByReason(ruleIds, sinceDate, reason) {
+    if (!ruleIds?.length) return [];
+    const [rows] = await this.pool.query(
+      `SELECT rule_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date FROM reconciliation_ledger l
+       WHERE rule_id IN (?) AND bill_date >= ? AND gap_reason = ? AND expected_cost_usd IS NULL
+         AND revision = (SELECT MAX(revision) FROM reconciliation_ledger m WHERE m.rule_id = l.rule_id AND m.bill_date = l.bill_date)
+       ORDER BY bill_date, rule_id`, [ruleIds, sinceDate, reason]);
+    return rows.map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
+  }
+
+  // 补算：只填最新一版、应付成本还空着、原因是 EXPECTED_COST_LAGGING 的那一行（不覆盖有数的、不写新版）；detail.expected 一起换掉。填上了返回 true
+  async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null } = {}) {
+    const [result] = await this.pool.query(
+      `UPDATE reconciliation_ledger SET expected_cost_usd = ?, gap_reason = ?, tokens = ?, detail = JSON_SET(COALESCE(detail, JSON_OBJECT()), '$.expected', CAST(? AS JSON))
+       WHERE rule_id = ? AND bill_date = ? AND expected_cost_usd IS NULL AND gap_reason = 'EXPECTED_COST_LAGGING'
+         AND revision = (SELECT r FROM (SELECT MAX(revision) AS r FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ?) AS latest)`,
+      [expectedCostUsd, gapReason, tokens, JSON.stringify(expected), ruleId, billDate, ruleId, billDate]);
+    return Number(result?.affectedRows) > 0;
+  }
+
   // 结账没成：记下或更新这一行（settlementOutcome 的 state，op 是 retry / manual / sticky）。
   // 账本里已经有这天的任一版就不写（另一处已经固定了），一条语句判断，不用先读；调用方读状态行时带着重结请求的日子除外
   // （requestedAt 不为空：账本里本来就有这天，重结没成要照样记下退避，不然每轮都再试一次——请求在不在由调用方手里的状态行说了算，

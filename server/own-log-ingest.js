@@ -11,7 +11,7 @@
 //   - 每个窗口读完才写库（桶加进去、进度挪到窗口终点，一个事务），读到一半出错整个窗口不写；
 //   - 落后超过 LAG_WARN_MS 每小时打一行日志（V1-a 没页面，先不进需处理）。
 // 桶里顺手记下管理员自用额度、不在管理员名下的渠道测试额度（和 R1 同一个规矩，server/own-helpers.js 的管理员名单），V1 只用来和 R1 对账打日志。
-// 开关：系统设置「算应付成本」settings.expectedCost（db/store.js，每轮读一次）——只有明确开着才读；V1-a 默认关（只读不用），V1-b 带上设置页的开关界面时改成默认开（server/reconciliation.js）。
+// 开关：系统设置「算应付成本」settings.expectedCost（db/store.js，每轮读一次）——只有明确开着才读；默认开，系统设置页上能关（server/reconciliation.js）。
 import { OWN_LOG_SLOT_MS, accumulateBuckets } from "../lib/own-log-bucket.js";
 import { ingestAllowance, ownRequestState } from "../lib/own-request-budget.js";
 import { queryOwnLogWindow } from "../lib/providers.js";

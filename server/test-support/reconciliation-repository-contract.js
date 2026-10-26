@@ -1157,6 +1157,35 @@ contract("listLedgerDays lists each booked day once per rule from a date on, onl
   assert.deepEqual(await repository.listLedgerDays([], "2026-01-01"), []);
 });
 
+contract("expected-cost backfill: listLedgerDaysByReason lists lagging days of the latest revision; fillExpectedCost fills only an empty lagging row in place (no new revision), and only once", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const book = async (day, patch, resettle = false) => {
+    const window = { preset: "yesterday", startMs: Date.UTC(2026, 0, day), endMs: Date.UTC(2026, 0, day + 1), timezone: "UTC" };
+    const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: `2026-01-${String(day + 1).padStart(2, "0")}T00:20:00.000Z` });
+    const ledger = settlement(snapshot, resettle ? { resettle, revenueRate: 7 } : {});
+    ledger.entry = { ...ledger.entry, ...patch };
+    assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { ledger }), true);
+    return window;
+  };
+  await book(8, { expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null });
+  await book(9, { expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null });
+  const window9 = await book(9, { expectedCostUsd: 2.5, gapReason: null, tokens: 10 }, true); // 第二版已经有数
+  await book(10, { expectedCostUsd: null, gapReason: "MODEL_PRICE_UNREADABLE", tokens: 5 });
+  assert.deepEqual(await repository.listLedgerDaysByReason([rule.id], "2026-01-01", "EXPECTED_COST_LAGGING"), [{ ruleId: rule.id, billDate: "2026-01-08" }], "9 日最新一版有数、10 日原因不同：都不算");
+  assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-08", { expectedCostUsd: 1.25, gapReason: null, tokens: 2880000, expected: { usd: 1.25, backfilledAt: "2026-01-12T00:00:00.000Z" } }), true);
+  const window8 = { preset: "yesterday", startMs: Date.UTC(2026, 0, 8), endMs: Date.UTC(2026, 0, 9), timezone: "UTC" };
+  const filled = await repository.latestLedgerEntry(rule.id, window8);
+  assert.deepEqual([filled.revision, filled.expectedCostUsd, filled.gapReason, filled.tokens, filled.detail.expected.backfilledAt, filled.detail.result != null], [1, 1.25, null, 2880000, "2026-01-12T00:00:00.000Z", true], "原地填、不写新版、明细别的部分还在");
+  assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-08", { expectedCostUsd: 9 }), false, "已经填过的不再动");
+  assert.equal((await repository.latestLedgerEntry(rule.id, window8)).expectedCostUsd, 1.25);
+  assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-09", { expectedCostUsd: 9 }), false, "有数的不覆盖");
+  assert.equal((await repository.latestLedgerEntry(rule.id, window9)).expectedCostUsd, 2.5);
+  assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-10", { expectedCostUsd: 9 }), false, "原因不是没读到的不填");
+  assert.deepEqual(await repository.listLedgerDaysByReason([rule.id], "2026-01-01", "EXPECTED_COST_LAGGING"), []);
+});
+
 contract("billing capabilities round-trip, overwrite and delete by identity", async ({ repository, fixture }) => {
   const now = Date.now();
   const first = fixture.capabilityIdentity("first"), second = fixture.capabilityIdentity("second");

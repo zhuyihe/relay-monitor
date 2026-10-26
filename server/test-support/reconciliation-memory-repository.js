@@ -631,6 +631,27 @@ export class MemoryReconciliationRepository {
     return doomed.length;
   }
 
+  async listLedgerDaysByReason(ruleIds, sinceDate, reason) {
+    if (!ruleIds?.length) return [];
+    await this.#read("listLedgerDaysByReason", [ruleIds, sinceDate, reason]);
+    const wanted = new Set(ruleIds.map(String));
+    return this.#plain("ledger").filter((row) => wanted.has(String(row.rule_id)) && row.bill_date >= sinceDate && row.gap_reason === reason && row.expected_cost_usd == null
+      && Number(row.revision) === this.#ledgerOf(null, row.rule_id, row.bill_date)[0].revision)
+      .sort((a, b) => compare(a.bill_date, b.bill_date) || compareText(a.rule_id, b.rule_id)).map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
+  }
+
+  async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null } = {}) {
+    await this.#read("fillExpectedCost", [ruleId, billDate]);
+    const top = this.#ledgerOf(null, ruleId, billDate)[0];
+    const entry = top ? this.#rows("ledger").find(({ row }) => row === top) : null;
+    if (!entry || entry.row.expected_cost_usd != null || entry.row.gap_reason !== "EXPECTED_COST_LAGGING") return false;
+    const detail = typeof entry.row.detail === "string" ? JSON.parse(entry.row.detail || "{}") : { ...(entry.row.detail || {}) };
+    (this.log.ledgerFills ||= []).push({ ruleId, billDate, revision: entry.row.revision });
+    this.#update(null, "ledger", [entry], { expected_cost_usd: expectedCostUsd == null ? null : ledgerDecimal(expectedCostUsd, LEDGER_DECIMAL_SCALE.expected_cost_usd), gap_reason: gapReason, tokens,
+      detail: JSON.stringify({ ...detail, expected }) });
+    return true;
+  }
+
   async latestLedgerEntry(ruleId, window) {
     const billDate = billDayOf(window);
     if (!billDate) return null;

@@ -44,8 +44,8 @@ const DEFAULT_SETTINGS = {
   // 每日日报：默认按北京时间定时汇总昨日「我的站点」经营情况并推送
   dailyReport: { enabled: false, time: "09:00", channelIds: [], lastSent: null },
   // 「算应付成本」开关（用语规范 §8.3，应付成本 V1）：开着时定时读自营站点的收费记录（server/own-log-ingest.js）、结账时算应付成本（V1-b）；关掉以后一个整站读请求都不发。
-  // V1-a 先默认关（只读不用，开着是白读用户的线上站，审核 #123 第二轮）；V1-b 加上设置页的开关界面时改成默认开
-  expectedCost: false,
+  // 默认开（V1-b 带上了设置页的开关界面；V1-a 单独上线时是关的）
+  expectedCost: true,
 };
 
 function uid(prefix = "st") {
@@ -415,7 +415,7 @@ export class Store {
           },
         };
       }
-      if ("expectedCost" in patch) patch = { ...patch, expectedCost: patch.expectedCost !== false };
+      if ("expectedCost" in patch) patch = { ...patch, expectedCost: patch.expectedCost === true }; // 只认真正的 true / false，别的值一律当关（审核 #123 第三轮 低-1）
       if ("historyRetentionDays" in patch) {
         patch = {
           ...patch,
