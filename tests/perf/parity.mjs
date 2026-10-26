@@ -21,7 +21,8 @@ const BACKUP = "perf_parity_backup";
 // 每次结账都会变、和账算得对不对无关的列和 detail 里的键
 const VOLATILE_COLUMNS = ["settled_at", "version_id"];
 // （渠道的 stateObservedAt、倍率的 ratioObservedAt 这类「什么时候读到的」键，名字以 ObservedAt 结尾的一律不比）
-const VOLATILE_KEYS = new Set(["generatedAt", "resultGeneratedAt", "origin", "observedAt", "checkedAt", "fetchedAt",
+// trigger：这天是轮询回看（late）结的还是 parity 手动（manual）结的，只看谁抢先，和钱无关（审核 R2 第二轮、#123 perf 的 15 处假差）
+const VOLATILE_KEYS = new Set(["generatedAt", "resultGeneratedAt", "origin", "observedAt", "checkedAt", "fetchedAt", "trigger",
   ...(process.env.PARITY_IGNORE_KEYS || "").split(",").map((s) => s.trim()).filter(Boolean)]);
 const isVolatileKey = (key) => VOLATILE_KEYS.has(key) || /ObservedAt$/.test(key);
 const [cmd, ...args] = process.argv.slice(2);
