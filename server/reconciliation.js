@@ -821,9 +821,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const prior = [...entry.states].reverse().find((state) => state.endMs <= window.endMs) ?? null;
       // 窗口终点比记下的晚得多（从同一天起点查多天范围）不能直接用，要接着翻到新的终点（审核 R1：少减过 49430 额度）
       if (!settle && prior && Date.now() - prior.readAt < OWN_EXCLUSION_REUSE_MS && window.endMs - prior.endMs < OWN_EXCLUSION_REUSE_MS && covers(prior.result.coverage)) return prior.result;
-      // 同一个站点同一天，别的绑定刚对过账：结的是同一段窗口，直接用，不再每条绑定各查一遍（每个站每天每个来源一个 stat）
-      if (settle && prior?.verifiedEndMs === window.endMs && Date.now() - prior.readAt < OWN_EXCLUSION_VERIFIED_REUSE_MS && covers(prior.result.coverage)) return prior.result;
+      // 结账先读管理员名单（fresh）：沿用的那份是按当时的名单算的，名单变了（有人被降成普通用户、新加了管理员）就不能沿用（审核 #127 中-1）
       const { adminSet } = await readOwnAdminDirectory(rt, own, { fresh: settle });
+      const adminKey = [...adminSet].sort().join("\u0000");
+      const sameAdmins = prior?.adminKey === adminKey;
+      // 同一个站点同一天，别的绑定刚对过账：结的是同一段窗口、名单一样，直接用，不再每条绑定各查一遍（每个站每天每个来源一个 stat）
+      if (settle && prior?.verifiedEndMs === window.endMs && sameAdmins && Date.now() - prior.readAt < OWN_EXCLUSION_VERIFIED_REUSE_MS && covers(prior.result.coverage)) return prior.result;
       const sources = [...[...adminSet].sort().map((name) => ({ kind: "user", name })), ...OWN_CHANNEL_TEST_TOKEN_NAMES.map((name) => ({ kind: "token", name }))];
       const partKey = (source) => `${source.kind}:${source.name}`;
       const parts = new Map();
@@ -926,7 +929,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           const total = await queryOwnLogSourceTotal(own, base);
           // 同一天别的绑定刚结过（10 分钟内）、这个来源的总额度没变：渠道测试名字这个来源的那份直接沿用，不再每条绑定各查一遍
           // 「1 + 管理员数」个 stat（审核 CI：开了定时测试的站，每天结 80 条绑定从 1.2 秒变成 7–14 秒）
-          const recent = before && sameEnd && Date.now() - before.readAt < OWN_EXCLUSION_VERIFIED_REUSE_MS && before.seen === total;
+          const recent = before && sameEnd && sameAdmins && Date.now() - before.readAt < OWN_EXCLUSION_VERIFIED_REUSE_MS && before.seen === total;
           if (total === 0) part = emptyPart(0);
           else if (source.kind === "token" && recent) part = before;
           else if (source.kind === "token" && (part = await tokenOnlyInAdmins(total))) { /* 全在管理员名下：不翻页 */ }
@@ -960,7 +963,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       let coverage = "all";
       for (const part of parts.values()) if (part.coverage instanceof Set) coverage = coverage === "all" ? part.coverage : new Set([...coverage].filter((id) => part.coverage.has(id)));
       const result = { byChannel, coverage };
-      entry.states = [...entry.states.filter((state) => state.endMs !== window.endMs), { parts, result, endMs: window.endMs, readAt: Date.now(), ...(settle ? { verifiedEndMs: window.endMs } : {}) }]
+      entry.states = [...entry.states.filter((state) => state.endMs !== window.endMs), { parts, result, adminKey, endMs: window.endMs, readAt: Date.now(), ...(settle ? { verifiedEndMs: window.endMs } : {}) }]
         .filter((state, index, list) => Date.now() - state.readAt < OWN_EXCLUSION_STATE_KEEP_MS || index >= list.length - 1)
         .sort((a, b) => a.endMs - b.endMs).slice(-OWN_EXCLUSION_STATE_MAX);
       return result;

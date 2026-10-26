@@ -2259,7 +2259,7 @@ test("今天和近 7 天中间有不满一秒的已结束分段时不能跳过�
 });
 
 test("本月截至取数时刻：给实时毛利、只存 observation，同起点较晚截止的查询能读回较早记录", async (t) => {
-  const { rule, repository, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }] });
+  const { rule, repository, module, state } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }] });
   const realNow = Date.now;
   const now = Date.parse("2026-09-20T04:26:08.000Z");
   Date.now = () => now;
@@ -2268,15 +2268,16 @@ test("本月截至取数时刻：给实时毛利、只存 observation，同起�
   const { results } = await module.queryRules({ ruleIds: [rule.id], preset: "month" }, { force: true });
   assert.deepEqual(results[0].window, { preset: "month", timezone: "Asia/Shanghai", startMs: Date.parse("2026-08-31T16:00:00.000Z"), endMs: now });
   assert.equal(results[0].health.code, "READY");
-  // 本月没固定的天分两块读：过去的整天一块、今天一块（R1 多天修复），夹具的 stat 每次都回 250，所以收入是 2 × 250 ÷ 100 = 5，毛利 5 − 1 = 4
-  assert.equal(results[0].calculation.profitUsd, 4);
+  // 本月没固定的天分两块读：过去的整天一块、今天一块（R1 多天修复）——自营一侧每个渠道 2 个 stat；夹具的 stat 不管窗口都回 250，钱不是真数，只断言块数和有毛利
+  assert.ok(results[0].calculation.profitUsd != null);
+  assert.equal(state.statCalls.filter((call) => call.side === "own").length, 2, "过去的整天、今天各一块");
   assert.equal(results[0].displayStatus.state, "live");
   assert.equal("settlement" in results[0], false, "旧字段 settlement 已删");
   const saved = repository.tables.snapshots.map((row) => [row.window_kind, JSON.parse(row.source).recordType]);
   assert.deepEqual(saved, [["month", "observation"]], "本月还没结束，不写结账记录");
   const fingerprint = JSON.parse(repository.tables.snapshots[0].source).scopeFingerprint;
   const later = await repository.latestObservation(rule.id, { ...results[0].window, endMs: now + 60000 }, fingerprint);
-  assert.equal(later?.result.calculation.profitUsd, 4);
+  assert.equal(later?.result.calculation.profitUsd, results[0].calculation.profitUsd);
 });
 
 test("两侧都已应答的上游空消费异常不能被旧的确认利润掩盖，数据源不可用时才回退", async (t) => {
@@ -7590,6 +7591,7 @@ test("R1 多条绑定各要一个渠道、日志很多：按渠道 stat 只查�
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
   for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
   for (let id = 1; id <= 1200; id += 1) f.state.testLogs.push(usage(id, id <= 2 ? 1 : 0, { channel: id % 2 ? 1 : 2 })); // 额度小，只为让页数多；总额度 2
+  f.state.testLogs.push(usage(4000, 1, { token_name: "模型测试", token_id: 0, channel: 1 })); // root 名下一条渠道测试（额度 1，总额度不是 0）：渠道测试名字那个来源有东西，要查「全在管理员名下吗」
   const rootReads = () => f.state.requests.filter((request) => request.host === "own.test" && /^\/api\/log\//.test(request.path) && /username=root/.test(request.query));
   const settle = (ruleId) => f.module.queryRules({ ruleIds: [ruleId], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
   await settle("rr_live");
@@ -7599,9 +7601,22 @@ test("R1 多条绑定各要一个渠道、日志很多：按渠道 stat 只查�
   assert.ok(second.every((request) => request.path === "/api/log/stat"), `第二条绑定没有再翻页或读第一页：${second.map((r) => r.path).join(",")}`);
   const statChannels = second.filter((request) => /channel=/.test(request.query)).length;
   assert.ok(statChannels <= 1, `第二条绑定只补查渠道 2 一次：${statChannels}`);
-  // 渠道测试名字那两个来源：第二条绑定只各查一次总额度（没变就沿用），不再每条绑定查「1 + 管理员数」个 stat（审核 CI：每天结 80 条从 1.2 秒变 7–14 秒）
-  const testNameStats = f.state.requests.slice(requestsBefore).filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && /token_name=/.test(request.query) && !/username=/.test(request.query)).length;
-  assert.ok(testNameStats <= 2, `渠道测试名字的来源第二条绑定只查总额度：${testNameStats}`);
+  // 渠道测试名字那两个来源：第二条绑定只各查一次总额度（没变就沿用），不再查「每个管理员名下有多少」那几个 stat（审核 CI：每天结 80 条从 1.2 秒变 7–14 秒；审核 #127 低-1）
+  const perAdminStats = (from) => f.state.requests.slice(from).filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && /token_name=/.test(request.query) && /username=/.test(request.query)).length;
+  assert.ok(perAdminStats(0) > 0, "第一条绑定查过每个管理员名下的");
+  assert.equal(perAdminStats(requestsBefore), 0, "第二条绑定沿用，不再按管理员逐个查");
+  // 总额度变了（晚到一条渠道测试记录）：重查
+  f.state.testLogs.push(usage(5000, 1, { token_name: "模型测试", token_id: 0, username: "alice", channel: 1 }));
+  const beforeChanged = f.state.requests.length;
+  f.state.ledger.length = 0;
+  await settle("rr_live");
+  assert.ok(perAdminStats(beforeChanged) > 0, "总额度变了：按管理员逐个重查");
+  // 过了 10 分钟：重查
+  now += 11 * 60000;
+  const beforeLater = f.state.requests.length;
+  f.state.ledger.length = 0;
+  await settle("rr_two");
+  assert.ok(perAdminStats(beforeLater) > 0, "第 11 分钟：不再沿用");
   // 过去窗口：页面再看（非结账）不发请求
   now += 5 * 60000;
   const before = rootReads().length;
@@ -8281,4 +8296,19 @@ test("R1 多天窗口（近 7 天）：已固定的天用账本、不读管理�
   const second = await week("rr_live");
   assert.ok(second.calculation.profitUsd != null);
   assert.ok(rootPages() - mid <= 1, `已固定的天不读管理员日志：${rootPages() - mid} 页`);
+});
+
+test("R1 沿用要看管理员名单：bob 结第一条绑定时是管理员、之后被降成普通用户，第二条绑定不能沿用「全在管理员名下」那份，他名下的测试记录照兜底扣（审核 #127 中-1）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  const bob = { id: 3, username: "bob", display_name: "", role: 100, status: 1 };
+  f.state.ownUsers = [...OWN_USERS, bob];
+  f.state.testLogs.push(usage(1, 30, { token_name: "模型测试", token_id: 0, username: "bob", channel: 1 }), usage(2, 40, { token_name: "模型测试", token_id: 0, username: "bob", channel: 2 }));
+  const settle = (ruleId) => f.module.queryRules({ ruleIds: [ruleId], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" }).then((r) => r.results[0]);
+  const first = await settle("rr_live");
+  assert.equal(first.downstream.quotaUnits, 250 - 30, "bob 是管理员：他的测试记录按管理员扣");
+  f.state.ownUsers = [...OWN_USERS, { ...bob, role: 1 }]; // 降成普通用户
+  const second = await settle("rr_two");
+  assert.equal(second.downstream.quotaUnits, 250 - 40, "名单变了不沿用：bob 名下的测试记录按兜底扣（改动前沿用「全在管理员名下」那份，不扣，是 250）");
 });
