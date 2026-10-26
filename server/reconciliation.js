@@ -41,6 +41,7 @@ import { OwnLogStore } from "./own-log-store.js";
 import { INGEST, createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
 import { expectedCostForDay } from "../lib/expected-cost-day.js";
+import { buildProfitDetail, buildProfitPage, dayLabelsOf } from "../lib/profit-page.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
@@ -53,7 +54,7 @@ import { segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
-import { costBasisOf, isConfiguredRate, rateSnapshotOf, ratesFor } from "../lib/profit.js";
+import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, ratesFor } from "../lib/profit.js";
 import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
@@ -3156,6 +3157,61 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     previewKeyScope,
     createPreviewReadContext,
     listRules: (options = {}) => repository.listRules(options),
+    // ---- 每日利润页 A（设计稿 #118 §9）：整页一次读；一行一天的计算明细点开才读 ----
+    // 整页：现有的 queryRules（evaluate，不写库）给整段的收入 / 实付 / 毛利，账本按天的几列给应付成本和差额（lib/profit-page.js 拼）
+    async profitPage(input = {}) {
+      const response = await api.queryRules(input, { mode: "evaluate", force: true, origin: "manual", accountUsage: true });
+      const now = Date.parse(response.generatedAt), tz = response.tz;
+      const window = resolveReconciliationWindow({ ...input, timezone: tz }, now);
+      const labels = dayLabelsOf(window, tz, now);
+      const results = response.results;
+      const dayFacts = labels.length && results.length ? await repository.listLedgerDayFacts(results.map((row) => row.rule.id), labels[0], labels.at(-1)) : [];
+      // 看一天时「没算进的模型」的名字从那天的明细里拿（只有那几行、一行一次）
+      const missing = new Map();
+      if (labels.length === 1) {
+        for (const fact of dayFacts.filter((item) => item.gapReason === "MODEL_PRICE_MISSING")) {
+          const row = results.find((item) => item.rule.id === fact.ruleId);
+          const entry = row ? await repository.latestLedgerEntry(fact.ruleId, row.window).catch(() => null) : null;
+          missing.set(fact.ruleId, (entry?.detail?.expected?.missingPriceModels || []).map((model) => model.model).filter(Boolean));
+        }
+      }
+      const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [] });
+      // 固定成本：固定采购的上游按天平摊（lib/profit.js），换成美元要那个上游设了汇率；有一个没设就给 null（页面写「—」）
+      const fixedStations = usageUpstreams()?.fixed || [];
+      let fixedCostUsd = 0;
+      for (const station of fixedStations) {
+        const rate = rateSnapshotOf(station);
+        if (!isConfiguredRate(rate)) { fixedCostUsd = null; break; }
+        fixedCostUsd += amortizeFixedCost(purchasesOf(station), { startMs: window.startMs, endMs: Math.min(window.endMs, now), tz }).exact / Number(rate.cnyPerUsd);
+      }
+      const ownIssue = results.flatMap((row) => row.health?.issues || []).find((issue) => /^OWN_/.test(issue?.code || "") && reconciliationIssue(issue.code).kind === "reading");
+      const accounts = response.unaccountedUpstream?.accounts || [];
+      return { ...page, asOf: response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd,
+        netProfitUsd: page.pageTotals.grossProfitUsd != null && fixedCostUsd != null ? page.pageTotals.grossProfitUsd - fixedCostUsd : null,
+        ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
+        unaccountedUpstreamCostUsd: accounts.some((account) => account.unaccountedUsd != null) ? accounts.reduce((total, account) => total + (account.unaccountedUsd ?? 0), 0) : null,
+        unlinkedChannelCount: (response.coverage?.channels || []).filter((channel) => channel.status === "unlinked").length,
+        rateUnset: response.unconfiguredRateStations || [], fixedOffProfitStations: response.fixedOffProfitStations || [] };
+    },
+    // 一行一天的计算明细：已固定的从账本行读（result + detail.expected）；没固定的（今天）现算一次、应付成本没有
+    async profitDetail({ ruleIds = [], day } = {}) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(day || ""))) throw codedError("TIME_RANGE_INVALID", "日期不对");
+      const ids = [...new Set((Array.isArray(ruleIds) ? ruleIds : [ruleIds]).map(String).filter(Boolean))];
+      const rules = (await Promise.all(ids.map((id) => repository.getRule(id, { includeArchived: true })))).filter(Boolean);
+      if (!rules.length) throw ruleNotFound();
+      const pieces = [];
+      for (const rule of rules) {
+        const startMs = dayStartInTz(day, rule.timezone), endMs = shiftedDayStartInTz(startMs, 1, rule.timezone);
+        const entry = await repository.latestLedgerEntry(rule.id, { preset: "custom", startMs, endMs, timezone: rule.timezone });
+        if (entry) { pieces.push({ rule, result: entry.detail?.result || null, expected: entry.detail?.expected || null, entry }); continue; }
+        const now = Date.now();
+        if (startMs > now) throw codedError("TIME_RANGE_FUTURE", "不能选以后的时间");
+        const today = dayKeyInTz(now, rule.timezone) === day;
+        const live = await api.queryRules({ ruleIds: [rule.id], ...(today ? { preset: "today" } : { preset: "custom", startMs, endMs: Math.min(endMs, now) }) }, { mode: "evaluate", force: true, origin: "manual" });
+        pieces.push({ rule, result: live.results[0] || null, expected: null, entry: null });
+      }
+      return buildProfitDetail(pieces, { day });
+    },
     async getConfirmedHistory(id, input = {}) {
       const options = normalizeConfirmedHistoryOptions(input);
       try {
