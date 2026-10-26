@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow, normalizeReconciliationScopeIntent, ruleTimezoneFor } from "./reconciliation.js";
-import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationOwnerScope } from "./reconciliation-repository.js";
+import { ReconciliationRepository, copySegment, reconciliationOwnerRuleState, reconciliationOwnerScope } from "./reconciliation-repository.js";
 import { MemoryReconciliationRepository } from "./test-support/reconciliation-memory-repository.js";
 import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
@@ -8405,6 +8405,18 @@ test("R2 近 7 天碰到关过的一天：那一天不算，其余天照算，�
   await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-01T00:00:00Z"), toMs: Date.parse("2026-10-09T02:00:00Z") }] });
   const all = await week();
   assert.equal(all.health.code, "OWN_CONSUME_LOG_GAP");
+});
+
+test("copySegment：复制一份分段改 id，普通字段是自己的（不借原型链）、不可枚举的 keys 也带过去（总指挥 10-26 定，#114 中-G 改法）", () => {
+  const original = { id: "s1", ruleId: "r1", group: "g1", ratio: 0.8, window: { startMs: 1, endMs: 2 } };
+  Object.defineProperty(original, "keys", { value: [{ tokenId: 9 }], enumerable: false, configurable: true, writable: true });
+  const copy = copySegment(original, { id: "s1~1" });
+  assert.equal(copy.id, "s1~1", "overrides 生效");
+  assert.deepEqual({ ...copy, id: original.id }, original, "除了 id，别的字段和原段一样（都是拷贝自己的，不是原型链上的）");
+  assert.deepEqual(Object.keys(copy).sort(), Object.keys(original).sort(), "Object.keys 和原段一样（id 还在）");
+  assert.equal(JSON.stringify(copy), JSON.stringify({ ...original, id: "s1~1" }), "JSON.stringify 除了 id 和原段一样");
+  assert.deepEqual(copy.keys, [{ tokenId: 9 }], "keys 带过去了");
+  assert.equal(Object.getOwnPropertyDescriptor(copy, "keys").enumerable, false, "keys 还是不可枚举，不会被 JSON.stringify / Object.keys 带出来");
 });
 
 test("R2 × K1c 中-G：一段里挂两把 Key 时碰到关过的一天，按天切开不能把 Key 列表丢掉（审核 #114 中-G，总指挥 10-26 定）", async (t) => {

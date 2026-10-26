@@ -112,6 +112,13 @@ export function attachSegmentKeys(segments, keyRows) {
   return segments;
 }
 
+// 复制一份分段（改 id 这类场合用，比如按天切开后给切出来的那几截起新 id）：普通字段展开成自己的（JSON.stringify、Object.keys、深比较
+// 都和原段一样，只有 overrides 里给的字段不同），keys 这个不可枚举属性单独带过去——不能只用 `{ ...segment, ...overrides }`，那样
+// keys 会丢；也不能用 Object.create 接原型链，那样除了 overrides 里的字段，其余都不是这份拷贝自己的（总指挥 10-26 定，#114 中-G 改法）
+export function copySegment(segment, overrides = {}) {
+  return Object.defineProperty({ ...segment, ...overrides }, "keys", { value: segment.keys, enumerable: false, configurable: true, writable: true });
+}
+
 export function segmentFromRow(row) {
   return {
     id: row.id,

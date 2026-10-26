@@ -34,7 +34,7 @@ import {
 import { OWN_STATION_UNSET, UPSTREAM_GONE } from "../lib/format.js";
 import { CONSUME_LOG_LOOKBACK_MS, applyConsumeLogReading, consumeLogOffOverlap, consumeLogStillOff } from "../lib/consume-log.js";
 import { errorText, ownStationErrorCode } from "../lib/error-copy.js";
-import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationOwnerScope, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
+import { ReconciliationRepository, copySegment, reconciliationOwnerRuleState, reconciliationOwnerScope, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { workflowAction } from "../lib/workflow-actions.js";
 import { markOptionUnreadableSeen, notifyOptionUnreadable, notifyReconciliationHealth, optionAlertKey } from "./reconciliation-notify.js";
 import { OwnLogStore } from "./own-log-store.js";
@@ -2062,9 +2062,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // 头尾两截（挨着 segmentWindow 本来的起止）要保留 C3 放宽的那部分，不能也裁掉：Sub2API 换绑那天只能按整天读账单，
           // 裁到换绑时刻会把上游起点读错（审核 #114 中-F：换绑那天以后有一天关过，整行变成读不到上游）。
           // 段上挂的 Key 列表（segment.keys）是不可枚举属性（server/reconciliation-repository.js），`{...segment}` 展开会把它丢掉，
-          // 按天切出新的那几截就会只认绑定自己那把 Key、少算别的 Key 的上游成本——用 Object.create 接到原型链上，keys 照样能查到
-          // （审核 #114 中-G，总指挥 10-26 定）
-          return runs.map((run, index) => ({ segment: index ? Object.create(segment, { id: { value: `${String(segment.id).slice(0, 28)}~${index}`, enumerable: true } }) : segment, segmentWindow: { ...segmentWindow, ...run },
+          // 按天切出新的那几截就会只认绑定自己那把 Key、少算别的 Key 的上游成本——用 copySegment 显式复制，普通字段和 keys 都是
+          // 这份拷贝自己的，不借用原型链（审核 #114 中-G；总指挥 10-26 定改法：Object.create 会让除 id 外的字段都读不出来，
+          // JSON.stringify / Object.keys / 深比较都不对，K2b 以后复制分段统一用这个函数）
+          return runs.map((run, index) => ({ segment: index ? copySegment(segment, { id: `${String(segment.id).slice(0, 28)}~${index}` }) : segment, segmentWindow: { ...segmentWindow, ...run },
             upstreamWindow: upstreamWindow ? { ...upstreamWindow,
               startMs: run.startMs === segmentWindow.startMs ? upstreamWindow.startMs : run.startMs,
               endMs: run.endMs === segmentWindow.endMs ? upstreamWindow.endMs : run.endMs } : upstreamWindow }));
