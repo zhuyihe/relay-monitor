@@ -41,3 +41,17 @@ export function ingestCell(bg, get) {
 export function ingestRoundLine(x) {
   return `${x.startAt.slice(11, 19)}：整站读 ${x.ownLogAll}，自营全部 ${x.ownRequests}，问额度前 180 秒已用 ${x.usedBefore}${x.usedPartial ? "（窗口开头不满 180 秒，偏少）" : ""}，推算额度 ${x.allowanceEstimate}`;
 }
+
+// 开关的实际值（量之前、量完以后各读一次 GET /api/settings 的 expectedCost）和这段时间实际看到的整站读请求数。
+// 实际是关、整站读却不是 0 才算异常（anomaly）。老结果里没有 switch 时按「读不到」写
+const switchWord = (v) => (v === true ? "开" : v === false ? "关" : v === null ? "这个版本没有这个开关" : "读不到");
+export function ingestSwitch(bg) {
+  const g = bg?.steady?.ingest;
+  if (!g) return { text: NA, anomaly: false };
+  const before = g.switch?.before, after = g.switch?.after;
+  const state = !g.switch ? "读不到" : before === after ? switchWord(before) : `量之前${switchWord(before)}、量完${switchWord(after)}`;
+  const n = g.ownLogAllTotal ?? g.ownLogKinds?.all ?? null;
+  const off = g.switch && (before === false || before === null) && (after === false || after === null);
+  const anomaly = Boolean(off && n > 0);
+  return { text: `${state}，这段时间整站读 ${n ?? "?"} 个请求${anomaly ? "（开关关着却有整站读）" : ""}`, anomaly };
+}

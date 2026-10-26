@@ -30,8 +30,11 @@ async function ingestProgress() {
   } catch (err) { if (err?.code === "ER_NO_SUCH_TABLE") table = false; else throw err; }
   let buckets = null;
   if (table) { try { buckets = Number((await conn.query("SELECT COUNT(*) n FROM own_log_buckets"))[0][0].n); } catch { buckets = null; } }
-  const ownLog = await api("/api/settings").then((r) => r.ownLog ?? null).catch(() => null);
-  return { at, table, cursor, buckets, ownLog };
+  // 开关的实际值（不是脚本有没有 PUT）：true / false；这个版本的设置里没有 expectedCost 是 null；GET 失败是 "unreadable"
+  const settings = await api("/api/settings").catch(() => null);
+  const ownLog = settings?.ownLog ?? null;
+  const expectedCost = !settings ? "unreadable" : settings.settings && "expectedCost" in settings.settings ? settings.settings.expectedCost === true : null;
+  return { at, table, cursor, buckets, ownLog, expectedCost };
 }
 // 打开开关时：base、head 都从「刚打开」起量——先清掉进度和桶（同一个夹具上 base 量过以后 head 不接着 base 的进度读），
 // 再等到整站读真的往前读了一个窗口（最多 240 秒）才开稳态窗口：刚量完接口那一阵对自营站点的请求还算在 180 秒额度里，
@@ -104,7 +107,9 @@ if (ingest0.table && ingest1.table && ingest1.cursor) {
     behindEndMs: behindAt(ingest1), freshBehindMs, etaFromFreshMs: eta(freshBehindMs), etaFromNowMs: eta(behindAt(ingest1)) };
 }
 const ingest = {
-  expectedCost: EXPECTED_COST, bindings: RULES.length, cursorTable: ingest1.table,
+  // expectedCost：脚本有没有 PUT 打开；switch：量之前、量完以后读到的开关实际值（报告里写的是这个）；ownLogAllTotal：窗口里整站读一共几个
+  expectedCost: EXPECTED_COST, switch: { before: ingest0.expectedCost, after: ingest1.expectedCost }, ownLogAllTotal: allLogTimes.length,
+  bindings: RULES.length, cursorTable: ingest1.table,
   perRound: { ownLogAll: rounds.length ? Math.round(allLogTimes.length / rounds.length * 10) / 10 : null,
     ownRequests: rounds.length ? Math.round(ownTimes.length / rounds.length * 10) / 10 : null },
   rounds: ingestRounds,
