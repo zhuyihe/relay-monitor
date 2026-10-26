@@ -14,18 +14,23 @@
 | 文件 | 做什么 |
 |---|---|
 | `run.sh` | 编排：`local`（本机一条命令）、`all`、`seed`、`measure`、`parity`、`compare`、`stop`。CI 一步一个子命令 |
-| `lib/model.mjs` | 确定性数据模型：50 个上游、300 个自营渠道、80 条绑定、500 个用户、每天 10 万条日志（第 k 条全由 hash(k) 决定），按小时预聚合 |
+| `lib/model.mjs` | 确定性数据模型：50 个上游、300 个自营渠道、80 条绑定、500 个用户、每天 10 万条日志（第 k 条全由 hash(k) 决定），按小时预聚合。`PERF_BINDINGS=N` 只接入前 N 条绑定（见「整站读场景」） |
 | `lib/env.mjs` | 环境变量（库、端口、应用目录、结果目录）、登录、进度日志 |
 | `lib/ps.mjs` | performance_schema 语句摘要的快照和差值、binlog 字节、看门狗（夹具库里跑超过 60 秒的查询直接 `KILL QUERY`） |
 | `lib/metrics.mjs` | 后台稳态窗口折成「每轮结账轮询」 |
 | `lib/kill-queries.mjs` | 停服务时把它留在 MySQL 里还在跑的查询杀掉 |
+| `lib/key-agent-protocol.mjs` | 渠道 Key 读取服务的协议（打码、指纹、从 secret 派生请求令牌和指纹密钥）：和 `lib/key-fingerprint.js` 一字不差，但不从被测版本的代码引——假站点一个进程要跨 base、head 两版用 |
 | `fake-site.mjs` | 假站点：44 个 New API、4 个 Sub2API、2 个只用 Key 的上游和 1 个自营 New API（`/na01`…`/s245`…`/nk49`、`/own`），每个请求延迟 50 ms（`FAKE_DELAY_MS`）。`/__stats[?reset=1&detail=1]` 看请求计数，`/__ctl?delay=` 改延迟 |
 | | 开关：`FAKE_TEST_LOGS=1`（默认关）让自营站点的 `/api/log/`、`/api/log/stat` 里多出渠道测试日志（照 New API 的写法：token_name「模型测试」、token_id 0，每 10 分钟测一遍 300 个渠道） |
+| | 自营站点的 `/api/option/`：站点设置，`[{ key, value }]`，带几个大 JSON（倍率表等），整个响应约 37 KB（大小由条数定）。开关：`FAKE_CONSUME_LOG_OFF=1`（默认关）让 `LogConsumeEnabled` 回 "false"（自营站点关了收费记录） |
 | | 开关：`FAKE_OWN_RATE_LIMIT=1`（默认关）给自营站点加全站限流（同一来源 180 秒 360 个请求，超了回 429 带 Retry-After，被拒的数在 `/__stats` 的 `ownRateLimited`） |
 | | 开关：`FAKE_USER_ROLES="1:1,450:100"`（默认空）改用户列表里的角色（把 root 列成普通用户、user450 列成超级管理员） |
 | | 开关：`/__ctl?down=/na01,/na02` 让这些上游一律回 503（像上游挂了），`down=` 清空 |
+| | 自营站点单独一个端口 `FAKE_OWN_PORT`（默认 `FAKE_PORT + 1`，同一个进程、同一套路由）：控制台按「主机:端口」给自营站点记 180 秒的请求额度，和上游共用端口的话读上游的请求也会算进自营站点的额度 |
+| | 自营 `/api/log/` 分三类计数：带 `username`/`token_name`/`channel`/`model_name`/`group` 任何一个的是 `filtered`；不带的里 `page_size=1` 的是「上次以后有没有新消费」那一下（`latest`），别的是整站读（`all`）；`/__stats` 的 `ownLogKinds`，`detail=1` 的请求时间线里这类请求多一项类别 |
+| | 开关：`PERF_KEY_AGENT=on`（默认关，见下面「K2a/K2b 场景」）装渠道 Key 读取服务：`GET /key-agent/keys`（Bearer、ETag/304、`X-Agent-Stale`），每 10 分钟随机换 2～3 个渠道现在用的 Key；`/__ctl?key_agent_down=1\|0` 模拟读库失败，`key_agent_rotate=1` 立刻触发一次换 Key（本机调脚本用） |
 | `seed/00-config.mjs` | 定夹具起点（92 天前的 UTC 零点）和哪些（上游, 分组）40 天前换过倍率，写 `$PERF_OUT/fixture/config.json` |
-| `seed/01-base.mjs` | 删库重建、建表（应用的 `ensureSchema`），用应用的 `Store` 写自营站点、面板账号 admin/admin123、通知方式、日报 |
+| `seed/01-base.mjs` | 删库重建、建表（应用的 `ensureSchema`），用应用的 `Store` 写自营站点、面板账号 admin/admin123、通知方式、日报。`PERF_KEY_AGENT=on` 时顺带给自营站点配上读取服务的地址和令牌（被测版本没有这两个字段时 `Store.add` 原样丢掉，不报错——量的就是这个差） |
 | `seed/02-onboard.mjs` | 服务在跑：走「接入渠道」同一条接口建 50 个上游和 80 条绑定 |
 | `seed/03-history.mjs` | 服务停着：创建时间搬回起点，记 11 次倍率变化，灌余额历史（51 站 × 90 天 × 每分钟一点 = 660 万点，不进 binlog），算日汇总 |
 | `seed/04-recon.mjs` | 服务在跑：最近 90 天每天一次 `POST /api/reconciliation/query {observe:true}`，让应用自己结账；再补「今天」观测快照和约 10% 的重结版本 |
@@ -74,8 +79,41 @@ gh workflow run perf.yml -R zhuyihe/relay-monitor -f base=<SHA 或分支> -f hea
 - 给 `pr`：head 是 PR 的最新提交，base 是它和目标分支的分叉点（只量这个 PR 自己的改动）。
 - 不给 `pr`：`base` 空 = main，`head` 空 = 触发时选的分支。
 - `parity_days`：对拍天数，默认 14；`history_days`：余额历史天数，默认 90；`fake_test_logs`：勾上就给假站点带 `FAKE_TEST_LOGS=1`（自营站点多出渠道测试日志），默认不勾。
+- `bindings`：绑定条数，空 = 80；`expected_cost`：勾上 = 量后台前打开「算应付成本」（整站读）；不勾 = 不改开关，用产品默认（V1-a 关；V1-b 起默认开），不等于「关」。见下面「整站读场景」。
+- `key_agent`：勾上 = 假站点装渠道 Key 读取服务（照真协议：指纹、打码、304、`X-Agent-Stale`）、自营站点配上地址和令牌；不勾 = 和现在一样，没有这条路。见下面「K2a/K2b 场景」。
 - 测量脚本用触发时选的分支里的 `tests/perf`，不用被测版本里的。
 - 用时约 22 分钟：两版各装依赖、打包约 40 秒，建夹具约 5 分钟，每次测量约 6.5 分钟，对拍（14 天）约 1 分钟。余额历史用默认的 90 天就在 60 分钟的上限里，不用缩。
+
+## 整站读场景（小夹具，「算应付成本」开着）
+
+「算应付成本」打开后，每轮结账轮询结束时控制台按小窗口读自营站点不带筛选的 `/api/log/`（整站读）。它和别的读取共用 New API 默认的全站限流（同一来源 180 秒 360 个请求），自己最多用 25%，还要给别的读取留 120 个。80 条绑定的大夹具里别的读取就把额度占满了，整站读一页都分不到；这个场景用 5 条绑定，别的读取照常开着，量整站读真开起来是什么样。
+
+```sh
+gh workflow run perf.yml -R zhuyihe/relay-monitor --ref main -f pr=<号> -f bindings=5 -f expected_cost=true -f fake_test_logs=true
+```
+
+- `bindings=5`（`PERF_BINDINGS=5`）：只接入前 5 条绑定、它们所在的 3 个上游和 2 个只用 Key 的上游。数据模型不变：自营站点照旧 300 个渠道、每天 10 万条日志（加上测试日志），没接入的渠道照旧有消费，整站读要读的量和大夹具一样。不设时和原来逐字一样。
+- `expected_cost=true`（`PERF_EXPECTED_COST=on`）：后台测量开始前 `PUT /api/settings {expectedCost: true}`，清掉 `own_log_cursor`、`own_log_buckets`（base、head 都从「刚打开」起），等整站读真的写进一个窗口（最多 240 秒；刚量完接口那一阵的请求还占着 180 秒额度）再开稳态窗口。不勾时不改开关，用产品默认（V1-a 关；V1-b 起默认开）：在 V1-b 以后的版本上不勾，整站读照样开着，也不清进度、不等。
+- 要量整站读追得多快，可以把稳态窗口放长（本机 `BG_SEC=600`；CI 用默认 185 秒）。
+
+三样数在 `compare.md`（Summary 里）「整站读」一节、各自的 `summary.md`，原始数在 `background.json` 的 `steady.ingest`：
+
+- **每轮实际请求数**：稳态窗口里每轮结账轮询（从这一轮第一个渠道账单前 2 秒到下一轮同一点）对自营站点不带筛选的 `/api/log/` 几个，以及对自营站点全部几个。每轮明细还有「问额度前 180 秒已用」和按 `lib/own-request-budget.js` 的规矩推算的额度 `min(90, 360 − 120 − 已用)`：整站读是 0 时看这两个数，是额度分不到还是别的原因。
+- **限流占比**：稳态窗口里任意 180 秒（滑动）对自营站点的最多请求数 ÷ 360，和平均（窗口总数折成 180 秒）÷ 360；整站读和自营站点全部分开报。窗口不到 180 秒时「最多」就是整个窗口的数。全部的占比接近 100% 就是快撞到站点限流了。
+- **追平用时**：窗口开始和结束各读一次 `own_log_cursor.covered_to_ms`，落后 = 现在 − 120 秒 − 进度；「每分钟追了」= 进度挪了多少 ÷ 过了多久（每过 1 分钟读完几分钟的日志，大于 1 才追得上）。推算从刚打开（进度从昨天 0 点起）到追平 = 刚打开时落后多少 ÷（每分钟追的 − 1）。落后超过 1 小时时每轮最多 15 页、不到 1 小时 6 页，窗口里测到的是哪一段的速度，推算就按哪一段算，只看量级。base 没有 `own_log_cursor` 表（旧版）时写「不适用」。
+- 请求数、占比算可比；落后、追平用时只做参考（随机器快慢和夹具起点变）。这一节只列数，不判超线。
+- 开关写的是**实际值**：量之前、量完以后各读一次 `GET /api/settings` 的 `expectedCost`（旧版没有这个字段写「这个版本没有这个开关」），旁边写这段时间实际看到几个整站读请求。只有实际是关、整站读却不是 0 才标 ⚠、算一项超线。
+
+## K2a/K2b 场景（渠道 Key 读取服务）
+
+```sh
+gh workflow run perf.yml -R zhuyihe/relay-monitor -f pr=<号> -f key_agent=true
+```
+
+- `key_agent=true`（`PERF_KEY_AGENT=on`）：假站点在自营站点自己身上（`FAKE_OWN_PORT`）装一个 `/key-agent`，自营站点配上它的地址和令牌（种子脚本 `seed/01-base.mjs`）。被测版本没有 K2a（`keyAgentUrl`/`keyAgentSecret` 字段、`/key-agent` 这条路都不存在）时，这两步原样跳过、不报错——量的就是「装了读取服务前后，对外请求多了多少」，base（没有 K2a）天然是 0。
+- 协议照 k-plan 第二节：`GET /key-agent/keys` 要带 `Authorization: Bearer <派生的请求令牌>`；没变时带 `If-None-Match` 回 304；每个渠道一个指纹 + 一个打码（单数号上游的 Key 目录给打码、双数号给完整 Key，两条认法都量得到）；`/__ctl?key_agent_down=1` 模拟读取服务读库失败，照协议沿用上一份成功结果、带 `X-Agent-Stale: 1`（CI 默认不触发，本机调脚本用）。
+- 每 10 分钟随机换 2～3 个渠道现在用的 Key（只换走 New API 整号账号的渠道：候选只收这一类，走只用 Key 的上游、Sub2API 的渠道换了也看不出差，不浪费一次随机）。CI 默认的稳态窗口（185 秒）比 10 分钟短，量到的多半是「没变、304」那条路；想量「换了 Key 以后重新认一遍」有多贵，本机把窗口放长（`BG_SEC=1200` 以上）或用 `/__ctl?key_agent_rotate=1` 手动触发。
+- 请求数在 `compare.md`、`summary.md` 的「假站点请求按路由」里自动出现（`key-agent:/keys`），和「整站读」一样走已有的通用对比，没有另写一节。
 
 ## 结果怎么看
 
@@ -95,20 +133,20 @@ gh workflow run perf.yml -R zhuyihe/relay-monitor -f base=<SHA 或分支> -f hea
 | 可比（数出来的，超线规则只用在这一列） | 只做参考（标「参考」，不算超线） |
 |---|---|
 | 返回体字节、状态码 | 接口 p50/p95、冷请求毫秒 |
-| 每轮结账轮询：SQL 条数、对假站点的请求数、binlog 字节、扫描行数 | SQL 耗时、一轮余额刷新的毫秒 |
-| 一轮余额刷新：SQL 条数、请求数、`stations` 表写入行数、扫描行数 | 服务进程 CPU、内存 |
-| 稳态每分钟的 SQL 条数、扫描行数、请求数、binlog；假站点按路由的请求数 | 启动用时 |
+| 一轮余额刷新：SQL 条数、请求数、`stations` 表写入行数、扫描行数 | SQL 耗时、一轮余额刷新的毫秒 |
+| 稳态每分钟的 SQL 条数、请求数（进门槛）；扫描行数、binlog（只列） | 每轮结账轮询：SQL 条数、对假站点的请求数、binlog 字节、扫描行数 |
+| 假站点按路由的请求数 | 服务进程 CPU、内存；启动用时 |
 | 新出现的语句和它们的 EXPLAIN | |
 
 超线规则沿用测试台基线报告第 8 节（CONTRIBUTING.md 4.3），只用在可比的数上：
 
 - 返回体比 base 涨超过 20% 且多出 2 KB 以上，或超过 1 MB；base 是 200、head 不是 200；
-- 一轮余额刷新、每轮结账轮询的 SQL 条数、请求数、binlog 比 base 涨超过 20%；`stations` 表写入行数比 base 多；
+- 一轮余额刷新的 SQL 条数、请求数，稳态每分钟的 SQL 条数、请求数比 base 涨超过 20%；`stations` 表写入行数比 base 多；
 - 新出现的语句每次扫描超过 1 万行，或 EXPLAIN 里有全表扫描（type=ALL 且 rows > 1000）。
 
 base 本来就超了绝对线的（比如有的接口返回体已经超过 1 MB），head 没更差就标「base 已超」，不算超线。阈值能用环境变量调，见 `measure/compare.mjs` 开头。
 
-扫描行数、稳态每分钟的数只列出来不判超线：窗口里两个循环各跑几轮不一定一样，波动比每轮折算的大。
+「每轮结账轮询」原来是可比、进门槛的，现在改成参考，门槛挪到稳态每分钟的 SQL 条数和请求数上。原因：轮次是按「两次渠道账单隔超过 15 秒就算新的一轮」切的，两轮挨得近会并成一轮、窗口边上会切掉半轮，同一提交和自己比，「每轮」的 SQL 条数、请求数就差 34–40%（binlog 74%），超线全是假的；每分钟的数不用切轮，同一次只差 1–4%。扫描行数、稳态每分钟的 binlog 只列出来不判超线（同一提交 binlog/分钟也差过 26%）。
 
 ### 余额历史天数
 
@@ -119,4 +157,5 @@ base 本来就超了绝对线的（比如有的接口返回体已经超过 1 MB�
 - 页面（首屏、轮询）和打包体积这次没搬，还在测试台上量。
 - 夹具每次现建，「今天」类接口随时间变化：base 和 head 前后差十来分钟，返回体会有小的差别（阈值留了余量）。
 - 毫秒在 CI 上只做参考；要看耗时，在同一台机器上前后脚量 base 和 head，还是得在测试台上。
-- 同一提交对同一提交，每轮结账轮询的 SQL 条数也能差 10% 上下：后台有一批渠道状态同步（`reconciliation_rule_channels` 的 UPDATE，约 280 条）落不落在 185 秒的窗口里不一定，这批语句也可能出现在「新出现的语句」里（扫描 1 行，不算超线）。离 20% 的线有余量，但 head 小幅变多会被它盖住一点。
+- 「每轮」那几行（结账轮询、整站读的每轮请求）看轮数：两边轮数不同时以每分钟为准（原因见上面「性能哪些数可比」）。
+- 同一提交对同一提交，SQL 条数也能差 10% 上下：后台有一批渠道状态同步（`reconciliation_rule_channels` 的 UPDATE，约 280 条）落不落在 185 秒的窗口里不一定，这批语句也可能出现在「新出现的语句」里（扫描 1 行，不算超线）。离 20% 的线有余量，但 head 小幅变多会被它盖住一点。

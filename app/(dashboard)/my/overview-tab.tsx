@@ -6,7 +6,7 @@ import Link from "next/link";
 import { Button } from "antd";
 import { NAV_LABELS } from "../../../lib/brand";
 import { dayKeyInTz } from "../../../lib/business-time";
-import { ADMIN_UNMARKED, BASIS_TITLE, EMPTY, FORECAST_TEXT, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
+import { ADMIN_UNMARKED, BASIS_TITLE, EMPTY, INCOME_GAP_NOTE, FORECAST_TEXT, RANGE_TEXT, formatCompact, formatDayKey, formatInt, formatMoney, formatSinceToday, weekdayOfDayKey } from "../../../lib/format";
 import { profitApproxOf, splitProfitWarnings } from "../../../lib/profit";
 import { EmptyState, ErrorState } from "../../components/data-state";
 import { ForecastChart } from "../../components/forecast-chart";
@@ -196,6 +196,7 @@ function Equation({
       title={title}
       caption={caption}
       {...(unread || {})}
+      gapNote={p.consumeLogGap && !unread ? INCOME_GAP_NOTE(range === "today") : undefined}
       extra={
         <button type="button" className="jy-caption-link jy-my-linkbtn" onClick={onBasis}>
           {BASIS_TITLE}

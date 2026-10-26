@@ -72,6 +72,52 @@ async function notifyTokenProblem(rt, repo, rule, result, code) {
   await broadcast(rt.store.channels, title, body);
 }
 
+// 自营站点的设置一直读不到（R2 审核第二轮；用语规范 §10 同一套格式）：按自营站点只推一条，和令牌坏了的推送一样记在站点键上；读通了随 READY 一起清
+// 记在自己的站点键 opt:站点id 上（不用 tk:），因为「今天」每轮的 READY 结果会把 tk: 键整个清掉，这条要留到设置读得到那一刻（server/reconciliation.js 的 refreshConsumeLog 清）
+// 什么时候推：对账模块算出「连续读不到超过 24 小时」那一刻（server/reconciliation.js 的 syncOptionUnreadableSince），不是跟着某条绑定某天的结果——
+// 结账中的日子（还没过等待期的窗口）persistResult 不推告警，所以这条由站点那一层直接调
+export const optionAlertKey = (ownStationId) => `opt:${ownStationId}`;
+// 一发现读不到（不管多久、不管会不会推）就记一行：active、first_seen_at 是这一刻，last_notified_at 留空。已经有一行在 active 就不动
+// （保留它原来的 first_seen_at，不会因为重启、按天粒度的账本状态行而往后漂）——重启后第一次检测也会走到这里，不看内存里上一次是什么
+// （审核 R2 第二轮 中-E，总指挥 10-26 定）。推送仍然只在 syncOptionUnreadableSince 看到满 24 小时、这一段还没推过时才做。
+export async function markOptionUnreadableSeen(repo, ownStationId, now = Date.now(), code = "OWN_OPTION_UNREADABLE") {
+  const key = optionAlertKey(ownStationId);
+  return withSiteLock(key, async () => {
+    const previous = await repo.getAlertState(key, code);
+    if (previous?.active) return Number(previous.first_seen_at);
+    await repo.setAlertState(key, code, { active: true, firstSeenAt: now, lastSeenAt: now, lastNotifiedAt: null, recoveredAt: null });
+    return now;
+  });
+}
+export async function notifyOptionUnreadable(rt, repo, ownStationId, code = "OWN_OPTION_UNREADABLE") {
+  const key = optionAlertKey(ownStationId);
+  const first = await withSiteLock(key, async () => {
+    const now = Date.now();
+    const previous = await repo.getAlertState(key, code);
+    const firstSeenAt = previous?.active && previous.first_seen_at != null ? Number(previous.first_seen_at) : now;
+    // 这一段已经推过（markOptionUnreadableSeen 先写的行，或者上一轮已经推了）：只续 last_seen_at，不再推
+    if (previous?.active && previous.last_notified_at != null) {
+      await repo.setAlertState(key, code, { active: true, firstSeenAt, lastSeenAt: now, lastNotifiedAt: Number(previous.last_notified_at), recoveredAt: null });
+      return false;
+    }
+    await repo.setAlertState(key, code, { active: true, firstSeenAt, lastSeenAt: now, lastNotifiedAt: now, recoveredAt: null });
+    return true;
+  });
+  if (!first) return;
+  const station = rt.store.get?.(ownStationId) || null;
+  const name = station?.name ? stationDisplayName(station) : "";
+  const line = (label, value) => `${label}：${value}`;
+  const body = [
+    name ? line(ALERT_TEXT.ownLabel, name) : "",
+    line(ALERT_TEXT.status, ALERT_TEXT.optionUnreadableStatus),
+    line(ALERT_TEXT.impact, ALERT_TEXT.optionUnreadableImpact),
+    line(ALERT_TEXT.note, ALERT_TEXT.optionUnreadableNote),
+    line(ALERT_TEXT.time, formatZonedDateTime(Date.now(), businessTimeZone())),
+    BRAND.notificationSignature,
+  ].filter(Boolean).join("\n");
+  await broadcast(rt.store.channels || [], `【${BRAND.name}告警】${ALERT_TEXT.ownLabel}${name ? ` ${name}` : ""} ${ALERT_TEXT.optionUnreadableStatus}`, body);
+}
+
 export async function notifyReconciliationHealth(rt, repo, rule, result) {
   const now = Date.now();
   const code = result?.health?.code || "READY";
@@ -84,6 +130,7 @@ export async function notifyReconciliationHealth(rt, repo, rule, result) {
     return;
   }
   if (isAccessTokenError(code)) return notifyTokenProblem(rt, repo, rule, result, code);
+  if (code === "OWN_OPTION_UNREADABLE") return notifyOptionUnreadable(rt, repo, rule.ownStationId, code);
 
   const previous = await repo.getAlertState(rule.id, code);
   if (previous?.active) {

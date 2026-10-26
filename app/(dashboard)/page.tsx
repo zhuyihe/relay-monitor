@@ -15,11 +15,12 @@ import { attentionStationIds, balanceDaysText, balanceViewOf, buildOverviewActio
 import { balanceMoneyOf, countsInProfit, profitApproxOf, rateSnapshotOf, splitProfitWarnings } from "../../lib/profit";
 import { workflowActionMeta } from "../../lib/workflow-actions";
 import { asSentence, describeError, errorText, failureText, refreshAllText, refreshOneText } from "../../lib/error-copy";
-import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, formatAsOf, formatDays, formatMoney, formatSinceToday, formatZonedDate, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
+import { BALANCE_STATE_TEXT, basisText, COST_MODE_TEXT, EMPTY, INCOME_GAP_NOTE, formatAsOf, formatDays, formatMoney, formatSinceToday, formatZonedDate, RANGE_TEXT, refreshFailedText, SELL_PRICE_UNSET, soonText } from "../../lib/format";
 import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../lib/business-time";
 import { UPSTREAM_FORM_TEXT } from "../../lib/channel-onboarding";
 import { AttentionList } from "../components/attention-list";
 import { Sym } from "../components/icons";
+import { RecheckConsumeLogButton } from "../components/recheck-consume-log";
 import { More } from "../components/more";
 import type { AttentionItem } from "../components/attention-list";
 import { EmptyState, ErrorState, PanelSkeleton } from "../components/data-state";
@@ -405,6 +406,7 @@ function Equation({ range, money, error, onRetry }: { range: Range; money: Money
       title={title}
       caption={caption}
       {...(unread || {})}
+      gapNote={profit.consumeLogGap && !unread ? INCOME_GAP_NOTE(range === "today") : undefined}
       revenue={{
         value: profit.incomeCny ?? null,
         approx: approx.income,
@@ -506,7 +508,10 @@ function AttentionPanel({
   const names = new Map(stations.filter(Boolean).map((s) => [String(s.id), stationDisplayName(s)]));
   const nameOf = (id: string) => names.get(id);
   // 账号与账单待办是真实链接（可复制、可在新标签打开），普通点击在本站内跳转（不整页刷新），按钮名就是要做的动作
-  const open = (a: any, primary = true) => (
+  const open = (a: any, primary = true) => a.kind === "recheck_consume_log" ? (
+    // 自营站点不记收费记录：点了才马上再读一次站点的设置（转圈、就地提示），不是跳转
+    <RecheckConsumeLogButton type={primary ? "default" : "link"} aria-label={`${a.label}（${workflowOwner(a, nameOf)}）`} />
+  ) : (
     <Button
       size="small"
       type={primary ? "default" : "link"}

@@ -9,6 +9,7 @@ import { INCOME_UNREAD, MINUS, OWN_STATION_UNSET_HINT, OWN_STATION_UNSET_TITLE, 
 import { isLoss } from "../../lib/profit";
 import { workflowAction, workflowActionMeta } from "../../lib/workflow-actions";
 import { ErrorDetail, noteOf } from "./error-detail";
+import { RecheckConsumeLogButton } from "./recheck-consume-log";
 import { Icon } from "./icons";
 import { StatusText } from "./status";
 
@@ -35,6 +36,8 @@ export const EQ_TEXT = Object.freeze({
 // 下方写「读不到自营站点的收入：原因。这里只算成本。」[刷新] 和「查看详细原因」。运营总览、自营业务、成本估算共用
 export function incomeUnreadProps(error: unknown, onRetry?: () => void) {
   const note = noteOf(error);
+  // 自营站点不记收费记录：按钮是「重新检查」（点了才再读一次站点的设置，转圈、就地提示），读完再刷新
+  const recheck = (error as any)?.errorCode === "OWN_CONSUME_LOG_OFF";
   return {
     unconfigured: true,
     revenueEmpty: INCOME_UNREAD.empty,
@@ -43,7 +46,7 @@ export function incomeUnreadProps(error: unknown, onRetry?: () => void) {
       <>
         {failureSentence(INCOME_UNREAD.title, note.text)}
         {INCOME_UNREAD.costOnly}
-        {onRetry && (
+        {recheck ? <RecheckConsumeLogButton onDone={onRetry} className="jy-eq-inline-btn" /> : onRetry && (
           <Button size="small" onClick={onRetry} className="jy-eq-inline-btn">
             {workflowActionMeta("refresh")!.label}
           </Button>
@@ -155,6 +158,7 @@ export function ProfitEquation({
   revenueEmpty = EQ_TEXT.unsetRevenue,
   profitNote,
   notice,
+  gapNote,
   loading = false,
   partialTail = "实际净利会比这里低。",
 }: {
@@ -178,6 +182,8 @@ export function ProfitEquation({
   revenueEmpty?: string;
   profitNote?: ReactNode;
   notice?: ReactNode;
+  // 自营站点以前有一段没记收费记录、已经开回来，所选范围碰到那一段：等式下面一句灰字，不加按钮
+  gapNote?: string;
   loading?: boolean;
   // 不完整说明的最后一句；缺的是成本时利润偏高，缺的是汇率等时方向不定
   partialTail?: ReactNode;
@@ -278,6 +284,7 @@ export function ProfitEquation({
           </div>
         </div>
       )}
+      {gapNote && !unconfigured && !loading && <p className="jy-caption">{gapNote}</p>}
       {flow && (
         <div className="jy-flow" aria-label="每 100 元收入的去向">
           <div className="jy-flow-bar" aria-hidden="true">
