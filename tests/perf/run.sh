@@ -12,6 +12,7 @@
 # 环境变量（默认值）：DB_HOST(127.0.0.1) DB_PORT(3306) DB_USER(root) DB_PASSWORD() DB_NAME(relay_monitor_perf，名字里必须带 perf，种子会删库重建)
 #   APP_PORT(3301) FAKE_PORT(18950) PERF_OUT(系统临时目录/relay-monitor-perf) PERF_BASE_DIR PERF_HEAD_DIR（打包好的应用目录）
 #   PARITY_DAYS(14) API_N(10) BG_SEC(185) RECON_DAYS(90) PERF_HISTORY_DAYS(90) FAKE_DELAY_MS(50) FAKE_TEST_LOGS(0，假站点开关，见 README)
+#   PERF_BINDINGS(空 = 80 条绑定；缩小夹具，种子、假站点、测量一起用) PERF_EXPECTED_COST(off；on 时后台测量前打开「算应付成本」整站读)
 # 不带锁：CI 上一台机器只跑这一件。本机和别的重活抢机器时，自己在外面拿锁。
 
 set -o pipefail

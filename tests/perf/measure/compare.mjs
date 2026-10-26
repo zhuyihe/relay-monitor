@@ -8,7 +8,7 @@
 // 有超线时退出码是 2（结果照样打到标准输出）。
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { perRound } from "../lib/metrics.mjs";
+import { perRound, INGEST_ROWS, ingestCell, ingestRoundLine } from "../lib/metrics.mjs";
 
 const [baseDir, headDir] = process.argv.slice(2);
 if (!baseDir || !headDir) { console.error("用法：node measure/compare.mjs <base 结果目录> <head 结果目录>"); process.exit(1); }
@@ -87,6 +87,17 @@ if (b1 && b2) {
     out.push("| 路由 | base 每轮 | head 每轮 | 变化 |", "|---|--:|--:|--:|");
     for (const k of changed) out.push(`| ${k} | ${Math.round(per(b1, k))} | ${Math.round(per(b2, k))} | ${signed(Math.round(per(b2, k)) - Math.round(per(b1, k)))} |`);
   } else out.push("（全部一样）");
+  out.push("");
+}
+
+// ---- 整站读（算应付成本）：只列数，不判超线 ----
+if (b1 && b2 && (b1.steady.ingest || b2.steady.ingest)) {
+  const g1 = b1.steady.ingest, g2 = b2.steady.ingest;
+  out.push("## 整站读（「算应付成本」开着时，自营站点不带筛选的 /api/log/）\n",
+    `开关：base ${g1?.expectedCost ? "开" : "关"}，head ${g2?.expectedCost ? "开" : "关"}；绑定 ${g2?.bindings ?? "?"} 条。限流按 New API 默认：同一来源 180 秒 360 个请求。请求数、占比可比；落后、追平用时只做参考（随机器快慢和夹具起点变）。只列数，不判超线。开关关着时整站读应该是 0。\n`,
+    "| 指标 | 类别 | base | head |", "|---|---|--:|--:|");
+  for (const [name, kind, get] of INGEST_ROWS) out.push(`| ${name} | ${kind} | ${cell(ingestCell(b1, get))} | ${cell(ingestCell(b2, get))} |`);
+  for (const [label, g] of [["base", g1], ["head", g2]]) if (g?.rounds?.length) out.push("", `${label} 每轮：`, ...g.rounds.map((x) => `- ${ingestRoundLine(x)}`));
   out.push("");
 }
 

@@ -1,4 +1,4 @@
-// 假站点：一个进程模拟 50 个上游（New API / Sub2API / 只用 Key）和 1 个自营 New API 站点。
+// 假站点：一个进程模拟 50 个上游（New API / Sub2API / 只用 Key；PERF_BINDINGS 缩小时只有接入的那几个）和 1 个自营 New API 站点。
 // 用法：node fake-site.mjs   （FAKE_PORT 默认 18950，FAKE_DELAY_MS 默认 50）
 // 地址：上游 http://127.0.0.1:18950/na01 … /s245 … /nk49；自营 http://127.0.0.1:18950/own
 // 控制：GET /__stats[?reset=1] 看/清请求计数；POST /__ctl?delay=50&ratio=old|current&freeze=1|0 改延迟、分组倍率口径、停住「现在」；GET /__health
@@ -21,7 +21,10 @@ console.log(`[fake] 预聚合 ${agg.nh} 小时，用了 ${Date.now() - t0} ms`);
 let delayMs = Number(process.env.FAKE_DELAY_MS ?? 50);
 let ratioMode = process.env.FAKE_RATIO_MODE || "current";
 const stats = { total: 0, bytes: 0, byRoute: Object.create(null), bySite: Object.create(null), startedAt: new Date().toISOString() };
-let requestLog = []; // [到达时刻 ms, 路由]，/__stats?detail=1 返回，最多 20 万条
+let requestLog = []; // [到达时刻 ms, 路由]，/__stats?detail=1 返回，最多 20 万条；自营 /api/log/ 多一项 "all"（不带筛选的整站读）或 "filtered"
+// 自营 /api/log/ 分两类计数（整站读场景用）：all = 不带 username/token_name/channel/model_name/group 筛选的整站读（channel=0 算没筛），filtered = 带任何一个
+let ownLogKinds = { all: 0, filtered: 0 };
+const OWN_LOG_FILTERS = ["username", "token_name", "channel", "model_name", "group"];
 
 const upByPath = new Map(UPSTREAMS.map((up) => [up.path, up]));
 // freeze：POST /__ctl?freeze=1 以后「现在」停在那一秒，之后不再有新消费、余额不再变（测 P1a 那种「没有新消费就沿用」的轮次）；freeze=0 恢复
@@ -440,9 +443,9 @@ function route(req, url) {
   const path = url.pathname, q = url.searchParams;
   if (path === "/__health") return [200, { ok: true, epoch0, nh: agg.nh }];
   if (path === "/__stats") {
-    const snapshot = { ...JSON.parse(JSON.stringify(stats)), ownRateLimited };
+    const snapshot = { ...JSON.parse(JSON.stringify(stats)), ownRateLimited, ownLogKinds: { ...ownLogKinds } };
     if (q.get("detail") === "1") snapshot.log = requestLog;
-    if (q.get("reset") === "1") { stats.total = 0; stats.bytes = 0; stats.byRoute = Object.create(null); stats.bySite = Object.create(null); stats.startedAt = new Date().toISOString(); requestLog = []; }
+    if (q.get("reset") === "1") { stats.total = 0; stats.bytes = 0; stats.byRoute = Object.create(null); stats.bySite = Object.create(null); stats.startedAt = new Date().toISOString(); requestLog = []; ownLogKinds = { all: 0, filtered: 0 }; }
     return [200, snapshot];
   }
   if (path === "/__ctl") {
@@ -460,7 +463,9 @@ function route(req, url) {
   stats.total += 1;
   stats.byRoute[key] = (stats.byRoute[key] || 0) + 1;
   stats.bySite[site] = (stats.bySite[site] || 0) + 1;
-  if (requestLog.length < 200000) requestLog.push([Date.now(), key]);
+  const ownLogKind = key === "own:/api/log/" ? (OWN_LOG_FILTERS.some((f) => q.get(f) && q.get(f) !== "0") ? "filtered" : "all") : null;
+  if (ownLogKind) ownLogKinds[ownLogKind] += 1;
+  if (requestLog.length < 200000) requestLog.push(ownLogKind ? [Date.now(), key, ownLogKind] : [Date.now(), key]);
   if (downSites.has(site)) return [503, { success: false, message: "upstream down (fake)" }];
   if (site === "/own") return ownSite(rest, q, req);
   const up = upByPath.get(site);

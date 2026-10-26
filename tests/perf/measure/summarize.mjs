@@ -2,7 +2,7 @@
 // 用法：node measure/summarize.mjs <结果目录>
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { perRound } from "../lib/metrics.mjs";
+import { perRound, INGEST_ROWS, ingestCell, ingestRoundLine } from "../lib/metrics.mjs";
 
 const dir = process.argv[2];
 const load = (name) => existsSync(join(dir, name)) ? JSON.parse(readFileSync(join(dir, name), "utf8")) : null;
@@ -35,6 +35,11 @@ if (bg) {
   const pr = perRound(bg);
   if (pr) out.push(`| 折算：每轮结账轮询 | SQL ≈ ${pr.sql} 条，扫描行 ≈ ${pr.rowsExamined ?? "?"}，假站点请求 ≈ ${pr.fake}，binlog ≈ ${kb(pr.binlog)} KB（稳态窗口减去 ${s.balanceRounds} 轮余额刷新后按 ${s.reconRounds.length} 轮平均） |`,
     `| 折算：两个循环各跑一轮（≈ 每分钟） | SQL ≈ ${pr.sql + r.sqlStatements} 条，binlog ≈ ${kb(pr.binlog + (r.binlogBytes || 0))} KB |`);
+  if (s.ingest?.expectedCost || s.ingest?.perRound?.ownLogAll) {
+    out.push("", `整站读（「算应付成本」${s.ingest.expectedCost ? "开着" : "关着"}，绑定 ${s.ingest.bindings} 条；限流 180 秒 360 个）：\n`, "| 指标 | 类别 | 数值 |", "|---|---|--:|");
+    for (const [name, kind, get] of INGEST_ROWS) out.push(`| ${name} | ${kind} | ${ingestCell(bg, get)} |`);
+    out.push("", ...s.ingest.rounds.map((x) => `- ${ingestRoundLine(x)}`));
+  }
   out.push("", "稳态 SQL 按语句类型和表：\n", "| 语句 | 条数 | 耗时 ms | 扫描行 | 改动行 |", "|---|--:|--:|--:|--:|");
   for (const [k, v] of Object.entries(s.byTable).sort((a, b) => b[1].count - a[1].count).slice(0, 15)) out.push(`| ${k} | ${v.count} | ${Math.round(v.totalMs)} | ${v.rowsExamined} | ${v.rowsAffected} |`);
   out.push("", "稳态对假站点的请求（按路由，窗口内总数）：\n", "| 路由 | 次数 |", "|---|--:|");
