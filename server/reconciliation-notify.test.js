@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { NOTIFY_KEYWORD } from "../lib/brand.js";
-import { notifyReconciliationHealth } from "./reconciliation-notify.js";
+import { markOptionUnreadableSeen, notifyOptionUnreadable, notifyReconciliationHealth } from "./reconciliation-notify.js";
 
 test("利润问题的推送：正文最后一行是落款，带着推荐给机器人设的关键词", async (t) => {
   const sent = [];
@@ -102,6 +102,47 @@ test("令牌坏了的推送：同一个上游一条固定成本（上游读不�
   await notifyReconciliationHealth(f.rt, f.repo, fixedRule, { health: { code: "READY", issues: [] }, window: {} });
   await notifyReconciliationHealth(f.rt, f.repo, usageRule, tokenResult("ACCESS_TOKEN_LEGACY_RETIRED", "upstream", { stationName: "Foo" }));
   assert.equal(f.sent.length, 2, "读通了才清，之后再坏又推一条");
+});
+
+test("自营站点的设置一直读不到（R2）：同一个自营站点下 3 条绑定只推 1 条，标题、正文照 §10 令牌那一套；没起名字时不写站点那一行", async (t) => {
+  const rules = [ruleOf("r1"), ruleOf("r2"), ruleOf("r3")];
+  const f = tokenFixture(t, { stations: { up: { id: "up", name: "Foo" }, own: { id: "own", name: "My Site" } }, rules });
+  for (const rule of rules) await notifyOptionUnreadable(f.rt, f.repo, rule.ownStationId);
+  assert.equal(f.sent.length, 1, "按站点只推一条");
+  assert.equal(f.sent[0].title, "【炬元告警】自营站点 My Site 设置一直读不到");
+  const lines = f.sent[0].body.split("\n");
+  assert.deepEqual(lines.slice(0, 4), ["自营站点：My Site", "状态：设置一直读不到", "影响：看不出它还记不记收费记录；利润照常算，要是这段时间里收费记录关过，那段的收入会算少", "说明：自营站点恢复以后会自己好；也可以在运营总览的需处理里点「重新检查」"]);
+  assert.match(lines[4], /^时间：/);
+  assert.equal(lines.at(-1), "炬元告警中心");
+  // 记在 opt:站点 键上：「今天」每轮的 READY 不清它（清的是 tk: 键），设置读得到那一刻由对账模块清
+  assert.ok(f.states.has("opt:own|OWN_OPTION_UNREADABLE"));
+  await notifyReconciliationHealth(f.rt, f.repo, rules[0], { health: { code: "READY", issues: [] }, window: {} });
+  assert.ok(f.states.has("opt:own|OWN_OPTION_UNREADABLE"), "READY 不清它");
+  await f.repo.clearActiveAlerts("opt:own");
+  await notifyOptionUnreadable(f.rt, f.repo, "own");
+  assert.equal(f.sent.length, 2, "清掉以后再读不到才再推");
+  const g = tokenFixture(t, { stations: { own: { id: "own" } }, rules: [ruleOf("r1")] });
+  await notifyOptionUnreadable(g.rt, g.repo, "own");
+  assert.equal(g.sent[0].title, "【炬元告警】自营站点 设置一直读不到");
+  assert.equal(g.sent[0].body.split("\n")[0], "状态：设置一直读不到");
+});
+
+test("markOptionUnreadableSeen：一检测到就记 first_seen_at，不等满 24 小时才推那一刻；同一段里重复调用不会把时刻往后挪（审核 R2 第二轮 中-E）", async (t) => {
+  const f = tokenFixture(t, { stations: { own: { id: "own", name: "My Site" } }, rules: [ruleOf("r1")] });
+  const T0 = Date.parse("2026-10-09T00:00:00Z");
+  await markOptionUnreadableSeen(f.repo, "own", T0);
+  const row = f.states.get("opt:own|OWN_OPTION_UNREADABLE");
+  assert.deepEqual([row.active, row.first_seen_at, row.last_notified_at], [true, T0, null], "一发现就记行，还没推送时 last_notified_at 是空的");
+  assert.equal(f.sent.length, 0, "只记行，不推送");
+  // 这一段还在继续：再调用不把 first_seen_at 往后挪
+  await markOptionUnreadableSeen(f.repo, "own", T0 + 3600000);
+  assert.equal(f.states.get("opt:own|OWN_OPTION_UNREADABLE").first_seen_at, T0, "同一段里 first_seen_at 不变");
+  // 满 24 小时才推，推的时候用的是 T0（不是满 24 小时这一刻），只推一次
+  await notifyOptionUnreadable(f.rt, f.repo, "own");
+  assert.equal(f.sent.length, 1, "满 24 小时推 1 条");
+  assert.equal(f.states.get("opt:own|OWN_OPTION_UNREADABLE").first_seen_at, T0, "推送以后 first_seen_at 还是最早检测到的那一刻");
+  await notifyOptionUnreadable(f.rt, f.repo, "own");
+  assert.equal(f.sent.length, 1, "已经推过的这一段不再推（last_notified_at 不是空的）");
 });
 
 test("没标 push 的利润类问题只记状态不推；标了 push 的（Key 被拒）照推", async (t) => {

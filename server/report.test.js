@@ -189,6 +189,22 @@ test("日报的标题和正文都带推荐给机器人设的关键词（炬元�
   for (const signature of [BRAND.notificationSignature, BRAND.reportSignature]) assert.ok(signature.includes(NOTIFY_KEYWORD), signature);
 });
 
+const yesterdayStart = Date.parse("2026-10-07T00:00:00+08:00");
+for (const [name, periods, expected] of [
+  ["现在还关着", [{ fromMs: START - 3600000, toMs: null }], "自营站点不记收费记录了"],
+  ["昨天碰到过关着的那一段", [{ fromMs: yesterdayStart + 3600000, toMs: yesterdayStart + 7200000 }], "昨天自营站点有一段没记收费记录，那段的收入补不回来"],
+  ["没碰到", [{ fromMs: yesterdayStart - 86400000, toMs: yesterdayStart - 86400000 + 3600000 }], null],
+]) {
+  test(`日报：自营站点${name}，收入、利润写原因不当真报（用语规范 §8.1，审核第一轮 中-5）`, async (t) => {
+    const h = setup(t, { channels: ["a"] });
+    h.rt.store.data.stations[0].consumeLogOffPeriods = periods;
+    await sendReport(h.rt);
+    const body = h.sentBodies.at(-1).body;
+    if (expected) assert.ok(body.includes(`没读到（${expected}）`), body);
+    else assert.ok(!body.includes("没记收费记录") && !body.includes("不记收费记录"), body);
+  });
+}
+
 test("立即发送：返回每个渠道的结果列表", async (t) => {
   const h = setup(t);
   h.failures.add("b");

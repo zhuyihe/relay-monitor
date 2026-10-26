@@ -332,12 +332,34 @@ function ownRateLimit() {
   ownHits.push(now);
   return null;
 }
+
+// 站点设置里的大 JSON：按「几百个模型 × 每项约 40 字节」造倍率表，补全倍率表、分组倍率表同理；小项几十个。大小由条数定，不依赖具体版本
+const CONSUME_LOG_OFF = process.env.FAKE_CONSUME_LOG_OFF === "1";
+const bigTable = (prefix, n, value) => JSON.stringify(Object.fromEntries(Array.from({ length: n }, (_, i) => [`${prefix}-model-${String(i).padStart(4, "0")}-preview`, value(i)])));
+let optionCache = null;
+function OPTION_ITEMS() {
+  if (!optionCache) optionCache = [
+    { key: "ModelRatio", value: bigTable("m", 420, (i) => 0.5 + (i % 40) / 8) },
+    { key: "CompletionRatio", value: bigTable("c", 380, (i) => 1 + (i % 6)) },
+    { key: "CacheRatio", value: bigTable("k", 260, () => 0.1) },
+    { key: "ModelPrice", value: bigTable("p", 120, (i) => (i % 9) / 100) },
+    { key: "GroupRatio", value: JSON.stringify(Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`group-${i}`, 1 + (i % 5) / 10]))) },
+    ...Array.from({ length: 60 }, (_, i) => ({ key: `Setting${i}`, value: i % 3 ? "true" : "some-value-" + i })),
+  ];
+  return [...optionCache, { key: "LogConsumeEnabled", value: CONSUME_LOG_OFF ? "false" : "true" }];
+}
 function ownSite(rest, q, req) {
   const retryAfter = ownRateLimit();
   if (retryAfter != null) return [429, { success: false, message: "请求过于频繁" }, { "Retry-After": String(retryAfter) }];
   if (rest === "/api/status") return [200, ok({ version: "v0.9.6-perf", quota_per_unit: QPU, system_name: "自营站点" })];
   if (!req.headers.authorization) return [401, { success: false, message: "无权进行此操作，未登录且未提供 access token" }];
   switch (rest) {
+    case "/api/option/": {
+      // 站点设置（R2 审核用）：data 是 [{ key, value }]，LogConsumeEnabled 的值是 "true" / "false"。真站点把全部设置一起返回，其中几项是大 JSON
+      // （模型倍率表、补全倍率表、分组倍率表等，每项几 KB 到十几 KB）；这里照这个形状造，整个响应落在 20–60 KB 之间，
+      // 量「每个自营站点每 5 分钟多读一次」的字节数才像真的。只认超级管理员（这个假站点的登录就是 root）
+      return [200, ok(OPTION_ITEMS())];
+    }
     case "/api/user/self": return [200, ok({ id: 1, username: "root", display_name: "Root", role: 100, quota: 99000000000, used_quota: 1200000000, request_count: 123456 })];
     case "/api/channel/": {
       const { p, size } = pageOf(q);

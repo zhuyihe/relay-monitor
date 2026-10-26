@@ -22,6 +22,7 @@
 | `lib/key-agent-protocol.mjs` | 渠道 Key 读取服务的协议（打码、指纹、从 secret 派生请求令牌和指纹密钥）：和 `lib/key-fingerprint.js` 一字不差，但不从被测版本的代码引——假站点一个进程要跨 base、head 两版用 |
 | `fake-site.mjs` | 假站点：44 个 New API、4 个 Sub2API、2 个只用 Key 的上游和 1 个自营 New API（`/na01`…`/s245`…`/nk49`、`/own`），每个请求延迟 50 ms（`FAKE_DELAY_MS`）。`/__stats[?reset=1&detail=1]` 看请求计数，`/__ctl?delay=` 改延迟 |
 | | 开关：`FAKE_TEST_LOGS=1`（默认关）让自营站点的 `/api/log/`、`/api/log/stat` 里多出渠道测试日志（照 New API 的写法：token_name「模型测试」、token_id 0，每 10 分钟测一遍 300 个渠道） |
+| | 自营站点的 `/api/option/`：站点设置，`[{ key, value }]`，带几个大 JSON（倍率表等），整个响应约 37 KB（大小由条数定）。开关：`FAKE_CONSUME_LOG_OFF=1`（默认关）让 `LogConsumeEnabled` 回 "false"（自营站点关了收费记录） |
 | | 开关：`FAKE_OWN_RATE_LIMIT=1`（默认关）给自营站点加全站限流（同一来源 180 秒 360 个请求，超了回 429 带 Retry-After，被拒的数在 `/__stats` 的 `ownRateLimited`） |
 | | 开关：`FAKE_USER_ROLES="1:1,450:100"`（默认空）改用户列表里的角色（把 root 列成普通用户、user450 列成超级管理员） |
 | | 开关：`/__ctl?down=/na01,/na02` 让这些上游一律回 503（像上游挂了），`down=` 清空 |
