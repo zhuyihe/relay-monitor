@@ -1,6 +1,7 @@
 // 合并重复上游时，对账仓库那几张表（rules、channel_monitor_links）和合并日志的改动。
 // 每个函数都吃一个已经开着事务的连接：合并时它就是 Store 写上游文档的那个连接（db/store.js 的 mergeUpstreams），
 // 上游文档、绑定、关联、日志三边一起提交或一起回滚；回滚（db/k-unmerge.js）自己开事务照日志改回。
+import { refreshSegmentKeysSql } from "./segment-keys.js";
 import { randomUUID } from "node:crypto";
 
 export const MERGE_LOG_KIND = Object.freeze({
@@ -12,6 +13,10 @@ export const MERGE_LOG_KIND = Object.freeze({
 });
 
 export const mergeError = (code, message) => Object.assign(new Error(message), { code });
+async function refreshSegmentKeys(conn, ruleId) {
+  for (const { sql, params } of refreshSegmentKeysSql(ruleId)) await conn.query(sql, params);
+}
+
 const STALE = "UPSTREAM_MERGE_STALE";
 const CONFLICT = "UPSTREAM_MERGE_CONFLICT";
 
@@ -63,6 +68,8 @@ export async function applyMergeRows(conn, group, { mergeId, nowMs, oldRetainedA
       if (err?.code === "ER_DUP_ENTRY") throw mergeError(CONFLICT, "有一把 Key 在留下的上游里已经有一条绑定在用");
       throw err;
     }
+    // 分段记 Key（K1c）：这条绑定每一段 Key 行里的上游和 active_token_key 跟着改，不然分段里的 Key 还指着被合掉的上游，取数时当成「别的上游的 Key」
+    await refreshSegmentKeys(conn, rule.id);
     logs.push(logRow(mergeId, nowMs, group, rule.upstream_station_id, MERGE_LOG_KIND.RULE,
       { id: rule.id, upstreamStationId: rule.upstream_station_id, activeTokenKey: rule.active_token_key, newActiveTokenKey: nextKey }));
   }
@@ -174,6 +181,8 @@ export async function undoMergeRows(conn, merge, { nowMs, stations = true }) {
       const guarded = row.detail.newActiveTokenKey !== undefined;
       await conn.query(`UPDATE reconciliation_rules SET upstream_station_id = ?, active_token_key = ${guarded ? "IF(active_token_key <=> ?, ?, active_token_key)" : "?"}, updated_at = updated_at WHERE id = ? AND upstream_station_id = ?`,
         [row.detail.upstreamStationId, ...(guarded ? [row.detail.newActiveTokenKey, row.detail.activeTokenKey] : [row.detail.activeTokenKey]), row.detail.id, merge.retainedId]);
+      // 退回：分段的 Key 行跟着 rules 现在的样子重新对一遍（这条绑定没被改回去的话它们本来就和 rules 一致，什么也不变）
+      await refreshSegmentKeys(conn, row.detail.id);
     } else if (row.kind === MERGE_LOG_KIND.LINK_MOVED) {
       await conn.query("UPDATE channel_monitor_links SET station_id = ? WHERE own_station_id = ? AND channel_id = ? AND station_id = ?",
         [row.detail.from, row.detail.ownStationId, row.detail.channelId, merge.retainedId]);
