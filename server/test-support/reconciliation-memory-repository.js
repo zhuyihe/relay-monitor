@@ -483,6 +483,61 @@ export class MemoryReconciliationRepository {
     });
   }
 
+  // 对应 MySQL 版 applyKeyChangePlans：先把这一批绑定（和它们当前开着段）的 active_token_key 全部清空，
+  // 再分别开新段、写新值；唯一约束的检查在 #commit 里（#assertUnique），撞了整批回滚、这里捕获改回 { conflict: true }
+  async applyKeyChangePlans(plans, { detectedAt = Date.now() } = {}) {
+    try {
+      await this.#transaction("applyKeyChangePlans", async (tx) => {
+        const currents = new Map(), rules = new Map();
+        for (const { ruleId } of plans) {
+          await this.#lock(tx, `rule:${ruleId}`);
+          const entry = this.#ruleEntry(tx, ruleId);
+          if (!entry) throw repositoryError("RULE_NOT_FOUND");
+          rules.set(ruleId, entry.row);
+          const current = this.#segmentsOf(tx, ruleId).map(({ row }) => row).find((row) => row.effective_to_ms == null);
+          if (!current) throw repositoryError("CURRENT_SEGMENT_MISSING");
+          currents.set(ruleId, current);
+        }
+        for (const { ruleId } of plans) {
+          this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { active_token_key: null });
+          const keyRows = this.#rows("segmentKeys", tx).filter(({ row }) => sameText(row.segment_id, currents.get(ruleId).id));
+          this.#update(tx, "segmentKeys", keyRows, { active_token_key: null });
+        }
+        const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
+        for (const { ruleId, plan } of plans) {
+          const current = currents.get(ruleId), rule = rules.get(ruleId);
+          const openSegment = (effectiveFrom, keys, { closesAt = null } = {}) => {
+            const id = uid("rs"), createdAt = this.#timestamp();
+            this.#insert(tx, "segments", { id, rule_id: ruleId, group_name: current.group_name, group_ratio: current.group_ratio,
+              ratio_observed_at_ms: current.ratio_observed_at_ms, ratio_source: current.ratio_source,
+              effective_from_ms: bigint(effectiveFrom), effective_to_ms: closesAt == null ? null : bigint(closesAt),
+              detected_at_ms: bigint(detectedAt), timing_source: "detected", created_at: createdAt, updated_at: createdAt });
+            for (const key of keys) this.#insert(tx, "segmentKeys", { segment_id: id, upstream_station_id: key.upstreamStationId,
+              token_id: bigint(key.tokenId), token_name: key.tokenName ?? null, key_mask: null, match_source: "agent",
+              active_token_key: closesAt == null ? tokenKeyOf(key) : null });
+            return id;
+          };
+          this.#update(tx, "segments", this.#rows("segments", tx).filter(({ row }) => sameText(row.id, current.id)),
+            { effective_to_ms: bigint(plan.kind === "windowed" ? plan.windowStart : plan.cutoverAt) });
+          if (plan.kind === "windowed") {
+            openSegment(plan.windowStart, plan.windowKeys, { closesAt: plan.windowEnd });
+            openSegment(plan.windowEnd, plan.after);
+          } else {
+            openSegment(plan.cutoverAt, plan.after);
+          }
+          const [firstKey] = plan.after;
+          this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { token_id: bigint(firstKey.tokenId),
+            token_name: firstKey.tokenName ?? rule.token_name, active_token_key: tokenKeyOf(firstKey) });
+          this.#refreshSegmentKeys(tx, ruleId);
+        }
+      });
+    } catch (err) {
+      if (err?.code === "ER_DUP_ENTRY") return { conflict: true };
+      throw err;
+    }
+    return { conflict: false };
+  }
+
   async archiveRule(id, { now = this.now() } = {}) {
     return this.#transaction("archiveRule", async (tx) => {
       await this.#lock(tx, `rule:${id}`);

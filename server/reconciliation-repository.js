@@ -746,6 +746,79 @@ export class ReconciliationRepository {
     );
   }
 
+  // K2b：按 key-agent-resegment.js 给的计划，给一条或几条绑定（挪位置、互换时是两条）开新段——同一个事务里关旧段、
+  // 开新段、写 segment_keys，再把 rules 的 token_id/token_name/active_token_key 改到现在开着那段的第一把 Key
+  // （k-plan §3.4：这几列照旧写，旧代码、costOwnerFor、回滚都还能用，K2c 才把去重整个挪到 segment_keys 上）。
+  //
+  // 真正兜底的是数据库的两道唯一约束（rules.active_token_key、reconciliation_segment_keys 的
+  // uq_segment_key_active）：这一批里任何一条撞了，整批回滚，返回 { conflict: true }——调用方改记
+  // KEY_GROUP_CHANGED，不写段（detectGroupMerges 已经做过便宜的预检查，这里撞上是没预检查到的边界情况）。
+  //
+  // 先把这一批涉及的绑定的 active_token_key（和它们当前开着段的 active_token_key）全部清空，再分别写新值：
+  // 两条绑定互换 Key 时，不这样做会在同一个事务里自己撞自己的唯一约束（A 还没清掉，B 的新值就是 A 现在的值）。
+  //
+  // plans：[{ ruleId, plan }]，plan 是 server/key-agent-resegment.js 的 planKeyChangeSegments /
+  // planMovedKeySegments 的结果：
+  //   { kind: "precise" | "moved", cutoverAt, after: [{upstreamStationId, tokenId, tokenName?}] }
+  //   { kind: "windowed", windowStart, windowEnd, windowKeys: [...], after: [...] }
+  async applyKeyChangePlans(plans, { detectedAt = Date.now() } = {}) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const currents = new Map(), rules = new Map();
+      for (const { ruleId } of plans) {
+        const [ruleRows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
+        if (!ruleRows[0]) throw repositoryError("RULE_NOT_FOUND");
+        rules.set(ruleId, ruleRows[0]);
+        const [segmentRows] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? AND effective_to_ms IS NULL FOR UPDATE", [ruleId]);
+        if (!segmentRows[0]) throw repositoryError("CURRENT_SEGMENT_MISSING");
+        currents.set(ruleId, segmentRows[0]);
+      }
+      for (const { ruleId } of plans) {
+        await conn.query("UPDATE reconciliation_rules SET active_token_key = NULL WHERE id = ?", [ruleId]);
+        await conn.query("UPDATE reconciliation_segment_keys SET active_token_key = NULL WHERE segment_id = ?", [currents.get(ruleId).id]);
+      }
+      const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
+      for (const { ruleId, plan } of plans) {
+        const current = currents.get(ruleId), rule = rules.get(ruleId);
+        const openSegment = async (effectiveFrom, keys, { closesAt = null } = {}) => {
+          const id = uid("rs");
+          await conn.query(
+            `INSERT INTO reconciliation_rule_segments
+              (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, effective_to_ms, detected_at_ms, timing_source)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'detected')`,
+            [id, ruleId, current.group_name, current.group_ratio, current.ratio_observed_at_ms, current.ratio_source, effectiveFrom, closesAt, detectedAt]
+          );
+          for (const key of keys) await conn.query(
+            "INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source, active_token_key) VALUES (?, ?, ?, ?, 'agent', ?)",
+            [id, key.upstreamStationId, key.tokenId, key.tokenName ?? null, closesAt == null ? tokenKeyOf(key) : null]
+          );
+          return id;
+        };
+        if (plan.kind === "windowed") {
+          await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [plan.windowStart, current.id]);
+          await openSegment(plan.windowStart, plan.windowKeys, { closesAt: plan.windowEnd });
+          await openSegment(plan.windowEnd, plan.after);
+        } else {
+          await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [plan.cutoverAt, current.id]);
+          await openSegment(plan.cutoverAt, plan.after);
+        }
+        const [firstKey] = plan.after;
+        await conn.query(
+          "UPDATE reconciliation_rules SET token_id = ?, token_name = ?, active_token_key = ? WHERE id = ?",
+          [firstKey.tokenId, firstKey.tokenName ?? rule.token_name, tokenKeyOf(firstKey), ruleId]
+        );
+        await refreshSegmentKeys(conn, ruleId);
+      }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      if (err?.code === "ER_DUP_ENTRY" || Number(err?.errno) === 1062) return { conflict: true };
+      throw err;
+    } finally { conn.release(); }
+    return { conflict: false };
+  }
+
   async archiveRule(id, { now = Date.now() } = {}) {
     const conn = await this.pool.getConnection();
     let result;
