@@ -4,7 +4,7 @@ import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } fr
 import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
 import { applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
-import { isSettledAt } from "../lib/reconciliation-settlement.js";
+import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
 import { billDayOf } from "../lib/business-time.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../lib/billing-capability-storage.js";
 
@@ -14,6 +14,7 @@ const REPOSITORY_ERRORS = Object.freeze({
   CURRENT_SEGMENT_MISSING: "这条绑定缺少当前的倍率时段",
   RESOURCE_CHANGED: "这一段前面没有倍率变化，不能改时间",
   TRANSITION_TIME_OUT_OF_RANGE: "改的时间要在前后两次倍率变化之间",
+  TRANSITION_TIME_IN_FUTURE: "不能改到以后的时间",
   SOURCE_BINDING_UNCONFIRMED: "上游账号或自营站点变了，请确认这条绑定",
   LEGACY_IDENTITY_UNVERIFIED: "以前的绑定没记下上游账号，请确认这条绑定的上游账号和自营站点",
 });
@@ -584,12 +585,16 @@ export class ReconciliationRepository {
     return (await this.reconcileCurrentSegment(ruleId, input)).segments;
   }
 
-  async correctTransition(ruleId, segmentId, effectiveAt) {
+  // 改一段倍率变化的时间。同一个事务里：改分段，再给 [旧时间, 新时间) 落到的每个已结束的业务日写一条重结请求（计划 C2b，
+  // resettleBillDates）；写请求失败连分段一起回滚。绑定不存在或已解除报 RULE_NOT_FOUND；改到未来、不是整毫秒的拒绝。
+  async correctTransition(ruleId, segmentId, effectiveAt, { now = Date.now(), onPlan = null } = {}) {
     const at = Number(effectiveAt);
     const conn = await this.pool.getConnection();
     try {
       await conn.beginTransaction();
-      await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
+      const [ruleRows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? FOR UPDATE", [ruleId]);
+      if (!ruleRows.length || ruleRows[0].archived_at) throw repositoryError("RULE_NOT_FOUND");
+      const rule = ruleFromRow(ruleRows[0]);
       const [rows] = await conn.query(
         `SELECT * FROM reconciliation_rule_segments
          WHERE rule_id = ? ORDER BY effective_from_ms ASC, created_at ASC, effective_to_ms IS NOT NULL DESC, effective_to_ms ASC FOR UPDATE`,
@@ -603,7 +608,8 @@ export class ReconciliationRepository {
       if (index <= 0) throw repositoryError("RESOURCE_CHANGED");
       const previous = segments[index - 1];
       const next = segments[index + 1];
-      if (!Number.isFinite(at) || at <= previous.effectiveFrom || (next && at >= next.effectiveFrom)) {
+      if (Number.isSafeInteger(at) && at > now) throw repositoryError("TRANSITION_TIME_IN_FUTURE");
+      if (!Number.isSafeInteger(at) || at <= previous.effectiveFrom || (next && at >= next.effectiveFrom)) {
         throw repositoryError("TRANSITION_TIME_OUT_OF_RANGE");
       }
       await conn.query(
@@ -614,6 +620,11 @@ export class ReconciliationRepository {
          WHERE id IN (?, ?)`,
         [previous.id, at, segmentId, at, segmentId, previous.id, segmentId]
       );
+      // 31 天以内的日子写重结请求；更早的写一条要人处理的状态行（RESETTLE_TOO_OLD），不自动重结
+      const plan = resettleRequestPlan(rule, segments[index].effectiveFrom, at, now);
+      onPlan?.(plan); // 调用方要告诉用户哪几天会自动重算、哪几天太早没算
+      await this.requestResettle(ruleId, plan.recent, { reason: RESETTLE_REASON_TRANSITION, now }, conn);
+      await this.requestResettle(ruleId, plan.tooOld, { reason: RESETTLE_REASON_TRANSITION, now, manualReason: "RESETTLE_TOO_OLD" }, conn);
       await conn.commit();
     } catch (err) {
       await conn.rollback().catch(() => {});
@@ -697,7 +708,8 @@ export class ReconciliationRepository {
 
   // ledger：{ entry, resettle } 时在同一事务里记账。写不写、写第几版见 ledgerWriteDecision；提交以后把这个结论放进 ledger.booked
   // （其中 settledAt 是账本里这天最新那一版的固定时刻），调用方不用再读一次账本。
-  // settlement：{ billDate } 时这天结成了，同一个事务里删掉结账状态表的那一行（计划 C2a），守卫失败时一起回滚。
+  // settlement：{ billDate, resettleRequestedAt } 时这天结成了，同一个事务里删掉结账状态表的那一行（计划 C2a），守卫失败时一起回滚；
+  // 行里的重结请求时刻和 resettleRequestedAt 不同（取数期间又来了新请求）就不删（计划 C2b）。
   async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null, settlement = null } = {}) {
     let booked = null;
     const conn = await this.pool.getConnection();
@@ -762,7 +774,12 @@ export class ReconciliationRepository {
             ledgerInsertValues({ ...ledger.entry, ruleId, revision: booked.revision, source: booked.source }));
         }
       }
-      if (settlement?.billDate) await conn.query("DELETE FROM reconciliation_settlement_state WHERE rule_id = ? AND bill_date = ?", [ruleId, settlement.billDate]);
+      if (settlement?.billDate) {
+        // 请求按值比对：取数时读到的请求时刻等于行里现在的才删（没有请求的行是 NULL 对 NULL）。取数期间又来了新的重结请求，行留着
+        // （写请求时已经把重试、要人处理的记录清掉了，下一轮马上再结），新请求不被这一次吃掉。还是一条 DELETE，不多发语句
+        await conn.query("DELETE FROM reconciliation_settlement_state WHERE rule_id = ? AND bill_date = ? AND resettle_requested_at_ms <=> ?",
+          [ruleId, settlement.billDate, settlement.resettleRequestedAt ?? null]);
+      }
       if (guard && !guard()) { await conn.rollback(); return false; }
       await conn.commit();
       if (booked) ledger.booked = booked;
@@ -792,15 +809,45 @@ export class ReconciliationRepository {
   }
 
   // 结账没成：记下或更新这一行（settlementOutcome 的 state，op 是 retry / manual / sticky）。
-  // 账本里已经有这天的任一版就不写（另一处已经固定了），一条语句判断，不用先读。
-  async recordSettlementState(ruleId, billDate, state, now = Date.now()) {
+  // 账本里已经有这天的任一版就不写（另一处已经固定了），一条语句判断，不用先读；调用方读状态行时带着重结请求的日子除外
+  // （requestedAt 不为空：账本里本来就有这天，重结没成要照样记下退避，不然每轮都再试一次——请求在不在由调用方手里的状态行说了算，
+  // 不在这张表上再查一次：同表子查询会让并发写同一天死锁，审核 C2b 低-1）。
+  // 取数期间又来了新的重结请求（行里的请求时刻和 requestedAt 不一样）：这次的失败状态不盖，新请求刚清零的记录留着（审核 C2b 低-5）。
+  async recordSettlementState(ruleId, billDate, state, now = Date.now(), { requestedAt = null } = {}) {
     const values = settlementStateValues(state);
+    // 调用方读到这一行带着重结请求：只更新这一行（请求时刻还一样才盖）。行已经没了（手动那次同时结成、删掉了）就什么也不做，
+    // 不补插一行没有请求的孤儿行
+    if (requestedAt != null) {
+      const columns = [...SETTLEMENT_STATE_WRITE_COLUMNS, "updated_at_ms"];
+      await this.pool.query(
+        `UPDATE reconciliation_settlement_state SET ${columns.map((column) => `${column} = ?`).join(", ")} WHERE rule_id = ? AND bill_date = ? AND resettle_requested_at_ms = ?`,
+        [...values, now, ruleId, billDate, requestedAt]);
+      return;
+    }
+    const keep = (column) => `${column} = IF(resettle_requested_at_ms <=> ?, VALUES(${column}), ${column})`;
     await this.pool.query(
       `INSERT INTO reconciliation_settlement_state (rule_id, bill_date, ${SETTLEMENT_STATE_WRITE_COLUMNS.join(", ")}, updated_at_ms)
        SELECT ?, ?, ${SETTLEMENT_STATE_WRITE_COLUMNS.map(() => "?").join(", ")}, ? FROM DUAL
        WHERE NOT EXISTS (SELECT 1 FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ?)
-       ON DUPLICATE KEY UPDATE ${SETTLEMENT_STATE_WRITE_COLUMNS.map((column) => `${column} = VALUES(${column})`).join(", ")}, updated_at_ms = VALUES(updated_at_ms)`,
-      [ruleId, billDate, ...values, now, ruleId, billDate]);
+       ON DUPLICATE KEY UPDATE ${SETTLEMENT_STATE_WRITE_COLUMNS.map(keep).join(", ")}, ${keep("updated_at_ms")}`,
+      [ruleId, billDate, ...values, now, ruleId, billDate, ...Array(SETTLEMENT_STATE_WRITE_COLUMNS.length + 1).fill(null)]);
+  }
+
+  // 给这些日子写重结请求（一条多行 INSERT）：改时间、以后改设置、换 Key 的时刻都走这一个。conn 是调用方已经开着的事务连接，没传就直接用连接池。
+  // 已有状态行（这天还在退避、等人处理）的重置成「马上可以结」：请求时刻取比原来大的（按值比对才分得出新旧请求），重试和要人处理的记录清掉
+  // manualReason：这些日子不自动重结，写一条要人处理的状态行（不会自己消失的那种，比如 RESETTLE_TOO_OLD），请求仍记在行里（不记的话
+  // 这天账本里有，「已固定」的清理会把行删掉），人点「重新读取」才结
+  async requestResettle(ruleId, billDates, { reason = RESETTLE_REASON_TRANSITION, now = Date.now(), manualReason = null } = {}, conn = this.pool) {
+    if (!billDates?.length) return 0;
+    const detail = manualReason == null ? null : JSON.stringify({ code: manualReason, side: null });
+    await conn.query(
+      `INSERT INTO reconciliation_settlement_state (rule_id, bill_date, resettle_requested_at_ms, resettle_reason, manual_reason, manual_since_ms, last_detail, updated_at_ms)
+       VALUES ${billDates.map(() => "(?, ?, ?, ?, ?, ?, ?, ?)").join(", ")}
+       ON DUPLICATE KEY UPDATE resettle_requested_at_ms = GREATEST(VALUES(resettle_requested_at_ms), COALESCE(resettle_requested_at_ms, 0) + 1),
+         resettle_reason = VALUES(resettle_reason), retry_reason = NULL, manual_reason = VALUES(manual_reason), manual_since_ms = VALUES(manual_since_ms), attempts = 0,
+         next_attempt_at_ms = NULL, first_failed_at_ms = NULL, last_detail = VALUES(last_detail), updated_at_ms = VALUES(updated_at_ms)`,
+      billDates.flatMap((date) => [ruleId, date, now, reason, manualReason, manualReason == null ? null : now, detail, now]));
+    return billDates.length;
   }
 
   // 这天已经固定（账本里有）但状态行还在：删掉。结账成功时的删除在 saveSnapshotsForScope 的事务里做
@@ -808,10 +855,12 @@ export class ReconciliationRepository {
     await this.pool.query("DELETE FROM reconciliation_settlement_state WHERE rule_id = ? AND bill_date = ?", [ruleId, billDate]);
   }
 
-  // 每小时清一批：beforeDate 以前的、没有重结请求的行，一次最多 limit 行，删不完下次接着删。走 (bill_date) 索引
-  async pruneSettlementStates(beforeDate, limit = 500) {
+  // 每小时清一批：beforeDate 以前的、没有重结请求（或请求早已放弃）的行，一次最多 limit 行，删不完下次接着删。走 (bill_date) 索引
+  // 重结请求提出满 requestedBeforeMs 以前的也删（已经放弃的请求，7 天内还没结成的会一直留着）；RESETTLE_TOO_OLD、RESETTLE_SHRUNK 的行不删，等人处理
+  async pruneSettlementStates(beforeDate, limit = 500, requestedBeforeMs = 0) {
     const [result] = await this.pool.query(
-      "DELETE FROM reconciliation_settlement_state WHERE bill_date < ? AND resettle_requested_at_ms IS NULL LIMIT ?", [beforeDate, limit]);
+      `DELETE FROM reconciliation_settlement_state WHERE bill_date < ? AND (resettle_requested_at_ms IS NULL OR resettle_requested_at_ms < ?)
+         AND (manual_reason IS NULL OR manual_reason NOT IN (${RESETTLE_KEPT_REASONS.map(() => "?").join(", ")})) LIMIT ?`, [beforeDate, requestedBeforeMs, ...RESETTLE_KEPT_REASONS, limit]);
     return Number(result?.affectedRows) || 0;
   }
 

@@ -91,9 +91,12 @@ test("对拍：这天该不该结——轮询、读已固定的账、取数后�
     // 整天、两天、不从 0 点开始、没写时区
     for (const window of [{ startMs: start, endMs: end, timezone: tz }, { startMs: start, endMs: after, timezone: tz },
       { startMs: start + HOUR, endMs: end, timezone: tz }, { startMs: start, endMs: end }]) {
+      // 开始统计在这天之前、正好在这天结束、在这天里；旧规则按建绑定的时刻；建绑定的时刻读不出
+      const rules = [{ billingPolicy: "immediate", createdAt: new Date(start - DAY_MS).toISOString() }, { billingPolicy: "immediate", createdAt: new Date(window.endMs).toISOString() },
+        { billingPolicy: "immediate", createdAt: new Date(start - DAY_MS).toISOString(), billingEffectiveFrom: window.endMs - 1 }, { createdAt: new Date(window.endMs + HOUR).toISOString() }, { createdAt: "x" }];
       const generatedAts = [null, "x", ...[window.endMs - 1, window.endMs, window.endMs + DELAY - 1, window.endMs + DELAY, window.endMs + HOUR].map((at) => new Date(at).toISOString())];
       for (const now of [window.endMs - 1, window.endMs, window.endMs + DELAY - 1, window.endMs + DELAY, window.endMs + DAY_MS]) {
-        const diffs = settlementDiffs({ window, now, generatedAts });
+        const diffs = settlementDiffs({ window, now, rules, generatedAts });
         assert.deepEqual(diffs.filter((diff) => diff.family !== "B-S1"), [], `${tz} ${label} ${now}`);
         bs1 += diffs.length;
       }

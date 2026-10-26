@@ -162,7 +162,7 @@ test("changing a past transition reports saved time without claiming fixed days 
   const drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true });
   const timing = drawer.getByRole("region", { name: "改时间", exact: true });
   await timing.waitFor();
-  await timing.getByText("保存后，未固定的结果按新时间计算。系统会尝试更新昨天的固定记录，更早的固定记录暂不自动更新。", { exact: true }).waitFor();
+  await timing.getByText("保存以后，改到的那几天会按新的时间重新算，已经固定的也一样。31 天以前的不自动重算；要按新的时间算，到每日利润选那天点「重新读取」。", { exact: true }).waitFor();
   const input = timing.getByPlaceholder("倍率变化的时间");
   await input.fill("2026年10月8日 09:30");
   await input.press("Enter");
@@ -4634,4 +4634,26 @@ test("合并重复的上游：点「取消」只关框，不重读清单；「�
   await resumeConfirm.getByRole("button", { name: "刷新", exact: true }).click(); await resumeConfirm.waitFor({ state: "hidden" });
   assert.equal(calls.length, 1, "刷新不再发恢复监控");
   await mergeDrawer(page).getByText("没有要合的上游了。", { exact: true }).waitFor();
+});
+
+test("改时间以后有几天太早没自动重算：成功提示写出是哪几天、为什么，不自动消失，点关闭才收起（C2b）", async (t) => {
+  const segment = { id: "past-transition", group: "default", ratio: 1, timingSource: "detected", effectiveFrom: window.startMs, effectiveTo: null };
+  const { page } = await openDailyPage(t, {
+    segments: [segment],
+    query: (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture reload failed" }) }),
+    extraAPI(route, path) {
+      if (path !== "/api/reconciliation/rules/rule-1/transitions/past-transition") throw new Error("unexpected daily fixture API: " + path);
+      return fulfill(route, { segments: [segment], resettle: { recent: 4, tooOld: ["2025-12-30", "2025-12-31", "2026-01-01"] } });
+    },
+  });
+  await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click();
+  const timing = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true }).getByRole("region", { name: "改时间", exact: true });
+  await timing.waitFor();
+  const input = timing.getByPlaceholder("倍率变化的时间"); await input.fill("2026年10月8日 09:30"); await input.press("Enter");
+  await timing.getByRole("button", { name: "改时间", exact: true }).click();
+  const notice = page.locator(".ant-notification-notice").filter({ hasText: "时间已修改，改到的那几天会重新算。其中 2025年12月30日–1月1日 在 31 天以前，没自动重算；要按新的时间算，到每日利润选那天点「重新读取」。" });
+  await notice.waitFor();
+  await page.waitForTimeout(5500);
+  assert.equal(await notice.count(), 1, "5 秒以后还在");
+  await notice.locator(".ant-notification-notice-close").click(); await notice.waitFor({ state: "hidden" });
 });

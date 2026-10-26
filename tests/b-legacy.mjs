@@ -5,7 +5,7 @@
 // 下面三个从现在的 lib 引：B1 没改它们（isLiveReconciliationPreset、costBasisOf、rateSnapshotOf）。
 import { isLiveReconciliationPreset } from "../lib/reconciliation-contract.js";
 import { costBasisOf, rateSnapshotOf } from "../lib/profit.js";
-import { isCompletedBillingWindow as b2IsCompletedBillingWindow } from "../lib/reconciliation-scope-policy.js";
+import { isCompletedBillingWindow as b2IsCompletedBillingWindow, reconciliationAccountingStart as b2ReconciliationAccountingStart } from "../lib/reconciliation-scope-policy.js";
 import { billDayOf as b2BillDayOf, dayKeyInTz as b2DayKeyInTz, dayStartInTz as b2DayStartInTz } from "../lib/business-time.js";
 import { sameReconciliationWindow as b2SameReconciliationWindow } from "../lib/reconciliation-contract.js";
 
@@ -357,7 +357,15 @@ export function serverIsSettleableWindow(window, now) {
   return b2IsCompletedBillingWindow(window, now - SETTLE_DELAY_MS);
 }
 
-// 「轮询要不要结」（settlementWindowDue）和重试时刻（settleRetryAt）C2a 有意改了（状态表、退避表），不再对拍，那两段删了
+// 「轮询要不要结」没有状态行的那一小部分（C2b 对拍恢复）：C2a 起要不要结看状态表，有状态行时的判断（退避、要人处理、7 天）是有意改的新行为，
+// 不对拍；没有状态行、账本里也没这天、结束在 7 天以内的日子，新旧语义一样（过了等待期、不在开始统计之前就结），这一段照原来的写法留着对拍。
+// 原来闭包里读 settlements 那张表，这里只留「这一天从没试过」（entry 为空）的情形
+export function settlementWindowDue(rule, window, now) {
+  if (now < window.endMs + SETTLE_DELAY_MS) return null;
+  const start = b2ReconciliationAccountingStart(rule) ?? Date.parse(rule.createdAt);
+  if (Number.isFinite(start) && start >= window.endMs) return null;
+  return window;
+}
 
 export function isSettledRecord(record, window) {
   return !!record && new Date(record.generatedAt).getTime() >= window.endMs + SETTLE_DELAY_MS;
