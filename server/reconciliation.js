@@ -46,7 +46,7 @@ import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBill
   isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlement } from "../lib/reconciliation-ledger.js";
 import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
-import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, RESETTLE_KEPT_REASONS, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
+import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
 import { segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
@@ -632,7 +632,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // （页面上的确认框，C3、E 做；在那之前没有人传，手动「重新读取」读出来少了一半多也先挡着）。
       // 其他日子（普通请求日、RESETTLE_TOO_OLD 的日子）手动读取也照样判，读出来少了一半多先挡下、记 RESETTLE_SHRUNK
       const confirmShrink = origin === "manual" && confirmed === true && state?.manualReason === "RESETTLE_SHRUNK";
-      result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettleRequestedAt: state?.resettleRequestedAt ?? null, confirmShrink, confirmedAfter, trigger });
+      result = await inspectRule(rule.id, window, { mode: "settle", origin, ownerRegistry, resettleRequestedAt: state?.resettleRequestedAt ?? null, confirmShrink, confirmedAfter, trigger, priorState: state });
     } catch (err) {
       if (err?.code === "RULE_NOT_FOUND") throw err;
       const known = ["PERSISTENCE_FAILED", "HISTORY_UNAVAILABLE"].includes(err?.code);
@@ -854,7 +854,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       try { status = await queryOwnConsumeLog(own); } catch (err) { status = { state: "unavailable", code: String(err?.code || "") }; }
       const at = Date.now(), previous = known && known.credential === credential ? known : null;
       const next = { credential, checkedAt: at, status, lastOnAt: status.state === "on" ? at : previous?.lastOnAt ?? null,
-        unavailableSince: optionRetryable(status) ? previous?.unavailableSince ?? at : null };
+        unavailableSince: optionRetryable(status) ? previous?.unavailableSince ?? at : null,
+        // 状态行里记的「这天第一次读不到的时刻」（结账时看到的，见 consumeLogSettingNote）：重启不丢；读到了就清
+        firstFailedFromState: optionRetryable(status) ? previous?.firstFailedFromState ?? null : null };
       consumeLogReads.set(own.id, next);
       if (status.state === "on" || status.state === "off") {
         let latestLogMs = ownActivity.get(own.id)?.latest?.createdAtSec != null ? ownActivity.get(own.id).latest.createdAtSec * 1000 - CONSUME_LOG_LOOKBACK_MS : null;
@@ -891,7 +893,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       const read = consumeLogReads.get(id);
       // 设置连续读不到超过 24 小时：结账已经照常固定了，这里说一声是设置读不到（不借用「收费记录读不到」的话）
-      if (optionRetryable(read?.status) && read.unavailableSince != null && Date.now() - read.unavailableSince >= OPTION_UNREADABLE_MAX_MS) {
+      if (optionRetryable(read?.status) && optionUnreadableSince(read) != null && Date.now() - optionUnreadableSince(read) >= OPTION_UNREADABLE_MAX_MS) {
         out.push(workflowAction("recheck_consume_log", { ownStationId: id, stationId: id }, { code: "OWN_OPTION_UNREADABLE" }));
       }
       const status = consumeLogStatusOf(id);
@@ -904,7 +906,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return out;
   }
   // 这条绑定的这段窗口碰没碰到关着的段：碰到还关着的是 OFF（按钮「重新检查」），只碰到已经开回来的是 GAP（这一天永远不固定）
-  async function consumeLogIssueFor(own, rule, window, { force = false, settle = false } = {}) {
+  async function consumeLogIssueFor(own, rule, window, { force = false, settle = false, priorState = null } = {}) {
     await refreshConsumeLog(own, { force }).catch(() => null);
     const accountingStart = reconciliationAccountingStart(rule) ?? Date.parse(rule.createdAt);
     const clipped = { startMs: Math.max(window.startMs, Number.isFinite(accountingStart) ? accountingStart : -Infinity), endMs: window.endMs };
@@ -913,20 +915,26 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 结账那一轮读不到站点设置（网络错、5xx、超时这类会自己好的）：这一天这一轮不固定，按 C2a 退避再试；没权限、令牌作废照常固定
     // （审核第一轮 中-3，总指挥 10-26 定）。要固定的才这样，页面上看（settle 为假）不挡
     // 审核 R2 第二轮 中-1：挡的码说的是「设置读不到」，不是收费记录；这天结束以后读到过一次开着、或者连续读不到超过 24 小时，就不挡了（照常固定，明细里记一句，站点这一层进需处理）
-    if (!code && settle && consumeLogSettingNote(own, window)?.blocked) {
+    if (!code && settle && consumeLogSettingNote(own, window, priorState)?.blocked) {
       return { code: "OWN_OPTION_UNREADABLE", scope: "downstream", detail: issueText("OWN_OPTION_UNREADABLE"), observedAt: Date.now() };
     }
     return code ? { code, scope: "downstream", detail: issueText(code), observedAt: Date.now() } : null;
   }
   // 结账这一刻设置读不读得到（只看会自己好的那类读不到）：provenOn 这天结束以后读到过开着；tooLong 连续读不到超过 24 小时；两样都没有才挡（blocked）。
   // 不挡而固定的，返回的这一份写进账本明细（settlement.consumeLogSetting）
-  function consumeLogSettingNote(own, window) {
+  // 连续读不到从什么时候起：进程里记的那份，和这天状态行里记的「第一次读不到」取早的（控制台 24 小时内重启过也不会清零，审核 R2 增量 中-B）
+  const optionUnreadableSince = (read) => [read?.unavailableSince, read?.firstFailedFromState].filter((value) => value != null).reduce((min, value) => Math.min(min, value), Infinity) === Infinity ? null
+    : Math.min(...[read?.unavailableSince, read?.firstFailedFromState].filter((value) => value != null));
+  function consumeLogSettingNote(own, window, state = null) {
     const read = consumeLogReads.get(own.id);
     if (!optionRetryable(read?.status)) return null;
     const now = Date.now();
+    // 这天的状态行是因为设置读不到挡的：它记的第一次读不到的时刻比内存早就用它；自动试满（退避用完）也算太久了
+    if (state?.retryReason === "OWN_OPTION_UNREADABLE" && state.firstFailedAt != null && (read.firstFailedFromState == null || state.firstFailedAt < read.firstFailedFromState)) read.firstFailedFromState = state.firstFailedAt;
+    const since = optionUnreadableSince(read);
     const provenOn = read.lastOnAt != null && read.lastOnAt >= window.endMs;
-    const tooLong = read.unavailableSince != null && now - read.unavailableSince >= OPTION_UNREADABLE_MAX_MS;
-    return { state: "unreadable", sinceMs: read.unavailableSince ?? null, lastOnAt: read.lastOnAt ?? null, provenOn, tooLong, blocked: !provenOn && !tooLong };
+    const tooLong = (since != null && now - since >= OPTION_UNREADABLE_MAX_MS) || (state?.retryReason === "OWN_OPTION_UNREADABLE" && Number(state.attempts) >= SETTLE_MAX_AUTO_ATTEMPTS);
+    return { state: "unreadable", sinceMs: since, lastOnAt: read.lastOnAt ?? null, provenOn, tooLong, blocked: !provenOn && !tooLong };
   }
 
   async function markQuietOwnStations(rules, registry, now = Date.now()) {
@@ -1699,7 +1707,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // settle：结一个已经结束的日子（轮询回看和手动「重新读取」都走这条，计划 C2a）。强制重取，用已存的分段；
   //   不写分段、渠道状态、观测快照，不发告警；只按 settlementOutcome 写账本（多日写确认快照），结成了在同一个事务里删掉状态表那一行。
   // probe（只配 settle）：要人处理的日子到了重判的时刻，只走一遍取数前的判断，不取账单、不写库，返回 { probe: true, blocker }（计划 C2a 2.3）
-  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle: resettleOption = false, resettleRequestedAt = null, confirmShrink = false, confirmedAfter = null, trigger = null, probe = false } = {}) {
+  async function inspectRule(ruleId, window, { force = false, origin = "manual", ownerRegistry, mode = "observe", resettle: resettleOption = false, resettleRequestedAt = null, confirmShrink = false, confirmedAfter = null, trigger = null, probe = false, priorState = null } = {}) {
     const settle = mode === "settle";
     // 轮询回看带的是状态行里的请求时刻；resettle: true 是调用方（测试、手动）直接要求重结，没有请求时刻可比
     const resettle = resettleOption || resettleRequestedAt != null;
@@ -1962,9 +1970,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (costOwner.state === "duplicate") issues.push(upstreamSide({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: issueText("CANONICAL_KEY_CONFLICT"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (!ownAvailable) issues.push({ code: "OWN_BILLING_UNAVAILABLE", scope: "downstream", detail: issueText("OWN_BILLING_UNAVAILABLE"), observedAt: Date.now() });
       // 自营站点关过收费记录：碰到那一段的窗口，收入读不到、利润先不算（probe 也要看到，不取账单就能判）
-      let consumeLogIssue = ownAvailable ? await consumeLogIssueFor(own, rule, window, { force: force || settle, settle }) : null;
+      let consumeLogIssue = ownAvailable ? await consumeLogIssueFor(own, rule, window, { force: force || settle, settle, priorState }) : null;
       // 结账时设置读不到却照常固定的（读到过开着 / 读不到太久）：记下来，写进账本明细
-      const settingNote = ownAvailable && settle && !consumeLogIssue ? consumeLogSettingNote(own, window) : null;
+      const settingNote = ownAvailable && settle && !consumeLogIssue ? consumeLogSettingNote(own, window, priorState) : null;
       const consumeLogSetting = settingNote && !settingNote.blocked ? { state: settingNote.state, sinceMs: settingNote.sinceMs, lastOnAt: settingNote.lastOnAt, reason: settingNote.provenOn ? "proven_on" : "too_long" } : null;
       // 近 7 天、本月这类多天窗口碰到「已经开回来的」关着的那一段：碰到的那几天不算，其余天照算，行上加一句说明（总指挥 10-26 定 A）；
       // 整个窗口都碰到了、或者这是要固定的窗口（结账、手动重新读取的整天）时照旧挡住。applicable 在下面按天拆开后再定要不要真的挡
@@ -2545,7 +2553,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           result.ledger = { billDate: billDayOf(result.window), revision: ledgerOption.booked.revision, source: ledgerOption.booked.source,
             // 汇率按账本的精度（6 位小数）取整，和从账本行读出来的逐字一致（审核 C2a 第二轮低-3）
             settledAt: ledgerOption.booked.settledAt, rates: { income: ledgerRate(financialSnapshot.income), cost: ledgerRate(financialSnapshot.cost) },
-            costBasis: financialSnapshot.costBasis };
+            costBasis: financialSnapshot.costBasis, ...(result.consumeLogSetting ? { consumeLogSetting: result.consumeLogSetting } : {}) }; // 和 ledgerReference 同一个形状
         }
       }
     }

@@ -72,6 +72,35 @@ async function notifyTokenProblem(rt, repo, rule, result, code) {
   await broadcast(rt.store.channels, title, body);
 }
 
+// 自营站点的设置一直读不到（R2 审核第二轮；用语规范 §10 同一套格式）：按自营站点只推一条，和令牌坏了的推送一样记在站点键上；读通了随 READY 一起清
+async function notifyOptionUnreadable(rt, repo, rule, code) {
+  const key = siteKey("own", rule);
+  const first = await withSiteLock(key, async () => {
+    const now = Date.now();
+    const previous = await repo.getAlertState(key, code);
+    if (previous?.active) {
+      await repo.setAlertState(key, code, { active: true, firstSeenAt: Number(previous.first_seen_at), lastSeenAt: now,
+        lastNotifiedAt: previous.last_notified_at == null ? null : Number(previous.last_notified_at), recoveredAt: null });
+      return false;
+    }
+    await repo.setAlertState(key, code, { active: true, firstSeenAt: now, lastSeenAt: now, lastNotifiedAt: now, recoveredAt: null });
+    return true;
+  });
+  if (!first) return;
+  const station = rt.store.get?.(rule.ownStationId) || null;
+  const name = station?.name ? stationDisplayName(station) : "";
+  const line = (label, value) => `${label}：${value}`;
+  const body = [
+    name ? line(ALERT_TEXT.ownLabel, name) : "",
+    line(ALERT_TEXT.status, ALERT_TEXT.optionUnreadableStatus),
+    line(ALERT_TEXT.impact, ALERT_TEXT.optionUnreadableImpact),
+    line(ALERT_TEXT.note, ALERT_TEXT.optionUnreadableNote),
+    line(ALERT_TEXT.time, formatZonedDateTime(Date.now(), businessTimeZone())),
+    BRAND.notificationSignature,
+  ].filter(Boolean).join("\n");
+  await broadcast(rt.store.channels, `【${BRAND.name}告警】${ALERT_TEXT.ownLabel}${name ? ` ${name}` : ""} ${ALERT_TEXT.optionUnreadableStatus}`, body);
+}
+
 export async function notifyReconciliationHealth(rt, repo, rule, result) {
   const now = Date.now();
   const code = result?.health?.code || "READY";
@@ -84,6 +113,7 @@ export async function notifyReconciliationHealth(rt, repo, rule, result) {
     return;
   }
   if (isAccessTokenError(code)) return notifyTokenProblem(rt, repo, rule, result, code);
+  if (code === "OWN_OPTION_UNREADABLE") return notifyOptionUnreadable(rt, repo, rule, code);
 
   const previous = await repo.getAlertState(rule.id, code);
   if (previous?.active) {

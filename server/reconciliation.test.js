@@ -8995,3 +8995,60 @@ test("R1 结账一轮里几条绑定共用一份管理员名单：用户列表�
   assert.ok(f.state.ledger.filter((row) => row.bill_date === "2026-10-08").length === 3, "三条都结了");
   assert.equal(userReads(), 1, `这一轮用户列表要正好读 1 遍，读了 ${userReads()} 遍`);
 });
+
+test("R2 设置读不到的 24 小时按状态行里第一次读不到的时刻算：中途重启（新建模块）也不清零，到时照常固定，站点那一层进需处理（审核增量 中-B）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  f.state.optionReply = [502, { success: false }];
+  await f.module.refreshDue(now);
+  const row = f.repository.tables.settlementState.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(row?.retry_reason, "OWN_OPTION_UNREADABLE");
+  // 12 小时后重启：新模块，进程里什么都不记得
+  now += 12 * 3600000;
+  const restarted = createReconciliationModule(f.rt, { repository: f.repository, ownLogIngest: false });
+  await restarted.refreshDue(now);
+  assert.deepEqual(f.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date), [], "重启后 12 小时：还没到 24 小时，接着等");
+  // 再 13 小时又重启一次：状态行记的第一次读不到已经过了 24 小时 → 照常固定
+  now += 13 * 3600000;
+  const again = createReconciliationModule(f.rt, { repository: f.repository, ownLogIngest: false });
+  await again.refreshDue(now);
+  const settled = f.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date).sort();
+  assert.ok(settled.includes("2026-10-08"), `过了 24 小时（跨两次重启）照常固定：${settled}`);
+  const detail = f.state.ledger.find((r) => r.rule_id === "rr_live" && r.bill_date === "2026-10-08").detail;
+  assert.deepEqual([detail.settlement.consumeLogSetting.state, detail.settlement.consumeLogSetting.reason], ["unreadable", "too_long"]);
+  assert.equal(detail.settlement.consumeLogSetting.sinceMs, Date.parse("2026-10-09T03:00:00Z"), "从状态行里拿的第一次读不到的时刻");
+  const page = await again.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page" });
+  assert.ok(page.actions.some((action) => action.code === "OWN_OPTION_UNREADABLE"), "重启后站点那一层也知道读不到太久了");
+  assert.ok(page.results[0].ledger.consumeLogSetting, "已固定那天的 ledgerReference 带着那一句的依据（计算明细显示）");
+  // 设置读得到了：需处理那条去掉
+  f.state.optionReply = null;
+  now += 60000;
+  const back = await again.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", origin: "manual", force: true });
+  assert.ok(!back.actions.some((action) => action.code === "OWN_OPTION_UNREADABLE"));
+});
+
+test("R2 「这天结束以后读到过开着」才算证据：22:00 读到开着、之后设置读不到，这一天不能凭它固定（审核增量 低-A）；过了零点读到过开着再读不到才能", async (t) => {
+  // 上海 10-08 22:00 读到开着（今天的轮询），10-09 11:00 起设置读不到
+  let now = Date.parse("2026-10-08T14:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  await f.module.refreshDue(now); // 读到开着
+  now = Date.parse("2026-10-09T03:00:00Z");
+  f.state.optionReply = [502, { success: false }];
+  await f.module.refreshDue(now);
+  assert.ok(!f.state.ledger.some((r) => r.rule_id === "rr_live" && r.bill_date === "2026-10-08"), "22:00 那次开着在这天结束以前，不算证据：先等");
+  // 另一条：10-09 01:00 读到开着（这天已经结束，上游那一轮读不到没结成），11:00 设置读不到 → 凭读到过开着照常固定
+  let now2 = Date.parse("2026-10-08T17:00:00Z");
+  const g = await completedDayFixture(t, { clock: () => now2, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of g.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  g.state.upstreamQuota = null; // 上游读不到：这一轮结不成，但设置读到了开着
+  await g.module.refreshDue(now2);
+  assert.deepEqual(g.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date), []);
+  g.state.upstreamQuota = 100; g.state.optionReply = [502, { success: false }];
+  now2 = Date.parse("2026-10-09T03:00:00Z");
+  await g.module.refreshDue(now2);
+  const settled = g.state.ledger.find((r) => r.rule_id === "rr_live" && r.bill_date === "2026-10-08");
+  assert.ok(settled, "这天结束以后读到过开着：照常固定");
+  assert.equal(settled.detail.settlement.consumeLogSetting.reason, "proven_on");
+});
