@@ -244,7 +244,8 @@ const INCOME_ONLY_WARNINGS = new Set(["sell_price_unset"]);
  * 成本也算不出时就是 computeProfit 的 { error, errorCode }，整块报错，也带上 incomeUnconfirmed
  */
 export async function unconfirmedIncomeProfit(rt, own, err, options) {
-  const incomeUnconfirmed = resultError(err, "OWN_INCOME_UNCONFIRMED");
+  // 自营站点关着收费记录：原因说这个，不说「收入确认不了」（页面「重新检查」按钮靠这个码认）
+  const incomeUnconfirmed = resultError(err, ["OWN_CONSUME_LOG_OFF", "OWN_CONSUME_LOG_GAP"].includes(err?.code) ? err.code : "OWN_INCOME_UNCONFIRMED");
   const profit = await computeProfit(rt, own, 0, 0, { ...options, resold: null });
   if (profit.error) return { ...profit, incomeUnconfirmed };
   const kept = profit.warningCodes.map((code, i) => [code, profit.warnings[i]]).filter(([code]) => !INCOME_ONLY_WARNINGS.has(code));
@@ -276,14 +277,16 @@ function incomeUnconfirmed(message, cause, users = null, resoldErrors = null) {
  * 刚提成管理员的人不能漏到固定账里）。转售 Key 所属的用户在列表里不是管理员：多半是刚提成管理员，再读一份新的；
  * 还是对不上就报读不到（收入确认不了），不拿没确认的名单去扣收入。读不到用户列表也一样抛。
  */
-export async function readOwnAdminDirectory(rt, own, { fresh = false } = {}) {
+// fresh：结账要新的（现在读）；freshSince：这一轮结账开始以后读过的就算新的（同一轮各条绑定共用一份，不每条绑定各读一遍用户列表，审核 #127 增量 中-2）
+export async function readOwnAdminDirectory(rt, own, { fresh = false, freshSince = null } = {}) {
   const resold = resoldAdminKeysOf(own);
   const read = async (since) => {
     try { return await readOwnUsers(rt, own, since); }
     // 令牌作废、少了权限：照原样抛带码的错，要人换令牌，不包成「收入确认不了」（审核 #107 中-1）
     catch (cause) { throw isAccessTokenError(cause?.code) ? cause : incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
   };
-  let entry = await read(fresh ? Date.now() : 0);
+  let entry = await read(freshSince != null ? freshSince : fresh ? Date.now() : 0);
+  fresh = fresh || freshSince != null;
   const unconfirmed = (list) => { const admins = adminUsernamesOf(list); return [...new Set(resold.filter((key) => !admins.has(key.username)).map((key) => key.username))]; };
   // 和 readOwnIncome 共用「重读过还对不上的名字 1 分钟内不再为它们重读」（审核 R1 中-2：转售 Key 的主人不是管理员时每次都重读整份用户列表）
   // 结账（fresh）读回来的这份本来就是新发出的，不用再为对不上的名字重读一遍；轮询用的那份缓存才看「1 分钟内重读过没有」

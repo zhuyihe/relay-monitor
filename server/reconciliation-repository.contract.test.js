@@ -17,4 +17,8 @@ defineReconciliationRepositoryContract({
     return row ? { segmentId: row.segment_id, windowKind: row.window_kind, windowStartMs: Number(row.window_start_ms), windowEndMs: Number(row.window_end_ms),
       upstreamUsd: row.upstream_usd, healthCode: row.health_code, healthDetail: row.health_detail } : null;
   },
+  insertSegmentKeyRow: ({ repository, segmentId, upstreamStationId, tokenId, tokenName }) => {
+    repository.tables.segmentKeys.push({ segment_id: segmentId, upstream_station_id: upstreamStationId, token_id: Number(tokenId),
+      token_name: tokenName, key_mask: null, match_source: "extra", active_token_key: null });
+  },
 });

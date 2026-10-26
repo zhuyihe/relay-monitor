@@ -3,7 +3,7 @@
 // 只用白话（design/ui-copy-spec.md §9）；「改时间」是页面只读的唯一例外，其余处理都由按钮去对应页面。
 import { useRef } from "react";
 import { Alert, Button, DatePicker, Select } from "antd";
-import { EMPTY, formatDayZone, formatPct, formatZonedDateTime, formatZonedTime } from "../../../lib/format";
+import { EMPTY, OPTION_UNREADABLE_SETTLED_NOTE, formatDayZone, formatPct, formatZonedDateTime, formatZonedTime } from "../../../lib/format";
 import { reconciliationAccountingStart, reconciliationIssue } from "../../../lib/reconciliation-contract";
 import {
   hasReconciliationHistory,
@@ -96,7 +96,7 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
       <Detail label="毛利" value={<>{amountText(profit, profitCurrency as ReconciliationCurrency)} <LossTag show={flags.negative} /></>} />
       <Detail label="毛利率" value={formatPct(margin)} />
       <Detail label="汇率" value={rateText(detail, currency, timezone)} />
-      {status.state === "settled" ? <Detail label="固定于" value={formatZonedDateTime(status.settledAt, timezone)} /> : null}
+      {status.state === "settled" ? <Detail label="固定于" value={<>{formatZonedDateTime(status.settledAt, timezone)}{detail.ledger?.consumeLogSetting ? <small>{OPTION_UNREADABLE_SETTLED_NOTE}</small> : null}</>} /> : null}
       {start != null && requested && start > requested.startMs ? <Detail label="开始统计" value={accountingStartTextAt(start, timezone)} /> : null}
       {detail.scope?.accountedToMs != null ? <Detail label="统计到" value={`${formatZonedDateTime(detail.scope.accountedToMs, timezone)}（解除绑定）`} /> : null}
       {revisions > 0 ? <Detail label="改过" value={`改过 ${revisions} 次`} /> : null}

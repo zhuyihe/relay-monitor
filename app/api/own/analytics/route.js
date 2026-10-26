@@ -1,4 +1,5 @@
 // ---- 「我的站点」下游分析（分时段 / 分模型 / 分用户 + 消费预测）------------------
+import { consumeLogOffOverlap, consumeLogStillOff } from "../../../../lib/consume-log.js";
 import { withAuth, json } from "../../../../lib/api.js";
 import { ownStationErrorCode } from "../../../../lib/error-copy.js";
 import { OWN_STATION_UNSET } from "../../../../lib/format.js";
@@ -85,9 +86,13 @@ export const GET = withAuth(async (request, rt) => {
     }
     // 收入确认不了时不整页报错（§8.1）：收入、毛利、净利是 null，profit.incomeUnconfirmed 说原因，成本、消费、用户照常；
     // 用户列表也读不到时 usersUnavailable 说原因，没有预收、管理员标不出
-    const { users: ownUsers, adminSet, incomeUsd, adminUsageUsd, resold, incomeDaily, unconfirmed, usersUnavailable } = await readOwnIncomeOrUnconfirmed(
-      rt, own, userRows, { startMs, endMs: now, tz }
-    );
+    const income = await readOwnIncomeOrUnconfirmed(rt, own, userRows, { startMs, endMs: now, tz });
+    // 自营站点现在关着收费记录：消费日志不全，按用户消费算出来的收入是少的，不当收入说（用语规范 §8.1「自营站点不记收费记录了」），按钮「重新检查」
+    const logOff = consumeLogStillOff(own.consumeLogOffPeriods);
+    const { users: ownUsers, adminSet, usersUnavailable } = income;
+    const { incomeUsd, adminUsageUsd, resold, incomeDaily, unconfirmed } = logOff
+      ? { incomeUsd: null, adminUsageUsd: null, resold: null, incomeDaily: null, unconfirmed: Object.assign(new Error("自营站点不记收费记录了"), { code: "OWN_CONSUME_LOG_OFF" }) }
+      : income;
 
     // 小时级序列（近 28 天，缺时补 0，不含当前未完小时）→ 未来 24 小时预测
     // modelRows 本就拉了 35 天：更长的序列让画像与 conformal 校准都有足够原点
@@ -161,7 +166,8 @@ export const GET = withAuth(async (request, rt) => {
       // 按实际用户身份和转售消费分日，客户端不再用含管理员自用的模型消费猜收入形状。
       incomeDaily,
       incomeDailyApprox: false,
-      profit,
+      // 所选范围碰到已经开回来的「没记收费记录」那一段：等式下面写一句灰字（还关着的那种上面已经按「收入确认不了」说了）
+      profit: !unconfirmed && consumeLogOffOverlap(own.consumeLogOffPeriods, { startMs, endMs: now }).closed ? { ...profit, consumeLogGap: true } : profit,
       generatedAt: new Date().toISOString(),
     };
     // 编辑配置会清缓存；较早开始的请求可以返回自己的快照，但不能把旧口径重新填回缓存。

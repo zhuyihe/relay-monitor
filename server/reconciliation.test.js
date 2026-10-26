@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow, normalizeReconciliationScopeIntent, ruleTimezoneFor } from "./reconciliation.js";
-import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationOwnerScope } from "./reconciliation-repository.js";
+import { ReconciliationRepository, copySegment, reconciliationOwnerRuleState, reconciliationOwnerScope } from "./reconciliation-repository.js";
 import { MemoryReconciliationRepository } from "./test-support/reconciliation-memory-repository.js";
 import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
@@ -72,6 +72,7 @@ function observationRepositoryFixture({ segments, rule = { id: "rr", token_name:
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -279,6 +280,7 @@ test("应用层口径检查后、快照 INSERT 前发生编辑时，原子保存
           if (sql.includes("FROM reconciliation_rules")) return [[{ id: "rr", upstream_station_id: "up", own_station_id: "own", token_id: 1, token_name: "token", fixed_group: "g", timezone: "Asia/Shanghai", enabled: 1, archived_at: null }]];
           if (sql.includes("FROM reconciliation_rule_channels")) return [[{ channel_id: 2, channel_name: "changed" }]];
           if (sql.includes("FROM reconciliation_rule_segments")) return [[{ id: "s1", rule_id: "rr", group_name: "g", group_ratio: 1, effective_from_ms: 1000, effective_to_ms: null, detected_at_ms: 1000, timing_source: "operator_confirmed" }]];
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected query: ${sql}`);
         },
       };
@@ -306,6 +308,7 @@ test("较早成功或未确认快照都不能覆盖更晚的确认快照", async
       if (sql.includes("FROM reconciliation_rule_segments")) return [segments];
       if (sql.includes("FROM reconciliation_snapshots")) return [[{ source: JSON.stringify(source) }]];
       if (sql.includes("INSERT INTO reconciliation_snapshots")) throw new Error("superseded snapshot must not write");
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
   }; } };
@@ -364,6 +367,7 @@ test("双命名空间快照批量写入第二条失败时整个事务回滚", as
       if (inserts === 2) throw new Error("second insert failed");
       return [{ affectedRows: 1 }];
     }
+    if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
     throw new Error(`unexpected query: ${sql}`);
   };
   const pool = { async getConnection() { return {
@@ -390,6 +394,7 @@ test("R03 Repository核验owner状态并在INSERT前和commit前执行guard，�
       if (sql.includes("FROM reconciliation_rules")) return [[rule]];
       if (sql.includes("FROM reconciliation_rule_channels") || sql.includes("FROM reconciliation_rule_segments") || sql.includes("FROM reconciliation_snapshots")) return [[]];
       if (sql.includes("INSERT INTO reconciliation_snapshots")) { pending.push(params[2]); return [{ affectedRows: 1 }]; }
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     };
     const repository = new ReconciliationRepository({ query, async getConnection() { return { query,
@@ -420,6 +425,7 @@ test("observation 单调写入不会覆盖较新的 observation 或确认命名�
     if (sql.includes("FROM reconciliation_rule_segments")) return [[segment]];
     if (sql.includes("SELECT source FROM reconciliation_snapshots")) return [[stored.get(params[1])].filter(Boolean)];
     if (sql.includes("INSERT INTO reconciliation_snapshots")) { inserts += 1; stored.set(params[2], { source: params.at(-1) }); return [{ affectedRows: 1 }]; }
+    if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
     throw new Error(`unexpected query: ${sql}`);
   };
   const pool = { async getConnection() { return { async beginTransaction() {}, async commit() {}, async rollback() {}, release() {}, query }; } };
@@ -571,6 +577,7 @@ test("停止对账规则原子释放 Key 和渠道声明，并返回释放摘要
         { rule_id: "rr_release", channel_id: 1, channel_name: "渠道一" },
         { rule_id: "rr_release", channel_id: 2, channel_name: "渠道二" },
       ]];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -589,6 +596,7 @@ test("停止对账规则原子释放 Key 和渠道声明，并返回释放摘要
             return [{ affectedRows: 2 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
         async commit() { calls.push("commit"); },
@@ -621,6 +629,7 @@ test("停止对账规则遇到并发归档时不释放渠道且返回错误", as
     async query(sql) {
       if (sql.startsWith("SELECT * FROM reconciliation_rules")) return [[rule]];
       if (sql.startsWith("SELECT rule_id, channel_id")) return [[{ rule_id: "rr_race", channel_id: 1, channel_name: "渠道" }]];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -632,6 +641,7 @@ test("停止对账规则遇到并发归档时不释放渠道且返回错误", as
           if (sql.startsWith("UPDATE reconciliation_rules")) return [{ affectedRows: 0 }];
           if (sql.startsWith("UPDATE reconciliation_rule_channels")) throw new Error("channel release must not run");
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
         async commit() { calls.push("commit"); },
@@ -764,6 +774,7 @@ test("旧编辑缺少金融proof时拒绝渠道变化；时区建好以后不能
       if (sql.startsWith("SELECT * FROM reconciliation_rules WHERE id")) return [[row]];
       if (sql.includes("FROM reconciliation_rule_channels")) return [[]];
       if (sql.includes("JOIN reconciliation_rule_channels")) return [[]];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -780,6 +791,7 @@ test("旧编辑缺少金融proof时拒绝渠道变化；时区建好以后不能
           }
           if (sql.startsWith("DELETE FROM reconciliation_rule_channels") || sql.startsWith("INSERT INTO reconciliation_rule_channels")) return [{ affectedRows: 1 }];
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -899,6 +911,7 @@ test("归档规则使当前成本归属的缓存失效", async () => {
         if (sql.includes("FROM reconciliation_rule_channels")) return [[{
           rule_id: "rr-archived", channel_id: 1, channel_name: "渠道",
         }]];
+        if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
         throw new Error(`unexpected query: ${sql}`);
       },
     },
@@ -1183,6 +1196,7 @@ test("跨分段窗口分别核算并以合计金额重算毛利率，同时保�
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1362,7 +1376,7 @@ test("多分段查询不会按分段重复探测上游身份或两侧 /api/statu
   assert.deepEqual(statUsers, ["7", "7", "7", "7"], "分段 stat 复用元数据解析出的 PAT 身份");
   // 管理员自用（R1）：每段窗口读 3 个来源（管理员 root、两个渠道测试名字「模型测试」「Model test」）各一次列表，4 段共 12 次；用户列表（管理员名单）一轮共用一次。
   // 方案里「一段窗口一次，分段时每段各一次」
-  assert.deepEqual(ownCounts, { "/api/user/self": 1, "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 12, "/api/log/": 4, "/api/user/": 1 }, "本站身份和 /api/status 每轮只读一次，由各分段共用");
+  assert.deepEqual(ownCounts, { "/api/user/self": 1, "/api/channel/": 1, "/api/status": 1, "/api/log/stat": 12, "/api/log/": 4, "/api/user/": 1, "/api/option/": 1 }, "本站身份和 /api/status 每轮只读一次，由各分段共用");
 
   for (const counts of [upstreamCounts, ownCounts]) for (const path of Object.keys(counts)) delete counts[path];
   ownStatusBroken = true;
@@ -1379,6 +1393,7 @@ test("检测到 group 或 ratio 变化时关闭旧分段、保留历史并只打
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -1390,6 +1405,7 @@ test("检测到 group 或 ratio 变化时关闭旧分段、保留历史并只打
           if (sql.startsWith("UPDATE reconciliation_rule_segments")) { rows[0].effective_to_ms = params[0]; return [{ affectedRows: 1 }]; }
           if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) { rows.push({ id: params[0], rule_id: "rr", group_name: params[2], group_ratio: params[3], effective_from_ms: params[6], effective_to_ms: null, detected_at_ms: params[7], timing_source: "detected" }); return [{ affectedRows: 1 }]; }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1456,6 +1472,7 @@ test("首次观察到已知倍率会补全当前 legacy 分段，随后切组才
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1480,6 +1497,7 @@ test("已迁移的倍率未知分段在上游首次返回倍率时补全当前�
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -1491,6 +1509,7 @@ test("已迁移的倍率未知分段在上游首次返回倍率时补全当前�
           if (sql.startsWith("UPDATE reconciliation_rule_segments")) { rows[0].effective_to_ms = params[0]; return [{ affectedRows: 1 }]; }
           if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) { rows.push({ id: params[0], rule_id: "rr", group_name: params[2], group_ratio: params[3], effective_from_ms: params[6], effective_to_ms: null, detected_at_ms: params[7], timing_source: "detected" }); return [{ affectedRows: 1 }]; }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1508,6 +1527,7 @@ test("首次检测已切组时用仍存在的旧组目录倍率补全旧段，�
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -1525,6 +1545,7 @@ test("首次检测已切组时用仍存在的旧组目录倍率补全旧段，�
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1554,6 +1575,7 @@ test("旧组已不在本轮目录时切组不会伪造旧段倍率", async () =>
           if (sql.startsWith("UPDATE reconciliation_rule_segments")) { rows[0].effective_to_ms = params[0]; return [{ affectedRows: 1 }]; }
           if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) { rows.push({ id: params[0], rule_id: "rr", group_name: params[2], group_ratio: params[3], effective_from_ms: params[6], effective_to_ms: null, detected_at_ms: params[7], timing_source: "detected" }); return [{ affectedRows: 1 }]; }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1570,6 +1592,7 @@ test("切回原分组仍保留新的历史分段", async () => {
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -1586,6 +1609,7 @@ test("切回原分组仍保留新的历史分段", async () => {
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1608,6 +1632,7 @@ test("修正切换时间锁定相邻分段，并保留旧快照作为历史证�
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -1625,6 +1650,7 @@ test("修正切换时间锁定相邻分段，并保留旧快照作为历史证�
             return [{ affectedRows: 2 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1681,6 +1707,7 @@ test("查询中修正切换时间后，旧失败任务不会写入或缓存旧�
             return [{ affectedRows: 2 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1742,6 +1769,7 @@ test("加入同一 in-flight 查询的调用方在口径变化后也只拿到新
             return [{ affectedRows: 2 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -1785,6 +1813,7 @@ test("查询期间口径持续变化时最多尝试 3 次，本轮返回待获�
         segmentReads += 1;
         return [segments];
       }
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() { throw new Error("口径不一致时不能开启快照写入事务"); },
@@ -1863,6 +1892,7 @@ function scopeRaceFixture(id, { beforeLookup = null, beforeAlertRead = null, bef
             return [{ affectedRows: 2 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -2037,6 +2067,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     state.requests.push(request);
     if (onRequest) await onRequest(request);
     if (url.pathname === "/api/status") return reply(200, { success: true, data: { quota_per_unit: 100, version: "v" } });
+    // 自营站点的设置（R2）：默认记着收费记录；state.consumeLog 改成 "false" 就是关了，state.optionReply 整个换掉（没权限等）
+    if (url.pathname === "/api/option/") return state.optionReply ? reply(...state.optionReply) : reply(200, { success: true, data: [{ key: "SMTPToken", value: "secret" }, { key: "LogConsumeEnabled", value: state.consumeLog ?? "true" }] });
     if (url.host === "upstream.test") {
       if (url.pathname === "/api/user/self") return reply(200, { success: true, data: { id: 7 } });
       if (url.pathname === "/api/user/self/groups") return reply(200, { success: true, data: metadataGroups ? metadataGroups(request) : { g1: { ratio: 1 }, g2: { ratio: 2 } } });
@@ -2071,6 +2103,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin", authVersion: 1 },
   ];
   const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null,
+    // 只覆盖本测试要用的字段（R2 的 consumeLogOffPeriods 由监控写回站点记录）
+    update: async (stationId, patch) => Object.assign(stations.find((station) => station.id === stationId), patch),
     channels: [], billingIdentityKey: "reconciliation-fixture-billing-key" } };
   // 整站日志读取（V1-a）默认关着：这个夹具的假站点没有不带筛选的 /api/log/；要测它的用例自己传 ownLogIngest: true 和内存桶
   return { rule, state, segments, stations, rt, repository, module: createReconciliationModule(rt, { repository, ownLogStore: new MemoryOwnLogStore(), ownLogIngest: false, ...moduleOptions }) };
@@ -2266,7 +2300,7 @@ test("今天和近 7 天中间有不满一秒的已结束分段时不能跳过�
 });
 
 test("本月截至取数时刻：给实时毛利、只存 observation，同起点较晚截止的查询能读回较早记录", async (t) => {
-  const { rule, repository, module } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }] });
+  const { rule, repository, module, state } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 1000 }] });
   const realNow = Date.now;
   const now = Date.parse("2026-09-20T04:26:08.000Z");
   Date.now = () => now;
@@ -2275,14 +2309,16 @@ test("本月截至取数时刻：给实时毛利、只存 observation，同起�
   const { results } = await module.queryRules({ ruleIds: [rule.id], preset: "month" }, { force: true });
   assert.deepEqual(results[0].window, { preset: "month", timezone: "Asia/Shanghai", startMs: Date.parse("2026-08-31T16:00:00.000Z"), endMs: now });
   assert.equal(results[0].health.code, "READY");
-  assert.equal(results[0].calculation.profitUsd, 1.5);
+  // 本月没固定的天分两块读：过去的整天一块、今天一块（R1 多天修复）——自营一侧每个渠道 2 个 stat；夹具的 stat 不管窗口都回 250，钱不是真数，只断言块数和有毛利
+  assert.ok(results[0].calculation.profitUsd != null);
+  assert.equal(state.statCalls.filter((call) => call.side === "own").length, 2, "过去的整天、今天各一块");
   assert.equal(results[0].displayStatus.state, "live");
   assert.equal("settlement" in results[0], false, "旧字段 settlement 已删");
   const saved = repository.tables.snapshots.map((row) => [row.window_kind, JSON.parse(row.source).recordType]);
   assert.deepEqual(saved, [["month", "observation"]], "本月还没结束，不写结账记录");
   const fingerprint = JSON.parse(repository.tables.snapshots[0].source).scopeFingerprint;
   const later = await repository.latestObservation(rule.id, { ...results[0].window, endMs: now + 60000 }, fingerprint);
-  assert.equal(later?.result.calculation.profitUsd, 1.5);
+  assert.equal(later?.result.calculation.profitUsd, results[0].calculation.profitUsd);
 });
 
 test("两侧都已应答的上游空消费异常不能被旧的确认利润掩盖，数据源不可用时才回退", async (t) => {
@@ -2815,6 +2851,7 @@ test("known catalogue ratios backfill closed legacy segments without changing bo
   const pool = {
     async query(sql) {
       if (sql.includes("FROM reconciliation_rule_segments")) return [rows];
+      if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
       throw new Error(`unexpected query: ${sql}`);
     },
     async getConnection() {
@@ -2831,6 +2868,7 @@ test("known catalogue ratios backfill closed legacy segments without changing bo
             return [{ affectedRows: 1 }];
           }
           if (sql.includes("INSERT INTO reconciliation_settlement_state")) return [{ affectedRows: 1 }]; // 改时间时写的重结请求（C2b）
+          if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
           throw new Error(`unexpected transaction query: ${sql}`);
         },
       };
@@ -3067,6 +3105,7 @@ function membershipFixture() {
           return [{ affectedRows: 1 }];
         }
         if (sql.startsWith("INSERT INTO reconciliation_rule_segments")) return [{ affectedRows: 1 }];
+        if (sql.includes("reconciliation_segment_keys")) return [{ affectedRows: 0 }];
         throw new Error(`Unexpected write: ${sql}`);
       },
       async commit() { state.rules = working.rules; state.channels = working.channels; state.created = working.created; state.ruleWrites = working.ruleWrites; },
@@ -6994,6 +7033,28 @@ test("C3 审核二轮中-2（总指挥定）：当天从 New API 换绑到 Sub2A
   assert.ok(f.sub2.stats.slice(up).some((stat) => stat.api_key_id === "9" && stat.start_date === "2026-10-10"), "上游按整天取");
 });
 
+test("K1c：一段里有几把 Key，上游成本是各取一次再相加（一把在目录里、一把已删按名字取）；分段没带 Key 或只有绑定自己那把时和原来逐字相同", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const live = f.rows.find((row) => row.id === "rr_live");
+  const costOf = () => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").map((row) => Number(row.cost_usd));
+  // 分段表里有绑定自己那一把 Key：和没有 Key 行时一样
+  const segment = f.repository.tables.segments.find((row) => row.rule_id === "rr_live" && row.effective_to_ms == null);
+  f.repository.tables.segmentKeys.push({ segment_id: segment.id, upstream_station_id: live.upstream_station_id, token_id: live.token_id, token_name: live.token_name, key_mask: null, match_source: "initial", active_token_key: null });
+  await f.module.refreshDue(now);
+  assert.deepEqual(costOf(), [1], "一把 Key：上游成本 1（额度 100 ÷ 100）");
+  // 再加一把已经从目录里删掉的 Key（按名字取，每把各取一次）：成本相加
+  f.repository.tables.segmentKeys.push({ segment_id: segment.id, upstream_station_id: live.upstream_station_id, token_id: 77, token_name: "gone-key", key_mask: null, match_source: "fingerprint", active_token_key: null });
+  const calls = f.state.statCalls.length;
+  await f.repository.requestResettle("rr_live", ["2026-10-08"], { now });
+  now += 60000;
+  f.state.upstreamQuota = 100;
+  await f.module.refreshDue(now);
+  assert.deepEqual(costOf(), [1, 2], "两把 Key 各 1 相加，写第 2 版");
+  assert.equal(f.state.statCalls.slice(calls).filter((call) => call.side === "upstream" && call.start === COMPLETED_YESTERDAY.startMs / 1000).length, 2, "每把 Key 取一次");
+});
+
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {
   let now = Date.parse("2026-10-01T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
@@ -7878,15 +7939,33 @@ test("R1 多条绑定各要一个渠道、日志很多：按渠道 stat 只查�
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
   for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
   for (let id = 1; id <= 1200; id += 1) f.state.testLogs.push(usage(id, id <= 2 ? 1 : 0, { channel: id % 2 ? 1 : 2 })); // 额度小，只为让页数多；总额度 2
+  f.state.testLogs.push(usage(4000, 1, { token_name: "模型测试", token_id: 0, channel: 1 })); // root 名下一条渠道测试（额度 1，总额度不是 0）：渠道测试名字那个来源有东西，要查「全在管理员名下吗」
   const rootReads = () => f.state.requests.filter((request) => request.host === "own.test" && /^\/api\/log\//.test(request.path) && /username=root/.test(request.query));
   const settle = (ruleId) => f.module.queryRules({ ruleIds: [ruleId], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" });
   await settle("rr_live");
-  const afterFirst = rootReads().length;
+  const afterFirst = rootReads().length, requestsBefore = f.state.requests.length;
   await settle("rr_two");
   const second = rootReads().slice(afterFirst);
   assert.ok(second.every((request) => request.path === "/api/log/stat"), `第二条绑定没有再翻页或读第一页：${second.map((r) => r.path).join(",")}`);
   const statChannels = second.filter((request) => /channel=/.test(request.query)).length;
   assert.ok(statChannels <= 1, `第二条绑定只补查渠道 2 一次：${statChannels}`);
+  // 渠道测试名字那两个来源：第二条绑定只各查一次总额度（没变就沿用），不再查「每个管理员名下有多少」那几个 stat（审核 CI：每天结 80 条从 1.2 秒变 7–14 秒；审核 #127 低-1）
+  const perAdminStats = (from) => f.state.requests.slice(from).filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && /token_name=/.test(request.query) && /username=/.test(request.query)).length;
+  assert.ok(perAdminStats(0) > 0, "第一条绑定查过每个管理员名下的");
+  assert.equal(perAdminStats(requestsBefore), 0, "第二条绑定沿用，不再按管理员逐个查");
+  // 总额度变了（晚到一条渠道测试记录）：第三条绑定（要算的渠道 3 还没覆盖，不走整份沿用）重查
+  f.state.testLogs.push(usage(5000, 1, { token_name: "模型测试", token_id: 0, username: "alice", channel: 3 }));
+  f.rows.find((row) => row.id === "rr_three").enabled = 1;
+  const beforeChanged = f.state.requests.length;
+  await settle("rr_three");
+  assert.ok(perAdminStats(beforeChanged) > 0, "总额度变了：按管理员逐个重查");
+  // 过了 10 分钟：重查（把 rr_two 这天的账本行拿掉，让它真的再结一次）
+  now += 11 * 60000;
+  const beforeLater = f.state.requests.length;
+  for (let i = f.repository.tables.ledger.length - 1; i >= 0; i -= 1) if (f.repository.tables.ledger[i].rule_id === "rr_two") f.repository.tables.ledger.splice(i, 1);
+  f.rt._reconciliationResultCache.clear();
+  await settle("rr_two");
+  assert.ok(perAdminStats(beforeLater) > 0, "第 11 分钟：不再沿用");
   // 过去窗口：页面再看（非结账）不发请求
   now += 5 * 60000;
   const before = rootReads().length;
@@ -8212,6 +8291,317 @@ test("V1-b 算不出的原因写进账本：上游价目表读不到（上游没
   assert.deepEqual([live.expected_cost_usd, live.gap_reason], [2, null], "价目表有了：rr_live 这天算得出");
 });
 
+// ---- R2 自营站点关了收费记录（own-revenue-plan 第二节）----
+const optionReads = (f) => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/option/").length;
+const todayView = (f) => f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", force: true, origin: "manual" }).then((response) => response.results[0]);
+
+test("R2 读到关着：记下一段还关着的时间（从最后能证明开着的时刻起），今天碰到它：收入读不到、利润先不算，OWN_CONSUME_LOG_OFF；开回来以后段关上，原因变 GAP", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const own = () => f.rt.store.get("own"), periods = () => own().consumeLogOffPeriods ?? [];
+  const first = await todayView(f);
+  assert.deepEqual([first.health.code, periods()], ["READY", []], "开着：没有段，照常算");
+  assert.equal(first.downstream.state, "complete");
+  f.state.consumeLog = "false";
+  now += 60000;
+  const off = await todayView(f);
+  assert.deepEqual(periods(), [{ fromMs: Date.parse("2026-10-09T03:00:00Z"), toMs: null }], "起点是上一次读到开着的时刻");
+  assert.deepEqual([off.health.code, off.calculation.profitUsd], ["OWN_CONSUME_LOG_OFF", null]);
+  assert.notEqual(off.downstream.state, "complete", "关着的时候读出来的收入不当真，更不写 0");
+  assert.equal(off.displayStatus.state, "action");
+  assert.deepEqual([off.displayStatus.title, off.displayStatus.action.label], ["自营站点不记收费记录了", "重新检查"]);
+  // 关着期间每 30 秒以上才再读，段不重复写
+  now += 60000;
+  await todayView(f);
+  assert.equal(periods().length, 1, "还关着：不新开一段");
+  // 开回来：段关上；今天碰到的是已经开回来的那段
+  f.state.consumeLog = "true";
+  now += 60000;
+  const on = await todayView(f);
+  assert.deepEqual(periods(), [{ fromMs: Date.parse("2026-10-09T03:00:00Z"), toMs: now }]);
+  assert.equal(on.health.code, "OWN_CONSUME_LOG_GAP");
+  assert.deepEqual([on.displayStatus.state, on.displayStatus.title, on.displayStatus.action.label], ["action", "这一天自营站点有一段没记收费记录，那段的收入补不回来", ""]);
+});
+
+test("R2 昨天碰到过关着的那一段：不固定、不自动重试、手动重新读取也不固定；没碰到的那天照常固定（永远不按读到的数固定）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  // 10-08 上海时间 10:00–11:00 关过（已经开回来）：这一天碰到，10-07 没碰到
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-08T02:00:00Z"), toMs: Date.parse("2026-10-08T03:00:00Z") }] });
+  await f.module.refreshDue(now);
+  const days = () => f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => row.bill_date).sort();
+  assert.deepEqual(days(), ["2026-10-07"], "没碰到的那天固定了，碰到的 10-08 没固定");
+  const row = f.repository.tables.settlementState.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(row.manual_reason, "OWN_CONSUME_LOG_GAP", "不会自己消失：记下原因");
+  const stats = () => f.state.statCalls.filter((call) => call.start === Date.parse("2026-10-07T16:00:00Z") / 1000).length;
+  const before = stats();
+  now += 3 * 3600000;
+  await f.module.refreshDue(now);
+  assert.equal(stats() - before, 0, "不再自动试，不取 10-08 的账单");
+  const manual = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  assert.equal(manual.health.code, "OWN_CONSUME_LOG_GAP");
+  assert.deepEqual(days(), ["2026-10-07"], "手动重新读取也不固定");
+});
+
+test("R2 读不到设置（令牌少了 option:read、账号不是超级管理员、读取失败）：每天的状态不变、照常固定，没权限的状态记下给设置页说一句", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  f.state.optionReply = [403, { success: false, code: "ACCESS_TOKEN_SCOPE_DENIED", message: "The access token lacks the required permission: option:read" }];
+  await f.module.refreshDue(now);
+  assert.deepEqual(f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => row.bill_date).sort(), ["2026-10-07", "2026-10-08"], "照常固定");
+  assert.deepEqual(f.module.consumeLogStatus("own"), { state: "denied", reason: "scope" });
+  assert.deepEqual(f.rt.store.get("own").consumeLogOffPeriods ?? [], [], "没读到就不记段");
+  f.state.optionReply = [200, { success: false, message: "无权进行此操作，权限不足" }];
+  now += 60000;
+  await f.module.recheckConsumeLog(f.rt.store.get("own"));
+  assert.deepEqual(f.module.consumeLogStatus("own"), { state: "denied", reason: "not_root" });
+  f.state.optionReply = [502, { success: false }];
+  now += 60000;
+  await f.module.recheckConsumeLog(f.rt.store.get("own"));
+  assert.equal(f.module.consumeLogStatus("own").state, "unavailable");
+  f.state.optionReply = null;
+  now += 60000;
+  assert.deepEqual(await f.module.recheckConsumeLog(f.rt.store.get("own")), { state: "on" });
+});
+
+test("R2 站点一层的事项（运营总览、侧栏的需处理列表里）：现在还关着一条「重新检查」，令牌读不到设置一条「更新登录信息」；开回来、没权限以外的都没有；总览里按去处去重只留一条", async (t) => {
+  const { buildOverviewActions } = await import("../lib/overview-actions.js");
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const everything = async () => f.module.queryRules({ preset: "today" }, { mode: "observe", force: true, origin: "manual" });
+  const siteActions = (response) => response.actions.filter((action) => ["recheck_consume_log", "update_authorization"].includes(action.kind));
+  assert.deepEqual(siteActions(await everything()), [], "开着、读得到设置：没有");
+  f.state.consumeLog = "false";
+  now += 60000;
+  const off = await everything();
+  const [recheck] = siteActions(off);
+  assert.deepEqual([recheck.kind, recheck.label, recheck.title], ["recheck_consume_log", "重新检查", "自营站点不记收费记录了"]);
+  assert.equal(recheck.href, "/reconciliation", "没有「去哪处理」：点按钮才再读；地址只给列表去重用，不带参数（带参数打开页面会自动触发写操作）");
+  assert.equal(siteActions(off).filter((action) => action.kind === "recheck_consume_log").length >= 1, true);
+  // 三条绑定每条也有一条同去处的，总览里只剩一条
+  const overview = buildOverviewActions([], { workflowActions: off.actions });
+  assert.equal(overview.all.filter((row) => row.kind === "recheck_consume_log").length, 1, "总览里一个站点一条");
+  // 开回来：不再有（关过的那几天写在各天自己身上，不进清单）
+  f.state.consumeLog = "true";
+  now += 60000;
+  assert.deepEqual(siteActions(await everything()), []);
+  // 令牌读不到设置：一条「更新登录信息」，不是超级管理员时只写后半句
+  f.state.optionReply = [403, { success: false, code: "ACCESS_TOKEN_SCOPE_DENIED", message: "The access token lacks the required permission: option:read" }];
+  now += 60000;
+  const denied = siteActions(await everything()).find((action) => action.code === "OWN_OPTION_READ_DENIED");
+  assert.deepEqual([denied.kind, denied.label, denied.title, denied.stationId], ["update_authorization", "更新登录信息", "自营站点的令牌读不到设置", "own"]);
+  assert.match(denied.detail, /给令牌补上「读设置」的权限，或者换超级管理员的访问令牌。$/);
+  f.state.optionReply = [200, { success: false, message: "无权进行此操作，权限不足" }];
+  now += 60000;
+  const notRoot = siteActions(await everything()).find((action) => action.code === "OWN_OPTION_READ_DENIED");
+  assert.equal(notRoot.detail, "发现不了自营站点不记收费记录了。换超级管理员的访问令牌。");
+});
+
+test("R2「重新检查」按钮每次都真读（用户刚去后台打开、30 秒内回来点，不能回旧结果）；站点开关变了运营总览的缓存也清掉（设计验收必改 1、小改 4）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const { ownCache } = await import("./own-helpers.js");
+  const own = () => f.rt.store.get("own");
+  f.state.consumeLog = "false";
+  assert.deepEqual(await f.module.recheckConsumeLog(own()), { state: "off" });
+  ownCache(f.rt).set("analytics", { at: now }); // 运营总览自营分析的缓存（120 秒）
+  // 用户到后台打开了，5 秒后回来点「重新检查」：要读到开着
+  f.state.consumeLog = "true";
+  now += 5000;
+  assert.deepEqual(await f.module.recheckConsumeLog(own()), { state: "on" }, "30 秒内也真读");
+  assert.equal(ownCache(f.rt).size, 0, "开关变了，运营总览的缓存跟着清");
+  // 同一时刻连点：合成一次（读完 2 秒内回上一次的结果）
+  const reads = optionReads(f);
+  await Promise.all([f.module.recheckConsumeLog(own()), f.module.recheckConsumeLog(own())]);
+  assert.ok(optionReads(f) - reads <= 1, "并发的合成一次");
+});
+
+test("R2 关着的段从哪起算：重启以后（内存里没有读到开着的时刻）取最新一条日志往前 120 秒；站点的钟快时只用上一次读到开着的时刻，不取晚（审核第一轮 中-6、低-5）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  f.state.latestLogProbe = true;
+  const own = () => f.rt.store.get("own"), periods = () => own().consumeLogOffPeriods ?? [];
+  const sec = (ms) => Math.floor(ms / 1000);
+  // 重启以后第一次就读到关着：最新一条消费日志在 1 小时前，起点 = 它往前 120 秒
+  const lastLogMs = now - 3600000;
+  f.state.testLogs.push({ id: 1, channel: 1, quota: 1, created_at: sec(lastLogMs), token_name: "k", username: "root" });
+  f.state.consumeLog = "false";
+  await f.module.refreshDue(now);
+  assert.equal(periods()[0].fromMs, sec(lastLogMs) * 1000 - 120000, "起点取最新一条日志往前 120 秒");
+  // 站点的钟快 10 分钟：先开着读一轮（记下读到开着的时刻），一分钟后关了，最新一条日志的时刻比本机晚 10 分钟——起点不能取到它
+  f.rt.store.update("own", { consumeLogOffPeriods: [] });
+  f.state.consumeLog = "true";
+  now += 5 * 60000;
+  await f.module.recheckConsumeLog(own());
+  const onAt = now;
+  f.state.testLogs.push({ id: 2, channel: 1, quota: 1, created_at: sec(now + 600000), token_name: "k", username: "root" }); // 站点钟快 10 分钟
+  f.state.consumeLog = "false";
+  now += 60000;
+  await f.module.refreshDue(now);
+  await f.module.recheckConsumeLog(own());
+  assert.equal(periods().at(-1).fromMs, onAt, "钟快：起点是上一次读到开着的时刻，不是最新日志的时刻");
+});
+
+test("R2 停机很久以后第一次读到关着、内存里没有任何证据：单独读一次最新的一条消费日志（不限 2 小时）当起点，只多 1 个请求（审核第一轮 中-2，总指挥 10-26 定）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  const sec = (ms) => Math.floor(ms / 1000);
+  const lastLogMs = now - 20 * 3600000; // 20 小时前：停机期间关的，日志停在那
+  f.state.testLogs.push({ id: 1, channel: 1, quota: 1, created_at: sec(lastLogMs), token_name: "k", username: "root" });
+  f.state.latestLogProbe = true;
+  const prev = globalThis.fetch;
+  const latestReads = [];
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/" && !ownSourceRead(url) && url.searchParams.get("page_size") === "1") latestReads.push(url.searchParams.get("start_timestamp"));
+    return prev(input, init);
+  });
+  f.state.consumeLog = "false";
+  await f.module.recheckConsumeLog(f.rt.store.get("own"));
+  assert.equal(f.rt.store.get("own").consumeLogOffPeriods[0].fromMs, sec(lastLogMs) * 1000 - 120000, "起点是最新一条日志往前 120 秒，不是现在");
+  assert.ok(latestReads.includes("0"), "单独读了一次，不带起点限制");
+});
+
+test("R2 结账那一轮读不到站点设置（5xx）：这一天这一轮不固定，按退避再试，读到开着才固定；没权限照常固定（总指挥 10-26 定 B）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const days = () => f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => row.bill_date).sort();
+  f.state.optionReply = [502, { success: false }];
+  await f.module.refreshDue(now);
+  assert.deepEqual(days(), [], "读不到设置：不固定");
+  const row = f.repository.tables.settlementState.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(row?.retry_reason, "OWN_OPTION_UNREADABLE", "读取类，按退避再试；码说的是「设置读不到」，不借用「收费记录读不到」（审核第二轮 中-1）");
+  f.state.optionReply = null; // 恢复
+  now += 11 * 60000;
+  await f.module.refreshDue(now);
+  assert.ok(days().includes("2026-10-08"), "读到开着以后固定");
+  // 设置连续读不到超过 24 小时（收费记录本身读得到）：照常固定，账本明细记一句，站点这一层进需处理「自营站点的设置一直读不到」
+  const h = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const r of h.rows) r.enabled = r.id === "rr_live" ? 1 : 0;
+  h.state.optionReply = [502, { success: false }];
+  await h.module.refreshDue(now);
+  assert.deepEqual(h.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date), [], "头 24 小时先等");
+  assert.ok(!h.module.ownSiteActions?.length);
+  now += 25 * 3600000;
+  await h.module.refreshDue(now);
+  const settledRows = h.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date).sort();
+  assert.ok(settledRows.includes("2026-10-08") && settledRows.includes("2026-10-09"), `超过 24 小时：照常固定（${settledRows}）`);
+  const detail = h.state.ledger.find((r) => r.rule_id === "rr_live" && r.bill_date === "2026-10-09").detail;
+  assert.deepEqual([detail.settlement.consumeLogSetting.state, detail.settlement.consumeLogSetting.reason], ["unreadable", "too_long"], "明细照实记一句");
+  const page = await h.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "evaluate", origin: "page" });
+  const siteAction = page.actions.find((action) => action.code === "OWN_OPTION_UNREADABLE");
+  assert.deepEqual([siteAction?.kind, siteAction?.label, siteAction?.title, siteAction?.stationId], ["recheck_consume_log", "重新检查", "自营站点的设置一直读不到", "own"], "站点这一层进需处理，按钮「重新检查」");
+  assert.ok(!page.actions.some((action) => action.code === "OWN_BILLING_UNAVAILABLE"));
+  // 没权限照常固定
+  const g = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const r of g.rows) r.enabled = r.id === "rr_live" ? 1 : 0;
+  g.state.optionReply = [403, { success: false, message: "forbidden" }];
+  await g.module.refreshDue(now);
+  assert.ok(g.state.ledger.some((r) => r.rule_id === "rr_live" && r.bill_date === "2026-10-08"), "没权限照常固定");
+});
+
+test("R2 近 7 天碰到关过的一天：那一天不算，其余天照算，行上有一句说明；整段都碰到才整段需处理（总指挥 10-26 定 A）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z"); // 上海 10-09 11:00；开始统计 10-07 0 点
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const week = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "7d" }, { mode: "evaluate", origin: "page", force: true }).then((r) => r.results[0]);
+  const whole = await week();
+  assert.equal(whole.calculation.profitUsd !== null, true);
+  // 10-08（昨天）上海 10:00–11:00 关过，已经开回来
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-08T02:00:00Z"), toMs: Date.parse("2026-10-08T03:00:00Z") }] });
+  const partial = await week();
+  assert.notEqual(partial.health.code, "OWN_CONSUME_LOG_GAP", "不整段挡住");
+  assert.notEqual(partial.calculation.profitUsd, null, "其余天照算");
+  assert.ok(partial.health.issues.some((issue) => issue.code === "OWN_CONSUME_LOG_GAP_PARTIAL"), "加了一句说明");
+  // 切成几块读的同一个真分段合回一项：页面的「倍率变化」表只有真分段，金额等于合计（审核第二轮 中-2、低-3）
+  assert.deepEqual(partial.segments.map((segment) => segment.id), whole.segments.map((segment) => segment.id), "段号不带「~序号」、段数不变");
+  assert.equal(partial.segments.length, 1);
+  assert.deepEqual([partial.segments[0].downstream.amountUsd, partial.segments[0].upstream.amountUsd, partial.segments[0].pieces], [partial.downstream.amountUsd, partial.upstream.amountUsd, 2], "两块合成一段，收入、成本之和等于合计");
+  assert.ok(partial.segments[0].downstream.channels.every((channel) => channel.billingState === "complete"));
+  const dayStart = Date.parse("2026-10-07T16:00:00Z") / 1000, dayEnd = Date.parse("2026-10-08T16:00:00Z") / 1000; // 10-08 整天（上海）
+  f.state.statCalls.length = 0;
+  await week();
+  assert.ok(f.state.statCalls.length > 0 && f.state.statCalls.every((call) => call.end < dayStart || call.start >= dayEnd), "没有任何一次读取覆盖到被碰到的那一天（10-08），其余天分段读");
+  // 整段窗口都碰到（关过的段盖住了从开始统计起的全部）：整段需处理
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-01T00:00:00Z"), toMs: Date.parse("2026-10-09T02:00:00Z") }] });
+  const all = await week();
+  assert.equal(all.health.code, "OWN_CONSUME_LOG_GAP");
+});
+
+test("copySegment：复制一份分段改 id，普通字段是自己的（不借原型链）、不可枚举的 keys 也带过去（总指挥 10-26 定，#114 中-G 改法）", () => {
+  const original = { id: "s1", ruleId: "r1", group: "g1", ratio: 0.8, window: { startMs: 1, endMs: 2 } };
+  Object.defineProperty(original, "keys", { value: [{ tokenId: 9 }], enumerable: false, configurable: true, writable: true });
+  const copy = copySegment(original, { id: "s1~1" });
+  assert.equal(copy.id, "s1~1", "overrides 生效");
+  assert.deepEqual({ ...copy, id: original.id }, original, "除了 id，别的字段和原段一样（都是拷贝自己的，不是原型链上的）");
+  assert.deepEqual(Object.keys(copy).sort(), Object.keys(original).sort(), "Object.keys 和原段一样（id 还在）");
+  assert.equal(JSON.stringify(copy), JSON.stringify({ ...original, id: "s1~1" }), "JSON.stringify 除了 id 和原段一样");
+  assert.deepEqual(copy.keys, [{ tokenId: 9 }], "keys 带过去了");
+  assert.equal(Object.getOwnPropertyDescriptor(copy, "keys").enumerable, false, "keys 还是不可枚举，不会被 JSON.stringify / Object.keys 带出来");
+});
+
+test("R2 × K1c 中-G：一段里挂两把 Key 时碰到关过的一天，按天切开不能把 Key 列表丢掉（审核 #114 中-G，总指挥 10-26 定）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const live = f.rows.find((row) => row.id === "rr_live");
+  // 这条绑定的分段上挂两把 Key（K1c：一把在目录里、一把已删按名字取），上游成本是各取一次再相加
+  const segment = f.repository.tables.segments.find((row) => row.rule_id === "rr_live" && row.effective_to_ms == null);
+  f.repository.tables.segmentKeys.push(
+    { segment_id: segment.id, upstream_station_id: live.upstream_station_id, token_id: live.token_id, token_name: live.token_name, key_mask: null, match_source: "initial", active_token_key: null },
+    { segment_id: segment.id, upstream_station_id: live.upstream_station_id, token_id: 77, token_name: "gone-key", key_mask: null, match_source: "fingerprint", active_token_key: null });
+  const week = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "7d" }, { mode: "evaluate", origin: "page", force: true }).then((r) => r.results[0]);
+  const whole = await week();
+  assert.equal(whole.upstream.amountUsd, 2, "没碰到关着的段：两把 Key 各取一次相加，额度 100÷100=1，合计 2");
+  // 10-08 关过一天：按天切开，两截各自都要带着两把 Key，不能只剩绑定自己那把
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-08T02:00:00Z"), toMs: Date.parse("2026-10-08T03:00:00Z") }] });
+  const partial = await week();
+  assert.ok(partial.health.issues.some((issue) => issue.code === "OWN_CONSUME_LOG_GAP_PARTIAL"), "加了一句说明");
+  assert.equal(partial.upstream.amountUsd, 4, "两截各带两把 Key、各取一次：2 截 × 2 把 = 4 次取数，各 1 相加 = 4（丢了 Key 列表只会取到 2，少算一半）");
+});
+
+test("R2 关过的那天过了 33 天：状态行清掉了也不回到「实时」、手动重新读取也固定不了（总指挥 10-26 定 C）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-08T02:00:00Z"), toMs: Date.parse("2026-10-08T03:00:00Z") }] });
+  now += 33 * 86400000; // 33 天以后：状态行早被清了，段还在
+  f.repository.tables.settlementState.length = 0;
+  const yesterday = { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") };
+  const manual = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", ...yesterday }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  assert.equal(manual.health.code, "OWN_CONSUME_LOG_GAP", "段还在：那天仍说关过");
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").length, 0, "手动重新读取也没固定");
+});
+
+test("R2 还没开始统计的日子不被标成需处理（审核第一轮 中-7）：整天在开始统计之前，关着也不碰", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-05T00:00:00Z"), toMs: null }] });
+  const rule = f.rows.find((row) => row.id === "rr_live");
+  rule.billing_effective_from_ms = Date.parse("2026-10-08T16:00:00Z"); // 从今天 0 点起算
+  rule.created_at = new Date("2026-10-08T16:00:00Z");
+  const yesterday = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", ...COMPLETED_YESTERDAY }, { mode: "evaluate", origin: "page", force: true })).results[0];
+  assert.ok(!["OWN_CONSUME_LOG_OFF", "OWN_CONSUME_LOG_GAP"].includes(yesterday.health.code), `昨天在开始统计之前，不说关着：${yesterday.health.code}`);
+});
+
+test("R2 每 5 分钟读一次设置（轮询不强制）：5 分钟内几轮、几条绑定只读一次；设置里别的东西不进任何结果", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  await f.module.refreshDue(now);
+  const reads = optionReads(f);
+  assert.equal(reads, 1, "几条绑定同一轮只读一次");
+  now += 2 * 60000;
+  await f.module.refreshDue(now);
+  assert.equal(optionReads(f), reads, "2 分钟后不再读");
+  now += 4 * 60000;
+  await f.module.refreshDue(now);
+  assert.equal(optionReads(f), reads + 1, "过了 5 分钟再读一次");
+  assert.ok(!JSON.stringify(f.module.consumeLogStatus("own")).includes("secret"));
+});
+
 test("R1 读不到用户列表或管理员日志：这一天算不出收入、不固定，下次重试；不拿没减的数固定进账本", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
@@ -8255,7 +8645,7 @@ test("令牌作废：自营站点一侧马上进需处理（不是 OWN_BILLING_U
   const status = result.displayStatus;
   assert.equal(status.state, "action", "马上进需处理，不等 7 天");
   assert.equal(status.title, "自营站点的访问令牌已经作废了");
-  assert.equal(status.detail, "New API 升级以后旧式的访问令牌不能用了，要换一个新令牌（nap_ 开头），并勾上这些权限：profile:read、channel:read、log:read、user:read、usage:read");
+  assert.equal(status.detail, "New API 升级以后旧式的访问令牌不能用了，要换一个新令牌（nap_ 开头），并勾上这些权限：profile:read、channel:read、log:read、user:read、usage:read、option:read");
   assert.equal(status.action.kind, "update_authorization");
   // 结账：不固定；状态表记成要人处理（reasonKindOf 读 contract 的 kind，不用特判）
   await f.module.refreshDue(now);
@@ -8704,3 +9094,188 @@ test("C2a 每小时清一批状态表：31 天前、没有重结请求（或请�
   await f.module.refreshDue(now);
   assert.equal(f.repository.tables.settlementState.some((row) => row.bill_date === "2026-09-03"), false);
 });
+
+test("R1 多天窗口（近 7 天）：已固定的天用账本、不读管理员日志；没固定的过去整天和今天分开读——过去的那块按渠道 stat，只有今天那一块翻页（审核 CI：开了定时测试的站 60 秒超时）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z"); // 上海 10-09 11:00；开始统计 10-07 0 点
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  // root 名下 10-07、10-08 各 3000 条测试记录（各 30 页），今天 50 条（1 页）
+  const dayStart = Date.parse("2026-10-06T16:00:00Z") / 1000;
+  let id = 1;
+  for (let day = 0; day < 3; day += 1) for (let i = 0; i < (day < 2 ? 3000 : 50); i += 1) f.state.testLogs.push(usage(id++, 0, { channel: 1 + (i % 2), created_at: dayStart + day * 86400 + 10 + i * 20 }));
+  const rootReads = () => f.state.requests.filter((request) => request.host === "own.test" && /^\/api\/log\//.test(request.path) && /username=root/.test(request.query));
+  const rootPages = () => rootReads().filter((request) => request.path === "/api/log/").length;
+  const week = (ruleId) => f.module.queryRules({ ruleIds: [ruleId], preset: "7d" }, { mode: "evaluate", origin: "page", force: true }).then((r) => r.results[0]);
+  // 两天都没固定：过去两天并成一块、按渠道 stat（第一页读一次就知道 6000 行翻不过 2 个 stat），今天那一块翻 1 页
+  const before = rootPages();
+  const first = await week("rr_live");
+  assert.equal(first.health.code, "READY");
+  assert.ok(first.calculation.profitUsd != null);
+  assert.ok(rootPages() - before <= 3, `没固定的两天不整段翻页（只翻了 ${rootPages() - before} 页，改动前是 61 页）`);
+  assert.ok(rootReads().some((request) => request.path === "/api/log/stat" && /channel=/.test(request.query)), "过去的那块走了按渠道 stat");
+  // 结账 10-07、10-08 以后：已固定的天用账本，一页都不翻
+  await f.module.refreshDue(now);
+  assert.deepEqual(f.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date).sort(), ["2026-10-07", "2026-10-08"]);
+  now += 60000;
+  const mid = rootPages();
+  const second = await week("rr_live");
+  assert.ok(second.calculation.profitUsd != null);
+  assert.ok(rootPages() - mid <= 1, `已固定的天不读管理员日志：${rootPages() - mid} 页`);
+});
+
+test("R1 沿用要看管理员名单：bob 结第一条绑定时是管理员、之后被降成普通用户，第二条绑定不能沿用「全在管理员名下」那份，他名下的测试记录照兜底扣（审核 #127 中-1）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 60 * 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  const bob = { id: 3, username: "bob", display_name: "", role: 100, status: 1 };
+  f.state.ownUsers = [...OWN_USERS, bob];
+  // bob-key 那条挪到第一次结账之前（和另两条模型测试放一起）：这条本来就在，不是降级以后新来的，照样要按当时的名单判（审核 #127 M1 改坏检验）
+  f.state.testLogs.push(usage(1, 30, { token_name: "模型测试", token_id: 0, username: "bob", channel: 1 }), usage(2, 40, { token_name: "模型测试", token_id: 0, username: "bob", channel: 2 }),
+    usage(3, 50, { token_name: "bob-key", token_id: 9, username: "bob", channel: 2 })); // bob 自己的 Key：降级后算收入；整份沿用的话会多扣成 160
+  const settle = (ruleId) => f.module.queryRules({ ruleIds: [ruleId], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "observe", force: true, origin: "manual" }).then((r) => r.results[0]);
+  const first = await settle("rr_live");
+  assert.equal(first.downstream.quotaUnits, 250 - 30, "bob 是管理员：他的测试记录按管理员扣");
+  f.state.ownUsers = [...OWN_USERS, { ...bob, role: 1 }]; // 降成普通用户
+  now += 1000; // 时钟要走：结账读「这一轮开始以后」的名单，不动时钟会拿到缓存里的旧名单
+  const second = await settle("rr_two");
+  assert.equal(second.downstream.quotaUnits, 250 - 40, "名单变了不沿用：bob 名下的测试记录按兜底扣、他自己 Key 的照算收入（整份沿用是 160，沿用「全在管理员名下」那份是 250）");
+});
+
+test("R1 结账一轮里几条绑定共用一份管理员名单：用户列表每轮只读一遍，不是每条绑定各读一遍（审核 #127 增量 中-2）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  // 时钟每次走 1 毫秒：去掉 freshSince（每条绑定都重读）时，这一轮里的几次读都会落在不同的「现在」，读到 7 遍（审核 #127 改坏检验）
+  const f = await completedDayFixture(t, { clock: () => (now += 1), moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  f.state.testLogs.push(usage(1, 30, { token_name: "模型测试", token_id: 0, channel: 1 }));
+  const userReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/user/").length;
+  await f.module.refreshDue(now); // 三条绑定、两天（10-07、10-08）都在这一轮结
+  assert.ok(f.state.ledger.filter((row) => row.bill_date === "2026-10-08").length === 3, "三条都结了");
+  assert.equal(userReads(), 1, `这一轮用户列表要正好读 1 遍，读了 ${userReads()} 遍`);
+});
+
+test("R2 设置读不到的 24 小时按状态行里第一次读不到的时刻算：中途重启（新建模块）也不清零，到时照常固定，站点那一层进需处理（审核增量 中-B）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  f.state.optionReply = [502, { success: false }];
+  await f.module.refreshDue(now);
+  const row = f.repository.tables.settlementState.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(row?.retry_reason, "OWN_OPTION_UNREADABLE");
+  // 12 小时后重启：新模块，进程里什么都不记得
+  now += 12 * 3600000;
+  const restarted = createReconciliationModule(f.rt, { repository: f.repository, ownLogIngest: false });
+  await restarted.refreshDue(now);
+  assert.deepEqual(f.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date), [], "重启后 12 小时：还没到 24 小时，接着等");
+  // 再 13 小时又重启一次：状态行记的第一次读不到已经过了 24 小时 → 照常固定，推一条
+  now += 13 * 3600000;
+  f.rt.store.channels = [{ id: "c", type: "webhook", name: "运维群", enabled: true, config: { url: "https://hooks.example.com/x" } }];
+  const again = createReconciliationModule(f.rt, { repository: f.repository, ownLogIngest: false });
+  await again.refreshDue(now);
+  const settled = f.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date).sort();
+  assert.ok(settled.includes("2026-10-08"), `过了 24 小时（跨两次重启）照常固定：${settled}`);
+  const detail = f.state.ledger.find((r) => r.rule_id === "rr_live" && r.bill_date === "2026-10-08").detail;
+  assert.deepEqual([detail.settlement.consumeLogSetting.state, detail.settlement.consumeLogSetting.reason], ["unreadable", "too_long"]);
+  assert.equal(detail.settlement.consumeLogSetting.sinceMs, Date.parse("2026-10-09T03:00:00Z"), "从状态行里拿的第一次读不到的时刻");
+  const page = await again.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page" });
+  assert.ok(page.actions.some((action) => action.code === "OWN_OPTION_UNREADABLE"), "重启后站点那一层也知道读不到太久了");
+  assert.ok(page.results[0].ledger.consumeLogSetting, "已固定那天的 ledgerReference 带着那一句的依据（计算明细显示）");
+  // 那几天都固定了、状态行删了以后又重启：需处理那一条还在（从告警状态表里那一条的首次出现时刻拿，审核增量 中-C）；从账本读回的 ledgerReference 也带那一句的依据（低-G）
+  now += 6 * 3600000;
+  const third = createReconciliationModule(f.rt, { repository: f.repository, ownLogIngest: false });
+  f.rt._reconciliationResultCache.clear();
+  const afterRestart = await third.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs }, { mode: "evaluate", origin: "page" });
+  assert.ok(afterRestart.actions.some((action) => action.code === "OWN_OPTION_UNREADABLE"), "固定以后再重启，需处理那条还在");
+  assert.equal(f.state.requests.filter((request) => request.host === "hooks.example.com").length, 1, "超过 24 小时推了一条、只推一条（记在告警状态表 opt:own 上，之后只刷新最近看到的时刻）");
+  assert.deepEqual([afterRestart.results[0].ledger.consumeLogSetting.state, afterRestart.results[0].ledger.consumeLogSetting.reason], ["unreadable", "too_long"], "从账本读回的也带");
+  // 设置读得到了：需处理那条去掉
+  f.state.optionReply = null;
+  now += 60000;
+  const back = await third.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "observe", origin: "manual", force: true });
+  assert.ok(!back.actions.some((action) => action.code === "OWN_OPTION_UNREADABLE"));
+});
+
+test("R2 「这天结束以后读到过开着」才算证据：22:00 读到开着、之后设置读不到，这一天不能凭它固定（审核增量 低-A）；过了零点读到过开着再读不到才能", async (t) => {
+  // 上海 10-08 22:00 读到开着（今天的轮询），10-09 11:00 起设置读不到
+  let now = Date.parse("2026-10-08T14:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  await f.module.refreshDue(now); // 读到开着
+  now = Date.parse("2026-10-09T03:00:00Z");
+  f.state.optionReply = [502, { success: false }];
+  await f.module.refreshDue(now);
+  assert.ok(!f.state.ledger.some((r) => r.rule_id === "rr_live" && r.bill_date === "2026-10-08"), "22:00 那次开着在这天结束以前，不算证据：先等");
+  // 另一条：10-09 01:00 读到开着（这天已经结束，上游那一轮读不到没结成），11:00 设置读不到 → 凭读到过开着照常固定
+  let now2 = Date.parse("2026-10-08T17:00:00Z");
+  const g = await completedDayFixture(t, { clock: () => now2, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of g.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  g.state.upstreamQuota = null; // 上游读不到：这一轮结不成，但设置读到了开着
+  await g.module.refreshDue(now2);
+  assert.deepEqual(g.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date), []);
+  g.state.upstreamQuota = 100; g.state.optionReply = [502, { success: false }];
+  now2 = Date.parse("2026-10-09T03:00:00Z");
+  await g.module.refreshDue(now2);
+  const settled = g.state.ledger.find((r) => r.rule_id === "rr_live" && r.bill_date === "2026-10-08");
+  assert.ok(settled, "这天结束以后读到过开着：照常固定");
+  assert.equal(settled.detail.settlement.consumeLogSetting.reason, "proven_on");
+});
+
+// 审核 #114 中-F 用例草稿（放进 server/reconciliation.test.js 末尾即可；用到同文件里的 sub2ReconciliationFixture、canonicalBillingKey、ownSourceRead）。
+// Sub2API 绑定当天换绑（accounting_floor 在那天中间），之后有一天关过收费记录：近几天的多天窗口里那一天两边都不算，
+// 上游仍按整天读（换绑那天从 0 点起），合计等于没跳过那几天之和。中-F 改回去（头一截上游起点被裁成换绑时刻）就会失败。
+//
+// 夹具要点（作者卡在 PENDING 的原因）：
+//  1. 页面只读查询（mode: "evaluate"）在这条绑定被观测过之前一律回 PENDING（「还没观测过就没有可靠口径」，inspectRule 里 pendingResult）。
+//     先跑一次带观测的：refreshDue(now) 或 queryRules(today, { force: true })（默认 mode 是 observe），绑定才锚定。
+//  2. Sub2API 的账单能力要用「已结束那天有正消费」来核验：refreshDue 会去结昨天，昨天要有消费（costs 里给昨天一个正数）。
+//     没核验过时多天窗口回 UPSTREAM_CAPABILITY_UNVERIFIED（上游 partial，成本空）。
+//  3. sub2ReconciliationFixture 的假账单只按 start_date 给一天的数；多天窗口一次读一个 start_date~end_date 的范围，
+//     要按范围把每天加起来才对得上真值，下面在夹具外面再包一层 fetch。
+test("R2 × C3 Sub2API 当天换绑以后有一天关过收费记录：多天窗口跳过那一天，上游按整天读、合计等于其余几天（审核 #114 中-F）", async (t) => {
+  const tz = "Asia/Shanghai";
+  const at = (iso) => Date.parse(`${iso}+08:00`);
+  const floor = at("2026-10-06T14:30:00"); // 上海 10-06 14:30 从 New API 换绑到这条 Sub2API 绑定
+  let now = at("2026-10-10T11:00:00");
+  t.mock.method(Date, "now", () => now);
+  const costs = { "2026-10-06": 6, "2026-10-07": 7, "2026-10-08": 8, "2026-10-09": 9, "2026-10-10": 1 };
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-midf.test", costs, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  Object.assign(f.rule, { billing_effective_from_ms: floor + 60000, accounting_floor_ms: floor, provider: "sub2api" });
+  f.rule.canonical_key = canonicalBillingKey(f.stations[0], { platform: "sub2api", accountId: 7 }, f.rule.token_id);
+  // 自营站点的渠道收费：每分钟 1 额度（quota_per_unit 100 → 每分钟 0.01 美元），按请求的起止现算；上游 Sub2API 按日期范围把每天加起来
+  const ownQuota = (start, end) => Math.max(0, Math.floor(Math.min(end, Math.floor(now / 1000)) / 60) - Math.ceil(start / 60) + 1);
+  const inner = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    const json = (body) => ({ status: 200, text: async () => JSON.stringify(body) });
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !ownSourceRead(url)) {
+      return json({ success: true, data: { quota: ownQuota(Number(url.searchParams.get("start_timestamp")), Number(url.searchParams.get("end_timestamp"))) } });
+    }
+    if (url.host === "sub2-midf.test" && !url.pathname.startsWith("/api/v1/auth") && !url.pathname.startsWith("/api/v1/keys")) {
+      f.sub2.stats.push(Object.fromEntries(url.searchParams));
+      let cost = 0;
+      if (url.searchParams.get("api_key_id") === "9") for (const [day, value] of Object.entries(costs)) if (day >= url.searchParams.get("start_date") && day <= url.searchParams.get("end_date")) cost += value;
+      return { status: 200, text: async () => JSON.stringify({ code: 0, data: { total_actual_cost: cost } }) };
+    }
+    return inner(input, init);
+  });
+  // 先观测一轮（锚定绑定 + 用昨天 10-09 的正消费核验 Sub2API 账单能力），不然页面只读查询一直是 PENDING / 能力未核验
+  await f.module.refreshDue(now);
+  await f.module.queryRules(f.today, { force: true });
+
+  const window = { ruleIds: [f.rule.id], preset: "custom", timezone: tz, startMs: at("2026-10-06T00:00:00"), endMs: at("2026-10-10T00:00:00") };
+  const read = async () => (await f.module.queryRules(window, { mode: "evaluate", origin: "page", force: true })).results[0];
+  const whole = await read();
+  assert.equal(whole.health.code, "READY", "一直开着：照常算");
+  assert.deepEqual([whole.upstream.amountUsd, whole.downstream.amountUsd], [6 + 7 + 8 + 9, ownQuota(floor / 1000, at("2026-10-10T00:00:00") / 1000 - 1) / 100]);
+
+  // 10-08 上海 10:00–11:00 关过收费记录（已经开回来）：10-08 两边都不算，其余天照算
+  f.stations[1].consumeLogOffPeriods = [{ fromMs: at("2026-10-08T10:00:00"), toMs: at("2026-10-08T11:00:00") }];
+  const before = f.sub2.stats.length;
+  const partial = await read();
+  assert.ok(partial.health.issues.some((issue) => issue.code === "OWN_CONSUME_LOG_GAP_PARTIAL"), "行上有那一句说明");
+  assert.equal(partial.upstream.state, "complete", `上游读得到：${partial.health.code}`);
+  assert.equal(partial.upstream.amountUsd, 6 + 7 + 9, "上游 = 10-06（换绑那天整天）+ 10-07 + 10-09，不含 10-08");
+  const ownExpected = (ownQuota(floor / 1000, at("2026-10-08T00:00:00") / 1000 - 1) + ownQuota(at("2026-10-09T00:00:00") / 1000, at("2026-10-10T00:00:00") / 1000 - 1)) / 100;
+  assert.equal(partial.downstream.amountUsd, ownExpected, "收入 = 换绑那一刻到 10-08 0 点 + 10-09 整天");
+  const asked = f.sub2.stats.slice(before).filter((stat) => stat.api_key_id === "9").map((stat) => `${stat.start_date}~${stat.end_date}`).sort();
+  assert.deepEqual(asked, ["2026-10-06~2026-10-07", "2026-10-09~2026-10-09"], "上游按整天读两截，换绑那天从 0 点起，10-08 不读");
+});
+

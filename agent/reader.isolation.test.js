@@ -224,10 +224,13 @@ test("MySQL 每次读连一次：5 次读，账号累计连接数正好多 5 次
   const account = await mysql.agentAccount();
   const reader = readerOf(account);
   t.after(() => reader.close());
-  for (let i = 0; i < 5; i += 1) await reader.read();
-  assert.equal(await eventually(async () => (await totalConnections(account.name)) === 5), true, `累计连了 ${await totalConnections(account.name)} 次`);
-  await sleep(200);
-  assert.equal(await totalConnections(account.name), 5);
+  // 账号限了 MAX_USER_CONNECTIONS 1：上一次读的连接服务器那边没断干净时，下一次就连不上（偶发 DB_LIMIT，CI 上见过）。
+  // 等到当前连接数回到 0 再读下一次，不靠固定的等待时间（同 217~218 行「额度用完被拒以后连接收掉」那条的办法）
+  for (let i = 0; i < 5; i += 1) {
+    await reader.read();
+    assert.equal(await eventually(async () => (await mysql.connectionsOf(account.name)) === 0, { tries: 60, ms: 50 }), true, `第 ${i + 1} 次读完连接没收掉`);
+  }
+  assert.equal(await totalConnections(account.name), 5, `累计连了 ${await totalConnections(account.name)} 次`);
 });
 
 test("MySQL --dry-run：读一次、打印耗时和渠道数，不打 Key；账号过宽时退出码 1 并说明", { skip: skipMysql, timeout: 30000 }, async (t) => {

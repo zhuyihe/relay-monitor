@@ -24,6 +24,7 @@ import {
   segmentTimingLabel, sideRate, upstreamName,
 } from "./recon-format";
 import type { ReconciliationCurrency } from "../../../lib/client";
+import { RecheckConsumeLogButton } from "../../components/recheck-consume-log";
 
 // 三种状态和标签的颜色：需处理提醒、实时是信息、已固定是好的；亏损用红，金额本身不变色（§4、§7）
 const STATE_LEVEL: Record<string, Level> = { action: "warn", live: "info", settled: "good" };
@@ -75,7 +76,9 @@ export function SummaryMetric({ label, value, children }: { label: string; value
 // 需处理的那个按钮（§3.5）：去别的页面处理的直接跳转；改时间打开计算明细。
 // 重新读取、刷新这两种页面上本来就有按钮，这里不重复。列表里每行都有一个，传 target（Key 名）让读屏分得清是哪一行。
 export function IssueAction({ action, onDetail, target, ...button }: { action: any; onDetail?: () => void; target?: string } & Omit<ButtonProps, "href" | "onClick">) {
-  if (!action || action.kind === "retry_bill" || action.kind === "refresh") return null;
+  if (!action || !action.label || action.kind === "retry_bill" || action.kind === "refresh") return null;
+  // 重新检查：点了才马上再读一次自营站点的设置（三处入口同一个按钮）
+  if (action.kind === "recheck_consume_log") return <RecheckConsumeLogButton {...button} />; // label 空：这一天碰到过自营站点没记收费记录的那段，没有按钮
   const label = target ? `${action.label} ${target}` : undefined;
   if (action.href) return <Button {...button} aria-label={label} href={action.href}>{action.label}</Button>;
   return onDetail ? <Button {...button} aria-label={label} onClick={onDetail}>{action.label}</Button> : null;

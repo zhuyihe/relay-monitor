@@ -52,6 +52,34 @@ function fixture(t, { failUsers = false, userCount = 2, resold = false, failReso
   return { own, calls, controls, rt: { store: { list: () => [own] }, history: { usedBetween: () => 0 } } };
 }
 
+test("自营站点现在关着收费记录：收入、毛利、净利不说数，原因写「自营站点不记收费记录了」（页面按钮「重新检查」靠这个码认），成本和用户照常", async (t) => {
+  const f = fixture(t);
+  f.own.consumeLogOffPeriods = [{ fromMs: NOW - 3600000, toMs: null }];
+  const { GET } = await ownAnalyticsRoute();
+  const body = await (await GET(new Request("https://local.test/api/own/analytics?range=7d"), f.rt)).json();
+  assert.equal(body.profit.incomeCny, null);
+  assert.equal(body.profit.profitCny, null);
+  assert.equal(body.profit.incomeUnconfirmed.errorCode, "OWN_CONSUME_LOG_OFF");
+  assert.ok(body.byUser.length > 0, "用户照常");
+  // 开回来以后（段关上了）：照常算
+  f.own.consumeLogOffPeriods = [{ fromMs: NOW - 3600000, toMs: NOW - 1800000 }];
+  const again = await (await GET(new Request("https://local.test/api/own/analytics?range=7d"), f.rt)).json();
+  assert.equal(again.profit.incomeCny, 70);
+});
+
+test("自营站点以前有一段没记收费记录、现在已经开回来，所选范围碰到那一段：profit.consumeLogGap，收入照常显示；没碰到不带（总指挥 10-25）", async (t) => {
+  const f = fixture(t);
+  f.own.consumeLogOffPeriods = [{ fromMs: NOW - 3 * 86400000, toMs: NOW - 3 * 86400000 + 3600000 }];
+  const { GET } = await ownAnalyticsRoute();
+  const body = await (await GET(new Request("https://local.test/api/own/analytics?range=7d"), f.rt)).json();
+  assert.equal(body.profit.consumeLogGap, true);
+  assert.equal(body.profit.incomeCny, 70, "收入照常显示");
+  f.rt._ownCache?.clear(); // 自营分析缓存 120 秒，换了站点配置要清
+  f.own.consumeLogOffPeriods = [{ fromMs: NOW - 20 * 86400000, toMs: NOW - 20 * 86400000 + 3600000 }];
+  const other = await (await GET(new Request("https://local.test/api/own/analytics?range=7d"), f.rt)).json();
+  assert.equal(other.profit.consumeLogGap, undefined, "没碰到那一段不带");
+});
+
 for (const userCount of [2, 1101]) {
   test(`真实自营分析：${userCount} 个用户时管理员自用日不产生收入，成本估算复用真实分日金额`, async (t) => {
     const f = fixture(t, { userCount });
