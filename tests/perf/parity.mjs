@@ -21,6 +21,7 @@ const BACKUP = "perf_parity_backup";
 // 每次结账都会变、和账算得对不对无关的列和 detail 里的键
 const VOLATILE_COLUMNS = ["settled_at", "version_id"];
 // （渠道的 stateObservedAt、倍率的 ratioObservedAt 这类「什么时候读到的」键，名字以 ObservedAt 结尾的一律不比）
+// trigger：这天是轮询回看（late）结的还是 parity 手动（manual）结的，只看谁抢先，和钱无关（审核 R2 第二轮、#123 perf 的 15 处假差）
 const VOLATILE_KEYS = new Set(["generatedAt", "resultGeneratedAt", "origin", "observedAt", "checkedAt", "fetchedAt",
   ...(process.env.PARITY_IGNORE_KEYS || "").split(",").map((s) => s.trim()).filter(Boolean)]);
 const isVolatileKey = (key) => VOLATILE_KEYS.has(key) || /ObservedAt$/.test(key);
@@ -52,12 +53,19 @@ async function restore(conn, w) {
   return true;
 }
 
+// trigger 是谁结的（late 轮询回看 / manual parity 手动 / transition 重结 / poll 正常轮询）：late 和 manual 只差谁先抢到，和钱无关，
+// 两边都算「settled」；但 transition（C2b 重结）要和别的值分得开，照旧比（总指挥 10-26 定：不整个忽略 trigger，免得漏掉真正的差别）
+const triggerCanon = (value) => (value === "late" || value === "manual" ? "settled" : value);
+
 // detail 去掉每次都会变的键；对象键排序，导出稳定
 function normalize(value) {
   if (Array.isArray(value)) return value.map(normalize);
   if (value && typeof value === "object") {
     const out = {};
-    for (const key of Object.keys(value).sort()) if (!isVolatileKey(key)) out[key] = normalize(value[key]);
+    for (const key of Object.keys(value).sort()) {
+      if (isVolatileKey(key)) continue;
+      out[key] = key === "trigger" ? triggerCanon(normalize(value[key])) : normalize(value[key]);
+    }
     return out;
   }
   return value;
@@ -165,7 +173,7 @@ try {
       `- 日子：${A.window.days[0]} … ${A.window.days.at(-1)}（${A.window.days.length} 天，${A.window.tz}），挪走再重结的账本行：${A.window.moved ?? "?"}`,
       `- 账本行数：${la} ${A.rows.length}，${lb} ${B.rows.length}`,
       `- 结出毛利的绑定（每天）：${la} ${A.perDay.map((d) => d.settled).join(" ")}；${lb} ${B.perDay.map((d) => d.settled).join(" ")}`,
-      `- 比的字段（两边都有的）：${common.join("、")}；不比：${VOLATILE_COLUMNS.join("、")}，detail 里的 ${[...VOLATILE_KEYS].join("、")} 和以 ObservedAt 结尾的键`,
+      `- 比的字段（两边都有的）：${common.join("、")}；不比：${VOLATILE_COLUMNS.join("、")}，detail 里的 ${[...VOLATILE_KEYS].join("、")} 和以 ObservedAt 结尾的键；trigger 的 late/manual 当一样比（只差谁先结，和钱无关），transition/poll 照旧比`,
       ...(onlyA.length || onlyB.length ? [`- 只有一边有的字段（不比）：${la} ${onlyA.join("、") || "无"}；${lb} ${onlyB.join("、") || "无"}`] : []),
       `- 结账用时：${la} ${Math.round(A.perDay.reduce((s, d) => s + d.ms, 0) / 1000)} 秒，${lb} ${Math.round(B.perDay.reduce((s, d) => s + d.ms, 0) / 1000)} 秒（参考）`,
       "", `**${differences ? `${differences} 处不同` : "0 处不同"}**`, ""];
