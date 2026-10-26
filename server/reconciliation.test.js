@@ -8101,6 +8101,8 @@ test("V1-b 结账时算应付成本写进账本：这条绑定的渠道的桶 ×
   // 渠道 1 是 rr_live 的；渠道 2 是 rr_two 的；渠道 9 谁的都不是
   await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd + 3600000, buckets: [bucket(dayStart + 3600000, 1), bucket(dayStart + 7200000, 1, { completionTokens: 0, cacheReadTokens: 100 }), bucket(dayStart + 7200000, 2), bucket(dayStart + 3600000, 9), bucket(dayEnd, 1)] }, dayEnd + 3600000);
   const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  const debugLines = [];
+  t.mock.method(console, "debug", (...parts) => debugLines.push(parts.map(String).join(" ")));
   // 价目表：m 按量，model_ratio 2、completion_ratio 3、cache_ratio 0.1；上游 /api/status 的 quota_per_unit 是 100；g1 倍率 1
   f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2, completion_ratio: 3, cache_ratio: 0.1 }], group_ratio: { g1: 1 } };
   await f.module.refreshDue(Date.now());
@@ -8114,6 +8116,8 @@ test("V1-b 结账时算应付成本写进账本：这条绑定的渠道的桶 ×
   assert.deepEqual([detail.expected.usd, detail.expected.reason, detail.expected.byModel.length, detail.expected.byChannel, detail.expected.segments.length, detail.expected.quotaPerUnit],
     [7.2, null, 1, [{ channelId: 1, usd: 7.2 }], 1, 100]);
   assert.deepEqual(rows.find((row) => row.rule_id === "rr_two").expected_cost_usd, 5, "rr_two 只算渠道 2 的桶");
+  // 桶和 R1 的对账只打一行 debug（V1 不替换 R1）：桶里渠道 1 这天管理员自用 0，R1 扣的也是 0 → 不打；下面单独验会打的情况
+  assert.ok(!debugLines.some((line) => line.includes("应付成本对账")), "一致时不打");
   assert.deepEqual(rows.find((row) => row.rule_id === "rr_three").expected_cost_usd, 0, "rr_three 的渠道这天没用量：应付 0");
   const { results } = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
   const shown = results.find((row) => row.rule.id === "rr_live");
@@ -8121,6 +8125,23 @@ test("V1-b 结账时算应付成本写进账本：这条绑定的渠道的桶 ×
 });
 
 // Key 别处也用（KEY_SHARED）这里不测：现在回答「别处也用」的绑定成本覆盖是 unknown，根本不结账（COST_COVERAGE_UNKNOWN 先拦住），纯函数里留着给 K 的时间分段 Key 用
+test("V1-b 桶和 R1 的管理员自用对账：结账时桶里这些渠道的管理员自用额度和 R1 实际扣的不一样就打一行 debug（不带用户名、地址）；只打日志不改数", async (t) => {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd, buckets: [{ slotMs: dayStart + 3600000, channelId: 1, model: "m", upstreamModel: "", group: "g1", semantic: "anthropic", requests: 1, promptTokens: 100, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 7, adminQuota: 7, testQuota: 0 }] }, dayEnd);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  const debugLines = [];
+  t.mock.method(console, "debug", (...parts) => debugLines.push(parts.map(String).join(" ")));
+  await f.module.refreshDue(Date.now());
+  const line = debugLines.find((item) => item.includes("应付成本对账：绑定 rr_live"));
+  assert.ok(line, `打了对账日志：${debugLines.join(" | ")}`);
+  assert.match(line, /桶里管理员自用 7 额度，R1 扣了 \d+/);
+  assert.ok(!/alice|root|own\.test|upstream\.test/.test(line), "不带用户名、地址");
+  const live = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.deepEqual([live.revenue_usd, live.cost_usd], [2.5, 1], "R1 的数照旧，不拿桶改");
+});
+
 test("V1-b 算不出的原因写进账本：上游价目表读不到（上游没开模型广场）→ MODEL_PRICE_UNREADABLE；有模型没价格 → MODEL_PRICE_MISSING 并列出；原因不挡结账、原有金额照写", async (t) => {
   const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
   const ownLogStore = new MemoryOwnLogStore();
