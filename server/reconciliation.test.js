@@ -7605,16 +7605,17 @@ test("R1 多条绑定各要一个渠道、日志很多：按渠道 stat 只查�
   const perAdminStats = (from) => f.state.requests.slice(from).filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && /token_name=/.test(request.query) && /username=/.test(request.query)).length;
   assert.ok(perAdminStats(0) > 0, "第一条绑定查过每个管理员名下的");
   assert.equal(perAdminStats(requestsBefore), 0, "第二条绑定沿用，不再按管理员逐个查");
-  // 总额度变了（晚到一条渠道测试记录）：重查
-  f.state.testLogs.push(usage(5000, 1, { token_name: "模型测试", token_id: 0, username: "alice", channel: 1 }));
+  // 总额度变了（晚到一条渠道测试记录）：第三条绑定（要算的渠道 3 还没覆盖，不走整份沿用）重查
+  f.state.testLogs.push(usage(5000, 1, { token_name: "模型测试", token_id: 0, username: "alice", channel: 3 }));
+  f.rows.find((row) => row.id === "rr_three").enabled = 1;
   const beforeChanged = f.state.requests.length;
-  f.state.ledger.length = 0;
-  await settle("rr_live");
+  await settle("rr_three");
   assert.ok(perAdminStats(beforeChanged) > 0, "总额度变了：按管理员逐个重查");
-  // 过了 10 分钟：重查
+  // 过了 10 分钟：重查（把 rr_two 这天的账本行拿掉，让它真的再结一次）
   now += 11 * 60000;
   const beforeLater = f.state.requests.length;
-  f.state.ledger.length = 0;
+  for (let i = f.repository.tables.ledger.length - 1; i >= 0; i -= 1) if (f.repository.tables.ledger[i].rule_id === "rr_two") f.repository.tables.ledger.splice(i, 1);
+  f.rt._reconciliationResultCache.clear();
   await settle("rr_two");
   assert.ok(perAdminStats(beforeLater) > 0, "第 11 分钟：不再沿用");
   // 过去窗口：页面再看（非结账）不发请求
