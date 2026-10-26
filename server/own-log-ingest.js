@@ -57,8 +57,10 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
     try { ({ adminSet } = await readOwnAdminDirectory(rt, own)); resoldKeys = resoldAdminKeysOf(own); }
     catch (error) { return { skipped: "admins", pages: 0, error: error?.code || error?.message }; }
     let cursor = await store.getCursor(own.id);
-    // 进度比保留期还旧（停机超过 35 天）：补上的桶随后就会被清掉，不如从昨天 0 点重来
-    if (cursor && cursor.coveredToMs < at - INGEST.KEEP_DAYS * 86400000) { await store.deleteStation(own.id); cursor = null; log("own-log-ingest", own.id, "cursor too old, restarting from yesterday"); }
+    // 进度比昨天 0 点（业务时区）还旧——停机、或「算应付成本」关了一阵子又打开：不补那段缺口（关着的日子本来就用不上，
+    // 停机太久的话补上的桶也多半被保留期清掉），直接从昨天 0 点重来，和第一次开始读一样（总指挥 10-26 定，决定 C）。
+    // 跳过的那几天 coveredFromMs 一起挪过去，下次结账按 expectedCostForDay 的覆盖判断自然落「还没开始算」，不会误判成「读得慢」
+    if (cursor && cursor.coveredToMs < firstFromMs(at)) { await store.deleteStation(own.id); cursor = null; log("own-log-ingest", own.id, "cursor too old, restarting from yesterday"); }
     cursor ??= await store.startCursor(own.id, firstFromMs(at), at);
     const horizon = wholeSecond(at - INGEST.LAG_MS);
     if (cursor.coveredToMs >= horizon) return { skipped: "caught-up", pages: 0, coveredToMs: cursor.coveredToMs };

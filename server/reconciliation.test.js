@@ -7195,7 +7195,7 @@ test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率�
     assert.deepEqual(row.rates, { income: { stationId: "own", cnyPerUsd: 7.1, source: "configured" },
       cost: { stationId: "upstream", cnyPerUsd: 6.5, source: "configured" }, costBasis: "usage" });
     assert.deepEqual(row.ledger, { billDate: "2026-10-08", revision: 1, source: "settle", settledAt: row.settledAt, rates: { income: 7.1, cost: null }, costBasis: "usage",
-      expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: 0 }, "夹具默认不开整站读：应付成本算不出，原因是整站日志没读完（V1-b）");
+      expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null }, "夹具默认不开整站读：应付成本算不出，原因是整站日志没读完（V1-b）；没读全时 tokens 也不写（审核 R2 #125 中-4）");
   }
   // 今天还没结账，按当前配置：固定采购、成本记 0。
   const today = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "evaluate", origin: "page" })).results[0];

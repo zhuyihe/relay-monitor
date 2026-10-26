@@ -440,6 +440,18 @@ test("「算应付成本」开关 settings.expectedCost：默认开（V1-b 带�
   assert.equal(store.settings.expectedCost, false, "字符串不算开");
 });
 
+test("老库里没有标记、存着 expectedCost:false：升级后一次性改成开，写上标记；界面上关掉的带标记，再跑一次迁移还是关；新装的默认开（决定 1，总指挥 10-26 定）", async () => {
+  // ① 老库：V1-a 没有界面开关，存着的 false 不可能是用户自己选的——没有标记，改成开
+  const migrated = await new Store(fakePool([], [], { expectedCost: false })).load();
+  assert.deepEqual([migrated.settings.expectedCost, migrated.settings.expectedCostMigratedV1b], [true, true]);
+  // ② 界面上关掉的带标记：再跑一次迁移（比如重启）还是关，不会被当成「没人动过」又扳回去
+  const keptOff = await new Store(fakePool([], [], { expectedCost: false, expectedCostMigratedV1b: true })).load();
+  assert.equal(keptOff.settings.expectedCost, false, "带标记的不动");
+  // ③ 新装：库里没有这个键，直接走默认开，迁移也顺手打上标记（以后不用再判一次）
+  const fresh = await new Store(fakePool([])).load();
+  assert.deepEqual([fresh.settings.expectedCost, fresh.settings.expectedCostMigratedV1b], [true, true]);
+});
+
 test("配置写库失败不会发布账号、设置、通知或站点变更", async () => {
   const changes = [
     (store) => store.updateSettings({ refreshIntervalSec: 90 }),

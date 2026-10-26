@@ -206,6 +206,13 @@ export class Store {
       },
     };
     this._metaSecrets = metaSecrets;
+    // 一次性迁移（决定 1，总指挥 10-26 定）：V1-a 没有「算应付成本」的界面开关，库里存着的 false 不可能是用户自己选的——
+    // 任何一次保存设置都会把整份 settings 写回去，V1-a 上线期间保存过设置的站，库里就留着这个 false。没有迁移标记、
+    // 而且值正好是 false 的，当成「没人动过」改成开，写上标记；以后用户自己在 V1-b 界面上关掉的带着标记，这里不会再碰它
+    if (meta.settings?.expectedCostMigratedV1b !== true) {
+      if (meta.settings?.expectedCost === false) this.data.settings.expectedCost = true;
+      this.data.settings.expectedCostMigratedV1b = true;
+    }
     this.data.settings.historyRetentionDays =
       normalizeHistoryRetentionDays(this.data.settings.historyRetentionDays);
     // v2.2：旧规则没有渠道绑定字段；归一化成 5 个事件键齐全的独立对象

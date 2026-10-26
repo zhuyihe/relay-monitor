@@ -2198,16 +2198,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const segments = (result.segments || []).map((segment) => ({ startMs: segment.window?.startMs ?? window.startMs, endMs: segment.window?.endMs ?? window.endMs,
       ratio: segment.upstream?.ratio ?? segment.ratio ?? result.upstream?.ratio ?? null, group: segment.upstream?.group ?? segment.group ?? result.upstream?.group ?? null }));
     const quotaPerUnit = result.upstream?.quotaPerUnit ?? null;
-    let buckets = [], coveredToMs = null, pricing = null, pricingError = null;
+    let buckets = [], coveredFromMs = null, coveredToMs = null, pricing = null, pricingError = null;
     try {
       const [cursor, rows] = await Promise.all([store?.getCursor(own?.id) ?? null, store?.listBuckets(own?.id, window.startMs, window.endMs) ?? []]);
-      coveredToMs = cursor?.coveredToMs ?? null; buckets = rows;
+      coveredFromMs = cursor?.coveredFromMs ?? null; coveredToMs = cursor?.coveredToMs ?? null; buckets = rows;
     } catch (error) { console.debug("应付成本：读小时桶失败", rule.id, error?.code || error?.message); }
     if (upstream?.type === "newapi" && !upstream.isOwn) {
       try { pricing = await upstreamPricing.pricingFor(upstream); } catch (error) { pricingError = error; }
     }
     const expected = expectedCostForDay({ window, buckets, channelIds, segments: segments.length ? segments : [{ startMs: window.startMs, endMs: window.endMs, ratio: result.upstream?.ratio ?? null, group: result.upstream?.group ?? null }],
-      pricing, pricingError, quotaPerUnit, flags: { off: rt.store?.settings?.expectedCost === false, platform: upstream?.type ?? null, keyShared, groupAuto, coveredToMs } });
+      pricing, pricingError, quotaPerUnit, flags: { off: rt.store?.settings?.expectedCost === false, platform: upstream?.type ?? null, keyShared, groupAuto, coveredFromMs, coveredToMs } });
     // 对账：桶里这些渠道这一天的管理员自用额度（R1 的规矩）和 R1 实际扣的比一比（只打日志，不改数；跑一两周一致了再让 R1 用桶）
     if (coveredToMs != null && coveredToMs >= window.endMs && result.downstream?.adminUsageQuotaUnits != null) {
       const wanted = new Set(channelIds.map(Number));

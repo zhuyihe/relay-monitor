@@ -48,7 +48,7 @@ try {
     const expected = expectedCostForDay({ window, buckets, channelIds: (rule.channels || []).map((channel) => channel.channelId),
       segments: segments.length ? segments : [{ startMs, endMs, ratio: saved?.upstream?.ratio ?? null, group: saved?.upstream?.group ?? null }],
       pricing, pricingError, quotaPerUnit: saved?.upstream?.quotaPerUnit ?? null,
-      flags: { platform: upstream?.type ?? null, keyShared: rule.costCoverage !== "complete", groupAuto: false, coveredToMs: cursor?.coveredToMs ?? null } });
+      flags: { platform: upstream?.type ?? null, keyShared: rule.costCoverage !== "complete", groupAuto: false, coveredFromMs: cursor?.coveredFromMs ?? null, coveredToMs: cursor?.coveredToMs ?? null } });
     const actual = saved?.upstream?.amountUsd ?? null;
     const gap = gapOf(actual, expected.usd);
     const money = (value) => (value == null ? "—" : `$${Number(value).toFixed(4)}`);

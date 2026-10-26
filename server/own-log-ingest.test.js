@@ -242,6 +242,16 @@ test("进度比保留期还旧（停机超过 35 天）：清掉从昨天 0 点�
   assert.equal(await ingest.pruneIfDue(), 4500, "4500 行 = 3 批");
 });
 
+test("关了几天（不到 35 天）又打开：进度比昨天 0 点还旧就直接跳过去，不补关着那几天的缺口（总指挥 10-26 定，决定 C）", async (t) => {
+  resetOwnRequestBudget();
+  const { own, rt } = await fakeSite(t, [row(1, YESTERDAY_START + 1000)]);
+  const store = new MemoryOwnLogStore();
+  await store.startCursor("own", YESTERDAY_START - 10 * 86400000); // 10 天前还开着，之后关了
+  const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
+  await ingest.ingestOnce(own);
+  assert.equal((await store.getCursor("own")).coveredFromMs, YESTERDAY_START, "10 天远没到 35 天，照样直接跳到昨天 0 点，不是继续往回补");
+});
+
 test("管理员名单读不到：这轮不读（桶里的管理员自用会算错）；清理只删 35 天前的桶", async (t) => {
   resetOwnRequestBudget();
   const { own, requests } = await fakeSite(t, [row(1, YESTERDAY_START + 1000)]);
