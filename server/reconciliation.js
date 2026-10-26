@@ -2057,10 +2057,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             const last = runs.at(-1);
             if (last && last.endMs === piece.startMs) last.endMs = piece.endMs; else runs.push({ startMs: piece.startMs, endMs: piece.endMs, timezone: piece.timezone });
           }
-          // upstreamWindow 按这一段自己的起止裁一遍：原来是整段的（Sub2API 当天换绑那天会比 segmentWindow 宽），按天切开以后
-          // 每一截只留和它重叠的那部分，不能整段照抄——不然碰到关着那天会被跳过的日子又从上游这一侧读回来（审核改坏检验抓到）
+          // upstreamWindow 按这一截自己的起止裁一遍：原来是整段的（Sub2API 当天换绑那天会比 segmentWindow 宽），按天切开以后
+          // 中间被切开的地方只留和它重叠的那部分，不能整段照抄——不然碰到关着那天会被跳过的日子又从上游这一侧读回来（审核改坏检验抓到）。
+          // 头尾两截（挨着 segmentWindow 本来的起止）要保留 C3 放宽的那部分，不能也裁掉：Sub2API 换绑那天只能按整天读账单，
+          // 裁到换绑时刻会把上游起点读错（审核 #114 中-F：换绑那天以后有一天关过，整行变成读不到上游）
           return runs.map((run, index) => ({ segment: index ? { ...segment, id: `${String(segment.id).slice(0, 28)}~${index}` } : segment, segmentWindow: { ...segmentWindow, ...run },
-            upstreamWindow: upstreamWindow ? { ...upstreamWindow, startMs: Math.max(upstreamWindow.startMs, run.startMs), endMs: Math.min(upstreamWindow.endMs, run.endMs) } : upstreamWindow }));
+            upstreamWindow: upstreamWindow ? { ...upstreamWindow,
+              startMs: run.startMs === segmentWindow.startMs ? upstreamWindow.startMs : run.startMs,
+              endMs: run.endMs === segmentWindow.endMs ? upstreamWindow.endMs : run.endMs } : upstreamWindow }));
         });
         if (kept.length) {
           applicable = kept;
