@@ -8407,6 +8407,26 @@ test("R2 近 7 天碰到关过的一天：那一天不算，其余天照算，�
   assert.equal(all.health.code, "OWN_CONSUME_LOG_GAP");
 });
 
+test("R2 × K1c 中-G：一段里挂两把 Key 时碰到关过的一天，按天切开不能把 Key 列表丢掉（审核 #114 中-G，总指挥 10-26 定）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const live = f.rows.find((row) => row.id === "rr_live");
+  // 这条绑定的分段上挂两把 Key（K1c：一把在目录里、一把已删按名字取），上游成本是各取一次再相加
+  const segment = f.repository.tables.segments.find((row) => row.rule_id === "rr_live" && row.effective_to_ms == null);
+  f.repository.tables.segmentKeys.push(
+    { segment_id: segment.id, upstream_station_id: live.upstream_station_id, token_id: live.token_id, token_name: live.token_name, key_mask: null, match_source: "initial", active_token_key: null },
+    { segment_id: segment.id, upstream_station_id: live.upstream_station_id, token_id: 77, token_name: "gone-key", key_mask: null, match_source: "fingerprint", active_token_key: null });
+  const week = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "7d" }, { mode: "evaluate", origin: "page", force: true }).then((r) => r.results[0]);
+  const whole = await week();
+  assert.equal(whole.upstream.amountUsd, 2, "没碰到关着的段：两把 Key 各取一次相加，额度 100÷100=1，合计 2");
+  // 10-08 关过一天：按天切开，两截各自都要带着两把 Key，不能只剩绑定自己那把
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-08T02:00:00Z"), toMs: Date.parse("2026-10-08T03:00:00Z") }] });
+  const partial = await week();
+  assert.ok(partial.health.issues.some((issue) => issue.code === "OWN_CONSUME_LOG_GAP_PARTIAL"), "加了一句说明");
+  assert.equal(partial.upstream.amountUsd, 4, "两截各带两把 Key、各取一次：2 截 × 2 把 = 4 次取数，各 1 相加 = 4（丢了 Key 列表只会取到 2，少算一半）");
+});
+
 test("R2 关过的那天过了 33 天：状态行清掉了也不回到「实时」、手动重新读取也固定不了（总指挥 10-26 定 C）", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
@@ -9061,3 +9081,65 @@ test("R2 「这天结束以后读到过开着」才算证据：22:00 读到开�
   assert.ok(settled, "这天结束以后读到过开着：照常固定");
   assert.equal(settled.detail.settlement.consumeLogSetting.reason, "proven_on");
 });
+
+// 审核 #114 中-F 用例草稿（放进 server/reconciliation.test.js 末尾即可；用到同文件里的 sub2ReconciliationFixture、canonicalBillingKey、ownSourceRead）。
+// Sub2API 绑定当天换绑（accounting_floor 在那天中间），之后有一天关过收费记录：近几天的多天窗口里那一天两边都不算，
+// 上游仍按整天读（换绑那天从 0 点起），合计等于没跳过那几天之和。中-F 改回去（头一截上游起点被裁成换绑时刻）就会失败。
+//
+// 夹具要点（作者卡在 PENDING 的原因）：
+//  1. 页面只读查询（mode: "evaluate"）在这条绑定被观测过之前一律回 PENDING（「还没观测过就没有可靠口径」，inspectRule 里 pendingResult）。
+//     先跑一次带观测的：refreshDue(now) 或 queryRules(today, { force: true })（默认 mode 是 observe），绑定才锚定。
+//  2. Sub2API 的账单能力要用「已结束那天有正消费」来核验：refreshDue 会去结昨天，昨天要有消费（costs 里给昨天一个正数）。
+//     没核验过时多天窗口回 UPSTREAM_CAPABILITY_UNVERIFIED（上游 partial，成本空）。
+//  3. sub2ReconciliationFixture 的假账单只按 start_date 给一天的数；多天窗口一次读一个 start_date~end_date 的范围，
+//     要按范围把每天加起来才对得上真值，下面在夹具外面再包一层 fetch。
+test("R2 × C3 Sub2API 当天换绑以后有一天关过收费记录：多天窗口跳过那一天，上游按整天读、合计等于其余几天（审核 #114 中-F）", async (t) => {
+  const tz = "Asia/Shanghai";
+  const at = (iso) => Date.parse(`${iso}+08:00`);
+  const floor = at("2026-10-06T14:30:00"); // 上海 10-06 14:30 从 New API 换绑到这条 Sub2API 绑定
+  let now = at("2026-10-10T11:00:00");
+  t.mock.method(Date, "now", () => now);
+  const costs = { "2026-10-06": 6, "2026-10-07": 7, "2026-10-08": 8, "2026-10-09": 9, "2026-10-10": 1 };
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-midf.test", costs, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  Object.assign(f.rule, { billing_effective_from_ms: floor + 60000, accounting_floor_ms: floor, provider: "sub2api" });
+  f.rule.canonical_key = canonicalBillingKey(f.stations[0], { platform: "sub2api", accountId: 7 }, f.rule.token_id);
+  // 自营站点的渠道收费：每分钟 1 额度（quota_per_unit 100 → 每分钟 0.01 美元），按请求的起止现算；上游 Sub2API 按日期范围把每天加起来
+  const ownQuota = (start, end) => Math.max(0, Math.floor(Math.min(end, Math.floor(now / 1000)) / 60) - Math.ceil(start / 60) + 1);
+  const inner = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    const json = (body) => ({ status: 200, text: async () => JSON.stringify(body) });
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !ownSourceRead(url)) {
+      return json({ success: true, data: { quota: ownQuota(Number(url.searchParams.get("start_timestamp")), Number(url.searchParams.get("end_timestamp"))) } });
+    }
+    if (url.host === "sub2-midf.test" && !url.pathname.startsWith("/api/v1/auth") && !url.pathname.startsWith("/api/v1/keys")) {
+      f.sub2.stats.push(Object.fromEntries(url.searchParams));
+      let cost = 0;
+      if (url.searchParams.get("api_key_id") === "9") for (const [day, value] of Object.entries(costs)) if (day >= url.searchParams.get("start_date") && day <= url.searchParams.get("end_date")) cost += value;
+      return { status: 200, text: async () => JSON.stringify({ code: 0, data: { total_actual_cost: cost } }) };
+    }
+    return inner(input, init);
+  });
+  // 先观测一轮（锚定绑定 + 用昨天 10-09 的正消费核验 Sub2API 账单能力），不然页面只读查询一直是 PENDING / 能力未核验
+  await f.module.refreshDue(now);
+  await f.module.queryRules(f.today, { force: true });
+
+  const window = { ruleIds: [f.rule.id], preset: "custom", timezone: tz, startMs: at("2026-10-06T00:00:00"), endMs: at("2026-10-10T00:00:00") };
+  const read = async () => (await f.module.queryRules(window, { mode: "evaluate", origin: "page", force: true })).results[0];
+  const whole = await read();
+  assert.equal(whole.health.code, "READY", "一直开着：照常算");
+  assert.deepEqual([whole.upstream.amountUsd, whole.downstream.amountUsd], [6 + 7 + 8 + 9, ownQuota(floor / 1000, at("2026-10-10T00:00:00") / 1000 - 1) / 100]);
+
+  // 10-08 上海 10:00–11:00 关过收费记录（已经开回来）：10-08 两边都不算，其余天照算
+  f.stations[1].consumeLogOffPeriods = [{ fromMs: at("2026-10-08T10:00:00"), toMs: at("2026-10-08T11:00:00") }];
+  const before = f.sub2.stats.length;
+  const partial = await read();
+  assert.ok(partial.health.issues.some((issue) => issue.code === "OWN_CONSUME_LOG_GAP_PARTIAL"), "行上有那一句说明");
+  assert.equal(partial.upstream.state, "complete", `上游读得到：${partial.health.code}`);
+  assert.equal(partial.upstream.amountUsd, 6 + 7 + 9, "上游 = 10-06（换绑那天整天）+ 10-07 + 10-09，不含 10-08");
+  const ownExpected = (ownQuota(floor / 1000, at("2026-10-08T00:00:00") / 1000 - 1) + ownQuota(at("2026-10-09T00:00:00") / 1000, at("2026-10-10T00:00:00") / 1000 - 1)) / 100;
+  assert.equal(partial.downstream.amountUsd, ownExpected, "收入 = 换绑那一刻到 10-08 0 点 + 10-09 整天");
+  const asked = f.sub2.stats.slice(before).filter((stat) => stat.api_key_id === "9").map((stat) => `${stat.start_date}~${stat.end_date}`).sort();
+  assert.deepEqual(asked, ["2026-10-06~2026-10-07", "2026-10-09~2026-10-09"], "上游按整天读两截，换绑那天从 0 点起，10-08 不读");
+});
+
