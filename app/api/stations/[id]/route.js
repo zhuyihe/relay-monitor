@@ -5,12 +5,17 @@ import { errorText } from "../../../../lib/error-copy.js";
 import { redact } from "../../../../server/stations.js";
 import { refreshStation } from "../../../../server/refresh.js";
 import { purgeStation } from "./purge.js";
+import { forgetOwnLog } from "../../../../server/own-log-store.js";
+import { sameEndpoint } from "../../../../lib/endpoint.js";
 
 async function updateStation(request, rt, params) {
   const b = (await request.json().catch(() => null)) || {};
   const options = { expectedAuthVersion: b.expectedAuthVersion, expectedResourceVersion: b.expectedResourceVersion };
   if ("type" in b && !STATION_TYPES.some((t) => t.value === b.type))
     return json({ error: "请选上游类型", code: "UNSUPPORTED_UPSTREAM_TYPE" }, 400);
+  // 保存时原地改的是同一个对象，比较地址要先把旧地址记下来（审核 #123 第二轮中-2）
+  const previous = rt.store.get(params.id);
+  const before = previous ? { isOwn: !!previous.isOwn, baseUrl: previous.baseUrl } : null;
   let s;
   try {
     s = await rt.store.update(params.id, b, options);
@@ -21,6 +26,8 @@ async function updateStation(request, rt, params) {
     throw error;
   }
   if (!s) return json({ error: "找不到这个上游", code: "UPSTREAM_NOT_FOUND" }, 404);
+  // 自营站点换了地址：整站日志的进度和桶是旧站的，清掉从头读（应付成本 V1）
+  if (before?.isOwn && s.isOwn && !sameEndpoint(before.baseUrl, s.baseUrl)) await forgetOwnLog(rt, s.id);
   rt._ownCache?.clear();
   delete rt._ownChannelsCache;
   delete rt._ownUsersCache;

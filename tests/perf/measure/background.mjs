@@ -13,6 +13,8 @@ const outDir = process.argv[2];
 const W = Number(process.argv[3] || 185);
 mkdirSync(outDir, { recursive: true });
 const api = await login();
+// 「算应付成本」开关（应付成本 V1）：V1-a 默认关着，量压力时要打开才读整站日志；PERF_EXPECTED_COST=off 时不开
+if (process.env.PERF_EXPECTED_COST !== "off") await api("/api/settings", { method: "PUT", body: { expectedCost: true } });
 const conn = await connect();
 const pid = appPid();
 const sampleProc = () => { if (!pid) return null; try { const [cpu, rss] = execSync(`ps -o %cpu=,rss= -p ${pid}`).toString().trim().split(/\s+/).map(Number); return { cpu, rssMb: Math.round(rss / 1024) }; } catch { return null; } };
