@@ -56,6 +56,21 @@ test("公共PUT明确映射CAS，忽略伪造identity/markers/guard，restore保
   assert.equal(station.name, "Renamed");
 });
 
+test("自营站点换了地址：整站日志的进度和桶清掉（forgetOwnLog）；只改名字、地址只是大小写或末尾斜杠不同不清（审核 #123 第二轮中-2）", async () => {
+  const { PUT } = await stationRoute();
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]], commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const store = new Store(pool);
+  const station = await store.add({ type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "token-a", monitorEnabled: true }); // 自营站点要开着监控才算 isOwn
+  const forgotten = [];
+  const rt = { pool, store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 }, _ownLogStore: { deleteStation: async (id) => forgotten.push(id) } };
+  const send = (body) => PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify(body) }), rt, { id: station.id });
+  assert.equal((await send({ name: "改名" })).status, 200);
+  assert.equal((await send({ baseUrl: "https://OWN.test/" })).status, 200);
+  assert.deepEqual(forgotten, [], "改名、地址只是写法不同：不清");
+  assert.equal((await send({ baseUrl: "https://other.test", accessToken: "token-b" })).status, 200);
+  assert.deepEqual(forgotten, [station.id], "真换了地址：清掉旧站的进度和桶");
+});
+
 test("PUT 找不到上游和上游类型不对时带码，界面按码说（lib/error-copy.js）", async () => {
   const { PUT } = await stationRoute();
   const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]],

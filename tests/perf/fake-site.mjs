@@ -72,6 +72,15 @@ function newApiUpstream(up, rest, q, req) {
       return [200, ok({ id: up.accountId, username: `acct${up.i}`, display_name: up.name, quota: Math.round(b.remaining),
         used_quota: Math.round(b.used), request_count: Math.round(b.used / 15000), group: "default" })];
     }
+    case "/api/pricing": {
+      // 价目表（应付成本 V1-a 审核用）：照 New API 的形状，data 是每个模型一项（按量 quota_type 0，倍率 model_ratio/completion_ratio/cache_ratio），
+      // group_ratio 是这个账号可用分组的倍率。不要求登录（真站点只挂「模型广场」开关）
+      const data = MODELS.map((model, index) => ({ model_name: model, quota_type: 0, model_ratio: 0.5 + (index % 4), completion_ratio: 1 + (index % 5),
+        cache_ratio: 0.1, create_cache_ratio: 1.25, enable_groups: ["all"] }));
+      const groupRatio = {};
+      for (const g of ["default", "vip", "claude", "gpt", "gemini", "svip", "auto"]) groupRatio[g] = upGroupRatio(up, g);
+      return [200, { success: true, data, group_ratio: groupRatio, vendors: [], usable_group: groupRatio }];
+    }
     case "/api/user/self/groups": {
       const groups = {};
       for (const g of ["default", "vip", "claude", "gpt", "gemini", "svip", "auto"]) groups[g] = { ratio: upGroupRatio(up, g), desc: `${g} 分组` };

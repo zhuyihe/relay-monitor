@@ -13,6 +13,8 @@ import { reconciliationNotCountedText } from "../lib/reconciliation-view.js";
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
+import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
+import { resetOwnRequestBudget } from "../lib/own-request-budget.js";
 import { billingCapabilityAliases } from "../lib/billing-capability-storage.js";
 
 function trustedLegacyRule(rule, stations = [], upstreamAccountId = 7, ownAccountId = 7) {
@@ -2055,6 +2057,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if ((url.pathname === "/api/log/" || url.pathname === "/api/log/stat") && ownSourceRead(url)) return reply(200, ownTestLogApi(url, state.testLogs));
       // 最新一条消费日志（轮询判断站点安不安静用，没有筛选条件）：只在 state.latestLogProbe 打开时给，别的测试照旧读不到
       if (state.latestLogProbe && url.pathname === "/api/log/" && !ownSourceRead(url)) return reply(200, ownTestLogApi(url, state.testLogs));
+      // 整站消费日志（V1-a 的整站读，不带筛选）：只在 state.fullLogList 打开时给，别的测试照旧读不到（404）
+      if (state.fullLogList && url.pathname === "/api/log/" && !ownSourceRead(url)) return reply(200, ownTestLogApi(url, state.testLogs));
       if (url.pathname === "/api/user/") return reply(200, ownUsersApi(url, state.ownUsers));
       if (url.pathname === "/api/log/stat") return stat("own", url, state.ownQuota);
     }
@@ -2066,7 +2070,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
   ];
   const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null,
     channels: [], billingIdentityKey: "reconciliation-fixture-billing-key" } };
-  return { rule, state, segments, stations, rt, repository, module: createReconciliationModule(rt, { repository, ...moduleOptions }) };
+  // 整站日志读取（V1-a）默认关着：这个夹具的假站点没有不带筛选的 /api/log/；要测它的用例自己传 ownLogIngest: true 和内存桶
+  return { rule, state, segments, stations, rt, repository, module: createReconciliationModule(rt, { repository, ownLogStore: new MemoryOwnLogStore(), ownLogIngest: false, ...moduleOptions }) };
 }
 
 test("上游分组目录缺少当前组时仍独立获取本站渠道收费", async (t) => {
@@ -8036,6 +8041,51 @@ test("R1 渠道测试名字兜底来源：测试日志全在管理员名下，�
   const second = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs - 86400000, endMs: COMPLETED_YESTERDAY.startMs }, { mode: "evaluate", origin: "page", force: true })).results[0];
   assert.ok(tokenPages() > before, "有不在管理员名下的：翻页");
   assert.equal(second.downstream.adminUsageQuotaUnits, 1 + 5, "root 名下的 1，加兜底扣掉不在管理员名下的 5");
+});
+
+// ---- 应付成本 V1-a：整站日志增量读挂在结账轮询里 ----
+test("V1-a 轮询每轮给自营站点读几页整站日志（落后时最多 15 页、追平后 6 页），进度和桶落库；开关关掉不读；默认夹具不开整站读时一个不带筛选的请求都不发", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const yesterdayStart = Date.parse("2026-10-07T16:00:00Z") / 1000;
+  resetOwnRequestBudget(); // 额度和断路是进程里一份，前面的用例让 own.test 回过 500，断路器可能还开着
+  const ownLogStore = new MemoryOwnLogStore();
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000, ownLogStore, ownLogIngest: true } });
+  f.state.fullLogList = true;
+  for (let id = 1; id <= 300; id += 1) f.state.testLogs.push({ id, channel: 1, quota: 1, created_at: yesterdayStart + id * 60, token_name: "k", username: "alice", model_name: "m" });
+  // 不带筛选、也不是「最新一条」探测（page_size=1，P1a 判站点安不安静用的）的 /api/log/ 才是整站读
+  const isIngest = (request) => request.host === "own.test" && request.path === "/api/log/" && !request.sourceRead && !/page_size=1(&|$)/.test(request.query || "");
+  const fullReads = () => f.state.requests.filter(isIngest).length;
+  // 没设置过（settings 里没有 expectedCost）：V1-a 默认关，一个整站读请求都不发
+  await f.module.refreshDue(now);
+  assert.equal(fullReads(), 0, "没设置过不读");
+  f.rt.store.settings = { expectedCost: true };
+  now += 60000; resetOwnRequestBudget();
+  await f.module.refreshDue(now);
+  const first = fullReads();
+  assert.ok(first > 0 && first <= 15, `落后 35 小时：这一轮最多 15 页，读了 ${first} 页`);
+  const cursor = await ownLogStore.getCursor("own");
+  assert.equal(cursor.coveredFromMs, yesterdayStart * 1000, "从昨天 0 点起");
+  assert.ok(cursor.coveredToMs > cursor.coveredFromMs);
+  assert.ok((await f.module.ownLogBuckets("own", 0, Number.MAX_SAFE_INTEGER)).length > 0, "桶落库");
+  now += 60000;
+  resetOwnRequestBudget();
+  await f.module.refreshDue(now);
+  assert.ok(fullReads() - first <= 15, "下一轮接着读，还是最多 15 页（追到 1 小时内才回到 6 页，server/own-log-ingest.test.js 有验）");
+  // 「算应付成本」关着（settings.expectedCost=false，每轮读一次）：一个整站读请求都不发
+  const beforeOff = fullReads();
+  f.rt.store.settings = { expectedCost: false };
+  now += 60000; resetOwnRequestBudget();
+  await f.module.refreshDue(now);
+  assert.equal(fullReads(), beforeOff, "关掉以后不读");
+  f.rt.store.settings = { expectedCost: true };
+  now += 60000; resetOwnRequestBudget();
+  await f.module.refreshDue(now);
+  assert.ok(fullReads() > beforeOff, "打开又接着读");
+  // 默认不开：一个不带筛选的 /api/log/ 都不发
+  const g = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
+  g.state.fullLogList = true;
+  await g.module.refreshDue(now);
+  assert.equal(g.state.requests.filter(isIngest).length, 0);
 });
 
 test("R1 读不到用户列表或管理员日志：这一天算不出收入、不固定，下次重试；不拿没减的数固定进账本", async (t) => {

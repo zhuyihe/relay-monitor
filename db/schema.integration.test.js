@@ -7,6 +7,8 @@ import { ChannelOnboardingRepository } from "../server/channel-onboarding-reposi
 import { ReconciliationRepository, reconciliationOwnerScope } from "../server/reconciliation-repository.js";
 import { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, ledgerInsertValues } from "../lib/reconciliation-ledger.js";
+import { defineOwnLogStoreContract } from "../server/test-support/own-log-store-contract.js";
+import { OwnLogStore } from "../server/own-log-store.js";
 import { defineReconciliationRepositoryContract } from "../server/test-support/reconciliation-repository-contract.js";
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
@@ -809,6 +811,17 @@ defineReconciliationRepositoryContract({
       window_end_ms AS windowEndMs, upstream_usd AS upstreamUsd, health_code AS healthCode, health_detail AS healthDetail
       FROM reconciliation_snapshots WHERE rule_id = ? AND snapshot_key = ?`, [ruleId, snapshotKey]);
     return row ? { ...row, windowStartMs: Number(row.windowStartMs), windowEndMs: Number(row.windowEndMs) } : null;
+  },
+  // 连接池在最后一组契约（下面的 own log store）跑完才关
+});
+
+// 自营站点整站日志的小时桶和进度：和内存实现同一组用例
+defineOwnLogStoreContract({
+  name: "MySQL 8",
+  create: async () => {
+    contractSchemaReady ||= ensureSchema(contractPool);
+    await contractSchemaReady;
+    return new OwnLogStore(contractPool);
   },
   teardown: () => contractPool.end(),
 });

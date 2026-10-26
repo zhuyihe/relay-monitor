@@ -34,6 +34,9 @@ import { OWN_STATION_UNSET, UPSTREAM_GONE } from "../lib/format.js";
 import { errorText, ownStationErrorCode } from "../lib/error-copy.js";
 import { ReconciliationRepository, reconciliationOwnerRuleState, reconciliationOwnerScope, normalizeConfirmedHistoryOptions } from "./reconciliation-repository.js";
 import { notifyReconciliationHealth } from "./reconciliation-notify.js";
+import { OwnLogStore } from "./own-log-store.js";
+import { createOwnLogIngest } from "./own-log-ingest.js";
+import { createUpstreamPricing } from "./upstream-pricing.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
@@ -473,7 +476,11 @@ function sourceSnapshot(token, metadata, upstream, downstream) {
 //   lookbackTimeMs：每轮回看最多花多久，缺省 min(20 秒, 刷新间隔的三分之一)，已经发出去的那一天照常做完；
 //   lookbackDelayMs：启动后等多久才开始回看（今天、昨天照常），缺省随机 1–5 分钟，几个进程同时重启时不会一起打上游。
 export function createReconciliationModule(rt, { repository = new ReconciliationRepository(rt.pool), stationUsageCost = defaultStationUsageCost,
-  lookbackBudget = null, lookbackTimeMs = null, lookbackDelayMs = 60000 + Math.floor(Math.random() * 4 * 60000) } = {}) {
+  lookbackBudget = null, lookbackTimeMs = null, lookbackDelayMs = 60000 + Math.floor(Math.random() * 4 * 60000),
+  // 自营站点整站日志的小时桶（应付成本 V1-a）：测试传内存实现；ownLogIngest: false 关掉整站读（只在测试里）
+  ownLogStore = null, ownLogIngest = true } = {}) {
+  const ownLog = createOwnLogIngest(rt, { store: ownLogStore || (rt._ownLogStore ||= new OwnLogStore(rt.pool)), log: (...args) => console.debug(...args) });
+  const upstreamPricing = (rt._upstreamPricing ||= createUpstreamPricing(rt));
   const resultCache = (rt._reconciliationResultCache ||= new Map());
   const inflight = (rt._reconciliationInflight ||= new Map());
   const metadataCache = (rt._reconciliationMetadataCache ||= new Map());
@@ -2875,7 +2882,20 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       });
       await settleDue(plan, ownerRegistry);
       await pruneSettlementStates(now);
+      // 自营站点整站日志增量读（应付成本 V1-a）：每轮每个自营站点读几页，额度和断路在 lib/own-request-budget.js；读失败不影响这一轮别的事
+      // 「算应付成本」开着（settings.expectedCost === true）才读；没设置过、关着都一个整站读请求都不发（每轮读一次，不用重启；用语规范 §8.3）
+      if (ownLogIngest && rt.store?.settings?.expectedCost === true) {
+        for (const id of new Set(rules.map((rule) => rule.ownStationId))) {
+          const own = upstreamStation(id);
+          if (own?.isOwn && own.type === "newapi") await ownLog.ingestOnce(own).catch((error) => console.error("自营站点整站日志读取失败:", error?.message || String(error)));
+        }
+        await ownLog.pruneIfDue();
+      }
     },
+    // 应付成本 V1-a：整站日志读取和上游价目表，给 V1-b 的结账和只读试算用
+    ingestOwnLog: (own) => ownLog.ingestOnce(own),
+    ownLogBuckets: (stationId, fromSlotMs, toSlotMs) => (ownLogStore || rt._ownLogStore).listBuckets(stationId, fromSlotMs, toSlotMs),
+    upstreamPricing: (station) => upstreamPricing.pricingFor(station),
     // 接入关联后立即在后台观测今天一次，不必等下一轮轮询。没有启动后台轮询（测试、脚本）时不观测。
     observeSoon(ruleIds) {
       if (!rt._reconciliationPollTimer || !ruleIds?.length) return null;

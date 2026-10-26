@@ -4,6 +4,8 @@
 import { withAuth, json } from "../../../lib/api.js";
 import { businessTimeZone } from "../../../lib/business-time.js";
 import { restartPolling, refreshAll } from "../../../server/refresh.js";
+import { OwnLogStore } from "../../../server/own-log-store.js";
+import { dayKeyInTz, dayStartInTz, shiftDayLabel } from "../../../lib/business-time.js";
 
 function parseRetentionDays(value) {
   if (value == null) return null;
@@ -11,8 +13,25 @@ function parseRetentionDays(value) {
   return Number.isSafeInteger(days) && days > 0 ? days : undefined;
 }
 
+// ownLog（应付成本 V1-a，审核 #123 第二轮）：自营站点的收费记录读到哪儿了——coveredFromMs / coveredToMs 进度两头，behindMs 落后多少，
+// incompleteDays 哪几天还没读全（业务时区，从读到的那天到昨天）；设置页「算应付成本」开关下面那一行和每日利润表下面的提示用。没有自营站点、没有进度、读不到都是 null
+async function ownLogProgress(rt, now = Date.now()) {
+  try {
+    const own = rt.store.list?.().find((station) => station.isOwn && station.type === "newapi");
+    if (!own || !rt.pool) return null;
+    const cursor = await (rt._ownLogStore ||= new OwnLogStore(rt.pool)).getCursor(own.id);
+    if (!cursor) return null;
+    const tz = businessTimeZone();
+    const today = dayKeyInTz(now, tz), incompleteDays = [];
+    for (let day = dayKeyInTz(cursor.coveredToMs, tz), guard = 0; day < today && guard < 400; day = shiftDayLabel(day, 1), guard += 1) incompleteDays.push(day);
+    // 读到的那一天如果正好读到了天结束（进度 = 第二天 0 点），这一天是全的
+    if (incompleteDays.length && dayStartInTz(shiftDayLabel(incompleteDays[0], 1), tz) <= cursor.coveredToMs) incompleteDays.shift();
+    return { coveredFromMs: cursor.coveredFromMs, coveredToMs: cursor.coveredToMs, behindMs: Math.max(0, now - cursor.coveredToMs), incompleteDays };
+  } catch { return null; }
+}
+
 export const GET = withAuth(async (request, rt) => {
-  return json({ settings: rt.store.settings, history: await rt.history.getSummary(), tz: businessTimeZone(), secretsEncrypted: rt.store.secretsEncrypted });
+  return json({ settings: rt.store.settings, history: await rt.history.getSummary(), tz: businessTimeZone(), secretsEncrypted: rt.store.secretsEncrypted, ownLog: await ownLogProgress(rt) });
 });
 
 export const PUT = withAuth(async (request, rt) => {
@@ -22,6 +41,7 @@ export const PUT = withAuth(async (request, rt) => {
     patch.refreshIntervalSec = Math.max(10, Number(body.refreshIntervalSec) || 60);
   if (body?.lowBalanceUsd != null)
     patch.lowBalanceUsd = Math.max(0, Number(body.lowBalanceUsd) || 0);
+  if (body && "expectedCost" in body) patch.expectedCost = body.expectedCost !== false; // 「算应付成本」开关（应付成本 V1，用语规范 §8.3）
   if (body?.dailyReport && typeof body.dailyReport === "object")
     patch.dailyReport = body.dailyReport; // store 内部做字段校验合并
 

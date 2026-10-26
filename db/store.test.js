@@ -429,6 +429,15 @@ test("写库失败向调用方报错，后续串行保存仍能成功", async ()
   assert.equal(attempts, 2);
 });
 
+test("「算应付成本」开关 settings.expectedCost：V1-a 默认关（V1-b 带界面时改开）；只有明确 false 才关", async () => {
+  const store = await new Store(fakePool([])).load();
+  assert.equal(store.settings.expectedCost, false);
+  await store.updateSettings({ expectedCost: false });
+  assert.equal(store.settings.expectedCost, false);
+  await store.updateSettings({ expectedCost: "yes" });
+  assert.equal(store.settings.expectedCost, true);
+});
+
 test("配置写库失败不会发布账号、设置、通知或站点变更", async () => {
   const changes = [
     (store) => store.updateSettings({ refreshIntervalSec: 90 }),

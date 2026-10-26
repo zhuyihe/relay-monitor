@@ -281,6 +281,34 @@ export async function ensureSchema(pool) {
     PRIMARY KEY (rule_id, bill_date),
     INDEX idx_settlement_state_bill_date (bill_date)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 自营站点整站消费日志的读取进度和小时桶（应付成本 V1-a）：cursor 每个自营站点一行；buckets 按（站点、小时、渠道、模型、上游模型、分组、缓存口径）加起来的数，
+  // 不加外键，每小时清一批 35 天前的桶（按 slot_ms 索引）
+  await pool.query(`CREATE TABLE IF NOT EXISTS own_log_cursor (
+    station_id VARCHAR(32) NOT NULL PRIMARY KEY,
+    covered_from_ms BIGINT NOT NULL,
+    covered_to_ms BIGINT NOT NULL,
+    updated_at_ms BIGINT NOT NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS own_log_buckets (
+    station_id VARCHAR(32) NOT NULL,
+    slot_ms BIGINT NOT NULL,
+    channel_id INT NOT NULL,
+    model VARCHAR(128) NOT NULL,
+    upstream_model VARCHAR(128) NOT NULL,
+    grp VARCHAR(64) NOT NULL,
+    semantic VARCHAR(12) NOT NULL,
+    requests INT NOT NULL DEFAULT 0,
+    prompt_tokens BIGINT NOT NULL DEFAULT 0,
+    completion_tokens BIGINT NOT NULL DEFAULT 0,
+    cache_read_tokens BIGINT NOT NULL DEFAULT 0,
+    cache_write_tokens BIGINT NOT NULL DEFAULT 0,
+    cache_write_1h_tokens BIGINT NOT NULL DEFAULT 0,
+    quota BIGINT NOT NULL DEFAULT 0,
+    admin_quota BIGINT NOT NULL DEFAULT 0,
+    test_quota BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (station_id, slot_ms, channel_id, model, upstream_model, grp, semantic),
+    INDEX idx_own_log_buckets_slot (slot_ms)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   // 搬旧账失败不挡启动：记日志、不写完成标记，下次启动重试。
   try { await backfillReconciliationLedger(pool); } catch (err) { console.error("  结账账本迁移旧账失败，下次启动重试:", err?.message); }
 }
