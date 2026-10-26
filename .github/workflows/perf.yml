@@ -35,7 +35,7 @@ on:
         required: false
         default: ""
       expected_cost:
-        description: "打开「算应付成本」（整站读）再量后台；默认关，和产品默认一样"
+        description: "勾上 = 量后台前打开「算应付成本」（整站读）；不勾 = 不改开关，用产品默认（V1-a 关；V1-b 起默认开）"
         type: boolean
         required: false
         default: false

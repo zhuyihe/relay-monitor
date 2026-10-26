@@ -15,7 +15,8 @@ const outDir = process.argv[2];
 const W = Number(process.argv[3] || 185);
 mkdirSync(outDir, { recursive: true });
 const api = await login();
-// 「算应付成本」开关（应付成本 V1）：产品默认关着，默认场景也关着；只有 PERF_EXPECTED_COST=on 才打开（整站读场景，见 README）
+// 「算应付成本」开关（应付成本 V1）：只有 PERF_EXPECTED_COST=on 才 PUT 打开（整站读场景，见 README）；
+// 不设或 off 时不改开关，用产品默认（V1-a 关；V1-b 起默认开），不等于「关」
 const EXPECTED_COST = process.env.PERF_EXPECTED_COST === "on";
 if (EXPECTED_COST) await api("/api/settings", { method: "PUT", body: { expectedCost: true } });
 const conn = await connect();
