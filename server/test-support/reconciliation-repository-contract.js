@@ -916,7 +916,7 @@ contract("the ledger keeps one row per settled day: the same window is not booke
   const first = await latest();
   assert.deepEqual({ ...first, detail: undefined }, { ruleId: rule.id, billDate: "2026-01-10", revision: 1, versionId: null, timezone: "UTC",
     startMs: day, endMs: day + DAY, revenueUsd: 2.25, costUsd: 1, revenueRate: 7.1, costRate: null, costBasis: "usage", source: "settle",
-    detail: undefined, settledAt: "2026-01-11T00:20:00.000Z" });
+    detail: undefined, settledAt: "2026-01-11T00:20:00.000Z", expectedCostUsd: null, gapReason: null, tokens: null });
   assert.equal(first.detail.result.calculation.profitUsd, 2);
   assert.equal(first.detail.scopeFingerprint, fingerprint);
 

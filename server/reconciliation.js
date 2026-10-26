@@ -37,6 +37,7 @@ import { notifyReconciliationHealth } from "./reconciliation-notify.js";
 import { OwnLogStore } from "./own-log-store.js";
 import { createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
+import { expectedCostForDay } from "../lib/expected-cost-day.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
@@ -2182,6 +2183,41 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource })) ? unavailable : STALE_SCOPE;
   }
 
+  // 一条绑定一天的应付成本（V1-b）：桶（整站日志，只读、不发请求）、这一天各段的上游分组倍率、价目表（每小时一次的缓存）、
+  // 上游的额度换算；算不出的情况给原因码（lib/expected-cost-day.js）。顺手把桶里的「管理员自用」和 R1 扣的数比一比打一行 debug（V1 只对账，不替换 R1）。
+  // 出任何错都不挡结账：那一天应付成本写「—」加 MODEL_PRICE_UNREADABLE / OWN_LOG_INCOMPLETE 这类原因
+  async function expectedCostForSettlement(rule, result, token) {
+    const window = result.window;
+    const upstream = upstreamStation(rule.upstreamStationId), own = upstreamStation(rule.ownStationId);
+    const store = ownLogStore || rt._ownLogStore;
+    const channelIds = (rule.channels || []).map((channel) => channel.channelId);
+    const keyShared = rule.costCoverage !== "complete"; // 这把 Key 别处也在用（或者没答）：上游扣的钱分不出来
+    const groupAuto = !!token && (token.group === "auto" || !!token.crossGroupRetry);
+    const segments = (result.segments || []).map((segment) => ({ startMs: segment.window?.startMs ?? window.startMs, endMs: segment.window?.endMs ?? window.endMs,
+      ratio: segment.upstream?.ratio ?? segment.ratio ?? result.upstream?.ratio ?? null, group: segment.upstream?.group ?? segment.group ?? result.upstream?.group ?? null }));
+    const quotaPerUnit = result.upstream?.quotaPerUnit ?? null;
+    let buckets = [], coveredToMs = null, pricing = null, pricingError = null;
+    try {
+      const [cursor, rows] = await Promise.all([store?.getCursor(own?.id) ?? null, store?.listBuckets(own?.id, window.startMs, window.endMs) ?? []]);
+      coveredToMs = cursor?.coveredToMs ?? null; buckets = rows;
+    } catch (error) { console.debug("应付成本：读小时桶失败", rule.id, error?.code || error?.message); }
+    if (upstream?.type === "newapi" && !upstream.isOwn) {
+      try { pricing = await upstreamPricing.pricingFor(upstream); } catch (error) { pricingError = error; }
+    }
+    const expected = expectedCostForDay({ window, buckets, channelIds, segments: segments.length ? segments : [{ startMs: window.startMs, endMs: window.endMs, ratio: result.upstream?.ratio ?? null, group: result.upstream?.group ?? null }],
+      pricing, pricingError, quotaPerUnit, flags: { platform: upstream?.type ?? null, keyShared, groupAuto, coveredToMs } });
+    // 对账：桶里这些渠道这一天的管理员自用额度（R1 的规矩）和 R1 实际扣的比一比（只打日志，不改数；跑一两周一致了再让 R1 用桶）
+    if (coveredToMs != null && coveredToMs >= window.endMs && result.downstream?.adminUsageQuotaUnits != null) {
+      const wanted = new Set(channelIds.map(Number));
+      const bucketAdmin = buckets.filter((bucket) => wanted.has(Number(bucket.channelId)) && bucket.slotMs >= window.startMs && bucket.slotMs < window.endMs)
+        .reduce((sum, bucket) => sum + Number(bucket.adminQuota || 0) + Number(bucket.testQuota || 0), 0);
+      if (bucketAdmin !== Number(result.downstream.adminUsageQuotaUnits)) console.debug(`应付成本对账：绑定 ${rule.id} ${billDayOf(window)} 桶里管理员自用 ${bucketAdmin} 额度，R1 扣了 ${result.downstream.adminUsageQuotaUnits}`);
+    }
+    return { usd: expected.usd, reason: expected.reason, tokens: expected.tokens,
+      detail: { usd: expected.usd, reason: expected.reason, tokens: expected.tokens, byModel: expected.byModel, missingPriceModels: expected.missingPriceModels, segments: expected.segments, byChannel: expected.byChannel,
+        pricingReadAt: pricing?.readAt ?? null, quotaPerUnit } };
+  }
+
   async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false, resettleRequestedAt = null, confirmShrink = false, confirmedAfter = null, settle = false, trigger = null } = {}) {
     const wholeWindow = { id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health };
     const segmentSnapshots = result.segments?.length ? result.segments : [wholeWindow];
@@ -2256,9 +2292,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const ledgerRate = (rate) => { const value = ledgerDecimal(configuredRate(rate), 6); return value == null ? null : Number(value); };
     // 账本明细里记下这次是怎么结的（计划 C2a 2.6）：poll 轮询结昨天、late 回看更早的日子、manual 手动重新读取、transition 改了切换时间的重结
     const settlement = { trigger: trigger || (resettle ? "transition" : origin === "manual" ? "manual" : "poll") };
-    const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, { ...sourceFor({ ...wholeWindow, recordType: "confirmed" }), settlement }, {
+    // 应付成本（V1-b）：结单日账时按这一天的小时桶和上游价目表算出来，随账本一起固定；算不出的给原因码。只影响新列，不改原有金额
+    const expected = ledgerDay ? await expectedCostForSettlement(rule, result, token) : null;
+    const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, { ...sourceFor({ ...wholeWindow, recordType: "confirmed" }), settlement, ...(expected ? { expected: expected.detail } : {}) }, {
       revenueRate: configuredRate(financialSnapshot.income), costRate: configuredRate(financialSnapshot.cost),
-      costBasis: financialSnapshot.costBasis }) : null;
+      costBasis: financialSnapshot.costBasis, expectedCostUsd: expected?.usd ?? null, gapReason: expected?.reason ?? null, tokens: expected?.tokens ?? null }) : null;
     // 重结读出来的收入或上游成本比账本最新一版少一半以上（日志过了保留期之类）：不写新版，等人确认（手动「重新读取」才覆盖）。
     // 记 RESETTLE_SHRUNK 的状态行由 settleDay 写；页面上这天还是已固定的旧数
     // 确认了（confirmShrink）：确认框里写的「重算」数（confirmedAfter）和这次再读到的不一样、或者根本没带，照旧挡下、把新的数记下来再让人看一眼（直接调接口也绕不过），
@@ -2340,7 +2378,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           result.ledger = { billDate: billDayOf(result.window), revision: ledgerOption.booked.revision, source: ledgerOption.booked.source,
             // 汇率按账本的精度（6 位小数）取整，和从账本行读出来的逐字一致（审核 C2a 第二轮低-3）
             settledAt: ledgerOption.booked.settledAt, rates: { income: ledgerRate(financialSnapshot.income), cost: ledgerRate(financialSnapshot.cost) },
-            costBasis: financialSnapshot.costBasis };
+            costBasis: financialSnapshot.costBasis,
+            expectedCostUsd: ledgerEntry?.expectedCostUsd == null ? null : Number(ledgerDecimal(ledgerEntry.expectedCostUsd, 8)), gapReason: ledgerEntry?.gapReason ?? null, tokens: ledgerEntry?.tokens ?? null };
         }
       }
     }
