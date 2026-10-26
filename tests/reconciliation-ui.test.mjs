@@ -472,7 +472,7 @@ test("daily late bill and new scope retain requested yesterday and expose first 
   // 这天过去 7 天还没读全，读取类问题变成需处理
   const { page, queries } = await openDailyPage(t, { data: dailyResponse([row]) }); const rowA = page.locator("tr.ant-table-row", { hasText: "Rule A" }); await rowA.getByText("需处理", { exact: true }).waitFor(); await rowA.getByText(reconciliationIssue("WAITING_FOR_BILL").title, { exact: true }).waitFor();
   await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click(); const drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true }); await detailValue(drawer, "开始统计").waitFor();
-  assert.equal(await detailValue(drawer, "时间").innerText(), formatZonedWindow(window)); assert.equal(await detailValue(drawer, "开始统计").innerText(), "10月8日 03:00"); await drawer.locator(".ant-drawer-close").click();
+  assert.equal(await detailValue(drawer, "时间").innerText(), formatZonedWindow(window)); assert.equal(await detailValue(drawer, "开始统计").innerText(), "10月8日 3:00"); await drawer.locator(".ant-drawer-close").click();
   const retried = page.waitForResponse((response) => response.url().endsWith("/api/reconciliation/query")); await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await retried; assert.deepEqual([queries[0].preset, queries[0].startMs, queries[0].endMs], ["custom", window.startMs, window.endMs]);
 });
 
@@ -585,7 +585,7 @@ test("workflow scope and conflict destinations expose saved history and all conf
   const scopedRows = dailyRows(); scopedRows[0].rule.billingPolicy = "immediate"; scopedRows[0].rule.billingEffectiveFrom = window.startMs + 6 * 3600000; scopedRows[0].rule.accountingFloorMs = window.startMs + 6 * 3600000; // 开始统计永远是 0 点；只有当天换绑的才有下限，晚于 0 点，明细才写「开始统计」
   const scope = await openDailyPage(t, { path: "/reconciliation?action=scope&ruleId=rule-1", data: dailyResponse(scopedRows) });
   const drawer = scope.page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true });
-  assert.equal(await detailValue(drawer, "开始统计").innerText(), "10月8日 06:00"); await drawer.getByRole("button", { name: "以前的每日记录", exact: true }).waitFor();
+  assert.equal(await detailValue(drawer, "开始统计").innerText(), "10月8日 6:00"); await drawer.getByRole("button", { name: "以前的每日记录", exact: true }).waitFor();
   const rows = dailyRows(); for (const row of rows.slice(0, 2)) row.health = { code: "DUPLICATE_CHANNEL_ASSIGNMENT", issues: [{ code: "DUPLICATE_CHANNEL_ASSIGNMENT", ruleIds: ["rule-1", "rule-2"], detail: "销售渠道重复归属" }] };
   const conflict = await openDailyPage(t, { path: "/reconciliation?action=conflict&ruleId=rule-1", data: dailyResponse(rows) }); const detail = conflict.page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true });
   await detail.getByText(reconciliationRowFlags(rows[0]).displayStatus.title, { exact: true }).waitFor(); await detail.getByRole("button", { name: "查看 Rule B", exact: true }).click();
