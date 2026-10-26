@@ -924,7 +924,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           : { ...((source.kind === "token" && await tokenOnlyInAdmins(null)) || await readSmart(null)), readAt: Date.now() };
         else {
           const total = await queryOwnLogSourceTotal(own, base);
+          // 同一天别的绑定刚结过（10 分钟内）、这个来源的总额度没变：渠道测试名字这个来源的那份直接沿用，不再每条绑定各查一遍
+          // 「1 + 管理员数」个 stat（审核 CI：开了定时测试的站，每天结 80 条绑定从 1.2 秒变成 7–14 秒）
+          const recent = before && sameEnd && Date.now() - before.readAt < OWN_EXCLUSION_VERIFIED_REUSE_MS && before.seen === total;
           if (total === 0) part = emptyPart(0);
+          else if (source.kind === "token" && recent) part = before;
           else if (source.kind === "token" && (part = await tokenOnlyInAdmins(total))) { /* 全在管理员名下：不翻页 */ }
           else {
             part = await readSmart(total);
@@ -1016,12 +1020,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         return { ...downstream, startMs: piece.startMs };
       } catch { return null; }
     });
+    // 没固定的天连着的并成一块读；但「已经过去的整天」和「今天（还在变）」不并在一起：过去的那块是已结束的窗口，管理员日志按
+    // 「翻页还是按渠道 stat」挑便宜的（几十万行也就每个渠道 1 个 stat）；并进今天那一块就成了还在变的窗口，只能从头翻页，
+    // 开了定时渠道测试的站一天四万多行、几天就是几千页（审核 CI：近 7 天、本月 60 秒超时）
+    const closedBefore = Date.now() - RECONCILIATION_SETTLE_DELAY_MS;
     const groups = [];
     pieces.forEach((piece, index) => {
       if (fixed[index]) return;
+      const closed = piece.endMs <= closedBefore;
       const last = groups.at(-1);
-      if (last && last.endMs === piece.startMs) last.endMs = piece.endMs;
-      else groups.push({ startMs: piece.startMs, endMs: piece.endMs, index });
+      if (last && last.endMs === piece.startMs && last.closed === closed) last.endMs = piece.endMs;
+      else groups.push({ startMs: piece.startMs, endMs: piece.endMs, index, closed });
     });
     const live = await Promise.all(groups.map((group) => ownRevenueWindow(own, rule, { ...segmentWindow, startMs: group.startMs, endMs: group.endMs }, { ...options, reuse: false })));
     // 不满一秒的头尾块读不出东西（emptySecondWindow）：不算一块；整段都是这样的就照原样返回
