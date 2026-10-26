@@ -119,7 +119,7 @@ export type ReconciliationWindowTotals = { knownIncomeUsd: number | null; knownC
 // 未纳入核算的上游消费 = 各按用量计费上游的账号级扣费 − 已计入核算的 Key 成本；只对共同汇总给出。
 export type UnaccountedUpstreamState = "pending" | "partial" | "estimated" | "complete";
 export type UnaccountedUpstream = {
-  state: UnaccountedUpstreamState; currency: ReconciliationCurrency; total: number | null;
+  state: UnaccountedUpstreamState; currency: ReconciliationCurrency; total: number | null; totalUsd: number | null;
   accounts: { stationId: string; name: string; rate: number | null; mode: string | null; endMs: number | null; state: UnaccountedUpstreamState | "unavailable"; notes: string[]; ruleIds: string[];
     accountUsd: number | null; accountedUsd: number; unaccountedUsd: number | null; account: number | null; accounted: number; unaccounted: number | null;
     // 已核算多于账号扣费（unaccounted < 0）时的原因：取数时刻不同、汇率不同或两者都有

@@ -3207,10 +3207,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const ownIssues = results.flatMap((row) => row.health?.issues || []).filter((issue) =>
         (/^OWN_/.test(issue?.code || "") && reconciliationIssue(issue.code).kind === "reading") || (issue?.side === "own" && isAccessTokenError(issue?.code)));
       const ownIssue = ownIssues.at(-1);
-      // 没算进利润的上游成本：和 /query 的 unaccountedUpstream.total 同一个算法（每账号 max(0, 没算进的美元) 再加，超额算进的账号不拖累合计）；
-      // 不能直接用 .total（那是按 displayCurrency 折算过的，可能是人民币），这里用账号明细里的 unaccountedUsd（始终是美元，审核 #126 M4）
-      const unaccountedUpstreamCostUsd = !response.unaccountedUpstream || response.unaccountedUpstream.state === "pending" ? null
-        : (response.unaccountedUpstream.accounts || []).reduce((total, account) => total + Math.max(0, finite(account.unaccountedUsd) ?? 0), 0);
+      // 没算进利润的上游成本：直接用 unaccountedUpstream.totalUsd（summarizeUnaccountedUpstream 给的美元合计，算法只有一份；
+      // 不能用 .total，那是按 displayCurrency 折算过的，可能是人民币，审核 #126 M4）
+      const unaccountedUpstreamCostUsd = response.unaccountedUpstream?.totalUsd ?? null;
       const rateUnsetIds = new Set();
       const rateUnset = [...(response.unconfiguredRateStations || []), ...fixedRateUnset].filter((station) => (rateUnsetIds.has(station.id) ? false : (rateUnsetIds.add(station.id), true)));
       return { ...page, asOf: response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd,
