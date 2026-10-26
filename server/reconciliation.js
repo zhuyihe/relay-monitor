@@ -1140,7 +1140,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 一段的上游成本（K1c）：这一段里每把 Key 各取一次再相加（lib/reconciliation-keys.js）。每段只有绑定自己那把（或分段没带 Key）时，
   // 就是原来的单次取数，结果逐字不变；多把 Key、已删 Key 给 K2b 开段以后用。Key 在别的上游里（K2b 的事）这一版读不了，当 Key 身份对不上
   async function upstreamWindowForSegment(upstream, metadata, token, segment, window, { readOnly, upstreamStationId }) {
-    const wanted = segmentKeyTokens({ segmentKeys: segment?.keys, ruleToken: token, metadata, upstreamStationId });
+    let wanted = segmentKeyTokens({ segmentKeys: segment?.keys, ruleToken: token, metadata, upstreamStationId });
+    // Sub2API 已删 Key 按「总量减别的 Key」算（querySub2DeletedKeyStat）：传进来的 metadata 可能是这一轮缓存的（5 分钟内），
+    // 「别的 Key」目录里刚建的、已经有用量的新 Key 还没进来，减法会把新 Key 的钱算进已删 Key。观测/结账（非只读）时强制重读一次
+    // Key 目录再判一遍：这一轮内同一个上游重读过就沿用缓存，不会每段都重读（K2b 落地前必须解决，审核 #129 M2）。
+    // New API 的已删 Key 按名字直接取（queryNewApiTokenStat），不走这个减法，不用重读
+    const isSub2 = upstream.type === "sub2api" || upstream.type === "sub2api-password";
+    if (!readOnly && isSub2 && wanted.some((item) => item.deleted)) {
+      metadata = await metadataFor(upstream, { force: true, timezone: window.timezone });
+      wanted = segmentKeyTokens({ segmentKeys: segment?.keys, ruleToken: token, metadata, upstreamStationId });
+    }
     if (wanted.length === 1 && (wanted[0].own || wanted[0].token?.id === token?.id)) return upstreamWindowFor(upstream, metadata, token, window, { readOnly });
     if (wanted.some((item) => item.foreign)) throw codedError("UPSTREAM_KEY_UNVERIFIED", "分段里有别的上游的 Key，这一版读不了");
     return sumKeyStats(await Promise.all(wanted.map((item) => upstreamWindowFor(upstream, metadata, item.token, window, { readOnly }))));

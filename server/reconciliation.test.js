@@ -7049,6 +7049,61 @@ test("K1c：一段里有几把 Key，上游成本是各取一次再相加（一�
   assert.equal(f.state.statCalls.slice(calls).filter((call) => call.side === "upstream" && call.start === COMPLETED_YESTERDAY.startMs / 1000).length, 2, "每把 Key 取一次");
 });
 
+// 这一轮按「要结的上游」整批重读目录（planSettlement 的 staleMetadata 标记）已经盖住了「昨天」「回看预算内」这两类，
+// 这条额外加的是不挂在那两类上也要对：已删 Key 的减法本身必须重读，不依赖调用方记得先标 staleMetadata
+// （K2b 要加新的开段/认 Key 路径，不能指望每条新路径都记得照 refreshDue 那样先标一遍）
+test("K2b 前置：Sub2API 已删 Key 的减法（非只读）强制重读一次 Key 目录，不靠调用方先标 staleMetadata；只读查询不触发", async (t) => {
+  const now0 = Date.parse("2026-10-11T01:00:00Z"); // 上海 10-11 09:00
+  let now = now0;
+  t.mock.method(Date, "now", () => now);
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "7", ratio: null, from: 0 }] });
+  const baseUrl = "https://sub2-stale-metadata.test";
+  Object.assign(f.stations[0], { type: "sub2api", baseUrl, accessToken: "jwt" });
+  Object.assign(f.rule, { billing_policy: "next-complete-day", scope_version: 1, billing_effective_from_ms: Date.parse("2026-10-09T16:00:00Z"),
+    cost_coverage: "complete", source_binding: { 1: "r1" } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const host = new URL(baseUrl).host, ownFetch = globalThis.fetch;
+  // sub2.tokens 是「上游这一刻真的有哪些 Key」：一开始只有 9，模拟新 Key 10 是在第一次读目录以后才建的
+  const sub2 = { tokens: [{ id: 9, user_id: 7, name: "stable", status: "active", group_id: 7 }], keysCalls: 0,
+    costs: { 9: { "2026-10-10": 3 }, 10: { "2026-10-10": 4 } }, total: { "2026-10-10": 10 } };
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(input);
+    if (url.host !== host) return ownFetch(input, init);
+    const reply = (status, data) => ({ status, text: async () => JSON.stringify({ code: status === 200 ? 0 : 1, data }) });
+    if (url.pathname === "/api/v1/auth/me") return reply(200, { id: 7 });
+    if (url.pathname === "/api/v1/keys") { sub2.keysCalls += 1; return reply(200, { total: sub2.tokens.length, items: sub2.tokens }); }
+    if (url.pathname.startsWith("/api/v1/keys/")) return reply(404, {});
+    const date = url.searchParams.get("start_date"), keyId = url.searchParams.get("api_key_id");
+    const cost = keyId == null ? sub2.total[date] ?? 0 : sub2.costs[keyId]?.[date] ?? 0;
+    return reply(200, { total_actual_cost: cost });
+  });
+
+  await f.module.refreshDue(now); // 基线：只有绑定自己那把 Key（9），正常结账
+  assert.deepEqual(f.state.ledger.map((row) => [row.bill_date, row.detail.result.calculation.upstream?.amountUsd ?? row.cost_usd]).filter(([d]) => d === "2026-10-10"), [["2026-10-10", 3]]);
+  assert.equal(sub2.keysCalls, 1);
+
+  // 这时候上游建了新 Key 10（有用量）：目录缓存还没过期（5 分钟内），自然不会知道
+  sub2.tokens = [{ id: 9, user_id: 7, name: "stable", status: "active", group_id: 7 }, { id: 10, user_id: 7, name: "oai-2", status: "active", group_id: 7 }];
+  // 分段里再加一把已经从目录删掉的 Key（77）：和 K1c 原有测试同一个造法
+  const segment = f.repository.tables.segments.find((row) => row.rule_id === "rr_live" && row.effective_to_ms == null);
+  f.repository.tables.segmentKeys.push({ segment_id: segment.id, upstream_station_id: "upstream", token_id: f.rule.token_id, token_name: f.rule.token_name, key_mask: null, match_source: "initial", active_token_key: null });
+  f.repository.tables.segmentKeys.push({ segment_id: segment.id, upstream_station_id: "upstream", token_id: 77, token_name: "gone-key", key_mask: null, match_source: "fingerprint", active_token_key: null });
+  const keysCallsBefore = sub2.keysCalls;
+  await f.repository.requestResettle("rr_live", ["2026-10-10"], { now });
+  now += 60000; // 远没到 5 分钟，普通轮询不会自然重读目录
+  await f.module.refreshDue(now);
+  assert.ok(sub2.keysCalls > keysCallsBefore, "已删 Key 这一轮强制重读了一次目录（不管这个上游是不是也被 planSettlement 标过 staleMetadata）");
+  // 10 − 3（Key 9）− 4（Key 10）= 3：减法要把新 Key 10 也扣掉，不是 10 − 3 = 7（把 Key 10 的钱错算成已删 Key 的）。
+  // 这一轮恰好也在 planSettlement 的「昨天」范围里、本来就会被标 staleMetadata，这个数本来就会是对的；
+  // 这条测试证明的是重读的码路径真的跑了（上一行的请求数），不是只靠外层那道已有的保险
+  assert.deepEqual(f.state.ledger.filter((row) => row.bill_date === "2026-10-10").map((row) => Number(row.cost_usd)), [3, 3 + 3]);
+
+  // 只读查询（页面）不强制重读，也不改任何状态
+  const readKeysCalls = sub2.keysCalls;
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai", startMs: Date.parse("2026-10-09T16:00:00Z"), endMs: Date.parse("2026-10-10T16:00:00Z") }, { mode: "evaluate", origin: "page" });
+  assert.equal(sub2.keysCalls, readKeysCalls, "只读查询不强制重读目录");
+});
+
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {
   let now = Date.parse("2026-10-01T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
