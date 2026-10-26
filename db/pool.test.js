@@ -43,6 +43,8 @@ test("对账 schema 缺列或索引时使用 MySQL 8 兼容的普通 ALTER", asy
     "ALTER TABLE reconciliation_rules ADD COLUMN billing_policy VARCHAR(32) NOT NULL DEFAULT 'legacy-v3'",
     "ALTER TABLE reconciliation_rules ADD COLUMN scope_version BIGINT NOT NULL DEFAULT 1",
     "ALTER TABLE reconciliation_rules ADD COLUMN billing_effective_from_ms BIGINT NULL",
+    "ALTER TABLE reconciliation_rules ADD COLUMN archived_at_ms BIGINT NULL",
+    "ALTER TABLE reconciliation_rules ADD COLUMN accounting_floor_ms BIGINT NULL",
     "ALTER TABLE reconciliation_rules ADD COLUMN cost_coverage VARCHAR(24) NOT NULL DEFAULT 'unknown'",
     "ALTER TABLE reconciliation_rules ADD COLUMN provider VARCHAR(24) NULL",
     "ALTER TABLE reconciliation_rules ADD COLUMN canonical_key VARCHAR(255) NULL",
@@ -57,7 +59,7 @@ test("对账 schema 缺列或索引时使用 MySQL 8 兼容的普通 ALTER", asy
 test("对账 schema 已具备列和索引时不重复执行 ALTER", async () => {
   const pool = schemaPool({
     columns: ["channel_status", "status_observed_at_ms", "status_changed_at_ms", "segment_id", "ratio_observed_at_ms", "ratio_source",
-      "billing_policy", "scope_version", "billing_effective_from_ms", "cost_coverage", "provider", "canonical_key", "source_binding", "identity_scheme"],
+      "billing_policy", "scope_version", "billing_effective_from_ms", "archived_at_ms", "accounting_floor_ms", "cost_coverage", "provider", "canonical_key", "source_binding", "identity_scheme"],
     indexes: ["idx_reconciliation_snapshot_segment", "idx_reconciliation_rule_token"],
   });
   await ensureSchema(pool);
@@ -73,7 +75,11 @@ test("新关联迁移可重跑且旧规则不切换自然日策略", async () =>
   const links = pool.calls.find((call) => call.sql.includes("CREATE TABLE IF NOT EXISTS channel_monitor_links"));
   assert.ok(links.sql.includes("PRIMARY KEY (own_station_id, channel_id, station_id)"));
   assert.equal(links.sql.includes("token"), false);
-  assert.equal(pool.calls.some((call) => /UPDATE reconciliation_rules/.test(call.sql)), false);
+  assert.equal(pool.calls.some((call) => /UPDATE reconciliation_rules SET billing/.test(call.sql)), false);
+  // 解除时刻回填：只补 archived_at_ms 为空的已解除行，不动别的列
+  const backfill = pool.calls.filter((call) => /UPDATE reconciliation_rules/.test(call.sql));
+  assert.equal(backfill.length, 2);
+  assert.ok(backfill.every((call) => /SET archived_at_ms = UNIX_TIMESTAMP\(archived_at\) \* 1000 WHERE archived_at IS NOT NULL AND archived_at_ms IS NULL/.test(call.sql)));
 });
 
 function confirmedRow(ruleId, { startMs = START, generatedAt = new Date(START + DAY + 20 * 60000).toISOString() } = {}) {

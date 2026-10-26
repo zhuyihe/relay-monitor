@@ -4,10 +4,12 @@
 // error 存报错本身（带 code、status），整块读不到时页面按它归类成一句（lib/error-copy.js）；summaryError、ruleRetryErrors 存的是报错原文，
 // 页面只放进「查看详细原因」（design/ui-copy-spec.md §8.2）。
 // 多个请求可能交错返回：windowRequestId 丢弃过期的窗口响应，resultEpoch / rowResultEpoch 保证较新的单行结果不被较早的全量响应覆盖。
-import { useEffect, useRef, useState } from "react";
+import { App } from "antd";
+import { createElement, useEffect, useRef, useState } from "react";
 import { api } from "../../../lib/client";
 import { ERROR_CATEGORIES } from "../../../lib/error-copy";
 import { sameReconciliationWindow } from "../../../lib/reconciliation-contract";
+import { RESETTLE_SHRUNK_CHANGED, resettleShrunkConfirm } from "../../../lib/reconciliation-view";
 import { caughtError, isLivePreset } from "./recon-format";
 import type { ReconPreset, ReconWindow } from "./recon-format";
 
@@ -19,6 +21,7 @@ const USAGE_REREAD_MS = 5000;
 const OTHER_ERROR = ERROR_CATEGORIES.other.text;
 
 export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, row: any) => void }) {
+  const { message, modal } = App.useApp();
   const [config, setConfig] = useState<any>(null);
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -133,6 +136,17 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
     const id = String(item?.rule?.id || "");
     const window = item?.requestedWindow || item?.window;
     if (!id || !window?.startMs || !window?.endMs) return;
+    // 这天是「重算的数比原来少了一半多」没换掉的：这一下会把已固定的钱换掉，先弹确认框写出换成多少（§5.3）；点了才带确认去读
+    const confirmation = resettleShrunkConfirm(item);
+    if (confirmation) {
+      const confirmed = await new Promise<boolean>((resolve) => modal.confirm({
+        title: confirmation.title, okText: confirmation.okText, cancelText: confirmation.cancelText,
+        content: createElement("div", null, ...confirmation.lines.map((line: string) => createElement("div", { key: line }, line)),
+          createElement("div", { style: { marginTop: 8, opacity: 0.65 } }, confirmation.hint)),
+        onOk: () => resolve(true), onCancel: () => resolve(false),
+      }));
+      if (!confirmed) return;
+    }
     const requestId = (ruleRetryRequestId.current.get(id) || 0) + 1;
     ruleRetryRequestId.current.set(id, requestId);
     const requestWindowEpoch = windowRequestId.current;
@@ -140,7 +154,7 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
     setRetryingRuleIds((previous) => new Set(previous).add(id));
     setRuleRetryErrors((previous) => ({ ...previous, [id]: "" }));
     try {
-      const next = await api("/api/reconciliation/query", { method: "POST", body: { preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: [id], observe: true } });
+      const next = await api("/api/reconciliation/query", { method: "POST", body: { preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: [id], observe: true, ...(confirmation ? { confirmShrink: true, confirmedAfter: confirmation.after } : {}) } });
       const replacement = (next?.results || []).find((candidate: any) => String(candidate?.rule?.id) === id);
       const replacementWindow = replacement?.requestedWindow || replacement?.window;
       if (requestId !== ruleRetryRequestId.current.get(id) || requestWindowEpoch !== windowRequestId.current || !replacement || !sameReconciliationWindow(window, replacementWindow)) return;
@@ -152,6 +166,8 @@ export function useReconWindow({ onRowReplaced }: { onRowReplaced: (id: string, 
         return { ...previous, results: previous.results.map((candidate: any) => String(candidate?.rule?.id) === id ? replacement : candidate) };
       });
       onRowReplaced(id, replacement);
+      // 太早没自动重算的日子点「重新读取」，读出来又少了一半多：先没换掉，说一声（和需处理的标题同一句，§5.3）
+      if (replacement.displayStatus?.action?.code === "RESETTLE_SHRUNK") message.warning(confirmation ? RESETTLE_SHRUNK_CHANGED : `${replacement.displayStatus.title}，先没换掉`);
       void refreshSummary(activeWindow, requestWindowEpoch);
     } catch (err: any) {
       if (requestId === ruleRetryRequestId.current.get(id) && requestWindowEpoch === windowRequestId.current) setRuleRetryErrors((previous) => ({ ...previous, [id]: err?.message || OTHER_ERROR }));

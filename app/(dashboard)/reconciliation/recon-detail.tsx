@@ -3,16 +3,16 @@
 // 只用白话（design/ui-copy-spec.md §9）；「改时间」是页面只读的唯一例外，其余处理都由按钮去对应页面。
 import { useRef } from "react";
 import { Alert, Button, DatePicker, Select } from "antd";
-import { EMPTY, formatDayZone, formatPct, formatZonedDateTime } from "../../../lib/format";
+import { EMPTY, formatDayZone, formatPct, formatZonedDateTime, formatZonedTime } from "../../../lib/format";
 import { reconciliationAccountingStart, reconciliationIssue } from "../../../lib/reconciliation-contract";
 import {
   hasReconciliationHistory,
   mergeReconciliationChannels,
-  reconciliationAccountingStartText,
+  accountingStartTextAt,
   reconciliationRowFlags,
 } from "../../../lib/reconciliation-view";
 import { ErrorDetail } from "../../components/error-detail";
-import { CORRECT_TIMING_HINT } from "../../../lib/workflow-actions";
+import { CORRECT_TIMING_HINT, SUB2API_WHOLE_DAY_COST } from "../../../lib/workflow-actions";
 import { ChannelBreakdown, Detail, IssueAction, LossTag } from "./recon-parts";
 import {
   RECON_BUTTONS, RECON_COPY, RETRY_FAILED_TEXT, amountText, adminUsageLine, costText, currentGroup, currentRatioLabel, formatWindow, incomeText, isFixedCost, ratioChangeText, ratioLabel, rateText,
@@ -55,7 +55,8 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
   const adminUsage = adminUsageLine(detail, currency);
   const fixedCost = isFixedCost(detail);
   const ratioChange = ratioChangeText(detail, timezone);
-  const start = reconciliationAccountingStart(detail.rule);
+  // 开始统计：这天当时实际从哪一刻算起（结果里记着，C3 以前固定的绑上那天记的是「那一刻」）；没记就按现在的规则
+  const start = detail.scope?.accountedFromMs ?? reconciliationAccountingStart(detail.rule);
   const revisions = Number(detail.ledger?.revision) - 1;
   const pendingSegments = state.transitionSegments.filter((segment: any) => segment.timingSource === "detected");
   const otherConflicts = status.state === "action" ? conflictRuleIds(detail) : [];
@@ -91,12 +92,13 @@ export function ReconDetail({ detail, state, currency, upstreams, businessTimezo
       <Detail label="分组 / 倍率" value={`${currentGroup(detail)} · ${currentRatioLabel(detail)}`} />
       <Detail label="收入" value={<>{incomeText(detail, currency)}<small>{channels.length ? RECON_COPY.incomeSource(channels.length) : RECON_COPY.noChannels}</small>{adminUsage ? <small title={adminUsage.title}>{adminUsage.text}</small> : null}</>} />
       <Detail label="上游成本" value={<>{costText(detail, currency)}{fixedCost ? null
-        : <small>来自 Key「{keyName(detail.rule)}」的用量记录{ratioChange ? `；${ratioChange}` : ""}</small>}</>} />
+        : <small>来自 Key「{keyName(detail.rule)}」的用量记录{ratioChange ? `；${ratioChange}` : ""}{detail.scope?.upstreamWholeDay ? `。${SUB2API_WHOLE_DAY_COST(formatZonedTime(detail.scope.accountedFromMs, timezone))}` : ""}</small>}</>} />
       <Detail label="毛利" value={<>{amountText(profit, profitCurrency as ReconciliationCurrency)} <LossTag show={flags.negative} /></>} />
       <Detail label="毛利率" value={formatPct(margin)} />
       <Detail label="汇率" value={rateText(detail, currency, timezone)} />
       {status.state === "settled" ? <Detail label="固定于" value={formatZonedDateTime(status.settledAt, timezone)} /> : null}
-      {start != null && requested && start > requested.startMs ? <Detail label="开始统计" value={reconciliationAccountingStartText(detail.rule, timezone)} /> : null}
+      {start != null && requested && start > requested.startMs ? <Detail label="开始统计" value={accountingStartTextAt(start, timezone)} /> : null}
+      {detail.scope?.accountedToMs != null ? <Detail label="统计到" value={`${formatZonedDateTime(detail.scope.accountedToMs, timezone)}（解除绑定）`} /> : null}
       {revisions > 0 ? <Detail label="改过" value={`改过 ${revisions} 次`} /> : null}
     </div>
     <p className="jy-caption">毛利 = 收入 − 上游成本；毛利率 = 毛利 ÷ 收入。{hasReconciliationHistory(ruleHistory(detail)) ? "倍率变了的日子分两段算。" : ""}</p>

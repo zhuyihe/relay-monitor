@@ -94,7 +94,7 @@ export type ConfirmedHistoryBilling = {
 export type ConfirmedHistoryRecord = {
   historyId: string; confirmedAt: string; window: ConfirmedHistoryWindow; ownSource: OwnSource | null;
   upstreamSource: { provider: string | null; baseUrl: string | null; accountId: string | null; tokenId: number | null; tokenName: string | null };
-  scopeVersion: number | null; scopeFingerprint: string | null; billingEffectiveFromMs: number | null; channels: { channelId: number; name: string | null }[];
+  scopeVersion: number | null; scopeFingerprint: string | null; billingEffectiveFromMs: number | null; accountingStartMs: number | null; accountedToMs: number | null; channels: { channelId: number; name: string | null }[];
   amountBasis: { id: string; currency: "USD"; billingSource: string; calculationVersion: number; conversion: "quota_per_unit" | "provider_cost_usd" | null };
   upstream: ConfirmedHistoryBilling; downstream: ConfirmedHistoryBilling & { channels: { channelId: number; name: string | null; billingState: string | null; quotaUnits: number | null; amountUsd: number | null; knownAmountUsd: number | null }[] };
   calculation: { differenceUsd: number | null; profitUsd: number | null; riskDifferenceUsd: number | null; marginRate: number | null };

@@ -46,6 +46,11 @@ function useReportUnknownCode(code?: string) {
 export function RowStatus({ item, currency }: { item: any; currency: ReconciliationCurrency }) {
   const status = reconciliationRowFlags(item, currency).displayStatus;
   useReportUnknownCode(status.code);
+  // 整天在开始统计之前（C②）：不是状态，状态那一格写灰字，下面一句从哪天开始
+  if (status.state === "not_started") return <span className="reconciliation-status-stack">
+    <small className="reconciliation-status-note">{status.label}</small>
+    {status.note ? <small className="reconciliation-status-note">{status.note}</small> : null}
+  </span>;
   const note = status.state === "action" ? status.title : status.note || status.hints?.[0]?.text || "";
   return <span className="reconciliation-status-stack" title={status.state === "settled" ? status.note : undefined}>
     <span className="reconciliation-status-tags">

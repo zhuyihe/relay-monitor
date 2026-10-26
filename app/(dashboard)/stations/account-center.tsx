@@ -12,10 +12,10 @@ import { STATION_TABS } from "../../../lib/brand.js";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time.js";
 import { BINDING_COPY, ONBOARDING_TYPES } from "../../../lib/channel-onboarding.js";
 import { ERROR_CATEGORIES, describeError, errorText, failureSentence, failureText } from "../../../lib/error-copy.js";
-import { EMPTY, FIXED_COST_TEXT, NOTHING_TO_HANDLE, RATE_UNSET_PARITY, formatAsOf, formatDayZone, formatRate, formatUsd, formatZonedDateTime, formatZonedRange, refreshFailedText } from "../../../lib/format";
+import { EMPTY, FIXED_COST_TEXT, NOTHING_TO_HANDLE, RATE_UNSET_PARITY, formatAsOf, formatDayZone, formatRate, formatUsd, formatZonedDate, formatZonedDateTime, formatZonedRange, refreshFailedText } from "../../../lib/format";
 import { COVERAGE_ANSWERS, COVERAGE_QUESTION, coverageAnswerOption, fillIssueCopy, reconciliationChannelStatus, reconciliationIssue } from "../../../lib/reconciliation-contract.js";
 import { reconciliationChannelName, reconciliationKeyName, reconciliationKeyNamer } from "../../../lib/reconciliation-view.js";
-import { DESTINATION_CHANGED, HISTORY_KEPT, testReadText, workflowActionMeta } from "../../../lib/workflow-actions.js";
+import { DESTINATION_CHANGED, HISTORY_KEPT, SUB2API_UNBIND_DAY, testReadText, workflowActionMeta } from "../../../lib/workflow-actions.js";
 import { Skeleton } from "../../components/data-state";
 import { ErrorDetail, notice, noteOf } from "../../components/error-detail";
 import type { ErrorNote } from "../../components/error-detail";
@@ -63,7 +63,7 @@ const COPY = Object.freeze({
   editElsewhere: `在「${STATION_TABS.list}」里看余额和改设置。`,
   conflictWith: (names: string) => `和它重复的：${names}`,
   missingUpstreamDetail: "上游已删除，这条绑定读不到上游成本，请解除绑定",
-  unbindHint: `解除后不再算这把 Key 在这些渠道上的利润，空出来的渠道可以重新绑定；${HISTORY_KEPT}，同一把 Key 的其他绑定不受影响。`,
+  unbindHint: (sub2apiDay: string) => `解除后不再算这把 Key 在这些渠道上的利润，空出来的渠道可以重新绑定。${sub2apiDay ? SUB2API_UNBIND_DAY(sub2apiDay) : ""}${HISTORY_KEPT}，同一把 Key 的其他绑定不受影响。`,
   keyNotBound: "这把 Key 还没绑定。",
   noKeys: `还没有 Key。在「${STATION_TABS.onboarding}」把 Key 和渠道绑定后，显示在这里。`,
   loginOutdated: `${UPDATE_LOGIN.title}，${UPDATE_LOGIN.detail}。`,
@@ -389,6 +389,11 @@ export function useAccountCenter({
     return `${option.label}：${names.join("、")}`;
   };
   const ownStationName = (id: string) => stations.find((station) => station.id === id)?.name || EMPTY;
+  // 上游是 Sub2API 时，解除绑定那天（今天，按这条绑定的时区）整天不算：确认框里先让人看见（C③）。别的上游返回空串
+  const unbindSub2apiDay = (association: AccountAssociation) => {
+    const account = (accountModel?.accounts || []).find((item) => item.resources.some((resource) => resource.id === association.upstreamStationId));
+    return account?.identity.provider === "sub2api" ? formatZonedDate(Date.now(), association.timezone) : "";
+  };
   // 这一页的 Key 名：各上游账号下的 Key 和没对上上游的绑定放在一起比，同名的都加上编号（§3.1）
   const keyTitle: (key: AccountKeyScope | AccountAssociation | UnmatchedAssociation) => string = reconciliationKeyNamer([...(accountModel?.accounts || []).flatMap((account) => account.keys), ...(accountModel?.unmatchedAssociations || [])]);
   const purposeLocked = loadingAccounts || !!accountError || authorizationBusy;
@@ -889,7 +894,7 @@ export function useAccountCenter({
             </>
           ) : purposeTarget?.association ? (
             <>
-              <p>{COPY.unbindHint}</p>
+              <p>{COPY.unbindHint(unbindSub2apiDay(purposeTarget.association))}</p>
               <dl className="jy-accounts-facts">
                 <dt>Key</dt><dd>{purposeTarget.keyLabel || EMPTY}</dd>
                 <dt>{BINDING_COPY.ownStation}</dt><dd>{ownStationName(purposeTarget.association.ownStationId)}</dd>
