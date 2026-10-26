@@ -21,9 +21,10 @@ console.log(`[fake] 预聚合 ${agg.nh} 小时，用了 ${Date.now() - t0} ms`);
 let delayMs = Number(process.env.FAKE_DELAY_MS ?? 50);
 let ratioMode = process.env.FAKE_RATIO_MODE || "current";
 const stats = { total: 0, bytes: 0, byRoute: Object.create(null), bySite: Object.create(null), startedAt: new Date().toISOString() };
-let requestLog = []; // [到达时刻 ms, 路由]，/__stats?detail=1 返回，最多 20 万条；自营 /api/log/ 多一项 "all"（不带筛选的整站读）或 "filtered"
-// 自营 /api/log/ 分两类计数（整站读场景用）：all = 不带 username/token_name/channel/model_name/group 筛选的整站读（channel=0 算没筛），filtered = 带任何一个
-let ownLogKinds = { all: 0, filtered: 0 };
+let requestLog = []; // [到达时刻 ms, 路由]，/__stats?detail=1 返回，最多 20 万条；自营 /api/log/ 多一项类别（all / latest / filtered，见下）
+// 自营 /api/log/ 分三类计数（整站读场景用）：filtered = 带 username/token_name/channel/model_name/group 任何一个（channel=0 算没筛）；
+// 不带筛选的里，page_size=1 的是「上次以后有没有新消费」那一下（latest），别的是整站读（all）
+let ownLogKinds = { all: 0, latest: 0, filtered: 0 };
 const OWN_LOG_FILTERS = ["username", "token_name", "channel", "model_name", "group"];
 
 const upByPath = new Map(UPSTREAMS.map((up) => [up.path, up]));
@@ -445,7 +446,7 @@ function route(req, url) {
   if (path === "/__stats") {
     const snapshot = { ...JSON.parse(JSON.stringify(stats)), ownRateLimited, ownLogKinds: { ...ownLogKinds } };
     if (q.get("detail") === "1") snapshot.log = requestLog;
-    if (q.get("reset") === "1") { stats.total = 0; stats.bytes = 0; stats.byRoute = Object.create(null); stats.bySite = Object.create(null); stats.startedAt = new Date().toISOString(); requestLog = []; ownLogKinds = { all: 0, filtered: 0 }; }
+    if (q.get("reset") === "1") { stats.total = 0; stats.bytes = 0; stats.byRoute = Object.create(null); stats.bySite = Object.create(null); stats.startedAt = new Date().toISOString(); requestLog = []; ownLogKinds = { all: 0, latest: 0, filtered: 0 }; }
     return [200, snapshot];
   }
   if (path === "/__ctl") {
@@ -463,7 +464,7 @@ function route(req, url) {
   stats.total += 1;
   stats.byRoute[key] = (stats.byRoute[key] || 0) + 1;
   stats.bySite[site] = (stats.bySite[site] || 0) + 1;
-  const ownLogKind = key === "own:/api/log/" ? (OWN_LOG_FILTERS.some((f) => q.get(f) && q.get(f) !== "0") ? "filtered" : "all") : null;
+  const ownLogKind = key === "own:/api/log/" ? (OWN_LOG_FILTERS.some((f) => q.get(f) && q.get(f) !== "0") ? "filtered" : q.get("page_size") === "1" ? "latest" : "all") : null;
   if (ownLogKind) ownLogKinds[ownLogKind] += 1;
   if (requestLog.length < 200000) requestLog.push(ownLogKind ? [Date.now(), key, ownLogKind] : [Date.now(), key]);
   if (downSites.has(site)) return [503, { success: false, message: "upstream down (fake)" }];

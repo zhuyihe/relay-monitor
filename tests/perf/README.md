@@ -25,7 +25,7 @@
 | | 开关：`FAKE_USER_ROLES="1:1,450:100"`（默认空）改用户列表里的角色（把 root 列成普通用户、user450 列成超级管理员） |
 | | 开关：`/__ctl?down=/na01,/na02` 让这些上游一律回 503（像上游挂了），`down=` 清空 |
 | | 自营站点单独一个端口 `FAKE_OWN_PORT`（默认 `FAKE_PORT + 1`，同一个进程、同一套路由）：控制台按「主机:端口」给自营站点记 180 秒的请求额度，和上游共用端口的话读上游的请求也会算进自营站点的额度 |
-| | 自营 `/api/log/` 分两类计数：不带 `username`/`token_name`/`channel`/`model_name`/`group` 的是整站读（`all`），带任何一个的是 `filtered`；`/__stats` 的 `ownLogKinds`，`detail=1` 的请求时间线里这类请求多一项类别 |
+| | 自营 `/api/log/` 分三类计数：带 `username`/`token_name`/`channel`/`model_name`/`group` 任何一个的是 `filtered`；不带的里 `page_size=1` 的是「上次以后有没有新消费」那一下（`latest`），别的是整站读（`all`）；`/__stats` 的 `ownLogKinds`，`detail=1` 的请求时间线里这类请求多一项类别 |
 | `seed/00-config.mjs` | 定夹具起点（92 天前的 UTC 零点）和哪些（上游, 分组）40 天前换过倍率，写 `$PERF_OUT/fixture/config.json` |
 | `seed/01-base.mjs` | 删库重建、建表（应用的 `ensureSchema`），用应用的 `Store` 写自营站点、面板账号 admin/admin123、通知方式、日报 |
 | `seed/02-onboard.mjs` | 服务在跑：走「接入渠道」同一条接口建 50 个上游和 80 条绑定 |
