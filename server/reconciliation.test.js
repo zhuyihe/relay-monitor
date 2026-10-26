@@ -8385,6 +8385,19 @@ test("R2 近 7 天碰到关过的一天：那一天不算，其余天照算，�
   assert.equal(all.health.code, "OWN_CONSUME_LOG_GAP");
 });
 
+test("R2 关过的那天过了 33 天：状态行清掉了也不回到「实时」、手动重新读取也固定不了（总指挥 10-26 定 C）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  await f.rt.store.update("own", { consumeLogOffPeriods: [{ fromMs: Date.parse("2026-10-08T02:00:00Z"), toMs: Date.parse("2026-10-08T03:00:00Z") }] });
+  now += 33 * 86400000; // 33 天以后：状态行早被清了，段还在
+  f.repository.tables.settlementState.length = 0;
+  const yesterday = { startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z") };
+  const manual = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", ...yesterday }, { mode: "observe", force: true, origin: "manual" })).results[0];
+  assert.equal(manual.health.code, "OWN_CONSUME_LOG_GAP", "段还在：那天仍说关过");
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").length, 0, "手动重新读取也没固定");
+});
+
 test("R2 还没开始统计的日子不被标成需处理（审核第一轮 中-7）：整天在开始统计之前，关着也不碰", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
