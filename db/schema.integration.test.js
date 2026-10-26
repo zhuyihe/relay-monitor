@@ -838,6 +838,10 @@ defineReconciliationRepositoryContract({
       FROM reconciliation_snapshots WHERE rule_id = ? AND snapshot_key = ?`, [ruleId, snapshotKey]);
     return row ? { ...row, windowStartMs: Number(row.windowStartMs), windowEndMs: Number(row.windowEndMs) } : null;
   },
+  insertSegmentKeyRow: async ({ segmentId, upstreamStationId, tokenId, tokenName }) => {
+    await contractPool.query(`INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source)
+      VALUES (?, ?, ?, ?, 'extra')`, [segmentId, upstreamStationId, tokenId, tokenName]);
+  },
   // 连接池在最后一组契约（下面的 own log store）跑完才关
 });
 

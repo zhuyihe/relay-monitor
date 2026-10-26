@@ -7,6 +7,7 @@
 //   inspectSnapshot({ repository, ruleId, snapshotKey })  读取快照行的物理列（segment_id 等没有公开读取方法）
 //   failRequestWrites({ repository })                让之后写重结请求的那一步抛错，返回恢复的函数（改切换时间的事务里，请求写不进去要连分段一起回滚）
 //   backdateRule({ repository, ruleId, createdAtMs })  把一条绑定的建立时刻改到过去（改时间要写重结请求的日子得在建绑定之后，用例里只能这样造）
+//   insertSegmentKeyRow({ repository, segmentId, upstreamStationId, tokenId, tokenName })  给一段多插一行 Key（K1c 这版公开方法造不出一段多把 Key，这是唯一的造法，K2b 开始写才会真的发生）
 //   teardown()                                       全部用例结束后释放资源
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -155,7 +156,7 @@ function settlement(snapshot, { resettle = false, ...rates } = {}) {
 const CASES = [];
 const contract = (title, run) => CASES.push([title, run]);
 
-export function defineReconciliationRepositoryContract({ name, create, cleanup = async () => {}, inspectSnapshot = null, backdateRule = null, failRequestWrites = null, teardown = null }) {
+export function defineReconciliationRepositoryContract({ name, create, cleanup = async () => {}, inspectSnapshot = null, backdateRule = null, failRequestWrites = null, insertSegmentKeyRow = null, teardown = null }) {
   test(`reconciliation repository contract: ${name}`, { timeout: 120000 }, async (t) => {
     if (teardown) t.after(teardown);
     for (const [title, run] of CASES) {
@@ -166,7 +167,8 @@ export function defineReconciliationRepositoryContract({ name, create, cleanup =
         try {
           const backdate = backdateRule && ((ruleId, createdAtMs) => backdateRule({ repository, ruleId, createdAtMs }));
           const failRequests = failRequestWrites && (() => failRequestWrites({ repository }));
-          await run({ repository, fixture, inspect, backdate, failRequests });
+          const insertKey = insertSegmentKeyRow && ((args) => insertSegmentKeyRow({ repository, ...args }));
+          await run({ repository, fixture, inspect, backdate, failRequests, insertKey });
         } finally {
           await cleanup({ repository, ruleIds: await fixture.collectRuleIds(), capabilityIdentities: [...fixture.capabilityIdentities] });
         }
@@ -1425,6 +1427,20 @@ contract("segment keys (K1c): every segment has its Key row, filled from the rul
   assert.equal(await repository.archiveRule(rule.id), true);
   segments = await repository.listSegments(rule.id);
   assert.deepEqual(segments.map((segment) => segment.keys[0].active), [false, false]);
+});
+
+contract("segment keys (K1c)：一段有不止一把 Key 时（K2b 开始写才会真的发生，这版用后门造），listSegments 的 JOIN 把同一段的几行折叠进一个 segment.keys 数组，不会把段拆成几份、也不会漏掉哪一把", async ({ repository, fixture, insertKey }) => {
+  assert.ok(insertKey, "运行方要提供 insertSegmentKeyRow");
+  const rule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:sk-multi`, billingPolicy: "immediate", timezone: "UTC" });
+  const [segment] = await repository.listSegments(rule.id);
+  assert.equal(segment.keys.length, 1, "造之前只有 rules 上那一把");
+  const extraStationId = fixture.station("up-extra"), extraTokenId = fixture.token(77);
+  await insertKey({ segmentId: segment.id, upstreamStationId: extraStationId, tokenId: extraTokenId, tokenName: "Extra" });
+  const segments = await repository.listSegments(rule.id);
+  assert.equal(segments.length, 1, "多了一把 Key 的行，段数不变，不会把一段拆成两段");
+  const keys = segments[0].keys.map((key) => [key.upstreamStationId, key.tokenId, key.tokenName]).sort((a, b) => a[1] - b[1]);
+  assert.deepEqual(keys, [[rule.upstreamStationId, rule.tokenId, rule.tokenName], [extraStationId, extraTokenId, "Extra"]].sort((a, b) => a[1] - b[1]),
+    "两把都在同一段的 keys 里，不多不少");
 });
 
 contract("listSettlementStates with billDates only returns those days", async ({ repository, fixture }) => {
