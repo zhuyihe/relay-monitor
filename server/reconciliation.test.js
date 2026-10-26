@@ -8349,11 +8349,28 @@ test("R2 结账那一轮读不到站点设置（5xx）：这一天这一轮不�
   await f.module.refreshDue(now);
   assert.deepEqual(days(), [], "读不到设置：不固定");
   const row = f.repository.tables.settlementState.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
-  assert.equal(row?.retry_reason, "OWN_BILLING_UNAVAILABLE", "读取类，按退避再试");
+  assert.equal(row?.retry_reason, "OWN_OPTION_UNREADABLE", "读取类，按退避再试；码说的是「设置读不到」，不借用「收费记录读不到」（审核第二轮 中-1）");
   f.state.optionReply = null; // 恢复
   now += 11 * 60000;
   await f.module.refreshDue(now);
   assert.ok(days().includes("2026-10-08"), "读到开着以后固定");
+  // 设置连续读不到超过 24 小时（收费记录本身读得到）：照常固定，账本明细记一句，站点这一层进需处理「自营站点的设置一直读不到」
+  const h = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const r of h.rows) r.enabled = r.id === "rr_live" ? 1 : 0;
+  h.state.optionReply = [502, { success: false }];
+  await h.module.refreshDue(now);
+  assert.deepEqual(h.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date), [], "头 24 小时先等");
+  assert.ok(!h.module.ownSiteActions?.length);
+  now += 25 * 3600000;
+  await h.module.refreshDue(now);
+  const settledRows = h.state.ledger.filter((r) => r.rule_id === "rr_live").map((r) => r.bill_date).sort();
+  assert.ok(settledRows.includes("2026-10-08") && settledRows.includes("2026-10-09"), `超过 24 小时：照常固定（${settledRows}）`);
+  const detail = h.state.ledger.find((r) => r.rule_id === "rr_live" && r.bill_date === "2026-10-09").detail;
+  assert.deepEqual([detail.settlement.consumeLogSetting.state, detail.settlement.consumeLogSetting.reason], ["unreadable", "too_long"], "明细照实记一句");
+  const page = await h.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "evaluate", origin: "page" });
+  const siteAction = page.actions.find((action) => action.code === "OWN_OPTION_UNREADABLE");
+  assert.deepEqual([siteAction?.kind, siteAction?.label, siteAction?.title, siteAction?.stationId], ["recheck_consume_log", "重新检查", "自营站点的设置一直读不到", "own"], "站点这一层进需处理，按钮「重新检查」");
+  assert.ok(!page.actions.some((action) => action.code === "OWN_BILLING_UNAVAILABLE"));
   // 没权限照常固定
   const g = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
   for (const r of g.rows) r.enabled = r.id === "rr_live" ? 1 : 0;
@@ -8375,6 +8392,11 @@ test("R2 近 7 天碰到关过的一天：那一天不算，其余天照算，�
   assert.notEqual(partial.health.code, "OWN_CONSUME_LOG_GAP", "不整段挡住");
   assert.notEqual(partial.calculation.profitUsd, null, "其余天照算");
   assert.ok(partial.health.issues.some((issue) => issue.code === "OWN_CONSUME_LOG_GAP_PARTIAL"), "加了一句说明");
+  // 切成几块读的同一个真分段合回一项：页面的「倍率变化」表只有真分段，金额等于合计（审核第二轮 中-2、低-3）
+  assert.deepEqual(partial.segments.map((segment) => segment.id), whole.segments.map((segment) => segment.id), "段号不带「~序号」、段数不变");
+  assert.equal(partial.segments.length, 1);
+  assert.deepEqual([partial.segments[0].downstream.amountUsd, partial.segments[0].upstream.amountUsd, partial.segments[0].pieces], [partial.downstream.amountUsd, partial.upstream.amountUsd, 2], "两块合成一段，收入、成本之和等于合计");
+  assert.ok(partial.segments[0].downstream.channels.every((channel) => channel.billingState === "complete"));
   const dayStart = Date.parse("2026-10-07T16:00:00Z") / 1000, dayEnd = Date.parse("2026-10-08T16:00:00Z") / 1000; // 10-08 整天（上海）
   f.state.statCalls.length = 0;
   await week();

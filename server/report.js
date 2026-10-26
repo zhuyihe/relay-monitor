@@ -12,8 +12,7 @@ import { businessTimeZone, dayKeyInTz, dayStartInTz, shiftDayLabel, zonedParts }
 import { errorText } from "../lib/error-copy.js";
 import {
   ADMIN_UNMARKED, BALANCE_STATE_TEXT, BASIS_TITLE, COST_MODE_TEXT, EMPTY, FORECAST_TEXT, NO_SPEND_TEXT, NO_UPSTREAM_TEXT,
-  OWN_STATION_UNSET, RATE_UNSET, formatCompact, formatDayKey, formatDays, formatDeltaPct, formatMoney, formatPct, weekdayOfDayKey,
-} from "../lib/format.js";
+  OWN_STATION_UNSET, RATE_UNSET, formatCompact, formatDayKey, formatDays, formatDeltaPct, formatMoney, formatPct, weekdayOfDayKey, incomeGapText } from "../lib/format.js";
 import { balanceViewOf, burnText, ownStationDisplayName, stationDisplayName } from "../lib/overview-actions.js";
 import { balanceMoneyOf, isLoss, profitApproxOf, rateSnapshotOf, splitProfitWarnings } from "../lib/profit.js";
 
@@ -179,7 +178,7 @@ function reportFigures(rt, { own, tz, dayStart, byModel, byUser, daily, profit, 
 
   // 收入、成本、利润：读不到的说原因（§8.2 那一类的话）；估算的数和页面一样加「≈」
   // 收入读不到的原因：关着、关过用自己的说法（关过的那句写「昨天」），别的是收入确认不了
-  const incomeReason = unconfirmed ? (unconfirmed.code === "OWN_CONSUME_LOG_GAP" ? errorText({ code: "OWN_CONSUME_LOG_GAP" }).replace("这一天", "昨天") : errorText({ code: unconfirmed.code === "OWN_CONSUME_LOG_OFF" ? "OWN_CONSUME_LOG_OFF" : "OWN_INCOME_UNCONFIRMED" })) : null;
+  const incomeReason = unconfirmed ? (unconfirmed.code === "OWN_CONSUME_LOG_GAP" ? incomeGapText("昨天") : errorText({ code: unconfirmed.code === "OWN_CONSUME_LOG_OFF" ? "OWN_CONSUME_LOG_OFF" : "OWN_INCOME_UNCONFIRMED" })) : null;
   const costReason = profit?.error ? errorText(profit) : null;
   const approx = profitApproxOf(profit, own);
   const { reasons, notes } = costReason ? { reasons: [], notes: [] } : splitProfitWarnings(profit);
