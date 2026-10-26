@@ -6,7 +6,8 @@ import { StatusTag } from "../../components/status";
 import { EmptyState, Skeleton } from "../../components/data-state";
 import { ErrorDetail } from "../../components/error-detail";
 import type { ConfirmedHistoryRecord } from "../../../lib/client";
-import { EMPTY, FIXED_COST_TEXT, formatPct, formatZonedDateTime, refreshFailedText } from "../../../lib/format";
+import { EMPTY, FIXED_COST_TEXT, formatPct, formatZonedDate, formatZonedDateTime, refreshFailedText } from "../../../lib/format";
+import { SUB2API_UNBIND_DAY } from "../../../lib/workflow-actions";
 import { failureText } from "../../../lib/error-copy";
 import { INCOMPLETE_DAY_TEXT } from "../../../lib/reconciliation-contract";
 import { formatReconciliationMoney as money, reconciliationBillingText, reconciliationChannelName, reconciliationKeyName, reconciliationKeyNamer } from "../../../lib/reconciliation-view";
@@ -45,7 +46,7 @@ function settledRateText(record: ConfirmedHistoryRecord) {
 
 function RecordDetails({ record }: { record: ConfirmedHistoryRecord }) {
   const timezone = record.window.timezone || undefined;
-  const start = record.billingEffectiveFromMs;
+  const start = record.accountingStartMs ?? record.billingEffectiveFromMs;
   return <div className="reconciliation-confirmed-details" data-history-id={record.historyId}>
     {incomplete(record) ? <Alert type="warning" showIcon title={INCOMPLETE_DAY_TEXT} /> : null}
     <Detail label="时间" value={dayText(record)} />
@@ -57,6 +58,7 @@ function RecordDetails({ record }: { record: ConfirmedHistoryRecord }) {
     <Detail label="汇率" value={settledRateText(record)} />
     <Detail label="固定于" value={formatZonedDateTime(record.confirmedAt, timezone)} />
     {start != null && start > record.window.startMs ? <Detail label="开始统计" value={formatZonedDateTime(start, timezone)} /> : null}
+    {record.accountedToMs != null ? <Detail label="统计到" value={`${formatZonedDateTime(record.accountedToMs, timezone)}（解除绑定）`} /> : null}
     {revisionText(record) ? <Detail label="改过" value={revisionText(record)} /> : null}
   </div>;
 }
@@ -168,6 +170,9 @@ export function ReconHistory({ history, compact, rules, upstreams, businessTimez
         : error ? null
           : <EmptyState title={records ? "这几天没有每日记录。" : ruleId ? "选好日期后点「查询」" : "请选择绑定"} />}
     {records ? <p className="jy-caption">{records.records.length} 条每日记录 · 按美元显示。只列每天的记录，以前的数据还在。</p> : null}
+    {records && rule?.archivedAt && rule.provider === "sub2api"
+      ? <p className="jy-caption">{SUB2API_UNBIND_DAY(formatZonedDate(rule.archivedAtMs ?? Date.parse(rule.archivedAt), rule.timezone))}</p>
+      : null}
     {records && fixedUpstream && usageRecords
       ? <p className="jy-caption">这个上游现在计入固定成本；没标「{FIXED_COST_TEXT}」的日子是当时按用量算的上游成本，不改。</p>
       : null}

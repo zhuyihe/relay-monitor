@@ -4636,6 +4636,42 @@ test("合并重复的上游：点「取消」只关框，不重读清单；「�
   await mergeDrawer(page).getByText("没有要合的上游了。", { exact: true }).waitFor();
 });
 
+test("这天重算的数比原来少了一半多（需处理）：点「重新读取」先弹确认框写出原来和重算的数，取消不发请求，确认才带确认读取（C3）", async (t) => {
+  const shrunk = { side: "revenue", before: { revenueUsd: 45.17, costUsd: 15.12 }, after: { revenueUsd: 12.4, costUsd: 15.1 } };
+  const rows = dailyRows(); rows[0].health = { code: "READY", issues: [{ code: "RESETTLE_SHRUNK", scope: "history", detail: "", shrunk }] };
+  const fixed = dailyRows(); fixed[0] = rule("rule-1", "Rule A", 4);
+  const { page, queries } = await openDailyPage(t, { data: dailyResponse(rows), query(route) { return fulfill(route, dailyResponse([fixed[0]])); } });
+  const row = page.locator("tr.ant-table-row", { hasText: "Rule A" });
+  await row.getByText("这天重算的数比原来少了一半多", { exact: true }).waitFor();
+  const dialog = page.getByRole("dialog", { name: "按重算的数固定 10月8日？", exact: true });
+  // 取消：不发请求
+  await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await dialog.waitFor();
+  await dialog.getByText("收入：原来 $45.17，重算 $12.40", { exact: true }).waitFor();
+  await dialog.getByText("上游成本：原来 $15.12，重算 $15.10", { exact: true }).waitFor();
+  await dialog.getByText("会再读一次记录，按读到的数固定；原来的数不再留着。", { exact: true }).waitFor();
+  await dialog.getByRole("button", { name: "取消", exact: true }).click(); await dialog.waitFor({ state: "hidden" });
+  assert.equal(queries.length, 0, "取消不读取");
+  // 确认：带确认读取
+  await page.getByRole("button", { name: "重新读取 Rule A", exact: true }).click(); await dialog.waitFor();
+  const read = page.waitForResponse((response) => response.url().endsWith("/api/reconciliation/query"));
+  await dialog.getByRole("button", { name: "重新读取", exact: true }).click(); await read;
+  assert.equal(queries.length, 1); assert.equal(queries[0].confirmShrink, true); assert.equal(queries[0].observe, true); assert.deepEqual(queries[0].confirmedAfter, { revenueUsd: 12.4, costUsd: 15.1 }, "带上框里写的重算数");
+  // 别的日子（没有这个问题）点「重新读取」不弹框、不带确认
+  await page.getByRole("button", { name: "重新读取 Rule B", exact: true }).click();
+  await page.waitForResponse((response) => response.url().endsWith("/api/reconciliation/query"));
+  assert.equal(queries[1].confirmShrink, undefined); assert.equal(await page.getByRole("dialog").count(), 0);
+});
+
+test("整天在开始统计之前的日子（C②）：状态格写灰字「还没开始统计」和从哪天开始，三个数写「—」，不算进汇总，旁边不提它", async (t) => {
+  const rows = dailyRows(); rows[0].scope = { ...rows[0].scope, notEffective: true }; rows[0].rule.billingEffectiveFrom = 1791475200000; // 10月9日 0:00
+  const { page } = await openDailyPage(t, { data: dailyResponse(rows) });
+  const row = page.locator("tr.ant-table-row", { hasText: "Rule A" });
+  await row.getByText("还没开始统计", { exact: true }).waitFor(); await row.getByText("从 10月9日 开始统计", { exact: true }).waitFor();
+  assert.equal(await row.locator(".reconciliation-status-tags").count(), 0, "不是状态标签");
+  assert.equal(await row.locator(".reconciliation-table-amount").filter({ hasText: EMPTY }).count() >= 3, true, "收入、上游成本、毛利写「—」");
+  const summary = page.getByRole("region", { name: "汇总", exact: true });
+  await summaryMetric(summary, "毛利").getByText("$3.00", { exact: true }).waitFor(); // 只加另外两条（各 1.5）
+  assert.equal(await summary.getByText(/还在读取|需处理/).count(), 0);
 test("改时间以后有几天太早没自动重算：成功提示写出是哪几天、为什么，不自动消失，点关闭才收起（C2b）", async (t) => {
   const segment = { id: "past-transition", group: "default", ratio: 1, timingSource: "detected", effectiveFrom: window.startMs, effectiveTo: null };
   const { page } = await openDailyPage(t, {

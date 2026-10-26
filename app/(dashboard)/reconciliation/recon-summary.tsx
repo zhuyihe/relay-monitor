@@ -12,7 +12,7 @@ import { StatusTag } from "../../components/status";
 import type { KnownChannelCoverage, ReconciliationCurrency, ReconciliationDisplayTotals, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream } from "../../../lib/client";
 import { EMPTY, RATE_UNSET_USD, formatAsOf, formatDayZone, formatPct, formatRate, refreshFailedText } from "../../../lib/format";
 import { reconciliationChannelStatus, reconciliationCoverageText, reconciliationIssue } from "../../../lib/reconciliation-contract";
-import { reconciliationChannelName, reconciliationChannelTag, reconciliationNotCountedText } from "../../../lib/reconciliation-view";
+import { reconciliationChannelName, reconciliationChannelTag, reconciliationHeldText, reconciliationNotCountedText, reconciliationNotStartedText } from "../../../lib/reconciliation-view";
 import { NAV_LABELS } from "../../../lib/brand";
 import { SummaryMetric } from "./recon-parts";
 import { RECON_BUTTONS, amountText, formatWindow, isLivePreset } from "./recon-format";
@@ -113,6 +113,8 @@ export function ReconSummary({ summary, results, coverage, currency, grouped = f
   // 汇总那组的窗口（带时区和预设），用来判断这段时间是不是只有一天
   const range = results[0]?.requestedWindow || results[0]?.window;
   const attentionNote = summary ? reconciliationNotCountedText(summary.totals, range) : "";
+  // 选的这段时间所有绑定都还没开始统计（C②）：汇总写一句，不写三个「—」
+  const notStartedNote = reconciliationNotStartedText(results, range);
   const note = <>
     {coverageText ? `${coverageText}。` : ""}
     {currency === "CNY" ? "按各自设置的汇率换算成人民币（已固定的日子按固定时记下的汇率）。" : `${RATE_UNSET_USD}。`}
@@ -128,7 +130,9 @@ export function ReconSummary({ summary, results, coverage, currency, grouped = f
     /> : null}
     {summary ? <>
       <WindowMetrics totals={summary.totals} />
+      {notStartedNote ? <p className="jy-caption">{notStartedNote}</p> : null}
       {attentionNote ? <p className="jy-caption">{attentionNote}</p> : null}
+      {summary && reconciliationHeldText(summary.totals, range) ? <p className="jy-caption">{reconciliationHeldText(summary.totals, range)}</p> : null}
       {unaccounted ? <UnaccountedUpstreamBlock data={unaccounted} rereading={usageRereading} /> : null}
     </> : <p className="reconciliation-summary__empty">{EMPTY}{grouped ? <span className="jy-caption">这几条绑定没法放在一起汇总，分开写在下面</span> : null}</p>}
   </Panel>;
@@ -146,12 +150,14 @@ export function ReconWindowGroups({ groups, results, businessTimezone, stale }: 
     const coverageText = reconciliationCoverageText(group.coverage);
     // 「其中 N 条绑定…」说的是这组的绑定，单独一行，紧跟在三个数下面，不接在渠道那句后面
     const attentionNote = reconciliationNotCountedText(group.totals, { ...group.window, timezone });
+    const heldNote = reconciliationHeldText(group.totals, { ...group.window, timezone });
     return {
       key: group.groupKey,
       label: <span>{formatWindow({ ...group.window, timezone })}{zone ? ` · ${zone}` : ""}{stale ? " · 数据可能不是最新" : ""}</span>,
       children: <div className="reconciliation-window-group">
         <WindowMetrics totals={group.totals} />
         {attentionNote ? <p className="jy-caption">{attentionNote}</p> : null}
+        {heldNote ? <p className="jy-caption">{heldNote}</p> : null}
         {coverageText ? <p className="jy-caption">{coverageText}。</p> : null}
       </div>,
     };

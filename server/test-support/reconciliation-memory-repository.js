@@ -9,14 +9,14 @@
 // - 单表 UPDATE 的 SET 从左到右求值，后面的表达式读到的是前面刚赋的新值。
 // - 读取结果是新对象，JSON 列像 mysql2 一样解析成新对象，调用方改了也不影响存储。
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../../lib/reconciliation-snapshot.js";
-import { applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
+import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
 import { billDayOf } from "../../lib/business-time.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, resettleRequestPlan } from "../../lib/reconciliation-settlement.js";
 import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
-  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, segmentFromRow,
+  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, segmentFromRow,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
   SETTLEMENT_STATE_WRITE_COLUMNS, settlementStateFromRow, settlementStateValues,
 } from "../reconciliation-repository.js";
@@ -156,6 +156,14 @@ export class MemoryReconciliationRepository {
       .map((row) => ruleFromRow(fresh(row), this.#channelsOf(null, row.id)));
   }
 
+  async listRecentlyArchivedRules(sinceMs) {
+    await this.#read("listRecentlyArchivedRules", [sinceMs]);
+    return this.#plain("rules")
+      .filter((row) => row.archived_at != null && Number(row.archived_at_ms) >= sinceMs && row.canonical_key != null)
+      .sort((a, b) => Number(b.archived_at_ms) - Number(a.archived_at_ms))
+      .map((row) => ruleFromRow(fresh(row), this.#channelsOf(null, row.id)));
+  }
+
   async getRule(id, { includeArchived = false } = {}) {
     await this.#read("getRule", [id, { includeArchived }]);
     const row = this.#plain("rules").find((item) => sameText(item.id, id) && (includeArchived || item.archived_at == null));
@@ -189,10 +197,14 @@ export class MemoryReconciliationRepository {
       if (isScopedBillingPolicy(input.billingPolicy)) input = applyScopePolicy(null, input);
       if (guard) guard(null, [], input);
       const createdAt = this.#timestamp();
+      // 同一天里更早解除的占着同一个渠道（或同一把 Key）的 New API 绑定：新绑定从那一刻起算（C3，同 MySQL 版）
+      const archivedPeers = this.#plain("rules").filter((row) => row.archived_at != null).map((row) => ruleFromRow(fresh(row), this.#channelsOf(tx, row.id)));
+      const accountingFloor = isScopedBillingPolicy(input.billingPolicy)
+        ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels }, archivedPeers) : null;
       this.#insert(tx, "rules", {
-        id, upstream_station_id: input.upstreamStationId ?? null, own_station_id: input.ownStationId ?? null, token_id: bigint(input.tokenId),
+        id, accounting_floor_ms: accountingFloor, upstream_station_id: input.upstreamStationId ?? null, own_station_id: input.ownStationId ?? null, token_id: bigint(input.tokenId),
         token_name: input.tokenName ?? null, fixed_group: input.fixedGroup ?? null, timezone: input.timezone ?? null,
-        enabled: input.enabled === false ? 0 : 1, active_token_key: tokenKey ?? null, archived_at: null,
+        enabled: input.enabled === false ? 0 : 1, active_token_key: tokenKey ?? null, archived_at: null, archived_at_ms: null,
         billing_policy: input.billingPolicy || "legacy-v3", scope_version: bigint(input.scopeVersion || 1),
         billing_effective_from_ms: bigint(input.billingEffectiveFrom), cost_coverage: input.costCoverage || "unknown",
         provider: input.provider || null, canonical_key: input.canonicalKey || null,
@@ -432,11 +444,11 @@ export class MemoryReconciliationRepository {
     });
   }
 
-  async archiveRule(id) {
+  async archiveRule(id, { now = this.now() } = {}) {
     return this.#transaction("archiveRule", async (tx) => {
       await this.#lock(tx, `rule:${id}`);
       const entry = this.#ruleEntry(tx, id);
-      const affected = entry ? this.#update(tx, "rules", [entry], { enabled: 0, active_token_key: null, archived_at: this.#timestamp() }) : 0;
+      const affected = entry ? this.#update(tx, "rules", [entry], { enabled: 0, active_token_key: null, archived_at: this.#timestamp(), archived_at_ms: bigint(now) }) : 0;
       if (affected) {
         this.#update(tx, "channels", this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, id)), { active_channel_key: null });
         tx.record.archivedRuleIds.push(id);
@@ -449,7 +461,7 @@ export class MemoryReconciliationRepository {
     return this.#saveSnapshot(snapshot, null);
   }
 
-  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null, settlement = null } = {}) {
+  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null, settlement = null, archived = false } = {}) {
     let booked = null;
     return this.#transaction("saveSnapshotsForScope", async (tx) => {
       // 和 MySQL 仓库一样只锁同一把 Key 的绑定（按 id 排好依次锁），锁内再比。内存仓库没有真的并发，这里的锁只保证调用顺序和 MySQL 一致，测不出锁漏了
@@ -460,9 +472,10 @@ export class MemoryReconciliationRepository {
         if (reconciliationOwnerRuleState(group().map((row) => ruleFromRow(row))) !== expectedOwnerState.state) return this.#abort(tx, false);
       }
       await this.#lock(tx, `rule:${ruleId}`);
-      const entry = this.#ruleEntry(tx, ruleId);
+      const entry = this.#ruleEntry(tx, ruleId, { archived });
       if (!entry) return false;
       const rule = ruleFromRow(entry.row, this.#channelsOf(tx, ruleId));
+      if (rule.archivedAt && !(archived && archivedLedgerAllowed(rule, ledger))) return this.#abort(tx, false);
       if (reconciliationScopeFingerprint(rule, this.#segmentsOf(tx, ruleId).map(({ row }) => segmentFromRow(row))) !== expectedScopeFingerprint) return false;
       if (guard && !guard()) return this.#abort(tx, false);
       for (const snapshot of snapshots) {
@@ -575,12 +588,12 @@ export class MemoryReconciliationRepository {
 
   // ---- 结账状态（计划 C2a），和 MySQL 仓库同一套语义 ----
 
-  async listSettlementStates(ruleIds) {
-    if (!ruleIds?.length) return [];
+  async listSettlementStates(ruleIds, { billDates = null } = {}) {
+    if (!ruleIds?.length || (billDates && !billDates.length)) return [];
     this.log.settlementReads = (this.log.settlementReads || 0) + 1;
     await this.#read("listSettlementStates", [ruleIds]);
     const wanted = new Set(ruleIds.map(String));
-    return this.#rows("settlementState").map(({ row }) => row).filter((row) => wanted.has(String(row.rule_id))).map((row) => settlementStateFromRow(fresh(row)));
+    return this.#rows("settlementState").map(({ row }) => row).filter((row) => wanted.has(String(row.rule_id)) && (!billDates || billDates.includes(row.bill_date))).map((row) => settlementStateFromRow(fresh(row)));
   }
 
   // MySQL 那边必须带 rule_id IN 走主键前缀；这里记下收到的条件，契约测试钉住
@@ -744,8 +757,8 @@ export class MemoryReconciliationRepository {
     return this.tables[table].slice();
   }
 
-  #ruleEntry(tx, id) {
-    return this.#rows("rules", tx).find(({ row }) => sameText(row.id, id) && row.archived_at == null) || null;
+  #ruleEntry(tx, id, { archived = false } = {}) {
+    return this.#rows("rules", tx).find(({ row }) => sameText(row.id, id) && (archived || row.archived_at == null)) || null;
   }
 
   #snapshotEntry(tx, ruleId, snapshotKey) {

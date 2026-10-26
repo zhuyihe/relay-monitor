@@ -93,8 +93,8 @@ class Fixture {
     return rules.filter((rule) => this.ruleIds.has(rule.id));
   }
 
-  async fingerprint(ruleId) {
-    const rule = await this.repository.getRule(ruleId);
+  async fingerprint(ruleId, { includeArchived = false } = {}) {
+    const rule = await this.repository.getRule(ruleId, { includeArchived });
     return reconciliationScopeFingerprint(rule, await this.repository.listSegments(ruleId));
   }
 
@@ -196,7 +196,7 @@ contract("createRule stores the rule, name-ordered channels and one operator-con
     tokenName: `Contract ${fixture.tag}`, fixedGroup: "default", timezone: "UTC", enabled: true,
     billingPolicy: "legacy-v3", scopeVersion: 1, billingEffectiveFrom: null, costCoverage: "unknown", provider: null, canonicalKey: null,
     sourceBinding: null, ownSource: null, coverageDeclaration: { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] },
-    archivedAt: null, createdAt: null, updatedAt: null,
+    archivedAt: null, archivedAtMs: null, accountingFloorMs: null, createdAt: null, updatedAt: null,
     channels: [
       { channelId: fixture.channel(1), name: "alpha", state: null, stateObservedAt: null, stateChangedAt: null },
       { channelId: fixture.channel(3), name: "Alpha", state: null, stateObservedAt: null, stateChangedAt: null },
@@ -1379,6 +1379,71 @@ contract("pruneSettlementStates also drops a request made before the given time 
   // 不带第三个参数：有请求的一律不删（和以前一样）
   await repository.requestResettle(rule.id, ["2025-11-04"], { now: 1 });
   assert.equal(await repository.pruneSettlementStates("2025-12-01", 500), 0);
+});
+
+contract("createRule: a new binding that takes the same channel (or Key) on the day an earlier New API binding was archived starts at that moment, not at 0:00; Sub2API, other channels and other days are not affected", async ({ repository, fixture }) => {
+  const old = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:floor`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(1), name: "A" }] });
+  const other = await fixture.createRule({ tokenId: fixture.token(8), canonicalKey: `up:${fixture.tag}:floor-other`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(8), name: "Z" }] });
+  const sub2 = await fixture.createRule({ tokenId: fixture.token(9), canonicalKey: `up:${fixture.tag}:floor-sub2`, billingPolicy: "immediate", timezone: "UTC", provider: "sub2api", channels: [{ channelId: fixture.channel(9), name: "S" }] });
+  const at = Date.now() - 60000; // 解除在一分钟前：新绑定（现在建）和它在同一天，除非正好跨过 0 点
+  for (const rule of [old, other, sub2]) assert.equal(await repository.archiveRule(rule.id, { now: at }), true);
+  const dayStart = Math.floor(Date.now() / 86400000) * 86400000;
+  if (at < dayStart) return; // 刚好跨过 UTC 0 点，这一轮不测
+  const sameChannel = await fixture.createRule({ tokenId: fixture.token(2), billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(1), name: "A" }] });
+  assert.equal(sameChannel.accountingFloorMs, at, "同一个渠道：从解除那一刻起算");
+  const sameKey = await fixture.createRule({ tokenId: fixture.token(3), canonicalKey: `up:${fixture.tag}:floor`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(3), name: "C" }] });
+  assert.equal(sameKey.accountingFloorMs, at, "同一把 Key");
+  const unrelated = await fixture.createRule({ tokenId: fixture.token(4), billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(4), name: "D" }] });
+  assert.equal(unrelated.accountingFloorMs, null, "别的渠道、别的 Key 不受影响");
+  const afterSub2 = await fixture.createRule({ tokenId: fixture.token(5), billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(9), name: "S" }] });
+  assert.equal(afterSub2.accountingFloorMs, null, "旧的是 Sub2API：解除当天整天不算，新绑定照 0 点");
+});
+
+contract("listSettlementStates with billDates only returns those days", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const now = Date.UTC(2026, 0, 12, 3);
+  await repository.requestResettle(rule.id, ["2025-10-01", "2025-10-02", "2025-10-03"], { now, manualReason: "RESETTLE_TOO_OLD" });
+  assert.deepEqual((await repository.listSettlementStates([rule.id], { billDates: ["2025-10-02"] })).map((row) => row.billDate), ["2025-10-02"]);
+  assert.deepEqual(await repository.listSettlementStates([rule.id], { billDates: [] }), []);
+  assert.equal((await repository.listSettlementStates([rule.id])).length, 3, "不给日期读全部");
+});
+
+contract("archiveRule writes the archive time in milliseconds; listRecentlyArchivedRules returns only anchored rules archived since the given time", async ({ repository, fixture }) => {
+  const anchored = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:anchored` });
+  const plain = await fixture.createRule({ tokenId: fixture.token(7), channels: [{ channelId: fixture.channel(7), name: "other" }] });
+  const at = Date.UTC(2026, 0, 12, 6, 30);
+  assert.equal(await repository.archiveRule(anchored.id, { now: at }), true);
+  assert.equal(await repository.archiveRule(plain.id, { now: at }), true);
+  assert.equal((await repository.getRule(anchored.id, { includeArchived: true })).archivedAtMs, at);
+  assert.equal(await repository.getRule(anchored.id), null);
+  const recent = (await repository.listRecentlyArchivedRules(at - 1)).filter((rule) => [anchored.id, plain.id].includes(rule.id));
+  assert.deepEqual(recent.map((rule) => [rule.id, rule.archivedAtMs]), [[anchored.id, at]], "没锚定过的（没有 canonicalKey）不回看");
+  assert.equal(recent[0].channels.length, 1, "带着渠道");
+  assert.deepEqual((await repository.listRecentlyArchivedRules(at + 1)).filter((rule) => rule.id === anchored.id), [], "解除得更早的不返回");
+});
+
+contract("saveSnapshotsForScope on an archived rule: only with archived: true, only a ledger entry whose day starts before the archive time", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:anchored2` });
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const at = Date.UTC(2026, 0, 12, 6, 30);
+  const day = (n) => ({ preset: "custom", startMs: Date.UTC(2026, 0, n), endMs: Date.UTC(2026, 0, n + 1), timezone: "UTC" });
+  const entryFor = (n) => {
+    const snapshot = billingSnapshot({ rule, segment, fingerprint, window: day(n), generatedAt: `2026-01-${String(n + 1).padStart(2, "0")}T00:20:00.000Z`, profitUsd: 2 });
+    return { snapshot, ledger: settlement(snapshot) };
+  };
+  assert.equal(await repository.archiveRule(rule.id, { now: at }), true);
+  const archivedFingerprint = await fixture.fingerprint(rule.id, { includeArchived: true });
+  const before = entryFor(11), onArchiveDay = entryFor(12), after = entryFor(13);
+  // 不说 archived: true：照旧写不进去
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, archivedFingerprint, [], { ledger: before.ledger, archived: false }), false);
+  // 解除前的日子、解除当天（开始早于解除时刻）：写得进账本
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, archivedFingerprint, [], { ledger: before.ledger, archived: true }), true);
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, archivedFingerprint, [], { ledger: onArchiveDay.ledger, archived: true }), true);
+  // 解除以后才开始的日子、不带账本的：不写
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, archivedFingerprint, [], { ledger: after.ledger, archived: true }), false);
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, archivedFingerprint, [before.snapshot], { archived: true }), false, "只许记账本");
+  assert.deepEqual((await repository.listLedgerDays([rule.id], "2026-01-01")).map((row) => row.billDate).sort(), ["2026-01-11", "2026-01-12"]);
 });
 
 contract("pruneSettlementStates never drops RESETTLE_TOO_OLD or RESETTLE_SHRUNK rows (waiting for a person), however old; they go once handled", async ({ repository, fixture }) => {

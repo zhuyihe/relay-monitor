@@ -3608,6 +3608,27 @@ test("两个旧资源同账号新金融创建不能绕过proof或产生第二份
   assert.equal(state.created, 0);
 });
 
+test("C3 用户 10-26：当天中途绑上，从那天 0 点整天算（上午的用量算进来），和 0 点就绑上的结果一样", async (t) => {
+  const dayStart = Date.parse("2026-10-09T16:00:00Z"); // 上海 10-10 0:00
+  const now = dayStart + 8 * 3600000; // 当天 8:00 起算的 8 小时后，16:00
+  t.mock.method(Date, "now", () => now);
+  const run = async (effective) => {
+    const { rule, module, state, rt } = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }] });
+    Object.assign(rule, { billing_policy: "immediate", scope_version: 1, billing_effective_from_ms: effective, created_at: new Date(effective), cost_coverage: "complete", source_binding: { 1: "r1" } });
+    rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+    const result = (await module.queryRules({ ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: dayStart, endMs: now }, { force: true })).results[0];
+    return { result, calls: state.statCalls.map((call) => [call.side, call.start]) };
+  };
+  const midnight = await run(dayStart);
+  const afternoon = await run(dayStart + 6 * 3600000 + 30 * 60000); // 14:30 才绑上
+  assert.deepEqual(afternoon.calls, midnight.calls, "两边都从当天 0 点取（不从 14:30）");
+  assert.ok(afternoon.calls.length > 0 && afternoon.calls.every(([, start]) => start === dayStart / 1000));
+  assert.deepEqual([afternoon.result.upstream.amountUsd, afternoon.result.downstream.amountUsd, afternoon.result.calculation.profitUsd],
+    [midnight.result.upstream.amountUsd, midnight.result.downstream.amountUsd, midnight.result.calculation.profitUsd], "上午的用量也算进来");
+  assert.equal(afternoon.result.scope.accountedFromMs, null, "整天都在统计里，不再有「从 14:30 起」");
+  assert.deepEqual(afternoon.result.segments[0].window, { ...afternoon.result.window, startMs: dayStart });
+});
+
 test("新范围从生效时刻起核算：生效前窗口不取数，跨界窗口只算生效后，未结束窗口给实时利润，只有完整日确认", async (t) => {
   const now = Date.parse("2026-10-11T01:00:00Z");
   t.mock.method(Date, "now", () => now);
@@ -5337,7 +5358,7 @@ test("U05真实NewAPI默认完整昨日：3/10全局known覆盖、局部重试�
   assert.deepEqual([full.coverage.knownChannelCount, full.coverage.accountedChannelCount, full.coverage.state, full.coverage.wholeSiteState], [10, 3, "partial", "unverified"]);
   assert.equal(full.windowGroups.length, 1);
   // 一个汇率都没设置：按系统原值（USD）显示，也不提示缺汇率。
-  assert.deepEqual(full.commonSummary.totals, { knownIncomeUsd: 7.5, knownCostUsd: 3, confirmedProfitUsd: 4.5, confirmedMarginRate: 0.6, profitComplete: false, attentionRuleIds: [], readingRuleIds: [],
+  assert.deepEqual(full.commonSummary.totals, { knownIncomeUsd: 7.5, knownCostUsd: 3, confirmedProfitUsd: 4.5, confirmedMarginRate: 0.6, profitComplete: false, attentionRuleIds: [], heldRuleIds: [], notStartedRuleIds: [], readingRuleIds: [],
     display: { currency: "USD", knownIncome: 7.5, knownCost: 3, confirmedProfit: 4.5, confirmedMarginRate: 0.6 } });
   assert.deepEqual([full.displayCurrency, full.unconfiguredRateStations], ["USD", []]);
   assert.equal(full.unaccountedUpstream, undefined, "没要求账号级对比时不附带");
@@ -5730,7 +5751,11 @@ test("U05真实Provider+module DST23/25小时、生效前窗口保留完整请�
   assert.equal(f.state.statCalls.length, callsBefore, "生效前窗口不向任何一侧取数");
   // 已知成本同样确定为 0：汇总里不能出现“毛利 0、成本未知”的矛盾，也不能写成确认账单。
   assert.ok(before.results.every((row) => row.scope.notEffective === true && row.upstream.knownAmountUsd === 0 && row.upstream.countedAmountUsd === 0 && row.downstream.knownAmountUsd === 0));
-  assert.equal(before.windowGroups.length, 1); assert.equal(before.windowGroups[0].totals.knownCostUsd, 0); assert.deepEqual(before.windowGroups[0].totals.attentionRuleIds, []);
+  // 整天在开始统计之前的日子（C②）：这条绑定这天不算状态，不加进汇总（收入、上游成本、毛利都不加），不算需处理，也不算还在读取
+  assert.ok(before.results.every((row) => row.displayStatus.state === "not_started" && row.displayStatus.label === "还没开始统计"));
+  assert.equal(before.windowGroups.length, 1); assert.equal(before.windowGroups[0].totals.knownCostUsd, null);
+  assert.deepEqual([before.windowGroups[0].totals.attentionRuleIds, before.windowGroups[0].totals.readingRuleIds], [[], []]);
+  assert.equal(before.windowGroups[0].totals.notStartedRuleIds.length, before.results.length);
   assert.equal([...f.state.snapshots.values()].some((snapshot) => JSON.parse(snapshot.source).recordType === "confirmed" && JSON.parse(snapshot.source).window?.endMs === Date.parse("2026-10-08T16:00:00Z")), false);
   const notEffective = before.coverage.channels.find((channel) => channel.channelId === 1);
   assert.equal(notEffective.status, "not_effective"); assert.deepEqual(notEffective.issues, ["BILLING_SCOPE_NOT_EFFECTIVE"]);
@@ -6456,6 +6481,14 @@ test("C2b 重结请求不受 7 天回看限制（改的时间可能在很久以�
   assert.equal(touched("2026-09-21"), false, "请求满 7 天放弃");
   assert.equal(f.state.ledger.some((row) => row.bill_date === "2026-09-21"), false);
   assert.deepEqual(await requestedDays(f), ["2026-09-21"]);
+  // 页面上这天标成需处理（R6）：放弃了的请求，现在显示的还是改之前的数
+  const gaveUp = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: start("2026-09-21") * 1000, endMs: start("2026-09-22") * 1000 }, { mode: "evaluate", origin: "page" })).results[0].displayStatus;
+  assert.deepEqual([gaveUp.state, gaveUp.title, gaveUp.action.kind], ["action", "改了时间的这天没重算成", "retry_bill"]);
+  // 7 天以内的请求（还在试）不标
+  await f.repository.requestResettle("rr_live", ["2026-09-22"], { now: now - 24 * 3600000 });
+  await f.module.refreshDue(now);
+  const trying = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: start("2026-09-22") * 1000, endMs: start("2026-09-23") * 1000 }, { mode: "evaluate", origin: "page" })).results[0].displayStatus;
+  assert.notEqual(trying.state, "action");
 });
 
 test("C2b 取数期间又来了新的重结请求：这次结成的只办完它读到的那一条，新请求留着，下一轮再重结", async (t) => {
@@ -6591,9 +6624,20 @@ test("C2b 总指挥定的 3（明显少就不写）：重结读出来的收入�
   assert.deepEqual(revisions(), [[1, 2.5, 1]], "不写新版");
   const blocked = await state();
   assert.deepEqual([blocked.manualReason, blocked.resettleRequestedAt != null, blocked.nextAttemptAt], ["RESETTLE_SHRUNK", true, null], "要人处理、请求还在、不自动再试");
-  assert.equal(blocked.detail?.side, "revenue", "状态行记下少的是收入（页面按它写说明里的「收入」）");
+  assert.deepEqual(blocked.detail?.shrunk, { side: "revenue", before: { revenueUsd: 2.5, costUsd: 1 }, after: { revenueUsd: 0, costUsd: 1 } },
+    "状态行记下少的是收入，原来和重算的收入、上游成本各多少（确认框直接读，不用再去上游读）");
   const page = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", origin: "page" });
   assert.equal(page.results[0].calculation.profitUsd, 1.5, "页面仍是已固定的旧数");
+  // 页面上这天标成需处理，说明里写少的是收入，确认框要的原来 / 重算的数也在里面
+  const status = page.results[0].displayStatus;
+  assert.deepEqual([status.state, status.title, status.action.kind, status.shrunk], ["action", "这天重算的数比原来少了一半多", "retry_bill",
+    { side: "revenue", before: { revenueUsd: 2.5, costUsd: 1 }, after: { revenueUsd: 0, costUsd: 1 } }]);
+  assert.match(status.detail, /^重算出来的收入不到原来的一半/);
+  // 账本里还是原来固定的数：单日汇总照算（和多天一致），毛利照显示，只多一句提示
+  const heldPage = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "evaluate", origin: "page" });
+  assert.deepEqual([heldPage.commonSummary.totals.confirmedProfitUsd, heldPage.commonSummary.totals.attentionRuleIds, heldPage.commonSummary.totals.heldRuleIds], [1.5, [], ["rr_live"]]);
+  const week = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: COMPLETED_YESTERDAY.startMs, endMs: COMPLETED_YESTERDAY.endMs + 1 }, { mode: "evaluate", origin: "page" });
+  void week;
   // 之后的轮询不再自动取这天
   const calls = f.state.statCalls.length;
   now += 3 * 3600000;
@@ -6623,7 +6667,11 @@ test("C2b 设计的确认：改了时间太早没自动重算的日子（RESETTL
   await f.repository.requestResettle("rr_live", ["2026-10-07"], { now, manualReason: "RESETTLE_TOO_OLD" });
   const ledger = () => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-07").map((row) => [row.revision, Number(row.revenue_usd)]);
   const before = ledger();
-  const manual = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: Date.parse("2026-10-06T16:00:00Z"), endMs: Date.parse("2026-10-07T16:00:00Z") }, { mode: "observe", force: true, origin: "manual" });
+  const dayQuery = { ruleIds: ["rr_live"], preset: "custom", startMs: Date.parse("2026-10-06T16:00:00Z"), endMs: Date.parse("2026-10-07T16:00:00Z") };
+  // 页面上这天标成需处理：太早没自动重算，现在显示的还是改之前的数
+  const noticed = (await f.module.queryRules(dayQuery, { mode: "evaluate", origin: "page" })).results[0].displayStatus;
+  assert.deepEqual([noticed.state, noticed.title, noticed.action.kind], ["action", "改了时间的这天太早，没自动重算", "retry_bill"]);
+  const manual = () => f.module.queryRules(dayQuery, { mode: "observe", force: true, origin: "manual" });
   f.state.ownQuota = 0;
   await manual();
   assert.deepEqual(ledger(), before, "又少了一半多：没写新版");
@@ -6712,6 +6760,55 @@ test("C2b 审核二轮中-2：RESETTLE_TOO_OLD 的日子手动读取没结成不
   assert.equal(row(plain)?.manual_reason, "RESETTLE_SHRUNK");
 });
 
+test("C3 审核要总指挥定 2：SHRUNK 确认时再读到的数和确认框里写的「重算」不一样，再挡一次、记下新的数；一样才写", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) { row.enabled = row.id === "rr_live" ? 1 : 0; row.billing_effective_from_ms = Date.parse("2026-08-31T16:00:00Z"); }
+  await f.module.refreshDue(now); // 10-08 固定：收入 2.5、成本 1
+  const ledger = () => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").map((row) => Number(row.revenue_usd));
+  const state = async () => (await f.repository.listSettlementStates(["rr_live"])).find((row) => row.billDate === "2026-10-08");
+  const confirm = (after) => f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual", confirmShrink: true, confirmedAfter: after });
+  f.state.ownQuota = 0; // 重算出来收入 0
+  await f.repository.requestResettle("rr_live", ["2026-10-08"], { now });
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual" }); // 先挡下：框里会写重算 $0
+  assert.deepEqual((await state()).detail.shrunk.after, { revenueUsd: 0, costUsd: 1 });
+  // 确认框写的是 $0，再读到的是 $1.2：不一样，再挡一次，状态行换成新的数
+  f.state.ownQuota = 120;
+  await confirm({ revenueUsd: 0, costUsd: 1 });
+  assert.deepEqual(ledger(), [2.5], "没写新版");
+  const again = await state();
+  assert.equal(again.manualReason, "RESETTLE_SHRUNK");
+  assert.deepEqual(again.detail.shrunk.after, { revenueUsd: 1.2, costUsd: 1 }, "记下新的数，框里下次写它");
+  // 这次框里写的就是 $1.2，再读到的还是 $1.2：写
+  await confirm({ revenueUsd: 1.2, costUsd: 1 });
+  assert.deepEqual(ledger(), [2.5, 1.2]);
+  assert.equal(await state(), undefined);
+});
+
+test("C3 审核 C2b 低-A：确认参数误传给普通请求日或 RESETTLE_TOO_OLD 的日子，照样判「少了一半多」先挡下，只有状态行是 RESETTLE_SHRUNK 的那天才跳过", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) { row.enabled = row.id === "rr_live" ? 1 : 0; row.billing_effective_from_ms = Date.parse("2026-08-31T16:00:00Z"); }
+  await f.module.refreshDue(now); // 10-08 固定：收入 2.5、成本 1
+  const ledger = () => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").map((row) => Number(row.revenue_usd));
+  const state = async () => (await f.repository.listSettlementStates(["rr_live"])).find((row) => row.billDate === "2026-10-08");
+  const read = () => f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual", confirmShrink: true });
+  f.state.ownQuota = 0;
+  // 普通请求日（行里没有 RESETTLE_SHRUNK）
+  await f.repository.requestResettle("rr_live", ["2026-10-08"], { now });
+  await read();
+  assert.deepEqual(ledger(), [2.5], "没写新版");
+  assert.equal((await state()).manualReason, "RESETTLE_SHRUNK", "挡下，记成要人处理");
+  // RESETTLE_TOO_OLD 的日子
+  await f.repository.requestResettle("rr_live", ["2026-10-08"], { now: now + 1, manualReason: "RESETTLE_TOO_OLD" });
+  await read();
+  assert.deepEqual(ledger(), [2.5]);
+  assert.equal((await state()).manualReason, "RESETTLE_SHRUNK");
+  // 这时状态行是 RESETTLE_SHRUNK：带确认才覆盖
+  await read();
+  assert.deepEqual(ledger(), [2.5, 0], "状态行是 RESETTLE_SHRUNK、带了确认：照读到的数固定");
+});
+
 test("C2b 总指挥定的 3：旧值小于 0.5 美元的不判「明显少」（零头不误伤）；少 30% 的照常写新版", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
@@ -6735,6 +6832,138 @@ test("C2b 总指挥定的 3：旧值小于 0.5 美元的不判「明显少」（
   now += 60000;
   await f.module.refreshDue(now);
   assert.equal(revisions().length, 4, "少 30% 照常写新版");
+});
+
+test("C3 解除绑定以后补结解除前的日子：New API 解除当天账本行是整天窗口、金额只算到解除那一刻，解除以后的日子不结，也不再观测今天", async (t) => {
+  const archivedAt = Date.parse("2026-10-08T06:30:00Z"); // 上海 10-08 14:30
+  let now = archivedAt;
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  await f.module.archiveRule("rr_live");
+  assert.equal((await f.repository.getRule("rr_live", { includeArchived: true })).archivedAtMs, archivedAt, "解除时刻按毫秒存");
+  const calls = f.state.statCalls.length, todayBefore = f.repository.log.snapshotWrites.length;
+  now = Date.parse("2026-10-09T03:00:00Z"); // 上海 10-09 11:00：10-08 已过完
+  await f.module.refreshDue(now);
+  const days = () => [...new Set(f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => row.bill_date))].sort();
+  assert.deepEqual(days(), ["2026-10-07", "2026-10-08"], "解除前的整天和解除当天都固定了，解除以后的 10-09 不结");
+  // 解除当天：账本行窗口仍是整天，取数只取到解除那一刻
+  const row = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.deepEqual([Number(row.window_start_ms), Number(row.window_end_ms)], [COMPLETED_YESTERDAY.startMs, COMPLETED_YESTERDAY.endMs]);
+  const detail = typeof row.detail === "string" ? JSON.parse(row.detail) : row.detail;
+  assert.equal(detail.result.scope.accountedToMs, archivedAt, "明细记统计到解除那一刻");
+  const archiveDayCalls = f.state.statCalls.slice(calls).filter((call) => call.start === COMPLETED_YESTERDAY.startMs / 1000);
+  assert.ok(archiveDayCalls.length > 0 && archiveDayCalls.every((call) => call.end === archivedAt / 1000 - 1), JSON.stringify(archiveDayCalls));
+  const fullDayCalls = f.state.statCalls.slice(calls).filter((call) => call.start === (COMPLETED_YESTERDAY.startMs - 86400000) / 1000);
+  assert.ok(fullDayCalls.length > 0 && fullDayCalls.every((call) => call.end === COMPLETED_YESTERDAY.startMs / 1000 - 1), "解除前的整天取整天");
+  assert.equal(f.repository.log.snapshotWrites.length, todayBefore, "已解除的不写「今天」快照");
+  // 以前的每日记录里：解除当天记着统计到解除那一刻，解除前的整天没有
+  const { records } = await f.module.getConfirmedHistory("rr_live", { startMs: COMPLETED_YESTERDAY.startMs - 2 * 86400000, endMs: COMPLETED_YESTERDAY.endMs });
+  assert.deepEqual(records.map((record) => [record.billDate, record.accountedToMs]).sort(), [["2026-10-07", null], ["2026-10-08", archivedAt]]);
+  assert.ok(records.every((record) => record.accountingStartMs === Date.parse("2026-10-06T16:00:00Z")), "开始统计是开始那天的 0 点");
+  // 再过一轮：账本里已有、没有新的事
+  const written = f.state.ledgerWrites.length;
+  now += 600000;
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledgerWrites.length, written);
+  assert.deepEqual(await f.repository.listSettlementStates(["rr_live"]), []);
+});
+
+test("C3 审核中-1：已解除的绑定补结时，同一段时间里别的绑定也占着同一个渠道就挡住（不重复算收入）；隔天才绑上的不挡", async (t) => {
+  const archivedAt = Date.parse("2026-10-08T06:30:00Z"); // 上海 10-08 14:30 解除
+  let now = archivedAt;
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1], rr_two: [1], rr_three: [3] }, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  const effective = (id, at) => { f.rows.find((row) => row.id === id).billing_effective_from_ms = Date.parse(at); };
+  effective("rr_live", "2026-10-06T16:00:00Z"); effective("rr_two", "2026-10-06T16:00:00Z"); // 10-07 起两条同时占着渠道 1
+  await f.module.archiveRule("rr_live");
+  now = Date.parse("2026-10-09T03:00:00Z");
+  await f.module.refreshDue(now);
+  const days = (id) => [...new Set(f.state.ledger.filter((row) => row.rule_id === id).map((row) => row.bill_date))].sort();
+  assert.deepEqual(days("rr_live"), [], "同一时段还有别的绑定占着渠道 1：已解除的这条不补结，收入不算两遍");
+  const state = (await f.repository.listSettlementStates(["rr_live"])).find((row) => row.billDate === "2026-10-07");
+  assert.equal(state?.manualReason, "DUPLICATE_CHANNEL_ASSIGNMENT", "记成要人处理");
+});
+
+test("C3 用户 10-26 + 审核对拍 S4a：当天解除又绑回同一渠道，新绑定从解除那一刻起算，旧绑定那天照结，两条加起来正好一整天（不重叠、不挡）", async (t) => {
+  const archivedAt = Date.parse("2026-10-08T06:30:00Z"); // 上海 10-08 14:30 解除
+  let now = archivedAt;
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1], rr_two: [1], rr_three: [3] }, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  const row = (id) => f.rows.find((item) => item.id === id);
+  row("rr_live").billing_effective_from_ms = Date.parse("2026-10-06T16:00:00Z");
+  row("rr_two").billing_effective_from_ms = archivedAt + 1800000; // 15:00 绑上
+  row("rr_two").accounting_floor_ms = archivedAt;                // 建的时候仓库算出的下限（同一天更早解除了占着渠道 1 的 New API 绑定）
+  await f.module.archiveRule("rr_live");
+  now = Date.parse("2026-10-09T03:00:00Z");
+  await f.module.refreshDue(now);
+  const ledgerOf = (id, day) => f.state.ledger.find((item) => item.rule_id === id && item.bill_date === day);
+  assert.ok(ledgerOf("rr_live", "2026-10-08"), "旧绑定那天照结（算到 14:30）");
+  assert.ok(ledgerOf("rr_two", "2026-10-08"), "新绑定那天也结");
+  const detail = (item) => (typeof item.detail === "string" ? JSON.parse(item.detail) : item.detail).result.scope;
+  assert.equal(detail(ledgerOf("rr_live", "2026-10-08")).accountedToMs, archivedAt);
+  assert.equal(detail(ledgerOf("rr_two", "2026-10-08")).accountedFromMs, archivedAt, "新绑定从旧的解除那一刻起算");
+  const stat = f.state.statCalls.filter((call) => call.start === COMPLETED_YESTERDAY.startMs / 1000 || call.start === archivedAt / 1000);
+  assert.ok(stat.some((call) => call.end === archivedAt / 1000 - 1) && stat.some((call) => call.start === archivedAt / 1000), "两段取数首尾相接，不重叠");
+  assert.equal((await f.repository.listSettlementStates(["rr_live"])).length, 0, "没有被挡");
+});
+
+test("C3 审核中-1：别的绑定是解除以后才占上这个渠道的（隔天绑上），已解除的照常补结", async (t) => {
+  const archivedAt = Date.parse("2026-10-08T06:30:00Z");
+  let now = archivedAt;
+  const f = await completedDayFixture(t, { clock: () => now, channelsByRule: { rr_live: [1], rr_two: [1], rr_three: [3] }, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_three" ? 0 : 1;
+  f.rows.find((row) => row.id === "rr_live").billing_effective_from_ms = Date.parse("2026-10-06T16:00:00Z");
+  f.rows.find((row) => row.id === "rr_two").billing_effective_from_ms = Date.parse("2026-10-08T16:00:00Z"); // 10-09 0:00 才开始，在解除以后
+  await f.module.archiveRule("rr_live");
+  now = Date.parse("2026-10-09T03:00:00Z");
+  await f.module.refreshDue(now);
+  assert.deepEqual([...new Set(f.state.ledger.filter((row) => row.rule_id === "rr_live").map((row) => row.bill_date))].sort(), ["2026-10-07", "2026-10-08"]);
+});
+
+test("C3 Sub2API 上游解除当天不结（只能按整天读），解除前的整天照结", async (t) => {
+  let now = Date.parse("2026-10-10T06:30:00Z"); // 上海 10-10 14:30 解除
+  t.mock.method(Date, "now", () => now);
+  const f = sub2ReconciliationFixture(t, { baseUrl: "https://sub2-archive.test", costs: { "2026-10-08": 2, "2026-10-09": 2, "2026-10-10": 2 }, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  Object.assign(f.rule, { billing_effective_from_ms: Date.parse("2026-10-07T16:00:00Z"), provider: "sub2api" });
+  f.rule.canonical_key = canonicalBillingKey(f.stations[0], { platform: "sub2api", accountId: 7 }, f.rule.token_id);
+  await f.module.queryRules(f.today, { force: true }); // 解除前页面刷新过一次：核验过账单能力（落库），以后补结不用再核验
+  await f.module.archiveRule(f.rule.id);
+  now = Date.parse("2026-10-11T01:00:00Z"); // 上海 10-11 09:00
+  const statsBefore = f.sub2.stats.length;
+  await f.module.refreshDue(now);
+  assert.deepEqual([...new Set(f.state.ledger.map((row) => row.bill_date))].sort(), ["2026-10-08", "2026-10-09"], "解除当天 10-10 不结");
+  const asked = f.sub2.stats.slice(statsBefore).filter((stat) => stat.api_key_id === "9").map((stat) => stat.start_date);
+  assert.ok(!asked.includes("2026-10-10"), "解除当天连账单都不取");
+});
+
+test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {
+  let now = Date.parse("2026-10-01T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  await f.module.archiveRule("rr_live"); // 10-01 解除
+  now = Date.parse("2026-10-12T03:00:00Z"); // 11 天以后
+  const calls = f.state.statCalls.length;
+  await f.module.refreshDue(now);
+  assert.equal(f.state.statCalls.length, calls, "解除得太早：不取数");
+  // 没锚定过：解除前没人保证这把 Key 只有它在用
+  const g = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of g.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  g.rows.find((row) => row.id === "rr_live").canonical_key = null;
+  now = Date.parse("2026-10-09T03:00:00Z");
+  await g.module.archiveRule("rr_live");
+  const gCalls = g.state.statCalls.length;
+  now += 3600000;
+  await g.module.refreshDue(now);
+  assert.equal(g.state.statCalls.length, gCalls, "没锚定过的不补结");
+  // 旧版（legacy）规则：不是按整体取数的，不补结
+  const h = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of h.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  h.rows.find((row) => row.id === "rr_live").billing_policy = "legacy-v3";
+  await h.module.archiveRule("rr_live");
+  const hCalls = h.state.statCalls.length;
+  now += 3600000;
+  await h.module.refreshDue(now);
+  assert.equal(h.state.statCalls.length, hCalls, "旧版规则不补结");
 });
 
 test("C2a 修正切换时间后重结昨天没成：10 分钟后再试，不是每轮都重取", async (t) => {

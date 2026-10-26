@@ -3,7 +3,7 @@
 import { EMPTY, FIXED_COST_TEXT, RATE_UNSET_USD, UPSTREAM_GONE, formatRate, formatZonedDateTime, formatZonedWindow } from "../../../lib/format";
 import {
   formatReconciliationAmount, formatReconciliationMoney, mergeReconciliationSegments, reconciliationBillingText, reconciliationChannelTag, reconciliationRateFactors,
-  reconciliationRatioChange,
+  reconciliationNotStarted, reconciliationRatioChange,
 } from "../../../lib/reconciliation-view";
 import type { ReconciliationCurrency } from "../../../lib/client";
 import { adminUsageLineOf } from "../../../lib/admin-usage-text";
@@ -71,12 +71,12 @@ export function sideAmount(item: any, side: "income" | "cost", currency: Reconci
 
 // 收入、上游成本一格：读全了只写金额，没读全写「$1.20（没读全）」，没读到写「读取中」「读不到」
 export const incomeText = (item: any, currency: ReconciliationCurrency, billing = item?.downstream) =>
-  reconciliationBillingText(billing, sideRate(item, "income", currency));
+  reconciliationNotStarted(item) ? EMPTY : reconciliationBillingText(billing, sideRate(item, "income", currency));
 // 收入里减掉的管理员自用（用语规范 §9「管理员自用」）：写法和判断都在 lib/admin-usage-text.js（有单元测试），这里只把钱按汇率和币种写出来
 export function adminUsageLine(item: any, currency: ReconciliationCurrency, billing = item?.downstream) {
   return adminUsageLineOf(billing, (usd: number) => formatReconciliationMoney(usd, sideRate(item, "income", currency)));
 }
-export const costText = (item: any, currency: ReconciliationCurrency, billing = item?.upstream) => isFixedCost(item)
+export const costText = (item: any, currency: ReconciliationCurrency, billing = item?.upstream) => reconciliationNotStarted(item) ? EMPTY : isFixedCost(item)
   ? FIXED_COST_TEXT : reconciliationBillingText(billing, sideRate(item, "cost", currency));
 
 // 汇率一行（§9）：「1 美元 = 7.20 元」；收入和上游成本的汇率不一样时分开写；固定时记下的汇率写上固定的时间。

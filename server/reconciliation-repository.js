@@ -3,7 +3,7 @@ import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, nor
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
-import { applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
 import { billDayOf } from "../lib/business-time.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../lib/billing-capability-storage.js";
@@ -54,6 +54,12 @@ export function activeChannelKey(input, channelId) {
   return input.enabled === false ? null : `${input.ownStationId}:${channelId}`;
 }
 
+// 已解除的绑定只许记账本、而且这天开始早于解除时刻（New API 解除当天的账本行窗口仍是整天，金额只算到解除时刻；Sub2API 解除当天不结，由取数那边挡）
+export function archivedLedgerAllowed(rule, ledger) {
+  const archivedAt = rule.archivedAtMs;
+  return Number.isFinite(archivedAt) && Number.isFinite(Number(ledger?.entry?.startMs)) && Number(ledger.entry.startMs) < archivedAt;
+}
+
 export function ruleFromRow(row, channels = []) {
   return {
     id: row.id,
@@ -67,11 +73,14 @@ export function ruleFromRow(row, channels = []) {
     billingPolicy: row.billing_policy || "legacy-v3",
     scopeVersion: Number(row.scope_version || 1),
     billingEffectiveFrom: row.billing_effective_from_ms == null ? null : Number(row.billing_effective_from_ms),
+    accountingFloorMs: row.accounting_floor_ms == null ? null : Number(row.accounting_floor_ms),
     costCoverage: row.cost_coverage || "unknown",
     provider: row.provider || null,
     canonicalKey: row.canonical_key || null,
     ...normalizeRuleSourceBinding(row.source_binding, row.cost_coverage || "unknown"),
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
+    // 解除时刻（毫秒）：新写的行由进程写；回填前的旧行读不到时退回 archived_at
+    archivedAtMs: row.archived_at_ms != null ? Number(row.archived_at_ms) : row.archived_at ? new Date(row.archived_at).getTime() : null,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
     channels: channels.map((channel) => ({
@@ -231,6 +240,20 @@ export class ReconciliationRepository {
     return rows.map((row) => ruleFromRow(row, grouped.get(row.id) || []));
   }
 
+  // 最近解除的绑定（解除时刻 ≥ sinceMs）：只有锚定过的（有 canonicalKey，解除前这把 Key 只有它在用）才回看解除前的日子（计划 C3 4.1）
+  async listRecentlyArchivedRules(sinceMs) {
+    const [rows] = await this.pool.query(
+      // enabled = 0 AND archived_at >= …：走 idx_reconciliation_enabled(enabled, archived_at)，不扫全表（已解除的行只增不减）；archived_at 是 DATETIME，
+      // 多放宽一天免得时区偏差漏掉，精确的比较用毫秒那一列
+      "SELECT * FROM reconciliation_rules WHERE enabled = 0 AND archived_at >= FROM_UNIXTIME(?) AND archived_at_ms >= ? AND canonical_key IS NOT NULL ORDER BY archived_at_ms DESC",
+      [Math.floor(sinceMs / 1000) - 86400, sinceMs]);
+    if (!rows.length) return [];
+    const [channelRows] = await this.pool.query(
+      "SELECT rule_id, channel_id, channel_name, channel_status, status_observed_at_ms, status_changed_at_ms FROM reconciliation_rule_channels WHERE rule_id IN (?) ORDER BY channel_name, channel_id",
+      [rows.map((row) => row.id)]);
+    return rows.map((row) => ruleFromRow(row, channelRows.filter((channel) => channel.rule_id === row.id)));
+  }
+
   async getRule(id, { includeArchived = false } = {}) {
     const [rows] = await this.pool.query(
       `SELECT * FROM reconciliation_rules WHERE id = ? ${includeArchived ? "" : "AND archived_at IS NULL"}`,
@@ -297,15 +320,28 @@ export class ReconciliationRepository {
       await conn.beginTransaction();
       if (isScopedBillingPolicy(input.billingPolicy)) input = applyScopePolicy(null, input);
       if (guard) guard(null, [], input);
+      // 同一天里更早解除的占着同一个渠道（或同一把 Key）的 New API 绑定：新绑定从那一刻起算（C3）
+      let accountingFloor = null;
+      if (isScopedBillingPolicy(input.billingPolicy) && Number.isFinite(input.billingEffectiveFrom)) {
+        const dayAgo = input.billingEffectiveFrom - 36 * 3600000;
+        const [oldRows] = await conn.query(
+          "SELECT * FROM reconciliation_rules WHERE enabled = 0 AND archived_at >= FROM_UNIXTIME(?) AND archived_at_ms >= ? AND own_station_id = ?",
+          [Math.floor(dayAgo / 1000), dayAgo, input.ownStationId]);
+        if (oldRows.some((row) => row.archived_at_ms != null)) {
+          const [oldChannels] = await conn.query("SELECT rule_id, channel_id, channel_name FROM reconciliation_rule_channels WHERE rule_id IN (?)", [oldRows.filter((row) => row.archived_at_ms != null).map((row) => row.id)]);
+          accountingFloor = accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels },
+            oldRows.filter((row) => row.archived_at_ms != null).map((row) => ruleFromRow(row, oldChannels.filter((channel) => channel.rule_id === row.id))));
+        }
+      }
       await conn.query(
         `INSERT INTO reconciliation_rules
           (id, upstream_station_id, own_station_id, token_id, token_name, fixed_group, timezone, enabled, active_token_key,
-           billing_policy, scope_version, billing_effective_from_ms, cost_coverage, provider, canonical_key, source_binding)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           billing_policy, scope_version, billing_effective_from_ms, cost_coverage, provider, canonical_key, source_binding, accounting_floor_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, input.upstreamStationId, input.ownStationId, input.tokenId, input.tokenName,
           input.fixedGroup, input.timezone, input.enabled === false ? 0 : 1, tokenKey,
           input.billingPolicy || "legacy-v3", input.scopeVersion || 1, input.billingEffectiveFrom ?? null,
-          input.costCoverage || "unknown", input.provider || null, input.canonicalKey || null, JSON.stringify(serializeRuleSourceBinding(input))]
+          input.costCoverage || "unknown", input.provider || null, input.canonicalKey || null, JSON.stringify(serializeRuleSourceBinding(input)), accountingFloor]
       );
       if (input.channels.length) {
         await conn.query(
@@ -658,15 +694,15 @@ export class ReconciliationRepository {
     } finally { conn.release(); }
   }
 
-  async archiveRule(id) {
+  async archiveRule(id, { now = Date.now() } = {}) {
     const conn = await this.pool.getConnection();
     let result;
     try {
       await conn.beginTransaction();
       await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
       [result] = await conn.query(
-        "UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, archived_at = NOW() WHERE id = ? AND archived_at IS NULL",
-        [id]
+        "UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, archived_at = NOW(), archived_at_ms = ? WHERE id = ? AND archived_at IS NULL",
+        [now, id]
       );
       if (result.affectedRows) {
         await conn.query("UPDATE reconciliation_rule_channels SET active_channel_key = NULL WHERE rule_id = ?", [id]);
@@ -710,7 +746,8 @@ export class ReconciliationRepository {
   // （其中 settledAt 是账本里这天最新那一版的固定时刻），调用方不用再读一次账本。
   // settlement：{ billDate, resettleRequestedAt } 时这天结成了，同一个事务里删掉结账状态表的那一行（计划 C2a），守卫失败时一起回滚；
   // 行里的重结请求时刻和 resettleRequestedAt 不同（取数期间又来了新请求）就不删（计划 C2b）。
-  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null, settlement = null } = {}) {
+  // archived：已解除的绑定补结解除前的日子（计划 C3），只许写账本、而且这天开始早于解除时刻；不核对同一把 Key 的绑定组（不传 expectedOwnerState）
+  async saveSnapshotsForScope(ruleId, expectedScopeFingerprint, snapshots, { expectedOwnerState = null, guard = null, ledger = null, settlement = null, archived = false } = {}) {
     let booked = null;
     const conn = await this.pool.getConnection();
     try {
@@ -733,9 +770,13 @@ export class ReconciliationRepository {
           return false;
         }
       }
-      const [ruleRows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
+      const [ruleRows] = await conn.query(`SELECT * FROM reconciliation_rules WHERE id = ? ${archived ? "" : "AND archived_at IS NULL"} FOR UPDATE`, [ruleId]);
       if (!ruleRows.length) {
         await conn.commit();
+        return false;
+      }
+      if (ruleRows[0].archived_at && !(archived && archivedLedgerAllowed(ruleFromRow(ruleRows[0]), ledger))) {
+        await conn.rollback();
         return false;
       }
       const [channels] = await conn.query("SELECT rule_id, channel_id, channel_name, channel_status, status_observed_at_ms, status_changed_at_ms FROM reconciliation_rule_channels WHERE rule_id = ? ORDER BY channel_name, channel_id FOR UPDATE", [ruleId]);
@@ -793,9 +834,11 @@ export class ReconciliationRepository {
   // ---- 结账状态（计划 C2a）：每条绑定每个还没固定的日子一行 ----
 
   // 一轮轮询的批量读：这些绑定的全部状态行（表有上限，正常时接近空），不按绑定逐条查
-  async listSettlementStates(ruleIds) {
-    if (!ruleIds?.length) return [];
-    const [rows] = await this.pool.query(`SELECT ${SETTLEMENT_STATE_SELECT} FROM reconciliation_settlement_state WHERE rule_id IN (?)`, [ruleIds]);
+  // billDates：只读这几天的行（页面查询只要选的那几天，不读全部；主键前缀 rule_id、再 bill_date）
+  async listSettlementStates(ruleIds, { billDates = null } = {}) {
+    if (!ruleIds?.length || (billDates && !billDates.length)) return [];
+    const [rows] = await this.pool.query(`SELECT ${SETTLEMENT_STATE_SELECT} FROM reconciliation_settlement_state WHERE rule_id IN (?)${billDates ? " AND bill_date IN (?)" : ""}`,
+      billDates ? [ruleIds, billDates] : [ruleIds]);
     return rows.map(settlementStateFromRow);
   }
 
