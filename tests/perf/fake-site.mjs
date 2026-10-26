@@ -1,13 +1,13 @@
-// 假站点：一个进程模拟 50 个上游（New API / Sub2API / 只用 Key）和 1 个自营 New API 站点。
+// 假站点：一个进程模拟 50 个上游（New API / Sub2API / 只用 Key；PERF_BINDINGS 缩小时只有接入的那几个）和 1 个自营 New API 站点。
 // 用法：node fake-site.mjs   （FAKE_PORT 默认 18950，FAKE_DELAY_MS 默认 50）
-// 地址：上游 http://127.0.0.1:18950/na01 … /s245 … /nk49；自营 http://127.0.0.1:18950/own
+// 地址：上游 http://127.0.0.1:18950/na01 … /s245 … /nk49；自营 http://127.0.0.1:18951/own（FAKE_OWN_PORT，默认 FAKE_PORT + 1；两个端口同一套路由）
 // 控制：GET /__stats[?reset=1] 看/清请求计数；POST /__ctl?delay=50&ratio=old|current&freeze=1|0 改延迟、分组倍率口径、停住「现在」；GET /__health
 // 所有数字来自 lib/model.mjs 的确定性模型：分页、按渠道/按天/按 Key 的统计互相对得上。
 import { createServer } from "node:http";
 import {
   loadConfig, makeAggregates, makeBalanceModel, channelQuota, tokenCostQuota, accountCostQuota,
   UPSTREAMS, OWN, CHANNELS, USERS, MODELS, OWN_GROUPS, RULES, QPU, N_CH, N_USERS, HOUR, TZ,
-  dayStartSec, dateKeyOf, PORT, upstreamGroupRatio,
+  dayStartSec, dateKeyOf, PORT, OWN_PORT, upstreamGroupRatio,
 } from "./lib/model.mjs";
 
 const config = loadConfig();
@@ -21,7 +21,11 @@ console.log(`[fake] 预聚合 ${agg.nh} 小时，用了 ${Date.now() - t0} ms`);
 let delayMs = Number(process.env.FAKE_DELAY_MS ?? 50);
 let ratioMode = process.env.FAKE_RATIO_MODE || "current";
 const stats = { total: 0, bytes: 0, byRoute: Object.create(null), bySite: Object.create(null), startedAt: new Date().toISOString() };
-let requestLog = []; // [到达时刻 ms, 路由]，/__stats?detail=1 返回，最多 20 万条
+let requestLog = []; // [到达时刻 ms, 路由]，/__stats?detail=1 返回，最多 20 万条；自营 /api/log/ 多一项类别（all / latest / filtered，见下）
+// 自营 /api/log/ 分三类计数（整站读场景用）：filtered = 带 username/token_name/channel/model_name/group 任何一个（channel=0 算没筛）；
+// 不带筛选的里，page_size=1 的是「上次以后有没有新消费」那一下（latest），别的是整站读（all）
+let ownLogKinds = { all: 0, latest: 0, filtered: 0 };
+const OWN_LOG_FILTERS = ["username", "token_name", "channel", "model_name", "group"];
 
 const upByPath = new Map(UPSTREAMS.map((up) => [up.path, up]));
 // freeze：POST /__ctl?freeze=1 以后「现在」停在那一秒，之后不再有新消费、余额不再变（测 P1a 那种「没有新消费就沿用」的轮次）；freeze=0 恢复
@@ -440,9 +444,9 @@ function route(req, url) {
   const path = url.pathname, q = url.searchParams;
   if (path === "/__health") return [200, { ok: true, epoch0, nh: agg.nh }];
   if (path === "/__stats") {
-    const snapshot = { ...JSON.parse(JSON.stringify(stats)), ownRateLimited };
+    const snapshot = { ...JSON.parse(JSON.stringify(stats)), ownRateLimited, ownLogKinds: { ...ownLogKinds } };
     if (q.get("detail") === "1") snapshot.log = requestLog;
-    if (q.get("reset") === "1") { stats.total = 0; stats.bytes = 0; stats.byRoute = Object.create(null); stats.bySite = Object.create(null); stats.startedAt = new Date().toISOString(); requestLog = []; }
+    if (q.get("reset") === "1") { stats.total = 0; stats.bytes = 0; stats.byRoute = Object.create(null); stats.bySite = Object.create(null); stats.startedAt = new Date().toISOString(); requestLog = []; ownLogKinds = { all: 0, latest: 0, filtered: 0 }; }
     return [200, snapshot];
   }
   if (path === "/__ctl") {
@@ -460,7 +464,9 @@ function route(req, url) {
   stats.total += 1;
   stats.byRoute[key] = (stats.byRoute[key] || 0) + 1;
   stats.bySite[site] = (stats.bySite[site] || 0) + 1;
-  if (requestLog.length < 200000) requestLog.push([Date.now(), key]);
+  const ownLogKind = key === "own:/api/log/" ? (OWN_LOG_FILTERS.some((f) => q.get(f) && q.get(f) !== "0") ? "filtered" : q.get("page_size") === "1" ? "latest" : "all") : null;
+  if (ownLogKind) ownLogKinds[ownLogKind] += 1;
+  if (requestLog.length < 200000) requestLog.push(ownLogKind ? [Date.now(), key, ownLogKind] : [Date.now(), key]);
   if (downSites.has(site)) return [503, { success: false, message: "upstream down (fake)" }];
   if (site === "/own") return ownSite(rest, q, req);
   const up = upByPath.get(site);
@@ -470,7 +476,7 @@ function route(req, url) {
   return keyUpstream(up, rest, req);
 }
 
-const server = createServer((req, res) => {
+const handler = (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
   const finish = () => {
     let status, body, headers;
@@ -481,6 +487,10 @@ const server = createServer((req, res) => {
   const internal = url.pathname.startsWith("/__");
   req.resume();
   req.on("end", () => { if (!internal && delayMs > 0) setTimeout(finish, delayMs); else finish(); });
-});
+};
+const server = createServer(handler);
 server.keepAliveTimeout = 30000;
-server.listen(PORT, "127.0.0.1", () => console.log(`[fake] 假站点 http://127.0.0.1:${PORT}，延迟 ${delayMs} ms，倍率口径 ${ratioMode}`));
+const ownServer = createServer(handler);
+ownServer.keepAliveTimeout = 30000;
+ownServer.listen(OWN_PORT, "127.0.0.1");
+server.listen(PORT, "127.0.0.1", () => console.log(`[fake] 假站点 http://127.0.0.1:${PORT}（自营站点 ${OWN_PORT}），延迟 ${delayMs} ms，倍率口径 ${ratioMode}`));

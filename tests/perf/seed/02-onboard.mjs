@@ -38,5 +38,5 @@ for (const up of UPSTREAMS) {
   }
 }
 await fetch(`${BASE}/__ctl?ratio=current&delay=50`);
-progress(`种子 2：接入 50 个上游用了 ${Math.round((Date.now() - t0) / 1000)} 秒，建了 ${rules} 条绑定，失败 ${failures} 个`);
+progress(`种子 2：接入 ${UPSTREAMS.length} 个上游用了 ${Math.round((Date.now() - t0) / 1000)} 秒，建了 ${rules} 条绑定，失败 ${failures} 个`);
 if (failures) process.exit(1);

@@ -30,13 +30,22 @@ on:
         type: boolean
         required: false
         default: false
+      bindings:
+        description: "绑定条数（1–80，空 = 80）：缩小夹具，比如 5（整站读场景，见 README）"
+        required: false
+        default: ""
+      expected_cost:
+        description: "勾上 = 量后台前打开「算应付成本」（整站读）；不勾 = 不改开关，用产品默认（V1-a 关；V1-b 起默认开）"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
   pull-requests: read
 
 concurrency:
-  group: perf-${{ github.ref }}-${{ inputs.pr }}-${{ inputs.base }}-${{ inputs.head }}
+  group: perf-${{ github.ref }}-${{ inputs.pr }}-${{ inputs.base }}-${{ inputs.head }}-${{ inputs.bindings }}-${{ inputs.expected_cost }}
   cancel-in-progress: false
 
 jobs:
@@ -69,6 +78,8 @@ jobs:
       PARITY_DAYS: ${{ inputs.parity_days || '14' }}
       PERF_HISTORY_DAYS: ${{ inputs.history_days || '90' }}
       FAKE_TEST_LOGS: ${{ inputs.fake_test_logs && '1' || '0' }}
+      PERF_BINDINGS: ${{ inputs.bindings }}
+      PERF_EXPECTED_COST: ${{ inputs.expected_cost && 'on' || 'off' }}
     steps:
       - name: Checkout harness (tests/perf)
         uses: actions/checkout@v4
@@ -172,7 +183,7 @@ jobs:
           PR: ${{ inputs.pr }}
         run: |
           {
-            echo "base \`${BASE_SHA:0:7}\`，head \`${HEAD_SHA:0:7}\`${PR:+（PR #$PR）}；对拍 $PARITY_DAYS 天，余额历史 $PERF_HISTORY_DAYS 天，假站点测试日志 $FAKE_TEST_LOGS"
+            echo "base \`${BASE_SHA:0:7}\`，head \`${HEAD_SHA:0:7}\`${PR:+（PR #$PR）}；对拍 $PARITY_DAYS 天，余额历史 $PERF_HISTORY_DAYS 天，假站点测试日志 $FAKE_TEST_LOGS，绑定 ${PERF_BINDINGS:-80} 条，算应付成本（整站读）$PERF_EXPECTED_COST"
             echo
             echo '### 各段用时'
             echo

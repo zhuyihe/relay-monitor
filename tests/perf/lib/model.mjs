@@ -15,6 +15,9 @@ export const OUT_DIR = resolve(process.env.PERF_OUT || join(tmpdir(), "relay-mon
 export const CONFIG_PATH = join(OUT_DIR, "fixture", "config.json");
 export const PORT = Number(process.env.FAKE_PORT || 18950);
 export const BASE = `http://127.0.0.1:${PORT}`;
+// 自营站点单独一个端口（同一个假站点进程）：控制台按「主机:端口」给自营站点记请求额度（lib/own-request-budget.js），
+// 和上游共用一个端口的话，读上游的请求也算进自营站点的 180 秒 360 个里，整站读分到的额度就不对了
+export const OWN_PORT = Number(process.env.FAKE_OWN_PORT || PORT + 1);
 export const QPU = 500000;
 export const N_UP = 50;
 export const N_CH = 300;
@@ -48,7 +51,7 @@ const SLOT_CUM = [40, 65, 80, 92, 100];
 export const UP_GROUPS = ["default", "vip", "claude", "gpt", "gemini", "svip"];
 
 // ---- 上游账号 --------------------------------------------------------------
-export const UPSTREAMS = Array.from({ length: N_UP }, (_, idx) => {
+const ALL_UPSTREAMS = Array.from({ length: N_UP }, (_, idx) => {
   const i = idx + 1;
   const kind = i <= 44 ? "newapi" : i <= 48 ? "sub2api" : "newapi-key";
   const prefix = kind === "newapi" ? "na" : kind === "sub2api" ? "s2" : "nk";
@@ -68,17 +71,17 @@ export const UPSTREAMS = Array.from({ length: N_UP }, (_, idx) => {
     tokens, boundTokens: tokens.slice(0, bound),
     lowBalance: [7, 23, 41].includes(i) };
 });
-export const OWN = { path: "/own", baseUrl: `${BASE}/own`, accessToken: "pat-own-root-0123456789abcdef", userId: "1", accountId: 1 };
+export const OWN = { path: "/own", baseUrl: `http://127.0.0.1:${OWN_PORT}/own`, accessToken: "pat-own-root-0123456789abcdef", userId: "1", accountId: 1 };
 
 // ---- 规则（绑定）和自营渠道 --------------------------------------------------
 // 80 条规则（48 个能读账单的账号，16 个绑 1 把 Key、32 个绑 2 把），按顺序分 285 个渠道（前 45 条 4 个、后 35 条 3 个）；
 // 剩下 15 个渠道走两个只用 Key 的上游，只看余额不算账（「没算进来」）。
-export const RULES = [];
-for (const up of UPSTREAMS) for (const token of up.boundTokens) RULES.push({ r: RULES.length, up, token });
+const ALL_RULES = [];
+for (const up of ALL_UPSTREAMS) for (const token of up.boundTokens) ALL_RULES.push({ r: ALL_RULES.length, up, token });
 const channelUp = new Array(N_CH + 1), channelRule = new Array(N_CH + 1).fill(-1);
 {
   let c = 1;
-  for (const rule of RULES) {
+  for (const rule of ALL_RULES) {
     const n = rule.r < 45 ? 4 : 3;
     rule.channels = [];
     for (let j = 0; j < n; j++, c++) { rule.channels.push(c); channelUp[c] = rule.up; channelRule[c] = rule.r; }
@@ -86,9 +89,21 @@ const channelUp = new Array(N_CH + 1), channelRule = new Array(N_CH + 1).fill(-1
     // 约 10% 的绑定没回答「这把 Key 还给别处用吗」——页面上的「需处理」
     rule.coverage = rule.r % 10 === 7 ? "unknown" : "none";
   }
-  const keyUps = UPSTREAMS.filter((up) => up.kind === "newapi-key");
+  const keyUps = ALL_UPSTREAMS.filter((up) => up.kind === "newapi-key");
   for (let k = 0; c <= N_CH; c++, k++) channelUp[c] = keyUps[k < 8 ? 0 : 1];
 }
+// 小夹具：PERF_BINDINGS=N（1–80，默认空 = 全部 80 条）只接入前 N 条绑定、它们所在的上游和两个只用 Key 的上游。
+// 模型本身不变（渠道归属、事件、收入、成本都按 80 条算）：没接入的绑定的渠道照旧有消费，只是控制台里没有绑定管它们，
+// 像真站点上没配进控制台的渠道。种子、假站点、测量都从这里取 RULES、UPSTREAMS，不设时和原来逐字一样。
+const BINDINGS = (() => {
+  const raw = String(process.env.PERF_BINDINGS ?? "").trim();
+  if (!raw) return ALL_RULES.length;
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < 1 || n > ALL_RULES.length) throw new Error(`PERF_BINDINGS=${raw}：要 1–${ALL_RULES.length} 的整数，或者不设`);
+  return n;
+})();
+export const RULES = ALL_RULES.slice(0, BINDINGS);
+export const UPSTREAMS = ALL_UPSTREAMS.filter((up) => up.kind === "newapi-key" || RULES.some((rule) => rule.up === up));
 export const KEY_UP_CHANNELS = (up) => Array.from({ length: N_CH }, (_, x) => x + 1).filter((c) => channelUp[c] === up && channelRule[c] < 0);
 export const CHANNELS = Array.from({ length: N_CH }, (_, x) => {
   const c = x + 1, up = channelUp[c], p = Math.floor((c - 1) / 5);
@@ -214,7 +229,7 @@ export function channelQuota(agg, channelIds, s, e) {
 
 // 上游某把 Key 在 [s, e] 的成本（额度）
 export function tokenCostQuota(agg, up, token, s, e) {
-  const rule = RULES.find((r) => r.up === up && r.token.id === token.id);
+  const rule = ALL_RULES.find((r) => r.up === up && r.token.id === token.id);
   if (rule) {
     const q = channelQuota(agg, rule.channels, s, e);
     let sum = 0;
