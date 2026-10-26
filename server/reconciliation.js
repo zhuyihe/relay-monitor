@@ -727,7 +727,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     for (const ids of assignments.values()) if (ids.length > 1) for (const id of ids) {
       duplicateSales.set(id, [...new Set([...(duplicateSales.get(id) || []), ...ids])].sort());
     }
-    return { rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, duplicateSales, billingSource: Object.freeze(billingSource),
+    return { startedAt: Date.now(), rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, duplicateSales, billingSource: Object.freeze(billingSource),
       // 这一轮（或这一次查询）里共用的：自营站点的 /api/status；哪些自营站点从什么时候起没有新的消费（只有轮询会填）
       ownStatus: new Map(), ownQuietFrom: new Map() };
   }
@@ -802,7 +802,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     && ![error, error?.cause].some((item) => ["AUTHENTICATION_FAILED", "UPSTREAM_AUTH_DENIED"].includes(item?.code) || String(item?.code || "").startsWith("ACCESS_TOKEN_"));
   const OWN_EXCLUSION_VERIFIED_REUSE_MS = 10 * 60000;
   const OWN_EXCLUSION_FALLBACK_REUSE_MS = 10 * 60000;
-  function ownExclusion(own, window, { settle = false, channelIds = [] } = {}) {
+  // freshSince：这一轮结账开始的时刻（ownerRegistry.startedAt）——结账要新的管理员名单，但同一轮里各条绑定共用这一份，不每条各读一遍用户列表（审核 #127 增量 中-2）
+  function ownExclusion(own, window, { settle = false, channelIds = [], freshSince = null } = {}) {
     const wantedChannels = [...new Set(channelIds.map(Number))];
     // 沿用的结果要覆盖这次要算的渠道：翻页读的是全站所有渠道（"all"），按渠道 stat 读的只有当时要算的那几个
     const covers = (coverage) => coverage === "all" || wantedChannels.every((id) => coverage.has(id));
@@ -822,7 +823,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 窗口终点比记下的晚得多（从同一天起点查多天范围）不能直接用，要接着翻到新的终点（审核 R1：少减过 49430 额度）
       if (!settle && prior && Date.now() - prior.readAt < OWN_EXCLUSION_REUSE_MS && window.endMs - prior.endMs < OWN_EXCLUSION_REUSE_MS && covers(prior.result.coverage)) return prior.result;
       // 结账先读管理员名单（fresh）：沿用的那份是按当时的名单算的，名单变了（有人被降成普通用户、新加了管理员）就不能沿用（审核 #127 中-1）
-      const { adminSet } = await readOwnAdminDirectory(rt, own, { fresh: settle });
+      const { adminSet } = await readOwnAdminDirectory(rt, own, settle ? (freshSince != null ? { freshSince } : { fresh: true }) : {});
       const adminKey = [...adminSet].sort().join("\u0000");
       const sameAdmins = prior?.adminKey === adminKey;
       // 同一个站点同一天，别的绑定刚对过账：结的是同一段窗口、名单一样，直接用，不再每条绑定各查一遍（每个站每天每个来源一个 stat）
@@ -996,7 +997,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
     let reusedStale = false; // 管理员自用那一份是读失败后沿用的：这一次的结果不进缓存，不然站点一直没有新消费时超过 10 分钟也不换
     const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus,
-      exclusion: async () => { const read = await ownExclusion(own, segmentWindow, { settle, channelIds }); if (read.stale) reusedStale = true; return read; } });
+      exclusion: async () => { const read = await ownExclusion(own, segmentWindow, { settle, channelIds, freshSince: registry?.startedAt ?? null }); if (read.stale) reusedStale = true; return read; } });
     // 只有轮询观测今天会沿用，别的窗口（昨天、结账、自定义、近 7 天、本月）不记
     if (reuse && result.state === "complete" && !result.emptySecondWindow && !reusedStale) {
       ownRevenueCache.set(key, { endMs: segmentWindow.endMs, result });

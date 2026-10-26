@@ -8310,6 +8310,18 @@ test("R1 沿用要看管理员名单：bob 结第一条绑定时是管理员、�
   const first = await settle("rr_live");
   assert.equal(first.downstream.quotaUnits, 250 - 30, "bob 是管理员：他的测试记录按管理员扣");
   f.state.ownUsers = [...OWN_USERS, { ...bob, role: 1 }]; // 降成普通用户
+  now += 1000; // 时钟要走：结账读「这一轮开始以后」的名单，不动时钟会拿到缓存里的旧名单
+  f.state.testLogs.push(usage(3, 50, { token_name: "bob-key", token_id: 9, username: "bob", channel: 2 })); // bob 自己的 Key：降级后算收入；整份沿用的话会多扣成 160
   const second = await settle("rr_two");
-  assert.equal(second.downstream.quotaUnits, 250 - 40, "名单变了不沿用：bob 名下的测试记录按兜底扣（改动前沿用「全在管理员名下」那份，不扣，是 250）");
+  assert.equal(second.downstream.quotaUnits, 250 - 40, "名单变了不沿用：bob 名下的测试记录按兜底扣、他自己 Key 的照算收入（整份沿用是 160，沿用「全在管理员名下」那份是 250）");
+});
+
+test("R1 结账一轮里几条绑定共用一份管理员名单：用户列表每轮只读一遍，不是每条绑定各读一遍（审核 #127 增量 中-2）", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  f.state.testLogs.push(usage(1, 30, { token_name: "模型测试", token_id: 0, channel: 1 }));
+  const userReads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/user/").length;
+  await f.module.refreshDue(now); // 三条绑定、两天（10-07、10-08）都在这一轮结
+  assert.ok(f.state.ledger.filter((row) => row.bill_date === "2026-10-08").length === 3, "三条都结了");
+  assert.ok(userReads() >= 1 && userReads() <= 2, `这一轮用户列表读了 ${userReads()} 遍（每条绑定各读一遍的话至少 6 遍）`);
 });
