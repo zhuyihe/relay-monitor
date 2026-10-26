@@ -1,4 +1,4 @@
-node_modules
+**/node_modules
 data
 .git
 .github
@@ -11,3 +11,4 @@ deploy
 .env.*
 !.env.example
 server.md
+Dockerfile.agent

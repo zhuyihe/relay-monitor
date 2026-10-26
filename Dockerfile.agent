@@ -1,0 +1,24 @@
+# 渠道 Key 读取服务（agent/）：放在自营 New API 旁边，读 channels 表，只对外给打码和指纹。
+# 构建上下文是仓库根目录：要拷 lib/key-fingerprint.js（和控制台共用同一份打码、指纹规则）
+FROM node:24-alpine AS deps
+WORKDIR /app
+COPY agent/package.json agent/package-lock.json ./
+# --omit=peer：mysql2 的 peer 依赖（@types/node 之类）用不上，不装；--ignore-scripts：依赖里的安装脚本一个都不跑
+RUN npm ci --omit=dev --omit=peer --ignore-scripts --no-audit --no-fund
+
+FROM node:24-alpine
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+# package.json 只为让 .js 按 ES 模块加载
+COPY agent/package.json ./package.json
+COPY agent/config.js agent/dsn.js agent/account-check.js agent/reader.js agent/snapshot.js agent/dry-run.js agent/server.js agent/healthcheck.js ./agent/
+COPY lib/key-fingerprint.js ./lib/key-fingerprint.js
+
+# SQLite 的相对路径（SQLITE_PATH 默认 one-api.db）和 New API 官方镜像一样落在 /data
+WORKDIR /data
+EXPOSE 8790
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["node", "/app/agent/healthcheck.js"]
+# V8 堆上限 64 MB（实测 1000 个渠道进程约 77 MB、5000 个约 92 MB、2 万个约 133 MB，容器内存限制请设 192 MB 以上，见部署说明里的 compose 片段）；node:sqlite 的实验性警告不打。
+# 用 ENTRYPOINT：docker compose run --rm relay-key-agent --dry-run 的参数会传给读取服务
+ENTRYPOINT ["node", "--max-old-space-size=64", "--disable-warning=ExperimentalWarning", "/app/agent/server.js"]

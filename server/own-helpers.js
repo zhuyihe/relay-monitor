@@ -4,6 +4,7 @@
 import {
   queryStationUsage, queryOwnUsers, queryOwnChannels, queryLogStat, queryOwnFlow,
 } from "../lib/providers.js";
+import { isAccessTokenError } from "../lib/access-token-scopes.js";
 import { businessTimeZone, dayKeyInTz, dayRangeInTz, resolveBusinessWindow } from "../lib/business-time.js";
 import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, summarizeProfit, toCny } from "../lib/profit.js";
 import { COST_MODE_TEXT, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../lib/format.js";
@@ -279,7 +280,8 @@ export async function readOwnAdminDirectory(rt, own, { fresh = false } = {}) {
   const resold = resoldAdminKeysOf(own);
   const read = async (since) => {
     try { return await readOwnUsers(rt, own, since); }
-    catch (cause) { throw incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
+    // 令牌作废、少了权限：照原样抛带码的错，要人换令牌，不包成「收入确认不了」（审核 #107 中-1）
+    catch (cause) { throw isAccessTokenError(cause?.code) ? cause : incomeUnconfirmed("用户身份没读全，收入和利润暂时算不出", cause); }
   };
   let entry = await read(fresh ? Date.now() : 0);
   const unconfirmed = (list) => { const admins = adminUsernamesOf(list); return [...new Set(resold.filter((key) => !admins.has(key.username)).map((key) => key.username))]; };

@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>每日利润整页重做 · 三种样子 · 炬元</title>
+<!--
+  每日利润整页重做的三种样子（静态样稿），配 design/ux/daily-profit-redesign.md 看。底子照抄 k1a-merge.html：
+  颜色、字号、间距取自 lib/design-tokens.js 和 app/styles/jy.css。数据是编的，三张用同一份：今天到 14:32，5 把 Key、6 个渠道，
+  「拼车团队」那把 Key 多扣了 $1.20。截图：design/ux/screens/dp-*.png（每个 .frame 截一张）。
+-->
+<style>
+:root {
+  --plane: #F4F6F8; --sheet: #FFFFFF; --sunken: #EEF1F5; --rule: #DFE4EA; --rule-soft: #E9EDF2;
+  --ink: #152033; --ink-2: #475467; --ink-3: #667085; --ink-dis: #98A2B3;
+  --cobalt: #3157D5; --cobalt-tint: #EBF0FD;
+  --sider: #131B2C; --sider-ink: #C5CCD8; --sider-ink-3: #8B95A6; --sider-active: rgba(127, 156, 255, .16);
+  --good: #137A63; --good-ink: #0F6B56; --good-tint: #E6F3EE;
+  --warn: #A86400; --warn-ink: #915500; --warn-tint: #FFF4E0;
+  --crit: #C83C3C; --crit-ink: #B42F2F; --crit-tint: #FDECEC;
+  --r1: 4px; --r2: 8px; --r3: 12px;
+  --shadow: 0 8px 24px rgba(21, 32, 51, .12);
+  --font: "IBM Plex Sans", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { font-family: var(--font); font-size: 14px; line-height: 22px; color: var(--ink); background: #D9DEE5; -webkit-font-smoothing: antialiased; padding: 32px; }
+.frame { background: var(--plane); margin: 0 auto 40px; overflow: hidden; position: relative; box-shadow: 0 1px 0 rgba(0,0,0,.04); }
+.frame-label { font-size: 13px; color: #475467; margin: 0 auto 8px; font-weight: 600; }
+.sym { width: 12px; height: 12px; flex: none; display: inline-block; vertical-align: -1px; }
+.icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.caption { font-size: 12px; line-height: 18px; color: var(--ink-3); }
+a { color: var(--cobalt); text-decoration: none; }
+.num { font-variant-numeric: tabular-nums; }
+.c-crit { color: var(--crit-ink); } .c-warn { color: var(--warn-ink); } .c-good { color: var(--good); } .c-muted { color: var(--ink-3); }
+
+/* 外壳 */
+.shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100%; }
+.sider { background: var(--sider); color: var(--sider-ink); padding: 16px 12px; display: flex; flex-direction: column; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 20px; color: #fff; }
+.brand strong { display: block; font-size: 16px; line-height: 24px; font-weight: 600; }
+.brand small { display: block; font-size: 12px; line-height: 16px; color: var(--sider-ink-3); }
+.brand svg { stroke: #fff; fill: none; stroke-width: 2.2; stroke-linecap: round; }
+.brand svg circle { fill: #fff; stroke: none; }
+.nav-group { font-size: 12px; line-height: 18px; color: var(--sider-ink-3); padding: 16px 12px 6px; }
+.nav-group:first-child { padding-top: 0; }
+.nav a { position: relative; display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; border-radius: var(--r2); color: var(--sider-ink); }
+.nav a.on { background: var(--sider-active); color: #fff; font-weight: 500; }
+.nav a.on::before { content: ""; position: absolute; left: -12px; top: 10px; bottom: 10px; width: 3px; border-radius: 0 3px 3px 0; background: #7F9CFF; }
+.nav-count { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: #C83C3C; color: #fff; font-size: 12px; line-height: 20px; text-align: center; font-weight: 600; }
+.sider-foot { margin-top: auto; padding: 12px; font-size: 12px; color: var(--sider-ink-3); }
+.main { min-width: 0; display: flex; flex-direction: column; }
+.topbar { display: flex; align-items: center; gap: 16px; height: 56px; padding: 0 24px; background: var(--sheet); border-bottom: 1px solid var(--rule); }
+.topbar h1 { margin: 0; font-size: 20px; line-height: 28px; font-weight: 600; white-space: nowrap; }
+.spacer { flex: 1; }
+.fresh { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); white-space: nowrap; }
+.fresh i { width: 6px; height: 6px; border-radius: 50%; background: var(--good); }
+.icon-btn { position: relative; display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: var(--r2); color: var(--ink-2); }
+.avatar { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--cobalt-tint); color: var(--cobalt); font-size: 13px; font-weight: 600; }
+.seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--sunken); border-radius: var(--r2); }
+.seg span { padding: 3px 12px; border-radius: 6px; color: var(--ink-2); white-space: nowrap; }
+.seg span.on { background: var(--sheet); color: var(--ink); box-shadow: 0 1px 2px rgba(21, 32, 51, .08); font-weight: 500; }
+.content { padding: 24px; display: flex; flex-direction: column; gap: 24px; }
+
+/* 面板 */
+.panel { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); min-width: 0; display: flex; flex-direction: column; }
+.panel-head { display: flex; align-items: baseline; gap: 12px; padding: 20px 24px 0; flex-wrap: wrap; }
+.panel-head h2 { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; }
+.panel-head .extra { display: flex; align-items: center; gap: 8px; }
+.panel-body { padding: 16px 24px 24px; }
+.count { display: inline-grid; place-items: center; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px; background: var(--crit-tint); color: var(--crit-ink); font-size: 12px; font-weight: 600; align-self: center; }
+.count.muted { background: var(--sunken); color: var(--ink-2); }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 15px; border-radius: 6px; border: 1px solid #D0D5DD; background: var(--sheet); color: var(--ink); font: inherit; font-size: 14px; white-space: nowrap; }
+.btn.sm { height: 28px; padding: 0 10px; font-size: 13px; }
+.btn.primary { background: var(--cobalt); border-color: var(--cobalt); color: #fff; }
+.btn.link { border: 0; background: none; color: var(--cobalt); padding: 0 6px; }
+.btn[disabled] { color: var(--ink-dis); background: var(--sunken); border-color: var(--rule); }
+.tag { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: var(--r1); font-size: 12px; line-height: 18px; font-weight: 500; white-space: nowrap; }
+.tag.warn { background: var(--warn-tint); color: var(--warn-ink); }
+.tag.crit { background: var(--crit-tint); color: var(--crit-ink); }
+.tag.info { background: var(--cobalt-tint); color: var(--cobalt); }
+.tag.muted { background: var(--sunken); color: var(--ink-2); font-weight: 400; }
+
+/* 需处理（app/components/attention-list.tsx 的样子） */
+.attention { list-style: none; margin: 0; padding: 8px 0; }
+.attention li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; padding: 14px 24px; border-top: 1px solid var(--rule-soft); }
+.attention li:first-child { border-top: 0; }
+.attention .sym { width: 14px; height: 14px; margin-top: 4px; }
+.attention strong { font-weight: 500; }
+.attention p { color: var(--ink-3); font-size: 13px; line-height: 20px; margin: 2px 0 0; }
+.attention .note { margin-top: 4px; font-size: 12px; line-height: 18px; color: var(--ink-2); }
+.attention .note .day { display: inline-block; padding: 0 6px; border-radius: var(--r1); background: var(--sunken); margin-right: 4px; font-variant-numeric: tabular-nums; }
+.attention .actions { display: flex; gap: 4px; align-items: center; }
+.attention li.fading { opacity: .35; }
+.attention li.inline { padding: 12px 16px; background: #FFFBF3; border: 1px solid #F3E3C3; border-radius: var(--r2); }
+.attention li.inline.crit { background: #FFF7F7; border-color: #F4D3D3; }
+.more { padding: 0 24px 16px; display: flex; gap: 12px; align-items: center; font-size: 12px; }
+.all-clear { display: flex; gap: 12px; align-items: flex-start; padding: 20px 24px; color: var(--ink-2); }
+.all-clear .sym { width: 14px; height: 14px; margin-top: 4px; color: var(--good); }
+.all-clear strong { color: var(--ink); font-weight: 500; }
+.all-clear.one-line { padding: 14px 24px 18px; }
+.state-error { display: grid; grid-template-columns: 16px minmax(0,1fr) auto; gap: 4px 12px; padding: 14px 24px; border-top: 1px solid var(--rule-soft); align-items: start; }
+.state-error .sym { width: 14px; height: 14px; margin-top: 4px; color: var(--crit); }
+.banner { display: flex; gap: 12px; align-items: flex-start; margin: 16px 24px 0; padding: 12px 16px; border-radius: var(--r2); background: var(--warn-tint); }
+.banner .sym { color: var(--warn); margin-top: 5px; }
+.banner b { font-weight: 600; }
+.dim { opacity: .6; }
+
+/* 利润等式（缩略） */
+.eq { display: grid; grid-template-columns: 1fr 24px 1fr 24px 1fr 24px 1fr 24px 1fr; align-items: center; gap: 8px; padding: 18px 24px 22px; }
+.eq .t span { display: block; font-size: 12px; color: var(--ink-3); }
+.eq .t b { font-size: 24px; line-height: 32px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.eq .op { font-size: 24px; color: var(--ink-3); font-weight: 300; text-align: center; }
+.eq .t.res { background: var(--cobalt-tint); border-radius: var(--r2); padding: 8px 12px; }
+
+/* 余量（缩略） */
+.runway { list-style: none; margin: 0; padding: 4px 24px 20px; }
+.runway li { display: grid; grid-template-columns: 128px minmax(0, 1fr) 84px; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--rule-soft); }
+.runway li:first-child { border-top: 0; }
+.runway .who strong { display: block; font-weight: 500; }
+.runway .who span { display: block; font-size: 12px; color: var(--ink-3); }
+.bar { height: 8px; border-radius: 4px; background: var(--sunken); position: relative; }
+.bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: #66708A; }
+.runway .days { text-align: right; font-weight: 600; }
+.runway .days small { display: block; font-size: 12px; font-weight: 500; }
+
+/* 每日利润 */
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); padding: 12px 24px 0; }
+.metric { padding: 0 16px; border-left: 1px solid var(--rule); }
+.metric:first-child { border-left: 0; padding-left: 0; }
+.metric span { display: block; font-size: 13px; color: var(--ink-2); }
+.metric b { display: block; font-size: 24px; line-height: 34px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.sum-note { margin: 14px 24px 0; padding-top: 12px; border-top: 1px solid var(--rule-soft); font-size: 13px; color: var(--ink-2); }
+.sum-foot { padding: 10px 24px 20px; }
+.table { width: 100%; border-collapse: collapse; }
+.table th { background: var(--sunken); font-weight: 500; color: var(--ink-2); font-size: 13px; text-align: left; padding: 10px 16px; }
+.table td { padding: 12px 16px; border-top: 1px solid var(--rule-soft); vertical-align: top; }
+.table td.r, .table th.r { text-align: right; }
+
+/* 上游账单 */
+.acct { border: 1px solid var(--rule); border-radius: var(--r2); margin: 12px 24px 0; }
+.acct-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--rule-soft); }
+.acct-body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
+.res-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.key-row { display: flex; align-items: center; gap: 10px; padding: 10px 0 0; border-top: 1px dashed var(--rule); }
+.key-row:first-of-type { border-top: 0; }
+.ulist { list-style: none; margin: 0; padding: 0; }
+.ulist li { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 12px 24px; border-top: 1px solid var(--rule-soft); }
+.ulist li.on { background: var(--cobalt-tint); box-shadow: inset 3px 0 0 var(--cobalt); }
+.grp { font-size: 12px; font-weight: 600; color: var(--ink-3); padding: 8px 24px 4px; background: #FAFBFC; border-top: 1px solid var(--rule-soft); }
+.chan { border: 1px solid var(--rule); border-radius: var(--r2); padding: 12px 16px; }
+.tag.plain { background: var(--sunken); color: var(--ink-2); font-weight: 400; }
+.quiet { margin: 12px 24px 0; border: 1px solid var(--rule); border-radius: var(--r2); padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
+
+/* 日报 */
+pre.report { margin: 0; font-family: var(--font); font-size: 13px; line-height: 21px; white-space: pre-wrap; background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); padding: 16px 18px; }
+pre.report mark { background: #FFF1C2; color: inherit; border-radius: 3px; padding: 0 2px; }
+.mail { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); overflow: hidden; }
+.mail-head { background: #131B2C; color: #fff; padding: 14px 18px; }
+.mail-head small { display: block; color: #8B95A6; font-size: 12px; }
+.mail-cells { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 14px 18px 0; }
+.mail-cell { border: 1px solid var(--rule); border-radius: 6px; padding: 8px 10px; }
+.mail-cell span { display: block; font-size: 12px; color: var(--ink-3); }
+.mail-cell b { font-size: 18px; font-variant-numeric: tabular-nums; }
+.mail-line { margin: 10px 18px 0; font-size: 13px; color: var(--ink-2); }
+.mail-attn { margin: 12px 18px 18px; padding: 10px 12px; border-radius: 6px; background: #FFFBF3; border: 1px solid #F3E3C3; display: flex; align-items: center; gap: 10px; font-size: 13px; }
+
+/* 弹窗、提示 */
+.scrim { position: absolute; inset: 0; background: rgba(15, 20, 27, .36); }
+.modal { position: absolute; left: 50%; top: 80px; transform: translateX(-50%); width: 520px; background: var(--sheet); border-radius: var(--r3); box-shadow: var(--shadow); }
+.modal-head { padding: 18px 24px 0; display: flex; align-items: center; gap: 12px; }
+.modal-head h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.modal-body { padding: 12px 24px 4px; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 16px 24px 20px; }
+.facts { display: grid; grid-template-columns: 96px 1fr; gap: 4px 12px; font-size: 13px; padding: 10px 12px; background: var(--sunken); border-radius: var(--r2); }
+.facts span { color: var(--ink-3); }
+.radio { display: flex; flex-direction: column; gap: 2px; margin: 12px 0 6px; }
+.radio label { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 6px; }
+.radio label i { width: 16px; height: 16px; border-radius: 50%; border: 1px solid #98A2B3; flex: none; }
+.radio label.on { background: var(--cobalt-tint); }
+.radio label.on i { border: 5px solid var(--cobalt); }
+.toast { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); background: var(--sheet); border-radius: var(--r2); box-shadow: var(--shadow); padding: 9px 16px; display: flex; gap: 8px; align-items: center; font-size: 14px; z-index: 3; }
+.toast .sym { color: var(--good); }
+.ann { position: absolute; background: #3157D5; color: #fff; font-size: 12px; line-height: 18px; padding: 4px 8px; border-radius: 6px; max-width: 260px; box-shadow: var(--shadow); z-index: 4; }
+.ann::after { content: ""; position: absolute; width: 8px; height: 8px; background: #3157D5; transform: rotate(45deg); }
+.ann.l::after { left: -4px; top: 9px; } .ann.r::after { right: -4px; top: 9px; } .ann.t::after { top: -4px; left: 16px; } .ann.b::after { bottom: -4px; left: 16px; }
+
+/* 手机 */
+.m .topbar { height: 52px; padding: 0 12px 0 8px; gap: 10px; }
+.m .topbar h1 { font-size: 18px; }
+.m .content { padding: 16px; gap: 16px; }
+.m .panel-head { padding: 16px 16px 0; }
+.m .attention li { padding: 14px 16px; grid-template-columns: 16px minmax(0, 1fr); }
+.m .attention .actions { grid-column: 2; margin-left: -2px; margin-top: 6px; }
+.m .attention .btn { height: 40px; padding: 0 16px; }
+.m .more { padding: 0 16px 16px; }
+.menu-badge { position: absolute; top: 2px; right: 0; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #C83C3C; color: #fff; font-size: 11px; line-height: 18px; font-weight: 600; text-align: center; }
+.m-eq { display: flex; align-items: baseline; gap: 10px; padding: 14px 16px 16px; flex-wrap: wrap; }
+.m-eq b { font-size: 22px; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="crit" viewBox="0 0 12 12"><path d="M6 .6 11.4 6 6 11.4.6 6Z" fill="currentColor"/></symbol>
+  <symbol id="warn" viewBox="0 0 12 12"><path d="M6 1 11.6 10.8H.4Z" fill="currentColor"/></symbol>
+  <symbol id="good" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.2" fill="currentColor"/></symbol>
+  <symbol id="info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 7.2V11M8 5h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="i-overview" viewBox="0 0 16 16"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></symbol>
+  <symbol id="i-stations" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="4.5" rx="1"/><rect x="2" y="9" width="12" height="4.5" rx="1"/></symbol>
+  <symbol id="i-usage" viewBox="0 0 16 16"><path d="M1.5 8.5h3l2-5.5 3 10 2-4.5h3"/></symbol>
+  <symbol id="i-my" viewBox="0 0 16 16"><path d="M2.5 6.5 8 2l5.5 4.5V14h-11Z"/><path d="M6.5 14v-4h3v4"/></symbol>
+  <symbol id="i-analytics" viewBox="0 0 16 16"><path d="M2 14h12"/><path d="M4.5 11V8M8 11V4M11.5 11V6.5"/></symbol>
+  <symbol id="i-recon" viewBox="0 0 16 16"><path d="M2.5 4h7M2.5 8h5M2.5 12h4"/><path d="m9.5 11 1.8 1.8L14 9.5"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 16 16"><path d="M4 7a4 4 0 0 1 8 0v3l1.5 2h-11L4 10Z"/><path d="M6.5 14h3"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.5 8A5.5 5.5 0 1 1 11.9 4.1"/><path d="M13.5 2.2v3.3h-3.3"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 2.5v11a5.5 5.5 0 0 0 0-11Z" fill="currentColor"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 16 16"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="m6 4 4 4-4 4"/></symbol>
+  <symbol id="i-chev-d" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></symbol>
+  <symbol id="i-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+</svg>
+
+<template id="sider">
+  <aside class="sider">
+    <div class="brand"><svg width="28" height="28" viewBox="0 0 32 32"><path d="M7 7H11.5C15.5 7 16 12 21.5 12"/><path d="M7 16H21.5"/><path d="M7 25H11.5C15.5 25 16 20 21.5 20"/><path d="M22 5V27"/><circle cx="5" cy="7" r="2"/><circle cx="5" cy="16" r="2"/><circle cx="5" cy="25" r="2"/></svg><div><strong>炬元</strong><small>控制台</small></div></div>
+    <nav class="nav">
+      <div class="nav-group">监控</div>
+      <a data-k="home"><svg class="icon"><use href="#i-overview"/></svg>运营总览<span class="nav-count">6</span></a>
+      <a data-k="stations"><svg class="icon"><use href="#i-stations"/></svg>上游资源</a>
+      <a data-k="usage"><svg class="icon"><use href="#i-usage"/></svg>用量分析</a>
+      <div class="nav-group">经营</div>
+      <a data-k="my"><svg class="icon"><use href="#i-my"/></svg>自营业务</a>
+      <a data-k="analytics"><svg class="icon"><use href="#i-analytics"/></svg>成本估算</a>
+      <a data-k="recon"><svg class="icon"><use href="#i-recon"/></svg>每日利润</a>
+      <div class="nav-group">系统</div>
+      <a data-k="bell"><svg class="icon"><use href="#i-bell"/></svg>告警中心</a>
+      <a data-k="gear"><svg class="icon"><use href="#i-gear"/></svg>系统设置</a>
+    </nav>
+    <div class="sider-foot">软件版本 2.2.0</div>
+  </aside>
+</template>
+
+<style>
+.tbl { width: 100%; border-collapse: collapse; }
+.tbl th { background: var(--sunken); font-weight: 500; color: var(--ink-2); font-size: 13px; text-align: left; padding: 9px 16px; white-space: nowrap; }
+.tbl td { padding: 11px 16px; border-top: 1px solid var(--rule-soft); font-size: 14px; vertical-align: top; }
+.tbl td small { display: block; color: var(--ink-3); font-size: 12px; line-height: 18px; }
+.tbl .r { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl tr.gap td { background: #FFF8F8; }
+.tbl tr.gap td:first-child { box-shadow: inset 3px 0 0 var(--crit); }
+.tbl tr.attn td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.tbl tr.key td { background: #FAFBFC; font-size: 13px; color: var(--ink-2); padding-top: 9px; padding-bottom: 9px; }
+.tbl tr.child td:first-child { padding-left: 34px; }
+.tbl tr.sum td { background: var(--sunken); font-weight: 600; }
+.tbl tr.expand td { background: #FFF8F8; padding: 0 16px 14px 16px; border-top: 0; }
+.tbl tr.expand td:first-child { box-shadow: inset 3px 0 0 var(--crit); }
+.tbl .muted { color: var(--ink-dis); }
+.pill { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: 11px; font-size: 12px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pill.over { background: var(--crit-tint); color: var(--crit-ink); }
+.pill.under { background: var(--cobalt-tint); color: var(--cobalt); }
+.pill.ok { background: transparent; color: var(--good); font-weight: 500; padding: 0; }
+.pill.ok::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--good); }
+.pill.na { background: var(--warn-tint); color: var(--warn-ink); }
+
+/* 顶上的数 */
+.kpis { display: grid; grid-template-columns: 1.15fr 1fr 1.15fr 1fr; }
+.kpi { padding: 18px 24px 20px; border-left: 1px solid var(--rule-soft); }
+.kpi:first-child { border-left: 0; }
+.kpi > span { display: block; font-size: 13px; color: var(--ink-2); }
+.kpi > b { display: block; font-size: 28px; line-height: 38px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.kpi > small { display: block; font-size: 12px; line-height: 18px; color: var(--ink-3); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.kpi.bad > b { color: var(--crit-ink); }
+.kpi.bad { background: #FFF8F8; }
+.subline { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--ink-2); }
+.foot-line { font-size: 13px; color: var(--ink-3); padding: 12px 24px 16px; display: flex; gap: 16px; flex-wrap: wrap; }
+
+/* 展开的「差在哪几天」 */
+.why-box { border: 1px solid #F4D3D3; background: #fff; border-radius: var(--r2); padding: 12px 14px; display: grid; grid-template-columns: 1fr 360px; gap: 16px; font-size: 13px; }
+.why-box h5 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+.why-box p { margin: 0; color: var(--ink-2); line-height: 20px; }
+.days7 { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.days7 div { height: 44px; border-radius: 6px; background: var(--sunken); display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 11px; color: var(--ink-3); line-height: 14px; font-variant-numeric: tabular-nums; }
+.days7 div.over { background: var(--crit-tint); color: var(--crit-ink); font-weight: 600; box-shadow: inset 0 0 0 1px #EBB5B5; }
+.days7 div b { font-weight: 600; }
+
+/* B：一句话 */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 24px; padding: 24px 28px; align-items: center; }
+.hero h2 { margin: 0; font-size: 15px; font-weight: 500; color: var(--ink-2); }
+.hero .big { font-size: 40px; line-height: 50px; font-weight: 600; font-variant-numeric: tabular-nums; margin: 4px 0 8px; }
+.hero p { margin: 0; font-size: 15px; line-height: 24px; color: var(--ink); }
+.hero p .c-crit { font-weight: 600; }
+.cmp { display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.cmp .row { display: grid; grid-template-columns: 70px 1fr 74px; gap: 10px; align-items: center; font-variant-numeric: tabular-nums; }
+.cmp .row span:first-child { color: var(--ink-3); }
+.cmp .bar2 { height: 10px; border-radius: 5px; background: var(--sunken); position: relative; overflow: hidden; }
+.cmp .bar2 i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 5px; background: #8FA6EC; }
+.cmp .bar2 i.act { background: var(--cobalt); }
+.cmp .r { text-align: right; font-weight: 600; }
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.card { background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r2); padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+.card.over { border-color: #EBB5B5; box-shadow: inset 3px 0 0 var(--crit); }
+.card.attn { border-color: #F3E3C3; box-shadow: inset 3px 0 0 var(--warn); }
+.card.under { box-shadow: inset 3px 0 0 var(--cobalt); }
+.card h4 { margin: 0; font-size: 15px; font-weight: 600; }
+.card h4 small { display: block; font-size: 12px; color: var(--ink-3); font-weight: 400; margin-top: 2px; }
+.card .amt { font-size: 24px; line-height: 30px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.card .pair { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.card .pair span:nth-child(odd) { color: var(--ink-3); }
+.card .cfoot { display: flex; align-items: center; gap: 8px; margin-top: auto; }
+.sec-title { display: flex; align-items: baseline; gap: 10px; }
+.sec-title h3 { margin: 0; font-size: 16px; font-weight: 600; }
+
+/* C：渠道 × 天 */
+.mx { width: 100%; border-collapse: separate; border-spacing: 0; }
+.mx th { font-size: 12px; font-weight: 500; color: var(--ink-2); padding: 8px 6px; background: var(--sunken); text-align: center; white-space: nowrap; }
+.mx th:first-child { text-align: left; padding-left: 16px; }
+.mx th.r, .mx td.r { text-align: right; padding-right: 16px; }
+.mx td { padding: 6px; border-top: 1px solid var(--rule-soft); font-size: 13px; text-align: center; vertical-align: middle; }
+.mx td:first-child { text-align: left; padding: 10px 16px; font-size: 14px; }
+.mx td:first-child small { display: block; font-size: 12px; color: var(--ink-3); }
+.mx td.r { font-variant-numeric: tabular-nums; }
+.cell { height: 34px; border-radius: 6px; display: grid; place-items: center; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--ink-dis); background: #F7F9FB; }
+.cell.over { background: var(--crit-tint); color: var(--crit-ink); font-weight: 600; box-shadow: inset 0 0 0 1px #EBB5B5; }
+.cell.under { background: #fff; color: var(--cobalt); font-weight: 600; box-shadow: inset 0 0 0 1px #AFC0F2; }
+.cell.na { background: repeating-linear-gradient(135deg, #FFF4E0 0 5px, #FCE7C2 5px 7px); color: var(--warn-ink); font-weight: 500; }
+.cell.today { box-shadow: inset 0 0 0 1px #AFC0F2; }
+.cell.over.today { box-shadow: inset 0 0 0 1px #EBB5B5, 0 0 0 2px #EBF0FD; }
+.mx tr.sum td { background: var(--sunken); font-weight: 600; }
+.legend { display: flex; gap: 18px; align-items: center; font-size: 12px; color: var(--ink-3); padding: 12px 24px 16px; }
+.legend i { display: inline-block; width: 18px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 6px; }
+.minis { display: flex; gap: 32px; align-items: baseline; padding: 16px 24px 18px; flex-wrap: wrap; }
+.minis div span { display: block; font-size: 12px; color: var(--ink-3); }
+.minis div b { font-size: 22px; line-height: 30px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.minis div small { font-size: 12px; color: var(--ink-3); margin-left: 6px; }
+</style>
+
+<style>
+.minis div small { display: block; font-size: 12px; color: var(--ink-3); white-space: nowrap; }
+.cell.later { background: #fff; color: var(--ink-3); border: 1px dashed #C9D1DC; font-size: 11px; }
+.cell.none { background: transparent; color: var(--ink-dis); }
+.cell.over, .cell.under { color: var(--ink); }
+.gray { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.flag { display: inline-flex; align-items: center; height: 20px; padding: 0 6px; border-radius: 4px; font-size: 12px; font-weight: 600; margin-left: 8px; background: var(--crit-tint); color: var(--crit-ink); box-shadow: inset 0 0 0 1px #EBB5B5; }
+.flag.under { background: var(--cobalt-tint); color: var(--cobalt); box-shadow: inset 0 0 0 1px #AFC0F2; }
+.dash { color: var(--ink-3); }
+.dash small { display: block; font-size: 12px; line-height: 17px; color: var(--ink-3); white-space: normal; }
+td.why { max-width: 240px; }
+.mx th small { display: block; font-weight: 400; color: var(--ink-3); }
+.kpi.bad > b { color: var(--ink); }
+.days7 div.over { color: var(--ink); }
+</style>
+
+<!-- ═══ dp-a：昨天（已固定的一天，完整对账） ═══ -->
+<p class="frame-label" style="width:1440px">dp-a · 样子 A「一张对账表」，看已经固定的一天（昨天）：顶上四个数，下面一张表一行一个渠道（同一把 Key 的几个渠道合一行），五个数都在一行里；对不上的排最前、点开看差在哪几天；算不了差额的写「—」和原因</p>
+<section class="frame" id="dp-a" style="width:1440px;height:1130px">
+  <div class="shell" data-on="recon">
+    <div class="sider-slot"></div>
+    <div class="main">
+      <header class="topbar"><h1>每日利润</h1><span class="seg"><span>今天</span><span class="on">昨天</span><span>近 7 天</span><span>本月</span><span>自定义</span></span><span class="spacer"></span><span class="fresh"><i></i>数据截至 14:32</span><span class="avatar">A</span></header>
+      <div class="content" style="gap:16px">
+        <div class="subline"><span>10月25日 周日 · 已固定</span><span class="spacer"></span><span class="btn">以前的每日记录</span></div>
+        <section class="panel">
+          <div class="kpis">
+            <div class="kpi"><span>毛利</span><b>$39.19</b><small>收入 $103.70 − 实付成本 $64.51<br>毛利率 37.8%</small></div>
+            <div class="kpi bad"><span>比预期少赚</span><b>$0.71</b><small>多扣 $1.20 · 少扣 $0.50 · 门槛以内 +$0.01<br>只算算得出应付成本的 3 行</small></div>
+            <div class="kpi"><span>对不上</span><b>2 个渠道</b><small>差额超过门槛的</small></div>
+            <div class="kpi"><span>算不了差额</span><b>2 个渠道</b><small>Sub2API 上游 1 个 · 有模型没价格 1 个<br>另有 1 个读不到上游账单，没算进来</small></div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head" style="padding-bottom:12px"><h2>渠道</h2><span class="count muted">7</span><span class="spacer" style="flex:1"></span><span class="seg"><span class="on">全部</span><span>对不上 2</span><span>需处理 1</span></span></div>
+          <table class="tbl">
+            <thead><tr><th style="width:290px">渠道</th><th class="r">收入</th><th class="r">应付成本</th><th class="r">实付成本</th><th class="r" style="width:270px">差额<small style="display:inline;color:var(--ink-3);font-weight:400"> 实付 − 应付</small></th><th class="r">毛利</th></tr></thead>
+            <tbody>
+              <tr class="gap"><td><b style="font-weight:600">备用 C</b><small>拼车团队 · Key team-c · vip 分组 ×0.8</small></td><td class="r">$14.60</td><td class="r">$8.00</td><td class="r">$9.20</td><td class="r">多扣 $1.20 <span class="gray">比应付多 15%</span><span class="flag">对不上</span></td><td class="r">$5.40</td></tr>
+              <tr class="expand"><td colspan="6">
+                <div class="why-box">
+                  <div><h5>差在哪</h5><p>自营站点这个渠道这天用了 160 万 Token，按上游的价格和 vip 分组 ×0.8 算，应付 $8.00；上游这把 Key 这天实付 $9.20。10月24日 也多扣了 $0.90。</p><p style="margin-top:8px"><a>看计算明细（按模型拆开）</a>　<a>到上游后台查这把 Key</a></p></div>
+                  <div><h5>近 7 天每天的差额</h5><div class="days7"><div>19日<b>·</b></div><div>20日<b>·</b></div><div>21日<b>·</b></div><div>22日<b>·</b></div><div>23日<b>·</b></div><div class="over">24日<b>+0.90</b></div><div class="over">25日<b>+1.20</b></div></div></div>
+                </div>
+              </td></tr>
+              <tr><td>直连 E<small>官方代理 · Key pw · default 分组 ×1.0</small></td><td class="r">$20.80</td><td class="r">$13.90</td><td class="r">$13.40</td><td class="r">少扣 $0.50 <span class="gray">比应付少 3.6%</span><span class="flag under">对不上</span></td><td class="r">$7.40</td></tr>
+              <tr class="attn"><td><b style="font-weight:600">备用 F</b><small>轻量站 · Key k2</small></td><td class="r">$5.10</td><td class="r dash">—</td><td class="r"><span class="pill na">读不到</span></td><td class="r why dash">—<small>上游账单从 10月17日 起一直读不到</small></td><td class="r dash">—</td></tr>
+              <tr class="attn"><td colspan="6" style="border-top:0;padding-top:0"><span class="caption c-warn">需处理：这一行没算进合计。</span> <span class="btn sm" style="margin-left:8px">更新登录信息</span></td></tr>
+              <tr><td>高速 A、备用 B<small>主力上游 · 2 个渠道合用 Key oai · ×1.0</small></td><td class="r">$58.60</td><td class="r">$35.70</td><td class="r">$35.71</td><td class="r gray">+$0.01</td><td class="r">$22.89</td></tr>
+              <tr><td>低价 D<small>低价站 · Key low</small></td><td class="r">$6.30</td><td class="r dash">—</td><td class="r">$4.10</td><td class="r why dash">—<small>Sub2API 上游读不到价格，算不了应付成本</small></td><td class="r">$2.20</td></tr>
+              <tr><td>新模型 G<small>主力上游 · Key oai2 · default 分组 ×1.0</small></td><td class="r">$3.40</td><td class="r dash">—</td><td class="r">$2.10</td><td class="r why dash">—<small>上游没给 o3-pro 的价格，算不了应付成本</small></td><td class="r">$1.30</td></tr>
+              <tr class="sum"><td>合计（算进来的 6 个渠道）</td><td class="r">$103.70</td><td class="r">$57.60<small style="font-weight:400">只有 3 行</small></td><td class="r">$64.51</td><td class="r">+$0.71<small style="font-weight:400">同样这 3 行</small></td><td class="r">$39.19</td></tr>
+            </tbody>
+          </table>
+          <div class="foot-line"><span>差额同时超过 $0.05 和应付成本的 2% 才标「对不上」，没超过的照常写数</span><span>另有 $15.55 上游成本没算进利润 <a>查看各上游</a></span><span>另有 2 个渠道还没算利润 <a>开始算利润</a></span><span>没设置汇率，按美元显示</span><span>固定成本和净利看<a>运营总览</a></span></div>
+        </section>
+      </div>
+    </div>
+  </div>
+  <div class="ann t" style="left:540px;top:276px;max-width:330px">比预期少赚 = 实付成本 − 应付成本，只算算得出应付成本的那几行</div>
+  <div class="ann r" style="left:330px;top:934px;max-width:250px">算不了的写「—」和一句原因，不写 0</div>
+</section>
+
+<!-- ═══ dp-a-today：A 看今天 ═══ -->
+<p class="frame-label" style="width:1440px">dp-a-today · 样子 A 看今天：今天的毛利实时算；应付成本和差额要等这一天过了零点、固定以后才有，所以表的最后一列换成「10月25日的差额」（最近一次算得出的那天），对不上的照样一眼看出</p>
+<section class="frame" id="dp-a-today" style="width:1440px;height:870px">
+  <div class="shell" data-on="recon">
+    <div class="sider-slot"></div>
+    <div class="main">
+      <header class="topbar"><h1>每日利润</h1><span class="seg"><span class="on">今天</span><span>昨天</span><span>近 7 天</span><span>本月</span><span>自定义</span></span><span class="spacer"></span><span class="fresh"><i></i>数据截至 14:32</span><span class="avatar">A</span></header>
+      <div class="content" style="gap:16px">
+        <div class="subline"><span>10月26日 0:00–14:32 · 今天的数还会变，过了零点自动固定</span><span class="spacer"></span><span class="btn">以前的每日记录</span></div>
+        <section class="panel">
+          <div class="kpis">
+            <div class="kpi"><span>今天到现在的毛利</span><b>$35.90</b><small>收入 $95.10 − 实付成本 $59.20<br>毛利率 37.7%</small></div>
+            <div class="kpi"><span>今天的差额</span><b class="gray" style="font-size:20px">明天出</b><small>应付成本和差额，等今天过了零点、固定以后才算</small></div>
+            <div class="kpi bad"><span>10月25日 比预期少赚</span><b>$0.71</b><small>2 个渠道对不上 · <a>看 10月25日</a></small></div>
+            <div class="kpi"><span>没算进来</span><b>1 个渠道</b><small>「备用 F」上游账单读不到</small></div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head" style="padding-bottom:12px"><h2>渠道</h2><span class="count muted">7</span></div>
+          <table class="tbl">
+            <thead><tr><th style="width:330px">渠道</th><th class="r">收入</th><th class="r">实付成本</th><th class="r">毛利</th><th class="r" style="width:310px">10月25日的差额</th></tr></thead>
+            <tbody>
+              <tr class="gap"><td><b style="font-weight:600">备用 C</b><small>拼车团队 · Key team-c · vip 分组 ×0.8</small></td><td class="r">$14.20</td><td class="r">$8.90</td><td class="r">$5.30</td><td class="r">多扣 $1.20<span class="flag">对不上</span></td></tr>
+              <tr><td>直连 E<small>官方代理 · Key pw</small></td><td class="r">$19.60</td><td class="r">$12.70</td><td class="r">$6.90</td><td class="r">少扣 $0.50<span class="flag under">对不上</span></td></tr>
+              <tr class="attn"><td><b style="font-weight:600">备用 F</b><small>轻量站 · Key k2</small></td><td class="r">$4.80</td><td class="r"><span class="pill na">读不到</span></td><td class="r dash">—</td><td class="r dash">—<small>上游账单从 10月17日 起读不到</small></td></tr>
+              <tr class="attn"><td colspan="5" style="border-top:0;padding-top:0"><span class="caption c-warn">需处理：这一行没算进合计。</span> <span class="btn sm" style="margin-left:8px">更新登录信息</span></td></tr>
+              <tr><td>高速 A、备用 B<small>主力上游 · 2 个渠道合用 Key oai</small></td><td class="r">$52.30</td><td class="r">$31.90</td><td class="r">$20.40</td><td class="r gray">+$0.01</td></tr>
+              <tr><td>低价 D<small>低价站 · Key low</small></td><td class="r">$5.90</td><td class="r">$3.80</td><td class="r">$2.10</td><td class="r dash">—<small>Sub2API 上游读不到价格</small></td></tr>
+              <tr><td>新模型 G<small>主力上游 · Key oai2</small></td><td class="r">$3.10</td><td class="r">$1.90</td><td class="r">$1.20</td><td class="r dash">—<small>上游没给 o3-pro 的价格</small></td></tr>
+              <tr class="sum"><td>合计（算进来的 6 个渠道）</td><td class="r">$95.10</td><td class="r">$59.20</td><td class="r">$35.90</td><td class="r">+$0.71</td></tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+    </div>
+  </div>
+  <div class="ann t" style="left:540px;top:276px;max-width:330px">今天的差额不写 0，写「明天出」；旁边一格给最近一次算得出的那天</div>
+</section>
+
+<!-- ═══ dp-b ═══ -->
+<p class="frame-label" style="width:1440px">dp-b · 样子 B「先说结论」（看今天）：顶上一句大字说今天赚了多少，下面一句说最近一次算得出差额的那天（昨天）差多少、差在哪；只摆要查的几张卡片；其余渠道今天的数收在最下面</p>
+<section class="frame" id="dp-b" style="width:1440px;height:1000px">
+  <div class="shell" data-on="recon">
+    <div class="sider-slot"></div>
+    <div class="main">
+      <header class="topbar"><h1>每日利润</h1><span class="seg"><span class="on">今天</span><span>昨天</span><span>近 7 天</span><span>本月</span><span>自定义</span></span><span class="spacer"></span><span class="fresh"><i></i>数据截至 14:32</span><span class="avatar">A</span></header>
+      <div class="content" style="gap:20px">
+        <section class="panel">
+          <div class="hero">
+            <div>
+              <h2>今天到现在（0:00–14:32，还会变）</h2>
+              <div class="big">毛利 $35.90</div>
+              <p>昨天（10月25日）比按倍率算的少赚 $0.71：上游在「备用 C」多扣了 $1.20，在「直连 E」少扣了 $0.50，其余算得出的差 $0.01。今天的差额明天出。</p>
+            </div>
+            <div class="cmp">
+              <div class="caption" style="padding-left:80px;margin-bottom:-2px">10月25日，算得出应付成本的 3 行</div>
+              <div class="row"><span>预期毛利</span><div class="bar2"><i style="width:100%"></i></div><span class="r">$36.40</span></div>
+              <div class="row"><span>实际毛利</span><div class="bar2"><i class="act" style="width:98.0%"></i></div><span class="r">$35.69</span></div>
+              <div class="caption" style="padding-left:80px">另 2 个渠道算不了差额，1 个读不到账单</div>
+            </div>
+          </div>
+        </section>
+        <div class="sec-title"><h3>要查的</h3><span class="count">3</span><span class="caption">10月25日 · 多扣在前，然后是读不到、少扣</span></div>
+        <div class="cards">
+          <div class="card over">
+            <h4>备用 C<small>拼车团队 · Key team-c · vip 分组 ×0.8</small></h4>
+            <div class="amt">多扣 $1.20 <span class="caption">比应付多 15%</span><span class="flag">对不上</span></div>
+            <div class="pair"><span>应付</span><span>$8.00（160 万 Token，按上游价格 × 0.8）</span><span>实付</span><span>$9.20</span><span>毛利</span><span>$5.40</span></div>
+            <div class="days7"><div>19日<b>·</b></div><div>20日<b>·</b></div><div>21日<b>·</b></div><div>22日<b>·</b></div><div>23日<b>·</b></div><div class="over">24日<b>+0.90</b></div><div class="over">25日<b>+1.20</b></div></div>
+            <div class="cfoot"><span class="btn sm">看计算明细</span><a class="caption" style="color:var(--cobalt)">到上游后台查这把 Key</a></div>
+          </div>
+          <div class="card attn">
+            <h4>备用 F<small>轻量站 · Key k2</small></h4>
+            <div class="amt c-warn" style="font-size:18px">上游账单读不到</div>
+            <div class="pair"><span>收入</span><span>今天 $4.80</span><span>实付</span><span>读不到，从 10月17日 起</span></div>
+            <p class="caption" style="margin:0">这个渠道的毛利和差额都没法算，没算进上面的数。</p>
+            <div class="cfoot"><span class="btn sm">更新登录信息</span></div>
+          </div>
+          <div class="card under">
+            <h4>直连 E<small>官方代理 · Key pw · default 分组 ×1.0</small></h4>
+            <div class="amt">少扣 $0.50 <span class="caption">比应付少 3.6%</span><span class="flag under">对不上</span></div>
+            <div class="pair"><span>应付</span><span>$13.90</span><span>实付</span><span>$13.40</span><span>毛利</span><span>$7.40</span></div>
+            <p class="caption" style="margin:0">上游少收了，对你不亏。标出来是因为它也说明上游没按倍率收。</p>
+            <div class="cfoot"><span class="btn sm">看计算明细</span></div>
+          </div>
+        </div>
+        <section class="panel">
+          <div class="panel-head" style="padding-bottom:12px"><h2>其余渠道今天</h2><span class="count muted">3</span><span class="spacer" style="flex:1"></span><span class="btn link sm">收起</span></div>
+          <table class="tbl">
+            <thead><tr><th>渠道</th><th class="r">收入</th><th class="r">实付成本</th><th class="r">毛利</th><th class="r">10月25日的差额</th></tr></thead>
+            <tbody>
+              <tr><td>高速 A、备用 B<small>主力上游 · 2 个渠道合用 Key oai</small></td><td class="r">$52.30</td><td class="r">$31.90</td><td class="r">$20.40</td><td class="r gray">+$0.01</td></tr>
+              <tr><td>低价 D<small>低价站 · Key low</small></td><td class="r">$5.90</td><td class="r">$3.80</td><td class="r">$2.10</td><td class="r dash">—<small>Sub2API 上游读不到价格</small></td></tr>
+              <tr><td>新模型 G<small>主力上游 · Key oai2</small></td><td class="r">$3.10</td><td class="r">$1.90</td><td class="r">$1.20</td><td class="r dash">—<small>上游没给 o3-pro 的价格</small></td></tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+    </div>
+  </div>
+  <div class="ann l" style="left:600px;top:283px;max-width:420px">今天看毛利，差额看最近算得出的那天，两件分两句说</div>
+</section>
+
+<!-- ═══ dp-c ═══ -->
+<p class="frame-label" style="width:1440px">dp-c · 样子 C「渠道 × 天」（看近 7 天）：一张格子表，行是渠道，列是天；格子里写那天的差额，只有对不上的才上底色；今天那一列写「明天出」；算不了差额的渠道整行写「—」，原因写在渠道名下面</p>
+<section class="frame" id="dp-c" style="width:1440px;height:900px">
+  <div class="shell" data-on="recon">
+    <div class="sider-slot"></div>
+    <div class="main">
+      <header class="topbar"><h1>每日利润</h1><span class="seg"><span>今天</span><span>昨天</span><span class="on">近 7 天</span><span>本月</span><span>自定义</span></span><span class="spacer"></span><span class="fresh"><i></i>数据截至 14:32</span><span class="avatar">A</span></header>
+      <div class="content" style="gap:16px">
+        <section class="panel">
+          <div class="minis">
+            <div><span>近 7 天毛利（含今天到现在）</span><b>$265.09</b><small>收入 $702.58 − 实付成本 $437.49</small></div>
+            <div><span>比预期少赚（10月20日–10月25日）</span><b>$1.65</b><small>多扣 $2.10 · 少扣 $0.50 · 门槛以内 +$0.05</small></div>
+            <div><span>对不上</span><b>2 个渠道</b><small>算不了差额 2 个 · 需处理 1 个</small></div>
+            <span class="spacer" style="flex:1"></span><span class="btn">以前的每日记录</span>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head" style="padding-bottom:12px"><h2>每天的差额</h2><span class="caption">实付成本 − 应付成本；只有对不上的才上底色</span></div>
+          <table class="mx">
+            <thead><tr><th style="width:250px">渠道</th><th>10月20日<small>周二</small></th><th>10月21日<small>周三</small></th><th>10月22日<small>周四</small></th><th>10月23日<small>周五</small></th><th>10月24日<small>周六</small></th><th>10月25日<small>周日</small></th><th>今天<small>还会变</small></th><th class="r">6 天差额</th><th class="r">毛利</th></tr></thead>
+            <tbody>
+              <tr><td>备用 C<small>拼车团队 · Key team-c · ×0.8</small></td><td><div class="cell"></div></td><td><div class="cell"></div></td><td><div class="cell"></div></td><td><div class="cell"></div></td><td><div class="cell over">+0.90</div></td><td><div class="cell over">+1.20</div></td><td><div class="cell later">明天出</div></td><td class="r">多扣 $2.10</td><td class="r">$42.10</td></tr>
+              <tr><td>直连 E<small>官方代理 · Key pw</small></td><td><div class="cell"></div></td><td><div class="cell"></div></td><td><div class="cell"></div></td><td><div class="cell"></div></td><td><div class="cell"></div></td><td><div class="cell under">−0.50</div></td><td><div class="cell later">明天出</div></td><td class="r">少扣 $0.50</td><td class="r">$49.00</td></tr>
+              <tr><td>备用 F<small>轻量站 · 上游账单从 10月17日 起读不到</small></td><td><div class="cell na">读不到</div></td><td><div class="cell na">读不到</div></td><td><div class="cell na">读不到</div></td><td><div class="cell na">读不到</div></td><td><div class="cell na">读不到</div></td><td><div class="cell na">读不到</div></td><td><div class="cell na">读不到</div></td><td class="r"><span class="pill na">需处理</span></td><td class="r dash">—</td></tr>
+              <tr><td>高速 A、备用 B<small>主力上游 · 2 个渠道合用 Key oai</small></td><td><div class="cell">+0.01</div></td><td><div class="cell"></div></td><td><div class="cell">+0.02</div></td><td><div class="cell"></div></td><td><div class="cell">+0.01</div></td><td><div class="cell">+0.01</div></td><td><div class="cell later">明天出</div></td><td class="r gray">+$0.05</td><td class="r">$160.05</td></tr>
+              <tr><td>低价 D<small>低价站 · Sub2API 上游读不到价格</small></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td class="r dash">—</td><td class="r">$11.24</td></tr>
+              <tr><td>新模型 G<small>主力上游 · 上游没给 o3-pro 的价格</small></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td><div class="cell none">—</div></td><td class="r dash">—</td><td class="r">$2.70</td></tr>
+              <tr class="sum"><td>每天合计毛利</td><td>$37.20</td><td>$38.15</td><td>$39.30</td><td>$37.90</td><td>$37.45</td><td>$39.19</td><td>$35.90</td><td class="r">+$1.65</td><td class="r">$265.09</td></tr>
+            </tbody>
+          </table>
+          <div class="legend"><span><i style="background:var(--crit-tint);box-shadow:inset 0 0 0 1px #EBB5B5"></i>多扣，对不上</span><span><i style="background:#fff;box-shadow:inset 0 0 0 1px #AFC0F2"></i>少扣，对不上</span><span><i style="background:repeating-linear-gradient(135deg,#FFF4E0 0 4px,#FCE7C2 4px 6px)"></i>读不到上游账单</span><span><i style="background:#fff;border:1px dashed #C9D1DC"></i>今天，明天出</span><span><i style="background:#F7F9FB;box-shadow:inset 0 0 0 1px var(--rule)"></i>门槛以内（照常写数）</span><span class="spacer" style="flex:1"></span><span>点格子看那一天的计算明细</span></div>
+        </section>
+        <div class="foot-line" style="padding:0 4px"><span>另有 2 个渠道还没算利润 <a>开始算利润</a></span><span>收入、应付成本、实付成本逐项看：点渠道名</span><span>没设置汇率，按美元显示</span><span>固定成本和净利看<a>运营总览</a></span></div>
+      </div>
+    </div>
+  </div>
+  <div class="ann l" style="left:640px;top:234px;max-width:420px">差在哪个渠道、哪几天，一眼扫出来：上了底色的格子就是要查的</div>
+</section>
+<script>
+  const tpl = document.getElementById("sider");
+  for (const shell of document.querySelectorAll(".shell")) {
+    const slot = shell.querySelector(".sider-slot");
+    const node = tpl.content.cloneNode(true);
+    const on = shell.dataset.on;
+    node.querySelector(`[data-k="${on}"]`)?.classList.add("on");
+    slot.replaceWith(node);
+  }
+</script>
+</body>
+</html>
