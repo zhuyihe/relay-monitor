@@ -7,11 +7,16 @@
 //     很稀的窗口翻倍，上限 1 小时；下限 5 秒（每秒几十条的站点也能一个窗口一个窗口往前走，审核 #123 中-2）；
 //   - 每轮最多 MAX_PAGES_PER_ROUND 页、MAX_ROUND_MS 毫秒；落后超过 BEHIND_MS 时每轮放宽到 MAX_PAGES_BEHIND 页（180 秒 45 个、限流的 12.5%），追平回到 6 页；
 //     每发一个请求之前都看一眼时间和断路器，到了就停，这个窗口不写，下一轮从窗口起点重来（审核 #123 中-3）；
-//   - 第一次跑只从昨天 0 点（业务时区）起，不往前补更早的；进度比保留期还旧（停机超过 35 天）也从昨天 0 点重来，不补注定要被清掉的桶；
+//   - 第一次跑只从昨天 0 点（业务时区）起，不往前补更早的；
+//   - 停机、站点读不到、令牌失效造成的掉队，不管多久都照常按保底慢慢追，不跳、不清桶（总指挥 10-26 定第三轮）；
+//     只在「算应付成本」关→开这一下，进度比昨天 0 点还旧时，才挪到昨天 0 点（关着的日子本来就不读，不补那段缺口），
+//     跳过的缺口记在 own_log_cursor 的 disabled_from_ms/disabled_to_ms，结账时那几天给 EXPECTED_COST_DISABLED；
 //   - 每个窗口读完才写库（桶加进去、进度挪到窗口终点，一个事务），读到一半出错整个窗口不写；
 //   - 落后超过 LAG_WARN_MS 每小时打一行日志（V1-a 没页面，先不进需处理）。
 // 桶里顺手记下管理员自用额度、不在管理员名下的渠道测试额度（和 R1 同一个规矩，server/own-helpers.js 的管理员名单），V1 只用来和 R1 对账打日志。
 // 开关：系统设置「算应付成本」settings.expectedCost（db/store.js，每轮读一次）——只有明确开着才读；默认开，系统设置页上能关（server/reconciliation.js）。
+// 关→开判断：server/reconciliation.js 轮询时记 settings.expectedCostWasOff（settings 里的内部标记，不进设置页），只在关变开那一轮把
+// justTurnedOn 传给 ingestOnce。
 import { OWN_LOG_SLOT_MS, accumulateBuckets } from "../lib/own-log-bucket.js";
 import { ingestAllowance, noteIngestUsage, ownRequestState } from "../lib/own-request-budget.js";
 import { queryOwnLogWindow } from "../lib/providers.js";
@@ -46,7 +51,7 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
   // 第一次：从昨天 0 点（业务时区）起读
   const firstFromMs = (at) => shiftedDayStartInTz(dayStartInTz(dayKeyInTz(at, businessTimeZone()), businessTimeZone()), -1, businessTimeZone());
 
-  async function ingestOnce(own) {
+  async function ingestOnce(own, { justTurnedOn = false } = {}) {
     if (!own?.isOwn || own.type !== "newapi") return { skipped: "not-own" };
     const at = now();
     const base = ownBase(own);
@@ -57,10 +62,13 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
     try { ({ adminSet } = await readOwnAdminDirectory(rt, own)); resoldKeys = resoldAdminKeysOf(own); }
     catch (error) { return { skipped: "admins", pages: 0, error: error?.code || error?.message }; }
     let cursor = await store.getCursor(own.id);
-    // 进度比昨天 0 点（业务时区）还旧——停机、或「算应付成本」关了一阵子又打开：不补那段缺口（关着的日子本来就用不上，
-    // 停机太久的话补上的桶也多半被保留期清掉），直接从昨天 0 点重来，和第一次开始读一样（总指挥 10-26 定，决定 C）。
-    // 跳过的那几天 coveredFromMs 一起挪过去，下次结账按 expectedCostForDay 的覆盖判断自然落「还没开始算」，不会误判成「读得慢」
-    if (cursor && cursor.coveredToMs < firstFromMs(at)) { await store.deleteStation(own.id); cursor = null; log("own-log-ingest", own.id, "cursor too old, restarting from yesterday"); }
+    // 只在「算应付成本」关→开这一下才跳：关着那几天本来就不读，不补那段缺口，直接挪到昨天 0 点（总指挥 10-26 定第三轮，决定 C）。
+    // 停机、站点读不到、令牌失效造成的掉队，不管多久都不跳，照常按保底慢慢追——那几天的开关本来是开着的，补得上就该补上。
+    // 跳过的缺口记在 cursor 的 disabledFromMs/disabledToMs（结账时这段范围给 EXPECTED_COST_DISABLED），不清桶（已经读进来的留着）
+    if (justTurnedOn && cursor && cursor.coveredToMs < firstFromMs(at)) {
+      cursor = await store.skipCursor(own.id, firstFromMs(at), at);
+      log("own-log-ingest", own.id, "off->on, skipped stale progress to yesterday");
+    }
     cursor ??= await store.startCursor(own.id, firstFromMs(at), at);
     const horizon = wholeSecond(at - INGEST.LAG_MS);
     if (cursor.coveredToMs >= horizon) return { skipped: "caught-up", pages: 0, coveredToMs: cursor.coveredToMs };

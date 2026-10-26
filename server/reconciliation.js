@@ -2198,16 +2198,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const segments = (result.segments || []).map((segment) => ({ startMs: segment.window?.startMs ?? window.startMs, endMs: segment.window?.endMs ?? window.endMs,
       ratio: segment.upstream?.ratio ?? segment.ratio ?? result.upstream?.ratio ?? null, group: segment.upstream?.group ?? segment.group ?? result.upstream?.group ?? null }));
     const quotaPerUnit = result.upstream?.quotaPerUnit ?? null;
-    let buckets = [], coveredFromMs = null, coveredToMs = null, pricing = null, pricingError = null;
+    let buckets = [], coveredFromMs = null, coveredToMs = null, disabledFromMs = null, disabledToMs = null, pricing = null, pricingError = null;
     try {
       const [cursor, rows] = await Promise.all([store?.getCursor(own?.id) ?? null, store?.listBuckets(own?.id, window.startMs, window.endMs) ?? []]);
-      coveredFromMs = cursor?.coveredFromMs ?? null; coveredToMs = cursor?.coveredToMs ?? null; buckets = rows;
+      coveredFromMs = cursor?.coveredFromMs ?? null; coveredToMs = cursor?.coveredToMs ?? null;
+      disabledFromMs = cursor?.disabledFromMs ?? null; disabledToMs = cursor?.disabledToMs ?? null; buckets = rows;
     } catch (error) { console.debug("应付成本：读小时桶失败", rule.id, error?.code || error?.message); }
     if (upstream?.type === "newapi" && !upstream.isOwn) {
       try { pricing = await upstreamPricing.pricingFor(upstream); } catch (error) { pricingError = error; }
     }
     const expected = expectedCostForDay({ window, buckets, channelIds, segments: segments.length ? segments : [{ startMs: window.startMs, endMs: window.endMs, ratio: result.upstream?.ratio ?? null, group: result.upstream?.group ?? null }],
-      pricing, pricingError, quotaPerUnit, flags: { off: rt.store?.settings?.expectedCost === false, platform: upstream?.type ?? null, keyShared, groupAuto, coveredFromMs, coveredToMs } });
+      pricing, pricingError, quotaPerUnit, flags: { off: rt.store?.settings?.expectedCost === false, platform: upstream?.type ?? null, keyShared, groupAuto, coveredFromMs, coveredToMs, disabledFromMs, disabledToMs } });
     // 对账：桶里这些渠道这一天的管理员自用额度（R1 的规矩）和 R1 实际扣的比一比（只打日志，不改数；跑一两周一致了再让 R1 用桶）
     if (coveredToMs != null && coveredToMs >= window.endMs && result.downstream?.adminUsageQuotaUnits != null) {
       const wanted = new Set(channelIds.map(Number));
@@ -2960,11 +2961,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       await pruneSettlementStates(now);
       // 自营站点整站日志增量读（应付成本 V1-a）：每轮每个自营站点读几页，额度和断路在 lib/own-request-budget.js；读失败不影响这一轮别的事
       // 「算应付成本」开着（settings.expectedCost === true）才读；没设置过、关着都一个整站读请求都不发（每轮读一次，不用重启；用语规范 §8.3）
-      if (ownLogIngest && rt.store?.settings?.expectedCost === true) {
+      const expectedCostOn = rt.store?.settings?.expectedCost === true;
+      // 记「上一次看到开关是关着的」：只在关→开这一下才告诉 ingestOnce 去跳缺口（总指挥 10-26 定第三轮，决定 C）
+      const wasOff = rt.store?.settings?.expectedCostWasOff === true;
+      const justTurnedOn = expectedCostOn && wasOff;
+      if (!expectedCostOn && !wasOff) await rt.store?.updateSettings?.({ expectedCostWasOff: true })?.catch?.(() => {});
+      else if (justTurnedOn) await rt.store?.updateSettings?.({ expectedCostWasOff: false })?.catch?.(() => {});
+      if (ownLogIngest && expectedCostOn) {
         for (const id of new Set(rules.map((rule) => rule.ownStationId))) {
           const own = upstreamStation(id);
           if (own?.isOwn && own.type === "newapi") {
-            await ownLog.ingestOnce(own).catch((error) => console.error("自营站点整站日志读取失败:", error?.message || String(error)));
+            await ownLog.ingestOnce(own, { justTurnedOn }).catch((error) => console.error("自营站点整站日志读取失败:", error?.message || String(error)));
             await backfillExpectedCost(own, { now }).catch((error) => console.error("应付成本补算失败:", error?.message || String(error)));
           }
         }

@@ -46,6 +46,9 @@ const DEFAULT_SETTINGS = {
   // 「算应付成本」开关（用语规范 §8.3，应付成本 V1）：开着时定时读自营站点的收费记录（server/own-log-ingest.js）、结账时算应付成本（V1-b）；关掉以后一个整站读请求都不发。
   // 默认开（V1-b 带上了设置页的开关界面；V1-a 单独上线时是关的）
   expectedCost: true,
+  // 内部标记，不进设置页：轮询时记「上一次看到这个开关是关着的」，只在关→开这一下才跳过整站日志的缺口（总指挥 10-26 定第三轮，
+  // server/reconciliation.js、server/own-log-ingest.js）
+  expectedCostWasOff: false,
 };
 
 function uid(prefix = "st") {

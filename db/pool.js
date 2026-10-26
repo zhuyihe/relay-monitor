@@ -296,6 +296,10 @@ export async function ensureSchema(pool) {
     covered_to_ms BIGINT NOT NULL,
     updated_at_ms BIGINT NOT NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 「算应付成本」关→开跳过的那段缺口（总指挥 10-26 定第三轮）：covered_to_ms 直接挪到昨天 0 点，中间跳过的这段记在这两列，
+  // 结账时这段范围里的日子给 EXPECTED_COST_DISABLED（不是 NOT_STARTED/EXPECTED_COST_NOT_RECORDED，那两个留给「还没开始统计」）
+  await addColumnIfMissing(pool, "own_log_cursor", "disabled_from_ms", "BIGINT NULL");
+  await addColumnIfMissing(pool, "own_log_cursor", "disabled_to_ms", "BIGINT NULL");
   await pool.query(`CREATE TABLE IF NOT EXISTS own_log_buckets (
     station_id VARCHAR(32) NOT NULL,
     slot_ms BIGINT NOT NULL,

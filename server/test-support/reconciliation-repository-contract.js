@@ -1188,6 +1188,13 @@ contract("expected-cost backfill: listLedgerDaysByReason lists lagging days of t
   assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-08", { expectedCostUsd: 9, revision: 999 }), false, "revision 对不上不填");
   assert.equal((await repository.latestLedgerEntry(rule.id, window8)).expectedCostUsd, 1.25);
   assert.deepEqual(await repository.listLedgerDaysByReason([rule.id], "2026-01-01", "EXPECTED_COST_LAGGING"), []);
+  // 审核第二轮 低-A：带着第 1 版的号去填，这期间又重结写出了第 2 版（也还没读到、还是 LAGGING）——revision 对不上「现在的最新一版」，
+  // 不能填到第 1 版上（第 1 版已经不是最新的了，填了也没用，还把旧版的 detail 改了）；内存和 MySQL 要走同一个结果
+  await book(11, { expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null });
+  const window11 = await book(11, { expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null }, true);
+  assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-11", { expectedCostUsd: 9, revision: 1 }), false, "已经有第 2 版、带第 1 版去填：不填");
+  const stillLagging = await repository.latestLedgerEntry(rule.id, window11);
+  assert.deepEqual([stillLagging.revision, stillLagging.expectedCostUsd, stillLagging.gapReason], [2, null, "EXPECTED_COST_LAGGING"], "第 2 版没被填、也没被动过");
 });
 
 contract("billing capabilities round-trip, overwrite and delete by identity", async ({ repository, fixture }) => {

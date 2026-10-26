@@ -863,13 +863,18 @@ export class ReconciliationRepository {
   }
 
   // 补算：只填最新一版、应付成本还空着、原因是 EXPECTED_COST_LAGGING 的那一行（不覆盖有数的、不写新版）；detail.expected 一起换掉。填上了返回 true。
-  // revision：调用方读那一行时带的版本号，不在这里重查「现在的最新一版」——读、算、写之间插进来一次重结写出新版的话，revision 对不上就不写，
-  // 不会把按旧分段算出来的数填到新版上（审核 R2 #125 低-2）
+  // revision：调用方读那一行时带的版本号，和「现在的最新一版」都要对上——读、算、写之间插进来一次重结写出新版的话，revision 对不上旧版就不填，
+  // 也不会填到旧版上盖掉（新版不受影响，但旧版的 detail 不该再被改；审核 R2 #125 低-2、第二轮 低-A：两个条件都要留着，只认 revision = ?
+  // 不够，内存实现两样都要求，MySQL 也要一样）
   async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null, revision = null } = {}) {
+    // 用 JOIN 一份派生表接「现在的最新一版」，不在 WHERE 里直接对同一张表做关联子查询（MySQL 不让 UPDATE 的 WHERE 子查询直接选同一张表）
     const [result] = await this.pool.query(
-      `UPDATE reconciliation_ledger SET expected_cost_usd = ?, gap_reason = ?, tokens = ?, detail = JSON_SET(COALESCE(detail, JSON_OBJECT()), '$.expected', CAST(? AS JSON))
-       WHERE rule_id = ? AND bill_date = ? AND expected_cost_usd IS NULL AND gap_reason = 'EXPECTED_COST_LAGGING' AND revision = ?`,
-      [expectedCostUsd, gapReason, tokens, JSON.stringify(expected), ruleId, billDate, revision]);
+      `UPDATE reconciliation_ledger l
+       JOIN (SELECT rule_id, bill_date, MAX(revision) AS max_revision FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? GROUP BY rule_id, bill_date) latest
+         ON latest.rule_id = l.rule_id AND latest.bill_date = l.bill_date
+       SET l.expected_cost_usd = ?, l.gap_reason = ?, l.tokens = ?, l.detail = JSON_SET(COALESCE(l.detail, JSON_OBJECT()), '$.expected', CAST(? AS JSON))
+       WHERE l.rule_id = ? AND l.bill_date = ? AND l.expected_cost_usd IS NULL AND l.gap_reason = 'EXPECTED_COST_LAGGING' AND l.revision = ? AND l.revision = latest.max_revision`,
+      [ruleId, billDate, expectedCostUsd, gapReason, tokens, JSON.stringify(expected), ruleId, billDate, revision]);
     return Number(result?.affectedRows) > 0;
   }
 

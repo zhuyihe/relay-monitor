@@ -6,7 +6,13 @@ export class MemoryOwnLogStore {
   constructor() { this.cursors = new Map(); this.buckets = new Map(); this.writes = 0; this.failNextApply = false; }
   async getCursor(stationId) { const c = this.cursors.get(stationId); return c ? { stationId, ...c } : null; }
   async startCursor(stationId, fromMs, now = Date.now()) {
-    if (!this.cursors.has(stationId)) this.cursors.set(stationId, { coveredFromMs: fromMs, coveredToMs: fromMs, updatedAtMs: now });
+    if (!this.cursors.has(stationId)) this.cursors.set(stationId, { coveredFromMs: fromMs, coveredToMs: fromMs, updatedAtMs: now, disabledFromMs: null, disabledToMs: null });
+    return this.getCursor(stationId);
+  }
+  async skipCursor(stationId, toMs, now = Date.now()) {
+    const cursor = this.cursors.get(stationId);
+    if (!cursor) return null;
+    cursor.disabledFromMs = cursor.coveredToMs; cursor.disabledToMs = toMs; cursor.coveredToMs = toMs; cursor.updatedAtMs = now;
     return this.getCursor(stationId);
   }
   async applyWindow(stationId, { fromMs, toMs, buckets }, now = Date.now()) {

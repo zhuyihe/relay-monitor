@@ -228,28 +228,47 @@ test("站点不给 total：一页一页翻到不满一页为止；这轮额度�
   assert.ok(requests.length > 0);
 });
 
-test("进度比保留期还旧（停机超过 35 天）：清掉从昨天 0 点重来；清理一批一批删到不满一批为止（审核 #123 低-4、低-6）", async (t) => {
+// 总指挥 10-26 定第三轮：停机、站点读不到、令牌失效造成的掉队，不管多久都不跳，照常按保底慢慢追——那几天开关本来是开着的，补得上就该补
+test("控制台停两天再起来：不跳，前天照样按保底慢慢补上（没有 justTurnedOn 就不跳，不管落后多久）", async (t) => {
   resetOwnRequestBudget();
   const { own, rt } = await fakeSite(t, [row(1, YESTERDAY_START + 1000)]);
   const store = new MemoryOwnLogStore();
-  await store.startCursor("own", NOW - 40 * 86400000);
+  await store.startCursor("own", NOW - 40 * 86400000); // 停机 40 天，远超 35 天的保留期
   const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
   await ingest.ingestOnce(own);
-  assert.equal((await store.getCursor("own")).coveredFromMs, YESTERDAY_START, "从昨天 0 点重来");
+  assert.equal((await store.getCursor("own")).coveredFromMs, NOW - 40 * 86400000, "没传 justTurnedOn：进度起点不动，不跳，照旧从老地方往前追");
+  assert.equal((await store.getCursor("own")).disabledFromMs, null, "没有跳过的缺口");
+});
+
+test("清理一批一批删到不满一批为止（审核 #123 低-4、低-6）", async (t) => {
+  resetOwnRequestBudget();
+  const { rt } = await fakeSite(t, [row(1, YESTERDAY_START + 1000)]);
+  const store = new MemoryOwnLogStore();
+  const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
   const old = []; for (let i = 0; i < 4500; i += 1) old.push({ slotMs: NOW - 40 * 86400000, channelId: i, model: "m", upstreamModel: "", group: "g", semantic: "openai", requests: 1 });
-  await store.deleteStation("old"); await store.startCursor("old", 0);
+  await store.startCursor("old", 0);
   await store.applyWindow("old", { fromMs: 0, toMs: 1, buckets: old });
   assert.equal(await ingest.pruneIfDue(), 4500, "4500 行 = 3 批");
 });
 
-test("关了几天（不到 35 天）又打开：进度比昨天 0 点还旧就直接跳过去，不补关着那几天的缺口（总指挥 10-26 定，决定 C）", async (t) => {
+test("开关关 10 天再打开：传 justTurnedOn 才跳到昨天 0 点，跳过的缺口记下来、桶不删（总指挥 10-26 定第三轮，决定 C）", async (t) => {
   resetOwnRequestBudget();
-  const { own, rt } = await fakeSite(t, [row(1, YESTERDAY_START + 1000)]);
+  const { own, rt } = await fakeSite(t, []); // 不给日志，避免追的时候自己把进度推到昨天，干扰断言
   const store = new MemoryOwnLogStore();
-  await store.startCursor("own", YESTERDAY_START - 10 * 86400000); // 10 天前还开着，之后关了
+  const oldFrom = YESTERDAY_START - 10 * 86400000; // 10 天前还开着，之后关了
+  await store.startCursor("own", oldFrom);
+  await store.applyWindow("own", { fromMs: oldFrom, toMs: oldFrom + 1, buckets: [{ slotMs: oldFrom, channelId: 1, model: "m", upstreamModel: "", group: "g", semantic: "openai", requests: 1 }] });
   const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
-  await ingest.ingestOnce(own);
-  assert.equal((await store.getCursor("own")).coveredFromMs, YESTERDAY_START, "10 天远没到 35 天，照样直接跳到昨天 0 点，不是继续往回补");
+  await ingest.ingestOnce(own, { justTurnedOn: false });
+  const before = await store.getCursor("own");
+  assert.equal(before.disabledFromMs, null, "没传 justTurnedOn：这一轮不跳，没有缺口");
+  assert.ok(before.coveredToMs < YESTERDAY_START, "10 天的缺口一轮追不完，还没到昨天 0 点");
+  await ingest.ingestOnce(own, { justTurnedOn: true });
+  const cursor = await store.getCursor("own");
+  // 跳过去以后，这一轮剩下的额度接着往前读（不是跳完就停）：只断言跳到了昨天 0 点（或更后面）、缺口记对了
+  assert.ok(cursor.coveredToMs >= YESTERDAY_START, "跳到了昨天 0 点（或这一轮接着往前读到了更后面）");
+  assert.deepEqual([cursor.disabledFromMs, cursor.disabledToMs], [before.coveredToMs, YESTERDAY_START], "缺口是跳之前的进度到昨天 0 点这一段");
+  assert.equal((await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)).length, 1, "已经读进来的桶没删");
 });
 
 test("管理员名单读不到：这轮不读（桶里的管理员自用会算错）；清理只删 35 天前的桶", async (t) => {
