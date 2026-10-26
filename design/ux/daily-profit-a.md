@@ -159,6 +159,7 @@
 | — 自营站点的记录看不出缓存用了多少 | 自营站点的记录里没有缓存那几项，算不准 |
 | — 这把 Key 别处也在用 | 上游扣的钱分不出来 |
 | — 这把 Key 的分组会自动换 | auto 分组，或者请求在几个分组之间重试过 |
+| — 这天固定时还没算应付成本 | 应付成本上线以前就已经固定的日子，不补算 |
 | — 昨天还没开始算 | 看今天时，昨天这个渠道还没开始算 |
 | — | 这一行需处理（原因写在这一行下面） |
 
@@ -231,7 +232,7 @@
 | `incomeUsd`、`actualCostUsd`、`grossProfitUsd` | 算进来的日子；一天都没算进来时 `actualCostUsd`、`grossProfitUsd` 是 `null` |
 | `uncountedIncomeUsd` | 没算进来的日子里读到的收入（需处理那一行「收入照写」用，不进合计） |
 | `expectedCostUsd` | 只在范围全固定、算得出时有，否则 `null` |
-| `gap` | `{ usd, rate, state, mismatchedDays, days, reason, missingPriceModels }`，只算已固定的日子：`rate = usd ÷ 这几天的应付成本`；`state` 是 `over` / `under`（这几天里有超过门槛的那一天，两种都有时取 `over`）、`within`、`today`（明天出）、`reading`、`none`（算不了）；`reason` 在 `none` 时给：`UPSTREAM_PRICE_UNSUPPORTED`（Sub2API）、`MODEL_PRICE_MISSING`、`MODEL_PRICE_UNREADABLE`（上游的价格表读不到）、`CACHE_FIELDS_UNKNOWN`（自营站点的记录看不出缓存用量）、`KEY_SHARED`、`GROUP_AUTO`、`NOT_STARTED`；`days` 同 9.1。不用 `difference` 这个词：现有 `calculation.differenceUsd` 是毛利 |
+| `gap` | `{ usd, rate, state, mismatchedDays, days, reason, missingPriceModels }`，只算已固定的日子：`rate = usd ÷ 这几天的应付成本`；`state` 是 `over` / `under`（这几天里有超过门槛的那一天，两种都有时取 `over`）、`within`、`today`（明天出）、`reading`、`none`（算不了）；`reason` 在 `none` 时给：`UPSTREAM_PRICE_UNSUPPORTED`（Sub2API）、`MODEL_PRICE_MISSING`、`MODEL_PRICE_UNREADABLE`（上游的价格表读不到）、`CACHE_FIELDS_UNKNOWN`（自营站点的记录看不出缓存用量）、`KEY_SHARED`、`GROUP_AUTO`、`NOT_STARTED`、`EXPECTED_COST_NOT_RECORDED`（应付成本上线以前固定的日子）；`days` 同 9.1。不用 `difference` 这个词：现有 `calculation.differenceUsd` 是毛利 |
 | `attention` | 需处理时那一条：`{ code, title, detail, action, fromDay, moreCount }`，和需处理清单同一份（E）；沿用 `displayStatus`。和 `gap` 分开：一行可以既需处理、又有算进来那几天的差额 |
 | `excludedDays` | 范围里没算进来的天数（「上面只是前 16 天」） |
 | `daily` | 点开那一行用：`[{ day, state, gapUsd, gapState, tokens }]`，`state` 是 `fixed` / `reading` / `today` / `attention` / `notStarted`；看一天时给近 7 天，几天时给范围里每一天（最多 31）；`tokens` 是那天的 Token 数（「这天用了 288 万 Token」），结账时顺手存进账本 |

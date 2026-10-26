@@ -179,6 +179,8 @@
 
 ## 7. 每日利润 `/reconciliation`
 
+> **被每日利润重做取代**（用户 10-26 选 A，[每日利润整页重做稿](./daily-profit-redesign.md)第 8 节、[A 细化稿](./daily-profit-a.md)）：「改后」那一段（汇总 8 列 + 需处理 4 列、日条）换成整宽单栏：页顶一句、四个数一行、一张对账表，见 A 细化稿第 0、2 节
+
 ![](./screens/layout-now-d-reconciliation.png)
 
 **回答**：每天、每个渠道赚了多少，哪天定下来了。
