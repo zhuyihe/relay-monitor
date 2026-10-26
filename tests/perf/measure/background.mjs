@@ -32,11 +32,15 @@ async function ingestProgress() {
   const ownLog = await api("/api/settings").then((r) => r.ownLog ?? null).catch(() => null);
   return { at, table, cursor, buckets, ownLog };
 }
-// 打开开关后等第一轮整站读建好进度（最多 150 秒），稳态窗口从有进度开始量，窗口开头那次读数才有意义
+// 打开开关时：base、head 都从「刚打开」起量——先清掉进度和桶（同一个夹具上 base 量过以后 head 不接着 base 的进度读），
+// 再等到整站读真的往前读了一个窗口（最多 240 秒）才开稳态窗口：刚量完接口那一阵对自营站点的请求还算在 180 秒额度里，
+// 那几轮整站读只分到一两页、一个窗口都写不进，量的就不是稳态了
 if (EXPECTED_COST) {
-  for (const t = Date.now(); Date.now() - t < 150000; await new Promise((r) => setTimeout(r, 3000))) {
+  try { await conn.query("DELETE FROM own_log_buckets"); await conn.query("DELETE FROM own_log_cursor"); }
+  catch (err) { if (err?.code !== "ER_NO_SUCH_TABLE") throw err; }
+  for (const t = Date.now(); Date.now() - t < 240000; await new Promise((r) => setTimeout(r, 3000))) {
     const p = await ingestProgress();
-    if (!p.table || p.cursor) break;
+    if (!p.table || (p.cursor && p.cursor.coveredToMs > p.cursor.coveredFromMs)) break;
   }
 }
 const pid = appPid();

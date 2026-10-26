@@ -24,6 +24,7 @@
 | | 开关：`FAKE_OWN_RATE_LIMIT=1`（默认关）给自营站点加全站限流（同一来源 180 秒 360 个请求，超了回 429 带 Retry-After，被拒的数在 `/__stats` 的 `ownRateLimited`） |
 | | 开关：`FAKE_USER_ROLES="1:1,450:100"`（默认空）改用户列表里的角色（把 root 列成普通用户、user450 列成超级管理员） |
 | | 开关：`/__ctl?down=/na01,/na02` 让这些上游一律回 503（像上游挂了），`down=` 清空 |
+| | 自营站点单独一个端口 `FAKE_OWN_PORT`（默认 `FAKE_PORT + 1`，同一个进程、同一套路由）：控制台按「主机:端口」给自营站点记 180 秒的请求额度，和上游共用端口的话读上游的请求也会算进自营站点的额度 |
 | | 自营 `/api/log/` 分两类计数：不带 `username`/`token_name`/`channel`/`model_name`/`group` 的是整站读（`all`），带任何一个的是 `filtered`；`/__stats` 的 `ownLogKinds`，`detail=1` 的请求时间线里这类请求多一项类别 |
 | `seed/00-config.mjs` | 定夹具起点（92 天前的 UTC 零点）和哪些（上游, 分组）40 天前换过倍率，写 `$PERF_OUT/fixture/config.json` |
 | `seed/01-base.mjs` | 删库重建、建表（应用的 `ensureSchema`），用应用的 `Store` 写自营站点、面板账号 admin/admin123、通知方式、日报 |
@@ -88,7 +89,7 @@ gh workflow run perf.yml -R zhuyihe/relay-monitor --ref main -f pr=<号> -f bind
 ```
 
 - `bindings=5`（`PERF_BINDINGS=5`）：只接入前 5 条绑定、它们所在的 3 个上游和 2 个只用 Key 的上游。数据模型不变：自营站点照旧 300 个渠道、每天 10 万条日志（加上测试日志），没接入的渠道照旧有消费，整站读要读的量和大夹具一样。不设时和原来逐字一样。
-- `expected_cost=true`（`PERF_EXPECTED_COST=on`）：后台测量开始前 `PUT /api/settings {expectedCost: true}`，等第一轮整站读建好进度（最多 150 秒）再开稳态窗口。不勾时不开。
+- `expected_cost=true`（`PERF_EXPECTED_COST=on`）：后台测量开始前 `PUT /api/settings {expectedCost: true}`，清掉 `own_log_cursor`、`own_log_buckets`（base、head 都从「刚打开」起），等整站读真的写进一个窗口（最多 240 秒；刚量完接口那一阵的请求还占着 180 秒额度）再开稳态窗口。不勾时不开。
 - 要量整站读追得多快，可以把稳态窗口放长（本机 `BG_SEC=600`；CI 用默认 185 秒）。
 
 三样数在 `compare.md`（Summary 里）「整站读」一节、各自的 `summary.md`，原始数在 `background.json` 的 `steady.ingest`：

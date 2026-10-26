@@ -15,6 +15,9 @@ export const OUT_DIR = resolve(process.env.PERF_OUT || join(tmpdir(), "relay-mon
 export const CONFIG_PATH = join(OUT_DIR, "fixture", "config.json");
 export const PORT = Number(process.env.FAKE_PORT || 18950);
 export const BASE = `http://127.0.0.1:${PORT}`;
+// 自营站点单独一个端口（同一个假站点进程）：控制台按「主机:端口」给自营站点记请求额度（lib/own-request-budget.js），
+// 和上游共用一个端口的话，读上游的请求也算进自营站点的 180 秒 360 个里，整站读分到的额度就不对了
+export const OWN_PORT = Number(process.env.FAKE_OWN_PORT || PORT + 1);
 export const QPU = 500000;
 export const N_UP = 50;
 export const N_CH = 300;
@@ -68,7 +71,7 @@ const ALL_UPSTREAMS = Array.from({ length: N_UP }, (_, idx) => {
     tokens, boundTokens: tokens.slice(0, bound),
     lowBalance: [7, 23, 41].includes(i) };
 });
-export const OWN = { path: "/own", baseUrl: `${BASE}/own`, accessToken: "pat-own-root-0123456789abcdef", userId: "1", accountId: 1 };
+export const OWN = { path: "/own", baseUrl: `http://127.0.0.1:${OWN_PORT}/own`, accessToken: "pat-own-root-0123456789abcdef", userId: "1", accountId: 1 };
 
 // ---- 规则（绑定）和自营渠道 --------------------------------------------------
 // 80 条规则（48 个能读账单的账号，16 个绑 1 把 Key、32 个绑 2 把），按顺序分 285 个渠道（前 45 条 4 个、后 35 条 3 个）；

@@ -1,13 +1,13 @@
 // 假站点：一个进程模拟 50 个上游（New API / Sub2API / 只用 Key；PERF_BINDINGS 缩小时只有接入的那几个）和 1 个自营 New API 站点。
 // 用法：node fake-site.mjs   （FAKE_PORT 默认 18950，FAKE_DELAY_MS 默认 50）
-// 地址：上游 http://127.0.0.1:18950/na01 … /s245 … /nk49；自营 http://127.0.0.1:18950/own
+// 地址：上游 http://127.0.0.1:18950/na01 … /s245 … /nk49；自营 http://127.0.0.1:18951/own（FAKE_OWN_PORT，默认 FAKE_PORT + 1；两个端口同一套路由）
 // 控制：GET /__stats[?reset=1] 看/清请求计数；POST /__ctl?delay=50&ratio=old|current&freeze=1|0 改延迟、分组倍率口径、停住「现在」；GET /__health
 // 所有数字来自 lib/model.mjs 的确定性模型：分页、按渠道/按天/按 Key 的统计互相对得上。
 import { createServer } from "node:http";
 import {
   loadConfig, makeAggregates, makeBalanceModel, channelQuota, tokenCostQuota, accountCostQuota,
   UPSTREAMS, OWN, CHANNELS, USERS, MODELS, OWN_GROUPS, RULES, QPU, N_CH, N_USERS, HOUR, TZ,
-  dayStartSec, dateKeyOf, PORT, upstreamGroupRatio,
+  dayStartSec, dateKeyOf, PORT, OWN_PORT, upstreamGroupRatio,
 } from "./lib/model.mjs";
 
 const config = loadConfig();
@@ -475,7 +475,7 @@ function route(req, url) {
   return keyUpstream(up, rest, req);
 }
 
-const server = createServer((req, res) => {
+const handler = (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
   const finish = () => {
     let status, body, headers;
@@ -486,6 +486,10 @@ const server = createServer((req, res) => {
   const internal = url.pathname.startsWith("/__");
   req.resume();
   req.on("end", () => { if (!internal && delayMs > 0) setTimeout(finish, delayMs); else finish(); });
-});
+};
+const server = createServer(handler);
 server.keepAliveTimeout = 30000;
-server.listen(PORT, "127.0.0.1", () => console.log(`[fake] 假站点 http://127.0.0.1:${PORT}，延迟 ${delayMs} ms，倍率口径 ${ratioMode}`));
+const ownServer = createServer(handler);
+ownServer.keepAliveTimeout = 30000;
+ownServer.listen(OWN_PORT, "127.0.0.1");
+server.listen(PORT, "127.0.0.1", () => console.log(`[fake] 假站点 http://127.0.0.1:${PORT}（自营站点 ${OWN_PORT}），延迟 ${delayMs} ms，倍率口径 ${ratioMode}`));
