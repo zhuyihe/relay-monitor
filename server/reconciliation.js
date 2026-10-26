@@ -705,18 +705,25 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   // K2b：分组、合组检测接进结账流程（k-plan §3.3，总指挥 10-26 定：不能等 K2c）。这一步只检测、不碰
-  // reconciliation_rule_channels、不开新段：检测到的绑定由调用方（settle-day 的早退）当未结处理，
+  // reconciliation_rule_channels、不开新段：检测到的绑定由调用方（inspectRule 的早退）当未结处理，
   // 这几天先不结账——这样两条冲突的绑定不会都把钱算进去，也不会靠数据库唯一约束兜底（那是正常换 Key 开段时的事）。
   // 一条绑定这一轮有多个渠道（组）且认出的 Key 不是同一把：分组了。两条不同绑定这一轮认出的是同一把 Key：合组了。
   // 多把 Key 的渠道、这一轮没认出来（ambiguous/not_found）的渠道不参与判断，留给下一轮。
+  //
+  // 返回 ruleId -> b（第一次认出这条绑定冲突的时刻，毫秒）；早退只挡 window.endMs > b 的窗口（总指挥 10-26 定：
+  // b 以前已经结过、或者还没轮到结的日子，和这件事无关，不能因为今天冲突了就连累）。b 第一次认出时持久化到
+  // rules.key_group_conflict_since_ms（重启不丢），后面几轮沿用同一个 b，不随着每轮 now 往后挪；冲突解开了清掉。
   async function keyGroupConflictsFor(rules) {
-    const conflicts = new Set();
+    const conflicts = new Map(); // ruleId -> b
+    const now = Date.now();
     const enabled = rules.filter((rule) => rule.enabled);
+    const byOwnStation = new Map(); // 只给参与了本轮识别的 own 站点下的绑定判断分组/合组；没装读取服务的站点不受影响，也不清它们的记号
     for (const ownStationId of new Set(enabled.map((rule) => rule.ownStationId))) {
       const ownStation = upstreamStation(ownStationId);
       if (!ownStation || !keyAgentConfigOf(ownStation)) continue;
       const identified = await identifyChannelsCached(rt, ownStation).catch(() => null);
       if (!identified?.ok || !identified.channels) continue;
+      byOwnStation.set(ownStationId, true);
       const refByChannelId = new Map();
       for (const channel of identified.channels) {
         if (channel.keyless || channel.slots?.length !== 1) continue;
@@ -728,12 +735,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       for (const rule of enabled.filter((item) => item.ownStationId === ownStationId)) {
         const channelRefs = rule.channels.map((channel) => refByChannelId.get(Number(channel.channelId)) ?? null);
         if (channelRefs.every((ref) => ref == null)) continue; // 这一轮一把都没认出来，不参与判断
-        if (detectGroupSplit(channelRefs)) { conflicts.add(rule.id); continue; }
+        if (detectGroupSplit(channelRefs)) { conflicts.set(rule.id, rule.keyGroupConflictSinceMs ?? now); continue; }
         const ref = channelRefs.find(Boolean);
         if (ref) currentRefsByBinding.push({ bindingId: rule.id, ref });
       }
-      for (const group of detectGroupMerges(currentRefsByBinding)) for (const bindingId of group) conflicts.add(bindingId);
+      for (const group of detectGroupMerges(currentRefsByBinding)) for (const bindingId of group) {
+        const rule = enabled.find((item) => item.id === bindingId);
+        conflicts.set(bindingId, rule?.keyGroupConflictSinceMs ?? now);
+      }
     }
+    await Promise.all(enabled.filter((rule) => byOwnStation.has(rule.ownStationId)).map(async (rule) => {
+      const sinceMs = conflicts.get(rule.id) ?? null;
+      if (sinceMs !== (rule.keyGroupConflictSinceMs ?? null)) await repository.markKeyGroupConflict(rule.id, sinceMs).catch(() => {});
+    }));
     return conflicts;
   }
 
@@ -793,7 +807,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
     // 只读查询（页面只读、evaluate）不检测：identifyChannelsCached 本身有 4 分钟缓存，但这里额外按 observe 收一道，
     // 不让纯读页面的请求触发检测逻辑；真正会出问题的场景已经有定期的观测/轮询在跑，不差这一次
-    const keyGroupConflicts = observe ? await keyGroupConflictsFor(rules) : new Set();
+    const keyGroupConflicts = observe ? await keyGroupConflictsFor(rules) : new Map();
     return { startedAt: Date.now(), rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, duplicateSales, billingSource: Object.freeze(billingSource),
       keyGroupConflicts,
       // 这一轮（或这一次查询）里共用的：自营站点的 /api/status；哪些自营站点从什么时候起没有新的消费（只有轮询会填）
@@ -1824,9 +1838,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (!upstreamProblem && (canonicalKey !== actualKey || canonicalKey !== rule.canonicalKey)) {
         return unavailable(health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")), { metadata, token }, false);
       }
-      // K2b：这条绑定分组了或合组了（keyGroupConflictsFor，k-plan §3.3），交给 K2c 重新分组；这几天先不结账、
-      // 不开新段——宁可先不算，也不把钱算给错的那一条（两条冲突的绑定都走这里，不会有一条算了另一条也算）
-      if (ownerRegistry.keyGroupConflicts?.has(rule.id)) {
+      // K2b：这条绑定分组了或合组了（keyGroupConflictsFor，k-plan §3.3），交给 K2c 重新分组；从第一次认出冲突的那一刻
+      // （b）起不结账、不开新段——宁可先不算，也不把钱算给错的那一条。只挡 b 及以后的窗口：b 以前已经结过、或者还没
+      // 轮到结的日子，和这件事无关，不能因为今天冲突了就连累昨天（总指挥 10-26 定）
+      const keyGroupConflictSince = ownerRegistry.keyGroupConflicts?.get(rule.id);
+      if (keyGroupConflictSince != null && window.endMs >= keyGroupConflictSince) {
         return unavailable(health("KEY_GROUP_CHANGED", issueText("KEY_GROUP_CHANGED")), { metadata, token }, false);
       }
       const platform = evidenceMetadata?.platform ?? rule.provider ?? billingProviderOf(upstream);

@@ -7117,11 +7117,14 @@ test("K2b 前置：Sub2API 已删 Key 的减法（非只读）强制重读一次
 // 冲突的绑定那几天既不会固定下来（没有账本行），也不会把同一笔钱算给两条绑定（不会出现两条账本行同一天同一把 Key 都算了钱）。
 const KEY_AGENT_SECRET = "K7m2-xP9q" + "R4t".repeat(10);
 
-test("K2b：合组——两条不同绑定这一轮认出的是同一把 Key，账本两条都没有固定下来的行，不会把同一把 Key 的钱算给两条", async (t) => {
-  const now0 = Date.parse("2026-10-11T01:00:00Z"); // 上海 10-11 09:00
-  let now = now0;
+test("K2b：合组——早退只挡从第一次认出冲突那一刻（b）起的窗口；b 以前已经结过的日子不受影响，冲突解开以后恢复正常", async (t) => {
+  // 总指挥 10-26：「今天14:00第一次认出合组，昨天那条绑定的账和这件事无关……拖过7天还会进需处理」——
+  // 这条测试证明：10-11（b 以前）正常固定且不会被后面几轮动；10-12（跨过 b 的那天）不固定；
+  // 10-13（合组解开以后）恢复正常，三天都不会把同一把 Key 的钱算给两条绑定。
+  let now = Date.parse("2026-10-12T01:00:00Z"); // 上海 10-12 09:00，合组从一开始就在（b 落在这一轮里）
   t.mock.method(Date, "now", () => now);
   const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let colliding = true;
   const f = liveReconciliationFixture(t, {
     segments: [{ id: "s1", group: "g1", from: 0 }],
     extraRuleIds: ["rr_b"],
@@ -7129,20 +7132,33 @@ test("K2b：合组——两条不同绑定这一轮认出的是同一把 Key，�
     tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
     keyAgent: {
       secret: KEY_AGENT_SECRET,
-      // 渠道 1（rr_live 的）和渠道 2（rr_b 的）这一轮都认出是 token 9 那把——合组了，分不清这把 Key 该算给哪条
+      // colliding 时渠道 1（rr_live）和渠道 2（rr_b）这一轮都认出是 token 9——合组了，分不清这把 Key 该算给哪条；
+      // 解开以后各认各的（渠道 2 认出 token 10，和 rr_b 自己原来那把一致）
       channels: () => [
-        { id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyNine), f: "unused-when-mask-matches-1" }] },
-        { id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyNine), f: "unused-when-mask-matches-2" }] },
+        { id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyNine), f: "unused-1" }] },
+        { id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(colliding ? keyNine : keyTen), f: "unused-2" }] },
       ],
     },
   });
-  await f.module.refreshDue(now); // 结「昨天」（10-10）
-  assert.deepEqual(f.state.ledger.filter((row) => row.bill_date === "2026-10-10"), [], "两条绑定这天都没有固定下来的行");
+  const rowsOf = (date) => f.state.ledger.filter((row) => row.bill_date === date);
+
+  await f.module.refreshDue(now); // 结「昨天」10-11：这一刻（b）落在 10-12，10-11 整天都在 b 以前，不受影响
+  const oct11 = rowsOf("2026-10-11");
+  assert.equal(oct11.length, 2, "10-11 两条绑定都正常固定（在 b 以前，和合组这件事无关）");
+
+  now = Date.parse("2026-10-13T01:00:00Z"); // 上海 10-13 09:00，合组还在
+  await f.module.refreshDue(now); // 结「昨天」10-12：10-12 这一天跨过了 b（b 落在 10-12 当天），该挡
+  assert.deepEqual(rowsOf("2026-10-12"), [], "10-12（跨过 b 的那天）两条绑定都没有固定下来的行");
+  assert.deepEqual(rowsOf("2026-10-11"), oct11, "10-11 已经固定的行没有被后面几轮动过");
+
+  colliding = false; // 合组解开（比如渠道 2 换回了自己的 Key）
+  now = Date.parse("2026-10-14T01:00:00Z");
+  await f.module.refreshDue(now); // 结「昨天」10-13：解开以后恢复正常
+  assert.equal(rowsOf("2026-10-13").length, 2, "合组解开以后，10-13 两条绑定恢复正常固定");
 });
 
-test("K2b：分组——一条绑定名下两个渠道，这一轮认出的 Key 不再是同一把，这天不固定、不结账；不相关的别的绑定照常结账", async (t) => {
-  const now0 = Date.parse("2026-10-11T01:00:00Z");
-  let now = now0;
+test("K2b：分组——一条绑定名下两个渠道，这一轮认出的 Key 不再是同一把，只挡跨过 b 的那天；b 以前的照常固定，不相关的别的绑定照常结账", async (t) => {
+  let now = Date.parse("2026-10-12T01:00:00Z"); // 上海 10-12 09:00，分组从一开始就在（b 落在这一轮里）
   t.mock.method(Date, "now", () => now);
   const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
   const f = liveReconciliationFixture(t, {
@@ -7159,9 +7175,16 @@ test("K2b：分组——一条绑定名下两个渠道，这一轮认出的 Key 
       ],
     },
   });
-  await f.module.refreshDue(now);
-  assert.deepEqual(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-10"), [], "组散了这天不固定、不结账");
-  assert.ok(f.state.ledger.some((row) => row.rule_id === "rr_b" && row.bill_date === "2026-10-10"), "不相关的绑定（渠道没在这次识别结果里）照常结账");
+  const rowsOf = (ruleId, date) => f.state.ledger.filter((row) => row.rule_id === ruleId && row.bill_date === date);
+
+  await f.module.refreshDue(now); // 结「昨天」10-11：b 落在 10-12，10-11 整天在 b 以前，不受影响
+  assert.equal(rowsOf("rr_live", "2026-10-11").length, 1, "10-11（在 b 以前）照常固定");
+  assert.equal(rowsOf("rr_b", "2026-10-10").length + rowsOf("rr_b", "2026-10-11").length > 0, true, "不相关的绑定（渠道没在识别结果里）照常结账");
+
+  now = Date.parse("2026-10-13T01:00:00Z");
+  await f.module.refreshDue(now); // 结「昨天」10-12：这天跨过了 b，该挡
+  assert.deepEqual(rowsOf("rr_live", "2026-10-12"), [], "组散了，10-12（跨过 b 的那天）不固定、不结账");
+  assert.ok(rowsOf("rr_b", "2026-10-12").length > 0, "不相关的绑定（渠道没在这次识别结果里）照常结账，不连坐");
 });
 
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {

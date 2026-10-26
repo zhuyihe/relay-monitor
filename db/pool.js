@@ -206,6 +206,9 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_rules", "provider", "VARCHAR(24) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "canonical_key", "VARCHAR(255) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "source_binding", "JSON NULL");
+  // K2b：分组、合组第一次被认出来的时刻（毫秒），跨轮记下来，重启不丢（总指挥 10-26 定）。早退只挡从这一刻起的窗口，
+  // 这一刻以前已经结过（或者还没结到）的日子不受影响；冲突解开（比如又换回来）清成 NULL
+  await addColumnIfMissing(pool, "reconciliation_rules", "key_group_conflict_since_ms", "BIGINT NULL");
   await addIndexIfMissing(pool, "reconciliation_snapshots", "idx_reconciliation_snapshot_segment", "(segment_id)");
   // 写快照前「先读出同一把 Key 的那一组绑定」（计划 P1c）走这个索引；解除的绑定也留着，表会越来越大
   await addIndexIfMissing(pool, "reconciliation_rules", "idx_reconciliation_rule_token", "(token_id, archived_at)");

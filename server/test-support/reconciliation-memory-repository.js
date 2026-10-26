@@ -473,6 +473,16 @@ export class MemoryReconciliationRepository {
     });
   }
 
+  // 对应 MySQL 版：sinceMs 为 null 清掉；有值时只在还没记过（key_group_conflict_since_ms IS NULL）才写，不覆盖已经记过的
+  async markKeyGroupConflict(ruleId, sinceMs) {
+    await this.#transaction("markKeyGroupConflict", async (tx) => {
+      const entry = this.#ruleEntry(tx, ruleId);
+      if (!entry) return;
+      if (sinceMs == null) { this.#update(tx, "rules", [entry], { key_group_conflict_since_ms: null }); return; }
+      if (entry.row.key_group_conflict_since_ms == null) this.#update(tx, "rules", [entry], { key_group_conflict_since_ms: bigint(sinceMs) });
+    });
+  }
+
   async archiveRule(id, { now = this.now() } = {}) {
     return this.#transaction("archiveRule", async (tx) => {
       await this.#lock(tx, `rule:${id}`);
