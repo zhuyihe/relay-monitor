@@ -804,10 +804,13 @@ export class ReconciliationRepository {
           await openSegment(plan.cutoverAt, plan.after);
         }
         const [firstKey] = plan.after;
-        await conn.query(
-          "UPDATE reconciliation_rules SET token_id = ?, token_name = ?, active_token_key = ? WHERE id = ?",
-          [firstKey.tokenId, firstKey.tokenName ?? rule.token_name, tokenKeyOf(firstKey), ruleId]
-        );
+        // canonicalKey 是按 [provider, panel, accountId, tokenId] 算的（lib/reconciliation-scope-policy.js 的
+        // canonicalBillingKey），tokenId 一换它就变了：不跟着改，下一次结账会发现「现在算出来的 canonicalKey 和
+        // 锚定时记的不一样」，当成 SOURCE_BINDING_UNCONFIRMED 挡住——K2b 换 Key 的本意是不打扰，不能换了反而挡住。
+        // 调用方（server/reconciliation.js）传 plan.canonicalKey 时才改；不传（比如下面几条测试，不关心锚定）就不动
+        const sets = ["token_id = ?", "token_name = ?", "active_token_key = ?"], params = [firstKey.tokenId, firstKey.tokenName ?? rule.token_name, tokenKeyOf(firstKey)];
+        if (plan.canonicalKey !== undefined) { sets.push("canonical_key = ?"); params.push(plan.canonicalKey); }
+        await conn.query(`UPDATE reconciliation_rules SET ${sets.join(", ")} WHERE id = ?`, [...params, ruleId]);
         await refreshSegmentKeys(conn, ruleId);
       }
       await conn.commit();

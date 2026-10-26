@@ -527,7 +527,8 @@ export class MemoryReconciliationRepository {
           }
           const [firstKey] = plan.after;
           this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { token_id: bigint(firstKey.tokenId),
-            token_name: firstKey.tokenName ?? rule.token_name, active_token_key: tokenKeyOf(firstKey) });
+            token_name: firstKey.tokenName ?? rule.token_name, active_token_key: tokenKeyOf(firstKey),
+            ...(plan.canonicalKey !== undefined ? { canonical_key: plan.canonicalKey } : {}) });
           this.#refreshSegmentKeys(tx, ruleId);
         }
       });

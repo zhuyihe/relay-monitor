@@ -1525,6 +1525,26 @@ contract("applyKeyChangePlans: an open multi-key segment gets active_token_key o
   assert.deepEqual(result, { conflict: true }, "rules.active_token_key 这一把（fresh C）没人占，但 segment_keys 里撞车的那把（collideRef）还是拦住了");
 });
 
+contract("applyKeyChangePlans: plan.canonicalKey given updates rules.canonical_key in lockstep with token_id (otherwise the next settle sees a stale anchor and SOURCE_BINDING_UNCONFIRMED blocks it); omitted leaves canonical_key untouched", async ({ repository, fixture }) => {
+  const anchored = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:akp-canon`, channels: [{ channelId: fixture.channel(42), name: "Anchored" }] });
+  const newToken = fixture.token(43);
+  const newCanonicalKey = `up:${fixture.tag}:akp-canon-new`;
+  await repository.applyKeyChangePlans([
+    { ruleId: anchored.id, plan: { kind: "precise", cutoverAt: EFFECTIVE_FROM + HOUR, canonicalKey: newCanonicalKey,
+      after: [{ upstreamStationId: anchored.upstreamStationId, tokenId: newToken, tokenName: "New" }] } },
+  ]);
+  const after = await repository.getRule(anchored.id);
+  assert.equal(after.tokenId, newToken);
+  assert.equal(after.canonicalKey, newCanonicalKey, "canonicalKey 跟着 tokenId 一起换，不然锚定对不上");
+
+  const untouched = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:akp-canon-keep`, channels: [{ channelId: fixture.channel(44), name: "Untouched" }] });
+  await repository.applyKeyChangePlans([
+    { ruleId: untouched.id, plan: { kind: "precise", cutoverAt: EFFECTIVE_FROM + HOUR,
+      after: [{ upstreamStationId: untouched.upstreamStationId, tokenId: fixture.token(45), tokenName: "New2" }] } },
+  ]);
+  assert.equal((await repository.getRule(untouched.id)).canonicalKey, `up:${fixture.tag}:akp-canon-keep`, "没传 canonicalKey 就不动原来的（给不关心锚定的调用方用）");
+});
+
 contract("listSettlementStates with billDates only returns those days", async ({ repository, fixture }) => {
   const rule = await fixture.createRule();
   const now = Date.UTC(2026, 0, 12, 3);

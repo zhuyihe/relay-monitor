@@ -39,8 +39,11 @@ export function planMovedKeySegments({ observedAt }) {
 
 // 批量：这一轮识别，每条绑定从 before（上一次确认时握着的 Key，没有就是 null）变成 after（这一次识别到的 Key）。
 // 没变的绑定不出现在结果里——「没换 Key 时结果逐字不变」在这一层天然成立：没有计划，调用方就不会去改任何段。
-// moved 的判断：这条绑定新握着的 Key，是不是本轮 before 时刻另一条绑定正握着的那把——是，就是挪过来的，不是凭空出现的
-export function planSegmentChanges({ bindings, lastSeenAt, observedAt, preciseAtByBinding = {} }) {
+// moved 的判断：这条绑定新握着的 Key，是不是本轮 before 时刻另一条绑定正握着的那把——是，就是挪过来的，不是凭空出现的。
+// lastSeenAt 是这一批共用的（一般是同一个 own 站点、同一个持久化的「读取服务上一次读成功的时刻」）；
+// 个别绑定要用不一样的（比如那个站点从没读成功过，退到这条绑定自己开着段的起点，参见 safeLastSeenAt），
+// 用 lastSeenAtByBinding 按 bindingId 覆盖
+export function planSegmentChanges({ bindings, lastSeenAt, observedAt, preciseAtByBinding = {}, lastSeenAtByBinding = {} }) {
   const ownerBefore = new Map();
   for (const binding of bindings) if (binding.before) ownerBefore.set(keyRefId(binding.before), binding.id);
   const plans = [];
@@ -51,7 +54,8 @@ export function planSegmentChanges({ bindings, lastSeenAt, observedAt, preciseAt
       plans.push({ bindingId: binding.id, movedFromBindingId, ...planMovedKeySegments({ observedAt }) });
     } else {
       plans.push({ bindingId: binding.id, ...planKeyChangeSegments({
-        lastSeenAt, observedAt, oldRef: binding.before, newRef: binding.after, preciseAt: preciseAtByBinding[binding.id] ?? null,
+        lastSeenAt: lastSeenAtByBinding[binding.id] ?? lastSeenAt, observedAt, oldRef: binding.before, newRef: binding.after,
+        preciseAt: preciseAtByBinding[binding.id] ?? null,
       }) });
     }
   }

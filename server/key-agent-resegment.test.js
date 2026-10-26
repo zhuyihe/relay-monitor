@@ -122,6 +122,16 @@ test("planSegmentChanges：没换 Key 的绑定不出现在计划里——调用
   assert.deepEqual(plans.map((p) => p.bindingId), ["C"]);
 });
 
+test("planSegmentChanges：lastSeenAtByBinding 按 bindingId 覆盖这一批共用的 lastSeenAt（那条绑定的站点没有持久化的成功时刻，退到它自己开着段的起点）", () => {
+  const plans = planSegmentChanges({
+    bindings: [{ id: "A", before: ref(9), after: ref(10) }, { id: "B", before: ref(5), after: ref(6) }],
+    lastSeenAt: T("10:00"), observedAt: T("14:30"),
+    lastSeenAtByBinding: { B: T("00:00") }, // B 退到自己段的起点，A 用这一批共用的
+  });
+  assert.equal(plans.find((p) => p.bindingId === "A").windowStart, T("10:00"));
+  assert.equal(plans.find((p) => p.bindingId === "B").windowStart, T("00:00"));
+});
+
 // ---------- Sub2API 同一天挪的逐条拆分 ----------
 
 test("splitSub2RecordsAtCutover：Sub2API 没有实时信号，翻这一天的逐条用量按 b 精确切开，before/after 金额相加等于全天总额", () => {
