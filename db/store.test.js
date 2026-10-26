@@ -429,9 +429,9 @@ test("写库失败向调用方报错，后续串行保存仍能成功", async ()
   assert.equal(attempts, 2);
 });
 
-test("「算应付成本」开关 settings.expectedCost：默认开；只有明确 false 才关", async () => {
+test("「算应付成本」开关 settings.expectedCost：V1-a 默认关（V1-b 带界面时改开）；只有明确 false 才关", async () => {
   const store = await new Store(fakePool([])).load();
-  assert.equal(store.settings.expectedCost, true);
+  assert.equal(store.settings.expectedCost, false);
   await store.updateSettings({ expectedCost: false });
   assert.equal(store.settings.expectedCost, false);
   await store.updateSettings({ expectedCost: "yes" });

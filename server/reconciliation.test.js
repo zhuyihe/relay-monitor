@@ -7395,6 +7395,11 @@ test("V1-a 轮询每轮给自营站点读几页整站日志（落后时最多 15
   // 不带筛选、也不是「最新一条」探测（page_size=1，P1a 判站点安不安静用的）的 /api/log/ 才是整站读
   const isIngest = (request) => request.host === "own.test" && request.path === "/api/log/" && !request.sourceRead && !/page_size=1(&|$)/.test(request.query || "");
   const fullReads = () => f.state.requests.filter(isIngest).length;
+  // 没设置过（settings 里没有 expectedCost）：V1-a 默认关，一个整站读请求都不发
+  await f.module.refreshDue(now);
+  assert.equal(fullReads(), 0, "没设置过不读");
+  f.rt.store.settings = { expectedCost: true };
+  now += 60000; resetOwnRequestBudget();
   await f.module.refreshDue(now);
   const first = fullReads();
   assert.ok(first > 0 && first <= 15, `落后 35 小时：这一轮最多 15 页，读了 ${first} 页`);

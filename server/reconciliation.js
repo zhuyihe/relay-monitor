@@ -2741,8 +2741,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       await settleDue(plan, ownerRegistry);
       await pruneSettlementStates(now);
       // 自营站点整站日志增量读（应付成本 V1-a）：每轮每个自营站点读几页，额度和断路在 lib/own-request-budget.js；读失败不影响这一轮别的事
-      // 「算应付成本」关着（settings.expectedCost=false）时一个整站读请求都不发（每轮读一次，不用重启；用语规范 §8.3）
-      if (ownLogIngest && rt.store?.settings?.expectedCost !== false) {
+      // 「算应付成本」开着（settings.expectedCost === true）才读；没设置过、关着都一个整站读请求都不发（每轮读一次，不用重启；用语规范 §8.3）
+      if (ownLogIngest && rt.store?.settings?.expectedCost === true) {
         for (const id of new Set(rules.map((rule) => rule.ownStationId))) {
           const own = upstreamStation(id);
           if (own?.isOwn && own.type === "newapi") await ownLog.ingestOnce(own).catch((error) => console.error("自营站点整站日志读取失败:", error?.message || String(error)));
