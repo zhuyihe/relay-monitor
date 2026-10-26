@@ -20,7 +20,7 @@ async function updateStation(request, rt, params) {
   try {
     s = await rt.store.update(params.id, b, options);
   } catch (error) {
-    if (["AUTHORIZATION_CHANGED", "RESOURCE_CHANGED"].includes(error.code)) return json({ error: error.message, code: error.code }, 400);
+    if (["AUTHORIZATION_CHANGED", "RESOURCE_CHANGED", "SECRET_TOO_SHORT", "SECRET_TOO_WEAK"].includes(error.code)) return json({ error: error.message, code: error.code }, 400);
     // 换了地址却没重新填密钥（db/store.js updateLocked）
     if (error.code === "ENDPOINT_CHANGED_SECRET_REQUIRED") return json({ error: errorText(error), code: error.code }, 400);
     throw error;

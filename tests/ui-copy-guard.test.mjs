@@ -84,6 +84,8 @@ const ENGLISH_ALLOWED_IN = Object.freeze({
   "lib/notify.js": /Telegram|Server酱|Resend|SMTP|smtp\.gmail\.com|Webhook|ntfy|JSON 格式|re_ 开头/g,
   // 新式访问令牌「作废」那句说明里的 nap_ 开头（用语规范 §5.2）
   "lib/reconciliation-contract.js": /nap_ 开头/g,
+  // 装渠道 Key 读取服务的「怎么装」收起区（K2a，ui-copy-spec.md §3.7 附录）：环境变量名、命令、配置项名和部署文档路径不翻译
+  "app/(dashboard)/stations/station-drawer.tsx": /docker compose|relay-key-agent|RELAY_KEY_AGENT_SECRET|openssl rand -base64 32|deploy\/README\.md|HTTPS/g,
 });
 const leftoverEnglish = (file, text) =>
   /[A-Za-z]/.test((ENGLISH_ALLOWED_IN[file] ? text.replace(ENGLISH_ALLOWED_IN[file], "") : text).replace(ALLOWED_ENGLISH, ""));

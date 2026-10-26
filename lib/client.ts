@@ -176,10 +176,17 @@ export function readWorkflowDestination(search: string, page: "stations" | "reco
   }
   return result;
 }
+// 渠道 Key 读取服务认出的「现在用的 Key」（K2a，只认只显示）；keyless 没有 slots，页面暂不画这个字段
+export type IdentifiedChannelKey = {
+  channelId: number; keyless?: true;
+  slots?: { index: number; state: "identified" | "ambiguous" | "not_found" | "unresolved";
+    matches?: { stationId: string; tokenId: number; tokenName: string }[] }[];
+};
 export type PublicCatalogueChannel = {
   id: number; name: string; type: number; status: number; baseUrl: string; groups: string[]; revision: string; missing: boolean;
   monitor: { status: "linked" | "unlinked" | "review_required"; stationIds: string[] };
   reconciliation: { status: "configured" | "unconfigured" | "review_required"; ruleIds: string[] };
+  identifiedKey: IdentifiedChannelKey | null;
 };
 // 一条核算关联：一把 Key 在某个本站下归属的渠道范围（停止后保留为历史）
 export type AccountAssociation = {

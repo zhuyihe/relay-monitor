@@ -5,10 +5,10 @@
 import { useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { ReactNode, Ref } from "react";
 import dayjs from "dayjs";
-import { App, Button, DatePicker, Drawer, Form, Grid, Input, Select, Switch } from "antd";
+import { App, Button, Collapse, DatePicker, Drawer, Form, Grid, Input, Select, Switch } from "antd";
 import { api } from "../../../lib/client";
 import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions";
-import { failureText, requiredText } from "../../../lib/error-copy";
+import { describeError, failureText, requiredText } from "../../../lib/error-copy";
 import { formatRate, formatSellPrice, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../../../lib/format";
 import { NAV_LABELS } from "../../../lib/brand";
 import { stationDisplayName } from "../../../lib/overview-actions";
@@ -38,6 +38,7 @@ export type StationDrawerHandle = {
 const FORM_KEYS = [
   "name", "type", "baseUrl", "accessToken", "userId", "apiKey", "email", "password",
   "lowBalanceUsd", "cnyPerUsd", "costAliasesText", "includeInProfit", "isOwn", "noRenewal",
+  "keyAgentUrl", "keyAgentSecret",
 ];
 const TEST_READ = workflowActionMeta("verify_identity").label;
 
@@ -112,7 +113,30 @@ const COPY = Object.freeze({
   removeOf: (n: number) => `删掉第 ${n} 笔固定成本记录`,
   addOne: "再记一笔",
   purchasesDesc: "每笔按「金额 ÷ 天数」按天平摊，从开始日期算起，到期就不再算；几笔重叠时加在一起（在原来的套餐上加购或续费，就再记一笔）。",
+  // 渠道 Key 读取服务（K2a，design/ui-copy-spec.md §3.7、附录「怎么装」收起区）
+  keyAgentUrl: "读取服务地址",
+  keyAgentUrlHint: "默认是站点地址后面加固定路径，装在别处时才改。",
+  keyAgentUrlPlaceholder: "https://api.example.com/relay-monitor-agent",
+  keyAgentSecret: "读取服务令牌",
+  keyAgentSecretHint: "装渠道 Key 读取服务时设的那个令牌，至少 32 个字符。",
+  keyAgentNotConfigured: "还没装读取服务",
+  howToInstall: "怎么装（在你站的 docker compose 里加几行）",
+  howToInstallSteps: [
+    "生成一个令牌：在你站的服务器上运行 openssl rand -base64 32，得到的一串就是令牌，下面两处都用它。",
+    "在你站的 docker compose 里加一个 relay-key-agent 服务（镜像、环境变量和示例片段见仓库 deploy/README.md「装渠道 Key 读取服务」第 3 步），令牌填进它的 RELAY_KEY_AGENT_SECRET，然后重启。",
+    "有反向代理的，把「站点地址 + 固定路径」转给它，「读取服务地址」不用改；没有反向代理、直接开端口的，在下面「读取服务地址」里填那个地址。都要走 HTTPS。",
+    "想更稳妥：按 deploy/README.md 第 2 步给数据库建一个只能查渠道表的专用账号。",
+    "装好以后，把令牌填进上面「读取服务令牌」那一栏，点「测试读取」。",
+  ],
+  keyAgentOk: (n: number) => `能读到：${n} 个渠道的 Key`,
 });
+
+// 读取服务那一栏的状态（design/ui-copy-spec.md §5.2「自营站点读到了」）：没配置不算错，太弱说清是哪一种，其余归到和别处一样的「其他」
+function keyAgentIssueText(code: string | undefined) {
+  if (code === "SECRET_TOO_SHORT") return "令牌至少 32 个字符，用「怎么装」里的命令生成一串";
+  if (code === "SECRET_TOO_WEAK") return "令牌太弱，用「怎么装」里的命令生成一串";
+  return describeError({ code }).text;
+}
 
 function snapshotOf(values: any, purchases: any[]) {
   const v: Record<string, unknown> = {};
@@ -169,6 +193,7 @@ export function StationDrawer({
   const typed: Record<string, unknown> = { accessToken: typedAccessToken, apiKey: typedApiKey, password: typedPassword };
   const typedRate = Form.useWatch("cnyPerUsd", form);
   const typedOwn = Form.useWatch("isOwn", form);
+  const typedKeyAgentSecret = Form.useWatch("keyAgentSecret", form);
 
   const needsFor = (type: string): string[] => types.find((item) => item.value === type)?.needs || [];
 
@@ -194,6 +219,8 @@ export function StationDrawer({
       includeInProfit: station?.includeInProfit !== false,
       isOwn: !!station?.isOwn,
       noRenewal: !!station?.noRenewal,
+      keyAgentUrl: station?.keyAgentUrl || "",
+      keyAgentSecret: "",
     };
     form.setFieldsValue(values);
     const fingerprint = connectionFingerprint(values, station?.id, needsFor(values.type));
@@ -227,6 +254,10 @@ export function StationDrawer({
         setConnectionTest(null);
         setTestedFingerprint(null);
       }
+    }
+    // 读取服务地址/令牌不影响上游本身的连接指纹，改了以后只清掉它自己那条结果，不动主结果
+    if (("keyAgentUrl" in changed || "keyAgentSecret" in changed) && connectionTest?.keyAgent) {
+      setConnectionTest((prev) => (prev ? { ...prev, keyAgent: undefined } : prev));
     }
     setDirty(snapshotOf(all, purchases) !== initialSnapshot.current);
   };
@@ -267,6 +298,12 @@ export function StationDrawer({
       const payload: Record<string, unknown> = { stationId: editing?.id, type };
       if (type !== "fixed") payload.baseUrl = String(values.baseUrl || "").trim();
       for (const field of fields) payload[field] = values[field] ?? "";
+      // 渠道 Key 读取服务（K2a）：自营站点顺带测一下，不影响上游本身的测试结果
+      if (type === "newapi" && values.isOwn) {
+        payload.isOwn = true;
+        payload.keyAgentUrl = String(values.keyAgentUrl || "").trim();
+        payload.keyAgentSecret = String(values.keyAgentSecret || "").trim();
+      }
       const result = await api("/api/stations/test", { body: payload });
       setConnectionTest(result.ok ? result : { ok: false, issue: resultIssue(result) });
       setTestedFingerprint(fingerprint);
@@ -315,6 +352,12 @@ export function StationDrawer({
           payload[field] = value;
         }
       }
+    }
+    // 渠道 Key 读取服务（K2a）：只对自营站点有意义，留空表示不装 / 保持已保存的令牌
+    if (type === "newapi" && v.isOwn) {
+      payload.keyAgentUrl = String(v.keyAgentUrl || "").trim();
+      const keyAgentSecret = String(v.keyAgentSecret || "").trim();
+      if (keyAgentSecret) payload.keyAgentSecret = keyAgentSecret;
     }
     // 切换接入类型时，清掉不再适用的旧凭证和地址；同类型编辑仍允许敏感字段留空以保持原值
     const applicableConnectionFields = new Set(type === "fixed" ? [] : ["baseUrl", ...connectionFields]);
@@ -439,6 +482,9 @@ export function StationDrawer({
   }
   if (needs.includes("password")) credentialItems.push(secretItem("password", undefined, !!editing?.hasPassword));
 
+  // 渠道 Key 读取服务（K2a）：和主连接测试同一次「测试读取」里带出来，和主结果分开展示，不影响主结果的通过/失败
+  const keyAgentResult = testPassed && connectionTest ? connectionTest.keyAgent || null : null;
+
   const typeHint = types.find((t) => t.value === formType)?.hint;
   const rateText = isOwnStation ? formatSellPrice(typedRate) : formatRate(typedRate);
   const updatePurchase = (i: number, patch: Record<string, unknown>) =>
@@ -507,6 +553,39 @@ export function StationDrawer({
           <legend>{COPY.login}</legend>
           {!isFixed ? <p className="fs-desc">{COPY.loginDesc}</p> : null}
           {credentialItems.length > 1 ? <div className="jy-two">{credentialItems}</div> : credentialItems}
+          {isOwnStation && (
+            <>
+              <Form.Item label={COPY.keyAgentUrl} name="keyAgentUrl" extra={COPY.keyAgentUrlHint}>
+                <Input placeholder={COPY.keyAgentUrlPlaceholder} autoComplete="off" inputMode="url" />
+              </Form.Item>
+              <Form.Item
+                label={COPY.keyAgentSecret}
+                name="keyAgentSecret"
+                extra={
+                  editing?.hasKeyAgentSecret && !String(typedKeyAgentSecret || "")
+                    ? SECRET_FIELD_TEXT.keep(COPY.keyAgentSecret)
+                    : editing?.hasKeyAgentSecret
+                      ? SECRET_FIELD_TEXT.replace(COPY.keyAgentSecret)
+                      : COPY.keyAgentSecretHint
+                }
+              >
+                <Input.Password autoComplete="new-password" placeholder={editing?.hasKeyAgentSecret ? SECRET_FIELD_TEXT.saved : undefined} />
+              </Form.Item>
+              <Collapse
+                className="jy-stations-howto"
+                ghost
+                items={[{
+                  key: "how",
+                  label: COPY.howToInstall,
+                  children: (
+                    <ol>
+                      {COPY.howToInstallSteps.map((step, i) => <li key={i}>{step}</li>)}
+                    </ol>
+                  ),
+                }]}
+              />
+            </>
+          )}
           {isFixed ? (
             <div className="jy-banner jy-banner--info">
               <Sym kind="info" />
@@ -525,6 +604,12 @@ export function StationDrawer({
               </div>
               <div aria-live="polite">{testResult}</div>
               {testHint ? <p className="jy-caption jy-stations-hint">{testHint}</p> : null}
+              {isOwnStation && keyAgentResult && (
+                <div className={keyAgentResult.ok ? "jy-test-result" : "jy-test-result jy-test-result--bad"}>
+                  <Sym kind={keyAgentResult.ok ? "good" : keyAgentResult.code === "KEY_AGENT_NOT_CONFIGURED" ? "info" : "crit"} />
+                  <b>{keyAgentResult.ok ? COPY.keyAgentOk(keyAgentResult.channelCount) : keyAgentResult.code === "KEY_AGENT_NOT_CONFIGURED" ? COPY.keyAgentNotConfigured : keyAgentIssueText(keyAgentResult.code)}</b>
+                </div>
+              )}
             </>
           )}
         </fieldset>

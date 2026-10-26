@@ -4,7 +4,7 @@ import { businessTimeZone, dayBoundsInTz } from "../lib/business-time.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 
 export function redact(rt, s) {
-  const { accessToken, apiKey, password, s2Tokens, onboardingOrigin, authorizationUpdateRef, alertState, ...rest } = s;
+  const { accessToken, apiKey, password, s2Tokens, keyAgentSecret, onboardingOrigin, authorizationUpdateRef, alertState, ...rest } = s;
   const balance = s.balance && !s.balance.ok
     ? { ...s.balance, error: connectionDiagnostic(s.balance.error, s) }
     : s.balance;
@@ -17,6 +17,7 @@ export function redact(rt, s) {
     hasAccessToken: !!accessToken,
     hasApiKey: !!apiKey,
     hasPassword: !!password,
+    hasKeyAgentSecret: !!keyAgentSecret,
     tokenInfo: s2Tokens
       ? { expiresAt: s2Tokens.expiresAt || null, lastLoginAt: s2Tokens.lastLoginAt || null }
       : null,

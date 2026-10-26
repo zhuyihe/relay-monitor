@@ -247,3 +247,25 @@ test("彻底删除先清除历史；历史清除失败后保留资源以便重�
   assert.deepEqual(await purgeStation(rt, station.id), { ok: true, alreadyPurged: false });
   assert.equal(removeCalls, 1);
 });
+
+test("PUT 渠道 Key 读取服务配置（K2a）：令牌太弱报 400，响应里不回传令牌、只回 hasKeyAgentSecret 和地址", async () => {
+  const { PUT } = await stationRoute();
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]],
+    commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const store = new Store(pool);
+  const station = await store.add({ type: "newapi", baseUrl: "https://own.test", isOwn: true, accessToken: "pat" });
+  const rt = { store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 } };
+  const send = (body) => PUT(new Request("https://local.test/api/stations/one", { method: "PUT", body: JSON.stringify(body) }), rt, { id: station.id });
+  const weak = await send({ keyAgentUrl: "https://own.test/key-agent", keyAgentSecret: "too-short" });
+  assert.equal(weak.status, 400);
+  assert.equal((await weak.json()).code, "SECRET_TOO_SHORT");
+  assert.equal(station.keyAgentSecret, "", "没有写进去");
+  const strong = "K7m2-xP9q" + "R4t".repeat(10);
+  const ok = await send({ keyAgentUrl: "https://own.test/key-agent", keyAgentSecret: strong });
+  assert.equal(ok.status, 200);
+  const body = await ok.json();
+  assert.equal(body.station.keyAgentUrl, "https://own.test/key-agent");
+  assert.equal(body.station.hasKeyAgentSecret, true);
+  assert.equal("keyAgentSecret" in body.station, false, "令牌不回传");
+  assert.equal(station.keyAgentSecret, strong, "库里是明文（加密在 Store 落库那一层）");
+});

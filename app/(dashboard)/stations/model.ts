@@ -46,6 +46,8 @@ export type ConnectionTestResult = {
   remaining?: number;
   currency?: string | null;
   issue?: ConnectionIssue;
+  // 渠道 Key 读取服务（K2a）：只在自营站点、测主连接成功时顺带带出来，和主结果分开展示
+  keyAgent?: { ok: boolean; channelCount?: number; code?: string };
 };
 
 export type StationCheck = { issue: ConnectionIssue; checkedAt: string };

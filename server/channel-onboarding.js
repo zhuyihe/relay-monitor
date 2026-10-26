@@ -15,6 +15,15 @@ import { reconciliationKeyName } from "../lib/reconciliation-view.js";
 import { businessTimeZone, canonicalTimeZone } from "../lib/business-time.js";
 import { refreshStation } from "./refresh.js";
 import { normalizeReconciliationScopeIntent, ruleTimezoneFor } from "./reconciliation.js";
+import { identifyChannelsCached } from "./key-agent-identify.js";
+
+// 渠道 Key 读取服务认出的「现在用的 Key」（K2a，只认只显示，这里只带出来，页面暂不画）：按渠道编号查。
+// 没有自营站点、没装读取服务时 identifyChannelsCached 很快回 KEY_AGENT_NOT_CONFIGURED，不会每次查询都去问候选上游
+async function identifiedKeysByChannel(rt, station) {
+  if (!station) return new Map();
+  const identified = await identifyChannelsCached(rt, station);
+  return new Map((identified.ok && identified.channels ? identified.channels : []).map((entry) => [entry.channelId, entry]));
+}
 
 // 验证后才保存。重试和同进程并发接入按上游地址 + 账号身份复用，避免重复监控同一余额。
 export async function connectNewApiUpstream(rt, input, queryMetadata = queryNewApiReconciliationMetadata, queryIdentity = queryAccountIdentity) {
@@ -380,6 +389,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       actions.push(...account.actions);
     }
     let sourceUnconfirmed = false;
+    const identifiedByChannel = await identifiedKeysByChannel(rt, own());
     const channels = source.channels.map((channel) => {
       const members = savedLinks.filter((link) => link.ownStationId === source.ownSource?.stationId && link.channelId === Number(channel.id) && rt.store.get(link.stationId));
       const monitored = members.filter((link) => rt.store.get(link.stationId).monitorEnabled !== false && !rt.store.get(link.stationId).archivedAt);
@@ -387,7 +397,8 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
         && (rule.channels || []).some((member) => Number(member.channelId) === Number(channel.id)));
       return { ...channel, baseUrl: onboardingBaseUrl(channel.baseUrl), monitor: { status: channel.missing || monitored.some((link) => link.channelRevision !== channel.revision) ? "review_required" : monitored.length ? "linked" : "unlinked",
         stationIds: [...new Set(members.map((link) => link.stationId))].sort() },
-        reconciliation: { status: bindingStatus(related.filter(active), inspect, () => { sourceUnconfirmed = true; }), ruleIds: related.map((rule) => rule.id).sort() } };
+        reconciliation: { status: bindingStatus(related.filter(active), inspect, () => { sourceUnconfirmed = true; }), ruleIds: related.map((rule) => rule.id).sort() },
+        identifiedKey: identifiedByChannel.get(Number(channel.id)) || null };
     });
     // 归不到已核验 Key 下的有效关联仍在核算：单独列出，保留停止入口
     const placed = new Set([...accounts.values()].flatMap((account) => account.keys.flatMap((key) => key.ruleIds)));
@@ -730,6 +741,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
     const source = getSourceCatalogue(), inspect = sourceInspectorForRead();
     // 没有自营站点时两边都是 undefined，不能当成「读到的就是这个站点的渠道」
     const channels = station && catalogue && catalogue.ownStationId === station.id ? catalogue.channels : [];
+    const identifiedByChannel = await identifiedKeysByChannel(rt, station);
     return {
       ownSource: source.ownSource, sourceVersion: source.sourceVersion,
       ownStation: publicOnboardingStation(station), upstreams: upstreams.map(publicOnboardingStation), rules: allRules,
@@ -749,6 +761,7 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
               return { ...link, paused: resource?.monitorEnabled === false, archived: !!resource?.archivedAt, missing: !resource };
             }) },
           reconciliation: { status: bindingStatus(relatedRules, inspect), ruleIds: relatedRules.map((rule) => rule.id) },
+          identifiedKey: identifiedByChannel.get(Number(channel.id)) || null,
         };
       }),
       syncedAt: catalogue?.syncedAt || null, stale: stale(), error: syncError, errorCode: syncErrorCode, tz: businessTimeZone(),

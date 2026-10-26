@@ -7,6 +7,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
 import { endpointChangedError, sameEndpoint, staleSecrets } from "../lib/endpoint.js";
 import { knownChannelConfig, resolveChannelConfig } from "../lib/notify.js";
+import { assertKeyAgentSecretStrength } from "./secrets.js";
 import { canOpen, hasSecretValue, isCiphertext, META_SECRETS, metaAad, openText, sealText, secretSlots, secretText, secretValue } from "./secrets.js";
 
 export function stationBusinessVersion(station) {
@@ -608,6 +609,9 @@ export class Store {
       fixedPurchases: sanitizePurchases(input.fixedPurchases) || [],
       // 转售给下游的管理员/root API Key（其消费计入收入而非成本）
       resoldAdminKeys: sanitizeResoldKeys(input.resoldAdminKeys) || [],
+      // 渠道 Key 读取服务（K2a）：装在这个自营站点旁边的只读小服务，url 要 https://，secret 整串加密存、派生出请求令牌和指纹密钥
+      keyAgentUrl: String(input.keyAgentUrl || "").trim(),
+      keyAgentSecret: (() => { const v = String(input.keyAgentSecret || "").trim(); if (v) assertKeyAgentSecretStrength(v); return v; })(),
       demo: !!input.demo,
       createdAt: new Date().toISOString(),
       archivedAt: null,
@@ -668,6 +672,12 @@ export class Store {
       }
       if ("fixedPurchases" in patch) s.fixedPurchases = sanitizePurchases(patch.fixedPurchases) || [];
       if ("resoldAdminKeys" in patch) s.resoldAdminKeys = sanitizeResoldKeys(patch.resoldAdminKeys) || [];
+      if ("keyAgentUrl" in patch) s.keyAgentUrl = String(patch.keyAgentUrl ?? "").trim();
+      // 留空代表沿用已保存的令牌（和上游访问令牌、Key 一个规矩）；换了填的要先过强度检查，太弱不让存
+      if ("keyAgentSecret" in patch) {
+        const v = String(patch.keyAgentSecret ?? "").trim();
+        if (v) { assertKeyAgentSecretStrength(v); s.keyAgentSecret = v; }
+      }
       // 凭证或站点实际变化才作废令牌缓存（前端编辑总会带上 type/email 原值，
       // 无脑作废会导致每次改名都触发一次完整重登录）
       const credsChanged =
