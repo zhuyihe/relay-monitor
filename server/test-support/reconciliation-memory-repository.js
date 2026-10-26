@@ -640,11 +640,12 @@ export class MemoryReconciliationRepository {
       .sort((a, b) => compare(a.bill_date, b.bill_date) || compareText(a.rule_id, b.rule_id)).map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
   }
 
-  async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null } = {}) {
+  async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null, revision = null } = {}) {
     await this.#read("fillExpectedCost", [ruleId, billDate]);
     const top = this.#ledgerOf(null, ruleId, billDate)[0];
     const entry = top ? this.#rows("ledger").find(({ row }) => row === top) : null;
-    if (!entry || entry.row.expected_cost_usd != null || entry.row.gap_reason !== "EXPECTED_COST_LAGGING") return false;
+    // revision 是调用方读那一行时的版本号，不重查「现在的最新一版」：对不上（这期间插进来一次重结写出新版）就不填（审核 R2 #125 低-2）
+    if (!entry || entry.row.expected_cost_usd != null || entry.row.gap_reason !== "EXPECTED_COST_LAGGING" || Number(entry.row.revision) !== Number(revision)) return false;
     const detail = typeof entry.row.detail === "string" ? JSON.parse(entry.row.detail || "{}") : { ...(entry.row.detail || {}) };
     (this.log.ledgerFills ||= []).push({ ruleId, billDate, revision: entry.row.revision });
     this.#update(null, "ledger", [entry], { expected_cost_usd: expectedCostUsd == null ? null : ledgerDecimal(expectedCostUsd, LEDGER_DECIMAL_SCALE.expected_cost_usd), gap_reason: gapReason, tokens,

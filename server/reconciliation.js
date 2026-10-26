@@ -2227,7 +2227,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const store = ownLogStore || rt._ownLogStore;
     const cursor = await store?.getCursor(own.id);
     if (!cursor) return 0;
-    const rules = (await repository.listRules()).filter((rule) => rule.ownStationId === own.id);
+    // 解除以后才固定的那天（低-1，审核 R2 #125）：listRules 默认不带已解除的绑定，补不到；带上 includeArchived 才找得到
+    const rules = (await repository.listRules({ includeArchived: true })).filter((rule) => rule.ownStationId === own.id);
     const since = dayKeyInTz(now - INGEST.KEEP_DAYS * DAY_MS, businessTimeZone());
     const lagging = await repository.listLedgerDaysByReason(rules.map((rule) => rule.id), since, "EXPECTED_COST_LAGGING");
     let filled = 0;
@@ -2243,8 +2244,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (!saved || entry.expectedCostUsd != null || entry.gapReason !== "EXPECTED_COST_LAGGING") continue;
       const expected = await expectedCostForSettlement(rule, { window, segments: saved.segments || [], upstream: saved.upstream, downstream: saved.downstream }, null);
       if (expected.reason === "EXPECTED_COST_LAGGING") continue;
+      // 带上读到的这一版（低-2，审核 R2 #125）：读、算、写之间要是插进来一次重结写出新版，不能把这份按旧分段算的数填到新版上
       const ok = await repository.fillExpectedCost(ruleId, billDate, { expectedCostUsd: expected.usd, gapReason: expected.reason, tokens: expected.tokens,
-        expected: { ...expected.detail, backfilledAt: new Date(now).toISOString() } });
+        expected: { ...expected.detail, backfilledAt: new Date(now).toISOString() }, revision: entry.revision });
       if (!ok) continue;
       filled += 1;
       // 页面缓存里这条绑定的结果带着旧的 ledgerReference：清掉，下次读账本

@@ -862,13 +862,14 @@ export class ReconciliationRepository {
     return rows.map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
   }
 
-  // 补算：只填最新一版、应付成本还空着、原因是 EXPECTED_COST_LAGGING 的那一行（不覆盖有数的、不写新版）；detail.expected 一起换掉。填上了返回 true
-  async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null } = {}) {
+  // 补算：只填最新一版、应付成本还空着、原因是 EXPECTED_COST_LAGGING 的那一行（不覆盖有数的、不写新版）；detail.expected 一起换掉。填上了返回 true。
+  // revision：调用方读那一行时带的版本号，不在这里重查「现在的最新一版」——读、算、写之间插进来一次重结写出新版的话，revision 对不上就不写，
+  // 不会把按旧分段算出来的数填到新版上（审核 R2 #125 低-2）
+  async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null, revision = null } = {}) {
     const [result] = await this.pool.query(
       `UPDATE reconciliation_ledger SET expected_cost_usd = ?, gap_reason = ?, tokens = ?, detail = JSON_SET(COALESCE(detail, JSON_OBJECT()), '$.expected', CAST(? AS JSON))
-       WHERE rule_id = ? AND bill_date = ? AND expected_cost_usd IS NULL AND gap_reason = 'EXPECTED_COST_LAGGING'
-         AND revision = (SELECT r FROM (SELECT MAX(revision) AS r FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ?) AS latest)`,
-      [expectedCostUsd, gapReason, tokens, JSON.stringify(expected), ruleId, billDate, ruleId, billDate]);
+       WHERE rule_id = ? AND bill_date = ? AND expected_cost_usd IS NULL AND gap_reason = 'EXPECTED_COST_LAGGING' AND revision = ?`,
+      [expectedCostUsd, gapReason, tokens, JSON.stringify(expected), ruleId, billDate, revision]);
     return Number(result?.affectedRows) > 0;
   }
 
