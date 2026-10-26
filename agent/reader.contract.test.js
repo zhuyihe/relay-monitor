@@ -162,7 +162,10 @@ for (const kind of TEST_KINDS) {
         st.after(() => reader.close());
         for (let i = 0; i < 3; i += 1) {
           assert.equal((await reader.read()).length, 1);
-          assert.equal(await db.connectionsOf(account.name), 0, `第 ${i + 1} 次读完还有连接`);
+          // 断开在库那边要一会儿才算数：等到 0（最多约 3 秒），超时还不是 0 照样失败
+          let left = await db.connectionsOf(account.name);
+          for (let wait = 0; left !== 0 && wait < 60; wait += 1) { await new Promise((resolve) => setTimeout(resolve, 50)); left = await db.connectionsOf(account.name); }
+          assert.equal(left, 0, `第 ${i + 1} 次读完还有连接`);
         }
       });
     }
