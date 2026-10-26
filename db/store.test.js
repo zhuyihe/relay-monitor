@@ -429,13 +429,13 @@ test("写库失败向调用方报错，后续串行保存仍能成功", async ()
   assert.equal(attempts, 2);
 });
 
-test("整站日志读取的开关 settings.ownLogIngest：默认开；只有明确 false 才关", async () => {
+test("「算应付成本」开关 settings.expectedCost：默认开；只有明确 false 才关", async () => {
   const store = await new Store(fakePool([])).load();
-  assert.equal(store.settings.ownLogIngest, true);
-  await store.updateSettings({ ownLogIngest: false });
-  assert.equal(store.settings.ownLogIngest, false);
-  await store.updateSettings({ ownLogIngest: "yes" });
-  assert.equal(store.settings.ownLogIngest, true);
+  assert.equal(store.settings.expectedCost, true);
+  await store.updateSettings({ expectedCost: false });
+  assert.equal(store.settings.expectedCost, false);
+  await store.updateSettings({ expectedCost: "yes" });
+  assert.equal(store.settings.expectedCost, true);
 });
 
 test("配置写库失败不会发布账号、设置、通知或站点变更", async () => {

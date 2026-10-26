@@ -7406,13 +7406,13 @@ test("V1-a 轮询每轮给自营站点读几页整站日志（落后时最多 15
   resetOwnRequestBudget();
   await f.module.refreshDue(now);
   assert.ok(fullReads() - first <= 15, "下一轮接着读，还是最多 15 页（追到 1 小时内才回到 6 页，server/own-log-ingest.test.js 有验）");
-  // 关掉的开关（settings.ownLogIngest=false，每轮读一次）：一个整站读请求都不发
+  // 「算应付成本」关着（settings.expectedCost=false，每轮读一次）：一个整站读请求都不发
   const beforeOff = fullReads();
-  f.rt.store.settings = { ownLogIngest: false };
+  f.rt.store.settings = { expectedCost: false };
   now += 60000; resetOwnRequestBudget();
   await f.module.refreshDue(now);
   assert.equal(fullReads(), beforeOff, "关掉以后不读");
-  f.rt.store.settings = { ownLogIngest: true };
+  f.rt.store.settings = { expectedCost: true };
   now += 60000; resetOwnRequestBudget();
   await f.module.refreshDue(now);
   assert.ok(fullReads() > beforeOff, "打开又接着读");
