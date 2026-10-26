@@ -3176,22 +3176,33 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         }
       }
       const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [] });
-      // 固定成本：固定采购的上游按天平摊（lib/profit.js），换成美元要那个上游设了汇率；有一个没设就给 null（页面写「—」）
+      // 固定成本：固定采购的上游按天平摊（lib/profit.js），换成美元要那个上游设了汇率；有一个没设就给 null（页面写「固定成本算不出，净利先不算」）
       const fixedStations = usageUpstreams()?.fixed || [];
       let fixedCostUsd = 0;
+      // 没设汇率的固定上游：readResponse 的 unconfiguredRateStations 不含固定上游（那条路不摊固定成本，没必要提示），这里单独收集、和它的点名去重合并（审核 #126 M6）
+      const fixedRateUnset = [];
       for (const station of fixedStations) {
         const rate = rateSnapshotOf(station);
-        if (!isConfiguredRate(rate)) { fixedCostUsd = null; break; }
-        fixedCostUsd += amortizeFixedCost(purchasesOf(station), { startMs: window.startMs, endMs: Math.min(window.endMs, now), tz }).exact / Number(rate.cnyPerUsd);
+        if (!isConfiguredRate(rate)) { fixedCostUsd = null; fixedRateUnset.push({ id: station.id, name: station.name }); continue; }
+        if (fixedCostUsd != null) fixedCostUsd += amortizeFixedCost(purchasesOf(station), { startMs: window.startMs, endMs: Math.min(window.endMs, now), tz }).exact / Number(rate.cnyPerUsd);
       }
-      const ownIssue = results.flatMap((row) => row.health?.issues || []).find((issue) => /^OWN_/.test(issue?.code || "") && reconciliationIssue(issue.code).kind === "reading");
-      const accounts = response.unaccountedUpstream?.accounts || [];
+      // 整站收入读不到：从各绑定的 health.issues 扫（不另发请求，运营总览走的是现读一次 computeProfit，这里只有结果里带着的问题可查，
+      // 审核 #126 M5 要的「同一份」做不到不额外读站点；改法：自营站点侧的令牌类问题（ACCESS_TOKEN_*）也算进来，不只挑第一条、按最新一个）
+      const ownIssues = results.flatMap((row) => row.health?.issues || []).filter((issue) =>
+        (/^OWN_/.test(issue?.code || "") && reconciliationIssue(issue.code).kind === "reading") || (issue?.side === "own" && isAccessTokenError(issue?.code)));
+      const ownIssue = ownIssues.at(-1);
+      // 没算进利润的上游成本：和 /query 的 unaccountedUpstream.total 同一个算法（每账号 max(0, 没算进的美元) 再加，超额算进的账号不拖累合计）；
+      // 不能直接用 .total（那是按 displayCurrency 折算过的，可能是人民币），这里用账号明细里的 unaccountedUsd（始终是美元，审核 #126 M4）
+      const unaccountedUpstreamCostUsd = !response.unaccountedUpstream || response.unaccountedUpstream.state === "pending" ? null
+        : (response.unaccountedUpstream.accounts || []).reduce((total, account) => total + Math.max(0, finite(account.unaccountedUsd) ?? 0), 0);
+      const rateUnsetIds = new Set();
+      const rateUnset = [...(response.unconfiguredRateStations || []), ...fixedRateUnset].filter((station) => (rateUnsetIds.has(station.id) ? false : (rateUnsetIds.add(station.id), true)));
       return { ...page, asOf: response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd,
         netProfitUsd: page.pageTotals.grossProfitUsd != null && fixedCostUsd != null ? page.pageTotals.grossProfitUsd - fixedCostUsd : null,
         ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
-        unaccountedUpstreamCostUsd: accounts.some((account) => account.unaccountedUsd != null) ? accounts.reduce((total, account) => total + (account.unaccountedUsd ?? 0), 0) : null,
+        unaccountedUpstreamCostUsd,
         unlinkedChannelCount: (response.coverage?.channels || []).filter((channel) => channel.status === "unlinked").length,
-        rateUnset: response.unconfiguredRateStations || [], fixedOffProfitStations: response.fixedOffProfitStations || [] };
+        rateUnset, fixedOffProfitStations: response.fixedOffProfitStations || [] };
     },
     // 一行一天的计算明细：已固定的从账本行读（result + detail.expected）；没固定的（今天）现算一次、应付成本没有
     async profitDetail({ ruleIds = [], day } = {}) {
