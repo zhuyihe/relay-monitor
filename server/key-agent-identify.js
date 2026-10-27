@@ -224,9 +224,12 @@ async function identifyChannelsCachedOnce(rt, ownStation, options) {
   //   （200 用快照自己读库的时刻，304 和没带 readAt 的往前推一个读取服务的缓存间隔；不用控制台拿到快照的时刻，那个比真正读库的晚，a 晚了会漏钱）
   const readAtOk = Number.isFinite(result.readAtMs) && result.readAtMs >= now - KEY_AGENT_READ_AT_MAX_AGE_MS && result.readAtMs <= now + KEY_AGENT_READ_AT_MAX_AHEAD_MS;
   const readAtMs = readAtOk ? Math.min(result.readAtMs, now) : null; // 偏快一点的夹到现在
-  if (Number.isFinite(result.readAtMs) && !readAtOk) console.warn(`[key-agent] 读取服务给的读库时刻和控制台的钟差太多（${Math.round((result.readAtMs - now) / 1000)} 秒），不采用，改用控制台拿到快照的时刻`);
+  const readAtBad = Number.isFinite(result.readAtMs) && !readAtOk;
+  if (readAtBad) console.warn(`[key-agent] 读取服务给的读库时刻和控制台的钟差太多（${Math.round((result.readAtMs - now) / 1000)} 秒），不采用`);
+  // b（换 Key 的时刻）用控制台拿到快照的时刻：晚一点只会让过渡窗口更宽。a（「上一次读成功」）不能用控制台的时刻——它比真正读库的晚，a 晚了窗口就窄了，新 Key 的用量会漏；
+  // 读库时刻不可信时这一轮不推进 a（confirmedAtMs 记 null，a 留在上一次读成功的时刻 / 开着那段的起点，safeLastSeenAt 那套）
   const resolved = { ...resolvedBase, fetchedAtMs: result.stale ? null : now,
-    ...(result.stale ? { confirmedAtMs: null } : { confirmedAtMs: readAtMs ?? now - KEY_AGENT_READ_LAG_MS }) };
+    ...(result.stale || readAtBad ? { confirmedAtMs: null } : { confirmedAtMs: readAtMs ?? now - KEY_AGENT_READ_LAG_MS }) };
   if (readAtMs == null) delete resolved.readAtMs; else resolved.readAtMs = readAtMs;
   // 带 X-Agent-Stale 的是读取服务给的旧结果，不当「最近一次读成功」留下，也不换 etag
   // comparedAt：最近一次真的拿上游目录比对的时刻（200，或者 304 但重新比对了）；纯沿用旧结果的 304 不更新它
