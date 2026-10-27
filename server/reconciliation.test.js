@@ -8224,6 +8224,25 @@ test("固定成本补数（G 第五轮）：同一个上游下绑定 A 停了、
   assert.deepEqual(day("2026-10-12"), ["fixed", 10], "B 开了以后账卡着的日子按现在的设置");
 });
 
+test("固定成本补数（G 收尾）：绑定 A 中途归档、归档前账卡着：归档那天以前没有账本行的日子记 fixed，归档以后记 usage 0", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  await f.module.refreshDue(now); // 账本 10-07、10-08 按用量
+  const a = f.rows.find((row) => row.id === "rr_live");
+  a.enabled = 0; a.archived_at_ms = Date.parse("2026-10-10T16:00:00Z"); a.archived_at = new Date(a.archived_at_ms); // 10-11 0 点（上海）归档
+  upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5;
+  const realFacts = f.repository.listLedgerDayFacts.bind(f.repository);
+  f.repository.listLedgerDayFacts = async (...args) => (await realFacts(...args)).filter((fact) => fact.billDate <= "2026-10-08");
+  f.repository.tables.fixedCostDays.length = 0;
+  now = Date.parse("2026-10-14T03:00:00Z");
+  await f.module.refreshDue(now);
+  const day = (d) => f.repository.tables.fixedCostDays.filter((row) => row.station_id === "upstream" && row.bill_date === d).map((row) => [row.basis, Number(row.cost_cny)])[0];
+  assert.deepEqual([day("2026-10-09"), day("2026-10-10")], [["fixed", 10], ["fixed", 10]], "归档以前账卡着：按现在的设置");
+  assert.deepEqual([day("2026-10-11"), day("2026-10-12")], [["usage", 0], ["usage", 0]], "归档以后沿用 usage");
+});
+
 test("固定成本写昨天（G 第四轮）：没有在跑的绑定、昨天没有账本行时按上游现在的设置，不沿用前面的计法", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now });
