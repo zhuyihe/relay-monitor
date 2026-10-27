@@ -268,3 +268,41 @@ test("status：上游已经删了（归档）的渠道不能开始（识别缓�
   await g.module.autoStart("own");
   assert.deepEqual([...g.rt._autoStartBackoff.keys()], ["other:up1:11"], "这个站点下不再出现的组清掉，别的站点的不动");
 });
+
+test("stop 碰上重新分组：归档报 RULE_NOT_FOUND 不当「已经停了」——跟着渠道找到它现在的绑定，把那条停掉并记「用户停的」；别的渠道不受影响", async () => {
+  const f = fixture({ channels: [1, 2], rules: [running("r-old", [1, 2])], identified: [] });
+  // 旧绑定在点停止和归档之间被重新分组：归档报找不到，渠道已经在两条新绑定里
+  f.rt.reconciliation.archiveRule = async (id, options) => {
+    f.calls.archived.push([id, options]);
+    if (id === "r-old") { f.state.rules = [running("r-new-1", [1]), running("r-new-2", [2])]; throw Object.assign(new Error("gone"), { code: "RULE_NOT_FOUND" }); }
+    f.state.rules = f.state.rules.filter((rule) => rule.id !== id);
+    return { ruleId: id };
+  };
+  const result = await f.module.stop({ ownStationId: "own", channelIds: [1] });
+  assert.deepEqual(result, { stopped: [{ ruleId: "r-new-1", channelIds: [1] }], optedOut: [] }, "渠道 1 现在的绑定停了");
+  assert.deepEqual(f.calls.archived.map(([id, options]) => [id, options.optout]), [["r-old", true], ["r-new-1", true]]);
+  assert.deepEqual(f.state.rules.map((rule) => rule.id), ["r-new-2"], "渠道 2 的新绑定还在算");
+});
+
+test("stop 碰上反复重新分组：找了 3 圈渠道还在新绑定里，报「渠道刚刚换了分组，请刷新」，不写成已经停了", async () => {
+  const f = fixture({ channels: [1], rules: [running("r-0", [1])], identified: [] });
+  let generation = 0;
+  f.rt.reconciliation.archiveRule = async () => { generation += 1; f.state.rules = [running(`r-${generation}`, [1])]; throw Object.assign(new Error("gone"), { code: "RULE_NOT_FOUND" }); };
+  await assert.rejects(f.module.stop({ ownStationId: "own", channelIds: [1] }), { code: "CHANNEL_SOURCE_CHANGED" });
+  assert.deepEqual(f.calls.optoutAdded, [], "没记「用户不要算」：渠道其实还在算");
+});
+
+// 审核 #145 低：今天停掉的绑定读不到时不能当没有——自动开始这一轮跳过、不建绑定，手动开始报 HISTORY_UNAVAILABLE（宁可晚开始也不把今天已经算给停掉那条的收入再算一遍）
+test("读不到今天停掉的绑定：自动开始这一轮跳过（不建绑定），手动开始报 HISTORY_UNAVAILABLE", async () => {
+  const identified = [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 2, keyless: false, slots: [slot("up1", 11)] }];
+  // 渠道 1 已经在算（同一把 Key），渠道 2 是新认出来的、也想自动开始：要查今天有没有停掉过的绑定
+  const f = fixture({ channels: [1, 2], identified, rules: [{ ...running("r-1", [1]), upstreamStationId: "up1", tokenId: 11 }] });
+  f.rt.reconciliation.listRecentlyArchivedRules = async () => { throw new Error("db down"); };
+  const auto = await f.module.autoStart("own");
+  assert.deepEqual([auto.started, auto.skipped], [[], "NOT_READY"], "自动开始这一轮跳过");
+  assert.equal(f.calls.probe.length, 0, "没有建绑定");
+  await assert.rejects(f.module.start({ ownStationId: "own", channelIds: [2] }), { code: "HISTORY_UNAVAILABLE" });
+  assert.equal(f.calls.probe.length, 0);
+  f.rt.reconciliation.listRecentlyArchivedRules = async () => []; // 读得到了：照常
+  assert.equal((await f.module.start({ ownStationId: "own", channelIds: [2] })).started.length, 1);
+});
