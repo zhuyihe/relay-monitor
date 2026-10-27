@@ -151,7 +151,7 @@ export default function ReconciliationPage() {
   >
     {history.open
       ? <ReconHistory history={history} compact={compact} rules={config?.rules || []} upstreams={config?.upstreams} businessTimezone={tz} />
-      : detail && data ? <ProfitDetail detail={detail} page={data} ctx={ctx} onRetry={() => void state.openDetail(detail.row, detail.day)} /> : null}
+      : detail && data ? <ProfitDetail detail={detail} page={data} ctx={ctx} compact={compact} onRetry={() => void state.openDetail(detail.row, detail.day)} onCorrected={() => state.load(activeWindow, { observe: true })} /> : null}
   </Drawer>;
 
   if (!data) return <>{drawer}</>;

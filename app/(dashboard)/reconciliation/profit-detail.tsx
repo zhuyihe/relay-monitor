@@ -8,6 +8,7 @@ import { EMPTY, formatCompact, formatDayKey, formatPct, formatZonedDateTime } fr
 import { formatReconciliationMoney } from "../../../lib/reconciliation-view";
 import { dayKeyInTz } from "../../../lib/business-time";
 import { COPY } from "./copy";
+import { TimingCorrection } from "./profit-timing";
 import { adminUsageText, fmtMoney, gapReasonText, groupText, modelUsageText, overUnderText, rateText, ratioLine, ratioText, signedMoney, toDisplay, tokensText, unitPriceText } from "./profit-format";
 import type { Ctx } from "./profit-format";
 import type { DetailState } from "./use-profit-page";
@@ -22,7 +23,7 @@ function Section({ title, value, children }: { title: string; value?: string; ch
   </section>;
 }
 
-function Body({ detail, row, page, ctx }: { detail: ProfitDetailResponse; row: ProfitRow; page: ProfitPageResponse; ctx: Ctx }) {
+function Body({ detail, row, page, ctx, compact, onCorrected }: { detail: ProfitDetailResponse; row: ProfitRow; page: ProfitPageResponse; ctx: Ctx; compact: boolean; onCorrected: () => Promise<unknown> }) {
   const incomeRate = row.rates?.income ?? null, costRate = row.rates?.cost ?? null;
   const income = (usd: number | null | undefined) => fmtMoney(toDisplay(usd, incomeRate, ctx.currency), ctx.currency);
   const cost = (usd: number | null | undefined) => fmtMoney(toDisplay(usd, costRate, ctx.currency), ctx.currency);
@@ -79,12 +80,13 @@ function Body({ detail, row, page, ctx }: { detail: ProfitDetailResponse; row: P
       <dt>{COPY.detail.fixedAt}</dt><dd>{detail.fixedAt ? formatZonedDateTime(detail.fixedAt, ctx.tz) : COPY.detail.notFixed}</dd>
       {detail.settled ? <><dt>{COPY.detail.revised}</dt><dd>{detail.revisions && detail.revisions > 1 ? COPY.detail.revisedTimes(detail.revisions - 1) : COPY.detail.notRevised}</dd></> : null}
     </dl>
+    <TimingCorrection row={row} timezone={ctx.tz} compact={compact} reload={onCorrected} />
     {row.key.upstreamKeyUrl ? <Button href={row.key.upstreamKeyUrl} target="_blank" rel="noreferrer">{COPY.expanded.upstreamKey}</Button> : null}
   </div>;
 }
 
-export function ProfitDetail({ detail, page, ctx, onRetry }: { detail: NonNullable<DetailState>; page: ProfitPageResponse; ctx: Ctx; onRetry: () => void }) {
+export function ProfitDetail({ detail, page, ctx, compact, onRetry, onCorrected }: { detail: NonNullable<DetailState>; page: ProfitPageResponse; ctx: Ctx; compact: boolean; onRetry: () => void; onCorrected: () => Promise<unknown> }) {
   if (detail.loading) return <div aria-busy="true" className="jy-stack" style={{ gap: 10 }}>{[0, 1, 2, 3].map((i) => <Skeleton key={i} width={i === 3 ? "60%" : "100%"} />)}</div>;
   if (detail.error || !detail.data) return <ErrorState what={COPY.detail.readFailed} error={detail.error} onRetry={onRetry} />;
-  return <Body detail={detail.data} row={detail.row} page={page} ctx={ctx} />;
+  return <Body detail={detail.data} row={detail.row} page={page} ctx={ctx} compact={compact} onCorrected={onCorrected} />;
 }

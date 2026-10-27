@@ -184,6 +184,8 @@ async function openDailyPage(t, options = {}) {
     if (url.pathname === "/api/reconciliation" && method === "GET") return fulfill(route, { actions: [] });
     if (url.pathname === "/api/reconciliation/profit") { const body = route.request().postDataJSON(); profitReads.push(body); return options.profit ? options.profit(route, body, profitReads.length) : fulfill(route, pageOf(body)); }
     if (url.pathname === "/api/reconciliation/query") { const body = route.request().postDataJSON(); queries.push(body); return options.query ? options.query(route, body) : fulfill(route, { results: [] }); }
+    // 计算明细里「改时间」读倍率变化记录（options.segments）
+    if (/^\/api\/reconciliation\/rules\/[^/]+\/segments$/.test(url.pathname) && method === "GET") return fulfill(route, { segments: options.segments || [] });
     if (url.pathname === "/api/reconciliation/profit/detail") { const params = Object.fromEntries(url.searchParams); detailReads.push(params); return options.detail ? options.detail(route, params) : fulfill(route, profitDetail({ day: params.day })); }
     if (options.extraAPI) return options.extraAPI(route, url.pathname);
     throw new Error("unexpected daily fixture API: " + url.pathname);
@@ -212,8 +214,8 @@ test("changing a past transition reports saved time without claiming fixed days 
       return fulfill(route, { segments: [segment] });
     },
   });
-  await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click();
-  const drawer = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true });
+  await page.getByRole("button", { name: new RegExp(`^${PROFIT_COPY.expanded.dayCell("10月8日")}`) }).first().click();
+  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true });
   const timing = drawer.getByRole("region", { name: "改时间", exact: true });
   await timing.waitFor();
   await timing.getByText("保存以后，改到的那几天会按新的时间重新算，已经固定的也一样。31 天以前的不自动重算；要按新的时间算，到每日利润选那天点「重新读取」。", { exact: true }).waitFor();
@@ -4219,8 +4221,8 @@ test("改时间以后有几天太早没自动重算：成功提示写出是哪�
       return fulfill(route, { segments: [segment], resettle: { recent: 4, tooOld: ["2025-12-30", "2025-12-31", "2026-01-01"] } });
     },
   });
-  await page.getByRole("button", { name: "查看 Rule A 的计算明细", exact: true }).click();
-  const timing = page.getByRole("dialog", { name: "Rule A · 计算明细", exact: true }).getByRole("region", { name: "改时间", exact: true });
+  await page.getByRole("button", { name: new RegExp(`^${PROFIT_COPY.expanded.dayCell("10月8日")}`) }).first().click();
+  const timing = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }).getByRole("region", { name: "改时间", exact: true });
   await timing.waitFor();
   const input = timing.getByPlaceholder("倍率变化的时间"); await input.fill("2026年10月8日 09:30"); await input.press("Enter");
   await timing.getByRole("button", { name: "改时间", exact: true }).click();
