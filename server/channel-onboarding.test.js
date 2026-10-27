@@ -2357,6 +2357,21 @@ test("U06公开list仅投影已核验OwnSource白名单，零上游请求与持�
   assert.deepEqual({ store: f.rt.store.data, catalogue: f.state.catalogue, rules: f.state.rules, links: f.state.links }, before);
 });
 
+// 审核 #131 M1/M2：识别结果接进渠道列表（identifiedKey）的集成保护
+test("渠道列表带上读取服务认出的 identifiedKey，读取服务给的是旧结果（X-Agent-Stale）时 stale/staleReason 一路带到渠道上；没装读取服务时 identifiedKey 是 null", async (t) => {
+  const f = await onboardingFixture();
+  const none = await f.module.list();
+  assert.equal(none.channels[0].identifiedKey, null, "没装读取服务：不问、不带");
+  const secret = "K7m2-xP9q" + "R4t".repeat(10);
+  await f.rt.store.update(f.own.id, { keyAgentUrl: "https://own.example/key-agent", keyAgentSecret: secret });
+  t.mock.method(globalThis, "fetch", async () => ({ status: 200,
+    headers: { get: (name) => ({ "x-agent-stale": "1", "x-agent-stale-reason": "DB_ERROR", etag: '"s1"' })[name.toLowerCase()] ?? null },
+    json: async () => ({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, keyless: true }] }) }));
+  f.rt._keyAgentIdentifyCache = null;
+  const listed = await f.module.list();
+  assert.deepEqual(listed.channels[0].identifiedKey, { channelId: 1, keyless: true, stale: true, staleReason: "DB_ERROR" });
+});
+
 test("U06普通授权变化及sync失败保留最后核验来源，不能把旧namespace认作当前账号", async (t) => {
   const f = await onboardingFixture(), initial = await f.module.list();
   await f.rt.store.update(f.own.id, { accessToken: "next-own-secret", userId: "8" });

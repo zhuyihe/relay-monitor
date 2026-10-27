@@ -3,6 +3,7 @@ import { withAuth, json } from "../../../../lib/api.js";
 import { describeError } from "../../../../lib/error-copy.js";
 import { sameEndpoint, staleSecrets } from "../../../../lib/endpoint.js";
 import { queryStation, STATION_TYPES } from "../../../../lib/providers.js";
+import { readKeyAgent } from "../../../../server/key-agent.js";
 import { UPSTREAM_SECRET_FIELDS, UPSTREAM_TYPES } from "../../../../lib/channel-onboarding.js";
 
 const CONNECTION_FIELDS = ["baseUrl", "accessToken", "apiKey", "userId", "email", "password"];
@@ -75,12 +76,19 @@ export const POST = withAuth(async (request, rt) => {
     return json({ ok: false, code: result.code, category, message: text, action, diagnostic: result.error });
   }
 
-  return json({
+  const response = {
     ok: true,
     message: "连接成功，可以保存。",
     latencyMs: result.latencyMs,
     account: result.account || null,
     remaining: result.remaining,
     currency: result.currency || null,
-  });
+  };
+  // 渠道 Key 读取服务（K2a）：只在自营站点、填了地址和令牌时才顺带测，不影响上游本身的测试结果
+  if (station.type === "newapi" && body.isOwn === true) {
+    const keyAgentUrl = text(body.keyAgentUrl);
+    const keyAgentSecret = text(body.keyAgentSecret) || text(saved?.keyAgentSecret) || "";
+    if (keyAgentUrl || keyAgentSecret) response.keyAgent = await readKeyAgent({ keyAgentUrl, keyAgentSecret });
+  }
+  return json(response);
 });
