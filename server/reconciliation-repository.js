@@ -117,8 +117,9 @@ export function attachSegmentKeys(segments, keyRows) {
 // 复制一份分段（改 id 这类场合用，比如按天切开后给切出来的那几截起新 id）：普通字段展开成自己的（JSON.stringify、Object.keys、深比较
 // 都和原段一样，只有 overrides 里给的字段不同），keys 这个不可枚举属性单独带过去——不能只用 `{ ...segment, ...overrides }`，那样
 // keys 会丢；也不能用 Object.create 接原型链，那样除了 overrides 里的字段，其余都不是这份拷贝自己的（总指挥 10-26 定，#114 中-G 改法）
+// overrides 里给了 keys 就用它（换成别的 Key 列表，照旧不可枚举、不进 JSON），没给才拷原段的；以前 overrides.keys 会被悄悄盖掉，不报错也不生效
 export function copySegment(segment, overrides = {}) {
-  return Object.defineProperty({ ...segment, ...overrides }, "keys", { value: segment.keys, enumerable: false, configurable: true, writable: true });
+  return Object.defineProperty({ ...segment, ...overrides }, "keys", { value: Object.hasOwn(overrides, "keys") ? overrides.keys : segment.keys, enumerable: false, configurable: true, writable: true });
 }
 
 // 重新分组的一条旧绑定在落库那一刻还成立吗（regroupRules 的前置条件，内存仓库共用）：Key、渠道和计划一样；a 不早于开着那段的起点、b 不早于 a
