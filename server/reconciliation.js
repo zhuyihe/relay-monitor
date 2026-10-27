@@ -48,7 +48,7 @@ import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlem
 import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
 import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
-import { segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
+import { keyPiecesOf, segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
@@ -1545,6 +1545,24 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return sumKeyStats(await Promise.all(wanted.map((item) => upstreamWindowFor(upstream, metadata, item.token, window, { readOnly }))));
   }
 
+  // 按 Key 整体取数的规则（scoped，生产的绑定都是）整窗口只带最新那一段（currentSegment），换过 Key 的窗口里旧 Key 换之前的用量
+  // 和过渡段 [a, b) 里旧 Key 那份都取不到（上游成本少算）。窗口里各段用的 Key 不一样时，按段 ∩ 窗口切成几截、各取各的 Key 再相加
+  // （lib/reconciliation-keys.js 的 keyPiecesOf；各段 Key 一样、没换过 Key 的返回 null，走原来的整窗单次取数，结果逐字不变）。
+  // 结果的窗口还是整窗（和请求对得上，不触发 BILLING_WINDOW_MISMATCH）。
+  // Sub2API 只能按整天读账单，切不开中途的窗口：整窗每把用过的 Key 各取一次全天再相加（专用账号下旧 Key 换掉以后没有用量、
+  // 新 Key 换上以前没有用量，不会重复，k-plan 3.5）；一把 Key 在两个绑定之间挪过的情况这一版先不结账（见 applyKeyAgentChangesFor）
+  async function upstreamWindowForScopedSegments(upstream, metadata, token, segments, currentSegment, window, options) {
+    const pieces = keyPiecesOf(segments, window, token?.id);
+    if (!pieces) return upstreamWindowForSegment(upstream, metadata, token, currentSegment, window, options);
+    const isSub2 = upstream.type === "sub2api" || upstream.type === "sub2api-password";
+    const sources = isSub2
+      ? [{ segment: copySegment(currentSegment, { keys: [...new Map(pieces.flatMap(({ segment }) => segment.keys || []).map((key) => [`${key.upstreamStationId ?? ""}:${key.tokenId}`, key])).values()] }), window }]
+      : pieces;
+    const results = await Promise.all(sources.map((piece) => upstreamWindowForSegment(upstream, metadata, token, piece.segment, piece.window, options)));
+    const summed = sumKeyStats(results);
+    return { ...summed, window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
+  }
+
   function tokenNameIsUnique(metadata, token) {
     return metadata.platform === "sub2api" || metadata.tokens.filter((item) => item.name === token.name).length === 1;
   }
@@ -2341,7 +2359,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // 上游读不到（只有固定成本会走到这里）：不取上游，问题已经在上面记了一次
           upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
-            : upstreamWindowForSegment(upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId }).catch((error) => ({ error })),
+            : (isScopedBillingPolicy(rule.billingPolicy)
+              ? upstreamWindowForScopedSegments(upstream, metadata, token, segments, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId })
+              : upstreamWindowForSegment(upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId })).catch((error) => ({ error })),
           (ownAvailable && consumeLogIssue ? Promise.resolve({ error: codedError(consumeLogIssue.code, consumeLogIssue.detail), consumeLog: true })
             : ownAvailable
             ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle })
