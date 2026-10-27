@@ -68,10 +68,26 @@ export async function applyMergeRows(conn, group, { mergeId, nowMs, oldRetainedA
       if (err?.code === "ER_DUP_ENTRY") throw mergeError(CONFLICT, "有一把 Key 在留下的上游里已经有一条绑定在用");
       throw err;
     }
-    // 分段记 Key（K1c）：这条绑定每一段 Key 行里的上游和 active_token_key 跟着改，不然分段里的 Key 还指着被合掉的上游，取数时当成「别的上游的 Key」
-    await refreshSegmentKeys(conn, rule.id);
+    // 分段记 Key：这条绑定每一段里指着被合掉的上游的 Key 行，不管 match_source 是什么（initial、K2b 写的 fingerprint / mask / revealed /
+    // agent……），upstream_station_id 都换成留下的那个，token_id 不变；active_token_key 是「上游:Key」那种的跟着换。
+    // 不再靠 refreshSegmentKeys 重算（它只改 initial 行，K2b 写的行会还指着被合掉的上游，取成本时成了「别的上游的 Key」）。
+    // 换了哪些行、换之前的值，记进日志，退回时逐字改回去
+    const [keyRows] = await conn.query(
+      `SELECT k.segment_id, k.token_id, k.active_token_key FROM reconciliation_segment_keys k JOIN reconciliation_rule_segments s ON s.id = k.segment_id
+       WHERE s.rule_id = ? AND k.upstream_station_id = ? FOR UPDATE`, [rule.id, rule.upstream_station_id]);
+    const movedKeys = keyRows.map((row) => ({ segmentId: row.segment_id, tokenId: Number(row.token_id), activeBefore: row.active_token_key ?? null,
+      activeAfter: row.active_token_key === `${rule.upstream_station_id}:${row.token_id}` ? `${retainedId}:${row.token_id}` : row.active_token_key ?? null }));
+    try {
+      for (const moved of movedKeys) {
+        await conn.query("UPDATE reconciliation_segment_keys SET upstream_station_id = ?, active_token_key = ? WHERE segment_id = ? AND token_id = ? AND upstream_station_id = ?",
+          [retainedId, moved.activeAfter, moved.segmentId, moved.tokenId, rule.upstream_station_id]);
+      }
+    } catch (err) {
+      if (err?.code === "ER_DUP_ENTRY") throw mergeError(CONFLICT, "有一把 Key 在留下的上游里已经有一条绑定在用");
+      throw err;
+    }
     logs.push(logRow(mergeId, nowMs, group, rule.upstream_station_id, MERGE_LOG_KIND.RULE,
-      { id: rule.id, upstreamStationId: rule.upstream_station_id, activeTokenKey: rule.active_token_key, newActiveTokenKey: nextKey }));
+      { id: rule.id, upstreamStationId: rule.upstream_station_id, activeTokenKey: rule.active_token_key, newActiveTokenKey: nextKey, segmentKeys: movedKeys }));
   }
 
   const [links] = await conn.query(
@@ -179,10 +195,20 @@ export async function undoMergeRows(conn, merge, { nowMs, stations = true }) {
       // 之后这条绑定又改过上游（比如用户改了绑定）就不动它：只改回还指着留下的那个的
       // 键只在还等于合并时写进去的那个值时才改回：合并以后这条绑定停用了、换了 Key，它的键已经不是那个值，不能被写回旧键
       const guarded = row.detail.newActiveTokenKey !== undefined;
-      await conn.query(`UPDATE reconciliation_rules SET upstream_station_id = ?, active_token_key = ${guarded ? "IF(active_token_key <=> ?, ?, active_token_key)" : "?"}, updated_at = updated_at WHERE id = ? AND upstream_station_id = ?`,
+      const [reverted] = await conn.query(`UPDATE reconciliation_rules SET upstream_station_id = ?, active_token_key = ${guarded ? "IF(active_token_key <=> ?, ?, active_token_key)" : "?"}, updated_at = updated_at WHERE id = ? AND upstream_station_id = ?`,
         [row.detail.upstreamStationId, ...(guarded ? [row.detail.newActiveTokenKey, row.detail.activeTokenKey] : [row.detail.activeTokenKey]), row.detail.id, merge.retainedId]);
-      // 退回：分段的 Key 行跟着 rules 现在的样子重新对一遍（这条绑定没被改回去的话它们本来就和 rules 一致，什么也不变）
-      await refreshSegmentKeys(conn, row.detail.id);
+      if (Array.isArray(row.detail.segmentKeys)) {
+        // 合并时换了哪些 Key 行、换之前是什么，日志里都有：逐行改回去（绑定自己没被改回去，比如合并以后用户又改了绑定，就都不动）。
+        // 行只在还指着留下的那个时才改回；active_token_key 只在还等于合并时写进去的那个值时才改回，合并以后停用了、换了 Key 的不能被写回旧值
+        if (reverted.affectedRows) for (const moved of row.detail.segmentKeys) {
+          await conn.query(`UPDATE reconciliation_segment_keys SET upstream_station_id = ?, active_token_key = IF(active_token_key <=> ?, ?, active_token_key)
+            WHERE segment_id = ? AND token_id = ? AND upstream_station_id = ?`,
+          [row.detail.upstreamStationId, moved.activeAfter, moved.activeBefore, moved.segmentId, moved.tokenId, merge.retainedId]);
+        }
+      } else {
+        // 老日志（这个改动以前的合并）没记 Key 行：那时只有 initial 行，跟着 rules 重新对一遍
+        await refreshSegmentKeys(conn, row.detail.id);
+      }
     } else if (row.kind === MERGE_LOG_KIND.LINK_MOVED) {
       await conn.query("UPDATE channel_monitor_links SET station_id = ? WHERE own_station_id = ? AND channel_id = ? AND station_id = ?",
         [row.detail.from, row.detail.ownStationId, row.detail.channelId, merge.retainedId]);

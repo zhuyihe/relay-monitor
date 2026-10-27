@@ -3,7 +3,7 @@ import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, nor
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
-import { refreshSegmentKeysSql } from "../db/segment-keys.js";
+import { refreshSegmentKeysSql, fillMissingSegmentKeysSql } from "../db/segment-keys.js";
 import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
 import { billDayOf } from "../lib/business-time.js";
@@ -769,8 +769,8 @@ export class ReconciliationRepository {
       }
       for (const { ruleId } of plans) {
         // 先把还没有 Key 行的段补一行（填 rules 上现在——也就是换之前——的那把）：下面要改 rules.token_id，
-        // 补晚了历史段就会读成新 Key。正常数据启动迁移已经补齐，这里是保险（只跑 refreshSegmentKeysSql 的第一条）
-        const [fillMissing] = refreshSegmentKeysSql(ruleId);
+        // 补晚了历史段就会读成新 Key。正常数据启动迁移已经补齐，这里是保险
+        const fillMissing = fillMissingSegmentKeysSql(ruleId);
         await conn.query(fillMissing.sql, fillMissing.params);
         await conn.query("UPDATE reconciliation_rules SET active_token_key = NULL WHERE id = ?", [ruleId]);
         await conn.query("UPDATE reconciliation_segment_keys SET active_token_key = NULL WHERE segment_id = ?", [currents.get(ruleId).id]);
@@ -778,6 +778,9 @@ export class ReconciliationRepository {
       const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
       for (const { ruleId, plan } of plans) {
         const current = currents.get(ruleId), rule = rules.get(ruleId);
+        // rules.active_token_key 和 createRule（activeTokenKey）一个口径：锚定过的用 canonical_key，没有就用「上游:Key」；
+        // 开着的段第一把 Key 的行和它是同一个值（K1c 的 initial 行就是这么抄的），别的 Key 用「上游:Key」
+        const ruleActiveKey = plan.canonicalKey ?? tokenKeyOf(plan.after[0]);
         const openSegment = async (effectiveFrom, keys, { closesAt = null } = {}) => {
           const id = uid("rs");
           await conn.query(
@@ -786,9 +789,9 @@ export class ReconciliationRepository {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'detected')`,
             [id, ruleId, current.group_name, current.group_ratio, current.ratio_observed_at_ms, current.ratio_source, effectiveFrom, closesAt, detectedAt]
           );
-          for (const key of keys) await conn.query(
+          for (const [index, key] of keys.entries()) await conn.query(
             "INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source, active_token_key) VALUES (?, ?, ?, ?, 'agent', ?)",
-            [id, key.upstreamStationId, key.tokenId, key.tokenName ?? null, closesAt == null ? tokenKeyOf(key) : null]
+            [id, key.upstreamStationId, key.tokenId, key.tokenName ?? null, closesAt == null ? (index === 0 ? ruleActiveKey : tokenKeyOf(key)) : null]
           );
           return id;
         };
@@ -805,7 +808,7 @@ export class ReconciliationRepository {
         // canonicalBillingKey），tokenId 一换它就变了：不跟着改，下一次结账会发现「现在算出来的 canonicalKey 和
         // 锚定时记的不一样」，当成 SOURCE_BINDING_UNCONFIRMED 挡住——K2b 换 Key 的本意是不打扰，不能换了反而挡住。
         // 调用方（server/reconciliation.js）传 plan.canonicalKey 时才改；不传（比如下面几条测试，不关心锚定）就不动
-        const sets = ["token_id = ?", "token_name = ?", "active_token_key = ?"], params = [firstKey.tokenId, firstKey.tokenName ?? rule.token_name, tokenKeyOf(firstKey)];
+        const sets = ["token_id = ?", "token_name = ?", "active_token_key = ?"], params = [firstKey.tokenId, firstKey.tokenName ?? rule.token_name, ruleActiveKey];
         if (plan.canonicalKey !== undefined) { sets.push("canonical_key = ?"); params.push(plan.canonicalKey); }
         await conn.query(`UPDATE reconciliation_rules SET ${sets.join(", ")} WHERE id = ?`, [...params, ruleId]);
         // 不调 refreshSegmentKeys：它会把这条绑定全部 match_source = 'initial' 的历史段都改成 rules 现在这把 Key

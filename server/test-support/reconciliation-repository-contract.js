@@ -1547,6 +1547,43 @@ contract("applyKeyChangePlans: plan.canonicalKey given updates rules.canonical_k
   assert.equal((await repository.getRule(untouched.id)).canonicalKey, `up:${fixture.tag}:akp-canon-keep`, "没传 canonicalKey 就不动原来的（给不关心锚定的调用方用）");
 });
 
+// 总指挥 10-27：refreshSegmentKeys 会把这条绑定所有 initial 行改成 rules 现在的 Key、非 initial 的行完全不碰——K2b 写过段以后，
+// 别处再调一次（倍率变化开新段、改绑定、解除……）历史就被改掉，或者上一段的 agent 行还占着唯一键。守住：关掉的段 Key 行不再变、不再占唯一键
+contract("after applyKeyChangePlans, every path that refreshes segment keys (ratio change, updateRule, archiveRule) leaves closed segments' keys unchanged and releases the unique keys", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(50), name: "Hist" }], tokenName: "Old Key" });
+  const newToken = fixture.token(51);
+  const newRef = { upstreamStationId: rule.upstreamStationId, tokenId: newToken, tokenName: "New Key" };
+  const oldRef = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: "Old Key" };
+  const windowStart = EFFECTIVE_FROM + HOUR, windowEnd = windowStart + 2 * 60 * 1000;
+  assert.deepEqual(await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: { kind: "windowed", windowStart, windowEnd, windowKeys: [oldRef, newRef], after: [newRef] } }]), { conflict: false });
+  const shape = async () => (await repository.listSegments(rule.id)).map((segment) => ({ to: segment.effectiveTo, keys: segment.keys.map((key) => [key.tokenId, key.tokenName, key.matchSource, key.active]).sort((a, b) => a[0] - b[0]) }));
+  const before = await shape();
+  assert.equal(before.length, 3);
+  const historyOf = (list) => list.slice(0, 2); // 原段（旧 Key）和过渡段（两把）：已经关掉的
+
+  // 倍率变化开新段：上一段（K2b 写的 agent 行）不能还占着唯一键，新段才写得进去；历史段不变
+  await repository.observeSource(rule.id, { groups: {}, group: "vip", ratio: 2, tokenName: "New Key", detectedAt: Date.now() - 1000 });
+  let after = await shape();
+  assert.equal(after.length, 4);
+  assert.deepEqual(historyOf(after), historyOf(before), "倍率变化以后历史段的 Key 行不变");
+  assert.deepEqual(after[2].keys.map((key) => key[3]), [false], "上一段（已经关掉）的 agent 行不再占唯一键");
+  assert.deepEqual(after[3].keys.map((key) => [key[0], key[3]]), [[newToken, true]], "新开的段拿的是现在这把，占着唯一键");
+
+  // 改绑定（这里只改名字）：initial 的行本来会整条历史一起改，K2b 以后关掉的段不跟着 rules 走
+  await repository.updateRule(rule.id, { tokenName: "Renamed" });
+  after = await shape();
+  assert.deepEqual(historyOf(after), historyOf(before), "改绑定以后历史段的 Key 行不变（原段还是 Old Key，不是 Renamed）");
+  assert.equal(after[3].keys[0][1], "Renamed", "开着的那段仍然跟着 rules");
+
+  // 解除：所有 Key 行都不再占唯一键；别的绑定马上可以用这把 Key
+  assert.equal(await repository.archiveRule(rule.id), true);
+  after = await shape();
+  assert.deepEqual(after.flatMap((segment) => segment.keys.map((key) => key[3])).filter(Boolean), [], "解除以后没有一行还占着唯一键");
+  assert.deepEqual(historyOf(after), historyOf(before).map((segment) => ({ ...segment, keys: segment.keys.map(([id, name, source]) => [id, name, source, false]) })), "历史段的 Key 行还是原样");
+  const taker = await fixture.createRule({ tokenId: newToken, channels: [{ channelId: fixture.channel(52), name: "Taker" }] });
+  assert.equal(taker.tokenId, newToken, "解除以后别的绑定可以用这把 Key（agent 行没有留着占唯一键）");
+});
+
 contract("listSettlementStates with billDates only returns those days", async ({ repository, fixture }) => {
   const rule = await fixture.createRule();
   const now = Date.UTC(2026, 0, 12, 3);

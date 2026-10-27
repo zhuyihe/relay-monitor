@@ -308,21 +308,35 @@ export class MemoryReconciliationRepository {
     return attachSegmentKeys(segments, keyRows);
   }
 
-  // 同 MySQL 版 db/segment-keys.js 的 refreshSegmentKeysSql：每段一行 Key，来源是 initial 的跟着 rules 现在的上游和 Key 走，
-  // active_token_key 只给还开着的那段、而且绑定在用时（rules.active_token_key 有值）才有
+  // 同 MySQL 版 db/segment-keys.js 的 refreshSegmentKeysSql（几条语句一一对应，改一边要改另一边）：
+  // 0 关掉的段、停用/解除的绑定的所有 Key 行不再占 active_token_key；1 没有 Key 行的段补一行；
+  // 2 来源是 initial 的行跟着 rules 走——K2b 以后（这条绑定有了非 initial 的行）关掉的段不再跟；
+  // 3 开着的段 initial 行拿 rules.active_token_key；4 开着的段非 initial 的行：第一把和 rules 是同一把用 rules 的，别的「上游:Key」
   #refreshSegmentKeys(tx, ruleId) {
     const rule = this.#rows("rules", tx).find(({ row }) => sameText(row.id, ruleId))?.row;
     if (!rule) return;
     const segments = this.#segmentsOf(tx, ruleId).map(({ row }) => row);
-    const mine = this.#rows("segmentKeys", tx).filter(({ row }) => segments.some((segment) => segment.id === row.segment_id));
-    // 先全部清掉 active（唯一键），再逐段补行、更新
-    this.#update(tx, "segmentKeys", mine.filter(({ row }) => row.match_source === "initial" && row.active_token_key != null), { active_token_key: null });
+    const keyRows = () => this.#rows("segmentKeys", tx).filter(({ row }) => segments.some((segment) => segment.id === row.segment_id));
+    const segmentOf = (row) => segments.find((segment) => segment.id === row.segment_id);
+    // 0
+    this.#update(tx, "segmentKeys", keyRows().filter(({ row }) => row.active_token_key != null && (segmentOf(row).effective_to_ms != null || rule.active_token_key == null)), { active_token_key: null });
+    // 1
     for (const segment of segments) {
-      const entry = mine.find(({ row }) => row.segment_id === segment.id && row.match_source === "initial");
-      const active = segment.effective_to_ms == null && rule.active_token_key != null ? rule.active_token_key : null;
-      const fields = { upstream_station_id: rule.upstream_station_id, token_id: bigint(rule.token_id), token_name: rule.token_name ?? null };
-      if (entry) this.#update(tx, "segmentKeys", [entry], { ...fields, active_token_key: active });
-      else if (!mine.some(({ row }) => row.segment_id === segment.id)) this.#insert(tx, "segmentKeys", { segment_id: segment.id, ...fields, key_mask: null, match_source: "initial", active_token_key: active });
+      if (keyRows().some(({ row }) => row.segment_id === segment.id)) continue;
+      this.#insert(tx, "segmentKeys", { segment_id: segment.id, upstream_station_id: rule.upstream_station_id, token_id: bigint(rule.token_id),
+        token_name: rule.token_name ?? null, key_mask: null, match_source: "initial", active_token_key: null });
+    }
+    // 2、3
+    const hasAgentRows = keyRows().some(({ row }) => row.match_source !== "initial");
+    const follow = keyRows().filter(({ row }) => row.match_source === "initial" && (segmentOf(row).effective_to_ms == null || !hasAgentRows));
+    this.#update(tx, "segmentKeys", follow, { upstream_station_id: rule.upstream_station_id, token_id: bigint(rule.token_id), token_name: rule.token_name ?? null, active_token_key: null });
+    if (rule.active_token_key != null) {
+      this.#update(tx, "segmentKeys", keyRows().filter(({ row }) => row.match_source === "initial" && segmentOf(row).effective_to_ms == null), { active_token_key: rule.active_token_key });
+      // 4
+      for (const entry of keyRows().filter(({ row }) => row.match_source !== "initial" && segmentOf(row).effective_to_ms == null)) {
+        const same = entry.row.upstream_station_id === rule.upstream_station_id && Number(entry.row.token_id) === Number(rule.token_id);
+        this.#update(tx, "segmentKeys", [entry], { active_token_key: same ? rule.active_token_key : `${entry.row.upstream_station_id}:${entry.row.token_id}` });
+      }
     }
   }
 
@@ -512,15 +526,16 @@ export class MemoryReconciliationRepository {
         const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
         for (const { ruleId, plan } of plans) {
           const current = currents.get(ruleId), rule = rules.get(ruleId);
+          const ruleActiveKey = plan.canonicalKey ?? tokenKeyOf(plan.after[0]); // 同 MySQL 版：和 createRule 一个口径
           const openSegment = (effectiveFrom, keys, { closesAt = null } = {}) => {
             const id = uid("rs"), createdAt = this.#timestamp();
             this.#insert(tx, "segments", { id, rule_id: ruleId, group_name: current.group_name, group_ratio: current.group_ratio,
               ratio_observed_at_ms: current.ratio_observed_at_ms, ratio_source: current.ratio_source,
               effective_from_ms: bigint(effectiveFrom), effective_to_ms: closesAt == null ? null : bigint(closesAt),
               detected_at_ms: bigint(detectedAt), timing_source: "detected", created_at: createdAt, updated_at: createdAt });
-            for (const key of keys) this.#insert(tx, "segmentKeys", { segment_id: id, upstream_station_id: key.upstreamStationId,
+            for (const [index, key] of keys.entries()) this.#insert(tx, "segmentKeys", { segment_id: id, upstream_station_id: key.upstreamStationId,
               token_id: bigint(key.tokenId), token_name: key.tokenName ?? null, key_mask: null, match_source: "agent",
-              active_token_key: closesAt == null ? tokenKeyOf(key) : null });
+              active_token_key: closesAt == null ? (index === 0 ? ruleActiveKey : tokenKeyOf(key)) : null });
             return id;
           };
           this.#update(tx, "segments", this.#rows("segments", tx).filter(({ row }) => sameText(row.id, current.id)),
@@ -533,7 +548,7 @@ export class MemoryReconciliationRepository {
           }
           const [firstKey] = plan.after;
           this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { token_id: bigint(firstKey.tokenId),
-            token_name: firstKey.tokenName ?? rule.token_name, active_token_key: tokenKeyOf(firstKey),
+            token_name: firstKey.tokenName ?? rule.token_name, active_token_key: ruleActiveKey,
             ...(plan.canonicalKey !== undefined ? { canonical_key: plan.canonicalKey } : {}) });
           // 不调 #refreshSegmentKeys：它会把全部 match_source='initial' 的历史段都改成 rules 现在这把 Key
           // （对应 MySQL 版同一处注释）——K2b 每段该用哪把 Key 已经按时间精确写好了，历史段不能跟着现在这把一起变
