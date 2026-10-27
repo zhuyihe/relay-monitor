@@ -265,3 +265,67 @@ test("identifyChannels：Sub2API 完整 Key 不外泄——用真的读目录（
   assert.doesNotMatch(leaked(rt), new RegExp(raw.slice(3)), "缓存（识别结果、目录种类）里也没有完整 Key");
   assert.ok(calls.includes("/api/v1/keys"));
 });
+
+// 审核 2 对 #142 第 1 轮意见
+test("identifyChannels（#142 中 1）：Sub2API 目录是空的（刚建的账号还没有 Key）不记成「没给完整 Key」——下一次有了 Key 就能认出来，不被 1 小时跳过", async (t) => {
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "http://10.0.0.5:8080", keys: [{ i: 0, m: mask, f: fp }] }] }, { headers: { etag: '"v1"' } }));
+  const rt = { store: { list: () => [ownStation, sub2Station] } };
+  let keys = [];
+  const querySub2Metadata = async (station, options) => sub2Catalogue(...keys)(station, options);
+  const first = await identifyChannels(rt, ownStation, { querySub2Metadata });
+  assert.equal(first.channels[0].slots[0].state, "not_found");
+  assert.equal(rt._keyAgentCatalogKinds.has("s2"), false, "空目录不记种类");
+  keys = [[7, "s2-key", fullKey]]; // 用户在 Sub2API 建了 Key 填进渠道
+  delete rt._keyAgentSub2Catalogue; // 5 分钟目录缓存到期
+  const second = await identifyChannels(rt, ownStation, { querySub2Metadata });
+  assert.equal(second.channels[0].slots[0].state, "identified", "没有被一小时跳过");
+});
+
+test("identifyChannels（#142 中 3）：Sub2API 指纹目录按站点缓存 5 分钟（只放指纹）——快照变了也不重读；过期或站点登录信息变了才重读；同时进来的几个调用合并成一次", async (t) => {
+  let agentCalls = 0;
+  t.mock.method(globalThis, "fetch", async () => { agentCalls += 1; return { status: 200, headers: { get: () => null }, json: async () => ({ v: 1, db: "mysql", readAt: agentCalls, channels: [{ id: 1, baseUrl: "http://10.0.0.5:8080", keys: [{ i: 0, m: mask, f: fp }] }] }) }; });
+  const station = { ...sub2Station };
+  const rt = { store: { list: () => [ownStation, station] } };
+  let reads = 0;
+  const querySub2Metadata = async (s, options) => { reads += 1; return sub2Catalogue([7, "s2-key", fullKey])(s, options); };
+  await identifyChannels(rt, ownStation, { querySub2Metadata });
+  await identifyChannels(rt, ownStation, { querySub2Metadata }); // 快照又来一份（模拟 ETag 变了）
+  assert.equal(reads, 1, "5 分钟内不重读");
+  assert.doesNotMatch(JSON.stringify([...rt._keyAgentSub2Catalogue]), new RegExp(fullKey.slice(3)), "缓存里只有指纹，没有完整 Key");
+  rt._keyAgentSub2Catalogue.get("s2").at -= 6 * 60 * 1000;
+  await identifyChannels(rt, ownStation, { querySub2Metadata });
+  assert.equal(reads, 2, "过期重读");
+  station.authVersion = 2; // 登录信息改过（authVersion 跟着变，stationBusinessVersion 里有）：不用旧的
+  await identifyChannels(rt, ownStation, { querySub2Metadata });
+  assert.equal(reads, 3);
+  // 同时进来三个调用：合并成一次（读取服务和 Sub2 目录各问一次）
+  delete rt._keyAgentSub2Catalogue; rt._keyAgentIdentifyCache = null; agentCalls = 0; reads = 0;
+  const [a, b, c] = await Promise.all([1, 2, 3].map(() => identifyChannelsCached(rt, ownStation, { querySub2Metadata })));
+  assert.equal(agentCalls, 1);
+  assert.equal(reads, 1);
+  assert.deepEqual([a === b, b === c], [true, true]);
+});
+
+test("identifyChannels（#142 低 5）：同一把 Key 在两个 Sub2API 目录里都有（指纹撞车）——保持 ambiguous，不拿 New API 的 reveal 去问 Sub2API 站点，也不静默选一把", async (t) => {
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "http://10.0.0.5:8080", keys: [{ i: 0, m: mask, f: fp }] }] }, { headers: { etag: '"v1"' } }));
+  const second = { ...sub2Station, id: "s3", baseUrl: "https://s3.example.com" };
+  const rt = { store: { list: () => [ownStation, sub2Station, second] } };
+  let reveals = 0;
+  const result = await identifyChannels(rt, ownStation, { querySub2Metadata: sub2Catalogue([7, "a", fullKey]), revealKeys: async () => { reveals += 1; return {}; } });
+  assert.equal(result.channels[0].slots[0].state, "ambiguous");
+  assert.deepEqual(result.channels[0].slots[0].matches.map((match) => match.stationId).sort(), ["s2", "s3"]);
+  assert.equal(reveals, 0, "指纹撞车 reveal 分不开，不发");
+  assert.deepEqual(result.revealIssues, []);
+});
+
+test("identifyChannels（#142 低 6）：候选是 Sub2API（地址对上）只读它、认出就不读非候选；sub2api-password 类型也认得出", async (t) => {
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "https://s2.example.com", keys: [{ i: 0, m: mask, f: fp }] }] }, { headers: { etag: '"v1"' } }));
+  const password = { id: "s2", type: "sub2api-password", baseUrl: "https://s2.example.com", email: "a@example.test", password: "pw" };
+  const other = { id: "s9", type: "sub2api", baseUrl: "https://other.example.com", accessToken: "jwt" };
+  const rt = { store: { list: () => [ownStation, password, other] } };
+  const readStations = [];
+  const querySub2Metadata = async (station, options) => { readStations.push(station.id); return sub2Catalogue([7, "s2-key", fullKey])(station, options); };
+  const result = await identifyChannels(rt, ownStation, { querySub2Metadata });
+  assert.deepEqual(result.channels[0].slots, [{ index: 0, state: "identified", matches: [{ stationId: "s2", tokenId: 7, tokenName: "s2-key", via: "fingerprint" }] }]);
+  assert.deepEqual(readStations, ["s2"], "只读候选，认出就不读非候选");
+});

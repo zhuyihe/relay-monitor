@@ -4,10 +4,24 @@ import { fetchKeyAgentSnapshot } from "../lib/key-agent-client.js";
 import { identifyChannel, identifyKeySlot, classifyUpstreamKey } from "../lib/key-agent-match.js";
 import { queryNewApiReconciliationMetadata, queryReconciliationMetadata, queryRevealedTokenKeys } from "../lib/providers.js";
 import { keyAgentConfigOf } from "./key-agent.js";
+import { stationBusinessVersion } from "../db/store.js";
 import { matchCostStations } from "./own-helpers.js";
 
 // 读过一次发现目录里没有完整 Key 的上游，这么久之内不再为指纹去读它（新版 New API 的目录只给打码）
 const CATALOG_KIND_TTL_MS = 60 * 60 * 1000;
+// Sub2API 的目录每读一次是 3 个请求（身份核对前后各一次 + Key 列表，密码型再加登录 5 个），读取服务的快照一变（渠道被自动禁用/启用也会）
+// 就要全读一遍：按站点缓存 5 分钟（和对账 P1b 的目录缓存一个节奏）。缓存里只有 id、名字、状态、指纹，没有完整 Key；
+// 站点的地址、登录信息变了（stationBusinessVersion）就不用旧的；读失败不缓存
+const SUB2_CATALOGUE_TTL_MS = 5 * 60 * 1000;
+function sub2CatalogueOf(rt, station, config, querySub2Metadata) {
+  const cache = (rt._keyAgentSub2Catalogue ||= new Map());
+  const version = stationBusinessVersion(station);
+  const hit = cache.get(station.id);
+  if (hit && hit.version === version && hit.fingerprintKey === config.fingerprintKey.toString("hex") && Date.now() - hit.at < SUB2_CATALOGUE_TTL_MS) return Promise.resolve(hit.tokens);
+  return querySub2Metadata(station, { fingerprintOf: (raw) => fingerprintKey(raw, config.fingerprintKey) })
+    .then((metadata) => { cache.set(station.id, { at: Date.now(), version, fingerprintKey: config.fingerprintKey.toString("hex"), tokens: metadata.tokens }); return metadata.tokens; })
+    .catch(() => null);
+}
 
 // 打码对上不止一把候选时，取这几把的完整 Key 精确再分（k-plan §2.2）：有 api_key:reveal 权限就拿到 { tokenId: 完整Key }；
 // 没权限按码返回，不抛（调用方按上游汇总成一条需处理，不是逐渠道）；被限流、网络错等别的失败也按码返回，这一轮当认不出，下一轮再试，不重试、不特殊处理。
@@ -38,7 +52,7 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
       const promise = station.type === "newapi"
         ? queryMetadata(station, {}).then((metadata) => metadata.tokens).catch(() => null)
         : isSub2(station)
-          ? querySub2Metadata(station, { fingerprintOf: (raw) => fingerprintKey(raw, config.fingerprintKey) }).then((metadata) => metadata.tokens).catch(() => null)
+          ? sub2CatalogueOf(rt, station, config, querySub2Metadata)
           : Promise.resolve(null);
       tokenListCache.set(station.id, promise);
     }
@@ -57,7 +71,8 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
   const loadList = async (station) => {
     if (!loadedLists.has(station.id)) {
       const tokens = await tokensOf(station);
-      if (tokens) catalogKinds.set(station.id, { hasFullKeys: tokens.some((token) => token.fingerprint || classifyUpstreamKey(token.maskedKey)?.kind === "full"), at: Date.now() });
+      // 空目录（刚建的账号还没有 Key）说明不了这个上游给不给完整 Key，不记种类——不然 1 小时内不再为指纹读它，用户刚建的 Key 认不出来
+      if (tokens?.length) catalogKinds.set(station.id, { hasFullKeys: tokens.some((token) => token.fingerprint || classifyUpstreamKey(token.maskedKey)?.kind === "full"), at: Date.now() });
       loadedLists.set(station.id, { stationId: station.id, tokens });
     }
     return loadedLists.get(station.id);
@@ -91,7 +106,7 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
   for (const channel of channels) {
     if (channel.keyless) continue;
     for (const slot of channel.slots) {
-      if (slot.state !== "ambiguous") continue;
+      if (slot.state !== "ambiguous" || !slot.matches.every((match) => match.via === "mask")) continue; // 指纹撞车 reveal 分不开：保持 ambiguous
       for (const match of slot.matches) {
         if (!neededByStation.has(match.stationId)) neededByStation.set(match.stationId, new Set());
         neededByStation.get(match.stationId).add(Number(match.tokenId));
@@ -107,7 +122,7 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
     for (const channel of channels) {
       if (channel.keyless) continue;
       for (const slot of channel.slots) {
-        if (slot.state !== "ambiguous") continue;
+        if (slot.state !== "ambiguous" || !slot.matches.every((match) => match.via === "mask")) continue;
         const fingerprint = rawFingerprintOf.get(`${channel.channelId}:${slot.index}`);
         const byStation = new Map();
         for (const match of slot.matches) byStation.set(match.stationId, [...(byStation.get(match.stationId) || []), match]);
@@ -148,6 +163,14 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
 // 304（读取服务那一侧没变）直接沿用上一次认出的结果，连候选上游都不问
 export const IDENTIFY_CACHE_MS = 4 * 60 * 1000;
 export async function identifyChannelsCached(rt, ownStation, options = {}) {
+  // 同一个自营站点同时来几个调用（轮询、页面查询、报告）：合并成一次，别各读一遍上游目录（缓存在 await 之后才写，挡不住同时进来的）
+  const inflight = (rt._keyAgentIdentifyInflight ||= new Map());
+  if (inflight.has(ownStation.id)) return inflight.get(ownStation.id);
+  const promise = identifyChannelsCachedOnce(rt, ownStation, options).finally(() => inflight.delete(ownStation.id));
+  inflight.set(ownStation.id, promise);
+  return promise;
+}
+async function identifyChannelsCachedOnce(rt, ownStation, options) {
   const cache = rt._keyAgentIdentifyCache;
   const now = Date.now();
   if (cache && cache.stationId === ownStation.id && now - cache.at < IDENTIFY_CACHE_MS) return cache.result;
