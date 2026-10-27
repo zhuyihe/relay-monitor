@@ -285,9 +285,9 @@ test("DELETE 上游（归档）：先把它下面在算的渠道停掉再删，�
   assert.equal(store.get(upstream.id).archivedAt, null, "停渠道失败：上游没删");
   const response = await send(upstream.id);
   assert.deepEqual([response.status, (await response.json()).stoppedChannelCount], [200, 3]);
-  assert.deepEqual(calls, [upstream.id]);
+  assert.deepEqual(calls, [upstream.id, upstream.id], "删以前停一遍，归档以后再收一遍（这段时间里新建的绑定）");
   assert.ok(store.get(upstream.id).archivedAt, "停好了以后才删");
   const ownResponse = await send(own.id);
   assert.equal((await ownResponse.json()).stoppedChannelCount, 0);
-  assert.deepEqual(calls, [upstream.id], "自营站点不走停渠道");
+  assert.deepEqual(calls, [upstream.id, upstream.id], "自营站点不走停渠道");
 });

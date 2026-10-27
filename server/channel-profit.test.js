@@ -227,3 +227,44 @@ test("stop：一次最多 1000 个渠道；不在渠道目录也不在在算的�
   assert.deepEqual(f.calls.optoutAdded, [], "编号不对整次都不写");
   assert.deepEqual(await f.module.stop({ ownStationId: "own", channelIds: [2] }), { stopped: [], optedOut: [2] });
 });
+
+test("autoStart：缓存识别里不在停过的组里、fresh 识别里却认出和停过的渠道是同一把 Key——start() 用 fresh 的组再判断一遍，整组不自动开始（不是失败，不退避）", async () => {
+  const unresolved = { channelId: 1, keyless: false, slots: [{ index: 0, state: "unresolved" }] };
+  const channel2 = { channelId: 2, keyless: false, slots: [slot("up1", 11)] };
+  const f = fixture({ channels: [1, 2], stations: [own, mine], optouts: [{ ownStationId: "own", channelId: 1, atMs: 5 }], identified: [] });
+  const module = createChannelProfitModule(f.rt, { identify: async (rt, ownStation, options) => ({ ok: true, stale: false, revealIssues: [],
+    channels: options?.fresh ? [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }, channel2] : [unresolved, channel2] }), randomId: () => "request-1" });
+  const result = await module.autoStart("own");
+  assert.deepEqual(result.started, []);
+  assert.equal(f.calls.probe.length, 0, "没送预览：停过的渠道 1 不会被带进去");
+  assert.equal(f.rt._autoStartBackoff.size, 0, "不是失败，不退避");
+  assert.deepEqual(f.calls.marked, []);
+});
+
+test("autoStart：一轮最多 3 组，合成一次预览和确认；剩下的下一轮再做", async () => {
+  const ids = [1, 2, 3, 4, 5];
+  const f = fixture({ channels: ids, stations: [own, mine], identified: ids.map((id) => ({ channelId: id, keyless: false, slots: [slot("up1", 10 + id)] })) });
+  const result = await f.module.autoStart("own");
+  assert.equal(f.calls.probe.length, 1, "一次预览");
+  assert.equal(f.calls.connect.length, 1, "一次确认");
+  assert.deepEqual(f.calls.connect[0].groups.map((group) => group.channels.map((channel) => channel.channelId)), [[1], [2], [3]], "最多 3 组");
+  assert.equal(result.started.length, 3);
+});
+
+test("autoStart：新渠道追加进已有的绑定（用户点开始建的）时，只给新建的绑定记来源 auto，已有的那条不动", async () => {
+  const f = fixture({ channels: [1, 2], stations: [own, mine], rules: [running("user-rule", [1])],
+    identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 2, keyless: false, slots: [slot("up1", 11)] }],
+    connectResult: (input) => ({ complete: true, groups: input.groups.map((group) => ({ groupId: group.groupId, requestedGroupIds: [group.groupId], reconciliation: { status: "configured", ruleId: "user-rule" } })) }) });
+  const result = await f.module.autoStart("own");
+  assert.equal(result.started.length, 1);
+  assert.deepEqual(f.calls.marked, [], "追加进用户的绑定：不记 auto");
+});
+
+test("status：上游已经删了（归档）的渠道不能开始（识别缓存最多 4 分钟，还会认）；退避记录只留还在等的组", async () => {
+  const f = fixture({ channels: [1], stations: [own, { ...mine, archivedAt: "2026-10-11T00:00:00Z" }], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] });
+  assert.equal((await f.module.status("own")).channels[0].reason, "CHANNEL_KEY_UNMATCHED");
+  const g = fixture({ channels: [1], stations: [own, mine], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] });
+  g.rt._autoStartBackoff = new Map([["own:up1:99", { nextAt: Infinity, delayMs: 1 }], ["other:up1:11", { nextAt: Infinity, delayMs: 1 }]]);
+  await g.module.autoStart("own");
+  assert.deepEqual([...g.rt._autoStartBackoff.keys()], ["other:up1:11"], "这个站点下不再出现的组清掉，别的站点的不动");
+});

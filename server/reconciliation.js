@@ -53,7 +53,7 @@ import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } 
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
 import { costBasisOf, isConfiguredRate, rateSnapshotOf, ratesFor } from "../lib/profit.js";
-import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
+import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 import { keyAgentConfigOf } from "./key-agent.js";
@@ -806,6 +806,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 事项全部解除（这一轮没有）才清、下次重新记。换码就重置成现在，会把之前被挡的日子放行
     const issueFor = (rule, code, extra = {}) => ({ code, sinceMs: keyIssues.get(rule.id)?.sinceMs ?? openIssue(rule)?.sinceMs ?? now, ...extra });
     const keyAgentDown = new Map(); // ruleId -> { code, sinceMs }：读取服务读不到，从 sinceMs 起先不算
+    const keyUse = new Map(); // own 站点 -> Map(「上游站点:Key 编号」 -> 这一轮认出的用着它的渠道编号)
     const identifiedAtByStation = new Map(); // own 站点 -> 这一轮识别的快照读库的时刻（事项解开的时刻用它）
     const now = Date.now();
     const enabled = rules.filter((rule) => rule.enabled);
@@ -856,6 +857,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         refByChannelId.set(Number(channel.channelId),
           { upstreamStationId: slot.matches[0].stationId, tokenId: Number(slot.matches[0].tokenId), tokenName: slot.matches[0].tokenName ?? null });
       }
+      // 这一轮读取服务认出的每把 Key 被哪些渠道用着（几把 Key 的渠道的每一把也算）：Sub2API 换 Key 那天旧 Key 还被别的渠道用着要先不结账（sub2KeyUsedElsewhere）
+      const channelsByKey = new Map();
+      for (const channel of identified.channels) if (!channel.keyless) for (const slot of channel.slots || []) {
+        if (slot.state !== "identified") continue;
+        for (const match of slot.matches || []) {
+          const keyId = `${match.stationId}:${Number(match.tokenId)}`;
+          channelsByKey.set(keyId, [...(channelsByKey.get(keyId) || []), Number(channel.channelId)]);
+        }
+      }
+      keyUse.set(ownStationId, channelsByKey);
       // 这个站点下这一轮有没有没处理完的——有就不推进「上一次读成功」。按绑定记（重新分组成功以后那几条绑定就不算没处理完了），别的原因记 pendingOther
       const pendingRules = new Set();
       let pendingOther = false;
@@ -926,7 +937,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const toApply = changeCandidates.filter((item) => !keyIssues.has(item.rule.id) && !regrouped.has(item.rule.id));
       if (toApply.length) {
         // b 用这份快照读取服务自己读库的时刻（换 Key 的真正时刻不晚于它）；没有（304 沿用）才用控制台拿到的时刻
-        const result = await applyKeyAgentChangesFor(toApply, { observedAt: identified.readAtMs ?? identified.fetchedAtMs ?? now, stationLastSuccessAtMs, resources, keyIssues, issueFor, openIssue });
+        const result = await applyKeyAgentChangesFor(toApply, { observedAt: identified.readAtMs ?? identified.fetchedAtMs ?? now, stationLastSuccessAtMs, resources, keyIssues, issueFor, openIssue, channelsByKey });
         applied ||= result.applied;
         if (!result.allApplied) pendingOther = true;
       }
@@ -948,7 +959,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         await repository.markKeyIssue(rule.id, issue ? { code: issue.code, sinceMs: issue.sinceMs } : null).catch(() => {});
       }
     }));
-    return { keyIssues, keyAgentDown, rules: applied ? await repository.listRules().catch(() => rules) : rules };
+    return { keyIssues, keyAgentDown, keyUse, rules: applied ? await repository.listRules().catch(() => rules) : rules };
   }
 
   // K2c 重新分组（k-plan 3.3，规则的细节在 server/key-agent-resegment.js 的 planRegroup）。K2b 认出分组、合组以后不再只记 KEY_GROUP_CHANGED：
@@ -1038,7 +1049,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // SOURCE_BINDING_UNCONFIRMED 挡住（锚定时记的 canonicalKey 对不上了）。
   // 互换、轮换的绑定一组一个事务，别的组各自一个事务；撞了数据库唯一约束（没被 detectGroupMerges 预检查到的边界情况）只回滚、只记这一组的分组冲突，不写段。
   // 返回 { applied: 有没有哪一组真的写进库, allApplied: 这一批是不是全部落库了 }
-  async function applyKeyAgentChangesFor(changeCandidates, { observedAt, stationLastSuccessAtMs, resources, keyIssues, issueFor, openIssue }) {
+  async function applyKeyAgentChangesFor(changeCandidates, { observedAt, stationLastSuccessAtMs, resources, keyIssues, issueFor, openIssue, channelsByKey }) {
     const lastSeenAtByBinding = {};
     for (const { rule } of changeCandidates) {
       const segments = await repository.listSegments(rule.id).catch(() => []);
@@ -1112,8 +1123,24 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         continue;
       }
       applied = true;
+      // Sub2API 只能按整天读：换掉的旧 Key 这一刻还被这条绑定以外的渠道用着（那个渠道在不在算、是不是新开的都一样），整天读会把那个渠道的用量算进这条绑定，
+      // 挪 Key 的一对绑定（上面的 deferred）以外的这几种情况也一样。换 Key 的那几天（过渡段起点所在的日子到换 Key 那天）不结账，只挡这几天，以后的日子照常算。
+      // 临时的挡：逐条拆分（k-plan 3.5，按 b 把那天切开）合了以后去掉
+      for (const { ruleId } of group) {
+        const { rule, before } = byRuleId.get(ruleId);
+        if (!isSub2(ruleId) || !sub2KeyUsedElsewhere(rule, [before], channelsByKey)) continue;
+        const from = dayBoundsInTz(Math.min(lastSeenAtByBinding[ruleId] ?? observedAt, observedAt), rule.timezone), to = dayBoundsInTz(observedAt, rule.timezone);
+        await repository.markKeyIssue(ruleId, { code: "PENDING", sinceMs: from.startMs, untilMs: to.endMs }).catch(() => {});
+      }
     }
     return { applied, allApplied };
+  }
+
+  // 这几把 Key 里有没有被这条绑定自己的渠道以外的渠道用着（这一轮读取服务认出的，channelsByKey）
+  function sub2KeyUsedElsewhere(rule, keys, channelsByKey) {
+    if (!channelsByKey) return false;
+    const own = new Set(rule.channels.map((channel) => Number(channel.channelId)));
+    return keys.some((key) => (channelsByKey.get(`${key.upstreamStationId ?? rule.upstreamStationId}:${Number(key.tokenId)}`) || []).some((channelId) => !own.has(channelId)));
   }
 
   // K2c 自动开始：每轮轮询给每个装了读取服务的自营站点问一次（channel-profit.js 的 autoStart）。接入向导没起来（测试、刚启动）就不做；
@@ -1163,11 +1190,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 不让纯读页面的请求触发检测逻辑；真正会出问题的场景已经有定期的观测/轮询在跑，不差这一次。
     // 放在算成本主人、写账本的版本指纹之前：这一轮真的换了 Key（rules.token_id、canonical_key 变了）就重新读绑定，
     // 后面用的都是换完以后的，不会这一轮拿着旧的 token_id 判重复、核对版本
-    let keyIssues = new Map(), keyAgentDown = new Map();
+    let keyIssues = new Map(), keyAgentDown = new Map(), keyUse = new Map();
     if (observe) {
       const round = await keyAgentRoundFor(rules, resources);
       keyIssues = round.keyIssues;
       keyAgentDown = round.keyAgentDown;
+      keyUse = round.keyUse;
       if (round.rules !== rules) {
         rules = round.rules;
         billingSource.expectedOwnerState = reconciliationOwnerRuleState(rules);
@@ -1197,7 +1225,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       duplicateSales.set(id, [...new Set([...(duplicateSales.get(id) || []), ...ids])].sort());
     }
     return { startedAt: Date.now(), rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, duplicateSales, billingSource: Object.freeze(billingSource),
-      keyIssues, keyAgentDown, keyAgentObserved: observe,
+      keyIssues, keyAgentDown, keyUse, keyAgentObserved: observe,
       // 这一轮（或这一次查询）里共用的：自营站点的 /api/status；哪些自营站点从什么时候起没有新的消费（只有轮询会填）
       ownStatus: new Map(), ownQuietFrom: new Map() };
   }
@@ -2453,6 +2481,18 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const platform = evidenceMetadata?.platform ?? rule.provider ?? billingProviderOf(upstream);
       const persistedSegments = await repository.listSegments(rule.id);
       if (!persistedSegments.length) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", INCOMPLETE_DAY_TEXT), { metadata: evidenceMetadata, token: evidenceToken });
+      // Sub2API 整天读：这一天的段里放过、现在已经换掉的 Key 这一轮还被别的渠道用着，整天读会把那个渠道的用量算进这条绑定——不结账（换 Key 那一刻没认出来的新渠道，
+      // 到结账时读取服务多半已经认出来了）。临时的挡：逐条拆分合了以后去掉
+      if (ownerRegistry.keyAgentObserved && !rule.archivedAt && /^sub2api/.test(upstream.type || "") && persistedSegments.length > 1) { // 重新分组归档的旧绑定窗口里放的新组的 Key 本来就在别的绑定里，不在这里挡
+        const inWindow = persistedSegments.filter((segment) => Number(segment.effectiveFrom) < window.endMs && (segment.effectiveTo == null || Number(segment.effectiveTo) > window.startMs));
+        const idOf = (key) => `${key.upstreamStationId ?? rule.upstreamStationId}:${Number(key.tokenId)}`;
+        const latest = persistedSegments.reduce((best, segment) => (Number(segment.effectiveFrom) > Number(best.effectiveFrom) ? segment : best));
+        const current = new Set((latest.keys?.length ? latest.keys : [{ tokenId: rule.tokenId }]).map(idOf));
+        const departed = inWindow.flatMap((segment) => segment.keys || []).filter((key) => !current.has(idOf(key)));
+        if (departed.length && sub2KeyUsedElsewhere(rule, departed, ownerRegistry.keyUse?.get(rule.ownStationId))) {
+          return unavailable(health("PENDING", issueText("PENDING"), { sinceMs: window.startMs }), { metadata, token }, false);
+        }
+      }
       const catalogueObserved = !upstreamProblem && metadata.groupsAvailable && metadata.groups[token.group]?.ratio != null;
       const currentRatio = catalogueObserved ? metadata.groups[token.group].ratio : null;
       const ratioObservedAt = Date.now();

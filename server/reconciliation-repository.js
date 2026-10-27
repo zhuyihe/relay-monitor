@@ -813,15 +813,15 @@ export class ReconciliationRepository {
   // K2b：这条绑定的 Key 现在有没处理的事，跨轮记下来、重启不丢。issue 是 { code, sinceMs, untilMs? }，null 表示解开了清掉；
   // untilMs 有值是「解开了、但 [sinceMs, untilMs) 里的日子仍然算不准」，只挡这一段。
   // 调用方（server/reconciliation.js keyAgentRoundFor）自己保证同一件事沿用第一次认出的 sinceMs，这里只管写
+  async markKeyIssue(ruleId, issue) {
+    await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ?, key_issue_until_ms = ? WHERE id = ?",
+      [issue?.code ?? null, issue?.sinceMs ?? null, issue?.untilMs ?? null, ruleId]);
+  }
+
   // 这条绑定是系统自动开始的（'auto'）：只在还没记过的时候写，不影响结账和指纹
   async markRuleStartSource(ruleId, source) {
     const [result] = await this.pool.query("UPDATE reconciliation_rules SET start_source = ? WHERE id = ? AND start_source IS NULL", [source, ruleId]);
     return result.affectedRows > 0;
-  }
-
-  async markKeyIssue(ruleId, issue) {
-    await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ?, key_issue_until_ms = ? WHERE id = ?",
-      [issue?.code ?? null, issue?.sinceMs ?? null, issue?.untilMs ?? null, ruleId]);
   }
 
   // K2b：按 key-agent-resegment.js 给的计划，给一条或几条绑定（挪位置、互换时是两条）开新段——同一个事务里关旧段、
