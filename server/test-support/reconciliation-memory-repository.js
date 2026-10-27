@@ -499,6 +499,13 @@ export class MemoryReconciliationRepository {
           currents.set(ruleId, current);
         }
         for (const { ruleId } of plans) {
+          // 对应 MySQL 版：先给还没有 Key 行的段补一行（填换之前 rules 上的那把），再清空 active_token_key
+          const oldRule = this.#ruleEntry(tx, ruleId).row;
+          for (const segment of this.#segmentsOf(tx, ruleId).map(({ row }) => row)) {
+            if (this.#rows("segmentKeys", tx).some(({ row }) => row.segment_id === segment.id)) continue;
+            this.#insert(tx, "segmentKeys", { segment_id: segment.id, upstream_station_id: oldRule.upstream_station_id, token_id: bigint(oldRule.token_id),
+              token_name: oldRule.token_name ?? null, key_mask: null, match_source: "initial", active_token_key: null });
+          }
           this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { active_token_key: null });
           const keyRows = this.#rows("segmentKeys", tx).filter(({ row }) => sameText(row.segment_id, currents.get(ruleId).id));
           this.#update(tx, "segmentKeys", keyRows, { active_token_key: null });

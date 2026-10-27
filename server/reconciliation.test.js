@@ -2076,7 +2076,10 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if (url.pathname === "/api/token/") {
         if (metadataFailure) return reply(500, { success: false });
         const distinct = [...new Map(rules.map((item) => [item.token_id, item])).values()];
-        const extra = extraTokens.map((item) => ({ token_id: item.tokenId, token_name: item.name }));
+        // 换 Key 的测试里仓库会把规则上的 token_id 原地改成新 Key（夹具的 rules 和仓库共用同一批对象），
+        // 这时 extraTokens 里同一把已经在 distinct 里了，不能列两遍（目录里同一把出现两次，读取会报分页重复）
+        const extra = extraTokens.filter((item) => !distinct.some((existing) => Number(existing.token_id) === Number(item.tokenId)))
+          .map((item) => ({ token_id: item.tokenId, token_name: item.name }));
         return reply(200, { success: true, data: { total: distinct.length + extra.length, items: [...distinct, ...extra].map((item) => ({ id: item.token_id, user_id: init.headers?.["New-Api-User"], name: item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false,
           ...(tokenKeyOf ? { key: maskKey(tokenKeyOf(item.token_id)) } : {}) })) } });
       }
@@ -7206,7 +7209,8 @@ test("K2b：没有冲突的正常换 Key——识别→算计划→落库接上�
   const f = liveReconciliationFixture(t, {
     segments: [{ id: "s1", group: "g1", from: 0 }],
     tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
-    extraTokens: [{ tokenId: 10, name: "oai-2" }], // 一开始没有任何绑定用它，是「凭空出现的新 Key」，不是挪过来的
+    // 10：一开始没有任何绑定用它，是「凭空出现的新 Key」，不是挪过来的；9：旧 Key 换掉以后上游目录里还在（规则上的 token_id 改成 10 以后夹具不再替它列）
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
     keyAgent: {
       secret: KEY_AGENT_SECRET,
       channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(currentKey), f: "unused" }] }],
@@ -7229,15 +7233,8 @@ test("K2b：没有冲突的正常换 Key——识别→算计划→落库接上�
   assert.deepEqual(segments[2].keys.map((key) => key.tokenId), [10]);
   assert.deepEqual(segments[1].keys.map((key) => key.tokenId).sort((a, b) => a - b), [9, 10], "过渡段两把 Key 都记着");
 
-  console.error("DEBUG segments after change:", JSON.stringify(segments.map((s) => ({ from: s.effectiveFrom, to: s.effectiveTo, keys: s.keys.map((k) => k.tokenId) }))));
-  console.error("DEBUG ledger after round2:", JSON.stringify(f.state.ledger.map((r) => [r.rule_id, r.bill_date])));
-
   now = Date.parse("2026-10-13T01:00:00Z");
   await f.module.refreshDue(now); // 结「昨天」10-12：换完以后照常结账，不会被挡住
-  const debugResult = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai",
-    startMs: Date.parse("2026-10-11T16:00:00Z"), endMs: Date.parse("2026-10-12T16:00:00Z") }, { force: true });
-  console.error("DEBUG health:", JSON.stringify(debugResult.results[0]?.health));
-  console.error("DEBUG segments field:", JSON.stringify(debugResult.results[0]?.segments?.map((s) => ({ from: s.window, upstream: s.upstream?.state, downstream: s.downstream?.state }))));
   assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length, 1,
     "换了 Key 以后 10-12 照常固定，没有被 SOURCE_BINDING_UNCONFIRMED 挡住");
 });

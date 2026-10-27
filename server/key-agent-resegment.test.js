@@ -45,6 +45,10 @@ test("safeLastSeenAt：有持久化的「读取服务上一次读成功的时刻
   assert.equal(safeLastSeenAt({ keyAgentLastSuccessAtMs: T("10:00"), segmentEffectiveFrom: T("00:00") }), T("10:00"));
 });
 
+test("safeLastSeenAt：持久化的成功时刻比开着那段的起点还早（站点的时刻很久没往前推过）——不早于段起点，段不能在自己起点以前结束", () => {
+  assert.equal(safeLastSeenAt({ keyAgentLastSuccessAtMs: T("00:10"), segmentEffectiveFrom: T("09:00") }), T("09:00"));
+});
+
 test("safeLastSeenAt：没有持久化的成功时刻（没装过读取服务，或者刚装上还没成功读过）——退到这条绑定当前开着那段的起点，一定不晚于真正换 Key 的那一刻", () => {
   assert.equal(safeLastSeenAt({ keyAgentLastSuccessAtMs: null, segmentEffectiveFrom: T("00:00") }), T("00:00"));
 });

@@ -241,35 +241,25 @@ test("keyAgentReachability：没配置读取服务，当作拿不到新结果累
   assert.equal(keyAgentReachability(rt, "own").consecutiveFailures, 0, "没检查过的站点不受影响");
 });
 
-// K2b：持久化「读取服务上一次读成功的时刻」（给 lastSeenAt 丢了以后兜底用，见 server/key-agent-resegment.js 的 safeLastSeenAt）
-test("identifyChannelsCached：真的读成功（200 或 304，不带 X-Agent-Stale）才记一次成功时刻；连不上、带 Stale 的都不记", async (t) => {
-  const calls = [];
-  const store = { list: () => [ownStation], setKeyAgentLastSuccessAt: async (stationId, atMs) => { calls.push([stationId, atMs]); } };
-  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, keyless: true }] }, { headers: { etag: '"v1"' } }));
-  await identifyChannelsCached({ store }, ownStation);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0][0], "own");
-  assert.equal(typeof calls[0][1], "number");
-});
-
-test("identifyChannelsCached：连不上时不记成功时刻", async (t) => {
+// K2b：fetchedAtMs 是这一份结果真的从读取服务拿到的时刻（给驱动当「读取服务上一次读成功」用；持久化由驱动在换段落库以后做，
+// 这里不写 store——读完就写的话 a 会变成 b，见 server/reconciliation.js keyGroupConflictsFor）
+test("identifyChannelsCached：结果带 fetchedAtMs（真的读成功的时刻）；缓存命中还是原来那一刻；带 X-Agent-Stale、连不上都没有；这里不碰 store", async (t) => {
   const calls = [];
   const store = { list: () => [ownStation], setKeyAgentLastSuccessAt: async (...args) => { calls.push(args); } };
+  const rt = { store };
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, keyless: true }] }, { headers: { etag: '"v1"' } }));
+  const before = Date.now();
+  const first = await identifyChannelsCached(rt, ownStation);
+  assert.ok(first.fetchedAtMs >= before && first.fetchedAtMs <= Date.now());
+  const second = await identifyChannelsCached(rt, ownStation); // 缓存命中
+  assert.equal(second.fetchedAtMs, first.fetchedAtMs, "缓存命中带的是原来那一刻，不是现在");
+  assert.equal(calls.length, 0, "identifyChannelsCached 自己不写 store：由驱动在换段落库以后再写");
+
+  const staleRt = { store };
+  t.mock.restoreAll();
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, keyless: true }] }, { headers: { "x-agent-stale": "1" } }));
+  assert.equal((await identifyChannelsCached(staleRt, ownStation)).fetchedAtMs, null, "读取服务给的是旧结果，不算这一轮真的读成功");
+  t.mock.restoreAll();
   t.mock.method(globalThis, "fetch", async () => { throw new Error("连不上"); });
-  await identifyChannelsCached({ store }, ownStation);
-  assert.equal(calls.length, 0);
-});
-
-test("identifyChannelsCached：200 但带 X-Agent-Stale 时不记成功时刻（读取服务自己读库失败，给的是旧结果，不算这一轮真的读成功）", async (t) => {
-  const calls = [];
-  const store = { list: () => [ownStation], setKeyAgentLastSuccessAt: async (...args) => { calls.push(args); } };
-  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, keyless: true }] },
-    { headers: { "x-agent-stale": "1" } }));
-  await identifyChannelsCached({ store }, ownStation);
-  assert.equal(calls.length, 0);
-});
-
-test("identifyChannelsCached：没提供 setKeyAgentLastSuccessAt（比如旧的测试夹具）不报错——可选调用", async (t) => {
-  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, keyless: true }] }, { headers: { etag: '"v1"' } }));
-  await assert.doesNotReject(identifyChannelsCached({ store: { list: () => [ownStation] } }, ownStation));
+  assert.equal((await identifyChannelsCached({ store }, ownStation)).fetchedAtMs, undefined, "连不上：没有结果，也就没有这个时刻");
 });

@@ -122,13 +122,14 @@ export async function identifyChannelsCached(rt, ownStation, options = {}) {
   const sameStation = cache?.stationId === ownStation.id;
   const result = await identifyChannels(rt, ownStation, { ...options, etag: sameStation ? cache.etag : null });
   trackKeyAgentReachability(rt, ownStation.id, result); // 只在真的问了一次（没命中 4 分钟缓存）才记，不按调用次数记
-  // K2b：这一轮读取服务真的读成功了（200 或 304，都不带 X-Agent-Stale）：持久化这一刻，重启后找不到更精确的
-  // 「上一次确认是哪把 Key」时拿它兜底换 Key 窗口的起点（总指挥 10-26 定：只往前挪不回退，宁可窗口宽一点）
-  if (result.ok && !result.stale) await rt.store.setKeyAgentLastSuccessAt?.(ownStation.id, now)?.catch(() => {});
   if (!result.ok) { rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result, etag: sameStation ? cache.etag : null }; return result; }
-  const resolved = result.status === 304 && sameStation && cache.result?.ok
+  // fetchedAtMs：这一份结果是什么时候真的从读取服务拿到的（200 或 304，不带 X-Agent-Stale 才有）。缓存命中返回的还是原来那份，
+  // 所以带的是原来那一刻——K2b 的驱动拿它当「读取服务上一次读成功」的时刻，由驱动在换段落库提交以后再持久化
+  // （不在这里写：读完就先写，a 就成了 b，中途重启还会让它退不回去，见 server/reconciliation.js keyGroupConflictsFor）
+  const resolvedBase = result.status === 304 && sameStation && cache.result?.ok
     ? { ...result, channels: cache.result.channels, revealIssues: cache.result.revealIssues }
     : result;
+  const resolved = { ...resolvedBase, fetchedAtMs: result.stale ? null : now };
   rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result: resolved, etag: result.etag ?? (sameStation ? cache.etag : null) };
   return resolved;
 }

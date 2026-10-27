@@ -772,6 +772,10 @@ export class ReconciliationRepository {
         currents.set(ruleId, segmentRows[0]);
       }
       for (const { ruleId } of plans) {
+        // 先把还没有 Key 行的段补一行（填 rules 上现在——也就是换之前——的那把）：下面要改 rules.token_id，
+        // 补晚了历史段就会读成新 Key。正常数据启动迁移已经补齐，这里是保险（只跑 refreshSegmentKeysSql 的第一条）
+        const [fillMissing] = refreshSegmentKeysSql(ruleId);
+        await conn.query(fillMissing.sql, fillMissing.params);
         await conn.query("UPDATE reconciliation_rules SET active_token_key = NULL WHERE id = ?", [ruleId]);
         await conn.query("UPDATE reconciliation_segment_keys SET active_token_key = NULL WHERE segment_id = ?", [currents.get(ruleId).id]);
       }
