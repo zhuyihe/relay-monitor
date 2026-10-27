@@ -127,8 +127,9 @@ export function utcOffsetText(zone: string, at = Date.now()) {
   return `UTC${minutes < 0 ? MINUS : "+"}${Math.floor(abs / 60)}${abs % 60 ? `:${String(abs % 60).padStart(2, "0")}` : ""}`;
 }
 // settled：这天固定了没有（「算应付成本」关着的两种写法）；zone：这一行上游算一天的时区（一天不从整点开始那一句）
-export function gapReasonText(reason: string | null | undefined, missingModels: string[] = [], { settled = true, zone = null as string | null | undefined, tieredModels = [] as string[] } = {}) {
+export function gapReasonText(reason: string | null | undefined, missingModels: string[] = [], { settled = true, zone = null as string | null | undefined, tieredModels = [] as string[], keyChangeWhen = null as string | null } = {}) {
   if (!reason) return "";
+  if (reason === "KEY_CHANGE_RATIO_DIFFERS" && keyChangeWhen) return COPY.gap.keyChangeRatio(keyChangeWhen);
   if (reason === "MODEL_PRICE_MISSING") {
     const names = (missingModels || []).filter(Boolean);
     return !names.length ? COPY.gap.missingPriceUnnamed : names.length === 1 ? COPY.gap.missingPrice(names[0]) : COPY.gap.missingPrices(names[0], names.length);
