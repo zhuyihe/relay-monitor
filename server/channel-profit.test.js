@@ -43,7 +43,7 @@ test("status：没装读取服务不能开始；每个渠道是在算 / 能开�
   const f = fixture({ channels: [1, 2, 3, 4, 5, 6, 7, 8], configured: false, identified: [] });
   assert.deepEqual(await f.module.status("own"), { ok: false, code: "KEY_AGENT_NOT_CONFIGURED" });
 
-  const g = fixture({ channels: [1, 2, 3, 4, 5, 6, 7, 8, 9], optouts: [{ ownStationId: "own", channelId: 3, atMs: 5 }], rules: [running("r-live", [9])], identified: [
+  const g = fixture({ channels: [1, 2, 3, 4, 5, 6, 7, 8, 9], optouts: [{ ownStationId: "own", channelId: 3, atMs: 5 }], rules: [running("r-live", [9])], revealIssues: [{ upstreamStationId: "up1", channelIds: [6] }], identified: [
     { channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 2, keyless: false, slots: [slot("up1", 11)] }, // 同一把 Key
     { channelId: 3, keyless: false, slots: [slot("up2", 22)] },
     { channelId: 4, keyless: true },
@@ -58,7 +58,7 @@ test("status：没装读取服务不能开始；每个渠道是在算 / 能开�
   const by = Object.fromEntries(status.channels.map((channel) => [channel.channelId, channel]));
   assert.deepEqual([by[1].state, by[1].groupKey, by[2].groupKey], ["startable", "up1:11", "up1:11"]);
   assert.deepEqual([by[3].state, by[3].optedOut], ["startable", true], "停过的渠道还能点「开始算利润」");
-  assert.deepEqual([by[4].reason, by[5].reason, by[6].reason, by[7].reason, by[8].reason], ["KEYLESS", "KEY_UNMATCHED", "KEY_REVEAL_DENIED", "KEY_UNRESOLVED", "UPSTREAM_UNSUPPORTED"]);
+  assert.deepEqual([by[4].reason, by[5].reason, by[6].reason, by[7].reason, by[8].reason], ["KEYLESS", "CHANNEL_KEY_UNMATCHED", "KEY_REVEAL_DENIED", "KEY_UNRESOLVED", "UPSTREAM_UNSUPPORTED"]);
   assert.deepEqual([by[9].state, by[9].ruleId], ["running", "r-live"]);
   assert.deepEqual(status.groups.map((group) => [group.groupKey, group.channelIds]), [["up1:11", [1, 2]], ["up2:22", [3]]]);
 });
@@ -207,7 +207,7 @@ test("overview：一个渠道只一种状态（需处理 > 在算 > 没算）；
   assert.deepEqual([by["rule:r-auto"].state, by["rule:r-auto"].names, by["rule:r-auto"].startedBy], ["running", ["渠道1", "渠道2"], "auto"]);
   assert.deepEqual([by["rule:r-bad"].state, by["rule:r-bad"].issues], ["attention", ["CHANNEL_KEY_UNMATCHED"]]);
   assert.deepEqual([by["key:up1:33"].state, by["key:up1:33"].optedOut, by["key:up1:33"].needsCoverage, by["key:up1:33"].startGroupKey], ["stopped", true, false, "up1:33"]);
-  assert.deepEqual(view.unmatched.map((item) => [item.channelId, item.reason]), [[4, "KEY_UNMATCHED"], [5, "KEYLESS"], [6, "KEY_REVEAL_DENIED"]]);
+  assert.deepEqual(view.unmatched.map((item) => [item.channelId, item.reason]), [[4, "CHANNEL_KEY_UNMATCHED"], [5, "KEYLESS"], [6, "KEY_REVEAL_DENIED"]]);
   assert.equal(view.unmatched[2].upstreamStationId, "up2");
   const up = Object.fromEntries(view.upstreams.map((item) => [item.id, item]));
   assert.deepEqual([up.up1.channelCount, up.up1.runningCount, up.up1.attentionCount, up.up1.accountUse], [3, 2, 0, "only_mine"]);
@@ -249,4 +249,118 @@ test("answerCoverage：只改在算的绑定的回答——走绑定编辑的「
   await assert.rejects(f.module.answerCoverage({ ownStationId: "own", ruleId: "r-gone", coverage: { answer: "none" } }), { code: "RULE_NOT_FOUND" });
   await assert.rejects(f.module.answerCoverage({ ownStationId: "own", ruleId: "r1", coverage: { answer: "bogus" } }), { code: "INVALID_REQUEST" });
   assert.equal(calls.length, 2, "答案不对不去预览");
+});
+
+test("status：打码撞了但 reveal 只是暂时失败（revealIssues 里没有这个渠道）不报少权限，报 KEY_UNRESOLVED（会自己好）", async () => {
+  const f = fixture({ channels: [1], identified: [{ channelId: 1, keyless: false, slots: [{ index: 0, state: "ambiguous", matches: [{ stationId: "up1", tokenId: 1 }, { stationId: "up1", tokenId: 2 }] }] }] });
+  assert.equal((await f.module.status("own")).channels[0].reason, "KEY_UNRESOLVED");
+});
+
+test("status：几把 Key 的渠道也在用的 Key——和它共用这把 Key 的渠道不能开始（KEY_SHARED_WITH_MULTI_KEY，写明和哪个渠道共用），不建绑定；这把 Key 没人共用的组不受影响", async () => {
+  const f = fixture({ channels: [1, 2, 3, 4], identified: [
+    { channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 2, keyless: false, slots: [slot("up1", 11)] }, // A、B 用 K11
+    { channelId: 3, keyless: false, slots: [slot("up1", 11), slot("up1", 99)].map((item, index) => ({ ...item, index })) }, // C 用两把，其中一把是 K11
+    { channelId: 4, keyless: false, slots: [slot("up1", 44)] },
+  ] });
+  const status = await f.module.status("own");
+  const by = Object.fromEntries(status.channels.map((channel) => [channel.channelId, channel]));
+  assert.deepEqual([by[1], by[2]].map((channel) => [channel.state, channel.reason, channel.sharedWithChannelIds]), [["blocked", "KEY_SHARED_WITH_MULTI_KEY", [3]], ["blocked", "KEY_SHARED_WITH_MULTI_KEY", [3]]]);
+  assert.equal(by[3].reason, "MULTI_KEY");
+  assert.deepEqual([by[4].state, status.groups.map((group) => group.groupKey)], ["startable", ["up1:44"]]);
+  const result = await f.module.start({ ownStationId: "own", channelIds: [1, 2, 4] });
+  assert.deepEqual(result.blocked.map((item) => [item.channelId, item.code]), [[1, "KEY_SHARED_WITH_MULTI_KEY"], [2, "KEY_SHARED_WITH_MULTI_KEY"]]);
+  assert.deepEqual(result.started.map((item) => item.channelIds), [[4]], "共用 Key 的那组不建绑定，别的组照常");
+});
+
+test("start：fresh——识别缓存没过期时也重新问；一组的回答格式不对只算这一组没答，别的组照常开始", async () => {
+  const asked = [];
+  const f = fixture({ channels: [1, 2], identified: [] });
+  const channels = [{ channelId: 1, keyless: false, slots: [slot("up2", 22)] }, { channelId: 2, keyless: false, slots: [slot("up1", 11)] }];
+  const module = createChannelProfitModule(f.rt, { identify: async (rt, own, options) => { asked.push(options?.fresh === true); return { ok: true, stale: false, channels, revealIssues: [] }; }, randomId: () => "request-1" });
+  const result = await module.start({ ownStationId: "own", channelIds: [1, 2], coverage: { "up2:22": { answer: "bogus" } } });
+  assert.ok(asked.includes(true), "开始前重新问读取服务");
+  assert.deepEqual(result.blocked.map((item) => [item.channelId, item.code]), [[1, "COVERAGE_ANSWER_REQUIRED"]]);
+  assert.deepEqual(result.started.map((item) => item.channelIds), [[2]]);
+});
+
+test("start 和 stop 同一个自营站点一个一个来：同时点开始和停止，停止看到的是开始已经提交的结果；同时停止两次，第二次当成已经停了", async () => {
+  const f = fixture({ channels: [1], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] });
+  // 假的 connectBatch 让出一下事件循环：不排队的话 stop 会在 start 提交以前读到「没在算」
+  const connect = f.rt.channelOnboarding.connectBatch;
+  f.rt.channelOnboarding.connectBatch = async (input) => { await new Promise((resolve) => setTimeout(resolve, 5)); const result = await connect(input); f.state.rules.push(running("rule-0", [1])); return result; };
+  const [started, stopped] = await Promise.all([f.module.start({ ownStationId: "own", channelIds: [1] }), f.module.stop({ ownStationId: "own", channelIds: [1] })]);
+  assert.equal(started.started.length, 1);
+  assert.deepEqual(stopped.stopped.map((item) => item.ruleId), ["rule-0"], "停止排在开始后面，看到了刚建好的绑定，真的停了它");
+  assert.equal(f.state.rules.length, 0);
+  // 同时停止两次：第二次 archiveRule 报 RULE_NOT_FOUND，当成已经停了
+  f.state.rules.push(running("rule-1", [1]));
+  const archive = f.rt.reconciliation.archiveRule;
+  f.rt.reconciliation.archiveRule = async (id, options) => { if (f.state.rules.every((rule) => rule.id !== id)) throw Object.assign(new Error("gone"), { code: "RULE_NOT_FOUND" }); return archive(id, options); };
+  const both = await Promise.all([f.module.stop({ ownStationId: "own", channelIds: [1] }), f.module.stop({ ownStationId: "own", channelIds: [1] })]);
+  assert.deepEqual(both.map((item) => item.stopped.length + item.optedOut.length), [1, 1]);
+});
+
+test("stop：一次最多 1000 个渠道；不在渠道目录也不在在算的绑定里的编号不往「用户不要算」里写", async () => {
+  const f = fixture({ channels: [1, 2], identified: [] });
+  await assert.rejects(f.module.stop({ ownStationId: "own", channelIds: Array.from({ length: 1001 }, (_, index) => index + 1) }), { code: "INVALID_REQUEST" });
+  await assert.rejects(f.module.stop({ ownStationId: "own", channelIds: [2, 999] }), { code: "CHANNEL_SOURCE_CHANGED" });
+  assert.deepEqual(f.calls.optoutAdded, [], "编号不对整次都不写");
+  assert.deepEqual(await f.module.stop({ ownStationId: "own", channelIds: [2] }), { stopped: [], optedOut: [2] });
+});
+
+test("autoStart：缓存识别里不在停过的组里、fresh 识别里却认出和停过的渠道是同一把 Key——start() 用 fresh 的组再判断一遍，整组不自动开始（不是失败，不退避）", async () => {
+  const unresolved = { channelId: 1, keyless: false, slots: [{ index: 0, state: "unresolved" }] };
+  const channel2 = { channelId: 2, keyless: false, slots: [slot("up1", 11)] };
+  const f = fixture({ channels: [1, 2], stations: [own, mine], optouts: [{ ownStationId: "own", channelId: 1, atMs: 5 }], identified: [] });
+  const module = createChannelProfitModule(f.rt, { identify: async (rt, ownStation, options) => ({ ok: true, stale: false, revealIssues: [],
+    channels: options?.fresh ? [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }, channel2] : [unresolved, channel2] }), randomId: () => "request-1" });
+  const result = await module.autoStart("own");
+  assert.deepEqual(result.started, []);
+  assert.equal(f.calls.probe.length, 0, "没送预览：停过的渠道 1 不会被带进去");
+  assert.equal(f.rt._autoStartBackoff.size, 0, "不是失败，不退避");
+  assert.deepEqual(f.calls.marked, []);
+});
+
+test("autoStart：一轮最多 3 组，合成一次预览和确认；剩下的下一轮再做", async () => {
+  const ids = [1, 2, 3, 4, 5];
+  const f = fixture({ channels: ids, stations: [own, mine], identified: ids.map((id) => ({ channelId: id, keyless: false, slots: [slot("up1", 10 + id)] })) });
+  const result = await f.module.autoStart("own");
+  assert.equal(f.calls.probe.length, 1, "一次预览");
+  assert.equal(f.calls.connect.length, 1, "一次确认");
+  assert.deepEqual(f.calls.connect[0].groups.map((group) => group.channels.map((channel) => channel.channelId)), [[1], [2], [3]], "最多 3 组");
+  assert.equal(result.started.length, 3);
+});
+
+test("autoStart：新渠道追加进已有的绑定（用户点开始建的）时，只给新建的绑定记来源 auto，已有的那条不动", async () => {
+  const f = fixture({ channels: [1, 2], stations: [own, mine], rules: [running("user-rule", [1])],
+    identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 2, keyless: false, slots: [slot("up1", 11)] }],
+    connectResult: (input) => ({ complete: true, groups: input.groups.map((group) => ({ groupId: group.groupId, requestedGroupIds: [group.groupId], reconciliation: { status: "configured", ruleId: "user-rule" } })) }) });
+  const result = await f.module.autoStart("own");
+  assert.equal(result.started.length, 1);
+  assert.deepEqual(f.calls.marked, [], "追加进用户的绑定：不记 auto");
+});
+
+test("status：上游已经删了（归档）的渠道不能开始（识别缓存最多 4 分钟，还会认）；退避记录只留还在等的组", async () => {
+  const f = fixture({ channels: [1], stations: [own, { ...mine, archivedAt: "2026-10-11T00:00:00Z" }], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] });
+  assert.equal((await f.module.status("own")).channels[0].reason, "CHANNEL_KEY_UNMATCHED");
+  const g = fixture({ channels: [1], stations: [own, mine], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] });
+  g.rt._autoStartBackoff = new Map([["own:up1:99", { nextAt: Infinity, delayMs: 1 }], ["other:up1:11", { nextAt: Infinity, delayMs: 1 }]]);
+  await g.module.autoStart("own");
+  assert.deepEqual([...g.rt._autoStartBackoff.keys()], ["other:up1:11"], "这个站点下不再出现的组清掉，别的站点的不动");
+});
+
+test("overview：几把 Key 的渠道写在它用的上游下面（blocked 卡片，写几把），和它共用 Key 的组一张 blocked 卡片（写和哪个渠道共用）；都不进 unmatched，也不算在算", async () => {
+  const f = overviewFixture({ channels: [1, 2, 3, 4], identified: [
+    { channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 2, keyless: false, slots: [slot("up1", 11)] }, // 共用 K11
+    { channelId: 3, keyless: false, slots: [slot("up1", 11), { ...slot("up2", 22), index: 1 }] },
+    { channelId: 4, keyless: false, slots: [slot("up1", 44)] },
+  ] });
+  const view = await f.module.overview("own");
+  const byId = Object.fromEntries(view.cards.map((card) => [card.id, card]));
+  assert.deepEqual([byId["shared:up1:11"].state, byId["shared:up1:11"].channelIds, byId["shared:up1:11"].blocked], ["blocked", [1, 2], { code: "KEY_SHARED_WITH_MULTI_KEY", sharedWith: ["渠道3"] }]);
+  assert.deepEqual([byId["multi:3:up1"].state, byId["multi:3:up1"].blocked, byId["multi:3:up2"].upstreamStationId], ["blocked", { code: "MULTI_KEY", keyCount: 2 }, "up2"], "几把 Key 的渠道写在它用到的每个上游下面");
+  assert.equal(byId["key:up1:44"].state, "stopped", "别的组照常");
+  assert.deepEqual(view.unmatched, []);
+  const upstream = Object.fromEntries(view.upstreams.map((item) => [item.id, item]));
+  assert.equal(upstream.up1.runningCount, 0, "blocked 卡片不算在算");
 });

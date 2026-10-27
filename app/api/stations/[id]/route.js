@@ -52,9 +52,11 @@ export const DELETE = withAuth(async (request, rt, params) => {
   if (purge && body?.confirm !== "DELETE")
     return json({ error: "彻底删除资源及历史需要确认" }, 400);
 
-  const stopped = rt.store.get(params.id)?.isOwn ? { ruleCount: 0, channelCount: 0 } : await stopChannelsOf(rt, params.id);
+  const isOwn = !!rt.store.get(params.id)?.isOwn;
+  const stopped = isOwn ? { ruleCount: 0, channelCount: 0 } : await stopChannelsOf(rt, params.id);
   if (purge) {
     const result = await purgeStation(rt, params.id);
+    if (result.ok && !isOwn) await stopChannelsOf(rt, params.id).catch(() => {}); // 上游删了以后再收一遍：删的这段时间里新建的绑定（自动开始、手动开始）也停掉
     if (result.ok) {
       rt._ownCache?.clear();
       delete rt._ownChannelsCache;
@@ -65,6 +67,7 @@ export const DELETE = withAuth(async (request, rt, params) => {
 
   const station = await rt.store.archive(params.id);
   const ok = !!station;
+  if (ok && !isOwn) await stopChannelsOf(rt, params.id).catch(() => {}); // 上游归档以后再收一遍（幂等）：先停渠道、后归档的这段时间里新建的绑定也停掉
   rt._ownCache?.clear();
   delete rt._ownChannelsCache;
   delete rt._ownUsersCache;

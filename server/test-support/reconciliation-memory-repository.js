@@ -217,8 +217,14 @@ export class MemoryReconciliationRepository {
       const createdAt = this.#timestamp();
       // 同一天里更早解除的占着同一个渠道（或同一把 Key）的 New API 绑定：新绑定从那一刻起算（C3，同 MySQL 版）
       const archivedPeers = this.#plain("rules").filter((row) => row.archived_at != null).map((row) => ruleFromRow(fresh(row), this.#channelsOf(tx, row.id)));
+      // 这把 Key 今天早些时候被这个自营站点下别的绑定握过、那些段已经关掉了：新绑定从最晚的结束时刻起算（同 MySQL 版）
+      const ruleOwner = new Map(this.#plain("rules").map((row) => [row.id, row.own_station_id]));
+      const heldSegments = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && ruleOwner.get(segment.rule_id) === input.ownStationId
+        && this.#plain("segmentKeys").some((key) => key.segment_id === segment.id && key.upstream_station_id === input.upstreamStationId && Number(key.token_id) === Number(input.tokenId)));
+      const keyHeldUntilMs = heldSegments.length ? Math.max(...heldSegments.map((segment) => Number(segment.effective_to_ms))) : null;
       const accountingFloor = floorOverride !== undefined ? floorOverride : isScopedBillingPolicy(input.billingPolicy)
-        ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels }, archivedPeers) : null;
+        ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels,
+          keyHeldUntilMs, sub2: input.provider === "sub2api" }, archivedPeers) : null;
       this.#insert(tx, "rules", {
         id, accounting_floor_ms: accountingFloor, upstream_station_id: input.upstreamStationId ?? null, own_station_id: input.ownStationId ?? null, token_id: bigint(input.tokenId),
         token_name: input.tokenName ?? null, fixed_group: input.fixedGroup ?? null, timezone: input.timezone ?? null,
@@ -529,7 +535,7 @@ export class MemoryReconciliationRepository {
     await this.#transaction("markKeyIssue", async (tx) => {
       const entry = this.#ruleEntry(tx, ruleId);
       if (!entry) return;
-      this.#update(tx, "rules", [entry], { key_issue_code: issue?.code ?? null, key_issue_since_ms: issue ? bigint(issue.sinceMs) : null });
+      this.#update(tx, "rules", [entry], { key_issue_code: issue?.code ?? null, key_issue_since_ms: issue ? bigint(issue.sinceMs) : null, key_issue_until_ms: issue?.untilMs != null ? bigint(issue.untilMs) : null });
     });
   }
 

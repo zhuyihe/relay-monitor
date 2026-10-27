@@ -293,7 +293,7 @@ test("identifyChannelsCached：结果带 fetchedAtMs（真的读成功的时刻�
 });
 
 const age = (rt, ms) => { rt._keyAgentIdentifyCache.at -= ms; if (rt._keyAgentIdentifyCache.lastGood) rt._keyAgentIdentifyCache.lastGood.comparedAt -= ms; };
-// 审核 2 第 1 轮 高-2：304 只说明读取服务那一份没变，不说明上游目录没变
+// 304 只说明读取服务那一份没变，不说明上游目录没变
 test("identifyChannelsCached：认出的结果里有没认定的（渠道 Key 不在已加的上游里），读取服务回 304 也要重新对一遍上游目录——用户把上游加上以后下一轮就认出来了", async (t) => {
   let step = 0;
   t.mock.method(globalThis, "fetch", async () => {

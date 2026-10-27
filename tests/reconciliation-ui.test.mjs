@@ -3529,7 +3529,7 @@ test("「渠道」页签：用过的 Key 新的在前，先露 3 段、多的收
   const lines = [4, 3, 2, 1].map((n) => keyLine(`oai-${n}`, n, "A-monitor-1", { fromMs: T0 - n * DAY, toMs: n === 4 ? null : T0 - (n - 1) * DAY }));
   lines[0].between = [T0 - 4 * DAY - 3600e3, T0 - 4 * DAY];
   const overview = channelsOverview({ cards: [channelCard("rule:r1", { ruleId: "r1", startedBy: "auto", startedAtMs: T0 - 4 * DAY, keys: lines })],
-    unmatched: [{ channelId: 8, name: "渠道 内网中转", reason: "KEY_UNMATCHED" }, { channelId: 9, name: "Vertex 渠道", reason: "KEYLESS" }] });
+    unmatched: [{ channelId: 8, name: "渠道 内网中转", reason: "CHANNEL_KEY_UNMATCHED" }, { channelId: 9, name: "Vertex 渠道", reason: "KEYLESS" }] });
   const { page, center } = await openAccountsPage(t, { overview });
   const card = center.locator('[data-card-id="rule:r1"]'); await card.waitFor();
   assert.equal(await card.locator(".jy-channels-key").count(), 3); await card.getByRole("button", { name: "再看 1 段", exact: true }).click(); assert.equal(await card.locator(".jy-channels-key").count(), 4);

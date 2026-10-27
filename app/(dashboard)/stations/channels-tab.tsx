@@ -51,6 +51,9 @@ const COPY = Object.freeze({
   keyNotInUpstream: "这个渠道用的 Key 不在已加的上游里",
   keyUnrecognisable: "这类渠道的 Key 系统认不了，利润算不了",
   multiKey: "这个渠道填了几把 Key，这一版还不能开始算利润",
+  multiKeyOn: (n: number) => `这个渠道填了 ${n} 把 Key，这一版还算不了`,
+  sharedWithMultiKey: (names: string[]) => `这把 Key 还给${names.length > 1 ? `「${names[0]}」等 ${names.length} 个渠道` : `「${names[0]}」`}用着，这一版还算不了`,
+  cannotStart: "这一版还算不了",
   noBills: "这个上游读不到每天的账单，只能看余额",
   onlyOneKey: "这个上游只填了一把 Key，换 Key 时要来这里改",
   readerNone: "装好读取服务才能开始算利润",
@@ -88,8 +91,10 @@ const SHARED_ELSEWHERE = Object.freeze({
 
 type KeyLine = { fromMs: number; toMs: number | null; between: [number, number] | null; key: { upstreamStationId: string; tokenId: number; tokenName: string | null }; group: string | null; ratio: number | null };
 type Card = {
-  id: string; state: "attention" | "running" | "stopped"; upstreamStationId: string; channelIds: number[]; names: string[]; ruleId: string | null; tokenName: string | null;
+  id: string; state: "attention" | "running" | "stopped" | "blocked"; upstreamStationId: string; channelIds: number[]; names: string[]; ruleId: string | null; tokenName: string | null;
   startedBy: "auto" | "user" | null; startedAtMs: number | null; issues: string[]; keys: KeyLine[]; startGroupKey: string | null; needsCoverage: boolean; optedOut: boolean;
+  // state = blocked：这一版还算不了（几把 Key 的渠道、和它共用 Key 的组），没有按钮
+  blocked?: { code: "MULTI_KEY" | "KEY_SHARED_WITH_MULTI_KEY"; keyCount?: number; sharedWith?: string[] };
 };
 type UpstreamRow = { id: string; name: string; type: string; accountUse: string | null; noBills: boolean; channelCount: number; runningCount: number; attentionCount: number };
 type Unmatched = { channelId: number; name: string; reason: string; upstreamStationId?: string };
@@ -334,6 +339,7 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
   const renderCard = (card: Card, upstream: UpstreamRow | undefined) => {
     const stateTag = card.state === "attention" ? <span className="jy-tag jy-tag--warn">{COPY.needsAction}</span>
       : card.state === "running" ? <span className="jy-tag jy-tag--info">{COPY.running}</span> : <span className="jy-tag jy-tag--muted">{COPY.stopped}</span>;
+    const blockedText = card.blocked ? (card.blocked.code === "MULTI_KEY" ? COPY.multiKeyOn(card.blocked.keyCount ?? 2) : COPY.sharedWithMultiKey(card.blocked.sharedWith ?? [])) : null;
     const busy = busyId === card.id;
     const canStart = card.state === "stopped" && !upstream?.noBills;
     return (
@@ -342,9 +348,11 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
           <h3>{card.names.join("、")}</h3>
           {stateTag}
           <span className="spacer" />
-          {card.state !== "stopped" ? <Button type="link" size="small" disabled={busy} onClick={() => setStopTarget(card)}>{STOP.label}</Button> : null}
+          {card.state === "running" || card.state === "attention" ? <Button type="link" size="small" disabled={busy} onClick={() => setStopTarget(card)}>{STOP.label}</Button> : null}
+          {card.state === "blocked" ? <Button size="small" type="primary" disabled title={blockedText ?? undefined}>{START.label}</Button> : null}
           {canStart ? <Button size="small" type="primary" loading={busy} onClick={() => clickStart(card)}>{START.label}</Button> : null}
         </header>
+        {blockedText ? <p className="jy-caption">{blockedText}</p> : null}
         {card.issues.map((code) => issueBox(card, code))}
         {card.state === "stopped" && upstream?.noBills ? <p className="jy-caption">{COPY.noBills}</p> : null}
         {card.state === "stopped" && card.needsCoverage && !upstream?.noBills ? <p className="jy-caption">{COPY.answerHint}</p> : null}
@@ -364,7 +372,7 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
   const selectedStation = stations.find((item) => item.id === selectedId);
   const selectedAccount = accountModel?.accounts.find((account) => account.resources.some((resource) => resource.id === selectedId)) ?? null;
   const cardsOf = (id: string) => (overview?.cards ?? []).filter((card) => card.upstreamStationId === id)
-    .sort((a, b) => ["attention", "running", "stopped"].indexOf(a.state) - ["attention", "running", "stopped"].indexOf(b.state));
+    .sort((a, b) => ["attention", "running", "stopped", "blocked"].indexOf(a.state) - ["attention", "running", "stopped", "blocked"].indexOf(b.state));
   const unmatched = overview?.unmatched ?? [];
   // 上游的令牌少了读完整 Key 的权限：有两把 Key 分不清，事写在这个上游上（一个上游一件）
   const revealDenied = unmatched.some((item) => item.reason === "KEY_REVEAL_DENIED" && item.upstreamStationId === selectedId);
@@ -394,7 +402,7 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
   } else {
     const cards = selected ? cardsOf(selected.id) : [];
     // 没在算的渠道多时只露前面几张，后面的收进「还有 N 个渠道」
-    const stoppedCards = cards.filter((card) => card.state === "stopped"), liveCards = cards.filter((card) => card.state !== "stopped");
+    const stoppedCards = cards.filter((card) => card.state === "stopped"), liveCards = cards.filter((card) => card.state === "running" || card.state === "attention"), blockedCards = cards.filter((card) => card.state === "blocked");
     const SHOW_STOPPED = 3;
     const showAll = !!expandedMore[selectedId];
     const shownStopped = showAll ? stoppedCards : stoppedCards.slice(0, SHOW_STOPPED), hiddenStopped = showAll ? [] : stoppedCards.slice(SHOW_STOPPED);
@@ -425,9 +433,9 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
                       <div className="jy-channels-unmatched__row">
                         <b>{item.name}</b>
                         <span className="spacer" />
-                        {item.reason === "KEY_UNMATCHED" ? <Button size="small" onClick={() => openEditor(null)}>{ADD_UPSTREAM.label}</Button> : null}
+                        {item.reason === "CHANNEL_KEY_UNMATCHED" ? <Button size="small" onClick={() => openEditor(null)}>{ADD_UPSTREAM.label}</Button> : null}
                       </div>
-                      <p className="jy-caption">{item.reason === "KEY_UNMATCHED" ? COPY.keyNotInUpstream : item.reason === "KEYLESS" ? COPY.keyUnrecognisable : item.reason === "MULTI_KEY" ? COPY.multiKey : COPY.keyNotInUpstream}</p>
+                      <p className="jy-caption">{item.reason === "CHANNEL_KEY_UNMATCHED" ? COPY.keyNotInUpstream : item.reason === "KEYLESS" ? COPY.keyUnrecognisable : item.reason === "MULTI_KEY" ? COPY.multiKey : COPY.keyNotInUpstream}</p>
                     </li>
                   ))}
                 </ul>
@@ -464,6 +472,7 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
               {!cards.length ? <EmptyState title={COPY.noChannels} desc={COPY.noChannelsDesc} center={false} /> : null}
               {liveCards.map((card) => renderCard(card, selected))}
               {shownStopped.map((card) => renderCard(card, selected))}
+              {blockedCards.map((card) => renderCard(card, selected))}
               {hiddenStopped.length ? (
                 <button type="button" className="jy-channels-more" onClick={() => setExpandedMore((current) => ({ ...current, [selectedId]: true }))}>
                   {COPY.more(hiddenStopped.reduce((total, card) => total + card.channelIds.length, 0), hiddenStopped.map((card) => card.names.join("、")).join("、"))}
@@ -528,8 +537,9 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
 // 开始算利润没做成的原因（blocked 的码）
 function blockedText(code: string) {
   if (code === "COVERAGE_ANSWER_REQUIRED") return `请回答「${COVERAGE_QUESTION}」`;
-  if (code === "KEY_UNMATCHED") return COPY.keyNotInUpstream;
+  if (code === "CHANNEL_KEY_UNMATCHED") return COPY.keyNotInUpstream;
   if (code === "KEYLESS") return COPY.keyUnrecognisable;
   if (code === "MULTI_KEY") return COPY.multiKey;
+  if (code === "KEY_SHARED_WITH_MULTI_KEY") return COPY.cannotStart;
   return "这个渠道现在不能开始，稍后再试";
 }
