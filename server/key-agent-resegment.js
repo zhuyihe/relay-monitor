@@ -161,7 +161,7 @@ export function planRegroup({ rules, refByChannelId, flaggedIds }) {
   });
   const groups = [...groupsByKey.values()].map((group) => ({ ...group, channelIds: group.channelIds.sort((a, b) => a - b) }));
 
-  // 旧绑定都在 b 归档。[a, b) 这段里，每把 Key 恰好算一次（总指挥 10-27 定）：
+  // 旧绑定都在 b 归档。[a, b) 这段里，每把 Key 恰好算一次（10-27 定）：
   //   - b 以前已经属于某条牵连的旧绑定的 Key（它们各自 rules 上握着的）：由那条旧绑定算，别人的过渡段里不放它；
   //   - 全新的 Key（a 以前哪条在算的绑定都没握过，渠道换到它）：放进恰好一条旧绑定的过渡段——用到它的绑定里排第一的那条
   //     （按建的先后、再按 id，规则固定），几条绑定的渠道都换到它时只放一次。不管是分组（一条绑定的渠道换走到新 Key），还是合组

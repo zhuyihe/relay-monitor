@@ -305,17 +305,25 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     const ids = [...new Set((Array.isArray(channelIds) ? channelIds : []).map(Number))];
     if (!ids.length || ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) throw codedError("CHANNEL_REQUIRED", "请至少选一个渠道");
     if (ids.length > MAX_STOP_CHANNELS) throw codedError("INVALID_REQUEST", "一次选的渠道太多了");
-    const rules = (await reconciliation().listRules()).filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId);
+    const stationRules = async () => (await reconciliation().listRules()).filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId);
+    const rules = await stationRules();
     // 只认你站渠道目录里的渠道和在算的绑定里的渠道，别的编号不往「用户不要算」里写
     const known = new Set(rules.flatMap((rule) => rule.channels.map((channel) => Number(channel.channelId))));
     for (const channel of onboarding()?.getSourceCatalogue?.()?.channels || []) known.add(Number(channel.id));
     if (ids.some((id) => !known.has(id))) throw codedError("CHANNEL_SOURCE_CHANGED", "选的渠道在自营站点里找不到了，请刷新渠道列表后重新选");
     const covered = new Set(), stopped = [];
-    for (const rule of rules.filter((item) => item.channels.some((channel) => ids.includes(Number(channel.channelId))))) {
-      // 别处刚好也停了这条（同时点两次）：已经停了，当成功，接着处理后面的
-      try { await reconciliation().archiveRule(rule.id, { optout: true }); } catch (error) { if (error?.code !== "RULE_NOT_FOUND") throw error; }
-      for (const channel of rule.channels) covered.add(Number(channel.channelId));
-      stopped.push({ ruleId: rule.id, channelIds: rule.channels.map((channel) => Number(channel.channelId)) });
+    // 归档没成（这条绑定刚被别处归档：别处也点了停止，或者重新分组刚把它换成了新绑定——渠道现在在新绑定里）不能当「已经停了」：
+    // 重新找一遍这些渠道现在在哪条在算的绑定里，把那条也停掉、记「用户停的」；最多找 3 圈，还有就让用户刷新重来
+    let current = rules;
+    for (let round = 0; ; round += 1, current = await stationRules()) {
+      const running = current.filter((rule) => rule.channels.some((channel) => ids.includes(Number(channel.channelId))));
+      if (!running.length) break;
+      if (round >= 3) throw codedError("CHANNEL_SOURCE_CHANGED", "选的渠道刚刚换了分组，请刷新渠道列表后重新选");
+      for (const rule of running) {
+        try { await reconciliation().archiveRule(rule.id, { optout: true }); } catch (error) { if (error?.code === "RULE_NOT_FOUND") continue; throw error; }
+        for (const channel of rule.channels) covered.add(Number(channel.channelId));
+        stopped.push({ ruleId: rule.id, channelIds: rule.channels.map((channel) => Number(channel.channelId)) });
+      }
     }
     const optedOut = ids.filter((id) => !covered.has(id));
     if (optedOut.length) await reconciliation().addChannelOptouts(ownStationId, optedOut, Date.now());
