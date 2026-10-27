@@ -3638,7 +3638,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const fixedStations = usageUpstreams()?.fixed || [];
       // 已固定的日子读表里所有上游的行（不看上游现在是什么计法、归档没有、算不算进利润）；一条语句
       const fixedDays = labels.length ? await repository.listFixedCostDays(null, labels[0], labels.at(-1)) : [];
-      const { usd: fixedCostUsd, cny: fixedCostCny, rateUnset: fixedRateUnset } = fixedCostOfRange({ stations: fixedStations, nameOf: (id) => upstreamStation(id)?.name, results, labels, window, now, tz, dayFacts, fixedDays,
+      const { usd: fixedCostUsd, cny: fixedCostCny, rateUnset: fixedRateUnset } = fixedCostOfRange({ stations: fixedStations, nameOf: (id) => upstreamStation(id)?.name, results, labels, window, now, tz, dayFacts, fixedDays, stickyDays,
         offPeriodsOf: (ownStationId) => upstreamStation(ownStationId)?.consumeLogOffPeriods });
       // 整站收入读不到：从各绑定的 health.issues 扫（不另发请求，运营总览走的是现读一次 computeProfit，这里只有结果里带着的问题可查，
       // 审核 #126 M5 要的「同一份」做不到不额外读站点；改法：自营站点侧的令牌类问题（ACCESS_TOKEN_*）也算进来，不只挑第一条、按最新一个）
