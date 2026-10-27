@@ -1967,12 +1967,27 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (inDay.length === 1 && inDay[0][0] === thisDay && inDay[0][1] === dayEnd) {
         const last = reads.at(-1);
         if (last && last.claims === null && last.endMs === thisDay) last.endMs = dayEnd; else reads.push({ startMs: thisDay, endMs: dayEnd, claims: null });
-      } else reads.push({ startMs: thisDay, endMs: dayEnd, claims: inDay });
+      } else reads.push({ startMs: thisDay, endMs: dayEnd, claims: inDay, live: dayEnd < nextDay });
     }
     return reads;
   }
 
-  async function sub2SplitWindow(upstream, metadata, token, claimed, window, { readOnly, upstreamStationId }) {
+  // 今天（还没结束的一天）换过手的 Key：按天统计切不开，今天整天先只算给一条绑定——现在握着这把 Key 的那条（在算的、开着的段里有它）；
+  // 现在没有在算的绑定握着它，就算给今天最后握着它的那条在算的绑定。另一条今天不算这把 Key，合计不翻倍也不丢；两条之间分得不准没关系，
+  // 结账固定这一天时按逐条拆分分准（审核 #150 第 2 轮中-1，总指挥 10-27 定）
+  async function liveKeyOwnerOf(rule, key, dayStartMs) {
+    const rules = (await repository.listRules({ includeArchived: true })).filter((item) => item.ownStationId === rule.ownStationId);
+    const byRule = await repository.listSegmentsForRules(rules.map((item) => item.id));
+    const holdsKey = (segment) => (segment.keys || []).some((item) => Number(item.tokenId) === Number(key.tokenId) && (item.upstreamStationId ?? null) === (key.upstreamStationId ?? null));
+    const running = rules.filter((item) => !item.archivedAt && item.enabled);
+    const holders = running.filter((item) => (byRule[item.id] || []).some((segment) => segment.effectiveTo == null && holdsKey(segment)));
+    if (holders.length) return holders.some((item) => item.id === rule.id);
+    const lastEnd = (item) => Math.max(-Infinity, ...(byRule[item.id] || []).filter((segment) => segment.effectiveTo != null && Number(segment.effectiveTo) >= dayStartMs && holdsKey(segment)).map((segment) => Number(segment.effectiveTo)));
+    const last = running.map((item) => ({ item, end: lastEnd(item) })).filter((entry) => Number.isFinite(entry.end)).sort((x, y) => y.end - x.end)[0];
+    return last?.item.id === rule.id;
+  }
+
+  async function sub2SplitWindow(upstream, metadata, token, claimed, window, { readOnly, upstreamStationId, liveKeyOwner = null }) {
     const resolve = (meta) => claimed.map((item) => ({ item, resolved: segmentKeyTokens({ segmentKeys: [item.key], ruleToken: token, metadata: meta, upstreamStationId })[0] }));
     let wanted = resolve(metadata);
     // 整天读的已删 Key 按「总量减别的 Key」算，要先重读一次 Key 目录（同 upstreamWindowForSegment）；逐条翻的已删 Key 不用减法
@@ -1984,7 +1999,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const results = await Promise.all(wanted.map(async ({ item, resolved }) => {
       if (resolved.foreign) return foreignKeyWindow(item.key, window, { readOnly });
       const reads = item.partial ? sub2DayReads(window, item.windows) : [{ startMs: window.startMs, endMs: window.endMs, claims: null }];
-      const parts = await Promise.all(reads.map((piece) => upstreamWindowFor(upstream, metadata, resolved.token, { ...window, startMs: piece.startMs, endMs: piece.endMs }, { readOnly, claims: piece.claims })));
+      const parts = await Promise.all(reads.map(async (piece) => {
+        // 今天换过手的 Key（认领不满整天、窗口还没结束）：整天先只算给一条绑定，另一条给空认领（算 0）
+        let claims = piece.claims;
+        if (piece.live && claims && liveKeyOwner) claims = (await liveKeyOwner(item.key, piece.startMs)) ? null : [];
+        return upstreamWindowFor(upstream, metadata, resolved.token, { ...window, startMs: piece.startMs, endMs: piece.endMs }, { readOnly, claims });
+      }));
       return parts.length === 1 ? parts[0] : sumKeyStats(parts);
     }));
     const summed = sumKeyStats(results);
@@ -2823,7 +2843,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           floorError ? Promise.resolve({ error: floorError }) : upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
             : (isScopedBillingPolicy(rule.billingPolicy)
-              ? upstreamWindowForScopedSegments(upstream, metadata, token, segments, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId, claimFromMs })
+              ? upstreamWindowForScopedSegments(upstream, metadata, token, segments, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId, claimFromMs, liveKeyOwner: (key, dayStartMs) => liveKeyOwnerOf(rule, key, dayStartMs) })
               : upstreamWindowForSegment(upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId })).catch((error) => ({ error })),
           (ownAvailable && consumeLogIssue ? Promise.resolve({ error: codedError(consumeLogIssue.code, consumeLogIssue.detail), consumeLog: true })
             : ownAvailable
@@ -3189,8 +3209,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const endMs = Math.min(to, segment.effectiveTo ?? Infinity);
       if (!(startMs < endMs)) return;
       const piece = { startMs, endMs, ratio: segment.ratio ?? fallback.ratio, group: segment.group ?? fallback.group };
+      // 换 Key 的过渡段 [a, b)：渠道那段时间到底在用旧 Key 还是新 Key 分不清，里面按旧 Key 的倍率切。新旧倍率不一样就算不准（会出一个假的「对不上」），
+      // 这一天应付成本给 KEY_CHANGE_RATIO_DIFFERS 不比差额；倍率一样（最常见）照常算（审核 #133 第 4 轮 M1，总指挥 10-27 定）
+      const next = sorted[index + 1];
+      if (segment.timingSource === "key_change_window" && next && (next.ratio ?? fallback.ratio) !== piece.ratio) {
+        pieces.push({ ...piece, keyChangeAmbiguous: true, keyChangeAtMs: segment.effectiveTo ?? segment.effectiveFrom, keyChangeBetween: [segment.effectiveFrom, segment.effectiveTo ?? segment.effectiveFrom] });
+        return;
+      }
       const last = pieces.at(-1);
-      if (last && last.endMs === startMs && last.ratio === piece.ratio && last.group === piece.group) last.endMs = endMs; else pieces.push(piece);
+      // 相邻两段倍率一样就合成一段（同倍率不同分组在半点也不挡：数是能算的；分组是 auto 的，expectedCostForDay 按分组另挡）
+      if (last && !last.keyChangeAmbiguous && last.endMs === startMs && last.ratio === piece.ratio && last.group !== "auto" && piece.group !== "auto") last.endMs = endMs; else pieces.push(piece);
     });
     return pieces.length ? pieces : resultSegments;
   }
@@ -3226,7 +3254,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (bucketAdmin !== Number(result.downstream.adminUsageQuotaUnits)) console.debug(`应付成本对账：绑定 ${rule.id} ${billDayOf(window)} 桶里管理员自用 ${bucketAdmin} 额度，R1 扣了 ${result.downstream.adminUsageQuotaUnits}`);
     }
     return { usd: expected.usd, reason: expected.reason, tokens: expected.tokens,
-      detail: { usd: expected.usd, reason: expected.reason, tokens: expected.tokens, byModel: expected.byModel, missingPriceModels: expected.missingPriceModels, segments: expected.segments, byChannel: expected.byChannel,
+      detail: { usd: expected.usd, reason: expected.reason, tokens: expected.tokens, ...(expected.keyChange ? { keyChange: expected.keyChange } : {}), byModel: expected.byModel, missingPriceModels: expected.missingPriceModels, segments: expected.segments, byChannel: expected.byChannel,
         pricingReadAt: pricing?.readAt ?? null, quotaPerUnit } };
   }
 
@@ -3863,7 +3891,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           missing.set(fact.ruleId, (entry?.detail?.expected?.missingPriceModels || []).map((model) => model.model).filter(Boolean));
         }
       }
-      const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [] });
+      // 永远不固定的日子（KEY_CONFLICT_GAP、OWN_CONSUME_LOG_GAP 这类 sticky 原因，状态行记着）：整页按天、行的合计里「只去掉那几天」，不当成还在读取（审核 #133 第 4 轮 M3，和 R2「关过的日子」同口径）
+      const stickyDays = new Map();
+      if (labels.length && results.length) {
+        const states = await repository.listSettlementStates(results.map((row) => row.rule.id), { billDates: labels }).catch(() => []);
+        for (const state of states) if (state.manualReason != null && reasonKindOf(state.manualReason) === "sticky") {
+          if (!stickyDays.has(state.ruleId)) stickyDays.set(state.ruleId, new Map());
+          stickyDays.get(state.ruleId).set(state.billDate, state.manualReason);
+        }
+      }
+      const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [], stickyDays });
       // 固定成本：固定采购的上游按天平摊（lib/profit.js），换成美元要那个上游设了汇率；有一个没设就给 null（页面写「固定成本算不出，净利先不算」）
       // 最小改法（审核 #126 M3）：按天摊，已固定的日子按账本那天记的 cost_basis 判要不要摊（fixed 才摊、usage 不摊）、汇率用那天的 cost_rate；
       // 还没固定的日子（今天、还在读取）按现在的设置摊。注意：摊的「金额」本身还是按现在的购买记录算，改了购买金额过去的日子会跟着变——
