@@ -6,6 +6,7 @@ import "../../styles/pages/reconciliation.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, App, Button, DatePicker, Drawer, Grid } from "antd";
 import { readWorkflowDestination } from "../../../lib/client";
+import { OWN_CONSUME_LOG_CHECKED } from "../../components/recheck-consume-log";
 import { BINDING_COPY } from "../../../lib/channel-onboarding.js";
 import { DESTINATION_CHANGED } from "../../../lib/workflow-actions";
 import type { KnownChannelCoverage, ReconciliationCurrency, ReconciliationSummary, ReconciliationWindowGroup, UnaccountedUpstream, WorkflowDestination } from "../../../lib/client";
@@ -113,6 +114,14 @@ export default function ReconciliationPage() {
   // 仅首屏初始化；后续查询由时间范围、刷新和定时器驱动。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 「重新检查」按钮（app/components/recheck-consume-log.tsx）点完以后，重读自己这一页的数据（按钮点了才读，不是打开页面就读）
+  useEffect(() => {
+    const onChecked = () => { void recon.loadWindow(activeWindow, true, true); };
+    window.addEventListener(OWN_CONSUME_LOG_CHECKED, onChecked);
+    return () => window.removeEventListener(OWN_CONSUME_LOG_CHECKED, onChecked);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recon, activeWindow]);
 
   // 第一次读到数据后定位到那条，打开计算明细；之后的单行重新读取不再重复打开
   useEffect(() => {

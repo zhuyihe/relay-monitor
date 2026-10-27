@@ -2,6 +2,7 @@
 // 设计：内存缓存 this.data 保持 v1 数据形状，所有读走内存（同步 getter 不变），
 // 所有写通过 save() 串行化写透 MySQL——消费方（26 个端点/告警/日报）零改动。
 import { hashPassword } from "../lib/auth.js";
+import { normalizeOffPeriods } from "../lib/consume-log.js";
 import { ALERT_EVENT_KEYS, ALERT_RULE_KEYS, DEFAULT_RULES, UNNAMED_CHANNEL, resetNoRenewalAlertState } from "../lib/alert-rules.js";
 import { createHash, randomBytes } from "node:crypto";
 import { onboardingBaseUrl, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
@@ -612,6 +613,8 @@ export class Store {
       // 渠道 Key 读取服务（K2a）：装在这个自营站点旁边的只读小服务，url 要 https://，secret 整串加密存、派生出请求令牌和指纹密钥
       keyAgentUrl: String(input.keyAgentUrl || "").trim(),
       keyAgentSecret: (() => { const v = String(input.keyAgentSecret || "").trim(); if (v) assertKeyAgentSecretStrength(v); return v; })(),
+      // 自营站点关着收费记录的时间段 [{ fromMs, toMs | null }]，只在开、关变化时写，留最近 31 天（lib/consume-log.js，own-revenue-plan 第二节）
+      consumeLogOffPeriods: normalizeOffPeriods(input.consumeLogOffPeriods),
       demo: !!input.demo,
       createdAt: new Date().toISOString(),
       archivedAt: null,
@@ -681,6 +684,7 @@ export class Store {
         const v = String(patch.keyAgentSecret ?? "").trim();
         if (v) { assertKeyAgentSecretStrength(v); s.keyAgentSecret = v; }
       }
+      if ("consumeLogOffPeriods" in patch) s.consumeLogOffPeriods = normalizeOffPeriods(patch.consumeLogOffPeriods);
       // 凭证或站点实际变化才作废令牌缓存（前端编辑总会带上 type/email 原值，
       // 无脑作废会导致每次改名都触发一次完整重登录）
       const credsChanged =

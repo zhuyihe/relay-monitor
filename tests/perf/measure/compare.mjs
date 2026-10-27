@@ -1,14 +1,15 @@
 // base 和 head 在同一个夹具上各量一次「接口和后台」以后对比：node measure/compare.mjs <base 结果目录> <head 结果目录>
-// 只有「可比的数」参与超线判断：请求数（假站点按路由、每轮结账轮询）、SQL 条数、扫描行数、返回体字节、binlog 字节、新出现的语句和它们的 EXPLAIN。
+// 只有「可比的数」参与超线判断：请求数（假站点按路由、稳态每分钟）、SQL 条数、扫描行数、返回体字节、binlog 字节、新出现的语句和它们的 EXPLAIN。
 // 毫秒、CPU、内存只做参考（CI 机器快慢不一），表里标「参考」，不算超线。
 // 超线规则沿用本机测试台基线报告第 8 节（CONTRIBUTING.md 4.3），阈值可用环境变量调：
 //   BODY_PCT=20 BODY_MAX_KB=1024   返回体比 base 涨超过 20%（且多出 2 KB 以上），或超过 1 MB
-//   SQL_PCT=20                     一轮余额刷新、每轮结账轮询的 SQL 条数 / 假站点请求 / binlog 比 base 涨超过 20%
+//   SQL_PCT=20                     一轮余额刷新的 SQL 条数 / 假站点请求，稳态每分钟的 SQL 条数 / 假站点请求比 base 涨超过 20%
+//                                  （「每轮结账轮询」只做参考：轮次按「渠道账单隔超过 15 秒算新一轮」切，同一提交比自己也能差 34–40%）
 //   SCAN_ROWS=10000                新出现的语句每次扫描超过 1 万行，或 EXPLAIN 里有 type=ALL 且 rows > 1000
 // 有超线时退出码是 2（结果照样打到标准输出）。
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { perRound } from "../lib/metrics.mjs";
+import { perRound, INGEST_ROWS, ingestCell, ingestRoundLine, ingestSwitch } from "../lib/metrics.mjs";
 
 const [baseDir, headDir] = process.argv.slice(2);
 if (!baseDir || !headDir) { console.error("用法：node measure/compare.mjs <base 结果目录> <head 结果目录>"); process.exit(1); }
@@ -51,23 +52,25 @@ const [b1, b2] = [load(baseDir, "background.json"), load(headDir, "background.js
 if (b1 && b2) {
   const r1 = perRound(b1) || {}, r2 = perRound(b2) || {};
   out.push("## 后台（没开页面，稳态）\n",
-    `窗口：base ${b1.windowSec} 秒（余额刷新 ${b1.steady.balanceRounds} 轮、结账轮询 ${b1.steady.reconRounds.length} 轮），head ${b2.windowSec} 秒（${b2.steady.balanceRounds} 轮、${b2.steady.reconRounds.length} 轮）。「每轮」是稳态窗口减去余额刷新后按结账轮询轮数平均。\n`,
+    `「每轮」几行只做参考，先看两边轮数；轮数不同时以「稳态每分钟」为准（门槛也在每分钟的 SQL 条数、假站点请求上）。窗口：base ${b1.windowSec} 秒（余额刷新 ${b1.steady.balanceRounds} 轮、结账轮询 ${b1.steady.reconRounds.length} 轮），head ${b2.windowSec} 秒（${b2.steady.balanceRounds} 轮、${b2.steady.reconRounds.length} 轮）。「每轮」是稳态窗口减去余额刷新后按结账轮询轮数平均。\n`,
     "| 指标 | 类别 | base | head | 变化 | |", "|---|---|--:|--:|--:|---|");
   const sqlPct = env("SQL_PCT", 20);
   // [名字, 类别, base, head, 超线规则]
   const rows = [
-    ["每轮结账轮询 SQL 条数", "可比", r1.sql, r2.sql, (x, y) => pct(x, y) > sqlPct],
-    ["每轮结账轮询 假站点请求", "可比", r1.fake, r2.fake, (x, y) => pct(x, y) > sqlPct],
-    ["每轮结账轮询 binlog KB", "可比", Math.round((r1.binlog || 0) / 1024), Math.round((r2.binlog || 0) / 1024), (x, y) => pct(x, y) > sqlPct],
-    ["每轮结账轮询 扫描行数", "可比", r1.rowsExamined, r2.rowsExamined, null],
+    // 「每轮」只做参考：轮次按「两次渠道账单隔超过 15 秒算新一轮」切，两轮挨得近会并成一轮、窗口边上会切掉半轮，
+    // 同一提交比自己就差 34–40%（run 40287231589）。门槛挪到下面「稳态每分钟」的 SQL 条数、假站点请求上
+    ["每轮结账轮询 SQL 条数", "参考", r1.sql, r2.sql, null],
+    ["每轮结账轮询 假站点请求", "参考", r1.fake, r2.fake, null],
+    ["每轮结账轮询 binlog KB", "参考", Math.round((r1.binlog || 0) / 1024), Math.round((r2.binlog || 0) / 1024), null],
+    ["每轮结账轮询 扫描行数", "参考", r1.rowsExamined, r2.rowsExamined, null],
     ["一轮余额刷新 SQL 条数", "可比", b1.refreshRound.sqlStatements, b2.refreshRound.sqlStatements, (x, y) => pct(x, y) > sqlPct],
     ["一轮余额刷新 假站点请求", "可比", b1.refreshRound.fakeRequests, b2.refreshRound.fakeRequests, (x, y) => pct(x, y) > sqlPct],
     ["一轮余额刷新 stations 表写入行数", "可比", b1.refreshRound.stationRowsWritten, b2.refreshRound.stationRowsWritten, (x, y) => y > x],
     ["一轮余额刷新 扫描行数", "可比", b1.refreshRound.rowsExamined, b2.refreshRound.rowsExamined, null],
     ["一轮余额刷新 binlog KB", "可比", Math.round((b1.refreshRound.binlogBytes || 0) / 1024), Math.round((b2.refreshRound.binlogBytes || 0) / 1024), null],
-    ["稳态 SQL 条数/分钟", "可比", b1.steady.sqlPerMin, b2.steady.sqlPerMin, null],
+    ["稳态 SQL 条数/分钟", "可比", b1.steady.sqlPerMin, b2.steady.sqlPerMin, (x, y) => pct(x, y) > sqlPct],
     ["稳态 扫描行数/分钟", "可比", b1.steady.rowsExaminedPerMin, b2.steady.rowsExaminedPerMin, null],
-    ["稳态 假站点请求/分钟", "可比", b1.steady.fakeRequestsPerMin, b2.steady.fakeRequestsPerMin, null],
+    ["稳态 假站点请求/分钟", "可比", b1.steady.fakeRequestsPerMin, b2.steady.fakeRequestsPerMin, (x, y) => pct(x, y) > sqlPct],
     ["稳态 binlog KB/分钟", "可比", Math.round((b1.steady.binlogBytesPerMin || 0) / 1024), Math.round((b2.steady.binlogBytesPerMin || 0) / 1024), null],
     ["稳态 SQL 耗时 ms/分钟", "参考", b1.steady.sqlMsPerMin, b2.steady.sqlMsPerMin, null],
     ["一轮余额刷新 ms", "参考", b1.refreshRound.ms, b2.refreshRound.ms, null],
@@ -87,6 +90,19 @@ if (b1 && b2) {
     out.push("| 路由 | base 每轮 | head 每轮 | 变化 |", "|---|--:|--:|--:|");
     for (const k of changed) out.push(`| ${k} | ${Math.round(per(b1, k))} | ${Math.round(per(b2, k))} | ${signed(Math.round(per(b2, k)) - Math.round(per(b1, k)))} |`);
   } else out.push("（全部一样）");
+  out.push("");
+}
+
+// ---- 整站读（算应付成本）：只列数，不判超线 ----
+if (b1 && b2 && (b1.steady.ingest || b2.steady.ingest)) {
+  const g1 = b1.steady.ingest, g2 = b2.steady.ingest;
+  const [s1, s2] = [ingestSwitch(b1), ingestSwitch(b2)];
+  out.push("## 整站读（「算应付成本」，自营站点不带筛选的 /api/log/）\n",
+    `「算应付成本」开关（量之前、量完各读一次实际值）：base ${s1.text}${s1.anomaly ? flag(true) : ""}；head ${s2.text}${s2.anomaly ? flag(true) : ""}。绑定 ${g2?.bindings ?? "?"} 条。`,
+    "限流按 New API 默认：同一来源 180 秒 360 个请求。请求数、占比可比；落后、追平用时只做参考（随机器快慢和夹具起点变）。下表只列数，不判超线；只有开关实际是关、整站读却不是 0 才标 ⚠ 算一项。\n",
+    "| 指标 | 类别 | base | head |", "|---|---|--:|--:|");
+  for (const [name, kind, get] of INGEST_ROWS) out.push(`| ${name} | ${kind} | ${cell(ingestCell(b1, get))} | ${cell(ingestCell(b2, get))} |`);
+  for (const [label, g] of [["base", g1], ["head", g2]]) if (g?.rounds?.length) out.push("", `${label} 每轮：`, ...g.rounds.map((x) => `- ${ingestRoundLine(x)}`));
   out.push("");
 }
 

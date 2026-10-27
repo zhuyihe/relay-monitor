@@ -10,6 +10,7 @@ import { sameEndpoint } from "../../../../lib/endpoint.js";
 
 async function updateStation(request, rt, params) {
   const b = (await request.json().catch(() => null)) || {};
+  delete b.consumeLogOffPeriods; // 关着的时间段只由监控写，页面和接口都不能改（GAP 那几天的依据）
   const options = { expectedAuthVersion: b.expectedAuthVersion, expectedResourceVersion: b.expectedResourceVersion };
   if ("type" in b && !STATION_TYPES.some((t) => t.value === b.type))
     return json({ error: "请选上游类型", code: "UNSUPPORTED_UPSTREAM_TYPE" }, 400);

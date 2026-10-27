@@ -26,6 +26,7 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
   if (snapshot.status === 304) return { ok: true, status: 304, stale: snapshot.stale, staleReason: snapshot.staleReason, etag: snapshot.etag, channels: null };
 
   const upstreams = rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && station.type !== "fixed" && !station.archivedAt);
+  const newApiUpstreams = upstreams.filter((station) => station.type === "newapi");
   const tokenListCache = new Map();
   const tokensOf = (station) => {
     if (!tokenListCache.has(station.id)) {
@@ -36,14 +37,18 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
     }
     return tokenListCache.get(station.id);
   };
+  // 指纹在全部已加的上游里找（审核 #131 H1，k-plan §2.2）：每个上游的 Key 目录只读一次（tokensOf 按上游缓存），
+  // 不会因为按渠道重复查而多读；候选（地址对上的）是这份里的子集，打码比对只在候选里找，不放大（H2）
+  const allTokenLists = await Promise.all(newApiUpstreams.map(async (station) => ({ stationId: station.id, tokens: await tokensOf(station) })));
 
   const channels = [], rawFingerprintOf = new Map(); // `${channelId}:${index}` -> 读取服务给的指纹（第二轮分打码撞了要用）
   for (const channel of snapshot.channels) {
     if (channelIds && !channelIds.includes(Number(channel.id))) continue;
     if (channel.keyless) { channels.push({ channelId: Number(channel.id), keyless: true }); continue; }
     const candidates = matchCostStations(upstreams, channel.baseUrl).filter((station) => station.type === "newapi");
-    const tokenLists = await Promise.all(candidates.map(async (station) => ({ stationId: station.id, tokens: await tokensOf(station) })));
-    const identified = identifyChannel(channel, tokenLists, config.fingerprintKey);
+    const candidateIds = new Set(candidates.map((station) => station.id));
+    const candidateTokenLists = allTokenLists.filter((item) => candidateIds.has(item.stationId));
+    const identified = identifyChannel(channel, { allTokenLists, candidateTokenLists }, config.fingerprintKey);
     for (const slot of identified.slots) rawFingerprintOf.set(`${identified.channelId}:${slot.index}`, channel.keys.find((key) => Number(key.i) === slot.index)?.f);
     channels.push(identified);
   }
@@ -90,7 +95,9 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
           }
           for (const candidate of candidates) {
             const fullKey = result.keys[candidate.tokenId];
-            if (fullKey != null && fingerprintKey(fullKey, config.fingerprintKey) === fingerprint) resolved.push(candidate);
+            // 返回里没有这把（超过一轮能取的批数、或上游没给）：没读全，不能当成「这把不是」，保持 ambiguous 下一轮再试
+            if (fullKey == null) { anyUnreadable = true; continue; }
+            if (fingerprintKey(fullKey, config.fingerprintKey) === fingerprint) resolved.push({ ...candidate, via: "revealed" });
           }
         }
         if (resolved.length === 1) { slot.state = "identified"; slot.matches = resolved; }

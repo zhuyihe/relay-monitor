@@ -114,14 +114,11 @@ export function attachSegmentKeys(segments, keyRows) {
   return segments;
 }
 
-// 复制一个分段（展开、按天切开这类地方要用它，不要 `{...segment}`、也不要 `Object.create`）：
-// segment.keys 是不可枚举属性，`{...segment}` 展开时会悄悄丢掉——挂着多把 Key 的段复制以后上游成本会少算
-// （审核 #114：真值 2592 算成 1684.8）。overrides 覆盖的字段里如果带了 keys，用 overrides 的；否则原样带过去
+// 复制一份分段（改 id 这类场合用，比如按天切开后给切出来的那几截起新 id）：普通字段展开成自己的（JSON.stringify、Object.keys、深比较
+// 都和原段一样，只有 overrides 里给的字段不同），keys 这个不可枚举属性单独带过去——不能只用 `{ ...segment, ...overrides }`，那样
+// keys 会丢；也不能用 Object.create 接原型链，那样除了 overrides 里的字段，其余都不是这份拷贝自己的（总指挥 10-26 定，#114 中-G 改法）
 export function copySegment(segment, overrides = {}) {
-  const copy = { ...segment, ...overrides };
-  const keys = Object.hasOwn(overrides, "keys") ? overrides.keys : segment.keys;
-  Object.defineProperty(copy, "keys", { value: keys ?? [], enumerable: false, configurable: true, writable: true });
-  return copy;
+  return Object.defineProperty({ ...segment, ...overrides }, "keys", { value: segment.keys, enumerable: false, configurable: true, writable: true });
 }
 
 export function segmentFromRow(row) {
