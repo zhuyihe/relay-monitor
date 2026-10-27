@@ -2529,9 +2529,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (last) from = shiftDayLabel(last, 1);
       else {
         earliest ??= (await repository.earliestLedgerDate()) || lastDay;
-        const createdDay = Number.isFinite(Date.parse(station.createdAt)) ? dayKeyInTz(Date.parse(station.createdAt), tz) : earliest;
-        from = earliest > createdDay ? earliest : createdDay;
+        from = earliest;
       }
+      // 第一次写：从最早有账本的那天写起；这个上游建立以前的日子记 excluded、0 元（那时它还不存在，不能按现在的购买记录摊）
+      const createdDay = !last && Number.isFinite(Date.parse(station.createdAt)) ? dayKeyInTz(Date.parse(station.createdAt), tz) : null;
       if (from > lastDay) continue;
       const mine = allRules.filter((rule) => String(rule.upstreamStationId) === String(station.id)).map((rule) => rule.id);
       const facts = mine.length ? await repository.listLedgerDayFacts(mine, from, lastDay) : [];
@@ -2543,6 +2544,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const nowBasis = dayBasisOfStation(station), rate = rateSnapshotOf(station), purchases = purchasesOf(station), rows = [];
       for (let day = from; day <= lastDay; day = shiftDayLabel(day, 1)) {
         const fact = dayFact.get(day);
+        if (createdDay && day < createdDay && !fact) { rows.push({ stationId: station.id, billDate: day, basis: "excluded", costCny: 0, costRate: null, note: null }); continue; }
         const basis = fact?.costBasis ? (fact.costBasis === "fixed" ? "fixed" : "usage") : nowBasis;
         if (basis !== "fixed") { rows.push({ stationId: station.id, billDate: day, basis, costCny: 0, costRate: null, note: null }); continue; }
         const startMs = dayStartInTz(day, tz);

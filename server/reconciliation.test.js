@@ -7503,6 +7503,26 @@ test("固定成本重结不改已固定的那天（G 审核中-4）：已固定�
   assert.deepEqual(rows(), [["2026-10-07", 10], ["2026-10-08", 10]], "固定成本表不变、不多行");
 });
 
+test("固定成本补数（G 审核第三轮）：新加的上游，它建立以前的日子记 excluded 0 元；停机几天以后中间的日子也补上", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5;
+  await f.module.refreshDue(now); // 账本最早一天 10-07
+  // 10-09 才加的服务器租金，没填起始日期：10-09 以前不能按现在的购买记录摊
+  f.stations.push({ id: "rent2", name: "新租金", type: "fixed", baseUrl: "", enabled: true, archivedAt: null, createdAt: "2026-10-09T01:00:00Z", fixedPurchases: [{ amount: 600, days: 30 }], cnyPerUsd: 4 });
+  now += 86400000; // 10-10 03:00（业务时区 10-10 11:00）：补到 10-09
+  await f.module.refreshDue(now);
+  const of = (id) => f.repository.tables.fixedCostDays.filter((row) => row.station_id === id).map((row) => [row.bill_date, row.basis, Number(row.cost_cny)]).sort();
+  assert.deepEqual(of("rent2"), [["2026-10-07", "excluded", 0], ["2026-10-08", "excluded", 0], ["2026-10-09", "fixed", 20]], "建立以前的日子（账本最早日起）记 excluded 0；建立当天起照摊");
+  // 停机 3 天：中间的日子也补上
+  const before = of("upstream").length;
+  now += 3 * 86400000;
+  await f.module.refreshDue(now);
+  assert.equal(of("upstream").length, before + 3, "中间几天也补上");
+});
+
 test("固定成本补数（G 审核第二轮）：以前的日子用账本里结账那天记的汇率（上线时数不跳）；以后每天只从各上游已写的最后一天往后接着补", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });

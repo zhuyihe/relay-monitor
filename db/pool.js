@@ -281,8 +281,10 @@ export async function ensureSchema(pool) {
     cost_rate DECIMAL(12,6) NULL,
     note VARCHAR(64) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (station_id, bill_date)
+    PRIMARY KEY (station_id, bill_date),
+    INDEX idx_fixed_cost_days_date (bill_date)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await addColumnIfMissing(pool, "reconciliation_fixed_cost_days", "basis", "VARCHAR(16) NOT NULL DEFAULT 'fixed'");
   // 结账状态（计划 C2a）：每条绑定每个还没固定的日子一行，固定成了就在同一个事务里删掉。只放没办完的日子，正常时接近空。
   // retry_reason 会自己好的原因（按退避表再试）；manual_reason 要人处理的原因；source_version 记下时的配置代次（变了马上重判）。
   // resettle_* 是重结请求（C2b 才写）。不加外键；清理按 bill_date 每小时删一批 31 天前、没有请求的行。
