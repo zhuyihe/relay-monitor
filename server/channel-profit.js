@@ -15,6 +15,7 @@ import { coverageNeedsAnswer } from "../lib/reconciliation-contract.js";
 import { channelKeyLines } from "../lib/channel-key-lines.js";
 import { ACCOUNT_USE_VALUES } from "../db/store.js";
 import { dayKeyInTz } from "../lib/business-time.js";
+import { costBasisOf } from "../lib/profit.js";
 
 const BILLING_TYPES = new Set(["newapi", "sub2api", "sub2api-password"]);
 
@@ -344,7 +345,7 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
       const channelIds = rule.channels.map((channel) => Number(channel.channelId));
       // 没回答（或答了不确定）：COST_COVERAGE_UNKNOWN；答了「别处也在用」：COST_SHARED_ELSEWHERE（用语规范 §5.2 回答以后这条事换成什么）
       const issues = [...(rule.keyIssue ? [rule.keyIssue.code] : []),
-        ...(coverageNeedsAnswer(rule, "usage") ? [rule.coverageDeclaration?.answer === "other_use" ? "COST_SHARED_ELSEWHERE" : "COST_COVERAGE_UNKNOWN"] : [])];
+        ...(coverageNeedsAnswer(rule, costBasisOf(rt.store.get(rule.upstreamStationId))) ? [rule.coverageDeclaration?.answer === "other_use" ? "COST_SHARED_ELSEWHERE" : "COST_COVERAGE_UNKNOWN"] : [])];
       return { id: `rule:${rule.id}`, state: issues.length ? "attention" : "running", upstreamStationId: rule.upstreamStationId, channelIds,
         names: rule.channels.map((channel) => channelName(Number(channel.channelId), channel.name)), ruleId: rule.id, tokenName: rule.tokenName ?? null,
         startedBy: rule.startSource === "auto" ? "auto" : "user", startedAtMs: Number.isFinite(rule.billingEffectiveFrom) ? rule.billingEffectiveFrom : Date.parse(rule.createdAt) || null,
