@@ -276,3 +276,14 @@ test("planSegmentChanges：newKeyFloorByBinding 按绑定给，没给的绑定�
   const solo = planSegmentChanges({ bindings: [{ id: "B", before: b, after: a }], lastSeenAt: 0, observedAt: 1000, newKeyFloorByBinding: { B: 400 } });
   assert.deepEqual(solo.map((plan) => [plan.bindingId, plan.windowStart]), [["B", 400]]);
 });
+
+test("planKeyChangeSegments / planMovedKeySegments（F4）：b 不早于 a、不早于上一个持有者段的结尾——读取服务的钟比控制台慢时，干净切也不会切在它们前面", () => {
+  // a 在 b 后面（钟差）：不开负长度的窗口，切在 a
+  assert.deepEqual(planKeyChangeSegments({ lastSeenAt: T("10:09"), observedAt: T("10:00"), oldRef: ref(1), newRef: ref(2) }), { kind: "precise", cutoverAt: T("10:09"), before: [ref(1)], after: [ref(2)] });
+  // b 早于上一个持有者段的结尾：切在那个结尾
+  assert.equal(planKeyChangeSegments({ lastSeenAt: T("09:00"), observedAt: T("10:00"), oldRef: ref(1), newRef: ref(2), newKeyFloor: T("10:06") }).cutoverAt, T("10:06"));
+  assert.equal(planMovedKeySegments({ observedAt: T("10:00"), newRef: ref(2), newKeyFloor: T("10:06") }).cutoverAt, T("10:06"), "挪过来的也一样");
+  assert.equal(planMovedKeySegments({ observedAt: T("10:00"), newRef: ref(2) }).cutoverAt, T("10:00"), "没有下限时不变");
+  const plans = planSegmentChanges({ bindings: [{ id: "a", before: ref(1), after: ref(2) }, { id: "b", before: ref(2), after: ref(1) }], lastSeenAt: T("09:00"), observedAt: T("10:00"), newKeyFloorByBinding: { a: T("10:06") } });
+  assert.deepEqual(plans.map((plan) => [plan.bindingId, plan.cutoverAt]), [["a", T("10:06")], ["b", T("10:00")]]);
+});

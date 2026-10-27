@@ -7379,8 +7379,8 @@ for (const policy of POLICIES) test("K2b：合组——早退只挡从第一次�
   await f.module.refreshDue(now); // 结「昨天」10-13：冲突期间（10-12 09:00 到解开）渠道 2 用的 Key 的钱没有进过任何一条绑定的段——不能带着缺的钱固定
   assert.deepEqual(rowsOf("2026-10-13"), [], "合组解开以后，冲突期间的 10-13 仍然不固定（K2c 重新分组落库以前不知道渠道 2 那段用的是哪把 Key）");
   assert.equal((await f.repository.getRule("rr_live")).keyIssue, null, "事项本身解开了");
-  const closed = (await f.repository.getRule("rr_live")).keyIssueClosed;
-  assert.deepEqual([closed.code, closed.sinceMs, closed.untilMs], ["KEY_GROUP_CHANGED", Date.parse("2026-10-12T01:00:00Z"), Date.parse("2026-10-14T01:00:00Z")], "记着冲突期间 [认出, 解开)，只挡这一段");
+  const [closed] = (await f.repository.getRule("rr_live")).keyBlocks;
+  assert.deepEqual([closed.code, closed.sinceMs, closed.untilMs], ["KEY_CONFLICT_GAP", Date.parse("2026-10-12T01:00:00Z"), Date.parse("2026-10-14T01:00:00Z")], "记着冲突期间 [认出, 解开)，只挡这一段（永远不固定的那一类）");
   now = Date.parse("2026-10-15T01:00:00Z");
   await f.module.refreshDue(now); // 结 10-14：这一天碰到冲突期间（解开在 10-14 09:00），也不固定
   assert.deepEqual(rowsOf("2026-10-14"), []);
@@ -7740,7 +7740,14 @@ test("K2b：渠道换成了一把不在已加上游里的 Key（CHANNEL_KEY_UNMA
   await round("2026-10-12T16:40:00Z");
   await round("2026-10-12T16:55:00Z"); // 需处理的那天每 10 分钟本地重判一次
   assert.equal((await f.repository.getRule("rr_live")).keyIssue, null, "解开以后记号清掉");
-  assert.equal(booked("2026-10-12"), 1, "恢复以后照常算、照常固定");
+  // 冲突期间（认出 10-11 16:30Z 到解开 10-12 16:40Z）渠道用的那把 Key 不在任何已加的上游里，用量没人算：这几天永远不固定（KEY_CONFLICT_GAP），不管是哪种事项
+  assert.deepEqual((await f.repository.getRule("rr_live")).keyBlocks.map((block) => [block.code, block.sinceMs]), [["KEY_CONFLICT_GAP", issue.sinceMs]]);
+  assert.equal(booked("2026-10-12"), 0, "冲突期间的 10-12 不固定");
+  assert.equal((await state("2026-10-12"))?.manualReason, "KEY_CONFLICT_GAP", "要人处理的那一类，没有按钮、不再自动重试");
+  await round("2026-10-13T16:20:00Z");
+  assert.equal(booked("2026-10-13"), 0, "解开那一天（10-13，解开在它 00:40）也碰到冲突期间，不固定");
+  await round("2026-10-14T16:20:00Z");
+  assert.equal(booked("2026-10-14"), 1, "整天在解开以后的日子照常算、照常固定");
 });
 
 test("K2b：渠道没锚定过（还没开始算）时换成了不在已加上游里的 Key——不进需处理，只在原处写一句（流程稿附录 4）", async (t) => {
@@ -7778,7 +7785,7 @@ test("K2b：打码撞了、上游令牌没有 api_key:reveal 权限（KEY_REVEAL
   assert.equal(day.health.upstreamStationId, "upstream", "缺 api_key:reveal 权限的上游");
 });
 
-test("K2b：Sub2API 上游上一把 Key 在两条绑定之间挪（同一天切不开）——这两条这几天先不结账，记一个会自己好的「读取中」，不换段、不动绑定；等按逐条用量拆开的后续 PR", async (t) => {
+test("K2b：Sub2API 上游上一把 Key 在两条绑定之间挪（互换）——照常按 b 换段（和 New API 一样），只有换手那一天（b 所在的业务日）两条都不结账、记一段会自己好的「读取中」，第二天起各读各的 Key 照常固定；等按逐条用量拆开的后续 PR 补结那一天", async (t) => {
   let now = Date.parse("2026-10-11T16:05:00Z");
   t.mock.method(Date, "now", () => now);
   const f = liveReconciliationFixture(t, {
@@ -7797,29 +7804,36 @@ test("K2b：Sub2API 上游上一把 Key 在两条绑定之间挪（同一天切�
     return { status: data ? 200 : 404, text: async () => JSON.stringify({ code: data ? 0 : 404, data }) };
   });
   for (const row of f.repository.tables.rules) row.canonical_key = canonicalBillingKey(f.stations[0], { platform: "sub2api", accountId: "42" }, row.token_id);
-  const match = (tokenId) => [{ stationId: "upstream", tokenId, tokenName: `k${tokenId}`, via: "fingerprint" }];
+  const match = (tokenId) => [{ stationId: "upstream", tokenId, tokenName: tokenId === 9 ? "stable" : "stable-rr_b", via: "fingerprint" }]; // 目录里的 Key 名
   const slot = (tokenId) => ({ index: 0, state: "identified", matches: match(tokenId) });
   // 两条绑定互换 Key：rr_live（token 9）现在用 10，rr_b（token 10）现在用 9
   f.rt._keyAgentIdentifyCache = { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, revealIssues: [],
     channels: [{ channelId: 1, keyless: false, slots: [slot(10)] }, { channelId: 2, keyless: false, slots: [slot(9)] }] } };
   await f.module.refreshDue(now);
   const [a, b] = [await f.repository.getRule("rr_live"), await f.repository.getRule("rr_b")];
-  assert.deepEqual([a.tokenId, b.tokenId], [9, 10], "没动绑定");
-  assert.equal((await f.repository.listSegments("rr_live")).length, 1, "没换段");
-  assert.equal((await f.repository.listSegments("rr_b")).length, 1);
-  assert.equal(a.keyIssue?.code, "PENDING", "会自己好的「读取中」，不是需处理");
-  assert.equal(b.keyIssue?.code, "PENDING");
+  assert.deepEqual([a.tokenId, b.tokenId], [10, 9], "互换：两条都换了 Key");
+  assert.equal((await f.repository.listSegments("rr_live")).length, 2, "按 b 换段，b 前一段 b 后一段");
+  assert.equal((await f.repository.listSegments("rr_b")).length, 2);
+  assert.deepEqual([a.keyIssue, b.keyIssue], [null, null], "不记事项");
+  // 换手那一天（b = 10-12 00:05 上海，这一天 [10-12 0:00, 10-13 0:00)）两条都挡，只挡这一天
+  const day = [Date.parse("2026-10-11T16:00:00Z"), Date.parse("2026-10-12T16:00:00Z")];
+  for (const rule of [a, b]) assert.deepEqual(rule.keyBlocks, [{ code: "PENDING", sinceMs: day[0], untilMs: day[1] }]);
   assert.equal(reconciliationIssue("PENDING").kind, "reading");
-  assert.equal(f.stations[1].keyAgentLastSuccessAtMs ?? null, null, "这一轮没处理完，站点的成功时刻不往前推");
-  // 当天不入账：挪过的那天（b 以后结束的 10-12）这两条都不固定，账本没有行；状态是会自己好的「读取中」
+  assert.ok(f.stations[1].keyAgentLastSuccessAtMs != null, "这一轮处理完了，站点的成功时刻往前推");
   now = Date.parse("2026-10-12T16:20:00Z");
   f.rt._keyAgentIdentifyCache = { ...f.rt._keyAgentIdentifyCache, at: now, result: { ...f.rt._keyAgentIdentifyCache.result, fetchedAtMs: now } };
   await f.module.refreshDue(now);
   const booked = (ruleId, billDate) => f.state.ledger.filter((row) => row.rule_id === ruleId && row.bill_date === billDate).length;
-  assert.deepEqual([booked("rr_live", "2026-10-12"), booked("rr_b", "2026-10-12")], [0, 0], "挪过 Key 的这一天两条绑定都不入账");
+  assert.deepEqual([booked("rr_live", "2026-10-12"), booked("rr_b", "2026-10-12")], [0, 0], "换手那一天两条绑定都不入账");
   const [state] = await f.repository.listSettlementStates(["rr_live"], { billDates: ["2026-10-12"] });
   assert.equal(state?.retryReason, "PENDING", "会自己好的读取类，不是要人处理");
   assert.equal(state?.manualReason ?? null, null);
+  now = Date.parse("2026-10-13T16:20:00Z");
+  f.rt._keyAgentIdentifyCache = { ...f.rt._keyAgentIdentifyCache, at: now, result: { ...f.rt._keyAgentIdentifyCache.result, fetchedAtMs: now } };
+  await f.module.refreshDue(now);
+  // 第二天（10-13）不再被换手的挡住：这个用例的假 Sub2API 没有账单统计接口，结不出来是 UPSTREAM_CAPABILITY_UNVERIFIED，不是 PENDING；钱逐天对的量在 regroupMoneyScenario 的互换用例里
+  const [next] = await f.repository.listSettlementStates(["rr_live"], { billDates: ["2026-10-13"] });
+  assert.notEqual(next?.manualReason ?? next?.retryReason, "PENDING", "第二天起不再挡")
 });
 
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {
@@ -9945,7 +9959,8 @@ test("K2b：CHANNEL_KEY_UNMATCHED 记着的日子，读取服务随后断了也�
   await round("2026-10-11T17:00:00Z");
   await round("2026-10-11T17:15:00Z");
   assert.equal((await f.repository.getRule("rr_live")).keyIssue, null, "读得到、重新判断以后才清");
-  assert.equal(booked("2026-10-11"), 1, "事项解开以后照常固定");
+  assert.equal(booked("2026-10-11"), 0, "冲突期间的 10-11 解开以后也不固定（那几天渠道用的 Key 没人算）");
+  assert.equal((await state("2026-10-11"))?.manualReason, "KEY_CONFLICT_GAP");
 });
 
 // 高-3：同一条绑定换了一种事项，b 沿用最早的那个，不重置成现在
@@ -10172,13 +10187,14 @@ test("K2b：一条绑定两个渠道，一个认出换了 Key、另一个这一�
   await round("2026-10-11T01:00:00Z"); // 锚定
   state.ch1 = 10; state.ch2Missing = true; await round("2026-10-11T05:00:00Z"); // 渠道 1 认出换成 K10，渠道 2 这一轮认不出
   let rule = await f.repository.getRule("rr_live");
-  assert.deepEqual([rule.tokenId, (await f.repository.listSegments("rr_live")).length, rule.keyIssue], [9, 1, null], "不拿认出来的那个渠道当整条绑定换了 Key（渠道 2 的 Key 用量以后没人算），这一轮不换");
+  assert.deepEqual([rule.tokenId, (await f.repository.listSegments("rr_live")).length, rule.keyIssue], [9, 1, { code: "PENDING", sinceMs: Date.parse("2026-10-11T05:00:00Z") }],
+    "不拿认出来的那个渠道当整条绑定换了 Key（渠道 2 的 Key 用量以后没人算），这一轮不换；但有渠道已经换了，从认出来的这一刻起先不算（会自己好的 PENDING）");
   state.ch2Missing = false; state.ch2 = 9; await round("2026-10-11T06:00:00Z"); // 渠道 2 认出来了、还是 K9：渠道 1 换了、渠道 2 没换，分组冲突
   rule = await f.repository.getRule("rr_live");
-  assert.deepEqual([rule.keyIssue.code, rule.keyIssue.sinceMs], ["KEY_GROUP_CHANGED", Date.parse("2026-10-11T06:00:00Z")]);
+  assert.deepEqual([rule.keyIssue.code, rule.keyIssue.sinceMs], ["KEY_GROUP_CHANGED", Date.parse("2026-10-11T05:00:00Z")], "换码，b 沿用最早的");
   state.ch2Missing = true; await round("2026-10-11T07:00:00Z"); // 冲突中渠道 2 变认不出：不是「冲突解开」，记号不清
   rule = await f.repository.getRule("rr_live");
-  assert.deepEqual([rule.keyIssue?.code, rule.keyIssue?.sinceMs], ["KEY_GROUP_CHANGED", Date.parse("2026-10-11T06:00:00Z")], "记号沿用，不清");
+  assert.deepEqual([rule.keyIssue?.code, rule.keyIssue?.sinceMs], ["KEY_GROUP_CHANGED", Date.parse("2026-10-11T05:00:00Z")], "记号沿用，不清");
   await round("2026-10-11T17:00:00Z"); // 10-11 结束
   assert.deepEqual(f.state.ledger.filter((row) => row.bill_date === "2026-10-11"), [], "冲突期间的 10-11 不固定");
 });
@@ -10215,4 +10231,26 @@ test("K2b：没锚定过的绑定（还没开始算）识别到不一样的 Key 
   assert.equal((await f.repository.getRule("rr_live")).canonicalKey, null, "夹具里的绑定还没锚定");
   await f.module.refreshDue(now); // 第一轮：渠道已经是 K10，但这条绑定还没锚定（这一轮才锚定）：不换段
   assert.equal((await f.repository.listSegments("rr_live")).length, 1, "没锚定过的绑定不换段");
+});
+
+// 审核 2 第二轮 F1：事项解开（渠道回到原来的 Key）转成一段冲突期，解开以后又出新事项、又解开，旧的冲突期不会被覆盖——两段的日子都永远不固定
+test("K2b：冲突期叠着存好几段——事项解开、又出新事项、又解开，第一段的冲突期还在，两段碰到的日子都不固定，中间干净的日子照常固定", async (t) => {
+  const { f, agent, round, state, booked } = await readerOutageFixture(t);
+  const keyNine = agent.key, unknown = "sk-" + "Unkn".repeat(10);
+  await round("2026-10-10T06:00:00Z"); // R0：正常
+  agent.key = unknown; await round("2026-10-10T10:00:00Z"); // 第一次：认出不在已加上游里的 Key（since1）
+  agent.key = keyNine; await round("2026-10-10T12:00:00Z"); await round("2026-10-10T12:15:00Z"); // 解开（until1）
+  const first = (await f.repository.getRule("rr_live")).keyBlocks;
+  assert.deepEqual(first.map((block) => [block.code, block.sinceMs, block.untilMs]), [["KEY_CONFLICT_GAP", Date.parse("2026-10-10T10:00:00Z"), first[0].untilMs]]);
+  agent.key = unknown; await round("2026-10-14T10:00:00Z"); // 第二次（since2）：新事项不覆盖第一段
+  assert.equal((await f.repository.getRule("rr_live")).keyBlocks.length, 1, "新事项不覆盖旧的冲突期");
+  agent.key = keyNine; await round("2026-10-14T12:00:00Z"); await round("2026-10-14T12:15:00Z"); // 又解开
+  const blocks = (await f.repository.getRule("rr_live")).keyBlocks;
+  assert.equal(blocks.length, 2, "两段都留着");
+  assert.deepEqual(blocks.map((block) => block.sinceMs), [Date.parse("2026-10-10T10:00:00Z"), Date.parse("2026-10-14T10:00:00Z")]);
+  await round("2026-10-15T16:20:00Z"); // 把两段之间、之后的日子都结一遍
+  assert.equal(booked("2026-10-10"), 0, "第一段碰到的 10-10 不固定");
+  assert.equal(booked("2026-10-14"), 0, "第二段碰到的 10-14 不固定");
+  assert.equal((await state("2026-10-10"))?.manualReason, "KEY_CONFLICT_GAP");
+  assert.equal((await state("2026-10-14"))?.manualReason, "KEY_CONFLICT_GAP");
 });
