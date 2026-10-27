@@ -79,7 +79,9 @@ export function ruleFromRow(row, channels = []) {
     provider: row.provider || null,
     canonicalKey: row.canonical_key || null,
     // K2b：这条绑定的 Key 现在有没处理的事（KEY_GROUP_CHANGED / CHANNEL_KEY_UNMATCHED / KEY_REVEAL_DENIED）和第一次认出来的时刻（毫秒）；没有是 null
-    keyIssue: row.key_issue_code ? { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms) } : null,
+    // 现在还没解开的事项；解开了、只挡冲突期间那一段日子的在 keyIssueClosed（见 server/reconciliation.js keyAgentRoundFor）
+    keyIssue: row.key_issue_code && row.key_issue_until_ms == null ? { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms) } : null,
+    ...(row.key_issue_code && row.key_issue_until_ms != null ? { keyIssueClosed: { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms), untilMs: Number(row.key_issue_until_ms) } } : {}),
     ...normalizeRuleSourceBinding(row.source_binding, row.cost_coverage || "unknown"),
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
     // 解除时刻（毫秒）：新写的行由进程写；回填前的旧行读不到时退回 archived_at
@@ -511,6 +513,26 @@ export class ReconciliationRepository {
       token_id: row.key_token_id, token_name: row.key_token_name, key_mask: row.key_key_mask, match_source: row.key_match_source, active_token_key: row.key_active_token_key })));
   }
 
+  // 几条绑定的分段一次读出来（换 Key 时找这把 Key 上一个持有者的段、「渠道」页签的「用过的 Key」）：{ [ruleId]: 分段[] }，一条查询，不按绑定逐条读
+  async listSegmentsForRules(ruleIds) {
+    const ids = [...new Set((ruleIds || []).map(String))];
+    if (!ids.length) return {};
+    const [rows] = await this.pool.query(
+      `SELECT s.*, k.segment_id AS key_segment_id, k.upstream_station_id AS key_upstream_station_id, k.token_id AS key_token_id,
+         k.token_name AS key_token_name, k.key_mask AS key_key_mask, k.match_source AS key_match_source, k.active_token_key AS key_active_token_key
+       FROM reconciliation_rule_segments s LEFT JOIN reconciliation_segment_keys k ON k.segment_id = s.id
+       WHERE s.rule_id IN (?) ORDER BY s.rule_id ASC, s.effective_from_ms ASC, s.created_at ASC, s.effective_to_ms IS NOT NULL DESC, s.effective_to_ms ASC, k.token_id ASC`,
+      [ids]
+    );
+    const segments = [], seen = new Set();
+    for (const row of rows) if (!seen.has(row.id)) { seen.add(row.id); segments.push(segmentFromRow(row)); }
+    attachSegmentKeys(segments, rows.map((row) => ({ segment_id: row.key_segment_id, upstream_station_id: row.key_upstream_station_id,
+      token_id: row.key_token_id, token_name: row.key_token_name, key_mask: row.key_key_mask, match_source: row.key_match_source, active_token_key: row.key_active_token_key })));
+    const byRule = Object.fromEntries(ids.map((id) => [id, []]));
+    for (const segment of segments) byRule[segment.ruleId].push(segment);
+    return byRule;
+  }
+
   async backfillMissingSegmentRatios(ruleId, groups, observedAt = Date.now(), segments = null) {
     const knownRatios = new Map(Object.entries(groups || {}).flatMap(([name, group]) => {
       const ratio = Number(group?.ratio);
@@ -742,11 +764,12 @@ export class ReconciliationRepository {
     } finally { conn.release(); }
   }
 
-  // K2b：这条绑定的 Key 现在有没处理的事，跨轮记下来、重启不丢（总指挥 10-26 定）。issue 是 { code, sinceMs }，null 表示解开了清掉。
+  // K2b：这条绑定的 Key 现在有没处理的事，跨轮记下来、重启不丢。issue 是 { code, sinceMs, untilMs? }，null 表示解开了清掉；
+  // untilMs 有值是「解开了、但 [sinceMs, untilMs) 里的日子仍然算不准」，只挡这一段。
   // 调用方（server/reconciliation.js keyAgentRoundFor）自己保证同一件事沿用第一次认出的 sinceMs，这里只管写
   async markKeyIssue(ruleId, issue) {
-    await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ? WHERE id = ?",
-      [issue?.code ?? null, issue?.sinceMs ?? null, ruleId]);
+    await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ?, key_issue_until_ms = ? WHERE id = ?",
+      [issue?.code ?? null, issue?.sinceMs ?? null, issue?.untilMs ?? null, ruleId]);
   }
 
   // K2b：按 key-agent-resegment.js 给的计划，给一条或几条绑定（挪位置、互换时是两条）开新段——同一个事务里关旧段、

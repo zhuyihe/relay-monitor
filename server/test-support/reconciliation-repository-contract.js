@@ -1445,7 +1445,7 @@ contract("segment keys (K1c)：一段有不止一把 Key 时（K2b 开始写才�
 });
 
 // K2b：正常换 Key（没有冲突）时真正开段的那条路（server/key-agent-resegment.js 的计划 → 这里落库）。
-// 总指挥 10-26 定：同一个事务关旧段、开新段、写 segment_keys、改 rules 的 token_id/token_name/active_token_key；
+// 同一个事务关旧段、开新段、写 segment_keys、改 rules 的 token_id/token_name/active_token_key；
 // 真正兜底的是数据库的两道唯一约束，撞了整批回滚、返回 { conflict: true }，不靠应用层的预检查当唯一防线。
 contract("applyKeyChangePlans: a windowed plan closes the old segment, opens a closed transitional multi-key segment and an open single-key segment; rules.token_id/token_name follow the open segment's key", async ({ repository, fixture }) => {
   const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(30), name: "Windowed" }] });
@@ -1867,4 +1867,30 @@ contract("applyKeyChangePlans: rules carrying a real active_token_key — one pl
   const ring = [move(now[0], now[2], canonicalOf("c"), at2), move(now[2], now[1], canonicalOf("a"), at2), move(now[1], now[0], canonicalOf("b"), at2)];
   assert.deepEqual(await repository.applyKeyChangePlans([ring[0]]), { conflict: true }, "轮换拆开：撞");
   assert.deepEqual(await repository.applyKeyChangePlans(ring), { conflict: false }, "轮换同一批：不撞");
+});
+
+contract("listSegmentsForRules (K2d): several rules' segments (with keys) in one read, same content as listSegments per rule; no ids gives {}; an unknown id gives an empty list", async ({ repository, fixture }) => {
+  const first = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:l1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(181), name: "A" }] });
+  const second = await fixture.createRule({ tokenId: fixture.token(182), tokenName: "L2", canonicalKey: `up:${fixture.tag}:l2`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(182), name: "B" }] });
+  const batch = await repository.listSegmentsForRules([first.id, second.id, `rr_missing${fixture.tag}`]);
+  assert.deepEqual(Object.keys(batch).sort(), [first.id, second.id, `rr_missing${fixture.tag}`].sort());
+  for (const id of [first.id, second.id]) {
+    const single = await repository.listSegments(id);
+    assert.deepEqual(batch[id].map((segment) => [segment.id, segment.effectiveFrom, segment.effectiveTo, segment.keys.map((key) => key.tokenId)]), single.map((segment) => [segment.id, segment.effectiveFrom, segment.effectiveTo, segment.keys.map((key) => key.tokenId)]));
+    assert.ok(batch[id].length >= 1 && batch[id].every((segment) => segment.keys.length >= 1));
+  }
+  assert.deepEqual(batch[`rr_missing${fixture.tag}`], []);
+  assert.deepEqual(await repository.listSegmentsForRules([]), {});
+});
+
+contract("markKeyIssue (K2b): an open issue reads back as keyIssue; with untilMs it reads back as keyIssueClosed (and keyIssue is null); null clears both", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(191), name: "K" }] });
+  const get = () => repository.getRule(rule.id);
+  assert.deepEqual([(await get()).keyIssue, (await get()).keyIssueClosed ?? null], [null, null]);
+  await repository.markKeyIssue(rule.id, { code: "KEY_GROUP_CHANGED", sinceMs: 1000 });
+  assert.deepEqual([(await get()).keyIssue, (await get()).keyIssueClosed ?? null], [{ code: "KEY_GROUP_CHANGED", sinceMs: 1000 }, null]);
+  await repository.markKeyIssue(rule.id, { code: "KEY_GROUP_CHANGED", sinceMs: 1000, untilMs: 5000 });
+  assert.deepEqual([(await get()).keyIssue, (await get()).keyIssueClosed], [null, { code: "KEY_GROUP_CHANGED", sinceMs: 1000, untilMs: 5000 }]);
+  await repository.markKeyIssue(rule.id, null);
+  assert.deepEqual([(await get()).keyIssue, (await get()).keyIssueClosed ?? null], [null, null]);
 });
