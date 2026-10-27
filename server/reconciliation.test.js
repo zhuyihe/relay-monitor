@@ -11336,18 +11336,29 @@ test("K2b + Sub2API 翻不完转了需处理以后点「重新读取」：回到
   assert.equal(await state("rr_live"), null, "状态行删掉了");
 });
 
-// 审核 #150 第 2 轮中-1（总指挥 10-27 定）：换手当天「今天」的实时数——部分认领的 Key 今天整天只算给一条绑定（现在握着它的；没人握着就给今天最后握着它的在算的），合计不翻倍也不丢
-for (const [label, options, keys] of [
-  ["互换", { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }], before: { 1: 9, 2: 10 }, after: { 1: 10, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null] } }, 2],
-  ["挪给在算的渠道", { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }, { tokenId: 20, name: "k20" }], before: { 1: 9, 2: 10 }, after: { 1: 20, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null], k20: [0, null] } }, 3],
-  ["挪给没在算的渠道", { rules: [], channelsByRule: { rr_live: [1] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "k20" }], before: { 1: 9 }, after: { 1: 20 }, lateAfter: { 2: 9 }, usage: { stable: [0, null], k20: [0, null] } }, 2],
-]) test(`换手当天「今天」的实时数（Sub2API，${label}）：每把 Key 今天整天只算给一条绑定，合计 = 各 Key 当天用量之和，不翻倍也不丢`, async (t) => {
+// 审核 #150 第 2 轮中-1（总指挥 10-27 定）：换手当天「今天」的实时数——部分认领的 Key 今天整天只算给一条绑定（现在握着它的；没人握着就给今天最后握着它的在算的），合计不翻倍也不丢。
+// 审核 3 第 2 轮：断言要按每条绑定——只看合计时，把 liveKeyOwnerOf 判反了互换也照样过（互换是对称的）。三把 Key 用量不一样长（K9 整天 24 小时，
+// K10 从 3 小时后起 21 小时，K20 从 1 小时后起 23 小时），握着 Key 的那条拿这把 Key 今天整天的，另一条拿 0
+const LIVE_DAY_START = Date.parse("2026-10-11T16:00:00Z"), LIVE_H = 3600;
+const liveUsage = { stable: [0, null], "stable-rr_b": [LIVE_DAY_START + 3 * 3600000, null], k20: [LIVE_DAY_START + 3600000, null] }; 
+const LIVE_U = { K9: 24 * LIVE_H, K10: 21 * LIVE_H, K20: 23 * LIVE_H }; // 假上游按天统计给整天的数（今天也是）
+for (const [label, options, expected] of [
+  // 互换：rr_live 现在握着 K10，rr_b 握着 K9
+  ["互换", { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }], before: { 1: 9, 2: 10 }, after: { 1: 10, 2: 9 }, usage: { stable: liveUsage.stable, "stable-rr_b": liveUsage["stable-rr_b"] } },
+    { rr_live: LIVE_U.K10, rr_b: LIVE_U.K9 }],
+  // 挪给在算的渠道：rr_live 换到 K20，K9 给了 rr_b，K10 没人握着——给今天最后握着它的在算的绑定 rr_b
+  ["挪给在算的渠道", { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }, { tokenId: 20, name: "k20" }], before: { 1: 9, 2: 10 }, after: { 1: 20, 2: 9 }, usage: liveUsage },
+    { rr_live: LIVE_U.K20, rr_b: LIVE_U.K9 + LIVE_U.K10 }],
+  // 挪给没在算的渠道：rr_live 换到 K20，K9 被没在算的渠道 2 用着——没人握着，给今天最后握着它的在算的绑定 rr_live
+  ["挪给没在算的渠道", { rules: [], channelsByRule: { rr_live: [1] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "k20" }], before: { 1: 9 }, after: { 1: 20 }, lateAfter: { 2: 9 }, usage: { stable: liveUsage.stable, k20: liveUsage.k20 } },
+    { rr_live: LIVE_U.K20 + LIVE_U.K9 }],
+]) test(`换手当天「今天」的实时数（Sub2API，${label}）：每把 Key 今天整天只算给一条绑定（按每条绑定断言，三把 Key 用量不一样长），合计不翻倍也不丢`, async (t) => {
   const s = await regroupMoneyScenario(t, "immediate", { sub2: true, expectRegroup: false, stopAfterB: true, ...options });
   await s.advance(REGROUP_B + 3 * 3600000); // 换手（09:00）以后 3 小时：今天的窗口 [0 点, 现在) 里认领才不满整个窗口
   const ruleIds = ["rr_live", ...(options.rules || [])];
   const { results } = await s.f.module.queryRules({ ruleIds, preset: "today" }, { mode: "evaluate", force: true, origin: "manual" });
-  const total = results.reduce((sum, row) => sum + (row.upstream?.knownAmountUsd ?? 0), 0);
-  assert.equal(total, keys * 86400, `今天各 Key 的整天用量之和（${keys} 把 Key）`);
+  const byRule = Object.fromEntries(results.map((row) => [row.rule.id, row.upstream?.knownAmountUsd ?? 0]));
+  assert.deepEqual(byRule, expected, "每条绑定今天的上游成本：握着 Key 的那条拿整天，另一条拿 0");
 });
 
 // ===== K2c 重新分组：按时间线逐天对账（审核 #144 第 1 轮）=====
