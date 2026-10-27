@@ -9,7 +9,7 @@
 // 有超线时退出码是 2（结果照样打到标准输出）。
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { perRound, INGEST_ROWS, ingestCell, ingestRoundLine, ingestSwitch, steadyDelayText } from "../lib/metrics.mjs";
+import { perRound, INGEST_ROWS, ingestCell, ingestRoundLine, ingestSwitch, steadyDelayText, keyAgentLine } from "../lib/metrics.mjs";
 
 const [baseDir, headDir] = process.argv.slice(2);
 if (!baseDir || !headDir) { console.error("用法：node measure/compare.mjs <base 结果目录> <head 结果目录>"); process.exit(1); }
@@ -54,6 +54,7 @@ if (b1 && b2) {
   out.push("## 后台（没开页面，稳态）\n",
     `「每轮」几行只做参考，先看两边轮数；轮数不同时以「稳态每分钟」为准（门槛也在每分钟的 SQL 条数、假站点请求上）。窗口：base ${b1.windowSec} 秒（余额刷新 ${b1.steady.balanceRounds} 轮、结账轮询 ${b1.steady.reconRounds.length} 轮），head ${b2.windowSec} 秒（${b2.steady.balanceRounds} 轮、${b2.steady.reconRounds.length} 轮）。「每轮」是稳态窗口减去余额刷新后按结账轮询轮数平均。\n`,
     `base：${steadyDelayText(b1)}；head：${steadyDelayText(b2)}。\n`,
+    ...[["base", b1], ["head", b2]].map(([label, bg]) => { const k = keyAgentLine(bg); return `${label}：${k.text}${k.anomaly ? ` ${flag(true)}` : ""}。\n`; }),
     "| 指标 | 类别 | base | head | 变化 | |", "|---|---|--:|--:|--:|---|");
   const sqlPct = env("SQL_PCT", 20);
   // [名字, 类别, base, head, 超线规则]

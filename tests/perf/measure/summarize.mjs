@@ -2,7 +2,7 @@
 // 用法：node measure/summarize.mjs <结果目录>
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { perRound, INGEST_ROWS, ingestCell, ingestRoundLine, ingestSwitch, steadyDelayText } from "../lib/metrics.mjs";
+import { perRound, INGEST_ROWS, ingestCell, ingestRoundLine, ingestSwitch, steadyDelayText, keyAgentLine } from "../lib/metrics.mjs";
 
 const dir = process.argv[2];
 const load = (name) => existsSync(join(dir, name)) ? JSON.parse(readFileSync(join(dir, name), "utf8")) : null;
@@ -23,6 +23,7 @@ if (bg) {
   out.push("## 后台（没开页面，稳态）\n");
   out.push("| 指标 | 数值 |", "|---|--:|");
   out.push(`| 窗口 | ${bg.windowSec} 秒（余额刷新 ${s.balanceRounds} 轮、结账轮询 ${s.reconRounds.length} 轮）；${steadyDelayText(bg)} |`);
+  { const k = keyAgentLine(bg); out.push(`| 渠道 Key 读取服务 | ${k.text}${k.anomaly ? " ⚠" : ""} |`); }
   out.push(`| 对假站点请求 / 分钟 | ${s.fakeRequestsPerMin} |`);
   out.push(`| SQL 条数 / 分钟 | ${s.sqlPerMin} |`);
   out.push(`| SQL 耗时 / 分钟 | ${s.sqlMsPerMin} ms |`);

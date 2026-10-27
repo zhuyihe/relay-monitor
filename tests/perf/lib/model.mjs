@@ -18,6 +18,12 @@ export const BASE = `http://127.0.0.1:${PORT}`;
 // 自营站点单独一个端口（同一个假站点进程）：控制台按「主机:端口」给自营站点记请求额度（lib/own-request-budget.js），
 // 和上游共用一个端口的话，读上游的请求也算进自营站点的 180 秒 360 个里，整站读分到的额度就不对了
 export const OWN_PORT = Number(process.env.FAKE_OWN_PORT || PORT + 1);
+// 渠道 Key 读取服务（PERF_KEY_AGENT=on）单独一个 https 端口：控制台只认 https 的读取服务地址（lib/key-agent-client.js），
+// http 的地址直接回 KEY_AGENT_URL_INVALID、一个请求都不发。证书是 run.sh 用 openssl 现生成的自签证书（CN、SAN 都是 127.0.0.1），
+// 放在结果目录下；被测应用进程带 NODE_EXTRA_CA_CERTS 指到它（不关证书校验）
+export const KEY_AGENT_PORT = Number(process.env.FAKE_KEY_AGENT_PORT || PORT + 2);
+export const KEY_AGENT_URL = `https://127.0.0.1:${KEY_AGENT_PORT}/key-agent`;
+export const KEY_AGENT_TLS = { cert: join(OUT_DIR, "tls", "key-agent.crt"), key: join(OUT_DIR, "tls", "key-agent.key") };
 export const QPU = 500000;
 export const N_UP = 50;
 export const N_CH = 300;

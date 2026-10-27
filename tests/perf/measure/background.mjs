@@ -173,6 +173,8 @@ const result = {
   at: new Date().toISOString(), windowSec: Math.round(elapsed), steadyDelay,
   steady: {
     fakeRequests: fake.total, fakeRequestsPerMin: perMin(fake.total), fakeByRoute: fake.byRoute, fakeBytes: fake.bytes,
+    // 渠道 Key 读取服务（PERF_KEY_AGENT=on）：稳态窗口里 /key-agent/keys 按状态码几次、换了几次 Key
+    keyAgent: { on: /^(1|on|true)$/i.test(String(process.env.PERF_KEY_AGENT ?? "")), byStatus: fake.keyAgentStatus ?? null, rotations: fake.keyAgentRotations ?? null },
     sqlStatements: steady.reduce((a, d) => a + d.count, 0), sqlPerMin: perMin(steady.reduce((a, d) => a + d.count, 0)),
     sqlMsPerMin: perMin(steady.reduce((a, d) => a + d.totalMs, 0)),
     rowsExamined: steady.reduce((a, d) => a + d.rowsExamined, 0), rowsExaminedPerMin: perMin(steady.reduce((a, d) => a + d.rowsExamined, 0)),

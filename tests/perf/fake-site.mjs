@@ -5,13 +5,17 @@
 // 所有数字来自 lib/model.mjs 的确定性模型：分页、按渠道/按天/按 Key 的统计互相对得上。
 // 渠道 Key 读取服务（K2a/K2b 量夹具，PERF_KEY_AGENT=on 才接）：GET /key-agent/keys（Bearer、ETag/304、X-Agent-Stale），
 // 每 PERF_KEY_AGENT_ROTATE_SEC 秒（默认 600）随机换 2~3 个渠道现在用的 Key（走 New API 整号账号的那些）；/__ctl?key_agent_down=1|0 模拟读取服务读库失败（照真协议
-// 沿用上一份成功结果、带 X-Agent-Stale），key_agent_rotate=1 立刻触发一次换 Key（不用等 10 分钟，本机调脚本用）。
+// 沿用上一份成功结果、带 X-Agent-Stale），key_agent_rotate=1 立刻触发一次换 Key（不用等 10 分钟，本机调脚本用），
+// key_agent_rotate_pause=1|0 暂停/恢复定时换 Key（对拍时停：暂停时把换过的渠道都换回绑定的那把 Key）。
+// 读取服务走单独的 https 端口 https://127.0.0.1:18952/key-agent（FAKE_KEY_AGENT_PORT，默认 FAKE_PORT + 2；证书见 lib/model.mjs 的 KEY_AGENT_TLS）。
 import { createServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
+import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import {
   loadConfig, makeAggregates, makeBalanceModel, channelQuota, tokenCostQuota, accountCostQuota,
   UPSTREAMS, OWN, CHANNELS, USERS, MODELS, OWN_GROUPS, RULES, QPU, N_CH, N_USERS, HOUR, TZ,
-  dayStartSec, dateKeyOf, PORT, OWN_PORT, upstreamGroupRatio, tokenKeySecret, channelDefaultToken, channelDefaultSecret, channelUpstream,
+  dayStartSec, dateKeyOf, PORT, OWN_PORT, KEY_AGENT_PORT, KEY_AGENT_TLS, upstreamGroupRatio, tokenKeySecret, channelDefaultToken, channelDefaultSecret, channelUpstream,
 } from "./lib/model.mjs";
 import { maskKey, fingerprintKey, deriveAgentKeys, KEY_AGENT_SECRET } from "./lib/key-agent-protocol.mjs";
 
@@ -50,6 +54,8 @@ const keyAgentOverride = new Map();
 let keyAgentRotations = 0; // /__stats 报的「换了几次」，量的时候确认真的在换
 let keyAgentDown = false; // POST /__ctl?key_agent_down=1｜0：模拟读取服务那一侧读库失败，照真协议沿用上一份成功结果、带 X-Agent-Stale
 let keyAgentLastGood = null; // { body, etag }
+let keyAgentRotatePaused = false; // POST /__ctl?key_agent_rotate_pause=1｜0：对拍时停掉定时换 Key（60 秒一换会让被换渠道的绑定和 base 合理地不同）
+let keyAgentStatus = Object.create(null); // GET /key-agent/keys 按状态码计数（200、304……），/__stats 报
 const ROTATABLE = KEY_AGENT_ON ? CHANNELS.filter((ch) => channelUpstream(ch.id).kind === "newapi" && channelDefaultToken(ch.id)).map((ch) => ch.id) : [];
 function rotateKeyAgentChannels() {
   const n = 2 + Math.floor(Math.random() * 2); // 2 或 3 个
@@ -63,7 +69,7 @@ function rotateKeyAgentChannels() {
 }
 // 换 Key 的间隔：默认 600 秒（真实读取服务的节奏）；CI 的稳态窗口只有 185 秒，量「换了 Key 以后重新认、写段」那一段要调小（比如 60）
 const KEY_AGENT_ROTATE_SEC = Math.max(1, Math.floor(num(process.env.PERF_KEY_AGENT_ROTATE_SEC || undefined, 600)));
-if (KEY_AGENT_ON) setInterval(rotateKeyAgentChannels, KEY_AGENT_ROTATE_SEC * 1000).unref?.();
+if (KEY_AGENT_ON) setInterval(() => { if (!keyAgentRotatePaused) rotateKeyAgentChannels(); }, KEY_AGENT_ROTATE_SEC * 1000).unref?.();
 
 function keyAgentChannelKeys(c) {
   const up = channelUpstream(c), overrideId = keyAgentOverride.get(c);
@@ -525,9 +531,9 @@ function route(req, url) {
   const path = url.pathname, q = url.searchParams;
   if (path === "/__health") return [200, { ok: true, epoch0, nh: agg.nh }];
   if (path === "/__stats") {
-    const snapshot = { ...JSON.parse(JSON.stringify(stats)), ownRateLimited, ownLogKinds: { ...ownLogKinds }, keyAgentRotations, keyAgentDown };
+    const snapshot = { ...JSON.parse(JSON.stringify(stats)), ownRateLimited, ownLogKinds: { ...ownLogKinds }, keyAgentRotations, keyAgentDown, keyAgentRotatePaused, keyAgentStatus: { ...keyAgentStatus } };
     if (q.get("detail") === "1") snapshot.log = requestLog;
-    if (q.get("reset") === "1") { stats.total = 0; stats.bytes = 0; stats.byRoute = Object.create(null); stats.bySite = Object.create(null); stats.startedAt = new Date().toISOString(); requestLog = []; ownLogKinds = { all: 0, latest: 0, filtered: 0 }; keyAgentRotations = 0; }
+    if (q.get("reset") === "1") { stats.total = 0; stats.bytes = 0; stats.byRoute = Object.create(null); stats.bySite = Object.create(null); stats.startedAt = new Date().toISOString(); requestLog = []; ownLogKinds = { all: 0, latest: 0, filtered: 0 }; keyAgentRotations = 0; keyAgentStatus = Object.create(null); }
     return [200, snapshot];
   }
   if (path === "/__ctl") {
@@ -537,7 +543,9 @@ function route(req, url) {
     if (q.has("down")) downSites = new Set((q.get("down") || "").split(",").filter(Boolean));
     if (q.has("key_agent_down")) keyAgentDown = q.get("key_agent_down") === "1";
     if (q.has("key_agent_rotate")) rotateKeyAgentChannels(); // 手动触发一次换 Key，不用等 10 分钟（本机调脚本用）
-    return [200, { delayMs, ratioMode, frozenSec, down: [...downSites], keyAgentDown }];
+    // 暂停时顺带把换过的渠道换回绑定的那把 Key：对拍里 base、head 看到的读取服务和绑定对得上，不因为之前换过 Key 而不同
+    if (q.has("key_agent_rotate_pause")) { keyAgentRotatePaused = q.get("key_agent_rotate_pause") === "1"; if (keyAgentRotatePaused) keyAgentOverride.clear(); }
+    return [200, { delayMs, ratioMode, frozenSec, down: [...downSites], keyAgentDown, keyAgentRotatePaused }];
   }
   if (path.startsWith("/hook/")) return [200, { errcode: 0, errmsg: "ok", code: 0 }];
   const m = path.match(/^(\/(?:na|s2|nk)\d\d|\/own|\/key-agent)(\/.*)?$/);
@@ -550,7 +558,11 @@ function route(req, url) {
   const ownLogKind = key === "own:/api/log/" ? (OWN_LOG_FILTERS.some((f) => q.get(f) && q.get(f) !== "0") ? "filtered" : q.get("page_size") === "1" ? "latest" : "all") : null;
   if (ownLogKind) ownLogKinds[ownLogKind] += 1;
   if (requestLog.length < 200000) requestLog.push(ownLogKind ? [Date.now(), key, ownLogKind] : [Date.now(), key]);
-  if (site === "/key-agent") return keyAgentSite(req);
+  if (site === "/key-agent") {
+    const r = keyAgentSite(req);
+    if (rest === "/keys") keyAgentStatus[r[0]] = (keyAgentStatus[r[0]] || 0) + 1;
+    return r;
+  }
   if (downSites.has(site)) return [503, { success: false, message: "upstream down (fake)" }];
   if (site === "/own") return ownSite(rest, q, req);
   const up = upByPath.get(site);
@@ -577,4 +589,11 @@ server.keepAliveTimeout = 30000;
 const ownServer = createServer(handler);
 ownServer.keepAliveTimeout = 30000;
 ownServer.listen(OWN_PORT, "127.0.0.1");
+// 读取服务的 https 端口：只在 PERF_KEY_AGENT=on 时开（证书由 run.sh 生成，没有就报错退出——宁可起不来，也不要悄悄量不到）
+if (KEY_AGENT_ON) {
+  const tls = { cert: readFileSync(KEY_AGENT_TLS.cert), key: readFileSync(KEY_AGENT_TLS.key) };
+  const keyAgentServer = createHttpsServer(tls, handler);
+  keyAgentServer.keepAliveTimeout = 30000;
+  keyAgentServer.listen(KEY_AGENT_PORT, "127.0.0.1", () => console.log(`[fake] 渠道 Key 读取服务 https://127.0.0.1:${KEY_AGENT_PORT}/key-agent`));
+}
 server.listen(PORT, "127.0.0.1", () => console.log(`[fake] 假站点 http://127.0.0.1:${PORT}（自营站点 ${OWN_PORT}），延迟 ${delayMs} ms，倍率口径 ${ratioMode}`));

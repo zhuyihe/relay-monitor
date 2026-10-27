@@ -14,7 +14,8 @@
 #   PARITY_DAYS(14) API_N(10) BG_SEC(185) RECON_DAYS(90) PERF_HISTORY_DAYS(90) FAKE_DELAY_MS(50) FAKE_TEST_LOGS(0，假站点开关，见 README)
 #   PERF_BINDINGS(空 = 80 条绑定；缩小夹具，种子、假站点、测量一起用) PERF_EXPECTED_COST(off；on 时后台测量前打开「算应付成本」整站读)
 #   PERF_STEADY_DELAY_SEC(0，量完接口以后先等这么多秒再开稳态，量「没人看」用 660；BG_SEC 就是 workflow 的 steady_sec)
-#   PERF_KEY_AGENT(off；on 时假站点装渠道 Key 读取服务、自营站点配上地址和令牌，见 README「K2a/K2b 场景」)
+#   PERF_KEY_AGENT(off；on 时假站点在 https 端口 FAKE_KEY_AGENT_PORT(FAKE_PORT + 2) 装渠道 Key 读取服务、自营站点配上地址和令牌，
+#     证书 $PERF_OUT/tls/key-agent.crt 现生成，被测应用带 NODE_EXTRA_CA_CERTS；对拍时暂停换 Key。见 README「K2a/K2b 场景」)
 #   PERF_KEY_AGENT_ROTATE_SEC(600；假读取服务换一次 Key 的间隔，稳态窗口只有 185 秒，想量到换 Key 以后重新认、写段就填 60 左右)
 # 不带锁：CI 上一台机器只跑这一件。本机和别的重活抢机器时，自己在外面拿锁。
 
@@ -22,7 +23,7 @@ set -o pipefail
 PERF_DIR=$(cd "$(dirname "$0")" && pwd)
 export DB_HOST=${DB_HOST:-127.0.0.1} DB_PORT=${DB_PORT:-3306} DB_USER=${DB_USER:-root} DB_PASSWORD=${DB_PASSWORD:-} DB_NAME=${DB_NAME:-relay_monitor_perf}
 export APP_PORT=${APP_PORT:-3301} FAKE_PORT=${FAKE_PORT:-18950}
-export FAKE_OWN_PORT=${FAKE_OWN_PORT:-$(( FAKE_PORT + 1 ))}
+export FAKE_OWN_PORT=${FAKE_OWN_PORT:-$(( FAKE_PORT + 1 ))} FAKE_KEY_AGENT_PORT=${FAKE_KEY_AGENT_PORT:-$(( FAKE_PORT + 2 ))}
 TMP_ROOT=${TMPDIR:-/tmp}
 export PERF_OUT=${PERF_OUT:-${TMP_ROOT%/}/relay-monitor-perf}
 PARITY_DAYS=${PARITY_DAYS:-14} API_N=${API_N:-10} BG_SEC=${BG_SEC:-185} RECON_DAYS=${RECON_DAYS:-90}
@@ -57,11 +58,24 @@ stop_app() {
 stop_fake() {
   [ -f "$PERF_OUT/pids/fake" ] && kill "$(cat "$PERF_OUT/pids/fake")" 2>/dev/null
   rm -f "$PERF_OUT/pids/fake"
-  kill_port "$FAKE_PORT"; kill_port "$FAKE_OWN_PORT"
+  kill_port "$FAKE_PORT"; kill_port "$FAKE_OWN_PORT"; kill_port "$FAKE_KEY_AGENT_PORT"
 }
 fake_up() { curl -sf -m 2 "http://127.0.0.1:$FAKE_PORT/__health" > /dev/null; }
+# 渠道 Key 读取服务的自签证书（PERF_KEY_AGENT=on 时）：CN、SAN 都是 127.0.0.1，放在 $PERF_OUT/tls/；假站点的 https 端口用它，
+# 被测应用进程带 NODE_EXTRA_CA_CERTS 信任它（start_app）。不用 NODE_TLS_REJECT_UNAUTHORIZED=0：那样量不到证书这一环
+KEY_AGENT_CERT=$PERF_OUT/tls/key-agent.crt
+key_agent_on() { case "${PERF_KEY_AGENT:-}" in 1|on|true|ON|TRUE) return 0 ;; *) return 1 ;; esac; }
+ensure_cert() {
+  key_agent_on || return 0
+  [ -s "$KEY_AGENT_CERT" ] && [ -s "$PERF_OUT/tls/key-agent.key" ] && return 0
+  mkdir -p "$PERF_OUT/tls"
+  openssl req -x509 -newkey rsa:2048 -nodes -days 7 -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" \
+    -keyout "$PERF_OUT/tls/key-agent.key" -out "$KEY_AGENT_CERT" > "$LOGS/openssl.log" 2>&1 \
+    || { echo "生成读取服务证书失败，见 $LOGS/openssl.log"; return 1; }
+}
 ensure_fake() {
   fake_up && return 0
+  ensure_cert || return 1
   stop_fake
   (cd "$PERF_DIR" && exec env FAKE_DELAY_MS="${FAKE_DELAY_MS:-50}" node fake-site.mjs >> "$LOGS/fake-site.log" 2>&1) &
   echo $! > "$PERF_OUT/pids/fake"
@@ -79,7 +93,9 @@ start_app() {
   [ -f "$dir/lib/peer-address.js" ] && preload="--import ./lib/peer-address.js"
   local t0 t1 t2
   t0=$(node -e 'console.log(Date.now())')
-  (cd "$dir" && exec env HOST=127.0.0.1 PORT="$APP_PORT" node $preload node_modules/next/dist/bin/next start -p "$APP_PORT" -H 127.0.0.1 >> "$LOGS/app-$label.log" 2>&1) &
+  local ca=()
+  key_agent_on && ca=(NODE_EXTRA_CA_CERTS="$KEY_AGENT_CERT")
+  (cd "$dir" && exec env "${ca[@]}" HOST=127.0.0.1 PORT="$APP_PORT" node $preload node_modules/next/dist/bin/next start -p "$APP_PORT" -H 127.0.0.1 >> "$LOGS/app-$label.log" 2>&1) &
   echo $! > "$PERF_OUT/pids/app"
   local ok=0
   for _ in $(seq 1 240); do
@@ -157,6 +173,8 @@ cmd_parity() {
   rm -f "$PERF_OUT/parity/base.json" "$PERF_OUT/parity/head.json" "$PERF_OUT/parity/parity.md"
   (cd "$PERF_DIR" && node parity.mjs move "$PARITY_DAYS") || return 1
   ensure_fake || rc=1
+  # 对拍时停掉定时换 Key（并换回绑定的那把）：60 秒一换会让被换渠道的绑定和 base 合理地不同；结束后恢复，稳态窗口照常换
+  key_agent_on && curl -sf -m 5 "http://127.0.0.1:$FAKE_PORT/__ctl?key_agent_rotate_pause=1" > /dev/null
   if start_app "$PERF_BASE_DIR" parity-base; then
     (cd "$PERF_DIR" && node parity.mjs settle base) || rc=1
   else rc=1; fi
@@ -168,6 +186,7 @@ cmd_parity() {
   stop_app
   # 不管上面成不成，夹具都恢复成挪走前的样子（后面 head 的性能测量要用）
   (cd "$PERF_DIR" && node parity.mjs restore) || rc=1
+  key_agent_on && curl -sf -m 5 "http://127.0.0.1:$FAKE_PORT/__ctl?key_agent_rotate_pause=0" > /dev/null
   if [ -f "$PERF_OUT/parity/base.json" ] && [ -f "$PERF_OUT/parity/head.json" ]; then
     (cd "$PERF_DIR" && node parity.mjs diff base head > /dev/null) || rc=1
   else

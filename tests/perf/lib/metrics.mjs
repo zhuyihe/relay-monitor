@@ -63,3 +63,14 @@ export function steadyDelayText(bg) {
   const d = bg?.steadyDelay;
   return d ? `接口量完以后等了 ${d.waitedSec} 秒才开稳态（steady_delay_sec=${d.requestedSec}）` : "接口量完以后等了多久：没记（老结果）";
 }
+
+// 渠道 Key 读取服务这段时间被请求了几次（/key-agent/keys 按状态码）；key_agent=on 却是 0 次时 anomaly（读取服务没连上，量的不是 K2 那条路）
+export function keyAgentLine(bg) {
+  const k = bg?.steady?.keyAgent;
+  if (!k) return { text: "读取服务：没记（老结果）", anomaly: false };
+  const by = k.byStatus || {};
+  const total = Object.values(by).reduce((a, n) => a + n, 0);
+  const parts = [`200 ${by[200] || 0} 次`, `304 ${by[304] || 0} 次`, ...Object.keys(by).filter((c) => c !== "200" && c !== "304").sort().map((c) => `${c} ${by[c]} 次`)];
+  const anomaly = k.on && total === 0;
+  return { text: `读取服务（key_agent ${k.on ? "开" : "关"}）这段时间被请求 ${total} 次：${parts.join("、")}${k.on ? `；换了 ${k.rotations ?? "?"} 次 Key` : ""}${anomaly ? "（开着却一次都没请求，没连上）" : ""}`, anomaly };
+}

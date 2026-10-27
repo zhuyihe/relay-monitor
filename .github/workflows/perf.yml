@@ -48,7 +48,7 @@ on:
         required: false
         default: false
       key_agent:
-        description: "勾上 = 假站点装渠道 Key 读取服务（照真协议：指纹、打码、304、X-Agent-Stale），每 10 分钟换几个渠道的 Key；不勾 = 和现在一样"
+        description: "勾上 = 假站点在单独的 https 端口装渠道 Key 读取服务（照真协议：指纹、打码、304、X-Agent-Stale；自签证书现生成，被测应用带 NODE_EXTRA_CA_CERTS），每 10 分钟换几个渠道的 Key、对拍时暂停；不勾 = 和现在一样"
         type: boolean
         required: false
         default: false
@@ -90,6 +90,8 @@ jobs:
       DB_NAME: relay_monitor_perf
       APP_PORT: 3301
       FAKE_PORT: 18950
+      # 渠道 Key 读取服务的 https 端口（key_agent 勾上时；证书在 perf-out/tls/，run.sh 给被测应用带 NODE_EXTRA_CA_CERTS）
+      FAKE_KEY_AGENT_PORT: 18952
       PERF_OUT: ${{ github.workspace }}/perf-out
       PERF_BASE_DIR: ${{ github.workspace }}/apps/base
       PARITY_DAYS: ${{ inputs.parity_days || '14' }}
