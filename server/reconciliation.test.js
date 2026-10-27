@@ -11211,3 +11211,38 @@ test("应付成本 × 换 Key：同分组、倍率变了（整点切）——按
   assert.deepEqual([live.expected_cost_usd, live.gap_reason], [15, null]);
   assert.equal(detail.expected.segments.length, 2);
 });
+
+test("K2b + Sub2API 翻不完转了需处理以后点「重新读取」：回到还在读取、系统每分钟接着翻（翻页进度不丢），翻完自己固定，不用反复点（总指挥 10-27 定）", async (t) => {
+  const s = await regroupMoneyScenario(t, "immediate", { sub2: true, expectRegroup: false, rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }],
+    before: { 1: 9, 2: 10 }, after: { 1: 10, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null] }, recordStepMs: 3000, pagesPerMinute: 4 });
+  const state = async (ruleId) => (await s.f.repository.listSettlementStates([ruleId], { billDates: ["2026-10-12"] }))[0] ?? null;
+  const manual = (ruleId) => s.f.module.queryRules({ ruleIds: [ruleId], preset: "custom", startMs: Date.parse("2026-10-11T16:00:00Z"), endMs: Date.parse("2026-10-12T16:00:00Z") }, { mode: "observe", force: true, origin: "manual" });
+  // 每轮只翻 4 页（22 页要 6 轮）：先熬过 3 天，两条都转成需处理
+  await s.advance("2026-10-15T16:30:00Z"); await s.advance("2026-10-15T17:00:00Z");
+  assert.equal((await state("rr_live"))?.manualReason, "UPSTREAM_RECORDS_TOO_MANY");
+  assert.equal((await state("rr_b"))?.manualReason, "UPSTREAM_RECORDS_TOO_MANY");
+  // 点「重新读取」：回到还在读取（读取类），带一小时的续翻期限
+  await manual("rr_live");
+  const resumed = await state("rr_live");
+  assert.deepEqual([resumed.manualReason, resumed.retryReason], [null, "UPSTREAM_RECORDS_PENDING"], "回到还在读取");
+  assert.ok(resumed.detail.resumeUntilMs > Date.parse("2026-10-15T17:50:00Z"), "续翻一小时");
+  // 之后系统每分钟接着翻一轮，不用再点
+  let at = Date.parse("2026-10-15T17:00:00Z");
+  for (let round = 0; round < 12 && s.f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length === 0; round += 1) { at += 61000; await s.advance(at); }
+  assert.equal(s.f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length, 1, "翻完自己固定了");
+  assert.equal(await state("rr_live"), null, "状态行删掉了");
+});
+
+// 审核 #150 第 2 轮中-1（总指挥 10-27 定）：换手当天「今天」的实时数——部分认领的 Key 今天整天只算给一条绑定（现在握着它的；没人握着就给今天最后握着它的在算的），合计不翻倍也不丢
+for (const [label, options, keys] of [
+  ["互换", { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }], before: { 1: 9, 2: 10 }, after: { 1: 10, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null] } }, 2],
+  ["挪给在算的渠道", { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }, { tokenId: 20, name: "k20" }], before: { 1: 9, 2: 10 }, after: { 1: 20, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null], k20: [0, null] } }, 3],
+  ["挪给没在算的渠道", { rules: [], channelsByRule: { rr_live: [1] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "k20" }], before: { 1: 9 }, after: { 1: 20 }, lateAfter: { 2: 9 }, usage: { stable: [0, null], k20: [0, null] } }, 2],
+]) test(`换手当天「今天」的实时数（Sub2API，${label}）：每把 Key 今天整天只算给一条绑定，合计 = 各 Key 当天用量之和，不翻倍也不丢`, async (t) => {
+  const s = await regroupMoneyScenario(t, "immediate", { sub2: true, expectRegroup: false, stopAfterB: true, ...options });
+  await s.advance(REGROUP_B + 3 * 3600000); // 换手（09:00）以后 3 小时：今天的窗口 [0 点, 现在) 里认领才不满整个窗口
+  const ruleIds = ["rr_live", ...(options.rules || [])];
+  const { results } = await s.f.module.queryRules({ ruleIds, preset: "today" }, { mode: "evaluate", force: true, origin: "manual" });
+  const total = results.reduce((sum, row) => sum + (row.upstream?.knownAmountUsd ?? 0), 0);
+  assert.equal(total, keys * 86400, `今天各 Key 的整天用量之和（${keys} 把 Key）`);
+});

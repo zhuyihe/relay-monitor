@@ -1938,12 +1938,27 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (inDay.length === 1 && inDay[0][0] === thisDay && inDay[0][1] === dayEnd) {
         const last = reads.at(-1);
         if (last && last.claims === null && last.endMs === thisDay) last.endMs = dayEnd; else reads.push({ startMs: thisDay, endMs: dayEnd, claims: null });
-      } else reads.push({ startMs: thisDay, endMs: dayEnd, claims: inDay });
+      } else reads.push({ startMs: thisDay, endMs: dayEnd, claims: inDay, live: dayEnd < nextDay });
     }
     return reads;
   }
 
-  async function sub2SplitWindow(upstream, metadata, token, claimed, window, { readOnly, upstreamStationId }) {
+  // 今天（还没结束的一天）换过手的 Key：按天统计切不开，今天整天先只算给一条绑定——现在握着这把 Key 的那条（在算的、开着的段里有它）；
+  // 现在没有在算的绑定握着它，就算给今天最后握着它的那条在算的绑定。另一条今天不算这把 Key，合计不翻倍也不丢；两条之间分得不准没关系，
+  // 结账固定这一天时按逐条拆分分准（审核 #150 第 2 轮中-1，总指挥 10-27 定）
+  async function liveKeyOwnerOf(rule, key, dayStartMs) {
+    const rules = (await repository.listRules({ includeArchived: true })).filter((item) => item.ownStationId === rule.ownStationId);
+    const byRule = await repository.listSegmentsForRules(rules.map((item) => item.id));
+    const holdsKey = (segment) => (segment.keys || []).some((item) => Number(item.tokenId) === Number(key.tokenId) && (item.upstreamStationId ?? null) === (key.upstreamStationId ?? null));
+    const running = rules.filter((item) => !item.archivedAt && item.enabled);
+    const holders = running.filter((item) => (byRule[item.id] || []).some((segment) => segment.effectiveTo == null && holdsKey(segment)));
+    if (holders.length) return holders.some((item) => item.id === rule.id);
+    const lastEnd = (item) => Math.max(-Infinity, ...(byRule[item.id] || []).filter((segment) => segment.effectiveTo != null && Number(segment.effectiveTo) >= dayStartMs && holdsKey(segment)).map((segment) => Number(segment.effectiveTo)));
+    const last = running.map((item) => ({ item, end: lastEnd(item) })).filter((entry) => Number.isFinite(entry.end)).sort((x, y) => y.end - x.end)[0];
+    return last?.item.id === rule.id;
+  }
+
+  async function sub2SplitWindow(upstream, metadata, token, claimed, window, { readOnly, upstreamStationId, liveKeyOwner = null }) {
     const resolve = (meta) => claimed.map((item) => ({ item, resolved: segmentKeyTokens({ segmentKeys: [item.key], ruleToken: token, metadata: meta, upstreamStationId })[0] }));
     let wanted = resolve(metadata);
     // 整天读的已删 Key 按「总量减别的 Key」算，要先重读一次 Key 目录（同 upstreamWindowForSegment）；逐条翻的已删 Key 不用减法
@@ -1955,7 +1970,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const results = await Promise.all(wanted.map(async ({ item, resolved }) => {
       if (resolved.foreign) return foreignKeyWindow(item.key, window, { readOnly });
       const reads = item.partial ? sub2DayReads(window, item.windows) : [{ startMs: window.startMs, endMs: window.endMs, claims: null }];
-      const parts = await Promise.all(reads.map((piece) => upstreamWindowFor(upstream, metadata, resolved.token, { ...window, startMs: piece.startMs, endMs: piece.endMs }, { readOnly, claims: piece.claims })));
+      const parts = await Promise.all(reads.map(async (piece) => {
+        // 今天换过手的 Key（认领不满整天、窗口还没结束）：整天先只算给一条绑定，另一条给空认领（算 0）
+        let claims = piece.claims;
+        if (piece.live && claims && liveKeyOwner) claims = (await liveKeyOwner(item.key, piece.startMs)) ? null : [];
+        return upstreamWindowFor(upstream, metadata, resolved.token, { ...window, startMs: piece.startMs, endMs: piece.endMs }, { readOnly, claims });
+      }));
       return parts.length === 1 ? parts[0] : sumKeyStats(parts);
     }));
     const summed = sumKeyStats(results);
@@ -2785,7 +2805,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           floorError ? Promise.resolve({ error: floorError }) : upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
             : (isScopedBillingPolicy(rule.billingPolicy)
-              ? upstreamWindowForScopedSegments(upstream, metadata, token, segments, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId, claimFromMs })
+              ? upstreamWindowForScopedSegments(upstream, metadata, token, segments, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId, claimFromMs, liveKeyOwner: (key, dayStartMs) => liveKeyOwnerOf(rule, key, dayStartMs) })
               : upstreamWindowForSegment(upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId })).catch((error) => ({ error })),
           (ownAvailable && consumeLogIssue ? Promise.resolve({ error: codedError(consumeLogIssue.code, consumeLogIssue.detail), consumeLog: true })
             : ownAvailable

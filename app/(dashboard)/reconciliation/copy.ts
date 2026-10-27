@@ -163,6 +163,8 @@ export const COPY = Object.freeze({
     sinceOnly: (day: string, n: number) => `${day}起没算进利润，上面只是前 ${n} 天`,
     more: (n: number) => `还有 ${n} 个问题`,
     retryFailed: "重新读取没完成，请稍后再试",
+    // 「这天的用量记录太多，没读完」点「重新读取」以后：回到还在读取，系统接着读一个小时（设计 10-27 定；不写「已重新读取」，这时还没读完）
+    retryResumed: "已经接着读了，读完会自己固定",
   }),
   // 点开一行（设计稿 §4）
   expanded: Object.freeze({
