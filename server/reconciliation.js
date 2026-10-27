@@ -460,8 +460,9 @@ function toErrorHealth(err, own = false, station = null) {
     return { ...health(code, issueText(code)), side: "upstream", stationName: station ? stationDisplayName(station) : "", ...(err?.scope ? { missingScope: err.scope } : {}) };
   }
   const issue = own ? "OWN_BILLING_UNAVAILABLE" : code === "UPSTREAM_AUTH_DENIED" ? "KEY_INVALID_OR_DENIED"
-    : code === "UPSTREAM_FEATURE_UNSUPPORTED" ? "UPSTREAM_FEATURE_UNSUPPORTED" : "UPSTREAM_DATA_UNAVAILABLE";
-  return health(issue, issueText(issue));
+    : code === "UPSTREAM_FEATURE_UNSUPPORTED" ? "UPSTREAM_FEATURE_UNSUPPORTED" : code === "UPSTREAM_RECORDS_PENDING" ? "UPSTREAM_RECORDS_PENDING" : "UPSTREAM_DATA_UNAVAILABLE";
+  // UPSTREAM_RECORDS_PENDING 带着换手的那一刻（逐条翻不完的那把 Key 的第一个认领边界）
+  return health(issue, issueText(issue), issue === "UPSTREAM_RECORDS_PENDING" && Number.isFinite(Number(err?.sinceMs)) ? { sinceMs: Number(err.sinceMs) } : {});
 }
 
 // 轮询沿用了不久前的身份（这一轮没现读）时上游拒绝（New API），或者读账单时核对出账号换了（Sub2API）：
@@ -484,6 +485,7 @@ const CALCULATION_BLOCKERS = new Set([
   "UPSTREAM_FEATURE_UNSUPPORTED",
   "KEY_INVALID_OR_DENIED",
   "UPSTREAM_DATA_UNAVAILABLE",
+  "UPSTREAM_RECORDS_PENDING",
   "OWN_BILLING_UNAVAILABLE",
   "OWN_OPTION_UNREADABLE",
   "OWN_FLOW_INCOMPLETE",
@@ -1922,6 +1924,25 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return list.some((item) => item.partial) ? list : null;
   }
 
+  // 一把 Key 在多天窗口里认领的时间段（windows）按业务日拆成几次读：认领整天（或整个窗口的最后一截）的天连起来读一次按天统计（claims: null）；
+  // 只认领一部分的天读逐条（claims 是那一天里认领的 [开始, 结束)）；一点没认领的天不读
+  function sub2DayReads(window, windows) {
+    const reads = [];
+    for (let dayStart = window.startMs; dayStart < window.endMs;) {
+      const nextDay = shiftedDayStartInTz(dayStart, 1, window.timezone);
+      const dayEnd = Math.min(nextDay, window.endMs);
+      const inDay = windows.map((piece) => [Math.max(piece.startMs, dayStart), Math.min(piece.endMs, dayEnd)]).filter(([from, to]) => from < to);
+      const thisDay = dayStart;
+      dayStart = nextDay;
+      if (!inDay.length) continue;
+      if (inDay.length === 1 && inDay[0][0] === thisDay && inDay[0][1] === dayEnd) {
+        const last = reads.at(-1);
+        if (last && last.claims === null && last.endMs === thisDay) last.endMs = dayEnd; else reads.push({ startMs: thisDay, endMs: dayEnd, claims: null });
+      } else reads.push({ startMs: thisDay, endMs: dayEnd, claims: inDay });
+    }
+    return reads;
+  }
+
   async function sub2SplitWindow(upstream, metadata, token, claimed, window, { readOnly, upstreamStationId }) {
     const resolve = (meta) => claimed.map((item) => ({ item, resolved: segmentKeyTokens({ segmentKeys: [item.key], ruleToken: token, metadata: meta, upstreamStationId })[0] }));
     let wanted = resolve(metadata);
@@ -1930,8 +1951,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       metadata = await metadataFor(upstream, { force: true, timezone: window.timezone });
       wanted = resolve(metadata);
     }
-    const results = await Promise.all(wanted.map(({ item, resolved }) => (resolved.foreign ? foreignKeyWindow(item.key, window, { readOnly })
-      : upstreamWindowFor(upstream, metadata, resolved.token, window, { readOnly, claims: item.partial ? item.windows.map((piece) => [piece.startMs, piece.endMs]) : null }))));
+    // 多天窗口（近 7 天、本月、自定义）按天拆（审核 #150 第 1 轮中-3）：只有认领不满整天的那几天走逐条，连着的整天认领合成一段走按天统计，不认领的天不读
+    const results = await Promise.all(wanted.map(async ({ item, resolved }) => {
+      if (resolved.foreign) return foreignKeyWindow(item.key, window, { readOnly });
+      const reads = item.partial ? sub2DayReads(window, item.windows) : [{ startMs: window.startMs, endMs: window.endMs, claims: null }];
+      const parts = await Promise.all(reads.map((piece) => upstreamWindowFor(upstream, metadata, resolved.token, { ...window, startMs: piece.startMs, endMs: piece.endMs }, { readOnly, claims: piece.claims })));
+      return parts.length === 1 ? parts[0] : sumKeyStats(parts);
+    }));
     const summed = sumKeyStats(results);
     const foreign = wanted.some(({ resolved }) => resolved.foreign);
     const byStation = foreign ? mergeStationAmounts(wanted.map(({ resolved }, index) => [{ stationId: resolved.foreign ? wanted[index].item.key.upstreamStationId : upstreamStationId, amountUsd: results[index].amountUsd }])) : null;
@@ -2787,9 +2813,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // cause：读账单时上游报的原始码（限流、5xx 是 UPSTREAM_REQUEST_FAILED，连不上、超时是 NETWORK_UNREACHABLE），回看靠它分辨「这个上游这一刻整体读不到」
           segmentIssues.push(upstreamSide({ code: billHealth.code, scope: "segment", detail: billHealth.detail, observedAt: Date.now(),
             ...(upstreamResult.error?.code ? { cause: String(upstreamResult.error.code) } : {}),
-            ...(billHealth.stationName != null ? { stationName: billHealth.stationName } : {}), ...(billHealth.missingScope ? { missingScope: billHealth.missingScope } : {}) }));
-          // Key 账单报错：可能换了 Key 或身份变了，下一轮全部重读（P1b 的异常之一）
-          staleMetadata.add(rule.upstreamStationId);
+            ...(billHealth.stationName != null ? { stationName: billHealth.stationName } : {}), ...(billHealth.missingScope ? { missingScope: billHealth.missingScope } : {}),
+            ...(billHealth.sinceMs != null ? { sinceMs: billHealth.sinceMs } : {}) }));
+          // Key 账单报错：可能换了 Key 或身份变了，下一轮全部重读（P1b 的异常之一）；逐条用量一轮翻不完（限速）不是这类，下一轮接着翻就行
+          if (upstreamResult.error?.code !== "UPSTREAM_RECORDS_PENDING") staleMetadata.add(rule.upstreamStationId);
         }
         if (upstreamResult.emptySecondWindow || downstreamResult.emptySecondWindow) {
           const issue = { code: "PENDING", scope: "segment", detail: issueText("PENDING"), observedAt: Date.now() };

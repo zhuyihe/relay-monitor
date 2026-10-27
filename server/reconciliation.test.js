@@ -15,6 +15,7 @@ import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 import { createFakeSub2Api, recordsInDay, secondsInDay } from "./test-support/fake-sub2api.js";
+import { resetSub2RecordState } from "../lib/providers.js";
 import { createFakeNewApi } from "./test-support/fake-newapi.js";
 import { createChannelProfitModule } from "./channel-profit.js";
 import { resetOwnRequestBudget } from "../lib/own-request-budget.js";
@@ -10331,7 +10332,7 @@ test("K2b（驱动层 304）：渠道换成了不在已加上游里的 Key，读
 // K2c 重新分组的钱：[a, b) 这段里每把 Key 恰好算一次（总指挥 10-27）。按 Key 名字、按时间回用量（每秒 1 美元），重新分组以后把所有绑定（包括已经归档的旧绑定）
 // 当天的上游成本加起来，必须等于各把 Key 当天用量之和——算两遍会多，漏了会少。a = 10-11 01:00Z（上一次读成功），渠道在 t = 10-11 20:00Z 换了 Key，b = 10-12 01:00Z 才认出来
 const REGROUP_A = Date.parse("2026-10-11T01:00:00Z"), REGROUP_T = Date.parse("2026-10-11T20:00:00Z"), REGROUP_B = Date.parse("2026-10-12T01:00:00Z");
-async function regroupMoneyScenario(t, policy, { rules, channelsByRule, tokens, before, after, usage, sub2 = false, expectRegroup = true, lateAfter = null }) {
+async function regroupMoneyScenario(t, policy, { rules, channelsByRule, tokens, before, after, usage, sub2 = false, expectRegroup = true, lateAfter = null, recordStepMs = 60000, pagesPerMinute = null, stopAfterB = false }) {
   let now = REGROUP_A;
   t.mock.method(Date, "now", () => now);
   const keys = Object.fromEntries([9, 10, 11, 20, 21].map((id) => [id, "sk-" + String(id).padStart(2, "0") + "Kx9z".repeat(9)]));
@@ -10341,7 +10342,8 @@ async function regroupMoneyScenario(t, policy, { rules, channelsByRule, tokens, 
   const tokenIdOfName = Object.fromEntries([{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }, ...tokens].map((item) => [item.name, item.tokenId]));
   const fakeSub2 = sub2 ? createFakeSub2Api({ keys: [...new Map([{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }, ...tokens].map((item) => [item.tokenId, { id: item.tokenId, name: item.name }])).values()],
     dayUsageUsd: (keyId, day) => { const name = Object.keys(tokenIdOfName).find((key) => tokenIdOfName[key] === keyId); return usageWindows[name] ? secondsInDay([usageWindows[name][0] * 1000, usageWindows[name][1] * 1000], day) : 0; },
-    recordsOf: (keyId, day) => { const name = Object.keys(tokenIdOfName).find((key) => tokenIdOfName[key] === keyId); return usage[name] ? recordsInDay(usage[name], day) : []; } }) : null;
+    recordsOf: (keyId, day) => { const name = Object.keys(tokenIdOfName).find((key) => tokenIdOfName[key] === keyId); return usage[name] ? recordsInDay(usage[name], day, recordStepMs) : []; } }) : null;
+  if (sub2 && pagesPerMinute != null) resetSub2RecordState({ pagesPerMinute });
   const f = liveReconciliationFixture(t, { policy, segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: rules, channelsByRule, tokenKeyOf: (tokenId) => keys[tokenId], extraTokens: tokens, sub2api: fakeSub2,
     usageOf: (name, startSec, endSec) => { const w = usageWindows[name]; return w ? 100 * Math.max(0, Math.min(endSec + 1, w[1]) - Math.max(startSec, w[0])) : 0; },
     keyAgent: { secret: KEY_AGENT_SECRET, channels: () => Object.entries(channelToken).map(([id, tokenId]) => ({ id: Number(id), baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[tokenId]), f: "unused" }] })) } });
@@ -10364,7 +10366,8 @@ async function regroupMoneyScenario(t, policy, { rules, channelsByRule, tokens, 
   const archived = (await f.repository.listRules({ includeArchived: true })).filter((rule) => rule.archivedAt);
   if (expectRegroup) assert.ok(archived.length > 0, "旧绑定在 b 归档了（重新分组发生了）");
   if (lateAfter) Object.assign(channelToken, lateAfter); // b 这一轮之后读取服务认出的又变了（比如新渠道这时才用上那把旧 Key）
-  for (const iso of ["2026-10-13T01:00:00Z", "2026-10-14T01:00:00Z", "2026-10-15T01:00:00Z"]) { now = Date.parse(iso); inject(); await f.module.refreshDue(now); }
+  if (!stopAfterB) for (const iso of ["2026-10-13T01:00:00Z", "2026-10-14T01:00:00Z", "2026-10-15T01:00:00Z"]) { now = Date.parse(iso); inject(); await f.module.refreshDue(now); }
+  const advance = async (value) => { now = typeof value === "string" ? Date.parse(value) : value; inject(); await f.module.refreshDue(now); };
   const costOn = (billDate) => {
     const latest = new Map();
     for (const row of f.state.ledger.filter((item) => item.bill_date === billDate)) if (!latest.has(row.rule_id) || Number(row.revision) > Number(latest.get(row.rule_id).revision)) latest.set(row.rule_id, row);
@@ -10375,7 +10378,7 @@ async function regroupMoneyScenario(t, policy, { rules, channelsByRule, tokens, 
     const startSec = Date.parse(`${billDate}T00:00:00+08:00`) / 1000, endSec = startSec + 86400;
     return Object.values(usageWindows).reduce((total, [from, to]) => total + Math.max(0, Math.min(endSec, to) - Math.max(startSec, from)), 0);
   };
-  return { f, costOn, truthOn, archived };
+  return { f, costOn, truthOn, archived, fake: fakeSub2, advance };
 }
 // immediate（生产的绑定）三天都量；legacy-v3 的旧绑定归档以后系统不补结它 b 以前的日子（C3 只补 scoped 的，已有行为），只量新绑定（一律 immediate）的那天
 const checkMoney = (scenario, policy) => { for (const day of policy === "immediate" ? ["2026-10-11", "2026-10-12", "2026-10-13"] : ["2026-10-13"]) assert.equal(scenario.costOn(day), scenario.truthOn(day), `${day}：所有绑定的上游成本加起来 = 各把 Key 当天用量之和（没有一把 Key 算两遍、也没漏）`); };
@@ -10459,6 +10462,18 @@ test("K2b + Sub2API：两条绑定互换 Key（挪过）——按 b 换段、换
   const own = (ruleId, day) => s.f.state.ledger.filter((row) => row.rule_id === ruleId && row.bill_date === day).reduce((total, row) => total + Number(row.cost_usd), 0);
   assert.equal(own("rr_live", "2026-10-12") + own("rr_b", "2026-10-12"), 2 * 86400);
   assert.equal(own("rr_live", "2026-10-12"), 86400, "9 点前 K9（32400）+ 9 点后 K10（54000）");
+});
+
+test("K2b + Sub2API 互换：多天窗口（近 7 天这类）按天拆——只有换手那一天翻逐条，别的日子照旧读按天统计；结果和每天各读一次加起来一样（审核 #150 中-3）", async (t) => {
+  const s = await regroupMoneyScenario(t, "immediate", { sub2: true, expectRegroup: false, rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }],
+    before: { 1: 9, 2: 10 }, after: { 1: 10, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null] } });
+  s.fake.calls.length = 0;
+  const query = () => s.f.module.queryRules({ preset: "custom", startMs: Date.parse("2026-10-10T16:00:00Z"), endMs: Date.parse("2026-10-14T16:00:00Z"), timezone: "Asia/Shanghai" }, { force: true, mode: "evaluate" }).then(({ results }) => results);
+  const results = await query();
+  const days = [...new Set(s.fake.calls.filter((call) => call.path === "/api/v1/usage").map((call) => `${call.query.start_date}..${call.query.end_date}`))];
+  assert.deepEqual(days, ["2026-10-12..2026-10-12"], "逐条只翻换手那一天，不翻整段 4 天");
+  const total = results.reduce((sum, row) => sum + (row.upstream?.amountUsd ?? 0), 0);
+  assert.equal(total, [0, 1, 2, 3].reduce((sum, day) => sum + s.truthOn(`2026-10-${String(11 + day).padStart(2, "0")}`), 0), "四天（10-11 到 10-14）所有行的上游成本之和 = 各 Key 当天用量之和");
 });
 
 // 旧 Key 换掉以后被别的渠道（没在算）接着用：这条绑定这一天只认领自己那几段的时间，别的渠道用旧 Key 的部分不算进来，换 Key 那天照常结账
@@ -11092,4 +11107,46 @@ test("换 Key：A 当天先停了、同一把 Key 挪给在算的 B——B 的�
   const transitional = segments.find((segment) => segment.keys.length === 2);
   assert.ok(transitional, "过渡段里放着 K10 和 K9");
   assert.equal(transitional.effectiveFrom, stoppedAt, "过渡段从 A 停的那一刻起，不从上一次读到的 02:00 起：[02:00, 03:00) 的 K9 已经算给了 A");
+});
+
+// 量大的 Key 换手那天：每个账号每分钟最多翻 N 页，一轮翻不完、下一轮接着翻（不从头），翻完才固定；结束满 3 天还没翻完就转成需处理。
+// 这里每 3 秒一条（一天 28800 条）、每分钟限 5 页，缩小了数据量（生产是每秒一条、每分钟 20 页：lib/providers.test.js 里整页数按 44 页、[20, 20, 4] 三轮量过）
+test("K2b + Sub2API 互换、记录很多的 Key：每轮最多翻限定的页数，几轮接着翻完，换手那天固定下来，每天所有行成本之和 = 各 Key 当天用量之和（审核 #150 中-2）", async (t) => {
+  const s = await regroupMoneyScenario(t, "immediate", { sub2: true, expectRegroup: false, rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }],
+    before: { 1: 9, 2: 10 }, after: { 1: 10, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null] }, recordStepMs: 3000, pagesPerMinute: 5 });
+  const pagesNow = () => s.fake.calls.filter((call) => call.path === "/api/v1/usage").length;
+  const state = async (ruleId) => (await s.f.repository.listSettlementStates([ruleId], { billDates: ["2026-10-12"] }))[0] ?? null;
+  assert.equal(s.f.state.ledger.filter((row) => row.bill_date === "2026-10-12").length, 0, "换手那天翻不完：还没固定");
+  assert.equal((await state("rr_live"))?.retryReason, "UPSTREAM_RECORDS_PENDING", "读取类：实时·还在读取，系统会接着读");
+  // 前面三轮（10-13、10-14、10-15 各隔一天）超过了翻页进度保留的 6 小时，每轮都从头翻；后面每小时一轮，接着翻
+  const baseline = pagesNow();
+  const perRound = [];
+  for (let hour = 2; hour <= 14 && s.f.state.ledger.filter((row) => row.bill_date === "2026-10-12").length < 2; hour += 1) {
+    const before = pagesNow();
+    await s.advance(`2026-10-15T${String(hour).padStart(2, "0")}:00:00Z`);
+    perRound.push(pagesNow() - before);
+  }
+  assert.ok(perRound.every((count) => count <= 5), `每轮最多翻 5 页：${perRound}`);
+  assert.equal(s.f.state.ledger.filter((row) => row.bill_date === "2026-10-12").length, 2, `两条绑定的换手那天都固定了（每轮翻的页数 ${perRound}）`);
+  for (const day of ["2026-10-11", "2026-10-12", "2026-10-13"]) assert.equal(s.costOn(day), s.truthOn(day), `${day}：所有行的上游成本之和 = 各 Key 当天用量之和`);
+  // 每把 Key 翻 b（09:00）这一侧：9 小时 = 9 × 1200 = 10800 条 → 11 页；两把 Key 共 22 页，每页只翻一次（没有因为两条绑定各取一次翻成两遍）
+  assert.ok(pagesNow() - baseline <= 2 * 11, `接着翻（每小时一轮）一共翻的页数：${pagesNow() - baseline}`);
+});
+
+test("K2b + Sub2API 记录很多、翻得很慢（每分钟 1 页）：换手那天结束满 3 天还没翻完——转成需处理 UPSTREAM_RECORDS_TOO_MANY，不再自动翻、不固定", async (t) => {
+  const s = await regroupMoneyScenario(t, "immediate", { sub2: true, expectRegroup: false, rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }],
+    before: { 1: 9, 2: 10 }, after: { 1: 10, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null] }, recordStepMs: 3000, pagesPerMinute: 1 });
+  const pagesNow = () => s.fake.calls.filter((call) => call.path === "/api/v1/usage").length;
+  const state = async (ruleId) => (await s.f.repository.listSettlementStates([ruleId], { billDates: ["2026-10-12"] }))[0] ?? null;
+  assert.equal((await state("rr_live"))?.retryReason, "UPSTREAM_RECORDS_PENDING", "3 天以内：还在读取");
+  await s.advance("2026-10-15T16:30:00Z"); // 10-12 结束（10-12T16:00Z）满 3 天
+  // 回看每轮最多补 ⌈绑定数 ÷ 2⌉ 个「绑定×天」（两条绑定每轮只补一条）：这一轮补的是 rr_live，rr_b 还是读取类，下一轮到它
+  const row = await state("rr_live");
+  assert.deepEqual([row?.manualReason, row?.retryReason ?? null], ["UPSTREAM_RECORDS_TOO_MANY", null], "满 3 天转成需处理");
+  assert.equal(s.f.state.ledger.filter((item) => item.bill_date === "2026-10-12").length, 0, "没固定");
+  await s.advance("2026-10-15T17:00:00Z"); // 轮到 rr_b：它也满 3 天了
+  assert.equal((await state("rr_b"))?.manualReason, "UPSTREAM_RECORDS_TOO_MANY", "rr_b 也转成需处理");
+  const before = pagesNow();
+  await s.advance("2026-10-15T20:00:00Z");
+  assert.equal(pagesNow(), before, "两条都需处理了：不再自动翻");
 });
