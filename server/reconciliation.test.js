@@ -8203,6 +8203,27 @@ test("固定成本写昨天（G 第五轮中-D）：绑定的账一直卡着没�
   assert.ok(stuck.length >= 1 && stuck.every(([, basis, cny]) => basis === "fixed" && cny === 10), `账卡着的日子按现在的设置：${JSON.stringify(stuck)}`);
 });
 
+test("固定成本补数（G 第五轮）：同一个上游下绑定 A 停了、绑定 B 后来才开：A 停到 B 开之间没有账本行的日子沿用 usage 记 0，B 开了以后账卡着的日子按现在的设置记 fixed", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  await f.module.refreshDue(now); // 账本 10-07、10-08 按用量
+  const [a] = f.rows.filter((row) => row.id === "rr_live");
+  // A 在 10-09 0 点（上海）停了；B 从 10-12 才开
+  a.enabled = 0; a.archived_at_ms = Date.parse("2026-10-08T16:00:00Z"); a.archived_at = new Date(a.archived_at_ms);
+  f.rows.push({ ...a, id: "rr_b", enabled: 1, archived_at: null, archived_at_ms: null, active_token_key: null, active_channel_key: null, created_at: new Date("2026-10-11T16:00:00Z"), billing_effective_from_ms: null });
+  upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5;
+  const realFacts = f.repository.listLedgerDayFacts.bind(f.repository);
+  f.repository.listLedgerDayFacts = async (...args) => (await realFacts(...args)).filter((fact) => fact.billDate <= "2026-10-08");
+  f.repository.tables.fixedCostDays.length = 0;
+  now = Date.parse("2026-10-14T03:00:00Z");
+  await f.module.refreshDue(now);
+  const day = (d) => f.repository.tables.fixedCostDays.filter((row) => row.station_id === "upstream" && row.bill_date === d).map((row) => [row.basis, Number(row.cost_cny)])[0];
+  assert.deepEqual([day("2026-10-09"), day("2026-10-10"), day("2026-10-11")], [["usage", 0], ["usage", 0], ["usage", 0]], "A 停了、B 还没开的日子沿用 usage");
+  assert.deepEqual(day("2026-10-12"), ["fixed", 10], "B 开了以后账卡着的日子按现在的设置");
+});
+
 test("固定成本写昨天（G 第四轮）：没有在跑的绑定、昨天没有账本行时按上游现在的设置，不沿用前面的计法", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now });

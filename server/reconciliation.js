@@ -2890,6 +2890,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (last) { const [row] = await repository.listFixedCostDays([station.id], last, last); carry = row && ["fixed", "usage"].includes(row.basis) ? row.basis : null; }
       const nowBasis = dayBasisOfStation(station), rate = rateSnapshotOf(station), purchases = purchasesOf(station), rows = [];
       const hasLiveRule = allRules.some((rule) => String(rule.upstreamStationId) === String(station.id) && rule.enabled && !rule.archivedAt);
+      // 那一天这个上游有没有在跑的绑定：那一天落在某条绑定的 [核算起点, 归档时刻) 里（没归档的要还开着）
+      const mineRules = allRules.filter((rule) => String(rule.upstreamStationId) === String(station.id));
+      const liveOn = (day) => {
+        const dayStart = dayStartInTz(day, tz), dayEnd = shiftedDayStartInTz(dayStart, 1, tz);
+        return mineRules.some((rule) => {
+          const start = reconciliationAccountingStart(rule) ?? Date.parse(rule.createdAt);
+          const end = rule.archivedAtMs ?? (rule.enabled ? Infinity : null);
+          return Number.isFinite(start) && start < dayEnd && end != null && end > dayStart;
+        });
+      };
       for (let day = from; day <= lastDay; day = shiftDayLabel(day, 1)) {
         const fact = dayFact.get(day);
         // 上游现在不算进利润（关了「算进利润」、没在监控）：每一天都记 excluded、0 元
@@ -2899,7 +2909,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 昨天：有账本行按账本；没有账本行但还有在跑的绑定（账多半还没结）这一轮先不写，往后的日子也先不写；没有绑定的按现在的设置
         if (day === lastDay && !fact?.costBasis && hasLiveRule) { deferred = true; break; }
         // 昨天以前、又没有账本行的日子：还有在跑的绑定（账只是卡着没结）按现在的设置；没有绑定了才沿用此前最近一条账本行的计法；昨天（没有绑定的）按现在的设置
-        const basis = fact?.costBasis ? carry : (day === lastDay || hasLiveRule ? nowBasis : (carry ?? nowBasis));
+        const basis = fact?.costBasis ? carry : (day === lastDay || liveOn(day) ? nowBasis : (carry ?? nowBasis));
         if (basis !== "fixed") { rows.push({ stationId: station.id, billDate: day, basis, costCny: 0, costRate: null, note: null }); continue; }
         const startMs = dayStartInTz(day, tz);
         const amortized = amortizeFixedCost(purchases, { startMs, endMs: shiftedDayStartInTz(startMs, 1, tz), tz });
