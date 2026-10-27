@@ -7325,6 +7325,56 @@ test("K2b：新 Key 在 [a, b] 里还没有用量：定不出，不记 display_f
   assert.equal(fx.logCalls().length, 1);
 });
 
+// 生产的绑定都是 immediate（scoped）：换 Key 当天上游成本也得按段取（旧 Key 换之前的用量、过渡段里两把都取），
+// 不能整天只按最新那把取。夹具的 stat 每次回 1 美元，数请求就是数金额
+test("K2b：immediate（scoped）规则换 Key——换 Key 当天上游成本按段取各自的 Key（过渡段两把都取），没换 Key 的窗口还是整窗一次", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let currentKey = keyNine;
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(currentKey), f: "unused" }] }] },
+  });
+  const effective = Date.parse("2026-10-01T00:00:00Z");
+  Object.assign(f.rule, { billing_policy: "immediate", scope_version: 1, billing_effective_from_ms: effective, created_at: new Date(effective), cost_coverage: "complete", source_binding: { 1: "r1" } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const dayOf = async (startIso, endIso) => {
+    const before = f.state.requests.length;
+    const result = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai",
+      startMs: Date.parse(startIso), endMs: Date.parse(endIso) }, { force: true })).results[0];
+    const stats = f.state.requests.slice(before).filter((request) => request.host === "upstream.test" && request.path === "/api/log/self/stat")
+      .map((request) => { const q = new URLSearchParams(request.query); return [q.get("token_name"), Number(q.get("start_timestamp")), Number(q.get("end_timestamp"))]; })
+      .sort((x, y) => String(x[0]).localeCompare(String(y[0])) || x[1] - y[1]);
+    return { result, stats };
+  };
+  const sec = (iso) => Date.parse(iso) / 1000;
+
+  await f.module.refreshDue(now); // 第一轮：锚定
+  now = Date.parse("2026-10-11T16:00:00Z"); // 还没换 Key：10-11 整天（上海）只有 token 9，整窗一次
+  const beforeChange = await dayOf("2026-10-10T16:00:00Z", "2026-10-11T16:00:00Z");
+  assert.deepEqual(beforeChange.stats, [["stable", sec("2026-10-10T16:00:00Z"), sec("2026-10-11T16:00:00Z") - 1]], "没换 Key：整窗一次，和以前一样");
+
+  currentKey = keyTen;
+  now = Date.parse("2026-10-12T01:00:00Z");
+  await f.module.refreshDue(now); // 认出换了，落库：段 [0, a) token 9、[a, b) 两把、[b, ) token 10；a = 上一次读成功的时刻，b = 现在
+  const a = sec("2026-10-11T01:00:00Z"), b = sec("2026-10-12T01:00:00Z");
+  assert.deepEqual((await f.repository.listSegments("rr_live")).map((s) => s.keys.map((k) => k.tokenId)), [[9], [9, 10], [10]]);
+
+  now = Date.parse("2026-10-13T01:00:00Z");
+  // 10-12（b 所在的那天）：[0 点, b) 过渡段两把都取，[b, 24 点) 只取新的
+  const changeDay = await dayOf("2026-10-11T16:00:00Z", "2026-10-12T16:00:00Z");
+  assert.deepEqual(changeDay.stats, [["oai-2", sec("2026-10-11T16:00:00Z"), b - 1], ["oai-2", b, sec("2026-10-12T16:00:00Z") - 1], ["stable", sec("2026-10-11T16:00:00Z"), b - 1]],
+    "换 Key 当天：过渡段里旧 Key 那份也取了（以前整天只取 oai-2 一条）");
+  assert.equal(changeDay.result.upstream.amountUsd, 3, "三次各 1 美元");
+  // 换了以后的整天：只有新 Key，整窗一次
+  now = Date.parse("2026-10-14T01:00:00Z");
+  const later = await dayOf("2026-10-12T16:00:00Z", "2026-10-13T16:00:00Z");
+  assert.deepEqual(later.stats, [["oai-2", sec("2026-10-12T16:00:00Z"), sec("2026-10-13T16:00:00Z") - 1]]);
+});
+
 test("K2b：读完、落库前重启——这一轮的成功时刻要等落库以后才写，重启后 a 还是上一次读成功的时刻，[t, b) 不漏", async (t) => {
   let now = Date.parse("2026-10-11T01:00:00Z");
   t.mock.method(Date, "now", () => now);
