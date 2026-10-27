@@ -58,6 +58,32 @@ test("identifyChannels（审核 #131 H2）：打码比对不会被放大到全�
     "只认出候选（地址对上的）那一把；地址对不上的 up2 即使打码一样也不会被当成候选，不然会把钱算到错的账号上");
 });
 
+// 审核 #131 第 2 轮：别多读上游。非候选上游的 Key 目录只有在第一步（只读候选）之后还有渠道认不出时才读，
+// 而且读过一次发现目录里没有完整 Key（新版 New API 只给打码）的，1 小时内不再为指纹去读
+test("identifyChannels（别多读上游）：候选上游就认出来了——非候选的上游一个请求都不发", async (t) => {
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "https://up.example.com", keys: [{ i: 0, m: mask, f: fp }] }] }, { headers: { etag: '"v1"' } }));
+  const rt = { store: { list: () => [ownStation, { id: "up1", type: "newapi", baseUrl: "https://up.example.com" }, { id: "up2", type: "newapi", baseUrl: "https://other.example.com" }, { id: "up3", type: "newapi", baseUrl: "https://third.example.com" }] } };
+  const read = [];
+  const queryMetadata = async (station) => { read.push(station.id); return { tokens: [{ id: 9, name: "oai", maskedKey: station.id === "up1" ? mask : "Zzzz…0000" }] }; };
+  const result = await identifyChannels(rt, ownStation, { queryMetadata });
+  assert.equal(result.channels[0].slots[0].state, "identified");
+  assert.deepEqual(read, ["up1"], "只读了候选上游，非候选的 up2、up3 没读");
+});
+
+test("identifyChannels（别多读上游）：候选里认不出才为指纹读非候选的上游；读过发现目录只给打码的，1 小时内下一轮不再读它", async (t) => {
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "http://10.0.0.5:8080", keys: [{ i: 0, m: mask, f: fp }] }] }, { headers: { etag: '"v1"' } }));
+  const rt = { store: { list: () => [ownStation, { id: "old", type: "newapi", baseUrl: "https://old.example.com" }, { id: "new", type: "newapi", baseUrl: "https://new.example.com" }] } };
+  const read = [];
+  const queryMetadata = async (station) => { read.push(station.id); return { tokens: [{ id: 9, name: "oai", maskedKey: station.id === "old" ? fullKey : "Zzzz…0000" }] }; }; // old：老版本，目录给完整 Key；new：新版本，只给打码
+  const first = await identifyChannels(rt, ownStation, { queryMetadata });
+  assert.deepEqual(read.sort(), ["new", "old"], "第一轮：没有候选，认不出，才把非候选的都读一遍");
+  assert.equal(first.channels[0].slots[0].state, "identified");
+  assert.equal(first.channels[0].slots[0].matches[0].stationId, "old");
+  read.length = 0;
+  await identifyChannels(rt, ownStation, { queryMetadata });
+  assert.deepEqual(read, ["old"], "第二轮：new 的目录上次读过、没有完整 Key，不再为指纹读它；old 有完整 Key 还要读");
+});
+
 test("identifyChannels：这个站点没配读取服务直接说没配，不发请求", async (t) => {
   let called = false;
   t.mock.method(globalThis, "fetch", async () => { called = true; return { status: 200, headers: { get: () => null }, json: async () => ({}) }; });

@@ -1,10 +1,13 @@
 // 认出快照里每个渠道现在用的是哪把 Key（K2a）。只认、只显示：不开段、不改账，K2b 才按认出的结果写分段。
 import { fingerprintKey } from "../lib/key-fingerprint.js";
 import { fetchKeyAgentSnapshot } from "../lib/key-agent-client.js";
-import { identifyChannel } from "../lib/key-agent-match.js";
+import { identifyChannel, identifyKeySlot, classifyUpstreamKey } from "../lib/key-agent-match.js";
 import { queryNewApiReconciliationMetadata, queryRevealedTokenKeys } from "../lib/providers.js";
 import { keyAgentConfigOf } from "./key-agent.js";
 import { matchCostStations } from "./own-helpers.js";
+
+// 读过一次发现目录里没有完整 Key 的上游，这么久之内不再为指纹去读它（新版 New API 的目录只给打码）
+const CATALOG_KIND_TTL_MS = 60 * 60 * 1000;
 
 // 打码对上不止一把候选时，取这几把的完整 Key 精确再分（k-plan §2.2）：有 api_key:reveal 权限就拿到 { tokenId: 完整Key }；
 // 没权限按码返回，不抛（调用方按上游汇总成一条需处理，不是逐渠道）；被限流、网络错等别的失败也按码返回，这一轮当认不出，下一轮再试，不重试、不特殊处理。
@@ -37,20 +40,45 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
     }
     return tokenListCache.get(station.id);
   };
-  // 指纹在全部已加的上游里找（审核 #131 H1，k-plan §2.2）：每个上游的 Key 目录只读一次（tokensOf 按上游缓存），
-  // 不会因为按渠道重复查而多读；候选（地址对上的）是这份里的子集，打码比对只在候选里找，不放大（H2）
-  const allTokenLists = await Promise.all(newApiUpstreams.map(async (station) => ({ stationId: station.id, tokens: await tokensOf(station) })));
+  // 指纹在全部已加的 New API 上游里找（审核 #131 H1，k-plan §2.2），打码只在候选（地址对上的）里找（H2）。
+  // 但读一个上游的 Key 目录要翻页，不便宜（审核 #131 第 2 轮：别多读上游），所以分两步：
+  //   1. 先只读候选上游，和只认候选时一样（每个候选只读一次，这一轮里共用）；认得出的渠道到这里就结束，零额外读取。
+  //   2. 只有第一步之后还有渠道认不出（not_found：渠道填的是代理/内网地址，或者换成了哪都没有的 Key），才为指纹去读
+  //      非候选的 New API 上游目录。而且新版 New API（≥ v0.11.4）的目录只给打码、比不了指纹：读过一次发现没有完整 Key 的上游，
+  //      记在 rt._keyAgentCatalogKinds 里 1 小时内不再为指纹读它。
+  //   这里读目录是 queryNewApiReconciliationMetadata 自己读，没有走对账模块里 P1b 的 5 分钟目录缓存（那份缓存在对账模块内部，
+  //   这里拿不到）；识别结果整体有 4 分钟缓存（identifyChannelsCached），304 时连这些都不读。
+  const catalogKinds = (rt._keyAgentCatalogKinds ||= new Map()); // upstreamId -> { hasFullKeys, at }
+  const loadedLists = new Map(); // upstreamId -> { stationId, tokens }：这一轮读过的目录
+  const loadList = async (station) => {
+    if (!loadedLists.has(station.id)) {
+      const tokens = await tokensOf(station);
+      if (tokens) catalogKinds.set(station.id, { hasFullKeys: tokens.some((token) => classifyUpstreamKey(token.maskedKey)?.kind === "full"), at: Date.now() });
+      loadedLists.set(station.id, { stationId: station.id, tokens });
+    }
+    return loadedLists.get(station.id);
+  };
 
-  const channels = [], rawFingerprintOf = new Map(); // `${channelId}:${index}` -> 读取服务给的指纹（第二轮分打码撞了要用）
+  const channels = [], pendingChannels = [], rawFingerprintOf = new Map(); // `${channelId}:${index}` -> 读取服务给的指纹（第二轮分打码撞了要用）
   for (const channel of snapshot.channels) {
     if (channelIds && !channelIds.includes(Number(channel.id))) continue;
     if (channel.keyless) { channels.push({ channelId: Number(channel.id), keyless: true }); continue; }
     const candidates = matchCostStations(upstreams, channel.baseUrl).filter((station) => station.type === "newapi");
-    const candidateIds = new Set(candidates.map((station) => station.id));
-    const candidateTokenLists = allTokenLists.filter((item) => candidateIds.has(item.stationId));
-    const identified = identifyChannel(channel, { allTokenLists, candidateTokenLists }, config.fingerprintKey);
+    const candidateTokenLists = await Promise.all(candidates.map(loadList));
+    const identified = identifyChannel(channel, { allTokenLists: candidateTokenLists, candidateTokenLists }, config.fingerprintKey);
     for (const slot of identified.slots) rawFingerprintOf.set(`${identified.channelId}:${slot.index}`, channel.keys.find((key) => Number(key.i) === slot.index)?.f);
     channels.push(identified);
+    if (identified.slots.some((slot) => slot.state === "not_found")) pendingChannels.push({ channel, identified, candidateTokenLists });
+  }
+  if (pendingChannels.length) {
+    const kindFresh = (station) => { const kind = catalogKinds.get(station.id); return kind && Date.now() - kind.at < CATALOG_KIND_TTL_MS ? kind : null; };
+    const others = newApiUpstreams.filter((station) => !loadedLists.has(station.id) && kindFresh(station)?.hasFullKeys !== false);
+    await Promise.all(others.map(loadList));
+    const allTokenLists = [...loadedLists.values()];
+    for (const { channel, identified, candidateTokenLists } of pendingChannels) {
+      identified.slots = identified.slots.map((slot) => slot.state !== "not_found" ? slot
+        : { index: slot.index, ...identifyKeySlot(channel.keys.find((key) => Number(key.i) === slot.index), { allTokenLists, candidateTokenLists }, config.fingerprintKey) });
+    }
   }
 
   // 打码撞了：按上游批量 reveal 一次（同一个上游、这一轮内只问一次，几个渠道的候选合并着问）
