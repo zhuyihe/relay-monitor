@@ -10329,7 +10329,7 @@ test("K2b（驱动层 304）：渠道换成了不在已加上游里的 Key，读
   assert.equal(rule.tokenId, 77, "换段");
 });
 
-// K2c 重新分组的钱：[a, b) 这段里每把 Key 恰好算一次（总指挥 10-27）。按 Key 名字、按时间回用量（每秒 1 美元），重新分组以后把所有绑定（包括已经归档的旧绑定）
+// K2c 重新分组的钱：[a, b) 这段里每把 Key 恰好算一次（10-27 定）。按 Key 名字、按时间回用量（每秒 1 美元），重新分组以后把所有绑定（包括已经归档的旧绑定）
 // 当天的上游成本加起来，必须等于各把 Key 当天用量之和——算两遍会多，漏了会少。a = 10-11 01:00Z（上一次读成功），渠道在 t = 10-11 20:00Z 换了 Key，b = 10-12 01:00Z 才认出来
 const REGROUP_A = Date.parse("2026-10-11T01:00:00Z"), REGROUP_T = Date.parse("2026-10-11T20:00:00Z"), REGROUP_B = Date.parse("2026-10-12T01:00:00Z");
 async function regroupMoneyScenario(t, policy, { rules, channelsByRule, tokens, before, after, usage, sub2 = false, expectRegroup = true, lateAfter = null, recordStepMs = 60000, pagesPerMinute = null, stopAfterB = false }) {
@@ -10793,18 +10793,20 @@ test("K2b：没锚定过的绑定（还没开始算）识别到不一样的 Key 
 // K2c-3b 换到另一个上游的 Key：渠道 1 原来用旧上游的 K9，在 t 换成新上游的 Key（a < t < b）。旧绑定的 [a,b) 过渡段放旧 Key + 新上游的新 Key（跨上游读），
 // b 归档；新上游答了「只给我的渠道用」，重新分组里直接在新上游下建的那条从 b 起算，不和过渡段重叠。每天所有行（含已归档的）的上游成本之和 = 各 Key 当天用量之和。
 // 旧上游是 Sub2API（只能整天读，归档那天整天不算）：新绑定从 b 那天 0 点整天算，第一段带着旧 Key（整天读）
-async function crossUpstreamScenario(t, { from = "newapi", to, rates = null, targetAccountUse = "only_mine" }) {
+async function crossUpstreamScenario(t, { from = "newapi", to, rates = null, targetAccountUse = "only_mine", changeAt = REGROUP_T, othersUse = null }) {
   let now = REGROUP_A;
   t.mock.method(Date, "now", () => now);
   const oldSub2 = from === "sub2api", sub2 = to === "sub2api", injectIdentity = oldSub2 || sub2;
   const keys = { 9: "sk-09" + "Kx9z".repeat(9), 30: "sk-30" + "Kx9z".repeat(9) };
-  const windows = { stable: [0, REGROUP_T], newkey: [REGROUP_T, null] }; // 每秒 1 美元
+  const windows = { stable: [0, changeAt], newkey: [changeAt, null] }; // 每秒 1 美元
   const secs = (name, startSec, endSec) => { const [from, to] = [windows[name][0] / 1000, (windows[name][1] ?? Infinity) / 1000]; return Math.max(0, Math.min(endSec + 1, to) - Math.max(startSec, from)); };
   const newName = "newkey", newId = sub2 ? 40 : 30;
   const second = sub2
-    ? createFakeSub2Api({ keys: [{ id: 40, name: newName }], dayUsageUsd: (_id, day) => secondsInDay(windows[newName], day) })
+    ? createFakeSub2Api({ keys: [{ id: 40, name: newName }], dayUsageUsd: (_id, day) => secondsInDay(windows[newName], day) + (othersUse ? secondsInDay(othersUse, day) : 0),
+      // othersUse：不在这个渠道上的别的消费者（别处也在用这把新 Key）用的，每秒 1 美元；按时间认领要靠逐条记录
+      recordsOf: (_id, day) => [...recordsInDay(windows[newName], day, 600000), ...(othersUse ? recordsInDay(othersUse, day, 600000) : [])] })
     : createFakeNewApi({ keys: [{ id: 30, name: newName, masked: maskKey(keys[30]) }], usageQuota: (name, startSec, endSec) => 100 * secs(name, startSec, endSec) });
-  const first = oldSub2 ? createFakeSub2Api({ keys: [{ id: 9, name: "stable" }], dayUsageUsd: (_id, day) => secondsInDay(windows.stable, day) }) : null;
+  const first = oldSub2 ? createFakeSub2Api({ keys: [{ id: 9, name: "stable" }], dayUsageUsd: (_id, day) => secondsInDay(windows.stable, day), recordsOf: (_id, day) => recordsInDay(windows.stable, day, 600000) }) : null;
   const channel = { baseUrl: "https://upstream.test", token: 9 };
   const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], channelsByRule: { rr_live: [1] }, extraTokens: [{ tokenId: 9, name: "stable" }],
     ...(oldSub2 ? { sub2api: first, tokenKeyOf: () => "sk-x" } : { tokenKeyOf: (id) => keys[id], usageOf: (name, startSec, endSec) => (name === "stable" ? 100 * secs("stable", startSec, endSec) : 0) }),
@@ -10844,10 +10846,11 @@ async function crossUpstreamScenario(t, { from = "newapi", to, rates = null, tar
 
 for (const [from, to] of [["newapi", "newapi"], ["newapi", "sub2api"], ["sub2api", "newapi"], ["sub2api", "sub2api"]]) {
   const label = (type) => (type === "newapi" ? "New API" : "Sub2API");
-  test(`K2c 换到另一个上游（${label(from)} → ${label(to)}）：旧绑定在 b 归档，新上游下的新绑定接着算；每天所有行的上游成本之和 = 各 Key 当天用量之和`, async (t) => {
+  test(`K2c 换到另一个上游（${label(from)} → ${label(to)}）：旧绑定在 b 归档（New API → Sub2API 在 b 那天 0 点归档），新上游下的新绑定接着算；每天所有行的上游成本之和 = 各 Key 当天用量之和`, async (t) => {
     const s = await crossUpstreamScenario(t, { from, to });
     const old = await s.f.repository.getRule("rr_live", { includeArchived: true });
-    assert.deepEqual([old.enabled, old.archivedAtMs], [false, REGROUP_B], "旧绑定在 b 归档");
+    const newApiToSub2 = from === "newapi" && to === "sub2api";
+    assert.deepEqual([old.enabled, old.archivedAtMs], [false, newApiToSub2 ? Date.parse("2026-10-11T16:00:00Z") : REGROUP_B], newApiToSub2 ? "New API → Sub2API：b 那天整天交给新绑定，旧绑定在 b 那天 0 点归档（那天没有「有收入没成本」的尾巴）" : "旧绑定在 b 归档");
     assert.equal(s.created.length, 1, "新上游下建了一条");
     const started = await s.f.repository.getRule(s.created[0]);
     assert.deepEqual([started.upstreamStationId, started.channels.map((channel) => channel.channelId)], ["upstream2", [1]]);
@@ -10862,9 +10865,9 @@ for (const [from, to] of [["newapi", "newapi"], ["newapi", "sub2api"], ["sub2api
       assert.equal(windowSegment.effectiveTo, REGROUP_B);
     }
     const newSegments = await s.f.repository.listSegments(started.id);
-    if (from === "sub2api") {
-      assert.equal(started.accountingFloorMs, null, "旧绑定是 Sub2API：归档那天整天不算，新绑定从 b 那天 0 点整天算，不设下限");
-      assert.deepEqual([newSegments[0].effectiveTo, newSegments[0].keys.map((key) => `${key.upstreamStationId}:${key.tokenId}`).sort()], [Date.parse("2026-10-12T16:00:00Z"), ["upstream:9", `upstream2:${to === "sub2api" ? 40 : 30}`].sort()], "第一段只到下一个业务日 0 点，带着旧 Key（整天读）");
+    if (from === "sub2api" || newApiToSub2) {
+      assert.equal(started.accountingFloorMs, null, from === "sub2api" ? "旧绑定是 Sub2API：归档那天整天不算，新绑定从 b 那天 0 点整天算，不设下限" : "New API → Sub2API：新绑定从 b 那天 0 点整天算（收入和成本），不设下限");
+      assert.deepEqual([newSegments[0].effectiveTo, newSegments[0].keys.map((key) => `${key.upstreamStationId}:${key.tokenId}`).sort()], [REGROUP_B, ["upstream:9", `upstream2:${to === "sub2api" ? 40 : 30}`].sort()], "第一段关在 b（同一天再换 Key、再重新分组都接得上），带着旧 Key（整天读）");
     } else {
       assert.equal(started.accountingFloorMs, REGROUP_B, "旧绑定是 New API：算到 b 为止，新绑定从 b 起算");
     }
@@ -10916,6 +10919,32 @@ for (const [from, to] of [["newapi", "newapi"], ["sub2api", "newapi"], ["sub2api
     for (const day of ["2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14"]) assert.equal(s.costOn(day), s.truthOn(day), day);
   });
 }
+
+// 审核 #146 第 1 轮 M1：New API 换到 Sub2API，换 Key 发生在 b 那天 0 点以前（23:50）、b 在那天 9 点才读到——旧绑定在 b 那天 0 点归档，
+// 那天整天（收入和成本）由新绑定取，不留「有收入没成本」的 [0 点, b) 尾巴，那天固定得了
+test("K2c 换到另一个上游（New API → Sub2API）：换 Key 在 b 那天 0 点以前——旧绑定在 b 那天 0 点归档、没有尾巴；b 那天由新绑定整天算（收入和成本），每天对得上、b 那天固定得了", async (t) => {
+  const bDayStart = Date.parse("2026-10-11T16:00:00Z");
+  const s = await crossUpstreamScenario(t, { from: "newapi", to: "sub2api", changeAt: Date.parse("2026-10-11T15:50:00Z") });
+  const old = await s.f.repository.getRule("rr_live", { includeArchived: true });
+  assert.deepEqual([old.enabled, old.archivedAtMs], [false, bDayStart], "旧绑定在 b 那天 0 点归档");
+  const oldSegments = await s.f.repository.listSegments("rr_live");
+  assert.equal(oldSegments.some((segment) => segment.effectiveTo > bDayStart), false, "没有 [0 点, b) 只放旧 Key 的尾巴");
+  const started = await s.f.repository.getRule(s.created[0]);
+  assert.equal(started.accountingFloorMs, null, "新绑定从 b 那天 0 点整天算");
+  const newSegments = await s.f.repository.listSegments(started.id);
+  assert.deepEqual([newSegments[0].effectiveTo, newSegments[0].keys.map((key) => `${key.upstreamStationId}:${key.tokenId}`)], [REGROUP_B, ["upstream:9", "upstream2:40"]], "第一段带着旧 Key（和新绑定自己的 Key，整天读），到 b");
+  for (const day of ["2026-10-11", "2026-10-12", "2026-10-13"]) assert.equal(s.costOn(day), s.truthOn(day), day);
+  const rowsOn12 = s.f.state.ledger.filter((row) => row.bill_date === "2026-10-12");
+  assert.deepEqual([...new Set(rowsOn12.map((row) => row.rule_id))], [started.id], "b 那天只有新绑定一行，旧绑定那天没有行");
+  assert.equal(rowsOn12.some((row) => row.rule_id === "rr_live"), false);
+});
+
+// 审核 #146 第 1 轮 M2（Sub2API 目标）：新 Key 在 a 那天 0 点到 a 之间被别的消费者用过（不是这个渠道）——旧绑定的过渡段读新 Sub2API Key 时按时间认领、
+// 只认 [a, …)，a 以前的不能算进这个渠道的成本
+test("K2c 换到另一个上游（New API → Sub2API）：新 Key 在 a 以前被别的消费者用过——按时间认领，a 以前的不算进成本", async (t) => {
+  const s = await crossUpstreamScenario(t, { from: "newapi", to: "sub2api", othersUse: [Date.parse("2026-10-10T16:00:00Z"), Date.parse("2026-10-10T21:00:00Z")] }); // a 那天（上海 10-11）0 点到 5 点
+  for (const day of ["2026-10-11", "2026-10-12", "2026-10-13"]) assert.equal(s.costOn(day), s.truthOn(day), `${day}：只有这个渠道自己的用量`);
+});
 
 // 审核 2 第二轮 F1：事项解开（渠道回到原来的 Key）转成一段冲突期，解开以后又出新事项、又解开，旧的冲突期不会被覆盖——两段的日子都永远不固定
 test("K2b：冲突期叠着存好几段——事项解开、又出新事项、又解开，第一段的冲突期还在，两段碰到的日子都不固定，中间干净的日子照常固定", async (t) => {
@@ -11245,4 +11274,181 @@ for (const [label, options, keys] of [
   const { results } = await s.f.module.queryRules({ ruleIds, preset: "today" }, { mode: "evaluate", force: true, origin: "manual" });
   const total = results.reduce((sum, row) => sum + (row.upstream?.knownAmountUsd ?? 0), 0);
   assert.equal(total, keys * 86400, `今天各 Key 的整天用量之和（${keys} 把 Key）`);
+});
+
+// ===== K2c 重新分组：按时间线逐天对账（审核 #144 第 1 轮）=====
+// 渠道按时间线用 Key（每个渠道每秒 1 美元，每小时一轮），重新分组以后所有绑定（含已归档的旧绑定）每天账本最新一版成本之和必须等于各把 Key 当天用量之和；
+// 冲突期（认不出的 Key、推迟期间又换过的 Key、旧绑定自己的冲突期）碰到的日子固定成「—」加原因，不写成少了钱的数
+const { dayKeyInTz: rgDayKey, dayStartInTz: rgDayStart, shiftDayLabel: rgShift } = await import("../lib/business-time.js");
+const RG_KEYS = Object.fromEntries([9, 10, 11, 12, 20, 21, 22].map((id) => [id, "sk-" + String(id).padStart(2, "0") + "Qw7z".repeat(9)]));
+RG_KEYS.X = "sk-XX" + "Unkn".repeat(9); // 不在任何已加上游里的 Key
+const RG_NAMES = { 9: "stable", 10: "stable-rr_b", 11: "stable-rr_c", 12: "stable-rr_d", 20: "k20", 21: "k21", 22: "k22" };
+const rgT = (iso) => Date.parse(iso);
+const rgTokenAt = (timeline, channel, ms) => { let current = null; for (const [from, token] of timeline[channel]) if (from <= ms) current = token; return current; };
+function rgUsageSec(timeline, tokenId, fromMs, toMs) {
+  let total = 0;
+  for (const points of Object.values(timeline)) for (let i = 0; i < points.length; i += 1) {
+    if (String(points[i][1]) !== String(tokenId)) continue;
+    const start = Math.max(points[i][0], fromMs), end = Math.min(i + 1 < points.length ? points[i + 1][0] : Infinity, toMs);
+    if (end > start) total += (end - start) / 1000;
+  }
+  return total;
+}
+const rgHourly = (fromIso, toIso) => { const out = []; for (let x = rgT(fromIso); x <= rgT(toIso); x += 3600000) out.push(x); return out; };
+const RG_DAYS = ["2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15"];
+const RG_ROUNDS = rgHourly("2026-10-11T01:00:00Z", "2026-10-16T02:00:00Z");
+async function regroupTimeline(t, { rules = [], channelsByRule, timeline, sub2 = false, staleUntil = null, hooks = {}, rounds = RG_ROUNDS }) {
+  let now = rounds[0];
+  t.mock.method(Date, "now", () => now);
+  const tokenIds = new Set([9, ...rules.map((_, i) => 10 + i)]);
+  for (const points of Object.values(timeline)) for (const [, token] of points) if (token !== "X") tokenIds.add(token);
+  const tokens = [...tokenIds].map((tokenId) => ({ tokenId, name: RG_NAMES[tokenId] }));
+  const idOfName = Object.fromEntries(tokens.map((item) => [item.name, item.tokenId]));
+  const fakeSub2 = sub2 ? createFakeSub2Api({ keys: tokens.map((item) => ({ id: item.tokenId, name: item.name })),
+    dayUsageUsd: (keyId, day) => { const start = Date.parse(`${day}T00:00:00+08:00`); return rgUsageSec(timeline, keyId, start, start + 86400000); },
+    // 逐条用量记录（按时间认领的 Sub2API 上游读这个）：每 10 分钟一条，金额 = 这 10 分钟里的用量
+    recordsOf: (keyId, day) => { const start = Date.parse(`${day}T00:00:00+08:00`), out = []; for (let at = start; at < start + 86400000; at += 600000) { const usd = rgUsageSec(timeline, keyId, at, at + 600000); if (usd > 0) out.push({ atMs: at, usd }); } return out; } }) : null;
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: rules, channelsByRule, tokenKeyOf: (id) => RG_KEYS[id], extraTokens: tokens, sub2api: fakeSub2,
+    usageOf: (name, startSec, endSec) => 100 * rgUsageSec(timeline, idOfName[name], startSec * 1000, (endSec + 1) * 1000),
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => Object.keys(timeline).map((channel) => ({ id: Number(channel), baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(RG_KEYS[rgTokenAt(timeline, channel, now)]), f: "unused" }] })) } });
+  f.stations[0].accountUse = "only_mine";
+  if (sub2) Object.assign(f.stations[0], { type: "sub2api", accessToken: "jwt" });
+  const inject = () => {
+    if (!sub2) { f.rt._keyAgentIdentifyCache = null; return; }
+    f.rt._keyAgentIdentifyCache = { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, revealIssues: [],
+      channels: Object.keys(timeline).map((channel) => { const token = rgTokenAt(timeline, channel, now); return { channelId: Number(channel), keyless: false, slots: [token === "X" ? { index: 0, state: "not_found", matches: [] }
+        : { index: 0, state: "identified", matches: [{ stationId: "upstream", tokenId: token, tokenName: RG_NAMES[token], via: "fingerprint" }] }] }; }) } };
+  };
+  for (let i = 0; i < rounds.length; i += 1) {
+    now = rounds[i]; inject();
+    if (hooks[i]) await hooks[i]({ f, now });
+    await f.module.refreshDue(now);
+    if (i === 0) {
+      const namespaceKey = (await f.repository.getRule("rr_live")).ownSource.namespaceKey;
+      // 渠道目录没确认（stale）时不重新分组、原样留着 KEY_GROUP_CHANGED：用它造「推迟了几轮」
+      f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }), getSourceCatalogue: () => ({ ownSource: { namespaceKey }, stale: staleUntil != null && now < rgT(staleUntil),
+        channels: Object.keys(timeline).map((id) => ({ id: Number(id), name: `渠道 ${id}`, revision: `rev-${id}`, missing: false })) }) };
+    }
+  }
+  const latestRows = (billDate) => {
+    const latest = new Map();
+    for (const row of f.state.ledger.filter((item) => item.bill_date === billDate)) if (!latest.has(row.rule_id) || Number(row.revision) > Number(latest.get(row.rule_id).revision)) latest.set(row.rule_id, row);
+    return [...latest.values()];
+  };
+  const costOn = (day) => latestRows(day).reduce((total, row) => total + Number(row.cost_usd), 0);
+  const truthOn = (day) => { const start = rgDayStart(day, "Asia/Shanghai"), end = rgDayStart(rgShift(day, 1), "Asia/Shanghai"); return [...tokenIds, "X"].reduce((total, token) => total + rgUsageSec(timeline, token, start, end), 0); };
+  const page = await f.module.profitPage({ preset: "custom", startMs: rgDayStart(RG_DAYS[0], "Asia/Shanghai"), endMs: rgDayStart(rgShift(RG_DAYS.at(-1), 1), "Asia/Shanghai") });
+  const cellOf = (channelId, day) => page.rows.find((row) => row.channels.some((channel) => channel.channelId === channelId))?.daily.find((cell) => cell.day === day);
+  return { f, costOn, truthOn, latestRows, page, cellOf, rules: await f.repository.listRules({ includeArchived: true }) };
+}
+// 每天要么钱对得上，要么是冲突期那几天（blocked）：页面小格是需处理 + 冲突原因，并且重新分组出来的新绑定那天一行都没写
+function expectRegroupDays(s, blocked = [], label = "") {
+  for (const day of RG_DAYS) {
+    if (blocked.includes(day)) {
+      for (const channelId of [1, 2]) { const cell = s.cellOf(channelId, day); if (cell) assert.deepEqual([cell.state, cell.reason], ["attention", "KEY_CONFLICT_GAP"], `${label}${day} 渠道 ${channelId}：冲突期的那天写需处理加原因`); }
+      const rows = s.latestRows(day).filter((row) => s.rules.find((rule) => rule.id === row.rule_id && !rule.archivedAt));
+      assert.deepEqual(rows, [], `${label}${day}：冲突期的那天新绑定不固定，不写少了钱的数`);
+    } else assert.equal(s.costOn(day), s.truthOn(day), `${label}${day}：所有绑定当天上游成本之和 = 各把 Key 当天用量之和`);
+  }
+}
+const RG_SHAPES = {
+  // H2：Sub2API 新绑定第一段关在 b：同一天再换 Key、再重新分组都接得上
+  "合组到已有的 Key 以后同一天再分组": { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, timeline: { 1: [[0, 9]], 2: [[0, 10], [rgT("2026-10-11T20:30:00Z"), 9], [rgT("2026-10-12T03:30:00Z"), 21]] } },
+  "合组到已有的 Key 以后同一天整组换 Key": { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, timeline: { 1: [[0, 9], [rgT("2026-10-12T03:30:00Z"), 21]], 2: [[0, 10], [rgT("2026-10-11T20:30:00Z"), 9], [rgT("2026-10-12T03:30:00Z"), 21]] } },
+  "合组到全新的 Key 以后同一天再分组": { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, timeline: { 1: [[0, 9], [rgT("2026-10-11T20:10:00Z"), 20]], 2: [[0, 10], [rgT("2026-10-11T20:40:00Z"), 20], [rgT("2026-10-12T03:30:00Z"), 21]] } },
+  "分组以后同一天再分一次": { channelsByRule: { rr_live: [1, 2] }, timeline: { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-11T20:30:00Z"), 20], [rgT("2026-10-12T03:30:00Z"), 21]] } },
+  // H3：Sub2API 旧绑定当天更早换过 Key，旧 Key 当天整天的用量要带到新绑定
+  "整组换 Key 以后同一天分组": { channelsByRule: { rr_live: [1, 2] }, timeline: { 1: [[0, 9], [rgT("2026-10-11T20:30:00Z"), 21]], 2: [[0, 9], [rgT("2026-10-11T20:30:00Z"), 21], [rgT("2026-10-12T03:30:00Z"), 22]] } },
+  "整组换 Key 以后同一天合组": { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, timeline: { 1: [[0, 9], [rgT("2026-10-11T20:30:00Z"), 21], [rgT("2026-10-12T03:30:00Z"), 10]], 2: [[0, 10]] } },
+};
+for (const sub2 of [false, true]) for (const [name, spec] of Object.entries(RG_SHAPES)) {
+  test(`K2c 重新分组逐天对账：${name}（${sub2 ? "Sub2API" : "New API"}）`, async (t) => {
+    expectRegroupDays(await regroupTimeline(t, { ...spec, sub2 }));
+  });
+}
+for (const sub2 of [false, true]) {
+  // H1：认出这件事以后渠道用过认不出的 Key
+  test(`K2c 重新分组：先换成不在已加上游里的 Key、几小时后才换成能认出的，重新分组——从第一次认出到这一轮那几天固定成「—」加原因，别的天对得上（${sub2 ? "Sub2API" : "New API"}）`, async (t) => {
+    const s = await regroupTimeline(t, { channelsByRule: { rr_live: [1, 2] }, sub2, timeline: { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-11T20:30:00Z"), "X"], [rgT("2026-10-12T03:30:00Z"), 20]] } });
+    expectRegroupDays(s, ["2026-10-12"]);
+    assert.ok(s.rules.some((rule) => rule.archivedAt), "分组本身照常做了：以后的日子接着算");
+  });
+  test(`K2c 重新分组：推迟期间渠道又换了 Key（K20 → K21），这一轮按最后一把重新分组——推迟那几天固定成「—」加原因（${sub2 ? "Sub2API" : "New API"}）`, async (t) => {
+    const s = await regroupTimeline(t, { channelsByRule: { rr_live: [1, 2] }, sub2, staleUntil: "2026-10-12T06:00:00Z",
+      timeline: { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-11T20:30:00Z"), 20], [rgT("2026-10-12T02:30:00Z"), 21]] } });
+    expectRegroupDays(s, ["2026-10-12"]);
+  });
+  test(`K2c 重新分组：推迟了几轮、这期间一直是同一件事（等渠道目录确认）——钱已经算全了，不写冲突期，每天都对得上（${sub2 ? "Sub2API" : "New API"}）`, async (t) => {
+    const s = await regroupTimeline(t, { channelsByRule: { rr_live: [1, 2] }, sub2, staleUntil: "2026-10-12T03:00:00Z",
+      timeline: { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-11T20:30:00Z"), 20]] } });
+    expectRegroupDays(s);
+    assert.ok(s.rules.some((rule) => rule.archivedAt), "分组做了");
+    assert.ok(s.rules.every((rule) => !rule.keyBlocks), "没有冲突期");
+  });
+  test(`K2c 重新分组：旧绑定当天（b 所在的那天）自己有一段冲突期——带到新绑定上，那天固定成「—」加原因（${sub2 ? "Sub2API" : "New API"}）`, async (t) => {
+    const s = await regroupTimeline(t, { channelsByRule: { rr_live: [1, 2] }, sub2,
+      timeline: { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-11T17:30:00Z"), "X"], [rgT("2026-10-11T18:30:00Z"), 9], [rgT("2026-10-11T20:30:00Z"), 20]] } });
+    expectRegroupDays(s, ["2026-10-12"]);
+  });
+}
+
+// 节流用例共用：一个渠道换了 Key（认出来就会重新分组），repository.regroupRules 可以改成失败、数试了几次
+async function regroupThrottleFixture(t) {
+  let now = rgT("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const timeline = { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-11T20:30:00Z"), 20]] };
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], channelsByRule: { rr_live: [1, 2] }, tokenKeyOf: (id) => RG_KEYS[id],
+    extraTokens: [{ tokenId: 20, name: "k20" }], usageOf: () => 0,
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => Object.keys(timeline).map((channel) => ({ id: Number(channel), baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(RG_KEYS[rgTokenAt(timeline, channel, now)]), f: "unused" }] })) } });
+  f.stations[0].accountUse = "only_mine";
+  await f.module.refreshDue(now);
+  const namespaceKey = (await f.repository.getRule("rr_live")).ownSource.namespaceKey;
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }), getSourceCatalogue: () => ({ ownSource: { namespaceKey }, stale: false,
+    channels: [1, 2].map((id) => ({ id, name: `渠道 ${id}`, revision: `rev-${id}`, missing: false })) }) };
+  const original = f.repository.regroupRules.bind(f.repository);
+  const state = { attempts: 0, failing: false, now: () => now, advance: async (ms) => { now += ms; await f.module.refreshDue(now); } };
+  f.repository.regroupRules = async (...args) => { state.attempts += 1; if (state.failing) throw new Error("连接断了"); return original(...args); };
+  const warnings = [];
+  t.mock.method(console, "warn", (...args) => { warnings.push(args.join(" ")); });
+  t.mock.method(console, "error", () => {});
+  now = rgT("2026-10-11T21:00:00Z");
+  return { f, state, warnings, regroupedCount: async () => (await f.repository.listRules({ includeArchived: true })).filter((rule) => rule.archivedAt).length };
+}
+
+test("K2c 重新分组节流：写库失败按自动开始同一套退避（10 分钟起、翻倍）再试，不是每轮都开事务；失败写日志", async (t) => {
+  const { f, state, warnings, regroupedCount } = await regroupThrottleFixture(t);
+  state.failing = true;
+  await f.module.refreshDue(state.now());
+  assert.equal(state.attempts, 1, "第一轮试了一次，失败");
+  assert.ok(warnings.some((line) => /\[regroup\].*写库失败.*10 分钟后再试/.test(line)), "失败写日志，说明多久以后再试");
+  await state.advance(5 * 60000);
+  assert.equal(state.attempts, 1, "退避期间（10 分钟内）不再试");
+  await state.advance(6 * 60000);
+  assert.equal(state.attempts, 2, "退避到了再试一次（还是失败，下次等 20 分钟）");
+  await state.advance(11 * 60000);
+  assert.equal(state.attempts, 2, "20 分钟的退避没到");
+  state.failing = false;
+  await state.advance(10 * 60000);
+  assert.equal(state.attempts, 3, "到了再试，这次成功");
+  assert.equal(await regroupedCount(), 1, "重新分组落库了");
+});
+
+test("K2c 重新分组节流：同一个渠道一天最多重新分组 3 次，超过留着 KEY_GROUP_CHANGED，第二天再分", async (t) => {
+  const { f, state, regroupedCount } = await regroupThrottleFixture(t);
+  f.rt._regroupCounts = new Map([["own:1@2026-10-12", 3]]); // 渠道 1 这个业务日（10-12）已经重新分过 3 次
+  await f.module.refreshDue(state.now());
+  assert.equal(state.attempts, 0, "这一天的第 4 次不试");
+  assert.equal(await regroupedCount(), 0);
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.code, "KEY_GROUP_CHANGED", "留着 KEY_GROUP_CHANGED，不结账");
+  await state.advance(24 * 3600000); // 第二天
+  assert.equal(state.attempts, 1, "第二天再分");
+  assert.equal(await regroupedCount(), 1);
+});
+
+test("K2c 重新分组：渠道刚被用户停了（记了「用户停的」）——不带进新绑定接着算，不分组", async (t) => {
+  const { f, state, regroupedCount } = await regroupThrottleFixture(t);
+  await f.repository.addChannelOptouts("own", [2], state.now());
+  await f.module.refreshDue(state.now());
+  assert.equal(state.attempts, 0, "没有去写重新分组");
+  assert.equal(await regroupedCount(), 0);
 });

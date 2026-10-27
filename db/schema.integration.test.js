@@ -847,6 +847,9 @@ defineReconciliationRepositoryContract({
       FROM reconciliation_snapshots WHERE rule_id = ? AND snapshot_key = ?`, [ruleId, snapshotKey]);
     return row ? { ...row, windowStartMs: Number(row.windowStartMs), windowEndMs: Number(row.windowEndMs) } : null;
   },
+  deleteSegmentKeyRows: async ({ ruleId }) => {
+    await contractPool.query("DELETE k FROM reconciliation_segment_keys k JOIN reconciliation_rule_segments s ON s.id = k.segment_id WHERE s.rule_id = ?", [ruleId]);
+  },
   insertSegmentKeyRow: async ({ segmentId, upstreamStationId, tokenId, tokenName }) => {
     await contractPool.query(`INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source)
       VALUES (?, ?, ?, ?, 'extra')`, [segmentId, upstreamStationId, tokenId, tokenName]);
