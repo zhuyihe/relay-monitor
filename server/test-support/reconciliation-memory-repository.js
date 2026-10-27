@@ -678,8 +678,7 @@ export class MemoryReconciliationRepository {
         }
         const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
         for (const { close, entry, open } of states) {
-          const end = close.archiveAt != null ? Number(close.archiveAt) : at; // 对应 MySQL 版：换到 Sub2API 上游的 New API 旧绑定在 b 那天 0 点归档，不能早于开着那段的起点
-          if (end < Number(open.effective_from_ms)) throw Object.assign(new Error("stale regroup"), { staleRegroup: true });
+          const end = close.archiveAt != null ? Number(close.archiveAt) : at; // 对应 MySQL 版：换到 Sub2API 上游的 New API 旧绑定在 b 那天 0 点归档
           if (close.window) {
             for (const segment of this.#segmentsOf(tx, close.ruleId).map(({ row }) => row)) {
               if (this.#rows("segmentKeys", tx).some(({ row }) => row.segment_id === segment.id)) continue;

@@ -1132,7 +1132,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         changed = false;
         for (const id of [...eligible]) {
           const cap = startOfBillingDay(at, byId.get(id).timezone), owned = plan.groups.filter((group) => group.fromRuleIds.includes(id));
-          if (owned.length && cap < at && cap >= openFromOf.get(id) && owned.every((group) => toSub2Group(group) && group.fromRuleIds.every((other) => eligible.has(other)))) continue;
+          if (owned.length && cap < at && owned.every((group) => toSub2Group(group) && group.fromRuleIds.every((other) => eligible.has(other)))) continue;
           eligible.delete(id); changed = true;
         }
       }
@@ -1174,7 +1174,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       try { held = await repository.keyHeldUntil(ownStationId, group.ref.upstreamStationId, group.ref.tokenId, { sinceMs: dayStart, excludeRuleIds: plan.closes.map((close) => close.ruleId), excludeArchived: toSub2 }); } catch (error) { return failedWith("读 Key 上一个持有者失败", error); }
       if (held == null || held <= dayStart) continue;
       if (toSub2) create.accountingFloorMs = shiftedDayStartInTz(dayStart, 1, timezone);
-      else if (held > at) create.accountingFloorMs = held;
+      else if (create.accountingFloorMs === null) {
+        // 下限是 null：旧绑定是 Sub2API，b 那天整天交给新绑定（收入从 0 点起）。从 held 起算会丢掉 [0 点, held) 的收入，整天算又会把上一个持有者的用量再算一遍——
+        // 这一天固定成「—」加原因（KEY_CONFLICT_GAP），之后照常
+        create.keyBlocks = [...(create.keyBlocks || []), { code: "KEY_CONFLICT_GAP", sinceMs: dayStart, untilMs: shiftedDayStartInTz(dayStart, 1, timezone) }];
+      } else if (held > (create.accountingFloorMs ?? at)) create.accountingFloorMs = held;
     }
     // 推迟了几轮、这段时间事项的码变过或渠道的 Key 又变过（或不知道有没有，比如重启过）：[b, 这一轮) 里渠道用过什么 Key 这一轮的计划不知道，写冲突期；
     // 旧绑定那边也要挡：它的 [a, b) 过渡段放的是这一轮的 Key、不是当时真用的，跨零点时 b 以前那天会少算一半，那天固定成「—」（见下面 closes 的 keyBlocks）。
@@ -1991,6 +1995,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 换到另一个上游的 Key（K2c-3b）：一段里的 Key 带着自己的上游，别的上游的 Key 去那个上游读（元数据、身份、账单能力都是那个上游的）。
   // Sub2API 只能按整天读：窗口放宽到包着它的自然日（过渡段只到 b 那天 0 点，见 regroupFor，所以不会和新上游下的新绑定读重）
   async function foreignKeyWindow(key, window, { readOnly }) {
+    // 读哪个上游失败就记到哪个上游：错误上带着那个上游的编号，报错、过期标记都按它（不记到旧上游头上，财务会被指错地方）
+    try { return await foreignKeyWindowRead(key, window, { readOnly }); } catch (error) { if (error && typeof error === "object" && error.upstreamStationId == null) error.upstreamStationId = key.upstreamStationId; throw error; }
+  }
+  async function foreignKeyWindowRead(key, window, { readOnly }) {
     const configured = upstreamStation(key.upstreamStationId);
     if (!billingStation(configured)) throw codedError("UPSTREAM_KEY_UNVERIFIED", "分段里有别的上游的 Key，找不到那个上游");
     const station = { ...configured }, foreignMetadata = await metadataFor(station, { timezone: window.timezone });
@@ -2880,13 +2888,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           segmentIssues.push(commonBillingTimezone(segmentWindow, downstreamSide).state !== "verified" ? issue : upstreamSide(issue));
         }
         if (upstreamResult.error && !upstreamResult.skipped) {
-          const billHealth = upstreamErrorHealth(upstreamResult.error, upstreamResource);
+          // 别的上游的 Key 读失败（换到另一个上游的过渡段）：错误、提示、过期标记都记到那个上游，不记到这条绑定自己的上游头上
+          const failedStationId = upstreamResult.error?.upstreamStationId ?? rule.upstreamStationId;
+          const failedResource = failedStationId === rule.upstreamStationId ? upstreamResource : { station: upstreamStation(failedStationId) };
+          const billHealth = upstreamErrorHealth(upstreamResult.error, failedResource);
           // cause：读账单时上游报的原始码（限流、5xx 是 UPSTREAM_REQUEST_FAILED，连不上、超时是 NETWORK_UNREACHABLE），回看靠它分辨「这个上游这一刻整体读不到」
           segmentIssues.push(upstreamSide({ code: billHealth.code, scope: "segment", detail: billHealth.detail, observedAt: Date.now(),
             ...(upstreamResult.error?.code ? { cause: String(upstreamResult.error.code) } : {}),
-            ...(billHealth.stationName != null ? { stationName: billHealth.stationName } : {}), ...(billHealth.missingScope ? { missingScope: billHealth.missingScope } : {}) }));
+            ...(billHealth.stationName != null ? { stationName: billHealth.stationName } : {}), ...(billHealth.missingScope ? { missingScope: billHealth.missingScope } : {}),
+            ...(failedStationId !== rule.upstreamStationId ? { upstreamStationId: failedStationId } : {}) })); // 按钮（更新登录信息）去读失败的那个上游
           // Key 账单报错：可能换了 Key 或身份变了，下一轮全部重读（P1b 的异常之一）
-          staleMetadata.add(rule.upstreamStationId);
+          staleMetadata.add(failedStationId);
         }
         if (upstreamResult.emptySecondWindow || downstreamResult.emptySecondWindow) {
           const issue = { code: "PENDING", scope: "segment", detail: issueText("PENDING"), observedAt: Date.now() };

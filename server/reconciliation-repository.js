@@ -1031,9 +1031,9 @@ export class ReconciliationRepository {
         states.push({ close, rule, open });
       }
       for (const { close, rule, open } of states) {
-        // 旧绑定归档的时刻：默认 b；换到 Sub2API 上游的 New API 旧绑定在 b 那天 0 点归档（close.archiveAt，那一天整天由新绑定取），不能早于开着那段的起点
+        // 旧绑定归档的时刻：默认 b；换到 Sub2API 上游的 New API 旧绑定在 b 那天 0 点归档（close.archiveAt，那一天整天由新绑定取）。
+        // 开着那段是当天更早换 Key 才开的（起点在 0 点以后）也一样：归档时刻早于它的起点，那天旧绑定整天不结（归档当天不结账），不留一行
         const end = close.archiveAt != null ? Number(close.archiveAt) : at;
-        if (end < Number(open.effective_from_ms)) { await conn.rollback(); return { conflict: false, stale: true }; }
         if (close.window) {
           const fillMissing = fillMissingSegmentKeysSql(close.ruleId);
           await conn.query(fillMissing.sql, fillMissing.params);

@@ -1995,13 +1995,12 @@ contract("regroupRules: keyBlocks on a new rule are stored with it (the conflict
   assert.deepEqual((await repository.getRule(result.ruleIds[0])).keyBlocks, [{ code: "KEY_CONFLICT_GAP", sinceMs: b, untilMs: b + 2 * HOUR }], "相邻的并成一段");
 });
 
-contract("regroupRules: close.archiveAt archives the old rule at that moment (no window tail after it) and close.keyBlocks are stored with the archive; an archiveAt before the open segment's start is stale", async ({ repository, fixture }) => {
+contract("regroupRules: close.archiveAt archives the old rule at that moment (no window tail after it) and close.keyBlocks are stored with the archive; an archiveAt before the open segment's start (an earlier same-day key change opened it after midnight) is still accepted", async ({ repository, fixture }) => {
   const oldRule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:m1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(141), name: "A" }] });
   const newRef = { upstreamStationId: oldRule.upstreamStationId, tokenId: fixture.token(142), tokenName: "N" };
   const a = EFFECTIVE_FROM + HOUR, cap = a + HOUR, b = cap + HOUR;
   const input = fixture.ruleInput({ tokenId: newRef.tokenId, tokenName: "N", canonicalKey: `up:${fixture.tag}:m-new`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(141), name: "A" }] });
   const expect = { tokenId: oldRule.tokenId, channelIds: [fixture.channel(141)] };
-  assert.deepEqual(await repository.regroupRules({ at: b, closes: [{ ruleId: oldRule.id, expect, window: null, archiveAt: EFFECTIVE_FROM - 1000 }], creates: [input] }), { conflict: false, stale: true }, "archiveAt 早于开着那段的起点：不写");
   const result = await repository.regroupRules({ at: b, closes: [{ ruleId: oldRule.id, expect, window: { from: a, keys: [{ upstreamStationId: oldRule.upstreamStationId, tokenId: oldRule.tokenId }, newRef] }, archiveAt: cap,
     keyBlocks: [{ code: "KEY_CONFLICT_GAP", sinceMs: a, untilMs: cap }] }], creates: [input] });
   assert.deepEqual([result.conflict, result.stale], [false, false]);

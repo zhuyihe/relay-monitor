@@ -11414,3 +11414,162 @@ for (const sub2 of [false, true]) {
     assert.ok(s.costOn("2026-10-12") <= s.truthOn("2026-10-12") + 1e-6, "10-12 不多算");
   });
 }
+
+// ===== K2c 换到另一个上游：速率不同、用量按小时变的逐天核对（审核 2 的 #146 第 2 轮脚本，改成断言）=====
+// 渠道 1 从旧上游的 Key（旧）换到新上游的 Key（新），Key 速率 1:3 和 3:1 各一遍，每天所有行（含已归档的）的上游成本之和、收入之和对真值：
+// 「—」的天（没有行）不比，其余天一分不差；任何一天都不能比真值多（不能把一把 Key 算两遍）
+
+// ===================== RV146 cross-upstream review harness =====================
+// Channel 1 (own station) holds old key 9 on "upstream" until t, then key NEW on "upstream2" (New API id 30 / Sub2 id 40),
+// optional second switch. Channel produces 1 $/s cost on whatever key it holds; extra consumers of keys via ext().
+// Own revenue: 2 $/s for channel 1 (time-proportional, so revenue gaps/doubles show).
+const C_RV = { SH: "Asia/Shanghai" };
+const cIso = (ms) => new Date(ms + 8 * 3600000).toISOString().slice(5, 16);
+const cT = (iso) => Date.parse(iso);
+const cHourly = (fromIso, toIso, stepMin = 60) => { const out = []; for (let x = cT(fromIso); x <= cT(toIso); x += stepMin * 60000) out.push(x); return out; };
+// RV146 round 2: non-uniform time profile (Shanghai hour weight) and per-key channel rates
+const C_W = [1, 1, 1, 1, 1, 2, 3, 4, 5, 5, 4, 3, 2, 3, 4, 5, 6, 5, 4, 3, 2, 2, 1, 1];
+const cInteg = (s, e) => { let total = 0; let x = s; while (x < e) { const h = Math.floor(x / 3600000) * 3600000 + 3600000; const y = Math.min(e, h); total += C_W[new Date(x + 8 * 3600000).getUTCHours()] * (y - x) / 1000; x = y; } return total; };
+async function crossHarness(t, { crate = { old2: 2, old: 1, new: 3, new2: 2 }, split = null, fail2 = null, timeline2 = null, crate2 = { old: 1, new: 3, new2: 2 }, from = "newapi", to = "newapi", timeline, rounds, accountUse = "only_mine", rates = null, ext = {}, days, hooks = {}, extraKeys2 = [], channel2 = false, addUpstream2At = null }) {
+  // timeline: [[ms, keyName]] keyName in "old" | "new" | "new2" ; ext: { keyName: [[fromMs, toMs, usdPerSec]] }
+  let now = rounds[0];
+  t.mock.method(Date, "now", () => now);
+  const oldSub2 = from === "sub2api", sub2 = to === "sub2api", injectIdentity = oldSub2 || sub2;
+  const ids = { old2: 8, old: 9, new: sub2 ? 40 : 30, new2: sub2 ? 41 : 31 };
+  const station = { old2: "upstream", old: "upstream", new: "upstream2", new2: "upstream2" };
+  const names = { old2: "stable2", old: "stable", new: "newkey", new2: "newkey2" };
+  const secret = { 8: "sk-08" + "Kx9z".repeat(9), 9: "sk-09" + "Kx9z".repeat(9), 30: "sk-30" + "Kx9z".repeat(9), 31: "sk-31" + "Kx9z".repeat(9), 40: "sk-40" + "Kx9z".repeat(9), 41: "sk-41" + "Kx9z".repeat(9) };
+  const keyAt = (ms) => { let cur = null; for (const [at, k] of timeline) if (at <= ms) cur = k; return cur; };
+  let total0 = 0;
+  const keyAt2 = (ms) => { if (!timeline2) return "new"; let cur = null; for (const [at, k] of timeline2) if (at <= ms) cur = k; return cur; };
+  const usage = (k, fromMs, toMs, chOnly = false) => {
+    if (timeline2) for (let i = 0; i < timeline2.length; i++) if (timeline2[i][1] === k && !chOnly) { const s = Math.max(timeline2[i][0], fromMs), e = Math.min(i + 1 < timeline2.length ? timeline2[i + 1][0] : Infinity, toMs); if (e > s) total0 += crate2[k] * cInteg(s, e); } // $ of key k in [fromMs, toMs)
+    let total = total0; total0 = 0;
+    for (let i = 0; i < timeline.length; i++) if (timeline[i][1] === k) { const s = Math.max(timeline[i][0], fromMs), e = Math.min(i + 1 < timeline.length ? timeline[i + 1][0] : Infinity, toMs); if (e > s) total += crate[k] * cInteg(s, e); }
+    if (!chOnly) for (const [a, b, r] of ext[k] || []) { const s = Math.max(a, fromMs), e = Math.min(b ?? Infinity, toMs); if (e > s) total += r * (e - s) / 1000; }
+    return total;
+  };
+  const dayStart = (d) => cT(`${d}T00:00:00+08:00`);
+  const dayUsage = (k) => (_id, d) => (dayStart(d) > Date.now() ? 0 : usage(k, dayStart(d), Math.min(dayStart(d) + 86400000, Date.now())));
+  const k2 = ["new", "new2"];
+  const second = sub2
+    ? createFakeSub2Api({ keys: k2.map((k) => ({ id: ids[k], name: names[k] })), dayUsageUsd: (id, d) => dayUsage(id === ids.new ? "new" : "new2")(id, d) })
+    : createFakeNewApi({ keys: k2.map((k) => ({ id: ids[k], name: names[k], masked: maskKey(secret[ids[k]]) })), usageQuota: (name, s, e) => 100 * usage(name === names.new ? "new" : "new2", s * 1000, (e + 1) * 1000) });
+  const calls2 = second.calls;
+  if (fail2) { const orig = second.handle.bind(second); second.handle = (url, ...rest) => (fail2(now, url) ? { status: globalThis.RVFAILCODE_V ?? 502, text: async () => JSON.stringify({ success: false, message: "x" }) } : orig(url, ...rest)); }
+  const first = oldSub2 ? createFakeSub2Api({ keys: [{ id: 9, name: "stable" }], dayUsageUsd: dayUsage("old") }) : null;
+  const revenue = (s, e) => { // own channel 1 revenue quota (quota_per_unit 100): 2 $/s always
+    return 200 * cInteg(s * 1000, Math.max(s, e + 1) * 1000);
+  };
+  const ownHost = { handle(url) { if (url.pathname === "/api/log/stat" && !ownSourceRead(url)) return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota: revenue(Number(url.searchParams.get("start_timestamp")), Math.min(Number(url.searchParams.get("end_timestamp")), Math.floor(Date.now() / 1000))) } }) }; return null; } };
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], channelsByRule: { rr_live: [1] }, extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 8, name: "stable2" }],
+    ...(oldSub2 ? { sub2api: first, tokenKeyOf: () => "sk-x" } : { tokenKeyOf: (id) => secret[id], usageOf: (name, s, e) => (name === "stable" ? 100 * usage("old", s * 1000, (e + 1) * 1000) : name === "stable2" ? 100 * usage("old2", s * 1000, (e + 1) * 1000) : 0) }),
+    extraStations: [{ id: "upstream2", name: "上游2", type: sub2 ? "sub2api" : "newapi", baseUrl: "https://upstream2.test", accessToken: sub2 ? "jwt" : "pat2", authVersion: 1, accountUse, ...(rates ? { cnyPerUsd: rates.second } : {}) }],
+    extraHosts: { "upstream2.test": second, "own.test": ownHost },
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: station[keyAt(now)] === "upstream" ? "https://upstream.test" : "https://upstream2.test", keys: [{ i: 0, m: maskKey(secret[ids[keyAt(now)]]), f: "unused" }] }, ...(channel2 ? [{ id: 2, baseUrl: "https://upstream2.test", keys: [{ i: 0, m: maskKey(secret[ids[keyAt2(now)]]), f: "unused" }] }] : [])] } });
+  if (channel2) { // an existing binding rr_two on upstream2 holding the NEW key, channel 2 uses it all along (pass ext.new = [[0,null,1]])
+    const base = f.repository.tables.rules.find((r) => r.id === "rr_live");
+    f.repository.tables.rules.push({ ...base, id: "rr_two", upstream_station_id: "upstream2", token_id: ids.new, token_name: names.new, canonical_key: null, provider: null });
+    const ch = f.repository.tables.channels.find((r) => r.rule_id === "rr_live");
+    f.repository.tables.channels.push({ ...ch, rule_id: "rr_two", channel_id: 2, channel_name: "渠道 2" });
+    const sg = f.repository.tables.segments.find((r) => r.rule_id === "rr_live");
+    f.repository.tables.segments.push({ ...sg, id: "s1-two", rule_id: "rr_two" });
+  }
+  f.stations[0].accountUse = "only_mine";
+  if (oldSub2) Object.assign(f.stations[0], { type: "sub2api", accessToken: "jwt" });
+  if (rates) f.stations[0].cnyPerUsd = rates.first;
+  const injected = () => { const k = keyAt(now); return { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, revealIssues: [],
+    channels: [{ channelId: 1, keyless: false, slots: [{ index: 0, state: "identified", matches: [{ stationId: station[k], tokenId: ids[k], tokenName: names[k], via: "fingerprint" }] }] }, ...(channel2 ? [{ channelId: 2, keyless: false, slots: [{ index: 0, state: "identified", matches: [{ stationId: "upstream2", tokenId: ids[keyAt2(now)], tokenName: names[keyAt2(now)], via: "fingerprint" }] }] }] : [])] } }; };
+  let up2 = null;
+  if (addUpstream2At != null) { const i = f.stations.findIndex((x) => x.id === "upstream2"); up2 = f.stations.splice(i, 1)[0]; }
+  const injected2 = () => { const r = injected(); if (up2 && station[keyAt(now)] === "upstream2") r.result.channels[0].slots[0] = { index: 0, state: "not_found", matches: [] }; return r; };
+  const inject = () => { f.rt._keyAgentIdentifyCache = injectIdentity ? injected2() : null; };
+  const log = [];
+  for (let i = 0; i < rounds.length; i++) {
+    now = rounds[i]; inject();
+    if (up2 && i === addUpstream2At) { f.stations.push(up2); up2 = null; f.module.invalidateSources?.(); }
+    if (hooks[i]) await hooks[i]({ f, now });
+    inject();
+    await f.module.refreshDue(now);
+    if (i === 0) {
+      const anchored = await f.repository.getRule("rr_live");
+      f.rt.reconciliation = f.module;
+      if (injectIdentity) f.rt.channelProfit = createChannelProfitModule(f.rt, { identify: async () => f.rt._keyAgentIdentifyCache.result });
+      f.rt.channelOnboarding = { getSourceCatalogue: () => ({ ownSource: { namespaceKey: anchored.ownSource.namespaceKey }, stale: false, channels: [{ id: 1, name: "渠道 1", revision: "rev-1", missing: false }, ...(channel2 ? [{ id: 2, name: "渠道 2", revision: "rev-2", missing: false }] : [])] }), inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+      f.rt.onboardingSource = f.rt.channelOnboarding;
+    }
+    if (hooks.after?.[i]) await hooks.after[i]({ f, now });
+  }
+  const allRules = await f.repository.listRules({ includeArchived: true });
+  const latestRows = (d) => { const latest = new Map(); for (const row of f.state.ledger.filter((x) => x.bill_date === d)) if (!latest.has(row.rule_id) || Number(row.revision) > Number(latest.get(row.rule_id).revision)) latest.set(row.rule_id, row); return [...latest.values()]; };
+  const rateOf = (k) => (rates ? (station[k] === "upstream" ? rates.first : rates.second) : null);
+  const out = {};
+  for (const d of days) {
+    const rows = latestRows(d), s = dayStart(d), e = s + 86400000;
+    const truth = ["old2", "old", "new", "new2"].reduce((x, k) => x + usage(k, s, e), 0);
+    const truthCny = rates ? ["old2", "old", "new", "new2"].reduce((x, k) => x + usage(k, s, e) * (rateOf(k) ?? NaN), 0) : null;
+    out[d] = { cost: +rows.reduce((x, r) => x + Number(r.cost_usd), 0).toFixed(3), truth, rev: +rows.reduce((x, r) => x + Number(r.revenue_usd), 0).toFixed(3), revTruth: +(2 * cInteg(s, e) * (channel2 ? 2 : 1)).toFixed(3),
+      ...(split != null ? { exp: { old: { c: +["old2", "old", "new", "new2"].reduce((x, k) => x + usage(k, s, Math.min(e, split), true), 0).toFixed(3), r: +(2 * cInteg(s, Math.min(e, split))).toFixed(3) },
+        new: { c: +["old2", "old", "new", "new2"].reduce((x, k) => x + usage(k, Math.max(s, split), e, true), 0).toFixed(3), r: +(2 * cInteg(Math.max(s, split), e)).toFixed(3) } } } : {}),
+      ...(rates ? { cny: +rows.reduce((x, r) => x + Number(r.cost_usd) * (r.cost_rate == null ? NaN : Number(r.cost_rate)), 0).toFixed(2), truthCny } : {}),
+      ...(split != null ? { diff: (() => { const g = (sel) => rows.filter(sel).reduce((x, r) => [x[0] + Number(r.cost_usd), x[1] + Number(r.revenue_usd)], [0, 0]);
+        const o = g((r) => r.rule_id === "rr_live"), n = g((r) => r.rule_id !== "rr_live" && r.rule_id !== "rr_two");
+        return { oldC: +(o[0] - (0)).toFixed(3), oldR: +o[1].toFixed(3), newC: +n[0].toFixed(3), newR: +n[1].toFixed(3) }; })() } : {}),
+      rows: rows.map((r) => `${r.rule_id.slice(0, 9)}:c${Number(r.cost_usd)}/r${Number(r.revenue_usd)}${rates ? `@${r.cost_rate}` : ""}${r.locked_at || r.status ? `/${r.status ?? ""}` : ""}`) };
+  }
+  const rulesOut = allRules.map((r) => ({ id: r.id.slice(0, 9), up: r.upstreamStationId, tok: r.tokenId, en: r.enabled, arch: r.archivedAtMs ? cIso(r.archivedAtMs) : null, floor: r.accountingFloorMs === undefined ? "u" : r.accountingFloorMs == null ? null : cIso(r.accountingFloorMs), issue: r.keyIssue ? `${r.keyIssue.code}@${cIso(r.keyIssue.sinceMs)}` : null, blocks: (r.keyBlocks || []).map((b) => `${b.code}[${cIso(b.sinceMs)},${cIso(b.untilMs)})`), src: r.source ?? r.startSource ?? null }));
+  const segs = {};
+  for (const r of allRules) segs[r.id.slice(0, 9)] = (await f.repository.listSegments(r.id)).map((s) => `[${s.effectiveFrom ? cIso(s.effectiveFrom) : 0},${s.effectiveTo == null ? "-" : cIso(s.effectiveTo)}) ${s.timingSource} k=${(s.keys || []).map((k) => `${k.upstreamStationId}:${k.tokenId}`).join("/")}`);
+  return { f, out, rulesOut, segs, calls2, print() {} };
+}
+
+const crossDays = (out) => Object.entries(out);
+const crossNoOver = (s, label) => { for (const [day, v] of crossDays(s.out)) { assert.ok(v.cost <= v.truth + 1e-3, `${label} ${day}：成本不能比真值多（${v.cost} / ${v.truth}）`); assert.ok(v.rev <= v.revTruth + 1e-3, `${label} ${day}：收入不能比真值多（${v.rev} / ${v.revTruth}）`); } };
+const crossExact = (s, label, days = null) => { for (const [day, v] of crossDays(s.out)) if (!days || days.includes(day)) { assert.ok(Math.abs(v.cost - v.truth) < 1e-3, `${label} ${day}：成本 ${v.cost} 对真值 ${v.truth}`); assert.ok(Math.abs(v.rev - v.revTruth) < 1e-3, `${label} ${day}：收入 ${v.rev} 对真值 ${v.revTruth}`); } };
+const crossRates = [[{ old: 1, new: 3, new2: 2 }, "旧 1 新 3"], [{ old: 3, new: 1, new2: 2 }, "旧 3 新 1"]];
+
+// M1（审核 #146 第 1 轮）：New API → Sub2API，换 Key 在 b 那天 0 点以前（23:50）或以后（0:10）、一个读取服务断了 44 小时的变体——旧绑定那天没有行、新绑定整天，每天对得上
+for (const [cr, lbl] of crossRates) {
+  for (const [tl, tIso] of [["23:50 换", "2026-10-11T15:50:00Z"], ["0:10 换", "2026-10-11T16:10:00Z"]]) test(`K2c 换到另一个上游（New API → Sub2API，${tl}，${lbl}）：每天收入和成本都对得上，旧绑定那天不留一行`, async (t) => {
+    const s = await crossHarness(t, { crate: cr, split: cT("2026-10-11T16:00:00Z"), from: "newapi", to: "sub2api", timeline: [[0, "old"], [cT(tIso), "new"]], rounds: cHourly("2026-10-10T16:30:00Z", "2026-10-13T17:30:00Z"), days: ["2026-10-11", "2026-10-12", "2026-10-13"] });
+    crossExact(s, `${tl} ${lbl}`);
+    assert.ok(!s.out["2026-10-12"].rows.some((row) => row.startsWith("rr_live")), "旧绑定在 b 那天 0 点归档，那天没有行");
+  });
+  test(`K2c 换到另一个上游（New API → Sub2API，读取服务断了 44 小时，${lbl}）：b 那天旧绑定没有行，每天对得上`, async (t) => {
+    const gapRounds = [...cHourly("2026-10-10T16:30:00Z", "2026-10-11T05:30:00Z"), ...cHourly("2026-10-13T01:30:00Z", "2026-10-14T17:30:00Z")];
+    const s = await crossHarness(t, { crate: cr, split: cT("2026-10-12T16:00:00Z"), from: "newapi", to: "sub2api", timeline: [[0, "old"], [cT("2026-10-12T02:10:00Z"), "new"]], rounds: gapRounds, days: ["2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14"] });
+    crossExact(s, `断 44 小时 ${lbl}`);
+  });
+}
+
+// M3（审核 #146 第 2 轮）：旧绑定当天更早换过 Key（开着那段的起点在 0 点以后），再换到 Sub2API 上游——整天规则照样生效：旧绑定那天没有行（不是「收入在旧行、成本在新行」）
+for (const [cr, lbl] of crossRates) test(`K2c 换到另一个上游（旧绑定当天更早换过 Key，再换到 Sub2API，${lbl}）：旧绑定那天没有行，每天对得上`, async (t) => {
+  const s = await crossHarness(t, { crate: { ...cr, old2: cr.old === 1 ? 2 : 1 }, crate2: { old2: 1, old: 1, new: 2, new2: 1 }, from: "newapi", to: "sub2api",
+    timeline: [[0, "old"], [cT("2026-10-11T18:10:00Z"), "old2"], [cT("2026-10-12T07:10:00Z"), "new"]], rounds: cHourly("2026-10-10T16:30:00Z", "2026-10-13T17:30:00Z"), days: ["2026-10-11", "2026-10-12", "2026-10-13"] });
+  crossExact(s, `M3 ${lbl}`);
+  assert.ok(!s.out["2026-10-12"].rows.some((row) => row.startsWith("rr_live")), "旧绑定那天没有行");
+});
+
+// H1（审核 2 / 审核 3 的场景）：绑定 A（rr_two，渠道 2）当天更早握着新 Key K、05:10 换走（不在这次重新分组里），之后渠道 1 换到 K 触发重新分组建了新绑定 B——
+// 渠道 2 在 05:10 以前用 K 的钱已经算给了 A，B 不能再算一遍。New API 目标从 05:10 起算；B 的下限没法干净落下的（旧绑定是 Sub2API 整天交给 B、或新上游是 Sub2API 一天中间切不开）那一天不固定
+for (const [from, to] of [["newapi", "sub2api"], ["sub2api", "sub2api"], ["newapi", "newapi"], ["sub2api", "newapi"]]) for (const [cr, lbl] of crossRates) {
+  test(`K2c 换到另一个上游：新绑定拿到当天早些时候被没牵连的绑定握过的 Key（${from} → ${to}，${lbl}）——不把那一段算两遍`, async (t) => {
+    const s = await crossHarness(t, { crate: cr, crate2: { old: 1, new: 2, new2: 1 }, from, to, channel2: true, timeline2: [[0, "new"], [cT("2026-10-11T21:10:00Z"), "new2"]],
+      timeline: [[0, "old"], [cT("2026-10-12T07:10:00Z"), "new"]], rounds: cHourly("2026-10-10T16:30:00Z", "2026-10-13T17:30:00Z"), days: ["2026-10-11", "2026-10-12", "2026-10-13"] });
+    crossNoOver(s, `${from}→${to} ${lbl}`);
+    crossExact(s, `${from}→${to} ${lbl}`, ["2026-10-11", "2026-10-13"]);
+    if (from === "newapi" && to === "newapi") crossExact(s, `${from}→${to} ${lbl}`, ["2026-10-12"]);
+  });
+}
+
+// 审核 2（#146 第 2 轮）：读别的上游的 Key 失败（换到另一个上游的过渡段）——错误、「更新登录信息」按钮、下一轮重读的标记都记到读失败的那个上游（foreignKeyWindow 给错误带上它的编号；
+// 按钮去哪个上游由 lib/reconciliation-view.test.js 的用例守）。这里守：新上游 401 时旧绑定那天不会写成少了新 Key 的数，而是读不到
+test("K2c 换到另一个上游：过渡段里新上游的 Key 读失败（401）——旧绑定那天不固定成少了新 Key 的数，状态行写原因", async (t) => {
+  globalThis.RVFAILCODE_V = 401;
+  t.after(() => { delete globalThis.RVFAILCODE_V; });
+  const s = await crossHarness(t, { from: "newapi", to: "newapi", fail2: (now) => now >= cT("2026-10-12T16:00:00Z"),
+    timeline: [[0, "old"], [cT("2026-10-12T02:10:00Z"), "new"]], rounds: cHourly("2026-10-10T16:30:00Z", "2026-10-13T17:30:00Z"), days: ["2026-10-12"] });
+  assert.equal(s.f.state.ledger.some((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12" && Number(row.cost_usd) > 0), false, "旧绑定 10-12 没有固定出一个少了新 Key 的数");
+  const [state] = await s.f.repository.listSettlementStates(["rr_live"], { billDates: ["2026-10-12"] });
+  assert.equal(state?.manualReason, "KEY_INVALID_OR_DENIED", "原因是读新上游被拒（要人去更新新上游的登录信息）");
+});
