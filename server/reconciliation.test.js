@@ -6779,23 +6779,6 @@ test("C2b 中-1：重结用账本里记下的汇率和成本计法，不用现�
   assert.deepEqual(revisions(), [[1, 7.2, 7.1], [2, 7.2, 7.1]], "新版的汇率等于旧版");
 });
 
-test("固定成本重结沿用原值（G 审核中-4）：已固定的日子改了购买记录以后重结（读数变了写新版），新版的 fixed_cost_cny 等于旧版", async (t) => {
-  let now = Date.parse("2026-10-09T03:00:00Z");
-  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
-  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
-  const upstream = f.stations.find((station) => station.id === "upstream");
-  upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5; // 每天 10 元
-  await f.module.refreshDue(now);
-  const revisions = () => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").map((row) => [row.revision, Number(row.fixed_cost_cny)]);
-  assert.deepEqual(revisions(), [[1, 10]], "前提：第 1 版记下每天 10 元");
-  upstream.fixedPurchases = [{ amount: 3000, days: 30 }]; // 改成每天 100 元
-  f.state.ownQuota = 200;
-  await f.repository.requestResettle("rr_live", ["2026-10-08"], { now });
-  now += 60000;
-  await f.module.refreshDue(now);
-  assert.deepEqual(revisions(), [[1, 10], [2, 10]], "新版沿用旧版的金额，不按新购买记录重记");
-});
-
 test("C2b 总指挥定的 2：改了绑定以后（C2a 的 blocked 生效），改时间写的重结请求也照样挡，回看不自动结，用户点「重新读取」才结", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
@@ -7470,22 +7453,45 @@ test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率�
   assert.deepEqual([today.rates.costBasis, today.rates.income.cnyPerUsd, today.ledger], ["fixed", 8, undefined]);
 });
 
-test("固定成本跟着每天一起固定（G）：固定成本的上游结账时记下那天摊到的金额（元）；以后改购买记录、汇率，已固定的日子不变，每日利润页的净利也不变", async (t) => {
+test("固定成本跟着每天一起固定（G）：每个固定成本的上游每天一行（金额元和当时汇率），有没有绑定都写、几条绑定共用也只一行；以后改购买记录、汇率，已固定的日子和每日利润页的净利都不变", async (t) => {
   const f = await completedDayFixture(t);
   const upstream = f.stations.find((station) => station.id === "upstream");
   upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5; // 每天 10 元 = $2
+  // 没有绑定的固定上游（服务器租金）：每天 20 元，汇率 4 = $5
+  f.stations.push({ id: "rent", name: "服务器租金", type: "fixed", baseUrl: "", enabled: true, archivedAt: null, fixedPurchases: [{ amount: 600, days: 30 }], cnyPerUsd: 4 });
   await f.module.refreshDue(Date.now());
-  assert.deepEqual(f.state.ledger.map((row) => [row.bill_date, row.cost_basis, Number(row.cost_rate), Number(row.fixed_cost_cny)]), Array(3).fill(["2026-10-08", "fixed", 5, 10]), "三条绑定都记了固定成本那天的金额和汇率");
+  const rows = () => f.repository.tables.fixedCostDays.map((row) => [row.station_id, row.bill_date, Number(row.cost_cny), Number(row.cost_rate)]).sort();
+  assert.deepEqual(rows(), [["rent", "2026-10-08", 20, 4], ["upstream", "2026-10-08", 10, 5]], "三条绑定共用一个上游也只一行；没有绑定的也写");
   const before = await f.module.profitPage({ preset: "yesterday" });
-  assert.equal(before.fixedCostUsd, 2, "同一个固定成本的上游只摊一份，不按绑定数加三遍");
-  // 购买记录改成每天 100 元、汇率改成 1 美元 = 2 元：已固定的昨天不变
+  assert.deepEqual([before.fixedCostUsd, before.fixedCostCny], [2 + 5, 30], "同一个固定成本的上游只摊一份，不按绑定数加三遍");
+  // 购买记录改成每天 100 元、汇率改了：已固定的昨天不变；再跑一轮也不会改写已有的行
   upstream.fixedPurchases = [{ amount: 3000, days: 30 }]; upstream.cnyPerUsd = 2;
+  f.stations.find((station) => station.id === "rent").cnyPerUsd = 8;
   f.rt._reconciliationResultCache.clear();
+  await f.module.refreshDue(Date.now());
+  assert.equal(await f.repository.recordFixedCostDays([{ stationId: "upstream", billDate: "2026-10-08", costCny: 999, costRate: 1 }]), 0, "写过的一天不会被改，也不出第二行");
+  assert.deepEqual(rows(), [["rent", "2026-10-08", 20, 4], ["upstream", "2026-10-08", 10, 5]]);
   const after = await f.module.profitPage({ preset: "yesterday" });
-  assert.equal(after.fixedCostUsd, 2, "改了购买记录和汇率，已固定的日子不变");
-  assert.equal(after.netProfitUsd, before.netProfitUsd);
-  assert.equal(before.fixedCostCny, 10, "接口也给人民币原值：显示人民币时直接用它，不再经汇率折来折去");
-  assert.equal(after.fixedCostCny, 10);
+  assert.deepEqual([after.fixedCostUsd, after.fixedCostCny, after.netProfitUsd], [7, 30, before.netProfitUsd], "改了购买记录和汇率，已固定的日子不变；人民币是记下的原值");
+});
+
+test("固定成本重结不改已固定的那天（G 审核中-4）：已固定的日子改了购买记录以后重结（读数变了写新版），固定成本表里那一行不变、不多一行", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5; // 每天 10 元
+  await f.module.refreshDue(now);
+  // 从最早有账本的那天（10-07）起补，到昨天（10-08）为止
+  const rows = () => f.repository.tables.fixedCostDays.map((row) => [row.bill_date, Number(row.cost_cny)]);
+  assert.deepEqual(rows(), [["2026-10-07", 10], ["2026-10-08", 10]], "前提：从最早有账本的那天起补到昨天，每天 10 元");
+  upstream.fixedPurchases = [{ amount: 3000, days: 30 }]; // 改成每天 100 元
+  f.state.ownQuota = 200;
+  await f.repository.requestResettle("rr_live", ["2026-10-08"], { now });
+  now += 60000;
+  await f.module.refreshDue(now);
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08").length, 2, "读数变了：账本写了第 2 版");
+  assert.deepEqual(rows(), [["2026-10-07", 10], ["2026-10-08", 10]], "固定成本表不变、不多行");
 });
 
 test("结账在途改变成本计法和双边汇率：废弃旧任务，重读后只保存一致的新配置", async (t) => {

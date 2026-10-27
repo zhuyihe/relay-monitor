@@ -72,7 +72,7 @@ const ALL_UPSTREAMS = Array.from({ length: N_UP }, (_, idx) => {
     lowBalance: [7, 23, 41].includes(i) };
 });
 // 固定成本的上游（G：固定成本跟着每天一起固定）：上游 1、2 各被 2 条绑定共用（量「只摊一份」），上游 1 的汇率和别的上游（7.2）不一样（量固定成本折美元用哪个汇率）。
-// 购买记录的起点留空 = 从有账那天起一直摊；种子 02 接入完以后改上游，种子 04 结账时才会记下 fixed_cost_cny
+// 购买记录的起点留空 = 从有账那天起一直摊；种子 02 接入完以后改上游，应用每天（和重启后第一次）把已过去的日子一天一行记进 reconciliation_fixed_cost_days
 export const FIXED_COST_UPSTREAMS = [
   { i: 1, cnyPerUsd: 6.8, fixedPurchases: [{ amount: 3000, days: 30 }] },
   { i: 2, cnyPerUsd: 7.2, fixedPurchases: [{ amount: 1500, days: 30 }, { amount: 900, days: 15 }] },

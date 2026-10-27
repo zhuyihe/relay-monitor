@@ -13,7 +13,7 @@ import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, serializeR
 import { billDayOf } from "../../lib/business-time.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, resettleRequestPlan } from "../../lib/reconciliation-settlement.js";
 import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
-import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
+import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, fixedCostDayFromRow, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
   uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow,
@@ -34,6 +34,7 @@ const TABLE_NAMES = {
   ledger: "reconciliation_ledger",
   settlementState: "reconciliation_settlement_state",
   segmentKeys: "reconciliation_segment_keys",
+  fixedCostDays: "reconciliation_fixed_cost_days",
 };
 
 // 与 db/pool.js 的建表语句保持一致。
@@ -80,6 +81,11 @@ const SCHEMA = {
     keys: { PRIMARY: ["segment_id", "upstream_station_id", "token_id"], uq_segment_key_active: ["active_token_key"] },
     notNull: ["segment_id", "upstream_station_id", "token_id", "match_source"],
     varchar: { segment_id: 32, upstream_station_id: 32, token_name: 160, key_mask: 64, match_source: 16, active_token_key: 255 },
+  },
+  fixedCostDays: {
+    keys: { PRIMARY: ["station_id", "bill_date"] },
+    notNull: ["station_id", "bill_date", "cost_cny"],
+    varchar: { station_id: 32, note: 64 },
   },
   settlementState: {
     keys: { PRIMARY: ["rule_id", "bill_date"] },
@@ -145,9 +151,9 @@ export class MemoryReconciliationRepository {
   //   beforeCommit(tx) / afterCommit(tx)
   //   beforeCapabilityWrite(method, identity)  保存或删除账单能力前，可以抛错模拟写入失败
   // tx 是 { name, snapshots: [{ ruleId, snapshotKey, source }], archivedRuleIds }。
-  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], settlementState = [], segmentKeys = [], now = () => Date.now(), hooks = {} } = {}) {
+  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], settlementState = [], segmentKeys = [], fixedCostDays = [], now = () => Date.now(), hooks = {} } = {}) {
     this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts], capabilities: [...capabilities], ledger: [...ledger],
-      settlementState: [...settlementState], segmentKeys: [...segmentKeys] };
+      settlementState: [...settlementState], segmentKeys: [...segmentKeys], fixedCostDays: [...fixedCostDays] };
     this.now = now;
     this.hooks = hooks;
     // snapshotWrites / ratioWrites / channelStateWrites 按语句记录，包括之后被回滚的写入。
@@ -681,6 +687,33 @@ export class MemoryReconciliationRepository {
     this.#update(null, "ledger", [entry], { expected_cost_usd: expectedCostUsd == null ? null : ledgerDecimal(expectedCostUsd, LEDGER_DECIMAL_SCALE.expected_cost_usd), gap_reason: gapReason, tokens,
       detail: JSON.stringify({ ...detail, expected }) });
     return true;
+  }
+
+  // INSERT IGNORE：已经有这一天的行就跳过（和 MySQL 一样不改）
+  async recordFixedCostDays(rows) {
+    if (!rows?.length) return 0;
+    await this.#read("recordFixedCostDays", [rows]);
+    let written = 0;
+    for (const row of rows) {
+      if (this.#plain("fixedCostDays").some((item) => sameText(item.station_id, row.stationId) && item.bill_date === row.billDate)) continue;
+      this.#insert(null, "fixedCostDays", { station_id: String(row.stationId), bill_date: row.billDate, cost_cny: ledgerDecimal(row.costCny, 8) ?? "0.00000000", cost_rate: ledgerDecimal(row.costRate, 6), note: row.note ?? null });
+      written += 1;
+    }
+    return written;
+  }
+
+  async listFixedCostDays(stationIds, fromDate, toDate) {
+    if (!stationIds?.length) return [];
+    await this.#read("listFixedCostDays", [stationIds, fromDate, toDate]);
+    const wanted = new Set(stationIds.map(String));
+    return this.#plain("fixedCostDays").filter((row) => wanted.has(String(row.station_id)) && row.bill_date >= fromDate && row.bill_date <= toDate)
+      .sort((a, b) => compare(a.bill_date, b.bill_date) || compareText(a.station_id, b.station_id)).map(fixedCostDayFromRow);
+  }
+
+  async earliestLedgerDate() {
+    await this.#read("earliestLedgerDate", []);
+    const dates = this.#plain("ledger").map((row) => row.bill_date).sort(compare);
+    return dates[0] ?? null;
   }
 
   async listLedgerDayFacts(ruleIds, fromDate, toDate) {
