@@ -28,6 +28,8 @@ export const COPY = Object.freeze({
     netToday: (fixedCost: string, net: string) => `扣今天的固定成本 ${fixedCost} 后，净利 ${net}`,
     net: (fixedCost: string, net: string) => `扣固定成本 ${fixedCost} 后，净利 ${net}`,
     netUnknown: "固定成本算不出，净利先不算",
+    // 净利那一行的悬停（用语规范 §9）：只挂在每日利润页，别的页的固定成本还跟着现在的购买记录走
+    fixedHover: "固定成本按天平摊，那天固定时一起记下；改了固定成本，已固定的日子不变，还没固定的按新的算",
     // 按人民币显示时固定成本是按自营站点的汇率换的（用语规范 §7）
     approx: (money: string) => `≈ ${money}`,
     gapToday: "今天的差额",

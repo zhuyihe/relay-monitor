@@ -3198,7 +3198,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 固定成本（lib/profit-page.js fixedCostOfRange）：已固定的日子用账本里那天记下的金额和汇率（G：固定成本跟着每天一起固定，
       // 以后改了购买记录已固定的日子不变）；还没固定的日子按现在的算；自营站点关着收费记录碰到的日子不扣（决定记录 58）。
       // 没设汇率的固定上游：readResponse 的 unconfiguredRateStations 不含固定上游（那条路不摊固定成本，没必要提示），单独收集、和它的点名去重合并（审核 #126 M6）
-      const { usd: fixedCostUsd, rateUnset: fixedRateUnset } = fixedCostOfRange({ stations: usageUpstreams()?.fixed || [], results, labels, window, now, tz, dayFacts,
+      const { usd: fixedCostUsd, cny: fixedCostCny, rateUnset: fixedRateUnset } = fixedCostOfRange({ stations: usageUpstreams()?.fixed || [], results, labels, window, now, tz, dayFacts,
         offPeriodsOf: (ownStationId) => upstreamStation(ownStationId)?.consumeLogOffPeriods });
       // 整站收入读不到：从各绑定的 health.issues 扫（不另发请求，运营总览走的是现读一次 computeProfit，这里只有结果里带着的问题可查，
       // 审核 #126 M5 要的「同一份」做不到不额外读站点；改法：自营站点侧的令牌类问题（ACCESS_TOKEN_*）也算进来，不只挑第一条、按最新一个）
@@ -3210,7 +3210,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const unaccountedUpstreamCostUsd = response.unaccountedUpstream?.totalUsd ?? null;
       const rateUnsetIds = new Set();
       const rateUnset = [...(response.unconfiguredRateStations || []), ...fixedRateUnset].filter((station) => (rateUnsetIds.has(station.id) ? false : (rateUnsetIds.add(station.id), true)));
-      return { ...page, asOf: response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd,
+      return { ...page, asOf: response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd, fixedCostCny,
         netProfitUsd: page.pageTotals.grossProfitUsd != null && fixedCostUsd != null ? page.pageTotals.grossProfitUsd - fixedCostUsd : null,
         ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
         unaccountedUpstreamCostUsd,

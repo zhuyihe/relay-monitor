@@ -135,7 +135,7 @@ export type ProfitPageResponse = {
   latestSettledGap: { day: string; usd: number | null; mismatchedRowCount: number } | null;
   counts: { channels: number; countedChannels: number; mismatchedChannels: number; attentionChannels: number; uncomputable: Record<string, number>; mismatchedDays: { over: number; under: number } };
   gapThreshold: { usd: number; rate: number }; rows: ProfitRow[];
-  asOf: string; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; netProfitUsd: number | null;
+  asOf: string; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; fixedCostCny?: number | null; netProfitUsd: number | null;
   ownIncomeUnavailable: { code: string } | null; unaccountedUpstreamCostUsd: number | null; unlinkedChannelCount: number;
   rateUnset: { id: string; name: string }[]; fixedOffProfitStations: { id: string; name: string }[];
 };

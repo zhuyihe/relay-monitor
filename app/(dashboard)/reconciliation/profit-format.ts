@@ -65,7 +65,8 @@ export function pageMoney(page: ProfitPageResponse, currency: ReconciliationCurr
   const over = sum(judged.map((row) => dayGap(row, "over"))), under = -sum(judged.map((row) => dayGap(row, "under")));
   // 固定成本接口只给美元（各上游按自己的汇率换过来的），这里按自营站点的汇率换回去只能是近似；没有汇率时不写
   const ownRate = page.rows.find((row) => finite(row.rates?.income))?.rates.income ?? null;
-  const fixedCost = toDisplay(page.fixedCostUsd, ownRate, currency);
+  // 显示人民币：直接用接口给的人民币原值；显示美元：用各上游自己的汇率折好的美元数（不经自营站点的汇率）
+  const fixedCost = currency === "CNY" && page.fixedCostCny !== undefined ? page.fixedCostCny : toDisplay(page.fixedCostUsd, ownRate, currency);
   const latestRows = page.latestSettledGap ? page.rows.filter((row) => row.latestSettledGap?.day === page.latestSettledGap!.day && row.latestSettledGap?.usd != null) : [];
   return { income, actual, gross, fixedCost, net: gross != null && fixedCost != null ? gross - fixedCost : null,
     gap, over, under, within: gap == null ? 0 : gap - over + under,

@@ -56,6 +56,13 @@ const todayPage = (overrides = {}) => page({ range: { preset: "today", startMs: 
 const weekPage = (overrides = {}) => page({ range: { preset: "7d", startMs: dayStartInTz(D("10-20"), TZ), endMs: NOW, timezone: TZ }, dayCounts: { fixed: 6, reading: 0, today: 1 },
   gap: { days: { first: D("10-20"), last: D("10-25"), count: 6, contiguous: true }, expectedCostUsd: 300, actualCostUsd: 301.65, usd: 1.65, overUsd: 2.1, underUsd: 0.5, withinUsd: 0.05, rowCount: 5 }, ...overrides });
 
+test("按人民币显示：固定成本直接用接口给的人民币原值，不拿美元再按自营站点汇率折回（两边汇率不同也不变）", () => {
+  const r = row(); r.rates = { ...r.rates, income: 7.2 };
+  const p = page({ rows: [r], fixedCostUsd: 700 / 6.8, fixedCostCny: 700, displayCurrency: "CNY" });
+  assert.equal(pageMoney(p, "CNY").fixedCost, 700);
+  assert.equal(pageMoney(p, "USD").fixedCost, 700 / 6.8);
+});
+
 test("差额那一格（§5.7）：多扣 / 少扣带百分比和「对不上」；门槛以内灰字写数；今天「明天出」；算不了写「—」和原因", () => {
   const p = page();
   assert.deepEqual(gapCell(row(), p, ctx), { main: "多扣 $1.20", sub: "比应付多 15%", tag: true, tone: "over", muted: false });
