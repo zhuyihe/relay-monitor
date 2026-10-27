@@ -2144,6 +2144,18 @@ contract("keyHeldUntil (L1): the latest end of a closed segment holding this key
   assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, fixture.token(999)), null, "没握过的 Key");
   assert.equal(await repository.keyHeldUntil("other-own", a.upstreamStationId, a.tokenId), null, "别的自营站点的不算");
   assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, a.tokenId, { sinceMs: end + 1 }), null, "sinceMs 以前结束的不算");
+  assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, a.tokenId, { excludeRuleId: a.id }), null, "excludeRuleId：不算这条绑定自己的段");
+  assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, a.tokenId, { untilMs: end - 1 }), null, "untilMs 以后结束的不算");
+});
+
+contract("keyHeldUntil (#155、#150 中-1): a stopped binding's last segment is never closed — it still counts as holding the key until the moment it was stopped (New API), so a key moved to another binding the same day is not seen as free", async ({ repository, fixture }) => {
+  const a = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:h2`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(243), name: "A" }] });
+  assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, a.tokenId), null, "还在算：没有结束时刻");
+  const stoppedAt = Date.now() - 5000;
+  assert.equal(await repository.archiveRule(a.id, { now: stoppedAt }), true);
+  assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, a.tokenId), stoppedAt, "停了的绑定，最后一段没关：握到停的那一刻");
+  assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, a.tokenId, { sinceMs: stoppedAt + 1 }), null, "停在 sinceMs 以前的不算");
+  assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, a.tokenId, { excludeRuleId: a.id }), null);
 });
 
 contract("createRule (K2c-1): a key whose segment in another binding closed earlier today — the new binding's floor is that segment's end (New API, revenue and cost both start there); a Sub2API new binding starts the next day (the day cannot be cut)", async ({ repository, fixture }) => {

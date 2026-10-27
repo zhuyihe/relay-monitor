@@ -4,7 +4,7 @@ import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } fr
 import { LEDGER_DAY_FACT_COLUMNS, RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerDayFactFromRow, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
 import { refreshSegmentKeysSql, fillMissingSegmentKeysSql } from "../db/segment-keys.js";
-import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
+import { accountingFloorFor, applyScopePolicy, heldUntilOf, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
 import { billDayOf } from "../lib/business-time.js";
 import { BILLING_CAPABILITY_IDENTITY_SCHEME } from "../lib/billing-capability-storage.js";
@@ -426,13 +426,9 @@ export class ReconciliationRepository {
         }
         // 这把 Key 今天早些时候被这个自营站点下别的绑定握过、那些段已经关掉了（那条绑定换 Key、挪 Key 开的段，在算的和已停的都算）：
         // 取最晚的结束时刻，新绑定从那一刻起算（下限管整条绑定，收入和成本都从下限算）
-        const [heldRows] = await conn.query(
-          `SELECT MAX(s.effective_to_ms) AS held_until FROM reconciliation_rule_segments s
-             JOIN reconciliation_segment_keys k ON k.segment_id = s.id JOIN reconciliation_rules r ON r.id = s.rule_id
-            WHERE r.own_station_id = ? AND k.upstream_station_id = ? AND k.token_id = ? AND s.effective_to_ms IS NOT NULL AND s.effective_to_ms >= ?`,
-          [input.ownStationId, input.upstreamStationId, input.tokenId, dayAgo]);
+        const keyHeldUntilMs = await this.keyHeldUntil(input.ownStationId, input.upstreamStationId, input.tokenId, { sinceMs: dayAgo, conn });
         accountingFloor = accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels,
-          keyHeldUntilMs: heldRows[0]?.held_until == null ? null : Number(heldRows[0].held_until) }, archivedPeers);
+          keyHeldUntilMs }, archivedPeers);
       }
       await conn.query(
         `INSERT INTO reconciliation_rules
@@ -585,13 +581,18 @@ export class ReconciliationRepository {
 
   // 这个自营站点下，这把 Key 已经关掉的段（在算的、已停的绑定都算）里最晚的结束时刻；从没被握过是 null。每把 Key 恰好算一次：换 Key 时新 Key 在这条绑定里
   // 最早从这一刻算起。只按这把 Key 查（走 idx_segment_key_token(upstream_station_id, token_id)），不读整个站点所有绑定的所有段
-  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null, conn = null } = {}) {
+  //
+  // 已停的绑定（archived_at_ms）最后一段没有关（停的时候不改段）：按停的那一刻算它握到什么时候（segmentHeldEndMs，New API 到停的那一刻、Sub2API 到停的那天 0 点），
+  // 不然「A 停了、这把 Key 当天挪给 B」会看不见 A 握过（审核 #155、#150 第 1 轮中-1）。excludeRuleId：不算这条绑定自己的段；untilMs：只要不晚于这个时刻的
+  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null, untilMs = null, excludeRuleId = null, conn = null } = {}) {
+    const since = sinceMs ?? 0;
     const [rows] = await (conn || this.pool).query(
-      `SELECT MAX(s.effective_to_ms) AS held_until FROM reconciliation_segment_keys k
+      `SELECT s.effective_to_ms, r.archived_at_ms, r.provider, r.timezone FROM reconciliation_segment_keys k
          JOIN reconciliation_rule_segments s ON s.id = k.segment_id JOIN reconciliation_rules r ON r.id = s.rule_id
-        WHERE k.upstream_station_id = ? AND k.token_id = ? AND r.own_station_id = ? AND s.effective_to_ms IS NOT NULL AND s.effective_to_ms >= ?`,
-      [upstreamStationId, tokenId, ownStationId, sinceMs ?? 0]);
-    return rows[0]?.held_until == null ? null : Number(rows[0].held_until);
+        WHERE k.upstream_station_id = ? AND k.token_id = ? AND r.own_station_id = ? AND (? IS NULL OR r.id <> ?)
+          AND ((s.effective_to_ms IS NOT NULL AND s.effective_to_ms >= ?) OR (s.effective_to_ms IS NULL AND r.archived_at_ms IS NOT NULL AND r.archived_at_ms >= ?))`,
+      [upstreamStationId, tokenId, ownStationId, excludeRuleId, excludeRuleId, since, since]);
+    return heldUntilOf(rows.map((row) => ({ effectiveToMs: row.effective_to_ms, archivedAtMs: row.archived_at_ms, provider: row.provider, timezone: row.timezone })), { sinceMs: since, untilMs });
   }
 
   // 几条绑定的分段一次读出来（换 Key 时找这把 Key 上一个持有者的段、「渠道」页签的「用过的 Key」）：{ [ruleId]: 分段[] }，一条查询，不按绑定逐条读

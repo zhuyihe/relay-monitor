@@ -9,7 +9,7 @@
 // - 单表 UPDATE 的 SET 从左到右求值，后面的表达式读到的是前面刚赋的新值。
 // - 读取结果是新对象，JSON 列像 mysql2 一样解析成新对象，调用方改了也不影响存储。
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../../lib/reconciliation-snapshot.js";
-import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
+import { accountingFloorFor, applyScopePolicy, heldUntilOf, isScopedBillingPolicy, serializeRuleSourceBinding } from "../../lib/reconciliation-scope-policy.js";
 import { billDayOf } from "../../lib/business-time.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, resettleRequestPlan } from "../../lib/reconciliation-settlement.js";
 import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
@@ -218,10 +218,7 @@ export class MemoryReconciliationRepository {
       // 同一天里更早解除的占着同一个渠道（或同一把 Key）的 New API 绑定：新绑定从那一刻起算（C3，同 MySQL 版）
       const archivedPeers = this.#plain("rules").filter((row) => row.archived_at != null).map((row) => ruleFromRow(fresh(row), this.#channelsOf(tx, row.id)));
       // 这把 Key 今天早些时候被这个自营站点下别的绑定握过、那些段已经关掉了：新绑定从最晚的结束时刻起算（同 MySQL 版）
-      const ruleOwner = new Map(this.#plain("rules").map((row) => [row.id, row.own_station_id]));
-      const heldSegments = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && ruleOwner.get(segment.rule_id) === input.ownStationId
-        && this.#plain("segmentKeys").some((key) => key.segment_id === segment.id && key.upstream_station_id === input.upstreamStationId && Number(key.token_id) === Number(input.tokenId)));
-      const keyHeldUntilMs = heldSegments.length ? Math.max(...heldSegments.map((segment) => Number(segment.effective_to_ms))) : null;
+      const keyHeldUntilMs = this.#heldUntil(input.ownStationId, input.upstreamStationId, input.tokenId, {});
       const accountingFloor = floorOverride !== undefined ? floorOverride : isScopedBillingPolicy(input.billingPolicy)
         ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels,
           keyHeldUntilMs }, archivedPeers) : null;
@@ -539,15 +536,15 @@ export class MemoryReconciliationRepository {
     });
   }
 
-  // 对应 MySQL 版 keyHeldUntil
-  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null } = {}) {
+  // 对应 MySQL 版 keyHeldUntil（已停的绑定最后一段没关，按停的那一刻算：segmentHeldEndMs）
+  #heldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null, untilMs = null, excludeRuleId = null }) {
     const rules = new Map(this.#plain("rules").map((row) => [row.id, row]));
-    const ends = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && Number(segment.effective_to_ms) >= (sinceMs ?? 0)
-      && rules.get(segment.rule_id)?.own_station_id === ownStationId
+    const segments = this.#plain("segments").filter((segment) => rules.get(segment.rule_id)?.own_station_id === ownStationId && segment.rule_id !== excludeRuleId
       && this.#plain("segmentKeys").some((key) => key.segment_id === segment.id && key.upstream_station_id === upstreamStationId && Number(key.token_id) === Number(tokenId)))
-      .map((segment) => Number(segment.effective_to_ms));
-    return ends.length ? Math.max(...ends) : null;
+      .map((segment) => { const rule = rules.get(segment.rule_id); return { effectiveToMs: segment.effective_to_ms, archivedAtMs: rule.archived_at_ms ?? null, provider: rule.provider ?? null, timezone: rule.timezone }; });
+    return heldUntilOf(segments, { sinceMs: sinceMs ?? 0, untilMs });
   }
+  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, options = {}) { return this.#heldUntil(ownStationId, upstreamStationId, tokenId, options); }
 
   // 对应 MySQL 版 addKeyBlock
   async addKeyBlock(ruleId, block, { clearIssue = false } = {}) {
