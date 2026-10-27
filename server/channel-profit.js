@@ -160,6 +160,22 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     return { started };
   }
 
+  // 回答「这把 Key 还给别处用吗？」（「渠道」页签的「去回答」，在算的渠道、没回答或要改答案时）：走绑定编辑已有的「预览 + 保存」（预览依据核对），
+  // 渠道、Key 都不变，只改回答。回答「只给这些渠道用」以后，绑定上没算的几天（从开始算起）靠回看补结
+  async function answerCoverage({ ownStationId, ruleId, coverage }) {
+    ownStationOf(ownStationId);
+    const rule = (await reconciliation().listRules()).find((item) => item.id === ruleId && item.enabled && !item.archivedAt && item.ownStationId === ownStationId);
+    if (!rule) throw codedError("RULE_NOT_FOUND", "这个渠道已经停止算利润了，请刷新");
+    let declaration;
+    try { declaration = normalizeCoverageDeclaration(coverage); } catch { throw codedError("INVALID_REQUEST", "请回答「这把 Key 还给别处用吗？」"); }
+    const body = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, salesChannelIds: rule.channels.map((channel) => Number(channel.channelId)),
+      timezone: rule.timezone, enabled: true, coverageDeclaration: declaration };
+    const proof = await onboarding().probeRuleEdit(ruleId, body);
+    const previewGuard = onboarding().getPreviewGuard(proof.previewId, proof.groupId);
+    await reconciliation().updateRule(ruleId, body, { previewGuard });
+    return { ruleId, answer: declaration.answer };
+  }
+
   // 停止算利润：这几个渠道所在的绑定整条归档（同一把 Key 的渠道一起停，一个勾），同一个事务把它的渠道记成「用户停的」；
   // 没在算的渠道（第 3 步里取消勾的）只记「用户不要算」。已经算出来的日子留着，以后可以再点「开始算利润」
   async function stop({ ownStationId, channelIds }) {
@@ -203,7 +219,9 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
 
     const cards = live.map((rule) => {
       const channelIds = rule.channels.map((channel) => Number(channel.channelId));
-      const issues = [...(rule.keyIssue ? [rule.keyIssue.code] : []), ...(coverageNeedsAnswer(rule, "usage") ? ["COST_COVERAGE_UNKNOWN"] : [])];
+      // 没回答（或答了不确定）：COST_COVERAGE_UNKNOWN；答了「别处也在用」：COST_SHARED_ELSEWHERE（用语规范 §5.2 回答以后这条事换成什么）
+      const issues = [...(rule.keyIssue ? [rule.keyIssue.code] : []),
+        ...(coverageNeedsAnswer(rule, "usage") ? [rule.coverageDeclaration?.answer === "other_use" ? "COST_SHARED_ELSEWHERE" : "COST_COVERAGE_UNKNOWN"] : [])];
       return { id: `rule:${rule.id}`, state: issues.length ? "attention" : "running", upstreamStationId: rule.upstreamStationId, channelIds,
         names: rule.channels.map((channel) => channelName(Number(channel.channelId), channel.name)), ruleId: rule.id, tokenName: rule.tokenName ?? null,
         startedBy: rule.startSource === "auto" ? "auto" : "user", startedAtMs: Number.isFinite(rule.billingEffectiveFrom) ? rule.billingEffectiveFrom : Date.parse(rule.createdAt) || null,
@@ -232,5 +250,5 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     return { ok: true, reader, upstreams, cards, unmatched };
   }
 
-  return { status, overview, start, stop, autoStart };
+  return { status, overview, start, stop, answerCoverage, autoStart };
 }

@@ -4,7 +4,7 @@ import { createChannelProfitModule } from "../../../../server/channel-profit.js"
 import { connectionDiagnostic } from "../../../../lib/connection-test.js";
 
 // 按渠道开始/停止算利润（K2c）。登录由路由那一层包好；这一层只管请求格式、错误码和模块的接线，方便单独测
-// operation：status、overview（GET，?ownStationId=）/ start / stop（POST）。overview 是「渠道」页签要的整份数据（上游 → 渠道 → 用过的 Key）
+// operation：status、overview（GET，?ownStationId=）/ start / stop / answer（POST）。overview 是「渠道」页签要的整份数据（上游 → 渠道 → 用过的 Key）
 export async function handleChannelProfitRequest(request, rt, operation) {
   let body = {};
   const search = new URL(request.url).searchParams;
@@ -22,6 +22,7 @@ export async function handleChannelProfitRequest(request, rt, operation) {
     const result = operation === "status" ? await module.status(ownStationId)
       : operation === "overview" ? await module.overview(ownStationId)
       : operation === "start" ? await module.start({ ownStationId, channelIds: body.channelIds, coverage: body.coverage })
+        : operation === "answer" ? await module.answerCoverage({ ownStationId, ruleId: body.ruleId, coverage: body.coverage })
         : await module.stop({ ownStationId, channelIds: body.channelIds });
     return Response.json(result);
   } catch (error) {

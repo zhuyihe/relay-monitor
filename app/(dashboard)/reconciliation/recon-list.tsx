@@ -27,7 +27,7 @@ type ListState = ReturnType<typeof useReconResults>;
 const expandable = (item: any) => hasReconciliationHistory(ruleHistory(item));
 
 // 绑定渠道的地方（§3.1 渠道绑定）
-const CONNECT_HREF = "/stations?view=onboarding";
+const CONNECT_HREF = "/stations?view=channels";
 
 export function ReconList({ results, keyName: ruleKeyName, list, currency, upstreams, compact, error, ownStation, asOf, retryingRuleIds, ruleRetryErrors, onDetail, onRetry }: {
   results: any[]; keyName: (rule: any) => string; list: ListState; currency: ReconciliationCurrency; upstreams: any; compact: boolean; error: unknown; ownStation: boolean; asOf: string;

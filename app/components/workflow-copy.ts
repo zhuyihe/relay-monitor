@@ -18,7 +18,7 @@ export function workflowOwner(action: any, nameOf: (id: string) => string | unde
   if (action.ownStationId && nameOf(String(action.ownStationId))) return nameOf(String(action.ownStationId))!;
   if (action.accountKey) return "上游账号";
   if (action.href?.startsWith("/reconciliation")) return NAV_LABELS.reconciliation;
-  return STATION_TABS.bills;
+  return STATION_TABS.channels;
 }
 
 // 合并到同一行里的其余事项，用一句短语交代

@@ -228,3 +228,25 @@ test("overview：没回答的绑定进需处理（COST_COVERAGE_UNKNOWN）；别
   const free = view.cards.find((item) => item.id === "key:up2:22");
   assert.deepEqual([free.state, free.channelIds, free.needsCoverage], ["stopped", [2], true]);
 });
+
+test("overview：答了「别处也在用」的渠道需处理写 COST_SHARED_ELSEWHERE（利润先不算，要换 Key 或停止），不再是没回答的那一条", async () => {
+  const f = overviewFixture({ channels: [1], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }],
+    rules: [live("r1", [1], { costCoverage: "unknown", coverageDeclaration: { answer: "other_use", otherUse: "external" } })] });
+  const view = await f.module.overview("own");
+  assert.deepEqual(view.cards.map((card) => [card.state, card.issues]), [["attention", ["COST_SHARED_ELSEWHERE"]]]);
+});
+
+test("answerCoverage：只改在算的绑定的回答——走绑定编辑的「预览 + 保存」（渠道、Key 都不变）；没在算的、回答不对都不写", async () => {
+  const f = fixture({ channels: [1, 2], identified: [], rules: [{ ...running("r1", [1, 2]), upstreamStationId: "up2", tokenId: 22, timezone: "Asia/Shanghai" }] });
+  const calls = [];
+  f.rt.channelOnboarding.probeRuleEdit = async (id, body) => { calls.push(["probe", id, body]); return { previewId: "p1", groupId: "g1" }; };
+  f.rt.channelOnboarding.getPreviewGuard = (previewId, groupId) => ({ previewId, groupId });
+  f.rt.reconciliation.updateRule = async (id, body, options) => { calls.push(["update", id, body, options]); return { id }; };
+  const result = await f.module.answerCoverage({ ownStationId: "own", ruleId: "r1", coverage: { answer: "none" } });
+  assert.deepEqual(result, { ruleId: "r1", answer: "none" });
+  const body = { upstreamStationId: "up2", tokenId: 22, salesChannelIds: [1, 2], timezone: "Asia/Shanghai", enabled: true, coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] } };
+  assert.deepEqual(calls, [["probe", "r1", body], ["update", "r1", body, { previewGuard: { previewId: "p1", groupId: "g1" } }]]);
+  await assert.rejects(f.module.answerCoverage({ ownStationId: "own", ruleId: "r-gone", coverage: { answer: "none" } }), { code: "RULE_NOT_FOUND" });
+  await assert.rejects(f.module.answerCoverage({ ownStationId: "own", ruleId: "r1", coverage: { answer: "bogus" } }), { code: "INVALID_REQUEST" });
+  assert.equal(calls.length, 2, "答案不对不去预览");
+});

@@ -67,63 +67,53 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-stations-m-issue { grid-column: 1 / -1; margin-top: 6px; }
 .jy-stations-m-issue .jy-stations-issue { position: static; }
 
-/* 渠道接入（main 的共享组件，内部仍是 antd 原生件）：去掉组件自带的外边距，折叠面板对齐新版面板 */
-.jy-stations-onboarding { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.jy-stations-onboarding:empty { display: none; }
-.jy-stations-onboarding > * { margin-bottom: 0 !important; }
-.jy-stations-onboarding > .ant-collapse { background: var(--jy-sheet); border-color: var(--jy-rule); border-radius: var(--jy-r2); overflow: hidden; }
-.jy-stations-onboarding > .ant-collapse > .ant-collapse-item { border-color: var(--jy-rule); }
-.jy-stations-onboarding > .ant-collapse > .ant-collapse-item > .ant-collapse-header { padding: 16px 24px; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--jy-ink); }
-.jy-stations-onboarding > .ant-collapse .ant-collapse-content { background: var(--jy-sheet); border-color: var(--jy-rule-soft); }
-
-/* 上游账单 */
-.jy-accounts-body { display: flex; flex-direction: column; gap: 16px; overflow-wrap: anywhere; }
-.jy-accounts-body > .jy-caption { margin: 0; }
-.jy-accounts-toolbar .ant-input-affix-wrapper { width: 320px; max-width: 100%; }
-.jy-accounts-filter { width: 130px; }
-.jy-accounts-skeleton { display: flex; flex-direction: column; gap: 12px; }
-.jy-accounts-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.jy-accounts-line { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
-.jy-accounts-line b { font-weight: 600; color: var(--jy-ink); }
-.jy-accounts-site h3, .jy-accounts-unverified h3 { margin: 0 0 8px; font-size: 13px; line-height: 20px; font-weight: 600; color: var(--jy-ink-2); }
-.jy-accounts-collapse.ant-collapse { background: var(--jy-sheet); border-color: var(--jy-rule); border-radius: var(--jy-r2); }
-.jy-accounts-collapse.ant-collapse > .ant-collapse-item { border-color: var(--jy-rule); }
-.jy-accounts-collapse.ant-collapse .ant-collapse-content { border-color: var(--jy-rule-soft); }
-.jy-accounts-account { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.jy-accounts-account p, .jy-accounts-resource p, .jy-accounts-unverified p { margin: 0; }
-.jy-accounts-pending { font-size: 13px; line-height: 20px; color: var(--jy-ink-2); }
-.jy-accounts-group { display: flex; flex-direction: column; }
-.jy-accounts-resource { display: flex; flex-direction: column; gap: 4px; padding: 12px 0; border-bottom: 1px solid var(--jy-rule-soft); min-width: 0; }
-.jy-accounts-resource:last-child { border-bottom: 0; }
-.jy-accounts-resource .jy-accounts-actions { margin-top: 4px; }
-.jy-accounts-keys.ant-collapse > .ant-collapse-item > .ant-collapse-header { padding-inline: 0; }
-.jy-accounts-keys.ant-collapse .ant-collapse-content-box { padding-inline: 0; }
-.jy-accounts-key { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.jy-accounts-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 16px; margin: 0; font-size: 13px; line-height: 20px; }
-.jy-accounts-facts dt { color: var(--jy-ink-3); white-space: nowrap; }
-.jy-accounts-facts dd { margin: 0; color: var(--jy-ink); }
-/* Key 下的核算关联：每条一行，处理目标指向的那条用色条标出 */
-.jy-accounts-associations { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
-.jy-accounts-association { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); min-width: 0; }
-.jy-accounts-association.is-focused { border-color: var(--jy-cobalt); box-shadow: inset 3px 0 0 var(--jy-cobalt); background: var(--jy-cobalt-tint); }
-.jy-accounts-empty { margin: 0; padding: 16px; border-radius: var(--jy-r2); background: var(--jy-sunken); text-align: center; color: var(--jy-ink-2); font-size: 13px; }
-.jy-accounts-unverified { display: flex; flex-direction: column; gap: 8px; padding-top: 16px; border-top: 1px solid var(--jy-rule-soft); }
-.jy-accounts-unverified h3 { margin: 0; }
-.jy-accounts-unverified-item { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 12px 16px; border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); }
-.jy-accounts-unverified-item > .jy-accounts-resource { align-self: stretch; padding-top: 4px; border-bottom: 0; }
-.jy-accounts-purpose { display: flex; flex-direction: column; gap: 12px; }
-.jy-accounts-purpose p { margin: 0; }
-.jy-accounts-inspect .jy-panel-body { display: flex; flex-direction: column; padding-top: 4px; }
+/* 「渠道」页签（K2d）：左 4 列上游列表、右 8 列选中的上游下面的渠道（ui-design-spec §1.4 第 3 条）；手机单栏 */
+.jy-channels { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.jy-channels-grid { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 8fr); gap: 16px; align-items: start; }
+.jy-channels-loading { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
+.jy-count { font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
+.jy-channels-upstreams { margin: 0; padding: 0; list-style: none; }
+.jy-channels-upstream {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; width: 100%; padding: 12px 16px;
+  border: 0; border-bottom: 1px solid var(--jy-rule-soft); border-left: 3px solid transparent; background: none; font: inherit; text-align: left; cursor: pointer; color: var(--jy-ink);
+}
+.jy-channels-upstream:hover { background: var(--jy-sunken); }
+.jy-channels-upstream.is-selected { background: var(--jy-cobalt-tint); border-left-color: var(--jy-cobalt); }
+.jy-channels-upstream__name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 8px; }
+.jy-channels-upstream__sub { grid-column: 1 / -1; }
+.jy-channels-unmatched { padding: 12px 16px 4px; background: var(--jy-sunken); }
+.jy-channels-unmatched h3 { margin: 0 0 8px; font-size: 12px; line-height: 18px; font-weight: 600; color: var(--jy-ink-2); }
+.jy-channels-unmatched ul { margin: 0; padding: 0; list-style: none; }
+.jy-channels-unmatched li { padding: 8px 0 12px; }
+.jy-channels-unmatched p { margin: 2px 0 0; }
+.jy-channels-unmatched__row { display: flex; align-items: center; gap: 8px; }
+.jy-channels-cards { display: flex; flex-direction: column; gap: 12px; padding: 16px; min-width: 0; }
+.jy-channels-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border: 1px solid var(--jy-rule); border-radius: var(--jy-r2); min-width: 0; }
+.jy-channels-card[data-state="attention"] { border-color: var(--jy-rule); }
+.jy-channels-card__head { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.jy-channels-card__head h3 { margin: 0; font-size: 14px; line-height: 22px; font-weight: 600; color: var(--jy-ink); overflow-wrap: anywhere; }
+.jy-channels-card p { margin: 0; }
+.jy-channels-issue { display: flex; align-items: flex-start; gap: 8px; padding: 8px 12px; border-radius: var(--jy-r1); background: var(--jy-sunken); }
+.jy-channels-issue__body { flex: 1 1 0; min-width: 0; }
+.jy-channels-issue__body b { font-weight: 600; color: var(--jy-ink); }
+.jy-channels-issue__body p { margin-top: 2px; }
+.jy-channels-keys ul { margin: 0; padding: 0; list-style: none; }
+.jy-channels-keys__title { font-size: 12px; line-height: 18px; font-weight: 600; color: var(--jy-ink-2); }
+.jy-channels-key { display: grid; grid-template-columns: minmax(0, 11em) minmax(0, 1fr); gap: 8px; padding: 2px 0; font-size: 13px; line-height: 20px; }
+.jy-channels-key__when { color: var(--jy-ink-3); font-variant-numeric: tabular-nums; }
+.jy-channels-key__what { color: var(--jy-ink); overflow-wrap: anywhere; }
+.jy-channels-more { align-self: flex-start; padding: 0; border: 0; background: none; font: inherit; color: var(--jy-cobalt); cursor: pointer; }
+.jy-channels-more:hover { text-decoration: underline; text-underline-offset: 3px; }
+.jy-channels-answers { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.jy-channels-answers__hint { display: block; }
 
 @media (max-width: 767px) {
   .jy-stations-type { width: 100%; }
   .jy-stations-purchase { grid-template-columns: minmax(0, 1fr) 96px; }
-  .jy-stations-onboarding > .ant-collapse > .ant-collapse-item > .ant-collapse-header { padding: 12px 16px; }
-  .jy-accounts-toolbar .ant-input-affix-wrapper, .jy-accounts-filter { width: 100%; }
-  .jy-accounts-actions .ant-btn { min-height: 44px; }
-  .jy-accounts-facts { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  .jy-accounts-facts dd { margin-bottom: 4px; }
-  .jy-accounts-unverified-item, .jy-accounts-association { padding: 12px; }
+  .jy-channels-grid { grid-template-columns: minmax(0, 1fr); }
+  .jy-channels-cards { padding: 12px; }
+  .jy-channels-key { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .jy-channels-card .ant-btn, .jy-channels-issue .ant-btn { min-height: 44px; }
 }
 
 /* 余额列下的近 48 小时走势：整块是按钮，点开余额趋势 */
@@ -154,3 +144,4 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 
 /* 行末按钮外面那一层（提示的触发区），不改按钮的排法 */
 .jy-tip-wrap { display: inline-flex; }
+.jy-channels-card__head .spacer { flex: 1 1 0; }

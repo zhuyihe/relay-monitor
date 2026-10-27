@@ -255,10 +255,10 @@ export default function ReconciliationPage() {
         <div className="reconciliation-head__actions">
           <Button onClick={() => openHistory()}>{RECON_BUTTONS.history}</Button>
           <Button href="/analytics">{NAV_LABELS.analytics}</Button>
-          <Button type="primary" href="/stations?view=bills">去{STATION_TABS.bills}</Button>
+          <Button type="primary" href="/stations?view=channels">去{STATION_TABS.channels}</Button>
         </div>
       </div>
-      <p className="jy-caption">每天的收入、上游成本和毛利。去绑定、改绑定、解除绑定请到{STATION_TABS.bills}。</p>
+      <p className="jy-caption">每天的收入、上游成本和毛利。开始算利润、停止算利润请到{STATION_TABS.channels}。</p>
     </div>
 
     {hasAlerts ? <div className="reconciliation-alerts">{alerts}</div> : null}

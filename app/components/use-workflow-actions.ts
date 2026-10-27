@@ -40,6 +40,9 @@ const INITIAL: WorkflowState = {
 };
 let state = INITIAL;
 const inflight: Partial<Record<Source, Promise<void>>> = {};
+// 上游账号读模型整份（「渠道」页签要用它：更新登录信息的抽屉、账号的待办）和读它时的错：和事项同一次读取，不为同一份数据发两遍请求
+let accountModel: any = null;
+let accountError: unknown = null;
 const listeners = new Set<() => void>();
 
 function update(patch: Partial<WorkflowState>) {
@@ -59,7 +62,8 @@ function loadSource(source: Source, force: boolean): Promise<void> {
       const r = await api(READS[source]);
       actions = r?.actions || [];
       names = channelNamesOf(r);
-    } catch {}
+      if (source === "accounts") { accountModel = r; accountError = null; }
+    } catch (err) { if (source === "accounts") accountError = err; }
     update({
       ...(actions
         ? {
@@ -114,6 +118,13 @@ export function channelNameOf(names: WorkflowState["channelNames"], ownStationId
 
 export function loadWorkflowActions(force = false, sources: readonly Source[] = ALL_SOURCES): Promise<void> {
   return Promise.all(sources.map((source) => loadSource(source, force))).then(() => {});
+}
+
+// 读上游账号读模型整份（force：不用 5 分钟内的缓存；已经有一次在读就接着等它，不重复请求）。读不到抛原来的错
+export async function loadAccountModel(force = true) {
+  await loadSource("accounts", force);
+  if (state.failed.accounts || !accountModel) throw accountError ?? new Error("读不到上游账号");
+  return accountModel;
 }
 
 // 上游资源页读到新的上游账单后直接更新，不必再请求一次
