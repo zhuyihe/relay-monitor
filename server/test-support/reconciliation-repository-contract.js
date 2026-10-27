@@ -1894,3 +1894,28 @@ contract("markKeyIssue (K2b): an open issue reads back as keyIssue; with untilMs
   await repository.markKeyIssue(rule.id, null);
   assert.deepEqual([(await get()).keyIssue, (await get()).keyIssueClosed ?? null], [null, null]);
 });
+
+contract("createRule (K2c-1): a key whose segment in another binding closed earlier today — the new binding's floor is that segment's end (New API, revenue and cost both start there); a Sub2API new binding starts the next day (the day cannot be cut)", async ({ repository, fixture }) => {
+  const dayStart = Math.floor(Date.now() / 86400000) * 86400000; // 契约的时区是 UTC
+  const end = Math.max(Date.now() - 2000, dayStart + 2000), start = end - 1000;
+  const a = await fixture.createRule({ billingPolicy: "immediate", canonicalKey: `up:${fixture.tag}:h1`, channels: [{ channelId: fixture.channel(201), name: "A" }] });
+  const oldRef = { upstreamStationId: a.upstreamStationId, tokenId: a.tokenId, tokenName: a.tokenName };
+  const newRef = { upstreamStationId: a.upstreamStationId, tokenId: fixture.token(202), tokenName: "N" };
+  const applied = await repository.applyKeyChangePlans([{ ruleId: a.id, plan: { kind: "windowed", windowStart: start, windowEnd: end, windowKeys: [oldRef, newRef], before: [oldRef], after: [newRef], canonicalKey: `up:${fixture.tag}:h1n` } }]);
+  assert.deepEqual(applied, { conflict: false });
+  const nobody = await fixture.createRule({ billingPolicy: "immediate", tokenId: fixture.token(299), tokenName: "Z", canonicalKey: `up:${fixture.tag}:h0`, channels: [{ channelId: fixture.channel(209), name: "Z" }] });
+  assert.equal(nobody.accountingFloorMs, null, "没被别的绑定握过的 Key 没有下限");
+  const b = await fixture.createRule({ billingPolicy: "immediate", tokenId: oldRef.tokenId, tokenName: oldRef.tokenName, canonicalKey: `up:${fixture.tag}:h2`, channels: [{ channelId: fixture.channel(203), name: "B" }] });
+  assert.equal(b.accountingFloorMs, end, "新绑定从那条绑定放开这把 Key 的那一刻起算");
+});
+
+contract("createRule (K2c-1): the same on a Sub2API upstream — the new binding is not counted today and starts at the next day's 0:00", async ({ repository, fixture }) => {
+  const dayStart = Math.floor(Date.now() / 86400000) * 86400000;
+  const end = Math.max(Date.now() - 2000, dayStart + 2000), start = end - 1000;
+  const a = await fixture.createRule({ billingPolicy: "immediate", provider: "sub2api", canonicalKey: `up:${fixture.tag}:s1`, channels: [{ channelId: fixture.channel(211), name: "A" }] });
+  const oldRef = { upstreamStationId: a.upstreamStationId, tokenId: a.tokenId, tokenName: a.tokenName };
+  const newRef = { upstreamStationId: a.upstreamStationId, tokenId: fixture.token(212), tokenName: "N" };
+  await repository.applyKeyChangePlans([{ ruleId: a.id, plan: { kind: "windowed", windowStart: start, windowEnd: end, windowKeys: [oldRef, newRef], before: [oldRef], after: [newRef], canonicalKey: `up:${fixture.tag}:s1n` } }]);
+  const b = await fixture.createRule({ billingPolicy: "immediate", provider: "sub2api", tokenId: oldRef.tokenId, tokenName: oldRef.tokenName, canonicalKey: `up:${fixture.tag}:s2`, channels: [{ channelId: fixture.channel(213), name: "B" }] });
+  assert.equal(b.accountingFloorMs, dayStart + 86400000, "Sub2API 切不开一天中间：今天不算，第二天 0 点起整天算");
+});
