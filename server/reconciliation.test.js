@@ -7596,6 +7596,21 @@ test("固定成本每天写昨天那一行（G 第四轮中-B/中-C）：按用�
   assert.deepEqual(last.slice(1), ["excluded", 0], "不算进利润以后每天 excluded 0");
 });
 
+test("固定成本写昨天（G 第五轮中-D）：绑定的账一直卡着没结，期间上游改成了固定：没有账本行的日子按现在的设置记 fixed，不沿用前面的 usage", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  await f.module.refreshDue(now); // 账本 10-07、10-08 按用量
+  const realFacts = f.repository.listLedgerDayFacts.bind(f.repository);
+  f.repository.listLedgerDayFacts = async (...args) => (await realFacts(...args)).filter((fact) => fact.billDate <= "2026-10-08"); // 之后结账一直卡着
+  upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5;
+  now += 3 * 86400000;
+  await f.module.refreshDue(now);
+  const stuck = f.repository.tables.fixedCostDays.filter((row) => row.station_id === "upstream" && row.bill_date > "2026-10-08").map((row) => [row.bill_date, row.basis, Number(row.cost_cny)]).sort();
+  assert.ok(stuck.length >= 1 && stuck.every(([, basis, cny]) => basis === "fixed" && cny === 10), `账卡着的日子按现在的设置：${JSON.stringify(stuck)}`);
+});
+
 test("固定成本写昨天（G 第四轮）：没有在跑的绑定、昨天没有账本行时按上游现在的设置，不沿用前面的计法", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now });

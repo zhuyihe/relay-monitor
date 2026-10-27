@@ -2555,8 +2555,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (fact?.costBasis) carry = fact.costBasis === "fixed" ? "fixed" : "usage";
         // 昨天：有账本行按账本；没有账本行但还有在跑的绑定（账多半还没结）这一轮先不写，往后的日子也先不写；没有绑定的按现在的设置
         if (day === lastDay && !fact?.costBasis && hasLiveRule) { deferred = true; break; }
-        // 昨天以前、又没有账本行的日子沿用此前最近一条账本行的计法；昨天（没有绑定的）按现在的设置
-        const basis = fact?.costBasis ? carry : (day === lastDay ? nowBasis : (carry ?? nowBasis));
+        // 昨天以前、又没有账本行的日子：还有在跑的绑定（账只是卡着没结）按现在的设置；没有绑定了才沿用此前最近一条账本行的计法；昨天（没有绑定的）按现在的设置
+        const basis = fact?.costBasis ? carry : (day === lastDay || hasLiveRule ? nowBasis : (carry ?? nowBasis));
         if (basis !== "fixed") { rows.push({ stationId: station.id, billDate: day, basis, costCny: 0, costRate: null, note: null }); continue; }
         const startMs = dayStartInTz(day, tz);
         const amortized = amortizeFixedCost(purchases, { startMs, endMs: shiftedDayStartInTz(startMs, 1, tz), tz });
