@@ -6,7 +6,7 @@
 // 渠道 Key 读取服务（K2a/K2b 量夹具，PERF_KEY_AGENT=on 才接）：GET /key-agent/keys（Bearer、ETag/304、X-Agent-Stale），
 // 每 PERF_KEY_AGENT_ROTATE_SEC 秒（默认 600）随机换 2~3 个渠道现在用的 Key（走 New API 整号账号的那些）；/__ctl?key_agent_down=1|0 模拟读取服务读库失败（照真协议
 // 沿用上一份成功结果、带 X-Agent-Stale），key_agent_rotate=1 立刻触发一次换 Key（不用等 10 分钟，本机调脚本用），
-// key_agent_rotate_pause=1|0 暂停/恢复定时换 Key（对拍时停：暂停时把换过的渠道都换回绑定的那把 Key）。
+// key_agent_rotate_pause=1|0 暂停/恢复定时换 Key（默认停着，只在稳态窗口里开；暂停时把换过的渠道都换回绑定的那把 Key）。
 // 读取服务走单独的 https 端口 https://127.0.0.1:18952/key-agent（FAKE_KEY_AGENT_PORT，默认 FAKE_PORT + 2；证书见 lib/model.mjs 的 KEY_AGENT_TLS）。
 import { createServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
@@ -54,22 +54,42 @@ const keyAgentOverride = new Map();
 let keyAgentRotations = 0; // /__stats 报的「换了几次」，量的时候确认真的在换
 let keyAgentDown = false; // POST /__ctl?key_agent_down=1｜0：模拟读取服务那一侧读库失败，照真协议沿用上一份成功结果、带 X-Agent-Stale
 let keyAgentLastGood = null; // { body, etag }
-let keyAgentRotatePaused = false; // POST /__ctl?key_agent_rotate_pause=1｜0：对拍时停掉定时换 Key（60 秒一换会让被换渠道的绑定和 base 合理地不同）
+// 定时换 Key 只在稳态窗口里开（measure/background.mjs 窗口开头 pause=0、结尾 pause=1），平时和对拍时都停着：
+// 按墙钟一直换的话，base、head 的稳态窗口里各换几次全看运气（实测一边 3 次、一边 0 次，同一份代码 SQL/分钟差 48%），量出来不可比。
+// 每次恢复都从头计时、用同一个种子挑渠道和 Key，base、head 的窗口里换的次数、换的渠道都一样
+let keyAgentRotatePaused = true; // POST /__ctl?key_agent_rotate_pause=1｜0；暂停时把换过的渠道都换回绑定的那把 Key
 let keyAgentStatus = Object.create(null); // GET /key-agent/keys 按状态码计数（200、304……），/__stats 报
 const ROTATABLE = KEY_AGENT_ON ? CHANNELS.filter((ch) => channelUpstream(ch.id).kind === "newapi" && channelDefaultToken(ch.id)).map((ch) => ch.id) : [];
+// 换 Key 用的随机数：固定种子（mulberry32），每次恢复定时换 Key 时重置，base、head 换的是同一批渠道、同一批 Key
+let rotateSeed = 0;
+function rotateRandom() {
+  rotateSeed = (rotateSeed + 0x6D2B79F5) | 0;
+  let t = rotateSeed;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
 function rotateKeyAgentChannels() {
-  const n = 2 + Math.floor(Math.random() * 2); // 2 或 3 个
+  const n = 2 + Math.floor(rotateRandom() * 2); // 2 或 3 个
   for (let i = 0; i < n && ROTATABLE.length; i++) {
-    const c = ROTATABLE[Math.floor(Math.random() * ROTATABLE.length)];
+    const c = ROTATABLE[Math.floor(rotateRandom() * ROTATABLE.length)];
     const up = channelUpstream(c);
-    const token = up.tokens[Math.floor(Math.random() * up.tokens.length)];
+    const token = up.tokens[Math.floor(rotateRandom() * up.tokens.length)];
     keyAgentOverride.set(c, token.id);
     keyAgentRotations += 1;
   }
 }
 // 换 Key 的间隔：默认 600 秒（真实读取服务的节奏）；CI 的稳态窗口只有 185 秒，量「换了 Key 以后重新认、写段」那一段要调小（比如 60）
 const KEY_AGENT_ROTATE_SEC = Math.max(1, Math.floor(num(process.env.PERF_KEY_AGENT_ROTATE_SEC || undefined, 600)));
-if (KEY_AGENT_ON) setInterval(() => { if (!keyAgentRotatePaused) rotateKeyAgentChannels(); }, KEY_AGENT_ROTATE_SEC * 1000).unref?.();
+let rotateTimer = null;
+function setKeyAgentRotatePaused(paused) {
+  keyAgentRotatePaused = paused;
+  if (rotateTimer) { clearInterval(rotateTimer); rotateTimer = null; }
+  if (paused) { keyAgentOverride.clear(); return; }
+  rotateSeed = 20261027; // 每个窗口从同一个种子、同一个相位开始
+  if (KEY_AGENT_ON) rotateTimer = setInterval(rotateKeyAgentChannels, KEY_AGENT_ROTATE_SEC * 1000);
+  rotateTimer?.unref?.();
+}
 
 function keyAgentChannelKeys(c) {
   const up = channelUpstream(c), overrideId = keyAgentOverride.get(c);
@@ -544,7 +564,7 @@ function route(req, url) {
     if (q.has("key_agent_down")) keyAgentDown = q.get("key_agent_down") === "1";
     if (q.has("key_agent_rotate")) rotateKeyAgentChannels(); // 手动触发一次换 Key，不用等 10 分钟（本机调脚本用）
     // 暂停时顺带把换过的渠道换回绑定的那把 Key：对拍里 base、head 看到的读取服务和绑定对得上，不因为之前换过 Key 而不同
-    if (q.has("key_agent_rotate_pause")) { keyAgentRotatePaused = q.get("key_agent_rotate_pause") === "1"; if (keyAgentRotatePaused) keyAgentOverride.clear(); }
+    if (q.has("key_agent_rotate_pause")) setKeyAgentRotatePaused(q.get("key_agent_rotate_pause") === "1");
     return [200, { delayMs, ratioMode, frozenSec, down: [...downSites], keyAgentDown, keyAgentRotatePaused }];
   }
   if (path.startsWith("/hook/")) return [200, { errcode: 0, errmsg: "ok", code: 0 }];

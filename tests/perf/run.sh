@@ -175,7 +175,7 @@ cmd_parity() {
   rm -f "$PERF_OUT/parity/base.json" "$PERF_OUT/parity/head.json" "$PERF_OUT/parity/parity.md"
   (cd "$PERF_DIR" && node parity.mjs move "$PARITY_DAYS") || return 1
   ensure_fake || rc=1
-  # 对拍时停掉定时换 Key（并换回绑定的那把）：60 秒一换会让被换渠道的绑定和 base 合理地不同；结束后恢复，稳态窗口照常换
+  # 对拍时定时换 Key 是停着的（只在稳态窗口里开，见 fake-site.mjs），这里再停一次并换回绑定的那把 Key，防上一个窗口没收尾
   key_agent_on && curl -sf -m 5 "http://127.0.0.1:$FAKE_PORT/__ctl?key_agent_rotate_pause=1" > /dev/null
   if start_app "$PERF_BASE_DIR" parity-base; then
     (cd "$PERF_DIR" && node parity.mjs settle base) || rc=1
@@ -188,7 +188,6 @@ cmd_parity() {
   stop_app
   # 不管上面成不成，夹具都恢复成挪走前的样子（后面 head 的性能测量要用）
   (cd "$PERF_DIR" && node parity.mjs restore) || rc=1
-  key_agent_on && curl -sf -m 5 "http://127.0.0.1:$FAKE_PORT/__ctl?key_agent_rotate_pause=0" > /dev/null
   if [ -f "$PERF_OUT/parity/base.json" ] && [ -f "$PERF_OUT/parity/head.json" ]; then
     (cd "$PERF_DIR" && node parity.mjs diff base head > /dev/null) || rc=1
   else
