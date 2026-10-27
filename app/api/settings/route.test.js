@@ -39,12 +39,13 @@ test("GET /api/settings 带 ownLog：进度两头、落后多少、哪几天没�
   assert.equal(await read(runtime({ cursor: null })), null);
 });
 
-test("PUT /api/settings 只带 expectedCost：false 关、别的值都是开；不带就不动", async () => {
+test("PUT /api/settings 只带 expectedCost：只认真正的 true / false，别的值一律当关；不带就不动", async () => {
   const { PUT } = await settingsRoute();
   const rt = runtime();
   const put = (body) => PUT(new Request("http://x/api/settings", { method: "PUT", body: JSON.stringify(body) }), rt);
   assert.equal((await (await put({ expectedCost: false })).json()).settings.expectedCost, false);
-  assert.equal((await (await put({ expectedCost: "no" })).json()).settings.expectedCost, true);
+  assert.equal((await (await put({ expectedCost: true })).json()).settings.expectedCost, true);
+  assert.equal((await (await put({ expectedCost: "yes" })).json()).settings.expectedCost, false, "字符串不算开");
   await put({ expectedCost: false });
   assert.equal((await (await put({ refreshIntervalSec: 90 })).json()).settings.expectedCost, false, "不带 expectedCost 就不动");
 });

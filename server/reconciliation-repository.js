@@ -1,7 +1,7 @@
 // 上游渠道对账的持久化层：只保存规则、聚合快照、告警状态和账单能力核验结果，绝不复制站点凭据。
 import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, normalizeSuccessfulResult, sameReconciliationWindow } from "../lib/reconciliation-contract.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
-import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
+import { LEDGER_DAY_FACT_COLUMNS, RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerDayFactFromRow, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
 import { refreshSegmentKeysSql, fillMissingSegmentKeysSql } from "../db/segment-keys.js";
 import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
@@ -288,6 +288,8 @@ function billDateText(value) {
 const LEDGER_DECISION_SELECT = ["revision", "source", "timezone", "window_start_ms", "window_end_ms", "revenue_usd", "cost_usd",
   "revenue_rate", "cost_rate", "cost_basis", "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at"].join(", ");
 const LEDGER_SELECT = RECONCILIATION_LEDGER_COLUMNS.map((column) => column === "bill_date" ? "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date"
+  : column === "settled_at" ? "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at" : column).join(", ");
+const LEDGER_DAY_FACT_SELECT = LEDGER_DAY_FACT_COLUMNS.map((column) => column === "bill_date" ? "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date"
   : column === "settled_at" ? "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at" : column).join(", ");
 
 export class ReconciliationRepository {
@@ -1214,6 +1216,45 @@ export class ReconciliationRepository {
       "SELECT rule_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date FROM reconciliation_ledger WHERE rule_id IN (?) AND bill_date >= ? GROUP BY rule_id, bill_date",
       [ruleIds, sinceDate]);
     return rows.map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
+  }
+
+  // 应付成本补算（V1-b，总指挥 10-26 定）：这些绑定从 sinceDate 起、最新一版原因是 reason 的日子（固定时整站记录还没读到那天的）
+  async listLedgerDaysByReason(ruleIds, sinceDate, reason) {
+    if (!ruleIds?.length) return [];
+    const [rows] = await this.pool.query(
+      `SELECT rule_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date FROM reconciliation_ledger l
+       WHERE rule_id IN (?) AND bill_date >= ? AND gap_reason = ? AND expected_cost_usd IS NULL
+         AND revision = (SELECT MAX(revision) FROM reconciliation_ledger m WHERE m.rule_id = l.rule_id AND m.bill_date = l.bill_date)
+       ORDER BY bill_date, rule_id`, [ruleIds, sinceDate, reason]);
+    return rows.map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
+  }
+
+  // 补算：只填最新一版、应付成本还空着、原因是 EXPECTED_COST_LAGGING 的那一行（不覆盖有数的、不写新版）；detail.expected 一起换掉。填上了返回 true。
+  // revision：调用方读那一行时带的版本号，和「现在的最新一版」都要对上——读、算、写之间插进来一次重结写出新版的话，revision 对不上旧版就不填，
+  // 也不会填到旧版上盖掉（新版不受影响，但旧版的 detail 不该再被改；审核 R2 #125 低-2、第二轮 低-A：两个条件都要留着，只认 revision = ?
+  // 不够，内存实现两样都要求，MySQL 也要一样）
+  async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null, revision = null } = {}) {
+    // 用 JOIN 一份派生表接「现在的最新一版」，不在 WHERE 里直接对同一张表做关联子查询（MySQL 不让 UPDATE 的 WHERE 子查询直接选同一张表）
+    const [result] = await this.pool.query(
+      `UPDATE reconciliation_ledger l
+       JOIN (SELECT rule_id, bill_date, MAX(revision) AS max_revision FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? GROUP BY rule_id, bill_date) latest
+         ON latest.rule_id = l.rule_id AND latest.bill_date = l.bill_date
+       SET l.expected_cost_usd = ?, l.gap_reason = ?, l.tokens = ?, l.detail = JSON_SET(COALESCE(l.detail, JSON_OBJECT()), '$.expected', CAST(? AS JSON))
+       WHERE l.rule_id = ? AND l.bill_date = ? AND l.expected_cost_usd IS NULL AND l.gap_reason = 'EXPECTED_COST_LAGGING' AND l.revision = ? AND l.revision = latest.max_revision`,
+      [ruleId, billDate, expectedCostUsd, gapReason, tokens, JSON.stringify(expected), ruleId, billDate, revision]);
+    return Number(result?.affectedRows) > 0;
+  }
+
+  // 每日利润页（#118 §9）：这些绑定在 [fromDate, toDate] 里每天最新一版的几列（不读 detail JSON）。一条语句，按 (rule_id, bill_date, revision) 主键走
+  async listLedgerDayFacts(ruleIds, fromDate, toDate) {
+    if (!ruleIds?.length) return [];
+    const [rows] = await this.pool.query(
+      `SELECT ${LEDGER_DAY_FACT_SELECT} FROM reconciliation_ledger l
+       WHERE rule_id IN (?) AND bill_date >= ? AND bill_date <= ?
+         AND revision = (SELECT MAX(revision) FROM reconciliation_ledger m WHERE m.rule_id = l.rule_id AND m.bill_date = l.bill_date)
+       ORDER BY bill_date, rule_id`,
+      [ruleIds, fromDate, toDate]);
+    return rows.map(ledgerDayFactFromRow);
   }
 
   // 结账没成：记下或更新这一行（settlementOutcome 的 state，op 是 retry / manual / sticky）。

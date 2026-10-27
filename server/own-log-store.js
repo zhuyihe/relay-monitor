@@ -14,7 +14,8 @@ export const bucketRowOf = (stationId, bucket) => ({ station_id: stationId, slot
 export const bucketFromRow = (row) => ({ slotMs: Number(row.slot_ms), channelId: Number(row.channel_id), model: row.model, upstreamModel: row.upstream_model, group: row.grp, semantic: row.semantic,
   ...Object.fromEntries(OWN_LOG_BUCKET_COLUMNS.map((column) => [FIELD_OF_COLUMN[column], Number(row[column])])) });
 
-const cursorFromRow = (row) => row ? { stationId: row.station_id, coveredFromMs: Number(row.covered_from_ms), coveredToMs: Number(row.covered_to_ms), updatedAtMs: Number(row.updated_at_ms) } : null;
+const cursorFromRow = (row) => row ? { stationId: row.station_id, coveredFromMs: Number(row.covered_from_ms), coveredToMs: Number(row.covered_to_ms), updatedAtMs: Number(row.updated_at_ms),
+  disabledFromMs: row.disabled_from_ms == null ? null : Number(row.disabled_from_ms), disabledToMs: row.disabled_to_ms == null ? null : Number(row.disabled_to_ms) } : null;
 
 // 站点彻底删除、或者自营站点换了地址（同一个 id 读另一个站）时：进度和桶一起清掉，不然会从旧进度接着读新站点、两个站的数混在一个桶里
 export async function forgetOwnLog(rt, stationId) {
@@ -26,13 +27,24 @@ export class OwnLogStore {
   constructor(pool) { this.pool = pool; }
 
   async getCursor(stationId) {
-    const [rows] = await this.pool.query("SELECT station_id, covered_from_ms, covered_to_ms, updated_at_ms FROM own_log_cursor WHERE station_id = ?", [stationId]);
+    const [rows] = await this.pool.query("SELECT station_id, covered_from_ms, covered_to_ms, updated_at_ms, disabled_from_ms, disabled_to_ms FROM own_log_cursor WHERE station_id = ?", [stationId]);
     return cursorFromRow(rows[0]);
   }
 
   // 第一次：从 fromMs 起读（已经有进度的不动）
   async startCursor(stationId, fromMs, now = Date.now()) {
     await this.pool.query("INSERT IGNORE INTO own_log_cursor (station_id, covered_from_ms, covered_to_ms, updated_at_ms) VALUES (?, ?, ?, ?)", [stationId, fromMs, fromMs, now]);
+    return this.getCursor(stationId);
+  }
+
+  // 「算应付成本」关→开，进度比昨天 0 点还旧：把进度挪到 toMs，中间这段（原来的 covered_to_ms 到 toMs）记成跳过的缺口，
+  // 不删桶（已经读进来的留着，补算用得上；总指挥 10-26 定第三轮）。已经有一段没补上的缺口（第二次关→开，中间那段「开着」的
+  // 日子还没来得及补算）：两段缺口并成一段记（偏保守——中间那段原本读全了的日子也会被算成缺口，但不会漏；只记一段，
+  // 不改表结构记多段；审核 R2 #125 第三轮 中-E）
+  async skipCursor(stationId, toMs, now = Date.now()) {
+    await this.pool.query(
+      "UPDATE own_log_cursor SET disabled_from_ms = COALESCE(disabled_from_ms, covered_to_ms), disabled_to_ms = ?, covered_to_ms = ?, updated_at_ms = ? WHERE station_id = ?",
+      [toMs, toMs, now, stationId]);
     return this.getCursor(stationId);
   }
 
