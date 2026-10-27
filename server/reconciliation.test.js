@@ -2097,6 +2097,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if (url.pathname === "/api/log/self/stat") return stat("upstream", url, usageOf ? usageOf(url.searchParams.get("token_name"), Number(url.searchParams.get("start_timestamp")), Number(url.searchParams.get("end_timestamp"))) : state.upstreamQuota);
       // 取完整 Key（打码撞了才会问，K2a）：没有 api_key:reveal 权限
       if (url.pathname === "/api/token/batch/keys" && revealScopeDenied) return reply(403, { success: false, code: "ACCESS_TOKEN_SCOPE_DENIED", message: "The access token lacks the required permission: api_key:reveal" });
+      // 上游价目表（V1-b 算应付成本用）：只在 state.pricing 给了时有，别的测试照旧 404（读不到 → MODEL_PRICE_UNREADABLE）
+      if (url.pathname === "/api/pricing") return state.pricing ? reply(200, state.pricing) : reply(404, { success: false });
     }
     if (url.host === "own.test") {
       if (url.pathname === "/api/user/self") return reply(200, { success: true, data: { id: 1 } });
@@ -8036,7 +8038,8 @@ test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率�
     assert.deepEqual([row.displayStatus.state, row.calculation.profitUsd], ["settled", 1.5], "已结账的毛利不按固定采购重算");
     assert.deepEqual(row.rates, { income: { stationId: "own", cnyPerUsd: 7.1, source: "configured" },
       cost: { stationId: "upstream", cnyPerUsd: 6.5, source: "configured" }, costBasis: "usage" });
-    assert.deepEqual(row.ledger, { billDate: "2026-10-08", revision: 1, source: "settle", settledAt: row.settledAt, rates: { income: 7.1, cost: null }, costBasis: "usage" });
+    assert.deepEqual(row.ledger, { billDate: "2026-10-08", revision: 1, source: "settle", settledAt: row.settledAt, rates: { income: 7.1, cost: null }, costBasis: "usage",
+      expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null }, "夹具默认不开整站读：应付成本算不出，原因是整站日志没读完（V1-b）；没读全时 tokens 也不写（审核 R2 #125 中-4）");
   }
   // 今天还没结账，按当前配置：固定采购、成本记 0。
   const today = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "today" }, { mode: "evaluate", origin: "page" })).results[0];
@@ -8544,7 +8547,8 @@ test("C2a 结成新版以后不再读一次账本行：result 自己就是刚写
   // 和真的从账本行读出来的 ledgerReference 一样（版本、来源、固定时刻、汇率、成本计法），不是另算一份
   const row = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
   assert.deepEqual(settled.ledger, { billDate: row.bill_date, revision: row.revision, source: row.source, settledAt: settled.settledAt,
-    rates: { income: row.revenue_rate ?? null, cost: row.cost_rate ?? null }, costBasis: row.cost_basis }, "result.ledger 直接补好，和账本里写进去的那一行一致");
+    rates: { income: row.revenue_rate ?? null, cost: row.cost_rate ?? null }, costBasis: row.cost_basis,
+    expectedCostUsd: row.expected_cost_usd ?? null, gapReason: row.gap_reason ?? null, tokens: row.tokens ?? null }, "result.ledger 直接补好，和账本里写进去的那一行一致");
 });
 
 test("C2a 第二轮低-3：result.ledger 的汇率按账本精度（6 位小数）取整、来源是账本里的来源，带 lastConfirmed；和之后从账本读出来的逐字一致", async (t) => {
@@ -8948,6 +8952,144 @@ test("V1-a 轮询每轮给自营站点读几页整站日志（落后时最多 15
   g.state.fullLogList = true;
   await g.module.refreshDue(now);
   assert.equal(g.state.requests.filter(isIngest).length, 0);
+});
+
+// ---- 应付成本 V1-b：结账时按桶和价目表算、写进账本新列 ----
+test("V1-b 结账时算应付成本写进账本：这条绑定的渠道的桶 × 上游价目表 × 分组倍率 ÷ 额度换算；Token 合计；明细进 detail.expected；result.ledger 带上；别的渠道的桶不算", async (t) => {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  const bucket = (slotMs, channelId, extra = {}) => ({ slotMs, channelId, model: "m", upstreamModel: "", group: "g1", semantic: "anthropic", requests: 1, promptTokens: 100, completionTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 1, adminQuota: 0, testQuota: 0, ...extra });
+  // 渠道 1 是 rr_live 的；渠道 2 是 rr_two 的；渠道 9 谁的都不是
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd + 3600000, buckets: [bucket(dayStart + 3600000, 1), bucket(dayStart + 7200000, 1, { completionTokens: 0, cacheReadTokens: 100 }), bucket(dayStart + 7200000, 2), bucket(dayStart + 3600000, 9), bucket(dayEnd, 1)] }, dayEnd + 3600000);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  const debugLines = [];
+  t.mock.method(console, "debug", (...parts) => debugLines.push(parts.map(String).join(" ")));
+  // 价目表：m 按量，model_ratio 2、completion_ratio 3、cache_ratio 0.1；上游 /api/status 的 quota_per_unit 是 100；g1 倍率 1
+  f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2, completion_ratio: 3, cache_ratio: 0.1 }], group_ratio: { g1: 1 } };
+  await f.module.refreshDue(Date.now());
+  const rows = f.state.ledger.filter((row) => row.bill_date === "2026-10-08");
+  // rr_live（渠道 1）：桶 1 = (100 + 50×3) × 2 ÷ 100 = 5；桶 2 = (0 + 100×0.1) × 2 ÷ 100 = 0.2（prompt 100 全是缓存读，anthropic 口径 prompt 不含缓存：100 未缓存 + 100 缓存读）
+  // anthropic 口径：promptTokens 100 是未缓存输入，cacheRead 100 另算 → (100 + 100×0.1) × 2 ÷ 100 = 2.2；合计 7.2；Token = 100+50 + 100+0 + 0 = 250
+  const live = rows.find((row) => row.rule_id === "rr_live");
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason, live.tokens], [7.2, null, 250]);
+  assert.deepEqual([live.revenue_usd, live.cost_usd], [2.5, 1], "原有金额不变");
+  const detail = JSON.parse(live.detail_json ?? "null") ?? live.detail;
+  assert.deepEqual([detail.expected.usd, detail.expected.reason, detail.expected.byModel.length, detail.expected.byChannel, detail.expected.segments.length, detail.expected.quotaPerUnit],
+    [7.2, null, 1, [{ channelId: 1, usd: 7.2 }], 1, 100]);
+  assert.deepEqual(rows.find((row) => row.rule_id === "rr_two").expected_cost_usd, 5, "rr_two 只算渠道 2 的桶");
+  // 桶和 R1 的对账只打一行 debug（V1 不替换 R1）：桶里渠道 1 这天管理员自用 0，R1 扣的也是 0 → 不打；下面单独验会打的情况
+  assert.ok(!debugLines.some((line) => line.includes("应付成本对账")), "一致时不打");
+  assert.deepEqual(rows.find((row) => row.rule_id === "rr_three").expected_cost_usd, 0, "rr_three 的渠道这天没用量：应付 0");
+  const { results } = await f.module.queryRules({ preset: "yesterday" }, { mode: "evaluate", origin: "page" });
+  const shown = results.find((row) => row.rule.id === "rr_live");
+  assert.deepEqual([shown.ledger.expectedCostUsd, shown.ledger.gapReason, shown.ledger.tokens], [7.2, null, 250], "读回来的 ledgerReference 带新列");
+  // 每日利润页 A（#118 §9）：看这一天的整页和一行一天的计算明细
+  const page = await f.module.profitPage({ preset: "custom", startMs: dayStart, endMs: dayEnd });
+  assert.deepEqual([page.dayCounts, page.range.preset, page.gapThreshold], [{ fixed: 1, reading: 0, today: 0 }, "custom", { usd: 0.05, rate: 0.02 }]);
+  // 三条绑定三把 Key：rr_three 这天没用量应付 0、实付 1 → 多扣（排最前）；rr_live 应付 7.2 实付 1、rr_two 应付 5 实付 1 → 少扣，差额大的在前
+  assert.deepEqual(page.rows.map((row) => [row.rowKey, row.channels.map((channel) => channel.channelId), row.expectedCostUsd, row.actualCostUsd, row.gap.state, Number(row.gap.usd.toFixed(2))]),
+    [["upstream:11", [3], 0, 1, "over", 1], ["upstream:9", [1], 7.2, 1, "under", -6.2], ["upstream:10", [2], 5, 1, "under", -4]]);
+  assert.deepEqual(page.pageTotals, { incomeUsd: 7.5, actualCostUsd: 3, grossProfitUsd: 4.5, grossMarginRate: 0.6 });
+  assert.deepEqual([page.gap.expectedCostUsd, page.gap.actualCostUsd, Number(page.gap.usd.toFixed(2)), page.gap.overUsd, Number(page.gap.underUsd.toFixed(2)), page.gap.rowCount, page.gap.days.count], [12.2, 3, -9.2, 1, 10.2, 3, 1], "underUsd 是正数");
+  assert.deepEqual(page.counts, { channels: 3, countedChannels: 3, mismatchedChannels: 3, attentionChannels: 0, uncomputable: {}, mismatchedDays: { over: 1, under: 2 } });
+  assert.deepEqual([page.fixedCostUsd, page.netProfitUsd, page.unlinkedChannelCount, page.rateUnset, page.ownIncomeUnavailable, page.asOf != null, page.tz], [0, 4.5, 7, [], null, true, "Asia/Shanghai"], "固定成本 0（没有固定采购的上游）；渠道目录里 10 个渠道只绑了 3 个");
+  const dayDetail = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-08" });
+  assert.deepEqual([dayDetail.settled, dayDetail.expected.usd, dayDetail.actual.usd, dayDetail.gap.state, dayDetail.income.adminUsage.deducted, dayDetail.revisions, dayDetail.expected.byModel.length, dayDetail.expected.byModel[0].pricesPerMillion != null],
+    [true, 7.2, 1, "under", "all", 1, 1, true]);
+  assert.ok(dayDetail.fixedAt && dayDetail.income.usd === 2.5 && dayDetail.grossProfitUsd === 1.5);
+  const today = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-09" });
+  assert.deepEqual([today.settled, today.expected.usd, today.expected.reason, today.revisions], [false, null, null, null], "没固定的日子：现算、应付成本没有");
+  await assert.rejects(f.module.profitDetail({ ruleIds: ["nope"], day: "2026-10-08" }), { code: "RULE_NOT_FOUND" });
+  await assert.rejects(f.module.profitDetail({ ruleIds: ["rr_live"], day: "bad" }), { code: "TIME_RANGE_INVALID" });
+});
+
+// Key 别处也用（KEY_SHARED）这里不测：现在回答「别处也用」的绑定成本覆盖是 unknown，根本不结账（COST_COVERAGE_UNKNOWN 先拦住），纯函数里留着给 K 的时间分段 Key 用
+test("V1-b 「算应付成本」关着（settings.expectedCost=false）：结账照常，应付成本写「—」加 EXPECTED_COST_DISABLED，不读桶不读价目表；以后打开也不补算（账本行只插不改）", async (t) => {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd, buckets: [{ slotMs: dayStart + 3600000, channelId: 1, model: "m", upstreamModel: "", group: "g1", semantic: "anthropic", requests: 1, promptTokens: 100, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 1, adminQuota: 0, testQuota: 0 }] }, dayEnd);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2 }], group_ratio: {} };
+  f.rt.store.settings = { expectedCost: false };
+  await f.module.refreshDue(Date.now());
+  const row = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.deepEqual([row.expected_cost_usd, row.gap_reason, row.tokens, row.revenue_usd, row.cost_usd], [null, "EXPECTED_COST_DISABLED", null, 2.5, 1]);
+  assert.equal(f.state.requests.filter((r) => r.path === "/api/pricing").length, 0, "关着不读价目表");
+  f.rt.store.settings = { expectedCost: true };
+  f.rt._reconciliationResultCache.clear();
+  await f.module.refreshDue(Date.now());
+  assert.equal(f.state.ledger.filter((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08").length, 1, "打开以后不补算、不多一版");
+});
+
+test("V1-b 补算：固定那天时整站记录还没读到（EXPECTED_COST_LAGGING），读完以后补一次应付成本——只填空着的、不写新版、明细写补算时刻；补过不再动", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  resetOwnRequestBudget();
+  const ownLogStore = new MemoryOwnLogStore();
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000, ownLogStore, ownLogIngest: true } });
+  f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2 }], group_ratio: {} };
+  // 整站日志：渠道 1 在 10-08 有一条 100 个输入 token 的记录
+  f.state.fullLogList = true;
+  f.state.testLogs.push({ id: 1, type: 2, channel: 1, quota: 1, created_at: (dayStart + 3600000) / 1000, token_name: "k", username: "alice", model_name: "m", prompt_tokens: 100, completion_tokens: 0, other: "{}" });
+  f.rt.store.settings = { expectedCost: true };
+  // 第一轮：先结账（这时还没有整站读的进度 → EXPECTED_COST_LAGGING），再开始读整站日志
+  await f.module.refreshDue(now);
+  const settledRow = () => f.state.ledger.filter((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.equal(settledRow().length, 1);
+  // 一轮一轮读到追平，补算跟着每轮整站读跑
+  for (let i = 0; i < 15 && settledRow()[0].expected_cost_usd == null; i += 1) { now += 60000; resetOwnRequestBudget(); await f.module.refreshDue(now); }
+  const [row] = settledRow();
+  assert.deepEqual([settledRow().length, row.revision, Number(row.expected_cost_usd), row.gap_reason, row.tokens], [1, 1, 2, null, 100], "原地补上（100 token × model_ratio 2 ÷ quota_per_unit 100 = $2），不写新版");
+  assert.ok(row.detail.expected.backfilledAt, "明细记下补算时刻");
+  assert.deepEqual([row.revenue_usd, row.cost_usd], [2.5, 1], "原有金额不动");
+  assert.equal(await f.module.backfillExpectedCost(f.stations.find((station) => station.id === "own"), { now }), 0, "补过不再动");
+  const other = f.state.ledger.find((item) => item.rule_id === "rr_three" && item.bill_date === "2026-10-08");
+  assert.deepEqual([Number(other.expected_cost_usd), other.gap_reason], [0, null], "这天没用量的绑定补成 0");
+});
+
+test("V1-b 桶和 R1 的管理员自用对账：结账时桶里这些渠道的管理员自用额度和 R1 实际扣的不一样就打一行 debug（不带用户名、地址）；只打日志不改数", async (t) => {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd, buckets: [{ slotMs: dayStart + 3600000, channelId: 1, model: "m", upstreamModel: "", group: "g1", semantic: "anthropic", requests: 1, promptTokens: 100, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 7, adminQuota: 7, testQuota: 0 }] }, dayEnd);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  const debugLines = [];
+  t.mock.method(console, "debug", (...parts) => debugLines.push(parts.map(String).join(" ")));
+  await f.module.refreshDue(Date.now());
+  const line = debugLines.find((item) => item.includes("应付成本对账：绑定 rr_live"));
+  assert.ok(line, `打了对账日志：${debugLines.join(" | ")}`);
+  assert.match(line, /桶里管理员自用 7 额度，R1 扣了 \d+/);
+  assert.ok(!/alice|root|own\.test|upstream\.test/.test(line), "不带用户名、地址");
+  const live = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.deepEqual([live.revenue_usd, live.cost_usd], [2.5, 1], "R1 的数照旧，不拿桶改");
+});
+
+test("V1-b 算不出的原因写进账本：上游价目表读不到（上游没开模型广场）→ MODEL_PRICE_UNREADABLE；有模型没价格 → MODEL_PRICE_MISSING 并列出；原因不挡结账、原有金额照写", async (t) => {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  const bucket = (channelId, model) => ({ slotMs: dayStart + 3600000, channelId, model, upstreamModel: "", group: "g1", semantic: "anthropic", requests: 1, promptTokens: 100, completionTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 1, adminQuota: 0, testQuota: 0 });
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd, buckets: [bucket(1, "m"), bucket(2, "m"), bucket(3, "o3")] }, dayEnd);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  await f.module.refreshDue(Date.now());
+  const first = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-08");
+  assert.deepEqual([first.expected_cost_usd, first.gap_reason, first.tokens, first.revenue_usd, first.cost_usd], [null, "MODEL_PRICE_UNREADABLE", 100, 2.5, 1], "夹具没给 /api/pricing（404）：读不到；照样结账");
+  assert.equal(f.state.ledger.filter((item) => item.bill_date === "2026-10-08").length, 3, "三条绑定都结了");
+  assert.deepEqual([first.detail.expected.reason, first.detail.expected.missingPriceModels], ["MODEL_PRICE_UNREADABLE", []]);
+  // 第二天：价目表有了，但 o3 没价格
+  f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2 }], group_ratio: {} };
+  f.module.upstreamPricing.invalidate?.();
+  await ownLogStore.applyWindow("own", { fromMs: dayEnd, toMs: dayEnd + 86400000, buckets: [{ ...bucket(3, "o3"), slotMs: dayEnd + 3600000 }, { ...bucket(1, "m"), slotMs: dayEnd + 3600000 }] }, dayEnd + 86400000);
+  t.mock.method(Date, "now", () => Date.parse("2026-10-10T03:00:00Z"));
+  await f.module.refreshDue(Date.now());
+  const three = f.state.ledger.find((item) => item.rule_id === "rr_three" && item.bill_date === "2026-10-09");
+  assert.deepEqual([three.expected_cost_usd, three.gap_reason], [null, "MODEL_PRICE_MISSING"]);
+  const detail = JSON.parse(three.detail_json ?? "null") ?? three.detail;
+  assert.deepEqual(detail.expected.missingPriceModels.map((row) => row.model), ["o3"]);
+  const live = f.state.ledger.find((item) => item.rule_id === "rr_live" && item.bill_date === "2026-10-09");
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [2, null], "价目表有了：rr_live 这天算得出");
 });
 
 // ---- R2 自营站点关了收费记录（own-revenue-plan 第二节）----
@@ -10577,4 +10719,59 @@ test("addKeyBlock（L1）：超过 200 段把最旧的两段并成一段，不�
   assert.equal(blocks.length, 200);
   assert.equal(blocks[0].sinceMs, 0, "最旧的起点还在");
   assert.equal(blocks.at(-1).untilMs, 204 * 10 + 5);
+});
+
+// ---- 应付成本 × 换 Key（K 和 V1-b 碰在一起）：换 Key 那天一条绑定被切成几段，应付成本按段算，每段用自己的倍率 ----
+async function expectedCostKeyDay(t, { cutOffsetMs, second }) {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  const bucket = (slotMs, channelId, extra = {}) => ({ slotMs, channelId, model: "m", upstreamModel: "", group: "g1", semantic: "anthropic", requests: 1, promptTokens: 100, completionTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 1, adminQuota: 0, testQuota: 0, ...extra });
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd + 3600000, buckets: [bucket(dayStart + 3600000, 1), bucket(dayStart + 7200000, 1, { completionTokens: 0, cacheReadTokens: 100 }), bucket(dayEnd, 1)] }, dayEnd + 3600000);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  const cut = dayStart + cutOffsetMs;
+  const first = f.repository.tables.segments.find((row) => row.rule_id === "rr_live");
+  Object.assign(first, { group_ratio: 1, effective_to_ms: cut });
+  f.repository.tables.segments.push({ ...first, id: "s1-key2", group_name: second.group, group_ratio: second.ratio, effective_from_ms: cut, effective_to_ms: null, detected_at_ms: cut, timing_source: "key_change" });
+  f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2, completion_ratio: 3, cache_ratio: 0.1 }], group_ratio: { g1: 1 } };
+  await f.module.refreshDue(Date.now());
+  const live = f.state.ledger.find((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
+  return { live, detail: JSON.parse(live.detail_json ?? "null") ?? live.detail };
+}
+
+test("应付成本 × 换 Key：换 Key 在整点（10:00），前后两段倍率不一样——按段算，每段用自己的倍率", async (t) => {
+  const { live, detail } = await expectedCostKeyDay(t, { cutOffsetMs: 2 * 3600000, second: { group: "g2", ratio: 2 } });
+  // 第 1 小时桶（在前一段，倍率 1）(100 + 50×3) × 2 ÷ 100 = 5；第 2 小时桶（在后一段，倍率 2）(100 + 100×0.1) × 2 ÷ 100 = 2.2，× 2 = 4.4；整天都套最新那段的倍率会是 10 + 4.4 = 14.4
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [9.4, null]);
+  assert.deepEqual(detail.expected.segments.map((row) => [row.ratio, row.usd]), [[1, 5], [2, 4.4]]);
+});
+
+test("应付成本 × 换 Key：换 Key 不在整点（9:30）而且前后倍率不一样——算不出，PARTIAL_HOUR_UNSUPPORTED（和 C3 当天换绑、停止算利润同一条规矩）", async (t) => {
+  const { live } = await expectedCostKeyDay(t, { cutOffsetMs: 90 * 60000, second: { group: "g2", ratio: 2 } });
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [null, "PARTIAL_HOUR_UNSUPPORTED"]);
+});
+
+test("应付成本 × 换 Key：换 Key 不在整点但前后分组、倍率一样——合成一段照常算，不挡", async (t) => {
+  const { live, detail } = await expectedCostKeyDay(t, { cutOffsetMs: 90 * 60000, second: { group: "g1", ratio: 1 } });
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [7.2, null]);
+  assert.equal(detail.expected.segments.length, 1);
+});
+
+// 每日利润页（A1/A2）显示换 Key 冲突期的日子：KEY_CONFLICT_GAP 是需处理但没有按钮（和自营站点没记收费记录那段同一个做法），不算进汇总；会自己好的 PENDING 显示「还在读取」
+test("每日利润页：碰到换 Key 冲突期（KEY_CONFLICT_GAP）的一天——这条绑定显示需处理、没有按钮、不算进汇总；别的绑定照常", async (t) => {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd + 3600000, buckets: [] }, dayEnd + 3600000);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  const live = f.repository.tables.rules.find((row) => row.id === "rr_live");
+  live.key_blocks = JSON.stringify([{ code: "KEY_CONFLICT_GAP", sinceMs: dayStart + 3 * 3600000, untilMs: dayStart + 5 * 3600000 }]);
+  await f.module.refreshDue(Date.now());
+  assert.deepEqual(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08"), [], "冲突期碰到的这一天不固定");
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_two" && row.bill_date === "2026-10-08").length, 1, "别的绑定照常固定");
+  const page = await f.module.profitPage({ preset: "custom", startMs: dayStart, endMs: dayEnd });
+  const row = page.rows.find((item) => item.channels.some((channel) => channel.channelId === 1));
+  assert.deepEqual([row.counted, row.attention?.code, row.attention?.action?.label ?? "", row.grossProfitUsd], [false, "KEY_CONFLICT_GAP", "", null]);
+  assert.match(row.attention.title, /这一天几个渠道换了 Key/);
+  assert.equal(page.rows.filter((item) => item.counted).length, 2);
 });

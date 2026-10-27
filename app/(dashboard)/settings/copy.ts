@@ -15,6 +15,11 @@ export const COPY = Object.freeze({
   intervalHint: "系统每隔这么久读一次各上游的余额，最短 10 秒",
   intervalMin: "自动刷新间隔最短 10 秒",
   seconds: "秒",
+  // 「算应付成本」开关（ui-copy-spec §8.3，应付成本 V1-b）：开关下面一句说明；开着时再下面一行写收费记录读到哪儿了，落后 1 小时以上换一句
+  expectedCost: "算应付成本",
+  expectedCostHint: "开着时，系统定时读自营站点的收费记录（只读，不改自营站点的任何东西），按上游的价格和倍率算每天的应付成本，和上游实付的对一对。关了就不再读，每日利润里的应付成本和差额写「—」，收入、上游成本、毛利照常；关着那几天固定的，以后打开也不补算。",
+  readTo: (at: string) => `收费记录读到 ${at}`,
+  readBehind: (at: string) => `收费记录只读到 ${at}，自营站点的记录多，系统在接着读`,
   // 余额提醒线挪到告警中心（ui-copy-spec §8.3；有通知方式时在「余额偏低」那一行，没有时在空状态下面那一小块），这里一句链过去（中间是链接）
   lowLineMovedBefore: "余额提醒线在",
   lowLineMovedAfter: "里设。",
