@@ -11161,3 +11161,40 @@ test("K2b + Sub2API 记录很多、翻得很慢（每分钟 1 页）：换手那
   await s.advance("2026-10-15T20:00:00Z");
   assert.equal(pagesNow(), before, "两条都需处理了：不再自动翻");
 });
+
+// K2d：上游换了账号以后，同一个上游下有的绑定对不上（记的是原来的账号）、有的对得上（换了账号以后才建的）：identityWatch 按上游记一份，
+// 这一轮每条绑定各调一次——对上的那条不能把对不上的那条记下的「第一次发现的时刻」清掉（不管谁先谁后）
+for (const order of ["对不上的在前", "对得上的在前"]) test(`R02 换账号后同一个上游下两条绑定一条对不上一条对得上：identityWatch 不被对得上的那条清掉、第一次发现的时刻保留（${order}）`, async (t) => {
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, extraTokens: [{ tokenId: 10, name: "stable-rr_b" }] });
+  for (const row of f.repository.tables.rules) trustedLegacyRule(row, f.stations, 7, 1);
+  const store = new Store(f.rt.pool);
+  store.data.stations = f.stations;
+  f.rt.store = store;
+  const input = (ruleIds) => ({ ruleIds, preset: "custom", startMs: 1000000, endMs: 1060000 });
+  await f.module.queryRules(input(["rr_live", "rr_b"]), { force: true }); // 换账号以前：两条都对得上，先安全锚定
+  const oldFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (request, init) => {
+    const url = new URL(request);
+    if (url.host === "upstream.test" && init?.headers?.Authorization === "Bearer replacement-account") {
+      const data = url.pathname === "/api/user/self" ? { id: 8, username: "账号 B" }
+        : url.pathname === "/api/token/" ? { total: 2, items: [{ id: 9, user_id: 8, name: "stable", status: 1, group: "g1", cross_group_retry: false }, { id: 10, user_id: 8, name: "stable-rr_b", status: 1, group: "g1", cross_group_retry: false }] }
+          : url.pathname === "/api/user/self/groups" ? { g1: { ratio: 1 } } : null;
+      if (data) return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
+    }
+    return oldFetch(request, init);
+  });
+  await store.update("upstream", { accessToken: "replacement-account" });
+  // rr_b 是换账号以后才建的：记的就是新账号的 Key；rr_live 记的还是原来的账号
+  f.repository.tables.rules.find((row) => row.id === "rr_b").canonical_key = canonicalBillingKey(f.stations[0], { platform: "newapi", accountId: 8 }, 10);
+  const ids = order === "对不上的在前" ? ["rr_live", "rr_b"] : ["rr_b", "rr_live"];
+  const results = (await f.module.queryRules(input(ids), { force: true })).results;
+  const live = results.find((row) => row.rule.id === "rr_live");
+  assert.equal(live.health.code, "SOURCE_BINDING_UNCONFIRMED", "对不上的那条照样挡");
+  const watch = store.get("upstream").identityWatch;
+  assert.deepEqual([watch?.accountId, watch?.accountName], ["8", "账号 B"], "对得上的那条没有把记录清掉");
+  assert.equal(watch.sinceMs, live.health.sinceMs, "页面上写的「第一次发现的时刻」就是记下的那个");
+  const firstSeen = watch.sinceMs;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await f.module.queryRules(input(ids.slice().reverse()), { force: true });
+  assert.equal(store.get("upstream").identityWatch?.sinceMs, firstSeen, "下一轮（换个顺序）仍然是第一次发现的时刻，不重写");
+});

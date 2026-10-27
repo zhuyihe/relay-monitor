@@ -2563,7 +2563,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 本站一侧对不上始终挡；上游身份变了是上游一侧的问题，固定成本时只作参考
       const upstreamChanged = !!rule.canonicalKey && rule.canonicalKey !== actualKey;
       // K2d：上游现在登录的是另一个账号——第一次发现的时刻按上游记一份（对上了就清掉；只在观测的轮次写），事项带上游名、读到的账号名、这个上游下的渠道数（§5.2）
-      const driftWatch = identity && observe && !settle ? await noteIdentityDrift(upstream, identity, upstreamChanged) : (upstreamStation(rule.upstreamStationId)?.identityWatch ?? null);
+      // 同一个上游下有好几条绑定：记录按上游记一份，这一条对上了不能把别的绑定还没对上的记录清掉（这一轮每条绑定各调一次，后面的会覆盖前面的）——
+      // 这个上游下有任何一条绑定对不上就算还在变，全对上了才清
+      const upstreamAnyChanged = upstreamChanged || (!!identity && (ownerRegistry.rules || []).some((item) => item.enabled && item.upstreamStationId === rule.upstreamStationId
+        && !!item.canonicalKey && item.canonicalKey !== canonicalBillingKey(upstream, identity, item.tokenId)));
+      const driftWatch = identity && observe && !settle ? await noteIdentityDrift(upstream, identity, upstreamAnyChanged) : (upstreamStation(rule.upstreamStationId)?.identityWatch ?? null);
       const upstreamSourceHealth = () => health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"), { side: "upstream", stationName: stationDisplayName(upstream),
         accountId: String(identity.accountId), accountName: identity.accountName ?? driftWatch?.accountName ?? null, sinceMs: driftWatch?.sinceMs ?? Date.now(),
         channelCount: ownerRegistry.rules.filter((item) => item.enabled && item.upstreamStationId === rule.upstreamStationId).reduce((total, item) => total + (item.channels?.length ?? 0), 0) });
