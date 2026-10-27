@@ -10847,7 +10847,7 @@ for (const [from, to] of [["newapi", "newapi"], ["newapi", "sub2api"], ["sub2api
     const newSegments = await s.f.repository.listSegments(started.id);
     if (from === "sub2api") {
       assert.equal(started.accountingFloorMs, null, "旧绑定是 Sub2API：归档那天整天不算，新绑定从 b 那天 0 点整天算，不设下限");
-      assert.deepEqual([newSegments[0].effectiveTo, newSegments[0].keys.map((key) => `${key.upstreamStationId}:${key.tokenId}`).sort()], [Date.parse("2026-10-12T16:00:00Z"), ["upstream:9", `upstream2:${to === "sub2api" ? 40 : 30}`].sort()], "第一段只到下一个业务日 0 点，带着旧 Key（整天读）");
+      assert.deepEqual([newSegments[0].effectiveTo, newSegments[0].keys.map((key) => `${key.upstreamStationId}:${key.tokenId}`).sort()], [REGROUP_B, ["upstream:9", `upstream2:${to === "sub2api" ? 40 : 30}`].sort()], "第一段关在 b（同一天再换 Key、再重新分组都接得上），带着旧 Key（整天读）");
     } else {
       assert.equal(started.accountingFloorMs, REGROUP_B, "旧绑定是 New API：算到 b 为止，新绑定从 b 起算");
     }
