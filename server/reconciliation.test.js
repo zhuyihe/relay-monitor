@@ -7552,6 +7552,19 @@ test("固定成本补数（G 总指挥第三轮）：没有账本行的日子沿
   assert.ok(gapDays.length >= 1 && gapDays.every(([basis, cny]) => basis === "usage" && cny === 0), `没有账本行的日子沿用按用量：${JSON.stringify(gapDays)}`);
 });
 
+test("固定成本补数（G 第四轮）：从来没绑定过的服务器租金，上线补数时历史照现在的购买记录摊、不变成 0；建立以前、没有账本行的日子仍记 excluded 0（优先）", async (t) => {
+  const now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  f.stations.push({ id: "rent-old", name: "老租金", type: "fixed", baseUrl: "", enabled: true, archivedAt: null, createdAt: "2026-09-01T00:00:00Z", fixedPurchases: [{ amount: 600, days: 30 }], cnyPerUsd: 4 },
+    { id: "rent-new", name: "新租金", type: "fixed", baseUrl: "", enabled: true, archivedAt: null, createdAt: "2026-10-09T01:00:00Z", fixedPurchases: [{ amount: 600, days: 30 }], cnyPerUsd: 4 });
+  await f.module.refreshDue(now);
+  const of = (id) => f.repository.tables.fixedCostDays.filter((row) => row.station_id === id).map((row) => [row.bill_date, row.basis, Number(row.cost_cny)]).sort();
+  const old = of("rent-old");
+  assert.ok(old.length >= 1 && old.every(([, basis, cny]) => basis === "fixed" && cny === 20), `从来没绑定过、建立得早：历史每天 20 元，不是 0：${JSON.stringify(old)}`);
+  assert.ok(of("rent-new").some(([day, basis, cny]) => day < "2026-10-09" && basis === "excluded" && cny === 0), "建立以前、没有账本行的日子记 excluded 0");
+  assert.ok(of("rent-new").every(([day, basis, cny]) => day < "2026-10-09" ? basis === "excluded" : cny === 20), "建立当天起照摊");
+});
+
 test("固定成本补数（G 审核第二轮）：以前的日子用账本里结账那天记的汇率（上线时数不跳）；以后每天只从各上游已写的最后一天往后接着补", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
