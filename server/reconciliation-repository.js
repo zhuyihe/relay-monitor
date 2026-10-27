@@ -787,7 +787,9 @@ export class ReconciliationRepository {
     try {
       await conn.beginTransaction();
       const currents = new Map(), rules = new Map();
-      for (const { ruleId } of plans) {
+      // 按 id 排好再锁：传进来的顺序是 listRules 的顺序（按启用、更新时间），两个并发的批次顺序相反时会互相死锁；
+      // 和结账的 owner scope、K1a 合并一样按 id 顺序锁
+      for (const { ruleId } of [...plans].sort((x, y) => (x.ruleId < y.ruleId ? -1 : x.ruleId > y.ruleId ? 1 : 0))) {
         const [ruleRows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
         if (!ruleRows[0]) throw repositoryError("RULE_NOT_FOUND");
         rules.set(ruleId, ruleRows[0]);
@@ -795,7 +797,7 @@ export class ReconciliationRepository {
         if (!segmentRows[0]) throw repositoryError("CURRENT_SEGMENT_MISSING");
         currents.set(ruleId, segmentRows[0]);
       }
-      // 前置条件（审核 2 第 1 轮 中-1）：计划是调用方在读规则以后算的，到这里（行已经锁上）规则可能已经被别的写入换过了——
+      // 前置条件：计划是调用方在读规则以后算的，到这里（行已经锁上）规则可能已经被别的写入换过了——
       // 页面刷新和轮询可以同时进来，各算同一份计划；缓存期间倍率变化也可能开了新段。不满足就什么也不写、整批回滚，
       // 返回 { stale: true }，调用方下一轮重新算：规则现在的 Key 不是计划的「换之前」；切点早于开着那段的起点；窗口倒挂
       if (plans.some(({ ruleId, plan }) => keyChangePlanIsStale(plan, rules.get(ruleId), currents.get(ruleId)))) {

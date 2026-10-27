@@ -1565,7 +1565,7 @@ contract("applyKeyChangePlans: plan.canonicalKey given updates rules.canonical_k
   assert.equal((await repository.getRule(untouched.id)).canonicalKey, `up:${fixture.tag}:akp-canon-keep`, "没传 canonicalKey 就不动原来的（给不关心锚定的调用方用）");
 });
 
-// 总指挥 10-27：refreshSegmentKeys 会把这条绑定所有 initial 行改成 rules 现在的 Key、非 initial 的行完全不碰——K2b 写过段以后，
+// refreshSegmentKeys 会把这条绑定所有 initial 行改成 rules 现在的 Key、非 initial 的行完全不碰——K2b 写过段以后，
 // 别处再调一次（倍率变化开新段、改绑定、解除……）历史就被改掉，或者上一段的 agent 行还占着唯一键。守住：关掉的段 Key 行不再变、不再占唯一键
 contract("after applyKeyChangePlans, every path that refreshes segment keys (ratio change, updateRule, archiveRule) leaves closed segments' keys unchanged and releases the unique keys", async ({ repository, fixture }) => {
   const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(50), name: "Hist" }], tokenName: "Old Key" });
@@ -1742,7 +1742,7 @@ contract("correctTransition: days older than 31 days get an attention row (RESET
   assert.equal(plain[0].detail, null);
 });
 
-contract("applyKeyChangePlans: preconditions — replaying the same plan, a cutover before the open segment's start, an inverted window all write nothing and return stale (no inverted / duplicate / zero-length segments)", async ({ repository, fixture }) => {
+contract("applyKeyChangePlans: preconditions — replaying the same plan, a cutover before the open segment's start, an inverted window all write nothing and return stale (no inverted or duplicate segments; a cutover exactly at the open segment's start stays allowed and leaves a zero-length old segment, ordered before the open one)", async ({ repository, fixture }) => {
   const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(66), name: "Pre" }], initialRatio: 1 });
   const oldRef = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName };
   const newRef = { upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(67), tokenName: "Pre2" };
@@ -1884,4 +1884,50 @@ contract("regroupRules: stale plans (the rule's key or channels changed since, a
   const clash = fixture.ruleInput({ tokenId: holder.tokenId, tokenName: holder.tokenName, canonicalKey: `up:${fixture.tag}:s-holder`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(97), name: "A" }] });
   assert.deepEqual(await repository.regroupRules({ at: b, closes: [close({ window: { from: EFFECTIVE_FROM + 1000, keys: [{ upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId }] } })], creates: [clash] }), { conflict: true, stale: false });
   assert.equal(await snapshot(), before, "撞唯一键：旧绑定没归档、没开过渡段");
+});
+
+contract("applyKeyChangePlans: a plan whose only mismatch is `before` (a legal cutover) writes nothing; a cutover exactly at the open segment's start is allowed (zero-length old segment); concurrent identical plans write exactly one copy", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(101), name: "P" }], initialRatio: 1 });
+  const oldRef = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName };
+  const newRef = { upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(102), tokenName: "P2" };
+  const snapshot = async () => JSON.stringify([await repository.listSegments(rule.id), (await repository.getRule(rule.id)).tokenId]);
+  const before = await snapshot();
+  const cutoverAt = EFFECTIVE_FROM + HOUR; // 切点本身是合法的，只有「换之前」那把 Key 对不上规则现在的
+  const wrongToken = { kind: "precise", cutoverAt, before: [{ upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(555) }], after: [newRef] };
+  assert.deepEqual(await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: wrongToken }]), { conflict: false, stale: true });
+  const wrongStation = { kind: "precise", cutoverAt, before: [{ upstreamStationId: "other-upstream", tokenId: rule.tokenId }], after: [newRef] };
+  assert.deepEqual(await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: wrongStation }]), { conflict: false, stale: true });
+  assert.equal(await snapshot(), before, "只有 before 不符：什么也没写");
+  // 切点正好等于开着那段的起点：允许，旧段长度为零
+  assert.deepEqual(await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: { kind: "precise", cutoverAt: EFFECTIVE_FROM, before: [oldRef], after: [newRef] } }]), { conflict: false });
+  assert.deepEqual((await repository.listSegments(rule.id)).map((segment) => [segment.effectiveFrom, segment.effectiveTo]), [[EFFECTIVE_FROM, EFFECTIVE_FROM], [EFFECTIVE_FROM, null]]);
+  // 三个同时进来的同一份计划（页面刷新 + 轮询）：只写一份，其余 stale（行锁 + 前置条件）
+  const other = await fixture.createRule({ tokenId: fixture.token(110), tokenName: `Contract ${fixture.tag} Q`, channels: [{ channelId: fixture.channel(110), name: "Q" }], initialRatio: 1 });
+  const otherRef = { upstreamStationId: other.upstreamStationId, tokenId: other.tokenId, tokenName: other.tokenName };
+  const nextRef = { upstreamStationId: other.upstreamStationId, tokenId: fixture.token(111), tokenName: "Q2" };
+  const plan = { kind: "windowed", windowStart: EFFECTIVE_FROM + HOUR, windowEnd: EFFECTIVE_FROM + HOUR + 60000, windowKeys: [otherRef, nextRef], before: [otherRef], after: [nextRef] };
+  const settled = await Promise.allSettled([1, 2, 3].map(() => repository.applyKeyChangePlans([{ ruleId: other.id, plan }])));
+  const outcomes = settled.map((item) => (item.status === "fulfilled" ? JSON.stringify(item.value) : `ERR:${item.reason?.code}`));
+  assert.equal(outcomes.filter((item) => item === JSON.stringify({ conflict: false })).length, 1, `只写一份：${outcomes.join(" ")}`);
+  assert.equal((await repository.listSegments(other.id)).length, 3, "原段 + 过渡段 + 新段，没有重复的");
+});
+
+contract("applyKeyChangePlans: rules carrying a real active_token_key — one plan alone collides on the unique key, a swap or a three-rule rotation in one batch works (why the driver keeps a swap group in one transaction)", async ({ repository, fixture }) => {
+  const canonicalOf = (name) => `up:${fixture.tag}:${name}`;
+  const make = (name, offset) => fixture.createRule({ tokenId: fixture.token(offset), tokenName: `Contract ${fixture.tag} ${name}`, canonicalKey: canonicalOf(name), billingPolicy: "immediate", channels: [{ channelId: fixture.channel(offset), name }] });
+  const [a, b, c] = [await make("a", 120), await make("b", 121), await make("c", 122)];
+  const refOf = (rule) => ({ upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName });
+  const move = (rule, to, canonical, at) => ({ ruleId: rule.id, plan: { kind: "moved", cutoverAt: at, before: [refOf(rule)], after: [refOf(to)], canonicalKey: canonical } });
+  const at = EFFECTIVE_FROM + HOUR;
+  // 拆开单独应用：第一条拿了另一条握着的 canonical key，撞唯一键
+  assert.deepEqual(await repository.applyKeyChangePlans([move(a, b, canonicalOf("b"), at)]), { conflict: true });
+  // 同一批互换：先清空再写，不撞
+  assert.deepEqual(await repository.applyKeyChangePlans([move(a, b, canonicalOf("b"), at), move(b, a, canonicalOf("a"), at)]), { conflict: false });
+  assert.deepEqual([(await repository.getRule(a.id)).tokenId, (await repository.getRule(b.id)).tokenId], [b.tokenId, a.tokenId]);
+  // 三条轮换：拆开撞，同一批不撞
+  const now = [await repository.getRule(a.id), await repository.getRule(b.id), await repository.getRule(c.id)];
+  const at2 = at + HOUR;
+  const ring = [move(now[0], now[2], canonicalOf("c"), at2), move(now[2], now[1], canonicalOf("a"), at2), move(now[1], now[0], canonicalOf("b"), at2)];
+  assert.deepEqual(await repository.applyKeyChangePlans([ring[0]]), { conflict: true }, "轮换拆开：撞");
+  assert.deepEqual(await repository.applyKeyChangePlans(ring), { conflict: false }, "轮换同一批：不撞");
 });

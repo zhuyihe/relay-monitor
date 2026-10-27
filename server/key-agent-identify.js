@@ -155,12 +155,13 @@ export const IDENTIFY_CACHE_MS = 4 * 60 * 1000;
 // 认出的结果里还有没认定的（not_found、ambiguous、unresolved，或者少了 api_key:reveal 权限）：这类状态会随上游目录、权限变化自己好，
 // 读取服务回 304 也要重新对一遍上游目录；全都认定了（identified / keyless）的，304 就沿用，不多读上游（审核 #131「别多读上游」）
 // 没认定的状态（渠道 Key 不在已加的上游里是会持续很久的真实场景）重新对上游目录的间隔：读取服务回 304 时最多每 15 分钟对一次，
-// 不是每次缓存到期（4 分钟）都把候选上游的目录读一遍——持续 not_found 的渠道每个候选上游每小时最多读 4 次（审核 2 第 2 轮提醒）
+// 不是每次缓存到期（4 分钟）都把候选上游的目录读一遍——持续 not_found 的渠道每个候选上游每小时最多读 4 次
 export const UNRESOLVED_RECHECK_MS = 15 * 60 * 1000;
 const hasUnresolved = (result) => (result?.revealIssues?.length ?? 0) > 0
   || (result?.channels || []).some((channel) => !channel.keyless && (channel.slots || []).some((slot) => slot.state !== "identified"));
+const unresolvedCount = (result) => (result?.channels || []).reduce((total, channel) => total + (channel.slots || []).filter((slot) => slot.state === "unresolved").length, 0);
 // 缓存分两份：result 是最近一次问的结果（失败了也记，4 分钟内不重复问）；lastGood 是最近一次读成功的结果、etag、原始渠道列表，
-// 失败结果不会覆盖它——一次 503 之后恢复回 304 时，沿用的还是失败之前认出的 channels，不是 null（审核 2 第 1 轮 高-2）
+// 失败结果不会覆盖它——一次 503 之后恢复回 304 时，沿用的还是失败之前认出的 channels，不是 null
 export async function identifyChannelsCached(rt, ownStation, options = {}) {
   const cache = rt._keyAgentIdentifyCache;
   const now = Date.now();
@@ -175,13 +176,16 @@ export async function identifyChannelsCached(rt, ownStation, options = {}) {
   // fetchedAtMs：这一份结果是什么时候真的从读取服务拿到的（200 或 304，不带 X-Agent-Stale 才有）。缓存命中返回的还是原来那份，
   // 所以带的是原来那一刻——K2b 的驱动拿它当「读取服务上一次读成功」的时刻，由驱动在换段落库提交以后再持久化
   // （不在这里写：读完就先写，a 就成了 b，中途重启还会让它退不回去，见 server/reconciliation.js keyAgentRoundFor）
-  const resolvedBase = result.channels == null && good
+  // 304 重新对上游目录时某个候选上游这一轮读不到（slot 变成 unresolved）：这次比对不算数——读取服务那一份没变（304），上一份认出来的
+  // 还是对的，不让一次上游抖动把原本认得出的渠道降级、再沿用十几分钟；也不更新 comparedAt，下一轮缓存到期接着重对
+  const recheckFailed = result.status === 304 && result.channels != null && !!good && unresolvedCount(result) > unresolvedCount(good.result);
+  const resolvedBase = (result.channels == null || recheckFailed) && good
     ? { ...result, channels: good.result.channels, revealIssues: good.result.revealIssues }
     : result;
   const resolved = { ...resolvedBase, fetchedAtMs: result.stale ? null : now };
   // 带 X-Agent-Stale 的是读取服务给的旧结果，不当「最近一次读成功」留下，也不换 etag
   // comparedAt：最近一次真的拿上游目录比对的时刻（200，或者 304 但重新比对了）；纯沿用旧结果的 304 不更新它
-  const compared = result.channels != null;
+  const compared = result.channels != null && !recheckFailed;
   const nextGood = result.stale ? good : { etag: result.etag ?? good?.etag ?? null, result: resolved, snapshotChannels: result.snapshotChannels ?? good?.snapshotChannels ?? null,
     comparedAt: compared ? now : good?.comparedAt ?? now };
   rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result: resolved, lastGood: nextGood };
