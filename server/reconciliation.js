@@ -1883,19 +1883,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return { ...summed, ...(byStation ? { byStation } : {}), window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
   }
 
-  // 这条（Sub2API）绑定的起算点在当天中间时：这把 Key 当天早些时候在这个自营站点下别的绑定里关掉的段里，最晚的结束时刻（在起算点那天、不晚于起算点）；没有是 null
-  async function sub2KeyHeldFloor(rule) {
+  // 这条（Sub2API）绑定的起算点在当天中间时：这条绑定第一段里的 Key，当天早些时候在这个自营站点下别的绑定里握过的（关掉的段、已停的绑定）最晚的结束时刻
+  // （在起算点那天、不晚于起算点）；没有是 null。只在起算点那天（窗口从起算点所在的业务日 0 点起）查，别的日子不查。
+  // 按第一段的 Key 查，不按绑定现在的 Key：新绑定当天又换了一次 Key，现在的 Key 查不到别人握过的段，会从 0 点起认领、和原来的持有人算两遍（审核 #150 第 1 轮中-1）；
+  // 查询和新绑定下限（createRule）、换 Key 的 newKeyFloor 是同一个仓库方法 keyHeldUntil，不另写一份。读不到就抛，不当没有
+  async function sub2ClaimFloor(rule, segments, window) {
     const start = reconciliationAccountingStart(rule);
     if (start == null) return null;
     const dayStart = startOfBillingDay(start, rule.timezone);
-    if (start <= dayStart) return null;
-    const ids = (await repository.listRules({ includeArchived: true }).catch(() => [])).filter((item) => item.ownStationId === rule.ownStationId && item.id !== rule.id).map((item) => item.id);
-    const byRule = ids.length ? await repository.listSegmentsForRules(ids).catch(() => ({})) : {};
+    if (start <= dayStart || window.startMs !== dayStart) return null;
+    const first = [...(segments || [])].filter((segment) => Number.isFinite(Number(segment.effectiveFrom))).sort((x, y) => Number(x.effectiveFrom) - Number(y.effectiveFrom))[0];
+    const keys = first?.keys?.length ? first.keys : [{ upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId }];
     let held = null;
-    for (const segments of Object.values(byRule)) for (const segment of segments) {
-      if (segment.effectiveTo == null || segment.effectiveTo > start || segment.effectiveTo < dayStart) continue;
-      if (!(segment.keys || []).some((key) => key.upstreamStationId === rule.upstreamStationId && Number(key.tokenId) === Number(rule.tokenId))) continue;
-      held = Math.max(held ?? -Infinity, segment.effectiveTo);
+    for (const key of keys) {
+      const until = await repository.keyHeldUntil(rule.ownStationId, key.upstreamStationId ?? rule.upstreamStationId, key.tokenId, { sinceMs: dayStart, untilMs: start, excludeRuleId: rule.id });
+      if (until != null) held = Math.max(held ?? -Infinity, until);
     }
     return held;
   }
@@ -2747,10 +2749,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 上游一侧自己的窗口（Sub2API 当天换绑的那天比本站一侧长，见 accountingUpstreamWindow）
         const upstreamWindow = upstreamOwnWindow || segmentWindow;
         // Sub2API 新绑定的起算点在当天中间、而且是因为这把 Key 当天早些时候在别的绑定里关了段：上游成本从那一刻起翻逐条用量算（别的原因的下限，比如当天从 New API 换绑过来，上游照旧取整天）
-        const claimFromMs = !upstreamProblem && isScopedBillingPolicy(rule.billingPolicy) && /^sub2api/.test(upstream.type || "") ? await sub2KeyHeldFloor(rule) : null;
+        let claimFromMs = null, floorError = null;
+        if (!upstreamProblem && isScopedBillingPolicy(rule.billingPolicy) && /^sub2api/.test(upstream.type || "")) {
+          // 读不到别的绑定握过这把 Key 的记录：这一天先不结（不当没有，会和原来的持有人算两遍），下一轮再试
+          try { claimFromMs = await sub2ClaimFloor(rule, segments, upstreamWindow); } catch { floorError = codedError("HISTORY_UNAVAILABLE", issueText("HISTORY_UNAVAILABLE")); }
+        }
         const [upstreamResult, downstreamResult] = await Promise.all([
           // 上游读不到（只有固定成本会走到这里）：不取上游，问题已经在上面记了一次
-          upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
+          floorError ? Promise.resolve({ error: floorError }) : upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
             : (isScopedBillingPolicy(rule.billingPolicy)
               ? upstreamWindowForScopedSegments(upstream, metadata, token, segments, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId, claimFromMs })
