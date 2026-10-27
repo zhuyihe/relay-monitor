@@ -4725,7 +4725,6 @@ test("P1a 自营站点时钟偏慢 10 分钟、日志晚 60 多秒才写进去�
   // 站点的钟比控制台慢 10 分钟：站点记的时刻都是控制台的 10 分钟前。起点按站点的时刻定（最新那条往前 120 秒），
   // 落后 10 分钟以上才挪（挪的那一轮照常读）；这里的日志都离起点不远，不会挪
   const SLOW = 600;
-  let quietGuard = 0; // 渠道 2、3 用它让 quota 一直变，这个用例不测减压 PR 的渠道级安静
   const logs = [1, 2, 3].map((channel, index) => ({ id: index + 1, channel, created_at: sec() - SLOW - 60, quota: 100 }));
   const add = (channel, created_at) => logs.push({ id: logs.length + 1, channel, created_at, quota: 100 });
   const siteLogs = ownLogList(logs);
@@ -4737,8 +4736,7 @@ test("P1a 自营站点时钟偏慢 10 分钟、日志晚 60 多秒才写进去�
     if (url.host === "own.test" && url.pathname === "/api/log/stat") {
       f.state.requests.push({ host: url.host, path: url.pathname });
       const channel = Number(url.searchParams.get("channel")), start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
-      // 这个用例只盯渠道 1（rr_live）的信号；渠道 2、3 不参与断言，让它们的 quota 一直变，不被减压 PR 的渠道级安静挡住现读
-      const quota = channel === 1 ? logs.filter((log) => log.channel === channel && log.created_at >= start && log.created_at <= end).reduce((sum, log) => sum + log.quota, 0) : 100 + (quietGuard += 1);
+      const quota = logs.filter((log) => log.channel === channel && log.created_at >= start && log.created_at <= end).reduce((sum, log) => sum + log.quota, 0);
       return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota } }) };
     }
     return prev(input, init);
@@ -4780,7 +4778,6 @@ test("P1a 审核第二轮：晚 1 秒、ClickHouse 显示序号、钟慢加读�
     const logs = [1, 2, 3].map((channel, index) => ({ id: index + 1, channel, created_at: sec() - 60, quota: 100 }));
     const siteLogs = ownLogList(logs, [], { clickhouse });
     let failChannel = false;
-    let quietGuard = 0; // 渠道 2、3 的 quota 不参与这组用例的断言（只看 rr_live/渠道 1），让它们一直变，不被减压 PR 的渠道级安静挡住现读
     const prev = globalThis.fetch;
     st.mock.method(globalThis, "fetch", async (input, init) => {
       const url = new URL(String(input));
@@ -4795,19 +4792,17 @@ test("P1a 审核第二轮：晚 1 秒、ClickHouse 显示序号、钟慢加读�
         f.state.requests.push({ host: url.host, path: url.pathname });
         if (failChannel) return { status: 500, text: async () => "{}" };
         const channel = Number(url.searchParams.get("channel")), start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
-        const quota = channel === 1 ? logs.filter((log) => log.channel === channel && log.created_at >= start && log.created_at <= end).reduce((sum, log) => sum + log.quota, 0) : 100 + (quietGuard += 1);
+        const quota = logs.filter((log) => log.channel === channel && log.created_at >= start && log.created_at <= end).reduce((sum, log) => sum + log.quota, 0);
         return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota } }) };
       }
       return prev(input, init);
     });
     const reads = () => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat" && !request.sourceRead).length;
-    // 这组用例测的是整站探测的老机制，不测减压 PR 新加的「没人看就放慢」：每轮先把「这一刻有人在看」记一下（直接戳内部状态，
-    // 不走一次真的查询、不进 resultCache），lastTodayViewAt 一直是新的，viewerIdle 一直是 false
     return {
       f, logs, sec,
       add: (channel, created_at) => logs.push({ id: logs.length + 1, channel, created_at, quota: 100 }),
       failChannels: (value) => { failChannel = value; },
-      round: async (ms = 60000) => { now += ms; f.rt._reconciliationLastTodayViewAt.at = now; const before = reads(); await f.module.refreshDue(now); return reads() - before; },
+      round: async (ms = 60000) => { now += ms; const before = reads(); await f.module.refreshDue(now); return reads() - before; },
       live: async () => (await f.module.queryRules({ preset: "today", ruleIds: ["rr_live"] }, { mode: "evaluate", origin: "page" })).results[0].downstream.amountUsd,
     };
   };
@@ -4857,13 +4852,11 @@ test("P1a 审核第二轮：晚 1 秒、ClickHouse 显示序号、钟慢加读�
     const s = await setup(st);
     await s.round(); assert.equal(await s.round(), 0);
     assert.equal(await s.round(11 * 60000), 0);
-    // 渠道 1（rr_live）这一轮之前只被真的问过一次（第一轮），还没有「连续两次不变」，这里把挪起点的变化（渠道 2 来一条新消费）和
-    // 渠道 1 真正的新消费（晚到的 3 条）放进同一轮：减压 PR 的渠道级安静要连续两次不变才会进安静期，这一轮渠道 1 的 quota 跟着
-    // 一起变，不会被误判成安静、拖到下一次才发现
     s.add(2, s.sec());
+    assert.ok(await s.round() > 0, "有新消费");
     const newest = Math.max(...s.logs.map((log) => log.created_at));
     for (let i = 0; i < 3; i += 1) s.add(1, newest - 30); // 起点挪到 newest−120：开头 3 条掉出去、晚到 3 条补进来
-    assert.ok(await s.round() > 0, "有新消费、起点挪了，这一轮照常读");
+    assert.ok(await s.round() > 0, "起点挪了，照常读");
     assert.equal(await s.live(), 4, "晚到的 3 条算进来");
   });
 
@@ -4927,11 +4920,6 @@ test("P1a 沿用渠道收费的边界：额度换算变了、读失败后进入�
   assert.deepEqual(await amounts(), [1.25, 1.25, 1.25]);
   assert.equal(await round(), 0, "按新换算记下以后接着沿用");
 
-  // 换算那一轮顺手真的问了一次渠道（quota 和上一次比没变），减压 PR 的渠道级安静会从那一刻起算：等满 5 分钟让它过期，
-  // 不然下面这个「读失败」场景会撞上渠道级安静（渠道本身的新消费最多晚 5 分钟才会被发现，是减压 PR 接受的权衡，这里不是要测这个）
-  now += 5 * 60000;
-  assert.equal(await round(), 0, "这几分钟站点还是安静的");
-
   // 有新消费、渠道读失败，接着进入安静期：失败那轮没记下，安静期里不能沿用更早的那份
   newLog(); failChannelStat = true;
   await round();
@@ -4982,10 +4970,9 @@ test("P1a 沿用渠道收费的边界：额度换算变了、读失败后进入�
   assert.deepEqual(fingerprints().sort(), ["rr_live", "rr_two"]);
 });
 
-// 减压 PR（用户 10-26 定插到最前面，总指挥 10-26 定两条）：安静的渠道隔 5 分钟才真的问一次 stat，数一变马上回到每分钟；
-// 没人看「今天」页面超过 10 分钟，所有渠道（不管本身安不安静）都放慢；空闲后有人回来，立刻让这一轮跑，不用等满间隔；
-// 结账、别的窗口都不走这条省请求的路，照旧现读
-test("减压 PR：渠道各自判断安不安静、数一变马上回到每分钟；没人看放慢；空闲后有人来立刻刷一轮；结账不受影响", async (t) => {
+// 减压 PR（用户 10-26 定插到最前面；总指挥 10-26 定：只做「没人看就放慢」，按渠道判安静不做，P1a 的探测和它的测试不动）：
+// 没人看「今天」页面超过 10 分钟，所有渠道都放慢到 5 分钟一轮；有人看照旧每分钟；空闲后有人来立刻跑一轮；结账、页面直接来看都不受影响
+test("减压 PR：没人看「今天」页面超过 10 分钟就放慢，有人看照旧每分钟；空闲后有人来立刻刷一轮；页面直接来看、结账都照旧现读", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now }); // 默认 rr_live:[1]、rr_two:[2]、rr_three:[3]，同一个自营站点
   const logs = [{ id: 1, created_at: Math.floor(now / 1000) - 60 }];
@@ -4999,7 +4986,6 @@ test("减压 PR：渠道各自判断安不安静、数一变马上回到每分�
     if (url.host === "own.test" && url.pathname === "/api/log/stat" && !ownSourceRead(url)) {
       f.state.requests.push({ host: url.host, path: url.pathname, query: url.search });
       const channel = Number(url.searchParams.get("channel"));
-      // 渠道 2 由用例控制是否安静；渠道 1、3 不参与断言，固定值即可（整站探测靠 newLog，不靠渠道的 quota）
       const quota = channel === 2 ? quota2 : 100;
       return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota } }) };
     }
@@ -5007,42 +4993,32 @@ test("减压 PR：渠道各自判断安不安静、数一变马上回到每分�
   });
   const statCallsFor = (channelId) => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat"
     && new URLSearchParams(request.query).get("channel") === String(channelId)).length;
-  // 每轮都让站点整体「不安静」（newLog），这样渠道级的省请求才用得到——站点整体安静时，整站那道总闸直接把所有渠道都挡住，
-  // 轮不到渠道各自判断（审核第二轮报告里说的「整站探测当总闸」）
+  const liveTwo = async () => (await f.module.queryRules({ preset: "today", ruleIds: ["rr_two"] }, { mode: "evaluate", origin: "page" })).results[0].downstream.amountUsd;
+  // 每轮都让站点整体「不安静」（newLog），这样「没人看才放慢」才用得到——站点整体安静时，整站那道总闸直接把所有渠道都挡住，
+  // 轮不到这里（审核报告里说的「整站探测当总闸」，P1a 的范围，这个 PR 不碰）
   const round = async (ms = 60000) => { now += ms; newLog(); const before = statCallsFor(2); await f.module.refreshDue(now); return statCallsFor(2) - before; };
 
-  f.rt._reconciliationLastTodayViewAt.at = now; // 先当有人刚看过，这一段只测渠道级安静，不测空闲
+  await liveTwo(); // 有人正在看：记一下这一刻
+  assert.equal(await round(), 2, "有人看：照旧每分钟问；这一轮还要结昨天，渠道 2 多问一次");
+  assert.equal(await round(), 1, "有人看：照旧每分钟问");
 
-  // 第一轮：没有上一轮可比，渠道 2 照问（这一轮还要结昨天，渠道 2 多问一次，之后几轮昨天已经结过，不再提）
-  assert.equal(await round(), 2, "第一轮没有上一轮可比，照问；另一次是结昨天");
-  // 渠道 2 的 quota 没变：这是第一次确认没变，还不算安静，照问；问完这一次开始算安静（5 分钟内不再真的问）
-  assert.equal(await round(), 1, "第一次确认没变，还不算安静，照问；问完这一次开始算安静");
-  assert.equal(await round(), 0, "安静了，5 分钟内不再真的问");
-  assert.equal(await round(), 0, "还在 5 分钟内，不问");
-  assert.equal(await round(), 0, "还在 5 分钟内，不问");
-  assert.equal(await round(), 0, "还在 5 分钟内，不问");
-  // 满 5 分钟，这一轮真的问一次——系统不可能在没问之前就知道数变没变，所以数变了也要等这一轮才会发现；
-  // 从这一轮起（发现变了）马上回到每分钟问，不用再等一个 5 分钟
-  quota2 = 200;
-  assert.equal(await round(), 1, "满 5 分钟，真的问一次，这才发现变了");
-  assert.equal(await round(), 1, "发现变了以后马上回到每分钟问，不用再等 5 分钟");
-
-  // 没人看「今天」页面超过 10 分钟：渠道 2 放慢到 5 分钟一轮，即使它本身还在变也一样放慢
+  // 没人看「今天」页面超过 10 分钟：所有渠道（不管本身有没有新消费，渠道 2 的 quota 其实一直没变）都放慢到 5 分钟一轮
   for (let i = 0; i < 11; i += 1) await round(); // 11 分钟没有页面来看，超过 OWN_VIEWER_IDLE_MS
   const idleReads = statCallsFor(2);
-  quota2 = 300; // 继续变，但没人看，不该马上问
-  await round();
-  assert.equal(statCallsFor(2) - idleReads, 0, "没人看超过 10 分钟：即使渠道还在变，也不是每轮都问");
+  quota2 = 200; // 这期间其实有新消费，但没人看，不该马上问
+  assert.equal(await round(), 0, "没人看超过 10 分钟：不是每轮都问了");
+  assert.equal(statCallsFor(2), idleReads, "这一轮真的没问（沿用），不是刚好问到了同样的数");
+  // 页面这时直接来看（不是走后台轮询那条路）：不管后台这一轮是不是沿用的，页面自己现算一遍，看到的是真数，不是沿用的旧数
+  assert.equal(await liveTwo(), 2, "页面直接来看：现读，看到新消费，不是沿用的旧数（减压 PR 的沿用结果不进页面能读到的缓存）");
 
-  // 这时有人打开页面看「今天」：下一轮立刻让这一路跑一遍，不等满空闲的间隔
-  await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" });
-  const beforeWake = statCallsFor(2);
-  assert.ok((await round()) > 0 || statCallsFor(2) > beforeWake, "空闲后有人来，下一轮立刻刷，不用等满 5 分钟");
+  // 刚才那次页面来看，就是「有人回来了」：下一轮立刻恢复每分钟，不用再等 5 分钟
+  assert.equal(await round(), 1, "空闲后有人来，下一轮立刻刷一轮，不等满 5 分钟的间隔");
+  assert.equal(await round(), 1, "恢复以后照旧每分钟问");
 
-  // 结账不走这条省请求的路，照旧现读：第一轮（上面）今天、昨天结账各问了一次渠道 2，不是只问了今天那一次就把昨天也顶了
+  // 结账（昨天）不走这条省请求的路，照旧现读：第一轮已经结过昨天，这里确认它当时是真读的，不受「今天」这边放慢影响
   const yesterday = await f.module.queryRules({ preset: "yesterday", ruleIds: ["rr_two"] }, { mode: "evaluate", origin: "page" });
   assert.equal(yesterday.results.length, 1);
-  assert.ok(yesterday.results[0].downstream.amountUsd != null, "昨天已经结过账，有数（结账那一轮不受渠道级安静影响，现读过）");
+  assert.ok(yesterday.results[0].downstream.amountUsd != null, "昨天已经结过账，有数");
 });
 
 test("P1b 轮询按时间重读上游：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟；Key 账单报错、有收入而 Key 用量为 0、目录里找不到 Key，下一轮马上全部重读；页面「刷新」照旧强制", async (t) => {

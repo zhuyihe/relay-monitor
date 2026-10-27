@@ -127,9 +127,8 @@ export async function mapWithConcurrency(items, limit, mapper) {
 }
 const TODAY_TTL_MS = 60000;
 const QUERY_TTL_MS = 60000;
-// 减压 PR（用户 10-26 定插到最前面，总指挥 10-26 定两条）：渠道连续安静（stat 的 quota 没变）多久才拉长间隔；
+// 减压 PR（用户 10-26 定插到最前面；总指挥 10-26 定：只做「没人看就放慢」，按渠道判安静不做，P1a 的探测和它的测试不动）：
 // 没人看「今天」页面多久算没人看、这时「今天」多久才真的刷新一次；空闲后有人回来，立刻补一轮，不等满这个间隔。
-const OWN_CHANNEL_QUIET_RECHECK_MS = 5 * 60000;
 const OWN_VIEWER_IDLE_MS = 10 * 60000;
 const OWN_VIEWER_IDLE_RECHECK_MS = 5 * 60000;
 const MAX_RESULT_CACHE_ENTRIES = 200;
@@ -552,15 +551,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   const ownActivity = (rt._reconciliationOwnActivity ||= new Map());
   const ownRevenueCache = (rt._reconciliationOwnRevenue ||= new Map());
   // 减压 PR：
-  //   ownChannelActivity：每个渠道（和 ownRevenueCache 同一份 key，再加渠道号）上一次真的问到的净额度、什么时候问的、
-  //     从什么时候起没变（quietSince）——安静的渠道（quota 连续没变）5 分钟才真的再问一次；
+  //   ownChannelActivity：每个渠道（和 ownRevenueCache 同一份 key，再加渠道号）上一次真的问到的净额度、什么时候问的——
+  //     没人看「今天」页面超过 OWN_VIEWER_IDLE_MS 时，所有渠道（不管本身有没有新消费）都放慢到 OWN_VIEWER_IDLE_RECHECK_MS 才真的再问一次；
   //   lastTodayViewAt：最近一次有页面来要「今天/近 7 天/本月」这类实时窗口的时刻（queryRules 里 origin "page" 时更新，
-  //     借用页面本来就有的轮询，不额外发请求）；超过 OWN_VIEWER_IDLE_MS 没人来，就当没人在看，这时「今天」不管渠道本身
-  //     安不安静都放慢到 OWN_VIEWER_IDLE_RECHECK_MS 才真的问一次；空闲后第一次又有人来，立刻让这一轮跑，不用等满这个间隔。
-  // 两条都只影响轮询「今天」这一路实时刷新（reuse 只在 observe+poll+实时窗口才为真）：结账、告警、日报走各自的窗口和路径，不受影响。
+  //     借用页面本来就有的轮询，不额外发请求）；at 一开始是 null——从来没有页面来过时，不当「没人看」，照旧每轮问（不用等
+  //     第一次页面来访才开始计时，也不会撞上 P1a 那组从不模拟页面访问的测试）；空闲后第一次又有人来，立刻让这一轮跑。
+  // 只影响轮询「今天」这一路实时刷新（reuse 只在 observe+poll+实时窗口才为真）：结账、告警、日报走各自的窗口和路径，不受影响。
   // 整站级的「有没有新消费」探测（markQuietOwnStations）留着当总闸：整站都没新消费时，这里都不会跑到（上面整站级沿用先返回了）。
+  // 按渠道各自判断安不安静这次不做（总指挥 10-26 定）：等以后「今天」改从整站读的小时桶算，根本不再按渠道问 stat 时一并解决。
   const ownChannelActivity = (rt._reconciliationOwnChannelActivity ||= new Map());
-  const lastTodayViewAt = (rt._reconciliationLastTodayViewAt ||= { at: 0, wokeUpAt: 0 });
+  const lastTodayViewAt = (rt._reconciliationLastTodayViewAt ||= { at: null, wokeUpAt: 0 });
   // ownExclusion：各自营站点每段窗口里管理员自用、渠道测试日志的累计（每个来源：按渠道的额度、翻到的最大编号），「今天」接着翻、结账用它对账
   const ownExclusionCache = (rt._reconciliationOwnExclusion ||= new Map());
   const observationWrites = (rt._reconciliationObservationWrites ||= new Map());
@@ -1234,19 +1234,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (status && status.quotaPerUnit === cached.result.quotaPerUnit) return { ...cached.result, window: { ...cached.result.window, endMs: segmentWindow.endMs } };
     }
     let reusedStale = false; // 管理员自用那一份是读失败后沿用的：这一次的结果不进缓存，不然站点一直没有新消费时超过 10 分钟也不换
-    // 减压 PR：整站级的沿用（上面）没中时，按渠道再筛一遍——安静的渠道（quota 连续没变）、或者没人在看「今天」页面时所有渠道，
-    // 隔一段才真的问一次 stat，不是每轮都问；只在 reuse（轮询观测「今天」）时才这样做，结账、页面「刷新」、别的窗口照旧逐个问。
-    // 渠道的键和上面 ownRevenueCache 用的 key 同一份（带凭据指纹、分段窗口起点）：凭据换了、分段切了、跨零点了，这份键自然换掉，
-    // 和站点级沿用用同一套失效规矩。空闲后第一次有页面回来（checkedAt 晚于 wokeUpAt，这个渠道上次真的问是在那之前）：这一轮强制真的问，
-    // 不等满安静或空闲的间隔，让回来的人马上看到新数（总指挥 10-26 定）
+    // 减压 PR：整站级的沿用（上面）没中时，没人在看「今天」页面超过 OWN_VIEWER_IDLE_MS 就把所有渠道都放慢，隔一段才真的问一次 stat，
+    // 不是每轮都问；只在 reuse（轮询观测「今天」）时才这样做，结账、页面「刷新」、别的窗口照旧逐个问。渠道的键和上面 ownRevenueCache
+    // 用的 key 同一份（带凭据指纹、分段窗口起点）：凭据换了、分段切了、跨零点了，这份键自然换掉，和站点级沿用用同一套失效规矩。
+    // 空闲后第一次有页面回来（checkedAt 晚于 wokeUpAt，这个渠道上次真的问是在那之前）：这一轮强制真的问，不等满空闲的间隔，
+    // 让回来的人马上看到新数（总指挥 10-26 定）。按渠道各自判断安不安静这次不做，整站级探测照旧当总闸。
     const checkedAt = Date.now();
-    const skipChannels = reuse ? new Map(channelIds.map((channelId) => [channelId, ownChannelActivity.get(`${key}:${channelId}`)]).filter(([, activity]) => {
-      // 键相同但这次要的窗口终点比记下的那份还早（legacy 分段切开、窗口缩小了）：和站点级沿用同一个规矩，不能沿用（审核边界用例）
-      if (!activity || activity.checkedAt < lastTodayViewAt.wokeUpAt || activity.endMs > segmentWindow.endMs) return false;
-      const viewerIdle = checkedAt - lastTodayViewAt.at > OWN_VIEWER_IDLE_MS;
-      const recheckMs = viewerIdle ? OWN_VIEWER_IDLE_RECHECK_MS : activity.quietSince != null ? OWN_CHANNEL_QUIET_RECHECK_MS : 0;
-      return recheckMs > 0 && checkedAt - activity.checkedAt < recheckMs;
-    })) : null;
+    const viewerIdle = lastTodayViewAt.at != null && checkedAt - lastTodayViewAt.at > OWN_VIEWER_IDLE_MS;
+    const skipChannels = reuse && viewerIdle ? new Map(channelIds.map((channelId) => [channelId, ownChannelActivity.get(`${key}:${channelId}`)]).filter(([, activity]) =>
+      // 键相同但这次要的窗口终点比记下的那份还早（legacy 分段切开、窗口缩小了）：和站点级沿用同一个规矩，不能沿用；
+      // 空闲后刚回来那一刻（checkedAt 早于 wokeUpAt）不沿用，强制真的问一次
+      activity && activity.checkedAt >= lastTodayViewAt.wokeUpAt && activity.endMs <= segmentWindow.endMs && checkedAt - activity.checkedAt < OWN_VIEWER_IDLE_RECHECK_MS)) : null;
     const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus, skipChannels,
       exclusion: async () => { const read = await ownExclusion(own, segmentWindow, { settle, channelIds, freshSince: registry?.startedAt ?? null }); if (read.stale) reusedStale = true; return read; } });
     // 只有轮询观测今天会沿用，别的窗口（昨天、结账、自定义、近 7 天、本月）不记
@@ -1255,17 +1253,18 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 只留今天的：键里有窗口起点，过了零点的旧键不会再用到
       for (const [cachedKey, entry] of ownRevenueCache) if (entry.endMs < segmentWindow.endMs - 2 * DAY_MS) ownRevenueCache.delete(cachedKey);
     }
-    // 渠道安静检测只认这一轮真的问过的渠道（沿用掉的不算，不然检查时刻一直不前进、永远不会真的再问）
+    // 记下这一轮真的问到的渠道净额度，给没人看时的沿用用（沿用掉的不算，检查时刻不前进）
     if (reuse) for (const channel of result.channels) {
       if (skipChannels?.has(channel.channelId)) continue;
       const activityKey = `${key}:${channel.channelId}`;
       if (channel.billingState !== "complete") { ownChannelActivity.delete(activityKey); continue; }
-      const previous = ownChannelActivity.get(activityKey);
-      const unchanged = previous && previous.endMs <= segmentWindow.endMs && previous.quotaUnits === channel.quotaUnits && previous.adminUsageQuotaUnits === channel.adminUsageQuotaUnits;
-      ownChannelActivity.set(activityKey, { quotaUnits: channel.quotaUnits, adminUsageQuotaUnits: channel.adminUsageQuotaUnits, checkedAt, endMs: segmentWindow.endMs, quietSince: unchanged ? (previous.quietSince ?? checkedAt) : null });
+      ownChannelActivity.set(activityKey, { quotaUnits: channel.quotaUnits, adminUsageQuotaUnits: channel.adminUsageQuotaUnits, checkedAt, endMs: segmentWindow.endMs });
     }
     // 旧键（分段切了、跨零点了）的记录顺手清掉：一天没再问过就丢（和 ownRevenueCache 的清理同一个节奏）
     if (reuse) for (const [activityKey, activity] of ownChannelActivity) if (checkedAt - activity.checkedAt > DAY_MS) ownChannelActivity.delete(activityKey);
+    // 这一轮有渠道是沿用的（没人看、放慢）：这份结果不算「刚刚核实过」，不进 resultCache——不然页面来看（mode:"evaluate" 不管
+    // cached.observed，TTL 内照样信任缓存）会拿到这份沿用的数，而不是自己现算一遍；不可枚举，不进序列化、不进账本明细（总指挥 10-26 定）
+    if (skipChannels?.size > 0) Object.defineProperty(result, "staleFromIdleSkip", { value: true, enumerable: false, configurable: true });
     return result;
   }
 
@@ -2150,6 +2149,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 本站 /api/status 同一轮各绑定、各分段共用一次（ownStatusFor）；读取失败时每个分段照常按本站账单不可用处理。
       const loadOwnStatus = () => ownStatusFor(ownerRegistry, own);
       const reuseOwnRevenue = observe && origin === "poll" && isLiveReconciliationPreset(window.preset);
+      // 减压 PR：这一轮里哪些分段的渠道收入是沿用的（没人看、放慢）——有一段是，这整条绑定这一轮的结果就不进 resultCache
+      // （downstreamResult.staleFromIdleSkip 在 foldSplitSegments/下面的对象展开里会丢，这里单独记一份）
+      const staleFromIdleSkip = [];
       const segmentResults = foldSplitSegments(await mapWithConcurrency(applicable, 6, async ({ segment, segmentWindow, upstreamWindow: upstreamOwnWindow }) => {
         // 上游一侧自己的窗口（Sub2API 当天换绑的那天比本站一侧长，见 accountingUpstreamWindow）
         const upstreamWindow = upstreamOwnWindow || segmentWindow;
@@ -2164,6 +2166,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
             .catch((error) => ({ error })),
         ]);
+        if (downstreamResult.staleFromIdleSkip) staleFromIdleSkip.push(true);
         const segmentIssues = issues.filter((issue) => CALCULATION_BLOCKERS.has(issue.code));
         const sides = [upstreamResult, downstreamResult].filter((side) => !side.error);
         // 只有上游一侧的窗口或时区对不上时算上游侧问题；本站一侧对不上始终阻断。
@@ -2350,6 +2353,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         costBasis,
         health: resultHealth, generatedAt: new Date().toISOString(),
       };
+      // 减压 PR：这一轮有分段的渠道收入是沿用的（没人看、放慢）——记在 result 上（不可枚举，不进序列化、不进快照、不进账本），
+      // 调用方据此不把这份结果放进 resultCache；页面来看时才会照旧现读，不会拿到沿用的数（总指挥 10-26 定）
+      if (staleFromIdleSkip.length) Object.defineProperty(result, "staleFromIdleSkip", { value: true, enumerable: false, configurable: true });
       const scopeFingerprint = reconciliationScopeFingerprint(rule, segments);
       if (!await hasCurrentScope(rule.id, scopeFingerprint, generation, !!rule.archivedAt)) return STALE_SCOPE;
       if (currentSourceCredential(rule) !== sourceCredential) return STALE_SCOPE;
@@ -2385,7 +2391,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (value?.probe) return value;
         if (value !== STALE_SCOPE && (ruleGenerations.get(ruleId) || 0) === generation
           && currentSourceCredential(rule) === request.sourceCredential && billingSourceState().version === billingSource.version) {
-          if (value.health.code !== "PENDING") cacheResult(cacheKey, value, request.sourceCredential, billingSource.ownerVersion, observe);
+          // 这份结果里有渠道收入是沿用的（没人看、放慢）：不进 resultCache，免得页面来看时（evaluate 模式不管 cached.observed，
+          // TTL 内照样信任缓存）拿到沿用的数——留着旧的那份（更早、但是现读的）等它自然过期，或者等下一次现读覆盖（总指挥 10-26 定）
+          if (value.health.code !== "PENDING" && !value.staleFromIdleSkip) cacheResult(cacheKey, value, request.sourceCredential, billingSource.ownerVersion, observe);
           return value;
         }
         if (billingSourceState().version !== billingSource.version) return STALE_SCOPE;
@@ -3117,7 +3125,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 空闲超过 OWN_VIEWER_IDLE_MS 之后第一次又来，记一下这一刻（wokeUpAt），下一轮轮询据此强制把安静、空闲的渠道都真的问一遍
       if (options.origin === "page" && isLiveReconciliationPreset(input.preset)) {
         const now = Date.now();
-        if (now - lastTodayViewAt.at > OWN_VIEWER_IDLE_MS) lastTodayViewAt.wokeUpAt = now;
+        if (lastTodayViewAt.at != null && now - lastTodayViewAt.at > OWN_VIEWER_IDLE_MS) lastTodayViewAt.wokeUpAt = now;
         lastTodayViewAt.at = now;
       }
       for (let attempt = 1; ; attempt += 1) {
