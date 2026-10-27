@@ -1128,7 +1128,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // Sub2API 一把 Key 同一天在两条绑定之间换手（互换、转手、挪给新渠道）：按天的统计切不开，结账时这一天、这一把 Key 翻逐条用量，在 b 那一刻切开
     // （k-plan 3.5；每条绑定只认领自己那几段的时间，见 upstreamWindowForScopedSegments），这里照常写段
     const applyPlans = plans.map((plan) => {
-      const { rule, before } = byRuleId.get(plan.bindingId);
+      const { rule } = byRuleId.get(plan.bindingId);
       const identity = resources.get(rule.upstreamStationId)?.identity;
       const upstream = upstreamStation(rule.upstreamStationId);
       // 上游这一轮身份读不到：不拿读不到的身份算 canonicalKey，这一条整条跳过，等下一轮一起换
@@ -1137,12 +1137,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const metadata = resources.get(rule.upstreamStationId)?.metadata;
       const newToken = metadata?.tokens?.find((item) => Number(item.id) === Number(plan.after[0].tokenId));
       const groupFields = newToken ? { group: newToken.group, ratio: metadata.groupsAvailable ? metadata.groups?.[newToken.group]?.ratio ?? null : null } : {};
-      // Sub2API 只能按整天读：（1）一把 Key 在两条绑定之间挪（movedSub2）；（2）换掉的旧 Key 这一刻还被这条绑定以外的渠道用着（那个渠道在不在算、是不是新开的都一样）——
-      // 整天读会把别的渠道的用量算进这条绑定。段照常换，换手那一天（b 所在的业务日）这条绑定不结账，记一段会自己好的 PENDING，只挡这一天，以后的日子照常算；
-      // 挡和换段同一个事务写（applyKeyChangePlans 的 keyBlock）。临时的挡：逐条拆分（k-plan 3.5，按 b 把那天切开）合了以后去掉
-      const day = movedSub2.has(plan.bindingId) || (isSub2(plan.bindingId) && sub2KeyUsedElsewhere(rule, [before], channelsByKey)) ? dayBoundsInTz(observedAt, rule.timezone) : null;
-      return { ruleId: plan.bindingId, plan: { ...plan, ...groupFields, canonicalKey: canonicalBillingKey(upstream, identity, plan.after[0].tokenId) },
-        ...(day ? { keyBlock: { code: "PENDING", sinceMs: day.startMs, untilMs: day.endMs } } : {}) };
+      return { ruleId: plan.bindingId, plan: { ...plan, ...groupFields, canonicalKey: canonicalBillingKey(upstream, identity, plan.after[0].tokenId) } };
     }).filter(Boolean);
     // 互换、轮换（挪过）的几条绑定必须同生同死：按 movedFromBindingId 把互相牵连的归成一组，每组一个事务；
     // 别的组各自一个事务。一组撞了约束只回滚这一组、只给这一组记 KEY_GROUP_CHANGED（会自己好的那类），别的组照常换段——
