@@ -14,6 +14,7 @@ import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.j
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
+import { createFakeSub2Api, secondsInDay } from "./test-support/fake-sub2api.js";
 import { resetOwnRequestBudget } from "../lib/own-request-budget.js";
 import { billingCapabilityAliases } from "../lib/billing-capability-storage.js";
 import { maskKey } from "../lib/key-fingerprint.js";
@@ -1995,7 +1996,7 @@ function ownTestLogApi(url, logs = []) {
 // 换 Key 的端到端两种规则都跑：immediate（生产的绑定，按 Key 整体取数）和 legacy-v3（旧版，按段取）
 const POLICIES = ["immediate", "legacy"];
 
-function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [], revealScopeDenied = false, policy = "legacy" }) {
+function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [], revealScopeDenied = false, policy = "legacy", sub2api = null }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
     id, rule_id: "rr_live", group_name: group, group_ratio: ratio,
@@ -2079,6 +2080,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     // 自营站点的设置（R2）：默认记着收费记录；state.consumeLog 改成 "false" 就是关了，state.optionReply 整个换掉（没权限等）
     if (url.pathname === "/api/option/") return state.optionReply ? reply(...state.optionReply) : reply(200, { success: true, data: [{ key: "SMTPToken", value: "secret" }, { key: "LogConsumeEnabled", value: state.consumeLog ?? "true" }] });
     if (url.host === "upstream.test") {
+      const sub2Hit = sub2api?.handle(url); if (sub2Hit) return sub2Hit; // 假 Sub2API 上游（server/test-support/fake-sub2api.js）
       if (url.pathname === "/api/user/self") return reply(200, { success: true, data: { id: 7 } });
       if (url.pathname === "/api/user/self/groups") return reply(200, { success: true, data: metadataGroups ? metadataGroups(request) : { g1: { ratio: 1 }, g2: { ratio: 2 } } });
       if (url.pathname === "/api/token/") {
@@ -9872,4 +9874,31 @@ test("K2b（驱动层 304）：渠道换成了不在已加上游里的 Key，读
   const rule = await f.repository.getRule("rr_live");
   assert.equal(rule.keyIssue, null, "认出来了，事项清掉");
   assert.equal(rule.tokenId, 77, "换段");
+});
+
+// Sub2API 上游（用户在用）：按天读账单，切不开中途。换 Key 那天整窗各把 Key 取全天再相加。
+// 识别还不认 Sub2API 的 Key 目录（#142 另合），这里直接塞识别结果。所有行（这条绑定每一天）上游成本之和 = 各 Key 当天用量之和
+test("K2b + Sub2API：同一条绑定换 Key——换 Key 那天整窗各把 Key 取全天再相加，每天上游成本 = 各 Key 当天用量之和（以前整窗只取最新那把，旧 Key 的用量漏了）", async (t) => {
+  const A = Date.parse("2026-10-11T01:00:00Z"), SWITCH = Date.parse("2026-10-11T20:00:00Z"), B = Date.parse("2026-10-12T01:00:00Z");
+  let now = A;
+  t.mock.method(Date, "now", () => now);
+  const windows = { 9: [0, SWITCH], 20: [SWITCH, null] }; // 旧 Key 用到 SWITCH，新 Key 从 SWITCH 起（每秒 1 美元）
+  const fake = createFakeSub2Api({ keys: [{ id: 9, name: "stable" }, { id: 20, name: "k20" }], dayUsageUsd: (keyId, day) => secondsInDay(windows[keyId], day), now: () => Date.now() });
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], sub2api: fake,
+    usageOf: () => 0, tokenKeyOf: () => "sk-unused", extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "k20" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [] } });
+  Object.assign(f.stations[0], { type: "sub2api", accessToken: "jwt" });
+  const channelToken = { 1: 9 };
+  const inject = () => { f.rt._keyAgentIdentifyCache = { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, revealIssues: [],
+    channels: Object.entries(channelToken).map(([id, tokenId]) => ({ channelId: Number(id), keyless: false, slots: [{ index: 0, state: "identified",
+      matches: [{ stationId: "upstream", tokenId, tokenName: tokenId === 9 ? "stable" : "k20", via: "fingerprint" }] }] })) } }; };
+  inject();
+  await f.module.refreshDue(now);
+  channelToken[1] = 20; now = B; inject();
+  await f.module.refreshDue(now); // 认出换了 Key：[a, b) 过渡段两把 Key 都放着
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 20);
+  for (const iso of ["2026-10-13T01:00:00Z", "2026-10-14T01:00:00Z"]) { now = Date.parse(iso); inject(); await f.module.refreshDue(now); }
+  const cost = (day) => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === day).reduce((total, row) => total + Number(row.cost_usd), 0);
+  const truth = (day) => Object.values(windows).reduce((total, window) => total + secondsInDay(window, day), 0);
+  for (const day of ["2026-10-11", "2026-10-12", "2026-10-13"]) assert.equal(cost(day), truth(day), `${day}：各 Key 当天用量之和`);
 });

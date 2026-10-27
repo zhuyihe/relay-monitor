@@ -1585,9 +1585,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const pieces = keyPiecesOf(segments, window, token?.id);
     if (!pieces) return upstreamWindowForSegment(upstream, metadata, token, currentSegment, window, options);
     const isSub2 = upstream.type === "sub2api" || upstream.type === "sub2api-password";
-    const sources = isSub2
-      ? [{ segment: copySegment(currentSegment, { keys: [...new Map(pieces.flatMap(({ segment }) => segment.keys || []).map((key) => [`${key.upstreamStationId ?? ""}:${key.tokenId}`, key])).values()] }), window }]
-      : pieces;
+    let sources = pieces;
+    if (isSub2) {
+      // copySegment 的 overrides 不管 keys（keys 是不可枚举属性，照原段拷），所以 keys 要拷完再换
+      const merged = copySegment(currentSegment);
+      merged.keys = [...new Map(pieces.flatMap(({ segment }) => segment.keys?.length ? segment.keys : [{ upstreamStationId: upstreamStation(options.upstreamStationId)?.id, tokenId: token?.id, tokenName: token?.name }])
+        .map((key) => [`${key.upstreamStationId ?? ""}:${key.tokenId}`, key])).values()];
+      sources = [{ segment: merged, window }];
+    }
     const results = await Promise.all(sources.map((piece) => upstreamWindowForSegment(upstream, metadata, token, piece.segment, piece.window, options)));
     const summed = sumKeyStats(results);
     return { ...summed, window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
