@@ -271,11 +271,12 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_ledger", "expected_cost_usd", "DECIMAL(20,8) NULL");
   await addColumnIfMissing(pool, "reconciliation_ledger", "gap_reason", "VARCHAR(40) NULL");
   await addColumnIfMissing(pool, "reconciliation_ledger", "tokens", "BIGINT NULL");
-  // 固定成本按天固定（G）：每个固定成本的上游、每个已结束的自然日一行，记那天摊到的人民币金额和当时的汇率（没设汇率是空），只插入不改；
-  // 有没有绑定都写。note 是那天购买记录的笔数句（「2 笔在用，1 笔已到期」）。不加外键；页面按（上游, 日期范围）读，走主键。
+  // 固定成本按天固定（G）：每个上游、每个已结束的自然日一行（完整的：这天没有这一行才算还没固定），basis 记那天的计法：
+  // fixed 记摊到的人民币金额和当时的汇率（没设汇率是空），usage（按用量）、excluded（不算进利润）记 0；只插入不改，有没有绑定都写，彻底删除上游也不删。note 是那天购买记录的笔数句（「2 笔在用，1 笔已到期」）。不加外键；页面按（上游, 日期范围）读，走主键。
   await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_fixed_cost_days (
     station_id VARCHAR(32) NOT NULL,
     bill_date DATE NOT NULL,
+    basis VARCHAR(16) NOT NULL DEFAULT 'fixed',
     cost_cny DECIMAL(20,8) NOT NULL,
     cost_rate DECIMAL(12,6) NULL,
     note VARCHAR(64) NULL,

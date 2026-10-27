@@ -84,8 +84,8 @@ const SCHEMA = {
   },
   fixedCostDays: {
     keys: { PRIMARY: ["station_id", "bill_date"] },
-    notNull: ["station_id", "bill_date", "cost_cny"],
-    varchar: { station_id: 32, note: 64 },
+    notNull: ["station_id", "bill_date", "basis", "cost_cny"],
+    varchar: { station_id: 32, basis: 16, note: 64 },
   },
   settlementState: {
     keys: { PRIMARY: ["rule_id", "bill_date"] },
@@ -696,17 +696,17 @@ export class MemoryReconciliationRepository {
     let written = 0;
     for (const row of rows) {
       if (this.#plain("fixedCostDays").some((item) => sameText(item.station_id, row.stationId) && item.bill_date === row.billDate)) continue;
-      this.#insert(null, "fixedCostDays", { station_id: String(row.stationId), bill_date: row.billDate, cost_cny: ledgerDecimal(row.costCny, 8) ?? "0.00000000", cost_rate: ledgerDecimal(row.costRate, 6), note: row.note ?? null });
+      this.#insert(null, "fixedCostDays", { station_id: String(row.stationId), bill_date: row.billDate, basis: row.basis || "fixed", cost_cny: ledgerDecimal(row.costCny, 8) ?? "0.00000000", cost_rate: ledgerDecimal(row.costRate, 6), note: row.note ?? null });
       written += 1;
     }
     return written;
   }
 
   async listFixedCostDays(stationIds, fromDate, toDate) {
-    if (!stationIds?.length) return [];
+    if (stationIds != null && !stationIds.length) return [];
     await this.#read("listFixedCostDays", [stationIds, fromDate, toDate]);
-    const wanted = new Set(stationIds.map(String));
-    return this.#plain("fixedCostDays").filter((row) => wanted.has(String(row.station_id)) && row.bill_date >= fromDate && row.bill_date <= toDate)
+    const wanted = stationIds ? new Set(stationIds.map(String)) : null;
+    return this.#plain("fixedCostDays").filter((row) => (!wanted || wanted.has(String(row.station_id))) && row.bill_date >= fromDate && row.bill_date <= toDate)
       .sort((a, b) => compare(a.bill_date, b.bill_date) || compareText(a.station_id, b.station_id)).map(fixedCostDayFromRow);
   }
 

@@ -7459,9 +7459,11 @@ test("固定成本跟着每天一起固定（G）：每个固定成本的上游�
   upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5; // 每天 10 元 = $2
   // 没有绑定的固定上游（服务器租金）：每天 20 元，汇率 4 = $5
   f.stations.push({ id: "rent", name: "服务器租金", type: "fixed", baseUrl: "", enabled: true, archivedAt: null, fixedPurchases: [{ amount: 600, days: 30 }], cnyPerUsd: 4 });
+  // 不算进利润的上游：也写一行，记 0 并标明计法
+  f.stations.push({ id: "skipped", name: "不算进利润", type: "newapi", baseUrl: "https://skipped.test", enabled: true, archivedAt: null, includeInProfit: false });
   await f.module.refreshDue(Date.now());
-  const rows = () => f.repository.tables.fixedCostDays.map((row) => [row.station_id, row.bill_date, Number(row.cost_cny), Number(row.cost_rate)]).sort();
-  assert.deepEqual(rows(), [["rent", "2026-10-08", 20, 4], ["upstream", "2026-10-08", 10, 5]], "三条绑定共用一个上游也只一行；没有绑定的也写");
+  const rows = () => f.repository.tables.fixedCostDays.map((row) => [row.station_id, row.bill_date, row.basis, Number(row.cost_cny), row.cost_rate == null ? null : Number(row.cost_rate)]).sort();
+  assert.deepEqual(rows(), [["rent", "2026-10-08", "fixed", 20, 4], ["skipped", "2026-10-08", "excluded", 0, null], ["upstream", "2026-10-08", "fixed", 10, 5]], "三条绑定共用一个上游也只一行；没有绑定的也写；不算进利润的记 0 标 excluded");
   const before = await f.module.profitPage({ preset: "yesterday" });
   assert.deepEqual([before.fixedCostUsd, before.fixedCostCny], [2 + 5, 30], "同一个固定成本的上游只摊一份，不按绑定数加三遍");
   // 购买记录改成每天 100 元、汇率改了：已固定的昨天不变；再跑一轮也不会改写已有的行
@@ -7470,9 +7472,16 @@ test("固定成本跟着每天一起固定（G）：每个固定成本的上游�
   f.rt._reconciliationResultCache.clear();
   await f.module.refreshDue(Date.now());
   assert.equal(await f.repository.recordFixedCostDays([{ stationId: "upstream", billDate: "2026-10-08", costCny: 999, costRate: 1 }]), 0, "写过的一天不会被改，也不出第二行");
-  assert.deepEqual(rows(), [["rent", "2026-10-08", 20, 4], ["upstream", "2026-10-08", 10, 5]]);
+  assert.deepEqual(rows().filter((row) => row[2] === "fixed"), [["rent", "2026-10-08", "fixed", 20, 4], ["upstream", "2026-10-08", "fixed", 10, 5]]);
   const after = await f.module.profitPage({ preset: "yesterday" });
   assert.deepEqual([after.fixedCostUsd, after.fixedCostCny, after.netProfitUsd], [7, 30, before.netProfitUsd], "改了购买记录和汇率，已固定的日子不变；人民币是记下的原值");
+  // 已固定的日子不看上游现在怎么样：彻底删掉没绑定的上游、把另一个改成按用量，表里已固定的行照样算
+  f.stations.splice(f.stations.findIndex((station) => station.id === "rent"), 1);
+  upstream.fixedPurchases = []; upstream.type = "newapi";
+  f.rt._reconciliationResultCache.clear();
+  const gone = await f.module.profitPage({ preset: "yesterday" });
+  assert.deepEqual([gone.fixedCostUsd, gone.fixedCostCny], [7, 30], "删除、改计法以后，已固定的日子照算");
+  assert.equal(f.repository.tables.fixedCostDays.length, 3, "表里的行一行没少");
 });
 
 test("固定成本重结不改已固定的那天（G 审核中-4）：已固定的日子改了购买记录以后重结（读数变了写新版），固定成本表里那一行不变、不多一行", async (t) => {

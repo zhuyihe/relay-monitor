@@ -921,17 +921,17 @@ export class ReconciliationRepository {
   async recordFixedCostDays(rows) {
     if (!rows?.length) return 0;
     const [result] = await this.pool.query(
-      "INSERT IGNORE INTO reconciliation_fixed_cost_days (station_id, bill_date, cost_cny, cost_rate, note) VALUES ?",
-      [rows.map((row) => [row.stationId, row.billDate, ledgerDecimal(row.costCny, 8) ?? 0, ledgerDecimal(row.costRate, 6), row.note ?? null])]);
+      "INSERT IGNORE INTO reconciliation_fixed_cost_days (station_id, bill_date, basis, cost_cny, cost_rate, note) VALUES ?",
+      [rows.map((row) => [row.stationId, row.billDate, row.basis || "fixed", ledgerDecimal(row.costCny, 8) ?? 0, ledgerDecimal(row.costRate, 6), row.note ?? null])]);
     return Number(result?.affectedRows) || 0;
   }
 
-  // 这些上游在 [fromDate, toDate] 里已经固定的日子（一条语句，走主键）
+  // [fromDate, toDate] 里已经固定的日子（一条语句）；给了 stationIds 只取这些上游，不给（null）取全部——页面读固定成本时不看上游现在是什么样
   async listFixedCostDays(stationIds, fromDate, toDate) {
-    if (!stationIds?.length) return [];
+    if (stationIds != null && !stationIds.length) return [];
     const [rows] = await this.pool.query(
-      "SELECT station_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date, cost_cny, cost_rate, note FROM reconciliation_fixed_cost_days WHERE station_id IN (?) AND bill_date >= ? AND bill_date <= ? ORDER BY bill_date, station_id",
-      [stationIds.map(String), fromDate, toDate]);
+      `SELECT station_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date, basis, cost_cny, cost_rate, note FROM reconciliation_fixed_cost_days WHERE ${stationIds ? "station_id IN (?) AND " : ""}bill_date >= ? AND bill_date <= ? ORDER BY bill_date, station_id`,
+      stationIds ? [stationIds.map(String), fromDate, toDate] : [fromDate, toDate]);
     return rows.map(fixedCostDayFromRow);
   }
 

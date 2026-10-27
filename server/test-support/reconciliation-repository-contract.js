@@ -1212,6 +1212,11 @@ contract("fixed-cost days: one row per station and day, INSERT IGNORE never rewr
     [["2026-01-08", 10, 6.8, "2 笔在用"], ["2026-01-09", 0, null, null], ["2026-01-10", 5, 6.8, null]], "写过的一天不改、没设汇率是 null");
   assert.deepEqual((await repository.listFixedCostDays(["fxd1", "fxd2"], "2026-01-08", "2026-01-08")).map((row) => [row.stationId, row.costCny]), [["fxd1", 10], ["fxd2", 20.5]], "范围和上游都按给的取");
   assert.deepEqual(await repository.listFixedCostDays([], "2026-01-01", "2026-01-31"), []);
+  await repository.recordFixedCostDays([{ stationId: "fxd4", billDate: "2026-01-09", basis: "usage", costCny: 0 }, { stationId: "fxd5", billDate: "2026-01-09", basis: "excluded", costCny: 0 }]);
+  const all = await repository.listFixedCostDays(null, "2026-01-09", "2026-01-09");
+  assert.ok(["fxd1", "fxd4", "fxd5"].every((id) => all.some((row) => row.stationId === id)), "不给上游：取这一段里所有上游的行");
+  assert.deepEqual(all.filter((row) => row.stationId === "fxd4" || row.stationId === "fxd5").map((row) => [row.stationId, row.basis, row.costCny]), [["fxd4", "usage", 0], ["fxd5", "excluded", 0]], "计法一起记，按用量、不算进利润的记 0");
+  assert.equal((await repository.listFixedCostDays(["fxd1"], "2026-01-08", "2026-01-08"))[0].basis, "fixed", "不写计法就是 fixed");
   assert.equal(await repository.latestFixedCostDay("fxd1"), "2026-01-10", "这个上游已写的最后一天");
   assert.equal(await repository.latestFixedCostDay("fxd-none"), null, "没写过是 null");
   // 并发写同一天：只留一行
