@@ -5,6 +5,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { credentialFieldOf, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
+import { secretWeakness } from "../lib/key-fingerprint.js";
 import { channelSecretFields } from "../lib/notify.js";
 
 const CIPHERTEXT = /^enc:v1:([0-9a-f]{8}):([A-Za-z0-9_-]{16}):([A-Za-z0-9_-]{22,})$/;
@@ -14,7 +15,13 @@ const TAG_BYTES = 16;
 // 还有余额结果里记的账号名（Sub2API 账号没有用户名时就是登录邮箱）。
 // 读库只按这张表解密，不是「长得像密文就解」：上游返回的任何字符串都可能长得像密文，那样一个上游就能让服务起不来。
 // 所以这张表只加不减：去掉一项，库里那一项的密文就会被当成明文用
-const STATION_SECRET_PATHS = Object.freeze([...UPSTREAM_SECRET_FIELDS, "email", "s2Tokens", "balance.account"]);
+// keyAgentSecret：渠道 Key 读取服务的令牌（K2a），和上游令牌一样整串加密存
+const STATION_SECRET_PATHS = Object.freeze([...UPSTREAM_SECRET_FIELDS, "email", "s2Tokens", "balance.account", "keyAgentSecret"]);
+// 读取服务的令牌太短或太弱不让存（和读取服务启动时的检查一样，lib/key-fingerprint.js 的 secretWeakness）
+export function assertKeyAgentSecretStrength(secret) {
+  const weakness = secretWeakness(secret);
+  if (weakness) throw Object.assign(new Error(weakness === "SECRET_TOO_SHORT" ? "令牌至少 32 个字符，用「怎么装」里的命令生成一串" : "令牌太弱，用「怎么装」里的命令生成一串"), { code: weakness });
+}
 // 清空时写什么：自动登录的令牌是对象，清成 null；其余是字符串，清成空串
 const EMPTY_VALUE = { s2Tokens: null };
 // 从上游读回来的（下次刷新会重写）：明文模式下原样存着上游给的字符串，它可能刚好长得像密文。
@@ -144,7 +151,7 @@ function holderOf(doc) {
 function labelOf(doc, path) {
   const label = doc.kind === "channel"
     ? channelSecretFields(doc.type).find((field) => field.key === path)?.label
-    : path === "s2Tokens" ? "自动登录拿到的令牌" : path === "balance.account" ? "余额记录里的账号名" : credentialFieldOf(doc.type, path)?.label;
+    : path === "s2Tokens" ? "自动登录拿到的令牌" : path === "balance.account" ? "余额记录里的账号名" : path === "keyAgentSecret" ? "读取服务令牌" : credentialFieldOf(doc.type, path)?.label;
   return label || path;
 }
 

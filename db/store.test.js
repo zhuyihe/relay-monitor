@@ -663,3 +663,19 @@ test("读库时去掉 #42 给通知方式记的投递版本（补发改成按 id
   const added = await store.addChannel({ type: "webhook", name: "新的", config: { url: "https://hooks.example.com/y" } });
   assert.equal("deliveryVersion" in added, false);
 });
+
+test("渠道 Key 读取服务配置（K2a）：url 直接存，secret 太短或太弱不让存，够强才存；留空保留已保存的", async () => {
+  const store = await new Store(fakePool()).load();
+  const station = await store.add({ name: "自营站", type: "newapi", baseUrl: "https://own.example.com", isOwn: true, accessToken: "pat" });
+  assert.deepEqual([station.keyAgentUrl, station.keyAgentSecret], ["", ""]);
+  await assert.rejects(store.update(station.id, { keyAgentSecret: "too-short" }), (error) => error.code === "SECRET_TOO_SHORT");
+  await assert.rejects(store.update(station.id, { keyAgentSecret: "a".repeat(40) }), (error) => error.code === "SECRET_TOO_WEAK");
+  const strong = "K7m2-xP9q" + "R4t".repeat(10);
+  await store.update(station.id, { keyAgentUrl: "https://own.example.com/key-agent", keyAgentSecret: strong });
+  assert.deepEqual([store.get(station.id).keyAgentUrl, store.get(station.id).keyAgentSecret], ["https://own.example.com/key-agent", strong]);
+  // 留空：地址可以单独改，令牌不填就沿用已保存的
+  await store.update(station.id, { keyAgentUrl: "https://own.example.com/agent2", keyAgentSecret: "" });
+  assert.deepEqual([store.get(station.id).keyAgentUrl, store.get(station.id).keyAgentSecret], ["https://own.example.com/agent2", strong]);
+  // 建站点时也一样挡弱令牌
+  await assert.rejects(store.add({ name: "x", type: "newapi", baseUrl: "https://x.test", keyAgentSecret: "short" }), (error) => error.code === "SECRET_TOO_SHORT");
+});

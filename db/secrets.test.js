@@ -353,3 +353,15 @@ test("reset-secrets：用现在这个密钥加密、却解不开的，说是数�
   assert.deepEqual(report.cleared.map((item) => item.label), ["登录密码"]);
   assert.ok(resetReportLines(report, { secretKey: keyA }).includes(`其中用现在这个密钥（编号 ${keyA.id}）加密、却解不开的，是库里的数据被改过。`));
 });
+
+test("渠道 Key 读取服务的令牌（keyAgentSecret）也加密存，附加数据绑的是这个上游、这个字段；label 写「读取服务令牌」", async () => {
+  const station = { id: "st_c", name: "丙", type: "newapi", baseUrl: "https://c.example", accessToken: "", apiKey: "", email: "", password: "",
+    s2Tokens: null, keyAgentUrl: "https://c.example/key-agent", keyAgentSecret: "agent-secret-value" };
+  const pool = memoryPool({ stations: [station] });
+  const store = await new Store(pool, { secretKey: keyA }).load();
+  assert.ok(isCiphertext(pool.doc("st_c").keyAgentSecret));
+  assert.equal(pool.doc("st_c").keyAgentUrl, "https://c.example/key-agent", "地址不加密");
+  assert.equal(store.get("st_c").keyAgentSecret, "agent-secret-value", "内存里是明文");
+  // 附加数据绑这个上游、这个字段：挪到别的上游名下解不开（和令牌、Key 一样的规矩，不单独抽测，这里只核对不是漏加密）
+  assert.doesNotMatch(pool.dump(), /agent-secret-value/);
+});

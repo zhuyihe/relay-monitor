@@ -27,7 +27,13 @@ export const POST = withAuth(async (request, rt) => {
   if (!b.type || !STATION_TYPES.some((t) => t.value === b.type))
     return json({ error: "请选上游类型", code: "UNSUPPORTED_UPSTREAM_TYPE" }, 400);
   if (!b.baseUrl && b.type !== "fixed") return json({ error: "请填写站点地址" }, 400);
-  const s = await rt.store.add(b);
+  let s;
+  try {
+    s = await rt.store.add(b);
+  } catch (error) {
+    if (["SECRET_TOO_SHORT", "SECRET_TOO_WEAK"].includes(error.code)) return json({ error: error.message, code: error.code }, 400);
+    throw error;
+  }
   rt._ownCache?.clear();
   delete rt._ownChannelsCache;
   delete rt._ownUsersCache;
