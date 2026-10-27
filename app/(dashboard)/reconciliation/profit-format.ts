@@ -53,7 +53,7 @@ export function pageMoney(page: ProfitPageResponse, currency: ReconciliationCurr
   const counted = page.rows.filter((row) => row.counted);
   if (currency !== "CNY") {
     const latest = page.latestSettledGap;
-    return { income: page.pageTotals.incomeUsd, actual: page.pageTotals.actualCostUsd, gross: page.pageTotals.grossProfitUsd, fixedCost: page.fixedCostUsd, net: page.netProfitUsd,
+    return { income: page.pageTotals.incomeUsd, actual: page.pageTotals.actualCostUsd, gross: page.pageTotals.grossProfitUsd, fixedCost: page.fixedCostUsd, fixedExact: true, net: page.netProfitUsd,
       gap: page.gap.usd, over: page.gap.overUsd, under: page.gap.underUsd, within: page.gap.withinUsd, latestGap: latest?.usd ?? null, unaccounted: page.unaccountedUpstreamCostUsd, approx: false };
   }
   const moneys = counted.map((row) => rowMoney(row, currency));
@@ -68,7 +68,7 @@ export function pageMoney(page: ProfitPageResponse, currency: ReconciliationCurr
   // 显示人民币：直接用接口给的人民币原值；显示美元：用各上游自己的汇率折好的美元数（不经自营站点的汇率）
   const fixedCost = currency === "CNY" && page.fixedCostCny !== undefined ? page.fixedCostCny : toDisplay(page.fixedCostUsd, ownRate, currency);
   const latestRows = page.latestSettledGap ? page.rows.filter((row) => row.latestSettledGap?.day === page.latestSettledGap!.day && row.latestSettledGap?.usd != null) : [];
-  return { income, actual, gross, fixedCost, net: gross != null && fixedCost != null ? gross - fixedCost : null,
+  return { income, actual, gross, fixedCost, fixedExact: currency === "CNY" && page.fixedCostCny !== undefined, net: gross != null && fixedCost != null ? gross - fixedCost : null,
     gap, over, under, within: gap == null ? 0 : gap - over + under,
     latestGap: latestRows.length ? sum(latestRows.map((row) => toDisplay(row.latestSettledGap!.usd, row.rates?.cost, currency) ?? 0)) : null,
     // 固定成本、没算进利润的上游成本是按自营站点的汇率换回来的，写的时候带「≈」（用语规范 §7）
@@ -335,7 +335,7 @@ export function metrics(page: ProfitPageResponse, ctx: Ctx): Metric[] {
   const grossLines = [COPY.metric.equation(fmt(money.income), fmt(money.actual))];
   if (money.income != null && money.income > 0 && money.gross != null) grossLines.push(COPY.metric.margin(formatPct(money.gross / money.income)));
   const approx = (value: number | null) => (money.approx ? COPY.metric.approx(fmt(value)) : fmt(value));
-  if (money.gross != null) grossLines.push(money.fixedCost == null ? COPY.metric.netUnknown : today ? COPY.metric.netToday(approx(money.fixedCost), approx(money.net)) : COPY.metric.net(approx(money.fixedCost), approx(money.net)));
+  if (money.gross != null) grossLines.push(money.fixedCost == null ? COPY.metric.netUnknown : today ? COPY.metric.netToday(money.fixedExact ? fmt(money.fixedCost) : approx(money.fixedCost), approx(money.net)) : COPY.metric.net(money.fixedExact ? fmt(money.fixedCost) : approx(money.fixedCost), approx(money.net)));
   const gross: Metric = { key: "gross", title: today ? COPY.metric.grossToday : allFixed || single ? COPY.metric.gross : COPY.metric.grossRange(presetName && page.range.preset !== "custom" ? presetName : rangeText(page, ctx)), value: fmt(money.gross), lines: grossLines };
   // 2. 差额：今天「明天出」；其余比预期少赚 / 多赚，下面多扣、少扣、门槛以内三项
   let gap: Metric;

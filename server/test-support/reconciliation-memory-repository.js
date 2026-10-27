@@ -710,6 +710,12 @@ export class MemoryReconciliationRepository {
       .sort((a, b) => compare(a.bill_date, b.bill_date) || compareText(a.station_id, b.station_id)).map(fixedCostDayFromRow);
   }
 
+  async latestFixedCostDay(stationId) {
+    await this.#read("latestFixedCostDay", [stationId]);
+    const dates = this.#plain("fixedCostDays").filter((row) => sameText(row.station_id, stationId)).map((row) => row.bill_date).sort(compare);
+    return dates.at(-1) ?? null;
+  }
+
   async earliestLedgerDate() {
     await this.#read("earliestLedgerDate", []);
     const dates = this.#plain("ledger").map((row) => row.bill_date).sort(compare);

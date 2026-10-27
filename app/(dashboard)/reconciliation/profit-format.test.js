@@ -61,6 +61,8 @@ test("按人民币显示：固定成本直接用接口给的人民币原值，�
   const p = page({ rows: [r], fixedCostUsd: 700 / 6.8, fixedCostCny: 700, displayCurrency: "CNY" });
   assert.equal(pageMoney(p, "CNY").fixedCost, 700);
   assert.equal(pageMoney(p, "USD").fixedCost, 700 / 6.8);
+  assert.equal(pageMoney(p, "CNY").fixedExact, true, "人民币原值：固定成本前面不带「≈」");
+  assert.equal(pageMoney(page({ rows: [r], fixedCostUsd: 100, displayCurrency: "CNY" }), "CNY").fixedExact, false, "接口没给人民币原值时才是折算的");
 });
 
 test("差额那一格（§5.7）：多扣 / 少扣带百分比和「对不上」；门槛以内灰字写数；今天「明天出」；算不了写「—」和原因", () => {

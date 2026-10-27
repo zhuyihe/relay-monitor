@@ -2516,23 +2516,32 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (fixedCostFilledThrough === lastDay) return;
     const fixed = usageUpstreams()?.fixed || [];
     if (!fixed.length) { fixedCostFilledThrough = lastDay; return; }
-    const earliest = (await repository.earliestLedgerDate()) || lastDay;
+    let earliest = null; // 没写过的上游才要：账本最早的一天（用到才读，每天最多一次）
     const allRules = await repository.listRules({ includeArchived: true });
     for (const station of fixed) {
-      const createdDay = Number.isFinite(Date.parse(station.createdAt)) ? dayKeyInTz(Date.parse(station.createdAt), tz) : earliest;
-      const from = earliest > createdDay ? earliest : createdDay;
+      // 每个上游从它已写的最后一天往后补；没写过的才从最早有账本的那天补（不设天数上限，写满了也不会停）
+      const last = await repository.latestFixedCostDay(station.id);
+      let from;
+      if (last) from = shiftDayLabel(last, 1);
+      else {
+        earliest ??= (await repository.earliestLedgerDate()) || lastDay;
+        const createdDay = Number.isFinite(Date.parse(station.createdAt)) ? dayKeyInTz(Date.parse(station.createdAt), tz) : earliest;
+        from = earliest > createdDay ? earliest : createdDay;
+      }
       if (from > lastDay) continue;
       const mine = allRules.filter((rule) => String(rule.upstreamStationId) === String(station.id)).map((rule) => rule.id);
-      const [have, facts] = await Promise.all([repository.listFixedCostDays([station.id], from, lastDay), mine.length ? repository.listLedgerDayFacts(mine, from, lastDay) : []]);
-      const haveDays = new Set(have.map((row) => row.billDate));
+      const facts = mine.length ? await repository.listLedgerDayFacts(mine, from, lastDay) : [];
+      // 那天有账本行：汇率取结账那天记的（和上线前页面读的一样，数不跳）；没有账本行才用现在的
+      const factRate = new Map();
+      for (const fact of facts) if (fact.costBasis === "fixed" && fact.costRate > 0 && !factRate.has(fact.billDate)) factRate.set(fact.billDate, fact.costRate);
       const usageDays = new Set(facts.filter((fact) => fact.costBasis && fact.costBasis !== "fixed").map((fact) => fact.billDate));
       const rate = rateSnapshotOf(station), purchases = purchasesOf(station), rows = [];
-      for (let day = from, guard = 0; day <= lastDay && guard < 800; day = shiftDayLabel(day, 1), guard += 1) {
+      for (let day = from; day <= lastDay; day = shiftDayLabel(day, 1)) {
         // 那天是按用量算的（后来才换成固定）：上游成本已经在那天的账里，不再另记固定成本
-        if (haveDays.has(day) || usageDays.has(day)) continue;
+        if (usageDays.has(day)) continue;
         const startMs = dayStartInTz(day, tz);
         const amortized = amortizeFixedCost(purchases, { startMs, endMs: shiftedDayStartInTz(startMs, 1, tz), tz });
-        rows.push({ stationId: station.id, billDate: day, costCny: amortized.exact, costRate: isConfiguredRate(rate) ? rate.cnyPerUsd : null, note: amortized.note });
+        rows.push({ stationId: station.id, billDate: day, costCny: amortized.exact, costRate: factRate.get(day) ?? (isConfiguredRate(rate) ? rate.cnyPerUsd : null), note: amortized.note });
       }
       if (rows.length) await repository.recordFixedCostDays(rows);
     }

@@ -1212,6 +1212,8 @@ contract("fixed-cost days: one row per station and day, INSERT IGNORE never rewr
     [["2026-01-08", 10, 6.8, "2 笔在用"], ["2026-01-09", 0, null, null], ["2026-01-10", 5, 6.8, null]], "写过的一天不改、没设汇率是 null");
   assert.deepEqual((await repository.listFixedCostDays(["fxd1", "fxd2"], "2026-01-08", "2026-01-08")).map((row) => [row.stationId, row.costCny]), [["fxd1", 10], ["fxd2", 20.5]], "范围和上游都按给的取");
   assert.deepEqual(await repository.listFixedCostDays([], "2026-01-01", "2026-01-31"), []);
+  assert.equal(await repository.latestFixedCostDay("fxd1"), "2026-01-10", "这个上游已写的最后一天");
+  assert.equal(await repository.latestFixedCostDay("fxd-none"), null, "没写过是 null");
   // 并发写同一天：只留一行
   await Promise.all([1, 2, 3].map((n) => repository.recordFixedCostDays([{ stationId: "fxd3", billDate: "2026-01-08", costCny: n, costRate: 5 }])));
   assert.equal((await repository.listFixedCostDays(["fxd3"], "2026-01-08", "2026-01-08")).length, 1);

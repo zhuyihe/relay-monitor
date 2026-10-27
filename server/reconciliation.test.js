@@ -7494,6 +7494,29 @@ test("固定成本重结不改已固定的那天（G 审核中-4）：已固定�
   assert.deepEqual(rows(), [["2026-10-07", 10], ["2026-10-08", 10]], "固定成本表不变、不多行");
 });
 
+test("固定成本补数（G 审核第二轮）：以前的日子用账本里结账那天记的汇率（上线时数不跳）；以后每天只从各上游已写的最后一天往后接着补", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5; // 结账时每天 10 元、汇率 5
+  await f.module.refreshDue(now);
+  const rows = () => f.repository.tables.fixedCostDays.map((row) => [row.bill_date, Number(row.cost_rate)]);
+  // 模拟「上线前已经有账本、表还是空的」：清空表，汇率改成 2，隔一天再跑一轮——补数那天有账本，用账本记的汇率 5，不用现在的 2
+  f.repository.tables.fixedCostDays.length = 0;
+  upstream.cnyPerUsd = 2;
+  now += 86400000;
+  await f.module.refreshDue(now);
+  assert.deepEqual(rows().filter(([day]) => day <= "2026-10-08"), [["2026-10-07", 5], ["2026-10-08", 5]], "有账本的日子取账本里的汇率");
+  // 再隔一天：只补新的一天，已写的不重算
+  const written = f.repository.tables.fixedCostDays.length;
+  upstream.cnyPerUsd = 3;
+  now += 86400000;
+  await f.module.refreshDue(now);
+  assert.equal(f.repository.tables.fixedCostDays.length, written + 1, "只多一天");
+  assert.deepEqual(rows().filter(([day]) => day <= "2026-10-08"), [["2026-10-07", 5], ["2026-10-08", 5]]);
+});
+
 test("结账在途改变成本计法和双边汇率：废弃旧任务，重读后只保存一致的新配置", async (t) => {
   for (const initialFixed of [true, false]) await t.test(initialFixed ? "固定采购改按用量" : "按用量改固定采购", async (t) => {
     const wait = holdPoint();

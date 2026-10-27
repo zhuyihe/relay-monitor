@@ -935,6 +935,12 @@ export class ReconciliationRepository {
     return rows.map(fixedCostDayFromRow);
   }
 
+  // 这个上游已写的最后一天（没写过是 null）：补数从它的下一天接着往后
+  async latestFixedCostDay(stationId) {
+    const [rows] = await this.pool.query("SELECT DATE_FORMAT(MAX(bill_date), '%Y-%m-%d') AS d FROM reconciliation_fixed_cost_days WHERE station_id = ?", [String(stationId)]);
+    return rows[0]?.d ?? null;
+  }
+
   // 补数的起点：账本里最早的一天（没有账本是 null）
   async earliestLedgerDate() {
     const [rows] = await this.pool.query("SELECT DATE_FORMAT(MIN(bill_date), '%Y-%m-%d') AS d FROM reconciliation_ledger");
