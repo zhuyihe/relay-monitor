@@ -3672,3 +3672,40 @@ test("回答账号用途：改答案时多一行说明（只给我的渠道用 �
   await opened.getByText(/^这个上游下有 3 个渠道还没在算：/).waitFor();
   assert.equal(await direct.center.getByRole("option", { selected: true }).first().innerText().then((text) => text.startsWith("B-monitor")), true, "落在这个上游上");
 });
+
+// ---- K2d-1 设计验收：手机上点上游自动滚到它的渠道那一块、「换一个上游」滚回列表；右上角不常驻「更新登录信息」；今天上午算过的渠道今天开始不了 ----
+test("手机：点一个上游自动平滑滚到它的渠道那一块；那一块右上有「换一个上游」，点了滚回列表；桌面没有这个链接", async (t) => {
+  // 上游多、卡片多，页面比一屏长，滚动才看得出来
+  const base = channelsOverview();
+  const extra = Array.from({ length: 8 }, (_, i) => channelUpstream(`Extra-${i}`, `Extra ${i}`, { channelCount: 1, runningCount: 1 }));
+  const cards = [...base.cards, ...Array.from({ length: 6 }, (_, i) => channelCard(`rule:x${i}`, { upstreamStationId: "A-monitor-2", ruleId: `x${i}`, names: [`长渠道 ${i}`], channelIds: [100 + i], keys: [keyLine("oai", 1, "A-monitor-2")] }))];
+  const mobile = await openAccountsPage(t, { overview: { ...base, upstreams: [...base.upstreams, ...extra], cards }, viewport: { width: 390, height: 844 } });
+  await mobile.center.getByRole("option").first().waitFor();
+  const topOf = (selector) => mobile.page.locator(selector).first().evaluate((node) => Math.round(node.getBoundingClientRect().top));
+  const before = await topOf(".jy-channels-right-wrap");
+  assert.ok(before > 300, `点以前渠道那一块在屏幕下面（top=${before}）`);
+  await mobile.center.getByRole("option", { name: /^A-monitor-2/ }).click();
+  await mobile.page.waitForFunction(() => document.querySelector(".jy-channels-right-wrap").getBoundingClientRect().top < 200, null, { timeout: 5000 });
+  await mobile.center.getByRole("button", { name: "换一个上游", exact: true }).click();
+  await mobile.page.waitForFunction(() => document.querySelector(".jy-channels-left-wrap").getBoundingClientRect().top < 200 && document.querySelector(".jy-channels-left-wrap").getBoundingClientRect().top > -50, null, { timeout: 5000 });
+  const desktop = await openAccountsPage(t, { overview: channelsOverview() });
+  assert.equal(await desktop.center.getByRole("button", { name: "换一个上游", exact: true }).count(), 0);
+});
+
+test("右上角只留「编辑上游」和「暂停监控」；登录信息相关的事写在这个上游里，按钮「更新登录信息」在那一行", async (t) => {
+  const { center } = await openAccountsPage(t, { overview: channelsOverview() });
+  await center.getByRole("option", { name: /^A-monitor-1/ }).click();
+  const head = center.locator(".jy-channels-right-wrap header, .jy-channels-right-wrap .jy-panel__extra").first();
+  assert.equal(await center.locator('[data-issue="login"]').count() > 0 ? await center.locator(".jy-channels-right-wrap [data-issue=login]").getByRole("button", { name: /^更新登录信息/ }).count() : 1, 1, "按钮在那件事的一行里");
+  const extraButtons = await center.locator(".jy-channels-right-wrap").first().evaluate((node) => [...node.querySelectorAll("button")].filter((b) => !b.closest(".jy-channels-cards")).map((b) => b.textContent.trim()));
+  assert.ok(!extraButtons.some((text) => text.startsWith("更新登录信息")), `右上角没有「更新登录信息」：${extraButtons}`);
+  assert.ok(extraButtons.includes("编辑上游"));
+});
+
+test("今天上午已经在别的 Key 下算过的渠道：卡片上写「今天 10:00 以前已经按 Key「oai」算过，明天 0 点起可以开始算」，「开始算利润」灰着", async (t) => {
+  const overview = channelsOverview({ cards: [channelCard("today:A-monitor-1:11", { state: "blocked", names: ["渠道 6"], channelIds: [6], ruleId: null, blocked: { code: "COUNTED_EARLIER_TODAY", stoppedAtMs: Date.parse("2026-10-26T02:00:00Z"), tokenName: "oai" } })] });
+  const { center } = await openAccountsPage(t, { overview });
+  const card = center.locator('[data-card-id="today:A-monitor-1:11"]');
+  await card.getByText(/^今天 .* 以前已经按 Key「oai」算过，明天 0 点起可以开始算$/).waitFor();
+  assert.equal(await card.getByRole("button", { name: START_PROFIT.label, exact: true }).isDisabled(), true);
+});

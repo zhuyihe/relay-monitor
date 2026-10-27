@@ -55,6 +55,8 @@ const COPY = Object.freeze({
   multiKeyOn: (n: number) => `这个渠道填了 ${n} 把 Key，这一版还算不了`,
   sharedWithMultiKey: (names: string[]) => `这把 Key 还给${names.length > 1 ? `「${names[0]}」等 ${names.length} 个渠道` : `「${names[0]}」`}用着，这一版还算不了`,
   cannotStart: "这一版还算不了",
+  // 今天上午这个渠道已经在别的 Key 下算过，今天再加进来会算两遍，等到明天 0 点（用语规范 §5.6）
+  countedEarlier: (time: string, key: string) => `今天 ${time} 以前已经按 Key「${key}」算过，明天 0 点起可以开始算`,
   noBills: "这个上游读不到每天的账单，只能看余额",
   onlyOneKey: "这个上游只填了一把 Key，换 Key 时要来这里改",
   readerNone: "装好读取服务才能开始算利润",
@@ -82,6 +84,7 @@ const COPY = Object.freeze({
   pausedHint: "暂停监控时不刷新余额，渠道照常算利润。",
   balance: "余额",
   editUpstream: "编辑上游",
+  pickAnother: "换一个上游",
 });
 // 「这个上游账号只给你自己的渠道用吗？」的选项（用语规范 §5.2）；打开时一个都不选。值是上游上存的 accountUse
 const USE_OPTIONS = [
@@ -108,7 +111,7 @@ type Card = {
   id: string; state: "attention" | "running" | "stopped" | "blocked"; upstreamStationId: string; channelIds: number[]; names: string[]; ruleId: string | null; tokenName: string | null;
   startedBy: "auto" | "user" | null; startedAtMs: number | null; issues: string[]; keys: KeyLine[]; startGroupKey: string | null; needsCoverage: boolean; optedOut: boolean;
   // state = blocked：这一版还算不了（几把 Key 的渠道、和它共用 Key 的组），没有按钮
-  blocked?: { code: "MULTI_KEY" | "KEY_SHARED_WITH_MULTI_KEY"; keyCount?: number; sharedWith?: string[] };
+  blocked?: { code: "MULTI_KEY" | "KEY_SHARED_WITH_MULTI_KEY" | "COUNTED_EARLIER_TODAY"; keyCount?: number; sharedWith?: string[]; stoppedAtMs?: number; tokenName?: string | null };
 };
 type UpstreamRow = { id: string; name: string; type: string; accountUse: string | null; noBills: boolean; needsAccountUse?: boolean; channelCount: number; runningCount: number; attentionCount: number };
 type Unmatched = { channelId: number; name: string; reason: string; upstreamStationId?: string };
@@ -163,6 +166,14 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
   const [useError, setUseError] = useState<ErrorNote | null>(null);
   const epoch = useRef(0);
   const resolved = useRef(false);
+  // 手机上上游列表在渠道卡片上面：点一个上游要自动滚到它的渠道那一块，点了不滚屏幕上什么都没变；那一块的标题右边有「换一个上游」滚回列表（设计验收 #148）
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const cardsRef = useRef<HTMLDivElement | null>(null);
+  const [scrollToCards, setScrollToCards] = useState(0);
+  useEffect(() => {
+    if (!scrollToCards || !compact) return;
+    cardsRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [scrollToCards, compact]);
   const tz = accountModel?.tz || DEFAULT_BUSINESS_TIME_ZONE;
   const own = useMemo(() => stations.find((station) => station.isOwn && !station.archivedAt && station.type === "newapi") ?? null, [stations]);
   const ownId: string = own?.id ?? "";
@@ -375,7 +386,9 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
   const renderCard = (card: Card, upstream: UpstreamRow | undefined) => {
     const stateTag = card.state === "attention" ? <span className="jy-tag jy-tag--warn">{COPY.needsAction}</span>
       : card.state === "running" ? <span className="jy-tag jy-tag--info">{COPY.running}</span> : <span className="jy-tag jy-tag--muted">{COPY.stopped}</span>;
-    const blockedText = card.blocked ? (card.blocked.code === "MULTI_KEY" ? COPY.multiKeyOn(card.blocked.keyCount ?? 2) : COPY.sharedWithMultiKey(card.blocked.sharedWith ?? [])) : null;
+    const blockedText = card.blocked ? (card.blocked.code === "MULTI_KEY" ? COPY.multiKeyOn(card.blocked.keyCount ?? 2)
+      : card.blocked.code === "COUNTED_EARLIER_TODAY" ? COPY.countedEarlier(formatZonedTime(card.blocked.stoppedAtMs ?? 0, tz), card.blocked.tokenName ?? "")
+        : COPY.sharedWithMultiKey(card.blocked.sharedWith ?? [])) : null;
     const busy = busyId === card.id;
     const canStart = card.state === "stopped" && !upstream?.noBills;
     return (
@@ -411,6 +424,10 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
   const notStartedNames = (id: string) => (overview?.cards ?? []).filter((card) => card.upstreamStationId === id && card.state === "stopped" && !card.optedOut).flatMap((card) => card.names);
   const cardsOf = (id: string) => (overview?.cards ?? []).filter((card) => card.upstreamStationId === id)
     .sort((a, b) => ["attention", "running", "stopped", "blocked"].indexOf(a.state) - ["attention", "running", "stopped", "blocked"].indexOf(b.state));
+  // 登录信息相关的事（登录信息不对或过期、令牌少了权限）写在这个上游里，按钮放在那一行；右上角不常驻「更新登录信息」（设计验收 #148：平时要改走「编辑上游」）
+  const loginAction = selectedStation && !selectedStation.isOwn
+    ? (accountModel?.actions ?? []).find((action: any) => action.kind === "update_authorization" && (action.stationId === selectedId || (action.accountKey && selectedAccount && action.accountKey === selectedAccount.accountKey))) ?? null
+    : null;
   const unmatched = overview?.unmatched ?? [];
   // 上游的令牌少了读完整 Key 的权限：有两把 Key 分不清，事写在这个上游上（一个上游一件）
   const revealDenied = unmatched.some((item) => item.reason === "KEY_REVEAL_DENIED" && item.upstreamStationId === selectedId);
@@ -450,11 +467,12 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
         {readerBanner}
         {notice ? <div className="jy-banner" role="status"><Sym kind="warn" /><div className="jy-banner__body"><b>{notice}</b></div></div> : null}
         <div className="jy-channels-grid">
+          <div ref={listRef} className="jy-channels-left-wrap">
           <Panel title={COPY.upstreams} badge={<span className="jy-count">{upstreams.length} 个</span>} body="flush" className="jy-channels-left">
             <ul className="jy-channels-upstreams" role="listbox" aria-label={COPY.upstreams}>
               {upstreams.map((item) => (
                 <li key={item.id}>
-                  <button type="button" role="option" aria-selected={item.id === selectedId} className={`jy-channels-upstream${item.id === selectedId ? " is-selected" : ""}`} onClick={() => setSelectedId(item.id)}>
+                  <button type="button" role="option" aria-selected={item.id === selectedId} className={`jy-channels-upstream${item.id === selectedId ? " is-selected" : ""}`} onClick={() => { setSelectedId(item.id); setScrollToCards((n) => n + 1); }}>
                     <span className="jy-channels-upstream__name">{item.name}{stations.find((s) => s.id === item.id)?.monitorEnabled === false ? <span className="jy-tag jy-tag--muted">{COPY.paused}</span> : null}</span>
                     {item.attentionCount ? <span className="jy-tag jy-tag--warn">{item.attentionCount} 个{COPY.needsAction}</span> : null}
                     <span className="jy-channels-upstream__sub jy-caption">{accountUseText(item)}</span>
@@ -485,6 +503,8 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
               </div>
             ) : null}
           </Panel>
+          </div>
+          <div ref={cardsRef} className="jy-channels-right-wrap">
           <Panel
             body={false}
             className="jy-channels-right"
@@ -492,16 +512,24 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
             caption={selectedStation?.balance?.ok ? `${COPY.balance} ${balanceMoneyOf(selectedStation, Number(selectedStation.balance.remaining)).text}` : undefined}
             extra={selectedStation && !selectedStation.isOwn ? (
               <>
+                {compact ? <Button type="link" size="small" onClick={() => listRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" })}>{COPY.pickAnother}</Button> : null}
                 <Button size="small" onClick={() => openEditor(selectedStation)}>{COPY.editUpstream}</Button>
-                {selectedAccount && authorizationEligible(selectedAccount).length ? (
-                  <Button size="small" aria-label={`${UPDATE_LOGIN.label} 上游账号 ${selectedAccount.identity.accountId}`} onClick={() => openAuthorization(selectedAccount)}>{UPDATE_LOGIN.label}</Button>
-                ) : null}
                 {!selectedStation.archivedAt ? <Button size="small" loading={busyId === `monitor:${selectedStation.id}`} onClick={() => { void setMonitor(selectedStation, selectedStation.monitorEnabled === false); }}>{selectedStation.monitorEnabled === false ? RESUME.label : PAUSE.label}</Button> : null}
               </>
             ) : undefined}
           >
             <div className="jy-channels-cards">
               {selected?.type === "newapi-key" ? <p className="jy-caption">{COPY.onlyOneKey}</p> : null}
+              {loginAction ? (
+                <div className="jy-channels-issue" role="status" data-issue="login">
+                  <Sym kind="warn" />
+                  <div className="jy-channels-issue__body">
+                    <b>{loginAction.title}</b>
+                    {loginAction.detail ? <p className="jy-caption">{loginAction.detail}</p> : null}
+                  </div>
+                  <Button size="small" aria-label={selectedAccount ? `${UPDATE_LOGIN.label} 上游账号 ${selectedAccount.identity.accountId}` : UPDATE_LOGIN.label} onClick={() => (selectedAccount && authorizationEligible(selectedAccount).length ? openAuthorization(selectedAccount) : openEditor(selectedStation))}>{UPDATE_LOGIN.label}</Button>
+                </div>
+              ) : null}
               {revealDenied ? (
                 <div className="jy-channels-issue" role="status">
                   <Sym kind="warn" />
@@ -533,6 +561,7 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
               ) : null}
             </div>
           </Panel>
+          </div>
         </div>
         {recoveryButton}
       </div>
@@ -617,5 +646,6 @@ function blockedText(code: string) {
   if (code === "KEYLESS") return COPY.keyUnrecognisable;
   if (code === "MULTI_KEY") return COPY.multiKey;
   if (code === "KEY_SHARED_WITH_MULTI_KEY") return COPY.cannotStart;
+  if (code === "COUNTED_EARLIER_TODAY") return "今天不能开始，明天 0 点起可以";
   return "这个渠道现在不能开始，稍后再试";
 }

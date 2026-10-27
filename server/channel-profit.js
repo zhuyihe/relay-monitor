@@ -14,6 +14,7 @@ import { normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
 import { coverageNeedsAnswer } from "../lib/reconciliation-contract.js";
 import { channelKeyLines } from "../lib/channel-key-lines.js";
 import { ACCOUNT_USE_VALUES } from "../db/store.js";
+import { dayKeyInTz } from "../lib/business-time.js";
 
 const BILLING_TYPES = new Set(["newapi", "sub2api", "sub2api-password"]);
 
@@ -104,6 +105,20 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
           sharedWithChannelIds: multiKeyUse.get(channel.groupKey), upstreamStationId: channel.upstreamStationId, groupKey: channel.groupKey, tokenName: channel.tokenName };
       }
     }
+    // 渠道今天早些时候属于一条已经停掉的绑定、现在又要追加进别的在算绑定（这把 Key 已经有在算的绑定）：追加这条路没有「按渠道记核算起点」，
+    // 今天开始会把这个渠道今天已经算给停掉的那条绑定的收入再算进在算的那条里（同一笔收入算两遍）——今天不让开始（COUNTED_EARLIER_TODAY），明天 0 点起可以；
+    // 自动开始今天不建，明天那一轮自然开始。每个渠道记自己的核算起点（决定 b）留到以后，和多 Key 渠道放开一起做
+    const runningKeys = new Set(rules.filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId).map((rule) => groupKeyOf(rule.upstreamStationId, rule.tokenId)));
+    if (channels.some((channel) => channel.state === "startable" && runningKeys.has(channel.groupKey)) && typeof reconciliation().listRecentlyArchivedRules === "function") {
+      const recent = (await reconciliation().listRecentlyArchivedRules(now() - 36 * 3600 * 1000).catch(() => [])).filter((rule) => rule.ownStationId === ownStationId && rule.archivedAtMs != null
+        && dayKeyInTz(rule.archivedAtMs, rule.timezone) === dayKeyInTz(now(), rule.timezone));
+      for (const [index, channel] of channels.entries()) {
+        if (channel.state !== "startable" || !runningKeys.has(channel.groupKey)) continue;
+        const stopped = recent.filter((rule) => rule.channels.some((member) => Number(member.channelId) === channel.channelId)).sort((a, b) => b.archivedAtMs - a.archivedAtMs)[0];
+        if (stopped) channels[index] = { channelId: channel.channelId, name: channel.name, revision: channel.revision, optedOut: channel.optedOut, state: "blocked", reason: "COUNTED_EARLIER_TODAY",
+          stoppedAtMs: stopped.archivedAtMs, tokenName: stopped.tokenName ?? null, upstreamStationId: channel.upstreamStationId, groupKey: channel.groupKey };
+      }
+    }
     const groups = new Map();
     for (const channel of channels) if (channel.state === "startable") {
       const group = groups.get(channel.groupKey) || { groupKey: channel.groupKey, upstreamStationId: channel.upstreamStationId, tokenId: channel.tokenId,
@@ -132,7 +147,8 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     for (const id of ids) {
       const channel = byId.get(id);
       if (channel.state === "running") alreadyRunning.push({ channelId: id, ruleId: channel.ruleId });
-      else if (channel.state === "blocked") blocked.push({ channelId: id, code: channel.reason, ...(channel.upstreamStationId ? { upstreamStationId: channel.upstreamStationId } : {}) });
+      else if (channel.state === "blocked") blocked.push({ channelId: id, code: channel.reason, ...(channel.upstreamStationId ? { upstreamStationId: channel.upstreamStationId } : {}),
+        ...(channel.stoppedAtMs != null ? { stoppedAtMs: channel.stoppedAtMs, tokenName: channel.tokenName ?? null } : {}) });
       else wanted.set(channel.groupKey, state.groups.find((group) => group.groupKey === channel.groupKey));
     }
     const ready = [];
@@ -146,7 +162,7 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
         continue;
       }
       let declaration = null;
-      if (upstream?.accountUse === "only_mine") declaration = normalizeCoverageDeclaration({ answer: "none" });
+      if (upstream?.accountUse === "only_mine") declaration = normalizeCoverageDeclaration({ answer: "none", source: "account" });
       else if (coverage?.[group.groupKey] != null) { try { declaration = normalizeCoverageDeclaration(coverage[group.groupKey]); } catch { declaration = null; } } // 格式不对只算这一组没答
       if (!declaration) {
         for (const channelId of group.channelIds.filter((id) => ids.includes(id))) blocked.push({ channelId, code: "COVERAGE_ANSWER_REQUIRED", groupKey: group.groupKey });
@@ -243,8 +259,10 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
   // 回答（或改回答）「这个上游账号只给你自己的渠道用吗？」（用语规范 §5.2）：写在上游上（accountUse），只对自营站点 ownStationId 下的绑定和渠道起作用。
   // 钱的影响：
   //   - 答「只给我的渠道用」：这个上游下还没在算的渠道，下一轮轮询自动开始（autoStart，从今天 0 点起算，用户停过的不开）；
-  //     已经在算、但还没回答「这把 Key 还给别处用吗？」的绑定（别处也在用、不确定时留下的）按「只给这些渠道用」算——账号只给你自己的渠道用，这一问就不用问了；
-  //   - 从「只给我的渠道用」改成别的：这个上游下在算的绑定回到「还没回答」（利润先不算，每把 Key 要回答一次），新渠道不再自动开始；
+  //     已经在算、但还没回答（「不确定」）「这把 Key 还给别处用吗？」的绑定按「只给这些渠道用」算，记来源 account（账号只给你自己的渠道用，这一问就不用问了）；
+  //     用户自己一把一把答过的（只给这些渠道用、站外也在用……）都不动；
+  //   - 从「只给我的渠道用」改成别的：只有因为它才变成「只给这些渠道用」的（来源 account）回到「不确定」（利润先不算，每把 Key 要回答一次），
+  //     用户自己答过的不动，新渠道不再自动开始；
   //   - 改成同样的答案：什么也不动。
   // 和开始、停止排在同一个队里（同一个自营站点一个一个来）。返回 { accountUse, previous, changedRules, failed }
   function answerAccountUse(input) { return serialized(input?.ownStationId, () => answerAccountUseNow(input)); }
@@ -258,13 +276,13 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     // 先改上游的回答、再动绑定：中途失败时回答已经是新的，没改成的绑定留在原来的样子（下一次再答一遍就接着改），不会出现回答没改、绑定先动了
     await rt.store.update(upstream.id, { accountUse });
     const changedRules = [], failed = [];
-    const wanted = accountUse === "only_mine" ? { answer: "none" } : previous === "only_mine" ? { answer: "unknown" } : null;
+    const wanted = accountUse === "only_mine" ? { answer: "none", source: "account" } : previous === "only_mine" ? { answer: "unknown", source: "account" } : null;
     if (wanted) {
       const live = (await reconciliation().listRules()).filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId && rule.upstreamStationId === upstream.id);
       for (const rule of live) {
-        const declared = rule.coverageDeclaration?.answer ?? (rule.costCoverage === "complete" ? "none" : "unknown");
-        // 改成「只给我的渠道用」：只动还没答成「只给这些渠道用」的；改成别的：只动答成「只给这些渠道用」的（别的回答是用户答过的，留着）
-        if (accountUse === "only_mine" ? declared === "none" : declared !== "none") continue;
+        const declaration = rule.coverageDeclaration, declared = declaration?.answer ?? (rule.costCoverage === "complete" ? "none" : "unknown");
+        // 改成「只给我的渠道用」：只动「不确定」的（用户答的别的回答，包括自己答的「只给这些渠道用」，都留着）；改成别的：只动来源是账号回答的（用户自己答的留着）
+        if (accountUse === "only_mine" ? declared !== "unknown" : declaration?.source !== "account" || declared !== "none") continue;
         try { await setRuleCoverage(rule, normalizeCoverageDeclaration(wanted)); changedRules.push(rule.id); }
         catch (error) { failed.push({ ruleId: rule.id, code: error?.code || "COVERAGE_UPDATE_FAILED" }); }
       }
@@ -345,6 +363,12 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
       const sharedGroups = new Map();
       for (const channel of state.channels) {
         if (channel.state !== "blocked") continue;
+        if (channel.reason === "COUNTED_EARLIER_TODAY") { // 今天上午在别的绑定下算过：卡片上写停的时刻和原来那把 Key，「开始算利润」今天灰着（明天 0 点起可以）
+          const group = sharedGroups.get(`today:${channel.groupKey}`) || { channel, channelIds: [], today: true };
+          group.channelIds.push(channel.channelId);
+          sharedGroups.set(`today:${channel.groupKey}`, group);
+          continue;
+        }
         if (channel.reason === "KEY_SHARED_WITH_MULTI_KEY") {
           const group = sharedGroups.get(channel.groupKey) || { channel, channelIds: [] };
           group.channelIds.push(channel.channelId);
@@ -361,7 +385,13 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
         unmatched.push({ channelId: channel.channelId, name: channelName(channel.channelId, channel.name), reason: channel.reason,
           ...(channel.upstreamStationId ? { upstreamStationId: channel.upstreamStationId } : {}) });
       }
-      for (const [groupKey, { channel, channelIds }] of sharedGroups) {
+      for (const [groupKey, { channel, channelIds, today }] of sharedGroups) {
+        if (today) {
+          cards.push({ id: `${groupKey}`, state: "blocked", upstreamStationId: channel.upstreamStationId, channelIds, names: channelIds.map((channelId) => channelName(channelId)), ruleId: null,
+            tokenName: channel.tokenName ?? null, startedBy: null, startedAtMs: null, issues: [], keys: keysOf(channelIds), startGroupKey: null, needsCoverage: false,
+            optedOut: channelIds.some((channelId) => optedOut.has(channelId)), blocked: { code: "COUNTED_EARLIER_TODAY", stoppedAtMs: channel.stoppedAtMs, tokenName: channel.tokenName ?? null } });
+          continue;
+        }
         cards.push({ id: `shared:${groupKey}`, state: "blocked", upstreamStationId: channel.upstreamStationId, channelIds, names: channelIds.map((channelId) => channelName(channelId)),
           ruleId: null, tokenName: channel.tokenName ?? null, startedBy: null, startedAtMs: null, issues: [], keys: keysOf(channelIds), startGroupKey: null, needsCoverage: false,
           optedOut: channelIds.some((channelId) => optedOut.has(channelId)),
