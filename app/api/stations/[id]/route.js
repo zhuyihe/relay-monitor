@@ -7,6 +7,13 @@ import { refreshStation } from "../../../../server/refresh.js";
 import { purgeStation } from "./purge.js";
 import { forgetOwnLog } from "../../../../server/own-log-store.js";
 import { sameEndpoint } from "../../../../lib/endpoint.js";
+import { createReconciliationModule } from "../../../../server/reconciliation.js";
+
+// 删上游（归档、彻底删除）之前，先把它下面在算的渠道停掉（记成「用户停的」）；停的渠道数带回给界面。失败就不删上游（渠道没停完上游还在，安全）
+async function stopChannelsOf(rt, stationId) {
+  const reconciliation = (rt.reconciliation ||= createReconciliationModule(rt));
+  return reconciliation.stopUpstreamChannels(stationId);
+}
 
 async function updateStation(request, rt, params) {
   const b = (await request.json().catch(() => null)) || {};
@@ -45,6 +52,7 @@ export const DELETE = withAuth(async (request, rt, params) => {
   if (purge && body?.confirm !== "DELETE")
     return json({ error: "彻底删除资源及历史需要确认" }, 400);
 
+  const stopped = rt.store.get(params.id)?.isOwn ? { ruleCount: 0, channelCount: 0 } : await stopChannelsOf(rt, params.id);
   if (purge) {
     const result = await purgeStation(rt, params.id);
     if (result.ok) {
@@ -52,7 +60,7 @@ export const DELETE = withAuth(async (request, rt, params) => {
       delete rt._ownChannelsCache;
       delete rt._ownUsersCache;
     }
-    return json({ ok: result.ok, purged: result.ok, alreadyPurged: result.alreadyPurged });
+    return json({ ok: result.ok, purged: result.ok, alreadyPurged: result.alreadyPurged, stoppedChannelCount: stopped.channelCount });
   }
 
   const station = await rt.store.archive(params.id);
@@ -60,5 +68,5 @@ export const DELETE = withAuth(async (request, rt, params) => {
   rt._ownCache?.clear();
   delete rt._ownChannelsCache;
   delete rt._ownUsersCache;
-  return json({ ok, archived: ok, station: station ? redact(rt, station) : null });
+  return json({ ok, archived: ok, station: station ? redact(rt, station) : null, stoppedChannelCount: stopped.channelCount });
 });

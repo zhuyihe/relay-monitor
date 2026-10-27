@@ -1948,3 +1948,13 @@ contract("regroupRules: a new rule with dayExtraKeys (Sub2API) gets a closed fir
   const taker = await fixture.createRule({ tokenId: oldRule.tokenId, ownStationId: fixture.station("own-after"), canonicalKey: `up:${fixture.tag}:x3`, channels: [{ channelId: fixture.channel(133), name: "T" }] });
   assert.equal(taker.tokenId, oldRule.tokenId);
 });
+
+contract("markRuleStartSource (K2c): records 'auto' once and only when nothing was recorded; a rule nobody marked looks exactly as before (no startSource field)", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(141), name: "S" }] });
+  assert.equal("startSource" in rule, false, "没记过的规则的样子和以前逐字一样");
+  assert.equal(await repository.markRuleStartSource(rule.id, "auto"), true);
+  assert.equal((await repository.getRule(rule.id)).startSource, "auto");
+  assert.equal(await repository.markRuleStartSource(rule.id, "user"), false, "已经记过的不改");
+  assert.equal((await repository.getRule(rule.id)).startSource, "auto");
+  assert.equal(await repository.markRuleStartSource(`rr_missing${fixture.tag}`, "auto"), false);
+});

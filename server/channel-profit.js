@@ -20,7 +20,10 @@ function codedError(code, message, extra = {}) {
 
 const groupKeyOf = (upstreamStationId, tokenId) => `${upstreamStationId}:${tokenId}`;
 
-export function createChannelProfitModule(rt, { identify = identifyChannelsCached, randomId = randomUUID } = {}) {
+// 自动开始失败（预览依据变了、账单能力没验证……）以后多久再试：10 分钟起，每次翻倍，最多 1 小时——不能每轮轮询都把这一组再预览一遍（读上游）
+const AUTO_START_RETRY_MIN_MS = 10 * 60 * 1000, AUTO_START_RETRY_MAX_MS = 60 * 60 * 1000;
+
+export function createChannelProfitModule(rt, { identify = identifyChannelsCached, randomId = randomUUID, now = () => Date.now() } = {}) {
   const onboarding = () => rt.channelOnboarding || rt.onboardingSource;
   const reconciliation = () => rt.reconciliation;
 
@@ -81,7 +84,7 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
   // 开始算利润。channelIds 是用户勾的渠道；同一把 Key 的其他渠道自动带上（一个勾，不会把整把 Key 的成本压到其中一个渠道上）。
   // coverage：每组 { [groupKey]: 回答 }——上游答了「只给我的渠道用」（accountUse = only_mine）的不用回答，别的每把 Key 要答一次
   // （附录 2，沿用现有的 coverageDeclaration）。返回 { started, alreadyRunning, blocked, failed }，没做成的写清楚为什么。
-  async function start({ ownStationId, channelIds, coverage = {} }) {
+  async function start({ ownStationId, channelIds, coverage = {}, source = "user" }) {
     const ids = [...new Set((Array.isArray(channelIds) ? channelIds : []).map(Number))];
     if (!ids.length || ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) throw codedError("CHANNEL_REQUIRED", "请至少选一个渠道");
     const state = await status(ownStationId, { fresh: true });
@@ -123,9 +126,36 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
       else failed.push({ groupKey: group.groupKey, channelIds: group.channelIds, code: result?.code || result?.reconciliation?.code || "ONBOARDING_FAILED",
         reason: result?.reason || result?.reconciliation?.reason || null });
     }
-    // 用户点了「开始算利润」：删掉这些渠道的「用户停的」记号（只对真的开始了的）
-    if (started.length) await reconciliation().removeChannelOptouts(ownStationId, started.flatMap((item) => item.channelIds));
+    // 用户点了「开始算利润」：删掉这些渠道的「用户停的」记号（只对真的开始了的）；自动开始（source: "auto"）不碰这些记号，记下来源
+    if (started.length && source !== "auto") await reconciliation().removeChannelOptouts(ownStationId, started.flatMap((item) => item.channelIds));
+    if (started.length && source === "auto") for (const item of started) await reconciliation().markRuleStartSource?.(item.ruleId, "auto");
     return { started, alreadyRunning, blocked, failed };
+  }
+
+  // 自动开始（k-plan 第七节）：上游答了「只给我的渠道用」（accountUse = only_mine），读取服务认出一个新渠道用了它的 Key，就从认出的这一刻起自动建绑定
+  // （和用户点「开始算利润」同一条路：预览 + 确认，核算起点也一样是今天 0 点），来源记 auto。轮询每轮调一次。
+  // 不自动开始的：用户停过的渠道（reconciliation_channel_optout，只有用户点「开始算利润」才开始）、别处也在用/没回答的上游（要先回答每把 Key）、
+  // 认不出的渠道；同一把 Key 的几个渠道里只要有一个是用户停过的，这一组整组不自动开始（一起算或一起不算）。
+  // 上游从别处也在用改成只给我的渠道用以后，已经在等的渠道下一轮就进来（每轮重新判断，不用另外触发）。失败的组按 groupKey 退避
+  async function autoStart(ownStationId) {
+    const state = await status(ownStationId);
+    if (!state.ok) return { started: [], skipped: "NOT_READY" };
+    const backoff = (rt._autoStartBackoff ||= new Map());
+    const at = now(), started = [];
+    for (const group of state.groups) {
+      if (rt.store.get(group.upstreamStationId)?.accountUse !== "only_mine") continue;
+      if (group.channelIds.some((id) => state.channels.find((channel) => channel.channelId === id)?.optedOut)) continue;
+      const key = `${ownStationId}:${group.groupKey}`;
+      if ((backoff.get(key)?.nextAt ?? 0) > at) continue;
+      const result = await start({ ownStationId, channelIds: group.channelIds, source: "auto" }).catch((error) => ({ started: [], failed: [{ code: error?.code || "AUTO_START_FAILED" }], blocked: [] }));
+      if (result.started.length) { backoff.delete(key); started.push(...result.started); }
+      else if (result.failed.length || result.blocked.length) {
+        const previous = backoff.get(key)?.delayMs ?? AUTO_START_RETRY_MIN_MS / 2;
+        const delayMs = Math.min(AUTO_START_RETRY_MAX_MS, previous * 2);
+        backoff.set(key, { nextAt: at + delayMs, delayMs });
+      }
+    }
+    return { started };
   }
 
   // 停止算利润：这几个渠道所在的绑定整条归档（同一把 Key 的渠道一起停，一个勾），同一个事务把它的渠道记成「用户停的」；
@@ -146,5 +176,5 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     return { stopped, optedOut };
   }
 
-  return { status, start, stop };
+  return { status, start, stop, autoStart };
 }

@@ -42,7 +42,7 @@ const SCHEMA = {
   rules: {
     keys: { PRIMARY: ["id"], uq_reconciliation_active_token: ["active_token_key"] },
     notNull: ["id", "upstream_station_id", "own_station_id", "token_id", "token_name", "fixed_group", "timezone", "enabled", "billing_policy", "scope_version", "cost_coverage"],
-    varchar: { id: 32, upstream_station_id: 32, own_station_id: 32, token_name: 160, fixed_group: 160, timezone: 64, active_token_key: 255, billing_policy: 32, cost_coverage: 24, provider: 24, canonical_key: 255, key_issue_code: 40 },
+    varchar: { id: 32, upstream_station_id: 32, own_station_id: 32, token_name: 160, fixed_group: 160, timezone: 64, active_token_key: 255, billing_policy: 32, cost_coverage: 24, provider: 24, canonical_key: 255, key_issue_code: 40, start_source: 16 },
     onUpdate: "updated_at",
   },
   channels: {
@@ -506,6 +506,16 @@ export class MemoryReconciliationRepository {
         this.#update(tx, "channels", entries, (row) => ({ channel_status: state.state ?? null, status_observed_at_ms: bigint(observedAt),
           status_changed_at_ms: (row.channel_status ?? null) === (state.state ?? null) ? row.status_changed_at_ms : bigint(observedAt) }));
       }
+    });
+  }
+
+  // 对应 MySQL 版 markRuleStartSource
+  async markRuleStartSource(ruleId, source) {
+    return this.#transaction("markRuleStartSource", async (tx) => {
+      const entry = this.#ruleEntry(tx, ruleId);
+      if (!entry || entry.row.start_source != null) return false;
+      this.#update(tx, "rules", [entry], { start_source: source });
+      return true;
     });
   }
 

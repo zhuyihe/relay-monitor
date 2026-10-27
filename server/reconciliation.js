@@ -57,6 +57,7 @@ import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyIn
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 import { keyAgentConfigOf } from "./key-agent.js";
+import { createChannelProfitModule } from "./channel-profit.js";
 import { identifyChannelsCached, keyAgentReachability } from "./key-agent-identify.js";
 import { detectGroupSplit, detectGroupMerges, planSegmentChanges, planRegroup, safeLastSeenAt, keyAgentExceptionIssueOf } from "./key-agent-resegment.js";
 
@@ -1053,6 +1054,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       applied = true;
     }
     return { applied, allApplied };
+  }
+
+  // K2c 自动开始：每轮轮询给每个装了读取服务的自营站点问一次（channel-profit.js 的 autoStart）。接入向导没起来（测试、刚启动）就不做；
+  // 任何一步失败都不影响这一轮结账，失败的组自己退避
+  async function autoStartRound() {
+    if (!rt.channelOnboarding) return;
+    const profit = (rt.channelProfit ||= createChannelProfitModule(rt));
+    for (const own of rt.store.list().filter((station) => station.isOwn && station.type === "newapi" && !station.archivedAt && keyAgentConfigOf(station))) {
+      await profit.autoStart(own.id).catch(() => {});
+    }
   }
 
   // 页面「刷新」（观测）强制重读 Key 目录和账号身份；只读查询用 5 分钟缓存。
@@ -3415,6 +3426,24 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     },
     // 「用户停了」的渠道（k-plan 第七节）：停止算利润 = 归档这条绑定 + 同一个事务把它的渠道记成用户停的（optout: true）
     listChannelOptouts: (ownStationId = null) => repository.listChannelOptouts(ownStationId),
+    markRuleStartSource: (ruleId, source) => repository.markRuleStartSource(ruleId, source),
+    // 删上游时一起停掉它下面渠道的利润（k-plan 12.2，总指挥 10-25 定）：这个上游下在算的绑定整条归档，渠道记成「用户停的」（不再自动开始，
+    // 上游加回来以后用户可以再点「开始算利润」）。已经算出来的日子留着。这里和上游记录是两个存储（绑定在对账表里，上游在站点文档里），做不成一个数据库事务：
+    // 调用方（删除接口）先停渠道、再删上游——中途失败的话是「渠道停了、上游还在」，安全的一边，重试就是幂等的（停过的绑定不会再出现）。
+    // 返回 { ruleCount, channelCount }，删除确认框要写「这个上游下 N 个渠道也会停止算利润」用的就是这个数（K2d）
+    async stopUpstreamChannels(upstreamStationId) {
+      const rules = (await repository.listRules()).filter((rule) => rule.enabled && rule.upstreamStationId === upstreamStationId);
+      let channelCount = 0;
+      for (const rule of rules) {
+        await api.archiveRule(rule.id, { optout: true });
+        channelCount += rule.channels.length;
+      }
+      return { ruleCount: rules.length, channelCount };
+    },
+    async countUpstreamChannels(upstreamStationId) {
+      const rules = (await repository.listRules()).filter((rule) => rule.enabled && rule.upstreamStationId === upstreamStationId);
+      return { ruleCount: rules.length, channelCount: rules.reduce((total, rule) => total + rule.channels.length, 0) };
+    },
     addChannelOptouts: (ownStationId, channelIds, atMs) => repository.addChannelOptouts(ownStationId, channelIds, atMs),
     removeChannelOptouts: (ownStationId, channelIds) => repository.removeChannelOptouts(ownStationId, channelIds),
     async archiveRule(id, { optout = false } = {}) {
@@ -3529,6 +3558,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       await syncOptionUnreadableSince(rules, { observe: true }); // 设置读不到的时刻从库里对一遍（重启后内存里是空的），结账和需处理都用它
       await settleDue(plan, ownerRegistry);
       await pruneSettlementStates(now);
+      await autoStartRound();
       // 自营站点整站日志增量读（应付成本 V1-a）：每轮每个自营站点读几页，额度和断路在 lib/own-request-budget.js；读失败不影响这一轮别的事
       // 「算应付成本」开着（settings.expectedCost === true）才读；没设置过、关着都一个整站读请求都不发（每轮读一次，不用重启；用语规范 §8.3）
       if (ownLogIngest && rt.store?.settings?.expectedCost === true) {

@@ -80,6 +80,8 @@ export function ruleFromRow(row, channels = []) {
     canonicalKey: row.canonical_key || null,
     // K2b：这条绑定的 Key 现在有没处理的事（KEY_GROUP_CHANGED / CHANNEL_KEY_UNMATCHED / KEY_REVEAL_DENIED）和第一次认出来的时刻（毫秒）；没有是 null
     keyIssue: row.key_issue_code ? { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms) } : null,
+    // 系统自动开始的才带（用户点的是没有这个字段，规则的样子和以前逐字一样）
+    ...(row.start_source ? { startSource: row.start_source } : {}),
     ...normalizeRuleSourceBinding(row.source_binding, row.cost_coverage || "unknown"),
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
     // 解除时刻（毫秒）：新写的行由进程写；回填前的旧行读不到时退回 archived_at
@@ -778,6 +780,12 @@ export class ReconciliationRepository {
 
   // K2b：这条绑定的 Key 现在有没处理的事，跨轮记下来、重启不丢（总指挥 10-26 定）。issue 是 { code, sinceMs }，null 表示解开了清掉。
   // 调用方（server/reconciliation.js keyAgentRoundFor）自己保证同一件事沿用第一次认出的 sinceMs，这里只管写
+  // 这条绑定是系统自动开始的（'auto'）：只在还没记过的时候写，不影响结账和指纹
+  async markRuleStartSource(ruleId, source) {
+    const [result] = await this.pool.query("UPDATE reconciliation_rules SET start_source = ? WHERE id = ? AND start_source IS NULL", [source, ruleId]);
+    return result.affectedRows > 0;
+  }
+
   async markKeyIssue(ruleId, issue) {
     await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ? WHERE id = ?",
       [issue?.code ?? null, issue?.sinceMs ?? null, ruleId]);

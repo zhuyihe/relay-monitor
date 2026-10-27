@@ -212,6 +212,9 @@ export async function ensureSchema(pool) {
   // 事情解开（比如又换回来）清成 NULL
   await addColumnIfMissing(pool, "reconciliation_rules", "key_issue_code", "VARCHAR(40) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "key_issue_since_ms", "BIGINT NULL");
+  // K2c：这条绑定是怎么开始算的——用户点的（NULL 或 'user'）还是系统自动开始的（'auto'：上游答了「只给我的渠道用」，认出新渠道用了它的 Key）。
+  // 只用来在「渠道」页签写「10月26日起系统自动开始算」，不进任何结账、快照指纹的计算
+  await addColumnIfMissing(pool, "reconciliation_rules", "start_source", "VARCHAR(16) NULL");
   await addIndexIfMissing(pool, "reconciliation_snapshots", "idx_reconciliation_snapshot_segment", "(segment_id)");
   // 写快照前「先读出同一把 Key 的那一组绑定」（计划 P1c）走这个索引；解除的绑定也留着，表会越来越大
   await addIndexIfMissing(pool, "reconciliation_rules", "idx_reconciliation_rule_token", "(token_id, archived_at)");

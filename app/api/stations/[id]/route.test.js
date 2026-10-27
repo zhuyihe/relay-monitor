@@ -269,3 +269,25 @@ test("PUT 渠道 Key 读取服务配置（K2a）：令牌太弱报 400，响应�
   assert.equal("keyAgentSecret" in body.station, false, "令牌不回传");
   assert.equal(station.keyAgentSecret, strong, "库里是明文（加密在 Store 落库那一层）");
 });
+
+test("DELETE 上游（归档）：先把它下面在算的渠道停掉再删，带回停了几个渠道；停渠道失败就不删上游；自营站点不停渠道", async () => {
+  const { DELETE } = await stationRoute();
+  const pool = { getConnection: async () => ({ beginTransaction: async () => {}, query: async () => [[]], commit: async () => {}, rollback: async () => {}, release() {} }) };
+  const store = new Store(pool);
+  const upstream = await store.add({ type: "newapi", baseUrl: "https://del.test", accessToken: "pat" });
+  const own = await store.add({ type: "newapi", baseUrl: "https://own-del.test", accessToken: "admin", isOwn: true });
+  const calls = [];
+  const rt = { store, history: { predict: () => null, sparkline: () => [], usedSince: () => 0 },
+    reconciliation: { stopUpstreamChannels: async (id) => { calls.push(id); return { ruleCount: 2, channelCount: 3 }; } } };
+  const send = (id) => DELETE(new Request(`https://local.test/api/stations/${id}`, { method: "DELETE", body: "{}" }), rt, { id });
+  const failing = { ...rt, reconciliation: { stopUpstreamChannels: async () => { throw new Error("db down"); } } };
+  await assert.rejects(DELETE(new Request("https://local.test/api/stations/x", { method: "DELETE", body: "{}" }), failing, { id: upstream.id }), /db down/);
+  assert.equal(store.get(upstream.id).archivedAt, null, "停渠道失败：上游没删");
+  const response = await send(upstream.id);
+  assert.deepEqual([response.status, (await response.json()).stoppedChannelCount], [200, 3]);
+  assert.deepEqual(calls, [upstream.id]);
+  assert.ok(store.get(upstream.id).archivedAt, "停好了以后才删");
+  const ownResponse = await send(own.id);
+  assert.equal((await ownResponse.json()).stoppedChannelCount, 0);
+  assert.deepEqual(calls, [upstream.id], "自营站点不走停渠道");
+});

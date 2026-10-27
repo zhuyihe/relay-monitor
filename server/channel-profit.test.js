@@ -11,7 +11,7 @@ const slot = (stationId, tokenId, tokenName = `k${tokenId}`) => ({ index: 0, sta
 
 // 假的运行时：渠道目录、读取服务认出的结果、绑定、「用户停的」都放在内存里；接入向导的 probeBatch / connectBatch 只记下收到的输入
 function fixture({ channels, identified, rules = [], optouts = [], stations = [own, upMine, upShared], configured = true, connectResult = null }) {
-  const calls = { probe: [], connect: [], archived: [], optoutAdded: [], optoutRemoved: [] };
+  const calls = { probe: [], connect: [], archived: [], optoutAdded: [], optoutRemoved: [], marked: [] };
   const state = { rules: [...rules], optouts: [...optouts] };
   const rt = {
     store: { get: (id) => (id === "own" && !configured ? { ...own, keyAgentUrl: "", keyAgentSecret: "" } : stations.find((station) => station.id === id) || null) },
@@ -29,11 +29,12 @@ function fixture({ channels, identified, rules = [], optouts = [], stations = [o
       listChannelOptouts: async () => state.optouts,
       removeChannelOptouts: async (ownStationId, ids) => { calls.optoutRemoved.push([ownStationId, [...ids]]); state.optouts = state.optouts.filter((row) => !ids.includes(row.channelId)); return ids.length; },
       addChannelOptouts: async (ownStationId, ids) => { calls.optoutAdded.push([ownStationId, [...ids]]); state.optouts.push(...ids.map((channelId) => ({ ownStationId, channelId, atMs: 1 }))); return ids.length; },
+      markRuleStartSource: async (id, source) => { calls.marked.push([id, source]); return true; },
       archiveRule: async (id, options) => { calls.archived.push([id, options]); state.rules = state.rules.filter((rule) => rule.id !== id); return { ruleId: id }; },
     },
   };
   const module = createChannelProfitModule(rt, { identify: async () => ({ ok: true, stale: false, channels: identified, revealIssues: [] }), randomId: () => "request-1" });
-  return { module, calls, state };
+  return { module, calls, state, rt };
 }
 
 const running = (id, channelIds) => ({ id, enabled: true, archivedAt: null, ownStationId: "own", channels: channelIds.map((channelId) => ({ channelId })) });
@@ -119,4 +120,53 @@ test("stop：这几个渠道所在的绑定整条归档（同一把 Key 的渠�
   assert.deepEqual(f.state.rules.map((rule) => rule.id), ["r-b"], "别的绑定不动");
   await assert.rejects(f.module.stop({ ownStationId: "own", channelIds: [] }), { code: "CHANNEL_REQUIRED" });
   await assert.rejects(f.module.stop({ ownStationId: "nope", channelIds: [1] }), { code: "OWN_STATION_UNSET" });
+});
+
+const mine = { ...upMine, accountUse: "only_mine" };
+
+test("autoStart：只给我的渠道用的上游，认出的新渠道自动开始（来源记 auto，不碰「用户停的」记号）；别处也在用/没回答的上游、用户停过的渠道（整组）、认不出的不自动开始", async () => {
+  const f = fixture({ channels: [1, 2, 3, 4, 5, 6], stations: [own, mine, { ...upShared }, { id: "up3", type: "newapi" }],
+    optouts: [{ ownStationId: "own", channelId: 4, atMs: 5 }], identified: [
+      { channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 2, keyless: false, slots: [slot("up1", 11)] }, // 同一把 Key：一组
+      { channelId: 3, keyless: false, slots: [slot("up2", 22)] }, // 别处也在用
+      { channelId: 4, keyless: false, slots: [slot("up1", 44)] }, // 用户停过
+      { channelId: 5, keyless: false, slots: [slot("up3", 55)] }, // 上游没回答过
+      { channelId: 6, keyless: false, slots: [{ index: 0, state: "not_found" }] }, // 认不出
+    ] });
+  const result = await f.module.autoStart("own");
+  assert.deepEqual(result.started.map((item) => [item.groupKey, item.channelIds]), [["up1:11", [1, 2]]]);
+  assert.equal(f.calls.probe.length, 1, "只送自动开始的那一组");
+  assert.equal(f.calls.probe[0].groups[0].reconciliation.coverageDeclaration.answer, "none");
+  assert.deepEqual(f.calls.optoutRemoved, [], "自动开始不删「用户停的」记号");
+  assert.deepEqual(f.calls.marked, [["rule-0", "auto"]], "来源记 auto");
+  assert.deepEqual((await fixture({ channels: [1], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] }).module.start({ ownStationId: "own", channelIds: [1] })).started.length, 1);
+});
+
+test("autoStart：上游从别处也在用改成只给我的渠道用，已经在等的渠道下一轮就自动开始（每轮重新判断，不用另外触发）", async () => {
+  const station = { ...upMine, accountUse: "elsewhere" };
+  const f = fixture({ channels: [1], stations: [own, station], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] });
+  assert.deepEqual((await f.module.autoStart("own")).started, [], "别处也在用：不自动开始");
+  station.accountUse = "only_mine"; // 用户在上游编辑里改了答案
+  assert.equal((await f.module.autoStart("own")).started.length, 1);
+});
+
+test("autoStart：失败的组退避（10 分钟起、每次翻倍、最多 1 小时），退避期间不再预览；退避到了再试；成功以后清掉", async () => {
+  let clock = 1_000_000, failing = true;
+  const f = fixture({ channels: [1], stations: [own, mine], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }],
+    connectResult: (input) => (failing
+      ? { complete: false, groups: input.groups.map((group) => ({ groupId: group.groupId, requestedGroupIds: [group.groupId], code: "PREVIEW_BASIS_CHANGED", reconciliation: { status: "unavailable" } })) }
+      : { complete: true, groups: input.groups.map((group) => ({ groupId: group.groupId, requestedGroupIds: [group.groupId], reconciliation: { status: "configured", ruleId: "rule-x" } })) }) });
+  const rtLike = { store: { get: (id) => (id === "own" ? own : id === "up1" ? mine : null) }, channelOnboarding: f.rt.channelOnboarding, reconciliation: f.rt.reconciliation };
+  const module = createChannelProfitModule(rtLike, { identify: async () => ({ ok: true, stale: false, channels: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }], revealIssues: [] }), randomId: () => "r", now: () => clock });
+  await module.autoStart("own");
+  assert.equal(f.calls.probe.length, 1);
+  clock += 5 * 60 * 1000; await module.autoStart("own");
+  assert.equal(f.calls.probe.length, 1, "10 分钟内不再试");
+  clock += 6 * 60 * 1000; await module.autoStart("own");
+  assert.equal(f.calls.probe.length, 2, "10 分钟到了再试");
+  clock += 15 * 60 * 1000; await module.autoStart("own");
+  assert.equal(f.calls.probe.length, 2, "第二次失败以后退避翻倍到 20 分钟，15 分钟不够");
+  failing = false; clock += 10 * 60 * 1000;
+  assert.equal((await module.autoStart("own")).started.length, 1);
+  assert.equal(rtLike._autoStartBackoff.size, 0, "成功以后退避清掉");
 });
