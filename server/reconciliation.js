@@ -995,7 +995,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 换段已经落库提交（或这一轮没有要换的）、而且没有没处理完的：这一轮读取服务读成功的时刻才可以记下来
       // a：「上一次读成功」记快照自己读库的时刻（confirmedAtMs），不是控制台拿到快照的时刻——读取服务自己最多缓存 4 分钟，
       // 控制台时刻比真正读库的晚，a 晚了会漏掉 [真正换 Key, a) 新 Key 的用量
-      const confirmedAt = identified.confirmedAtMs ?? identified.fetchedAtMs;
+      // null 是读取服务给的读库时刻不可信：这一轮不推进（留在上一次读成功的时刻），不能退回控制台的时刻；没带这个字段的（测试里直接注入的结果）才用 fetchedAtMs
+      const confirmedAt = identified.confirmedAtMs === undefined ? identified.fetchedAtMs : identified.confirmedAtMs;
       if (!isPending() && confirmedAt != null) await rt.store.setKeyAgentLastSuccessAt?.(ownStationId, confirmedAt)?.catch?.(() => {});
     }
     await Promise.all(enabled.filter((rule) => byOwnStation.has(rule.ownStationId) && !regroupedAll.has(rule.id)).map(async (rule) => {
