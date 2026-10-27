@@ -113,13 +113,13 @@ export function detectGroupMerges(currentRefsByBinding) {
 //   - 牵连的绑定的渠道必须都认出了 Key（没认出来的不能分，原样留着，K2b 照旧不结账），而且 Key 都在原来的上游里
 //     （换到另一个上游的 Key 是 K2c-3 的事）；
 //   - 新的组：牵连的渠道按现在用的 Key 连成组，一组一条新绑定，从 b 起算；
-//   - 旧绑定都在 b 归档。其中「分组」的旧绑定（渠道现在用了几把不同的 Key）在 [a, b) 开一段，放它原来那把 + 换走的那几把
-//     （不管换走的渠道这段用了哪把，钱都在旧组里，不漏不重）；但换走的 Key 如果原来就是别的牵连绑定握着的，不放进来
-//     （那把 Key 在 [a, b) 的钱算在那条绑定名下，放两边就算了两遍）；几条绑定都换走到同一把新 Key 时，只放在排第一的那条里。
+//   - 旧绑定都在 b 归档；[a, b) 里每把 Key 恰好算一次：b 以前已经属于某条牵连的旧绑定的 Key 由那条算、别人的过渡段不放；
+//     全新的 Key 放进恰好一条旧绑定的过渡段（用到它的绑定里排第一的那条，见下面的注释）。
 // rules：这个自营站点下在算的绑定 [{ id, upstreamStationId, tokenId, tokenName, channelIds, channels? }]；refByChannelId：Number(channelId) -> { upstreamStationId, tokenId, tokenName }
 // （只有认出了的单把 Key 渠道才有）；flaggedIds：K2b 标记了的绑定。
 // 返回 { ok: true, closes: [{ ruleId, windowKeys: [ref] | null }], groups: [{ ref, channelIds, fromRuleIds }] }，
 // 或 { ok: false, reason: "UNIDENTIFIED" | "UPSTREAM_CHANGED", ruleIds }（这一轮不分，保持原样）
+// closes 里 { ruleId, windowKeys: [ref] | null, windowUsers: [ruleId] }
 export function planRegroup({ rules, refByChannelId, flaggedIds }) {
   const byId = new Map(rules.map((rule) => [rule.id, rule]));
   const ownRef = (rule) => ({ upstreamStationId: rule.upstreamStationId, tokenId: Number(rule.tokenId), tokenName: rule.tokenName ?? null });
@@ -154,20 +154,29 @@ export function planRegroup({ rules, refByChannelId, flaggedIds }) {
   });
   const groups = [...groupsByKey.values()].map((group) => ({ ...group, channelIds: group.channelIds.sort((a, b) => a - b) }));
 
-  // 旧绑定在 b 归档；渠道现在用了几把不同 Key 的（分组），开 [a, b) 的过渡段
+  // 旧绑定都在 b 归档。[a, b) 这段里，每把 Key 恰好算一次（总指挥 10-27 定）：
+  //   - b 以前已经属于某条牵连的旧绑定的 Key（它们各自 rules 上握着的）：由那条旧绑定算，别人的过渡段里不放它；
+  //   - 全新的 Key（a 以前哪条在算的绑定都没握过，渠道换到它）：放进恰好一条旧绑定的过渡段——用到它的绑定里排第一的那条
+  //     （按建的先后、再按 id，规则固定），几条绑定的渠道都换到它时只放一次。不管是分组（一条绑定的渠道换走到新 Key），还是合组
+  //     （几条绑定的渠道都换到同一把新 Key：t 到 b 之间新 Key 的用量，不放进来谁都不算）；
+  //   过渡段放「这条绑定原来握着的那把 + 它负责的全新 Key」；windowUsers 是用到这些全新 Key 的绑定（调用方据此定过渡段的起点：
+  //   这些绑定里最早的 a，不早于这条绑定开着那段的起点）
   const heldByInvolved = new Set(members.map((rule) => keyRefId(ownRef(rule))));
-  const windowKeyOwner = new Map(); // 新 Key -> 放在哪条绑定的过渡段里（排第一的）
+  const order = [...members].sort((x, y) => String(x.createdAt ?? "").localeCompare(String(y.createdAt ?? "")) || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  const ownerOfNewKey = new Map(); // 全新的 Key -> 负责它的绑定 id
+  const usersOfNewKey = new Map(); // 全新的 Key -> 用到它的绑定 id 们
+  const newKeyRefs = new Map();
+  for (const rule of order) for (const ref of refsOf(rule)) {
+    const id = keyRefId(ref);
+    if (heldByInvolved.has(id)) continue;
+    if (!ownerOfNewKey.has(id)) { ownerOfNewKey.set(id, rule.id); usersOfNewKey.set(id, []); newKeyRefs.set(id, { ...ref }); }
+    if (!usersOfNewKey.get(id).includes(rule.id)) usersOfNewKey.get(id).push(rule.id);
+  }
   const closes = members.map((rule) => {
-    const distinct = new Map(refsOf(rule).map((ref) => [keyRefId(ref), ref]));
-    if (distinct.size < 2) return { ruleId: rule.id, windowKeys: null };
-    const keys = [ownRef(rule)];
-    for (const [id, ref] of distinct) {
-      if (id === keyRefId(ownRef(rule)) || heldByInvolved.has(id)) continue; // 自己的 / 别的牵连绑定原来握着的：不放
-      if (windowKeyOwner.has(id) && windowKeyOwner.get(id) !== rule.id) continue;
-      windowKeyOwner.set(id, rule.id);
-      keys.push({ ...ref });
-    }
-    return { ruleId: rule.id, windowKeys: keys.length > 1 ? keys : null };
+    const owned = [...ownerOfNewKey].filter(([, owner]) => owner === rule.id).map(([id]) => id);
+    if (!owned.length) return { ruleId: rule.id, windowKeys: null, windowUsers: [] };
+    return { ruleId: rule.id, windowKeys: [ownRef(rule), ...owned.map((id) => newKeyRefs.get(id))],
+      windowUsers: [...new Set([rule.id, ...owned.flatMap((id) => usersOfNewKey.get(id))])] };
   });
   return { ok: true, closes, groups };
 }

@@ -912,7 +912,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   async function regroupFor({ ownStationId, flaggedIds, refByChannelId, observedAt, stationLastSuccessAtMs, resources, keyIssues, issueFor, stationRules }) {
     const notDone = { done: false, ruleIds: new Set() };
     const plan = planRegroup({ flaggedIds, refByChannelId, rules: stationRules.filter((rule) => rule.canonicalKey != null).map((rule) => ({
-      id: rule.id, upstreamStationId: rule.upstreamStationId, tokenId: Number(rule.tokenId), tokenName: rule.tokenName, channelIds: rule.channels.map((channel) => Number(channel.channelId)) })) });
+      id: rule.id, createdAt: rule.createdAt, upstreamStationId: rule.upstreamStationId, tokenId: Number(rule.tokenId), tokenName: rule.tokenName, channelIds: rule.channels.map((channel) => Number(channel.channelId)) })) });
     if (!plan.ok) return notDone;
     const byId = new Map(stationRules.map((rule) => [rule.id, rule]));
     const members = plan.closes.map((close) => byId.get(close.ruleId));
@@ -947,12 +947,18 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const settled = await repository.listLedgerDays(plan.closes.map((close) => close.ruleId), dayKeyInTz(at, members[0].timezone)).catch(() => null);
     if (!settled || settled.length) return notDone;
     // 旧绑定：a 和 K2b 一样（safeLastSeenAt：读之前的站点成功时刻，带着没处理完的事的绑定用开着那段的起点）
-    const closes = [];
+    const closes = [], aOf = new Map(), openFromOf = new Map();
     for (const close of plan.closes) {
       const rule = byId.get(close.ruleId);
       const open = (await repository.listSegments(rule.id).catch(() => [])).find((segment) => segment.effectiveTo == null);
       if (!open) return notDone;
-      const from = safeLastSeenAt({ keyAgentLastSuccessAtMs: rule.keyIssue != null ? null : stationLastSuccessAtMs, segmentEffectiveFrom: open.effectiveFrom });
+      openFromOf.set(rule.id, open.effectiveFrom);
+      aOf.set(rule.id, safeLastSeenAt({ keyAgentLastSuccessAtMs: rule.keyIssue != null ? null : stationLastSuccessAtMs, segmentEffectiveFrom: open.effectiveFrom }));
+    }
+    for (const close of plan.closes) {
+      const rule = byId.get(close.ruleId);
+      // 过渡段的起点：用到这条绑定负责的全新 Key 的绑定里最早的 a（合组时几个渠道在 [a, b) 里不同时刻换过去），不早于这条绑定开着那段的起点
+      const from = close.windowKeys ? Math.max(openFromOf.get(rule.id), Math.min(...close.windowUsers.map((id) => aOf.get(id)))) : null;
       closes.push({ ruleId: rule.id, expect: { tokenId: Number(rule.tokenId), channelIds: rule.channels.map((channel) => Number(channel.channelId)) },
         window: close.windowKeys ? { from, keys: close.windowKeys } : null });
     }

@@ -255,14 +255,14 @@ const key = (tokenId) => ({ upstreamStationId: "up1", tokenId, tokenName: `k${to
 test("planRegroup 分组：一条绑定两个渠道原来共用 K1，现在 A 还是 K1、B 换成了 K2——旧绑定在 b 归档、[a,b) 放 K1 和 K2，新绑定一渠道一条", () => {
   const plan = planRegroup({ rules: [rule("x", 1, [10, 20])], refByChannelId: refs({ 10: 1, 20: 2 }), flaggedIds: ["x"] });
   assert.equal(plan.ok, true);
-  assert.deepEqual(plan.closes, [{ ruleId: "x", windowKeys: [key(1), key(2)] }]);
+  assert.deepEqual(plan.closes, [{ ruleId: "x", windowKeys: [key(1), key(2)], windowUsers: ["x"] }]);
   assert.deepEqual(plan.groups.map((group) => [group.ref.tokenId, group.channelIds]), [[1, [10]], [2, [20]]]);
 });
 
 test("planRegroup 合组：两条绑定的渠道现在用同一把 Key——旧的两条各自在 b 归档，不开过渡段，新的一条放全部渠道", () => {
   const plan = planRegroup({ rules: [rule("x", 1, [10]), rule("y", 2, [20])], refByChannelId: refs({ 10: 1, 20: 1 }), flaggedIds: ["x", "y"] });
   assert.equal(plan.ok, true);
-  assert.deepEqual(plan.closes, [{ ruleId: "x", windowKeys: null }, { ruleId: "y", windowKeys: null }]);
+  assert.deepEqual(plan.closes, [{ ruleId: "x", windowKeys: null, windowUsers: [] }, { ruleId: "y", windowKeys: null, windowUsers: [] }], "合到其中一条原来的 Key：不开过渡段");
   assert.deepEqual(plan.groups.map((group) => [group.ref.tokenId, group.channelIds, group.fromRuleIds]), [[1, [10, 20], ["x", "y"]]]);
 });
 
@@ -278,7 +278,7 @@ test("planRegroup：牵连的绑定找全——被标记的绑定用到了另一
 test("planRegroup：几条绑定都换走到同一把全新的 Key，过渡段只放在排第一的那条里（不算两遍）", () => {
   const plan = planRegroup({ rules: [rule("x", 1, [10, 11]), rule("y", 2, [20, 21])], refByChannelId: refs({ 10: 1, 11: 9, 20: 2, 21: 9 }), flaggedIds: ["x", "y"] });
   assert.equal(plan.ok, true);
-  assert.deepEqual(plan.closes, [{ ruleId: "x", windowKeys: [key(1), key(9)] }, { ruleId: "y", windowKeys: null }]);
+  assert.deepEqual(plan.closes, [{ ruleId: "x", windowKeys: [key(1), key(9)], windowUsers: ["x", "y"] }, { ruleId: "y", windowKeys: null, windowUsers: [] }]);
   assert.deepEqual(plan.groups.map((group) => [group.ref.tokenId, group.channelIds]), [[1, [10]], [9, [11, 21]], [2, [20]]]);
 });
 
@@ -288,4 +288,14 @@ test("planRegroup：牵连的渠道有没认出来的、或者 Key 换到了别�
   const elsewhere = planRegroup({ rules: [rule("x", 1, [10, 20])], refByChannelId: new Map([[10, key(1)], [20, { upstreamStationId: "up2", tokenId: 5 }]]), flaggedIds: ["x"] });
   assert.deepEqual([elsewhere.ok, elsewhere.reason], [false, "UPSTREAM_CHANGED"]);
   assert.equal(planRegroup({ rules: [rule("x", 1, [10])], refByChannelId: refs({ 10: 1 }), flaggedIds: [] }).ok, false);
+});
+
+test("planRegroup 合组到全新的 Key：两条绑定的渠道都换成同一把全新的 K3——K3 放进恰好一条旧绑定的过渡段（排第一的），不是谁都不放，也不是每条都放", () => {
+  const plan = planRegroup({ rules: [{ ...rule("y", 2, [20]), createdAt: "2026-10-02" }, { ...rule("x", 1, [10]), createdAt: "2026-10-01" }], refByChannelId: refs({ 10: 3, 20: 3 }), flaggedIds: ["x", "y"] });
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.closes, [{ ruleId: "x", windowKeys: [key(1), key(3)], windowUsers: ["x", "y"] }, { ruleId: "y", windowKeys: null, windowUsers: [] }], "按建的先后：x 先建，放它那条");
+  assert.deepEqual(plan.groups.map((group) => [group.ref.tokenId, group.channelIds, group.fromRuleIds]), [[3, [10, 20], ["x", "y"]]]);
+  // 建的先后一样按 id；分组里换走的全新 Key、合组里的全新 Key 都恰好一处
+  const tie = planRegroup({ rules: [rule("b", 2, [20]), rule("a", 1, [10])], refByChannelId: refs({ 10: 3, 20: 3 }), flaggedIds: ["a", "b"] });
+  assert.deepEqual(tie.closes.map((close) => [close.ruleId, !!close.windowKeys]), [["a", true], ["b", false]]);
 });
