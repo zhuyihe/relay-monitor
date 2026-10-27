@@ -1199,6 +1199,28 @@ contract("expected-cost backfill: listLedgerDaysByReason lists lagging days of t
   assert.deepEqual([stillLagging.revision, stillLagging.expectedCostUsd, stillLagging.gapReason], [2, null, "EXPECTED_COST_LAGGING"], "第 2 版没被填、也没被动过");
 });
 
+contract("listLedgerDayFacts gives each rule's latest revision per day inside [from, to], with the expected-cost columns; only the given rules", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule(), other = await fixture.createRule({ tokenId: fixture.token(7), channels: [{ channelId: fixture.channel(7), name: "other" }] });
+  const book = async (target, day, profitUsd = 2, resettle = false) => {
+    const [segment] = await repository.listSegments(target.id);
+    const fingerprint = await fixture.fingerprint(target.id);
+    const window = { preset: "yesterday", startMs: Date.UTC(2026, 0, day), endMs: Date.UTC(2026, 0, day + 1), timezone: "UTC" };
+    const snapshot = billingSnapshot({ rule: target, segment, fingerprint, window, generatedAt: `2026-01-${String(day + 1).padStart(2, "0")}T00:20:00.000Z`, profitUsd });
+    // 重算那一版换个汇率（账本内容变了才写新版）；第二版带应付成本三列，第一版算不出
+    const ledger = settlement(snapshot, { resettle, ...(resettle ? { revenueRate: 7 } : {}) });
+    ledger.entry = { ...ledger.entry, expectedCostUsd: profitUsd === 3 ? 1.25 : null, gapReason: profitUsd === 3 ? null : "MODEL_PRICE_UNREADABLE", tokens: profitUsd === 3 ? 2880000 : null };
+    assert.equal(await repository.saveSnapshotsForScope(target.id, fingerprint, [snapshot], { ledger }), true);
+  };
+  await book(rule, 8); await book(rule, 9); await book(rule, 9, 3, true); await book(rule, 12); await book(other, 9);
+  const facts = await repository.listLedgerDayFacts([rule.id], "2026-01-09", "2026-01-11");
+  assert.deepEqual(facts.map((fact) => [fact.billDate, fact.revision, fact.expectedCostUsd, fact.gapReason, fact.tokens, fact.costBasis]),
+    [["2026-01-09", 2, 1.25, null, 2880000, "usage"]], "只有范围里的天、每天最新一版、别的绑定不要");
+  assert.ok(facts[0].settledAt && Number.isFinite(facts[0].revenueUsd), "带固定时刻和原有金额");
+  assert.deepEqual((await repository.listLedgerDayFacts([rule.id, other.id], "2026-01-01", "2026-01-31")).map((fact) => [fact.billDate, fact.ruleId === rule.id ? "r" : "o"]).sort(),
+    [["2026-01-08", "r"], ["2026-01-09", "o"], ["2026-01-09", "r"], ["2026-01-12", "r"]]);
+  assert.deepEqual(await repository.listLedgerDayFacts([], "2026-01-01", "2026-01-31"), []);
+});
+
 contract("billing capabilities round-trip, overwrite and delete by identity", async ({ repository, fixture }) => {
   const now = Date.now();
   const first = fixture.capabilityIdentity("first"), second = fixture.capabilityIdentity("second");
