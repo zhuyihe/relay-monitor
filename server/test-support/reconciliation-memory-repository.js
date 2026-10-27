@@ -563,7 +563,7 @@ export class MemoryReconciliationRepository {
           this.#update(tx, "segmentKeys", keyRows, { active_token_key: null });
         }
         const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
-        for (const { ruleId, plan } of plans) {
+        for (const { ruleId, plan, keyBlock } of plans) {
           const current = currents.get(ruleId), rule = rules.get(ruleId);
           const ruleActiveKey = plan.canonicalKey ?? tokenKeyOf(plan.after[0]); // 同 MySQL 版：和 createRule 一个口径
           const newGroup = plan.group ?? current.group_name;
@@ -589,6 +589,7 @@ export class MemoryReconciliationRepository {
             openSegment(plan.cutoverAt, plan.after, { fresh: true });
           }
           const [firstKey] = plan.after;
+          if (keyBlock) this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { key_blocks: JSON.stringify(addKeyBlock(this.#ruleEntry(tx, ruleId).row.key_blocks, keyBlock)) }); // 同 MySQL 版：和换段同一个事务
           this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { token_id: bigint(firstKey.tokenId),
             token_name: firstKey.tokenName ?? rule.token_name, active_token_key: ruleActiveKey,
             ...(plan.canonicalKey !== undefined ? { canonical_key: plan.canonicalKey } : {}), ...(plan.group !== undefined ? { fixed_group: plan.group } : {}) });

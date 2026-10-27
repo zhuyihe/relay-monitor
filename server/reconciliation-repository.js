@@ -69,7 +69,7 @@ export function keyBlocksOf(value) {
   return list.map((item) => ({ code: String(item?.code || ""), sinceMs: Number(item?.sinceMs), untilMs: Number(item?.untilMs) }))
     .filter((item) => item.code && Number.isFinite(item.sinceMs) && Number.isFinite(item.untilMs) && item.untilMs > item.sinceMs).sort((a, b) => a.sinceMs - b.sinceMs);
 }
-// 加一段：和同一个码相交、相邻的并起来；最多留 200 段（再多的是出了故障，留最近的）
+// 加一段：和同一个码相交、相邻的并起来；超过 200 段（出了故障才会有）就把最旧的两段并成一段（宁可多挡一段中间的日子，也不丢最旧的冲突期）
 export function addKeyBlock(blocks, block) {
   const merged = [];
   let current = { ...block };
@@ -78,7 +78,9 @@ export function addKeyBlock(blocks, block) {
     else merged.push(item);
   }
   merged.push(current);
-  return merged.sort((a, b) => a.sinceMs - b.sinceMs).slice(-200);
+  merged.sort((a, b) => a.sinceMs - b.sinceMs);
+  while (merged.length > 200) { const [first, second] = merged; merged.splice(0, 2, { code: first.code === second.code ? first.code : "KEY_CONFLICT_GAP", sinceMs: first.sinceMs, untilMs: Math.max(first.untilMs, second.untilMs) }); }
+  return merged;
 }
 
 export function ruleFromRow(row, channels = []) {
@@ -874,7 +876,7 @@ export class ReconciliationRepository {
         await conn.query("UPDATE reconciliation_segment_keys SET active_token_key = NULL WHERE segment_id = ?", [currents.get(ruleId).id]);
       }
       const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
-      for (const { ruleId, plan } of plans) {
+      for (const { ruleId, plan, keyBlock } of plans) {
         const current = currents.get(ruleId), rule = rules.get(ruleId);
         // rules.active_token_key 和 createRule（activeTokenKey）一个口径：锚定过的用 canonical_key，没有就用「上游:Key」；
         // 开着的段第一把 Key 的行和它是同一个值（K1c 的 initial 行就是这么抄的），别的 Key 用「上游:Key」
@@ -910,6 +912,8 @@ export class ReconciliationRepository {
           await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [plan.cutoverAt, current.id]);
           await openSegment(plan.cutoverAt, plan.after, { fresh: true });
         }
+        // 换手那天的挡和换段同一个事务写：挡写失败整批回滚，不会出现「换了段、挡没写上」把错的钱固定下来
+        if (keyBlock) await conn.query("UPDATE reconciliation_rules SET key_blocks = ? WHERE id = ?", [JSON.stringify(addKeyBlock(rule.key_blocks, keyBlock)), ruleId]);
         const [firstKey] = plan.after;
         // canonicalKey 是按 [provider, panel, accountId, tokenId] 算的（lib/reconciliation-scope-policy.js 的
         // canonicalBillingKey），tokenId 一换它就变了：不跟着改，下一次结账会发现「现在算出来的 canonicalKey 和
