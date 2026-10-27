@@ -449,6 +449,8 @@ export class ReconciliationRepository {
           [input.channels.map((channel) => [id, channel.channelId, channel.name, activeChannelKey(input, channel.channelId)])]
         );
       }
+      // K2c 重新分组：新绑定一建出来就带着的冲突期（第一次认出到这一轮之间、旧绑定当天的冲突期），和 addKeyBlock 同一个机制
+      if (input.keyBlocks?.length) await conn.query("UPDATE reconciliation_rules SET key_blocks = ? WHERE id = ?", [JSON.stringify(input.keyBlocks.reduce((blocks, block) => addKeyBlock(blocks, block), [])), id]);
       const firstSegmentId = uid("rs");
       await conn.query(
         `INSERT INTO reconciliation_rule_segments
@@ -457,7 +459,7 @@ export class ReconciliationRepository {
         [firstSegmentId, id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs ?? (isScopedBillingPolicy(input.billingPolicy) ? 0 : Date.now())), Date.now()]
       );
       // Sub2API 重新分组（K2c）：旧绑定归档那天整天不算（只能按整天读），它原来的 Key 要是没有被任何新组接着用，b 当天 b 以前的用量就没人算。
-      // 把这些 Key 放进新绑定第一段（只到下一个业务日 0 点，段是关着的所以不占唯一键）：b 当天整天读时多取这几把，第二天起第一段不再碰到
+      // 把这些 Key 放进新绑定第一段（关在 b：endsAt，段是关着的所以不占唯一键）：b 当天整天读时多取这几把，b 以后第一段不再碰到
       const extra = input.dayExtraKeys;
       if (extra?.keys?.length) {
         await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [extra.endsAt, firstSegmentId]);
@@ -1030,6 +1032,9 @@ export class ReconciliationRepository {
         states.push({ close, rule, open });
       }
       for (const { close, rule, open } of states) {
+        // 旧绑定归档的时刻：默认 b；换到 Sub2API 上游的 New API 旧绑定在 b 那天 0 点归档（close.archiveAt，那一天整天由新绑定取），不能早于开着那段的起点
+        const end = close.archiveAt != null ? Number(close.archiveAt) : at;
+        if (end < Number(open.effective_from_ms)) { await conn.rollback(); return { conflict: false, stale: true }; }
         if (close.window) {
           const fillMissing = fillMissingSegmentKeysSql(close.ruleId);
           await conn.query(fillMissing.sql, fillMissing.params);
@@ -1037,7 +1042,7 @@ export class ReconciliationRepository {
           const id = uid("rs");
           // window.to：过渡段只到这里（换到 Sub2API 上游时截到 b 那天 0 点，b 当天新 Key 的用量整天由新上游下的新绑定取），
           // to 到 b 之间还有一小段，只放这条绑定自己原来的那把 Key
-          const windowTo = close.window.to != null && close.window.to < at ? close.window.to : at;
+          const windowTo = close.window.to != null && close.window.to < end ? close.window.to : end;
           await conn.query(
             `INSERT INTO reconciliation_rule_segments
               (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, effective_to_ms, detected_at_ms, timing_source)
@@ -1046,20 +1051,22 @@ export class ReconciliationRepository {
           for (const key of close.window.keys) await conn.query(
             "INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source, active_token_key) VALUES (?, ?, ?, ?, 'agent', NULL)",
             [id, key.upstreamStationId, key.tokenId, key.tokenName ?? null]);
-          if (windowTo < at) {
+          if (windowTo < end) {
             const tailId = uid("rs");
             await conn.query(
               `INSERT INTO reconciliation_rule_segments
                 (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, effective_to_ms, detected_at_ms, timing_source)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'key_change')`,
-              [tailId, close.ruleId, open.group_name, open.group_ratio, open.ratio_observed_at_ms, open.ratio_source, windowTo, at, detectedAt]);
+              [tailId, close.ruleId, open.group_name, open.group_ratio, open.ratio_observed_at_ms, open.ratio_source, windowTo, end, detectedAt]);
             await conn.query(
               "INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source, active_token_key) VALUES (?, ?, ?, ?, 'agent', NULL)",
               [tailId, rule.upstream_station_id, rule.token_id, rule.token_name ?? null]);
           }
         }
-        await conn.query("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, archived_at = NOW(), archived_at_ms = ? WHERE id = ? AND archived_at IS NULL", [at, close.ruleId]);
+        await conn.query("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, archived_at = NOW(), archived_at_ms = ? WHERE id = ? AND archived_at IS NULL", [end, close.ruleId]);
         await conn.query("UPDATE reconciliation_rule_channels SET active_channel_key = NULL WHERE rule_id = ?", [close.ruleId]);
+        // 归档的同时记下这条旧绑定的冲突期（比如过渡段里没放、先不算的新 Key 那一段），和归档同一个事务
+        if (close.keyBlocks?.length) await conn.query("UPDATE reconciliation_rules SET key_blocks = ? WHERE id = ?", [JSON.stringify(close.keyBlocks.reduce((blocks, block) => addKeyBlock(blocks, block), keyBlocksOf(rule.key_blocks))), close.ruleId]);
         await refreshSegmentKeys(conn, close.ruleId);
       }
       const createdIds = [];
