@@ -545,7 +545,7 @@ test("identifyChannels（#142 低 6）：候选是 Sub2API（地址对上）只�
 });
 
 // 审核 #133 第 2 轮 M1：readAt 是读取服务那台机器的时钟，不能照单全收
-test("identifyChannelsCached（M1）：读取服务给的 readAt 在 [现在 − 15 分钟, 现在 + 1 分钟] 里才采用（偏快一点的夹到现在）；偏快很多、偏慢很多都丢掉：b 用控制台的时刻，a 这一轮不推进", async (t) => {
+test("identifyChannelsCached（M1）：读取服务给的 readAt 在 [现在 − 7 分钟, 现在 + 1 分钟] 里才采用（偏快一点的夹到现在）；偏快很多、偏慢很多都丢掉：b 用控制台的时刻，a 这一轮不推进", async (t) => {
   const real = Date.now();
   t.mock.method(console, "warn", () => {});
   const ask = async (readAt) => {

@@ -471,7 +471,7 @@ function upstreamErrorHealth(err, resource) {
 }
 
 // 事项解开以后要转成一段「冲突期」（KEY_CONFLICT_GAP）的码：渠道在这段时间里用的另一把 Key，用量没有进过任何一条绑定的段
-const KEY_CONFLICT_CODES = new Set(["KEY_GROUP_CHANGED", "CHANNEL_KEY_UNMATCHED", "KEY_REVEAL_DENIED"]);
+const KEY_CONFLICT_CODES = new Set(["KEY_GROUP_CHANGED", "CHANNEL_KEY_UNMATCHED", "KEY_REVEAL_DENIED", "PENDING"]);
 
 const CALCULATION_BLOCKERS = new Set([
   "ACCESS_TOKEN_LEGACY_RETIRED",
@@ -962,8 +962,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 分组 / 合组、认不出（不在已加的上游里）、读不了完整 Key 的事项解开了（渠道回到了原来的 Key，没有靠换段处理）：冲突期间渠道用的另一把 Key
       // 没有进过任何一条绑定的段——那段日子不能带着缺的钱固定。转成一段「冲突期」[sinceMs, untilMs)（KEY_CONFLICT_GAP，永远不固定），以后的日子照常算；
       // 一条绑定可以有好几段，解开以后又出新事项不会把旧的覆盖掉。这一轮换了段的（[a, b) 过渡段已经把新 Key 的用量算进来了）和会自己好的 PENDING 不转
-      if (!issue && previous && KEY_CONFLICT_CODES.has(previous.code) && !appliedRuleIds.has(rule.id)) {
-        await repository.addKeyBlock(rule.id, { code: "KEY_CONFLICT_GAP", sinceMs: previous.sinceMs, untilMs: identifiedAtByStation.get(rule.ownStationId) ?? now }, { clearIssue: true }).catch(() => {});
+      // 这一轮刚好换了段也照样转：换段的 [a, b) 过渡窗口只放旧 Key 和新 Key，冲突期间用过的第三把 Key 不在里面（审核 #133 第 3 轮 M4）。
+      // 写失败（连接断了）就这一轮仍然当事项还开着挡住，下一轮再转，不能放行
+      if (!issue && previous && KEY_CONFLICT_CODES.has(previous.code)) {
+        try { await repository.addKeyBlock(rule.id, { code: "KEY_CONFLICT_GAP", sinceMs: previous.sinceMs, untilMs: identifiedAtByStation.get(rule.ownStationId) ?? now }, { clearIssue: true }); }
+        catch { keyIssues.set(rule.id, { code: previous.code, sinceMs: previous.sinceMs }); }
         return;
       }
       if ((issue?.code ?? null) !== (previous?.code ?? null) || (issue?.sinceMs ?? null) !== (previous?.sinceMs ?? null)) {
@@ -1125,7 +1128,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // Sub2API 一把 Key 同一天在两条绑定之间换手（互换、转手、挪给新渠道）：按天的统计切不开，结账时这一天、这一把 Key 翻逐条用量，在 b 那一刻切开
     // （k-plan 3.5；每条绑定只认领自己那几段的时间，见 upstreamWindowForScopedSegments），这里照常写段
     const applyPlans = plans.map((plan) => {
-      const { rule } = byRuleId.get(plan.bindingId);
+      const { rule, before } = byRuleId.get(plan.bindingId);
       const identity = resources.get(rule.upstreamStationId)?.identity;
       const upstream = upstreamStation(rule.upstreamStationId);
       // 上游这一轮身份读不到：不拿读不到的身份算 canonicalKey，这一条整条跳过，等下一轮一起换
@@ -1134,7 +1137,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const metadata = resources.get(rule.upstreamStationId)?.metadata;
       const newToken = metadata?.tokens?.find((item) => Number(item.id) === Number(plan.after[0].tokenId));
       const groupFields = newToken ? { group: newToken.group, ratio: metadata.groupsAvailable ? metadata.groups?.[newToken.group]?.ratio ?? null : null } : {};
-      return { ruleId: plan.bindingId, plan: { ...plan, ...groupFields, canonicalKey: canonicalBillingKey(upstream, identity, plan.after[0].tokenId) } };
+      // Sub2API 只能按整天读：（1）一把 Key 在两条绑定之间挪（movedSub2）；（2）换掉的旧 Key 这一刻还被这条绑定以外的渠道用着（那个渠道在不在算、是不是新开的都一样）——
+      // 整天读会把别的渠道的用量算进这条绑定。段照常换，换手那一天（b 所在的业务日）这条绑定不结账，记一段会自己好的 PENDING，只挡这一天，以后的日子照常算；
+      // 挡和换段同一个事务写（applyKeyChangePlans 的 keyBlock）。临时的挡：逐条拆分（k-plan 3.5，按 b 把那天切开）合了以后去掉
+      const day = movedSub2.has(plan.bindingId) || (isSub2(plan.bindingId) && sub2KeyUsedElsewhere(rule, [before], channelsByKey)) ? dayBoundsInTz(observedAt, rule.timezone) : null;
+      return { ruleId: plan.bindingId, plan: { ...plan, ...groupFields, canonicalKey: canonicalBillingKey(upstream, identity, plan.after[0].tokenId) },
+        ...(day ? { keyBlock: { code: "PENDING", sinceMs: day.startMs, untilMs: day.endMs } } : {}) };
     }).filter(Boolean);
     // 互换、轮换（挪过）的几条绑定必须同生同死：按 movedFromBindingId 把互相牵连的归成一组，每组一个事务；
     // 别的组各自一个事务。一组撞了约束只回滚这一组、只给这一组记 KEY_GROUP_CHANGED（会自己好的那类），别的组照常换段——
@@ -2567,8 +2575,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 不会在观测之前显示「实时」而这几天其实不会固定；观测的轮次用这一轮重新判断的结果（解开了就是没有）
       const keyIssue = ownerRegistry.keyIssues?.get(rule.id) ?? (ownerRegistry.keyAgentObserved === false ? rule.keyIssue : null);
       // 已经解开、只挡冲突期间那几段日子（渠道回到了原来的 Key，冲突期间另一把 Key 的用量没人算）：窗口碰到哪一段就是那一类（KEY_CONFLICT_GAP 永远不固定、PENDING 会自己好）
-      const blockHit = (rule.keyBlocks || []).find((block) => window.endMs > block.sinceMs && window.startMs < block.untilMs);
-      if (blockHit) {
+      // 冲突期（永远不固定）排在会自己好的 PENDING 前面：同一天两种都有时写没用的「重新读取」会误导（审核 #133 第 3 轮 L2）
+      const hits = (rule.keyBlocks || []).filter((block) => window.endMs > block.sinceMs && window.startMs < block.untilMs);
+      const blockHit = hits.find((block) => block.code === "KEY_CONFLICT_GAP") ?? hits[0] ?? null;
+      // 近 7 天、本月这类多天窗口只碰到冲突期：像 R2 的 OWN_CONSUME_LOG_GAP 那样只去掉碰到的那几天，其余天照算（审核 #133 第 3 轮 M1）
+      const partialKeyGap = !!blockHit && !settle && !billDayOf(window) && hits.every((block) => block.code === "KEY_CONFLICT_GAP");
+      if (blockHit && !partialKeyGap) {
         return unavailable(health(blockHit.code, issueText(blockHit.code), { sinceMs: blockHit.sinceMs, untilMs: blockHit.untilMs }), { metadata, token }, false);
       }
       if (keyIssue && window.endMs >= keyIssue.sinceMs) {
@@ -2663,11 +2675,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const clipped = isScopedBillingPolicy(rule.billingPolicy) ? accountingWindow(rule, window, platform) : window;
       const clippedUpstream = isScopedBillingPolicy(rule.billingPolicy) ? accountingUpstreamWindow(rule, window, platform) : window;
       let applicable = isScopedBillingPolicy(rule.billingPolicy) ? (clipped ? [{ segment: currentSegment, segmentWindow: clipped, upstreamWindow: clippedUpstream }] : []) : intersecting;
-      if (partialGapCandidate) {
-        // 把每段窗口按天切开，去掉碰到关着那一段的天，剩下连着的天并成一段（同一段的几个部分用「段号~序号」区分，快照键不撞）
+      if (partialGapCandidate || partialKeyGap) {
+        // 把每段窗口按天切开，去掉碰到关着那一段（或换 Key 冲突期）的天，剩下连着的天并成一段（同一段的几个部分用「段号~序号」区分，快照键不撞）
         const stationPeriods = upstreamStation(own.id)?.consumeLogOffPeriods ?? own.consumeLogOffPeriods;
         const kept = applicable.flatMap(({ segment, segmentWindow, upstreamWindow }) => {
-          const days = splitWindowByDays(segmentWindow).filter((piece) => !consumeLogOffOverlap(stationPeriods, piece).closed);
+          const days = splitWindowByDays(segmentWindow).filter((piece) => !(partialGapCandidate && consumeLogOffOverlap(stationPeriods, piece).closed)
+            && !(partialKeyGap && hits.some((block) => piece.endMs > block.sinceMs && piece.startMs < block.untilMs)));
           const runs = [];
           for (const piece of days) {
             const last = runs.at(-1);
@@ -2688,8 +2701,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         });
         if (kept.length) {
           applicable = kept;
-          issues.push({ code: "OWN_CONSUME_LOG_GAP_PARTIAL", scope: "downstream", detail: issueText("OWN_CONSUME_LOG_GAP_PARTIAL"), observedAt: Date.now() });
+          if (partialGapCandidate) issues.push({ code: "OWN_CONSUME_LOG_GAP_PARTIAL", scope: "downstream", detail: issueText("OWN_CONSUME_LOG_GAP_PARTIAL"), observedAt: Date.now() });
+          if (partialKeyGap) issues.push({ code: "KEY_CONFLICT_GAP_PARTIAL", scope: "segment", detail: issueText("KEY_CONFLICT_GAP_PARTIAL"), observedAt: Date.now() });
           consumeLogIssue = null;
+        } else if (partialKeyGap && !partialGapCandidate) {
+          issues.push({ code: "KEY_CONFLICT_GAP", scope: "segment", detail: issueText("KEY_CONFLICT_GAP"), sinceMs: blockHit.sinceMs, untilMs: blockHit.untilMs, observedAt: Date.now() });
         } else issues.push(consumeLogIssue);
       }
       // probe 到这里为止：取数前能判断的都判断完了，还挡着的要人处理的原因交回去，不读渠道、不取账单
