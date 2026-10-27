@@ -15,7 +15,7 @@
 #   PERF_BINDINGS(空 = 80 条绑定；缩小夹具，种子、假站点、测量一起用) PERF_EXPECTED_COST(off；on 时后台测量前打开「算应付成本」整站读)
 #   PERF_STEADY_DELAY_SEC(0，量完接口以后先等这么多秒再开稳态，量「没人看」用 660；BG_SEC 就是 workflow 的 steady_sec)
 #   PERF_KEY_AGENT(off；on 时假站点在 https 端口 FAKE_KEY_AGENT_PORT(FAKE_PORT + 2) 装渠道 Key 读取服务、自营站点配上地址和令牌，
-#     证书 $PERF_OUT/tls/key-agent.crt 现生成，被测应用带 NODE_EXTRA_CA_CERTS；对拍时暂停换 Key。见 README「K2a/K2b 场景」)
+#     证书 $PERF_TLS_DIR/key-agent.crt 现生成（结果目录外面，不进产物），被测应用带 NODE_EXTRA_CA_CERTS；对拍时暂停换 Key。见 README「K2a/K2b 场景」)
 #   PERF_KEY_AGENT_ROTATE_SEC(600；假读取服务换一次 Key 的间隔，稳态窗口只有 185 秒，想量到换 Key 以后重新认、写段就填 60 左右)
 # 不带锁：CI 上一台机器只跑这一件。本机和别的重活抢机器时，自己在外面拿锁。
 
@@ -26,6 +26,8 @@ export APP_PORT=${APP_PORT:-3301} FAKE_PORT=${FAKE_PORT:-18950}
 export FAKE_OWN_PORT=${FAKE_OWN_PORT:-$(( FAKE_PORT + 1 ))} FAKE_KEY_AGENT_PORT=${FAKE_KEY_AGENT_PORT:-$(( FAKE_PORT + 2 ))}
 TMP_ROOT=${TMPDIR:-/tmp}
 export PERF_OUT=${PERF_OUT:-${TMP_ROOT%/}/relay-monitor-perf}
+# 读取服务的自签证书和私钥放在结果目录外面：CI 会把整个 perf-out/ 当产物上传（公开仓库谁都能下），私钥不进产物
+export PERF_TLS_DIR=${PERF_TLS_DIR:-${RUNNER_TEMP:-${TMP_ROOT%/}}/relay-perf-tls}
 PARITY_DAYS=${PARITY_DAYS:-14} API_N=${API_N:-10} BG_SEC=${BG_SEC:-185} RECON_DAYS=${RECON_DAYS:-90}
 LOGS=$PERF_OUT/logs
 mkdir -p "$LOGS" "$PERF_OUT/pids"
@@ -61,16 +63,16 @@ stop_fake() {
   kill_port "$FAKE_PORT"; kill_port "$FAKE_OWN_PORT"; kill_port "$FAKE_KEY_AGENT_PORT"
 }
 fake_up() { curl -sf -m 2 "http://127.0.0.1:$FAKE_PORT/__health" > /dev/null; }
-# 渠道 Key 读取服务的自签证书（PERF_KEY_AGENT=on 时）：CN、SAN 都是 127.0.0.1，放在 $PERF_OUT/tls/；假站点的 https 端口用它，
+# 渠道 Key 读取服务的自签证书（PERF_KEY_AGENT=on 时）：CN、SAN 都是 127.0.0.1，放在 $PERF_TLS_DIR（不在 $PERF_OUT 下）；假站点的 https 端口用它，
 # 被测应用进程带 NODE_EXTRA_CA_CERTS 信任它（start_app）。不用 NODE_TLS_REJECT_UNAUTHORIZED=0：那样量不到证书这一环
-KEY_AGENT_CERT=$PERF_OUT/tls/key-agent.crt
+KEY_AGENT_CERT=$PERF_TLS_DIR/key-agent.crt
 key_agent_on() { case "${PERF_KEY_AGENT:-}" in 1|on|true|ON|TRUE) return 0 ;; *) return 1 ;; esac; }
 ensure_cert() {
   key_agent_on || return 0
-  [ -s "$KEY_AGENT_CERT" ] && [ -s "$PERF_OUT/tls/key-agent.key" ] && return 0
-  mkdir -p "$PERF_OUT/tls"
+  [ -s "$KEY_AGENT_CERT" ] && [ -s "$PERF_TLS_DIR/key-agent.key" ] && return 0
+  mkdir -p "$PERF_TLS_DIR" && chmod 700 "$PERF_TLS_DIR"
   openssl req -x509 -newkey rsa:2048 -nodes -days 7 -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" \
-    -keyout "$PERF_OUT/tls/key-agent.key" -out "$KEY_AGENT_CERT" > "$LOGS/openssl.log" 2>&1 \
+    -keyout "$PERF_TLS_DIR/key-agent.key" -out "$KEY_AGENT_CERT" > "$LOGS/openssl.log" 2>&1 \
     || { echo "生成读取服务证书失败，见 $LOGS/openssl.log"; return 1; }
 }
 ensure_fake() {

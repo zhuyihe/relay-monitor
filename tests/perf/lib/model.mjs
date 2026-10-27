@@ -20,10 +20,11 @@ export const BASE = `http://127.0.0.1:${PORT}`;
 export const OWN_PORT = Number(process.env.FAKE_OWN_PORT || PORT + 1);
 // 渠道 Key 读取服务（PERF_KEY_AGENT=on）单独一个 https 端口：控制台只认 https 的读取服务地址（lib/key-agent-client.js），
 // http 的地址直接回 KEY_AGENT_URL_INVALID、一个请求都不发。证书是 run.sh 用 openssl 现生成的自签证书（CN、SAN 都是 127.0.0.1），
-// 放在结果目录下；被测应用进程带 NODE_EXTRA_CA_CERTS 指到它（不关证书校验）
+// 放在结果目录外面（PERF_TLS_DIR，CI 上传的产物里不能有私钥）；被测应用进程带 NODE_EXTRA_CA_CERTS 指到它（不关证书校验）
 export const KEY_AGENT_PORT = Number(process.env.FAKE_KEY_AGENT_PORT || PORT + 2);
 export const KEY_AGENT_URL = `https://127.0.0.1:${KEY_AGENT_PORT}/key-agent`;
-export const KEY_AGENT_TLS = { cert: join(OUT_DIR, "tls", "key-agent.crt"), key: join(OUT_DIR, "tls", "key-agent.key") };
+export const TLS_DIR = resolve(process.env.PERF_TLS_DIR || join(process.env.RUNNER_TEMP || tmpdir(), "relay-perf-tls"));
+export const KEY_AGENT_TLS = { cert: join(TLS_DIR, "key-agent.crt"), key: join(TLS_DIR, "key-agent.key") };
 export const QPU = 500000;
 export const N_UP = 50;
 export const N_CH = 300;

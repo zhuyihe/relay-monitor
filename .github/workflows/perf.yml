@@ -90,7 +90,7 @@ jobs:
       DB_NAME: relay_monitor_perf
       APP_PORT: 3301
       FAKE_PORT: 18950
-      # 渠道 Key 读取服务的 https 端口（key_agent 勾上时；证书在 perf-out/tls/，run.sh 给被测应用带 NODE_EXTRA_CA_CERTS）
+      # 渠道 Key 读取服务的 https 端口（key_agent 勾上时；证书在 $RUNNER_TEMP/relay-perf-tls/、不在上传的 perf-out/ 里，run.sh 给被测应用带 NODE_EXTRA_CA_CERTS）
       FAKE_KEY_AGENT_PORT: 18952
       PERF_OUT: ${{ github.workspace }}/perf-out
       PERF_BASE_DIR: ${{ github.workspace }}/apps/base
