@@ -23,8 +23,10 @@ export const INGEST_ROWS = [
   ["每轮 自营站点全部请求", "可比", (g) => g.perRound.ownRequests],
   ["整站读 任意 180 秒最多 / 360", "可比", (g) => `${g.rateLimit.ownLogAllMax}（${g.rateLimit.ownLogAllMaxPct}%）`],
   ["整站读 180 秒平均 / 360", "可比", (g) => `${g.rateLimit.ownLogAllAvg}（${g.rateLimit.ownLogAllAvgPct}%）`],
+  ["整站读 每 300 秒平均", "可比", (g) => (g.rateLimit.ownLogAllAvg300 == null ? NA : g.rateLimit.ownLogAllAvg300)],
   ["自营站点全部 任意 180 秒最多 / 360", "可比", (g) => `${g.rateLimit.ownMax}（${g.rateLimit.ownMaxPct}%）`],
   ["自营站点全部 180 秒平均 / 360", "可比", (g) => `${g.rateLimit.ownAvg}（${g.rateLimit.ownAvgPct}%）`],
+  ["自营站点全部 每 300 秒平均", "可比", (g) => (g.rateLimit.ownAvg300 == null ? NA : g.rateLimit.ownAvg300)],
   ["窗口开始 落后（现在 − 120 秒 − 进度）", "参考", (g) => (g.cursorTable && g.catchUp ? duration(g.catchUp.behindStartMs) + (g.catchUp.startFromCursor ? "" : "（窗口开始还没进度，按起点算）") : NA)],
   ["窗口结束 落后", "参考", (g) => (g.cursorTable && g.catchUp ? duration(g.catchUp.behindEndMs) : NA)],
   ["每分钟追了（分钟日志 / 分钟）", "参考", (g) => (g.cursorTable && g.catchUp ? g.catchUp.minutesPerMinute : NA)],
@@ -54,4 +56,10 @@ export function ingestSwitch(bg) {
   const off = g.switch && (before === false || before === null) && (after === false || after === null);
   const anomaly = Boolean(off && n > 0);
   return { text: `${state}，这段时间整站读 ${n ?? "?"} 个请求${anomaly ? "（开关关着却有整站读）" : ""}`, anomaly };
+}
+
+// 「接口量完以后等了 N 秒才开稳态」（steady_delay_sec 和整站读场景的 185 秒取大的）；老结果里没有就写「没记」
+export function steadyDelayText(bg) {
+  const d = bg?.steadyDelay;
+  return d ? `接口量完以后等了 ${d.waitedSec} 秒才开稳态（steady_delay_sec=${d.requestedSec}）` : "接口量完以后等了多久：没记（老结果）";
 }
