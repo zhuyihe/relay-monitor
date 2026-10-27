@@ -74,7 +74,7 @@ test("start：同一把 Key 的渠道自动连成一组带上、上游答了「�
   assert.equal(input.requestId, "request-1");
   assert.deepEqual(input.selections, [{ selectionId: "s-up1", stationId: "up1", monitor: false }]);
   assert.deepEqual(input.groups, [{ groupId: "g-0", selectionId: "s-up1", channels: [{ channelId: 1, channelRevision: "r1" }, { channelId: 2, channelRevision: "r2" }],
-    reconciliation: { tokenId: 11, coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] } } }]);
+    reconciliation: { tokenId: 11, coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [], source: "account" } } }]);
   assert.deepEqual(f.calls.connect[0], { ...input, previewId: "preview-1" }, "确认用的是同一份输入和预览");
   assert.deepEqual(f.calls.optoutRemoved, [["own", [1, 2]]]);
   assert.deepEqual(f.state.optouts, []);
@@ -371,35 +371,44 @@ function accountUseFixture({ upstream, rules }) {
   const f = fixture({ channels: [1, 2, 3], stations: [own, station, upShared], identified: [], rules });
   f.rt.store.update = async (id, patch) => { Object.assign(station, patch); return station; };
   const calls = [];
-  f.rt.channelOnboarding.probeRuleEdit = async (id, body) => { calls.push([id, body.coverageDeclaration.answer]); return { previewId: `p-${id}`, groupId: "g1" }; };
+  f.rt.channelOnboarding.probeRuleEdit = async (id, body) => { calls.push([id, body.coverageDeclaration.answer, body.coverageDeclaration.source]); return { previewId: `p-${id}`, groupId: "g1" }; };
   f.rt.channelOnboarding.getPreviewGuard = (previewId, groupId) => ({ previewId, groupId });
   f.rt.reconciliation.updateRule = async (id) => ({ id });
   return { f, station, calls };
 }
-const ruleOf = (id, channelIds, answer, extra = {}) => ({ ...running(id, channelIds), upstreamStationId: "up1", tokenId: 11, timezone: "Asia/Shanghai", costCoverage: answer === "none" ? "complete" : "unknown", coverageDeclaration: answer ? { answer } : undefined, ...extra });
+const ruleOf = (id, channelIds, answer, extra = {}) => ({ ...running(id, channelIds), upstreamStationId: "up1", tokenId: 11, timezone: "Asia/Shanghai", costCoverage: answer === "none" ? "complete" : "unknown", coverageDeclaration: answer ? { answer, ...(extra.source ? { source: extra.source } : {}) } : undefined, ...extra });
 
-test("answerAccountUse：答「只给我的渠道用」——写在上游上；这个上游下在算的、还没答成「只给这些渠道用」的绑定改成「只给这些渠道用」，答过的、别的上游的不动", async () => {
+test("answerAccountUse：答「只给我的渠道用」——写在上游上；这个上游下在算的、「不确定」的绑定改成「只给这些渠道用」（来源记 account），用户自己答过的（只给这些渠道用、别处也在用）、别的上游的不动", async () => {
   const { f, station, calls } = accountUseFixture({ upstream: { ...upMine, accountUse: null }, rules: [ruleOf("r-unknown", [1], "unknown"), ruleOf("r-none", [2], "none"), ruleOf("r-other", [3], "other_use"), { ...ruleOf("r-up2", [3], "unknown"), upstreamStationId: "up2" }] });
   const result = await f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "only_mine" });
   assert.equal(station.accountUse, "only_mine");
-  assert.deepEqual([result.previous, result.changedRules.sort(), result.failed], [null, ["r-other", "r-unknown"], []]);
-  assert.deepEqual(calls.map(([id, answer]) => [id, answer]).sort(), [["r-other", "none"], ["r-unknown", "none"]]);
+  assert.deepEqual([result.previous, result.changedRules, result.failed], [null, ["r-unknown"], []]);
+  assert.deepEqual(calls.map(([id, answer, source]) => [id, answer, source]), [["r-unknown", "none", "account"]]);
 });
 
-test("answerAccountUse：从「只给我的渠道用」改成别的——这个上游下答成「只给这些渠道用」的绑定回到「不确定」（利润先不算，要重新答），别的回答留着；改成同样的答案什么也不动", async () => {
-  const { f, station, calls } = accountUseFixture({ upstream: { ...upMine, accountUse: "only_mine" }, rules: [ruleOf("r-none", [1], "none"), ruleOf("r-ext", [2], "other_use")] });
+test("answerAccountUse：从「只给我的渠道用」改成别的——只有因为它才变成「只给这些渠道用」的（来源 account）回到「不确定」，用户自己一把一把答过的不动；改成同样的答案什么也不动；改过去再改回来，用户自己答的前后逐字不变", async () => {
+  const mine = ruleOf("r-mine", [1], "none"); // 用户自己答的「只给这些渠道用」（没有来源）
+  const derived = ruleOf("r-derived", [2], "none", { source: "account" });
+  const external = ruleOf("r-ext", [3], "other_use");
+  const { f, station, calls } = accountUseFixture({ upstream: { ...upMine, accountUse: "only_mine" }, rules: [mine, derived, external] });
   const same = await f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "only_mine" });
   assert.deepEqual([same.changedRules, calls], [[], []]);
   const result = await f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "elsewhere" });
   assert.equal(station.accountUse, "elsewhere");
-  assert.deepEqual([result.changedRules, calls], [["r-none"], [["r-none", "unknown"]]]);
+  assert.deepEqual([result.changedRules, calls.map(([id, answer, source]) => [id, answer, source])], [["r-derived"], [["r-derived", "unknown", "account"]]], "用户自己答的 r-mine 没动");
+  // 再改回「只给我的渠道用」：只有「不确定」的（含刚才回退的 r-derived）改成「只给这些渠道用」，用户自己答的（r-mine、r-ext）一直没动
+  calls.length = 0;
+  f.state.rules = f.state.rules.map((rule) => (rule.id === "r-derived" ? { ...rule, coverageDeclaration: { answer: "unknown", source: "account" }, costCoverage: "unknown" } : rule));
+  const back = await f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "only_mine" });
+  assert.deepEqual([back.changedRules, calls.map(([id]) => id)], [["r-derived"], ["r-derived"]]);
+  assert.deepEqual([mine.coverageDeclaration, external.coverageDeclaration], [{ answer: "none" }, { answer: "other_use" }], "用户自己答的前后逐字不变");
   // 从没回答、不确定 → 别处也在用：绑定不动
-  const g = accountUseFixture({ upstream: { ...upMine, accountUse: "unsure" }, rules: [ruleOf("r-none", [1], "none")] });
+  const g = accountUseFixture({ upstream: { ...upMine, accountUse: "unsure" }, rules: [ruleOf("r-derived", [1], "none", { source: "account" })] });
   assert.deepEqual((await g.f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "elsewhere" })).changedRules, []);
 });
 
 test("answerAccountUse：回答不在三个值里、找不到上游、自营站点、已归档的上游都不写；某条绑定没改成只记在 failed，上游的回答已经是新的", async () => {
-  const { f, station } = accountUseFixture({ upstream: { ...upMine, accountUse: "only_mine" }, rules: [ruleOf("r-a", [1], "none"), ruleOf("r-b", [2], "none")] });
+  const { f, station } = accountUseFixture({ upstream: { ...upMine, accountUse: "only_mine" }, rules: [ruleOf("r-a", [1], "none", { source: "account" }), ruleOf("r-b", [2], "none", { source: "account" })] });
   await assert.rejects(f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "bogus" }), { code: "INVALID_REQUEST" });
   await assert.rejects(f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "nope", accountUse: "elsewhere" }), { code: "UPSTREAM_NOT_FOUND" });
   await assert.rejects(f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "own", accountUse: "elsewhere" }), { code: "UPSTREAM_NOT_FOUND" });
@@ -430,4 +439,19 @@ test("overview：用到这个上游的 Key 的渠道有了、账号没回答（�
   assert.equal(unsure.upstreams.find((item) => item.id === "up1").needsAccountUse, true);
   const answered = await overviewFixture({ channels: [1], stations: [own, { ...upMine, accountUse: "elsewhere" }, upShared], identified }).module.overview("own");
   assert.deepEqual([answered.upstreams.find((item) => item.id === "up1").needsAccountUse, answered.upstreams.find((item) => item.id === "up1").attentionCount], [false, 0]);
+});
+
+test("overview：渠道今天上午属于停掉的绑定、又要追加进别的在算绑定——一张 blocked 卡片写停的时刻和原来那把 Key（COUNTED_EARLIER_TODAY），不进 unmatched，不算在算", async () => {
+  const clock = Date.parse("2026-10-11T06:00:00Z"); // 上海 14:00
+  const stopped = { ...running("r-old", [3]), enabled: false, archivedAt: "2026-10-11T02:00:00.000Z", archivedAtMs: Date.parse("2026-10-11T02:00:00Z"), timezone: "Asia/Shanghai", tokenName: "oai" };
+  const f = overviewFixture({ channels: [1, 3], rules: [{ ...running("r-a", [1]), upstreamStationId: "up1", tokenId: 11 }], identified: [
+    { channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 3, keyless: false, slots: [slot("up1", 11)] }] });
+  f.rt.reconciliation.listRecentlyArchivedRules = async () => [stopped];
+  const module = createChannelProfitModule(f.rt, { identify: async () => ({ ok: true, stale: false, revealIssues: [], channels: [
+    { channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 3, keyless: false, slots: [slot("up1", 11)] }] }), now: () => clock });
+  const view = await module.overview("own");
+  const card = view.cards.find((item) => item.blocked?.code === "COUNTED_EARLIER_TODAY");
+  assert.deepEqual([card.state, card.channelIds, card.blocked.stoppedAtMs, card.blocked.tokenName], ["blocked", [3], Date.parse("2026-10-11T02:00:00Z"), "oai"]);
+  assert.deepEqual(view.unmatched, []);
+  assert.equal((await module.status("own")).groups.length, 0, "今天不能开始");
 });
