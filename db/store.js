@@ -622,7 +622,7 @@ export class Store {
       alertState: null, // 告警去重状态（含不再续费站点的一次性低余额提醒时间）
       balance: null, // 最近一次查询结果
       // 渠道 Key 读取服务上一次读成功的时刻（毫秒，K2b）：重启后找不到更精确的「上一次确认是哪把 Key」时，
-      // 兜底当成换 Key 窗口的起点——只要不晚于真正换的那一刻就不会漏钱（总指挥 10-26 定，见 key-agent-identify.js）
+      // 兜底当成换 Key 窗口的起点——只要不晚于真正换的那一刻就不会漏钱（见 key-agent-identify.js）
       keyAgentLastSuccessAtMs: null,
     };
     clearHiddenCredentials(station);

@@ -164,7 +164,9 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
     }
   }
 
-  const result = { ok: true, status: snapshot.status, stale: snapshot.stale, staleReason: snapshot.staleReason, etag: snapshot.etag, channels, revealIssues };
+  const result = { ok: true, status: snapshot.status, stale: snapshot.stale, staleReason: snapshot.staleReason, etag: snapshot.etag, channels, revealIssues,
+    // 200 才有：这份快照读取服务自己读库的时刻（304 没带，沿用的那份认出来的结果不带）
+    ...(snapshot.status === 200 && Number.isFinite(snapshot.readAt) ? { readAtMs: snapshot.readAt } : {}) };
   // 原始渠道列表（带指纹、打码）给缓存层留着重新比对用：不可枚举，不会跟着结果被展开、序列化出去
   Object.defineProperty(result, "snapshotChannels", { value: snapshot.channels, enumerable: false });
   return result;
@@ -174,6 +176,9 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
 // 查询结果（渠道目录等）一请求一次调这个，不会把所有候选上游的 Key 目录在节奏之外重读一遍。
 // 304（读取服务那一侧没变）直接沿用上一次认出的结果，连候选上游都不问
 export const IDENTIFY_CACHE_MS = 4 * 60 * 1000;
+// 读取服务自己读库最多隔这么久读一次（agent/snapshot.js MIN_READ_GAP_MS）：它给的快照最多这么旧。304 没有 readAt，
+// 「这个时刻 Key 还是原来的」只能保证到「现在往前推这么久」
+export const KEY_AGENT_READ_LAG_MS = 4 * 60 * 1000;
 // 认出的结果里还有没认定的（not_found、ambiguous、unresolved，或者少了 api_key:reveal 权限）：这类状态会随上游目录、权限变化自己好，
 // 读取服务回 304 也要重新对一遍上游目录；全都认定了（identified / keyless）的，304 就沿用，不多读上游（审核 #131「别多读上游」）
 // 没认定的状态（渠道 Key 不在已加的上游里是会持续很久的真实场景）重新对上游目录的间隔：读取服务回 304 时最多每 15 分钟对一次，
@@ -211,7 +216,12 @@ async function identifyChannelsCachedOnce(rt, ownStation, options) {
   const resolvedBase = (result.channels == null || recheckFailed) && good
     ? { ...result, channels: good.result.channels, revealIssues: good.result.revealIssues }
     : result;
-  const resolved = { ...resolvedBase, fetchedAtMs: result.stale ? null : now };
+  // readAtMs（只有读到新的一份 200 才有）：识别出来的 Key 在这个时刻已经是这样了——换 Key 的 b 用它（真正换的时刻 ≤ 这个时刻，
+  //   窗口多放一点老 Key 无害，早于它会漏新 Key 的用量）；confirmedAtMs：这个时刻 Key 还是认出来的这样——「上一次读成功」的 a 用它
+  //   （200 用快照自己读库的时刻，304 和没带 readAt 的往前推一个读取服务的缓存间隔；不用控制台拿到快照的时刻，那个比真正读库的晚，a 晚了会漏钱）
+  const resolved = { ...resolvedBase, fetchedAtMs: result.stale ? null : now,
+    ...(result.stale ? { confirmedAtMs: null } : { confirmedAtMs: result.readAtMs ?? now - KEY_AGENT_READ_LAG_MS }) };
+  if (result.readAtMs == null) delete resolved.readAtMs;
   // 带 X-Agent-Stale 的是读取服务给的旧结果，不当「最近一次读成功」留下，也不换 etag
   // comparedAt：最近一次真的拿上游目录比对的时刻（200，或者 304 但重新比对了）；纯沿用旧结果的 304 不更新它
   const compared = result.channels != null && !recheckFailed;
