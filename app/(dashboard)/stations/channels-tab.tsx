@@ -70,7 +70,6 @@ const COPY = Object.freeze({
   moreKeys: (n: number) => `再看 ${n} 段`,
   autoStarted: (at: string) => `${at} 起系统自动开始算`,
   answerHint: "别处也在用的话，上游成本会算多；回答之前，利润先不算",
-  sub2WholeDay: (day: string) => `这个上游只能按整天读账单，今天（${day}）整天算进来`,
   startDone: "已开始算利润，今天的数已经在每日利润里",
   allStarted: (n: number) => `已开始算利润（${n} 个渠道）`,
   answered: "已保存",
@@ -631,7 +630,6 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
             </Radio>
           ))}
         </Radio.Group>
-        {answerTarget?.mode === "start" && /^sub2api/.test(stations.find((item) => item.id === answerTarget.card.upstreamStationId)?.type || "") ? <p className="jy-caption">{COPY.sub2WholeDay(formatZonedDate(Date.now(), tz))}</p> : null}
         {answerError ? <div className="jy-banner jy-banner--crit" role="alert"><Sym kind="warn" /><div className="jy-banner__body"><b>{answerError.text}</b><ErrorDetail raw={answerError.raw} /></div></div> : null}
       </Modal>
     </>

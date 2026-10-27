@@ -401,6 +401,42 @@ test("近 7 天 / 本月：不出应付成本列；差额只加已固定的日�
   const rowC = rowOf(page, "Rule C"); await rowC.getByText(PROFIT_COPY.gap.tomorrow, { exact: true }).waitFor(); await rowC.getByText(new RegExp(` · ${PROFIT_COPY.table.startedTodayShort}$`)).waitFor();
 });
 
+// 审核 #133 第 4 轮 M3、M4 的界面用例（审核 3 提的两个尾巴）：换 Key 冲突期（KEY_CONFLICT_GAP，永远不固定）的日子在多天窗口、计算明细里的样子
+test("近 7 天碰到换 Key 冲突期的一天：这一天的小格写「—」、点不开；整页不把它当「还在读取」，别的天的小格照常", async (t) => {
+  const gapDay = "2026-10-06";
+  const conflict = profitRow("rule-1", "Rule A", { gapUsd: 0.3, expected: 5, days: 5, mismatchedDays: [{ day: PROFIT_YESTERDAY, usd: 0.3, state: "over" }],
+    daily: [{ day: "2026-10-03", state: "fixed", gapUsd: 0, gapState: "within", reason: null, tokens: 720000 }, { day: "2026-10-04", state: "fixed", gapUsd: 0, gapState: "within", reason: null, tokens: 720000 },
+      { day: "2026-10-05", state: "fixed", gapUsd: 0, gapState: "within", reason: null, tokens: 720000 }, { day: gapDay, state: "attention", gapUsd: null, gapState: null, reason: "KEY_CONFLICT_GAP", tokens: null },
+      { day: "2026-10-07", state: "fixed", gapUsd: 0, gapState: "within", reason: null, tokens: 720000 }, { day: PROFIT_YESTERDAY, state: "fixed", gapUsd: 0.3, gapState: "over", reason: null, tokens: 720000 },
+      { day: PROFIT_TODAY, state: "today", gapUsd: null, gapState: null, reason: null, tokens: null }] });
+  const rows = [conflict, profitRow("rule-2", "Rule B", { gapUsd: 0.01, expected: 6, days: 6 })];
+  // 整页的天数：那一天不是「还在读取」（reading 0），6 天里 5 天已固定、今天实时
+  const { page } = await openDailyPage(t, { rows, pageOf: (body) => ({ ...profitPage(rows, { preset: "7d", customPreset: body.preset }), dayCounts: { fixed: 5, reading: 0, today: 1 } }), path: "/reconciliation" });
+  await pickPreset(page, PROFIT_COPY.presets["7d"]);
+  await page.locator(".jy-profit-caption").getByText(`10月3日–10月9日 · ${PROFIT_COPY.daysFixed(5)}，${PROFIT_COPY.todayLive}`, { exact: true }).waitFor();
+  assert.equal(await page.getByText(PROFIT_COPY.daysReading(1), { exact: false }).count(), 0, "冲突期的那一天不写成「还在读取」");
+  assert.equal(await rowOf(page, "Rule A").locator(".jy-profit-row__toggle").getAttribute("aria-expanded"), "true", "对不上的行默认展开");
+  const days = page.locator(".jy-profit-row__expanded").first().getByRole("group", { name: PROFIT_COPY.expanded.dailyTitleRange, exact: true });
+  const cell = days.getByRole("button", { name: `${PROFIT_COPY.expanded.dayCell("10月6日")} ${EMPTY}`, exact: true });
+  await cell.waitFor(); assert.equal(await cell.isDisabled(), true, "这一天没有可看的计算明细");
+  await days.getByRole("button", { name: `${PROFIT_COPY.expanded.dayCell("10月7日")} ${PROFIT_COPY.expanded.dot}`, exact: true }).waitFor();
+  await days.getByRole("button", { name: `${PROFIT_COPY.expanded.dayCell("10月8日")} +0.30`, exact: true }).waitFor();
+});
+
+test("计算明细碰到换 Key 冲突期的那天：实付成本、毛利写「—」加原因，不写 $0.00，也不写「毛利 = 收入」", async (t) => {
+  const title = "这一天几个渠道换了 Key，分不清哪把 Key 的钱该算给哪个渠道，这天没算";
+  const { page } = await openDailyPage(t, { pageOf: () => profitPage(yesterdayRows(), { preset: "yesterday" }),
+    detail: (route, params) => fulfill(route, profitDetail({ day: params.day, actual: { usd: null, keyName: "Rule A" }, gap: { usd: null, rate: null, state: null }, grossProfitUsd: null, unavailable: { code: "KEY_CONFLICT_GAP", title, detail: "" } })) });
+  await page.locator(".jy-profit-row__expanded").first().getByRole("button", { name: PROFIT_COPY.expanded.seeDetail, exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor();
+  await drawer.getByText(title, { exact: true }).waitFor();
+  const sectionValue = (heading) => drawer.locator("section.jy-profit-detail__sec").filter({ has: page.getByRole("heading", { name: heading, exact: true }) }).locator("header strong");
+  assert.equal((await sectionValue(PROFIT_COPY.detail.actual).innerText()).trim(), EMPTY, "实付成本是「—」");
+  assert.equal((await sectionValue(PROFIT_COPY.detail.gross).innerText()).trim(), EMPTY, "毛利是「—」");
+  assert.equal(await drawer.getByText("$0.00", { exact: false }).count(), 0, "没有写成 0");
+  assert.equal(await drawer.getByText(PROFIT_COPY.detail.actualFrom("Rule A"), { exact: true }).count(), 0, "没说「来自 Rule A 这把 Key 的用量记录」，因为这天没算");
+});
+
 test("手机 390：顶上一张卡片（毛利大字、底下一行昨天的差额和「看昨天」）、筛选一排、一个渠道一张卡片；点开五个数竖排、小格横滑、「看计算明细」整屏；不横向滚动", async (t) => {
   const { page, profitReads } = await openDailyPage(t, { viewport: { width: 390, height: 844 } });
   const summary = page.locator(".jy-profit-summary--mobile"); await summary.getByText(PROFIT_COPY.metric.grossTodayMobile, { exact: true }).waitFor(); await summary.getByText("$4.50", { exact: true }).waitFor();
