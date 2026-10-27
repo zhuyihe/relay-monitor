@@ -565,3 +565,15 @@ test("identifyChannelsCached（M1）：读取服务给的 readAt 在 [现在 −
   assert.equal(farBehind.readAtMs, undefined);
   assert.equal(farBehind.confirmedAtMs, null, "慢了一小时也一样，a 留在上一次读成功的时刻");
 });
+
+test("identifyChannelsCached（#143 低-6）：不传 fresh 时 4 分钟内沿用缓存（不请求读取服务）；传了 fresh 就真的再请求一次读取服务（etag 照用）", async (t) => {
+  let asked = 0;
+  t.mock.method(globalThis, "fetch", async () => { asked += 1; return { status: 200, headers: { get: () => null }, json: async () => ({ v: 1, db: "mysql", readAt: Date.now(), channels: [{ id: 1, keyless: true }] }) }; });
+  const rt = { store: { list: () => [ownStation] } };
+  await identifyChannelsCached(rt, ownStation);
+  assert.equal(asked, 1);
+  await identifyChannelsCached(rt, ownStation);
+  assert.equal(asked, 1, "缓存里的，不再问");
+  await identifyChannelsCached(rt, ownStation, { fresh: true });
+  assert.equal(asked, 2, "fresh：真的再问一次读取服务");
+});

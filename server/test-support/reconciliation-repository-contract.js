@@ -1909,6 +1909,31 @@ contract("applyKeyChangePlans: the unique key it writes is canonicalKey (same fo
     { code: "ER_DUP_ENTRY", errno: 1062 });
 });
 
+contract("channel optout (K2c): archiveRule({ optout: true }) records the rule's channels as user-stopped in the same transaction; plain archive records nothing; removeChannelOptouts deletes only the given channels; re-stopping is idempotent", async ({ repository, fixture }) => {
+  const stopped = await fixture.createRule({ channels: [{ channelId: fixture.channel(81), name: "A" }, { channelId: fixture.channel(82), name: "B" }] });
+  const plain = await fixture.createRule({ tokenId: fixture.token(83), channels: [{ channelId: fixture.channel(83), name: "C" }] });
+  assert.equal(await repository.archiveRule(plain.id), true);
+  assert.deepEqual((await repository.listChannelOptouts(plain.ownStationId)).filter((row) => row.channelId === fixture.channel(83)), [], "普通解除不记「用户停的」");
+  const at = Date.UTC(2026, 9, 27, 3);
+  assert.equal(await repository.archiveRule(stopped.id, { now: at, optout: true }), true);
+  const rows = (await repository.listChannelOptouts(stopped.ownStationId)).filter((row) => [fixture.channel(81), fixture.channel(82)].includes(row.channelId));
+  assert.deepEqual(rows.map((row) => [row.channelId, row.atMs]), [[fixture.channel(81), at], [fixture.channel(82), at]].sort((a, b) => a[0] - b[0]));
+  // 已经解除的再停一次：什么也不记、不报错
+  assert.equal(await repository.archiveRule(stopped.id, { now: at + 1000, optout: true }), false);
+  assert.equal((await repository.listChannelOptouts(stopped.ownStationId)).filter((row) => row.atMs === at + 1000).length, 0);
+  // 另一条绑定又用了同一个渠道、再停：不重复、时刻保留第一次
+  const again = await fixture.createRule({ tokenId: fixture.token(84), channels: [{ channelId: fixture.channel(81), name: "A" }] });
+  await repository.archiveRule(again.id, { now: at + 5000, optout: true });
+  const first = (await repository.listChannelOptouts(stopped.ownStationId)).find((row) => row.channelId === fixture.channel(81));
+  assert.equal(first.atMs, at, "时刻保留第一次");
+  // 用户在「渠道」页签点「开始算利润」：删掉这一行；只删给的渠道
+  assert.equal(await repository.removeChannelOptouts(stopped.ownStationId, [fixture.channel(81)]), 1);
+  assert.deepEqual((await repository.listChannelOptouts(stopped.ownStationId)).filter((row) => [fixture.channel(81), fixture.channel(82)].includes(row.channelId)).map((row) => row.channelId), [fixture.channel(82)]);
+  assert.equal(await repository.removeChannelOptouts(stopped.ownStationId, []), 0);
+  // 别的自营站点的同编号渠道不受影响
+  assert.deepEqual(await repository.listChannelOptouts(fixture.station("own-nobody")), []);
+});
+
 contract("applyKeyChangePlans: a plan whose only mismatch is `before` (a legal cutover) writes nothing; a cutover exactly at the open segment's start is allowed (zero-length old segment); concurrent identical plans write exactly one copy", async ({ repository, fixture }) => {
   const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(101), name: "P" }], initialRatio: 1 });
   const oldRef = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName };
@@ -2021,4 +2046,29 @@ contract("keyHeldUntil (L1): the latest end of a closed segment holding this key
   assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, fixture.token(999)), null, "没握过的 Key");
   assert.equal(await repository.keyHeldUntil("other-own", a.upstreamStationId, a.tokenId), null, "别的自营站点的不算");
   assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, a.tokenId, { sinceMs: end + 1 }), null, "sinceMs 以前结束的不算");
+});
+
+contract("createRule (K2c-1): a key whose segment in another binding closed earlier today — the new binding's floor is that segment's end (New API, revenue and cost both start there); a Sub2API new binding starts the next day (the day cannot be cut)", async ({ repository, fixture }) => {
+  const dayStart = Math.floor(Date.now() / 86400000) * 86400000; // 契约的时区是 UTC
+  const end = Math.max(Date.now() - 2000, dayStart + 2000), start = end - 1000;
+  const a = await fixture.createRule({ billingPolicy: "immediate", canonicalKey: `up:${fixture.tag}:h1`, channels: [{ channelId: fixture.channel(201), name: "A" }] });
+  const oldRef = { upstreamStationId: a.upstreamStationId, tokenId: a.tokenId, tokenName: a.tokenName };
+  const newRef = { upstreamStationId: a.upstreamStationId, tokenId: fixture.token(202), tokenName: "N" };
+  const applied = await repository.applyKeyChangePlans([{ ruleId: a.id, plan: { kind: "windowed", windowStart: start, windowEnd: end, windowKeys: [oldRef, newRef], before: [oldRef], after: [newRef], canonicalKey: `up:${fixture.tag}:h1n` } }]);
+  assert.deepEqual(applied, { conflict: false });
+  const nobody = await fixture.createRule({ billingPolicy: "immediate", tokenId: fixture.token(299), tokenName: "Z", canonicalKey: `up:${fixture.tag}:h0`, channels: [{ channelId: fixture.channel(209), name: "Z" }] });
+  assert.equal(nobody.accountingFloorMs, null, "没被别的绑定握过的 Key 没有下限");
+  const b = await fixture.createRule({ billingPolicy: "immediate", tokenId: oldRef.tokenId, tokenName: oldRef.tokenName, canonicalKey: `up:${fixture.tag}:h2`, channels: [{ channelId: fixture.channel(203), name: "B" }] });
+  assert.equal(b.accountingFloorMs, end, "新绑定从那条绑定放开这把 Key 的那一刻起算");
+});
+
+contract("createRule (K2c-1): the same on a Sub2API upstream — the new binding is not counted today and starts at the next day's 0:00", async ({ repository, fixture }) => {
+  const dayStart = Math.floor(Date.now() / 86400000) * 86400000;
+  const end = Math.max(Date.now() - 2000, dayStart + 2000), start = end - 1000;
+  const a = await fixture.createRule({ billingPolicy: "immediate", provider: "sub2api", canonicalKey: `up:${fixture.tag}:s1`, channels: [{ channelId: fixture.channel(211), name: "A" }] });
+  const oldRef = { upstreamStationId: a.upstreamStationId, tokenId: a.tokenId, tokenName: a.tokenName };
+  const newRef = { upstreamStationId: a.upstreamStationId, tokenId: fixture.token(212), tokenName: "N" };
+  await repository.applyKeyChangePlans([{ ruleId: a.id, plan: { kind: "windowed", windowStart: start, windowEnd: end, windowKeys: [oldRef, newRef], before: [oldRef], after: [newRef], canonicalKey: `up:${fixture.tag}:s1n` } }]);
+  const b = await fixture.createRule({ billingPolicy: "immediate", provider: "sub2api", tokenId: oldRef.tokenId, tokenName: oldRef.tokenName, canonicalKey: `up:${fixture.tag}:s2`, channels: [{ channelId: fixture.channel(213), name: "B" }] });
+  assert.equal(b.accountingFloorMs, dayStart + 86400000, "Sub2API 切不开一天中间：今天不算，第二天 0 点起整天算");
 });

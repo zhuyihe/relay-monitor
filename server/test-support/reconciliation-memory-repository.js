@@ -35,6 +35,7 @@ const TABLE_NAMES = {
   settlementState: "reconciliation_settlement_state",
   segmentKeys: "reconciliation_segment_keys",
   fixedCostDays: "reconciliation_fixed_cost_days",
+  optouts: "reconciliation_channel_optout",
 };
 
 // 与 db/pool.js 的建表语句保持一致。
@@ -86,6 +87,11 @@ const SCHEMA = {
     keys: { PRIMARY: ["station_id", "bill_date"] },
     notNull: ["station_id", "bill_date", "basis", "cost_cny"],
     varchar: { station_id: 32, basis: 16, note: 64 },
+  },
+  optouts: {
+    keys: { PRIMARY: ["own_station_id", "channel_id"] },
+    notNull: ["own_station_id", "channel_id", "created_at_ms"],
+    varchar: { own_station_id: 32 },
   },
   settlementState: {
     keys: { PRIMARY: ["rule_id", "bill_date"] },
@@ -151,9 +157,9 @@ export class MemoryReconciliationRepository {
   //   beforeCommit(tx) / afterCommit(tx)
   //   beforeCapabilityWrite(method, identity)  保存或删除账单能力前，可以抛错模拟写入失败
   // tx 是 { name, snapshots: [{ ruleId, snapshotKey, source }], archivedRuleIds }。
-  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], settlementState = [], segmentKeys = [], fixedCostDays = [], now = () => Date.now(), hooks = {} } = {}) {
+  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], settlementState = [], segmentKeys = [], optouts = [], fixedCostDays = [], now = () => Date.now(), hooks = {} } = {}) {
     this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts], capabilities: [...capabilities], ledger: [...ledger],
-      settlementState: [...settlementState], segmentKeys: [...segmentKeys], fixedCostDays: [...fixedCostDays] };
+      settlementState: [...settlementState], segmentKeys: [...segmentKeys], optouts: [...optouts], fixedCostDays: [...fixedCostDays] };
     this.now = now;
     this.hooks = hooks;
     // snapshotWrites / ratioWrites / channelStateWrites 按语句记录，包括之后被回滚的写入。
@@ -211,8 +217,14 @@ export class MemoryReconciliationRepository {
       const createdAt = this.#timestamp();
       // 同一天里更早解除的占着同一个渠道（或同一把 Key）的 New API 绑定：新绑定从那一刻起算（C3，同 MySQL 版）
       const archivedPeers = this.#plain("rules").filter((row) => row.archived_at != null).map((row) => ruleFromRow(fresh(row), this.#channelsOf(tx, row.id)));
+      // 这把 Key 今天早些时候被这个自营站点下别的绑定握过、那些段已经关掉了：新绑定从最晚的结束时刻起算（同 MySQL 版）
+      const ruleOwner = new Map(this.#plain("rules").map((row) => [row.id, row.own_station_id]));
+      const heldSegments = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && ruleOwner.get(segment.rule_id) === input.ownStationId
+        && this.#plain("segmentKeys").some((key) => key.segment_id === segment.id && key.upstream_station_id === input.upstreamStationId && Number(key.token_id) === Number(input.tokenId)));
+      const keyHeldUntilMs = heldSegments.length ? Math.max(...heldSegments.map((segment) => Number(segment.effective_to_ms))) : null;
       const accountingFloor = isScopedBillingPolicy(input.billingPolicy)
-        ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels }, archivedPeers) : null;
+        ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels,
+          keyHeldUntilMs, sub2: input.provider === "sub2api" }, archivedPeers) : null;
       this.#insert(tx, "rules", {
         id, accounting_floor_ms: accountingFloor, upstream_station_id: input.upstreamStationId ?? null, own_station_id: input.ownStationId ?? null, token_id: bigint(input.tokenId),
         token_name: input.tokenName ?? null, fixed_group: input.fixedGroup ?? null, timezone: input.timezone ?? null,
@@ -599,7 +611,36 @@ export class MemoryReconciliationRepository {
     return { conflict: false };
   }
 
-  async archiveRule(id, { now = this.now() } = {}) {
+  // 对应 MySQL 版：「用户停了」的渠道
+  async listChannelOptouts(ownStationId = null) {
+    return this.#plain("optouts").filter((row) => ownStationId == null || sameText(row.own_station_id, ownStationId))
+      .map((row) => ({ ownStationId: row.own_station_id, channelId: Number(row.channel_id), atMs: Number(row.created_at_ms) }))
+      .sort((a, b) => String(a.ownStationId).localeCompare(String(b.ownStationId)) || a.channelId - b.channelId);
+  }
+
+  async addChannelOptouts(ownStationId, channelIds, atMs = this.now()) {
+    const ids = [...new Set((channelIds || []).map(Number).filter((id) => Number.isSafeInteger(id)))];
+    return this.#transaction("addChannelOptouts", async (tx) => {
+      let added = 0;
+      for (const id of ids) {
+        if (this.#rows("optouts", tx).some(({ row }) => sameText(row.own_station_id, ownStationId) && Number(row.channel_id) === id)) continue;
+        this.#insert(tx, "optouts", { own_station_id: ownStationId, channel_id: bigint(id), created_at_ms: bigint(atMs) });
+        added += 1;
+      }
+      return added;
+    });
+  }
+
+  async removeChannelOptouts(ownStationId, channelIds) {
+    const ids = new Set((channelIds || []).map(Number).filter((id) => Number.isSafeInteger(id)));
+    return this.#transaction("removeChannelOptouts", async (tx) => {
+      const entries = this.#rows("optouts", tx).filter(({ row }) => sameText(row.own_station_id, ownStationId) && ids.has(Number(row.channel_id)));
+      this.#delete(tx, "optouts", entries);
+      return entries.length;
+    });
+  }
+
+  async archiveRule(id, { now = this.now(), optout = false } = {}) {
     return this.#transaction("archiveRule", async (tx) => {
       await this.#lock(tx, `rule:${id}`);
       const entry = this.#ruleEntry(tx, id);
@@ -607,6 +648,11 @@ export class MemoryReconciliationRepository {
       if (affected) {
         this.#update(tx, "channels", this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, id)), { active_channel_key: null });
         this.#refreshSegmentKeys(tx, id);
+        if (optout) for (const { row } of this.#rows("channels", tx).filter(({ row: channel }) => sameText(channel.rule_id, id))) {
+          if (!this.#rows("optouts", tx).some(({ row: existing }) => sameText(existing.own_station_id, entry.row.own_station_id) && Number(existing.channel_id) === Number(row.channel_id))) {
+            this.#insert(tx, "optouts", { own_station_id: entry.row.own_station_id, channel_id: bigint(row.channel_id), created_at_ms: bigint(now) });
+          }
+        }
         tx.record.archivedRuleIds.push(id);
       }
       return affected > 0;
