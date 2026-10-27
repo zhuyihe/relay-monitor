@@ -80,9 +80,10 @@ gh workflow run perf.yml -R zhuyihe/relay-monitor -f base=<SHA 或分支> -f hea
 - 不给 `pr`：`base` 空 = main，`head` 空 = 触发时选的分支。
 - `parity_days`：对拍天数，默认 14；`history_days`：余额历史天数，默认 90；`fake_test_logs`：勾上就给假站点带 `FAKE_TEST_LOGS=1`（自营站点多出渠道测试日志），默认不勾。
 - `bindings`：绑定条数，空 = 80；`expected_cost`：勾上 = 量后台前打开「算应付成本」（整站读）；不勾 = 不改开关，用产品默认（V1-a 关；V1-b 起默认开），不等于「关」。见下面「整站读场景」。
+- `steady_delay_sec`：量完接口以后先等这么多秒再开稳态，默认 0；`steady_sec`：稳态窗口秒数（`BG_SEC`），默认 185。见下面「量没人看的时候」。
 - `key_agent`：勾上 = 假站点装渠道 Key 读取服务（照真协议：指纹、打码、304、`X-Agent-Stale`）、自营站点配上地址和令牌；不勾 = 和现在一样，没有这条路。见下面「K2a/K2b 场景」。
 - 测量脚本用触发时选的分支里的 `tests/perf`，不用被测版本里的。
-- 用时约 22 分钟：两版各装依赖、打包约 40 秒，建夹具约 5 分钟，每次测量约 6.5 分钟，对拍（14 天）约 1 分钟。余额历史用默认的 90 天就在 60 分钟的上限里，不用缩。
+- 用时约 22 分钟：两版各装依赖、打包约 40 秒，建夹具约 5 分钟，每次测量约 6.5 分钟，对拍（14 天）约 1 分钟。余额历史用默认的 90 天就在上限里，不用缩。上限是 90 分钟：80 条绑定加上 `steady_delay_sec=660 steady_sec=600` 每次测量多等约 18 分钟、两次约 36 分钟。
 
 ## 整站读场景（小夹具，「算应付成本」开着）
 
@@ -93,8 +94,8 @@ gh workflow run perf.yml -R zhuyihe/relay-monitor --ref main -f pr=<号> -f bind
 ```
 
 - `bindings=5`（`PERF_BINDINGS=5`）：只接入前 5 条绑定、它们所在的 3 个上游和 2 个只用 Key 的上游。数据模型不变：自营站点照旧 300 个渠道、每天 10 万条日志（加上测试日志），没接入的渠道照旧有消费，整站读要读的量和大夹具一样。不设时和原来逐字一样。
-- `expected_cost=true`（`PERF_EXPECTED_COST=on`）：后台测量开始前 `PUT /api/settings {expectedCost: true}`，清掉 `own_log_cursor`、`own_log_buckets`（base、head 都从「刚打开」起），等整站读真的写进一个窗口（最多 240 秒；刚量完接口那一阵的请求还占着 180 秒额度）再开稳态窗口。不勾时不改开关，用产品默认（V1-a 关；V1-b 起默认开）：在 V1-b 以后的版本上不勾，整站读照样开着，也不清进度、不等。
-- 要量整站读追得多快，可以把稳态窗口放长（本机 `BG_SEC=600`；CI 用默认 185 秒）。
+- `expected_cost=true`（`PERF_EXPECTED_COST=on`）：后台测量开始前 `PUT /api/settings {expectedCost: true}`，清掉 `own_log_cursor`、`own_log_buckets`（base、head 都从「刚打开」起），等整站读真的写进一个窗口、并且从量完接口起满 185 秒（最多等 240 秒）再开稳态窗口。刚量完接口那一阵的请求还占着 180 秒额度：有保底的版本靠保底就能写进一个小窗口，只看「进度动了」的话稳态头两轮只读到保底的 2 页，追平用时会被推算长好几倍，所以还要等满 185 秒。不勾时不改开关，用产品默认（V1-a 关；V1-b 起默认开）：在 V1-b 以后的版本上不勾，整站读照样开着，也不清进度、不等。
+- 要量整站读追得多快，可以把稳态窗口放长（`steady_sec=600`，本机 `BG_SEC=600`）。
 
 三样数在 `compare.md`（Summary 里）「整站读」一节、各自的 `summary.md`，原始数在 `background.json` 的 `steady.ingest`：
 
@@ -114,6 +115,14 @@ gh workflow run perf.yml -R zhuyihe/relay-monitor -f pr=<号> -f key_agent=true
 - 协议照 k-plan 第二节：`GET /key-agent/keys` 要带 `Authorization: Bearer <派生的请求令牌>`；没变时带 `If-None-Match` 回 304；每个渠道一个指纹 + 一个打码（单数号上游的 Key 目录给打码、双数号给完整 Key，两条认法都量得到）；`/__ctl?key_agent_down=1` 模拟读取服务读库失败，照协议沿用上一份成功结果、带 `X-Agent-Stale: 1`（CI 默认不触发，本机调脚本用）。
 - 每 10 分钟随机换 2～3 个渠道现在用的 Key（只换走 New API 整号账号的渠道：候选只收这一类，走只用 Key 的上游、Sub2API 的渠道换了也看不出差，不浪费一次随机）。CI 默认的稳态窗口（185 秒）比 10 分钟短，量到的多半是「没变、304」那条路；想量「换了 Key 以后重新认一遍」有多贵，本机把窗口放长（`BG_SEC=1200` 以上）或用 `/__ctl?key_agent_rotate=1` 手动触发。
 - 请求数在 `compare.md`、`summary.md` 的「假站点请求按路由」里自动出现（`key-agent:/keys`），和「整站读」一样走已有的通用对比，没有另写一节。
+
+## 量「没人看」的时候（steady_delay_sec、steady_sec）
+
+控制台在最后一次页面请求（`GET /api/reconciliation?preset=today` 这类）过去 10 分钟以后才把「今天」放慢。接口测量正好会发这些请求，稳态又紧接着开，默认量到的全是「有人看」。
+
+- 量「没人看」（放慢以后）：`-f steady_delay_sec=660 -f steady_sec=600`。660 = 10 分钟空闲 + 1 分钟余量；放慢以后每个渠道约 5 分钟才问一次，任意 180 秒要么碰上一整批、要么一个没有，185 秒的稳态不准，所以窗口放到 600 秒。
+- 等待从量完接口那一刻算起；和整站读场景的 185 秒取较大的那个，不叠加。实际等了多久写在 compare、summary 里（「接口量完以后等了 N 秒才开稳态」，base、head 各写各的），原始数在 `background.json` 的 `steadyDelay`。
+- 「自营站点全部」和「整站读」多一行「每 300 秒平均」（窗口总数折成 300 秒），稳态不足 300 秒时写「不适用」。
 
 ## 结果怎么看
 
