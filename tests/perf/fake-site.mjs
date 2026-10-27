@@ -62,7 +62,7 @@ function rotateKeyAgentChannels() {
   }
 }
 // 换 Key 的间隔：默认 600 秒（真实读取服务的节奏）；CI 的稳态窗口只有 185 秒，量「换了 Key 以后重新认、写段」那一段要调小（比如 60）
-const KEY_AGENT_ROTATE_SEC = Math.max(1, Math.floor(num(process.env.PERF_KEY_AGENT_ROTATE_SEC, 600)));
+const KEY_AGENT_ROTATE_SEC = Math.max(1, Math.floor(num(process.env.PERF_KEY_AGENT_ROTATE_SEC || undefined, 600)));
 if (KEY_AGENT_ON) setInterval(rotateKeyAgentChannels, KEY_AGENT_ROTATE_SEC * 1000).unref?.();
 
 function keyAgentChannelKeys(c) {
