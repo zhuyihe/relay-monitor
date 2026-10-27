@@ -107,10 +107,15 @@ export function rangeCaption(page: ProfitPageResponse, ctx: Ctx) {
 
 // ---- 轮询 ----
 // 范围里含今天才轮询（不带 observe）：「今天」和终点晚于今天 0 点的自定义范围 30 秒一次；「近 7 天」「本月」也含今天，和旧页面一样 5 分钟一次
-// （不比旧页面多发请求）；昨天、不含今天的自定义范围的日子都已固定，不轮询（审核 #128）。tz 是接口给的业务时区，没读到页面数据时用默认
+// （不比旧页面多发请求）；昨天、不含今天的自定义范围的日子都已固定，不轮询（审核 #128）。
+// 例外：不管选的哪个范围，当前结果里还有「还在读取」的日子（零点以后正在结账的那几个小时）就 5 分钟重读一次，没有了就停（审核 2 #128）。tz 是接口给的业务时区，没读到页面数据时用默认
 export const LIVE_POLL_MS = 30000;
 export const LIVE_POLL_LONG_MS = 300000;
-export function livePollMs(window: { preset: string; startMs?: number; endMs?: number }, now: number, tz?: string | null): number | null {
+export function livePollMs(window: { preset: string; startMs?: number; endMs?: number }, now: number, tz?: string | null, reading = false): number | null {
+  const base = livePollBase(window, now, tz);
+  return base ?? (reading ? LIVE_POLL_LONG_MS : null);
+}
+function livePollBase(window: { preset: string; startMs?: number; endMs?: number }, now: number, tz?: string | null): number | null {
   if (window.preset === "today") return LIVE_POLL_MS;
   if (window.preset === "7d" || window.preset === "month") return LIVE_POLL_LONG_MS;
   if (window.preset === "custom" && Number.isFinite(window.endMs)) return (window.endMs as number) > dayStartInTz(dayKeyInTz(now, tz || undefined), tz || undefined) ? LIVE_POLL_MS : null;

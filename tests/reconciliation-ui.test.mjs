@@ -4253,3 +4253,36 @@ test("重新检查（R2）：点了才读一次自营站点的设置，读完提
   for (let i = 0; i < 50 && profitReads.length === before; i += 1) await page.waitForTimeout(100);
   assert.equal(profitReads.length, before + 1, "点完重读整页");
 });
+
+test("昨天里有「还在读取」的日子：5 分钟重读一次（只读 POST /profit，不带 force），读完变已固定就不再读（审核 2 #128）", async (t) => {
+  let yesterdayReads = 0, skewMs = 0;
+  const { page, profitReads } = await openDailyPage(t, { clock: true, pageOf: (body) => {
+    if (body.preset !== "yesterday") return { ...profitPage(todayRows(), { preset: "today" }), asOf: new Date(Date.now() + skewMs).toISOString() };
+    yesterdayReads += 1;
+    const base = profitPage(yesterdayRows(), { preset: "yesterday" });
+    return { ...base, asOf: new Date(Date.now() + skewMs).toISOString(), dayCounts: yesterdayReads === 1 ? { fixed: 0, reading: 1, today: 0 } : { fixed: 1, reading: 0, today: 0 } };
+  } });
+  const advance = async (ms) => { skewMs += ms; await page.clock.fastForward(ms); };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
+  await pickPreset(page, PROFIT_COPY.presets.yesterday); await page.locator(`.jy-freshness[title="数据每 5 分钟自动刷新"]`).waitFor();
+  const before = profitReads.length;
+  assert.deepEqual(profitReads.at(-1), { preset: "yesterday" });
+  await advance(290000); await settle(); assert.equal(profitReads.length, before, "5 分钟以前不读");
+  await advance(20000); await settle(); assert.equal(profitReads.length, before + 1, "5 分钟到了重读一次");
+  assert.deepEqual(profitReads.at(-1), { preset: "yesterday" }, "不带 force、不带 observe");
+  await page.locator(`.jy-freshness[title="当前时间范围不自动刷新，可点右侧刷新"]`).waitFor();
+  await advance(600000); await settle(); assert.equal(profitReads.length, before + 1, "已固定以后不再读");
+});
+
+test("手机 320：一个渠道一张卡片，点开能看计算明细，页面不横向溢出", async (t) => {
+  const { page } = await openDailyPage(t, { viewport: { width: 320, height: 800 } });
+  assert.equal(await page.locator(".jy-profit-table").count(), 0);
+  const card = cardOf(page, "Rule A"); await card.waitFor();
+  await page.locator(".jy-profit-summary--mobile").waitFor();
+  await card.locator(".jy-profit-card__top").click();
+  await card.getByRole("button", { name: PROFIT_COPY.expanded.seeDetailShort, exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor();
+  assert.ok((await page.locator(".ant-drawer-content-wrapper").filter({ has: drawer }).boundingBox()).width >= 319);
+  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "320px document root overflows horizontally");
+});

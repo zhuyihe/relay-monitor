@@ -278,6 +278,9 @@ test("轮询判定：范围里含今天才轮询——「今天」、含今天�
   assert.equal(livePollMs({ preset: "custom", startMs: dayStartInTz(D("10-20"), TZ), endMs: todayStart - 1 }, NOW, TZ), null);
   assert.equal(livePollMs({ preset: "custom" }, NOW, TZ), null, "自定义没给终点：不轮询");
   assert.equal(livePollMs({ preset: "yesterday" }, NOW, TZ), null, "昨天已固定");
+  assert.equal(livePollMs({ preset: "yesterday" }, NOW, TZ, true), LIVE_POLL_LONG_MS, "昨天还有在读取的日子：5 分钟一次");
+  assert.equal(livePollMs({ preset: "custom", startMs: dayStartInTz(D("10-20"), TZ), endMs: todayStart }, NOW, TZ, true), LIVE_POLL_LONG_MS, "不含今天的自定义也一样");
+  assert.equal(livePollMs({ preset: "today" }, NOW, TZ, true), LIVE_POLL_MS, "含今天的照旧 30 秒");
   for (const preset of ["7d", "month"]) assert.equal(livePollMs({ preset }, NOW, TZ), LIVE_POLL_LONG_MS, `${preset} 含今天：和旧页面一样 5 分钟一次`);
   assert.equal(LIVE_POLL_LONG_MS, 300000);
 });
