@@ -545,7 +545,7 @@ test("identifyChannels（#142 低 6）：候选是 Sub2API（地址对上）只�
 });
 
 // 审核 #133 第 2 轮 M1：readAt 是读取服务那台机器的时钟，不能照单全收
-test("identifyChannelsCached（M1）：读取服务给的 readAt 在 [现在 − 15 分钟, 现在 + 1 分钟] 里才采用（偏快一点的夹到现在）；偏快很多、偏慢很多都丢掉，改用控制台拿到快照的时刻，a 也不会被卡在将来", async (t) => {
+test("identifyChannelsCached（M1）：读取服务给的 readAt 在 [现在 − 15 分钟, 现在 + 1 分钟] 里才采用（偏快一点的夹到现在）；偏快很多、偏慢很多都丢掉：b 用控制台的时刻，a 这一轮不推进", async (t) => {
   const real = Date.now();
   t.mock.method(console, "warn", () => {});
   const ask = async (readAt) => {
@@ -559,10 +559,11 @@ test("identifyChannelsCached（M1）：读取服务给的 readAt 在 [现在 −
   assert.ok(slightlyAhead.readAtMs <= Date.now() && slightlyAhead.readAtMs >= real, "偏快一点的夹到现在，不会比控制台还晚");
   const farAhead = await ask(real + 60 * 60_000); // 那台机器的钟快了一小时
   assert.equal(farAhead.readAtMs, undefined);
-  assert.ok(farAhead.confirmedAtMs <= Date.now(), "不采用，a 不会被卡在将来");
+  assert.equal(farAhead.confirmedAtMs, null, "钟快了一小时：不采用，这一轮不推进 a（a 不会被卡在将来，也不会比真正换 Key 的时刻晚）");
+  assert.ok(farAhead.fetchedAtMs <= Date.now(), "b 用控制台拿到快照的时刻");
   const farBehind = await ask(real - 60 * 60_000);
   assert.equal(farBehind.readAtMs, undefined);
-  assert.ok(farBehind.confirmedAtMs > real - 10 * 60_000, "慢了一小时也不采用，用控制台的时刻往前推一个缓存间隔");
+  assert.equal(farBehind.confirmedAtMs, null, "慢了一小时也一样，a 留在上一次读成功的时刻");
 });
 
 test("identifyChannelsCached（#143 低-6）：不传 fresh 时 4 分钟内沿用缓存（不请求读取服务）；传了 fresh 就真的再请求一次读取服务（etag 照用）", async (t) => {
