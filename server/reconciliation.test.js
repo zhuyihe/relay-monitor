@@ -11176,8 +11176,7 @@ function rgUsageSec(timeline, tokenId, fromMs, toMs) {
 const rgHourly = (fromIso, toIso) => { const out = []; for (let x = rgT(fromIso); x <= rgT(toIso); x += 3600000) out.push(x); return out; };
 const RG_DAYS = ["2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15"];
 const RG_ROUNDS = rgHourly("2026-10-11T01:00:00Z", "2026-10-16T02:00:00Z");
-const rgRoundAt = (iso) => { const index = RG_ROUNDS.indexOf(rgT(iso)); assert.ok(index >= 0, `没有这一轮：${iso}`); return index; };
-async function regroupTimeline(t, { rules = [], channelsByRule, timeline, sub2 = false, accountUse = "only_mine", hooks = {}, rounds = RG_ROUNDS }) {
+async function regroupTimeline(t, { rules = [], channelsByRule, timeline, sub2 = false, staleUntil = null, hooks = {}, rounds = RG_ROUNDS }) {
   let now = rounds[0];
   t.mock.method(Date, "now", () => now);
   const tokenIds = new Set([9, ...rules.map((_, i) => 10 + i)]);
@@ -11189,7 +11188,7 @@ async function regroupTimeline(t, { rules = [], channelsByRule, timeline, sub2 =
   const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: rules, channelsByRule, tokenKeyOf: (id) => RG_KEYS[id], extraTokens: tokens, sub2api: fakeSub2,
     usageOf: (name, startSec, endSec) => 100 * rgUsageSec(timeline, idOfName[name], startSec * 1000, (endSec + 1) * 1000),
     keyAgent: { secret: KEY_AGENT_SECRET, channels: () => Object.keys(timeline).map((channel) => ({ id: Number(channel), baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(RG_KEYS[rgTokenAt(timeline, channel, now)]), f: "unused" }] })) } });
-  f.stations[0].accountUse = accountUse;
+  f.stations[0].accountUse = "only_mine";
   if (sub2) Object.assign(f.stations[0], { type: "sub2api", accessToken: "jwt" });
   const inject = () => {
     if (!sub2) { f.rt._keyAgentIdentifyCache = null; return; }
@@ -11203,7 +11202,8 @@ async function regroupTimeline(t, { rules = [], channelsByRule, timeline, sub2 =
     await f.module.refreshDue(now);
     if (i === 0) {
       const namespaceKey = (await f.repository.getRule("rr_live")).ownSource.namespaceKey;
-      f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }), getSourceCatalogue: () => ({ ownSource: { namespaceKey }, stale: false,
+      // 渠道目录没确认（stale）时不重新分组、原样留着 KEY_GROUP_CHANGED：用它造「推迟了几轮」
+      f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }), getSourceCatalogue: () => ({ ownSource: { namespaceKey }, stale: staleUntil != null && now < rgT(staleUntil),
         channels: Object.keys(timeline).map((id) => ({ id: Number(id), name: `渠道 ${id}`, revision: `rev-${id}`, missing: false })) }) };
     }
   }
@@ -11228,7 +11228,6 @@ function expectRegroupDays(s, blocked = [], label = "") {
     } else assert.equal(s.costOn(day), s.truthOn(day), `${label}${day}：所有绑定当天上游成本之和 = 各把 Key 当天用量之和`);
   }
 }
-const rgSetUse = (iso, value) => ({ [rgRoundAt(iso)]: ({ f }) => { f.stations[0].accountUse = value; } });
 const RG_SHAPES = {
   // H2：Sub2API 新绑定第一段关在 b：同一天再换 Key、再重新分组都接得上
   "合组到已有的 Key 以后同一天再分组": { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, timeline: { 1: [[0, 9]], 2: [[0, 10], [rgT("2026-10-11T20:30:00Z"), 9], [rgT("2026-10-12T03:30:00Z"), 21]] } },
@@ -11252,12 +11251,12 @@ for (const sub2 of [false, true]) {
     assert.ok(s.rules.some((rule) => rule.archivedAt), "分组本身照常做了：以后的日子接着算");
   });
   test(`K2c 重新分组：推迟期间渠道又换了 Key（K20 → K21），这一轮按最后一把重新分组——推迟那几天固定成「—」加原因（${sub2 ? "Sub2API" : "New API"}）`, async (t) => {
-    const s = await regroupTimeline(t, { channelsByRule: { rr_live: [1, 2] }, sub2, accountUse: "elsewhere", hooks: rgSetUse("2026-10-12T06:00:00Z", "only_mine"),
+    const s = await regroupTimeline(t, { channelsByRule: { rr_live: [1, 2] }, sub2, staleUntil: "2026-10-12T06:00:00Z",
       timeline: { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-11T20:30:00Z"), 20], [rgT("2026-10-12T02:30:00Z"), 21]] } });
     expectRegroupDays(s, ["2026-10-12"]);
   });
-  test(`K2c 重新分组：推迟了几轮、这期间一直是同一件事（等别处回答）——钱已经算全了，不写冲突期，每天都对得上（${sub2 ? "Sub2API" : "New API"}）`, async (t) => {
-    const s = await regroupTimeline(t, { channelsByRule: { rr_live: [1, 2] }, sub2, accountUse: "elsewhere", hooks: rgSetUse("2026-10-12T03:00:00Z", "only_mine"),
+  test(`K2c 重新分组：推迟了几轮、这期间一直是同一件事（等渠道目录确认）——钱已经算全了，不写冲突期，每天都对得上（${sub2 ? "Sub2API" : "New API"}）`, async (t) => {
+    const s = await regroupTimeline(t, { channelsByRule: { rr_live: [1, 2] }, sub2, staleUntil: "2026-10-12T03:00:00Z",
       timeline: { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-11T20:30:00Z"), 20]] } });
     expectRegroupDays(s);
     assert.ok(s.rules.some((rule) => rule.archivedAt), "分组做了");
