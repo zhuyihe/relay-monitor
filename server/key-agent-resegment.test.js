@@ -1,6 +1,6 @@
 // K2b 分段决策的测试（先于算法写，覆盖 design/ux/binding-flow.md §2「例外三」、§3「换 Key、换倍率时」里的每个例子）：
 // [a,b) 窗口两把 Key 都算、Key 在两个渠道之间挪、Sub2API 同一天挪的逐条拆分、例外三跨轮状态的每一种转换，
-// 外加「没换 Key 时结果逐字不变」。审核 2 先看这些用例对不对得上 k-plan，再审算法。
+// 外加「没换 Key 时结果逐字不变」。
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -39,7 +39,7 @@ test("planKeyChangeSegments：New API 逐条用量能精确定出新 Key 第一�
   assert.equal(plan.windowKeys, undefined, "精确切点时不该再有过渡段");
 });
 
-// ---------- lastSeenAt（a）丢了的兜底：只能往前退，不能往后挪（总指挥 10-26 定，重启场景） ----------
+// ---------- lastSeenAt（a）丢了的兜底：只能往前退，不能往后挪（重启场景） ----------
 
 test("safeLastSeenAt：有持久化的「读取服务上一次读成功的时刻」就用它，旧一点也没关系", () => {
   assert.equal(safeLastSeenAt({ keyAgentLastSuccessAtMs: T("10:00"), segmentEffectiveFrom: T("00:00") }), T("10:00"));
@@ -224,7 +224,7 @@ test("detectGroupMerges：各握各的 Key，没有冲突", () => {
   assert.deepEqual(detectGroupMerges([{ bindingId: "A", ref: ref(9) }, { bindingId: "B", ref: ref(5) }]), []);
 });
 
-// ---------- 多 Key 段经过切开、复制以后成本不变（审核 1 在 #114 发现的丢 keys 问题，K2b 以后真的会用上多 Key 段） ----------
+// ---------- 多 Key 段经过切开、复制以后成本不变（之前发现的丢 keys 问题，K2b 以后真的会用上多 Key 段） ----------
 
 test("copySegment：多 Key 段复制、改字段以后，keys 原样带过去，不会像 `{...segment}` 那样丢掉（审核 #114：真值 2592 算成了 1684.8 就是因为丢了这个属性）", async () => {
   const { attachSegmentKeys, copySegment } = await import("./reconciliation-repository.js");
@@ -240,8 +240,50 @@ test("copySegment：多 Key 段复制、改字段以后，keys 原样带过去�
   const dayCopy = copySegment(segment, { effectiveFrom: T("00:00"), effectiveTo: T("24:00") });
   assert.equal(dayCopy.keys.length, 2, "复制以后两把 Key 还在");
   assert.deepEqual(dayCopy.keys.map((k) => k.tokenId), [9, 10]);
-  // 对照：`{...segment}` 的老办法会把不可枚举的 keys 丢掉，这是审核 1 发现的真实 bug 的根因
+  // 对照：`{...segment}` 的老办法会把不可枚举的 keys 丢掉，这是之前发现的真实 bug 的根因
   assert.equal({ ...segment }.keys, undefined, "展开运算符本身确实会丢（这正是为什么要用 copySegment，不是这个函数的 bug）");
   // JSON 序列化不受影响（keys 本来就不该进 JSON，这是 K1c 定的规矩，复制以后也一样不进）
   assert.equal(JSON.stringify(dayCopy).includes("oai"), false);
+});
+
+test("copySegment：overrides 里给了 keys 就生效（换成别的 Key 列表），而且不进 JSON、不可枚举；没给就和原段一样；原段不被改", async () => {
+  const { attachSegmentKeys, copySegment } = await import("./reconciliation-repository.js");
+  const [segment] = attachSegmentKeys([{ id: "seg1", effectiveFrom: 1, effectiveTo: 2 }], [{ segment_id: "seg1", upstream_station_id: "up1", token_id: 9, token_name: "secret-name", match_source: "agent" }]);
+  const replacement = [{ upstreamStationId: "up1", tokenId: 9 }, { upstreamStationId: "up1", tokenId: 20, tokenName: "other-secret" }];
+  const swapped = copySegment(segment, { keys: replacement });
+  assert.deepEqual(swapped.keys.map((key) => key.tokenId), [9, 20], "传了 keys 就生效");
+  assert.equal(Object.keys(swapped).includes("keys"), false, "不可枚举");
+  assert.equal(JSON.stringify(swapped).includes("other-secret"), false, "不进 JSON");
+  assert.deepEqual(segment.keys.map((key) => key.tokenId), [9], "原段不变");
+  const plain = copySegment(segment, { id: "seg1~1" });
+  assert.deepEqual(plain.keys.map((key) => key.tokenId), [9], "没传就和原段一样");
+  assert.equal(plain.id, "seg1~1");
+});
+
+// ---------- 每把 Key 恰好算一次：新 Key 之前被别的绑定握过，窗口里它从那条绑定的段结束起算 ----------
+test("planKeyChangeSegments：新 Key 有上一个持有者（段在 floor 结束）——窗口起点不早于 floor，旧 Key 仍在开着那段里；floor 早于 a 不起作用；floor 不早于 b 就干净切一刀", () => {
+  const oldRef = { upstreamStationId: "u", tokenId: 10 }, newRef = { upstreamStationId: "u", tokenId: 9 };
+  assert.deepEqual(planKeyChangeSegments({ lastSeenAt: 100, observedAt: 500, oldRef, newRef, newKeyFloor: 300 }),
+    { kind: "windowed", windowStart: 300, windowEnd: 500, windowKeys: [oldRef, newRef], before: [oldRef], after: [newRef] });
+  assert.equal(planKeyChangeSegments({ lastSeenAt: 100, observedAt: 500, oldRef, newRef, newKeyFloor: 50 }).windowStart, 100);
+  assert.deepEqual(planKeyChangeSegments({ lastSeenAt: 100, observedAt: 500, oldRef, newRef, newKeyFloor: 500 }), { kind: "precise", cutoverAt: 500, before: [oldRef], after: [newRef] });
+});
+
+test("planSegmentChanges：newKeyFloorByBinding 按绑定给，没给的绑定照旧", () => {
+  const a = { upstreamStationId: "u", tokenId: 9 }, b = { upstreamStationId: "u", tokenId: 10 }, c = { upstreamStationId: "u", tokenId: 12 };
+  const plans = planSegmentChanges({ bindings: [{ id: "A", before: a, after: c }, { id: "B", before: b, after: a }], lastSeenAt: 0, observedAt: 1000, newKeyFloorByBinding: { B: 400 } });
+  assert.deepEqual(plans.map((plan) => [plan.bindingId, plan.kind === "windowed" ? plan.windowStart : plan.kind]), [["A", 0], ["B", "moved"]], "B 的 K9 同批里 A 握着，是挪过来的，按 b 切；floor 只管窗口");
+  const solo = planSegmentChanges({ bindings: [{ id: "B", before: b, after: a }], lastSeenAt: 0, observedAt: 1000, newKeyFloorByBinding: { B: 400 } });
+  assert.deepEqual(solo.map((plan) => [plan.bindingId, plan.windowStart]), [["B", 400]]);
+});
+
+test("planKeyChangeSegments / planMovedKeySegments（F4）：b 不早于 a、不早于上一个持有者段的结尾——读取服务的钟比控制台慢时，干净切也不会切在它们前面", () => {
+  // a 在 b 后面（钟差）：不开负长度的窗口，切在 a
+  assert.deepEqual(planKeyChangeSegments({ lastSeenAt: T("10:09"), observedAt: T("10:00"), oldRef: ref(1), newRef: ref(2) }), { kind: "precise", cutoverAt: T("10:09"), before: [ref(1)], after: [ref(2)] });
+  // b 早于上一个持有者段的结尾：切在那个结尾
+  assert.equal(planKeyChangeSegments({ lastSeenAt: T("09:00"), observedAt: T("10:00"), oldRef: ref(1), newRef: ref(2), newKeyFloor: T("10:06") }).cutoverAt, T("10:06"));
+  assert.equal(planMovedKeySegments({ observedAt: T("10:00"), newRef: ref(2), newKeyFloor: T("10:06") }).cutoverAt, T("10:06"), "挪过来的也一样");
+  assert.equal(planMovedKeySegments({ observedAt: T("10:00"), newRef: ref(2) }).cutoverAt, T("10:00"), "没有下限时不变");
+  const plans = planSegmentChanges({ bindings: [{ id: "a", before: ref(1), after: ref(2) }, { id: "b", before: ref(2), after: ref(1) }], lastSeenAt: T("09:00"), observedAt: T("10:00"), newKeyFloorByBinding: { a: T("10:06") } });
+  assert.deepEqual(plans.map((plan) => [plan.bindingId, plan.cutoverAt]), [["a", T("10:06")], ["b", T("10:00")]]);
 });

@@ -9,7 +9,7 @@
 const keyRefId = (ref) => `${ref.upstreamStationId}:${ref.tokenId}`;
 const sameKeyRef = (a, b) => !!a && !!b && keyRefId(a) === keyRefId(b);
 
-// lastSeenAt（a）丢了的时候（比如控制台重启）兜底用哪个时刻（总指挥 10-26 定）：真正换 Key 的那一刻 t 落在
+// lastSeenAt（a）丢了的时候（比如控制台重启）兜底用哪个时刻：真正换 Key 的那一刻 t 落在
 // a、b 之间；a 退得越早越安全——只要 a ≤ t 就不漏钱也不重复算（新 Key 换上以前没有用量，老 Key 本来就是这条绑定
 // 自己的，宽出来的那一段，两把 Key 多读到的都是 0，不是多算）；a 只能往前退，不能往后挪，往后挪会把 [t, b) 那段
 // 新 Key 的花费漏掉（旧段只有旧 Key、新段从 b 起，两边都不算）。
@@ -25,18 +25,25 @@ export function safeLastSeenAt({ keyAgentLastSuccessAtMs, segmentEffectiveFrom }
 // 定不出就开一个 [lastSeenAt, observedAt) 的过渡段，两把 Key 的账单都读——这段时间只有这一个渠道在用这两把 Key，
 // 两把都算是它的钱，不是重复算（design/ux/binding-flow.md §1 第 3 步「系统做了什么」：「这一分钟单独成一段，
 // 段里两把 Key 的账单都读，所以换 Key 那一分钟里花的钱算进来了」；§3 说的是过渡段多长时间该怎么标，不是要不要开）
-export function planKeyChangeSegments({ lastSeenAt, observedAt, oldRef, newRef, preciseAt = null }) {
+// newKeyFloor：新 Key 在这条绑定里最早从什么时候算（每把 Key 恰好算一次）：这把 Key 之前被别的绑定握过、那条绑定的段到这个时刻才结束，
+// 新 Key 不能比它早进这条绑定的窗口（否则 [a, 结束) 里这把 Key 在两条绑定里各算了一次）；全新的 Key 没有上一个持有者，不给。
+// 窗口只管新 Key 的起点往后挪：旧 Key 还在这条绑定开着的那段里，挪到窗口起点之前的部分照旧算给这条绑定，不漏
+export function planKeyChangeSegments({ lastSeenAt, observedAt, oldRef, newRef, preciseAt = null, newKeyFloor = null }) {
   if (preciseAt != null) return { kind: "precise", cutoverAt: preciseAt, before: oldRef ? [oldRef] : [], after: [newRef] };
   if (!oldRef) return { kind: "precise", cutoverAt: observedAt, before: [], after: [newRef] }; // 原来没有 Key（新渠道、没有用量），没有旧 Key 可以一起算
-  return { kind: "windowed", windowStart: lastSeenAt, windowEnd: observedAt, windowKeys: [oldRef, newRef], before: [oldRef], after: [newRef] };
+  const windowStart = Math.max(lastSeenAt, newKeyFloor ?? -Infinity);
+  // 起点已经不早于 b：新 Key 从 b 起算，没有过渡窗口可开，干净切一刀
+  // b 不早于 a、不早于上一个持有者段的结尾（两台机器的钟差 ≥ 几分钟时 b 可能比它们还早：干净切会少算或多算，审核 #133 第 2 轮 F4）
+  if (windowStart >= observedAt) return { kind: "precise", cutoverAt: windowStart, before: [oldRef], after: [newRef] };
+  return { kind: "windowed", windowStart, windowEnd: observedAt, windowKeys: [oldRef, newRef], before: [oldRef], after: [newRef] };
 }
 
 // newRef 这把 Key 是从另一条「还在算」的绑定那边挪过来的：两边都按读到变化的那一刻 b 切开，不开过渡段——
 // 这段钱只能算给其中一条绑定，两条绑定各开一段都把这段算进去，就是把同一笔钱算了两次（design/ux/binding-flow.md
 // §3：「按读到变化的那一刻 b 切开：到 b 为止算给原来的渠道，b 起算给后来的渠道，不问你」）。
 // after 带着挪过来的这把 Key（调用方开段要用，参见 server/reconciliation-repository.js 的 applyKeyChangePlans）
-export function planMovedKeySegments({ observedAt, newRef }) {
-  return { kind: "moved", cutoverAt: observedAt, after: [newRef] };
+export function planMovedKeySegments({ observedAt, newRef, newKeyFloor = null }) {
+  return { kind: "moved", cutoverAt: Math.max(observedAt, newKeyFloor ?? -Infinity), after: [newRef] };
 }
 
 // 批量：这一轮识别，每条绑定从 before（上一次确认时握着的 Key，没有就是 null）变成 after（这一次识别到的 Key）。
@@ -45,7 +52,7 @@ export function planMovedKeySegments({ observedAt, newRef }) {
 // lastSeenAt 是这一批共用的（一般是同一个 own 站点、同一个持久化的「读取服务上一次读成功的时刻」）；
 // 个别绑定要用不一样的（比如那个站点从没读成功过，退到这条绑定自己开着段的起点，参见 safeLastSeenAt），
 // 用 lastSeenAtByBinding 按 bindingId 覆盖
-export function planSegmentChanges({ bindings, lastSeenAt, observedAt, preciseAtByBinding = {}, lastSeenAtByBinding = {} }) {
+export function planSegmentChanges({ bindings, lastSeenAt, observedAt, preciseAtByBinding = {}, lastSeenAtByBinding = {}, newKeyFloorByBinding = {} }) {
   const ownerBefore = new Map();
   for (const binding of bindings) if (binding.before) ownerBefore.set(keyRefId(binding.before), binding.id);
   const plans = [];
@@ -53,11 +60,11 @@ export function planSegmentChanges({ bindings, lastSeenAt, observedAt, preciseAt
     if (!binding.after || sameKeyRef(binding.before, binding.after)) continue;
     const movedFromBindingId = ownerBefore.get(keyRefId(binding.after));
     if (movedFromBindingId != null && movedFromBindingId !== binding.id) {
-      plans.push({ bindingId: binding.id, movedFromBindingId, ...planMovedKeySegments({ observedAt, newRef: binding.after }) });
+      plans.push({ bindingId: binding.id, movedFromBindingId, ...planMovedKeySegments({ observedAt, newRef: binding.after, newKeyFloor: newKeyFloorByBinding[binding.id] ?? null }), before: binding.before ? [binding.before] : [] });
     } else {
       plans.push({ bindingId: binding.id, ...planKeyChangeSegments({
         lastSeenAt: lastSeenAtByBinding[binding.id] ?? lastSeenAt, observedAt, oldRef: binding.before, newRef: binding.after,
-        preciseAt: preciseAtByBinding[binding.id] ?? null,
+        preciseAt: preciseAtByBinding[binding.id] ?? null, newKeyFloor: newKeyFloorByBinding[binding.id] ?? null,
       }) });
     }
   }

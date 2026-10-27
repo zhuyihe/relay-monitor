@@ -1,7 +1,7 @@
 // 上游渠道对账的持久化层：只保存规则、聚合快照、告警状态和账单能力核验结果，绝不复制站点凭据。
 import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, normalizeSuccessfulResult, sameReconciliationWindow } from "../lib/reconciliation-contract.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
-import { RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerEntryFromRow, ledgerHistoryRecord,
+import { LEDGER_DAY_FACT_COLUMNS, RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerDayFactFromRow, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
 import { refreshSegmentKeysSql, fillMissingSegmentKeysSql } from "../db/segment-keys.js";
 import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
@@ -61,6 +61,28 @@ export function archivedLedgerAllowed(rule, ledger) {
   return Number.isFinite(archivedAt) && Number.isFinite(Number(ledger?.entry?.startMs)) && Number(ledger.entry.startMs) < archivedAt;
 }
 
+// 解开了、但那几天仍然算不准的冲突期（reconciliation_rules.key_blocks）：[{ code, sinceMs, untilMs }]，按起点排好、相交或相邻的并成一段；坏数据丢掉
+export function keyBlocksOf(value) {
+  let list = value;
+  if (typeof list === "string") { try { list = JSON.parse(list); } catch { return []; } }
+  if (!Array.isArray(list)) return [];
+  return list.map((item) => ({ code: String(item?.code || ""), sinceMs: Number(item?.sinceMs), untilMs: Number(item?.untilMs) }))
+    .filter((item) => item.code && Number.isFinite(item.sinceMs) && Number.isFinite(item.untilMs) && item.untilMs > item.sinceMs).sort((a, b) => a.sinceMs - b.sinceMs);
+}
+// 加一段：和同一个码相交、相邻的并起来；超过 200 段（出了故障才会有）就把最旧的两段并成一段（宁可多挡一段中间的日子，也不丢最旧的冲突期）
+export function addKeyBlock(blocks, block) {
+  const merged = [];
+  let current = { ...block };
+  for (const item of keyBlocksOf(blocks)) {
+    if (item.code === current.code && item.sinceMs <= current.untilMs && item.untilMs >= current.sinceMs) current = { code: current.code, sinceMs: Math.min(item.sinceMs, current.sinceMs), untilMs: Math.max(item.untilMs, current.untilMs) };
+    else merged.push(item);
+  }
+  merged.push(current);
+  merged.sort((a, b) => a.sinceMs - b.sinceMs);
+  while (merged.length > 200) { const [first, second] = merged; merged.splice(0, 2, { code: first.code === second.code ? first.code : "KEY_CONFLICT_GAP", sinceMs: first.sinceMs, untilMs: Math.max(first.untilMs, second.untilMs) }); }
+  return merged;
+}
+
 export function ruleFromRow(row, channels = []) {
   return {
     id: row.id,
@@ -80,6 +102,8 @@ export function ruleFromRow(row, channels = []) {
     canonicalKey: row.canonical_key || null,
     // K2b：这条绑定的 Key 现在有没处理的事（KEY_GROUP_CHANGED / CHANNEL_KEY_UNMATCHED / KEY_REVEAL_DENIED）和第一次认出来的时刻（毫秒）；没有是 null
     keyIssue: row.key_issue_code ? { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms) } : null,
+    // 解开了、但那几天仍然算不准的冲突期（可以有好几段）：只在有的时候带这个字段（见 server/reconciliation.js keyAgentRoundFor）
+    ...(keyBlocksOf(row.key_blocks).length ? { keyBlocks: keyBlocksOf(row.key_blocks) } : {}),
     ...normalizeRuleSourceBinding(row.source_binding, row.cost_coverage || "unknown"),
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
     // 解除时刻（毫秒）：新写的行由进程写；回填前的旧行读不到时退回 archived_at
@@ -117,8 +141,18 @@ export function attachSegmentKeys(segments, keyRows) {
 // 复制一份分段（改 id 这类场合用，比如按天切开后给切出来的那几截起新 id）：普通字段展开成自己的（JSON.stringify、Object.keys、深比较
 // 都和原段一样，只有 overrides 里给的字段不同），keys 这个不可枚举属性单独带过去——不能只用 `{ ...segment, ...overrides }`，那样
 // keys 会丢；也不能用 Object.create 接原型链，那样除了 overrides 里的字段，其余都不是这份拷贝自己的（总指挥 10-26 定，#114 中-G 改法）
+// overrides 里给了 keys 就用它（换成别的 Key 列表，照旧不可枚举、不进 JSON），没给才拷原段的；以前 overrides.keys 会被悄悄盖掉，不报错也不生效
 export function copySegment(segment, overrides = {}) {
-  return Object.defineProperty({ ...segment, ...overrides }, "keys", { value: segment.keys, enumerable: false, configurable: true, writable: true });
+  return Object.defineProperty({ ...segment, ...overrides }, "keys", { value: Object.hasOwn(overrides, "keys") ? overrides.keys : segment.keys, enumerable: false, configurable: true, writable: true });
+}
+
+// 换 Key 的计划在落库那一刻还成立吗（applyKeyChangePlans 的前置条件，内存仓库共用）。rule、current 是库里（锁住以后）的行
+export function keyChangePlanIsStale(plan, rule, current) {
+  const before = plan.before?.[0];
+  if (before && (Number(rule.token_id) !== Number(before.tokenId) || before.upstreamStationId != null && rule.upstream_station_id !== before.upstreamStationId)) return true;
+  const start = plan.kind === "windowed" ? plan.windowStart : plan.cutoverAt;
+  if (!(Number(start) >= Number(current.effective_from_ms))) return true; // 段不能在自己的起点以前结束（a 就是起点时旧段长度为零，照旧允许：开着那段的起点是 a 的下限）
+  return plan.kind === "windowed" && !(plan.windowEnd >= plan.windowStart);
 }
 
 export function segmentFromRow(row) {
@@ -244,6 +278,8 @@ function billDateText(value) {
 const LEDGER_DECISION_SELECT = ["revision", "source", "timezone", "window_start_ms", "window_end_ms", "revenue_usd", "cost_usd",
   "revenue_rate", "cost_rate", "cost_basis", "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at"].join(", ");
 const LEDGER_SELECT = RECONCILIATION_LEDGER_COLUMNS.map((column) => column === "bill_date" ? "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date"
+  : column === "settled_at" ? "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at" : column).join(", ");
+const LEDGER_DAY_FACT_SELECT = LEDGER_DAY_FACT_COLUMNS.map((column) => column === "bill_date" ? "DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date"
   : column === "settled_at" ? "DATE_FORMAT(settled_at, '%Y-%m-%d %H:%i:%s.%f') AS settled_at" : column).join(", ");
 
 export class ReconciliationRepository {
@@ -503,6 +539,37 @@ export class ReconciliationRepository {
       token_id: row.key_token_id, token_name: row.key_token_name, key_mask: row.key_key_mask, match_source: row.key_match_source, active_token_key: row.key_active_token_key })));
   }
 
+  // 这个自营站点下，这把 Key 已经关掉的段（在算的、已停的绑定都算）里最晚的结束时刻；从没被握过是 null。每把 Key 恰好算一次：换 Key 时新 Key 在这条绑定里
+  // 最早从这一刻算起。只按这把 Key 查（走 idx_segment_key_token(upstream_station_id, token_id)），不读整个站点所有绑定的所有段
+  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null, conn = null } = {}) {
+    const [rows] = await (conn || this.pool).query(
+      `SELECT MAX(s.effective_to_ms) AS held_until FROM reconciliation_segment_keys k
+         JOIN reconciliation_rule_segments s ON s.id = k.segment_id JOIN reconciliation_rules r ON r.id = s.rule_id
+        WHERE k.upstream_station_id = ? AND k.token_id = ? AND r.own_station_id = ? AND s.effective_to_ms IS NOT NULL AND s.effective_to_ms >= ?`,
+      [upstreamStationId, tokenId, ownStationId, sinceMs ?? 0]);
+    return rows[0]?.held_until == null ? null : Number(rows[0].held_until);
+  }
+
+  // 几条绑定的分段一次读出来（换 Key 时找这把 Key 上一个持有者的段、「渠道」页签的「用过的 Key」）：{ [ruleId]: 分段[] }，一条查询，不按绑定逐条读
+  async listSegmentsForRules(ruleIds) {
+    const ids = [...new Set((ruleIds || []).map(String))];
+    if (!ids.length) return {};
+    const [rows] = await this.pool.query(
+      `SELECT s.*, k.segment_id AS key_segment_id, k.upstream_station_id AS key_upstream_station_id, k.token_id AS key_token_id,
+         k.token_name AS key_token_name, k.key_mask AS key_key_mask, k.match_source AS key_match_source, k.active_token_key AS key_active_token_key
+       FROM reconciliation_rule_segments s LEFT JOIN reconciliation_segment_keys k ON k.segment_id = s.id
+       WHERE s.rule_id IN (?) ORDER BY s.rule_id ASC, s.effective_from_ms ASC, s.created_at ASC, s.effective_to_ms IS NOT NULL DESC, s.effective_to_ms ASC, k.token_id ASC`,
+      [ids]
+    );
+    const segments = [], seen = new Set();
+    for (const row of rows) if (!seen.has(row.id)) { seen.add(row.id); segments.push(segmentFromRow(row)); }
+    attachSegmentKeys(segments, rows.map((row) => ({ segment_id: row.key_segment_id, upstream_station_id: row.key_upstream_station_id,
+      token_id: row.key_token_id, token_name: row.key_token_name, key_mask: row.key_key_mask, match_source: row.key_match_source, active_token_key: row.key_active_token_key })));
+    const byRule = Object.fromEntries(ids.map((id) => [id, []]));
+    for (const segment of segments) byRule[segment.ruleId].push(segment);
+    return byRule;
+  }
+
   async backfillMissingSegmentRatios(ruleId, groups, observedAt = Date.now(), segments = null) {
     const knownRatios = new Map(Object.entries(groups || {}).flatMap(([name, group]) => {
       const ratio = Number(group?.ratio);
@@ -734,11 +801,28 @@ export class ReconciliationRepository {
     } finally { conn.release(); }
   }
 
-  // K2b：这条绑定的 Key 现在有没处理的事，跨轮记下来、重启不丢（总指挥 10-26 定）。issue 是 { code, sinceMs }，null 表示解开了清掉。
+  // K2b：这条绑定的 Key 现在有没处理的事，跨轮记下来、重启不丢。issue 是 { code, sinceMs }，null 表示解开了清掉。
   // 调用方（server/reconciliation.js keyAgentRoundFor）自己保证同一件事沿用第一次认出的 sinceMs，这里只管写
   async markKeyIssue(ruleId, issue) {
-    await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ? WHERE id = ?",
-      [issue?.code ?? null, issue?.sinceMs ?? null, ruleId]);
+    await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ? WHERE id = ?", [issue?.code ?? null, issue?.sinceMs ?? null, ruleId]);
+  }
+
+  // 记下一段「那几天仍然算不准、永远不固定」的日子 [sinceMs, untilMs)（和已有的并起来，已有的不会被覆盖、丢掉）；clearIssue 同时把现在开着的事项清掉
+  // （事项解开了，转成这一段）。读 → 改 → 写在一个事务里，同一条绑定同时来两次不会互相覆盖
+  async addKeyBlock(ruleId, block, { clearIssue = false } = {}) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query("SELECT key_blocks FROM reconciliation_rules WHERE id = ? FOR UPDATE", [ruleId]);
+      if (rows.length) {
+        const next = addKeyBlock(rows[0].key_blocks, block);
+        await conn.query(`UPDATE reconciliation_rules SET key_blocks = ?${clearIssue ? ", key_issue_code = NULL, key_issue_since_ms = NULL" : ""} WHERE id = ?`, [JSON.stringify(next), ruleId]);
+      }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally { conn.release(); }
   }
 
   // 换 Key 开的新段（timing_source = key_change，起点是 effectiveFromMs）记下新 Key 第一条用量的时刻——只用来写「几点换的」，
@@ -769,13 +853,22 @@ export class ReconciliationRepository {
     try {
       await conn.beginTransaction();
       const currents = new Map(), rules = new Map();
-      for (const { ruleId } of plans) {
+      // 按 id 排好再锁：传进来的顺序是 listRules 的顺序（按启用、更新时间），两个并发的批次顺序相反时会互相死锁；
+      // 和结账的 owner scope、K1a 合并一样按 id 顺序锁
+      for (const { ruleId } of [...plans].sort((x, y) => (x.ruleId < y.ruleId ? -1 : x.ruleId > y.ruleId ? 1 : 0))) {
         const [ruleRows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
         if (!ruleRows[0]) throw repositoryError("RULE_NOT_FOUND");
         rules.set(ruleId, ruleRows[0]);
         const [segmentRows] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? AND effective_to_ms IS NULL FOR UPDATE", [ruleId]);
         if (!segmentRows[0]) throw repositoryError("CURRENT_SEGMENT_MISSING");
         currents.set(ruleId, segmentRows[0]);
+      }
+      // 前置条件：计划是调用方在读规则以后算的，到这里（行已经锁上）规则可能已经被别的写入换过了——
+      // 页面刷新和轮询可以同时进来，各算同一份计划；缓存期间倍率变化也可能开了新段。不满足就什么也不写、整批回滚，
+      // 返回 { stale: true }，调用方下一轮重新算：规则现在的 Key 不是计划的「换之前」；切点早于开着那段的起点；窗口倒挂
+      if (plans.some(({ ruleId, plan }) => keyChangePlanIsStale(plan, rules.get(ruleId), currents.get(ruleId)))) {
+        await conn.rollback();
+        return { conflict: false, stale: true };
       }
       for (const { ruleId } of plans) {
         // 先把还没有 Key 行的段补一行（填 rules 上现在——也就是换之前——的那把）：下面要改 rules.token_id，
@@ -786,7 +879,7 @@ export class ReconciliationRepository {
         await conn.query("UPDATE reconciliation_segment_keys SET active_token_key = NULL WHERE segment_id = ?", [currents.get(ruleId).id]);
       }
       const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
-      for (const { ruleId, plan } of plans) {
+      for (const { ruleId, plan, keyBlock } of plans) {
         const current = currents.get(ruleId), rule = rules.get(ruleId);
         // rules.active_token_key 和 createRule（activeTokenKey）一个口径：锚定过的用 canonical_key，没有就用「上游:Key」；
         // 开着的段第一把 Key 的行和它是同一个值（K1c 的 initial 行就是这么抄的），别的 Key 用「上游:Key」
@@ -822,6 +915,8 @@ export class ReconciliationRepository {
           await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [plan.cutoverAt, current.id]);
           await openSegment(plan.cutoverAt, plan.after, { fresh: true });
         }
+        // 换手那天的挡和换段同一个事务写：挡写失败整批回滚，不会出现「换了段、挡没写上」把错的钱固定下来
+        if (keyBlock) await conn.query("UPDATE reconciliation_rules SET key_blocks = ? WHERE id = ?", [JSON.stringify(addKeyBlock(rule.key_blocks, keyBlock)), ruleId]);
         const [firstKey] = plan.after;
         // canonicalKey 是按 [provider, panel, accountId, tokenId] 算的（lib/reconciliation-scope-policy.js 的
         // canonicalBillingKey），tokenId 一换它就变了：不跟着改，下一次结账会发现「现在算出来的 canonicalKey 和
@@ -1001,6 +1096,45 @@ export class ReconciliationRepository {
       "SELECT rule_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date FROM reconciliation_ledger WHERE rule_id IN (?) AND bill_date >= ? GROUP BY rule_id, bill_date",
       [ruleIds, sinceDate]);
     return rows.map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
+  }
+
+  // 应付成本补算（V1-b，总指挥 10-26 定）：这些绑定从 sinceDate 起、最新一版原因是 reason 的日子（固定时整站记录还没读到那天的）
+  async listLedgerDaysByReason(ruleIds, sinceDate, reason) {
+    if (!ruleIds?.length) return [];
+    const [rows] = await this.pool.query(
+      `SELECT rule_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date FROM reconciliation_ledger l
+       WHERE rule_id IN (?) AND bill_date >= ? AND gap_reason = ? AND expected_cost_usd IS NULL
+         AND revision = (SELECT MAX(revision) FROM reconciliation_ledger m WHERE m.rule_id = l.rule_id AND m.bill_date = l.bill_date)
+       ORDER BY bill_date, rule_id`, [ruleIds, sinceDate, reason]);
+    return rows.map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
+  }
+
+  // 补算：只填最新一版、应付成本还空着、原因是 EXPECTED_COST_LAGGING 的那一行（不覆盖有数的、不写新版）；detail.expected 一起换掉。填上了返回 true。
+  // revision：调用方读那一行时带的版本号，和「现在的最新一版」都要对上——读、算、写之间插进来一次重结写出新版的话，revision 对不上旧版就不填，
+  // 也不会填到旧版上盖掉（新版不受影响，但旧版的 detail 不该再被改；审核 R2 #125 低-2、第二轮 低-A：两个条件都要留着，只认 revision = ?
+  // 不够，内存实现两样都要求，MySQL 也要一样）
+  async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null, revision = null } = {}) {
+    // 用 JOIN 一份派生表接「现在的最新一版」，不在 WHERE 里直接对同一张表做关联子查询（MySQL 不让 UPDATE 的 WHERE 子查询直接选同一张表）
+    const [result] = await this.pool.query(
+      `UPDATE reconciliation_ledger l
+       JOIN (SELECT rule_id, bill_date, MAX(revision) AS max_revision FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? GROUP BY rule_id, bill_date) latest
+         ON latest.rule_id = l.rule_id AND latest.bill_date = l.bill_date
+       SET l.expected_cost_usd = ?, l.gap_reason = ?, l.tokens = ?, l.detail = JSON_SET(COALESCE(l.detail, JSON_OBJECT()), '$.expected', CAST(? AS JSON))
+       WHERE l.rule_id = ? AND l.bill_date = ? AND l.expected_cost_usd IS NULL AND l.gap_reason = 'EXPECTED_COST_LAGGING' AND l.revision = ? AND l.revision = latest.max_revision`,
+      [ruleId, billDate, expectedCostUsd, gapReason, tokens, JSON.stringify(expected), ruleId, billDate, revision]);
+    return Number(result?.affectedRows) > 0;
+  }
+
+  // 每日利润页（#118 §9）：这些绑定在 [fromDate, toDate] 里每天最新一版的几列（不读 detail JSON）。一条语句，按 (rule_id, bill_date, revision) 主键走
+  async listLedgerDayFacts(ruleIds, fromDate, toDate) {
+    if (!ruleIds?.length) return [];
+    const [rows] = await this.pool.query(
+      `SELECT ${LEDGER_DAY_FACT_SELECT} FROM reconciliation_ledger l
+       WHERE rule_id IN (?) AND bill_date >= ? AND bill_date <= ?
+         AND revision = (SELECT MAX(revision) FROM reconciliation_ledger m WHERE m.rule_id = l.rule_id AND m.bill_date = l.bill_date)
+       ORDER BY bill_date, rule_id`,
+      [ruleIds, fromDate, toDate]);
+    return rows.map(ledgerDayFactFromRow);
   }
 
   // 结账没成：记下或更新这一行（settlementOutcome 的 state，op 是 retry / manual / sticky）。

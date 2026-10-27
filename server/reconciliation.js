@@ -39,8 +39,10 @@ import { ReconciliationRepository, copySegment, reconciliationOwnerRuleState, re
 import { workflowAction } from "../lib/workflow-actions.js";
 import { markOptionUnreadableSeen, notifyOptionUnreadable, notifyReconciliationHealth, optionAlertKey } from "./reconciliation-notify.js";
 import { OwnLogStore } from "./own-log-store.js";
-import { createOwnLogIngest } from "./own-log-ingest.js";
+import { INGEST, createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
+import { expectedCostForDay } from "../lib/expected-cost-day.js";
+import { buildProfitDetail, buildProfitPage, dayLabelsOf } from "../lib/profit-page.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
@@ -53,8 +55,8 @@ import { keyPiecesOf, segmentKeyTokens, sumKeyStats } from "../lib/reconciliatio
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
-import { costBasisOf, isConfiguredRate, rateSnapshotOf, ratesFor } from "../lib/profit.js";
-import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
+import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, ratesFor } from "../lib/profit.js";
+import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 import { keyAgentConfigOf } from "./key-agent.js";
@@ -133,6 +135,11 @@ const TODAY_TTL_MS = 60000;
 const QUERY_TTL_MS = 60000;
 // 换 Key 后找新 Key 第一条用量，一条绑定最多等这么久（只为显示，找不到就按 b 写，不能拖住这一轮）
 const KEY_FIRST_USAGE_BUDGET_MS = 20000;
+
+// 减压 PR（用户 10-26 定插到最前面；总指挥 10-26 定：只做「没人看就放慢」，按渠道判安静不做，P1a 的探测和它的测试不动）：
+// 没人看「今天」页面多久算没人看、这时「今天」多久才真的刷新一次；空闲后有人回来，立刻补一轮，不等满这个间隔。
+const OWN_VIEWER_IDLE_MS = 10 * 60000;
+const OWN_VIEWER_IDLE_RECHECK_MS = 5 * 60000;
 const MAX_RESULT_CACHE_ENTRIES = 200;
 // 账号级上游用量：已结束窗口不会再变，缓存久一些；页面最多等这么久，取不到先返回「读取中」。
 const ACCOUNT_USAGE_TTL_MS = 10 * 60000;
@@ -456,11 +463,15 @@ function upstreamErrorHealth(err, resource) {
   return REUSED_IDENTITY_SUSPECT.has(String(err?.code || "")) && resource?.identityReused ? health("PENDING", issueText("PENDING")) : toErrorHealth(err, false, resource?.station);
 }
 
+// 事项解开以后要转成一段「冲突期」（KEY_CONFLICT_GAP）的码：渠道在这段时间里用的另一把 Key，用量没有进过任何一条绑定的段
+const KEY_CONFLICT_CODES = new Set(["KEY_GROUP_CHANGED", "CHANNEL_KEY_UNMATCHED", "KEY_REVEAL_DENIED", "PENDING"]);
+
 const CALCULATION_BLOCKERS = new Set([
   "ACCESS_TOKEN_LEGACY_RETIRED",
   "ACCESS_TOKEN_SCOPE_DENIED",
   "OWN_CONSUME_LOG_OFF",
   "OWN_CONSUME_LOG_GAP",
+  "KEY_CONFLICT_GAP",
   "UPSTREAM_FEATURE_UNSUPPORTED",
   "KEY_INVALID_OR_DENIED",
   "UPSTREAM_DATA_UNAVAILABLE",
@@ -532,7 +543,11 @@ function sourceSnapshot(token, metadata, upstream, downstream) {
 export function createReconciliationModule(rt, { repository = new ReconciliationRepository(rt.pool), stationUsageCost = defaultStationUsageCost,
   lookbackBudget = null, lookbackTimeMs = null, lookbackDelayMs = 60000 + Math.floor(Math.random() * 4 * 60000),
   // 自营站点整站日志的小时桶（应付成本 V1-a）：测试传内存实现；ownLogIngest: false 关掉整站读（只在测试里）
-  ownLogStore = null, ownLogIngest = true } = {}) {
+  ownLogStore = null, ownLogIngest = true,
+  // 减压 PR（总指挥 10-26 定）：没人看「今天」页面的起算点，由调用方注入——生产启动那一处（lib/runtime.js）传 Date.now()，
+  // 刚启动、还没有页面来过就从这一刻起算 10 分钟，不然每次重启（watchtower 拉新镜像）都会把「没人看」清零；不传就是 null：
+  // 从没有页面来过不算没人看（测试走这条，和以前一样）。重启后要是有人开着页面，页面每 30 秒来一次，马上刷新，不用存库。
+  viewerIdleSince = null } = {}) {
   const ownLog = createOwnLogIngest(rt, { store: ownLogStore || (rt._ownLogStore ||= new OwnLogStore(rt.pool)), log: (...args) => console.debug(...args) });
   const upstreamPricing = (rt._upstreamPricing ||= createUpstreamPricing(rt));
   const resultCache = (rt._reconciliationResultCache ||= new Map());
@@ -553,6 +568,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   //   observationWrites：每条绑定最近一次写下的「今天」观测快照的内容指纹和写入时刻
   const ownActivity = (rt._reconciliationOwnActivity ||= new Map());
   const ownRevenueCache = (rt._reconciliationOwnRevenue ||= new Map());
+  // 减压 PR：
+  //   ownChannelActivity：每个渠道（和 ownRevenueCache 同一份 key，再加渠道号）上一次真的问到的净额度、什么时候问的——
+  //     没人看「今天」页面超过 OWN_VIEWER_IDLE_MS 时，所有渠道（不管本身有没有新消费）都放慢到 OWN_VIEWER_IDLE_RECHECK_MS 才真的再问一次；
+  //   lastTodayViewAt：最近一次有页面来要「今天/近 7 天/本月」这类实时窗口的时刻（queryRules 里 origin "page" 时更新，
+  //     借用页面本来就有的轮询，不额外发请求）；at 一开始是调用方注入的 viewerIdleSince（生产启动传启动时刻，测试不传是 null，
+  //     null = 从没有页面来过不算没人看，照旧每轮问）；空闲后第一次又有人来，立刻让这一轮跑。
+  // 只影响轮询「今天」这一路实时刷新（reuse 只在 observe+poll+实时窗口才为真）：结账、告警、日报走各自的窗口和路径，不受影响。
+  // 整站级的「有没有新消费」探测（markQuietOwnStations）留着当总闸：整站都没新消费时，这里都不会跑到（上面整站级沿用先返回了）。
+  // 按渠道各自判断安不安静这次不做（总指挥 10-26 定）：等以后「今天」改从整站读的小时桶算，根本不再按渠道问 stat 时一并解决。
+  const ownChannelActivity = (rt._reconciliationOwnChannelActivity ||= new Map());
+  const lastTodayViewAt = (rt._reconciliationLastTodayViewAt ||= { at: viewerIdleSince });
   // ownExclusion：各自营站点每段窗口里管理员自用、渠道测试日志的累计（每个来源：按渠道的额度、翻到的最大编号），「今天」接着翻、结账用它对账
   const ownExclusionCache = (rt._reconciliationOwnExclusion ||= new Map());
   const observationWrites = (rt._reconciliationObservationWrites ||= new Map());
@@ -756,7 +782,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   // K2b：渠道这一轮认出的 Key 和绑定自己记的不一样时，接进结账流程要做的两件事（k-plan §3.3/§3.4，
-  // 总指挥 10-26 定：检测和正常换 Key 都不能等 K2c）：
+  // 检测和正常换 Key 都不能等 K2c）：
   //   1. 分组、合组：只检测、不碰 reconciliation_rule_channels、不开新段。检测到的绑定由调用方
   //      （inspectRule 的早退）当未结处理，从第一次认出冲突的那一刻（b）起不结账，交给 K2c 重新分组。
   //   2. 没有冲突、真的换了 Key 的绑定：算好计划（server/key-agent-resegment.js），同一个事务开新段、
@@ -766,7 +792,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 只给已经锚定过身份（rule.canonicalKey 不是 null）、这一轮上游身份读得到的绑定换 Key：没锚定的绑定走自己的
   // 锚定流程，不归 K2b 管；上游这一轮读不到就留给下一轮，不拿读不到的身份算 canonicalKey。
   //
-  // 过渡段 [a, b) 的 a（总指挥 10-27 定，丢了只能往前退、不能退到 b，否则 [t, b) 那段新 Key 的花费漏掉）：
+  // 过渡段 [a, b) 的 a（丢了只能往前退、不能退到 b，否则 [t, b) 那段新 Key 的花费漏掉）：
   //   - a 取这一轮读取服务读之前存的「上一次读成功」的时刻，不是这一轮的；这一轮新的成功时刻要等这一轮的换段落库
   //     提交以后再写（identifyChannelsCached 自己不写）。读完先写会让 a 变成 b；写完还没落库就重启，重启后 a 还是 b。
   //   - 这一轮只要这个站点下还有没处理完的（撞了约束回滚、分组合组、上游身份读不到、有绑定这一轮认不出来……），
@@ -777,15 +803,20 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 这条绑定的 Key 现在有没处理的事（keyIssues，ruleId -> { code, sinceMs, channelId? }）：
   //   KEY_GROUP_CHANGED（分组、合组）、CHANNEL_KEY_UNMATCHED（渠道换成了不在已加上游里的 Key，流程稿例外一）、
   //   KEY_REVEAL_DENIED（打码撞了、上游令牌没有读完整 Key 的权限）。都是从第一次认出来的那一刻 b 起不结账；
-  //   早退只挡 window.endMs >= b 的窗口（总指挥 10-26 定：b 以前已经结过、或者还没轮到结的日子，和这件事无关，不能
+  //   早退只挡 window.endMs >= b 的窗口（b 以前已经结过、或者还没轮到结的日子，和这件事无关，不能
   //   因为今天出了事就连累）。b 第一次认出时持久化到 rules.key_issue_code / key_issue_since_ms（重启不丢），
   //   后面几轮同一件事沿用同一个 b；事情解开了清掉。
   // 返回 { keyIssues, keyAgentDown, rules }：
   // rules 是换段落库以后重新读的绑定（没有换 Key 时原样返回），调用方要用它重算成本主人和写账本的版本指纹。
   async function keyAgentRoundFor(rules, resources) {
     const keyIssues = new Map(); // ruleId -> { code, sinceMs, channelId? }
-    const issueFor = (rule, code, extra = {}) => ({ code, sinceMs: rule.keyIssue?.code === code ? rule.keyIssue.sinceMs : now, ...extra });
+    const openIssue = (rule) => rule.keyIssue ?? null;
+    // b（sinceMs）：一条绑定只要一直有事项（不管事项的码怎么变，比如 CHANNEL_KEY_UNMATCHED 变成 KEY_GROUP_CHANGED）就沿用最早的那个，
+    // 事项全部解除（这一轮没有）才清、下次重新记。换码就重置成现在，会把之前被挡的日子放行
+    const issueFor = (rule, code, extra = {}) => ({ code, sinceMs: keyIssues.get(rule.id)?.sinceMs ?? openIssue(rule)?.sinceMs ?? now, ...extra });
     const keyAgentDown = new Map(); // ruleId -> { code, sinceMs }：读取服务读不到，从 sinceMs 起先不算
+    const identifiedAtByStation = new Map(); // own 站点 -> 这一轮识别的快照读库的时刻（事项解开的时刻用它）
+    const appliedRuleIds = new Set(); // 这一轮换了段落库的绑定
     const now = Date.now();
     const enabled = rules.filter((rule) => rule.enabled);
     const byOwnStation = new Map(); // 只给参与了本轮识别的 own 站点下的绑定判断分组/合组；没装读取服务的站点不受影响，也不清它们的记号
@@ -799,20 +830,33 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 读不到（连不上、401/503、格式不对），或者带 X-Agent-Stale（读取服务自己读库失败、给的是上一份旧结果）：都算拿不到新结果。
       // 不拿旧结果去判换没换 Key；这个站点下各绑定记「读不到」，从最后一次读到的时刻起先不算
       if (!identified?.ok || identified.stale === true || !identified.channels) {
+        // 库里已经记着的事项（rules.key_issue_code / key_issue_since_ms）这一轮没法重新判断：继续挡，不能因为读取服务断了就放行
+        // （CHANNEL_KEY_UNMATCHED 从 b 起挡着的那天，读取服务一断就被固定）。事项只有读得到、重新判断以后才清
+        for (const rule of enabled.filter((item) => item.ownStationId === ownStationId && openIssue(item))) {
+          keyIssues.set(rule.id, { code: rule.keyIssue.code, sinceMs: rule.keyIssue.sinceMs });
+        }
         const reach = keyAgentReachability(rt, ownStationId);
         const code = keyAgentExceptionIssueOf(reach);
         if (code) {
-          const sinceMs = reach.lastSuccessAtMs ?? stationLastSuccessAtMs ?? reach.unreachableSinceMs ?? now;
-          for (const rule of enabled.filter((item) => item.ownStationId === ownStationId)) keyAgentDown.set(rule.id, { code, sinceMs });
+          // 从最后一次读到的时刻起先不算。内存里的最后一次读到、持久化的都没有（这个站点从来没读成功过，或者每一轮都有没处理完的绑定
+          // 所以持久化值一直没推进、又恰好重启）：退回这条绑定开着那段的起点，不用「现在」——用现在会把从来没核对过 Key 的日子放行
+          const known = reach.lastSuccessAtMs ?? stationLastSuccessAtMs;
+          for (const rule of enabled.filter((item) => item.ownStationId === ownStationId)) {
+            const openFrom = known == null ? (await repository.listSegments(rule.id).catch(() => [])).find((segment) => segment.effectiveTo == null)?.effectiveFrom : null;
+            keyAgentDown.set(rule.id, { code, sinceMs: known ?? openFrom ?? reach.unreachableSinceMs ?? now });
+          }
         }
         continue;
       }
       byOwnStation.set(ownStationId, true);
+      identifiedAtByStation.set(ownStationId, identified.readAtMs ?? identified.fetchedAtMs ?? now);
       const snapshotByChannelId = new Map(identified.channels.map((channel) => [Number(channel.channelId), channel]));
       // 全部上游都读到了、哪里都没有这把（not_found）：渠道换成了不在已加上游里的 Key；打码撞了又没有 api_key:reveal 权限：
       // 分不清是哪把（revealIssues，K2a 按上游汇总）。多把 Key 的渠道不参与
       const unmatchedChannelIds = new Set(identified.channels.filter((channel) => !channel.keyless && channel.slots?.length === 1 && channel.slots[0].state === "not_found").map((channel) => Number(channel.channelId)));
       const revealDeniedChannelIds = new Set((identified.revealIssues || []).flatMap((item) => item.channelIds || []).map(Number));
+      // 缺 api_key:reveal 权限的是哪个上游：「更新登录信息」要去那个上游（打码撞了时它不一定是绑定自己的上游）
+      const revealUpstreamByChannel = new Map((identified.revealIssues || []).flatMap((item) => (item.channelIds || []).map((id) => [Number(id), item.upstreamStationId])));
       const refByChannelId = new Map();
       for (const channel of identified.channels) {
         if (channel.keyless || channel.slots?.length !== 1) continue;
@@ -821,6 +865,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         refByChannelId.set(Number(channel.channelId),
           { upstreamStationId: slot.matches[0].stationId, tokenId: Number(slot.matches[0].tokenId), tokenName: slot.matches[0].tokenName ?? null });
       }
+      // 认不出（不在目录里、打码撞了没解开、上游这一轮读不到、几把 Key）不是「事情解开了」：库里已经记着的事项沿用，不清
+      const carryIssue = (rule) => { const open = openIssue(rule); if (open && !keyIssues.has(rule.id)) keyIssues.set(rule.id, { code: open.code, sinceMs: open.sinceMs }); };
       let pending = false; // 这个站点下这一轮有没有没处理完的——有就不推进「上一次读成功」
       const currentRefsByBinding = [], changeCandidates = [];
       for (const rule of enabled.filter((item) => item.ownStationId === ownStationId)) {
@@ -832,14 +878,25 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // 这一轮一把都没认出来，不参与换 Key 判断；但除非它的渠道全是不认 Key 的（keyless），这条绑定这一轮没被确认过，
           // 站点的成功时刻不能越过它最后一次确认旧 Key 的时刻
           if (rule.channels.some((channel) => !snapshotByChannelId.get(Number(channel.channelId))?.keyless)) pending = true;
-          if (deniedChannel) keyIssues.set(rule.id, issueFor(rule, "KEY_REVEAL_DENIED", { channelId: deniedChannel.channelId }));
+          if (deniedChannel) keyIssues.set(rule.id, issueFor(rule, "KEY_REVEAL_DENIED", { channelId: deniedChannel.channelId, upstreamStationId: revealUpstreamByChannel.get(Number(deniedChannel.channelId)) }));
           else if (unmatchedChannel) keyIssues.set(rule.id, issueFor(rule, "CHANNEL_KEY_UNMATCHED", { channelId: unmatchedChannel.channelId }));
+          else carryIssue(rule);
           continue;
         }
         if (detectGroupSplit(channelRefs)) { keyIssues.set(rule.id, issueFor(rule, "KEY_GROUP_CHANGED")); pending = true; continue; }
         if (deniedChannel || unmatchedChannel) { // 组里有的渠道认出来了、有的没有：这条绑定这一轮没处理完
-          keyIssues.set(rule.id, deniedChannel ? issueFor(rule, "KEY_REVEAL_DENIED", { channelId: deniedChannel.channelId })
+          keyIssues.set(rule.id, deniedChannel ? issueFor(rule, "KEY_REVEAL_DENIED", { channelId: deniedChannel.channelId, upstreamStationId: revealUpstreamByChannel.get(Number(deniedChannel.channelId)) })
             : issueFor(rule, "CHANNEL_KEY_UNMATCHED", { channelId: unmatchedChannel.channelId }));
+          pending = true;
+          continue;
+        }
+        // 一条绑定几个渠道，有的认出来了、有的认不出：不拿认出来的那几个当整条绑定换了 Key（剩下的渠道换成什么不知道，它们的 Key 用量以后没人算）——
+        // 这一轮整条不换，等都认出来；k-plan 3.3 的分组、合组交给 K2c
+        if (rule.channels.some((channel) => !refByChannelId.has(Number(channel.channelId)) && !snapshotByChannelId.get(Number(channel.channelId))?.keyless)) {
+          // 认出来的那几个渠道里已经有换了 Key 的：这条绑定从现在起有一部分钱（换了的 Key 的用量）没人算，不能一直不记事项——记一个会自己好的「读取中」，
+          // 从认出来的那一刻起先不算（剩下的渠道认出来以后换段，a 用开着那段的起点，这几天的新 Key 不漏）；没有换 Key 的只是有渠道认不出，沿用已有的事项
+          const changed = channelRefs.some((ref) => ref && (ref.upstreamStationId !== rule.upstreamStationId || Number(ref.tokenId) !== Number(rule.tokenId)));
+          if (changed && rule.canonicalKey != null && !openIssue(rule)) keyIssues.set(rule.id, issueFor(rule, "PENDING")); else carryIssue(rule);
           pending = true;
           continue;
         }
@@ -850,7 +907,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 改上游的 Key），这一版不当「换 Key」处理，留给现有机制
         if (differs && rule.canonicalKey != null && ref.upstreamStationId === rule.upstreamStationId) {
           changeCandidates.push({ rule, before: { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId }, after: ref });
-        } else if (differs) pending = true;
+        } else if (differs) {
+          // 换到了别的上游站点的 Key：这一版没有跨上游的换段（K2c 的重新分组接着做），不能悄悄照旧结账——记事项，从认出来的那一刻起先不算
+          if (rule.canonicalKey != null) keyIssues.set(rule.id, issueFor(rule, "KEY_GROUP_CHANGED"));
+          pending = true;
+        }
       }
       for (const group of detectGroupMerges(currentRefsByBinding)) for (const bindingId of group) {
         const rule = enabled.find((item) => item.id === bindingId);
@@ -859,16 +920,31 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       const toApply = changeCandidates.filter((item) => !keyIssues.has(item.rule.id));
       if (toApply.length) {
-        const result = await applyKeyAgentChangesFor(toApply, { observedAt: identified.fetchedAtMs ?? now, stationLastSuccessAtMs, resources, keyIssues, issueFor });
+        // b 用这份快照读取服务自己读库的时刻（换 Key 的真正时刻不晚于它）；没有（304 沿用）才用控制台拿到的时刻
+        const result = await applyKeyAgentChangesFor(toApply, { observedAt: identified.readAtMs ?? identified.fetchedAtMs ?? now, stationLastSuccessAtMs, resources, keyIssues, issueFor, openIssue });
         applied ||= result.applied;
+        for (const ruleId of result.appliedRuleIds || []) appliedRuleIds.add(ruleId);
         if (!result.allApplied) pending = true;
       }
       // 换段已经落库提交（或这一轮没有要换的）、而且没有没处理完的：这一轮读取服务读成功的时刻才可以记下来
-      if (!pending && identified.fetchedAtMs != null) await rt.store.setKeyAgentLastSuccessAt?.(ownStationId, identified.fetchedAtMs)?.catch?.(() => {});
+      // a：「上一次读成功」记快照自己读库的时刻（confirmedAtMs），不是控制台拿到快照的时刻——读取服务自己最多缓存 4 分钟，
+      // 控制台时刻比真正读库的晚，a 晚了会漏掉 [真正换 Key, a) 新 Key 的用量
+      const confirmedAt = identified.confirmedAtMs ?? identified.fetchedAtMs;
+      if (!pending && confirmedAt != null) await rt.store.setKeyAgentLastSuccessAt?.(ownStationId, confirmedAt)?.catch?.(() => {});
     }
     await Promise.all(enabled.filter((rule) => byOwnStation.has(rule.ownStationId)).map(async (rule) => {
-      const issue = keyIssues.get(rule.id) ?? null;
-      if ((issue?.code ?? null) !== (rule.keyIssue?.code ?? null) || (issue?.sinceMs ?? null) !== (rule.keyIssue?.sinceMs ?? null)) {
+      const issue = keyIssues.get(rule.id) ?? null, previous = openIssue(rule);
+      // 分组 / 合组、认不出（不在已加的上游里）、读不了完整 Key 的事项解开了（渠道回到了原来的 Key，没有靠换段处理）：冲突期间渠道用的另一把 Key
+      // 没有进过任何一条绑定的段——那段日子不能带着缺的钱固定。转成一段「冲突期」[sinceMs, untilMs)（KEY_CONFLICT_GAP，永远不固定），以后的日子照常算；
+      // 一条绑定可以有好几段，解开以后又出新事项不会把旧的覆盖掉。这一轮换了段的（[a, b) 过渡段已经把新 Key 的用量算进来了）和会自己好的 PENDING 不转
+      // 这一轮刚好换了段也照样转：换段的 [a, b) 过渡窗口只放旧 Key 和新 Key，冲突期间用过的第三把 Key 不在里面（审核 #133 第 3 轮 M4）。
+      // 写失败（连接断了）就这一轮仍然当事项还开着挡住，下一轮再转，不能放行
+      if (!issue && previous && KEY_CONFLICT_CODES.has(previous.code)) {
+        try { await repository.addKeyBlock(rule.id, { code: "KEY_CONFLICT_GAP", sinceMs: previous.sinceMs, untilMs: identifiedAtByStation.get(rule.ownStationId) ?? now }, { clearIssue: true }); }
+        catch { keyIssues.set(rule.id, { code: previous.code, sinceMs: previous.sinceMs }); }
+        return;
+      }
+      if ((issue?.code ?? null) !== (previous?.code ?? null) || (issue?.sinceMs ?? null) !== (previous?.sinceMs ?? null)) {
         await repository.markKeyIssue(rule.id, issue ? { code: issue.code, sinceMs: issue.sinceMs } : null).catch(() => {});
       }
     }));
@@ -879,30 +955,37 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 算每条的 a（safeLastSeenAt）、batch 一次 planSegmentChanges（算不算「挪过」要几条一起看），再一次
   // applyKeyChangePlans 落库；canonicalKey 按新 tokenId 重新算，和 token_id 一起改，不然下一次结账会被
   // SOURCE_BINDING_UNCONFIRMED 挡住（锚定时记的 canonicalKey 对不上了）。
-  // 撞了数据库唯一约束（没被 detectGroupMerges 预检查到的边界情况）：这一批里牵连的绑定都改记分组冲突，不写段。
-  // 返回 { applied: 有没有真的写进库, allApplied: 这一批是不是全部落库了 }
-  async function applyKeyAgentChangesFor(changeCandidates, { observedAt, stationLastSuccessAtMs, resources, keyIssues, issueFor }) {
+  // 互换、轮换的绑定一组一个事务，别的组各自一个事务；撞了数据库唯一约束（没被 detectGroupMerges 预检查到的边界情况）只回滚、只记这一组的分组冲突，不写段。
+  // 返回 { applied: 有没有哪一组真的写进库, allApplied: 这一批是不是全部落库了 }
+  async function applyKeyAgentChangesFor(changeCandidates, { observedAt, stationLastSuccessAtMs, resources, keyIssues, issueFor, openIssue }) {
     const lastSeenAtByBinding = {};
     for (const { rule } of changeCandidates) {
       const segments = await repository.listSegments(rule.id).catch(() => []);
       const open = segments.find((segment) => segment.effectiveTo == null);
       if (!open) return { applied: false, allApplied: false }; // 读不到开着的段，这一轮不换
-      lastSeenAtByBinding[rule.id] = safeLastSeenAt({ keyAgentLastSuccessAtMs: rule.keyIssue != null ? null : stationLastSuccessAtMs,
+      lastSeenAtByBinding[rule.id] = safeLastSeenAt({ keyAgentLastSuccessAtMs: openIssue(rule) != null ? null : stationLastSuccessAtMs,
         segmentEffectiveFrom: open.effectiveFrom });
+    }
+    // 每把 Key 恰好算一次：新 Key 之前被这个自营站点下别的绑定（在算的、已停的）握过，它在这条绑定里最早从那条绑定的段结束算起——
+    // 不能拿整个站点的 a（站点上一次读成功，有一条绑定永远处理不完时 a 会一直冻着）：[a, 那一刻) 里这把 Key 已经算给了上一个持有者
+    const newKeyFloorByBinding = {};
+    for (const { rule, after } of changeCandidates) {
+      let floor;
+      try { floor = await repository.keyHeldUntil(rule.ownStationId, after.upstreamStationId, after.tokenId); } catch { return { applied: false, allApplied: false }; } // 读不到历史的段，这一轮不换
+      if (floor != null) newKeyFloorByBinding[rule.id] = floor;
     }
     const plans = planSegmentChanges({
       bindings: changeCandidates.map(({ rule, before, after }) => ({ id: rule.id, before, after })),
-      observedAt, lastSeenAt: observedAt, lastSeenAtByBinding,
+      observedAt, lastSeenAt: observedAt, lastSeenAtByBinding, newKeyFloorByBinding,
     });
     const byRuleId = new Map(changeCandidates.map((item) => [item.rule.id, item]));
-    // Sub2API 只能按整天读账单：一把 Key 在两条绑定之间挪（互换、转手）时，b 那一刻切不开这一天的钱——两条绑定各取这把 Key 全天，
-    // 同一笔钱会算两遍。这一版先不处理（总指挥 10-27 定）：这两条绑定这几天先不结账，记一个会自己好的「读取中」，
-    // 等后面的小 PR 按逐条用量拆开（design/ux/binding-flow.md §3 最后一段）；宁可先不算，也不算错。
-    // 现在识别只认 New API 上游的 Key（Sub2API 的目录不给 Key 材料），这里是为以后认得出 Sub2API 时守住的
+    // Sub2API 只能按整天读账单：一把 Key 在两条绑定之间挪（互换、转手）时，b 那一刻切不开这一天的钱——两条绑定那一天各取这把 Key 全天，同一笔钱会算两遍。
+    // 段照常按 b 换（和 New API 一样：到 b 为止算给原来的绑定，b 起算给后来的，两条都守「按 Key 的下限」），第二天起各读各的 Key、整天读不会混在一起；
+    // 只有换手那一天（b 所在的业务日）两条绑定都先不结账，记一段会自己好的 PENDING，等按逐条用量拆开的后续 PR（k-plan 3.5）补结；宁可先不算，也不算错。
+    // 识别认得出 Sub2API 上游的 Key（#142：读目录时就地算指纹，只比指纹），所以 Sub2API 的 Key 在两条绑定之间挪是真会走到这里的，守在这里
     const isSub2 = (ruleId) => /^sub2api/.test(upstreamStation(byRuleId.get(ruleId)?.rule.upstreamStationId)?.type || "");
-    const deferred = new Set(plans.filter((plan) => plan.kind === "moved" && isSub2(plan.bindingId)).flatMap((plan) => [plan.bindingId, plan.movedFromBindingId]).filter(Boolean));
-    for (const ruleId of deferred) if (byRuleId.has(ruleId)) keyIssues.set(ruleId, issueFor(byRuleId.get(ruleId).rule, "PENDING"));
-    const applyPlans = plans.filter((plan) => !deferred.has(plan.bindingId)).map((plan) => {
+    const movedSub2 = new Set(plans.filter((plan) => plan.kind === "moved" && isSub2(plan.bindingId)).flatMap((plan) => [plan.bindingId, plan.movedFromBindingId]).filter(Boolean));
+    const applyPlans = plans.map((plan) => {
       const { rule } = byRuleId.get(plan.bindingId);
       const identity = resources.get(rule.upstreamStationId)?.identity;
       const upstream = upstreamStation(rule.upstreamStationId);
@@ -912,22 +995,43 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const metadata = resources.get(rule.upstreamStationId)?.metadata;
       const newToken = metadata?.tokens?.find((item) => Number(item.id) === Number(plan.after[0].tokenId));
       const groupFields = newToken ? { group: newToken.group, ratio: metadata.groupsAvailable ? metadata.groups?.[newToken.group]?.ratio ?? null : null } : {};
-      return { ruleId: plan.bindingId, plan: { ...plan, ...groupFields, canonicalKey: canonicalBillingKey(upstream, identity, plan.after[0].tokenId) } };
+      // Sub2API 挪过的一对：换手那天（b 所在的业务日）这条绑定先不结账，挡和换段同一个事务写（applyKeyChangePlans 的 keyBlock）
+      const day = movedSub2.has(plan.bindingId) ? dayBoundsInTz(observedAt, rule.timezone) : null;
+      return { ruleId: plan.bindingId, plan: { ...plan, ...groupFields, canonicalKey: canonicalBillingKey(upstream, identity, plan.after[0].tokenId) },
+        ...(day ? { keyBlock: { code: "PENDING", sinceMs: day.startMs, untilMs: day.endMs } } : {}) };
     }).filter(Boolean);
-    if (!applyPlans.length) return { applied: false, allApplied: false };
-    // 写库失败（不是撞唯一约束，比如连接断了）：这一轮没换成，不是分组合组，不记冲突，下一轮接着换
-    const result = await repository.applyKeyChangePlans(applyPlans, { detectedAt: observedAt }).catch(() => null);
-    if (!result) return { applied: false, allApplied: false };
-    if (result.conflict) {
-      // 数据库唯一约束拦住了（没被 detectGroupMerges 预检查到的边界情况）：这一批牵连的绑定都改记分组冲突，
-      // 不是某一条的事——两条互换、或者批里有一条真的撞了别的绑定，都保守地当这一批都不安全，交给 K2c
-      for (const plan of applyPlans) {
-        keyIssues.set(plan.ruleId, issueFor(byRuleId.get(plan.ruleId).rule, "KEY_GROUP_CHANGED"));
+    // 互换、轮换（挪过）的几条绑定必须同生同死：按 movedFromBindingId 把互相牵连的归成一组，每组一个事务；
+    // 别的组各自一个事务。一组撞了约束只回滚这一组、只给这一组记 KEY_GROUP_CHANGED（会自己好的那类），别的组照常换段——
+    // 一条有问题的绑定不能挡住同一个站点上别的绑定换 Key（见 PR 说明）。
+    // 挪过来的 Key 在另一头的那条绑定这一轮没算出计划（上游身份读不到被跳过）：这一条也先留着，不然会和还握着这把 Key 的另一头撞车
+    const skipped = new Set(plans.map((plan) => plan.bindingId).filter((id) => !applyPlans.some((item) => item.ruleId === id)));
+    const held = applyPlans.filter(({ plan }) => plan.kind === "moved" && skipped.has(plan.movedFromBindingId));
+    const ready = applyPlans.filter((item) => !held.includes(item));
+    if (!ready.length) return { applied: false, allApplied: false };
+    const parent = new Map(ready.map(({ ruleId }) => [ruleId, ruleId]));
+    const find = (id) => { while (parent.get(id) !== id) id = parent.get(id); return id; };
+    for (const { ruleId, plan } of ready) if (plan.movedFromBindingId != null && parent.has(plan.movedFromBindingId)) parent.set(find(ruleId), find(plan.movedFromBindingId));
+    const grouped = new Map();
+    for (const item of ready) grouped.set(find(item.ruleId), [...(grouped.get(find(item.ruleId)) || []), item]);
+    const groups = [...grouped.values()];
+    let applied = false, allApplied = !held.length && ready.length === changeCandidates.length;
+    const appliedRuleIds = new Set();
+    for (const group of groups) {
+      // 写库失败（不是撞唯一约束，比如连接断了）：这一组这一轮没换成，不是分组合组，不记冲突，下一轮接着换；
+      // stale：计划落库时已经不成立（别的写入先换过了、倍率变化先开了新段），什么也没写，下一轮重新算
+      const result = await repository.applyKeyChangePlans(group, { detectedAt: observedAt }).catch(() => null);
+      if (!result || result.stale) { allApplied = false; continue; }
+      if (result.conflict) {
+        // 数据库唯一约束拦住了（没被 detectGroupMerges 预检查到的边界情况）：这一组牵连的绑定都改记分组冲突，不写段
+        for (const { ruleId } of group) keyIssues.set(ruleId, issueFor(byRuleId.get(ruleId).rule, "KEY_GROUP_CHANGED"));
+        allApplied = false;
+        continue;
       }
-      return { applied: false, allApplied: false };
+      applied = true;
+      for (const { ruleId } of group) appliedRuleIds.add(ruleId);
     }
-    await recordKeyChangeDisplayTimes(applyPlans, resources);
-    return { applied: true, allApplied: applyPlans.length === changeCandidates.length && !deferred.size };
+    await recordKeyChangeDisplayTimes(applyPlans.filter(({ ruleId }) => appliedRuleIds.has(ruleId)), resources);
+    return { applied, allApplied, appliedRuleIds: [...appliedRuleIds] };
   }
 
   // 换 Key 开的段落库以后，New API 上游去找新 Key 在 [a, b] 里的第一条用量，记在新段上（display_from_ms），
@@ -1021,7 +1125,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       duplicateSales.set(id, [...new Set([...(duplicateSales.get(id) || []), ...ids])].sort());
     }
     return { startedAt: Date.now(), rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, duplicateSales, billingSource: Object.freeze(billingSource),
-      keyIssues, keyAgentDown,
+      keyIssues, keyAgentDown, keyAgentObserved: observe,
       // 这一轮（或这一次查询）里共用的：自营站点的 /api/status；哪些自营站点从什么时候起没有新的消费（只有轮询会填）
       ownStatus: new Map(), ownQuietFrom: new Map() };
   }
@@ -1432,20 +1536,54 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       resoldAdminKeysOf(own).map((item) => `${item.username}\u0000${item.tokenName}`).sort()]); // 转售 Key 改了马上换键（审核 R1 低-6）
     const cached = ownRevenueCache.get(key), quiet = registry?.ownQuietFrom?.get(own.id);
     // 最新那条日志的时刻（站点的钟）也要在记下的那份里：站点时钟偏快时，记下那份读到的时刻还没包住它，照旧现读
+    // 缓存里那份有渠道是没人看时沿用的（staleEndMs：沿用的那些渠道上次读到的窗口终点）：要是那之后站点又来过新消费（quiet.from 更晚），
+    // 沿用的那几个渠道的数可能已经旧了，不能拿它当「站点没新消费所以数没变」整站沿用（审核 #137 中-1）
     if (reuse && cached && quiet && cached.endMs >= quiet.from && cached.endMs <= segmentWindow.endMs
+      && (cached.staleEndMs == null || (cached.staleEndMs >= quiet.from && (quiet.coveredFromMs == null || quiet.coveredFromMs <= cached.staleEndMs)))
       && (quiet.coveredFromMs == null || quiet.coveredFromMs <= cached.endMs)) {
       const status = await loadStatus().catch(() => null);
-      if (status && status.quotaPerUnit === cached.result.quotaPerUnit) return { ...cached.result, window: { ...cached.result.window, endMs: segmentWindow.endMs } };
+      if (status && status.quotaPerUnit === cached.result.quotaPerUnit) {
+        const reused = { ...cached.result, window: { ...cached.result.window, endMs: segmentWindow.endMs } };
+        if (cached.staleEndMs != null) Object.defineProperty(reused, "staleFromIdleSkip", { value: true, enumerable: false, configurable: true });
+        return reused;
+      }
     }
     let reusedStale = false; // 管理员自用那一份是读失败后沿用的：这一次的结果不进缓存，不然站点一直没有新消费时超过 10 分钟也不换
-    const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus,
+    // 减压 PR：整站级的沿用（上面）没中时，没人在看「今天」页面超过 OWN_VIEWER_IDLE_MS 就把所有渠道都放慢，隔一段才真的问一次 stat，
+    // 不是每轮都问；只在 reuse（轮询观测「今天」）时才这样做，结账、页面「刷新」、别的窗口照旧逐个问。渠道的键和上面 ownRevenueCache
+    // 用的 key 同一份（带凭据指纹、分段窗口起点）：凭据换了、分段切了、跨零点了，这份键自然换掉，和站点级沿用用同一套失效规矩。
+    // 空闲后有页面回来：页面请求把 lastTodayViewAt.at 刷成现在，下一轮 viewerIdle 就是 false，所有渠道都现问，不等满放慢的间隔（总指挥 10-26 定）。
+    // 按渠道各自判断安不安静这次不做，整站级探测照旧当总闸。
+    // 这一轮有渠道是沿用的：站点级缓存里记下 staleEndMs，整站沿用时要核对，不能把这份旧数当刚读到的返回（审核 #137 中-1）。
+    const checkedAt = Date.now();
+    const viewerIdle = lastTodayViewAt.at != null && checkedAt - lastTodayViewAt.at > OWN_VIEWER_IDLE_MS;
+    const skipChannels = reuse && viewerIdle ? new Map(channelIds.map((channelId) => [channelId, ownChannelActivity.get(`${key}:${channelId}`)]).filter(([, activity]) =>
+      // 键相同但这次要的窗口终点比记下的那份还早（legacy 分段切开、窗口缩小了）：和站点级沿用同一个规矩，不能沿用
+      activity && activity.endMs <= segmentWindow.endMs && checkedAt - activity.checkedAt < OWN_VIEWER_IDLE_RECHECK_MS
+      // 站点安静、但这个渠道上次读到的窗口没包住最新那条日志（日志落在窗口终点那一秒、或站点钟快）：这一轮不沿用，真去问（审核 #137 中-3）
+      && !(quiet && quiet.coveredFromMs != null && quiet.coveredFromMs > activity.endMs))) : null;
+    const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus, skipChannels,
       exclusion: async () => { const read = await ownExclusion(own, segmentWindow, { settle, channelIds, freshSince: registry?.startedAt ?? null }); if (read.stale) reusedStale = true; return read; } });
     // 只有轮询观测今天会沿用，别的窗口（昨天、结账、自定义、近 7 天、本月）不记
     if (reuse && result.state === "complete" && !result.emptySecondWindow && !reusedStale) {
-      ownRevenueCache.set(key, { endMs: segmentWindow.endMs, result });
+      // staleEndMs：沿用的渠道上次读到的窗口终点（不是上次问的时刻）：整站沿用时要核它有没有包住最新那条日志
+      const staleEndMs = skipChannels?.size > 0 ? Math.min(...[...skipChannels.values()].map((activity) => activity.endMs)) : null;
+      ownRevenueCache.set(key, { endMs: segmentWindow.endMs, result, staleEndMs });
       // 只留今天的：键里有窗口起点，过了零点的旧键不会再用到
       for (const [cachedKey, entry] of ownRevenueCache) if (entry.endMs < segmentWindow.endMs - 2 * DAY_MS) ownRevenueCache.delete(cachedKey);
     }
+    // 记下这一轮真的问到的渠道净额度，给没人看时的沿用用（沿用掉的不算，检查时刻不前进）
+    if (reuse) for (const channel of result.channels) {
+      if (skipChannels?.has(channel.channelId)) continue;
+      const activityKey = `${key}:${channel.channelId}`;
+      if (channel.billingState !== "complete") { ownChannelActivity.delete(activityKey); continue; }
+      ownChannelActivity.set(activityKey, { quotaUnits: channel.quotaUnits, adminUsageQuotaUnits: channel.adminUsageQuotaUnits, checkedAt, endMs: segmentWindow.endMs });
+    }
+    // 旧键（分段切了、跨零点了）的记录顺手清掉：一天没再问过就丢（和 ownRevenueCache 的清理同一个节奏）
+    if (reuse) for (const [activityKey, activity] of ownChannelActivity) if (checkedAt - activity.checkedAt > DAY_MS) ownChannelActivity.delete(activityKey);
+    // 这一轮有渠道是沿用的（没人看、放慢）：这份结果不算「刚刚核实过」，不进 resultCache——不然页面来看（mode:"evaluate" 不管
+    // cached.observed，TTL 内照样信任缓存）会拿到这份沿用的数，而不是自己现算一遍；不可枚举，不进序列化、不进账本明细（总指挥 10-26 定）
+    if (skipChannels?.size > 0) Object.defineProperty(result, "staleFromIdleSkip", { value: true, enumerable: false, configurable: true });
     return result;
   }
 
@@ -1579,9 +1717,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const pieces = keyPiecesOf(segments, window, token?.id);
     if (!pieces) return upstreamWindowForSegment(upstream, metadata, token, currentSegment, window, options);
     const isSub2 = upstream.type === "sub2api" || upstream.type === "sub2api-password";
-    const sources = isSub2
-      ? [{ segment: copySegment(currentSegment, { keys: [...new Map(pieces.flatMap(({ segment }) => segment.keys || []).map((key) => [`${key.upstreamStationId ?? ""}:${key.tokenId}`, key])).values()] }), window }]
-      : pieces;
+    let sources = pieces;
+    if (isSub2) {
+      const merged = copySegment(currentSegment, { keys: [...new Map(pieces.flatMap(({ segment }) => segment.keys?.length ? segment.keys : [{ upstreamStationId: upstreamStation(options.upstreamStationId)?.id, tokenId: token?.id, tokenName: token?.name }])
+        .map((key) => [`${key.upstreamStationId ?? ""}:${key.tokenId}`, key])).values()] });
+      sources = [{ segment: merged, window }];
+    }
     const results = await Promise.all(sources.map((piece) => upstreamWindowForSegment(upstream, metadata, token, piece.segment, piece.window, options)));
     const summed = sumKeyStats(results);
     return { ...summed, window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
@@ -2218,10 +2359,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       // K2b：这条绑定分组了或合组了（keyAgentRoundFor，k-plan §3.3），交给 K2c 重新分组；换成不在已加上游里的 Key（CHANNEL_KEY_UNMATCHED）、读不了完整 Key（KEY_REVEAL_DENIED）也走这里；从第一次认出冲突的那一刻
       // （b）起不结账、不开新段——宁可先不算，也不把钱算给错的那一条。只挡 b 及以后的窗口：b 以前已经结过、或者还没
-      // 轮到结的日子，和这件事无关，不能因为今天冲突了就连累昨天（总指挥 10-26 定）
-      const keyIssue = ownerRegistry.keyIssues?.get(rule.id);
+      // 轮到结的日子，和这件事无关，不能因为今天冲突了就连累昨天
+      // 只读查询（页面 evaluate）不判断，用库里持久化的事项（rule.keyIssue）：页面和需处理清单看到的是同一件事，
+      // 不会在观测之前显示「实时」而这几天其实不会固定；观测的轮次用这一轮重新判断的结果（解开了就是没有）
+      const keyIssue = ownerRegistry.keyIssues?.get(rule.id) ?? (ownerRegistry.keyAgentObserved === false ? rule.keyIssue : null);
+      // 已经解开、只挡冲突期间那几段日子（渠道回到了原来的 Key，冲突期间另一把 Key 的用量没人算）：窗口碰到哪一段就是那一类（KEY_CONFLICT_GAP 永远不固定、PENDING 会自己好）
+      // 冲突期（永远不固定）排在会自己好的 PENDING 前面：同一天两种都有时写没用的「重新读取」会误导（审核 #133 第 3 轮 L2）
+      const hits = (rule.keyBlocks || []).filter((block) => window.endMs > block.sinceMs && window.startMs < block.untilMs);
+      const blockHit = hits.find((block) => block.code === "KEY_CONFLICT_GAP") ?? hits[0] ?? null;
+      // 近 7 天、本月这类多天窗口只碰到冲突期：像 R2 的 OWN_CONSUME_LOG_GAP 那样只去掉碰到的那几天，其余天照算（审核 #133 第 3 轮 M1）
+      const partialKeyGap = !!blockHit && !settle && !billDayOf(window) && hits.every((block) => block.code === "KEY_CONFLICT_GAP");
+      if (blockHit && !partialKeyGap) {
+        return unavailable(health(blockHit.code, issueText(blockHit.code), { sinceMs: blockHit.sinceMs, untilMs: blockHit.untilMs }), { metadata, token }, false);
+      }
       if (keyIssue && window.endMs >= keyIssue.sinceMs) {
-        return unavailable(health(keyIssue.code, issueText(keyIssue.code), { sinceMs: keyIssue.sinceMs, ...(keyIssue.channelId != null ? { channelId: keyIssue.channelId } : {}) }), { metadata, token }, false);
+        return unavailable(health(keyIssue.code, issueText(keyIssue.code), { sinceMs: keyIssue.sinceMs, ...(keyIssue.channelId != null ? { channelId: keyIssue.channelId } : {}), ...(keyIssue.upstreamStationId != null ? { upstreamStationId: keyIssue.upstreamStationId } : {}) }), { metadata, token }, false);
       }
       // K2b 例外三（binding-flow.md §2）：读取服务读不到新结果时，从最后一次读到的时刻起，这个站点下各渠道的数先不算
       // （实时·还在读取，过了零点也不固定）；连续 3 次才升成需处理 KEY_READER_UNREACHABLE（keyAgentExceptionIssueOf）。
@@ -2312,11 +2464,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const clipped = isScopedBillingPolicy(rule.billingPolicy) ? accountingWindow(rule, window, platform) : window;
       const clippedUpstream = isScopedBillingPolicy(rule.billingPolicy) ? accountingUpstreamWindow(rule, window, platform) : window;
       let applicable = isScopedBillingPolicy(rule.billingPolicy) ? (clipped ? [{ segment: currentSegment, segmentWindow: clipped, upstreamWindow: clippedUpstream }] : []) : intersecting;
-      if (partialGapCandidate) {
-        // 把每段窗口按天切开，去掉碰到关着那一段的天，剩下连着的天并成一段（同一段的几个部分用「段号~序号」区分，快照键不撞）
+      if (partialGapCandidate || partialKeyGap) {
+        // 把每段窗口按天切开，去掉碰到关着那一段（或换 Key 冲突期）的天，剩下连着的天并成一段（同一段的几个部分用「段号~序号」区分，快照键不撞）
         const stationPeriods = upstreamStation(own.id)?.consumeLogOffPeriods ?? own.consumeLogOffPeriods;
         const kept = applicable.flatMap(({ segment, segmentWindow, upstreamWindow }) => {
-          const days = splitWindowByDays(segmentWindow).filter((piece) => !consumeLogOffOverlap(stationPeriods, piece).closed);
+          const days = splitWindowByDays(segmentWindow).filter((piece) => !(partialGapCandidate && consumeLogOffOverlap(stationPeriods, piece).closed)
+            && !(partialKeyGap && hits.some((block) => piece.endMs > block.sinceMs && piece.startMs < block.untilMs)));
           const runs = [];
           for (const piece of days) {
             const last = runs.at(-1);
@@ -2337,8 +2490,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         });
         if (kept.length) {
           applicable = kept;
-          issues.push({ code: "OWN_CONSUME_LOG_GAP_PARTIAL", scope: "downstream", detail: issueText("OWN_CONSUME_LOG_GAP_PARTIAL"), observedAt: Date.now() });
+          if (partialGapCandidate) issues.push({ code: "OWN_CONSUME_LOG_GAP_PARTIAL", scope: "downstream", detail: issueText("OWN_CONSUME_LOG_GAP_PARTIAL"), observedAt: Date.now() });
+          if (partialKeyGap) issues.push({ code: "KEY_CONFLICT_GAP_PARTIAL", scope: "segment", detail: issueText("KEY_CONFLICT_GAP_PARTIAL"), observedAt: Date.now() });
           consumeLogIssue = null;
+        } else if (partialKeyGap && !partialGapCandidate) {
+          issues.push({ code: "KEY_CONFLICT_GAP", scope: "segment", detail: issueText("KEY_CONFLICT_GAP"), sinceMs: blockHit.sinceMs, untilMs: blockHit.untilMs, observedAt: Date.now() });
         } else issues.push(consumeLogIssue);
       }
       // probe 到这里为止：取数前能判断的都判断完了，还挡着的要人处理的原因交回去，不读渠道、不取账单
@@ -2376,6 +2532,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 本站 /api/status 同一轮各绑定、各分段共用一次（ownStatusFor）；读取失败时每个分段照常按本站账单不可用处理。
       const loadOwnStatus = () => ownStatusFor(ownerRegistry, own);
       const reuseOwnRevenue = observe && origin === "poll" && isLiveReconciliationPreset(window.preset);
+      // 减压 PR：这一轮里哪些分段的渠道收入是沿用的（没人看、放慢）——有一段是，这整条绑定这一轮的结果就不进 resultCache
+      // （downstreamResult.staleFromIdleSkip 在 foldSplitSegments/下面的对象展开里会丢，这里单独记一份）
+      const staleFromIdleSkip = [];
       const segmentResults = foldSplitSegments(await mapWithConcurrency(applicable, 6, async ({ segment, segmentWindow, upstreamWindow: upstreamOwnWindow }) => {
         // 上游一侧自己的窗口（Sub2API 当天换绑的那天比本站一侧长，见 accountingUpstreamWindow）
         const upstreamWindow = upstreamOwnWindow || segmentWindow;
@@ -2392,6 +2551,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             : Promise.resolve({ error: codedError("OWN_BILLING_UNAVAILABLE", issueText("OWN_BILLING_UNAVAILABLE")) }))
             .catch((error) => ({ error })),
         ]);
+        if (downstreamResult.staleFromIdleSkip) staleFromIdleSkip.push(true);
         const segmentIssues = issues.filter((issue) => CALCULATION_BLOCKERS.has(issue.code));
         const sides = [upstreamResult, downstreamResult].filter((side) => !side.error);
         // 只有上游一侧的窗口或时区对不上时算上游侧问题；本站一侧对不上始终阻断。
@@ -2578,6 +2738,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         costBasis,
         health: resultHealth, generatedAt: new Date().toISOString(),
       };
+      // 减压 PR：这一轮有分段的渠道收入是沿用的（没人看、放慢）——记在 result 上（不可枚举，不进序列化、不进快照、不进账本），
+      // 调用方据此不把这份结果放进 resultCache；页面来看时才会照旧现读，不会拿到沿用的数（总指挥 10-26 定）
+      if (staleFromIdleSkip.length) Object.defineProperty(result, "staleFromIdleSkip", { value: true, enumerable: false, configurable: true });
       const scopeFingerprint = reconciliationScopeFingerprint(rule, segments);
       if (!await hasCurrentScope(rule.id, scopeFingerprint, generation, !!rule.archivedAt)) return STALE_SCOPE;
       if (currentSourceCredential(rule) !== sourceCredential) return STALE_SCOPE;
@@ -2613,7 +2776,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (value?.probe) return value;
         if (value !== STALE_SCOPE && (ruleGenerations.get(ruleId) || 0) === generation
           && currentSourceCredential(rule) === request.sourceCredential && billingSourceState().version === billingSource.version) {
-          if (value.health.code !== "PENDING") cacheResult(cacheKey, value, request.sourceCredential, billingSource.ownerVersion, observe);
+          // 这份结果里有渠道收入是沿用的（没人看、放慢）：不进 resultCache，免得页面来看时（evaluate 模式不管 cached.observed，
+          // TTL 内照样信任缓存）拿到沿用的数——留着旧的那份（更早、但是现读的）等它自然过期，或者等下一次现读覆盖（总指挥 10-26 定）
+          if (value.health.code !== "PENDING" && !value.staleFromIdleSkip) cacheResult(cacheKey, value, request.sourceCredential, billingSource.ownerVersion, observe);
           return value;
         }
         if (billingSourceState().version !== billingSource.version) return STALE_SCOPE;
@@ -2708,6 +2873,110 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource })) ? unavailable : STALE_SCOPE;
   }
 
+  // 一条绑定一天的应付成本（V1-b）：桶（整站日志，只读、不发请求）、这一天各段的上游分组倍率、价目表（每小时一次的缓存）、
+  // 上游的额度换算；算不出的情况给原因码（lib/expected-cost-day.js）。顺手把桶里的「管理员自用」和 R1 扣的数比一比打一行 debug（V1 只对账，不替换 R1）。
+  // 出任何错都不挡结账：那一天应付成本写「—」加 MODEL_PRICE_UNREADABLE / EXPECTED_COST_LAGGING 这类原因
+  // 应付成本按段算（K 和 V1-b 碰在一起的那一处）：按 Key 整体取数的绑定，结账结果里只有一段（最新那段），但换 Key（或倍率变化）会把这一天切成几段，
+  // 每段有自己的分组和倍率；渠道的小时桶是整条绑定的，所以不能整天套最新那段的倍率。这里把这一天按库里存的段切开，每段用自己的倍率；
+  // 相邻两段分组、倍率都一样的合成一段（只是换了一把同分组的 Key，不挡）；段的边界不在整点而两边倍率又不一样，expectedCostForDay 记 PARTIAL_HOUR_UNSUPPORTED，
+  // 和 C3 当天换绑 / 停止算利润那天同一条规矩（收费记录按整点记，切不开）。切的范围就是结账结果的窗口（C3 那天只有一部分时间在算）。读不到库里的段就沿用结账结果里的
+  async function keyAwareExpectedSegments(rule, resultSegments) {
+    if (!isScopedBillingPolicy(rule.billingPolicy) || !resultSegments.length) return resultSegments;
+    const persisted = await repository.listSegments(rule.id).catch(() => null);
+    if (!persisted || persisted.length < 2) return resultSegments;
+    const from = Math.min(...resultSegments.map((segment) => segment.startMs)), to = Math.max(...resultSegments.map((segment) => segment.endMs));
+    const fallback = resultSegments.at(-1);
+    const sorted = [...persisted].sort((a, b) => a.effectiveFrom - b.effectiveFrom);
+    const pieces = [];
+    sorted.forEach((segment, index) => {
+      const startMs = index === 0 ? from : Math.max(from, segment.effectiveFrom);
+      const endMs = Math.min(to, segment.effectiveTo ?? Infinity);
+      if (!(startMs < endMs)) return;
+      const piece = { startMs, endMs, ratio: segment.ratio ?? fallback.ratio, group: segment.group ?? fallback.group };
+      // 换 Key 的过渡段 [a, b)：渠道那段时间到底在用旧 Key 还是新 Key 分不清，里面按旧 Key 的倍率切。新旧倍率不一样就算不准（会出一个假的「对不上」），
+      // 这一天应付成本给 KEY_CHANGE_RATIO_DIFFERS 不比差额；倍率一样（最常见）照常算（审核 #133 第 4 轮 M1，总指挥 10-27 定）
+      const next = sorted[index + 1];
+      if (segment.timingSource === "key_change_window" && next && (next.ratio ?? fallback.ratio) !== piece.ratio) {
+        pieces.push({ ...piece, keyChangeAmbiguous: true, keyChangeAtMs: segment.effectiveTo ?? segment.effectiveFrom, keyChangeBetween: [segment.effectiveFrom, segment.effectiveTo ?? segment.effectiveFrom] });
+        return;
+      }
+      const last = pieces.at(-1);
+      // 相邻两段倍率一样就合成一段（同倍率不同分组在半点也不挡：数是能算的；分组是 auto 的，expectedCostForDay 按分组另挡）
+      if (last && !last.keyChangeAmbiguous && last.endMs === startMs && last.ratio === piece.ratio && last.group !== "auto" && piece.group !== "auto") last.endMs = endMs; else pieces.push(piece);
+    });
+    return pieces.length ? pieces : resultSegments;
+  }
+
+  async function expectedCostForSettlement(rule, result, token) {
+    const window = result.window;
+    // 「算应付成本」关着：不读桶、不读价目表，直接记原因（关着那几天固定的，以后打开也不补算，用语规范 §8.3）
+    if (rt.store?.settings?.expectedCost === false) return { usd: null, reason: "EXPECTED_COST_DISABLED", tokens: null, detail: { usd: null, reason: "EXPECTED_COST_DISABLED", tokens: null, byModel: [], missingPriceModels: [], segments: [], byChannel: [], pricingReadAt: null, quotaPerUnit: null } };
+    const upstream = upstreamStation(rule.upstreamStationId), own = upstreamStation(rule.ownStationId);
+    const store = ownLogStore || rt._ownLogStore;
+    const channelIds = (rule.channels || []).map((channel) => channel.channelId);
+    const keyShared = rule.costCoverage !== "complete"; // 这把 Key 别处也在用（或者没答）：上游扣的钱分不出来
+    const groupAuto = !!token && (token.group === "auto" || !!token.crossGroupRetry);
+    const segments = await keyAwareExpectedSegments(rule, (result.segments || []).map((segment) => ({ startMs: segment.window?.startMs ?? window.startMs, endMs: segment.window?.endMs ?? window.endMs,
+      ratio: segment.upstream?.ratio ?? segment.ratio ?? result.upstream?.ratio ?? null, group: segment.upstream?.group ?? segment.group ?? result.upstream?.group ?? null })));
+    const quotaPerUnit = result.upstream?.quotaPerUnit ?? null;
+    let buckets = [], coveredFromMs = null, coveredToMs = null, disabledFromMs = null, disabledToMs = null, pricing = null, pricingError = null;
+    try {
+      const [cursor, rows] = await Promise.all([store?.getCursor(own?.id) ?? null, store?.listBuckets(own?.id, window.startMs, window.endMs) ?? []]);
+      coveredFromMs = cursor?.coveredFromMs ?? null; coveredToMs = cursor?.coveredToMs ?? null;
+      disabledFromMs = cursor?.disabledFromMs ?? null; disabledToMs = cursor?.disabledToMs ?? null; buckets = rows;
+    } catch (error) { console.debug("应付成本：读小时桶失败", rule.id, error?.code || error?.message); }
+    if (upstream?.type === "newapi" && !upstream.isOwn) {
+      try { pricing = await upstreamPricing.pricingFor(upstream); } catch (error) { pricingError = error; }
+    }
+    const expected = expectedCostForDay({ window, buckets, channelIds, segments: segments.length ? segments : [{ startMs: window.startMs, endMs: window.endMs, ratio: result.upstream?.ratio ?? null, group: result.upstream?.group ?? null }],
+      pricing, pricingError, quotaPerUnit, flags: { off: rt.store?.settings?.expectedCost === false, platform: upstream?.type ?? null, keyShared, groupAuto, coveredFromMs, coveredToMs, disabledFromMs, disabledToMs } });
+    // 对账：桶里这些渠道这一天的管理员自用额度（R1 的规矩）和 R1 实际扣的比一比（只打日志，不改数；跑一两周一致了再让 R1 用桶）
+    if (coveredToMs != null && coveredToMs >= window.endMs && result.downstream?.adminUsageQuotaUnits != null) {
+      const wanted = new Set(channelIds.map(Number));
+      const bucketAdmin = buckets.filter((bucket) => wanted.has(Number(bucket.channelId)) && bucket.slotMs >= window.startMs && bucket.slotMs < window.endMs)
+        .reduce((sum, bucket) => sum + Number(bucket.adminQuota || 0) + Number(bucket.testQuota || 0), 0);
+      if (bucketAdmin !== Number(result.downstream.adminUsageQuotaUnits)) console.debug(`应付成本对账：绑定 ${rule.id} ${billDayOf(window)} 桶里管理员自用 ${bucketAdmin} 额度，R1 扣了 ${result.downstream.adminUsageQuotaUnits}`);
+    }
+    return { usd: expected.usd, reason: expected.reason, tokens: expected.tokens,
+      detail: { usd: expected.usd, reason: expected.reason, tokens: expected.tokens, ...(expected.keyChange ? { keyChange: expected.keyChange } : {}), byModel: expected.byModel, missingPriceModels: expected.missingPriceModels, segments: expected.segments, byChannel: expected.byChannel,
+        pricingReadAt: pricing?.readAt ?? null, quotaPerUnit } };
+  }
+
+  // 应付成本补算（V1-b，总指挥 10-26 定）：固定那天时整站记录还没读到（EXPECTED_COST_LAGGING），读完以后补一次——只填空着的，不覆盖、不写新版；
+  // 倍率用账本里记的分段，价目表用补的时候读到的，明细写 backfilledAt（计算明细写「X 月 X 日补算的」）。跟在每轮整站读后面，每个自营站点每轮最多补 20 天
+  const BACKFILL_PER_ROUND = 20;
+  async function backfillExpectedCost(own, { now = Date.now() } = {}) {
+    const store = ownLogStore || rt._ownLogStore;
+    const cursor = await store?.getCursor(own.id);
+    if (!cursor) return 0;
+    // 解除以后才固定的那天（低-1，审核 R2 #125）：listRules 默认不带已解除的绑定，补不到；带上 includeArchived 才找得到
+    const rules = (await repository.listRules({ includeArchived: true })).filter((rule) => rule.ownStationId === own.id);
+    const since = dayKeyInTz(now - INGEST.KEEP_DAYS * DAY_MS, businessTimeZone());
+    const lagging = await repository.listLedgerDaysByReason(rules.map((rule) => rule.id), since, "EXPECTED_COST_LAGGING");
+    let filled = 0;
+    for (const { ruleId, billDate } of lagging) {
+      if (filled >= BACKFILL_PER_ROUND) break;
+      const rule = rules.find((item) => item.id === ruleId);
+      if (!rule) continue;
+      const startMs = dayStartInTz(billDate, rule.timezone), endMs = shiftedDayStartInTz(startMs, 1, rule.timezone);
+      if (cursor.coveredToMs < endMs) continue; // 这天还没读完
+      const window = { preset: "custom", startMs, endMs, timezone: rule.timezone };
+      const entry = await repository.latestLedgerEntry(ruleId, window);
+      const saved = entry?.detail?.result;
+      if (!saved || entry.expectedCostUsd != null || entry.gapReason !== "EXPECTED_COST_LAGGING") continue;
+      const expected = await expectedCostForSettlement(rule, { window, segments: saved.segments || [], upstream: saved.upstream, downstream: saved.downstream }, null);
+      if (expected.reason === "EXPECTED_COST_LAGGING") continue;
+      // 带上读到的这一版（低-2，审核 R2 #125）：读、算、写之间要是插进来一次重结写出新版，不能把这份按旧分段算的数填到新版上
+      const ok = await repository.fillExpectedCost(ruleId, billDate, { expectedCostUsd: expected.usd, gapReason: expected.reason, tokens: expected.tokens,
+        expected: { ...expected.detail, backfilledAt: new Date(now).toISOString() }, revision: entry.revision });
+      if (!ok) continue;
+      filled += 1;
+      // 页面缓存里这条绑定的结果带着旧的 ledgerReference：清掉，下次读账本
+      for (const key of [...resultCache.keys()]) if (String(key).includes(ruleId)) resultCache.delete(key);
+    }
+    return filled;
+  }
+
   async function persistResult(rule, result, origin, metadata = null, token = null, { saveSnapshots = true, scopeFingerprint = null, billingFingerprint = null, sourceCredential = null, generation = 0, billingSource = null, financialSnapshot = null, resettle = false, resettleRequestedAt = null, confirmShrink = false, confirmedAfter = null, settle = false, trigger = null } = {}) {
     const wholeWindow = { id: result.currentSegment?.id || null, window: result.window, upstream: result.upstream, downstream: result.downstream, calculation: result.calculation, health: result.health };
     const segmentSnapshots = result.segments?.length ? result.segments : [wholeWindow];
@@ -2784,9 +3053,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const settlement = { trigger: trigger || (resettle ? "transition" : origin === "manual" ? "manual" : "poll"),
       // 固定这天时自营站点的设置读不到、但照常固定了（R2 审核第二轮中-1）：照实记一句，页面计算明细写出来
       ...(result.consumeLogSetting ? { consumeLogSetting: result.consumeLogSetting } : {}) };
-    const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, { ...sourceFor({ ...wholeWindow, recordType: "confirmed" }), settlement }, {
+    // 应付成本（V1-b）：结单日账时按这一天的小时桶和上游价目表算出来，随账本一起固定；算不出的给原因码。只影响新列，不改原有金额
+    const expected = ledgerDay ? await expectedCostForSettlement(rule, result, token) : null;
+    const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, { ...sourceFor({ ...wholeWindow, recordType: "confirmed" }), settlement, ...(expected ? { expected: expected.detail } : {}) }, {
       revenueRate: configuredRate(financialSnapshot.income), costRate: configuredRate(financialSnapshot.cost),
-      costBasis: financialSnapshot.costBasis }) : null;
+      costBasis: financialSnapshot.costBasis, expectedCostUsd: expected?.usd ?? null, gapReason: expected?.reason ?? null, tokens: expected?.tokens ?? null }) : null;
     // 重结读出来的收入或上游成本比账本最新一版少一半以上（日志过了保留期之类）：不写新版，等人确认（手动「重新读取」才覆盖）。
     // 记 RESETTLE_SHRUNK 的状态行由 settleDay 写；页面上这天还是已固定的旧数
     // 确认了（confirmShrink）：确认框里写的「重算」数（confirmedAfter）和这次再读到的不一样、或者根本没带，照旧挡下、把新的数记下来再让人看一眼（直接调接口也绕不过），
@@ -2868,7 +3139,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           result.ledger = { billDate: billDayOf(result.window), revision: ledgerOption.booked.revision, source: ledgerOption.booked.source,
             // 汇率按账本的精度（6 位小数）取整，和从账本行读出来的逐字一致（审核 C2a 第二轮低-3）
             settledAt: ledgerOption.booked.settledAt, rates: { income: ledgerRate(financialSnapshot.income), cost: ledgerRate(financialSnapshot.cost) },
-            costBasis: financialSnapshot.costBasis, ...(result.consumeLogSetting ? { consumeLogSetting: result.consumeLogSetting } : {}) }; // 和 ledgerReference 同一个形状
+            costBasis: financialSnapshot.costBasis,
+            expectedCostUsd: ledgerEntry?.expectedCostUsd == null ? null : Number(ledgerDecimal(ledgerEntry.expectedCostUsd, 8)), gapReason: ledgerEntry?.gapReason ?? null, tokens: ledgerEntry?.tokens ?? null,
+            ...(result.consumeLogSetting ? { consumeLogSetting: result.consumeLogSetting } : {}) }; // 和 ledgerReference 同一个形状
         }
       }
     }
@@ -3283,6 +3556,96 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     previewKeyScope,
     createPreviewReadContext,
     listRules: (options = {}) => repository.listRules(options),
+    // ---- 每日利润页 A（设计稿 #118 §9）：整页一次读；一行一天的计算明细点开才读 ----
+    // 整页：现有的 queryRules（evaluate，不写库）给整段的收入 / 实付 / 毛利，账本按天的几列给应付成本和差额（lib/profit-page.js 拼）
+    async profitPage(input = {}) {
+      const response = await api.queryRules(input, { mode: "evaluate", force: true, origin: "manual", accountUsage: true });
+      const now = Date.parse(response.generatedAt), tz = response.tz;
+      const window = resolveReconciliationWindow({ ...input, timezone: tz }, now);
+      const labels = dayLabelsOf(window, tz, now);
+      const results = response.results;
+      const dayFacts = labels.length && results.length ? await repository.listLedgerDayFacts(results.map((row) => row.rule.id), labels[0], labels.at(-1)) : [];
+      // 看一天时「没算进的模型」的名字从那天的明细里拿（只有那几行、一行一次）
+      const missing = new Map();
+      if (labels.length === 1) {
+        for (const fact of dayFacts.filter((item) => item.gapReason === "MODEL_PRICE_MISSING")) {
+          const row = results.find((item) => item.rule.id === fact.ruleId);
+          const entry = row ? await repository.latestLedgerEntry(fact.ruleId, row.window).catch(() => null) : null;
+          missing.set(fact.ruleId, (entry?.detail?.expected?.missingPriceModels || []).map((model) => model.model).filter(Boolean));
+        }
+      }
+      // 永远不固定的日子（KEY_CONFLICT_GAP、OWN_CONSUME_LOG_GAP 这类 sticky 原因，状态行记着）：整页按天、行的合计里「只去掉那几天」，不当成还在读取（审核 #133 第 4 轮 M3，和 R2「关过的日子」同口径）
+      const stickyDays = new Map();
+      if (labels.length && results.length) {
+        const states = await repository.listSettlementStates(results.map((row) => row.rule.id), { billDates: labels }).catch(() => []);
+        for (const state of states) if (state.manualReason != null && reasonKindOf(state.manualReason) === "sticky") {
+          if (!stickyDays.has(state.ruleId)) stickyDays.set(state.ruleId, new Map());
+          stickyDays.get(state.ruleId).set(state.billDate, state.manualReason);
+        }
+      }
+      const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [], stickyDays });
+      // 固定成本：固定采购的上游按天平摊（lib/profit.js），换成美元要那个上游设了汇率；有一个没设就给 null（页面写「固定成本算不出，净利先不算」）
+      // 最小改法（审核 #126 M3）：按天摊，已固定的日子按账本那天记的 cost_basis 判要不要摊（fixed 才摊、usage 不摊）、汇率用那天的 cost_rate；
+      // 还没固定的日子（今天、还在读取）按现在的设置摊。注意：摊的「金额」本身还是按现在的购买记录算，改了购买金额过去的日子会跟着变——
+      // 「固定成本本身也按天固定下来」是以后单独一个小 PR 做的事，这里不做
+      const fixedStations = usageUpstreams()?.fixed || [];
+      let fixedCostUsd = 0;
+      // 没设汇率的固定上游：readResponse 的 unconfiguredRateStations 不含固定上游（那条路不摊固定成本，没必要提示），这里单独收集、和它的点名去重合并（审核 #126 M6）
+      const fixedRateUnset = [];
+      const dayFactOf = new Map(dayFacts.map((item) => [`${item.ruleId}:${item.billDate}`, item]));
+      for (const station of fixedStations) {
+        const rate = rateSnapshotOf(station);
+        if (!isConfiguredRate(rate)) { fixedCostUsd = null; fixedRateUnset.push({ id: station.id, name: station.name }); continue; }
+        if (fixedCostUsd == null) continue;
+        const purchases = purchasesOf(station);
+        const boundRuleIds = results.filter((row) => String(row.rule.upstreamStationId) === String(station.id)).map((row) => row.rule.id);
+        for (const day of labels) {
+          const dayStartMs = Math.max(dayStartInTz(day, tz), window.startMs);
+          const dayEndMs = Math.min(shiftedDayStartInTz(dayStartInTz(day, tz), 1, tz), window.endMs, now);
+          if (dayEndMs <= dayStartMs) continue;
+          const dayUsd = amortizeFixedCost(purchases, { startMs: dayStartMs, endMs: dayEndMs, tz }).exact;
+          if (!dayUsd) continue;
+          const fact = boundRuleIds.map((id) => dayFactOf.get(`${id}:${day}`)).find(Boolean);
+          if (fact) { if (fact.costBasis !== "fixed") continue; fixedCostUsd += dayUsd / Number(fact.costRate || rate.cnyPerUsd); }
+          else fixedCostUsd += dayUsd / Number(rate.cnyPerUsd);
+        }
+      }
+      // 整站收入读不到：从各绑定的 health.issues 扫（不另发请求，运营总览走的是现读一次 computeProfit，这里只有结果里带着的问题可查，
+      // 审核 #126 M5 要的「同一份」做不到不额外读站点；改法：自营站点侧的令牌类问题（ACCESS_TOKEN_*）也算进来，不只挑第一条、按最新一个）
+      const ownIssues = results.flatMap((row) => row.health?.issues || []).filter((issue) =>
+        (/^OWN_/.test(issue?.code || "") && reconciliationIssue(issue.code).kind === "reading") || (issue?.side === "own" && isAccessTokenError(issue?.code)));
+      const ownIssue = ownIssues.at(-1);
+      // 没算进利润的上游成本：直接用 unaccountedUpstream.totalUsd（summarizeUnaccountedUpstream 给的美元合计，算法只有一份；
+      // 不能用 .total，那是按 displayCurrency 折算过的，可能是人民币，审核 #126 M4）
+      const unaccountedUpstreamCostUsd = response.unaccountedUpstream?.totalUsd ?? null;
+      const rateUnsetIds = new Set();
+      const rateUnset = [...(response.unconfiguredRateStations || []), ...fixedRateUnset].filter((station) => (rateUnsetIds.has(station.id) ? false : (rateUnsetIds.add(station.id), true)));
+      return { ...page, asOf: response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd,
+        netProfitUsd: page.pageTotals.grossProfitUsd != null && fixedCostUsd != null ? page.pageTotals.grossProfitUsd - fixedCostUsd : null,
+        ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
+        unaccountedUpstreamCostUsd,
+        unlinkedChannelCount: (response.coverage?.channels || []).filter((channel) => channel.status === "unlinked").length,
+        rateUnset, fixedOffProfitStations: response.fixedOffProfitStations || [] };
+    },
+    // 一行一天的计算明细：已固定的从账本行读（result + detail.expected）；没固定的（今天）现算一次、应付成本没有
+    async profitDetail({ ruleIds = [], day } = {}) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(day || ""))) throw codedError("TIME_RANGE_INVALID", "日期不对");
+      const ids = [...new Set((Array.isArray(ruleIds) ? ruleIds : [ruleIds]).map(String).filter(Boolean))];
+      const rules = (await Promise.all(ids.map((id) => repository.getRule(id, { includeArchived: true })))).filter(Boolean);
+      if (!rules.length) throw ruleNotFound();
+      const pieces = [];
+      for (const rule of rules) {
+        const startMs = dayStartInTz(day, rule.timezone), endMs = shiftedDayStartInTz(startMs, 1, rule.timezone);
+        const entry = await repository.latestLedgerEntry(rule.id, { preset: "custom", startMs, endMs, timezone: rule.timezone });
+        if (entry) { pieces.push({ rule, result: entry.detail?.result || null, expected: entry.detail?.expected || null, entry }); continue; }
+        const now = Date.now();
+        if (startMs > now) throw codedError("TIME_RANGE_FUTURE", "不能选以后的时间");
+        const today = dayKeyInTz(now, rule.timezone) === day;
+        const live = await api.queryRules({ ruleIds: [rule.id], ...(today ? { preset: "today" } : { preset: "custom", startMs, endMs: Math.min(endMs, now) }) }, { mode: "evaluate", force: true, origin: "manual" });
+        pieces.push({ rule, result: live.results[0] || null, expected: null, entry: null });
+      }
+      return buildProfitDetail(pieces, { day });
+    },
     async getConfirmedHistory(id, input = {}) {
       const options = normalizeConfirmedHistoryOptions(input);
       try {
@@ -3341,6 +3704,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       });
     },
     async queryRules({ ruleIds = null, ...input } = {}, options = {}) {
+      // 减压 PR：页面来读实时窗口（今天/近 7 天/本月），就是「有人在看」的信号——不额外发请求，借用页面本来就有的轮询；
+      // 空闲后第一次又来，at 刷成现在，下一轮轮询就不再当没人看，所有渠道都现问
+      if (options.origin === "page" && isLiveReconciliationPreset(input.preset)) {
+        const now = Date.now();
+        lastTodayViewAt.at = now;
+      }
       for (let attempt = 1; ; attempt += 1) {
         const knownRules = await repository.listRules({ includeArchived: true });
         const rules = knownRules.filter((rule) => !rule.archivedAt);
@@ -3417,16 +3786,31 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       await pruneSettlementStates(now);
       // 自营站点整站日志增量读（应付成本 V1-a）：每轮每个自营站点读几页，额度和断路在 lib/own-request-budget.js；读失败不影响这一轮别的事
       // 「算应付成本」开着（settings.expectedCost === true）才读；没设置过、关着都一个整站读请求都不发（每轮读一次，不用重启；用语规范 §8.3）
-      if (ownLogIngest && rt.store?.settings?.expectedCost === true) {
+      const expectedCostOn = rt.store?.settings?.expectedCost === true;
+      // 记「上一次看到开关是关着的」：只在关→开这一下才告诉 ingestOnce 去跳缺口（总指挥 10-26 定第三轮，决定 C）
+      const wasOff = rt.store?.settings?.expectedCostWasOff === true;
+      const justTurnedOn = expectedCostOn && wasOff;
+      if (!expectedCostOn && !wasOff) await rt.store?.updateSettings?.({ expectedCostWasOff: true })?.catch?.(() => {});
+      if (ownLogIngest && expectedCostOn) {
+        // 跳不跳只在 ingestOnce 里面判断（只改库，不发请求，排在额度/断路/管理员名单检查前面，一定会跑到）；
+        // 清掉「上一次是关着的」标记要等每个站点都真的判断过（skipChecked），不然某个站点这一轮被额度、断路挡住没走到判断，
+        // 标记却已经清了，下一轮就再也不会跳了（审核 R2 #125 第三轮 中-C）
+        let allSkipChecked = true;
         for (const id of new Set(rules.map((rule) => rule.ownStationId))) {
           const own = upstreamStation(id);
-          if (own?.isOwn && own.type === "newapi") await ownLog.ingestOnce(own).catch((error) => console.error("自营站点整站日志读取失败:", error?.message || String(error)));
+          if (own?.isOwn && own.type === "newapi") {
+            const result = await ownLog.ingestOnce(own, { justTurnedOn }).catch((error) => { console.error("自营站点整站日志读取失败:", error?.message || String(error)); return null; });
+            if (!result?.skipChecked) allSkipChecked = false;
+            await backfillExpectedCost(own, { now }).catch((error) => console.error("应付成本补算失败:", error?.message || String(error)));
+          }
         }
+        if (justTurnedOn && allSkipChecked) await rt.store?.updateSettings?.({ expectedCostWasOff: false })?.catch?.(() => {});
         await ownLog.pruneIfDue();
       }
     },
     // 应付成本 V1-a：整站日志读取和上游价目表，给 V1-b 的结账和只读试算用
     ingestOwnLog: (own) => ownLog.ingestOnce(own),
+    backfillExpectedCost,
     ownLogBuckets: (stationId, fromSlotMs, toSlotMs) => (ownLogStore || rt._ownLogStore).listBuckets(stationId, fromSlotMs, toSlotMs),
     upstreamPricing: (station) => upstreamPricing.pricingFor(station),
     // 自营站点记不记收费记录的最近一次读取结果（{ state: on | off | denied | unavailable, reason? }），没读过是 null；设置页用
@@ -3444,6 +3828,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       identityCache.clear();
       // P1a 的两张表也清：渠道收费的沿用和「今天」快照的跳写都要从现读重新开始
       ownRevenueCache.clear();
+      ownChannelActivity.clear(); // 减压 PR 沿用的渠道净额度记录也跟着清，不然清缓存以后还会沿用旧数据
       observationWrites.clear();
       clearBillingResults();
     },
@@ -3454,8 +3839,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 }
 
 // 每轮结束后按当前设置排下一轮：改了刷新间隔不用重启，慢的一轮也不会和下一轮重叠。
-export function startReconciliationPolling(rt) {
-  const module = (rt.reconciliation ||= createReconciliationModule(rt));
+export function startReconciliationPolling(rt, options = {}) {
+  const module = (rt.reconciliation ||= createReconciliationModule(rt, options));
   if (rt._reconciliationPollTimer) return module;
   const schedule = (delayMs) => {
     rt._reconciliationPollTimer = setTimeout(tick, delayMs);

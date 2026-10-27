@@ -208,13 +208,16 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_rules", "source_binding", "JSON NULL");
   // K2b：这条绑定的 Key 现在有没处理的事——分组/合组（KEY_GROUP_CHANGED）、渠道换成了不在已加上游里的 Key
   // （CHANNEL_KEY_UNMATCHED）、打码撞了又没有读完整 Key 的权限（KEY_REVEAL_DENIED）——第一次认出来的时刻（毫秒），
-  // 跨轮记下来，重启不丢（总指挥 10-26 定）。早退只挡从这一刻起的窗口，这一刻以前已经结过（或者还没结到）的日子不受影响；
+  // 跨轮记下来，重启不丢。早退只挡从这一刻起的窗口，这一刻以前已经结过（或者还没结到）的日子不受影响；
   // 事情解开（比如又换回来）清成 NULL
   await addColumnIfMissing(pool, "reconciliation_rules", "key_issue_code", "VARCHAR(40) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "key_issue_since_ms", "BIGINT NULL");
   // K2b 后续：换 Key 开的新段，系统从上游日志里找到新 Key 的第一条用量时，记下那一刻（毫秒）。只用来写「几点换的」，
   // 不改钱——段的起点 effective_from_ms 还是读到变化的那一刻 b，钱按 [a, b) 两把 Key 相加算；没找到（或不是 New API）是 NULL
   await addColumnIfMissing(pool, "reconciliation_rule_segments", "display_from_ms", "BIGINT NULL");
+  // 事项解开了（渠道回到原来的 Key），没有靠换段、重新分组处理：冲突期间 [since, until) 里另一把 Key 的用量没人算，这一段的日子不能固定、永远不固定。
+  // 一条绑定可以有好几段（解开以后又出新事项、又解开），存成 JSON 数组 [{ code, sinceMs, untilMs }]；NULL 是没有
+  await addColumnIfMissing(pool, "reconciliation_rules", "key_blocks", "JSON NULL");
   await addIndexIfMissing(pool, "reconciliation_snapshots", "idx_reconciliation_snapshot_segment", "(segment_id)");
   // 写快照前「先读出同一把 Key 的那一组绑定」（计划 P1c）走这个索引；解除的绑定也留着，表会越来越大
   await addIndexIfMissing(pool, "reconciliation_rules", "idx_reconciliation_rule_token", "(token_id, archived_at)");
@@ -271,8 +274,15 @@ export async function ensureSchema(pool) {
     source VARCHAR(24) NOT NULL,
     detail JSON NULL,
     settled_at DATETIME(3) NOT NULL,
+    expected_cost_usd DECIMAL(20,8) NULL,
+    gap_reason VARCHAR(40) NULL,
+    tokens BIGINT NULL,
     PRIMARY KEY (rule_id, bill_date, revision)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 应付成本（V1-b）：账本多三列，旧账是 null
+  await addColumnIfMissing(pool, "reconciliation_ledger", "expected_cost_usd", "DECIMAL(20,8) NULL");
+  await addColumnIfMissing(pool, "reconciliation_ledger", "gap_reason", "VARCHAR(40) NULL");
+  await addColumnIfMissing(pool, "reconciliation_ledger", "tokens", "BIGINT NULL");
   // 结账状态（计划 C2a）：每条绑定每个还没固定的日子一行，固定成了就在同一个事务里删掉。只放没办完的日子，正常时接近空。
   // retry_reason 会自己好的原因（按退避表再试）；manual_reason 要人处理的原因；source_version 记下时的配置代次（变了马上重判）。
   // resettle_* 是重结请求（C2b 才写）。不加外键；清理按 bill_date 每小时删一批 31 天前、没有请求的行。
@@ -302,6 +312,10 @@ export async function ensureSchema(pool) {
     covered_to_ms BIGINT NOT NULL,
     updated_at_ms BIGINT NOT NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 「算应付成本」关→开跳过的那段缺口（总指挥 10-26 定第三轮）：covered_to_ms 直接挪到昨天 0 点，中间跳过的这段记在这两列，
+  // 结账时这段范围里的日子给 EXPECTED_COST_DISABLED（不是 NOT_STARTED/EXPECTED_COST_NOT_RECORDED，那两个留给「还没开始统计」）
+  await addColumnIfMissing(pool, "own_log_cursor", "disabled_from_ms", "BIGINT NULL");
+  await addColumnIfMissing(pool, "own_log_cursor", "disabled_to_ms", "BIGINT NULL");
   await pool.query(`CREATE TABLE IF NOT EXISTS own_log_buckets (
     station_id VARCHAR(32) NOT NULL,
     slot_ms BIGINT NOT NULL,

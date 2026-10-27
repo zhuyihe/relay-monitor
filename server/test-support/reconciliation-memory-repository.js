@@ -13,10 +13,10 @@ import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, serializeR
 import { billDayOf } from "../../lib/business-time.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, resettleRequestPlan } from "../../lib/reconciliation-settlement.js";
 import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
-import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
+import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
-  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow,
+  uid, addKeyBlock, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
   SETTLEMENT_STATE_WRITE_COLUMNS, settlementStateFromRow, settlementStateValues,
 } from "../reconciliation-repository.js";
@@ -308,6 +308,11 @@ export class MemoryReconciliationRepository {
     return attachSegmentKeys(segments, keyRows);
   }
 
+  async listSegmentsForRules(ruleIds) {
+    const ids = [...new Set((ruleIds || []).map(String))];
+    return Object.fromEntries(await Promise.all(ids.map(async (id) => [id, await this.listSegments(id)])));
+  }
+
   // 同 MySQL 版 db/segment-keys.js 的 refreshSegmentKeysSql（几条语句一一对应，改一边要改另一边）：
   // 0 关掉的段、停用/解除的绑定的所有 Key 行不再占 active_token_key；1 没有 Key 行的段补一行；
   // 2 来源是 initial 的行跟着 rules 走——K2b 以后（这条绑定有了非 initial 的行）关掉的段不再跟；
@@ -505,13 +510,33 @@ export class MemoryReconciliationRepository {
     });
   }
 
+  // 对应 MySQL 版 keyHeldUntil
+  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null } = {}) {
+    const rules = new Map(this.#plain("rules").map((row) => [row.id, row]));
+    const ends = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && Number(segment.effective_to_ms) >= (sinceMs ?? 0)
+      && rules.get(segment.rule_id)?.own_station_id === ownStationId
+      && this.#plain("segmentKeys").some((key) => key.segment_id === segment.id && key.upstream_station_id === upstreamStationId && Number(key.token_id) === Number(tokenId)))
+      .map((segment) => Number(segment.effective_to_ms));
+    return ends.length ? Math.max(...ends) : null;
+  }
+
+  // 对应 MySQL 版 addKeyBlock
+  async addKeyBlock(ruleId, block, { clearIssue = false } = {}) {
+    await this.#transaction("addKeyBlock", async (tx) => {
+      const entry = this.#ruleEntry(tx, ruleId);
+      if (!entry) return;
+      this.#update(tx, "rules", [entry], { key_blocks: JSON.stringify(addKeyBlock(entry.row.key_blocks, block)), ...(clearIssue ? { key_issue_code: null, key_issue_since_ms: null } : {}) });
+    });
+  }
+
   // 对应 MySQL 版 applyKeyChangePlans：先把这一批绑定（和它们当前开着段）的 active_token_key 全部清空，
   // 再分别开新段、写新值；唯一约束的检查在 #commit 里（#assertUnique），撞了整批回滚、这里捕获改回 { conflict: true }
   async applyKeyChangePlans(plans, { detectedAt = Date.now() } = {}) {
     try {
       await this.#transaction("applyKeyChangePlans", async (tx) => {
+        tx.record.keyChangeRuleIds = plans.map(({ ruleId }) => ruleId); // 给测试的 beforeCommit 钩子认「这个事务是给哪几条绑定换 Key」
         const currents = new Map(), rules = new Map();
-        for (const { ruleId } of plans) {
+        for (const { ruleId } of [...plans].sort((x, y) => (x.ruleId < y.ruleId ? -1 : x.ruleId > y.ruleId ? 1 : 0))) { // 同 MySQL 版：按 id 顺序锁
           await this.#lock(tx, `rule:${ruleId}`);
           const entry = this.#ruleEntry(tx, ruleId);
           if (!entry) throw repositoryError("RULE_NOT_FOUND");
@@ -520,6 +545,8 @@ export class MemoryReconciliationRepository {
           if (!current) throw repositoryError("CURRENT_SEGMENT_MISSING");
           currents.set(ruleId, current);
         }
+        // 对应 MySQL 版的前置条件：不满足就整批什么也不写（抛出去，事务回滚），返回 { stale: true }
+        if (plans.some(({ ruleId, plan }) => keyChangePlanIsStale(plan, rules.get(ruleId), currents.get(ruleId)))) throw Object.assign(new Error("stale key change plan"), { stalePlan: true });
         for (const { ruleId } of plans) {
           // 对应 MySQL 版：先给还没有 Key 行的段补一行（填换之前 rules 上的那把），再清空 active_token_key
           const oldRule = this.#ruleEntry(tx, ruleId).row;
@@ -533,7 +560,7 @@ export class MemoryReconciliationRepository {
           this.#update(tx, "segmentKeys", keyRows, { active_token_key: null });
         }
         const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
-        for (const { ruleId, plan } of plans) {
+        for (const { ruleId, plan, keyBlock } of plans) {
           const current = currents.get(ruleId), rule = rules.get(ruleId);
           const ruleActiveKey = plan.canonicalKey ?? tokenKeyOf(plan.after[0]); // 同 MySQL 版：和 createRule 一个口径
           const newGroup = plan.group ?? current.group_name;
@@ -559,6 +586,7 @@ export class MemoryReconciliationRepository {
             openSegment(plan.cutoverAt, plan.after, { fresh: true });
           }
           const [firstKey] = plan.after;
+          if (keyBlock) this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { key_blocks: JSON.stringify(addKeyBlock(this.#ruleEntry(tx, ruleId).row.key_blocks, keyBlock)) }); // 同 MySQL 版：和换段同一个事务
           this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { token_id: bigint(firstKey.tokenId),
             token_name: firstKey.tokenName ?? rule.token_name, active_token_key: ruleActiveKey,
             ...(plan.canonicalKey !== undefined ? { canonical_key: plan.canonicalKey } : {}), ...(plan.group !== undefined ? { fixed_group: plan.group } : {}) });
@@ -568,6 +596,7 @@ export class MemoryReconciliationRepository {
       });
     } catch (err) {
       if (err?.code === "ER_DUP_ENTRY") return { conflict: true };
+      if (err?.stalePlan) return { conflict: false, stale: true };
       throw err;
     }
     return { conflict: false };
@@ -759,6 +788,37 @@ export class MemoryReconciliationRepository {
     const doomed = this.#rows("settlementState").filter(({ row }) => row.bill_date < beforeDate && (row.resettle_requested_at_ms == null || row.resettle_requested_at_ms < requestedBeforeMs) && !RESETTLE_KEPT_REASONS.includes(row.manual_reason)).slice(0, limit);
     this.#delete(null, "settlementState", doomed);
     return doomed.length;
+  }
+
+  async listLedgerDaysByReason(ruleIds, sinceDate, reason) {
+    if (!ruleIds?.length) return [];
+    await this.#read("listLedgerDaysByReason", [ruleIds, sinceDate, reason]);
+    const wanted = new Set(ruleIds.map(String));
+    return this.#plain("ledger").filter((row) => wanted.has(String(row.rule_id)) && row.bill_date >= sinceDate && row.gap_reason === reason && row.expected_cost_usd == null
+      && Number(row.revision) === this.#ledgerOf(null, row.rule_id, row.bill_date)[0].revision)
+      .sort((a, b) => compare(a.bill_date, b.bill_date) || compareText(a.rule_id, b.rule_id)).map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
+  }
+
+  async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null, revision = null } = {}) {
+    await this.#read("fillExpectedCost", [ruleId, billDate]);
+    const top = this.#ledgerOf(null, ruleId, billDate)[0];
+    const entry = top ? this.#rows("ledger").find(({ row }) => row === top) : null;
+    // revision 是调用方读那一行时的版本号，不重查「现在的最新一版」：对不上（这期间插进来一次重结写出新版）就不填（审核 R2 #125 低-2）
+    if (!entry || entry.row.expected_cost_usd != null || entry.row.gap_reason !== "EXPECTED_COST_LAGGING" || Number(entry.row.revision) !== Number(revision)) return false;
+    const detail = typeof entry.row.detail === "string" ? JSON.parse(entry.row.detail || "{}") : { ...(entry.row.detail || {}) };
+    (this.log.ledgerFills ||= []).push({ ruleId, billDate, revision: entry.row.revision });
+    this.#update(null, "ledger", [entry], { expected_cost_usd: expectedCostUsd == null ? null : ledgerDecimal(expectedCostUsd, LEDGER_DECIMAL_SCALE.expected_cost_usd), gap_reason: gapReason, tokens,
+      detail: JSON.stringify({ ...detail, expected }) });
+    return true;
+  }
+
+  async listLedgerDayFacts(ruleIds, fromDate, toDate) {
+    if (!ruleIds?.length) return [];
+    await this.#read("listLedgerDayFacts", [ruleIds, fromDate, toDate]);
+    const wanted = new Set(ruleIds.map(String));
+    return this.#plain("ledger").filter((row) => wanted.has(String(row.rule_id)) && row.bill_date >= fromDate && row.bill_date <= toDate
+      && Number(row.revision) === this.#ledgerOf(null, row.rule_id, row.bill_date)[0].revision)
+      .sort((a, b) => compare(a.bill_date, b.bill_date) || compareText(a.rule_id, b.rule_id)).map((row) => ledgerDayFactFromRow(ledgerRead(row)));
   }
 
   async latestLedgerEntry(ruleId, window) {
