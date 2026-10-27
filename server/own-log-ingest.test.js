@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { INGEST, createOwnLogIngest } from "./own-log-ingest.js";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 import { ownUsersKey } from "./own-helpers.js";
-import { noteOwnRequest, resetOwnRequestBudget, INGEST_RESERVE, OWN_RATE_LIMIT } from "../lib/own-request-budget.js";
+import { noteOwnRequest, resetOwnRequestBudget, INGEST_FLOOR_PER_MIN, INGEST_RESERVE, OWN_RATE_LIMIT } from "../lib/own-request-budget.js";
 import { OWN_LOG_SLOT_MS } from "../lib/own-log-bucket.js";
 
 // 业务时区上海：now 是 10-09 11:00，昨天 0 点是 10-07 16:00Z
@@ -113,13 +113,17 @@ test("额度和断路：别的读取已经用掉大半额度就这轮不读；�
   const store = new MemoryOwnLogStore();
   const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
   for (let i = 0; i < OWN_RATE_LIMIT - INGEST_RESERVE; i += 1) noteOwnRequest(own.baseUrl + "/x", { status: 200, elapsedMs: 10, now: NOW });
-  assert.deepEqual((await ingest.ingestOnce(own)).skipped, "budget", "剩给别人的额度不够：不读");
+  // 剩给别人的额度不够：不是 0，保底每分钟还能发 INGEST_FLOOR_PER_MIN 个（总指挥 10-26 定，不然线上别的读占满时整站读永远发不出）
+  const starved = await ingest.ingestOnce(own);
+  assert.ok(!starved.skipped && starved.pages > 0 && starved.pages <= INGEST_FLOOR_PER_MIN, `额度不够时走保底：${starved.pages} 页`);
+  const coveredAfterStarved = (await store.getCursor("own")).coveredToMs;
+  const beforeBreak = requests.filter((r) => r.path === "/api/log/").length;
   resetOwnRequestBudget();
   fail = 429;
   const broken = await ingest.ingestOnce(own);
   assert.equal(broken.error, "UPSTREAM_REQUEST_FAILED");
-  assert.equal(requests.filter((r) => r.path === "/api/log/").length, 1, "429 以后这轮不再发");
-  assert.equal((await store.getCursor("own")).coveredToMs, YESTERDAY_START, "窗口没写");
+  assert.equal(requests.filter((r) => r.path === "/api/log/").length - beforeBreak, 1, "429 以后这轮不再发");
+  assert.equal((await store.getCursor("own")).coveredToMs, coveredAfterStarved, "窗口没写");
   assert.equal((await ingest.ingestOnce(own)).skipped, "break", "断路期间不读");
   fail = null; resetOwnRequestBudget();
   const ok = await ingest.ingestOnce(own);
@@ -163,6 +167,7 @@ test("很忙的站点（每秒 12 条）追得上：窗口缩到几十秒，每�
   for (; rounds < 40; rounds += 1) {
     resetOwnRequestBudget();
     const result = await ingest.ingestOnce(own);
+    console.log("DEBUG", rounds, JSON.stringify(result), ingest.windowSizes.get("own"));
     if (result.skipped === "caught-up") break;
     assert.ok(result.pages <= INGEST.MAX_PAGES_BEHIND, `每轮最多 15 页：${result.pages}`);
     const cursor = await store.getCursor("own");
@@ -223,18 +228,85 @@ test("站点不给 total：一页一页翻到不满一页为止；这轮额度�
   assert.ok(requests.length > 0);
 });
 
-test("进度比保留期还旧（停机超过 35 天）：清掉从昨天 0 点重来；清理一批一批删到不满一批为止（审核 #123 低-4、低-6）", async (t) => {
+// 总指挥 10-26 定第三轮：停机、站点读不到、令牌失效造成的掉队，不管多久都不跳，照常按保底慢慢追——那几天开关本来是开着的，补得上就该补
+test("控制台停两天再起来：不跳，前天照样按保底慢慢补上（没有 justTurnedOn 就不跳，不管落后多久）", async (t) => {
   resetOwnRequestBudget();
   const { own, rt } = await fakeSite(t, [row(1, YESTERDAY_START + 1000)]);
   const store = new MemoryOwnLogStore();
-  await store.startCursor("own", NOW - 40 * 86400000);
+  await store.startCursor("own", NOW - 40 * 86400000); // 停机 40 天，远超 35 天的保留期
   const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
   await ingest.ingestOnce(own);
-  assert.equal((await store.getCursor("own")).coveredFromMs, YESTERDAY_START, "从昨天 0 点重来");
+  assert.equal((await store.getCursor("own")).coveredFromMs, NOW - 40 * 86400000, "没传 justTurnedOn：进度起点不动，不跳，照旧从老地方往前追");
+  assert.equal((await store.getCursor("own")).disabledFromMs, null, "没有跳过的缺口");
+});
+
+test("清理一批一批删到不满一批为止（审核 #123 低-4、低-6）", async (t) => {
+  resetOwnRequestBudget();
+  const { rt } = await fakeSite(t, [row(1, YESTERDAY_START + 1000)]);
+  const store = new MemoryOwnLogStore();
+  const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
   const old = []; for (let i = 0; i < 4500; i += 1) old.push({ slotMs: NOW - 40 * 86400000, channelId: i, model: "m", upstreamModel: "", group: "g", semantic: "openai", requests: 1 });
-  await store.deleteStation("old"); await store.startCursor("old", 0);
+  await store.startCursor("old", 0);
   await store.applyWindow("old", { fromMs: 0, toMs: 1, buckets: old });
   assert.equal(await ingest.pruneIfDue(), 4500, "4500 行 = 3 批");
+});
+
+test("开关关 10 天再打开：传 justTurnedOn 才跳到昨天 0 点，跳过的缺口记下来、桶不删（总指挥 10-26 定第三轮，决定 C）", async (t) => {
+  resetOwnRequestBudget();
+  const { own, rt } = await fakeSite(t, []); // 不给日志，避免追的时候自己把进度推到昨天，干扰断言
+  const store = new MemoryOwnLogStore();
+  const oldFrom = YESTERDAY_START - 10 * 86400000; // 10 天前还开着，之后关了
+  await store.startCursor("own", oldFrom);
+  await store.applyWindow("own", { fromMs: oldFrom, toMs: oldFrom + 1, buckets: [{ slotMs: oldFrom, channelId: 1, model: "m", upstreamModel: "", group: "g", semantic: "openai", requests: 1 }] });
+  const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
+  await ingest.ingestOnce(own, { justTurnedOn: false });
+  const before = await store.getCursor("own");
+  assert.equal(before.disabledFromMs, null, "没传 justTurnedOn：这一轮不跳，没有缺口");
+  assert.ok(before.coveredToMs < YESTERDAY_START, "10 天的缺口一轮追不完，还没到昨天 0 点");
+  await ingest.ingestOnce(own, { justTurnedOn: true });
+  const cursor = await store.getCursor("own");
+  // 跳过去以后，这一轮剩下的额度接着往前读（不是跳完就停）：只断言跳到了昨天 0 点（或更后面）、缺口记对了
+  assert.ok(cursor.coveredToMs >= YESTERDAY_START, "跳到了昨天 0 点（或这一轮接着往前读到了更后面）");
+  assert.deepEqual([cursor.disabledFromMs, cursor.disabledToMs], [before.coveredToMs, YESTERDAY_START], "缺口是跳之前的进度到昨天 0 点这一段");
+  assert.equal((await store.listBuckets("own", 0, Number.MAX_SAFE_INTEGER)).length, 1, "已经读进来的桶没删");
+});
+
+// 审核 R2 #125 第三轮 中-C：这一轮被额度、断路、管理员名单挡住，没真的走到跳不跳那一步时，skipChecked 不给 true——
+// 调用方（server/reconciliation.js）据此不清「上一次是关着的」标记，下一轮还会再试，不会因为撞上这些挡路的原因就永远跳不过去
+test("被额度、管理员名单挡住的那一轮没真的判断过跳不跳：不给 skipChecked，下一轮还会再试（审核 R2 #125 第三轮 中-C）", async (t) => {
+  resetOwnRequestBudget();
+  const oldFrom = YESTERDAY_START - 10 * 86400000;
+  const store = new MemoryOwnLogStore();
+  await store.startCursor("own", oldFrom);
+
+  // 额度不够（断路/限流）：function 在判断跳不跳之前就退出
+  {
+    const { own, rt } = await fakeSite(t, []);
+    for (let i = 0; i < 400; i += 1) noteOwnRequest(own.baseUrl + "/x", { status: 429, elapsedMs: 10, now: NOW });
+    const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
+    const result = await ingest.ingestOnce(own, { justTurnedOn: true });
+    assert.equal(result.skipChecked, undefined, "被断路/限流挡住，没走到跳不跳那一步");
+    assert.equal((await store.getCursor("own")).disabledFromMs, null, "没跳，缺口还没记");
+  }
+  resetOwnRequestBudget();
+
+  // 管理员名单读不到：function 在判断跳不跳之前就退出（现在的站点读不到 /api/user/）
+  {
+    const { own } = await fakeSite(t, []);
+    const bad = { ...own, baseUrl: "http://127.0.0.1:9" };
+    const ingest = createOwnLogIngest({}, { store, now: () => NOW });
+    const result = await ingest.ingestOnce(bad, { justTurnedOn: true });
+    assert.equal(result.skipped, "admins");
+    assert.equal(result.skipChecked, undefined, "被管理员名单挡住，没走到跳不跳那一步");
+    assert.equal((await store.getCursor("own")).disabledFromMs, null, "没跳，缺口还没记");
+  }
+
+  // 这两轮都没真的判断过，下一轮（额度、名单都正常）应该还能跳——不会因为之前被挡住就再也跳不过去
+  const { own, rt } = await fakeSite(t, []);
+  const ingest = createOwnLogIngest(rt, { store, now: () => NOW });
+  const result = await ingest.ingestOnce(own, { justTurnedOn: true });
+  assert.equal(result.skipChecked, true, "这一轮真的走到了跳不跳那一步");
+  assert.ok((await store.getCursor("own")).disabledFromMs != null, "这一轮才真的跳了、记下缺口");
 });
 
 test("管理员名单读不到：这轮不读（桶里的管理员自用会算错）；清理只删 35 天前的桶", async (t) => {
@@ -252,4 +324,28 @@ test("管理员名单读不到：这轮不读（桶里的管理员自用会算�
   await store.applyWindow("own", { fromMs: 0, toMs: 1, buckets: [{ slotMs: NOW - 40 * 86400000, channelId: 1, model: "m", upstreamModel: "", group: "g", semantic: "openai", requests: 1 }, { slotMs: NOW - 3600000, channelId: 1, model: "m", upstreamModel: "", group: "g", semantic: "openai", requests: 1 }] });
   assert.equal(await ingest.pruneIfDue(), 1);
   assert.equal(await ingest.pruneIfDue(), 0, "一小时内不再清");
+});
+
+test("保底：别的读取一直占满额度（线上站点忙），整站读每轮也能发出 INGEST_FLOOR_PER_MIN 个请求、窗口接着切小，最后追平（总指挥 10-26 定）", async (t) => {
+  resetOwnRequestBudget();
+  // 落后 2 小时，每 2 分钟一条（60 条），密度不大，保底 2 页/分钟也追得上
+  const logs = []; let id = 1;
+  for (let at = NOW - 2 * 3600000; at < NOW - INGEST.LAG_MS; at += 120000) logs.push(row(id++, at));
+  const { own, rt } = await fakeSite(t, logs);
+  const store = new MemoryOwnLogStore();
+  await store.startCursor("own", NOW - 2 * 3600000);
+  let now = NOW;
+  const ingest = createOwnLogIngest(rt, { store, now: () => now });
+  let rounds = 0;
+  for (; rounds < 60; rounds += 1) {
+    resetOwnRequestBudget();
+    // 模拟别的读取占满这个站点的额度：整站读只能靠保底
+    for (let i = 0; i < OWN_RATE_LIMIT - INGEST_RESERVE; i += 1) noteOwnRequest(own.baseUrl + "/other", { status: 200, elapsedMs: 10, now });
+    const result = await ingest.ingestOnce(own);
+    if (result.skipped === "caught-up") break;
+    assert.ok(result.pages <= INGEST_FLOOR_PER_MIN, `每轮最多保底 ${INGEST_FLOOR_PER_MIN} 页：${result.pages}`);
+  }
+  assert.ok(rounds > 0 && rounds < 60, `保底慢慢追平：${rounds} 轮`);
+  const cursor = await store.getCursor("own");
+  assert.equal(cursor.coveredToMs, now - INGEST.LAG_MS, "最后追平");
 });

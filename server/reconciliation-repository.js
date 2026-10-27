@@ -888,6 +888,33 @@ export class ReconciliationRepository {
     return rows.map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
   }
 
+  // 应付成本补算（V1-b，总指挥 10-26 定）：这些绑定从 sinceDate 起、最新一版原因是 reason 的日子（固定时整站记录还没读到那天的）
+  async listLedgerDaysByReason(ruleIds, sinceDate, reason) {
+    if (!ruleIds?.length) return [];
+    const [rows] = await this.pool.query(
+      `SELECT rule_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date FROM reconciliation_ledger l
+       WHERE rule_id IN (?) AND bill_date >= ? AND gap_reason = ? AND expected_cost_usd IS NULL
+         AND revision = (SELECT MAX(revision) FROM reconciliation_ledger m WHERE m.rule_id = l.rule_id AND m.bill_date = l.bill_date)
+       ORDER BY bill_date, rule_id`, [ruleIds, sinceDate, reason]);
+    return rows.map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
+  }
+
+  // 补算：只填最新一版、应付成本还空着、原因是 EXPECTED_COST_LAGGING 的那一行（不覆盖有数的、不写新版）；detail.expected 一起换掉。填上了返回 true。
+  // revision：调用方读那一行时带的版本号，和「现在的最新一版」都要对上——读、算、写之间插进来一次重结写出新版的话，revision 对不上旧版就不填，
+  // 也不会填到旧版上盖掉（新版不受影响，但旧版的 detail 不该再被改；审核 R2 #125 低-2、第二轮 低-A：两个条件都要留着，只认 revision = ?
+  // 不够，内存实现两样都要求，MySQL 也要一样）
+  async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null, revision = null } = {}) {
+    // 用 JOIN 一份派生表接「现在的最新一版」，不在 WHERE 里直接对同一张表做关联子查询（MySQL 不让 UPDATE 的 WHERE 子查询直接选同一张表）
+    const [result] = await this.pool.query(
+      `UPDATE reconciliation_ledger l
+       JOIN (SELECT rule_id, bill_date, MAX(revision) AS max_revision FROM reconciliation_ledger WHERE rule_id = ? AND bill_date = ? GROUP BY rule_id, bill_date) latest
+         ON latest.rule_id = l.rule_id AND latest.bill_date = l.bill_date
+       SET l.expected_cost_usd = ?, l.gap_reason = ?, l.tokens = ?, l.detail = JSON_SET(COALESCE(l.detail, JSON_OBJECT()), '$.expected', CAST(? AS JSON))
+       WHERE l.rule_id = ? AND l.bill_date = ? AND l.expected_cost_usd IS NULL AND l.gap_reason = 'EXPECTED_COST_LAGGING' AND l.revision = ? AND l.revision = latest.max_revision`,
+      [ruleId, billDate, expectedCostUsd, gapReason, tokens, JSON.stringify(expected), ruleId, billDate, revision]);
+    return Number(result?.affectedRows) > 0;
+  }
+
   // 结账没成：记下或更新这一行（settlementOutcome 的 state，op 是 retry / manual / sticky）。
   // 账本里已经有这天的任一版就不写（另一处已经固定了），一条语句判断，不用先读；调用方读状态行时带着重结请求的日子除外
   // （requestedAt 不为空：账本里本来就有这天，重结没成要照样记下退避，不然每轮都再试一次——请求在不在由调用方手里的状态行说了算，

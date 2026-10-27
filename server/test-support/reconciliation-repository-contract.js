@@ -918,7 +918,7 @@ contract("the ledger keeps one row per settled day: the same window is not booke
   const first = await latest();
   assert.deepEqual({ ...first, detail: undefined }, { ruleId: rule.id, billDate: "2026-01-10", revision: 1, versionId: null, timezone: "UTC",
     startMs: day, endMs: day + DAY, revenueUsd: 2.25, costUsd: 1, revenueRate: 7.1, costRate: null, costBasis: "usage", source: "settle",
-    detail: undefined, settledAt: "2026-01-11T00:20:00.000Z" });
+    detail: undefined, settledAt: "2026-01-11T00:20:00.000Z", expectedCostUsd: null, gapReason: null, tokens: null });
   assert.equal(first.detail.result.calculation.profitUsd, 2);
   assert.equal(first.detail.scopeFingerprint, fingerprint);
 
@@ -1157,6 +1157,46 @@ contract("listLedgerDays lists each booked day once per rule from a date on, onl
   assert.deepEqual(days, [{ ruleId: rule.id, billDate: "2026-01-09" }], "两版只算一天，早于起点的不要，别的绑定不要");
   assert.equal((await repository.listLedgerDays([rule.id, other.id], "2026-01-01")).length, 3);
   assert.deepEqual(await repository.listLedgerDays([], "2026-01-01"), []);
+});
+
+contract("expected-cost backfill: listLedgerDaysByReason lists lagging days of the latest revision; fillExpectedCost fills only an empty lagging row in place (no new revision), and only once", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule();
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const book = async (day, patch, resettle = false) => {
+    const window = { preset: "yesterday", startMs: Date.UTC(2026, 0, day), endMs: Date.UTC(2026, 0, day + 1), timezone: "UTC" };
+    const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: `2026-01-${String(day + 1).padStart(2, "0")}T00:20:00.000Z` });
+    const ledger = settlement(snapshot, resettle ? { resettle, revenueRate: 7 } : {});
+    ledger.entry = { ...ledger.entry, ...patch };
+    assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { ledger }), true);
+    return window;
+  };
+  await book(8, { expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null });
+  await book(9, { expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null });
+  const window9 = await book(9, { expectedCostUsd: 2.5, gapReason: null, tokens: 10 }, true); // 第二版已经有数
+  await book(10, { expectedCostUsd: null, gapReason: "MODEL_PRICE_UNREADABLE", tokens: 5 });
+  assert.deepEqual(await repository.listLedgerDaysByReason([rule.id], "2026-01-01", "EXPECTED_COST_LAGGING"), [{ ruleId: rule.id, billDate: "2026-01-08" }], "9 日最新一版有数、10 日原因不同：都不算");
+  // revision 带的是调用方读到那一行时的版本号（审核 R2 #125 低-2），不是重查「现在的最新一版」：8、10 日各只写过 1 版，9 日写过 2 版
+  assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-08", { expectedCostUsd: 1.25, gapReason: null, tokens: 2880000, expected: { usd: 1.25, backfilledAt: "2026-01-12T00:00:00.000Z" }, revision: 1 }), true);
+  const window8 = { preset: "yesterday", startMs: Date.UTC(2026, 0, 8), endMs: Date.UTC(2026, 0, 9), timezone: "UTC" };
+  const filled = await repository.latestLedgerEntry(rule.id, window8);
+  assert.deepEqual([filled.revision, filled.expectedCostUsd, filled.gapReason, filled.tokens, filled.detail.expected.backfilledAt, filled.detail.result != null], [1, 1.25, null, 2880000, "2026-01-12T00:00:00.000Z", true], "原地填、不写新版、明细别的部分还在");
+  assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-08", { expectedCostUsd: 9, revision: 1 }), false, "已经填过的不再动");
+  assert.equal((await repository.latestLedgerEntry(rule.id, window8)).expectedCostUsd, 1.25);
+  assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-09", { expectedCostUsd: 9, revision: 2 }), false, "有数的不覆盖");
+  assert.equal((await repository.latestLedgerEntry(rule.id, window9)).expectedCostUsd, 2.5);
+  assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-10", { expectedCostUsd: 9, revision: 1 }), false, "原因不是没读到的不填");
+  // 带着读到时的旧版本号：这期间又重结写出了新版，revision 对不上，不把旧分段算出来的数填到新版上
+  assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-08", { expectedCostUsd: 9, revision: 999 }), false, "revision 对不上不填");
+  assert.equal((await repository.latestLedgerEntry(rule.id, window8)).expectedCostUsd, 1.25);
+  assert.deepEqual(await repository.listLedgerDaysByReason([rule.id], "2026-01-01", "EXPECTED_COST_LAGGING"), []);
+  // 审核第二轮 低-A：带着第 1 版的号去填，这期间又重结写出了第 2 版（也还没读到、还是 LAGGING）——revision 对不上「现在的最新一版」，
+  // 不能填到第 1 版上（第 1 版已经不是最新的了，填了也没用，还把旧版的 detail 改了）；内存和 MySQL 要走同一个结果
+  await book(11, { expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null });
+  const window11 = await book(11, { expectedCostUsd: null, gapReason: "EXPECTED_COST_LAGGING", tokens: null }, true);
+  assert.equal(await repository.fillExpectedCost(rule.id, "2026-01-11", { expectedCostUsd: 9, revision: 1 }), false, "已经有第 2 版、带第 1 版去填：不填");
+  const stillLagging = await repository.latestLedgerEntry(rule.id, window11);
+  assert.deepEqual([stillLagging.revision, stillLagging.expectedCostUsd, stillLagging.gapReason], [2, null, "EXPECTED_COST_LAGGING"], "第 2 版没被填、也没被动过");
 });
 
 contract("billing capabilities round-trip, overwrite and delete by identity", async ({ repository, fixture }) => {
