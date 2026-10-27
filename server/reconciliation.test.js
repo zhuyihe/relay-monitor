@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow, normalizeReconciliationScopeIntent, ruleTimezoneFor } from "./reconciliation.js";
-import { ReconciliationRepository, copySegment, reconciliationOwnerRuleState, reconciliationOwnerScope } from "./reconciliation-repository.js";
+import { ReconciliationRepository, addKeyBlock, copySegment, reconciliationOwnerRuleState, reconciliationOwnerScope } from "./reconciliation-repository.js";
 import { MemoryReconciliationRepository } from "./test-support/reconciliation-memory-repository.js";
 import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
@@ -14,8 +14,10 @@ import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.j
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
+import { createFakeSub2Api, secondsInDay } from "./test-support/fake-sub2api.js";
 import { resetOwnRequestBudget } from "../lib/own-request-budget.js";
 import { billingCapabilityAliases } from "../lib/billing-capability-storage.js";
+import { maskKey } from "../lib/key-fingerprint.js";
 
 function trustedLegacyRule(rule, stations = [], upstreamAccountId = 7, ownAccountId = 7) {
   const upstream = stations.find((station) => station.id === rule.upstream_station_id) || { type: "newapi", baseUrl: "https://upstream.test" };
@@ -1991,7 +1993,10 @@ function ownTestLogApi(url, logs = []) {
   return { success: true, data: { total: matched.length, items } };
 }
 
-function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {} }) {
+// 换 Key 的端到端两种规则都跑：immediate（生产的绑定，按 Key 整体取数）和 legacy-v3（旧版，按段取）
+const POLICIES = ["immediate", "legacy"];
+
+function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [], revealScopeDenied = false, policy = "legacy", usageOf = null, sub2api = null }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
     id, rule_id: "rr_live", group_name: group, group_ratio: ratio,
@@ -2001,6 +2006,11 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
   const open = segments.find((segment) => segment.effective_to_ms == null);
   const rule = { id: "rr_live", upstream_station_id: "upstream", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: open.group_name, timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
   const rules = [rule, ...extraRuleIds.map((id, index) => ({ ...rule, id, token_id: duplicateKeys ? 9 : 10 + index, token_name: duplicateKeys ? "stable" : `stable-${id}` }))];
+  // policy: "immediate" 是生产的绑定（按 Key 整体取数，scoped）；默认 legacy（旧版，按段取）。换 Key 的用例两种都要跑
+  if (policy === "immediate") for (const item of rules) {
+    const effective = Date.parse("2026-10-01T00:00:00Z");
+    Object.assign(item, { billing_policy: "immediate", scope_version: 1, billing_effective_from_ms: effective, created_at: new Date(effective), cost_coverage: "complete", source_binding: { 1: "r1" } });
+  }
   const allSegments = [...segments, ...extraRuleIds.flatMap((ruleId) => segments.map((segment) => ({ ...segment, id: `${segment.id}-${ruleId}`, rule_id: ruleId })) )];
   const channels = rules.flatMap((item) => (channelsByRule[item.id] || [1]).map((channelId) => ({
     rule_id: item.id, channel_id: channelId, channel_name: channelsByRule[item.id] ? `渠道 ${channelId}` : "渠道",
@@ -2070,14 +2080,23 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     // 自营站点的设置（R2）：默认记着收费记录；state.consumeLog 改成 "false" 就是关了，state.optionReply 整个换掉（没权限等）
     if (url.pathname === "/api/option/") return state.optionReply ? reply(...state.optionReply) : reply(200, { success: true, data: [{ key: "SMTPToken", value: "secret" }, { key: "LogConsumeEnabled", value: state.consumeLog ?? "true" }] });
     if (url.host === "upstream.test") {
+      const sub2Hit = sub2api?.handle(url); if (sub2Hit) return sub2Hit; // 假 Sub2API 上游（server/test-support/fake-sub2api.js）
       if (url.pathname === "/api/user/self") return reply(200, { success: true, data: { id: 7 } });
       if (url.pathname === "/api/user/self/groups") return reply(200, { success: true, data: metadataGroups ? metadataGroups(request) : { g1: { ratio: 1 }, g2: { ratio: 2 } } });
       if (url.pathname === "/api/token/") {
         if (metadataFailure) return reply(500, { success: false });
         const distinct = [...new Map(rules.map((item) => [item.token_id, item])).values()];
-        return reply(200, { success: true, data: { total: distinct.length, items: distinct.map((item) => ({ id: item.token_id, user_id: init.headers?.["New-Api-User"], name: item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false })) } });
+        // 换 Key 的测试里仓库会把规则上的 token_id 原地改成新 Key（夹具的 rules 和仓库共用同一批对象），
+        // 这时 extraTokens 里同一把已经在 distinct 里了，不能列两遍（目录里同一把出现两次，读取会报分页重复）
+        const extra = extraTokens.filter((item) => !distinct.some((existing) => Number(existing.token_id) === Number(item.tokenId)))
+          .map((item) => ({ token_id: item.tokenId, token_name: item.name }));
+        return reply(200, { success: true, data: { total: distinct.length + extra.length, items: [...distinct, ...extra].map((item) => ({ id: item.token_id, user_id: init.headers?.["New-Api-User"], name: item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false,
+          ...(tokenKeyOf ? { key: maskKey(tokenKeyOf(item.token_id)) } : {}) })) } });
       }
-      if (url.pathname === "/api/log/self/stat") return stat("upstream", url, state.upstreamQuota);
+      // usageOf(token_name, 起秒, 止秒（含）) 给了就按 Key 名字、按时间段回用量（量钱对不对：每把 Key 的用量只能被算一次）；没给就一律 state.upstreamQuota
+      if (url.pathname === "/api/log/self/stat") return stat("upstream", url, usageOf ? usageOf(url.searchParams.get("token_name"), Number(url.searchParams.get("start_timestamp")), Number(url.searchParams.get("end_timestamp"))) : state.upstreamQuota);
+      // 取完整 Key（打码撞了才会问，K2a）：没有 api_key:reveal 权限
+      if (url.pathname === "/api/token/batch/keys" && revealScopeDenied) return reply(403, { success: false, code: "ACCESS_TOKEN_SCOPE_DENIED", message: "The access token lacks the required permission: api_key:reveal" });
       // 上游价目表（V1-b 算应付成本用）：只在 state.pricing 给了时有，别的测试照旧 404（读不到 → MODEL_PRICE_UNREADABLE）
       if (url.pathname === "/api/pricing") return state.pricing ? reply(200, state.pricing) : reply(404, { success: false });
     }
@@ -2095,18 +2114,36 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if (state.fullLogList && url.pathname === "/api/log/" && !ownSourceRead(url)) return reply(200, ownTestLogApi(url, state.testLogs));
       if (url.pathname === "/api/user/") return reply(200, ownUsersApi(url, state.ownUsers));
       if (url.pathname === "/api/log/stat") return stat("own", url, state.ownQuota);
+      // 渠道 Key 读取服务（K2a/K2b）：只在传了 keyAgent 的测试里有这条路，别的测试这个站点没配，keyAgentConfigOf 直接判没配，不会问
+      if (url.pathname === "/key-agent/keys" && keyAgent) {
+        if (keyAgent.down) return { status: 503, headers: { get: () => null }, json: async () => ({}) }; // 读取服务读不到（例外三）
+        const channels = typeof keyAgent.channels === "function" ? keyAgent.channels(request) : keyAgent.channels;
+        // 和真读取服务一样：带 If-None-Match 且内容没变回 304（ETag 由渠道内容算，这里内容变了 etag 就变）
+        const etag = `"ka-${JSON.stringify(channels).length}-${createHash("sha256").update(JSON.stringify(channels)).digest("hex").slice(0, 8)}"`;
+        if (init.headers?.["If-None-Match"] === etag) return { status: 304, headers: { get: (name) => (name.toLowerCase() === "etag" ? etag : null) }, json: async () => ({}) };
+        return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? etag : null) },
+          json: async () => ({ v: 1, db: "mysql", readAt: Date.now() - (keyAgent.readLagMs ?? 0), channels }) };
+      }
     }
     return reply(404, { success: false });
   });
   const stations = [
     { id: "upstream", name: "上游", type: "newapi", baseUrl: "https://upstream.test", accessToken: "pat", authVersion: 1 },
-    { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin", authVersion: 1 },
+    { id: "own", name: "本站", type: "newapi", isOwn: true, baseUrl: "https://own.test", accessToken: "admin", authVersion: 1,
+      ...(keyAgent ? { keyAgentUrl: "https://own.test/key-agent", keyAgentSecret: keyAgent.secret } : {}) },
   ];
   const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null,
     // 只覆盖本测试要用的字段（R2 的 consumeLogOffPeriods 由监控写回站点记录）
     update: async (stationId, patch) => Object.assign(stations.find((station) => station.id === stationId), patch),
-    channels: [], billingIdentityKey: "reconciliation-fixture-billing-key" } };
+    channels: [], billingIdentityKey: "reconciliation-fixture-billing-key",
+    // 对应 Store 真正的 setKeyAgentLastSuccessAt：只往前挪不回退；夹具直接改这个站点对象的字段就够了
+    // （真正的 Store 每次写会换一个新对象，但调用方总是在调用前先把旧值存进局部变量，这里简化成原地改不影响那段逻辑）
+    async setKeyAgentLastSuccessAt(id, atMs) {
+      const station = stations.find((item) => item.id === id);
+      if (station && (station.keyAgentLastSuccessAtMs == null || atMs > station.keyAgentLastSuccessAtMs)) station.keyAgentLastSuccessAtMs = atMs;
+    } } };
   // 整站日志读取（V1-a）默认关着：这个夹具的假站点没有不带筛选的 /api/log/；要测它的用例自己传 ownLogIngest: true 和内存桶
+  if (policy === "immediate") rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
   return { rule, state, segments, stations, rt, repository, module: createReconciliationModule(rt, { repository, ownLogStore: new MemoryOwnLogStore(), ownLogIngest: false, ...moduleOptions }) };
 }
 
@@ -7245,6 +7282,561 @@ test("K1c：一段里有几把 Key，上游成本是各取一次再相加（一�
   assert.equal(f.state.statCalls.slice(calls).filter((call) => call.side === "upstream" && call.start === COMPLETED_YESTERDAY.startMs / 1000).length, 2, "每把 Key 取一次");
 });
 
+// 这一轮按「要结的上游」整批重读目录（planSettlement 的 staleMetadata 标记）已经盖住了「昨天」「回看预算内」这两类，
+// 这条额外加的是不挂在那两类上也要对：已删 Key 的减法本身必须重读，不依赖调用方记得先标 staleMetadata
+// （K2b 要加新的开段/认 Key 路径，不能指望每条新路径都记得照 refreshDue 那样先标一遍）
+test("K2b 前置：Sub2API 已删 Key 的减法（非只读）强制重读一次 Key 目录，不靠调用方先标 staleMetadata；只读查询不触发", async (t) => {
+  const now0 = Date.parse("2026-10-11T01:00:00Z"); // 上海 10-11 09:00
+  let now = now0;
+  t.mock.method(Date, "now", () => now);
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "7", ratio: null, from: 0 }] });
+  const baseUrl = "https://sub2-stale-metadata.test";
+  Object.assign(f.stations[0], { type: "sub2api", baseUrl, accessToken: "jwt" });
+  Object.assign(f.rule, { billing_policy: "next-complete-day", scope_version: 1, billing_effective_from_ms: Date.parse("2026-10-09T16:00:00Z"),
+    cost_coverage: "complete", source_binding: { 1: "r1" } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const host = new URL(baseUrl).host, ownFetch = globalThis.fetch;
+  // sub2.tokens 是「上游这一刻真的有哪些 Key」：一开始只有 9，模拟新 Key 10 是在第一次读目录以后才建的
+  const sub2 = { tokens: [{ id: 9, user_id: 7, name: "stable", status: "active", group_id: 7 }], keysCalls: 0,
+    costs: { 9: { "2026-10-10": 3 }, 10: { "2026-10-10": 4 } }, total: { "2026-10-10": 10 } };
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(input);
+    if (url.host !== host) return ownFetch(input, init);
+    const reply = (status, data) => ({ status, text: async () => JSON.stringify({ code: status === 200 ? 0 : 1, data }) });
+    if (url.pathname === "/api/v1/auth/me") return reply(200, { id: 7 });
+    if (url.pathname === "/api/v1/keys") { sub2.keysCalls += 1; return reply(200, { total: sub2.tokens.length, items: sub2.tokens }); }
+    if (url.pathname.startsWith("/api/v1/keys/")) return reply(404, {});
+    const date = url.searchParams.get("start_date"), keyId = url.searchParams.get("api_key_id");
+    const cost = keyId == null ? sub2.total[date] ?? 0 : sub2.costs[keyId]?.[date] ?? 0;
+    return reply(200, { total_actual_cost: cost });
+  });
+
+  await f.module.refreshDue(now); // 基线：只有绑定自己那把 Key（9），正常结账
+  assert.deepEqual(f.state.ledger.map((row) => [row.bill_date, row.detail.result.calculation.upstream?.amountUsd ?? row.cost_usd]).filter(([d]) => d === "2026-10-10"), [["2026-10-10", 3]]);
+  assert.equal(sub2.keysCalls, 1);
+
+  // 这时候上游建了新 Key 10（有用量）：目录缓存还没过期（5 分钟内），自然不会知道
+  sub2.tokens = [{ id: 9, user_id: 7, name: "stable", status: "active", group_id: 7 }, { id: 10, user_id: 7, name: "oai-2", status: "active", group_id: 7 }];
+  // 分段里再加一把已经从目录删掉的 Key（77）：和 K1c 原有测试同一个造法
+  const segment = f.repository.tables.segments.find((row) => row.rule_id === "rr_live" && row.effective_to_ms == null);
+  f.repository.tables.segmentKeys.push({ segment_id: segment.id, upstream_station_id: "upstream", token_id: f.rule.token_id, token_name: f.rule.token_name, key_mask: null, match_source: "initial", active_token_key: null });
+  f.repository.tables.segmentKeys.push({ segment_id: segment.id, upstream_station_id: "upstream", token_id: 77, token_name: "gone-key", key_mask: null, match_source: "fingerprint", active_token_key: null });
+  const keysCallsBefore = sub2.keysCalls;
+  await f.repository.requestResettle("rr_live", ["2026-10-10"], { now });
+  now += 60000; // 远没到 5 分钟，普通轮询不会自然重读目录
+  await f.module.refreshDue(now);
+  assert.ok(sub2.keysCalls > keysCallsBefore, "已删 Key 这一轮强制重读了一次目录（不管这个上游是不是也被 planSettlement 标过 staleMetadata）");
+  // 10 − 3（Key 9）− 4（Key 10）= 3：减法要把新 Key 10 也扣掉，不是 10 − 3 = 7（把 Key 10 的钱错算成已删 Key 的）。
+  // 这一轮恰好也在 planSettlement 的「昨天」范围里、本来就会被标 staleMetadata，这个数本来就会是对的；
+  // 这条测试证明的是重读的码路径真的跑了（上一行的请求数），不是只靠外层那道已有的保险
+  assert.deepEqual(f.state.ledger.filter((row) => row.bill_date === "2026-10-10").map((row) => Number(row.cost_usd)), [3, 3 + 3]);
+
+  // 只读查询（页面）不强制重读，也不改任何状态
+  const readKeysCalls = sub2.keysCalls;
+  await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai", startMs: Date.parse("2026-10-09T16:00:00Z"), endMs: Date.parse("2026-10-10T16:00:00Z") }, { mode: "evaluate", origin: "page" });
+  assert.equal(sub2.keysCalls, readKeysCalls, "只读查询不强制重读目录");
+});
+
+// K2b：分组、合组检测接进结账流程（不能等 K2c）。下面两条证明接进去以后账本是安全的：
+// 冲突的绑定那几天既不会固定下来（没有账本行），也不会把同一笔钱算给两条绑定（不会出现两条账本行同一天同一把 Key 都算了钱）。
+const KEY_AGENT_SECRET = "K7m2-xP9q" + "R4t".repeat(10);
+
+for (const policy of POLICIES) test("K2b：合组——早退只挡从第一次认出冲突那一刻（b）起的窗口；b 以前已经结过的日子不受影响，冲突解开以后恢复正常 [" + policy + "]", async (t) => {
+  // 设计约定：今天 14:00 第一次认出合组，昨天那条绑定的账和这件事无关，拖过 7 天才进需处理——
+  // 这条测试证明：10-11（b 以前）正常固定且不会被后面几轮动；10-12（跨过 b 的那天）不固定；
+  // 10-13（合组解开以后）恢复正常，三天都不会把同一把 Key 的钱算给两条绑定。
+  let now = Date.parse("2026-10-12T01:00:00Z"); // 上海 10-12 09:00，合组从一开始就在（b 落在这一轮里）
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let colliding = true;
+  const f = liveReconciliationFixture(t, { policy,
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    extraRuleIds: ["rr_b"],
+    channelsByRule: { rr_live: [1], rr_b: [2] },
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    keyAgent: {
+      secret: KEY_AGENT_SECRET,
+      // colliding 时渠道 1（rr_live）和渠道 2（rr_b）这一轮都认出是 token 9——合组了，分不清这把 Key 该算给哪条；
+      // 解开以后各认各的（渠道 2 认出 token 10，和 rr_b 自己原来那把一致）
+      channels: () => [
+        { id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyNine), f: "unused-1" }] },
+        { id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(colliding ? keyNine : keyTen), f: "unused-2" }] },
+      ],
+    },
+  });
+  const rowsOf = (date) => f.state.ledger.filter((row) => row.bill_date === date);
+
+  await f.module.refreshDue(now); // 结「昨天」10-11：这一刻（b）落在 10-12，10-11 整天都在 b 以前，不受影响
+  const oct11 = rowsOf("2026-10-11");
+  assert.equal(oct11.length, 2, "10-11 两条绑定都正常固定（在 b 以前，和合组这件事无关）");
+
+  now = Date.parse("2026-10-13T01:00:00Z"); // 上海 10-13 09:00，合组还在
+  await f.module.refreshDue(now); // 结「昨天」10-12：10-12 这一天跨过了 b（b 落在 10-12 当天），该挡
+  assert.deepEqual(rowsOf("2026-10-12"), [], "10-12（跨过 b 的那天）两条绑定都没有固定下来的行");
+  assert.deepEqual(rowsOf("2026-10-11"), oct11, "10-11 已经固定的行没有被后面几轮动过");
+
+  colliding = false; // 合组解开（比如渠道 2 换回了自己的 Key）
+  now = Date.parse("2026-10-14T01:00:00Z");
+  await f.module.refreshDue(now); // 结「昨天」10-13：冲突期间（10-12 09:00 到解开）渠道 2 用的 Key 的钱没有进过任何一条绑定的段——不能带着缺的钱固定
+  assert.deepEqual(rowsOf("2026-10-13"), [], "合组解开以后，冲突期间的 10-13 仍然不固定（K2c 重新分组落库以前不知道渠道 2 那段用的是哪把 Key）");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue, null, "事项本身解开了");
+  const [closed] = (await f.repository.getRule("rr_live")).keyBlocks;
+  assert.deepEqual([closed.code, closed.sinceMs, closed.untilMs], ["KEY_CONFLICT_GAP", Date.parse("2026-10-12T01:00:00Z"), Date.parse("2026-10-14T01:00:00Z")], "记着冲突期间 [认出, 解开)，只挡这一段（永远不固定的那一类）");
+  now = Date.parse("2026-10-15T01:00:00Z");
+  await f.module.refreshDue(now); // 结 10-14：这一天碰到冲突期间（解开在 10-14 09:00），也不固定
+  assert.deepEqual(rowsOf("2026-10-14"), []);
+  now = Date.parse("2026-10-16T01:00:00Z");
+  await f.module.refreshDue(now); // 结 10-15：整天在解开以后，照常固定
+  assert.equal(rowsOf("2026-10-15").length, 2, "解开以后的日子恢复正常固定");
+});
+
+for (const policy of POLICIES) test("K2b：分组——一条绑定名下两个渠道，这一轮认出的 Key 不再是同一把，只挡跨过 b 的那天；b 以前的照常固定，不相关的别的绑定照常结账 [" + policy + "]", async (t) => {
+  let now = Date.parse("2026-10-12T01:00:00Z"); // 上海 10-12 09:00，分组从一开始就在（b 落在这一轮里）
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  const f = liveReconciliationFixture(t, { policy,
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    extraRuleIds: ["rr_b"], // 只是为了让上游目录真的列出 token 10；rr_b 自己的渠道（3）不在读取服务快照里，不参与这次检测
+    channelsByRule: { rr_live: [1, 2], rr_b: [3] },
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    keyAgent: {
+      secret: KEY_AGENT_SECRET,
+      // rr_live 的渠道 1 认出 token 9（自己原来那把，没变），渠道 2 这一轮认出的是 token 10——组散了
+      channels: () => [
+        { id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyNine), f: "unused-1" }] },
+        { id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyTen), f: "unused-2" }] },
+      ],
+    },
+  });
+  const rowsOf = (ruleId, date) => f.state.ledger.filter((row) => row.rule_id === ruleId && row.bill_date === date);
+
+  await f.module.refreshDue(now); // 结「昨天」10-11：b 落在 10-12，10-11 整天在 b 以前，不受影响
+  assert.equal(rowsOf("rr_live", "2026-10-11").length, 1, "10-11（在 b 以前）照常固定");
+  assert.equal(rowsOf("rr_b", "2026-10-10").length + rowsOf("rr_b", "2026-10-11").length > 0, true, "不相关的绑定（渠道没在识别结果里）照常结账");
+
+  now = Date.parse("2026-10-13T01:00:00Z");
+  await f.module.refreshDue(now); // 结「昨天」10-12：这天跨过了 b，该挡
+  assert.deepEqual(rowsOf("rr_live", "2026-10-12"), [], "组散了，10-12（跨过 b 的那天）不固定、不结账");
+  assert.ok(rowsOf("rr_b", "2026-10-12").length > 0, "不相关的绑定（渠道没在这次识别结果里）照常结账，不连坐");
+});
+
+for (const policy of POLICIES) test("K2b：没有冲突的正常换 Key——识别→算计划→落库接上了：开出过渡段，rules.token_id/canonical_key 一起换，换完照常结账固定（不被 SOURCE_BINDING_UNCONFIRMED 挡住） [" + policy + "]", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z"); // 上海 10-11 09:00，先走一轮，渠道还是原来的 token 9
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let currentKey = keyNine; // 渠道 1 这一轮用的 Key，后面改成 keyTen 模拟换 Key
+  const f = liveReconciliationFixture(t, { policy,
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    // 10：一开始没有任何绑定用它，是「凭空出现的新 Key」，不是挪过来的；9：旧 Key 换掉以后上游目录里还在（规则上的 token_id 改成 10 以后夹具不再替它列）
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    keyAgent: {
+      secret: KEY_AGENT_SECRET,
+      channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(currentKey), f: "unused" }] }],
+    },
+  });
+  await f.module.refreshDue(now); // 第一轮：锚定身份，渠道还是 token 9，没有变化
+  const anchored = await f.repository.getRule("rr_live");
+  assert.ok(anchored.canonicalKey, "第一轮已经锚定");
+  assert.equal(anchored.tokenId, 9);
+
+  currentKey = keyTen; // 第二天：渠道真的换成了 token 10
+  now = Date.parse("2026-10-12T01:00:00Z");
+  await f.module.refreshDue(now); // 这一轮认出换了，算计划、落库
+
+  const changed = await f.repository.getRule("rr_live");
+  assert.equal(changed.tokenId, 10, "rules.token_id 跟着换了");
+  assert.notEqual(changed.canonicalKey, anchored.canonicalKey, "canonical_key 跟着 token_id 一起换，不然下次结账会被 SOURCE_BINDING_UNCONFIRMED 挡住");
+  const segments = await f.repository.listSegments("rr_live");
+  assert.equal(segments.length, 3, "原段关掉 + 过渡段（两把 Key，已关）+ 新段（token 10，开着）");
+  assert.deepEqual(segments[2].keys.map((key) => key.tokenId), [10]);
+  assert.deepEqual(segments[1].keys.map((key) => key.tokenId).sort((a, b) => a - b), [9, 10], "过渡段两把 Key 都记着");
+  // 正常换 Key：a 是上一次读成功的时刻（第一轮 10-11 01:00Z），b 是这一轮读到的时刻（10-12 01:00Z）
+  assert.equal(segments[1].effectiveFrom, Date.parse("2026-10-11T01:00:00Z"), "a = 上一次读成功的时刻");
+  assert.equal(segments[1].effectiveTo, Date.parse("2026-10-12T01:00:00Z"), "b = 这一轮读到新 Key 的时刻");
+  assert.equal(f.stations[1].keyAgentLastSuccessAtMs, Date.parse("2026-10-12T01:00:00Z"), "换段落库以后，这一轮的成功时刻才记下来");
+
+  now = Date.parse("2026-10-13T01:00:00Z");
+  await f.module.refreshDue(now); // 结「昨天」10-12：换完以后照常结账，不会被挡住
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length, 1,
+    "换了 Key 以后 10-12 照常固定，没有被 SOURCE_BINDING_UNCONFIRMED 挡住");
+  // 换 Key 那天（design/ui-copy-spec.md §5.4）：出「换了 Key」那一句，不出「倍率变化的时间是系统估的」（也就不给「改时间」）
+  const day = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai",
+    startMs: Date.parse("2026-10-11T16:00:00Z"), endMs: Date.parse("2026-10-12T16:00:00Z") }, { force: true });
+  const codes = day.results[0].health.issues.map((issue) => issue.code);
+  // 钱：换 Key 当天上游成本 = 过渡段 [0 点, b) 两把 Key 各 1 + b 起新 Key 1（夹具的 stat 每次回 1 美元）；两种规则都得是 3
+  // （immediate 以前整天只按最新那把取，只有 1）
+  assert.equal(day.results[0].upstream.amountUsd, 3, `换 Key 当天旧 Key 那份也算进来（${policy}）`);
+  assert.ok(codes.includes("KEY_CHANGED"), "换 Key 那天有这一句");
+  assert.equal(codes.includes("SEGMENT_TIMING_UNCONFIRMED"), false, "换 Key 开的段不是估的倍率变化，不出旧提示");
+  assert.deepEqual(segments.slice(1).map((segment) => segment.timingSource), ["key_change_window", "key_change"]);
+});
+
+// 生产的绑定都是 immediate（scoped）：换 Key 当天上游成本也得按段取（旧 Key 换之前的用量、过渡段里两把都取），
+// 不能整天只按最新那把取。夹具的 stat 每次回 1 美元，数请求就是数金额
+test("K2b：immediate（scoped）规则换 Key——换 Key 当天上游成本按段取各自的 Key（过渡段两把都取），没换 Key 的窗口还是整窗一次", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let currentKey = keyNine;
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(currentKey), f: "unused" }] }] },
+  });
+  const effective = Date.parse("2026-10-01T00:00:00Z");
+  Object.assign(f.rule, { billing_policy: "immediate", scope_version: 1, billing_effective_from_ms: effective, created_at: new Date(effective), cost_coverage: "complete", source_binding: { 1: "r1" } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const dayOf = async (startIso, endIso) => {
+    const before = f.state.requests.length;
+    const result = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai",
+      startMs: Date.parse(startIso), endMs: Date.parse(endIso) }, { force: true })).results[0];
+    const stats = f.state.requests.slice(before).filter((request) => request.host === "upstream.test" && request.path === "/api/log/self/stat")
+      .map((request) => { const q = new URLSearchParams(request.query); return [q.get("token_name"), Number(q.get("start_timestamp")), Number(q.get("end_timestamp"))]; })
+      .sort((x, y) => String(x[0]).localeCompare(String(y[0])) || x[1] - y[1]);
+    return { result, stats };
+  };
+  const sec = (iso) => Date.parse(iso) / 1000;
+
+  await f.module.refreshDue(now); // 第一轮：锚定
+  now = Date.parse("2026-10-11T16:00:00Z"); // 还没换 Key：10-11 整天（上海）只有 token 9，整窗一次
+  const beforeChange = await dayOf("2026-10-10T16:00:00Z", "2026-10-11T16:00:00Z");
+  assert.deepEqual(beforeChange.stats, [["stable", sec("2026-10-10T16:00:00Z"), sec("2026-10-11T16:00:00Z") - 1]], "没换 Key：整窗一次，和以前一样");
+
+  currentKey = keyTen;
+  now = Date.parse("2026-10-12T01:00:00Z");
+  await f.module.refreshDue(now); // 认出换了，落库：段 [0, a) token 9、[a, b) 两把、[b, ) token 10；a = 上一次读成功的时刻，b = 现在
+  const a = sec("2026-10-11T01:00:00Z"), b = sec("2026-10-12T01:00:00Z");
+  assert.deepEqual((await f.repository.listSegments("rr_live")).map((s) => s.keys.map((k) => k.tokenId)), [[9], [9, 10], [10]]);
+
+  now = Date.parse("2026-10-13T01:00:00Z");
+  // 10-12（b 所在的那天）：[0 点, b) 过渡段两把都取，[b, 24 点) 只取新的
+  const changeDay = await dayOf("2026-10-11T16:00:00Z", "2026-10-12T16:00:00Z");
+  assert.deepEqual(changeDay.stats, [["oai-2", sec("2026-10-11T16:00:00Z"), b - 1], ["oai-2", b, sec("2026-10-12T16:00:00Z") - 1], ["stable", sec("2026-10-11T16:00:00Z"), b - 1]],
+    "换 Key 当天：过渡段里旧 Key 那份也取了（以前整天只取 oai-2 一条）");
+  assert.equal(changeDay.result.upstream.amountUsd, 3, "三次各 1 美元");
+  // 换了以后的整天：只有新 Key，整窗一次
+  now = Date.parse("2026-10-14T01:00:00Z");
+  const later = await dayOf("2026-10-12T16:00:00Z", "2026-10-13T16:00:00Z");
+  assert.deepEqual(later.stats, [["oai-2", sec("2026-10-12T16:00:00Z"), sec("2026-10-13T16:00:00Z") - 1]]);
+});
+
+for (const policy of POLICIES) test("K2b：读完、落库前重启——这一轮的成功时刻要等落库以后才写，重启后 a 还是上一次读成功的时刻，[t, b) 不漏 [" + policy + "]", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let currentKey = keyNine;
+  const f = liveReconciliationFixture(t, { policy,
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(currentKey), f: "unused" }] }] },
+  });
+  const own = f.stations[1];
+  await f.module.refreshDue(now); // 第一轮 10-11 01:00Z：没变化，成功时刻记下 T1
+  const t1 = Date.parse("2026-10-11T01:00:00Z");
+  assert.equal(own.keyAgentLastSuccessAtMs, t1);
+
+  currentKey = keyTen;
+  now = Date.parse("2026-10-11T14:30:00Z"); // 真正换 Key 在 T1 和这一轮之间的某一刻，这一轮 14:30 才读到
+  const original = f.repository.applyKeyChangePlans.bind(f.repository);
+  const seenAtApply = [];
+  let crash = true;
+  f.repository.applyKeyChangePlans = async (...args) => {
+    seenAtApply.push(own.keyAgentLastSuccessAtMs); // 落库的这一刻，库里「上一次读成功」还应该是 T1，不是这一轮的 14:30
+    if (crash) { crash = false; throw new Error("进程在落库前被杀了"); }
+    return original(...args);
+  };
+  await f.module.refreshDue(now);
+  assert.deepEqual(seenAtApply, [t1], "落库时站点的成功时刻还是上一次的，没有读完就先写成 b");
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 9, "这一轮没落库，绑定原样");
+  assert.equal(own.keyAgentLastSuccessAtMs, t1, "没落库，成功时刻不往前推：重启以后 a 还是 T1");
+
+  // 「重启」：内存里的识别缓存丢了，站点上持久化的成功时刻还在
+  f.rt._keyAgentIdentifyCache = null;
+  now = Date.parse("2026-10-11T14:34:00Z");
+  await f.module.refreshDue(now);
+  const segments = await f.repository.listSegments("rr_live");
+  assert.equal(segments.length, 3);
+  assert.equal(segments[1].effectiveFrom, t1, "重启后 a 还是上一次读成功的 T1，不是 b——[t, b) 在过渡段里，不漏");
+  assert.equal(segments[1].effectiveTo, now);
+  assert.deepEqual(segments[1].keys.map((key) => key.tokenId).sort((a, b) => a - b), [9, 10]);
+  assert.equal(own.keyAgentLastSuccessAtMs, now, "换段落库以后才记下这一轮");
+});
+
+for (const policy of POLICIES) test("K2b：冲突几轮以后解开再换段——站点的成功时刻没往前推，换段的 a 用开着那段的起点，不漏 [" + policy + "]", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10), keyEleven = "sk-" + "Elev".repeat(10);
+  let keys = { 1: keyNine, 2: keyNine }; // 一条绑定两个渠道（组），都用 token 9
+  const f = liveReconciliationFixture(t, { policy,
+    segments: [{ id: "s1", group: "g1", from: 1000 }],
+    channelsByRule: { rr_live: [1, 2] },
+    tokenKeyOf: (tokenId) => ({ 9: keyNine, 10: keyTen, 11: keyEleven })[tokenId],
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }, { tokenId: 11, name: "oai-3" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [1, 2].map((id) => ({ id, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[id]), f: "unused" }] })) },
+  });
+  const own = f.stations[1];
+  await f.module.refreshDue(now); // T1：正常，成功时刻记下 T1
+  const t1 = Date.parse("2026-10-11T01:00:00Z");
+  assert.equal(own.keyAgentLastSuccessAtMs, t1);
+
+  keys = { 1: keyTen, 2: keyEleven }; // 组散了：两个渠道各换了一把不一样的
+  now = Date.parse("2026-10-12T01:00:00Z");
+  await f.module.refreshDue(now);
+  now = Date.parse("2026-10-12T01:10:00Z");
+  f.rt._keyAgentIdentifyCache = null;
+  await f.module.refreshDue(now); // 又一轮，还是冲突
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 9, "冲突期间不换段");
+  assert.equal(own.keyAgentLastSuccessAtMs, t1, "有没处理完的冲突，站点的成功时刻不往前推");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.code, "KEY_GROUP_CHANGED", "冲突已经记下了（带着 b）");
+
+  keys = { 1: keyTen, 2: keyTen }; // 冲突解开：两个渠道又一样了，都换成了 token 10
+  now = Date.parse("2026-10-12T01:20:00Z");
+  f.rt._keyAgentIdentifyCache = null;
+  await f.module.refreshDue(now);
+  const rule = await f.repository.getRule("rr_live");
+  assert.equal(rule.tokenId, 10, "解开以后换段");
+  assert.equal(rule.keyIssue, null, "冲突记号清掉了");
+  const segments = await f.repository.listSegments("rr_live");
+  const transitional = segments.find((segment) => segment.keys.length === 2);
+  assert.equal(transitional.effectiveFrom, 1000, "带着冲突的绑定，a 用开着那段的起点，不是站点的 T1");
+  assert.equal(transitional.effectiveTo, now);
+  assert.equal(own.keyAgentLastSuccessAtMs, now, "换段落库、冲突清掉以后，成功时刻才往前推");
+});
+
+for (const policy of POLICIES) test("K2b：两条绑定互换 Key（挪过）——同一个事务清空再写不撞自己的唯一约束，两边都按 b 切开不开过渡段，成本主人看到的是换完以后的 Key [" + policy + "]", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let swapped = false;
+  const f = liveReconciliationFixture(t, { policy,
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    extraRuleIds: ["rr_b"],
+    channelsByRule: { rr_live: [1], rr_b: [2] },
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [
+      { id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(swapped ? keyTen : keyNine), f: "unused-1" }] },
+      { id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(swapped ? keyNine : keyTen), f: "unused-2" }] },
+    ] },
+  });
+  await f.module.refreshDue(now);
+  assert.ok((await f.repository.getRule("rr_live")).canonicalKey && (await f.repository.getRule("rr_b")).canonicalKey, "第一轮两条都锚定了");
+  // 生产里绑定建的时候 rules.active_token_key 就是 canonical key（createRule），开着那段的 Key 行抄的同一个值；夹具的规则没有，
+  // 补上——不然互换时撞不上唯一约束，「互换必须同组一个事务」（server/reconciliation.js applyKeyAgentChangesFor 的分组）去掉了测试也是绿的
+  for (const row of f.repository.tables.rules) row.active_token_key = row.canonical_key;
+  for (const keyRow of f.repository.tables.segmentKeys) keyRow.active_token_key = f.repository.tables.rules.find((row) => row.token_id === keyRow.token_id)?.canonical_key ?? null;
+
+  swapped = true; // 两个渠道互换了 Key
+  now = Date.parse("2026-10-12T01:00:00Z");
+  await f.module.refreshDue(now);
+  const a = await f.repository.getRule("rr_live"), b = await f.repository.getRule("rr_b");
+  assert.deepEqual([a.tokenId, b.tokenId], [10, 9], "互换成功，没有撞唯一约束");
+  assert.equal(a.keyIssue, null);
+  assert.equal(b.keyIssue, null, "互换不是分组合组，不记冲突");
+  for (const ruleId of ["rr_live", "rr_b"]) {
+    const segments = await f.repository.listSegments(ruleId);
+    assert.equal(segments.length, 2, "挪过：按 b 切开，只有旧段和新段，没有两把 Key 都算的过渡段");
+    assert.equal(segments[0].effectiveTo, now);
+    assert.equal(segments[1].effectiveFrom, now);
+    assert.equal(segments[1].keys.length, 1);
+  }
+  assert.equal((await f.repository.listSegments("rr_live"))[1].keys[0].tokenId, 10);
+  assert.equal((await f.repository.listSegments("rr_b"))[1].keys[0].tokenId, 9);
+});
+
+// 例外三（binding-flow.md §2）：读取服务读不到新结果。从最后一次读到的时刻起这个站点下各渠道先不算（实时·还在读取，过了零点也不固定）；
+// 连续 3 次才升成需处理 KEY_READER_UNREACHABLE；最后一次读到以前的日子不受影响；连上以后 Key 没变就照常算、换了就是 [a, b) 过渡段。
+async function readerOutageFixture(t) {
+  const clock = { now: Date.parse("2026-10-11T01:00:00Z") };
+  t.mock.method(Date, "now", () => clock.now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  const agent = { secret: KEY_AGENT_SECRET, down: false, key: keyNine, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(agent.key), f: "unused" }] }] };
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    keyAgent: agent,
+  });
+  const round = async (isoTime) => {
+    clock.now = Date.parse(isoTime);
+    f.rt._keyAgentIdentifyCache = null; // 每一轮都真的去问读取服务（不命中 4 分钟缓存）
+    await f.module.refreshDue(clock.now);
+  };
+  const state = async (billDate) => (await f.repository.listSettlementStates(["rr_live"], { billDates: [billDate] }))[0] || null;
+  const booked = (billDate) => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === billDate).length;
+  return { f, agent, keyTen, round, state, booked };
+}
+
+// 时间线（上海 UTC+8，一天在 UTC 16:00 结束，结账等 15 分钟）：R0 10-11 16:05Z 读得到（最后一次读到）——这时 10-11 刚结束还没到结账的点；
+// 读取服务停了：R1 10-11 16:30Z、R2 10-12 16:20Z、R3 10-12 16:35Z 各读不到一次（连续 3 次）；R4 10-12 17:00Z 连上
+test("K2b 例外三：读不到——最后一次读到以前结束的日子照常固定，以后的不固定；前 2 次是「还在读取」，第 3 次升成需处理；连上、Key 没变——照常算，不开过渡段", async (t) => {
+  const { f, agent, round, state, booked } = await readerOutageFixture(t);
+  await round("2026-10-11T16:05:00Z"); // R0：读得到，最后一次读到是这一刻
+  assert.equal(booked("2026-10-11"), 0, "10-11 刚结束，还没到结账的点");
+
+  agent.down = true; // 读取服务停了
+  await round("2026-10-11T16:30:00Z"); // R1：第 1 次读不到。10-11 在最后一次读到以前就结束了，照常结账
+  assert.equal(booked("2026-10-11"), 1, "最后一次读到以前结束的日子，读不到也照常固定");
+
+  await round("2026-10-12T16:20:00Z"); // R2：第 2 次。10-12 在最后一次读到以后才结束：先不算
+  assert.equal(booked("2026-10-12"), 0, "最后一次读到以后结束的日子不固定");
+  assert.equal((await state("2026-10-12"))?.retryReason, "KEY_AGENT_UNAVAILABLE", "前 2 次是读取类：实时·还在读取，系统会自己再读");
+
+  await round("2026-10-12T16:35:00Z"); // R3：第 3 次，连续 3 次才进需处理
+  assert.equal((await state("2026-10-12"))?.manualReason, "KEY_READER_UNREACHABLE", "连续 3 次升成需处理");
+  assert.equal(booked("2026-10-12"), 0, "过了零点也不固定");
+  const before = await f.repository.getRule("rr_live");
+
+  agent.down = false; // R4：连上了，Key 没变
+  await round("2026-10-12T17:00:00Z");
+  await round("2026-10-12T17:15:00Z"); // 需处理的那天每 10 分钟本地重判一次，读到了就接着算
+  assert.equal(booked("2026-10-12"), 1, "连上、Key 没变：这段时间的数照常算、照常固定，不提示");
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, before.tokenId, "没换 Key 就不动绑定");
+  assert.equal((await f.repository.listSegments("rr_live")).length, 1, "没有过渡段");
+});
+
+test("K2b 例外三：读不到期间渠道换了 Key，连上以后——[a, b) 过渡段的 a 是最后一次读到旧 Key 的时刻，b 是连上的时刻，读不到那段时间花的钱照常算进来", async (t) => {
+  const { f, agent, keyTen, round, state, booked } = await readerOutageFixture(t);
+  await round("2026-10-11T16:05:00Z"); // R0：最后一次读到旧 Key（token 9）：a
+  const a = Date.parse("2026-10-11T16:05:00Z");
+  agent.down = true;
+  await round("2026-10-11T16:30:00Z");
+  await round("2026-10-12T16:20:00Z");
+  await round("2026-10-12T16:35:00Z");
+  assert.equal((await state("2026-10-12"))?.manualReason, "KEY_READER_UNREACHABLE");
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 9, "读不到期间不换段");
+
+  agent.down = false;
+  agent.key = keyTen; // 读不到期间渠道已经换成了 token 10
+  await round("2026-10-12T17:00:00Z"); // R4：b，重新读到的时刻
+  const b = Date.parse("2026-10-12T17:00:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 10, "连上以后换段");
+  const transitional = (await f.repository.listSegments("rr_live")).find((segment) => segment.keys.length === 2);
+  assert.equal(transitional.effectiveFrom, a, "a = 最后一次读到旧 Key 的时刻");
+  assert.equal(transitional.effectiveTo, b, "b = 重新读到的时刻");
+  await round("2026-10-12T17:15:00Z");
+  assert.equal(booked("2026-10-12"), 1, "读不到那段时间的数照常算进来、照常固定");
+});
+
+test("K2b：渠道换成了一把不在已加上游里的 Key（CHANNEL_KEY_UNMATCHED，流程稿例外一）——从认出的那一刻起不结账、记需处理；那一刻以前的日子照常固定；换回来（或把上游加进来）以后恢复", async (t) => {
+  const { f, agent, round, state, booked } = await readerOutageFixture(t);
+  const keyNine = agent.key;
+  await round("2026-10-11T16:05:00Z"); // R0：正常，渠道用 token 9
+  agent.key = "sk-" + "Unkn".repeat(10); // 渠道换成了一把哪个已加的上游里都没有的 Key
+  await round("2026-10-11T16:30:00Z"); // R1：认出来了（b）。10-11 在 b 以前就结束了，照常结账
+  const issue = (await f.repository.getRule("rr_live")).keyIssue;
+  assert.equal(issue.code, "CHANNEL_KEY_UNMATCHED");
+  assert.equal(issue.sinceMs, Date.parse("2026-10-11T16:30:00Z"), "b = 第一次认出来的时刻");
+  assert.equal(booked("2026-10-11"), 1, "b 以前结束的日子照常固定");
+  await round("2026-10-12T16:20:00Z"); // R2：10-12 在 b 以后结束：不结账
+  assert.equal(booked("2026-10-12"), 0);
+  assert.equal((await state("2026-10-12"))?.manualReason, "CHANNEL_KEY_UNMATCHED", "要人处理的（需处理），不是读取类");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue.sinceMs, issue.sinceMs, "同一件事沿用第一次的 b，不随每轮往后挪");
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 9, "不碰绑定");
+
+  agent.key = keyNine; // 换回来了
+  await round("2026-10-12T16:40:00Z");
+  await round("2026-10-12T16:55:00Z"); // 需处理的那天每 10 分钟本地重判一次
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue, null, "解开以后记号清掉");
+  // 冲突期间（认出 10-11 16:30Z 到解开 10-12 16:40Z）渠道用的那把 Key 不在任何已加的上游里，用量没人算：这几天永远不固定（KEY_CONFLICT_GAP），不管是哪种事项
+  assert.deepEqual((await f.repository.getRule("rr_live")).keyBlocks.map((block) => [block.code, block.sinceMs]), [["KEY_CONFLICT_GAP", issue.sinceMs]]);
+  assert.equal(booked("2026-10-12"), 0, "冲突期间的 10-12 不固定");
+  assert.equal((await state("2026-10-12"))?.manualReason, "KEY_CONFLICT_GAP", "要人处理的那一类，没有按钮、不再自动重试");
+  await round("2026-10-13T16:20:00Z");
+  assert.equal(booked("2026-10-13"), 0, "解开那一天（10-13，解开在它 00:40）也碰到冲突期间，不固定");
+  await round("2026-10-14T16:20:00Z");
+  assert.equal(booked("2026-10-14"), 1, "整天在解开以后的日子照常算、照常固定");
+});
+
+test("K2b：渠道没锚定过（还没开始算）时换成了不在已加上游里的 Key——不进需处理，只在原处写一句（流程稿附录 4）", async (t) => {
+  const { f, agent, round } = await readerOutageFixture(t);
+  f.repository.tables.rules.find((row) => row.id === "rr_live").canonical_key = null; // 假装还没锚定
+  f.repository.tables.rules.find((row) => row.id === "rr_live").source_binding = null;
+  agent.key = "sk-" + "Unkn".repeat(10);
+  await round("2026-10-11T16:30:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue, null);
+});
+
+test("K2b：打码撞了、上游令牌没有 api_key:reveal 权限（KEY_REVEAL_DENIED）——从认出来的那一刻起不结账、记需处理", async (t) => {
+  let now = Date.parse("2026-10-11T16:05:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyNineLookalike = "sk-Nine" + "abc".repeat(8) + "Nine"; // 前 4 后 4 一样、中间不一样
+  const agent = { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyNine), f: "no-match" }] }] };
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    tokenKeyOf: (tokenId) => (tokenId === 12 ? keyNineLookalike : keyNine),
+    extraTokens: [{ tokenId: 12, name: "lookalike" }],
+    keyAgent: agent, revealScopeDenied: true,
+  });
+  const round = async (iso) => { now = Date.parse(iso); f.rt._keyAgentIdentifyCache = null; await f.module.refreshDue(now); };
+  await round("2026-10-11T16:30:00Z");
+  const issue = (await f.repository.getRule("rr_live")).keyIssue;
+  assert.equal(issue?.code, "KEY_REVEAL_DENIED");
+  await round("2026-10-12T16:20:00Z");
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length, 0, "分不清是哪把，这天不固定");
+  const [settleState] = await f.repository.listSettlementStates(["rr_live"], { billDates: ["2026-10-12"] });
+  assert.equal(settleState?.manualReason, "KEY_REVEAL_DENIED", "要人处理的（给令牌补权限），不是读取类");
+  // 「更新登录信息」要去缺权限的那个上游：服务端把它带在 health 上（页面按它落点；没带就退回绑定自己的上游）
+  const day = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai",
+    startMs: Date.parse("2026-10-11T16:00:00Z"), endMs: Date.parse("2026-10-12T16:00:00Z") }, { force: true })).results[0];
+  assert.equal(day.health.code, "KEY_REVEAL_DENIED");
+  assert.equal(day.health.upstreamStationId, "upstream", "缺 api_key:reveal 权限的上游");
+});
+
+test("K2b：Sub2API 上游上一把 Key 在两条绑定之间挪（互换）——照常按 b 换段（和 New API 一样），只有换手那一天（b 所在的业务日）两条都不结账、记一段会自己好的「读取中」，第二天起各读各的 Key 照常固定；等按逐条用量拆开的后续 PR 补结那一天", async (t) => {
+  let now = Date.parse("2026-10-11T16:05:00Z");
+  t.mock.method(Date, "now", () => now);
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    extraRuleIds: ["rr_b"],
+    channelsByRule: { rr_live: [1], rr_b: [2] },
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [] },
+  });
+  Object.assign(f.stations[0], { type: "sub2api", accessToken: "jwt" }); // 这里直接塞一份识别结果；上游当 Sub2API 读（下面补上 Sub2API 的身份和 Key 目录接口）
+  const newApiFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host !== "upstream.test") return newApiFetch(input, init);
+    const data = url.pathname === "/api/v1/auth/me" ? { id: 42 }
+      : url.pathname === "/api/v1/keys" ? { total: 2, items: [[9, "stable"], [10, "stable-rr_b"]].map(([id, name]) => ({ id, user_id: 42, name, status: "active", group_id: null })) } : null;
+    return { status: data ? 200 : 404, text: async () => JSON.stringify({ code: data ? 0 : 404, data }) };
+  });
+  for (const row of f.repository.tables.rules) row.canonical_key = canonicalBillingKey(f.stations[0], { platform: "sub2api", accountId: "42" }, row.token_id);
+  const match = (tokenId) => [{ stationId: "upstream", tokenId, tokenName: tokenId === 9 ? "stable" : "stable-rr_b", via: "fingerprint" }]; // 目录里的 Key 名
+  const slot = (tokenId) => ({ index: 0, state: "identified", matches: match(tokenId) });
+  // 两条绑定互换 Key：rr_live（token 9）现在用 10，rr_b（token 10）现在用 9
+  f.rt._keyAgentIdentifyCache = { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, revealIssues: [],
+    channels: [{ channelId: 1, keyless: false, slots: [slot(10)] }, { channelId: 2, keyless: false, slots: [slot(9)] }] } };
+  await f.module.refreshDue(now);
+  const [a, b] = [await f.repository.getRule("rr_live"), await f.repository.getRule("rr_b")];
+  assert.deepEqual([a.tokenId, b.tokenId], [10, 9], "互换：两条都换了 Key");
+  assert.equal((await f.repository.listSegments("rr_live")).length, 2, "按 b 换段，b 前一段 b 后一段");
+  assert.equal((await f.repository.listSegments("rr_b")).length, 2);
+  assert.deepEqual([a.keyIssue, b.keyIssue], [null, null], "不记事项");
+  // 换手那一天（b = 10-12 00:05 上海，这一天 [10-12 0:00, 10-13 0:00)）两条都挡，只挡这一天
+  const day = [Date.parse("2026-10-11T16:00:00Z"), Date.parse("2026-10-12T16:00:00Z")];
+  for (const rule of [a, b]) assert.deepEqual(rule.keyBlocks, [{ code: "PENDING", sinceMs: day[0], untilMs: day[1] }]);
+  assert.equal(reconciliationIssue("PENDING").kind, "reading");
+  assert.ok(f.stations[1].keyAgentLastSuccessAtMs != null, "这一轮处理完了，站点的成功时刻往前推");
+  now = Date.parse("2026-10-12T16:20:00Z");
+  f.rt._keyAgentIdentifyCache = { ...f.rt._keyAgentIdentifyCache, at: now, result: { ...f.rt._keyAgentIdentifyCache.result, fetchedAtMs: now } };
+  await f.module.refreshDue(now);
+  const booked = (ruleId, billDate) => f.state.ledger.filter((row) => row.rule_id === ruleId && row.bill_date === billDate).length;
+  assert.deepEqual([booked("rr_live", "2026-10-12"), booked("rr_b", "2026-10-12")], [0, 0], "换手那一天两条绑定都不入账");
+  const [state] = await f.repository.listSettlementStates(["rr_live"], { billDates: ["2026-10-12"] });
+  assert.equal(state?.retryReason, "PENDING", "会自己好的读取类，不是要人处理");
+  assert.equal(state?.manualReason ?? null, null);
+  now = Date.parse("2026-10-13T16:20:00Z");
+  f.rt._keyAgentIdentifyCache = { ...f.rt._keyAgentIdentifyCache, at: now, result: { ...f.rt._keyAgentIdentifyCache.result, fetchedAtMs: now } };
+  await f.module.refreshDue(now);
+  // 第二天（10-13）不再被换手的挡住：这个用例的假 Sub2API 没有账单统计接口，结不出来是 UPSTREAM_CAPABILITY_UNVERIFIED，不是 PENDING；钱逐天对的量在 regroupMoneyScenario 的互换用例里
+  const [next] = await f.repository.listSettlementStates(["rr_live"], { billDates: ["2026-10-13"] });
+  assert.notEqual(next?.manualReason ?? next?.retryReason, "PENDING", "第二天起不再挡")
+});
+
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {
   let now = Date.parse("2026-10-01T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
@@ -9681,3 +10273,524 @@ test("R2 × C3 Sub2API 当天换绑以后有一天关过收费记录：多天窗
   assert.deepEqual(asked, ["2026-10-06~2026-10-07", "2026-10-09~2026-10-09"], "上游按整天读两截，换绑那天从 0 点起，10-08 不读");
 });
 
+
+// 读取服务一断，库里已经记着的需处理事项继续挡（不能只看这一轮内存里算出来的）
+test("K2b：CHANNEL_KEY_UNMATCHED 记着的日子，读取服务随后断了也不会被固定——事项只有读得到、重新判断以后才清", async (t) => {
+  const { f, agent, round, state, booked } = await readerOutageFixture(t);
+  const keyNine = agent.key;
+  await round("2026-10-11T06:00:00Z"); // R0：正常
+  agent.key = "sk-" + "Unkn".repeat(10);
+  await round("2026-10-11T10:00:00Z"); // R1：认出渠道换成了哪都没有的 Key（b = 10:00Z，10-11 这天跨过了 b）
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue.sinceMs, Date.parse("2026-10-11T10:00:00Z"));
+  await round("2026-10-11T16:05:00Z"); // R2：10-11 刚结束（上海 24:00 = 16:00Z），还没到结账的点；读取服务读得到（最后一次读到在 10-11 结束以后）
+  agent.down = true;
+  await round("2026-10-11T16:30:00Z"); // R3：读不到。最后一次读到在 10-11 结束以后，例外三不挡 10-11——只剩库里记着的事项挡得住
+  assert.equal(booked("2026-10-11"), 0, "读取服务断了，b 以后的 10-11 也不能被固定");
+  assert.equal((await state("2026-10-11"))?.manualReason, "CHANNEL_KEY_UNMATCHED", "状态行还说原来的事项");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.sinceMs, Date.parse("2026-10-11T10:00:00Z"), "读不到的轮次不清记号、不改 b");
+
+  agent.down = false;
+  agent.key = keyNine; // 连上了，渠道又是原来那把：事项解开
+  await round("2026-10-11T17:00:00Z");
+  await round("2026-10-11T17:15:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue, null, "读得到、重新判断以后才清");
+  assert.equal(booked("2026-10-11"), 0, "冲突期间的 10-11 解开以后也不固定（那几天渠道用的 Key 没人算）");
+  assert.equal((await state("2026-10-11"))?.manualReason, "KEY_CONFLICT_GAP");
+});
+
+// 高-3：同一条绑定换了一种事项，b 沿用最早的那个，不重置成现在
+test("K2b：同一条绑定的事项换了码（CHANNEL_KEY_UNMATCHED → KEY_GROUP_CHANGED），b 沿用最早的，之前被挡的日子不会被放行", async (t) => {
+  const clock = { now: Date.parse("2026-10-10T12:00:00Z") };
+  t.mock.method(Date, "now", () => clock.now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10), unknown = "sk-" + "Unkn".repeat(10);
+  const agent = { secret: KEY_AGENT_SECRET, keys: { 1: keyNine, 2: keyNine } };
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    extraRuleIds: ["rr_b"], // 让上游目录列出 token 10
+    channelsByRule: { rr_live: [1, 2], rr_b: [3] },
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [1, 2].map((id) => ({ id, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(agent.keys[id]), f: `unused-${id}` }] })) },
+  });
+  const round = async (isoTime) => { clock.now = Date.parse(isoTime); f.rt._keyAgentIdentifyCache = null; await f.module.refreshDue(clock.now); };
+  const booked = (billDate) => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === billDate).length;
+  await round("2026-10-10T12:00:00Z"); // 正常：两个渠道都是 token 9
+  agent.keys = { 1: unknown, 2: unknown }; // 两个渠道都换成了哪都没有的 Key
+  await round("2026-10-10T15:00:00Z"); // 事项一：CHANNEL_KEY_UNMATCHED，b = 15:00Z（上海 10-10 在 16:00Z 结束，跨过了 b）
+  const first = (await f.repository.getRule("rr_live")).keyIssue;
+  assert.deepEqual([first.code, first.sinceMs], ["CHANNEL_KEY_UNMATCHED", Date.parse("2026-10-10T15:00:00Z")]);
+  agent.keys = { 1: keyNine, 2: keyTen }; // 渠道 1 回到原来那把、渠道 2 认出是 token 10：组散了
+  await round("2026-10-10T16:30:00Z"); // 事项二：KEY_GROUP_CHANGED。b 不能重置成 16:30Z——不然 10-10（16:00Z 结束）又被放行
+  const second = (await f.repository.getRule("rr_live")).keyIssue;
+  assert.equal(second.code, "KEY_GROUP_CHANGED");
+  assert.equal(second.sinceMs, Date.parse("2026-10-10T15:00:00Z"), "b 沿用最早的事项的");
+  assert.equal(booked("2026-10-10"), 0, "10-10 一直被挡着，没有因为换了码就被固定");
+
+  agent.keys = { 1: keyNine, 2: keyNine }; // 回到正常
+  await round("2026-10-10T17:00:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue, null, "事项全部解除才清");
+});
+
+// 互相牵连的绑定一组一个事务；一组撞了约束只回滚这一组，别的组照常换段
+test("K2b：同一轮里一条绑定撞了唯一约束、另外两条正常换 Key——正常的两条段写进去了，撞的那条回滚并记 KEY_GROUP_CHANGED；下一轮冲突解开后它也能换", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keys = { 9: "sk-" + "Nine".repeat(10), 10: "sk-" + "TenT".repeat(10), 11: "sk-" + "Elev".repeat(10), 20: "sk-" + "Twen".repeat(10), 21: "sk-" + "Tw1n".repeat(10), 22: "sk-" + "Tw2n".repeat(10) };
+  const channelKey = { 1: keys[9], 3: keys[10], 4: keys[11] };
+  let conflictFor = null; // 哪条绑定的事务在提交时撞唯一键（模拟 detectGroupMerges 没预检查到的边界）
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    extraRuleIds: ["rr_b", "rr_c"],
+    channelsByRule: { rr_live: [1], rr_b: [3], rr_c: [4] },
+    tokenKeyOf: (tokenId) => keys[tokenId],
+    extraTokens: [{ tokenId: 20, name: "new-a" }, { tokenId: 21, name: "new-b" }, { tokenId: 22, name: "new-c" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => Object.entries(channelKey).map(([id, key]) => ({ id: Number(id), baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(key), f: "unused" }] })) },
+    onRepositoryCommit: (record) => { if (conflictFor && record.keyChangeRuleIds?.includes(conflictFor)) throw Object.assign(new Error("duplicate key"), { code: "ER_DUP_ENTRY", errno: 1062 }); },
+  });
+  await f.module.refreshDue(now); // 第一轮：三条都锚定、没有变化
+  const tokenOf = async (id) => (await f.repository.getRule(id)).tokenId;
+  assert.deepEqual([await tokenOf("rr_live"), await tokenOf("rr_b"), await tokenOf("rr_c")], [9, 10, 11]);
+
+  Object.assign(channelKey, { 1: keys[20], 3: keys[21], 4: keys[22] }); // 三条绑定各自的渠道都换了 Key（互不牵连）
+  conflictFor = "rr_c";
+  now = Date.parse("2026-10-12T01:00:00Z");
+  await f.module.refreshDue(now);
+  assert.deepEqual([await tokenOf("rr_live"), await tokenOf("rr_b")], [20, 21], "没撞的两条照常换了段");
+  assert.equal((await f.repository.listSegments("rr_live")).length, 3);
+  assert.equal(await tokenOf("rr_c"), 11, "撞的那条整组回滚，逐字不变");
+  assert.equal((await f.repository.listSegments("rr_c")).length, 1, "没有残留的段");
+  assert.equal((await f.repository.getRule("rr_c")).keyIssue?.code, "KEY_GROUP_CHANGED", "撞的那条记会自己好的分组冲突");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue, null, "别的组不连坐");
+  assert.equal((await f.repository.getRule("rr_b")).keyIssue, null);
+  assert.equal(f.stations[1].keyAgentLastSuccessAtMs, Date.parse("2026-10-11T01:00:00Z"), "撞了的组这一轮没处理完：站点的成功时刻不往前推");
+
+  conflictFor = null; // 冲突解开
+  now = Date.parse("2026-10-12T01:10:00Z");
+  f.rt._keyAgentIdentifyCache = null;
+  await f.module.refreshDue(now);
+  assert.equal(await tokenOf("rr_c"), 22, "下一轮冲突解开以后撞的那条也换了段");
+  assert.equal((await f.repository.getRule("rr_c")).keyIssue, null);
+  assert.equal(await tokenOf("rr_live"), 20, "已经换好的不再动");
+});
+
+test("K2b 例外三：这个站点从来没读成功过（内存和持久化都没有「最后一次读到」），读不到就一律先不算——从开着那段的起点起挡，不用「现在」把从没核对过 Key 的日子放行", async (t) => {
+  const { f, agent, round, state, booked } = await readerOutageFixture(t);
+  agent.down = true; // 第一轮就读不到，没有任何一次读到过
+  await round("2026-10-11T16:30:00Z"); // 10-11 刚结束（16:00Z）：以前会因为 sinceMs = 现在 而被固定
+  assert.equal(booked("2026-10-11"), 0, "从来没核对过 Key，读不到时哪天都不固定");
+  assert.equal((await state("2026-10-11"))?.retryReason, "KEY_AGENT_UNAVAILABLE");
+  assert.equal(f.stations[1].keyAgentLastSuccessAtMs ?? null, null);
+  agent.down = false; // 连上了，Key 没变：照常固定
+  await round("2026-10-11T17:00:00Z");
+  await round("2026-10-11T17:15:00Z");
+  assert.equal(booked("2026-10-11"), 1, "读到以后照常算");
+});
+
+test("K2b：页面只读查询（evaluate）也看库里持久化的事项——UNMATCHED 记着的那天显示需处理的原因，不是「实时 / READY」；b 以前的日子不受影响；事项解开后观测一轮就没了", async (t) => {
+  const { f, agent, round } = await readerOutageFixture(t);
+  const keyNine = agent.key;
+  await round("2026-10-11T06:00:00Z");
+  agent.key = "sk-" + "Unkn".repeat(10);
+  await round("2026-10-11T10:00:00Z"); // 认出渠道换成了哪都没有的 Key，b = 10:00Z，记进库里
+  await round("2026-10-11T16:05:00Z"); // 10-11 结束了（还没到结账的点），事项还在
+  const evaluate = async (startIso, endIso) => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai",
+    startMs: Date.parse(startIso), endMs: Date.parse(endIso) }, { mode: "evaluate" })).results[0];
+  const day = await evaluate("2026-10-10T16:00:00Z", "2026-10-11T16:00:00Z"); // 10-11 整天，跨过 b
+  assert.equal(day.health.code, "CHANNEL_KEY_UNMATCHED", "只读查询看持久化的事项，不是 READY");
+  const before = await evaluate("2026-10-09T16:00:00Z", "2026-10-10T16:00:00Z"); // 10-10，整天在 b 以前
+  assert.notEqual(before.health.code, "CHANNEL_KEY_UNMATCHED", "b 以前的日子不受影响");
+  agent.key = keyNine; // 解开
+  await round("2026-10-11T16:10:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue, null);
+  assert.notEqual((await evaluate("2026-10-10T16:00:00Z", "2026-10-11T16:00:00Z")).health.code, "CHANNEL_KEY_UNMATCHED");
+});
+
+test("K2b（驱动层 304）：渠道换成了不在已加上游里的 Key，读取服务内容不变（304）——把上游加上以后，过了重对间隔下一轮就认出来、清掉事项并换段，不是一直卡在 CHANNEL_KEY_UNMATCHED", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keys = { 9: "sk-" + "Nine".repeat(10), 77: "sk-" + "Sev7".repeat(10) };
+  const extraTokens = [{ tokenId: 9, name: "stable" }];
+  let channelKey = keys[9];
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }], tokenKeyOf: (tokenId) => keys[tokenId], extraTokens,
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(channelKey), f: "unused" }] }] } });
+  const round = async (iso) => { now = Date.parse(iso); await f.module.refreshDue(now); }; // 不清识别缓存：靠 4 分钟到期 + etag（304）
+  await round("2026-10-11T01:00:00Z");
+  assert.ok((await f.repository.getRule("rr_live")).canonicalKey, "锚定");
+  channelKey = keys[77]; // 渠道换成了一把不在已加上游里的 Key
+  await round("2026-10-11T01:10:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.code, "CHANNEL_KEY_UNMATCHED");
+  extraTokens.push({ tokenId: 77, name: "added-later" }); // 用户把这把 Key 所在的上游加上了（目录里有了）
+  await round("2026-10-11T01:20:00Z"); // 读取服务内容没变（304），但距上一次对上游目录不到 15 分钟：先不重对
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.code, "CHANNEL_KEY_UNMATCHED", "间隔没到，不重读上游目录");
+  await round("2026-10-11T01:30:00Z"); // 过了 15 分钟：304 也重新对一遍上游目录
+  const rule = await f.repository.getRule("rr_live");
+  assert.equal(rule.keyIssue, null, "认出来了，事项清掉");
+  assert.equal(rule.tokenId, 77, "换段");
+});
+
+// Sub2API 上游（用户在用）：按天读账单，切不开中途。换 Key 那天整窗各把 Key 取全天再相加。
+// 识别还不认 Sub2API 的 Key 目录（#142 另合），这里直接塞识别结果。所有行（这条绑定每一天）上游成本之和 = 各 Key 当天用量之和
+test("K2b + Sub2API：同一条绑定换 Key——换 Key 那天整窗各把 Key 取全天再相加，每天上游成本 = 各 Key 当天用量之和（以前整窗只取最新那把，旧 Key 的用量漏了）", async (t) => {
+  const A = Date.parse("2026-10-11T01:00:00Z"), SWITCH = Date.parse("2026-10-11T20:00:00Z"), B = Date.parse("2026-10-12T01:00:00Z");
+  let now = A;
+  t.mock.method(Date, "now", () => now);
+  const windows = { 9: [0, SWITCH], 20: [SWITCH, null] }; // 旧 Key 用到 SWITCH，新 Key 从 SWITCH 起（每秒 1 美元）
+  const fake = createFakeSub2Api({ keys: [{ id: 9, name: "stable" }, { id: 20, name: "k20" }], dayUsageUsd: (keyId, day) => secondsInDay(windows[keyId], day), now: () => Date.now() });
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], sub2api: fake,
+    usageOf: () => 0, tokenKeyOf: () => "sk-unused", extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "k20" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [] } });
+  Object.assign(f.stations[0], { type: "sub2api", accessToken: "jwt" });
+  const channelToken = { 1: 9 };
+  const inject = () => { f.rt._keyAgentIdentifyCache = { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, revealIssues: [],
+    channels: Object.entries(channelToken).map(([id, tokenId]) => ({ channelId: Number(id), keyless: false, slots: [{ index: 0, state: "identified",
+      matches: [{ stationId: "upstream", tokenId, tokenName: tokenId === 9 ? "stable" : "k20", via: "fingerprint" }] }] })) } }; };
+  inject();
+  await f.module.refreshDue(now);
+  channelToken[1] = 20; now = B; inject();
+  await f.module.refreshDue(now); // 认出换了 Key：[a, b) 过渡段两把 Key 都放着
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 20);
+  for (const iso of ["2026-10-13T01:00:00Z", "2026-10-14T01:00:00Z"]) { now = Date.parse(iso); inject(); await f.module.refreshDue(now); }
+  const cost = (day) => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === day).reduce((total, row) => total + Number(row.cost_usd), 0);
+  const truth = (day) => Object.values(windows).reduce((total, window) => total + secondsInDay(window, day), 0);
+  for (const day of ["2026-10-11", "2026-10-12", "2026-10-13"]) assert.equal(cost(day), truth(day), `${day}：各 Key 当天用量之和`);
+});
+
+// ---- 换 Key 的钱：每把 Key 恰好算一次 ----
+// 每把 Key 的用量按 Key 名字、按时间段设定（每秒 1 美元，quota_per_unit 100）；每天所有绑定（含已归档的）账本行的上游成本之和 = 各把 Key 当天用量之和
+const usageWindowsOf = (windows) => (name, startSec, endSec) => { const w = windows[name]; return w ? 100 * Math.max(0, Math.min(endSec + 1, w[1]) - Math.max(startSec, w[0])) : 0; };
+const secOf = (iso) => Date.parse(iso) / 1000;
+const latestLedgerCostOn = (f, billDate) => {
+  const latest = new Map();
+  for (const row of f.state.ledger.filter((item) => item.bill_date === billDate)) if (!latest.has(row.rule_id) || Number(row.revision) > Number(latest.get(row.rule_id).revision)) latest.set(row.rule_id, row);
+  return [...latest.values()].reduce((total, row) => total + Number(row.cost_usd), 0);
+};
+
+test("K2b 钱：站点里有一条永远处理不完的绑定（几把 Key 的渠道），a 一直冻着——一把 Key 跨两轮从 A 挪给 B，也只算一次（B 的窗口里这把 Key 从 A 的段结束起算）", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keys = { 9: "sk-" + "Nine".repeat(10), 10: "sk-" + "TenT".repeat(10), 11: "sk-" + "Elev".repeat(10), 12: "sk-" + "Twel".repeat(10) };
+  const held = { 1: 9, 2: 10 }; // 渠道 1（A）、渠道 2（B）现在用的 Key；渠道 3 是几把 Key 的渠道（C）
+  const t1 = secOf("2026-10-11T04:00:00Z"), t2 = secOf("2026-10-11T08:00:00Z"); // A 换成 K12、B 换成 K9 的真正时刻
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_b", "rr_c"], channelsByRule: { rr_live: [1], rr_b: [2], rr_c: [3] },
+    tokenKeyOf: (id) => keys[id], extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }, { tokenId: 12, name: "oai-12" }],
+    usageOf: usageWindowsOf({ stable: [0, Infinity], "stable-rr_b": [0, t2], "stable-rr_c": [0, Infinity], "oai-12": [t1, Infinity] }),
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [
+      { id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[held[1]]), f: "unused" }] }, { id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[held[2]]), f: "unused" }] },
+      { id: 3, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[11]), f: "unused" }, { i: 1, m: maskKey("sk-" + "Othr".repeat(10)), f: "unused" }] }] } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const round = async (iso) => { now = Date.parse(iso); f.rt._keyAgentIdentifyCache = null; await f.module.refreshDue(now); };
+  await round("2026-10-11T01:00:00Z"); // 锚定
+  held[1] = 12; await round("2026-10-11T05:00:00Z"); // 第 1 轮：A 换走 K9
+  held[2] = 9; await round("2026-10-11T09:00:00Z"); // 第 2 轮：B 接 K9（C 一直没处理完，站点的成功时刻一直冻着）
+  await round("2026-10-11T17:00:00Z"); // 10-11（上海）结束，结账
+  const day = Date.parse("2026-10-10T16:00:00Z") / 1000;
+  const truth = 86400 /* K9 */ + (t2 - day) /* K10，B 换走以前 */ + 86400 /* K11 */ + (day + 86400 - t1) /* K12，A 换上以后 */;
+  assert.equal(latestLedgerCostOn(f, "2026-10-11"), truth, "A、B、C 三条绑定当天上游成本之和 = 各把 Key 当天用量之和（K9 不重复）");
+  const windows = (await f.repository.listSegments("rr_b")).filter((segment) => segment.timingSource === "key_change_window");
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0].effectiveFrom >= Date.parse("2026-10-11T05:00:00Z") || windows[0].effectiveFrom === 0, true, "B 的窗口不早于 A 放开 K9 的那一刻（或者 B 的新 Key 那一段从那一刻起）");
+});
+
+test("K2b 钱：读取服务自己缓存最多 4 分钟——换 Key 的 a 用快照自己读库的时刻，b 用新一份快照读库的时刻，[真正换 Key, 控制台拿到快照) 那几分钟的新 Key 用量不漏", async (t) => {
+  let now = Date.parse("2026-10-11T11:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keys = { 9: "sk-" + "Nine".repeat(10), 10: "sk-" + "TenT".repeat(10) };
+  const agent = { secret: KEY_AGENT_SECRET, held: 9, readLagMs: 0, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[agent.held]), f: "unused" }] }] };
+  const tSwitch = secOf("2026-10-11T11:58:00Z"); // 真正换 Key 的时刻
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], tokenKeyOf: (id) => keys[id], extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    usageOf: usageWindowsOf({ stable: [0, tSwitch], "oai-2": [tSwitch, Infinity] }), keyAgent: agent });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const round = async (iso) => { now = Date.parse(iso); f.rt._keyAgentIdentifyCache = null; await f.module.refreshDue(now); };
+  await round("2026-10-11T11:00:00Z");
+  agent.readLagMs = 4 * 60 * 1000; await round("2026-10-11T12:00:00Z"); // 控制台 12:00 拿到的快照，读取服务 11:56 读的库（旧 Key，换 Key 在 11:58）
+  agent.held = 10; agent.readLagMs = 0; await round("2026-10-11T12:05:00Z"); // 12:05 的快照已经是新 Key
+  await round("2026-10-11T17:00:00Z");
+  assert.equal(latestLedgerCostOn(f, "2026-10-11"), 86400, "整天每秒 1 美元（旧 Key 到 11:58，新 Key 从 11:58 起），一秒不漏");
+  const window = (await f.repository.listSegments("rr_live")).find((segment) => segment.timingSource === "key_change_window");
+  assert.deepEqual([window.effectiveFrom, window.effectiveTo], [Date.parse("2026-10-11T11:56:00Z"), Date.parse("2026-10-11T12:05:00Z")], "a = 最后一份还是旧 Key 的快照读库的时刻，b = 第一份是新 Key 的快照读库的时刻");
+});
+
+test("K2b：一条绑定两个渠道，一个认出换了 Key、另一个这一轮认不出——整条绑定这一轮不换；分组冲突中渠道变认不出，冲突记号不清、冲突期间的日子不固定", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keys = { 9: "sk-" + "Nine".repeat(10), 10: "sk-" + "TenT".repeat(10) };
+  const state = { ch1: 9, ch2: 9, ch2Missing: false };
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], channelsByRule: { rr_live: [1, 2] }, tokenKeyOf: (id) => keys[id], extraTokens: [{ tokenId: 10, name: "oai-2" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[state.ch1]), f: "unused" }] },
+      ...(state.ch2Missing ? [] : [{ id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[state.ch2]), f: "unused" }] }])] } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const round = async (iso) => { now = Date.parse(iso); f.rt._keyAgentIdentifyCache = null; await f.module.refreshDue(now); };
+  await round("2026-10-11T01:00:00Z"); // 锚定
+  state.ch1 = 10; state.ch2Missing = true; await round("2026-10-11T05:00:00Z"); // 渠道 1 认出换成 K10，渠道 2 这一轮认不出
+  let rule = await f.repository.getRule("rr_live");
+  assert.deepEqual([rule.tokenId, (await f.repository.listSegments("rr_live")).length, rule.keyIssue], [9, 1, { code: "PENDING", sinceMs: Date.parse("2026-10-11T05:00:00Z") }],
+    "不拿认出来的那个渠道当整条绑定换了 Key（渠道 2 的 Key 用量以后没人算），这一轮不换；但有渠道已经换了，从认出来的这一刻起先不算（会自己好的 PENDING）");
+  state.ch2Missing = false; state.ch2 = 9; await round("2026-10-11T06:00:00Z"); // 渠道 2 认出来了、还是 K9：渠道 1 换了、渠道 2 没换，分组冲突
+  rule = await f.repository.getRule("rr_live");
+  assert.deepEqual([rule.keyIssue.code, rule.keyIssue.sinceMs], ["KEY_GROUP_CHANGED", Date.parse("2026-10-11T05:00:00Z")], "换码，b 沿用最早的");
+  state.ch2Missing = true; await round("2026-10-11T07:00:00Z"); // 冲突中渠道 2 变认不出：不是「冲突解开」，记号不清
+  rule = await f.repository.getRule("rr_live");
+  assert.deepEqual([rule.keyIssue?.code, rule.keyIssue?.sinceMs], ["KEY_GROUP_CHANGED", Date.parse("2026-10-11T05:00:00Z")], "记号沿用，不清");
+  await round("2026-10-11T17:00:00Z"); // 10-11 结束
+  assert.deepEqual(f.state.ledger.filter((row) => row.bill_date === "2026-10-11"), [], "冲突期间的 10-11 不固定");
+});
+
+test("K2b：渠道换成了别的上游站点的 Key——不悄悄照旧结账，记事项 KEY_GROUP_CHANGED，从认出来的那一刻起先不算", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const key = "sk-" + "Nine".repeat(10);
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], tokenKeyOf: () => key,
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(key), f: "unused" }] }] } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  await f.module.refreshDue(now); // 锚定
+  now = Date.parse("2026-10-11T05:00:00Z");
+  // 识别认出这个渠道现在用的是另一个上游站点的 Key（识别结果直接注入，这个夹具只有一个上游）
+  f.rt._keyAgentIdentifyCache = { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, readAtMs: now, confirmedAtMs: now, revealIssues: [],
+    channels: [{ channelId: 1, keyless: false, slots: [{ index: 0, state: "identified", matches: [{ stationId: "another-upstream", tokenId: 30, tokenName: "other", via: "fingerprint" }] }] }] } };
+  await f.module.refreshDue(now);
+  const rule = await f.repository.getRule("rr_live");
+  assert.deepEqual([rule.tokenId, rule.keyIssue?.code, rule.keyIssue?.sinceMs], [9, "KEY_GROUP_CHANGED", now], "没有悄悄不处理");
+  now = Date.parse("2026-10-11T17:00:00Z"); f.rt._keyAgentIdentifyCache = null;
+  f.rt._keyAgentIdentifyCache = { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, readAtMs: now, confirmedAtMs: now, revealIssues: [],
+    channels: [{ channelId: 1, keyless: false, slots: [{ index: 0, state: "identified", matches: [{ stationId: "another-upstream", tokenId: 30, tokenName: "other", via: "fingerprint" }] }] }] } };
+  await f.module.refreshDue(now);
+  assert.deepEqual(f.state.ledger.filter((row) => row.bill_date === "2026-10-11"), [], "认出来以后的 10-11 不固定");
+});
+
+test("K2b：没锚定过的绑定（还没开始算）识别到不一样的 Key 不换段", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keys = { 9: "sk-" + "Nine".repeat(10), 10: "sk-" + "TenT".repeat(10) };
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], tokenKeyOf: (id) => keys[id], extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[10]), f: "unused" }] }] } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  assert.equal((await f.repository.getRule("rr_live")).canonicalKey, null, "夹具里的绑定还没锚定");
+  await f.module.refreshDue(now); // 第一轮：渠道已经是 K10，但这条绑定还没锚定（这一轮才锚定）：不换段
+  assert.equal((await f.repository.listSegments("rr_live")).length, 1, "没锚定过的绑定不换段");
+});
+
+// 审核 2 第二轮 F1：事项解开（渠道回到原来的 Key）转成一段冲突期，解开以后又出新事项、又解开，旧的冲突期不会被覆盖——两段的日子都永远不固定
+test("K2b：冲突期叠着存好几段——事项解开、又出新事项、又解开，第一段的冲突期还在，两段碰到的日子都不固定，中间干净的日子照常固定", async (t) => {
+  const { f, agent, round, state, booked } = await readerOutageFixture(t);
+  const keyNine = agent.key, unknown = "sk-" + "Unkn".repeat(10);
+  await round("2026-10-10T06:00:00Z"); // R0：正常
+  agent.key = unknown; await round("2026-10-10T10:00:00Z"); // 第一次：认出不在已加上游里的 Key（since1）
+  agent.key = keyNine; await round("2026-10-10T12:00:00Z"); await round("2026-10-10T12:15:00Z"); // 解开（until1）
+  const first = (await f.repository.getRule("rr_live")).keyBlocks;
+  assert.deepEqual(first.map((block) => [block.code, block.sinceMs, block.untilMs]), [["KEY_CONFLICT_GAP", Date.parse("2026-10-10T10:00:00Z"), first[0].untilMs]]);
+  agent.key = unknown; await round("2026-10-14T10:00:00Z"); // 第二次（since2）：新事项不覆盖第一段
+  assert.equal((await f.repository.getRule("rr_live")).keyBlocks.length, 1, "新事项不覆盖旧的冲突期");
+  agent.key = keyNine; await round("2026-10-14T12:00:00Z"); await round("2026-10-14T12:15:00Z"); // 又解开
+  const blocks = (await f.repository.getRule("rr_live")).keyBlocks;
+  assert.equal(blocks.length, 2, "两段都留着");
+  assert.deepEqual(blocks.map((block) => block.sinceMs), [Date.parse("2026-10-10T10:00:00Z"), Date.parse("2026-10-14T10:00:00Z")]);
+  await round("2026-10-15T16:20:00Z"); // 把两段之间、之后的日子都结一遍
+  assert.equal(booked("2026-10-10"), 0, "第一段碰到的 10-10 不固定");
+  assert.equal(booked("2026-10-14"), 0, "第二段碰到的 10-14 不固定");
+  assert.equal((await state("2026-10-10"))?.manualReason, "KEY_CONFLICT_GAP");
+  assert.equal((await state("2026-10-14"))?.manualReason, "KEY_CONFLICT_GAP");
+});
+
+// 审核 #133 M1 / 总指挥 10-27：读取服务那台机器的钟快了 1 小时——readAt 不可信，不采用：b 用控制台拿到快照的时刻（晚一点只会让窗口更宽），a 这一轮不推进（留在上一次读成功的时刻），
+// 所以 a 不会晚于真正换 Key 的时刻，换 Key 到 b 之间新 Key 的用量一秒不漏
+test("K2b 钱：读取服务的钟快了 1 小时——a 不推进、不会晚于真正换 Key 的时刻，[真正换 Key, b) 的新 Key 用量不漏", async (t) => {
+  let now = Date.parse("2026-10-11T11:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(console, "warn", () => {});
+  const keys = { 9: "sk-" + "Nine".repeat(10), 10: "sk-" + "TenT".repeat(10) };
+  const agent = { secret: KEY_AGENT_SECRET, held: 9, readLagMs: 0, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[agent.held]), f: "unused" }] }] };
+  const tSwitch = secOf("2026-10-11T11:58:00Z");
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], tokenKeyOf: (id) => keys[id], extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    usageOf: usageWindowsOf({ stable: [0, tSwitch], "oai-2": [tSwitch, Infinity] }), keyAgent: agent });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const round = async (iso) => { now = Date.parse(iso); f.rt._keyAgentIdentifyCache = null; await f.module.refreshDue(now); };
+  await round("2026-10-11T11:00:00Z"); // 钟正常：a 推进到 11:00
+  agent.readLagMs = -60 * 60 * 1000; // 读取服务的钟快了 1 小时：readAt = 控制台时刻 + 1 小时
+  await round("2026-10-11T11:30:00Z"); // 还是旧 Key：这一轮 a 不推进
+  agent.held = 10; await round("2026-10-11T12:05:00Z"); // 新 Key（换 Key 在 11:58）：b = 控制台 12:05
+  const window = (await f.repository.listSegments("rr_live")).find((segment) => segment.timingSource === "key_change_window");
+  assert.ok(window.effectiveFrom <= Date.parse("2026-10-11T11:58:00Z"), "a 不晚于真正换 Key 的时刻");
+  assert.equal(window.effectiveTo, Date.parse("2026-10-11T12:05:00Z"), "b = 控制台拿到快照的时刻");
+  agent.readLagMs = 0;
+  await round("2026-10-11T17:00:00Z");
+  assert.equal(latestLedgerCostOn(f, "2026-10-11"), 86400, "整天每秒 1 美元，一秒不漏");
+});
+
+// ---- 审核 #133 第 3 轮 ----
+test("K2b（M4）：冲突解开的这一轮刚好换了段——冲突期照样转出来（过渡窗口里没有冲突期间用过的第三把 Key），那几天永远不固定", async (t) => {
+  const { f, agent, keyTen, round, state, booked } = await readerOutageFixture(t);
+  await round("2026-10-10T06:00:00Z");
+  agent.key = "sk-" + "Unkn".repeat(10); await round("2026-10-10T10:00:00Z"); // 认出渠道用了不在已加上游里的 Key（since）
+  agent.key = keyTen; await round("2026-10-10T12:00:00Z"); // 渠道换成了已加的 K10：事项解开的同一轮换段
+  await round("2026-10-10T12:15:00Z");
+  const rule = await f.repository.getRule("rr_live");
+  assert.equal(rule.tokenId, 10, "换段落库了");
+  assert.deepEqual(rule.keyBlocks.map((block) => [block.code, block.sinceMs]), [["KEY_CONFLICT_GAP", Date.parse("2026-10-10T10:00:00Z")]], "冲突期照样转出来");
+  assert.equal(rule.keyIssue, null);
+  await round("2026-10-11T16:20:00Z");
+  assert.equal(booked("2026-10-10"), 0, "冲突期碰到的 10-10 不固定");
+  assert.equal((await state("2026-10-10"))?.manualReason, "KEY_CONFLICT_GAP");
+});
+
+test("K2b（M3、F3）：多渠道绑定一个换了一个认不出记的 PENDING，换回原 Key 清掉时也转成冲突期——那几天不固定", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keys = { 9: "sk-" + "Nine".repeat(10), 10: "sk-" + "TenT".repeat(10) };
+  const state = { ch1: 9, ch2: 9, ch2Missing: false };
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], channelsByRule: { rr_live: [1, 2] }, tokenKeyOf: (id) => keys[id], extraTokens: [{ tokenId: 10, name: "oai-2" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[state.ch1]), f: "unused" }] },
+      ...(state.ch2Missing ? [] : [{ id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[state.ch2]), f: "unused" }] }])] } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const round = async (iso) => { now = Date.parse(iso); f.rt._keyAgentIdentifyCache = null; await f.module.refreshDue(now); };
+  await round("2026-10-11T01:00:00Z");
+  state.ch1 = 10; state.ch2Missing = true; await round("2026-10-11T05:00:00Z"); // PENDING
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue.code, "PENDING");
+  state.ch1 = 9; state.ch2Missing = false; await round("2026-10-11T07:00:00Z"); await round("2026-10-11T07:15:00Z"); // 换回原 Key：清掉
+  const rule = await f.repository.getRule("rr_live");
+  assert.equal(rule.keyIssue, null);
+  assert.deepEqual(rule.keyBlocks.map((block) => [block.code, block.sinceMs]), [["KEY_CONFLICT_GAP", Date.parse("2026-10-11T05:00:00Z")]]);
+  await round("2026-10-11T17:00:00Z");
+  assert.deepEqual(f.state.ledger.filter((row) => row.bill_date === "2026-10-11"), [], "冲突期碰到的 10-11 不固定");
+});
+
+test("K2b（M1、L2）：近 7 天这类多天窗口只碰到冲突期——只去掉碰到的那几天、其余天照算，加一句说明；同一天还有 PENDING 时冲突期优先；整个窗口都碰到就是冲突期的原因", async (t) => {
+  const { f, round } = await readerOutageFixture(t);
+  await round("2026-10-10T06:00:00Z");
+  const row = f.repository.tables.rules.find((item) => item.id === "rr_live");
+  const day = (iso) => Date.parse(iso);
+  row.key_blocks = JSON.stringify([{ code: "KEY_CONFLICT_GAP", sinceMs: day("2026-10-12T04:00:00Z"), untilMs: day("2026-10-12T10:00:00Z") },
+    { code: "KEY_CONFLICT_GAP", sinceMs: day("2026-10-13T04:00:00Z"), untilMs: day("2026-10-13T10:00:00Z") },
+    { code: "PENDING", sinceMs: day("2026-10-13T01:00:00Z"), untilMs: day("2026-10-13T10:00:00Z") }]);
+  await round("2026-10-15T01:00:00Z"); // 把时钟走到窗口之后
+  const query = (startIso, endIso) => f.module.queryRules({ preset: "custom", startMs: day(startIso), endMs: day(endIso), timezone: "Asia/Shanghai" }, { force: true, mode: "evaluate" }).then(({ results }) => results[0]);
+  const wide = await query("2026-10-10T16:00:00Z", "2026-10-12T16:00:00Z"); // 上海 10-11 到 10-12（10-12 碰到冲突期）
+  assert.notEqual(wide.health.code, "KEY_CONFLICT_GAP", "多天窗口不整窗拦");
+  assert.ok(wide.health.issues.some((issue) => issue.code === "KEY_CONFLICT_GAP_PARTIAL"), "加一句说明");
+  assert.ok(wide.calculation.profitUsd != null, "其余天照算");
+  const one = await query("2026-10-12T16:00:00Z", "2026-10-13T16:00:00Z"); // 上海 10-13 一天：冲突期和 PENDING 都碰到
+  assert.equal(one.health.code, "KEY_CONFLICT_GAP", "同一天两种都有时冲突期优先");
+  assert.equal(reconciliationIssue("KEY_CONFLICT_GAP_PARTIAL").kind, "hint");
+});
+
+test("addKeyBlock（L1）：超过 200 段把最旧的两段并成一段，不丢最旧的冲突期", () => {
+  let blocks = [];
+  for (let index = 0; index < 205; index += 1) blocks = addKeyBlock(blocks, { code: "KEY_CONFLICT_GAP", sinceMs: index * 10, untilMs: index * 10 + 5 });
+  assert.equal(blocks.length, 200);
+  assert.equal(blocks[0].sinceMs, 0, "最旧的起点还在");
+  assert.equal(blocks.at(-1).untilMs, 204 * 10 + 5);
+});
+
+// ---- 应付成本 × 换 Key（K 和 V1-b 碰在一起）：换 Key 那天一条绑定被切成几段，应付成本按段算，每段用自己的倍率 ----
+async function expectedCostKeyDay(t, { cutOffsetMs, second }) {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  const bucket = (slotMs, channelId, extra = {}) => ({ slotMs, channelId, model: "m", upstreamModel: "", group: "g1", semantic: "anthropic", requests: 1, promptTokens: 100, completionTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 1, adminQuota: 0, testQuota: 0, ...extra });
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd + 3600000, buckets: [bucket(dayStart + 3600000, 1), bucket(dayStart + 7200000, 1, { completionTokens: 0, cacheReadTokens: 100 }), bucket(dayEnd, 1)] }, dayEnd + 3600000);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  const cut = dayStart + cutOffsetMs;
+  const first = f.repository.tables.segments.find((row) => row.rule_id === "rr_live");
+  Object.assign(first, { group_ratio: 1, effective_to_ms: cut });
+  f.repository.tables.segments.push({ ...first, id: "s1-key2", group_name: second.group, group_ratio: second.ratio, effective_from_ms: cut, effective_to_ms: null, detected_at_ms: cut, timing_source: "key_change" });
+  f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2, completion_ratio: 3, cache_ratio: 0.1 }], group_ratio: { g1: 1 } };
+  await f.module.refreshDue(Date.now());
+  const live = f.state.ledger.find((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
+  return { live, detail: JSON.parse(live.detail_json ?? "null") ?? live.detail };
+}
+
+test("应付成本 × 换 Key：换 Key 在整点（10:00），前后两段倍率不一样——按段算，每段用自己的倍率", async (t) => {
+  const { live, detail } = await expectedCostKeyDay(t, { cutOffsetMs: 2 * 3600000, second: { group: "g2", ratio: 2 } });
+  // 第 1 小时桶（在前一段，倍率 1）(100 + 50×3) × 2 ÷ 100 = 5；第 2 小时桶（在后一段，倍率 2）(100 + 100×0.1) × 2 ÷ 100 = 2.2，× 2 = 4.4；整天都套最新那段的倍率会是 10 + 4.4 = 14.4
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [9.4, null]);
+  assert.deepEqual(detail.expected.segments.map((row) => [row.ratio, row.usd]), [[1, 5], [2, 4.4]]);
+});
+
+test("应付成本 × 换 Key：换 Key 不在整点（9:30）而且前后倍率不一样——算不出，PARTIAL_HOUR_UNSUPPORTED（和 C3 当天换绑、停止算利润同一条规矩）", async (t) => {
+  const { live } = await expectedCostKeyDay(t, { cutOffsetMs: 90 * 60000, second: { group: "g2", ratio: 2 } });
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [null, "PARTIAL_HOUR_UNSUPPORTED"]);
+});
+
+test("应付成本 × 换 Key：换 Key 不在整点但前后分组、倍率一样——合成一段照常算，不挡", async (t) => {
+  const { live, detail } = await expectedCostKeyDay(t, { cutOffsetMs: 90 * 60000, second: { group: "g1", ratio: 1 } });
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [7.2, null]);
+  assert.equal(detail.expected.segments.length, 1);
+});
+
+// 每日利润页（A1/A2）显示换 Key 冲突期的日子：KEY_CONFLICT_GAP 是需处理但没有按钮（和自营站点没记收费记录那段同一个做法），不算进汇总；会自己好的 PENDING 显示「还在读取」
+test("每日利润页：碰到换 Key 冲突期（KEY_CONFLICT_GAP）的一天——这条绑定显示需处理、没有按钮、不算进汇总；别的绑定照常", async (t) => {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd + 3600000, buckets: [] }, dayEnd + 3600000);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  const live = f.repository.tables.rules.find((row) => row.id === "rr_live");
+  live.key_blocks = JSON.stringify([{ code: "KEY_CONFLICT_GAP", sinceMs: dayStart + 3 * 3600000, untilMs: dayStart + 5 * 3600000 }]);
+  await f.module.refreshDue(Date.now());
+  assert.deepEqual(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08"), [], "冲突期碰到的这一天不固定");
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_two" && row.bill_date === "2026-10-08").length, 1, "别的绑定照常固定");
+  const page = await f.module.profitPage({ preset: "custom", startMs: dayStart, endMs: dayEnd });
+  const row = page.rows.find((item) => item.channels.some((channel) => channel.channelId === 1));
+  assert.deepEqual([row.counted, row.attention?.code, row.attention?.action?.label ?? "", row.grossProfitUsd], [false, "KEY_CONFLICT_GAP", "", null]);
+  assert.match(row.attention.title, /这一天几个渠道换了 Key/);
+  assert.equal(page.rows.filter((item) => item.counted).length, 2);
+});
+
+// 审核 #133 第 4 轮 M3、M4：换 Key 冲突期的那天（永远不固定）在每日利润页多天窗口、计算明细里的显示
+test("每日利润页：多天窗口里的冲突日（KEY_CONFLICT_GAP，永远不固定）——小格标需处理加原因，不算还在读取；计算明细实付、毛利写「—」加原因，不写 0", async (t) => {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart - 86400000, dayStart - 86400000);
+  await ownLogStore.applyWindow("own", { fromMs: dayStart - 86400000, toMs: dayEnd + 3600000, buckets: [] }, dayEnd + 3600000);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  f.repository.tables.rules.find((row) => row.id === "rr_live").key_blocks = JSON.stringify([{ code: "KEY_CONFLICT_GAP", sinceMs: dayStart + 3 * 3600000, untilMs: dayStart + 5 * 3600000 }]);
+  await f.module.refreshDue(Date.now());
+  const page = await f.module.profitPage({ preset: "custom", startMs: dayStart - 86400000, endMs: dayEnd });
+  const row = page.rows.find((item) => item.channels.some((channel) => channel.channelId === 1));
+  const cell = row.daily.find((item) => item.day === "2026-10-08");
+  assert.deepEqual([cell.state, cell.reason], ["attention", "KEY_CONFLICT_GAP"], "不是「还在读取」，原因写出来");
+  const other = page.rows.find((item) => item.channels.some((channel) => channel.channelId === 2));
+  assert.equal(other.daily.find((item) => item.day === "2026-10-08").state, "fixed", "别的渠道照常");
+  assert.equal(page.dayCounts.fixed, 1, "这一天别的渠道固定了，整页这一天算固定；被扣的那条不拦它");
+  const detail = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-08" });
+  assert.deepEqual([detail.actual.usd, detail.grossProfitUsd, detail.unavailable?.code], [null, null, "KEY_CONFLICT_GAP"], "实付、毛利是「—」，不是 0 和「毛利 = 收入」");
+  const fine = await f.module.profitDetail({ ruleIds: ["rr_two"], day: "2026-10-08" });
+  assert.equal(fine.unavailable, null);
+  assert.notEqual(fine.actual.usd, null);
+});
+
+// 审核 #133 第 4 轮 M1：换 Key 的过渡段 [a, b) 按旧 Key 的倍率切；新旧倍率不一样就算不准，这天应付成本给 KEY_CHANGE_RATIO_DIFFERS 不比差额
+async function expectedCostWindowDay(t, { segments }) {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  const bucket = (slotMs, extra = {}) => ({ slotMs, channelId: 1, model: "m", upstreamModel: "", group: "g1", semantic: "anthropic", requests: 1, promptTokens: 100, completionTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 1, adminQuota: 0, testQuota: 0, ...extra });
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd + 3600000, buckets: [bucket(dayStart + 3600000), bucket(dayStart + 7200000), bucket(dayEnd)] }, dayEnd + 3600000);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  const first = f.repository.tables.segments.find((row) => row.rule_id === "rr_live");
+  segments.forEach((spec, index) => {
+    const row = index === 0 ? first : { ...first, id: `s-${index}` };
+    Object.assign(row, { group_name: spec.group, group_ratio: spec.ratio, effective_from_ms: dayStart + spec.from * 60000, effective_to_ms: spec.to == null ? null : dayStart + spec.to * 60000, timing_source: spec.source ?? "key_change", detected_at_ms: dayStart });
+    if (index > 0) f.repository.tables.segments.push(row);
+  });
+  f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2, completion_ratio: 3, cache_ratio: 0.1 }], group_ratio: { g1: 1 } };
+  await f.module.refreshDue(Date.now());
+  const live = f.state.ledger.find((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
+  return { f, live, detail: JSON.parse(live.detail_json ?? "null") ?? live.detail };
+}
+test("应付成本 × 换 Key：过渡段 [a, b) 前后两把 Key 的倍率不一样——KEY_CHANGE_RATIO_DIFFERS，应付成本不写数（实付、毛利照常），说明带换 Key 的时刻（两次读取之间）", async (t) => {
+  const { f, live, detail } = await expectedCostWindowDay(t, { segments: [{ from: 0, to: 120, group: "g1", ratio: 1, source: "initial" }, { from: 120, to: 180, group: "g1", ratio: 1, source: "key_change_window" }, { from: 180, to: null, group: "g2", ratio: 2 }] });
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [null, "KEY_CHANGE_RATIO_DIFFERS"]);
+  assert.deepEqual([detail.expected.keyChange.atMs, detail.expected.keyChange.between], [Date.parse("2026-10-07T16:00:00Z") + 180 * 60000, [Date.parse("2026-10-07T16:00:00Z") + 120 * 60000, Date.parse("2026-10-07T16:00:00Z") + 180 * 60000]]);
+  assert.ok(Number(live.cost_usd) >= 0 && live.revenue_usd != null, "实付、收入照常固定");
+  const shown = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-08" });
+  assert.equal(shown.expected.reason, "KEY_CHANGE_RATIO_DIFFERS");
+  assert.deepEqual([shown.expected.keyChange.between != null], [true]);
+});
+test("应付成本 × 换 Key：过渡段前后倍率一样（最常见）——照常算，换 Key 的边界不在整点、分组不一样也不挡（L1）", async (t) => {
+  const { live } = await expectedCostWindowDay(t, { segments: [{ from: 0, to: 90, group: "g1", ratio: 1, source: "initial" }, { from: 90, to: 150, group: "g1", ratio: 1, source: "key_change_window" }, { from: 150, to: null, group: "g3", ratio: 1 }] });
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [10, null]);
+});
+test("应付成本 × 换 Key：同分组、倍率变了（整点切）——按两段各算（合并的判据是倍率不是分组名）（L3）", async (t) => {
+  const { live, detail } = await expectedCostWindowDay(t, { segments: [{ from: 0, to: 120, group: "g1", ratio: 1, source: "initial" }, { from: 120, to: null, group: "g1", ratio: 2 }] });
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [15, null]);
+  assert.equal(detail.expected.segments.length, 2);
+});

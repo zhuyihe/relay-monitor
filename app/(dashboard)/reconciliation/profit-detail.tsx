@@ -4,7 +4,7 @@
 import { Button } from "antd";
 import { ErrorState, Skeleton } from "../../components/data-state";
 import type { ProfitDetailResponse, ProfitPageResponse, ProfitRow } from "../../../lib/client";
-import { EMPTY, formatCompact, formatDayKey, formatPct, formatZonedDateTime, OPTION_UNREADABLE_EXPECTED_NOTE, OPTION_UNREADABLE_SETTLED_NOTE } from "../../../lib/format";
+import { EMPTY, formatCompact, formatDayKey, formatPct, formatZonedDateTime, formatZonedTime, OPTION_UNREADABLE_EXPECTED_NOTE, OPTION_UNREADABLE_SETTLED_NOTE } from "../../../lib/format";
 import { formatReconciliationMoney } from "../../../lib/reconciliation-view";
 import { dayKeyInTz } from "../../../lib/business-time";
 import { COPY } from "./copy";
@@ -37,6 +37,9 @@ function Body({ detail, row, page, ctx, compact, onCorrected }: { detail: Profit
   const gap = detail.gap;
   const gapValue = gap?.usd == null ? EMPTY : gap.state === "within" ? signedMoney(toDisplay(gap.usd, costRate, ctx.currency), ctx.currency) : overUnderText(toDisplay(gap.usd, costRate, ctx.currency)!, ctx.currency);
   const today = detail.day === page.today;
+  // 换 Key 的时刻（KEY_CHANGE_RATIO_DIFFERS 的说明用）：定得出写「14:30」，两次读取之间写「15:19–16:05 之间」；带不到就不写时刻
+  const keyChangeWhen = (change: { atMs: number | null; between: [number, number] | null } | null | undefined) => change?.between && change.between[0] !== change.between[1]
+    ? `${formatZonedTime(change.between[0], ctx.tz)}–${formatZonedTime(change.between[1], ctx.tz)} 之间` : change?.atMs != null ? formatZonedTime(change.atMs, ctx.tz) : null;
   return <div className="jy-profit-detail">
     <Section title={COPY.detail.income} value={income(detail.income.usd)}>
       <p>{many ? COPY.detail.incomeFromMany(row.channels.length) : COPY.detail.incomeFrom(channelName(row.channels[0]?.channelId))}{admin ? `，${admin}` : ""}。</p>
@@ -44,7 +47,7 @@ function Body({ detail, row, page, ctx, compact, onCorrected }: { detail: Profit
     </Section>
     <Section title={COPY.detail.expected} value={detail.expected.usd == null ? EMPTY : cost(detail.expected.usd)}>
       {today ? <p>{COPY.detail.expectedToday}</p>
-        : detail.expected.usd == null && !models.length ? <p>{gapReasonText(detail.expected.reason, missing.map((model) => model.model), { settled: detail.settled, zone: ctx.zoneOf?.(row) })}</p>
+        : detail.expected.usd == null && !models.length ? <p>{gapReasonText(detail.expected.reason, missing.map((model) => model.model), { settled: detail.settled, zone: ctx.zoneOf?.(row), keyChangeWhen: keyChangeWhen(detail.expected.keyChange) })}</p>
           : <>
             <p>{many ? COPY.detail.expectedIntroMany(row.upstream.name || EMPTY, group) : COPY.detail.expectedIntro(row.upstream.name || EMPTY, group)}</p>
             {ctx.currency === "CNY" ? <p className="jy-caption">{COPY.detail.usdTable}</p> : null}
@@ -67,7 +70,7 @@ function Body({ detail, row, page, ctx, compact, onCorrected }: { detail: Profit
       <p>{missing.map((model) => COPY.detail.missingOne(model.model, formatCompact(model.inputTokens), formatCompact(model.outputTokens))).join("、")}。{COPY.detail.missingHint}</p>
     </Section> : null}
     <Section title={COPY.detail.actual} value={cost(detail.actual.usd)}>
-      <p>{COPY.detail.actualFrom(detail.actual.keyName || row.key.name)}</p>
+      {detail.unavailable ? <p>{[detail.unavailable.title, detail.unavailable.detail].filter(Boolean).join("。") || COPY.detail.unavailableUnknown}</p> : <p>{COPY.detail.actualFrom(detail.actual.keyName || row.key.name)}</p>}
     </Section>
     <Section title={COPY.detail.gap} value={gapValue}>
       <p>{COPY.detail.gapFormula}{gap?.rate != null && gap.state !== "within" ? `，${rateText(gap.rate)}` : ""}。{COPY.detail.gapNote(formatReconciliationMoney(page.gapThreshold.usd, null), formatPct(page.gapThreshold.rate, 0))}</p>

@@ -19,10 +19,28 @@ export const SEGMENT_KEYS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS reconciliation
   INDEX idx_segment_key_token (upstream_station_id, token_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`;
 
-// scope：只处理一条绑定（写分段的事务里用），或不给就是全部（启动迁移）。三条语句，重复跑结果一样：
+// scope：只处理一条绑定（写分段的事务里用），或不给就是全部（启动迁移）。几条语句，重复跑结果一样：
+//   0 已经关掉的段、以及停用/解除的绑定的所有 Key 行，不再占着 active_token_key（不管 match_source：K2b 写的 agent 行也一样，
+//     不然倍率变化开新段、或者解除以后，上一段的 agent 行还占着唯一键，新段（或别的绑定）写不进去）；
 //   1 没有 Key 行的分段补一行，填 rules 上现在的那把；
-//   2 来源是 initial 的行跟着 rules 上现在的上游、Key 走（改绑定时旧代码是整条绑定的历史都按新 Key 取，这里保持一样）；
-//   3 active_token_key：先清掉，再把还开着的那段填上 rules.active_token_key（绑定在用时才有值，停用、解除后为空）。
+//   2 来源是 initial 的行跟着 rules 现在的上游、Key 走（改绑定时旧代码是整条绑定的历史都按新 Key 取，这里保持一样）。
+//     K2b 以后（这条绑定有了非 initial 的行：agent 等），已经关掉的段的 Key 行不再跟着 rules 走——关掉的段用的是哪把 Key
+//     是按时间定下来的，换 Key 以后别处再调一次这个函数，历史段不能被改成新 Key；开着的那段仍然跟着 rules；
+//   3 active_token_key：把还开着的那段填上 rules.active_token_key（绑定在用时才有值，停用、解除后为空）。
+//   4 开着的那段里非 initial 的行（K2b 写的）：第一把和 rules 上的是同一把就用 rules.active_token_key，别的用「上游:Key」。
+//     绑定停用以后重新启用，它们要重新占回唯一键。
+// 这条绑定有没有非 initial 的 Key 行：放在派生表里（DISTINCT 逼它先物化），不能写成对同一张表的子查询（MySQL 报 1093：
+// 更新的表不能同时在子查询里读）
+const AGENT_ROWS_JOIN = `LEFT JOIN (SELECT DISTINCT xs.rule_id FROM reconciliation_segment_keys x JOIN reconciliation_rule_segments xs ON xs.id = x.segment_id
+        WHERE x.match_source <> 'initial') agent ON agent.rule_id = s.rule_id`;
+// 只补没有 Key 行的分段（填 rules 上现在的那把），不改已有的行：K2b 换 Key 之前先跑一遍，保证要关掉的段留得住换之前的 Key
+export function fillMissingSegmentKeysSql(ruleId) {
+  return { sql: `INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source)
+      SELECT s.id, r.upstream_station_id, r.token_id, r.token_name, 'initial'
+      FROM reconciliation_rule_segments s JOIN reconciliation_rules r ON r.id = s.rule_id
+      WHERE NOT EXISTS (SELECT 1 FROM reconciliation_segment_keys k WHERE k.segment_id = s.id) AND s.rule_id = ?`, params: [ruleId] };
+}
+
 export function refreshSegmentKeysSql(ruleId = null) {
   const only = ruleId == null ? "" : " AND s.rule_id = ?";
   const params = ruleId == null ? [] : [ruleId];
@@ -35,17 +53,23 @@ export function refreshSegmentKeysSql(ruleId = null) {
       WHERE NOT EXISTS (SELECT 1 FROM reconciliation_segment_keys k WHERE k.segment_id = s.id)`, params },
   ];
   return [
-    { sql: `INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source)
-      SELECT s.id, r.upstream_station_id, r.token_id, r.token_name, 'initial'
-      FROM reconciliation_rule_segments s JOIN reconciliation_rules r ON r.id = s.rule_id
-      WHERE NOT EXISTS (SELECT 1 FROM reconciliation_segment_keys k WHERE k.segment_id = s.id)${only}`, params },
     { sql: `UPDATE reconciliation_segment_keys k
       JOIN reconciliation_rule_segments s ON s.id = k.segment_id JOIN reconciliation_rules r ON r.id = s.rule_id
+      SET k.active_token_key = NULL
+      WHERE k.active_token_key IS NOT NULL AND (s.effective_to_ms IS NOT NULL OR r.active_token_key IS NULL)${only}`, params },
+    fillMissingSegmentKeysSql(ruleId),
+    { sql: `UPDATE reconciliation_segment_keys k
+      JOIN reconciliation_rule_segments s ON s.id = k.segment_id JOIN reconciliation_rules r ON r.id = s.rule_id
+      ${AGENT_ROWS_JOIN}
       SET k.upstream_station_id = r.upstream_station_id, k.token_id = r.token_id, k.token_name = r.token_name, k.active_token_key = NULL
-      WHERE k.match_source = 'initial'${only}`, params },
+      WHERE k.match_source = 'initial' AND (s.effective_to_ms IS NULL OR agent.rule_id IS NULL)${only}`, params },
     { sql: `UPDATE reconciliation_segment_keys k
       JOIN reconciliation_rule_segments s ON s.id = k.segment_id JOIN reconciliation_rules r ON r.id = s.rule_id
       SET k.active_token_key = r.active_token_key
       WHERE k.match_source = 'initial' AND s.effective_to_ms IS NULL AND r.active_token_key IS NOT NULL${only}`, params },
+    { sql: `UPDATE reconciliation_segment_keys k
+      JOIN reconciliation_rule_segments s ON s.id = k.segment_id JOIN reconciliation_rules r ON r.id = s.rule_id
+      SET k.active_token_key = IF(k.upstream_station_id = r.upstream_station_id AND k.token_id = r.token_id, r.active_token_key, CONCAT(k.upstream_station_id, ':', k.token_id))
+      WHERE k.match_source <> 'initial' AND s.effective_to_ms IS NULL AND r.active_token_key IS NOT NULL${only}`, params },
   ];
 }

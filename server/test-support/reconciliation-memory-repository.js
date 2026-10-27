@@ -16,7 +16,7 @@ import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, fixedCostDayFromRow, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
-  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow,
+  uid, addKeyBlock, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
   SETTLEMENT_STATE_WRITE_COLUMNS, settlementStateFromRow, settlementStateValues,
 } from "../reconciliation-repository.js";
@@ -42,7 +42,7 @@ const SCHEMA = {
   rules: {
     keys: { PRIMARY: ["id"], uq_reconciliation_active_token: ["active_token_key"] },
     notNull: ["id", "upstream_station_id", "own_station_id", "token_id", "token_name", "fixed_group", "timezone", "enabled", "billing_policy", "scope_version", "cost_coverage"],
-    varchar: { id: 32, upstream_station_id: 32, own_station_id: 32, token_name: 160, fixed_group: 160, timezone: 64, active_token_key: 255, billing_policy: 32, cost_coverage: 24, provider: 24, canonical_key: 255 },
+    varchar: { id: 32, upstream_station_id: 32, own_station_id: 32, token_name: 160, fixed_group: 160, timezone: 64, active_token_key: 255, billing_policy: 32, cost_coverage: 24, provider: 24, canonical_key: 255, key_issue_code: 40 },
     onUpdate: "updated_at",
   },
   channels: {
@@ -314,21 +314,40 @@ export class MemoryReconciliationRepository {
     return attachSegmentKeys(segments, keyRows);
   }
 
-  // 同 MySQL 版 db/segment-keys.js 的 refreshSegmentKeysSql：每段一行 Key，来源是 initial 的跟着 rules 现在的上游和 Key 走，
-  // active_token_key 只给还开着的那段、而且绑定在用时（rules.active_token_key 有值）才有
+  async listSegmentsForRules(ruleIds) {
+    const ids = [...new Set((ruleIds || []).map(String))];
+    return Object.fromEntries(await Promise.all(ids.map(async (id) => [id, await this.listSegments(id)])));
+  }
+
+  // 同 MySQL 版 db/segment-keys.js 的 refreshSegmentKeysSql（几条语句一一对应，改一边要改另一边）：
+  // 0 关掉的段、停用/解除的绑定的所有 Key 行不再占 active_token_key；1 没有 Key 行的段补一行；
+  // 2 来源是 initial 的行跟着 rules 走——K2b 以后（这条绑定有了非 initial 的行）关掉的段不再跟；
+  // 3 开着的段 initial 行拿 rules.active_token_key；4 开着的段非 initial 的行：第一把和 rules 是同一把用 rules 的，别的「上游:Key」
   #refreshSegmentKeys(tx, ruleId) {
     const rule = this.#rows("rules", tx).find(({ row }) => sameText(row.id, ruleId))?.row;
     if (!rule) return;
     const segments = this.#segmentsOf(tx, ruleId).map(({ row }) => row);
-    const mine = this.#rows("segmentKeys", tx).filter(({ row }) => segments.some((segment) => segment.id === row.segment_id));
-    // 先全部清掉 active（唯一键），再逐段补行、更新
-    this.#update(tx, "segmentKeys", mine.filter(({ row }) => row.match_source === "initial" && row.active_token_key != null), { active_token_key: null });
+    const keyRows = () => this.#rows("segmentKeys", tx).filter(({ row }) => segments.some((segment) => segment.id === row.segment_id));
+    const segmentOf = (row) => segments.find((segment) => segment.id === row.segment_id);
+    // 0
+    this.#update(tx, "segmentKeys", keyRows().filter(({ row }) => row.active_token_key != null && (segmentOf(row).effective_to_ms != null || rule.active_token_key == null)), { active_token_key: null });
+    // 1
     for (const segment of segments) {
-      const entry = mine.find(({ row }) => row.segment_id === segment.id && row.match_source === "initial");
-      const active = segment.effective_to_ms == null && rule.active_token_key != null ? rule.active_token_key : null;
-      const fields = { upstream_station_id: rule.upstream_station_id, token_id: bigint(rule.token_id), token_name: rule.token_name ?? null };
-      if (entry) this.#update(tx, "segmentKeys", [entry], { ...fields, active_token_key: active });
-      else if (!mine.some(({ row }) => row.segment_id === segment.id)) this.#insert(tx, "segmentKeys", { segment_id: segment.id, ...fields, key_mask: null, match_source: "initial", active_token_key: active });
+      if (keyRows().some(({ row }) => row.segment_id === segment.id)) continue;
+      this.#insert(tx, "segmentKeys", { segment_id: segment.id, upstream_station_id: rule.upstream_station_id, token_id: bigint(rule.token_id),
+        token_name: rule.token_name ?? null, key_mask: null, match_source: "initial", active_token_key: null });
+    }
+    // 2、3
+    const hasAgentRows = keyRows().some(({ row }) => row.match_source !== "initial");
+    const follow = keyRows().filter(({ row }) => row.match_source === "initial" && (segmentOf(row).effective_to_ms == null || !hasAgentRows));
+    this.#update(tx, "segmentKeys", follow, { upstream_station_id: rule.upstream_station_id, token_id: bigint(rule.token_id), token_name: rule.token_name ?? null, active_token_key: null });
+    if (rule.active_token_key != null) {
+      this.#update(tx, "segmentKeys", keyRows().filter(({ row }) => row.match_source === "initial" && segmentOf(row).effective_to_ms == null), { active_token_key: rule.active_token_key });
+      // 4
+      for (const entry of keyRows().filter(({ row }) => row.match_source !== "initial" && segmentOf(row).effective_to_ms == null)) {
+        const same = entry.row.upstream_station_id === rule.upstream_station_id && Number(entry.row.token_id) === Number(rule.token_id);
+        this.#update(tx, "segmentKeys", [entry], { active_token_key: same ? rule.active_token_key : `${entry.row.upstream_station_id}:${entry.row.token_id}` });
+      }
     }
   }
 
@@ -477,6 +496,107 @@ export class MemoryReconciliationRepository {
           status_changed_at_ms: (row.channel_status ?? null) === (state.state ?? null) ? row.status_changed_at_ms : bigint(observedAt) }));
       }
     });
+  }
+
+  // 对应 MySQL 版 markKeyIssue
+  async markKeyIssue(ruleId, issue) {
+    await this.#transaction("markKeyIssue", async (tx) => {
+      const entry = this.#ruleEntry(tx, ruleId);
+      if (!entry) return;
+      this.#update(tx, "rules", [entry], { key_issue_code: issue?.code ?? null, key_issue_since_ms: issue ? bigint(issue.sinceMs) : null });
+    });
+  }
+
+  // 对应 MySQL 版 keyHeldUntil
+  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null } = {}) {
+    const rules = new Map(this.#plain("rules").map((row) => [row.id, row]));
+    const ends = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && Number(segment.effective_to_ms) >= (sinceMs ?? 0)
+      && rules.get(segment.rule_id)?.own_station_id === ownStationId
+      && this.#plain("segmentKeys").some((key) => key.segment_id === segment.id && key.upstream_station_id === upstreamStationId && Number(key.token_id) === Number(tokenId)))
+      .map((segment) => Number(segment.effective_to_ms));
+    return ends.length ? Math.max(...ends) : null;
+  }
+
+  // 对应 MySQL 版 addKeyBlock
+  async addKeyBlock(ruleId, block, { clearIssue = false } = {}) {
+    await this.#transaction("addKeyBlock", async (tx) => {
+      const entry = this.#ruleEntry(tx, ruleId);
+      if (!entry) return;
+      this.#update(tx, "rules", [entry], { key_blocks: JSON.stringify(addKeyBlock(entry.row.key_blocks, block)), ...(clearIssue ? { key_issue_code: null, key_issue_since_ms: null } : {}) });
+    });
+  }
+
+  // 对应 MySQL 版 applyKeyChangePlans：先把这一批绑定（和它们当前开着段）的 active_token_key 全部清空，
+  // 再分别开新段、写新值；唯一约束的检查在 #commit 里（#assertUnique），撞了整批回滚、这里捕获改回 { conflict: true }
+  async applyKeyChangePlans(plans, { detectedAt = Date.now() } = {}) {
+    try {
+      await this.#transaction("applyKeyChangePlans", async (tx) => {
+        tx.record.keyChangeRuleIds = plans.map(({ ruleId }) => ruleId); // 给测试的 beforeCommit 钩子认「这个事务是给哪几条绑定换 Key」
+        const currents = new Map(), rules = new Map();
+        for (const { ruleId } of [...plans].sort((x, y) => (x.ruleId < y.ruleId ? -1 : x.ruleId > y.ruleId ? 1 : 0))) { // 同 MySQL 版：按 id 顺序锁
+          await this.#lock(tx, `rule:${ruleId}`);
+          const entry = this.#ruleEntry(tx, ruleId);
+          if (!entry) throw repositoryError("RULE_NOT_FOUND");
+          rules.set(ruleId, entry.row);
+          const current = this.#segmentsOf(tx, ruleId).map(({ row }) => row).find((row) => row.effective_to_ms == null);
+          if (!current) throw repositoryError("CURRENT_SEGMENT_MISSING");
+          currents.set(ruleId, current);
+        }
+        // 对应 MySQL 版的前置条件：不满足就整批什么也不写（抛出去，事务回滚），返回 { stale: true }
+        if (plans.some(({ ruleId, plan }) => keyChangePlanIsStale(plan, rules.get(ruleId), currents.get(ruleId)))) throw Object.assign(new Error("stale key change plan"), { stalePlan: true });
+        for (const { ruleId } of plans) {
+          // 对应 MySQL 版：先给还没有 Key 行的段补一行（填换之前 rules 上的那把），再清空 active_token_key
+          const oldRule = this.#ruleEntry(tx, ruleId).row;
+          for (const segment of this.#segmentsOf(tx, ruleId).map(({ row }) => row)) {
+            if (this.#rows("segmentKeys", tx).some(({ row }) => row.segment_id === segment.id)) continue;
+            this.#insert(tx, "segmentKeys", { segment_id: segment.id, upstream_station_id: oldRule.upstream_station_id, token_id: bigint(oldRule.token_id),
+              token_name: oldRule.token_name ?? null, key_mask: null, match_source: "initial", active_token_key: null });
+          }
+          this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { active_token_key: null });
+          const keyRows = this.#rows("segmentKeys", tx).filter(({ row }) => sameText(row.segment_id, currents.get(ruleId).id));
+          this.#update(tx, "segmentKeys", keyRows, { active_token_key: null });
+        }
+        const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
+        for (const { ruleId, plan, keyBlock } of plans) {
+          const current = currents.get(ruleId), rule = rules.get(ruleId);
+          const ruleActiveKey = plan.canonicalKey ?? tokenKeyOf(plan.after[0]); // 同 MySQL 版：和 createRule 一个口径
+          const newGroup = plan.group ?? current.group_name;
+          const newRatio = plan.ratio !== undefined ? plan.ratio : current.group_ratio;
+          const openSegment = (effectiveFrom, keys, { closesAt = null, timingSource = "key_change", fresh = false } = {}) => {
+            const id = uid("rs"), createdAt = this.#timestamp();
+            const useNew = fresh && plan.group !== undefined; // 同 MySQL 版：新段的分组、倍率按新 Key 给的，没给沿用旧段
+            this.#insert(tx, "segments", { id, rule_id: ruleId, group_name: useNew ? newGroup : current.group_name, group_ratio: useNew ? (newRatio ?? null) : current.group_ratio,
+              ratio_observed_at_ms: useNew ? (newRatio == null ? null : bigint(detectedAt)) : current.ratio_observed_at_ms, ratio_source: useNew ? (newRatio == null ? null : "group_catalog") : current.ratio_source,
+              effective_from_ms: bigint(effectiveFrom), effective_to_ms: closesAt == null ? null : bigint(closesAt),
+              detected_at_ms: bigint(detectedAt), timing_source: timingSource, created_at: createdAt, updated_at: createdAt });
+            for (const [index, key] of keys.entries()) this.#insert(tx, "segmentKeys", { segment_id: id, upstream_station_id: key.upstreamStationId,
+              token_id: bigint(key.tokenId), token_name: key.tokenName ?? null, key_mask: null, match_source: "agent",
+              active_token_key: closesAt == null ? (index === 0 ? ruleActiveKey : tokenKeyOf(key)) : null });
+            return id;
+          };
+          this.#update(tx, "segments", this.#rows("segments", tx).filter(({ row }) => sameText(row.id, current.id)),
+            { effective_to_ms: bigint(plan.kind === "windowed" ? plan.windowStart : plan.cutoverAt) });
+          if (plan.kind === "windowed") {
+            openSegment(plan.windowStart, plan.windowKeys, { closesAt: plan.windowEnd, timingSource: "key_change_window" });
+            openSegment(plan.windowEnd, plan.after, { fresh: true });
+          } else {
+            openSegment(plan.cutoverAt, plan.after, { fresh: true });
+          }
+          const [firstKey] = plan.after;
+          if (keyBlock) this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { key_blocks: JSON.stringify(addKeyBlock(this.#ruleEntry(tx, ruleId).row.key_blocks, keyBlock)) }); // 同 MySQL 版：和换段同一个事务
+          this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { token_id: bigint(firstKey.tokenId),
+            token_name: firstKey.tokenName ?? rule.token_name, active_token_key: ruleActiveKey,
+            ...(plan.canonicalKey !== undefined ? { canonical_key: plan.canonicalKey } : {}), ...(plan.group !== undefined ? { fixed_group: plan.group } : {}) });
+          // 不调 #refreshSegmentKeys：它会把全部 match_source='initial' 的历史段都改成 rules 现在这把 Key
+          // （对应 MySQL 版同一处注释）——K2b 每段该用哪把 Key 已经按时间精确写好了，历史段不能跟着现在这把一起变
+        }
+      });
+    } catch (err) {
+      if (err?.code === "ER_DUP_ENTRY") return { conflict: true };
+      if (err?.stalePlan) return { conflict: false, stale: true };
+      throw err;
+    }
+    return { conflict: false };
   }
 
   async archiveRule(id, { now = this.now() } = {}) {
