@@ -107,12 +107,13 @@ gh workflow run perf.yml -R zhuyihe/relay-monitor --ref main -f pr=<号> -f bind
 ## K2a/K2b 场景（渠道 Key 读取服务）
 
 ```sh
-gh workflow run perf.yml -R zhuyihe/relay-monitor -f pr=<号> -f key_agent=true
+gh workflow run perf.yml -R zhuyihe/relay-monitor -f pr=<号> -f key_agent=true            # 稳态窗口里多半没有换 Key
+gh workflow run perf.yml -R zhuyihe/relay-monitor -f pr=<号> -f key_agent=true -f key_agent_rotate_sec=60   # 量到换 Key 那一段
 ```
 
 - `key_agent=true`（`PERF_KEY_AGENT=on`）：假站点在自营站点自己身上（`FAKE_OWN_PORT`）装一个 `/key-agent`，自营站点配上它的地址和令牌（种子脚本 `seed/01-base.mjs`）。被测版本没有 K2a（`keyAgentUrl`/`keyAgentSecret` 字段、`/key-agent` 这条路都不存在）时，这两步原样跳过、不报错——量的就是「装了读取服务前后，对外请求多了多少」，base（没有 K2a）天然是 0。
 - 协议照 k-plan 第二节：`GET /key-agent/keys` 要带 `Authorization: Bearer <派生的请求令牌>`；没变时带 `If-None-Match` 回 304；每个渠道一个指纹 + 一个打码（单数号上游的 Key 目录给打码、双数号给完整 Key，两条认法都量得到）；`/__ctl?key_agent_down=1` 模拟读取服务读库失败，照协议沿用上一份成功结果、带 `X-Agent-Stale: 1`（CI 默认不触发，本机调脚本用）。
-- 每 10 分钟随机换 2～3 个渠道现在用的 Key（只换走 New API 整号账号的渠道：候选只收这一类，走只用 Key 的上游、Sub2API 的渠道换了也看不出差，不浪费一次随机）。CI 默认的稳态窗口（185 秒）比 10 分钟短，量到的多半是「没变、304」那条路；想量「换了 Key 以后重新认一遍」有多贵，本机把窗口放长（`BG_SEC=1200` 以上）或用 `/__ctl?key_agent_rotate=1` 手动触发。
+- 每 `PERF_KEY_AGENT_ROTATE_SEC` 秒（默认 600，perf.yml 的输入 `key_agent_rotate_sec`）随机换 2～3 个渠道现在用的 Key（只换走 New API 整号账号的渠道：候选只收这一类，走只用 Key 的上游、Sub2API 的渠道换了也看不出差，不浪费一次随机）。CI 默认的稳态窗口（185 秒）比 10 分钟短，量到的多半是「没变、304」那条路；想量「换了 Key 以后重新认一遍、写段」有多贵：CI 里给 `key_agent_rotate_sec` 填 60 左右（稳态窗口里换上几次）；本机也可以把窗口放长（`BG_SEC=1200` 以上）或用 `/__ctl?key_agent_rotate=1` 手动触发。
 - 请求数在 `compare.md`、`summary.md` 的「假站点请求按路由」里自动出现（`key-agent:/keys`），和「整站读」一样走已有的通用对比，没有另写一节。
 
 ## 结果怎么看
