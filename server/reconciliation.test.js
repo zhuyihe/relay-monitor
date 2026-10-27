@@ -11011,3 +11011,25 @@ test("K2c 重新分组：渠道刚被用户停了（记了「用户停的」）�
   assert.equal(state.attempts, 0, "没有去写重新分组");
   assert.equal(await regroupedCount(), 0);
 });
+
+// 审核 2 补测（#133 之后）：读取服务报的读库时刻不可信（钟差太多）时，identify 把 confirmedAtMs 置成 null——「上一次读成功」的 a 这一轮不往前挪，
+// 不能再退回控制台的时刻（fetchedAtMs 比真正读库的晚，换 Key 前后最多 4 分钟的新 Key 用量会漏）
+test("K2b：读取服务给的读库时刻不可信（confirmedAtMs 为 null）：这一轮不推进「上一次读成功」的时刻；可信的照常推进", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const key = "sk-" + "Nine".repeat(10);
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], tokenKeyOf: () => key,
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(key), f: "unused" }] }] } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const own = f.stations[1];
+  const inject = (extra) => { f.rt._keyAgentIdentifyCache = { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, readAtMs: now, revealIssues: [], ...extra,
+    channels: [{ channelId: 1, keyless: false, slots: [{ index: 0, state: "identified", matches: [{ stationId: "upstream", tokenId: 9, tokenName: "stable", via: "fingerprint" }] }] }] } }; };
+  await f.module.refreshDue(now); // 锚定
+  now = Date.parse("2026-10-11T02:00:00Z"); inject({ confirmedAtMs: now });
+  await f.module.refreshDue(now);
+  assert.equal(own.keyAgentLastSuccessAtMs, now, "可信：推进到读库的时刻");
+  const before = own.keyAgentLastSuccessAtMs;
+  now = Date.parse("2026-10-11T03:00:00Z"); inject({ confirmedAtMs: null });
+  await f.module.refreshDue(now);
+  assert.equal(own.keyAgentLastSuccessAtMs, before, "不可信：不往前挪，也不退回控制台的时刻");
+});
