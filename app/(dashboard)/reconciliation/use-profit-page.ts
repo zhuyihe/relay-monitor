@@ -10,6 +10,7 @@ import { api } from "../../../lib/client";
 import type { ProfitDetailResponse, ProfitPageResponse, ProfitRow } from "../../../lib/client";
 import { ERROR_CATEGORIES } from "../../../lib/error-copy";
 import { livePollMs } from "./profit-format";
+import { COPY } from "./copy";
 // 这天重算的数比原来少了一半多、没换掉：点「重新读取」先弹确认框写出换成多少，确认框的内容和老页面同一份（C3，审核 #126/#128 盘点）
 import { RESETTLE_SHRUNK_CHANGED, resettleShrunkConfirm } from "../../../lib/reconciliation-view";
 
@@ -119,6 +120,7 @@ export function useProfitPage() {
       const next = await load(activeWindow);
       // 太早没自动重算的日子点「重新读取」，读出来又少了一半多：先没换掉，说一声（和需处理的标题同一句，§5.3）
       const fresh = next?.rows.find((item) => item.rowKey === key);
+      if (row.attention?.code === "UPSTREAM_RECORDS_TOO_MANY" && fresh?.attention?.code !== "UPSTREAM_RECORDS_TOO_MANY") message.info(COPY.attention.retryResumed);
       if (fresh?.attention?.code === "RESETTLE_SHRUNK") message.warning(confirmation ? RESETTLE_SHRUNK_CHANGED : `${fresh.attention.title}，先没换掉`);
     } catch (err) {
       setRetryErrors((previous) => ({ ...previous, [key]: caughtError(err) }));
