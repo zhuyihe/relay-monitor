@@ -245,3 +245,17 @@ test("copySegment：多 Key 段复制、改字段以后，keys 原样带过去�
   // JSON 序列化不受影响（keys 本来就不该进 JSON，这是 K1c 定的规矩，复制以后也一样不进）
   assert.equal(JSON.stringify(dayCopy).includes("oai"), false);
 });
+
+test("copySegment：overrides 里给了 keys 就生效（换成别的 Key 列表），而且不进 JSON、不可枚举；没给就和原段一样；原段不被改", async () => {
+  const { attachSegmentKeys, copySegment } = await import("./reconciliation-repository.js");
+  const [segment] = attachSegmentKeys([{ id: "seg1", effectiveFrom: 1, effectiveTo: 2 }], [{ segment_id: "seg1", upstream_station_id: "up1", token_id: 9, token_name: "secret-name", match_source: "agent" }]);
+  const replacement = [{ upstreamStationId: "up1", tokenId: 9 }, { upstreamStationId: "up1", tokenId: 20, tokenName: "other-secret" }];
+  const swapped = copySegment(segment, { keys: replacement });
+  assert.deepEqual(swapped.keys.map((key) => key.tokenId), [9, 20], "传了 keys 就生效");
+  assert.equal(Object.keys(swapped).includes("keys"), false, "不可枚举");
+  assert.equal(JSON.stringify(swapped).includes("other-secret"), false, "不进 JSON");
+  assert.deepEqual(segment.keys.map((key) => key.tokenId), [9], "原段不变");
+  const plain = copySegment(segment, { id: "seg1~1" });
+  assert.deepEqual(plain.keys.map((key) => key.tokenId), [9], "没传就和原段一样");
+  assert.equal(plain.id, "seg1~1");
+});
