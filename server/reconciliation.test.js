@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createReconciliationModule, mapWithConcurrency, reconciliationScopeFingerprint, resolveReconciliationWindow, normalizeReconciliationScopeIntent, ruleTimezoneFor } from "./reconciliation.js";
-import { ReconciliationRepository, copySegment, reconciliationOwnerRuleState, reconciliationOwnerScope } from "./reconciliation-repository.js";
+import { ReconciliationRepository, addKeyBlock, copySegment, reconciliationOwnerRuleState, reconciliationOwnerScope } from "./reconciliation-repository.js";
 import { MemoryReconciliationRepository } from "./test-support/reconciliation-memory-repository.js";
 import { reconciliationSnapshotIdentity, reconciliationConfirmedHistoryRecord } from "../lib/reconciliation-snapshot.js";
 import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
@@ -10798,4 +10798,68 @@ test("K2b 钱：读取服务的钟快了 1 小时——a 不推进、不会晚�
   agent.readLagMs = 0;
   await round("2026-10-11T17:00:00Z");
   assert.equal(latestLedgerCostOn(f, "2026-10-11"), 86400, "整天每秒 1 美元，一秒不漏");
+});
+
+// ---- 审核 #133 第 3 轮 ----
+test("K2b（M4）：冲突解开的这一轮刚好换了段——冲突期照样转出来（过渡窗口里没有冲突期间用过的第三把 Key），那几天永远不固定", async (t) => {
+  const { f, agent, keyTen, round, state, booked } = await readerOutageFixture(t);
+  await round("2026-10-10T06:00:00Z");
+  agent.key = "sk-" + "Unkn".repeat(10); await round("2026-10-10T10:00:00Z"); // 认出渠道用了不在已加上游里的 Key（since）
+  agent.key = keyTen; await round("2026-10-10T12:00:00Z"); // 渠道换成了已加的 K10：事项解开的同一轮换段
+  await round("2026-10-10T12:15:00Z");
+  const rule = await f.repository.getRule("rr_live");
+  assert.equal(rule.tokenId, 10, "换段落库了");
+  assert.deepEqual(rule.keyBlocks.map((block) => [block.code, block.sinceMs]), [["KEY_CONFLICT_GAP", Date.parse("2026-10-10T10:00:00Z")]], "冲突期照样转出来");
+  assert.equal(rule.keyIssue, null);
+  await round("2026-10-11T16:20:00Z");
+  assert.equal(booked("2026-10-10"), 0, "冲突期碰到的 10-10 不固定");
+  assert.equal((await state("2026-10-10"))?.manualReason, "KEY_CONFLICT_GAP");
+});
+
+test("K2b（M3、F3）：多渠道绑定一个换了一个认不出记的 PENDING，换回原 Key 清掉时也转成冲突期——那几天不固定", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keys = { 9: "sk-" + "Nine".repeat(10), 10: "sk-" + "TenT".repeat(10) };
+  const state = { ch1: 9, ch2: 9, ch2Missing: false };
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], channelsByRule: { rr_live: [1, 2] }, tokenKeyOf: (id) => keys[id], extraTokens: [{ tokenId: 10, name: "oai-2" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[state.ch1]), f: "unused" }] },
+      ...(state.ch2Missing ? [] : [{ id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[state.ch2]), f: "unused" }] }])] } });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const round = async (iso) => { now = Date.parse(iso); f.rt._keyAgentIdentifyCache = null; await f.module.refreshDue(now); };
+  await round("2026-10-11T01:00:00Z");
+  state.ch1 = 10; state.ch2Missing = true; await round("2026-10-11T05:00:00Z"); // PENDING
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue.code, "PENDING");
+  state.ch1 = 9; state.ch2Missing = false; await round("2026-10-11T07:00:00Z"); await round("2026-10-11T07:15:00Z"); // 换回原 Key：清掉
+  const rule = await f.repository.getRule("rr_live");
+  assert.equal(rule.keyIssue, null);
+  assert.deepEqual(rule.keyBlocks.map((block) => [block.code, block.sinceMs]), [["KEY_CONFLICT_GAP", Date.parse("2026-10-11T05:00:00Z")]]);
+  await round("2026-10-11T17:00:00Z");
+  assert.deepEqual(f.state.ledger.filter((row) => row.bill_date === "2026-10-11"), [], "冲突期碰到的 10-11 不固定");
+});
+
+test("K2b（M1、L2）：近 7 天这类多天窗口只碰到冲突期——只去掉碰到的那几天、其余天照算，加一句说明；同一天还有 PENDING 时冲突期优先；整个窗口都碰到就是冲突期的原因", async (t) => {
+  const { f, round } = await readerOutageFixture(t);
+  await round("2026-10-10T06:00:00Z");
+  const row = f.repository.tables.rules.find((item) => item.id === "rr_live");
+  const day = (iso) => Date.parse(iso);
+  row.key_blocks = JSON.stringify([{ code: "KEY_CONFLICT_GAP", sinceMs: day("2026-10-12T04:00:00Z"), untilMs: day("2026-10-12T10:00:00Z") },
+    { code: "KEY_CONFLICT_GAP", sinceMs: day("2026-10-13T04:00:00Z"), untilMs: day("2026-10-13T10:00:00Z") },
+    { code: "PENDING", sinceMs: day("2026-10-13T01:00:00Z"), untilMs: day("2026-10-13T10:00:00Z") }]);
+  await round("2026-10-15T01:00:00Z"); // 把时钟走到窗口之后
+  const query = (startIso, endIso) => f.module.queryRules({ preset: "custom", startMs: day(startIso), endMs: day(endIso), timezone: "Asia/Shanghai" }, { force: true, mode: "evaluate" }).then(({ results }) => results[0]);
+  const wide = await query("2026-10-10T16:00:00Z", "2026-10-12T16:00:00Z"); // 上海 10-11 到 10-12（10-12 碰到冲突期）
+  assert.notEqual(wide.health.code, "KEY_CONFLICT_GAP", "多天窗口不整窗拦");
+  assert.ok(wide.health.issues.some((issue) => issue.code === "KEY_CONFLICT_GAP_PARTIAL"), "加一句说明");
+  assert.ok(wide.calculation.profitUsd != null, "其余天照算");
+  const one = await query("2026-10-12T16:00:00Z", "2026-10-13T16:00:00Z"); // 上海 10-13 一天：冲突期和 PENDING 都碰到
+  assert.equal(one.health.code, "KEY_CONFLICT_GAP", "同一天两种都有时冲突期优先");
+  assert.equal(reconciliationIssue("KEY_CONFLICT_GAP_PARTIAL").kind, "hint");
+});
+
+test("addKeyBlock（L1）：超过 200 段把最旧的两段并成一段，不丢最旧的冲突期", () => {
+  let blocks = [];
+  for (let index = 0; index < 205; index += 1) blocks = addKeyBlock(blocks, { code: "KEY_CONFLICT_GAP", sinceMs: index * 10, untilMs: index * 10 + 5 });
+  assert.equal(blocks.length, 200);
+  assert.equal(blocks[0].sinceMs, 0, "最旧的起点还在");
+  assert.equal(blocks.at(-1).untilMs, 204 * 10 + 5);
 });
