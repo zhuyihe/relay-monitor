@@ -125,7 +125,7 @@ export async function identifyChannelsCached(rt, ownStation, options = {}) {
   if (!result.ok) { rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result, etag: sameStation ? cache.etag : null }; return result; }
   // fetchedAtMs：这一份结果是什么时候真的从读取服务拿到的（200 或 304，不带 X-Agent-Stale 才有）。缓存命中返回的还是原来那份，
   // 所以带的是原来那一刻——K2b 的驱动拿它当「读取服务上一次读成功」的时刻，由驱动在换段落库提交以后再持久化
-  // （不在这里写：读完就先写，a 就成了 b，中途重启还会让它退不回去，见 server/reconciliation.js keyGroupConflictsFor）
+  // （不在这里写：读完就先写，a 就成了 b，中途重启还会让它退不回去，见 server/reconciliation.js keyAgentRoundFor）
   const resolvedBase = result.status === 304 && sameStation && cache.result?.ok
     ? { ...result, channels: cache.result.channels, revealIssues: cache.result.revealIssues }
     : result;

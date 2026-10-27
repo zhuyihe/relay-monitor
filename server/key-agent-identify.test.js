@@ -243,7 +243,7 @@ test("keyAgentReachability：没配置读取服务，当作拿不到新结果累
 });
 
 // K2b：fetchedAtMs 是这一份结果真的从读取服务拿到的时刻（给驱动当「读取服务上一次读成功」用；持久化由驱动在换段落库以后做，
-// 这里不写 store——读完就写的话 a 会变成 b，见 server/reconciliation.js keyGroupConflictsFor）
+// 这里不写 store——读完就写的话 a 会变成 b，见 server/reconciliation.js keyAgentRoundFor）
 test("identifyChannelsCached：结果带 fetchedAtMs（真的读成功的时刻）；缓存命中还是原来那一刻；带 X-Agent-Stale、连不上都没有；这里不碰 store", async (t) => {
   const calls = [];
   const store = { list: () => [ownStation], setKeyAgentLastSuccessAt: async (...args) => { calls.push(args); } };

@@ -41,7 +41,7 @@ const SCHEMA = {
   rules: {
     keys: { PRIMARY: ["id"], uq_reconciliation_active_token: ["active_token_key"] },
     notNull: ["id", "upstream_station_id", "own_station_id", "token_id", "token_name", "fixed_group", "timezone", "enabled", "billing_policy", "scope_version", "cost_coverage"],
-    varchar: { id: 32, upstream_station_id: 32, own_station_id: 32, token_name: 160, fixed_group: 160, timezone: 64, active_token_key: 255, billing_policy: 32, cost_coverage: 24, provider: 24, canonical_key: 255 },
+    varchar: { id: 32, upstream_station_id: 32, own_station_id: 32, token_name: 160, fixed_group: 160, timezone: 64, active_token_key: 255, billing_policy: 32, cost_coverage: 24, provider: 24, canonical_key: 255, key_issue_code: 40 },
     onUpdate: "updated_at",
   },
   channels: {
@@ -473,13 +473,12 @@ export class MemoryReconciliationRepository {
     });
   }
 
-  // 对应 MySQL 版：sinceMs 为 null 清掉；有值时只在还没记过（key_group_conflict_since_ms IS NULL）才写，不覆盖已经记过的
-  async markKeyGroupConflict(ruleId, sinceMs) {
-    await this.#transaction("markKeyGroupConflict", async (tx) => {
+  // 对应 MySQL 版 markKeyIssue
+  async markKeyIssue(ruleId, issue) {
+    await this.#transaction("markKeyIssue", async (tx) => {
       const entry = this.#ruleEntry(tx, ruleId);
       if (!entry) return;
-      if (sinceMs == null) { this.#update(tx, "rules", [entry], { key_group_conflict_since_ms: null }); return; }
-      if (entry.row.key_group_conflict_since_ms == null) this.#update(tx, "rules", [entry], { key_group_conflict_since_ms: bigint(sinceMs) });
+      this.#update(tx, "rules", [entry], { key_issue_code: issue?.code ?? null, key_issue_since_ms: issue ? bigint(issue.sinceMs) : null });
     });
   }
 

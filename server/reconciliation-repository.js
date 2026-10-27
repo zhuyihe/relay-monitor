@@ -78,8 +78,8 @@ export function ruleFromRow(row, channels = []) {
     costCoverage: row.cost_coverage || "unknown",
     provider: row.provider || null,
     canonicalKey: row.canonical_key || null,
-    // K2b：分组、合组第一次被认出来的时刻（毫秒），没有冲突（或者解开了）是 null
-    keyGroupConflictSinceMs: row.key_group_conflict_since_ms == null ? null : Number(row.key_group_conflict_since_ms),
+    // K2b：这条绑定的 Key 现在有没处理的事（KEY_GROUP_CHANGED / CHANNEL_KEY_UNMATCHED / KEY_REVEAL_DENIED）和第一次认出来的时刻（毫秒）；没有是 null
+    keyIssue: row.key_issue_code ? { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms) } : null,
     ...normalizeRuleSourceBinding(row.source_binding, row.cost_coverage || "unknown"),
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
     // 解除时刻（毫秒）：新写的行由进程写；回填前的旧行读不到时退回 archived_at
@@ -732,15 +732,11 @@ export class ReconciliationRepository {
     } finally { conn.release(); }
   }
 
-  // K2b：分组、合组第一次被认出来的时刻，跨轮记下来、重启不丢（总指挥 10-26 定）。sinceMs 为 null 表示冲突解开了，清掉。
-  // 只在没有值的时候才写新的 since（已经记过的不会被后面几轮的 now 覆盖，否则「从什么时候起」会一直往后挪，早退的窗口越收越窄）
-  async markKeyGroupConflict(ruleId, sinceMs) {
-    await this.pool.query(
-      sinceMs == null
-        ? "UPDATE reconciliation_rules SET key_group_conflict_since_ms = NULL WHERE id = ?"
-        : "UPDATE reconciliation_rules SET key_group_conflict_since_ms = ? WHERE id = ? AND key_group_conflict_since_ms IS NULL",
-      sinceMs == null ? [ruleId] : [sinceMs, ruleId]
-    );
+  // K2b：这条绑定的 Key 现在有没处理的事，跨轮记下来、重启不丢（总指挥 10-26 定）。issue 是 { code, sinceMs }，null 表示解开了清掉。
+  // 调用方（server/reconciliation.js keyAgentRoundFor）自己保证同一件事沿用第一次认出的 sinceMs，这里只管写
+  async markKeyIssue(ruleId, issue) {
+    await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ? WHERE id = ?",
+      [issue?.code ?? null, issue?.sinceMs ?? null, ruleId]);
   }
 
   // K2b：按 key-agent-resegment.js 给的计划，给一条或几条绑定（挪位置、互换时是两条）开新段——同一个事务里关旧段、

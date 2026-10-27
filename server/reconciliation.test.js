@@ -1992,7 +1992,7 @@ function ownTestLogApi(url, logs = []) {
   return { success: true, data: { total: matched.length, items } };
 }
 
-function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [] }) {
+function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [], revealScopeDenied = false }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
     id, rule_id: "rr_live", group_name: group, group_ratio: ratio,
@@ -2084,6 +2084,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
           ...(tokenKeyOf ? { key: maskKey(tokenKeyOf(item.token_id)) } : {}) })) } });
       }
       if (url.pathname === "/api/log/self/stat") return stat("upstream", url, state.upstreamQuota);
+      // 取完整 Key（打码撞了才会问，K2a）：没有 api_key:reveal 权限
+      if (url.pathname === "/api/token/batch/keys" && revealScopeDenied) return reply(403, { success: false, code: "ACCESS_TOKEN_SCOPE_DENIED", message: "The access token lacks the required permission: api_key:reveal" });
     }
     if (url.host === "own.test") {
       if (url.pathname === "/api/user/self") return reply(200, { success: true, data: { id: 1 } });
@@ -7312,7 +7314,7 @@ test("K2b：冲突几轮以后解开再换段——站点的成功时刻没往�
   await f.module.refreshDue(now); // 又一轮，还是冲突
   assert.equal((await f.repository.getRule("rr_live")).tokenId, 9, "冲突期间不换段");
   assert.equal(own.keyAgentLastSuccessAtMs, t1, "有没处理完的冲突，站点的成功时刻不往前推");
-  assert.ok((await f.repository.getRule("rr_live")).keyGroupConflictSinceMs != null, "冲突已经记下了 b");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.code, "KEY_GROUP_CHANGED", "冲突已经记下了（带着 b）");
 
   keys = { 1: keyTen, 2: keyTen }; // 冲突解开：两个渠道又一样了，都换成了 token 10
   now = Date.parse("2026-10-12T01:20:00Z");
@@ -7320,7 +7322,7 @@ test("K2b：冲突几轮以后解开再换段——站点的成功时刻没往�
   await f.module.refreshDue(now);
   const rule = await f.repository.getRule("rr_live");
   assert.equal(rule.tokenId, 10, "解开以后换段");
-  assert.equal(rule.keyGroupConflictSinceMs, null, "冲突记号清掉了");
+  assert.equal(rule.keyIssue, null, "冲突记号清掉了");
   const segments = await f.repository.listSegments("rr_live");
   const transitional = segments.find((segment) => segment.keys.length === 2);
   assert.equal(transitional.effectiveFrom, 1000, "带着冲突的绑定，a 用开着那段的起点，不是站点的 T1");
@@ -7352,8 +7354,8 @@ test("K2b：两条绑定互换 Key（挪过）——同一个事务清空再写�
   await f.module.refreshDue(now);
   const a = await f.repository.getRule("rr_live"), b = await f.repository.getRule("rr_b");
   assert.deepEqual([a.tokenId, b.tokenId], [10, 9], "互换成功，没有撞唯一约束");
-  assert.equal(a.keyGroupConflictSinceMs, null);
-  assert.equal(b.keyGroupConflictSinceMs, null, "互换不是分组合组，不记冲突");
+  assert.equal(a.keyIssue, null);
+  assert.equal(b.keyIssue, null, "互换不是分组合组，不记冲突");
   for (const ruleId of ["rr_live", "rr_b"]) {
     const segments = await f.repository.listSegments(ruleId);
     assert.equal(segments.length, 2, "挪过：按 b 切开，只有旧段和新段，没有两把 Key 都算的过渡段");
@@ -7437,6 +7439,59 @@ test("K2b 例外三：读不到期间渠道换了 Key，连上以后——[a, b)
   assert.equal(transitional.effectiveTo, b, "b = 重新读到的时刻");
   await round("2026-10-12T17:15:00Z");
   assert.equal(booked("2026-10-12"), 1, "读不到那段时间的数照常算进来、照常固定");
+});
+
+test("K2b：渠道换成了一把不在已加上游里的 Key（CHANNEL_KEY_UNMATCHED，流程稿例外一）——从认出的那一刻起不结账、记需处理；那一刻以前的日子照常固定；换回来（或把上游加进来）以后恢复", async (t) => {
+  const { f, agent, round, state, booked } = await readerOutageFixture(t);
+  const keyNine = agent.key;
+  await round("2026-10-11T16:05:00Z"); // R0：正常，渠道用 token 9
+  agent.key = "sk-" + "Unkn".repeat(10); // 渠道换成了一把哪个已加的上游里都没有的 Key
+  await round("2026-10-11T16:30:00Z"); // R1：认出来了（b）。10-11 在 b 以前就结束了，照常结账
+  const issue = (await f.repository.getRule("rr_live")).keyIssue;
+  assert.equal(issue.code, "CHANNEL_KEY_UNMATCHED");
+  assert.equal(issue.sinceMs, Date.parse("2026-10-11T16:30:00Z"), "b = 第一次认出来的时刻");
+  assert.equal(booked("2026-10-11"), 1, "b 以前结束的日子照常固定");
+  await round("2026-10-12T16:20:00Z"); // R2：10-12 在 b 以后结束：不结账
+  assert.equal(booked("2026-10-12"), 0);
+  assert.equal((await state("2026-10-12"))?.manualReason, "CHANNEL_KEY_UNMATCHED", "要人处理的（需处理），不是读取类");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue.sinceMs, issue.sinceMs, "同一件事沿用第一次的 b，不随每轮往后挪");
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 9, "不碰绑定");
+
+  agent.key = keyNine; // 换回来了
+  await round("2026-10-12T16:40:00Z");
+  await round("2026-10-12T16:55:00Z"); // 需处理的那天每 10 分钟本地重判一次
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue, null, "解开以后记号清掉");
+  assert.equal(booked("2026-10-12"), 1, "恢复以后照常算、照常固定");
+});
+
+test("K2b：渠道没锚定过（还没开始算）时换成了不在已加上游里的 Key——不进需处理，只在原处写一句（流程稿附录 4）", async (t) => {
+  const { f, agent, round } = await readerOutageFixture(t);
+  f.repository.tables.rules.find((row) => row.id === "rr_live").canonical_key = null; // 假装还没锚定
+  f.repository.tables.rules.find((row) => row.id === "rr_live").source_binding = null;
+  agent.key = "sk-" + "Unkn".repeat(10);
+  await round("2026-10-11T16:30:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue, null);
+});
+
+test("K2b：打码撞了、上游令牌没有 api_key:reveal 权限（KEY_REVEAL_DENIED）——从认出来的那一刻起不结账、记需处理", async (t) => {
+  let now = Date.parse("2026-10-11T16:05:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyNineLookalike = "sk-Nine" + "abc".repeat(8) + "Nine"; // 前 4 后 4 一样、中间不一样
+  const agent = { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keyNine), f: "no-match" }] }] };
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    tokenKeyOf: (tokenId) => (tokenId === 12 ? keyNineLookalike : keyNine),
+    extraTokens: [{ tokenId: 12, name: "lookalike" }],
+    keyAgent: agent, revealScopeDenied: true,
+  });
+  const round = async (iso) => { now = Date.parse(iso); f.rt._keyAgentIdentifyCache = null; await f.module.refreshDue(now); };
+  await round("2026-10-11T16:30:00Z");
+  const issue = (await f.repository.getRule("rr_live")).keyIssue;
+  assert.equal(issue?.code, "KEY_REVEAL_DENIED");
+  await round("2026-10-12T16:20:00Z");
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length, 0, "分不清是哪把，这天不固定");
+  const [settleState] = await f.repository.listSettlementStates(["rr_live"], { billDates: ["2026-10-12"] });
+  assert.equal(settleState?.manualReason, "KEY_REVEAL_DENIED", "要人处理的（给令牌补权限），不是读取类");
 });
 
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {
