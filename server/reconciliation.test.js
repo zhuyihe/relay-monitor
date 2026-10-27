@@ -10551,8 +10551,8 @@ test("K2b + Sub2API：同一条绑定换 Key——换 Key 那天整窗各把 Key
 // 每天所有行的上游成本之和 = 各 Key 当天用量之和——自动开始以前的日子 K20 没人算（渠道还没开始），开始那天起整天算
 // again：B 被自动开始（拿到挪来的 K9）以后，同一天 15:00（上海）又换成 K30、K9 从此没人用（审核 #150 第 1 轮中-1：B 现在的 Key 不再是 K9，查不到别的绑定握过 K9）
 const REGROUP_C = Date.parse("2026-10-12T07:00:00Z");
-// stopFirst：A 先在 11:00（上海）停了（停的时候不改它的段），K9 当天挪给渠道 2、渠道 2 在 12:00 被自动开始成 B（审核 #155、#150 中-1：查「今天谁握着这把 Key」要看已停的绑定）
-const REGROUP_STOP = Date.parse("2026-10-12T03:00:00Z");
+// stopFirst：A 先在 08:30（上海）停了（停的时候不改它的段），K9 当天挪给渠道 2、渠道 2 在 09:00 被自动开始成 B（审核 #155、#150 中-1：查「今天谁握着这把 Key」要看已停的绑定）
+const REGROUP_STOP = Date.parse("2026-10-12T00:30:00Z");
 async function autoStartScenario(t, { sub2, optout = false, removeUpstreamFirst = false, move = false, again = false, stopFirst = false }) {
   let now = REGROUP_A;
   t.mock.method(Date, "now", () => now);
