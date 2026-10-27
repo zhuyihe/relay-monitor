@@ -10793,7 +10793,7 @@ test("K2b：没锚定过的绑定（还没开始算）识别到不一样的 Key 
 // K2c-3b 换到另一个上游的 Key：渠道 1 原来用旧上游的 K9，在 t 换成新上游的 Key（a < t < b）。旧绑定的 [a,b) 过渡段放旧 Key + 新上游的新 Key（跨上游读），
 // b 归档；新上游答了「只给我的渠道用」，重新分组里直接在新上游下建的那条从 b 起算，不和过渡段重叠。每天所有行（含已归档的）的上游成本之和 = 各 Key 当天用量之和。
 // 旧上游是 Sub2API（只能整天读，归档那天整天不算）：新绑定从 b 那天 0 点整天算，第一段带着旧 Key（整天读）
-async function crossUpstreamScenario(t, { from = "newapi", to, rates = null, targetAccountUse = "only_mine", changeAt = REGROUP_T }) {
+async function crossUpstreamScenario(t, { from = "newapi", to, rates = null, targetAccountUse = "only_mine", changeAt = REGROUP_T, othersUse = null }) {
   let now = REGROUP_A;
   t.mock.method(Date, "now", () => now);
   const oldSub2 = from === "sub2api", sub2 = to === "sub2api", injectIdentity = oldSub2 || sub2;
@@ -10802,9 +10802,11 @@ async function crossUpstreamScenario(t, { from = "newapi", to, rates = null, tar
   const secs = (name, startSec, endSec) => { const [from, to] = [windows[name][0] / 1000, (windows[name][1] ?? Infinity) / 1000]; return Math.max(0, Math.min(endSec + 1, to) - Math.max(startSec, from)); };
   const newName = "newkey", newId = sub2 ? 40 : 30;
   const second = sub2
-    ? createFakeSub2Api({ keys: [{ id: 40, name: newName }], dayUsageUsd: (_id, day) => secondsInDay(windows[newName], day) })
+    ? createFakeSub2Api({ keys: [{ id: 40, name: newName }], dayUsageUsd: (_id, day) => secondsInDay(windows[newName], day) + (othersUse ? secondsInDay(othersUse, day) : 0),
+      // othersUse：不在这个渠道上的别的消费者（别处也在用这把新 Key）用的，每秒 1 美元；按时间认领要靠逐条记录
+      recordsOf: (_id, day) => [...recordsInDay(windows[newName], day, 600000), ...(othersUse ? recordsInDay(othersUse, day, 600000) : [])] })
     : createFakeNewApi({ keys: [{ id: 30, name: newName, masked: maskKey(keys[30]) }], usageQuota: (name, startSec, endSec) => 100 * secs(name, startSec, endSec) });
-  const first = oldSub2 ? createFakeSub2Api({ keys: [{ id: 9, name: "stable" }], dayUsageUsd: (_id, day) => secondsInDay(windows.stable, day) }) : null;
+  const first = oldSub2 ? createFakeSub2Api({ keys: [{ id: 9, name: "stable" }], dayUsageUsd: (_id, day) => secondsInDay(windows.stable, day), recordsOf: (_id, day) => recordsInDay(windows.stable, day, 600000) }) : null;
   const channel = { baseUrl: "https://upstream.test", token: 9 };
   const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], channelsByRule: { rr_live: [1] }, extraTokens: [{ tokenId: 9, name: "stable" }],
     ...(oldSub2 ? { sub2api: first, tokenKeyOf: () => "sk-x" } : { tokenKeyOf: (id) => keys[id], usageOf: (name, startSec, endSec) => (name === "stable" ? 100 * secs("stable", startSec, endSec) : 0) }),
@@ -10935,6 +10937,13 @@ test("K2c 换到另一个上游（New API → Sub2API）：换 Key 在 b 那天 
   const rowsOn12 = s.f.state.ledger.filter((row) => row.bill_date === "2026-10-12");
   assert.deepEqual([...new Set(rowsOn12.map((row) => row.rule_id))], [started.id], "b 那天只有新绑定一行，旧绑定那天没有行");
   assert.equal(rowsOn12.some((row) => row.rule_id === "rr_live"), false);
+});
+
+// 审核 #146 第 1 轮 M2（Sub2API 目标）：新 Key 在 a 那天 0 点到 a 之间被别的消费者用过（不是这个渠道）——旧绑定的过渡段读新 Sub2API Key 时按时间认领、
+// 只认 [a, …)，a 以前的不能算进这个渠道的成本
+test("K2c 换到另一个上游（New API → Sub2API）：新 Key 在 a 以前被别的消费者用过——按时间认领，a 以前的不算进成本", async (t) => {
+  const s = await crossUpstreamScenario(t, { from: "newapi", to: "sub2api", othersUse: [Date.parse("2026-10-10T16:00:00Z"), Date.parse("2026-10-10T21:00:00Z")] }); // a 那天（上海 10-11）0 点到 5 点
+  for (const day of ["2026-10-11", "2026-10-12", "2026-10-13"]) assert.equal(s.costOn(day), s.truthOn(day), `${day}：只有这个渠道自己的用量`);
 });
 
 // 审核 2 第二轮 F1：事项解开（渠道回到原来的 Key）转成一段冲突期，解开以后又出新事项、又解开，旧的冲突期不会被覆盖——两段的日子都永远不固定
@@ -11296,7 +11305,9 @@ async function regroupTimeline(t, { rules = [], channelsByRule, timeline, sub2 =
   const tokens = [...tokenIds].map((tokenId) => ({ tokenId, name: RG_NAMES[tokenId] }));
   const idOfName = Object.fromEntries(tokens.map((item) => [item.name, item.tokenId]));
   const fakeSub2 = sub2 ? createFakeSub2Api({ keys: tokens.map((item) => ({ id: item.tokenId, name: item.name })),
-    dayUsageUsd: (keyId, day) => { const start = Date.parse(`${day}T00:00:00+08:00`); return rgUsageSec(timeline, keyId, start, start + 86400000); } }) : null;
+    dayUsageUsd: (keyId, day) => { const start = Date.parse(`${day}T00:00:00+08:00`); return rgUsageSec(timeline, keyId, start, start + 86400000); },
+    // 逐条用量记录（按时间认领的 Sub2API 上游读这个）：每 10 分钟一条，金额 = 这 10 分钟里的用量
+    recordsOf: (keyId, day) => { const start = Date.parse(`${day}T00:00:00+08:00`), out = []; for (let at = start; at < start + 86400000; at += 600000) { const usd = rgUsageSec(timeline, keyId, at, at + 600000); if (usd > 0) out.push({ atMs: at, usd }); } return out; } }) : null;
   const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: rules, channelsByRule, tokenKeyOf: (id) => RG_KEYS[id], extraTokens: tokens, sub2api: fakeSub2,
     usageOf: (name, startSec, endSec) => 100 * rgUsageSec(timeline, idOfName[name], startSec * 1000, (endSec + 1) * 1000),
     keyAgent: { secret: KEY_AGENT_SECRET, channels: () => Object.keys(timeline).map((channel) => ({ id: Number(channel), baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(RG_KEYS[rgTokenAt(timeline, channel, now)]), f: "unused" }] })) } });

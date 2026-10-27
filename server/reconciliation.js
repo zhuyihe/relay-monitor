@@ -1944,19 +1944,23 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   }
 
   // 换到另一个上游的 Key（K2c-3b）：一段里的 Key 带着自己的上游，别的上游的 Key 去那个上游读（元数据、身份、账单能力都是那个上游的）。
-  // Sub2API 只能按整天读：窗口放宽到包着它的自然日（过渡段只到 b 那天 0 点，见 regroupFor，所以不会和新上游下的新绑定读重）
+  // Sub2API 只能按整天读：整天认领的天读按天统计、认领一部分的天改翻逐条用量（见下）；过渡段只到 b 那天 0 点（regroupFor），不会和新上游下的新绑定读重
   async function foreignKeyWindow(key, window, { readOnly }) {
     const configured = upstreamStation(key.upstreamStationId);
     if (!billingStation(configured)) throw codedError("UPSTREAM_KEY_UNVERIFIED", "分段里有别的上游的 Key，找不到那个上游");
     const station = { ...configured }, foreignMetadata = await metadataFor(station, { timezone: window.timezone });
     const token = foreignMetadata.tokens?.find((item) => Number(item.id) === Number(key.tokenId)) ?? { id: Number(key.tokenId), name: key.tokenName ?? null, deleted: true };
-    let wide = window;
+    // Sub2API 的 Key 一天中间切不开：整天认领的天读按天统计，认领一部分的天（过渡段的 a 在当天中间、b 以前……）改翻逐条用量，只算落在这个窗口里的
+    // （和同一个上游的 Key 同一个办法，sub2DayReads）——不能放宽到整天，那样 a 以前别的消费者用这把 Key 的用量会算进这条绑定（审核 #146 第 1 轮 M2）
     if (/^sub2api/.test(station.type)) {
-      const startMs = startOfBillingDay(window.startMs, window.timezone);
-      const endMs = isDayStartInTz(window.endMs, window.timezone) || window.endMs > Date.now() - 5 * 60 * 1000 ? window.endMs : shiftedDayStartInTz(window.endMs - 1, 1, window.timezone);
-      wide = { ...window, startMs, endMs };
+      const wideStart = startOfBillingDay(window.startMs, window.timezone);
+      const wideEnd = isDayStartInTz(window.endMs, window.timezone) || window.endMs > Date.now() - 5 * 60 * 1000 ? window.endMs : shiftedDayStartInTz(window.endMs - 1, 1, window.timezone);
+      const reads = sub2DayReads({ ...window, startMs: wideStart, endMs: wideEnd }, [{ startMs: window.startMs, endMs: window.endMs }]);
+      const parts = await Promise.all(reads.map((piece) => upstreamWindowFor(station, foreignMetadata, token, { ...window, startMs: piece.startMs, endMs: piece.endMs }, { readOnly, claims: piece.claims })));
+      const summed = parts.length === 1 ? parts[0] : sumKeyStats(parts);
+      return { ...summed, window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
     }
-    return upstreamWindowFor(station, foreignMetadata, token, wide, { readOnly });
+    return upstreamWindowFor(station, foreignMetadata, token, window, { readOnly });
   }
 
   // 按 Key 整体取数的规则（scoped，生产的绑定都是）整窗口只带最新那一段（currentSegment），换过 Key 的窗口里旧 Key 换之前的用量
