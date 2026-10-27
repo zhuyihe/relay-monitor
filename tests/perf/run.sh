@@ -15,6 +15,7 @@
 #   PERF_BINDINGS(空 = 80 条绑定；缩小夹具，种子、假站点、测量一起用) PERF_EXPECTED_COST(off；on 时后台测量前打开「算应付成本」整站读)
 #   PERF_STEADY_DELAY_SEC(0，量完接口以后先等这么多秒再开稳态，量「没人看」用 660；BG_SEC 就是 workflow 的 steady_sec)
 #   PERF_KEY_AGENT(off；on 时假站点装渠道 Key 读取服务、自营站点配上地址和令牌，见 README「K2a/K2b 场景」)
+#   PERF_KEY_AGENT_ROTATE_SEC(600；假读取服务换一次 Key 的间隔，稳态窗口只有 185 秒，想量到换 Key 以后重新认、写段就填 60 左右)
 # 不带锁：CI 上一台机器只跑这一件。本机和别的重活抢机器时，自己在外面拿锁。
 
 set -o pipefail

@@ -52,13 +52,17 @@ on:
         type: boolean
         required: false
         default: false
+      key_agent_rotate_sec:
+        description: "key_agent 勾上时，假读取服务换一次 Key 的间隔（秒，空 = 600）。稳态窗口只有 185 秒，想量到「换了 Key 以后重新认、写段」那一段就填 60 左右"
+        required: false
+        default: ""
 
 permissions:
   contents: read
   pull-requests: read
 
 concurrency:
-  group: perf-${{ github.ref }}-${{ inputs.pr }}-${{ inputs.base }}-${{ inputs.head }}-${{ inputs.bindings }}-${{ inputs.expected_cost }}-${{ inputs.key_agent }}-${{ inputs.steady_delay_sec }}-${{ inputs.steady_sec }}
+  group: perf-${{ github.ref }}-${{ inputs.pr }}-${{ inputs.base }}-${{ inputs.head }}-${{ inputs.bindings }}-${{ inputs.expected_cost }}-${{ inputs.key_agent }}-${{ inputs.key_agent_rotate_sec }}-${{ inputs.steady_delay_sec }}-${{ inputs.steady_sec }}
   cancel-in-progress: false
 
 jobs:
@@ -96,6 +100,7 @@ jobs:
       PERF_STEADY_DELAY_SEC: ${{ inputs.steady_delay_sec || '0' }}
       BG_SEC: ${{ inputs.steady_sec || '185' }}
       PERF_KEY_AGENT: ${{ inputs.key_agent && 'on' || 'off' }}
+      PERF_KEY_AGENT_ROTATE_SEC: ${{ inputs.key_agent_rotate_sec || '600' }}
     steps:
       - name: Checkout harness (tests/perf)
         uses: actions/checkout@v4
@@ -198,8 +203,9 @@ jobs:
           HEAD_SHA: ${{ steps.refs.outputs.head }}
           PR: ${{ inputs.pr }}
         run: |
+          ROTATE_NOTE=""; [ "$PERF_KEY_AGENT" = on ] && ROTATE_NOTE="（每 ${PERF_KEY_AGENT_ROTATE_SEC} 秒换一次 Key）"
           {
-            echo "base \`${BASE_SHA:0:7}\`，head \`${HEAD_SHA:0:7}\`${PR:+（PR #$PR）}；对拍 $PARITY_DAYS 天，余额历史 $PERF_HISTORY_DAYS 天，假站点测试日志 $FAKE_TEST_LOGS，绑定 ${PERF_BINDINGS:-80} 条，算应付成本（整站读）$PERF_EXPECTED_COST，渠道 Key 读取服务 $PERF_KEY_AGENT，量完接口等 $PERF_STEADY_DELAY_SEC 秒，稳态 $BG_SEC 秒"
+            echo "base \`${BASE_SHA:0:7}\`，head \`${HEAD_SHA:0:7}\`${PR:+（PR #$PR）}；对拍 $PARITY_DAYS 天，余额历史 $PERF_HISTORY_DAYS 天，假站点测试日志 $FAKE_TEST_LOGS，绑定 ${PERF_BINDINGS:-80} 条，算应付成本（整站读）$PERF_EXPECTED_COST，渠道 Key 读取服务 $PERF_KEY_AGENT$ROTATE_NOTE，量完接口等 $PERF_STEADY_DELAY_SEC 秒，稳态 $BG_SEC 秒"
             echo
             echo '### 各段用时'
             echo
