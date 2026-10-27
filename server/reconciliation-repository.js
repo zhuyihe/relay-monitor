@@ -61,6 +61,26 @@ export function archivedLedgerAllowed(rule, ledger) {
   return Number.isFinite(archivedAt) && Number.isFinite(Number(ledger?.entry?.startMs)) && Number(ledger.entry.startMs) < archivedAt;
 }
 
+// 解开了、但那几天仍然算不准的冲突期（reconciliation_rules.key_blocks）：[{ code, sinceMs, untilMs }]，按起点排好、相交或相邻的并成一段；坏数据丢掉
+export function keyBlocksOf(value) {
+  let list = value;
+  if (typeof list === "string") { try { list = JSON.parse(list); } catch { return []; } }
+  if (!Array.isArray(list)) return [];
+  return list.map((item) => ({ code: String(item?.code || ""), sinceMs: Number(item?.sinceMs), untilMs: Number(item?.untilMs) }))
+    .filter((item) => item.code && Number.isFinite(item.sinceMs) && Number.isFinite(item.untilMs) && item.untilMs > item.sinceMs).sort((a, b) => a.sinceMs - b.sinceMs);
+}
+// 加一段：和同一个码相交、相邻的并起来；最多留 200 段（再多的是出了故障，留最近的）
+export function addKeyBlock(blocks, block) {
+  const merged = [];
+  let current = { ...block };
+  for (const item of keyBlocksOf(blocks)) {
+    if (item.code === current.code && item.sinceMs <= current.untilMs && item.untilMs >= current.sinceMs) current = { code: current.code, sinceMs: Math.min(item.sinceMs, current.sinceMs), untilMs: Math.max(item.untilMs, current.untilMs) };
+    else merged.push(item);
+  }
+  merged.push(current);
+  return merged.sort((a, b) => a.sinceMs - b.sinceMs).slice(-200);
+}
+
 export function ruleFromRow(row, channels = []) {
   return {
     id: row.id,
@@ -79,9 +99,9 @@ export function ruleFromRow(row, channels = []) {
     provider: row.provider || null,
     canonicalKey: row.canonical_key || null,
     // K2b：这条绑定的 Key 现在有没处理的事（KEY_GROUP_CHANGED / CHANNEL_KEY_UNMATCHED / KEY_REVEAL_DENIED）和第一次认出来的时刻（毫秒）；没有是 null
-    // 现在还没解开的事项；解开了、只挡冲突期间那一段日子的在 keyIssueClosed（见 server/reconciliation.js keyAgentRoundFor）
-    keyIssue: row.key_issue_code && row.key_issue_until_ms == null ? { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms) } : null,
-    ...(row.key_issue_code && row.key_issue_until_ms != null ? { keyIssueClosed: { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms), untilMs: Number(row.key_issue_until_ms) } } : {}),
+    keyIssue: row.key_issue_code ? { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms) } : null,
+    // 解开了、但那几天仍然算不准的冲突期（可以有好几段）：只在有的时候带这个字段（见 server/reconciliation.js keyAgentRoundFor）
+    ...(keyBlocksOf(row.key_blocks).length ? { keyBlocks: keyBlocksOf(row.key_blocks) } : {}),
     ...normalizeRuleSourceBinding(row.source_binding, row.cost_coverage || "unknown"),
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
     // 解除时刻（毫秒）：新写的行由进程写；回填前的旧行读不到时退回 archived_at
@@ -513,6 +533,17 @@ export class ReconciliationRepository {
       token_id: row.key_token_id, token_name: row.key_token_name, key_mask: row.key_key_mask, match_source: row.key_match_source, active_token_key: row.key_active_token_key })));
   }
 
+  // 这个自营站点下，这把 Key 已经关掉的段（在算的、已停的绑定都算）里最晚的结束时刻；从没被握过是 null。每把 Key 恰好算一次：换 Key 时新 Key 在这条绑定里
+  // 最早从这一刻算起。只按这把 Key 查（走 idx_segment_key_token(upstream_station_id, token_id)），不读整个站点所有绑定的所有段
+  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null, conn = null } = {}) {
+    const [rows] = await (conn || this.pool).query(
+      `SELECT MAX(s.effective_to_ms) AS held_until FROM reconciliation_segment_keys k
+         JOIN reconciliation_rule_segments s ON s.id = k.segment_id JOIN reconciliation_rules r ON r.id = s.rule_id
+        WHERE k.upstream_station_id = ? AND k.token_id = ? AND r.own_station_id = ? AND s.effective_to_ms IS NOT NULL AND s.effective_to_ms >= ?`,
+      [upstreamStationId, tokenId, ownStationId, sinceMs ?? 0]);
+    return rows[0]?.held_until == null ? null : Number(rows[0].held_until);
+  }
+
   // 几条绑定的分段一次读出来（换 Key 时找这把 Key 上一个持有者的段、「渠道」页签的「用过的 Key」）：{ [ruleId]: 分段[] }，一条查询，不按绑定逐条读
   async listSegmentsForRules(ruleIds) {
     const ids = [...new Set((ruleIds || []).map(String))];
@@ -764,12 +795,28 @@ export class ReconciliationRepository {
     } finally { conn.release(); }
   }
 
-  // K2b：这条绑定的 Key 现在有没处理的事，跨轮记下来、重启不丢。issue 是 { code, sinceMs, untilMs? }，null 表示解开了清掉；
-  // untilMs 有值是「解开了、但 [sinceMs, untilMs) 里的日子仍然算不准」，只挡这一段。
+  // K2b：这条绑定的 Key 现在有没处理的事，跨轮记下来、重启不丢。issue 是 { code, sinceMs }，null 表示解开了清掉。
   // 调用方（server/reconciliation.js keyAgentRoundFor）自己保证同一件事沿用第一次认出的 sinceMs，这里只管写
   async markKeyIssue(ruleId, issue) {
-    await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ?, key_issue_until_ms = ? WHERE id = ?",
-      [issue?.code ?? null, issue?.sinceMs ?? null, issue?.untilMs ?? null, ruleId]);
+    await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ? WHERE id = ?", [issue?.code ?? null, issue?.sinceMs ?? null, ruleId]);
+  }
+
+  // 记下一段「那几天仍然算不准、永远不固定」的日子 [sinceMs, untilMs)（和已有的并起来，已有的不会被覆盖、丢掉）；clearIssue 同时把现在开着的事项清掉
+  // （事项解开了，转成这一段）。读 → 改 → 写在一个事务里，同一条绑定同时来两次不会互相覆盖
+  async addKeyBlock(ruleId, block, { clearIssue = false } = {}) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query("SELECT key_blocks FROM reconciliation_rules WHERE id = ? FOR UPDATE", [ruleId]);
+      if (rows.length) {
+        const next = addKeyBlock(rows[0].key_blocks, block);
+        await conn.query(`UPDATE reconciliation_rules SET key_blocks = ?${clearIssue ? ", key_issue_code = NULL, key_issue_since_ms = NULL" : ""} WHERE id = ?`, [JSON.stringify(next), ruleId]);
+      }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally { conn.release(); }
   }
 
   // K2b：按 key-agent-resegment.js 给的计划，给一条或几条绑定（挪位置、互换时是两条）开新段——同一个事务里关旧段、

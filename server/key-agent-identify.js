@@ -179,6 +179,9 @@ export const IDENTIFY_CACHE_MS = 4 * 60 * 1000;
 // 读取服务自己读库最多隔这么久读一次（agent/snapshot.js MIN_READ_GAP_MS）：它给的快照最多这么旧。304 没有 readAt，
 // 「这个时刻 Key 还是原来的」只能保证到「现在往前推这么久」
 export const KEY_AGENT_READ_LAG_MS = 4 * 60 * 1000;
+// readAt 是读取服务那台机器的时钟，控制台不能照单全收（审核 #133 第 2 轮 M1）：快照最多这么旧、最多比控制台的钟快这么一点才信；
+// 超出（那台机器的钟快了或慢了）就丢掉，用控制台拿到快照的时刻——b 偏快会把 a 卡在将来、挡住将来的日子，偏慢会漏掉 [真正换 Key, b) 新 Key 的用量
+export const KEY_AGENT_READ_AT_MAX_AGE_MS = 15 * 60 * 1000, KEY_AGENT_READ_AT_MAX_AHEAD_MS = 60 * 1000;
 // 认出的结果里还有没认定的（not_found、ambiguous、unresolved，或者少了 api_key:reveal 权限）：这类状态会随上游目录、权限变化自己好，
 // 读取服务回 304 也要重新对一遍上游目录；全都认定了（identified / keyless）的，304 就沿用，不多读上游（审核 #131「别多读上游」）
 // 没认定的状态（渠道 Key 不在已加的上游里是会持续很久的真实场景）重新对上游目录的间隔：读取服务回 304 时最多每 15 分钟对一次，
@@ -219,9 +222,12 @@ async function identifyChannelsCachedOnce(rt, ownStation, options) {
   // readAtMs（只有读到新的一份 200 才有）：识别出来的 Key 在这个时刻已经是这样了——换 Key 的 b 用它（真正换的时刻 ≤ 这个时刻，
   //   窗口多放一点老 Key 无害，早于它会漏新 Key 的用量）；confirmedAtMs：这个时刻 Key 还是认出来的这样——「上一次读成功」的 a 用它
   //   （200 用快照自己读库的时刻，304 和没带 readAt 的往前推一个读取服务的缓存间隔；不用控制台拿到快照的时刻，那个比真正读库的晚，a 晚了会漏钱）
+  const readAtOk = Number.isFinite(result.readAtMs) && result.readAtMs >= now - KEY_AGENT_READ_AT_MAX_AGE_MS && result.readAtMs <= now + KEY_AGENT_READ_AT_MAX_AHEAD_MS;
+  const readAtMs = readAtOk ? Math.min(result.readAtMs, now) : null; // 偏快一点的夹到现在
+  if (Number.isFinite(result.readAtMs) && !readAtOk) console.warn(`[key-agent] 读取服务给的读库时刻和控制台的钟差太多（${Math.round((result.readAtMs - now) / 1000)} 秒），不采用，改用控制台拿到快照的时刻`);
   const resolved = { ...resolvedBase, fetchedAtMs: result.stale ? null : now,
-    ...(result.stale ? { confirmedAtMs: null } : { confirmedAtMs: result.readAtMs ?? now - KEY_AGENT_READ_LAG_MS }) };
-  if (result.readAtMs == null) delete resolved.readAtMs;
+    ...(result.stale ? { confirmedAtMs: null } : { confirmedAtMs: readAtMs ?? now - KEY_AGENT_READ_LAG_MS }) };
+  if (readAtMs == null) delete resolved.readAtMs; else resolved.readAtMs = readAtMs;
   // 带 X-Agent-Stale 的是读取服务给的旧结果，不当「最近一次读成功」留下，也不换 etag
   // comparedAt：最近一次真的拿上游目录比对的时刻（200，或者 304 但重新比对了）；纯沿用旧结果的 304 不更新它
   const compared = result.channels != null && !recheckFailed;

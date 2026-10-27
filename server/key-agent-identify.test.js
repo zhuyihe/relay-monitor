@@ -543,3 +543,24 @@ test("identifyChannels（#142 低 6）：候选是 Sub2API（地址对上）只�
   assert.deepEqual(result.channels[0].slots, [{ index: 0, state: "identified", matches: [{ stationId: "s2", tokenId: 7, tokenName: "s2-key", via: "fingerprint" }] }]);
   assert.deepEqual(readStations, ["s2"], "只读候选，认出就不读非候选");
 });
+
+// 审核 #133 第 2 轮 M1：readAt 是读取服务那台机器的时钟，不能照单全收
+test("identifyChannelsCached（M1）：读取服务给的 readAt 在 [现在 − 15 分钟, 现在 + 1 分钟] 里才采用（偏快一点的夹到现在）；偏快很多、偏慢很多都丢掉，改用控制台拿到快照的时刻，a 也不会被卡在将来", async (t) => {
+  const real = Date.now();
+  t.mock.method(console, "warn", () => {});
+  const ask = async (readAt) => {
+    t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt, channels: [{ id: 1, keyless: true }] }, { headers: { etag: `"v-${readAt}"` } }));
+    const rt = { store: { list: () => [ownStation] } };
+    return identifyChannelsCached(rt, ownStation);
+  };
+  const fine = await ask(real - 60_000);
+  assert.ok(Math.abs(fine.readAtMs - (real - 60_000)) < 2000 && fine.confirmedAtMs === fine.readAtMs, "正常的采用");
+  const slightlyAhead = await ask(real + 30_000);
+  assert.ok(slightlyAhead.readAtMs <= Date.now() && slightlyAhead.readAtMs >= real, "偏快一点的夹到现在，不会比控制台还晚");
+  const farAhead = await ask(real + 60 * 60_000); // 那台机器的钟快了一小时
+  assert.equal(farAhead.readAtMs, undefined);
+  assert.ok(farAhead.confirmedAtMs <= Date.now(), "不采用，a 不会被卡在将来");
+  const farBehind = await ask(real - 60 * 60_000);
+  assert.equal(farBehind.readAtMs, undefined);
+  assert.ok(farBehind.confirmedAtMs > real - 10 * 60_000, "慢了一小时也不采用，用控制台的时刻往前推一个缓存间隔");
+});
