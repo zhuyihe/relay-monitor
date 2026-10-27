@@ -50,11 +50,12 @@ import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlem
 import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
 import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
 import { stationBusinessVersion } from "../db/store.js";
-import { keyPiecesOf, segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
+import { keyAmountEntry, keyPiecesOf, mergeKeyAmounts, segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
   summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
 import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, ratesFor } from "../lib/profit.js";
+import { keyChangesOnDay, keyMovesOnDay } from "../lib/profit-key-changes.js";
 import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
@@ -399,6 +400,7 @@ function foldSplitSegments(pieces, costBasis) {
       successfulCount: sides.reduce((total, side) => total + (side.successfulCount ?? 0), 0), expectedCount: sides.reduce((total, side) => total + (side.expectedCount ?? 0), 0),
       observedAt: Math.max(...sides.map((side) => Number(side.observedAt) || 0)),
       ...(sides.some((side) => side.byStation) ? { byStation: mergeStationAmounts(sides.map((side) => side.byStation ?? [{ stationId: null, amountUsd: side.amountUsd }])) } : {}),
+      ...(sides.some((side) => side.byKey) ? { byKey: mergeKeyAmounts(sides.map((side) => side.byKey ?? [])) } : {}),
       window: span(first.window, last.window, list[0].window), requestedWindow: span(first.requestedWindow, last.requestedWindow, list[0].window) };
   };
   return [...groups.entries()].map(([base, list]) => {
@@ -1852,11 +1854,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (wanted.length === 1 && (wanted[0].own || wanted[0].token?.id === token?.id)) return upstreamWindowFor(upstream, metadata, token, window, { readOnly });
     const results = await Promise.all(wanted.map((item) => item.foreign ? foreignKeyWindow(item.key, window, { readOnly }) : upstreamWindowFor(upstream, metadata, item.token, window, { readOnly })));
     const summed = sumKeyStats(results);
-    if (!wanted.some((item) => item.foreign)) return summed;
+    // 一段里两把 Key（换 Key 的过渡段）：每把各花了多少，计算明细按 Key 分开写
+    const byKey = wanted.map((item, index) => keyAmountEntry(item.foreign ? item.key : { upstreamStationId, tokenId: item.token?.id, tokenName: item.token?.name }, results[index], window.startMs, window.endMs));
+    if (!wanted.some((item) => item.foreign)) return { ...summed, byKey };
     // 有别的上游的 Key（换到另一个上游的过渡段）：结果的窗口还是请求的窗口（Sub2API 那把按整天读，窗口放宽了，不触发窗口对不上）；
     // 记下每个上游各花了多少美元，算混合汇率用
     const byStation = mergeStationAmounts(wanted.map((item, index) => [{ stationId: item.foreign ? item.key.upstreamStationId : upstreamStationId, amountUsd: results[index].amountUsd }]));
-    return { ...(results.length > 1 ? { ...summed, window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } } : summed), ...(byStation ? { byStation } : {}) };
+    return { ...(results.length > 1 ? { ...summed, window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } } : summed), ...(byStation ? { byStation } : {}), byKey };
   }
 
   // 换到另一个上游的 Key（K2c-3b）：一段里的 Key 带着自己的上游，别的上游的 Key 去那个上游读（元数据、身份、账单能力都是那个上游的）。
@@ -1897,7 +1901,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const results = await Promise.all(sources.map((piece) => upstreamWindowForSegment(upstream, metadata, token, piece.segment, piece.window, options)));
     const summed = sumKeyStats(results);
     const byStation = results.some((item) => item.byStation) ? mergeStationAmounts(results.map((item) => item.byStation ?? [{ stationId: options.upstreamStationId, amountUsd: item.amountUsd }])) : undefined;
-    return { ...summed, ...(byStation ? { byStation } : {}), window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
+    // 换了 Key 的那天（窗口里不止一把 Key）：每把 Key 各花了多少、归这条绑定的时间段，计算明细按 Key 分开写。每一截里一把 Key 的取这一截的段里记的那把
+    const keyLists = results.map((result, index) => result.byKey ?? [keyAmountEntry(sources[index].segment.keys?.[0] ?? { upstreamStationId: options.upstreamStationId, tokenId: token?.id, tokenName: token?.name }, result, sources[index].window.startMs, sources[index].window.endMs)]);
+    const byKey = mergeKeyAmounts(keyLists);
+    const { byKey: _leaked, ...base } = summed;
+    return { ...base, ...(byStation ? { byStation } : {}), ...(byKey.length > 1 ? { byKey } : {}), window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
   }
 
   // 这条（Sub2API）绑定的起算点在当天中间时：这条绑定第一段里的 Key，当天早些时候在这个自营站点下别的绑定里握过的（关掉的段、已停的绑定）最晚的结束时刻
@@ -1976,7 +1984,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const summed = sumKeyStats(results);
     const foreign = wanted.some(({ resolved }) => resolved.foreign);
     const byStation = foreign ? mergeStationAmounts(wanted.map(({ resolved }, index) => [{ stationId: resolved.foreign ? wanted[index].item.key.upstreamStationId : upstreamStationId, amountUsd: results[index].amountUsd }])) : null;
-    return { ...summed, ...(byStation ? { byStation } : {}), window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
+    // 每把 Key 各花了多少、归这条绑定的时间段（换了 Key 或挪了 Key 的那天，计算明细按 Key 分开写）
+    const byKey = wanted.length > 1 ? wanted.map(({ item, resolved }, index) => keyAmountEntry({ upstreamStationId: item.key.upstreamStationId ?? upstreamStationId, tokenId: item.key.tokenId, tokenName: resolved.token?.name ?? item.key.tokenName },
+      results[index], Math.min(...item.windows.map((piece) => piece.startMs)), Math.max(...item.windows.map((piece) => piece.endMs)))) : null;
+    const { byKey: _leaked, ...base } = summed;
+    return { ...base, ...(byStation ? { byStation } : {}), ...(byKey ? { byKey } : {}), window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
   }
 
   function tokenNameIsUnique(metadata, token) {
@@ -2885,6 +2897,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             state: "complete", quotaUnits: upstreamResult.quotaUnits, quotaPerUnit: upstreamResult.quotaPerUnit,
             amountUsd: upstreamUsd, knownAmountUsd: upstreamUsd, successfulCount: 1, expectedCount: 1,
             ...(upstreamResult.byStation ? { byStation: upstreamResult.byStation } : {}),
+            ...(upstreamResult.byKey ? { byKey: upstreamResult.byKey } : {}),
             observedAt: upstreamResult.latestLogAtMs || Date.now(), window: upstreamResult.window || upstreamWindow,
             requestedWindow: upstreamWindow, billingTimezone: upstreamResult.billingTimezone,
           },
@@ -2999,6 +3012,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           expectedCount: segmentResults.length,
           observedAt: Date.now(), window: sideWindow("upstream"),
           billingTimezone: commonBillingTimezone(window, segmentResults.map((segment) => segment.upstream)),
+          // 换了 Key 的那天每把 Key 各花了多少（进账本明细，计算明细按 Key 分开写）
+          ...(segmentResults.some((segment) => segment.upstream.byKey) ? { byKey: mergeKeyAmounts(segmentResults.map((segment) => segment.upstream.byKey ?? [])) } : {}),
           status: evidenceToken?.status ?? null, group: currentSegment.group, ratio: currentRatio,
         },
         downstream: {
@@ -3913,6 +3928,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const live = await api.queryRules({ ruleIds: [rule.id], ...(today ? { preset: "today" } : { preset: "custom", startMs, endMs: Math.min(endMs, now) }) }, { mode: "evaluate", force: true, origin: "manual" });
         pieces.push({ rule, result: live.results[0] || null, expected: null, entry: null });
       }
+      // 这一天换过 Key、Key 在两条绑定之间挪过手的时刻（计算明细「按 Key 分开写」「Key 挪到了别的渠道」）：只是写给人看的说明，读不到就不写，不挡明细
+      try {
+        const ownIds = new Set(rules.map((rule) => rule.ownStationId));
+        const siblings = (await repository.listRules({ includeArchived: true })).filter((item) => ownIds.has(item.ownStationId));
+        const byRule = await repository.listSegmentsForRules(siblings.map((item) => item.id));
+        const channelNamesOf = (item) => (item.channels || []).map((channel) => channel.name || `渠道 ${channel.channelId}`);
+        const others = siblings.map((item) => ({ id: item.id, channelNames: channelNamesOf(item), segments: byRule[item.id] || [] }));
+        for (const piece of pieces) {
+          const startMs = dayStartInTz(day, piece.rule.timezone), dayWindow = { startMs, endMs: shiftedDayStartInTz(startMs, 1, piece.rule.timezone) };
+          piece.changes = keyChangesOnDay(byRule[piece.rule.id] || [], dayWindow);
+          piece.moves = keyMovesOnDay({ id: piece.rule.id, channelNames: channelNamesOf(piece.rule) }, piece.changes, others, dayWindow);
+        }
+      } catch { /* 说明读不到：明细照常，没有这几句 */ }
       return buildProfitDetail(pieces, { day });
     },
     async getConfirmedHistory(id, input = {}) {

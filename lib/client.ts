@@ -140,6 +140,10 @@ export type ProfitPageResponse = {
   rateUnset: { id: string; name: string }[]; fixedOffProfitStations: { id: string; name: string }[];
 };
 export type ProfitDetailModel = { model: string; upstreamModel?: string | null; requests: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; pricesPerMillion?: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null } | null; beforeRatioUsd: number; usd: number };
+export type ProfitDetailKeyRef = { upstreamStationId: string | null; tokenId: number; tokenName: string | null };
+export type ProfitDetailKeyAmount = ProfitDetailKeyRef & { amountUsd: number | null; fromMs: number; toMs: number };
+export type ProfitDetailKeyChange = { atMs: number; between: [number, number] | null; from: ProfitDetailKeyRef; to: ProfitDetailKeyRef };
+export type ProfitDetailKeyMove = { key: ProfitDetailKeyRef; atMs: number; fromNames: string[]; toNames: string[] };
 export type ProfitDetailResponse = {
   day: string; settled: boolean;
   income: { usd: number | null; adminUsage: { usd: number | null; deducted: "all" | "some" | "none" }; byChannel: { channelId: number; usd: number | null }[] };
@@ -147,6 +151,8 @@ export type ProfitDetailResponse = {
   expected: { usd: number | null; reason: string | null; backfilledAt?: string | null; groupName: string | null; groupRatio: number | null; segments: { startMs: number; endMs: number; ratio: number | null; group?: string | null; usd?: number | null; ruleId: string | null }[];
     byModel: ProfitDetailModel[]; missingPriceModels: { model: string; inputTokens: number; outputTokens: number; requests: number }[]; byChannel: { channelId: number; usd: number | null }[]; tokens: number | null };
   actual: { usd: number | null; keyName: string | null };
+  // 换了 Key、Key 挪了手的那天（用语规范 §9）：amounts 每把 Key 各花了多少（不止一把时才有）、changes 换 Key 的几次、moves Key 在渠道之间挪的几次
+  keys?: { amounts: ProfitDetailKeyAmount[]; changes: ProfitDetailKeyChange[]; moves: ProfitDetailKeyMove[] };
   gap: { usd: number | null; rate: number | null; state: "over" | "under" | "within" | null } | null;
   grossProfitUsd: number | null; fixedAt: string | null; revisions: number | null;
 };

@@ -220,6 +220,11 @@ export const COPY = Object.freeze({
     missingHint: "这一天的应付成本、差额写「—」。",
     actual: "实付成本",
     actualFrom: (key: string) => `来自上游这把 Key「${key}」这天的用量记录。`,
+    // 换了 Key 的那天按 Key 分开写（用语规范 §9「上游成本（换了 Key 的那天）」）：「oai（到 14:30）$3.20；oai-2（14:30 起）$1.10」
+    keyUntil: (name: string, time: string) => `${name}（到 ${time}）`,
+    keyFrom: (name: string, time: string) => `${name}（${time} 起）`,
+    // Key 挪到了别的渠道（§9）：两个渠道这天的明细里都写这一句
+    keyMoved: (key: string, time: string, from: string, to: string) => `Key「${key}」${time} 从${from}挪到${to}：这一刻以前的算给${from}，以后的算给${to}（这一刻是系统读到的，前后最多差一分钟）。`,
     gap: "差额",
     gapFormula: "实付成本 − 应付成本",
     gapNote: (usd: string, pct: string) => `同时超过 ${usd} 和应付成本的 ${pct}，算对不上。正常也会差一点（两边记录的时刻不一样、请求重试），超过这条线才标出来。`,

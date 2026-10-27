@@ -66,7 +66,7 @@ function RecordDetails({ record }: { record: ConfirmedHistoryRecord }) {
     <Detail label="汇率" value={settledRateText(record)} />
     <Detail label="固定于" value={formatZonedDateTime(record.confirmedAt, timezone)} />
     {start != null && start > record.window.startMs ? <Detail label="开始统计" value={formatZonedDateTime(start, timezone)} /> : null}
-    {record.accountedToMs != null ? <Detail label="统计到" value={`${formatZonedDateTime(record.accountedToMs, timezone)}（解除绑定）`} /> : null}
+    {record.accountedToMs != null ? <Detail label="统计到" value={`${formatZonedDateTime(record.accountedToMs, timezone)}（停止算利润）`} /> : null}
     {revisionText(record) ? <Detail label="改过" value={revisionText(record)} /> : null}
   </div>;
 }
@@ -158,7 +158,7 @@ export function ReconHistory({ history, compact, rules, upstreams, businessTimez
         placeholder="选择绑定（含已解除）" onChange={history.chooseRule}
         options={directory.map((item: any) => ({
           value: item.id,
-          label: `${keyName(item)} · ${upstreamName(item, upstreams)} · ${ended(item) ? "已解除绑定" : "在用"}`,
+          label: `${keyName(item)} · ${upstreamName(item, upstreams)} · ${ended(item) ? "没算利润" : "在算利润"}`,
         }))}
       />
     </div>

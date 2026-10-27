@@ -11198,3 +11198,29 @@ for (const order of ["对不上的在前", "对得上的在前"]) test(`R02 换�
   await f.module.queryRules(input(ids.slice().reverse()), { force: true });
   assert.equal(store.get("upstream").identityWatch?.sinceMs, firstSeen, "下一轮（换个顺序）仍然是第一次发现的时刻，不重写");
 });
+
+// 每日利润的计算明细（用语规范 §9）：换了 Key、Key 挪了手的那天，上游成本按 Key 分开写、写「Key 挪到了别的渠道」那一句
+for (const sub2 of [false, true]) test(`计算明细（${sub2 ? "Sub2API" : "New API"}）：两条绑定互换 Key 的那天——每把 Key 各花了多少（到 b / b 起）和 Key 挪到了别的渠道那一句，两条绑定的明细里都有；换 Key 前后的钱加起来等于实付成本`, async (t) => {
+  const s = await regroupMoneyScenario(t, "immediate", { sub2, expectRegroup: false, rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }],
+    before: { 1: 9, 2: 10 }, after: { 1: 10, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null] } });
+  const detail = await s.f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-12" });
+  const b = REGROUP_B + 0; // 互换在 b 切开（09:00 上海）
+  assert.deepEqual(detail.keys.amounts.map((item) => [item.tokenName, item.amountUsd, item.fromMs <= detail.keys.amounts[0].fromMs, item.toMs === b || item.fromMs === b]), [["stable", 32400, true, true], ["stable-rr_b", 54000, false, true]]);
+  assert.equal(detail.keys.amounts.reduce((total, item) => total + item.amountUsd, 0), detail.actual.usd, "各把 Key 的钱加起来 = 实付成本");
+  assert.deepEqual(detail.keys.changes.map((change) => [change.atMs, change.between, change.from.tokenName, change.to.tokenName]), [[b, null, "stable", "stable-rr_b"]]);
+  assert.deepEqual(detail.keys.moves.map((move) => [move.key.tokenName, move.atMs, move.fromNames, move.toNames]), [["stable", b, ["渠道 1"], ["渠道 2"]], ["stable-rr_b", b, ["渠道 2"], ["渠道 1"]]]);
+  const other = await s.f.module.profitDetail({ ruleIds: ["rr_b"], day: "2026-10-12" });
+  assert.deepEqual(other.keys.moves.map((move) => [move.key.tokenName, move.fromNames, move.toNames]), [["stable-rr_b", ["渠道 2"], ["渠道 1"]], ["stable", ["渠道 1"], ["渠道 2"]]], "接手的那条绑定的明细里也有");
+  const before = await s.f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-11" });
+  assert.deepEqual([before.keys.amounts, before.keys.changes, before.keys.moves], [[], [], []], "没换 Key 的那天什么都不写");
+});
+
+for (const sub2 of [false, true]) test(`计算明细（${sub2 ? "Sub2API" : "New API"}）：一条绑定自己换 Key 的那天——旧 Key、新 Key 各花了多少，换的时刻是两次读取之间（between = [a, b]），没有「挪到了别的渠道」`, async (t) => {
+  const s = await regroupMoneyScenario(t, "immediate", { sub2, expectRegroup: false, rules: [], channelsByRule: { rr_live: [1] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "k20" }],
+    before: { 1: 9 }, after: { 1: 20 }, usage: { stable: [0, REGROUP_T], k20: [REGROUP_T, null] } });
+  const detail = await s.f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-12" });
+  assert.deepEqual(detail.keys.amounts.map((item) => [item.tokenName, item.amountUsd]), [["stable", 14400], ["k20", 72000]], "旧 Key 到 b（04:00 起没有用量）、新 Key 从 04:00 起");
+  assert.equal(detail.keys.amounts.reduce((total, item) => total + item.amountUsd, 0), detail.actual.usd);
+  assert.deepEqual(detail.keys.changes.map((change) => [change.atMs, change.between != null, change.from.tokenName, change.to.tokenName]), [[REGROUP_B, true, "stable", "k20"]]);
+  assert.deepEqual(detail.keys.moves, []);
+});

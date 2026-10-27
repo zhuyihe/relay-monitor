@@ -4,7 +4,7 @@
 import { Button } from "antd";
 import { ErrorState, Skeleton } from "../../components/data-state";
 import type { ProfitDetailResponse, ProfitPageResponse, ProfitRow } from "../../../lib/client";
-import { EMPTY, formatCompact, formatDayKey, formatPct, formatZonedDateTime } from "../../../lib/format";
+import { EMPTY, formatCompact, formatDayKey, formatPct, formatZonedDateTime, formatZonedTime } from "../../../lib/format";
 import { formatReconciliationMoney } from "../../../lib/reconciliation-view";
 import { dayKeyInTz } from "../../../lib/business-time";
 import { COPY } from "./copy";
@@ -37,6 +37,16 @@ function Body({ detail, row, page, ctx, compact, onCorrected }: { detail: Profit
   const gap = detail.gap;
   const gapValue = gap?.usd == null ? EMPTY : gap.state === "within" ? signedMoney(toDisplay(gap.usd, costRate, ctx.currency), ctx.currency) : overUnderText(toDisplay(gap.usd, costRate, ctx.currency)!, ctx.currency);
   const today = detail.day === page.today;
+  // 换了 Key 的那天上游成本按 Key 分开写：这把 Key 是换走的写「到 X」、是换上的写「X 起」，没换过时刻的（整天都是它）只写名字
+  const keyAmounts = detail.keys?.amounts ?? [], keyChanges = detail.keys?.changes ?? [], moves = detail.keys?.moves ?? [];
+  const keyLines = keyAmounts.map((amount) => {
+    const name = amount.tokenName || `Key ${amount.tokenId}`;
+    const left = keyChanges.find((change) => change.from.tokenId === amount.tokenId && change.from.upstreamStationId === amount.upstreamStationId);
+    const arrived = keyChanges.find((change) => change.to.tokenId === amount.tokenId && change.to.upstreamStationId === amount.upstreamStationId);
+    const label = left ? COPY.detail.keyUntil(name, formatZonedTime(left.atMs, ctx.tz)) : arrived ? COPY.detail.keyFrom(name, formatZonedTime(arrived.atMs, ctx.tz)) : name;
+    return { id: `${amount.upstreamStationId}:${amount.tokenId}`, label, usd: amount.amountUsd };
+  });
+  const namesText = (names: string[]) => names.map((name) => `「${name}」`).join("");
   return <div className="jy-profit-detail">
     <Section title={COPY.detail.income} value={income(detail.income.usd)}>
       <p>{many ? COPY.detail.incomeFromMany(row.channels.length) : COPY.detail.incomeFrom(channelName(row.channels[0]?.channelId))}{admin ? `，${admin}` : ""}。</p>
@@ -68,6 +78,8 @@ function Body({ detail, row, page, ctx, compact, onCorrected }: { detail: Profit
     </Section> : null}
     <Section title={COPY.detail.actual} value={cost(detail.actual.usd)}>
       <p>{COPY.detail.actualFrom(detail.actual.keyName || row.key.name)}</p>
+      {keyLines.length ? <ul className="jy-profit-detail__list">{keyLines.map((line) => <li key={line.id}><span>{line.label}</span><b>{line.usd == null ? EMPTY : cost(line.usd)}</b></li>)}</ul> : null}
+      {moves.map((move) => <p key={`${move.key.upstreamStationId}:${move.key.tokenId}@${move.atMs}`} className="jy-caption">{COPY.detail.keyMoved(move.key.tokenName || `Key ${move.key.tokenId}`, formatZonedDateTime(move.atMs, ctx.tz), namesText(move.fromNames), namesText(move.toNames))}</p>)}
     </Section>
     <Section title={COPY.detail.gap} value={gapValue}>
       <p>{COPY.detail.gapFormula}{gap?.rate != null && gap.state !== "within" ? `，${rateText(gap.rate)}` : ""}。{COPY.detail.gapNote(formatReconciliationMoney(page.gapThreshold.usd, null), formatPct(page.gapThreshold.rate, 0))}</p>

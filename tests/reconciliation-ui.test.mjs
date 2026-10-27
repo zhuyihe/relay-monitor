@@ -278,6 +278,27 @@ test("切昨天：五个数一行（收入、应付成本、实付成本、差�
   assert.equal(profitReads.length, 2, "筛选不再请求");
 });
 
+test("计算明细：换了 Key、Key 挪了手的那天——上游成本按 Key 分开写（到 14:30 / 14:30 起），再写一句「Key 挪到了别的渠道」；没换 Key 的那天都不写", async (t) => {
+  const at = Date.parse("2026-10-08T06:30:00.000Z"); // 上海 14:30
+  const keys = { amounts: [{ upstreamStationId: "upstream-1", tokenId: 9, tokenName: "oai", amountUsd: 0.7, fromMs: at - 14.5 * 3600000, toMs: at }, { upstreamStationId: "upstream-1", tokenId: 10, tokenName: "oai-2", amountUsd: 0.5, fromMs: at, toMs: at + 9.5 * 3600000 }],
+    changes: [{ atMs: at, between: null, from: { upstreamStationId: "upstream-1", tokenId: 9, tokenName: "oai" }, to: { upstreamStationId: "upstream-1", tokenId: 10, tokenName: "oai-2" } }],
+    moves: [{ key: { upstreamStationId: "upstream-1", tokenId: 9, tokenName: "oai" }, atMs: at, fromNames: ["Rule A"], toNames: ["高速 A", "备用 B"] }] };
+  const { page } = await openDailyPage(t, { pageOf: () => profitPage(yesterdayRows(), { preset: "yesterday" }), detail: (route) => fulfill(route, profitDetail({ keys })) });
+  await rowOf(page, "Rule A").locator(".jy-profit-row__toggle").waitFor();
+  await page.locator(".jy-profit-row__expanded").first().getByRole("button", { name: PROFIT_COPY.expanded.seeDetail, exact: true }).click();
+  const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor();
+  const list = drawer.locator(".jy-profit-detail__list").filter({ hasText: "oai" });
+  await list.getByText(PROFIT_COPY.detail.keyUntil("oai", "14:30"), { exact: true }).waitFor(); await list.getByText(PROFIT_COPY.detail.keyFrom("oai-2", "14:30"), { exact: true }).waitFor();
+  assert.equal(await list.locator("li b").allInnerTexts().then((texts) => texts.join(" ")), "$0.70 $0.50", "每把 Key 各花了多少");
+  await drawer.getByText(PROFIT_COPY.detail.keyMoved("oai", "10月8日 14:30", "「Rule A」", "「高速 A」「备用 B」"), { exact: true }).waitFor();
+  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
+  // 没换 Key 的日子（keys 里什么都没有）：不写这几句
+  const plain = await openDailyPage(t, { pageOf: () => profitPage(yesterdayRows(), { preset: "yesterday" }) });
+  await plain.page.locator(".jy-profit-row__expanded").first().getByRole("button", { name: PROFIT_COPY.expanded.seeDetail, exact: true }).click();
+  const plainDrawer = plain.page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await plainDrawer.waitFor();
+  assert.equal(await plainDrawer.getByText(/挪到/).count(), 0); assert.equal(await plainDrawer.locator(".jy-profit-detail__list").filter({ hasText: "（到" }).count(), 0);
+});
+
 test("点开一行：对不上的默认展开，「差在哪」一句写用量、倍率、应付和实付；近 7 天每天的小格，点一格或「看计算明细」打开那天的计算明细抽屉（GET /profit/detail）", async (t) => {
   const { page, detailReads } = await openDailyPage(t, { pageOf: () => profitPage(yesterdayRows(), { preset: "yesterday" }) });
   const rowA = rowOf(page, "Rule A"), rowB = rowOf(page, "Rule B");
@@ -882,9 +903,9 @@ async function openConfirmedHistoryPage(t, options = {}) {
   const stopElsewhere = () => Object.assign(current.rule, { enabled: false, archivedAt: "2026-10-09T00:00:00Z" });
   return { page, reads, historyReads, queries, records, stopElsewhere };
 }
-// 以前的每日记录（recon-history.tsx）：抽屉标题和入口按钮都是「以前的每日记录」，绑定下拉写「Key · 上游 · 在用 / 已解除绑定」
+// 以前的每日记录（recon-history.tsx）：抽屉标题和入口按钮都是「以前的每日记录」，绑定下拉写「Key · 上游 · 在算利润 / 没算利润」（K2d-3，用语规范 §3.1）
 const HISTORY = workflowActionMeta("open_history").label, HISTORY_UPSTREAM = configuration.upstreams[0].name;
-const historyOption = (key, ended = false) => `${key} · ${HISTORY_UPSTREAM} · ${ended ? "已解除绑定" : "在用"}`;
+const historyOption = (key, ended = false) => `${key} · ${HISTORY_UPSTREAM} · ${ended ? "没算利润" : "在算利润"}`;
 const historyCount = (n) => `${n} 条每日记录 · 按美元显示。只列每天的记录，以前的数据还在。`;
 const HISTORY_FIXED_NOTE = `这个上游现在计入固定成本；没标「${FIXED_COST_TEXT}」的日子是当时按用量算的上游成本，不改。`;
 // 记录里没有 Key 名称和 ID 时写「—」，不拿现在的绑定去补
