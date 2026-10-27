@@ -1526,6 +1526,22 @@ contract("applyKeyChangePlans: writing a key another rule still actively holds r
   assert.equal((await repository.getRule(taken.id)).tokenId, taken.tokenId, "没参与这批的那条绑定没被动");
 });
 
+contract("applyKeyChangePlans: a plan's keyBlock is written in the same transaction as the key change — it lands with the change, and a collision rolls the block back too (审核 #133 第 3 轮 M2)", async ({ repository, fixture }) => {
+  const taken = await fixture.createRule({ tokenId: fixture.token(37), channels: [{ channelId: fixture.channel(37), name: "Taken2" }] });
+  const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(38), name: "Block" }] });
+  const block = { code: "PENDING", sinceMs: EFFECTIVE_FROM, untilMs: EFFECTIVE_FROM + 24 * HOUR };
+  const collideRef = { upstreamStationId: taken.upstreamStationId, tokenId: taken.tokenId, tokenName: taken.tokenName };
+  const collided = await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: { kind: "precise", cutoverAt: EFFECTIVE_FROM + HOUR, after: [collideRef] }, keyBlock: block }]);
+  assert.deepEqual(collided, { conflict: true });
+  assert.equal((await repository.getRule(rule.id)).keyBlocks ?? null, null, "撞了整批回滚，挡也没写");
+  const newRef = { upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(39), tokenName: "Fresh" };
+  const result = await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: { kind: "precise", cutoverAt: EFFECTIVE_FROM + HOUR, after: [newRef] }, keyBlock: block }]);
+  assert.deepEqual(result, { conflict: false });
+  const after = await repository.getRule(rule.id);
+  assert.equal(after.tokenId, newRef.tokenId);
+  assert.deepEqual(after.keyBlocks, [block], "换段和挡一起落库");
+});
+
 contract("applyKeyChangePlans: an open multi-key segment gets active_token_key on every key, not just the first — a collision on the second key is still caught", async ({ repository, fixture }) => {
   const taken = await fixture.createRule({ tokenId: fixture.token(37), channels: [{ channelId: fixture.channel(37), name: "Taken" }] });
   const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(38), name: "Multi" }] });
