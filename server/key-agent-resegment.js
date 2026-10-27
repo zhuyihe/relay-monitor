@@ -105,3 +105,69 @@ export function detectGroupMerges(currentRefsByBinding) {
   }
   return [...byRef.values()].filter((bindingIds) => bindingIds.length > 1);
 }
+
+// K2c 重新分组（k-plan 3.3）：K2b 认出「组散了」（一条绑定名下的渠道现在用的 Key 不再是同一把）或「合组了」（几条绑定的渠道现在用同一把 Key）以后，
+// 这里算该怎么重新分：
+//   - 先把牵连的绑定找全（closure）：被标记的绑定，加上和它们的 Key 有关的——现在的 Key 在别的绑定名下（渠道读到的 Key 是它的）、或者别的绑定握着的 Key
+//     （rules 上的 token，唯一约束，要建新绑定得先让它归档）——一直找到不再有新的为止；
+//   - 牵连的绑定的渠道必须都认出了 Key（没认出来的不能分，原样留着，K2b 照旧不结账），而且 Key 都在原来的上游里
+//     （换到另一个上游的 Key 是 K2c-3 的事）；
+//   - 新的组：牵连的渠道按现在用的 Key 连成组，一组一条新绑定，从 b 起算；
+//   - 旧绑定都在 b 归档。其中「分组」的旧绑定（渠道现在用了几把不同的 Key）在 [a, b) 开一段，放它原来那把 + 换走的那几把
+//     （不管换走的渠道这段用了哪把，钱都在旧组里，不漏不重）；但换走的 Key 如果原来就是别的牵连绑定握着的，不放进来
+//     （那把 Key 在 [a, b) 的钱算在那条绑定名下，放两边就算了两遍）；几条绑定都换走到同一把新 Key 时，只放在排第一的那条里。
+// rules：这个自营站点下在算的绑定 [{ id, upstreamStationId, tokenId, tokenName, channelIds, channels? }]；refByChannelId：Number(channelId) -> { upstreamStationId, tokenId, tokenName }
+// （只有认出了的单把 Key 渠道才有）；flaggedIds：K2b 标记了的绑定。
+// 返回 { ok: true, closes: [{ ruleId, windowKeys: [ref] | null }], groups: [{ ref, channelIds, fromRuleIds }] }，
+// 或 { ok: false, reason: "UNIDENTIFIED" | "UPSTREAM_CHANGED", ruleIds }（这一轮不分，保持原样）
+export function planRegroup({ rules, refByChannelId, flaggedIds }) {
+  const byId = new Map(rules.map((rule) => [rule.id, rule]));
+  const ownRef = (rule) => ({ upstreamStationId: rule.upstreamStationId, tokenId: Number(rule.tokenId), tokenName: rule.tokenName ?? null });
+  const refsOf = (rule) => rule.channelIds.map((channelId) => refByChannelId.get(Number(channelId)) ?? null);
+  const involved = new Set(flaggedIds.filter((id) => byId.has(id)));
+  if (!involved.size) return { ok: false, reason: "NOTHING_TO_DO", ruleIds: [] };
+  for (let changed = true; changed;) {
+    changed = false;
+    const keys = new Set();
+    for (const id of involved) for (const ref of refsOf(byId.get(id))) if (ref) keys.add(keyRefId(ref));
+    for (const rule of rules) {
+      if (involved.has(rule.id)) continue;
+      const holds = keys.has(keyRefId(ownRef(rule)));
+      const uses = refsOf(rule).some((ref) => ref && keys.has(keyRefId(ref)));
+      if (holds || uses) { involved.add(rule.id); changed = true; }
+    }
+  }
+  const members = [...involved].sort().map((id) => byId.get(id));
+  const unidentified = members.filter((rule) => refsOf(rule).some((ref) => !ref)).map((rule) => rule.id);
+  if (unidentified.length) return { ok: false, reason: "UNIDENTIFIED", ruleIds: unidentified };
+  const moved = members.filter((rule) => refsOf(rule).some((ref) => ref.upstreamStationId !== rule.upstreamStationId)).map((rule) => rule.id);
+  if (moved.length) return { ok: false, reason: "UPSTREAM_CHANGED", ruleIds: moved };
+
+  // 新的组：牵连的渠道按现在用的 Key 连成组
+  const groupsByKey = new Map();
+  for (const rule of members) rule.channelIds.forEach((channelId, index) => {
+    const ref = refsOf(rule)[index], id = keyRefId(ref);
+    if (!groupsByKey.has(id)) groupsByKey.set(id, { ref: { ...ref }, channelIds: [], fromRuleIds: [] });
+    const group = groupsByKey.get(id);
+    group.channelIds.push(Number(channelId));
+    if (!group.fromRuleIds.includes(rule.id)) group.fromRuleIds.push(rule.id);
+  });
+  const groups = [...groupsByKey.values()].map((group) => ({ ...group, channelIds: group.channelIds.sort((a, b) => a - b) }));
+
+  // 旧绑定在 b 归档；渠道现在用了几把不同 Key 的（分组），开 [a, b) 的过渡段
+  const heldByInvolved = new Set(members.map((rule) => keyRefId(ownRef(rule))));
+  const windowKeyOwner = new Map(); // 新 Key -> 放在哪条绑定的过渡段里（排第一的）
+  const closes = members.map((rule) => {
+    const distinct = new Map(refsOf(rule).map((ref) => [keyRefId(ref), ref]));
+    if (distinct.size < 2) return { ruleId: rule.id, windowKeys: null };
+    const keys = [ownRef(rule)];
+    for (const [id, ref] of distinct) {
+      if (id === keyRefId(ownRef(rule)) || heldByInvolved.has(id)) continue; // 自己的 / 别的牵连绑定原来握着的：不放
+      if (windowKeyOwner.has(id) && windowKeyOwner.get(id) !== rule.id) continue;
+      windowKeyOwner.set(id, rule.id);
+      keys.push({ ...ref });
+    }
+    return { ruleId: rule.id, windowKeys: keys.length > 1 ? keys : null };
+  });
+  return { ok: true, closes, groups };
+}

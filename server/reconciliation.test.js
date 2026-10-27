@@ -9823,3 +9823,109 @@ test("K2b 例外三：这个站点从来没读成功过（内存和持久化都�
   await round("2026-10-11T17:15:00Z");
   assert.equal(booked("2026-10-11"), 1, "读到以后照常算");
 });
+
+// K2c 重新分组（k-plan 3.3）：K2b 认出分组/合组以后，能分就分——旧绑定在 b 归档（分组的在 [a, b) 开一段放两把 Key），新绑定从 b 起算
+function regroupFixture(t, { rules, channelsByRule, tokens, keysOf }) {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keys = { 9: "sk-" + "Nine".repeat(10), 10: "sk-" + "TenT".repeat(10), 11: "sk-" + "Elev".repeat(10), 20: "sk-" + "Twen".repeat(10), 21: "sk-" + "Tw1n".repeat(10) };
+  const channelKey = { ...keysOf }; // 渠道 -> 现在填的 Key（测试里随时改）
+  const f = liveReconciliationFixture(t, {
+    policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: rules, channelsByRule,
+    tokenKeyOf: (tokenId) => keys[tokenId],
+    extraTokens: tokens,
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => Object.entries(channelKey).map(([id, tokenId]) => ({ id: Number(id), baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[tokenId]), f: "unused" }] })) },
+  });
+  f.stations[0].accountUse = "only_mine"; // 上游答了「只给我的渠道用」：新组不用再回答
+  const revisions = () => Object.fromEntries(Object.keys(channelKey).map((id) => [id, `rev-${id}`]));
+  const setCatalogue = (namespaceKey) => { f.rt.onboardingSource = { ...f.rt.onboardingSource, getSourceCatalogue: () => ({ ownSource: { namespaceKey }, stale: false,
+    channels: Object.keys(channelKey).map((id) => ({ id: Number(id), name: `渠道 ${id}`, revision: revisions()[id], missing: false })) }) }; };
+  return { f, channelKey, setCatalogue, setNow(value) { now = value; } };
+}
+
+test("K2c：分组——一条绑定两个渠道原来共用一把 Key，其中一个换了 Key：旧绑定在 b 归档、[a,b) 放两把 Key，新绑定一渠道一条从 b 起算，KEY_GROUP_CHANGED 不再留着", async (t) => {
+  const g = regroupFixture(t, { rules: [], channelsByRule: { rr_live: [1, 2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "twen" }], keysOf: { 1: 9, 2: 9 } });
+  const { f } = g;
+  await f.module.refreshDue(Date.parse("2026-10-11T01:00:00Z")); // R0：正常，锚定
+  const anchored = await f.repository.getRule("rr_live");
+  g.setCatalogue(anchored.ownSource.namespaceKey);
+  g.channelKey[2] = 20; // 渠道 2 换成了 token 20：组散了
+  g.setNow(Date.parse("2026-10-12T01:00:00Z"));
+  g.f.rt._keyAgentIdentifyCache = null;
+  await f.module.refreshDue(g.f.rt && Date.parse("2026-10-12T01:00:00Z")); // R1：认出来，直接重新分组
+  const a = Date.parse("2026-10-11T01:00:00Z"), b = Date.parse("2026-10-12T01:00:00Z");
+  const old = await f.repository.getRule("rr_live", { includeArchived: true });
+  assert.deepEqual([old.enabled, old.archivedAtMs], [false, b], "旧绑定在 b 归档");
+  const segments = await f.repository.listSegments("rr_live");
+  assert.deepEqual(segments.map((segment) => [segment.effectiveFrom, segment.effectiveTo, segment.timingSource]).slice(-2), [[0, a, "operator_confirmed"], [a, b, "key_change_window"]]);
+  assert.deepEqual(segments.at(-1).keys.map((key) => key.tokenId).sort((x, y) => x - y), [9, 20], "[a,b) 两把 Key 都放着");
+  const rules = (await f.repository.listRules()).filter((rule) => rule.enabled);
+  assert.deepEqual(rules.map((rule) => [rule.tokenId, rule.channels.map((channel) => channel.channelId), rule.accountingFloorMs, rule.keyIssue]).sort((x, y) => x[0] - y[0]),
+    [[9, [1], b, null], [20, [2], b, null]], "新绑定一渠道一条，从 b 起算，没有事项");
+  assert.equal(rules.every((rule) => rule.canonicalKey && rule.ownSource?.namespaceKey === anchored.ownSource.namespaceKey), true);
+  // 新绑定的账：从 b 起——查 b 所在的那天，上游成本只取 b 起（核算起点下限），不取 b 以前（那是旧绑定的）
+  const before = f.state.requests.length;
+  g.setNow(Date.parse("2026-10-12T02:00:00Z"));
+  const day = await f.module.queryRules({ ruleIds: [rules.find((rule) => rule.tokenId === 20).id], preset: "custom", timezone: "Asia/Shanghai",
+    startMs: Date.parse("2026-10-11T16:00:00Z"), endMs: Date.parse("2026-10-12T02:00:00Z") }, { force: true });
+  const stats = f.state.requests.slice(before).filter((request) => request.host === "upstream.test" && request.path === "/api/log/self/stat").map((request) => new URLSearchParams(request.query));
+  assert.ok(stats.length > 0 && stats.every((q) => q.get("token_name") === "twen" && Number(q.get("start_timestamp")) === b / 1000), "新绑定 b 以前的钱不取（旧绑定的）");
+  assert.ok(day.results[0].health.issues.every((issue) => issue.code !== "KEY_GROUP_CHANGED"));
+});
+
+test("K2c：合组——两条绑定的渠道现在用同一把 Key：旧的两条各自在 b 归档（不开过渡段），新绑定放全部渠道从 b 起算", async (t) => {
+  const g = regroupFixture(t, { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }], keysOf: { 1: 9, 2: 10 } });
+  const { f } = g;
+  await f.module.refreshDue(Date.parse("2026-10-11T01:00:00Z"));
+  g.setCatalogue((await f.repository.getRule("rr_live")).ownSource.namespaceKey);
+  g.channelKey[2] = 9; // 渠道 2 也换成了 token 9：和渠道 1 同一把
+  g.setNow(Date.parse("2026-10-12T01:00:00Z"));
+  g.f.rt._keyAgentIdentifyCache = null;
+  await f.module.refreshDue(Date.parse("2026-10-12T01:00:00Z"));
+  const b = Date.parse("2026-10-12T01:00:00Z");
+  for (const id of ["rr_live", "rr_b"]) {
+    const old = await f.repository.getRule(id, { includeArchived: true });
+    assert.deepEqual([old.enabled, old.archivedAtMs], [false, b]);
+    assert.equal((await f.repository.listSegments(id)).length, 1, "合组：旧绑定不开过渡段");
+  }
+  const rules = (await f.repository.listRules()).filter((rule) => rule.enabled);
+  assert.equal(rules.length, 1);
+  assert.deepEqual([rules[0].tokenId, rules[0].channels.map((channel) => channel.channelId).sort(), rules[0].accountingFloorMs], [9, [1, 2], b]);
+});
+
+test("K2c：能分的条件对不上就不分，原样留着 KEY_GROUP_CHANGED、不结账（渠道目录没确认 / 别处也在用的上游新组的 Key 没人答过）", async (t) => {
+  const g = regroupFixture(t, { rules: [], channelsByRule: { rr_live: [1, 2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "twen" }], keysOf: { 1: 9, 2: 9 } });
+  const { f } = g;
+  await f.module.refreshDue(Date.parse("2026-10-11T01:00:00Z"));
+  const namespaceKey = (await f.repository.getRule("rr_live")).ownSource.namespaceKey;
+  g.channelKey[2] = 20;
+  const next = async (iso) => { g.setNow(Date.parse(iso)); g.f.rt._keyAgentIdentifyCache = null; await f.module.refreshDue(Date.parse(iso)); };
+  await next("2026-10-12T01:00:00Z"); // 渠道目录还没确认（没有 getSourceCatalogue）：不分
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.code, "KEY_GROUP_CHANGED");
+  assert.equal((await f.repository.getRule("rr_live")).enabled, true);
+  g.setCatalogue(namespaceKey);
+  f.stations[0].accountUse = "elsewhere"; // 别处也在用：新组的 Key（token 20）没人答过
+  await next("2026-10-12T01:10:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).enabled, true, "新组的 Key 没答过：不分");
+  assert.equal((await f.repository.listRules()).length, 1);
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.sinceMs, Date.parse("2026-10-12T01:00:00Z"), "b 沿用第一次认出的");
+  f.stations[0].accountUse = "only_mine"; // 答了：下一轮就分
+  await next("2026-10-12T01:20:00Z");
+  assert.equal((await f.repository.getRule("rr_live", { includeArchived: true })).enabled, false);
+  assert.equal((await f.repository.getRule("rr_live", { includeArchived: true })).archivedAtMs, Date.parse("2026-10-12T01:00:00Z"), "b = 第一次认出来的时刻（不是分的这一轮）");
+});
+
+test("K2c：牵连的绑定在 b 以后已经有固定过的日子，不分（旧、新两边都会算那几天）——原样留着 KEY_GROUP_CHANGED", async (t) => {
+  const g = regroupFixture(t, { rules: [], channelsByRule: { rr_live: [1, 2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "twen" }], keysOf: { 1: 9, 2: 9 } });
+  const { f } = g;
+  await f.module.refreshDue(Date.parse("2026-10-11T01:00:00Z"));
+  g.setCatalogue((await f.repository.getRule("rr_live")).ownSource.namespaceKey);
+  g.channelKey[2] = 20;
+  g.setNow(Date.parse("2026-10-12T01:00:00Z"));
+  g.f.rt._keyAgentIdentifyCache = null;
+  f.repository.tables.ledger.push({ rule_id: "rr_live", bill_date: "2026-10-13", revision: 1 }); // b（10-12）以后已经有一天固定了
+  await f.module.refreshDue(Date.parse("2026-10-12T01:00:00Z"));
+  assert.equal((await f.repository.getRule("rr_live")).enabled, true, "不分");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.code, "KEY_GROUP_CHANGED");
+  assert.equal((await f.repository.listRules()).length, 1);
+});

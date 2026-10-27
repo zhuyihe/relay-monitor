@@ -121,6 +121,15 @@ export function copySegment(segment, overrides = {}) {
   return Object.defineProperty({ ...segment, ...overrides }, "keys", { value: segment.keys, enumerable: false, configurable: true, writable: true });
 }
 
+// 重新分组的一条旧绑定在落库那一刻还成立吗（regroupRules 的前置条件，内存仓库共用）：Key、渠道和计划一样；a 不早于开着那段的起点、b 不早于 a
+export function regroupIsStale(close, at, rule, channelRows, open) {
+  if (Number(rule.token_id) !== Number(close.expect.tokenId)) return true;
+  const have = channelRows.map((row) => Number(row.channel_id)).sort((a, b) => a - b), want = [...close.expect.channelIds].map(Number).sort((a, b) => a - b);
+  if (have.length !== want.length || have.some((id, index) => id !== want[index])) return true;
+  const from = close.window ? close.window.from : at;
+  return !(Number(from) >= Number(open.effective_from_ms)) || !(Number(at) >= Number(from));
+}
+
 // 换 Key 的计划在落库那一刻还成立吗（applyKeyChangePlans 的前置条件，内存仓库共用）。rule、current 是库里（锁住以后）的行
 export function keyChangePlanIsStale(plan, rule, current) {
   const before = plan.before?.[0];
@@ -349,17 +358,33 @@ export class ReconciliationRepository {
   }
 
   async createRule(input, { guard = null } = {}) {
+    const conn = await this.pool.getConnection();
+    let id;
+    try {
+      await conn.beginTransaction();
+      id = await this.insertRuleOn(conn, input, { guard });
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally {
+      conn.release();
+    }
+    return this.getRule(id);
+  }
+
+  // 在调用方的事务里建一条绑定（createRule 和 K2c 重新分组共用，一个概念一处实现）。now 是「生效时刻」（确认即生效：从这一刻所在的业务日 0 点起算），
+  // 默认现在；floorOverride 给了就直接当核算起点的下限（重新分组：新绑定从 b 起算），不去找同一天更早解除的绑定。返回新绑定的 id
+  async insertRuleOn(conn, input, { guard = null, now = Date.now(), floorOverride } = {}) {
     const requested = input;
     const id = uid("rr");
     const tokenKey = activeTokenKey(input);
-    const conn = await this.pool.getConnection();
-    try {
-      await conn.beginTransaction();
-      if (isScopedBillingPolicy(input.billingPolicy)) input = applyScopePolicy(null, input);
+    {
+      if (isScopedBillingPolicy(input.billingPolicy)) input = applyScopePolicy(null, input, now);
       if (guard) guard(null, [], input);
       // 同一天里更早解除的占着同一个渠道（或同一把 Key）的 New API 绑定：新绑定从那一刻起算（C3）
-      let accountingFloor = null;
-      if (isScopedBillingPolicy(input.billingPolicy) && Number.isFinite(input.billingEffectiveFrom)) {
+      let accountingFloor = floorOverride === undefined ? null : floorOverride;
+      if (floorOverride === undefined && isScopedBillingPolicy(input.billingPolicy) && Number.isFinite(input.billingEffectiveFrom)) {
         const dayAgo = input.billingEffectiveFrom - 36 * 3600000;
         const [oldRows] = await conn.query(
           "SELECT * FROM reconciliation_rules WHERE enabled = 0 AND archived_at >= FROM_UNIXTIME(?) AND archived_at_ms >= ? AND own_station_id = ?",
@@ -393,15 +418,9 @@ export class ReconciliationRepository {
         [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs ?? (isScopedBillingPolicy(input.billingPolicy) ? 0 : Date.now())), Date.now()]
       );
       await refreshSegmentKeys(conn, id);
-      if (guard) guard(null, [], isScopedBillingPolicy(input.billingPolicy) ? applyScopePolicy(null, requested) : input);
-      await conn.commit();
-    } catch (err) {
-      await conn.rollback().catch(() => {});
-      throw err;
-    } finally {
-      conn.release();
+      if (guard) guard(null, [], isScopedBillingPolicy(input.billingPolicy) ? applyScopePolicy(null, requested, now) : input);
+      return id;
     }
-    return this.getRule(id);
   }
 
   async updateRule(id, input, { append = false, guard = null } = {}) {
@@ -873,6 +892,55 @@ export class ReconciliationRepository {
     if (!ids.length) return 0;
     const [result] = await this.pool.query("DELETE FROM reconciliation_channel_optout WHERE own_station_id = ? AND channel_id IN (?)", [ownStationId, ids]);
     return result.affectedRows;
+  }
+
+  // K2c 重新分组（k-plan 3.3）：几个渠道原来共用一把 Key（一条绑定），现在用的 Key 不一样了（分组），或者几条绑定的渠道现在用同一把 Key（合组）。
+  // 同一个事务里：旧绑定（closes）该开过渡段的开 [a, b) 一段（放旧 Key 和换走的新 Key，不管换走的渠道这段用了哪把，钱都在旧组里，不漏不重），
+  // 然后在 b 归档（archived_at_ms = b，不记「用户停的」）；新绑定（creates，一组一条）从 b 起算（核算起点下限 = b，生效日 = b 所在的业务日）。
+  // closes：[{ ruleId, expect: { tokenId, channelIds }, window: null | { from: a, keys: [{ upstreamStationId, tokenId, tokenName }] } }]；
+  // creates：insertRuleOn 要的输入。落库那一刻旧绑定的 Key、渠道和计划对不上、a/b 倒挂：什么也不写，返回 { stale: true }；撞唯一约束整体回滚返回 { conflict: true }
+  async regroupRules({ at, closes, creates }, { detectedAt = Date.now() } = {}) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const states = [];
+      for (const close of closes) {
+        const [ruleRows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [close.ruleId]);
+        const [channelRows] = await conn.query("SELECT channel_id FROM reconciliation_rule_channels WHERE rule_id = ?", [close.ruleId]);
+        const [segmentRows] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? AND effective_to_ms IS NULL FOR UPDATE", [close.ruleId]);
+        const rule = ruleRows[0], open = segmentRows[0];
+        if (!rule || !rule.enabled || !open) { await conn.rollback(); return { conflict: false, stale: true }; }
+        if (regroupIsStale(close, at, rule, channelRows, open)) { await conn.rollback(); return { conflict: false, stale: true }; }
+        states.push({ close, rule, open });
+      }
+      for (const { close, rule, open } of states) {
+        if (close.window) {
+          const fillMissing = fillMissingSegmentKeysSql(close.ruleId);
+          await conn.query(fillMissing.sql, fillMissing.params);
+          await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [close.window.from, open.id]);
+          const id = uid("rs");
+          await conn.query(
+            `INSERT INTO reconciliation_rule_segments
+              (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, effective_to_ms, detected_at_ms, timing_source)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'key_change_window')`,
+            [id, close.ruleId, open.group_name, open.group_ratio, open.ratio_observed_at_ms, open.ratio_source, close.window.from, at, detectedAt]);
+          for (const key of close.window.keys) await conn.query(
+            "INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source, active_token_key) VALUES (?, ?, ?, ?, 'agent', NULL)",
+            [id, key.upstreamStationId, key.tokenId, key.tokenName ?? null]);
+        }
+        await conn.query("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, archived_at = NOW(), archived_at_ms = ? WHERE id = ? AND archived_at IS NULL", [at, close.ruleId]);
+        await conn.query("UPDATE reconciliation_rule_channels SET active_channel_key = NULL WHERE rule_id = ?", [close.ruleId]);
+        await refreshSegmentKeys(conn, close.ruleId);
+      }
+      const createdIds = [];
+      for (const input of creates) createdIds.push(await this.insertRuleOn(conn, input, { now: at, floorOverride: at }));
+      await conn.commit();
+      return { conflict: false, stale: false, ruleIds: createdIds };
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      if (err?.code === "ER_DUP_ENTRY" || Number(err?.errno) === 1062) return { conflict: true, stale: false };
+      throw err;
+    } finally { conn.release(); }
   }
 
   async archiveRule(id, { now = Date.now(), optout = false } = {}) {

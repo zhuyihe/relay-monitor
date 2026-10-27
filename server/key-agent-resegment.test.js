@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   planKeyChangeSegments, planMovedKeySegments, planSegmentChanges, splitSub2RecordsAtCutover,
-  keyAgentExceptionIssueOf, KEY_READER_UNREACHABLE_THRESHOLD, detectGroupSplit, detectGroupMerges, safeLastSeenAt,
+  keyAgentExceptionIssueOf, KEY_READER_UNREACHABLE_THRESHOLD, detectGroupSplit, detectGroupMerges, safeLastSeenAt, planRegroup,
 } from "./key-agent-resegment.js";
 
 const ref = (tokenId, upstreamStationId = "up1") => ({ upstreamStationId, tokenId });
@@ -244,4 +244,48 @@ test("copySegment：多 Key 段复制、改字段以后，keys 原样带过去�
   assert.equal({ ...segment }.keys, undefined, "展开运算符本身确实会丢（这正是为什么要用 copySegment，不是这个函数的 bug）");
   // JSON 序列化不受影响（keys 本来就不该进 JSON，这是 K1c 定的规矩，复制以后也一样不进）
   assert.equal(JSON.stringify(dayCopy).includes("oai"), false);
+});
+
+// ---------- K2c 重新分组（planRegroup） ----------
+
+const rule = (id, tokenId, channelIds, upstreamStationId = "up1") => ({ id, upstreamStationId, tokenId, tokenName: `k${tokenId}`, channelIds });
+const refs = (entries) => new Map(Object.entries(entries).map(([channelId, tokenId]) => [Number(channelId), { upstreamStationId: "up1", tokenId, tokenName: `k${tokenId}` }]));
+const key = (tokenId) => ({ upstreamStationId: "up1", tokenId, tokenName: `k${tokenId}` });
+
+test("planRegroup 分组：一条绑定两个渠道原来共用 K1，现在 A 还是 K1、B 换成了 K2——旧绑定在 b 归档、[a,b) 放 K1 和 K2，新绑定一渠道一条", () => {
+  const plan = planRegroup({ rules: [rule("x", 1, [10, 20])], refByChannelId: refs({ 10: 1, 20: 2 }), flaggedIds: ["x"] });
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.closes, [{ ruleId: "x", windowKeys: [key(1), key(2)] }]);
+  assert.deepEqual(plan.groups.map((group) => [group.ref.tokenId, group.channelIds]), [[1, [10]], [2, [20]]]);
+});
+
+test("planRegroup 合组：两条绑定的渠道现在用同一把 Key——旧的两条各自在 b 归档，不开过渡段，新的一条放全部渠道", () => {
+  const plan = planRegroup({ rules: [rule("x", 1, [10]), rule("y", 2, [20])], refByChannelId: refs({ 10: 1, 20: 1 }), flaggedIds: ["x", "y"] });
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.closes, [{ ruleId: "x", windowKeys: null }, { ruleId: "y", windowKeys: null }]);
+  assert.deepEqual(plan.groups.map((group) => [group.ref.tokenId, group.channelIds, group.fromRuleIds]), [[1, [10, 20], ["x", "y"]]]);
+});
+
+test("planRegroup：牵连的绑定找全——被标记的绑定用到了另一条绑定握着的 Key（唯一约束，要先归档它），那一条也一起分；没牵连的不碰", () => {
+  const plan = planRegroup({ rules: [rule("x", 1, [10, 20]), rule("y", 2, [30]), rule("z", 3, [40])], refByChannelId: refs({ 10: 1, 20: 2, 30: 2, 40: 3 }), flaggedIds: ["x"] });
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.closes.map((close) => close.ruleId), ["x", "y"], "z 没牵连，不动");
+  assert.deepEqual(plan.groups.map((group) => [group.ref.tokenId, group.channelIds]), [[1, [10]], [2, [20, 30]]]);
+  // 换走的 K2 原来是 y 握着的：x 的过渡段里不放 K2（K2 在 [a,b) 的钱算在 y 名下，放两边就算了两遍）
+  assert.deepEqual(plan.closes.find((close) => close.ruleId === "x").windowKeys, null);
+});
+
+test("planRegroup：几条绑定都换走到同一把全新的 Key，过渡段只放在排第一的那条里（不算两遍）", () => {
+  const plan = planRegroup({ rules: [rule("x", 1, [10, 11]), rule("y", 2, [20, 21])], refByChannelId: refs({ 10: 1, 11: 9, 20: 2, 21: 9 }), flaggedIds: ["x", "y"] });
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.closes, [{ ruleId: "x", windowKeys: [key(1), key(9)] }, { ruleId: "y", windowKeys: null }]);
+  assert.deepEqual(plan.groups.map((group) => [group.ref.tokenId, group.channelIds]), [[1, [10]], [9, [11, 21]], [2, [20]]]);
+});
+
+test("planRegroup：牵连的渠道有没认出来的、或者 Key 换到了别的上游，这一轮不分（保持原样）", () => {
+  const unresolved = planRegroup({ rules: [rule("x", 1, [10, 20])], refByChannelId: refs({ 10: 1 }), flaggedIds: ["x"] });
+  assert.deepEqual([unresolved.ok, unresolved.reason, unresolved.ruleIds], [false, "UNIDENTIFIED", ["x"]]);
+  const elsewhere = planRegroup({ rules: [rule("x", 1, [10, 20])], refByChannelId: new Map([[10, key(1)], [20, { upstreamStationId: "up2", tokenId: 5 }]]), flaggedIds: ["x"] });
+  assert.deepEqual([elsewhere.ok, elsewhere.reason], [false, "UPSTREAM_CHANGED"]);
+  assert.equal(planRegroup({ rules: [rule("x", 1, [10])], refByChannelId: refs({ 10: 1 }), flaggedIds: [] }).ok, false);
 });

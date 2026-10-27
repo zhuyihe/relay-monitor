@@ -16,7 +16,7 @@ import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
-  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale,
+  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale, regroupIsStale,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
   SETTLEMENT_STATE_WRITE_COLUMNS, settlementStateFromRow, settlementStateValues,
 } from "../reconciliation-repository.js";
@@ -201,17 +201,23 @@ export class MemoryReconciliationRepository {
   }
 
   async createRule(input, { guard = null } = {}) {
+    let id;
+    await this.#transaction("createRule", async (tx) => { id = this.#insertRule(tx, input, { guard }); await this.#lock(tx, `rule:${id}`); });
+    return this.getRule(id);
+  }
+
+  // 对应 MySQL 版 insertRuleOn：在调用方的事务里建一条绑定（createRule 和 K2c 重新分组共用）。同步返回新绑定 id
+  #insertRule(tx, input, { guard = null, now = Date.now(), floorOverride } = {}) {
     const requested = input;
     const id = uid("rr");
     const tokenKey = activeTokenKey(input);
-    await this.#transaction("createRule", async (tx) => {
-      await this.#lock(tx, `rule:${id}`);
-      if (isScopedBillingPolicy(input.billingPolicy)) input = applyScopePolicy(null, input);
+    {
+      if (isScopedBillingPolicy(input.billingPolicy)) input = applyScopePolicy(null, input, now);
       if (guard) guard(null, [], input);
       const createdAt = this.#timestamp();
       // 同一天里更早解除的占着同一个渠道（或同一把 Key）的 New API 绑定：新绑定从那一刻起算（C3，同 MySQL 版）
       const archivedPeers = this.#plain("rules").filter((row) => row.archived_at != null).map((row) => ruleFromRow(fresh(row), this.#channelsOf(tx, row.id)));
-      const accountingFloor = isScopedBillingPolicy(input.billingPolicy)
+      const accountingFloor = floorOverride !== undefined ? floorOverride : isScopedBillingPolicy(input.billingPolicy)
         ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels }, archivedPeers) : null;
       this.#insert(tx, "rules", {
         id, accounting_floor_ms: accountingFloor, upstream_station_id: input.upstreamStationId ?? null, own_station_id: input.ownStationId ?? null, token_id: bigint(input.tokenId),
@@ -230,9 +236,9 @@ export class MemoryReconciliationRepository {
         effective_to_ms: null, detected_at_ms: Date.now(), timing_source: "operator_confirmed", created_at: createdAt, updated_at: createdAt,
       });
       this.#refreshSegmentKeys(tx, id);
-      if (guard) guard(null, [], isScopedBillingPolicy(input.billingPolicy) ? applyScopePolicy(null, requested) : input);
-    });
-    return this.getRule(id);
+      if (guard) guard(null, [], isScopedBillingPolicy(input.billingPolicy) ? applyScopePolicy(null, requested, now) : input);
+      return id;
+    }
   }
 
   async updateRule(id, input, { append = false, guard = null } = {}) {
@@ -601,6 +607,51 @@ export class MemoryReconciliationRepository {
       this.#delete(tx, "optouts", entries);
       return entries.length;
     });
+  }
+
+  // 对应 MySQL 版 regroupRules
+  async regroupRules({ at, closes, creates }, { detectedAt = Date.now() } = {}) {
+    let createdIds = [];
+    try {
+      await this.#transaction("regroupRules", async (tx) => {
+        const states = [];
+        for (const close of closes) {
+          await this.#lock(tx, `rule:${close.ruleId}`);
+          const entry = this.#ruleEntry(tx, close.ruleId);
+          const open = this.#segmentsOf(tx, close.ruleId).map(({ row }) => row).find((row) => row.effective_to_ms == null);
+          const channelRows = this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, close.ruleId)).map(({ row }) => row);
+          if (!entry || !entry.row.enabled || !open || regroupIsStale(close, at, entry.row, channelRows, open)) throw Object.assign(new Error("stale regroup"), { staleRegroup: true });
+          states.push({ close, entry, open });
+        }
+        const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
+        for (const { close, entry, open } of states) {
+          if (close.window) {
+            for (const segment of this.#segmentsOf(tx, close.ruleId).map(({ row }) => row)) {
+              if (this.#rows("segmentKeys", tx).some(({ row }) => row.segment_id === segment.id)) continue;
+              this.#insert(tx, "segmentKeys", { segment_id: segment.id, upstream_station_id: entry.row.upstream_station_id, token_id: bigint(entry.row.token_id),
+                token_name: entry.row.token_name ?? null, key_mask: null, match_source: "initial", active_token_key: null });
+            }
+            this.#update(tx, "segments", this.#rows("segments", tx).filter(({ row }) => sameText(row.id, open.id)), { effective_to_ms: bigint(close.window.from) });
+            const id = uid("rs"), createdAt = this.#timestamp();
+            this.#insert(tx, "segments", { id, rule_id: close.ruleId, group_name: open.group_name, group_ratio: open.group_ratio, ratio_observed_at_ms: open.ratio_observed_at_ms,
+              ratio_source: open.ratio_source, effective_from_ms: bigint(close.window.from), effective_to_ms: bigint(at), detected_at_ms: bigint(detectedAt),
+              timing_source: "key_change_window", created_at: createdAt, updated_at: createdAt });
+            for (const key of close.window.keys) this.#insert(tx, "segmentKeys", { segment_id: id, upstream_station_id: key.upstreamStationId, token_id: bigint(key.tokenId),
+              token_name: key.tokenName ?? null, key_mask: null, match_source: "agent", active_token_key: null });
+          }
+          this.#update(tx, "rules", [entry], { enabled: 0, active_token_key: null, archived_at: this.#timestamp(), archived_at_ms: bigint(at) });
+          this.#update(tx, "channels", this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, close.ruleId)), { active_channel_key: null });
+          this.#refreshSegmentKeys(tx, close.ruleId);
+          tx.record.archivedRuleIds.push(close.ruleId);
+        }
+        createdIds = creates.map((input) => this.#insertRule(tx, input, { now: at, floorOverride: at }));
+      });
+    } catch (err) {
+      if (err?.staleRegroup) return { conflict: false, stale: true };
+      if (err?.code === "ER_DUP_ENTRY") return { conflict: true, stale: false };
+      throw err;
+    }
+    return { conflict: false, stale: false, ruleIds: createdIds };
   }
 
   async archiveRule(id, { now = this.now(), optout = false } = {}) {
