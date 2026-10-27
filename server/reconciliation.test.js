@@ -10777,12 +10777,12 @@ test("K2b：没锚定过的绑定（还没开始算）识别到不一样的 Key 
 // K2c-3b 换到另一个上游的 Key：渠道 1 原来用旧上游的 K9，在 t 换成新上游的 Key（a < t < b）。旧绑定的 [a,b) 过渡段放旧 Key + 新上游的新 Key（跨上游读），
 // b 归档；新上游答了「只给我的渠道用」，重新分组里直接在新上游下建的那条从 b 起算，不和过渡段重叠。每天所有行（含已归档的）的上游成本之和 = 各 Key 当天用量之和。
 // 旧上游是 Sub2API（只能整天读，归档那天整天不算）：新绑定从 b 那天 0 点整天算，第一段带着旧 Key（整天读）
-async function crossUpstreamScenario(t, { from = "newapi", to, rates = null, targetAccountUse = "only_mine" }) {
+async function crossUpstreamScenario(t, { from = "newapi", to, rates = null, targetAccountUse = "only_mine", changeAt = REGROUP_T }) {
   let now = REGROUP_A;
   t.mock.method(Date, "now", () => now);
   const oldSub2 = from === "sub2api", sub2 = to === "sub2api", injectIdentity = oldSub2 || sub2;
   const keys = { 9: "sk-09" + "Kx9z".repeat(9), 30: "sk-30" + "Kx9z".repeat(9) };
-  const windows = { stable: [0, REGROUP_T], newkey: [REGROUP_T, null] }; // 每秒 1 美元
+  const windows = { stable: [0, changeAt], newkey: [changeAt, null] }; // 每秒 1 美元
   const secs = (name, startSec, endSec) => { const [from, to] = [windows[name][0] / 1000, (windows[name][1] ?? Infinity) / 1000]; return Math.max(0, Math.min(endSec + 1, to) - Math.max(startSec, from)); };
   const newName = "newkey", newId = sub2 ? 40 : 30;
   const second = sub2
@@ -10827,10 +10827,11 @@ async function crossUpstreamScenario(t, { from = "newapi", to, rates = null, tar
 
 for (const [from, to] of [["newapi", "newapi"], ["newapi", "sub2api"], ["sub2api", "newapi"], ["sub2api", "sub2api"]]) {
   const label = (type) => (type === "newapi" ? "New API" : "Sub2API");
-  test(`K2c 换到另一个上游（${label(from)} → ${label(to)}）：旧绑定在 b 归档，新上游下的新绑定接着算；每天所有行的上游成本之和 = 各 Key 当天用量之和`, async (t) => {
+  test(`K2c 换到另一个上游（${label(from)} → ${label(to)}）：旧绑定在 b 归档（New API → Sub2API 在 b 那天 0 点归档），新上游下的新绑定接着算；每天所有行的上游成本之和 = 各 Key 当天用量之和`, async (t) => {
     const s = await crossUpstreamScenario(t, { from, to });
     const old = await s.f.repository.getRule("rr_live", { includeArchived: true });
-    assert.deepEqual([old.enabled, old.archivedAtMs], [false, REGROUP_B], "旧绑定在 b 归档");
+    const newApiToSub2 = from === "newapi" && to === "sub2api";
+    assert.deepEqual([old.enabled, old.archivedAtMs], [false, newApiToSub2 ? Date.parse("2026-10-11T16:00:00Z") : REGROUP_B], newApiToSub2 ? "New API → Sub2API：b 那天整天交给新绑定，旧绑定在 b 那天 0 点归档（那天没有「有收入没成本」的尾巴）" : "旧绑定在 b 归档");
     assert.equal(s.created.length, 1, "新上游下建了一条");
     const started = await s.f.repository.getRule(s.created[0]);
     assert.deepEqual([started.upstreamStationId, started.channels.map((channel) => channel.channelId)], ["upstream2", [1]]);
@@ -10845,8 +10846,8 @@ for (const [from, to] of [["newapi", "newapi"], ["newapi", "sub2api"], ["sub2api
       assert.equal(windowSegment.effectiveTo, REGROUP_B);
     }
     const newSegments = await s.f.repository.listSegments(started.id);
-    if (from === "sub2api") {
-      assert.equal(started.accountingFloorMs, null, "旧绑定是 Sub2API：归档那天整天不算，新绑定从 b 那天 0 点整天算，不设下限");
+    if (from === "sub2api" || newApiToSub2) {
+      assert.equal(started.accountingFloorMs, null, from === "sub2api" ? "旧绑定是 Sub2API：归档那天整天不算，新绑定从 b 那天 0 点整天算，不设下限" : "New API → Sub2API：新绑定从 b 那天 0 点整天算（收入和成本），不设下限");
       assert.deepEqual([newSegments[0].effectiveTo, newSegments[0].keys.map((key) => `${key.upstreamStationId}:${key.tokenId}`).sort()], [REGROUP_B, ["upstream:9", `upstream2:${to === "sub2api" ? 40 : 30}`].sort()], "第一段关在 b（同一天再换 Key、再重新分组都接得上），带着旧 Key（整天读）");
     } else {
       assert.equal(started.accountingFloorMs, REGROUP_B, "旧绑定是 New API：算到 b 为止，新绑定从 b 起算");
@@ -10879,6 +10880,38 @@ test("K2c 换到另一个上游：旧上游是 Sub2API、新上游没答「只�
   const rule = await s.f.repository.getRule("rr_live");
   assert.deepEqual([rule.enabled, rule.keyIssue?.code], [true, "KEY_GROUP_CHANGED"]);
   assert.deepEqual(s.created, []);
+});
+
+// 审核 #146 第 1 轮 M1：New API 换到 Sub2API，换 Key 发生在 b 那天 0 点以前（23:50）、b 在那天 9 点才读到——旧绑定在 b 那天 0 点归档，
+// 那天整天（收入和成本）由新绑定取，不留「有收入没成本」的 [0 点, b) 尾巴，那天固定得了
+test("K2c 换到另一个上游（New API → Sub2API）：换 Key 在 b 那天 0 点以前——旧绑定在 b 那天 0 点归档、没有尾巴；b 那天由新绑定整天算（收入和成本），每天对得上、b 那天固定得了", async (t) => {
+  const bDayStart = Date.parse("2026-10-11T16:00:00Z");
+  const s = await crossUpstreamScenario(t, { from: "newapi", to: "sub2api", changeAt: Date.parse("2026-10-11T15:50:00Z") });
+  const old = await s.f.repository.getRule("rr_live", { includeArchived: true });
+  assert.deepEqual([old.enabled, old.archivedAtMs], [false, bDayStart], "旧绑定在 b 那天 0 点归档");
+  const oldSegments = await s.f.repository.listSegments("rr_live");
+  assert.equal(oldSegments.some((segment) => segment.effectiveTo > bDayStart), false, "没有 [0 点, b) 只放旧 Key 的尾巴");
+  const started = await s.f.repository.getRule(s.created[0]);
+  assert.equal(started.accountingFloorMs, null, "新绑定从 b 那天 0 点整天算");
+  const newSegments = await s.f.repository.listSegments(started.id);
+  assert.deepEqual([newSegments[0].effectiveTo, newSegments[0].keys.map((key) => `${key.upstreamStationId}:${key.tokenId}`)], [REGROUP_B, ["upstream:9", "upstream2:40"]], "第一段带着旧 Key（和新绑定自己的 Key，整天读），到 b");
+  for (const day of ["2026-10-11", "2026-10-12", "2026-10-13"]) assert.equal(s.costOn(day), s.truthOn(day), day);
+  const rowsOn12 = s.f.state.ledger.filter((row) => row.bill_date === "2026-10-12");
+  assert.deepEqual([...new Set(rowsOn12.map((row) => row.rule_id))], [started.id], "b 那天只有新绑定一行，旧绑定那天没有行");
+  assert.equal(rowsOn12.some((row) => row.rule_id === "rr_live"), false);
+});
+
+// 审核 #146 第 1 轮 M2、L4：新上游还没回答「只给我的渠道用」（New API 旧绑定，交给自动开始，渠道先停着等回答）——回答以前新 Key 的用量谁都不算，
+// 旧绑定的过渡段不放它；过渡段里没放的那一段旧绑定写冲突期，那几天固定成「—」加原因
+test("K2c 换到另一个上游（New API → New API）：新上游没答「只给我的渠道用」——旧绑定在 b 归档、不建新绑定，过渡段不放新 Key，[a, b) 写成冲突期（那几天不固定）", async (t) => {
+  const s = await crossUpstreamScenario(t, { from: "newapi", to: "newapi", targetAccountUse: "unknown" });
+  const old = await s.f.repository.getRule("rr_live", { includeArchived: true });
+  assert.deepEqual([old.enabled, old.archivedAtMs], [false, REGROUP_B], "旧绑定在 b 归档");
+  assert.deepEqual(s.created, [], "没有新绑定：渠道先停着等回答");
+  const oldSegments = await s.f.repository.listSegments("rr_live");
+  assert.equal(oldSegments.flatMap((segment) => segment.keys).some((key) => key.upstreamStationId === "upstream2"), false, "过渡段里没有新上游的 Key（回答以前它的用量谁都不算）");
+  assert.deepEqual(old.keyBlocks?.map((block) => [block.code, block.untilMs]), [["KEY_CONFLICT_GAP", REGROUP_B]], "[a, b) 写成冲突期");
+  assert.equal(s.f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date >= "2026-10-11").length, 0, "冲突期碰到的日子不固定，不写少了新 Key 的数");
 });
 
 // 审核 2 第二轮 F1：事项解开（渠道回到原来的 Key）转成一段冲突期，解开以后又出新事项、又解开，旧的冲突期不会被覆盖——两段的日子都永远不固定

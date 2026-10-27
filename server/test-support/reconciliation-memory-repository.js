@@ -16,7 +16,7 @@ import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
-  uid, addKeyBlock, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale, regroupIsStale,
+  uid, addKeyBlock, keyBlocksOf, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale, regroupIsStale,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
   SETTLEMENT_STATE_WRITE_COLUMNS, settlementStateFromRow, settlementStateValues,
 } from "../reconciliation-repository.js";
@@ -677,6 +677,8 @@ export class MemoryReconciliationRepository {
         }
         const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
         for (const { close, entry, open } of states) {
+          const end = close.archiveAt != null ? Number(close.archiveAt) : at; // 对应 MySQL 版：换到 Sub2API 上游的 New API 旧绑定在 b 那天 0 点归档，不能早于开着那段的起点
+          if (end < Number(open.effective_from_ms)) throw Object.assign(new Error("stale regroup"), { staleRegroup: true });
           if (close.window) {
             for (const segment of this.#segmentsOf(tx, close.ruleId).map(({ row }) => row)) {
               if (this.#rows("segmentKeys", tx).some(({ row }) => row.segment_id === segment.id)) continue;
@@ -685,21 +687,22 @@ export class MemoryReconciliationRepository {
             }
             this.#update(tx, "segments", this.#rows("segments", tx).filter(({ row }) => sameText(row.id, open.id)), { effective_to_ms: bigint(close.window.from) });
             const id = uid("rs"), createdAt = this.#timestamp();
-            const windowTo = close.window.to != null && close.window.to < at ? close.window.to : at; // 对应 MySQL 版：过渡段可以只到 to，to 到 b 之间一小段只放自己原来的 Key
+            const windowTo = close.window.to != null && close.window.to < end ? close.window.to : end; // 对应 MySQL 版：过渡段可以只到 to，to 到 b 之间一小段只放自己原来的 Key
             this.#insert(tx, "segments", { id, rule_id: close.ruleId, group_name: open.group_name, group_ratio: open.group_ratio, ratio_observed_at_ms: open.ratio_observed_at_ms,
               ratio_source: open.ratio_source, effective_from_ms: bigint(close.window.from), effective_to_ms: bigint(windowTo), detected_at_ms: bigint(detectedAt),
               timing_source: "key_change_window", created_at: createdAt, updated_at: createdAt });
             for (const key of close.window.keys) this.#insert(tx, "segmentKeys", { segment_id: id, upstream_station_id: key.upstreamStationId, token_id: bigint(key.tokenId),
               token_name: key.tokenName ?? null, key_mask: null, match_source: "agent", active_token_key: null });
-            if (windowTo < at) {
+            if (windowTo < end) {
               const tailId = uid("rs");
               this.#insert(tx, "segments", { id: tailId, rule_id: close.ruleId, group_name: open.group_name, group_ratio: open.group_ratio, ratio_observed_at_ms: open.ratio_observed_at_ms,
-                ratio_source: open.ratio_source, effective_from_ms: bigint(windowTo), effective_to_ms: bigint(at), detected_at_ms: bigint(detectedAt), timing_source: "key_change", created_at: createdAt, updated_at: createdAt });
+                ratio_source: open.ratio_source, effective_from_ms: bigint(windowTo), effective_to_ms: bigint(end), detected_at_ms: bigint(detectedAt), timing_source: "key_change", created_at: createdAt, updated_at: createdAt });
               this.#insert(tx, "segmentKeys", { segment_id: tailId, upstream_station_id: entry.row.upstream_station_id, token_id: bigint(entry.row.token_id),
                 token_name: entry.row.token_name ?? null, key_mask: null, match_source: "agent", active_token_key: null });
             }
           }
-          this.#update(tx, "rules", [entry], { enabled: 0, active_token_key: null, archived_at: this.#timestamp(), archived_at_ms: bigint(at) });
+          this.#update(tx, "rules", [entry], { enabled: 0, active_token_key: null, archived_at: this.#timestamp(), archived_at_ms: bigint(end),
+            ...(close.keyBlocks?.length ? { key_blocks: JSON.stringify(close.keyBlocks.reduce((blocks, block) => addKeyBlock(blocks, block), keyBlocksOf(entry.row.key_blocks))) } : {}) }); // 同 MySQL 版：冲突期和归档同一个事务
           this.#update(tx, "channels", this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, close.ruleId)), { active_channel_key: null });
           this.#refreshSegmentKeys(tx, close.ruleId);
           tx.record.archivedRuleIds.push(close.ruleId);
