@@ -45,7 +45,7 @@ import { buildProfitDetail, buildProfitPage, dayLabelsOf } from "../lib/profit-p
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
-  isScopedBillingPolicy, nextBillingEffectiveFrom, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
+  isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlement } from "../lib/reconciliation-ledger.js";
 import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
 import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
@@ -58,6 +58,7 @@ import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnap
 import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
+import { retryBlocked, recordRetryFailure } from "../lib/retry-backoff.js";
 import { keyAgentConfigOf } from "./key-agent.js";
 import { createChannelProfitModule } from "./channel-profit.js";
 import { identifyChannelsCached, keyAgentReachability } from "./key-agent-identify.js";
@@ -473,6 +474,8 @@ function upstreamErrorHealth(err, resource) {
 }
 
 // 事项解开以后要转成一段「冲突期」（KEY_CONFLICT_GAP）的码：渠道在这段时间里用的另一把 Key，用量没有进过任何一条绑定的段
+// 重新分组：同一个渠道一天最多重新分组几次（来回翻 Key 的渠道不能每轮都新建绑定）
+const REGROUP_MAX_PER_CHANNEL_PER_DAY = 3;
 const KEY_CONFLICT_CODES = new Set(["KEY_GROUP_CHANGED", "CHANNEL_KEY_UNMATCHED", "KEY_REVEAL_DENIED", "PENDING"]);
 
 const CALCULATION_BLOCKERS = new Set([
@@ -942,18 +945,43 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         keyIssues.set(bindingId, issueFor(rule, "KEY_GROUP_CHANGED"));
         pendingRules.add(bindingId);
       }
+      // 重新分组可能推迟几轮（别处也在用的上游新组的 Key 没人答过……）：推迟期间事项的码变过（比如先认不出、后来才是分组）、
+      // 渠道用的 Key 又变过，都记在进程内的 regroupWatch 里（只记这一轮看到的样子，重启清零）；regroupFor 要靠它判断 [第一次认出, 这一轮) 里有没有没人算的 Key
+      const regroupWatch = (rt._regroupWatch ||= new Map());
+      for (const rule of enabled.filter((item) => item.ownStationId === ownStationId)) {
+        const issue = keyIssues.get(rule.id);
+        if (!issue) { regroupWatch.delete(rule.id); continue; }
+        const shape = JSON.stringify(rule.channels.map((channel) => { const ref = refByChannelId.get(Number(channel.channelId)); return [Number(channel.channelId), ref ? `${ref.upstreamStationId}:${ref.tokenId}` : null]; }).sort((x, y) => x[0] - y[0]));
+        const entry = regroupWatch.get(rule.id);
+        if (!entry || entry.sinceMs !== issue.sinceMs) regroupWatch.set(rule.id, { sinceMs: issue.sinceMs, shape, dirty: openIssue(rule) != null || issue.code !== "KEY_GROUP_CHANGED" }); // 以前就有事项而这里没记过：不知道中间发生过什么，按有过变化算
+        else { if (entry.shape !== shape || issue.code !== "KEY_GROUP_CHANGED") entry.dirty = true; entry.shape = shape; }
+      }
       // K2c：分组、合组认出来了，能重新分就直接分（一个事务：旧绑定在 b 归档、新绑定从 b 起算），分不了才留着 KEY_GROUP_CHANGED
       const flaggedIds = [...keyIssues].filter(([, issue]) => issue.code === "KEY_GROUP_CHANGED").map(([ruleId]) => ruleId)
         .filter((ruleId) => enabled.some((rule) => rule.id === ruleId && rule.ownStationId === ownStationId));
       let regrouped = new Set();
-      if (flaggedIds.length) {
-        const outcome = await regroupFor({ ownStationId, flaggedIds, refByChannelId, observedAt: identified.readAtMs ?? identified.fetchedAtMs ?? now, stationLastSuccessAtMs, resources, keyIssues, issueFor,
-          stationRules: enabled.filter((rule) => rule.ownStationId === ownStationId) });
+      // 节流：写库失败 / 落库时对不上的，按自动开始同一套退避（lib/retry-backoff.js，10 分钟起、最多 1 小时）再试，不能每轮都开一个带锁的事务；
+      // 同一个渠道一天最多重新分组 3 次，来回翻的渠道超过就留着 KEY_GROUP_CHANGED，第二天再分。都是进程内记着的（重启清零）
+      const observedAt = identified.readAtMs ?? identified.fetchedAtMs ?? now;
+      const stationRules = enabled.filter((rule) => rule.ownStationId === ownStationId);
+      const flaggedChannelIds = stationRules.filter((rule) => flaggedIds.includes(rule.id)).flatMap((rule) => rule.channels.map((channel) => Number(channel.channelId)));
+      const regroupDay = dayKeyInTz(observedAt, stationRules[0]?.timezone || businessTimeZone());
+      const regroupCounts = (rt._regroupCounts ||= new Map()), regroupBackoff = (rt._regroupBackoff ||= new Map());
+      for (const key of regroupCounts.keys()) if (!key.endsWith(`@${regroupDay}`)) regroupCounts.delete(key);
+      const backoffKey = `${ownStationId}:${[...flaggedIds].sort().join(",")}`;
+      const countOf = (channelId) => regroupCounts.get(`${ownStationId}:${channelId}@${regroupDay}`) ?? 0;
+      if (flaggedIds.length && !retryBlocked(regroupBackoff, backoffKey, now) && !flaggedChannelIds.some((channelId) => countOf(channelId) >= REGROUP_MAX_PER_CHANNEL_PER_DAY)) {
+        const outcome = await regroupFor({ ownStationId, flaggedIds, refByChannelId, observedAt, stationLastSuccessAtMs, resources, keyIssues, issueFor, stationRules });
         if (outcome.done) {
+          regroupBackoff.delete(backoffKey);
+          for (const channelId of flaggedChannelIds) regroupCounts.set(`${ownStationId}:${channelId}@${regroupDay}`, countOf(channelId) + 1);
           regrouped = outcome.ruleIds;
           for (const ruleId of regrouped) regroupedAll.add(ruleId);
           applied = true;
           for (const ruleId of regrouped) { keyIssues.delete(ruleId); pendingRules.delete(ruleId); }
+        } else if (outcome.failed) {
+          const waitMs = recordRetryFailure(regroupBackoff, backoffKey, now);
+          console.warn(`[regroup] 站点 ${ownStationId} 重新分组没落库（${outcome.failed}），${Math.round(waitMs / 60000)} 分钟后再试`);
         }
       }
       const toApply = changeCandidates.filter((item) => !keyIssues.has(item.rule.id) && !regrouped.has(item.rule.id));
@@ -1064,11 +1092,26 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 之前几轮没分成（比如新组的 Key 还没人答过），从 b 起这几条绑定一直不结账，分的时候旧绑定要在那个 b 归档、新绑定从 b 起算。
     // 牵连的绑定在 b 以后已经有固定过的日子（比如后来才牵连进来的绑定）：旧、新两边都会算那几天，不分，原样留着
     const at = Math.min(observedAt, ...plan.closes.map((close) => keyIssues.get(close.ruleId)?.sinceMs ?? byId.get(close.ruleId).keyIssue?.sinceMs ?? observedAt));
-    const settled = await repository.listLedgerDays(plan.closes.map((close) => close.ruleId), dayKeyInTz(at, members[0].timezone)).catch(() => null);
-    if (!settled || settled.length) return notDone;
-    // Sub2API 只能按整天读，旧绑定归档那天整天不算：旧绑定原来的 Key 要是没有被任何新组接着用（合组里被合掉的那条的 Key、
-    // 分组到全新 Key 时原组不再用的……），b 当天 b 以前的用量就没人算了。把这些 Key 放进新绑定第一段（只到下一个业务日 0 点），
-    // 那天整天读时多取这几把；挂在 fromRuleIds 里有这条旧绑定的第一个新组上。New API 旧绑定算到 b 为止，不需要
+    const timezone = members[0].timezone, dayStart = dayBoundsInTz(at, timezone).startMs;
+    const failedWith = (reason, error = null) => {
+      if (error) console.error(`[regroup] ${reason}:`, error?.message || String(error));
+      return { ...notDone, failed: reason };
+    };
+    let settled;
+    try { settled = await repository.listLedgerDays(plan.closes.map((close) => close.ruleId), dayKeyInTz(at, timezone)); } catch (error) { return failedWith("读已固定的日子失败", error); }
+    if (settled.length) return notDone;
+    let segmentsByRule;
+    try { segmentsByRule = await repository.listSegmentsForRules(plan.closes.map((close) => close.ruleId)); } catch (error) { return failedWith("读分段失败", error); }
+    // 用户停了渠道：停止和重新分组撞上时，停止会跟着渠道找到它现在的绑定（channel-profit.js 的 stopNow）；这里再挡一层，落了「用户停的」记号的渠道不带进新绑定
+    let optedOut;
+    try { optedOut = new Set((await repository.listChannelOptouts(ownStationId)).map((item) => Number(item.channelId))); } catch (error) { return failedWith("读「用户停的」记号失败", error); }
+    if (plan.groups.some((group) => group.channelIds.some((channelId) => optedOut.has(Number(channelId))))) return notDone;
+    // Sub2API 只能按整天读，旧绑定归档那天整天不算：旧绑定那天用过的 Key（现在这把，也包括当天更早换下来的、过渡段里的、上一次重新分组带来的），
+    // 没有被新组接着用的，b 当天 b 以前的用量就没人算了。把这些 Key 放进新绑定第一段（关在 b，不是下一天 0 点：开着那段从 b 起，
+    // 当天再换 Key、再重新分组都接得上），那天整天读时多取这几把；挂在 fromRuleIds 里有这条旧绑定的第一个新组上。New API 旧绑定算到 b 为止，不需要
+    const groupHolds = (key) => plan.groups.some((group) => group.ref.upstreamStationId === key.upstreamStationId && Number(group.ref.tokenId) === Number(key.tokenId));
+    // 冲突期：认出这件事到这一轮之间有隔轮（推迟过），那段时间渠道用过什么 Key 这一轮的计划不知道——[b, 这一轮) 写成 KEY_CONFLICT_GAP（和 K2b 事项解开同一个机制，
+    // 这几天固定成「—」加原因）；旧绑定自己带着的冲突期（Sub2API 从 b 当天 0 点起、New API 从 b 起还没过去的）也带到新绑定上，不然旧绑定归档以后挡不住这几天
     for (const close of plan.closes) {
       const rule = byId.get(close.ruleId), upstream = upstreamStation(rule.upstreamStationId);
       if (!/^sub2api/.test(upstream?.type || "")) continue;
@@ -1083,7 +1126,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const closes = [], aOf = new Map(), openFromOf = new Map();
     for (const close of plan.closes) {
       const rule = byId.get(close.ruleId);
-      const open = (await repository.listSegments(rule.id).catch(() => [])).find((segment) => segment.effectiveTo == null);
+      const open = (segmentsByRule[rule.id] || []).find((segment) => segment.effectiveTo == null);
       if (!open) return notDone;
       openFromOf.set(rule.id, open.effectiveFrom);
       aOf.set(rule.id, safeLastSeenAt({ keyAgentLastSuccessAtMs: rule.keyIssue != null ? null : stationLastSuccessAtMs, segmentEffectiveFrom: open.effectiveFrom }));
@@ -1104,7 +1147,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (!result || result.stale) return notDone;
     if (result.conflict) {
       for (const close of plan.closes) keyIssues.set(close.ruleId, issueFor(byId.get(close.ruleId), "KEY_GROUP_CHANGED"));
-      return notDone;
+      return failedWith("撞了唯一约束，整体回滚");
     }
     for (const close of plan.closes) clearBillingResults(close.ruleId);
     for (const ruleId of result.ruleIds || []) clearBillingResults(ruleId);

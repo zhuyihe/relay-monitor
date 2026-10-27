@@ -450,6 +450,8 @@ export class ReconciliationRepository {
           [input.channels.map((channel) => [id, channel.channelId, channel.name, activeChannelKey(input, channel.channelId)])]
         );
       }
+      // K2c 重新分组：新绑定一建出来就带着的冲突期（第一次认出到这一轮之间、旧绑定当天的冲突期），和 addKeyBlock 同一个机制
+      if (input.keyBlocks?.length) await conn.query("UPDATE reconciliation_rules SET key_blocks = ? WHERE id = ?", [JSON.stringify(input.keyBlocks.reduce((blocks, block) => addKeyBlock(blocks, block), [])), id]);
       const firstSegmentId = uid("rs");
       await conn.query(
         `INSERT INTO reconciliation_rule_segments
@@ -458,7 +460,7 @@ export class ReconciliationRepository {
         [firstSegmentId, id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs ?? (isScopedBillingPolicy(input.billingPolicy) ? 0 : Date.now())), Date.now()]
       );
       // Sub2API 重新分组（K2c）：旧绑定归档那天整天不算（只能按整天读），它原来的 Key 要是没有被任何新组接着用，b 当天 b 以前的用量就没人算。
-      // 把这些 Key 放进新绑定第一段（只到下一个业务日 0 点，段是关着的所以不占唯一键）：b 当天整天读时多取这几把，第二天起第一段不再碰到
+      // 把这些 Key 放进新绑定第一段（关在 b：endsAt，段是关着的所以不占唯一键）：b 当天整天读时多取这几把，b 以后第一段不再碰到
       const extra = input.dayExtraKeys;
       if (extra?.keys?.length) {
         await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [extra.endsAt, firstSegmentId]);
