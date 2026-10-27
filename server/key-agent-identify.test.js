@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fingerprintKey, maskKey, deriveAgentKeys } from "../lib/key-fingerprint.js";
-import { identifyChannels, identifyChannelsCached, keyAgentReachability, IDENTIFY_CACHE_MS } from "./key-agent-identify.js";
+import { identifyChannels, identifyChannelsCached, keyAgentReachability, IDENTIFY_CACHE_MS, UNRESOLVED_RECHECK_MS } from "./key-agent-identify.js";
 
 const STRONG_SECRET = "K7m2-xP9q" + "R4t".repeat(10);
 const { fingerprintKey: fpBytes } = deriveAgentKeys(STRONG_SECRET);
@@ -291,6 +291,7 @@ test("identifyChannelsCached：结果带 fetchedAtMs（真的读成功的时刻�
   assert.equal((await identifyChannelsCached({ store }, ownStation)).fetchedAtMs, undefined, "连不上：没有结果，也就没有这个时刻");
 });
 
+const age = (rt, ms) => { rt._keyAgentIdentifyCache.at -= ms; if (rt._keyAgentIdentifyCache.lastGood) rt._keyAgentIdentifyCache.lastGood.comparedAt -= ms; };
 // 审核 2 第 1 轮 高-2：304 只说明读取服务那一份没变，不说明上游目录没变
 test("identifyChannelsCached：认出的结果里有没认定的（渠道 Key 不在已加的上游里），读取服务回 304 也要重新对一遍上游目录——用户把上游加上以后下一轮就认出来了", async (t) => {
   let step = 0;
@@ -304,14 +305,14 @@ test("identifyChannelsCached：认出的结果里有没认定的（渠道 Key �
   const rt = { store: { list: () => [ownStation, upstream] } };
   const first = await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => ({ tokens: [] }) }); // 目录里还没有这把
   assert.equal(first.channels[0].slots[0].state, "not_found");
-  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  age(rt, UNRESOLVED_RECHECK_MS + 1);
   let metadataCalls = 0;
   const second = await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => { metadataCalls++; return { tokens: [{ id: 9, name: "oai", maskedKey: fullKey }] }; } });
   assert.equal(metadataCalls, 1, "没认定的：304 也重新读候选上游的目录");
   assert.equal(second.channels[0].slots[0].state, "identified", "上游加上以后认出来了");
   assert.equal(second.fetchedAtMs != null, true);
   // 认定了的就不再多读（上面「304 沿用」那条）
-  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  age(rt, UNRESOLVED_RECHECK_MS + 1);
   await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => { metadataCalls++; return { tokens: [] }; } });
   assert.equal(metadataCalls, 1, "全部认定以后 304 不再读上游");
 });
@@ -332,7 +333,7 @@ test("identifyChannelsCached：打码撞了又没有 api_key:reveal 权限，读
   const first = await identifyChannelsCached(rt, ownStation, { queryMetadata: maskedQueryMetadata, revealKeys });
   assert.equal(first.revealIssues.length, 1);
   granted = true;
-  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  age(rt, UNRESOLVED_RECHECK_MS + 1);
   const second = await identifyChannelsCached(rt, ownStation, { queryMetadata: maskedQueryMetadata, revealKeys });
   assert.deepEqual(second.revealIssues, [], "补了权限：不再有缺权限的");
   assert.equal(second.channels[0].slots[0].state, "identified");
@@ -352,12 +353,35 @@ test("identifyChannelsCached：一次失败（503）不覆盖上一份认出的�
   const rt = { store: { list: () => [ownStation, upstream] } };
   const options = { queryMetadata: async () => ({ tokens: [{ id: 9, name: "oai", maskedKey: fullKey }] }) };
   const first = await identifyChannelsCached(rt, ownStation, options);
-  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  age(rt, UNRESOLVED_RECHECK_MS + 1);
   const failed = await identifyChannelsCached(rt, ownStation, options);
   assert.equal(failed.ok, false);
-  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  age(rt, UNRESOLVED_RECHECK_MS + 1);
   const recovered = await identifyChannelsCached(rt, ownStation, options);
   assert.equal(recovered.ok, true);
   assert.deepEqual(recovered.channels, first.channels, "失败之后恢复，沿用失败前认出的，不是 null");
   assert.ok(recovered.fetchedAtMs != null);
+});
+
+test("identifyChannelsCached：持续 not_found 的渠道（例外一的真实场景）304 时最多每 15 分钟重读一次候选上游目录——一小时 15 次缓存到期只读 4 次，不是每 4 分钟一次", async (t) => {
+  let step = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    step++;
+    if (step === 1) return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"v1"' : null) },
+      json: async () => ({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "https://up.example.com", keys: [{ i: 0, m: mask, f: fp }] }] }) };
+    return { status: 304, headers: { get: () => null }, json: async () => ({}) };
+  });
+  const upstream = { id: "up1", type: "newapi", baseUrl: "https://up.example.com" };
+  const rt = { store: { list: () => [ownStation, upstream] } };
+  let reads = 0;
+  const options = { queryMetadata: async () => { reads += 1; return { tokens: [] }; } }; // 一直没有这把 Key
+  await identifyChannelsCached(rt, ownStation, options);
+  assert.equal(reads, 1);
+  for (let round = 1; round <= 15; round += 1) { // 每 4 分钟一轮（缓存刚好到期），共 60 分钟
+    rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+    rt._keyAgentIdentifyCache.lastGood.comparedAt -= IDENTIFY_CACHE_MS + 1;
+    await identifyChannelsCached(rt, ownStation, options);
+  }
+  assert.ok(reads <= 5, `一小时读了 ${reads} 次：第一次 + 每 15 分钟一次，最多 5 次`);
+  assert.ok(reads >= 4, "间隔到了还是会重读（上游加上能认出来）");
 });

@@ -154,6 +154,9 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
 export const IDENTIFY_CACHE_MS = 4 * 60 * 1000;
 // 认出的结果里还有没认定的（not_found、ambiguous、unresolved，或者少了 api_key:reveal 权限）：这类状态会随上游目录、权限变化自己好，
 // 读取服务回 304 也要重新对一遍上游目录；全都认定了（identified / keyless）的，304 就沿用，不多读上游（审核 #131「别多读上游」）
+// 没认定的状态（渠道 Key 不在已加的上游里是会持续很久的真实场景）重新对上游目录的间隔：读取服务回 304 时最多每 15 分钟对一次，
+// 不是每次缓存到期（4 分钟）都把候选上游的目录读一遍——持续 not_found 的渠道每个候选上游每小时最多读 4 次（审核 2 第 2 轮提醒）
+export const UNRESOLVED_RECHECK_MS = 15 * 60 * 1000;
 const hasUnresolved = (result) => (result?.revealIssues?.length ?? 0) > 0
   || (result?.channels || []).some((channel) => !channel.keyless && (channel.slots || []).some((slot) => slot.state !== "identified"));
 // 缓存分两份：result 是最近一次问的结果（失败了也记，4 分钟内不重复问）；lastGood 是最近一次读成功的结果、etag、原始渠道列表，
@@ -165,7 +168,7 @@ export async function identifyChannelsCached(rt, ownStation, options = {}) {
   const sameStation = cache?.stationId === ownStation.id;
   const good = sameStation ? cache.lastGood ?? null : null;
   const result = await identifyChannels(rt, ownStation, { ...options, etag: good?.etag ?? null,
-    cachedSnapshot: good && hasUnresolved(good.result) ? { channels: good.snapshotChannels } : null });
+    cachedSnapshot: good && hasUnresolved(good.result) && now - good.comparedAt >= UNRESOLVED_RECHECK_MS ? { channels: good.snapshotChannels } : null });
   trackKeyAgentReachability(rt, ownStation.id, result); // 只在真的问了一次（没命中 4 分钟缓存）才记，不按调用次数记
   if (!result.ok) { rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result, lastGood: good }; return result; }
   // fetchedAtMs：这一份结果是什么时候真的从读取服务拿到的（200 或 304，不带 X-Agent-Stale 才有）。缓存命中返回的还是原来那份，
@@ -176,7 +179,10 @@ export async function identifyChannelsCached(rt, ownStation, options = {}) {
     : result;
   const resolved = { ...resolvedBase, fetchedAtMs: result.stale ? null : now };
   // 带 X-Agent-Stale 的是读取服务给的旧结果，不当「最近一次读成功」留下，也不换 etag
-  const nextGood = result.stale ? good : { etag: result.etag ?? good?.etag ?? null, result: resolved, snapshotChannels: result.snapshotChannels ?? good?.snapshotChannels ?? null };
+  // comparedAt：最近一次真的拿上游目录比对的时刻（200，或者 304 但重新比对了）；纯沿用旧结果的 304 不更新它
+  const compared = result.channels != null;
+  const nextGood = result.stale ? good : { etag: result.etag ?? good?.etag ?? null, result: resolved, snapshotChannels: result.snapshotChannels ?? good?.snapshotChannels ?? null,
+    comparedAt: compared ? now : good?.comparedAt ?? now };
   rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result: resolved, lastGood: nextGood };
   return resolved;
 }
