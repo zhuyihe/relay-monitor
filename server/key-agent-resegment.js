@@ -33,7 +33,8 @@ export function planKeyChangeSegments({ lastSeenAt, observedAt, oldRef, newRef, 
   if (!oldRef) return { kind: "precise", cutoverAt: observedAt, before: [], after: [newRef] }; // 原来没有 Key（新渠道、没有用量），没有旧 Key 可以一起算
   const windowStart = Math.max(lastSeenAt, newKeyFloor ?? -Infinity);
   // 起点已经不早于 b：新 Key 从 b 起算，没有过渡窗口可开，干净切一刀
-  if (windowStart >= observedAt) return { kind: "precise", cutoverAt: observedAt, before: [oldRef], after: [newRef] };
+  // b 不早于 a、不早于上一个持有者段的结尾（两台机器的钟差 ≥ 几分钟时 b 可能比它们还早：干净切会少算或多算，审核 #133 第 2 轮 F4）
+  if (windowStart >= observedAt) return { kind: "precise", cutoverAt: windowStart, before: [oldRef], after: [newRef] };
   return { kind: "windowed", windowStart, windowEnd: observedAt, windowKeys: [oldRef, newRef], before: [oldRef], after: [newRef] };
 }
 
@@ -41,8 +42,8 @@ export function planKeyChangeSegments({ lastSeenAt, observedAt, oldRef, newRef, 
 // 这段钱只能算给其中一条绑定，两条绑定各开一段都把这段算进去，就是把同一笔钱算了两次（design/ux/binding-flow.md
 // §3：「按读到变化的那一刻 b 切开：到 b 为止算给原来的渠道，b 起算给后来的渠道，不问你」）。
 // after 带着挪过来的这把 Key（调用方开段要用，参见 server/reconciliation-repository.js 的 applyKeyChangePlans）
-export function planMovedKeySegments({ observedAt, newRef }) {
-  return { kind: "moved", cutoverAt: observedAt, after: [newRef] };
+export function planMovedKeySegments({ observedAt, newRef, newKeyFloor = null }) {
+  return { kind: "moved", cutoverAt: Math.max(observedAt, newKeyFloor ?? -Infinity), after: [newRef] };
 }
 
 // 批量：这一轮识别，每条绑定从 before（上一次确认时握着的 Key，没有就是 null）变成 after（这一次识别到的 Key）。
@@ -59,7 +60,7 @@ export function planSegmentChanges({ bindings, lastSeenAt, observedAt, preciseAt
     if (!binding.after || sameKeyRef(binding.before, binding.after)) continue;
     const movedFromBindingId = ownerBefore.get(keyRefId(binding.after));
     if (movedFromBindingId != null && movedFromBindingId !== binding.id) {
-      plans.push({ bindingId: binding.id, movedFromBindingId, ...planMovedKeySegments({ observedAt, newRef: binding.after }), before: binding.before ? [binding.before] : [] });
+      plans.push({ bindingId: binding.id, movedFromBindingId, ...planMovedKeySegments({ observedAt, newRef: binding.after, newKeyFloor: newKeyFloorByBinding[binding.id] ?? null }), before: binding.before ? [binding.before] : [] });
     } else {
       plans.push({ bindingId: binding.id, ...planKeyChangeSegments({
         lastSeenAt: lastSeenAtByBinding[binding.id] ?? lastSeenAt, observedAt, oldRef: binding.before, newRef: binding.after,

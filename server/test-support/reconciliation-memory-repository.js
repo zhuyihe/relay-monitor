@@ -16,7 +16,7 @@ import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
-  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale, regroupIsStale,
+  uid, addKeyBlock, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale, regroupIsStale,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
   SETTLEMENT_STATE_WRITE_COLUMNS, settlementStateFromRow, settlementStateValues,
 } from "../reconciliation-repository.js";
@@ -535,7 +535,26 @@ export class MemoryReconciliationRepository {
     await this.#transaction("markKeyIssue", async (tx) => {
       const entry = this.#ruleEntry(tx, ruleId);
       if (!entry) return;
-      this.#update(tx, "rules", [entry], { key_issue_code: issue?.code ?? null, key_issue_since_ms: issue ? bigint(issue.sinceMs) : null, key_issue_until_ms: issue?.untilMs != null ? bigint(issue.untilMs) : null });
+      this.#update(tx, "rules", [entry], { key_issue_code: issue?.code ?? null, key_issue_since_ms: issue ? bigint(issue.sinceMs) : null });
+    });
+  }
+
+  // 对应 MySQL 版 keyHeldUntil
+  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null } = {}) {
+    const rules = new Map(this.#plain("rules").map((row) => [row.id, row]));
+    const ends = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && Number(segment.effective_to_ms) >= (sinceMs ?? 0)
+      && rules.get(segment.rule_id)?.own_station_id === ownStationId
+      && this.#plain("segmentKeys").some((key) => key.segment_id === segment.id && key.upstream_station_id === upstreamStationId && Number(key.token_id) === Number(tokenId)))
+      .map((segment) => Number(segment.effective_to_ms));
+    return ends.length ? Math.max(...ends) : null;
+  }
+
+  // 对应 MySQL 版 addKeyBlock
+  async addKeyBlock(ruleId, block, { clearIssue = false } = {}) {
+    await this.#transaction("addKeyBlock", async (tx) => {
+      const entry = this.#ruleEntry(tx, ruleId);
+      if (!entry) return;
+      this.#update(tx, "rules", [entry], { key_blocks: JSON.stringify(addKeyBlock(entry.row.key_blocks, block)), ...(clearIssue ? { key_issue_code: null, key_issue_since_ms: null } : {}) });
     });
   }
 
