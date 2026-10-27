@@ -13,6 +13,7 @@ import { identifyChannelsCached } from "./key-agent-identify.js";
 import { normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
 import { coverageNeedsAnswer } from "../lib/reconciliation-contract.js";
 import { channelKeyLines } from "../lib/channel-key-lines.js";
+import { ACCOUNT_USE_VALUES } from "../db/store.js";
 
 const BILLING_TYPES = new Set(["newapi", "sub2api", "sub2api-password"]);
 
@@ -226,12 +227,49 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     if (!rule) throw codedError("RULE_NOT_FOUND", "这个渠道已经停止算利润了，请刷新");
     let declaration;
     try { declaration = normalizeCoverageDeclaration(coverage); } catch { throw codedError("INVALID_REQUEST", "请回答「这把 Key 还给别处用吗？」"); }
+    await setRuleCoverage(rule, declaration);
+    return { ruleId, answer: declaration.answer };
+  }
+
+  // 一条在算的绑定的「这把 Key 还给别处用吗？」回答改成 declaration（先预览、再保存，和用户自己点「去回答」同一条路）
+  async function setRuleCoverage(rule, declaration) {
     const body = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, salesChannelIds: rule.channels.map((channel) => Number(channel.channelId)),
       timezone: rule.timezone, enabled: true, coverageDeclaration: declaration };
-    const proof = await onboarding().probeRuleEdit(ruleId, body);
+    const proof = await onboarding().probeRuleEdit(rule.id, body);
     const previewGuard = onboarding().getPreviewGuard(proof.previewId, proof.groupId);
-    await reconciliation().updateRule(ruleId, body, { previewGuard });
-    return { ruleId, answer: declaration.answer };
+    await reconciliation().updateRule(rule.id, body, { previewGuard });
+  }
+
+  // 回答（或改回答）「这个上游账号只给你自己的渠道用吗？」（用语规范 §5.2）：写在上游上（accountUse），只对自营站点 ownStationId 下的绑定和渠道起作用。
+  // 钱的影响：
+  //   - 答「只给我的渠道用」：这个上游下还没在算的渠道，下一轮轮询自动开始（autoStart，从今天 0 点起算，用户停过的不开）；
+  //     已经在算、但还没回答「这把 Key 还给别处用吗？」的绑定（别处也在用、不确定时留下的）按「只给这些渠道用」算——账号只给你自己的渠道用，这一问就不用问了；
+  //   - 从「只给我的渠道用」改成别的：这个上游下在算的绑定回到「还没回答」（利润先不算，每把 Key 要回答一次），新渠道不再自动开始；
+  //   - 改成同样的答案：什么也不动。
+  // 和开始、停止排在同一个队里（同一个自营站点一个一个来）。返回 { accountUse, previous, changedRules, failed }
+  function answerAccountUse(input) { return serialized(input?.ownStationId, () => answerAccountUseNow(input)); }
+  async function answerAccountUseNow({ ownStationId, upstreamStationId, accountUse }) {
+    ownStationOf(ownStationId);
+    if (!ACCOUNT_USE_VALUES.includes(accountUse)) throw codedError("INVALID_REQUEST", "请回答「这个上游账号只给你自己的渠道用吗？」");
+    const upstream = rt.store.get(String(upstreamStationId || ""));
+    if (!upstream || upstream.isOwn || upstream.archivedAt || !BILLING_TYPES.has(upstream.type)) throw codedError("UPSTREAM_NOT_FOUND", "找不到这个上游，请刷新");
+    const previous = upstream.accountUse ?? null;
+    if (previous === accountUse) return { accountUse, previous, changedRules: [], failed: [] };
+    // 先改上游的回答、再动绑定：中途失败时回答已经是新的，没改成的绑定留在原来的样子（下一次再答一遍就接着改），不会出现回答没改、绑定先动了
+    await rt.store.update(upstream.id, { accountUse });
+    const changedRules = [], failed = [];
+    const wanted = accountUse === "only_mine" ? { answer: "none" } : previous === "only_mine" ? { answer: "unknown" } : null;
+    if (wanted) {
+      const live = (await reconciliation().listRules()).filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId && rule.upstreamStationId === upstream.id);
+      for (const rule of live) {
+        const declared = rule.coverageDeclaration?.answer ?? (rule.costCoverage === "complete" ? "none" : "unknown");
+        // 改成「只给我的渠道用」：只动还没答成「只给这些渠道用」的；改成别的：只动答成「只给这些渠道用」的（别的回答是用户答过的，留着）
+        if (accountUse === "only_mine" ? declared === "none" : declared !== "none") continue;
+        try { await setRuleCoverage(rule, normalizeCoverageDeclaration(wanted)); changedRules.push(rule.id); }
+        catch (error) { failed.push({ ruleId: rule.id, code: error?.code || "COVERAGE_UPDATE_FAILED" }); }
+      }
+    }
+    return { accountUse, previous, changedRules, failed };
   }
 
   // 停止算利润：这几个渠道所在的绑定整条归档（同一把 Key 的渠道一起停，一个勾），同一个事务把它的渠道记成「用户停的」；
@@ -264,7 +302,7 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
   // 一个渠道只显示一种：需处理 > 在算利润 > 没算利润；同一把 Key 的几个渠道是一张卡片（在算的按绑定、没在算的按 Key 连成组）。
   // 读取服务没装好、读不到时照样列出在算的渠道（从绑定读），不能开始的原因写在 reader 里。
   //   reader  { state: "ok" | "not_configured" | "unavailable", code? }
-  //   upstreams  左边的上游列表，每个 { id, name, type, accountUse, noBills, channelCount, runningCount, attentionCount }
+  //   upstreams  左边的上游列表，每个 { id, name, type, accountUse, noBills, needsAccountUse, channelCount, runningCount, attentionCount }
   //   cards  { id, state: "attention" | "running" | "stopped", upstreamStationId, channelIds, names, ruleId, startedBy, startedAtMs,
   //            issues: [码], keys: 用过的 Key（lib/channel-key-lines.js）, startGroupKey, needsCoverage, optedOut }
   //   unmatched  没对上上游的渠道 { channelId, name, reason }（reason 同 status 的 blocked 原因）
@@ -334,12 +372,15 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     const revealDenied = new Set(unmatched.filter((item) => item.reason === "KEY_REVEAL_DENIED" && item.upstreamStationId).map((item) => item.upstreamStationId));
     const upstreams = rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && station.type !== "fixed" && !station.archivedAt).map((station) => {
       const mine = cards.filter((card) => card.upstreamStationId === station.id);
-      return { id: station.id, name: station.name ?? station.id, type: station.type, accountUse: station.accountUse ?? null, noBills: !BILLING_TYPES.has(station.type),
-        channelCount: mine.reduce((total, card) => total + card.channelIds.length, 0), runningCount: mine.filter((card) => card.state === "running" || card.state === "attention").reduce((total, card) => total + card.channelIds.length, 0),
-        attentionCount: mine.filter((card) => card.state === "attention").length + (revealDenied.has(station.id) ? 1 : 0) };
+      const channelCount = mine.reduce((total, card) => total + card.channelIds.length, 0);
+      // 用到这个上游的 Key 的渠道有了、账号还没回答（或答了「不确定」）：「这个上游账号只给你自己的渠道用吗？」是这个上游的一件事（用语规范 §5.2）
+      const needsAccountUse = BILLING_TYPES.has(station.type) && channelCount > 0 && (station.accountUse == null || station.accountUse === "unsure");
+      return { id: station.id, name: station.name ?? station.id, type: station.type, accountUse: station.accountUse ?? null, noBills: !BILLING_TYPES.has(station.type), needsAccountUse,
+        channelCount, runningCount: mine.filter((card) => card.state === "running" || card.state === "attention").reduce((total, card) => total + card.channelIds.length, 0),
+        attentionCount: mine.filter((card) => card.state === "attention").length + (revealDenied.has(station.id) ? 1 : 0) + (needsAccountUse ? 1 : 0) };
     });
     return { ok: true, reader, upstreams, cards, unmatched };
   }
 
-  return { status, overview, start, stop, answerCoverage, autoStart };
+  return { status, overview, start, stop, answerCoverage, answerAccountUse, autoStart };
 }

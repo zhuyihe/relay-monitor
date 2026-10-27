@@ -2942,3 +2942,33 @@ test("K2c 开始算利润（真接入向导 + 真对账模块）：同一把 Key
   assert.deepEqual(again.alreadyRunning.map((item) => item.channelId), [2], "已经在算的不重复建");
   assert.equal((await f.rt.reconciliation.listRules()).length, 1);
 });
+
+// K2d：上游账号还没回答「只给你自己的渠道用吗？」、别处也在用的上游下新渠道还没算利润——进需处理（accounts 那一路的事项）；原来的「有 N 个渠道还没绑定 [去绑定]」不再出
+test("K2d listAccounts 新事项：用到这个上游的 Key 的渠道有了而账号没回答（去回答）；没回答 / 别处也在用的上游下没在算、没被停过的渠道算新渠道（开始算利润，按渠道数）；只给我的渠道用的上游都不出；渠道还没绑定不再出「去绑定」", async (t) => {
+  const f = await genuineBatchFixture(t);
+  await f.store.update(f.own.id, { keyAgentUrl: "https://own.test/key-agent", keyAgentSecret: "K7m2-xP9q" + "R4t".repeat(10) });
+  const slot = (tokenId) => ({ index: 0, state: "identified", matches: [{ stationId: f.supplier.id, tokenId, tokenName: `Key ${tokenId}`, via: "fingerprint" }] });
+  const now = Date.parse("2026-10-09T07:00:00Z");
+  const inject = (channels) => { f.rt._keyAgentIdentifyCache = { at: Date.now(), stationId: f.own.id, etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: Date.now(), revealIssues: [], channels } }; };
+  inject([1, 2].map((channelId) => ({ channelId, keyless: false, slots: [slot(9)] })).concat([{ channelId: 3, keyless: false, slots: [slot(10)] }, { channelId: 4, keyless: false, slots: [{ index: 0, state: "not_found" }] }]));
+  f.rt.reconciliation.listChannelOptouts = async () => [{ ownStationId: f.own.id, channelId: 3, atMs: now }]; // 渠道 3 是用户停过的：不算新渠道（这里的假数据库没有 optout 表）
+  const actionsOf = async () => (await f.rt.channelOnboarding.listAccounts()).actions.filter((action) => ["answer_account_use", "start_new_channels", "connect_channels"].includes(action.kind));
+  // 没回答：去回答 + 新渠道（渠道 1、2，渠道 3 停过的不算）
+  let actions = await actionsOf();
+  assert.deepEqual(actions.map((action) => [action.kind, action.stationId, action.channelIds]), [["answer_account_use", f.supplier.id, []], ["start_new_channels", f.supplier.id, [1, 2]]]);
+  assert.equal(actions[1].title, `「${f.supplier.name || "未命名上游"}」下有 2 个新渠道还没算利润`);
+  assert.equal(actions.some((action) => action.kind === "connect_channels"), false, "原来的「去绑定」不出了");
+  // 答了「别处也在用」：不用再回答，新渠道还在
+  await f.store.update(f.supplier.id, { accountUse: "elsewhere" });
+  assert.deepEqual((await actionsOf()).map((action) => action.kind), ["start_new_channels"]);
+  // 答了「不确定」：去回答又出来
+  await f.store.update(f.supplier.id, { accountUse: "unsure" });
+  assert.deepEqual((await actionsOf()).map((action) => action.kind), ["answer_account_use", "start_new_channels"]);
+  // 只给我的渠道用：都不出（新渠道系统自己开始算）
+  await f.store.update(f.supplier.id, { accountUse: "only_mine" });
+  assert.deepEqual(await actionsOf(), []);
+  // 没有渠道用这个上游的 Key：不用回答
+  await f.store.update(f.supplier.id, { accountUse: null });
+  inject([{ channelId: 1, keyless: false, slots: [{ index: 0, state: "not_found" }] }]);
+  assert.deepEqual(await actionsOf(), []);
+});

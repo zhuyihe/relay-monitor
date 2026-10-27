@@ -88,6 +88,8 @@ const COPY = Object.freeze({
   deleteConfirmAria: (name: string) => `输入「${name}」确认${DELETE.label}`,
   deleteDone: (name: string) => `${DELETE.done}「${name}」`,
   deleteGone: "这个上游已经删除了",
+  // 归档、删除上游时这个上游下在算的渠道一起停止算利润（用语规范 §5.5 删上游时；个数按渠道数）
+  stopsToo: (n: number) => `这个上游下 ${n} 个渠道也会停止算利润`,
   deleteFailed: "删除失败",
   edit: "编辑",
   editOne: (name: string) => `编辑 ${name}`,
@@ -181,6 +183,18 @@ export default function StationsPage() {
   const [archiveTarget, setArchiveTarget] = useState<any>(null);
   const [purgeTarget, setPurgeTarget] = useState<any>(null);
   const [purgeConfirm, setPurgeConfirm] = useState("");
+  // 归档 / 删除上游的确认框里写「这个上游下 N 个渠道也会停止算利润」：打开确认框时数一次（读不到就不写这一句，渠道照样会停）
+  const [stopCounts, setStopCounts] = useState<Record<string, number>>({});
+  useEffect(() => {
+    const target = archiveTarget || purgeTarget;
+    if (!target || target.isOwn) return;
+    let cancelled = false;
+    api(`/api/reconciliation/channels/upstream-count?upstreamStationId=${encodeURIComponent(target.id)}`)
+      .then((result: any) => { if (!cancelled) setStopCounts((counts) => ({ ...counts, [target.id]: Number(result?.channelCount) || 0 })); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archiveTarget, purgeTarget]);
   const [archiving, setArchiving] = useState(false);
   const [purging, setPurging] = useState(false);
 
@@ -1105,6 +1119,7 @@ export default function StationsPage() {
             <p className="jy-caption">{COPY.archiveWhere}</p>
           </div>
         </div>
+        {archiveTarget && stopCounts[archiveTarget.id] > 0 ? <p data-stops-too>{COPY.stopsToo(stopCounts[archiveTarget.id])}</p> : null}
         <Button
           type="link"
           danger
@@ -1137,6 +1152,7 @@ export default function StationsPage() {
             <p className="jy-caption">{COPY.deleteDesc}</p>
           </div>
         </div>
+        {purgeTarget && stopCounts[purgeTarget.id] > 0 ? <p data-stops-too>{COPY.stopsToo(stopCounts[purgeTarget.id])}</p> : null}
         <div className="jy-stations-confirm">
           <label className="jy-caption" htmlFor="jy-stations-purge-input">{COPY.deleteConfirm}<b>{purgeName}</b></label>
           <Input

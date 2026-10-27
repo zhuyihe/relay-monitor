@@ -4,13 +4,24 @@ import { createChannelProfitModule } from "../../../../server/channel-profit.js"
 import { connectionDiagnostic } from "../../../../lib/connection-test.js";
 
 // 按渠道开始/停止算利润（K2c）。登录由路由那一层包好；这一层只管请求格式、错误码和模块的接线，方便单独测
-// operation：status、overview（GET，?ownStationId=）/ start / stop / answer（POST）。overview 是「渠道」页签要的整份数据（上游 → 渠道 → 用过的 Key）
+// operation：status、overview（GET，?ownStationId=）/ start / stop / answer / account-use（POST；account-use 是回答「这个上游账号只给你自己的渠道用吗？」，改钱：答「只给我的渠道用」以后下一轮自动开始）。overview 是「渠道」页签要的整份数据（上游 → 渠道 → 用过的 Key）
 export async function handleChannelProfitRequest(request, rt, operation) {
   let body = {};
   const search = new URL(request.url).searchParams;
-  if (operation !== "status" && operation !== "overview") {
+  if (operation !== "status" && operation !== "overview" && operation !== "upstream-count") {
     try { body = await request.json(); } catch { return Response.json({ error: "页面已过期，请刷新后重新打开", code: "INVALID_REQUEST" }, { status: 400 }); }
     if (!body || typeof body !== "object" || Array.isArray(body)) return Response.json({ error: "页面已过期，请刷新后重新打开", code: "INVALID_REQUEST" }, { status: 400 });
+  }
+  // 删除（归档）上游的确认框要写「这个上游下 N 个渠道也会停止算利润」：数这个上游下在算的渠道（不分自营站点，删上游是整个上游的事）
+  if (operation === "upstream-count") {
+    const upstreamStationId = String(search.get("upstreamStationId") || "");
+    if (!upstreamStationId) return Response.json({ error: "页面已过期，请刷新后重新打开", code: "INVALID_REQUEST" }, { status: 400 });
+    try {
+      rt.reconciliation ||= createReconciliationModule(rt);
+      return Response.json(await rt.reconciliation.countUpstreamChannels(upstreamStationId));
+    } catch (error) {
+      return Response.json({ error: connectionDiagnostic(error?.message || "操作没完成，请稍后再试", [rt.store?.get?.(upstreamStationId)]), code: error?.code || "CHANNEL_PROFIT_FAILED" }, { status: 400 });
+    }
   }
   const ownStationId = String((operation === "status" || operation === "overview" ? search.get("ownStationId") : body.ownStationId) || "");
   if (!ownStationId) return Response.json({ error: "请先设置自营站点", code: "OWN_STATION_UNSET" }, { status: 400 });
@@ -23,6 +34,7 @@ export async function handleChannelProfitRequest(request, rt, operation) {
       : operation === "overview" ? await module.overview(ownStationId)
       : operation === "start" ? await module.start({ ownStationId, channelIds: body.channelIds, coverage: body.coverage })
         : operation === "answer" ? await module.answerCoverage({ ownStationId, ruleId: body.ruleId, coverage: body.coverage })
+        : operation === "account-use" ? await module.answerAccountUse({ ownStationId, upstreamStationId: body.upstreamStationId, accountUse: body.accountUse })
         : await module.stop({ ownStationId, channelIds: body.channelIds });
     return Response.json(result);
   } catch (error) {

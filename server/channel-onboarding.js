@@ -8,6 +8,7 @@ import { stationBusinessVersion } from "../db/store.js";
 import { completedBillingDayWindow, canonicalBillingKey, applyScopePolicy, normalizeRuleSourceBinding, reconciliationBillingSchedule } from "../lib/reconciliation-scope-policy.js";
 import { ChannelOnboardingRepository } from "./channel-onboarding-repository.js";
 import { workflowAction } from "../lib/workflow-actions.js";
+import { stationDisplayName } from "../lib/overview-actions.js";
 import { coverageNeedsAnswer, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { costBasisOf } from "../lib/profit.js";
 import { OWN_STATION_UNSET } from "../lib/format.js";
@@ -410,8 +411,29 @@ export function createChannelOnboardingModule(rt, dependencies = {}) {
       const reason = !station ? "missing_resource" : !storedIdentity(station) ? "unverified_resource" : rule.canonicalKey ? "key_changed" : "unanchored";
       return { ...associationOf(rule), reason, tokenId: rule.tokenId, tokenName: rule.tokenName || reconciliationKeyName(rule) };
     }).sort((a, b) => a.ruleId.localeCompare(b.ruleId));
-    const unlinked = channels.filter((channel) => !channel.missing && channel.reconciliation.status === "unconfigured").map((channel) => channel.id);
-    if (source.ownSource && unlinked.length) actions.push(workflowAction("connect_channels", { ownStationId: source.ownSource.stationId, channelIds: unlinked }));
+    // K2d：「有 N 个渠道还没绑定 [去绑定]」换成两件新事（用语规范 §5.2）：用到这个上游的 Key 的渠道有了、账号还没回答「只给你自己的渠道用吗？」[去回答]；
+    // 账号别处也在用（或没回答）的上游下新连上来的渠道系统不会自己开始算「「上游名」下有 N 个新渠道还没算利润」[开始算利润]。
+    // 渠道用的是哪个上游，看读取服务认出的 Key（只认只有一把 Key、认出一个上游的渠道）；用户停过的渠道不算新渠道
+    if (source.ownSource && !source.stale) {
+      const optedOut = new Set(((await rt.reconciliation?.listChannelOptouts?.(source.ownSource.stationId).catch(() => null)) || []).map((row) => Number(row.channelId)));
+      const usingByStation = new Map();
+      for (const channel of channels) {
+        const slots = channel.identifiedKey?.slots || [];
+        const matches = slots.length === 1 && slots[0].state === "identified" ? slots[0].matches || [] : [];
+        if (channel.missing || matches.length !== 1) continue;
+        usingByStation.set(matches[0].stationId, [...(usingByStation.get(matches[0].stationId) || []), channel]);
+      }
+      for (const [stationId, using] of usingByStation) {
+        const station = stationById.get(stationId);
+        if (!station || station.archivedAt || !ACCOUNT_TYPES.includes(station.type) || station.type === "newapi-key") continue;
+        const answer = station.accountUse ?? null;
+        if (answer === null || answer === "unsure") actions.push(workflowAction("answer_account_use", { stationId, ownStationId: source.ownSource.stationId }));
+        const fresh = using.filter((channel) => channel.reconciliation.status === "unconfigured" && !optedOut.has(Number(channel.id))).map((channel) => channel.id);
+        if (answer !== "only_mine" && fresh.length) {
+          actions.push(workflowAction("start_new_channels", { stationId, ownStationId: source.ownSource.stationId, channelIds: fresh }, { params: { upstream: stationDisplayName(station) } }));
+        }
+      }
+    }
     if (own() && (source.stale || sourceUnconfirmed)) {
       actions.push(workflowAction("review_source", { ownStationId: own().id, channelIds: channels.map((channel) => channel.id) }));
     }

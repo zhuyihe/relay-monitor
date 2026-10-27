@@ -46,3 +46,20 @@ test("channels 接口：overview 读 ?ownStationId=（GET），没有自营站�
   const none = await handleChannelProfitRequest(new Request("https://console.test/api/reconciliation/channels/overview"), rt, "overview");
   assert.deepEqual([none.status, (await none.json()).code], [400, "OWN_STATION_UNSET"]);
 });
+
+test("channels 接口：account-use 读 body 的上游编号和回答，原样交给模块（回答「这个上游账号只给你自己的渠道用吗？」）", async () => {
+  const { rt, calls } = runtime({ answerAccountUse: async (input) => { calls.push(["account-use", input]); return { accountUse: input.accountUse, previous: null, changedRules: [], failed: [] }; } });
+  const ok = await handleChannelProfitRequest(post({ ownStationId: "own", upstreamStationId: "up1", accountUse: "only_mine" }), rt, "account-use");
+  assert.deepEqual([ok.status, (await ok.json()).accountUse, calls], [200, "only_mine", [["account-use", { ownStationId: "own", upstreamStationId: "up1", accountUse: "only_mine" }]]]);
+  const bad = await handleChannelProfitRequest(post({ upstreamStationId: "up1", accountUse: "only_mine" }), rt, "account-use");
+  assert.deepEqual([bad.status, (await bad.json()).code], [400, "OWN_STATION_UNSET"]);
+});
+
+test("channels 接口：upstream-count 读 ?upstreamStationId=（GET，不用自营站点），数这个上游下在算的渠道（删上游确认框「这个上游下 N 个渠道也会停止算利润」）", async () => {
+  const counted = [];
+  const rt = { store: { get: () => null }, reconciliation: { countUpstreamChannels: async (id) => { counted.push(id); return { ruleCount: 2, channelCount: 3 }; } }, channelOnboarding: {}, channelProfit: {} };
+  const ok = await handleChannelProfitRequest(new Request("https://console.test/api/reconciliation/channels/upstream-count?upstreamStationId=up1"), rt, "upstream-count");
+  assert.deepEqual([ok.status, await ok.json(), counted], [200, { ruleCount: 2, channelCount: 3 }, ["up1"]]);
+  const none = await handleChannelProfitRequest(new Request("https://console.test/api/reconciliation/channels/upstream-count"), rt, "upstream-count");
+  assert.deepEqual([none.status, (await none.json()).code], [400, "INVALID_REQUEST"]);
+});

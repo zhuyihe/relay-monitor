@@ -33,6 +33,7 @@ const UPDATE_LOGIN = workflowActionMeta("update_authorization")!;
 const PAUSE = workflowActionMeta("pause_monitor")!;
 const RESUME = workflowActionMeta("resume_monitor")!;
 const ANSWER = workflowActionMeta("confirm_coverage")!;
+const ANSWER_USE = workflowActionMeta("answer_account_use")!;
 
 // 只在这个页签出现的说法（用语按 design/ui-copy-spec.md）；共用的名字从 lib/ 取
 const COPY = Object.freeze({
@@ -70,11 +71,24 @@ const COPY = Object.freeze({
   startDone: "已开始算利润，今天的数已经在每日利润里",
   allStarted: (n: number) => `已开始算利润（${n} 个渠道）`,
   answered: "已保存",
+  answerUse: "回答",
+  changeUse: "改回答",
+  useQuestion: "这个上游账号只给你自己的渠道用吗？",
+  useChangeToElse: "这个上游下每把 Key 要回答一次「这把 Key 还给别处用吗？」，回答以前这几个渠道先不算；新渠道不再自己开始算",
+  useChangeToMine: "这个上游下的渠道，换 Key 时系统自己跟上，新渠道系统自己开始算",
+  // 选「只给我的渠道用」、这个上游下有还没在算的渠道时多写的一行（用语规范 §5.2）：三个以内全写，多了写前两个加「等 N 个渠道」
+  usePending: (names: string[]) => `这个上游下有 ${names.length} 个渠道还没在算：${names.length <= 3 ? names.map((name) => `「${name}」`).join("") : `${names.slice(0, 2).map((name) => `「${name}」`).join("")}等 ${names.length} 个渠道`}，保存以后从今天 0 点开始算。不想算的，在「渠道」页签里点「停止算利润」，停了以后不会再自己开始。`,
   paused: "暂停监控",
   pausedHint: "暂停监控时不刷新余额，渠道照常算利润。",
   balance: "余额",
   editUpstream: "编辑上游",
 });
+// 「这个上游账号只给你自己的渠道用吗？」的选项（用语规范 §5.2）；打开时一个都不选。值是上游上存的 accountUse
+const USE_OPTIONS = [
+  { value: "only_mine", label: "只给我的渠道用", hint: "换 Key 时系统会自己跟上，新渠道系统自己开始算" },
+  { value: "elsewhere", label: "别处也在用", hint: "每把 Key 还要回答一次「这把 Key 还给别处用吗？」；新渠道系统不会自己开始算" },
+  { value: "unsure", label: "不确定", hint: "选「不确定」的话，这个上游下的利润先不算" },
+];
 const ANSWER_HINT: Record<string, string> = {
   none: "",
   external: "上游成本分不开，利润先不算；给这些渠道换一把单独的 Key 就能算",
@@ -96,7 +110,7 @@ type Card = {
   // state = blocked：这一版还算不了（几把 Key 的渠道、和它共用 Key 的组），没有按钮
   blocked?: { code: "MULTI_KEY" | "KEY_SHARED_WITH_MULTI_KEY"; keyCount?: number; sharedWith?: string[] };
 };
-type UpstreamRow = { id: string; name: string; type: string; accountUse: string | null; noBills: boolean; channelCount: number; runningCount: number; attentionCount: number };
+type UpstreamRow = { id: string; name: string; type: string; accountUse: string | null; noBills: boolean; needsAccountUse?: boolean; channelCount: number; runningCount: number; attentionCount: number };
 type Unmatched = { channelId: number; name: string; reason: string; upstreamStationId?: string };
 export type ChannelOverview = { ok: true; reader: { state: "ok" | "not_configured" | "unavailable"; code?: string }; upstreams: UpstreamRow[]; cards: Card[]; unmatched: Unmatched[] };
 
@@ -143,6 +157,10 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
   const [answerValue, setAnswerValue] = useState<string>("");
   const [answerError, setAnswerError] = useState<ErrorNote | null>(null);
   const [expandedMore, setExpandedMore] = useState<Record<string, boolean>>({});
+  // 回答「这个上游账号只给你自己的渠道用吗？」的小窗
+  const [useTarget, setUseTarget] = useState<UpstreamRow | null>(null);
+  const [useValue, setUseValue] = useState<string>("");
+  const [useError, setUseError] = useState<ErrorNote | null>(null);
   const epoch = useRef(0);
   const resolved = useRef(false);
   const tz = accountModel?.tz || DEFAULT_BUSINESS_TIME_ZONE;
@@ -213,6 +231,9 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
       else if (station && !station.archivedAt) openEditor(station);
     } else if (destination.action === "coverage" && card) {
       setAnswerTarget({ card, mode: "answer" }); setAnswerValue(""); setAnswerError(null);
+    } else if (destination.action === "answer-use") {
+      const row = overview?.upstreams.find((item) => item.id === destination.stationId);
+      if (row) { setUseTarget(row); setUseValue(""); setUseError(null); } else setNotice("找不到这个上游。");
     }
     const target = card?.upstreamStationId ?? destination.stationId;
     if (target && overview?.upstreams.some((item) => item.id === target)) setSelectedId(target);
@@ -270,6 +291,21 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
       } else if (await start(card, declaration)) setAnswerTarget(null);
     } catch (err: any) {
       setAnswerError({ text: failureText("保存失败", err), raw: describeError(err).raw });
+    } finally { setBusyId(""); }
+  };
+
+  const openUse = (row: UpstreamRow) => { setUseTarget(row); setUseValue(""); setUseError(null); };
+  const submitUse = async () => {
+    if (!useTarget || !useValue) { setUseError({ text: `请回答「${COPY.useQuestion}」`, notice: true } as ErrorNote); return; }
+    setBusyId(`use:${useTarget.id}`); setUseError(null);
+    try {
+      const result = await api("/api/reconciliation/channels/account-use", { method: "POST", body: { ownStationId: ownId, upstreamStationId: useTarget.id, accountUse: useValue } });
+      if (result.failed?.length) message.warning(failureText("保存没全做成", { code: result.failed[0].code, message: "" }));
+      else message.success(COPY.answered);
+      setUseTarget(null);
+      await refreshAfterWrite();
+    } catch (err: any) {
+      setUseError({ text: failureText("保存失败", err), raw: describeError(err).raw });
     } finally { setBusyId(""); }
   };
 
@@ -371,6 +407,8 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
   const selected = upstreams.find((item) => item.id === selectedId);
   const selectedStation = stations.find((item) => item.id === selectedId);
   const selectedAccount = accountModel?.accounts.find((account) => account.resources.some((resource) => resource.id === selectedId)) ?? null;
+  // 这个上游下还没在算、也没被用户停过的渠道名（回答「只给我的渠道用」以后下一轮会自动开始的）：同一把 Key 的几个渠道算几个
+  const notStartedNames = (id: string) => (overview?.cards ?? []).filter((card) => card.upstreamStationId === id && card.state === "stopped" && !card.optedOut).flatMap((card) => card.names);
   const cardsOf = (id: string) => (overview?.cards ?? []).filter((card) => card.upstreamStationId === id)
     .sort((a, b) => ["attention", "running", "stopped", "blocked"].indexOf(a.state) - ["attention", "running", "stopped", "blocked"].indexOf(b.state));
   const unmatched = overview?.unmatched ?? [];
@@ -421,6 +459,11 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
                     {item.attentionCount ? <span className="jy-tag jy-tag--warn">{item.attentionCount} 个{COPY.needsAction}</span> : null}
                     <span className="jy-channels-upstream__sub jy-caption">{accountUseText(item)}</span>
                   </button>
+                  {item.type !== "newapi-key" && !item.noBills ? (
+                    <Button type="link" size="small" className="jy-channels-upstream__answer" disabled={!ownId} onClick={() => openUse(item)}>
+                      {item.needsAccountUse || !item.accountUse ? COPY.answerUse : COPY.changeUse}
+                    </Button>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -469,6 +512,16 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
                   <Button size="small" onClick={() => (selectedAccount && authorizationEligible(selectedAccount).length ? openAuthorization(selectedAccount) : openEditor(selectedStation))}>{UPDATE_LOGIN.label}</Button>
                 </div>
               ) : null}
+              {selected?.needsAccountUse ? (
+                <div className="jy-channels-issue" role="status" data-issue="account-use">
+                  <Sym kind="warn" />
+                  <div className="jy-channels-issue__body">
+                    <b>{ANSWER_USE.title}</b>
+                    <p className="jy-caption">{ANSWER_USE.detail}</p>
+                  </div>
+                  <Button size="small" onClick={() => selected && openUse(selected)}>{ANSWER_USE.label}</Button>
+                </div>
+              ) : null}
               {!cards.length ? <EmptyState title={COPY.noChannels} desc={COPY.noChannelsDesc} center={false} /> : null}
               {liveCards.map((card) => renderCard(card, selected))}
               {shownStopped.map((card) => renderCard(card, selected))}
@@ -505,6 +558,29 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
         {sub2 ? <p>这个上游只能按整天读账单，今天（{formatZonedDate(Date.now(), tz)}）整天不算进{stopCard && stopCard.names.length > 1 ? "这几个渠道" : "这个渠道"}的利润。</p> : null}
         {stopCard && stopCard.names.length > 1 ? <p>这几个渠道用同一把 Key，一起停。</p> : null}
         <p>以前的每日记录还在，以后可以再点「{START.label}」接着算。</p>
+      </Modal>
+      <Modal
+        title={COPY.useQuestion}
+        open={!!useTarget}
+        onCancel={() => setUseTarget(null)}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={!!useTarget && busyId === `use:${useTarget.id}`}
+        onOk={() => { void submitUse(); }}
+        destroyOnHidden
+      >
+        <Radio.Group value={useValue} onChange={(event) => setUseValue(event.target.value)} className="jy-channels-answers">
+          {USE_OPTIONS.map((option) => (
+            <Radio key={option.value} value={option.value}>
+              {option.label}
+              <span className="jy-caption jy-channels-answers__hint">{option.hint}</span>
+            </Radio>
+          ))}
+        </Radio.Group>
+        {useTarget?.accountUse === "only_mine" && useValue === "elsewhere" ? <p className="jy-caption">{COPY.useChangeToElse}</p> : null}
+        {useTarget && useTarget.accountUse && useTarget.accountUse !== "only_mine" && useValue === "only_mine" ? <p className="jy-caption">{COPY.useChangeToMine}</p> : null}
+        {useTarget && useValue === "only_mine" && notStartedNames(useTarget.id).length ? <p className="jy-caption" data-use-pending>{COPY.usePending(notStartedNames(useTarget.id))}</p> : null}
+        {useError ? <div className="jy-banner jy-banner--crit" role="alert"><Sym kind="warn" /><div className="jy-banner__body"><b>{useError.text}</b><ErrorDetail raw={useError.raw} /></div></div> : null}
       </Modal>
       <Modal
         title={COVERAGE_QUESTION}

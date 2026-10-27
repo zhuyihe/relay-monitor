@@ -364,3 +364,70 @@ test("overview：几把 Key 的渠道写在它用的上游下面（blocked 卡�
   const upstream = Object.fromEntries(view.upstreams.map((item) => [item.id, item]));
   assert.equal(upstream.up1.runningCount, 0, "blocked 卡片不算在算");
 });
+
+// 回答「这个上游账号只给你自己的渠道用吗？」（K2d）：写在上游上；改答案时在算的绑定的回答跟着动（钱的影响）
+function accountUseFixture({ upstream, rules }) {
+  const station = { ...upstream };
+  const f = fixture({ channels: [1, 2, 3], stations: [own, station, upShared], identified: [], rules });
+  f.rt.store.update = async (id, patch) => { Object.assign(station, patch); return station; };
+  const calls = [];
+  f.rt.channelOnboarding.probeRuleEdit = async (id, body) => { calls.push([id, body.coverageDeclaration.answer]); return { previewId: `p-${id}`, groupId: "g1" }; };
+  f.rt.channelOnboarding.getPreviewGuard = (previewId, groupId) => ({ previewId, groupId });
+  f.rt.reconciliation.updateRule = async (id) => ({ id });
+  return { f, station, calls };
+}
+const ruleOf = (id, channelIds, answer, extra = {}) => ({ ...running(id, channelIds), upstreamStationId: "up1", tokenId: 11, timezone: "Asia/Shanghai", costCoverage: answer === "none" ? "complete" : "unknown", coverageDeclaration: answer ? { answer } : undefined, ...extra });
+
+test("answerAccountUse：答「只给我的渠道用」——写在上游上；这个上游下在算的、还没答成「只给这些渠道用」的绑定改成「只给这些渠道用」，答过的、别的上游的不动", async () => {
+  const { f, station, calls } = accountUseFixture({ upstream: { ...upMine, accountUse: null }, rules: [ruleOf("r-unknown", [1], "unknown"), ruleOf("r-none", [2], "none"), ruleOf("r-other", [3], "other_use"), { ...ruleOf("r-up2", [3], "unknown"), upstreamStationId: "up2" }] });
+  const result = await f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "only_mine" });
+  assert.equal(station.accountUse, "only_mine");
+  assert.deepEqual([result.previous, result.changedRules.sort(), result.failed], [null, ["r-other", "r-unknown"], []]);
+  assert.deepEqual(calls.map(([id, answer]) => [id, answer]).sort(), [["r-other", "none"], ["r-unknown", "none"]]);
+});
+
+test("answerAccountUse：从「只给我的渠道用」改成别的——这个上游下答成「只给这些渠道用」的绑定回到「不确定」（利润先不算，要重新答），别的回答留着；改成同样的答案什么也不动", async () => {
+  const { f, station, calls } = accountUseFixture({ upstream: { ...upMine, accountUse: "only_mine" }, rules: [ruleOf("r-none", [1], "none"), ruleOf("r-ext", [2], "other_use")] });
+  const same = await f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "only_mine" });
+  assert.deepEqual([same.changedRules, calls], [[], []]);
+  const result = await f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "elsewhere" });
+  assert.equal(station.accountUse, "elsewhere");
+  assert.deepEqual([result.changedRules, calls], [["r-none"], [["r-none", "unknown"]]]);
+  // 从没回答、不确定 → 别处也在用：绑定不动
+  const g = accountUseFixture({ upstream: { ...upMine, accountUse: "unsure" }, rules: [ruleOf("r-none", [1], "none")] });
+  assert.deepEqual((await g.f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "elsewhere" })).changedRules, []);
+});
+
+test("answerAccountUse：回答不在三个值里、找不到上游、自营站点、已归档的上游都不写；某条绑定没改成只记在 failed，上游的回答已经是新的", async () => {
+  const { f, station } = accountUseFixture({ upstream: { ...upMine, accountUse: "only_mine" }, rules: [ruleOf("r-a", [1], "none"), ruleOf("r-b", [2], "none")] });
+  await assert.rejects(f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "bogus" }), { code: "INVALID_REQUEST" });
+  await assert.rejects(f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "nope", accountUse: "elsewhere" }), { code: "UPSTREAM_NOT_FOUND" });
+  await assert.rejects(f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "own", accountUse: "elsewhere" }), { code: "UPSTREAM_NOT_FOUND" });
+  assert.equal(station.accountUse, "only_mine", "都没写");
+  f.rt.channelOnboarding.probeRuleEdit = async (id) => { if (id === "r-a") throw Object.assign(new Error("预览失败"), { code: "PREVIEW_BASIS_CHANGED" }); return { previewId: "p", groupId: "g" }; };
+  const result = await f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "elsewhere" });
+  assert.equal(station.accountUse, "elsewhere");
+  assert.deepEqual([result.changedRules, result.failed], [["r-b"], [{ ruleId: "r-a", code: "PREVIEW_BASIS_CHANGED" }]]);
+  const archived = accountUseFixture({ upstream: { ...upMine, archivedAt: "2026-10-01T00:00:00Z" }, rules: [] });
+  await assert.rejects(archived.f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "elsewhere" }), { code: "UPSTREAM_NOT_FOUND" });
+});
+
+test("answerAccountUse：改成「只给我的渠道用」以后下一轮 autoStart 就把这个上游下没在算的渠道开始（回答和自动开始接上了）", async () => {
+  const { f } = accountUseFixture({ upstream: { ...upMine, accountUse: null }, rules: [] });
+  const module = createChannelProfitModule(f.rt, { identify: async () => ({ ok: true, stale: false, revealIssues: [], channels: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] }), randomId: () => "request-1" });
+  assert.deepEqual((await module.autoStart("own")).started, [], "没回答：不自动开始");
+  await f.module.answerAccountUse({ ownStationId: "own", upstreamStationId: "up1", accountUse: "only_mine" });
+  assert.equal((await module.autoStart("own")).started.length, 1);
+});
+
+test("overview：用到这个上游的 Key 的渠道有了、账号没回答（或答了「不确定」）→ 这个上游 needsAccountUse，算一件要处理的事；答了就没有；没有渠道用它不算", async () => {
+  const identified = [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }];
+  const unanswered = await overviewFixture({ channels: [1], stations: [own, { ...upMine, accountUse: null }, upShared], identified }).module.overview("own");
+  const row = unanswered.upstreams.find((item) => item.id === "up1");
+  assert.deepEqual([row.needsAccountUse, row.attentionCount, row.accountUse], [true, 1, null]);
+  assert.equal(unanswered.upstreams.find((item) => item.id === "up2").needsAccountUse, false, "没有渠道用 up2：不用回答");
+  const unsure = await overviewFixture({ channels: [1], stations: [own, { ...upMine, accountUse: "unsure" }, upShared], identified }).module.overview("own");
+  assert.equal(unsure.upstreams.find((item) => item.id === "up1").needsAccountUse, true);
+  const answered = await overviewFixture({ channels: [1], stations: [own, { ...upMine, accountUse: "elsewhere" }, upShared], identified }).module.overview("own");
+  assert.deepEqual([answered.upstreams.find((item) => item.id === "up1").needsAccountUse, answered.upstreams.find((item) => item.id === "up1").attentionCount], [false, 0]);
+});

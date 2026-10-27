@@ -1664,6 +1664,7 @@ test("删除上游要输入这个上游的名字：不一致时按钮不能点�
   const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url()), path = url.pathname, method = route.request().method();
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/reconciliation/channels/upstream-count") return fulfill(route, { ruleCount: 1, channelCount: 3 });
     if (path === "/api/stations/del-1" && method === "DELETE") { deletes.push({ query: url.search, body: route.request().postDataJSON() }); return fulfill(route, { ok: true }); }
     if (path === "/api/stations") return fulfill(route, { stations: deletes.length ? [] : [{ id: "del-1", name: "Alpha 上游", type: "newapi", baseUrl: "https://alpha.test", monitorEnabled: true, balance: { ok: true, remaining: 10, checkedAt: "2026-10-09T07:00:00.000Z" }, prediction: null, spark: [] }], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
@@ -1674,6 +1675,7 @@ test("删除上游要输入这个上游的名字：不一致时按钮不能点�
   await page.getByRole("menuitem", { name: `${workflowActionMeta("delete_upstream").label}…` }).click();
   const dialog = page.getByRole("dialog", { name: `${workflowActionMeta("delete_upstream").label}「Alpha 上游」？`, exact: true });
   await dialog.waitFor();
+  await dialog.getByText("这个上游下 3 个渠道也会停止算利润", { exact: true }).waitFor(); // 删上游时这个上游下在算的渠道一起停止算利润（用语规范 §5.5）
   const input = dialog.getByLabel(`输入「Alpha 上游」确认${workflowActionMeta("delete_upstream").label}`, { exact: true });
   const ok = dialog.getByRole("button", { name: workflowActionMeta("delete_upstream").label, exact: true });
   assert.equal(await ok.isDisabled(), true);
@@ -3620,4 +3622,53 @@ test("上游的令牌少了读完整 Key 的权限：事写在这个上游上（
   await center.getByRole("option", { name: /^A-monitor-2/ }).click(); assert.equal(await center.getByText("上游的令牌少了读完整 Key 的权限", { exact: true }).count(), 0);
   await center.getByRole("option", { name: /^A-monitor-1/ }).click();
   await center.locator(".jy-channels-issue").getByRole("button", { name: UPDATE_AUTH, exact: true }).click(); await authorizationDialog(page, model.accounts[0].identity.accountId).waitFor();
+});
+
+// ---- K2d：回答「这个上游账号只给你自己的渠道用吗？」（左边每个上游一个「回答 / 改回答」、需处理框「去回答」、同一个小窗） ----
+const USE_QUESTION = "这个上游账号只给你自己的渠道用吗？", ANSWER_USE_BUTTON = workflowActionMeta("answer_account_use").label;
+const useOverview = () => channelsOverview({
+  upstreams: [channelUpstream("A-monitor-1", "A-monitor-1", { channelCount: 2, runningCount: 2 }),
+    channelUpstream("B-monitor", "B-monitor", { accountUse: null, channelCount: 3, runningCount: 0, attentionCount: 1, needsAccountUse: true }),
+    channelUpstream("pure-key", "pure-key", { type: "newapi-key", accountUse: null, noBills: true, channelCount: 1, runningCount: 1 })],
+  cards: [channelCard("rule:r1", { ruleId: "r1", names: ["高速 A"], channelIds: [1] }),
+    channelCard("key:B-monitor:1", { state: "stopped", upstreamStationId: "B-monitor", names: ["高速 X", "高速 Y"], channelIds: [11, 12], startGroupKey: "B-monitor:1", needsCoverage: true }),
+    channelCard("key:B-monitor:2", { state: "stopped", upstreamStationId: "B-monitor", names: ["备用 Z"], channelIds: [13], startGroupKey: "B-monitor:2", needsCoverage: true }),
+    channelCard("key:B-monitor:3", { state: "stopped", upstreamStationId: "B-monitor", names: ["用户停过的"], channelIds: [14], startGroupKey: "B-monitor:3", needsCoverage: true, optedOut: true })] });
+
+test("回答账号用途：左边每个上游一个「回答 / 改回答」（只填一把 Key 的上游没有）；没回答的上游里写一件要处理的事「去回答」，点开小窗，三个选项一个都不选，选「只给我的渠道用」时写还没在算的渠道（用户停过的不算），保存发 account-use", async (t) => {
+  const log = [], overview = useOverview();
+  const { page, center } = await openAccountsPage(t, { overview, mutation: (route, mutation) => { log.push(mutation); return fulfill(route, { accountUse: mutation.body.accountUse, previous: null, changedRules: [], failed: [] }); } });
+  const options = center.getByRole("option");
+  assert.match((await options.allInnerTexts())[0], /^B-monitor\s+1 个需处理/, "没回答的上游在前、算一件要处理的事");
+  const answerButtons = async (name) => center.getByRole("listbox").locator("li", { hasText: name }).getByRole("button", { name: /^(回答|改回答)$/ }).allInnerTexts();
+  assert.deepEqual([await answerButtons("A-monitor-1"), await answerButtons("B-monitor"), await answerButtons("pure-key")], [["改回答"], ["回答"], []]);
+  await center.getByRole("option", { name: /^B-monitor/ }).click();
+  const issue = center.locator('[data-issue="account-use"]');
+  await issue.getByText(USE_QUESTION, { exact: true }).waitFor(); await issue.getByText("还没回答、或者答了「不确定」时，这个上游下的利润先不算", { exact: true }).waitFor();
+  await issue.getByRole("button", { name: ANSWER_USE_BUTTON, exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: USE_QUESTION, exact: true });
+  await dialog.waitFor();
+  assert.equal(await dialog.getByRole("radio", { checked: true }).count(), 0, "打开时一个都不选");
+  await dialog.getByRole("button", { name: "保存", exact: true }).click();
+  await dialog.getByText(`请回答「${USE_QUESTION}」`, { exact: true }).waitFor();
+  assert.equal(log.length, 0, "没选不发请求");
+  await dialog.getByRole("radio", { name: /^只给我的渠道用/ }).check();
+  await dialog.getByText("这个上游下有 3 个渠道还没在算：「高速 X」「高速 Y」「备用 Z」，保存以后从今天 0 点开始算。不想算的，在「渠道」页签里点「停止算利润」，停了以后不会再自己开始。", { exact: true }).waitFor();
+  await dialog.getByRole("button", { name: "保存", exact: true }).click(); await dialog.waitFor({ state: "hidden" });
+  assert.deepEqual(log.map((item) => [item.path, item.body.upstreamStationId, item.body.accountUse]), [["/api/reconciliation/channels/account-use", "B-monitor", "only_mine"]]);
+});
+
+test("回答账号用途：改答案时多一行说明（只给我的渠道用 ↔ 别处也在用）；选「别处也在用」不写还没在算的渠道；带 action=answer-use&stationId 进来直接弹小窗", async (t) => {
+  const { page, center } = await openAccountsPage(t, { overview: useOverview() });
+  await center.getByRole("listbox").locator("li", { hasText: "A-monitor-1" }).getByRole("button", { name: "改回答", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: USE_QUESTION, exact: true });
+  await dialog.getByRole("radio", { name: /^别处也在用/ }).check();
+  await dialog.getByText("这个上游下每把 Key 要回答一次「这把 Key 还给别处用吗？」，回答以前这几个渠道先不算；新渠道不再自己开始算", { exact: true }).waitFor();
+  assert.equal(await dialog.locator("[data-use-pending]").count(), 0);
+  await dialog.getByRole("button", { name: "取消", exact: true }).click(); await dialog.waitFor({ state: "hidden" });
+  const direct = await openAccountsPage(t, { overview: useOverview(), path: "/stations?view=channels&action=answer-use&stationId=B-monitor" });
+  const opened = direct.page.getByRole("dialog", { name: USE_QUESTION, exact: true }); await opened.waitFor();
+  await opened.getByRole("radio", { name: /^只给我的渠道用/ }).check();
+  await opened.getByText(/^这个上游下有 3 个渠道还没在算：/).waitFor();
+  assert.equal(await direct.center.getByRole("option", { selected: true }).first().innerText().then((text) => text.startsWith("B-monitor")), true, "落在这个上游上");
 });
