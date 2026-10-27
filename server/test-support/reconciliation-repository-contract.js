@@ -1968,3 +1968,16 @@ contract("archiveRule reason (K2c): a system stop records stop_reason and no opt
   assert.equal("stopReason" in (await repository.getRule(plain.id, { includeArchived: true })), false);
   assert.deepEqual((await repository.listChannelOptouts(removed.ownStationId)).filter((row) => [fixture.channel(151), fixture.channel(152)].includes(row.channelId)), [], "系统停的不记用户停的");
 });
+
+contract("regroupRules: a window with `to` before b ends there, and a tail segment [to, b) carrying only the rule's own key follows; keys of another upstream ride in the window", async ({ repository, fixture }) => {
+  const oldRule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:w1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(161), name: "W" }] });
+  const own = { upstreamStationId: oldRule.upstreamStationId, tokenId: oldRule.tokenId, tokenName: oldRule.tokenName };
+  const foreign = { upstreamStationId: fixture.station("up-other"), tokenId: fixture.token(162), tokenName: "F" };
+  const a = EFFECTIVE_FROM + HOUR, to = a + 4 * HOUR, b = a + 6 * HOUR;
+  const result = await repository.regroupRules({ at: b, closes: [{ ruleId: oldRule.id, expect: { tokenId: oldRule.tokenId, channelIds: [fixture.channel(161)] }, window: { from: a, to, keys: [own, foreign] } }], creates: [] });
+  assert.deepEqual([result.conflict, result.stale], [false, false]);
+  const segments = await repository.listSegments(oldRule.id);
+  assert.deepEqual(segments.map((segment) => [segment.effectiveFrom, segment.effectiveTo, segment.timingSource]), [[EFFECTIVE_FROM, a, "operator_confirmed"], [a, to, "key_change_window"], [to, b, "key_change"]]);
+  assert.deepEqual(segments[1].keys.map((key) => key.upstreamStationId).sort(), [oldRule.upstreamStationId, foreign.upstreamStationId].sort(), "过渡段里有别的上游的 Key");
+  assert.deepEqual(segments[2].keys.map((key) => key.tokenId), [oldRule.tokenId], "到 b 之间只有自己原来的 Key");
+});

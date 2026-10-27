@@ -653,11 +653,19 @@ export class MemoryReconciliationRepository {
             }
             this.#update(tx, "segments", this.#rows("segments", tx).filter(({ row }) => sameText(row.id, open.id)), { effective_to_ms: bigint(close.window.from) });
             const id = uid("rs"), createdAt = this.#timestamp();
+            const windowTo = close.window.to != null && close.window.to < at ? close.window.to : at; // 对应 MySQL 版：过渡段可以只到 to，to 到 b 之间一小段只放自己原来的 Key
             this.#insert(tx, "segments", { id, rule_id: close.ruleId, group_name: open.group_name, group_ratio: open.group_ratio, ratio_observed_at_ms: open.ratio_observed_at_ms,
-              ratio_source: open.ratio_source, effective_from_ms: bigint(close.window.from), effective_to_ms: bigint(at), detected_at_ms: bigint(detectedAt),
+              ratio_source: open.ratio_source, effective_from_ms: bigint(close.window.from), effective_to_ms: bigint(windowTo), detected_at_ms: bigint(detectedAt),
               timing_source: "key_change_window", created_at: createdAt, updated_at: createdAt });
             for (const key of close.window.keys) this.#insert(tx, "segmentKeys", { segment_id: id, upstream_station_id: key.upstreamStationId, token_id: bigint(key.tokenId),
               token_name: key.tokenName ?? null, key_mask: null, match_source: "agent", active_token_key: null });
+            if (windowTo < at) {
+              const tailId = uid("rs");
+              this.#insert(tx, "segments", { id: tailId, rule_id: close.ruleId, group_name: open.group_name, group_ratio: open.group_ratio, ratio_observed_at_ms: open.ratio_observed_at_ms,
+                ratio_source: open.ratio_source, effective_from_ms: bigint(windowTo), effective_to_ms: bigint(at), detected_at_ms: bigint(detectedAt), timing_source: "key_change", created_at: createdAt, updated_at: createdAt });
+              this.#insert(tx, "segmentKeys", { segment_id: tailId, upstream_station_id: entry.row.upstream_station_id, token_id: bigint(entry.row.token_id),
+                token_name: entry.row.token_name ?? null, key_mask: null, match_source: "agent", active_token_key: null });
+            }
           }
           this.#update(tx, "rules", [entry], { enabled: 0, active_token_key: null, archived_at: this.#timestamp(), archived_at_ms: bigint(at) });
           this.#update(tx, "channels", this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, close.ruleId)), { active_channel_key: null });

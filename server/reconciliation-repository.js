@@ -946,14 +946,28 @@ export class ReconciliationRepository {
           await conn.query(fillMissing.sql, fillMissing.params);
           await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [close.window.from, open.id]);
           const id = uid("rs");
+          // window.to：过渡段只到这里（换到 Sub2API 上游时截到 b 那天 0 点，b 当天新 Key 的用量整天由新上游下的新绑定取），
+          // to 到 b 之间还有一小段，只放这条绑定自己原来的那把 Key
+          const windowTo = close.window.to != null && close.window.to < at ? close.window.to : at;
           await conn.query(
             `INSERT INTO reconciliation_rule_segments
               (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, effective_to_ms, detected_at_ms, timing_source)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'key_change_window')`,
-            [id, close.ruleId, open.group_name, open.group_ratio, open.ratio_observed_at_ms, open.ratio_source, close.window.from, at, detectedAt]);
+            [id, close.ruleId, open.group_name, open.group_ratio, open.ratio_observed_at_ms, open.ratio_source, close.window.from, windowTo, detectedAt]);
           for (const key of close.window.keys) await conn.query(
             "INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source, active_token_key) VALUES (?, ?, ?, ?, 'agent', NULL)",
             [id, key.upstreamStationId, key.tokenId, key.tokenName ?? null]);
+          if (windowTo < at) {
+            const tailId = uid("rs");
+            await conn.query(
+              `INSERT INTO reconciliation_rule_segments
+                (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, effective_to_ms, detected_at_ms, timing_source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'key_change')`,
+              [tailId, close.ruleId, open.group_name, open.group_ratio, open.ratio_observed_at_ms, open.ratio_source, windowTo, at, detectedAt]);
+            await conn.query(
+              "INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source, active_token_key) VALUES (?, ?, ?, ?, 'agent', NULL)",
+              [tailId, rule.upstream_station_id, rule.token_id, rule.token_name ?? null]);
+          }
         }
         await conn.query("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, archived_at = NOW(), archived_at_ms = ? WHERE id = ? AND archived_at IS NULL", [at, close.ruleId]);
         await conn.query("UPDATE reconciliation_rule_channels SET active_channel_key = NULL WHERE rule_id = ?", [close.ruleId]);

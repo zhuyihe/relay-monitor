@@ -282,11 +282,14 @@ test("planRegroup：几条绑定都换走到同一把全新的 Key，过渡段�
   assert.deepEqual(plan.groups.map((group) => [group.ref.tokenId, group.channelIds]), [[1, [10]], [9, [11, 21]], [2, [20]]]);
 });
 
-test("planRegroup：牵连的渠道有没认出来的、或者 Key 换到了别的上游，这一轮不分（保持原样）", () => {
+test("planRegroup：牵连的渠道有没认出来的、或者 Key 换到了别的上游，这一轮不分（保持原样）；换到另一个上游的 Key 照出计划", () => {
   const unresolved = planRegroup({ rules: [rule("x", 1, [10, 20])], refByChannelId: refs({ 10: 1 }), flaggedIds: ["x"] });
   assert.deepEqual([unresolved.ok, unresolved.reason, unresolved.ruleIds], [false, "UNIDENTIFIED", ["x"]]);
-  const elsewhere = planRegroup({ rules: [rule("x", 1, [10, 20])], refByChannelId: new Map([[10, key(1)], [20, { upstreamStationId: "up2", tokenId: 5 }]]), flaggedIds: ["x"] });
-  assert.deepEqual([elsewhere.ok, elsewhere.reason], [false, "UPSTREAM_CHANGED"]);
+  // 换到另一个上游的 Key：计划照出（K2c-3b），过渡段里放别的上游的那把（带着它自己的上游编号），新的组带着自己的上游
+  const elsewhere = planRegroup({ rules: [rule("x", 1, [10, 20])], refByChannelId: new Map([[10, key(1)], [20, { upstreamStationId: "up2", tokenId: 5, tokenName: "k5" }]]), flaggedIds: ["x"] });
+  assert.equal(elsewhere.ok, true);
+  assert.deepEqual(elsewhere.closes, [{ ruleId: "x", windowKeys: [key(1), { upstreamStationId: "up2", tokenId: 5, tokenName: "k5" }], windowUsers: ["x"] }]);
+  assert.deepEqual(elsewhere.groups.map((group) => [group.ref.upstreamStationId, group.ref.tokenId, group.channelIds]), [["up1", 1, [10]], ["up2", 5, [20]]]);
   assert.equal(planRegroup({ rules: [rule("x", 1, [10])], refByChannelId: refs({ 10: 1 }), flaggedIds: [] }).ok, false);
 });
 

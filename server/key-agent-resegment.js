@@ -118,7 +118,7 @@ export function detectGroupMerges(currentRefsByBinding) {
 // rules：这个自营站点下在算的绑定 [{ id, upstreamStationId, tokenId, tokenName, channelIds, channels? }]；refByChannelId：Number(channelId) -> { upstreamStationId, tokenId, tokenName }
 // （只有认出了的单把 Key 渠道才有）；flaggedIds：K2b 标记了的绑定。
 // 返回 { ok: true, closes: [{ ruleId, windowKeys: [ref] | null }], groups: [{ ref, channelIds, fromRuleIds }] }，
-// 或 { ok: false, reason: "UNIDENTIFIED" | "UPSTREAM_CHANGED", ruleIds }（这一轮不分，保持原样）
+// 或 { ok: false, reason: "UNIDENTIFIED", ruleIds }（这一轮不分，保持原样）
 // closes 里 { ruleId, windowKeys: [ref] | null, windowUsers: [ruleId] }
 export function planRegroup({ rules, refByChannelId, flaggedIds }) {
   const byId = new Map(rules.map((rule) => [rule.id, rule]));
@@ -140,8 +140,8 @@ export function planRegroup({ rules, refByChannelId, flaggedIds }) {
   const members = [...involved].sort().map((id) => byId.get(id));
   const unidentified = members.filter((rule) => refsOf(rule).some((ref) => !ref)).map((rule) => rule.id);
   if (unidentified.length) return { ok: false, reason: "UNIDENTIFIED", ruleIds: unidentified };
-  const moved = members.filter((rule) => refsOf(rule).some((ref) => ref.upstreamStationId !== rule.upstreamStationId)).map((rule) => rule.id);
-  if (moved.length) return { ok: false, reason: "UPSTREAM_CHANGED", ruleIds: moved };
+  // 换到另一个上游的 Key（K2c-3b）不再在这里拦：新的组带着自己的上游，换走的 Key 放进旧绑定的过渡段（段里的 Key 本来就带上游编号），
+  // 调用方（server/reconciliation.js 的 regroupFor）按两边上游的类型决定做不做、过渡段截到哪
 
   // 新的组：牵连的渠道按现在用的 Key 连成组
   const groupsByKey = new Map();

@@ -866,7 +866,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 改上游的 Key），这一版不当「换 Key」处理，留给现有机制
         if (differs && rule.canonicalKey != null && ref.upstreamStationId === rule.upstreamStationId) {
           changeCandidates.push({ rule, before: { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId }, after: ref });
-        } else if (differs) pendingRules.add(rule.id);
+        } else if (differs) {
+          // 换到另一个上游站点的 Key（K2c-3b）：和分组一样从 b 起不结账，交给 regroupFor（能做就做，做不了留着）
+          if (rule.canonicalKey != null) keyIssues.set(rule.id, issueFor(rule, "KEY_GROUP_CHANGED"));
+          pendingRules.add(rule.id);
+        }
       }
       for (const group of detectGroupMerges(currentRefsByBinding)) for (const bindingId of group) {
         const rule = enabled.find((item) => item.id === bindingId);
@@ -922,8 +926,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (ownSources.size !== 1 || ownSources.has(null) || !catalogue?.ownSource || catalogue.stale || catalogue.ownSource.namespaceKey !== [...ownSources][0]) return notDone;
     const revisionById = new Map((catalogue.channels || []).filter((channel) => !channel.missing).map((channel) => [Number(channel.id), channel.revision]));
     const nameById = new Map(members.flatMap((rule) => rule.channels.map((channel) => [Number(channel.channelId), channel.name])));
+    // 换到另一个上游的 Key（K2c-3b）。旧上游是 New API（按秒读，b 以前算给旧绑定、b 起算给新绑定，精确）才能做；旧上游是 Sub2API 时
+    // 旧绑定归档那天整天不算（C3），旧 Key 在 b 当天 b 以前的用量没有人能接（新绑定在别的上游下没法带它），先不做，原样留着不结账。
+    // 别的上游下的新组不在这里建：交给自动开始（上游答了「只给我的渠道用」才开始，答案不是的渠道先停着等回答）——它从 b 起算（同一天更早归档的
+    // 占着同一个渠道的绑定，C3 的核算起点下限；新上游是 Sub2API 时整天算）。旧绑定的过渡段放旧 Key + 别的上游的新 Key，过渡段不和新绑定重叠
+    const isForeignGroup = (group) => !group.fromRuleIds.some((id) => byId.get(id).upstreamStationId === group.ref.upstreamStationId);
+    const foreignWindow = plan.closes.some((close) => (close.windowKeys || []).some((key) => key.upstreamStationId !== byId.get(close.ruleId).upstreamStationId));
+    if (plan.groups.some(isForeignGroup) || foreignWindow) {
+      if (plan.closes.some((close) => !/^newapi$/.test(upstreamStation(byId.get(close.ruleId).upstreamStationId)?.type || ""))) return notDone;
+      if (plan.groups.some((group) => isForeignGroup(group) && !upstreamStation(group.ref.upstreamStationId))) return notDone;
+    }
     const creates = [];
     for (const group of plan.groups) {
+      if (isForeignGroup(group)) { creates.push(null); continue; }
       const resource = resources.get(group.ref.upstreamStationId), upstream = upstreamStation(group.ref.upstreamStationId);
       const metadata = resource?.metadata, identity = resource?.identity;
       if (!upstream || !metadata || !identity || metadata.capability?.state !== "supported") return notDone;
@@ -957,6 +972,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const index = plan.groups.findIndex((group) => group.fromRuleIds.includes(rule.id));
       if (index < 0) continue;
       const target = creates[index];
+      if (!target) continue;
       (target.dayExtraKeys ||= { endsAt: nextBillingEffectiveFrom(target.timezone, at), keys: [] }).keys.push({ upstreamStationId: rule.upstreamStationId, tokenId: Number(rule.tokenId), tokenName: rule.tokenName ?? null });
     }
     // 旧绑定：a 和 K2b 一样（safeLastSeenAt：读之前的站点成功时刻，带着没处理完的事的绑定用开着那段的起点）
@@ -972,10 +988,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const rule = byId.get(close.ruleId);
       // 过渡段的起点：用到这条绑定负责的全新 Key 的绑定里最早的 a（合组时几个渠道在 [a, b) 里不同时刻换过去），不早于这条绑定开着那段的起点
       const from = close.windowKeys ? Math.max(openFromOf.get(rule.id), Math.min(...close.windowUsers.map((id) => aOf.get(id)))) : null;
-      closes.push({ ruleId: rule.id, expect: { tokenId: Number(rule.tokenId), channelIds: rule.channels.map((channel) => Number(channel.channelId)) },
-        window: close.windowKeys ? { from, keys: close.windowKeys } : null });
+      // 换到 Sub2API 上游的 Key：Sub2API 只能按整天读，新上游下的新绑定从 b 那天 0 点整天算，所以旧绑定的过渡段只到 b 那天 0 点（b 当天那把新 Key 的用量
+      // 整天由新绑定取，不放在过渡段里读两遍）；过渡段起点不早于 b 那天 0 点时没有过渡段
+      const foreignToSub2 = (close.windowKeys || []).some((key) => key.upstreamStationId !== rule.upstreamStationId && /^sub2api/.test(upstreamStation(key.upstreamStationId)?.type || ""));
+      const cap = foreignToSub2 ? startOfBillingDay(at, rule.timezone) : null;
+      const window = !close.windowKeys || (cap != null && from >= cap) ? null : { from, ...(cap != null ? { to: cap } : {}), keys: close.windowKeys };
+      closes.push({ ruleId: rule.id, expect: { tokenId: Number(rule.tokenId), channelIds: rule.channels.map((channel) => Number(channel.channelId)) }, window });
     }
-    const result = await repository.regroupRules({ at, closes, creates }, { detectedAt: observedAt }).catch(() => null);
+    const result = await repository.regroupRules({ at, closes, creates: creates.filter(Boolean) }, { detectedAt: observedAt }).catch(() => null);
     if (!result || result.stale) return notDone;
     if (result.conflict) {
       for (const close of plan.closes) keyIssues.set(close.ruleId, issueFor(byId.get(close.ruleId), "KEY_GROUP_CHANGED"));
@@ -1681,8 +1701,26 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       wanted = segmentKeyTokens({ segmentKeys: segment?.keys, ruleToken: token, metadata, upstreamStationId });
     }
     if (wanted.length === 1 && (wanted[0].own || wanted[0].token?.id === token?.id)) return upstreamWindowFor(upstream, metadata, token, window, { readOnly });
-    if (wanted.some((item) => item.foreign)) throw codedError("UPSTREAM_KEY_UNVERIFIED", "分段里有别的上游的 Key，这一版读不了");
-    return sumKeyStats(await Promise.all(wanted.map((item) => upstreamWindowFor(upstream, metadata, item.token, window, { readOnly }))));
+    const results = await Promise.all(wanted.map((item) => item.foreign ? foreignKeyWindow(item.key, window, { readOnly }) : upstreamWindowFor(upstream, metadata, item.token, window, { readOnly })));
+    const summed = sumKeyStats(results);
+    // 有别的上游的 Key（换到另一个上游的过渡段）：结果的窗口还是请求的窗口（Sub2API 那把按整天读，窗口放宽了，不触发窗口对不上）
+    return wanted.some((item) => item.foreign) && results.length > 1 ? { ...summed, window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } } : summed;
+  }
+
+  // 换到另一个上游的 Key（K2c-3b）：一段里的 Key 带着自己的上游，别的上游的 Key 去那个上游读（元数据、身份、账单能力都是那个上游的）。
+  // Sub2API 只能按整天读：窗口放宽到包着它的自然日（过渡段只到 b 那天 0 点，见 regroupFor，所以不会和新上游下的新绑定读重）
+  async function foreignKeyWindow(key, window, { readOnly }) {
+    const configured = upstreamStation(key.upstreamStationId);
+    if (!billingStation(configured)) throw codedError("UPSTREAM_KEY_UNVERIFIED", "分段里有别的上游的 Key，找不到那个上游");
+    const station = { ...configured }, foreignMetadata = await metadataFor(station, { timezone: window.timezone });
+    const token = foreignMetadata.tokens?.find((item) => Number(item.id) === Number(key.tokenId)) ?? { id: Number(key.tokenId), name: key.tokenName ?? null, deleted: true };
+    let wide = window;
+    if (/^sub2api/.test(station.type)) {
+      const startMs = startOfBillingDay(window.startMs, window.timezone);
+      const endMs = isDayStartInTz(window.endMs, window.timezone) || window.endMs > Date.now() - 5 * 60 * 1000 ? window.endMs : shiftedDayStartInTz(window.endMs - 1, 1, window.timezone);
+      wide = { ...window, startMs, endMs };
+    }
+    return upstreamWindowFor(station, foreignMetadata, token, wide, { readOnly });
   }
 
   // 按 Key 整体取数的规则（scoped，生产的绑定都是）整窗口只带最新那一段（currentSegment），换过 Key 的窗口里旧 Key 换之前的用量
