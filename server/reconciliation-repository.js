@@ -548,6 +548,26 @@ export class ReconciliationRepository {
       token_id: row.key_token_id, token_name: row.key_token_name, key_mask: row.key_key_mask, match_source: row.key_match_source, active_token_key: row.key_active_token_key })));
   }
 
+  // 几条绑定的分段一次读出来（「渠道」页签：每个渠道经手过的绑定，在算的和已停的）：{ [ruleId]: 分段[] }，一条查询，不按绑定逐条读
+  async listSegmentsForRules(ruleIds) {
+    const ids = [...new Set((ruleIds || []).map(String))];
+    if (!ids.length) return {};
+    const [rows] = await this.pool.query(
+      `SELECT s.*, k.segment_id AS key_segment_id, k.upstream_station_id AS key_upstream_station_id, k.token_id AS key_token_id,
+         k.token_name AS key_token_name, k.key_mask AS key_key_mask, k.match_source AS key_match_source, k.active_token_key AS key_active_token_key
+       FROM reconciliation_rule_segments s LEFT JOIN reconciliation_segment_keys k ON k.segment_id = s.id
+       WHERE s.rule_id IN (?) ORDER BY s.rule_id ASC, s.effective_from_ms ASC, s.created_at ASC, s.effective_to_ms IS NOT NULL DESC, s.effective_to_ms ASC, k.token_id ASC`,
+      [ids]
+    );
+    const segments = [], seen = new Set();
+    for (const row of rows) if (!seen.has(row.id)) { seen.add(row.id); segments.push(segmentFromRow(row)); }
+    attachSegmentKeys(segments, rows.map((row) => ({ segment_id: row.key_segment_id, upstream_station_id: row.key_upstream_station_id,
+      token_id: row.key_token_id, token_name: row.key_token_name, key_mask: row.key_key_mask, match_source: row.key_match_source, active_token_key: row.key_active_token_key })));
+    const byRule = Object.fromEntries(ids.map((id) => [id, []]));
+    for (const segment of segments) byRule[segment.ruleId].push(segment);
+    return byRule;
+  }
+
   async backfillMissingSegmentRatios(ruleId, groups, observedAt = Date.now(), segments = null) {
     const knownRatios = new Map(Object.entries(groups || {}).flatMap(([name, group]) => {
       const ratio = Number(group?.ratio);

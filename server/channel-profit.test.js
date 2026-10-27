@@ -176,7 +176,7 @@ const seg = (extra) => ({ effectiveFrom: 0, effectiveTo: null, group: "a", ratio
 function overviewFixture(args) {
   const f = fixture(args);
   const segments = args.segments || {};
-  f.rt.reconciliation.listSegments = async (id) => segments[id] || [];
+  f.rt.reconciliation.listSegmentsForRules = async (ids) => Object.fromEntries(ids.map((id) => [id, segments[id] || []]));
   f.rt.store.list = () => args.stations || [own, upMine, upShared];
   return f;
 }

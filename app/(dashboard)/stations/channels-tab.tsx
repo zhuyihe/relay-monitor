@@ -366,6 +366,8 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
   const cardsOf = (id: string) => (overview?.cards ?? []).filter((card) => card.upstreamStationId === id)
     .sort((a, b) => ["attention", "running", "stopped"].indexOf(a.state) - ["attention", "running", "stopped"].indexOf(b.state));
   const unmatched = overview?.unmatched ?? [];
+  // 上游的令牌少了读完整 Key 的权限：有两把 Key 分不清，事写在这个上游上（一个上游一件）
+  const revealDenied = unmatched.some((item) => item.reason === "KEY_REVEAL_DENIED" && item.upstreamStationId === selectedId);
   const noKeyList = unmatched.filter((item) => item.reason !== "KEY_REVEAL_DENIED" && item.reason !== "KEY_UNRESOLVED");
 
   const reader = overview?.reader;
@@ -449,6 +451,16 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
           >
             <div className="jy-channels-cards">
               {selected?.type === "newapi-key" ? <p className="jy-caption">{COPY.onlyOneKey}</p> : null}
+              {revealDenied ? (
+                <div className="jy-channels-issue" role="status">
+                  <Sym kind="warn" />
+                  <div className="jy-channels-issue__body">
+                    <b>{reconciliationIssue("KEY_REVEAL_DENIED").plain}</b>
+                    <p className="jy-caption">{reconciliationIssue("KEY_REVEAL_DENIED").detailPlain}</p>
+                  </div>
+                  <Button size="small" onClick={() => (selectedAccount && authorizationEligible(selectedAccount).length ? openAuthorization(selectedAccount) : openEditor(selectedStation))}>{UPDATE_LOGIN.label}</Button>
+                </div>
+              ) : null}
               {!cards.length ? <EmptyState title={COPY.noChannels} desc={COPY.noChannelsDesc} center={false} /> : null}
               {liveCards.map((card) => renderCard(card, selected))}
               {shownStopped.map((card) => renderCard(card, selected))}

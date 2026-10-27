@@ -211,9 +211,10 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     const reader = state.ok ? { state: "ok", stale: state.stale === true } : { state: state.code === "KEY_AGENT_NOT_CONFIGURED" ? "not_configured" : "unavailable", code: state.code };
     const allRules = (await reconciliation().listRules({ includeArchived: true })).filter((rule) => rule.ownStationId === ownStationId);
     const live = allRules.filter((rule) => rule.enabled && !rule.archivedAt);
-    const segmentsOf = new Map(await Promise.all(allRules.map(async (rule) => [rule.id, await reconciliation().listSegments(rule.id).catch(() => [])])));
+    // 「用过的 Key」要的分段：这个自营站点的绑定（在算的和已停的）一次读出来，不按绑定逐条读
+    const segmentsOf = await reconciliation().listSegmentsForRules(allRules.map((rule) => rule.id)).catch(() => ({}));
     const keysOf = (channelIds) => channelKeyLines(allRules.filter((rule) => rule.channels.some((channel) => channelIds.includes(Number(channel.channelId))))
-      .map((rule) => ({ ...rule, segments: segmentsOf.get(rule.id) || [] }))).reverse().slice(0, 50);
+      .map((rule) => ({ ...rule, segments: segmentsOf[rule.id] || [] }))).reverse().slice(0, 50);
     const channelName = (channelId, fallback) => nameOf.get(channelId) ?? fallback ?? `渠道 #${channelId}`;
     const optedOut = new Set((state.ok ? state.channels : []).filter((channel) => channel.optedOut).map((channel) => channel.channelId));
 

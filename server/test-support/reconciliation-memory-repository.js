@@ -330,6 +330,11 @@ export class MemoryReconciliationRepository {
     return attachSegmentKeys(segments, keyRows);
   }
 
+  async listSegmentsForRules(ruleIds) {
+    const ids = [...new Set((ruleIds || []).map(String))];
+    return Object.fromEntries(await Promise.all(ids.map(async (id) => [id, await this.listSegments(id)])));
+  }
+
   // 同 MySQL 版 db/segment-keys.js 的 refreshSegmentKeysSql（几条语句一一对应，改一边要改另一边）：
   // 0 关掉的段、停用/解除的绑定的所有 Key 行不再占 active_token_key；1 没有 Key 行的段补一行；
   // 2 来源是 initial 的行跟着 rules 走——K2b 以后（这条绑定有了非 initial 的行）关掉的段不再跟；

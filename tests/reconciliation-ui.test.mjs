@@ -3611,3 +3611,13 @@ for (const width of [320, 390, 768, 1440]) {
     if (width >= 1200) { const box = await center.locator(".jy-channels-grid").evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").length); assert.equal(box, 2, "桌面左右两栏"); }
   });
 }
+
+test("上游的令牌少了读完整 Key 的权限：事写在这个上游上（一个上游一件），按钮「更新登录信息」打开同一个抽屉；别的上游不带这件事", async (t) => {
+  const overview = channelsOverview({ unmatched: [{ channelId: 6, name: "渠道 6", reason: "KEY_REVEAL_DENIED", upstreamStationId: "A-monitor-1" }] });
+  const { page, center, model } = await openAccountsPage(t, { overview });
+  await center.getByText("上游的令牌少了读完整 Key 的权限", { exact: true }).waitFor();
+  assert.equal(await center.getByText("没对上上游的渠道", { exact: false }).count(), 0, "这件事不在「没对上上游的渠道」里");
+  await center.getByRole("option", { name: /^A-monitor-2/ }).click(); assert.equal(await center.getByText("上游的令牌少了读完整 Key 的权限", { exact: true }).count(), 0);
+  await center.getByRole("option", { name: /^A-monitor-1/ }).click();
+  await center.locator(".jy-channels-issue").getByRole("button", { name: UPDATE_AUTH, exact: true }).click(); await authorizationDialog(page, model.accounts[0].identity.accountId).waitFor();
+});

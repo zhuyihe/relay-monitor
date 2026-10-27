@@ -1999,3 +1999,17 @@ contract("regroupRules: a create with accountingFloorMs null (old rule is Sub2AP
   assert.deepEqual(segments[0].keys.map((key) => key.upstreamStationId).sort(), [otherStation, oldRule.upstreamStationId].sort(), "第一段带着别的上游的旧 Key");
   assert.equal(segments[0].effectiveTo, endsAt);
 });
+
+contract("listSegmentsForRules (K2d): several rules' segments (with keys) in one read, same content as listSegments per rule; no ids gives {}; an unknown id gives an empty list", async ({ repository, fixture }) => {
+  const first = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:l1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(181), name: "A" }] });
+  const second = await fixture.createRule({ tokenId: fixture.token(182), tokenName: "L2", canonicalKey: `up:${fixture.tag}:l2`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(182), name: "B" }] });
+  const batch = await repository.listSegmentsForRules([first.id, second.id, `rr_missing${fixture.tag}`]);
+  assert.deepEqual(Object.keys(batch).sort(), [first.id, second.id, `rr_missing${fixture.tag}`].sort());
+  for (const id of [first.id, second.id]) {
+    const single = await repository.listSegments(id);
+    assert.deepEqual(batch[id].map((segment) => [segment.id, segment.effectiveFrom, segment.effectiveTo, segment.keys.map((key) => key.tokenId)]), single.map((segment) => [segment.id, segment.effectiveFrom, segment.effectiveTo, segment.keys.map((key) => key.tokenId)]));
+    assert.ok(batch[id].length >= 1 && batch[id].every((segment) => segment.keys.length >= 1));
+  }
+  assert.deepEqual(batch[`rr_missing${fixture.tag}`], []);
+  assert.deepEqual(await repository.listSegmentsForRules([]), {});
+});

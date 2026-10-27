@@ -3622,6 +3622,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (!rule) throw ruleNotFound();
       return repository.listSegments(id);
     },
+    // 几条绑定的分段一次读出来（「渠道」页签的「用过的 Key」）：{ [ruleId]: 分段[] }
+    listSegmentsForRules: (ruleIds) => repository.listSegmentsForRules(ruleIds),
     async correctTransition(ruleId, segmentId, effectiveAt) {
       return serializeWrite(async () => {
         const rule = await repository.getRule(ruleId, { includeArchived: true });
