@@ -587,12 +587,15 @@ export class ReconciliationRepository {
 
   // 这个自营站点下，这把 Key 已经关掉的段（在算的、已停的绑定都算）里最晚的结束时刻；从没被握过是 null。每把 Key 恰好算一次：换 Key 时新 Key 在这条绑定里
   // 最早从这一刻算起。只按这把 Key 查（走 idx_segment_key_token(upstream_station_id, token_id)），不读整个站点所有绑定的所有段
-  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null, conn = null } = {}) {
+  // excludeRuleIds：不算这几条绑定自己的段（重新分组：牵连进来的旧绑定在同一个事务里归档，它们的段不算「别的持有者」）
+  // excludeArchived：不算已归档绑定的段（Sub2API 归档那天整天不算，它那天不读这把 Key，不构成「这天已经算给了别人」）
+  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null, excludeRuleIds = null, excludeArchived = false, conn = null } = {}) {
+    const exclude = (excludeRuleIds || []).map(String);
     const [rows] = await (conn || this.pool).query(
       `SELECT MAX(s.effective_to_ms) AS held_until FROM reconciliation_segment_keys k
          JOIN reconciliation_rule_segments s ON s.id = k.segment_id JOIN reconciliation_rules r ON r.id = s.rule_id
-        WHERE k.upstream_station_id = ? AND k.token_id = ? AND r.own_station_id = ? AND s.effective_to_ms IS NOT NULL AND s.effective_to_ms >= ?`,
-      [upstreamStationId, tokenId, ownStationId, sinceMs ?? 0]);
+        WHERE k.upstream_station_id = ? AND k.token_id = ? AND r.own_station_id = ? AND s.effective_to_ms IS NOT NULL AND s.effective_to_ms >= ?${exclude.length ? " AND r.id NOT IN (?)" : ""}${excludeArchived ? " AND r.archived_at_ms IS NULL AND r.archived_at IS NULL" : ""}`,
+      [upstreamStationId, tokenId, ownStationId, sinceMs ?? 0, ...(exclude.length ? [exclude] : [])]);
     return rows[0]?.held_until == null ? null : Number(rows[0].held_until);
   }
 
@@ -1044,10 +1047,12 @@ export class ReconciliationRepository {
         }
         await conn.query("UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, archived_at = NOW(), archived_at_ms = ? WHERE id = ? AND archived_at IS NULL", [at, close.ruleId]);
         await conn.query("UPDATE reconciliation_rule_channels SET active_channel_key = NULL WHERE rule_id = ?", [close.ruleId]);
+        // 归档的同时记下这条旧绑定的冲突期（比如推迟的重新分组，a 到 b 那段它真用了什么 Key 不知道），和归档同一个事务
+        if (close.keyBlocks?.length) await conn.query("UPDATE reconciliation_rules SET key_blocks = ? WHERE id = ?", [JSON.stringify(close.keyBlocks.reduce((blocks, block) => addKeyBlock(blocks, block), keyBlocksOf(rule.key_blocks))), close.ruleId]);
         await refreshSegmentKeys(conn, close.ruleId);
       }
       const createdIds = [];
-      for (const input of creates) createdIds.push(await this.insertRuleOn(conn, input, { now: at, floorOverride: at }));
+      for (const input of creates) createdIds.push(await this.insertRuleOn(conn, input, { now: at, floorOverride: input.accountingFloorMs !== undefined ? input.accountingFloorMs : at }));
       await conn.commit();
       return { conflict: false, stale: false, ruleIds: createdIds };
     } catch (err) {

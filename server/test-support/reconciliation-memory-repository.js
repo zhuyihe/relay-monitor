@@ -16,7 +16,7 @@ import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
-  uid, addKeyBlock, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale, regroupIsStale,
+  uid, addKeyBlock, keyBlocksOf, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale, regroupIsStale,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
   SETTLEMENT_STATE_WRITE_COLUMNS, settlementStateFromRow, settlementStateValues,
 } from "../reconciliation-repository.js";
@@ -541,9 +541,10 @@ export class MemoryReconciliationRepository {
   }
 
   // 对应 MySQL 版 keyHeldUntil
-  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null } = {}) {
+  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null, excludeRuleIds = null, excludeArchived = false } = {}) {
     const rules = new Map(this.#plain("rules").map((row) => [row.id, row]));
-    const ends = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && Number(segment.effective_to_ms) >= (sinceMs ?? 0)
+    const exclude = new Set((excludeRuleIds || []).map(String));
+    const ends = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && Number(segment.effective_to_ms) >= (sinceMs ?? 0) && !exclude.has(String(segment.rule_id)) && !(excludeArchived && (rules.get(segment.rule_id)?.archived_at != null || rules.get(segment.rule_id)?.archived_at_ms != null))
       && rules.get(segment.rule_id)?.own_station_id === ownStationId
       && this.#plain("segmentKeys").some((key) => key.segment_id === segment.id && key.upstream_station_id === upstreamStationId && Number(key.token_id) === Number(tokenId)))
       .map((segment) => Number(segment.effective_to_ms));
@@ -691,12 +692,13 @@ export class MemoryReconciliationRepository {
             for (const key of close.window.keys) this.#insert(tx, "segmentKeys", { segment_id: id, upstream_station_id: key.upstreamStationId, token_id: bigint(key.tokenId),
               token_name: key.tokenName ?? null, key_mask: null, match_source: "agent", active_token_key: null });
           }
-          this.#update(tx, "rules", [entry], { enabled: 0, active_token_key: null, archived_at: this.#timestamp(), archived_at_ms: bigint(at) });
+          this.#update(tx, "rules", [entry], { enabled: 0, active_token_key: null, archived_at: this.#timestamp(), archived_at_ms: bigint(at),
+            ...(close.keyBlocks?.length ? { key_blocks: JSON.stringify(close.keyBlocks.reduce((blocks, block) => addKeyBlock(blocks, block), keyBlocksOf(entry.row.key_blocks))) } : {}) }); // 同 MySQL 版：冲突期和归档同一个事务
           this.#update(tx, "channels", this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, close.ruleId)), { active_channel_key: null });
           this.#refreshSegmentKeys(tx, close.ruleId);
           tx.record.archivedRuleIds.push(close.ruleId);
         }
-        createdIds = creates.map((input) => this.#insertRule(tx, input, { now: at, floorOverride: at }));
+        createdIds = creates.map((input) => this.#insertRule(tx, input, { now: at, floorOverride: input.accountingFloorMs !== undefined ? input.accountingFloorMs : at }));
       });
     } catch (err) {
       if (err?.staleRegroup) return { conflict: false, stale: true };
