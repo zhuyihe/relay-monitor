@@ -13,7 +13,7 @@ import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, serializeR
 import { billDayOf } from "../../lib/business-time.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, resettleRequestPlan } from "../../lib/reconciliation-settlement.js";
 import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
-import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
+import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
   uid, addKeyBlock, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale, regroupIsStale,
@@ -904,6 +904,37 @@ export class MemoryReconciliationRepository {
     const doomed = this.#rows("settlementState").filter(({ row }) => row.bill_date < beforeDate && (row.resettle_requested_at_ms == null || row.resettle_requested_at_ms < requestedBeforeMs) && !RESETTLE_KEPT_REASONS.includes(row.manual_reason)).slice(0, limit);
     this.#delete(null, "settlementState", doomed);
     return doomed.length;
+  }
+
+  async listLedgerDaysByReason(ruleIds, sinceDate, reason) {
+    if (!ruleIds?.length) return [];
+    await this.#read("listLedgerDaysByReason", [ruleIds, sinceDate, reason]);
+    const wanted = new Set(ruleIds.map(String));
+    return this.#plain("ledger").filter((row) => wanted.has(String(row.rule_id)) && row.bill_date >= sinceDate && row.gap_reason === reason && row.expected_cost_usd == null
+      && Number(row.revision) === this.#ledgerOf(null, row.rule_id, row.bill_date)[0].revision)
+      .sort((a, b) => compare(a.bill_date, b.bill_date) || compareText(a.rule_id, b.rule_id)).map((row) => ({ ruleId: row.rule_id, billDate: row.bill_date }));
+  }
+
+  async fillExpectedCost(ruleId, billDate, { expectedCostUsd = null, gapReason = null, tokens = null, expected = null, revision = null } = {}) {
+    await this.#read("fillExpectedCost", [ruleId, billDate]);
+    const top = this.#ledgerOf(null, ruleId, billDate)[0];
+    const entry = top ? this.#rows("ledger").find(({ row }) => row === top) : null;
+    // revision 是调用方读那一行时的版本号，不重查「现在的最新一版」：对不上（这期间插进来一次重结写出新版）就不填（审核 R2 #125 低-2）
+    if (!entry || entry.row.expected_cost_usd != null || entry.row.gap_reason !== "EXPECTED_COST_LAGGING" || Number(entry.row.revision) !== Number(revision)) return false;
+    const detail = typeof entry.row.detail === "string" ? JSON.parse(entry.row.detail || "{}") : { ...(entry.row.detail || {}) };
+    (this.log.ledgerFills ||= []).push({ ruleId, billDate, revision: entry.row.revision });
+    this.#update(null, "ledger", [entry], { expected_cost_usd: expectedCostUsd == null ? null : ledgerDecimal(expectedCostUsd, LEDGER_DECIMAL_SCALE.expected_cost_usd), gap_reason: gapReason, tokens,
+      detail: JSON.stringify({ ...detail, expected }) });
+    return true;
+  }
+
+  async listLedgerDayFacts(ruleIds, fromDate, toDate) {
+    if (!ruleIds?.length) return [];
+    await this.#read("listLedgerDayFacts", [ruleIds, fromDate, toDate]);
+    const wanted = new Set(ruleIds.map(String));
+    return this.#plain("ledger").filter((row) => wanted.has(String(row.rule_id)) && row.bill_date >= fromDate && row.bill_date <= toDate
+      && Number(row.revision) === this.#ledgerOf(null, row.rule_id, row.bill_date)[0].revision)
+      .sort((a, b) => compare(a.bill_date, b.bill_date) || compareText(a.rule_id, b.rule_id)).map((row) => ledgerDayFactFromRow(ledgerRead(row)));
   }
 
   async latestLedgerEntry(ruleId, window) {
