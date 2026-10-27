@@ -8,6 +8,7 @@
 //   failRequestWrites({ repository })                让之后写重结请求的那一步抛错，返回恢复的函数（改切换时间的事务里，请求写不进去要连分段一起回滚）
 //   backdateRule({ repository, ruleId, createdAtMs })  把一条绑定的建立时刻改到过去（改时间要写重结请求的日子得在建绑定之后，用例里只能这样造）
 //   insertSegmentKeyRow({ repository, segmentId, upstreamStationId, tokenId, tokenName })  给一段多插一行 Key（K1c 这版公开方法造不出一段多把 Key，这是唯一的造法，K2b 开始写才会真的发生）
+//   deleteSegmentKeyRows({ repository, ruleId })      把一条绑定所有分段的 Key 行删光（旧版本留下的绑定没有 Key 行：重新分组、换 Key 切段前要先补上，只能这样造）
 //   teardown()                                       全部用例结束后释放资源
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -156,7 +157,7 @@ function settlement(snapshot, { resettle = false, ...rates } = {}) {
 const CASES = [];
 const contract = (title, run) => CASES.push([title, run]);
 
-export function defineReconciliationRepositoryContract({ name, create, cleanup = async () => {}, inspectSnapshot = null, backdateRule = null, failRequestWrites = null, insertSegmentKeyRow = null, teardown = null }) {
+export function defineReconciliationRepositoryContract({ name, create, cleanup = async () => {}, inspectSnapshot = null, backdateRule = null, failRequestWrites = null, insertSegmentKeyRow = null, deleteSegmentKeyRows = null, teardown = null }) {
   test(`reconciliation repository contract: ${name}`, { timeout: 120000 }, async (t) => {
     if (teardown) t.after(teardown);
     for (const [title, run] of CASES) {
@@ -168,7 +169,8 @@ export function defineReconciliationRepositoryContract({ name, create, cleanup =
           const backdate = backdateRule && ((ruleId, createdAtMs) => backdateRule({ repository, ruleId, createdAtMs }));
           const failRequests = failRequestWrites && (() => failRequestWrites({ repository }));
           const insertKey = insertSegmentKeyRow && ((args) => insertSegmentKeyRow({ repository, ...args }));
-          await run({ repository, fixture, inspect, backdate, failRequests, insertKey });
+          const deleteKeys = deleteSegmentKeyRows && ((ruleId) => deleteSegmentKeyRows({ repository, ruleId }));
+          await run({ repository, fixture, inspect, backdate, failRequests, insertKey, deleteKeys });
         } finally {
           await cleanup({ repository, ruleIds: await fixture.collectRuleIds(), capabilityIdentities: [...fixture.capabilityIdentities] });
         }
@@ -1938,6 +1940,77 @@ contract("regroupRules: a merge — the old rules are archived at b without a wi
   assert.equal((await repository.listSegments(first.id)).length, 1, "合组：旧绑定不开过渡段");
   const created = await repository.getRule(result.ruleIds[0]);
   assert.deepEqual(created.channels.map((channel) => channel.channelId).sort((x, y) => x - y), [fixture.channel(94), fixture.channel(96)].sort((x, y) => x - y));
+});
+
+contract("regroupRules: an old rule whose segments have no key rows yet still carries its own key — the first segment and the window both hold it (key rows are filled in before the segment is cut)", async ({ repository, fixture, deleteKeys }) => {
+  const oldRule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:f1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(101), name: "A" }, { channelId: fixture.channel(102), name: "B" }] });
+  const oldRef = { upstreamStationId: oldRule.upstreamStationId, tokenId: oldRule.tokenId, tokenName: oldRule.tokenName };
+  const newRef = { upstreamStationId: oldRule.upstreamStationId, tokenId: fixture.token(103), tokenName: "T2" };
+  await deleteKeys(oldRule.id);
+  assert.deepEqual((await repository.listSegments(oldRule.id)).flatMap((segment) => segment.keys), [], "先把 Key 行删光，造出旧版本的样子");
+  const a = EFFECTIVE_FROM + HOUR, b = a + 5 * 60 * 1000;
+  const groupInput = (ref, channelId, name, canonicalKey) => fixture.ruleInput({ tokenId: ref.tokenId, tokenName: ref.tokenName, canonicalKey, billingPolicy: "immediate", channels: [{ channelId, name }] });
+  const result = await repository.regroupRules({ at: b, closes: [{ ruleId: oldRule.id, expect: { tokenId: oldRule.tokenId, channelIds: [fixture.channel(101), fixture.channel(102)] }, window: { from: a, keys: [oldRef, newRef] } }],
+    creates: [groupInput(oldRef, fixture.channel(101), "A", `up:${fixture.tag}:f1`), groupInput(newRef, fixture.channel(102), "B", `up:${fixture.tag}:f2`)] });
+  assert.deepEqual([result.conflict, result.stale], [false, false]);
+  result.ruleIds.forEach((id) => fixture.ruleIds.add(id));
+  const segments = await repository.listSegments(oldRule.id);
+  assert.deepEqual(segments.map((segment) => segment.keys.map((key) => key.tokenId).sort((x, y) => x - y)),
+    [[oldRef.tokenId], [oldRef.tokenId, newRef.tokenId].sort((x, y) => x - y)], "第一段补上了它自己那把 Key，过渡段两把都在");
+});
+
+contract("regroupRules: the new rules' accounting floor is exactly b (floorOverride), not the floor createRule would compute from a rule archived earlier the same day", async ({ repository, fixture }) => {
+  const oldRule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:g1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(111), name: "A" }, { channelId: fixture.channel(112), name: "B" }] });
+  // 同一个自营站点、同一个渠道（113）下更早停掉的绑定：createRule 会把新绑定的下限抬到它停的那一刻（C3），重新分组不能这样——新绑定从 b 起算，不看别人
+  const earlier = await fixture.createRule({ tokenId: fixture.token(114), tokenName: `Contract ${fixture.tag} E`, canonicalKey: `up:${fixture.tag}:g-earlier`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(113), name: "C" }] });
+  const a = EFFECTIVE_FROM + HOUR, b = a + 5 * 60 * 1000, stoppedAt = a - 10 * 60 * 1000;
+  assert.equal(await repository.archiveRule(earlier.id, { now: stoppedAt }), true);
+  const input = fixture.ruleInput({ tokenId: oldRule.tokenId, tokenName: oldRule.tokenName, canonicalKey: `up:${fixture.tag}:g1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(111), name: "A" }, { channelId: fixture.channel(113), name: "C" }] });
+  const result = await repository.regroupRules({ at: b, closes: [{ ruleId: oldRule.id, expect: { tokenId: oldRule.tokenId, channelIds: [fixture.channel(111), fixture.channel(112)] }, window: null }], creates: [input] });
+  assert.deepEqual([result.conflict, result.stale], [false, false]);
+  result.ruleIds.forEach((id) => fixture.ruleIds.add(id));
+  const created = await repository.getRule(result.ruleIds[0]);
+  assert.equal(created.accountingFloorMs, b, "下限就是 b，不是更早停掉的那条绑定停的时刻");
+  assert.notEqual(b, stoppedAt);
+});
+
+contract("regroupRules: a rule that is disabled but not archived is stale (nothing written)", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:h1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(121), name: "A" }] });
+  await repository.updateRule(rule.id, { enabled: false });
+  const before = JSON.stringify(await repository.listRules({ includeArchived: true }).then((rules) => rules.filter((item) => fixture.ruleIds.has(item.id))));
+  const input = fixture.ruleInput({ tokenId: fixture.token(122), tokenName: "N", canonicalKey: `up:${fixture.tag}:h-new`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(121), name: "A" }] });
+  const result = await repository.regroupRules({ at: EFFECTIVE_FROM + HOUR, closes: [{ ruleId: rule.id, expect: { tokenId: rule.tokenId, channelIds: [fixture.channel(121)] }, window: null }], creates: [input] });
+  assert.deepEqual(result, { conflict: false, stale: true });
+  assert.equal(JSON.stringify(await repository.listRules({ includeArchived: true }).then((rules) => rules.filter((item) => fixture.ruleIds.has(item.id)))), before, "什么也没写：没有归档、没有新绑定");
+});
+
+contract("regroupRules: keyBlocks on a new rule are stored with it (the conflict period [first recognised, this round) travels to the new binding)", async ({ repository, fixture }) => {
+  const oldRule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:k1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(131), name: "A" }] });
+  const b = EFFECTIVE_FROM + 2 * HOUR;
+  const input = fixture.ruleInput({ tokenId: fixture.token(132), tokenName: "N", canonicalKey: `up:${fixture.tag}:k-new`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(131), name: "A" }],
+    keyBlocks: [{ code: "KEY_CONFLICT_GAP", sinceMs: b, untilMs: b + HOUR }, { code: "KEY_CONFLICT_GAP", sinceMs: b + HOUR, untilMs: b + 2 * HOUR }] });
+  const result = await repository.regroupRules({ at: b, closes: [{ ruleId: oldRule.id, expect: { tokenId: oldRule.tokenId, channelIds: [fixture.channel(131)] }, window: null }], creates: [input] });
+  assert.deepEqual([result.conflict, result.stale], [false, false]);
+  result.ruleIds.forEach((id) => fixture.ruleIds.add(id));
+  assert.deepEqual((await repository.getRule(result.ruleIds[0])).keyBlocks, [{ code: "KEY_CONFLICT_GAP", sinceMs: b, untilMs: b + 2 * HOUR }], "相邻的并成一段");
+});
+
+contract("regroupRules: close.archiveAt archives the old rule at that moment (no window tail after it) and close.keyBlocks are stored with the archive; an archiveAt before the open segment's start is stale", async ({ repository, fixture }) => {
+  const oldRule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:m1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(141), name: "A" }] });
+  const newRef = { upstreamStationId: oldRule.upstreamStationId, tokenId: fixture.token(142), tokenName: "N" };
+  const a = EFFECTIVE_FROM + HOUR, cap = a + HOUR, b = cap + HOUR;
+  const input = fixture.ruleInput({ tokenId: newRef.tokenId, tokenName: "N", canonicalKey: `up:${fixture.tag}:m-new`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(141), name: "A" }] });
+  const expect = { tokenId: oldRule.tokenId, channelIds: [fixture.channel(141)] };
+  assert.deepEqual(await repository.regroupRules({ at: b, closes: [{ ruleId: oldRule.id, expect, window: null, archiveAt: EFFECTIVE_FROM - 1000 }], creates: [input] }), { conflict: false, stale: true }, "archiveAt 早于开着那段的起点：不写");
+  const result = await repository.regroupRules({ at: b, closes: [{ ruleId: oldRule.id, expect, window: { from: a, keys: [{ upstreamStationId: oldRule.upstreamStationId, tokenId: oldRule.tokenId }, newRef] }, archiveAt: cap,
+    keyBlocks: [{ code: "KEY_CONFLICT_GAP", sinceMs: a, untilMs: cap }] }], creates: [input] });
+  assert.deepEqual([result.conflict, result.stale], [false, false]);
+  result.ruleIds.forEach((id) => fixture.ruleIds.add(id));
+  const archived = await repository.getRule(oldRule.id, { includeArchived: true });
+  assert.equal(archived.archivedAtMs, cap, "在 archiveAt 归档，不是 b");
+  assert.deepEqual(archived.keyBlocks, [{ code: "KEY_CONFLICT_GAP", sinceMs: a, untilMs: cap }], "冲突期和归档同一个事务写进去");
+  const segments = await repository.listSegments(oldRule.id);
+  assert.deepEqual(segments.map((segment) => [segment.effectiveFrom, segment.effectiveTo]), [[EFFECTIVE_FROM, a], [a, cap]], "过渡段到 archiveAt 为止，没有 [archiveAt, b) 的尾巴");
 });
 
 contract("regroupRules: stale plans (the rule's key or channels changed since, a before the open segment, b before a) and unique-key conflicts write nothing", async ({ repository, fixture }) => {
