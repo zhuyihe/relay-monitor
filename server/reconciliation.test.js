@@ -11286,7 +11286,7 @@ const RG_NAMES = { 9: "stable", 10: "stable-rr_b", 11: "stable-rr_c", 12: "stabl
 const rgT = (iso) => Date.parse(iso);
 const rgTokenAt = (timeline, channel, ms) => { let current = null; for (const [from, token] of timeline[channel]) if (from <= ms) current = token; return current; };
 // 每把 Key 每秒花多少美元：默认 1，「stable-rr_b」（10）3——两把 Key 速率不同，算到谁头上才看得出来
-const RG_RATE = { 10: 3 };
+const RG_RATE = { 10: 3, 12: 0 }; // 12 是「没有用量」：渠道停手以后换到它
 function rgUsageSec(timeline, tokenId, fromMs, toMs) {
   let total = 0;
   for (const points of Object.values(timeline)) for (let i = 0; i < points.length; i += 1) {
@@ -11479,8 +11479,7 @@ test("K2b：读取服务给的读库时刻不可信（confirmedAtMs 为 null）�
 
 // 审核 3 提、总指挥 10-27 定：同一把 Key 今天早些时候被绑定 A（不在这次重新分组牵连的范围里）握过，之后重新分组把这把 Key 给了新建的绑定 B——
 // B 对这把 Key 的下限 = A 那一段结束的时刻（每把 Key 恰好算一次），不能从 0 点（Sub2API 整天）或 a 起算，把 A 自己的用量也算给 B。Key 速率 1:3，逐条绑定断言
-// Sub2API 版在 #150（按时间认领）里跑：#144 这一层 Sub2API 整天读，同一天在两条绑定之间换手切不开
-for (const sub2 of [false]) {
+for (const sub2 of [false, true]) {
   test(`K2c 重新分组：新建的绑定拿到一把今天早些时候别的绑定（没牵连进来）握过的 Key——只算 A 停手以后的，A 那段不算两遍（${sub2 ? "Sub2API" : "New API"}，Key 速率 1:3）`, async (t) => {
     // 渠道 3（绑定 A = rr_b）12:00（SH 10-12 04:00）前用 Key 10（每秒 3 美元），之后换到 Key 21；渠道 2（绑定 rr_live 的两个渠道之一）09:00 换到 Key 10，重新分组把它给新绑定 B
     const s = await regroupTimeline(t, { rules: ["rr_b"], channelsByRule: { rr_live: [1, 2], rr_b: [3] }, sub2,
@@ -11493,5 +11492,22 @@ for (const sub2 of [false]) {
     assert.equal(Number(rowOf("2026-10-12", "rr_b").cost_usd), 3 * 14400 + 72000, "A 那天的数");
     assert.equal(Number(rowOf("2026-10-12", fresh[0].id).cost_usd), 3 * 54000, "B 那天只算自己从 09:00 起的 Key 10");
     for (const day of ["2026-10-12", "2026-10-13", "2026-10-14"]) assert.equal(s.costOn(day), s.truthOn(day), `${day}：所有绑定的和 = 各把 Key 当天用量之和`);
+  });
+}
+
+// 审核 #133 补测（审核 2，Key 速率 1:3）：已归档的上一个持有者给下限。绑定 A（rr_b，渠道 2）10-13 00:30Z 被用户停了（归档，最后一段不关），
+// 渠道 1（绑定 rr_live）00:40Z 换到 A 的 Key 10：换 Key 的新 Key 下限 = A 不再握这把 Key 的那一刻，不把 A 自己的用量算给 rr_live
+for (const sub2 of [false, true]) {
+  test(`K2b 换到一把刚被停掉（归档）的绑定握过的 Key：下限 = 那条绑定不再握它的那一刻，A 的用量不算两遍（${sub2 ? "Sub2API" : "New API"}，Key 速率 1:3）`, async (t) => {
+    const stopAt = rgT("2026-10-13T00:30:00Z");
+    const s = await regroupTimeline(t, { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, sub2,
+      hooks: { [RG_ROUNDS.indexOf(rgT("2026-10-13T01:00:00Z"))]: async ({ f }) => { await f.repository.archiveRule("rr_b", { now: stopAt }); } },
+      timeline: { 1: [[0, 9], [rgT("2026-10-13T00:40:00Z"), 10]], 2: [[0, 10], [stopAt, 12]] } }); // Key 12 速率 0：渠道 2 停手以后没有用量
+    const rowOf = (day, ruleId) => s.latestRows(day).find((row) => row.rule_id === ruleId);
+    // 10-13（SH，10-12 16:00Z 起）：rr_live 的 Key 9 到 00:40Z（31200）+ Key 10 从 00:30Z 起（3 × 55200，不含 A 在 00:30Z 以前的）。
+    // A 自己停手那天（10-13）的行：Key 10 同一天又被 rr_live 握着，A 那天结不了（CANONICAL_KEY_CONFLICT，停手当天 Key 换手的老问题，见 PR 说明），所以那天不比总和
+    // Sub2API：A 停手那天整天不算（C③），所以 rr_live 从 a 起认领 Key 10 不会和 A 算两遍，这一天不比单条的数；New API 按停的那一刻切
+    if (!sub2) assert.equal(Number(rowOf("2026-10-13", "rr_live").cost_usd), 31200 + 3 * 55200, "rr_live 那天的数：Key 10 从 A 停手的 00:30Z 起，不含 A 在那以前的");
+    assert.equal(s.costOn("2026-10-14"), s.truthOn("2026-10-14"), "10-14：所有绑定的和 = 各把 Key 当天用量之和");
   });
 }
