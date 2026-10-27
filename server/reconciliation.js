@@ -529,7 +529,11 @@ function sourceSnapshot(token, metadata, upstream, downstream) {
 export function createReconciliationModule(rt, { repository = new ReconciliationRepository(rt.pool), stationUsageCost = defaultStationUsageCost,
   lookbackBudget = null, lookbackTimeMs = null, lookbackDelayMs = 60000 + Math.floor(Math.random() * 4 * 60000),
   // 自营站点整站日志的小时桶（应付成本 V1-a）：测试传内存实现；ownLogIngest: false 关掉整站读（只在测试里）
-  ownLogStore = null, ownLogIngest = true } = {}) {
+  ownLogStore = null, ownLogIngest = true,
+  // 减压 PR（总指挥 10-26 定）：没人看「今天」页面的起算点，由调用方注入——生产启动那一处（lib/runtime.js）传 Date.now()，
+  // 刚启动、还没有页面来过就从这一刻起算 10 分钟，不然每次重启（watchtower 拉新镜像）都会把「没人看」清零；不传就是 null：
+  // 从没有页面来过不算没人看（测试走这条，和以前一样）。重启后要是有人开着页面，页面每 30 秒来一次，马上刷新，不用存库。
+  viewerIdleSince = null } = {}) {
   const ownLog = createOwnLogIngest(rt, { store: ownLogStore || (rt._ownLogStore ||= new OwnLogStore(rt.pool)), log: (...args) => console.debug(...args) });
   const upstreamPricing = (rt._upstreamPricing ||= createUpstreamPricing(rt));
   const resultCache = (rt._reconciliationResultCache ||= new Map());
@@ -554,13 +558,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   //   ownChannelActivity：每个渠道（和 ownRevenueCache 同一份 key，再加渠道号）上一次真的问到的净额度、什么时候问的——
   //     没人看「今天」页面超过 OWN_VIEWER_IDLE_MS 时，所有渠道（不管本身有没有新消费）都放慢到 OWN_VIEWER_IDLE_RECHECK_MS 才真的再问一次；
   //   lastTodayViewAt：最近一次有页面来要「今天/近 7 天/本月」这类实时窗口的时刻（queryRules 里 origin "page" 时更新，
-  //     借用页面本来就有的轮询，不额外发请求）；at 一开始是 null——从来没有页面来过时，不当「没人看」，照旧每轮问（不用等
-  //     第一次页面来访才开始计时，也不会撞上 P1a 那组从不模拟页面访问的测试）；空闲后第一次又有人来，立刻让这一轮跑。
+  //     借用页面本来就有的轮询，不额外发请求）；at 一开始是调用方注入的 viewerIdleSince（生产启动传启动时刻，测试不传是 null，
+  //     null = 从没有页面来过不算没人看，照旧每轮问）；空闲后第一次又有人来，立刻让这一轮跑。
   // 只影响轮询「今天」这一路实时刷新（reuse 只在 observe+poll+实时窗口才为真）：结账、告警、日报走各自的窗口和路径，不受影响。
   // 整站级的「有没有新消费」探测（markQuietOwnStations）留着当总闸：整站都没新消费时，这里都不会跑到（上面整站级沿用先返回了）。
   // 按渠道各自判断安不安静这次不做（总指挥 10-26 定）：等以后「今天」改从整站读的小时桶算，根本不再按渠道问 stat 时一并解决。
   const ownChannelActivity = (rt._reconciliationOwnChannelActivity ||= new Map());
-  const lastTodayViewAt = (rt._reconciliationLastTodayViewAt ||= { at: null, wokeUpAt: 0 });
+  const lastTodayViewAt = (rt._reconciliationLastTodayViewAt ||= { at: viewerIdleSince, wokeUpAt: 0 });
   // ownExclusion：各自营站点每段窗口里管理员自用、渠道测试日志的累计（每个来源：按渠道的额度、翻到的最大编号），「今天」接着翻、结账用它对账
   const ownExclusionCache = (rt._reconciliationOwnExclusion ||= new Map());
   const observationWrites = (rt._reconciliationObservationWrites ||= new Map());
@@ -3242,8 +3246,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 }
 
 // 每轮结束后按当前设置排下一轮：改了刷新间隔不用重启，慢的一轮也不会和下一轮重叠。
-export function startReconciliationPolling(rt) {
-  const module = (rt.reconciliation ||= createReconciliationModule(rt));
+export function startReconciliationPolling(rt, options = {}) {
+  const module = (rt.reconciliation ||= createReconciliationModule(rt, options));
   if (rt._reconciliationPollTimer) return module;
   const schedule = (delayMs) => {
     rt._reconciliationPollTimer = setTimeout(tick, delayMs);

@@ -5021,6 +5021,39 @@ test("减压 PR：没人看「今天」页面超过 10 分钟就放慢，有人�
   assert.ok(yesterday.results[0].downstream.amountUsd != null, "昨天已经结过账，有数");
 });
 
+// 减压 PR（总指挥 10-26 定）：进程刚启动、还没有任何页面来过——生产启动那一处传 viewerIdleSince（启动时刻），从那一刻起算 10 分钟没人看就放慢；
+// 之后来一次页面请求，下一轮立刻补一轮。测试默认不传（null），从没人看过不算没人看，P1a 那组照旧
+test("减压 PR：启动后一直没有页面来（传了 viewerIdleSince），过 10 分钟就放慢；再来一次页面请求，下一轮立刻补一轮", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { viewerIdleSince: now } });
+  const logs = [{ id: 1, created_at: Math.floor(now / 1000) - 60 }];
+  const newLog = () => logs.push({ id: logs.length + 1, created_at: Math.floor(now / 1000) - 1 });
+  const siteLogs = ownLogList(logs, []);
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !ownSourceRead(url)) {
+      f.state.requests.push({ host: url.host, path: url.pathname, query: url.search });
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota: 100 } }) };
+    }
+    return prev(input, init);
+  });
+  const statCallsFor = (channelId) => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat"
+    && new URLSearchParams(request.query).get("channel") === String(channelId)).length;
+  const round = async (ms = 60000) => { now += ms; newLog(); const before = statCallsFor(2); await f.module.refreshDue(now); return statCallsFor(2) - before; };
+
+  assert.equal(await round(), 2, "刚启动：还没满 10 分钟，照旧每分钟问；这一轮还要结昨天，渠道 2 多问一次");
+  for (let i = 0; i < 8; i += 1) assert.equal(await round(), 1, "启动后 10 分钟内：照旧每分钟问");
+  await round(); // 满 10 分钟，这一轮还是正常问的（门槛是超过 10 分钟）
+  await round();
+  assert.equal(await round(), 0, "启动后一直没有页面来，超过 10 分钟：放慢，这一轮沿用");
+  assert.equal(await round(), 0, "还在放慢");
+  await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" });
+  assert.equal(await round(), 1, "有页面来了：下一轮立刻补一轮，不等满 5 分钟");
+  assert.equal(await round(), 1, "有人看：照旧每分钟问");
+});
+
 test("P1b 轮询按时间重读上游：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟；Key 账单报错、有收入而 Key 用量为 0、目录里找不到 Key，下一轮马上全部重读；页面「刷新」照旧强制", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now });
