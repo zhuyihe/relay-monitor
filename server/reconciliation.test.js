@@ -7274,7 +7274,7 @@ function displayTimeFixture(t, { keyLogs }) {
     keyLogs,
   });
   const logCalls = () => f.state.requests.filter((request) => request.path === "/api/log/self");
-  return { f, logCalls, async change() {
+  return { f, logCalls, setNow(value) { now = value; }, async change() {
     await f.module.refreshDue(now); // 第一轮：锚定
     this.callsBeforeChange = logCalls().length;
     currentKey = keyTen;
