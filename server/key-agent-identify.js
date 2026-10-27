@@ -179,9 +179,9 @@ export const IDENTIFY_CACHE_MS = 4 * 60 * 1000;
 // 读取服务自己读库最多隔这么久读一次（agent/snapshot.js MIN_READ_GAP_MS）：它给的快照最多这么旧。304 没有 readAt，
 // 「这个时刻 Key 还是原来的」只能保证到「现在往前推这么久」
 export const KEY_AGENT_READ_LAG_MS = 4 * 60 * 1000;
-// readAt 是读取服务那台机器的时钟，控制台不能照单全收（审核 #133 第 2 轮 M1）：快照最多这么旧、最多比控制台的钟快这么一点才信；
+// readAt 是读取服务那台机器的时钟，控制台不能照单全收（审核 #133 第 2 轮 M1）：快照最多这么旧（读取服务自己最多缓存 4 分钟，再留 3 分钟的钟差）、最多比控制台的钟快这么一点才信；
 // 超出（那台机器的钟快了或慢了）就丢掉，用控制台拿到快照的时刻——b 偏快会把 a 卡在将来、挡住将来的日子，偏慢会漏掉 [真正换 Key, b) 新 Key 的用量
-export const KEY_AGENT_READ_AT_MAX_AGE_MS = 15 * 60 * 1000, KEY_AGENT_READ_AT_MAX_AHEAD_MS = 60 * 1000;
+export const KEY_AGENT_READ_AT_MAX_AGE_MS = 7 * 60 * 1000, KEY_AGENT_READ_AT_MAX_AHEAD_MS = 60 * 1000;
 // 认出的结果里还有没认定的（not_found、ambiguous、unresolved，或者少了 api_key:reveal 权限）：这类状态会随上游目录、权限变化自己好，
 // 读取服务回 304 也要重新对一遍上游目录；全都认定了（identified / keyless）的，304 就沿用，不多读上游（审核 #131「别多读上游」）
 // 没认定的状态（渠道 Key 不在已加的上游里是会持续很久的真实场景）重新对上游目录的间隔：读取服务回 304 时最多每 15 分钟对一次，
