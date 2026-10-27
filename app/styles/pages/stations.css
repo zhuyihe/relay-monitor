@@ -78,7 +78,7 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; width: 100%; padding: 12px 16px;
   border: 0; border-bottom: 1px solid var(--jy-rule-soft); border-left: 3px solid transparent; background: none; font: inherit; text-align: left; cursor: pointer; color: var(--jy-ink);
 }
-.jy-channels-upstream:hover { background: var(--jy-sunken); }
+@media (hover: hover) { .jy-channels-upstream:hover { background: var(--jy-sunken); } } /* 手机上点完不留着悬停的灰底 */
 .jy-channels-upstream.is-selected { background: var(--jy-cobalt-tint); border-left-color: var(--jy-cobalt); }
 .jy-channels-upstream__name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 8px; }
 .jy-channels-upstream__sub { grid-column: 1 / -1; }

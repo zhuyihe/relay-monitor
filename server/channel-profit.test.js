@@ -379,3 +379,12 @@ test("overview：渠道今天上午属于停掉的绑定、又要追加进别的
   assert.deepEqual(view.unmatched, []);
   assert.equal((await module.status("own")).groups.length, 0, "今天不能开始");
 });
+
+test("overview：固定成本的上游（配了固定付费）下，几个渠道共用一把 Key、没回答「这把 Key 还给别处用吗」——不进需处理（固定成本不按 Key 分摊，问了也不影响钱）；按用量计费的上游照旧需处理", async () => {
+  const unanswered = (id, extra = {}) => ({ ...running(id, [1, 2]), upstreamStationId: "up1", tokenId: 11, costCoverage: "unknown", coverageDeclaration: { answer: "unknown" }, billingPolicy: "immediate", keyIssue: null, ...extra });
+  const identified = [1, 2].map((channelId) => ({ channelId, keyless: false, slots: [slot("up1", 11)] }));
+  const fixed = await overviewFixture({ channels: [1, 2], stations: [own, { ...upMine, fixedPurchases: [{ amount: 300, days: 30 }] }, upShared], rules: [unanswered("r-fixed")], identified }).module.overview("own");
+  assert.deepEqual([fixed.cards.find((card) => card.ruleId === "r-fixed").state, fixed.cards.find((card) => card.ruleId === "r-fixed").issues], ["running", []]);
+  const usage = await overviewFixture({ channels: [1, 2], stations: [own, { ...upMine }, upShared], rules: [unanswered("r-usage")], identified }).module.overview("own");
+  assert.deepEqual([usage.cards.find((card) => card.ruleId === "r-usage").state, usage.cards.find((card) => card.ruleId === "r-usage").issues], ["attention", ["COST_COVERAGE_UNKNOWN"]]);
+});

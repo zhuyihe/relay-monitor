@@ -303,7 +303,7 @@ export function useChannelsTab({ stations, types, loadingMeta, compact, loaded, 
 
   // ---- 片段 ------------------------------------------------------------------
   const keyText = (line: KeyLine) => {
-    const parts = [line.key.tokenName ?? EMPTY, line.group ? `分组 ${line.group}` : "", line.ratio != null ? `倍率 ${line.ratio}` : ""].filter(Boolean).join(" · ");
+    const parts = [line.key.tokenName ?? EMPTY, line.group ? `分组 ${line.group}` : "", line.ratio != null ? `倍率 ${line.ratio}` : "倍率暂时读不到"].filter(Boolean).join(" · ");
     const at = (ms: number) => formatZonedDateTime(ms, tz);
     if (line.between) return { when: `${at(line.between[0])}–${formatZonedTime(line.between[1], tz)} 之间换成`, what: parts };
     return { when: `${at(line.fromMs)} 起`, what: parts };
