@@ -11,6 +11,10 @@ import { knownChannelConfig, resolveChannelConfig } from "../lib/notify.js";
 import { assertKeyAgentSecretStrength } from "./secrets.js";
 import { canOpen, hasSecretValue, isCiphertext, META_SECRETS, metaAad, openText, sealText, secretSlots, secretText, secretValue } from "./secrets.js";
 
+export const ACCOUNT_USE_VALUES = Object.freeze(["only_mine", "elsewhere", "unsure"]);
+// 不认识的值当没回答（null），不抛错：旧数据、手改库都不会让整个站点读不出来
+export const normalizeAccountUse = (value) => ACCOUNT_USE_VALUES.includes(value) ? value : null;
+
 export function stationBusinessVersion(station) {
   if (!station) return null;
   return createHash("sha256").update(JSON.stringify([
@@ -623,6 +627,9 @@ export class Store {
       // 渠道 Key 读取服务（K2a）：装在这个自营站点旁边的只读小服务，url 要 https://，secret 整串加密存、派生出请求令牌和指纹密钥
       keyAgentUrl: String(input.keyAgentUrl || "").trim(),
       keyAgentSecret: (() => { const v = String(input.keyAgentSecret || "").trim(); if (v) assertKeyAgentSecretStrength(v); return v; })(),
+      // 这个上游账号是不是只给自营站点的渠道用（k-plan 第七节）：「only_mine」只给我的渠道用 / 「elsewhere」别处也在用 / 「unsure」不确定；
+      // null 是还没回答（升级前已有的上游都是，K-3：照现在每把 Key 的回答算，不进需处理）。只有「only_mine」才让新渠道自动开始
+      accountUse: normalizeAccountUse(input.accountUse),
       // 自营站点关着收费记录的时间段 [{ fromMs, toMs | null }]，只在开、关变化时写，留最近 31 天（lib/consume-log.js，own-revenue-plan 第二节）
       consumeLogOffPeriods: normalizeOffPeriods(input.consumeLogOffPeriods),
       demo: !!input.demo,
@@ -689,6 +696,7 @@ export class Store {
       if ("fixedPurchases" in patch) s.fixedPurchases = sanitizePurchases(patch.fixedPurchases) || [];
       if ("resoldAdminKeys" in patch) s.resoldAdminKeys = sanitizeResoldKeys(patch.resoldAdminKeys) || [];
       if ("keyAgentUrl" in patch) s.keyAgentUrl = String(patch.keyAgentUrl ?? "").trim();
+      if ("accountUse" in patch) s.accountUse = normalizeAccountUse(patch.accountUse);
       // 留空代表沿用已保存的令牌（和上游访问令牌、Key 一个规矩）；换了填的要先过强度检查，太弱不让存
       if ("keyAgentSecret" in patch) {
         const v = String(patch.keyAgentSecret ?? "").trim();
