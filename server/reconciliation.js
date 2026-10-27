@@ -366,6 +366,17 @@ function channelState(status) {
 
 // 多天窗口按天跳过关着的日子以后，同一个真分段被切成几块（id「段号~序号」）：取完数合回一项——金额、额度相加，窗口取首尾，问题合并；
 // 快照按真分段写、页面的「倍率变化」表也只有真分段（审核 R2 第二轮 中-2）。没切过的原样返回
+// 换到另一个上游的 Key 在过渡段里和旧 Key 一起算：几个上游各花了多少美元（账本一行只存一个汇率，混合汇率要按这个比例折）。
+// parts 是若干组 [{ stationId, amountUsd }]，同一个上游的合起来；任何一项没有金额就整体没有（不拿读不到的当 0）
+function mergeStationAmounts(parts) {
+  const totals = new Map();
+  for (const part of parts.flat()) {
+    if (!Number.isFinite(part.amountUsd)) return undefined;
+    totals.set(part.stationId, (totals.get(part.stationId) ?? 0) + part.amountUsd);
+  }
+  return [...totals].map(([stationId, amountUsd]) => ({ stationId, amountUsd }));
+}
+
 function foldSplitSegments(pieces, costBasis) {
   const groups = new Map();
   for (const piece of pieces) { const base = String(piece.id).split("~")[0]; if (!groups.has(base)) groups.set(base, []); groups.get(base).push(piece); }
@@ -381,6 +392,7 @@ function foldSplitSegments(pieces, costBasis) {
       quotaUnits: sumOrNull(sides, (side) => side.quotaUnits), amountUsd: complete ? sumOrNull(sides, (side) => side.amountUsd) : null, knownAmountUsd: sumKnown(sides, (side) => side.knownAmountUsd),
       successfulCount: sides.reduce((total, side) => total + (side.successfulCount ?? 0), 0), expectedCount: sides.reduce((total, side) => total + (side.expectedCount ?? 0), 0),
       observedAt: Math.max(...sides.map((side) => Number(side.observedAt) || 0)),
+      ...(sides.some((side) => side.byStation) ? { byStation: mergeStationAmounts(sides.map((side) => side.byStation ?? [{ stationId: null, amountUsd: side.amountUsd }])) } : {}),
       window: span(first.window, last.window, list[0].window), requestedWindow: span(first.requestedWindow, last.requestedWindow, list[0].window) };
   };
   return [...groups.entries()].map(([base, list]) => {
@@ -926,22 +938,44 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (ownSources.size !== 1 || ownSources.has(null) || !catalogue?.ownSource || catalogue.stale || catalogue.ownSource.namespaceKey !== [...ownSources][0]) return notDone;
     const revisionById = new Map((catalogue.channels || []).filter((channel) => !channel.missing).map((channel) => [Number(channel.id), channel.revision]));
     const nameById = new Map(members.flatMap((rule) => rule.channels.map((channel) => [Number(channel.channelId), channel.name])));
-    // 换到另一个上游的 Key（K2c-3b）。旧上游是 New API（按秒读，b 以前算给旧绑定、b 起算给新绑定，精确）才能做；旧上游是 Sub2API 时
-    // 旧绑定归档那天整天不算（C3），旧 Key 在 b 当天 b 以前的用量没有人能接（新绑定在别的上游下没法带它），先不做，原样留着不结账。
-    // 别的上游下的新组不在这里建：交给自动开始（上游答了「只给我的渠道用」才开始，答案不是的渠道先停着等回答）——它从 b 起算（同一天更早归档的
-    // 占着同一个渠道的绑定，C3 的核算起点下限；新上游是 Sub2API 时整天算）。旧绑定的过渡段放旧 Key + 别的上游的新 Key，过渡段不和新绑定重叠
+    // 换到另一个上游的 Key（K2c-3b）。旧绑定的过渡段放旧 Key + 别的上游的新 Key（跨上游读），在 b 归档，过渡段不和新绑定重叠。
+    //  - 旧上游是 New API（按秒读）：b 以前算给旧绑定，新绑定从 b 起算，精确。
+    //  - 旧上游是 Sub2API（只能按整天读）：旧绑定归档那天整天不算（C3），所以新绑定从 b 那天 0 点整天算收入和成本（不设核算起点下限），
+    //    它第一段（只到下一个业务日 0 点）带着旧 Key（dayExtraKeys，跨上游整天读，只那一天），旧 Key 在 b 当天 b 以前的用量由它接；
+    //    旧绑定的过渡段总是只到 b 那天 0 点（0 点以后整天由新绑定取，不读两遍）。
+    // 别的上游下的新组：上游答了「只给我的渠道用」就在这里一起建（旧上游是 Sub2API 时必须在这里建，旧 Key 才有人接）；答案不是的，旧上游是
+    // New API 时交给自动开始（答案不是的渠道先停着等回答），旧上游是 Sub2API 时先不分（留着 KEY_GROUP_CHANGED，下一轮再试）
     const isForeignGroup = (group) => !group.fromRuleIds.some((id) => byId.get(id).upstreamStationId === group.ref.upstreamStationId);
+    const isSub2Rule = (rule) => /^sub2api/.test(upstreamStation(rule.upstreamStationId)?.type || "");
     const foreignWindow = plan.closes.some((close) => (close.windowKeys || []).some((key) => key.upstreamStationId !== byId.get(close.ruleId).upstreamStationId));
-    if (plan.groups.some(isForeignGroup) || foreignWindow) {
-      if (plan.closes.some((close) => !/^newapi$/.test(upstreamStation(byId.get(close.ruleId).upstreamStationId)?.type || ""))) return notDone;
-      if (plan.groups.some((group) => isForeignGroup(group) && !upstreamStation(group.ref.upstreamStationId))) return notDone;
-    }
+    if ((plan.groups.some(isForeignGroup) || foreignWindow) && plan.groups.some((group) => isForeignGroup(group) && !upstreamStation(group.ref.upstreamStationId))) return notDone;
+    // 一个新组牵连的旧绑定里 New API 和 Sub2API 混着：本站收入从哪一刻起算对不上（New API 的算到 b 为止，Sub2API 的归档那天整天不算），先不分
+    if (plan.groups.some((group) => new Set(group.fromRuleIds.map((id) => isSub2Rule(byId.get(id)))).size > 1)) return notDone;
+    // 跨上游的新组要读新上游的元数据和身份，它不一定在这一轮牵连的上游里（resources 里没有）：就地读一次（5 分钟缓存）
+    const resourceOf = async (stationId) => {
+      const known = resources.get(stationId);
+      if (known) return known;
+      const station = upstreamStation(stationId);
+      if (!station || !billingStation(station)) return null;
+      try {
+        const read = await readMetadata({ ...station }, { force: false, timezone: members[0].timezone, reuseIdentity: true });
+        const metadata = read?.value ?? null;
+        if (!metadata) return null;
+        return { station, metadata, identity: { provider: metadata.platform, baseUrl: onboardingBaseUrl(station.baseUrl), accountId: String(metadata.accountId ?? metadata.userId) } };
+      } catch { return null; }
+    };
     const creates = [];
     for (const group of plan.groups) {
-      if (isForeignGroup(group)) { creates.push(null); continue; }
-      const resource = resources.get(group.ref.upstreamStationId), upstream = upstreamStation(group.ref.upstreamStationId);
+      const foreign = isForeignGroup(group);
+      const fromSub2 = group.fromRuleIds.some((id) => isSub2Rule(byId.get(id)));
+      // 别的上游下的新组，旧上游是 New API 又没答「只给我的渠道用」：交给自动开始
+      if (foreign && !fromSub2 && upstreamStation(group.ref.upstreamStationId)?.accountUse !== "only_mine") { creates.push(null); continue; }
+      const resource = await resourceOf(group.ref.upstreamStationId), upstream = upstreamStation(group.ref.upstreamStationId);
       const metadata = resource?.metadata, identity = resource?.identity;
-      if (!upstream || !metadata || !identity || metadata.capability?.state !== "supported") return notDone;
+      // 别的上游下的新绑定：Sub2API 账单过滤能力还没核验过（新上游第一次有绑定）也先建——新绑定第一次读账单时会核验，没核验完不结账、
+      // 不会算错；这个上游「不支持」才不分
+      const capabilityOk = metadata?.capability?.state === "supported" || (foreign && metadata?.capability?.state === "unverified" && metadata.capability.reason === "DEPLOYMENT_NOT_VERIFIED");
+      if (!upstream || !metadata || !identity || !capabilityOk) return notDone;
       const token = metadata.tokens?.find((item) => Number(item.id) === Number(group.ref.tokenId));
       if (!token || token.status !== 1 || !tokenNameIsUnique(metadata, token) || (metadata.platform !== "sub2api" && !token.group) || token.group === "auto" || token.crossGroupRetry) return notDone;
       const canonicalKey = canonicalBillingKey(upstream, identity, token.id);
@@ -953,6 +987,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       creates.push({ upstreamStationId: upstream.id, ownStationId, tokenId: token.id, tokenName: token.name, fixedGroup: token.group,
         initialRatio: metadata.groups?.[token.group]?.ratio ?? null, timezone: members[0].timezone, enabled: true, provider: metadata.platform, canonicalKey,
         billingPolicy: "immediate", ownSource: members[0].ownSource, costCoverage: coverageDeclaration.answer === "none" ? "complete" : "unknown", coverageDeclaration,
+        // 旧绑定是 Sub2API：归档那天整天不算，新绑定从 b 那天 0 点整天算（不设下限）；New API 的算到 b 为止，新绑定从 b 起算
+        ...(fromSub2 ? { accountingFloorMs: null } : {}),
         sourceBinding: Object.fromEntries(group.channelIds.map((channelId) => [channelId, revisionById.get(channelId)])), previewEffectiveFromMs: null,
         channels: group.channelIds.map((channelId) => ({ channelId, name: String(nameById.get(channelId) || `渠道 #${channelId}`) })) });
     }
@@ -990,8 +1026,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const from = close.windowKeys ? Math.max(openFromOf.get(rule.id), Math.min(...close.windowUsers.map((id) => aOf.get(id)))) : null;
       // 换到 Sub2API 上游的 Key：Sub2API 只能按整天读，新上游下的新绑定从 b 那天 0 点整天算，所以旧绑定的过渡段只到 b 那天 0 点（b 当天那把新 Key 的用量
       // 整天由新绑定取，不放在过渡段里读两遍）；过渡段起点不早于 b 那天 0 点时没有过渡段
+      // 旧绑定自己是 Sub2API：归档那天整天不算，过渡段同样只到 b 那天 0 点，那一天由新绑定整天取
       const foreignToSub2 = (close.windowKeys || []).some((key) => key.upstreamStationId !== rule.upstreamStationId && /^sub2api/.test(upstreamStation(key.upstreamStationId)?.type || ""));
-      const cap = foreignToSub2 ? startOfBillingDay(at, rule.timezone) : null;
+      const cap = foreignToSub2 || isSub2Rule(rule) ? startOfBillingDay(at, rule.timezone) : null;
       const window = !close.windowKeys || (cap != null && from >= cap) ? null : { from, ...(cap != null ? { to: cap } : {}), keys: close.windowKeys };
       closes.push({ ruleId: rule.id, expect: { tokenId: Number(rule.tokenId), channelIds: rule.channels.map((channel) => Number(channel.channelId)) }, window });
     }
@@ -1703,8 +1740,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (wanted.length === 1 && (wanted[0].own || wanted[0].token?.id === token?.id)) return upstreamWindowFor(upstream, metadata, token, window, { readOnly });
     const results = await Promise.all(wanted.map((item) => item.foreign ? foreignKeyWindow(item.key, window, { readOnly }) : upstreamWindowFor(upstream, metadata, item.token, window, { readOnly })));
     const summed = sumKeyStats(results);
-    // 有别的上游的 Key（换到另一个上游的过渡段）：结果的窗口还是请求的窗口（Sub2API 那把按整天读，窗口放宽了，不触发窗口对不上）
-    return wanted.some((item) => item.foreign) && results.length > 1 ? { ...summed, window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } } : summed;
+    if (!wanted.some((item) => item.foreign)) return summed;
+    // 有别的上游的 Key（换到另一个上游的过渡段）：结果的窗口还是请求的窗口（Sub2API 那把按整天读，窗口放宽了，不触发窗口对不上）；
+    // 记下每个上游各花了多少美元，算混合汇率用
+    const byStation = mergeStationAmounts(wanted.map((item, index) => [{ stationId: item.foreign ? item.key.upstreamStationId : upstreamStationId, amountUsd: results[index].amountUsd }]));
+    return { ...(results.length > 1 ? { ...summed, window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } } : summed), ...(byStation ? { byStation } : {}) };
   }
 
   // 换到另一个上游的 Key（K2c-3b）：一段里的 Key 带着自己的上游，别的上游的 Key 去那个上游读（元数据、身份、账单能力都是那个上游的）。
@@ -1741,7 +1781,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
     const results = await Promise.all(sources.map((piece) => upstreamWindowForSegment(upstream, metadata, token, piece.segment, piece.window, options)));
     const summed = sumKeyStats(results);
-    return { ...summed, window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
+    const byStation = results.some((item) => item.byStation) ? mergeStationAmounts(results.map((item) => item.byStation ?? [{ stationId: options.upstreamStationId, amountUsd: item.amountUsd }])) : undefined;
+    return { ...summed, ...(byStation ? { byStation } : {}), window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
   }
 
   function tokenNameIsUnique(metadata, token) {
@@ -2613,6 +2654,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           } : {
             state: "complete", quotaUnits: upstreamResult.quotaUnits, quotaPerUnit: upstreamResult.quotaPerUnit,
             amountUsd: upstreamUsd, knownAmountUsd: upstreamUsd, successfulCount: 1, expectedCount: 1,
+            ...(upstreamResult.byStation ? { byStation: upstreamResult.byStation } : {}),
             observedAt: upstreamResult.latestLogAtMs || Date.now(), window: upstreamResult.window || upstreamWindow,
             requestedWindow: upstreamWindow, billingTimezone: upstreamResult.billingTimezone,
           },
@@ -2660,6 +2702,20 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 窗口整段在核算起点之前时没有分段：这条关联在该窗口的收入和成本都确定为 0。
       const knownUpstreamUsd = !segmentResults.length ? 0 : segmentResults.some((segment) => segment.upstream.knownAmountUsd != null)
         ? segmentResults.reduce((sum, segment) => sum + (segment.upstream.knownAmountUsd ?? 0), 0) : null;
+      // 换到另一个上游的 Key（过渡段里两个上游的钱）：账本一行只存一个汇率，各上游的美元各按各自上游的汇率折成人民币再相加，
+      // 混合汇率 = 人民币合计 ÷ 美元合计。有一个上游没设置汇率就按「没设置」（不当 1:1）；已固定的重结沿用账本里记的汇率（savedLedger），不重算
+      let mixedCostRate = null;
+      if (completeUpstream && costBasis !== "fixed" && !savedLedger && segmentResults.some((segment) => segment.upstream.byStation)) {
+        const parts = mergeStationAmounts(segmentResults.map((segment) => (segment.upstream.byStation ?? [{ stationId: null, amountUsd: segment.upstream.amountUsd }])
+          .map((entry) => ({ ...entry, stationId: entry.stationId ?? rule.upstreamStationId }))));
+        const rates = parts?.map((part) => ({ ...part, rate: rateSnapshotOf(upstreamStation(part.stationId)) }));
+        if (rates) {
+          const usd = rates.reduce((total, part) => total + part.amountUsd, 0);
+          if (!rates.every((part) => isConfiguredRate(part.rate))) mixedCostRate = { cnyPerUsd: 1, source: "default" };
+          else if (usd > 0) mixedCostRate = { cnyPerUsd: rates.reduce((total, part) => total + part.amountUsd * part.rate.cnyPerUsd, 0) / usd, source: "configured" };
+        }
+        if (mixedCostRate) financialSnapshot.cost = mixedCostRate;
+      }
       const allChannels = states.map((channel) => {
         const billingRows = segmentResults.map((segment) => segment.downstream.channels?.find((item) => item.channelId === channel.channelId)).filter(Boolean);
         const complete = billingRows.length === segmentResults.length && billingRows.every((item) => item.billingState === "complete" && item.amountUsd != null);
@@ -2734,7 +2790,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           channels: allChannels,
         },
         calculation: calculationFromAmounts(costBasis === "fixed" ? 0 : upstreamUsd, downstreamUsd, issues),
-        costBasis,
+        costBasis, ...(mixedCostRate ? { costRateMixed: mixedCostRate } : {}),
         health: resultHealth, generatedAt: new Date().toISOString(),
       };
       const scopeFingerprint = reconciliationScopeFingerprint(rule, segments);
@@ -3078,7 +3134,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 已结账的日子用账本记下的汇率和成本计法，账本没记的（当时没配置、迁移的旧账）按当前配置。
       const upstream = upstreamStation(result.rule.upstreamStationId), ledger = result.ledger;
       const { income, cost, costBasis } = ratesFor({ own: upstreamStation(result.rule.ownStationId), upstream, saved: ledger, costBasis: result.costBasis });
-      const rates = { income: { stationId: result.rule.ownStationId, ...income }, cost: { stationId: result.rule.upstreamStationId, ...cost }, costBasis };
+      // 过渡段里有两个上游的钱：现读的行用混合汇率（已结账的行用账本记的）
+      const rates = { income: { stationId: result.rule.ownStationId, ...income }, cost: { stationId: result.rule.upstreamStationId, ...(result.costRateMixed && !ledger ? result.costRateMixed : cost) }, costBasis };
       const enriched = Object.assign(result, { rates, ownSource: source, scope: result.scope || reconciliationBillingSchedule(result.rule),
         billingTimezone: result.billingTimezone || commonBillingTimezone(result.window, [result.upstream, result.downstream]),
         amountBasis: result.amountBasis || { id: "channel-billing-usd-v3", currency: "USD", billingSource: RECONCILIATION_BILLING_SOURCE,

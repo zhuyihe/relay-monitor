@@ -672,7 +672,7 @@ export class MemoryReconciliationRepository {
           this.#refreshSegmentKeys(tx, close.ruleId);
           tx.record.archivedRuleIds.push(close.ruleId);
         }
-        createdIds = creates.map((input) => this.#insertRule(tx, input, { now: at, floorOverride: at }));
+        createdIds = creates.map((input) => this.#insertRule(tx, input, { now: at, floorOverride: input.accountingFloorMs !== undefined ? input.accountingFloorMs : at }));
       });
     } catch (err) {
       if (err?.staleRegroup) return { conflict: false, stale: true };

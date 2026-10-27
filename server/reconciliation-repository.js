@@ -974,7 +974,7 @@ export class ReconciliationRepository {
         await refreshSegmentKeys(conn, close.ruleId);
       }
       const createdIds = [];
-      for (const input of creates) createdIds.push(await this.insertRuleOn(conn, input, { now: at, floorOverride: at }));
+      for (const input of creates) createdIds.push(await this.insertRuleOn(conn, input, { now: at, floorOverride: input.accountingFloorMs !== undefined ? input.accountingFloorMs : at }));
       await conn.commit();
       return { conflict: false, stale: false, ruleIds: createdIds };
     } catch (err) {

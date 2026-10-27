@@ -1981,3 +1981,21 @@ contract("regroupRules: a window with `to` before b ends there, and a tail segme
   assert.deepEqual(segments[1].keys.map((key) => key.upstreamStationId).sort(), [oldRule.upstreamStationId, foreign.upstreamStationId].sort(), "过渡段里有别的上游的 Key");
   assert.deepEqual(segments[2].keys.map((key) => key.tokenId), [oldRule.tokenId], "到 b 之间只有自己原来的 Key");
 });
+
+contract("regroupRules: a create with accountingFloorMs null (old rule is Sub2API: archive day not counted) has no floor, the default is b; its first segment carries an old key of another upstream", async ({ repository, fixture }) => {
+  const oldRule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:f1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(171), name: "A" }, { channelId: fixture.channel(172), name: "B" }] });
+  const b = EFFECTIVE_FROM + 2 * HOUR, endsAt = b + 10 * HOUR;
+  const foreignOld = { upstreamStationId: oldRule.upstreamStationId, tokenId: oldRule.tokenId, tokenName: oldRule.tokenName };
+  const otherStation = fixture.station("up-new");
+  const wholeDay = fixture.ruleInput({ upstreamStationId: otherStation, tokenId: fixture.token(173), tokenName: "N1", canonicalKey: `up:${fixture.tag}:f2`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(171), name: "A" }], accountingFloorMs: null, dayExtraKeys: { endsAt, keys: [foreignOld] } });
+  const fromB = fixture.ruleInput({ upstreamStationId: otherStation, tokenId: fixture.token(174), tokenName: "N2", canonicalKey: `up:${fixture.tag}:f3`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(172), name: "B" }] });
+  const result = await repository.regroupRules({ at: b, closes: [{ ruleId: oldRule.id, expect: { tokenId: oldRule.tokenId, channelIds: [fixture.channel(171), fixture.channel(172)] }, window: null }], creates: [wholeDay, fromB] });
+  assert.deepEqual([result.conflict, result.stale], [false, false]);
+  result.ruleIds.forEach((id) => fixture.ruleIds.add(id));
+  const [first, second] = await Promise.all(result.ruleIds.map((id) => repository.getRule(id)));
+  assert.equal(first.accountingFloorMs, null, "没有下限：从 b 那天 0 点整天算");
+  assert.equal(second.accountingFloorMs, b, "没给就是 b");
+  const segments = await repository.listSegments(first.id);
+  assert.deepEqual(segments[0].keys.map((key) => key.upstreamStationId).sort(), [otherStation, oldRule.upstreamStationId].sort(), "第一段带着别的上游的旧 Key");
+  assert.equal(segments[0].effectiveTo, endsAt);
+});
