@@ -164,7 +164,8 @@ const hasUnresolved = (result) => (result?.revealIssues?.length ?? 0) > 0
 export async function identifyChannelsCached(rt, ownStation, options = {}) {
   const cache = rt._keyAgentIdentifyCache;
   const now = Date.now();
-  if (cache && cache.stationId === ownStation.id && now - cache.at < IDENTIFY_CACHE_MS) return cache.result;
+  // options.fresh：用户点「开始算利润」这种要拿最新结果的地方，不用 4 分钟缓存（etag 照用，读取服务没变就是 304）
+  if (!options.fresh && cache && cache.stationId === ownStation.id && now - cache.at < IDENTIFY_CACHE_MS) return cache.result;
   const sameStation = cache?.stationId === ownStation.id;
   const good = sameStation ? cache.lastGood ?? null : null;
   const result = await identifyChannels(rt, ownStation, { ...options, etag: good?.etag ?? null,

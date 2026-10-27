@@ -825,6 +825,8 @@ defineReconciliationRepositoryContract({
     await contractPool.query(
       "DELETE FROM reconciliation_segment_keys WHERE segment_id IN (SELECT id FROM reconciliation_rule_segments WHERE rule_id IN (?))", [ruleIds]
     );
+    // 「用户停的」渠道按（自营站点、渠道）记、没有 rule_id：按这批绑定的自营站点删（夹具的自营站点编号带随机后缀，只属于这次用例）
+    await contractPool.query("DELETE FROM reconciliation_channel_optout WHERE own_station_id IN (SELECT own_station_id FROM reconciliation_rules WHERE id IN (?))", [ruleIds]);
     for (const table of ["reconciliation_alert_state", "reconciliation_snapshots", "reconciliation_ledger", "reconciliation_settlement_state", "reconciliation_rule_segments",
       "reconciliation_rule_channels"]) await contractPool.query(`DELETE FROM ${table} WHERE rule_id IN (?)`, [ruleIds]);
     await contractPool.query("DELETE FROM reconciliation_rules WHERE id IN (?)", [ruleIds]);

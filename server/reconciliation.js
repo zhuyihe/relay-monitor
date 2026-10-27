@@ -3309,13 +3309,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (matches.length > 1) throw codedError("CANONICAL_KEY_CONFLICT", issueText("CANONICAL_KEY_CONFLICT"));
       return matches[0] || null;
     },
-    async archiveRule(id) {
+    // 「用户停了」的渠道（k-plan 第七节）：停止算利润 = 归档这条绑定 + 同一个事务把它的渠道记成用户停的（optout: true）
+    listChannelOptouts: (ownStationId = null) => repository.listChannelOptouts(ownStationId),
+    addChannelOptouts: (ownStationId, channelIds, atMs) => repository.addChannelOptouts(ownStationId, channelIds, atMs),
+    removeChannelOptouts: (ownStationId, channelIds) => repository.removeChannelOptouts(ownStationId, channelIds),
+    async archiveRule(id, { optout = false } = {}) {
       return serializeWrite(async () => {
         const rule = await repository.getRule(id);
         if (!rule) throw ruleNotFound();
         const billingSource = billingSourceState();
         const ok = await withObservationSourceLock(rule, currentSourceCredential(rule), async () => {
-          const archived = await repository.archiveRule(id);
+          const archived = await repository.archiveRule(id, { optout });
           if (archived) clearBillingResults(id);
           return archived;
         }, billingSource);

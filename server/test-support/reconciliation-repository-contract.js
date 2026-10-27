@@ -1797,3 +1797,28 @@ contract("applyKeyChangePlans: the unique key it writes is canonicalKey (same fo
   await assert.rejects(fixture.createRule({ tokenId: fixture.token(75), canonicalKey: canonical, ownStationId: fixture.station("own-late"), channels: [{ channelId: fixture.channel(75), name: "Late" }] }),
     { code: "ER_DUP_ENTRY", errno: 1062 });
 });
+
+contract("channel optout (K2c): archiveRule({ optout: true }) records the rule's channels as user-stopped in the same transaction; plain archive records nothing; removeChannelOptouts deletes only the given channels; re-stopping is idempotent", async ({ repository, fixture }) => {
+  const stopped = await fixture.createRule({ channels: [{ channelId: fixture.channel(81), name: "A" }, { channelId: fixture.channel(82), name: "B" }] });
+  const plain = await fixture.createRule({ tokenId: fixture.token(83), channels: [{ channelId: fixture.channel(83), name: "C" }] });
+  assert.equal(await repository.archiveRule(plain.id), true);
+  assert.deepEqual((await repository.listChannelOptouts(plain.ownStationId)).filter((row) => row.channelId === fixture.channel(83)), [], "普通解除不记「用户停的」");
+  const at = Date.UTC(2026, 9, 27, 3);
+  assert.equal(await repository.archiveRule(stopped.id, { now: at, optout: true }), true);
+  const rows = (await repository.listChannelOptouts(stopped.ownStationId)).filter((row) => [fixture.channel(81), fixture.channel(82)].includes(row.channelId));
+  assert.deepEqual(rows.map((row) => [row.channelId, row.atMs]), [[fixture.channel(81), at], [fixture.channel(82), at]].sort((a, b) => a[0] - b[0]));
+  // 已经解除的再停一次：什么也不记、不报错
+  assert.equal(await repository.archiveRule(stopped.id, { now: at + 1000, optout: true }), false);
+  assert.equal((await repository.listChannelOptouts(stopped.ownStationId)).filter((row) => row.atMs === at + 1000).length, 0);
+  // 另一条绑定又用了同一个渠道、再停：不重复、时刻保留第一次
+  const again = await fixture.createRule({ tokenId: fixture.token(84), channels: [{ channelId: fixture.channel(81), name: "A" }] });
+  await repository.archiveRule(again.id, { now: at + 5000, optout: true });
+  const first = (await repository.listChannelOptouts(stopped.ownStationId)).find((row) => row.channelId === fixture.channel(81));
+  assert.equal(first.atMs, at, "时刻保留第一次");
+  // 用户在「渠道」页签点「开始算利润」：删掉这一行；只删给的渠道
+  assert.equal(await repository.removeChannelOptouts(stopped.ownStationId, [fixture.channel(81)]), 1);
+  assert.deepEqual((await repository.listChannelOptouts(stopped.ownStationId)).filter((row) => [fixture.channel(81), fixture.channel(82)].includes(row.channelId)).map((row) => row.channelId), [fixture.channel(82)]);
+  assert.equal(await repository.removeChannelOptouts(stopped.ownStationId, []), 0);
+  // 别的自营站点的同编号渠道不受影响
+  assert.deepEqual(await repository.listChannelOptouts(fixture.station("own-nobody")), []);
+});
