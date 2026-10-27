@@ -988,7 +988,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 换段已经落库提交（或这一轮没有要换的）、而且没有没处理完的：这一轮读取服务读成功的时刻才可以记下来
       // a：「上一次读成功」记快照自己读库的时刻（confirmedAtMs），不是控制台拿到快照的时刻——读取服务自己最多缓存 4 分钟，
       // 控制台时刻比真正读库的晚，a 晚了会漏掉 [真正换 Key, a) 新 Key 的用量
-      const confirmedAt = identified.confirmedAtMs ?? identified.fetchedAtMs;
+      // null 是读取服务给的读库时刻不可信：这一轮不推进（留在上一次读成功的时刻），不能退回控制台的时刻；没带这个字段的（测试里直接注入的结果）才用 fetchedAtMs
+      const confirmedAt = identified.confirmedAtMs === undefined ? identified.fetchedAtMs : identified.confirmedAtMs;
       if (!isPending() && confirmedAt != null) await rt.store.setKeyAgentLastSuccessAt?.(ownStationId, confirmedAt)?.catch?.(() => {});
     }
     await Promise.all(enabled.filter((rule) => byOwnStation.has(rule.ownStationId) && !regroupedAll.has(rule.id)).map(async (rule) => {
@@ -2022,23 +2023,26 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return loading;
   }
 
-  // 这条（Sub2API）绑定的起算点在当天中间时：这条绑定第一段里的 Key，当天早些时候在这个自营站点下别的绑定里握过的（关掉的段、已停的绑定）最晚的结束时刻
-  // （在起算点那天、不晚于起算点）；没有是 null。只在起算点那天（窗口从起算点所在的业务日 0 点起）查，别的日子不查。
+  // 这条（Sub2API）绑定第一段里的每把 Key，当天早些时候在这个自营站点下别的绑定里握过的（关掉的段、已停 / 已归档的绑定）最晚的结束时刻——每把 Key 各自的认领下限
+  // （Map：id → 毫秒；一把都没有是 null）。只在起算点那天查：起算点在当天中间的，看不晚于起算点的；起算点在 0 点的（比如重新分组建的新绑定整天算），
+  // 这把 Key 在 0 点以后被没牵连进来的绑定握过、后来才到这条绑定，也要从那一段结束起认领。别的日子不查。
   // 按第一段的 Key 查，不按绑定现在的 Key：新绑定当天又换了一次 Key，现在的 Key 查不到别人握过的段，会从 0 点起认领、和原来的持有人算两遍（审核 #150 第 1 轮中-1）；
   // 查询和新绑定下限（createRule）、换 Key 的 newKeyFloor 是同一个仓库方法 keyHeldUntil，不另写一份。读不到就抛，不当没有
   async function sub2ClaimFloor(rule, segments, window) {
     const start = reconciliationAccountingStart(rule);
     if (start == null) return null;
     const dayStart = startOfBillingDay(start, rule.timezone);
-    if (start <= dayStart || window.startMs !== dayStart) return null;
+    if (window.startMs !== dayStart) return null;
     const first = [...(segments || [])].filter((segment) => Number.isFinite(Number(segment.effectiveFrom))).sort((x, y) => Number(x.effectiveFrom) - Number(y.effectiveFrom))[0];
+    const until = start > dayStart ? start : null; // 起算点在 0 点：当天没有「不晚于」的界限（握过这把 Key 的别的绑定都在这条绑定接手以前停手，同一把 Key 同一时间只有一条绑定握着）
     const keys = first?.keys?.length ? first.keys : [{ upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId }];
-    let held = null;
+    const floors = new Map();
     for (const key of keys) {
-      const until = await repository.keyHeldUntil(rule.ownStationId, key.upstreamStationId ?? rule.upstreamStationId, key.tokenId, { sinceMs: dayStart, untilMs: start, excludeRuleId: rule.id });
-      if (until != null) held = Math.max(held ?? -Infinity, until);
+      const upstreamStationId = key.upstreamStationId ?? rule.upstreamStationId;
+      const held = await repository.keyHeldUntil(rule.ownStationId, upstreamStationId, key.tokenId, { sinceMs: dayStart, untilMs: until, excludeRuleId: rule.id });
+      if (held != null) floors.set(`${upstreamStationId ?? ""}:${key.tokenId}`, held);
     }
-    return held;
+    return floors.size ? floors : null;
   }
 
   // 结账前的 Key 占用检查（审核 #133 第 3 轮后总指挥加的，k-plan 3.5 的「每把 Key 恰好算一次」在结账这一步再核一遍）：
@@ -2050,9 +2054,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const claimantOf = async (item, itemSegments) => {
       const upstreamWindow = accountingUpstreamWindow(item, window, item.provider);
       if (!upstreamWindow || !itemSegments.length) return null;
-      const claimFromMs = /^sub2api/.test(upstreamStation(item.upstreamStationId)?.type || "") ? await sub2ClaimFloor(item, itemSegments, upstreamWindow) : null;
+      const claimFloors = /^sub2api/.test(upstreamStation(item.upstreamStationId)?.type || "") ? await sub2ClaimFloor(item, itemSegments, upstreamWindow) : null;
       const pieces = keyPiecesOf(itemSegments, upstreamWindow, item.tokenId) ?? [{ segment: itemSegments.at(-1), window: upstreamWindow }];
-      const claims = claimedKeyWindows(pieces, { fallbackKey: { upstreamStationId: item.upstreamStationId, tokenId: item.tokenId, tokenName: item.tokenName }, claimFromMs });
+      const claims = claimedKeyWindows(pieces, { fallbackKey: { upstreamStationId: item.upstreamStationId, tokenId: item.tokenId, tokenName: item.tokenName }, claimFloors });
       return { ruleId: item.id, startMs: reconciliationAccountingStart(item) ?? Date.parse(item.createdAt), archivedAtMs: item.archivedAtMs ?? null, claims, rule: item };
     };
     const own = await claimantOf(rule, segments);
@@ -2064,8 +2068,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // 每把 Key 在这个窗口里归这条绑定的时间段（lib/reconciliation-keys.js 的 claimedKeyWindows，和结账前的占用检查同一份）。
   // 有一把 Key 只认领一部分窗口（partial）就返回全部 [{ key, windows, partial }]，没有（每把都是整个窗口）返回 null，走原来的按天取
-  function sub2ClaimedKeys(pieces, window, token, { claimFromMs = null, upstreamStationId = null } = {}) {
-    const claimed = claimedKeyWindows(pieces, { fallbackKey: { upstreamStationId: upstreamStation(upstreamStationId)?.id, tokenId: token?.id, tokenName: token?.name }, claimFromMs });
+  function sub2ClaimedKeys(pieces, window, token, { claimFloors = null, upstreamStationId = null } = {}) {
+    const claimed = claimedKeyWindows(pieces, { fallbackKey: { upstreamStationId: upstreamStation(upstreamStationId)?.id, tokenId: token?.id, tokenName: token?.name }, claimFloors });
     const list = [...claimed.values()].map((entry) => ({ ...entry, partial: !(entry.windows.length === 1 && entry.windows[0].startMs === window.startMs && entry.windows[0].endMs === window.endMs) }));
     return list.some((item) => item.partial) ? list : null;
   }
@@ -2954,17 +2958,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 上游一侧自己的窗口（Sub2API 当天换绑的那天比本站一侧长，见 accountingUpstreamWindow）
         const upstreamWindow = upstreamOwnWindow || segmentWindow;
         // Sub2API 新绑定的起算点在当天中间、而且是因为这把 Key 当天早些时候在别的绑定里关了段：上游成本从那一刻起翻逐条用量算（别的原因的下限，比如当天从 New API 换绑过来，上游照旧取整天）
-        let claimFromMs = null, floorError = null;
+        let claimFloors = null, floorError = null;
         if (!upstreamProblem && isScopedBillingPolicy(rule.billingPolicy) && /^sub2api/.test(upstream.type || "")) {
           // 读不到别的绑定握过这把 Key 的记录：这一天先不结（不当没有，会和原来的持有人算两遍），下一轮再试
-          try { claimFromMs = await sub2ClaimFloor(rule, segments, upstreamWindow); } catch { floorError = codedError("HISTORY_UNAVAILABLE", issueText("HISTORY_UNAVAILABLE")); }
+          try { claimFloors = await sub2ClaimFloor(rule, segments, upstreamWindow); } catch { floorError = codedError("HISTORY_UNAVAILABLE", issueText("HISTORY_UNAVAILABLE")); }
         }
         const [upstreamResult, downstreamResult] = await Promise.all([
           // 上游读不到（只有固定成本会走到这里）：不取上游，问题已经在上面记了一次
           floorError ? Promise.resolve({ error: floorError }) : upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
             : (isScopedBillingPolicy(rule.billingPolicy)
-              ? upstreamWindowForScopedSegments(upstream, metadata, token, segments, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId, claimFromMs, liveKeyOwner: (key, dayStartMs) => liveKeyOwnerOf(rule, key, dayStartMs, ownerRegistry) })
+              ? upstreamWindowForScopedSegments(upstream, metadata, token, segments, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId, claimFloors, liveKeyOwner: (key, dayStartMs) => liveKeyOwnerOf(rule, key, dayStartMs) })
               : upstreamWindowForSegment(upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId })).catch((error) => ({ error })),
           (ownAvailable && consumeLogIssue ? Promise.resolve({ error: codedError(consumeLogIssue.code, consumeLogIssue.detail), consumeLog: true })
             : ownAvailable
