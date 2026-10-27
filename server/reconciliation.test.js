@@ -10754,3 +10754,28 @@ test("K2b：冲突期叠着存好几段——事项解开、又出新事项、�
   assert.equal((await state("2026-10-10"))?.manualReason, "KEY_CONFLICT_GAP");
   assert.equal((await state("2026-10-14"))?.manualReason, "KEY_CONFLICT_GAP");
 });
+
+// 审核 #133 M1 / 总指挥 10-27：读取服务那台机器的钟快了 1 小时——readAt 不可信，不采用：b 用控制台拿到快照的时刻（晚一点只会让窗口更宽），a 这一轮不推进（留在上一次读成功的时刻），
+// 所以 a 不会晚于真正换 Key 的时刻，换 Key 到 b 之间新 Key 的用量一秒不漏
+test("K2b 钱：读取服务的钟快了 1 小时——a 不推进、不会晚于真正换 Key 的时刻，[真正换 Key, b) 的新 Key 用量不漏", async (t) => {
+  let now = Date.parse("2026-10-11T11:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(console, "warn", () => {});
+  const keys = { 9: "sk-" + "Nine".repeat(10), 10: "sk-" + "TenT".repeat(10) };
+  const agent = { secret: KEY_AGENT_SECRET, held: 9, readLagMs: 0, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[agent.held]), f: "unused" }] }] };
+  const tSwitch = secOf("2026-10-11T11:58:00Z");
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], tokenKeyOf: (id) => keys[id], extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    usageOf: usageWindowsOf({ stable: [0, tSwitch], "oai-2": [tSwitch, Infinity] }), keyAgent: agent });
+  f.rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
+  const round = async (iso) => { now = Date.parse(iso); f.rt._keyAgentIdentifyCache = null; await f.module.refreshDue(now); };
+  await round("2026-10-11T11:00:00Z"); // 钟正常：a 推进到 11:00
+  agent.readLagMs = -60 * 60 * 1000; // 读取服务的钟快了 1 小时：readAt = 控制台时刻 + 1 小时
+  await round("2026-10-11T11:30:00Z"); // 还是旧 Key：这一轮 a 不推进
+  agent.held = 10; await round("2026-10-11T12:05:00Z"); // 新 Key（换 Key 在 11:58）：b = 控制台 12:05
+  const window = (await f.repository.listSegments("rr_live")).find((segment) => segment.timingSource === "key_change_window");
+  assert.ok(window.effectiveFrom <= Date.parse("2026-10-11T11:58:00Z"), "a 不晚于真正换 Key 的时刻");
+  assert.equal(window.effectiveTo, Date.parse("2026-10-11T12:05:00Z"), "b = 控制台拿到快照的时刻");
+  agent.readLagMs = 0;
+  await round("2026-10-11T17:00:00Z");
+  assert.equal(latestLedgerCostOn(f, "2026-10-11"), 86400, "整天每秒 1 美元，一秒不漏");
+});
