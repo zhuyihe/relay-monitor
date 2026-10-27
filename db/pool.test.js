@@ -56,6 +56,7 @@ test("对账 schema 缺列或索引时使用 MySQL 8 兼容的普通 ALTER", asy
     "ALTER TABLE reconciliation_ledger ADD COLUMN gap_reason VARCHAR(40) NULL",
     "ALTER TABLE reconciliation_ledger ADD COLUMN tokens BIGINT NULL",
     "ALTER TABLE reconciliation_fixed_cost_days ADD COLUMN basis VARCHAR(16) NOT NULL DEFAULT 'fixed'",
+    "ALTER TABLE reconciliation_fixed_cost_days ADD INDEX idx_fixed_cost_days_date (bill_date)",
     "ALTER TABLE own_log_cursor ADD COLUMN disabled_from_ms BIGINT NULL",
     "ALTER TABLE own_log_cursor ADD COLUMN disabled_to_ms BIGINT NULL",
   ]);
@@ -67,7 +68,7 @@ test("对账 schema 已具备列和索引时不重复执行 ALTER", async () => 
     columns: ["channel_status", "status_observed_at_ms", "status_changed_at_ms", "segment_id", "ratio_observed_at_ms", "ratio_source",
       "billing_policy", "scope_version", "billing_effective_from_ms", "archived_at_ms", "accounting_floor_ms", "cost_coverage", "provider", "canonical_key", "source_binding", "identity_scheme",
       "expected_cost_usd", "gap_reason", "tokens", "basis", "disabled_from_ms", "disabled_to_ms"],
-    indexes: ["idx_reconciliation_snapshot_segment", "idx_reconciliation_rule_token"],
+    indexes: ["idx_reconciliation_snapshot_segment", "idx_reconciliation_rule_token", "idx_fixed_cost_days_date"],
   });
   await ensureSchema(pool);
   assert.equal(pool.calls.some((call) => call.sql.startsWith("ALTER TABLE")), false);

@@ -7548,7 +7548,7 @@ test("固定成本补数（G 总指挥第三轮）：没有账本行的日子沿
   const again = f.repository.tables.fixedCostDays.filter((row) => row.station_id === "upstream" && row.bill_date <= "2026-10-08").map((row) => [row.bill_date, row.basis, Number(row.cost_cny)]).sort();
   assert.deepEqual(again, [["2026-10-07", "usage", 0], ["2026-10-08", "usage", 0]]);
   assert.ok(ledgerDays.size >= 2);
-  const gapDays = f.repository.tables.fixedCostDays.filter((row) => row.station_id === "upstream" && row.bill_date > "2026-10-08" && !f.state.ledger.some((l) => l.bill_date === row.bill_date)).map((row) => [row.basis, Number(row.cost_cny)]);
+  const gapDays = f.repository.tables.fixedCostDays.filter((row) => row.station_id === "upstream" && row.bill_date > "2026-10-08" && row.bill_date < "2026-10-11" && !f.state.ledger.some((l) => l.bill_date === row.bill_date)).map((row) => [row.basis, Number(row.cost_cny)]);
   assert.ok(gapDays.length >= 1 && gapDays.every(([basis, cny]) => basis === "usage" && cny === 0), `没有账本行的日子沿用按用量：${JSON.stringify(gapDays)}`);
 });
 
@@ -7563,6 +7563,50 @@ test("固定成本补数（G 第四轮）：从来没绑定过的服务器租金
   assert.ok(old.length >= 1 && old.every(([, basis, cny]) => basis === "fixed" && cny === 20), `从来没绑定过、建立得早：历史每天 20 元，不是 0：${JSON.stringify(old)}`);
   assert.ok(of("rent-new").some(([day, basis, cny]) => day < "2026-10-09" && basis === "excluded" && cny === 0), "建立以前、没有账本行的日子记 excluded 0");
   assert.ok(of("rent-new").every(([day, basis, cny]) => day < "2026-10-09" ? basis === "excluded" : cny === 20), "建立当天起照摊");
+});
+
+test("固定成本每天写昨天那一行（G 第四轮中-B/中-C）：按用量改成固定以后，新的日子按固定记；上游现在不算进利润，每一天都记 excluded 0；昨天的账还没结时这一轮先不写、下一轮再写", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  const of = () => f.repository.tables.fixedCostDays.filter((row) => row.station_id === "upstream").map((row) => [row.bill_date, row.basis, Number(row.cost_cny)]).sort();
+  await f.module.refreshDue(now);
+  assert.ok(of().every(([, basis]) => basis === "usage"), "前提：开始是按用量");
+  // 按用量改成固定：之后几天账本按固定结，表里也按固定记（不能一直沿用前一天的按用量）
+  upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5;
+  for (let n = 0; n < 3; n += 1) { now += 86400000; await f.module.refreshDue(now); }
+  const fixedDays = of().filter(([, basis]) => basis === "fixed");
+  assert.ok(fixedDays.length >= 2 && fixedDays.every(([, , cny]) => cny === 10), `改成固定以后新的日子按固定记：${JSON.stringify(of())}`);
+  // 昨天的账还没结：这一轮先不写昨天，下一轮再写
+  const realFacts = f.repository.listLedgerDayFacts.bind(f.repository);
+  f.repository.listLedgerDayFacts = async () => [];
+  const written = of().length;
+  now += 86400000;
+  await f.module.refreshDue(now);
+  assert.equal(of().length, written, "昨天的账还没结（没有账本行、绑定还在跑）：先不写");
+  f.repository.listLedgerDayFacts = realFacts;
+  await f.module.refreshDue(now);
+  assert.ok(of().length > written, "下一轮写上");
+  // 关掉「算进利润」：以后每一天都记 excluded、0 元
+  upstream.includeInProfit = false;
+  now += 2 * 86400000;
+  await f.module.refreshDue(now);
+  const last = of().at(-1);
+  assert.deepEqual(last.slice(1), ["excluded", 0], "不算进利润以后每天 excluded 0");
+});
+
+test("固定成本写昨天（G 第四轮）：没有在跑的绑定、昨天没有账本行时按上游现在的设置，不沿用前面的计法", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  await f.module.refreshDue(now); // 按用量
+  for (const row of f.rows) row.enabled = 0;
+  upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5;
+  now += 86400000;
+  await f.module.refreshDue(now);
+  const lastRow = f.repository.tables.fixedCostDays.filter((row) => row.station_id === "upstream").sort((a, b) => (a.bill_date < b.bill_date ? -1 : 1)).at(-1);
+  assert.deepEqual([lastRow.bill_date, lastRow.basis, Number(lastRow.cost_cny)], ["2026-10-09", "fixed", 10]);
 });
 
 test("固定成本补数（G 审核第二轮）：以前的日子用账本里结账那天记的汇率（上线时数不跳）；以后每天只从各上游已写的最后一天往后接着补", async (t) => {

@@ -2521,6 +2521,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const own = usageUpstreams()?.own;
     const stations = own ? rt.store.list().filter((station) => !station.archivedAt && station.id !== own.id) : [];
     if (!stations.length) { fixedCostFilledThrough = lastDay; return; }
+    let deferred = false; // 昨天的账还没结的上游这一轮先不写昨天，下一轮再写（零点写昨天时账还没结，不能一律走「没有账本行」）
     let earliest = null; // 没写过的上游才要：账本最早的一天（用到才读，每天最多一次）
     const allRules = await repository.listRules({ includeArchived: true });
     for (const station of stations) {
@@ -2545,11 +2546,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       let carry = null;
       if (last) { const [row] = await repository.listFixedCostDays([station.id], last, last); carry = row && ["fixed", "usage"].includes(row.basis) ? row.basis : null; }
       const nowBasis = dayBasisOfStation(station), rate = rateSnapshotOf(station), purchases = purchasesOf(station), rows = [];
+      const hasLiveRule = allRules.some((rule) => String(rule.upstreamStationId) === String(station.id) && rule.enabled && !rule.archivedAt);
       for (let day = from; day <= lastDay; day = shiftDayLabel(day, 1)) {
         const fact = dayFact.get(day);
+        // 上游现在不算进利润（关了「算进利润」、没在监控）：每一天都记 excluded、0 元
+        if (nowBasis === "excluded") { rows.push({ stationId: station.id, billDate: day, basis: "excluded", costCny: 0, costRate: null, note: null }); continue; }
         if (createdDay && day < createdDay && !fact) { rows.push({ stationId: station.id, billDate: day, basis: "excluded", costCny: 0, costRate: null, note: null }); continue; }
         if (fact?.costBasis) carry = fact.costBasis === "fixed" ? "fixed" : "usage";
-        const basis = fact?.costBasis ? carry : (carry ?? nowBasis);
+        // 昨天：有账本行按账本；没有账本行但还有在跑的绑定（账多半还没结）这一轮先不写，往后的日子也先不写；没有绑定的按现在的设置
+        if (day === lastDay && !fact?.costBasis && hasLiveRule) { deferred = true; break; }
+        // 昨天以前、又没有账本行的日子沿用此前最近一条账本行的计法；昨天（没有绑定的）按现在的设置
+        const basis = fact?.costBasis ? carry : (day === lastDay ? nowBasis : (carry ?? nowBasis));
         if (basis !== "fixed") { rows.push({ stationId: station.id, billDate: day, basis, costCny: 0, costRate: null, note: null }); continue; }
         const startMs = dayStartInTz(day, tz);
         const amortized = amortizeFixedCost(purchases, { startMs, endMs: shiftedDayStartInTz(startMs, 1, tz), tz });
@@ -2558,7 +2565,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       if (rows.length) await repository.recordFixedCostDays(rows);
     }
-    fixedCostFilledThrough = lastDay;
+    if (!deferred) fixedCostFilledThrough = lastDay;
   }
 
   // 一条绑定一天的应付成本（V1-b）：桶（整站日志，只读、不发请求）、这一天各段的上游分组倍率、价目表（每小时一次的缓存）、
