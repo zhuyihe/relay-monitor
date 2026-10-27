@@ -20,6 +20,8 @@ export const EQ_TEXT = Object.freeze({
   upstreamCount: (n: number) => `${n} 个上游`,
   fixedCount: (n: number) => `${n} 个上游，按天平摊`,
   noFixed: "没有固定成本",
+  // 固定成本一格的悬停（用语规范 §9）
+  fixedHover: "固定成本按天平摊，那天固定时一起记下；改了固定成本，已固定的日子不变，还没固定的按新的算",
   partial: "数据不完整",
   profitPartialTail: "实际数字可能与这里有出入。",
   // 缺的是上游成本：成本偏低，毛利和净利偏高
@@ -86,6 +88,7 @@ function Term({
   op,
   kind,
   loading,
+  title,
 }: {
   label: string;
   color?: string;
@@ -95,6 +98,7 @@ function Term({
   // gross：第一行的结果；net：第二行的结果（主结论）；carry：第二行开头承接的毛利，窄屏账单式里隐藏
   kind?: "gross" | "net" | "carry";
   loading?: boolean;
+  title?: string;
 }) {
   const plain = !kind;
   const cls = [
@@ -130,7 +134,7 @@ function Term({
     );
   }
   return (
-    <div className={cls} data-op={op} aria-hidden={kind === "carry" ? true : undefined}>
+    <div className={cls} data-op={op} title={title} aria-hidden={kind === "carry" ? true : undefined}>
       {inner}
     </div>
   );
@@ -258,7 +262,7 @@ export function ProfitEquation({
         />
         <Term label="毛利" term={{ value: grossValue, approx: grossApprox }} kind="carry" loading={loading} />
         <Op ch={MINUS} spoken="减" />
-        <Term label="固定成本" color="var(--jy-s3)" term={fixed} op={MINUS} loading={loading} />
+        <Term label="固定成本" color="var(--jy-s3)" term={fixed} op={MINUS} loading={loading} title={EQ_TEXT.fixedHover} />
         <Op ch="=" spoken="等于" />
         <Term
           label="净利"

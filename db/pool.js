@@ -265,12 +265,15 @@ export async function ensureSchema(pool) {
     expected_cost_usd DECIMAL(20,8) NULL,
     gap_reason VARCHAR(40) NULL,
     tokens BIGINT NULL,
+    fixed_cost_cny DECIMAL(20,8) NULL,
     PRIMARY KEY (rule_id, bill_date, revision)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   // 应付成本（V1-b）：账本多三列，旧账是 null
   await addColumnIfMissing(pool, "reconciliation_ledger", "expected_cost_usd", "DECIMAL(20,8) NULL");
   await addColumnIfMissing(pool, "reconciliation_ledger", "gap_reason", "VARCHAR(40) NULL");
   await addColumnIfMissing(pool, "reconciliation_ledger", "tokens", "BIGINT NULL");
+  // 固定成本跟着每天一起固定（G）：固定成本的上游那天摊到的金额（元），旧账是 null
+  await addColumnIfMissing(pool, "reconciliation_ledger", "fixed_cost_cny", "DECIMAL(20,8) NULL");
   // 结账状态（计划 C2a）：每条绑定每个还没固定的日子一行，固定成了就在同一个事务里删掉。只放没办完的日子，正常时接近空。
   // retry_reason 会自己好的原因（按退避表再试）；manual_reason 要人处理的原因；source_version 记下时的配置代次（变了马上重判）。
   // resettle_* 是重结请求（C2b 才写）。不加外键；清理按 bill_date 每小时删一批 31 天前、没有请求的行。

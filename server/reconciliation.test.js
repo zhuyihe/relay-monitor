@@ -7453,6 +7453,22 @@ test("4a 账本记下结账时配置的汇率和成本计法：之后改汇率�
   assert.deepEqual([today.rates.costBasis, today.rates.income.cnyPerUsd, today.ledger], ["fixed", 8, undefined]);
 });
 
+test("固定成本跟着每天一起固定（G）：固定成本的上游结账时记下那天摊到的金额（元）；以后改购买记录、汇率，已固定的日子不变，每日利润页的净利也不变", async (t) => {
+  const f = await completedDayFixture(t);
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5; // 每天 10 元 = $2
+  await f.module.refreshDue(Date.now());
+  assert.deepEqual(f.state.ledger.map((row) => [row.bill_date, row.cost_basis, Number(row.cost_rate), Number(row.fixed_cost_cny)]), Array(3).fill(["2026-10-08", "fixed", 5, 10]), "三条绑定都记了固定成本那天的金额和汇率");
+  const before = await f.module.profitPage({ preset: "yesterday" });
+  assert.equal(before.fixedCostUsd, 2, "同一个固定成本的上游只摊一份，不按绑定数加三遍");
+  // 购买记录改成每天 100 元、汇率改成 1 美元 = 2 元：已固定的昨天不变
+  upstream.fixedPurchases = [{ amount: 3000, days: 30 }]; upstream.cnyPerUsd = 2;
+  f.rt._reconciliationResultCache.clear();
+  const after = await f.module.profitPage({ preset: "yesterday" });
+  assert.equal(after.fixedCostUsd, 2, "改了购买记录和汇率，已固定的日子不变");
+  assert.equal(after.netProfitUsd, before.netProfitUsd);
+});
+
 test("结账在途改变成本计法和双边汇率：废弃旧任务，重读后只保存一致的新配置", async (t) => {
   for (const initialFixed of [true, false]) await t.test(initialFixed ? "固定采购改按用量" : "按用量改固定采购", async (t) => {
     const wait = holdPoint();

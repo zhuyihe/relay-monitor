@@ -41,7 +41,7 @@ import { OwnLogStore } from "./own-log-store.js";
 import { INGEST, createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
 import { expectedCostForDay } from "../lib/expected-cost-day.js";
-import { buildProfitDetail, buildProfitPage, dayLabelsOf } from "../lib/profit-page.js";
+import { buildProfitDetail, buildProfitPage, dayLabelsOf, fixedCostOfRange } from "../lib/profit-page.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
@@ -2505,6 +2505,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource })) ? unavailable : STALE_SCOPE;
   }
 
+  // 固定成本跟着每天一起固定（G）：固定成本的上游，那天摊到的金额（元）随账本一起记下来，以后改了购买记录，已固定的日子不变。
+  // 重结（改了倍率变化的时间）沿用原来那一版记下的，不按现在的购买记录重摊；原来没记的（这一版以前固定的旧账）才按现在的算。
+  // 摊 0 也记（那天确实没有固定成本），免得以后补记购买记录把那天的数改了。别的计法（按用量）不记，是 null
+  async function fixedCostCnyForSettlement(rule, window, { resettle = false } = {}) {
+    if (resettle) {
+      const prior = await repository.latestLedgerEntry(rule.id, window).catch(() => null);
+      if (prior?.fixedCostCny != null) return prior.fixedCostCny;
+    }
+    const station = upstreamStation(rule.upstreamStationId);
+    if (!station) return null;
+    return amortizeFixedCost(purchasesOf(station), { startMs: window.startMs, endMs: window.endMs, tz: window.timezone }).exact;
+  }
+
   // 一条绑定一天的应付成本（V1-b）：桶（整站日志，只读、不发请求）、这一天各段的上游分组倍率、价目表（每小时一次的缓存）、
   // 上游的额度换算；算不出的情况给原因码（lib/expected-cost-day.js）。顺手把桶里的「管理员自用」和 R1 扣的数比一比打一行 debug（V1 只对账，不替换 R1）。
   // 出任何错都不挡结账：那一天应付成本写「—」加 MODEL_PRICE_UNREADABLE / EXPECTED_COST_LAGGING 这类原因
@@ -2656,9 +2669,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       ...(result.consumeLogSetting ? { consumeLogSetting: result.consumeLogSetting } : {}) };
     // 应付成本（V1-b）：结单日账时按这一天的小时桶和上游价目表算出来，随账本一起固定；算不出的给原因码。只影响新列，不改原有金额
     const expected = ledgerDay ? await expectedCostForSettlement(rule, result, token) : null;
+    const fixedCostCny = ledgerDay && financialSnapshot.costBasis === "fixed" ? await fixedCostCnyForSettlement(rule, result.window, { resettle }) : null;
     const ledgerEntry = ledgerDay ? ledgerEntryForSettlement(rule.id, result, { ...sourceFor({ ...wholeWindow, recordType: "confirmed" }), settlement, ...(expected ? { expected: expected.detail } : {}) }, {
       revenueRate: configuredRate(financialSnapshot.income), costRate: configuredRate(financialSnapshot.cost),
-      costBasis: financialSnapshot.costBasis, expectedCostUsd: expected?.usd ?? null, gapReason: expected?.reason ?? null, tokens: expected?.tokens ?? null }) : null;
+      costBasis: financialSnapshot.costBasis, expectedCostUsd: expected?.usd ?? null, gapReason: expected?.reason ?? null, tokens: expected?.tokens ?? null,
+      fixedCostCny }) : null;
     // 重结读出来的收入或上游成本比账本最新一版少一半以上（日志过了保留期之类）：不写新版，等人确认（手动「重新读取」才覆盖）。
     // 记 RESETTLE_SHRUNK 的状态行由 settleDay 写；页面上这天还是已固定的旧数
     // 确认了（confirmShrink）：确认框里写的「重算」数（confirmedAfter）和这次再读到的不一样、或者根本没带，照旧挡下、把新的数记下来再让人看一眼（直接调接口也绕不过），
@@ -3180,28 +3195,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 最小改法（审核 #126 M3）：按天摊，已固定的日子按账本那天记的 cost_basis 判要不要摊（fixed 才摊、usage 不摊）、汇率用那天的 cost_rate；
       // 还没固定的日子（今天、还在读取）按现在的设置摊。注意：摊的「金额」本身还是按现在的购买记录算，改了购买金额过去的日子会跟着变——
       // 「固定成本本身也按天固定下来」是以后单独一个小 PR 做的事，这里不做
-      const fixedStations = usageUpstreams()?.fixed || [];
-      let fixedCostUsd = 0;
-      // 没设汇率的固定上游：readResponse 的 unconfiguredRateStations 不含固定上游（那条路不摊固定成本，没必要提示），这里单独收集、和它的点名去重合并（审核 #126 M6）
-      const fixedRateUnset = [];
-      const dayFactOf = new Map(dayFacts.map((item) => [`${item.ruleId}:${item.billDate}`, item]));
-      for (const station of fixedStations) {
-        const rate = rateSnapshotOf(station);
-        if (!isConfiguredRate(rate)) { fixedCostUsd = null; fixedRateUnset.push({ id: station.id, name: station.name }); continue; }
-        if (fixedCostUsd == null) continue;
-        const purchases = purchasesOf(station);
-        const boundRuleIds = results.filter((row) => String(row.rule.upstreamStationId) === String(station.id)).map((row) => row.rule.id);
-        for (const day of labels) {
-          const dayStartMs = Math.max(dayStartInTz(day, tz), window.startMs);
-          const dayEndMs = Math.min(shiftedDayStartInTz(dayStartInTz(day, tz), 1, tz), window.endMs, now);
-          if (dayEndMs <= dayStartMs) continue;
-          const dayUsd = amortizeFixedCost(purchases, { startMs: dayStartMs, endMs: dayEndMs, tz }).exact;
-          if (!dayUsd) continue;
-          const fact = boundRuleIds.map((id) => dayFactOf.get(`${id}:${day}`)).find(Boolean);
-          if (fact) { if (fact.costBasis !== "fixed") continue; fixedCostUsd += dayUsd / Number(fact.costRate || rate.cnyPerUsd); }
-          else fixedCostUsd += dayUsd / Number(rate.cnyPerUsd);
-        }
-      }
+      // 固定成本（lib/profit-page.js fixedCostOfRange）：已固定的日子用账本里那天记下的金额和汇率（G：固定成本跟着每天一起固定，
+      // 以后改了购买记录已固定的日子不变）；还没固定的日子按现在的算；自营站点关着收费记录碰到的日子不扣（决定记录 58）。
+      // 没设汇率的固定上游：readResponse 的 unconfiguredRateStations 不含固定上游（那条路不摊固定成本，没必要提示），单独收集、和它的点名去重合并（审核 #126 M6）
+      const { usd: fixedCostUsd, rateUnset: fixedRateUnset } = fixedCostOfRange({ stations: usageUpstreams()?.fixed || [], results, labels, window, now, tz, dayFacts,
+        offPeriodsOf: (ownStationId) => upstreamStation(ownStationId)?.consumeLogOffPeriods });
       // 整站收入读不到：从各绑定的 health.issues 扫（不另发请求，运营总览走的是现读一次 computeProfit，这里只有结果里带着的问题可查，
       // 审核 #126 M5 要的「同一份」做不到不额外读站点；改法：自营站点侧的令牌类问题（ACCESS_TOKEN_*）也算进来，不只挑第一条、按最新一个）
       const ownIssues = results.flatMap((row) => row.health?.issues || []).filter((issue) =>

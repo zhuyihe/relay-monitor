@@ -4232,3 +4232,24 @@ test("改时间以后有几天太早没自动重算：成功提示写出是哪�
   assert.equal(await notice.count(), 1, "5 秒以后还在");
   await notice.locator(".ant-notification-notice-close").click(); await notice.waitFor({ state: "hidden" });
 });
+
+test("重新检查（R2）：点了才读一次自营站点的设置，读完提示结果，每日利润自己重读整页（不是打开页面就读）", async (t) => {
+  const attention = { code: "OWN_CONSUME_LOG_OFF", title: reconciliationIssue("OWN_CONSUME_LOG_OFF").title, detail: "", action: workflowAction("recheck_consume_log", {}), fromDay: "2026-10-01", moreCount: 0 };
+  const rows = [profitRow("rule-1", "Rule A", { expected: 1, cost: 1.2, gapUsd: 0.2 }), profitRow("rule-2", "Rule B", { attention })];
+  let checks = 0;
+  const { page, profitReads } = await openDailyPage(t, { rows, pageOf: () => profitPage(rows, { preset: "yesterday" }),
+    extraAPI(route, path) {
+      if (path !== "/api/own/consume-log") throw new Error("unexpected daily fixture API: " + path);
+      assert.equal(route.request().method(), "POST"); checks += 1;
+      return fulfill(route, { status: { state: "on" } });
+    } });
+  await rowOf(page, "Rule B").waitFor();
+  assert.equal(checks, 0, "打开页面不读设置");
+  const before = profitReads.length;
+  await page.getByRole("button", { name: `重新检查 Rule B`, exact: true }).click();
+  await page.locator(".ant-message").getByText("已经在记收费记录了", { exact: true }).waitFor();
+  await page.waitForFunction(() => !document.querySelector(".ant-btn-loading"));
+  assert.equal(checks, 1, "只读一次");
+  for (let i = 0; i < 50 && profitReads.length === before; i += 1) await page.waitForTimeout(100);
+  assert.equal(profitReads.length, before + 1, "点完重读整页");
+});

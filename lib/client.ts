@@ -149,6 +149,8 @@ export type ProfitDetailResponse = {
   actual: { usd: number | null; keyName: string | null };
   gap: { usd: number | null; rate: number | null; state: "over" | "under" | "within" | null } | null;
   grossProfitUsd: number | null; fixedAt: string | null; revisions: number | null;
+  // 固定这天时自营站点的设置一直读不到（R2）
+  settingUnreadable?: boolean;
 };
 export type WorkflowAction = {
   // 种类和按钮文字只在 lib/workflow-actions.js 定义（ACTIONS）

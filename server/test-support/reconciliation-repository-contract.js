@@ -918,7 +918,7 @@ contract("the ledger keeps one row per settled day: the same window is not booke
   const first = await latest();
   assert.deepEqual({ ...first, detail: undefined }, { ruleId: rule.id, billDate: "2026-01-10", revision: 1, versionId: null, timezone: "UTC",
     startMs: day, endMs: day + DAY, revenueUsd: 2.25, costUsd: 1, revenueRate: 7.1, costRate: null, costBasis: "usage", source: "settle",
-    detail: undefined, settledAt: "2026-01-11T00:20:00.000Z", expectedCostUsd: null, gapReason: null, tokens: null });
+    detail: undefined, settledAt: "2026-01-11T00:20:00.000Z", expectedCostUsd: null, gapReason: null, tokens: null, fixedCostCny: null });
   assert.equal(first.detail.result.calculation.profitUsd, 2);
   assert.equal(first.detail.scopeFingerprint, fingerprint);
 
@@ -1208,13 +1208,13 @@ contract("listLedgerDayFacts gives each rule's latest revision per day inside [f
     const snapshot = billingSnapshot({ rule: target, segment, fingerprint, window, generatedAt: `2026-01-${String(day + 1).padStart(2, "0")}T00:20:00.000Z`, profitUsd });
     // 重算那一版换个汇率（账本内容变了才写新版）；第二版带应付成本三列，第一版算不出
     const ledger = settlement(snapshot, { resettle, ...(resettle ? { revenueRate: 7 } : {}) });
-    ledger.entry = { ...ledger.entry, expectedCostUsd: profitUsd === 3 ? 1.25 : null, gapReason: profitUsd === 3 ? null : "MODEL_PRICE_UNREADABLE", tokens: profitUsd === 3 ? 2880000 : null };
+    ledger.entry = { ...ledger.entry, expectedCostUsd: profitUsd === 3 ? 1.25 : null, gapReason: profitUsd === 3 ? null : "MODEL_PRICE_UNREADABLE", tokens: profitUsd === 3 ? 2880000 : null, fixedCostCny: profitUsd === 3 ? 10.5 : null };
     assert.equal(await repository.saveSnapshotsForScope(target.id, fingerprint, [snapshot], { ledger }), true);
   };
   await book(rule, 8); await book(rule, 9); await book(rule, 9, 3, true); await book(rule, 12); await book(other, 9);
   const facts = await repository.listLedgerDayFacts([rule.id], "2026-01-09", "2026-01-11");
-  assert.deepEqual(facts.map((fact) => [fact.billDate, fact.revision, fact.expectedCostUsd, fact.gapReason, fact.tokens, fact.costBasis]),
-    [["2026-01-09", 2, 1.25, null, 2880000, "usage"]], "只有范围里的天、每天最新一版、别的绑定不要");
+  assert.deepEqual(facts.map((fact) => [fact.billDate, fact.revision, fact.expectedCostUsd, fact.gapReason, fact.tokens, fact.costBasis, fact.fixedCostCny]),
+    [["2026-01-09", 2, 1.25, null, 2880000, "usage", 10.5]], "只有范围里的天、每天最新一版、别的绑定不要；固定成本那天摊到的金额（元）跟着账本存下来（G）");
   assert.ok(facts[0].settledAt && Number.isFinite(facts[0].revenueUsd), "带固定时刻和原有金额");
   assert.deepEqual((await repository.listLedgerDayFacts([rule.id, other.id], "2026-01-01", "2026-01-31")).map((fact) => [fact.billDate, fact.ruleId === rule.id ? "r" : "o"]).sort(),
     [["2026-01-08", "r"], ["2026-01-09", "o"], ["2026-01-09", "r"], ["2026-01-12", "r"]]);
