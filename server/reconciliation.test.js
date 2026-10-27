@@ -7232,11 +7232,136 @@ test("K2b：没有冲突的正常换 Key——识别→算计划→落库接上�
   assert.equal(segments.length, 3, "原段关掉 + 过渡段（两把 Key，已关）+ 新段（token 10，开着）");
   assert.deepEqual(segments[2].keys.map((key) => key.tokenId), [10]);
   assert.deepEqual(segments[1].keys.map((key) => key.tokenId).sort((a, b) => a - b), [9, 10], "过渡段两把 Key 都记着");
+  // 正常换 Key：a 是上一次读成功的时刻（第一轮 10-11 01:00Z），b 是这一轮读到的时刻（10-12 01:00Z）
+  assert.equal(segments[1].effectiveFrom, Date.parse("2026-10-11T01:00:00Z"), "a = 上一次读成功的时刻");
+  assert.equal(segments[1].effectiveTo, Date.parse("2026-10-12T01:00:00Z"), "b = 这一轮读到新 Key 的时刻");
+  assert.equal(f.stations[1].keyAgentLastSuccessAtMs, Date.parse("2026-10-12T01:00:00Z"), "换段落库以后，这一轮的成功时刻才记下来");
 
   now = Date.parse("2026-10-13T01:00:00Z");
   await f.module.refreshDue(now); // 结「昨天」10-12：换完以后照常结账，不会被挡住
   assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length, 1,
     "换了 Key 以后 10-12 照常固定，没有被 SOURCE_BINDING_UNCONFIRMED 挡住");
+});
+
+test("K2b：读完、落库前重启——这一轮的成功时刻要等落库以后才写，重启后 a 还是上一次读成功的时刻，[t, b) 不漏", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let currentKey = keyNine;
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(currentKey), f: "unused" }] }] },
+  });
+  const own = f.stations[1];
+  await f.module.refreshDue(now); // 第一轮 10-11 01:00Z：没变化，成功时刻记下 T1
+  const t1 = Date.parse("2026-10-11T01:00:00Z");
+  assert.equal(own.keyAgentLastSuccessAtMs, t1);
+
+  currentKey = keyTen;
+  now = Date.parse("2026-10-11T14:30:00Z"); // 真正换 Key 在 T1 和这一轮之间的某一刻，这一轮 14:30 才读到
+  const original = f.repository.applyKeyChangePlans.bind(f.repository);
+  const seenAtApply = [];
+  let crash = true;
+  f.repository.applyKeyChangePlans = async (...args) => {
+    seenAtApply.push(own.keyAgentLastSuccessAtMs); // 落库的这一刻，库里「上一次读成功」还应该是 T1，不是这一轮的 14:30
+    if (crash) { crash = false; throw new Error("进程在落库前被杀了"); }
+    return original(...args);
+  };
+  await f.module.refreshDue(now);
+  assert.deepEqual(seenAtApply, [t1], "落库时站点的成功时刻还是上一次的，没有读完就先写成 b");
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 9, "这一轮没落库，绑定原样");
+  assert.equal(own.keyAgentLastSuccessAtMs, t1, "没落库，成功时刻不往前推：重启以后 a 还是 T1");
+
+  // 「重启」：内存里的识别缓存丢了，站点上持久化的成功时刻还在
+  f.rt._keyAgentIdentifyCache = null;
+  now = Date.parse("2026-10-11T14:34:00Z");
+  await f.module.refreshDue(now);
+  const segments = await f.repository.listSegments("rr_live");
+  assert.equal(segments.length, 3);
+  assert.equal(segments[1].effectiveFrom, t1, "重启后 a 还是上一次读成功的 T1，不是 b——[t, b) 在过渡段里，不漏");
+  assert.equal(segments[1].effectiveTo, now);
+  assert.deepEqual(segments[1].keys.map((key) => key.tokenId).sort((a, b) => a - b), [9, 10]);
+  assert.equal(own.keyAgentLastSuccessAtMs, now, "换段落库以后才记下这一轮");
+});
+
+test("K2b：冲突几轮以后解开再换段——站点的成功时刻没往前推，换段的 a 用开着那段的起点，不漏", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10), keyEleven = "sk-" + "Elev".repeat(10);
+  let keys = { 1: keyNine, 2: keyNine }; // 一条绑定两个渠道（组），都用 token 9
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 1000 }],
+    channelsByRule: { rr_live: [1, 2] },
+    tokenKeyOf: (tokenId) => ({ 9: keyNine, 10: keyTen, 11: keyEleven })[tokenId],
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }, { tokenId: 11, name: "oai-3" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [1, 2].map((id) => ({ id, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(keys[id]), f: "unused" }] })) },
+  });
+  const own = f.stations[1];
+  await f.module.refreshDue(now); // T1：正常，成功时刻记下 T1
+  const t1 = Date.parse("2026-10-11T01:00:00Z");
+  assert.equal(own.keyAgentLastSuccessAtMs, t1);
+
+  keys = { 1: keyTen, 2: keyEleven }; // 组散了：两个渠道各换了一把不一样的
+  now = Date.parse("2026-10-12T01:00:00Z");
+  await f.module.refreshDue(now);
+  now = Date.parse("2026-10-12T01:10:00Z");
+  f.rt._keyAgentIdentifyCache = null;
+  await f.module.refreshDue(now); // 又一轮，还是冲突
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 9, "冲突期间不换段");
+  assert.equal(own.keyAgentLastSuccessAtMs, t1, "有没处理完的冲突，站点的成功时刻不往前推");
+  assert.ok((await f.repository.getRule("rr_live")).keyGroupConflictSinceMs != null, "冲突已经记下了 b");
+
+  keys = { 1: keyTen, 2: keyTen }; // 冲突解开：两个渠道又一样了，都换成了 token 10
+  now = Date.parse("2026-10-12T01:20:00Z");
+  f.rt._keyAgentIdentifyCache = null;
+  await f.module.refreshDue(now);
+  const rule = await f.repository.getRule("rr_live");
+  assert.equal(rule.tokenId, 10, "解开以后换段");
+  assert.equal(rule.keyGroupConflictSinceMs, null, "冲突记号清掉了");
+  const segments = await f.repository.listSegments("rr_live");
+  const transitional = segments.find((segment) => segment.keys.length === 2);
+  assert.equal(transitional.effectiveFrom, 1000, "带着冲突的绑定，a 用开着那段的起点，不是站点的 T1");
+  assert.equal(transitional.effectiveTo, now);
+  assert.equal(own.keyAgentLastSuccessAtMs, now, "换段落库、冲突清掉以后，成功时刻才往前推");
+});
+
+test("K2b：两条绑定互换 Key（挪过）——同一个事务清空再写不撞自己的唯一约束，两边都按 b 切开不开过渡段，成本主人看到的是换完以后的 Key", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let swapped = false;
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    extraRuleIds: ["rr_b"],
+    channelsByRule: { rr_live: [1], rr_b: [2] },
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [
+      { id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(swapped ? keyTen : keyNine), f: "unused-1" }] },
+      { id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(swapped ? keyNine : keyTen), f: "unused-2" }] },
+    ] },
+  });
+  await f.module.refreshDue(now);
+  assert.ok((await f.repository.getRule("rr_live")).canonicalKey && (await f.repository.getRule("rr_b")).canonicalKey, "第一轮两条都锚定了");
+
+  swapped = true; // 两个渠道互换了 Key
+  now = Date.parse("2026-10-12T01:00:00Z");
+  await f.module.refreshDue(now);
+  const a = await f.repository.getRule("rr_live"), b = await f.repository.getRule("rr_b");
+  assert.deepEqual([a.tokenId, b.tokenId], [10, 9], "互换成功，没有撞唯一约束");
+  assert.equal(a.keyGroupConflictSinceMs, null);
+  assert.equal(b.keyGroupConflictSinceMs, null, "互换不是分组合组，不记冲突");
+  for (const ruleId of ["rr_live", "rr_b"]) {
+    const segments = await f.repository.listSegments(ruleId);
+    assert.equal(segments.length, 2, "挪过：按 b 切开，只有旧段和新段，没有两把 Key 都算的过渡段");
+    assert.equal(segments[0].effectiveTo, now);
+    assert.equal(segments[1].effectiveFrom, now);
+    assert.equal(segments[1].keys.length, 1);
+  }
+  assert.equal((await f.repository.listSegments("rr_live"))[1].keys[0].tokenId, 10);
+  assert.equal((await f.repository.listSegments("rr_b"))[1].keys[0].tokenId, 9);
 });
 
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {

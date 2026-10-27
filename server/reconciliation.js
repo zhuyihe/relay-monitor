@@ -867,8 +867,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       return { ruleId: plan.bindingId, plan: { ...plan, canonicalKey: canonicalBillingKey(upstream, identity, plan.after[0].tokenId) } };
     }).filter(Boolean);
     if (!applyPlans.length) return { applied: false, allApplied: false };
+    // 写库失败（不是撞唯一约束，比如连接断了）：这一轮没换成，不是分组合组，不记冲突，下一轮接着换
     const result = await repository.applyKeyChangePlans(applyPlans, { detectedAt: observedAt }).catch(() => null);
-    if (!result || result.conflict) {
+    if (!result) return { applied: false, allApplied: false };
+    if (result.conflict) {
       // 数据库唯一约束拦住了（没被 detectGroupMerges 预检查到的边界情况）：这一批牵连的绑定都改记分组冲突，
       // 不是某一条的事——两条互换、或者批里有一条真的撞了别的绑定，都保守地当这一批都不安全，交给 K2c
       for (const plan of applyPlans) {
