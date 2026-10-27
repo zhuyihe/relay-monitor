@@ -1983,16 +1983,58 @@ contract("listSegmentsForRules (K2d): several rules' segments (with keys) in one
   assert.deepEqual(await repository.listSegmentsForRules([]), {});
 });
 
-contract("markKeyIssue (K2b): an open issue reads back as keyIssue; with untilMs it reads back as keyIssueClosed (and keyIssue is null); null clears both", async ({ repository, fixture }) => {
+contract("markKeyIssue / addKeyBlock (K2b): an open issue reads back as keyIssue; closed periods stack as keyBlocks (several, merged when they touch, never overwritten by a new issue); clearIssue turns the open issue into a block", async ({ repository, fixture }) => {
   const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(191), name: "K" }] });
   const get = () => repository.getRule(rule.id);
-  assert.deepEqual([(await get()).keyIssue, (await get()).keyIssueClosed ?? null], [null, null]);
+  assert.deepEqual([(await get()).keyIssue, (await get()).keyBlocks ?? null], [null, null]);
   await repository.markKeyIssue(rule.id, { code: "KEY_GROUP_CHANGED", sinceMs: 1000 });
-  assert.deepEqual([(await get()).keyIssue, (await get()).keyIssueClosed ?? null], [{ code: "KEY_GROUP_CHANGED", sinceMs: 1000 }, null]);
-  await repository.markKeyIssue(rule.id, { code: "KEY_GROUP_CHANGED", sinceMs: 1000, untilMs: 5000 });
-  assert.deepEqual([(await get()).keyIssue, (await get()).keyIssueClosed], [null, { code: "KEY_GROUP_CHANGED", sinceMs: 1000, untilMs: 5000 }]);
+  assert.deepEqual([(await get()).keyIssue, (await get()).keyBlocks ?? null], [{ code: "KEY_GROUP_CHANGED", sinceMs: 1000 }, null]);
+  await repository.addKeyBlock(rule.id, { code: "KEY_CONFLICT_GAP", sinceMs: 1000, untilMs: 5000 }, { clearIssue: true });
+  assert.deepEqual([(await get()).keyIssue, (await get()).keyBlocks], [null, [{ code: "KEY_CONFLICT_GAP", sinceMs: 1000, untilMs: 5000 }]]);
+  // 解开以后又出新事项、又解开：旧的一段还在，新的叠上去
+  await repository.markKeyIssue(rule.id, { code: "CHANNEL_KEY_UNMATCHED", sinceMs: 9000 });
+  assert.deepEqual((await get()).keyBlocks, [{ code: "KEY_CONFLICT_GAP", sinceMs: 1000, untilMs: 5000 }], "新事项不会覆盖旧的冲突期");
+  await repository.addKeyBlock(rule.id, { code: "KEY_CONFLICT_GAP", sinceMs: 9000, untilMs: 12000 }, { clearIssue: true });
+  assert.deepEqual([(await get()).keyIssue, (await get()).keyBlocks], [null, [{ code: "KEY_CONFLICT_GAP", sinceMs: 1000, untilMs: 5000 }, { code: "KEY_CONFLICT_GAP", sinceMs: 9000, untilMs: 12000 }]]);
+  // 相交的并起来；不同的码不并；不清事项时事项不动
+  await repository.markKeyIssue(rule.id, { code: "PENDING", sinceMs: 20000 });
+  await repository.addKeyBlock(rule.id, { code: "KEY_CONFLICT_GAP", sinceMs: 4000, untilMs: 9500 });
+  await repository.addKeyBlock(rule.id, { code: "PENDING", sinceMs: 4500, untilMs: 6000 });
+  assert.deepEqual((await get()).keyBlocks, [{ code: "KEY_CONFLICT_GAP", sinceMs: 1000, untilMs: 12000 }, { code: "PENDING", sinceMs: 4500, untilMs: 6000 }]);
+  assert.deepEqual((await get()).keyIssue, { code: "PENDING", sinceMs: 20000 });
   await repository.markKeyIssue(rule.id, null);
-  assert.deepEqual([(await get()).keyIssue, (await get()).keyIssueClosed ?? null], [null, null]);
+  assert.equal((await get()).keyIssue, null);
+});
+
+contract("listSegmentsForRules (M2): a rule with several segments, one of them holding two keys — segments in time order and every key with the right upstream and token, identical to listSegments", async ({ repository, fixture }) => {
+  const a = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:m1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(231), name: "A" }] });
+  const oldRef = { upstreamStationId: a.upstreamStationId, tokenId: a.tokenId, tokenName: a.tokenName };
+  const newRef = { upstreamStationId: a.upstreamStationId, tokenId: fixture.token(232), tokenName: "M2-new" };
+  const now = Date.now();
+  await repository.applyKeyChangePlans([{ ruleId: a.id, plan: { kind: "windowed", windowStart: now - 4000, windowEnd: now - 2000, windowKeys: [oldRef, newRef], before: [oldRef], after: [newRef], canonicalKey: `up:${fixture.tag}:m1n` } }], { detectedAt: now - 2000 });
+  const [batch] = Object.values(await repository.listSegmentsForRules([a.id]));
+  const single = await repository.listSegments(a.id);
+  const shape = (segments) => segments.map((segment) => ({ from: segment.effectiveFrom, to: segment.effectiveTo, keys: segment.keys.map((key) => [key.upstreamStationId, Number(key.tokenId), key.tokenName]).sort() }));
+  assert.deepEqual(shape(batch), shape(single), "和 listSegments 逐项相同（含每把 Key 的上游、编号、名字）");
+  assert.ok(batch.length >= 3, "旧段、过渡段、新段");
+  assert.deepEqual(batch.map((segment) => segment.effectiveFrom), [...batch.map((segment) => segment.effectiveFrom)].sort((x, y) => x - y), "按时间从早到晚");
+  const window = batch.find((segment) => segment.keys.length === 2);
+  assert.deepEqual(window.keys.map((key) => [key.upstreamStationId, Number(key.tokenId)]).sort(), [[a.upstreamStationId, Number(oldRef.tokenId)], [a.upstreamStationId, Number(newRef.tokenId)]].sort(), "过渡段两把 Key 的上游和编号都对");
+  assert.deepEqual(batch.at(-1).keys.map((key) => [key.upstreamStationId, Number(key.tokenId)]), [[a.upstreamStationId, Number(newRef.tokenId)]], "最后一段只有新 Key");
+});
+
+contract("keyHeldUntil (L1): the latest end of a closed segment holding this key in this own station (running and stopped bindings); null when never held; scoped to the own station", async ({ repository, fixture }) => {
+  const a = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:h1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(241), name: "A" }] });
+  const oldRef = { upstreamStationId: a.upstreamStationId, tokenId: a.tokenId, tokenName: a.tokenName };
+  const newRef = { upstreamStationId: a.upstreamStationId, tokenId: fixture.token(242), tokenName: "H-new" };
+  assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, a.tokenId), null, "还握着（段没关）：没有结束时刻");
+  const end = Date.now() - 1000;
+  await repository.applyKeyChangePlans([{ ruleId: a.id, plan: { kind: "precise", cutoverAt: end, before: [oldRef], after: [newRef], canonicalKey: `up:${fixture.tag}:h1n` } }], { detectedAt: end });
+  assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, a.tokenId), end, "旧 Key 的段在换 Key 那一刻关掉");
+  assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, newRef.tokenId), null, "新 Key 还握着");
+  assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, fixture.token(999)), null, "没握过的 Key");
+  assert.equal(await repository.keyHeldUntil("other-own", a.upstreamStationId, a.tokenId), null, "别的自营站点的不算");
+  assert.equal(await repository.keyHeldUntil(a.ownStationId, a.upstreamStationId, a.tokenId, { sinceMs: end + 1 }), null, "sinceMs 以前结束的不算");
 });
 
 contract("createRule (K2c-1): a key whose segment in another binding closed earlier today — the new binding's floor is that segment's end (New API, revenue and cost both start there); a Sub2API new binding starts the next day (the day cannot be cut)", async ({ repository, fixture }) => {
