@@ -140,13 +140,16 @@ export async function identifyChannelsCached(rt, ownStation, options = {}) {
 // 和 server/reconciliation.js 的 staleMetadata/metadataCache 一个道理，重启清零可以接受——连续 3 次约 10~15 分钟，不是定金额对不对
 function trackKeyAgentReachability(rt, stationId, result) {
   const tracker = (rt._keyAgentReachability ||= new Map());
-  const state = tracker.get(stationId) || { consecutiveFailures: 0, unreachableSinceMs: null };
+  const state = tracker.get(stationId) || { consecutiveFailures: 0, unreachableSinceMs: null, lastSuccessAtMs: null };
   const failed = !result.ok || result.stale === true;
+  const at = Date.now();
+  // lastSuccessAtMs：内存里记的「最近一次真的读到」，例外三从这一刻起先不算（和持久化的 keyAgentLastSuccessAtMs 不是一回事：
+  // 那个有「没处理完就不往前推」的规矩，这个只管读不读得到）
   tracker.set(stationId, failed
-    ? { consecutiveFailures: state.consecutiveFailures + 1, unreachableSinceMs: state.unreachableSinceMs ?? Date.now() }
-    : { consecutiveFailures: 0, unreachableSinceMs: null });
+    ? { consecutiveFailures: state.consecutiveFailures + 1, unreachableSinceMs: state.unreachableSinceMs ?? at, lastSuccessAtMs: state.lastSuccessAtMs }
+    : { consecutiveFailures: 0, unreachableSinceMs: null, lastSuccessAtMs: at });
 }
 // 查这个站点现在的例外三状态：consecutiveFailures 到 3 就该升成需处理 KEY_READER_UNREACHABLE（调用方按 k-plan §6 的表判）
 export function keyAgentReachability(rt, stationId) {
-  return rt._keyAgentReachability?.get(stationId) || { consecutiveFailures: 0, unreachableSinceMs: null };
+  return rt._keyAgentReachability?.get(stationId) || { consecutiveFailures: 0, unreachableSinceMs: null, lastSuccessAtMs: null };
 }

@@ -199,7 +199,7 @@ test("keyAgentReachability：连续读不到（连不上）才累加；命中 4 
   const rt = { store: { list: () => [ownStation] } };
   await identifyChannelsCached(rt, ownStation);
   assert.equal(fetchCalls, 1);
-  assert.deepEqual(keyAgentReachability(rt, "own"), { consecutiveFailures: 1, unreachableSinceMs: keyAgentReachability(rt, "own").unreachableSinceMs });
+  assert.deepEqual(keyAgentReachability(rt, "own"), { consecutiveFailures: 1, unreachableSinceMs: keyAgentReachability(rt, "own").unreachableSinceMs, lastSuccessAtMs: null });
   const since = keyAgentReachability(rt, "own").unreachableSinceMs;
   assert.equal(typeof since, "number");
   await identifyChannelsCached(rt, ownStation); // 还在 4 分钟缓存期内，不会真的再问
@@ -230,7 +230,8 @@ test("keyAgentReachability：带 X-Agent-Stale 的 200 也算拿不到新结果�
   assert.equal(keyAgentReachability(rt, "own").consecutiveFailures, 2, "连续第二次还是 Stale，接着累加");
   rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
   await identifyChannelsCached(rt, ownStation);
-  assert.deepEqual(keyAgentReachability(rt, "own"), { consecutiveFailures: 0, unreachableSinceMs: null }, "真的 200（不带 Stale）清零");
+  const cleared = keyAgentReachability(rt, "own");
+  assert.deepEqual([cleared.consecutiveFailures, cleared.unreachableSinceMs, typeof cleared.lastSuccessAtMs], [0, null, "number"], "真的 200（不带 Stale）清零，并记下最近一次真的读到的时刻");
 });
 
 test("keyAgentReachability：没配置读取服务，当作拿不到新结果累加；各站点分开记", async (t) => {

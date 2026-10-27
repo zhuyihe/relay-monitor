@@ -2101,6 +2101,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if (url.pathname === "/api/log/stat") return stat("own", url, state.ownQuota);
       // 渠道 Key 读取服务（K2a/K2b）：只在传了 keyAgent 的测试里有这条路，别的测试这个站点没配，keyAgentConfigOf 直接判没配，不会问
       if (url.pathname === "/key-agent/keys" && keyAgent) {
+        if (keyAgent.down) return { status: 503, headers: { get: () => null }, json: async () => ({}) }; // 读取服务读不到（例外三）
         const channels = typeof keyAgent.channels === "function" ? keyAgent.channels(request) : keyAgent.channels;
         return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"ka1"' : null) },
           json: async () => ({ v: 1, db: "mysql", readAt: Date.now(), channels }) };
@@ -7362,6 +7363,80 @@ test("K2b：两条绑定互换 Key（挪过）——同一个事务清空再写�
   }
   assert.equal((await f.repository.listSegments("rr_live"))[1].keys[0].tokenId, 10);
   assert.equal((await f.repository.listSegments("rr_b"))[1].keys[0].tokenId, 9);
+});
+
+// 例外三（binding-flow.md §2）：读取服务读不到新结果。从最后一次读到的时刻起这个站点下各渠道先不算（实时·还在读取，过了零点也不固定）；
+// 连续 3 次才升成需处理 KEY_READER_UNREACHABLE；最后一次读到以前的日子不受影响；连上以后 Key 没变就照常算、换了就是 [a, b) 过渡段。
+async function readerOutageFixture(t) {
+  const clock = { now: Date.parse("2026-10-11T01:00:00Z") };
+  t.mock.method(Date, "now", () => clock.now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  const agent = { secret: KEY_AGENT_SECRET, down: false, key: keyNine, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(agent.key), f: "unused" }] }] };
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    keyAgent: agent,
+  });
+  const round = async (isoTime) => {
+    clock.now = Date.parse(isoTime);
+    f.rt._keyAgentIdentifyCache = null; // 每一轮都真的去问读取服务（不命中 4 分钟缓存）
+    await f.module.refreshDue(clock.now);
+  };
+  const state = async (billDate) => (await f.repository.listSettlementStates(["rr_live"], { billDates: [billDate] }))[0] || null;
+  const booked = (billDate) => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === billDate).length;
+  return { f, agent, keyTen, round, state, booked };
+}
+
+// 时间线（上海 UTC+8，一天在 UTC 16:00 结束，结账等 15 分钟）：R0 10-11 16:05Z 读得到（最后一次读到）——这时 10-11 刚结束还没到结账的点；
+// 读取服务停了：R1 10-11 16:30Z、R2 10-12 16:20Z、R3 10-12 16:35Z 各读不到一次（连续 3 次）；R4 10-12 17:00Z 连上
+test("K2b 例外三：读不到——最后一次读到以前结束的日子照常固定，以后的不固定；前 2 次是「还在读取」，第 3 次升成需处理；连上、Key 没变——照常算，不开过渡段", async (t) => {
+  const { f, agent, round, state, booked } = await readerOutageFixture(t);
+  await round("2026-10-11T16:05:00Z"); // R0：读得到，最后一次读到是这一刻
+  assert.equal(booked("2026-10-11"), 0, "10-11 刚结束，还没到结账的点");
+
+  agent.down = true; // 读取服务停了
+  await round("2026-10-11T16:30:00Z"); // R1：第 1 次读不到。10-11 在最后一次读到以前就结束了，照常结账
+  assert.equal(booked("2026-10-11"), 1, "最后一次读到以前结束的日子，读不到也照常固定");
+
+  await round("2026-10-12T16:20:00Z"); // R2：第 2 次。10-12 在最后一次读到以后才结束：先不算
+  assert.equal(booked("2026-10-12"), 0, "最后一次读到以后结束的日子不固定");
+  assert.equal((await state("2026-10-12"))?.retryReason, "KEY_AGENT_UNAVAILABLE", "前 2 次是读取类：实时·还在读取，系统会自己再读");
+
+  await round("2026-10-12T16:35:00Z"); // R3：第 3 次，连续 3 次才进需处理
+  assert.equal((await state("2026-10-12"))?.manualReason, "KEY_READER_UNREACHABLE", "连续 3 次升成需处理");
+  assert.equal(booked("2026-10-12"), 0, "过了零点也不固定");
+  const before = await f.repository.getRule("rr_live");
+
+  agent.down = false; // R4：连上了，Key 没变
+  await round("2026-10-12T17:00:00Z");
+  await round("2026-10-12T17:15:00Z"); // 需处理的那天每 10 分钟本地重判一次，读到了就接着算
+  assert.equal(booked("2026-10-12"), 1, "连上、Key 没变：这段时间的数照常算、照常固定，不提示");
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, before.tokenId, "没换 Key 就不动绑定");
+  assert.equal((await f.repository.listSegments("rr_live")).length, 1, "没有过渡段");
+});
+
+test("K2b 例外三：读不到期间渠道换了 Key，连上以后——[a, b) 过渡段的 a 是最后一次读到旧 Key 的时刻，b 是连上的时刻，读不到那段时间花的钱照常算进来", async (t) => {
+  const { f, agent, keyTen, round, state, booked } = await readerOutageFixture(t);
+  await round("2026-10-11T16:05:00Z"); // R0：最后一次读到旧 Key（token 9）：a
+  const a = Date.parse("2026-10-11T16:05:00Z");
+  agent.down = true;
+  await round("2026-10-11T16:30:00Z");
+  await round("2026-10-12T16:20:00Z");
+  await round("2026-10-12T16:35:00Z");
+  assert.equal((await state("2026-10-12"))?.manualReason, "KEY_READER_UNREACHABLE");
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 9, "读不到期间不换段");
+
+  agent.down = false;
+  agent.key = keyTen; // 读不到期间渠道已经换成了 token 10
+  await round("2026-10-12T17:00:00Z"); // R4：b，重新读到的时刻
+  const b = Date.parse("2026-10-12T17:00:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 10, "连上以后换段");
+  const transitional = (await f.repository.listSegments("rr_live")).find((segment) => segment.keys.length === 2);
+  assert.equal(transitional.effectiveFrom, a, "a = 最后一次读到旧 Key 的时刻");
+  assert.equal(transitional.effectiveTo, b, "b = 重新读到的时刻");
+  await round("2026-10-12T17:15:00Z");
+  assert.equal(booked("2026-10-12"), 1, "读不到那段时间的数照常算进来、照常固定");
 });
 
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {

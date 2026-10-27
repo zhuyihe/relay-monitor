@@ -57,8 +57,8 @@ import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayKeyIn
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 import { keyAgentConfigOf } from "./key-agent.js";
-import { identifyChannelsCached } from "./key-agent-identify.js";
-import { detectGroupSplit, detectGroupMerges, planSegmentChanges, safeLastSeenAt } from "./key-agent-resegment.js";
+import { identifyChannelsCached, keyAgentReachability } from "./key-agent-identify.js";
+import { detectGroupSplit, detectGroupMerges, planSegmentChanges, safeLastSeenAt, keyAgentExceptionIssueOf } from "./key-agent-resegment.js";
 
 export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 
@@ -222,8 +222,9 @@ function publicMetadata(metadata) {
   };
 }
 
-function health(code, detail = "") {
-  return { code, label: reconciliationIssueLabel(code), detail, stale: code === "STALE" };
+// extra：随这条问题带出去的事实（页面写文案要用），比如 K2b 的 sinceMs（从哪一刻起算不出，文案里的 {time}）
+function health(code, detail = "", extra = {}) {
+  return { code, label: reconciliationIssueLabel(code), detail, stale: code === "STALE", ...extra };
 }
 
 // 报错原文和 health.detail 用 §5 的问题文案（lib/reconciliation-contract.js），不另写一套；界面按 code 取标题和说明。
@@ -770,12 +771,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   //   - 带着没处理完的冲突的绑定（key_group_conflict_since_ms 有值），a 一律用开着那段的起点；所有绑定的 a 都不能早于
   //     开着那段的起点（段不能在自己起点以前结束）。
   //
-  // 返回 { conflicts, rules }：conflicts 是 ruleId -> b（第一次认出这条绑定冲突的时刻，毫秒）；早退只挡
+  // 返回 { conflicts, keyAgentDown, rules }：conflicts 是 ruleId -> b（第一次认出这条绑定冲突的时刻，毫秒）；早退只挡
   // window.endMs >= b 的窗口（总指挥 10-26 定：b 以前已经结过、或者还没轮到结的日子，和这件事无关，不能因为今天冲突了就连累）。
   // b 第一次认出时持久化到 rules.key_group_conflict_since_ms（重启不丢），后面几轮沿用同一个 b；冲突解开了清掉。
   // rules 是换段落库以后重新读的绑定（没有换 Key 时原样返回），调用方要用它重算成本主人和写账本的版本指纹。
   async function keyAgentRoundFor(rules, resources) {
     const conflicts = new Map(); // ruleId -> b
+    const keyAgentDown = new Map(); // ruleId -> { code, sinceMs }：读取服务读不到，从 sinceMs 起先不算
     const now = Date.now();
     const enabled = rules.filter((rule) => rule.enabled);
     const byOwnStation = new Map(); // 只给参与了本轮识别的 own 站点下的绑定判断分组/合组；没装读取服务的站点不受影响，也不清它们的记号
@@ -786,7 +788,17 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 这一轮读之前「读取服务上一次读成功的时刻」：先存住旧值，落库以后才把这一轮的写进去
       const stationLastSuccessAtMs = ownStation.keyAgentLastSuccessAtMs ?? null;
       const identified = await identifyChannelsCached(rt, ownStation).catch(() => null);
-      if (!identified?.ok || !identified.channels) continue;
+      // 读不到（连不上、401/503、格式不对），或者带 X-Agent-Stale（读取服务自己读库失败、给的是上一份旧结果）：都算拿不到新结果。
+      // 不拿旧结果去判换没换 Key；这个站点下各绑定记「读不到」，从最后一次读到的时刻起先不算
+      if (!identified?.ok || identified.stale === true || !identified.channels) {
+        const reach = keyAgentReachability(rt, ownStationId);
+        const code = keyAgentExceptionIssueOf(reach);
+        if (code) {
+          const sinceMs = reach.lastSuccessAtMs ?? stationLastSuccessAtMs ?? reach.unreachableSinceMs ?? now;
+          for (const rule of enabled.filter((item) => item.ownStationId === ownStationId)) keyAgentDown.set(rule.id, { code, sinceMs });
+        }
+        continue;
+      }
       byOwnStation.set(ownStationId, true);
       const snapshotByChannelId = new Map(identified.channels.map((channel) => [Number(channel.channelId), channel]));
       const refByChannelId = new Map();
@@ -835,7 +847,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const sinceMs = conflicts.get(rule.id) ?? null;
       if (sinceMs !== (rule.keyGroupConflictSinceMs ?? null)) await repository.markKeyGroupConflict(rule.id, sinceMs).catch(() => {});
     }));
-    return { conflicts, rules: applied ? await repository.listRules().catch(() => rules) : rules };
+    return { conflicts, keyAgentDown, rules: applied ? await repository.listRules().catch(() => rules) : rules };
   }
 
   // changeCandidates：这一个 own 站点下真的换了 Key、没有冲突的绑定，{ rule, before, after }。
@@ -919,10 +931,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 不让纯读页面的请求触发检测逻辑；真正会出问题的场景已经有定期的观测/轮询在跑，不差这一次。
     // 放在算成本主人、写账本的版本指纹之前：这一轮真的换了 Key（rules.token_id、canonical_key 变了）就重新读绑定，
     // 后面用的都是换完以后的，不会这一轮拿着旧的 token_id 判重复、核对版本
-    let keyGroupConflicts = new Map();
+    let keyGroupConflicts = new Map(), keyAgentDown = new Map();
     if (observe) {
       const round = await keyAgentRoundFor(rules, resources);
       keyGroupConflicts = round.conflicts;
+      keyAgentDown = round.keyAgentDown;
       if (round.rules !== rules) {
         rules = round.rules;
         billingSource.expectedOwnerState = reconciliationOwnerRuleState(rules);
@@ -952,7 +965,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       duplicateSales.set(id, [...new Set([...(duplicateSales.get(id) || []), ...ids])].sort());
     }
     return { startedAt: Date.now(), rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, duplicateSales, billingSource: Object.freeze(billingSource),
-      keyGroupConflicts,
+      keyGroupConflicts, keyAgentDown,
       // 这一轮（或这一次查询）里共用的：自营站点的 /api/status；哪些自营站点从什么时候起没有新的消费（只有轮询会填）
       ownStatus: new Map(), ownQuietFrom: new Map() };
   }
@@ -2134,7 +2147,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 轮到结的日子，和这件事无关，不能因为今天冲突了就连累昨天（总指挥 10-26 定）
       const keyGroupConflictSince = ownerRegistry.keyGroupConflicts?.get(rule.id);
       if (keyGroupConflictSince != null && window.endMs >= keyGroupConflictSince) {
-        return unavailable(health("KEY_GROUP_CHANGED", issueText("KEY_GROUP_CHANGED")), { metadata, token }, false);
+        return unavailable(health("KEY_GROUP_CHANGED", issueText("KEY_GROUP_CHANGED"), { sinceMs: keyGroupConflictSince }), { metadata, token }, false);
+      }
+      // K2b 例外三（binding-flow.md §2）：读取服务读不到新结果时，从最后一次读到的时刻起，这个站点下各渠道的数先不算
+      // （实时·还在读取，过了零点也不固定）；连续 3 次才升成需处理 KEY_READER_UNREACHABLE（keyAgentExceptionIssueOf）。
+      // 最后一次读到以前的日子不受影响；读到了、Key 没变就照常算，换了就是 [a, b) 过渡段（上面 keyAgentRoundFor）
+      const readerDown = ownerRegistry.keyAgentDown?.get(rule.id);
+      if (readerDown && window.endMs > readerDown.sinceMs) {
+        return unavailable(health(readerDown.code, issueText(readerDown.code), { sinceMs: readerDown.sinceMs }), { metadata, token }, false);
       }
       const platform = evidenceMetadata?.platform ?? rule.provider ?? billingProviderOf(upstream);
       const persistedSegments = await repository.listSegments(rule.id);
