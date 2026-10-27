@@ -1,6 +1,7 @@
 "use client";
 // 以前的每日记录（抽屉正文）：每天固定时记下的收入、上游成本和毛利，固定后不再变，也不算进上面的汇总。
 // 金额按记下的美元原值显示，不用现在的汇率换算；记录里没有的写「—」，不拿现在的绑定去补。用语按 design/ui-copy-spec.md §3、§9。
+import type { ReactNode } from "react";
 import { Alert, Button, Collapse, DatePicker, Select, Table } from "antd";
 import { StatusTag } from "../../components/status";
 import { EmptyState, Skeleton } from "../../components/data-state";
@@ -11,13 +12,20 @@ import { SUB2API_UNBIND_DAY } from "../../../lib/workflow-actions";
 import { failureText } from "../../../lib/error-copy";
 import { INCOMPLETE_DAY_TEXT } from "../../../lib/reconciliation-contract";
 import { formatReconciliationMoney as money, reconciliationBillingText, reconciliationChannelName, reconciliationKeyName, reconciliationKeyNamer } from "../../../lib/reconciliation-view";
-import { Detail } from "./recon-parts";
 import { RECON_BUTTONS, RECON_COPY, formatWindow, rateLine, upstreamName } from "./recon-format";
 import type { useConfirmedHistory } from "./use-confirmed-history";
 
 const { RangePicker } = DatePicker;
 
 type HistoryState = ReturnType<typeof useConfirmedHistory>;
+
+// 展开的记录里一项：左边名称，右边写法
+function Detail({ label, value }: { label: string; value: ReactNode }) {
+  return <div className="reconciliation-detail">
+    <span className="reconciliation-detail__label">{label}</span>
+    <span className="reconciliation-detail__value">{value}</span>
+  </div>;
+}
 
 // 早期的记录缺了来源、时区或渠道（§5.5）
 const incomplete = (record: ConfirmedHistoryRecord) => record.sourceCompleteness === "legacy_partial" || !record.window.timezone;
