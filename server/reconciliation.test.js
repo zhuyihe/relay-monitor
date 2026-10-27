@@ -11107,7 +11107,7 @@ test("占用检查：同一把 Key 同一段时间算在两条绑定里（重叠
   assert.ok(!lines.join("\n").includes("sk-"), "日志里没有 Key 本身");
   for (const ruleId of ["rr_live", "rr_b"]) {
     const [state] = await f.repository.listSettlementStates([ruleId], { billDates: ["2026-10-12"] });
-    assert.deepEqual([state?.retryReason, state?.manualReason ?? null], ["KEY_USE_MISMATCH", null], "是会自己好的那类（实时·还在读取），不是要人处理");
+    assert.deepEqual([state?.retryReason ?? null, state?.manualReason], [null, "KEY_USE_MISMATCH"], "要人处理的一类：一结束、查出重叠就进需处理，不先显示「还在读取」、不转「这天一直没固定」");
   }
 });
 
@@ -11361,8 +11361,9 @@ test("占用检查（审核 #155 第 1 轮）：重叠的日子卡在 KEY_USE_MI
   await settleDay();
   const detail = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-12" });
   assert.deepEqual([detail.unavailable?.code, detail.actual.usd, detail.grossProfitUsd], ["KEY_USE_MISMATCH", null, null]);
-  assert.match(detail.unavailable.detail, /Key「stable」10月12日 \d+:\d\d–\d+:\d\d：「渠道 1」「渠道 2」都算了/, "详细原因写 Key、时段、渠道");
-  assert.doesNotMatch(detail.unavailable.detail, /rr_|segment/);
+  assert.match(detail.unavailable.detail, /^Key「stable」10月12日 \d+:\d\d–\d+:\d\d 这一段，「渠道 1」「渠道 2」都算了它的钱。为了不把这段成本算两遍，这天先没固定。/, "说明里直接写 Key、时段、渠道");
+  assert.match(detail.unavailable.lines[0], /^Key「stable」10月12日 \d+:\d\d–\d+:\d\d：「渠道 1」「渠道 2」都算了$/, "详细原因一段一行");
+  assert.doesNotMatch(JSON.stringify(detail.unavailable), /rr_|segment/);
 });
 
 test("占用检查（审核 #155 第 1 轮）：会写账本的观测路径（页面「刷新」请求在 15 分钟线前发出、跨线时走观测路径）也过检查", async (t) => {
@@ -11394,6 +11395,21 @@ test("占用检查（审核 #155 第 1 轮性能）：同一个站点的绑定�
   await settleDay();
   const byStation = calls.filter((options) => options.includeArchived && options.ownStationId != null);
   assert.ok(byStation.length >= 1 && byStation.length <= 1, `按站点读（SQL 里按 own_station_id 筛）、一轮里同一个站点只读一份：${JSON.stringify(calls)}`);
+});
+
+// 审核 #155 第 2 轮：重叠修好以后（段改回不重叠），这天不用人动手，下一轮的本地检查一过就照常固定
+test("占用检查：重叠修好以后，要人处理的这天自己固定；不给「重新读取」、详细原因随状态行带着", async (t) => {
+  const { f, swapAt, segmentsOf, settleDay } = await occupancyFixture(t, "immediate");
+  const segment = segmentsOf("rr_live")[0], original = segment.effective_to_ms;
+  segment.effective_to_ms = swapAt + 3 * 3600000;
+  assert.deepEqual(await settleDay(), [0, 0]);
+  const [stuck] = await f.repository.listSettlementStates(["rr_live"], { billDates: ["2026-10-12"] });
+  assert.equal(stuck.manualReason, "KEY_USE_MISMATCH");
+  assert.equal(stuck.detail.occupancy?.[0]?.keyName, "stable", "状态行里带着哪把 Key、哪一段、哪几个渠道");
+  segment.effective_to_ms = original; // 修好了
+  await f.module.refreshDue(Date.parse("2026-10-12T17:30:00Z"));
+  await f.module.refreshDue(Date.parse("2026-10-12T18:30:00Z"));
+  assert.ok(f.state.ledger.some((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12"), "修好以后自己固定了");
 });
 
 // ===== K2c 重新分组：按时间线逐天对账（审核 #144 第 1 轮）=====

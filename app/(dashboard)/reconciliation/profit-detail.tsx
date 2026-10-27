@@ -71,6 +71,7 @@ function Body({ detail, row, page, ctx, compact, onCorrected }: { detail: Profit
     </Section> : null}
     <Section title={COPY.detail.actual} value={cost(detail.actual.usd)}>
       {detail.unavailable ? <p>{[detail.unavailable.title, detail.unavailable.detail].filter(Boolean).join("。") || COPY.detail.unavailableUnknown}</p> : <p>{COPY.detail.actualFrom(detail.actual.keyName || row.key.name)}</p>}
+      {detail.unavailable?.lines?.length ? <ul className="jy-profit-detail__list">{detail.unavailable.lines.map((line) => <li key={line}><span>{line}</span></li>)}</ul> : null}
     </Section>
     <Section title={COPY.detail.gap} value={gapValue}>
       <p>{COPY.detail.gapFormula}{gap?.rate != null && gap.state !== "within" ? `，${rateText(gap.rate)}` : ""}。{COPY.detail.gapNote(formatReconciliationMoney(page.gapThreshold.usd, null), formatPct(page.gapThreshold.rate, 0))}</p>

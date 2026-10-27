@@ -148,15 +148,15 @@ export type ProfitDetailResponse = {
     byModel: ProfitDetailModel[]; missingPriceModels: { model: string; inputTokens: number; outputTokens: number; requests: number }[]; byChannel: { channelId: number; usd: number | null }[]; tokens: number | null };
   actual: { usd: number | null; keyName: string | null };
   // 这天没算出来的原因（换 Key 冲突期、还在读取、需处理…），算出来的是 null：实付、毛利写「—」加这个原因，不写 0
-  unavailable?: { code: string | null; title: string | null; detail: string | null } | null;
+  unavailable?: { code: string | null; title: string | null; detail: string | null; lines?: string[] } | null;
   gap: { usd: number | null; rate: number | null; state: "over" | "under" | "within" | null } | null;
   grossProfitUsd: number | null; fixedAt: string | null; revisions: number | null;
 };
 export type WorkflowAction = {
   // 种类和按钮文字只在 lib/workflow-actions.js 定义（ACTIONS）
   id: string; kind: "verify_identity" | "update_authorization" | "verify_capability" | "connect_channels" | "confirm_coverage" | "review_source" | "inspect_balance" | "retry_bill" | "review_conflict"
-    | "edit_binding" | "correct_timing" | "refresh" | "swap_key" | "unbind" | "delete_upstream" | "view_detail" | "setup_own_station" | "check_connection" | "add_upstream" | "recheck_consume_log";
-  label: string; title?: string; detail?: string; code?: string; accountKey: string | null; stationId: string | null; ruleId: string | null; ownStationId: string | null;
+    | "edit_binding" | "correct_timing" | "refresh" | "swap_key" | "unbind" | "delete_upstream" | "view_detail" | "copy_detail" | "setup_own_station" | "check_connection" | "add_upstream" | "recheck_consume_log";
+  label: string; title?: string; detail?: string; code?: string; copyText?: string; accountKey: string | null; stationId: string | null; ruleId: string | null; ownStationId: string | null;
   channelIds: number[]; window: { startMs: number; endMs: number; timezone: string } | null; href: string | null;
 };
 export type WorkflowDestination = {

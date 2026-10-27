@@ -6,6 +6,7 @@ import { Fragment } from "react";
 import type { ReactNode } from "react";
 import { Alert, Button } from "antd";
 import { RecheckConsumeLogButton } from "../../components/recheck-consume-log";
+import { CopyDetailButton } from "../../components/copy-detail";
 import { Icon } from "../../components/icons";
 import { CountBadge, Panel } from "../../components/panel";
 import { Seg } from "../../components/seg";
@@ -49,6 +50,8 @@ function ActionButton({ action, row, onRetry, onRefresh, retrying, size }: { act
   if (action.kind === "recheck_consume_log") return <RecheckConsumeLogButton size={size} aria-label={label} />;
   if (action.kind === "retry_bill") return <Button size={size} loading={retrying} aria-label={label} onClick={() => onRetry(row)}>{action.label}</Button>;
   if (action.kind === "refresh") return <Button size={size} aria-label={label} onClick={onRefresh}>{action.label}</Button>;
+  // 复制详细原因：复制的纯文本跟着事项带过来（copyText），点了提示「已复制」（KEY_USE_MISMATCH）
+  if (action.kind === "copy_detail" && action.copyText) return <CopyDetailButton action={action} size={size} aria-label={label} />;
   if (action.href) return <Button size={size} aria-label={label} href={action.href}>{action.label}</Button>;
   return null;
 }

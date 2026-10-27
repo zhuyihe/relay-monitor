@@ -53,7 +53,7 @@ import { stationBusinessVersion } from "../db/store.js";
 import { claimedKeyWindows, keyClaimProblems, keyPiecesOf, segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
-  summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations, reconciliationOccupancyLines } from "../lib/reconciliation-view.js";
+  summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations, reconciliationOccupancyLineList, reconciliationOccupancyParams } from "../lib/reconciliation-view.js";
 import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, ratesFor } from "../lib/profit.js";
 import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
@@ -2009,12 +2009,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 只读这个站点的（SQL 里按 own_station_id 筛，不全表读）；一轮里同一个站点只读一份（ownerRegistry 上记着，这一轮的换 Key、重新分组都在建 registry 时做完了），
   // 页面只读查询没有 registry 就每次读。读不到就抛，调用方决定当没有还是先不结（审核 #155 第 1 轮性能）
   const STATION_BINDINGS_KEEP_MS = 40 * DAY_MS;
-  async function stationBindings(rule, ownerRegistry = null) {
-    const cache = ownerRegistry ? (ownerRegistry.stationBindings ||= new Map()) : null;
+  async function stationBindings(rule, ownerRegistry = null, { sinceMs = null } = {}) {
+    // 停了的绑定要留到被结的这一天开始以后才停的（手动重试几十天前的日子也要看见当时握着 Key 的绑定）；一般的日子用统一的 40 天，一轮里同一个站点只读一份
+    const wanted = Math.min(Date.now() - STATION_BINDINGS_KEEP_MS, sinceMs ?? Infinity);
+    const standard = wanted >= Date.now() - STATION_BINDINGS_KEEP_MS - 1000;
+    const cache = ownerRegistry && standard ? (ownerRegistry.stationBindings ||= new Map()) : null;
     if (cache?.has(rule.ownStationId)) return cache.get(rule.ownStationId);
     const loading = (async () => {
-      const since = Date.now() - STATION_BINDINGS_KEEP_MS;
-      const rules = (await repository.listRules({ includeArchived: true, ownStationId: rule.ownStationId })).filter((item) => item.archivedAtMs == null || item.archivedAtMs >= since);
+      const rules = (await repository.listRules({ includeArchived: true, ownStationId: rule.ownStationId })).filter((item) => item.archivedAtMs == null || item.archivedAtMs >= wanted);
       const byRule = rules.length ? await repository.listSegmentsForRules(rules.map((item) => item.id)) : {};
       return rules.map((item) => ({ rule: item, segments: byRule[item.id] || [] }));
     })();
@@ -2050,7 +2052,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 只读库里已经存好的段，不请求上游；认领的算法和取数是同一份（accountingUpstreamWindow、keyPiecesOf、claimedKeyWindows）。返回问题列表，空数组就是没问题。
   // 读不到别的绑定的段就抛，调用方这一天先不结
   async function keyOccupancyProblems(rule, segments, window, ownerRegistry = null) {
-    const siblings = (await stationBindings(rule, ownerRegistry)).filter(({ rule: item }) => item.id !== rule.id);
+    const siblings = (await stationBindings(rule, ownerRegistry, { sinceMs: window.startMs })).filter(({ rule: item }) => item.id !== rule.id);
     const claimantOf = async (item, itemSegments) => {
       const upstreamWindow = accountingUpstreamWindow(item, window, item.provider);
       if (!upstreamWindow || !itemSegments.length) return null;
@@ -2063,7 +2065,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (!own) return [];
     const claimants = [own, ...(await Promise.all(siblings.filter(({ rule: item }) => isScopedBillingPolicy(item.billingPolicy)).map(({ rule: item, segments: itemSegments }) => claimantOf(item, itemSegments)))).filter(Boolean)];
     const namesOf = (ruleId) => (claimants.find((item) => item.ruleId === ruleId)?.rule.channels || []).map((channel) => channel.name || `渠道 ${channel.channelId}`);
-    return keyClaimProblems(claimants, [...own.claims.keys()]).map((problem) => ({ ...problem, channelNames: problem.ruleIds.map(namesOf) }));
+    // 只留牵涉到被查这条绑定的问题：别的两条绑定之间的重叠，和这条绑定干净地用着同一把 Key 的第三条无关，不能因此被挡（审核 #155 第 2 轮低 2）
+    return keyClaimProblems(claimants, [...own.claims.keys()]).filter((problem) => problem.ruleIds.includes(rule.id)).map((problem) => ({ ...problem, channelNames: problem.ruleIds.map(namesOf) }));
   }
 
   // 每把 Key 在这个窗口里归这条绑定的时间段（lib/reconciliation-keys.js 的 claimedKeyWindows，和结账前的占用检查同一份）。
@@ -2917,7 +2920,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         } else issues.push(consumeLogIssue);
       }
       // probe 到这里为止：取数前能判断的都判断完了，还挡着的要人处理的原因交回去，不读渠道、不取账单
-      if (probe) return { probe: true, blocker: issues.find((issue) => CALCULATION_BLOCKERS.has(issue.code) && !issue.reference && reasonKindOf(issue.code) !== "retry")?.code ?? null };
+      if (probe) {
+        const blocking = issues.find((issue) => CALCULATION_BLOCKERS.has(issue.code) && !issue.reference && reasonKindOf(issue.code) !== "retry");
+        return { probe: true, blocker: blocking?.code ?? null, issue: blocking ?? null }; // issue：带着占用检查的重叠（哪把 Key、哪一段、哪几个渠道），写状态行时记下来
+      }
       let catalogue = null;
       // 结账（settle）虽然强制重取账单，渠道目录只用来写渠道状态，不挡结果：用 10 分钟内的缓存，不每结一天就重读一遍（安全审核 C2a 低-3）
       try { if (ownAvailable) catalogue = await ownChannelsFor(own, { force: force && !settle }); } catch (error) {
@@ -3830,7 +3836,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const probe = async (rule, window) => {
       try {
         const probed = await inspectRule(rule.id, window, { mode: "settle", probe: true, origin: "poll", ownerRegistry });
-        return probed?.probe ? probed.blocker : undefined;
+        return probed?.probe ? { code: probed.blocker, issue: probed.issue ?? null } : undefined;
       } catch (err) {
         if (err?.code !== "RULE_NOT_FOUND") console.error("重判结账状态失败:", err?.message || String(err));
         return undefined;
@@ -3848,8 +3854,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const probed = await probe(rule, window);
       for (const item of items) {
         // 没判出来：照原因还在处理，10 分钟后再判，不每轮重来
-        const blocker = probed === undefined ? item.state.manualReason : probed;
-        const next = settlementRecheck({ window: item.window, state: item.state, blocker, now: Date.now(), sourceVersion });
+        const blocker = probed === undefined ? item.state.manualReason : probed.code;
+        const next = settlementRecheck({ window: item.window, state: item.state, blocker, issue: probed?.issue ?? null, now: Date.now(), sourceVersion });
         const billDate = billDayOf(item.window);
         // 原因没变：不写状态行，只把下次重判的时刻记在进程里（每 10 分钟写一次状态行没有意义）；原因变了、没了才写
         if (recheckUnchanged(item.state, next)) { recheckAt.set(`${rule.id}|${billDate}`, Number(next.nextAttemptAt)); continue; }
@@ -3862,9 +3868,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 第一次试的日子（没有状态行）先在本地判断：取数前就能看出要人处理的（没回答「这把 Key 还给别处用吗？」、来源没确认……）
       // 直接记下，不取账单。刚上线时回看 7 天的那一批就不会为挡着的绑定白取一遍
       if (!state) {
-        const blocker = await probe(rule, window);
+        const probed = await probe(rule, window), blocker = probed?.code ?? null;
         if (blocker && reasonKindOf(blocker) !== "retry") {
-          const next = settlementOutcome({ window, result: { health: { code: blocker } }, now: Date.now(), sourceVersion }).state;
+          const next = settlementOutcome({ window, result: { health: { code: blocker, ...(probed.issue ? { issues: [probed.issue] } : {}) } }, now: Date.now(), sourceVersion }).state;
           try { if (next) await repository.recordSettlementState(rule.id, billDayOf(window), next); } catch (err) { console.error("记结账状态失败:", err?.message || String(err)); }
           return { blocked: true };
         }
@@ -4094,7 +4100,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (code !== "KEY_USE_MISMATCH") continue;
         const startMs = dayStartInTz(day, piece.rule.timezone), window = { preset: "custom", startMs, endMs: shiftedDayStartInTz(startMs, 1, piece.rule.timezone), timezone: piece.rule.timezone };
         const issue = reconciliationIssue(code);
-        piece.stateStatus = { code, title: issue.title ?? null, detail: fillIssueCopy(issue.detail, issue.detailPlain, { lines: reconciliationOccupancyLines(state.detail?.occupancy, window.timezone) }) };
+        piece.stateStatus = { code, title: issue.title ?? null, detail: fillIssueCopy(issue.detail, issue.detailPlain, reconciliationOccupancyParams(state.detail?.occupancy, window.timezone) ?? {}),
+          lines: reconciliationOccupancyLineList(state.detail?.occupancy, window.timezone) };
       }
       return buildProfitDetail(pieces, { day });
     },

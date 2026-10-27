@@ -342,6 +342,22 @@ test("空和出错：还没有在算利润的渠道时表的位置写一句加�
   await rowOf(unread.page, "Rule A").getByText("$1.00", { exact: true }).waitFor(); assert.equal(await rowOf(unread.page, "Rule A").locator(".jy-profit-num").filter({ hasText: EMPTY }).count(), 2);
 });
 
+// 占用检查（KEY_USE_MISMATCH）要人处理：一结束、查出重叠就进需处理——行上写需处理、金额「—」，说明里直接写 Key、时段、渠道，按钮「复制详细原因」，点了提示「已复制」、复制的是详细原因纯文本
+test("需处理：Key 被两个渠道都算了（KEY_USE_MISMATCH）——说明写 Key、时段、渠道，按钮「复制详细原因」，点了写进剪贴板并提示「已复制」；没有「重新读取」", async (t) => {
+  const copyText = "Fixture 站 2026-10-08\nKey「oai」10月8日 14:30–14:35：「Rule A」「Rule B」都算了";
+  const detail = "Key「oai」10月8日 14:30–14:35 这一段，「Rule A」「Rule B」都算了它的钱。为了不把这段成本算两遍，这天先没固定。不是你设置的问题，把详细原因复制下来发给技术同事。";
+  const attention = { code: "KEY_USE_MISMATCH", title: reconciliationIssue("KEY_USE_MISMATCH").title, detail, action: { ...workflowAction("copy_detail", { ruleId: "rule-1" }, { code: "KEY_USE_MISMATCH" }), copyText }, fromDay: PROFIT_YESTERDAY, moreCount: 0 };
+  const rows = [profitRow("rule-1", "Rule A", { attention })];
+  const { page } = await openDailyPage(t, { rows, pageOf: () => profitPage(rows, { preset: "yesterday" }) });
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {});
+  const line = page.locator(".jy-profit-attention").filter({ hasText: attention.title }); await line.waitFor();
+  await line.getByText(detail, { exact: false }).waitFor();
+  assert.equal(await page.getByRole("button", { name: new RegExp(`^${workflowActionMeta("retry_bill").label}`) }).count(), 0, "不给「重新读取」");
+  await line.getByRole("button", { name: new RegExp(`^${workflowActionMeta("copy_detail").label}`) }).click();
+  await page.getByText(workflowActionMeta("copy_detail").done, { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), copyText, "复制的是详细原因纯文本");
+});
+
 test("表下面一行：没算进利润的上游成本、还没算利润的渠道、没设置汇率、收费记录读到哪儿了（落后 1 小时以上才写，链到系统设置）", async (t) => {
   const { page } = await openDailyPage(t, { pageOptions: { unaccounted: 3.1, unlinked: 2, rateUnset: [{ id: "upstream-1", name: "Fixture upstream" }] }, ownLog: { coveredToMs: Date.parse(PROFIT_AS_OF) - 2 * 3600000, behindMs: 2 * 3600000 } });
   const notes = page.locator(".jy-profit-notes"); await notes.locator("span", { hasText: PROFIT_COPY.notice.unaccounted("$3.10") }).waitFor(); await notes.locator("span", { hasText: PROFIT_COPY.notice.unlinked(2) }).waitFor(); await notes.getByText(RATE_UNSET_USD, { exact: true }).waitFor();
