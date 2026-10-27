@@ -7,7 +7,7 @@ import { createReconciliationModule } from "./reconciliation.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { MemoryReconciliationRepository } from "./test-support/reconciliation-memory-repository.js";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
-import { createFakeSub2Api } from "./test-support/fake-sub2api.js";
+import { createFakeSub2Api, recordsInDay } from "./test-support/fake-sub2api.js";
 import { createChannelProfitModule } from "./channel-profit.js";
 
 const SH = (iso) => Date.parse(`${iso}+08:00`);
@@ -20,7 +20,8 @@ async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1
   // windows[keyId] = [fromMs, toMs)：这把 Key 有用量的时段（每秒 1 美元）；没给就是一直在用
   const used = (keyId, fromMs, toMs) => { const [a, b] = windows[keyId] || [-Infinity, Infinity]; return Math.max(0, Math.min(toMs, b, state.now) - Math.max(fromMs, a)) / 1000; };
   const fake = upstreamType === "sub2api" ? createFakeSub2Api({ keys: keys.map((id) => ({ id, name: `Key ${id}` })),
-    dayUsageUsd: (id, day) => { const start = SH(`${day}T00:00:00`); return used(Number(id), start, start + DAY * 1000); }, now: () => state.now }) : null;
+    dayUsageUsd: (id, day) => { const start = SH(`${day}T00:00:00`); return used(Number(id), start, start + DAY * 1000); },
+    recordsOf: (id, day) => recordsInDay(windows[id] || [-Infinity, Infinity], day), now: () => state.now }) : null;
   const reply = (body, status = 200) => ({ status, text: async () => JSON.stringify(body) });
   const requests = [];
   t.mock.method(globalThis, "fetch", async (input, init = {}) => {
@@ -202,10 +203,7 @@ for (const upstreamType of ["newapi", "sub2api"]) {
       const rows = f.costOn(day);
       report.push({ day, truth, got: rows.reduce((sum, row) => sum + Number(row.cost_usd || 0), 0), rows: rows.map((row) => `${rules.find((r) => r.id === row.rule_id)?.channels.map((c) => c.channelId)}:${row.cost_usd}`) });
     }
-    // Sub2API 切不开一天中间：换 Key 的 A 那天不结账（旧 Key 被别的渠道用着），B 那天不算（A 的旧段握着这把 Key 到换 Key 的那一刻），第二天 0 点起整天算。
-    // 临时的挡，逐条拆分（k-plan 3.5）合了以后去掉——到时这里也量 10-11
-    const blocked = upstreamType === "sub2api" ? ["2026-10-11"] : [];
-    for (const day of blocked) assert.deepEqual(report.find((r) => r.day === day).rows, [], `${day} 不入账`);
-    assert.deepEqual(report.filter((r) => !blocked.includes(r.day) && Math.abs(r.got - r.truth) > 1e-6), []);
+    // Sub2API 也一样：那一天 A 的旧 Key 到换 Key 的那一刻、B 从那一刻起，按逐条用量切开（k-plan 3.5），每天所有行的成本之和 = 各 Key 当天用量之和
+    assert.deepEqual(report.filter((r) => Math.abs(r.got - r.truth) > 1e-6), []);
   });
 }

@@ -408,7 +408,7 @@ export class ReconciliationRepository {
             WHERE r.own_station_id = ? AND k.upstream_station_id = ? AND k.token_id = ? AND s.effective_to_ms IS NOT NULL AND s.effective_to_ms >= ?`,
           [input.ownStationId, input.upstreamStationId, input.tokenId, dayAgo]);
         accountingFloor = accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels,
-          keyHeldUntilMs: heldRows[0]?.held_until == null ? null : Number(heldRows[0].held_until), sub2: input.provider === "sub2api" }, archivedPeers);
+          keyHeldUntilMs: heldRows[0]?.held_until == null ? null : Number(heldRows[0].held_until) }, archivedPeers);
       }
       await conn.query(
         `INSERT INTO reconciliation_rules

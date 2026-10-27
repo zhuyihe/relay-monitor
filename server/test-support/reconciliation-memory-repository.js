@@ -224,7 +224,7 @@ export class MemoryReconciliationRepository {
       const keyHeldUntilMs = heldSegments.length ? Math.max(...heldSegments.map((segment) => Number(segment.effective_to_ms))) : null;
       const accountingFloor = floorOverride !== undefined ? floorOverride : isScopedBillingPolicy(input.billingPolicy)
         ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels,
-          keyHeldUntilMs, sub2: input.provider === "sub2api" }, archivedPeers) : null;
+          keyHeldUntilMs }, archivedPeers) : null;
       this.#insert(tx, "rules", {
         id, accounting_floor_ms: accountingFloor, upstream_station_id: input.upstreamStationId ?? null, own_station_id: input.ownStationId ?? null, token_id: bigint(input.tokenId),
         token_name: input.tokenName ?? null, fixed_group: input.fixedGroup ?? null, timezone: input.timezone ?? null,
