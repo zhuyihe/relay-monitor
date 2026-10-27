@@ -2741,7 +2741,8 @@ test("upstream unavailable retains persisted segment evidence in the response an
     ruleIds: [rule.id], preset: "custom", timezone: "Asia/Shanghai", startMs: 1000, endMs: 2000,
   }, { force: true });
 
-  assert.equal(results[0].health.code, "UPSTREAM_DATA_UNAVAILABLE");
+  // 这条绑定指向的上游不在了（K2d，k-plan 12.2）：COST_OWNER_UNVERIFIED，按「上游删了」说（variant: deleted），按钮「加上游」
+  assert.deepEqual([results[0].health.code, results[0].health.variant], ["COST_OWNER_UNVERIFIED", "deleted"]);
   assert.equal(results[0].lastSuccessfulAt, undefined, "首次读取失败不能伪称有最近成功结果");
   assert.equal(results[0].currentSegment.group, "g1");
   assert.equal(results[0].currentSegment.ratio, 2.9);
@@ -2947,7 +2948,7 @@ test("R02 legacy首次安全锚定先于观察；换账号不写分组、倍率�
   t.mock.method(globalThis, "fetch", async (input, init) => {
     const url = new URL(input);
     if (url.host === "upstream.test" && init?.headers?.Authorization === "Bearer replacement-account") {
-      const data = url.pathname === "/api/user/self" ? { id: 8 }
+      const data = url.pathname === "/api/user/self" ? { id: 8, username: "账号 B" }
         : url.pathname === "/api/token/" ? { total: 1, items: [{ id: 9, user_id: 8, name: "stable", status: 1, group: "g2", cross_group_retry: false }] }
           : url.pathname === "/api/user/self/groups" ? { g2: { ratio: 20 } } : null;
       if (data) return { status: 200, text: async () => JSON.stringify({ success: true, data }) };
@@ -2957,6 +2958,11 @@ test("R02 legacy首次安全锚定先于观察；换账号不写分组、倍率�
   await store.update("upstream", { accessToken: "replacement-account" });
   const changed = (await f.module.queryRules(input, { force: true })).results[0];
   assert.equal(changed.health.code, "SOURCE_BINDING_UNCONFIRMED");
+  // K2d：上游这一侧对不上——带上游名、读到的账号（显示名「账号 B」）、第一次发现的时刻（按上游记在 identityWatch 里，重启不丢）
+  assert.deepEqual([changed.health.side, changed.health.accountId, changed.health.accountName], ["upstream", "8", "账号 B"]);
+  assert.equal(typeof changed.health.stationName, "string");
+  assert.deepEqual(store.get("upstream").identityWatch, { accountId: "8", accountName: "账号 B", sinceMs: changed.health.sinceMs }, "第一次发现的时刻记在上游上");
+  const firstSeen = changed.health.sinceMs;
   assert.equal(changed.calculation.profitUsd, null);
   assert.equal(changed.downstream.knownAmountUsd, 2.5);
   assert.deepEqual(f.segments, before.segments);
@@ -2964,6 +2970,9 @@ test("R02 legacy首次安全锚定先于观察；换账号不写分组、倍率�
   assert.deepEqual(f.state.ratioWrites, before.ratios);
   assert.deepEqual(f.state.channelStateWrites, before.states);
   assert.equal(f.rule.fixed_group, "g1");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const again = (await f.module.queryRules(input, { force: true })).results[0];
+  assert.equal(again.health.sinceMs, firstSeen, "之后每一轮沿用第一次发现的时刻，不重写");
 });
 
 test("R02 Repository首锚定拒绝已有渠道观察，持久原身份匹配才保留旧范围锚定", async (t) => {
@@ -5363,7 +5372,7 @@ test("P1b Sub2API 沿用身份那一轮读账单时发现账号换了：先算�
       now += 60000;
       await f.module.refreshDue(now); // 这一轮 Key 目录和身份都沿用缓存，只有读账单时核对 auth/me
       if (scenario === "换了账号") {
-        assert.deepEqual(codes(), [], "沿用身份时账号对不上：先算还在读取，不推「上游这天的用量记录一直读不到」");
+        assert.deepEqual(codes(), [], "沿用身份时账号对不上：先算还在读取，不推「上游这天一直读不到」");
         let catalogueReads = 0;
         f.sub2.onRequest = (url) => { if (url.pathname === "/api/v1/keys") catalogueReads += 1; };
         now += 60000;
@@ -8125,16 +8134,16 @@ test("C1 成本计法在提前返回之前就定：固定成本、锚定过的�
     ["Key 停用了", "KEY_INVALID_OR_DENIED", "KEY_INVALID_OR_DENIED", { replies: [keyDisabled] }],
     ["Key 目录读不到", "UPSTREAM_DATA_UNAVAILABLE", "UPSTREAM_DATA_UNAVAILABLE", { options: { metadataFailure: true } }],
     ["上游账号身份读不到", "UPSTREAM_DATA_UNAVAILABLE", "UPSTREAM_DATA_UNAVAILABLE", { replies: [reply("upstream.test", "/api/user/self", { success: false })] }],
-    ["上游账号换了人", "SOURCE_BINDING_UNCONFIRMED", "SOURCE_BINDING_UNCONFIRMED", { replies: [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } })] }],
+    ["上游账号换了人", "SOURCE_BINDING_UNCONFIRMED", "SOURCE_BINDING_UNCONFIRMED", { side: "upstream", replies: [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } })] }],
     // 换成的 8 号账号里也有一把 id 9 的 Key，名字不同：不能拿它来显示、记账
     ["上游账号换了人，新账号里 id 相同的 Key 名字不同", "KEY_INVALID_OR_DENIED", "KEY_INVALID_OR_DENIED", { replies: [reply("upstream.test", "/api/user/self", { success: true, data: { id: 8 } }),
       reply("upstream.test", "/api/token/", { success: true, data: { total: 1, items: [{ id: 9, user_id: 8, name: "别人的 Key", status: 1, group: "g1", cross_group_retry: false }] } })] }],
     ["本站读不到（本站一侧照旧挡）", null, "OWN_BILLING_UNAVAILABLE", { ownDown: true, blocksFixed: true }],
-    ["本站账号换了人（本站一侧照旧挡）", null, "SOURCE_BINDING_UNCONFIRMED", { blocksFixed: true, replies: [reply("own.test", "/api/user/self", { success: true, data: { id: 9 } })] }],
+    ["本站账号换了人（本站一侧照旧挡）", null, "SOURCE_BINDING_UNCONFIRMED", { side: "own", blocksFixed: true, replies: [reply("own.test", "/api/user/self", { success: true, data: { id: 9 } })] }],
     ["没锚定过、上游账号身份读不到（照旧挡）", null, "UPSTREAM_DATA_UNAVAILABLE", { unanchored: "canonicalKey", blocksFixed: true, replies: [reply("upstream.test", "/api/user/self", { success: false })] }],
     ["只缺本站来源的锚定、Key 停用（照旧挡）", null, "KEY_INVALID_OR_DENIED", { unanchored: "ownSource", blocksFixed: true, replies: [keyDisabled] }],
   ];
-  for (const [label, referenceCode, usageCode, { replies = [], options = {}, ownDown = false, unanchored = null, blocksFixed = false }] of cases) {
+  for (const [label, referenceCode, usageCode, { replies = [], options = {}, ownDown = false, unanchored = null, blocksFixed = false, side = null }] of cases) {
     for (const fixed of [true, false]) {
       await t.test(`${label}·${fixed ? "固定成本" : "按用量"}`, async (st) => {
         const f = await completedDayFixture(st, options);
@@ -8163,6 +8172,8 @@ test("C1 成本计法在提前返回之前就定：固定成本、锚定过的�
           assert.equal(row.rule.tokenName, "stable", "Key 名用绑定上存的，不用读到的目录");
         } else {
           assert.deepEqual([row.calculation.profitUsd, row.health.code], [null, usageCode], JSON.stringify(row.health));
+          // K2d：账号对不上按哪一侧说（上游登录的是另一个账号 / 自营站点登录的是另一个账号）
+          if (side) assert.equal(row.health.side, side, JSON.stringify(row.health));
         }
         // 页面「刷新」（观测）也一样，不出错
         const [observed] = (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "yesterday" }, { mode: "observe", force: true, origin: "manual" })).results;

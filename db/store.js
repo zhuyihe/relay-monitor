@@ -15,6 +15,15 @@ export const ACCOUNT_USE_VALUES = Object.freeze(["only_mine", "elsewhere", "unsu
 // 不认识的值当没回答（null），不抛错：旧数据、手改库都不会让整个站点读不出来
 export const normalizeAccountUse = (value) => ACCOUNT_USE_VALUES.includes(value) ? value : null;
 
+// 上游现在登录的账号和原来记的不是同一个：{ accountId（现在读到的）, accountName（只用来显示，可能没有）, sinceMs（第一次发现的时刻）}；没有对不上是 null。
+// 只在变化时由对账写（server/reconciliation.js noteIdentityDrift），重启不丢；页面和接口都不能改（routes 里删掉）
+export function normalizeIdentityWatch(value) {
+  const accountId = String(value?.accountId ?? "").trim(), sinceMs = Number(value?.sinceMs);
+  if (!accountId || !Number.isFinite(sinceMs)) return null;
+  const name = typeof value?.accountName === "string" ? value.accountName.trim().slice(0, 80) : "";
+  return { accountId, accountName: name || null, sinceMs };
+}
+
 export function stationBusinessVersion(station) {
   if (!station) return null;
   return createHash("sha256").update(JSON.stringify([
@@ -622,6 +631,7 @@ export class Store {
       accountUse: normalizeAccountUse(input.accountUse),
       // 自营站点关着收费记录的时间段 [{ fromMs, toMs | null }]，只在开、关变化时写，留最近 31 天（lib/consume-log.js，own-revenue-plan 第二节）
       consumeLogOffPeriods: normalizeOffPeriods(input.consumeLogOffPeriods),
+      identityWatch: normalizeIdentityWatch(input.identityWatch),
       demo: !!input.demo,
       createdAt: new Date().toISOString(),
       archivedAt: null,
@@ -693,6 +703,7 @@ export class Store {
         if (v) { assertKeyAgentSecretStrength(v); s.keyAgentSecret = v; }
       }
       if ("consumeLogOffPeriods" in patch) s.consumeLogOffPeriods = normalizeOffPeriods(patch.consumeLogOffPeriods);
+      if ("identityWatch" in patch) s.identityWatch = normalizeIdentityWatch(patch.identityWatch);
       // 凭证或站点实际变化才作废令牌缓存（前端编辑总会带上 type/email 原值，
       // 无脑作废会导致每次改名都触发一次完整重登录）
       const credsChanged =
@@ -844,5 +855,10 @@ export class Store {
     await this._changeStation(id, (s) => {
       if (s.keyAgentLastSuccessAtMs == null || atMs > s.keyAgentLastSuccessAtMs) s.keyAgentLastSuccessAtMs = atMs;
     });
+  }
+
+  // 「现在登录的是另一个账号」第一次发现的时刻等（normalizeIdentityWatch）：对账只在变化时写，null 是清掉（账号又对上了）
+  async setIdentityWatch(id, watch) {
+    await this._changeStation(id, (s) => { s.identityWatch = normalizeIdentityWatch(watch); });
   }
 }

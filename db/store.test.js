@@ -690,3 +690,20 @@ test("accountUse（K2c）：上游账号是不是只给自营站点的渠道用�
   await store.update(fresh.id, { accountUse: "whatever" });
   assert.equal(store.get(fresh.id).accountUse, null, "不认识的值当没回答，不抛错");
 });
+
+test("identityWatch（K2d）：上游现在登录的账号和原来记的不一样时第一次发现的时刻（只用来显示「从几点起」）——setIdentityWatch 写、null 清；坏值当没有", async () => {
+  const store = await new Store(fakePool()).load();
+  const station = await store.add({ name: "上游", type: "newapi", baseUrl: "https://up.test" });
+  assert.equal(store.get(station.id).identityWatch, null, "新建的没有");
+  await store.setIdentityWatch(station.id, { accountId: " 8 ", accountName: "  账号 B ", sinceMs: 1000 });
+  assert.deepEqual(store.get(station.id).identityWatch, { accountId: "8", accountName: "账号 B", sinceMs: 1000 });
+  await store.setIdentityWatch(station.id, { accountId: "8", accountName: "", sinceMs: 1000 });
+  assert.equal(store.get(station.id).identityWatch.accountName, null, "没有名字就是 null");
+  for (const bad of [{ accountId: "", sinceMs: 5 }, { accountId: "8", sinceMs: "x" }, "oops", undefined]) {
+    await store.setIdentityWatch(station.id, { accountId: "8", sinceMs: 1 });
+    await store.setIdentityWatch(station.id, bad);
+    assert.equal(store.get(station.id).identityWatch, null, "坏值当没有");
+  }
+  await store.setIdentityWatch(station.id, { accountId: "9", accountName: "账号 C", sinceMs: 2000 });
+  assert.deepEqual(store.get(station.id).identityWatch, { accountId: "9", accountName: "账号 C", sinceMs: 2000 });
+});

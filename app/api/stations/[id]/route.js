@@ -18,6 +18,7 @@ async function stopChannelsOf(rt, stationId) {
 async function updateStation(request, rt, params) {
   const b = (await request.json().catch(() => null)) || {};
   delete b.consumeLogOffPeriods; // 关着的时间段只由监控写，页面和接口都不能改（GAP 那几天的依据）
+  delete b.identityWatch; // 「现在登录的是另一个账号」第一次发现的时刻只由对账写
   const options = { expectedAuthVersion: b.expectedAuthVersion, expectedResourceVersion: b.expectedResourceVersion };
   if ("type" in b && !STATION_TYPES.some((t) => t.value === b.type))
     return json({ error: "请选上游类型", code: "UNSUPPORTED_UPSTREAM_TYPE" }, 400);

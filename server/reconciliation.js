@@ -463,7 +463,7 @@ function toErrorHealth(err, own = false, station = null) {
 }
 
 // 轮询沿用了不久前的身份（这一轮没现读）时上游拒绝（New API），或者读账单时核对出账号换了（Sub2API）：
-// 不能马上说「上游拒绝读取这把 Key」「上游这天的用量记录一直读不到」并推送。这一轮先当成还在读取，
+// 不能马上说「上游拒绝读取这把 Key」「上游这天一直读不到」并推送。这一轮先当成还在读取，
 // 上游已记进 staleMetadata，下一轮全部重读身份以后再定。连不上、超时这类不在此列，照常报
 const REUSED_IDENTITY_SUSPECT = new Set(["UPSTREAM_AUTH_DENIED", "UPSTREAM_IDENTITY_CHANGED"]);
 function upstreamErrorHealth(err, resource) {
@@ -762,7 +762,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const same = cached?.credential === credential;
     const identityCurrent = same && now - cached.identityAt < IDENTITY_TTL_MS;
     if (!force && same && now - cached.at < CATALOGUE_TTL_MS && (!reuseIdentity || identityCurrent)) return { value: cached.value, identityReused: true };
-    const known = !force && reuseIdentity && identityCurrent ? { accountId: cached.value.accountId,
+    const known = !force && reuseIdentity && identityCurrent ? { accountId: cached.value.accountId, accountName: cached.value.accountName ?? null,
       status: cached.value.platform === "newapi" ? { quotaPerUnit: cached.value.quotaPerUnit, version: cached.value.version } : null } : null;
     const value = await queryReconciliationMetadata({ ...station }, { timezone: zone, capabilityStore: billingCapabilityStore, known });
     // 只缓存读全了的：分组没读到（groupsAvailable 为 false）的这份不留，下一轮照常重读（读失败的本来就不缓存）
@@ -773,6 +773,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   async function metadataFor(station, options) {
     return (await readMetadata(station, options)).value;
+  }
+
+  // 上游现在登录的账号和这条绑定记的不是同一个（K2d）：第一次发现的时刻和读到的账号名按上游记一份（station.identityWatch），只在变化时写，重启不丢；
+  // 对上了就清掉。返回这个上游现在的记录（{ accountId, accountName, sinceMs } 或 null）。同一个上游同时只写一次
+  const identityWatchWrites = new Set();
+  async function noteIdentityDrift(upstream, identity, changed) {
+    const current = upstreamStation(upstream?.id)?.identityWatch ?? null;
+    if (!upstream?.id || !identity || typeof rt.store?.setIdentityWatch !== "function") return current;
+    const accountId = String(identity.accountId), same = current?.accountId === accountId;
+    const next = !changed ? null : { accountId, accountName: identity.accountName ?? (same ? current.accountName : null) ?? null, sinceMs: same ? current.sinceMs : Date.now() };
+    if ((next == null && current == null) || (next && same && current.accountName === next.accountName)) return current;
+    if (identityWatchWrites.has(upstream.id)) return next ?? current;
+    identityWatchWrites.add(upstream.id);
+    try { await rt.store.setIdentityWatch(upstream.id, next); } catch { return current; } finally { identityWatchWrites.delete(upstream.id); }
+    return next;
   }
 
   async function identityFor(station, { force = false, maxAgeMs = CATALOGUE_TTL_MS } = {}) {
@@ -1005,7 +1020,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const read = await readMetadata({ ...station }, { force: false, timezone: members[0].timezone, reuseIdentity: true });
         const metadata = read?.value ?? null;
         if (!metadata) return null;
-        return { station, metadata, identity: { provider: metadata.platform, baseUrl: onboardingBaseUrl(station.baseUrl), accountId: String(metadata.accountId ?? metadata.userId) } };
+        return { station, metadata, identity: { provider: metadata.platform, baseUrl: onboardingBaseUrl(station.baseUrl), accountId: String(metadata.accountId ?? metadata.userId), ...(metadata.accountName ? { accountName: metadata.accountName } : {}) } };
       } catch { return null; }
     };
     const creates = [];
@@ -1196,7 +1211,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         reused = poll && !force;
         const read = billingStation(station) ? await readMetadata(station, { force, timezone, reuseIdentity: poll }) : null;
         const metadata = read?.value ?? null;
-        const identity = metadata ? { provider: metadata.platform, baseUrl: onboardingBaseUrl(station.baseUrl), accountId: String(metadata.accountId ?? metadata.userId) }
+        const identity = metadata ? { provider: metadata.platform, baseUrl: onboardingBaseUrl(station.baseUrl), accountId: String(metadata.accountId ?? metadata.userId), ...(metadata.accountName ? { accountName: metadata.accountName } : {}) }
           : await identityFor(station, { force, maxAgeMs: poll ? IDENTITY_TTL_MS : CATALOGUE_TTL_MS });
         if (force) staleMetadata.delete(id);
         return [id, Object.freeze({ station, resourceVersion, metadata, identity: Object.freeze(identity), identityReused: poll && !!read?.identityReused, error: null })];
@@ -2474,7 +2489,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const upstreamOptional = costBasis === "fixed" && !!upstream && anchored;
       let upstreamProblem = null;
       if (!billingStation(upstream)) {
-        const problem = health("UPSTREAM_DATA_UNAVAILABLE", "找不到这个上游，或这个上游读不到账单");
+        // 这条绑定指向的上游不在了（从控制台删的会一起停算，只剩直接改库、旧版本删的，§5.2）：渠道名列在标题里，按钮「加上游」；不在了的上游没有记录可挂时刻，说明用不带时刻的那一句
+        const problem = !currentUpstream
+          ? health("COST_OWNER_UNVERIFIED", issueText("COST_OWNER_UNVERIFIED"), { variant: "deleted", channelNames: rule.channels.map((channel) => channel.name).filter(Boolean) })
+          : health("UPSTREAM_DATA_UNAVAILABLE", "找不到这个上游，或这个上游读不到账单");
         if (!upstreamOptional) return unavailable(problem, {}, anchored);
         upstreamProblem = problem;
       }
@@ -2505,14 +2523,19 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const actualKey = identity ? canonicalBillingKey(upstream, identity, rule.tokenId) : rule.canonicalKey;
       // 本站一侧对不上始终挡；上游身份变了是上游一侧的问题，固定成本时只作参考
       const upstreamChanged = !!rule.canonicalKey && rule.canonicalKey !== actualKey;
-      if (upstreamChanged && upstreamOptional) upstreamProblem ||= health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"));
+      // K2d：上游现在登录的是另一个账号——第一次发现的时刻按上游记一份（对上了就清掉；只在观测的轮次写），事项带上游名、读到的账号名、这个上游下的渠道数（§5.2）
+      const driftWatch = identity && observe && !settle ? await noteIdentityDrift(upstream, identity, upstreamChanged) : (upstreamStation(rule.upstreamStationId)?.identityWatch ?? null);
+      const upstreamSourceHealth = () => health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"), { side: "upstream", stationName: stationDisplayName(upstream),
+        accountId: String(identity.accountId), accountName: identity.accountName ?? driftWatch?.accountName ?? null, sinceMs: driftWatch?.sinceMs ?? Date.now(),
+        channelCount: ownerRegistry.rules.filter((item) => item.enabled && item.upstreamStationId === rule.upstreamStationId).reduce((total, item) => total + (item.channels?.length ?? 0), 0) });
+      if (upstreamChanged && upstreamOptional) upstreamProblem ||= upstreamSourceHealth();
       // 自营站点的令牌作废、少了权限：站点上每条路都回 401/403，身份也读不到——这时说的是令牌，不是「上游账号或自营站点有变化」（审核 #107 中-1）
       const ownTokenError = !ownSource && ownAvailable && isAccessTokenError(ownerRegistry.resources.get(rule.ownStationId)?.error?.code)
         ? ownerRegistry.resources.get(rule.ownStationId).error : null;
       let identityIssue = ownTokenError
         ? { ...health(ownTokenError.code, issueText(ownTokenError.code)), side: "own", ...(ownTokenError.scope ? { missingScope: ownTokenError.scope } : {}) }
         : !ownSource || (upstreamChanged && !upstreamOptional) || (rule.ownSource && rule.ownSource.namespaceKey !== ownSource.namespaceKey)
-        ? health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")) : null;
+        ? (upstreamChanged && !upstreamOptional ? upstreamSourceHealth() : health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED"), { side: "own" })) : null;
       // 结账（settle）和只读计算一样不锚定：锚定是今天的观测做的事，结账只写账本和状态行（计划 C2a 2.5）
       if (!identityIssue && !anchored && (!observe || settle)) {
         // 还没观测过就没有可靠口径，取上下游账单也只是白跑一趟。
@@ -2552,7 +2575,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       const canonicalKey = upstreamProblem ? rule.canonicalKey : canonicalBillingKey(upstream, metadata, token.id);
       if (!upstreamProblem && (canonicalKey !== actualKey || canonicalKey !== rule.canonicalKey)) {
-        return unavailable(health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")), { metadata, token }, false);
+        return unavailable(identity ? upstreamSourceHealth() : health("SOURCE_BINDING_UNCONFIRMED", issueText("SOURCE_BINDING_UNCONFIRMED")), { metadata, token }, false);
       }
       // K2b：这条绑定分组了或合组了（keyAgentRoundFor，k-plan §3.3），交给 K2c 重新分组；换成不在已加上游里的 Key（CHANNEL_KEY_UNMATCHED）、读不了完整 Key（KEY_REVEAL_DENIED）也走这里；从第一次认出冲突的那一刻
       // （b）起不结账、不开新段——宁可先不算，也不把钱算给错的那一条。只挡 b 及以后的窗口：b 以前已经结过、或者还没
@@ -2601,7 +2624,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (ownerRegistry.duplicateSales.has(rule.id)) issues.push({ code: "DUPLICATE_CHANNEL_ASSIGNMENT", scope: "rule",
         detail: issueText("DUPLICATE_CHANNEL_ASSIGNMENT"), ruleIds: ownerRegistry.duplicateSales.get(rule.id), observedAt: Date.now() });
       const observedSource = sourceState(rule);
-      if (observedSource.status !== "confirmed") issues.push({ code: "SOURCE_BINDING_UNCONFIRMED", scope: "source", detail: issueText("SOURCE_BINDING_UNCONFIRMED"), observedAt: Date.now() });
+      if (observedSource.status !== "confirmed") issues.push({ code: "SOURCE_BINDING_UNCONFIRMED", scope: "source", side: "own", detail: issueText("SOURCE_BINDING_UNCONFIRMED"), observedAt: Date.now() });
       if (rule.archivedAt) {
         const clash = archivedClash(rule, window, ownerRegistry);
         if (clash.channel.length) issues.push({ code: "DUPLICATE_CHANNEL_ASSIGNMENT", scope: "rule", detail: issueText("DUPLICATE_CHANNEL_ASSIGNMENT"), ruleIds: [rule.id, ...clash.channel].sort(), observedAt: Date.now() });
