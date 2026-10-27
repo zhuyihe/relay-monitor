@@ -233,6 +233,7 @@ export class MemoryReconciliationRepository {
         billing_effective_from_ms: bigint(input.billingEffectiveFrom), cost_coverage: input.costCoverage || "unknown",
         provider: input.provider || null, canonical_key: input.canonicalKey || null,
         source_binding: JSON.stringify(serializeRuleSourceBinding(input)), created_at: createdAt, updated_at: createdAt,
+        ...(input.keyBlocks?.length ? { key_blocks: JSON.stringify(input.keyBlocks.reduce((blocks, block) => addKeyBlock(blocks, block), [])) } : {}), // 同 MySQL 版：重新分组带来的冲突期
       });
       for (const channel of input.channels) this.#insertChannel(tx, id, channel, input);
       const firstSegmentId = uid("rs");
@@ -242,7 +243,7 @@ export class MemoryReconciliationRepository {
         effective_from_ms: Number(input.initialEffectiveFromMs ?? (isScopedBillingPolicy(input.billingPolicy) ? 0 : Date.now())),
         effective_to_ms: null, detected_at_ms: Date.now(), timing_source: "operator_confirmed", created_at: createdAt, updated_at: createdAt,
       });
-      const extra = input.dayExtraKeys; // 对应 MySQL 版：Sub2API 重新分组，没有被新组接着用的旧 Key 放进新绑定第一段（关着的，到下一个业务日 0 点）
+      const extra = input.dayExtraKeys; // 对应 MySQL 版：Sub2API 重新分组，没有被新组接着用的旧 Key 放进新绑定第一段（关着的，关在 b：endsAt）
       if (extra?.keys?.length) {
         this.#update(tx, "segments", this.#rows("segments", tx).filter(({ row }) => row.id === firstSegmentId), { effective_to_ms: bigint(extra.endsAt) });
         this.#insert(tx, "segments", { id: uid("rs"), rule_id: id, group_name: input.fixedGroup ?? null, group_ratio: bigint(input.initialRatio),
