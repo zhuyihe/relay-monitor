@@ -22,7 +22,8 @@ const BACKUP = "perf_parity_backup";
 const VOLATILE_COLUMNS = ["settled_at", "version_id"];
 // （渠道的 stateObservedAt、倍率的 ratioObservedAt 这类「什么时候读到的」键，名字以 ObservedAt 结尾的一律不比）
 // trigger：这天是轮询回看（late）结的还是 parity 手动（manual）结的，只看谁抢先，和钱无关（审核 R2 第二轮、#123 perf 的 15 处假差）
-const VOLATILE_KEYS = new Set(["generatedAt", "resultGeneratedAt", "origin", "observedAt", "checkedAt", "fetchedAt",
+// pricingReadAt：应付成本明细里「上游价目表是什么时候读的」（V1-b），每小时读一次，base、head 各读各的，和钱无关（#149 perf 的 938 处假差）
+const VOLATILE_KEYS = new Set(["generatedAt", "resultGeneratedAt", "origin", "observedAt", "checkedAt", "fetchedAt", "pricingReadAt",
   ...(process.env.PARITY_IGNORE_KEYS || "").split(",").map((s) => s.trim()).filter(Boolean)]);
 const isVolatileKey = (key) => VOLATILE_KEYS.has(key) || /ObservedAt$/.test(key);
 const [cmd, ...args] = process.argv.slice(2);

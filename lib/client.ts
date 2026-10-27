@@ -105,36 +105,55 @@ export type ConfirmedHistoryRecord = {
   settledRates?: { income: number | null; cost: number | null }; costBasis?: "usage" | "fixed" | null;
 };
 export type ConfirmedHistoryResponse = { ruleId: string; readOnly: true; records: ConfirmedHistoryRecord[]; nextCursor: string | null };
-export type ReconciliationAmountBasis = { id: string; currency: "USD"; billingSource: string; calculationVersion: number; conversion: "quota_per_unit" | "provider_cost_usd" | null };
-export type KnownChannelCoverage = {
-  label: "known-channel-coverage"; state: "complete_known" | "partial" | "unknown"; catalogueState: "verified" | "unknown"; wholeSiteState: "unverified";
-  knownChannelCount: number; accountedChannelCount: number;
-  channels: { ownSource: OwnSource | null; ownStationId: string; channelId: number; name: string; operatingState: string; ruleIds: string[];
-    status: "accounted" | "unlinked" | "not_effective" | "source_unverified" | "billing_missing" | "coverage_unknown" | "duplicate" | "row_attention" | "monitor_only" | "unsupported"; issues: string[]; reason?: string; actions: WorkflowAction[] }[];
-};
-// 金额默认按系统原值（USD）显示；本站和各上游都设置了汇率时整页按人民币显示。*Usd 字段始终是账单原币原始口径。
+// 金额默认按系统原值（USD）显示；自营站点和各上游都设置了汇率时整页按人民币显示。*Usd 字段始终是账单原币原始口径。
 export type ReconciliationCurrency = "USD" | "CNY";
-export type ReconciliationDisplayTotals = { currency: ReconciliationCurrency; knownIncome: number | null; knownCost: number | null; confirmedProfit: number | null; confirmedMarginRate: number | null };
-export type ReconciliationWindowTotals = { knownIncomeUsd: number | null; knownCostUsd: number | null; confirmedProfitUsd: number | null; confirmedMarginRate: number | null; profitComplete: boolean; attentionRuleIds: string[]; readingRuleIds: string[]; display?: ReconciliationDisplayTotals };
-// 未纳入核算的上游消费 = 各按用量计费上游的账号级扣费 − 已计入核算的 Key 成本；只对共同汇总给出。
-export type UnaccountedUpstreamState = "pending" | "partial" | "estimated" | "complete";
-export type UnaccountedUpstream = {
-  state: UnaccountedUpstreamState; currency: ReconciliationCurrency; total: number | null;
-  accounts: { stationId: string; name: string; rate: number | null; mode: string | null; endMs: number | null; state: UnaccountedUpstreamState | "unavailable"; notes: string[]; ruleIds: string[];
-    accountUsd: number | null; accountedUsd: number; unaccountedUsd: number | null; account: number | null; accounted: number; unaccounted: number | null;
-    // 已核算多于账号扣费（unaccounted < 0）时的原因：取数时刻不同、汇率不同或两者都有
-    overAccounted?: "timing" | "rate" | "mixed" | null }[];
-  window: { startMs: number; endMs: number; timezone: string; preset: string };
-  fixedStations: { id: string; name: string }[]; excludedStations: { id: string; name: string }[];
+// ---- 每日利润页（POST /api/reconciliation/profit、GET …/profit/detail；字段名照设计稿 daily-profit-a.md §9）----
+// 一行一天的小格：fixed 已固定 / reading 还在读取 / today 今天 / attention 需处理 / notStarted 还没开始算 / future 还没到
+export type ProfitDayCell = { day: string; state: "fixed" | "reading" | "today" | "attention" | "notStarted" | "future"; gapUsd: number | null; gapState: "over" | "under" | "within" | null; reason: string | null; tokens: number | null };
+// 差额的状态：over / under 对不上（多扣 / 少扣）、within 门槛以内、today 明天出、reading 还在读取、uncomputable 算不了（reason 给原因）、attention 需处理、notStarted 还没开始算
+export type ProfitGapState = "over" | "under" | "within" | "today" | "reading" | "none";
+export type ProfitRow = {
+  rowKey: string; ruleIds: string[]; channels: { channelId: number; name: string | null }[];
+  upstream: { stationId: string; name: string | null; provider: string | null };
+  key: { name: string; groupName: string | null; groupRatio: number | null; upstreamKeyUrl: string | null };
+  // 页面换算用的汇率：收入按自营站点、成本按这个上游；没设置是 null（按美元显示）
+  rates: { income: number | null; cost: number | null; costBasis: "usage" | "fixed" | null };
+  startedOn: string | null; startedAt: number | null; counted: boolean;
+  incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; uncountedIncomeUsd: number | null; expectedCostUsd: number | null;
+  gap: { usd: number | null; rate: number | null; state: ProfitGapState; mismatchedDays: { day: string; usd: number; state: "over" | "under" }[]; days: number; reason: string | null; missingPriceModels: string[] };
+  attention: { code: string | null; title: string | null; detail: string | null; action: WorkflowAction | null; fromDay: string | null; moreCount: number;
+    // 这天重算的数比原来少了一半多、没换掉（RESETTLE_SHRUNK）：点「重新读取」先弹确认框用这几个数，没有就是 null（C3，resettleShrunkConfirm）
+    shrunk: { side: "revenue" | "cost" | "both"; before: { revenueUsd: number | null; costUsd: number | null }; after: { revenueUsd: number | null; costUsd: number | null } } | null } | null;
+  excludedDays: number; daily: ProfitDayCell[];
+  latestSettledGap: { day: string; usd: number | null; state: "over" | "under" | "within" | null; reason: string | null } | null;
 };
-export type ReconciliationWindowGroup = { groupKey: string; ownSource: OwnSource | null; window: { startMs: number; endMs: number; preset?: string }; timezones: string[]; amountBasis: ReconciliationAmountBasis; ruleIds: string[]; totals: ReconciliationWindowTotals; coverage: KnownChannelCoverage; actions: WorkflowAction[] };
-// live 实时（窗口未结束）/ settled 已结账 / ended 已结束（非整日窗口，不结账）/ pending 待结账 / unavailable 不可用；由服务端给出，前端只渲染。
-export type ReconciliationSettlement = "live" | "settled" | "ended" | "pending" | "unavailable";
-export type ReconciliationSummary = { groupKey: string; totals: ReconciliationWindowTotals; coverage: KnownChannelCoverage };
+export type ProfitPageResponse = {
+  range: { preset: string | null; startMs: number; endMs: number; timezone: string }; today: string;
+  dayCounts: { fixed: number; reading: number; today: number };
+  pageTotals: { incomeUsd: number | null; actualCostUsd: number | null; grossProfitUsd: number | null; grossMarginRate: number | null };
+  gap: { days: { first: string | null; last: string | null; count: number; contiguous: boolean }; expectedCostUsd: number | null; actualCostUsd: number | null; usd: number | null; overUsd: number; underUsd: number; withinUsd: number; rowCount: number };
+  latestSettledGap: { day: string; usd: number | null; mismatchedRowCount: number } | null;
+  counts: { channels: number; countedChannels: number; mismatchedChannels: number; attentionChannels: number; uncomputable: Record<string, number>; mismatchedDays: { over: number; under: number } };
+  gapThreshold: { usd: number; rate: number }; rows: ProfitRow[];
+  asOf: string; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; netProfitUsd: number | null;
+  ownIncomeUnavailable: { code: string } | null; unaccountedUpstreamCostUsd: number | null; unlinkedChannelCount: number;
+  rateUnset: { id: string; name: string }[]; fixedOffProfitStations: { id: string; name: string }[];
+};
+export type ProfitDetailModel = { model: string; upstreamModel?: string | null; requests: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; pricesPerMillion?: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null } | null; beforeRatioUsd: number; usd: number };
+export type ProfitDetailResponse = {
+  day: string; settled: boolean;
+  income: { usd: number | null; adminUsage: { usd: number | null; deducted: "all" | "some" | "none" }; byChannel: { channelId: number; usd: number | null }[] };
+  // backfilledAt：这天固定时收费记录还没读完、后来补算的时刻；没补算是 null
+  expected: { usd: number | null; reason: string | null; backfilledAt?: string | null; groupName: string | null; groupRatio: number | null; segments: { startMs: number; endMs: number; ratio: number | null; group?: string | null; usd?: number | null; ruleId: string | null }[];
+    byModel: ProfitDetailModel[]; missingPriceModels: { model: string; inputTokens: number; outputTokens: number; requests: number }[]; byChannel: { channelId: number; usd: number | null }[]; tokens: number | null };
+  actual: { usd: number | null; keyName: string | null };
+  gap: { usd: number | null; rate: number | null; state: "over" | "under" | "within" | null } | null;
+  grossProfitUsd: number | null; fixedAt: string | null; revisions: number | null;
+};
 export type WorkflowAction = {
   // 种类和按钮文字只在 lib/workflow-actions.js 定义（ACTIONS）
   id: string; kind: "verify_identity" | "update_authorization" | "verify_capability" | "connect_channels" | "confirm_coverage" | "review_source" | "inspect_balance" | "retry_bill" | "review_conflict"
-    | "edit_binding" | "correct_timing" | "refresh" | "swap_key" | "unbind" | "delete_upstream" | "view_detail" | "setup_own_station" | "check_connection" | "add_upstream";
+    | "edit_binding" | "correct_timing" | "refresh" | "swap_key" | "unbind" | "delete_upstream" | "view_detail" | "setup_own_station" | "check_connection" | "add_upstream" | "recheck_consume_log";
   label: string; title?: string; detail?: string; code?: string; accountKey: string | null; stationId: string | null; ruleId: string | null; ownStationId: string | null;
   channelIds: number[]; window: { startMs: number; endMs: number; timezone: string } | null; href: string | null;
 };
