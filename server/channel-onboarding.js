@@ -18,11 +18,14 @@ import { normalizeReconciliationScopeIntent, ruleTimezoneFor } from "./reconcili
 import { identifyChannelsCached } from "./key-agent-identify.js";
 
 // 渠道 Key 读取服务认出的「现在用的 Key」（K2a，只认只显示，这里只带出来，页面暂不画）：按渠道编号查。
-// 没有自营站点、没装读取服务时 identifyChannelsCached 很快回 KEY_AGENT_NOT_CONFIGURED，不会每次查询都去问候选上游
+// 没有自营站点、没装读取服务时 identifyChannelsCached 很快回 KEY_AGENT_NOT_CONFIGURED，不会每次查询都去问候选上游。
+// stale/staleReason（读取服务自己读库失败、给的是上一份旧结果，K1b 定的协议）带到每个渠道的条目上：
+// 审核 #131 M2——这一版页面还没画这两个字段，但接的人（K2b/K2d）不该因为这里丢了而忘记带
 async function identifiedKeysByChannel(rt, station) {
   if (!station) return new Map();
   const identified = await identifyChannelsCached(rt, station);
-  return new Map((identified.ok && identified.channels ? identified.channels : []).map((entry) => [entry.channelId, entry]));
+  return new Map((identified.ok && identified.channels ? identified.channels : [])
+    .map((entry) => [entry.channelId, { ...entry, stale: identified.stale ?? false, staleReason: identified.staleReason ?? null }]));
 }
 
 // 验证后才保存。重试和同进程并发接入按上游地址 + 账号身份复用，避免重复监控同一余额。

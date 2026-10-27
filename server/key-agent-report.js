@@ -31,5 +31,7 @@ export async function keyBindingReport(rt, ownStation, options = {}) {
       mismatches.push({ channelId: channel.channelId, kind: "different_key", bound, identified: identifiedKeys });
     }
   }
-  return { ok: true, mismatches };
+  // stale/staleReason（读取服务自己读库失败、给的是上一份旧结果）带出来：审核 #131 M2，现在没有调用方，
+  // 先把形状定好，接的人（K2b/K2d）不用再去 identifyChannelsCached 的结果里现找
+  return { ok: true, stale: identified.stale ?? false, staleReason: identified.staleReason ?? null, mismatches };
 }

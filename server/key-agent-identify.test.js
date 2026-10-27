@@ -28,7 +28,34 @@ test("identifyChannels：候选上游用地址对，指纹精确认出；keyless
   assert.equal(result.ok, true);
   assert.deepEqual(result.channels.find((c) => c.channelId === 2), { channelId: 2, keyless: true });
   const first = result.channels.find((c) => c.channelId === 1);
-  assert.deepEqual(first.slots, [{ index: 0, state: "identified", matches: [{ stationId: "up1", tokenId: 9, tokenName: "oai" }] }]);
+  assert.deepEqual(first.slots, [{ index: 0, state: "identified", matches: [{ stationId: "up1", tokenId: 9, tokenName: "oai", via: "fingerprint" }] }]);
+});
+
+test("identifyChannels（审核 #131 H1）：渠道填的是代理/内网地址，和哪个上游都对不上（没有候选），指纹照样能在全部已加的上游里精确认出", async (t) => {
+  const channel = { id: 1, baseUrl: "http://10.0.0.5:8080", keys: [{ i: 0, m: mask, f: fp }] }; // 内网地址，对不上任何上游
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [channel] }, { headers: { etag: '"v1"' } }));
+  const upstream = { id: "up1", type: "newapi", baseUrl: "https://up.example.com" }; // 真正的上游，地址和渠道对不上
+  const rt = { store: { list: () => [ownStation, upstream] } };
+  const queryMetadata = async () => ({ tokens: [{ id: 9, name: "oai", maskedKey: fullKey }] }); // 给的是完整 Key（比如 Sub2API 式的目录）
+  const result = await identifyChannels(rt, ownStation, { queryMetadata });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.channels[0].slots, [{ index: 0, state: "identified", matches: [{ stationId: "up1", tokenId: 9, tokenName: "oai", via: "fingerprint" }] }],
+    "地址对不上任何候选，不代表认不出来——这正是方案要解决的场景（k-plan §2.2）");
+});
+
+test("identifyChannels（审核 #131 H2）：打码比对不会被放大到全部上游——另一个地址对不上的上游刚好有一把打码一样的 Key，不会被误认成这一把", async (t) => {
+  const channel = { id: 1, baseUrl: "https://up.example.com", keys: [{ i: 0, m: mask, f: "not-a-real-fingerprint" }] }; // 这里只给打码，指纹对不上任何完整 Key
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [channel] }, { headers: { etag: '"v1"' } }));
+  const candidate = { id: "up1", type: "newapi", baseUrl: "https://up.example.com" }; // 地址对上，是候选
+  const notCandidate = { id: "up2", type: "newapi", baseUrl: "https://other.example.com" }; // 地址对不上，不是候选，但打码刚好一样
+  const rt = { store: { list: () => [ownStation, candidate, notCandidate] } };
+  const queryMetadata = async (station) => station.id === "up1"
+    ? { tokens: [{ id: 9, name: "candidate-key", maskedKey: mask }] }
+    : { tokens: [{ id: 99, name: "not-a-candidate-key", maskedKey: mask }] };
+  const result = await identifyChannels(rt, ownStation, { queryMetadata });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.channels[0].slots, [{ index: 0, state: "identified", matches: [{ stationId: "up1", tokenId: 9, tokenName: "candidate-key", via: "mask" }] }],
+    "只认出候选（地址对上的）那一把；地址对不上的 up2 即使打码一样也不会被当成候选，不然会把钱算到错的账号上");
 });
 
 test("identifyChannels：这个站点没配读取服务直接说没配，不发请求", async (t) => {
@@ -59,6 +86,26 @@ test("identifyChannelsCached：缓存期内不再问读取服务；缓存期过�
   await identifyChannelsCached(rt, ownStation);
   assert.equal(fetchCalls, 2, "过期后再问一次");
   assert.equal(etags[1], '"v1"', "带上次的 etag");
+});
+
+// 审核 #131 M1：两个自营站点各有各的读取服务，缓存（rt._keyAgentIdentifyCache）按站点 id 隔开，不能串
+test("identifyChannelsCached：两个自营站点交替问，各拿各的结果，缓存不串（站点 A 的渠道不会出现在站点 B 的结果里）", async (t) => {
+  const ownB = { id: "own-b", isOwn: true, type: "newapi", keyAgentUrl: "https://own-b.test/key-agent", keyAgentSecret: STRONG_SECRET };
+  const fetched = [];
+  t.mock.method(globalThis, "fetch", async (url) => {
+    fetched.push(String(url));
+    const id = String(url).startsWith("https://own-b.test") ? 2 : 1;
+    return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? `"v${id}"` : null) },
+      json: async () => ({ v: 1, db: "mysql", readAt: 1, channels: [{ id, keyless: true }] }) };
+  });
+  const rt = { store: { list: () => [ownStation, ownB] } };
+  const a1 = await identifyChannelsCached(rt, ownStation);
+  const b1 = await identifyChannelsCached(rt, ownB);
+  const a2 = await identifyChannelsCached(rt, ownStation);
+  assert.deepEqual(a1.channels.map((c) => c.channelId), [1]);
+  assert.deepEqual(b1.channels.map((c) => c.channelId), [2], "站点 B 拿到的是自己的渠道，不是 A 缓存的");
+  assert.deepEqual(a2.channels.map((c) => c.channelId), [1], "换回 A：还是 A 自己的渠道，不是 B 的");
+  assert.deepEqual(fetched.map((u) => new URL(u).host), ["own.test", "own-b.test", "own.test"], "换站点不命中对方的缓存，各问各的读取服务");
 });
 
 test("identifyChannelsCached：304（读取服务那一侧没变）沿用上一次认出的结果，不重读候选上游的 Key 目录", async (t) => {
@@ -99,7 +146,7 @@ test("identifyChannels：打码撞了、有 api_key:reveal 权限——批量取
   const revealCalls = [];
   const revealKeys = async (station, tokenIds) => { revealCalls.push({ stationId: station.id, tokenIds: [...tokenIds] }); return { 9: fullKeyA, 10: fullKeyB }; };
   const result = await identifyChannels(rt, ownStation, { queryMetadata: maskedQueryMetadata, revealKeys });
-  assert.deepEqual(result.channels[0].slots, [{ index: 0, state: "identified", matches: [{ stationId: "up1", tokenId: 9, tokenName: "oai-a" }] }]);
+  assert.deepEqual(result.channels[0].slots, [{ index: 0, state: "identified", matches: [{ stationId: "up1", tokenId: 9, tokenName: "oai-a", via: "revealed" }] }]);
   assert.deepEqual(result.revealIssues, []);
   assert.equal(revealCalls.length, 1, "同一个上游这一轮只问一次");
   assert.deepEqual(revealCalls[0].tokenIds.sort((a, b) => a - b), [9, 10]);
@@ -124,6 +171,15 @@ test("identifyChannels：reveal 被限流（或别的失败）——这一轮当
   assert.equal(result.channels[0].slots[0].state, "ambiguous");
   assert.deepEqual(result.revealIssues, []);
   assert.equal(revealCalls, 1, "这一轮只问一次，不在这一轮里重试");
+});
+
+test("identifyChannels（审核 #131 低项）：reveal 返回里少了某把候选（超过一轮能取的批数、或上游没给）——没读全，slot 保持 ambiguous 下一轮再试，不能误判成 not_found", async (t) => {
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [ambiguousChannel] }, { headers: { etag: '"v1"' } }));
+  const rt = { store: { list: () => [ownStation, ambiguousUpstream] } };
+  const revealKeys = async () => ({ 10: fullKeyB }); // 候选 9、10：只回了 10，9 没取到；10 不是渠道这把
+  const result = await identifyChannels(rt, ownStation, { queryMetadata: maskedQueryMetadata, revealKeys });
+  assert.equal(result.channels[0].slots[0].state, "ambiguous", "9 没取到，不能下「都不是」的结论");
+  assert.deepEqual(result.revealIssues, []);
 });
 
 test("identifyChannels：reveal 拿到的完整 Key 只用来算指纹，不出现在返回结果里（k-plan §11.3）", async (t) => {
