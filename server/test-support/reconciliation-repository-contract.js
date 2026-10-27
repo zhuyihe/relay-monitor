@@ -1931,3 +1931,20 @@ contract("applyKeyChangePlans: rules carrying a real active_token_key — one pl
   assert.deepEqual(await repository.applyKeyChangePlans([ring[0]]), { conflict: true }, "轮换拆开：撞");
   assert.deepEqual(await repository.applyKeyChangePlans(ring), { conflict: false }, "轮换同一批：不撞");
 });
+
+contract("regroupRules: a new rule with dayExtraKeys (Sub2API) gets a closed first segment up to the next business day carrying the extra old keys (no unique key held), then an open segment with only its own key", async ({ repository, fixture }) => {
+  const oldRule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:x1`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(131), name: "A" }] });
+  const dropped = { upstreamStationId: oldRule.upstreamStationId, tokenId: oldRule.tokenId, tokenName: oldRule.tokenName };
+  const b = EFFECTIVE_FROM + 2 * HOUR, endsAt = b + 10 * HOUR;
+  const input = fixture.ruleInput({ tokenId: fixture.token(132), tokenName: "New", canonicalKey: `up:${fixture.tag}:x2`, billingPolicy: "immediate", channels: [{ channelId: fixture.channel(131), name: "A" }], dayExtraKeys: { endsAt, keys: [dropped] } });
+  const result = await repository.regroupRules({ at: b, closes: [{ ruleId: oldRule.id, expect: { tokenId: oldRule.tokenId, channelIds: [fixture.channel(131)] }, window: null }], creates: [input] });
+  assert.deepEqual([result.conflict, result.stale], [false, false]);
+  result.ruleIds.forEach((id) => fixture.ruleIds.add(id));
+  const segments = await repository.listSegments(result.ruleIds[0]);
+  assert.deepEqual(segments.map((segment) => [segment.effectiveTo === null ? null : segment.effectiveTo, segment.keys.map((key) => key.tokenId).sort((x, y) => x - y), segment.keys.map((key) => key.active)]),
+    [[endsAt, [oldRule.tokenId, input.tokenId].sort((x, y) => x - y), [false, false]], [null, [input.tokenId], [true]]], "第一段关着、带着多出来的旧 Key 且不占唯一键；第二段开着只有自己的 Key");
+  assert.equal(segments[1].effectiveFrom, endsAt);
+  // 旧 Key 没被占着：别的绑定马上可以用它
+  const taker = await fixture.createRule({ tokenId: oldRule.tokenId, ownStationId: fixture.station("own-after"), canonicalKey: `up:${fixture.tag}:x3`, channels: [{ channelId: fixture.channel(133), name: "T" }] });
+  assert.equal(taker.tokenId, oldRule.tokenId);
+});

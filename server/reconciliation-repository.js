@@ -411,13 +411,28 @@ export class ReconciliationRepository {
           [input.channels.map((channel) => [id, channel.channelId, channel.name, activeChannelKey(input, channel.channelId)])]
         );
       }
+      const firstSegmentId = uid("rs");
       await conn.query(
         `INSERT INTO reconciliation_rule_segments
           (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, detected_at_ms, timing_source)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'operator_confirmed')`,
-        [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs ?? (isScopedBillingPolicy(input.billingPolicy) ? 0 : Date.now())), Date.now()]
+        [firstSegmentId, id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", Number(input.initialEffectiveFromMs ?? (isScopedBillingPolicy(input.billingPolicy) ? 0 : Date.now())), Date.now()]
       );
+      // Sub2API 重新分组（K2c）：旧绑定归档那天整天不算（只能按整天读），它原来的 Key 要是没有被任何新组接着用，b 当天 b 以前的用量就没人算。
+      // 把这些 Key 放进新绑定第一段（只到下一个业务日 0 点，段是关着的所以不占唯一键）：b 当天整天读时多取这几把，第二天起第一段不再碰到
+      const extra = input.dayExtraKeys;
+      if (extra?.keys?.length) {
+        await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [extra.endsAt, firstSegmentId]);
+        await conn.query(
+          `INSERT INTO reconciliation_rule_segments
+            (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, detected_at_ms, timing_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'key_change')`,
+          [uid("rs"), id, input.fixedGroup, input.initialRatio ?? null, input.initialRatio == null ? null : Date.now(), input.initialRatio == null ? null : "group_catalog", extra.endsAt, Date.now()]);
+      }
       await refreshSegmentKeys(conn, id);
+      if (extra?.keys?.length) for (const key of extra.keys) await conn.query(
+        "INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source, active_token_key) VALUES (?, ?, ?, ?, 'agent', NULL)",
+        [firstSegmentId, key.upstreamStationId, key.tokenId, key.tokenName ?? null]);
       if (guard) guard(null, [], isScopedBillingPolicy(input.billingPolicy) ? applyScopePolicy(null, requested, now) : input);
       return id;
     }

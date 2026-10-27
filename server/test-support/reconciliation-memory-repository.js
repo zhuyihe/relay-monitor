@@ -229,13 +229,23 @@ export class MemoryReconciliationRepository {
         source_binding: JSON.stringify(serializeRuleSourceBinding(input)), created_at: createdAt, updated_at: createdAt,
       });
       for (const channel of input.channels) this.#insertChannel(tx, id, channel, input);
+      const firstSegmentId = uid("rs");
       this.#insert(tx, "segments", {
-        id: uid("rs"), rule_id: id, group_name: input.fixedGroup ?? null, group_ratio: bigint(input.initialRatio),
+        id: firstSegmentId, rule_id: id, group_name: input.fixedGroup ?? null, group_ratio: bigint(input.initialRatio),
         ratio_observed_at_ms: input.initialRatio == null ? null : Date.now(), ratio_source: input.initialRatio == null ? null : "group_catalog",
         effective_from_ms: Number(input.initialEffectiveFromMs ?? (isScopedBillingPolicy(input.billingPolicy) ? 0 : Date.now())),
         effective_to_ms: null, detected_at_ms: Date.now(), timing_source: "operator_confirmed", created_at: createdAt, updated_at: createdAt,
       });
+      const extra = input.dayExtraKeys; // 对应 MySQL 版：Sub2API 重新分组，没有被新组接着用的旧 Key 放进新绑定第一段（关着的，到下一个业务日 0 点）
+      if (extra?.keys?.length) {
+        this.#update(tx, "segments", this.#rows("segments", tx).filter(({ row }) => row.id === firstSegmentId), { effective_to_ms: bigint(extra.endsAt) });
+        this.#insert(tx, "segments", { id: uid("rs"), rule_id: id, group_name: input.fixedGroup ?? null, group_ratio: bigint(input.initialRatio),
+          ratio_observed_at_ms: input.initialRatio == null ? null : Date.now(), ratio_source: input.initialRatio == null ? null : "group_catalog",
+          effective_from_ms: bigint(extra.endsAt), effective_to_ms: null, detected_at_ms: Date.now(), timing_source: "key_change", created_at: createdAt, updated_at: createdAt });
+      }
       this.#refreshSegmentKeys(tx, id);
+      if (extra?.keys?.length) for (const key of extra.keys) this.#insert(tx, "segmentKeys", { segment_id: firstSegmentId, upstream_station_id: key.upstreamStationId, token_id: bigint(key.tokenId),
+        token_name: key.tokenName ?? null, key_mask: null, match_source: "agent", active_token_key: null });
       if (guard) guard(null, [], isScopedBillingPolicy(input.billingPolicy) ? applyScopePolicy(null, requested, now) : input);
       return id;
     }

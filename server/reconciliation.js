@@ -43,7 +43,7 @@ import { createUpstreamPricing } from "./upstream-pricing.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
-  isScopedBillingPolicy, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
+  isScopedBillingPolicy, nextBillingEffectiveFrom, reconciliationAccountingStart, startOfBillingDay, scopeRecalculatedInWindow } from "../lib/reconciliation-scope-policy.js";
 import { ledgerDecimal, ledgerEntryForSettlement, ledgerReference, ledgerSettlement } from "../lib/reconciliation-ledger.js";
 import { splitWindowByDays, stitchChannelRevenue } from "../lib/reconciliation-stitch.js";
 import { SETTLE_LOOKBACK_MAX_PER_ROUND, SETTLE_LOOKBACK_MS, SETTLE_MAX_AUTO_ATTEMPTS, RESETTLE_KEPT_REASONS, isSettleableWindow, resettleShrunkInfo, sameShrunkAfter, isSettledAt, reasonKindOf, settleRetryDelayMs, settlementOutcome, settlementPrecheck, settlementRecheck } from "../lib/reconciliation-settlement.js";
@@ -946,6 +946,18 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const at = Math.min(observedAt, ...plan.closes.map((close) => keyIssues.get(close.ruleId)?.sinceMs ?? byId.get(close.ruleId).keyIssue?.sinceMs ?? observedAt));
     const settled = await repository.listLedgerDays(plan.closes.map((close) => close.ruleId), dayKeyInTz(at, members[0].timezone)).catch(() => null);
     if (!settled || settled.length) return notDone;
+    // Sub2API 只能按整天读，旧绑定归档那天整天不算：旧绑定原来的 Key 要是没有被任何新组接着用（合组里被合掉的那条的 Key、
+    // 分组到全新 Key 时原组不再用的……），b 当天 b 以前的用量就没人算了。把这些 Key 放进新绑定第一段（只到下一个业务日 0 点），
+    // 那天整天读时多取这几把；挂在 fromRuleIds 里有这条旧绑定的第一个新组上。New API 旧绑定算到 b 为止，不需要
+    for (const close of plan.closes) {
+      const rule = byId.get(close.ruleId), upstream = upstreamStation(rule.upstreamStationId);
+      if (!/^sub2api/.test(upstream?.type || "")) continue;
+      if (plan.groups.some((group) => group.ref.upstreamStationId === rule.upstreamStationId && Number(group.ref.tokenId) === Number(rule.tokenId))) continue;
+      const index = plan.groups.findIndex((group) => group.fromRuleIds.includes(rule.id));
+      if (index < 0) continue;
+      const target = creates[index];
+      (target.dayExtraKeys ||= { endsAt: nextBillingEffectiveFrom(target.timezone, at), keys: [] }).keys.push({ upstreamStationId: rule.upstreamStationId, tokenId: Number(rule.tokenId), tokenName: rule.tokenName ?? null });
+    }
     // 旧绑定：a 和 K2b 一样（safeLastSeenAt：读之前的站点成功时刻，带着没处理完的事的绑定用开着那段的起点）
     const closes = [], aOf = new Map(), openFromOf = new Map();
     for (const close of plan.closes) {
@@ -1672,9 +1684,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const pieces = keyPiecesOf(segments, window, token?.id);
     if (!pieces) return upstreamWindowForSegment(upstream, metadata, token, currentSegment, window, options);
     const isSub2 = upstream.type === "sub2api" || upstream.type === "sub2api-password";
-    const sources = isSub2
-      ? [{ segment: copySegment(currentSegment, { keys: [...new Map(pieces.flatMap(({ segment }) => segment.keys || []).map((key) => [`${key.upstreamStationId ?? ""}:${key.tokenId}`, key])).values()] }), window }]
-      : pieces;
+    let sources = pieces;
+    if (isSub2) {
+      // copySegment 的 overrides 不管 keys（keys 是不可枚举属性，照原段拷），所以 keys 要拷完再换
+      const merged = copySegment(currentSegment);
+      merged.keys = [...new Map(pieces.flatMap(({ segment }) => segment.keys?.length ? segment.keys : [{ upstreamStationId: upstreamStation(options.upstreamStationId)?.id, tokenId: token?.id, tokenName: token?.name }])
+        .map((key) => [`${key.upstreamStationId ?? ""}:${key.tokenId}`, key])).values()];
+      sources = [{ segment: merged, window }];
+    }
     const results = await Promise.all(sources.map((piece) => upstreamWindowForSegment(upstream, metadata, token, piece.segment, piece.window, options)));
     const summed = sumKeyStats(results);
     return { ...summed, window: { ...summed.window, startMs: window.startMs, endMs: window.endMs } };
