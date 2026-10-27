@@ -8,7 +8,7 @@ import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
 import { SETTLE_LOOKBACK_MAX_PER_ROUND } from "../lib/reconciliation-settlement.js";
 import { Store } from "../db/store.js";
 import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconciliation-scope-policy.js";
-import { reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
+import { coverageNeedsAnswer, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { reconciliationNotCountedText } from "../lib/reconciliation-view.js";
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
@@ -9909,7 +9909,7 @@ test("K2c：合组——两条绑定的渠道现在用同一把 Key：旧的两�
   assert.deepEqual([rules[0].tokenId, rules[0].channels.map((channel) => channel.channelId).sort(), rules[0].accountingFloorMs], [9, [1, 2], b]);
 });
 
-test("K2c：能分的条件对不上就不分，原样留着 KEY_GROUP_CHANGED、不结账（渠道目录没确认 / 别处也在用的上游新组的 Key 没人答过）", async (t) => {
+test("K2c：渠道目录没确认就不分，原样留着 KEY_GROUP_CHANGED、不结账；别处也在用的上游新组的 Key 没人答过（K2c-4）：照分，新组建一条还没回答的绑定，旧的 Key 沿用原来的回答", async (t) => {
   const g = regroupFixture(t, { rules: [], channelsByRule: { rr_live: [1, 2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "twen" }], keysOf: { 1: 9, 2: 9 } });
   const { f } = g;
   await f.module.refreshDue(Date.parse("2026-10-11T01:00:00Z"));
@@ -9922,13 +9922,13 @@ test("K2c：能分的条件对不上就不分，原样留着 KEY_GROUP_CHANGED�
   g.setCatalogue(namespaceKey);
   f.stations[0].accountUse = "elsewhere"; // 别处也在用：新组的 Key（token 20）没人答过
   await next("2026-10-12T01:10:00Z");
-  assert.equal((await f.repository.getRule("rr_live")).enabled, true, "新组的 Key 没答过：不分");
-  assert.equal((await f.repository.listRules()).length, 1);
-  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.sinceMs, Date.parse("2026-10-12T01:00:00Z"), "b 沿用第一次认出的");
-  f.stations[0].accountUse = "only_mine"; // 答了：下一轮就分
-  await next("2026-10-12T01:20:00Z");
-  assert.equal((await f.repository.getRule("rr_live", { includeArchived: true })).enabled, false);
-  assert.equal((await f.repository.getRule("rr_live", { includeArchived: true })).archivedAtMs, Date.parse("2026-10-12T01:00:00Z"), "b = 第一次认出来的时刻（不是分的这一轮）");
+  const old = await f.repository.getRule("rr_live", { includeArchived: true });
+  assert.deepEqual([old.enabled, old.archivedAtMs], [false, Date.parse("2026-10-12T01:00:00Z")], "照分：b = 第一次认出来的时刻（不是分的这一轮）");
+  const rules = (await f.repository.listRules()).filter((rule) => rule.enabled);
+  const answered = rules.find((rule) => rule.tokenId === 9), fresh = rules.find((rule) => rule.tokenId === 20);
+  assert.deepEqual([coverageNeedsAnswer(answered, "usage"), answered.coverageDeclaration?.answer], [false, "none"], "原来就在用的 Key 沿用原来的回答");
+  assert.deepEqual([coverageNeedsAnswer(fresh, "usage"), fresh.coverageDeclaration?.answer ?? null, fresh.costCoverage], [true, "unknown", "unknown"], "新 Key 没人答过：建一条还没回答的绑定，需处理「这把 Key 还给别处用吗？」");
+  assert.deepEqual(fresh.channels.map((channel) => channel.channelId), [2]);
 });
 
 test("K2c：牵连的绑定在 b 以后已经有固定过的日子，不分（旧、新两边都会算那几天）——原样留着 KEY_GROUP_CHANGED", async (t) => {
@@ -10288,7 +10288,8 @@ async function crossUpstreamScenario(t, { from = "newapi", to, rates = null, tar
     return [...latest.values()].reduce((total, row) => total + Number(row.cost_usd), 0);
   };
   const truthOn = (billDate) => Object.values(windows).reduce((total, window) => total + secondsInDay(window, billDate), 0);
-  return { f, created, costOn, truthOn, windows };
+  const more = async (isos) => { for (const iso of isos) { now = Date.parse(iso); inject(); await f.module.refreshDue(now); } };
+  return { f, created, costOn, truthOn, windows, more };
 }
 
 for (const [from, to] of [["newapi", "newapi"], ["newapi", "sub2api"], ["sub2api", "newapi"], ["sub2api", "sub2api"]]) {
@@ -10340,9 +10341,28 @@ test("K2c 换到另一个上游：过渡段里有一个上游没设置汇率时�
   assert.equal(row.cost_rate, null);
 });
 
-test("K2c 换到另一个上游：旧上游是 Sub2API、新上游没答「只给我的渠道用」时先不分（旧 Key 在 b 当天 b 以前的用量没人接）——原样留着 KEY_GROUP_CHANGED，不归档、不建新绑定", async (t) => {
-  const s = await crossUpstreamScenario(t, { from: "sub2api", to: "newapi", targetAccountUse: "unknown" });
-  const rule = await s.f.repository.getRule("rr_live");
-  assert.deepEqual([rule.enabled, rule.keyIssue?.code], [true, "KEY_GROUP_CHANGED"]);
-  assert.deepEqual(s.created, []);
-});
+// K2c-4：新上游别处也在用（或没回答），渠道换到这把新 Key：照常分，新上游下建一条还没回答的绑定，b 起先不算，等回答
+for (const [from, to] of [["newapi", "newapi"], ["sub2api", "newapi"], ["sub2api", "sub2api"]]) {
+  test(`K2c-4 换到另一个上游（${from === "newapi" ? "New API" : "Sub2API"} → ${to === "newapi" ? "New API" : "Sub2API"}），新上游没答「只给我的渠道用」：新绑定从 b 起先不算利润；答「只给这些渠道用」以后 b 起那几天跟着补结，每天所有行的成本之和 = 各 Key 当天用量之和；答「别处也在用」利润照旧不算`, async (t) => {
+    const s = await crossUpstreamScenario(t, { from, to, targetAccountUse: "unknown" });
+    const old = await s.f.repository.getRule("rr_live", { includeArchived: true });
+    assert.deepEqual([old.enabled, old.archivedAtMs], [false, REGROUP_B], "旧绑定照常在 b 归档");
+    assert.equal(s.created.length, 1);
+    const fresh = await s.f.repository.getRule(s.created[0]);
+    assert.deepEqual([coverageNeedsAnswer(fresh, "usage"), fresh.coverageDeclaration?.answer ?? null], [true, "unknown"], "新绑定还没回答");
+    const bookedOf = (id) => s.f.state.ledger.filter((row) => row.rule_id === id).map((row) => row.bill_date);
+    assert.deepEqual(bookedOf(fresh.id), [], "回答以前 b 起一天都不算");
+    // 答「别处也在用」：利润照旧不算
+    const answerWith = (coverageDeclaration, costCoverage) => s.f.repository.updateRule(fresh.id, { upstreamStationId: "upstream2", ownStationId: "own", tokenId: fresh.tokenId, tokenName: fresh.tokenName, fixedGroup: fresh.fixedGroup,
+      provider: fresh.provider, canonicalKey: fresh.canonicalKey, ownSource: fresh.ownSource, sourceBinding: fresh.sourceBinding, channels: fresh.channels, timezone: fresh.timezone, enabled: true,
+      billingPolicy: fresh.billingPolicy, costCoverage, coverageDeclaration });
+    await answerWith({ answer: "other_use", otherUse: "external", uncoveredOwnChannelIds: [] }, "unknown");
+    await s.more(["2026-10-15T02:00:00Z", "2026-10-15T03:00:00Z", "2026-10-15T04:00:00Z", "2026-10-15T05:00:00Z"]);
+    assert.deepEqual(bookedOf(fresh.id), [], "答了别处也在用：利润照旧不算");
+    // 答「只给这些渠道用」：b 起那几天跟着补结
+    await answerWith({ answer: "none" }, "complete");
+    await s.more(["2026-10-15T06:00:00Z", "2026-10-15T07:00:00Z", "2026-10-15T08:00:00Z", "2026-10-15T09:00:00Z", "2026-10-15T10:00:00Z", "2026-10-15T11:00:00Z"]);
+    assert.ok(["2026-10-12", "2026-10-13", "2026-10-14"].every((day) => bookedOf(fresh.id).includes(day)), `补结 ${bookedOf(fresh.id)}`);
+    for (const day of ["2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14"]) assert.equal(s.costOn(day), s.truthOn(day), day);
+  });
+}

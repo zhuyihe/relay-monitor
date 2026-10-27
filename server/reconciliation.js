@@ -923,8 +923,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
 
   // K2c 重新分组（k-plan 3.3，规则的细节在 server/key-agent-resegment.js 的 planRegroup）。K2b 认出分组、合组以后不再只记 KEY_GROUP_CHANGED：
 // 能分就在一个事务里分——牵连的旧绑定在 b（这一轮读取服务读到的时刻）归档，分组的在 [a, b) 开一段放两把 Key，新绑定一组一条从 b 起算。
-// 保守：任何一步对不上（有没认出来的渠道、Key 换到了别的上游、上游身份/Key 目录这一轮读不到、Key 不能算、渠道目录没确认、别处也在用的上游里
-// 新组的 Key 没人答过「这把 Key 还给别处用吗」……）都不分，原样留着 KEY_GROUP_CHANGED（不结账，从 b 起），下一轮再试；
+// 保守：任何一步对不上（有没认出来的渠道、上游身份/Key 目录这一轮读不到、Key 不能算、渠道目录没确认、一个新组牵连的旧绑定里 New API 和 Sub2API 混着……）
+// 都不分，原样留着 KEY_GROUP_CHANGED（不结账，从 b 起），下一轮再试。新组的 Key 没人答过「这把 Key 还给别处用吗」不算对不上：照分，建一条还没回答的绑定（K2c-4）；
 // 落库时对不上（stale）也不写；撞了唯一约束整体回滚，记 KEY_GROUP_CHANGED。返回 { done, ruleIds }：done 为真时 ruleIds 是已归档的旧绑定
   async function regroupFor({ ownStationId, flaggedIds, refByChannelId, observedAt, stationLastSuccessAtMs, resources, keyIssues, issueFor, stationRules }) {
     const notDone = { done: false, ruleIds: new Set() };
@@ -943,8 +943,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     //  - 旧上游是 Sub2API（只能按整天读）：旧绑定归档那天整天不算（C3），所以新绑定从 b 那天 0 点整天算收入和成本（不设核算起点下限），
     //    它第一段（只到下一个业务日 0 点）带着旧 Key（dayExtraKeys，跨上游整天读，只那一天），旧 Key 在 b 当天 b 以前的用量由它接；
     //    旧绑定的过渡段总是只到 b 那天 0 点（0 点以后整天由新绑定取，不读两遍）。
-    // 别的上游下的新组：上游答了「只给我的渠道用」就在这里一起建（旧上游是 Sub2API 时必须在这里建，旧 Key 才有人接）；答案不是的，旧上游是
-    // New API 时交给自动开始（答案不是的渠道先停着等回答），旧上游是 Sub2API 时先不分（留着 KEY_GROUP_CHANGED，下一轮再试）
+    // 新组一律在这里建（旧上游是 Sub2API 时必须在这里建，旧 Key 才有人接）。新 Key 的回答（K2c-4）：上游答了「只给我的渠道用」就是「只给这些渠道用」；
+    // 同一把 Key 在旧绑定里答过的沿用；都不是（新上游别处也在用或没回答、渠道换到一把没人答过的 Key）就建一条还没回答的绑定——
+    // 从 b 起先不算利润，需处理「这把 Key 还给别处用吗？」[去回答]（和别的没回答的绑定同一条路，COST_COVERAGE_UNKNOWN）；
+    // 答「只给这些渠道用」以后 b 起那几天跟着补结，答别处也在用利润照旧不算
     const isForeignGroup = (group) => !group.fromRuleIds.some((id) => byId.get(id).upstreamStationId === group.ref.upstreamStationId);
     const isSub2Rule = (rule) => /^sub2api/.test(upstreamStation(rule.upstreamStationId)?.type || "");
     const foreignWindow = plan.closes.some((close) => (close.windowKeys || []).some((key) => key.upstreamStationId !== byId.get(close.ruleId).upstreamStationId));
@@ -968,8 +970,6 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     for (const group of plan.groups) {
       const foreign = isForeignGroup(group);
       const fromSub2 = group.fromRuleIds.some((id) => isSub2Rule(byId.get(id)));
-      // 别的上游下的新组，旧上游是 New API 又没答「只给我的渠道用」：交给自动开始
-      if (foreign && !fromSub2 && upstreamStation(group.ref.upstreamStationId)?.accountUse !== "only_mine") { creates.push(null); continue; }
       const resource = await resourceOf(group.ref.upstreamStationId), upstream = upstreamStation(group.ref.upstreamStationId);
       const metadata = resource?.metadata, identity = resource?.identity;
       // 别的上游下的新绑定：Sub2API 账单过滤能力还没核验过（新上游第一次有绑定）也先建——新绑定第一次读账单时会核验，没核验完不结账、
@@ -980,13 +980,12 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (!token || token.status !== 1 || !tokenNameIsUnique(metadata, token) || (metadata.platform !== "sub2api" && !token.group) || token.group === "auto" || token.crossGroupRetry) return notDone;
       const canonicalKey = canonicalBillingKey(upstream, identity, token.id);
       if (!canonicalKey || group.channelIds.some((channelId) => !revisionById.has(channelId))) return notDone;
-      // 新组的 Key 的回答：上游答了「只给我的渠道用」自动没有别的用途；别的上游，这把 Key 必须是旧绑定里已经答过的同一把，否则先不分
+      // 新组的 Key 的回答：上游答了「只给我的渠道用」自动没有别的用途；否则是旧绑定里已经答过的同一把的回答；都没有就还没回答（null）
       const answered = members.find((rule) => rule.upstreamStationId === upstream.id && Number(rule.tokenId) === Number(token.id) && rule.coverageDeclaration);
-      const coverageDeclaration = upstream.accountUse === "only_mine" ? { answer: "none" } : answered?.coverageDeclaration;
-      if (!coverageDeclaration) return notDone;
+      const coverageDeclaration = upstream.accountUse === "only_mine" ? { answer: "none" } : answered?.coverageDeclaration ?? null;
       creates.push({ upstreamStationId: upstream.id, ownStationId, tokenId: token.id, tokenName: token.name, fixedGroup: token.group,
         initialRatio: metadata.groups?.[token.group]?.ratio ?? null, timezone: members[0].timezone, enabled: true, provider: metadata.platform, canonicalKey,
-        billingPolicy: "immediate", ownSource: members[0].ownSource, costCoverage: coverageDeclaration.answer === "none" ? "complete" : "unknown", coverageDeclaration,
+        billingPolicy: "immediate", ownSource: members[0].ownSource, costCoverage: coverageDeclaration?.answer === "none" ? "complete" : "unknown", coverageDeclaration,
         // 旧绑定是 Sub2API：归档那天整天不算，新绑定从 b 那天 0 点整天算（不设下限）；New API 的算到 b 为止，新绑定从 b 起算
         ...(fromSub2 ? { accountingFloorMs: null } : {}),
         sourceBinding: Object.fromEntries(group.channelIds.map((channelId) => [channelId, revisionById.get(channelId)])), previewEffectiveFromMs: null,
@@ -1032,7 +1031,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const window = !close.windowKeys || (cap != null && from >= cap) ? null : { from, ...(cap != null ? { to: cap } : {}), keys: close.windowKeys };
       closes.push({ ruleId: rule.id, expect: { tokenId: Number(rule.tokenId), channelIds: rule.channels.map((channel) => Number(channel.channelId)) }, window });
     }
-    const result = await repository.regroupRules({ at, closes, creates: creates.filter(Boolean) }, { detectedAt: observedAt }).catch(() => null);
+    const result = await repository.regroupRules({ at, closes, creates }, { detectedAt: observedAt }).catch(() => null);
     if (!result || result.stale) return notDone;
     if (result.conflict) {
       for (const close of plan.closes) keyIssues.set(close.ruleId, issueFor(byId.get(close.ruleId), "KEY_GROUP_CHANGED"));
