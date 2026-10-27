@@ -208,10 +208,13 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_rules", "source_binding", "JSON NULL");
   // K2b：这条绑定的 Key 现在有没处理的事——分组/合组（KEY_GROUP_CHANGED）、渠道换成了不在已加上游里的 Key
   // （CHANNEL_KEY_UNMATCHED）、打码撞了又没有读完整 Key 的权限（KEY_REVEAL_DENIED）——第一次认出来的时刻（毫秒），
-  // 跨轮记下来，重启不丢（总指挥 10-26 定）。早退只挡从这一刻起的窗口，这一刻以前已经结过（或者还没结到）的日子不受影响；
+  // 跨轮记下来，重启不丢。早退只挡从这一刻起的窗口，这一刻以前已经结过（或者还没结到）的日子不受影响；
   // 事情解开（比如又换回来）清成 NULL
   await addColumnIfMissing(pool, "reconciliation_rules", "key_issue_code", "VARCHAR(40) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "key_issue_since_ms", "BIGINT NULL");
+  // 分组 / 合组的事项又解开了（渠道回到原来的 Key），没有靠重新分组处理：冲突期间 [since, until) 里另一把 Key 的用量没人算，
+  // 这一段的日子不能固定——事项记着，until 是解开的时刻（毫秒），until 以后的日子照常算；NULL 是还没解开
+  await addColumnIfMissing(pool, "reconciliation_rules", "key_issue_until_ms", "BIGINT NULL");
   await addIndexIfMissing(pool, "reconciliation_snapshots", "idx_reconciliation_snapshot_segment", "(segment_id)");
   // 写快照前「先读出同一把 Key 的那一组绑定」（计划 P1c）走这个索引；解除的绑定也留着，表会越来越大
   await addIndexIfMissing(pool, "reconciliation_rules", "idx_reconciliation_rule_token", "(token_id, archived_at)");

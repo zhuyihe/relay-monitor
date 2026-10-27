@@ -23,6 +23,15 @@ const groupKeyOf = (upstreamStationId, tokenId) => `${upstreamStationId}:${token
 export function createChannelProfitModule(rt, { identify = identifyChannelsCached, randomId = randomUUID } = {}) {
   const onboarding = () => rt.channelOnboarding || rt.onboardingSource;
   const reconciliation = () => rt.reconciliation;
+  // 同一个自营站点的开始 / 停止一个一个来（同时点两次开始、开始和停止同时点：后一个看到前一个已经提交的结果，不会停止说停了、渠道却还在算）
+  const queues = new Map();
+  const serialized = (ownStationId, task) => {
+    const previous = queues.get(ownStationId) || Promise.resolve();
+    const next = previous.catch(() => {}).then(task);
+    queues.set(ownStationId, next);
+    next.catch(() => {}).finally(() => { if (queues.get(ownStationId) === next) queues.delete(ownStationId); });
+    return next;
+  };
 
   function ownStationOf(ownStationId) {
     const station = rt.store.get(ownStationId);
@@ -64,10 +73,27 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
         return { ...base, state: "startable", upstreamStationId: match.stationId, tokenId: Number(match.tokenId), tokenName: match.tokenName ?? null,
           groupKey: groupKeyOf(match.stationId, match.tokenId) };
       }
-      if (slot.state === "not_found") return { ...base, state: "blocked", reason: "KEY_UNMATCHED" }; // 不在已加的上游里：加上游
-      if (slot.state === "ambiguous") return { ...base, state: "blocked", reason: "KEY_REVEAL_DENIED", upstreamStationId: revealDenied.get(channelId) ?? null };
-      return { ...base, state: "blocked", reason: "KEY_UNRESOLVED" }; // 上游这一轮读不到，会自己好
+      if (slot.state === "not_found") return { ...base, state: "blocked", reason: "CHANNEL_KEY_UNMATCHED" }; // 不在已加的上游里：加上游（用语规范 §5.2 的码）
+      // 打码撞了、读完整 Key 又没有权限（revealIssues 里有这个渠道）才是少权限；reveal 只是暂时失败（限流、网络）的不是，会自己好
+      if (slot.state === "ambiguous" && revealDenied.has(channelId)) return { ...base, state: "blocked", reason: "KEY_REVEAL_DENIED", upstreamStationId: revealDenied.get(channelId) ?? null };
+      return { ...base, state: "blocked", reason: "KEY_UNRESOLVED" }; // 上游这一轮读不到、reveal 暂时失败，会自己好
     });
+    // 几把 Key 的渠道也在用的 Key（它的某个 slot 认出来是这把）：这把 Key 的钱有一部分是那个渠道的，分不到每个渠道，算到这一组头上会把成本压到这几个渠道上、
+    // 绑定还被标成全覆盖。这一版多 Key 渠道本来就不能开始，和它共用 Key 的组也先挡住，等多 Key 渠道放开时一起解（k-plan 3.1、3.3：用同一把 Key 的渠道连成一组）
+    const multiKeyUse = new Map();
+    for (const entry of identified.channels) {
+      if (entry.keyless || (entry.slots || []).length <= 1) continue;
+      for (const slot of entry.slots) for (const match of slot.matches || []) {
+        const key = groupKeyOf(match.stationId, match.tokenId);
+        multiKeyUse.set(key, [...new Set([...(multiKeyUse.get(key) || []), Number(entry.channelId)])]);
+      }
+    }
+    for (const [index, channel] of channels.entries()) {
+      if (channel.state === "startable" && multiKeyUse.has(channel.groupKey)) {
+        channels[index] = { channelId: channel.channelId, name: channel.name, revision: channel.revision, optedOut: channel.optedOut, state: "blocked", reason: "KEY_SHARED_WITH_MULTI_KEY",
+          sharedWithChannelIds: multiKeyUse.get(channel.groupKey), upstreamStationId: channel.upstreamStationId };
+      }
+    }
     const groups = new Map();
     for (const channel of channels) if (channel.state === "startable") {
       const group = groups.get(channel.groupKey) || { groupKey: channel.groupKey, upstreamStationId: channel.upstreamStationId, tokenId: channel.tokenId,
@@ -81,11 +107,15 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
   // 开始算利润。channelIds 是用户勾的渠道；同一把 Key 的其他渠道自动带上（一个勾，不会把整把 Key 的成本压到其中一个渠道上）。
   // coverage：每组 { [groupKey]: 回答 }——上游答了「只给我的渠道用」（accountUse = only_mine）的不用回答，别的每把 Key 要答一次
   // （附录 2，沿用现有的 coverageDeclaration）。返回 { started, alreadyRunning, blocked, failed }，没做成的写清楚为什么。
-  async function start({ ownStationId, channelIds, coverage = {} }) {
+  function start(input) { return serialized(input?.ownStationId, () => startNow(input)); }
+  async function startNow({ ownStationId, channelIds, coverage = {} }) {
     const ids = [...new Set((Array.isArray(channelIds) ? channelIds : []).map(Number))];
     if (!ids.length || ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) throw codedError("CHANNEL_REQUIRED", "请至少选一个渠道");
     const state = await status(ownStationId, { fresh: true });
-    if (!state.ok) throw codedError(state.code, state.code === "KEY_AGENT_NOT_CONFIGURED" ? "装好渠道 Key 读取服务才能开始算利润" : "渠道 Key 暂时读不到，稍后再试");
+    if (!state.ok) {
+      throw codedError(state.code, state.code === "KEY_AGENT_NOT_CONFIGURED" ? "装好渠道 Key 读取服务才能开始算利润"
+        : state.code === "CHANNEL_CATALOGUE_STALE" ? "你站的渠道列表还没读到，稍后再试" : "渠道 Key 暂时读不到，稍后再试");
+    }
     const byId = new Map(state.channels.map((channel) => [channel.channelId, channel]));
     if (ids.some((id) => !byId.has(id))) throw codedError("CHANNEL_SOURCE_CHANGED", "选的渠道在自营站点里找不到了，请刷新渠道列表后重新选");
     const started = [], alreadyRunning = [], blocked = [], failed = [], wanted = new Map();
@@ -100,7 +130,7 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
       const upstream = rt.store.get(group.upstreamStationId);
       let declaration = null;
       if (upstream?.accountUse === "only_mine") declaration = normalizeCoverageDeclaration({ answer: "none" });
-      else if (coverage?.[group.groupKey] != null) declaration = normalizeCoverageDeclaration(coverage[group.groupKey]);
+      else if (coverage?.[group.groupKey] != null) { try { declaration = normalizeCoverageDeclaration(coverage[group.groupKey]); } catch { declaration = null; } } // 格式不对只算这一组没答
       if (!declaration) {
         for (const channelId of group.channelIds.filter((id) => ids.includes(id))) blocked.push({ channelId, code: "COVERAGE_ANSWER_REQUIRED", groupKey: group.groupKey });
         continue;
@@ -130,14 +160,22 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
 
   // 停止算利润：这几个渠道所在的绑定整条归档（同一把 Key 的渠道一起停，一个勾），同一个事务把它的渠道记成「用户停的」；
   // 没在算的渠道（第 3 步里取消勾的）只记「用户不要算」。已经算出来的日子留着，以后可以再点「开始算利润」
-  async function stop({ ownStationId, channelIds }) {
+  function stop(input) { return serialized(input?.ownStationId, () => stopNow(input)); }
+  const MAX_STOP_CHANNELS = 1000;
+  async function stopNow({ ownStationId, channelIds }) {
     ownStationOf(ownStationId);
     const ids = [...new Set((Array.isArray(channelIds) ? channelIds : []).map(Number))];
     if (!ids.length || ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) throw codedError("CHANNEL_REQUIRED", "请至少选一个渠道");
+    if (ids.length > MAX_STOP_CHANNELS) throw codedError("INVALID_REQUEST", "一次选的渠道太多了");
     const rules = (await reconciliation().listRules()).filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId);
+    // 只认你站渠道目录里的渠道和在算的绑定里的渠道，别的编号不往「用户不要算」里写
+    const known = new Set(rules.flatMap((rule) => rule.channels.map((channel) => Number(channel.channelId))));
+    for (const channel of onboarding()?.getSourceCatalogue?.()?.channels || []) known.add(Number(channel.id));
+    if (ids.some((id) => !known.has(id))) throw codedError("CHANNEL_SOURCE_CHANGED", "选的渠道在自营站点里找不到了，请刷新渠道列表后重新选");
     const covered = new Set(), stopped = [];
     for (const rule of rules.filter((item) => item.channels.some((channel) => ids.includes(Number(channel.channelId))))) {
-      await reconciliation().archiveRule(rule.id, { optout: true });
+      // 别处刚好也停了这条（同时点两次）：已经停了，当成功，接着处理后面的
+      try { await reconciliation().archiveRule(rule.id, { optout: true }); } catch (error) { if (error?.code !== "RULE_NOT_FOUND") throw error; }
       for (const channel of rule.channels) covered.add(Number(channel.channelId));
       stopped.push({ ruleId: rule.id, channelIds: rule.channels.map((channel) => Number(channel.channelId)) });
     }
