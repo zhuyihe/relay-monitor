@@ -10846,12 +10846,14 @@ RG_KEYS.X = "sk-XX" + "Unkn".repeat(9); // 不在任何已加上游里的 Key
 const RG_NAMES = { 9: "stable", 10: "stable-rr_b", 11: "stable-rr_c", 12: "stable-rr_d", 20: "k20", 21: "k21", 22: "k22" };
 const rgT = (iso) => Date.parse(iso);
 const rgTokenAt = (timeline, channel, ms) => { let current = null; for (const [from, token] of timeline[channel]) if (from <= ms) current = token; return current; };
+// 每把 Key 每秒花多少美元：默认 1，「stable-rr_b」（10）3——两把 Key 速率不同，算到谁头上才看得出来
+const RG_RATE = { 10: 3 };
 function rgUsageSec(timeline, tokenId, fromMs, toMs) {
   let total = 0;
   for (const points of Object.values(timeline)) for (let i = 0; i < points.length; i += 1) {
     if (String(points[i][1]) !== String(tokenId)) continue;
     const start = Math.max(points[i][0], fromMs), end = Math.min(i + 1 < points.length ? points[i + 1][0] : Infinity, toMs);
-    if (end > start) total += (end - start) / 1000;
+    if (end > start) total += (end - start) / 1000 * (RG_RATE[tokenId] ?? 1);
   }
   return total;
 }
@@ -11033,3 +11035,22 @@ test("K2b：读取服务给的读库时刻不可信（confirmedAtMs 为 null）�
   await f.module.refreshDue(now);
   assert.equal(own.keyAgentLastSuccessAtMs, before, "不可信：不往前挪，也不退回控制台的时刻");
 });
+
+// 审核 3 提、总指挥 10-27 定：同一把 Key 今天早些时候被绑定 A（不在这次重新分组牵连的范围里）握过，之后重新分组把这把 Key 给了新建的绑定 B——
+// B 对这把 Key 的下限 = A 那一段结束的时刻（每把 Key 恰好算一次），不能从 0 点（Sub2API 整天）或 a 起算，把 A 自己的用量也算给 B。Key 速率 1:3，逐条绑定断言
+// Sub2API 版在 #150（按时间认领）里跑：#144 这一层 Sub2API 整天读，同一天在两条绑定之间换手切不开
+for (const sub2 of [false]) {
+  test(`K2c 重新分组：新建的绑定拿到一把今天早些时候别的绑定（没牵连进来）握过的 Key——只算 A 停手以后的，A 那段不算两遍（${sub2 ? "Sub2API" : "New API"}，Key 速率 1:3）`, async (t) => {
+    // 渠道 3（绑定 A = rr_b）12:00（SH 10-12 04:00）前用 Key 10（每秒 3 美元），之后换到 Key 21；渠道 2（绑定 rr_live 的两个渠道之一）09:00 换到 Key 10，重新分组把它给新绑定 B
+    const s = await regroupTimeline(t, { rules: ["rr_b"], channelsByRule: { rr_live: [1, 2], rr_b: [3] }, sub2,
+      timeline: { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-12T01:00:00Z"), 10]], 3: [[0, 10], [rgT("2026-10-11T20:00:00Z"), 21]] } });
+    const tokenOf = new Map(s.rules.map((rule) => [rule.id, rule.tokenId]));
+    const rowOf = (day, ruleId) => s.latestRows(day).find((row) => row.rule_id === ruleId);
+    const fresh = s.rules.filter((rule) => !rule.archivedAt && Number(rule.tokenId) === 10);
+    assert.equal(fresh.length, 1, "重新分组给渠道 2 建了一条拿 Key 10 的新绑定 B");
+    // 10-12（SH）：A 的 Key 10 算到 04:00（3 × 4 小时）+ Key 21 之后（1 × 20 小时）；B 的 Key 10 从 09:00 起（3 × 15 小时），不含 A 的那 4 小时
+    assert.equal(Number(rowOf("2026-10-12", "rr_b").cost_usd), 3 * 14400 + 72000, "A 那天的数");
+    assert.equal(Number(rowOf("2026-10-12", fresh[0].id).cost_usd), 3 * 54000, "B 那天只算自己从 09:00 起的 Key 10");
+    for (const day of ["2026-10-12", "2026-10-13", "2026-10-14"]) assert.equal(s.costOn(day), s.truthOn(day), `${day}：所有绑定的和 = 各把 Key 当天用量之和`);
+  });
+}
