@@ -177,3 +177,26 @@ test("stop：一次最多 1000 个渠道；不在渠道目录也不在在算的�
   assert.deepEqual(f.calls.optoutAdded, [], "编号不对整次都不写");
   assert.deepEqual(await f.module.stop({ ownStationId: "own", channelIds: [2] }), { stopped: [], optedOut: [2] });
 });
+
+test("stop 碰上重新分组：归档报 RULE_NOT_FOUND 不当「已经停了」——跟着渠道找到它现在的绑定，把那条停掉并记「用户停的」；别的渠道不受影响", async () => {
+  const f = fixture({ channels: [1, 2], rules: [running("r-old", [1, 2])], identified: [] });
+  // 旧绑定在点停止和归档之间被重新分组：归档报找不到，渠道已经在两条新绑定里
+  f.rt.reconciliation.archiveRule = async (id, options) => {
+    f.calls.archived.push([id, options]);
+    if (id === "r-old") { f.state.rules = [running("r-new-1", [1]), running("r-new-2", [2])]; throw Object.assign(new Error("gone"), { code: "RULE_NOT_FOUND" }); }
+    f.state.rules = f.state.rules.filter((rule) => rule.id !== id);
+    return { ruleId: id };
+  };
+  const result = await f.module.stop({ ownStationId: "own", channelIds: [1] });
+  assert.deepEqual(result, { stopped: [{ ruleId: "r-new-1", channelIds: [1] }], optedOut: [] }, "渠道 1 现在的绑定停了");
+  assert.deepEqual(f.calls.archived.map(([id, options]) => [id, options.optout]), [["r-old", true], ["r-new-1", true]]);
+  assert.deepEqual(f.state.rules.map((rule) => rule.id), ["r-new-2"], "渠道 2 的新绑定还在算");
+});
+
+test("stop 碰上反复重新分组：找了 3 圈渠道还在新绑定里，报「渠道刚刚换了分组，请刷新」，不写成已经停了", async () => {
+  const f = fixture({ channels: [1], rules: [running("r-0", [1])], identified: [] });
+  let generation = 0;
+  f.rt.reconciliation.archiveRule = async () => { generation += 1; f.state.rules = [running(`r-${generation}`, [1])]; throw Object.assign(new Error("gone"), { code: "RULE_NOT_FOUND" }); };
+  await assert.rejects(f.module.stop({ ownStationId: "own", channelIds: [1] }), { code: "CHANNEL_SOURCE_CHANGED" });
+  assert.deepEqual(f.calls.optoutAdded, [], "没记「用户不要算」：渠道其实还在算");
+});
