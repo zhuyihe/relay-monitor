@@ -5116,8 +5116,48 @@ test("减压 PR（审核 #137 中-1 复现）：没人看时渠道来了新消�
   for (let i = 0; i < 11; i += 1) await round(); // 没人看超过 10 分钟，进入放慢
   quota2 = 200; // 有新消费，但这一轮渠道 2 沿用
   assert.equal(await round(), 0, "放慢：这一轮沿用");
-  for (let i = 0; i < 3; i += 1) await round(false); // 站点转安静（没有新日志），整站沿用
+  let askedWhileQuiet = 0;
+  for (let i = 0; i < 3; i += 1) askedWhileQuiet += await round(false); // 站点转安静（没有新日志），整站沿用
+  assert.ok(askedWhileQuiet > 0, "轮询这一侧：站点转安静后，沿用的渠道要真去问，不能一直沿用旧数（页面现算会掩盖这一点，所以单独断言）");
   assert.equal(await liveTwo(), 2, "页面来看：新数 2，不是放慢那轮沿用的旧数 1");
+});
+
+// 审核 #137 中-3：没人看期间某一轮真问了渠道，但读到的窗口没包住最新那条日志（站点钟快、日志落在终点那一秒）；之后站点安静，不能一直沿用旧数
+test("减压 PR（审核 #137 中-3）：站点的钟快、真问那一轮没包住最新日志，之后站点安静——轮询这一侧要补问，不能一直沿用旧数", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  const sec = () => Math.floor(now / 1000);
+  const logs = [{ id: 1, channel: 2, created_at: sec() - 60, quota: 100 }];
+  const add = (created_at) => logs.push({ id: logs.length + 1, channel: 2, created_at, quota: 100 });
+  const siteLogs = ownLogList(logs, []);
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !ownSourceRead(url)) {
+      f.state.requests.push({ host: url.host, path: url.pathname, query: url.search });
+      const channel = Number(url.searchParams.get("channel")), start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
+      const quota = logs.filter((log) => log.channel === channel && log.created_at >= start && log.created_at <= end).reduce((sum, log) => sum + log.quota, 0);
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota } }) };
+    }
+    return prev(input, init);
+  });
+  const statCallsFor = (channelId) => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat"
+    && new URLSearchParams(request.query).get("channel") === String(channelId)).length;
+  const liveTwo = async () => (await f.module.queryRules({ preset: "today", ruleIds: ["rr_two"] }, { mode: "evaluate", origin: "page" })).results[0].downstream.amountUsd;
+  const round = async () => { now += 60000; const before = statCallsFor(2); await f.module.refreshDue(now); return statCallsFor(2) - before; };
+
+  await liveTwo(); await round(); await round();
+  for (let i = 0; i < 11; i += 1) await round(); // 没人看超过 10 分钟，进入放慢
+  // 找到真问的那一轮，之后数 4 轮沿用，在下一个真问的那一轮前加一笔「站点钟快 30 秒」的日志
+  let guard = 0; while ((await round()) === 0 && guard++ < 10);
+  for (let i = 0; i < 4; i += 1) assert.equal(await round(), 0, "放慢：沿用");
+  add(sec() + 60 + 30); // 这一轮真问时它还在窗口终点之后（站点钟快）
+  assert.ok((await round()) > 0, "真问了，但没包住那笔日志，读到旧数");
+  let asked = 0;
+  for (let i = 0; i < 3; i += 1) asked += await round(); // 之后站点没有新日志：不能一直沿用旧数
+  assert.ok(asked > 0, "站点转安静后，没包住最新日志的渠道要补问");
+  assert.equal(await liveTwo(), 2, "页面看到的是新数");
 });
 
 test("P1b 轮询按时间重读上游：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟；Key 账单报错、有收入而 Key 用量为 0、目录里找不到 Key，下一轮马上全部重读；页面「刷新」照旧强制", async (t) => {

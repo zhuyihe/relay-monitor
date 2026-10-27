@@ -1232,15 +1232,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       resoldAdminKeysOf(own).map((item) => `${item.username}\u0000${item.tokenName}`).sort()]); // 转售 Key 改了马上换键（审核 R1 低-6）
     const cached = ownRevenueCache.get(key), quiet = registry?.ownQuietFrom?.get(own.id);
     // 最新那条日志的时刻（站点的钟）也要在记下的那份里：站点时钟偏快时，记下那份读到的时刻还没包住它，照旧现读
-    // 缓存里那份有渠道是没人看时沿用的（staleSince：沿用的那些渠道上次真的问是什么时候）：要是那之后站点又来过新消费（quiet.from 更晚），
+    // 缓存里那份有渠道是没人看时沿用的（staleEndMs：沿用的那些渠道上次读到的窗口终点）：要是那之后站点又来过新消费（quiet.from 更晚），
     // 沿用的那几个渠道的数可能已经旧了，不能拿它当「站点没新消费所以数没变」整站沿用（审核 #137 中-1）
     if (reuse && cached && quiet && cached.endMs >= quiet.from && cached.endMs <= segmentWindow.endMs
-      && (cached.staleSince == null || cached.staleSince >= quiet.from)
+      && (cached.staleEndMs == null || (cached.staleEndMs >= quiet.from && (quiet.coveredFromMs == null || quiet.coveredFromMs <= cached.staleEndMs)))
       && (quiet.coveredFromMs == null || quiet.coveredFromMs <= cached.endMs)) {
       const status = await loadStatus().catch(() => null);
       if (status && status.quotaPerUnit === cached.result.quotaPerUnit) {
         const reused = { ...cached.result, window: { ...cached.result.window, endMs: segmentWindow.endMs } };
-        if (cached.staleSince != null) Object.defineProperty(reused, "staleFromIdleSkip", { value: true, enumerable: false, configurable: true });
+        if (cached.staleEndMs != null) Object.defineProperty(reused, "staleFromIdleSkip", { value: true, enumerable: false, configurable: true });
         return reused;
       }
     }
@@ -1250,18 +1250,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 用的 key 同一份（带凭据指纹、分段窗口起点）：凭据换了、分段切了、跨零点了，这份键自然换掉，和站点级沿用用同一套失效规矩。
     // 空闲后有页面回来：页面请求把 lastTodayViewAt.at 刷成现在，下一轮 viewerIdle 就是 false，所有渠道都现问，不等满放慢的间隔（总指挥 10-26 定）。
     // 按渠道各自判断安不安静这次不做，整站级探测照旧当总闸。
-    // 这一轮有渠道是沿用的：站点级缓存里记下 staleSince，整站沿用时要核对，不能把这份旧数当刚读到的返回（审核 #137 中-1）。
+    // 这一轮有渠道是沿用的：站点级缓存里记下 staleEndMs，整站沿用时要核对，不能把这份旧数当刚读到的返回（审核 #137 中-1）。
     const checkedAt = Date.now();
     const viewerIdle = lastTodayViewAt.at != null && checkedAt - lastTodayViewAt.at > OWN_VIEWER_IDLE_MS;
     const skipChannels = reuse && viewerIdle ? new Map(channelIds.map((channelId) => [channelId, ownChannelActivity.get(`${key}:${channelId}`)]).filter(([, activity]) =>
       // 键相同但这次要的窗口终点比记下的那份还早（legacy 分段切开、窗口缩小了）：和站点级沿用同一个规矩，不能沿用
-      activity && activity.endMs <= segmentWindow.endMs && checkedAt - activity.checkedAt < OWN_VIEWER_IDLE_RECHECK_MS)) : null;
+      activity && activity.endMs <= segmentWindow.endMs && checkedAt - activity.checkedAt < OWN_VIEWER_IDLE_RECHECK_MS
+      // 站点安静、但这个渠道上次读到的窗口没包住最新那条日志（日志落在窗口终点那一秒、或站点钟快）：这一轮不沿用，真去问（审核 #137 中-3）
+      && !(quiet && quiet.coveredFromMs != null && quiet.coveredFromMs > activity.endMs))) : null;
     const result = await queryOwnChannelRevenue(own, { channelIds, startMs: segmentWindow.startMs, endMs: segmentWindow.endMs, timezone: segmentWindow.timezone, loadStatus, skipChannels,
       exclusion: async () => { const read = await ownExclusion(own, segmentWindow, { settle, channelIds, freshSince: registry?.startedAt ?? null }); if (read.stale) reusedStale = true; return read; } });
     // 只有轮询观测今天会沿用，别的窗口（昨天、结账、自定义、近 7 天、本月）不记
     if (reuse && result.state === "complete" && !result.emptySecondWindow && !reusedStale) {
-      const skippedAt = skipChannels?.size > 0 ? Math.min(...[...skipChannels.values()].map((activity) => activity.checkedAt)) : null;
-      ownRevenueCache.set(key, { endMs: segmentWindow.endMs, result, staleSince: skippedAt });
+      // staleEndMs：沿用的渠道上次读到的窗口终点（不是上次问的时刻）：整站沿用时要核它有没有包住最新那条日志
+      const staleEndMs = skipChannels?.size > 0 ? Math.min(...[...skipChannels.values()].map((activity) => activity.endMs)) : null;
+      ownRevenueCache.set(key, { endMs: segmentWindow.endMs, result, staleEndMs });
       // 只留今天的：键里有窗口起点，过了零点的旧键不会再用到
       for (const [cachedKey, entry] of ownRevenueCache) if (entry.endMs < segmentWindow.endMs - 2 * DAY_MS) ownRevenueCache.delete(cachedKey);
     }
