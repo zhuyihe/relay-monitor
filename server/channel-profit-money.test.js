@@ -258,4 +258,22 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     const d2 = dayTotals(f, "2026-10-12");
     assert.deepEqual([d2.cost, d2.revenue], [DAY, 4 * DAY], "第二天起渠道 6 正常算进 A：收入两个渠道各全天，成本 Key 9 全天");
   });
+
+  test(`决定 54 走追加（${upstreamType}）：读不到今天停掉的绑定——先挡着，不开始也不追加（不当没有，不然会把今天已经算给停掉那条的收入再算一遍）；读得到了再开始`, async (t) => {
+    const f = await setup(t, { upstreamType, keys: [9, 30], channelKey: { 1: 9, 6: 30 }, windows: { 30: [-Infinity, SH("2026-10-11T10:30:00")] } });
+    await f.at("2026-10-10T10:00:00"); await f.profit.start({ ownStationId: f.own.id, channelIds: [1, 6] });
+    await settle(f, ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T09:00:00"]);
+    await f.at("2026-10-11T10:00:00"); await f.profit.stop({ ownStationId: f.own.id, channelIds: [6] });
+    f.channelKey[6] = 9; await f.round("2026-10-11T10:30:00");
+    await f.at("2026-10-11T11:00:00");
+    const real = f.rt.reconciliation.listRecentlyArchivedRules.bind(f.rt.reconciliation);
+    let failing = true;
+    t.mock.method(f.rt.reconciliation, "listRecentlyArchivedRules", async (...args) => { if (failing) throw new Error("连接断了"); return real(...args); });
+    assert.deepEqual(await f.profit.status(f.own.id), { ok: false, code: "HISTORY_UNAVAILABLE" });
+    await assert.rejects(f.profit.start({ ownStationId: f.own.id, channelIds: [6] }), { code: "HISTORY_UNAVAILABLE" });
+    assert.equal((await f.rt.reconciliation.listRules()).length, 1, "没建也没追加：只有 A 在算");
+    failing = false;
+    const status = (await f.profit.status(f.own.id)).channels.find((channel) => channel.channelId === 6);
+    assert.deepEqual([status.state, status.reason], ["blocked", "COUNTED_EARLIER_TODAY"], "读得到了：回到原来的挡");
+  });
 }

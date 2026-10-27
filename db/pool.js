@@ -279,8 +279,15 @@ export async function ensureSchema(pool) {
     source VARCHAR(24) NOT NULL,
     detail JSON NULL,
     settled_at DATETIME(3) NOT NULL,
+    expected_cost_usd DECIMAL(20,8) NULL,
+    gap_reason VARCHAR(40) NULL,
+    tokens BIGINT NULL,
     PRIMARY KEY (rule_id, bill_date, revision)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 应付成本（V1-b）：账本多三列，旧账是 null
+  await addColumnIfMissing(pool, "reconciliation_ledger", "expected_cost_usd", "DECIMAL(20,8) NULL");
+  await addColumnIfMissing(pool, "reconciliation_ledger", "gap_reason", "VARCHAR(40) NULL");
+  await addColumnIfMissing(pool, "reconciliation_ledger", "tokens", "BIGINT NULL");
   // 结账状态（计划 C2a）：每条绑定每个还没固定的日子一行，固定成了就在同一个事务里删掉。只放没办完的日子，正常时接近空。
   // retry_reason 会自己好的原因（按退避表再试）；manual_reason 要人处理的原因；source_version 记下时的配置代次（变了马上重判）。
   // resettle_* 是重结请求（C2b 才写）。不加外键；清理按 bill_date 每小时删一批 31 天前、没有请求的行。
@@ -310,6 +317,10 @@ export async function ensureSchema(pool) {
     covered_to_ms BIGINT NOT NULL,
     updated_at_ms BIGINT NOT NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  // 「算应付成本」关→开跳过的那段缺口（总指挥 10-26 定第三轮）：covered_to_ms 直接挪到昨天 0 点，中间跳过的这段记在这两列，
+  // 结账时这段范围里的日子给 EXPECTED_COST_DISABLED（不是 NOT_STARTED/EXPECTED_COST_NOT_RECORDED，那两个留给「还没开始统计」）
+  await addColumnIfMissing(pool, "own_log_cursor", "disabled_from_ms", "BIGINT NULL");
+  await addColumnIfMissing(pool, "own_log_cursor", "disabled_to_ms", "BIGINT NULL");
   await pool.query(`CREATE TABLE IF NOT EXISTS own_log_buckets (
     station_id VARCHAR(32) NOT NULL,
     slot_ms BIGINT NOT NULL,

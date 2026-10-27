@@ -100,7 +100,11 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     // 自动开始今天不建，明天那一轮自然开始。每个渠道记自己的核算起点（决定 b）留到以后，和多 Key 渠道放开一起做
     const runningKeys = new Set(rules.filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId).map((rule) => groupKeyOf(rule.upstreamStationId, rule.tokenId)));
     if (channels.some((channel) => channel.state === "startable" && runningKeys.has(channel.groupKey)) && typeof reconciliation().listRecentlyArchivedRules === "function") {
-      const recent = (await reconciliation().listRecentlyArchivedRules(now() - 36 * 3600 * 1000).catch(() => [])).filter((rule) => rule.ownStationId === ownStationId && rule.archivedAtMs != null
+      // 读不到今天停掉的绑定就不能当没有：这道挡没了，开始的那一刻会把今天已经算给停掉那条绑定的收入再算一遍。先挡着、这一轮不开始（手动的收到读取类的原因，
+      // 自动开始这一轮跳过），下一轮再试，宁可晚开始也不算错（审核 #143 第 2 轮低-8）
+      let archived;
+      try { archived = await reconciliation().listRecentlyArchivedRules(now() - 36 * 3600 * 1000); } catch { return { ok: false, code: "HISTORY_UNAVAILABLE" }; }
+      const recent = archived.filter((rule) => rule.ownStationId === ownStationId && rule.archivedAtMs != null
         && dayKeyInTz(rule.archivedAtMs, rule.timezone) === dayKeyInTz(now(), rule.timezone));
       for (const [index, channel] of channels.entries()) {
         if (channel.state !== "startable" || !runningKeys.has(channel.groupKey)) continue;
@@ -129,7 +133,8 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     const state = await status(ownStationId, { fresh: true });
     if (!state.ok) {
       throw codedError(state.code, state.code === "KEY_AGENT_NOT_CONFIGURED" ? "装好渠道 Key 读取服务才能开始算利润"
-        : state.code === "CHANNEL_CATALOGUE_STALE" ? "你站的渠道列表还没读到，稍后再试" : "渠道 Key 暂时读不到，稍后再试");
+        : state.code === "CHANNEL_CATALOGUE_STALE" ? "你站的渠道列表还没读到，稍后再试"
+        : state.code === "HISTORY_UNAVAILABLE" ? "今天停掉的绑定暂时读不到，稍后再试" : "渠道 Key 暂时读不到，稍后再试");
     }
     const byId = new Map(state.channels.map((channel) => [channel.channelId, channel]));
     if (ids.some((id) => !byId.has(id))) throw codedError("CHANNEL_SOURCE_CHANGED", "选的渠道在自营站点里找不到了，请刷新渠道列表后重新选");
