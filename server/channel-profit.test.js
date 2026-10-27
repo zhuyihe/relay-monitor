@@ -10,7 +10,7 @@ const upShared = { id: "up2", type: "sub2api", accountUse: "elsewhere" };
 const slot = (stationId, tokenId, tokenName = `k${tokenId}`) => ({ index: 0, state: "identified", matches: [{ stationId, tokenId, tokenName, via: "fingerprint" }] });
 
 // 假的运行时：渠道目录、读取服务认出的结果、绑定、「用户停的」都放在内存里；接入向导的 probeBatch / connectBatch 只记下收到的输入
-function fixture({ channels, identified, rules = [], optouts = [], stations = [own, upMine, upShared], configured = true, connectResult = null }) {
+function fixture({ channels, identified, rules = [], optouts = [], stations = [own, upMine, upShared], configured = true, connectResult = null, revealIssues = [] }) {
   const calls = { probe: [], connect: [], archived: [], optoutAdded: [], optoutRemoved: [], marked: [] };
   const state = { rules: [...rules], optouts: [...optouts] };
   const rt = {
@@ -33,7 +33,7 @@ function fixture({ channels, identified, rules = [], optouts = [], stations = [o
       archiveRule: async (id, options) => { calls.archived.push([id, options]); state.rules = state.rules.filter((rule) => rule.id !== id); return { ruleId: id }; },
     },
   };
-  const module = createChannelProfitModule(rt, { identify: async () => ({ ok: true, stale: false, channels: identified, revealIssues: [] }), randomId: () => "request-1" });
+  const module = createChannelProfitModule(rt, { identify: async () => ({ ok: true, stale: false, channels: identified, revealIssues }), randomId: () => "request-1" });
   return { module, calls, state, rt };
 }
 
@@ -169,4 +169,62 @@ test("autoStart：失败的组退避（10 分钟起、每次翻倍、最多 1 �
   failing = false; clock += 10 * 60 * 1000;
   assert.equal((await module.autoStart("own")).started.length, 1);
   assert.equal(rtLike._autoStartBackoff.size, 0, "成功以后退避清掉");
+});
+
+// 「渠道」页签的整份数据（K2d）
+const seg = (extra) => ({ effectiveFrom: 0, effectiveTo: null, group: "a", ratio: 1.2, timingSource: "operator_confirmed", keys: [], ...extra });
+function overviewFixture(args) {
+  const f = fixture(args);
+  const segments = args.segments || {};
+  f.rt.reconciliation.listSegments = async (id) => segments[id] || [];
+  f.rt.store.list = () => args.stations || [own, upMine, upShared];
+  return f;
+}
+const live = (id, channelIds, extra = {}) => ({ ...running(id, channelIds), upstreamStationId: "up1", tokenId: 11, tokenName: "oai", createdAt: "2026-10-10T00:00:00Z", billingEffectiveFrom: Date.parse("2026-10-10T00:00:00Z"),
+  billingPolicy: "immediate", costCoverage: "complete", coverageDeclaration: { answer: "none" }, keyIssue: null, ...extra });
+
+test("overview：没装读取服务——照样列出在算的渠道（从绑定读），reader 写明不能开始的原因", async () => {
+  const f = overviewFixture({ channels: [1, 2], configured: false, identified: [], rules: [live("r1", [1])], segments: { r1: [seg({ keys: [{ upstreamStationId: "up1", tokenId: 11, tokenName: "oai" }] })] } });
+  const view = await f.module.overview("own");
+  assert.deepEqual(view.reader, { state: "not_configured", code: "KEY_AGENT_NOT_CONFIGURED" });
+  assert.deepEqual(view.cards.map((card) => [card.state, card.names, card.upstreamStationId, card.startedBy]), [["running", ["渠道1"], "up1", "user"]]);
+  assert.deepEqual(view.cards[0].keys.map((line) => [line.key.tokenName, line.group, line.ratio, line.toMs]), [["oai", "a", 1.2, null]]);
+  assert.deepEqual(view.unmatched, []);
+});
+
+test("overview：一个渠道只一种状态（需处理 > 在算 > 没算）；同一把 Key 的几个渠道一张卡片；自动开始的带来源；上游一行的数；没对上上游的列在 unmatched", async () => {
+  const f = overviewFixture({ channels: [1, 2, 3, 4, 5, 6, 7], optouts: [{ ownStationId: "own", channelId: 3, atMs: 5 }],
+    rules: [live("r-auto", [1, 2], { startSource: "auto" }), live("r-bad", [7], { upstreamStationId: "up2", tokenId: 22, keyIssue: { code: "CHANNEL_KEY_UNMATCHED", sinceMs: 5 } })],
+    identified: [
+      { channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 2, keyless: false, slots: [slot("up1", 11)] },
+      { channelId: 3, keyless: false, slots: [slot("up1", 33)] }, { channelId: 4, keyless: false, slots: [{ index: 0, state: "not_found" }] },
+      { channelId: 5, keyless: true }, { channelId: 6, keyless: false, slots: [{ index: 0, state: "ambiguous", matches: [{ stationId: "up2", tokenId: 1 }] }] },
+      { channelId: 7, keyless: false, slots: [slot("up2", 22)] },
+    ], revealIssues: [{ upstreamStationId: "up2", channelIds: [6] }] });
+  const view = await f.module.overview("own");
+  assert.equal(view.reader.state, "ok");
+  const by = Object.fromEntries(view.cards.map((card) => [card.id, card]));
+  assert.deepEqual([by["rule:r-auto"].state, by["rule:r-auto"].names, by["rule:r-auto"].startedBy], ["running", ["渠道1", "渠道2"], "auto"]);
+  assert.deepEqual([by["rule:r-bad"].state, by["rule:r-bad"].issues], ["attention", ["CHANNEL_KEY_UNMATCHED"]]);
+  assert.deepEqual([by["key:up1:33"].state, by["key:up1:33"].optedOut, by["key:up1:33"].needsCoverage, by["key:up1:33"].startGroupKey], ["stopped", true, false, "up1:33"]);
+  assert.deepEqual(view.unmatched.map((item) => [item.channelId, item.reason]), [[4, "KEY_UNMATCHED"], [5, "KEYLESS"], [6, "KEY_REVEAL_DENIED"]]);
+  assert.equal(view.unmatched[2].upstreamStationId, "up2");
+  const up = Object.fromEntries(view.upstreams.map((item) => [item.id, item]));
+  assert.deepEqual([up.up1.channelCount, up.up1.runningCount, up.up1.attentionCount, up.up1.accountUse], [3, 2, 0, "only_mine"]);
+  assert.deepEqual([up.up2.channelCount, up.up2.runningCount, up.up2.attentionCount], [1, 1, 2], "卡片上一件事 + 读完整 Key 的权限一件事");
+});
+
+test("overview：没回答的绑定进需处理（COST_COVERAGE_UNKNOWN）；别处也在用的上游里没在算的渠道，开始前要回答（needsCoverage）；用过的 Key 取自已停的绑定的分段，新的在前", async () => {
+  const oldKey = { upstreamStationId: "up1", tokenId: 11, tokenName: "oai" }, newKey = { upstreamStationId: "up2", tokenId: 22, tokenName: "oai-2" };
+  const stopped = { ...live("r-old", [1]), enabled: false, archivedAt: "2026-10-12T00:00:00Z" };
+  const f = overviewFixture({ channels: [1, 2], identified: [{ channelId: 1, keyless: false, slots: [slot("up2", 22, "oai-2")] }, { channelId: 2, keyless: false, slots: [slot("up2", 22, "oai-2")] }],
+    rules: [stopped, live("r-new", [1], { upstreamStationId: "up2", tokenId: 22, tokenName: "oai-2", createdAt: "2026-10-12T00:00:00Z", billingEffectiveFrom: Date.parse("2026-10-12T00:00:00Z"), costCoverage: "unknown", coverageDeclaration: { answer: "unknown" } })],
+    segments: { "r-old": [seg({ effectiveTo: Date.parse("2026-10-12T00:00:00Z"), keys: [oldKey] })], "r-new": [seg({ keys: [newKey], ratio: null })] } });
+  // 假仓库的 listRules 不看 includeArchived：把已停的也放进去，由模块自己按 enabled 分
+  const view = await f.module.overview("own");
+  const card = view.cards.find((item) => item.id === "rule:r-new");
+  assert.deepEqual([card.state, card.issues], ["attention", ["COST_COVERAGE_UNKNOWN"]]);
+  assert.deepEqual(card.keys.map((line) => [line.key.tokenName, line.toMs === null]), [["oai-2", true], ["oai", false]], "新的在前");
+  const free = view.cards.find((item) => item.id === "key:up2:22");
+  assert.deepEqual([free.state, free.channelIds, free.needsCoverage], ["stopped", [2], true]);
 });

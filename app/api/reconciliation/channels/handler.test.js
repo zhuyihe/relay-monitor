@@ -8,6 +8,7 @@ function runtime(overrides = {}) {
   const rt = { store: { get: () => ({ id: "own", baseUrl: "https://own.test", accessToken: "secret-pat" }) }, reconciliation: {}, channelOnboarding: {},
     channelProfit: {
       status: async (id) => { calls.push(["status", id]); return { ok: true, channels: [], groups: [] }; },
+      overview: async (id) => { calls.push(["overview", id]); return { ok: true, cards: [], upstreams: [], unmatched: [] }; },
       start: async (input) => { calls.push(["start", input]); return { started: [], alreadyRunning: [], blocked: [], failed: [] }; },
       stop: async (input) => { calls.push(["stop", input]); return { stopped: [], optedOut: [] }; },
       ...overrides } };
@@ -36,4 +37,12 @@ test("channels 接口：请求不对给 400 和码；模块抛的带码的错原
   const body = await failed.json();
   assert.deepEqual([failed.status, body.code], [400, "KEY_AGENT_NOT_CONFIGURED"]);
   assert.doesNotMatch(body.error, /secret-pat/, "原文里的令牌不能原样给出去");
+});
+
+test("channels 接口：overview 读 ?ownStationId=（GET），没有自营站点给 400", async () => {
+  const { rt, calls } = runtime();
+  const ok = await handleChannelProfitRequest(new Request("https://console.test/api/reconciliation/channels/overview?ownStationId=own"), rt, "overview");
+  assert.deepEqual([ok.status, (await ok.json()).ok, calls], [200, true, [["overview", "own"]]]);
+  const none = await handleChannelProfitRequest(new Request("https://console.test/api/reconciliation/channels/overview"), rt, "overview");
+  assert.deepEqual([none.status, (await none.json()).code], [400, "OWN_STATION_UNSET"]);
 });

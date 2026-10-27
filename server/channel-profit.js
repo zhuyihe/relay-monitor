@@ -11,6 +11,8 @@ import { randomUUID } from "node:crypto";
 import { keyAgentConfigOf } from "./key-agent.js";
 import { identifyChannelsCached } from "./key-agent-identify.js";
 import { normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
+import { coverageNeedsAnswer } from "../lib/reconciliation-contract.js";
+import { channelKeyLines } from "../lib/channel-key-lines.js";
 
 const BILLING_TYPES = new Set(["newapi", "sub2api", "sub2api-password"]);
 
@@ -176,5 +178,59 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     return { stopped, optedOut };
   }
 
-  return { status, start, stop, autoStart };
+  // 「渠道」页签要的整份数据（K2d，binding-flow 第 4 节、ui-copy-spec §5.5「渠道」页签）：上游 → 渠道 → 用过的 Key。
+  // 一个渠道只显示一种：需处理 > 在算利润 > 没算利润；同一把 Key 的几个渠道是一张卡片（在算的按绑定、没在算的按 Key 连成组）。
+  // 读取服务没装好、读不到时照样列出在算的渠道（从绑定读），不能开始的原因写在 reader 里。
+  //   reader  { state: "ok" | "not_configured" | "unavailable", code? }
+  //   upstreams  左边的上游列表，每个 { id, name, type, accountUse, noBills, channelCount, runningCount, attentionCount }
+  //   cards  { id, state: "attention" | "running" | "stopped", upstreamStationId, channelIds, names, ruleId, startedBy, startedAtMs,
+  //            issues: [码], keys: 用过的 Key（lib/channel-key-lines.js）, startGroupKey, needsCoverage, optedOut }
+  //   unmatched  没对上上游的渠道 { channelId, name, reason }（reason 同 status 的 blocked 原因）
+  async function overview(ownStationId) {
+    const own = ownStationOf(ownStationId);
+    const catalogue = onboarding()?.getSourceCatalogue?.();
+    const catalogueOk = !!catalogue?.ownSource && !catalogue.stale;
+    const nameOf = new Map((catalogueOk ? catalogue.channels : []).filter((channel) => !channel.missing).map((channel) => [Number(channel.id), channel.name]));
+    const state = keyAgentConfigOf(own) ? await status(ownStationId).catch(() => ({ ok: false, code: "KEY_AGENT_UNAVAILABLE" })) : { ok: false, code: "KEY_AGENT_NOT_CONFIGURED" };
+    const reader = state.ok ? { state: "ok", stale: state.stale === true } : { state: state.code === "KEY_AGENT_NOT_CONFIGURED" ? "not_configured" : "unavailable", code: state.code };
+    const allRules = (await reconciliation().listRules({ includeArchived: true })).filter((rule) => rule.ownStationId === ownStationId);
+    const live = allRules.filter((rule) => rule.enabled && !rule.archivedAt);
+    const segmentsOf = new Map(await Promise.all(allRules.map(async (rule) => [rule.id, await reconciliation().listSegments(rule.id).catch(() => [])])));
+    const keysOf = (channelIds) => channelKeyLines(allRules.filter((rule) => rule.channels.some((channel) => channelIds.includes(Number(channel.channelId))))
+      .map((rule) => ({ ...rule, segments: segmentsOf.get(rule.id) || [] }))).reverse().slice(0, 50);
+    const channelName = (channelId, fallback) => nameOf.get(channelId) ?? fallback ?? `渠道 #${channelId}`;
+    const optedOut = new Set((state.ok ? state.channels : []).filter((channel) => channel.optedOut).map((channel) => channel.channelId));
+
+    const cards = live.map((rule) => {
+      const channelIds = rule.channels.map((channel) => Number(channel.channelId));
+      const issues = [...(rule.keyIssue ? [rule.keyIssue.code] : []), ...(coverageNeedsAnswer(rule, "usage") ? ["COST_COVERAGE_UNKNOWN"] : [])];
+      return { id: `rule:${rule.id}`, state: issues.length ? "attention" : "running", upstreamStationId: rule.upstreamStationId, channelIds,
+        names: rule.channels.map((channel) => channelName(Number(channel.channelId), channel.name)), ruleId: rule.id, tokenName: rule.tokenName ?? null,
+        startedBy: rule.startSource === "auto" ? "auto" : "user", startedAtMs: Number.isFinite(rule.billingEffectiveFrom) ? rule.billingEffectiveFrom : Date.parse(rule.createdAt) || null,
+        issues, keys: keysOf(channelIds), startGroupKey: null, needsCoverage: false, optedOut: false };
+    });
+    const unmatched = [];
+    if (state.ok) {
+      for (const group of state.groups) {
+        const upstream = rt.store.get(group.upstreamStationId);
+        cards.push({ id: `key:${group.groupKey}`, state: "stopped", upstreamStationId: group.upstreamStationId, channelIds: group.channelIds,
+          names: group.channelIds.map((channelId) => channelName(channelId)), ruleId: null, tokenName: group.tokenName ?? null, startedBy: null, startedAtMs: null,
+          issues: [], keys: keysOf(group.channelIds), startGroupKey: group.groupKey, needsCoverage: upstream?.accountUse !== "only_mine",
+          optedOut: group.channelIds.some((channelId) => optedOut.has(channelId)) });
+      }
+      for (const channel of state.channels) if (channel.state === "blocked") unmatched.push({ channelId: channel.channelId, name: channelName(channel.channelId, channel.name), reason: channel.reason,
+        ...(channel.upstreamStationId ? { upstreamStationId: channel.upstreamStationId } : {}) });
+    }
+    // 左边的上游列表：在算 / 能开始的渠道数和要处理的数（要处理 = 卡片上的事；读取服务读不全 Key 是上游的事，算在这个上游上，一个上游一件）
+    const revealDenied = new Set(unmatched.filter((item) => item.reason === "KEY_REVEAL_DENIED" && item.upstreamStationId).map((item) => item.upstreamStationId));
+    const upstreams = rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && station.type !== "fixed" && !station.archivedAt).map((station) => {
+      const mine = cards.filter((card) => card.upstreamStationId === station.id);
+      return { id: station.id, name: station.name ?? station.id, type: station.type, accountUse: station.accountUse ?? null, noBills: !BILLING_TYPES.has(station.type),
+        channelCount: mine.reduce((total, card) => total + card.channelIds.length, 0), runningCount: mine.filter((card) => card.state !== "stopped").reduce((total, card) => total + card.channelIds.length, 0),
+        attentionCount: mine.filter((card) => card.state === "attention").length + (revealDenied.has(station.id) ? 1 : 0) };
+    });
+    return { ok: true, reader, upstreams, cards, unmatched };
+  }
+
+  return { status, overview, start, stop, autoStart };
 }
