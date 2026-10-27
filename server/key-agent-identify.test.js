@@ -14,17 +14,18 @@ function fakeFetch(body, { status = 200, headers = {} } = {}) {
   return async () => ({ status, headers: { get: (name) => headers[name.toLowerCase()] ?? null }, json: async () => body });
 }
 
-test("identifyChannels：候选上游用地址对，指纹精确认出；keyless 的渠道原样带出；候选是 Sub2API 时跳过（目录不给 Key 材料）", async (t) => {
+test("identifyChannels：候选上游用地址对，指纹精确认出；keyless 的渠道原样带出；同地址的 Sub2API 候选也读，它的目录只给指纹，这里指纹对不上，不影响 New API 那把认出来", async (t) => {
   const channel = (id, baseUrl, keyless) => keyless ? { id, keyless: true, baseUrl } : { id, baseUrl, keys: [{ i: 0, m: mask, f: fp }] };
   t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [
     channel(1, "https://up.example.com", false),
     channel(2, "", true),
   ] }, { headers: { etag: '"v1"' } }));
   const upstream = { id: "up1", type: "newapi", baseUrl: "https://up.example.com" };
-  const sub2 = { id: "up2", type: "sub2api", baseUrl: "https://up.example.com" }; // 同地址也是候选，但类型是 Sub2API，这一版跳过
+  const sub2 = { id: "up2", type: "sub2api", baseUrl: "https://up.example.com" }; // 同地址也是候选；它的目录里没有这把（指纹对不上）
   const rt = { store: { list: () => [ownStation, upstream, sub2] } };
   const queryMetadata = async () => ({ tokens: [{ id: 9, name: "oai", maskedKey: fullKey }] });
-  const result = await identifyChannels(rt, ownStation, { queryMetadata });
+  const querySub2Metadata = async (station, { fingerprintOf }) => ({ tokens: [{ id: 5, name: "s2", maskedKey: "", fingerprint: fingerprintOf("sk-some-other-key-entirely-0000") }] });
+  const result = await identifyChannels(rt, ownStation, { queryMetadata, querySub2Metadata });
   assert.equal(result.ok, true);
   assert.deepEqual(result.channels.find((c) => c.channelId === 2), { channelId: 2, keyless: true });
   const first = result.channels.find((c) => c.channelId === 1);
@@ -384,4 +385,161 @@ test("identifyChannelsCached：持续 not_found 的渠道（例外一的真实�
   }
   assert.ok(reads <= 5, `一小时读了 ${reads} 次：第一次 + 每 15 分钟一次，最多 5 次`);
   assert.ok(reads >= 4, "间隔到了还是会重读（上游加上能认出来）");
+});
+
+test("identifyChannelsCached：304 重新对上游目录时候选上游读不到——这次比对不算数，不把认得出的渠道降级成 unresolved、不更新 comparedAt，下一轮缓存到期接着重对", async (t) => {
+  let step = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    step++;
+    if (step === 1) return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"v1"' : null) },
+      json: async () => ({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "https://up.example.com", keys: [{ i: 0, m: mask, f: fp }] }] }) };
+    return { status: 304, headers: { get: () => null }, json: async () => ({}) };
+  });
+  const upstream = { id: "up1", type: "newapi", baseUrl: "https://up.example.com" };
+  const rt = { store: { list: () => [ownStation, upstream] } };
+  const first = await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => ({ tokens: [] }) });
+  assert.equal(first.channels[0].slots[0].state, "not_found");
+  const comparedAt = rt._keyAgentIdentifyCache.lastGood.comparedAt;
+  age(rt, UNRESOLVED_RECHECK_MS + 1);
+  const second = await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => { throw new Error("upstream 500"); } });
+  assert.equal(second.channels[0].slots[0].state, "not_found", "沿用上一份，不是 unresolved");
+  assert.ok(second.fetchedAtMs != null, "读取服务读到了（304）");
+  assert.ok(rt._keyAgentIdentifyCache.lastGood.comparedAt < comparedAt, "比对没成：comparedAt 没往前更新（age 之后还是更早的那个）");
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1; // 缓存到期，间隔早已超过：马上接着重对
+  const third = await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => ({ tokens: [{ id: 9, name: "oai", maskedKey: fullKey }] }) });
+  assert.equal(third.channels[0].slots[0].state, "identified");
+});
+
+test("identifyChannelsCached：带 X-Agent-Stale 的 200（读取服务给的旧结果）带着不同的 etag，也不当「最近一次读成功」：etag 和结果都不换", async (t) => {
+  let step = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    step++;
+    const channels = [{ id: 1, baseUrl: "https://up.example.com", keys: [{ i: 0, m: mask, f: fp }] }];
+    if (step === 1) return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"v1"' : null) }, json: async () => ({ v: 1, db: "mysql", readAt: 1, channels }) };
+    return { status: 200, headers: { get: (name) => ({ etag: '"stale-v2"', "x-agent-stale": "1" })[name.toLowerCase()] ?? null }, json: async () => ({ v: 1, db: "mysql", readAt: 2, channels }) };
+  });
+  const upstream = { id: "up1", type: "newapi", baseUrl: "https://up.example.com" };
+  const rt = { store: { list: () => [ownStation, upstream] } };
+  const options = { queryMetadata: async () => ({ tokens: [{ id: 9, name: "oai", maskedKey: fullKey }] }) };
+  await identifyChannelsCached(rt, ownStation, options);
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  const stale = await identifyChannelsCached(rt, ownStation, options);
+  assert.equal(stale.stale, true);
+  assert.equal(stale.fetchedAtMs, null, "旧结果不算读到");
+  assert.equal(rt._keyAgentIdentifyCache.lastGood.etag, '"v1"', "stale 的 etag 不当最近一次读成功的");
+});
+
+// Sub2API 的 /api/v1/keys 每一项都带完整 Key（Sub2API v0.2.18 handler/dto/mappers.go:87）：读目录时就地算成指纹，只比指纹（它没有打码）
+const sub2Station = { id: "s2", type: "sub2api", baseUrl: "https://s2.example.com", accessToken: "jwt" };
+const sub2Catalogue = (...keys) => async (station, { fingerprintOf }) => ({ tokens: keys.map(([id, name, raw]) => ({ id, name, maskedKey: "", fingerprint: fingerprintOf(raw) })) });
+
+test("identifyChannels：渠道地址就是 Sub2API 上游（候选），指纹认出它的哪把 Key；Sub2API 目录没有打码，不会靠打码误认", async (t) => {
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [
+    { id: 1, baseUrl: "https://s2.example.com", keys: [{ i: 0, m: mask, f: fp }] },
+    { id: 2, baseUrl: "https://s2.example.com", keys: [{ i: 0, m: mask, f: "no-such-fingerprint" }] }, // 打码一样但指纹对不上：Sub2API 不参与打码，认不出
+  ] }, { headers: { etag: '"v1"' } }));
+  const rt = { store: { list: () => [ownStation, sub2Station] } };
+  const result = await identifyChannels(rt, ownStation, { querySub2Metadata: sub2Catalogue([7, "s2-key", fullKey], [8, "other", "sk-" + "Zz9y".repeat(10)]) });
+  assert.deepEqual(result.channels[0].slots, [{ index: 0, state: "identified", matches: [{ stationId: "s2", tokenId: 7, tokenName: "s2-key", via: "fingerprint" }] }]);
+  assert.equal(result.channels[1].slots[0].state, "not_found");
+});
+
+test("identifyChannels：渠道填的是代理地址（没有候选），先只读候选（零），认不出才去读 Sub2API 上游的目录，指纹认出；读过一次就缓存不重读", async (t) => {
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "http://10.0.0.5:8080", keys: [{ i: 0, m: mask, f: fp }] }] }, { headers: { etag: '"v1"' } }));
+  const rt = { store: { list: () => [ownStation, sub2Station] } };
+  let reads = 0;
+  const querySub2Metadata = async (station, options) => { reads += 1; return sub2Catalogue([7, "s2-key", fullKey])(station, options); };
+  const result = await identifyChannels(rt, ownStation, { querySub2Metadata });
+  assert.deepEqual(result.channels[0].slots, [{ index: 0, state: "identified", matches: [{ stationId: "s2", tokenId: 7, tokenName: "s2-key", via: "fingerprint" }] }]);
+  assert.equal(reads, 1);
+  assert.equal(rt._keyAgentCatalogKinds.get("s2").hasFullKeys, true, "Sub2API 目录有指纹：算「给完整 Key」的上游，以后也会为指纹去读");
+});
+
+test("identifyChannels：Sub2API 完整 Key 不外泄——用真的读目录（fetch 假上游给了完整 Key），认出结果、读取服务缓存里都找不到完整 Key", async (t) => {
+  const raw = fullKey;
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(String(input));
+    calls.push(url.pathname);
+    if (url.pathname.includes("key-agent")) return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"v1"' : null) },
+      json: async () => ({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "https://s2.example.com", keys: [{ i: 0, m: mask, f: fp }] }] }) };
+    const data = url.pathname === "/api/v1/auth/me" ? { id: 42 }
+      : url.pathname === "/api/v1/keys" ? { total: 1, items: [{ id: 7, user_id: 42, name: "s2-key", status: "active", group_id: 3, key: raw }] } : null;
+    return { status: data ? 200 : 404, text: async () => JSON.stringify({ code: data ? 0 : 404, data }) };
+  });
+  const rt = { store: { list: () => [ownStation, sub2Station] } };
+  const result = await identifyChannelsCached(rt, ownStation);
+  assert.deepEqual(result.channels[0].slots, [{ index: 0, state: "identified", matches: [{ stationId: "s2", tokenId: 7, tokenName: "s2-key", via: "fingerprint" }] }]);
+  const leaked = (value) => JSON.stringify(value, (_key, item) => (item instanceof Map ? [...item] : item));
+  assert.doesNotMatch(leaked(result), new RegExp(raw.slice(3)), "返回体里没有完整 Key");
+  assert.doesNotMatch(leaked(rt), new RegExp(raw.slice(3)), "缓存（识别结果、目录种类）里也没有完整 Key");
+  assert.ok(calls.includes("/api/v1/keys"));
+});
+
+// 审核 2 对 #142 第 1 轮意见
+test("identifyChannels（#142 中 1）：Sub2API 目录是空的（刚建的账号还没有 Key）不记成「没给完整 Key」——下一次有了 Key 就能认出来，不被 1 小时跳过", async (t) => {
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "http://10.0.0.5:8080", keys: [{ i: 0, m: mask, f: fp }] }] }, { headers: { etag: '"v1"' } }));
+  const rt = { store: { list: () => [ownStation, sub2Station] } };
+  let keys = [];
+  const querySub2Metadata = async (station, options) => sub2Catalogue(...keys)(station, options);
+  const first = await identifyChannels(rt, ownStation, { querySub2Metadata });
+  assert.equal(first.channels[0].slots[0].state, "not_found");
+  assert.equal(rt._keyAgentCatalogKinds.has("s2"), false, "空目录不记种类");
+  keys = [[7, "s2-key", fullKey]]; // 用户在 Sub2API 建了 Key 填进渠道
+  delete rt._keyAgentSub2Catalogue; // 5 分钟目录缓存到期
+  const second = await identifyChannels(rt, ownStation, { querySub2Metadata });
+  assert.equal(second.channels[0].slots[0].state, "identified", "没有被一小时跳过");
+});
+
+test("identifyChannels（#142 中 3）：Sub2API 指纹目录按站点缓存 5 分钟（只放指纹）——快照变了也不重读；过期或站点登录信息变了才重读；同时进来的几个调用合并成一次", async (t) => {
+  let agentCalls = 0;
+  t.mock.method(globalThis, "fetch", async () => { agentCalls += 1; return { status: 200, headers: { get: () => null }, json: async () => ({ v: 1, db: "mysql", readAt: agentCalls, channels: [{ id: 1, baseUrl: "http://10.0.0.5:8080", keys: [{ i: 0, m: mask, f: fp }] }] }) }; });
+  const station = { ...sub2Station };
+  const rt = { store: { list: () => [ownStation, station] } };
+  let reads = 0;
+  const querySub2Metadata = async (s, options) => { reads += 1; return sub2Catalogue([7, "s2-key", fullKey])(s, options); };
+  await identifyChannels(rt, ownStation, { querySub2Metadata });
+  await identifyChannels(rt, ownStation, { querySub2Metadata }); // 快照又来一份（模拟 ETag 变了）
+  assert.equal(reads, 1, "5 分钟内不重读");
+  assert.doesNotMatch(JSON.stringify([...rt._keyAgentSub2Catalogue]), new RegExp(fullKey.slice(3)), "缓存里只有指纹，没有完整 Key");
+  // 缓存里也不放读取服务派生出来的指纹密钥（只放一个摘要当版本戳）：hex、base64 两种写法都找不到
+  const cacheDump = JSON.stringify([...rt._keyAgentSub2Catalogue]);
+  for (const form of [fpBytes.toString("hex"), fpBytes.toString("base64"), fpBytes.toString("base64url")]) assert.equal(cacheDump.includes(form), false, "缓存里没有指纹密钥原文");
+  assert.match(rt._keyAgentSub2Catalogue.get("s2").keyStamp, /^[0-9a-f]{16}$/, "只有 16 位的摘要");
+  rt._keyAgentSub2Catalogue.get("s2").at -= 6 * 60 * 1000;
+  await identifyChannels(rt, ownStation, { querySub2Metadata });
+  assert.equal(reads, 2, "过期重读");
+  station.authVersion = 2; // 登录信息改过（authVersion 跟着变，stationBusinessVersion 里有）：不用旧的
+  await identifyChannels(rt, ownStation, { querySub2Metadata });
+  assert.equal(reads, 3);
+  // 同时进来三个调用：合并成一次（读取服务和 Sub2 目录各问一次）
+  delete rt._keyAgentSub2Catalogue; rt._keyAgentIdentifyCache = null; agentCalls = 0; reads = 0;
+  const [a, b, c] = await Promise.all([1, 2, 3].map(() => identifyChannelsCached(rt, ownStation, { querySub2Metadata })));
+  assert.equal(agentCalls, 1);
+  assert.equal(reads, 1);
+  assert.deepEqual([a === b, b === c], [true, true]);
+});
+
+test("identifyChannels（#142 低 5）：同一把 Key 在两个 Sub2API 目录里都有（指纹撞车）——保持 ambiguous，不拿 New API 的 reveal 去问 Sub2API 站点，也不静默选一把", async (t) => {
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "http://10.0.0.5:8080", keys: [{ i: 0, m: mask, f: fp }] }] }, { headers: { etag: '"v1"' } }));
+  const second = { ...sub2Station, id: "s3", baseUrl: "https://s3.example.com" };
+  const rt = { store: { list: () => [ownStation, sub2Station, second] } };
+  let reveals = 0;
+  const result = await identifyChannels(rt, ownStation, { querySub2Metadata: sub2Catalogue([7, "a", fullKey]), revealKeys: async () => { reveals += 1; return {}; } });
+  assert.equal(result.channels[0].slots[0].state, "ambiguous");
+  assert.deepEqual(result.channels[0].slots[0].matches.map((match) => match.stationId).sort(), ["s2", "s3"]);
+  assert.equal(reveals, 0, "指纹撞车 reveal 分不开，不发");
+  assert.deepEqual(result.revealIssues, []);
+});
+
+test("identifyChannels（#142 低 6）：候选是 Sub2API（地址对上）只读它、认出就不读非候选；sub2api-password 类型也认得出", async (t) => {
+  t.mock.method(globalThis, "fetch", fakeFetch({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "https://s2.example.com", keys: [{ i: 0, m: mask, f: fp }] }] }, { headers: { etag: '"v1"' } }));
+  const password = { id: "s2", type: "sub2api-password", baseUrl: "https://s2.example.com", email: "a@example.test", password: "pw" };
+  const other = { id: "s9", type: "sub2api", baseUrl: "https://other.example.com", accessToken: "jwt" };
+  const rt = { store: { list: () => [ownStation, password, other] } };
+  const readStations = [];
+  const querySub2Metadata = async (station, options) => { readStations.push(station.id); return sub2Catalogue([7, "s2-key", fullKey])(station, options); };
+  const result = await identifyChannels(rt, ownStation, { querySub2Metadata });
+  assert.deepEqual(result.channels[0].slots, [{ index: 0, state: "identified", matches: [{ stationId: "s2", tokenId: 7, tokenName: "s2-key", via: "fingerprint" }] }]);
+  assert.deepEqual(readStations, ["s2"], "只读候选，认出就不读非候选");
 });

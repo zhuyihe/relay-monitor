@@ -4,7 +4,7 @@
 // 控制：GET /__stats[?reset=1] 看/清请求计数；POST /__ctl?delay=50&ratio=old|current&freeze=1|0 改延迟、分组倍率口径、停住「现在」；GET /__health
 // 所有数字来自 lib/model.mjs 的确定性模型：分页、按渠道/按天/按 Key 的统计互相对得上。
 // 渠道 Key 读取服务（K2a/K2b 量夹具，PERF_KEY_AGENT=on 才接）：GET /key-agent/keys（Bearer、ETag/304、X-Agent-Stale），
-// 每 10 分钟随机换 2~3 个渠道现在用的 Key（走 New API 整号账号的那些）；/__ctl?key_agent_down=1|0 模拟读取服务读库失败（照真协议
+// 每 PERF_KEY_AGENT_ROTATE_SEC 秒（默认 600）随机换 2~3 个渠道现在用的 Key（走 New API 整号账号的那些）；/__ctl?key_agent_down=1|0 模拟读取服务读库失败（照真协议
 // 沿用上一份成功结果、带 X-Agent-Stale），key_agent_rotate=1 立刻触发一次换 Key（不用等 10 分钟，本机调脚本用）。
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
@@ -61,7 +61,9 @@ function rotateKeyAgentChannels() {
     keyAgentRotations += 1;
   }
 }
-if (KEY_AGENT_ON) setInterval(rotateKeyAgentChannels, 10 * 60000).unref?.();
+// 换 Key 的间隔：默认 600 秒（真实读取服务的节奏）；CI 的稳态窗口只有 185 秒，量「换了 Key 以后重新认、写段」那一段要调小（比如 60）
+const KEY_AGENT_ROTATE_SEC = Math.max(1, Math.floor(num(process.env.PERF_KEY_AGENT_ROTATE_SEC || undefined, 600)));
+if (KEY_AGENT_ON) setInterval(rotateKeyAgentChannels, KEY_AGENT_ROTATE_SEC * 1000).unref?.();
 
 function keyAgentChannelKeys(c) {
   const up = channelUpstream(c), overrideId = keyAgentOverride.get(c);

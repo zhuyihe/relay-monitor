@@ -14,6 +14,7 @@ import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.j
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
 import { createHash } from "node:crypto";
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
+import { createFakeSub2Api, secondsInDay } from "./test-support/fake-sub2api.js";
 import { resetOwnRequestBudget } from "../lib/own-request-budget.js";
 import { billingCapabilityAliases } from "../lib/billing-capability-storage.js";
 import { maskKey } from "../lib/key-fingerprint.js";
@@ -1995,7 +1996,7 @@ function ownTestLogApi(url, logs = []) {
 // 换 Key 的端到端两种规则都跑：immediate（生产的绑定，按 Key 整体取数）和 legacy-v3（旧版，按段取）
 const POLICIES = ["immediate", "legacy"];
 
-function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [], revealScopeDenied = false, policy = "legacy" }) {
+function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [], revealScopeDenied = false, policy = "legacy", sub2api = null }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
     id, rule_id: "rr_live", group_name: group, group_ratio: ratio,
@@ -2079,6 +2080,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
     // 自营站点的设置（R2）：默认记着收费记录；state.consumeLog 改成 "false" 就是关了，state.optionReply 整个换掉（没权限等）
     if (url.pathname === "/api/option/") return state.optionReply ? reply(...state.optionReply) : reply(200, { success: true, data: [{ key: "SMTPToken", value: "secret" }, { key: "LogConsumeEnabled", value: state.consumeLog ?? "true" }] });
     if (url.host === "upstream.test") {
+      const sub2Hit = sub2api?.handle(url); if (sub2Hit) return sub2Hit; // 假 Sub2API 上游（server/test-support/fake-sub2api.js）
       if (url.pathname === "/api/user/self") return reply(200, { success: true, data: { id: 7 } });
       if (url.pathname === "/api/user/self/groups") return reply(200, { success: true, data: metadataGroups ? metadataGroups(request) : { g1: { ratio: 1 }, g2: { ratio: 2 } } });
       if (url.pathname === "/api/token/") {
@@ -2113,7 +2115,10 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if (url.pathname === "/key-agent/keys" && keyAgent) {
         if (keyAgent.down) return { status: 503, headers: { get: () => null }, json: async () => ({}) }; // 读取服务读不到（例外三）
         const channels = typeof keyAgent.channels === "function" ? keyAgent.channels(request) : keyAgent.channels;
-        return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"ka1"' : null) },
+        // 和真读取服务一样：带 If-None-Match 且内容没变回 304（ETag 由渠道内容算，这里内容变了 etag 就变）
+        const etag = `"ka-${JSON.stringify(channels).length}-${createHash("sha256").update(JSON.stringify(channels)).digest("hex").slice(0, 8)}"`;
+        if (init.headers?.["If-None-Match"] === etag) return { status: 304, headers: { get: (name) => (name.toLowerCase() === "etag" ? etag : null) }, json: async () => ({}) };
+        return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? etag : null) },
           json: async () => ({ v: 1, db: "mysql", readAt: Date.now(), channels }) };
       }
     }
@@ -5001,6 +5006,196 @@ test("P1a 沿用渠道收费的边界：额度换算变了、读失败后进入�
   assert.deepEqual(fingerprints().sort(), ["rr_live", "rr_two"]);
 });
 
+// 减压 PR（用户 10-26 定插到最前面；总指挥 10-26 定：只做「没人看就放慢」，按渠道判安静不做，P1a 的探测和它的测试不动）：
+// 没人看「今天」页面超过 10 分钟，所有渠道都放慢到 5 分钟一轮；有人看照旧每分钟；空闲后有人来立刻跑一轮；结账、页面直接来看都不受影响
+test("减压 PR：没人看「今天」页面超过 10 分钟就放慢，有人看照旧每分钟；空闲后有人来立刻刷一轮；页面直接来看、结账都照旧现读", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now }); // 默认 rr_live:[1]、rr_two:[2]、rr_three:[3]，同一个自营站点
+  const logs = [{ id: 1, created_at: Math.floor(now / 1000) - 60 }];
+  const newLog = () => logs.push({ id: logs.length + 1, created_at: Math.floor(now / 1000) - 1 });
+  const siteLogs = ownLogList(logs, []);
+  const prev = globalThis.fetch;
+  let quota2 = 100;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !ownSourceRead(url)) {
+      f.state.requests.push({ host: url.host, path: url.pathname, query: url.search });
+      const channel = Number(url.searchParams.get("channel"));
+      const quota = channel === 2 ? quota2 : 100;
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota } }) };
+    }
+    return prev(input, init);
+  });
+  const statCallsFor = (channelId) => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat"
+    && new URLSearchParams(request.query).get("channel") === String(channelId)).length;
+  const liveTwo = async () => (await f.module.queryRules({ preset: "today", ruleIds: ["rr_two"] }, { mode: "evaluate", origin: "page" })).results[0].downstream.amountUsd;
+  // 每轮都让站点整体「不安静」（newLog），这样「没人看才放慢」才用得到——站点整体安静时，整站那道总闸直接把所有渠道都挡住，
+  // 轮不到这里（审核报告里说的「整站探测当总闸」，P1a 的范围，这个 PR 不碰）
+  const round = async (ms = 60000) => { now += ms; newLog(); const before = statCallsFor(2); await f.module.refreshDue(now); return statCallsFor(2) - before; };
+
+  await liveTwo(); // 有人正在看：记一下这一刻
+  assert.equal(await round(), 2, "有人看：照旧每分钟问；这一轮还要结昨天，渠道 2 多问一次");
+  assert.equal(await round(), 1, "有人看：照旧每分钟问");
+
+  // 没人看「今天」页面超过 10 分钟：所有渠道（不管本身有没有新消费，渠道 2 的 quota 其实一直没变）都放慢到 5 分钟一轮
+  for (let i = 0; i < 11; i += 1) await round(); // 11 分钟没有页面来看，超过 OWN_VIEWER_IDLE_MS
+  const idleReads = statCallsFor(2);
+  quota2 = 200; // 这期间其实有新消费，但没人看，不该马上问
+  assert.equal(await round(), 0, "没人看超过 10 分钟：不是每轮都问了");
+  assert.equal(statCallsFor(2), idleReads, "这一轮真的没问（沿用），不是刚好问到了同样的数");
+  // 页面这时直接来看（不是走后台轮询那条路）：不管后台这一轮是不是沿用的，页面自己现算一遍，看到的是真数，不是沿用的旧数
+  assert.equal(await liveTwo(), 2, "页面直接来看：现读，看到新消费，不是沿用的旧数（减压 PR 的沿用结果不进页面能读到的缓存）");
+
+  // 刚才那次页面来看，就是「有人回来了」：下一轮立刻恢复每分钟，不用再等 5 分钟
+  assert.equal(await round(), 1, "空闲后有人来，下一轮立刻刷一轮，不等满 5 分钟的间隔");
+  assert.equal(await round(), 1, "恢复以后照旧每分钟问");
+
+  // 结账（昨天）不走这条省请求的路，照旧现读：第一轮已经结过昨天，这里确认它当时是真读的，不受「今天」这边放慢影响
+  const yesterday = await f.module.queryRules({ preset: "yesterday", ruleIds: ["rr_two"] }, { mode: "evaluate", origin: "page" });
+  assert.equal(yesterday.results.length, 1);
+  assert.ok(yesterday.results[0].downstream.amountUsd != null, "昨天已经结过账，有数");
+});
+
+// 减压 PR（总指挥 10-26 定）：进程刚启动、还没有任何页面来过——生产启动那一处传 viewerIdleSince（启动时刻），从那一刻起算 10 分钟没人看就放慢；
+// 之后来一次页面请求，下一轮立刻补一轮。测试默认不传（null），从没人看过不算没人看，P1a 那组照旧
+test("减压 PR：启动后一直没有页面来（传了 viewerIdleSince），过 10 分钟就放慢；再来一次页面请求，下一轮立刻补一轮", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { viewerIdleSince: now } });
+  const logs = [{ id: 1, created_at: Math.floor(now / 1000) - 60 }];
+  const newLog = () => logs.push({ id: logs.length + 1, created_at: Math.floor(now / 1000) - 1 });
+  const siteLogs = ownLogList(logs, []);
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !ownSourceRead(url)) {
+      f.state.requests.push({ host: url.host, path: url.pathname, query: url.search });
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota: 100 } }) };
+    }
+    return prev(input, init);
+  });
+  const statCallsFor = (channelId) => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat"
+    && new URLSearchParams(request.query).get("channel") === String(channelId)).length;
+  const round = async (ms = 60000) => { now += ms; newLog(); const before = statCallsFor(2); await f.module.refreshDue(now); return statCallsFor(2) - before; };
+
+  assert.equal(await round(), 2, "刚启动：还没满 10 分钟，照旧每分钟问；这一轮还要结昨天，渠道 2 多问一次");
+  for (let i = 0; i < 8; i += 1) assert.equal(await round(), 1, "启动后 10 分钟内：照旧每分钟问");
+  await round(); // 满 10 分钟，这一轮还是正常问的（门槛是超过 10 分钟）
+  await round();
+  assert.equal(await round(), 0, "启动后一直没有页面来，超过 10 分钟：放慢，这一轮沿用");
+  assert.equal(await round(), 0, "还在放慢");
+  await f.module.queryRules({ preset: "today" }, { mode: "evaluate", origin: "page" });
+  assert.equal(await round(), 1, "有页面来了：下一轮立刻补一轮，不等满 5 分钟");
+  assert.equal(await round(), 1, "有人看：照旧每分钟问");
+});
+
+// 审核 #137 中-1、低-4：放慢那一轮沿用的旧数不能被站点级缓存（ownRevenueCache）吃进去、之后整站沿用时当成刚读到的数给人看；放慢期间满 5 分钟要真去问一次
+test("减压 PR（审核 #137 低-4）：放慢期间满 5 分钟会真问一次、问到新数", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  const logs = [{ id: 1, created_at: Math.floor(now / 1000) - 60 }];
+  const newLog = () => logs.push({ id: logs.length + 1, created_at: Math.floor(now / 1000) - 1 });
+  const siteLogs = ownLogList(logs, []);
+  const prev = globalThis.fetch;
+  let quota2 = 100;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !ownSourceRead(url)) {
+      f.state.requests.push({ host: url.host, path: url.pathname, query: url.search });
+      const channel = Number(url.searchParams.get("channel"));
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota: channel === 2 ? quota2 : 100 } }) };
+    }
+    return prev(input, init);
+  });
+  const statCallsFor = (channelId) => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat"
+    && new URLSearchParams(request.query).get("channel") === String(channelId)).length;
+  const liveTwo = async () => (await f.module.queryRules({ preset: "today", ruleIds: ["rr_two"] }, { mode: "evaluate", origin: "page" })).results[0].downstream.amountUsd;
+  const round = async (fresh = true) => { now += 60000; if (fresh) newLog(); const before = statCallsFor(2); await f.module.refreshDue(now); return statCallsFor(2) - before; };
+
+  await liveTwo(); await round(); await round();
+  for (let i = 0; i < 11; i += 1) await round(); // 没人看超过 10 分钟，进入放慢
+  quota2 = 200; // 有新消费，但这一轮渠道 2 沿用
+  assert.equal(await round(), 0, "放慢：这一轮沿用");
+  // 放慢期间满 5 分钟要真问一次（改成 60 分钟会抓到）
+  const asked = [];
+  for (let i = 0; i < 5; i += 1) asked.push(await round());
+  assert.ok(asked.some((n) => n > 0), "放慢期间满 5 分钟会真问一次");
+  assert.equal(await liveTwo(), 2, "问到了新数");
+});
+
+test("减压 PR（审核 #137 中-1 复现）：没人看时渠道来了新消费、马上转安静——页面来看是新数，不是放慢那轮沿用后被站点级缓存吃进去的旧数", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  const logs = [{ id: 1, created_at: Math.floor(now / 1000) - 60 }];
+  const newLog = () => logs.push({ id: logs.length + 1, created_at: Math.floor(now / 1000) - 1 });
+  const siteLogs = ownLogList(logs, []);
+  const prev = globalThis.fetch;
+  let quota2 = 100;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !ownSourceRead(url)) {
+      f.state.requests.push({ host: url.host, path: url.pathname, query: url.search });
+      const channel = Number(url.searchParams.get("channel"));
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota: channel === 2 ? quota2 : 100 } }) };
+    }
+    return prev(input, init);
+  });
+  const statCallsFor = (channelId) => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat"
+    && new URLSearchParams(request.query).get("channel") === String(channelId)).length;
+  const liveTwo = async () => (await f.module.queryRules({ preset: "today", ruleIds: ["rr_two"] }, { mode: "evaluate", origin: "page" })).results[0].downstream.amountUsd;
+  const round = async (fresh = true) => { now += 60000; if (fresh) newLog(); const before = statCallsFor(2); await f.module.refreshDue(now); return statCallsFor(2) - before; };
+
+  await liveTwo(); await round(); await round();
+  for (let i = 0; i < 11; i += 1) await round(); // 没人看超过 10 分钟，进入放慢
+  quota2 = 200; // 有新消费，但这一轮渠道 2 沿用
+  assert.equal(await round(), 0, "放慢：这一轮沿用");
+  let askedWhileQuiet = 0;
+  for (let i = 0; i < 3; i += 1) askedWhileQuiet += await round(false); // 站点转安静（没有新日志），整站沿用
+  assert.ok(askedWhileQuiet > 0, "轮询这一侧：站点转安静后，沿用的渠道要真去问，不能一直沿用旧数（页面现算会掩盖这一点，所以单独断言）");
+  assert.equal(await liveTwo(), 2, "页面来看：新数 2，不是放慢那轮沿用的旧数 1");
+});
+
+// 审核 #137 中-3：没人看期间某一轮真问了渠道，但读到的窗口没包住最新那条日志（站点钟快、日志落在终点那一秒）；之后站点安静，不能一直沿用旧数
+test("减压 PR（审核 #137 中-3）：站点的钟快、真问那一轮没包住最新日志，之后站点安静——轮询这一侧要补问，不能一直沿用旧数", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now });
+  const sec = () => Math.floor(now / 1000);
+  const logs = [{ id: 1, channel: 2, created_at: sec() - 60, quota: 100 }];
+  const add = (created_at) => logs.push({ id: logs.length + 1, channel: 2, created_at, quota: 100 });
+  const siteLogs = ownLogList(logs, []);
+  const prev = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (input, init) => {
+    const url = new URL(String(input));
+    if (url.host === "own.test" && url.pathname === "/api/log/") return siteLogs(url);
+    if (url.host === "own.test" && url.pathname === "/api/log/stat" && !ownSourceRead(url)) {
+      f.state.requests.push({ host: url.host, path: url.pathname, query: url.search });
+      const channel = Number(url.searchParams.get("channel")), start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
+      const quota = logs.filter((log) => log.channel === channel && log.created_at >= start && log.created_at <= end).reduce((sum, log) => sum + log.quota, 0);
+      return { status: 200, text: async () => JSON.stringify({ success: true, data: { quota } }) };
+    }
+    return prev(input, init);
+  });
+  const statCallsFor = (channelId) => f.state.requests.filter((request) => request.host === "own.test" && request.path === "/api/log/stat"
+    && new URLSearchParams(request.query).get("channel") === String(channelId)).length;
+  const liveTwo = async () => (await f.module.queryRules({ preset: "today", ruleIds: ["rr_two"] }, { mode: "evaluate", origin: "page" })).results[0].downstream.amountUsd;
+  const round = async () => { now += 60000; const before = statCallsFor(2); await f.module.refreshDue(now); return statCallsFor(2) - before; };
+
+  await liveTwo(); await round(); await round();
+  for (let i = 0; i < 11; i += 1) await round(); // 没人看超过 10 分钟，进入放慢
+  // 找到真问的那一轮，之后数 4 轮沿用，在下一个真问的那一轮前加一笔「站点钟快 30 秒」的日志
+  let guard = 0; while ((await round()) === 0 && guard++ < 10);
+  for (let i = 0; i < 4; i += 1) assert.equal(await round(), 0, "放慢：沿用");
+  add(sec() + 60 + 30); // 这一轮真问时它还在窗口终点之后（站点钟快）
+  assert.ok((await round()) > 0, "真问了，但没包住那笔日志，读到旧数");
+  let asked = 0;
+  for (let i = 0; i < 3; i += 1) asked += await round(); // 之后站点没有新日志：不能一直沿用旧数
+  assert.ok(asked > 0, "站点转安静后，没包住最新日志的渠道要补问");
+  assert.equal(await liveTwo(), 2, "页面看到的是新数");
+});
+
 test("P1b 轮询按时间重读上游：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟；Key 账单报错、有收入而 Key 用量为 0、目录里找不到 Key，下一轮马上全部重读；页面「刷新」照旧强制", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now });
@@ -7417,6 +7612,10 @@ for (const policy of POLICIES) test("K2b：两条绑定互换 Key（挪过）—
   });
   await f.module.refreshDue(now);
   assert.ok((await f.repository.getRule("rr_live")).canonicalKey && (await f.repository.getRule("rr_b")).canonicalKey, "第一轮两条都锚定了");
+  // 生产里绑定建的时候 rules.active_token_key 就是 canonical key（createRule），开着那段的 Key 行抄的同一个值；夹具的规则没有，
+  // 补上——不然互换时撞不上唯一约束，「互换必须同组一个事务」（server/reconciliation.js applyKeyAgentChangesFor 的分组）去掉了测试也是绿的
+  for (const row of f.repository.tables.rules) row.active_token_key = row.canonical_key;
+  for (const keyRow of f.repository.tables.segmentKeys) keyRow.active_token_key = f.repository.tables.rules.find((row) => row.token_id === keyRow.token_id)?.canonical_key ?? null;
 
   swapped = true; // 两个渠道互换了 Key
   now = Date.parse("2026-10-12T01:00:00Z");
@@ -9801,6 +10000,7 @@ test("K2b：同一轮里一条绑定撞了唯一约束、另外两条正常换 K
   assert.equal((await f.repository.getRule("rr_c")).keyIssue?.code, "KEY_GROUP_CHANGED", "撞的那条记会自己好的分组冲突");
   assert.equal((await f.repository.getRule("rr_live")).keyIssue, null, "别的组不连坐");
   assert.equal((await f.repository.getRule("rr_b")).keyIssue, null);
+  assert.equal(f.stations[1].keyAgentLastSuccessAtMs, Date.parse("2026-10-11T01:00:00Z"), "撞了的组这一轮没处理完：站点的成功时刻不往前推");
 
   conflictFor = null; // 冲突解开
   now = Date.parse("2026-10-12T01:10:00Z");
@@ -9822,4 +10022,73 @@ test("K2b 例外三：这个站点从来没读成功过（内存和持久化都�
   await round("2026-10-11T17:00:00Z");
   await round("2026-10-11T17:15:00Z");
   assert.equal(booked("2026-10-11"), 1, "读到以后照常算");
+});
+
+test("K2b：页面只读查询（evaluate）也看库里持久化的事项——UNMATCHED 记着的那天显示需处理的原因，不是「实时 / READY」；b 以前的日子不受影响；事项解开后观测一轮就没了", async (t) => {
+  const { f, agent, round } = await readerOutageFixture(t);
+  const keyNine = agent.key;
+  await round("2026-10-11T06:00:00Z");
+  agent.key = "sk-" + "Unkn".repeat(10);
+  await round("2026-10-11T10:00:00Z"); // 认出渠道换成了哪都没有的 Key，b = 10:00Z，记进库里
+  await round("2026-10-11T16:05:00Z"); // 10-11 结束了（还没到结账的点），事项还在
+  const evaluate = async (startIso, endIso) => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai",
+    startMs: Date.parse(startIso), endMs: Date.parse(endIso) }, { mode: "evaluate" })).results[0];
+  const day = await evaluate("2026-10-10T16:00:00Z", "2026-10-11T16:00:00Z"); // 10-11 整天，跨过 b
+  assert.equal(day.health.code, "CHANNEL_KEY_UNMATCHED", "只读查询看持久化的事项，不是 READY");
+  const before = await evaluate("2026-10-09T16:00:00Z", "2026-10-10T16:00:00Z"); // 10-10，整天在 b 以前
+  assert.notEqual(before.health.code, "CHANNEL_KEY_UNMATCHED", "b 以前的日子不受影响");
+  agent.key = keyNine; // 解开
+  await round("2026-10-11T16:10:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue, null);
+  assert.notEqual((await evaluate("2026-10-10T16:00:00Z", "2026-10-11T16:00:00Z")).health.code, "CHANNEL_KEY_UNMATCHED");
+});
+
+test("K2b（驱动层 304）：渠道换成了不在已加上游里的 Key，读取服务内容不变（304）——把上游加上以后，过了重对间隔下一轮就认出来、清掉事项并换段，不是一直卡在 CHANNEL_KEY_UNMATCHED", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keys = { 9: "sk-" + "Nine".repeat(10), 77: "sk-" + "Sev7".repeat(10) };
+  const extraTokens = [{ tokenId: 9, name: "stable" }];
+  let channelKey = keys[9];
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }], tokenKeyOf: (tokenId) => keys[tokenId], extraTokens,
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(channelKey), f: "unused" }] }] } });
+  const round = async (iso) => { now = Date.parse(iso); await f.module.refreshDue(now); }; // 不清识别缓存：靠 4 分钟到期 + etag（304）
+  await round("2026-10-11T01:00:00Z");
+  assert.ok((await f.repository.getRule("rr_live")).canonicalKey, "锚定");
+  channelKey = keys[77]; // 渠道换成了一把不在已加上游里的 Key
+  await round("2026-10-11T01:10:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.code, "CHANNEL_KEY_UNMATCHED");
+  extraTokens.push({ tokenId: 77, name: "added-later" }); // 用户把这把 Key 所在的上游加上了（目录里有了）
+  await round("2026-10-11T01:20:00Z"); // 读取服务内容没变（304），但距上一次对上游目录不到 15 分钟：先不重对
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.code, "CHANNEL_KEY_UNMATCHED", "间隔没到，不重读上游目录");
+  await round("2026-10-11T01:30:00Z"); // 过了 15 分钟：304 也重新对一遍上游目录
+  const rule = await f.repository.getRule("rr_live");
+  assert.equal(rule.keyIssue, null, "认出来了，事项清掉");
+  assert.equal(rule.tokenId, 77, "换段");
+});
+
+// Sub2API 上游（用户在用）：按天读账单，切不开中途。换 Key 那天整窗各把 Key 取全天再相加。
+// 识别还不认 Sub2API 的 Key 目录（#142 另合），这里直接塞识别结果。所有行（这条绑定每一天）上游成本之和 = 各 Key 当天用量之和
+test("K2b + Sub2API：同一条绑定换 Key——换 Key 那天整窗各把 Key 取全天再相加，每天上游成本 = 各 Key 当天用量之和（以前整窗只取最新那把，旧 Key 的用量漏了）", async (t) => {
+  const A = Date.parse("2026-10-11T01:00:00Z"), SWITCH = Date.parse("2026-10-11T20:00:00Z"), B = Date.parse("2026-10-12T01:00:00Z");
+  let now = A;
+  t.mock.method(Date, "now", () => now);
+  const windows = { 9: [0, SWITCH], 20: [SWITCH, null] }; // 旧 Key 用到 SWITCH，新 Key 从 SWITCH 起（每秒 1 美元）
+  const fake = createFakeSub2Api({ keys: [{ id: 9, name: "stable" }, { id: 20, name: "k20" }], dayUsageUsd: (keyId, day) => secondsInDay(windows[keyId], day), now: () => Date.now() });
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], sub2api: fake,
+    usageOf: () => 0, tokenKeyOf: () => "sk-unused", extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "k20" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [] } });
+  Object.assign(f.stations[0], { type: "sub2api", accessToken: "jwt" });
+  const channelToken = { 1: 9 };
+  const inject = () => { f.rt._keyAgentIdentifyCache = { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, revealIssues: [],
+    channels: Object.entries(channelToken).map(([id, tokenId]) => ({ channelId: Number(id), keyless: false, slots: [{ index: 0, state: "identified",
+      matches: [{ stationId: "upstream", tokenId, tokenName: tokenId === 9 ? "stable" : "k20", via: "fingerprint" }] }] })) } }; };
+  inject();
+  await f.module.refreshDue(now);
+  channelToken[1] = 20; now = B; inject();
+  await f.module.refreshDue(now); // 认出换了 Key：[a, b) 过渡段两把 Key 都放着
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 20);
+  for (const iso of ["2026-10-13T01:00:00Z", "2026-10-14T01:00:00Z"]) { now = Date.parse(iso); inject(); await f.module.refreshDue(now); }
+  const cost = (day) => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === day).reduce((total, row) => total + Number(row.cost_usd), 0);
+  const truth = (day) => Object.values(windows).reduce((total, window) => total + secondsInDay(window, day), 0);
+  for (const day of ["2026-10-11", "2026-10-12", "2026-10-13"]) assert.equal(cost(day), truth(day), `${day}：各 Key 当天用量之和`);
 });
