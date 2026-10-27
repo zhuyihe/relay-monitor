@@ -892,13 +892,24 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       observedAt, lastSeenAt: observedAt, lastSeenAtByBinding,
     });
     const byRuleId = new Map(changeCandidates.map((item) => [item.rule.id, item]));
-    const applyPlans = plans.map((plan) => {
+    // Sub2API 只能按整天读账单：一把 Key 在两条绑定之间挪（互换、转手）时，b 那一刻切不开这一天的钱——两条绑定各取这把 Key 全天，
+    // 同一笔钱会算两遍。这一版先不处理（总指挥 10-27 定）：这两条绑定这几天先不结账，记一个会自己好的「读取中」，
+    // 等后面的小 PR 按逐条用量拆开（design/ux/binding-flow.md §3 最后一段）；宁可先不算，也不算错。
+    // 现在识别只认 New API 上游的 Key（Sub2API 的目录不给 Key 材料），这里是为以后认得出 Sub2API 时守住的
+    const isSub2 = (ruleId) => /^sub2api/.test(upstreamStation(byRuleId.get(ruleId)?.rule.upstreamStationId)?.type || "");
+    const deferred = new Set(plans.filter((plan) => plan.kind === "moved" && isSub2(plan.bindingId)).flatMap((plan) => [plan.bindingId, plan.movedFromBindingId]).filter(Boolean));
+    for (const ruleId of deferred) if (byRuleId.has(ruleId)) keyIssues.set(ruleId, issueFor(byRuleId.get(ruleId).rule, "PENDING"));
+    const applyPlans = plans.filter((plan) => !deferred.has(plan.bindingId)).map((plan) => {
       const { rule } = byRuleId.get(plan.bindingId);
       const identity = resources.get(rule.upstreamStationId)?.identity;
       const upstream = upstreamStation(rule.upstreamStationId);
       // 上游这一轮身份读不到：不拿读不到的身份算 canonicalKey，这一条整条跳过，等下一轮一起换
       if (!identity || !upstream) return null;
-      return { ruleId: plan.bindingId, plan: { ...plan, canonicalKey: canonicalBillingKey(upstream, identity, plan.after[0].tokenId) } };
+      // 新 Key 在上游目录里的分组和倍率：新段按它开（不然下一次观测发现分组变了，换 Key 之后又切一段）；目录里找不到就不给，沿用旧段的
+      const metadata = resources.get(rule.upstreamStationId)?.metadata;
+      const newToken = metadata?.tokens?.find((item) => Number(item.id) === Number(plan.after[0].tokenId));
+      const groupFields = newToken ? { group: newToken.group, ratio: metadata.groupsAvailable ? metadata.groups?.[newToken.group]?.ratio ?? null : null } : {};
+      return { ruleId: plan.bindingId, plan: { ...plan, ...groupFields, canonicalKey: canonicalBillingKey(upstream, identity, plan.after[0].tokenId) } };
     }).filter(Boolean);
     if (!applyPlans.length) return { applied: false, allApplied: false };
     // 写库失败（不是撞唯一约束，比如连接断了）：这一轮没换成，不是分组合组，不记冲突，下一轮接着换
@@ -912,7 +923,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       return { applied: false, allApplied: false };
     }
-    return { applied: true, allApplied: applyPlans.length === changeCandidates.length };
+    return { applied: true, allApplied: applyPlans.length === changeCandidates.length && !deferred.size };
   }
 
   // 页面「刷新」（观测）强制重读 Key 目录和账号身份；只读查询用 5 分钟缓存。
@@ -2233,6 +2244,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       if (reconciliation.transitioned) {
         issues.push({ code: "ROUTE_TRANSITION_DETECTED", scope: "rule", detail: issueText("ROUTE_TRANSITION_DETECTED"), observedAt: Date.now() });
+      }
+      // 换 Key 那天的一句提示（§5.4）：这个窗口里有换 Key 开的段（timing_source key_change）就有；
+      // 换 Key 开的段不是估的倍率变化，下面「倍率变化的时间是系统估的」只看 detected 的段，不会带上它
+      if (segments.some((segment) => segment.timingSource === "key_change" && segment.effectiveFrom >= window.startMs && segment.effectiveFrom < window.endMs)) {
+        issues.push({ code: "KEY_CHANGED", scope: "rule", detail: issueText("KEY_CHANGED"), observedAt: Date.now() });
       }
       const unconfirmedSegments = segments.filter((segment) => segment.timingSource === "detected");
       if (unconfirmedSegments.length) {

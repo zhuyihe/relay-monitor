@@ -527,12 +527,15 @@ export class MemoryReconciliationRepository {
         for (const { ruleId, plan } of plans) {
           const current = currents.get(ruleId), rule = rules.get(ruleId);
           const ruleActiveKey = plan.canonicalKey ?? tokenKeyOf(plan.after[0]); // 同 MySQL 版：和 createRule 一个口径
-          const openSegment = (effectiveFrom, keys, { closesAt = null } = {}) => {
+          const newGroup = plan.group ?? current.group_name;
+          const newRatio = plan.ratio !== undefined ? plan.ratio : current.group_ratio;
+          const openSegment = (effectiveFrom, keys, { closesAt = null, timingSource = "key_change", fresh = false } = {}) => {
             const id = uid("rs"), createdAt = this.#timestamp();
-            this.#insert(tx, "segments", { id, rule_id: ruleId, group_name: current.group_name, group_ratio: current.group_ratio,
-              ratio_observed_at_ms: current.ratio_observed_at_ms, ratio_source: current.ratio_source,
+            const useNew = fresh && plan.group !== undefined; // 同 MySQL 版：新段的分组、倍率按新 Key 给的，没给沿用旧段
+            this.#insert(tx, "segments", { id, rule_id: ruleId, group_name: useNew ? newGroup : current.group_name, group_ratio: useNew ? (newRatio ?? null) : current.group_ratio,
+              ratio_observed_at_ms: useNew ? (newRatio == null ? null : bigint(detectedAt)) : current.ratio_observed_at_ms, ratio_source: useNew ? (newRatio == null ? null : "group_catalog") : current.ratio_source,
               effective_from_ms: bigint(effectiveFrom), effective_to_ms: closesAt == null ? null : bigint(closesAt),
-              detected_at_ms: bigint(detectedAt), timing_source: "detected", created_at: createdAt, updated_at: createdAt });
+              detected_at_ms: bigint(detectedAt), timing_source: timingSource, created_at: createdAt, updated_at: createdAt });
             for (const [index, key] of keys.entries()) this.#insert(tx, "segmentKeys", { segment_id: id, upstream_station_id: key.upstreamStationId,
               token_id: bigint(key.tokenId), token_name: key.tokenName ?? null, key_mask: null, match_source: "agent",
               active_token_key: closesAt == null ? (index === 0 ? ruleActiveKey : tokenKeyOf(key)) : null });
@@ -541,15 +544,15 @@ export class MemoryReconciliationRepository {
           this.#update(tx, "segments", this.#rows("segments", tx).filter(({ row }) => sameText(row.id, current.id)),
             { effective_to_ms: bigint(plan.kind === "windowed" ? plan.windowStart : plan.cutoverAt) });
           if (plan.kind === "windowed") {
-            openSegment(plan.windowStart, plan.windowKeys, { closesAt: plan.windowEnd });
-            openSegment(plan.windowEnd, plan.after);
+            openSegment(plan.windowStart, plan.windowKeys, { closesAt: plan.windowEnd, timingSource: "key_change_window" });
+            openSegment(plan.windowEnd, plan.after, { fresh: true });
           } else {
-            openSegment(plan.cutoverAt, plan.after);
+            openSegment(plan.cutoverAt, plan.after, { fresh: true });
           }
           const [firstKey] = plan.after;
           this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { token_id: bigint(firstKey.tokenId),
             token_name: firstKey.tokenName ?? rule.token_name, active_token_key: ruleActiveKey,
-            ...(plan.canonicalKey !== undefined ? { canonical_key: plan.canonicalKey } : {}) });
+            ...(plan.canonicalKey !== undefined ? { canonical_key: plan.canonicalKey } : {}), ...(plan.group !== undefined ? { fixed_group: plan.group } : {}) });
           // 不调 #refreshSegmentKeys：它会把全部 match_source='initial' 的历史段都改成 rules 现在这把 Key
           // （对应 MySQL 版同一处注释）——K2b 每段该用哪把 Key 已经按时间精确写好了，历史段不能跟着现在这把一起变
         }

@@ -781,13 +781,22 @@ export class ReconciliationRepository {
         // rules.active_token_key 和 createRule（activeTokenKey）一个口径：锚定过的用 canonical_key，没有就用「上游:Key」；
         // 开着的段第一把 Key 的行和它是同一个值（K1c 的 initial 行就是这么抄的），别的 Key 用「上游:Key」
         const ruleActiveKey = plan.canonicalKey ?? tokenKeyOf(plan.after[0]);
-        const openSegment = async (effectiveFrom, keys, { closesAt = null } = {}) => {
+        // 新段的分组、倍率：调用方（server/reconciliation.js）按新 Key 在上游目录里的分组给 plan.group / plan.ratio，没给就沿用旧段的
+        // （不然下一次观测发现分组变了，会在换 Key 之后又切一段，出「倍率在 …变了」那句，和换 Key 那句重复）。
+        // timing_source：key_change_window 是 [a, b) 过渡段、key_change 是换 Key 那一刻起的新段——换 Key 的那一刻是系统读到的，
+        // 不是估的倍率变化，不出「倍率变化的时间是系统估的」，也不能「改时间」（design/ui-copy-spec.md §5.4）
+        const newGroup = plan.group ?? current.group_name;
+        const newRatio = plan.ratio !== undefined ? plan.ratio : current.group_ratio;
+        const openSegment = async (effectiveFrom, keys, { closesAt = null, timingSource = "key_change", fresh = false } = {}) => {
           const id = uid("rs");
+          const useNew = fresh && plan.group !== undefined;
           await conn.query(
             `INSERT INTO reconciliation_rule_segments
               (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, effective_to_ms, detected_at_ms, timing_source)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'detected')`,
-            [id, ruleId, current.group_name, current.group_ratio, current.ratio_observed_at_ms, current.ratio_source, effectiveFrom, closesAt, detectedAt]
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, ruleId, useNew ? newGroup : current.group_name, useNew ? newRatio ?? null : current.group_ratio,
+              useNew ? (newRatio == null ? null : detectedAt) : current.ratio_observed_at_ms, useNew ? (newRatio == null ? null : "group_catalog") : current.ratio_source,
+              effectiveFrom, closesAt, detectedAt, timingSource]
           );
           for (const [index, key] of keys.entries()) await conn.query(
             "INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source, active_token_key) VALUES (?, ?, ?, ?, 'agent', ?)",
@@ -797,11 +806,11 @@ export class ReconciliationRepository {
         };
         if (plan.kind === "windowed") {
           await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [plan.windowStart, current.id]);
-          await openSegment(plan.windowStart, plan.windowKeys, { closesAt: plan.windowEnd });
-          await openSegment(plan.windowEnd, plan.after);
+          await openSegment(plan.windowStart, plan.windowKeys, { closesAt: plan.windowEnd, timingSource: "key_change_window" });
+          await openSegment(plan.windowEnd, plan.after, { fresh: true });
         } else {
           await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [plan.cutoverAt, current.id]);
-          await openSegment(plan.cutoverAt, plan.after);
+          await openSegment(plan.cutoverAt, plan.after, { fresh: true });
         }
         const [firstKey] = plan.after;
         // canonicalKey 是按 [provider, panel, accountId, tokenId] 算的（lib/reconciliation-scope-policy.js 的
@@ -810,6 +819,7 @@ export class ReconciliationRepository {
         // 调用方（server/reconciliation.js）传 plan.canonicalKey 时才改；不传（比如下面几条测试，不关心锚定）就不动
         const sets = ["token_id = ?", "token_name = ?", "active_token_key = ?"], params = [firstKey.tokenId, firstKey.tokenName ?? rule.token_name, ruleActiveKey];
         if (plan.canonicalKey !== undefined) { sets.push("canonical_key = ?"); params.push(plan.canonicalKey); }
+        if (plan.group !== undefined) { sets.push("fixed_group = ?"); params.push(plan.group); }
         await conn.query(`UPDATE reconciliation_rules SET ${sets.join(", ")} WHERE id = ?`, [...params, ruleId]);
         // 不调 refreshSegmentKeys：它会把这条绑定全部 match_source = 'initial' 的历史段都改成 rules 现在这把 Key
         // （db/segment-keys.js 的注释：「改绑定的 Key：来源是 initial 的行都跟着走，旧代码整条绑定的历史都按现在

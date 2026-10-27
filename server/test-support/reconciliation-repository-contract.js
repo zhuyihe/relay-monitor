@@ -1475,6 +1475,24 @@ contract("applyKeyChangePlans: a windowed plan closes the old segment, opens a c
   assert.equal(after.tokenName, "New Key");
 });
 
+contract("applyKeyChangePlans: segments opened for a key change carry timing_source key_change_window / key_change (not detected); plan.group/ratio give the new segment the new key's group and ratio while the transitional segment keeps the old; rules.fixed_group follows", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(60), name: "Grp" }], initialRatio: 1 });
+  const oldRef = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName };
+  const newRef = { upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(61), tokenName: "New" };
+  const windowStart = EFFECTIVE_FROM + HOUR, windowEnd = windowStart + 5 * 60 * 1000;
+  await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: { kind: "windowed", windowStart, windowEnd, windowKeys: [oldRef, newRef], after: [newRef], group: "vip", ratio: 1.5 } }]);
+  const segments = await repository.listSegments(rule.id);
+  assert.deepEqual(segments.map((segment) => segment.timingSource).slice(1), ["key_change_window", "key_change"], "不是 detected：不出「倍率变化的时间是系统估的」，也不能改时间");
+  assert.deepEqual([segments[1].group, segments[1].ratio], [segments[0].group, segments[0].ratio], "过渡段还是旧的分组、倍率");
+  assert.deepEqual([segments[2].group, segments[2].ratio], ["vip", 1.5], "新段按新 Key 的分组、倍率");
+  assert.equal((await repository.getRule(rule.id)).fixedGroup, "vip");
+  // 不给 group：新段沿用旧段的
+  const other = await fixture.createRule({ tokenId: fixture.token(62), channels: [{ channelId: fixture.channel(62), name: "NoGrp" }], initialRatio: 2 });
+  await repository.applyKeyChangePlans([{ ruleId: other.id, plan: { kind: "precise", cutoverAt: EFFECTIVE_FROM + HOUR, after: [{ upstreamStationId: other.upstreamStationId, tokenId: fixture.token(63), tokenName: "N2" }] } }]);
+  const [first, second] = await repository.listSegments(other.id);
+  assert.deepEqual([second.timingSource, second.group, second.ratio], ["key_change", first.group, first.ratio]);
+});
+
 contract("applyKeyChangePlans: swapping keys between two rules in one batch — clear-then-write means the swap itself never trips the unique constraint", async ({ repository, fixture }) => {
   const a = await fixture.createRule({ channels: [{ channelId: fixture.channel(32), name: "A" }] });
   const b = await fixture.createRule({ tokenId: fixture.token(33), tokenName: `Contract ${fixture.tag} B`, channels: [{ channelId: fixture.channel(34), name: "B" }] });

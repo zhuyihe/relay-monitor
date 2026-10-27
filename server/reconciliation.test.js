@@ -7244,6 +7244,13 @@ test("K2b：没有冲突的正常换 Key——识别→算计划→落库接上�
   await f.module.refreshDue(now); // 结「昨天」10-12：换完以后照常结账，不会被挡住
   assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length, 1,
     "换了 Key 以后 10-12 照常固定，没有被 SOURCE_BINDING_UNCONFIRMED 挡住");
+  // 换 Key 那天（design/ui-copy-spec.md §5.4）：出「换了 Key」那一句，不出「倍率变化的时间是系统估的」（也就不给「改时间」）
+  const day = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai",
+    startMs: Date.parse("2026-10-11T16:00:00Z"), endMs: Date.parse("2026-10-12T16:00:00Z") }, { force: true });
+  const codes = day.results[0].health.issues.map((issue) => issue.code);
+  assert.ok(codes.includes("KEY_CHANGED"), "换 Key 那天有这一句");
+  assert.equal(codes.includes("SEGMENT_TIMING_UNCONFIRMED"), false, "换 Key 开的段不是估的倍率变化，不出旧提示");
+  assert.deepEqual(segments.slice(1).map((segment) => segment.timingSource), ["key_change_window", "key_change"]);
 });
 
 test("K2b：读完、落库前重启——这一轮的成功时刻要等落库以后才写，重启后 a 还是上一次读成功的时刻，[t, b) 不漏", async (t) => {
@@ -7492,6 +7499,33 @@ test("K2b：打码撞了、上游令牌没有 api_key:reveal 权限（KEY_REVEAL
   assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length, 0, "分不清是哪把，这天不固定");
   const [settleState] = await f.repository.listSettlementStates(["rr_live"], { billDates: ["2026-10-12"] });
   assert.equal(settleState?.manualReason, "KEY_REVEAL_DENIED", "要人处理的（给令牌补权限），不是读取类");
+});
+
+test("K2b：Sub2API 上游上一把 Key 在两条绑定之间挪（同一天切不开）——这两条这几天先不结账，记一个会自己好的「读取中」，不换段、不动绑定；等按逐条用量拆开的后续 PR", async (t) => {
+  let now = Date.parse("2026-10-11T16:05:00Z");
+  t.mock.method(Date, "now", () => now);
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    extraRuleIds: ["rr_b"],
+    channelsByRule: { rr_live: [1], rr_b: [2] },
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [] },
+  });
+  Object.assign(f.stations[0], { type: "sub2api" }); // 现在识别只认 New API 的 Key；这里直接塞一份识别结果，守住以后认得出 Sub2API 时的行为
+  for (const row of f.repository.tables.rules) row.canonical_key = `canon-${row.id}`;
+  const match = (tokenId) => [{ stationId: "upstream", tokenId, tokenName: `k${tokenId}`, via: "fingerprint" }];
+  const slot = (tokenId) => ({ index: 0, state: "identified", matches: match(tokenId) });
+  // 两条绑定互换 Key：rr_live（token 9）现在用 10，rr_b（token 10）现在用 9
+  f.rt._keyAgentIdentifyCache = { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, revealIssues: [],
+    channels: [{ channelId: 1, keyless: false, slots: [slot(10)] }, { channelId: 2, keyless: false, slots: [slot(9)] }] } };
+  await f.module.refreshDue(now);
+  const [a, b] = [await f.repository.getRule("rr_live"), await f.repository.getRule("rr_b")];
+  assert.deepEqual([a.tokenId, b.tokenId], [9, 10], "没动绑定");
+  assert.equal((await f.repository.listSegments("rr_live")).length, 1, "没换段");
+  assert.equal((await f.repository.listSegments("rr_b")).length, 1);
+  assert.equal(a.keyIssue?.code, "PENDING", "会自己好的「读取中」，不是需处理");
+  assert.equal(b.keyIssue?.code, "PENDING");
+  assert.equal(reconciliationIssue("PENDING").kind, "reading");
+  assert.equal(f.stations[1].keyAgentLastSuccessAtMs ?? null, null, "这一轮没处理完，站点的成功时刻不往前推");
 });
 
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {
