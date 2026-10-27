@@ -11372,3 +11372,45 @@ for (const sub2 of [false]) {
     for (const day of ["2026-10-12", "2026-10-13", "2026-10-14"]) assert.equal(s.costOn(day), s.truthOn(day), `${day}：所有绑定的和 = 各把 Key 当天用量之和`);
   });
 }
+
+// 审核 #144 第 2 轮 高 1：推迟的重新分组跨了 0 点——换 Key 在 23:30（上海）、0:00 才第一次认出、渠道目录没确认推迟了几轮、推迟期间 Key 又换了一次。
+// 旧绑定 [a, b) 过渡段放的是这一轮的 Key、不是当时真用的，b 以前那天（10-11）会少算：那天固定成「—」加原因；b 以后挡到这一轮的那几天也一样
+for (const sub2 of [false, true]) {
+  test(`K2c 重新分组：推迟的重新分组跨过 0 点、推迟期间 Key 又变——b 以前那天（旧绑定）也固定成「—」，不固定成少了钱的数（${sub2 ? "Sub2API" : "New API"}）`, async (t) => {
+    const s = await regroupTimeline(t, { channelsByRule: { rr_live: [1, 2] }, sub2, staleUntil: "2026-10-11T18:00:00Z",
+      timeline: { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-11T15:30:00Z"), 20], [rgT("2026-10-11T17:00:00Z"), 21]] } });
+    const old = s.rules.find((rule) => rule.id === "rr_live");
+    assert.ok(old.archivedAtMs != null, "分组本身做了");
+    assert.equal(s.latestRows("2026-10-11").filter((row) => row.rule_id === "rr_live").length, 0, "b 以前那天旧绑定不固定（少算一半的数不写）");
+    assert.ok(old.keyBlocks?.some((block) => block.code === "KEY_CONFLICT_GAP"), "旧绑定带着冲突期");
+    for (const day of ["2026-10-13", "2026-10-14"]) assert.equal(s.costOn(day), s.truthOn(day), `${day}：冲突期以后照常对得上`);
+  });
+}
+
+// 审核 #144 第 2 轮 中 2：过渡段里每把 Key 不早于它上一个持有者结束的时刻。带着没处理完的事的绑定 a 是开着那段的起点（很早），没有这个下限就把上一个持有者的整段历史又读一遍
+test("K2c 重新分组：过渡段起点不早于 Key 上一个持有者（没牵连进来的绑定）结束的时刻——删掉这个下限用量会算两遍", async (t) => {
+  // rr_b（渠道 3）10-11 20:10Z 从 Key 10（速率 3）换到 Key 12（没有用量），21:00Z 的那一轮把 Key 10 的段关在 21:00Z；
+  // 渠道 2 22:30Z 换到 Key 10，渠道目录 23:00Z 才有（推迟），重新分组时 rr_live 的 a 是它开着那段的起点（很早）
+  const s = await regroupTimeline(t, { rules: ["rr_b"], channelsByRule: { rr_live: [1, 2], rr_b: [3] }, sub2: false, staleUntil: "2026-10-12T00:00:00Z",
+    timeline: { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-11T22:30:00Z"), 10]], 3: [[0, 10], [rgT("2026-10-11T20:10:00Z"), 12]] } });
+  for (const day of ["2026-10-12", "2026-10-13", "2026-10-14"]) assert.equal(s.costOn(day), s.truthOn(day), `${day}：每把 Key 恰好算一次`);
+  assert.equal(s.latestRows("2026-10-11").reduce((sum, row) => sum + Number(row.cost_usd), 0) <= s.truthOn("2026-10-11") + 1e-6, true, "10-11 不多算");
+});
+
+// 审核 #144 第 2 轮 高 2：绑定 A（不在这次重新分组）当天正常换 Key（K10→K11），之后拆分把 K10 给新绑定 B——Sub2API 整天读，A 读了 K10 整天、B 又读一遍。
+// B 这一天不算（下限落在当天中间，Sub2API 切不开：从第二天 0 点起整天算），不双算；New API 在 b 切开，本来就不重叠
+for (const sub2 of [false, true]) {
+  test(`K2c 重新分组：新绑定拿到一把当天早些时候被没牵连的绑定正常换走的 Key——不双算（${sub2 ? "Sub2API，新绑定从第二天起算" : "New API"}，Key 速率 1:3）`, async (t) => {
+    const s = await regroupTimeline(t, { rules: ["rr_b"], channelsByRule: { rr_live: [1, 2], rr_b: [3] }, sub2,
+      timeline: { 1: [[0, 9]], 2: [[0, 9], [rgT("2026-10-11T20:30:00Z"), 10]], 3: [[0, 10], [rgT("2026-10-11T18:00:00Z"), 21]] } });
+    const fresh = s.rules.filter((rule) => !rule.archivedAt && Number(rule.tokenId) === 10);
+    assert.equal(fresh.length, 1, "渠道 2 拿到 Key 10 的新绑定 B");
+    if (sub2) {
+      assert.equal(fresh[0].accountingFloorMs, rgT("2026-10-12T16:00:00Z"), "Sub2API：B 从第二天 0 点（上海）起整天算");
+      assert.equal(s.latestRows("2026-10-12").some((row) => row.rule_id === fresh[0].id), false, "B 这一天没有行，Key 10 不算两遍");
+    }
+    for (const day of ["2026-10-13", "2026-10-14"]) assert.equal(s.costOn(day), s.truthOn(day), `${day}：之后每天对得上`);
+    // 这一天所有行加起来不比真值多（没有任何一把 Key 算两遍）
+    assert.ok(s.costOn("2026-10-12") <= s.truthOn("2026-10-12") + 1e-6, "10-12 不多算");
+  });
+}

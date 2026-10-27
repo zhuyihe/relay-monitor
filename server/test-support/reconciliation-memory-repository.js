@@ -541,9 +541,10 @@ export class MemoryReconciliationRepository {
   }
 
   // 对应 MySQL 版 keyHeldUntil
-  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null } = {}) {
+  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null, excludeRuleIds = null, excludeArchived = false } = {}) {
     const rules = new Map(this.#plain("rules").map((row) => [row.id, row]));
-    const ends = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && Number(segment.effective_to_ms) >= (sinceMs ?? 0)
+    const exclude = new Set((excludeRuleIds || []).map(String));
+    const ends = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && Number(segment.effective_to_ms) >= (sinceMs ?? 0) && !exclude.has(String(segment.rule_id)) && !(excludeArchived && (rules.get(segment.rule_id)?.archived_at != null || rules.get(segment.rule_id)?.archived_at_ms != null))
       && rules.get(segment.rule_id)?.own_station_id === ownStationId
       && this.#plain("segmentKeys").some((key) => key.segment_id === segment.id && key.upstream_station_id === upstreamStationId && Number(key.token_id) === Number(tokenId)))
       .map((segment) => Number(segment.effective_to_ms));

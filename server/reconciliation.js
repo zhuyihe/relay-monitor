@@ -1163,9 +1163,24 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (!extra.keys.some((item) => item.upstreamStationId === key.upstreamStationId && Number(item.tokenId) === Number(key.tokenId))) extra.keys.push({ upstreamStationId: key.upstreamStationId, tokenId: Number(key.tokenId), tokenName: key.tokenName ?? null });
       }
     }
+    // 每把 Key 恰好算一次：新绑定的 Key 在这个自营站点下今天早些时候被牵连范围以外的绑定握过（正常换 Key 关掉的段、已停的）——那一段的用量已经算给了它，
+    // 新绑定不能再算一遍（和新建绑定、换 Key 的 newKeyFloor 同一个读法 keyHeldUntil，只是不算牵连进来的旧绑定自己：它们在同一个事务里归档）。
+    // New API：新绑定从那一刻起算（比 b 晚才有用）；Sub2API 一天中间切不开（上游只能按整天读），新绑定这一天不算、从第二天 0 点起整天算（#150 改成按时间认领）
+    for (const [index, group] of plan.groups.entries()) {
+      const create = creates[index];
+      if (!create) continue;
+      let held = null;
+      const toSub2 = /^sub2api/.test(upstreamStation(group.ref.upstreamStationId)?.type || "");
+      try { held = await repository.keyHeldUntil(ownStationId, group.ref.upstreamStationId, group.ref.tokenId, { sinceMs: dayStart, excludeRuleIds: plan.closes.map((close) => close.ruleId), excludeArchived: toSub2 }); } catch (error) { return failedWith("读 Key 上一个持有者失败", error); }
+      if (held == null || held <= dayStart) continue;
+      if (toSub2) create.accountingFloorMs = shiftedDayStartInTz(dayStart, 1, timezone);
+      else if (held > at) create.accountingFloorMs = held;
+    }
     // 推迟了几轮、这段时间事项的码变过或渠道的 Key 又变过（或不知道有没有，比如重启过）：[b, 这一轮) 里渠道用过什么 Key 这一轮的计划不知道，写冲突期；
+    // 旧绑定那边也要挡：它的 [a, b) 过渡段放的是这一轮的 Key、不是当时真用的，跨零点时 b 以前那天会少算一半，那天固定成「—」（见下面 closes 的 keyBlocks）。
     // 一直是同一件事、渠道没再变的推迟（等别处答完）不写：[a, b) 过渡段和新绑定从 b 起已经把钱算全了
-    if (at < observedAt && plan.closes.some((close) => { const watch = rt._regroupWatch?.get(close.ruleId); return !watch || watch.dirty; })) {
+    const deferredDirty = at < observedAt && plan.closes.some((close) => { const watch = rt._regroupWatch?.get(close.ruleId); return !watch || watch.dirty; });
+    if (deferredDirty) {
       for (const create of creates.filter(Boolean)) create.keyBlocks = [...(create.keyBlocks || []), { code: "KEY_CONFLICT_GAP", sinceMs: at, untilMs: observedAt }];
     }
     // 别的上游下的新组还没回答「只给我的渠道用」（交给自动开始，那个渠道先停着等回答）：回答以前这把新 Key 的用量谁都不算，旧绑定的过渡段也不放它——
@@ -1195,9 +1210,11 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const archiveAt = wholeDay.get(rule.id) ?? null; // New API 旧绑定换到 Sub2API 上游：b 那天 0 点归档，没有 [0 点, b) 的尾巴
       const cap = archiveAt ?? (foreignToSub2 || isSub2Rule(rule) ? startOfBillingDay(at, rule.timezone) : null);
       const window = !windowKeys || windowKeys.length < 2 || (cap != null && from >= cap) ? null : { from, ...(cap != null && archiveAt == null ? { to: cap } : {}), keys: windowKeys };
+      // 推迟过又变过：旧绑定从 a（最多往前一天）到这一轮挡成冲突期，a 到 b 那段它真用了什么 Key 这一轮不知道
+      const oldBlocks = [...(deferredDirty ? [{ code: "KEY_CONFLICT_GAP", sinceMs: Math.max(aOf.get(rule.id), dayStart - DAY_MS), untilMs: observedAt }] : []),
+        ...(droppedKey ? [{ code: "KEY_CONFLICT_GAP", sinceMs: Math.max(openFromOf.get(rule.id), Math.min(...close.windowUsers.map((id) => aOf.get(id)))), untilMs: at }] : [])];
       closes.push({ ruleId: rule.id, expect: { tokenId: Number(rule.tokenId), channelIds: rule.channels.map((channel) => Number(channel.channelId)) }, window,
-        ...(archiveAt != null ? { archiveAt } : {}),
-        ...(droppedKey ? { keyBlocks: [{ code: "KEY_CONFLICT_GAP", sinceMs: Math.max(openFromOf.get(rule.id), Math.min(...close.windowUsers.map((id) => aOf.get(id)))), untilMs: at }] } : {}) });
+        ...(archiveAt != null ? { archiveAt } : {}), ...(oldBlocks.length ? { keyBlocks: oldBlocks } : {}) });
     }
     let result;
     try { result = await repository.regroupRules({ at, closes, creates: creates.filter(Boolean) }, { detectedAt: observedAt }); } catch (error) { return failedWith("写库失败", error); }
