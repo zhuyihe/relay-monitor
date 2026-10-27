@@ -323,6 +323,36 @@ test("合并重复上游：文档、绑定、关联、日志同一个事务；�
 
 });
 
+test("合并重复上游（K2b 换过 Key 以后）：所有指着被合掉那个上游的 Key 行，不管 match_source，上游都换成留下的、token_id 不变；换 Key 以前的段还是旧 Key；退回以后和合并前逐字相同", { timeout: 60000 }, async (t) => {
+  const pool = mysql.createPool({ host: process.env.DB_HOST, port, user: process.env.DB_USER, password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME, connectionLimit: 8 });
+  t.after(() => pool.end());
+  const { ids, rt } = await seedFixture(pool);
+  const reconciliation = new ReconciliationRepository(pool);
+  // r_b（上游 b）换过一次 Key：5 → 55，开出 [a,b) 过渡段（两把 Key）和新段；K2b 写的行是 agent
+  const oldRef = { upstreamStationId: ids.b, tokenId: 5, tokenName: "Key 5" }, newRef = { upstreamStationId: ids.b, tokenId: 55, tokenName: "Key 55" };
+  const windowStart = Date.now() - 3600000, windowEnd = windowStart + 120000;
+  assert.deepEqual(await reconciliation.applyKeyChangePlans([{ ruleId: "r_b", plan: { kind: "windowed", windowStart, windowEnd, windowKeys: [oldRef, newRef], after: [newRef] } }]), { conflict: false });
+  const keysOf = async (ruleId) => (await reconciliation.listSegments(ruleId)).map((segment) => segment.keys.map((key) => [key.upstreamStationId, key.tokenId, key.matchSource, key.active]));
+  const beforeKeys = await keysOf("r_b");
+  assert.deepEqual(beforeKeys.map((keys) => keys.length), [1, 2, 1]);
+  const before = await dumpAll(pool);
+
+  await applyUpstreamMerge(rt, { retainedId: ids.a, mergedIds: [ids.b, ids.c] });
+  const afterKeys = await keysOf("r_b");
+  // 每一行：上游换成 a，token_id、match_source 不变；换 Key 以前的段（第 1 段）还是旧 Key 5，开着的段是 55
+  assert.deepEqual(afterKeys.map((keys) => keys.map(([upstream, token, source]) => [upstream, token, source])),
+    beforeKeys.map((keys) => keys.map(([, token, source]) => [ids.a, token, source])), "所有 match_source 的行都跟着换上游，token_id 不变");
+  assert.deepEqual(afterKeys[0].map(([, token]) => token), [5], "换 Key 以前的段还是旧 Key");
+  assert.deepEqual(afterKeys[2].map(([, token, , active]) => [token, active]), [[55, true]]);
+  const [openActive] = (await pool.query("SELECT k.active_token_key FROM reconciliation_segment_keys k JOIN reconciliation_rule_segments s ON s.id = k.segment_id WHERE s.rule_id = 'r_b' AND s.effective_to_ms IS NULL"))[0];
+  assert.equal(openActive.active_token_key, `${ids.a}:55`, "「上游:Key」形式的 active_token_key 跟着换上游");
+  assert.deepEqual((await pool.query("SELECT COUNT(*) AS n FROM reconciliation_segment_keys k JOIN reconciliation_rule_segments s ON s.id = k.segment_id WHERE s.rule_id = 'r_b' AND k.upstream_station_id = ?", [ids.b]))[0][0].n, 0, "没有行还指着被合掉的上游");
+
+  await undoMerges(pool, { apply: true, now: 5 });
+  assert.deepEqual(await dumpAll(pool), before, "退回以后和合并前逐字相同");
+});
+
 test("合并重复上游：拿锁后重判、退回时键的守卫、脚本退回的检查", { timeout: 60000 }, async (t) => {
   const pool = mysql.createPool({ host: process.env.DB_HOST, port, user: process.env.DB_USER, password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME, connectionLimit: 8 });

@@ -3,7 +3,7 @@ import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, nor
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
 import { LEDGER_DAY_FACT_COLUMNS, RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerDayFactFromRow, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
-import { refreshSegmentKeysSql } from "../db/segment-keys.js";
+import { refreshSegmentKeysSql, fillMissingSegmentKeysSql } from "../db/segment-keys.js";
 import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { RESETTLE_KEPT_REASONS, RESETTLE_REASON_TRANSITION, isSettledAt, resettleRequestPlan } from "../lib/reconciliation-settlement.js";
 import { billDayOf } from "../lib/business-time.js";
@@ -61,6 +61,28 @@ export function archivedLedgerAllowed(rule, ledger) {
   return Number.isFinite(archivedAt) && Number.isFinite(Number(ledger?.entry?.startMs)) && Number(ledger.entry.startMs) < archivedAt;
 }
 
+// 解开了、但那几天仍然算不准的冲突期（reconciliation_rules.key_blocks）：[{ code, sinceMs, untilMs }]，按起点排好、相交或相邻的并成一段；坏数据丢掉
+export function keyBlocksOf(value) {
+  let list = value;
+  if (typeof list === "string") { try { list = JSON.parse(list); } catch { return []; } }
+  if (!Array.isArray(list)) return [];
+  return list.map((item) => ({ code: String(item?.code || ""), sinceMs: Number(item?.sinceMs), untilMs: Number(item?.untilMs) }))
+    .filter((item) => item.code && Number.isFinite(item.sinceMs) && Number.isFinite(item.untilMs) && item.untilMs > item.sinceMs).sort((a, b) => a.sinceMs - b.sinceMs);
+}
+// 加一段：和同一个码相交、相邻的并起来；超过 200 段（出了故障才会有）就把最旧的两段并成一段（宁可多挡一段中间的日子，也不丢最旧的冲突期）
+export function addKeyBlock(blocks, block) {
+  const merged = [];
+  let current = { ...block };
+  for (const item of keyBlocksOf(blocks)) {
+    if (item.code === current.code && item.sinceMs <= current.untilMs && item.untilMs >= current.sinceMs) current = { code: current.code, sinceMs: Math.min(item.sinceMs, current.sinceMs), untilMs: Math.max(item.untilMs, current.untilMs) };
+    else merged.push(item);
+  }
+  merged.push(current);
+  merged.sort((a, b) => a.sinceMs - b.sinceMs);
+  while (merged.length > 200) { const [first, second] = merged; merged.splice(0, 2, { code: first.code === second.code ? first.code : "KEY_CONFLICT_GAP", sinceMs: first.sinceMs, untilMs: Math.max(first.untilMs, second.untilMs) }); }
+  return merged;
+}
+
 export function ruleFromRow(row, channels = []) {
   return {
     id: row.id,
@@ -78,6 +100,10 @@ export function ruleFromRow(row, channels = []) {
     costCoverage: row.cost_coverage || "unknown",
     provider: row.provider || null,
     canonicalKey: row.canonical_key || null,
+    // K2b：这条绑定的 Key 现在有没处理的事（KEY_GROUP_CHANGED / CHANNEL_KEY_UNMATCHED / KEY_REVEAL_DENIED）和第一次认出来的时刻（毫秒）；没有是 null
+    keyIssue: row.key_issue_code ? { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms) } : null,
+    // 解开了、但那几天仍然算不准的冲突期（可以有好几段）：只在有的时候带这个字段（见 server/reconciliation.js keyAgentRoundFor）
+    ...(keyBlocksOf(row.key_blocks).length ? { keyBlocks: keyBlocksOf(row.key_blocks) } : {}),
     ...normalizeRuleSourceBinding(row.source_binding, row.cost_coverage || "unknown"),
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
     // 解除时刻（毫秒）：新写的行由进程写；回填前的旧行读不到时退回 archived_at
@@ -115,8 +141,18 @@ export function attachSegmentKeys(segments, keyRows) {
 // 复制一份分段（改 id 这类场合用，比如按天切开后给切出来的那几截起新 id）：普通字段展开成自己的（JSON.stringify、Object.keys、深比较
 // 都和原段一样，只有 overrides 里给的字段不同），keys 这个不可枚举属性单独带过去——不能只用 `{ ...segment, ...overrides }`，那样
 // keys 会丢；也不能用 Object.create 接原型链，那样除了 overrides 里的字段，其余都不是这份拷贝自己的（总指挥 10-26 定，#114 中-G 改法）
+// overrides 里给了 keys 就用它（换成别的 Key 列表，照旧不可枚举、不进 JSON），没给才拷原段的；以前 overrides.keys 会被悄悄盖掉，不报错也不生效
 export function copySegment(segment, overrides = {}) {
-  return Object.defineProperty({ ...segment, ...overrides }, "keys", { value: segment.keys, enumerable: false, configurable: true, writable: true });
+  return Object.defineProperty({ ...segment, ...overrides }, "keys", { value: Object.hasOwn(overrides, "keys") ? overrides.keys : segment.keys, enumerable: false, configurable: true, writable: true });
+}
+
+// 换 Key 的计划在落库那一刻还成立吗（applyKeyChangePlans 的前置条件，内存仓库共用）。rule、current 是库里（锁住以后）的行
+export function keyChangePlanIsStale(plan, rule, current) {
+  const before = plan.before?.[0];
+  if (before && (Number(rule.token_id) !== Number(before.tokenId) || before.upstreamStationId != null && rule.upstream_station_id !== before.upstreamStationId)) return true;
+  const start = plan.kind === "windowed" ? plan.windowStart : plan.cutoverAt;
+  if (!(Number(start) >= Number(current.effective_from_ms))) return true; // 段不能在自己的起点以前结束（a 就是起点时旧段长度为零，照旧允许：开着那段的起点是 a 的下限）
+  return plan.kind === "windowed" && !(plan.windowEnd >= plan.windowStart);
 }
 
 export function segmentFromRow(row) {
@@ -501,6 +537,37 @@ export class ReconciliationRepository {
       token_id: row.key_token_id, token_name: row.key_token_name, key_mask: row.key_key_mask, match_source: row.key_match_source, active_token_key: row.key_active_token_key })));
   }
 
+  // 这个自营站点下，这把 Key 已经关掉的段（在算的、已停的绑定都算）里最晚的结束时刻；从没被握过是 null。每把 Key 恰好算一次：换 Key 时新 Key 在这条绑定里
+  // 最早从这一刻算起。只按这把 Key 查（走 idx_segment_key_token(upstream_station_id, token_id)），不读整个站点所有绑定的所有段
+  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null, conn = null } = {}) {
+    const [rows] = await (conn || this.pool).query(
+      `SELECT MAX(s.effective_to_ms) AS held_until FROM reconciliation_segment_keys k
+         JOIN reconciliation_rule_segments s ON s.id = k.segment_id JOIN reconciliation_rules r ON r.id = s.rule_id
+        WHERE k.upstream_station_id = ? AND k.token_id = ? AND r.own_station_id = ? AND s.effective_to_ms IS NOT NULL AND s.effective_to_ms >= ?`,
+      [upstreamStationId, tokenId, ownStationId, sinceMs ?? 0]);
+    return rows[0]?.held_until == null ? null : Number(rows[0].held_until);
+  }
+
+  // 几条绑定的分段一次读出来（换 Key 时找这把 Key 上一个持有者的段、「渠道」页签的「用过的 Key」）：{ [ruleId]: 分段[] }，一条查询，不按绑定逐条读
+  async listSegmentsForRules(ruleIds) {
+    const ids = [...new Set((ruleIds || []).map(String))];
+    if (!ids.length) return {};
+    const [rows] = await this.pool.query(
+      `SELECT s.*, k.segment_id AS key_segment_id, k.upstream_station_id AS key_upstream_station_id, k.token_id AS key_token_id,
+         k.token_name AS key_token_name, k.key_mask AS key_key_mask, k.match_source AS key_match_source, k.active_token_key AS key_active_token_key
+       FROM reconciliation_rule_segments s LEFT JOIN reconciliation_segment_keys k ON k.segment_id = s.id
+       WHERE s.rule_id IN (?) ORDER BY s.rule_id ASC, s.effective_from_ms ASC, s.created_at ASC, s.effective_to_ms IS NOT NULL DESC, s.effective_to_ms ASC, k.token_id ASC`,
+      [ids]
+    );
+    const segments = [], seen = new Set();
+    for (const row of rows) if (!seen.has(row.id)) { seen.add(row.id); segments.push(segmentFromRow(row)); }
+    attachSegmentKeys(segments, rows.map((row) => ({ segment_id: row.key_segment_id, upstream_station_id: row.key_upstream_station_id,
+      token_id: row.key_token_id, token_name: row.key_token_name, key_mask: row.key_key_mask, match_source: row.key_match_source, active_token_key: row.key_active_token_key })));
+    const byRule = Object.fromEntries(ids.map((id) => [id, []]));
+    for (const segment of segments) byRule[segment.ruleId].push(segment);
+    return byRule;
+  }
+
   async backfillMissingSegmentRatios(ruleId, groups, observedAt = Date.now(), segments = null) {
     const knownRatios = new Map(Object.entries(groups || {}).flatMap(([name, group]) => {
       const ratio = Number(group?.ratio);
@@ -730,6 +797,137 @@ export class ReconciliationRepository {
       await conn.rollback().catch(() => {});
       throw err;
     } finally { conn.release(); }
+  }
+
+  // K2b：这条绑定的 Key 现在有没处理的事，跨轮记下来、重启不丢。issue 是 { code, sinceMs }，null 表示解开了清掉。
+  // 调用方（server/reconciliation.js keyAgentRoundFor）自己保证同一件事沿用第一次认出的 sinceMs，这里只管写
+  async markKeyIssue(ruleId, issue) {
+    await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ? WHERE id = ?", [issue?.code ?? null, issue?.sinceMs ?? null, ruleId]);
+  }
+
+  // 记下一段「那几天仍然算不准、永远不固定」的日子 [sinceMs, untilMs)（和已有的并起来，已有的不会被覆盖、丢掉）；clearIssue 同时把现在开着的事项清掉
+  // （事项解开了，转成这一段）。读 → 改 → 写在一个事务里，同一条绑定同时来两次不会互相覆盖
+  async addKeyBlock(ruleId, block, { clearIssue = false } = {}) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query("SELECT key_blocks FROM reconciliation_rules WHERE id = ? FOR UPDATE", [ruleId]);
+      if (rows.length) {
+        const next = addKeyBlock(rows[0].key_blocks, block);
+        await conn.query(`UPDATE reconciliation_rules SET key_blocks = ?${clearIssue ? ", key_issue_code = NULL, key_issue_since_ms = NULL" : ""} WHERE id = ?`, [JSON.stringify(next), ruleId]);
+      }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    } finally { conn.release(); }
+  }
+
+  // K2b：按 key-agent-resegment.js 给的计划，给一条或几条绑定（挪位置、互换时是两条）开新段——同一个事务里关旧段、
+  // 开新段、写 segment_keys，再把 rules 的 token_id/token_name/active_token_key 改到现在开着那段的第一把 Key
+  // （k-plan §3.4：这几列照旧写，旧代码、costOwnerFor、回滚都还能用，K2c 才把去重整个挪到 segment_keys 上）。
+  //
+  // 真正兜底的是数据库的两道唯一约束（rules.active_token_key、reconciliation_segment_keys 的
+  // uq_segment_key_active）：这一批里任何一条撞了，整批回滚，返回 { conflict: true }——调用方改记
+  // KEY_GROUP_CHANGED，不写段（detectGroupMerges 已经做过便宜的预检查，这里撞上是没预检查到的边界情况）。
+  //
+  // 先把这一批涉及的绑定的 active_token_key（和它们当前开着段的 active_token_key）全部清空，再分别写新值：
+  // 两条绑定互换 Key 时，不这样做会在同一个事务里自己撞自己的唯一约束（A 还没清掉，B 的新值就是 A 现在的值）。
+  //
+  // plans：[{ ruleId, plan }]，plan 是 server/key-agent-resegment.js 的 planKeyChangeSegments /
+  // planMovedKeySegments 的结果：
+  //   { kind: "precise" | "moved", cutoverAt, after: [{upstreamStationId, tokenId, tokenName?}] }
+  //   { kind: "windowed", windowStart, windowEnd, windowKeys: [...], after: [...] }
+  async applyKeyChangePlans(plans, { detectedAt = Date.now() } = {}) {
+    const conn = await this.pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const currents = new Map(), rules = new Map();
+      // 按 id 排好再锁：传进来的顺序是 listRules 的顺序（按启用、更新时间），两个并发的批次顺序相反时会互相死锁；
+      // 和结账的 owner scope、K1a 合并一样按 id 顺序锁
+      for (const { ruleId } of [...plans].sort((x, y) => (x.ruleId < y.ruleId ? -1 : x.ruleId > y.ruleId ? 1 : 0))) {
+        const [ruleRows] = await conn.query("SELECT * FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [ruleId]);
+        if (!ruleRows[0]) throw repositoryError("RULE_NOT_FOUND");
+        rules.set(ruleId, ruleRows[0]);
+        const [segmentRows] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? AND effective_to_ms IS NULL FOR UPDATE", [ruleId]);
+        if (!segmentRows[0]) throw repositoryError("CURRENT_SEGMENT_MISSING");
+        currents.set(ruleId, segmentRows[0]);
+      }
+      // 前置条件：计划是调用方在读规则以后算的，到这里（行已经锁上）规则可能已经被别的写入换过了——
+      // 页面刷新和轮询可以同时进来，各算同一份计划；缓存期间倍率变化也可能开了新段。不满足就什么也不写、整批回滚，
+      // 返回 { stale: true }，调用方下一轮重新算：规则现在的 Key 不是计划的「换之前」；切点早于开着那段的起点；窗口倒挂
+      if (plans.some(({ ruleId, plan }) => keyChangePlanIsStale(plan, rules.get(ruleId), currents.get(ruleId)))) {
+        await conn.rollback();
+        return { conflict: false, stale: true };
+      }
+      for (const { ruleId } of plans) {
+        // 先把还没有 Key 行的段补一行（填 rules 上现在——也就是换之前——的那把）：下面要改 rules.token_id，
+        // 补晚了历史段就会读成新 Key。正常数据启动迁移已经补齐，这里是保险
+        const fillMissing = fillMissingSegmentKeysSql(ruleId);
+        await conn.query(fillMissing.sql, fillMissing.params);
+        await conn.query("UPDATE reconciliation_rules SET active_token_key = NULL WHERE id = ?", [ruleId]);
+        await conn.query("UPDATE reconciliation_segment_keys SET active_token_key = NULL WHERE segment_id = ?", [currents.get(ruleId).id]);
+      }
+      const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
+      for (const { ruleId, plan, keyBlock } of plans) {
+        const current = currents.get(ruleId), rule = rules.get(ruleId);
+        // rules.active_token_key 和 createRule（activeTokenKey）一个口径：锚定过的用 canonical_key，没有就用「上游:Key」；
+        // 开着的段第一把 Key 的行和它是同一个值（K1c 的 initial 行就是这么抄的），别的 Key 用「上游:Key」
+        const ruleActiveKey = plan.canonicalKey ?? tokenKeyOf(plan.after[0]);
+        // 新段的分组、倍率：调用方（server/reconciliation.js）按新 Key 在上游目录里的分组给 plan.group / plan.ratio，没给就沿用旧段的
+        // （不然下一次观测发现分组变了，会在换 Key 之后又切一段，出「倍率在 …变了」那句，和换 Key 那句重复）。
+        // timing_source：key_change_window 是 [a, b) 过渡段、key_change 是换 Key 那一刻起的新段——换 Key 的那一刻是系统读到的，
+        // 不是估的倍率变化，不出「倍率变化的时间是系统估的」，也不能「改时间」（design/ui-copy-spec.md §5.4）
+        const newGroup = plan.group ?? current.group_name;
+        const newRatio = plan.ratio !== undefined ? plan.ratio : current.group_ratio;
+        const openSegment = async (effectiveFrom, keys, { closesAt = null, timingSource = "key_change", fresh = false } = {}) => {
+          const id = uid("rs");
+          const useNew = fresh && plan.group !== undefined;
+          await conn.query(
+            `INSERT INTO reconciliation_rule_segments
+              (id, rule_id, group_name, group_ratio, ratio_observed_at_ms, ratio_source, effective_from_ms, effective_to_ms, detected_at_ms, timing_source)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, ruleId, useNew ? newGroup : current.group_name, useNew ? newRatio ?? null : current.group_ratio,
+              useNew ? (newRatio == null ? null : detectedAt) : current.ratio_observed_at_ms, useNew ? (newRatio == null ? null : "group_catalog") : current.ratio_source,
+              effectiveFrom, closesAt, detectedAt, timingSource]
+          );
+          for (const [index, key] of keys.entries()) await conn.query(
+            "INSERT INTO reconciliation_segment_keys (segment_id, upstream_station_id, token_id, token_name, match_source, active_token_key) VALUES (?, ?, ?, ?, 'agent', ?)",
+            [id, key.upstreamStationId, key.tokenId, key.tokenName ?? null, closesAt == null ? (index === 0 ? ruleActiveKey : tokenKeyOf(key)) : null]
+          );
+          return id;
+        };
+        if (plan.kind === "windowed") {
+          await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [plan.windowStart, current.id]);
+          await openSegment(plan.windowStart, plan.windowKeys, { closesAt: plan.windowEnd, timingSource: "key_change_window" });
+          await openSegment(plan.windowEnd, plan.after, { fresh: true });
+        } else {
+          await conn.query("UPDATE reconciliation_rule_segments SET effective_to_ms = ? WHERE id = ?", [plan.cutoverAt, current.id]);
+          await openSegment(plan.cutoverAt, plan.after, { fresh: true });
+        }
+        // 换手那天的挡和换段同一个事务写：挡写失败整批回滚，不会出现「换了段、挡没写上」把错的钱固定下来
+        if (keyBlock) await conn.query("UPDATE reconciliation_rules SET key_blocks = ? WHERE id = ?", [JSON.stringify(addKeyBlock(rule.key_blocks, keyBlock)), ruleId]);
+        const [firstKey] = plan.after;
+        // canonicalKey 是按 [provider, panel, accountId, tokenId] 算的（lib/reconciliation-scope-policy.js 的
+        // canonicalBillingKey），tokenId 一换它就变了：不跟着改，下一次结账会发现「现在算出来的 canonicalKey 和
+        // 锚定时记的不一样」，当成 SOURCE_BINDING_UNCONFIRMED 挡住——K2b 换 Key 的本意是不打扰，不能换了反而挡住。
+        // 调用方（server/reconciliation.js）传 plan.canonicalKey 时才改；不传（比如下面几条测试，不关心锚定）就不动
+        const sets = ["token_id = ?", "token_name = ?", "active_token_key = ?"], params = [firstKey.tokenId, firstKey.tokenName ?? rule.token_name, ruleActiveKey];
+        if (plan.canonicalKey !== undefined) { sets.push("canonical_key = ?"); params.push(plan.canonicalKey); }
+        if (plan.group !== undefined) { sets.push("fixed_group = ?"); params.push(plan.group); }
+        await conn.query(`UPDATE reconciliation_rules SET ${sets.join(", ")} WHERE id = ?`, [...params, ruleId]);
+        // 不调 refreshSegmentKeys：它会把这条绑定全部 match_source = 'initial' 的历史段都改成 rules 现在这把 Key
+        // （db/segment-keys.js 的注释：「改绑定的 Key：来源是 initial 的行都跟着走，旧代码整条绑定的历史都按现在
+        // 这把取」）——那是手动改绑定的语义，不是 K2b 的；K2b 每段该用哪把 Key 已经按时间精确写好了（上面
+        // openSegment 逐段写的 'agent' 行），历史段不该跟着现在这把一起变，不然旧段的上游成本会算成新 Key 的
+      }
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      if (err?.code === "ER_DUP_ENTRY" || Number(err?.errno) === 1062) return { conflict: true };
+      throw err;
+    } finally { conn.release(); }
+    return { conflict: false };
   }
 
   async archiveRule(id, { now = Date.now() } = {}) {

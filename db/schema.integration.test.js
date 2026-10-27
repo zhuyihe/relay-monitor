@@ -820,6 +820,12 @@ defineReconciliationRepositoryContract({
       await contractPool.query("DELETE FROM reconciliation_billing_capabilities WHERE identity IN (?)", [capabilityIdentities]);
     }
     if (!ruleIds.length) return;
+    // reconciliation_segment_keys 没有 rule_id 列（按 segment_id 记），不在下面这个按 rule_id 删的循环里；
+    // 漏删会在共享的测试库里留下 active_token_key 的残留行，下次谁写到同一个值就会撞上这条已经不存在的绑定
+    // （K2b 的 applyKeyChangePlans 测试第一次真的大量写 active_token_key 才把这个漏洞炸出来）
+    await contractPool.query(
+      "DELETE FROM reconciliation_segment_keys WHERE segment_id IN (SELECT id FROM reconciliation_rule_segments WHERE rule_id IN (?))", [ruleIds]
+    );
     for (const table of ["reconciliation_alert_state", "reconciliation_snapshots", "reconciliation_ledger", "reconciliation_settlement_state", "reconciliation_rule_segments",
       "reconciliation_rule_channels"]) await contractPool.query(`DELETE FROM ${table} WHERE rule_id IN (?)`, [ruleIds]);
     await contractPool.query("DELETE FROM reconciliation_rules WHERE id IN (?)", [ruleIds]);
