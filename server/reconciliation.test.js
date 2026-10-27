@@ -10111,3 +10111,30 @@ test("K2b + Sub2API：两条绑定互换 Key（挪过）——b 当天及以后�
   }
   assert.equal(s.costOn("2026-10-11"), s.truthOn("2026-10-11"), "b 以前那天照常结账");
 });
+
+// Sub2API 上游（用户在用）：按天读账单，切不开中途。换 Key 那天整窗各把 Key 取全天再相加。
+// 识别还不认 Sub2API 的 Key 目录（#142 另合），这里直接塞识别结果。所有行（这条绑定每一天）上游成本之和 = 各 Key 当天用量之和
+test("K2b + Sub2API：同一条绑定换 Key——换 Key 那天整窗各把 Key 取全天再相加，每天上游成本 = 各 Key 当天用量之和（以前整窗只取最新那把，旧 Key 的用量漏了）", async (t) => {
+  const A = Date.parse("2026-10-11T01:00:00Z"), SWITCH = Date.parse("2026-10-11T20:00:00Z"), B = Date.parse("2026-10-12T01:00:00Z");
+  let now = A;
+  t.mock.method(Date, "now", () => now);
+  const windows = { 9: [0, SWITCH], 20: [SWITCH, null] }; // 旧 Key 用到 SWITCH，新 Key 从 SWITCH 起（每秒 1 美元）
+  const fake = createFakeSub2Api({ keys: [{ id: 9, name: "stable" }, { id: 20, name: "k20" }], dayUsageUsd: (keyId, day) => secondsInDay(windows[keyId], day), now: () => Date.now() });
+  const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], sub2api: fake,
+    usageOf: () => 0, tokenKeyOf: () => "sk-unused", extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "k20" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [] } });
+  Object.assign(f.stations[0], { type: "sub2api", accessToken: "jwt" });
+  const channelToken = { 1: 9 };
+  const inject = () => { f.rt._keyAgentIdentifyCache = { at: now, stationId: "own", etag: null, result: { ok: true, status: 200, stale: false, fetchedAtMs: now, revealIssues: [],
+    channels: Object.entries(channelToken).map(([id, tokenId]) => ({ channelId: Number(id), keyless: false, slots: [{ index: 0, state: "identified",
+      matches: [{ stationId: "upstream", tokenId, tokenName: tokenId === 9 ? "stable" : "k20", via: "fingerprint" }] }] })) } }; };
+  inject();
+  await f.module.refreshDue(now);
+  channelToken[1] = 20; now = B; inject();
+  await f.module.refreshDue(now); // 认出换了 Key：[a, b) 过渡段两把 Key 都放着
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 20);
+  for (const iso of ["2026-10-13T01:00:00Z", "2026-10-14T01:00:00Z"]) { now = Date.parse(iso); inject(); await f.module.refreshDue(now); }
+  const cost = (day) => f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === day).reduce((total, row) => total + Number(row.cost_usd), 0);
+  const truth = (day) => Object.values(windows).reduce((total, window) => total + secondsInDay(window, day), 0);
+  for (const day of ["2026-10-11", "2026-10-12", "2026-10-13"]) assert.equal(cost(day), truth(day), `${day}：各 Key 当天用量之和`);
+});
