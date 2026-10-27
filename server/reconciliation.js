@@ -1166,9 +1166,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     if (at < observedAt && plan.closes.some((close) => { const watch = rt._regroupWatch?.get(close.ruleId); return !watch || watch.dirty; })) {
       for (const create of creates.filter(Boolean)) create.keyBlocks = [...(create.keyBlocks || []), { code: "KEY_CONFLICT_GAP", sinceMs: at, untilMs: observedAt }];
     }
-    // 别的上游下的新组还没回答「这把 Key 还给别处用吗」（新绑定先不算利润，需处理里等回答）：回答以前这把新 Key 的用量谁都不算，旧绑定的过渡段也不放它——
+    // 别的上游下的新组交给自动开始（新组为空，K2c-3b 的做法；K2c-4 起新组一律建、没回答的绑定先不算利润，这一段不会走到）：回答以前这把新 Key 的用量谁都不算，旧绑定的过渡段也不放它——
     // 放进去会把别的消费者对这把 Key 的用量算成这条绑定的成本。过渡段里没放的这一段（[a, b)）不能固定成少算了新 Key 的数：旧绑定写一段冲突期，那几天固定成「—」加原因
-    const delegatedRefs = plan.groups.filter((group, index) => !creates[index] || (isForeignGroup(group) && creates[index].coverageDeclaration == null)).map((group) => group.ref);
+    const delegatedRefs = plan.groups.filter((_, index) => !creates[index]).map((group) => group.ref);
     const isDelegatedKey = (key) => delegatedRefs.some((ref) => ref.upstreamStationId === key.upstreamStationId && Number(ref.tokenId) === Number(key.tokenId));
     for (const close of plan.closes) {
       const rule = byId.get(close.ruleId);

@@ -10921,19 +10921,6 @@ test("K2c 换到另一个上游（New API → Sub2API）：换 Key 在 b 那天 
   assert.equal(rowsOn12.some((row) => row.rule_id === "rr_live"), false);
 });
 
-// 审核 #146 第 1 轮 M2、L4：新上游还没回答「只给我的渠道用」（New API 旧绑定，交给自动开始，渠道先停着等回答）——回答以前新 Key 的用量谁都不算，
-// 旧绑定的过渡段不放它；过渡段里没放的那一段旧绑定写冲突期，那几天固定成「—」加原因
-test("K2c 换到另一个上游（New API → New API）：新上游没答「只给我的渠道用」——旧绑定在 b 归档、不建新绑定，过渡段不放新 Key，[a, b) 写成冲突期（那几天不固定）", async (t) => {
-  const s = await crossUpstreamScenario(t, { from: "newapi", to: "newapi", targetAccountUse: "unknown" });
-  const old = await s.f.repository.getRule("rr_live", { includeArchived: true });
-  assert.deepEqual([old.enabled, old.archivedAtMs], [false, REGROUP_B], "旧绑定在 b 归档");
-  assert.deepEqual(s.created, [], "没有新绑定：渠道先停着等回答");
-  const oldSegments = await s.f.repository.listSegments("rr_live");
-  assert.equal(oldSegments.flatMap((segment) => segment.keys).some((key) => key.upstreamStationId === "upstream2"), false, "过渡段里没有新上游的 Key（回答以前它的用量谁都不算）");
-  assert.deepEqual(old.keyBlocks?.map((block) => [block.code, block.untilMs]), [["KEY_CONFLICT_GAP", REGROUP_B]], "[a, b) 写成冲突期");
-  assert.equal(s.f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date >= "2026-10-11").length, 0, "冲突期碰到的日子不固定，不写少了新 Key 的数");
-});
-
 // 审核 2 第二轮 F1：事项解开（渠道回到原来的 Key）转成一段冲突期，解开以后又出新事项、又解开，旧的冲突期不会被覆盖——两段的日子都永远不固定
 test("K2b：冲突期叠着存好几段——事项解开、又出新事项、又解开，第一段的冲突期还在，两段碰到的日子都不固定，中间干净的日子照常固定", async (t) => {
   const { f, agent, round, state, booked } = await readerOutageFixture(t);
