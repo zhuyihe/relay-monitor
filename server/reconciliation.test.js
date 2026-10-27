@@ -10843,3 +10843,81 @@ test("addKeyBlock（L1）：超过 200 段把最旧的两段并成一段，不�
   assert.equal(blocks[0].sinceMs, 0, "最旧的起点还在");
   assert.equal(blocks.at(-1).untilMs, 204 * 10 + 5);
 });
+
+// ---- 结账前的 Key 占用检查（server/reconciliation.js keyOccupancyProblems）----
+// 两条绑定互换 Key（和上面「两条绑定互换 Key（挪过）」同一个夹具），换手那天在 b 切开；每个用例在换手以后、结账以前改一下库里的段，
+// 造出审核 #133 各轮里复现过的坏状态：同一把 Key 同一段时间算在两条绑定里（重叠，上游成本算两遍）、换手中间漏了一段（空档）。
+async function occupancyFixture(t, policy) {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const warnings = [];
+  t.mock.method(console, "warn", (...args) => { warnings.push(args.join(" ")); });
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let swapped = false;
+  const f = liveReconciliationFixture(t, { policy,
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    extraRuleIds: ["rr_b"],
+    channelsByRule: { rr_live: [1], rr_b: [2] },
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [
+      { id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(swapped ? keyTen : keyNine), f: "unused-1" }] },
+      { id: 2, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(swapped ? keyNine : keyTen), f: "unused-2" }] },
+    ] },
+  });
+  await f.module.refreshDue(now);
+  for (const row of f.repository.tables.rules) row.active_token_key = row.canonical_key;
+  for (const keyRow of f.repository.tables.segmentKeys) keyRow.active_token_key = f.repository.tables.rules.find((row) => row.token_id === keyRow.token_id)?.canonical_key ?? null;
+  swapped = true;
+  now = Date.parse("2026-10-12T01:00:00Z"); // 上海 10-12 09:00 互换
+  await f.module.refreshDue(now);
+  const swapAt = now;
+  const segmentsOf = (ruleId) => f.repository.tables.segments.filter((row) => row.rule_id === ruleId).sort((a, b) => Number(a.effective_from_ms) - Number(b.effective_from_ms));
+  const settleDay = async () => { now = Date.parse("2026-10-12T17:00:00Z"); await f.module.refreshDue(now); return ["rr_live", "rr_b"].map((id) => f.state.ledger.filter((row) => row.rule_id === id && row.bill_date === "2026-10-12").length); };
+  return { f, swapAt, segmentsOf, settleDay, warnings };
+}
+
+for (const policy of POLICIES) test("占用检查：正常互换 Key 以后，换手那天两条绑定照常固定，不报占用问题 [" + policy + "]", async (t) => {
+  const { settleDay, warnings } = await occupancyFixture(t, policy);
+  const [live, b] = await settleDay();
+  assert.ok(live >= 1 && b >= 1, `两条都固定了：${live} ${b}`);
+  assert.deepEqual(warnings.filter((line) => line.includes("[key-occupancy]")), []);
+});
+
+// 只查按 Key 整体取数的绑定（immediate / next-complete-day，生产的绑定都是）；旧版 legacy 规则不认领 Key，不在检查范围
+test("占用检查：同一把 Key 同一段时间算在两条绑定里（重叠）——换手那天两条都先不固定，记 KEY_USE_MISMATCH，日志写明哪把 Key、哪两条绑定、哪段时间", async (t) => {
+  const { f, swapAt, segmentsOf, settleDay, warnings } = await occupancyFixture(t, "immediate");
+  segmentsOf("rr_live")[0].effective_to_ms = swapAt + 3 * 3600000; // rr_live 的旧段（K9）多算到 b 以后 3 小时，和 rr_b 从 b 起的 K9 重叠
+  assert.deepEqual(await settleDay(), [0, 0], "重叠的那天两条都不固定");
+  const lines = warnings.filter((line) => line.includes("[key-occupancy]"));
+  assert.ok(lines.length >= 1 && lines[0].includes("2026-10-12") && lines[0].includes("rr_live") && lines[0].includes("rr_b") && lines[0].includes("算两遍"), lines.join("\n"));
+  assert.ok(!lines.join("\n").includes("sk-"), "日志里没有 Key 本身");
+  for (const ruleId of ["rr_live", "rr_b"]) {
+    const [state] = await f.repository.listSettlementStates([ruleId], { billDates: ["2026-10-12"] });
+    assert.deepEqual([state?.retryReason, state?.manualReason ?? null], ["KEY_USE_MISMATCH", null], "是会自己好的那类（实时·还在读取），不是要人处理");
+  }
+});
+
+test("占用检查：换手中间漏了一段（两条在算的绑定之间的空档）——换手那天先不固定", async (t) => {
+  const { swapAt, segmentsOf, settleDay, warnings } = await occupancyFixture(t, "immediate");
+  segmentsOf("rr_b")[1].effective_from_ms = swapAt + 3 * 3600000; // rr_b 的新段（K9）晚 3 小时才开始，b 到那一刻的 K9 没人认领
+  assert.deepEqual(await settleDay(), [0, 0], "有空档的那天都不固定");
+  assert.ok(warnings.some((line) => line.includes("[key-occupancy]") && line.includes("漏")), warnings.join("\n"));
+});
+
+for (const policy of POLICIES) test("占用检查：Key 挪给没在算的渠道（rr_b 在 b 停了）——后面没有在算的绑定认领，是正常的空档，不挡 [" + policy + "]", async (t) => {
+  const { f, swapAt, segmentsOf, settleDay, warnings } = await occupancyFixture(t, policy);
+  const row = f.repository.tables.rules.find((item) => item.id === "rr_b");
+  row.archived_at = new Date(swapAt).toISOString(); row.archived_at_ms = swapAt; row.enabled = 0; // rr_b 在 b 停了，它新段的 K9 不再有人认领
+  segmentsOf("rr_b").pop();
+  segmentsOf("rr_b").at(-1).effective_to_ms = swapAt;
+  await settleDay();
+  assert.deepEqual(warnings.filter((line) => line.includes("[key-occupancy]")), []);
+  assert.ok(f.state.ledger.some((entry) => entry.rule_id === "rr_live" && entry.bill_date === "2026-10-12"), "rr_live 照常固定");
+});
+
+test("占用检查：读不到别的绑定的段——这一天先不固定，不当没问题放行", async (t) => {
+  const { f, settleDay } = await occupancyFixture(t, "immediate");
+  t.mock.method(f.repository, "listSegmentsForRules", async () => { throw new Error("连接断了"); });
+  assert.deepEqual(await settleDay(), [0, 0]);
+});
