@@ -2967,8 +2967,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const endMs = Math.min(to, segment.effectiveTo ?? Infinity);
       if (!(startMs < endMs)) return;
       const piece = { startMs, endMs, ratio: segment.ratio ?? fallback.ratio, group: segment.group ?? fallback.group };
+      // 换 Key 的过渡段 [a, b)：渠道那段时间到底在用旧 Key 还是新 Key 分不清，里面按旧 Key 的倍率切。新旧倍率不一样就算不准（会出一个假的「对不上」），
+      // 这一天应付成本给 KEY_CHANGE_RATIO_DIFFERS 不比差额；倍率一样（最常见）照常算（审核 #133 第 4 轮 M1，总指挥 10-27 定）
+      const next = sorted[index + 1];
+      if (segment.timingSource === "key_change_window" && next && (next.ratio ?? fallback.ratio) !== piece.ratio) {
+        pieces.push({ ...piece, keyChangeAmbiguous: true, keyChangeAtMs: segment.effectiveTo ?? segment.effectiveFrom, keyChangeBetween: [segment.effectiveFrom, segment.effectiveTo ?? segment.effectiveFrom] });
+        return;
+      }
       const last = pieces.at(-1);
-      if (last && last.endMs === startMs && last.ratio === piece.ratio && last.group === piece.group) last.endMs = endMs; else pieces.push(piece);
+      // 相邻两段倍率一样就合成一段（同倍率不同分组在半点也不挡：数是能算的；分组是 auto 的，expectedCostForDay 按分组另挡）
+      if (last && !last.keyChangeAmbiguous && last.endMs === startMs && last.ratio === piece.ratio && last.group !== "auto" && piece.group !== "auto") last.endMs = endMs; else pieces.push(piece);
     });
     return pieces.length ? pieces : resultSegments;
   }
@@ -3004,7 +3012,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (bucketAdmin !== Number(result.downstream.adminUsageQuotaUnits)) console.debug(`应付成本对账：绑定 ${rule.id} ${billDayOf(window)} 桶里管理员自用 ${bucketAdmin} 额度，R1 扣了 ${result.downstream.adminUsageQuotaUnits}`);
     }
     return { usd: expected.usd, reason: expected.reason, tokens: expected.tokens,
-      detail: { usd: expected.usd, reason: expected.reason, tokens: expected.tokens, byModel: expected.byModel, missingPriceModels: expected.missingPriceModels, segments: expected.segments, byChannel: expected.byChannel,
+      detail: { usd: expected.usd, reason: expected.reason, tokens: expected.tokens, ...(expected.keyChange ? { keyChange: expected.keyChange } : {}), byModel: expected.byModel, missingPriceModels: expected.missingPriceModels, segments: expected.segments, byChannel: expected.byChannel,
         pricingReadAt: pricing?.readAt ?? null, quotaPerUnit } };
   }
 
@@ -3640,7 +3648,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           missing.set(fact.ruleId, (entry?.detail?.expected?.missingPriceModels || []).map((model) => model.model).filter(Boolean));
         }
       }
-      const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [] });
+      // 永远不固定的日子（KEY_CONFLICT_GAP、OWN_CONSUME_LOG_GAP 这类 sticky 原因，状态行记着）：整页按天、行的合计里「只去掉那几天」，不当成还在读取（审核 #133 第 4 轮 M3，和 R2「关过的日子」同口径）
+      const stickyDays = new Map();
+      if (labels.length && results.length) {
+        const states = await repository.listSettlementStates(results.map((row) => row.rule.id), { billDates: labels }).catch(() => []);
+        for (const state of states) if (state.manualReason != null && reasonKindOf(state.manualReason) === "sticky") {
+          if (!stickyDays.has(state.ruleId)) stickyDays.set(state.ruleId, new Map());
+          stickyDays.get(state.ruleId).set(state.billDate, state.manualReason);
+        }
+      }
+      const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [], stickyDays });
       // 固定成本：固定采购的上游按天平摊（lib/profit.js），换成美元要那个上游设了汇率；有一个没设就给 null（页面写「固定成本算不出，净利先不算」）
       // 最小改法（审核 #126 M3）：按天摊，已固定的日子按账本那天记的 cost_basis 判要不要摊（fixed 才摊、usage 不摊）、汇率用那天的 cost_rate；
       // 还没固定的日子（今天、还在读取）按现在的设置摊。注意：摊的「金额」本身还是按现在的购买记录算，改了购买金额过去的日子会跟着变——
