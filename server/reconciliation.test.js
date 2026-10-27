@@ -7523,6 +7523,35 @@ test("固定成本补数（G 审核第三轮）：新加的上游，它建立以
   assert.equal(of("upstream").length, before + 3, "中间几天也补上");
 });
 
+test("固定成本补数（G 总指挥第三轮）：没有账本行的日子沿用这个上游此前离它最近的账本行的计法（按用量就记 0），一条都没有才用现在的计法", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  const upstream = f.stations.find((station) => station.id === "upstream");
+  await f.module.refreshDue(now); // 账本最早一天 10-07，按用量
+  assert.ok(f.state.ledger.every((row) => row.cost_basis === "usage"), "前提：账本是按用量算的");
+  for (const row of f.rows) row.enabled = 0; // 绑定停了：以后的日子不再有账本行
+  // 之后才改成固定成本，购买记录没填起始日期；清掉表模拟上线前的状态，隔两天再补：10-09 没有账本行，沿用 10-08 的「按用量」记 0，不按现在的固定摊
+  f.repository.tables.fixedCostDays.length = 0;
+  upstream.fixedPurchases = [{ amount: 300, days: 30 }]; upstream.cnyPerUsd = 5;
+  now += 2 * 86400000;
+  await f.module.refreshDue(now);
+  const rows = f.repository.tables.fixedCostDays.filter((row) => row.station_id === "upstream").map((row) => [row.bill_date, row.basis, Number(row.cost_cny)]).sort();
+  // 这一轮新结的日子（有账本行，已经是固定）按账本；10-07、10-08 的账本是按用量
+  const ledgerDays = new Set(f.state.ledger.map((row) => row.bill_date));
+  assert.deepEqual(rows.filter(([day]) => day <= "2026-10-08"), [["2026-10-07", "usage", 0], ["2026-10-08", "usage", 0]]);
+  // 清掉账本里 10-09 以后的行再补一遍，模拟这几天没有账本行：沿用 10-08 的按用量
+  f.repository.tables.ledger.splice(0, f.repository.tables.ledger.length, ...f.repository.tables.ledger.filter((row) => row.bill_date <= "2026-10-08"));
+  f.repository.tables.fixedCostDays.length = 0;
+  now += 86400000;
+  await f.module.refreshDue(now);
+  const again = f.repository.tables.fixedCostDays.filter((row) => row.station_id === "upstream" && row.bill_date <= "2026-10-08").map((row) => [row.bill_date, row.basis, Number(row.cost_cny)]).sort();
+  assert.deepEqual(again, [["2026-10-07", "usage", 0], ["2026-10-08", "usage", 0]]);
+  assert.ok(ledgerDays.size >= 2);
+  const gapDays = f.repository.tables.fixedCostDays.filter((row) => row.station_id === "upstream" && row.bill_date > "2026-10-08" && !f.state.ledger.some((l) => l.bill_date === row.bill_date)).map((row) => [row.basis, Number(row.cost_cny)]);
+  assert.ok(gapDays.length >= 1 && gapDays.every(([basis, cny]) => basis === "usage" && cny === 0), `没有账本行的日子沿用按用量：${JSON.stringify(gapDays)}`);
+});
+
 test("固定成本补数（G 审核第二轮）：以前的日子用账本里结账那天记的汇率（上线时数不跳）；以后每天只从各上游已写的最后一天往后接着补", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });

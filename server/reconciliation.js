@@ -2541,11 +2541,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const prior = dayFact.get(fact.billDate);
         if (!prior || (fact.costBasis && fact.costBasis !== "fixed") || (!prior.costBasis && fact.costBasis)) dayFact.set(fact.billDate, fact);
       }
+      // 没有账本行的日子沿用这个上游在这天以前离它最近的那条账本行的计法；这天以前一条都没有的才用现在的计法（和上线前页面显示的一样）
+      let carry = null;
+      if (last) { const [row] = await repository.listFixedCostDays([station.id], last, last); carry = row && ["fixed", "usage"].includes(row.basis) ? row.basis : null; }
       const nowBasis = dayBasisOfStation(station), rate = rateSnapshotOf(station), purchases = purchasesOf(station), rows = [];
       for (let day = from; day <= lastDay; day = shiftDayLabel(day, 1)) {
         const fact = dayFact.get(day);
         if (createdDay && day < createdDay && !fact) { rows.push({ stationId: station.id, billDate: day, basis: "excluded", costCny: 0, costRate: null, note: null }); continue; }
-        const basis = fact?.costBasis ? (fact.costBasis === "fixed" ? "fixed" : "usage") : nowBasis;
+        if (fact?.costBasis) carry = fact.costBasis === "fixed" ? "fixed" : "usage";
+        const basis = fact?.costBasis ? carry : (carry ?? nowBasis);
         if (basis !== "fixed") { rows.push({ stationId: station.id, billDate: day, basis, costCny: 0, costRate: null, note: null }); continue; }
         const startMs = dayStartInTz(day, tz);
         const amortized = amortizeFixedCost(purchases, { startMs, endMs: shiftedDayStartInTz(startMs, 1, tz), tz });
