@@ -42,7 +42,7 @@ const SCHEMA = {
   rules: {
     keys: { PRIMARY: ["id"], uq_reconciliation_active_token: ["active_token_key"] },
     notNull: ["id", "upstream_station_id", "own_station_id", "token_id", "token_name", "fixed_group", "timezone", "enabled", "billing_policy", "scope_version", "cost_coverage"],
-    varchar: { id: 32, upstream_station_id: 32, own_station_id: 32, token_name: 160, fixed_group: 160, timezone: 64, active_token_key: 255, billing_policy: 32, cost_coverage: 24, provider: 24, canonical_key: 255, key_issue_code: 40, start_source: 16 },
+    varchar: { id: 32, upstream_station_id: 32, own_station_id: 32, token_name: 160, fixed_group: 160, timezone: 64, active_token_key: 255, billing_policy: 32, cost_coverage: 24, provider: 24, canonical_key: 255, key_issue_code: 40, start_source: 16, stop_reason: 24 },
     onUpdate: "updated_at",
   },
   channels: {
@@ -674,11 +674,11 @@ export class MemoryReconciliationRepository {
     return { conflict: false, stale: false, ruleIds: createdIds };
   }
 
-  async archiveRule(id, { now = this.now(), optout = false } = {}) {
+  async archiveRule(id, { now = this.now(), optout = false, reason = null } = {}) {
     return this.#transaction("archiveRule", async (tx) => {
       await this.#lock(tx, `rule:${id}`);
       const entry = this.#ruleEntry(tx, id);
-      const affected = entry ? this.#update(tx, "rules", [entry], { enabled: 0, active_token_key: null, archived_at: this.#timestamp(), archived_at_ms: bigint(now) }) : 0;
+      const affected = entry ? this.#update(tx, "rules", [entry], { enabled: 0, active_token_key: null, archived_at: this.#timestamp(), archived_at_ms: bigint(now), stop_reason: reason }) : 0;
       if (affected) {
         this.#update(tx, "channels", this.#rows("channels", tx).filter(({ row }) => sameText(row.rule_id, id)), { active_channel_key: null });
         this.#refreshSegmentKeys(tx, id);

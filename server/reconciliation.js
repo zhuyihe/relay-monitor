@@ -3427,15 +3427,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // 「用户停了」的渠道（k-plan 第七节）：停止算利润 = 归档这条绑定 + 同一个事务把它的渠道记成用户停的（optout: true）
     listChannelOptouts: (ownStationId = null) => repository.listChannelOptouts(ownStationId),
     markRuleStartSource: (ruleId, source) => repository.markRuleStartSource(ruleId, source),
-    // 删上游时一起停掉它下面渠道的利润（k-plan 12.2，总指挥 10-25 定）：这个上游下在算的绑定整条归档，渠道记成「用户停的」（不再自动开始，
-    // 上游加回来以后用户可以再点「开始算利润」）。已经算出来的日子留着。这里和上游记录是两个存储（绑定在对账表里，上游在站点文档里），做不成一个数据库事务：
+    // 删上游时一起停掉它下面渠道的利润（k-plan 12.2）：这个上游下在算的绑定整条归档，来源记 stop_reason = upstream_removed——**不记成「用户停的」**
+    // （reconciliation_channel_optout）：用户删的是上游，不是在说「这几个渠道别算」；上游加回来（只给我的渠道用），或者渠道换到别的这样的上游，下一轮自动开始。已经算出来的日子留着。这里和上游记录是两个存储（绑定在对账表里，上游在站点文档里），做不成一个数据库事务：
     // 调用方（删除接口）先停渠道、再删上游——中途失败的话是「渠道停了、上游还在」，安全的一边，重试就是幂等的（停过的绑定不会再出现）。
     // 返回 { ruleCount, channelCount }，删除确认框要写「这个上游下 N 个渠道也会停止算利润」用的就是这个数（K2d）
     async stopUpstreamChannels(upstreamStationId) {
       const rules = (await repository.listRules()).filter((rule) => rule.enabled && rule.upstreamStationId === upstreamStationId);
       let channelCount = 0;
       for (const rule of rules) {
-        await api.archiveRule(rule.id, { optout: true });
+        await api.archiveRule(rule.id, { reason: "upstream_removed" });
         channelCount += rule.channels.length;
       }
       return { ruleCount: rules.length, channelCount };
@@ -3446,13 +3446,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     },
     addChannelOptouts: (ownStationId, channelIds, atMs) => repository.addChannelOptouts(ownStationId, channelIds, atMs),
     removeChannelOptouts: (ownStationId, channelIds) => repository.removeChannelOptouts(ownStationId, channelIds),
-    async archiveRule(id, { optout = false } = {}) {
+    async archiveRule(id, { optout = false, reason = null } = {}) {
       return serializeWrite(async () => {
         const rule = await repository.getRule(id);
         if (!rule) throw ruleNotFound();
         const billingSource = billingSourceState();
         const ok = await withObservationSourceLock(rule, currentSourceCredential(rule), async () => {
-          const archived = await repository.archiveRule(id, { optout });
+          const archived = await repository.archiveRule(id, { optout, reason });
           if (archived) clearBillingResults(id);
           return archived;
         }, billingSource);

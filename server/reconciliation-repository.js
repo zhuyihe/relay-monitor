@@ -82,6 +82,7 @@ export function ruleFromRow(row, channels = []) {
     keyIssue: row.key_issue_code ? { code: row.key_issue_code, sinceMs: Number(row.key_issue_since_ms) } : null,
     // 系统自动开始的才带（用户点的是没有这个字段，规则的样子和以前逐字一样）
     ...(row.start_source ? { startSource: row.start_source } : {}),
+    ...(row.stop_reason ? { stopReason: row.stop_reason } : {}),
     ...normalizeRuleSourceBinding(row.source_binding, row.cost_coverage || "unknown"),
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null,
     // 解除时刻（毫秒）：新写的行由进程写；回填前的旧行读不到时退回 archived_at
@@ -969,15 +970,15 @@ export class ReconciliationRepository {
     } finally { conn.release(); }
   }
 
-  async archiveRule(id, { now = Date.now(), optout = false } = {}) {
+  async archiveRule(id, { now = Date.now(), optout = false, reason = null } = {}) {
     const conn = await this.pool.getConnection();
     let result;
     try {
       await conn.beginTransaction();
       await conn.query("SELECT id FROM reconciliation_rules WHERE id = ? AND archived_at IS NULL FOR UPDATE", [id]);
       [result] = await conn.query(
-        "UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, archived_at = NOW(), archived_at_ms = ? WHERE id = ? AND archived_at IS NULL",
-        [now, id]
+        "UPDATE reconciliation_rules SET enabled = 0, active_token_key = NULL, archived_at = NOW(), archived_at_ms = ?, stop_reason = ? WHERE id = ? AND archived_at IS NULL",
+        [now, reason, id]
       );
       if (result.affectedRows) {
         await conn.query("UPDATE reconciliation_rule_channels SET active_channel_key = NULL WHERE rule_id = ?", [id]);

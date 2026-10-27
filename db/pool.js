@@ -215,6 +215,9 @@ export async function ensureSchema(pool) {
   // K2c：这条绑定是怎么开始算的——用户点的（NULL 或 'user'）还是系统自动开始的（'auto'：上游答了「只给我的渠道用」，认出新渠道用了它的 Key）。
   // 只用来在「渠道」页签写「10月26日起系统自动开始算」，不进任何结账、快照指纹的计算
   await addColumnIfMissing(pool, "reconciliation_rules", "start_source", "VARCHAR(16) NULL");
+  // K2c：这条绑定是因为什么归档的，只有系统停的才记（'upstream_removed'：用户删了上游）；用户自己停的记在 reconciliation_channel_optout，不在这里。
+  // 删上游不是在说「这几个渠道别算」，所以不进 optout——上游加回来、渠道换到别的「只给我的渠道用」的上游，会自动开始
+  await addColumnIfMissing(pool, "reconciliation_rules", "stop_reason", "VARCHAR(24) NULL");
   await addIndexIfMissing(pool, "reconciliation_snapshots", "idx_reconciliation_snapshot_segment", "(segment_id)");
   // 写快照前「先读出同一把 Key 的那一组绑定」（计划 P1c）走这个索引；解除的绑定也留着，表会越来越大
   await addIndexIfMissing(pool, "reconciliation_rules", "idx_reconciliation_rule_token", "(token_id, archived_at)");

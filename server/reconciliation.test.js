@@ -10143,7 +10143,7 @@ test("K2b + Sub2API：同一条绑定换 Key——换 Key 那天整窗各把 Key
 // K2c 自动开始：上游答了「只给我的渠道用」，读取服务认出一个新渠道（渠道 2）用了它的 Key（K20），轮询的这一轮就自动开始——和用户点「开始算利润」一样，从今天 0 点起算
 // （点以前今天已经产生的用量也算进来）。接入向导用桩（真接入向导的预览+确认在 channel-onboarding.test.js 的端到端里测过），这里量钱：
 // 每天所有行的上游成本之和 = 各 Key 当天用量之和——自动开始以前的日子 K20 没人算（渠道还没开始），开始那天起整天算
-async function autoStartScenario(t, { sub2, optout = false }) {
+async function autoStartScenario(t, { sub2, optout = false, removeUpstreamFirst = false }) {
   let now = REGROUP_A;
   t.mock.method(Date, "now", () => now);
   const keys = Object.fromEntries([9, 20].map((id) => [id, "sk-" + String(id).padStart(2, "0") + "Kx9z".repeat(9)]));
@@ -10183,6 +10183,7 @@ async function autoStartScenario(t, { sub2, optout = false }) {
     })) }),
   };
   if (optout) await f.repository.addChannelOptouts("own", [2], now);
+  if (removeUpstreamFirst) await f.module.stopUpstreamChannels("upstream"); // 用户删了这个上游，又把它加回来（上游站点记录没动，只看绑定和 optout）
   // 渠道 2 在 b 这一轮才出现（用着 K20）
   channelToken[2] = 20; now = REGROUP_B; inject();
   await f.module.refreshDue(now);
@@ -10212,14 +10213,25 @@ test("K2c 自动开始：用户停过的渠道不自动开始（只有用户点�
   assert.deepEqual(s.created, [], "停过的渠道没有自动建");
 });
 
-test("K2c 删上游停渠道：stopUpstreamChannels 把这个上游下在算的绑定整条归档、渠道记成「用户停的」（不再自动开始），别的上游下的不动；返回停了几条绑定、几个渠道；再调一次什么也不停", async (t) => {
+test("K2c 删上游停渠道：stopUpstreamChannels 把这个上游下在算的绑定整条归档（来源 upstream_removed，不进 optout），别的上游下的不动；返回停了几条绑定、几个渠道；再调一次什么也不停", async (t) => {
   const f = liveReconciliationFixture(t, { policy: "immediate", segments: [{ id: "s1", group: "g1", from: 0 }], extraRuleIds: ["rr_b", "rr_c"], channelsByRule: { rr_live: [1, 2], rr_b: [3], rr_c: [4] } });
   f.repository.tables.rules.find((row) => row.id === "rr_c").upstream_station_id = "other-upstream";
   assert.deepEqual(await f.module.countUpstreamChannels("upstream"), { ruleCount: 2, channelCount: 3 }, "确认框数的是渠道数");
   assert.deepEqual(await f.module.stopUpstreamChannels("upstream"), { ruleCount: 2, channelCount: 3 });
   const archived = (await f.repository.listRules({ includeArchived: true })).filter((rule) => rule.archivedAt).map((rule) => rule.id).sort();
   assert.deepEqual(archived, ["rr_b", "rr_live"]);
-  assert.deepEqual((await f.repository.listChannelOptouts("own")).map((row) => row.channelId), [1, 2, 3], "停的渠道记成用户停的");
+  assert.deepEqual(await f.repository.listChannelOptouts("own"), [], "删上游不是在说「这几个渠道别算」：不记成用户停的（optout 表里没有它们）");
+  assert.deepEqual((await f.repository.listRules({ includeArchived: true })).filter((rule) => rule.archivedAt).map((rule) => rule.stopReason), ["upstream_removed", "upstream_removed"], "停的来源单独记一种");
   assert.equal((await f.repository.getRule("rr_c")).enabled, true, "别的上游下的不动");
   assert.deepEqual(await f.module.stopUpstreamChannels("upstream"), { ruleCount: 0, channelCount: 0 }, "幂等");
+});
+
+test("K2c 删上游以后把上游加回来（只给我的渠道用）：停下的渠道不在 optout 里，下一轮自动开始；用户自己点「停止算利润」的照旧不会自动开始", async (t) => {
+  const s = await autoStartScenario(t, { sub2: false, removeUpstreamFirst: true });
+  assert.deepEqual(await s.f.repository.listChannelOptouts("own"), [], "删上游没有记用户停的");
+  const rules = (await s.f.repository.listRules({ includeArchived: true }));
+  assert.equal(rules.find((rule) => rule.id === "rr_live").stopReason, "upstream_removed");
+  assert.equal(s.created.length, 2, "渠道 1（原来在算、被删上游停掉的）和渠道 2（新出现的）都自动开始了");
+  const started = await Promise.all(s.created.map((id) => s.f.repository.getRule(id)));
+  assert.deepEqual(started.map((rule) => [rule.startSource, rule.channels.map((channel) => channel.channelId)]).sort((x, y) => x[1][0] - y[1][0]), [["auto", [1]], ["auto", [2]]]);
 });

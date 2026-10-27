@@ -1958,3 +1958,13 @@ contract("markRuleStartSource (K2c): records 'auto' once and only when nothing w
   assert.equal((await repository.getRule(rule.id)).startSource, "auto");
   assert.equal(await repository.markRuleStartSource(`rr_missing${fixture.tag}`, "auto"), false);
 });
+
+contract("archiveRule reason (K2c): a system stop records stop_reason and no optout; a plain archive records neither; the field only exists when set", async ({ repository, fixture }) => {
+  const removed = await fixture.createRule({ channels: [{ channelId: fixture.channel(151), name: "R" }] });
+  const plain = await fixture.createRule({ tokenId: fixture.token(152), channels: [{ channelId: fixture.channel(152), name: "P" }] });
+  assert.equal(await repository.archiveRule(removed.id, { reason: "upstream_removed" }), true);
+  assert.equal(await repository.archiveRule(plain.id), true);
+  assert.equal((await repository.getRule(removed.id, { includeArchived: true })).stopReason, "upstream_removed");
+  assert.equal("stopReason" in (await repository.getRule(plain.id, { includeArchived: true })), false);
+  assert.deepEqual((await repository.listChannelOptouts(removed.ownStationId)).filter((row) => [fixture.channel(151), fixture.channel(152)].includes(row.channelId)), [], "系统停的不记用户停的");
+});
