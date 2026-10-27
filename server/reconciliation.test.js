@@ -3097,6 +3097,7 @@ function membershipFixture() {
       return [target.channels.filter((channel) => ids.includes(channel.rule_id))];
     }
     if (sql.includes("FROM reconciliation_rules")) return [params.length ? target.rules.filter((rule) => rule.id === params[0]) : target.rules];
+    if (sql.includes("MAX(s.effective_to_ms) AS held_until")) return [[{ held_until: null }]]; // 新绑定的下限：没有别的绑定握过这把 Key
     throw new Error(`Unexpected read: ${sql}`);
   };
   const pool = { query: async (...args) => read(...args), async getConnection() {

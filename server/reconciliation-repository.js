@@ -393,11 +393,20 @@ export class ReconciliationRepository {
         const [oldRows] = await conn.query(
           "SELECT * FROM reconciliation_rules WHERE enabled = 0 AND archived_at >= FROM_UNIXTIME(?) AND archived_at_ms >= ? AND own_station_id = ?",
           [Math.floor(dayAgo / 1000), dayAgo, input.ownStationId]);
+        let archivedPeers = [];
         if (oldRows.some((row) => row.archived_at_ms != null)) {
           const [oldChannels] = await conn.query("SELECT rule_id, channel_id, channel_name FROM reconciliation_rule_channels WHERE rule_id IN (?)", [oldRows.filter((row) => row.archived_at_ms != null).map((row) => row.id)]);
-          accountingFloor = accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels },
-            oldRows.filter((row) => row.archived_at_ms != null).map((row) => ruleFromRow(row, oldChannels.filter((channel) => channel.rule_id === row.id))));
+          archivedPeers = oldRows.filter((row) => row.archived_at_ms != null).map((row) => ruleFromRow(row, oldChannels.filter((channel) => channel.rule_id === row.id)));
         }
+        // 这把 Key 今天早些时候被这个自营站点下别的绑定握过、那些段已经关掉了（那条绑定换 Key、挪 Key 开的段，在算的和已停的都算）：
+        // 取最晚的结束时刻，新绑定从那一刻起算（下限管整条绑定，收入和成本都从下限算）
+        const [heldRows] = await conn.query(
+          `SELECT MAX(s.effective_to_ms) AS held_until FROM reconciliation_rule_segments s
+             JOIN reconciliation_segment_keys k ON k.segment_id = s.id JOIN reconciliation_rules r ON r.id = s.rule_id
+            WHERE r.own_station_id = ? AND k.upstream_station_id = ? AND k.token_id = ? AND s.effective_to_ms IS NOT NULL AND s.effective_to_ms >= ?`,
+          [input.ownStationId, input.upstreamStationId, input.tokenId, dayAgo]);
+        accountingFloor = accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels,
+          keyHeldUntilMs: heldRows[0]?.held_until == null ? null : Number(heldRows[0].held_until), sub2: input.provider === "sub2api" }, archivedPeers);
       }
       await conn.query(
         `INSERT INTO reconciliation_rules
@@ -940,7 +949,31 @@ export class ReconciliationRepository {
     return { conflict: false };
   }
 
-  async archiveRule(id, { now = Date.now() } = {}) {
+  // 「用户停了」的渠道（reconciliation_channel_optout）：读、加、删。加的在 archiveRule({ optout: true }) 里和归档同一个事务做
+  async listChannelOptouts(ownStationId = null) {
+    const [rows] = ownStationId == null
+      ? await this.pool.query("SELECT own_station_id, channel_id, created_at_ms FROM reconciliation_channel_optout ORDER BY own_station_id, channel_id")
+      : await this.pool.query("SELECT own_station_id, channel_id, created_at_ms FROM reconciliation_channel_optout WHERE own_station_id = ? ORDER BY channel_id", [ownStationId]);
+    return rows.map((row) => ({ ownStationId: row.own_station_id, channelId: Number(row.channel_id), atMs: Number(row.created_at_ms) }));
+  }
+
+  // 没有在算的渠道也能记「用户不要算」（第 3 步里取消勾的渠道）：已经记过的保留第一次的时刻
+  async addChannelOptouts(ownStationId, channelIds, atMs = Date.now()) {
+    const ids = [...new Set((channelIds || []).map(Number).filter((id) => Number.isSafeInteger(id)))];
+    if (!ids.length) return 0;
+    const [result] = await this.pool.query("INSERT INTO reconciliation_channel_optout (own_station_id, channel_id, created_at_ms) VALUES ? ON DUPLICATE KEY UPDATE created_at_ms = created_at_ms",
+      [ids.map((id) => [ownStationId, id, atMs])]);
+    return result.affectedRows;
+  }
+
+  async removeChannelOptouts(ownStationId, channelIds) {
+    const ids = [...new Set((channelIds || []).map(Number).filter((id) => Number.isSafeInteger(id)))];
+    if (!ids.length) return 0;
+    const [result] = await this.pool.query("DELETE FROM reconciliation_channel_optout WHERE own_station_id = ? AND channel_id IN (?)", [ownStationId, ids]);
+    return result.affectedRows;
+  }
+
+  async archiveRule(id, { now = Date.now(), optout = false } = {}) {
     const conn = await this.pool.getConnection();
     let result;
     try {
@@ -953,6 +986,11 @@ export class ReconciliationRepository {
       if (result.affectedRows) {
         await conn.query("UPDATE reconciliation_rule_channels SET active_channel_key = NULL WHERE rule_id = ?", [id]);
         await refreshSegmentKeys(conn, id);
+        // 用户点「停止算利润」：同一个事务里把这条绑定的渠道记成「用户停的」，以后不自动开始
+        if (optout) await conn.query(
+          `INSERT INTO reconciliation_channel_optout (own_station_id, channel_id, created_at_ms)
+           SELECT r.own_station_id, c.channel_id, ? FROM reconciliation_rule_channels c JOIN reconciliation_rules r ON r.id = c.rule_id
+           WHERE c.rule_id = ? ON DUPLICATE KEY UPDATE created_at_ms = created_at_ms`, [now, id]);
       }
       await conn.commit();
     } catch (err) {

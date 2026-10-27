@@ -2911,3 +2911,34 @@ test("渠道列表：还没设置自营站点、也从没读到过渠道时返�
   assert.deepEqual(synced.channels, []);
   assert.equal(synced.errorCode, "OWN_STATION_UNSET");
 });
+
+// K2c：按渠道开始算利润，用真的接入向导和对账模块（不是桩）走一遍预览 + 确认：同一把 Key 的渠道一起建成一条绑定、上游答了「只给我的渠道用」不用再答
+test("K2c 开始算利润（真接入向导 + 真对账模块）：同一把 Key 的几个渠道连成一组建一条绑定，已经在算的不重复建（停止算利润用内存仓库的契约测试和模块单测覆盖：这里的假 SQL 池不支持归档）", async (t) => {
+  const { createChannelProfitModule } = await import("./channel-profit.js");
+  const f = await genuineBatchFixture(t);
+  await f.store.update(f.own.id, { keyAgentUrl: "https://own.test/key-agent", keyAgentSecret: "K7m2-xP9q" + "R4t".repeat(10) });
+  await f.store.update(f.supplier.id, { accountUse: "only_mine" });
+  const slot = (tokenId) => ({ index: 0, state: "identified", matches: [{ stationId: f.supplier.id, tokenId, tokenName: `Key ${tokenId}`, via: "fingerprint" }] });
+  // 渠道 1、2、3 填的是同一把 Key（9），渠道 4 是 Key 10
+  const identified = [1, 2, 3].map((channelId) => ({ channelId, keyless: false, slots: [slot(9)] })).concat([{ channelId: 4, keyless: false, slots: [slot(10)] }]);
+  const profit = createChannelProfitModule(f.rt, { identify: async () => ({ ok: true, stale: false, channels: identified, revealIssues: [] }) });
+
+  const before = await profit.status(f.own.id);
+  assert.equal(before.ok, true);
+  assert.deepEqual(before.groups.map((group) => [group.groupKey, group.channelIds]), [[`${f.supplier.id}:9`, [1, 2, 3]], [`${f.supplier.id}:10`, [4]]]);
+
+  const started = await profit.start({ ownStationId: f.own.id, channelIds: [1] }); // 只勾了渠道 1：同一把 Key 的 2、3 一起带上
+  assert.deepEqual(started.failed, [], JSON.stringify(started));
+  assert.equal(started.started.length, 1);
+  assert.deepEqual(started.started[0].channelIds, [1, 2, 3]);
+  const rules = await f.rt.reconciliation.listRules();
+  assert.equal(rules.length, 1, "一组一条绑定");
+  assert.deepEqual([rules[0].tokenId, rules[0].channels.map((channel) => channel.channelId).sort((a, b) => a - b), rules[0].enabled], [9, [1, 2, 3], true]);
+  assert.equal(rules[0].coverageDeclaration?.answer, "none", "上游答了只给我的渠道用，不用再答");
+
+  const after = await profit.status(f.own.id);
+  assert.deepEqual(after.channels.filter((channel) => channel.state === "running").map((channel) => channel.channelId), [1, 2, 3]);
+  const again = await profit.start({ ownStationId: f.own.id, channelIds: [2] });
+  assert.deepEqual(again.alreadyRunning.map((item) => item.channelId), [2], "已经在算的不重复建");
+  assert.equal((await f.rt.reconciliation.listRules()).length, 1);
+});

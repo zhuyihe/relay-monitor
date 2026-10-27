@@ -232,6 +232,14 @@ export async function ensureSchema(pool) {
     WHERE NOT EXISTS (SELECT 1 FROM reconciliation_rule_segments s WHERE s.rule_id = r.id)`);
   // 分段记 Key（K1c）：每段一把 Key，已有的绑定每一段补一行（填 rules 上现在的那把）；重复跑只补缺的，不改账本、不触发重结
   await pool.query(SEGMENT_KEYS_TABLE_SQL);
+  // K2c：用户点「停止算利润」的渠道（自营站点 + 渠道编号 + 时刻）。以后系统认出这个渠道用了上游的 Key 也不自动开始；
+  // 用户在「渠道」页签点「开始算利润」就删掉这一行（k-plan 第七节）
+  await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_channel_optout (
+    own_station_id VARCHAR(32) NOT NULL,
+    channel_id BIGINT NOT NULL,
+    created_at_ms BIGINT NOT NULL,
+    PRIMARY KEY (own_station_id, channel_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   for (const { sql, params } of refreshSegmentKeysSql()) await pool.query(sql, params);
   await pool.query(`UPDATE reconciliation_snapshots s
     JOIN reconciliation_rule_segments g ON g.rule_id = s.rule_id

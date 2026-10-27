@@ -691,3 +691,16 @@ test("setKeyAgentLastSuccessAt（K2b）：持久化读取服务上一次读成�
   await store.setKeyAgentLastSuccessAt(station.id, 500);
   assert.equal(store.get(station.id).keyAgentLastSuccessAtMs, 2000, "更早的不覆盖，不会退回去");
 });
+
+test("accountUse（K2c）：上游账号是不是只给自营站点的渠道用——三个取值之外一律当没回答（null）；新建、更新都认；没带就保持原值", async () => {
+  const store = await new Store(fakePool()).load();
+  const fresh = await store.add({ name: "上游", type: "newapi", baseUrl: "https://up.test" });
+  assert.equal(fresh.accountUse, null, "升级前已有的上游、新建没答的：还没回答");
+  const mine = await store.add({ name: "上游2", type: "newapi", baseUrl: "https://up2.test", accountUse: "only_mine" });
+  assert.equal(mine.accountUse, "only_mine");
+  for (const value of ["elsewhere", "unsure", "only_mine"]) { await store.update(fresh.id, { accountUse: value }); assert.equal(store.get(fresh.id).accountUse, value); }
+  await store.update(fresh.id, { name: "改个名" });
+  assert.equal(store.get(fresh.id).accountUse, "only_mine", "没带 accountUse 就保持原值");
+  await store.update(fresh.id, { accountUse: "whatever" });
+  assert.equal(store.get(fresh.id).accountUse, null, "不认识的值当没回答，不抛错");
+});
