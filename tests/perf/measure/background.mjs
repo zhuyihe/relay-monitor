@@ -14,8 +14,12 @@ import { connect, digestSnapshot, digestDiff, binlogBytes, tableOf, kindOf } fro
 const outDir = process.argv[2];
 const W = Number(process.argv[3] || 185);
 mkdirSync(outDir, { recursive: true });
-// run.sh 里接口测量（measure/api.mjs）一结束就跑这个脚本：这一刻当作「量完接口」，下面整站读场景从这里起算 180 秒额度
+// run.sh 里接口测量（measure/api.mjs）一结束就跑这个脚本：这一刻当作「量完接口」，下面两种等待都从这里起算
 const apiDoneAt = Date.now();
+// PERF_STEADY_DELAY_SEC（workflow 的 steady_delay_sec，默认 0）：量完接口以后先等满这么多秒再开稳态窗口。
+// 量「没人看」用：控制台在最后一次页面请求（GET /api/reconciliation?preset=today 这类）过去 10 分钟以后才把「今天」放慢，
+// 可接口测量正好会发这些请求，紧接着开稳态的话量到的全是「有人看」。660 = 10 分钟空闲 + 1 分钟余量
+const STEADY_DELAY_MS = Math.max(0, Number(process.env.PERF_STEADY_DELAY_SEC || 0)) * 1000;
 const api = await login();
 // 「算应付成本」开关（应付成本 V1）：只有 PERF_EXPECTED_COST=on 才 PUT 打开（整站读场景，见 README）；
 // 不设或 off 时不改开关，用产品默认（V1-a 关；V1-b 起默认开），不等于「关」
@@ -39,23 +43,26 @@ async function ingestProgress() {
   return { at, table, cursor, buckets, ownLog, expectedCost };
 }
 // 打开开关时：base、head 都从「刚打开」起量——先清掉进度和桶（同一个夹具上 base 量过以后 head 不接着 base 的进度读），
-// 再等两件事都满足才开稳态窗口（等待最多 240 秒）：
+// 再等两件事都满足才开稳态窗口：
 //   1. 整站读真的往前读了一个窗口（进度动了）；
 //   2. 从量完接口那一刻起满 185 秒（限流窗口 180 秒再加 5 秒余量）。
 // 为什么要第 2 条：量接口那一阵对自营站点的请求还算在 180 秒额度里，这段时间整站读分不到正常的份。没有保底的版本一页都读不了，
 // 等「进度动了」自然就等到额度空出来；有保底（每分钟至少 2 个请求）的版本靠保底就能读完一个小窗口，进度一动等待就结束，
 // 可额度还被占着，稳态头两轮整站读只读到保底的 2 页（run 40310972875：head 2、2、15，base 15、15、15），追平用时被推算长了好几倍。
 // 这是量具的问题，不是产品的问题
+// 和 PERF_STEADY_DELAY_SEC 取较大的那个，不叠加；「进度动了」最多等 240 秒（从这里起算），等不到也照样开
 const SETTLE_AFTER_API_MS = 185000;
+const settleMs = Math.max(STEADY_DELAY_MS, EXPECTED_COST ? SETTLE_AFTER_API_MS : 0);
 if (EXPECTED_COST) {
   try { await conn.query("DELETE FROM own_log_buckets"); await conn.query("DELETE FROM own_log_cursor"); }
   catch (err) { if (err?.code !== "ER_NO_SUCH_TABLE") throw err; }
-  for (const t = Date.now(); Date.now() - t < 240000; await new Promise((r) => setTimeout(r, 3000))) {
+  for (const t = Date.now(); ; await new Promise((r) => setTimeout(r, 3000))) {
     const p = await ingestProgress();
     const moved = !p.table || (p.cursor && p.cursor.coveredToMs > p.cursor.coveredFromMs);
-    if (moved && Date.now() - apiDoneAt >= SETTLE_AFTER_API_MS) break;
+    if ((moved || Date.now() - t >= 240000) && Date.now() - apiDoneAt >= settleMs) break;
   }
 }
+while (Date.now() - apiDoneAt < settleMs) await new Promise((r) => setTimeout(r, Math.min(5000, settleMs - (Date.now() - apiDoneAt))));
 const pid = appPid();
 const sampleProc = () => { if (!pid) return null; try { const [cpu, rss] = execSync(`ps -o %cpu=,rss= -p ${pid}`).toString().trim().split(/\s+/).map(Number); return { cpu, rssMb: Math.round(rss / 1024) }; } catch { return null; } };
 
@@ -63,6 +70,7 @@ const sampleProc = () => { if (!pid) return null; try { const [cpu, rss] = execS
 await fetch(`${BASE}/__stats?reset=1`);
 const ingest0 = await ingestProgress();
 const d0 = await digestSnapshot(conn), b0 = await binlogBytes(conn), t0 = Date.now();
+const steadyDelay = { requestedSec: STEADY_DELAY_MS / 1000, waitedSec: Math.round((t0 - apiDoneAt) / 1000) };
 const procSamples = [];
 while (Date.now() - t0 < W * 1000) { await new Promise((r) => setTimeout(r, 5000)); const s = sampleProc(); if (s) procSamples.push(s); }
 const d1 = await digestSnapshot(conn), b1 = await binlogBytes(conn), elapsed = (Date.now() - t0) / 1000;
@@ -100,6 +108,8 @@ const ingestRounds = rounds.map((r, i) => {
 const maxIn = (times) => { let best = 0; for (let i = 0, j = 0; j < times.length; j++) { while (times[j] - times[i] >= LIMIT_WINDOW_MS) i++; best = Math.max(best, j - i + 1); } return best; };
 const share = (n) => Math.round((n / LIMIT) * 1000) / 10;
 const avg180 = (n) => Math.round((n / elapsed) * 180 * 10) / 10;
+// 每 300 秒平均：放慢以后每个渠道约 5 分钟才问一次，180 秒窗口要么碰上一整批要么一个没有；窗口不足 300 秒时是 null（报「不适用」）
+const avg300 = (n) => (elapsed >= 300 ? Math.round((n / elapsed) * 300 * 10) / 10 : null);
 const behindAt = (p) => (p.cursor ? Math.max(0, p.at - 120000 - p.cursor.coveredToMs) : null);
 let catchUp = null;
 if (ingest0.table && ingest1.table && ingest1.cursor) {
@@ -124,7 +134,8 @@ const ingest = {
   rounds: ingestRounds,
   rateLimit: { limit: LIMIT, windowSec: LIMIT_WINDOW_MS / 1000, fullWindow: elapsed >= LIMIT_WINDOW_MS / 1000,
     ownLogAllMax: maxIn(allLogTimes), ownLogAllMaxPct: share(maxIn(allLogTimes)), ownLogAllAvg: avg180(allLogTimes.length), ownLogAllAvgPct: share(avg180(allLogTimes.length)),
-    ownMax: maxIn(ownTimes), ownMaxPct: share(maxIn(ownTimes)), ownAvg: avg180(ownTimes.length), ownAvgPct: share(avg180(ownTimes.length)) },
+    ownMax: maxIn(ownTimes), ownMaxPct: share(maxIn(ownTimes)), ownAvg: avg180(ownTimes.length), ownAvgPct: share(avg180(ownTimes.length)),
+    ownLogAllAvg300: avg300(allLogTimes.length), ownAvg300: avg300(ownTimes.length) },
   ownLogKinds: fake.ownLogKinds ?? null,
   progress: { start: ingest0, end: ingest1 }, catchUp,
 };
@@ -159,7 +170,7 @@ const refreshOwn = refreshSql.filter((d) => BALANCE_TABLES.test(d.text || ""));
 const txPairs = refreshOwn.filter((d) => /`stations`/.test(d.text) && /^INSERT/i.test(d.text)).reduce((a, d) => a + d.count, 0);
 
 const result = {
-  at: new Date().toISOString(), windowSec: Math.round(elapsed),
+  at: new Date().toISOString(), windowSec: Math.round(elapsed), steadyDelay,
   steady: {
     fakeRequests: fake.total, fakeRequestsPerMin: perMin(fake.total), fakeByRoute: fake.byRoute, fakeBytes: fake.bytes,
     sqlStatements: steady.reduce((a, d) => a + d.count, 0), sqlPerMin: perMin(steady.reduce((a, d) => a + d.count, 0)),
