@@ -44,6 +44,24 @@ export function defineOwnLogStoreContract({ name, create, cleanup = async () => 
       assert.deepEqual([(await store.listBuckets(a, 0, 99999999)).length, (await store.listBuckets(b, 0, 99999999)).length], [1, 0], "清理按小时，不分站点（其余站点的早桶也清）");
     });
 
+    await t.test("skipCursor：挪进度不删桶，记下跳过的缺口（总指挥 10-26 定第三轮）", async () => {
+      const station = id("f");
+      await store.startCursor(station, 1000);
+      await store.applyWindow(station, { fromMs: 1000, toMs: 2000, buckets: [bucket()] });
+      const after = await store.skipCursor(station, 9000, 99);
+      assert.deepEqual([after.coveredToMs, after.disabledFromMs, after.disabledToMs, after.updatedAtMs], [9000, 2000, 9000, 99]);
+      assert.equal((await store.listBuckets(station, 0, 99999999)).length, 1, "桶还在，不清掉");
+    });
+
+    await t.test("skipCursor：第二次关→开，两段缺口并成一段记（偏保守，审核 R2 #125 第三轮 中-E）", async () => {
+      const station = id("g");
+      await store.startCursor(station, 1000);
+      await store.skipCursor(station, 9000, 99); // 第一次关→开，缺口 [1000, 9000)
+      await store.applyWindow(station, { fromMs: 9000, toMs: 9500, buckets: [bucket()] }); // 中间这段「开着」读到了一点
+      const after = await store.skipCursor(station, 20000, 199); // 第二次关→开，缺口原本是 [9500, 20000)
+      assert.deepEqual([after.disabledFromMs, after.disabledToMs], [1000, 20000], "并成一段，起点还是第一次的起点");
+    });
+
     await t.test("写失败整个窗口都不写：进度不动、桶不变", async () => {
       const station = id("e");
       await store.startCursor(station, 0);

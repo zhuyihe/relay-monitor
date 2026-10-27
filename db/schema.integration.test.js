@@ -155,7 +155,8 @@ test("MySQL 8 migration and onboarding transactions", { timeout: 60000 }, async 
     const entry = await reconciliation.latestLedgerEntry("legacy_rule", legacyDayWindow);
     assert.deepEqual({ ...entry, detail: undefined }, { ruleId: "legacy_rule", billDate: "2026-10-09", revision: 1, versionId: null,
       timezone: "Asia/Shanghai", startMs: LEDGER_DAY, endMs: LEDGER_DAY + 86400000, revenueUsd: 10.25, costUsd: 6.5, revenueRate: null,
-      costRate: null, costBasis: null, source: "migrated", detail: undefined, settledAt: "2026-10-09T16:20:00.000Z" });
+      costRate: null, costBasis: null, source: "migrated", detail: undefined, settledAt: "2026-10-09T16:20:00.000Z",
+      expectedCostUsd: null, gapReason: null, tokens: null }); // 搬进来的老行：应付成本三列空（V1-b）
     assert.equal(entry.detail.result.calculation.profitUsd, 3.75);
     const { records } = await reconciliation.listLedgerHistory("legacy_rule", { startMs: LEDGER_DAY - 86400000, endMs: LEDGER_DAY + 86400000 });
     assert.deepEqual(records.map((record) => [record.billDate, record.settlementSource, record.calculation.profitUsd]), [["2026-10-09", "migrated", 3.75]]);

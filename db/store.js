@@ -46,8 +46,11 @@ const DEFAULT_SETTINGS = {
   // 每日日报：默认按北京时间定时汇总昨日「我的站点」经营情况并推送
   dailyReport: { enabled: false, time: "09:00", channelIds: [], lastSent: null },
   // 「算应付成本」开关（用语规范 §8.3，应付成本 V1）：开着时定时读自营站点的收费记录（server/own-log-ingest.js）、结账时算应付成本（V1-b）；关掉以后一个整站读请求都不发。
-  // V1-a 先默认关（只读不用，开着是白读用户的线上站，审核 #123 第二轮）；V1-b 加上设置页的开关界面时改成默认开
-  expectedCost: false,
+  // 默认开（V1-b 带上了设置页的开关界面；V1-a 单独上线时是关的）
+  expectedCost: true,
+  // 内部标记，不进设置页：轮询时记「上一次看到这个开关是关着的」，只在关→开这一下才跳过整站日志的缺口（总指挥 10-26 定第三轮，
+  // server/reconciliation.js、server/own-log-ingest.js）
+  expectedCostWasOff: false,
 };
 
 function uid(prefix = "st") {
@@ -208,6 +211,13 @@ export class Store {
       },
     };
     this._metaSecrets = metaSecrets;
+    // 一次性迁移（决定 1，总指挥 10-26 定）：V1-a 没有「算应付成本」的界面开关，库里存着的 false 不可能是用户自己选的——
+    // 任何一次保存设置都会把整份 settings 写回去，V1-a 上线期间保存过设置的站，库里就留着这个 false。没有迁移标记、
+    // 而且值正好是 false 的，当成「没人动过」改成开，写上标记；以后用户自己在 V1-b 界面上关掉的带着标记，这里不会再碰它
+    if (meta.settings?.expectedCostMigratedV1b !== true) {
+      if (meta.settings?.expectedCost === false) this.data.settings.expectedCost = true;
+      this.data.settings.expectedCostMigratedV1b = true;
+    }
     this.data.settings.historyRetentionDays =
       normalizeHistoryRetentionDays(this.data.settings.historyRetentionDays);
     // v2.2：旧规则没有渠道绑定字段；归一化成 5 个事件键齐全的独立对象
@@ -417,7 +427,7 @@ export class Store {
           },
         };
       }
-      if ("expectedCost" in patch) patch = { ...patch, expectedCost: patch.expectedCost !== false };
+      if ("expectedCost" in patch) patch = { ...patch, expectedCost: patch.expectedCost === true }; // 只认真正的 true / false，别的值一律当关（审核 #123 第三轮 低-1）
       if ("historyRetentionDays" in patch) {
         patch = {
           ...patch,
