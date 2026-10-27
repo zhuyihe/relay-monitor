@@ -13,6 +13,7 @@ import { identifyChannelsCached } from "./key-agent-identify.js";
 import { normalizeCoverageDeclaration } from "../lib/channel-onboarding.js";
 import { coverageNeedsAnswer } from "../lib/reconciliation-contract.js";
 import { channelKeyLines } from "../lib/channel-key-lines.js";
+import { dayKeyInTz } from "../lib/business-time.js";
 
 const BILLING_TYPES = new Set(["newapi", "sub2api", "sub2api-password"]);
 
@@ -103,6 +104,20 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
           sharedWithChannelIds: multiKeyUse.get(channel.groupKey), upstreamStationId: channel.upstreamStationId, groupKey: channel.groupKey, tokenName: channel.tokenName };
       }
     }
+    // 渠道今天早些时候属于一条已经停掉的绑定、现在又要追加进别的在算绑定（这把 Key 已经有在算的绑定）：追加这条路没有「按渠道记核算起点」，
+    // 今天开始会把这个渠道今天已经算给停掉的那条绑定的收入再算进在算的那条里（同一笔收入算两遍）——今天不让开始（COUNTED_EARLIER_TODAY），明天 0 点起可以；
+    // 自动开始今天不建，明天那一轮自然开始。每个渠道记自己的核算起点（决定 b）留到以后，和多 Key 渠道放开一起做
+    const runningKeys = new Set(rules.filter((rule) => rule.enabled && !rule.archivedAt && rule.ownStationId === ownStationId).map((rule) => groupKeyOf(rule.upstreamStationId, rule.tokenId)));
+    if (channels.some((channel) => channel.state === "startable" && runningKeys.has(channel.groupKey)) && typeof reconciliation().listRecentlyArchivedRules === "function") {
+      const recent = (await reconciliation().listRecentlyArchivedRules(now() - 36 * 3600 * 1000).catch(() => [])).filter((rule) => rule.ownStationId === ownStationId && rule.archivedAtMs != null
+        && dayKeyInTz(rule.archivedAtMs, rule.timezone) === dayKeyInTz(now(), rule.timezone));
+      for (const [index, channel] of channels.entries()) {
+        if (channel.state !== "startable" || !runningKeys.has(channel.groupKey)) continue;
+        const stopped = recent.filter((rule) => rule.channels.some((member) => Number(member.channelId) === channel.channelId)).sort((a, b) => b.archivedAtMs - a.archivedAtMs)[0];
+        if (stopped) channels[index] = { channelId: channel.channelId, name: channel.name, revision: channel.revision, optedOut: channel.optedOut, state: "blocked", reason: "COUNTED_EARLIER_TODAY",
+          stoppedAtMs: stopped.archivedAtMs, tokenName: stopped.tokenName ?? null, upstreamStationId: channel.upstreamStationId, groupKey: channel.groupKey };
+      }
+    }
     const groups = new Map();
     for (const channel of channels) if (channel.state === "startable") {
       const group = groups.get(channel.groupKey) || { groupKey: channel.groupKey, upstreamStationId: channel.upstreamStationId, tokenId: channel.tokenId,
@@ -131,7 +146,8 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     for (const id of ids) {
       const channel = byId.get(id);
       if (channel.state === "running") alreadyRunning.push({ channelId: id, ruleId: channel.ruleId });
-      else if (channel.state === "blocked") blocked.push({ channelId: id, code: channel.reason, ...(channel.upstreamStationId ? { upstreamStationId: channel.upstreamStationId } : {}) });
+      else if (channel.state === "blocked") blocked.push({ channelId: id, code: channel.reason, ...(channel.upstreamStationId ? { upstreamStationId: channel.upstreamStationId } : {}),
+        ...(channel.stoppedAtMs != null ? { stoppedAtMs: channel.stoppedAtMs, tokenName: channel.tokenName ?? null } : {}) });
       else wanted.set(channel.groupKey, state.groups.find((group) => group.groupKey === channel.groupKey));
     }
     const ready = [];
@@ -307,6 +323,12 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
       const sharedGroups = new Map();
       for (const channel of state.channels) {
         if (channel.state !== "blocked") continue;
+        if (channel.reason === "COUNTED_EARLIER_TODAY") { // 今天上午在别的绑定下算过：卡片上写停的时刻和原来那把 Key，「开始算利润」今天灰着（明天 0 点起可以）
+          const group = sharedGroups.get(`today:${channel.groupKey}`) || { channel, channelIds: [], today: true };
+          group.channelIds.push(channel.channelId);
+          sharedGroups.set(`today:${channel.groupKey}`, group);
+          continue;
+        }
         if (channel.reason === "KEY_SHARED_WITH_MULTI_KEY") {
           const group = sharedGroups.get(channel.groupKey) || { channel, channelIds: [] };
           group.channelIds.push(channel.channelId);
@@ -323,7 +345,13 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
         unmatched.push({ channelId: channel.channelId, name: channelName(channel.channelId, channel.name), reason: channel.reason,
           ...(channel.upstreamStationId ? { upstreamStationId: channel.upstreamStationId } : {}) });
       }
-      for (const [groupKey, { channel, channelIds }] of sharedGroups) {
+      for (const [groupKey, { channel, channelIds, today }] of sharedGroups) {
+        if (today) {
+          cards.push({ id: `${groupKey}`, state: "blocked", upstreamStationId: channel.upstreamStationId, channelIds, names: channelIds.map((channelId) => channelName(channelId)), ruleId: null,
+            tokenName: channel.tokenName ?? null, startedBy: null, startedAtMs: null, issues: [], keys: keysOf(channelIds), startGroupKey: null, needsCoverage: false,
+            optedOut: channelIds.some((channelId) => optedOut.has(channelId)), blocked: { code: "COUNTED_EARLIER_TODAY", stoppedAtMs: channel.stoppedAtMs, tokenName: channel.tokenName ?? null } });
+          continue;
+        }
         cards.push({ id: `shared:${groupKey}`, state: "blocked", upstreamStationId: channel.upstreamStationId, channelIds, names: channelIds.map((channelId) => channelName(channelId)),
           ruleId: null, tokenName: channel.tokenName ?? null, startedBy: null, startedAtMs: null, issues: [], keys: keysOf(channelIds), startGroupKey: null, needsCoverage: false,
           optedOut: channelIds.some((channelId) => optedOut.has(channelId)),

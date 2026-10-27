@@ -364,3 +364,18 @@ test("overview：几把 Key 的渠道写在它用的上游下面（blocked 卡�
   const upstream = Object.fromEntries(view.upstreams.map((item) => [item.id, item]));
   assert.equal(upstream.up1.runningCount, 0, "blocked 卡片不算在算");
 });
+
+test("overview：渠道今天上午属于停掉的绑定、又要追加进别的在算绑定——一张 blocked 卡片写停的时刻和原来那把 Key（COUNTED_EARLIER_TODAY），不进 unmatched，不算在算", async () => {
+  const clock = Date.parse("2026-10-11T06:00:00Z"); // 上海 14:00
+  const stopped = { ...running("r-old", [3]), enabled: false, archivedAt: "2026-10-11T02:00:00.000Z", archivedAtMs: Date.parse("2026-10-11T02:00:00Z"), timezone: "Asia/Shanghai", tokenName: "oai" };
+  const f = overviewFixture({ channels: [1, 3], rules: [{ ...running("r-a", [1]), upstreamStationId: "up1", tokenId: 11 }], identified: [
+    { channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 3, keyless: false, slots: [slot("up1", 11)] }] });
+  f.rt.reconciliation.listRecentlyArchivedRules = async () => [stopped];
+  const module = createChannelProfitModule(f.rt, { identify: async () => ({ ok: true, stale: false, revealIssues: [], channels: [
+    { channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 3, keyless: false, slots: [slot("up1", 11)] }] }), now: () => clock });
+  const view = await module.overview("own");
+  const card = view.cards.find((item) => item.blocked?.code === "COUNTED_EARLIER_TODAY");
+  assert.deepEqual([card.state, card.channelIds, card.blocked.stoppedAtMs, card.blocked.tokenName], ["blocked", [3], Date.parse("2026-10-11T02:00:00Z"), "oai"]);
+  assert.deepEqual(view.unmatched, []);
+  assert.equal((await module.status("own")).groups.length, 0, "今天不能开始");
+});
