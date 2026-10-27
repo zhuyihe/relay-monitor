@@ -496,6 +496,15 @@ export class MemoryReconciliationRepository {
     });
   }
 
+  // 对应 MySQL 版 setSegmentDisplayFrom
+  async setSegmentDisplayFrom(ruleId, effectiveFromMs, displayFromMs) {
+    await this.#transaction("setSegmentDisplayFrom", async (tx) => {
+      const entries = this.#segmentsOf(tx, ruleId).filter(({ row }) => Number(row.effective_from_ms) === Number(effectiveFromMs)
+        && row.timing_source === "key_change" && row.display_from_ms == null);
+      this.#update(tx, "segments", entries, { display_from_ms: bigint(displayFromMs) });
+    });
+  }
+
   // 对应 MySQL 版 applyKeyChangePlans：先把这一批绑定（和它们当前开着段）的 active_token_key 全部清空，
   // 再分别开新段、写新值；唯一约束的检查在 #commit 里（#assertUnique），撞了整批回滚、这里捕获改回 { conflict: true }
   async applyKeyChangePlans(plans, { detectedAt = Date.now() } = {}) {

@@ -1741,3 +1741,22 @@ contract("correctTransition: days older than 31 days get an attention row (RESET
   assert.deepEqual([tooOld[0].manualSince, tooOld[0].nextAttemptAt, tooOld[0].detail], [now, null, { code: "RESETTLE_TOO_OLD", side: null }]);
   assert.equal(plain[0].detail, null);
 });
+
+contract("setSegmentDisplayFrom: records the first-usage time on the key_change segment only (display only: boundaries and keys untouched), never overwrites, ignores other segments; a segment without it carries no displayFromMs field", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(64), name: "Disp" }], initialRatio: 1 });
+  const oldRef = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName };
+  const newRef = { upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(65), tokenName: "Disp2" };
+  const windowStart = EFFECTIVE_FROM + HOUR, windowEnd = windowStart + 5 * 60 * 1000;
+  await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: { kind: "windowed", windowStart, windowEnd, windowKeys: [oldRef, newRef], after: [newRef] } }]);
+  const before = await repository.listSegments(rule.id);
+  assert.ok(before.every((segment) => !("displayFromMs" in segment)), "没找到之前：字段不出现（没换 Key 的绑定段逐字不变）");
+  const usageAt = windowStart + 2 * 60 * 1000;
+  await repository.setSegmentDisplayFrom(rule.id, windowStart, usageAt); // 过渡段起点：不是 key_change 的段，不动
+  assert.ok((await repository.listSegments(rule.id)).every((segment) => !("displayFromMs" in segment)));
+  await repository.setSegmentDisplayFrom(rule.id, windowEnd, usageAt);
+  await repository.setSegmentDisplayFrom(rule.id, windowEnd, usageAt + 1000); // 不覆盖
+  const after = await repository.listSegments(rule.id);
+  assert.deepEqual(after.map((segment) => segment.displayFromMs ?? null), [null, null, usageAt]);
+  assert.deepEqual(after.map((segment) => [segment.effectiveFrom, segment.effectiveTo]), before.map((segment) => [segment.effectiveFrom, segment.effectiveTo]), "只是显示：段的起止不变");
+  assert.deepEqual(after.map((segment) => segment.keys.map((key) => key.tokenId)), before.map((segment) => segment.keys.map((key) => key.tokenId)), "Key 行不变");
+});

@@ -5,6 +5,7 @@ import { stationDisplayName } from "../lib/overview-actions.js";
 import {
   queryReconciliationMetadata,
   queryNewApiStatus,
+  queryNewApiKeyFirstUsage,
   queryKeyReconciliationStat,
   queryOwnChannelRevenue,
   queryOwnLogSource,
@@ -130,6 +131,8 @@ export async function mapWithConcurrency(items, limit, mapper) {
 }
 const TODAY_TTL_MS = 60000;
 const QUERY_TTL_MS = 60000;
+// 换 Key 后找新 Key 第一条用量，一条绑定最多等这么久（只为显示，找不到就按 b 写，不能拖住这一轮）
+const KEY_FIRST_USAGE_BUDGET_MS = 20000;
 const MAX_RESULT_CACHE_ENTRIES = 200;
 // 账号级上游用量：已结束窗口不会再变，缓存久一些；页面最多等这么久，取不到先返回「读取中」。
 const ACCOUNT_USAGE_TTL_MS = 10 * 60000;
@@ -923,7 +926,28 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       }
       return { applied: false, allApplied: false };
     }
+    await recordKeyChangeDisplayTimes(applyPlans, resources);
     return { applied: true, allApplied: applyPlans.length === changeCandidates.length && !deferred.size };
+  }
+
+  // 换 Key 开的段落库以后，New API 上游去找新 Key 在 [a, b] 里的第一条用量，记在新段上（display_from_ms），
+  // 只用来写「几点换的」，不改钱（设计稿 k-plan 第五节「显示的时刻」）。整段都是尽力而为：读不到、超时、上游限流都当「定不出」，
+  // 什么也不记，不影响这一轮结账，也不重试（重试要再打一遍上游的日志）。只有有过渡段（[a, b) 两把 Key）的换 Key 才找——
+  // 精确切点和挪过的没有 a，不用找；Sub2API 没有这个接口，它按天读，换 Key 那天两把 Key 都算
+  async function recordKeyChangeDisplayTimes(applyPlans, resources) {
+    const lookups = applyPlans.filter(({ plan }) => plan.kind === "windowed");
+    await mapWithConcurrency(lookups, 2, async ({ ruleId, plan }) => {
+      const newKey = plan.after[0], station = upstreamStation(newKey.upstreamStationId);
+      if (!station || /^sub2api/.test(station.type || "") || !newKey.tokenName) return;
+      let timer;
+      try {
+        const found = await Promise.race([
+          queryNewApiKeyFirstUsage(station, { tokenName: newKey.tokenName, startMs: plan.windowStart, endMs: plan.windowEnd, userId: resources.get(station.id)?.metadata?.userId ?? null }),
+          new Promise((resolve) => { timer = setTimeout(() => resolve(null), KEY_FIRST_USAGE_BUDGET_MS); timer.unref?.(); }),
+        ]);
+        if (found != null && found >= plan.windowStart && found <= plan.windowEnd) await repository.setSegmentDisplayFrom(ruleId, plan.windowEnd, found);
+      } catch { /* 定不出：按 b 写 */ } finally { clearTimeout(timer); }
+    });
   }
 
   // 页面「刷新」（观测）强制重读 Key 目录和账号身份；只读查询用 5 分钟缓存。

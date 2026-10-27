@@ -1992,7 +1992,7 @@ function ownTestLogApi(url, logs = []) {
   return { success: true, data: { total: matched.length, items } };
 }
 
-function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [], revealScopeDenied = false }) {
+function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [], revealScopeDenied = false, keyLogs = null }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
     id, rule_id: "rr_live", group_name: group, group_ratio: ratio,
@@ -2084,6 +2084,13 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
           ...(tokenKeyOf ? { key: maskKey(tokenKeyOf(item.token_id)) } : {}) })) } });
       }
       if (url.pathname === "/api/log/self/stat") return stat("upstream", url, state.upstreamQuota);
+      // 逐条消费日志（换 Key 后找新 Key 第一条用量，只为显示）：传了 keyLogs（[{ id, token_name, created_at（秒） }]）才有，别的测试这条路读不到
+      if (url.pathname === "/api/log/self" && keyLogs) {
+        const q = url.searchParams;
+        const hit = keyLogs.filter((log) => log.token_name === q.get("token_name") && log.created_at >= Number(q.get("start_timestamp")) && log.created_at <= Number(q.get("end_timestamp"))).sort((a, b) => b.id - a.id);
+        const size = Number(q.get("page_size")), p = Number(q.get("p"));
+        return reply(200, { success: true, data: { page: p, page_size: size, total: hit.length, items: hit.slice((p - 1) * size, p * size) } });
+      }
       // 取完整 Key（打码撞了才会问，K2a）：没有 api_key:reveal 权限
       if (url.pathname === "/api/token/batch/keys" && revealScopeDenied) return reply(403, { success: false, code: "ACCESS_TOKEN_SCOPE_DENIED", message: "The access token lacks the required permission: api_key:reveal" });
     }
@@ -7251,6 +7258,71 @@ test("K2b：没有冲突的正常换 Key——识别→算计划→落库接上�
   assert.ok(codes.includes("KEY_CHANGED"), "换 Key 那天有这一句");
   assert.equal(codes.includes("SEGMENT_TIMING_UNCONFIRMED"), false, "换 Key 开的段不是估的倍率变化，不出旧提示");
   assert.deepEqual(segments.slice(1).map((segment) => segment.timingSource), ["key_change_window", "key_change"]);
+});
+
+// 换 Key 后找新 Key 的第一条用量（只为显示「几点换的」，不改钱）。a = 10-11 01:00Z，b = 10-12 01:00Z，新 Key 名字 oai-2
+function displayTimeFixture(t, { keyLogs }) {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let currentKey = keyNine;
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(currentKey), f: "unused" }] }] },
+    keyLogs,
+  });
+  const logCalls = () => f.state.requests.filter((request) => request.path === "/api/log/self");
+  return { f, logCalls, async change() {
+    await f.module.refreshDue(now); // 第一轮：锚定
+    this.callsBeforeChange = logCalls().length;
+    currentKey = keyTen;
+    now = Date.parse("2026-10-12T01:00:00Z");
+    await f.module.refreshDue(now); // 认出换了、落库
+    return f.repository.listSegments("rr_live");
+  } };
+}
+
+test("K2b：New API 换 Key 后去上游日志找新 Key 的第一条用量，记在新段上（display_from_ms），只用来显示：段的起止、Key 行、没换 Key 时的请求都不变", async (t) => {
+  const first = Date.parse("2026-10-11T06:30:15Z") / 1000;
+  const fx = displayTimeFixture(t, { keyLogs: [
+    { id: 1, token_name: "oai-2", created_at: first }, { id: 2, token_name: "oai-2", created_at: first + 60 }, { id: 3, token_name: "stable", created_at: first - 3600 },
+    { id: 4, token_name: "oai-2", created_at: Date.parse("2026-10-12T02:00:00Z") / 1000 }, // b 以后：不在 [a, b] 里
+  ] });
+  const { f, logCalls } = fx;
+  const segments = await fx.change();
+  assert.equal(fx.callsBeforeChange, 0, "没换 Key 的轮次不读逐条日志");
+  assert.deepEqual(segments.slice(1).map((segment) => segment.timingSource), ["key_change_window", "key_change"]);
+  assert.equal(segments[2].displayFromMs, first * 1000, "新 Key 第一条用量的时刻（精确到秒）");
+  assert.ok(segments.slice(0, 2).every((segment) => !("displayFromMs" in segment)), "只记在换 Key 开的新段上");
+  assert.deepEqual(segments.slice(1).map((segment) => [segment.effectiveFrom, segment.effectiveTo]),
+    [[Date.parse("2026-10-11T01:00:00Z"), Date.parse("2026-10-12T01:00:00Z")], [Date.parse("2026-10-12T01:00:00Z"), null]], "只是显示：过渡段还是 [a, b)，钱不变");
+  assert.deepEqual(segments[1].keys.map((key) => key.tokenId).sort((a, b) => a - b), [9, 10]);
+  const calls = logCalls();
+  assert.equal(calls.length, 2, "总数不多：数一次总数、再取最后一页，共 2 次");
+  assert.ok(calls.every((call) => /token_name=oai-2/.test(call.query) && /type=2/.test(call.query)), "只找新 Key 的消费日志");
+  // 同一轮再跑、再下一轮都不重找
+  await f.module.refreshDue(Date.parse("2026-10-12T01:00:30Z"));
+  assert.equal(logCalls().length, 2);
+});
+
+test("K2b：找新 Key 的第一条用量失败（上游读不到日志接口）或窗口里没有用量：按原来的写法（b 起 / a–b 之间），换 Key 照常落库，不重试", async (t) => {
+  const fx = displayTimeFixture(t, { keyLogs: null }); // 没有这条路：404
+  const { f, logCalls } = fx;
+  const segments = await fx.change();
+  assert.equal(segments.length, 3, "换 Key 照常落库");
+  assert.ok(segments.every((segment) => !("displayFromMs" in segment)));
+  assert.equal((await f.repository.getRule("rr_live")).tokenId, 10);
+  const calls = logCalls().length;
+  await f.module.refreshDue(Date.parse("2026-10-12T01:00:30Z"));
+  assert.equal(logCalls().length, calls, "不重试");
+});
+
+test("K2b：新 Key 在 [a, b] 里还没有用量：定不出，不记 display_from_ms，只数了一次总数", async (t) => {
+  const fx = displayTimeFixture(t, { keyLogs: [{ id: 1, token_name: "oai-2", created_at: Date.parse("2026-10-13T00:00:00Z") / 1000 }] });
+  assert.ok((await fx.change()).every((segment) => !("displayFromMs" in segment)));
+  assert.equal(fx.logCalls().length, 1);
 });
 
 test("K2b：读完、落库前重启——这一轮的成功时刻要等落库以后才写，重启后 a 还是上一次读成功的时刻，[t, b) 不漏", async (t) => {

@@ -212,6 +212,9 @@ export async function ensureSchema(pool) {
   // 事情解开（比如又换回来）清成 NULL
   await addColumnIfMissing(pool, "reconciliation_rules", "key_issue_code", "VARCHAR(40) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "key_issue_since_ms", "BIGINT NULL");
+  // K2b 后续：换 Key 开的新段，系统从上游日志里找到新 Key 的第一条用量时，记下那一刻（毫秒）。只用来写「几点换的」，
+  // 不改钱——段的起点 effective_from_ms 还是读到变化的那一刻 b，钱按 [a, b) 两把 Key 相加算；没找到（或不是 New API）是 NULL
+  await addColumnIfMissing(pool, "reconciliation_rule_segments", "display_from_ms", "BIGINT NULL");
   await addIndexIfMissing(pool, "reconciliation_snapshots", "idx_reconciliation_snapshot_segment", "(segment_id)");
   // 写快照前「先读出同一把 Key 的那一组绑定」（计划 P1c）走这个索引；解除的绑定也留着，表会越来越大
   await addIndexIfMissing(pool, "reconciliation_rules", "idx_reconciliation_rule_token", "(token_id, archived_at)");

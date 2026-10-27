@@ -133,6 +133,8 @@ export function segmentFromRow(row) {
     effectiveTo: row.effective_to_ms == null ? null : Number(row.effective_to_ms),
     detectedAt: Number(row.detected_at_ms),
     timingSource: row.timing_source,
+    // 换 Key 开的段、系统从上游日志找到新 Key 第一条用量的时刻；没找到的不带这个字段（没换 Key 的绑定，段的样子和以前逐字相同）
+    ...(row.display_from_ms == null ? {} : { displayFromMs: Number(row.display_from_ms) }),
   };
 }
 
@@ -737,6 +739,14 @@ export class ReconciliationRepository {
   async markKeyIssue(ruleId, issue) {
     await this.pool.query("UPDATE reconciliation_rules SET key_issue_code = ?, key_issue_since_ms = ? WHERE id = ?",
       [issue?.code ?? null, issue?.sinceMs ?? null, ruleId]);
+  }
+
+  // 换 Key 开的新段（timing_source = key_change，起点是 effectiveFromMs）记下新 Key 第一条用量的时刻——只用来写「几点换的」，
+  // 不动钱（段的起点、Key 行都不改）。已经记过的不覆盖；段不在了（绑定改过、被合并）就什么也不改
+  async setSegmentDisplayFrom(ruleId, effectiveFromMs, displayFromMs) {
+    await this.pool.query(
+      "UPDATE reconciliation_rule_segments SET display_from_ms = ? WHERE rule_id = ? AND effective_from_ms = ? AND timing_source = 'key_change' AND display_from_ms IS NULL",
+      [displayFromMs, ruleId, effectiveFromMs]);
   }
 
   // K2b：按 key-agent-resegment.js 给的计划，给一条或几条绑定（挪位置、互换时是两条）开新段——同一个事务里关旧段、
