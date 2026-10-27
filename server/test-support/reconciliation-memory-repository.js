@@ -503,7 +503,7 @@ export class MemoryReconciliationRepository {
       await this.#transaction("applyKeyChangePlans", async (tx) => {
         tx.record.keyChangeRuleIds = plans.map(({ ruleId }) => ruleId); // 给测试的 beforeCommit 钩子认「这个事务是给哪几条绑定换 Key」
         const currents = new Map(), rules = new Map();
-        for (const { ruleId } of plans) {
+        for (const { ruleId } of [...plans].sort((x, y) => (x.ruleId < y.ruleId ? -1 : x.ruleId > y.ruleId ? 1 : 0))) { // 同 MySQL 版：按 id 顺序锁
           await this.#lock(tx, `rule:${ruleId}`);
           const entry = this.#ruleEntry(tx, ruleId);
           if (!entry) throw repositoryError("RULE_NOT_FOUND");

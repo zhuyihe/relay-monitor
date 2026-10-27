@@ -2113,7 +2113,10 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if (url.pathname === "/key-agent/keys" && keyAgent) {
         if (keyAgent.down) return { status: 503, headers: { get: () => null }, json: async () => ({}) }; // 读取服务读不到（例外三）
         const channels = typeof keyAgent.channels === "function" ? keyAgent.channels(request) : keyAgent.channels;
-        return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"ka1"' : null) },
+        // 和真读取服务一样：带 If-None-Match 且内容没变回 304（ETag 由渠道内容算，这里内容变了 etag 就变）
+        const etag = `"ka-${JSON.stringify(channels).length}-${createHash("sha256").update(JSON.stringify(channels)).digest("hex").slice(0, 8)}"`;
+        if (init.headers?.["If-None-Match"] === etag) return { status: 304, headers: { get: (name) => (name.toLowerCase() === "etag" ? etag : null) }, json: async () => ({}) };
+        return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? etag : null) },
           json: async () => ({ v: 1, db: "mysql", readAt: Date.now(), channels }) };
       }
     }
@@ -7417,6 +7420,10 @@ for (const policy of POLICIES) test("K2b：两条绑定互换 Key（挪过）—
   });
   await f.module.refreshDue(now);
   assert.ok((await f.repository.getRule("rr_live")).canonicalKey && (await f.repository.getRule("rr_b")).canonicalKey, "第一轮两条都锚定了");
+  // 生产里绑定建的时候 rules.active_token_key 就是 canonical key（createRule），开着那段的 Key 行抄的同一个值；夹具的规则没有，
+  // 补上——不然互换时撞不上唯一约束，「互换必须同组一个事务」（server/reconciliation.js applyKeyAgentChangesFor 的分组）去掉了测试也是绿的
+  for (const row of f.repository.tables.rules) row.active_token_key = row.canonical_key;
+  for (const keyRow of f.repository.tables.segmentKeys) keyRow.active_token_key = f.repository.tables.rules.find((row) => row.token_id === keyRow.token_id)?.canonical_key ?? null;
 
   swapped = true; // 两个渠道互换了 Key
   now = Date.parse("2026-10-12T01:00:00Z");
@@ -9801,6 +9808,7 @@ test("K2b：同一轮里一条绑定撞了唯一约束、另外两条正常换 K
   assert.equal((await f.repository.getRule("rr_c")).keyIssue?.code, "KEY_GROUP_CHANGED", "撞的那条记会自己好的分组冲突");
   assert.equal((await f.repository.getRule("rr_live")).keyIssue, null, "别的组不连坐");
   assert.equal((await f.repository.getRule("rr_b")).keyIssue, null);
+  assert.equal(f.stations[1].keyAgentLastSuccessAtMs, Date.parse("2026-10-11T01:00:00Z"), "撞了的组这一轮没处理完：站点的成功时刻不往前推");
 
   conflictFor = null; // 冲突解开
   now = Date.parse("2026-10-12T01:10:00Z");
@@ -9822,4 +9830,46 @@ test("K2b 例外三：这个站点从来没读成功过（内存和持久化都�
   await round("2026-10-11T17:00:00Z");
   await round("2026-10-11T17:15:00Z");
   assert.equal(booked("2026-10-11"), 1, "读到以后照常算");
+});
+
+test("K2b：页面只读查询（evaluate）也看库里持久化的事项——UNMATCHED 记着的那天显示需处理的原因，不是「实时 / READY」；b 以前的日子不受影响；事项解开后观测一轮就没了", async (t) => {
+  const { f, agent, round } = await readerOutageFixture(t);
+  const keyNine = agent.key;
+  await round("2026-10-11T06:00:00Z");
+  agent.key = "sk-" + "Unkn".repeat(10);
+  await round("2026-10-11T10:00:00Z"); // 认出渠道换成了哪都没有的 Key，b = 10:00Z，记进库里
+  await round("2026-10-11T16:05:00Z"); // 10-11 结束了（还没到结账的点），事项还在
+  const evaluate = async (startIso, endIso) => (await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai",
+    startMs: Date.parse(startIso), endMs: Date.parse(endIso) }, { mode: "evaluate" })).results[0];
+  const day = await evaluate("2026-10-10T16:00:00Z", "2026-10-11T16:00:00Z"); // 10-11 整天，跨过 b
+  assert.equal(day.health.code, "CHANNEL_KEY_UNMATCHED", "只读查询看持久化的事项，不是 READY");
+  const before = await evaluate("2026-10-09T16:00:00Z", "2026-10-10T16:00:00Z"); // 10-10，整天在 b 以前
+  assert.notEqual(before.health.code, "CHANNEL_KEY_UNMATCHED", "b 以前的日子不受影响");
+  agent.key = keyNine; // 解开
+  await round("2026-10-11T16:10:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue, null);
+  assert.notEqual((await evaluate("2026-10-10T16:00:00Z", "2026-10-11T16:00:00Z")).health.code, "CHANNEL_KEY_UNMATCHED");
+});
+
+test("K2b（驱动层 304）：渠道换成了不在已加上游里的 Key，读取服务内容不变（304）——把上游加上以后，过了重对间隔下一轮就认出来、清掉事项并换段，不是一直卡在 CHANNEL_KEY_UNMATCHED", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  const keys = { 9: "sk-" + "Nine".repeat(10), 77: "sk-" + "Sev7".repeat(10) };
+  const extraTokens = [{ tokenId: 9, name: "stable" }];
+  let channelKey = keys[9];
+  const f = liveReconciliationFixture(t, { segments: [{ id: "s1", group: "g1", from: 0 }], tokenKeyOf: (tokenId) => keys[tokenId], extraTokens,
+    keyAgent: { secret: KEY_AGENT_SECRET, channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(channelKey), f: "unused" }] }] } });
+  const round = async (iso) => { now = Date.parse(iso); await f.module.refreshDue(now); }; // 不清识别缓存：靠 4 分钟到期 + etag（304）
+  await round("2026-10-11T01:00:00Z");
+  assert.ok((await f.repository.getRule("rr_live")).canonicalKey, "锚定");
+  channelKey = keys[77]; // 渠道换成了一把不在已加上游里的 Key
+  await round("2026-10-11T01:10:00Z");
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.code, "CHANNEL_KEY_UNMATCHED");
+  extraTokens.push({ tokenId: 77, name: "added-later" }); // 用户把这把 Key 所在的上游加上了（目录里有了）
+  await round("2026-10-11T01:20:00Z"); // 读取服务内容没变（304），但距上一次对上游目录不到 15 分钟：先不重对
+  assert.equal((await f.repository.getRule("rr_live")).keyIssue?.code, "CHANNEL_KEY_UNMATCHED", "间隔没到，不重读上游目录");
+  await round("2026-10-11T01:30:00Z"); // 过了 15 分钟：304 也重新对一遍上游目录
+  const rule = await f.repository.getRule("rr_live");
+  assert.equal(rule.keyIssue, null, "认出来了，事项清掉");
+  assert.equal(rule.tokenId, 77, "换段");
 });

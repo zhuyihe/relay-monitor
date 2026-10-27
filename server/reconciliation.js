@@ -763,7 +763,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 只给已经锚定过身份（rule.canonicalKey 不是 null）、这一轮上游身份读得到的绑定换 Key：没锚定的绑定走自己的
   // 锚定流程，不归 K2b 管；上游这一轮读不到就留给下一轮，不拿读不到的身份算 canonicalKey。
   //
-  // 过渡段 [a, b) 的 a（总指挥 10-27 定，丢了只能往前退、不能退到 b，否则 [t, b) 那段新 Key 的花费漏掉）：
+  // 过渡段 [a, b) 的 a（丢了只能往前退、不能退到 b，否则 [t, b) 那段新 Key 的花费漏掉）：
   //   - a 取这一轮读取服务读之前存的「上一次读成功」的时刻，不是这一轮的；这一轮新的成功时刻要等这一轮的换段落库
   //     提交以后再写（identifyChannelsCached 自己不写）。读完先写会让 a 变成 b；写完还没落库就重启，重启后 a 还是 b。
   //   - 这一轮只要这个站点下还有没处理完的（撞了约束回滚、分组合组、上游身份读不到、有绑定这一轮认不出来……），
@@ -782,7 +782,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   async function keyAgentRoundFor(rules, resources) {
     const keyIssues = new Map(); // ruleId -> { code, sinceMs, channelId? }
     // b（sinceMs）：一条绑定只要一直有事项（不管事项的码怎么变，比如 CHANNEL_KEY_UNMATCHED 变成 KEY_GROUP_CHANGED）就沿用最早的那个，
-    // 事项全部解除（这一轮没有）才清、下次重新记。换码就重置成现在，会把之前被挡的日子放行（审核 2 第 1 轮 高-3）
+    // 事项全部解除（这一轮没有）才清、下次重新记。换码就重置成现在，会把之前被挡的日子放行
     const issueFor = (rule, code, extra = {}) => ({ code, sinceMs: keyIssues.get(rule.id)?.sinceMs ?? rule.keyIssue?.sinceMs ?? now, ...extra });
     const keyAgentDown = new Map(); // ruleId -> { code, sinceMs }：读取服务读不到，从 sinceMs 起先不算
     const now = Date.now();
@@ -799,7 +799,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 不拿旧结果去判换没换 Key；这个站点下各绑定记「读不到」，从最后一次读到的时刻起先不算
       if (!identified?.ok || identified.stale === true || !identified.channels) {
         // 库里已经记着的事项（rules.key_issue_code / key_issue_since_ms）这一轮没法重新判断：继续挡，不能因为读取服务断了就放行
-        // （审核 2 第 1 轮 高-1：CHANNEL_KEY_UNMATCHED 从 b 起挡着的那天，读取服务一断就被固定）。事项只有读得到、重新判断以后才清
+        // （CHANNEL_KEY_UNMATCHED 从 b 起挡着的那天，读取服务一断就被固定）。事项只有读得到、重新判断以后才清
         for (const rule of enabled.filter((item) => item.ownStationId === ownStationId && item.keyIssue)) {
           keyIssues.set(rule.id, { code: rule.keyIssue.code, sinceMs: rule.keyIssue.sinceMs });
         }
@@ -907,7 +907,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     });
     const byRuleId = new Map(changeCandidates.map((item) => [item.rule.id, item]));
     // Sub2API 只能按整天读账单：一把 Key 在两条绑定之间挪（互换、转手）时，b 那一刻切不开这一天的钱——两条绑定各取这把 Key 全天，
-    // 同一笔钱会算两遍。这一版先不处理（总指挥 10-27 定）：这两条绑定这几天先不结账，记一个会自己好的「读取中」，
+    // 同一笔钱会算两遍。这一版先不处理：这两条绑定这几天先不结账，记一个会自己好的「读取中」，
     // 等后面的小 PR 按逐条用量拆开（design/ux/binding-flow.md §3 最后一段）；宁可先不算，也不算错。
     // 现在识别只认 New API 上游的 Key（Sub2API 的目录不给 Key 材料），这里是为以后认得出 Sub2API 时守住的
     const isSub2 = (ruleId) => /^sub2api/.test(upstreamStation(byRuleId.get(ruleId)?.rule.upstreamStationId)?.type || "");
@@ -927,7 +927,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }).filter(Boolean);
     // 互换、轮换（挪过）的几条绑定必须同生同死：按 movedFromBindingId 把互相牵连的归成一组，每组一个事务；
     // 别的组各自一个事务。一组撞了约束只回滚这一组、只给这一组记 KEY_GROUP_CHANGED（会自己好的那类），别的组照常换段——
-    // 一条有问题的绑定不能挡住同一个站点上别的绑定换 Key（审核 2 第 1 轮 中-2，总指挥 10-27 定）。
+    // 一条有问题的绑定不能挡住同一个站点上别的绑定换 Key（见 PR 说明）。
     // 挪过来的 Key 在另一头的那条绑定这一轮没算出计划（上游身份读不到被跳过）：这一条也先留着，不然会和还握着这把 Key 的另一头撞车
     const skipped = new Set(plans.map((plan) => plan.bindingId).filter((id) => !applyPlans.some((item) => item.ruleId === id)));
     const held = applyPlans.filter(({ plan }) => plan.kind === "moved" && skipped.has(plan.movedFromBindingId));
@@ -1027,7 +1027,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       duplicateSales.set(id, [...new Set([...(duplicateSales.get(id) || []), ...ids])].sort());
     }
     return { startedAt: Date.now(), rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, duplicateSales, billingSource: Object.freeze(billingSource),
-      keyIssues, keyAgentDown,
+      keyIssues, keyAgentDown, keyAgentObserved: observe,
       // 这一轮（或这一次查询）里共用的：自营站点的 /api/status；哪些自营站点从什么时候起没有新的消费（只有轮询会填）
       ownStatus: new Map(), ownQuietFrom: new Map() };
   }
@@ -2225,7 +2225,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // K2b：这条绑定分组了或合组了（keyAgentRoundFor，k-plan §3.3），交给 K2c 重新分组；换成不在已加上游里的 Key（CHANNEL_KEY_UNMATCHED）、读不了完整 Key（KEY_REVEAL_DENIED）也走这里；从第一次认出冲突的那一刻
       // （b）起不结账、不开新段——宁可先不算，也不把钱算给错的那一条。只挡 b 及以后的窗口：b 以前已经结过、或者还没
       // 轮到结的日子，和这件事无关，不能因为今天冲突了就连累昨天（总指挥 10-26 定）
-      const keyIssue = ownerRegistry.keyIssues?.get(rule.id);
+      // 只读查询（页面 evaluate）不判断，用库里持久化的事项（rule.keyIssue）：页面和需处理清单看到的是同一件事，
+      // 不会在观测之前显示「实时」而这几天其实不会固定；观测的轮次用这一轮重新判断的结果（解开了就是没有）
+      const keyIssue = ownerRegistry.keyIssues?.get(rule.id) ?? (ownerRegistry.keyAgentObserved === false ? rule.keyIssue : null);
       if (keyIssue && window.endMs >= keyIssue.sinceMs) {
         return unavailable(health(keyIssue.code, issueText(keyIssue.code), { sinceMs: keyIssue.sinceMs, ...(keyIssue.channelId != null ? { channelId: keyIssue.channelId } : {}), ...(keyIssue.upstreamStationId != null ? { upstreamStationId: keyIssue.upstreamStationId } : {}) }), { metadata, token }, false);
       }

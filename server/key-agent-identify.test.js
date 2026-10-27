@@ -385,3 +385,45 @@ test("identifyChannelsCached：持续 not_found 的渠道（例外一的真实�
   assert.ok(reads <= 5, `一小时读了 ${reads} 次：第一次 + 每 15 分钟一次，最多 5 次`);
   assert.ok(reads >= 4, "间隔到了还是会重读（上游加上能认出来）");
 });
+
+test("identifyChannelsCached：304 重新对上游目录时候选上游读不到——这次比对不算数，不把认得出的渠道降级成 unresolved、不更新 comparedAt，下一轮缓存到期接着重对", async (t) => {
+  let step = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    step++;
+    if (step === 1) return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"v1"' : null) },
+      json: async () => ({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "https://up.example.com", keys: [{ i: 0, m: mask, f: fp }] }] }) };
+    return { status: 304, headers: { get: () => null }, json: async () => ({}) };
+  });
+  const upstream = { id: "up1", type: "newapi", baseUrl: "https://up.example.com" };
+  const rt = { store: { list: () => [ownStation, upstream] } };
+  const first = await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => ({ tokens: [] }) });
+  assert.equal(first.channels[0].slots[0].state, "not_found");
+  const comparedAt = rt._keyAgentIdentifyCache.lastGood.comparedAt;
+  age(rt, UNRESOLVED_RECHECK_MS + 1);
+  const second = await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => { throw new Error("upstream 500"); } });
+  assert.equal(second.channels[0].slots[0].state, "not_found", "沿用上一份，不是 unresolved");
+  assert.ok(second.fetchedAtMs != null, "读取服务读到了（304）");
+  assert.ok(rt._keyAgentIdentifyCache.lastGood.comparedAt < comparedAt, "比对没成：comparedAt 没往前更新（age 之后还是更早的那个）");
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1; // 缓存到期，间隔早已超过：马上接着重对
+  const third = await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => ({ tokens: [{ id: 9, name: "oai", maskedKey: fullKey }] }) });
+  assert.equal(third.channels[0].slots[0].state, "identified");
+});
+
+test("identifyChannelsCached：带 X-Agent-Stale 的 200（读取服务给的旧结果）带着不同的 etag，也不当「最近一次读成功」：etag 和结果都不换", async (t) => {
+  let step = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    step++;
+    const channels = [{ id: 1, baseUrl: "https://up.example.com", keys: [{ i: 0, m: mask, f: fp }] }];
+    if (step === 1) return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"v1"' : null) }, json: async () => ({ v: 1, db: "mysql", readAt: 1, channels }) };
+    return { status: 200, headers: { get: (name) => ({ etag: '"stale-v2"', "x-agent-stale": "1" })[name.toLowerCase()] ?? null }, json: async () => ({ v: 1, db: "mysql", readAt: 2, channels }) };
+  });
+  const upstream = { id: "up1", type: "newapi", baseUrl: "https://up.example.com" };
+  const rt = { store: { list: () => [ownStation, upstream] } };
+  const options = { queryMetadata: async () => ({ tokens: [{ id: 9, name: "oai", maskedKey: fullKey }] }) };
+  await identifyChannelsCached(rt, ownStation, options);
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  const stale = await identifyChannelsCached(rt, ownStation, options);
+  assert.equal(stale.stale, true);
+  assert.equal(stale.fetchedAtMs, null, "旧结果不算读到");
+  assert.equal(rt._keyAgentIdentifyCache.lastGood.etag, '"v1"', "stale 的 etag 不当最近一次读成功的");
+});
