@@ -290,3 +290,74 @@ test("identifyChannelsCached：结果带 fetchedAtMs（真的读成功的时刻�
   t.mock.method(globalThis, "fetch", async () => { throw new Error("连不上"); });
   assert.equal((await identifyChannelsCached({ store }, ownStation)).fetchedAtMs, undefined, "连不上：没有结果，也就没有这个时刻");
 });
+
+// 审核 2 第 1 轮 高-2：304 只说明读取服务那一份没变，不说明上游目录没变
+test("identifyChannelsCached：认出的结果里有没认定的（渠道 Key 不在已加的上游里），读取服务回 304 也要重新对一遍上游目录——用户把上游加上以后下一轮就认出来了", async (t) => {
+  let step = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    step++;
+    if (step === 1) return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"v1"' : null) },
+      json: async () => ({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "https://up.example.com", keys: [{ i: 0, m: mask, f: fp }] }] }) };
+    return { status: 304, headers: { get: () => null }, json: async () => ({}) };
+  });
+  const upstream = { id: "up1", type: "newapi", baseUrl: "https://up.example.com" };
+  const rt = { store: { list: () => [ownStation, upstream] } };
+  const first = await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => ({ tokens: [] }) }); // 目录里还没有这把
+  assert.equal(first.channels[0].slots[0].state, "not_found");
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  let metadataCalls = 0;
+  const second = await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => { metadataCalls++; return { tokens: [{ id: 9, name: "oai", maskedKey: fullKey }] }; } });
+  assert.equal(metadataCalls, 1, "没认定的：304 也重新读候选上游的目录");
+  assert.equal(second.channels[0].slots[0].state, "identified", "上游加上以后认出来了");
+  assert.equal(second.fetchedAtMs != null, true);
+  // 认定了的就不再多读（上面「304 沿用」那条）
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  await identifyChannelsCached(rt, ownStation, { queryMetadata: async () => { metadataCalls++; return { tokens: [] }; } });
+  assert.equal(metadataCalls, 1, "全部认定以后 304 不再读上游");
+});
+
+test("identifyChannelsCached：打码撞了又没有 api_key:reveal 权限，读取服务回 304 时补了权限也能重新认出来；重新比对不会把原始渠道列表（指纹、打码）放进返回结果", async (t) => {
+  let step = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    step++;
+    if (step === 1) return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"v1"' : null) }, json: async () => ({ v: 1, db: "mysql", readAt: 1, channels: [ambiguousChannel] }) };
+    return { status: 304, headers: { get: () => null }, json: async () => ({}) };
+  });
+  const rt = { store: { list: () => [ownStation, ambiguousUpstream] } };
+  let granted = false;
+  const revealKeys = async () => {
+    if (!granted) throw Object.assign(new Error("denied"), { code: "ACCESS_TOKEN_SCOPE_DENIED", scope: "api_key:reveal" });
+    return { 9: fullKeyA, 10: fullKeyB };
+  };
+  const first = await identifyChannelsCached(rt, ownStation, { queryMetadata: maskedQueryMetadata, revealKeys });
+  assert.equal(first.revealIssues.length, 1);
+  granted = true;
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  const second = await identifyChannelsCached(rt, ownStation, { queryMetadata: maskedQueryMetadata, revealKeys });
+  assert.deepEqual(second.revealIssues, [], "补了权限：不再有缺权限的");
+  assert.equal(second.channels[0].slots[0].state, "identified");
+  assert.equal(JSON.stringify(second).includes(collidingFp), false, "原始渠道列表里的指纹不在返回结果里");
+});
+
+test("identifyChannelsCached：一次失败（503）不覆盖上一份认出的结果；恢复回 304 时沿用的还是失败前的 channels，不是 null", async (t) => {
+  let step = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    step++;
+    if (step === 1) return { status: 200, headers: { get: (name) => (name.toLowerCase() === "etag" ? '"v1"' : null) },
+      json: async () => ({ v: 1, db: "mysql", readAt: 1, channels: [{ id: 1, baseUrl: "https://up.example.com", keys: [{ i: 0, m: mask, f: fp }] }] }) };
+    if (step === 2) return { status: 503, headers: { get: () => null }, json: async () => ({}) };
+    return { status: 304, headers: { get: () => null }, json: async () => ({}) };
+  });
+  const upstream = { id: "up1", type: "newapi", baseUrl: "https://up.example.com" };
+  const rt = { store: { list: () => [ownStation, upstream] } };
+  const options = { queryMetadata: async () => ({ tokens: [{ id: 9, name: "oai", maskedKey: fullKey }] }) };
+  const first = await identifyChannelsCached(rt, ownStation, options);
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  const failed = await identifyChannelsCached(rt, ownStation, options);
+  assert.equal(failed.ok, false);
+  rt._keyAgentIdentifyCache.at -= IDENTIFY_CACHE_MS + 1;
+  const recovered = await identifyChannelsCached(rt, ownStation, options);
+  assert.equal(recovered.ok, true);
+  assert.deepEqual(recovered.channels, first.channels, "失败之后恢复，沿用失败前认出的，不是 null");
+  assert.ok(recovered.fetchedAtMs != null);
+});

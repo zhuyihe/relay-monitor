@@ -16,7 +16,7 @@ import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
-  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow,
+  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
   SETTLEMENT_STATE_WRITE_COLUMNS, settlementStateFromRow, settlementStateValues,
 } from "../reconciliation-repository.js";
@@ -501,6 +501,7 @@ export class MemoryReconciliationRepository {
   async applyKeyChangePlans(plans, { detectedAt = Date.now() } = {}) {
     try {
       await this.#transaction("applyKeyChangePlans", async (tx) => {
+        tx.record.keyChangeRuleIds = plans.map(({ ruleId }) => ruleId); // 给测试的 beforeCommit 钩子认「这个事务是给哪几条绑定换 Key」
         const currents = new Map(), rules = new Map();
         for (const { ruleId } of plans) {
           await this.#lock(tx, `rule:${ruleId}`);
@@ -511,6 +512,8 @@ export class MemoryReconciliationRepository {
           if (!current) throw repositoryError("CURRENT_SEGMENT_MISSING");
           currents.set(ruleId, current);
         }
+        // 对应 MySQL 版的前置条件：不满足就整批什么也不写（抛出去，事务回滚），返回 { stale: true }
+        if (plans.some(({ ruleId, plan }) => keyChangePlanIsStale(plan, rules.get(ruleId), currents.get(ruleId)))) throw Object.assign(new Error("stale key change plan"), { stalePlan: true });
         for (const { ruleId } of plans) {
           // 对应 MySQL 版：先给还没有 Key 行的段补一行（填换之前 rules 上的那把），再清空 active_token_key
           const oldRule = this.#ruleEntry(tx, ruleId).row;
@@ -559,6 +562,7 @@ export class MemoryReconciliationRepository {
       });
     } catch (err) {
       if (err?.code === "ER_DUP_ENTRY") return { conflict: true };
+      if (err?.stalePlan) return { conflict: false, stale: true };
       throw err;
     }
     return { conflict: false };

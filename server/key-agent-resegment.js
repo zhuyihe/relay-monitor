@@ -53,7 +53,7 @@ export function planSegmentChanges({ bindings, lastSeenAt, observedAt, preciseAt
     if (!binding.after || sameKeyRef(binding.before, binding.after)) continue;
     const movedFromBindingId = ownerBefore.get(keyRefId(binding.after));
     if (movedFromBindingId != null && movedFromBindingId !== binding.id) {
-      plans.push({ bindingId: binding.id, movedFromBindingId, ...planMovedKeySegments({ observedAt, newRef: binding.after }) });
+      plans.push({ bindingId: binding.id, movedFromBindingId, ...planMovedKeySegments({ observedAt, newRef: binding.after }), before: binding.before ? [binding.before] : [] });
     } else {
       plans.push({ bindingId: binding.id, ...planKeyChangeSegments({
         lastSeenAt: lastSeenAtByBinding[binding.id] ?? lastSeenAt, observedAt, oldRef: binding.before, newRef: binding.after,

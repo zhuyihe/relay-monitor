@@ -121,6 +121,15 @@ export function copySegment(segment, overrides = {}) {
   return Object.defineProperty({ ...segment, ...overrides }, "keys", { value: segment.keys, enumerable: false, configurable: true, writable: true });
 }
 
+// 换 Key 的计划在落库那一刻还成立吗（applyKeyChangePlans 的前置条件，内存仓库共用）。rule、current 是库里（锁住以后）的行
+export function keyChangePlanIsStale(plan, rule, current) {
+  const before = plan.before?.[0];
+  if (before && (Number(rule.token_id) !== Number(before.tokenId) || before.upstreamStationId != null && rule.upstream_station_id !== before.upstreamStationId)) return true;
+  const start = plan.kind === "windowed" ? plan.windowStart : plan.cutoverAt;
+  if (!(Number(start) >= Number(current.effective_from_ms))) return true; // 段不能在自己的起点以前结束（a 就是起点时旧段长度为零，照旧允许：开着那段的起点是 a 的下限）
+  return plan.kind === "windowed" && !(plan.windowEnd >= plan.windowStart);
+}
+
 export function segmentFromRow(row) {
   return {
     id: row.id,
@@ -766,6 +775,13 @@ export class ReconciliationRepository {
         const [segmentRows] = await conn.query("SELECT * FROM reconciliation_rule_segments WHERE rule_id = ? AND effective_to_ms IS NULL FOR UPDATE", [ruleId]);
         if (!segmentRows[0]) throw repositoryError("CURRENT_SEGMENT_MISSING");
         currents.set(ruleId, segmentRows[0]);
+      }
+      // 前置条件（审核 2 第 1 轮 中-1）：计划是调用方在读规则以后算的，到这里（行已经锁上）规则可能已经被别的写入换过了——
+      // 页面刷新和轮询可以同时进来，各算同一份计划；缓存期间倍率变化也可能开了新段。不满足就什么也不写、整批回滚，
+      // 返回 { stale: true }，调用方下一轮重新算：规则现在的 Key 不是计划的「换之前」；切点早于开着那段的起点；窗口倒挂
+      if (plans.some(({ ruleId, plan }) => keyChangePlanIsStale(plan, rules.get(ruleId), currents.get(ruleId)))) {
+        await conn.rollback();
+        return { conflict: false, stale: true };
       }
       for (const { ruleId } of plans) {
         // 先把还没有 Key 行的段补一行（填 rules 上现在——也就是换之前——的那把）：下面要改 rules.token_id，

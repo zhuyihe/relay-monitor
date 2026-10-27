@@ -1741,3 +1741,59 @@ contract("correctTransition: days older than 31 days get an attention row (RESET
   assert.deepEqual([tooOld[0].manualSince, tooOld[0].nextAttemptAt, tooOld[0].detail], [now, null, { code: "RESETTLE_TOO_OLD", side: null }]);
   assert.equal(plain[0].detail, null);
 });
+
+contract("applyKeyChangePlans: preconditions — replaying the same plan, a cutover before the open segment's start, an inverted window all write nothing and return stale (no inverted / duplicate / zero-length segments)", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ channels: [{ channelId: fixture.channel(66), name: "Pre" }], initialRatio: 1 });
+  const oldRef = { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName };
+  const newRef = { upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(67), tokenName: "Pre2" };
+  const windowStart = EFFECTIVE_FROM + HOUR, windowEnd = windowStart + 2 * 60 * 1000;
+  const windowed = { kind: "windowed", windowStart, windowEnd, windowKeys: [oldRef, newRef], before: [oldRef], after: [newRef] };
+  const snapshot = async () => JSON.stringify([await repository.listSegments(rule.id), (await repository.getRule(rule.id)).tokenId]);
+  assert.deepEqual(await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: windowed }]), { conflict: false });
+  const applied = await snapshot();
+  // 同一份计划再应用一次（页面刷新和轮询各算了一份）：规则现在的 Key 已经不是计划的「换之前」
+  assert.deepEqual(await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: windowed }]), { conflict: false, stale: true });
+  assert.equal(await snapshot(), applied, "重放什么也没写：没有倒挂段、没有重复的过渡段");
+  // 切点早于开着那段（现在是 windowEnd 起的新段）的起点：不写
+  const back = { kind: "precise", cutoverAt: windowEnd - 1000, before: [newRef], after: [oldRef] };
+  assert.deepEqual(await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: back }]), { conflict: false, stale: true });
+  // 窗口倒挂（a 晚于 b）：不写
+  const inverted = { kind: "windowed", windowStart: windowEnd + 5000, windowEnd: windowEnd + 1000, windowKeys: [newRef, oldRef], before: [newRef], after: [oldRef] };
+  assert.deepEqual(await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: inverted }]), { conflict: false, stale: true });
+  assert.equal(await snapshot(), applied);
+  // 前置条件满足的还是能写（换回去）
+  const ok = { kind: "precise", cutoverAt: windowEnd + 60000, before: [newRef], after: [oldRef] };
+  assert.deepEqual(await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: ok }]), { conflict: false });
+  assert.equal((await repository.getRule(rule.id)).tokenId, rule.tokenId);
+  // 一批里只要有一条不成立，整批都不写（互换的一组要同生同死）
+  const other = await fixture.createRule({ tokenId: fixture.token(68), tokenName: `Contract ${fixture.tag} Pre-B`, channels: [{ channelId: fixture.channel(69), name: "PreB" }] });
+  const before = JSON.stringify([await repository.listSegments(rule.id), await repository.listSegments(other.id)]);
+  const stalePlan = { kind: "precise", cutoverAt: EFFECTIVE_FROM - 1, before: [{ upstreamStationId: other.upstreamStationId, tokenId: other.tokenId }], after: [{ upstreamStationId: other.upstreamStationId, tokenId: fixture.token(70), tokenName: "x" }] };
+  const goodPlan = { kind: "precise", cutoverAt: windowEnd + 120000, before: [oldRef], after: [newRef] };
+  assert.deepEqual(await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: goodPlan }, { ruleId: other.id, plan: stalePlan }]), { conflict: false, stale: true });
+  assert.equal(JSON.stringify([await repository.listSegments(rule.id), await repository.listSegments(other.id)]), before, "整批都不写");
+});
+
+
+contract("applyKeyChangePlans: the unique key it writes is canonicalKey (same form as createRule), so another binding with that canonicalKey is rejected; a disabled binding releases the key rows' unique slot and re-enabling takes it back", async ({ repository, fixture }) => {
+  const rule = await fixture.createRule({ canonicalKey: `up:${fixture.tag}:old`, billingPolicy: "immediate", timezone: "UTC", channels: [{ channelId: fixture.channel(71), name: "Act" }], initialRatio: 1 });
+  const newRef = { upstreamStationId: rule.upstreamStationId, tokenId: fixture.token(72), tokenName: "Act2" };
+  const canonical = `up:${fixture.tag}:new`;
+  await repository.applyKeyChangePlans([{ ruleId: rule.id, plan: { kind: "precise", cutoverAt: EFFECTIVE_FROM + HOUR, before: [{ upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId }], after: [newRef], canonicalKey: canonical } }]);
+  assert.equal((await repository.getRule(rule.id)).canonicalKey, canonical);
+  // rules.active_token_key 是 canonical 值（不是旧写法「上游:Key」）：另一条绑定带着同一个 canonicalKey 建，撞唯一键
+  await assert.rejects(fixture.createRule({ tokenId: fixture.token(73), canonicalKey: canonical, ownStationId: fixture.station("own-other"), channels: [{ channelId: fixture.channel(73), name: "Dup" }] }),
+    { code: "ER_DUP_ENTRY", errno: 1062 });
+  const openKeys = async () => (await repository.listSegments(rule.id)).find((segment) => segment.effectiveTo == null).keys.map((key) => key.active);
+  assert.deepEqual(await openKeys(), [true], "开着那段的 Key 行占着唯一键");
+  // 停用：不占唯一键（别的绑定可以用这把 Key）；重新启用：agent 写的 Key 行占回来
+  await repository.updateRule(rule.id, { enabled: false });
+  assert.deepEqual(await openKeys(), [false], "停用以后释放");
+  const taker = await fixture.createRule({ tokenId: fixture.token(74), canonicalKey: canonical, ownStationId: fixture.station("own-taker"), channels: [{ channelId: fixture.channel(74), name: "Taker" }] });
+  assert.ok(taker.id, "停用期间别的绑定可以占这把 Key");
+  assert.equal(await repository.archiveRule(taker.id), true);
+  await repository.updateRule(rule.id, { enabled: true });
+  assert.deepEqual(await openKeys(), [true], "重新启用以后 agent 行占回唯一键");
+  await assert.rejects(fixture.createRule({ tokenId: fixture.token(75), canonicalKey: canonical, ownStationId: fixture.station("own-late"), channels: [{ channelId: fixture.channel(75), name: "Late" }] }),
+    { code: "ER_DUP_ENTRY", errno: 1062 });
+});

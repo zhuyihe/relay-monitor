@@ -21,12 +21,18 @@ async function revealResultOf(revealKeys, station, tokenIds) {
 // Sub2API 的 Key 列表不给 Key 材料，这一版比不了，候选是 Sub2API 时直接跳过。
 // 返回 { ok, stale, staleReason, channels: [{ channelId, keyless, slots? }], revealIssues }；channelIds 给了就只认这几个。
 // revealIssues：按上游汇总的「少了 api_key:reveal 权限」，还没开始算的渠道只在这一条里列出（不逐渠道报需处理）
-export async function identifyChannels(rt, ownStation, { channelIds = null, etag = null, queryMetadata = queryNewApiReconciliationMetadata, revealKeys = queryRevealedTokenKeys } = {}) {
+// cachedSnapshot：上一次读取服务给的原始渠道列表（{ channels }）。读取服务回 304（它那一份没变）时，调用方想重新对一遍上游目录就传它——
+// 304 只说明读取服务的数没变，不说明上游目录没变（用户加了上游、补了 api_key:reveal 权限，渠道还是那把 Key，认出来的结果就该变）；
+// 不传就照旧：304 直接返回 channels: null，由调用方沿用上一次认出的结果
+export async function identifyChannels(rt, ownStation, { channelIds = null, etag = null, cachedSnapshot = null, queryMetadata = queryNewApiReconciliationMetadata, revealKeys = queryRevealedTokenKeys } = {}) {
   const config = keyAgentConfigOf(ownStation);
   if (!config) return { ok: false, code: "KEY_AGENT_NOT_CONFIGURED" };
-  const snapshot = await fetchKeyAgentSnapshot({ url: config.url, token: config.token, etag });
+  let snapshot = await fetchKeyAgentSnapshot({ url: config.url, token: config.token, etag });
   if (!snapshot.ok) return snapshot;
-  if (snapshot.status === 304) return { ok: true, status: 304, stale: snapshot.stale, staleReason: snapshot.staleReason, etag: snapshot.etag, channels: null };
+  if (snapshot.status === 304) {
+    if (!cachedSnapshot?.channels) return { ok: true, status: 304, stale: snapshot.stale, staleReason: snapshot.staleReason, etag: snapshot.etag, channels: null };
+    snapshot = { ...snapshot, channels: cachedSnapshot.channels };
+  }
 
   const upstreams = rt.store.list({ includeUnmonitored: true }).filter((station) => !station.isOwn && station.type !== "fixed" && !station.archivedAt);
   const newApiUpstreams = upstreams.filter((station) => station.type === "newapi");
@@ -136,29 +142,42 @@ export async function identifyChannels(rt, ownStation, { channelIds = null, etag
     }
   }
 
-  return { ok: true, status: 200, stale: snapshot.stale, staleReason: snapshot.staleReason, etag: snapshot.etag, channels, revealIssues };
+  const result = { ok: true, status: snapshot.status, stale: snapshot.stale, staleReason: snapshot.staleReason, etag: snapshot.etag, channels, revealIssues };
+  // 原始渠道列表（带指纹、打码）给缓存层留着重新比对用：不可枚举，不会跟着结果被展开、序列化出去
+  Object.defineProperty(result, "snapshotChannels", { value: snapshot.channels, enumerable: false });
+  return result;
 }
 
 // 查一次候选上游的 Key 目录要挨个翻页读，不便宜；缓存节奏和读取服务自己的库读节奏一样（k-plan §2.4 的 4 分钟），
 // 查询结果（渠道目录等）一请求一次调这个，不会把所有候选上游的 Key 目录在节奏之外重读一遍。
 // 304（读取服务那一侧没变）直接沿用上一次认出的结果，连候选上游都不问
 export const IDENTIFY_CACHE_MS = 4 * 60 * 1000;
+// 认出的结果里还有没认定的（not_found、ambiguous、unresolved，或者少了 api_key:reveal 权限）：这类状态会随上游目录、权限变化自己好，
+// 读取服务回 304 也要重新对一遍上游目录；全都认定了（identified / keyless）的，304 就沿用，不多读上游（审核 #131「别多读上游」）
+const hasUnresolved = (result) => (result?.revealIssues?.length ?? 0) > 0
+  || (result?.channels || []).some((channel) => !channel.keyless && (channel.slots || []).some((slot) => slot.state !== "identified"));
+// 缓存分两份：result 是最近一次问的结果（失败了也记，4 分钟内不重复问）；lastGood 是最近一次读成功的结果、etag、原始渠道列表，
+// 失败结果不会覆盖它——一次 503 之后恢复回 304 时，沿用的还是失败之前认出的 channels，不是 null（审核 2 第 1 轮 高-2）
 export async function identifyChannelsCached(rt, ownStation, options = {}) {
   const cache = rt._keyAgentIdentifyCache;
   const now = Date.now();
   if (cache && cache.stationId === ownStation.id && now - cache.at < IDENTIFY_CACHE_MS) return cache.result;
   const sameStation = cache?.stationId === ownStation.id;
-  const result = await identifyChannels(rt, ownStation, { ...options, etag: sameStation ? cache.etag : null });
+  const good = sameStation ? cache.lastGood ?? null : null;
+  const result = await identifyChannels(rt, ownStation, { ...options, etag: good?.etag ?? null,
+    cachedSnapshot: good && hasUnresolved(good.result) ? { channels: good.snapshotChannels } : null });
   trackKeyAgentReachability(rt, ownStation.id, result); // 只在真的问了一次（没命中 4 分钟缓存）才记，不按调用次数记
-  if (!result.ok) { rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result, etag: sameStation ? cache.etag : null }; return result; }
+  if (!result.ok) { rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result, lastGood: good }; return result; }
   // fetchedAtMs：这一份结果是什么时候真的从读取服务拿到的（200 或 304，不带 X-Agent-Stale 才有）。缓存命中返回的还是原来那份，
   // 所以带的是原来那一刻——K2b 的驱动拿它当「读取服务上一次读成功」的时刻，由驱动在换段落库提交以后再持久化
   // （不在这里写：读完就先写，a 就成了 b，中途重启还会让它退不回去，见 server/reconciliation.js keyAgentRoundFor）
-  const resolvedBase = result.status === 304 && sameStation && cache.result?.ok
-    ? { ...result, channels: cache.result.channels, revealIssues: cache.result.revealIssues }
+  const resolvedBase = result.channels == null && good
+    ? { ...result, channels: good.result.channels, revealIssues: good.result.revealIssues }
     : result;
   const resolved = { ...resolvedBase, fetchedAtMs: result.stale ? null : now };
-  rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result: resolved, etag: result.etag ?? (sameStation ? cache.etag : null) };
+  // 带 X-Agent-Stale 的是读取服务给的旧结果，不当「最近一次读成功」留下，也不换 etag
+  const nextGood = result.stale ? good : { etag: result.etag ?? good?.etag ?? null, result: resolved, snapshotChannels: result.snapshotChannels ?? good?.snapshotChannels ?? null };
+  rt._keyAgentIdentifyCache = { at: now, stationId: ownStation.id, result: resolved, lastGood: nextGood };
   return resolved;
 }
 

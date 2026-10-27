@@ -781,7 +781,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // rules 是换段落库以后重新读的绑定（没有换 Key 时原样返回），调用方要用它重算成本主人和写账本的版本指纹。
   async function keyAgentRoundFor(rules, resources) {
     const keyIssues = new Map(); // ruleId -> { code, sinceMs, channelId? }
-    const issueFor = (rule, code, extra = {}) => ({ code, sinceMs: rule.keyIssue?.code === code ? rule.keyIssue.sinceMs : now, ...extra });
+    // b（sinceMs）：一条绑定只要一直有事项（不管事项的码怎么变，比如 CHANNEL_KEY_UNMATCHED 变成 KEY_GROUP_CHANGED）就沿用最早的那个，
+    // 事项全部解除（这一轮没有）才清、下次重新记。换码就重置成现在，会把之前被挡的日子放行（审核 2 第 1 轮 高-3）
+    const issueFor = (rule, code, extra = {}) => ({ code, sinceMs: keyIssues.get(rule.id)?.sinceMs ?? rule.keyIssue?.sinceMs ?? now, ...extra });
     const keyAgentDown = new Map(); // ruleId -> { code, sinceMs }：读取服务读不到，从 sinceMs 起先不算
     const now = Date.now();
     const enabled = rules.filter((rule) => rule.enabled);
@@ -796,11 +798,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 读不到（连不上、401/503、格式不对），或者带 X-Agent-Stale（读取服务自己读库失败、给的是上一份旧结果）：都算拿不到新结果。
       // 不拿旧结果去判换没换 Key；这个站点下各绑定记「读不到」，从最后一次读到的时刻起先不算
       if (!identified?.ok || identified.stale === true || !identified.channels) {
+        // 库里已经记着的事项（rules.key_issue_code / key_issue_since_ms）这一轮没法重新判断：继续挡，不能因为读取服务断了就放行
+        // （审核 2 第 1 轮 高-1：CHANNEL_KEY_UNMATCHED 从 b 起挡着的那天，读取服务一断就被固定）。事项只有读得到、重新判断以后才清
+        for (const rule of enabled.filter((item) => item.ownStationId === ownStationId && item.keyIssue)) {
+          keyIssues.set(rule.id, { code: rule.keyIssue.code, sinceMs: rule.keyIssue.sinceMs });
+        }
         const reach = keyAgentReachability(rt, ownStationId);
         const code = keyAgentExceptionIssueOf(reach);
         if (code) {
-          const sinceMs = reach.lastSuccessAtMs ?? stationLastSuccessAtMs ?? reach.unreachableSinceMs ?? now;
-          for (const rule of enabled.filter((item) => item.ownStationId === ownStationId)) keyAgentDown.set(rule.id, { code, sinceMs });
+          // 从最后一次读到的时刻起先不算。内存里的最后一次读到、持久化的都没有（这个站点从来没读成功过，或者每一轮都有没处理完的绑定
+          // 所以持久化值一直没推进、又恰好重启）：退回这条绑定开着那段的起点，不用「现在」——用现在会把从来没核对过 Key 的日子放行
+          const known = reach.lastSuccessAtMs ?? stationLastSuccessAtMs;
+          for (const rule of enabled.filter((item) => item.ownStationId === ownStationId)) {
+            const openFrom = known == null ? (await repository.listSegments(rule.id).catch(() => [])).find((segment) => segment.effectiveTo == null)?.effectiveFrom : null;
+            keyAgentDown.set(rule.id, { code, sinceMs: known ?? openFrom ?? reach.unreachableSinceMs ?? now });
+          }
         }
         continue;
       }
@@ -810,6 +822,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 分不清是哪把（revealIssues，K2a 按上游汇总）。多把 Key 的渠道不参与
       const unmatchedChannelIds = new Set(identified.channels.filter((channel) => !channel.keyless && channel.slots?.length === 1 && channel.slots[0].state === "not_found").map((channel) => Number(channel.channelId)));
       const revealDeniedChannelIds = new Set((identified.revealIssues || []).flatMap((item) => item.channelIds || []).map(Number));
+      // 缺 api_key:reveal 权限的是哪个上游：「更新登录信息」要去那个上游（打码撞了时它不一定是绑定自己的上游）
+      const revealUpstreamByChannel = new Map((identified.revealIssues || []).flatMap((item) => (item.channelIds || []).map((id) => [Number(id), item.upstreamStationId])));
       const refByChannelId = new Map();
       for (const channel of identified.channels) {
         if (channel.keyless || channel.slots?.length !== 1) continue;
@@ -829,13 +843,13 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           // 这一轮一把都没认出来，不参与换 Key 判断；但除非它的渠道全是不认 Key 的（keyless），这条绑定这一轮没被确认过，
           // 站点的成功时刻不能越过它最后一次确认旧 Key 的时刻
           if (rule.channels.some((channel) => !snapshotByChannelId.get(Number(channel.channelId))?.keyless)) pending = true;
-          if (deniedChannel) keyIssues.set(rule.id, issueFor(rule, "KEY_REVEAL_DENIED", { channelId: deniedChannel.channelId }));
+          if (deniedChannel) keyIssues.set(rule.id, issueFor(rule, "KEY_REVEAL_DENIED", { channelId: deniedChannel.channelId, upstreamStationId: revealUpstreamByChannel.get(Number(deniedChannel.channelId)) }));
           else if (unmatchedChannel) keyIssues.set(rule.id, issueFor(rule, "CHANNEL_KEY_UNMATCHED", { channelId: unmatchedChannel.channelId }));
           continue;
         }
         if (detectGroupSplit(channelRefs)) { keyIssues.set(rule.id, issueFor(rule, "KEY_GROUP_CHANGED")); pending = true; continue; }
         if (deniedChannel || unmatchedChannel) { // 组里有的渠道认出来了、有的没有：这条绑定这一轮没处理完
-          keyIssues.set(rule.id, deniedChannel ? issueFor(rule, "KEY_REVEAL_DENIED", { channelId: deniedChannel.channelId })
+          keyIssues.set(rule.id, deniedChannel ? issueFor(rule, "KEY_REVEAL_DENIED", { channelId: deniedChannel.channelId, upstreamStationId: revealUpstreamByChannel.get(Number(deniedChannel.channelId)) })
             : issueFor(rule, "CHANNEL_KEY_UNMATCHED", { channelId: unmatchedChannel.channelId }));
           pending = true;
           continue;
@@ -876,8 +890,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 算每条的 a（safeLastSeenAt）、batch 一次 planSegmentChanges（算不算「挪过」要几条一起看），再一次
   // applyKeyChangePlans 落库；canonicalKey 按新 tokenId 重新算，和 token_id 一起改，不然下一次结账会被
   // SOURCE_BINDING_UNCONFIRMED 挡住（锚定时记的 canonicalKey 对不上了）。
-  // 撞了数据库唯一约束（没被 detectGroupMerges 预检查到的边界情况）：这一批里牵连的绑定都改记分组冲突，不写段。
-  // 返回 { applied: 有没有真的写进库, allApplied: 这一批是不是全部落库了 }
+  // 互换、轮换的绑定一组一个事务，别的组各自一个事务；撞了数据库唯一约束（没被 detectGroupMerges 预检查到的边界情况）只回滚、只记这一组的分组冲突，不写段。
+  // 返回 { applied: 有没有哪一组真的写进库, allApplied: 这一批是不是全部落库了 }
   async function applyKeyAgentChangesFor(changeCandidates, { observedAt, stationLastSuccessAtMs, resources, keyIssues, issueFor }) {
     const lastSeenAtByBinding = {};
     for (const { rule } of changeCandidates) {
@@ -911,19 +925,35 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const groupFields = newToken ? { group: newToken.group, ratio: metadata.groupsAvailable ? metadata.groups?.[newToken.group]?.ratio ?? null : null } : {};
       return { ruleId: plan.bindingId, plan: { ...plan, ...groupFields, canonicalKey: canonicalBillingKey(upstream, identity, plan.after[0].tokenId) } };
     }).filter(Boolean);
-    if (!applyPlans.length) return { applied: false, allApplied: false };
-    // 写库失败（不是撞唯一约束，比如连接断了）：这一轮没换成，不是分组合组，不记冲突，下一轮接着换
-    const result = await repository.applyKeyChangePlans(applyPlans, { detectedAt: observedAt }).catch(() => null);
-    if (!result) return { applied: false, allApplied: false };
-    if (result.conflict) {
-      // 数据库唯一约束拦住了（没被 detectGroupMerges 预检查到的边界情况）：这一批牵连的绑定都改记分组冲突，
-      // 不是某一条的事——两条互换、或者批里有一条真的撞了别的绑定，都保守地当这一批都不安全，交给 K2c
-      for (const plan of applyPlans) {
-        keyIssues.set(plan.ruleId, issueFor(byRuleId.get(plan.ruleId).rule, "KEY_GROUP_CHANGED"));
+    // 互换、轮换（挪过）的几条绑定必须同生同死：按 movedFromBindingId 把互相牵连的归成一组，每组一个事务；
+    // 别的组各自一个事务。一组撞了约束只回滚这一组、只给这一组记 KEY_GROUP_CHANGED（会自己好的那类），别的组照常换段——
+    // 一条有问题的绑定不能挡住同一个站点上别的绑定换 Key（审核 2 第 1 轮 中-2，总指挥 10-27 定）。
+    // 挪过来的 Key 在另一头的那条绑定这一轮没算出计划（上游身份读不到被跳过）：这一条也先留着，不然会和还握着这把 Key 的另一头撞车
+    const skipped = new Set(plans.map((plan) => plan.bindingId).filter((id) => !applyPlans.some((item) => item.ruleId === id)));
+    const held = applyPlans.filter(({ plan }) => plan.kind === "moved" && skipped.has(plan.movedFromBindingId));
+    const ready = applyPlans.filter((item) => !held.includes(item));
+    if (!ready.length) return { applied: false, allApplied: false };
+    const parent = new Map(ready.map(({ ruleId }) => [ruleId, ruleId]));
+    const find = (id) => { while (parent.get(id) !== id) id = parent.get(id); return id; };
+    for (const { ruleId, plan } of ready) if (plan.movedFromBindingId != null && parent.has(plan.movedFromBindingId)) parent.set(find(ruleId), find(plan.movedFromBindingId));
+    const grouped = new Map();
+    for (const item of ready) grouped.set(find(item.ruleId), [...(grouped.get(find(item.ruleId)) || []), item]);
+    const groups = [...grouped.values()];
+    let applied = false, allApplied = !held.length && ready.length === changeCandidates.length && !deferred.size;
+    for (const group of groups) {
+      // 写库失败（不是撞唯一约束，比如连接断了）：这一组这一轮没换成，不是分组合组，不记冲突，下一轮接着换；
+      // stale：计划落库时已经不成立（别的写入先换过了、倍率变化先开了新段），什么也没写，下一轮重新算
+      const result = await repository.applyKeyChangePlans(group, { detectedAt: observedAt }).catch(() => null);
+      if (!result || result.stale) { allApplied = false; continue; }
+      if (result.conflict) {
+        // 数据库唯一约束拦住了（没被 detectGroupMerges 预检查到的边界情况）：这一组牵连的绑定都改记分组冲突，不写段
+        for (const { ruleId } of group) keyIssues.set(ruleId, issueFor(byRuleId.get(ruleId).rule, "KEY_GROUP_CHANGED"));
+        allApplied = false;
+        continue;
       }
-      return { applied: false, allApplied: false };
+      applied = true;
     }
-    return { applied: true, allApplied: applyPlans.length === changeCandidates.length && !deferred.size };
+    return { applied, allApplied };
   }
 
   // 页面「刷新」（观测）强制重读 Key 目录和账号身份；只读查询用 5 分钟缓存。
@@ -2197,7 +2227,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       // 轮到结的日子，和这件事无关，不能因为今天冲突了就连累昨天（总指挥 10-26 定）
       const keyIssue = ownerRegistry.keyIssues?.get(rule.id);
       if (keyIssue && window.endMs >= keyIssue.sinceMs) {
-        return unavailable(health(keyIssue.code, issueText(keyIssue.code), { sinceMs: keyIssue.sinceMs, ...(keyIssue.channelId != null ? { channelId: keyIssue.channelId } : {}) }), { metadata, token }, false);
+        return unavailable(health(keyIssue.code, issueText(keyIssue.code), { sinceMs: keyIssue.sinceMs, ...(keyIssue.channelId != null ? { channelId: keyIssue.channelId } : {}), ...(keyIssue.upstreamStationId != null ? { upstreamStationId: keyIssue.upstreamStationId } : {}) }), { metadata, token }, false);
       }
       // K2b 例外三（binding-flow.md §2）：读取服务读不到新结果时，从最后一次读到的时刻起，这个站点下各渠道的数先不算
       // （实时·还在读取，过了零点也不固定）；连续 3 次才升成需处理 KEY_READER_UNREACHABLE（keyAgentExceptionIssueOf）。
