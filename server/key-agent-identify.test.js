@@ -502,6 +502,10 @@ test("identifyChannels（#142 中 3）：Sub2API 指纹目录按站点缓存 5 �
   await identifyChannels(rt, ownStation, { querySub2Metadata }); // 快照又来一份（模拟 ETag 变了）
   assert.equal(reads, 1, "5 分钟内不重读");
   assert.doesNotMatch(JSON.stringify([...rt._keyAgentSub2Catalogue]), new RegExp(fullKey.slice(3)), "缓存里只有指纹，没有完整 Key");
+  // 缓存里也不放读取服务派生出来的指纹密钥（只放一个摘要当版本戳）：hex、base64 两种写法都找不到
+  const cacheDump = JSON.stringify([...rt._keyAgentSub2Catalogue]);
+  for (const form of [fpBytes.toString("hex"), fpBytes.toString("base64"), fpBytes.toString("base64url")]) assert.equal(cacheDump.includes(form), false, "缓存里没有指纹密钥原文");
+  assert.match(rt._keyAgentSub2Catalogue.get("s2").keyStamp, /^[0-9a-f]{16}$/, "只有 16 位的摘要");
   rt._keyAgentSub2Catalogue.get("s2").at -= 6 * 60 * 1000;
   await identifyChannels(rt, ownStation, { querySub2Metadata });
   assert.equal(reads, 2, "过期重读");

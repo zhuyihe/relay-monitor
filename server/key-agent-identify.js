@@ -1,4 +1,5 @@
 // 认出快照里每个渠道现在用的是哪把 Key（K2a）。只认、只显示：不开段、不改账，K2b 才按认出的结果写分段。
+import { createHash } from "node:crypto";
 import { fingerprintKey } from "../lib/key-fingerprint.js";
 import { fetchKeyAgentSnapshot } from "../lib/key-agent-client.js";
 import { identifyChannel, identifyKeySlot, classifyUpstreamKey } from "../lib/key-agent-match.js";
@@ -13,13 +14,15 @@ const CATALOG_KIND_TTL_MS = 60 * 60 * 1000;
 // 就要全读一遍：按站点缓存 5 分钟（和对账 P1b 的目录缓存一个节奏）。缓存里只有 id、名字、状态、指纹，没有完整 Key；
 // 站点的地址、登录信息变了（stationBusinessVersion）就不用旧的；读失败不缓存
 const SUB2_CATALOGUE_TTL_MS = 5 * 60 * 1000;
+// 缓存只记一个摘要当版本戳（判「读取服务的密钥换没换」），不把派生出来的指纹密钥本身放进长期存在的缓存对象
+const keyStamp = (bytes) => createHash("sha256").update(bytes).digest("hex").slice(0, 16);
 function sub2CatalogueOf(rt, station, config, querySub2Metadata) {
   const cache = (rt._keyAgentSub2Catalogue ||= new Map());
   const version = stationBusinessVersion(station);
   const hit = cache.get(station.id);
-  if (hit && hit.version === version && hit.fingerprintKey === config.fingerprintKey.toString("hex") && Date.now() - hit.at < SUB2_CATALOGUE_TTL_MS) return Promise.resolve(hit.tokens);
+  if (hit && hit.version === version && hit.keyStamp === keyStamp(config.fingerprintKey) && Date.now() - hit.at < SUB2_CATALOGUE_TTL_MS) return Promise.resolve(hit.tokens);
   return querySub2Metadata(station, { fingerprintOf: (raw) => fingerprintKey(raw, config.fingerprintKey) })
-    .then((metadata) => { cache.set(station.id, { at: Date.now(), version, fingerprintKey: config.fingerprintKey.toString("hex"), tokens: metadata.tokens }); return metadata.tokens; })
+    .then((metadata) => { cache.set(station.id, { at: Date.now(), version, keyStamp: keyStamp(config.fingerprintKey), tokens: metadata.tokens }); return metadata.tokens; })
     .catch(() => null);
 }
 
