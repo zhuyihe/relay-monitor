@@ -4277,9 +4277,9 @@ test("昨天里有「还在读取」的日子：5 分钟重读一次（只读 PO
 test("手机 320：一个渠道一张卡片，点开能看计算明细，页面不横向溢出", async (t) => {
   const { page } = await openDailyPage(t, { viewport: { width: 320, height: 800 } });
   assert.equal(await page.locator(".jy-profit-table").count(), 0);
-  const card = cardOf(page, "Rule A"); await card.waitFor();
-  await page.locator(".jy-profit-summary--mobile").waitFor();
-  await card.locator(".jy-profit-card__top").click();
+  const summary = page.locator(".jy-profit-summary--mobile"); await summary.waitFor();
+  await summary.getByRole("button", { name: PROFIT_COPY.metric.seeDay("昨天"), exact: true }).click();
+  const card = cardOf(page, "Rule A"); await card.getByRole("group", { name: PROFIT_COPY.expanded.dailyTitle, exact: true }).waitFor();
   await card.getByRole("button", { name: PROFIT_COPY.expanded.seeDetailShort, exact: true }).click();
   const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor();
   assert.ok((await page.locator(".ant-drawer-content-wrapper").filter({ has: drawer }).boundingBox()).width >= 319);
