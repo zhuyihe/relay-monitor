@@ -1992,7 +1992,10 @@ function ownTestLogApi(url, logs = []) {
   return { success: true, data: { total: matched.length, items } };
 }
 
-function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [], revealScopeDenied = false }) {
+// 换 Key 的端到端两种规则都跑：immediate（生产的绑定，按 Key 整体取数）和 legacy-v3（旧版，按段取）
+const POLICIES = ["immediate", "legacy"];
+
+function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [], revealScopeDenied = false, policy = "legacy" }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
     id, rule_id: "rr_live", group_name: group, group_ratio: ratio,
@@ -2002,6 +2005,11 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
   const open = segments.find((segment) => segment.effective_to_ms == null);
   const rule = { id: "rr_live", upstream_station_id: "upstream", own_station_id: "own", token_id: 9, token_name: "stable", fixed_group: open.group_name, timezone: "Asia/Shanghai", enabled: 1, archived_at: null };
   const rules = [rule, ...extraRuleIds.map((id, index) => ({ ...rule, id, token_id: duplicateKeys ? 9 : 10 + index, token_name: duplicateKeys ? "stable" : `stable-${id}` }))];
+  // policy: "immediate" 是生产的绑定（按 Key 整体取数，scoped）；默认 legacy（旧版，按段取）。换 Key 的用例两种都要跑
+  if (policy === "immediate") for (const item of rules) {
+    const effective = Date.parse("2026-10-01T00:00:00Z");
+    Object.assign(item, { billing_policy: "immediate", scope_version: 1, billing_effective_from_ms: effective, created_at: new Date(effective), cost_coverage: "complete", source_binding: { 1: "r1" } });
+  }
   const allSegments = [...segments, ...extraRuleIds.flatMap((ruleId) => segments.map((segment) => ({ ...segment, id: `${segment.id}-${ruleId}`, rule_id: ruleId })) )];
   const channels = rules.flatMap((item) => (channelsByRule[item.id] || [1]).map((channelId) => ({
     rule_id: item.id, channel_id: channelId, channel_name: channelsByRule[item.id] ? `渠道 ${channelId}` : "渠道",
@@ -2127,6 +2135,7 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if (station && (station.keyAgentLastSuccessAtMs == null || atMs > station.keyAgentLastSuccessAtMs)) station.keyAgentLastSuccessAtMs = atMs;
     } } };
   // 整站日志读取（V1-a）默认关着：这个夹具的假站点没有不带筛选的 /api/log/；要测它的用例自己传 ownLogIngest: true 和内存桶
+  if (policy === "immediate") rt.onboardingSource = { inspectSource: () => ({ version: "r1", status: "confirmed" }) };
   return { rule, state, segments, stations, rt, repository, module: createReconciliationModule(rt, { repository, ownLogStore: new MemoryOwnLogStore(), ownLogIngest: false, ...moduleOptions }) };
 }
 
@@ -7134,7 +7143,7 @@ test("K2b 前置：Sub2API 已删 Key 的减法（非只读）强制重读一次
 // 冲突的绑定那几天既不会固定下来（没有账本行），也不会把同一笔钱算给两条绑定（不会出现两条账本行同一天同一把 Key 都算了钱）。
 const KEY_AGENT_SECRET = "K7m2-xP9q" + "R4t".repeat(10);
 
-test("K2b：合组——早退只挡从第一次认出冲突那一刻（b）起的窗口；b 以前已经结过的日子不受影响，冲突解开以后恢复正常", async (t) => {
+for (const policy of POLICIES) test("K2b：合组——早退只挡从第一次认出冲突那一刻（b）起的窗口；b 以前已经结过的日子不受影响，冲突解开以后恢复正常 [" + policy + "]", async (t) => {
   // 总指挥 10-26：「今天14:00第一次认出合组，昨天那条绑定的账和这件事无关……拖过7天还会进需处理」——
   // 这条测试证明：10-11（b 以前）正常固定且不会被后面几轮动；10-12（跨过 b 的那天）不固定；
   // 10-13（合组解开以后）恢复正常，三天都不会把同一把 Key 的钱算给两条绑定。
@@ -7142,7 +7151,7 @@ test("K2b：合组——早退只挡从第一次认出冲突那一刻（b）起�
   t.mock.method(Date, "now", () => now);
   const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
   let colliding = true;
-  const f = liveReconciliationFixture(t, {
+  const f = liveReconciliationFixture(t, { policy,
     segments: [{ id: "s1", group: "g1", from: 0 }],
     extraRuleIds: ["rr_b"],
     channelsByRule: { rr_live: [1], rr_b: [2] },
@@ -7174,11 +7183,11 @@ test("K2b：合组——早退只挡从第一次认出冲突那一刻（b）起�
   assert.equal(rowsOf("2026-10-13").length, 2, "合组解开以后，10-13 两条绑定恢复正常固定");
 });
 
-test("K2b：分组——一条绑定名下两个渠道，这一轮认出的 Key 不再是同一把，只挡跨过 b 的那天；b 以前的照常固定，不相关的别的绑定照常结账", async (t) => {
+for (const policy of POLICIES) test("K2b：分组——一条绑定名下两个渠道，这一轮认出的 Key 不再是同一把，只挡跨过 b 的那天；b 以前的照常固定，不相关的别的绑定照常结账 [" + policy + "]", async (t) => {
   let now = Date.parse("2026-10-12T01:00:00Z"); // 上海 10-12 09:00，分组从一开始就在（b 落在这一轮里）
   t.mock.method(Date, "now", () => now);
   const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
-  const f = liveReconciliationFixture(t, {
+  const f = liveReconciliationFixture(t, { policy,
     segments: [{ id: "s1", group: "g1", from: 0 }],
     extraRuleIds: ["rr_b"], // 只是为了让上游目录真的列出 token 10；rr_b 自己的渠道（3）不在读取服务快照里，不参与这次检测
     channelsByRule: { rr_live: [1, 2], rr_b: [3] },
@@ -7204,12 +7213,12 @@ test("K2b：分组——一条绑定名下两个渠道，这一轮认出的 Key 
   assert.ok(rowsOf("rr_b", "2026-10-12").length > 0, "不相关的绑定（渠道没在这次识别结果里）照常结账，不连坐");
 });
 
-test("K2b：没有冲突的正常换 Key——识别→算计划→落库接上了：开出过渡段，rules.token_id/canonical_key 一起换，换完照常结账固定（不被 SOURCE_BINDING_UNCONFIRMED 挡住）", async (t) => {
+for (const policy of POLICIES) test("K2b：没有冲突的正常换 Key——识别→算计划→落库接上了：开出过渡段，rules.token_id/canonical_key 一起换，换完照常结账固定（不被 SOURCE_BINDING_UNCONFIRMED 挡住） [" + policy + "]", async (t) => {
   let now = Date.parse("2026-10-11T01:00:00Z"); // 上海 10-11 09:00，先走一轮，渠道还是原来的 token 9
   t.mock.method(Date, "now", () => now);
   const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
   let currentKey = keyNine; // 渠道 1 这一轮用的 Key，后面改成 keyTen 模拟换 Key
-  const f = liveReconciliationFixture(t, {
+  const f = liveReconciliationFixture(t, { policy,
     segments: [{ id: "s1", group: "g1", from: 0 }],
     tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
     // 10：一开始没有任何绑定用它，是「凭空出现的新 Key」，不是挪过来的；9：旧 Key 换掉以后上游目录里还在（规则上的 token_id 改成 10 以后夹具不再替它列）
@@ -7248,6 +7257,9 @@ test("K2b：没有冲突的正常换 Key——识别→算计划→落库接上�
   const day = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai",
     startMs: Date.parse("2026-10-11T16:00:00Z"), endMs: Date.parse("2026-10-12T16:00:00Z") }, { force: true });
   const codes = day.results[0].health.issues.map((issue) => issue.code);
+  // 钱：换 Key 当天上游成本 = 过渡段 [0 点, b) 两把 Key 各 1 + b 起新 Key 1（夹具的 stat 每次回 1 美元）；两种规则都得是 3
+  // （immediate 以前整天只按最新那把取，只有 1）
+  assert.equal(day.results[0].upstream.amountUsd, 3, `换 Key 当天旧 Key 那份也算进来（${policy}）`);
   assert.ok(codes.includes("KEY_CHANGED"), "换 Key 那天有这一句");
   assert.equal(codes.includes("SEGMENT_TIMING_UNCONFIRMED"), false, "换 Key 开的段不是估的倍率变化，不出旧提示");
   assert.deepEqual(segments.slice(1).map((segment) => segment.timingSource), ["key_change_window", "key_change"]);
@@ -7303,12 +7315,12 @@ test("K2b：immediate（scoped）规则换 Key——换 Key 当天上游成本�
   assert.deepEqual(later.stats, [["oai-2", sec("2026-10-12T16:00:00Z"), sec("2026-10-13T16:00:00Z") - 1]]);
 });
 
-test("K2b：读完、落库前重启——这一轮的成功时刻要等落库以后才写，重启后 a 还是上一次读成功的时刻，[t, b) 不漏", async (t) => {
+for (const policy of POLICIES) test("K2b：读完、落库前重启——这一轮的成功时刻要等落库以后才写，重启后 a 还是上一次读成功的时刻，[t, b) 不漏 [" + policy + "]", async (t) => {
   let now = Date.parse("2026-10-11T01:00:00Z");
   t.mock.method(Date, "now", () => now);
   const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
   let currentKey = keyNine;
-  const f = liveReconciliationFixture(t, {
+  const f = liveReconciliationFixture(t, { policy,
     segments: [{ id: "s1", group: "g1", from: 0 }],
     tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
     extraTokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "oai-2" }],
@@ -7346,12 +7358,12 @@ test("K2b：读完、落库前重启——这一轮的成功时刻要等落库�
   assert.equal(own.keyAgentLastSuccessAtMs, now, "换段落库以后才记下这一轮");
 });
 
-test("K2b：冲突几轮以后解开再换段——站点的成功时刻没往前推，换段的 a 用开着那段的起点，不漏", async (t) => {
+for (const policy of POLICIES) test("K2b：冲突几轮以后解开再换段——站点的成功时刻没往前推，换段的 a 用开着那段的起点，不漏 [" + policy + "]", async (t) => {
   let now = Date.parse("2026-10-11T01:00:00Z");
   t.mock.method(Date, "now", () => now);
   const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10), keyEleven = "sk-" + "Elev".repeat(10);
   let keys = { 1: keyNine, 2: keyNine }; // 一条绑定两个渠道（组），都用 token 9
-  const f = liveReconciliationFixture(t, {
+  const f = liveReconciliationFixture(t, { policy,
     segments: [{ id: "s1", group: "g1", from: 1000 }],
     channelsByRule: { rr_live: [1, 2] },
     tokenKeyOf: (tokenId) => ({ 9: keyNine, 10: keyTen, 11: keyEleven })[tokenId],
@@ -7387,12 +7399,12 @@ test("K2b：冲突几轮以后解开再换段——站点的成功时刻没往�
   assert.equal(own.keyAgentLastSuccessAtMs, now, "换段落库、冲突清掉以后，成功时刻才往前推");
 });
 
-test("K2b：两条绑定互换 Key（挪过）——同一个事务清空再写不撞自己的唯一约束，两边都按 b 切开不开过渡段，成本主人看到的是换完以后的 Key", async (t) => {
+for (const policy of POLICIES) test("K2b：两条绑定互换 Key（挪过）——同一个事务清空再写不撞自己的唯一约束，两边都按 b 切开不开过渡段，成本主人看到的是换完以后的 Key [" + policy + "]", async (t) => {
   let now = Date.parse("2026-10-11T01:00:00Z");
   t.mock.method(Date, "now", () => now);
   const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
   let swapped = false;
-  const f = liveReconciliationFixture(t, {
+  const f = liveReconciliationFixture(t, { policy,
     segments: [{ id: "s1", group: "g1", from: 0 }],
     extraRuleIds: ["rr_b"],
     channelsByRule: { rr_live: [1], rr_b: [2] },
