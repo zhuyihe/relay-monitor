@@ -811,7 +811,10 @@ export class ReconciliationRepository {
         const sets = ["token_id = ?", "token_name = ?", "active_token_key = ?"], params = [firstKey.tokenId, firstKey.tokenName ?? rule.token_name, tokenKeyOf(firstKey)];
         if (plan.canonicalKey !== undefined) { sets.push("canonical_key = ?"); params.push(plan.canonicalKey); }
         await conn.query(`UPDATE reconciliation_rules SET ${sets.join(", ")} WHERE id = ?`, [...params, ruleId]);
-        await refreshSegmentKeys(conn, ruleId);
+        // 不调 refreshSegmentKeys：它会把这条绑定全部 match_source = 'initial' 的历史段都改成 rules 现在这把 Key
+        // （db/segment-keys.js 的注释：「改绑定的 Key：来源是 initial 的行都跟着走，旧代码整条绑定的历史都按现在
+        // 这把取」）——那是手动改绑定的语义，不是 K2b 的；K2b 每段该用哪把 Key 已经按时间精确写好了（上面
+        // openSegment 逐段写的 'agent' 行），历史段不该跟着现在这把一起变，不然旧段的上游成本会算成新 Key 的
       }
       await conn.commit();
     } catch (err) {

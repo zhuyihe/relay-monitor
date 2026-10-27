@@ -73,9 +73,10 @@ test("planKeyChangeSegments：原来没有 Key 的渠道（新渠道、还没有
 // ---------- Key 在两个渠道之间挪（binding-flow.md §3：按 b 切开，不开过渡段，钱不能算两次） ----------
 
 test("planMovedKeySegments：挪过来的 Key 按读到变化的那一刻 b 切开，不开过渡段", () => {
-  const plan = planMovedKeySegments({ observedAt: T("16:05") });
+  const plan = planMovedKeySegments({ observedAt: T("16:05"), newRef: ref(10) });
   assert.equal(plan.kind, "moved");
   assert.equal(plan.cutoverAt, T("16:05"));
+  assert.deepEqual(plan.after, [ref(10)], "带着挪过来的这把 Key，调用方开段要用");
   assert.equal(plan.windowKeys, undefined, "挪位置不该有两把 Key 都算的过渡段，不然两条绑定会把同一笔钱算两次");
 });
 

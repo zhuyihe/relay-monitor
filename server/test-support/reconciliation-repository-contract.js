@@ -1460,6 +1460,8 @@ contract("applyKeyChangePlans: a windowed plan closes the old segment, opens a c
   const segments = await repository.listSegments(rule.id);
   assert.equal(segments.length, 3, "原段关掉 + 过渡段（已关）+ 新段（开着）");
   assert.equal(segments[0].effectiveTo, windowStart);
+  assert.deepEqual(segments[0].keys.map((key) => key.tokenId), [rule.tokenId],
+    "原段（已经关了的历史段）还是原来那把 Key，不会被换 Key 以后的 rules.token_id 带着一起变");
   const transitional = segments[1], open = segments[2];
   assert.equal(transitional.effectiveFrom, windowStart);
   assert.equal(transitional.effectiveTo, windowEnd);

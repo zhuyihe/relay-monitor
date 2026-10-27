@@ -529,7 +529,8 @@ export class MemoryReconciliationRepository {
           this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { token_id: bigint(firstKey.tokenId),
             token_name: firstKey.tokenName ?? rule.token_name, active_token_key: tokenKeyOf(firstKey),
             ...(plan.canonicalKey !== undefined ? { canonical_key: plan.canonicalKey } : {}) });
-          this.#refreshSegmentKeys(tx, ruleId);
+          // 不调 #refreshSegmentKeys：它会把全部 match_source='initial' 的历史段都改成 rules 现在这把 Key
+          // （对应 MySQL 版同一处注释）——K2b 每段该用哪把 Key 已经按时间精确写好了，历史段不能跟着现在这把一起变
         }
       });
     } catch (err) {

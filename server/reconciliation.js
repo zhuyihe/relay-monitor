@@ -55,7 +55,7 @@ import { readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationU
 import { createBillingCapabilityStorage } from "../lib/billing-capability-storage.js";
 import { keyAgentConfigOf } from "./key-agent.js";
 import { identifyChannelsCached } from "./key-agent-identify.js";
-import { detectGroupSplit, detectGroupMerges } from "./key-agent-resegment.js";
+import { detectGroupSplit, detectGroupMerges, planSegmentChanges, safeLastSeenAt } from "./key-agent-resegment.js";
 
 export { reconciliationScopeFingerprint } from "../lib/reconciliation-snapshot.js";
 
@@ -704,16 +704,21 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return value;
   }
 
-  // K2b：分组、合组检测接进结账流程（k-plan §3.3，总指挥 10-26 定：不能等 K2c）。这一步只检测、不碰
-  // reconciliation_rule_channels、不开新段：检测到的绑定由调用方（inspectRule 的早退）当未结处理，
-  // 这几天先不结账——这样两条冲突的绑定不会都把钱算进去，也不会靠数据库唯一约束兜底（那是正常换 Key 开段时的事）。
-  // 一条绑定这一轮有多个渠道（组）且认出的 Key 不是同一把：分组了。两条不同绑定这一轮认出的是同一把 Key：合组了。
-  // 多把 Key 的渠道、这一轮没认出来（ambiguous/not_found）的渠道不参与判断，留给下一轮。
+  // K2b：渠道这一轮认出的 Key 和绑定自己记的不一样时，接进结账流程要做的两件事（k-plan §3.3/§3.4，
+  // 总指挥 10-26 定：检测和正常换 Key 都不能等 K2c）：
+  //   1. 分组、合组：只检测、不碰 reconciliation_rule_channels、不开新段。检测到的绑定由调用方
+  //      （inspectRule 的早退）当未结处理，从第一次认出冲突的那一刻（b）起不结账，交给 K2c 重新分组。
+  //   2. 没有冲突、真的换了 Key 的绑定：算好计划（server/key-agent-resegment.js），同一个事务开新段、
+  //      改 rules 那几列（server/reconciliation-repository.js 的 applyKeyChangePlans），数据库的两道
+  //      唯一约束兜底——检测没拦住的边界情况，撞了就回滚、改记分组冲突，不会把钱算给错的那一条。
+  // 多把 Key 的渠道、这一轮没认出来（ambiguous/not_found）的渠道都不参与（分组合组判断、换 Key 都不算），留给下一轮。
+  // 只给已经锚定过身份（rule.canonicalKey 不是 null）、这一轮上游身份读得到的绑定换 Key：没锚定的绑定走自己的
+  // 锚定流程，不归 K2b 管；上游这一轮读不到就留给下一轮，不拿读不到的身份算 canonicalKey。
   //
-  // 返回 ruleId -> b（第一次认出这条绑定冲突的时刻，毫秒）；早退只挡 window.endMs > b 的窗口（总指挥 10-26 定：
+  // 返回 ruleId -> b（第一次认出这条绑定冲突的时刻，毫秒）；早退只挡 window.endMs >= b 的窗口（总指挥 10-26 定：
   // b 以前已经结过、或者还没轮到结的日子，和这件事无关，不能因为今天冲突了就连累）。b 第一次认出时持久化到
   // rules.key_group_conflict_since_ms（重启不丢），后面几轮沿用同一个 b，不随着每轮 now 往后挪；冲突解开了清掉。
-  async function keyGroupConflictsFor(rules) {
+  async function keyGroupConflictsFor(rules, resources) {
     const conflicts = new Map(); // ruleId -> b
     const now = Date.now();
     const enabled = rules.filter((rule) => rule.enabled);
@@ -721,6 +726,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     for (const ownStationId of new Set(enabled.map((rule) => rule.ownStationId))) {
       const ownStation = upstreamStation(ownStationId);
       if (!ownStation || !keyAgentConfigOf(ownStation)) continue;
+      // 这一轮之前「读取服务上一次读成功的时刻」：identifyChannelsCached 真的读成功会把它推成 now，
+      // 必须在调用之前先存住旧值，不然下面给 safeLastSeenAt 用的就是这一轮的 now，不是真正安全的那个旧时刻
+      const stationLastSuccessAtMs = ownStation.keyAgentLastSuccessAtMs ?? null;
       const identified = await identifyChannelsCached(rt, ownStation).catch(() => null);
       if (!identified?.ok || !identified.channels) continue;
       byOwnStation.set(ownStationId, true);
@@ -729,26 +737,75 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (channel.keyless || channel.slots?.length !== 1) continue;
         const slot = channel.slots[0];
         if (slot.state !== "identified" || slot.matches?.length !== 1) continue;
-        refByChannelId.set(Number(channel.channelId), { upstreamStationId: slot.matches[0].stationId, tokenId: Number(slot.matches[0].tokenId) });
+        refByChannelId.set(Number(channel.channelId),
+          { upstreamStationId: slot.matches[0].stationId, tokenId: Number(slot.matches[0].tokenId), tokenName: slot.matches[0].tokenName ?? null });
       }
-      const currentRefsByBinding = [];
+      const currentRefsByBinding = [], changeCandidates = [];
       for (const rule of enabled.filter((item) => item.ownStationId === ownStationId)) {
         const channelRefs = rule.channels.map((channel) => refByChannelId.get(Number(channel.channelId)) ?? null);
         if (channelRefs.every((ref) => ref == null)) continue; // 这一轮一把都没认出来，不参与判断
         if (detectGroupSplit(channelRefs)) { conflicts.set(rule.id, rule.keyGroupConflictSinceMs ?? now); continue; }
         const ref = channelRefs.find(Boolean);
         if (ref) currentRefsByBinding.push({ bindingId: rule.id, ref });
+        // 渠道换到了别的上游站点的 Key（不是同一个上游站点内换了 token）：不是 K2b 的事（流程稿例外一，加上游 /
+        // 改上游的 Key），这一版不当「换 Key」处理，留给现有机制
+        if (ref && rule.canonicalKey != null && ref.upstreamStationId === rule.upstreamStationId && Number(ref.tokenId) !== Number(rule.tokenId)) {
+          changeCandidates.push({ rule, before: { upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId }, after: ref });
+        }
       }
       for (const group of detectGroupMerges(currentRefsByBinding)) for (const bindingId of group) {
         const rule = enabled.find((item) => item.id === bindingId);
         conflicts.set(bindingId, rule?.keyGroupConflictSinceMs ?? now);
       }
+      const conflictedThisRound = new Set(conflicts.keys());
+      const toApply = changeCandidates.filter((item) => !conflictedThisRound.has(item.rule.id));
+      if (toApply.length) await applyKeyAgentChangesFor(toApply, { observedAt: now, stationLastSuccessAtMs, resources, conflicts, now });
     }
     await Promise.all(enabled.filter((rule) => byOwnStation.has(rule.ownStationId)).map(async (rule) => {
       const sinceMs = conflicts.get(rule.id) ?? null;
       if (sinceMs !== (rule.keyGroupConflictSinceMs ?? null)) await repository.markKeyGroupConflict(rule.id, sinceMs).catch(() => {});
     }));
     return conflicts;
+  }
+
+  // changeCandidates：这一个 own 站点下真的换了 Key、没有冲突的绑定，{ rule, before, after }。
+  // 算每条的 lastSeenAt（safeLastSeenAt：优先用这个站点持久化的上一次读成功时刻，没有就退到这条绑定当前
+  // 开着段的起点，一定不晚于真正换 Key 的那一刻）、batch 一次 planSegmentChanges（算不算「挪过」要几条
+  // 一起看），再一次 applyKeyChangePlans 落库；canonicalKey 按新 tokenId 重新算，和 token_id 一起改，
+  // 不然下一次结账会被 SOURCE_BINDING_UNCONFIRMED 挡住（锚定时记的 canonicalKey 对不上了）。
+  // 撞了数据库唯一约束（没被 detectGroupMerges 预检查到的边界情况）：这一批里牵连的绑定都改记分组冲突，不写段。
+  async function applyKeyAgentChangesFor(changeCandidates, { observedAt, stationLastSuccessAtMs, resources, conflicts, now }) {
+    const lastSeenAtByBinding = {};
+    for (const { rule } of changeCandidates) {
+      if (stationLastSuccessAtMs != null) { lastSeenAtByBinding[rule.id] = stationLastSuccessAtMs; continue; }
+      const segments = await repository.listSegments(rule.id).catch(() => []);
+      const open = segments.find((segment) => segment.effectiveTo == null);
+      lastSeenAtByBinding[rule.id] = open ? open.effectiveFrom : observedAt;
+    }
+    const plans = planSegmentChanges({
+      bindings: changeCandidates.map(({ rule, before, after }) => ({ id: rule.id, before, after })),
+      observedAt, lastSeenAt: stationLastSuccessAtMs ?? observedAt, lastSeenAtByBinding,
+    });
+    const byRuleId = new Map(changeCandidates.map((item) => [item.rule.id, item]));
+    const applyPlans = plans.map((plan) => {
+      const { rule } = byRuleId.get(plan.bindingId);
+      const identity = resources.get(rule.upstreamStationId)?.identity;
+      const upstream = upstreamStation(rule.upstreamStationId);
+      // 上游这一轮身份读不到：不拿读不到的身份算 canonicalKey，留给下一轮（identity 没有时 plan.canonicalKey 就不传，
+      // applyKeyChangePlans 不会去动 rules.canonical_key，但 token_id 还是会换——先不要，整条跳过，等下一轮一起换）
+      if (!identity || !upstream) return null;
+      return { ruleId: plan.bindingId, plan: { ...plan, canonicalKey: canonicalBillingKey(upstream, identity, plan.after[0].tokenId) } };
+    }).filter(Boolean);
+    if (!applyPlans.length) return;
+    const result = await repository.applyKeyChangePlans(applyPlans, { detectedAt: observedAt }).catch(() => null);
+    if (!result || result.conflict) {
+      // 数据库唯一约束拦住了（没被 detectGroupMerges 预检查到的边界情况）：这一批牵连的绑定都改记分组冲突，
+      // 不是某一条的事——两条互换、或者批里有一条真的撞了别的绑定，都保守地当这一批都不安全，交给 K2c
+      for (const plan of applyPlans) {
+        const rule = byRuleId.get(plan.ruleId)?.rule;
+        conflicts.set(plan.ruleId, rule?.keyGroupConflictSinceMs ?? now);
+      }
+    }
   }
 
   // 页面「刷新」（观测）强制重读 Key 目录和账号身份；只读查询用 5 分钟缓存。
@@ -807,7 +864,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
     // 只读查询（页面只读、evaluate）不检测：identifyChannelsCached 本身有 4 分钟缓存，但这里额外按 observe 收一道，
     // 不让纯读页面的请求触发检测逻辑；真正会出问题的场景已经有定期的观测/轮询在跑，不差这一次
-    const keyGroupConflicts = observe ? await keyGroupConflictsFor(rules) : new Map();
+    const keyGroupConflicts = observe ? await keyGroupConflictsFor(rules, resources) : new Map();
     return { startedAt: Date.now(), rules: Object.freeze(participants.map((rule) => Object.freeze({ ...rule }))), resources, duplicateSales, billingSource: Object.freeze(billingSource),
       keyGroupConflicts,
       // 这一轮（或这一次查询）里共用的：自营站点的 /api/status；哪些自营站点从什么时候起没有新的消费（只有轮询会填）

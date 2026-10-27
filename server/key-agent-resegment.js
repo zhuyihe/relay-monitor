@@ -32,9 +32,10 @@ export function planKeyChangeSegments({ lastSeenAt, observedAt, oldRef, newRef, 
 
 // newRef 这把 Key 是从另一条「还在算」的绑定那边挪过来的：两边都按读到变化的那一刻 b 切开，不开过渡段——
 // 这段钱只能算给其中一条绑定，两条绑定各开一段都把这段算进去，就是把同一笔钱算了两次（design/ux/binding-flow.md
-// §3：「按读到变化的那一刻 b 切开：到 b 为止算给原来的渠道，b 起算给后来的渠道，不问你」）
-export function planMovedKeySegments({ observedAt }) {
-  return { kind: "moved", cutoverAt: observedAt };
+// §3：「按读到变化的那一刻 b 切开：到 b 为止算给原来的渠道，b 起算给后来的渠道，不问你」）。
+// after 带着挪过来的这把 Key（调用方开段要用，参见 server/reconciliation-repository.js 的 applyKeyChangePlans）
+export function planMovedKeySegments({ observedAt, newRef }) {
+  return { kind: "moved", cutoverAt: observedAt, after: [newRef] };
 }
 
 // 批量：这一轮识别，每条绑定从 before（上一次确认时握着的 Key，没有就是 null）变成 after（这一次识别到的 Key）。
@@ -51,7 +52,7 @@ export function planSegmentChanges({ bindings, lastSeenAt, observedAt, preciseAt
     if (!binding.after || sameKeyRef(binding.before, binding.after)) continue;
     const movedFromBindingId = ownerBefore.get(keyRefId(binding.after));
     if (movedFromBindingId != null && movedFromBindingId !== binding.id) {
-      plans.push({ bindingId: binding.id, movedFromBindingId, ...planMovedKeySegments({ observedAt }) });
+      plans.push({ bindingId: binding.id, movedFromBindingId, ...planMovedKeySegments({ observedAt, newRef: binding.after }) });
     } else {
       plans.push({ bindingId: binding.id, ...planKeyChangeSegments({
         lastSeenAt: lastSeenAtByBinding[binding.id] ?? lastSeenAt, observedAt, oldRef: binding.before, newRef: binding.after,

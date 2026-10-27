@@ -1992,7 +1992,7 @@ function ownTestLogApi(url, logs = []) {
   return { success: true, data: { total: matched.length, items } };
 }
 
-function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null }) {
+function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], duplicateKeys = false, failSnapshotForRule = null, onRequest = null, metadataGroups = null, metadataFailure = false, failLatestLookup = false, ownChannels = null, channelsByRule = {}, channelObservedAt = null, onSnapshotInsert = null, onRepositoryConnection = null, onRepositoryCommit = null, moduleOptions = {}, keyAgent = null, tokenKeyOf = null, extraTokens = [] }) {
   const ratios = { g1: 1, g2: 2 };
   const segments = specs.map(({ id, group, from, to = null, ratio = ratios[group] }) => ({
     id, rule_id: "rr_live", group_name: group, group_ratio: ratio,
@@ -2074,7 +2074,8 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       if (url.pathname === "/api/token/") {
         if (metadataFailure) return reply(500, { success: false });
         const distinct = [...new Map(rules.map((item) => [item.token_id, item])).values()];
-        return reply(200, { success: true, data: { total: distinct.length, items: distinct.map((item) => ({ id: item.token_id, user_id: init.headers?.["New-Api-User"], name: item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false,
+        const extra = extraTokens.map((item) => ({ token_id: item.tokenId, token_name: item.name }));
+        return reply(200, { success: true, data: { total: distinct.length + extra.length, items: [...distinct, ...extra].map((item) => ({ id: item.token_id, user_id: init.headers?.["New-Api-User"], name: item.token_name, status: 1, group: rule.fixed_group, cross_group_retry: false,
           ...(tokenKeyOf ? { key: maskKey(tokenKeyOf(item.token_id)) } : {}) })) } });
       }
       if (url.pathname === "/api/log/self/stat") return stat("upstream", url, state.upstreamQuota);
@@ -2108,7 +2109,13 @@ function liveReconciliationFixture(t, { segments: specs, extraRuleIds = [], dupl
       ...(keyAgent ? { keyAgentUrl: "https://own.test/key-agent", keyAgentSecret: keyAgent.secret } : {}) },
   ];
   const rt = { pool, store: { list: () => stations, get: (stationId) => stations.find((station) => station.id === stationId) || null,
-    channels: [], billingIdentityKey: "reconciliation-fixture-billing-key" } };
+    channels: [], billingIdentityKey: "reconciliation-fixture-billing-key",
+    // 对应 Store 真正的 setKeyAgentLastSuccessAt：只往前挪不回退；夹具直接改这个站点对象的字段就够了
+    // （真正的 Store 每次写会换一个新对象，但调用方总是在调用前先把旧值存进局部变量，这里简化成原地改不影响那段逻辑）
+    async setKeyAgentLastSuccessAt(id, atMs) {
+      const station = stations.find((item) => item.id === id);
+      if (station && (station.keyAgentLastSuccessAtMs == null || atMs > station.keyAgentLastSuccessAtMs)) station.keyAgentLastSuccessAtMs = atMs;
+    } } };
   // 整站日志读取（V1-a）默认关着：这个夹具的假站点没有不带筛选的 /api/log/；要测它的用例自己传 ownLogIngest: true 和内存桶
   return { rule, state, segments, stations, rt, repository, module: createReconciliationModule(rt, { repository, ownLogStore: new MemoryOwnLogStore(), ownLogIngest: false, ...moduleOptions }) };
 }
@@ -7185,6 +7192,50 @@ test("K2b：分组——一条绑定名下两个渠道，这一轮认出的 Key 
   await f.module.refreshDue(now); // 结「昨天」10-12：这天跨过了 b，该挡
   assert.deepEqual(rowsOf("rr_live", "2026-10-12"), [], "组散了，10-12（跨过 b 的那天）不固定、不结账");
   assert.ok(rowsOf("rr_b", "2026-10-12").length > 0, "不相关的绑定（渠道没在这次识别结果里）照常结账，不连坐");
+});
+
+test("K2b：没有冲突的正常换 Key——识别→算计划→落库接上了：开出过渡段，rules.token_id/canonical_key 一起换，换完照常结账固定（不被 SOURCE_BINDING_UNCONFIRMED 挡住）", async (t) => {
+  let now = Date.parse("2026-10-11T01:00:00Z"); // 上海 10-11 09:00，先走一轮，渠道还是原来的 token 9
+  t.mock.method(Date, "now", () => now);
+  const keyNine = "sk-" + "Nine".repeat(10), keyTen = "sk-" + "TenT".repeat(10);
+  let currentKey = keyNine; // 渠道 1 这一轮用的 Key，后面改成 keyTen 模拟换 Key
+  const f = liveReconciliationFixture(t, {
+    segments: [{ id: "s1", group: "g1", from: 0 }],
+    tokenKeyOf: (tokenId) => (tokenId === 9 ? keyNine : keyTen),
+    extraTokens: [{ tokenId: 10, name: "oai-2" }], // 一开始没有任何绑定用它，是「凭空出现的新 Key」，不是挪过来的
+    keyAgent: {
+      secret: KEY_AGENT_SECRET,
+      channels: () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(currentKey), f: "unused" }] }],
+    },
+  });
+  await f.module.refreshDue(now); // 第一轮：锚定身份，渠道还是 token 9，没有变化
+  const anchored = await f.repository.getRule("rr_live");
+  assert.ok(anchored.canonicalKey, "第一轮已经锚定");
+  assert.equal(anchored.tokenId, 9);
+
+  currentKey = keyTen; // 第二天：渠道真的换成了 token 10
+  now = Date.parse("2026-10-12T01:00:00Z");
+  await f.module.refreshDue(now); // 这一轮认出换了，算计划、落库
+
+  const changed = await f.repository.getRule("rr_live");
+  assert.equal(changed.tokenId, 10, "rules.token_id 跟着换了");
+  assert.notEqual(changed.canonicalKey, anchored.canonicalKey, "canonical_key 跟着 token_id 一起换，不然下次结账会被 SOURCE_BINDING_UNCONFIRMED 挡住");
+  const segments = await f.repository.listSegments("rr_live");
+  assert.equal(segments.length, 3, "原段关掉 + 过渡段（两把 Key，已关）+ 新段（token 10，开着）");
+  assert.deepEqual(segments[2].keys.map((key) => key.tokenId), [10]);
+  assert.deepEqual(segments[1].keys.map((key) => key.tokenId).sort((a, b) => a - b), [9, 10], "过渡段两把 Key 都记着");
+
+  console.error("DEBUG segments after change:", JSON.stringify(segments.map((s) => ({ from: s.effectiveFrom, to: s.effectiveTo, keys: s.keys.map((k) => k.tokenId) }))));
+  console.error("DEBUG ledger after round2:", JSON.stringify(f.state.ledger.map((r) => [r.rule_id, r.bill_date])));
+
+  now = Date.parse("2026-10-13T01:00:00Z");
+  await f.module.refreshDue(now); // 结「昨天」10-12：换完以后照常结账，不会被挡住
+  const debugResult = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", timezone: "Asia/Shanghai",
+    startMs: Date.parse("2026-10-11T16:00:00Z"), endMs: Date.parse("2026-10-12T16:00:00Z") }, { force: true });
+  console.error("DEBUG health:", JSON.stringify(debugResult.results[0]?.health));
+  console.error("DEBUG segments field:", JSON.stringify(debugResult.results[0]?.segments?.map((s) => ({ from: s.window, upstream: s.upstream?.state, downstream: s.downstream?.state }))));
+  assert.equal(f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length, 1,
+    "换了 Key 以后 10-12 照常固定，没有被 SOURCE_BINDING_UNCONFIRMED 挡住");
 });
 
 test("C3 解除时刻早于 7 天、没锚定过的、旧版（legacy）的绑定不补结", async (t) => {
