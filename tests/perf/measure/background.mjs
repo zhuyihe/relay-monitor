@@ -14,6 +14,8 @@ import { connect, digestSnapshot, digestDiff, binlogBytes, tableOf, kindOf } fro
 const outDir = process.argv[2];
 const W = Number(process.argv[3] || 185);
 mkdirSync(outDir, { recursive: true });
+// run.sh 里接口测量（measure/api.mjs）一结束就跑这个脚本：这一刻当作「量完接口」，下面整站读场景从这里起算 180 秒额度
+const apiDoneAt = Date.now();
 const api = await login();
 // 「算应付成本」开关（应付成本 V1）：只有 PERF_EXPECTED_COST=on 才 PUT 打开（整站读场景，见 README）；
 // 不设或 off 时不改开关，用产品默认（V1-a 关；V1-b 起默认开），不等于「关」
@@ -37,14 +39,21 @@ async function ingestProgress() {
   return { at, table, cursor, buckets, ownLog, expectedCost };
 }
 // 打开开关时：base、head 都从「刚打开」起量——先清掉进度和桶（同一个夹具上 base 量过以后 head 不接着 base 的进度读），
-// 再等到整站读真的往前读了一个窗口（最多 240 秒）才开稳态窗口：刚量完接口那一阵对自营站点的请求还算在 180 秒额度里，
-// 那几轮整站读只分到一两页、一个窗口都写不进，量的就不是稳态了
+// 再等两件事都满足才开稳态窗口（等待最多 240 秒）：
+//   1. 整站读真的往前读了一个窗口（进度动了）；
+//   2. 从量完接口那一刻起满 185 秒（限流窗口 180 秒再加 5 秒余量）。
+// 为什么要第 2 条：量接口那一阵对自营站点的请求还算在 180 秒额度里，这段时间整站读分不到正常的份。没有保底的版本一页都读不了，
+// 等「进度动了」自然就等到额度空出来；有保底（每分钟至少 2 个请求）的版本靠保底就能读完一个小窗口，进度一动等待就结束，
+// 可额度还被占着，稳态头两轮整站读只读到保底的 2 页（run 40310972875：head 2、2、15，base 15、15、15），追平用时被推算长了好几倍。
+// 这是量具的问题，不是产品的问题
+const SETTLE_AFTER_API_MS = 185000;
 if (EXPECTED_COST) {
   try { await conn.query("DELETE FROM own_log_buckets"); await conn.query("DELETE FROM own_log_cursor"); }
   catch (err) { if (err?.code !== "ER_NO_SUCH_TABLE") throw err; }
   for (const t = Date.now(); Date.now() - t < 240000; await new Promise((r) => setTimeout(r, 3000))) {
     const p = await ingestProgress();
-    if (!p.table || (p.cursor && p.cursor.coveredToMs > p.cursor.coveredFromMs)) break;
+    const moved = !p.table || (p.cursor && p.cursor.coveredToMs > p.cursor.coveredFromMs);
+    if (moved && Date.now() - apiDoneAt >= SETTLE_AFTER_API_MS) break;
   }
 }
 const pid = appPid();
