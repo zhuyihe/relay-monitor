@@ -7,13 +7,18 @@
 //     很稀的窗口翻倍，上限 1 小时；下限 5 秒（每秒几十条的站点也能一个窗口一个窗口往前走，审核 #123 中-2）；
 //   - 每轮最多 MAX_PAGES_PER_ROUND 页、MAX_ROUND_MS 毫秒；落后超过 BEHIND_MS 时每轮放宽到 MAX_PAGES_BEHIND 页（180 秒 45 个、限流的 12.5%），追平回到 6 页；
 //     每发一个请求之前都看一眼时间和断路器，到了就停，这个窗口不写，下一轮从窗口起点重来（审核 #123 中-3）；
-//   - 第一次跑只从昨天 0 点（业务时区）起，不往前补更早的；进度比保留期还旧（停机超过 35 天）也从昨天 0 点重来，不补注定要被清掉的桶；
+//   - 第一次跑只从昨天 0 点（业务时区）起，不往前补更早的；
+//   - 停机、站点读不到、令牌失效造成的掉队，不管多久都照常按保底慢慢追，不跳、不清桶（总指挥 10-26 定第三轮）；
+//     只在「算应付成本」关→开这一下，进度比昨天 0 点还旧时，才挪到昨天 0 点（关着的日子本来就不读，不补那段缺口），
+//     跳过的缺口记在 own_log_cursor 的 disabled_from_ms/disabled_to_ms，结账时那几天给 EXPECTED_COST_DISABLED；
 //   - 每个窗口读完才写库（桶加进去、进度挪到窗口终点，一个事务），读到一半出错整个窗口不写；
 //   - 落后超过 LAG_WARN_MS 每小时打一行日志（V1-a 没页面，先不进需处理）。
 // 桶里顺手记下管理员自用额度、不在管理员名下的渠道测试额度（和 R1 同一个规矩，server/own-helpers.js 的管理员名单），V1 只用来和 R1 对账打日志。
-// 开关：系统设置「算应付成本」settings.expectedCost（db/store.js，每轮读一次）——只有明确开着才读；V1-a 默认关（只读不用），V1-b 带上设置页的开关界面时改成默认开（server/reconciliation.js）。
+// 开关：系统设置「算应付成本」settings.expectedCost（db/store.js，每轮读一次）——只有明确开着才读；默认开，系统设置页上能关（server/reconciliation.js）。
+// 关→开判断：server/reconciliation.js 轮询时记 settings.expectedCostWasOff（settings 里的内部标记，不进设置页），只在关变开那一轮把
+// justTurnedOn 传给 ingestOnce。
 import { OWN_LOG_SLOT_MS, accumulateBuckets } from "../lib/own-log-bucket.js";
-import { ingestAllowance, ownRequestState } from "../lib/own-request-budget.js";
+import { ingestAllowance, noteIngestUsage, ownRequestState } from "../lib/own-request-budget.js";
 import { queryOwnLogWindow } from "../lib/providers.js";
 import { businessTimeZone, dayStartInTz, dayKeyInTz, shiftedDayStartInTz } from "../lib/business-time.js";
 import { readOwnAdminDirectory, resoldAdminKeysOf } from "./own-helpers.js";
@@ -46,22 +51,31 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
   // 第一次：从昨天 0 点（业务时区）起读
   const firstFromMs = (at) => shiftedDayStartInTz(dayStartInTz(dayKeyInTz(at, businessTimeZone()), businessTimeZone()), -1, businessTimeZone());
 
-  async function ingestOnce(own) {
+  async function ingestOnce(own, { justTurnedOn = false } = {}) {
     if (!own?.isOwn || own.type !== "newapi") return { skipped: "not-own" };
     const at = now();
     const base = ownBase(own);
     const allowance = ingestAllowance(base, { now: at });
+    // 这几处检查没走到跳不跳那一步：skipChecked 不给 true，调用方据此不清「上一次是关着的」标记，下一轮还会再试
+    // （只要这一轮没真的判断过，标记就不能清——不然某个站点一直被额度、断路、管理员名单挡住，关着的那几天就永远跳不过去了；
+    // 审核 R2 #125 第三轮 中-C）
     if (!allowance.allowed) return { skipped: allowance.reason, pages: 0 };
     // 管理员名单读不到这轮不读（进度也不建）：桶里「管理员自用」会算错，而且错了就留在桶里
     let adminSet, resoldKeys;
     try { ({ adminSet } = await readOwnAdminDirectory(rt, own)); resoldKeys = resoldAdminKeysOf(own); }
     catch (error) { return { skipped: "admins", pages: 0, error: error?.code || error?.message }; }
     let cursor = await store.getCursor(own.id);
-    // 进度比保留期还旧（停机超过 35 天）：补上的桶随后就会被清掉，不如从昨天 0 点重来
-    if (cursor && cursor.coveredToMs < at - INGEST.KEEP_DAYS * 86400000) { await store.deleteStation(own.id); cursor = null; log("own-log-ingest", own.id, "cursor too old, restarting from yesterday"); }
+    // 只在「算应付成本」关→开这一下才跳：关着那几天本来就不读，不补那段缺口，直接挪到昨天 0 点（总指挥 10-26 定第三轮，决定 C）。
+    // 停机、站点读不到、令牌失效造成的掉队，不管多久都不跳，照常按保底慢慢追——那几天的开关本来是开着的，补得上就该补上。
+    // 跳过的缺口记在 cursor 的 disabledFromMs/disabledToMs（结账时这段范围给 EXPECTED_COST_DISABLED），不清桶（已经读进来的留着）。
+    // 这一行跑到了（不管后面读不读得到日志），就算真的判断过了：skipChecked 给 true
+    if (justTurnedOn && cursor && cursor.coveredToMs < firstFromMs(at)) {
+      cursor = await store.skipCursor(own.id, firstFromMs(at), at);
+      log("own-log-ingest", own.id, "off->on, skipped stale progress to yesterday");
+    }
     cursor ??= await store.startCursor(own.id, firstFromMs(at), at);
     const horizon = wholeSecond(at - INGEST.LAG_MS);
-    if (cursor.coveredToMs >= horizon) return { skipped: "caught-up", pages: 0, coveredToMs: cursor.coveredToMs };
+    if (cursor.coveredToMs >= horizon) return { skipped: "caught-up", pages: 0, coveredToMs: cursor.coveredToMs, skipChecked: true };
     const behind = horizon - cursor.coveredToMs;
     if (behind > INGEST.LAG_WARN_MS && at - (lagWarnedAt.get(own.id) || 0) >= 3600000) {
       lagWarnedAt.set(own.id, at);
@@ -78,7 +92,7 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
       const fromMs = coveredTo, toMs = Math.max(fromMs + 1000, wholeSecond(Math.min(fromMs + windowMs, horizon)));
       let first;
       try { first = await queryOwnLogWindow(own, { startMs: fromMs, endMs: toMs, page: 1 }); }
-      catch (error) { log("own-log-ingest", own.id, "read failed", error?.code || error?.message); return { pages, windows, coveredToMs: coveredTo, error: error?.code || "read" }; }
+      catch (error) { log("own-log-ingest", own.id, "read failed", error?.code || error?.message); return { pages, windows, coveredToMs: coveredTo, error: error?.code || "read", skipChecked: true }; }
       budget -= 1; pages += 1;
       const total = first.total ?? (first.items.length < INGEST.PAGE_SIZE ? first.items.length : null);
       const needPages = total == null ? INGEST.PAGES_PER_WINDOW + 1 : Math.ceil(total / INGEST.PAGE_SIZE);
@@ -88,7 +102,12 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
         windowSizes.set(own.id, windowMs);
         continue;
       }
-      if (needPages - 1 > budget) { windowSizes.set(own.id, windowMs); break; } // 这轮剩的额度翻不完这个窗口：下一轮从头读它
+      // 剩的额度翻不完这个窗口：保底时额度很小（可能一直是 2），原地切半窗口接着试，不然会卡在「下一轮从头读」原地打转（总指挥 10-26 定）；
+      // 到了最小窗口还翻不完就只能等下一轮（硬读会超预算）
+      if (needPages - 1 > budget) {
+        if (toMs - fromMs > INGEST.WINDOW_MIN_MS) { windowMs = Math.max(INGEST.WINDOW_MIN_MS, wholeSecond((toMs - fromMs) / 2)); windowSizes.set(own.id, windowMs); continue; }
+        windowSizes.set(own.id, windowMs); break;
+      }
       const seen = new Set(), rows = [];
       const take = (items) => { for (const row of items) { const id = Number(row?.id); if (Number.isFinite(id)) { if (seen.has(id)) continue; seen.add(id); } rows.push(row); } };
       take(first.items);
@@ -101,17 +120,18 @@ export function createOwnLogIngest(rt, { store, now = () => Date.now(), log = ()
         take(next.items);
         more = next.items.length >= INGEST.PAGE_SIZE && (total == null ? page <= INGEST.PAGES_PER_WINDOW + 1 : rows.length < total);
       }
-      if (failed) { log("own-log-ingest", own.id, "read failed", failed?.code || failed?.message); return { pages, windows, coveredToMs: coveredTo, error: failed?.code || "read" }; }
+      if (failed) { log("own-log-ingest", own.id, "read failed", failed?.code || failed?.message); return { pages, windows, coveredToMs: coveredTo, error: failed?.code || "read", skipChecked: true }; }
       if (more) { windowSizes.set(own.id, windowMs); break; } // 额度、时间用完或断路了还没翻完：这个窗口不写，下一轮从头读
       const buckets = accumulateBuckets(rows, { adminSet, resoldKeys });
       const applied = await store.applyWindow(own.id, { fromMs, toMs, buckets: buckets.values() }, now());
-      if (!applied) return { pages, windows, coveredToMs: coveredTo, error: "cursor-moved" }; // 别的进程先写了：下一轮按库里的进度来
+      if (!applied) return { pages, windows, coveredToMs: coveredTo, error: "cursor-moved", skipChecked: true }; // 别的进程先写了：下一轮按库里的进度来
       coveredTo = toMs; windows += 1;
       // 很稀：窗口翻倍（上限 1 小时）
       if (rows.length < INGEST.PAGE_SIZE / 2 && toMs - fromMs >= windowMs) windowMs = Math.min(INGEST.WINDOW_MAX_MS, windowMs * 2);
       windowSizes.set(own.id, windowMs);
     }
-    return { pages, windows, coveredToMs: coveredTo };
+    noteIngestUsage(base, pages, now());
+    return { pages, windows, coveredToMs: coveredTo, skipChecked: true };
   }
 
   // 每小时清 35 天前的桶：一批 2000 行，删到不满一批为止（最多 20 批，表再大也不会一直涨）

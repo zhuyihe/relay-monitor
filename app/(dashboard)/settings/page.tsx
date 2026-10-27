@@ -7,7 +7,7 @@ import "../../styles/pages/settings.css";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import Link from "next/link";
-import { App, Button, Input, InputNumber, Select } from "antd";
+import { App, Button, Input, InputNumber, Select, Switch } from "antd";
 import { BRAND, NAV_LABELS, VERSION_LABEL } from "../../../lib/brand";
 import { api } from "../../../lib/client";
 import { DEFAULT_BUSINESS_TIME_ZONE } from "../../../lib/business-time";
@@ -82,6 +82,7 @@ export default function SettingsPage() {
   const uid = useId();
   const ids = {
     interval: `${uid}-interval`,
+    expectedCost: `${uid}-expected-cost`,
     retention: `${uid}-retention`,
     username: `${uid}-username`,
     pwOld: `${uid}-pw-old`,
@@ -135,6 +136,13 @@ export default function SettingsPage() {
     validate: (v) => (v == null ? requiredText(COPY.interval) : v < 10 ? COPY.intervalMin : null),
     save: async (v) => (await putSettings({ refreshIntervalSec: Number(v) })).refreshIntervalSec,
   });
+  // 「算应付成本」开关（§8.3）：一改就存，不弹确认框；开着时下面一行写收费记录读到哪儿了（接口 ownLog.coveredToMs）
+  const expectedCost = useAutoSave<boolean>(true, {
+    queue,
+    label: COPY.expectedCost,
+    save: async (v) => (await putSettings({ expectedCost: v })).expectedCost !== false,
+  });
+  const [ownLogCoveredTo, setOwnLogCoveredTo] = useState<number | null>(null);
   // 保留天数：缩短时先预览会删多少，再由确认框明确同意不可恢复的删除；取消就回到原来的天数
   const retention = useAutoSave<number | null>(null, {
     queue,
@@ -155,6 +163,8 @@ export default function SettingsPage() {
       if (result.tz) setTz(result.tz);
       const days = result.settings.historyRetentionDays == null ? null : Number(result.settings.historyRetentionDays);
       interval.sync(result.settings.refreshIntervalSec);
+      expectedCost.sync(result.settings.expectedCost !== false);
+      setOwnLogCoveredTo(Number.isFinite(Number(result.ownLog?.coveredToMs)) ? Number(result.ownLog.coveredToMs) : null);
       retention.sync(days);
       setCustomRetention((custom) => custom || !isPreset(days));
       if (result.history) setHistory(result.history);
@@ -462,7 +472,7 @@ export default function SettingsPage() {
                 </>
               ) : (
                 <>
-                  <Panel title={COPY.refresh} badge={<SaveState saving={interval.saving} dirty={interval.dirty} at={interval.savedAt} tz={tz} failures={[interval.failure]} />}>
+                  <Panel title={COPY.refresh} badge={<SaveState saving={interval.saving || expectedCost.saving} dirty={interval.dirty || expectedCost.dirty} at={Math.max(interval.savedAt, expectedCost.savedAt)} tz={tz} failures={[interval.failure, expectedCost.failure]} />}>
                     <div className="jy-field jy-settings-field">
                       <label htmlFor={ids.interval}>{COPY.interval}</label>
                       <InputNumber
@@ -481,6 +491,27 @@ export default function SettingsPage() {
                       />
                       <span className="jy-caption" id={`${ids.interval}-desc`}>{COPY.intervalHint}</span>
                       <FieldError id={`${ids.interval}-err`} text={interval.invalid || undefined} />
+                    </div>
+                    <div className="jy-field jy-settings-field">
+                      {/* 名字和开关同一行（设计验收 10-26）：系统设置里只有这一个开关，开关不拉满、一眼看得出是开关 */}
+                      <div className="jy-settings-switch">
+                        <label htmlFor={ids.expectedCost}>{COPY.expectedCost}</label>
+                        <Switch
+                          id={ids.expectedCost}
+                          checked={expectedCost.value}
+                          onChange={(checked) => {
+                            expectedCost.setValue(checked);
+                            void expectedCost.commit(checked);
+                          }}
+                          aria-describedby={`${ids.expectedCost}-desc`}
+                        />
+                      </div>
+                      <span className="jy-caption" id={`${ids.expectedCost}-desc`}>{COPY.expectedCostHint}</span>
+                      {expectedCost.value && ownLogCoveredTo != null ? (
+                        <span className="jy-caption">
+                          {Date.now() - ownLogCoveredTo > 3600000 ? COPY.readBehind(formatZonedDateTime(ownLogCoveredTo, tz)) : COPY.readTo(formatZonedDateTime(ownLogCoveredTo, tz))}
+                        </span>
+                      ) : null}
                     </div>
                     <p className="jy-caption">
                       {COPY.lowLineMovedBefore}
