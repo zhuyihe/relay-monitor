@@ -299,6 +299,24 @@ test("计算明细：换了 Key、Key 挪了手的那天——上游成本按 Ke
   assert.equal(await plainDrawer.getByText(/挪到/).count(), 0); assert.equal(await plainDrawer.locator(".jy-profit-detail__list").filter({ hasText: "（到" }).count(), 0);
 });
 
+test("计算明细：今天换过手的 Key（Sub2API 上游，今天还没固定）——接手的渠道写「今天 14:30 从「…」挪过来：今天的先全算在…」，原来的渠道写「挪给了…，14:30 以前的会算回这里」；New API 上游照原来那句", async (t) => {
+  const at = Date.parse("2026-10-08T06:30:00.000Z"); // 上海 14:30
+  const move = { key: { upstreamStationId: "upstream-1", tokenId: 9, tokenName: "pool" }, atMs: at, fromNames: ["高速 A"], toNames: ["Rule A"] };
+  const open = async (provider, rowName) => {
+    const rows = yesterdayRows(); rows[0].upstream.provider = provider; rows[0].channels = [{ channelId: 1, name: rowName }];
+    const { page } = await openDailyPage(t, { pageOf: () => profitPage(rows, { preset: "yesterday" }), detail: (route) => fulfill(route, profitDetail({ day: PROFIT_TODAY, keys: { amounts: [], changes: [], moves: [move] } })) });
+    await page.locator(".jy-profit-row__expanded").first().getByRole("button", { name: PROFIT_COPY.expanded.seeDetail, exact: true }).click();
+    const drawer = page.getByRole("dialog", { name: new RegExp(`^${PROFIT_COPY.detail.title(rowName, "").split(" ·")[0]}`) }); await drawer.waitFor();
+    return drawer;
+  };
+  const receiver = await open("sub2api", "Rule A");
+  await receiver.getByText(PROFIT_COPY.detail.keyMovedTodayTo("pool", "14:30", "「高速 A」", "「Rule A」"), { exact: true }).waitFor();
+  const leaving = await open("sub2api", "高速 A");
+  await leaving.getByText(PROFIT_COPY.detail.keyMovedTodayFrom("pool", "14:30", "「高速 A」", "「Rule A」"), { exact: true }).waitFor();
+  const newapi = await open("newapi", "Rule A");
+  await newapi.getByText(PROFIT_COPY.detail.keyMoved("pool", "10月8日 14:30", "「高速 A」", "「Rule A」"), { exact: true }).waitFor();
+});
+
 test("点开一行：对不上的默认展开，「差在哪」一句写用量、倍率、应付和实付；近 7 天每天的小格，点一格或「看计算明细」打开那天的计算明细抽屉（GET /profit/detail）", async (t) => {
   const { page, detailReads } = await openDailyPage(t, { pageOf: () => profitPage(yesterdayRows(), { preset: "yesterday" }) });
   const rowA = rowOf(page, "Rule A"), rowB = rowOf(page, "Rule B");

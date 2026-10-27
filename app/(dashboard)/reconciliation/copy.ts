@@ -56,7 +56,7 @@ export const COPY = Object.freeze({
       UPSTREAM_PRICE_UNSUPPORTED: "Sub2API 上游", MODEL_PRICE_MISSING: "有模型没价格", MODEL_PRICE_UNREADABLE: "读不到模型价格", CACHE_FIELDS_UNKNOWN: "看不出缓存用量",
       KEY_SHARED: "Key 别处也在用", GROUP_AUTO: "分组会自动换", NOT_STARTED: "还没开始算", EXPECTED_COST_NOT_RECORDED: "开始算以前", EXPECTED_COST_DISABLED: "开关关着",
       EXPECTED_COST_LAGGING: "收费记录还没读到", DAY_BOUNDARY_UNSUPPORTED: "一天不从整点开始", PARTIAL_HOUR_UNSUPPORTED: "这天的时段不是整点",
-      MODEL_PRICE_TIERED: "分档计价",
+      MODEL_PRICE_TIERED: "分档计价", KEY_CHANGE_RATIO_DIFFERS: "换 Key 倍率变了",
     }),
     uncomputableOther: "算不出",
     count: (n: number) => `${n} 个`,
@@ -139,7 +139,10 @@ export const COPY = Object.freeze({
       // 设计给的是按具体时刻分三种写法的版本（「这天从 14:23 起算」「这天算到 14:23」「这天只算 9:10–14:23」），
       // 接口（A1）现在没有把那个时刻单独带出来，先用这句不分情况的；时刻那版等 A1 补数据再接（design/ui-copy-spec.md §5.7）
       PARTIAL_HOUR_UNSUPPORTED: "这天算的时段不是整点开始或结束，收费记录按整点记，切不开，算不了应付成本",
+      // 这天换了 Key、新旧倍率不一样（用语规范 §5.7，设计 10-27 定）；换 Key 的时刻带得到时用 keyChangeRatio（见下）
+      KEY_CHANGE_RATIO_DIFFERS: "这天换了 Key，新旧倍率不一样，换的那一段分不清该按哪个倍率算，这天不比差额",
     }),
+    keyChangeRatio: (when: string) => `这天 ${when} 换了 Key，新旧倍率不一样，换的那一段分不清该按哪个倍率算，这天不比差额`,
     disabledNow: "「算应付成本」关着",
     // 这个上游的一天不从整点开始（时差按这一行上游的时区现算）
     dayBoundary: (offset: string) => `这个上游按 ${offset} 算一天，算不了应付成本`,
@@ -160,6 +163,8 @@ export const COPY = Object.freeze({
     sinceOnly: (day: string, n: number) => `${day}起没算进利润，上面只是前 ${n} 天`,
     more: (n: number) => `还有 ${n} 个问题`,
     retryFailed: "重新读取没完成，请稍后再试",
+    // 「这天的用量记录太多，没读完」点「重新读取」以后：回到还在读取，系统接着读一个小时（设计 10-27 定；不写「已重新读取」，这时还没读完）
+    retryResumed: "已经接着读了，读完会自己固定",
   }),
   // 点开一行（设计稿 §4）
   expanded: Object.freeze({
@@ -219,11 +224,16 @@ export const COPY = Object.freeze({
     missingOne: (model: string, input: string, output: string) => `${model}（输入 ${input}、输出 ${output} Token）`,
     missingHint: "这一天的应付成本、差额写「—」。",
     actual: "实付成本",
+    unavailableUnknown: "这天还没算出来",
     actualFrom: (key: string) => `来自上游这把 Key「${key}」这天的用量记录。`,
     // 换了 Key 的那天按 Key 分开写（用语规范 §9「上游成本（换了 Key 的那天）」）：「oai（到 14:30）$3.20；oai-2（14:30 起）$1.10」
     keyUntil: (name: string, time: string) => `${name}（到 ${time}）`,
     keyFrom: (name: string, time: string) => `${name}（${time} 起）`,
     // Key 挪到了别的渠道（§9）：两个渠道这天的明细里都写这一句
+    // 今天换过手的 Key（Sub2API 上游，今天还没固定）：今天整天先全算给现在握着它的那个渠道，明天固定时按那一刻切开（用语规范 §9「今天的写法」，设计 10-27 定）。
+    // New API 上游实时就按那一刻切，今天也照上面那一句
+    keyMovedTodayTo: (key: string, time: string, from: string, to: string) => `Key「${key}」今天 ${time} 从${from}挪过来：今天的先全算在${to}，明天固定时按 ${time} 切开。`,
+    keyMovedTodayFrom: (key: string, time: string, from: string, to: string) => `Key「${key}」今天 ${time} 挪给了${to}：今天的先全算在${to}，明天固定时按 ${time} 切开，${time} 以前的会算回这里。`,
     keyMoved: (key: string, time: string, from: string, to: string) => `Key「${key}」${time} 从${from}挪到${to}：这一刻以前的算给${from}，以后的算给${to}（这一刻是系统读到的，前后最多差一分钟）。`,
     gap: "差额",
     gapFormula: "实付成本 − 应付成本",

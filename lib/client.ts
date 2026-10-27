@@ -148,11 +148,13 @@ export type ProfitDetailResponse = {
   day: string; settled: boolean;
   income: { usd: number | null; adminUsage: { usd: number | null; deducted: "all" | "some" | "none" }; byChannel: { channelId: number; usd: number | null }[] };
   // backfilledAt：这天固定时收费记录还没读完、后来补算的时刻；没补算是 null
-  expected: { usd: number | null; reason: string | null; backfilledAt?: string | null; groupName: string | null; groupRatio: number | null; segments: { startMs: number; endMs: number; ratio: number | null; group?: string | null; usd?: number | null; ruleId: string | null }[];
+  expected: { usd: number | null; reason: string | null; keyChange?: { atMs: number | null; between: [number, number] | null } | null; backfilledAt?: string | null; groupName: string | null; groupRatio: number | null; segments: { startMs: number; endMs: number; ratio: number | null; group?: string | null; usd?: number | null; ruleId: string | null }[];
     byModel: ProfitDetailModel[]; missingPriceModels: { model: string; inputTokens: number; outputTokens: number; requests: number }[]; byChannel: { channelId: number; usd: number | null }[]; tokens: number | null };
   actual: { usd: number | null; keyName: string | null };
   // 换了 Key、Key 挪了手的那天（用语规范 §9）：amounts 每把 Key 各花了多少（不止一把时才有）、changes 换 Key 的几次、moves Key 在渠道之间挪的几次
   keys?: { amounts: ProfitDetailKeyAmount[]; changes: ProfitDetailKeyChange[]; moves: ProfitDetailKeyMove[] };
+  // 这天没算出来的原因（换 Key 冲突期、还在读取、需处理…），算出来的是 null：实付、毛利写「—」加这个原因，不写 0
+  unavailable?: { code: string | null; title: string | null; detail: string | null } | null;
   gap: { usd: number | null; rate: number | null; state: "over" | "under" | "within" | null } | null;
   grossProfitUsd: number | null; fixedAt: string | null; revisions: number | null;
 };

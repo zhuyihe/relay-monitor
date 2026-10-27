@@ -47,6 +47,9 @@ function Body({ detail, row, page, ctx, compact, onCorrected }: { detail: Profit
     return { id: `${amount.upstreamStationId}:${amount.tokenId}`, label, usd: amount.amountUsd };
   });
   const namesText = (names: string[]) => names.map((name) => `「${name}」`).join("");
+  // 换 Key 的时刻（KEY_CHANGE_RATIO_DIFFERS 的说明用）：定得出写「14:30」，两次读取之间写「15:19–16:05 之间」；带不到就不写时刻
+  const keyChangeWhen = (change: { atMs: number | null; between: [number, number] | null } | null | undefined) => change?.between && change.between[0] !== change.between[1]
+    ? `${formatZonedTime(change.between[0], ctx.tz)}–${formatZonedTime(change.between[1], ctx.tz)} 之间` : change?.atMs != null ? formatZonedTime(change.atMs, ctx.tz) : null;
   return <div className="jy-profit-detail">
     <Section title={COPY.detail.income} value={income(detail.income.usd)}>
       <p>{many ? COPY.detail.incomeFromMany(row.channels.length) : COPY.detail.incomeFrom(channelName(row.channels[0]?.channelId))}{admin ? `，${admin}` : ""}。</p>
@@ -54,7 +57,7 @@ function Body({ detail, row, page, ctx, compact, onCorrected }: { detail: Profit
     </Section>
     <Section title={COPY.detail.expected} value={detail.expected.usd == null ? EMPTY : cost(detail.expected.usd)}>
       {today ? <p>{COPY.detail.expectedToday}</p>
-        : detail.expected.usd == null && !models.length ? <p>{gapReasonText(detail.expected.reason, missing.map((model) => model.model), { settled: detail.settled, zone: ctx.zoneOf?.(row) })}</p>
+        : detail.expected.usd == null && !models.length ? <p>{gapReasonText(detail.expected.reason, missing.map((model) => model.model), { settled: detail.settled, zone: ctx.zoneOf?.(row), keyChangeWhen: keyChangeWhen(detail.expected.keyChange) })}</p>
           : <>
             <p>{many ? COPY.detail.expectedIntroMany(row.upstream.name || EMPTY, group) : COPY.detail.expectedIntro(row.upstream.name || EMPTY, group)}</p>
             {ctx.currency === "CNY" ? <p className="jy-caption">{COPY.detail.usdTable}</p> : null}
@@ -77,9 +80,16 @@ function Body({ detail, row, page, ctx, compact, onCorrected }: { detail: Profit
       <p>{missing.map((model) => COPY.detail.missingOne(model.model, formatCompact(model.inputTokens), formatCompact(model.outputTokens))).join("、")}。{COPY.detail.missingHint}</p>
     </Section> : null}
     <Section title={COPY.detail.actual} value={cost(detail.actual.usd)}>
-      <p>{COPY.detail.actualFrom(detail.actual.keyName || row.key.name)}</p>
+      {detail.unavailable ? <p>{[detail.unavailable.title, detail.unavailable.detail].filter(Boolean).join("。") || COPY.detail.unavailableUnknown}</p> : <p>{COPY.detail.actualFrom(detail.actual.keyName || row.key.name)}</p>}
       {keyLines.length ? <ul className="jy-profit-detail__list">{keyLines.map((line) => <li key={line.id}><span>{line.label}</span><b>{line.usd == null ? EMPTY : cost(line.usd)}</b></li>)}</ul> : null}
-      {moves.map((move) => <p key={`${move.key.upstreamStationId}:${move.key.tokenId}@${move.atMs}`} className="jy-caption">{COPY.detail.keyMoved(move.key.tokenName || `Key ${move.key.tokenId}`, formatZonedDateTime(move.atMs, ctx.tz), namesText(move.fromNames), namesText(move.toNames))}</p>)}
+      {moves.map((move) => {
+        const name = move.key.tokenName || `Key ${move.key.tokenId}`, from = namesText(move.fromNames), to = namesText(move.toNames);
+        // 今天、Sub2API 上游：今天整天先只算给现在握着这把 Key 的那个渠道（接手的），明天固定时才按那一刻切开
+        const todayWay = today && /^sub2api/.test(row.upstream.provider || "");
+        const receiver = row.channels.length > 0 && row.channels.every((channel) => move.toNames.includes(channel.name || `渠道 ${channel.channelId}`));
+        const text = todayWay ? (receiver ? COPY.detail.keyMovedTodayTo : COPY.detail.keyMovedTodayFrom)(name, formatZonedTime(move.atMs, ctx.tz), from, to) : COPY.detail.keyMoved(name, formatZonedDateTime(move.atMs, ctx.tz), from, to);
+        return <p key={`${move.key.upstreamStationId}:${move.key.tokenId}@${move.atMs}`} className="jy-caption">{text}</p>;
+      })}
     </Section>
     <Section title={COPY.detail.gap} value={gapValue}>
       <p>{COPY.detail.gapFormula}{gap?.rate != null && gap.state !== "within" ? `，${rateText(gap.rate)}` : ""}。{COPY.detail.gapNote(formatReconciliationMoney(page.gapThreshold.usd, null), formatPct(page.gapThreshold.rate, 0))}</p>

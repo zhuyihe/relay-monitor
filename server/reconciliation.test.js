@@ -11224,3 +11224,99 @@ for (const sub2 of [false, true]) test(`计算明细（${sub2 ? "Sub2API" : "New
   assert.deepEqual(detail.keys.changes.map((change) => [change.atMs, change.between != null, change.from.tokenName, change.to.tokenName]), [[REGROUP_B, true, "stable", "k20"]]);
   assert.deepEqual(detail.keys.moves, []);
 });
+
+// 审核 #133 第 4 轮 M3、M4：换 Key 冲突期的那天（永远不固定）在每日利润页多天窗口、计算明细里的显示
+test("每日利润页：多天窗口里的冲突日（KEY_CONFLICT_GAP，永远不固定）——小格标需处理加原因，不算还在读取；计算明细实付、毛利写「—」加原因，不写 0", async (t) => {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart - 86400000, dayStart - 86400000);
+  await ownLogStore.applyWindow("own", { fromMs: dayStart - 86400000, toMs: dayEnd + 3600000, buckets: [] }, dayEnd + 3600000);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  f.repository.tables.rules.find((row) => row.id === "rr_live").key_blocks = JSON.stringify([{ code: "KEY_CONFLICT_GAP", sinceMs: dayStart + 3 * 3600000, untilMs: dayStart + 5 * 3600000 }]);
+  await f.module.refreshDue(Date.now());
+  const page = await f.module.profitPage({ preset: "custom", startMs: dayStart - 86400000, endMs: dayEnd });
+  const row = page.rows.find((item) => item.channels.some((channel) => channel.channelId === 1));
+  const cell = row.daily.find((item) => item.day === "2026-10-08");
+  assert.deepEqual([cell.state, cell.reason], ["attention", "KEY_CONFLICT_GAP"], "不是「还在读取」，原因写出来");
+  const other = page.rows.find((item) => item.channels.some((channel) => channel.channelId === 2));
+  assert.equal(other.daily.find((item) => item.day === "2026-10-08").state, "fixed", "别的渠道照常");
+  assert.equal(page.dayCounts.fixed, 1, "这一天别的渠道固定了，整页这一天算固定；被扣的那条不拦它");
+  const detail = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-08" });
+  assert.deepEqual([detail.actual.usd, detail.grossProfitUsd, detail.unavailable?.code], [null, null, "KEY_CONFLICT_GAP"], "实付、毛利是「—」，不是 0 和「毛利 = 收入」");
+  const fine = await f.module.profitDetail({ ruleIds: ["rr_two"], day: "2026-10-08" });
+  assert.equal(fine.unavailable, null);
+  assert.notEqual(fine.actual.usd, null);
+});
+
+// 审核 #133 第 4 轮 M1：换 Key 的过渡段 [a, b) 按旧 Key 的倍率切；新旧倍率不一样就算不准，这天应付成本给 KEY_CHANGE_RATIO_DIFFERS 不比差额
+async function expectedCostWindowDay(t, { segments }) {
+  const dayStart = Date.parse("2026-10-07T16:00:00Z"), dayEnd = dayStart + 86400000;
+  const ownLogStore = new MemoryOwnLogStore();
+  await ownLogStore.startCursor("own", dayStart, dayStart);
+  const bucket = (slotMs, extra = {}) => ({ slotMs, channelId: 1, model: "m", upstreamModel: "", group: "g1", semantic: "anthropic", requests: 1, promptTokens: 100, completionTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite1hTokens: 0, quota: 1, adminQuota: 0, testQuota: 0, ...extra });
+  await ownLogStore.applyWindow("own", { fromMs: dayStart, toMs: dayEnd + 3600000, buckets: [bucket(dayStart + 3600000), bucket(dayStart + 7200000), bucket(dayEnd)] }, dayEnd + 3600000);
+  const f = await completedDayFixture(t, { moduleOptions: { ownLogStore } });
+  const first = f.repository.tables.segments.find((row) => row.rule_id === "rr_live");
+  segments.forEach((spec, index) => {
+    const row = index === 0 ? first : { ...first, id: `s-${index}` };
+    Object.assign(row, { group_name: spec.group, group_ratio: spec.ratio, effective_from_ms: dayStart + spec.from * 60000, effective_to_ms: spec.to == null ? null : dayStart + spec.to * 60000, timing_source: spec.source ?? "key_change", detected_at_ms: dayStart });
+    if (index > 0) f.repository.tables.segments.push(row);
+  });
+  f.state.pricing = { success: true, data: [{ model_name: "m", quota_type: 0, model_ratio: 2, completion_ratio: 3, cache_ratio: 0.1 }], group_ratio: { g1: 1 } };
+  await f.module.refreshDue(Date.now());
+  const live = f.state.ledger.find((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
+  return { f, live, detail: JSON.parse(live.detail_json ?? "null") ?? live.detail };
+}
+test("应付成本 × 换 Key：过渡段 [a, b) 前后两把 Key 的倍率不一样——KEY_CHANGE_RATIO_DIFFERS，应付成本不写数（实付、毛利照常），说明带换 Key 的时刻（两次读取之间）", async (t) => {
+  const { f, live, detail } = await expectedCostWindowDay(t, { segments: [{ from: 0, to: 120, group: "g1", ratio: 1, source: "initial" }, { from: 120, to: 180, group: "g1", ratio: 1, source: "key_change_window" }, { from: 180, to: null, group: "g2", ratio: 2 }] });
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [null, "KEY_CHANGE_RATIO_DIFFERS"]);
+  assert.deepEqual([detail.expected.keyChange.atMs, detail.expected.keyChange.between], [Date.parse("2026-10-07T16:00:00Z") + 180 * 60000, [Date.parse("2026-10-07T16:00:00Z") + 120 * 60000, Date.parse("2026-10-07T16:00:00Z") + 180 * 60000]]);
+  assert.ok(Number(live.cost_usd) >= 0 && live.revenue_usd != null, "实付、收入照常固定");
+  const shown = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-08" });
+  assert.equal(shown.expected.reason, "KEY_CHANGE_RATIO_DIFFERS");
+  assert.deepEqual([shown.expected.keyChange.between != null], [true]);
+});
+test("应付成本 × 换 Key：过渡段前后倍率一样（最常见）——照常算，换 Key 的边界不在整点、分组不一样也不挡（L1）", async (t) => {
+  const { live } = await expectedCostWindowDay(t, { segments: [{ from: 0, to: 90, group: "g1", ratio: 1, source: "initial" }, { from: 90, to: 150, group: "g1", ratio: 1, source: "key_change_window" }, { from: 150, to: null, group: "g3", ratio: 1 }] });
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [10, null]);
+});
+test("应付成本 × 换 Key：同分组、倍率变了（整点切）——按两段各算（合并的判据是倍率不是分组名）（L3）", async (t) => {
+  const { live, detail } = await expectedCostWindowDay(t, { segments: [{ from: 0, to: 120, group: "g1", ratio: 1, source: "initial" }, { from: 120, to: null, group: "g1", ratio: 2 }] });
+  assert.deepEqual([live.expected_cost_usd, live.gap_reason], [15, null]);
+  assert.equal(detail.expected.segments.length, 2);
+});
+
+test("K2b + Sub2API 翻不完转了需处理以后点「重新读取」：回到还在读取、系统每分钟接着翻（翻页进度不丢），翻完自己固定，不用反复点（总指挥 10-27 定）", async (t) => {
+  const s = await regroupMoneyScenario(t, "immediate", { sub2: true, expectRegroup: false, rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }],
+    before: { 1: 9, 2: 10 }, after: { 1: 10, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null] }, recordStepMs: 3000, pagesPerMinute: 4 });
+  const state = async (ruleId) => (await s.f.repository.listSettlementStates([ruleId], { billDates: ["2026-10-12"] }))[0] ?? null;
+  const manual = (ruleId) => s.f.module.queryRules({ ruleIds: [ruleId], preset: "custom", startMs: Date.parse("2026-10-11T16:00:00Z"), endMs: Date.parse("2026-10-12T16:00:00Z") }, { mode: "observe", force: true, origin: "manual" });
+  // 每轮只翻 4 页（22 页要 6 轮）：先熬过 3 天，两条都转成需处理
+  await s.advance("2026-10-15T16:30:00Z"); await s.advance("2026-10-15T17:00:00Z");
+  assert.equal((await state("rr_live"))?.manualReason, "UPSTREAM_RECORDS_TOO_MANY");
+  assert.equal((await state("rr_b"))?.manualReason, "UPSTREAM_RECORDS_TOO_MANY");
+  // 点「重新读取」：回到还在读取（读取类），带一小时的续翻期限
+  await manual("rr_live");
+  const resumed = await state("rr_live");
+  assert.deepEqual([resumed.manualReason, resumed.retryReason], [null, "UPSTREAM_RECORDS_PENDING"], "回到还在读取");
+  assert.ok(resumed.detail.resumeUntilMs > Date.parse("2026-10-15T17:50:00Z"), "续翻一小时");
+  // 之后系统每分钟接着翻一轮，不用再点
+  let at = Date.parse("2026-10-15T17:00:00Z");
+  for (let round = 0; round < 12 && s.f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length === 0; round += 1) { at += 61000; await s.advance(at); }
+  assert.equal(s.f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-12").length, 1, "翻完自己固定了");
+  assert.equal(await state("rr_live"), null, "状态行删掉了");
+});
+
+// 审核 #150 第 2 轮中-1（总指挥 10-27 定）：换手当天「今天」的实时数——部分认领的 Key 今天整天只算给一条绑定（现在握着它的；没人握着就给今天最后握着它的在算的），合计不翻倍也不丢
+for (const [label, options, keys] of [
+  ["互换", { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }], before: { 1: 9, 2: 10 }, after: { 1: 10, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null] } }, 2],
+  ["挪给在算的渠道", { rules: ["rr_b"], channelsByRule: { rr_live: [1], rr_b: [2] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 10, name: "stable-rr_b" }, { tokenId: 20, name: "k20" }], before: { 1: 9, 2: 10 }, after: { 1: 20, 2: 9 }, usage: { stable: [0, null], "stable-rr_b": [0, null], k20: [0, null] } }, 3],
+  ["挪给没在算的渠道", { rules: [], channelsByRule: { rr_live: [1] }, tokens: [{ tokenId: 9, name: "stable" }, { tokenId: 20, name: "k20" }], before: { 1: 9 }, after: { 1: 20 }, lateAfter: { 2: 9 }, usage: { stable: [0, null], k20: [0, null] } }, 2],
+]) test(`换手当天「今天」的实时数（Sub2API，${label}）：每把 Key 今天整天只算给一条绑定，合计 = 各 Key 当天用量之和，不翻倍也不丢`, async (t) => {
+  const s = await regroupMoneyScenario(t, "immediate", { sub2: true, expectRegroup: false, stopAfterB: true, ...options });
+  await s.advance(REGROUP_B + 3 * 3600000); // 换手（09:00）以后 3 小时：今天的窗口 [0 点, 现在) 里认领才不满整个窗口
+  const ruleIds = ["rr_live", ...(options.rules || [])];
+  const { results } = await s.f.module.queryRules({ ruleIds, preset: "today" }, { mode: "evaluate", force: true, origin: "manual" });
+  const total = results.reduce((sum, row) => sum + (row.upstream?.knownAmountUsd ?? 0), 0);
+  assert.equal(total, keys * 86400, `今天各 Key 的整天用量之和（${keys} 把 Key）`);
+});
