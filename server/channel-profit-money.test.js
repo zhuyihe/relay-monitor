@@ -44,6 +44,11 @@ async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1
       if (url.pathname === "/api/user/self") return reply({ success: true, data: { id: 1, quota: 100, used_quota: 1 } });
       if (url.pathname === "/api/status") return reply({ success: true, data: { quota_per_unit: 100 } });
       if (url.pathname === "/api/channel/") return reply({ success: true, data: { total: 7, items: [1, 2, 3, 4, 5, 6, 7].map((id) => ({ id, name: `Channel ${id}`, type: 1, status: 1, base_url: "https://up.test", group: "g1" })) } });
+      if (url.pathname === "/api/log/stat" && url.searchParams.get("channel") && !url.searchParams.get("username") && !url.searchParams.get("token_name")) {
+        // 收入：每个渠道每秒 2 美元（quota_per_unit 100），一直有；未来的秒不算
+        const start = Number(url.searchParams.get("start_timestamp")), end = Number(url.searchParams.get("end_timestamp"));
+        return reply({ success: true, data: { quota: 200 * Math.max(0, Math.min((end + 1) * 1000, state.now) - start * 1000) / 1000 } });
+      }
       if (url.pathname === "/api/option/") return reply({ success: true, data: [{ key: "LogConsumeEnabled", value: "true" }] });
       if (url.pathname === "/api/log/") return reply({ success: true, data: { items: [], total: 0 } });
       if (url.pathname === "/api/user/") { const page = Math.max(1, Number(url.searchParams.get("p") || 1)); const users = [{ id: 1, username: "root", display_name: "Root", role: 100, status: 1 }, { id: 2, username: "alice", display_name: "", role: 1, status: 1 }]; return reply({ success: true, data: { total: users.length, items: page === 1 ? users : [] } }); }
@@ -207,5 +212,54 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     const blocked = upstreamType === "sub2api" ? ["2026-10-11"] : [];
     for (const day of blocked) assert.deepEqual(report.find((r) => r.day === day).rows, [], `${day} 不入账`);
     assert.deepEqual(report.filter((r) => !blocked.includes(r.day) && Math.abs(r.got - r.truth) > 1e-6), []);
+  });
+}
+
+// ===== #143 审核第二轮：决定 54（新建绑定的下限）和追加路径 =====
+const dayTotals = (f, day) => { const rows = f.costOn(day); return { cost: rows.reduce((a, r) => a + Number(r.cost_usd || 0), 0), revenue: rows.reduce((a, r) => a + Number(r.revenue_usd || 0), 0) }; };
+const settle = async (f, list) => { for (const iso of list) await f.round(iso); };
+const LATER = ["2026-10-11T12:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T09:00:00", "2026-10-13T01:00:00", "2026-10-13T09:00:00", "2026-10-14T09:00:00"];
+
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`决定 54（${upstreamType}）：渠道上午属于一条停掉的绑定，下午换了 Key 重新开始——新建的绑定从停的那一刻起算（New API），Sub2API 停掉的那天整天不算、新的整天算，收入只算一次`, async (t) => {
+    const SWITCH = SH("2026-10-11T12:00:00");
+    const f = await setup(t, { upstreamType, keys: [9, 20], channelKey: { 1: 9 }, windows: { 9: [-Infinity, SWITCH], 20: [SWITCH, Infinity] } });
+    await f.at("2026-10-10T10:00:00"); await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+    await settle(f, ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T09:00:00"]);
+    await f.at("2026-10-11T11:00:00"); await f.profit.stop({ ownStationId: f.own.id, channelIds: [1] });
+    f.channelKey[1] = 20; await f.round("2026-10-11T12:00:00");
+    await f.at("2026-10-11T14:00:00");
+    const s = await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+    assert.equal(s.started.length, 1, JSON.stringify(s));
+    await settle(f, LATER);
+    const d = dayTotals(f, "2026-10-11");
+    // New API：旧的 [0, 11) + 新的从 11 点起 → 收入全天一次；成本 Key 9 [0, 11) + Key 20 [12, 24)。Sub2API：旧的那天整天不算（C③），新的整天 → 收入全天一次；成本 Key 20 从 12 点起
+    assert.deepEqual([d.cost, d.revenue], upstreamType === "newapi" ? [11 * 3600 + 12 * 3600, 2 * DAY] : [12 * 3600, 2 * DAY]);
+  });
+
+  test(`决定 54 走追加（${upstreamType}）：渠道上午属于停掉的绑定 C，下午换成 A 正在算的 Key——今天不让开始（COUNTED_EARLIER_TODAY，写明停的时刻和原来那把 Key），C 算到停的那一刻，A 那天不含这个渠道的收入；第二天 0 点起开始，算进 A`, async (t) => {
+    const f = await setup(t, { upstreamType, keys: [9, 30], channelKey: { 1: 9, 6: 30 }, windows: { 30: [-Infinity, SH("2026-10-11T10:30:00")] } });
+    await f.at("2026-10-10T10:00:00"); await f.profit.start({ ownStationId: f.own.id, channelIds: [1, 6] });
+    await settle(f, ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T09:00:00"]);
+    await f.at("2026-10-11T10:00:00"); await f.profit.stop({ ownStationId: f.own.id, channelIds: [6] });
+    f.channelKey[6] = 9; await f.round("2026-10-11T10:30:00");
+    await f.at("2026-10-11T11:00:00");
+    const status = (await f.profit.status(f.own.id)).channels.find((channel) => channel.channelId === 6);
+    assert.deepEqual([status.state, status.reason, status.stoppedAtMs, status.tokenName], ["blocked", "COUNTED_EARLIER_TODAY", SH("2026-10-11T10:00:00"), "Key 30"]);
+    const today = await f.profit.start({ ownStationId: f.own.id, channelIds: [6] });
+    assert.deepEqual([today.started, today.blocked.map((item) => [item.channelId, item.code, item.stoppedAtMs])], [[], [[6, "COUNTED_EARLIER_TODAY", SH("2026-10-11T10:00:00")]]], "今天不建");
+    assert.equal((await f.rt.reconciliation.listRules()).length, 1, "只有 A 在算");
+    await settle(f, ["2026-10-11T23:00:00", "2026-10-12T01:00:00"]);
+    const d = dayTotals(f, "2026-10-11");
+    // 收入：A 只有渠道 1（全天）；C（渠道 6）New API 算到 10 点；Sub2API 停掉的那天整天不算。成本：Key 9 全天（A）+ Key 30 [0, 10)（New API 的 C）
+    assert.deepEqual([d.cost, d.revenue], upstreamType === "newapi" ? [DAY + 10 * 3600, 2 * DAY + 2 * 10 * 3600] : [DAY, 2 * DAY], "C 那把 Key 上午的钱算在 C 里，A 那天不含渠道 6 的收入");
+    // 第二天 0 点以后可以开始：追加进 A
+    await f.at("2026-10-12T00:30:00");
+    assert.equal((await f.profit.status(f.own.id)).channels.find((channel) => channel.channelId === 6).state, "startable");
+    const next = await f.profit.start({ ownStationId: f.own.id, channelIds: [6] });
+    assert.equal(next.started.length, 1, JSON.stringify(next));
+    await settle(f, ["2026-10-12T09:00:00", "2026-10-13T01:00:00"]);
+    const d2 = dayTotals(f, "2026-10-12");
+    assert.deepEqual([d2.cost, d2.revenue], [DAY, 4 * DAY], "第二天起渠道 6 正常算进 A：收入两个渠道各全天，成本 Key 9 全天");
   });
 }
