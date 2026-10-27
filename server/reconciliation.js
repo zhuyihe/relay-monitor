@@ -53,7 +53,7 @@ import { stationBusinessVersion } from "../db/store.js";
 import { claimedKeyWindows, keyClaimProblems, keyPiecesOf, segmentKeyTokens, sumKeyStats } from "../lib/reconciliation-keys.js";
 import { onboardingBaseUrl, normalizeCoverageDeclaration, ACCOUNT_TYPE_VALUES } from "../lib/channel-onboarding.js";
 import { deriveKnownChannelCoverage, summarizeReconciliationWindowGroups, reconciliationResultActions, reconciliationDisplayStatus,
-  summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations } from "../lib/reconciliation-view.js";
+  summarizeUnaccountedUpstream, attributeAuthorizationRules, reconciliationDisplayCurrency, fixedOffProfitStations, reconciliationOccupancyLines } from "../lib/reconciliation-view.js";
 import { amortizeFixedCost, costBasisOf, isConfiguredRate, purchasesOf, rateSnapshotOf, ratesFor } from "../lib/profit.js";
 import { billDayOf, businessTimeZone, canonicalTimeZone, checkTimeZone, dayBoundsInTz, dayKeyInTz, dayStartInTz, isDayStartInTz, sameTimeZone, shiftDayLabel, shiftedDayStartInTz } from "../lib/business-time.js";
 import { ownCache, readOwnAdminDirectory, resoldAdminKeysOf, selectCostUpstreams, stationUsageCost as defaultStationUsageCost } from "./own-helpers.js";
@@ -485,6 +485,7 @@ const CALCULATION_BLOCKERS = new Set([
   "UPSTREAM_FEATURE_UNSUPPORTED",
   "KEY_INVALID_OR_DENIED",
   "UPSTREAM_DATA_UNAVAILABLE",
+  "KEY_USE_MISMATCH",
   "UPSTREAM_RECORDS_PENDING",
   "OWN_BILLING_UNAVAILABLE",
   "OWN_OPTION_UNREADABLE",
@@ -1894,16 +1895,28 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       if (nowMs - (keyOccupancyWarned.get(dedupe) ?? -Infinity) < 3600000) continue;
       keyOccupancyWarned.set(dedupe, nowMs);
       if (keyOccupancyWarned.size > 500) keyOccupancyWarned.delete(keyOccupancyWarned.keys().next().value);
-      const what = problem.type === "overlap" ? "被两条绑定同时认领（上游成本会算两遍）" : "两条在算的绑定之间有一段没人认领（这段的用量会漏掉）";
-      console.warn(`[key-occupancy] ${dayKeyInTz(window.startMs, window.timezone)} 这把 Key ${what}：上游 ${problem.key.upstreamStationId ?? rule.upstreamStationId}、Key ${problem.key.tokenId}${problem.key.tokenName ? `「${problem.key.tokenName}」` : ""}，绑定 ${problem.ruleIds.join("、")}，时间 ${new Date(problem.fromMs).toISOString()} 到 ${new Date(problem.toMs).toISOString()}；这天先不固定`);
+      const what = problem.type === "overlap" ? "被两条绑定同时认领（上游成本会算两遍）" : "两条在算的绑定之间有一段没人认领（这段的用量可能漏了，也可能本来就没人用，看不出来；不挡固定）";
+      const tokenName = String(problem.key.tokenName ?? "").replace(/[\r\n]+/g, " "); // Key 名是自由文本，不能带换行伪造日志行
+      console.warn(`[key-occupancy] ${dayKeyInTz(window.startMs, window.timezone)} 这把 Key ${what}：上游 ${problem.key.upstreamStationId ?? rule.upstreamStationId}、Key ${problem.key.tokenId}${tokenName ? `「${tokenName}」` : ""}，绑定 ${problem.ruleIds.join("、")}，时间 ${new Date(problem.fromMs).toISOString()} 到 ${new Date(problem.toMs).toISOString()}${problem.type === "overlap" ? "；这天先不固定" : ""}`);
     }
   }
 
-  // 同一个自营站点下别的绑定（在算的、已停的都算）和它们的全部分段：[{ rule, segments }]。读不到就抛，调用方决定当没有还是先不结
-  async function siblingBindings(rule) {
-    const rules = (await repository.listRules({ includeArchived: true })).filter((item) => item.ownStationId === rule.ownStationId && item.id !== rule.id);
-    const byRule = rules.length ? await repository.listSegmentsForRules(rules.map((item) => item.id)) : {};
-    return rules.map((item) => ({ rule: item, segments: byRule[item.id] || [] }));
+  // 同一个自营站点下的绑定（在算的、已停的都算，停了 40 天以上的不要：结账回看最远 31 天）和它们的全部分段：[{ rule, segments }]，含被查的这条自己。
+  // 只读这个站点的（SQL 里按 own_station_id 筛，不全表读）；一轮里同一个站点只读一份（ownerRegistry 上记着，这一轮的换 Key、重新分组都在建 registry 时做完了），
+  // 页面只读查询没有 registry 就每次读。读不到就抛，调用方决定当没有还是先不结（审核 #155 第 1 轮性能）
+  const STATION_BINDINGS_KEEP_MS = 40 * DAY_MS;
+  async function stationBindings(rule, ownerRegistry = null) {
+    const cache = ownerRegistry ? (ownerRegistry.stationBindings ||= new Map()) : null;
+    if (cache?.has(rule.ownStationId)) return cache.get(rule.ownStationId);
+    const loading = (async () => {
+      const since = Date.now() - STATION_BINDINGS_KEEP_MS;
+      const rules = (await repository.listRules({ includeArchived: true, ownStationId: rule.ownStationId })).filter((item) => item.archivedAtMs == null || item.archivedAtMs >= since);
+      const byRule = rules.length ? await repository.listSegmentsForRules(rules.map((item) => item.id)) : {};
+      return rules.map((item) => ({ rule: item, segments: byRule[item.id] || [] }));
+    })();
+    cache?.set(rule.ownStationId, loading);
+    loading.catch(() => cache?.delete(rule.ownStationId));
+    return loading;
   }
 
   // 这条（Sub2API）绑定的起算点在当天中间时：这条绑定第一段里的 Key，当天早些时候在这个自营站点下别的绑定里握过的（关掉的段、已停的绑定）最晚的结束时刻
@@ -1929,8 +1942,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 这一天这条绑定用到的每把 Key，在同一个自营站点下所有绑定（在算的、已停的）里认领的时间段，拼起来看有没有重叠（算两遍）或空档（两条都在算的绑定之间漏了一段）。
   // 只读库里已经存好的段，不请求上游；认领的算法和取数是同一份（accountingUpstreamWindow、keyPiecesOf、claimedKeyWindows）。返回问题列表，空数组就是没问题。
   // 读不到别的绑定的段就抛，调用方这一天先不结
-  async function keyOccupancyProblems(rule, segments, window) {
-    const siblings = await siblingBindings(rule);
+  async function keyOccupancyProblems(rule, segments, window, ownerRegistry = null) {
+    const siblings = (await stationBindings(rule, ownerRegistry)).filter(({ rule: item }) => item.id !== rule.id);
     const claimantOf = async (item, itemSegments) => {
       const upstreamWindow = accountingUpstreamWindow(item, window, item.provider);
       if (!upstreamWindow || !itemSegments.length) return null;
@@ -1942,7 +1955,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const own = await claimantOf(rule, segments);
     if (!own) return [];
     const claimants = [own, ...(await Promise.all(siblings.filter(({ rule: item }) => isScopedBillingPolicy(item.billingPolicy)).map(({ rule: item, segments: itemSegments }) => claimantOf(item, itemSegments)))).filter(Boolean)];
-    return keyClaimProblems(claimants, [...own.claims.keys()]);
+    const namesOf = (ruleId) => (claimants.find((item) => item.ruleId === ruleId)?.rule.channels || []).map((channel) => channel.name || `渠道 ${channel.channelId}`);
+    return keyClaimProblems(claimants, [...own.claims.keys()]).map((problem) => ({ ...problem, channelNames: problem.ruleIds.map(namesOf) }));
   }
 
   // 每把 Key 在这个窗口里归这条绑定的时间段（lib/reconciliation-keys.js 的 claimedKeyWindows，和结账前的占用检查同一份）。
@@ -1975,9 +1989,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 今天（还没结束的一天）换过手的 Key：按天统计切不开，今天整天先只算给一条绑定——现在握着这把 Key 的那条（在算的、开着的段里有它）；
   // 现在没有在算的绑定握着它，就算给今天最后握着它的那条在算的绑定。另一条今天不算这把 Key，合计不翻倍也不丢；两条之间分得不准没关系，
   // 结账固定这一天时按逐条拆分分准（审核 #150 第 2 轮中-1，总指挥 10-27 定）
-  async function liveKeyOwnerOf(rule, key, dayStartMs) {
-    const rules = (await repository.listRules({ includeArchived: true })).filter((item) => item.ownStationId === rule.ownStationId);
-    const byRule = await repository.listSegmentsForRules(rules.map((item) => item.id));
+  async function liveKeyOwnerOf(rule, key, dayStartMs, ownerRegistry = null) {
+    const bindings = await stationBindings(rule, ownerRegistry);
+    const rules = bindings.map((item) => item.rule), byRule = Object.fromEntries(bindings.map((item) => [item.rule.id, item.segments]));
     const holdsKey = (segment) => (segment.keys || []).some((item) => Number(item.tokenId) === Number(key.tokenId) && (item.upstreamStationId ?? null) === (key.upstreamStationId ?? null));
     const running = rules.filter((item) => !item.archivedAt && item.enabled);
     const holders = running.filter((item) => (byRule[item.id] || []).some((segment) => segment.effectiveTo == null && holdsKey(segment)));
@@ -2670,14 +2684,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const platform = evidenceMetadata?.platform ?? rule.provider ?? billingProviderOf(upstream);
       const persistedSegments = await repository.listSegments(rule.id);
       if (!persistedSegments.length) return unavailable(health("UPSTREAM_DATA_UNAVAILABLE", INCOMPLETE_DAY_TEXT), { metadata: evidenceMetadata, token: evidenceToken });
-      // 结账前的 Key 占用检查：这一天用到的 Key 在各条绑定里的认领重叠（算两遍）或有空档（漏一段）就先不固定，下一轮再判；只在结账（含重判）时做，页面只读查询不做
-      if (settle && isScopedBillingPolicy(rule.billingPolicy) && billDayOf(window)) {
+      // 结账前的 Key 占用检查：这一天用到的 Key 在各条绑定里的认领重叠（上游成本会算两遍）就先不固定（KEY_USE_MISMATCH，下面收集问题时记，
+      // 别的更要紧的问题照样排在它前面，不被它盖住）；空档（两条在算的绑定之间有一段没人认领）只写日志、不挡：读用量之前分不清是漏了还是那段本来就没人用（总指挥 10-27 定）。
+      // 只在会写账本的路上做：结账，和观测里已经结束的整天（页面「刷新」请求在 15 分钟线前发出、跨线时走观测路径写第 1 版，不能漏过检查）；页面只读查询不做
+      let occupancyOverlaps = [];
+      if (isScopedBillingPolicy(rule.billingPolicy) && billDayOf(window) && (settle || (observe && window.endMs <= Date.now()))) {
         let occupancy;
-        try { occupancy = await keyOccupancyProblems(rule, persistedSegments, window); } catch { throw codedError("HISTORY_UNAVAILABLE", issueText("HISTORY_UNAVAILABLE")); }
-        if (occupancy.length) {
-          warnKeyOccupancy(rule, window, occupancy);
-          return unavailable(health("KEY_USE_MISMATCH", issueText("KEY_USE_MISMATCH")), { metadata, token }, false);
-        }
+        try { occupancy = await keyOccupancyProblems(rule, persistedSegments, window, ownerRegistry); } catch { throw codedError("HISTORY_UNAVAILABLE", issueText("HISTORY_UNAVAILABLE")); }
+        if (occupancy.length) warnKeyOccupancy(rule, window, occupancy);
+        occupancyOverlaps = occupancy.filter((problem) => problem.type === "overlap");
       }
       const catalogueObserved = !upstreamProblem && metadata.groupsAvailable && metadata.groups[token.group]?.ratio != null;
       const currentRatio = catalogueObserved ? metadata.groups[token.group].ratio : null;
@@ -2708,6 +2723,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         if (clash.channel.length) issues.push({ code: "DUPLICATE_CHANNEL_ASSIGNMENT", scope: "rule", detail: issueText("DUPLICATE_CHANNEL_ASSIGNMENT"), ruleIds: [rule.id, ...clash.channel].sort(), observedAt: Date.now() });
         if (clash.key.length) issues.push(upstreamSide({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: issueText("CANONICAL_KEY_CONFLICT"), ruleIds: [rule.id, ...clash.key].sort(), observedAt: Date.now() }));
       }
+      // 占用检查发现的重叠：带上哪把 Key、哪一段、哪几个渠道，页面「详细原因」里写出来（不写段号、绑定 id）
+      if (occupancyOverlaps.length) issues.push({ code: "KEY_USE_MISMATCH", scope: "segment", detail: issueText("KEY_USE_MISMATCH"), observedAt: Date.now(),
+        occupancy: occupancyOverlaps.slice(0, 5).map((problem) => ({ keyName: problem.key.tokenName ?? `Key ${problem.key.tokenId}`, fromMs: problem.fromMs, toMs: problem.toMs, channelNames: problem.channelNames })) });
       const costOwner = costOwnerFor(rule, canonicalKey, ownerRegistry);
       if (costOwner.state === "unknown") issues.push(upstreamSide({ code: "COST_OWNER_UNVERIFIED", scope: "rule", detail: issueText("COST_OWNER_UNVERIFIED"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
       if (costOwner.state === "duplicate") issues.push(upstreamSide({ code: "CANONICAL_KEY_CONFLICT", scope: "rule", detail: issueText("CANONICAL_KEY_CONFLICT"), ruleIds: costOwner.ruleIds, observedAt: Date.now() }));
@@ -2843,7 +2861,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
           floorError ? Promise.resolve({ error: floorError }) : upstreamProblem ? Promise.resolve({ error: upstreamProblem, skipped: true })
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
             : (isScopedBillingPolicy(rule.billingPolicy)
-              ? upstreamWindowForScopedSegments(upstream, metadata, token, segments, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId, claimFromMs, liveKeyOwner: (key, dayStartMs) => liveKeyOwnerOf(rule, key, dayStartMs) })
+              ? upstreamWindowForScopedSegments(upstream, metadata, token, segments, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId, claimFromMs, liveKeyOwner: (key, dayStartMs) => liveKeyOwnerOf(rule, key, dayStartMs, ownerRegistry) })
               : upstreamWindowForSegment(upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId })).catch((error) => ({ error })),
           (ownAvailable && consumeLogIssue ? Promise.resolve({ error: codedError(consumeLogIssue.code, consumeLogIssue.detail), consumeLog: true })
             : ownAvailable
@@ -3960,6 +3978,16 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const today = dayKeyInTz(now, rule.timezone) === day;
         const live = await api.queryRules({ ruleIds: [rule.id], ...(today ? { preset: "today" } : { preset: "custom", startMs, endMs: Math.min(endMs, now) }) }, { mode: "evaluate", force: true, origin: "manual" });
         pieces.push({ rule, result: live.results[0] || null, expected: null, entry: null });
+      }
+      // 这天还没固定、卡在占用检查（KEY_USE_MISMATCH）：计算明细不写现算的实付、毛利（重叠的话现算的数把这把 Key 算了两遍），写「—」加状态行记着的原因（哪把 Key、哪一段、哪几个渠道）
+      const stuck = await repository.listSettlementStates(rules.map((rule) => rule.id), { billDates: [day] }).catch(() => []);
+      for (const piece of pieces) {
+        const state = piece.entry ? null : stuck.find((item) => item.ruleId === piece.rule.id);
+        const code = state?.retryReason ?? state?.manualReason ?? null;
+        if (code !== "KEY_USE_MISMATCH") continue;
+        const startMs = dayStartInTz(day, piece.rule.timezone), window = { preset: "custom", startMs, endMs: shiftedDayStartInTz(startMs, 1, piece.rule.timezone), timezone: piece.rule.timezone };
+        const issue = reconciliationIssue(code);
+        piece.stateStatus = { code, title: issue.title ?? null, detail: fillIssueCopy(issue.detail, issue.detailPlain, { lines: reconciliationOccupancyLines(state.detail?.occupancy, window.timezone) }) };
       }
       return buildProfitDetail(pieces, { day });
     },

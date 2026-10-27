@@ -297,9 +297,12 @@ export class ReconciliationRepository {
     this.pool = pool;
   }
 
-  async listRules({ includeArchived = false } = {}) {
+  // ownStationId：只读这个自营站点下的绑定（占用检查、今天的实时认领按站点读，不全表读）
+  async listRules({ includeArchived = false, ownStationId = null } = {}) {
+    const conditions = [...(includeArchived ? [] : ["archived_at IS NULL"]), ...(ownStationId != null ? ["own_station_id = ?"] : [])];
     const [rows] = await this.pool.query(
-      `SELECT * FROM reconciliation_rules ${includeArchived ? "" : "WHERE archived_at IS NULL"} ORDER BY enabled DESC, updated_at DESC`
+      `SELECT * FROM reconciliation_rules ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY enabled DESC, updated_at DESC`,
+      ownStationId != null ? [ownStationId] : []
     );
     if (!rows.length) return [];
     const ids = rows.map((row) => row.id);

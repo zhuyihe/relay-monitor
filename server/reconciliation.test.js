@@ -8,7 +8,7 @@ import { RECONCILIATION_LEDGER_COLUMNS } from "../lib/reconciliation-ledger.js";
 import { SETTLE_LOOKBACK_MAX_PER_ROUND } from "../lib/reconciliation-settlement.js";
 import { Store } from "../db/store.js";
 import { canonicalBillingKey, nextBillingEffectiveFrom } from "../lib/reconciliation-scope-policy.js";
-import { coverageNeedsAnswer, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
+import { RECONCILIATION_ISSUE_PRIORITY, coverageNeedsAnswer, reconciliationCoverageText, reconciliationIssue } from "../lib/reconciliation-contract.js";
 import { reconciliationNotCountedText } from "../lib/reconciliation-view.js";
 import { serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
 import { createChannelOnboardingModule } from "./channel-onboarding.js";
@@ -11082,11 +11082,12 @@ test("占用检查：同一把 Key 同一段时间算在两条绑定里（重叠
   }
 });
 
-test("占用检查：换手中间漏了一段（两条在算的绑定之间的空档）——换手那天先不固定", async (t) => {
+test("占用检查：换手中间有一段没人认领（两条在算的绑定之间的空档）——只打一行 warn，不挡固定（读用量之前分不清是漏了还是那段本来就没人用，总指挥 10-27 定）", async (t) => {
   const { swapAt, segmentsOf, settleDay, warnings } = await occupancyFixture(t, "immediate");
   segmentsOf("rr_b")[1].effective_from_ms = swapAt + 3 * 3600000; // rr_b 的新段（K9）晚 3 小时才开始，b 到那一刻的 K9 没人认领
-  assert.deepEqual(await settleDay(), [0, 0], "有空档的那天都不固定");
-  assert.ok(warnings.some((line) => line.includes("[key-occupancy]") && line.includes("漏")), warnings.join("\n"));
+  const [live, b] = await settleDay();
+  assert.ok(live >= 1 && b >= 1, `空档不挡：${live} ${b}`);
+  assert.ok(warnings.some((line) => line.includes("[key-occupancy]") && line.includes("没人认领") && line.includes("不挡固定") && !line.includes("先不固定")), warnings.join("\n"));
 });
 
 for (const policy of POLICIES) test("占用检查：Key 挪给没在算的渠道（rr_b 在 b 停了）——后面没有在算的绑定认领，是正常的空档，不挡 [" + policy + "]", async (t) => {
@@ -11323,4 +11324,45 @@ for (const [label, options, keys] of [
   const { results } = await s.f.module.queryRules({ ruleIds, preset: "today" }, { mode: "evaluate", force: true, origin: "manual" });
   const total = results.reduce((sum, row) => sum + (row.upstream?.knownAmountUsd ?? 0), 0);
   assert.equal(total, keys * 86400, `今天各 Key 的整天用量之和（${keys} 把 Key）`);
+});
+
+test("占用检查（审核 #155 第 1 轮）：重叠的日子卡在 KEY_USE_MISMATCH——计算明细实付、毛利写「—」，「详细原因」写哪把 Key、哪一段、哪几个渠道（不写段号、绑定 id）", async (t) => {
+  const { f, swapAt, segmentsOf, settleDay } = await occupancyFixture(t, "immediate");
+  segmentsOf("rr_live")[0].effective_to_ms = swapAt + 3 * 3600000; // 重叠 [b, b+3h)
+  await settleDay();
+  const detail = await f.module.profitDetail({ ruleIds: ["rr_live"], day: "2026-10-12" });
+  assert.deepEqual([detail.unavailable?.code, detail.actual.usd, detail.grossProfitUsd], ["KEY_USE_MISMATCH", null, null]);
+  assert.match(detail.unavailable.detail, /Key「stable」10月12日 \d+:\d\d–\d+:\d\d：「渠道 1」「渠道 2」都算了/, "详细原因写 Key、时段、渠道");
+  assert.doesNotMatch(detail.unavailable.detail, /rr_|segment/);
+});
+
+test("占用检查（审核 #155 第 1 轮）：会写账本的观测路径（页面「刷新」请求在 15 分钟线前发出、跨线时走观测路径）也过检查", async (t) => {
+  const { f, swapAt, segmentsOf } = await occupancyFixture(t, "immediate");
+  segmentsOf("rr_live")[0].effective_to_ms = swapAt + 3 * 3600000;
+  // 观测路径：这天刚结束、还没到 15 分钟线（结账的点），页面「刷新」读已结束的整天——写账本的路也要过检查
+  const dayEnd = Date.parse("2026-10-12T16:00:00Z");
+  t.mock.method(Date, "now", () => dayEnd + 5 * 60000);
+  const { results } = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: Date.parse("2026-10-11T16:00:00Z"), endMs: dayEnd, timezone: "Asia/Shanghai" }, { mode: "observe", force: true, origin: "manual" });
+  assert.equal(results[0].health.code, "KEY_USE_MISMATCH", "观测路径也不放过重叠");
+  assert.equal(f.state.ledger.filter((row) => row.bill_date === "2026-10-12").length, 0);
+});
+
+test("占用检查（审核 #155 第 1 轮）：重叠是收集问题时记的一条（和别的问题一起排优先级），不是提前返回——更要紧的需处理问题（比如这把 Key 绑了两次）排在它前面，不会被盖成会重试的 KEY_USE_MISMATCH", async (t) => {
+  const { f, swapAt, segmentsOf } = await occupancyFixture(t, "immediate");
+  segmentsOf("rr_live")[0].effective_to_ms = swapAt + 3 * 3600000;
+  t.mock.method(Date, "now", () => Date.parse("2026-10-12T17:00:00Z"));
+  const { results } = await f.module.queryRules({ ruleIds: ["rr_live"], preset: "custom", startMs: Date.parse("2026-10-11T16:00:00Z"), endMs: Date.parse("2026-10-12T16:00:00Z"), timezone: "Asia/Shanghai" }, { mode: "observe", force: true, origin: "manual" });
+  assert.ok(results[0].health.issues.some((issue) => issue.code === "KEY_USE_MISMATCH" && issue.occupancy?.length), "重叠记在问题列表里，带哪把 Key、哪一段、哪几个渠道");
+  const order = RECONCILIATION_ISSUE_PRIORITY;
+  for (const urgent of ["CANONICAL_KEY_CONFLICT", "DUPLICATE_CHANNEL_ASSIGNMENT", "COST_OWNER_UNVERIFIED", "SOURCE_BINDING_UNCONFIRMED", "KEY_CONFLICT_GAP"]) assert.ok(order.indexOf(urgent) < order.indexOf("KEY_USE_MISMATCH"), `${urgent} 排在它前面`);
+});
+
+test("占用检查（审核 #155 第 1 轮性能）：同一个站点的绑定和分段一轮里只读一份（不是每条绑定每天各读一次），而且按站点读、不全表读", async (t) => {
+  const { f, settleDay } = await occupancyFixture(t, "immediate");
+  const calls = [];
+  const original = f.repository.listRules.bind(f.repository);
+  t.mock.method(f.repository, "listRules", async (options = {}) => { calls.push(options); return original(options); });
+  await settleDay();
+  const byStation = calls.filter((options) => options.includeArchived && options.ownStationId != null);
+  assert.ok(byStation.length >= 1 && byStation.length <= 1, `按站点读（SQL 里按 own_station_id 筛）、一轮里同一个站点只读一份：${JSON.stringify(calls)}`);
 });

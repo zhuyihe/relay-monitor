@@ -160,10 +160,10 @@ export class MemoryReconciliationRepository {
     this.log = { snapshotWrites: [], ratioWrites: [], channelStateWrites: [], alertCalls: [], capabilityWrites: [], ledgerWrites: [], commits: [], rollbacks: [] };
   }
 
-  async listRules({ includeArchived = false } = {}) {
-    await this.#read("listRules", [{ includeArchived }]);
+  async listRules({ includeArchived = false, ownStationId = null } = {}) {
+    await this.#read("listRules", [ownStationId != null ? { includeArchived, ownStationId } : { includeArchived }]);
     return this.#plain("rules")
-      .filter((row) => includeArchived || row.archived_at == null)
+      .filter((row) => (includeArchived || row.archived_at == null) && (ownStationId == null || row.own_station_id === ownStationId))
       .sort((a, b) => Number(b.enabled) - Number(a.enabled) || nullsFirst(seconds(b.updated_at), seconds(a.updated_at)))
       .map((row) => ruleFromRow(fresh(row), this.#channelsOf(null, row.id)));
   }
