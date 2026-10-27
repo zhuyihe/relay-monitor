@@ -12,8 +12,10 @@
 // dayUsageUsd(keyId, "YYYY-MM-DD") 给每把 Key 每天（业务时区的一天）的用量（美元）；还没到的日子回 0（能力核验要求未来的完整日是 0）。
 // 用法：const fake = createFakeSub2Api({ keys, dayUsageUsd }); 在 fetch 的假实现里 `const hit = fake.handle(url); if (hit) return hit;`
 import { dayKeyInTz } from "../../lib/business-time.js";
+import { resetSub2RecordState } from "../../lib/providers.js";
 
 export function createFakeSub2Api({ accountId = 42, keys, dayUsageUsd, recordsOf = null, onUsagePage = null, deletedKeyIds = [], now = () => Date.now() }) {
+  resetSub2RecordState(); // 逐条翻页的进度和额度是进程里的：每个新的假上游从头开始，不带上一个用例翻过的页
   const calls = [];
   const reply = (status, data) => ({ status, text: async () => JSON.stringify({ code: status >= 300 ? status : 0, data }) });
   const byId = new Map(keys.map((key) => [Number(key.id), key]));
