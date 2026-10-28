@@ -1853,7 +1853,10 @@ async function assertBindModalFits(page, bind) {
     const inner = await bind.locator(selector).first().boundingBox();
     assert.ok(inner.x >= box.x && inner.x + inner.width <= box.x + box.width + 0.5, `${selector} 不超出弹窗 ${JSON.stringify([box, inner])}`);
   }
-  assert.equal(Math.round((await bind.locator(".jy-bind-list").boundingBox()).height), 300, "渠道列表框固定高 300");
+  const phone = viewport.width < 768;
+  assert.equal(Math.round((await bind.locator(".jy-bind-list").boundingBox()).height), phone ? 260 : 300, "渠道列表框固定高：电脑 300，手机 260");
+  if (phone) assert.equal(Math.round(box.width), viewport.width - 24, "手机上弹窗宽 = 屏宽减 24");
+  else assert.equal(Math.round(box.width), 520);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "页面没有横向滚动");
 }
 
@@ -1870,6 +1873,12 @@ test("上游资源：绑定渠道（地址对得上一个）：对得上的一�
   assert.equal(await bind.getByText(/利润/).count(), 0, "小窗口里不出现「利润」");
   await assertBindModalFits(page, bind);
   await shot(page, "bind-match-1440x900");
+  await page.setViewportSize({ width: 375, height: 812 }); await page.waitForTimeout(400);
+  await assertBindModalFits(page, bind);
+  const rows = await bind.locator(".jy-bind-row").first().boundingBox(), line = await bind.locator(".jy-bind-row .jy-bind-name").first().boundingBox(), addr = await bind.locator(".jy-bind-row .jy-bind-addr").first().boundingBox();
+  assert.ok(addr.y > line.y + line.height - 2, "手机上地址在名字下面一行");
+  assert.ok(rows.height > 40);
+  await shot(page, "bind-match-375x812");
   await bind.getByRole("button", { name: "绑定", exact: true }).click();
   for (let i = 0; i < 60 && !posts.length; i++) await page.waitForTimeout(100);
   assert.deepEqual(posts[0], { ownStationId: "own", channelId: 100, upstreamStationId: "up1", tokenId: 30 });

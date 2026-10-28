@@ -109,7 +109,7 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
       message.error(describeError({ code: error?.code, message: error?.message }).text);
     } finally { setSaving(false); }
   };
-  return <Modal open centered title={M.title} okText={M.ok} cancelText={M.cancel} okButtonProps={{ disabled: !channel || tokenId == null }} confirmLoading={saving} onCancel={onClose} onOk={() => void submit()} width="min(520px, calc(100vw - 32px))" className="jy-bind-modal" destroyOnHidden>
+  return <Modal open centered title={M.title} okText={M.ok} cancelText={M.cancel} okButtonProps={{ disabled: !channel || tokenId == null }} confirmLoading={saving} onCancel={onClose} onOk={() => void submit()} width="min(520px, calc(100vw - 24px))" className="jy-bind-modal" destroyOnHidden>
     <p className="jy-caption">{M.sub(upstream.name, upstream.address || "")}</p>
     <label className="jy-bind-label">{M.channel}</label>
     <Input
@@ -125,9 +125,11 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
             const off = item.enabled === false;
             return <Radio key={item.channelId} value={item.channelId} className="jy-bind-row">
               <span className="jy-bind-channel">
-                <span className={`jy-bind-name${off ? " is-off" : ""}`} title={item.name}>{item.name}</span>
-                {off ? <em className="jy-tag jy-tag--type jy-bind-off">{M.disabledTag}</em> : null}
-                {item.address && !item.name.includes(item.address) ? <small className="jy-caption jy-bind-addr">{item.address}</small> : null}
+                <span className="jy-bind-line">
+                  <span className={`jy-bind-name${off ? " is-off" : ""}`} title={item.name}>{item.name}</span>
+                  {off ? <em className="jy-tag jy-tag--type jy-bind-off">{M.disabledTag}</em> : null}
+                </span>
+                {item.address && !item.name.includes(item.address) ? <small className="jy-caption jy-bind-addr" title={item.address}>{item.address}</small> : null}
               </span>
             </Radio>;
           })}

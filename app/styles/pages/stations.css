@@ -179,10 +179,17 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-bind-list .jy-bind-row > span:last-child { flex: 1; min-width: 0; }
 .jy-bind-list > div { min-width: 0; }
 .jy-bind-channel { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.jy-bind-line { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 0 1 auto; }
 .jy-bind-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jy-bind-name.is-off { color: var(--jy-ink-3); }
 .jy-bind-off { flex: none; font-style: normal; }
 .jy-bind-addr { flex: none; margin-left: auto; white-space: nowrap; }
+/* 手机：列表框矮一点；每个渠道两行，名字一行、地址在下面一行灰字，放不下都截断 */
+@media (max-width: 767px) {
+  .jy-bind-list { height: 260px; }
+  .jy-bind-channel { flex-direction: column; align-items: stretch; gap: 0; }
+  .jy-bind-addr { margin-left: 0; overflow: hidden; text-overflow: ellipsis; }
+}
 .jy-bind-empty { margin: 0; padding: 12px; text-align: center; }
 .jy-bind-toggle { margin-top: 8px; padding: 0; border: 0; background: none; color: var(--jy-link, #2f54eb); cursor: pointer; font: inherit; font-size: 13px; }
 .jy-bind-modal .ant-modal-content { max-height: calc(100vh - 32px); overflow-y: auto; }
