@@ -386,7 +386,7 @@ test("手机 390：顶上一张卡片（毛利大字、底下一行昨天的差�
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "390px document root overflows horizontally");
 });
 
-const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} } };
+const shellFallback = { "/api/meta": { types: [], rules: {}, settings: {} }, "/api/stations": { stations: [], settings: {} }, "/api/reconciliation/channels/options": { ok: false, code: "CHANNEL_CATALOGUE_STALE" } };
 // 每个页面收到的渠道接入请求，供只读断言使用
 const onboardingRequests = new WeakMap();
 async function openFixturePage(t, handler, viewport, clock = false, onboardingHandler = null, path = "/reconciliation") {
@@ -1722,6 +1722,73 @@ test("加上游只填地址和访问令牌：离开令牌栏就试读，下面�
   await save.click();
   for (let wait = 0; !creates.length && wait < 50; wait++) await page.waitForTimeout(100);
   assert.deepEqual([creates[0].type, creates[0].name, creates[0].accessToken, creates[0].userId, creates[0].baseUrl], ["newapi", "演示·主力账号", "pat-123", "7", "https://api.example.com"]);
+});
+
+test("上游资源：「渠道」一列写几个或「没有渠道」，不能挂渠道的类型写「—」；点开右边抽屉，绑定渠道（渠道默认选第一个、Key 只剩一把替你选好）发 select-key", async (t) => {
+  const posts = [];
+  const up = (id, name, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 100, checkedAt: new Date().toISOString() }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" }, ...extra });
+  const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true }, up("up1", "主力上游"), up("up2", "没有渠道上游"), up("kk", "只用 Key", { type: "newapi-key" })];
+  const channels = [
+    { channelId: 1, name: "高速 A", address: "up1.test", ruleId: "r1", upstreamStationId: "up1", tokenId: 9, tokenName: "oai", tokenGroup: "default", sinceDay: "2026-10-12", suggestedUpstreamId: null },
+    { channelId: 5, name: "新模型 P", address: "elsewhere.test", ruleId: null, upstreamStationId: null, tokenId: null, tokenName: null, tokenGroup: null, sinceDay: null, suggestedUpstreamId: null },
+    { channelId: 6, name: "长文本 Q", address: "up1.test", ruleId: null, upstreamStationId: null, tokenId: null, tokenName: null, tokenGroup: null, sinceDay: null, suggestedUpstreamId: "up1" }];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname, method = route.request().method();
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: new Date().toISOString() });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/reconciliation/channels/options") return fulfill(route, { ok: true, upstreams: [{ id: "up1", name: "主力上游" }], channels });
+    if (path === "/api/reconciliation/upstreams/up1/keys") return fulfill(route, { platform: "newapi", tokens: [{ id: 9, name: "oai", status: 1, group: "default" }, { id: 30, name: "oai-16", status: 1, group: "default" }, { id: 31, name: "停用的", status: 2 }] });
+    if (path === "/api/reconciliation/channels/select-key") { posts.push(route.request().postDataJSON()); return fulfill(route, { changed: true }); }
+    throw new Error("unexpected API: " + method + " " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations");
+  const table = page.locator(".jy-stations-table");
+  const cell = (name) => table.locator("tbody tr", { hasText: name }).first().locator("td").nth(2);
+  await cell("主力上游").getByText("1 个", { exact: true }).waitFor();
+  await cell("没有渠道上游").getByText("没有渠道", { exact: true }).waitFor();
+  assert.equal(await cell("只用 Key").innerText(), "—", "不能挂渠道的类型写「—」");
+  await cell("主力上游").getByRole("button").click();
+  const drawer = page.getByRole("dialog", { name: /主力上游的渠道/ }); await drawer.waitFor();
+  assert.deepEqual(await drawer.locator("thead th").allInnerTexts(), ["渠道", "Key", "绑定日期", "操作"]);
+  await drawer.getByText("oai · 分组 default", { exact: true }).waitFor();
+  await drawer.getByText("10月12日", { exact: true }).waitFor();
+  assert.equal(await drawer.getByText(/利润|开始算|停止算/).count(), 0, "上游资源里不出现利润");
+  await drawer.getByRole("button", { name: "＋ 绑定渠道" }).click();
+  const bind = page.getByRole("dialog", { name: "绑定渠道", exact: true });
+  await bind.getByText("主力上游 · up1.test", { exact: true }).waitFor();
+  assert.deepEqual(await bind.locator(".jy-bind-channel").allInnerTexts().then((list) => list.map((item) => item.replace(/\s+/g, " "))), ["长文本 Q up1.test", "新模型 P elsewhere.test"], "地址对得上的排最前");
+  assert.equal(await bind.getByRole("radio", { name: /长文本 Q/ }).isChecked(), true, "第一个默认选中");
+  await bind.getByText("这个上游只剩这一把 Key 没绑渠道，已经替你选好", { exact: true }).waitFor();
+  await bind.getByRole("button", { name: "绑定", exact: true }).click();
+  for (let i = 0; i < 60 && !posts.length; i++) await page.waitForTimeout(100);
+  assert.deepEqual(posts[0], { ownStationId: "own", channelId: 6, upstreamStationId: "up1", tokenId: 30 });
+});
+
+test("上游资源：抽屉里「解绑」先弹确认框，写清楚不再挂在这个上游下面，确认后发 stop", async (t) => {
+  const stops = [];
+  const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true },
+    { id: "up1", name: "主力上游", type: "newapi", baseUrl: "https://up1.test", monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 100, checkedAt: new Date().toISOString() }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" } }];
+  const channels = [{ channelId: 1, name: "高速 A", address: "up1.test", ruleId: "r1", upstreamStationId: "up1", tokenId: 9, tokenName: "oai", tokenGroup: "default", sinceDay: "2026-10-12", suggestedUpstreamId: null }];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname, method = route.request().method();
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: new Date().toISOString() });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/reconciliation/channels/options") return fulfill(route, { ok: true, upstreams: [{ id: "up1", name: "主力上游" }], channels });
+    if (path === "/api/reconciliation/channels/stop") { stops.push(route.request().postDataJSON()); channels.length = 0; return fulfill(route, { stopped: [], optedOut: [] }); }
+    throw new Error("unexpected API: " + method + " " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations");
+  await page.locator(".jy-stations-table tbody tr", { hasText: "主力上游" }).first().locator("td").nth(2).getByRole("button").click();
+  const drawer = page.getByRole("dialog", { name: /主力上游的渠道/ }); await drawer.waitFor();
+  await drawer.getByRole("button", { name: "解绑 高速 A", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "解绑「高速 A」？", exact: true });
+  await confirm.getByText("解绑后，「高速 A」不再挂在主力上游下面，以后可以再绑。", { exact: true }).waitFor();
+  await confirm.getByRole("button", { name: "解绑", exact: true }).click();
+  for (let i = 0; i < 60 && !stops.length; i++) await page.waitForTimeout(100);
+  assert.deepEqual(stops[0], { ownStationId: "own", channelIds: [1] });
+  await drawer.getByText("这个上游下还没有渠道", { exact: true }).waitFor();
 });
 
 // ---- 合并重复的上游（K1a，design/ux/k1a-merge.md 第 9 节验收清单）-------------------------------------

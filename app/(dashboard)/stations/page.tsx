@@ -28,7 +28,7 @@ import { useShellPage } from "../../components/shell-context";
 import { Spark } from "../../components/spark";
 import { LEVEL_ORDER, StatusText } from "../../components/status";
 import { useUrlParams, useUrlState } from "../../components/use-url-state";
-import { channelNameKey, channelNameOf, useWorkflowActions } from "../../components/use-workflow-actions";
+import { channelNameKey, channelNameOf, loadWorkflowActions, useWorkflowActions } from "../../components/use-workflow-actions";
 import { workflowProblem } from "../../components/workflow-copy";
 import TrendModal, { TREND_TEXT } from "../trend-modal";
 import { buildStationView, resultIssue, testBalanceText, TYPES_MISSING_TEXT } from "./model";
@@ -38,13 +38,18 @@ import { MergeNotice, useMergeUpstreams } from "../../components/merge-upstreams
 import type { MergeCounts } from "../../components/merge-upstreams";
 import { MERGE_TEXT } from "../../../lib/upstream-merge-view.js";
 import { StationDrawer } from "./station-drawer";
+import { BindChannelModal, ChannelsDrawer, UnbindModal, useChannelOptions } from "./channel-binding";
+import type { ChannelOption, Upstream } from "./channel-binding";
+import { BINDABLE_UPSTREAM_TYPES } from "../../../lib/channel-binding.js";
+import { CHANNEL_BINDING } from "../../../lib/channel-binding-text";
+import { hostOf } from "../../../lib/channel-binding.js";
 import type { StationDrawerHandle } from "./station-drawer";
 
 const FILTERS = ["all", "attention", "ok", "archived"] as const;
 type Filter = (typeof FILTERS)[number];
 const SORTS = ["", "days", "-days"] as const;
 type Sort = (typeof SORTS)[number];
-const COLS = 6;
+const COLS = 7;
 
 const REFRESH = workflowActionMeta("refresh").label;
 const DELETE = workflowActionMeta("delete_upstream");
@@ -208,6 +213,14 @@ export default function StationsPage() {
   }, [queryParam]);
 
   const drawerRef = useRef<StationDrawerHandle>(null);
+  // 上游下面的渠道：右边抽屉 + 「绑定渠道」「解绑」小窗口；只管绑定、解绑，和利润没有关系；数据只有 /api/reconciliation/channels/options 一个读
+  const ownStation = stations.find((item: any) => item.isOwn && !item.archivedAt);
+  const channelOptions = useChannelOptions(ownStation?.id);
+  // 绑定、解绑以后重读渠道，也刷新需处理（解绑的渠道那条「Key 没用量」要跟着消失）
+  const afterChannelChange = async () => { await channelOptions.reload(); void loadWorkflowActions(true, ["bills"]); };
+  const [channelsOf, setChannelsOf] = useState<Upstream | null>(null);
+  const [binding, setBinding] = useState(false);
+  const [unbinding, setUnbinding] = useState<ChannelOption | null>(null);
   // 更多菜单里的“编辑”：关闭抽屉后焦点回到这一行的更多按钮
   const moreTriggerRef = useRef<HTMLElement | null>(null);
   const uid = useId();
@@ -631,6 +644,15 @@ export default function StationsPage() {
 
   // 余额的写法和运营总览同一处（balanceMoneyOf）：按上游自己的币种写，设了汇率下面写「约 ¥88.56」，
   // 没设置汇率下面写「没设置汇率」，悬停是整句
+  // 「渠道」一列：这个上游下挂了几个渠道、几个要处理；不能挂渠道的上游类型写「—」。都能点开右边的抽屉
+  const channelCell = (v: StationView) => {
+    const listed = channelOptions.options?.ok ? channelOptions.options.channels.filter((item) => item.upstreamStationId === v.id) : null;
+    if (v.archived || v.s.isOwn || !BINDABLE_UPSTREAM_TYPES.includes(v.s.type) || !listed) return <span className="jy-muted">{CHANNEL_BINDING.cell.unsupported}</span>;
+    const name = stationDisplayName(v.s);
+    return <button type="button" className="jy-link-btn jy-stations-channels" aria-label={CHANNEL_BINDING.drawerTitle(name)} onClick={() => setChannelsOf({ id: v.id, name, address: hostOf(v.s.baseUrl) })}>
+      {listed.length ? CHANNEL_BINDING.cell.count(listed.length) : CHANNEL_BINDING.cell.none}
+    </button>;
+  };
   const balanceCell = (v: StationView) => {
     const b = v.s.balance;
     if (v.fixed || !b?.ok) return <span className="jy-muted">{EMPTY}</span>;
@@ -888,6 +910,7 @@ export default function StationsPage() {
               <tr>
                 <th scope="col" className="jy-stations-pin-l">{COPY.col.name}</th>
                 <th scope="col">{COPY.col.status}</th>
+                <th scope="col">{CHANNEL_BINDING.column}</th>
                 <th scope="col" className="r">{COPY.col.balance}</th>
                 <th scope="col" className="r">{COPY.col.burn}</th>
                 <th scope="col" aria-sort={ariaSort}>
@@ -907,6 +930,7 @@ export default function StationsPage() {
                     <tr className={issue ? "has-issue" : undefined}>
                       <td className="jy-stations-pin-l">{resourceCell(v)}</td>
                       <td>{statusCell(v)}</td>
+                      <td>{channelCell(v)}</td>
                       <td className="r">{balanceCell(v)}</td>
                       <td className="r">{burnCell(v)}</td>
                       <td>{runwayCell(v)}</td>
@@ -961,6 +985,7 @@ export default function StationsPage() {
                     <span title={money?.cny ? `${money.full}，${money.note}` : money?.note}>{COPY.col.balance} <b>{money ? (money.cny ? money.text : money.full) : EMPTY}</b></span>
                   )}
                   {v.runway ? <span>{COPY.col.days} <b>{v.runway.text}</b></span> : null}
+                  {!v.archived && !v.s.isOwn && BINDABLE_UPSTREAM_TYPES.includes(v.s.type) && channelOptions.options?.ok ? <span>{CHANNEL_BINDING.column} {channelCell(v)}</span> : null}
                   {refreshing || stale ? subLine(note!, stale) : null}
                 </div>
                 {todo ? (
@@ -1124,6 +1149,12 @@ export default function StationsPage() {
       <TrendModal station={trendCur} onClose={() => setTrendStation(null)} settings={settings} rules={rules} tz={tz} />
 
       <StationDrawer ref={drawerRef} types={types} onSaved={onSaved} />
+      <ChannelsDrawer upstream={channelsOf} channels={channelOptions.options?.ok ? channelOptions.options.channels : []} tz={tz} onClose={() => { setChannelsOf(null); setBinding(false); setUnbinding(null); }}
+        onBind={() => setBinding(true)} onUnbind={setUnbinding} />
+      {ownStation ? <>
+        <BindChannelModal upstream={binding ? channelsOf : null} ownStationId={ownStation.id} options={channelOptions.options} onClose={() => setBinding(false)} onDone={afterChannelChange} />
+        <UnbindModal channel={unbinding} upstreamName={channelsOf?.name ?? ""} ownStationId={ownStation.id} onClose={() => setUnbinding(null)} onDone={afterChannelChange} />
+      </> : null}
       {merge.overlay}
     </div>
   );
