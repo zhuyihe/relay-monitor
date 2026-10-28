@@ -165,7 +165,7 @@ export default function AnalyticsPage() {
     <div className={`jy-page${loading && stale ? " jy-analytics-switching" : ""}`} aria-busy={(loading && stale) || undefined}>
       {loadError && <RefreshFailedBanner asOf={asOf} tz={tz} error={loadError} onRetry={retry} />}
       <MixPanel profit={profit} extra={toDaily} />
-      <DailyCostPanel profit={profit} tz={tz} />
+      <DailyCostPanel profit={profit} tz={tz} emptyText={emptyNote(profit, COPY.dailyEmpty)} />
     </div>
   );
 }
@@ -173,6 +173,17 @@ export default function AnalyticsPage() {
 // ---- 上游成本构成 ----------------------------------------------------------------
 
 // 按上游合计每日利润里各行的实付成本；最后一行「没算进利润的上游成本」（有才写）。合计 = 上游列表扣费的总数
+// 没有成本时分两种说：还有渠道需处理、今天算不出（不是没有），和运营总览同一个说法；真的没有才写「没有上游成本」
+function emptyNote(profit: ProfitPageResponse, fallback: string): React.ReactNode {
+  const n = profit.counts?.attentionChannels ?? 0;
+  return n > 0 ? (
+    <>
+      {COPY.notReady(n)}{" "}
+      <Link href="/reconciliation" className="jy-link">{NAV_LABELS.reconciliation}</Link>
+    </>
+  ) : fallback;
+}
+
 function MixPanel({ profit, extra }: { profit: ProfitPageResponse; extra?: React.ReactNode }) {
   const currency = profit.displayCurrency === "CNY" ? "CNY" : "USD";
   const byUpstream = new Map<string, { name: string; value: number }>();
@@ -197,7 +208,7 @@ function MixPanel({ profit, extra }: { profit: ProfitPageResponse; extra?: React
         total={items.length ? { label: COPY.total, value: fmtMoney(r2(total), currency) } : undefined}
         empty={
           <>
-            {COPY.mixEmpty}
+            {emptyNote(profit, COPY.mixEmpty)}
             <Link href="/stations" className="jy-link">
               {STATION_TABS.list}
             </Link>

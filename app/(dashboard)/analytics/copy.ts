@@ -50,6 +50,7 @@ export const COPY = Object.freeze({
   missingDays: (n: number) => `缺 ${n} 天，没算进去`,
   mixCaption: "按上游，所选时间合计",
   dailyCaption: "按天，所选时间内",
+  notReady: (n: number) => `这段时间还算不出：${n} 个渠道需处理`,
   dailyEmpty: "这段时间没有上游成本。",
   todayLegend: "今天（还会变）",
   mixUnread: "读不到每日利润，这里先不显示。",

@@ -225,7 +225,7 @@ export default function OverviewPage() {
     <div className="jy-page jy-ov">
       {/* 手机上需处理在最前 */}
       {compact ? attention : null}
-      <div className="jy-grid-8-4">
+      <div className="jy-grid-8-4 jy-ov-top">
         <ProfitToday profit={profit} error={profitErr} onRetry={() => void loadProfit()} />
         {compact ? null : attention}
       </div>

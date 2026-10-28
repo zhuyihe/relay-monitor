@@ -6,7 +6,7 @@ import { formatDayKey, formatMoney } from "../../../lib/format";
 import { Panel } from "../../components/panel";
 import { COPY } from "./copy";
 
-export function DailyCostPanel({ profit, tz }: { profit: ProfitPageResponse; tz: string }) {
+export function DailyCostPanel({ profit, tz, emptyText }: { profit: ProfitPageResponse; tz: string; emptyText?: React.ReactNode }) {
   const currency = profit.displayCurrency === "CNY" ? "CNY" : "USD";
   const days = (profit.dailyCost || []).map((item) => ({
     day: item.day,
@@ -18,7 +18,7 @@ export function DailyCostPanel({ profit, tz }: { profit: ProfitPageResponse; tz:
   return (
     <Panel title={COPY.panel.daily} caption={COPY.dailyCaption}>
       {days.length === 0 ? (
-        <p className="jy-caption">{COPY.dailyEmpty}</p>
+        <p className="jy-caption">{emptyText ?? COPY.dailyEmpty}</p>
       ) : (
         <>
           <ul className="jy-daily-cost" aria-label={COPY.panel.daily}>
