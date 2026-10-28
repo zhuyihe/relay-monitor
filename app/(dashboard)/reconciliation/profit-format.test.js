@@ -313,3 +313,10 @@ test("footerNotes：这一版还不算利润的渠道（Key 在两个上游里�
   assert.match(note(many), /；等 5 个渠道$/);
   assert.equal(note(many).split("；").length, 4, "点三个名 + 等 N 个");
 });
+
+test("footerNotes：多天范围里没算进来的天写一句", () => {
+  const hrefs = { upstreams: "/stations", start: "/s", settings: "/settings" };
+  const notes = (notCountedDays) => footerNotes({ ...page(), notCountedDays }, ctx, hrefs).map((n) => n.text);
+  assert.deepEqual(notes({ count: 0 }).filter((t) => /还没固定/.test(t)), []);
+  assert.ok(notes({ count: 3 }).includes("有 3 天还没固定，没算进来"));
+});

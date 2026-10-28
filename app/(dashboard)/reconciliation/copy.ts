@@ -249,7 +249,6 @@ export const COPY = Object.freeze({
     seeUpstreams: "查看各上游",
     unlinked: (n: number) => `另有 ${n} 个渠道还没算利润`,
     notCounted: (n: number) => `有 ${n} 天还没固定，没算进来`,
-    sub2Whole: "Sub2API 只能按整天读，这半天不算",
     // 这种接法这一版还不算利润：只提示，没有按钮（用语规范 §5.6）；最多点三个名，再多写「等 N 个渠道」
     unsupported: (items: string[], total: number) => `这一版还不算利润的渠道：${items.join("；")}${total > items.length ? `；等 ${total} 个渠道` : ""}`,
     unsupportedKeyInUpstreams: (name: string, upstreams: string[]) => `「${name}」它的 Key 在上游${upstreams.map((upstream) => `「${upstream}」`).join("")}里${upstreams.length > 1 ? "都有" : ""}`,

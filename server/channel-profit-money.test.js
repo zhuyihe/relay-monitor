@@ -401,46 +401,43 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     const cell = (page, day) => page.rows[0].daily.find((item) => item.day === day);
     assert.deepEqual(["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13"].map((day) => cell(whole, day).state), ["fixed", "fixed", "attention", "fixed"]);
     assert.equal(cell(whole, "2026-10-12").reason, "KEY_IN_OTHER_UPSTREAM");
-    // 头一天是半天：从 10-11 15:00 开始，10-11 那半天现读（那天记了两把 Key，Key 9 15 点以后没有用量），10-13 取账本
+    // 头一天是半天：从 10-11 15:00 开始。只有今天是实时的：半天头不现读，是「—」、不进合计，只取 10-13 的账本；页面写「有 1 天还没固定」
     const half = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-11T15:00:00"), endMs: SH("2026-10-14T00:00:00") });
-    // Sub2API 的上游只能按整天读：切成半天读不出来，那半天不算（和单天范围里半天的行为一样）；New API 按那半天现读
-    assert.equal(half.notCountedDays.sub2Whole, upstreamType === "sub2api", "Sub2API 半天头不读，页面写一句");
-    assert.deepEqual([half.pageTotals.actualCostUsd, half.pageTotals.incomeUsd], upstreamType === "newapi" ? [9 * H * 3 + day13, 9 * H * 2 + D * 2] : [day13, D * 2], "头一天按现读的半天，不走账本");
+    assert.deepEqual([half.pageTotals.actualCostUsd, half.pageTotals.incomeUsd, half.notCountedDays.count], [day13, D * 2, 1]);
   });
 }
 
 for (const upstreamType of ["newapi", "sub2api"]) {
-  test(`多天范围：头几天没固定（还没结账的整天）：不现读，是「—」不进合计，只现读昨天（${upstreamType}）`, async (t) => {
+  test(`多天范围：头几天没固定（还没结账的整天）：都不现读，是「—」不进合计（${upstreamType}）`, async (t) => {
     const f = await setup(t, { upstreamType, keys: [9], channelKey: { 1: 9 } });
     await f.at("2026-10-10T10:00:00");
     await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
     await f.at("2026-10-13T09:00:00");
     const D = 24 * 3600;
     const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-13T00:00:00") });
-    // 多天范围只现读还没到固定时候的尾巴（昨天）：10-10、10-11 没固定也不现读，是「—」、不进合计，页面写「有 2 天还没固定，没算进来」
-    assert.deepEqual([page.pageTotals.actualCostUsd, page.pageTotals.incomeUsd], [D, D * 2], "只算昨天（10-12）现读的那一天");
-    assert.deepEqual(page.notCountedDays, { count: 2, sub2Whole: false });
+    // 只有今天是实时的：10-10、10-11、10-12（昨天）都没固定，一律不现读，是「—」、不进合计，页面写「有 3 天还没固定，没算进来」
+    assert.deepEqual([page.pageTotals.actualCostUsd, page.pageTotals.incomeUsd], [null, null]);
+    assert.deepEqual(page.notCountedDays, { count: 3 });
+    const statCalls = globalThis.fetch.mock.calls.map((call) => new URL(String(call.arguments[0]))).filter((url) => url.pathname === "/api/log/self/stat" || url.pathname === "/api/log/stat");
+    assert.equal(statCalls.length, 0, "一个读上游、读自营站点的请求都没有");
   });
 }
 
-test("多天范围：昨天现读失败，那天是「—」、不进合计、页面写一句，不悄悄算少；已固定的日子照取账本", async (t) => {
+test("多天范围：昨天还没固定，不现读，是「—」、不进合计、页面写一句；已固定的日子取账本，今天现读", async (t) => {
   const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: { 1: 9 } });
   await f.at("2026-10-10T10:00:00");
   await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
   for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T09:00:00"]) await f.round(iso);
   await f.at("2026-10-13T09:00:00");
   const D = 24 * 3600, yesterdayStart = SH("2026-10-12T00:00:00") / 1000;
-  const real = globalThis.fetch;
-  t.mock.method(globalThis, "fetch", async (input, init) => {
-    const url = new URL(String(input));
-    if (url.host === "up.test" && url.pathname === "/api/log/self/stat" && Number(url.searchParams.get("start_timestamp")) === yesterdayStart) throw new Error("读不到");
-    return real(input, init);
-  });
+  const before = globalThis.fetch.mock.calls.length;
   const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-13T09:00:00") });
-  assert.equal(page.notCountedDays.count, 1, "昨天没读到，写「有 1 天还没固定，没算进来」");
+  assert.equal(page.notCountedDays.count, 1, "昨天没固定，写「有 1 天还没固定，没算进来」");
   // 10-10、10-11 取账本，10-13 现读 9 小时；昨天 10-12 不进合计
   assert.equal(page.pageTotals.actualCostUsd, 2 * D + 9 * 3600);
   assert.equal(page.pageTotals.incomeUsd, 2 * (2 * D + 9 * 3600));
+  const starts = globalThis.fetch.mock.calls.slice(before).map((call) => new URL(String(call.arguments[0]))).filter((url) => url.pathname === "/api/log/self/stat").map((url) => Number(url.searchParams.get("start_timestamp")));
+  assert.ok(!starts.includes(yesterdayStart), "昨天一个请求都没发");
 });
 
 test("多天范围：有账本行、只是重算要人处理（RESETTLE_SHRUNK）的天照取账本，不丢；单天加起来等于多天合计", async (t) => {
@@ -455,4 +452,21 @@ test("多天范围：有账本行、只是重算要人处理（RESETTLE_SHRUNK�
   const singles = [await range("2026-10-10", "2026-10-11"), await range("2026-10-11", "2026-10-12"), await range("2026-10-12", "2026-10-13")];
   assert.equal(whole.pageTotals.actualCostUsd, singles.reduce((sum, page) => sum + (page.pageTotals.actualCostUsd ?? 0), 0));
   assert.equal(whole.pageTotals.actualCostUsd, 3 * 24 * 3600, "10-11 也在合计里");
+});
+
+test("单看昨天或以前的一天：没固定就显示它的状态和原因，不去现读上游和自营站点；固定了读账本", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: { 1: 9 } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T09:00:00"]) await f.round(iso);
+  await f.at("2026-10-13T09:00:00"); // 10-12 还没结账
+  const range = (a, b) => f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH(`${a}T00:00:00`), endMs: SH(`${b}T00:00:00`) });
+  const before = globalThis.fetch.mock.calls.length;
+  const fixed = await range("2026-10-11", "2026-10-12");
+  assert.equal(fixed.pageTotals.actualCostUsd, 24 * 3600, "10-11 已固定：读账本");
+  const unfixed = await range("2026-10-12", "2026-10-13");
+  assert.equal(unfixed.pageTotals.actualCostUsd, null, "10-12 没固定：不进合计");
+  assert.equal(unfixed.rows[0].daily.find((day) => day.day === "2026-10-12").state, "reading", "显示还在读取");
+  const reads = globalThis.fetch.mock.calls.slice(before).map((call) => new URL(String(call.arguments[0]))).filter((url) => url.pathname === "/api/log/self/stat" || url.pathname === "/api/log/stat");
+  assert.equal(reads.length, 0, "过去的一天不读上游也不读自营站点");
 });

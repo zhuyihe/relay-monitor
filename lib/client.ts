@@ -136,7 +136,7 @@ export type ProfitPageResponse = {
   counts: { channels: number; countedChannels: number; mismatchedChannels: number; attentionChannels: number; uncomputable: Record<string, number>; mismatchedDays: { over: number; under: number } };
   gapThreshold: { usd: number; rate: number }; rows: ProfitRow[];
   asOf: string; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; fixedCostCny?: number | null; netProfitUsd: number | null;
-  ownIncomeUnavailable: { code: string } | null; unaccountedUpstreamCostUsd: number | null; unlinkedChannelCount: number; notCountedDays?: { count: number; sub2Whole: boolean }; unsupportedChannels?: { channelId: number; name: string; reason: string; upstreamNames: string[] }[];
+  ownIncomeUnavailable: { code: string } | null; unaccountedUpstreamCostUsd: number | null; unlinkedChannelCount: number; notCountedDays?: { count: number }; unsupportedChannels?: { channelId: number; name: string; reason: string; upstreamNames: string[] }[];
   rateUnset: { id: string; name: string }[]; fixedOffProfitStations: { id: string; name: string }[];
 };
 export type ProfitDetailModel = { model: string; upstreamModel?: string | null; requests: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; pricesPerMillion?: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null } | null; beforeRatioUsd: number; usd: number };

@@ -398,7 +398,6 @@ export function footerNotes(page: ProfitPageResponse, ctx: Ctx, hrefs: { upstrea
   if (money.unaccounted != null && money.unaccounted > 0) notes.push({ key: "unaccounted", text: COPY.notice.unaccounted(money.approx ? COPY.metric.approx(fmtMoney(money.unaccounted, ctx.currency)) : fmtMoney(money.unaccounted, ctx.currency)), link: { text: COPY.notice.seeUpstreams, href: hrefs.upstreams } });
   if (page.unlinkedChannelCount > 0) notes.push({ key: "unlinked", text: COPY.notice.unlinked(page.unlinkedChannelCount), link: { text: COPY.table.startCounting, href: hrefs.start } });
   if (page.notCountedDays?.count) notes.push({ key: "notCounted", text: COPY.notice.notCounted(page.notCountedDays.count) });
-  if (page.notCountedDays?.sub2Whole) notes.push({ key: "sub2Whole", text: COPY.notice.sub2Whole });
   const unsupported = (page.unsupportedChannels || []).filter((channel) => channel.reason === "KEY_IN_OTHER_UPSTREAM" && channel.upstreamNames.length)
     .map((channel) => COPY.notice.unsupportedKeyInUpstreams(channel.name, channel.upstreamNames));
   if (unsupported.length) notes.push({ key: "unsupported", text: COPY.notice.unsupported(unsupported.slice(0, 3), unsupported.length) });
