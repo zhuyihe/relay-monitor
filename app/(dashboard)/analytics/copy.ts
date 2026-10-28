@@ -17,7 +17,7 @@ export const COPY = Object.freeze({
   // 顶上那一行（ui-copy-spec §8.4）：收起时只写这一句，「数字怎么来的」展开后才是 sourceBody
   sourceShort: "这一页的数是按余额变化估出来的，不是上游的实际账单。",
   sourceBody: `上游成本按余额的变化估算，固定成本按付费周期平摊到每天，可用天数按近期花费估算；美元按各上游设置的汇率换成人民币（${RATE_UNSET_PARITY}）。按上游账单算的每天利润在「${NAV_LABELS.reconciliation}」里看。`,
-  emptyDesc: "加上上游后，这里会算成本和利润。",
+  emptyDesc: "加上上游后，这里会算成本。",
   emptyArchived: "已归档的上游勾选「包含已归档」后可以看。",
   // 利润等式下面「数据不完整」的原因，每条一句
   gapPast: (when: string, n: number) => `${when}没有上游的用量记录，这 ${n} 天的上游成本没算进去。`,
