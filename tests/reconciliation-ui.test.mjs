@@ -1765,7 +1765,7 @@ test("上游资源：「渠道」一列写几个或「没有渠道」，不能�
   assert.deepEqual(posts[0], { ownStationId: "own", channelId: 6, upstreamStationId: "up1", tokenId: 30 });
 });
 
-test("上游资源：别的列的数字很长时，「渠道」一列的「2 个」「没有渠道」「—」仍各占一行（1280 和 1440 宽）", async (t) => {
+test("上游资源：别的列的数字很长时，「渠道」一列的「2 个」「没有渠道」「—」仍各占一行（1280、1440、1920、2560 宽）", async (t) => {
   const now = Date.now();
   const spark = Array.from({ length: 24 }, (_, i) => [now - (24 - i) * 3600e3, 35101 + (24 - i) * 6700]);
   const long = { balance: { ok: true, remaining: 35101.28, checkedAt: new Date().toISOString() }, prediction: { etaDays: 2, burnPerDay: 161091, basis: "近 3 小时" }, spark, todayUsed: 56124, todayIsEstimate: true };
@@ -1783,7 +1783,7 @@ test("上游资源：别的列的数字很长时，「渠道」一列的「2 个
     throw new Error("unexpected API: " + path);
   }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations");
   const table = page.locator(".jy-stations-table");
-  for (const [width, height] of [[1280, 800], [1440, 900]]) {
+  for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080], [2560, 1440]]) {
     await page.setViewportSize({ width, height });
     await table.locator("tbody tr", { hasText: "主力上游" }).first().locator("td").nth(2).getByText("2 个", { exact: true }).waitFor();
     for (const [name, text] of [["主力上游", "2 个"], ["没有渠道上游", "没有渠道"], ["只用 Key", "—"]]) {
@@ -1793,6 +1793,22 @@ test("上游资源：别的列的数字很长时，「渠道」一列的「2 个
       assert.ok(box.height <= 24, `${width} 宽：「${text}」应占一行，实际高 ${box.height}`);
     }
     assert.ok((await table.locator("thead th").nth(2).locator("xpath=.").boundingBox()).height <= 48, "表头不折行");
+    const fit = await page.evaluate(() => {
+      const w = document.querySelector(".jy-table-wrap"), t = document.querySelector(".jy-stations-table"), sub = t.querySelector("tbody .jy-stations-sub > span");
+      return { wrap: w.clientWidth, table: t.scrollWidth, subLines: Math.round(sub.getBoundingClientRect().height / parseFloat(getComputedStyle(sub).lineHeight)) };
+    });
+    if (width >= 1440) assert.ok(fit.table <= fit.wrap, `${width} 宽下表格不该要左右拖（表 ${fit.table}，容器 ${fit.wrap}），「约 N 天」不能被右边固定的操作列盖住`);
+    else if (process.env.UI_SHOT_DIR) console.log(`${width} 宽：表 ${fit.table}，容器 ${fit.wrap}，要左右拖 ${fit.table - fit.wrap}px`);
+    if (width >= 1920) assert.equal(fit.subLines, 1, `${width} 宽位置够，状态小字该一行放下`);
+    if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/stations-${width}x${height}.png` });
+    if (width >= 1920 && process.env.UI_SHOT_DIR) {
+      await table.locator("tbody tr", { hasText: "主力上游" }).first().getByRole("button", { name: /主力上游的渠道/ }).click();
+      await page.getByRole("dialog", { name: /主力上游的渠道/ }).waitFor();
+      await page.waitForTimeout(700);
+      await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/drawer-${width}x${height}.png` });
+      await page.keyboard.press("Escape");
+      await page.getByRole("dialog", { name: /主力上游的渠道/ }).waitFor({ state: "hidden" });
+    }
     if (width === 1440) {
       const long = "「高速 A」有收入，但选的 Key 没用量，请到每日利润页换一把 Key 或者先解绑这个渠道，再回来看这一行";
       const lines = await page.evaluate((text) => { const span = document.querySelector(".jy-stations-table tbody .jy-stations-sub > span"); span.textContent = text; const r = span.getBoundingClientRect(); return Math.round(r.height / parseFloat(getComputedStyle(span).lineHeight)); }, long);
@@ -1800,11 +1816,6 @@ test("上游资源：别的列的数字很长时，「渠道」一列的「2 个
       if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/stations-long-title-1440x900.png` });
       await page.reload(); await table.locator("tbody tr", { hasText: "主力上游" }).first().waitFor();
     }
-    if (width === 1440) {
-      const fit = await page.evaluate(() => { const w = document.querySelector(".jy-table-wrap"), t = document.querySelector(".jy-stations-table"); return { wrap: w.clientWidth, table: t.scrollWidth }; });
-      assert.ok(fit.table <= fit.wrap, `1440 宽下表格不该要左右拖（表 ${fit.table}，容器 ${fit.wrap}），「约 N 天」不能被右边固定的操作列盖住`);
-    }
-    if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/stations-${width}x${height}.png` });
   }
 });
 
