@@ -25,10 +25,10 @@ import { COPY } from "./copy";
 import { addDays, derive, r2, validDay } from "./derive";
 import type { Derived } from "./derive";
 
-const PRESET_DAYS: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
-const RANGE_OPTIONS = (["7d", "30d", "90d"] as const).map((value) => ({ value, label: RANGE_TEXT[value] }));
-// 接口 days 上限 365：自定义开始日期最早到 364 天前
-const MAX_DAYS = 365;
+const PRESET_DAYS: Record<string, number> = { "7d": 7, "30d": 30 };
+const RANGE_OPTIONS = (["7d", "30d"] as const).map((value) => ({ value, label: RANGE_TEXT[value] }));
+// 成本构成读每日利润，最多看 31 天：自定义开始日期最早到 30 天前
+const MAX_DAYS = 31;
 const POLL_MS = 30000;
 
 type Snapshot = {
