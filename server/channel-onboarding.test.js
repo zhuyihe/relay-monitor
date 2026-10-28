@@ -530,7 +530,9 @@ test("U03 actual Store本地全量账号视图同域A/B分离，两old monitor�
   assert.equal(key.scopeVersion, 3); assert.equal(key.billingEffectiveFromMs, Date.parse("2026-10-09T16:00:00Z"));
   assert.equal(key.firstQueryableAtMs, Date.parse("2026-10-10T16:00:00Z")); assert.equal(key.scopeAmbiguous, false);
   const kinds = new Set(model.actions.map((action) => action.kind));
-  for (const kind of ["update_authorization", "inspect_balance", "verify_identity", "connect_channels", "confirm_coverage", "review_source"]) assert.ok(kinds.has(kind), kind);
+  for (const kind of ["update_authorization", "inspect_balance", "connect_channels", "review_source"]) assert.ok(kinds.has(kind), kind);
+  // 身份、完整账单、「还给别处用吗」不再让人去点：系统自己试读，没有这几种事项
+  for (const kind of ["verify_identity", "verify_capability", "confirm_coverage"]) assert.ok(!kinds.has(kind), kind);
   // 关联确认即生效，不再有“等待生效”的动作；所有接入动作都留在资源页。
   assert.equal(kinds.has("wait_effective"), false);
   for (const item of model.actions) {
@@ -583,7 +585,7 @@ test("U03 public历史关系保留，0active标历史，多active口径冲突不
   assert.ok(!a.actions.some((action) => ["confirm_coverage", "wait_effective"].includes(action.kind) && action.ruleId === "A-stopped"));
   assert.deepEqual(a.resources.find((resource) => resource.id === f.a2.id).purposes.billingRuleIds, ["A-legacy", "A-old-identity", "A-stopped"]);
   assert.ok(!a.keys.some((item) => [11, 12].includes(item.tokenId)));
-  assert.deepEqual(a.actions.filter((action) => action.kind === "verify_capability").map((action) => action.ruleId).sort(), ["A-legacy", "A-old-identity"]);
+  assert.deepEqual(a.actions.filter((action) => action.kind === "verify_capability").map((action) => action.ruleId).sort(), [], "系统自己试读，不出「测试读取」");
   assert.deepEqual(model.channels.find((channel) => channel.id === 3).reconciliation.ruleIds, ["A-history", "A-old-identity"]);
   f.state.rules = f.state.rules.filter((rule) => rule.id !== "A-conflict");
   f.state.rules.push(f.rule("A-membership-conflict", f.a1, 9, [2]));
@@ -600,7 +602,7 @@ test("2a 上游账单按 Key 逐条列出核算关联：有效在前，停止的
   const [active, history] = keyOf(model, "A", 9).associations;
   assert.deepEqual(keyOf(model, "A", 9).associations.map((item) => item.ruleId), ["A-active", "A-history"]);
   assert.deepEqual({ ...active, accountingStartMs: undefined }, { ruleId: "A-active", status: "active", upstreamStationId: "A-billing", ownStationId: "own",
-    timezone: "Asia/Shanghai", channels: [{ channelId: 1, name: "Channel 1" }], costCoverage: "unknown", needsCoverageAnswer: true,
+    timezone: "Asia/Shanghai", channels: [{ channelId: 1, name: "Channel 1" }], costCoverage: "unknown", needsCoverageAnswer: false,
     coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] }, scopeVersion: 3,
     billingEffectiveFromMs: Date.parse("2026-10-09T16:00:00Z"), accountingStartMs: undefined, conflict: false, conflictRuleIds: [],
     keyConflictRuleIds: [], channelConflictRuleIds: [], duplicateChannelIds: [], stoppedAt: null });
@@ -1209,7 +1211,7 @@ test("F07 directory reads reevaluate rule source after missing channels, restore
   assert.equal(f.state.ruleWrites, 1, "source observations do not rewrite financial scope");
 });
 
-test("渠道绑定：「这把 Key 还给别处用吗？」没答成「只给这些渠道用」的算需处理，固定成本的上游答什么都不影响", async (t) => {
+test("渠道绑定：不再问「这把 Key 还给别处用吗？」，答什么都不影响，也不列「去回答」", async (t) => {
   const f = await genuineBatchFixture(t), input = f.request([[1]]), preview = await f.rt.channelOnboarding.probeBatch(input);
   assert.equal((await f.rt.channelOnboarding.connectBatch({ ...input, previewId: preview.previewId })).complete, true);
   const status = async () => {
@@ -1223,14 +1225,14 @@ test("渠道绑定：「这把 Key 还给别处用吗？」没答成「只给这
   for (const answer of ["unknown", "other_use"]) {
     Object.assign(rule, { cost_coverage: "unknown", source_binding: JSON.stringify({ ...binding,
       coverageDeclaration: { answer, otherUse: answer === "other_use" ? "external" : null, uncoveredOwnChannelIds: [] } }) });
-    assert.deepEqual(await status(), ["review_required", "review_required"], answer);
-    // 要的是「去回答」，不是「确认来源」：来源本身没问题
-    assert.ok((await actions()).includes("confirm_coverage"), answer);
+    // 新口径：不再问「这把 Key 还给别处用吗」，没回答也照常已绑定、不出「去回答」
+    assert.deepEqual(await status(), ["configured", "configured"], answer);
+    assert.ok(!(await actions()).includes("confirm_coverage"), answer);
     assert.ok(!(await actions()).includes("review_source"), answer);
   }
   const association = async () => (await f.rt.channelOnboarding.listAccounts()).accounts.flatMap((account) => account.keys)
     .flatMap((key) => key.associations).find((item) => item.ruleId === rule.id);
-  assert.equal((await association()).needsCoverageAnswer, true, "上游账单那一条也说要回答");
+  assert.equal((await association()).needsCoverageAnswer, false, "上游账单那一条也不要求回答");
   // 旧规则（legacy-v3）不要求回答，和每日利润那一行一样：照旧「已绑定」，也不列「去回答」
   const policy = rule.billing_policy;
   rule.billing_policy = "legacy-v3";

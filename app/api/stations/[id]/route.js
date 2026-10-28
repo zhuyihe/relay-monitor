@@ -33,6 +33,8 @@ async function updateStation(request, rt, params) {
   delete rt._ownChannelsCache;
   delete rt._ownUsersCache;
   refreshStation(rt, s).catch(() => {});
+  // 系统自己试读一次（身份、完整账单、时区），不让人去点「测试读取」
+  rt.autoVerify?.verifySoon(s);
   return json({ station: redact(rt, s) });
 }
 

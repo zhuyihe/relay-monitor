@@ -1,4 +1,5 @@
 // 对账深模块：把窗口、上游取数、本站收费、快照和告警收敛在一个 Interface 后。
+import { createAutoVerifier } from "./upstream-auto-verify.js";
 import { createHash } from "node:crypto";
 import { isAccessTokenError } from "../lib/access-token-scopes.js";
 import { stationDisplayName } from "../lib/overview-actions.js";
@@ -3966,6 +3967,8 @@ export function startReconciliationPolling(rt, options = {}) {
   };
   const tick = async () => {
     try { await module.refreshDue(); } catch { /* 下一轮重试 */ }
+    // 系统自己试读上游（身份、完整账单、时区）：到点的才读，失败按退避
+    try { await (rt.autoVerify ||= createAutoVerifier(rt)).verifyDue(); } catch { /* 下一轮重试 */ }
     schedule(Math.max(60, Number(rt.store.settings?.refreshIntervalSec) || 60) * 1000);
   };
   schedule(0);
