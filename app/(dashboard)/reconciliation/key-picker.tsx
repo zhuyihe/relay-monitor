@@ -54,7 +54,7 @@ export function KeyPicker({ ownStationId, channel, upstreams, autoOpen = false, 
       const unique = (name: string) => tokens.filter((token) => token.name === name).length === 1 || metadata?.platform === "sub2api";
       const where = upstreams.find((upstream) => upstream.id === id)?.name ?? "";
       setKeys(tokens.filter((token) => token.status === 1 && unique(token.name)).map((token) => ({
-        value: token.id, label: [token.name, where, token.group ? `${KEY_PICKER.group} ${token.group}` : ""].filter(Boolean).join(" · "), display: [token.name, where].filter(Boolean).join(" · "),
+        value: token.id, label: [token.name, token.group ? `${KEY_PICKER.group} ${token.group}` : ""].filter(Boolean).join(" · "), display: [token.name, where].filter(Boolean).join(" · "),
       })));
     } catch {
       loadedFor.current = null;
@@ -69,8 +69,8 @@ export function KeyPicker({ ownStationId, channel, upstreams, autoOpen = false, 
     const picked = keys?.find((item) => item.value === tokenId);
     setSaving(true);
     try {
-      await api("/api/reconciliation/channels/select-key", { method: "POST", body: { ownStationId, channelId: channel.channelId, ...(bound ? {} : { upstreamStationId: upstreamId }), tokenId } });
-      message.success(KEY_PICKER.saved(picked?.display.split(" · ")[0] ?? ""));
+      const result = await api("/api/reconciliation/channels/select-key", { method: "POST", body: { ownStationId, channelId: channel.channelId, ...(bound ? {} : { upstreamStationId: upstreamId }), tokenId } });
+      message.success(bound ? KEY_PICKER.changed(picked?.display.split(" · ")[0] ?? "", (result?.rekeyedDays?.length ?? 0) > 0) : KEY_PICKER.started(channel.name));
       await onChanged();
     } catch (error: any) {
       message.error(describeError({ code: error?.code, message: error?.message }).text);
@@ -93,12 +93,13 @@ export function KeyPicker({ ownStationId, channel, upstreams, autoOpen = false, 
     </span>;
   }
   return <span className="jy-keypicker" onClick={(event) => event.stopPropagation()}>
+    {!bound && !needsUpstream ? <small className="jy-caption">{upstreamName(upstreamId)}</small> : null}
     <Select
       size="small" showSearch className="jy-keypicker__key" aria-label={`${KEY_PICKER.label}：${channel.name}`} placeholder={KEY_PICKER.placeholder} optionLabelProp="display"
       disabled={saving} loading={loading || saving} open={open} onOpenChange={(next) => { setOpen(next); if (next && upstreamId) void loadKeys(upstreamId); }}
       filterOption={(input, option) => String(option?.label ?? "").toLowerCase().includes(input.trim().toLowerCase())}
       value={bound ? channel.tokenId ?? undefined : undefined} options={keyOptions}
-      notFoundContent={loading ? KEY_PICKER.loading : empty && !keyOptions.length ? <span>{KEY_PICKER.noKeysAtAll} <a className="jy-link" href="/stations">{KEY_PICKER.upstreamList}</a></span> : KEY_PICKER.noMatch}
+      notFoundContent={loading ? KEY_PICKER.loading : failed ? KEY_PICKER.keysFailed : !upstreams.length ? <span>{KEY_PICKER.noKeysAtAll} <a className="jy-link" href="/stations">{KEY_PICKER.upstreamList}</a></span> : keys != null && keys.length === 0 ? KEY_PICKER.noKeys : KEY_PICKER.noMatch}
       onChange={(tokenId: number) => void choose(tokenId)}
     />
     {needsUpstream && !bound ? <a className="jy-link" role="button" onClick={() => { setUpstreamId(null); loadedFor.current = null; setKeys(null); }}>{KEY_PICKER.changeUpstream}</a> : null}
