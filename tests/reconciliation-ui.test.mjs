@@ -3249,9 +3249,8 @@ async function openOnboardingPage(t, options = {}) {
     if (options.loseResponseAt === writes.length) return route.abort("failed");
     return fulfill(route, latestResult);
   }, options.onboardingPath || "/stations?view=onboarding");
-  const channelButton = newChannelButton(page);
-  if (config.stale) await channelButton.waitFor();
-  else await channelButton.click({ trial: true });
+  // 渠道接入面板已经删了：等上游列表出来（有上游是表或卡片列表，没有是空状态）
+  await page.locator(".jy-stations-table, .jy-m-list, .jy-empty").first().waitFor();
   return { page, config, probes, writes, reads, recoveries };
 }
 // 已经看余额或算利润的渠道按钮是「改绑定「X」」，其余是「去绑定「X」」
