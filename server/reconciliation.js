@@ -926,9 +926,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
   }
 
-  // 这一版还不算利润的渠道（只提示、不进需处理）：用的 Key 在两个上游里都有、几把 Key 的渠道、和几把 Key 的渠道共用一把 Key。
+  // 这一版还不算利润的渠道（只提示、不进需处理）：用的 Key 在两个上游里都有（用户的接法里只有这一种）。
   // 问渠道利润模块要（识别结果有 4 分钟缓存，读取服务连不上就当没有）；写在每日利润表下面那一句里
-  const UNSUPPORTED_REASONS = new Set(["KEY_IN_OTHER_UPSTREAM", "MULTI_KEY", "KEY_SHARED_WITH_MULTI_KEY"]);
+  const UNSUPPORTED_REASONS = new Set(["KEY_IN_OTHER_UPSTREAM"]);
   async function unsupportedChannels() {
     if (!rt.channelOnboarding) return [];
     const profit = (rt.channelProfit ||= createChannelProfitModule(rt));
@@ -936,12 +936,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     for (const own of rt.store.list().filter((station) => station.isOwn && station.type === "newapi" && !station.archivedAt && keyAgentConfigOf(station))) {
       const state = await profit.status(own.id).catch(() => null);
       if (!state?.ok) continue;
-      const nameOf = (id) => state.channels.find((channel) => channel.channelId === Number(id))?.name;
       for (const channel of state.channels) {
         if (channel.state !== "blocked" || !UNSUPPORTED_REASONS.has(channel.reason)) continue;
         out.push({ channelId: channel.channelId, name: channel.name, reason: channel.reason,
-          upstreamNames: (channel.upstreamStationIds || []).map((id) => rt.store.get(id)?.name).filter(Boolean),
-          withNames: (channel.sharedWithChannelIds || []).map(nameOf).filter(Boolean) });
+          upstreamNames: (channel.upstreamStationIds || []).map((id) => rt.store.get(id)?.name).filter(Boolean) });
       }
     }
     return out;
