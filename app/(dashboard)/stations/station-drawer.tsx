@@ -11,7 +11,6 @@ import { KEY_AGENT_URL_INVALID_TEXT, isKeyAgentUrl } from "../../../lib/key-agen
 import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions";
 import { describeError, failureText, requiredText } from "../../../lib/error-copy";
 import { formatRate, formatSellPrice, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../../../lib/format";
-import { NAV_LABELS } from "../../../lib/brand";
 import { stationDisplayName } from "../../../lib/overview-actions";
 import { CREDENTIAL_FIELDS, credentialFieldOf, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT, UPSTREAM_SECRET_FIELDS } from "../../../lib/channel-onboarding.js";
 import { Dirty } from "../../components/data-state";
@@ -32,13 +31,14 @@ import type { ConnectionTestResult } from "./model";
 
 export type StationDrawerHandle = {
   // trigger：关闭后把焦点还给它（名称链接、编辑按钮、更多菜单按钮）
-  open: (station: any | null, trigger?: HTMLElement | null, options?: { focus?: "keyAgentUrl" | "keyAgentSecret" }) => void;
+  // own：设置自营站点（只在自营业务页用）；不给就是上游（地址 + 令牌，其余在「更多设置」）；focus：打开后停在读取服务地址或令牌那一栏
+  open: (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean; focus?: "keyAgentUrl" | "keyAgentSecret" }) => void;
 };
 
 // 参与“有未保存的修改”判断的字段；密钥框初始为空，输入即算修改
 const FORM_KEYS = [
   "name", "type", "baseUrl", "accessToken", "userId", "apiKey", "email", "password",
-  "lowBalanceUsd", "cnyPerUsd", "costAliasesText", "includeInProfit", "isOwn", "noRenewal",
+  "lowBalanceUsd", "cnyPerUsd", "includeInProfit", "noRenewal", "token",
   "keyAgentUrl", "keyAgentSecret",
 ];
 const TEST_READ = workflowActionMeta("verify_identity").label;
@@ -71,6 +71,18 @@ const COPY = Object.freeze({
   changedDesc: `保存前请重新${TEST_READ}，确认新的登录信息能读到余额。`,
   hintUnchanged: `只有改了登录信息才要重新${TEST_READ}`,
   hintCreate: `先${TEST_READ}，读到了才能新增`,
+  // 加上游只填地址和令牌（上游监控简化第 3 条）：类型、名字系统自己认
+  address: "站点地址",
+  addressHint: "上游网站的地址，例如 https://api.example.com",
+  token: "访问令牌",
+  tokenHint: "在上游后台「个人设置」里生成；只有 Key 的也可以填 Key",
+  detectedLine: (type: string, name: string, balance: string | null) => [type, name, balance ? `余额 ${balance}` : ""].filter(Boolean).join(" · "),
+  readFirst: "读到了才能新增",
+  needUserId: "这是 New API 站点，还要填你在这个站点上的用户 ID。",
+  more: "更多设置",
+  typeAuto: "自动识别",
+  detecting: "正在认这个上游",
+  ownTitle: "设置自营站点",
   // 分区
   basics: "基本信息",
   login: "登录信息",
@@ -79,11 +91,9 @@ const COPY = Object.freeze({
   costDesc: "不填就是不设置，不会当成 0。",
   namePlaceholder: "例如：主力上游",
   // 开关和填写项
-  isOwn: "这是我的自营站点",
-  isOwnDesc: `打开后，「${NAV_LABELS.my}」页会显示这个站点的用户、模型和收入。要填超级管理员的访问令牌和用户 ID。卖给客户的管理员 Key 在「${NAV_LABELS.my}」页的「转售 Key」里勾上，它的花费算收入。`,
   inProfit: "算进利润",
   inProfitFixed: "固定成本按天平摊，从净利里扣。只是看看、不属于这门生意的就关掉。",
-  inProfitDesc: "默认算进：就算自营站点的渠道里找不到这个上游，也按用量或余额变化算进上游成本。只是看看，或者会和别的上游重复算时才关掉。",
+  inProfitDesc: "关了就只看余额，不算进上游成本",
   fixedTitle: `固定成本不用${TEST_READ}`,
   fixedDesc: "只按固定成本记录按天平摊，不读取上游，也没有余额提醒。",
   rate: "汇率",
@@ -174,6 +184,13 @@ export function StationDrawer({
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<any>(null); // null = 新增
+  const [ownMode, setOwnMode] = useState(false); // 设置自营站点（自营业务页打开）
+  const [needUserId, setNeedUserId] = useState(false); // 认出是 New API 站点、还缺用户 ID
+  // 加上游：离开令牌栏就试读一次，读到了才能新增（detectedKey 是读的时候的地址 + 令牌 + 用户 ID，改了就作废）
+  const [detecting, setDetecting] = useState(false);
+  const [detected, setDetected] = useState<any>(null);
+  const [detectedKey, setDetectedKey] = useState<string | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [purchases, setPurchases] = useState<any[]>([]); // 固定成本付费记录行
   const [testing, setTesting] = useState(false);
@@ -196,21 +213,30 @@ export function StationDrawer({
   const typedPassword = Form.useWatch("password", form);
   const typed: Record<string, unknown> = { accessToken: typedAccessToken, apiKey: typedApiKey, password: typedPassword };
   const typedRate = Form.useWatch("cnyPerUsd", form);
-  const typedOwn = Form.useWatch("isOwn", form);
+  const typedBaseUrl = Form.useWatch("baseUrl", form);
+  const typedToken = Form.useWatch("token", form);
   const typedKeyAgentSecret = Form.useWatch("keyAgentSecret", form);
 
   const needsFor = (type: string): string[] => types.find((item) => item.value === type)?.needs || [];
 
-  const openDrawer = (station: any | null, trigger?: HTMLElement | null, options?: { focus?: "keyAgentUrl" | "keyAgentSecret" }) => {
+  const openDrawer = (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean; focus?: "keyAgentUrl" | "keyAgentSecret" }) => {
     if (!types.length) {
       message.warning(TYPES_MISSING_TEXT);
       return;
     }
     triggerRef.current = trigger || null;
     setEditing(station || null);
+    const own = !!station?.isOwn || !!options?.own;
+    setOwnMode(own);
+    setNeedUserId(false);
+    setDetected(null);
+    setDetectedKey(null);
+    setMoreOpen(!!station && !own);
     const values = {
       name: station?.name || "",
-      type: station?.type || types[0]?.value,
+      // 新增上游时类型留空 = 自动识别；自营站点一定是 New API
+      type: station?.type || (own ? "newapi" : ""),
+      token: "",
       baseUrl: station?.baseUrl || "",
       accessToken: "",
       userId: station?.userId || "",
@@ -219,9 +245,7 @@ export function StationDrawer({
       password: "",
       lowBalanceUsd: station?.lowBalanceUsd ?? "",
       cnyPerUsd: station?.cnyPerUsd ?? "",
-      costAliasesText: Array.isArray(station?.costAliases) ? station.costAliases.join("\n") : "",
       includeInProfit: station?.includeInProfit !== false,
-      isOwn: !!station?.isOwn,
       noRenewal: !!station?.noRenewal,
       keyAgentUrl: station?.keyAgentUrl || "",
       keyAgentSecret: "",
@@ -285,14 +309,37 @@ export function StationDrawer({
   useDrawerEscape(open && !saving, requestClose);
 
   const isFixed = formType === "fixed";
+  // 新增上游、类型没选：只填地址和令牌，保存时系统自己认类型和名字
+  const isAuto = !editing && !ownMode && !formType;
   // 自营站点：「算进利润」「渠道里用的其他地址」只对上游有用，藏起来但照旧提交原来的值（Form.Item hidden 仍收集值）；「汇率」改叫「售价」
-  const isOwnStation = formType === "newapi" && !!typedOwn;
-  const needs = needsFor(formType);
+  const isOwnStation = ownMode && formType === "newapi";
+  const needs = isAuto ? [] : needsFor(formType);
   const unchangedEdit = !!editing && formFingerprint === initialFingerprint;
   const testPassed = !!connectionTest?.ok && testedFingerprint === formFingerprint;
+  const typedUserId = Form.useWatch("userId", form);
+  const autoKey = `${String(typedBaseUrl || "").trim()}\n${String(typedToken || "").trim()}\n${String(typedUserId || "").trim()}`;
+  const autoReady = !!detected?.ok && detectedKey === autoKey;
+
+  // 离开令牌（或用户 ID）栏：认类型和名字、顺带读一次
+  const runDetect = async () => {
+    const baseUrl = String(typedBaseUrl || "").trim(), token = String(typedToken || "").trim();
+    if (!isAuto || !baseUrl || !token || detecting || (detected && detectedKey === autoKey)) return;
+    const key = autoKey;
+    setDetecting(true);
+    try {
+      const result = await api("/api/stations/detect", { body: { baseUrl, token, userId: String(typedUserId || "").trim() } });
+      if (result.needsUserId) { setNeedUserId(true); setDetected({ ok: false, needsUserId: true }); }
+      else setDetected(result.ok ? result : { ok: false, issue: { text: result.message, raw: result.diagnostic } });
+    } catch (e: any) {
+      setDetected({ ok: false, issue: resultIssue(e) });
+    } finally {
+      setDetectedKey(key);
+      setDetecting(false);
+    }
+  };
   const typedKeyAgentUrl = Form.useWatch("keyAgentUrl", form);
   const keyAgentUrlBad = isOwnStation && !!String(typedKeyAgentUrl || "").trim() && !isKeyAgentUrl(typedKeyAgentUrl);
-  const canSave = (isFixed || unchangedEdit || testPassed) && !keyAgentUrlBad;
+  const canSave = (isFixed || unchangedEdit || testPassed || (isAuto && autoReady)) && !keyAgentUrlBad;
 
   const onTestConnection = async () => {
     const values = form.getFieldsValue();
@@ -307,7 +354,7 @@ export function StationDrawer({
       if (type !== "fixed") payload.baseUrl = String(values.baseUrl || "").trim();
       for (const field of fields) payload[field] = values[field] ?? "";
       // 渠道 Key 读取服务（K2a）：自营站点顺带测一下，不影响上游本身的测试结果
-      if (type === "newapi" && values.isOwn) {
+      if (type === "newapi" && ownMode) {
         payload.isOwn = true;
         payload.keyAgentUrl = String(values.keyAgentUrl || "").trim();
         payload.keyAgentSecret = String(values.keyAgentSecret || "").trim();
@@ -325,18 +372,16 @@ export function StationDrawer({
 
   const onSave = async () => {
     const v = form.getFieldsValue();
-    const type = String(v.type || "").trim();
+    // 只填了地址和令牌：类型和名字用离开令牌栏时读到的
+    if (isAuto && !autoReady) return message.warning(COPY.readFirst);
+    const type = isAuto ? String(detected.type) : String(v.type || "").trim();
     const connectionFields = needsFor(type);
     const payload: any = {
-      name: String(v.name || "").trim(),
+      name: String(v.name || "").trim() || (isAuto ? String(detected.name || "") : ""),
       type,
       lowBalanceUsd: String(v.lowBalanceUsd ?? "").trim(),
       cnyPerUsd: String(v.cnyPerUsd ?? "").trim(),
-      costAliases: String(v.costAliasesText || "")
-        .split(/[\n,]/)
-        .map((x) => x.trim())
-        .filter(Boolean),
-      includeInProfit: !!v.includeInProfit,
+      includeInProfit: ownMode ? editing?.includeInProfit !== false : !!v.includeInProfit,
       // 金额/天数保持字符串提交，全空行剔除（同旧版）
       fixedPurchases: purchases
         .map((p) => ({
@@ -345,14 +390,15 @@ export function StationDrawer({
           startDate: p.startDate || "",
         }))
         .filter((p) => p.amount !== "" || p.days !== ""),
-      isOwn: v.type === "newapi" && !!v.isOwn,
+      isOwn: ownMode && type === "newapi",
       // 固定成本的上游一律不「不再续费」：它会关掉到期提醒，而固定成本的表单里没有这个开关（汇率等三项照原值带上）
       noRenewal: v.type !== "fixed" && !!v.noRenewal,
     };
     if (type !== "fixed") {
       payload.baseUrl = String(v.baseUrl || "").trim();
       for (const field of connectionFields) {
-        const value = field === "password" ? String(v[field] || "") : String(v[field] ?? "").trim();
+        const raw = isAuto && (field === "accessToken" || field === "apiKey") ? v.token : v[field];
+        const value = field === "password" ? String(raw || "") : String(raw ?? "").trim();
         // 编辑时敏感凭证留空表示保持已保存的值；其他当前类型字段按表单值提交
         if (UPSTREAM_SECRET_FIELDS.includes(field)) {
           if (value) payload[field] = value;
@@ -362,7 +408,7 @@ export function StationDrawer({
       }
     }
     // 渠道 Key 读取服务（K2a）：只对自营站点有意义，留空表示不装 / 保持已保存的令牌
-    if (type === "newapi" && v.isOwn) {
+    if (type === "newapi" && ownMode) {
       payload.keyAgentUrl = String(v.keyAgentUrl || "").trim();
       const keyAgentSecret = String(v.keyAgentSecret || "").trim();
       if (keyAgentSecret) payload.keyAgentSecret = keyAgentSecret;
@@ -381,7 +427,7 @@ export function StationDrawer({
     }
     // 保存时按当前表单重算指纹，不依赖可能滞后一拍的状态
     const fingerprintNow = connectionFingerprint(form.getFieldsValue(true), editing?.id, connectionFields);
-    const connectionOk = (!!editing && fingerprintNow === initialFingerprint)
+    const connectionOk = isAuto || (!!editing && fingerprintNow === initialFingerprint)
       || (!!connectionTest?.ok && testedFingerprint === fingerprintNow);
     if (payload.type !== "fixed" && !connectionOk) {
       return message.warning(COPY.testFirstToSave);
@@ -405,7 +451,7 @@ export function StationDrawer({
     }
   };
 
-  const saveLabel = editing ? COPY.save : UPSTREAM_FORM_TEXT.create;
+  const saveLabel = editing || ownMode ? COPY.save : UPSTREAM_FORM_TEXT.create;
 
   // 测试读取那一行的状态：形状 + 文字，不只靠颜色
   const testState: { level: Level; label: string } = testing
@@ -498,6 +544,78 @@ export function StationDrawer({
   const updatePurchase = (i: number, patch: Record<string, unknown>) =>
     setPurchases((l) => l.map((x, j) => (j === i ? { ...x, ...patch } : x)));
 
+  const costBody = (
+        <>
+          {/* 固定成本的上游用不到下面几项，只藏起来不拿掉：汇率、余额提醒线、其他地址保存时照原值带上，改回按用量算时还在；不再续费保存时写 false（见 onSave） */}
+          <Form.Item
+            label={isOwnStation ? COPY.sellPrice : COPY.rate}
+            name="cnyPerUsd"
+            hidden={isFixed}
+            extra={isOwnStation ? (rateText ? COPY.rateNow(rateText) : COPY.sellExample) : `${rateText ? COPY.rateNow(rateText) : COPY.rateExample}${COPY.rateBalance}`}
+          >
+            <Input placeholder={isOwnStation ? COPY.sellPlaceholder : COPY.ratePlaceholder} inputMode="decimal" autoComplete="off" />
+          </Form.Item>
+          <Form.Item label={COPY.lowBalance} name="lowBalanceUsd" hidden={isFixed} extra={COPY.lowBalanceDesc}>
+            <Input placeholder={COPY.lowBalancePlaceholder} inputMode="decimal" autoComplete="off" />
+          </Form.Item>
+          <Form.Item name="noRenewal" valuePropName="checked" hidden={isFixed} extra={COPY.noRenewalDesc}>
+            <SwitchRow label={COPY.noRenewal} />
+          </Form.Item>
+          {isFixed && (
+            <Form.Item label={COPY.purchasesLabel}>
+              {purchases.map((p, i) => (
+                <div key={i} className="jy-stations-purchase" role="group" aria-label={COPY.purchaseGroup(i + 1)}>
+                  <Input
+                    placeholder={COPY.amount}
+                    aria-label={COPY.amountOf(i + 1)}
+                    inputMode="decimal"
+                    value={p.amount ?? ""}
+                    onChange={(e) => updatePurchase(i, { amount: e.target.value })}
+                  />
+                  <Input
+                    placeholder={COPY.days}
+                    aria-label={COPY.daysOf(i + 1)}
+                    inputMode="numeric"
+                    value={p.days ?? ""}
+                    onChange={(e) => updatePurchase(i, { days: e.target.value })}
+                  />
+                  <DatePicker
+                    placeholder={COPY.startDate}
+                    value={p.startDate ? dayjs(p.startDate) : null}
+                    onChange={(d) => updatePurchase(i, { startDate: d ? d.format("YYYY-MM-DD") : "" })}
+                  />
+                  <button
+                    type="button"
+                    className="jy-icon-btn"
+                    title={COPY.removeOne}
+                    aria-label={COPY.removeOf(i + 1)}
+                    onClick={() => setPurchases((l) => l.filter((_, j) => j !== i))}
+                  >
+                    <Icon name="close" />
+                  </button>
+                </div>
+              ))}
+              <Button
+                type="dashed"
+                icon={<Icon name="plus" />}
+                onClick={() => setPurchases((l) => [...l, { startDate: dayjs().format("YYYY-MM-DD") }])}
+              >
+                {COPY.addOne}
+              </Button>
+              <p className="jy-caption jy-stations-hint">{COPY.purchasesDesc}</p>
+            </Form.Item>
+          )}
+        </>
+  );
+
+  // 自营站点：售价、余额提醒线单独一组；上游：都收在「更多设置」里，不分小标题
+  const costFields = ownMode ? (
+    <fieldset className="jy-fs">
+      <legend>{COPY.cost}</legend>
+      {costBody}
+    </fieldset>
+  ) : costBody;
+
   if (!mounted) return null;
   return (
     <Drawer
@@ -514,7 +632,7 @@ export function StationDrawer({
         const t = triggerRef.current;
         if (t && t.isConnected) t.focus();
       }}
-      title={editing ? UPSTREAM_FORM_TEXT.editTitle(stationDisplayName(editing)) : UPSTREAM_FORM_TEXT.create}
+      title={editing ? UPSTREAM_FORM_TEXT.editTitle(stationDisplayName(editing)) : ownMode ? COPY.ownTitle : UPSTREAM_FORM_TEXT.create}
       footer={
         <div className="jy-drawer-foot">
           <Dirty show={dirty} />
@@ -535,29 +653,48 @@ export function StationDrawer({
       {/* 抽屉常驻挂载：表单要有 name，字段 id 才不会和页面上其他表单（账号授权、渠道接入）撞车，标签才能指到自己的输入框 */}
       <Form name="station" form={form} layout="vertical" requiredMark={false} onValuesChange={onValuesChange}>
         <fieldset className="jy-fs">
-          <legend>{COPY.basics}</legend>
-          <Form.Item label={CREDENTIAL_FIELDS.name.label} name="name">
-            <Input placeholder={COPY.namePlaceholder} autoComplete="off" />
-          </Form.Item>
-          <Form.Item label={CREDENTIAL_FIELDS.type.label} name="type" extra={typeHint}>
-            <Select options={types.map((t) => ({ value: t.value, label: t.label }))} />
-          </Form.Item>
+          {!isAuto && <legend>{COPY.basics}</legend>}
+          {ownMode && (
+            <Form.Item label={CREDENTIAL_FIELDS.name.label} name="name">
+              <Input placeholder={COPY.namePlaceholder} autoComplete="off" />
+            </Form.Item>
+          )}
           {!isFixed && (
-            <Form.Item label={CREDENTIAL_FIELDS.baseUrl.label} name="baseUrl" extra={CREDENTIAL_FIELDS.baseUrl.hint}>
-              <Input placeholder="https://api.example.com" autoComplete="off" inputMode="url" />
+            <Form.Item label={isAuto ? COPY.address : CREDENTIAL_FIELDS.baseUrl.label} name="baseUrl" extra={isAuto ? COPY.addressHint : CREDENTIAL_FIELDS.baseUrl.hint}>
+              <Input placeholder="https://api.example.com" autoComplete="off" inputMode="url" onBlur={() => void runDetect()} />
             </Form.Item>
           )}
-          {formType === "newapi" && (
-            <Form.Item name="isOwn" valuePropName="checked" extra={COPY.isOwnDesc}>
-              <SwitchRow label={COPY.isOwn} />
-            </Form.Item>
+          {isAuto && (
+            <>
+              <Form.Item label={COPY.token} name="token" extra={COPY.tokenHint}>
+                <Input.Password autoComplete="new-password" onBlur={() => void runDetect()} />
+              </Form.Item>
+              {needUserId && (
+                <Form.Item label={CREDENTIAL_FIELDS.userId.label} name="userId" extra={COPY.needUserId}>
+                  <Input placeholder="例如 1" autoComplete="off" onBlur={() => void runDetect()} />
+                </Form.Item>
+              )}
+              <div aria-live="polite">
+                {detecting ? <p className="jy-caption">{COPY.detecting}</p> : null}
+                {!detecting && detected?.ok && detectedKey === autoKey ? (
+                  <div className="jy-test-result">
+                    <Sym kind="good" />
+                    <b>{COPY.detectedLine(types.find((t) => t.value === detected.type)?.label || detected.type, detected.name, testBalanceText(detected))}</b>
+                  </div>
+                ) : null}
+                {!detecting && detected && !detected.ok && !detected.needsUserId && detectedKey === autoKey ? (
+                  <div className="jy-test-result jy-test-result--bad">
+                    <Sym kind="crit" />
+                    <b>{testReadText({ ok: false, reason: detected.issue?.text })}</b>
+                    {detected.issue?.raw ? <div><ErrorDetail raw={detected.issue.raw} /></div> : null}
+                  </div>
+                ) : null}
+              </div>
+            </>
           )}
-          <Form.Item name="includeInProfit" valuePropName="checked" hidden={isOwnStation} extra={isFixed ? COPY.inProfitFixed : COPY.inProfitDesc}>
-            <SwitchRow label={COPY.inProfit} />
-          </Form.Item>
         </fieldset>
 
-        <fieldset className="jy-fs">
+        {!isAuto && <fieldset className="jy-fs">
           <legend>{COPY.login}</legend>
           {!isFixed ? <p className="fs-desc">{COPY.loginDesc}</p> : null}
           {credentialItems.length > 1 ? <div className="jy-two">{credentialItems}</div> : credentialItems}
@@ -620,74 +757,40 @@ export function StationDrawer({
               )}
             </>
           )}
-        </fieldset>
+        </fieldset>}
 
-        <fieldset className="jy-fs">
-          <legend>{COPY.cost}</legend>
-          {!isFixed && <p className="fs-desc">{COPY.costDesc}</p>}
-          {/* 固定成本的上游用不到下面几项，只藏起来不拿掉：汇率、余额提醒线、其他地址保存时照原值带上，改回按用量算时还在；不再续费保存时写 false（见 onSave） */}
-          <Form.Item
-            label={isOwnStation ? COPY.sellPrice : COPY.rate}
-            name="cnyPerUsd"
-            hidden={isFixed}
-            extra={isOwnStation ? (rateText ? COPY.rateNow(rateText) : COPY.sellExample) : `${rateText ? COPY.rateNow(rateText) : COPY.rateExample}${COPY.rateBalance}`}
-          >
-            <Input placeholder={isOwnStation ? COPY.sellPlaceholder : COPY.ratePlaceholder} inputMode="decimal" autoComplete="off" />
+        {ownMode && (
+          <Form.Item name="type" hidden>
+            <Input />
           </Form.Item>
-          <Form.Item label={COPY.lowBalance} name="lowBalanceUsd" hidden={isFixed} extra={COPY.lowBalanceDesc}>
-            <Input placeholder={COPY.lowBalancePlaceholder} inputMode="decimal" autoComplete="off" />
-          </Form.Item>
-          <Form.Item label={COPY.aliases} name="costAliasesText" hidden={isFixed || isOwnStation} extra={COPY.aliasesDesc}>
-            <Input.TextArea autoSize={{ minRows: 2, maxRows: 4 }} placeholder={"例如：10.0.0.8:8080\nhttp://relay.internal"} />
-          </Form.Item>
-          <Form.Item name="noRenewal" valuePropName="checked" hidden={isFixed} extra={COPY.noRenewalDesc}>
-            <SwitchRow label={COPY.noRenewal} />
-          </Form.Item>
-          {isFixed && (
-            <Form.Item label={COPY.purchasesLabel}>
-              {purchases.map((p, i) => (
-                <div key={i} className="jy-stations-purchase" role="group" aria-label={COPY.purchaseGroup(i + 1)}>
-                  <Input
-                    placeholder={COPY.amount}
-                    aria-label={COPY.amountOf(i + 1)}
-                    inputMode="decimal"
-                    value={p.amount ?? ""}
-                    onChange={(e) => updatePurchase(i, { amount: e.target.value })}
-                  />
-                  <Input
-                    placeholder={COPY.days}
-                    aria-label={COPY.daysOf(i + 1)}
-                    inputMode="numeric"
-                    value={p.days ?? ""}
-                    onChange={(e) => updatePurchase(i, { days: e.target.value })}
-                  />
-                  <DatePicker
-                    placeholder={COPY.startDate}
-                    value={p.startDate ? dayjs(p.startDate) : null}
-                    onChange={(d) => updatePurchase(i, { startDate: d ? d.format("YYYY-MM-DD") : "" })}
-                  />
-                  <button
-                    type="button"
-                    className="jy-icon-btn"
-                    title={COPY.removeOne}
-                    aria-label={COPY.removeOf(i + 1)}
-                    onClick={() => setPurchases((l) => l.filter((_, j) => j !== i))}
-                  >
-                    <Icon name="close" />
-                  </button>
-                </div>
-              ))}
-              <Button
-                type="dashed"
-                icon={<Icon name="plus" />}
-                onClick={() => setPurchases((l) => [...l, { startDate: dayjs().format("YYYY-MM-DD") }])}
-              >
-                {COPY.addOne}
-              </Button>
-              <p className="jy-caption jy-stations-hint">{COPY.purchasesDesc}</p>
-            </Form.Item>
-          )}
-        </fieldset>
+        )}
+        {ownMode ? costFields : (
+          <Collapse
+            className="jy-stations-more"
+            ghost
+            activeKey={moreOpen ? ["more"] : []}
+            onChange={(keys) => setMoreOpen((Array.isArray(keys) ? keys : [keys]).includes("more"))}
+            items={[{
+              key: "more",
+              forceRender: true,
+              label: COPY.more,
+              children: (
+                <>
+                  <Form.Item label={CREDENTIAL_FIELDS.name.label} name="name">
+                    <Input placeholder={COPY.namePlaceholder} autoComplete="off" />
+                  </Form.Item>
+                  <Form.Item label={CREDENTIAL_FIELDS.type.label} name="type" extra={typeHint}>
+                    <Select options={[...(editing ? [] : [{ value: "", label: COPY.typeAuto }]), ...types.map((t) => ({ value: t.value, label: t.label }))]} />
+                  </Form.Item>
+                  {costFields}
+                  <Form.Item name="includeInProfit" valuePropName="checked" extra={isFixed ? COPY.inProfitFixed : COPY.inProfitDesc}>
+                    <SwitchRow label={COPY.inProfit} />
+                  </Form.Item>
+                </>
+              ),
+            }]}
+          />
+        )}
       </Form>
     </Drawer>
   );

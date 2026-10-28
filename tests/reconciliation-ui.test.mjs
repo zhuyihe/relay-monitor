@@ -546,6 +546,10 @@ test("上游编辑页的 Esc 先收起展开的日期面板，再交给抽屉关
   await page.getByRole("button", { name: UPSTREAM_FORM_TEXT.create, exact: true }).first().click();
   const drawer = page.getByRole("dialog", { name: UPSTREAM_FORM_TEXT.create, exact: true });
   await drawer.waitFor();
+  // 加上游默认只有地址和令牌：固定成本在「更多设置」里选类型
+  await drawer.getByText("更多设置", { exact: true }).click();
+  await drawer.getByRole("combobox", { name: "类型", exact: true }).click();
+  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: "固定成本" }).click();
   await drawer.getByRole("button", { name: "再记一笔", exact: true }).click();
   await drawer.getByRole("group", { name: "第 2 笔固定成本记录", exact: true }).getByPlaceholder("开始日期").click();
   const panel = page.locator(".ant-picker-dropdown:not(.ant-picker-dropdown-hidden)");
@@ -665,265 +669,174 @@ test("删除上游要输入这个上游的名字：不一致时按钮不能点�
 const BUSINESS_TZ = "Asia/Shanghai";
 const shanghaiDay = (ms) => new Intl.DateTimeFormat("en-CA", { timeZone: BUSINESS_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
 const shiftDay = (key, n) => { const d = new Date(key + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
-// 成本估算的接口数据：按真实的今天往前排，一个按用量计费的上游每天都有记录
-function costAnalyticsFixture(days) {
-  const end = shanghaiDay(Date.now()), start = shiftDay(end, -(days - 1)), dates = Array.from({ length: days }, (_, i) => shiftDay(start, i));
-  return { days, start, end, tz: BUSINESS_TZ, generatedAt: new Date().toISOString(), selection: { includeArchived: false, stationCount: 1, archivedStationCount: 0 },
-    coverage: { earliestDate: start, latestDate: end, availableDays: days, requestedDays: days, monitoredStationCount: 1, isComplete: true, stationGaps: [] },
-    stations: [{ id: "up-a", name: "Fixture upstream", type: "newapi", cnyPerUsd: 7, totalCny: days * 10, fixedCny: 0, runway: { etaDays: 5, burnPerDay: 1, basis: "近 3 小时" } }],
-    daily: dates.map((date) => ({ stationId: "up-a", date, cny: 10 })), fixedDaily: [], heatmap: [], heatmapAvailable: true, heatmapAvailability: { available: days <= 30, reason: days <= 30 ? null : "range-not-supported", coverage: null } };
-}
-// 成本估算的可用天数用上游列表的余额和提醒线判断档位（balanceViewOf）：默认余额在提醒线以上、约 5 天，和接口的可用天数一致
-const costStationsFixture = (balance = { ok: true, remaining: 30 }, prediction = { etaDays: 5, burnPerDay: 1 }) => ({ stations: [{ id: "up-a", name: "Fixture upstream", type: "newapi", cnyPerUsd: 7, monitorEnabled: true, balance, prediction, spark: [] }], settings: { lowBalanceUsd: 5 } });
-async function openCostPage(t, own, path = "/analytics", { stations = costStationsFixture(), meta = (route) => fulfill(route, { rules: { etaDays: 3 }, settings: { lowBalanceUsd: 5 } }), analytics = costAnalyticsFixture } = {}) {
-  const ownReads = [];
+test("成本估算：只有「上游成本构成」和「每天的上游成本」两块，数读每日利润同一份；只有近 7 天、近 30 天和自定义；页顶有「每日利润」链接", async (t) => {
+  const rows = [profitRow("rule-1", "Rule A", { income: 5, cost: 2 }), profitRow("rule-2", "Rule B", { income: 3, cost: 1 })];
   const page = await openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/stations") return fulfill(route, stations);
-    if (url.pathname === "/api/meta") return meta(route);
-    if (url.pathname === "/api/analytics") return fulfill(route, analytics(Number(url.searchParams.get("days")) || 30));
-    if (url.pathname === "/api/own/analytics") { ownReads.push(url.searchParams.get("range")); return own(route); }
-    throw new Error("unexpected cost fixture API: " + url.pathname);
-  }, undefined, false, null, path);
-  await page.getByText(ANALYTICS_COPY.sourceTitle, { exact: true }).waitFor();
-  return { page, ownReads, equation: page.getByRole("region", { name: ANALYTICS_COPY.eqTitle, exact: true }) };
-}
+    const url = new URL(route.request().url()), path = url.pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/settings") return fulfill(route, { settings: {}, tz: PROFIT_TZ });
+    if (path === "/api/reconciliation/profit") return fulfill(route, { ...profitPage(rows), unaccountedUpstreamCostUsd: 0.5,
+      dailyCost: [{ day: "2026-10-07", actualCostUsd: 2 }, { day: PROFIT_TODAY, actualCostUsd: 1 }] });
+    throw new Error("unexpected cost fixture API: " + path);
+  }, undefined, false, null, "/analytics");
+  await page.getByRole("region", { name: ANALYTICS_COPY.panel.mix, exact: true }).waitFor();
+  await page.getByRole("region", { name: ANALYTICS_COPY.panel.daily, exact: true }).waitFor();
+  assert.equal(await page.getByRole("region").filter({ hasText: ANALYTICS_COPY.panel.heat }).count(), 0, "花费时段已删");
+  await page.getByText(ANALYTICS_COPY.unaccounted, { exact: false }).first().waitFor();
+  await page.getByText(ANALYTICS_COPY.todayLegend, { exact: false }).first().waitFor();
+  await page.getByRole("link", { name: "每日利润", exact: true }).first().waitFor();
+  assert.equal(await page.getByRole("button", { name: "近 90 天", exact: true }).count(), 0, "没有近 90 天");
+});
+
 const failJSON = (route, status, body) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
-test("成本估算：「数字怎么来的」「没算进去的数据」默认收起，只露一行结论；点按钮或页里「查看没算进去的数据」才展开", async (t) => {
-  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
-  // 最早的 3 天上游一条记录都没有：页里会出「查看没算进去的数据」，没算进去的数据那句写「3 天没有记录」
-  const analytics = (days) => {
-    const f = costAnalyticsFixture(days); f.daily = f.daily.slice(3); const earliestDate = f.daily[0].date;
-    f.coverage = { ...f.coverage, earliestDate, availableDays: days - 3, isComplete: false, stationGaps: [{ stationId: "up-a", stationName: "Fixture upstream", availableDays: days - 3, missingDays: 3, earliestDate }] };
-    return f;
-  };
-  const { page } = await openCostPage(t, own, "/analytics", { analytics });
-  // 页顶只露一句（ui-copy-spec §8.4），长说明在按钮后面
-  await page.getByText(ANALYTICS_COPY.sourceShort, { exact: true }).waitFor();
-  assert.equal(await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).count(), 0);
-  const source = page.getByRole("button", { name: ANALYTICS_COPY.sourceTitle, exact: true });
-  assert.equal(await source.getAttribute("aria-expanded"), "false"); await source.click();
-  assert.equal(await source.getAttribute("aria-expanded"), "true");
-  await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).waitFor();
-  await source.click(); assert.equal(await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).count(), 0);
-  // 没算进去的数据：结论一句和按钮在同一行，规则和明细在「哪些天、哪些上游缺记录」后面
-  const coverage = page.locator("#analytics-coverage");
-  const details = coverage.getByRole("button", { name: ANALYTICS_COPY.coverageCaption, exact: true });
-  const lead = coverage.getByText(ANALYTICS_COPY.leadGaps(ANALYTICS_COPY.leadMissingDays(3), 3), { exact: true });
-  await lead.waitFor(); await details.waitFor();
-  const [leadBox, buttonBox] = [await lead.boundingBox(), await details.boundingBox()];
-  assert.ok(Math.abs(leadBox.y + leadBox.height - (buttonBox.y + buttonBox.height)) < 8, "结论和按钮在同一行");
-  assert.equal(await coverage.locator("dl").count(), 0); assert.equal(await coverage.getByText(ANALYTICS_COPY.gapRule).count(), 0);
-  await details.click(); await coverage.locator("dl").getByText(ANALYTICS_COPY.kvRange, { exact: true }).waitFor();
-  await coverage.getByText(ANALYTICS_COPY.gapRule, { exact: true }).waitFor();
-  await details.click(); assert.equal(await coverage.locator("dl").count(), 0);
-  // 点页里真的「查看没算进去的数据」：展开并滚过去；收起后再点同一个链接也展开（地址栏的 # 没变）
-  const link = page.getByRole("link", { name: ANALYTICS_COPY.coverageLink, exact: true }).first();
-  await link.click(); await coverage.locator("dl").waitFor(); assert.equal(await details.getAttribute("aria-expanded"), "true");
-  await details.click(); assert.equal(await coverage.locator("dl").count(), 0);
-  await link.scrollIntoViewIfNeeded(); await link.click(); await coverage.locator("dl").waitFor();
-  // 带着 #analytics-coverage 刷新：那一块等数据读回来才出现，出现后展开并滚到它
-  await page.reload(); await coverage.locator("dl").waitFor(); assert.equal(await details.getAttribute("aria-expanded"), "true");
-  await page.waitForFunction(() => { const r = document.getElementById("analytics-coverage")?.getBoundingClientRect(); return r && r.top >= 0 && r.top < window.innerHeight / 2; });
-});
-
-test("成本估算：没缺记录时「没算进去的数据」只留一句、不出「哪些天、哪些上游缺记录」；只缺 1 天时说「这一天」", async (t) => {
-  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
-  let missing = 0;
-  const analytics = (days) => {
-    const f = costAnalyticsFixture(days); if (!missing) return f;
-    f.daily = f.daily.slice(missing); const earliestDate = f.daily[0].date;
-    f.coverage = { ...f.coverage, earliestDate, availableDays: days - missing, isComplete: false, stationGaps: [{ stationId: "up-a", stationName: "Fixture upstream", availableDays: days - missing, missingDays: missing, earliestDate }] };
-    return f;
-  };
-  const { page } = await openCostPage(t, own, "/analytics", { analytics });
-  const coverage = page.locator("#analytics-coverage");
-  await coverage.getByText(ANALYTICS_COPY.leadFull(30, 1), { exact: true }).waitFor();
-  assert.equal(await coverage.getByRole("button").count(), 0);
-  missing = 1; await page.reload();
-  await coverage.getByText(ANALYTICS_COPY.leadGaps(ANALYTICS_COPY.leadMissingDays(1), 1), { exact: true }).waitFor();
-  assert.match(await coverage.innerText(), /这一天的上游成本没算全/);
-  await coverage.getByRole("button", { name: ANALYTICS_COPY.coverageCaption, exact: true }).waitFor();
-});
-
-test("成本估算的可用天数和运营总览同一个档位：余额在提醒线以下写「余额偏低」，不只按天数写「快用完」", async (t) => {
-  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
-  const low = await openCostPage(t, own, "/analytics", { stations: costStationsFixture({ ok: true, remaining: 2 }, { etaDays: 1.5, burnPerDay: 1 }) });
-  const runway = low.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await runway.getByText(BALANCE_STATE_TEXT.low, { exact: true }).waitFor();
-  assert.equal(await runway.getByText(BALANCE_STATE_TEXT.soon, { exact: true }).count(), 0);
-  // 读不到提醒规则（/api/meta 失败）：提醒线用上游列表带回来的，照样是「余额偏低」
-  const noMeta = await openCostPage(t, own, "/analytics", { stations: costStationsFixture({ ok: true, remaining: 2 }, { etaDays: 1.5, burnPerDay: 1 }), meta: (route) => failJSON(route, 500, { error: "boom" }) });
-  const noMetaRunway = noMeta.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await noMetaRunway.getByText(BALANCE_STATE_TEXT.low, { exact: true }).waitFor();
-  assert.equal(await noMetaRunway.getByText(BALANCE_STATE_TEXT.soon, { exact: true }).count(), 0);
-  // 读不到余额：和运营总览一样画成虚线框（is-unknown），不画实心空条
-  const unreadable = await openCostPage(t, own, "/analytics", { stations: costStationsFixture({ ok: false, error: "403" }, { etaDays: 5, burnPerDay: 1 }) });
-  const unreadableRunway = unreadable.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await unreadableRunway.getByText(BALANCE_STATE_TEXT.unreadable, { exact: true }).waitFor();
-  assert.equal(await unreadableRunway.locator(".jy-track.is-unknown").count(), 1); assert.equal(await unreadableRunway.locator(".jy-track .fill").count(), 0);
-  // 余额在提醒线以上、约 5 天：还是「快用完」
-  const soon = await openCostPage(t, own); const soonRunway = soon.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await soonRunway.getByText(BALANCE_STATE_TEXT.soon, { exact: true }).waitFor();
-});
-// 利润等式里收入那一格留空时写的字（profit-equation.tsx 的 EQ_TEXT.unsetRevenue；组件文件带 JSX，node 读不了）
-const EQ_UNSET_REVENUE = "没设置";
-
-test("成本估算：收入算不出来时按原因说——没设置、超过 30 天、读不到、没法按天算各一句，原文收进「查看详细原因」", async (t) => {
-  const unset = await openCostPage(t, (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }));
-  await unset.equation.getByText(EQ_UNSET_REVENUE, { exact: true }).waitFor();
-  await unset.equation.getByText(new RegExp(`^${OWN_STATION_UNSET_TITLE}，`)).waitFor();
-  assert.equal(await unset.equation.getByRole("link", { name: workflowActionMeta("setup_own_station").label, exact: true }).getAttribute("href"), workflowAction("setup_own_station").href);
-  await unset.page.context().close();
-
-  // 超过 30 天：不去读自营收入，只算成本，给「切换到近 30 天」
-  const long = await openCostPage(t, () => { throw new Error("unexpected own read for 90 days"); }, "/analytics?range=90d");
-  await long.equation.getByText(ANALYTICS_COPY.longRangeNote, { exact: true }).waitFor();
-  await long.equation.locator(".jy-partial-note").filter({ hasText: ANALYTICS_COPY.longRangeNotice }).getByRole("link", { name: ANALYTICS_COPY.switchTo(RANGE_TEXT["30d"]), exact: true }).waitFor();
-  assert.deepEqual(long.ownReads, []);
-  await long.page.context().close();
-
-  // 接口报错和接口正常、但算收入时报错，是同一句；状态码 502 也按接口给的码归类
-  const raw = "own upstream said 403 forbidden";
-  for (const own of [(route) => failJSON(route, 502, { error: raw, code: "UPSTREAM_AUTH_DENIED" }),
-    (route) => fulfill(route, { station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7.5 }, profit: { error: raw, errorCode: "UPSTREAM_AUTH_DENIED" }, trend: [], tz: BUSINESS_TZ })]) {
-    const failed = await openCostPage(t, own);
-    const sentence = `${failureSentence(INCOME_UNREAD.title, ERROR_CATEGORIES.permission.text)}${INCOME_UNREAD.costOnly}`;
-    const notice = failed.equation.locator(".jy-partial-note").filter({ hasText: sentence }); await notice.waitFor();
-    await failed.equation.getByText(INCOME_UNREAD.empty, { exact: true }).waitFor();
-    await notice.getByRole("button", { name: REFRESH, exact: true }).waitFor();
-    // 原文默认收起，展开「查看详细原因」才看得到
-    assert.equal(await failed.page.getByText(raw, { exact: true }).isVisible(), false);
-    await notice.getByText("查看详细原因", { exact: true }).click(); await failed.page.getByText(raw, { exact: true }).waitFor();
-    await failed.page.context().close();
-  }
-
-  // 自营站点读到了，但没有每天的消费记录：收入没法分到每天，说原因，不当成报错
-  const unsplit = await openCostPage(t, (route) => fulfill(route, { station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7.5 }, profit: { incomeCny: 10 }, tz: BUSINESS_TZ }));
-  await unsplit.equation.getByText(ANALYTICS_COPY.incomeUnsplitEmpty, { exact: true }).waitFor();
-  await unsplit.equation.locator(".jy-partial-note").filter({ hasText: `${ANALYTICS_COPY.incomeUnsplit}：自营站点没有给出每天的消费记录。` }).waitFor();
-  assert.equal(await unsplit.equation.getByText("查看详细原因", { exact: true }).count(), 0);
-});
-
-// 收入确认不了时（用户身份或转售记录没读全），/api/own/analytics 照常返回（server/own-helpers.js 的 unconfirmedIncomeProfit）：
-// 两项成本照常，收入、管理员自用、毛利、净利是 null，原因在 profit.incomeUnconfirmed；用户列表也读不到时多一个 usersUnavailable
-const INCOME_UNCONFIRMED = { error: "用户「newbie」的身份没读到，收入和利润暂时算不出", errorCode: "OWN_INCOME_UNCONFIRMED" };
-const USERS_UNAVAILABLE = { error: "fixture user list unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" };
-const PROFIT_FAILED = "利润暂时算不出"; // profit-equation.tsx 的 EQ_TEXT.profitFailed（组件文件带 JSX，node 读不了）
-function unconfirmedOwnAnalytics(range = "7d", { usersUnavailable = false } = {}) {
-  const endMs = Date.now(), span = range === "today" ? 3600000 : 7 * 86400000, startMs = endMs - span;
-  return { range, tz: BUSINESS_TZ, startMs, endMs, prevWindow: { startMs: startMs - span, endMs: startMs, spanDays: span / 86400000 },
-    station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7 }, tokenScope: "billed",
-    byModel: [{ model: "fixture-model", tokens: 3000, cost: 5, requests: 5 }],
-    // 用户列表读不到时谁是管理员标不出，都按普通用户给
-    byUser: [{ user: "customer", tokens: 1000, cost: 2, requests: 3, isAdmin: false }, { user: "root", tokens: 2000, cost: 3, requests: 2, isAdmin: !usersUnavailable }],
-    prevUserAvailable: true, userBalances: usersUnavailable ? null : [{ user: "customer", balanceUsd: 4, usedUsd: 2, status: 1 }],
-    flow: { byGroup: [], byChannel: [], byUserGroup: [], coveredUsd: 0, coveragePct: null, prevWindow: { startMs: startMs - span, endMs: startMs } },
-    trend: [], daily: [], forecast: null, hourly: null, incomeDaily: null, incomeDailyApprox: false, generatedAt: new Date().toISOString(),
-    profit: { incomeCny: null, adminUsageCny: null, resoldCny: null, grossProfitCny: null, netProfitCny: null, grossMarginPct: null, netMarginPct: null, profitCny: null, marginPct: null,
-      upstreamCostCny: 3.5, fixedCostCny: 1.25, totalCostCny: 4.75, unmatched: [], complete: true, estimated: false, excludedStationIds: [], rateUnsetStations: [], warnings: [], warningCodes: [], windowDays: 7,
-      // 已标记的转售 Key 照常列出、金额是 null；没读到的那把带报错
-      resoldKeys: [{ username: "root", tokenName: "sale", usd: null, cny: null, error: "fixture stat unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" },
-        { username: "root", tokenName: "promo", usd: null, cny: null }],
-      costs: [{ stationId: "up-usage", name: "Usage upstream", channels: ["Sales"], mode: "usage", usd: 0.5, cny: 3.5 },
-        { stationId: "up-fixed", name: "Fixed upstream", channels: ["Sales"], mode: "fixed", note: "", active: 1, expired: 0, upcoming: 0, total: 1, cny: 1.25 }],
-      incomeUnconfirmed: INCOME_UNCONFIRMED },
-    ...(usersUnavailable ? { usersUnavailable: USERS_UNAVAILABLE } : {}) };
-}
-// 运营总览「今天收入和上游成本」用的大金额：收入 ¥12,345.67、上游成本 ¥23,456.80（5 个按用量算的上游）、5 位用户（售价 7，按 1 美元额度 = 7 元算）
-function bigOwnAnalytics(range = "today") {
-  const base = unconfirmedOwnAnalytics(range);
-  const costs = [9000, 6000, 4000, 2456.8, 2000].map((cny, i) => ({ stationId: `up-${i}`, name: `Upstream ${i}`, channels: ["Sales"], mode: "usage", usd: cny / 7, cny }));
-  const { incomeUnconfirmed, ...profit } = base.profit;
-  // 其余两位（2.2 + 1.3）× 7 = ¥24.50，和前 3 名（¥42、¥35、¥21）都不一样：写成「拿第 3 名的数」查得出来
-  return { ...base, byUser: [6, 5, 3, 2.2, 1.3].map((cost, i) => ({ user: `user${i}`, tokens: 1000, cost, requests: 3, isAdmin: false })),
-    profit: { ...profit, incomeCny: 12345.67, upstreamCostCny: 23456.8, fixedCostCny: 1234.56, totalCostCny: 24691.36, grossProfitCny: -11111.13, netProfitCny: -12345.69, costs } };
-}
-// 利润等式在收入读不到时：收入写「读不到」，毛利、净利留空、下面写「读不到收入」；下方一句原因加「刷新」，原文收起。
-// costs 给了就核对两项成本照常显示（成本估算页的成本来自 /api/analytics，不核对）
-async function expectIncomeUnread(equation, costs = null) {
-  const reason = errorText({ code: "OWN_INCOME_UNCONFIRMED" }), page = equation.page();
-  const notice = equation.locator(".jy-partial-note").filter({ hasText: `${failureSentence(INCOME_UNREAD.title, reason)}${INCOME_UNREAD.costOnly}` });
-  await notice.waitFor(); await notice.getByRole("button", { name: REFRESH, exact: true }).waitFor();
-  assert.equal(await page.getByText(INCOME_UNCONFIRMED.error, { exact: true }).filter({ visible: true }).count(), 0);
-  const term = (label) => equation.locator(".jy-eq-term:not(.is-carry)").filter({ has: page.locator(".jy-eq-label").filter({ hasText: new RegExp(`^${label}$`) }) });
-  const value = async (label) => (await term(label).locator(".jy-eq-value").textContent()).trim();
-  assert.equal(await value("收入"), INCOME_UNREAD.empty);
-  for (const label of ["毛利", "净利"]) { assert.equal(await value(label), EMPTY); assert.equal((await term(label).locator(".jy-eq-note").textContent()).trim(), INCOME_UNREAD.profit); }
-  if (costs) { assert.equal(await value("上游成本"), formatMoney(costs.upstream)); assert.equal(await value("固定成本"), formatMoney(costs.fixed)); }
-  assert.doesNotMatch(await equation.innerText(), /NaN|undefined/);
-  // 原文收在说明里的「查看详细原因」，点开才看得到
-  await notice.getByText("查看详细原因", { exact: true }).click(); await notice.getByText(INCOME_UNCONFIRMED.error, { exact: true }).waitFor();
-}
-async function openUnconfirmedMyPage(t, options) {
-  return openFixturePage(t, async (route) => {
+test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analytics，消费最多的用户、模型各前 5；利润怎么算、选转售 Key、按明细细算都是收起区", async (t) => {
+  const analytics = myLayoutAnalytics;
+  const adminKeys = [], paths = [];
+  const page = await openFixturePage(t, async (route) => {
     const url = new URL(route.request().url());
+    paths.push(url.pathname);
     if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(url.searchParams.get("range") || "7d", options));
-    // 每日收入只画收入，取自营站点接口的逐日收入：自营业务不再读慢的 /api/analytics（ui-design-spec §5.3）
+    if (url.pathname === "/api/own/analytics") return fulfill(route, analytics(url.searchParams.get("range") || "7d"));
+    if (url.pathname === "/api/own/admin-keys") { adminKeys.push(route.request().method()); return fulfill(route, { accounts: [{ username: "root", role: 100, enumerable: true, tokens: [{ name: "sale", flagged: true, usedUsd: 1 }] }] }); }
+    // 只画收入以后，自营业务不再读慢的 /api/analytics（请求了就会报错）
     throw new Error("unexpected my fixture API: " + url.pathname);
   }, undefined, false, null, "/my");
-}
-
-// 收入确认了的近 7 天：逐日收入 7 天（最早一天 ¥1,000，往后每天多 ¥100，最后一天是今天），7 个模型（前 5 + 其他 2 个）；
-// sellPrice: false 时自营站点没设置售价（收入按 1 美元额度 = 1 元估算）
-function myLayoutAnalytics(range = "7d", { sellPrice = true } = {}) {
-  const base = bigOwnAnalytics(range), end = shanghaiDay(Date.now());
-  const incomeDaily = Array.from({ length: 7 }, (_, i) => ({ date: shiftDay(end, i - 6), incomeCny: 1000 + i * 100 }));
-  const byModel = [700, 600, 500, 400, 300, 20, 10].map((cost, i) => ({ model: `model-${i}`, tokens: 1000, cost, requests: 3 }));
-  // 没设置售价：服务端在 profit 里带上 sell_price_unset 那条说明（等式下面写一次）
-  const unpriced = { station: { id: "own-1", name: "Fixture own" }, profit: { ...base.profit, adminUsageCny: 3, warnings: [SELL_PRICE_UNSET], warningCodes: ["sell_price_unset"] } };
-  return { ...base, incomeDaily, byModel, ...(sellPrice ? {} : unpriced) };
-}
-
-test("成本估算：没设置售价时，趋势图和表格里的收入也带「≈」，和等式同一个判断", async (t) => {
-  const cost = await openCostPage(t, (route) => fulfill(route, myLayoutAnalytics("7d", { sellPrice: false })), "/analytics?range=7d");
-  const trend = cost.page.getByRole("region", { name: "收入与上游成本", exact: true });
-  await trend.getByRole("button", { name: "表格", exact: true }).click();
-  const rev = (await trend.locator("tbody td:nth-child(2)").allInnerTexts()).map((x) => x.trim()).filter((x) => x !== EMPTY);
-  assert.ok(rev.length > 0); assert.ok(rev.every((x) => x.startsWith("≈")), rev.join(" "));
-});
-
-test("收入确认不了时：成本估算、自营业务的利润等式收入几项写「读不到」并说原因，两项成本照常；用户表说合计含管理员账号；用户列表也读不到时说管理员没标出", async (t) => {
-  const cost = await openCostPage(t, (route) => fulfill(route, { ...unconfirmedOwnAnalytics(), trend: [] }));
-  await expectIncomeUnread(cost.equation);
-  await cost.page.context().close();
-
-  // 自营业务默认近 7 天：利润等式叫「近 7 天经营」（profit-equation.tsx 的 EQ_TEXT.business）
-  const page = await openUnconfirmedMyPage(t);
-  await expectIncomeUnread(page.getByRole("region", { name: `${RANGE_TEXT["7d"]}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
-  // 利润那块不整块报错（报错框的标题里没有「利润暂时算不出」；原文收在「查看详细原因」里，可能也带这几个字）
-  assert.equal(await page.locator(".jy-state[role=alert] h3").filter({ hasText: PROFIT_FAILED }).count(), 0);
-  // 每日收入只画收入：收入读不到时那块只写一句短的，原因和「刷新」在上面的利润等式里（overview-tab.tsx 的 COPY.incomeSeeEq）
-  await page.getByRole("region", { name: "每日收入", exact: true }).getByText("读不到，原因见上面的利润等式。", { exact: true }).waitFor();
-  assert.doesNotMatch(await page.locator("main").innerText(), /NaN|undefined/);
-  // 「利润怎么算」照常打开（等式里的链接把收起区打开，More 的受控用法）；摘要不再写收入、成本的数（都在等式里），只写几个转售 Key、几个上游算进利润；
-  // 转售 Key 照常列出、金额写「—」，没读到的那把标「读不到」，照常能选（lib/format.js 的 BASIS_TITLE、profit-basis.tsx 的 COPY）
-  await page.getByRole("button", { name: "利润怎么算", exact: true }).click();
-  const basis = page.getByRole("region", { name: "利润怎么算", exact: true });
-  await basis.getByText(/^2 个转售 Key，\d+ 个上游算进利润/).waitFor();
-  assert.doesNotMatch(await basis.locator(".jy-panel-sub").innerText(), /[¥$]/);
-  assert.equal(await basis.getByRole("button", { name: "收入和成本怎么算、转售 Key、各上游成本", exact: true }).getAttribute("aria-expanded"), "true");
-  const resold = basis.getByRole("table", { name: "已标记的转售 Key", exact: true });
-  await resold.waitFor();
-  const resoldRow = (token) => resold.locator("tbody tr").filter({ has: page.getByText(token, { exact: true }) });
-  assert.equal((await resoldRow("promo").locator("td").last().textContent()).trim(), EMPTY);
-  assert.equal((await resoldRow("sale").locator("td").last().textContent()).trim(), EMPTY);
-  await resoldRow("sale").getByText("读不到", { exact: true }).waitFor();
-  assert.equal(await resoldRow("promo").getByText("读不到", { exact: true }).count(), 0);
-  assert.equal(await basis.getByRole("button", { name: "选转售 Key", exact: true }).isEnabled(), true);
-  // 用户标签页照常列出有消费的用户；收入没算出来，合计只说含多少管理员账号的消费（root 3 美元 × 7）
-  await page.getByRole("tab", { name: "用户", exact: true }).click();
-  await page.getByText("customer", { exact: true }).first().waitFor();
-  await page.getByText(`合计含管理员账号的 ${formatMoney(21)}。`).waitFor();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const region = (name) => page.getByRole("region", { name, exact: true });
+  const income = region("每日收入"), users = region("消费最多的用户"), forecast = region("预计花费"), models = region("消费最多的模型");
+  await income.waitFor(); await users.waitFor(); await forecast.waitFor(); await models.waitFor();
+  // 指标行在等式上面，这次只放等式里没有的三格（收入、毛利等 G 再补，同一个数一页只出现一次）
+  const metrics = region("这段时间的用量");
+  assert.deepEqual((await metrics.locator("dt").allInnerTexts()).map((x) => x.trim()), ["有消费的用户", "请求数", "Token（不含缓存）"]);
+  await metrics.getByText("5 个", { exact: true }).waitFor();
+  assert.doesNotMatch(await metrics.innerText(), /[¥$]/);
+  assert.ok((await metrics.boundingBox()).y < (await region(`${RANGE_TEXT["7d"]}经营`).boundingBox()).y, "指标行在利润等式上面");
+  // 「消费」合计在「消费最多的模型」下面，等于模型那几条加起来（按模型加总；用户的条按用户加总，可能对不上，所以不放用户下面）
+  assert.equal(await users.locator(".jy-my-facts").count(), 0);
+  assert.deepEqual((await models.locator(".jy-my-facts li").allInnerTexts()).map((x) => x.trim()), [`消费 ${formatMoney(2530 * 7)}`]);
+  // 管理员自用是 0 时「消费」和收入相等，不写那句（免得让人糊涂）；有管理员自用的情况在下面没设置售价那一页查
+  assert.equal(await models.getByText("含管理员自用，和收入不是一个数。", { exact: true }).count(), 0);
+  // 人数只在指标行里写一次：用户排行右上角不带数字
+  await users.getByRole("button", { name: "看全部用户", exact: true }).waitFor();
+  assert.equal(await users.getByText(/全部 \d+ 个用户/).count(), 0);
+  for (const [main, side] of [[income, users], [forecast, models]]) {
+    const [m, sd] = [await main.boundingBox(), await side.boundingBox()];
+    assert.ok(sd.x > m.x + m.width, "右边那块在左边那块右边");
+    assert.ok(m.width / sd.width > 1.8 && m.width / sd.width < 2.2, `宽度约 2:1（${Math.round(m.width)} / ${Math.round(sd.width)}）`);
+    assert.ok(Math.abs(m.y - sd.y) < 1 && Math.abs(m.height - sd.height) < 1, "上沿对齐、一样高");
+  }
+  // 每日收入只画收入：图例里没有上游成本，也没有每日净利；表格只有日期和收入两列、没有合计行（合计在等式里）
+  await income.locator(".jy-legend").getByText("收入", { exact: true }).waitFor();
+  // 说明里那句「上游成本在成本估算里看。」不算：只查图例
+  assert.equal(await income.locator(".jy-legend").getByText("上游成本").count(), 0); assert.equal(await income.getByText("每日净利").count(), 0);
+  await income.getByRole("button", { name: "表格", exact: true }).click();
+  await income.locator("table").waitFor();
+  assert.deepEqual((await income.locator("thead th").allInnerTexts()).map((x) => x.trim()), ["日期", "收入"]);
+  assert.equal(await income.locator("tfoot").count(), 0);
+  // 每天的收入照接口的逐日收入写，新的在上；第一行是今天（写「截至」几点），其余几天不写
+  const incomeRows = income.locator("tbody tr");
+  assert.deepEqual((await incomeRows.locator("td:last-child").allInnerTexts()).map((x) => x.trim()), [1600, 1500, 1400, 1300, 1200, 1100, 1000].map((v) => formatMoney(v)));
+  assert.match(await incomeRows.first().locator("td").first().innerText(), /截至/);
+  assert.equal(await incomeRows.locator("td:first-child", { hasText: "截至" }).count(), 1);
+  // 设置了售价：收入是准确数，不带「≈」；说明末尾去成本估算看上游成本，带当前时间范围
+  assert.doesNotMatch(await income.locator("tbody").innerText(), /≈/);
+  assert.equal(await income.getByRole("link", { name: "成本估算", exact: true }).getAttribute("href"), "/analytics?range=7d");
+  // 消费最多的模型：前 5 加一行「其他 2 个模型」（等于并掉的两个之和），右上角去「模型与渠道」
+  assert.equal(await models.locator(".jy-hbars li").count(), 6);
+  await models.locator(".jy-hbars li", { hasText: "其他 2 个模型" }).getByText(formatMoney(30 * 7), { exact: true }).waitFor();
+  await models.getByRole("button", { name: "全部 7 个模型", exact: true }).waitFor();
+  // 利润怎么算：摘要不带金额；明细收在共用的收起区里，默认收起
+  const basis = region("利润怎么算");
+  const basisMore = basis.getByRole("button", { name: "收入和成本怎么算、转售 Key、各上游成本", exact: true });
+  assert.equal(await basisMore.getAttribute("class"), "jy-more__toggle"); assert.equal(await basisMore.getAttribute("aria-expanded"), "false");
+  await basisMore.click();
+  // 选转售 Key：也是收起区，点开时才读管理员账号的 Key，「取消」收起
+  const pick = basis.getByRole("button", { name: "选转售 Key", exact: true });
+  assert.equal(await pick.getAttribute("class"), "jy-more__toggle"); assert.equal(adminKeys.length, 0);
+  await pick.click(); await basis.locator(".jy-my-mgr .jy-my-account h4", { hasText: "root" }).waitFor(); assert.deepEqual(adminKeys, ["GET"]);
+  await basis.getByRole("button", { name: "取消", exact: true }).click(); assert.equal(await pick.getAttribute("aria-expanded"), "false");
+  // 收起以后焦点回到「选转售 Key」按钮；「保存并重算」以后也一样
+  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "选转售 Key");
+  await pick.click(); await basis.locator(".jy-my-mgr .jy-my-account h4", { hasText: "root" }).waitFor();
+  await basis.getByRole("button", { name: "保存并重算", exact: true }).click();
+  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "选转售 Key");
+  assert.deepEqual(adminKeys, ["GET", "GET", "PUT"]);
+  // 换范围、点顶栏刷新：一直没请求过 /api/analytics（逐个记下请求过的路径再查）
+  await page.getByRole("button", { name: RANGE_TEXT["30d"], exact: true }).click();
+  await page.waitForURL(/range=30d/); await income.locator('a[href="/analytics?range=30d"]').waitFor();
+  const ownReads = () => paths.filter((x) => x === "/api/own/analytics").length, before = ownReads();
+  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
+  for (let i = 0; i < 50 && ownReads() === before; i++) await page.waitForTimeout(100);
+  assert.ok(ownReads() > before, "顶栏刷新重读了自营站点接口");
+  assert.ok(paths.includes("/api/own/analytics")); assert.equal(paths.filter((x) => x === "/api/analytics").length, 0);
+  // 按明细细算（模型与渠道标签页）：收起区，默认收起
+  await page.getByRole("tab", { name: "模型与渠道", exact: true }).click();
+  const audit = page.getByRole("button", { name: "细算的条数和结果", exact: true });
+  await audit.waitFor(); assert.equal(await audit.getAttribute("class"), "jy-more__toggle"); assert.equal(await audit.getAttribute("aria-expanded"), "false");
   await page.context().close();
 
-  // 用户列表也读不到：消费最多的用户、用户表下说管理员没标出；用户余额那块说原因、带刷新，不悄悄消失（shared.tsx 的 MY_TEXT.topUsers、users-tab.tsx 的 COPY.balTitle / balFailed）
-  const blind = await openUnconfirmedMyPage(t, { usersUnavailable: true });
-  await blind.getByRole("region", { name: "消费最多的用户", exact: true }).getByText(`${ADMIN_UNMARKED}。`, { exact: true }).waitFor();
-  await blind.getByRole("tab", { name: "用户", exact: true }).click();
-  const balances = blind.getByRole("region", { name: "用户余额", exact: true }).locator(".jy-state[role=alert]").filter({ hasText: failureSentence("读不到用户余额", errorText(USERS_UNAVAILABLE)) });
-  await balances.waitFor(); await balances.getByRole("button", { name: REFRESH, exact: true }).waitFor();
-  await blind.getByText(`${ADMIN_UNMARKED}。`).first().waitFor();
-  assert.equal(await blind.getByText(/合计含管理员/).count(), 0);
+  // 没设置售价：收入是估算，和等式同一个判断——每日收入的数值都带「≈」，说明里接上那句原因
+  const unpriced = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") return fulfill(route, myLayoutAnalytics(url.searchParams.get("range") || "7d", { sellPrice: false }));
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+  const estIncome = unpriced.getByRole("region", { name: "每日收入", exact: true });
+  await unpriced.getByRole("region", { name: "消费最多的模型", exact: true }).getByText("含管理员自用，和收入不是一个数。", { exact: true }).waitFor();
+  // 原因那句只在等式下面写一次，每日收入的说明里只写一句短的
+  await estIncome.getByText("收入是估算，原因见上面的利润等式。", { exact: false }).waitFor();
+  assert.equal((await unpriced.locator("main").innerText()).split(SELL_PRICE_UNSET).length - 1, 1, "「没设置售价」那句全页只出现一次");
+  await estIncome.getByRole("button", { name: "表格", exact: true }).click();
+  const est = (await estIncome.locator("tbody td:last-child").allInnerTexts()).map((x) => x.trim());
+  assert.equal(est.length, 7); assert.ok(est.every((x) => x.startsWith("≈")), est.join(" "));
+  // 悬停和读屏里的收入也带「≈」：键盘到最后一天，读屏那句写「收入 ≈…」
+  await estIncome.getByRole("button", { name: "图表", exact: true }).click();
+  const chart = estIncome.locator(".jy-chart-stack"); await chart.focus(); await chart.press("End");
+  assert.match(await estIncome.locator(".sr-only[aria-live]").innerText(), /收入 ≈/);
+  // 选「今天」：这块只画收入，说明不再提净利
+  await unpriced.getByRole("button", { name: RANGE_TEXT.today, exact: true }).click();
+  const todayOnly = unpriced.getByRole("region", { name: "每日收入", exact: true });
+  await todayOnly.getByText(/看每天的收入；/).waitFor();
+  assert.doesNotMatch(await todayOnly.innerText(), /净利/);
+  await unpriced.context().close();
+
+  // 「今天」按数据自己的结束时间判断：数据停在昨天 23:30（跨零点后还没刷新），昨天那一行才是「今天」（写「截至」）
+  const startOfToday = Date.parse(`${shanghaiDay(Date.now())}T00:00:00+08:00`);
+  const stale = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") {
+      const a = myLayoutAnalytics(url.searchParams.get("range") || "7d"), yesterday = shiftDay(shanghaiDay(Date.now()), -1);
+      return fulfill(route, { ...a, endMs: startOfToday - 30 * 60000, incomeDaily: a.incomeDaily.map((x, i) => ({ ...x, date: shiftDay(yesterday, i - 6) })) });
+    }
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+  const staleIncome = stale.getByRole("region", { name: "每日收入", exact: true });
+  await staleIncome.getByRole("button", { name: "表格", exact: true }).click();
+  const staleRows = staleIncome.locator("tbody tr");
+  await staleRows.first().waitFor();
+  assert.match(await staleRows.first().locator("td").first().innerText(), /截至/);
+  assert.equal(await staleIncome.locator("tbody td:first-child", { hasText: "截至" }).count(), 1);
+  await stale.context().close();
+
+  // 第一次加载时的骨架和概览同一个版式：块名是新的（「每日收入」，不是「收入与上游成本」），两行 8 + 4
+  let release; const held = new Promise((done) => { release = done; });
+  const slow = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") { await held; return fulfill(route, myLayoutAnalytics(url.searchParams.get("range") || "7d")); }
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+  t.after(() => release());
+  const busy = slow.locator(".jy-page[aria-busy=true]");
+  await busy.waitFor();
+  for (const name of ["这段时间的用量", "每日收入", "消费最多的用户", "预计花费"]) await busy.getByRole("region", { name, exact: true }).waitFor();
+  assert.equal(await busy.getByText("收入与上游成本").count(), 0);
+  assert.equal(await busy.locator(".jy-grid-8-4").count(), 2);
+  release();
+  await slow.getByRole("region", { name: "消费最多的模型", exact: true }).waitFor();
 });
 
 test("用量分析：全部上游都读不到时只说一处——黄条默认展开原因，合计只写「—」，下面不再放空状态", async (t) => {
@@ -1740,18 +1653,17 @@ test("编辑固定成本的上游：用不到的汇率、余额提醒线、其�
   }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations?edit=box");
   const drawer = page.getByRole("dialog", { name: UPSTREAM_FORM_TEXT.editTitle("服务器"), exact: true }); await drawer.waitFor();
   assert.equal(await drawer.getByLabel("汇率", { exact: true }).isVisible(), false); assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).isVisible(), false);
-  assert.equal(await drawer.getByLabel("渠道里用的其他地址", { exact: true }).isVisible(), false); assert.equal(await drawer.getByText("不再续费", { exact: true }).isVisible(), false);
+  assert.equal(await drawer.getByLabel("渠道里用的其他地址", { exact: true }).count(), 0); assert.equal(await drawer.getByText("不再续费", { exact: true }).isVisible(), false);
   // 改成按用量算：原来的值照旧填着（藏起来时没丢）
   const pickType = async (label) => { await drawer.getByRole("combobox", { name: "类型", exact: true }).click(); await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: label }).first().click(); };
   await pickType("New API"); await drawer.getByLabel("汇率", { exact: true }).waitFor();
   assert.equal(await drawer.getByLabel("汇率", { exact: true }).inputValue(), "7.2"); assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).inputValue(), "3");
-  assert.equal(await drawer.getByLabel("渠道里用的其他地址", { exact: true }).inputValue(), "10.0.0.9:8080");
   // 改回固定成本、改一笔金额后保存：汇率、余额提醒线、其他地址照原值带上；不再续费一律 false（会关掉到期提醒，固定成本的表单里没有这个开关）
   await pickType("固定成本"); await drawer.getByLabel("第 1 笔金额（¥）", { exact: true }).fill("320");
   await drawer.getByRole("button", { name: "保存", exact: true }).click();
   for (let wait = 0; !saves.length && wait < 50; wait++) await page.waitForTimeout(100);
   assert.equal(saves.length, 1); assert.equal(saves[0].type, "fixed"); assert.equal(saves[0].fixedPurchases[0].amount, "320");
-  assert.equal(saves[0].cnyPerUsd, "7.2"); assert.equal(saves[0].lowBalanceUsd, "3"); assert.deepEqual(saves[0].costAliases, ["10.0.0.9:8080"]); assert.equal(saves[0].noRenewal, false);
+  assert.equal(saves[0].cnyPerUsd, "7.2"); assert.equal(saves[0].lowBalanceUsd, "3"); assert.equal("costAliases" in saves[0], false, "其他地址不在表单里，不带过去（已存的照旧）"); assert.equal(saves[0].noRenewal, false);
 });
 
 test("编辑自营站点：「汇率」那一格叫「售价」，只对上游有用的设置藏起来，保存时照旧带上原来的值", async (t) => {
@@ -1777,7 +1689,37 @@ test("编辑自营站点：「汇率」那一格叫「售价」，只对上游�
   await drawer.getByLabel("售价", { exact: true }).fill("8"); await drawer.getByRole("button", { name: "保存", exact: true }).click();
   for (let wait = 0; !saves.length && wait < 50; wait++) await page.waitForTimeout(100);
   assert.equal(saves.length, 1); assert.equal(saves[0].cnyPerUsd, "8"); assert.equal(saves[0].isOwn, true); assert.equal(saves[0].includeInProfit, true);
-  assert.deepEqual(saves[0].costAliases, ["10.0.0.8:8080"]); assert.equal(saves[0].lowBalanceUsd, "3"); assert.equal(saves[0].noRenewal, true);
+  assert.equal("costAliases" in saves[0], false); assert.equal(saves[0].lowBalanceUsd, "3"); assert.equal(saves[0].noRenewal, true);
+});
+
+test("加上游只填地址和访问令牌：离开令牌栏就试读，下面写「类型 · 名字 · 余额」，读到了才能新增；要用户 ID 的才露出那一栏", async (t) => {
+  const detects = [], creates = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname, method = route.request().method();
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations" && method === "GET") return fulfill(route, { stations: [], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    if (path === "/api/stations" && method === "POST") { creates.push(route.request().postDataJSON()); return fulfill(route, { station: { id: "n1" } }); }
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API 账号", needs: ["accessToken", "userId"] }, { value: "fixed", label: "固定成本", needs: [] }], rules: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/stations/detect") {
+      const body = route.request().postDataJSON(); detects.push(body);
+      return fulfill(route, body.userId ? { ok: true, type: "newapi", name: "演示·主力账号", account: "演示·主力账号", remaining: 158.72, currency: "USD" } : { ok: false, needsUserId: true, type: "newapi" });
+    }
+    throw new Error("unexpected API: " + method + " " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations?edit=new");
+  const drawer = page.getByRole("dialog", { name: UPSTREAM_FORM_TEXT.create, exact: true }); await drawer.waitFor();
+  const save = drawer.getByRole("button", { name: UPSTREAM_FORM_TEXT.create, exact: true });
+  assert.equal(await save.isDisabled(), true, "还没读到：不能新增");
+  await drawer.getByLabel("站点地址", { exact: true }).fill("https://api.example.com");
+  await drawer.getByLabel("访问令牌", { exact: true }).fill("pat-123"); await drawer.getByLabel("站点地址", { exact: true }).click();
+  const userId = drawer.getByLabel("用户 ID", { exact: false }); await userId.waitFor();
+  assert.deepEqual(detects.map((d) => [d.baseUrl, d.token, d.userId]), [["https://api.example.com", "pat-123", ""]]);
+  await userId.fill("7"); await drawer.getByLabel("站点地址", { exact: true }).click();
+  await drawer.getByText("New API 账号 · 演示·主力账号 · 余额", { exact: false }).waitFor();
+  await page.waitForFunction(() => !document.querySelector(".ant-drawer .ant-btn-primary[disabled]"));
+  await save.click();
+  for (let wait = 0; !creates.length && wait < 50; wait++) await page.waitForTimeout(100);
+  assert.deepEqual([creates[0].type, creates[0].name, creates[0].accessToken, creates[0].userId, creates[0].baseUrl], ["newapi", "演示·主力账号", "pat-123", "7", "https://api.example.com"]);
 });
 
 // ---- 合并重复的上游（K1a，design/ux/k1a-merge.md 第 9 节验收清单）-------------------------------------
@@ -1934,15 +1876,6 @@ test("合并重复的上游：退回碰上 409 写「这次合并已经变了，
   await confirm.getByRole("button", { name: "刷新", exact: true }).click(); await confirm.waitFor({ state: "hidden" });
 });
 
-test("合并重复的上游：成本估算算不出时两行写「—」，下面一句，合并照样能点", async (t) => {
-  const { page } = await openMergePage(t, { groups: [mergeGroupOf({ estimate: null })], records: [] });
-  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
-  const card = mergeCard(page, "主力上游");
-  await card.getByText("— → —", { exact: true }).first().waitFor();
-  await card.getByText("成本估算暂时算不出，合并照样能做", { exact: true }).waitFor();
-  assert.equal(await card.getByRole("button", { name: "合并", exact: true }).isEnabled(), true);
-});
-
 test("合并重复的上游：只有合不了的组时提示换一句；「处理重复」去现成的那个地方；前后的数带「≈」时照写", async (t) => {
   const blocked = mergeBlockedGroup(); blocked.estimate = { windows: [{ days: 7, approx: true, before: { cny: 3211.2 }, after: { cny: 1070.4 } }, { days: 30, approx: true, before: { cny: 13982.4 }, after: { cny: 4660.8 } }] };
   const { page } = await openMergePage(t, { groups: [blocked], records: [] });
@@ -2013,18 +1946,6 @@ test("合并重复的上游：手机上抽屉从底部升起占满，按钮至�
     const minHeight = await sheet.getByRole("button", { name, exact: true }).evaluate((el) => parseFloat(getComputedStyle(el).minHeight));
     assert.ok(minHeight >= 44, `确认框里的「${name}」最小高度 ${minHeight}`);
   }
-});
-
-test("成本估算：总成本下面写「其中 1 个账号加成了 2 个上游，这里重复算了」[去合并]；没有重复时不出现", async (t) => {
-  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
-  const none = await openCostPage(t, own);
-  await none.page.getByText(ANALYTICS_COPY.totalCost, { exact: true }).waitFor();
-  assert.equal(await none.page.getByTestId("merge-cost-line").count(), 0);
-  const analytics = (days) => ({ ...costAnalyticsFixture(days), merge: { mergeable: 1, blocked: 0, accounts: 1, upstreams: 2, records: 0 } });
-  const { page } = await openCostPage(t, own, "/analytics", { analytics });
-  const line = page.getByTestId("merge-cost-line");
-  await line.getByText("其中 1 个账号加成了 2 个上游，这里重复算了", { exact: false }).waitFor();
-  await line.getByRole("button", { name: "去合并", exact: true }).waitFor();
 });
 
 test("合并重复的上游：另外几种合不了的一项一行，按钮放第一项的；「恢复监控」就地恢复被暂停的那个，改成一样以后「合并」能点", async (t) => {
@@ -2264,155 +2185,6 @@ test("昨天里有「还在读取」的日子：5 分钟重读一次（只读 PO
   await advance(600000); await settle(); assert.equal(profitReads.length, before + 1, "已固定以后不再读");
 });
 
-test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analytics，消费最多的用户、模型各前 5；利润怎么算、选转售 Key、按明细细算都是收起区", async (t) => {
-  const analytics = myLayoutAnalytics;
-  const adminKeys = [], paths = [];
-  const page = await openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    paths.push(url.pathname);
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/own/analytics") return fulfill(route, analytics(url.searchParams.get("range") || "7d"));
-    if (url.pathname === "/api/own/admin-keys") { adminKeys.push(route.request().method()); return fulfill(route, { accounts: [{ username: "root", role: 100, enumerable: true, tokens: [{ name: "sale", flagged: true, usedUsd: 1 }] }] }); }
-    // 只画收入以后，自营业务不再读慢的 /api/analytics（请求了就会报错）
-    throw new Error("unexpected my fixture API: " + url.pathname);
-  }, undefined, false, null, "/my");
-  await page.setViewportSize({ width: 1440, height: 900 });
-  const region = (name) => page.getByRole("region", { name, exact: true });
-  const income = region("每日收入"), users = region("消费最多的用户"), forecast = region("预计花费"), models = region("消费最多的模型");
-  await income.waitFor(); await users.waitFor(); await forecast.waitFor(); await models.waitFor();
-  // 指标行在等式上面，这次只放等式里没有的三格（收入、毛利等 G 再补，同一个数一页只出现一次）
-  const metrics = region("这段时间的用量");
-  assert.deepEqual((await metrics.locator("dt").allInnerTexts()).map((x) => x.trim()), ["有消费的用户", "请求数", "Token（不含缓存）"]);
-  await metrics.getByText("5 个", { exact: true }).waitFor();
-  assert.doesNotMatch(await metrics.innerText(), /[¥$]/);
-  assert.ok((await metrics.boundingBox()).y < (await region(`${RANGE_TEXT["7d"]}经营`).boundingBox()).y, "指标行在利润等式上面");
-  // 「消费」合计在「消费最多的模型」下面，等于模型那几条加起来（按模型加总；用户的条按用户加总，可能对不上，所以不放用户下面）
-  assert.equal(await users.locator(".jy-my-facts").count(), 0);
-  assert.deepEqual((await models.locator(".jy-my-facts li").allInnerTexts()).map((x) => x.trim()), [`消费 ${formatMoney(2530 * 7)}`]);
-  // 管理员自用是 0 时「消费」和收入相等，不写那句（免得让人糊涂）；有管理员自用的情况在下面没设置售价那一页查
-  assert.equal(await models.getByText("含管理员自用，和收入不是一个数。", { exact: true }).count(), 0);
-  // 人数只在指标行里写一次：用户排行右上角不带数字
-  await users.getByRole("button", { name: "看全部用户", exact: true }).waitFor();
-  assert.equal(await users.getByText(/全部 \d+ 个用户/).count(), 0);
-  for (const [main, side] of [[income, users], [forecast, models]]) {
-    const [m, sd] = [await main.boundingBox(), await side.boundingBox()];
-    assert.ok(sd.x > m.x + m.width, "右边那块在左边那块右边");
-    assert.ok(m.width / sd.width > 1.8 && m.width / sd.width < 2.2, `宽度约 2:1（${Math.round(m.width)} / ${Math.round(sd.width)}）`);
-    assert.ok(Math.abs(m.y - sd.y) < 1 && Math.abs(m.height - sd.height) < 1, "上沿对齐、一样高");
-  }
-  // 每日收入只画收入：图例里没有上游成本，也没有每日净利；表格只有日期和收入两列、没有合计行（合计在等式里）
-  await income.locator(".jy-legend").getByText("收入", { exact: true }).waitFor();
-  // 说明里那句「上游成本在成本估算里看。」不算：只查图例
-  assert.equal(await income.locator(".jy-legend").getByText("上游成本").count(), 0); assert.equal(await income.getByText("每日净利").count(), 0);
-  await income.getByRole("button", { name: "表格", exact: true }).click();
-  await income.locator("table").waitFor();
-  assert.deepEqual((await income.locator("thead th").allInnerTexts()).map((x) => x.trim()), ["日期", "收入"]);
-  assert.equal(await income.locator("tfoot").count(), 0);
-  // 每天的收入照接口的逐日收入写，新的在上；第一行是今天（写「截至」几点），其余几天不写
-  const incomeRows = income.locator("tbody tr");
-  assert.deepEqual((await incomeRows.locator("td:last-child").allInnerTexts()).map((x) => x.trim()), [1600, 1500, 1400, 1300, 1200, 1100, 1000].map((v) => formatMoney(v)));
-  assert.match(await incomeRows.first().locator("td").first().innerText(), /截至/);
-  assert.equal(await incomeRows.locator("td:first-child", { hasText: "截至" }).count(), 1);
-  // 设置了售价：收入是准确数，不带「≈」；说明末尾去成本估算看上游成本，带当前时间范围
-  assert.doesNotMatch(await income.locator("tbody").innerText(), /≈/);
-  assert.equal(await income.getByRole("link", { name: "成本估算", exact: true }).getAttribute("href"), "/analytics?range=7d");
-  // 消费最多的模型：前 5 加一行「其他 2 个模型」（等于并掉的两个之和），右上角去「模型与渠道」
-  assert.equal(await models.locator(".jy-hbars li").count(), 6);
-  await models.locator(".jy-hbars li", { hasText: "其他 2 个模型" }).getByText(formatMoney(30 * 7), { exact: true }).waitFor();
-  await models.getByRole("button", { name: "全部 7 个模型", exact: true }).waitFor();
-  // 利润怎么算：摘要不带金额；明细收在共用的收起区里，默认收起
-  const basis = region("利润怎么算");
-  const basisMore = basis.getByRole("button", { name: "收入和成本怎么算、转售 Key、各上游成本", exact: true });
-  assert.equal(await basisMore.getAttribute("class"), "jy-more__toggle"); assert.equal(await basisMore.getAttribute("aria-expanded"), "false");
-  await basisMore.click();
-  // 选转售 Key：也是收起区，点开时才读管理员账号的 Key，「取消」收起
-  const pick = basis.getByRole("button", { name: "选转售 Key", exact: true });
-  assert.equal(await pick.getAttribute("class"), "jy-more__toggle"); assert.equal(adminKeys.length, 0);
-  await pick.click(); await basis.locator(".jy-my-mgr .jy-my-account h4", { hasText: "root" }).waitFor(); assert.deepEqual(adminKeys, ["GET"]);
-  await basis.getByRole("button", { name: "取消", exact: true }).click(); assert.equal(await pick.getAttribute("aria-expanded"), "false");
-  // 收起以后焦点回到「选转售 Key」按钮；「保存并重算」以后也一样
-  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "选转售 Key");
-  await pick.click(); await basis.locator(".jy-my-mgr .jy-my-account h4", { hasText: "root" }).waitFor();
-  await basis.getByRole("button", { name: "保存并重算", exact: true }).click();
-  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "选转售 Key");
-  assert.deepEqual(adminKeys, ["GET", "GET", "PUT"]);
-  // 换范围、点顶栏刷新：一直没请求过 /api/analytics（逐个记下请求过的路径再查）
-  await page.getByRole("button", { name: RANGE_TEXT["30d"], exact: true }).click();
-  await page.waitForURL(/range=30d/); await income.locator('a[href="/analytics?range=30d"]').waitFor();
-  const ownReads = () => paths.filter((x) => x === "/api/own/analytics").length, before = ownReads();
-  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
-  for (let i = 0; i < 50 && ownReads() === before; i++) await page.waitForTimeout(100);
-  assert.ok(ownReads() > before, "顶栏刷新重读了自营站点接口");
-  assert.ok(paths.includes("/api/own/analytics")); assert.equal(paths.filter((x) => x === "/api/analytics").length, 0);
-  // 按明细细算（模型与渠道标签页）：收起区，默认收起
-  await page.getByRole("tab", { name: "模型与渠道", exact: true }).click();
-  const audit = page.getByRole("button", { name: "细算的条数和结果", exact: true });
-  await audit.waitFor(); assert.equal(await audit.getAttribute("class"), "jy-more__toggle"); assert.equal(await audit.getAttribute("aria-expanded"), "false");
-  await page.context().close();
-
-  // 没设置售价：收入是估算，和等式同一个判断——每日收入的数值都带「≈」，说明里接上那句原因
-  const unpriced = await openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/own/analytics") return fulfill(route, myLayoutAnalytics(url.searchParams.get("range") || "7d", { sellPrice: false }));
-    throw new Error("unexpected my fixture API: " + url.pathname);
-  }, undefined, false, null, "/my");
-  const estIncome = unpriced.getByRole("region", { name: "每日收入", exact: true });
-  await unpriced.getByRole("region", { name: "消费最多的模型", exact: true }).getByText("含管理员自用，和收入不是一个数。", { exact: true }).waitFor();
-  // 原因那句只在等式下面写一次，每日收入的说明里只写一句短的
-  await estIncome.getByText("收入是估算，原因见上面的利润等式。", { exact: false }).waitFor();
-  assert.equal((await unpriced.locator("main").innerText()).split(SELL_PRICE_UNSET).length - 1, 1, "「没设置售价」那句全页只出现一次");
-  await estIncome.getByRole("button", { name: "表格", exact: true }).click();
-  const est = (await estIncome.locator("tbody td:last-child").allInnerTexts()).map((x) => x.trim());
-  assert.equal(est.length, 7); assert.ok(est.every((x) => x.startsWith("≈")), est.join(" "));
-  // 悬停和读屏里的收入也带「≈」：键盘到最后一天，读屏那句写「收入 ≈…」
-  await estIncome.getByRole("button", { name: "图表", exact: true }).click();
-  const chart = estIncome.locator(".jy-chart-stack"); await chart.focus(); await chart.press("End");
-  assert.match(await estIncome.locator(".sr-only[aria-live]").innerText(), /收入 ≈/);
-  // 选「今天」：这块只画收入，说明不再提净利
-  await unpriced.getByRole("button", { name: RANGE_TEXT.today, exact: true }).click();
-  const todayOnly = unpriced.getByRole("region", { name: "每日收入", exact: true });
-  await todayOnly.getByText(/看每天的收入；/).waitFor();
-  assert.doesNotMatch(await todayOnly.innerText(), /净利/);
-  await unpriced.context().close();
-
-  // 「今天」按数据自己的结束时间判断：数据停在昨天 23:30（跨零点后还没刷新），昨天那一行才是「今天」（写「截至」）
-  const startOfToday = Date.parse(`${shanghaiDay(Date.now())}T00:00:00+08:00`);
-  const stale = await openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/own/analytics") {
-      const a = myLayoutAnalytics(url.searchParams.get("range") || "7d"), yesterday = shiftDay(shanghaiDay(Date.now()), -1);
-      return fulfill(route, { ...a, endMs: startOfToday - 30 * 60000, incomeDaily: a.incomeDaily.map((x, i) => ({ ...x, date: shiftDay(yesterday, i - 6) })) });
-    }
-    throw new Error("unexpected my fixture API: " + url.pathname);
-  }, undefined, false, null, "/my");
-  const staleIncome = stale.getByRole("region", { name: "每日收入", exact: true });
-  await staleIncome.getByRole("button", { name: "表格", exact: true }).click();
-  const staleRows = staleIncome.locator("tbody tr");
-  await staleRows.first().waitFor();
-  assert.match(await staleRows.first().locator("td").first().innerText(), /截至/);
-  assert.equal(await staleIncome.locator("tbody td:first-child", { hasText: "截至" }).count(), 1);
-  await stale.context().close();
-
-  // 第一次加载时的骨架和概览同一个版式：块名是新的（「每日收入」，不是「收入与上游成本」），两行 8 + 4
-  let release; const held = new Promise((done) => { release = done; });
-  const slow = await openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/own/analytics") { await held; return fulfill(route, myLayoutAnalytics(url.searchParams.get("range") || "7d")); }
-    throw new Error("unexpected my fixture API: " + url.pathname);
-  }, undefined, false, null, "/my");
-  t.after(() => release());
-  const busy = slow.locator(".jy-page[aria-busy=true]");
-  await busy.waitFor();
-  for (const name of ["这段时间的用量", "每日收入", "消费最多的用户", "预计花费"]) await busy.getByRole("region", { name, exact: true }).waitFor();
-  assert.equal(await busy.getByText("收入与上游成本").count(), 0);
-  assert.equal(await busy.locator(".jy-grid-8-4").count(), 2);
-  release();
-  await slow.getByRole("region", { name: "消费最多的模型", exact: true }).waitFor();
-});
-
 test("手机 320：一个渠道一张卡片，点开能看计算明细，页面不横向溢出", async (t) => {
   const { page } = await openDailyPage(t, { viewport: { width: 320, height: 800 } });
   assert.equal(await page.locator(".jy-profit-table").count(), 0);
@@ -2428,6 +2200,79 @@ test("手机 320：一个渠道一张卡片，点开能看计算明细，页面�
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "320px document root overflows horizontally");
 });
+
+// ---- 自营业务用例共用的夹具（原来夹在已删用例之间）----
+// 利润等式里收入那一格留空时写的字（profit-equation.tsx 的 EQ_TEXT.unsetRevenue；组件文件带 JSX，node 读不了）
+const EQ_UNSET_REVENUE = "没设置";
+// 收入确认不了时（用户身份或转售记录没读全），/api/own/analytics 照常返回（server/own-helpers.js 的 unconfirmedIncomeProfit）：
+// 两项成本照常，收入、管理员自用、毛利、净利是 null，原因在 profit.incomeUnconfirmed；用户列表也读不到时多一个 usersUnavailable
+const INCOME_UNCONFIRMED = { error: "用户「newbie」的身份没读到，收入和利润暂时算不出", errorCode: "OWN_INCOME_UNCONFIRMED" };
+const USERS_UNAVAILABLE = { error: "fixture user list unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" };
+const PROFIT_FAILED = "利润暂时算不出"; // profit-equation.tsx 的 EQ_TEXT.profitFailed（组件文件带 JSX，node 读不了）
+function unconfirmedOwnAnalytics(range = "7d", { usersUnavailable = false } = {}) {
+  const endMs = Date.now(), span = range === "today" ? 3600000 : 7 * 86400000, startMs = endMs - span;
+  return { range, tz: BUSINESS_TZ, startMs, endMs, prevWindow: { startMs: startMs - span, endMs: startMs, spanDays: span / 86400000 },
+    station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7 }, tokenScope: "billed",
+    byModel: [{ model: "fixture-model", tokens: 3000, cost: 5, requests: 5 }],
+    // 用户列表读不到时谁是管理员标不出，都按普通用户给
+    byUser: [{ user: "customer", tokens: 1000, cost: 2, requests: 3, isAdmin: false }, { user: "root", tokens: 2000, cost: 3, requests: 2, isAdmin: !usersUnavailable }],
+    prevUserAvailable: true, userBalances: usersUnavailable ? null : [{ user: "customer", balanceUsd: 4, usedUsd: 2, status: 1 }],
+    flow: { byGroup: [], byChannel: [], byUserGroup: [], coveredUsd: 0, coveragePct: null, prevWindow: { startMs: startMs - span, endMs: startMs } },
+    trend: [], daily: [], forecast: null, hourly: null, incomeDaily: null, incomeDailyApprox: false, generatedAt: new Date().toISOString(),
+    profit: { incomeCny: null, adminUsageCny: null, resoldCny: null, grossProfitCny: null, netProfitCny: null, grossMarginPct: null, netMarginPct: null, profitCny: null, marginPct: null,
+      upstreamCostCny: 3.5, fixedCostCny: 1.25, totalCostCny: 4.75, unmatched: [], complete: true, estimated: false, excludedStationIds: [], rateUnsetStations: [], warnings: [], warningCodes: [], windowDays: 7,
+      // 已标记的转售 Key 照常列出、金额是 null；没读到的那把带报错
+      resoldKeys: [{ username: "root", tokenName: "sale", usd: null, cny: null, error: "fixture stat unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" },
+        { username: "root", tokenName: "promo", usd: null, cny: null }],
+      costs: [{ stationId: "up-usage", name: "Usage upstream", channels: ["Sales"], mode: "usage", usd: 0.5, cny: 3.5 },
+        { stationId: "up-fixed", name: "Fixed upstream", channels: ["Sales"], mode: "fixed", note: "", active: 1, expired: 0, upcoming: 0, total: 1, cny: 1.25 }],
+      incomeUnconfirmed: INCOME_UNCONFIRMED },
+    ...(usersUnavailable ? { usersUnavailable: USERS_UNAVAILABLE } : {}) };
+}
+// 运营总览「今天收入和上游成本」用的大金额：收入 ¥12,345.67、上游成本 ¥23,456.80（5 个按用量算的上游）、5 位用户（售价 7，按 1 美元额度 = 7 元算）
+function bigOwnAnalytics(range = "today") {
+  const base = unconfirmedOwnAnalytics(range);
+  const costs = [9000, 6000, 4000, 2456.8, 2000].map((cny, i) => ({ stationId: `up-${i}`, name: `Upstream ${i}`, channels: ["Sales"], mode: "usage", usd: cny / 7, cny }));
+  const { incomeUnconfirmed, ...profit } = base.profit;
+  // 其余两位（2.2 + 1.3）× 7 = ¥24.50，和前 3 名（¥42、¥35、¥21）都不一样：写成「拿第 3 名的数」查得出来
+  return { ...base, byUser: [6, 5, 3, 2.2, 1.3].map((cost, i) => ({ user: `user${i}`, tokens: 1000, cost, requests: 3, isAdmin: false })),
+    profit: { ...profit, incomeCny: 12345.67, upstreamCostCny: 23456.8, fixedCostCny: 1234.56, totalCostCny: 24691.36, grossProfitCny: -11111.13, netProfitCny: -12345.69, costs } };
+}
+// 利润等式在收入读不到时：收入写「读不到」，毛利、净利留空、下面写「读不到收入」；下方一句原因加「刷新」，原文收起。
+// costs 给了就核对两项成本照常显示（成本估算页的成本来自 /api/analytics，不核对）
+async function expectIncomeUnread(equation, costs = null) {
+  const reason = errorText({ code: "OWN_INCOME_UNCONFIRMED" }), page = equation.page();
+  const notice = equation.locator(".jy-partial-note").filter({ hasText: `${failureSentence(INCOME_UNREAD.title, reason)}${INCOME_UNREAD.costOnly}` });
+  await notice.waitFor(); await notice.getByRole("button", { name: REFRESH, exact: true }).waitFor();
+  assert.equal(await page.getByText(INCOME_UNCONFIRMED.error, { exact: true }).filter({ visible: true }).count(), 0);
+  const term = (label) => equation.locator(".jy-eq-term:not(.is-carry)").filter({ has: page.locator(".jy-eq-label").filter({ hasText: new RegExp(`^${label}$`) }) });
+  const value = async (label) => (await term(label).locator(".jy-eq-value").textContent()).trim();
+  assert.equal(await value("收入"), INCOME_UNREAD.empty);
+  for (const label of ["毛利", "净利"]) { assert.equal(await value(label), EMPTY); assert.equal((await term(label).locator(".jy-eq-note").textContent()).trim(), INCOME_UNREAD.profit); }
+  if (costs) { assert.equal(await value("上游成本"), formatMoney(costs.upstream)); assert.equal(await value("固定成本"), formatMoney(costs.fixed)); }
+  assert.doesNotMatch(await equation.innerText(), /NaN|undefined/);
+  // 原文收在说明里的「查看详细原因」，点开才看得到
+  await notice.getByText("查看详细原因", { exact: true }).click(); await notice.getByText(INCOME_UNCONFIRMED.error, { exact: true }).waitFor();
+}
+async function openUnconfirmedMyPage(t, options) {
+  return openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(url.searchParams.get("range") || "7d", options));
+    // 每日收入只画收入，取自营站点接口的逐日收入：自营业务不再读慢的 /api/analytics（ui-design-spec §5.3）
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+}
+// 收入确认了的近 7 天：逐日收入 7 天（最早一天 ¥1,000，往后每天多 ¥100，最后一天是今天），7 个模型（前 5 + 其他 2 个）；
+// sellPrice: false 时自营站点没设置售价（收入按 1 美元额度 = 1 元估算）
+function myLayoutAnalytics(range = "7d", { sellPrice = true } = {}) {
+  const base = bigOwnAnalytics(range), end = shanghaiDay(Date.now());
+  const incomeDaily = Array.from({ length: 7 }, (_, i) => ({ date: shiftDay(end, i - 6), incomeCny: 1000 + i * 100 }));
+  const byModel = [700, 600, 500, 400, 300, 20, 10].map((cost, i) => ({ model: `model-${i}`, tokens: 1000, cost, requests: 3 }));
+  // 没设置售价：服务端在 profit 里带上 sell_price_unset 那条说明（等式下面写一次）
+  const unpriced = { station: { id: "own-1", name: "Fixture own" }, profit: { ...base.profit, adminUsageCny: 3, warnings: [SELL_PRICE_UNSET], warningCodes: ["sell_price_unset"] } };
+  return { ...base, incomeDaily, byModel, ...(sellPrice ? {} : unpriced) };
+}
 
 // ---- 共用夹具（原来夹在已删用例之间）----
 // 展开的记录里一项：左边名称，右边写法（Detail，recon-parts.tsx）
@@ -2472,134 +2317,9 @@ function confirmedHistoryRecord(id = "saved-oct8", profit = 1) {
   return { historyId: id, confirmedAt: "2026-10-08T16:01:00.000Z", window, ownSource: { stationId: "old-own", provider: "newapi", baseUrl: "https://old-own.test", accountId: "11", namespaceKey: "old-own-namespace" }, upstreamSource: { provider: "newapi", baseUrl: "https://old-up.test", accountId: "7", tokenId: 9, tokenName: "old-name" }, scopeVersion: 1, scopeFingerprint: "old-scope", billingEffectiveFromMs: window.startMs, channels, amountBasis: { id: "channel-billing-usd-v3", currency: "USD", billingSource: "channel-log-stat", calculationVersion: 3, conversion: "quota_per_unit" }, upstream: side(2), downstream: { ...side(2 + profit), channels: channels.map((channel) => ({ ...channel, billingState: "complete", quotaUnits: 100, amountUsd: 1, knownAmountUsd: 1 })) }, calculation: { differenceUsd: profit, profitUsd: profit, riskDifferenceUsd: null, marginRate: profit / (2 + profit) }, sourceCompleteness: "complete" };
 }
 const ownSource = { stationId: "own-1", provider: "newapi", baseUrl: "https://own.example", accountId: "1", namespaceKey: createHash("sha256").update(JSON.stringify(["newapi", "https://own.example", "1"])).digest("hex") };
-const connectButton = (name, action = CONNECT) => `${action}「${name}」`;
+const UPDATE_AUTH = workflowActionMeta("update_authorization").label, USE_SAVED = "用已有上游", NEW_UPSTREAM = "新增上游", CREATE_HINT = "保存后，别的渠道也能直接用这个上游。";
 // 渠道绑定的话：按钮名来自 lib/workflow-actions.js，其余在 app/components/channel-onboarding.tsx 的 COPY 表（tsx 测试里引用不到，照抄原句）
 const CONNECT = workflowActionMeta("connect_channels").label, EDIT_BINDING = workflowActionMeta("edit_binding").label, TEST_READ = workflowActionMeta("verify_identity").label, REFRESH = workflowActionMeta("refresh").label, RETRY = workflowActionMeta("retry_bill").label;
-const UPDATE_AUTH = workflowActionMeta("update_authorization").label, USE_SAVED = "用已有上游", NEW_UPSTREAM = "新增上游", CREATE_HINT = "保存后，别的渠道也能直接用这个上游。";
-async function openOnboardingPage(t, options = {}) {
-  const config = options.config || onboardingFixture(), probes = [], writes = [], reads = [], recoveries = [], operations = new Map();
-  let latestProbe, latestResult;
-  const page = await openFixturePage(t, async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (/^\/api\/reconciliation\/upstreams\/[^/]+\/keys$/.test(path)) {
-      reads.push({ path, method: route.request().method(), query: new URL(route.request().url()).search });
-      if (options.keyDirectory) return options.keyDirectory(route, path, reads, config);
-      if (options.readonlyAPI) return options.readonlyAPI(route, path);
-      return fulfill(route, onboardingDirectory(config, decodeURIComponent(path.split("/")[4]), options.tokens));
-    }
-    if (path === "/api/reconciliation/configuration") return fulfill(route, options.ruleConfiguration || configuration);
-    if (path === "/api/reconciliation" || path === "/api/reconciliation/query") return fulfill(route, options.ruleModel || response(options.ruleResults || [rule("rule-1", "Rule A", 10)]));
-    if (options.extraAPI) return options.extraAPI(route, path);
-    throw new Error("unexpected fixture API: " + path);
-  }, options.viewport, !!options.clock, async (route) => {
-    const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/channel-onboarding/accounts") { reads.push({ path, method: request.method() }); return options.accounts ? options.accounts(route, reads) : fulfill(route, options.accountModel || onboardingAccounts(config)); }
-    if (options.accountOperation && path.startsWith("/api/channel-onboarding/accounts/")) return options.accountOperation(route, path);
-    if (/^\/api\/channel-onboarding\/resources\/[^/]+\/identity$/.test(path) && options.extraAPI) return options.extraAPI(route, path);
-    if (request.method() === "GET" || path.endsWith("/sync")) { reads.push({ path, method: request.method() }); return options.discovery ? options.discovery(route, reads, config) : fulfill(route, config); }
-    const body = request.postDataJSON();
-    if (path === "/api/channel-onboarding/batch/probe") { probes.push(body); latestProbe = options.probe ? options.probe(body, probes.length, config) : probeResult(body, config, options); latestProbe.previewId += "-" + probes.length; operations.set(body.requestId, { ...(operations.get(body.requestId) || {}), input: body, probe: latestProbe }); return fulfill(route, latestProbe); }
-    if (path === "/api/channel-onboarding/batch/recover") { recoveries.push(body); const operation = operations.get(body.requestId); return fulfill(route, options.recover ? options.recover(body, operation?.result) : operation?.result || batchResult(operation.input, operation.probe, false)); }
-    assert.equal(path, "/api/channel-onboarding/batch");
-    writes.push(body);
-    latestResult = options.connect ? options.connect(body, writes.length, latestProbe) : batchResult(body, latestProbe);
-    operations.get(body.requestId).result = latestResult;
-    if (latestResult.complete) for (const group of body.groups) for (const channel of group.channels) {
-      const entry = config.channels.find((entry) => entry.id === channel.channelId);
-      const change = latestProbe.groups.find((entry) => entry.groupId === group.groupId).monitorChanges.find((entry) => entry.channelId === channel.channelId);
-      entry.monitor = { status: change.proposedStationIds.length ? "linked" : "unlinked", stationIds: change.proposedStationIds };
-      if (group.reconciliation) entry.reconciliation = { status: "configured", ruleIds: ["rule-1"] };
-    }
-    if (options.loseResponseAt === writes.length) return route.abort("failed");
-    return fulfill(route, latestResult);
-  }, options.onboardingPath || "/stations?view=onboarding");
-  const channelButton = newChannelButton(page);
-  if (config.stale) await channelButton.waitFor();
-  else await channelButton.click({ trial: true });
-  return { page, config, probes, writes, reads, recoveries };
-}
-// 已经看余额或算利润的渠道按钮是「改绑定「X」」，其余是「去绑定「X」」
-const newChannelButton = (page) => page.getByRole("button", { name: new RegExp(`^(${CONNECT}|${EDIT_BINDING})「New channel」$`) });
-function batchResult(body, probe, complete = true) {
-  return { requestId: body.requestId, complete, retryInput: probe.retryInput, groups: probe.groups.map((group) => ({
-    groupId: group.groupId, requestedGroupIds: group.requestedGroupIds, canonicalKey: group.basis.canonicalKey, complete,
-    monitor: { status: body.selections[0].monitor ? "linked" : "not_requested", stationIds: body.selections[0].monitor ? [body.selections[0].stationId || "new-up"] : [] },
-    reconciliation: { status: body.groups[0].reconciliation ? complete ? "configured" : "unverified" : "not_requested", ruleId: complete ? "rule-" + (group.basis.tokenId || "monitor") : undefined },
-    saved: { stationIds: body.selections[0].monitor ? [body.selections[0].stationId || "new-up"] : [], authorizationStationId: !body.groups[0].reconciliation ? null : !body.selections[0].monitor ? body.selections[0].stationId || "new-billing-auth" : body.selections[0].reconciliationAuthorization ? body.selections[0].reconciliationAuthorization.stationId || "billing-auth" : null, links: [], ruleId: complete && body.groups[0].reconciliation ? "rule-" + group.basis.tokenId : null, scopeVersion: 2, billingEffectiveFromMs: Date.parse("2026-10-10T12:00:00+08:00") },
-    channels: body.groups.find((entry) => entry.groupId === group.groupId).channels.map((entry) => ({ ...entry, complete, stationIds: [body.selections[0].stationId || "new-up"], ruleId: complete ? "rule-" + group.basis.tokenId : null, remainingActions: complete ? [] : ["retry_rule"] })),
-    remainingActions: complete ? [] : ["repreview"],
-  })) };
-}
-function probeResult(body, config, options = {}) {
-  const selection = body.selections[0];
-  const linkOnly = !selection.stationId && !selection.newStation;
-  const selectedStation = config.upstreams.find((entry) => entry.id === selection.stationId), billingStation = config.upstreams.find((entry) => entry.id === selection.reconciliationAuthorization?.stationId);
-  const accountIdentity = { provider: billingStation?.identity?.provider || selectedStation?.identity?.provider || (selection.newStation?.type?.startsWith("sub2api") ? "sub2api" : "newapi"), baseUrl: billingStation?.baseUrl || selection.newStation?.baseUrl || selectedStation?.baseUrl || "https://up.example", accountId: billingStation?.identity?.accountId || selectedStation?.identity?.accountId || "42" };
-  const mainIdentity = linkOnly || (selection.newStation?.type || config.upstreams.find((entry) => entry.id === selection.stationId)?.type) === "newapi-key" ? null : accountIdentity;
-  const groups = body.groups.map((group) => {
-    const tokenId = group.reconciliation?.tokenId || null;
-    const existingRule = config.rules.find((rule) => rule.enabled && !rule.archivedAt && rule.tokenId === tokenId);
-    const existing = existingRule?.channels.map((channel) => channel.channelId) || [];
-    const proposed = [...new Set([...existing, ...group.channels.map((entry) => entry.channelId)])];
-    const monitorChanges = group.channels.map((channel) => {
-      const current = config.channels.find((entry) => entry.id === channel.channelId), previousStationIds = current?.monitor?.stationIds || [];
-      const proposedStationIds = [...new Set([...previousStationIds.filter((id) => !(channel.removeMonitorStationIds || []).includes(id)), ...(selection.monitor ? [selection.stationId || "new-up"] : []), ...(selection.additionalMonitorStationIds || [])])];
-      return { channelId: channel.channelId, previousStationIds, proposedStationIds, addedStationIds: proposedStationIds.filter((id) => !previousStationIds.includes(id)), removedStationIds: previousStationIds.filter((id) => !proposedStationIds.includes(id)) };
-    });
-    return {
-      groupId: group.groupId, requestedGroupIds: [group.groupId], selectionIds: [group.selectionId], requestedChannelIds: group.channels.map((entry) => entry.channelId),
-      status: group.reconciliation ? options.billingStatus || (tokenId ? "ready" : "unavailable") : "monitor_only",
-      ...(group.reconciliation && !tokenId && !options.billingStatus ? { code: "KEY_REQUIRED", reason: "请选择实际使用的上游 Key" } : {}),
-      basis: { ownSource, sourceVersion: "source-v1", channelRevisions: Object.fromEntries(proposed.map((id) => [id, "revision-" + id])), resourceVersions: {}, accountIdentity, canonicalKey: tokenId ? existingRule?.canonicalKey || createHash("sha256").update(JSON.stringify([accountIdentity.provider, accountIdentity.baseUrl, accountIdentity.accountId, String(tokenId)])).digest("hex") : null, tokenId, keyVersion: tokenId ? "key-v1" : null, existingRuleId: existingRule?.id || null, existingScopeVersion: existingRule?.scopeVersion || null, existingChannelIds: existing, proposedChannelIds: proposed, timezone: group.reconciliation?.timezone || "Asia/Shanghai", billingEffectiveFromMs: preview.billingEffectiveFromMs, coverageDeclaration: group.reconciliation?.coverageDeclaration || { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } },
-      preview: { ...preview, costCoverage: group.reconciliation?.coverageDeclaration.answer === "none" ? "complete" : "unknown" },
-      monitorChanges,
-    };
-  });
-  return {
-    requestId: body.requestId, previewId: "preview-" + body.requestId, expiresAtMs: Date.now() + 600000, source: { ownSource, sourceVersion: "source-v1", resourceVersion: "own-v1" },
-    selections: [{ selectionId: selection.selectionId, station: linkOnly ? null : { id: selection.stationId || "new-up", name: "Fixture upstream" }, monitor: { status: "verified" }, authorizationStationId: selection.reconciliationAuthorization?.stationId || (mainIdentity ? selection.stationId || null : null), accountIdentity: mainIdentity, tokens: options.billingStatus ? [] : onboardingTokens, credentialUpdateRequired: !!options.requireUpdate }],
-    groups,
-    retryInput: { requestId: body.requestId, source: { ownStationId: body.ownStationId, ownSource, sourceVersion: "source-v1" }, selections: [{ selectionId: selection.selectionId, stationId: selection.stationId || null, type: linkOnly ? null : selection.newStation?.type || config.upstreams.find((entry) => entry.id === selection.stationId)?.type || "newapi", baseUrl: linkOnly ? null : selection.newStation?.baseUrl || "https://up.example", ...(linkOnly ? { linkOnly: true } : {}), monitor: selection.monitor, additionalMonitorStationIds: selection.additionalMonitorStationIds || [], accountIdentity: mainIdentity, authorizationStationId: selection.reconciliationAuthorization?.stationId || null, authorizationIdentity: linkOnly ? null : accountIdentity, credentialUpdateRequested: !!selection.updateCredentials && !!selection.newStation }], groups: groups.map((group, index) => ({ groupId: group.groupId, requestedGroupIds: group.requestedGroupIds, selectionIds: group.selectionIds, channels: body.groups[index].channels, reconciliationRequested: !!body.groups[index].reconciliation, reconciliation: group.basis.tokenId ? { canonicalKey: group.basis.canonicalKey, tokenId: group.basis.tokenId, timezone: group.basis.timezone, coverageDeclaration: group.basis.coverageDeclaration, previewEffectiveFromMs: preview.billingEffectiveFromMs } : null })) },
-  };
-}
 const preview = { billingEffectiveFromMs: null, firstQueryableAtMs: null, scopeChanged: true };
-const onboardingTokens = [{ id: 7, name: "Supplier Key", status: 1, group: "upstream-group" }, { id: 8, name: "New Key", status: 1, group: "upstream-group" }];
-function onboardingDirectory(config, id, tokens = onboardingTokens) {
-  const station = config.upstreams.find((entry) => entry.id === id);
-  return { quotaPerUnit: 500000, version: "keys-v1", groups: {}, platform: station?.identity?.provider || "newapi", capability: { state: "supported", currency: "USD", window: "second" }, billingTimezone: { state: "verified", timezone: "Asia/Shanghai" }, tokens, identity: { provider: station?.identity?.provider || "newapi", baseUrl: station?.baseUrl || "https://up.example", accountId: station?.identity?.accountId || "42" }, resourceVersion: station?.resourceVersion || "resource-" + id, probe: null };
-}
-function onboardingAccounts(config) {
-  const accounts = new Map(), unverifiedResources = [];
-  for (const station of config.upstreams) {
-    const identity = station.identity && { ...station.identity, baseUrl: station.baseUrl };
-    const resource = { archivedAt: null, authVersion: 1, resourceVersion: "resource-" + station.id, verification: identity ? "verified" : "unverified", purposes: { monitor: station.monitorEnabled !== false, billingRuleIds: config.rules.filter((rule) => rule.upstreamStationId === station.id).map((rule) => rule.id) }, balance: { ok: true, remaining: 10 }, hasAccessToken: station.type !== "newapi-key", hasApiKey: station.type === "newapi-key", hasPassword: false, ...station, identity };
-    if (!identity) { unverifiedResources.push(resource); continue; }
-    const accountKey = createHash("sha256").update(JSON.stringify([identity.provider, identity.baseUrl, identity.accountId])).digest("hex");
-    if (!accounts.has(accountKey)) accounts.set(accountKey, { accountKey, siteKey: identity.provider + ":" + identity.baseUrl, identity, resources: [], keys: [], actions: [] });
-    accounts.get(accountKey).resources.push(resource);
-  }
-  for (const account of accounts.values()) for (const rule of config.rules.filter((rule) => rule.canonicalKey && account.resources.some((resource) => resource.id === rule.upstreamStationId))) {
-    let key = account.keys.find((entry) => entry.tokenId === rule.tokenId);
-    if (!key) { key = { canonicalKey: rule.canonicalKey, tokenId: rule.tokenId, tokenName: rule.tokenName, ruleIds: [], activeRuleIds: [], scopeAmbiguous: false, channels: [], associations: [], costCoverage: rule.costCoverage, coverageDeclaration: rule.coverageDeclaration, scopeVersion: rule.scopeVersion, billingEffectiveFromMs: null, firstQueryableAtMs: null }; account.keys.push(key); }
-    key.ruleIds.push(rule.id); if (rule.enabled && !rule.archivedAt) key.activeRuleIds.push(rule.id);
-    key.channels.push(...rule.channels.map((channel) => ({ ...channel, ownStationId: rule.ownStationId, ownSource: rule.ownSource })));
-    key.associations.push({ ruleId: rule.id, status: rule.enabled && !rule.archivedAt ? "active" : "stopped", upstreamStationId: rule.upstreamStationId, ownStationId: rule.ownStationId, timezone: rule.timezone || "Asia/Shanghai", channels: rule.channels, costCoverage: rule.costCoverage,
-      // 和服务端一样由 coverageNeedsAnswer 算好；夹具里的绑定没写生效方式的按现在的新绑定算
-      needsCoverageAnswer: coverageNeedsAnswer({ billingPolicy: "immediate", ...rule }, costBasisOf(config.upstreams.find((station) => station.id === rule.upstreamStationId))),
-      coverageDeclaration: rule.coverageDeclaration, scopeVersion: rule.scopeVersion || 1, billingEffectiveFromMs: null, accountingStartMs: null, conflict: false, conflictRuleIds: [], stoppedAt: rule.archivedAt || null });
-  }
-  return { accounts: [...accounts.values()], unverifiedResources, channels: config.channels, actions: [], generatedAt: "2026-10-09T07:00:00.000Z" };
-}
-function onboardingFixture(existing = true, type = "newapi", ids = [4]) {
-  return {
-    ownStation: { id: "own-1", baseUrl: "https://own.example" },
-    ownSource, sourceVersion: "source-v1",
-    upstreams: existing ? [{ id: "upstream-1", name: "Fixture upstream", type, monitorEnabled: true, baseUrl: "https://up.example", authVersion: 1, resourceVersion: "resource-upstream-1", identity: type === "newapi-key" ? null : { provider: type.startsWith("sub2api") ? "sub2api" : "newapi", accountId: "42" } }] : [],
-    channels: ids.map((id) => ({ id, name: id === 4 ? "New channel" : "New channel " + id, status: 1, baseUrl: "https://up.example", groups: ["local-sales"], revision: "revision-" + id, candidates: existing ? ["upstream-1"] : [], monitor: { status: "unlinked", stationIds: [] }, reconciliation: { status: "unconfigured", ruleIds: [] } })),
-    rules: existing && type !== "newapi-key" ? [{ ...rule("rule-1", "Rule A", 10).rule, ownStationId: "own-1", ownSource, tokenId: 7, tokenName: "Supplier Key", timezone: "Asia/Shanghai", scopeVersion: 1, canonicalKey: createHash("sha256").update(JSON.stringify([type.startsWith("sub2api") ? "sub2api" : "newapi", "https://up.example", "42", "7"])).digest("hex"), channels: [1, 2, 3].map((channelId) => ({ channelId, name: "Sales " + channelId })), enabled: true }] : [],
-    syncedAt: "2026-10-09T06:00:00.000Z", stale: false,
-  };
-}
 
 test("占位：夹具段结束", () => {});
