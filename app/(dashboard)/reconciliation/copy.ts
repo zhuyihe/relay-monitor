@@ -19,7 +19,7 @@ export const KEY_PICKER = Object.freeze({
   noKeysAtAll: "已加的上游里读不到 Key，先去",
   noUpstream: "已加的上游里读不到 Key，先去",
   upstreamList: "上游列表",
-  started: (channel: string) => `已开始算「${channel}」，从今天 0 点起`,
+  started: (name: string) => `已选 Key「${name}」，从今天 0 点起按它算`,
   changed: (name: string, rekeyed: boolean) => `已改成 Key「${name}」：今天新旧两把都算，明天起只算新的${rekeyed ? "；被挡住的几天会按新 Key 重新算" : ""}`,
   notSelected: "还没选 Key",
   panelTitle: "还没算利润的渠道",

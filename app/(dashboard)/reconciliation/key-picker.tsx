@@ -70,7 +70,7 @@ export function KeyPicker({ ownStationId, channel, upstreams, autoOpen = false, 
     setSaving(true);
     try {
       const result = await api("/api/reconciliation/channels/select-key", { method: "POST", body: { ownStationId, channelId: channel.channelId, ...(bound ? {} : { upstreamStationId: upstreamId }), tokenId } });
-      message.success(bound ? KEY_PICKER.changed(picked?.display.split(" · ")[0] ?? "", (result?.rekeyedDays?.length ?? 0) > 0) : KEY_PICKER.started(channel.name));
+      message.success(bound ? KEY_PICKER.changed(picked?.display.split(" · ")[0] ?? "", (result?.rekeyedDays?.length ?? 0) > 0) : KEY_PICKER.started(picked?.display.split(" · ")[0] ?? ""));
       await onChanged();
     } catch (error: any) {
       message.error(describeError({ code: error?.code, message: error?.message }).text);
