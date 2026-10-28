@@ -910,7 +910,7 @@ export default function StationsPage() {
               <tr>
                 <th scope="col" className="jy-stations-pin-l">{COPY.col.name}</th>
                 <th scope="col">{COPY.col.status}</th>
-                <th scope="col">{CHANNEL_BINDING.column}</th>
+                <th scope="col" className="jy-stations-ch">{CHANNEL_BINDING.column}</th>
                 <th scope="col" className="r">{COPY.col.balance}</th>
                 <th scope="col" className="r">{COPY.col.burn}</th>
                 <th scope="col" aria-sort={ariaSort}>
@@ -930,7 +930,7 @@ export default function StationsPage() {
                     <tr className={issue ? "has-issue" : undefined}>
                       <td className="jy-stations-pin-l">{resourceCell(v)}</td>
                       <td>{statusCell(v)}</td>
-                      <td>{channelCell(v)}</td>
+                      <td className="jy-stations-ch">{channelCell(v)}</td>
                       <td className="r">{balanceCell(v)}</td>
                       <td className="r">{burnCell(v)}</td>
                       <td>{runwayCell(v)}</td>
