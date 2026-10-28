@@ -1758,6 +1758,60 @@ test("上游资源：「渠道」一列写几个或「没有渠道」，不能�
   await page.getByRole("dialog", { name: "绑定渠道", exact: true }).getByText("主力上游 · up1.test", { exact: true }).waitFor();
 });
 
+test("上游资源：别的列的数字很长时，「渠道」一列的「2 个」「没有渠道」「—」仍各占一行（1280、1440、1920、2560 宽）", async (t) => {
+  const now = Date.now();
+  const spark = Array.from({ length: 24 }, (_, i) => [now - (24 - i) * 3600e3, 35101 + (24 - i) * 6700]);
+  const long = { balance: { ok: true, remaining: 35101.28, checkedAt: new Date().toISOString() }, prediction: { etaDays: 2, burnPerDay: 161091, basis: "近 3 小时" }, spark, todayUsed: 56124, todayIsEstimate: true };
+  const up = (id, name, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, hasAccessToken: true, ...long, ...extra });
+  const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true }, up("up1", "主力上游"), up("up2", "没有渠道上游"), up("up3", "备用上游三"), up("up4", "备用上游四"), up("kk", "只用 Key", { type: "newapi-key" })];
+  const chan = (channelId, name) => ({ channelId, name, address: "up1.test", ruleId: `r${channelId}`, upstreamStationId: "up1", tokenId: channelId, tokenName: "oai", tokenGroup: "default", sinceDay: "2026-10-12", suggestedUpstreamId: null });
+  const channels = [chan(1, "高速 A"), chan(2, "高速 B")];
+  const page = await openFixturePage(t, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: new Date().toISOString() });
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/reconciliation/channels/options") return fulfill(route, { ok: true, upstreams: [{ id: "up1", name: "主力上游" }], channels });
+    throw new Error("unexpected API: " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations");
+  const table = page.locator(".jy-stations-table");
+  for (const [width, height] of [[1280, 800], [1440, 900], [1920, 1080], [2560, 1440]]) {
+    await page.setViewportSize({ width, height });
+    await table.locator("tbody tr", { hasText: "主力上游" }).first().locator("td").nth(2).getByText("2 个", { exact: true }).waitFor();
+    for (const [name, text] of [["主力上游", "2 个"], ["没有渠道上游", "没有渠道"], ["只用 Key", "—"]]) {
+      const cell = table.locator("tbody tr", { hasText: name }).first().locator("td").nth(2);
+      assert.equal((await cell.innerText()).trim(), text);
+      const box = await cell.getByText(text, { exact: true }).boundingBox();
+      assert.ok(box.height <= 24, `${width} 宽：「${text}」应占一行，实际高 ${box.height}`);
+    }
+    assert.ok((await table.locator("thead th").nth(2).locator("xpath=.").boundingBox()).height <= 48, "表头不折行");
+    const fit = await page.evaluate(() => {
+      const w = document.querySelector(".jy-table-wrap"), t = document.querySelector(".jy-stations-table"), sub = t.querySelector("tbody .jy-stations-sub > span");
+      return { wrap: w.clientWidth, table: t.scrollWidth, subLines: Math.round(sub.getBoundingClientRect().height / parseFloat(getComputedStyle(sub).lineHeight)) };
+    });
+    if (width >= 1440) assert.ok(fit.table <= fit.wrap, `${width} 宽下表格不该要左右拖（表 ${fit.table}，容器 ${fit.wrap}），「约 N 天」不能被右边固定的操作列盖住`);
+    else if (process.env.UI_SHOT_DIR) console.log(`${width} 宽：表 ${fit.table}，容器 ${fit.wrap}，要左右拖 ${fit.table - fit.wrap}px`);
+    if (width >= 1920) assert.equal(fit.subLines, 1, `${width} 宽位置够，状态小字该一行放下`);
+    if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/stations-${width}x${height}.png` });
+    if (width >= 1920 && process.env.UI_SHOT_DIR) {
+      await table.locator("tbody tr", { hasText: "主力上游" }).first().getByRole("button", { name: /主力上游的渠道/ }).click();
+      await page.getByRole("dialog", { name: /主力上游的渠道/ }).waitFor();
+      await page.waitForTimeout(700);
+      await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/drawer-${width}x${height}.png` });
+      await page.keyboard.press("Escape");
+      await page.getByRole("dialog", { name: /主力上游的渠道/ }).waitFor({ state: "hidden" });
+    }
+    if (width === 1440) {
+      const long = "「高速 A」有收入，但选的 Key 没用量，请到每日利润页换一把 Key 或者先解绑这个渠道，再回来看这一行";
+      const lines = await page.evaluate((text) => { const span = document.querySelector(".jy-stations-table tbody .jy-stations-sub > span"); span.textContent = text; const r = span.getBoundingClientRect(); return Math.round(r.height / parseFloat(getComputedStyle(span).lineHeight)); }, long);
+      assert.equal(lines, 2, "状态小字最多两行，多的省略");
+      if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/stations-long-title-1440x900.png` });
+      await page.reload(); await table.locator("tbody tr", { hasText: "主力上游" }).first().waitFor();
+    }
+  }
+});
+
 // 「绑定渠道」小窗口：和线上一样多的渠道（30 个左右，名字多是网址，6 个已禁用）
 async function openBindModal(t, { upstream, host, keys, matching }) {
   const posts = [];
