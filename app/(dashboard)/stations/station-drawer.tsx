@@ -645,7 +645,7 @@ export function StationDrawer({
       {/* 抽屉常驻挂载：表单要有 name，字段 id 才不会和页面上其他表单（账号授权、渠道接入）撞车，标签才能指到自己的输入框 */}
       <Form name="station" form={form} layout="vertical" requiredMark={false} onValuesChange={onValuesChange}>
         <fieldset className="jy-fs">
-          <legend>{COPY.basics}</legend>
+          {!isAuto && <legend>{COPY.basics}</legend>}
           {ownMode && (
             <Form.Item label={CREDENTIAL_FIELDS.name.label} name="name">
               <Input placeholder={COPY.namePlaceholder} autoComplete="off" />
