@@ -3,16 +3,17 @@
 // 数据只有一个读：GET /api/reconciliation/channels/options（渠道、绑在哪个上游、哪把 Key、从哪天绑的）；Key 列表是 GET /api/reconciliation/upstreams/:id/keys（现有的 5 分钟缓存，不强制刷新）。
 // 写：POST /api/reconciliation/channels/select-key（绑定）和 /stop（解绑）。
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { App, Button, Drawer, Grid, Modal, Radio, Select } from "antd";
+import { App, Button, Drawer, Grid, Input, Modal, Radio, Select } from "antd";
 import { api } from "../../../lib/client";
 import { describeError } from "../../../lib/error-copy";
 import { formatDayKey } from "../../../lib/format";
-import { bindableKeys, unboundChannelsFor } from "../../../lib/channel-binding.js";
+import { bindableKeys, channelChoices, defaultChannelId } from "../../../lib/channel-binding.js";
 import { CHANNEL_BINDING } from "../../../lib/channel-binding-text";
+import { Icon, Sym } from "../../components/icons";
 import { useDrawerEscape } from "../../components/drawer-escape";
 
 export type ChannelOption = {
-  channelId: number; name: string; address: string; ruleId: string | null; upstreamStationId: string | null; tokenId: number | null; tokenName: string | null;
+  channelId: number; name: string; address: string; enabled: boolean; ruleId: string | null; upstreamStationId: string | null; tokenId: number | null; tokenName: string | null;
   tokenGroup: string | null; sinceDay: string | null; suggestedUpstreamId: string | null;
 };
 export type ChannelOptions = { ok: true; channels: ChannelOption[]; upstreams: { id: string; name: string }[] } | { ok: false; code: string };
@@ -60,24 +61,26 @@ export function ChannelsDrawer({ upstream, channels, tz, onClose, onBind, onUnbi
   </Drawer>;
 }
 
-// 「绑定渠道」：渠道单选（你站上还没绑的，地址对得上这个上游的排最前、默认选第一个）+ Key 下拉（这个上游里还能绑的；只剩一把时替用户选好）
+// 「绑定渠道」：搜索框 + 固定高的渠道列表（你站上还没绑的；地址对得上这个上游的一组在前；已禁用的默认不列）+ Key 下拉（这个上游里还能绑的；只剩一把时替用户选好）
 export function BindChannelModal({ upstream, ownStationId, options, onClose, onDone }: {
   upstream: Upstream | null; ownStationId: string; options: ChannelOptions | null; onClose: () => void; onDone: () => void | Promise<void>;
 }) {
   const { message } = App.useApp();
   const channels = options?.ok ? options.channels : [];
-  const list = useMemo(() => (upstream ? unboundChannelsFor(channels, upstream.id) : []), [channels, upstream]);
   const [channelId, setChannelId] = useState<number | null>(null);
+  const [query, setQuery] = useState("");
+  const [showDisabled, setShowDisabled] = useState(false);
   const [tokenId, setTokenId] = useState<number | null>(null);
   const [keys, setKeys] = useState<{ value: number; label: string }[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [hint, setHint] = useState(false);
   const [saving, setSaving] = useState(false);
   const M = CHANNEL_BINDING.bindModal;
+  const choices = useMemo(() => (upstream ? channelChoices(channels, upstream.id, { query, showDisabled }) : null), [channels, upstream, query, showDisabled]);
 
-  useEffect(() => { // 每次打开：默认选第一个渠道
+  useEffect(() => { // 每次打开：只有一个启用的渠道对得上才替用户选好
     if (!upstream) return;
-    setChannelId(list[0]?.channelId ?? null); setTokenId(null); setKeys(null); setFailed(false); setHint(false); setSaving(false);
+    setChannelId(defaultChannelId(channels, upstream.id)); setQuery(""); setShowDisabled(false); setTokenId(null); setKeys(null); setFailed(false); setHint(false); setSaving(false);
   }, [upstream?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!upstream) return;
@@ -93,11 +96,12 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
     return () => { alive = false; };
   }, [upstream?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!upstream) return null;
-  const channel = list.find((item) => item.channelId === channelId);
+  // 选中的渠道被搜索挡住、或被收起的已禁用挡住时，不算选着
+  const channel = choices?.visible.find((item) => item.channelId === channelId) ?? null;
   const submit = async () => {
     setSaving(true);
     try {
-      await api("/api/reconciliation/channels/select-key", { body: { ownStationId, channelId, upstreamStationId: upstream.id, tokenId } });
+      await api("/api/reconciliation/channels/select-key", { body: { ownStationId, channelId: channel?.channelId, upstreamStationId: upstream.id, tokenId } });
       message.success(CHANNEL_BINDING.done.bound(channel?.name ?? "", upstream.name));
       onClose();
       await onDone();
@@ -105,14 +109,34 @@ export function BindChannelModal({ upstream, ownStationId, options, onClose, onD
       message.error(describeError({ code: error?.code, message: error?.message }).text);
     } finally { setSaving(false); }
   };
-  return <Modal open centered title={M.title} okText={M.ok} cancelText={M.cancel} okButtonProps={{ disabled: channelId == null || tokenId == null }} confirmLoading={saving} onCancel={onClose} onOk={() => void submit()} width={460} destroyOnHidden>
+  return <Modal open centered title={M.title} okText={M.ok} cancelText={M.cancel} okButtonProps={{ disabled: !channel || tokenId == null }} confirmLoading={saving} onCancel={onClose} onOk={() => void submit()} width="min(520px, calc(100vw - 24px))" className="jy-bind-modal" destroyOnHidden>
     <p className="jy-caption">{M.sub(upstream.name, upstream.address || "")}</p>
     <label className="jy-bind-label">{M.channel}</label>
-    {list.length ? (
-      <Radio.Group className="jy-bind-channels" value={channelId} onChange={(event) => setChannelId(event.target.value)}>
-        {list.map((item) => <Radio key={item.channelId} value={item.channelId}><span className="jy-bind-channel">{item.name}<small className="jy-caption">{item.address}</small></span></Radio>)}
-      </Radio.Group>
-    ) : <p className="jy-caption">{M.noChannels}</p>}
+    <Input
+      allowClear className="jy-bind-search" aria-label={M.searchAria} placeholder={M.search} prefix={<Icon name="search" />} value={query} disabled={saving}
+      onChange={(event) => setQuery(event.target.value)}
+    />
+    {choices?.noMatch ? <p className="jy-caption jy-bind-nomatch"><Sym kind="info" /><span>{M.noMatch}</span></p> : null}
+    <Radio.Group className="jy-bind-list" value={channel?.channelId ?? null} onChange={(event) => setChannelId(event.target.value)}>
+      {choices?.visible.length ? choices.groups.map((group, index) => (
+        <div key={group.title ?? index} role="group" aria-label={group.title ? (group.title === "match" ? M.groupMatch : M.groupOther) : undefined}>
+          {group.title ? <div className="jy-bind-group">{group.title === "match" ? M.groupMatch : M.groupOther}</div> : null}
+          {group.channels.map((item) => {
+            const off = item.enabled === false;
+            return <Radio key={item.channelId} value={item.channelId} className="jy-bind-row">
+              <span className="jy-bind-channel">
+                <span className="jy-bind-line">
+                  <span className={`jy-bind-name${off ? " is-off" : ""}`} title={item.name}>{item.name}</span>
+                  {off ? <em className="jy-tag jy-tag--type jy-bind-off">{M.disabledTag}</em> : null}
+                </span>
+                {item.address && !item.name.includes(item.address) ? <small className="jy-caption jy-bind-addr" title={item.address}>{item.address}</small> : null}
+              </span>
+            </Radio>;
+          })}
+        </div>
+      )) : <p className="jy-caption jy-bind-empty">{choices && !channels.some((item) => item.ruleId == null) ? M.noChannels : M.notFound}</p>}
+    </Radio.Group>
+    {choices?.disabledCount ? <button type="button" className="jy-link-btn jy-bind-toggle" aria-expanded={showDisabled} onClick={() => setShowDisabled((on) => !on)}>{showDisabled ? M.hideDisabled : M.showDisabled(choices.disabledCount)}</button> : null}
     <label className="jy-bind-label">{M.key}</label>
     <Select
       showSearch className="jy-bind-select" aria-label={M.key} placeholder={M.keyPlaceholder} value={tokenId ?? undefined} options={keys ?? []} loading={keys == null && !failed} disabled={saving}
