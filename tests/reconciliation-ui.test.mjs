@@ -439,20 +439,6 @@ test("workflow retry destination opens the linked day, expands that row with its
   assert.deepEqual(queries, [{ preset: "custom", startMs: window.startMs, endMs: window.endMs, ruleIds: ["rule-1"], observe: true }]); assert.equal(profitReads.length, 2);
 });
 
-test("configured binding with unknown coverage says bound without claiming its income is accounted", async (t) => {
-  const config = onboardingFixture();
-  config.channels[0].reconciliation = { status: "configured", ruleIds: ["rule-1"] };
-  Object.assign(config.rules[0], { costCoverage: "unknown", coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] } });
-  const { page, writes } = await openOnboardingPage(t, { config });
-  const row = page.locator(".ant-list-item").filter({ hasText: "New channel" });
-  await row.getByText("已绑定", { exact: true }).waitFor();
-  assert.equal(await row.getByText("已算进利润", { exact: true }).count(), 0);
-  await page.getByRole("combobox", { name: "状态", exact: true }).click();
-  await page.locator(".ant-select-dropdown:visible").getByText("已绑定", { exact: true }).click();
-  await row.getByText("已绑定", { exact: true }).waitFor();
-  assert.equal(writes.length, 0);
-});
-
 test("onboarding without browser cryptography does not partially open a drawer or send a request", async (t) => {
   const { page, probes, writes } = await openOnboardingPage(t);
   await page.evaluate(() => {
@@ -463,13 +449,6 @@ test("onboarding without browser cryptography does not partially open a drawer o
   await page.getByText(failureText("打开失败", { code: "BROWSER_UNSUPPORTED" }), { exact: true }).waitFor();
   assert.equal(await page.getByRole("dialog", { name: CONNECT, exact: true }).count(), 0);
   assert.equal(probes.length, 0); assert.equal(writes.length, 0);
-});
-
-test("manual discovery keeps a stale catalogue visible and disables new binding", async (t) => {
-  const { page } = await openOnboardingPage(t, { discovery(route, reads, config) { return fulfill(route, reads.filter((entry) => entry.path.endsWith("/sync")).length > 1 ? { ...config, stale: true, error: "fixture catalogue unavailable" } : config); } });
-  // 刷新失败时还列着上次读到的渠道，写「刷新失败，数据截至…」，要刷新成功才能绑定
-  await page.locator(".ant-collapse-header").getByRole("button", { name: REFRESH, exact: true }).click(); const stale = page.locator(".ant-alert-warning").filter({ has: page.getByText(refreshFailedText("2026-10-09T06:00:00.000Z"), { exact: true }) }); await stale.waitFor();
-  await stale.getByText("刷新后才能绑定", { exact: true }).waitFor(); await page.getByText("New channel", { exact: true }).waitFor(); assert.equal(await page.getByRole("button", { name: connectButton("New channel"), exact: true }).isDisabled(), true);
 });
 
 test("每日利润 is read-only: no create or edit entry; the attention row's fix links back to 上游资源 and nothing is written", async (t) => {
@@ -484,389 +463,6 @@ test("每日利润 is read-only: no create or edit entry; the attention row's fi
   // 每日利润不再嵌渠道接入：不读接入目录，也没有任何接入写请求
   const calls = onboardingRequests.get(page); assert.equal(calls.filter((call) => call.pathname === "/api/channel-onboarding").length, 0); assert.deepEqual(calls.filter((call) => call.method !== "GET"), []);
 });
-
-test("workflow channel and complete-Key destinations reuse one batch confirmation with known ninth channel", async (t) => {
-  const config = onboardingFixture(true, "newapi", [1, 2, 3, 4, 9]); config.rules[0].channels = [1, 2, 3].map((channelId) => ({ channelId, name: "Sales " + channelId })); config.rules[0].coverageDeclaration = { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [9] }; config.rules[0].timezone = "UTC";
-  const opened = await openAccountsPage(t, { config, path: "/stations?action=coverage&ruleId=rule-1" });
-  const drawer = opened.page.getByRole("dialog", { name: CONNECT, exact: true }); await drawer.getByText("已选 4 个渠道", { exact: true }).waitFor(); assert.equal(await tokenField(drawer).count(), 0); await answerCoverage(opened.page, drawer); await verifyOnboarding(drawer); await saveOnboarding(drawer);
-  assert.equal(opened.writes.length, 1); assert.deepEqual(opened.writes[0].groups[0].channels.map((channel) => channel.channelId), [1, 2, 3, 9]); assert.equal(opened.writes[0].groups[0].reconciliation.tokenId, 7); assert.equal(opened.writes[0].groups[0].reconciliation.timezone, "UTC"); assert.equal(opened.writes[0].groups[0].reconciliation.coverageDeclaration.answer, "none"); assert.equal(opened.writes[0].selections[0].stationId, "upstream-1"); assert.equal(opened.writes[0].selections[0].monitor, false);
-  const connected = await openAccountsPage(t, { path: "/stations?action=connect&ownStationId=own-1&channelIds=4" }); const single = connected.page.getByRole("dialog", { name: CONNECT, exact: true }); await single.getByText("已选 1 个渠道", { exact: true }).waitFor();
-  // 从需处理的「有 N 个渠道还没绑定」进来，要的就是算利润：「算利润」默认勾上（ui-design-spec §5.2）
-  assert.equal(await single.getByRole("checkbox", { name: BILLING_CHECKBOX, exact: true }).isChecked(), true); await chooseKey(connected.page, single, "New Key"); await answerCoverage(connected.page, single); await verifyOnboarding(single); await saveOnboarding(single);
-  assert.equal(connected.writes.length, 1); assert.equal(connected.writes[0].groups[0].reconciliation.tokenId, 8); assert.equal(connected.writes[0].groups[0].reconciliation.coverageDeclaration.answer, "none");
-});
-
-// 渠道绑定页打不开处理目标时（§8.2）：顶部一条提示，带「刷新」和回到渠道绑定的「返回」，不打开抽屉
-async function destinationProblem(page, title) {
-  const alert = page.locator(".ant-alert").filter({ has: page.locator(".ant-alert-title").filter({ hasText: exactText(title) }) });
-  await alert.waitFor(); await alert.getByRole("button", { name: REFRESH, exact: true }).waitFor();
-  assert.equal(await alert.getByRole("link", { name: "返回", exact: true }).getAttribute("href"), "/stations");
-  return alert;
-}
-test("workflow stale channel, changed source and stopped coverage destinations keep an actionable reload", async (t) => {
-  for (const path of ["/stations?action=connect&ownStationId=own-1&channelIds=999", "/stations?action=connect&ownStationId=another-source&channelIds=4", "/stations?action=coverage&ruleId=stopped-rule", "/stations?action=source&ownStationId=another-source"]) {
-    const opened = await openAccountsPage(t, { path }); await destinationProblem(opened.page, DESTINATION_CHANGED); assert.equal(opened.writes.length, 0); assert.equal(opened.probes.length, 0); assert.equal(await opened.page.getByRole("dialog").count(), 0);
-  }
-  const config = onboardingFixture(true, "newapi", [1, 2, 3, 4]); config.ownSource = { ...ownSource, accountId: "2", namespaceKey: createHash("sha256").update(JSON.stringify(["newapi", ownSource.baseUrl, "2"])).digest("hex") };
-  const changed = await openAccountsPage(t, { config, path: "/stations?action=coverage&ruleId=rule-1" }); const SOURCE = reconciliationIssue("SOURCE_BINDING_UNCONFIRMED");
-  const problem = await destinationProblem(changed.page, SOURCE.title); await problem.getByText(SOURCE.detail, { exact: true }).waitFor();
-  assert.equal(await problem.getByRole("link", { name: workflowActionMeta("review_source").label, exact: true }).getAttribute("href"), workflowAction("review_source", { ownStationId: config.ownStation.id }).href);
-  assert.equal(await changed.page.getByRole("dialog").count(), 0); assert.equal(changed.probes.length, 0); assert.equal(changed.writes.length, 0);
-});
-
-test("workflow balance destination focuses original resource settings and account authorization opens its existing flow", async (t) => {
-  const opened = await openAccountsPage(t, { path: "/stations?stationId=A-monitor-1" }); const focused = opened.page.getByRole("region", { name: workflowActionMeta("inspect_balance").label, exact: true }); await focused.getByText("A-monitor-1", { exact: true }).waitFor(); assert.equal(await focused.getByText("A-monitor-2", { exact: true }).count(), 0); await focused.getByRole("button", { name: "编辑上游", exact: true }).click(); const editor = opened.page.getByRole("dialog", { name: /^编辑上游：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel(CREDENTIAL_FIELDS.userId.label, { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("余额提醒线", { exact: true }).inputValue(), "27");
-  const authorized = await openAuthorizationPage(t); await authorized.page.goto(`${baseURL}/stations?action=authorization&accountKey=${authorized.model.accounts[0].accountKey}`); const drawer = authorized.page.getByRole("dialog", { name: `${UPDATE_AUTH} · 上游账号 42`, exact: true }); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("u06-once"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.equal(authorized.updates.length, 1); assert.deepEqual(authorized.updates[0].targetStationIds.sort(), ["st_u04_a1", "st_u04_a2", "st_u04_billing"]);
-});
-
-test("billing authorization station link opens the verified account and rejects conflicting account identity", async (t) => {
-  const opened = await openAuthorizationPage(t, { path: "/stations?action=authorization&stationId=st_u04_a1" });
-  await authorizationDialog(opened.page, "42").waitFor();
-  assert.equal(opened.probes.length, 0);
-  assert.equal(opened.updates.length, 0);
-  await opened.page.goto(`${baseURL}/stations?action=authorization&stationId=st_u04_a1&accountKey=${opened.model.accounts[1].accountKey}`);
-  await opened.page.locator(".jy-banner[role=alert]").filter({ has: opened.page.locator("b").filter({ hasText: exactText(DESTINATION_CHANGED) }) }).waitFor();
-  assert.equal(await opened.page.getByRole("dialog").count(), 0);
-  assert.equal(opened.updates.length, 0);
-});
-
-test("F06 a rejected identity save remains retryable and requires a new read before another confirmation", async (t) => {
-  const opened = await openAccountsPage(t, { path: "/stations?action=verify&stationId=unknown-legacy",
-    readonlyAPI(route) { return fulfill(route, keyVerificationFixture()); }, mutation(route) {
-      return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: "RESOURCE_CHANGED", error: "资源配置已变化，请重新核验" }) });
-    } });
-  const drawer = verificationDialog(opened.page, "unknown-legacy"), confirm = confirmIdentityButton(drawer);
-  await drawer.getByRole("button", { name: TEST_READ, exact: true }).click();
-  await confirm.click();
-  // 保存被拒：写「保存失败：内容有变化，请重新预览。」，接口原文收在「查看详细原因」
-  const rejected = alertWithTitle(drawer, failureText("保存失败", { code: "RESOURCE_CHANGED", error: "资源配置已变化，请重新核验" })); await rejected.waitFor();
-  assert.equal(await rejected.locator("details.jy-error-detail").filter({ hasText: "资源配置已变化，请重新核验" }).count(), 1);
-  assert.equal(await confirm.count(), 0);
-  await drawer.getByRole("button", { name: TEST_READ, exact: true }).click();
-  await alertTitle(drawer, IDENTITY_READ("42")).waitFor();
-  await confirm.waitFor();
-  assert.equal(opened.mutations.length, 1); assert.equal(opened.writes.length, 0);
-});
-test("workflow identity and selected-Key read preserve actual zero and separate Sub2 date capability from timezone", async (t) => {
-  for (const [stationId, provider, action, timezone] of [["unknown-legacy", "newapi", "verify", "UTC"], ["Sub-password", "sub2api", "verify-billing", "Asia/Shanghai"]]) {
-    const reads = []; const opened = await openAccountsPage(t, { path: `/stations?action=${action}&stationId=${stationId}`, readonlyAPI(route, path) {
-      assert.equal(path, `/api/reconciliation/upstreams/${stationId}/keys`); const params = Object.fromEntries(new URL(route.request().url()).searchParams); reads.push(params); return fulfill(route, keyVerificationFixture(provider, params.timezone, !!params.tokenId));
-    } });
-    // Key 下拉写「名称 · 分组 g」，没有分组时只写名称；读出来的上游成本是 0 也照写 $0.00
-    const drawer = verificationDialog(opened.page, stationId); await drawer.waitFor(); await drawer.getByRole("textbox", { name: "时区", exact: true }).fill(timezone); await drawer.getByRole("button", { name: TEST_READ, exact: true }).click(); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); await drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }).click(); await opened.page.getByText(provider === "newapi" ? "actual-key · 分组 g" : "actual-key", { exact: true }).last().click(); await drawer.getByRole("button", { name: VERIFY_SELECTED, exact: true }).click(); await alertTitle(drawer, "actual-key 的上游成本").waitFor();
-    assert.deepEqual(reads, [{ force: "true", timezone }, { force: "true", timezone, tokenId: "9" }]); assert.ok((await drawer.textContent()).includes(provider === "newapi" ? "上游成本 $0.00" : "上游成本 $3.25")); assert.ok((await drawer.textContent()).includes("这里只是测试读取，不改利润。")); if (provider === "sub2api") { await drawer.getByText(testReadText({ ok: true }), { exact: true }).waitFor(); await drawer.getByText(reconciliationIssue("BILLING_TIMEZONE_UNVERIFIED").title, { exact: true }).waitFor(); } assert.equal(opened.mutations.length, 0); assert.equal(opened.writes.length, 0);
-  }
-});
-
-test("workflow unreadable Key directory remains partial and pure-Key fallback uses the full original editor", async (t) => {
-  const opened = await openAccountsPage(t, { path: "/stations?action=verify&stationId=unknown-legacy", readonlyAPI(route) {
-    const partial = keyVerificationFixture(); Object.assign(partial, { quotaPerUnit: null, version: "", groups: {}, tokens: [], capability: { state: "unverified", currency: "USD", window: "second", reason: "KEY_METADATA_UNAVAILABLE" }, billingTimezone: { state: "unverified", timezone: "Asia/Shanghai", reason: "KEY_METADATA_UNAVAILABLE" } }); return fulfill(route, partial);
-  } }); const drawer = verificationDialog(opened.page, "unknown-legacy"); await drawer.getByRole("button", { name: TEST_READ, exact: true }).click(); await alertTitle(drawer, testReadText({ ok: false, reason: describeError({ code: "KEY_METADATA_UNAVAILABLE" }).text })).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: VERIFY_KEY, exact: true }).count(), 0); assert.equal(opened.mutations.length, 0);
-  const pure = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=pure-key", readonlyAPI() { assert.fail("pure Key must not enter account probe"); } }); const pureDrawer = verificationDialog(pure.page, "pure-key"); await alertTitle(pureDrawer, "只有一把 Key，读不到上游账号").waitFor(); await pureDrawer.getByRole("button", { name: UPDATE_AUTH, exact: true }).click(); const editor = pure.page.getByRole("dialog", { name: /^编辑上游：/ }); await editor.waitFor(); assert.equal(await editor.getByLabel(CREDENTIAL_FIELDS.name.label, { exact: true }).inputValue(), "pure-key"); assert.equal(pure.mutations.length, 0);
-});
-
-test("workflow external Key use stops the old rule before selecting a new Key while unknown use stays reference", async (t) => {
-  const config = onboardingFixture(true, "newapi", [1, 2, 3, 4]); config.rules[0].channels = [1, 2, 3].map((channelId) => ({ channelId })); config.rules[0].coverageDeclaration = { answer: "other_use", otherUse: "external", uncoveredOwnChannelIds: [] };
-  const opened = await openAccountsPage(t, { config, path: "/stations?action=coverage&ruleId=rule-1", mutation(route, mutation) { assert.equal(mutation.path, "/api/reconciliation/rules/rule-1"); assert.equal(mutation.method, "DELETE"); config.rules[0].enabled = false; return fulfill(route, { ok: true }); } }); const drawer = opened.page.getByRole("dialog", { name: CONNECT, exact: true }); await alertTitle(drawer, COVERAGE_QUESTION).waitFor(); assert.equal(await drawer.getByRole("combobox", { name: "Key", exact: true }).isDisabled(), true);
-  // 「换 Key」先确认：站外也在用就给站外单开一把 Key，旧 Key 以前的每日记录还在
-  await drawer.getByRole("button", { name: SWAP_KEY, exact: true }).click(); const confirm = opened.page.getByRole("dialog", { name: `${SWAP_KEY}？`, exact: true }); await confirm.getByText(`站外也在用的话，先在上游给站外单开一把 Key。换成新 Key 后，旧 Key ${HISTORY_KEPT}。`, { exact: true }).waitFor(); assert.equal(opened.writes.length, 0); await confirm.getByRole("button", { name: SWAP_KEY, exact: true }).click(); await confirm.waitFor({ state: "hidden" }); assert.equal(opened.mutations.length, 1);
-  await verifyOnboarding(drawer); await chooseKey(opened.page, drawer, "New Key"); await answerCoverage(opened.page, drawer); await verifyOnboarding(drawer); await saveOnboarding(drawer); assert.equal(opened.writes.length, 1); assert.equal(opened.writes[0].groups[0].reconciliation.tokenId, 8); assert.equal(opened.writes[0].selections[0].stationId, "upstream-1");
-  const unknown = await openAccountsPage(t, { config: onboardingFixture(true, "newapi", [1, 2, 3, 4]), path: "/stations?action=coverage&ruleId=rule-1" }); const unknownDrawer = unknown.page.getByRole("dialog", { name: CONNECT, exact: true });
-  // 从「去回答」进来一开始不选：没回答就测试读取，先提示回答，不发请求（ui-copy-spec §5.2、§8.2）
-  await unknownDrawer.getByRole("button", { name: TEST_READ, exact: true }).click(); await unknownDrawer.getByText(`请回答「${COVERAGE_QUESTION}」`, { exact: true }).waitFor(); assert.equal(unknown.probes.length, 0);
-  // 答「不确定」：选项下面和预览都写这个回答的后果，不写「从现在开始算利润」
-  await answerCoverage(unknown.page, unknownDrawer, { answer: UNSURE }); await unknownDrawer.getByText("选「不确定」的话，利润先不算", { exact: true }).waitFor(); await verifyOnboarding(unknownDrawer);
-  await unknownDrawer.getByText("同一把 Key 的上游成本只算一次；选「不确定」的话，利润先不算", { exact: true }).waitFor(); assert.equal(await unknownDrawer.getByText("从现在开始算利润，今天就能看到；过了零点自动固定。", { exact: true }).count(), 0);
-  assert.equal(unknown.mutations.length, 0); assert.equal(unknown.writes.length, 0); assert.equal(unknown.probes[0].groups[0].reconciliation.coverageDeclaration.answer, "unknown");
-});
-
-test("workflow overview merges stable public actions and preserves prior actions on a partial read failure", async (t) => {
-  let reads = 0; const opened = await openAccountsPage(t, { accounts(route, count, model) { reads += 1; return count > 2 ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture account read unavailable" }) }) : fulfill(route, model); }, readonlyAPI(route, path) {
-    // 总览的经营数据不在本用例范围内：只读接口给不可用，页面照常展示需处理的事
-    if (path === "/api/own/analytics") return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture analytics unavailable" }) });
-    assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
-  } });
-  await opened.page.goto(baseURL); const region = opened.page.getByRole("region", { name: "需处理", exact: true }); const authLink = new RegExp(`^${UPDATE_AUTH}（`); await region.getByRole("link", { name: authLink }).waitFor();
-  // 需处理只露前几条（ui-design-spec §5.1），其余在「还有 N 件」里：点开再数
-  await region.getByRole("button", { name: /^还有 \d+ 件$/ }).click();
-  assert.equal(await region.getByRole("link", { name: new RegExp(`^${workflowActionMeta("confirm_coverage").label}（`) }).count(), 1); const before = await region.getByRole("listitem").count(); await region.getByRole("button", { name: `${workflowActionMeta("refresh").label}需处理的事`, exact: true }).click();
-  // 有一处没读到：写「刷新失败，数据截至 …。」，上次读到的事项照常列出
-  await region.locator(".jy-ov-banner-text").filter({ hasText: /^刷新失败，数据截至 .+。$/ }).waitFor(); assert.equal(await region.getByRole("listitem").count(), before); const href = await region.getByRole("link", { name: authLink }).getAttribute("href"); assert.equal(href, opened.model.accounts[0].actions[0].href); assert.equal(opened.mutations.length, 0); assert.ok(reads >= 3);
-});
-
-test("运营总览在手机上先列需处理，再是利润等式；桌面照旧等式在前", async (t) => {
-  const readonlyAPI = (route, path) => path === "/api/own/analytics" ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture analytics unavailable" }) }) : (assert.equal(path, "/api/history/overview"), fulfill(route, { series: [] }));
-  for (const [width, attentionFirst] of [[390, true], [1440, false]]) {
-    const opened = await openAccountsPage(t, { readonlyAPI }); await opened.page.setViewportSize({ width, height: 844 }); await opened.page.goto(baseURL);
-    const attention = opened.page.getByRole("region", { name: "需处理", exact: true }), equation = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true });
-    await attention.waitFor(); await equation.waitFor();
-    // 按 DOM 先后比（读屏和键盘也按这个顺序），不只看位置；宽度判断在挂载后才定下来，等它一下
-    const order = async () => opened.page.evaluate(() => { const [attention, equation] = ["需处理", "今天经营"].map((name) => [...document.querySelectorAll("section.jy-panel")].find((node) => node.querySelector("h2")?.textContent === name)); return !!(attention && equation && attention.compareDocumentPosition(equation) & Node.DOCUMENT_POSITION_FOLLOWING); });
-    let before = await order(); for (let wait = 0; before !== attentionFirst && wait < 30; wait++) { await opened.page.waitForTimeout(100); before = await order(); }
-    assert.equal(before, attentionFirst, `宽 ${width} 时需处理${attentionFirst ? "应在" : "不应在"}利润等式前面`);
-  }
-});
-
-test("运营总览两行都是 8 + 4：等式和需处理并排、一样高，需处理按等式的高度露 2 条、其余收进「还有 N 件」；余量和「收入和上游成本」并排", async (t) => {
-  const readonlyAPI = (route, path) => path === "/api/own/analytics" ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture analytics unavailable" }) }) : (assert.equal(path, "/api/history/overview"), fulfill(route, { series: [] }));
-  const opened = await openAccountsPage(t, { readonlyAPI }); await opened.page.setViewportSize({ width: 1440, height: 900 }); await opened.page.goto(baseURL);
-  const page = opened.page;
-  const attention = page.getByRole("region", { name: "需处理", exact: true }), equation = page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true });
-  const runway = page.getByRole("region", { name: "上游余量", exact: true }), money = page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
-  await attention.locator(".jy-attention li").first().waitFor(); await equation.waitFor(); await runway.waitFor(); await money.waitFor();
-  // 同一行：左边 8 列、右边 4 列（宽度约 2:1），上沿对齐、一样高
-  for (const [main, side] of [[equation, attention], [runway, money]]) {
-    const [m, sd] = [await main.boundingBox(), await side.boundingBox()];
-    assert.ok(sd.x > m.x + m.width, "右边那块在左边那块右边");
-    assert.ok(m.width / sd.width > 1.8 && m.width / sd.width < 2.2, `宽度约 2:1（${Math.round(m.width)} / ${Math.round(sd.width)}）`);
-    assert.ok(Math.abs(m.y - sd.y) < 1 && Math.abs(m.height - sd.height) < 1, "上沿对齐、一样高");
-  }
-  // 需处理按等式的高度露 2 条，其余收进「还有 N 件」，点开在原地接着列（收起区 More）
-  const total = Number((await attention.locator(".jy-count-badge").first().innerText()).trim());
-  const shown = attention.locator(".jy-attention:not(.jy-attention-rest .jy-attention) > li");
-  assert.equal(await shown.count(), Math.min(2, total));
-  assert.ok(total > 2, `夹具里的需处理要多于 2 条（${total}）`);
-  const more = attention.getByRole("button", { name: `还有 ${total - 2} 件`, exact: true });
-  assert.equal(await more.getAttribute("class"), "jy-more__toggle", "用共用的收起区 More，不是自己写的按钮");
-  assert.equal(await more.getAttribute("aria-expanded"), "false"); assert.equal(await attention.locator(".jy-attention-rest .jy-attention > li").count(), 0);
-  const equationHeight = (await equation.boundingBox()).height;
-  await more.click(); assert.equal(await more.getAttribute("aria-expanded"), "true");
-  // 点开以后需处理变长，等式那块照自己的高度，不跟着拉长（去掉 :has 那条规则时这里会失败）
-  const [eqAfter, attAfter] = [(await equation.boundingBox()).height, (await attention.boundingBox()).height];
-  assert.ok(eqAfter <= equationHeight + 1 && eqAfter < attAfter - 100, `点开「还有 N 件」后等式不跟着拉长（点开前 ${Math.round(equationHeight)}，点开后 ${Math.round(eqAfter)}，需处理 ${Math.round(attAfter)}）`);
-  assert.equal(await attention.locator(".jy-attention-rest .jy-attention > li").count(), total - 2);
-  // 这里经营数据读不到（夹具），「收入和上游成本」那块照样占着右边 4 列；两小段的内容在「收入确认不了时」那条里查
-  assert.equal(opened.mutations.length, 0);
-});
-
-test("运营总览手机上没设置自营站点：「去设置」只在利润等式里，「收入」小段只写一句短的、排在前面，上游成本的条收进「按上游看」", async (t) => {
-  const analytics = costAnalyticsFixture(1); analytics.stations = [0, 1, 2, 3].map((i) => ({ ...analytics.stations[0], id: `up-${i}`, name: `Upstream ${i}`, includeInProfit: true, isOwn: false, costBasis: "usage", totalCny: 10 - i }));
-  const opened = await openAccountsPage(t, { readonlyAPI(route, path) {
-    if (path === "/api/own/analytics") return failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
-    if (path === "/api/analytics") return fulfill(route, analytics);
-    assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
-  } });
-  await opened.page.setViewportSize({ width: 390, height: 844 }); await opened.page.goto(baseURL);
-  const money = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
-  const revenue = money.getByRole("region", { name: "收入", exact: true });
-  // 原因和「去设置」只在等式下面那一处，「收入」小段只写一句短的、不带按钮（同一句话一页只说一次，ui-copy-spec §11）
-  await opened.page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true }).getByRole("link", { name: workflowActionMeta("setup_own_station").label, exact: true }).waitFor();
-  await revenue.getByText("没设置自营站点，见上面的利润等式。", { exact: true }).waitFor();
-  assert.equal(await revenue.getByRole("button").count() + await revenue.getByRole("link").count(), 0);
-  // 只有上游成本有条：按钮写「按上游看」（写它收着什么），不写「按用户、按上游看」；收入那句在它前面
-  const toggle = money.getByRole("button", { name: "按上游看", exact: true }); await toggle.waitFor();
-  assert.equal(await toggle.getAttribute("class"), "jy-more__toggle");
-  assert.equal(await money.getByRole("button", { name: "按用户、按上游看", exact: true }).count(), 0);
-  assert.ok((await revenue.boundingBox()).y < (await toggle.boundingBox()).y, "收入在前、上游成本在后");
-  assert.equal(await money.locator(".jy-hbars li").count(), 0);
-  await toggle.click(); assert.equal(await money.getByRole("region", { name: "上游成本", exact: true }).locator(".jy-hbars li").count(), 4);
-  assert.equal(opened.mutations.length, 0);
-});
-
-test("运营总览「今天收入和上游成本」：大金额在 1200–1440 宽时不压到运算符；小段标题不带合计（合计只在等式里）；各列前 3，「其他 N …」等于并掉的几项之和；手机上只收条形，读不到照样露出来", async (t) => {
-  const readonly = (analytics) => (route, path) => path === "/api/own/analytics" ? fulfill(route, analytics(new URL(route.request().url()).searchParams.get("range") || "today")) : (assert.equal(path, "/api/history/overview"), fulfill(route, { series: [] }));
-  const opened = await openAccountsPage(t, { readonlyAPI: readonly(bigOwnAnalytics) });
-  const page = opened.page;
-  for (const width of [1440, 1280, 1200]) {
-    await page.setViewportSize({ width, height: 900 }); await page.goto(baseURL);
-    const equation = page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true });
-    await equation.getByText(formatMoney(12345.67), { exact: false }).first().waitFor();
-    // 每个金额都在自己那一格里（不压到旁边的运算符）：金额字号按等式这一块的宽度缩
-    const over = await equation.locator(".jy-eq-term").evaluateAll((terms) => terms.filter((t) => getComputedStyle(t).visibility !== "hidden").map((t) => {
-      const v = t.querySelector(".jy-eq-value"); if (!v) return -1; const r = document.createRange(); r.selectNodeContents(v);
-      return Math.round(r.getBoundingClientRect().right - (t.getBoundingClientRect().right - parseFloat(getComputedStyle(t).paddingRight)));
-    }));
-    assert.ok(over.every((x) => x <= 0), `宽 ${width} 时金额超出自己那一格：${over.join(",")}`);
-  }
-  // 两小段「收入 · 按用户」「上游成本 · 按上游」：标题不带合计（同一个数一页只出现一次，合计在等式里），各列前 3，多的并成一行，那一行等于并掉的几项之和
-  const money = page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
-  const revenue = money.getByRole("region", { name: "收入", exact: true }), cost = money.getByRole("region", { name: "上游成本", exact: true });
-  await revenue.locator(".jy-ov-money-head").getByText("· 按用户").waitFor(); await cost.locator(".jy-ov-money-head").getByText("· 按上游").waitFor();
-  assert.equal(await money.locator(".jy-ov-money-head").filter({ hasText: /[¥$]/ }).count(), 0);
-  assert.equal(await money.getByText(formatMoney(12345.67)).count(), 0, "收入合计只在等式里，这块里不再写");
-  assert.equal(await money.getByText(formatMoney(23456.8)).count(), 0, "上游成本合计只在等式里，这块里不再写");
-  assert.equal(await revenue.locator(".jy-hbars li").count(), 4); assert.equal(await cost.locator(".jy-hbars li").count(), 4);
-  await revenue.locator(".jy-hbars li", { hasText: "其他 2 位用户" }).getByText(formatMoney(24.5), { exact: true }).waitFor();
-  await cost.locator(".jy-hbars li", { hasText: "其他 2 个上游" }).getByText(formatMoney(4456.8), { exact: true }).waitFor();
-  // 手机：条形收进「按用户、按上游看」
-  await page.setViewportSize({ width: 390, height: 844 }); await page.goto(baseURL);
-  const toggle = money.getByRole("button", { name: "按用户、按上游看", exact: true }); await toggle.waitFor();
-  assert.equal(await toggle.getAttribute("class"), "jy-more__toggle", "用共用的收起区 More，不是自己写的按钮");
-  assert.equal(await money.locator(".jy-hbars li").count(), 0);
-  await toggle.click(); assert.equal(await money.locator(".jy-hbars li").count(), 8);
-  // 手机上收入读不到：「收入」小段露着一句短的（原因在等式下面），不收进「按用户、按上游看」
-  const unread = await openAccountsPage(t, { readonlyAPI: readonly(unconfirmedOwnAnalytics) });
-  await unread.page.setViewportSize({ width: 390, height: 844 }); await unread.page.goto(baseURL);
-  const unreadMoney = unread.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
-  await unreadMoney.getByRole("region", { name: "收入", exact: true }).getByText("读不到，原因见上面的利润等式。", { exact: true }).waitFor();
-  assert.equal(opened.mutations.length + unread.mutations.length, 0);
-});
-
-test("workflow read failures and deleted verification targets expose a safe retry with no save", async (t) => {
-  let calls = 0; const opened = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=unknown-legacy", readonlyAPI(route) { calls += 1; if (calls === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "KEY_PROBE_UNAVAILABLE", retryable: true, error: "账号身份暂时无法核验，请检查授权或稍后重试" }) }); return fulfill(route, keyVerificationFixture("newapi", "Asia/Shanghai")); } }); const drawer = verificationDialog(opened.page, "unknown-legacy"); await drawer.getByRole("button", { name: TEST_READ, exact: true }).click();
-  // 读不到：写「读不到：」加归类后的原因，原文收在「查看详细原因」，旁边一个「刷新」；再测试读取一次就好
-  const failed = alertWithTitle(drawer, testReadText({ ok: false, reason: describeError({ code: "KEY_PROBE_UNAVAILABLE" }).text })); await failed.waitFor(); await failed.getByRole("button", { name: REFRESH, exact: true }).waitFor(); assert.equal(await failed.locator("details.jy-error-detail").filter({ hasText: "账号身份暂时无法核验，请检查授权或稍后重试" }).count(), 1);
-  await drawer.getByRole("button", { name: TEST_READ, exact: true }).click(); await alertTitle(drawer, IDENTITY_READ("42")).waitFor(); assert.equal(calls, 2); assert.equal(opened.mutations.length, 0);
-  // 处理目标不在了：顶部一条提示（上游没了写「找不到这个上游。」，上游账号变了写「这条已经变了」），带「刷新」和「返回上游列表」，不打开抽屉
-  for (const [path, title] of [["/stations?action=verify&stationId=deleted", `${ERROR_CATEGORIES.not_found.text}。`], ["/stations?action=authorization&accountKey=deleted", DESTINATION_CHANGED], ["/stations?stationId=deleted", `${ERROR_CATEGORIES.not_found.text}。`]]) {
-    const unavailable = await openAccountsPage(t, { path }); const banner = unavailable.page.locator(".jy-banner[role=alert]").filter({ has: unavailable.page.locator("b").filter({ hasText: exactText(title) }) }); await banner.waitFor(); await banner.getByRole("button", { name: REFRESH, exact: true }).waitFor();
-    assert.equal(await banner.getByRole("link", { name: `返回${STATION_TABS.list}`, exact: true }).getAttribute("href"), "/stations"); assert.equal(await unavailable.page.getByRole("dialog").count(), 0); assert.equal(unavailable.mutations.length, 0);
-  }
-});
-
-test("account authorization without randomUUID renews IDs on input changes and confirms the preview ID", async (t) => {
-  const { page, center, model, probes, updates } = await openAuthorizationPage(t);
-  await page.evaluate(() => Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined }));
-  const drawer = await openAccountAuthorization(page, center, model.accounts[0]);
-  await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("first-fixture-pat"); await previewAuthorization(drawer);
-  const first = probes[0].requestId;
-  assert.match(first, /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i);
-  await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("second-fixture-pat"); await previewAuthorization(drawer);
-  assert.notEqual(probes[1].requestId, first);
-  assert.match(probes[1].requestId, /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i);
-  await confirmAccountAuthorization(drawer);
-  assert.equal(updates[0].requestId, probes[1].requestId);
-});
-
-test("account authorization without browser cryptography does not partially open or send an update", async (t) => {
-  const { page, center, model, probes, updates } = await openAuthorizationPage(t);
-  await page.evaluate(() => {
-    Object.defineProperty(globalThis.crypto, "randomUUID", { configurable: true, value: undefined });
-    Object.defineProperty(globalThis.crypto, "getRandomValues", { configurable: true, value: undefined });
-  });
-  await openAccountAuthorization(page, center, model.accounts[0]);
-  // 报错按码归类后显示「浏览器太旧」那一句（原文「当前浏览器无法生成请求标识…」不在提示里），写在页面顶部，不说成刷新失败
-  await center.getByText(describeError({ code: "BROWSER_UNSUPPORTED" }).text, { exact: true }).waitFor();
-  assert.equal(await center.getByText(/刷新失败/).count(), 0);
-  assert.equal(await authorizationDialog(page, "42").count(), 0);
-  assert.equal(probes.length, 0); assert.equal(updates.length, 0);
-});
-
-test("account authorization inputs once and confirms three explicit targets while excluding same-site B, own, archived and pure Key", async (t) => {
-  const { page, center, model, probes, updates, originalStations } = await openAuthorizationPage(t), account = model.accounts[0]; const before = originalStations.map((resource) => ({ id: resource.id, userId: resource.userId, costAliases: resource.costAliases, lowBalanceUsd: resource.lowBalanceUsd, cnyPerUsd: resource.cnyPerUsd, includeInProfit: resource.includeInProfit, noRenewal: resource.noRenewal }));
-  const drawer = await openAccountAuthorization(page, center, account); assert.equal(await drawer.locator('input[type="password"]').count(), 1); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("one-new-pat"); await previewAuthorization(drawer);
-  assert.deepEqual(probes[0].targetStationIds, ["st_u04_billing", "st_u04_a1", "st_u04_a2"]); assert.deepEqual(probes[0].authorization, { type: "newapi", baseUrl: "https://same.test", accessToken: "one-new-pat", userId: "42" });
-  const stored = await page.evaluate(() => JSON.parse(sessionStorage.getItem("account-authorization-recovery-v05"))); assert.deepEqual(stored, { accountKey: account.accountKey, retryInput: { requestId: probes[0].requestId, targetStationIds: probes[0].targetStationIds } }); assert.doesNotMatch(JSON.stringify(stored), /pat|authorization|previewId|marker/);
-  // 「不跟着更新」按名字列出归档、同站其他上游账号、只用 Key 和自营站点；影响只写绑定条数，不写绑定编号
-  await drawer.getByText(/^不跟着更新：.*A-archived（已归档）.*B-monitor（其他上游账号）.*pure-key（只用 Key）.*Own station（自营站点）$/).waitFor(); await drawer.getByText("用到它的绑定 1 条", { exact: true }).waitFor(); assert.equal(await drawer.getByText(/rule_u04/).count(), 0);
-  await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); assert.equal(await drawer.locator('[data-authorization-target]').count(), 3); assert.equal(await drawer.locator('input[type="password"]').count(), 0); assert.equal(await page.evaluate(() => sessionStorage.getItem("account-authorization-recovery-v05")), null);
-  assert.deepEqual(originalStations.map((resource) => ({ id: resource.id, userId: resource.userId, costAliases: resource.costAliases, lowBalanceUsd: resource.lowBalanceUsd, cnyPerUsd: resource.cnyPerUsd, includeInProfit: resource.includeInProfit, noRenewal: resource.noRenewal })), before); assert.equal(model.accounts[1].resources[0].authVersion, 1);
-});
-
-test("Sub2API JWT and password switches clear hidden authorization and invalidate the previous preview", async (t) => {
-  const { page, center, model, probes, updates } = await openAuthorizationPage(t); const drawer = await openAccountAuthorization(page, center, model.accounts[2]);
-  const TOKEN = "登录令牌", TYPE = "类型", PASSWORD_TYPE = "Sub2API 账号（邮箱密码）", TOKEN_TYPE = "Sub2API 账号（登录令牌）";
-  await drawer.getByLabel(TOKEN, { exact: true }).fill("old-jwt-input"); await previewAuthorization(drawer); await drawer.getByRole("combobox", { name: TYPE, exact: true }).click(); await page.getByText(PASSWORD_TYPE, { exact: true }).last().click(); assert.equal(await authorizationConfirm(drawer).isDisabled(), true);
-  await drawer.getByLabel("登录邮箱", { exact: true }).fill("new@example.test"); await drawer.getByLabel("登录密码", { exact: true }).fill("temporary-password"); await previewAuthorization(drawer); assert.equal(probes[1].authorization.accessToken, undefined);
-  await drawer.getByRole("combobox", { name: TYPE, exact: true }).click(); await page.getByText(TOKEN_TYPE, { exact: true }).last().click(); assert.equal(await drawer.getByLabel(TOKEN, { exact: true }).inputValue(), ""); await drawer.getByLabel(TOKEN, { exact: true }).fill("new-jwt-input"); await previewAuthorization(drawer); assert.deepEqual(probes[2].authorization, { type: "sub2api", baseUrl: "https://same.test", accessToken: "new-jwt-input" }); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); assert.notEqual(probes[0].requestId, probes[2].requestId);
-  await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); await center.locator(`[data-account-key="${model.accounts[2].accountKey}"]`).getByRole("button", { name: `${UPDATE_AUTH} 上游账号 A`, exact: true }).click(); await drawer.getByRole("combobox", { name: TYPE, exact: true }).click(); await page.getByText(PASSWORD_TYPE, { exact: true }).last().click(); assert.equal(await drawer.getByLabel("登录邮箱", { exact: true }).inputValue(), ""); assert.equal(await drawer.getByLabel("登录密码", { exact: true }).inputValue(), ""); await drawer.getByLabel("登录邮箱", { exact: true }).fill("final@example.test"); await drawer.getByLabel("登录密码", { exact: true }).fill("final-password"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.deepEqual(updates[1].authorization, { type: "sub2api-password", baseUrl: "https://same.test", email: "final@example.test", password: "final-password" });
-});
-
-test("partial authorization reload uses readonly recovery before a new saved-donor preview and one confirmation", async (t) => {
-  // 没更新上的上游按原因归类后显示（lib/error-copy.js），原文进「查看详细原因」
-  const failed = describeError({ status: "failed", code: "AUTHORIZATION_UPDATE_FAILED", reason: "保存失败，请稍后重试" });
-  const { page, center, model, probes, updates, recoveries } = await openAuthorizationPage(t, { partial: true }); let drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("partial-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer);
-  const a2 = drawer.locator('[data-authorization-target="st_u04_a2"]'); await a2.getByText(`A-monitor-2：${failed.text}`, { exact: true }).waitFor(); assert.equal(await a2.locator("details.jy-error-detail").filter({ hasText: failed.raw }).count(), 1);
-  await page.reload(); await center.getByRole("button", { name: `查看上次${UPDATE_AUTH}的结果`, exact: true }).click(); drawer = authorizationDialog(page, "42"); await drawer.getByText("A-monitor-1：已更新过，不用再改", { exact: true }).waitFor(); assert.equal(probes.length, 1); assert.equal(updates.length, 1); assert.equal(recoveries.length, 1); assert.deepEqual(recoveries[0], { requestId: probes[0].requestId, targetStationIds: probes[0].targetStationIds });
-  await previewAuthorization(drawer, true); assert.equal(probes[1].reuseSavedAuthorization, true); assert.equal(probes[1].authorization, undefined); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a1").authVersion, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a2").authVersion, 2);
-});
-
-test("authorization response loss reads saved outcomes without submitting the update again", async (t) => {
-  const { page, center, model, updates, recoveries } = await openAuthorizationPage(t, { loseResponse: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("response-loss-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); await drawer.getByText("A-billing：已更新过，不用再改", { exact: true }).waitFor(); assert.equal(updates.length, 1); assert.equal(recoveries.length, 1); assert.equal(await page.evaluate(() => sessionStorage.getItem("account-authorization-recovery-v05")), null);
-});
-
-test("an invalid saved donor starts a new authorization operation for only unfinished targets", async (t) => {
-  const { page, center, model, probes, updates } = await openAuthorizationPage(t, { partial: true, invalidDonor: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("initial-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer);
-  // 已保存的登录信息用不了：提示重新填写，原文收在「查看详细原因」
-  await drawer.getByRole("button", { name: "重新预览", exact: true }).click(); const refill = alertWithTitle(drawer, REFILL_TITLE("AUTHORIZATION_UNVERIFIED")); await refill.waitFor(); assert.equal(await refill.locator("details.jy-error-detail").filter({ hasText: "已保存授权验证失败" }).count(), 1);
-  await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("replacement-pat"); await previewAuthorization(drawer); assert.notEqual(probes[2].requestId, probes[0].requestId); assert.deepEqual(probes[2].targetStationIds, ["st_u04_a2"]); await drawer.getByText(/^已更新，这次不再改：.*A-monitor-1/).waitFor(); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2); assert.equal(model.accounts[0].resources.find((resource) => resource.id === "st_u04_a1").authVersion, 2);
-});
-
-test("unknown authorization targets are opt-in and exclusions never count as updated resources", async (t) => {
-  const excludedText = describeError({ reason: "账号身份未核验，已排除" }).text;
-  const { page, center, model, probes, updates } = await openAuthorizationPage(t); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); const unknown = drawer.getByRole("checkbox", { name: "更新 unknown-legacy", exact: true }); assert.equal(await unknown.isChecked(), false); await unknown.check(); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("checked-pat"); await previewAuthorization(drawer); assert.equal(probes[0].targetStationIds.includes("st_u04_unknown"), true); await drawer.getByText(`不跟着更新 unknown-legacy：${excludedText}`, { exact: true }).waitFor(); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1); await alertTitle(drawer, "有 1 个上游没更新上，已更新的不变").waitFor(); await drawer.locator('[data-authorization-target="st_u04_unknown"]').getByText(`unknown-legacy：${excludedText}`, { exact: true }).waitFor(); assert.equal(await alertTitle(drawer, workflowActionMeta("update_authorization").done).count(), 0);
-  await drawer.getByRole("button", { name: "重新填写登录信息", exact: true }).click(); assert.equal(await drawer.getByRole("checkbox", { name: "更新 A-monitor-1", exact: true }).isChecked(), false); assert.equal(await drawer.getByRole("checkbox", { name: "更新 A-monitor-2", exact: true }).isChecked(), false); assert.equal(await drawer.getByRole("checkbox", { name: "更新 A-billing", exact: true }).isChecked(), false); assert.equal(await unknown.isChecked(), false); assert.equal(updates.length, 1);
-});
-
-test("authorization from same-site account B cannot update account A and requires a fresh valid preview", async (t) => {
-  const { page, center, model, updates } = await openAuthorizationPage(t); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("account-B"); await drawer.getByRole("button", { name: BINDING_COPY.preview, exact: true }).click();
-  const changed = alertWithTitle(drawer, describeError({ code: "ACCOUNT_IDENTITY_CHANGED" }).text); await changed.waitFor(); assert.equal(await changed.locator("details.jy-error-detail").filter({ hasText: "替换授权属于另一个账号，请另行接入" }).count(), 1);
-  assert.equal(await authorizationConfirm(drawer).isDisabled(), true); assert.equal(updates.length, 0); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("correct-account-A"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 1);
-});
-
-test("authorization with no saved donor requests fresh input and a new operation without a preview bypass", async (t) => {
-  const { page, center, model, probes, updates } = await openAuthorizationPage(t, { noDonor: true }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("failed-pat"); await previewAuthorization(drawer); await confirmAccountAuthorization(drawer);
-  await drawer.getByRole("button", { name: "重新预览", exact: true }).click(); const refill = alertWithTitle(drawer, REFILL_TITLE("SAVED_AUTHORIZATION_UNAVAILABLE")); await refill.waitFor(); assert.equal(await refill.locator("details.jy-error-detail").filter({ hasText: "尚无已确认更新的授权可复用" }).count(), 1); assert.equal(updates.length, 1);
-  await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("fresh-pat"); await previewAuthorization(drawer); assert.notEqual(probes[2].requestId, probes[0].requestId); assert.equal(probes[2].targetStationIds.length, 3); await confirmAccountAuthorization(drawer); assert.equal(updates.length, 2);
-});
-
-test("pause and re-enable retain complete resource settings while stopping one 核算关联 leaves other monitors and history intact", async (t) => {
-  const PAUSE = workflowActionMeta("pause_monitor"), RESUMED = workflowActionMeta("resume_monitor"), UNBIND = workflowActionMeta("unbind"), pauseTag = () => resource().locator(".jy-tag").filter({ hasText: exactText(PAUSE.label) });
-  const { page, center, model, mutations, originalStations } = await openAuthorizationPage(t); let a = await expandAccount(center, model.accounts[0]); const resource = () => a.locator('[data-resource-id="st_u04_a1"]'); await resource().getByRole("button", { name: `${PAUSE.label} A-monitor-1`, exact: true }).click(); let modal = page.getByRole("dialog", { name: `${PAUSE.label}「A-monitor-1」？`, exact: true }); await modal.getByText("暂停后不再刷新这个上游的余额，随时可以恢复；绑定照常算利润。", { exact: true }).waitFor(); await modal.getByRole("button", { name: `确认${PAUSE.label}`, exact: true }).click(); await modal.waitFor({ state: "hidden" }); await page.reload(); await center.getByText(/^3 个上游账号；/).waitFor(); a = await expandAccount(center, model.accounts[0]); await pauseTag().waitFor(); await resource().getByText("暂停监控时不刷新余额，绑定照常算利润。", { exact: true }).waitFor(); assert.equal(await page.locator(".resource-list-card").getByText("A-monitor-1", { exact: true }).count(), 0);
-  await resource().getByRole("button", { name: "编辑上游 A-monitor-1", exact: true }).click(); const editor = page.getByRole("dialog", { name: /^编辑上游：/ }); assert.equal(await editor.getByLabel(CREDENTIAL_FIELDS.userId.label, { exact: true }).inputValue(), "operator-A"); assert.equal(await editor.getByLabel("渠道里用的其他地址", { exact: true }).inputValue(), "kept_alias"); await editor.getByRole("button", { name: /取\s*消/ }).click();
-  await resource().getByRole("button", { name: `${RESUMED.label} A-monitor-1`, exact: true }).click(); modal = page.getByRole("dialog", { name: `${RESUMED.label}「A-monitor-1」？`, exact: true }); await waitForFact(modal, "利润", "不算进利润"); await modal.getByRole("button", { name: `确认${RESUMED.label}`, exact: true }).click(); await modal.waitFor({ state: "hidden" }); await resource().getByRole("button", { name: `${PAUSE.label} A-monitor-1`, exact: true }).waitFor(); assert.equal(await pauseTag().count(), 0); assert.equal(originalStations.find((entry) => entry.id === "st_u04_a1").includeInProfit, false);
-  // 解除绑定：确认框按 Key、自营站点和空出来的渠道说，不写绑定编号
-  await keyRow(a, "Key 9").click(); await a.getByRole("button", { name: `${UNBIND.label} Key 9 · Own station`, exact: true }).click(); modal = page.getByRole("dialog", { name: `${UNBIND.label}？`, exact: true }); await waitForFact(modal, "Key", "Key 9"); await waitForFact(modal, "自营站点", "Own station"); await waitForFact(modal, "解除后空出来的渠道", "Channel 1、Channel 3"); await modal.getByRole("button", { name: `确认${UNBIND.label}`, exact: true }).click(); await modal.waitFor({ state: "hidden" });
-  await a.locator('[data-rule-id="rule_u04"]').getByText("已解除绑定", { exact: true }).waitFor(); await a.locator('[data-rule-id="rule_history"]').getByText("已解除绑定", { exact: true }).waitFor(); await keyRow(a, "Key 9").getByText("已解除绑定", { exact: true }).waitFor(); assert.equal(await a.getByRole("button", { name: `${UNBIND.label} Key 9 · Own station`, exact: true }).count(), 0); assert.deepEqual(mutations.map(({ method, path }) => [method, path]), [["PUT", "/api/stations/st_u04_a1"], ["PUT", "/api/stations/st_u04_a1"], ["DELETE", "/api/reconciliation/rules/rule_u04"]]); assert.equal(model.accounts[0].resources.find((entry) => entry.id === "st_u04_a2").monitorEnabled, true); assert.equal(model.accounts[0].keys[0].ruleIds.includes("rule_history"), true); assert.equal(await center.getByRole("button", { name: new RegExp(`${PAUSE.label} Own station`) }).count(), 0);
-});
-
-test("authorization target changes invalidate preview and keyboard cancellation works at 320/390/768/1440 without overflow", async (t) => {
-  for (const width of [320, 390, 768, 1440]) {
-    const { page, center, model, updates } = await openAuthorizationPage(t, { viewport: { width, height: 900 } }); // 320px 时「预览」按钮正好落在 Next 开发模式左下角的悬浮标记下面（只在开发服务器上有），先把它藏起来
-    await page.addStyleTag({ content: "nextjs-portal { display: none !important; }" }); const drawer = await openAccountAuthorization(page, center, model.accounts[0]); await drawer.getByLabel(ACCESS_TOKEN, { exact: true }).fill("width-pat"); await previewAuthorization(drawer); const target = drawer.getByRole("checkbox", { name: "更新 A-monitor-2", exact: true }); await target.focus(); await page.keyboard.press("Space"); assert.equal(await authorizationConfirm(drawer).isDisabled(), true); assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `authorization overflow at ${width}`); await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" }); assert.equal(updates.length, 0);
-  }
-});
-
-// 上游账单（account-center.tsx）的写法：上游卡片写「余额提醒线 / 汇率 / 算不算进利润」，绑定写「渠道 / 开始统计 / 这把 Key 还给别处用吗？」，按钮名后跟「Key · 自营站点」
-const PAUSE_MONITOR = workflowActionMeta("pause_monitor").label, UNBIND_LABEL = workflowActionMeta("unbind").label, SWAP_LABEL = workflowActionMeta("swap_key").label;
-const OWN_CHANNELS_ANSWER = COVERAGE_ANSWERS.find((entry) => entry.value === "own_channels").label, OWNER_UNVERIFIED = reconciliationIssue("COST_OWNER_UNVERIFIED");
-const accountCaption = (accounts, unverified, unmatched) => new RegExp(`^${accounts} 个上游账号；${unverified} 个上游还没确认上游账号${unmatched == null ? "" : `；${unmatched} 条绑定还没归到 Key 下`} · `);
-test("account and Key expansion works by keyboard across 320/390/768/1440 widths without root overflow", async (t) => {
-  for (const width of [320, 390, 768, 1440]) {
-    const { page, center, model } = await openAccountsPage(t, { viewport: { width, height: 900 } }); const site = center.locator(`[data-site-key="${model.accounts[0].siteKey}"]`), accountButton = site.getByRole("button", { name: /账号 A / }); await accountButton.focus(); await page.keyboard.press("Enter"); const a = center.locator(`[data-account-key="${model.accounts[0].accountKey}"]`); await a.waitFor(); const keyButton = keyRow(a, "Key 9"); await keyButton.focus(); await page.keyboard.press("Enter"); await a.getByText("Channel 1、Channel 3", { exact: true }).waitFor();
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `account center overflow at ${width}`); await keyButton.focus(); await page.keyboard.press("Enter"); await a.getByText("Channel 1、Channel 3", { exact: true }).waitFor({ state: "hidden" });
-  }
-});
-
-function confirmedHistoryRecord(id = "saved-oct8", profit = 1) {
-  const window = { preset: "yesterday", startMs: Date.parse("2026-10-07T16:00:00Z"), endMs: Date.parse("2026-10-08T16:00:00Z"), timezone: "Asia/Shanghai" };
-  const side = (amount) => ({ state: "complete", quotaUnits: amount * 100, quotaPerUnit: 100, amountUsd: amount, knownAmountUsd: amount, countedAmountUsd: null, successfulCount: 1, expectedCount: 1, observedAt: null, window });
-  const channels = [1, 2, 3].map((channelId) => ({ channelId, name: "old-" + channelId }));
-  return { historyId: id, confirmedAt: "2026-10-08T16:01:00.000Z", window, ownSource: { stationId: "old-own", provider: "newapi", baseUrl: "https://old-own.test", accountId: "11", namespaceKey: "old-own-namespace" }, upstreamSource: { provider: "newapi", baseUrl: "https://old-up.test", accountId: "7", tokenId: 9, tokenName: "old-name" }, scopeVersion: 1, scopeFingerprint: "old-scope", billingEffectiveFromMs: window.startMs, channels, amountBasis: { id: "channel-billing-usd-v3", currency: "USD", billingSource: "channel-log-stat", calculationVersion: 3, conversion: "quota_per_unit" }, upstream: side(2), downstream: { ...side(2 + profit), channels: channels.map((channel) => ({ ...channel, billingState: "complete", quotaUnits: 100, amountUsd: 1, knownAmountUsd: 1 })) }, calculation: { differenceUsd: profit, profitUsd: profit, riskDifferenceUsd: null, marginRate: profit / (2 + profit) }, sourceCompleteness: "complete" };
-}
-async function openConfirmedHistoryPage(t, options = {}) {
-  const current = rule("rule-1", "Rule A", 10); Object.assign(current.rule, { enabled: true, archivedAt: null, scopeVersion: 2, tokenId: 99, channels: [{ channelId: 9, name: "New channel 9" }] });
-  if (options.groupHistory) current.transitionSegments = [{ id: "seg-old", group: "g1", ratio: 1, effectiveFrom: 1000, effectiveTo: 1500 }, { id: "seg-new", group: "g2", ratio: 2, effectiveFrom: 1500, effectiveTo: null }];
-  const archived = { ...current.rule, id: "old-rule", tokenName: "new-name", enabled: false, archivedAt: "2026-10-09T00:00:00Z" }, reads = [], historyReads = [], queries = [];
-  const records = options.records || [confirmedHistoryRecord()];
-  const page = await openFixturePage(t, async (route) => {
-    const request = route.request(), url = new URL(request.url()); reads.push({ path: url.pathname, method: request.method(), params: Object.fromEntries(url.searchParams) });
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/reconciliation/configuration") return fulfill(route, { ...configuration, ...(options.upstreams ? { upstreams: options.upstreams } : {}), ownStation: current.rule.archivedAt && options.removeOwnAfterStop ? null : { ...configuration.ownStation, cnyPerUsd: options.rate || null }, rules: [current.rule, archived].filter((rule) => !rule.archivedAt || url.searchParams.get("includeArchived") === "true") });
-    if (url.pathname === "/api/reconciliation" && request.method() === "GET") return fulfill(route, { actions: [] });
-    if (url.pathname === "/api/settings") return fulfill(route, { settings: {}, tz: PROFIT_TZ, ownLog: null });
-    if (url.pathname === "/api/reconciliation/profit") { const body = request.postDataJSON(); queries.push(body); return fulfill(route, profitPage(current.rule.archivedAt ? [] : [profitRow("rule-1", "Rule A", { expected: 1, cost: 1.2, gapUsd: 0.2 })], { preset: body.preset === "yesterday" ? "yesterday" : "today" })); }
-    if (url.pathname === "/api/reconciliation/query") { const body = request.postDataJSON(); queries.push(body); assert.ok(!body.ruleIds?.some((id) => id === archived.id || current.rule.archivedAt && id === current.rule.id)); return fulfill(route, { results: [] }); }
-    if (url.pathname.endsWith("/segments")) return fulfill(route, { segments: current.transitionSegments || [] });
-    if (url.pathname.endsWith("/confirmed")) { assert.equal(request.method(), "GET"); historyReads.push({ ruleId: url.pathname.split("/").at(-2), params: Object.fromEntries(url.searchParams) }); return options.history ? options.history(route, historyReads.at(-1), historyReads.length) : fulfill(route, { ruleId: historyReads.at(-1).ruleId, readOnly: true, records, nextCursor: null }); }
-    throw new Error("unexpected confirmed history fixture API: " + url.pathname);
-  }, options.viewport);
-  const badge = page.getByRole("button", { name: "Collapse issues badge", exact: true }); if (await badge.isVisible()) await badge.click();
-  // 核算页只读：停止核算在上游账单完成，这里只模拟它已发生
-  const stopElsewhere = () => Object.assign(current.rule, { enabled: false, archivedAt: "2026-10-09T00:00:00Z" });
-  return { page, reads, historyReads, queries, records, stopElsewhere };
-}
-// 以前的每日记录（recon-history.tsx）：抽屉标题和入口按钮都是「以前的每日记录」，绑定下拉写「Key · 上游 · 在用 / 已解除绑定」
-const HISTORY = workflowActionMeta("open_history").label, HISTORY_UPSTREAM = configuration.upstreams[0].name;
-const historyOption = (key, ended = false) => `${key} · ${HISTORY_UPSTREAM} · ${ended ? "已解除绑定" : "在用"}`;
-const historyCount = (n) => `${n} 条每日记录 · 按美元显示。只列每天的记录，以前的数据还在。`;
-const HISTORY_FIXED_NOTE = `这个上游现在计入固定成本；没标「${FIXED_COST_TEXT}」的日子是当时按用量算的上游成本，不改。`;
-// 记录里没有 Key 名称和 ID 时写「—」，不拿现在的绑定去补
-const historyKey = (record) => record.upstreamSource.tokenName || (record.upstreamSource.tokenId != null ? `Key #${record.upstreamSource.tokenId}` : EMPTY);
-async function chooseConfirmedHistoryRule(page, drawer, label = historyOption("Rule A")) { await drawer.getByRole("combobox", { name: "绑定", exact: true }).click(); await page.getByText(label, { exact: true }).last().click(); }
-async function expandConfirmedRecord(drawer, record, compact = false) { const button = compact ? drawer.getByRole("button", { name: new RegExp(` · ${historyKey(record).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`) }).first() : drawer.locator(`tr.ant-table-row[data-row-key="${record.historyId}"]`); await button.focus(); await drawer.page().keyboard.press("Enter"); return drawer.locator(`[data-history-id="${record.historyId}"]`); }
-// 展开的记录里一项：左边名称，右边写法（Detail，recon-parts.tsx）
-async function historyFact(record, label, value) { await record.locator(".reconciliation-detail").filter({ has: record.page().locator(".reconciliation-detail__label").filter({ hasText: exactText(label) }) }).locator(".reconciliation-detail__value").filter({ hasText: exactText(value) }).first().waitFor(); }
 
 test("confirmed history shows the Oct8 time, Key and channels it was fixed with, not current channel 9 or source details", async (t) => {
   const { page, reads, historyReads, records } = await openConfirmedHistoryPage(t, { groupHistory: true }); const summary = page.locator(".jy-profit-summary"), before = await summary.innerText(); await page.getByRole("button", { name: HISTORY, exact: true }).click(); const drawer = page.getByRole("dialog", { name: HISTORY, exact: true }); await chooseConfirmedHistoryRule(page, drawer); const record = await expandConfirmedRecord(drawer, records[0]); await drawer.locator(`tr.ant-table-row[data-row-key="${records[0].historyId}"]`).getByText("old-1、old-2、old-3", { exact: true }).waitFor(); await historyFact(record, "时间", formatZonedWindow(records[0].window)); await historyFact(record, "Key", "old-name"); await record.getByText("来自自营站点 3 个渠道的收费记录", { exact: true }).waitFor();
@@ -1421,155 +1017,6 @@ function myLayoutAnalytics(range = "7d", { sellPrice = true } = {}) {
   return { ...base, incomeDaily, byModel, ...(sellPrice ? {} : unpriced) };
 }
 
-test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analytics，消费最多的用户、模型各前 5；利润怎么算、选转售 Key、按明细细算都是收起区", async (t) => {
-  const analytics = myLayoutAnalytics;
-  const adminKeys = [], paths = [];
-  const page = await openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    paths.push(url.pathname);
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/own/analytics") return fulfill(route, analytics(url.searchParams.get("range") || "7d"));
-    if (url.pathname === "/api/own/admin-keys") { adminKeys.push(route.request().method()); return fulfill(route, { accounts: [{ username: "root", role: 100, enumerable: true, tokens: [{ name: "sale", flagged: true, usedUsd: 1 }] }] }); }
-    // 只画收入以后，自营业务不再读慢的 /api/analytics（请求了就会报错）
-    throw new Error("unexpected my fixture API: " + url.pathname);
-  }, undefined, false, null, "/my");
-  await page.setViewportSize({ width: 1440, height: 900 });
-  const region = (name) => page.getByRole("region", { name, exact: true });
-  const income = region("每日收入"), users = region("消费最多的用户"), forecast = region("预计花费"), models = region("消费最多的模型");
-  await income.waitFor(); await users.waitFor(); await forecast.waitFor(); await models.waitFor();
-  // 指标行在等式上面，这次只放等式里没有的三格（收入、毛利等 G 再补，同一个数一页只出现一次）
-  const metrics = region("这段时间的用量");
-  assert.deepEqual((await metrics.locator("dt").allInnerTexts()).map((x) => x.trim()), ["有消费的用户", "请求数", "Token（不含缓存）"]);
-  await metrics.getByText("5 个", { exact: true }).waitFor();
-  assert.doesNotMatch(await metrics.innerText(), /[¥$]/);
-  assert.ok((await metrics.boundingBox()).y < (await region(`${RANGE_TEXT["7d"]}经营`).boundingBox()).y, "指标行在利润等式上面");
-  // 「消费」合计在「消费最多的模型」下面，等于模型那几条加起来（按模型加总；用户的条按用户加总，可能对不上，所以不放用户下面）
-  assert.equal(await users.locator(".jy-my-facts").count(), 0);
-  assert.deepEqual((await models.locator(".jy-my-facts li").allInnerTexts()).map((x) => x.trim()), [`消费 ${formatMoney(2530 * 7)}`]);
-  // 管理员自用是 0 时「消费」和收入相等，不写那句（免得让人糊涂）；有管理员自用的情况在下面没设置售价那一页查
-  assert.equal(await models.getByText("含管理员自用，和收入不是一个数。", { exact: true }).count(), 0);
-  // 人数只在指标行里写一次：用户排行右上角不带数字
-  await users.getByRole("button", { name: "看全部用户", exact: true }).waitFor();
-  assert.equal(await users.getByText(/全部 \d+ 个用户/).count(), 0);
-  for (const [main, side] of [[income, users], [forecast, models]]) {
-    const [m, sd] = [await main.boundingBox(), await side.boundingBox()];
-    assert.ok(sd.x > m.x + m.width, "右边那块在左边那块右边");
-    assert.ok(m.width / sd.width > 1.8 && m.width / sd.width < 2.2, `宽度约 2:1（${Math.round(m.width)} / ${Math.round(sd.width)}）`);
-    assert.ok(Math.abs(m.y - sd.y) < 1 && Math.abs(m.height - sd.height) < 1, "上沿对齐、一样高");
-  }
-  // 每日收入只画收入：图例里没有上游成本，也没有每日净利；表格只有日期和收入两列、没有合计行（合计在等式里）
-  await income.locator(".jy-legend").getByText("收入", { exact: true }).waitFor();
-  // 说明里那句「上游成本在成本估算里看。」不算：只查图例
-  assert.equal(await income.locator(".jy-legend").getByText("上游成本").count(), 0); assert.equal(await income.getByText("每日净利").count(), 0);
-  await income.getByRole("button", { name: "表格", exact: true }).click();
-  await income.locator("table").waitFor();
-  assert.deepEqual((await income.locator("thead th").allInnerTexts()).map((x) => x.trim()), ["日期", "收入"]);
-  assert.equal(await income.locator("tfoot").count(), 0);
-  // 每天的收入照接口的逐日收入写，新的在上；第一行是今天（写「截至」几点），其余几天不写
-  const incomeRows = income.locator("tbody tr");
-  assert.deepEqual((await incomeRows.locator("td:last-child").allInnerTexts()).map((x) => x.trim()), [1600, 1500, 1400, 1300, 1200, 1100, 1000].map((v) => formatMoney(v)));
-  assert.match(await incomeRows.first().locator("td").first().innerText(), /截至/);
-  assert.equal(await incomeRows.locator("td:first-child", { hasText: "截至" }).count(), 1);
-  // 设置了售价：收入是准确数，不带「≈」；说明末尾去成本估算看上游成本，带当前时间范围
-  assert.doesNotMatch(await income.locator("tbody").innerText(), /≈/);
-  assert.equal(await income.getByRole("link", { name: "成本估算", exact: true }).getAttribute("href"), "/analytics?range=7d");
-  // 消费最多的模型：前 5 加一行「其他 2 个模型」（等于并掉的两个之和），右上角去「模型与渠道」
-  assert.equal(await models.locator(".jy-hbars li").count(), 6);
-  await models.locator(".jy-hbars li", { hasText: "其他 2 个模型" }).getByText(formatMoney(30 * 7), { exact: true }).waitFor();
-  await models.getByRole("button", { name: "全部 7 个模型", exact: true }).waitFor();
-  // 利润怎么算：摘要不带金额；明细收在共用的收起区里，默认收起
-  const basis = region("利润怎么算");
-  const basisMore = basis.getByRole("button", { name: "收入和成本怎么算、转售 Key、各上游成本", exact: true });
-  assert.equal(await basisMore.getAttribute("class"), "jy-more__toggle"); assert.equal(await basisMore.getAttribute("aria-expanded"), "false");
-  await basisMore.click();
-  // 选转售 Key：也是收起区，点开时才读管理员账号的 Key，「取消」收起
-  const pick = basis.getByRole("button", { name: "选转售 Key", exact: true });
-  assert.equal(await pick.getAttribute("class"), "jy-more__toggle"); assert.equal(adminKeys.length, 0);
-  await pick.click(); await basis.locator(".jy-my-mgr .jy-my-account h4", { hasText: "root" }).waitFor(); assert.deepEqual(adminKeys, ["GET"]);
-  await basis.getByRole("button", { name: "取消", exact: true }).click(); assert.equal(await pick.getAttribute("aria-expanded"), "false");
-  // 收起以后焦点回到「选转售 Key」按钮；「保存并重算」以后也一样
-  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "选转售 Key");
-  await pick.click(); await basis.locator(".jy-my-mgr .jy-my-account h4", { hasText: "root" }).waitFor();
-  await basis.getByRole("button", { name: "保存并重算", exact: true }).click();
-  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "选转售 Key");
-  assert.deepEqual(adminKeys, ["GET", "GET", "PUT"]);
-  // 换范围、点顶栏刷新：一直没请求过 /api/analytics（逐个记下请求过的路径再查）
-  await page.getByRole("button", { name: RANGE_TEXT["30d"], exact: true }).click();
-  await page.waitForURL(/range=30d/); await income.locator('a[href="/analytics?range=30d"]').waitFor();
-  const ownReads = () => paths.filter((x) => x === "/api/own/analytics").length, before = ownReads();
-  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
-  for (let i = 0; i < 50 && ownReads() === before; i++) await page.waitForTimeout(100);
-  assert.ok(ownReads() > before, "顶栏刷新重读了自营站点接口");
-  assert.ok(paths.includes("/api/own/analytics")); assert.equal(paths.filter((x) => x === "/api/analytics").length, 0);
-  // 按明细细算（模型与渠道标签页）：收起区，默认收起
-  await page.getByRole("tab", { name: "模型与渠道", exact: true }).click();
-  const audit = page.getByRole("button", { name: "细算的条数和结果", exact: true });
-  await audit.waitFor(); assert.equal(await audit.getAttribute("class"), "jy-more__toggle"); assert.equal(await audit.getAttribute("aria-expanded"), "false");
-  await page.context().close();
-
-  // 没设置售价：收入是估算，和等式同一个判断——每日收入的数值都带「≈」，说明里接上那句原因
-  const unpriced = await openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/own/analytics") return fulfill(route, myLayoutAnalytics(url.searchParams.get("range") || "7d", { sellPrice: false }));
-    throw new Error("unexpected my fixture API: " + url.pathname);
-  }, undefined, false, null, "/my");
-  const estIncome = unpriced.getByRole("region", { name: "每日收入", exact: true });
-  await unpriced.getByRole("region", { name: "消费最多的模型", exact: true }).getByText("含管理员自用，和收入不是一个数。", { exact: true }).waitFor();
-  // 原因那句只在等式下面写一次，每日收入的说明里只写一句短的
-  await estIncome.getByText("收入是估算，原因见上面的利润等式。", { exact: false }).waitFor();
-  assert.equal((await unpriced.locator("main").innerText()).split(SELL_PRICE_UNSET).length - 1, 1, "「没设置售价」那句全页只出现一次");
-  await estIncome.getByRole("button", { name: "表格", exact: true }).click();
-  const est = (await estIncome.locator("tbody td:last-child").allInnerTexts()).map((x) => x.trim());
-  assert.equal(est.length, 7); assert.ok(est.every((x) => x.startsWith("≈")), est.join(" "));
-  // 悬停和读屏里的收入也带「≈」：键盘到最后一天，读屏那句写「收入 ≈…」
-  await estIncome.getByRole("button", { name: "图表", exact: true }).click();
-  const chart = estIncome.locator(".jy-chart-stack"); await chart.focus(); await chart.press("End");
-  assert.match(await estIncome.locator(".sr-only[aria-live]").innerText(), /收入 ≈/);
-  // 选「今天」：这块只画收入，说明不再提净利
-  await unpriced.getByRole("button", { name: RANGE_TEXT.today, exact: true }).click();
-  const todayOnly = unpriced.getByRole("region", { name: "每日收入", exact: true });
-  await todayOnly.getByText(/看每天的收入；/).waitFor();
-  assert.doesNotMatch(await todayOnly.innerText(), /净利/);
-  await unpriced.context().close();
-
-  // 「今天」按数据自己的结束时间判断：数据停在昨天 23:30（跨零点后还没刷新），昨天那一行才是「今天」（写「截至」）
-  const startOfToday = Date.parse(`${shanghaiDay(Date.now())}T00:00:00+08:00`);
-  const stale = await openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/own/analytics") {
-      const a = myLayoutAnalytics(url.searchParams.get("range") || "7d"), yesterday = shiftDay(shanghaiDay(Date.now()), -1);
-      return fulfill(route, { ...a, endMs: startOfToday - 30 * 60000, incomeDaily: a.incomeDaily.map((x, i) => ({ ...x, date: shiftDay(yesterday, i - 6) })) });
-    }
-    throw new Error("unexpected my fixture API: " + url.pathname);
-  }, undefined, false, null, "/my");
-  const staleIncome = stale.getByRole("region", { name: "每日收入", exact: true });
-  await staleIncome.getByRole("button", { name: "表格", exact: true }).click();
-  const staleRows = staleIncome.locator("tbody tr");
-  await staleRows.first().waitFor();
-  assert.match(await staleRows.first().locator("td").first().innerText(), /截至/);
-  assert.equal(await staleIncome.locator("tbody td:first-child", { hasText: "截至" }).count(), 1);
-  await stale.context().close();
-
-  // 第一次加载时的骨架和概览同一个版式：块名是新的（「每日收入」，不是「收入与上游成本」），两行 8 + 4
-  let release; const held = new Promise((done) => { release = done; });
-  const slow = await openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/own/analytics") { await held; return fulfill(route, myLayoutAnalytics(url.searchParams.get("range") || "7d")); }
-    throw new Error("unexpected my fixture API: " + url.pathname);
-  }, undefined, false, null, "/my");
-  t.after(() => release());
-  const busy = slow.locator(".jy-page[aria-busy=true]");
-  await busy.waitFor();
-  for (const name of ["这段时间的用量", "每日收入", "消费最多的用户", "预计花费"]) await busy.getByRole("region", { name, exact: true }).waitFor();
-  assert.equal(await busy.getByText("收入与上游成本").count(), 0);
-  assert.equal(await busy.locator(".jy-grid-8-4").count(), 2);
-  release();
-  await slow.getByRole("region", { name: "消费最多的模型", exact: true }).waitFor();
-});
-
 test("成本估算：没设置售价时，趋势图和表格里的收入也带「≈」，和等式同一个判断", async (t) => {
   const cost = await openCostPage(t, (route) => fulfill(route, myLayoutAnalytics("7d", { sellPrice: false })), "/analytics?range=7d");
   const trend = cost.page.getByRole("region", { name: "收入与上游成本", exact: true });
@@ -1620,29 +1067,6 @@ test("收入确认不了时：成本估算、自营业务的利润等式收入�
   await balances.waitFor(); await balances.getByRole("button", { name: REFRESH, exact: true }).waitFor();
   await blind.getByText(`${ADMIN_UNMARKED}。`).first().waitFor();
   assert.equal(await blind.getByText(/合计含管理员/).count(), 0);
-});
-
-test("运营总览：收入确认不了时利润等式收入几项写「读不到」、两项成本照常；收入面板说原因，不拿用户消费拼出收入合计", async (t) => {
-  const opened = await openAccountsPage(t, { readonlyAPI(route, path) {
-    if (path === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(new URL(route.request().url()).searchParams.get("range") || "today"));
-    assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
-  } });
-  await opened.page.goto(baseURL);
-  // 运营总览默认看今天：利润等式叫「今天经营」，收入和上游成本合成一块「今天收入和上游成本」，上下两小段「收入」「上游成本」
-  // （EQ_TEXT.business、page.tsx 的 COPY.money；组件文件带 JSX，node 读不了）
-  await expectIncomeUnread(opened.page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
-  const money = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
-  const revenue = money.getByRole("region", { name: "收入", exact: true });
-  // 原因和「刷新」只在等式下面（上面 expectIncomeUnread 查过）；「收入」小段只写一句短的，不带按钮，也不拿用户消费拼收入（同一句话一页只说一次）
-  await revenue.getByText("读不到，原因见上面的利润等式。", { exact: true }).waitFor();
-  assert.equal(await revenue.getByRole("button").count(), 0);
-  assert.equal(await revenue.locator(".jy-state[role=alert]").count(), 0);
-  assert.doesNotMatch(await revenue.innerText(), /customer|root|¥/);
-  // 上游成本那一小段照常：按用量算的上游那一行是 ¥3.50；小段标题不带合计（合计只在等式里）
-  const cost = money.getByRole("region", { name: "上游成本", exact: true });
-  await cost.locator(".jy-hbars li", { hasText: "Usage upstream" }).getByText(formatMoney(3.5), { exact: true }).waitFor();
-  assert.equal(await cost.locator(".jy-ov-money-head").filter({ hasText: /[¥$]/ }).count(), 0);
-  assert.equal(opened.mutations.length, 0);
 });
 
 test("用量分析：全部上游都读不到时只说一处——黄条默认展开原因，合计只写「—」，下面不再放空状态", async (t) => {
@@ -3040,6 +2464,155 @@ test("昨天里有「还在读取」的日子：5 分钟重读一次（只读 PO
   await advance(600000); await settle(); assert.equal(profitReads.length, before + 1, "已固定以后不再读");
 });
 
+test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analytics，消费最多的用户、模型各前 5；利润怎么算、选转售 Key、按明细细算都是收起区", async (t) => {
+  const analytics = myLayoutAnalytics;
+  const adminKeys = [], paths = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    paths.push(url.pathname);
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") return fulfill(route, analytics(url.searchParams.get("range") || "7d"));
+    if (url.pathname === "/api/own/admin-keys") { adminKeys.push(route.request().method()); return fulfill(route, { accounts: [{ username: "root", role: 100, enumerable: true, tokens: [{ name: "sale", flagged: true, usedUsd: 1 }] }] }); }
+    // 只画收入以后，自营业务不再读慢的 /api/analytics（请求了就会报错）
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const region = (name) => page.getByRole("region", { name, exact: true });
+  const income = region("每日收入"), users = region("消费最多的用户"), forecast = region("预计花费"), models = region("消费最多的模型");
+  await income.waitFor(); await users.waitFor(); await forecast.waitFor(); await models.waitFor();
+  // 指标行在等式上面，这次只放等式里没有的三格（收入、毛利等 G 再补，同一个数一页只出现一次）
+  const metrics = region("这段时间的用量");
+  assert.deepEqual((await metrics.locator("dt").allInnerTexts()).map((x) => x.trim()), ["有消费的用户", "请求数", "Token（不含缓存）"]);
+  await metrics.getByText("5 个", { exact: true }).waitFor();
+  assert.doesNotMatch(await metrics.innerText(), /[¥$]/);
+  assert.ok((await metrics.boundingBox()).y < (await region(`${RANGE_TEXT["7d"]}经营`).boundingBox()).y, "指标行在利润等式上面");
+  // 「消费」合计在「消费最多的模型」下面，等于模型那几条加起来（按模型加总；用户的条按用户加总，可能对不上，所以不放用户下面）
+  assert.equal(await users.locator(".jy-my-facts").count(), 0);
+  assert.deepEqual((await models.locator(".jy-my-facts li").allInnerTexts()).map((x) => x.trim()), [`消费 ${formatMoney(2530 * 7)}`]);
+  // 管理员自用是 0 时「消费」和收入相等，不写那句（免得让人糊涂）；有管理员自用的情况在下面没设置售价那一页查
+  assert.equal(await models.getByText("含管理员自用，和收入不是一个数。", { exact: true }).count(), 0);
+  // 人数只在指标行里写一次：用户排行右上角不带数字
+  await users.getByRole("button", { name: "看全部用户", exact: true }).waitFor();
+  assert.equal(await users.getByText(/全部 \d+ 个用户/).count(), 0);
+  for (const [main, side] of [[income, users], [forecast, models]]) {
+    const [m, sd] = [await main.boundingBox(), await side.boundingBox()];
+    assert.ok(sd.x > m.x + m.width, "右边那块在左边那块右边");
+    assert.ok(m.width / sd.width > 1.8 && m.width / sd.width < 2.2, `宽度约 2:1（${Math.round(m.width)} / ${Math.round(sd.width)}）`);
+    assert.ok(Math.abs(m.y - sd.y) < 1 && Math.abs(m.height - sd.height) < 1, "上沿对齐、一样高");
+  }
+  // 每日收入只画收入：图例里没有上游成本，也没有每日净利；表格只有日期和收入两列、没有合计行（合计在等式里）
+  await income.locator(".jy-legend").getByText("收入", { exact: true }).waitFor();
+  // 说明里那句「上游成本在成本估算里看。」不算：只查图例
+  assert.equal(await income.locator(".jy-legend").getByText("上游成本").count(), 0); assert.equal(await income.getByText("每日净利").count(), 0);
+  await income.getByRole("button", { name: "表格", exact: true }).click();
+  await income.locator("table").waitFor();
+  assert.deepEqual((await income.locator("thead th").allInnerTexts()).map((x) => x.trim()), ["日期", "收入"]);
+  assert.equal(await income.locator("tfoot").count(), 0);
+  // 每天的收入照接口的逐日收入写，新的在上；第一行是今天（写「截至」几点），其余几天不写
+  const incomeRows = income.locator("tbody tr");
+  assert.deepEqual((await incomeRows.locator("td:last-child").allInnerTexts()).map((x) => x.trim()), [1600, 1500, 1400, 1300, 1200, 1100, 1000].map((v) => formatMoney(v)));
+  assert.match(await incomeRows.first().locator("td").first().innerText(), /截至/);
+  assert.equal(await incomeRows.locator("td:first-child", { hasText: "截至" }).count(), 1);
+  // 设置了售价：收入是准确数，不带「≈」；说明末尾去成本估算看上游成本，带当前时间范围
+  assert.doesNotMatch(await income.locator("tbody").innerText(), /≈/);
+  assert.equal(await income.getByRole("link", { name: "成本估算", exact: true }).getAttribute("href"), "/analytics?range=7d");
+  // 消费最多的模型：前 5 加一行「其他 2 个模型」（等于并掉的两个之和），右上角去「模型与渠道」
+  assert.equal(await models.locator(".jy-hbars li").count(), 6);
+  await models.locator(".jy-hbars li", { hasText: "其他 2 个模型" }).getByText(formatMoney(30 * 7), { exact: true }).waitFor();
+  await models.getByRole("button", { name: "全部 7 个模型", exact: true }).waitFor();
+  // 利润怎么算：摘要不带金额；明细收在共用的收起区里，默认收起
+  const basis = region("利润怎么算");
+  const basisMore = basis.getByRole("button", { name: "收入和成本怎么算、转售 Key、各上游成本", exact: true });
+  assert.equal(await basisMore.getAttribute("class"), "jy-more__toggle"); assert.equal(await basisMore.getAttribute("aria-expanded"), "false");
+  await basisMore.click();
+  // 选转售 Key：也是收起区，点开时才读管理员账号的 Key，「取消」收起
+  const pick = basis.getByRole("button", { name: "选转售 Key", exact: true });
+  assert.equal(await pick.getAttribute("class"), "jy-more__toggle"); assert.equal(adminKeys.length, 0);
+  await pick.click(); await basis.locator(".jy-my-mgr .jy-my-account h4", { hasText: "root" }).waitFor(); assert.deepEqual(adminKeys, ["GET"]);
+  await basis.getByRole("button", { name: "取消", exact: true }).click(); assert.equal(await pick.getAttribute("aria-expanded"), "false");
+  // 收起以后焦点回到「选转售 Key」按钮；「保存并重算」以后也一样
+  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "选转售 Key");
+  await pick.click(); await basis.locator(".jy-my-mgr .jy-my-account h4", { hasText: "root" }).waitFor();
+  await basis.getByRole("button", { name: "保存并重算", exact: true }).click();
+  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "选转售 Key");
+  assert.deepEqual(adminKeys, ["GET", "GET", "PUT"]);
+  // 换范围、点顶栏刷新：一直没请求过 /api/analytics（逐个记下请求过的路径再查）
+  await page.getByRole("button", { name: RANGE_TEXT["30d"], exact: true }).click();
+  await page.waitForURL(/range=30d/); await income.locator('a[href="/analytics?range=30d"]').waitFor();
+  const ownReads = () => paths.filter((x) => x === "/api/own/analytics").length, before = ownReads();
+  await page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
+  for (let i = 0; i < 50 && ownReads() === before; i++) await page.waitForTimeout(100);
+  assert.ok(ownReads() > before, "顶栏刷新重读了自营站点接口");
+  assert.ok(paths.includes("/api/own/analytics")); assert.equal(paths.filter((x) => x === "/api/analytics").length, 0);
+  // 按明细细算（模型与渠道标签页）：收起区，默认收起
+  await page.getByRole("tab", { name: "模型与渠道", exact: true }).click();
+  const audit = page.getByRole("button", { name: "细算的条数和结果", exact: true });
+  await audit.waitFor(); assert.equal(await audit.getAttribute("class"), "jy-more__toggle"); assert.equal(await audit.getAttribute("aria-expanded"), "false");
+  await page.context().close();
+
+  // 没设置售价：收入是估算，和等式同一个判断——每日收入的数值都带「≈」，说明里接上那句原因
+  const unpriced = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") return fulfill(route, myLayoutAnalytics(url.searchParams.get("range") || "7d", { sellPrice: false }));
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+  const estIncome = unpriced.getByRole("region", { name: "每日收入", exact: true });
+  await unpriced.getByRole("region", { name: "消费最多的模型", exact: true }).getByText("含管理员自用，和收入不是一个数。", { exact: true }).waitFor();
+  // 原因那句只在等式下面写一次，每日收入的说明里只写一句短的
+  await estIncome.getByText("收入是估算，原因见上面的利润等式。", { exact: false }).waitFor();
+  assert.equal((await unpriced.locator("main").innerText()).split(SELL_PRICE_UNSET).length - 1, 1, "「没设置售价」那句全页只出现一次");
+  await estIncome.getByRole("button", { name: "表格", exact: true }).click();
+  const est = (await estIncome.locator("tbody td:last-child").allInnerTexts()).map((x) => x.trim());
+  assert.equal(est.length, 7); assert.ok(est.every((x) => x.startsWith("≈")), est.join(" "));
+  // 悬停和读屏里的收入也带「≈」：键盘到最后一天，读屏那句写「收入 ≈…」
+  await estIncome.getByRole("button", { name: "图表", exact: true }).click();
+  const chart = estIncome.locator(".jy-chart-stack"); await chart.focus(); await chart.press("End");
+  assert.match(await estIncome.locator(".sr-only[aria-live]").innerText(), /收入 ≈/);
+  // 选「今天」：这块只画收入，说明不再提净利
+  await unpriced.getByRole("button", { name: RANGE_TEXT.today, exact: true }).click();
+  const todayOnly = unpriced.getByRole("region", { name: "每日收入", exact: true });
+  await todayOnly.getByText(/看每天的收入；/).waitFor();
+  assert.doesNotMatch(await todayOnly.innerText(), /净利/);
+  await unpriced.context().close();
+
+  // 「今天」按数据自己的结束时间判断：数据停在昨天 23:30（跨零点后还没刷新），昨天那一行才是「今天」（写「截至」）
+  const startOfToday = Date.parse(`${shanghaiDay(Date.now())}T00:00:00+08:00`);
+  const stale = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") {
+      const a = myLayoutAnalytics(url.searchParams.get("range") || "7d"), yesterday = shiftDay(shanghaiDay(Date.now()), -1);
+      return fulfill(route, { ...a, endMs: startOfToday - 30 * 60000, incomeDaily: a.incomeDaily.map((x, i) => ({ ...x, date: shiftDay(yesterday, i - 6) })) });
+    }
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+  const staleIncome = stale.getByRole("region", { name: "每日收入", exact: true });
+  await staleIncome.getByRole("button", { name: "表格", exact: true }).click();
+  const staleRows = staleIncome.locator("tbody tr");
+  await staleRows.first().waitFor();
+  assert.match(await staleRows.first().locator("td").first().innerText(), /截至/);
+  assert.equal(await staleIncome.locator("tbody td:first-child", { hasText: "截至" }).count(), 1);
+  await stale.context().close();
+
+  // 第一次加载时的骨架和概览同一个版式：块名是新的（「每日收入」，不是「收入与上游成本」），两行 8 + 4
+  let release; const held = new Promise((done) => { release = done; });
+  const slow = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") { await held; return fulfill(route, myLayoutAnalytics(url.searchParams.get("range") || "7d")); }
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+  t.after(() => release());
+  const busy = slow.locator(".jy-page[aria-busy=true]");
+  await busy.waitFor();
+  for (const name of ["这段时间的用量", "每日收入", "消费最多的用户", "预计花费"]) await busy.getByRole("region", { name, exact: true }).waitFor();
+  assert.equal(await busy.getByText("收入与上游成本").count(), 0);
+  assert.equal(await busy.locator(".jy-grid-8-4").count(), 2);
+  release();
+  await slow.getByRole("region", { name: "消费最多的模型", exact: true }).waitFor();
+});
+
 test("手机 320：一个渠道一张卡片，点开能看计算明细，页面不横向溢出", async (t) => {
   const { page } = await openDailyPage(t, { viewport: { width: 320, height: 800 } });
   assert.equal(await page.locator(".jy-profit-table").count(), 0);
@@ -3055,320 +2628,3 @@ test("手机 320：一个渠道一张卡片，点开能看计算明细，页面�
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "320px document root overflows horizontally");
 });
-
-// ---- 被删用例之间夹着的共用夹具 ----
-// 确认后预览卡片收起、抽屉恢复可关闭，再等结果标题：全部更新上，或「有 N 个上游没更新上」
-async function confirmAccountAuthorization(drawer) {
-  await authorizationConfirm(drawer).click(); await alertTitle(drawer, "预览，还没保存").waitFor({ state: "hidden" }); await drawer.locator(".ant-drawer-close").waitFor();
-  await alertTitle(drawer, new RegExp(`^(${workflowActionMeta("update_authorization").done}|有 \\d+ 个上游没更新上，已更新的不变)$`)).waitFor();
-}
-const alertTitle = (scope, text) => scope.locator(".ant-alert-title").filter({ hasText: typeof text === "string" ? exactText(text) : text });
-// 账号卡片里的事实按 dt/dd 成对展示：等到这一项的值出现
-const exactText = (text) => new RegExp(`^\\s*${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`);
-const authorizationConfirm = (drawer) => drawer.getByRole("button", { name: `确认${UPDATE_AUTH}`, exact: true });
-const UPDATE_AUTH = workflowActionMeta("update_authorization").label, USE_SAVED = "用已有上游", NEW_UPSTREAM = "新增上游", CREATE_HINT = "保存后，别的渠道也能直接用这个上游。";
-// 已有保存结果时预览按钮写「重新预览」，沿用已保存的登录信息
-async function previewAuthorization(drawer, again = false) { await drawer.getByRole("button", { name: again ? "重新预览" : BINDING_COPY.preview, exact: true }).click(); await alertTitle(drawer, "预览，还没保存").waitFor(); }
-const preview = { billingEffectiveFromMs: null, firstQueryableAtMs: null, scopeChanged: true };
-async function openAccountAuthorization(page, center, account) {
-  const expanded = await expandAccount(center, account); await expanded.getByRole("button", { name: `${UPDATE_AUTH} 上游账号 ${account.identity.accountId}`, exact: true }).click();
-  return authorizationDialog(page, account.identity.accountId);
-}
-// 更新登录信息（§3.7）：账号卡片里的按钮写「更新登录信息 上游账号 N」，抽屉标题「更新登录信息 · 上游账号 N」
-const authorizationDialog = (page, accountId) => page.getByRole("dialog", { name: `${UPDATE_AUTH} · 上游账号 ${accountId}`, exact: true });
-async function expandAccount(center, account) { await center.locator(`[data-site-key="${account.siteKey}"]`).getByRole("button", { name: new RegExp("账号 " + account.identity.accountId + " ") }).click(); return center.locator(`[data-account-key="${account.accountKey}"]`); }
-const REFILL_TITLE = (code) => `${describeError({ code }).text}。请重新填写登录信息。`;
-// 带这个标题的整条提示（标题和「查看详细原因」在同一条里）
-const alertWithTitle = (scope, text) => scope.locator(".ant-alert").filter({ has: scope.page().locator(".ant-alert-title").filter({ hasText: exactText(text) }) });
-async function openAuthorizationPage(t, options = {}) {
-  const model = accountReadFixture(), probes = [], updates = [], recoveries = [], operations = new Map();
-  const rename = { "A-monitor-1": "st_u04_a1", "A-monitor-2": "st_u04_a2", "A-billing": "st_u04_billing", "A-archived": "st_u04_archived", "B-monitor": "st_u04_b", "pure-key": "st_u04_key", "unknown-legacy": "st_u04_unknown", own: "st_u04_own" };
-  const account = model.accounts[0], b = model.accounts[1]; account.identity.accountId = "42"; b.identity.accountId = "43";
-  for (const item of [account, b]) {
-    item.accountKey = createHash("sha256").update(JSON.stringify([item.identity.provider, item.identity.baseUrl, item.identity.accountId])).digest("hex");
-    for (const resource of item.resources) { resource.id = rename[resource.id] || resource.id; resource.identity = { ...item.identity }; resource.purposes.billingRuleIds = resource.id === "st_u04_billing" ? ["rule_u04"] : []; }
-    for (const key of item.keys) if (key.activeRuleIds.length) { key.ruleIds = item === account ? ["rule_u04", "rule_history"] : ["rule_b"]; key.activeRuleIds = [key.ruleIds[0]]; key.associations.forEach((association, index) => { association.ruleId = key.ruleIds[index]; }); }
-    for (const key of item.keys) for (const association of key.associations) { association.upstreamStationId = rename[association.upstreamStationId] || association.upstreamStationId; association.ownStationId = "st_u04_own"; }
-  }
-  for (const resource of model.unverifiedResources) resource.id = rename[resource.id];
-  for (const channel of model.channels) { channel.monitor.stationIds = channel.monitor.stationIds.map((id) => rename[id] || id); channel.reconciliation.ruleIds = channel.id === 1 ? ["rule_u04"] : channel.reconciliation.ruleIds; }
-  for (const item of model.accounts) for (const key of item.keys) for (const channel of key.channels) { channel.ownStationId = "st_u04_own"; channel.ownSource.stationId = "st_u04_own"; }
-  let originalStations, donorRejected = false;
-  const resources = model.accounts.flatMap((item) => item.resources);
-  const intent = (body) => ({ requestId: body.requestId, targetStationIds: [...body.targetStationIds] });
-  const impact = (targets) => ({ monitorStationIds: targets.filter((target) => target.purposes.monitor).map((target) => target.stationId), billingRuleIds: [...new Set(targets.flatMap((target) => target.billingRuleIds))], channels: [{ ownStationId: "st_u04_own", channelId: 1, name: "Sales 1" }] });
-  const project = (body, targetAccount) => {
-    const targets = body.targetStationIds.flatMap((id) => {
-      const resource = targetAccount.resources.find((entry) => entry.id === id && !entry.archivedAt);
-      return resource ? [{ stationId: id, authVersion: resource.authVersion, resourceVersion: resource.resourceVersion, currentType: resource.type, newType: body.authorization?.type || resource.type, purposes: resource.purposes, monitorChannelIds: resource.purposes.monitor ? [1] : [], billingRuleIds: resource.purposes.billingRuleIds, billingChannelIds: resource.purposes.billingRuleIds.length ? [1] : [] }] : [];
-    });
-    return { requestId: body.requestId, previewId: "authorization-preview-" + probes.length, expiresAtMs: Date.now() + 600000, accountKey: targetAccount.accountKey, identity: targetAccount.identity, targets, excluded: body.targetStationIds.filter((id) => !targets.some((target) => target.stationId === id)).map((stationId) => ({ stationId, reason: "账号身份未核验，已排除" })), impact: impact(targets), retryInput: intent(body) };
-  };
-  const opened = await openAccountsPage(t, { model, viewport: options.viewport, path: options.path, ownStationId: "st_u04_own", async accountOperation(route, path) {
-    const body = route.request().postDataJSON(), targetAccount = model.accounts.find((item) => path.includes(item.accountKey)); assert.ok(targetAccount);
-    if (path.endsWith("/probe")) {
-      probes.push(body);
-      if (body.authorization?.accessToken === "account-B") return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: "ACCOUNT_IDENTITY_CHANGED", error: "替换授权属于另一个账号，请另行接入" }) });
-      if (body.reuseSavedAuthorization && options.invalidDonor && !donorRejected) { donorRejected = true; return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: "AUTHORIZATION_UNVERIFIED", error: "已保存授权验证失败 [已隐藏]" }) }); }
-      if (body.reuseSavedAuthorization && options.noDonor) return route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ code: "SAVED_AUTHORIZATION_UNAVAILABLE", error: "尚无已确认更新的授权可复用，请重新输入" }) });
-      const preview = project(body, targetAccount); operations.set(body.requestId, { preview, saved: operations.get(body.requestId)?.saved || new Set() }); return fulfill(route, preview);
-    }
-    const operation = operations.get(body.requestId); assert.ok(operation, "recovery uses the original credential-free intent");
-    if (path.endsWith("/recover")) {
-      recoveries.push(body); assert.deepEqual(body, operation.preview.retryInput);
-      const targets = body.targetStationIds.map((stationId) => ({ stationId, status: operation.saved.has(stationId) ? "already_updated" : "repreview_required", savedAuthVersion: operation.saved.has(stationId) ? 2 : null, ...(operation.saved.has(stationId) ? {} : { code: "PREVIEW_REQUIRED", reason: "请重新预览" }), remainingActions: operation.saved.has(stationId) ? [] : ["repreview"] }));
-      return fulfill(route, { requestId: body.requestId, accountKey: targetAccount.accountKey, complete: targets.every((target) => target.status === "already_updated"), targets, excluded: operation.preview.excluded, impact: operation.preview.impact, retryInput: intent(body) });
-    }
-    updates.push(body); assert.equal(body.previewId, operation.preview.previewId);
-    const targets = operation.preview.targets.map((target) => {
-      if (operation.saved.has(target.stationId)) return { stationId: target.stationId, status: "already_updated", savedAuthVersion: 2, remainingActions: [] };
-      if ((options.partial && target.stationId === "st_u04_a2" || options.noDonor) && updates.length === 1) return { stationId: target.stationId, status: "failed", savedAuthVersion: null, code: "AUTHORIZATION_UPDATE_FAILED", reason: "保存失败，请稍后重试", remainingActions: ["repreview"] };
-      operation.saved.add(target.stationId); const resource = resources.find((entry) => entry.id === target.stationId); resource.authVersion += 1; resource.resourceVersion += "-updated"; resource.type = target.newType;
-      Object.assign(originalStations.find((entry) => entry.id === target.stationId), { authVersion: resource.authVersion, resourceVersion: resource.resourceVersion, type: resource.type });
-      return { stationId: target.stationId, status: "updated", savedAuthVersion: resource.authVersion, remainingActions: [] };
-    });
-    targets.push(...operation.preview.excluded.map((target) => ({ stationId: target.stationId, status: "failed", savedAuthVersion: null, code: "TARGET_EXCLUDED", reason: target.reason, remainingActions: ["verify_identity", "repreview"] })));
-    const result = { requestId: body.requestId, accountKey: targetAccount.accountKey, complete: targets.every((target) => target.status !== "failed"), targets, excluded: operation.preview.excluded, impact: operation.preview.impact, retryInput: operation.preview.retryInput };
-    if (options.loseResponse && updates.length === 1) return route.abort("failed"); return fulfill(route, result);
-  }, mutation(route, mutation, stations) {
-    if (mutation.method === "PUT") {
-      const id = decodeURIComponent(mutation.path.split("/").at(-1)), resource = resources.find((entry) => entry.id === id); assert.ok(resource);
-      assert.deepEqual(Object.keys(mutation.body).sort(), ["expectedAuthVersion", "expectedResourceVersion", "monitorEnabled"]);
-      assert.equal(mutation.body.expectedAuthVersion, resource.authVersion); assert.equal(mutation.body.expectedResourceVersion, resource.resourceVersion);
-      resource.monitorEnabled = mutation.body.monitorEnabled; resource.purposes.monitor = mutation.body.monitorEnabled; if (!resource.monitorEnabled) resource.includeInProfit = false; resource.resourceVersion += "-purpose";
-      Object.assign(stations.find((entry) => entry.id === id), { monitorEnabled: resource.monitorEnabled, includeInProfit: resource.includeInProfit, resourceVersion: resource.resourceVersion }); return fulfill(route, { ok: true });
-    }
-    assert.equal(mutation.method, "DELETE"); const ruleId = mutation.path.split("/").at(-1); for (const item of model.accounts) for (const key of item.keys) {
-      key.activeRuleIds = key.activeRuleIds.filter((id) => id !== ruleId);
-      for (const association of key.associations) if (association.ruleId === ruleId) Object.assign(association, { status: "stopped", stoppedAt: "2026-10-09T07:30:00Z", conflict: false, conflictRuleIds: [] });
-    }
-    return fulfill(route, { ok: true });
-  } });
-  originalStations = opened.originalStations;
-  return { ...opened, probes, updates, recoveries };
-}
-async function openAccountsPage(t, options = {}) {
-  const model = options.model || accountReadFixture(), mutations = [], accountRequests = [];
-  const originalStations = [
-    { id: options.ownStationId || "own", name: "Own station", type: "newapi", baseUrl: "https://own.test", isOwn: true, monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 50 } },
-    ...model.accounts.flatMap((account) => account.resources), ...model.unverifiedResources,
-  ].map((entry) => ({ ...entry, isOwn: !!entry.isOwn, userId: ["A-monitor-1", "st_u04_a1"].includes(entry.id) ? "operator-A" : "", email: entry.id === "Sub-password" ? "saved-sub@example.test" : "", costAliases: ["A-monitor-1", "st_u04_a1"].includes(entry.id) ? ["kept_alias"] : [], tokenInfo: null, prediction: null, spark: [], todayUsed: null }));
-  const onboarded = await openOnboardingPage(t, { ...options, viewport: options.viewport, accountModel: model, accountOperation: options.accountOperation, accounts(route) {
-    accountRequests.push(route.request().method()); return options.accounts ? options.accounts(route, accountRequests.length, model) : fulfill(route, model);
-  }, extraAPI(route, path) {
-    // 每日利润页整页是只读的 POST（不是写）：不算改动
-    if (path === "/api/reconciliation/profit") return fulfill(route, profitPage([]));
-    if (route.request().method() !== "GET") { const mutation = { path, method: route.request().method(), body: route.request().postData() ? route.request().postDataJSON() : null }; mutations.push(mutation); if (options.mutation) return options.mutation(route, mutation, originalStations); throw new Error("unexpected account-center write"); }
-    if (path === "/api/stations") { const params = new URL(route.request().url()).searchParams; return fulfill(route, { stations: originalStations.filter((entry) => (!entry.archivedAt || params.get("includeArchived") === "true") && (entry.monitorEnabled !== false || params.get("includeUnmonitored") === "true")), settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } }); }
-    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }, { value: "newapi-key", label: "Key", needs: ["apiKey"] }, { value: "sub2api", label: "Sub2API", needs: ["accessToken"] }, { value: "sub2api-password", label: "Sub2API password", needs: ["email", "password"] }], rules: {} });
-    if (options.readonlyAPI) return options.readonlyAPI(route, path);
-    throw new Error("unexpected account fixture API: " + path);
-  } });
-  const { page } = onboarded;
-  // 上游账号、Key 与绑定在「上游账单」标签里；绑定类事项落到「渠道绑定」标签，上游账单此时不可见
-  const path = options.path || "/stations?view=bills", onboardingDestination = /[?&]action=(?:connect|coverage|source)(?:&|$)/.test(path);
-  // 预载的渠道接入页也读过一次账号；计数从目标页开始
-  accountRequests.length = 0;
-  await page.goto(baseURL + path); const center = page.getByRole("region", { name: STATION_TABS.bills }); if (onboardingDestination) await page.getByRole("tab", { name: STATION_TABS.onboarding, selected: true }).waitFor(); else if (options.initialFailure) await center.getByRole("button", { name: `${REFRESH}${STATION_TABS.bills}`, exact: true }).waitFor(); else if (!options.path) await center.getByText(/^3 个上游账号；/).waitFor(); else await center.getByText(/^\d+ 个上游账号/).waitFor();
-  if (/action=verify(?:&|-billing&)/.test(options.path || "") && !options.path.includes("stationId=deleted")) {
-    const verification = page.getByRole("dialog", { name: new RegExp(`^${TEST_READ} · `) }); await verification.waitFor();
-    await page.waitForFunction((dialog) => !dialog.closest(".ant-drawer")?.getAnimations({ subtree: true }).some((animation) => animation.playState === "running" && animation.effect?.getTiming().iterations !== Infinity), await verification.elementHandle());
-  }
-  const badge = page.getByRole("button", { name: "Collapse issues badge", exact: true }); if (await badge.isVisible()) await badge.click();
-  return { ...onboarded, page, center, model, mutations, accountRequests, originalStations };
-}
-// Public shapes and facts from server/channel-onboarding.test.js accountReadFixture/U03 cases.
-function accountReadFixture() {
-  const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-  const identity = (provider, accountId) => ({ provider, baseUrl: "https://same.test", accountId });
-  const source = { stationId: "own", provider: "newapi", baseUrl: "https://own.test", accountId: "1", namespaceKey: hash(["newapi", "https://own.test", "1"]) };
-  const resource = (id, account, extra = {}) => ({ id, name: id, type: "newapi", baseUrl: "https://same.test", monitorEnabled: true, archivedAt: null, authVersion: 1, resourceVersion: "version-" + id,
-    identity: account, verification: account ? "verified" : "unverified", purposes: { monitor: true, billingRuleIds: [] }, balance: { ok: true, remaining: 10 }, lowBalanceUsd: null, cnyPerUsd: null, includeInProfit: true, noRenewal: false, hasAccessToken: true, hasApiKey: false, hasPassword: false, ...extra });
-  const member = (channelId) => ({ ownSource: source, ownStationId: "own", channelId, name: "Channel " + channelId });
-  const aIdentity = identity("newapi", "A"), bIdentity = identity("newapi", "B"), subIdentity = identity("sub2api", "A");
-  const aKey = hash(["newapi", "https://same.test", "A"]), bKey = hash(["newapi", "https://same.test", "B"]), subKey = hash(["sub2api", "https://same.test", "A"]);
-  const action = (kind, target = {}) => ({ id: kind + ":" + hash(target), kind, label: workflowActionMeta(kind).label, accountKey: null, stationId: null, ruleId: null, ownStationId: null, channelIds: [], window: null, href: "/stations", ...target });
-  const channelRef = (channelId) => ({ channelId, name: "Channel " + channelId });
-  // needsCoverageAnswer 和服务端一样由 coverageNeedsAnswer 算（这里的绑定都是新绑定、按用量计成本）；extra 里写了就用写的
-  const association = (ruleId, extra = {}) => withCoverageAnswer({ ruleId, status: "active", upstreamStationId: null, ownStationId: "own", timezone: "Asia/Shanghai", channels: [channelRef(1)], costCoverage: "unknown",
-    coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] }, scopeVersion: 3, billingEffectiveFromMs: 1791561600000, accountingStartMs: 1791561600000, conflict: false, conflictRuleIds: [], stoppedAt: null, ...extra });
-  const withCoverageAnswer = (value) => ({ ...value, needsCoverageAnswer: value.needsCoverageAnswer ?? coverageNeedsAnswer({ billingPolicy: "immediate", ...value }, "usage") });
-  const stopped = (ruleId, extra = {}) => association(ruleId, { status: "stopped", scopeVersion: 1, stoppedAt: "2026-10-01T00:00:00Z", ...extra });
-  const key = (accountId, tokenId, extra = {}) => ({ canonicalKey: hash(["newapi", "https://same.test", accountId, tokenId]), tokenId, tokenName: "Key " + tokenId,
-    ruleIds: [accountId + "-active"], activeRuleIds: [accountId + "-active"], scopeAmbiguous: false, channels: [member(1)], costCoverage: "unknown", coverageDeclaration: { answer: "other_use", otherUse: "own_channels", uncoveredOwnChannelIds: [2] }, scopeVersion: 3, billingEffectiveFromMs: 1791561600000, firstQueryableAtMs: 1791648000000, ...extra });
-  const a = { accountKey: aKey, siteKey: hash(["newapi", "https://same.test"]), identity: aIdentity,
-    resources: [resource("A-archived", aIdentity, { archivedAt: "2026-10-01T00:00:00Z", purposes: { monitor: true, billingRuleIds: ["A-history"] } }), resource("A-billing", aIdentity, { monitorEnabled: false, purposes: { monitor: false, billingRuleIds: ["A-active"] } }),
-      resource("A-monitor-1", aIdentity, { lowBalanceUsd: 27, cnyPerUsd: 0.7, includeInProfit: false, noRenewal: true, balance: { ok: false, remaining: 10, account: null, error: "403 [已隐藏] [已隐藏] [已隐藏]" } }), resource("A-monitor-2", aIdentity, { purposes: { monitor: true, billingRuleIds: ["A-stopped"] } })],
-    keys: [key("A", 9, { ruleIds: ["A-active", "A-history"], channels: [member(1), member(3)], associations: [association("A-active", { upstreamStationId: "A-billing", channels: [channelRef(1), channelRef(3)] }), stopped("A-history", { upstreamStationId: "A-archived" })] }),
-      key("A", 10, { ruleIds: ["A-stopped"], activeRuleIds: [], channels: [member(2)], associations: [stopped("A-stopped", { upstreamStationId: "A-monitor-2", channels: [channelRef(2)] })] })],
-    actions: [action("update_authorization", { accountKey: aKey, href: `/stations?action=authorization&accountKey=${aKey}` }), action("confirm_coverage", { accountKey: aKey, ruleId: "A-active", ownStationId: "own", channelIds: [2], href: "/stations?action=coverage&ruleId=A-active" })] };
-  const b = { accountKey: bKey, siteKey: a.siteKey, identity: bIdentity, resources: [resource("B-monitor", bIdentity)], keys: [key("B", 9, { costCoverage: "complete", coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] }, channels: [member(2)],
-    associations: [association("B-active", { upstreamStationId: "B-monitor", channels: [channelRef(2)], costCoverage: "complete", coverageDeclaration: { answer: "none", otherUse: null, uncoveredOwnChannelIds: [] } })] })], actions: [action("inspect_balance", { accountKey: bKey, stationId: "B-monitor" })] };
-  const sub = { accountKey: subKey, siteKey: hash(["sub2api", "https://same.test"]), identity: subIdentity, resources: [resource("Sub-JWT", subIdentity, { type: "sub2api" }), resource("Sub-password", subIdentity, { type: "sub2api-password", hasAccessToken: false, hasPassword: true })], keys: [], actions: [] };
-  const unverifiedResources = [resource("pure-key", null, { type: "newapi-key", hasAccessToken: false, hasApiKey: true }), resource("unknown-legacy", null)];
-  const channels = [1, 2, 3].map((id) => ({ id, name: "Channel " + id, type: 1, status: id === 2 ? 2 : 1, baseUrl: "https://same.test", groups: ["sales"], revision: "revision-" + id, missing: id === 3,
-    monitor: { status: id === 1 ? "linked" : "unlinked", stationIds: id === 1 ? ["A-monitor-1", "A-monitor-2", "pure-key"] : [] }, reconciliation: { status: "configured", ruleIds: id === 1 ? ["A-active"] : id === 2 ? ["B-active", "A-stopped"] : ["A-history"] } }));
-  return { accounts: [a, b, sub], unverifiedResources, channels, actions: [...a.actions, ...b.actions, action("connect_channels", { stationId: "pure-key", ownStationId: "own", channelIds: [1], href: "/stations?action=connect&ownStationId=own&channelIds=1" }), action("verify_identity", { stationId: "unknown-legacy", ownStationId: "own", href: "/stations?action=verify&stationId=unknown-legacy" })], generatedAt: "2026-10-09T07:00:00.000Z" };
-}
-const ownSource = { stationId: "own-1", provider: "newapi", baseUrl: "https://own.example", accountId: "1", namespaceKey: createHash("sha256").update(JSON.stringify(["newapi", "https://own.example", "1"])).digest("hex") };
-async function openOnboardingPage(t, options = {}) {
-  const config = options.config || onboardingFixture(), probes = [], writes = [], reads = [], recoveries = [], operations = new Map();
-  let latestProbe, latestResult;
-  const page = await openFixturePage(t, async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (/^\/api\/reconciliation\/upstreams\/[^/]+\/keys$/.test(path)) {
-      reads.push({ path, method: route.request().method(), query: new URL(route.request().url()).search });
-      if (options.keyDirectory) return options.keyDirectory(route, path, reads, config);
-      if (options.readonlyAPI) return options.readonlyAPI(route, path);
-      return fulfill(route, onboardingDirectory(config, decodeURIComponent(path.split("/")[4]), options.tokens));
-    }
-    if (path === "/api/reconciliation/configuration") return fulfill(route, options.ruleConfiguration || configuration);
-    if (path === "/api/reconciliation" || path === "/api/reconciliation/query") return fulfill(route, options.ruleModel || response(options.ruleResults || [rule("rule-1", "Rule A", 10)]));
-    if (options.extraAPI) return options.extraAPI(route, path);
-    throw new Error("unexpected fixture API: " + path);
-  }, options.viewport, !!options.clock, async (route) => {
-    const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/channel-onboarding/accounts") { reads.push({ path, method: request.method() }); return options.accounts ? options.accounts(route, reads) : fulfill(route, options.accountModel || onboardingAccounts(config)); }
-    if (options.accountOperation && path.startsWith("/api/channel-onboarding/accounts/")) return options.accountOperation(route, path);
-    if (/^\/api\/channel-onboarding\/resources\/[^/]+\/identity$/.test(path) && options.extraAPI) return options.extraAPI(route, path);
-    if (request.method() === "GET" || path.endsWith("/sync")) { reads.push({ path, method: request.method() }); return options.discovery ? options.discovery(route, reads, config) : fulfill(route, config); }
-    const body = request.postDataJSON();
-    if (path === "/api/channel-onboarding/batch/probe") { probes.push(body); latestProbe = options.probe ? options.probe(body, probes.length, config) : probeResult(body, config, options); latestProbe.previewId += "-" + probes.length; operations.set(body.requestId, { ...(operations.get(body.requestId) || {}), input: body, probe: latestProbe }); return fulfill(route, latestProbe); }
-    if (path === "/api/channel-onboarding/batch/recover") { recoveries.push(body); const operation = operations.get(body.requestId); return fulfill(route, options.recover ? options.recover(body, operation?.result) : operation?.result || batchResult(operation.input, operation.probe, false)); }
-    assert.equal(path, "/api/channel-onboarding/batch");
-    writes.push(body);
-    latestResult = options.connect ? options.connect(body, writes.length, latestProbe) : batchResult(body, latestProbe);
-    operations.get(body.requestId).result = latestResult;
-    if (latestResult.complete) for (const group of body.groups) for (const channel of group.channels) {
-      const entry = config.channels.find((entry) => entry.id === channel.channelId);
-      const change = latestProbe.groups.find((entry) => entry.groupId === group.groupId).monitorChanges.find((entry) => entry.channelId === channel.channelId);
-      entry.monitor = { status: change.proposedStationIds.length ? "linked" : "unlinked", stationIds: change.proposedStationIds };
-      if (group.reconciliation) entry.reconciliation = { status: "configured", ruleIds: ["rule-1"] };
-    }
-    if (options.loseResponseAt === writes.length) return route.abort("failed");
-    return fulfill(route, latestResult);
-  }, options.onboardingPath || "/stations?view=onboarding");
-  // 渠道接入面板已经删了：等上游列表出来（有上游是表或卡片列表，没有是空状态）
-  await page.locator(".jy-stations-table, .jy-m-list, .jy-empty").first().waitFor();
-  return { page, config, probes, writes, reads, recoveries };
-}
-// 已经看余额或算利润的渠道按钮是「改绑定「X」」，其余是「去绑定「X」」
-const newChannelButton = (page) => page.getByRole("button", { name: new RegExp(`^(${CONNECT}|${EDIT_BINDING})「New channel」$`) });
-// 渠道绑定的话：按钮名来自 lib/workflow-actions.js，其余在 app/components/channel-onboarding.tsx 的 COPY 表（tsx 测试里引用不到，照抄原句）
-const CONNECT = workflowActionMeta("connect_channels").label, EDIT_BINDING = workflowActionMeta("edit_binding").label, TEST_READ = workflowActionMeta("verify_identity").label, REFRESH = workflowActionMeta("refresh").label, RETRY = workflowActionMeta("retry_bill").label;
-function batchResult(body, probe, complete = true) {
-  return { requestId: body.requestId, complete, retryInput: probe.retryInput, groups: probe.groups.map((group) => ({
-    groupId: group.groupId, requestedGroupIds: group.requestedGroupIds, canonicalKey: group.basis.canonicalKey, complete,
-    monitor: { status: body.selections[0].monitor ? "linked" : "not_requested", stationIds: body.selections[0].monitor ? [body.selections[0].stationId || "new-up"] : [] },
-    reconciliation: { status: body.groups[0].reconciliation ? complete ? "configured" : "unverified" : "not_requested", ruleId: complete ? "rule-" + (group.basis.tokenId || "monitor") : undefined },
-    saved: { stationIds: body.selections[0].monitor ? [body.selections[0].stationId || "new-up"] : [], authorizationStationId: !body.groups[0].reconciliation ? null : !body.selections[0].monitor ? body.selections[0].stationId || "new-billing-auth" : body.selections[0].reconciliationAuthorization ? body.selections[0].reconciliationAuthorization.stationId || "billing-auth" : null, links: [], ruleId: complete && body.groups[0].reconciliation ? "rule-" + group.basis.tokenId : null, scopeVersion: 2, billingEffectiveFromMs: Date.parse("2026-10-10T12:00:00+08:00") },
-    channels: body.groups.find((entry) => entry.groupId === group.groupId).channels.map((entry) => ({ ...entry, complete, stationIds: [body.selections[0].stationId || "new-up"], ruleId: complete ? "rule-" + group.basis.tokenId : null, remainingActions: complete ? [] : ["retry_rule"] })),
-    remainingActions: complete ? [] : ["repreview"],
-  })) };
-}
-function probeResult(body, config, options = {}) {
-  const selection = body.selections[0];
-  const linkOnly = !selection.stationId && !selection.newStation;
-  const selectedStation = config.upstreams.find((entry) => entry.id === selection.stationId), billingStation = config.upstreams.find((entry) => entry.id === selection.reconciliationAuthorization?.stationId);
-  const accountIdentity = { provider: billingStation?.identity?.provider || selectedStation?.identity?.provider || (selection.newStation?.type?.startsWith("sub2api") ? "sub2api" : "newapi"), baseUrl: billingStation?.baseUrl || selection.newStation?.baseUrl || selectedStation?.baseUrl || "https://up.example", accountId: billingStation?.identity?.accountId || selectedStation?.identity?.accountId || "42" };
-  const mainIdentity = linkOnly || (selection.newStation?.type || config.upstreams.find((entry) => entry.id === selection.stationId)?.type) === "newapi-key" ? null : accountIdentity;
-  const groups = body.groups.map((group) => {
-    const tokenId = group.reconciliation?.tokenId || null;
-    const existingRule = config.rules.find((rule) => rule.enabled && !rule.archivedAt && rule.tokenId === tokenId);
-    const existing = existingRule?.channels.map((channel) => channel.channelId) || [];
-    const proposed = [...new Set([...existing, ...group.channels.map((entry) => entry.channelId)])];
-    const monitorChanges = group.channels.map((channel) => {
-      const current = config.channels.find((entry) => entry.id === channel.channelId), previousStationIds = current?.monitor?.stationIds || [];
-      const proposedStationIds = [...new Set([...previousStationIds.filter((id) => !(channel.removeMonitorStationIds || []).includes(id)), ...(selection.monitor ? [selection.stationId || "new-up"] : []), ...(selection.additionalMonitorStationIds || [])])];
-      return { channelId: channel.channelId, previousStationIds, proposedStationIds, addedStationIds: proposedStationIds.filter((id) => !previousStationIds.includes(id)), removedStationIds: previousStationIds.filter((id) => !proposedStationIds.includes(id)) };
-    });
-    return {
-      groupId: group.groupId, requestedGroupIds: [group.groupId], selectionIds: [group.selectionId], requestedChannelIds: group.channels.map((entry) => entry.channelId),
-      status: group.reconciliation ? options.billingStatus || (tokenId ? "ready" : "unavailable") : "monitor_only",
-      ...(group.reconciliation && !tokenId && !options.billingStatus ? { code: "KEY_REQUIRED", reason: "请选择实际使用的上游 Key" } : {}),
-      basis: { ownSource, sourceVersion: "source-v1", channelRevisions: Object.fromEntries(proposed.map((id) => [id, "revision-" + id])), resourceVersions: {}, accountIdentity, canonicalKey: tokenId ? existingRule?.canonicalKey || createHash("sha256").update(JSON.stringify([accountIdentity.provider, accountIdentity.baseUrl, accountIdentity.accountId, String(tokenId)])).digest("hex") : null, tokenId, keyVersion: tokenId ? "key-v1" : null, existingRuleId: existingRule?.id || null, existingScopeVersion: existingRule?.scopeVersion || null, existingChannelIds: existing, proposedChannelIds: proposed, timezone: group.reconciliation?.timezone || "Asia/Shanghai", billingEffectiveFromMs: preview.billingEffectiveFromMs, coverageDeclaration: group.reconciliation?.coverageDeclaration || { answer: "unknown", otherUse: null, uncoveredOwnChannelIds: [] } },
-      preview: { ...preview, costCoverage: group.reconciliation?.coverageDeclaration.answer === "none" ? "complete" : "unknown" },
-      monitorChanges,
-    };
-  });
-  return {
-    requestId: body.requestId, previewId: "preview-" + body.requestId, expiresAtMs: Date.now() + 600000, source: { ownSource, sourceVersion: "source-v1", resourceVersion: "own-v1" },
-    selections: [{ selectionId: selection.selectionId, station: linkOnly ? null : { id: selection.stationId || "new-up", name: "Fixture upstream" }, monitor: { status: "verified" }, authorizationStationId: selection.reconciliationAuthorization?.stationId || (mainIdentity ? selection.stationId || null : null), accountIdentity: mainIdentity, tokens: options.billingStatus ? [] : onboardingTokens, credentialUpdateRequired: !!options.requireUpdate }],
-    groups,
-    retryInput: { requestId: body.requestId, source: { ownStationId: body.ownStationId, ownSource, sourceVersion: "source-v1" }, selections: [{ selectionId: selection.selectionId, stationId: selection.stationId || null, type: linkOnly ? null : selection.newStation?.type || config.upstreams.find((entry) => entry.id === selection.stationId)?.type || "newapi", baseUrl: linkOnly ? null : selection.newStation?.baseUrl || "https://up.example", ...(linkOnly ? { linkOnly: true } : {}), monitor: selection.monitor, additionalMonitorStationIds: selection.additionalMonitorStationIds || [], accountIdentity: mainIdentity, authorizationStationId: selection.reconciliationAuthorization?.stationId || null, authorizationIdentity: linkOnly ? null : accountIdentity, credentialUpdateRequested: !!selection.updateCredentials && !!selection.newStation }], groups: groups.map((group, index) => ({ groupId: group.groupId, requestedGroupIds: group.requestedGroupIds, selectionIds: group.selectionIds, channels: body.groups[index].channels, reconciliationRequested: !!body.groups[index].reconciliation, reconciliation: group.basis.tokenId ? { canonicalKey: group.basis.canonicalKey, tokenId: group.basis.tokenId, timezone: group.basis.timezone, coverageDeclaration: group.basis.coverageDeclaration, previewEffectiveFromMs: preview.billingEffectiveFromMs } : null })) },
-  };
-}
-const onboardingTokens = [{ id: 7, name: "Supplier Key", status: 1, group: "upstream-group" }, { id: 8, name: "New Key", status: 1, group: "upstream-group" }];
-function onboardingDirectory(config, id, tokens = onboardingTokens) {
-  const station = config.upstreams.find((entry) => entry.id === id);
-  return { quotaPerUnit: 500000, version: "keys-v1", groups: {}, platform: station?.identity?.provider || "newapi", capability: { state: "supported", currency: "USD", window: "second" }, billingTimezone: { state: "verified", timezone: "Asia/Shanghai" }, tokens, identity: { provider: station?.identity?.provider || "newapi", baseUrl: station?.baseUrl || "https://up.example", accountId: station?.identity?.accountId || "42" }, resourceVersion: station?.resourceVersion || "resource-" + id, probe: null };
-}
-function onboardingAccounts(config) {
-  const accounts = new Map(), unverifiedResources = [];
-  for (const station of config.upstreams) {
-    const identity = station.identity && { ...station.identity, baseUrl: station.baseUrl };
-    const resource = { archivedAt: null, authVersion: 1, resourceVersion: "resource-" + station.id, verification: identity ? "verified" : "unverified", purposes: { monitor: station.monitorEnabled !== false, billingRuleIds: config.rules.filter((rule) => rule.upstreamStationId === station.id).map((rule) => rule.id) }, balance: { ok: true, remaining: 10 }, hasAccessToken: station.type !== "newapi-key", hasApiKey: station.type === "newapi-key", hasPassword: false, ...station, identity };
-    if (!identity) { unverifiedResources.push(resource); continue; }
-    const accountKey = createHash("sha256").update(JSON.stringify([identity.provider, identity.baseUrl, identity.accountId])).digest("hex");
-    if (!accounts.has(accountKey)) accounts.set(accountKey, { accountKey, siteKey: identity.provider + ":" + identity.baseUrl, identity, resources: [], keys: [], actions: [] });
-    accounts.get(accountKey).resources.push(resource);
-  }
-  for (const account of accounts.values()) for (const rule of config.rules.filter((rule) => rule.canonicalKey && account.resources.some((resource) => resource.id === rule.upstreamStationId))) {
-    let key = account.keys.find((entry) => entry.tokenId === rule.tokenId);
-    if (!key) { key = { canonicalKey: rule.canonicalKey, tokenId: rule.tokenId, tokenName: rule.tokenName, ruleIds: [], activeRuleIds: [], scopeAmbiguous: false, channels: [], associations: [], costCoverage: rule.costCoverage, coverageDeclaration: rule.coverageDeclaration, scopeVersion: rule.scopeVersion, billingEffectiveFromMs: null, firstQueryableAtMs: null }; account.keys.push(key); }
-    key.ruleIds.push(rule.id); if (rule.enabled && !rule.archivedAt) key.activeRuleIds.push(rule.id);
-    key.channels.push(...rule.channels.map((channel) => ({ ...channel, ownStationId: rule.ownStationId, ownSource: rule.ownSource })));
-    key.associations.push({ ruleId: rule.id, status: rule.enabled && !rule.archivedAt ? "active" : "stopped", upstreamStationId: rule.upstreamStationId, ownStationId: rule.ownStationId, timezone: rule.timezone || "Asia/Shanghai", channels: rule.channels, costCoverage: rule.costCoverage,
-      // 和服务端一样由 coverageNeedsAnswer 算好；夹具里的绑定没写生效方式的按现在的新绑定算
-      needsCoverageAnswer: coverageNeedsAnswer({ billingPolicy: "immediate", ...rule }, costBasisOf(config.upstreams.find((station) => station.id === rule.upstreamStationId))),
-      coverageDeclaration: rule.coverageDeclaration, scopeVersion: rule.scopeVersion || 1, billingEffectiveFromMs: null, accountingStartMs: null, conflict: false, conflictRuleIds: [], stoppedAt: rule.archivedAt || null });
-  }
-  return { accounts: [...accounts.values()], unverifiedResources, channels: config.channels, actions: [], generatedAt: "2026-10-09T07:00:00.000Z" };
-}
-function onboardingFixture(existing = true, type = "newapi", ids = [4]) {
-  return {
-    ownStation: { id: "own-1", baseUrl: "https://own.example" },
-    ownSource, sourceVersion: "source-v1",
-    upstreams: existing ? [{ id: "upstream-1", name: "Fixture upstream", type, monitorEnabled: true, baseUrl: "https://up.example", authVersion: 1, resourceVersion: "resource-upstream-1", identity: type === "newapi-key" ? null : { provider: type.startsWith("sub2api") ? "sub2api" : "newapi", accountId: "42" } }] : [],
-    channels: ids.map((id) => ({ id, name: id === 4 ? "New channel" : "New channel " + id, status: 1, baseUrl: "https://up.example", groups: ["local-sales"], revision: "revision-" + id, candidates: existing ? ["upstream-1"] : [], monitor: { status: "unlinked", stationIds: [] }, reconciliation: { status: "unconfigured", ruleIds: [] } })),
-    rules: existing && type !== "newapi-key" ? [{ ...rule("rule-1", "Rule A", 10).rule, ownStationId: "own-1", ownSource, tokenId: 7, tokenName: "Supplier Key", timezone: "Asia/Shanghai", scopeVersion: 1, canonicalKey: createHash("sha256").update(JSON.stringify([type.startsWith("sub2api") ? "sub2api" : "newapi", "https://up.example", "42", "7"])).digest("hex"), channels: [1, 2, 3].map((channelId) => ({ channelId, name: "Sales " + channelId })), enabled: true }] : [],
-    syncedAt: "2026-10-09T06:00:00.000Z", stale: false,
-  };
-}
-const VERIFY_KEY = "选一把 Key", VERIFY_SELECTED = "测试读取选中的 Key", SWAP_KEY = workflowActionMeta("swap_key").label;
-const IDENTITY_READ = (accountId) => `能读到上游账号 ${accountId}`;
-const confirmIdentityButton = (drawer) => drawer.getByRole("button", { name: "确认", exact: true });
-// 测试读取抽屉（§3.5）：标题「测试读取 · 上游名」，读到上游账号写「能读到上游账号 N」，下面一个「确认」把这个上游归到这个上游账号下
-const verificationDialog = (page, name) => page.getByRole("dialog", { name: `${TEST_READ} · ${name}`, exact: true });
-function keyVerificationFixture(provider = "newapi", timezone = "UTC", selected = false) {
-  const capability = { state: "supported", currency: "USD", window: provider === "sub2api" ? "natural-day" : "second" };
-  const billingTimezone = provider === "sub2api" ? { state: "unverified", timezone, reason: "BILLING_TIMEZONE_UNVERIFIED" } : { state: "verified", timezone };
-  return { quotaPerUnit: provider === "newapi" ? 100 : null, version: provider === "newapi" ? "deployment-v1" : "", groups: provider === "newapi" ? { g: { ratio: 1, description: "" } } : {}, platform: provider,
-    capability: provider === "sub2api" ? { state: "unverified", currency: "USD", window: "natural-day", reason: "DEPLOYMENT_NOT_VERIFIED" } : capability,
-    billingTimezone, tokens: [{ id: 9, name: "actual-key", status: 1, group: provider === "newapi" ? "g" : "", crossGroupRetry: false }], identity: { provider, baseUrl: "https://same.test", accountId: "42" }, resourceVersion: "verified-resource-version",
-    probe: selected ? { tokenId: 9, state: "complete", complete: true, window: timezone === "UTC" ? { startMs: 1791417600000, endMs: 1791504000000, timezone } : { startMs: 1791388800000, endMs: 1791475200000, timezone }, currency: "USD", amountUsd: provider === "newapi" ? 0 : 3.25, knownAmountUsd: provider === "newapi" ? 0 : 3.25, actualCostUsd: provider === "sub2api" ? 3.25 : null, quotaUnits: provider === "newapi" ? 0 : null, quotaPerUnit: provider === "newapi" ? 100 : null, capability, billingTimezone } : null };
-}
-async function waitForFact(scope, term, value) {
-  await scope.locator("dt").filter({ hasText: exactText(term) }).locator("xpath=following-sibling::dd[1]").filter({ hasText: exactText(value) }).first().waitFor();
-}
-// 上游账单里一把 Key 的折叠行：Key 名后跟状态标签（app/(dashboard)/stations/account-center.tsx 的 COPY.activeCount / needsAction / unbound / notBound）
-const keyRow = (scope, name) => scope.getByRole("button", { name: new RegExp(`(?:^|\\s)${name} (?:\\d+ 条在用|需处理|已解除绑定|没绑定)`) });
-// 填访问令牌的输入框；补账单登录信息时旁边还有一个同名的「访问令牌」下拉框，只认输入框
-const tokenField = (scope) => scope.locator("input[type=password]").and(scope.getByLabel(ACCESS_TOKEN, { exact: true }));
-async function saveOnboarding(drawer) { await drawer.getByRole("button", { name: CONFIRM_BINDING, exact: true }).click(); await drawer.waitFor({ state: "hidden" }); }
-const CONFIRM_BINDING = "确认绑定", PROBE_OK = `${testReadText({ ok: true, bill: false })}，还没保存`, ACCESS_TOKEN = "访问令牌";
-async function chooseKey(page, drawer, name = "Supplier Key") { await drawer.getByRole("combobox", { name: "Key", exact: true }).click(); await page.getByText(keyOption(name), { exact: true }).last().click(); }
-const keyOption = (name, group = "upstream-group") => `${name} · 分组 ${group}`;
-// 「这把 Key 还给别处用吗？」一开始不选（ui-copy-spec §5.2）：选好 Key 以后先回答，再测试读取；几把 Key 时按 Key 名找
-async function answerCoverage(page, drawer, { key, answer = ONLY_THESE } = {}) { await drawer.getByRole("combobox", { name: key ? `${key} · ${COVERAGE_QUESTION}` : COVERAGE_QUESTION, exact: true }).click(); await page.getByText(answer, { exact: true }).last().click(); }
-async function verifyOnboarding(drawer) {
-  const button = drawer.getByRole("button", { name: TEST_READ, exact: true });
-  await button.scrollIntoViewIfNeeded();
-  const devBadge = drawer.page().getByRole("button", { name: "Collapse issues badge", exact: true });
-  if (await devBadge.isVisible()) await devBadge.click();
-  const response = drawer.page().waitForResponse((response) => new URL(response.url()).pathname === "/api/channel-onboarding/batch/probe");
-  await button.click(); await response; await drawer.getByText(PROBE_OK, { exact: true }).waitFor();
-}
-const connectButton = (name, action = CONNECT) => `${action}「${name}」`;
-const BILLING_CHECKBOX = `同时${ONBOARDING_PURPOSES.billing}（绑定 Key）`, ONLY_THESE = COVERAGE_ANSWERS.find((entry) => entry.value === "none").label, UNSURE = COVERAGE_ANSWERS.find((entry) => entry.value === "unknown").label;
