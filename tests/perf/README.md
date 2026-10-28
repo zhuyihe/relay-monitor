@@ -28,7 +28,7 @@
 | | 开关：`/__ctl?down=/na01,/na02` 让这些上游一律回 503（像上游挂了），`down=` 清空 |
 | | 自营站点单独一个端口 `FAKE_OWN_PORT`（默认 `FAKE_PORT + 1`，同一个进程、同一套路由）：控制台按「主机:端口」给自营站点记 180 秒的请求额度，和上游共用端口的话读上游的请求也会算进自营站点的额度 |
 | | 自营 `/api/log/` 分三类计数：带 `username`/`token_name`/`channel`/`model_name`/`group` 任何一个的是 `filtered`；不带的里 `page_size=1` 的是「上次以后有没有新消费」那一下（`latest`），别的是整站读（`all`）；`/__stats` 的 `ownLogKinds`，`detail=1` 的请求时间线里这类请求多一项类别 |
-| | 开关：`PERF_KEY_AGENT=on`（默认关，见下面「K2a/K2b 场景」）装渠道 Key 读取服务：`GET /key-agent/keys`（Bearer、ETag/304、`X-Agent-Stale`），每 10 分钟随机换 2～3 个渠道现在用的 Key；`/__ctl?key_agent_down=1\|0` 模拟读库失败，`key_agent_rotate=1` 立刻触发一次换 Key（本机调脚本用） |
+| | 开关：`PERF_KEY_AGENT=on`（默认关，见下面「K2a/K2b 场景」）在单独的 https 端口装渠道 Key 读取服务：`GET /key-agent/keys`（Bearer、ETag/304、`X-Agent-Stale`），每 10 分钟随机换 2～3 个渠道现在用的 Key；`/__ctl?key_agent_down=1\|0` 模拟读库失败，`key_agent_rotate=1` 立刻触发一次换 Key（本机调脚本用），`key_agent_rotate_pause=1\|0` 暂停/恢复定时换 Key（默认停着，只在稳态窗口里开） |
 | `seed/00-config.mjs` | 定夹具起点（92 天前的 UTC 零点）和哪些（上游, 分组）40 天前换过倍率，写 `$PERF_OUT/fixture/config.json` |
 | `seed/01-base.mjs` | 删库重建、建表（应用的 `ensureSchema`），用应用的 `Store` 写自营站点、面板账号 admin/admin123、通知方式、日报。`PERF_KEY_AGENT=on` 时顺带给自营站点配上读取服务的地址和令牌（被测版本没有这两个字段时 `Store.add` 原样丢掉，不报错——量的就是这个差） |
 | `seed/02-onboard.mjs` | 服务在跑：走「接入渠道」同一条接口建 50 个上游和 80 条绑定 |
@@ -108,14 +108,17 @@ gh workflow run perf.yml -R zhuyihe/relay-monitor --ref main -f pr=<号> -f bind
 ## K2a/K2b 场景（渠道 Key 读取服务）
 
 ```sh
-gh workflow run perf.yml -R zhuyihe/relay-monitor -f pr=<号> -f key_agent=true            # 稳态窗口里多半没有换 Key
-gh workflow run perf.yml -R zhuyihe/relay-monitor -f pr=<号> -f key_agent=true -f key_agent_rotate_sec=60   # 量到换 Key 那一段
+gh workflow run perf.yml -R zhuyihe/relay-monitor -f pr=<号> -f key_agent=true            # 稳态窗口里不换 Key（185 秒 < 600 秒）
+gh workflow run perf.yml -R zhuyihe/relay-monitor -f pr=<号> -f key_agent=true -f key_agent_rotate_sec=60   # 量到换 Key 那一段（base、head 窗口里各换 3 次）
 ```
 
-- `key_agent=true`（`PERF_KEY_AGENT=on`）：假站点在自营站点自己身上（`FAKE_OWN_PORT`）装一个 `/key-agent`，自营站点配上它的地址和令牌（种子脚本 `seed/01-base.mjs`）。被测版本没有 K2a（`keyAgentUrl`/`keyAgentSecret` 字段、`/key-agent` 这条路都不存在）时，这两步原样跳过、不报错——量的就是「装了读取服务前后，对外请求多了多少」，base（没有 K2a）天然是 0。
+- `key_agent=true`（`PERF_KEY_AGENT=on`）：假站点单开一个 **https** 端口（`FAKE_KEY_AGENT_PORT`，默认 `FAKE_PORT + 2`）装 `/key-agent`，自营站点配上地址 `https://127.0.0.1:<端口>/key-agent` 和令牌（种子脚本 `seed/01-base.mjs`）。被测版本没有 K2a（`keyAgentUrl`/`keyAgentSecret` 字段、`/key-agent` 这条路都不存在）时，这两步原样跳过、不报错——量的就是「装了读取服务前后，对外请求多了多少」，base（没有 K2a）天然是 0。
 - 协议照 k-plan 第二节：`GET /key-agent/keys` 要带 `Authorization: Bearer <派生的请求令牌>`；没变时带 `If-None-Match` 回 304；每个渠道一个指纹 + 一个打码（单数号上游的 Key 目录给打码、双数号给完整 Key，两条认法都量得到）；`/__ctl?key_agent_down=1` 模拟读取服务读库失败，照协议沿用上一份成功结果、带 `X-Agent-Stale: 1`（CI 默认不触发，本机调脚本用）。
-- 每 `PERF_KEY_AGENT_ROTATE_SEC` 秒（默认 600，perf.yml 的输入 `key_agent_rotate_sec`）随机换 2～3 个渠道现在用的 Key（只换走 New API 整号账号的渠道：候选只收这一类，走只用 Key 的上游、Sub2API 的渠道换了也看不出差，不浪费一次随机）。CI 默认的稳态窗口（185 秒）比 10 分钟短，量到的多半是「没变、304」那条路；想量「换了 Key 以后重新认一遍、写段」有多贵：CI 里给 `key_agent_rotate_sec` 填 60 左右（稳态窗口里换上几次）；本机也可以把窗口放长（`BG_SEC=1200` 以上）或用 `/__ctl?key_agent_rotate=1` 手动触发。
-- 请求数在 `compare.md`、`summary.md` 的「假站点请求按路由」里自动出现（`key-agent:/keys`），和「整站读」一样走已有的通用对比，没有另写一节。
+- 每 `PERF_KEY_AGENT_ROTATE_SEC` 秒（默认 600，perf.yml 的输入 `key_agent_rotate_sec`）随机换 2～3 个渠道现在用的 Key（只换走 New API 整号账号的渠道：候选只收这一类，走只用 Key 的上游、Sub2API 的渠道换了也看不出差，不浪费一次随机）。定时换 Key 只在稳态窗口里开：窗口开头从同一个相位起计时、用同一个种子挑渠道和 Key，窗口结尾停下并换回绑定的那把，所以 base、head 窗口里换的次数和渠道都一样，SQL/分钟这些数才可比（以前按墙钟一直换，同一份代码一边换 3 次、一边 0 次，SQL/分钟差 48%）。CI 默认的稳态窗口（185 秒）比 10 分钟短，量到的是「没变、304」那条路；想量「换了 Key 以后重新认一遍、写段」有多贵：CI 里给 `key_agent_rotate_sec` 填 60 左右（稳态窗口里换上几次）；本机也可以把窗口放长（`BG_SEC=1200` 以上）或用 `/__ctl?key_agent_rotate=1` 手动触发。
+- **为什么要 https**：控制台只认 https 的读取服务地址（`lib/key-agent-client.js`），http 的地址直接回 `KEY_AGENT_URL_INVALID`、一个请求都不发。以前夹具配的是 http，`key_agent=on` 从来没真正连上过读取服务：K2b 以后整个自营站点被「读不到读取服务」挡住，head 一条都结不出来。
+- **证书**：`run.sh` 起假站点前用 `openssl` 现生成一张自签证书（CN、SAN 都是 `127.0.0.1`，7 天有效），放在 `$PERF_TLS_DIR/key-agent.crt`、`key-agent.key`（默认 `$RUNNER_TEMP/relay-perf-tls/`，本机是系统临时目录下的 `relay-perf-tls/`；故意不放在 `$PERF_OUT` 下，CI 上传的产物里没有私钥）。`run.sh` 起的被测应用进程（seed、measure、parity 起的 base、head）都带 `NODE_EXTRA_CA_CERTS=$PERF_TLS_DIR/key-agent.crt` 信任它；不用 `NODE_TLS_REJECT_UNAUTHORIZED=0`，证书校验照常开着。本机自己起应用连这个假站点时，也要带上这个环境变量。
+- **对拍时不换 Key**：定时换 Key 平时停着，对拍时也是；`run.sh parity` 开始前再发一次 `/__ctl?key_agent_rotate_pause=1`（把换过的渠道都换回绑定的那把 Key）。换着 Key 对拍的话，被换渠道的绑定和 base 会合理地不同。
+- 请求数在 `compare.md`、`summary.md` 的「假站点请求按路由」里出现（`key-agent:/keys`）；后台一节另有一行「读取服务这段时间被请求 N 次：200 几次、304 几次」（`/__stats` 的 `keyAgentStatus`）。`key_agent=on` 却是 0 次时标 ⚠、算一项超线：读取服务没连上，量的不是 K2 那条路。
 
 ## 量「没人看」的时候（steady_delay_sec、steady_sec）
 

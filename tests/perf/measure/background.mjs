@@ -67,6 +67,9 @@ const pid = appPid();
 const sampleProc = () => { if (!pid) return null; try { const [cpu, rss] = execSync(`ps -o %cpu=,rss= -p ${pid}`).toString().trim().split(/\s+/).map(Number); return { cpu, rssMb: Math.round(rss / 1024) }; } catch { return null; } };
 
 // ---- 稳态窗口 ----
+// 读取服务（PERF_KEY_AGENT=on）的定时换 Key 只在窗口里开，从同一个种子、同一个相位起：base、head 窗口里换的次数和渠道都一样（见 fake-site.mjs）
+const KEY_AGENT = ["1", "on", "true"].includes(String(process.env.PERF_KEY_AGENT || "").toLowerCase());
+if (KEY_AGENT) await fetch(`${BASE}/__ctl?key_agent_rotate_pause=0`);
 await fetch(`${BASE}/__stats?reset=1`);
 const ingest0 = await ingestProgress();
 const d0 = await digestSnapshot(conn), b0 = await binlogBytes(conn), t0 = Date.now();
@@ -75,6 +78,7 @@ const procSamples = [];
 while (Date.now() - t0 < W * 1000) { await new Promise((r) => setTimeout(r, 5000)); const s = sampleProc(); if (s) procSamples.push(s); }
 const d1 = await digestSnapshot(conn), b1 = await binlogBytes(conn), elapsed = (Date.now() - t0) / 1000;
 const fake = await (await fetch(`${BASE}/__stats?detail=1&reset=1`)).json();
+if (KEY_AGENT) await fetch(`${BASE}/__ctl?key_agent_rotate_pause=1`);
 const ingest1 = await ingestProgress();
 const steady = digestDiff(d0, d1);
 const perMin = (x) => Math.round((x / elapsed) * 60 * 10) / 10;
@@ -173,6 +177,8 @@ const result = {
   at: new Date().toISOString(), windowSec: Math.round(elapsed), steadyDelay,
   steady: {
     fakeRequests: fake.total, fakeRequestsPerMin: perMin(fake.total), fakeByRoute: fake.byRoute, fakeBytes: fake.bytes,
+    // 渠道 Key 读取服务（PERF_KEY_AGENT=on）：稳态窗口里 /key-agent/keys 按状态码几次、换了几次 Key
+    keyAgent: { on: /^(1|on|true)$/i.test(String(process.env.PERF_KEY_AGENT ?? "")), byStatus: fake.keyAgentStatus ?? null, rotations: fake.keyAgentRotations ?? null },
     sqlStatements: steady.reduce((a, d) => a + d.count, 0), sqlPerMin: perMin(steady.reduce((a, d) => a + d.count, 0)),
     sqlMsPerMin: perMin(steady.reduce((a, d) => a + d.totalMs, 0)),
     rowsExamined: steady.reduce((a, d) => a + d.rowsExamined, 0), rowsExaminedPerMin: perMin(steady.reduce((a, d) => a + d.rowsExamined, 0)),
