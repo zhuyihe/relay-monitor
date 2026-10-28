@@ -154,3 +154,16 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 
 /* 行末按钮外面那一层（提示的触发区），不改按钮的排法 */
 .jy-tip-wrap { display: inline-flex; }
+
+/* 上游列表「渠道」一列和右边的渠道抽屉 */
+.jy-stations-channels { padding: 0; border: 0; background: none; color: var(--jy-link, #2f54eb); cursor: pointer; font: inherit; text-align: left; }
+.jy-channels-top { margin-bottom: 12px; }
+.jy-channels-empty { padding: 24px 0; }
+
+/* 「绑定渠道」小窗口 */
+.jy-bind-label { display: block; margin: 12px 0 4px; font-weight: 500; }
+.jy-bind-select { width: 100%; }
+.jy-bind-hint { margin: 6px 0 0; }
+.jy-bind-channels { display: grid; gap: 6px; border: 1px solid var(--jy-rule-soft, #e5e5e5); border-radius: 6px; padding: 8px 12px; }
+.jy-bind-channels .ant-radio-wrapper { display: flex; }
+.jy-bind-channel { display: inline-flex; justify-content: space-between; gap: 16px; min-width: 300px; }

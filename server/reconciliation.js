@@ -3735,6 +3735,10 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     previewKeyScope,
     createPreviewReadContext,
     listRules: (options = {}) => repository.listRules(options),
+    // 上游资源的抽屉用：上游的 Key 列表（名、分组、能不能用），走现有的 5 分钟缓存、不强制刷新；读不到是 null
+    async upstreamTokens(stationId) {
+      try { return (await api.getUpstreamKeys(stationId)).tokens; } catch { return null; }
+    },
     // ---- 每日利润页 A（设计稿 #118 §9）：整页一次读；一行一天的计算明细点开才读 ----
     // 整页：现有的 queryRules（evaluate，不写库）给整段的收入 / 实付 / 毛利，账本按天的几列给应付成本和差额（lib/profit-page.js 拼）
     async profitPage(rawInput = {}) {

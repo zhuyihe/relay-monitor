@@ -260,3 +260,21 @@ test("status：同一把 Key 在两个上游里都有——这一版不算，只
   const status = await f.module.status("own");
   assert.deepEqual([status.channels[0].state, status.channels[0].reason, status.channels[0].upstreamStationIds, status.groups], ["blocked", "KEY_IN_OTHER_UPSTREAM", ["up1", "up2"], []]);
 });
+
+test("options：渠道带自己的地址；绑了的带上游、Key（名、分组）、从哪天绑的；没绑的带地址对得上的上游；Key 列表读不到时分组是空", async () => {
+  const f = fixture({ channels: [1, 2, 3], identified: [], stations: [own, { ...upMine, id: "up1", type: "newapi", baseUrl: "https://a.test" }] });
+  const all = [own, { ...upMine, id: "up1", type: "newapi", baseUrl: "https://a.test" }];
+  f.rt.store.list = () => all; f.rt.store.get = (id) => all.find((station) => station.id === id) || null;
+  const catalogue = f.rt.channelOnboarding.getSourceCatalogue;
+  f.rt.channelOnboarding.getSourceCatalogue = () => { const value = catalogue(); value.channels = value.channels.map((channel) => ({ ...channel, baseUrl: channel.id === 3 ? "https://a.test/v1" : "https://x.test/api" })); return value; };
+  const rule = (id, channelId, tokenId) => ({ id, enabled: true, archivedAt: null, ownStationId: "own", upstreamStationId: "up1", tokenId, tokenName: `k${tokenId}`, timezone: "Asia/Shanghai", billingPolicy: "immediate",
+    billingEffectiveFrom: Date.parse("2026-10-20T04:00:00Z"), createdAt: "2026-10-20T04:00:00Z", channels: [{ channelId }] });
+  f.state.rules = [rule("r1", 1, 11), rule("r2", 2, 12)];
+  f.rt.reconciliation.upstreamTokens = async () => [{ id: 11, status: 1, group: "default" }];
+  const out = await f.module.options("own");
+  const by = Object.fromEntries(out.channels.map((channel) => [channel.channelId, channel]));
+  assert.deepEqual([by[1].address, by[1].upstreamStationId, by[1].tokenName, by[1].tokenGroup, by[1].sinceDay], ["x.test", "up1", "k11", "default", "2026-10-20"]);
+  assert.deepEqual([by[2].tokenGroup], [null], "Key 不在列表里：分组空");
+  assert.deepEqual([by[3].ruleId, by[3].address, by[3].suggestedUpstreamId], [null, "a.test", "up1"], "没绑的：带地址和对得上的上游");
+  assert.deepEqual(out.upstreams, [{ id: "up1", name: undefined }].map((item) => ({ id: item.id, name: all[1].name })));
+});
