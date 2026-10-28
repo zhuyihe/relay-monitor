@@ -34,7 +34,7 @@ import { dayKeyInTz, dayStartInTz, shiftDayLabel, shiftedDayStartInTz } from "..
 const { RangePicker } = DatePicker;
 // 从提醒或上游账单的链接进来时，链接指的那条绑定对不上（§8.1、§8.2）
 const REMOVED = describeError({ code: "RULE_NOT_FOUND" }).text;
-const PRESETS = (["today", "yesterday", "7d", "month", "custom"] as ProfitPreset[]).map((value) => ({ value, label: COPY.presets[value] }));
+const PRESETS = (["today", "yesterday", "7d", "month", "since", "custom"] as ProfitPreset[]).map((value) => ({ value, label: COPY.presets[value] }));
 const UPSTREAMS_HREF = "/stations";
 const START_HREF = `/stations?view=accounts`;
 const SETTINGS_HREF = "/settings";

@@ -16,7 +16,7 @@ import { sameReconciliationWindow } from "../../lib/reconciliation-contract.js";
 import { LEDGER_DECIMAL_SCALE, RECONCILIATION_LEDGER_COLUMNS, encodeLedgerCursor, fixedCostDayFromRow, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord, ledgerInsertValues,
   ledgerWriteDecision } from "../../lib/reconciliation-ledger.js";
 import {
-  uid, addKeyBlock, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangePlanIsStale,
+  uid, reconciliationOwnerRuleState, asJson, activeTokenKey, activeChannelKey, ruleFromRow, archivedLedgerAllowed, attachSegmentKeys, segmentFromRow, keyChangeIsStale, dayKeysFromRows,
   snapshotLogicalEnd, snapshotGeneratedAt, selectLatestRecord, normalizeConfirmedHistoryOptions, repositoryError,
   SETTLEMENT_STATE_WRITE_COLUMNS, settlementStateFromRow, settlementStateValues,
 } from "../reconciliation-repository.js";
@@ -36,6 +36,7 @@ const TABLE_NAMES = {
   segmentKeys: "reconciliation_segment_keys",
   fixedCostDays: "reconciliation_fixed_cost_days",
   optouts: "reconciliation_channel_optout",
+  dayKeys: "reconciliation_rule_day_keys",
 };
 
 // 与 db/pool.js 的建表语句保持一致。
@@ -87,6 +88,11 @@ const SCHEMA = {
     keys: { PRIMARY: ["station_id", "bill_date"] },
     notNull: ["station_id", "bill_date", "basis", "cost_cny"],
     varchar: { station_id: 32, basis: 16, note: 64 },
+  },
+  dayKeys: {
+    keys: { PRIMARY: ["rule_id", "bill_date", "upstream_station_id", "token_id"] },
+    notNull: ["rule_id", "bill_date", "upstream_station_id", "token_id"],
+    varchar: { rule_id: 32, upstream_station_id: 32, token_name: 160 },
   },
   optouts: {
     keys: { PRIMARY: ["own_station_id", "channel_id"] },
@@ -157,9 +163,9 @@ export class MemoryReconciliationRepository {
   //   beforeCommit(tx) / afterCommit(tx)
   //   beforeCapabilityWrite(method, identity)  保存或删除账单能力前，可以抛错模拟写入失败
   // tx 是 { name, snapshots: [{ ruleId, snapshotKey, source }], archivedRuleIds }。
-  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], settlementState = [], segmentKeys = [], optouts = [], fixedCostDays = [], now = () => Date.now(), hooks = {} } = {}) {
+  constructor({ rules = [], channels = [], segments = [], snapshots = [], alerts = [], capabilities = [], ledger = [], settlementState = [], segmentKeys = [], optouts = [], dayKeys = [], fixedCostDays = [], now = () => Date.now(), hooks = {} } = {}) {
     this.tables = { rules: [...rules], channels: [...channels], segments: [...segments], snapshots: [...snapshots], alerts: [...alerts], capabilities: [...capabilities], ledger: [...ledger],
-      settlementState: [...settlementState], segmentKeys: [...segmentKeys], optouts: [...optouts], fixedCostDays: [...fixedCostDays] };
+      settlementState: [...settlementState], segmentKeys: [...segmentKeys], optouts: [...optouts], dayKeys: [...dayKeys], fixedCostDays: [...fixedCostDays] };
     this.now = now;
     this.hooks = hooks;
     // snapshotWrites / ratioWrites / channelStateWrites 按语句记录，包括之后被回滚的写入。
@@ -217,14 +223,8 @@ export class MemoryReconciliationRepository {
       const createdAt = this.#timestamp();
       // 同一天里更早解除的占着同一个渠道（或同一把 Key）的 New API 绑定：新绑定从那一刻起算（C3，同 MySQL 版）
       const archivedPeers = this.#plain("rules").filter((row) => row.archived_at != null).map((row) => ruleFromRow(fresh(row), this.#channelsOf(tx, row.id)));
-      // 这把 Key 今天早些时候被这个自营站点下别的绑定握过、那些段已经关掉了：新绑定从最晚的结束时刻起算（同 MySQL 版）
-      const ruleOwner = new Map(this.#plain("rules").map((row) => [row.id, row.own_station_id]));
-      const heldSegments = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && ruleOwner.get(segment.rule_id) === input.ownStationId
-        && this.#plain("segmentKeys").some((key) => key.segment_id === segment.id && key.upstream_station_id === input.upstreamStationId && Number(key.token_id) === Number(input.tokenId)));
-      const keyHeldUntilMs = heldSegments.length ? Math.max(...heldSegments.map((segment) => Number(segment.effective_to_ms))) : null;
       const accountingFloor = isScopedBillingPolicy(input.billingPolicy)
-        ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels,
-          keyHeldUntilMs, sub2: input.provider === "sub2api" }, archivedPeers) : null;
+        ? accountingFloorFor({ timezone: input.timezone, effectiveFrom: input.billingEffectiveFrom, ownStationId: input.ownStationId, canonicalKey: input.canonicalKey, channels: input.channels }, archivedPeers) : null;
       this.#insert(tx, "rules", {
         id, accounting_floor_ms: accountingFloor, upstream_station_id: input.upstreamStationId ?? null, own_station_id: input.ownStationId ?? null, token_id: bigint(input.tokenId),
         token_name: input.tokenName ?? null, fixed_group: input.fixedGroup ?? null, timezone: input.timezone ?? null,
@@ -324,11 +324,6 @@ export class MemoryReconciliationRepository {
     const keyRows = this.#plain("segmentKeys").filter((row) => segments.some((segment) => segment.id === row.segment_id))
       .sort((a, b) => Number(a.token_id) - Number(b.token_id));
     return attachSegmentKeys(segments, keyRows);
-  }
-
-  async listSegmentsForRules(ruleIds) {
-    const ids = [...new Set((ruleIds || []).map(String))];
-    return Object.fromEntries(await Promise.all(ids.map(async (id) => [id, await this.listSegments(id)])));
   }
 
   // 同 MySQL 版 db/segment-keys.js 的 refreshSegmentKeysSql（几条语句一一对应，改一边要改另一边）：
@@ -519,96 +514,62 @@ export class MemoryReconciliationRepository {
     });
   }
 
-  // 对应 MySQL 版 keyHeldUntil
-  async keyHeldUntil(ownStationId, upstreamStationId, tokenId, { sinceMs = null } = {}) {
-    const rules = new Map(this.#plain("rules").map((row) => [row.id, row]));
-    const ends = this.#plain("segments").filter((segment) => segment.effective_to_ms != null && Number(segment.effective_to_ms) >= (sinceMs ?? 0)
-      && rules.get(segment.rule_id)?.own_station_id === ownStationId
-      && this.#plain("segmentKeys").some((key) => key.segment_id === segment.id && key.upstream_station_id === upstreamStationId && Number(key.token_id) === Number(tokenId)))
-      .map((segment) => Number(segment.effective_to_ms));
-    return ends.length ? Math.max(...ends) : null;
-  }
-
-  // 对应 MySQL 版 addKeyBlock
-  async addKeyBlock(ruleId, block, { clearIssue = false } = {}) {
-    await this.#transaction("addKeyBlock", async (tx) => {
-      const entry = this.#ruleEntry(tx, ruleId);
-      if (!entry) return;
-      this.#update(tx, "rules", [entry], { key_blocks: JSON.stringify(addKeyBlock(entry.row.key_blocks, block)), ...(clearIssue ? { key_issue_code: null, key_issue_since_ms: null } : {}) });
-    });
-  }
-
-  // 对应 MySQL 版 applyKeyChangePlans：先把这一批绑定（和它们当前开着段）的 active_token_key 全部清空，
-  // 再分别开新段、写新值；唯一约束的检查在 #commit 里（#assertUnique），撞了整批回滚、这里捕获改回 { conflict: true }
-  async applyKeyChangePlans(plans, { detectedAt = Date.now() } = {}) {
+  // 对应 MySQL 版 changeRuleKey
+  async changeRuleKey(ruleId, plan, { detectedAt = Date.now() } = {}) {
     try {
-      await this.#transaction("applyKeyChangePlans", async (tx) => {
-        tx.record.keyChangeRuleIds = plans.map(({ ruleId }) => ruleId); // 给测试的 beforeCommit 钩子认「这个事务是给哪几条绑定换 Key」
-        const currents = new Map(), rules = new Map();
-        for (const { ruleId } of [...plans].sort((x, y) => (x.ruleId < y.ruleId ? -1 : x.ruleId > y.ruleId ? 1 : 0))) { // 同 MySQL 版：按 id 顺序锁
-          await this.#lock(tx, `rule:${ruleId}`);
-          const entry = this.#ruleEntry(tx, ruleId);
-          if (!entry) throw repositoryError("RULE_NOT_FOUND");
-          rules.set(ruleId, entry.row);
-          const current = this.#segmentsOf(tx, ruleId).map(({ row }) => row).find((row) => row.effective_to_ms == null);
-          if (!current) throw repositoryError("CURRENT_SEGMENT_MISSING");
-          currents.set(ruleId, current);
-        }
-        // 对应 MySQL 版的前置条件：不满足就整批什么也不写（抛出去，事务回滚），返回 { stale: true }
-        if (plans.some(({ ruleId, plan }) => keyChangePlanIsStale(plan, rules.get(ruleId), currents.get(ruleId)))) throw Object.assign(new Error("stale key change plan"), { stalePlan: true });
-        for (const { ruleId } of plans) {
-          // 对应 MySQL 版：先给还没有 Key 行的段补一行（填换之前 rules 上的那把），再清空 active_token_key
-          const oldRule = this.#ruleEntry(tx, ruleId).row;
-          for (const segment of this.#segmentsOf(tx, ruleId).map(({ row }) => row)) {
-            if (this.#rows("segmentKeys", tx).some(({ row }) => row.segment_id === segment.id)) continue;
-            this.#insert(tx, "segmentKeys", { segment_id: segment.id, upstream_station_id: oldRule.upstream_station_id, token_id: bigint(oldRule.token_id),
-              token_name: oldRule.token_name ?? null, key_mask: null, match_source: "initial", active_token_key: null });
-          }
-          this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { active_token_key: null });
-          const keyRows = this.#rows("segmentKeys", tx).filter(({ row }) => sameText(row.segment_id, currents.get(ruleId).id));
-          this.#update(tx, "segmentKeys", keyRows, { active_token_key: null });
-        }
-        const tokenKeyOf = (key) => `${key.upstreamStationId}:${key.tokenId}`;
-        for (const { ruleId, plan, keyBlock } of plans) {
-          const current = currents.get(ruleId), rule = rules.get(ruleId);
-          const ruleActiveKey = plan.canonicalKey ?? tokenKeyOf(plan.after[0]); // 同 MySQL 版：和 createRule 一个口径
-          const newGroup = plan.group ?? current.group_name;
-          const newRatio = plan.ratio !== undefined ? plan.ratio : current.group_ratio;
-          const openSegment = (effectiveFrom, keys, { closesAt = null, timingSource = "key_change", fresh = false } = {}) => {
-            const id = uid("rs"), createdAt = this.#timestamp();
-            const useNew = fresh && plan.group !== undefined; // 同 MySQL 版：新段的分组、倍率按新 Key 给的，没给沿用旧段
-            this.#insert(tx, "segments", { id, rule_id: ruleId, group_name: useNew ? newGroup : current.group_name, group_ratio: useNew ? (newRatio ?? null) : current.group_ratio,
+      await this.#transaction("changeRuleKey", async (tx) => {
+        await this.#lock(tx, `rule:${ruleId}`);
+        const entry = this.#ruleEntry(tx, ruleId);
+        if (!entry) throw repositoryError("RULE_NOT_FOUND");
+        const current = this.#segmentsOf(tx, ruleId).map(({ row }) => row).find((row) => row.effective_to_ms == null);
+        if (!current) throw repositoryError("CURRENT_SEGMENT_MISSING");
+        if (keyChangeIsStale(plan, entry.row, current)) throw Object.assign(new Error("stale key change"), { stalePlan: true });
+        const newGroup = plan.group ?? current.group_name, newRatio = plan.ratio !== undefined ? plan.ratio : current.group_ratio;
+        const cut = plan.group !== undefined && (plan.group !== current.group_name || (newRatio ?? null) !== (current.group_ratio == null ? null : Number(current.group_ratio)));
+        if (cut) {
+          this.#update(tx, "segments", this.#rows("segments", tx).filter(({ row }) => sameText(row.id, current.id)), { effective_to_ms: bigint(plan.windowStart) });
+          const open = (effectiveFrom, effectiveTo, useNew, timingSource) => {
+            const createdAt = this.#timestamp();
+            this.#insert(tx, "segments", { id: uid("rs"), rule_id: ruleId, group_name: useNew ? newGroup : current.group_name, group_ratio: useNew ? (newRatio ?? null) : current.group_ratio,
               ratio_observed_at_ms: useNew ? (newRatio == null ? null : bigint(detectedAt)) : current.ratio_observed_at_ms, ratio_source: useNew ? (newRatio == null ? null : "group_catalog") : current.ratio_source,
-              effective_from_ms: bigint(effectiveFrom), effective_to_ms: closesAt == null ? null : bigint(closesAt),
-              detected_at_ms: bigint(detectedAt), timing_source: timingSource, created_at: createdAt, updated_at: createdAt });
-            for (const [index, key] of keys.entries()) this.#insert(tx, "segmentKeys", { segment_id: id, upstream_station_id: key.upstreamStationId,
-              token_id: bigint(key.tokenId), token_name: key.tokenName ?? null, key_mask: null, match_source: "agent",
-              active_token_key: closesAt == null ? (index === 0 ? ruleActiveKey : tokenKeyOf(key)) : null });
-            return id;
+              effective_from_ms: bigint(effectiveFrom), effective_to_ms: effectiveTo == null ? null : bigint(effectiveTo), detected_at_ms: bigint(detectedAt), timing_source: timingSource, created_at: createdAt, updated_at: createdAt });
           };
-          this.#update(tx, "segments", this.#rows("segments", tx).filter(({ row }) => sameText(row.id, current.id)),
-            { effective_to_ms: bigint(plan.kind === "windowed" ? plan.windowStart : plan.cutoverAt) });
-          if (plan.kind === "windowed") {
-            openSegment(plan.windowStart, plan.windowKeys, { closesAt: plan.windowEnd, timingSource: "key_change_window" });
-            openSegment(plan.windowEnd, plan.after, { fresh: true });
-          } else {
-            openSegment(plan.cutoverAt, plan.after, { fresh: true });
-          }
-          const [firstKey] = plan.after;
-          if (keyBlock) this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { key_blocks: JSON.stringify(addKeyBlock(this.#ruleEntry(tx, ruleId).row.key_blocks, keyBlock)) }); // 同 MySQL 版：和换段同一个事务
-          this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { token_id: bigint(firstKey.tokenId),
-            token_name: firstKey.tokenName ?? rule.token_name, active_token_key: ruleActiveKey,
-            ...(plan.canonicalKey !== undefined ? { canonical_key: plan.canonicalKey } : {}), ...(plan.group !== undefined ? { fixed_group: plan.group } : {}) });
-          // 不调 #refreshSegmentKeys：它会把全部 match_source='initial' 的历史段都改成 rules 现在这把 Key
-          // （对应 MySQL 版同一处注释）——K2b 每段该用哪把 Key 已经按时间精确写好了，历史段不能跟着现在这把一起变
+          open(plan.windowStart, plan.windowEnd, false, "key_change_window");
+          open(plan.windowEnd, null, true, "key_change");
         }
+        const ruleActiveKey = plan.canonicalKey ?? `${plan.after.upstreamStationId}:${plan.after.tokenId}`;
+        this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { active_token_key: null });
+        this.#update(tx, "rules", [this.#ruleEntry(tx, ruleId)], { token_id: bigint(plan.after.tokenId), token_name: plan.after.tokenName ?? entry.row.token_name, active_token_key: ruleActiveKey,
+          ...(plan.canonicalKey !== undefined ? { canonical_key: plan.canonicalKey } : {}), ...(plan.group !== undefined ? { fixed_group: plan.group } : {}) });
+        this.#refreshSegmentKeys(tx, ruleId);
       });
     } catch (err) {
-      if (err?.code === "ER_DUP_ENTRY") return { conflict: true };
+      if (err?.code === "ER_DUP_ENTRY") return { conflict: true, stale: false };
       if (err?.stalePlan) return { conflict: false, stale: true };
       throw err;
     }
-    return { conflict: false };
+    return { conflict: false, stale: false };
+  }
+
+  // 对应 MySQL 版 recordDayKeys / listDayKeys
+  async recordDayKeys(ruleId, rows) {
+    const list = (rows || []).filter((row) => row?.billDate && row.upstreamStationId != null && Number.isSafeInteger(Number(row.tokenId)));
+    return this.#transaction("recordDayKeys", async (tx) => {
+      let added = 0;
+      for (const row of list) {
+        if (this.#rows("dayKeys", tx).some(({ row: item }) => item.rule_id === ruleId && item.bill_date === row.billDate && item.upstream_station_id === row.upstreamStationId && Number(item.token_id) === Number(row.tokenId))) continue;
+        this.#insert(tx, "dayKeys", { rule_id: ruleId, bill_date: row.billDate, upstream_station_id: row.upstreamStationId, token_id: bigint(row.tokenId), token_name: row.tokenName ?? null });
+        added += 1;
+      }
+      return added;
+    });
+  }
+
+  async listDayKeys(ruleIds, fromDate, toDate) {
+    const ids = new Set((ruleIds || []).map(String));
+    const rows = this.#plain("dayKeys").filter((row) => ids.has(row.rule_id) && row.bill_date >= fromDate && row.bill_date <= toDate)
+      .sort((a, b) => compare(a.rule_id, b.rule_id) || compare(a.bill_date, b.bill_date) || Number(a.token_id) - Number(b.token_id));
+    return dayKeysFromRows(rows);
   }
 
   // 对应 MySQL 版：「用户停了」的渠道

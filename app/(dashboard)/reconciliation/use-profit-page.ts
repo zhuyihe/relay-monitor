@@ -13,7 +13,7 @@ import { livePollMs } from "./profit-format";
 // 这天重算的数比原来少了一半多、没换掉：点「重新读取」先弹确认框写出换成多少，确认框的内容和老页面同一份（C3，审核 #126/#128 盘点）
 import { RESETTLE_SHRUNK_CHANGED, resettleShrunkConfirm } from "../../../lib/reconciliation-view";
 
-export type ProfitPreset = "today" | "yesterday" | "7d" | "month" | "custom";
+export type ProfitPreset = "today" | "yesterday" | "7d" | "month" | "since" | "custom";
 export type ProfitWindow = { preset: ProfitPreset; startMs?: number; endMs?: number };
 
 // 读取失败时存下报错本身，抛出来的是空值时也要算出错

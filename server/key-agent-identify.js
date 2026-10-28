@@ -253,10 +253,10 @@ function trackKeyAgentReachability(rt, stationId, result) {
   // lastSuccessAtMs：内存里记的「最近一次真的读到」，例外三从这一刻起先不算（和持久化的 keyAgentLastSuccessAtMs 不是一回事：
   // 那个有「没处理完就不往前推」的规矩，这个只管读不读得到）
   tracker.set(stationId, failed
-    ? { consecutiveFailures: state.consecutiveFailures + 1, unreachableSinceMs: state.unreachableSinceMs ?? at, lastSuccessAtMs: state.lastSuccessAtMs }
+    ? { consecutiveFailures: state.consecutiveFailures + 1, unreachableSinceMs: state.unreachableSinceMs ?? at, lastSuccessAtMs: state.lastSuccessAtMs, lastCode: result.code || null }
     : { consecutiveFailures: 0, unreachableSinceMs: null, lastSuccessAtMs: at });
 }
 // 查这个站点现在的例外三状态：consecutiveFailures 到 3 就该升成需处理 KEY_READER_UNREACHABLE（调用方按 k-plan §6 的表判）
 export function keyAgentReachability(rt, stationId) {
-  return rt._keyAgentReachability?.get(stationId) || { consecutiveFailures: 0, unreachableSinceMs: null, lastSuccessAtMs: null };
+  return rt._keyAgentReachability?.get(stationId) || { consecutiveFailures: 0, unreachableSinceMs: null, lastSuccessAtMs: null, lastCode: null };
 }
