@@ -1794,6 +1794,13 @@ test("上游资源：别的列的数字很长时，「渠道」一列的「2 个
     }
     assert.ok((await table.locator("thead th").nth(2).locator("xpath=.").boundingBox()).height <= 48, "表头不折行");
     if (width === 1440) {
+      const long = "「高速 A」有收入，但选的 Key 没用量，请到每日利润页换一把 Key 或者先解绑这个渠道，再回来看这一行";
+      const lines = await page.evaluate((text) => { const span = document.querySelector(".jy-stations-table tbody .jy-stations-sub > span"); span.textContent = text; const r = span.getBoundingClientRect(); return Math.round(r.height / parseFloat(getComputedStyle(span).lineHeight)); }, long);
+      assert.equal(lines, 2, "状态小字最多两行，多的省略");
+      if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/stations-long-title-1440x900.png` });
+      await page.reload(); await table.locator("tbody tr", { hasText: "主力上游" }).first().waitFor();
+    }
+    if (width === 1440) {
       const fit = await page.evaluate(() => { const w = document.querySelector(".jy-table-wrap"), t = document.querySelector(".jy-stations-table"); return { wrap: w.clientWidth, table: t.scrollWidth }; });
       assert.ok(fit.table <= fit.wrap, `1440 宽下表格不该要左右拖（表 ${fit.table}，容器 ${fit.wrap}），「约 N 天」不能被右边固定的操作列盖住`);
     }
