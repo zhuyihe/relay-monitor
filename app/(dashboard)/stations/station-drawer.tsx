@@ -7,6 +7,7 @@ import type { ReactNode, Ref } from "react";
 import dayjs from "dayjs";
 import { App, Button, Collapse, DatePicker, Drawer, Form, Grid, Input, Select, Switch } from "antd";
 import { api } from "../../../lib/client";
+import { KEY_AGENT_URL_INVALID_TEXT, isKeyAgentUrl } from "../../../lib/key-agent-client.js";
 import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions";
 import { describeError, failureText, requiredText } from "../../../lib/error-copy";
 import { formatRate, formatSellPrice, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../../../lib/format";
@@ -31,7 +32,7 @@ import type { ConnectionTestResult } from "./model";
 
 export type StationDrawerHandle = {
   // trigger：关闭后把焦点还给它（名称链接、编辑按钮、更多菜单按钮）
-  open: (station: any | null, trigger?: HTMLElement | null) => void;
+  open: (station: any | null, trigger?: HTMLElement | null, options?: { focus?: "keyAgentUrl" | "keyAgentSecret" }) => void;
 };
 
 // 参与“有未保存的修改”判断的字段；密钥框初始为空，输入即算修改
@@ -135,7 +136,7 @@ const COPY = Object.freeze({
 function keyAgentIssueText(code: string | undefined) {
   if (code === "SECRET_TOO_SHORT") return "令牌至少 32 个字符，用「怎么装」里的命令生成一串";
   if (code === "SECRET_TOO_WEAK") return "令牌太弱，用「怎么装」里的命令生成一串";
-  if (code === "KEY_AGENT_URL_INVALID") return "读取服务地址要用加密连接的网址（参考输入框里的示例）";
+  if (code === "KEY_AGENT_URL_INVALID") return KEY_AGENT_URL_INVALID_TEXT;
   return describeError({ code }).text;
 }
 
@@ -198,7 +199,7 @@ export function StationDrawer({
 
   const needsFor = (type: string): string[] => types.find((item) => item.value === type)?.needs || [];
 
-  const openDrawer = (station: any | null, trigger?: HTMLElement | null) => {
+  const openDrawer = (station: any | null, trigger?: HTMLElement | null, options?: { focus?: "keyAgentUrl" | "keyAgentSecret" }) => {
     if (!types.length) {
       message.warning(TYPES_MISSING_TEXT);
       return;
@@ -236,6 +237,8 @@ export function StationDrawer({
     initialSnapshot.current = snapshotOf(values, rows);
     setDirty(false);
     setOpen(true);
+    // 从需处理的「改地址」「改令牌」进来：抽屉开着以后停在对应的那一栏
+    if (options?.focus) setTimeout(() => form.scrollToField(options.focus!, { focus: true, block: "center" }), 350);
   };
 
   useImperativeHandle(ref, () => ({ open: openDrawer }));
@@ -285,7 +288,9 @@ export function StationDrawer({
   const needs = needsFor(formType);
   const unchangedEdit = !!editing && formFingerprint === initialFingerprint;
   const testPassed = !!connectionTest?.ok && testedFingerprint === formFingerprint;
-  const canSave = isFixed || unchangedEdit || testPassed;
+  const typedKeyAgentUrl = Form.useWatch("keyAgentUrl", form);
+  const keyAgentUrlBad = isOwnStation && !!String(typedKeyAgentUrl || "").trim() && !isKeyAgentUrl(typedKeyAgentUrl);
+  const canSave = (isFixed || unchangedEdit || testPassed) && !keyAgentUrlBad;
 
   const onTestConnection = async () => {
     const values = form.getFieldsValue();
@@ -517,7 +522,7 @@ export function StationDrawer({
             type="primary"
             loading={saving}
             disabled={!canSave || (!!editing && !dirty)}
-            title={!canSave ? COPY.testFirst : editing && !dirty ? COPY.noChange : undefined}
+            title={keyAgentUrlBad ? KEY_AGENT_URL_INVALID_TEXT : !canSave ? COPY.testFirst : editing && !dirty ? COPY.noChange : undefined}
             onClick={onSave}
           >
             {saveLabel}
@@ -556,7 +561,7 @@ export function StationDrawer({
           {credentialItems.length > 1 ? <div className="jy-two">{credentialItems}</div> : credentialItems}
           {isOwnStation && (
             <>
-              <Form.Item label={COPY.keyAgentUrl} name="keyAgentUrl" extra={COPY.keyAgentUrlHint}>
+              <Form.Item label={COPY.keyAgentUrl} name="keyAgentUrl" extra={COPY.keyAgentUrlHint} validateStatus={keyAgentUrlBad ? "error" : undefined} help={keyAgentUrlBad ? KEY_AGENT_URL_INVALID_TEXT : undefined}>
                 <Input placeholder={COPY.keyAgentUrlPlaceholder} autoComplete="off" inputMode="url" />
               </Form.Item>
               <Form.Item

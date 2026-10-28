@@ -301,3 +301,16 @@ test("marginText：毛利 ÷ 收入；收入是 0 或毛利算不出写「—」
   assert.equal(marginText(3, 0), EMPTY);
   assert.equal(marginText(3, null), EMPTY);
 });
+
+test("footerNotes：这一版还不算利润的渠道只提示一句，最多点三个名，再多写「等 N 个渠道」", () => {
+  const hrefs = { upstreams: "/stations", start: "/s", settings: "/settings" };
+  const note = (unsupportedChannels) => footerNotes({ ...page(), unsupportedChannels }, ctx, hrefs).find((n) => n.key === "unsupported")?.text;
+  assert.equal(note([]), undefined);
+  assert.equal(note([{ channelId: 1, name: "渠道 A", reason: "KEY_IN_OTHER_UPSTREAM", upstreamNames: ["甲", "乙"], withNames: [] }]), "这一版还不算利润的渠道：「渠道 A」它的 Key 在上游「甲」「乙」里都有");
+  assert.equal(note([{ channelId: 2, name: "高速 C", reason: "KEY_SHARED_WITH_MULTI_KEY", upstreamNames: [], withNames: ["高速 B"] }]), "这一版还不算利润的渠道：「高速 C」它和「高速 B」用同一把 Key");
+  assert.equal(note([{ channelId: 2, name: "高速 C", reason: "KEY_SHARED_WITH_MULTI_KEY", upstreamNames: [], withNames: ["高速 B", "高速 D"] }]), "这一版还不算利润的渠道：「高速 C」它和「高速 B」等 2 个渠道用同一把 Key");
+  assert.equal(note([{ channelId: 3, name: "X", reason: "MULTI_KEY", upstreamNames: [], withNames: [] }]), "这一版还不算利润的渠道：「X」它填了不止一把 Key");
+  const many = [1, 2, 3, 4, 5].map((id) => ({ channelId: id, name: `渠道${id}`, reason: "MULTI_KEY", upstreamNames: [], withNames: [] }));
+  assert.match(note(many), /；等 5 个渠道$/);
+  assert.equal(note(many).split("；").length, 4, "点三个名 + 等 N 个");
+});

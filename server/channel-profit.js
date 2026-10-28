@@ -81,6 +81,10 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
       if (slot.state === "not_found") return { ...base, state: "blocked", reason: "CHANNEL_KEY_UNMATCHED" }; // 不在已加的上游里：加上游（用语规范 §5.2 的码）
       // 打码撞了、读完整 Key 又没有权限（revealIssues 里有这个渠道）才是少权限；reveal 只是暂时失败（限流、网络）的不是，会自己好
       if (slot.state === "ambiguous" && revealDenied.has(channelId)) return { ...base, state: "blocked", reason: "KEY_REVEAL_DENIED", upstreamStationId: revealDenied.get(channelId) ?? null };
+      // 同一把 Key 在两个上游里都有：这一版不算（只提示）
+      if (slot.state === "ambiguous" && new Set((slot.matches || []).map((match) => match.stationId)).size > 1) {
+        return { ...base, state: "blocked", reason: "KEY_IN_OTHER_UPSTREAM", upstreamStationIds: [...new Set(slot.matches.map((match) => match.stationId))] };
+      }
       return { ...base, state: "blocked", reason: "KEY_UNRESOLVED" }; // 上游这一轮读不到、reveal 暂时失败，会自己好
     });
     // 几把 Key 的渠道也在用的 Key（它的某个 slot 认出来是这把）：这把 Key 的钱有一部分是那个渠道的，分不到每个渠道，算到这一组头上会把成本压到这几个渠道上、

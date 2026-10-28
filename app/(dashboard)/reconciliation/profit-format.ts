@@ -100,6 +100,7 @@ export function rangeCaption(page: ProfitPageResponse, ctx: Ctx) {
   const asOf = Date.parse(page.asOf);
   if (isTodayView(page)) return `${formatDayKey(page.today, ctx.tz, ctx.now)} 0:00–${formatZonedTime(Number.isFinite(asOf) ? asOf : ctx.now ?? Date.now(), ctx.tz)} · ${COPY.todayCaption}`;
   const text = rangeText(page, ctx);
+  if (page.range?.preset === "since") return `${text} · ${COPY.presets.since}`; // 「10月20日–今天 · 开始算以来」
   if (isSingleDay(page)) return `${text} ${weekdayOfDayKey(rangeDays(page).first)} · ${page.dayCounts.fixed ? COPY.fixed : COPY.gap.reading}`;
   if (isAllFixed(page)) return `${text} · ${COPY.fixed}`;
   const parts = [page.dayCounts.fixed ? COPY.daysFixed(page.dayCounts.fixed) : "", page.dayCounts.reading ? COPY.daysReading(page.dayCounts.reading) : "", page.dayCounts.today ? COPY.todayLive : ""].filter(Boolean);
@@ -396,6 +397,10 @@ export function footerNotes(page: ProfitPageResponse, ctx: Ctx, hrefs: { upstrea
   const money = pageMoney(page, ctx.currency), notes: FooterNote[] = [];
   if (money.unaccounted != null && money.unaccounted > 0) notes.push({ key: "unaccounted", text: COPY.notice.unaccounted(money.approx ? COPY.metric.approx(fmtMoney(money.unaccounted, ctx.currency)) : fmtMoney(money.unaccounted, ctx.currency)), link: { text: COPY.notice.seeUpstreams, href: hrefs.upstreams } });
   if (page.unlinkedChannelCount > 0) notes.push({ key: "unlinked", text: COPY.notice.unlinked(page.unlinkedChannelCount), link: { text: COPY.table.startCounting, href: hrefs.start } });
+  const unsupported = (page.unsupportedChannels || []).map((channel) => channel.reason === "KEY_IN_OTHER_UPSTREAM" && channel.upstreamNames.length ? COPY.notice.unsupportedKeyInUpstreams(channel.name, channel.upstreamNames)
+    : channel.reason === "KEY_SHARED_WITH_MULTI_KEY" && channel.withNames.length ? COPY.notice.unsupportedKeyShared(channel.name, channel.withNames)
+    : channel.reason === "MULTI_KEY" ? COPY.notice.unsupportedManyKeys(channel.name) : null).filter((text): text is string => !!text);
+  if (unsupported.length) notes.push({ key: "unsupported", text: COPY.notice.unsupported(unsupported.slice(0, 3), unsupported.length) });
   if (ctx.currency !== "CNY" && page.rateUnset?.length) notes.push({ key: "rate", text: RATE_UNSET_USD });
   if (ownLog && finite(ownLog.coveredToMs)) {
     const behind = finite(ownLog.behindMs) ? ownLog.behindMs : (ctx.now ?? Date.now()) - ownLog.coveredToMs;

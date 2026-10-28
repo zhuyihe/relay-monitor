@@ -206,7 +206,7 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_rules", "provider", "VARCHAR(24) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "canonical_key", "VARCHAR(255) NULL");
   await addColumnIfMissing(pool, "reconciliation_rules", "source_binding", "JSON NULL");
-  // K2b：这条绑定的 Key 现在有没处理的事——分组/合组（KEY_GROUP_CHANGED）、渠道换成了不在已加上游里的 Key
+  // K2b：这条绑定的 Key 现在有没处理的事——渠道换成了不在已加上游里的 Key
   // （CHANNEL_KEY_UNMATCHED）、打码撞了又没有读完整 Key 的权限（KEY_REVEAL_DENIED）——第一次认出来的时刻（毫秒），
   // 跨轮记下来，重启不丢。早退只挡从这一刻起的窗口，这一刻以前已经结过（或者还没结到）的日子不受影响；
   // 事情解开（比如又换回来）清成 NULL

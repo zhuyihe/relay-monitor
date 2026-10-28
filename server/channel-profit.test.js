@@ -247,3 +247,9 @@ test("autoStart：一轮最多 3 组，合成一次预览和确认；剩下的�
   assert.deepEqual(f.calls.connect[0].groups.map((group) => group.channels.map((channel) => channel.channelId)), [[1], [2], [3]], "最多 3 组");
   assert.equal(result.started.length, 3);
 });
+
+test("status：同一把 Key 在两个上游里都有——这一版不算，只提示（KEY_IN_OTHER_UPSTREAM，带两个上游的编号），不进 groups", async () => {
+  const f = fixture({ channels: [1], identified: [{ channelId: 1, keyless: false, slots: [{ index: 0, state: "ambiguous", matches: [{ stationId: "up1", tokenId: 1 }, { stationId: "up2", tokenId: 7 }] }] }] });
+  const status = await f.module.status("own");
+  assert.deepEqual([status.channels[0].state, status.channels[0].reason, status.channels[0].upstreamStationIds, status.groups], ["blocked", "KEY_IN_OTHER_UPSTREAM", ["up1", "up2"], []]);
+});

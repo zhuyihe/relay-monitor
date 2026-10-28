@@ -6,6 +6,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 import { readFileSync } from "node:fs";
 import { credentialFieldOf, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
 import { secretWeakness } from "../lib/key-fingerprint.js";
+import { KEY_AGENT_URL_INVALID_TEXT, isKeyAgentUrl } from "../lib/key-agent-client.js";
 import { channelSecretFields } from "../lib/notify.js";
 
 const CIPHERTEXT = /^enc:v1:([0-9a-f]{8}):([A-Za-z0-9_-]{16}):([A-Za-z0-9_-]{22,})$/;
@@ -25,7 +26,7 @@ export function assertKeyAgentSecretStrength(secret) {
 // 读取服务地址：填了就必须是 https（令牌在请求头里走，不走明文）；不填是用默认地址，不算错
 export function assertKeyAgentUrl(url) {
   const text = String(url ?? "").trim();
-  if (text && !/^https:\/\/\S+$/i.test(text)) throw Object.assign(new Error("读取服务地址要用加密连接的网址"), { code: "KEY_AGENT_URL_INVALID" });
+  if (text && !isKeyAgentUrl(text)) throw Object.assign(new Error(KEY_AGENT_URL_INVALID_TEXT), { code: "KEY_AGENT_URL_INVALID" });
   return text;
 }
 // 清空时写什么：自动登录的令牌是对象，清成 null；其余是字符串，清成空串

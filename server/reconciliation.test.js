@@ -7274,7 +7274,7 @@ test("每天记下的 Key：上游成本是这一天记下的几把 Key 各取�
   await f.module.refreshDue(now);
   assert.deepEqual(costOf(), [1], "没记 Key：用绑定自己那把，上游成本 1（额度 100 ÷ 100）");
   // 这天记下绑定自己那把和一把已经从目录里删掉的 Key（按名字取，每把各取一次）：成本相加
-  pushDayKeys(f, "rr_live", [own, { upstreamStationId: live.upstream_station_id, tokenId: 77, tokenName: "gone-key" }]);
+  pushDayKeys(f, "rr_live", [own, { upstreamStationId: "up_merged_away", tokenId: 77, tokenName: "gone-key" }]); // 合并重复上游以后表里记的还是旧上游的编号：取数一律按绑定现在的上游
   const calls = f.state.statCalls.length;
   await f.repository.requestResettle("rr_live", ["2026-10-08"], { now });
   now += 60000;

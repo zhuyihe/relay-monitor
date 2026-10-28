@@ -926,6 +926,27 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     }
   }
 
+  // 这一版还不算利润的渠道（只提示、不进需处理）：用的 Key 在两个上游里都有、几把 Key 的渠道、和几把 Key 的渠道共用一把 Key。
+  // 问渠道利润模块要（识别结果有 4 分钟缓存，读取服务连不上就当没有）；写在每日利润表下面那一句里
+  const UNSUPPORTED_REASONS = new Set(["KEY_IN_OTHER_UPSTREAM", "MULTI_KEY", "KEY_SHARED_WITH_MULTI_KEY"]);
+  async function unsupportedChannels() {
+    if (!rt.channelOnboarding) return [];
+    const profit = (rt.channelProfit ||= createChannelProfitModule(rt));
+    const out = [];
+    for (const own of rt.store.list().filter((station) => station.isOwn && station.type === "newapi" && !station.archivedAt && keyAgentConfigOf(station))) {
+      const state = await profit.status(own.id).catch(() => null);
+      if (!state?.ok) continue;
+      const nameOf = (id) => state.channels.find((channel) => channel.channelId === Number(id))?.name;
+      for (const channel of state.channels) {
+        if (channel.state !== "blocked" || !UNSUPPORTED_REASONS.has(channel.reason)) continue;
+        out.push({ channelId: channel.channelId, name: channel.name, reason: channel.reason,
+          upstreamNames: (channel.upstreamStationIds || []).map((id) => rt.store.get(id)?.name).filter(Boolean),
+          withNames: (channel.sharedWithChannelIds || []).map(nameOf).filter(Boolean) });
+      }
+    }
+    return out;
+  }
+
   // 页面「刷新」（观测）强制重读 Key 目录和账号身份；只读查询用 5 分钟缓存。
   // 轮询（poll）按时间重读：分组和 Key 目录 5 分钟、身份和 /api/status 30 分钟（自营站点的身份也是 30 分钟）；
   // 记在 staleMetadata 里的上游这一轮强制全部重读：出了异常的、这一轮要结账的（refreshDue 放进来），读成功才清掉记号。
@@ -1587,7 +1608,8 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     const recorded = (await repository.listDayKeys([rule.id], first, last))[rule.id] || {};
     const keys = new Map();
     for (let day = first; day <= last; day = shiftDayLabel(day, 1)) {
-      for (const key of recorded[day] || [{ upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName }]) keys.set(`${key.upstreamStationId}:${key.tokenId}`, key);
+      // 一个渠道只对一个上游：Key 的上游一律取绑定现在的（合并重复上游以后表里记的还是旧上游的编号）
+      for (const key of recorded[day] || [{ tokenId: rule.tokenId, tokenName: rule.tokenName }]) keys.set(String(key.tokenId), { ...key, upstreamStationId: rule.upstreamStationId });
     }
     return upstreamWindowForSegment(upstream, metadata, token, { keys: [...keys.values()] }, window, { readOnly, upstreamStationId: rule.upstreamStationId });
   }
@@ -3534,6 +3556,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
         unaccountedUpstreamCostUsd,
         unlinkedChannelCount: (response.coverage?.channels || []).filter((channel) => channel.status === "unlinked").length,
+        unsupportedChannels: await unsupportedChannels(),
         rateUnset, fixedOffProfitStations: response.fixedOffProfitStations || [] };
     },
     // 一行一天的计算明细：已固定的从账本行读（result + detail.expected）；没固定的（今天）现算一次、应付成本没有

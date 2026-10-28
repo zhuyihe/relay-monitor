@@ -578,11 +578,11 @@ test("identifyChannelsCached（#143 低-6）：不传 fresh 时 4 分钟内沿�
   assert.equal(asked, 2, "fresh：真的再问一次读取服务");
 });
 
-test("keyAgentExceptionIssueOf：地址不是 https / 令牌被拒（401）第一次就是需处理，别的读不到连续 3 次才是", async () => {
+test("keyAgentExceptionIssueOf：地址不是 https / 令牌被拒（401）第一次就是需处理（各挂自己的码），别的读不到连续 3 次才是", async () => {
   const { keyAgentExceptionIssueOf } = await import("./key-agent-resegment.js");
   assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 0, lastCode: null }), null);
   assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 1, lastCode: "KEY_AGENT_UNAVAILABLE" }), "KEY_AGENT_UNAVAILABLE");
   assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 3, lastCode: "KEY_AGENT_UNAVAILABLE" }), "KEY_READER_UNREACHABLE");
-  assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 1, lastCode: "KEY_AGENT_UNAUTHORIZED" }), "KEY_READER_UNREACHABLE");
-  assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 1, lastCode: "KEY_AGENT_URL_INVALID" }), "KEY_READER_UNREACHABLE");
+  assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 1, lastCode: "KEY_AGENT_UNAUTHORIZED" }), "KEY_AGENT_UNAUTHORIZED");
+  assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 1, lastCode: "KEY_AGENT_URL_INVALID" }), "KEY_AGENT_URL_INVALID");
 });

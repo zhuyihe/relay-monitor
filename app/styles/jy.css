@@ -637,8 +637,8 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-topbar .jy-freshness { flex: none; }
   .jy-mobile-range:not(:empty) { display: flex; flex-direction: column; gap: 6px; }
   .jy-mobile-range .jy-range { flex-direction: column; align-items: stretch; gap: 6px; }
-  .jy-mobile-range .jy-seg { width: 100%; }
-  .jy-mobile-range .jy-seg button { flex: 1; padding: 0 6px; justify-content: center; }
+  .jy-mobile-range .jy-seg { width: 100%; overflow-x: auto; } /* 每日利润有六个范围，320 宽放不下时横滑 */
+  .jy-mobile-range .jy-seg button { flex: 1 0 auto; padding: 0 6px; justify-content: center; white-space: nowrap; }
   .jy-mobile-range .jy-range-wrap { width: 100%; }
   .jy-content { padding: 16px; gap: 16px; }
   .jy-page, .jy-tabpanel, .jy-stack { gap: 16px; }

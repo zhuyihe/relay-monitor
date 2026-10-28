@@ -248,6 +248,11 @@ export const COPY = Object.freeze({
     unaccounted: (usd: string) => `另有 ${usd} 上游成本没算进利润`,
     seeUpstreams: "查看各上游",
     unlinked: (n: number) => `另有 ${n} 个渠道还没算利润`,
+    // 这种接法这一版还不算利润：只提示，没有按钮（用语规范 §5.6）；最多点三个名，再多写「等 N 个渠道」
+    unsupported: (items: string[], total: number) => `这一版还不算利润的渠道：${items.join("；")}${total > items.length ? `；等 ${total} 个渠道` : ""}`,
+    unsupportedKeyInUpstreams: (name: string, upstreams: string[]) => `「${name}」它的 Key 在上游${upstreams.map((upstream) => `「${upstream}」`).join("")}里都有`,
+    unsupportedKeyShared: (name: string, others: string[]) => `「${name}」它和${others.length > 1 ? `「${others[0]}」等 ${others.length} 个渠道` : `「${others[0]}」`}用同一把 Key`,
+    unsupportedManyKeys: (name: string) => `「${name}」它填了不止一把 Key`,
     logLagging: (at: string) => `自营站点的收费记录读得慢，只读到 ${at}，这以后的应付成本还没算。`,
     goSettings: "去设置",
     readFailed: `读不到${NAV_LABELS.reconciliation}`,
