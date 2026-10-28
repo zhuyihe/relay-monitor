@@ -9,6 +9,7 @@ import { MemoryReconciliationRepository } from "./test-support/reconciliation-me
 import { MemoryOwnLogStore } from "./test-support/own-log-memory-store.js";
 import { createFakeSub2Api } from "./test-support/fake-sub2api.js";
 import { createChannelProfitModule } from "./channel-profit.js";
+import { canonicalBillingKey } from "../lib/reconciliation-scope-policy.js";
 
 const SH = (iso) => Date.parse(`${iso}+08:00`);
 const KEY_AGENT_SECRET = "K7m2-xP9q" + "R4t".repeat(10);
@@ -557,5 +558,35 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     assert.equal(cost("2026-10-10"), 24 * H * 1, "换 Key 以前的天只有 Key 9");
     assert.equal(cost("2026-10-11"), 9 * H * 1 + 15 * H * 3, "换 Key 那天：旧、新两把各取整天");
     assert.equal(cost("2026-10-12"), 24 * H * 3, "第二天起只用新的");
+  });
+}
+
+// 真建成的 legacy-v3 绑定（repository.createRule 不给策略就是 legacy-v3，不是建完再改）：在 New API 里换了 Key，过了一阵才来控制台改——
+// 前面还没固定的天、被重判的旧日子都要按当时的 Key（旧 Key）算，不能按新 Key 读
+// Sub2API 的老绑定建绑定那天（10 点）不能按整天固定，这条用 New API 核；Key 逻辑两边是同一段
+for (const upstreamType of ["newapi"]) {
+  test(`手动选 Key：真建成的 legacy-v3 绑定，换 Key 以后前面没固定的天和重判已固定的旧日子仍按旧 Key（${upstreamType}）`, async (t) => {
+    const SWITCH = SH("2026-10-11T00:30:00");
+    const f = await setup(t, { upstreamType, keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, SWITCH], 20: [SWITCH, Infinity] }, rates: { 9: 1, 20: 3 } });
+    await f.at("2026-10-09T10:00:00");
+    const station = f.store.get(f.supplier.id);
+    const canonicalKey = canonicalBillingKey(station, { accountId: 42, userId: 42 }, 9);
+    const rule = await f.repository.createRule({ upstreamStationId: f.supplier.id, ownStationId: f.own.id, tokenId: 9, tokenName: "Key 9", fixedGroup: "g1", timezone: "Asia/Shanghai",
+      channels: [{ channelId: 1, name: "Channel 1" }], initialEffectiveFromMs: SH("2026-10-09T00:00:00"), costCoverage: "complete", provider: upstreamType, canonicalKey });
+    assert.equal(rule.billingPolicy, "legacy-v3", "真的是 legacy-v3");
+    // 10-09 固定；10-10 在 10-11 00:15 以后本来该固定，但用户还没来改，先不让轮询结（模拟「过了一阵才来改」：这几轮之间没有结账）
+    for (const iso of ["2026-10-09T23:00:00", "2026-10-10T01:00:00", "2026-10-10T23:00:00"]) await f.round(iso);
+    const H = 3600, cost = (day) => Number(f.costOn(day)[0]?.cost_usd ?? NaN);
+    const day9 = cost("2026-10-09");
+    assert.equal(day9, 24 * H * 1, "10-09 整天只有 Key 9");
+    // 10-11 10:00 用户来把 Key 改成 20（10-10 还没固定）
+    await f.at("2026-10-11T10:00:00");
+    assert.equal((await f.rt.reconciliation.changeRuleKeyManual(rule.id, 20)) != null, true);
+    // 重判已固定的 10-09：账本一行不变
+    await f.repository.requestResettle(rule.id, ["2026-10-09"], { now: f.state.now });
+    for (const iso of ["2026-10-11T12:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T08:00:00"]) await f.round(iso);
+    assert.equal(cost("2026-10-10"), 24 * H * 1, "10-10 没固定的那天按旧 Key 9 算（不是新 Key 的 259200）");
+    assert.equal(cost("2026-10-09"), day9, "重判已固定的 10-09 仍按旧 Key");
+    assert.equal(cost("2026-10-11"), 0.5 * H * 1 + 23.5 * H * 3, "换 Key 当天旧、新两把各取整天：Key 9 到 0:30、Key 20 从 0:30 起");
   });
 }

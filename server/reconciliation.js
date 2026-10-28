@@ -1033,13 +1033,28 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
   // 每天都有 Key 记录：从开始算那天到昨天，还没记录的天补一行，用这条绑定现在配的那把 Key（装读取服务之前、手动选 Key 之前结账用的就是它）；
   // 最多补最近 800 天（超出的丢最老的）。前提：过去的天用的都是绑定现在配的这把 Key。返回 false 是没写成
   async function fillMissingDayKeys(rule, today) {
-    const started = reconciliationAccountingStart(rule), startDay = Number.isFinite(started) ? dayKeyInTz(started, rule.timezone) : today, yesterday = shiftDayLabel(today, -1);
+    const segments = await repository.listSegments(rule.id).catch(() => null);
+    if (!segments) return false;
+    // 开始日：新策略的绑定取核算起点；老绑定（legacy-v3）没有核算起点，取第一个分段的起点，没有就是建绑定那天
+    const started = reconciliationAccountingStart(rule), firstSegment = segments.reduce((min, segment) => (min == null || segment.effectiveFrom < min ? segment.effectiveFrom : min), null);
+    const createdAt = Date.parse(rule.createdAt);
+    const from = Number.isFinite(started) ? started : Number.isFinite(firstSegment) && firstSegment > 0 ? firstSegment : createdAt;
+    const startDay = Number.isFinite(from) ? dayKeyInTz(from, rule.timezone) : today, yesterday = shiftDayLabel(today, -1);
     if (startDay > yesterday) return true;
     const have = await repository.listDayKeys([rule.id], startDay, yesterday).then((all) => all[rule.id] || {}, () => null);
     if (!have) return false;
+    const current = [{ upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName }];
+    // 这一天用的 Key：碰到这一天的分段上挂的 Key（更老的分段带的是别的 Key），分段没挂 Key 或这天没有分段就是绑定现在配的这把
+    const keysOn = (day) => {
+      const dayStart = dayStartInTz(day, rule.timezone), dayEnd = dayStartInTz(shiftDayLabel(day, 1), rule.timezone);
+      const hit = segments.filter((segment) => segment.effectiveFrom < dayEnd && (segment.effectiveTo == null || segment.effectiveTo > dayStart));
+      const keys = hit.flatMap((segment) => (segment.keys || []).map((key) => ({ upstreamStationId: key.upstreamStationId ?? rule.upstreamStationId, tokenId: key.tokenId, tokenName: key.tokenName ?? null })));
+      const unique = new Map(keys.map((key) => [String(key.tokenId), key]));
+      return unique.size ? [...unique.values()] : current;
+    };
     const rows = [];
     for (let day = yesterday, guard = 0; day >= startDay && guard < 800; day = shiftDayLabel(day, -1), guard += 1) {
-      if (!have[day]) rows.push({ billDate: day, upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName });
+      if (!have[day]) for (const key of keysOn(day)) rows.push({ billDate: day, ...key });
     }
     if (!rows.length) return true;
     return repository.recordDayKeys(rule.id, rows).then(() => true, () => false);
