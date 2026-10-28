@@ -30,7 +30,8 @@ import type { RunwayItem } from "../components/runway";
 import { useShellPage } from "../components/shell-context";
 import { useWorkflowActions } from "../components/use-workflow-actions";
 import { actionPhrase, workflowDetail, workflowOwner, workflowProblem } from "../components/workflow-copy";
-import { fmtMoney, pageMoney } from "./reconciliation/profit-format";
+import { fmtMoney, metrics, pageMoney } from "./reconciliation/profit-format";
+import type { Ctx } from "./reconciliation/profit-format";
 import TrendModal, { TREND_TEXT } from "./trend-modal";
 import "../styles/pages/overview.css";
 
@@ -42,9 +43,8 @@ const REFRESH = workflowActionMeta("refresh")!.label;
 // 运营总览独有的话，只在这一处写；用语按 design/ui-copy-spec.md
 const COPY = Object.freeze({
   profitTitle: "今天赚了多少",
-  profitHint: "已扣固定成本，和每日利润是同一个数",
   profitUnread: "读不到每日利润",
-  profitUnavailable: "这会儿算不出，原因见每日利润",
+  equation: (income: string, cost: string) => `收入 ${income} − 上游成本 ${cost}`,
   profitLink: "每日利润",
   readFailed: (what: string) => `读不到${what}`,
   workflowUnreadable: "读不到上游账单和每日利润里需处理的事。",
@@ -67,6 +67,7 @@ const COPY = Object.freeze({
   expiresIn: (n: number) => `${n} 天后到期`,
   fixedSentence: (date: string) => `最近一笔 ${date}到期。要续上，再记一笔固定成本；不再续费可以在编辑里标记。`,
   runway: "快用完的上游",
+  runwayAllGood: "上游余额都够用",
   runwayEmptyTitle: "还没有按余额计费的上游",
   runwayEmptyDesc: "加上上游后，这里显示最快用完的几个。",
   noRenewal: "不再续费",
@@ -253,13 +254,17 @@ function ProfitToday({ profit, error, onRetry }: { profit: ProfitPageResponse | 
     }
     return <PanelSkeleton title={COPY.profitTitle} lines={3} />;
   }
+  // 和每日利润「今天」视图第一格同一份数、同一个函数（metrics）；总览上的字叫「上游成本」，不叫「实付成本」
   const currency = profit.displayCurrency === "CNY" ? "CNY" : "USD";
+  const ctx = { currency, tz: profit.tz, zoneOf: () => profit.tz } as Ctx;
   const money = pageMoney(profit, currency);
-  const net = money.net;
+  const gross = metrics(profit, ctx)[0];
+  const lines = [...gross.lines];
+  lines[0] = COPY.equation(fmtMoney(money.income, currency), fmtMoney(money.actual, currency));
   return (
     <Panel title={COPY.profitTitle} extra={link}>
-      <p className="jy-ov-hero jy-num" aria-live="polite">{net == null ? EMPTY : `${money.approx ? "≈ " : ""}${fmtMoney(net, currency)}`}</p>
-      <p className="jy-caption">{net == null ? COPY.profitUnavailable : COPY.profitHint}</p>
+      <p className="jy-ov-hero jy-num" aria-live="polite">{gross.value}</p>
+      {lines.map((line, index) => <p key={index} className="jy-caption">{line}</p>)}
     </Panel>
   );
 }
@@ -585,7 +590,15 @@ function RunwayPanel({
   }
 
   const sorted = [...rows].sort((a, b) => compareRunwayItems(a.item, b.item));
-  const shown = sorted.slice(0, RUNWAY_LIMIT);
+  // 只列快用完的（红、黄两档）里可用天数最少的 3 个；都够用就写一行
+  const shown = sorted.filter((r) => r.item.level === "crit" || r.item.level === "warn").slice(0, RUNWAY_LIMIT);
+  if (!shown.length) {
+    return (
+      <Panel title={COPY.runway} extra={allLink}>
+        <p className="jy-caption">{COPY.runwayAllGood}</p>
+      </Panel>
+    );
+  }
   return (
     <Panel title={COPY.runway} extra={allLink} body={false}>
       <Runway items={shown.map((r) => r.item)} critDays={critDays} />

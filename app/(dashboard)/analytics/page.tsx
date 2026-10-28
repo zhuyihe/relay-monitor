@@ -1,14 +1,17 @@
 "use client";
-// 成本估算：只留「成本构成」和一张趋势图（按上游余额变化估出来的成本）。
-// 赚了多少钱只认每日利润那一个数，这里不算利润；余额变化在这里只用来看每个上游花了多少。
+// 成本估算：只留「上游成本构成」和「每天的上游成本」两块。
+// 成本构成的数取每日利润同一份（/api/reconciliation/profit 的实付成本和「没算进利润的上游成本」）；
+// 赚了多少钱只认每日利润那一个数，这里不算利润。
 import "../../styles/pages/analytics.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { STATION_TABS } from "../../../lib/brand";
 import { api } from "../../../lib/client";
+import type { ProfitPageResponse } from "../../../lib/client";
 import { formatMoney, NO_UPSTREAM_TEXT, RANGE_TEXT } from "../../../lib/format";
-import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz } from "../../../lib/business-time";
+import { DEFAULT_BUSINESS_TIME_ZONE, dayKeyInTz, dayStartInTz } from "../../../lib/business-time";
+import { fmtMoney, pageMoney, rowMoney } from "../reconciliation/profit-format";
 import { UPSTREAM_FORM_TEXT } from "../../../lib/channel-onboarding";
 import { EmptyState, ErrorState, PanelSkeleton, RefreshFailedBanner } from "../../components/data-state";
 import { HBars } from "../../components/hbars";
@@ -30,6 +33,8 @@ const POLL_MS = 30000;
 
 type Snapshot = {
   data: any;
+  // 每日利润同一份数（成本构成用）；读不到是 null
+  profit: ProfitPageResponse | null;
   // 这份数据对应的查询条件；与当前选择不一致时说明正在切换
   query: string;
 };
@@ -64,7 +69,13 @@ export default function AnalyticsPage() {
     try {
       const data = await api(`/api/analytics?${params}`);
       if (my !== seq.current) return null;
-      setSnap({ data, query });
+      // 成本构成取每日利润同一份：窗口用上面接口给的开始日和业务时区，到现在为止
+      let profit: ProfitPageResponse | null = null;
+      try {
+        profit = (await api("/api/reconciliation/profit", { method: "POST", body: { preset: "custom", startMs: dayStartInTz(data.start, data.tz), endMs: Date.now() } })) as ProfitPageResponse;
+      } catch { profit = null; }
+      if (my !== seq.current) return null;
+      setSnap({ data, profit, query });
       setAsOf(Date.now());
       setLoadError(null);
       setLoading(false);
@@ -167,34 +178,43 @@ export default function AnalyticsPage() {
     <div className={`jy-page${loading && stale ? " jy-analytics-switching" : ""}`} aria-busy={(loading && stale) || undefined}>
       {loadError && <RefreshFailedBanner asOf={asOf} tz={tz} error={loadError} onRetry={retry} />}
       <TrendPanel rows={dv.rows} showRev={false} revApprox={false} asOf={asOf} tz={tz} />
-      <MixPanel dv={dv} />
+      <MixPanel profit={snap.profit} />
     </div>
   );
 }
 
-// ---- 成本构成 ------------------------------------------------------------------
+// ---- 上游成本构成 ----------------------------------------------------------------
 
-function MixPanel({ dv }: { dv: Derived }) {
-  const items: HBarItem[] = dv.mix.map((m) => {
-    const name = m.archived ? `${m.name}${COPY.archivedSuffix}` : m.name;
-    if (m.unknown) {
-      // 所选时间内一条用量记录都没有：画斜纹空条，不当作 0
-      return { key: m.id, name, value: null, note: m.fixed > 0 ? COPY.noRecordFixed(formatMoney(m.fixed)) : COPY.noRecord };
-    }
-    const tip: [ReactNode, ReactNode][] = [
-      ["上游成本", formatMoney(m.usage, { approx: m.missingDays > 0 })],
-      ["固定成本", formatMoney(m.fixed)],
-    ];
-    if (m.missingDays > 0) tip.push([COPY.usageRecord, COPY.missingDays(m.missingDays)]);
-    return { key: m.id, name, value: r2(m.usage + m.fixed), tipExtra: tip };
-  });
+// 按上游合计每日利润里各行的实付成本；最后一行「没算进利润的上游成本」（有才写）。合计 = 上游列表扣费的总数
+function MixPanel({ profit }: { profit: ProfitPageResponse | null }) {
+  if (!profit) {
+    return (
+      <Panel title={COPY.panel.mix} caption={COPY.mixCaption}>
+        <p className="jy-caption">{COPY.mixUnread}</p>
+      </Panel>
+    );
+  }
+  const currency = profit.displayCurrency === "CNY" ? "CNY" : "USD";
+  const byUpstream = new Map<string, { name: string; value: number }>();
+  for (const row of profit.rows) {
+    const actual = rowMoney(row, currency).actual;
+    if (actual == null) continue;
+    const id = row.upstream.stationId;
+    const entry = byUpstream.get(id) || { name: row.upstream.name || id, value: 0 };
+    entry.value += actual;
+    byUpstream.set(id, entry);
+  }
+  const items: HBarItem[] = [...byUpstream.entries()].map(([id, entry]) => ({ key: id, name: entry.name, value: r2(entry.value) }));
+  const unaccounted = pageMoney(profit, currency).unaccounted;
+  if (unaccounted) items.push({ key: "unaccounted", name: COPY.unaccounted, value: r2(unaccounted) });
+  const total = items.reduce((sum, item) => sum + (item.value ?? 0), 0);
   return (
     <Panel title={COPY.panel.mix} caption={COPY.mixCaption}>
       <HBars
         items={items}
         color="var(--jy-s2)"
         unitName={COPY.mixUnit}
-        total={items.length ? { label: COPY.total, value: formatMoney(r2(dv.usage + dv.fixed), { approx: dv.usageApprox }) } : undefined}
+        total={items.length ? { label: COPY.total, value: fmtMoney(r2(total), currency) } : undefined}
         empty={
           <>
             {COPY.mixEmpty}
