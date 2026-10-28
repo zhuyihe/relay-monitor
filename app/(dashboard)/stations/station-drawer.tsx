@@ -10,7 +10,6 @@ import { api } from "../../../lib/client";
 import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions";
 import { describeError, failureText, requiredText } from "../../../lib/error-copy";
 import { formatRate, formatSellPrice, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../../../lib/format";
-import { NAV_LABELS } from "../../../lib/brand";
 import { stationDisplayName } from "../../../lib/overview-actions";
 import { CREDENTIAL_FIELDS, credentialFieldOf, SECRET_FIELD_TEXT, UPSTREAM_FORM_TEXT, UPSTREAM_SECRET_FIELDS } from "../../../lib/channel-onboarding.js";
 import { Dirty } from "../../components/data-state";
@@ -31,13 +30,14 @@ import type { ConnectionTestResult } from "./model";
 
 export type StationDrawerHandle = {
   // trigger：关闭后把焦点还给它（名称链接、编辑按钮、更多菜单按钮）
-  open: (station: any | null, trigger?: HTMLElement | null) => void;
+  // own：设置自营站点（只在自营业务页用）；不给就是上游（地址 + 令牌，其余在「更多设置」）
+  open: (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean }) => void;
 };
 
 // 参与“有未保存的修改”判断的字段；密钥框初始为空，输入即算修改
 const FORM_KEYS = [
   "name", "type", "baseUrl", "accessToken", "userId", "apiKey", "email", "password",
-  "lowBalanceUsd", "cnyPerUsd", "costAliasesText", "includeInProfit", "isOwn", "noRenewal",
+  "lowBalanceUsd", "cnyPerUsd", "costAliasesText", "includeInProfit", "noRenewal", "token",
   "keyAgentUrl", "keyAgentSecret",
 ];
 const TEST_READ = workflowActionMeta("verify_identity").label;
@@ -70,6 +70,14 @@ const COPY = Object.freeze({
   changedDesc: `保存前请重新${TEST_READ}，确认新的登录信息能读到余额。`,
   hintUnchanged: `只有改了登录信息才要重新${TEST_READ}`,
   hintCreate: `先${TEST_READ}，读到了才能新增`,
+  // 加上游只填地址和令牌（上游监控简化第 3 条）：类型、名字系统自己认
+  token: "令牌",
+  tokenHint: "站点的访问令牌、登录令牌，或只用 Key 的上游的 Key（sk- 开头）；类型和名字系统自己认。",
+  needUserId: "这是 New API 站点，还要填你在这个站点上的用户 ID。",
+  more: "更多设置",
+  typeAuto: "自动识别",
+  detecting: "正在认这个上游",
+  ownTitle: "设置自营站点",
   // 分区
   basics: "基本信息",
   login: "登录信息",
@@ -78,8 +86,6 @@ const COPY = Object.freeze({
   costDesc: "不填就是不设置，不会当成 0。",
   namePlaceholder: "例如：主力上游",
   // 开关和填写项
-  isOwn: "这是我的自营站点",
-  isOwnDesc: `打开后，「${NAV_LABELS.my}」页会显示这个站点的用户、模型和收入。要填超级管理员的访问令牌和用户 ID。卖给客户的管理员 Key 在「${NAV_LABELS.my}」页的「转售 Key」里勾上，它的花费算收入。`,
   inProfit: "算进利润",
   inProfitFixed: "固定成本按天平摊，从净利里扣。只是看看、不属于这门生意的就关掉。",
   inProfitDesc: "默认算进：就算自营站点的渠道里找不到这个上游，也按用量或余额变化算进上游成本。只是看看，或者会和别的上游重复算时才关掉。",
@@ -170,6 +176,8 @@ export function StationDrawer({
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<any>(null); // null = 新增
+  const [ownMode, setOwnMode] = useState(false); // 设置自营站点（自营业务页打开）
+  const [needUserId, setNeedUserId] = useState(false); // 认出是 New API 站点、还缺用户 ID
   const [saving, setSaving] = useState(false);
   const [purchases, setPurchases] = useState<any[]>([]); // 固定成本付费记录行
   const [testing, setTesting] = useState(false);
@@ -192,21 +200,27 @@ export function StationDrawer({
   const typedPassword = Form.useWatch("password", form);
   const typed: Record<string, unknown> = { accessToken: typedAccessToken, apiKey: typedApiKey, password: typedPassword };
   const typedRate = Form.useWatch("cnyPerUsd", form);
-  const typedOwn = Form.useWatch("isOwn", form);
+  const typedBaseUrl = Form.useWatch("baseUrl", form);
+  const typedToken = Form.useWatch("token", form);
   const typedKeyAgentSecret = Form.useWatch("keyAgentSecret", form);
 
   const needsFor = (type: string): string[] => types.find((item) => item.value === type)?.needs || [];
 
-  const openDrawer = (station: any | null, trigger?: HTMLElement | null) => {
+  const openDrawer = (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean }) => {
     if (!types.length) {
       message.warning(TYPES_MISSING_TEXT);
       return;
     }
     triggerRef.current = trigger || null;
     setEditing(station || null);
+    const own = !!station?.isOwn || !!options?.own;
+    setOwnMode(own);
+    setNeedUserId(false);
     const values = {
       name: station?.name || "",
-      type: station?.type || types[0]?.value,
+      // 新增上游时类型留空 = 自动识别；自营站点一定是 New API
+      type: station?.type || (own ? "newapi" : ""),
+      token: "",
       baseUrl: station?.baseUrl || "",
       accessToken: "",
       userId: station?.userId || "",
@@ -217,7 +231,6 @@ export function StationDrawer({
       cnyPerUsd: station?.cnyPerUsd ?? "",
       costAliasesText: Array.isArray(station?.costAliases) ? station.costAliases.join("\n") : "",
       includeInProfit: station?.includeInProfit !== false,
-      isOwn: !!station?.isOwn,
       noRenewal: !!station?.noRenewal,
       keyAgentUrl: station?.keyAgentUrl || "",
       keyAgentSecret: "",
@@ -279,12 +292,14 @@ export function StationDrawer({
   useDrawerEscape(open && !saving, requestClose);
 
   const isFixed = formType === "fixed";
+  // 新增上游、类型没选：只填地址和令牌，保存时系统自己认类型和名字
+  const isAuto = !editing && !ownMode && !formType;
   // 自营站点：「算进利润」「渠道里用的其他地址」只对上游有用，藏起来但照旧提交原来的值（Form.Item hidden 仍收集值）；「汇率」改叫「售价」
-  const isOwnStation = formType === "newapi" && !!typedOwn;
-  const needs = needsFor(formType);
+  const isOwnStation = ownMode && formType === "newapi";
+  const needs = isAuto ? [] : needsFor(formType);
   const unchangedEdit = !!editing && formFingerprint === initialFingerprint;
   const testPassed = !!connectionTest?.ok && testedFingerprint === formFingerprint;
-  const canSave = isFixed || unchangedEdit || testPassed;
+  const canSave = isFixed || unchangedEdit || testPassed || (isAuto && !!String(typedBaseUrl || "").trim() && !!String(typedToken || "").trim());
 
   const onTestConnection = async () => {
     const values = form.getFieldsValue();
@@ -299,7 +314,7 @@ export function StationDrawer({
       if (type !== "fixed") payload.baseUrl = String(values.baseUrl || "").trim();
       for (const field of fields) payload[field] = values[field] ?? "";
       // 渠道 Key 读取服务（K2a）：自营站点顺带测一下，不影响上游本身的测试结果
-      if (type === "newapi" && values.isOwn) {
+      if (type === "newapi" && ownMode) {
         payload.isOwn = true;
         payload.keyAgentUrl = String(values.keyAgentUrl || "").trim();
         payload.keyAgentSecret = String(values.keyAgentSecret || "").trim();
@@ -317,10 +332,28 @@ export function StationDrawer({
 
   const onSave = async () => {
     const v = form.getFieldsValue();
-    const type = String(v.type || "").trim();
+    // 只填了地址和令牌：先让系统认类型和名字、顺带读一次；认不出或读不到就停在这里说原因，不保存
+    let detected: any = null;
+    if (isAuto) {
+      setSaving(true);
+      try {
+        detected = await api("/api/stations/detect", { body: { baseUrl: String(v.baseUrl || "").trim(), token: String(v.token || "").trim(), userId: String(v.userId || "").trim() } });
+      } catch (e: any) {
+        setSaving(false);
+        return message.error(failureText(COPY.saveFailed, e));
+      }
+      setSaving(false);
+      if (detected.needsUserId) {
+        setNeedUserId(true);
+        return message.info(COPY.needUserId);
+      }
+      if (!detected.ok) return message.error(failureText(COPY.saveFailed, { code: detected.code, message: detected.diagnostic }));
+      setNeedUserId(false);
+    }
+    const type = isAuto ? String(detected.type) : String(v.type || "").trim();
     const connectionFields = needsFor(type);
     const payload: any = {
-      name: String(v.name || "").trim(),
+      name: String(v.name || "").trim() || (isAuto ? String(detected.name || "") : ""),
       type,
       lowBalanceUsd: String(v.lowBalanceUsd ?? "").trim(),
       cnyPerUsd: String(v.cnyPerUsd ?? "").trim(),
@@ -328,7 +361,7 @@ export function StationDrawer({
         .split(/[\n,]/)
         .map((x) => x.trim())
         .filter(Boolean),
-      includeInProfit: !!v.includeInProfit,
+      includeInProfit: ownMode ? editing?.includeInProfit !== false : !!v.includeInProfit,
       // 金额/天数保持字符串提交，全空行剔除（同旧版）
       fixedPurchases: purchases
         .map((p) => ({
@@ -337,14 +370,15 @@ export function StationDrawer({
           startDate: p.startDate || "",
         }))
         .filter((p) => p.amount !== "" || p.days !== ""),
-      isOwn: v.type === "newapi" && !!v.isOwn,
+      isOwn: ownMode && type === "newapi",
       // 固定成本的上游一律不「不再续费」：它会关掉到期提醒，而固定成本的表单里没有这个开关（汇率等三项照原值带上）
       noRenewal: v.type !== "fixed" && !!v.noRenewal,
     };
     if (type !== "fixed") {
       payload.baseUrl = String(v.baseUrl || "").trim();
       for (const field of connectionFields) {
-        const value = field === "password" ? String(v[field] || "") : String(v[field] ?? "").trim();
+        const raw = isAuto && (field === "accessToken" || field === "apiKey") ? v.token : v[field];
+        const value = field === "password" ? String(raw || "") : String(raw ?? "").trim();
         // 编辑时敏感凭证留空表示保持已保存的值；其他当前类型字段按表单值提交
         if (UPSTREAM_SECRET_FIELDS.includes(field)) {
           if (value) payload[field] = value;
@@ -354,7 +388,7 @@ export function StationDrawer({
       }
     }
     // 渠道 Key 读取服务（K2a）：只对自营站点有意义，留空表示不装 / 保持已保存的令牌
-    if (type === "newapi" && v.isOwn) {
+    if (type === "newapi" && ownMode) {
       payload.keyAgentUrl = String(v.keyAgentUrl || "").trim();
       const keyAgentSecret = String(v.keyAgentSecret || "").trim();
       if (keyAgentSecret) payload.keyAgentSecret = keyAgentSecret;
@@ -373,7 +407,7 @@ export function StationDrawer({
     }
     // 保存时按当前表单重算指纹，不依赖可能滞后一拍的状态
     const fingerprintNow = connectionFingerprint(form.getFieldsValue(true), editing?.id, connectionFields);
-    const connectionOk = (!!editing && fingerprintNow === initialFingerprint)
+    const connectionOk = isAuto || (!!editing && fingerprintNow === initialFingerprint)
       || (!!connectionTest?.ok && testedFingerprint === fingerprintNow);
     if (payload.type !== "fixed" && !connectionOk) {
       return message.warning(COPY.testFirstToSave);
@@ -397,7 +431,7 @@ export function StationDrawer({
     }
   };
 
-  const saveLabel = editing ? COPY.save : UPSTREAM_FORM_TEXT.create;
+  const saveLabel = editing || ownMode ? COPY.save : UPSTREAM_FORM_TEXT.create;
 
   // 测试读取那一行的状态：形状 + 文字，不只靠颜色
   const testState: { level: Level; label: string } = testing
@@ -490,130 +524,7 @@ export function StationDrawer({
   const updatePurchase = (i: number, patch: Record<string, unknown>) =>
     setPurchases((l) => l.map((x, j) => (j === i ? { ...x, ...patch } : x)));
 
-  if (!mounted) return null;
-  return (
-    <Drawer
-      className="jy-drawer"
-      placement="right"
-      size={screens.md === false ? "100%" : 520}
-      open={open}
-      onClose={requestClose}
-      keyboard={false}
-      forceRender
-      focusable={{ focusTriggerAfterClose: false }}
-      afterOpenChange={(o) => {
-        if (o) return;
-        const t = triggerRef.current;
-        if (t && t.isConnected) t.focus();
-      }}
-      title={editing ? UPSTREAM_FORM_TEXT.editTitle(stationDisplayName(editing)) : UPSTREAM_FORM_TEXT.create}
-      footer={
-        <div className="jy-drawer-foot">
-          <Dirty show={dirty} />
-          <span className="spacer" />
-          <Button onClick={requestClose} disabled={saving}>{COPY.cancel}</Button>
-          <Button
-            type="primary"
-            loading={saving}
-            disabled={!canSave || (!!editing && !dirty)}
-            title={!canSave ? COPY.testFirst : editing && !dirty ? COPY.noChange : undefined}
-            onClick={onSave}
-          >
-            {saveLabel}
-          </Button>
-        </div>
-      }
-    >
-      {/* 抽屉常驻挂载：表单要有 name，字段 id 才不会和页面上其他表单（账号授权、渠道接入）撞车，标签才能指到自己的输入框 */}
-      <Form name="station" form={form} layout="vertical" requiredMark={false} onValuesChange={onValuesChange}>
-        <fieldset className="jy-fs">
-          <legend>{COPY.basics}</legend>
-          <Form.Item label={CREDENTIAL_FIELDS.name.label} name="name">
-            <Input placeholder={COPY.namePlaceholder} autoComplete="off" />
-          </Form.Item>
-          <Form.Item label={CREDENTIAL_FIELDS.type.label} name="type" extra={typeHint}>
-            <Select options={types.map((t) => ({ value: t.value, label: t.label }))} />
-          </Form.Item>
-          {!isFixed && (
-            <Form.Item label={CREDENTIAL_FIELDS.baseUrl.label} name="baseUrl" extra={CREDENTIAL_FIELDS.baseUrl.hint}>
-              <Input placeholder="https://api.example.com" autoComplete="off" inputMode="url" />
-            </Form.Item>
-          )}
-          {formType === "newapi" && (
-            <Form.Item name="isOwn" valuePropName="checked" extra={COPY.isOwnDesc}>
-              <SwitchRow label={COPY.isOwn} />
-            </Form.Item>
-          )}
-          <Form.Item name="includeInProfit" valuePropName="checked" hidden={isOwnStation} extra={isFixed ? COPY.inProfitFixed : COPY.inProfitDesc}>
-            <SwitchRow label={COPY.inProfit} />
-          </Form.Item>
-        </fieldset>
-
-        <fieldset className="jy-fs">
-          <legend>{COPY.login}</legend>
-          {!isFixed ? <p className="fs-desc">{COPY.loginDesc}</p> : null}
-          {credentialItems.length > 1 ? <div className="jy-two">{credentialItems}</div> : credentialItems}
-          {isOwnStation && (
-            <>
-              <Form.Item label={COPY.keyAgentUrl} name="keyAgentUrl" extra={COPY.keyAgentUrlHint}>
-                <Input placeholder={COPY.keyAgentUrlPlaceholder} autoComplete="off" inputMode="url" />
-              </Form.Item>
-              <Form.Item
-                label={COPY.keyAgentSecret}
-                name="keyAgentSecret"
-                extra={
-                  editing?.hasKeyAgentSecret && !String(typedKeyAgentSecret || "")
-                    ? SECRET_FIELD_TEXT.keep(COPY.keyAgentSecret)
-                    : editing?.hasKeyAgentSecret
-                      ? SECRET_FIELD_TEXT.replace(COPY.keyAgentSecret)
-                      : COPY.keyAgentSecretHint
-                }
-              >
-                <Input.Password autoComplete="new-password" placeholder={editing?.hasKeyAgentSecret ? SECRET_FIELD_TEXT.saved : undefined} />
-              </Form.Item>
-              <Collapse
-                className="jy-stations-howto"
-                ghost
-                items={[{
-                  key: "how",
-                  label: COPY.howToInstall,
-                  children: (
-                    <ol>
-                      {COPY.howToInstallSteps.map((step, i) => <li key={i}>{step}</li>)}
-                    </ol>
-                  ),
-                }]}
-              />
-            </>
-          )}
-          {isFixed ? (
-            <div className="jy-banner jy-banner--info">
-              <Sym kind="info" />
-              <div className="jy-banner__body">
-                <b>{COPY.fixedTitle}</b>
-                <p className="jy-caption">{COPY.fixedDesc}</p>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="jy-test-row">
-                <Button icon={<Icon name="test" />} loading={testing} onClick={onTestConnection}>
-                  {TEST_READ}
-                </Button>
-                <StatusText level={testState.level}>{testState.label}</StatusText>
-              </div>
-              <div aria-live="polite">{testResult}</div>
-              {testHint ? <p className="jy-caption jy-stations-hint">{testHint}</p> : null}
-              {isOwnStation && keyAgentResult && (
-                <div className={keyAgentResult.ok ? "jy-test-result" : "jy-test-result jy-test-result--bad"}>
-                  <Sym kind={keyAgentResult.ok ? "good" : keyAgentResult.code === "KEY_AGENT_NOT_CONFIGURED" ? "info" : "crit"} />
-                  <b>{keyAgentResult.ok ? COPY.keyAgentOk(keyAgentResult.channelCount) : keyAgentResult.code === "KEY_AGENT_NOT_CONFIGURED" ? COPY.keyAgentNotConfigured : keyAgentIssueText(keyAgentResult.code)}</b>
-                </div>
-              )}
-            </>
-          )}
-        </fieldset>
-
+  const costFields = (
         <fieldset className="jy-fs">
           <legend>{COPY.cost}</legend>
           {!isFixed && <p className="fs-desc">{COPY.costDesc}</p>}
@@ -680,6 +591,165 @@ export function StationDrawer({
             </Form.Item>
           )}
         </fieldset>
+  );
+
+  if (!mounted) return null;
+  return (
+    <Drawer
+      className="jy-drawer"
+      placement="right"
+      size={screens.md === false ? "100%" : 520}
+      open={open}
+      onClose={requestClose}
+      keyboard={false}
+      forceRender
+      focusable={{ focusTriggerAfterClose: false }}
+      afterOpenChange={(o) => {
+        if (o) return;
+        const t = triggerRef.current;
+        if (t && t.isConnected) t.focus();
+      }}
+      title={editing ? UPSTREAM_FORM_TEXT.editTitle(stationDisplayName(editing)) : ownMode ? COPY.ownTitle : UPSTREAM_FORM_TEXT.create}
+      footer={
+        <div className="jy-drawer-foot">
+          <Dirty show={dirty} />
+          <span className="spacer" />
+          <Button onClick={requestClose} disabled={saving}>{COPY.cancel}</Button>
+          <Button
+            type="primary"
+            loading={saving}
+            disabled={!canSave || (!!editing && !dirty)}
+            title={!canSave ? COPY.testFirst : editing && !dirty ? COPY.noChange : undefined}
+            onClick={onSave}
+          >
+            {saveLabel}
+          </Button>
+        </div>
+      }
+    >
+      {/* 抽屉常驻挂载：表单要有 name，字段 id 才不会和页面上其他表单（账号授权、渠道接入）撞车，标签才能指到自己的输入框 */}
+      <Form name="station" form={form} layout="vertical" requiredMark={false} onValuesChange={onValuesChange}>
+        <fieldset className="jy-fs">
+          <legend>{COPY.basics}</legend>
+          {ownMode && (
+            <Form.Item label={CREDENTIAL_FIELDS.name.label} name="name">
+              <Input placeholder={COPY.namePlaceholder} autoComplete="off" />
+            </Form.Item>
+          )}
+          {!isFixed && (
+            <Form.Item label={CREDENTIAL_FIELDS.baseUrl.label} name="baseUrl" extra={CREDENTIAL_FIELDS.baseUrl.hint}>
+              <Input placeholder="https://api.example.com" autoComplete="off" inputMode="url" />
+            </Form.Item>
+          )}
+          {isAuto && (
+            <>
+              <Form.Item label={COPY.token} name="token" extra={COPY.tokenHint}>
+                <Input.Password autoComplete="new-password" />
+              </Form.Item>
+              {needUserId && (
+                <Form.Item label={CREDENTIAL_FIELDS.userId.label} name="userId" extra={COPY.needUserId}>
+                  <Input placeholder="例如 1" autoComplete="off" />
+                </Form.Item>
+              )}
+            </>
+          )}
+        </fieldset>
+
+        {!isAuto && <fieldset className="jy-fs">
+          <legend>{COPY.login}</legend>
+          {!isFixed ? <p className="fs-desc">{COPY.loginDesc}</p> : null}
+          {credentialItems.length > 1 ? <div className="jy-two">{credentialItems}</div> : credentialItems}
+          {isOwnStation && (
+            <>
+              <Form.Item label={COPY.keyAgentUrl} name="keyAgentUrl" extra={COPY.keyAgentUrlHint}>
+                <Input placeholder={COPY.keyAgentUrlPlaceholder} autoComplete="off" inputMode="url" />
+              </Form.Item>
+              <Form.Item
+                label={COPY.keyAgentSecret}
+                name="keyAgentSecret"
+                extra={
+                  editing?.hasKeyAgentSecret && !String(typedKeyAgentSecret || "")
+                    ? SECRET_FIELD_TEXT.keep(COPY.keyAgentSecret)
+                    : editing?.hasKeyAgentSecret
+                      ? SECRET_FIELD_TEXT.replace(COPY.keyAgentSecret)
+                      : COPY.keyAgentSecretHint
+                }
+              >
+                <Input.Password autoComplete="new-password" placeholder={editing?.hasKeyAgentSecret ? SECRET_FIELD_TEXT.saved : undefined} />
+              </Form.Item>
+              <Collapse
+                className="jy-stations-howto"
+                ghost
+                items={[{
+                  key: "how",
+                  label: COPY.howToInstall,
+                  children: (
+                    <ol>
+                      {COPY.howToInstallSteps.map((step, i) => <li key={i}>{step}</li>)}
+                    </ol>
+                  ),
+                }]}
+              />
+            </>
+          )}
+          {isFixed ? (
+            <div className="jy-banner jy-banner--info">
+              <Sym kind="info" />
+              <div className="jy-banner__body">
+                <b>{COPY.fixedTitle}</b>
+                <p className="jy-caption">{COPY.fixedDesc}</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="jy-test-row">
+                <Button icon={<Icon name="test" />} loading={testing} onClick={onTestConnection}>
+                  {TEST_READ}
+                </Button>
+                <StatusText level={testState.level}>{testState.label}</StatusText>
+              </div>
+              <div aria-live="polite">{testResult}</div>
+              {testHint ? <p className="jy-caption jy-stations-hint">{testHint}</p> : null}
+              {isOwnStation && keyAgentResult && (
+                <div className={keyAgentResult.ok ? "jy-test-result" : "jy-test-result jy-test-result--bad"}>
+                  <Sym kind={keyAgentResult.ok ? "good" : keyAgentResult.code === "KEY_AGENT_NOT_CONFIGURED" ? "info" : "crit"} />
+                  <b>{keyAgentResult.ok ? COPY.keyAgentOk(keyAgentResult.channelCount) : keyAgentResult.code === "KEY_AGENT_NOT_CONFIGURED" ? COPY.keyAgentNotConfigured : keyAgentIssueText(keyAgentResult.code)}</b>
+                </div>
+              )}
+            </>
+          )}
+        </fieldset>}
+
+        {ownMode && (
+          <Form.Item name="type" hidden>
+            <Input />
+          </Form.Item>
+        )}
+        {ownMode ? costFields : (
+          <Collapse
+            className="jy-stations-more"
+            ghost
+            items={[{
+              key: "more",
+              forceRender: true,
+              label: COPY.more,
+              children: (
+                <>
+                  <Form.Item label={CREDENTIAL_FIELDS.name.label} name="name">
+                    <Input placeholder={COPY.namePlaceholder} autoComplete="off" />
+                  </Form.Item>
+                  <Form.Item label={CREDENTIAL_FIELDS.type.label} name="type" extra={typeHint}>
+                    <Select options={[...(editing ? [] : [{ value: "", label: COPY.typeAuto }]), ...types.map((t) => ({ value: t.value, label: t.label }))]} />
+                  </Form.Item>
+                  <Form.Item name="includeInProfit" valuePropName="checked" extra={isFixed ? COPY.inProfitFixed : COPY.inProfitDesc}>
+                    <SwitchRow label={COPY.inProfit} />
+                  </Form.Item>
+                  {costFields}
+                </>
+              ),
+            }]}
+          />
+        )}
       </Form>
     </Drawer>
   );

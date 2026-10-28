@@ -19,6 +19,8 @@ import { EQ_TEXT, ProfitEquation } from "../../components/profit-equation";
 import { RangePicker } from "../../components/range-picker";
 import { TabPanel, Tabs } from "../../components/seg";
 import { useShellPage } from "../../components/shell-context";
+import { StationDrawer } from "../stations/station-drawer";
+import type { StationDrawerHandle } from "../stations/station-drawer";
 import { useUrlState } from "../../components/use-url-state";
 import { ModelsTab } from "./models-tab";
 import { FC_TITLE, OVERVIEW_TITLES, OverviewTab } from "./overview-tab";
@@ -43,6 +45,7 @@ const COPY = {
   setupFigure: "设置完成后，这里会算出毛利和净利，并列出消费最多的用户和模型。",
   unreadable: "读不到自营站点的数据",
   tabsLabel: "自营业务视图",
+  ownSettings: "自营站点设置",
 };
 
 export default function MyStationPage() {
@@ -57,6 +60,15 @@ export default function MyStationPage() {
   const [err, setErr] = useState<{ range: string; error: Error } | null>(null);
   const [unconfigured, setUnconfigured] = useState(false);
   const [asOf, setAsOf] = useState<number | null>(null);
+  // 自营站点只在这一页设置：同一个抽屉，own 模式（名字、地址、令牌、用户 ID、售价、读取服务）
+  const drawerRef = useRef<StationDrawerHandle>(null);
+  const [stationTypes, setStationTypes] = useState<any[]>([]);
+  useEffect(() => { api("/api/meta").then((m) => setStationTypes(m?.types || [])).catch(() => {}); }, []);
+  const openOwnStation = async (trigger?: HTMLElement | null) => {
+    let own: any = null;
+    try { own = ((await api("/api/stations"))?.stations || []).find((station: any) => station.isOwn) || null; } catch { /* 读不到就当新设置 */ }
+    drawerRef.current?.open(own, trigger, { own: true });
+  };
 
   // 按明细细算（开销大，只在点按钮时才逐条看用量记录）
   const [audit, setAudit] = useState<any>(null);
@@ -159,12 +171,13 @@ export default function MyStationPage() {
           desc={COPY.setupDesc}
           steps={COPY.setupSteps}
           action={
-            <Button type="primary" size="large" onClick={() => router.push(SETUP.href!)}>
+            <Button type="primary" size="large" onClick={(event) => void openOwnStation(event.currentTarget)}>
               {SETUP.label}
             </Button>
           }
           figureNote={COPY.setupFigure}
         />
+        <StationDrawer ref={drawerRef} types={stationTypes} onSaved={reload} />
       </div>
     );
   }
@@ -228,8 +241,8 @@ export default function MyStationPage() {
         label={COPY.tabsLabel}
         extra={
           // 已经设置好：按钮写它去的那一页的名字，不写「去设置」（规范 §3.5 只用于还没设置）
-          <Button icon={<Icon name="gear" />} onClick={() => router.push("/stations")}>
-            {NAV_LABELS.stations}
+          <Button icon={<Icon name="gear" />} onClick={(event) => void openOwnStation(event.currentTarget)}>
+            {COPY.ownSettings}
           </Button>
         }
       />
@@ -245,6 +258,7 @@ export default function MyStationPage() {
           <ModelsTab v={view} range={shown} reload={reload} audit={audits} />
         </TabPanel>
       </div>
+      <StationDrawer ref={drawerRef} types={stationTypes} onSaved={reload} />
     </div>
   );
 }
