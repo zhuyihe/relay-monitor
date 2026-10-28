@@ -92,7 +92,7 @@ const COPY = Object.freeze({
   // 开关和填写项
   inProfit: "算进利润",
   inProfitFixed: "固定成本按天平摊，从净利里扣。只是看看、不属于这门生意的就关掉。",
-  inProfitDesc: "默认算进：就算自营站点的渠道里找不到这个上游，也按用量或余额变化算进上游成本。只是看看，或者会和别的上游重复算时才关掉。",
+  inProfitDesc: "关了就只看余额，不算进上游成本",
   fixedTitle: `固定成本不用${TEST_READ}`,
   fixedDesc: "只按固定成本记录按天平摊，不读取上游，也没有余额提醒。",
   rate: "汇率",
@@ -536,10 +536,8 @@ export function StationDrawer({
   const updatePurchase = (i: number, patch: Record<string, unknown>) =>
     setPurchases((l) => l.map((x, j) => (j === i ? { ...x, ...patch } : x)));
 
-  const costFields = (
-        <fieldset className="jy-fs">
-          <legend>{COPY.cost}</legend>
-          {!isFixed && <p className="fs-desc">{COPY.costDesc}</p>}
+  const costBody = (
+        <>
           {/* 固定成本的上游用不到下面几项，只藏起来不拿掉：汇率、余额提醒线、其他地址保存时照原值带上，改回按用量算时还在；不再续费保存时写 false（见 onSave） */}
           <Form.Item
             label={isOwnStation ? COPY.sellPrice : COPY.rate}
@@ -599,8 +597,16 @@ export function StationDrawer({
               <p className="jy-caption jy-stations-hint">{COPY.purchasesDesc}</p>
             </Form.Item>
           )}
-        </fieldset>
+        </>
   );
+
+  // 自营站点：售价、余额提醒线单独一组；上游：都收在「更多设置」里，不分小标题
+  const costFields = ownMode ? (
+    <fieldset className="jy-fs">
+      <legend>{COPY.cost}</legend>
+      {costBody}
+    </fieldset>
+  ) : costBody;
 
   if (!mounted) return null;
   return (

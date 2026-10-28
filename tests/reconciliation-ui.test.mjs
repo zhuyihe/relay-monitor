@@ -3750,18 +3750,17 @@ test("编辑固定成本的上游：用不到的汇率、余额提醒线、其�
   }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations?edit=box");
   const drawer = page.getByRole("dialog", { name: UPSTREAM_FORM_TEXT.editTitle("服务器"), exact: true }); await drawer.waitFor();
   assert.equal(await drawer.getByLabel("汇率", { exact: true }).isVisible(), false); assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).isVisible(), false);
-  assert.equal(await drawer.getByLabel("渠道里用的其他地址", { exact: true }).isVisible(), false); assert.equal(await drawer.getByText("不再续费", { exact: true }).isVisible(), false);
+  assert.equal(await drawer.getByLabel("渠道里用的其他地址", { exact: true }).count(), 0); assert.equal(await drawer.getByText("不再续费", { exact: true }).isVisible(), false);
   // 改成按用量算：原来的值照旧填着（藏起来时没丢）
   const pickType = async (label) => { await drawer.getByRole("combobox", { name: "类型", exact: true }).click(); await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: label }).first().click(); };
   await pickType("New API"); await drawer.getByLabel("汇率", { exact: true }).waitFor();
   assert.equal(await drawer.getByLabel("汇率", { exact: true }).inputValue(), "7.2"); assert.equal(await drawer.getByLabel("余额提醒线", { exact: true }).inputValue(), "3");
-  assert.equal(await drawer.getByLabel("渠道里用的其他地址", { exact: true }).inputValue(), "10.0.0.9:8080");
   // 改回固定成本、改一笔金额后保存：汇率、余额提醒线、其他地址照原值带上；不再续费一律 false（会关掉到期提醒，固定成本的表单里没有这个开关）
   await pickType("固定成本"); await drawer.getByLabel("第 1 笔金额（¥）", { exact: true }).fill("320");
   await drawer.getByRole("button", { name: "保存", exact: true }).click();
   for (let wait = 0; !saves.length && wait < 50; wait++) await page.waitForTimeout(100);
   assert.equal(saves.length, 1); assert.equal(saves[0].type, "fixed"); assert.equal(saves[0].fixedPurchases[0].amount, "320");
-  assert.equal(saves[0].cnyPerUsd, "7.2"); assert.equal(saves[0].lowBalanceUsd, "3"); assert.deepEqual(saves[0].costAliases, ["10.0.0.9:8080"]); assert.equal(saves[0].noRenewal, false);
+  assert.equal(saves[0].cnyPerUsd, "7.2"); assert.equal(saves[0].lowBalanceUsd, "3"); assert.equal("costAliases" in saves[0], false, "其他地址不在表单里，不带过去（已存的照旧）"); assert.equal(saves[0].noRenewal, false);
 });
 
 test("编辑自营站点：「汇率」那一格叫「售价」，只对上游有用的设置藏起来，保存时照旧带上原来的值", async (t) => {
@@ -3787,7 +3786,37 @@ test("编辑自营站点：「汇率」那一格叫「售价」，只对上游�
   await drawer.getByLabel("售价", { exact: true }).fill("8"); await drawer.getByRole("button", { name: "保存", exact: true }).click();
   for (let wait = 0; !saves.length && wait < 50; wait++) await page.waitForTimeout(100);
   assert.equal(saves.length, 1); assert.equal(saves[0].cnyPerUsd, "8"); assert.equal(saves[0].isOwn, true); assert.equal(saves[0].includeInProfit, true);
-  assert.deepEqual(saves[0].costAliases, ["10.0.0.8:8080"]); assert.equal(saves[0].lowBalanceUsd, "3"); assert.equal(saves[0].noRenewal, true);
+  assert.equal("costAliases" in saves[0], false); assert.equal(saves[0].lowBalanceUsd, "3"); assert.equal(saves[0].noRenewal, true);
+});
+
+test("加上游只填地址和访问令牌：离开令牌栏就试读，下面写「类型 · 名字 · 余额」，读到了才能新增；要用户 ID 的才露出那一栏", async (t) => {
+  const detects = [], creates = [];
+  const page = await openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url()), path = url.pathname, method = route.request().method();
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/stations" && method === "GET") return fulfill(route, { stations: [], settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
+    if (path === "/api/stations" && method === "POST") { creates.push(route.request().postDataJSON()); return fulfill(route, { station: { id: "n1" } }); }
+    if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API 账号", needs: ["accessToken", "userId"] }, { value: "fixed", label: "固定成本", needs: [] }], rules: {} });
+    if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
+    if (path === "/api/stations/detect") {
+      const body = route.request().postDataJSON(); detects.push(body);
+      return fulfill(route, body.userId ? { ok: true, type: "newapi", name: "演示·主力账号", account: "演示·主力账号", remaining: 158.72, currency: "USD" } : { ok: false, needsUserId: true, type: "newapi" });
+    }
+    throw new Error("unexpected API: " + method + " " + path);
+  }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations?edit=new");
+  const drawer = page.getByRole("dialog", { name: UPSTREAM_FORM_TEXT.create, exact: true }); await drawer.waitFor();
+  const save = drawer.getByRole("button", { name: UPSTREAM_FORM_TEXT.create, exact: true });
+  assert.equal(await save.isDisabled(), true, "还没读到：不能新增");
+  await drawer.getByLabel("站点地址", { exact: true }).fill("https://api.example.com");
+  await drawer.getByLabel("访问令牌", { exact: true }).fill("pat-123"); await drawer.getByLabel("站点地址", { exact: true }).click();
+  const userId = drawer.getByLabel("用户 ID", { exact: false }); await userId.waitFor();
+  assert.deepEqual(detects.map((d) => [d.baseUrl, d.token, d.userId]), [["https://api.example.com", "pat-123", ""]]);
+  await userId.fill("7"); await drawer.getByLabel("站点地址", { exact: true }).click();
+  await drawer.getByText("New API 账号 · 演示·主力账号 · 余额", { exact: false }).waitFor();
+  await page.waitForFunction(() => !document.querySelector(".ant-drawer .ant-btn-primary[disabled]"));
+  await save.click();
+  for (let wait = 0; !creates.length && wait < 50; wait++) await page.waitForTimeout(100);
+  assert.deepEqual([creates[0].type, creates[0].name, creates[0].accessToken, creates[0].userId, creates[0].baseUrl], ["newapi", "演示·主力账号", "pat-123", "7", "https://api.example.com"]);
 });
 
 // ---- 合并重复的上游（K1a，design/ux/k1a-merge.md 第 9 节验收清单）-------------------------------------
