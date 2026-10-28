@@ -181,7 +181,7 @@ export function createChannelProfitModule(rt, { identify = identifyChannelsCache
     const channels = catalogue.channels.filter((channel) => !channel.missing).map((channel) => {
       const rule = ruleOf.get(Number(channel.id)) || null;
       const start = rule ? reconciliationAccountingStart(rule) : null;
-      return { channelId: Number(channel.id), name: channel.name, address: hostOf(channel.baseUrl), ruleId: rule?.id ?? null, upstreamStationId: rule?.upstreamStationId ?? null,
+      return { channelId: Number(channel.id), name: channel.name, address: hostOf(channel.baseUrl), enabled: Number(channel.status) === 1, ruleId: rule?.id ?? null, upstreamStationId: rule?.upstreamStationId ?? null,
         tokenId: rule?.tokenId ?? null, tokenName: rule?.tokenName ?? null,
         tokenGroup: tokensOf.get(rule?.upstreamStationId)?.find((token) => Number(token.id) === Number(rule?.tokenId))?.group || null,
         sinceDay: start != null ? dayKeyInTz(start, rule.timezone) : null,

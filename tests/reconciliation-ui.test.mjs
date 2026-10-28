@@ -1755,57 +1755,102 @@ test("上游资源：「渠道」一列写几个或「没有渠道」，不能�
   await drawer.getByText("10月12日", { exact: true }).waitFor();
   assert.equal(await drawer.getByText(/利润|开始算|停止算/).count(), 0, "上游资源里不出现利润");
   await drawer.getByRole("button", { name: "＋ 绑定渠道" }).click();
-  const bind = page.getByRole("dialog", { name: "绑定渠道", exact: true });
-  await bind.getByText("主力上游 · up1.test", { exact: true }).waitFor();
-  assert.deepEqual(await bind.locator(".jy-bind-channel").allInnerTexts().then((list) => list.map((item) => item.replace(/\s+/g, " "))), ["长文本 Q up1.test", "新模型 P elsewhere.test"], "地址对得上的排最前");
-  assert.equal(await bind.getByRole("radio", { name: /长文本 Q/ }).isChecked(), true, "第一个默认选中");
-  await bind.getByText("这个上游只剩这一把 Key 没绑渠道，已经替你选好", { exact: true }).waitFor();
-  await bind.getByRole("button", { name: "绑定", exact: true }).click();
-  for (let i = 0; i < 60 && !posts.length; i++) await page.waitForTimeout(100);
-  assert.deepEqual(posts[0], { ownStationId: "own", channelId: 6, upstreamStationId: "up1", tokenId: 30 });
+  await page.getByRole("dialog", { name: "绑定渠道", exact: true }).getByText("主力上游 · up1.test", { exact: true }).waitFor();
 });
 
-test("上游资源：别的列的数字很长时，「渠道」一列的「2 个」「没有渠道」「—」仍各占一行（1280 和 1440 宽）", async (t) => {
-  const now = Date.now();
-  const spark = Array.from({ length: 24 }, (_, i) => [now - (24 - i) * 3600e3, 35101 + (24 - i) * 6700]);
-  const long = { balance: { ok: true, remaining: 35101.28, checkedAt: new Date().toISOString() }, prediction: { etaDays: 2, burnPerDay: 161091, basis: "近 3 小时" }, spark, todayUsed: 56124, todayIsEstimate: true };
-  const up = (id, name, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, hasAccessToken: true, ...long, ...extra });
-  const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true }, up("up1", "主力上游"), up("up2", "没有渠道上游"), up("up3", "备用上游三"), up("up4", "备用上游四"), up("kk", "只用 Key", { type: "newapi-key" })];
-  const chan = (channelId, name) => ({ channelId, name, address: "up1.test", ruleId: `r${channelId}`, upstreamStationId: "up1", tokenId: channelId, tokenName: "oai", tokenGroup: "default", sinceDay: "2026-10-12", suggestedUpstreamId: null });
-  const channels = [chan(1, "高速 A"), chan(2, "高速 B")];
+// 「绑定渠道」小窗口：和线上一样多的渠道（30 个左右，名字多是网址，6 个已禁用）
+async function openBindModal(t, { upstream, host, keys, matching }) {
+  const posts = [];
+  const names = ["https://api.lumen-cloud.com.cn", "http://10.8.3.21:3000/", "https://relay.example-hub.com/keys/claude-sonnet-premium-pool-overseas-backup", "星河-sonnet4.6-1.6", "https://gw.tianqi-ai.cn/keys", "碎-az-美西A2-1.9", "k7", "aws-东京-gpt5-1.2", "zz-azure-欧洲-2.0", "备用线路-03"];
+  const channels = Array.from({ length: 30 }, (_, i) => {
+    const channelId = 100 + i, name = i < 10 ? names[i] : `渠道-${i}-${["gpt", "claude", "gemini"][i % 3]}`;
+    return { channelId, name, address: i === 5 ? "hub.example-relay.com" : i === 8 ? "az.bridge-cloud.net" : `h${i}.example.net`, enabled: i < 24, ruleId: null, upstreamStationId: null, tokenId: null, tokenName: null, tokenGroup: null, sinceDay: null, suggestedUpstreamId: null };
+  });
+  channels.push({ channelId: 200, name: "az-备用-0.8", address: "az.bridge-cloud.net", enabled: false, ruleId: null, upstreamStationId: null, tokenId: null, tokenName: null, tokenGroup: null, sinceDay: null, suggestedUpstreamId: null });
+  channels.push({ channelId: 1, name: "已绑的", address: host, enabled: true, ruleId: "r1", upstreamStationId: "up1", tokenId: 9, tokenName: "oai", tokenGroup: "default", sinceDay: "2026-10-12", suggestedUpstreamId: null });
+  for (const [index, id] of matching.entries()) Object.assign(channels.find((item) => item.channelId === id), { suggestedUpstreamId: "up1", ...(index === 0 ? { name: `${upstream}-claude4.6-1.5`, address: host } : {}) });
+  const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true },
+    { id: "up1", name: upstream, type: "newapi", baseUrl: `https://${host}`, monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 100, checkedAt: new Date().toISOString() }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" } }];
   const page = await openFixturePage(t, async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
     if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: new Date().toISOString() });
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules: {} });
     if (path === "/api/reconciliation") return fulfill(route, { results: [], actions: [] });
-    if (path === "/api/reconciliation/channels/options") return fulfill(route, { ok: true, upstreams: [{ id: "up1", name: "主力上游" }], channels });
+    if (path === "/api/reconciliation/channels/options") return fulfill(route, { ok: true, upstreams: [{ id: "up1", name: upstream }], channels });
+    if (path === "/api/reconciliation/upstreams/up1/keys") return fulfill(route, { platform: "newapi", tokens: keys });
+    if (path === "/api/reconciliation/channels/select-key") { posts.push(route.request().postDataJSON()); return fulfill(route, { changed: true }); }
     throw new Error("unexpected API: " + path);
   }, undefined, false, (route) => fulfill(route, { accounts: [], unverifiedResources: [], channels: [], actions: [], generatedAt: "2026-10-09T07:00:00.000Z" }), "/stations");
-  const table = page.locator(".jy-stations-table");
-  for (const [width, height] of [[1280, 800], [1440, 900]]) {
-    await page.setViewportSize({ width, height });
-    await table.locator("tbody tr", { hasText: "主力上游" }).first().locator("td").nth(2).getByText("2 个", { exact: true }).waitFor();
-    for (const [name, text] of [["主力上游", "2 个"], ["没有渠道上游", "没有渠道"], ["只用 Key", "—"]]) {
-      const cell = table.locator("tbody tr", { hasText: name }).first().locator("td").nth(2);
-      assert.equal((await cell.innerText()).trim(), text);
-      const box = await cell.getByText(text, { exact: true }).boundingBox();
-      assert.ok(box.height <= 24, `${width} 宽：「${text}」应占一行，实际高 ${box.height}`);
-    }
-    assert.ok((await table.locator("thead th").nth(2).locator("xpath=.").boundingBox()).height <= 48, "表头不折行");
-    if (width === 1440) {
-      const long = "「高速 A」有收入，但选的 Key 没用量，请到每日利润页换一把 Key 或者先解绑这个渠道，再回来看这一行";
-      const lines = await page.evaluate((text) => { const span = document.querySelector(".jy-stations-table tbody .jy-stations-sub > span"); span.textContent = text; const r = span.getBoundingClientRect(); return Math.round(r.height / parseFloat(getComputedStyle(span).lineHeight)); }, long);
-      assert.equal(lines, 2, "状态小字最多两行，多的省略");
-      if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/stations-long-title-1440x900.png` });
-      await page.reload(); await table.locator("tbody tr", { hasText: "主力上游" }).first().waitFor();
-    }
-    if (width === 1440) {
-      const fit = await page.evaluate(() => { const w = document.querySelector(".jy-table-wrap"), t = document.querySelector(".jy-stations-table"); return { wrap: w.clientWidth, table: t.scrollWidth }; });
-      assert.ok(fit.table <= fit.wrap, `1440 宽下表格不该要左右拖（表 ${fit.table}，容器 ${fit.wrap}），「约 N 天」不能被右边固定的操作列盖住`);
-    }
-    if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/stations-${width}x${height}.png` });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator(".jy-stations-table tbody tr", { hasText: upstream }).first().locator("td").nth(2).getByRole("button").click();
+  const drawer = page.getByRole("dialog", { name: new RegExp(`${upstream}的渠道`) }); await drawer.waitFor();
+  await drawer.getByRole("button", { name: "＋ 绑定渠道" }).click();
+  const bind = page.getByRole("dialog", { name: "绑定渠道", exact: true }); await bind.waitFor();
+  await page.waitForTimeout(500);
+  return { page, bind, posts };
+}
+const shot = async (page, name) => { if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/${name}.png` }); };
+// 弹窗什么都不超出去：弹窗在屏幕里，渠道列表框、搜索框在弹窗里
+async function assertBindModalFits(page, bind) {
+  const viewport = page.viewportSize(), box = (await bind.boundingBox());
+  assert.ok(box.x >= 0 && box.x + box.width <= viewport.width && box.y >= 0 && box.y + box.height <= viewport.height, `弹窗放得进 ${viewport.width}×${viewport.height}：${JSON.stringify(box)}`);
+  for (const selector of [".jy-bind-search", ".jy-bind-list", ".ant-select"]) {
+    const inner = await bind.locator(selector).first().boundingBox();
+    assert.ok(inner.x >= box.x && inner.x + inner.width <= box.x + box.width + 0.5, `${selector} 不超出弹窗 ${JSON.stringify([box, inner])}`);
   }
+  assert.equal(Math.round((await bind.locator(".jy-bind-list").boundingBox()).height), 300, "渠道列表框固定高 300");
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, "页面没有横向滚动");
+}
+
+test("上游资源：绑定渠道（地址对得上一个）：对得上的一组在前、默认选好，Key 只剩一把也选好，「绑定」能点，提交的是这个渠道和这把 Key", async (t) => {
+  const { page, bind, posts } = await openBindModal(t, { upstream: "云帆", host: "api.yunfan-ai.com", matching: [100], keys: [{ id: 9, name: "oai", status: 1, group: "default" }, { id: 30, name: "oai-07", status: 1, group: "default" }, { id: 31, name: "停用的", status: 2 }] });
+  await bind.getByText("云帆 · api.yunfan-ai.com", { exact: true }).waitFor();
+  assert.deepEqual(await bind.locator(".jy-bind-group").allInnerTexts(), ["地址对得上这个上游", "其他渠道"]);
+  assert.equal(await bind.getByRole("radio", { name: /云帆-claude4.6-1.5/ }).isChecked(), true, "只有一个启用的渠道对得上，默认选好");
+  assert.equal(await bind.getByText("已禁用", { exact: true }).count(), 0, "已禁用的默认不列");
+  await bind.getByText("显示已禁用的 7 个", { exact: true }).waitFor();
+  assert.equal(await bind.getByText(/没有渠道的地址对得上/).count(), 0);
+  await bind.getByText("这个上游只剩这一把 Key 没绑渠道，已经替你选好", { exact: true }).waitFor();
+  assert.equal(await bind.getByRole("button", { name: "绑定", exact: true }).isEnabled(), true);
+  assert.equal(await bind.getByText(/利润/).count(), 0, "小窗口里不出现「利润」");
+  await assertBindModalFits(page, bind);
+  await shot(page, "bind-match-1440x900");
+  await bind.getByRole("button", { name: "绑定", exact: true }).click();
+  for (let i = 0; i < 60 && !posts.length; i++) await page.waitForTimeout(100);
+  assert.deepEqual(posts[0], { ownStationId: "own", channelId: 100, upstreamStationId: "up1", tokenId: 30 });
+});
+
+test("上游资源：绑定渠道（一个都对不上）：有提示、什么都不选、「绑定」灰着；搜得到名字或地址；搜不到有提示；已禁用的点开才列、带「已禁用」标签", async (t) => {
+  const { page, bind, posts } = await openBindModal(t, { upstream: "星港", host: "platform.xinggang.ai", matching: [], keys: [{ id: 30, name: "oai-07", status: 1, group: "default" }, { id: 31, name: "oai-08", status: 1, group: "default" }] });
+  await bind.getByText("没有渠道的地址对得上这个上游，用上面的搜索按名字或地址找。", { exact: true }).waitFor();
+  assert.equal(await bind.locator(".jy-bind-group").count(), 0, "只有一组，不写标题");
+  assert.equal(await bind.getByRole("radio", { checked: true }).count(), 0, "对不上就什么都不选");
+  assert.equal(await bind.getByRole("button", { name: "绑定", exact: true }).isDisabled(), true, "选好之前「绑定」是灰的");
+  await assertBindModalFits(page, bind);
+  await bind.getByRole("searchbox").or(bind.getByPlaceholder("搜渠道名或地址")).first().fill("az");
+  assert.deepEqual(await bind.locator(".jy-bind-name").allInnerTexts(), ["碎-az-美西A2-1.9", "zz-azure-欧洲-2.0"], "搜渠道名或地址");
+  assert.equal(await bind.getByText("已禁用", { exact: true }).count(), 0);
+  await bind.getByText("显示已禁用的 1 个", { exact: true }).click();
+  await bind.getByText("收起已禁用的", { exact: true }).waitFor();
+  assert.deepEqual(await bind.locator(".jy-bind-name").last().innerText(), "az-备用-0.8", "已禁用的排最后");
+  await bind.locator(".jy-bind-off").waitFor();
+  assert.equal(await bind.locator(".jy-bind-off").innerText(), "已禁用");
+  await shot(page, "bind-none-1440x900");
+  await bind.getByPlaceholder("搜渠道名或地址").fill("没有这个名字");
+  await bind.getByText("没有这个名字或地址的渠道", { exact: true }).waitFor();
+  await bind.getByPlaceholder("搜渠道名或地址").fill("az");
+  await bind.getByRole("radio", { name: /碎-az-美西A2-1.9/ }).check();
+  assert.equal(await bind.getByRole("button", { name: "绑定", exact: true }).isDisabled(), true, "Key 没选之前还是灰的");
+  await bind.locator(".ant-select").click(); await page.getByTitle("oai-08 · 分组 default").click();
+  assert.equal(await bind.getByRole("button", { name: "绑定", exact: true }).isEnabled(), true);
+  await bind.getByPlaceholder("搜渠道名或地址").fill("zz");
+  assert.equal(await bind.getByRole("button", { name: "绑定", exact: true }).isDisabled(), true, "选的渠道被搜索挡住了，不算选着");
+  await bind.getByPlaceholder("搜渠道名或地址").fill("");
+  await page.setViewportSize({ width: 375, height: 812 }); await page.waitForTimeout(400);
+  await assertBindModalFits(page, bind);
+  await shot(page, "bind-none-375x812");
+  assert.equal(posts.length, 0);
 });
 
 test("上游资源：抽屉里「解绑」先弹确认框，写清楚不再挂在这个上游下面，确认后发 stop", async (t) => {

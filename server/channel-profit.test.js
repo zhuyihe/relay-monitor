@@ -266,7 +266,7 @@ test("options：渠道带自己的地址；绑了的带上游、Key（名、分�
   const all = [own, { ...upMine, id: "up1", type: "newapi", baseUrl: "https://a.test" }];
   f.rt.store.list = () => all; f.rt.store.get = (id) => all.find((station) => station.id === id) || null;
   const catalogue = f.rt.channelOnboarding.getSourceCatalogue;
-  f.rt.channelOnboarding.getSourceCatalogue = () => { const value = catalogue(); value.channels = value.channels.map((channel) => ({ ...channel, baseUrl: channel.id === 3 ? "https://a.test/v1" : "https://x.test/api" })); return value; };
+  f.rt.channelOnboarding.getSourceCatalogue = () => { const value = catalogue(); value.channels = value.channels.map((channel) => ({ ...channel, status: channel.id === 2 ? 2 : channel.id === 3 ? 3 : 1, baseUrl: channel.id === 3 ? "https://a.test/v1" : "https://x.test/api" })); return value; };
   const rule = (id, channelId, tokenId) => ({ id, enabled: true, archivedAt: null, ownStationId: "own", upstreamStationId: "up1", tokenId, tokenName: `k${tokenId}`, timezone: "Asia/Shanghai", billingPolicy: "immediate",
     billingEffectiveFrom: Date.parse("2026-10-20T04:00:00Z"), createdAt: "2026-10-20T04:00:00Z", channels: [{ channelId }] });
   f.state.rules = [rule("r1", 1, 11), rule("r2", 2, 12)];
@@ -276,5 +276,6 @@ test("options：渠道带自己的地址；绑了的带上游、Key（名、分�
   assert.deepEqual([by[1].address, by[1].upstreamStationId, by[1].tokenName, by[1].tokenGroup, by[1].sinceDay], ["x.test", "up1", "k11", "default", "2026-10-20"]);
   assert.deepEqual([by[2].tokenGroup], [null], "Key 不在列表里：分组空");
   assert.deepEqual([by[3].ruleId, by[3].address, by[3].suggestedUpstreamId], [null, "a.test", "up1"], "没绑的：带地址和对得上的上游");
+  assert.deepEqual([by[1].enabled, by[2].enabled, by[3].enabled], [true, false, false], "启用 / 禁用来自渠道目录的 status：1 是启用，别的算禁用");
   assert.deepEqual(out.upstreams, [{ id: "up1", name: undefined }].map((item) => ({ id: item.id, name: all[1].name })));
 });
