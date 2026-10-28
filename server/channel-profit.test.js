@@ -180,21 +180,28 @@ test("stop：一次最多 1000 个渠道；不在渠道目录也不在在算的�
 
 const mine = { ...upMine, accountUse: "only_mine" };
 
-test("autoStart：只给我的渠道用的上游，认出的新渠道自动开始（不碰「用户停的」记号）；别处也在用/没回答的上游、用户停过的渠道（整组）、认不出的不自动开始", async () => {
+test("autoStart：只给我的渠道用的上游，认出的新渠道自动开始（不碰「用户停的」记号）；别处也在用的上游、用户停过的渠道（整组）、认不出的不自动开始；没设 accountUse 的按只给我的渠道用", async () => {
   const f = fixture({ channels: [1, 2, 3, 4, 5, 6], stations: [own, mine, { ...upShared }, { id: "up3", type: "newapi" }],
     optouts: [{ ownStationId: "own", channelId: 4, atMs: 5 }], identified: [
       { channelId: 1, keyless: false, slots: [slot("up1", 11)] }, { channelId: 2, keyless: false, slots: [slot("up1", 11)] }, // 同一把 Key：一组
       { channelId: 3, keyless: false, slots: [slot("up2", 22)] }, // 别处也在用
       { channelId: 4, keyless: false, slots: [slot("up1", 44)] }, // 用户停过
-      { channelId: 5, keyless: false, slots: [slot("up3", 55)] }, // 上游没回答过
+      { channelId: 5, keyless: false, slots: [slot("up3", 55)] }, // 上游没设过 accountUse：按「只给我的渠道用」，也自动开始
       { channelId: 6, keyless: false, slots: [{ index: 0, state: "not_found" }] }, // 认不出
     ] });
   const result = await f.module.autoStart("own");
-  assert.deepEqual(result.started.map((item) => [item.groupKey, item.channelIds]), [["up1:11", [1, 2]]]);
-  assert.equal(f.calls.probe.length, 1, "只送自动开始的那一组");
+  assert.deepEqual(result.started.map((item) => [item.groupKey, item.channelIds]).sort(), [["up1:11", [1, 2]], ["up3:55", [5]]]);
+  assert.equal(f.calls.probe.length, 1, "自动开始的几组合成一次预览");
   assert.equal(f.calls.probe[0].groups[0].reconciliation.coverageDeclaration.answer, "none");
   assert.deepEqual(f.calls.optoutRemoved, [], "自动开始不删「用户停的」记号");
   assert.deepEqual((await fixture({ channels: [1], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] }).module.start({ ownStationId: "own", channelIds: [1] })).started.length, 1);
+});
+
+test("autoStart：没设 accountUse 的上游下认出新渠道就自动开始（默认每把 Key 只给用户站上的渠道用，不出「去回答」），覆盖声明记「只给这些渠道用」", async () => {
+  const f = fixture({ channels: [1], stations: [own, { id: "up1", type: "newapi" }], identified: [{ channelId: 1, keyless: false, slots: [slot("up1", 11)] }] });
+  const result = await f.module.autoStart("own");
+  assert.deepEqual(result.started.map((item) => [item.groupKey, item.channelIds]), [["up1:11", [1]]]);
+  assert.equal(f.calls.probe[0].groups[0].reconciliation.coverageDeclaration.answer, "none");
 });
 
 test("autoStart：上游从别处也在用改成只给我的渠道用，已经在等的渠道下一轮就自动开始（每轮重新判断，不用另外触发）", async () => {
