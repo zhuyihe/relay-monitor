@@ -27,6 +27,8 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-stations-spark { flex: none; width: 96px; display: flex; }
 /* 日均花费、余额下一行（固定成本的说明也在这里）不折行，放不下省略 */
 .jy-stations-table .jy-sub-money { max-width: 200px; margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 「渠道」一列：「2 个」「没有渠道」「—」都不折行，别的列再长也不挤它 */
+.jy-stations-table .jy-stations-ch { white-space: nowrap; }
 .jy-stations-table .jy-cell-runway { min-height: 20px; }
 .jy-stations-table .jy-cell-runway .v { line-height: 20px; }
 
