@@ -2340,14 +2340,14 @@ test("手动选 Key：每个渠道一行有「选 Key」下拉框，绑过的换
   const rowA = rowOf(page, "Rule A");
   await rowA.getByLabel("选 Key：Channel A").waitFor();
   await rowA.getByLabel("选 Key：Channel A").click();
-  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").getByTitle("Key 20").click();
+  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").getByTitle("Key 20 · Up").click();
   await within(until(() => posts.length === 1), "换 Key 请求");
   assert.deepEqual(posts[0], { ownStationId: "own-1", channelId: 1, tokenId: 20 });
   // 还没算利润的渠道：上游默认选上地址对得上的那个，选 Key 以后带上游一起发
   const unbound = page.getByRole("region", { name: "还没算利润的渠道" });
   await unbound.getByText("新渠道").waitFor();
   await unbound.getByLabel("选 Key：新渠道").click();
-  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last().getByTitle("Key 20").click();
+  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last().getByTitle("Key 20 · Up").click();
   await within(until(() => posts.length === 2), "开始算请求");
   assert.deepEqual(posts[1], { ownStationId: "own-1", channelId: 5, upstreamStationId: "upstream-1", tokenId: 20 });
 });

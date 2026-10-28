@@ -5,16 +5,22 @@ import { NAV_LABELS } from "../../../lib/brand.js";
 
 // 手动选 Key（不装读取服务时）：每日利润每个渠道一个「选 Key」下拉框；字等设计定稿（design/ui-copy-spec.md）
 export const KEY_PICKER = Object.freeze({
+  column: "Key",
   label: "选 Key",
-  placeholder: "选 Key",
-  upstreamPlaceholder: "这个渠道用的上游",
+  placeholder: "选这个渠道用的 Key",
+  upstreamPlaceholder: "先选这个渠道用的是哪个上游",
+  addressUnmatched: "这个渠道填的地址和已加的上游都对不上，先选它用的是哪个上游，再选 Key。",
+  changeUpstream: "换上游",
+  group: "分组",
   loading: "读取中…",
-  noKeys: "这个上游没有能用的 Key",
-  keysFailed: "读不到这个上游的 Key 列表",
-  saved: "已保存",
+  noMatch: "没有这个名字的 Key",
+  noKeysAtAll: "已加的上游里读不到 Key，先去",
+  noUpstream: "已加的上游里读不到 Key，先去",
+  upstreamList: "上游列表",
+  saved: (name: string) => `已选 Key「${name}」，从今天 0 点起按它算`,
+  notSelected: "还没选 Key",
   panelTitle: "还没算利润的渠道",
-  panelDesc: "选上游和 Key，从今天 0 点开始算",
-  noUpstream: "先在上游列表里加这个渠道用的上游",
+  panelDesc: "选 Key，从今天 0 点开始算",
 });
 
 export const COPY = Object.freeze({

@@ -13,7 +13,7 @@ import { EmptyState } from "../../components/data-state";
 import { ErrorDetail, noteOf } from "../../components/error-detail";
 import type { ProfitPageResponse, ProfitRow, WorkflowAction } from "../../../lib/client";
 import { EMPTY, formatDayKey } from "../../../lib/format";
-import { COPY } from "./copy";
+import { COPY, KEY_PICKER } from "./copy";
 import {
   attentionNote, dayCellView, filterCounts, filterRows, fmtMoney, gapCell, gapHeader, isSingleDay, isTodayView, rangeDays, rowMoney, rowName, rowSubtitle, rowTone, showExpectedColumn,
   marginText, totalsRow, whereGapText, yesterdayOf,
@@ -101,7 +101,7 @@ function Expanded({ row, page, ctx, onOpenDetail, compact }: { row: ProfitRow; p
 function DesktopTable(props: Props & { rows: ProfitRow[] }) {
   const { page, ctx, rows, expanded, onToggle, onOpenDetail, onRetry, onRefresh, retryingKeys, retryErrors, renderPicker } = props;
   const expectedCol = showExpectedColumn(page), header = gapHeader(page, ctx), totals = totalsRow(page, ctx);
-  const columns = 3 + (expectedCol ? 1 : 0) + 3;
+  const columns = 3 + (expectedCol ? 1 : 0) + 3 + (renderPicker ? 1 : 0);
   // 全固定时五个数一行：收入、应付、实付、差额、毛利；其余：收入、实付、毛利、差额
   const Num = ({ children, sub }: { children: ReactNode; sub?: string }) => <td className="jy-profit-num">{children}{sub ? <small>{sub}</small> : null}</td>;
   const gapCol = (row: ProfitRow) => <td className="jy-profit-num jy-profit-num--gap"><GapText cell={gapCell(row, page, ctx)} /></td>;
@@ -109,6 +109,7 @@ function DesktopTable(props: Props & { rows: ProfitRow[] }) {
     <table className="jy-profit-table">
       <thead><tr>
         <th>{COPY.table.col.channel}</th>
+        {renderPicker ? <th>{KEY_PICKER.column}</th> : null}
         <th className="jy-profit-num">{COPY.table.col.income}</th>
         {expectedCol ? <th className="jy-profit-num">{COPY.table.col.expected}</th> : null}
         <th className="jy-profit-num">{COPY.table.col.actual}</th>
@@ -129,8 +130,8 @@ function DesktopTable(props: Props & { rows: ProfitRow[] }) {
                   <Icon name="expand" className={open ? "is-open" : undefined} /><strong>{name}</strong>
                 </button>
                 <small>{rowSubtitle(row, page, ctx)}</small>
-                {renderPicker ? <div className="jy-profit-row__picker">{renderPicker(row)}</div> : null}
               </td>
+              {renderPicker ? <td className="jy-profit-row__picker">{renderPicker(row)}</td> : null}
               <Num>{income}</Num>
               {expectedCol ? <Num>{fmtMoney(money.expected, ctx.currency)}</Num> : null}
               <Num>{actual}</Num>
@@ -148,6 +149,7 @@ function DesktopTable(props: Props & { rows: ProfitRow[] }) {
       </tbody>
       <tfoot><tr className="jy-profit-totals">
         <td>{totals.label}</td>
+        {renderPicker ? <td /> : null}
         <Num>{totals.income}</Num>
         {expectedCol ? <Num sub={totals.expectedSub}>{totals.expected}</Num> : null}
         <Num>{totals.actual}</Num>

@@ -217,7 +217,7 @@ export default function ReconciliationPage() {
     {unbound.length && ownerId ? <section className="jy-profit-unbound" aria-label={KEY_PICKER.panelTitle}>
       <h3>{KEY_PICKER.panelTitle}</h3>
       <p className="jy-caption">{KEY_PICKER.panelDesc}</p>
-      <ul>{unbound.map((channel) => <li key={channel.channelId}><span>{channel.name}</span>
+      <ul>{unbound.map((channel) => <li key={channel.channelId}><span>{channel.name} <small className="jy-caption">{KEY_PICKER.notSelected}</small></span>
         <KeyPicker key={channel.channelId} ownStationId={ownerId} channel={channel} upstreams={channelOptions.options?.ok ? channelOptions.options.upstreams : []} onChanged={onPicked} />
       </li>)}</ul>
     </section> : null}
