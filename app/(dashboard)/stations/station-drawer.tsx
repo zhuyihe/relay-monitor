@@ -116,7 +116,7 @@ const COPY = Object.freeze({
   purchasesDesc: "每笔按「金额 ÷ 天数」按天平摊，从开始日期算起，到期就不再算；几笔重叠时加在一起（在原来的套餐上加购或续费，就再记一笔）。",
   // 渠道 Key 读取服务（K2a，design/ui-copy-spec.md §3.7、附录「怎么装」收起区）
   keyAgentUrl: "读取服务地址",
-  keyAgentUrlHint: "默认是站点地址后面加固定路径，装在别处时才改。",
+  keyAgentUrlHint: "读取服务装好以后的 HTTPS 地址，必须填；不填就不读渠道 Key，换 Key 也追不到。",
   keyAgentUrlPlaceholder: "https://api.example.com/relay-monitor-agent",
   keyAgentSecret: "读取服务令牌",
   keyAgentSecretHint: "装渠道 Key 读取服务时设的那个令牌，至少 32 个字符。",
@@ -125,7 +125,7 @@ const COPY = Object.freeze({
   howToInstallSteps: [
     "生成一个令牌：在你站的服务器上运行 openssl rand -base64 32，得到的一串就是令牌，下面两处都用它。",
     "在你站的 docker compose 里加一个 relay-key-agent 服务（镜像、环境变量和示例片段见仓库 deploy/README.md「装渠道 Key 读取服务」第 3 步），令牌填进它的 RELAY_KEY_AGENT_SECRET，然后重启。",
-    "有反向代理的，把「站点地址 + 固定路径」转给它，「读取服务地址」不用改；没有反向代理、直接开端口的，在下面「读取服务地址」里填那个地址。都要走 HTTPS。",
+    "把读取服务的 HTTPS 地址填进下面「读取服务地址」。",
     "想更稳妥：按 deploy/README.md 第 2 步给数据库建一个只能查渠道表的专用账号。",
     "装好以后，把令牌填进上面「读取服务令牌」那一栏，点「测试读取」。",
   ],
