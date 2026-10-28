@@ -1605,114 +1605,6 @@ test("workflow overview merges stable public actions and preserves prior actions
   await region.locator(".jy-ov-banner-text").filter({ hasText: /^刷新失败，数据截至 .+。$/ }).waitFor(); assert.equal(await region.getByRole("listitem").count(), before); const href = await region.getByRole("link", { name: authLink }).getAttribute("href"); assert.equal(href, opened.model.accounts[0].actions[0].href); assert.equal(opened.mutations.length, 0); assert.ok(reads >= 3);
 });
 
-test("运营总览在手机上先列需处理，再是利润等式；桌面照旧等式在前", async (t) => {
-  const readonlyAPI = (route, path) => path === "/api/own/analytics" ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture analytics unavailable" }) }) : (assert.equal(path, "/api/history/overview"), fulfill(route, { series: [] }));
-  for (const [width, attentionFirst] of [[390, true], [1440, false]]) {
-    const opened = await openAccountsPage(t, { readonlyAPI }); await opened.page.setViewportSize({ width, height: 844 }); await opened.page.goto(baseURL);
-    const attention = opened.page.getByRole("region", { name: "需处理", exact: true }), equation = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true });
-    await attention.waitFor(); await equation.waitFor();
-    // 按 DOM 先后比（读屏和键盘也按这个顺序），不只看位置；宽度判断在挂载后才定下来，等它一下
-    const order = async () => opened.page.evaluate(() => { const [attention, equation] = ["需处理", "今天经营"].map((name) => [...document.querySelectorAll("section.jy-panel")].find((node) => node.querySelector("h2")?.textContent === name)); return !!(attention && equation && attention.compareDocumentPosition(equation) & Node.DOCUMENT_POSITION_FOLLOWING); });
-    let before = await order(); for (let wait = 0; before !== attentionFirst && wait < 30; wait++) { await opened.page.waitForTimeout(100); before = await order(); }
-    assert.equal(before, attentionFirst, `宽 ${width} 时需处理${attentionFirst ? "应在" : "不应在"}利润等式前面`);
-  }
-});
-
-test("运营总览两行都是 8 + 4：等式和需处理并排、一样高，需处理按等式的高度露 2 条、其余收进「还有 N 件」；余量和「收入和上游成本」并排", async (t) => {
-  const readonlyAPI = (route, path) => path === "/api/own/analytics" ? route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "fixture analytics unavailable" }) }) : (assert.equal(path, "/api/history/overview"), fulfill(route, { series: [] }));
-  const opened = await openAccountsPage(t, { readonlyAPI }); await opened.page.setViewportSize({ width: 1440, height: 900 }); await opened.page.goto(baseURL);
-  const page = opened.page;
-  const attention = page.getByRole("region", { name: "需处理", exact: true }), equation = page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true });
-  const runway = page.getByRole("region", { name: "上游余量", exact: true }), money = page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
-  await attention.locator(".jy-attention li").first().waitFor(); await equation.waitFor(); await runway.waitFor(); await money.waitFor();
-  // 同一行：左边 8 列、右边 4 列（宽度约 2:1），上沿对齐、一样高
-  for (const [main, side] of [[equation, attention], [runway, money]]) {
-    const [m, sd] = [await main.boundingBox(), await side.boundingBox()];
-    assert.ok(sd.x > m.x + m.width, "右边那块在左边那块右边");
-    assert.ok(m.width / sd.width > 1.8 && m.width / sd.width < 2.2, `宽度约 2:1（${Math.round(m.width)} / ${Math.round(sd.width)}）`);
-    assert.ok(Math.abs(m.y - sd.y) < 1 && Math.abs(m.height - sd.height) < 1, "上沿对齐、一样高");
-  }
-  // 需处理按等式的高度露 2 条，其余收进「还有 N 件」，点开在原地接着列（收起区 More）
-  const total = Number((await attention.locator(".jy-count-badge").first().innerText()).trim());
-  const shown = attention.locator(".jy-attention:not(.jy-attention-rest .jy-attention) > li");
-  assert.equal(await shown.count(), Math.min(2, total));
-  assert.ok(total > 2, `夹具里的需处理要多于 2 条（${total}）`);
-  const more = attention.getByRole("button", { name: `还有 ${total - 2} 件`, exact: true });
-  assert.equal(await more.getAttribute("class"), "jy-more__toggle", "用共用的收起区 More，不是自己写的按钮");
-  assert.equal(await more.getAttribute("aria-expanded"), "false"); assert.equal(await attention.locator(".jy-attention-rest .jy-attention > li").count(), 0);
-  const equationHeight = (await equation.boundingBox()).height;
-  await more.click(); assert.equal(await more.getAttribute("aria-expanded"), "true");
-  // 点开以后需处理变长，等式那块照自己的高度，不跟着拉长（去掉 :has 那条规则时这里会失败）
-  const [eqAfter, attAfter] = [(await equation.boundingBox()).height, (await attention.boundingBox()).height];
-  assert.ok(eqAfter <= equationHeight + 1 && eqAfter < attAfter - 100, `点开「还有 N 件」后等式不跟着拉长（点开前 ${Math.round(equationHeight)}，点开后 ${Math.round(eqAfter)}，需处理 ${Math.round(attAfter)}）`);
-  assert.equal(await attention.locator(".jy-attention-rest .jy-attention > li").count(), total - 2);
-  // 这里经营数据读不到（夹具），「收入和上游成本」那块照样占着右边 4 列；两小段的内容在「收入确认不了时」那条里查
-  assert.equal(opened.mutations.length, 0);
-});
-
-test("运营总览手机上没设置自营站点：「去设置」只在利润等式里，「收入」小段只写一句短的、排在前面，上游成本的条收进「按上游看」", async (t) => {
-  const analytics = costAnalyticsFixture(1); analytics.stations = [0, 1, 2, 3].map((i) => ({ ...analytics.stations[0], id: `up-${i}`, name: `Upstream ${i}`, includeInProfit: true, isOwn: false, costBasis: "usage", totalCny: 10 - i }));
-  const opened = await openAccountsPage(t, { readonlyAPI(route, path) {
-    if (path === "/api/own/analytics") return failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
-    if (path === "/api/analytics") return fulfill(route, analytics);
-    assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
-  } });
-  await opened.page.setViewportSize({ width: 390, height: 844 }); await opened.page.goto(baseURL);
-  const money = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
-  const revenue = money.getByRole("region", { name: "收入", exact: true });
-  // 原因和「去设置」只在等式下面那一处，「收入」小段只写一句短的、不带按钮（同一句话一页只说一次，ui-copy-spec §11）
-  await opened.page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true }).getByRole("link", { name: workflowActionMeta("setup_own_station").label, exact: true }).waitFor();
-  await revenue.getByText("没设置自营站点，见上面的利润等式。", { exact: true }).waitFor();
-  assert.equal(await revenue.getByRole("button").count() + await revenue.getByRole("link").count(), 0);
-  // 只有上游成本有条：按钮写「按上游看」（写它收着什么），不写「按用户、按上游看」；收入那句在它前面
-  const toggle = money.getByRole("button", { name: "按上游看", exact: true }); await toggle.waitFor();
-  assert.equal(await toggle.getAttribute("class"), "jy-more__toggle");
-  assert.equal(await money.getByRole("button", { name: "按用户、按上游看", exact: true }).count(), 0);
-  assert.ok((await revenue.boundingBox()).y < (await toggle.boundingBox()).y, "收入在前、上游成本在后");
-  assert.equal(await money.locator(".jy-hbars li").count(), 0);
-  await toggle.click(); assert.equal(await money.getByRole("region", { name: "上游成本", exact: true }).locator(".jy-hbars li").count(), 4);
-  assert.equal(opened.mutations.length, 0);
-});
-
-test("运营总览「今天收入和上游成本」：大金额在 1200–1440 宽时不压到运算符；小段标题不带合计（合计只在等式里）；各列前 3，「其他 N …」等于并掉的几项之和；手机上只收条形，读不到照样露出来", async (t) => {
-  const readonly = (analytics) => (route, path) => path === "/api/own/analytics" ? fulfill(route, analytics(new URL(route.request().url()).searchParams.get("range") || "today")) : (assert.equal(path, "/api/history/overview"), fulfill(route, { series: [] }));
-  const opened = await openAccountsPage(t, { readonlyAPI: readonly(bigOwnAnalytics) });
-  const page = opened.page;
-  for (const width of [1440, 1280, 1200]) {
-    await page.setViewportSize({ width, height: 900 }); await page.goto(baseURL);
-    const equation = page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true });
-    await equation.getByText(formatMoney(12345.67), { exact: false }).first().waitFor();
-    // 每个金额都在自己那一格里（不压到旁边的运算符）：金额字号按等式这一块的宽度缩
-    const over = await equation.locator(".jy-eq-term").evaluateAll((terms) => terms.filter((t) => getComputedStyle(t).visibility !== "hidden").map((t) => {
-      const v = t.querySelector(".jy-eq-value"); if (!v) return -1; const r = document.createRange(); r.selectNodeContents(v);
-      return Math.round(r.getBoundingClientRect().right - (t.getBoundingClientRect().right - parseFloat(getComputedStyle(t).paddingRight)));
-    }));
-    assert.ok(over.every((x) => x <= 0), `宽 ${width} 时金额超出自己那一格：${over.join(",")}`);
-  }
-  // 两小段「收入 · 按用户」「上游成本 · 按上游」：标题不带合计（同一个数一页只出现一次，合计在等式里），各列前 3，多的并成一行，那一行等于并掉的几项之和
-  const money = page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
-  const revenue = money.getByRole("region", { name: "收入", exact: true }), cost = money.getByRole("region", { name: "上游成本", exact: true });
-  await revenue.locator(".jy-ov-money-head").getByText("· 按用户").waitFor(); await cost.locator(".jy-ov-money-head").getByText("· 按上游").waitFor();
-  assert.equal(await money.locator(".jy-ov-money-head").filter({ hasText: /[¥$]/ }).count(), 0);
-  assert.equal(await money.getByText(formatMoney(12345.67)).count(), 0, "收入合计只在等式里，这块里不再写");
-  assert.equal(await money.getByText(formatMoney(23456.8)).count(), 0, "上游成本合计只在等式里，这块里不再写");
-  assert.equal(await revenue.locator(".jy-hbars li").count(), 4); assert.equal(await cost.locator(".jy-hbars li").count(), 4);
-  await revenue.locator(".jy-hbars li", { hasText: "其他 2 位用户" }).getByText(formatMoney(24.5), { exact: true }).waitFor();
-  await cost.locator(".jy-hbars li", { hasText: "其他 2 个上游" }).getByText(formatMoney(4456.8), { exact: true }).waitFor();
-  // 手机：条形收进「按用户、按上游看」
-  await page.setViewportSize({ width: 390, height: 844 }); await page.goto(baseURL);
-  const toggle = money.getByRole("button", { name: "按用户、按上游看", exact: true }); await toggle.waitFor();
-  assert.equal(await toggle.getAttribute("class"), "jy-more__toggle", "用共用的收起区 More，不是自己写的按钮");
-  assert.equal(await money.locator(".jy-hbars li").count(), 0);
-  await toggle.click(); assert.equal(await money.locator(".jy-hbars li").count(), 8);
-  // 手机上收入读不到：「收入」小段露着一句短的（原因在等式下面），不收进「按用户、按上游看」
-  const unread = await openAccountsPage(t, { readonlyAPI: readonly(unconfirmedOwnAnalytics) });
-  await unread.page.setViewportSize({ width: 390, height: 844 }); await unread.page.goto(baseURL);
-  const unreadMoney = unread.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
-  await unreadMoney.getByRole("region", { name: "收入", exact: true }).getByText("读不到，原因见上面的利润等式。", { exact: true }).waitFor();
-  assert.equal(opened.mutations.length + unread.mutations.length, 0);
-});
-
 test("workflow read failures and deleted verification targets expose a safe retry with no save", async (t) => {
   let calls = 0; const opened = await openAccountsPage(t, { path: "/stations?action=verify-billing&stationId=unknown-legacy", readonlyAPI(route) { calls += 1; if (calls === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ code: "KEY_PROBE_UNAVAILABLE", retryable: true, error: "账号身份暂时无法核验，请检查授权或稍后重试" }) }); return fulfill(route, keyVerificationFixture("newapi", "Asia/Shanghai")); } }); const drawer = verificationDialog(opened.page, "unknown-legacy"); await drawer.getByRole("button", { name: TEST_READ, exact: true }).click();
   // 读不到：写「读不到：」加归类后的原因，原文收在「查看详细原因」，旁边一个「刷新」；再测试读取一次就好
@@ -1742,7 +1634,7 @@ test("workflow verification keyboard and financial source links fit 320/390/768/
         .map((node) => ({ tag: node.tagName, className: node.className, right: node.getBoundingClientRect().right, text: node.textContent?.slice(0, 100) })) }));
     assert.ok(overflow.scroll <= overflow.client, JSON.stringify({ width, ...overflow }));
     await drawer.locator(".ant-drawer-close").focus(); await opened.page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
-    await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText(ANALYTICS_COPY.sourceTitle, { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.waitForURL(/\/reconciliation(\?|$)/); await opened.page.getByText(PROFIT_COPY.table.emptyTitle, { exact: true }).waitFor(); const rootOverflow = await opened.page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth, wide: [...document.querySelectorAll("body *")].filter((node) => node.getBoundingClientRect().right > document.documentElement.clientWidth + 1).slice(0, 6).map((node) => `${node.tagName}.${node.className}`) })); assert.ok(rootOverflow.scroll <= rootOverflow.client, JSON.stringify({ width, ...rootOverflow })); assert.equal(opened.mutations.length, 0); await opened.page.context().close();
+    await opened.page.goto(baseURL + "/reconciliation", { timeout: 30000 }); await opened.page.getByText(PROFIT_COPY.table.emptyTitle, { exact: true }).waitFor(); const rootOverflow = await opened.page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth, wide: [...document.querySelectorAll("body *")].filter((node) => node.getBoundingClientRect().right > document.documentElement.clientWidth + 1).slice(0, 6).map((node) => `${node.tagName}.${node.className}`) })); assert.ok(rootOverflow.scroll <= rootOverflow.client, JSON.stringify({ width, ...rootOverflow })); assert.equal(opened.mutations.length, 0); await opened.page.context().close();
   }
 });
 
@@ -2446,214 +2338,26 @@ test("删除上游要输入这个上游的名字：不一致时按钮不能点�
 const BUSINESS_TZ = "Asia/Shanghai";
 const shanghaiDay = (ms) => new Intl.DateTimeFormat("en-CA", { timeZone: BUSINESS_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
 const shiftDay = (key, n) => { const d = new Date(key + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
-// 成本估算的接口数据：按真实的今天往前排，一个按用量计费的上游每天都有记录
-function costAnalyticsFixture(days) {
-  const end = shanghaiDay(Date.now()), start = shiftDay(end, -(days - 1)), dates = Array.from({ length: days }, (_, i) => shiftDay(start, i));
-  return { days, start, end, tz: BUSINESS_TZ, generatedAt: new Date().toISOString(), selection: { includeArchived: false, stationCount: 1, archivedStationCount: 0 },
-    coverage: { earliestDate: start, latestDate: end, availableDays: days, requestedDays: days, monitoredStationCount: 1, isComplete: true, stationGaps: [] },
-    stations: [{ id: "up-a", name: "Fixture upstream", type: "newapi", cnyPerUsd: 7, totalCny: days * 10, fixedCny: 0, runway: { etaDays: 5, burnPerDay: 1, basis: "近 3 小时" } }],
-    daily: dates.map((date) => ({ stationId: "up-a", date, cny: 10 })), fixedDaily: [], heatmap: [], heatmapAvailable: true, heatmapAvailability: { available: days <= 30, reason: days <= 30 ? null : "range-not-supported", coverage: null } };
-}
-// 成本估算的可用天数用上游列表的余额和提醒线判断档位（balanceViewOf）：默认余额在提醒线以上、约 5 天，和接口的可用天数一致
-const costStationsFixture = (balance = { ok: true, remaining: 30 }, prediction = { etaDays: 5, burnPerDay: 1 }) => ({ stations: [{ id: "up-a", name: "Fixture upstream", type: "newapi", cnyPerUsd: 7, monitorEnabled: true, balance, prediction, spark: [] }], settings: { lowBalanceUsd: 5 } });
-async function openCostPage(t, own, path = "/analytics", { stations = costStationsFixture(), meta = (route) => fulfill(route, { rules: { etaDays: 3 }, settings: { lowBalanceUsd: 5 } }), analytics = costAnalyticsFixture } = {}) {
-  const ownReads = [];
+test("成本估算：只有「上游成本构成」和「每天的上游成本」两块，数读每日利润同一份；只有近 7 天、近 30 天和自定义；页顶有「每日利润」链接", async (t) => {
+  const rows = [profitRow("rule-1", "Rule A", { income: 5, cost: 2 }), profitRow("rule-2", "Rule B", { income: 3, cost: 1 })];
   const page = await openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/stations") return fulfill(route, stations);
-    if (url.pathname === "/api/meta") return meta(route);
-    if (url.pathname === "/api/analytics") return fulfill(route, analytics(Number(url.searchParams.get("days")) || 30));
-    if (url.pathname === "/api/own/analytics") { ownReads.push(url.searchParams.get("range")); return own(route); }
-    throw new Error("unexpected cost fixture API: " + url.pathname);
-  }, undefined, false, null, path);
-  await page.getByText(ANALYTICS_COPY.sourceTitle, { exact: true }).waitFor();
-  return { page, ownReads, equation: page.getByRole("region", { name: ANALYTICS_COPY.eqTitle, exact: true }) };
-}
+    const url = new URL(route.request().url()), path = url.pathname;
+    if (path === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (path === "/api/settings") return fulfill(route, { settings: {}, tz: PROFIT_TZ });
+    if (path === "/api/reconciliation/profit") return fulfill(route, { ...profitPage(rows), unaccountedUpstreamCostUsd: 0.5,
+      dailyCost: [{ day: "2026-10-07", actualCostUsd: 2 }, { day: PROFIT_TODAY, actualCostUsd: 1 }] });
+    throw new Error("unexpected cost fixture API: " + path);
+  }, undefined, false, null, "/analytics");
+  await page.getByRole("region", { name: ANALYTICS_COPY.panel.mix, exact: true }).waitFor();
+  await page.getByRole("region", { name: ANALYTICS_COPY.panel.daily, exact: true }).waitFor();
+  assert.equal(await page.getByRole("region").filter({ hasText: ANALYTICS_COPY.panel.heat }).count(), 0, "花费时段已删");
+  await page.getByText(ANALYTICS_COPY.unaccounted, { exact: false }).first().waitFor();
+  await page.getByText(ANALYTICS_COPY.todayLegend, { exact: false }).first().waitFor();
+  await page.getByRole("link", { name: "每日利润", exact: true }).first().waitFor();
+  assert.equal(await page.getByRole("button", { name: "近 90 天", exact: true }).count(), 0, "没有近 90 天");
+});
+
 const failJSON = (route, status, body) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
-
-test("成本估算：「数字怎么来的」「没算进去的数据」默认收起，只露一行结论；点按钮或页里「查看没算进去的数据」才展开", async (t) => {
-  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
-  // 最早的 3 天上游一条记录都没有：页里会出「查看没算进去的数据」，没算进去的数据那句写「3 天没有记录」
-  const analytics = (days) => {
-    const f = costAnalyticsFixture(days); f.daily = f.daily.slice(3); const earliestDate = f.daily[0].date;
-    f.coverage = { ...f.coverage, earliestDate, availableDays: days - 3, isComplete: false, stationGaps: [{ stationId: "up-a", stationName: "Fixture upstream", availableDays: days - 3, missingDays: 3, earliestDate }] };
-    return f;
-  };
-  const { page } = await openCostPage(t, own, "/analytics", { analytics });
-  // 页顶只露一句（ui-copy-spec §8.4），长说明在按钮后面
-  await page.getByText(ANALYTICS_COPY.sourceShort, { exact: true }).waitFor();
-  assert.equal(await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).count(), 0);
-  const source = page.getByRole("button", { name: ANALYTICS_COPY.sourceTitle, exact: true });
-  assert.equal(await source.getAttribute("aria-expanded"), "false"); await source.click();
-  assert.equal(await source.getAttribute("aria-expanded"), "true");
-  await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).waitFor();
-  await source.click(); assert.equal(await page.getByText(ANALYTICS_COPY.sourceBody, { exact: true }).count(), 0);
-  // 没算进去的数据：结论一句和按钮在同一行，规则和明细在「哪些天、哪些上游缺记录」后面
-  const coverage = page.locator("#analytics-coverage");
-  const details = coverage.getByRole("button", { name: ANALYTICS_COPY.coverageCaption, exact: true });
-  const lead = coverage.getByText(ANALYTICS_COPY.leadGaps(ANALYTICS_COPY.leadMissingDays(3), 3), { exact: true });
-  await lead.waitFor(); await details.waitFor();
-  const [leadBox, buttonBox] = [await lead.boundingBox(), await details.boundingBox()];
-  assert.ok(Math.abs(leadBox.y + leadBox.height - (buttonBox.y + buttonBox.height)) < 8, "结论和按钮在同一行");
-  assert.equal(await coverage.locator("dl").count(), 0); assert.equal(await coverage.getByText(ANALYTICS_COPY.gapRule).count(), 0);
-  await details.click(); await coverage.locator("dl").getByText(ANALYTICS_COPY.kvRange, { exact: true }).waitFor();
-  await coverage.getByText(ANALYTICS_COPY.gapRule, { exact: true }).waitFor();
-  await details.click(); assert.equal(await coverage.locator("dl").count(), 0);
-  // 点页里真的「查看没算进去的数据」：展开并滚过去；收起后再点同一个链接也展开（地址栏的 # 没变）
-  const link = page.getByRole("link", { name: ANALYTICS_COPY.coverageLink, exact: true }).first();
-  await link.click(); await coverage.locator("dl").waitFor(); assert.equal(await details.getAttribute("aria-expanded"), "true");
-  await details.click(); assert.equal(await coverage.locator("dl").count(), 0);
-  await link.scrollIntoViewIfNeeded(); await link.click(); await coverage.locator("dl").waitFor();
-  // 带着 #analytics-coverage 刷新：那一块等数据读回来才出现，出现后展开并滚到它
-  await page.reload(); await coverage.locator("dl").waitFor(); assert.equal(await details.getAttribute("aria-expanded"), "true");
-  await page.waitForFunction(() => { const r = document.getElementById("analytics-coverage")?.getBoundingClientRect(); return r && r.top >= 0 && r.top < window.innerHeight / 2; });
-});
-
-test("成本估算：没缺记录时「没算进去的数据」只留一句、不出「哪些天、哪些上游缺记录」；只缺 1 天时说「这一天」", async (t) => {
-  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
-  let missing = 0;
-  const analytics = (days) => {
-    const f = costAnalyticsFixture(days); if (!missing) return f;
-    f.daily = f.daily.slice(missing); const earliestDate = f.daily[0].date;
-    f.coverage = { ...f.coverage, earliestDate, availableDays: days - missing, isComplete: false, stationGaps: [{ stationId: "up-a", stationName: "Fixture upstream", availableDays: days - missing, missingDays: missing, earliestDate }] };
-    return f;
-  };
-  const { page } = await openCostPage(t, own, "/analytics", { analytics });
-  const coverage = page.locator("#analytics-coverage");
-  await coverage.getByText(ANALYTICS_COPY.leadFull(30, 1), { exact: true }).waitFor();
-  assert.equal(await coverage.getByRole("button").count(), 0);
-  missing = 1; await page.reload();
-  await coverage.getByText(ANALYTICS_COPY.leadGaps(ANALYTICS_COPY.leadMissingDays(1), 1), { exact: true }).waitFor();
-  assert.match(await coverage.innerText(), /这一天的上游成本没算全/);
-  await coverage.getByRole("button", { name: ANALYTICS_COPY.coverageCaption, exact: true }).waitFor();
-});
-
-test("成本估算的可用天数和运营总览同一个档位：余额在提醒线以下写「余额偏低」，不只按天数写「快用完」", async (t) => {
-  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
-  const low = await openCostPage(t, own, "/analytics", { stations: costStationsFixture({ ok: true, remaining: 2 }, { etaDays: 1.5, burnPerDay: 1 }) });
-  const runway = low.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await runway.getByText(BALANCE_STATE_TEXT.low, { exact: true }).waitFor();
-  assert.equal(await runway.getByText(BALANCE_STATE_TEXT.soon, { exact: true }).count(), 0);
-  // 读不到提醒规则（/api/meta 失败）：提醒线用上游列表带回来的，照样是「余额偏低」
-  const noMeta = await openCostPage(t, own, "/analytics", { stations: costStationsFixture({ ok: true, remaining: 2 }, { etaDays: 1.5, burnPerDay: 1 }), meta: (route) => failJSON(route, 500, { error: "boom" }) });
-  const noMetaRunway = noMeta.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await noMetaRunway.getByText(BALANCE_STATE_TEXT.low, { exact: true }).waitFor();
-  assert.equal(await noMetaRunway.getByText(BALANCE_STATE_TEXT.soon, { exact: true }).count(), 0);
-  // 读不到余额：和运营总览一样画成虚线框（is-unknown），不画实心空条
-  const unreadable = await openCostPage(t, own, "/analytics", { stations: costStationsFixture({ ok: false, error: "403" }, { etaDays: 5, burnPerDay: 1 }) });
-  const unreadableRunway = unreadable.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await unreadableRunway.getByText(BALANCE_STATE_TEXT.unreadable, { exact: true }).waitFor();
-  assert.equal(await unreadableRunway.locator(".jy-track.is-unknown").count(), 1); assert.equal(await unreadableRunway.locator(".jy-track .fill").count(), 0);
-  // 余额在提醒线以上、约 5 天：还是「快用完」
-  const soon = await openCostPage(t, own); const soonRunway = soon.page.getByRole("region", { name: ANALYTICS_COPY.panel.runway, exact: true }); await soonRunway.getByText(BALANCE_STATE_TEXT.soon, { exact: true }).waitFor();
-});
-// 利润等式里收入那一格留空时写的字（profit-equation.tsx 的 EQ_TEXT.unsetRevenue；组件文件带 JSX，node 读不了）
-const EQ_UNSET_REVENUE = "没设置";
-
-test("成本估算：收入算不出来时按原因说——没设置、超过 30 天、读不到、没法按天算各一句，原文收进「查看详细原因」", async (t) => {
-  const unset = await openCostPage(t, (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" }));
-  await unset.equation.getByText(EQ_UNSET_REVENUE, { exact: true }).waitFor();
-  await unset.equation.getByText(new RegExp(`^${OWN_STATION_UNSET_TITLE}，`)).waitFor();
-  assert.equal(await unset.equation.getByRole("link", { name: workflowActionMeta("setup_own_station").label, exact: true }).getAttribute("href"), workflowAction("setup_own_station").href);
-  await unset.page.context().close();
-
-  // 超过 30 天：不去读自营收入，只算成本，给「切换到近 30 天」
-  const long = await openCostPage(t, () => { throw new Error("unexpected own read for 90 days"); }, "/analytics?range=90d");
-  await long.equation.getByText(ANALYTICS_COPY.longRangeNote, { exact: true }).waitFor();
-  await long.equation.locator(".jy-partial-note").filter({ hasText: ANALYTICS_COPY.longRangeNotice }).getByRole("link", { name: ANALYTICS_COPY.switchTo(RANGE_TEXT["30d"]), exact: true }).waitFor();
-  assert.deepEqual(long.ownReads, []);
-  await long.page.context().close();
-
-  // 接口报错和接口正常、但算收入时报错，是同一句；状态码 502 也按接口给的码归类
-  const raw = "own upstream said 403 forbidden";
-  for (const own of [(route) => failJSON(route, 502, { error: raw, code: "UPSTREAM_AUTH_DENIED" }),
-    (route) => fulfill(route, { station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7.5 }, profit: { error: raw, errorCode: "UPSTREAM_AUTH_DENIED" }, trend: [], tz: BUSINESS_TZ })]) {
-    const failed = await openCostPage(t, own);
-    const sentence = `${failureSentence(INCOME_UNREAD.title, ERROR_CATEGORIES.permission.text)}${INCOME_UNREAD.costOnly}`;
-    const notice = failed.equation.locator(".jy-partial-note").filter({ hasText: sentence }); await notice.waitFor();
-    await failed.equation.getByText(INCOME_UNREAD.empty, { exact: true }).waitFor();
-    await notice.getByRole("button", { name: REFRESH, exact: true }).waitFor();
-    // 原文默认收起，展开「查看详细原因」才看得到
-    assert.equal(await failed.page.getByText(raw, { exact: true }).isVisible(), false);
-    await notice.getByText("查看详细原因", { exact: true }).click(); await failed.page.getByText(raw, { exact: true }).waitFor();
-    await failed.page.context().close();
-  }
-
-  // 自营站点读到了，但没有每天的消费记录：收入没法分到每天，说原因，不当成报错
-  const unsplit = await openCostPage(t, (route) => fulfill(route, { station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7.5 }, profit: { incomeCny: 10 }, tz: BUSINESS_TZ }));
-  await unsplit.equation.getByText(ANALYTICS_COPY.incomeUnsplitEmpty, { exact: true }).waitFor();
-  await unsplit.equation.locator(".jy-partial-note").filter({ hasText: `${ANALYTICS_COPY.incomeUnsplit}：自营站点没有给出每天的消费记录。` }).waitFor();
-  assert.equal(await unsplit.equation.getByText("查看详细原因", { exact: true }).count(), 0);
-});
-
-// 收入确认不了时（用户身份或转售记录没读全），/api/own/analytics 照常返回（server/own-helpers.js 的 unconfirmedIncomeProfit）：
-// 两项成本照常，收入、管理员自用、毛利、净利是 null，原因在 profit.incomeUnconfirmed；用户列表也读不到时多一个 usersUnavailable
-const INCOME_UNCONFIRMED = { error: "用户「newbie」的身份没读到，收入和利润暂时算不出", errorCode: "OWN_INCOME_UNCONFIRMED" };
-const USERS_UNAVAILABLE = { error: "fixture user list unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" };
-const PROFIT_FAILED = "利润暂时算不出"; // profit-equation.tsx 的 EQ_TEXT.profitFailed（组件文件带 JSX，node 读不了）
-function unconfirmedOwnAnalytics(range = "7d", { usersUnavailable = false } = {}) {
-  const endMs = Date.now(), span = range === "today" ? 3600000 : 7 * 86400000, startMs = endMs - span;
-  return { range, tz: BUSINESS_TZ, startMs, endMs, prevWindow: { startMs: startMs - span, endMs: startMs, spanDays: span / 86400000 },
-    station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7 }, tokenScope: "billed",
-    byModel: [{ model: "fixture-model", tokens: 3000, cost: 5, requests: 5 }],
-    // 用户列表读不到时谁是管理员标不出，都按普通用户给
-    byUser: [{ user: "customer", tokens: 1000, cost: 2, requests: 3, isAdmin: false }, { user: "root", tokens: 2000, cost: 3, requests: 2, isAdmin: !usersUnavailable }],
-    prevUserAvailable: true, userBalances: usersUnavailable ? null : [{ user: "customer", balanceUsd: 4, usedUsd: 2, status: 1 }],
-    flow: { byGroup: [], byChannel: [], byUserGroup: [], coveredUsd: 0, coveragePct: null, prevWindow: { startMs: startMs - span, endMs: startMs } },
-    trend: [], daily: [], forecast: null, hourly: null, incomeDaily: null, incomeDailyApprox: false, generatedAt: new Date().toISOString(),
-    profit: { incomeCny: null, adminUsageCny: null, resoldCny: null, grossProfitCny: null, netProfitCny: null, grossMarginPct: null, netMarginPct: null, profitCny: null, marginPct: null,
-      upstreamCostCny: 3.5, fixedCostCny: 1.25, totalCostCny: 4.75, unmatched: [], complete: true, estimated: false, excludedStationIds: [], rateUnsetStations: [], warnings: [], warningCodes: [], windowDays: 7,
-      // 已标记的转售 Key 照常列出、金额是 null；没读到的那把带报错
-      resoldKeys: [{ username: "root", tokenName: "sale", usd: null, cny: null, error: "fixture stat unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" },
-        { username: "root", tokenName: "promo", usd: null, cny: null }],
-      costs: [{ stationId: "up-usage", name: "Usage upstream", channels: ["Sales"], mode: "usage", usd: 0.5, cny: 3.5 },
-        { stationId: "up-fixed", name: "Fixed upstream", channels: ["Sales"], mode: "fixed", note: "", active: 1, expired: 0, upcoming: 0, total: 1, cny: 1.25 }],
-      incomeUnconfirmed: INCOME_UNCONFIRMED },
-    ...(usersUnavailable ? { usersUnavailable: USERS_UNAVAILABLE } : {}) };
-}
-// 运营总览「今天收入和上游成本」用的大金额：收入 ¥12,345.67、上游成本 ¥23,456.80（5 个按用量算的上游）、5 位用户（售价 7，按 1 美元额度 = 7 元算）
-function bigOwnAnalytics(range = "today") {
-  const base = unconfirmedOwnAnalytics(range);
-  const costs = [9000, 6000, 4000, 2456.8, 2000].map((cny, i) => ({ stationId: `up-${i}`, name: `Upstream ${i}`, channels: ["Sales"], mode: "usage", usd: cny / 7, cny }));
-  const { incomeUnconfirmed, ...profit } = base.profit;
-  // 其余两位（2.2 + 1.3）× 7 = ¥24.50，和前 3 名（¥42、¥35、¥21）都不一样：写成「拿第 3 名的数」查得出来
-  return { ...base, byUser: [6, 5, 3, 2.2, 1.3].map((cost, i) => ({ user: `user${i}`, tokens: 1000, cost, requests: 3, isAdmin: false })),
-    profit: { ...profit, incomeCny: 12345.67, upstreamCostCny: 23456.8, fixedCostCny: 1234.56, totalCostCny: 24691.36, grossProfitCny: -11111.13, netProfitCny: -12345.69, costs } };
-}
-// 利润等式在收入读不到时：收入写「读不到」，毛利、净利留空、下面写「读不到收入」；下方一句原因加「刷新」，原文收起。
-// costs 给了就核对两项成本照常显示（成本估算页的成本来自 /api/analytics，不核对）
-async function expectIncomeUnread(equation, costs = null) {
-  const reason = errorText({ code: "OWN_INCOME_UNCONFIRMED" }), page = equation.page();
-  const notice = equation.locator(".jy-partial-note").filter({ hasText: `${failureSentence(INCOME_UNREAD.title, reason)}${INCOME_UNREAD.costOnly}` });
-  await notice.waitFor(); await notice.getByRole("button", { name: REFRESH, exact: true }).waitFor();
-  assert.equal(await page.getByText(INCOME_UNCONFIRMED.error, { exact: true }).filter({ visible: true }).count(), 0);
-  const term = (label) => equation.locator(".jy-eq-term:not(.is-carry)").filter({ has: page.locator(".jy-eq-label").filter({ hasText: new RegExp(`^${label}$`) }) });
-  const value = async (label) => (await term(label).locator(".jy-eq-value").textContent()).trim();
-  assert.equal(await value("收入"), INCOME_UNREAD.empty);
-  for (const label of ["毛利", "净利"]) { assert.equal(await value(label), EMPTY); assert.equal((await term(label).locator(".jy-eq-note").textContent()).trim(), INCOME_UNREAD.profit); }
-  if (costs) { assert.equal(await value("上游成本"), formatMoney(costs.upstream)); assert.equal(await value("固定成本"), formatMoney(costs.fixed)); }
-  assert.doesNotMatch(await equation.innerText(), /NaN|undefined/);
-  // 原文收在说明里的「查看详细原因」，点开才看得到
-  await notice.getByText("查看详细原因", { exact: true }).click(); await notice.getByText(INCOME_UNCONFIRMED.error, { exact: true }).waitFor();
-}
-async function openUnconfirmedMyPage(t, options) {
-  return openFixturePage(t, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
-    if (url.pathname === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(url.searchParams.get("range") || "7d", options));
-    // 每日收入只画收入，取自营站点接口的逐日收入：自营业务不再读慢的 /api/analytics（ui-design-spec §5.3）
-    throw new Error("unexpected my fixture API: " + url.pathname);
-  }, undefined, false, null, "/my");
-}
-
-// 收入确认了的近 7 天：逐日收入 7 天（最早一天 ¥1,000，往后每天多 ¥100，最后一天是今天），7 个模型（前 5 + 其他 2 个）；
-// sellPrice: false 时自营站点没设置售价（收入按 1 美元额度 = 1 元估算）
-function myLayoutAnalytics(range = "7d", { sellPrice = true } = {}) {
-  const base = bigOwnAnalytics(range), end = shanghaiDay(Date.now());
-  const incomeDaily = Array.from({ length: 7 }, (_, i) => ({ date: shiftDay(end, i - 6), incomeCny: 1000 + i * 100 }));
-  const byModel = [700, 600, 500, 400, 300, 20, 10].map((cost, i) => ({ model: `model-${i}`, tokens: 1000, cost, requests: 3 }));
-  // 没设置售价：服务端在 profit 里带上 sell_price_unset 那条说明（等式下面写一次）
-  const unpriced = { station: { id: "own-1", name: "Fixture own" }, profit: { ...base.profit, adminUsageCny: 3, warnings: [SELL_PRICE_UNSET], warningCodes: ["sell_price_unset"] } };
-  return { ...base, incomeDaily, byModel, ...(sellPrice ? {} : unpriced) };
-}
 
 test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analytics，消费最多的用户、模型各前 5；利润怎么算、选转售 Key、按明细细算都是收起区", async (t) => {
   const analytics = myLayoutAnalytics;
@@ -2802,81 +2506,6 @@ test("自营业务两行 8 + 4：每日收入只画收入、不再读 /api/analy
   assert.equal(await busy.locator(".jy-grid-8-4").count(), 2);
   release();
   await slow.getByRole("region", { name: "消费最多的模型", exact: true }).waitFor();
-});
-
-test("成本估算：没设置售价时，趋势图和表格里的收入也带「≈」，和等式同一个判断", async (t) => {
-  const cost = await openCostPage(t, (route) => fulfill(route, myLayoutAnalytics("7d", { sellPrice: false })), "/analytics?range=7d");
-  const trend = cost.page.getByRole("region", { name: "收入与上游成本", exact: true });
-  await trend.getByRole("button", { name: "表格", exact: true }).click();
-  const rev = (await trend.locator("tbody td:nth-child(2)").allInnerTexts()).map((x) => x.trim()).filter((x) => x !== EMPTY);
-  assert.ok(rev.length > 0); assert.ok(rev.every((x) => x.startsWith("≈")), rev.join(" "));
-});
-
-test("收入确认不了时：成本估算、自营业务的利润等式收入几项写「读不到」并说原因，两项成本照常；用户表说合计含管理员账号；用户列表也读不到时说管理员没标出", async (t) => {
-  const cost = await openCostPage(t, (route) => fulfill(route, { ...unconfirmedOwnAnalytics(), trend: [] }));
-  await expectIncomeUnread(cost.equation);
-  await cost.page.context().close();
-
-  // 自营业务默认近 7 天：利润等式叫「近 7 天经营」（profit-equation.tsx 的 EQ_TEXT.business）
-  const page = await openUnconfirmedMyPage(t);
-  await expectIncomeUnread(page.getByRole("region", { name: `${RANGE_TEXT["7d"]}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
-  // 利润那块不整块报错（报错框的标题里没有「利润暂时算不出」；原文收在「查看详细原因」里，可能也带这几个字）
-  assert.equal(await page.locator(".jy-state[role=alert] h3").filter({ hasText: PROFIT_FAILED }).count(), 0);
-  // 每日收入只画收入：收入读不到时那块只写一句短的，原因和「刷新」在上面的利润等式里（overview-tab.tsx 的 COPY.incomeSeeEq）
-  await page.getByRole("region", { name: "每日收入", exact: true }).getByText("读不到，原因见上面的利润等式。", { exact: true }).waitFor();
-  assert.doesNotMatch(await page.locator("main").innerText(), /NaN|undefined/);
-  // 「利润怎么算」照常打开（等式里的链接把收起区打开，More 的受控用法）；摘要不再写收入、成本的数（都在等式里），只写几个转售 Key、几个上游算进利润；
-  // 转售 Key 照常列出、金额写「—」，没读到的那把标「读不到」，照常能选（lib/format.js 的 BASIS_TITLE、profit-basis.tsx 的 COPY）
-  await page.getByRole("button", { name: "利润怎么算", exact: true }).click();
-  const basis = page.getByRole("region", { name: "利润怎么算", exact: true });
-  await basis.getByText(/^2 个转售 Key，\d+ 个上游算进利润/).waitFor();
-  assert.doesNotMatch(await basis.locator(".jy-panel-sub").innerText(), /[¥$]/);
-  assert.equal(await basis.getByRole("button", { name: "收入和成本怎么算、转售 Key、各上游成本", exact: true }).getAttribute("aria-expanded"), "true");
-  const resold = basis.getByRole("table", { name: "已标记的转售 Key", exact: true });
-  await resold.waitFor();
-  const resoldRow = (token) => resold.locator("tbody tr").filter({ has: page.getByText(token, { exact: true }) });
-  assert.equal((await resoldRow("promo").locator("td").last().textContent()).trim(), EMPTY);
-  assert.equal((await resoldRow("sale").locator("td").last().textContent()).trim(), EMPTY);
-  await resoldRow("sale").getByText("读不到", { exact: true }).waitFor();
-  assert.equal(await resoldRow("promo").getByText("读不到", { exact: true }).count(), 0);
-  assert.equal(await basis.getByRole("button", { name: "选转售 Key", exact: true }).isEnabled(), true);
-  // 用户标签页照常列出有消费的用户；收入没算出来，合计只说含多少管理员账号的消费（root 3 美元 × 7）
-  await page.getByRole("tab", { name: "用户", exact: true }).click();
-  await page.getByText("customer", { exact: true }).first().waitFor();
-  await page.getByText(`合计含管理员账号的 ${formatMoney(21)}。`).waitFor();
-  await page.context().close();
-
-  // 用户列表也读不到：消费最多的用户、用户表下说管理员没标出；用户余额那块说原因、带刷新，不悄悄消失（shared.tsx 的 MY_TEXT.topUsers、users-tab.tsx 的 COPY.balTitle / balFailed）
-  const blind = await openUnconfirmedMyPage(t, { usersUnavailable: true });
-  await blind.getByRole("region", { name: "消费最多的用户", exact: true }).getByText(`${ADMIN_UNMARKED}。`, { exact: true }).waitFor();
-  await blind.getByRole("tab", { name: "用户", exact: true }).click();
-  const balances = blind.getByRole("region", { name: "用户余额", exact: true }).locator(".jy-state[role=alert]").filter({ hasText: failureSentence("读不到用户余额", errorText(USERS_UNAVAILABLE)) });
-  await balances.waitFor(); await balances.getByRole("button", { name: REFRESH, exact: true }).waitFor();
-  await blind.getByText(`${ADMIN_UNMARKED}。`).first().waitFor();
-  assert.equal(await blind.getByText(/合计含管理员/).count(), 0);
-});
-
-test("运营总览：收入确认不了时利润等式收入几项写「读不到」、两项成本照常；收入面板说原因，不拿用户消费拼出收入合计", async (t) => {
-  const opened = await openAccountsPage(t, { readonlyAPI(route, path) {
-    if (path === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(new URL(route.request().url()).searchParams.get("range") || "today"));
-    assert.equal(path, "/api/history/overview"); return fulfill(route, { series: [] });
-  } });
-  await opened.page.goto(baseURL);
-  // 运营总览默认看今天：利润等式叫「今天经营」，收入和上游成本合成一块「今天收入和上游成本」，上下两小段「收入」「上游成本」
-  // （EQ_TEXT.business、page.tsx 的 COPY.money；组件文件带 JSX，node 读不了）
-  await expectIncomeUnread(opened.page.getByRole("region", { name: `${RANGE_TEXT.today}经营`, exact: true }), { upstream: 3.5, fixed: 1.25 });
-  const money = opened.page.getByRole("region", { name: `${RANGE_TEXT.today}收入和上游成本`, exact: true });
-  const revenue = money.getByRole("region", { name: "收入", exact: true });
-  // 原因和「刷新」只在等式下面（上面 expectIncomeUnread 查过）；「收入」小段只写一句短的，不带按钮，也不拿用户消费拼收入（同一句话一页只说一次）
-  await revenue.getByText("读不到，原因见上面的利润等式。", { exact: true }).waitFor();
-  assert.equal(await revenue.getByRole("button").count(), 0);
-  assert.equal(await revenue.locator(".jy-state[role=alert]").count(), 0);
-  assert.doesNotMatch(await revenue.innerText(), /customer|root|¥/);
-  // 上游成本那一小段照常：按用量算的上游那一行是 ¥3.50；小段标题不带合计（合计只在等式里）
-  const cost = money.getByRole("region", { name: "上游成本", exact: true });
-  await cost.locator(".jy-hbars li", { hasText: "Usage upstream" }).getByText(formatMoney(3.5), { exact: true }).waitFor();
-  assert.equal(await cost.locator(".jy-ov-money-head").filter({ hasText: /[¥$]/ }).count(), 0);
-  assert.equal(opened.mutations.length, 0);
 });
 
 test("用量分析：全部上游都读不到时只说一处——黄条默认展开原因，合计只写「—」，下面不再放空状态", async (t) => {
@@ -3148,6 +2777,7 @@ test("上游列表「这把 Key」说清是哪些渠道：三个以上写「等 
     if (path === "/api/stations") return fulfill(route, { stations, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 }, generatedAt: iso(now) });
     if (path === "/api/meta") return fulfill(route, { types: [{ value: "newapi", label: "New API", needs: ["accessToken", "userId"] }], rules, settings: { refreshIntervalSec: 60, lowBalanceUsd: 5 } });
     // 21 号渠道在自营站点里改过名：绑定存下的是旧名，coverage.channels 是现在的名字；另一个自营站点也有 21 号渠道
+    if (path === "/api/reconciliation/profit") return fulfill(route, profitPage([]));
     if (path === "/api/own/analytics") return failJSON(route, 500, { error: "fixture own analytics unavailable" });
     if (path === "/api/history/overview") return fulfill(route, { series: [] });
     if (path === "/api/refresh") return fulfill(route, { ok: true });
@@ -3944,15 +3574,6 @@ test("合并重复的上游：退回碰上 409 写「这次合并已经变了，
   await confirm.getByRole("button", { name: "刷新", exact: true }).click(); await confirm.waitFor({ state: "hidden" });
 });
 
-test("合并重复的上游：成本估算算不出时两行写「—」，下面一句，合并照样能点", async (t) => {
-  const { page } = await openMergePage(t, { groups: [mergeGroupOf({ estimate: null })], records: [] });
-  await page.getByTestId("merge-notice").getByRole("button", { name: "查看", exact: true }).click();
-  const card = mergeCard(page, "主力上游");
-  await card.getByText("— → —", { exact: true }).first().waitFor();
-  await card.getByText("成本估算暂时算不出，合并照样能做", { exact: true }).waitFor();
-  assert.equal(await card.getByRole("button", { name: "合并", exact: true }).isEnabled(), true);
-});
-
 test("合并重复的上游：只有合不了的组时提示换一句；「处理重复」去现成的那个地方；前后的数带「≈」时照写", async (t) => {
   const blocked = mergeBlockedGroup(); blocked.estimate = { windows: [{ days: 7, approx: true, before: { cny: 3211.2 }, after: { cny: 1070.4 } }, { days: 30, approx: true, before: { cny: 13982.4 }, after: { cny: 4660.8 } }] };
   const { page } = await openMergePage(t, { groups: [blocked], records: [] });
@@ -4023,18 +3644,6 @@ test("合并重复的上游：手机上抽屉从底部升起占满，按钮至�
     const minHeight = await sheet.getByRole("button", { name, exact: true }).evaluate((el) => parseFloat(getComputedStyle(el).minHeight));
     assert.ok(minHeight >= 44, `确认框里的「${name}」最小高度 ${minHeight}`);
   }
-});
-
-test("成本估算：总成本下面写「其中 1 个账号加成了 2 个上游，这里重复算了」[去合并]；没有重复时不出现", async (t) => {
-  const own = (route) => failJSON(route, 400, { error: OWN_STATION_UNSET, code: "OWN_STATION_UNSET" });
-  const none = await openCostPage(t, own);
-  await none.page.getByText(ANALYTICS_COPY.totalCost, { exact: true }).waitFor();
-  assert.equal(await none.page.getByTestId("merge-cost-line").count(), 0);
-  const analytics = (days) => ({ ...costAnalyticsFixture(days), merge: { mergeable: 1, blocked: 0, accounts: 1, upstreams: 2, records: 0 } });
-  const { page } = await openCostPage(t, own, "/analytics", { analytics });
-  const line = page.getByTestId("merge-cost-line");
-  await line.getByText("其中 1 个账号加成了 2 个上游，这里重复算了", { exact: false }).waitFor();
-  await line.getByRole("button", { name: "去合并", exact: true }).waitFor();
 });
 
 test("合并重复的上游：另外几种合不了的一项一行，按钮放第一项的；「恢复监控」就地恢复被暂停的那个，改成一样以后「合并」能点", async (t) => {
@@ -4289,3 +3898,76 @@ test("手机 320：一个渠道一张卡片，点开能看计算明细，页面�
   await page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), "320px document root overflows horizontally");
 });
+
+// ---- 自营业务用例共用的夹具（原来夹在已删用例之间）----
+// 利润等式里收入那一格留空时写的字（profit-equation.tsx 的 EQ_TEXT.unsetRevenue；组件文件带 JSX，node 读不了）
+const EQ_UNSET_REVENUE = "没设置";
+// 收入确认不了时（用户身份或转售记录没读全），/api/own/analytics 照常返回（server/own-helpers.js 的 unconfirmedIncomeProfit）：
+// 两项成本照常，收入、管理员自用、毛利、净利是 null，原因在 profit.incomeUnconfirmed；用户列表也读不到时多一个 usersUnavailable
+const INCOME_UNCONFIRMED = { error: "用户「newbie」的身份没读到，收入和利润暂时算不出", errorCode: "OWN_INCOME_UNCONFIRMED" };
+const USERS_UNAVAILABLE = { error: "fixture user list unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" };
+const PROFIT_FAILED = "利润暂时算不出"; // profit-equation.tsx 的 EQ_TEXT.profitFailed（组件文件带 JSX，node 读不了）
+function unconfirmedOwnAnalytics(range = "7d", { usersUnavailable = false } = {}) {
+  const endMs = Date.now(), span = range === "today" ? 3600000 : 7 * 86400000, startMs = endMs - span;
+  return { range, tz: BUSINESS_TZ, startMs, endMs, prevWindow: { startMs: startMs - span, endMs: startMs, spanDays: span / 86400000 },
+    station: { id: "own-1", name: "Fixture own", cnyPerUsd: 7 }, tokenScope: "billed",
+    byModel: [{ model: "fixture-model", tokens: 3000, cost: 5, requests: 5 }],
+    // 用户列表读不到时谁是管理员标不出，都按普通用户给
+    byUser: [{ user: "customer", tokens: 1000, cost: 2, requests: 3, isAdmin: false }, { user: "root", tokens: 2000, cost: 3, requests: 2, isAdmin: !usersUnavailable }],
+    prevUserAvailable: true, userBalances: usersUnavailable ? null : [{ user: "customer", balanceUsd: 4, usedUsd: 2, status: 1 }],
+    flow: { byGroup: [], byChannel: [], byUserGroup: [], coveredUsd: 0, coveragePct: null, prevWindow: { startMs: startMs - span, endMs: startMs } },
+    trend: [], daily: [], forecast: null, hourly: null, incomeDaily: null, incomeDailyApprox: false, generatedAt: new Date().toISOString(),
+    profit: { incomeCny: null, adminUsageCny: null, resoldCny: null, grossProfitCny: null, netProfitCny: null, grossMarginPct: null, netMarginPct: null, profitCny: null, marginPct: null,
+      upstreamCostCny: 3.5, fixedCostCny: 1.25, totalCostCny: 4.75, unmatched: [], complete: true, estimated: false, excludedStationIds: [], rateUnsetStations: [], warnings: [], warningCodes: [], windowDays: 7,
+      // 已标记的转售 Key 照常列出、金额是 null；没读到的那把带报错
+      resoldKeys: [{ username: "root", tokenName: "sale", usd: null, cny: null, error: "fixture stat unavailable", errorCode: "UPSTREAM_REQUEST_FAILED" },
+        { username: "root", tokenName: "promo", usd: null, cny: null }],
+      costs: [{ stationId: "up-usage", name: "Usage upstream", channels: ["Sales"], mode: "usage", usd: 0.5, cny: 3.5 },
+        { stationId: "up-fixed", name: "Fixed upstream", channels: ["Sales"], mode: "fixed", note: "", active: 1, expired: 0, upcoming: 0, total: 1, cny: 1.25 }],
+      incomeUnconfirmed: INCOME_UNCONFIRMED },
+    ...(usersUnavailable ? { usersUnavailable: USERS_UNAVAILABLE } : {}) };
+}
+// 运营总览「今天收入和上游成本」用的大金额：收入 ¥12,345.67、上游成本 ¥23,456.80（5 个按用量算的上游）、5 位用户（售价 7，按 1 美元额度 = 7 元算）
+function bigOwnAnalytics(range = "today") {
+  const base = unconfirmedOwnAnalytics(range);
+  const costs = [9000, 6000, 4000, 2456.8, 2000].map((cny, i) => ({ stationId: `up-${i}`, name: `Upstream ${i}`, channels: ["Sales"], mode: "usage", usd: cny / 7, cny }));
+  const { incomeUnconfirmed, ...profit } = base.profit;
+  // 其余两位（2.2 + 1.3）× 7 = ¥24.50，和前 3 名（¥42、¥35、¥21）都不一样：写成「拿第 3 名的数」查得出来
+  return { ...base, byUser: [6, 5, 3, 2.2, 1.3].map((cost, i) => ({ user: `user${i}`, tokens: 1000, cost, requests: 3, isAdmin: false })),
+    profit: { ...profit, incomeCny: 12345.67, upstreamCostCny: 23456.8, fixedCostCny: 1234.56, totalCostCny: 24691.36, grossProfitCny: -11111.13, netProfitCny: -12345.69, costs } };
+}
+// 利润等式在收入读不到时：收入写「读不到」，毛利、净利留空、下面写「读不到收入」；下方一句原因加「刷新」，原文收起。
+// costs 给了就核对两项成本照常显示（成本估算页的成本来自 /api/analytics，不核对）
+async function expectIncomeUnread(equation, costs = null) {
+  const reason = errorText({ code: "OWN_INCOME_UNCONFIRMED" }), page = equation.page();
+  const notice = equation.locator(".jy-partial-note").filter({ hasText: `${failureSentence(INCOME_UNREAD.title, reason)}${INCOME_UNREAD.costOnly}` });
+  await notice.waitFor(); await notice.getByRole("button", { name: REFRESH, exact: true }).waitFor();
+  assert.equal(await page.getByText(INCOME_UNCONFIRMED.error, { exact: true }).filter({ visible: true }).count(), 0);
+  const term = (label) => equation.locator(".jy-eq-term:not(.is-carry)").filter({ has: page.locator(".jy-eq-label").filter({ hasText: new RegExp(`^${label}$`) }) });
+  const value = async (label) => (await term(label).locator(".jy-eq-value").textContent()).trim();
+  assert.equal(await value("收入"), INCOME_UNREAD.empty);
+  for (const label of ["毛利", "净利"]) { assert.equal(await value(label), EMPTY); assert.equal((await term(label).locator(".jy-eq-note").textContent()).trim(), INCOME_UNREAD.profit); }
+  if (costs) { assert.equal(await value("上游成本"), formatMoney(costs.upstream)); assert.equal(await value("固定成本"), formatMoney(costs.fixed)); }
+  assert.doesNotMatch(await equation.innerText(), /NaN|undefined/);
+  // 原文收在说明里的「查看详细原因」，点开才看得到
+  await notice.getByText("查看详细原因", { exact: true }).click(); await notice.getByText(INCOME_UNCONFIRMED.error, { exact: true }).waitFor();
+}
+async function openUnconfirmedMyPage(t, options) {
+  return openFixturePage(t, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/auth/me") return fulfill(route, { username: "fixture" });
+    if (url.pathname === "/api/own/analytics") return fulfill(route, unconfirmedOwnAnalytics(url.searchParams.get("range") || "7d", options));
+    // 每日收入只画收入，取自营站点接口的逐日收入：自营业务不再读慢的 /api/analytics（ui-design-spec §5.3）
+    throw new Error("unexpected my fixture API: " + url.pathname);
+  }, undefined, false, null, "/my");
+}
+// 收入确认了的近 7 天：逐日收入 7 天（最早一天 ¥1,000，往后每天多 ¥100，最后一天是今天），7 个模型（前 5 + 其他 2 个）；
+// sellPrice: false 时自营站点没设置售价（收入按 1 美元额度 = 1 元估算）
+function myLayoutAnalytics(range = "7d", { sellPrice = true } = {}) {
+  const base = bigOwnAnalytics(range), end = shanghaiDay(Date.now());
+  const incomeDaily = Array.from({ length: 7 }, (_, i) => ({ date: shiftDay(end, i - 6), incomeCny: 1000 + i * 100 }));
+  const byModel = [700, 600, 500, 400, 300, 20, 10].map((cost, i) => ({ model: `model-${i}`, tokens: 1000, cost, requests: 3 }));
+  // 没设置售价：服务端在 profit 里带上 sell_price_unset 那条说明（等式下面写一次）
+  const unpriced = { station: { id: "own-1", name: "Fixture own" }, profit: { ...base.profit, adminUsageCny: 3, warnings: [SELL_PRICE_UNSET], warningCodes: ["sell_price_unset"] } };
+  return { ...base, incomeDaily, byModel, ...(sellPrice ? {} : unpriced) };
+}

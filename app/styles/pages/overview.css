@@ -47,3 +47,9 @@
 }
 /* 没设置、读不到、算不出时小段里那一句（原因在上面的利润等式里） */
 .jy-ov-money-note { margin: 0; font-size: 13px; line-height: 20px; }
+
+/* 今天赚了多少不跟着右边的需处理拉高，顶部对齐 */
+.jy-ov-top { align-items: start; }
+/* 快用完的上游：一个上游一行，不带圆点 */
+.jy-ov-low { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.jy-ov-low li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; }

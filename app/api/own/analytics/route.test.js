@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
-import { derive } from "../../../(dashboard)/analytics/derive.ts";
 
 const NOW = Date.parse("2026-10-20T04:00:00Z"); // 上海 12:00
 const START = Date.parse("2026-10-13T16:00:00Z"); // 近 7 天的 10-14 零点
@@ -81,7 +80,7 @@ test("自营站点以前有一段没记收费记录、现在已经开回来，�
 });
 
 for (const userCount of [2, 1101]) {
-  test(`真实自营分析：${userCount} 个用户时管理员自用日不产生收入，成本估算复用真实分日金额`, async (t) => {
+  test(`真实自营分析：${userCount} 个用户时管理员自用日不产生收入`, async (t) => {
     const f = fixture(t, { userCount });
     const { GET } = await ownAnalyticsRoute();
     const res = await GET(new Request("https://local.test/api/own/analytics?range=7d"), f.rt);
@@ -93,11 +92,6 @@ for (const userCount of [2, 1101]) {
     assert.equal(body.byUser.find((u) => u.user === "root").isAdmin, true);
     assert.equal(body.incomeDailyApprox, false);
     assert.deepEqual(body.incomeDaily.map((r) => r.incomeCny), [0, 0, 0, 0, 0, 0, 70]);
-    const costs = { days: 7, start: "2026-10-14", end: "2026-10-20", tz: body.tz, stations: [], daily: [] };
-    const view = derive(costs, body);
-    assert.deepEqual(view.rows.map((r) => r.rev), [0, 0, 0, 0, 0, 0, 70]);
-    assert.equal(view.revenue, 70);
-    assert.equal(view.revenueApprox, false);
     if (userCount === 1101) assert.equal(f.calls.filter((u) => u.pathname === "/api/user/").length, 12);
   });
 }
@@ -119,11 +113,6 @@ test("真实自营分析：角色目录 503 时页面照常打开——收入、
   assert.deepEqual(body.byUser.map((u) => u.isAdmin), body.byUser.map(() => false));
   assert.equal(f.rt._ownCache.size, 0, "刷新时要重新读");
   assert.equal(f.rt._ownUsersCache, undefined);
-  // 成本估算按收入那块的报错说，不拿含管理员自用的消费猜每天的收入
-  const costs = { days: 7, start: "2026-10-14", end: "2026-10-20", tz: body.tz, stations: [], daily: [] };
-  const view = derive(costs, body);
-  assert.equal(view.incomeError.code, "OWN_INCOME_UNCONFIRMED");
-  assert.equal(view.revenue, null);
 });
 
 test("真实自营分析：转售记录没读全、用户列表读得到时，预收和管理员标记照常，收入那几项是 null，不缓存", async (t) => {

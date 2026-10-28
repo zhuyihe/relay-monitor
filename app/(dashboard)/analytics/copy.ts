@@ -5,7 +5,7 @@ import { EMPTY, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../../../lib/format.
 
 export const COPY = Object.freeze({
   eqTitle: "成本与利润",
-  panel: Object.freeze({ mix: "成本构成", heat: "花费时段", runway: "可用天数", summary: "成本概况", coverage: "没算进去的数据" }),
+  panel: Object.freeze({ daily: "每天的上游成本", mix: "上游成本构成", heat: "花费时段", runway: "可用天数", summary: "成本概况", coverage: "没算进去的数据" }),
   readFailed: "读不到成本数据",
   coverageLink: "查看没算进去的数据",
   archiveToggle: "包含已归档",
@@ -17,7 +17,7 @@ export const COPY = Object.freeze({
   // 顶上那一行（ui-copy-spec §8.4）：收起时只写这一句，「数字怎么来的」展开后才是 sourceBody
   sourceShort: "这一页的数是按余额变化估出来的，不是上游的实际账单。",
   sourceBody: `上游成本按余额的变化估算，固定成本按付费周期平摊到每天，可用天数按近期花费估算；美元按各上游设置的汇率换成人民币（${RATE_UNSET_PARITY}）。按上游账单算的每天利润在「${NAV_LABELS.reconciliation}」里看。`,
-  emptyDesc: "加上上游后，这里会算成本和利润。",
+  emptyDesc: "加上上游后，这里会算成本。",
   emptyArchived: "已归档的上游勾选「包含已归档」后可以看。",
   // 利润等式下面「数据不完整」的原因，每条一句
   gapPast: (when: string, n: number) => `${when}没有上游的用量记录，这 ${n} 天的上游成本没算进去。`,
@@ -48,7 +48,13 @@ export const COPY = Object.freeze({
   noRecordFixed: (money: string) => `没有记录，固定成本 ${money}`,
   usageRecord: "用量记录",
   missingDays: (n: number) => `缺 ${n} 天，没算进去`,
-  mixCaption: "按上游，所选时间合计（上游成本 + 固定成本）",
+  mixCaption: "按上游，所选时间合计",
+  dailyCaption: "按天，所选时间内",
+  notReady: (n: number) => `这段时间还算不出：${n} 个渠道需处理`,
+  dailyEmpty: "这段时间没有上游成本。",
+  todayLegend: "今天（还会变）",
+  mixUnread: "读不到每日利润，这里先不显示。",
+  unaccounted: "没算进利润的上游成本",
   mixUnit: "成本",
   total: "合计",
   mixEmpty: "这段时间没有上游成本。",
