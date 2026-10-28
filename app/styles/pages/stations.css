@@ -16,7 +16,7 @@ table.jy-data.jy-stations-table td { padding-block: 8px; line-height: 20px; }
 .jy-stations-name-line > .jy-stations-flag { flex: none; }
 .jy-stations-flag { height: 20px; padding: 0 6px; font-size: 11px; font-style: normal; }
 /* 状态格的下一行：状态的补充、要处理的事的标题、数据比别的旧时的「数据截至」，放不下的省略、悬停看全 */
-.jy-stations-sub { display: flex; align-items: center; gap: 4px; max-width: 200px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); white-space: nowrap; }
+.jy-stations-sub { display: flex; align-items: flex-start; gap: 4px; max-width: 150px; font-size: 12px; line-height: 18px; color: var(--jy-ink-3); }
 /* 状态格上一行：档位或「需处理」，和别的格子一样 20 高 */
 .jy-stations-table .jy-status { line-height: 20px; white-space: nowrap; }
 .jy-stations-sub .jy-icon { width: 12px; height: 12px; flex: none; }

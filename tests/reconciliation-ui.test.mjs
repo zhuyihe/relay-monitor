@@ -1727,7 +1727,7 @@ test("加上游只填地址和访问令牌：离开令牌栏就试读，下面�
 test("上游资源：「渠道」一列写几个或「没有渠道」，不能挂渠道的类型写「—」；点开右边抽屉，绑定渠道（渠道默认选第一个、Key 只剩一把替你选好）发 select-key", async (t) => {
   const posts = [];
   const up = (id, name, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, hasAccessToken: true, balance: { ok: true, remaining: 100, checkedAt: new Date().toISOString() }, prediction: { etaDays: 30, burnPerDay: 3, basis: "近 3 小时" }, ...extra });
-  const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true }, up("up1", "主力上游"), up("up2", "没有渠道上游"), up("kk", "只用 Key", { type: "newapi-key" })];
+  const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true }, up("up1", "主力上游"), up("up2", "没有渠道上游"), up("up3", "备用上游三"), up("up4", "备用上游四"), up("kk", "只用 Key", { type: "newapi-key" })];
   const channels = [
     { channelId: 1, name: "高速 A", address: "up1.test", ruleId: "r1", upstreamStationId: "up1", tokenId: 9, tokenName: "oai", tokenGroup: "default", sinceDay: "2026-10-12", suggestedUpstreamId: null },
     { channelId: 5, name: "新模型 P", address: "elsewhere.test", ruleId: null, upstreamStationId: null, tokenId: null, tokenName: null, tokenGroup: null, sinceDay: null, suggestedUpstreamId: null },
@@ -1766,9 +1766,11 @@ test("上游资源：「渠道」一列写几个或「没有渠道」，不能�
 });
 
 test("上游资源：别的列的数字很长时，「渠道」一列的「2 个」「没有渠道」「—」仍各占一行（1280 和 1440 宽）", async (t) => {
-  const long = { balance: { ok: true, remaining: 35101.28, checkedAt: new Date().toISOString() }, prediction: { etaDays: 2, burnPerDay: 161091, basis: "近 3 小时" } };
+  const now = Date.now();
+  const spark = Array.from({ length: 24 }, (_, i) => [now - (24 - i) * 3600e3, 35101 + (24 - i) * 6700]);
+  const long = { balance: { ok: true, remaining: 35101.28, checkedAt: new Date().toISOString() }, prediction: { etaDays: 2, burnPerDay: 161091, basis: "近 3 小时" }, spark, todayUsed: 56124, todayIsEstimate: true };
   const up = (id, name, extra = {}) => ({ id, name, type: "newapi", baseUrl: `https://${id}.test`, monitorEnabled: true, hasAccessToken: true, ...long, ...extra });
-  const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true }, up("up1", "主力上游"), up("up2", "没有渠道上游"), up("kk", "只用 Key", { type: "newapi-key" })];
+  const stations = [{ id: "own", name: "我的站", type: "newapi", isOwn: true, baseUrl: "https://own.test", monitorEnabled: true }, up("up1", "主力上游"), up("up2", "没有渠道上游"), up("up3", "备用上游三"), up("up4", "备用上游四"), up("kk", "只用 Key", { type: "newapi-key" })];
   const chan = (channelId, name) => ({ channelId, name, address: "up1.test", ruleId: `r${channelId}`, upstreamStationId: "up1", tokenId: channelId, tokenName: "oai", tokenGroup: "default", sinceDay: "2026-10-12", suggestedUpstreamId: null });
   const channels = [chan(1, "高速 A"), chan(2, "高速 B")];
   const page = await openFixturePage(t, async (route) => {
@@ -1791,6 +1793,10 @@ test("上游资源：别的列的数字很长时，「渠道」一列的「2 个
       assert.ok(box.height <= 24, `${width} 宽：「${text}」应占一行，实际高 ${box.height}`);
     }
     assert.ok((await table.locator("thead th").nth(2).locator("xpath=.").boundingBox()).height <= 48, "表头不折行");
+    if (width === 1440) {
+      const fit = await page.evaluate(() => { const w = document.querySelector(".jy-table-wrap"), t = document.querySelector(".jy-stations-table"); return { wrap: w.clientWidth, table: t.scrollWidth }; });
+      assert.ok(fit.table <= fit.wrap, `1440 宽下表格不该要左右拖（表 ${fit.table}，容器 ${fit.wrap}），「约 N 天」不能被右边固定的操作列盖住`);
+    }
     if (process.env.UI_SHOT_DIR) await page.screenshot({ path: `${process.env.UI_SHOT_DIR}/stations-${width}x${height}.png` });
   }
 });
