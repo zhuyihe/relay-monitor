@@ -6,7 +6,6 @@
 // 按明细细算另走 /api/own/audit，开销大，只在点按钮时请求。
 import "../../styles/pages/my.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Button } from "antd";
 import { api } from "../../../lib/client";
 import { NAV_LABELS } from "../../../lib/brand";
@@ -49,7 +48,6 @@ const COPY = {
 };
 
 export default function MyStationPage() {
-  const router = useRouter();
   // 默认近 7 天：「今天」在早上几乎是空的，首屏看不出走势
   const [range, setRange] = useUrlState<OwnRange>("range", "7d", RANGES);
   const [tab, setTab] = useUrlState<MyTab>("tab", "overview", TABS);
