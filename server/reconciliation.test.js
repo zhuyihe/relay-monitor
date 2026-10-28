@@ -9958,3 +9958,15 @@ test("渠道换成了别的上游的 Key、或者一个渠道几把 Key：只记
   const rule = await f.repository.getRule("rr_live");
   assert.deepEqual([rule.keyIssue?.code, rule.tokenId], ["CHANNEL_KEY_UNMATCHED", 9]);
 });
+
+test("没配读取服务（线上现状，靠手动绑定在算）：这天的 Key 就是绑定里配的那把，照常结账固定，没有需处理，也不记每天的 Key", async (t) => {
+  let now = Date.parse("2026-10-09T03:00:00Z");
+  const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 0, lookbackBudget: 10, lookbackTimeMs: 60000 } });
+  for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
+  await f.module.refreshDue(now);
+  const booked = f.state.ledger.filter((row) => row.rule_id === "rr_live" && row.bill_date === "2026-10-08");
+  assert.deepEqual(booked.map((row) => Number(row.cost_usd)), [1], "用绑定自己那把 Key 算出上游成本，固定进账本");
+  const rule = await f.repository.getRule("rr_live");
+  assert.equal(rule.keyIssue ?? null, null, "没有 Key 的事项");
+  assert.deepEqual((await f.repository.listDayKeys(["rr_live"], "2026-10-01", "2026-10-31"))["rr_live"] ?? {}, {}, "没读取服务就不记每天的 Key");
+});
