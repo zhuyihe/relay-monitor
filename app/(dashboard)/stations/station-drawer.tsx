@@ -125,7 +125,7 @@ const COPY = Object.freeze({
   howToInstallSteps: [
     "生成一个令牌：在你站的服务器上运行 openssl rand -base64 32，得到的一串就是令牌，下面两处都用它。",
     "在你站的 docker compose 里加一个 relay-key-agent 服务（镜像、环境变量和示例片段见仓库 deploy/README.md「装渠道 Key 读取服务」第 3 步），令牌填进它的 RELAY_KEY_AGENT_SECRET，然后重启。",
-    "把读取服务的 HTTPS 地址填进下面「读取服务地址」。",
+    "把读取服务的 HTTPS 地址填进上面「读取服务地址」。",
     "想更稳妥：按 deploy/README.md 第 2 步给数据库建一个只能查渠道表的专用账号。",
     "装好以后，把令牌填进上面「读取服务令牌」那一栏，点「测试读取」。",
   ],

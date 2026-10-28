@@ -643,56 +643,106 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return { ...input, preset: "custom", startMs, endMs: now, noCap: true };
   }
 
-  // 每日利润页的多天范围（近 7 天、本月、开始算以来、自选范围）：已经固定的日子直接取账本，每条绑定只现读它自己没固定的那几天（向上游和自营站点读）。
-  // 每条绑定从范围里它自己开始算那天起，连着的已固定日子是「前缀」，整体取账本里的收入、成本；现读窗口从这条绑定第一个没固定的那天 0 点起
-  // （范围已经全固定时至少读最后一天，留一份现读的结果当底）。这样旧日子不再有「当时用哪把 Key」的问题，读得也少。
-  // 返回 { liveStartOf(ruleId)：现读从哪一刻起, prefixOf(ruleId)：现读窗口之前那些已固定日子的合计 }；一天的范围、没有可取账本的返回 null
-  async function ledgerSplit(fullInput) {
-    const rules = (await repository.listRules()).filter((rule) => rule.enabled);
-    const now = Date.now(), per = [];
+  // 每日利润页的多天范围（近 7 天、本月、开始算以来、自选范围）：每条绑定逐天相加，不把几天并成一个窗口去读。
+  //   - 已固定的整天（过去的日子、账本里有这一行）：取账本那一行的收入、上游成本；
+  //   - 没固定的天、自选范围头尾的半天：只现读那一天（窗口就是那一天和范围的交集），用那一天自己记下的 Key（reconciliation_rule_day_keys）；
+  //   - 永远不固定的日子（sticky 原因，状态行记着，Key 在别的上游那几天也是）：这一天是「—」，不读、不算进合计。
+  // 每条绑定的结果以最后一天的现读结果为底（状态、倍率、分组），数换成逐天相加的和；窗口换成这条绑定整个范围的窗口，同一页各行的窗口一致。
+  const moneyOfResult = (result) => {
+    const income = Number(result.downstream?.knownAmountUsd ?? result.downstream?.amountUsd);
+    const upstream = result.upstream || {};
+    const cost = result.rates?.costBasis === "fixed" ? 0 : Number(Object.hasOwn(upstream, "countedAmountUsd") ? upstream.countedAmountUsd : upstream.knownAmountUsd ?? upstream.amountUsd);
+    return { income: Number.isFinite(income) ? income : 0, cost: Number.isFinite(cost) ? cost : 0 };
+  };
+  async function dailyProfitResults(input, rules, now) {
+    const per = [];
     for (const rule of rules) {
-      const w = resolveReconciliationWindow({ ...fullInput, timezone: rule.timezone }, now), labels = dayLabelsOf(w, rule.timezone, now);
-      if (labels.length >= 2) per.push({ rule, labels });
+      const w = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, now);
+      per.push({ rule, w, tz: rule.timezone, labels: dayLabelsOf(w, rule.timezone, now) });
     }
-    if (!per.length) return null;
-    const first = per.map((item) => item.labels[0]).sort()[0], last = per.map((item) => item.labels.at(-1)).sort().at(-1);
+    if (!per.some((item) => item.labels.length >= 2)) return null;
+    const ruleIds = per.map((item) => item.rule.id);
+    const firstDay = per.map((item) => item.labels[0]).sort()[0], lastDay = per.map((item) => item.labels.at(-1)).sort().at(-1);
     const facts = new Map();
-    for (const fact of await repository.listLedgerDayFacts(per.map((item) => item.rule.id), first, last)) {
+    for (const fact of await repository.listLedgerDayFacts(ruleIds, firstDay, lastDay)) {
       if (!facts.has(fact.ruleId)) facts.set(fact.ruleId, new Map());
       facts.get(fact.ruleId).set(fact.billDate, fact);
     }
-    const liveStart = new Map(), prefix = new Map();
-    for (const { rule, labels } of per) {
-      const tz = rule.timezone, today = dayKeyInTz(now, tz), started = reconciliationAccountingStart(rule);
-      const startDay = Number.isFinite(started) ? dayKeyInTz(started, tz) : labels[0];
-      const firstDay = startDay > labels[0] ? startDay : labels[0];
-      let day = firstDay;
-      while (day <= labels.at(-1) && day < today && facts.get(rule.id)?.has(day)) day = shiftDayLabel(day, 1);
-      const liveDay = day < labels.at(-1) ? day : labels.at(-1);
-      if (liveDay <= firstDay) continue; // 没有已固定的前缀：整段现读，和以前一样
-      let revenueUsd = 0, costUsd = 0;
-      for (let d = firstDay; d < liveDay; d = shiftDayLabel(d, 1)) {
-        const fact = facts.get(rule.id)?.get(d);
-        revenueUsd += fact?.revenueUsd ?? 0;
-        costUsd += fact?.costBasis === "fixed" ? 0 : fact?.costUsd ?? 0; // 固定成本的上游那天上游成本记 0（毛利不扣 cost_usd）
+    const sticky = new Map();
+    for (const state of await repository.listSettlementStates(ruleIds, { billDates: per.flatMap((item) => item.labels) }).catch(() => [])) {
+      if (state.manualReason != null && reasonKindOf(state.manualReason) === "sticky") {
+        if (!sticky.has(state.ruleId)) sticky.set(state.ruleId, new Set());
+        sticky.get(state.ruleId).add(state.billDate);
       }
-      liveStart.set(rule.id, dayStartInTz(liveDay, tz));
-      prefix.set(rule.id, { revenueUsd, costUsd });
     }
-    return liveStart.size ? { liveStartOf: (ruleId) => liveStart.get(ruleId), prefixOf: (ruleId) => prefix.get(ruleId) ?? null } : null;
-  }
-  // 现读窗口之前的已固定日子并进每条绑定的结果（只加收入、上游成本、毛利三个数；算进利润的才加）
-  function withLedgerPrefix(result, prefix) {
-    if (!prefix || !countsInSummary(result)) return result;
-    const addTo = (object, keys, amount) => {
-      const next = { ...object };
-      for (const key of keys) if (Number.isFinite(Number(next[key])) && next[key] != null) next[key] = Number(next[key]) + amount;
-      return next;
+    // 现读请求：按（起点, 终点）合并，同一天的几条绑定一次读。「今天」（范围终点在今天里）用 today 预设，和单天一样走实时窗口
+    const requests = new Map();
+    const need = (rule, key, requestInput) => {
+      if (!requests.has(key)) requests.set(key, { input: requestInput, ruleIds: new Set() });
+      requests.get(key).ruleIds.add(rule.id);
     };
-    return { ...result,
-      downstream: addTo(result.downstream, ["amountUsd", "knownAmountUsd"], prefix.revenueUsd),
-      upstream: addTo(result.upstream, ["amountUsd", "knownAmountUsd", "countedAmountUsd"], prefix.costUsd),
-      calculation: addTo(result.calculation, ["profitUsd"], prefix.revenueUsd - prefix.costUsd) };
+    const requestFor = ({ tz, w }, day) => {
+      const dayStart = dayStartInTz(day, tz), dayEnd = shiftedDayStartInTz(dayStart, 1, tz), start = Math.max(w.startMs, dayStart), end = Math.min(w.endMs, dayEnd);
+      const todayLive = day === dayKeyInTz(now, tz) && w.endMs >= now;
+      return { key: todayLive ? `today:${dayStart}` : `${start}:${end}`, input: todayLive ? { preset: "today" } : { preset: "custom", startMs: start, endMs: end, noCap: true }, full: start === dayStart && end === dayEnd };
+    };
+    const plan = new Map();
+    for (const item of per) {
+      const { rule, labels, tz } = item, today = dayKeyInTz(now, tz), started = reconciliationAccountingStart(rule);
+      const startDay = Number.isFinite(started) ? dayKeyInTz(started, tz) : labels[0];
+      const entry = { ledger: { income: 0, cost: 0, days: 0 }, live: [] };
+      for (const day of labels) {
+        if (day < startDay || sticky.get(rule.id)?.has(day)) continue;
+        const fact = facts.get(rule.id)?.get(day), request = requestFor(item, day);
+        if (request.full && day < today && fact) {
+          entry.ledger.income += fact.revenueUsd ?? 0;
+          entry.ledger.cost += fact.costBasis === "fixed" ? 0 : fact.costUsd ?? 0; // 固定成本的上游那天上游成本记 0（毛利不扣 cost_usd）
+          entry.ledger.days += 1;
+        } else { need(rule, request.key, request.input); entry.live.push({ day, key: request.key }); }
+      }
+      plan.set(rule.id, entry);
+    }
+    // 底：所有绑定在整个范围最后一天的现读结果（同时给汇总的覆盖、汇率提示等）；先读它
+    const lastItem = per.find((item) => item.labels.at(-1) === lastDay), primary = requestFor(lastItem, lastDay);
+    const answers = new Map(); // key -> response
+    const run = async (key, requestInput, only) => {
+      const key2 = only ? `${key}|${[...only].sort().join(",")}` : key;
+      if (!answers.has(key2)) answers.set(key2, await api.queryRules(only ? { ...requestInput, ruleIds: [...only] } : requestInput, { mode: "evaluate", force: true, origin: "manual", accountUsage: false }));
+      return answers.get(key2);
+    };
+    const response = await run(primary.key, primary.input, null);
+    for (const [key, request] of requests) if (key !== primary.key) await run(key, request.input, request.ruleIds);
+    const resultAt = (key, ruleId, onlyAnswer) => {
+      const found = (answers.get(key) || answers.get(onlyAnswer))?.results.find((row) => row.rule.id === ruleId);
+      return found || null;
+    };
+    const rows = [];
+    for (const item of per) {
+      const { rule, w } = item, entry = plan.get(rule.id);
+      let skeleton = response.results.find((row) => row.rule.id === rule.id);
+      if (!skeleton) continue;
+      // 底是「Key 在别的上游」那一句提示（这一天不算）：用这条绑定最近一个算得出的日子的现读结果当底，状态才不被这件事盖住
+      if (skeleton.health?.code === "KEY_IN_OTHER_UPSTREAM") {
+        const day = [...item.labels].reverse().find((label) => label >= item.labels[0] && !sticky.get(rule.id)?.has(label) && label < lastDay);
+        if (day) {
+          const request = requestFor(item, day), answer = await run(`${request.key}|base`, request.input, new Set([rule.id]));
+          skeleton = answer.results.find((row) => row.rule.id === rule.id) || skeleton;
+        }
+      }
+      let income = entry.ledger.income, cost = entry.ledger.cost, counted = entry.ledger.days;
+      for (const live of entry.live) {
+        const piece = live.key === primary.key ? response.results.find((row) => row.rule.id === rule.id) : resultAt(live.key, rule.id, `${live.key}|${[...requests.get(live.key).ruleIds].sort().join(",")}`);
+        if (!piece || !countsInSummary(piece)) continue;
+        const money = moneyOfResult(piece);
+        income += money.income; cost += money.cost; counted += 1;
+      }
+      const addKeys = (object, keys, value) => { const next = { ...object }; for (const key of keys) if (key in next) next[key] = value; return next; };
+      const merged = !countsInSummary(skeleton) ? { ...skeleton, window: w }
+        : { ...skeleton, window: w, downstream: addKeys(skeleton.downstream, ["amountUsd", "knownAmountUsd"], income), upstream: addKeys(skeleton.upstream, ["amountUsd", "knownAmountUsd", "countedAmountUsd"], cost),
+            calculation: addKeys(skeleton.calculation, ["profitUsd"], income - cost) };
+      rows.push(merged);
+    }
+    return { response, results: rows, stickyDays: sticky };
   }
 
   function serializeWrite(write) {
@@ -908,6 +958,9 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         // 记成只提示的 KEY_IN_OTHER_UPSTREAM，不进需处理；不记 Key；Key 回到原来的上游，下一轮自己解开
         if (ref && ref.upstreamStationId !== rule.upstreamStationId) {
           keyIssues.set(rule.id, issueFor(rule, "KEY_IN_OTHER_UPSTREAM", { channelId: channelIds[0], upstreamStationId: ref.upstreamStationId }));
+          // 当天只要有一刻 Key 在别的上游，这一天就是「—」、不算进合计，Key 回来以后也不补成少算的数：记成永远不固定的日子（sticky）
+          await repository.recordSettlementState(rule.id, dayKeyInTz(observedAt, rule.timezone), { op: "manual", reason: "KEY_IN_OTHER_UPSTREAM", sourceVersion: null, attempts: 0,
+            manualSince: now, firstFailedAt: now, lastAttemptAt: now, nextAttemptAt: null, detail: { code: "KEY_IN_OTHER_UPSTREAM" } }, now).catch(() => {});
           continue;
         }
         // 同一条绑定的渠道各用各的 Key、几把 Key 的渠道：这一版也不算，不记 Key、不进需处理，页面上只提示一句；
@@ -924,6 +977,18 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         }
         if (channelIds.some((id) => !refs[channelIds.indexOf(id)] && !snapshotByChannelId.get(id)?.keyless)) { pending = true; if (openIssue(rule)) keyIssues.set(rule.id, { ...rule.keyIssue }); continue; } // 有渠道这一轮没认出来：等下一轮
         const today = dayKeyInTz(observedAt, rule.timezone);
+        // 读取服务第一次认出这条绑定：从开始算那天到昨天，每天补一行，用这条绑定当时配的那把 Key（装读取服务之前结账用的就是它），
+        // 这样每天都有 Key 记录，不会有「没记录的天按现在的 Key 读」
+        const backfilled = (rt._dayKeyBackfilled ||= new Set());
+        if (!backfilled.has(rule.id)) {
+          const started = reconciliationAccountingStart(rule), startDay = Number.isFinite(started) ? dayKeyInTz(started, rule.timezone) : today, yesterday = shiftDayLabel(today, -1);
+          const have = startDay <= yesterday ? (await repository.listDayKeys([rule.id], startDay, today).catch(() => null))?.[rule.id] : {};
+          if (have && !Object.keys(have).length && startDay <= yesterday) {
+            const rows = [];
+            for (let day = startDay, guard = 0; day <= yesterday && guard < 800; day = shiftDayLabel(day, 1), guard += 1) rows.push({ billDate: day, upstreamStationId: rule.upstreamStationId, tokenId: rule.tokenId, tokenName: rule.tokenName });
+            await repository.recordDayKeys(rule.id, rows).then(() => backfilled.add(rule.id), () => { pending = true; });
+          } else if (have) backfilled.add(rule.id);
+        }
         const changed = Number(ref.tokenId) !== Number(rule.tokenId);
         if (changed) {
           const result = await applyKeyChange(rule, ref, { observedAt, stationLastSuccessAtMs, resources, today });
@@ -3578,14 +3643,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     // ---- 每日利润页 A（设计稿 #118 §9）：整页一次读；一行一天的计算明细点开才读 ----
     // 整页：现有的 queryRules（evaluate，不写库）给整段的收入 / 实付 / 毛利，账本按天的几列给应付成本和差额（lib/profit-page.js 拼）
     async profitPage(rawInput = {}) {
-      const input = await sinceInput(rawInput), since = rawInput.preset === "since";
-      const split = await ledgerSplit(input);
-      // 开始算以来：范围会越来越长，「没算进利润的上游成本」只读得到现读那一截，和页面别处对不上，这个范围下不读也不显示
-      const response = await api.queryRules(input, { mode: "evaluate", force: true, origin: "manual", accountUsage: !since, liveStartOf: split?.liveStartOf });
+      const input = await sinceInput(rawInput);
+      // 多天范围逐天相加（dailyProfitResults）；一天的范围（今天、昨天、选一天）照旧整窗读一次
+      const daily = await dailyProfitResults(input, (await repository.listRules()).filter((rule) => rule.enabled), Date.now());
+      // 「没算进利润的上游成本」只在单天范围显示：多天范围只读得到现读那几天，和页面别处对不上
+      const response = daily ? daily.response : await api.queryRules(input, { mode: "evaluate", force: true, origin: "manual", accountUsage: true });
       const now = Date.parse(response.generatedAt), tz = response.tz;
       const window = resolveReconciliationWindow({ ...input, timezone: tz }, now);
       const labels = dayLabelsOf(window, tz, now);
-      const results = split ? response.results.map((result) => withLedgerPrefix(result, split.prefixOf(result.rule.id))) : response.results;
+      const results = daily ? daily.results : response.results;
       const dayFacts = labels.length && results.length ? await repository.listLedgerDayFacts(results.map((row) => row.rule.id), labels[0], labels.at(-1)) : [];
       // 看一天时「没算进的模型」的名字从那天的明细里拿（只有那几行、一行一次）
       const missing = new Map();
@@ -3622,7 +3688,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const ownIssue = ownIssues.at(-1);
       // 没算进利润的上游成本：直接用 unaccountedUpstream.totalUsd（summarizeUnaccountedUpstream 给的美元合计，算法只有一份；
       // 不能用 .total，那是按 displayCurrency 折算过的，可能是人民币，审核 #126 M4）
-      const unaccountedUpstreamCostUsd = since ? null : response.unaccountedUpstream?.totalUsd ?? null;
+      const unaccountedUpstreamCostUsd = daily ? null : response.unaccountedUpstream?.totalUsd ?? null;
       const rateUnsetIds = new Set();
       const rateUnset = [...(response.unconfiguredRateStations || []), ...fixedRateUnset].filter((station) => (rateUnsetIds.has(station.id) ? false : (rateUnsetIds.add(station.id), true)));
       return { ...page, asOf: response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd, fixedCostCny,
@@ -3749,10 +3815,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         const results = await mapWithConcurrency(selected, MAX_CONCURRENT_RULES, (rule) => {
           // 今天、近 7 天、本月截至取数时刻：规则排队轮到时才定截止点（同 refreshDue），排队久了 Sub2API 实时区间也不会过旧。
           const live = isLiveReconciliationPreset(input.preset);
-          let window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, live ? Math.max(now, Date.now()) : now);
-          // 每日利润页的多天范围：这条绑定已固定的日子取账本，只现读它自己没固定的那几天（profitPage 的 ledgerSplit）
-          const liveStart = options.liveStartOf?.(rule.id);
-          if (liveStart != null && liveStart > window.startMs && liveStart < window.endMs) window = { ...window, preset: "custom", startMs: liveStart };
+          const window = resolveReconciliationWindow({ ...input, timezone: rule.timezone }, live ? Math.max(now, Date.now()) : now);
           // 手动「重新读取」一个已经结束的整天：走结账（settle），和轮询回看同一条路；结不成只更新原因，不推后自动的退避（计划 C2a 2.5）
           const manualSettle = options.mode === "observe" && billDayOf(window) && isSettleableWindow(window, Date.now());
           if (manualSettle) {

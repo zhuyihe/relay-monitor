@@ -250,7 +250,7 @@ export const COPY = Object.freeze({
     unlinked: (n: number) => `另有 ${n} 个渠道还没算利润`,
     // 这种接法这一版还不算利润：只提示，没有按钮（用语规范 §5.6）；最多点三个名，再多写「等 N 个渠道」
     unsupported: (items: string[], total: number) => `这一版还不算利润的渠道：${items.join("；")}${total > items.length ? `；等 ${total} 个渠道` : ""}`,
-    unsupportedKeyInUpstreams: (name: string, upstreams: string[]) => `「${name}」它的 Key ${upstreams.length > 1 ? "在" : "也在"}上游${upstreams.map((upstream) => `「${upstream}」`).join("")}里${upstreams.length > 1 ? "都有" : ""}`,
+    unsupportedKeyInUpstreams: (name: string, upstreams: string[]) => `「${name}」它的 Key 在上游${upstreams.map((upstream) => `「${upstream}」`).join("")}里${upstreams.length > 1 ? "都有" : ""}`,
     logLagging: (at: string) => `自营站点的收费记录读得慢，只读到 ${at}，这以后的应付成本还没算。`,
     goSettings: "去设置",
     readFailed: `读不到${NAV_LABELS.reconciliation}`,
