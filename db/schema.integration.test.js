@@ -48,7 +48,7 @@ const legacyLedgerRows = [
 ];
 
 async function seedLegacySchema(pool) {
-  const tables = ["channel_monitor_links", "reconciliation_settlement_state", "reconciliation_ledger", "reconciliation_billing_capabilities", "reconciliation_alert_state", "reconciliation_snapshots",
+  const tables = ["channel_monitor_links", "reconciliation_fixed_cost_days", "reconciliation_settlement_state", "reconciliation_ledger", "reconciliation_billing_capabilities", "reconciliation_alert_state", "reconciliation_snapshots",
     "reconciliation_rule_segments", "reconciliation_rule_channels", "reconciliation_rules",
     "station_daily_usage", "history_points", "meta", "stations"];
   for (const table of tables) await pool.query(`DROP TABLE IF EXISTS ${table}`);

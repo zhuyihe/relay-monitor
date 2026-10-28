@@ -1,7 +1,7 @@
 // 上游渠道对账的持久化层：只保存规则、聚合快照、告警状态和账单能力核验结果，绝不复制站点凭据。
 import { isCurrentReconciliationBillingContract, isLiveReconciliationPreset, normalizeSuccessfulResult, sameReconciliationWindow } from "../lib/reconciliation-contract.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordPrefix } from "../lib/reconciliation-snapshot.js";
-import { LEDGER_DAY_FACT_COLUMNS, RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, ledgerDayFactFromRow, ledgerEntryFromRow, ledgerHistoryRecord,
+import { LEDGER_DAY_FACT_COLUMNS, RECONCILIATION_LEDGER_COLUMNS, decodeLedgerCursor, encodeLedgerCursor, fixedCostDayFromRow, ledgerDayFactFromRow, ledgerDecimal, ledgerEntryFromRow, ledgerHistoryRecord,
   ledgerInsertValues, ledgerWriteDecision } from "../lib/reconciliation-ledger.js";
 import { refreshSegmentKeysSql, fillMissingSegmentKeysSql } from "../db/segment-keys.js";
 import { accountingFloorFor, applyScopePolicy, isScopedBillingPolicy, normalizeRuleSourceBinding, serializeRuleSourceBinding } from "../lib/reconciliation-scope-policy.js";
@@ -1151,6 +1151,36 @@ export class ReconciliationRepository {
        WHERE l.rule_id = ? AND l.bill_date = ? AND l.expected_cost_usd IS NULL AND l.gap_reason = 'EXPECTED_COST_LAGGING' AND l.revision = ? AND l.revision = latest.max_revision`,
       [ruleId, billDate, expectedCostUsd, gapReason, tokens, JSON.stringify(expected), ruleId, billDate, revision]);
     return Number(result?.affectedRows) > 0;
+  }
+
+  // 固定成本按天固定（G）：INSERT IGNORE，一天一行写了就不改；并发、重启后重复写都不会出第二行
+  async recordFixedCostDays(rows) {
+    if (!rows?.length) return 0;
+    const [result] = await this.pool.query(
+      "INSERT IGNORE INTO reconciliation_fixed_cost_days (station_id, bill_date, basis, cost_cny, cost_rate, note) VALUES ?",
+      [rows.map((row) => [row.stationId, row.billDate, row.basis || "fixed", ledgerDecimal(row.costCny, 8) ?? 0, ledgerDecimal(row.costRate, 6), row.note ?? null])]);
+    return Number(result?.affectedRows) || 0;
+  }
+
+  // [fromDate, toDate] 里已经固定的日子（一条语句）；给了 stationIds 只取这些上游，不给（null）取全部——页面读固定成本时不看上游现在是什么样
+  async listFixedCostDays(stationIds, fromDate, toDate) {
+    if (stationIds != null && !stationIds.length) return [];
+    const [rows] = await this.pool.query(
+      `SELECT station_id, DATE_FORMAT(bill_date, '%Y-%m-%d') AS bill_date, basis, cost_cny, cost_rate, note FROM reconciliation_fixed_cost_days WHERE ${stationIds ? "station_id IN (?) AND " : ""}bill_date >= ? AND bill_date <= ? ORDER BY bill_date, station_id`,
+      stationIds ? [stationIds.map(String), fromDate, toDate] : [fromDate, toDate]);
+    return rows.map(fixedCostDayFromRow);
+  }
+
+  // 这个上游已写的最后一天（没写过是 null）：补数从它的下一天接着往后
+  async latestFixedCostDay(stationId) {
+    const [rows] = await this.pool.query("SELECT DATE_FORMAT(MAX(bill_date), '%Y-%m-%d') AS d FROM reconciliation_fixed_cost_days WHERE station_id = ?", [String(stationId)]);
+    return rows[0]?.d ?? null;
+  }
+
+  // 补数的起点：账本里最早的一天（没有账本是 null）
+  async earliestLedgerDate() {
+    const [rows] = await this.pool.query("SELECT DATE_FORMAT(MIN(bill_date), '%Y-%m-%d') AS d FROM reconciliation_ledger");
+    return rows[0]?.d ?? null;
   }
 
   // 每日利润页（#118 §9）：这些绑定在 [fromDate, toDate] 里每天最新一版的几列（不读 detail JSON）。一条语句，按 (rule_id, bill_date, revision) 主键走

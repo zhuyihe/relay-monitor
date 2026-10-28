@@ -4,7 +4,7 @@
 import { Button } from "antd";
 import { ErrorState, Skeleton } from "../../components/data-state";
 import type { ProfitDetailResponse, ProfitPageResponse, ProfitRow } from "../../../lib/client";
-import { EMPTY, formatCompact, formatDayKey, formatPct, formatZonedDateTime, formatZonedTime } from "../../../lib/format";
+import { EMPTY, formatCompact, formatDayKey, formatPct, formatZonedDateTime, formatZonedTime, OPTION_UNREADABLE_EXPECTED_NOTE, OPTION_UNREADABLE_SETTLED_NOTE } from "../../../lib/format";
 import { formatReconciliationMoney } from "../../../lib/reconciliation-view";
 import { dayKeyInTz } from "../../../lib/business-time";
 import { COPY } from "./copy";
@@ -83,6 +83,7 @@ function Body({ detail, row, page, ctx, compact, onCorrected }: { detail: Profit
       <dt>{COPY.detail.fixedAt}</dt><dd>{detail.fixedAt ? formatZonedDateTime(detail.fixedAt, ctx.tz) : COPY.detail.notFixed}</dd>
       {detail.settled ? <><dt>{COPY.detail.revised}</dt><dd>{detail.revisions && detail.revisions > 1 ? COPY.detail.revisedTimes(detail.revisions - 1) : COPY.detail.notRevised}</dd></> : null}
     </dl>
+    {detail.settingUnreadable ? <p className="jy-caption">{OPTION_UNREADABLE_SETTLED_NOTE}{detail.expected.usd != null ? OPTION_UNREADABLE_EXPECTED_NOTE : ""}</p> : null}
     <TimingCorrection row={row} timezone={ctx.tz} compact={compact} reload={onCorrected} />
     {row.key.upstreamKeyUrl ? <Button href={row.key.upstreamKeyUrl} target="_blank" rel="noreferrer">{COPY.expanded.upstreamKey}</Button> : null}
   </div>;

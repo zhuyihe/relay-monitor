@@ -37,7 +37,7 @@ export function ProfitSummary({ page, ctx, compact, onSelectDay }: Props) {
       <dt className="jy-profit-metric__title">{metric.title}</dt>
       <dd>
         <strong className="jy-profit-metric__value">{metric.value}</strong>
-        {metric.lines.map((line, index) => <p key={index} className={metric.key === "gross" && index === metric.lines.length - 1 && index > 0 ? "jy-profit-metric__net" : undefined}>
+        {metric.lines.map((line, index) => <p key={index} title={metric.key === "gross" && index === metric.lines.length - 1 && index > 0 ? COPY.metric.fixedHover : undefined} className={metric.key === "gross" && index === metric.lines.length - 1 && index > 0 ? "jy-profit-metric__net" : undefined}>
           {line}{index === metric.lines.length - 1 ? <MetricLink metric={metric} onSelectDay={onSelectDay} /> : null}
         </p>)}
         {!metric.lines.length ? <MetricLink metric={metric} onSelectDay={onSelectDay} /> : null}

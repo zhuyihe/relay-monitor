@@ -2,7 +2,7 @@
 // 一个上游一次：新建上游（看余额）+ 每把要算账的 Key 绑定它那几条自营渠道。只用 Key 的上游只绑看余额。
 import { randomUUID } from "node:crypto";
 import { login, progress } from "../lib/env.mjs";
-import { UPSTREAMS, RULES, KEY_UP_CHANNELS, BASE } from "../lib/model.mjs";
+import { UPSTREAMS, RULES, KEY_UP_CHANNELS, BASE, FIXED_COST_UPSTREAMS } from "../lib/model.mjs";
 
 const api = await login();
 await fetch(`${BASE}/__ctl?ratio=old&delay=5`);
@@ -35,6 +35,15 @@ for (const up of UPSTREAMS) {
   } catch (err) {
     failures += 1;
     console.error(`上游 ${up.i} 接入失败：`, err.message, err.data ? JSON.stringify(err.data).slice(0, 500) : "");
+  }
+}
+// 固定成本的上游：接入完以后改上游的汇率和购买记录（种子 04 结账时按它们记账）
+{
+  const { stations } = await api("/api/stations");
+  for (const fixed of FIXED_COST_UPSTREAMS) {
+    const up = UPSTREAMS.find((item) => item.i === fixed.i), station = up && stations.find((item) => item.baseUrl === up.baseUrl && !item.isOwn);
+    if (!station) continue;
+    await api(`/api/stations/${station.id}`, { method: "PUT", body: { cnyPerUsd: fixed.cnyPerUsd, fixedPurchases: fixed.fixedPurchases } });
   }
 }
 await fetch(`${BASE}/__ctl?ratio=current&delay=50`);

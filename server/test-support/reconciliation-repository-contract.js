@@ -1200,6 +1200,39 @@ contract("expected-cost backfill: listLedgerDaysByReason lists lagging days of t
   assert.deepEqual([stillLagging.revision, stillLagging.expectedCostUsd, stillLagging.gapReason], [2, null, "EXPECTED_COST_LAGGING"], "第 2 版没被填、也没被动过");
 });
 
+contract("fixed-cost days: one row per station and day, INSERT IGNORE never rewrites or duplicates; range and station filters; earliest ledger date", async ({ repository, fixture }) => {
+  assert.equal(await repository.recordFixedCostDays([]), 0);
+  assert.equal(await repository.recordFixedCostDays([
+    { stationId: "fxd1", billDate: "2026-01-08", costCny: 10, costRate: 6.8, note: "2 笔在用" },
+    { stationId: "fxd1", billDate: "2026-01-09", costCny: 0, costRate: null },
+    { stationId: "fxd2", billDate: "2026-01-08", costCny: 20.5, costRate: 7.2 }]), 3);
+  // 同一天再写（金额、汇率不同；一批里还有新的一天）：已有的不动，只写新的
+  assert.equal(await repository.recordFixedCostDays([
+    { stationId: "fxd1", billDate: "2026-01-08", costCny: 999, costRate: 1 }, { stationId: "fxd1", billDate: "2026-01-10", costCny: 5, costRate: 6.8 }]), 1);
+  assert.deepEqual((await repository.listFixedCostDays(["fxd1"], "2026-01-01", "2026-01-31")).map((row) => [row.billDate, row.costCny, row.costRate, row.note]),
+    [["2026-01-08", 10, 6.8, "2 笔在用"], ["2026-01-09", 0, null, null], ["2026-01-10", 5, 6.8, null]], "写过的一天不改、没设汇率是 null");
+  assert.deepEqual((await repository.listFixedCostDays(["fxd1", "fxd2"], "2026-01-08", "2026-01-08")).map((row) => [row.stationId, row.costCny]), [["fxd1", 10], ["fxd2", 20.5]], "范围和上游都按给的取");
+  assert.deepEqual(await repository.listFixedCostDays([], "2026-01-01", "2026-01-31"), []);
+  await repository.recordFixedCostDays([{ stationId: "fxd4", billDate: "2026-01-09", basis: "usage", costCny: 0 }, { stationId: "fxd5", billDate: "2026-01-09", basis: "excluded", costCny: 0 }]);
+  const all = await repository.listFixedCostDays(null, "2026-01-09", "2026-01-09");
+  assert.ok(["fxd1", "fxd4", "fxd5"].every((id) => all.some((row) => row.stationId === id)), "不给上游：取这一段里所有上游的行");
+  assert.deepEqual(all.filter((row) => row.stationId === "fxd4" || row.stationId === "fxd5").map((row) => [row.stationId, row.basis, row.costCny]), [["fxd4", "usage", 0], ["fxd5", "excluded", 0]], "计法一起记，按用量、不算进利润的记 0");
+  assert.equal((await repository.listFixedCostDays(["fxd1"], "2026-01-08", "2026-01-08"))[0].basis, "fixed", "不写计法就是 fixed");
+  assert.equal(await repository.latestFixedCostDay("fxd1"), "2026-01-10", "这个上游已写的最后一天");
+  assert.equal(await repository.latestFixedCostDay("fxd-none"), null, "没写过是 null");
+  // 并发写同一天：只留一行
+  await Promise.all([1, 2, 3].map((n) => repository.recordFixedCostDays([{ stationId: "fxd3", billDate: "2026-01-08", costCny: n, costRate: 5 }])));
+  assert.equal((await repository.listFixedCostDays(["fxd3"], "2026-01-08", "2026-01-08")).length, 1);
+  const rule = await fixture.createRule();
+  const [segment] = await repository.listSegments(rule.id);
+  const fingerprint = await fixture.fingerprint(rule.id);
+  const window = { preset: "yesterday", startMs: Date.UTC(2026, 0, 12), endMs: Date.UTC(2026, 0, 13), timezone: "UTC" };
+  const snapshot = billingSnapshot({ rule, segment, fingerprint, window, generatedAt: "2026-01-13T00:20:00.000Z", profitUsd: 2 });
+  assert.equal(await repository.saveSnapshotsForScope(rule.id, fingerprint, [snapshot], { ledger: settlement(snapshot) }), true);
+  const earliest = await repository.earliestLedgerDate();
+  assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(earliest) && earliest <= "2026-01-12", `最早有账本的一天（别的用例在同一个库里也记了账）：${earliest}`);
+});
+
 contract("listLedgerDayFacts gives each rule's latest revision per day inside [from, to], with the expected-cost columns; only the given rules", async ({ repository, fixture }) => {
   const rule = await fixture.createRule(), other = await fixture.createRule({ tokenId: fixture.token(7), channels: [{ channelId: fixture.channel(7), name: "other" }] });
   const book = async (target, day, profitUsd = 2, resettle = false) => {

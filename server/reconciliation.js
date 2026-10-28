@@ -41,7 +41,7 @@ import { OwnLogStore } from "./own-log-store.js";
 import { INGEST, createOwnLogIngest } from "./own-log-ingest.js";
 import { createUpstreamPricing } from "./upstream-pricing.js";
 import { expectedCostForDay } from "../lib/expected-cost-day.js";
-import { buildProfitDetail, buildProfitPage, dayLabelsOf } from "../lib/profit-page.js";
+import { buildProfitDetail, buildProfitPage, dayLabelsOf, fixedCostOfRange } from "../lib/profit-page.js";
 import { reconciliationScopeFingerprint, reconciliationSnapshotRecordIdentity, reconciliationRuleEvidence } from "../lib/reconciliation-snapshot.js";
 import { connectionDiagnostic } from "../lib/connection-test.js";
 import { applyScopePolicy, billingProviderOf, canonicalBillingKey, completedBillingDayWindow, scopePolicyIssues, reconciliationBillingSchedule, isCompletedBillingWindow,
@@ -2848,6 +2848,79 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return (await persistResult(rule, unavailable, origin, evidence.metadata, evidence.token, { scopeFingerprint, billingFingerprint, sourceCredential, generation, billingSource })) ? unavailable : STALE_SCOPE;
   }
 
+  // 固定成本跟着每天一起固定（G）：每个上游、每个已结束的自然日写一行（reconciliation_fixed_cost_days），是「完整的」——页面里这天没有这一行才算还没固定：
+  //   fixed 记那天摊到的人民币金额和汇率，usage（按用量）、excluded（不算进利润）记 0 并标明计法。写了就不再改（主键 + INSERT IGNORE）；
+  //   有没有绑定都写；彻底删除上游也不删已写的行。页面读的地方只有 lib/profit-page.js 的 fixedCostOfRange 一个函数：已固定的日子只认这张表，
+  //   今天和还没固定的日子按现在的购买记录算。
+  // 每个业务日只做一次（内存里记着补到哪天）；每个上游从它已写的最后一天往后接着补（没写过的从最早有账本的那天补，不设天数上限）。
+  // 补以前的日子：那天有账本行，计法和汇率取账本里结账那天记的（页面上线前读的就是它，数不跳；一个上游一天只记一次，任一绑定那天是按用量的就记 usage，#126 M3）；
+  // 没有账本行的，用补数那一刻上游现在的计法和汇率，写了就不再变。
+  let fixedCostFilledThrough = null;
+  const dayBasisOfStation = (station) => (station.includeInProfit === false || station.monitorEnabled === false ? "excluded" : costBasisOf(station));
+  async function settleFixedCostDays(now) {
+    const tz = businessTimeZone();
+    const lastDay = shiftDayLabel(dayKeyInTz(now, tz), -1);
+    if (fixedCostFilledThrough === lastDay) return;
+    const own = usageUpstreams()?.own;
+    const stations = own ? rt.store.list().filter((station) => !station.archivedAt && station.id !== own.id) : [];
+    if (!stations.length) { fixedCostFilledThrough = lastDay; return; }
+    let deferred = false; // 昨天的账还没结的上游这一轮先不写昨天，下一轮再写（零点写昨天时账还没结，不能一律走「没有账本行」）
+    let earliest = null; // 没写过的上游才要：账本最早的一天（用到才读，每天最多一次）
+    const allRules = await repository.listRules({ includeArchived: true });
+    for (const station of stations) {
+      const last = await repository.latestFixedCostDay(station.id);
+      let from;
+      if (last) from = shiftDayLabel(last, 1);
+      else {
+        earliest ??= (await repository.earliestLedgerDate()) || lastDay;
+        from = earliest;
+      }
+      // 第一次写：从最早有账本的那天写起；这个上游建立以前的日子记 excluded、0 元（那时它还不存在，不能按现在的购买记录摊）
+      const createdDay = !last && Number.isFinite(Date.parse(station.createdAt)) ? dayKeyInTz(Date.parse(station.createdAt), tz) : null;
+      if (from > lastDay) continue;
+      const mine = allRules.filter((rule) => String(rule.upstreamStationId) === String(station.id)).map((rule) => rule.id);
+      const facts = mine.length ? await repository.listLedgerDayFacts(mine, from, lastDay) : [];
+      const dayFact = new Map();
+      for (const fact of facts) {
+        const prior = dayFact.get(fact.billDate);
+        if (!prior || (fact.costBasis && fact.costBasis !== "fixed") || (!prior.costBasis && fact.costBasis)) dayFact.set(fact.billDate, fact);
+      }
+      // 没有账本行的日子沿用这个上游在这天以前离它最近的那条账本行的计法；这天以前一条都没有的才用现在的计法（和上线前页面显示的一样）
+      let carry = null;
+      if (last) { const [row] = await repository.listFixedCostDays([station.id], last, last); carry = row && ["fixed", "usage"].includes(row.basis) ? row.basis : null; }
+      const nowBasis = dayBasisOfStation(station), rate = rateSnapshotOf(station), purchases = purchasesOf(station), rows = [];
+      const hasLiveRule = allRules.some((rule) => String(rule.upstreamStationId) === String(station.id) && rule.enabled && !rule.archivedAt);
+      // 那一天这个上游有没有在跑的绑定：那一天落在某条绑定的 [核算起点, 归档时刻) 里（没归档的要还开着）
+      const mineRules = allRules.filter((rule) => String(rule.upstreamStationId) === String(station.id));
+      const liveOn = (day) => {
+        const dayStart = dayStartInTz(day, tz), dayEnd = shiftedDayStartInTz(dayStart, 1, tz);
+        return mineRules.some((rule) => {
+          const start = reconciliationAccountingStart(rule) ?? Date.parse(rule.createdAt);
+          const end = rule.archivedAtMs ?? (rule.enabled ? Infinity : null);
+          return Number.isFinite(start) && start < dayEnd && end != null && end > dayStart;
+        });
+      };
+      for (let day = from; day <= lastDay; day = shiftDayLabel(day, 1)) {
+        const fact = dayFact.get(day);
+        // 上游现在不算进利润（关了「算进利润」、没在监控）：每一天都记 excluded、0 元
+        if (nowBasis === "excluded") { rows.push({ stationId: station.id, billDate: day, basis: "excluded", costCny: 0, costRate: null, note: null }); continue; }
+        if (createdDay && day < createdDay && !fact) { rows.push({ stationId: station.id, billDate: day, basis: "excluded", costCny: 0, costRate: null, note: null }); continue; }
+        if (fact?.costBasis) carry = fact.costBasis === "fixed" ? "fixed" : "usage";
+        // 昨天：有账本行按账本；没有账本行但还有在跑的绑定（账多半还没结）这一轮先不写，往后的日子也先不写；没有绑定的按现在的设置
+        if (day === lastDay && !fact?.costBasis && hasLiveRule) { deferred = true; break; }
+        // 昨天以前、又没有账本行的日子：还有在跑的绑定（账只是卡着没结）按现在的设置；没有绑定了才沿用此前最近一条账本行的计法；昨天（没有绑定的）按现在的设置
+        const basis = fact?.costBasis ? carry : (day === lastDay || liveOn(day) ? nowBasis : (carry ?? nowBasis));
+        if (basis !== "fixed") { rows.push({ stationId: station.id, billDate: day, basis, costCny: 0, costRate: null, note: null }); continue; }
+        const startMs = dayStartInTz(day, tz);
+        const amortized = amortizeFixedCost(purchases, { startMs, endMs: shiftedDayStartInTz(startMs, 1, tz), tz });
+        const dayRate = fact?.costRate > 0 ? fact.costRate : (isConfiguredRate(rate) ? rate.cnyPerUsd : null);
+        rows.push({ stationId: station.id, billDate: day, basis: "fixed", costCny: amortized.exact, costRate: dayRate, note: amortized.note });
+      }
+      if (rows.length) await repository.recordFixedCostDays(rows);
+    }
+    if (!deferred) fixedCostFilledThrough = lastDay;
+  }
+
   // 一条绑定一天的应付成本（V1-b）：桶（整站日志，只读、不发请求）、这一天各段的上游分组倍率、价目表（每小时一次的缓存）、
   // 上游的额度换算；算不出的情况给原因码（lib/expected-cost-day.js）。顺手把桶里的「管理员自用」和 R1 扣的数比一比打一行 debug（V1 只对账，不替换 R1）。
   // 出任何错都不挡结账：那一天应付成本写「—」加 MODEL_PRICE_UNREADABLE / EXPECTED_COST_LAGGING 这类原因
@@ -3559,32 +3632,14 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
         }
       }
       const page = buildProfitPage({ results, dayFacts, window, now, tz, stationOf: upstreamStation, missingModelsFor: (ruleId) => missing.get(ruleId) || [], stickyDays });
-      // 固定成本：固定采购的上游按天平摊（lib/profit.js），换成美元要那个上游设了汇率；有一个没设就给 null（页面写「固定成本算不出，净利先不算」）
-      // 最小改法（审核 #126 M3）：按天摊，已固定的日子按账本那天记的 cost_basis 判要不要摊（fixed 才摊、usage 不摊）、汇率用那天的 cost_rate；
-      // 还没固定的日子（今天、还在读取）按现在的设置摊。注意：摊的「金额」本身还是按现在的购买记录算，改了购买金额过去的日子会跟着变——
-      // 「固定成本本身也按天固定下来」是以后单独一个小 PR 做的事，这里不做
+      // 固定成本（lib/profit-page.js fixedCostOfRange，运营总览、自营业务以后也用它）：已固定的日子读 reconciliation_fixed_cost_days 里那天记下的金额和汇率，
+      // 今天和还没固定的日子按现在的购买记录算；自营站点关着收费记录碰到的日子不扣（决定记录 58）；那天是按用量算的不另扣（审核 #126 M3）。
+      // 没设汇率的固定上游：readResponse 的 unconfiguredRateStations 不含固定上游（那条路不摊固定成本，没必要提示），单独收集、和它的点名去重合并（审核 #126 M6）
       const fixedStations = usageUpstreams()?.fixed || [];
-      let fixedCostUsd = 0;
-      // 没设汇率的固定上游：readResponse 的 unconfiguredRateStations 不含固定上游（那条路不摊固定成本，没必要提示），这里单独收集、和它的点名去重合并（审核 #126 M6）
-      const fixedRateUnset = [];
-      const dayFactOf = new Map(dayFacts.map((item) => [`${item.ruleId}:${item.billDate}`, item]));
-      for (const station of fixedStations) {
-        const rate = rateSnapshotOf(station);
-        if (!isConfiguredRate(rate)) { fixedCostUsd = null; fixedRateUnset.push({ id: station.id, name: station.name }); continue; }
-        if (fixedCostUsd == null) continue;
-        const purchases = purchasesOf(station);
-        const boundRuleIds = results.filter((row) => String(row.rule.upstreamStationId) === String(station.id)).map((row) => row.rule.id);
-        for (const day of labels) {
-          const dayStartMs = Math.max(dayStartInTz(day, tz), window.startMs);
-          const dayEndMs = Math.min(shiftedDayStartInTz(dayStartInTz(day, tz), 1, tz), window.endMs, now);
-          if (dayEndMs <= dayStartMs) continue;
-          const dayUsd = amortizeFixedCost(purchases, { startMs: dayStartMs, endMs: dayEndMs, tz }).exact;
-          if (!dayUsd) continue;
-          const fact = boundRuleIds.map((id) => dayFactOf.get(`${id}:${day}`)).find(Boolean);
-          if (fact) { if (fact.costBasis !== "fixed") continue; fixedCostUsd += dayUsd / Number(fact.costRate || rate.cnyPerUsd); }
-          else fixedCostUsd += dayUsd / Number(rate.cnyPerUsd);
-        }
-      }
+      // 已固定的日子读表里所有上游的行（不看上游现在是什么计法、归档没有、算不算进利润）；一条语句
+      const fixedDays = labels.length ? await repository.listFixedCostDays(null, labels[0], labels.at(-1)) : [];
+      const { usd: fixedCostUsd, cny: fixedCostCny, rateUnset: fixedRateUnset } = fixedCostOfRange({ stations: fixedStations, nameOf: (id) => upstreamStation(id)?.name, results, labels, window, now, tz, dayFacts, fixedDays, stickyDays,
+        offPeriodsOf: (ownStationId) => upstreamStation(ownStationId)?.consumeLogOffPeriods });
       // 整站收入读不到：从各绑定的 health.issues 扫（不另发请求，运营总览走的是现读一次 computeProfit，这里只有结果里带着的问题可查，
       // 审核 #126 M5 要的「同一份」做不到不额外读站点；改法：自营站点侧的令牌类问题（ACCESS_TOKEN_*）也算进来，不只挑第一条、按最新一个）
       const ownIssues = results.flatMap((row) => row.health?.issues || []).filter((issue) =>
@@ -3595,7 +3650,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       const unaccountedUpstreamCostUsd = response.unaccountedUpstream?.totalUsd ?? null;
       const rateUnsetIds = new Set();
       const rateUnset = [...(response.unconfiguredRateStations || []), ...fixedRateUnset].filter((station) => (rateUnsetIds.has(station.id) ? false : (rateUnsetIds.add(station.id), true)));
-      return { ...page, asOf: response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd,
+      return { ...page, asOf: response.generatedAt, tz, displayCurrency: response.displayCurrency, fixedCostUsd, fixedCostCny,
         netProfitUsd: page.pageTotals.grossProfitUsd != null && fixedCostUsd != null ? page.pageTotals.grossProfitUsd - fixedCostUsd : null,
         ownIncomeUnavailable: ownIssue ? { code: ownIssue.code } : null,
         unaccountedUpstreamCostUsd,
@@ -3765,6 +3820,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
       await syncOptionUnreadableSince(rules, { observe: true }); // 设置读不到的时刻从库里对一遍（重启后内存里是空的），结账和需处理都用它
       await settleDue(plan, ownerRegistry);
       await pruneSettlementStates(now);
+      await settleFixedCostDays(now).catch((error) => console.error("固定成本按天固定失败:", error?.message || String(error)));
       // 自营站点整站日志增量读（应付成本 V1-a）：每轮每个自营站点读几页，额度和断路在 lib/own-request-budget.js；读失败不影响这一轮别的事
       // 「算应付成本」开着（settings.expectedCost === true）才读；没设置过、关着都一个整站读请求都不发（每轮读一次，不用重启；用语规范 §8.3）
       const expectedCostOn = rt.store?.settings?.expectedCost === true;

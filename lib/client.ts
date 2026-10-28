@@ -135,7 +135,7 @@ export type ProfitPageResponse = {
   latestSettledGap: { day: string; usd: number | null; mismatchedRowCount: number } | null;
   counts: { channels: number; countedChannels: number; mismatchedChannels: number; attentionChannels: number; uncomputable: Record<string, number>; mismatchedDays: { over: number; under: number } };
   gapThreshold: { usd: number; rate: number }; rows: ProfitRow[];
-  asOf: string; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; netProfitUsd: number | null;
+  asOf: string; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; fixedCostCny?: number | null; netProfitUsd: number | null;
   ownIncomeUnavailable: { code: string } | null; unaccountedUpstreamCostUsd: number | null; unlinkedChannelCount: number;
   rateUnset: { id: string; name: string }[]; fixedOffProfitStations: { id: string; name: string }[];
 };
@@ -151,6 +151,8 @@ export type ProfitDetailResponse = {
   unavailable?: { code: string | null; title: string | null; detail: string | null } | null;
   gap: { usd: number | null; rate: number | null; state: "over" | "under" | "within" | null } | null;
   grossProfitUsd: number | null; fixedAt: string | null; revisions: number | null;
+  // 固定这天时自营站点的设置一直读不到（R2）
+  settingUnreadable?: boolean;
 };
 export type WorkflowAction = {
   // 种类和按钮文字只在 lib/workflow-actions.js 定义（ACTIONS）

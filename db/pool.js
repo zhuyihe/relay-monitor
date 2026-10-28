@@ -288,6 +288,21 @@ export async function ensureSchema(pool) {
   await addColumnIfMissing(pool, "reconciliation_ledger", "expected_cost_usd", "DECIMAL(20,8) NULL");
   await addColumnIfMissing(pool, "reconciliation_ledger", "gap_reason", "VARCHAR(40) NULL");
   await addColumnIfMissing(pool, "reconciliation_ledger", "tokens", "BIGINT NULL");
+  // 固定成本按天固定（G）：每个上游、每个已结束的自然日一行（完整的：这天没有这一行才算还没固定），basis 记那天的计法：
+  // fixed 记摊到的人民币金额和当时的汇率（没设汇率是空），usage（按用量）、excluded（不算进利润）记 0；只插入不改，有没有绑定都写，彻底删除上游也不删。note 是那天购买记录的笔数句（「2 笔在用，1 笔已到期」）。不加外键；页面按（上游, 日期范围）读，走主键。
+  await pool.query(`CREATE TABLE IF NOT EXISTS reconciliation_fixed_cost_days (
+    station_id VARCHAR(32) NOT NULL,
+    bill_date DATE NOT NULL,
+    basis VARCHAR(16) NOT NULL DEFAULT 'fixed',
+    cost_cny DECIMAL(20,8) NOT NULL,
+    cost_rate DECIMAL(12,6) NULL,
+    note VARCHAR(64) NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (station_id, bill_date),
+    INDEX idx_fixed_cost_days_date (bill_date)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await addColumnIfMissing(pool, "reconciliation_fixed_cost_days", "basis", "VARCHAR(16) NOT NULL DEFAULT 'fixed'");
+  await addIndexIfMissing(pool, "reconciliation_fixed_cost_days", "idx_fixed_cost_days_date", "(bill_date)");
   // 结账状态（计划 C2a）：每条绑定每个还没固定的日子一行，固定成了就在同一个事务里删掉。只放没办完的日子，正常时接近空。
   // retry_reason 会自己好的原因（按退避表再试）；manual_reason 要人处理的原因；source_version 记下时的配置代次（变了马上重判）。
   // resettle_* 是重结请求（C2b 才写）。不加外键；清理按 bill_date 每小时删一批 31 天前、没有请求的行。

@@ -56,6 +56,15 @@ const todayPage = (overrides = {}) => page({ range: { preset: "today", startMs: 
 const weekPage = (overrides = {}) => page({ range: { preset: "7d", startMs: dayStartInTz(D("10-20"), TZ), endMs: NOW, timezone: TZ }, dayCounts: { fixed: 6, reading: 0, today: 1 },
   gap: { days: { first: D("10-20"), last: D("10-25"), count: 6, contiguous: true }, expectedCostUsd: 300, actualCostUsd: 301.65, usd: 1.65, overUsd: 2.1, underUsd: 0.5, withinUsd: 0.05, rowCount: 5 }, ...overrides });
 
+test("按人民币显示：固定成本直接用接口给的人民币原值，不拿美元再按自营站点汇率折回（两边汇率不同也不变）", () => {
+  const r = row(); r.rates = { ...r.rates, income: 7.2 };
+  const p = page({ rows: [r], fixedCostUsd: 700 / 6.8, fixedCostCny: 700, displayCurrency: "CNY" });
+  assert.equal(pageMoney(p, "CNY").fixedCost, 700);
+  assert.equal(pageMoney(p, "USD").fixedCost, 700 / 6.8);
+  assert.equal(pageMoney(p, "CNY").fixedExact, true, "人民币原值：固定成本前面不带「≈」");
+  assert.equal(pageMoney(page({ rows: [r], fixedCostUsd: 100, displayCurrency: "CNY" }), "CNY").fixedExact, false, "接口没给人民币原值时才是折算的");
+});
+
 test("差额那一格（§5.7）：多扣 / 少扣带百分比和「对不上」；门槛以内灰字写数；今天「明天出」；算不了写「—」和原因", () => {
   const p = page();
   assert.deepEqual(gapCell(row(), p, ctx), { main: "多扣 $1.20", sub: "比应付多 15%", tag: true, tone: "over", muted: false });
@@ -278,6 +287,9 @@ test("轮询判定：范围里含今天才轮询——「今天」、含今天�
   assert.equal(livePollMs({ preset: "custom", startMs: dayStartInTz(D("10-20"), TZ), endMs: todayStart - 1 }, NOW, TZ), null);
   assert.equal(livePollMs({ preset: "custom" }, NOW, TZ), null, "自定义没给终点：不轮询");
   assert.equal(livePollMs({ preset: "yesterday" }, NOW, TZ), null, "昨天已固定");
+  assert.equal(livePollMs({ preset: "yesterday" }, NOW, TZ, true), LIVE_POLL_LONG_MS, "昨天还有在读取的日子：5 分钟一次");
+  assert.equal(livePollMs({ preset: "custom", startMs: dayStartInTz(D("10-20"), TZ), endMs: todayStart }, NOW, TZ, true), LIVE_POLL_LONG_MS, "不含今天的自定义也一样");
+  assert.equal(livePollMs({ preset: "today" }, NOW, TZ, true), LIVE_POLL_MS, "含今天的照旧 30 秒");
   for (const preset of ["7d", "month"]) assert.equal(livePollMs({ preset }, NOW, TZ), LIVE_POLL_LONG_MS, `${preset} 含今天：和旧页面一样 5 分钟一次`);
   assert.equal(LIVE_POLL_LONG_MS, 300000);
 });
