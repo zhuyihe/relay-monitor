@@ -1815,6 +1815,15 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
     return results.length === 1 ? results[0] : sumKeyStats(results);
   }
 
+  // 老绑定（legacy-v3，不是 isScopedBillingPolicy）的上游成本：这个窗口里有每天记下的 Key（手动选 Key、读取服务认出换 Key 都会记）就按它们读，
+  // 换 Key 那天旧、新两把都算；没有记录的（没换过 Key、没装过读取服务）照旧按分段上的 Key 读，和以前逐字相同
+  async function upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, window, { readOnly }) {
+    const first = dayKeyInTz(window.startMs, window.timezone), last = dayKeyInTz(Math.max(window.startMs, window.endMs - 1), window.timezone);
+    const recorded = await repository.listDayKeys([rule.id], first, last).then((all) => all[rule.id] || {}, () => ({}));
+    if (Object.keys(recorded).length) return upstreamWindowForDayKeys(rule, upstream, metadata, token, window, { readOnly });
+    return upstreamWindowForSegment(upstream, metadata, token, segment, window, { readOnly, upstreamStationId: rule.upstreamStationId });
+  }
+
   function tokenNameIsUnique(metadata, token) {
     return metadata.platform === "sub2api" || metadata.tokens.filter((item) => item.name === token.name).length === 1;
   }
@@ -2619,7 +2628,7 @@ export function createReconciliationModule(rt, { repository = new Reconciliation
             // 结账照样可以记下上游的账单能力（Sub2API 用已结束那天的正消费核验，能力按上游账号记，不是按天写的东西）
             : (isScopedBillingPolicy(rule.billingPolicy)
               ? upstreamWindowForDayKeys(rule, upstream, metadata, token, upstreamWindow, { readOnly: !observe })
-              : upstreamWindowForSegment(upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe, upstreamStationId: rule.upstreamStationId })).catch((error) => ({ error })),
+              : upstreamWindowForLegacyBinding(rule, upstream, metadata, token, segment, upstreamWindow, { readOnly: !observe })).catch((error) => ({ error })),
           (ownAvailable && consumeLogIssue ? Promise.resolve({ error: codedError(consumeLogIssue.code, consumeLogIssue.detail), consumeLog: true })
             : ownAvailable
             ? ownRevenue(own, rule, segmentWindow, { loadStatus: loadOwnStatus, registry: ownerRegistry, reuse: reuseOwnRevenue, settle })

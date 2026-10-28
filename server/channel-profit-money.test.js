@@ -537,3 +537,25 @@ test("手动选 Key 兜底只在没配读取服务时判：配了读取服务的
   const states = await f.repository.listSettlementStates([(await f.rt.reconciliation.listRules())[0].id]);
   assert.ok(states.every((state) => state.manualReason !== "CHANNEL_KEY_NO_USAGE"), "配了读取服务的站点不判「Key 没有用量」");
 });
+
+// 10-13 以前建的绑定（legacy-v3，不是 isScopedBillingPolicy）：成本按分段上的 Key 读，手动换 Key 不能把换 Key 那天旧 Key 的一段丢掉（审核 2）
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`手动选 Key：legacy-v3 的老绑定换 Key，换的那天旧、新两把各算整天（9 点前 Key 9 每秒 1、9 点后 Key 20 每秒 3），第二天起只算新的（${upstreamType}）`, async (t) => {
+    const SWITCH = SH("2026-10-11T09:00:00");
+    const f = await setup(t, { upstreamType, keys: [9, 20], channelKey: {}, noAgent: true, windows: { 9: [-Infinity, SWITCH], 20: [SWITCH, Infinity] }, rates: { 9: 1, 20: 3 } });
+    await f.at("2026-10-09T10:00:00");
+    await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, upstreamStationId: f.supplier.id, tokenId: 9 });
+    // 把这条绑定还原成 10-13 以前建的老绑定：策略 legacy-v3、没有生效时刻，唯一的分段从建绑定那一刻起
+    const row = f.repository.tables.rules[0], created = SH("2026-10-09T10:00:00");
+    Object.assign(row, { billing_policy: "legacy-v3", billing_effective_from_ms: null, scope_version: 1, accounting_floor_ms: null });
+    for (const segment of f.repository.tables.segments.filter((item) => item.rule_id === row.id)) segment.effective_from_ms = created;
+    for (const iso of ["2026-10-09T23:00:00", "2026-10-10T01:00:00", "2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T08:00:00"]) await f.round(iso);
+    await f.at("2026-10-11T09:30:00");
+    assert.equal((await f.profit.selectKey({ ownStationId: f.own.id, channelId: 1, tokenId: 20 })).changed, true);
+    for (const iso of ["2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T23:00:00", "2026-10-13T01:00:00"]) await f.round(iso);
+    const H = 3600, cost = (day) => Number(f.costOn(day)[0]?.cost_usd ?? NaN);
+    assert.equal(cost("2026-10-10"), 24 * H * 1, "换 Key 以前的天只有 Key 9");
+    assert.equal(cost("2026-10-11"), 9 * H * 1 + 15 * H * 3, "换 Key 那天：旧、新两把各取整天");
+    assert.equal(cost("2026-10-12"), 24 * H * 3, "第二天起只用新的");
+  });
+}
