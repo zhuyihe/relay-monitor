@@ -614,6 +614,10 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-eq-result { margin-left: 0; }
   .jy-onboard { grid-template-columns: 1fr; }
   .jy-topbar .jy-range .jy-caption { display: none; }
+  /* 每日利润有六个范围，顶栏放不下时只让范围条横滑，不撑出页面 */
+  .jy-topbar-range { min-width: 0; flex: 0 1 auto; }
+  .jy-topbar-range .jy-range { min-width: 0; }
+  .jy-topbar-range .jy-seg { overflow-x: auto; }
 }
 @media (max-width: 767px) {
   .jy-shell, .jy-shell.is-collapsed { grid-template-columns: minmax(0, 1fr); }
@@ -637,8 +641,8 @@ fieldset.jy-fs > legend { float: left; width: 100%; padding: 0; border: 0; font-
   .jy-topbar .jy-freshness { flex: none; }
   .jy-mobile-range:not(:empty) { display: flex; flex-direction: column; gap: 6px; }
   .jy-mobile-range .jy-range { flex-direction: column; align-items: stretch; gap: 6px; }
-  .jy-mobile-range .jy-seg { width: 100%; }
-  .jy-mobile-range .jy-seg button { flex: 1; padding: 0 6px; justify-content: center; }
+  .jy-mobile-range .jy-seg { width: 100%; overflow-x: auto; } /* 每日利润有六个范围，320 宽放不下时横滑 */
+  .jy-mobile-range .jy-seg button { flex: 1 0 auto; padding: 0 6px; justify-content: center; white-space: nowrap; }
   .jy-mobile-range .jy-range-wrap { width: 100%; }
   .jy-content { padding: 16px; gap: 16px; }
   .jy-page, .jy-tabpanel, .jy-stack { gap: 16px; }

@@ -6,6 +6,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 import { readFileSync } from "node:fs";
 import { credentialFieldOf, UPSTREAM_SECRET_FIELDS } from "../lib/channel-onboarding.js";
 import { secretWeakness } from "../lib/key-fingerprint.js";
+import { KEY_AGENT_URL_INVALID_TEXT, isKeyAgentUrl } from "../lib/key-agent-client.js";
 import { channelSecretFields } from "../lib/notify.js";
 
 const CIPHERTEXT = /^enc:v1:([0-9a-f]{8}):([A-Za-z0-9_-]{16}):([A-Za-z0-9_-]{22,})$/;
@@ -21,6 +22,12 @@ const STATION_SECRET_PATHS = Object.freeze([...UPSTREAM_SECRET_FIELDS, "email", 
 export function assertKeyAgentSecretStrength(secret) {
   const weakness = secretWeakness(secret);
   if (weakness) throw Object.assign(new Error(weakness === "SECRET_TOO_SHORT" ? "令牌至少 32 个字符，用「怎么装」里的命令生成一串" : "令牌太弱，用「怎么装」里的命令生成一串"), { code: weakness });
+}
+// 读取服务地址：填了就必须是 https（令牌在请求头里走，不走明文）。不填就是没装读取服务（没有默认地址），这里不拦，对账照常按手动绑定算
+export function assertKeyAgentUrl(url) {
+  const text = String(url ?? "").trim();
+  if (text && !isKeyAgentUrl(text)) throw Object.assign(new Error(KEY_AGENT_URL_INVALID_TEXT), { code: "KEY_AGENT_URL_NOT_HTTPS" });
+  return text;
 }
 // 清空时写什么：自动登录的令牌是对象，清成 null；其余是字符串，清成空串
 const EMPTY_VALUE = { s2Tokens: null };

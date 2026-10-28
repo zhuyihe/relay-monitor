@@ -237,9 +237,9 @@ test("每日利润默认打开今天：整页一次 POST /profit；页顶一句�
   await metricOf(page, PROFIT_COPY.metric.gapToday).getByText(PROFIT_COPY.metric.tomorrow, { exact: true }).waitFor();
   const latest = metricOf(page, PROFIT_COPY.metric.lessThanExpectedDay("昨天")); await latest.getByText("$0.21", { exact: true }).waitFor(); await latest.locator("p", { hasText: PROFIT_COPY.metric.mismatchedChannelsLink(1) }).waitFor();
   await metricOf(page, PROFIT_COPY.metric.uncounted).getByText(PROFIT_COPY.metric.allCounted, { exact: true }).waitFor();
-  // 表头：渠道、收入、实付成本、毛利、昨天的差额；没有应付成本
+  // 表头：渠道、收入、上游成本、毛利、昨天的差额；没有应付成本
   const headers = await page.locator(".jy-profit-table thead th").allInnerTexts();
-  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), [PROFIT_COPY.table.col.channel, PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.actual, PROFIT_COPY.table.col.gross, PROFIT_COPY.table.yesterdayGap]);
+  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), [PROFIT_COPY.table.col.channel, PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.actual, PROFIT_COPY.table.col.gross, PROFIT_COPY.table.col.margin, PROFIT_COPY.table.yesterdayGap]);
   const rowA = rowOf(page, "Rule A"); await rowA.locator(".jy-profit-gap__main", { hasText: "多扣 $0.20" }).waitFor(); await rowA.locator(".jy-profit-tag", { hasText: PROFIT_COPY.gap.tag }).waitFor(); assert.ok((await rowA.getAttribute("class")).includes("jy-profit-row--over"));
   await rowOf(page, "Rule B").getByText("+$0.01", { exact: true }).waitFor();
   // 昨天还没开始算的渠道写原因，不写 $0.00
@@ -255,12 +255,12 @@ test("每日利润默认打开今天：整页一次 POST /profit；页顶一句�
   assert.equal(await page.locator(".jy-attention, .jy-eq, .jy-equation").count(), 0); assert.equal(await page.getByText("按天看", { exact: true }).count(), 0);
 });
 
-test("切昨天：五个数一行（收入、应付成本、实付成本、差额、毛利），对不上的行红底 / 蓝底带标签，门槛以内灰字；比预期少赚拆成多扣、少扣、门槛以内；筛选和合计按渠道数", async (t) => {
+test("切昨天：五个数一行（收入、应付成本、上游成本、差额、毛利），对不上的行红底 / 蓝底带标签，门槛以内灰字；比预期少赚拆成多扣、少扣、门槛以内；筛选和合计按渠道数", async (t) => {
   const { page, profitReads } = await openDailyPage(t);
   await pickPreset(page, PROFIT_COPY.presets.yesterday);
   await page.locator(".jy-profit-caption").getByText("10月8日 周四 · " + PROFIT_COPY.fixed, { exact: true }).waitFor(); assert.deepEqual(profitReads.at(-1), { preset: "yesterday" });
   const headers = await page.locator(".jy-profit-table thead th").allInnerTexts();
-  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), [PROFIT_COPY.table.col.channel, PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.expected, PROFIT_COPY.table.col.actual, `${PROFIT_COPY.table.col.gap}${PROFIT_COPY.table.col.gapSub}`.replace(/\s+/g, ""), PROFIT_COPY.table.col.gross]);
+  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), [PROFIT_COPY.table.col.channel, PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.expected, PROFIT_COPY.table.col.actual, `${PROFIT_COPY.table.col.gap}${PROFIT_COPY.table.col.gapSub}`.replace(/\s+/g, ""), PROFIT_COPY.table.col.gross, PROFIT_COPY.table.col.margin]);
   const less = metricOf(page, PROFIT_COPY.metric.lessThanExpected); await less.getByText("$0.11", { exact: true }).waitFor(); await less.getByText(PROFIT_COPY.metric.gapBreakdown("$0.20", "$0.10", "+$0.01"), { exact: true }).waitFor(); await less.getByText(PROFIT_COPY.metric.gapRows(3), { exact: true }).waitFor();
   await metricOf(page, PROFIT_COPY.metric.mismatched).getByText(PROFIT_COPY.metric.channels(2), { exact: true }).waitFor();
   assert.ok((await less.getAttribute("class")).includes("jy-profit-metric--crit")); assert.ok(!(await metricOf(page, PROFIT_COPY.metric.mismatched).getAttribute("class")).includes("jy-profit-metric--crit"));
@@ -310,7 +310,7 @@ test("需处理那一行：原因、附注和按钮同一行，差额写「—�
   // 看今天时需处理那一行同样带「· 10月1日起没算进利润」
   const today = await openDailyPage(t, { rows: [rows[0], rows[1]], pageOf: () => profitPage([rows[0], rows[1]]) });
   await today.page.locator(".jy-profit-attention").filter({ hasText: attention.title }).getByText(new RegExp(` · ${PROFIT_COPY.attention.since("10月1日")} · `)).waitFor();
-  await rowB.getByText("$2.50", { exact: true }).waitFor(); await rowB.getByText(PROFIT_COPY.table.unreadable, { exact: true }).waitFor(); assert.equal(await rowB.locator(".jy-profit-num").filter({ hasText: EMPTY }).count(), 3);
+  await rowB.getByText("$2.50", { exact: true }).waitFor(); await rowB.getByText(PROFIT_COPY.table.unreadable, { exact: true }).waitFor(); assert.equal(await rowB.locator(".jy-profit-num").filter({ hasText: EMPTY }).count(), 4); // 差额、毛利、毛利率（新加的一列）和应付成本这几格都写「—」
   await page.locator(".jy-profit-attention").filter({ hasText: attention.title }).getByText(`${PROFIT_COPY.attention.prefix}${attention.title}。${attention.detail} · ${PROFIT_COPY.attention.since("10月1日")} · ${PROFIT_COPY.attention.more(1)}`, { exact: true }).waitFor();
   const update = page.getByRole("link", { name: `${UPDATE_AUTH} Rule B、Rule D`, exact: true }); assert.equal(await update.getAttribute("href"), attention.action.href);
   // 排序：多扣的在前、需处理第二；筛选「需处理 3」按渠道数
@@ -335,11 +335,11 @@ test("空和出错：还没有在算利润的渠道时表的位置写一句加�
   fail = true; await failing.page.getByRole("button", { name: "刷新当前页面数据", exact: true }).click();
   await failing.page.locator(".jy-banner").getByText(refreshFailedText(Date.parse(PROFIT_AS_OF), PROFIT_TZ), { exact: true }).waitFor(); await rowOf(failing.page, "Rule A").locator(".jy-profit-gap__main", { hasText: "多扣 $0.20" }).waitFor();
   assert.deepEqual(failing.queries, [{ preset: "today", observe: true }]);
-  // 读不到自营站点的收入：和运营总览同一句，收入、毛利写「—」，实付成本照常
+  // 读不到自营站点的收入：和运营总览同一句，收入、毛利写「—」，上游成本照常
   const rows = todayRows().map((row) => ({ ...row, incomeUsd: null, grossProfitUsd: null }));
   const unread = await openDailyPage(t, { rows, pageOf: () => ({ ...profitPage(rows, { ownIncomeUnavailable: { code: "OWN_INCOME_UNCONFIRMED" } }), pageTotals: { incomeUsd: null, actualCostUsd: 3, grossProfitUsd: null, grossMarginRate: null }, netProfitUsd: null }) });
   await unread.page.locator(".jy-banner").getByText(`${INCOME_UNREAD.title}：${describeError({ code: "OWN_INCOME_UNCONFIRMED" }).text}。`, { exact: true }).waitFor();
-  await rowOf(unread.page, "Rule A").getByText("$1.00", { exact: true }).waitFor(); assert.equal(await rowOf(unread.page, "Rule A").locator(".jy-profit-num").filter({ hasText: EMPTY }).count(), 2);
+  await rowOf(unread.page, "Rule A").getByText("$1.00", { exact: true }).waitFor(); assert.equal(await rowOf(unread.page, "Rule A").locator(".jy-profit-num").filter({ hasText: EMPTY }).count(), 3); // 收入读不到：收入、毛利、毛利率三格「—」
 });
 
 test("表下面一行：没算进利润的上游成本、还没算利润的渠道、没设置汇率、收费记录读到哪儿了（落后 1 小时以上才写，链到系统设置）", async (t) => {
@@ -356,7 +356,7 @@ test("近 7 天 / 本月：不出应付成本列；差额只加已固定的日�
   await pickPreset(page, PROFIT_COPY.presets["7d"]);
   await page.locator(".jy-profit-caption").getByText(`10月3日–10月9日 · ${PROFIT_COPY.daysFixed(6)}，${PROFIT_COPY.todayLive}`, { exact: true }).waitFor();
   const headers = await page.locator(".jy-profit-table thead th").allInnerTexts();
-  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), [PROFIT_COPY.table.col.channel, PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.actual, PROFIT_COPY.table.col.gross, `${PROFIT_COPY.table.col.gap}${PROFIT_COPY.table.gapFixedDaysRange(6, "10月3日–10月8日")}`.replace(/\s+/g, "")]);
+  assert.deepEqual(headers.map((text) => text.replace(/\s+/g, "")), [PROFIT_COPY.table.col.channel, PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.actual, PROFIT_COPY.table.col.gross, PROFIT_COPY.table.col.margin, `${PROFIT_COPY.table.col.gap}${PROFIT_COPY.table.gapFixedDaysRange(6, "10月3日–10月8日")}`.replace(/\s+/g, "")]);
   const rowA = rowOf(page, "Rule A"); await rowA.locator(".jy-profit-gap__main", { hasText: "多扣 $0.30" }).waitFor(); await rowA.getByText(PROFIT_COPY.gap.mismatchedDaysIn(2), { exact: true }).waitFor();
   await metricOf(page, PROFIT_COPY.metric.lessThanExpectedFixed(6)).getByText("$0.31", { exact: true }).waitFor();
   const rowC = rowOf(page, "Rule C"); await rowC.getByText(PROFIT_COPY.gap.tomorrow, { exact: true }).waitFor(); await rowC.getByText(new RegExp(` · ${PROFIT_COPY.table.startedTodayShort}$`)).waitFor();
@@ -375,7 +375,7 @@ test("手机 390：顶上一张卡片（毛利大字、底下一行昨天的差�
   assert.ok((await cardA.getAttribute("class")).includes("jy-profit-row--over"));
   await summary.getByRole("button", { name: PROFIT_COPY.metric.seeDay("昨天"), exact: true }).click(); assert.deepEqual(profitReads.at(-1), { preset: "yesterday" });
   const card = cardOf(page, "Rule A"); await card.locator(".jy-profit-card__line", { hasText: PROFIT_COPY.table.gapLine(PROFIT_COPY.table.col.gap, "多扣 $0.20", "") }).waitFor(); assert.equal(await page.locator(".jy-profit-card.is-open").count(), 0); await card.locator(".jy-profit-card__head").click();
-  const facts = card.locator(".jy-profit-card__facts"); assert.deepEqual(await facts.locator("dt").allInnerTexts(), [PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.expected, PROFIT_COPY.table.col.actual, PROFIT_COPY.table.col.gap, PROFIT_COPY.table.col.gross]);
+  const facts = card.locator(".jy-profit-card__facts"); assert.deepEqual(await facts.locator("dt").allInnerTexts(), [PROFIT_COPY.table.col.income, PROFIT_COPY.table.col.expected, PROFIT_COPY.table.col.actual, PROFIT_COPY.table.col.gap, PROFIT_COPY.table.col.gross, PROFIT_COPY.table.col.margin]);
   await card.getByRole("group", { name: PROFIT_COPY.expanded.dailyTitle, exact: true }).waitFor();
   await card.getByRole("button", { name: PROFIT_COPY.expanded.seeDetailShort, exact: true }).click();
   const drawer = page.getByRole("dialog", { name: PROFIT_COPY.detail.title("Rule A", "10月8日"), exact: true }); await drawer.waitFor();
@@ -1742,7 +1742,7 @@ test("workflow verification keyboard and financial source links fit 320/390/768/
         .map((node) => ({ tag: node.tagName, className: node.className, right: node.getBoundingClientRect().right, text: node.textContent?.slice(0, 100) })) }));
     assert.ok(overflow.scroll <= overflow.client, JSON.stringify({ width, ...overflow }));
     await drawer.locator(".ant-drawer-close").focus(); await opened.page.keyboard.press("Escape"); await drawer.waitFor({ state: "hidden" });
-    await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText(ANALYTICS_COPY.sourceTitle, { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.waitForURL(/\/reconciliation(\?|$)/); await opened.page.getByText(PROFIT_COPY.table.emptyTitle, { exact: true }).waitFor(); assert.ok(await opened.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)); assert.equal(opened.mutations.length, 0); await opened.page.context().close();
+    await opened.page.goto(baseURL + "/analytics", { timeout: 30000 }); await opened.page.getByText(ANALYTICS_COPY.sourceTitle, { exact: true }).waitFor(); const bill = opened.page.locator('.page-toolbar a[href="/reconciliation"]'); await bill.waitFor(); await bill.focus(); await opened.page.keyboard.press("Enter"); await opened.page.waitForURL(/\/reconciliation(\?|$)/); await opened.page.getByText(PROFIT_COPY.table.emptyTitle, { exact: true }).waitFor(); const rootOverflow = await opened.page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, client: document.documentElement.clientWidth, wide: [...document.querySelectorAll("body *")].filter((node) => node.getBoundingClientRect().right > document.documentElement.clientWidth + 1).slice(0, 6).map((node) => `${node.tagName}.${node.className}`) })); assert.ok(rootOverflow.scroll <= rootOverflow.client, JSON.stringify({ width, ...rootOverflow })); assert.equal(opened.mutations.length, 0); await opened.page.context().close();
   }
 });
 

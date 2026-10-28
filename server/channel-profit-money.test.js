@@ -14,11 +14,11 @@ const SH = (iso) => Date.parse(`${iso}+08:00`);
 const KEY_AGENT_SECRET = "K7m2-xP9q" + "R4t".repeat(10);
 const DAY = 86400;
 
-async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1: 9, 2: 9, 3: 9, 4: 10, 5: 11, 6: 12 }, windows = {} }) {
+async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1: 9, 2: 9, 3: 9, 4: 10, 5: 11, 6: 12 }, windows = {}, elsewhere = {}, rates = {} }) {
   const state = { now: SH("2026-10-10T09:00:00") };
   t.mock.method(Date, "now", () => state.now);
   // windows[keyId] = [fromMs, toMs)：这把 Key 有用量的时段（每秒 1 美元）；没给就是一直在用
-  const used = (keyId, fromMs, toMs) => { const [a, b] = windows[keyId] || [-Infinity, Infinity]; return Math.max(0, Math.min(toMs, b, state.now) - Math.max(fromMs, a)) / 1000; };
+  const used = (keyId, fromMs, toMs) => { const [a, b] = windows[keyId] || [-Infinity, Infinity]; return Math.max(0, Math.min(toMs, b, state.now) - Math.max(fromMs, a)) / 1000 * (rates[keyId] ?? 1); };
   const fake = upstreamType === "sub2api" ? createFakeSub2Api({ keys: keys.map((id) => ({ id, name: `Key ${id}` })),
     dayUsageUsd: (id, day) => { const start = SH(`${day}T00:00:00`); return used(Number(id), start, start + DAY * 1000); }, now: () => state.now }) : null;
   const reply = (body, status = 200) => ({ status, text: async () => JSON.stringify(body) });
@@ -73,13 +73,13 @@ async function setup(t, { upstreamType, keys = [9, 10, 11, 12], channelKey = { 1
   await rt.channelOnboarding.sync();
   const identified = () => ({ ok: true, status: 200, stale: false, fetchedAtMs: state.now, revealIssues: [],
     channels: Object.entries(channelKey).filter(([, tokenId]) => tokenId != null).map(([id, tokenId]) => ({ channelId: Number(id), keyless: false,
-      slots: [{ index: 0, state: "identified", matches: [{ stationId: supplier.id, tokenId, tokenName: `Key ${tokenId}`, via: "fingerprint" }] }] })) });
+      slots: [{ index: 0, state: "identified", matches: [{ stationId: elsewhere[tokenId] ?? supplier.id, tokenId, tokenName: `Key ${tokenId}`, via: "fingerprint" }] }] })) });
   const inject = () => { const result = identified(); rt._keyAgentIdentifyCache = { at: state.now, stationId: own.id, result, lastGood: { etag: null, result, snapshotChannels: null, comparedAt: state.now } }; };
   const profit = createChannelProfitModule(rt, { identify: async () => identified() });
   const at = async (iso) => { state.now = SH(iso); inject(); await rt.channelOnboarding.sync(); };
   const round = async (iso) => { await at(iso); await rt.reconciliation.refreshDue(state.now); };
   const costOn = (day) => repository.tables.ledger.filter((row) => row.bill_date === day);
-  return { state, rt, store, own, supplier, repository, profit, at, round, costOn, requests, channelKey, used };
+  return { state, rt, store, own, supplier, repository, profit, at, round, costOn, requests, channelKey, used, elsewhere };
 }
 
 for (const upstreamType of ["newapi", "sub2api"]) {
@@ -186,7 +186,7 @@ test("同时点两次开始只建一条绑定；同时停止不报错、每个�
 });
 
 for (const upstreamType of ["newapi", "sub2api"]) {
-  test(`A 在算、当天 9 点换 Key，旧 Key 挪给新渠道 B，手动开始 B——每天所有行成本之和 = 各 Key 当天用量之和（${upstreamType}）`, async (t) => {
+  test(`A 在算、当天 9 点换 Key，旧 Key 挪给新渠道 B，手动开始 B——简单口径：每个渠道按当天用过的 Key 整天算，换 Key 那天旧 Key 在 A、B 两行各算一次（已知的重复，第二天起每天之和 = 各 Key 用量之和）（${upstreamType}）`, async (t) => {
     const SWITCH = SH("2026-10-11T09:00:00");
     const f = await setup(t, { upstreamType, keys: [9, 20, 13], channelKey: { 1: 9, 7: 13 }, windows: { 9: [-Infinity, Infinity], 20: [SWITCH, Infinity], 13: [Infinity, Infinity] } });
     await f.at("2026-10-10T10:00:00");
@@ -203,7 +203,8 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     const report = [];
     for (const day of ["2026-10-10", "2026-10-11", "2026-10-12"]) {
       const start = SH(`${day}T00:00:00`), end = start + DAY * 1000;
-      const truth = [9, 20, 13].reduce((sum, id) => sum + f.used(id, start, end), 0);
+      // 换 Key 那天（10-11）Key 9 先属于 A、后属于 B，两行各按整天算一次
+      const truth = [9, 20, 13].reduce((sum, id) => sum + f.used(id, start, end), 0) + (day === "2026-10-11" ? f.used(9, start, end) : 0);
       const rows = f.costOn(day);
       report.push({ day, truth, got: rows.reduce((sum, row) => sum + Number(row.cost_usd || 0), 0), rows: rows.map((row) => `${rules.find((r) => r.id === row.rule_id)?.channels.map((c) => c.channelId)}:${row.cost_usd}`) });
     }
@@ -277,3 +278,195 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     assert.deepEqual([status.state, status.reason], ["blocked", "COUNTED_EARLIER_TODAY"], "读得到了：回到原来的挡");
   });
 }
+
+// 几天合起来看（近 7 天、本月、开始算以来、自选范围）：每把 Key 只读它被记下的那些天。Key 挪到别的渠道以后，旧 Key 在这个渠道没用它的日子里不算（审核 2 H1）
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`多天窗口：Key 挪给别的渠道以后，每个渠道只算它自己记下的那些天的 Key，不把窗口里所有天的 Key 并起来整窗读（${upstreamType}）`, async (t) => {
+    const SWITCH = SH("2026-10-11T09:00:00");
+    const f = await setup(t, { upstreamType, keys: [9, 20, 13], channelKey: { 1: 9, 7: 13 }, windows: { 9: [-Infinity, Infinity], 20: [SWITCH, Infinity], 13: [Infinity, Infinity] } });
+    await f.at("2026-10-10T10:00:00");
+    await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+    for (const iso of ["2026-10-10T12:00:00", "2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T08:00:00"]) await f.round(iso);
+    f.channelKey[1] = 20; f.channelKey[7] = 9; // 9 点：渠道 1 换成 Key 20，Key 9 挪给渠道 7
+    await f.round("2026-10-11T09:00:00");
+    await f.at("2026-10-11T10:00:00");
+    await f.profit.start({ ownStationId: f.own.id, channelIds: [7] });
+    for (const iso of ["2026-10-11T12:00:00", "2026-10-12T01:00:00", "2026-10-12T09:00:00", "2026-10-13T09:00:00"]) await f.round(iso);
+    const dayStart = (day) => SH(`${day}T00:00:00`);
+    const live = await f.rt.reconciliation.queryRules({ preset: "custom", startMs: dayStart("2026-10-10"), endMs: dayStart("2026-10-13") }, { mode: "evaluate", force: true, origin: "manual" });
+    const costOf = (channelId) => Number(live.results.find((row) => row.rule.channels.some((channel) => channel.channelId === channelId)).upstream.amountUsd);
+    // 渠道 1：10-10 记 Key 9，10-11 记 Key 9 和 20（换 Key 那天），10-12 记 Key 20；渠道 7：10-11、10-12 记 Key 9
+    assert.equal(costOf(1), f.used(9, dayStart("2026-10-10"), dayStart("2026-10-12")) + f.used(20, dayStart("2026-10-11"), dayStart("2026-10-13")));
+    assert.equal(costOf(7), f.used(9, dayStart("2026-10-11"), dayStart("2026-10-13")));
+  });
+}
+
+// 开始算以来：已固定的日子取账本，只有没固定的日子才向上游现读（审核 2 性能项）
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`开始算以来：数和整段现读一样，但已固定的日子不再向上游读，只读没固定的那几天（${upstreamType}）`, async (t) => {
+    const f = await setup(t, { upstreamType, keys: [9], channelKey: { 1: 9 } });
+    await f.at("2026-10-10T10:00:00");
+    await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+    for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T23:00:00", "2026-10-13T01:00:00", "2026-10-13T09:00:00"]) await f.round(iso);
+    const dayStart = (day) => SH(`${day}T00:00:00`);
+    const full = await f.rt.reconciliation.queryRules({ preset: "custom", startMs: dayStart("2026-10-10"), endMs: SH("2026-10-13T09:00:00"), noCap: true }, { mode: "evaluate", force: true, origin: "manual" });
+    const expected = Number(full.results[0].upstream.amountUsd), expectedIncome = Number(full.results[0].downstream.amountUsd);
+    const before = globalThis.fetch.mock.calls.length;
+    const page = await f.rt.reconciliation.profitPage({ preset: "since" });
+    assert.deepEqual([page.pageTotals.actualCostUsd, page.pageTotals.incomeUsd], [expected, expectedIncome], "收入、上游成本和整段现读一样");
+    assert.equal(page.range.preset, "since");
+    assert.equal(page.unaccountedUpstreamCostUsd, null, "这个范围下不显示「没算进利润的上游成本」（只读得到现读那一截，和别处对不上）");
+    if (upstreamType === "newapi") {
+      const starts = globalThis.fetch.mock.calls.slice(before).map((call) => new URL(String(call.arguments[0]))).filter((url) => url.host === "up.test" && url.pathname === "/api/log/self/stat")
+        .map((url) => Number(url.searchParams.get("start_timestamp")) * 1000);
+      assert.ok(starts.length > 0 && starts.every((start) => start >= dayStart("2026-10-13")), `只读 10-13（今天）这没固定的一天，读了：${starts.map((start) => new Date(start).toISOString())}`);
+    }
+  });
+}
+
+test("渠道的 Key 换到了另一个已经加了的上游里：从那一刻起这个渠道不算（已经算出来的日子留着），只提示、不进需处理；每日利润表下面写「它的 Key 也在上游「乙」里」", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: { 1: 9 } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T08:00:00"]) await f.round(iso);
+  const booked = f.costOn("2026-10-10").length;
+  assert.equal(booked, 1, "10-10 已经固定");
+  const other = await f.store.add({ name: "乙", type: "fixed" });
+  f.elsewhere[77] = other.id; f.channelKey[1] = 77; // 9 点：渠道 1 的 Key 换成了乙上游里的 Key 77
+  await f.round("2026-10-11T09:00:00");
+  const rule = (await f.rt.reconciliation.listRules())[0];
+  assert.deepEqual([rule.keyIssue?.code, rule.tokenId], ["KEY_IN_OTHER_UPSTREAM", 9], "记成只提示的码，不换绑定的 Key");
+  for (const iso of ["2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T09:00:00"]) await f.round(iso);
+  assert.equal(f.costOn("2026-10-10").length, 1, "已经算出来的日子留着");
+  assert.equal(f.costOn("2026-10-11").length, 0, "从换的那一刻起这个渠道不算，那天不固定");
+  const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-12T09:00:00") });
+  assert.deepEqual(page.unsupportedChannels.map((item) => [item.channelId, item.reason, item.upstreamNames]), [[1, "KEY_IN_OTHER_UPSTREAM", ["乙"]]]);
+  assert.equal(page.rows[0].attention, null, "不进需处理");
+  // Key 回到原来的上游：下一轮自己解开
+  f.channelKey[1] = 9; delete f.elsewhere[77];
+  await f.round("2026-10-12T10:00:00");
+  assert.equal((await f.rt.reconciliation.listRules())[0].keyIssue ?? null, null);
+});
+
+// 每日利润页的多天范围：已固定的日子取账本，旧日子不会按「现在的 Key」重读（审核 2 第二轮：换过 Key 以后 7 天、本月这类范围）
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`多天范围：换过 Key 以后，已固定的日子取账本（数和每天账本之和一致），只现读最后没固定的那天（${upstreamType}）`, async (t) => {
+    const SWITCH = SH("2026-10-11T09:00:00");
+    const f = await setup(t, { upstreamType, keys: [9, 20], channelKey: { 1: 9 }, windows: { 9: [-Infinity, SWITCH], 20: [SWITCH, Infinity] } });
+    await f.at("2026-10-10T10:00:00");
+    await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+    for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T08:00:00"]) await f.round(iso);
+    f.channelKey[1] = 20; // 9 点换成 Key 20
+    for (const iso of ["2026-10-11T09:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T23:00:00", "2026-10-13T01:00:00", "2026-10-13T09:00:00"]) await f.round(iso);
+    const days = ["2026-10-10", "2026-10-11", "2026-10-12"];
+    const ledgerCost = days.reduce((sum, day) => sum + f.costOn(day).reduce((a, row) => a + Number(row.cost_usd || 0), 0), 0);
+    const ledgerIncome = days.reduce((sum, day) => sum + f.costOn(day).reduce((a, row) => a + Number(row.revenue_usd || 0), 0), 0);
+    assert.ok(days.every((day) => f.costOn(day).length === 1), "三天都已固定");
+    const before = globalThis.fetch.mock.calls.length;
+    const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-13T00:00:00") });
+    assert.deepEqual([page.pageTotals.actualCostUsd, page.pageTotals.incomeUsd], [ledgerCost, ledgerIncome], "整页的数 = 每天账本之和");
+    if (upstreamType === "newapi") {
+      const starts = globalThis.fetch.mock.calls.slice(before).map((call) => new URL(String(call.arguments[0]))).filter((url) => url.host === "up.test" && url.pathname === "/api/log/self/stat")
+        .map((url) => Number(url.searchParams.get("start_timestamp")) * 1000);
+      assert.ok(starts.every((start) => start >= SH("2026-10-12T00:00:00")), `只读最后一天，读了：${starts.map((start) => new Date(start).toISOString())}`);
+    }
+  });
+}
+
+// 逐天相加的端到端（每日利润页多天范围）：两把 Key 速率不同（Key 9 每秒 1 美元，Key 20 每秒 3 美元），收入每秒 2 美元。
+// 10-10 开始（Key 9）；10-11 9 点换成 Key 20；10-12 14–16 点 Key 20 出现在别的上游里（那天是「—」、不算进合计，Key 回来也不补）；10-13 照常。
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`多天范围逐天相加：换 Key 那天、半天开头、Key 挪走又回来的那天，每条渠道每天的数（${upstreamType}）`, async (t) => {
+    const SWITCH = SH("2026-10-11T09:00:00");
+    const f = await setup(t, { upstreamType, keys: [9, 20], channelKey: { 1: 9 }, windows: { 9: [-Infinity, SWITCH], 20: [SWITCH, Infinity] }, rates: { 9: 1, 20: 3 } });
+    const other = await f.store.add({ name: "乙", type: "fixed" });
+    await f.at("2026-10-10T10:00:00");
+    await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+    for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T08:00:00"]) await f.round(iso);
+    f.channelKey[1] = 20;
+    for (const iso of ["2026-10-11T09:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T09:00:00"]) await f.round(iso);
+    f.elsewhere[20] = other.id; // 14 点：Key 20 出现在乙上游里
+    await f.round("2026-10-12T14:00:00"); await f.round("2026-10-12T15:00:00");
+    delete f.elsewhere[20]; // 16 点回来
+    for (const iso of ["2026-10-12T16:00:00", "2026-10-12T23:00:00", "2026-10-13T01:00:00", "2026-10-13T12:00:00", "2026-10-13T23:00:00", "2026-10-14T01:00:00", "2026-10-14T09:00:00"]) await f.round(iso);
+    const H = 3600, D = 24 * H;
+    // 每天（逐天相加的参照）：10-10 Key 9 整天；10-11 记了 Key 9 和 20，各整天；10-12 Key 20 整天但那天不算；10-13 Key 20 整天
+    const day10 = D * 1, day11 = 9 * H * 1 + 15 * H * 3, day13 = D * 3, income = (days) => days * D * 2;
+    assert.deepEqual([10, 11, 12, 13].map((d) => f.costOn(`2026-10-${d}`).length), [1, 1, 0, 1], "10-12 没固定（Key 在别的上游的那天不补）");
+    assert.deepEqual([10, 11, 13].map((d) => Number(f.costOn(`2026-10-${d}`)[0].cost_usd)), [day10, day11, day13], "账本里每天的成本");
+    assert.equal((await f.rt.reconciliation.listRules())[0].keyIssue ?? null, null, "Key 回来以后事项解开");
+    // 整段：10-10 到 10-13 整天
+    const whole = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-14T00:00:00") });
+    assert.deepEqual([whole.pageTotals.actualCostUsd, whole.pageTotals.incomeUsd], [day10 + day11 + day13, income(3)], "10-12 不算进合计");
+    const cell = (page, day) => page.rows[0].daily.find((item) => item.day === day);
+    assert.deepEqual(["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13"].map((day) => cell(whole, day).state), ["fixed", "fixed", "attention", "fixed"]);
+    assert.equal(cell(whole, "2026-10-12").reason, "KEY_IN_OTHER_UPSTREAM");
+    // 头一天是半天：从 10-11 15:00 开始。只有今天是实时的：半天头不现读，是「—」、不进合计，只取 10-13 的账本；页面写「有 1 天还没固定」
+    const half = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-11T15:00:00"), endMs: SH("2026-10-14T00:00:00") });
+    assert.deepEqual([half.pageTotals.actualCostUsd, half.pageTotals.incomeUsd, half.notCountedDays.count], [day13, D * 2, 1]);
+  });
+}
+
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`多天范围：头几天没固定（还没结账的整天）：都不现读，是「—」不进合计（${upstreamType}）`, async (t) => {
+    const f = await setup(t, { upstreamType, keys: [9], channelKey: { 1: 9 } });
+    await f.at("2026-10-10T10:00:00");
+    await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+    await f.at("2026-10-13T09:00:00");
+    const D = 24 * 3600;
+    const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-13T00:00:00") });
+    // 只有今天是实时的：10-10、10-11、10-12（昨天）都没固定，一律不现读，是「—」、不进合计，页面写「有 3 天还没固定，没算进来」
+    assert.deepEqual([page.pageTotals.actualCostUsd, page.pageTotals.incomeUsd], [null, null]);
+    assert.deepEqual(page.notCountedDays, { count: 3 });
+    const statCalls = globalThis.fetch.mock.calls.map((call) => new URL(String(call.arguments[0]))).filter((url) => url.pathname === "/api/log/self/stat" || url.pathname === "/api/log/stat");
+    assert.equal(statCalls.length, 0, "一个读上游、读自营站点的请求都没有");
+  });
+}
+
+test("多天范围：昨天还没固定，不现读，是「—」、不进合计、页面写一句；已固定的日子取账本，今天现读", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: { 1: 9 } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T09:00:00"]) await f.round(iso);
+  await f.at("2026-10-13T09:00:00");
+  const D = 24 * 3600, yesterdayStart = SH("2026-10-12T00:00:00") / 1000;
+  const before = globalThis.fetch.mock.calls.length;
+  const page = await f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH("2026-10-10T00:00:00"), endMs: SH("2026-10-13T09:00:00") });
+  assert.equal(page.notCountedDays.count, 1, "昨天没固定，写「有 1 天还没固定，没算进来」");
+  // 10-10、10-11 取账本，10-13 现读 9 小时；昨天 10-12 不进合计
+  assert.equal(page.pageTotals.actualCostUsd, 2 * D + 9 * 3600);
+  assert.equal(page.pageTotals.incomeUsd, 2 * (2 * D + 9 * 3600));
+  const starts = globalThis.fetch.mock.calls.slice(before).map((call) => new URL(String(call.arguments[0]))).filter((url) => url.pathname === "/api/log/self/stat").map((url) => Number(url.searchParams.get("start_timestamp")));
+  assert.ok(!starts.includes(yesterdayStart), "昨天一个请求都没发");
+});
+
+test("多天范围：有账本行、只是重算要人处理（RESETTLE_SHRUNK）的天照取账本，不丢；单天加起来等于多天合计", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: { 1: 9 } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T23:00:00", "2026-10-13T01:00:00", "2026-10-13T09:00:00"]) await f.round(iso);
+  const rule = (await f.rt.reconciliation.listRules())[0], now = SH("2026-10-13T09:00:00");
+  await f.repository.recordSettlementState(rule.id, "2026-10-11", { op: "manual", reason: "RESETTLE_SHRUNK", sourceVersion: null, attempts: 0, manualSince: now, firstFailedAt: now, lastAttemptAt: now, nextAttemptAt: null, detail: { code: "RESETTLE_SHRUNK" } }, now);
+  const range = (a, b) => f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH(`${a}T00:00:00`), endMs: SH(`${b}T00:00:00`) });
+  const whole = await range("2026-10-10", "2026-10-13");
+  const singles = [await range("2026-10-10", "2026-10-11"), await range("2026-10-11", "2026-10-12"), await range("2026-10-12", "2026-10-13")];
+  assert.equal(whole.pageTotals.actualCostUsd, singles.reduce((sum, page) => sum + (page.pageTotals.actualCostUsd ?? 0), 0));
+  assert.equal(whole.pageTotals.actualCostUsd, 3 * 24 * 3600, "10-11 也在合计里");
+});
+
+test("单看昨天或以前的一天：没固定就显示它的状态和原因，不去现读上游和自营站点；固定了读账本", async (t) => {
+  const f = await setup(t, { upstreamType: "newapi", keys: [9], channelKey: { 1: 9 } });
+  await f.at("2026-10-10T10:00:00");
+  await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+  for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T09:00:00"]) await f.round(iso);
+  await f.at("2026-10-13T09:00:00"); // 10-12 还没结账
+  const range = (a, b) => f.rt.reconciliation.profitPage({ preset: "custom", startMs: SH(`${a}T00:00:00`), endMs: SH(`${b}T00:00:00`) });
+  const before = globalThis.fetch.mock.calls.length;
+  const fixed = await range("2026-10-11", "2026-10-12");
+  assert.equal(fixed.pageTotals.actualCostUsd, 24 * 3600, "10-11 已固定：读账本");
+  const unfixed = await range("2026-10-12", "2026-10-13");
+  assert.equal(unfixed.pageTotals.actualCostUsd, null, "10-12 没固定：不进合计");
+  assert.equal(unfixed.rows[0].daily.find((day) => day.day === "2026-10-12").state, "reading", "显示还在读取");
+  const reads = globalThis.fetch.mock.calls.slice(before).map((call) => new URL(String(call.arguments[0]))).filter((url) => url.pathname === "/api/log/self/stat" || url.pathname === "/api/log/stat");
+  assert.equal(reads.length, 0, "过去的一天不读上游也不读自营站点");
+});

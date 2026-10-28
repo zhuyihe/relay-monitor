@@ -1,6 +1,6 @@
 "use client";
-// 计算明细（设计稿 daily-profit-a.md §5、用语规范 §9）：一行一天，从上到下收入、应付成本（按模型拆开）、没算进的模型、实付成本、差额、毛利，
-// 最后倍率、固定于、改过。几个渠道合用一把 Key 时收入、应付成本按渠道各写一行，实付成本只有一个数。
+// 计算明细（设计稿 daily-profit-a.md §5、用语规范 §9）：一行一天，从上到下收入、应付成本（按模型拆开）、没算进的模型、上游成本、差额、毛利，
+// 最后倍率、固定于、改过。几个渠道合用一把 Key 时收入、应付成本按渠道各写一行，上游成本只有一个数。
 import { Button } from "antd";
 import { ErrorState, Skeleton } from "../../components/data-state";
 import type { ProfitDetailResponse, ProfitPageResponse, ProfitRow } from "../../../lib/client";

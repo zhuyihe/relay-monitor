@@ -7,6 +7,7 @@ import type { ReactNode, Ref } from "react";
 import dayjs from "dayjs";
 import { App, Button, Collapse, DatePicker, Drawer, Form, Grid, Input, Select, Switch } from "antd";
 import { api } from "../../../lib/client";
+import { KEY_AGENT_URL_INVALID_TEXT, isKeyAgentUrl } from "../../../lib/key-agent-client.js";
 import { testReadText, workflowActionMeta } from "../../../lib/workflow-actions";
 import { describeError, failureText, requiredText } from "../../../lib/error-copy";
 import { formatRate, formatSellPrice, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../../../lib/format";
@@ -30,8 +31,8 @@ import type { ConnectionTestResult } from "./model";
 
 export type StationDrawerHandle = {
   // trigger：关闭后把焦点还给它（名称链接、编辑按钮、更多菜单按钮）
-  // own：设置自营站点（只在自营业务页用）；不给就是上游（地址 + 令牌，其余在「更多设置」）
-  open: (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean }) => void;
+  // own：设置自营站点（只在自营业务页用）；不给就是上游（地址 + 令牌，其余在「更多设置」）；focus：打开后停在读取服务地址或令牌那一栏
+  open: (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean; focus?: "keyAgentUrl" | "keyAgentSecret" }) => void;
 };
 
 // 参与“有未保存的修改”判断的字段；密钥框初始为空，输入即算修改
@@ -125,7 +126,7 @@ const COPY = Object.freeze({
   purchasesDesc: "每笔按「金额 ÷ 天数」按天平摊，从开始日期算起，到期就不再算；几笔重叠时加在一起（在原来的套餐上加购或续费，就再记一笔）。",
   // 渠道 Key 读取服务（K2a，design/ui-copy-spec.md §3.7、附录「怎么装」收起区）
   keyAgentUrl: "读取服务地址",
-  keyAgentUrlHint: "默认是站点地址后面加固定路径，装在别处时才改。",
+  keyAgentUrlHint: "读取服务装好以后的 HTTPS 地址，必须填；不填就不读渠道 Key，换 Key 也追不到。",
   keyAgentUrlPlaceholder: "https://api.example.com/relay-monitor-agent",
   keyAgentSecret: "读取服务令牌",
   keyAgentSecretHint: "装渠道 Key 读取服务时设的那个令牌，至少 32 个字符。",
@@ -134,7 +135,7 @@ const COPY = Object.freeze({
   howToInstallSteps: [
     "生成一个令牌：在你站的服务器上运行 openssl rand -base64 32，得到的一串就是令牌，下面两处都用它。",
     "在你站的 docker compose 里加一个 relay-key-agent 服务（镜像、环境变量和示例片段见仓库 deploy/README.md「装渠道 Key 读取服务」第 3 步），令牌填进它的 RELAY_KEY_AGENT_SECRET，然后重启。",
-    "有反向代理的，把「站点地址 + 固定路径」转给它，「读取服务地址」不用改；没有反向代理、直接开端口的，在下面「读取服务地址」里填那个地址。都要走 HTTPS。",
+    "把读取服务的 HTTPS 地址填进上面「读取服务地址」。",
     "想更稳妥：按 deploy/README.md 第 2 步给数据库建一个只能查渠道表的专用账号。",
     "装好以后，把令牌填进上面「读取服务令牌」那一栏，点「测试读取」。",
   ],
@@ -145,6 +146,9 @@ const COPY = Object.freeze({
 function keyAgentIssueText(code: string | undefined) {
   if (code === "SECRET_TOO_SHORT") return "令牌至少 32 个字符，用「怎么装」里的命令生成一串";
   if (code === "SECRET_TOO_WEAK") return "令牌太弱，用「怎么装」里的命令生成一串";
+  if (code === "KEY_AGENT_URL_NOT_HTTPS") return KEY_AGENT_URL_INVALID_TEXT;
+  if (code === "KEY_AGENT_URL_INVALID") return "找不到读取服务：地址写错了，或者那个地址上没有它";
+  if (code === "KEY_AGENT_UNAUTHORIZED") return "读取服务说令牌不对：要和装读取服务时设的那个一样";
   return describeError({ code }).text;
 }
 
@@ -215,7 +219,7 @@ export function StationDrawer({
 
   const needsFor = (type: string): string[] => types.find((item) => item.value === type)?.needs || [];
 
-  const openDrawer = (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean }) => {
+  const openDrawer = (station: any | null, trigger?: HTMLElement | null, options?: { own?: boolean; focus?: "keyAgentUrl" | "keyAgentSecret" }) => {
     if (!types.length) {
       message.warning(TYPES_MISSING_TEXT);
       return;
@@ -259,6 +263,8 @@ export function StationDrawer({
     initialSnapshot.current = snapshotOf(values, rows);
     setDirty(false);
     setOpen(true);
+    // 从需处理的「改地址」「改令牌」进来：抽屉开着以后停在对应的那一栏
+    if (options?.focus) setTimeout(() => form.scrollToField(options.focus!, { focus: true, block: "center" }), 350);
   };
 
   useImperativeHandle(ref, () => ({ open: openDrawer }));
@@ -313,7 +319,6 @@ export function StationDrawer({
   const typedUserId = Form.useWatch("userId", form);
   const autoKey = `${String(typedBaseUrl || "").trim()}\n${String(typedToken || "").trim()}\n${String(typedUserId || "").trim()}`;
   const autoReady = !!detected?.ok && detectedKey === autoKey;
-  const canSave = isFixed || unchangedEdit || testPassed || (isAuto && autoReady);
 
   // 离开令牌（或用户 ID）栏：认类型和名字、顺带读一次
   const runDetect = async () => {
@@ -332,6 +337,9 @@ export function StationDrawer({
       setDetecting(false);
     }
   };
+  const typedKeyAgentUrl = Form.useWatch("keyAgentUrl", form);
+  const keyAgentUrlBad = isOwnStation && !!String(typedKeyAgentUrl || "").trim() && !isKeyAgentUrl(typedKeyAgentUrl);
+  const canSave = (isFixed || unchangedEdit || testPassed || (isAuto && autoReady)) && !keyAgentUrlBad;
 
   const onTestConnection = async () => {
     const values = form.getFieldsValue();
@@ -634,7 +642,7 @@ export function StationDrawer({
             type="primary"
             loading={saving}
             disabled={!canSave || (!!editing && !dirty)}
-            title={!canSave ? COPY.testFirst : editing && !dirty ? COPY.noChange : undefined}
+            title={keyAgentUrlBad ? KEY_AGENT_URL_INVALID_TEXT : !canSave ? COPY.testFirst : editing && !dirty ? COPY.noChange : undefined}
             onClick={onSave}
           >
             {saveLabel}
@@ -692,7 +700,7 @@ export function StationDrawer({
           {credentialItems.length > 1 ? <div className="jy-two">{credentialItems}</div> : credentialItems}
           {isOwnStation && (
             <>
-              <Form.Item label={COPY.keyAgentUrl} name="keyAgentUrl" extra={COPY.keyAgentUrlHint}>
+              <Form.Item label={COPY.keyAgentUrl} name="keyAgentUrl" extra={COPY.keyAgentUrlHint} validateStatus={keyAgentUrlBad ? "error" : undefined} help={keyAgentUrlBad ? KEY_AGENT_URL_INVALID_TEXT : undefined}>
                 <Input placeholder={COPY.keyAgentUrlPlaceholder} autoComplete="off" inputMode="url" />
               </Form.Item>
               <Form.Item

@@ -77,7 +77,7 @@ const FORBIDDEN = [
 // §3.7 的类型名和输入框名，以及 Key、ID、Token；文案表里的 {channel} 这类占位符填的是名称和时间。去掉这些后不该再有英文字母。
 // 「API」只许出现在类型名和 Key 说明里的上游页面名「API 密钥」中，单独写的「API」「API 地址」算后端用语；
 // 「UTC 时间」是 §6 那句「按 UTC 时间算一天」
-const ALLOWED_ENGLISH = /New API|Sub2API|「API 密钥」|Key|ID|Token|UTC 时间|sk-|https?:\/\/[\w./-]+|\{\w+\}/g;
+const ALLOWED_ENGLISH = /New API|Sub2API|「API 密钥」|Key|ID|Token|UTC 时间|sk-|https?:\/\/[\w./-]*|\{\w+\}/g;
 // lib/notify.js 是通知方式的类型名和填写项：§3.7 让它们照对方后台的原名写（类型名里的品牌、Webhook 地址、ntfy 令牌、Resend Key、
 // SMTP 服务器的例子、请求头的 JSON 格式），只在这个文件放行，别处照样卡
 const ENGLISH_ALLOWED_IN = Object.freeze({

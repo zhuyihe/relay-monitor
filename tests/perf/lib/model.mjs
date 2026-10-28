@@ -19,7 +19,7 @@ export const BASE = `http://127.0.0.1:${PORT}`;
 // 和上游共用一个端口的话，读上游的请求也算进自营站点的 180 秒 360 个里，整站读分到的额度就不对了
 export const OWN_PORT = Number(process.env.FAKE_OWN_PORT || PORT + 1);
 // 渠道 Key 读取服务（PERF_KEY_AGENT=on）单独一个 https 端口：控制台只认 https 的读取服务地址（lib/key-agent-client.js），
-// http 的地址直接回 KEY_AGENT_URL_INVALID、一个请求都不发。证书是 run.sh 用 openssl 现生成的自签证书（CN、SAN 都是 127.0.0.1），
+// http 的地址直接回 KEY_AGENT_URL_NOT_HTTPS、一个请求都不发。证书是 run.sh 用 openssl 现生成的自签证书（CN、SAN 都是 127.0.0.1），
 // 放在结果目录外面（PERF_TLS_DIR，CI 上传的产物里不能有私钥）；被测应用进程带 NODE_EXTRA_CA_CERTS 指到它（不关证书校验）
 export const KEY_AGENT_PORT = Number(process.env.FAKE_KEY_AGENT_PORT || PORT + 2);
 export const KEY_AGENT_URL = `https://127.0.0.1:${KEY_AGENT_PORT}/key-agent`;
