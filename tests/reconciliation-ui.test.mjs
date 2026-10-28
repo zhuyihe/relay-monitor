@@ -2197,7 +2197,7 @@ test("上游编辑页的 Esc 先收起展开的日期面板，再交给抽屉关
   const drawer = page.getByRole("dialog", { name: UPSTREAM_FORM_TEXT.create, exact: true });
   await drawer.waitFor();
   // 加上游默认只有地址和令牌：固定成本在「更多设置」里选类型
-  await drawer.getByRole("button", { name: "更多设置", exact: true }).click();
+  await drawer.getByText("更多设置", { exact: true }).click();
   await drawer.getByRole("combobox", { name: "类型", exact: true }).click();
   await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: "固定成本" }).click();
   await drawer.getByRole("button", { name: "再记一笔", exact: true }).click();
