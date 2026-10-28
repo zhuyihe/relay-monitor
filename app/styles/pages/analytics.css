@@ -29,3 +29,11 @@
   .jy-analytics-source { flex-wrap: wrap; }
   .jy-analytics-source .page-toolbar { width: auto; margin-left: 24px; }
 }
+
+/* 每天的上游成本：一天一根柱，今天那根虚线 */
+.jy-daily-cost { display: flex; align-items: flex-end; gap: 4px; height: 180px; margin: 0; padding: 0; list-style: none; }
+.jy-daily-cost li { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 4px; }
+.jy-daily-cost__bar { display: block; width: 100%; background: var(--jy-s2); border-radius: 3px 3px 0 0; }
+.jy-daily-cost li.is-today .jy-daily-cost__bar { background: transparent; border: 1.5px dashed var(--jy-s2); border-bottom: 0; }
+.jy-daily-cost__day { font-size: 11px; color: var(--jy-ink-3); }
+.jy-swatch--dashed { display: inline-block; width: 12px; height: 10px; border: 1.5px dashed var(--jy-s2); vertical-align: middle; }

@@ -138,6 +138,8 @@ export type ProfitPageResponse = {
   asOf: string; tz: string; displayCurrency: ReconciliationCurrency; fixedCostUsd: number | null; fixedCostCny?: number | null; netProfitUsd: number | null;
   ownIncomeUnavailable: { code: string } | null; unaccountedUpstreamCostUsd: number | null; unlinkedChannelCount: number;
   rateUnset: { id: string; name: string }[]; fixedOffProfitStations: { id: string; name: string }[];
+  // 每天的实付成本合计（成本估算「每天的上游成本」用）：美元原值和按各行汇率折的人民币
+  dailyCost?: { day: string; actualCostUsd: number; actualCostCny?: number }[];
 };
 export type ProfitDetailModel = { model: string; upstreamModel?: string | null; requests: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; pricesPerMillion?: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null } | null; beforeRatioUsd: number; usd: number };
 export type ProfitDetailResponse = {

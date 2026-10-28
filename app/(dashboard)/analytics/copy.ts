@@ -5,7 +5,7 @@ import { EMPTY, RATE_UNSET_PARITY, SELL_PRICE_UNSET } from "../../../lib/format.
 
 export const COPY = Object.freeze({
   eqTitle: "成本与利润",
-  panel: Object.freeze({ mix: "上游成本构成", heat: "花费时段", runway: "可用天数", summary: "成本概况", coverage: "没算进去的数据" }),
+  panel: Object.freeze({ daily: "每天的上游成本", mix: "上游成本构成", heat: "花费时段", runway: "可用天数", summary: "成本概况", coverage: "没算进去的数据" }),
   readFailed: "读不到成本数据",
   coverageLink: "查看没算进去的数据",
   archiveToggle: "包含已归档",
@@ -49,6 +49,9 @@ export const COPY = Object.freeze({
   usageRecord: "用量记录",
   missingDays: (n: number) => `缺 ${n} 天，没算进去`,
   mixCaption: "按上游，所选时间合计",
+  dailyCaption: "按天，所选时间内",
+  dailyEmpty: "这段时间没有上游成本。",
+  todayLegend: "今天（还会变）",
   mixUnread: "读不到每日利润，这里先不显示。",
   unaccounted: "没算进利润的上游成本",
   mixUnit: "成本",

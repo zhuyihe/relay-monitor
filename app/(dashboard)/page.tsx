@@ -25,8 +25,9 @@ import type { AttentionItem } from "../components/attention-list";
 import { EmptyState, ErrorState, PanelSkeleton } from "../components/data-state";
 import type { TipRow } from "../components/float-tip";
 import { CountBadge, Panel } from "../components/panel";
-import { compareRunwayItems, Runway, RUNWAY_TEXT } from "../components/runway";
+import { compareRunwayItems, RUNWAY_TEXT } from "../components/runway";
 import type { RunwayItem } from "../components/runway";
+import { StatusText } from "../components/status";
 import { useShellPage } from "../components/shell-context";
 import { useWorkflowActions } from "../components/use-workflow-actions";
 import { actionPhrase, workflowDetail, workflowOwner, workflowProblem } from "../components/workflow-copy";
@@ -43,7 +44,12 @@ const REFRESH = workflowActionMeta("refresh")!.label;
 // 运营总览独有的话，只在这一处写；用语按 design/ui-copy-spec.md
 const COPY = Object.freeze({
   profitTitle: "今天赚了多少",
-  profitUnread: "读不到每日利润",
+  profitUnread: "读不到每日利润，这里先不显示。",
+  profitNoChannels: "还没有在算利润的渠道",
+  startCounting: "开始算利润",
+  profitAttention: (n: number) => `今天还算不出：${n} 个渠道需处理`,
+  profitUnavailable: "今天还算不出",
+  noSpend: "近期没有花费",
   equation: (income: string, cost: string) => `收入 ${income} − 上游成本 ${cost}`,
   profitLink: "每日利润",
   readFailed: (what: string) => `读不到${what}`,
@@ -258,6 +264,21 @@ function ProfitToday({ profit, error, onRetry }: { profit: ProfitPageResponse | 
   const currency = profit.displayCurrency === "CNY" ? "CNY" : "USD";
   const ctx = { currency, tz: profit.tz, zoneOf: () => profit.tz } as Ctx;
   const money = pageMoney(profit, currency);
+  if (money.gross == null) {
+    const attentionN = profit.counts?.attentionChannels ?? 0;
+    return (
+      <Panel title={COPY.profitTitle} extra={link}>
+        {profit.rows.length === 0 ? (
+          <>
+            <p>{COPY.profitNoChannels}</p>
+            <Button size="small" href="/stations">{COPY.startCounting}</Button>
+          </>
+        ) : (
+          <p>{attentionN > 0 ? COPY.profitAttention(attentionN) : COPY.profitUnavailable}</p>
+        )}
+      </Panel>
+    );
+  }
   const gross = metrics(profit, ctx)[0];
   const lines = [...gross.lines];
   lines[0] = COPY.equation(fmtMoney(money.income, currency), fmtMoney(money.actual, currency));
@@ -512,7 +533,6 @@ function RunwayPanel({
   onTrend: (s: any) => void;
 }) {
   const router = useRouter();
-  const critDays = etaWindowDays(rules);
   const allLink = (
     <Link className="jy-caption-link" href="/stations">
       {STATION_TABS.list}
@@ -556,7 +576,7 @@ function RunwayPanel({
         level: view.level,
         state,
         // 余额用完时天数写「—」，只看档位名（和上游列表、余额趋势同一个写法）
-        daysLabel: balanceDaysText(view),
+        daysLabel: view.days === Infinity ? COPY.noSpend : balanceDaysText(view),
         tip,
       };
       return { item };
@@ -600,8 +620,15 @@ function RunwayPanel({
     );
   }
   return (
-    <Panel title={COPY.runway} extra={allLink} body={false}>
-      <Runway items={shown.map((r) => r.item)} critDays={critDays} />
+    <Panel title={COPY.runway} extra={allLink}>
+      <ul className="jy-ov-low">
+        {shown.map((r) => (
+          <li key={r.item.key}>
+            {r.item.name} {r.item.state ? <StatusText level={r.item.level}>{r.item.state}</StatusText> : null}
+            {[r.item.sub, r.item.daysLabel].filter(Boolean).map((part, i) => <span key={i}> · {part}</span>)}
+          </li>
+        ))}
+      </ul>
     </Panel>
   );
 }
