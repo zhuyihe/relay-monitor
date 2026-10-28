@@ -26,7 +26,7 @@ export function assertKeyAgentSecretStrength(secret) {
 // 读取服务地址：填了就必须是 https（令牌在请求头里走，不走明文）；不填是用默认地址，不算错
 export function assertKeyAgentUrl(url) {
   const text = String(url ?? "").trim();
-  if (text && !isKeyAgentUrl(text)) throw Object.assign(new Error(KEY_AGENT_URL_INVALID_TEXT), { code: "KEY_AGENT_URL_INVALID" });
+  if (text && !isKeyAgentUrl(text)) throw Object.assign(new Error(KEY_AGENT_URL_INVALID_TEXT), { code: "KEY_AGENT_URL_NOT_HTTPS" });
   return text;
 }
 // 清空时写什么：自动登录的令牌是对象，清成 null；其余是字符串，清成空串

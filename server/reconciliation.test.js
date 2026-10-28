@@ -9051,7 +9051,7 @@ test("copySegment：复制一份分段改 id，普通字段是自己的（不借
   assert.equal(Object.getOwnPropertyDescriptor(copy, "keys").enumerable, false, "keys 还是不可枚举，不会被 JSON.stringify / Object.keys 带出来");
 });
 
-test("R2 × 每天的 Key：这几天各记了两把 Key，碰到关过的一天按天切开，每一截都要取到这两把（审核 #114 中-G，总指挥 10-26 定）", async (t) => {
+test("R2 × 每天的 Key：这几天各记了两把 Key，碰到关过的一天按天切开，每一截都要取到这两把（审核 #114 中-G）", async (t) => {
   let now = Date.parse("2026-10-09T03:00:00Z");
   const f = await completedDayFixture(t, { clock: () => now, moduleOptions: { lookbackDelayMs: 24 * 3600000 } });
   for (const row of f.rows) row.enabled = row.id === "rr_live" ? 1 : 0;
@@ -9949,13 +9949,19 @@ test("渠道的 Key 对不上上游：Key 不在已加的上游里、上游令�
   assert.equal(rule.keyIssue ?? null, null, "认出来以后清掉");
 });
 
-test("渠道换成了别的上游的 Key、或者一个渠道几把 Key：只记「渠道的 Key 对不上上游」一句，不换绑定的 Key、不算", async (t) => {
+test("渠道的 Key 哪个上游里都找不到才是需处理的「渠道的 Key 对不上上游」；一个渠道几把 Key 这一版还不算：不进需处理、不换绑定的 Key", async (t) => {
   const { f, agent, round } = await readerOutageFixture(t);
   await round("2026-10-11T01:00:00Z"); await round("2026-10-11T01:10:00Z"); // 第一轮锚定绑定，第二轮才记 Key
-  // 一个渠道读到两把 Key
+  // 一个渠道读到两把 Key：只提示，不进需处理
   agent.channels = () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(agent.key), f: "unused-1" }, { i: 1, m: maskKey("sk-" + "TenT".repeat(10)), f: "unused-2" }] }];
   await round("2026-10-11T03:00:00Z");
-  const rule = await f.repository.getRule("rr_live");
+  let rule = await f.repository.getRule("rr_live");
+  assert.deepEqual([rule.keyIssue?.code ?? null, rule.tokenId], [null, 9]);
+  // 一把哪个上游里都没有的 Key：需处理
+  agent.key = "sk-" + "Nowh".repeat(10);
+  agent.channels = () => [{ id: 1, baseUrl: "https://upstream.test", keys: [{ i: 0, m: maskKey(agent.key), f: "unused-3" }] }];
+  await round("2026-10-11T03:10:00Z");
+  rule = await f.repository.getRule("rr_live");
   assert.deepEqual([rule.keyIssue?.code, rule.tokenId], ["CHANNEL_KEY_UNMATCHED", 9]);
 });
 

@@ -31,7 +31,7 @@ export const POST = withAuth(async (request, rt) => {
   try {
     s = await rt.store.add(b);
   } catch (error) {
-    if (["SECRET_TOO_SHORT", "SECRET_TOO_WEAK", "KEY_AGENT_URL_INVALID"].includes(error.code)) return json({ error: error.message, code: error.code }, 400);
+    if (["SECRET_TOO_SHORT", "SECRET_TOO_WEAK", "KEY_AGENT_URL_NOT_HTTPS"].includes(error.code)) return json({ error: error.message, code: error.code }, 400);
     throw error;
   }
   rt._ownCache?.clear();

@@ -136,7 +136,9 @@ const COPY = Object.freeze({
 function keyAgentIssueText(code: string | undefined) {
   if (code === "SECRET_TOO_SHORT") return "令牌至少 32 个字符，用「怎么装」里的命令生成一串";
   if (code === "SECRET_TOO_WEAK") return "令牌太弱，用「怎么装」里的命令生成一串";
-  if (code === "KEY_AGENT_URL_INVALID") return KEY_AGENT_URL_INVALID_TEXT;
+  if (code === "KEY_AGENT_URL_NOT_HTTPS") return KEY_AGENT_URL_INVALID_TEXT;
+  if (code === "KEY_AGENT_URL_INVALID") return "找不到读取服务：地址写错了，或者那个地址上没有它";
+  if (code === "KEY_AGENT_UNAUTHORIZED") return "读取服务说令牌不对：要和装读取服务时设的那个一样";
   return describeError({ code }).text;
 }
 

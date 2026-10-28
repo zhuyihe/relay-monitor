@@ -585,4 +585,5 @@ test("keyAgentExceptionIssueOf：地址不是 https / 令牌被拒（401）第�
   assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 3, lastCode: "KEY_AGENT_UNAVAILABLE" }), "KEY_READER_UNREACHABLE");
   assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 1, lastCode: "KEY_AGENT_UNAUTHORIZED" }), "KEY_AGENT_UNAUTHORIZED");
   assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 1, lastCode: "KEY_AGENT_URL_INVALID" }), "KEY_AGENT_URL_INVALID");
+  assert.equal(keyAgentExceptionIssueOf({ consecutiveFailures: 1, lastCode: "KEY_AGENT_URL_NOT_HTTPS" }), "KEY_AGENT_URL_INVALID", "存着的地址不是 https，也是「地址不对」");
 });

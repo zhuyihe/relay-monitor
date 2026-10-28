@@ -278,3 +278,47 @@ for (const upstreamType of ["newapi", "sub2api"]) {
     assert.deepEqual([status.state, status.reason], ["blocked", "COUNTED_EARLIER_TODAY"], "读得到了：回到原来的挡");
   });
 }
+
+// 几天合起来看（近 7 天、本月、开始算以来、自选范围）：每把 Key 只读它被记下的那些天。Key 挪到别的渠道以后，旧 Key 在这个渠道没用它的日子里不算（审核 2 H1）
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`多天窗口：Key 挪给别的渠道以后，每个渠道只算它自己记下的那些天的 Key，不把窗口里所有天的 Key 并起来整窗读（${upstreamType}）`, async (t) => {
+    const SWITCH = SH("2026-10-11T09:00:00");
+    const f = await setup(t, { upstreamType, keys: [9, 20, 13], channelKey: { 1: 9, 7: 13 }, windows: { 9: [-Infinity, Infinity], 20: [SWITCH, Infinity], 13: [Infinity, Infinity] } });
+    await f.at("2026-10-10T10:00:00");
+    await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+    for (const iso of ["2026-10-10T12:00:00", "2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T08:00:00"]) await f.round(iso);
+    f.channelKey[1] = 20; f.channelKey[7] = 9; // 9 点：渠道 1 换成 Key 20，Key 9 挪给渠道 7
+    await f.round("2026-10-11T09:00:00");
+    await f.at("2026-10-11T10:00:00");
+    await f.profit.start({ ownStationId: f.own.id, channelIds: [7] });
+    for (const iso of ["2026-10-11T12:00:00", "2026-10-12T01:00:00", "2026-10-12T09:00:00", "2026-10-13T09:00:00"]) await f.round(iso);
+    const dayStart = (day) => SH(`${day}T00:00:00`);
+    const live = await f.rt.reconciliation.queryRules({ preset: "custom", startMs: dayStart("2026-10-10"), endMs: dayStart("2026-10-13") }, { mode: "evaluate", force: true, origin: "manual" });
+    const costOf = (channelId) => Number(live.results.find((row) => row.rule.channels.some((channel) => channel.channelId === channelId)).upstream.amountUsd);
+    // 渠道 1：10-10 记 Key 9，10-11 记 Key 9 和 20（换 Key 那天），10-12 记 Key 20；渠道 7：10-11、10-12 记 Key 9
+    assert.equal(costOf(1), f.used(9, dayStart("2026-10-10"), dayStart("2026-10-12")) + f.used(20, dayStart("2026-10-11"), dayStart("2026-10-13")));
+    assert.equal(costOf(7), f.used(9, dayStart("2026-10-11"), dayStart("2026-10-13")));
+  });
+}
+
+// 开始算以来：已固定的日子取账本，只有没固定的日子才向上游现读（审核 2 性能项）
+for (const upstreamType of ["newapi", "sub2api"]) {
+  test(`开始算以来：数和整段现读一样，但已固定的日子不再向上游读，只读没固定的那几天（${upstreamType}）`, async (t) => {
+    const f = await setup(t, { upstreamType, keys: [9], channelKey: { 1: 9 } });
+    await f.at("2026-10-10T10:00:00");
+    await f.profit.start({ ownStationId: f.own.id, channelIds: [1] });
+    for (const iso of ["2026-10-10T23:00:00", "2026-10-11T01:00:00", "2026-10-11T23:00:00", "2026-10-12T01:00:00", "2026-10-12T23:00:00", "2026-10-13T01:00:00", "2026-10-13T09:00:00"]) await f.round(iso);
+    const dayStart = (day) => SH(`${day}T00:00:00`);
+    const full = await f.rt.reconciliation.queryRules({ preset: "custom", startMs: dayStart("2026-10-10"), endMs: SH("2026-10-13T09:00:00"), noCap: true }, { mode: "evaluate", force: true, origin: "manual" });
+    const expected = Number(full.results[0].upstream.amountUsd), expectedIncome = Number(full.results[0].downstream.amountUsd);
+    const before = globalThis.fetch.mock.calls.length;
+    const page = await f.rt.reconciliation.profitPage({ preset: "since" });
+    assert.deepEqual([page.pageTotals.actualCostUsd, page.pageTotals.incomeUsd], [expected, expectedIncome], "收入、上游成本和整段现读一样");
+    assert.equal(page.range.preset, "since");
+    if (upstreamType === "newapi") {
+      const starts = globalThis.fetch.mock.calls.slice(before).map((call) => new URL(String(call.arguments[0]))).filter((url) => url.host === "up.test" && url.pathname === "/api/log/self/stat")
+        .map((url) => Number(url.searchParams.get("start_timestamp")) * 1000);
+      assert.ok(starts.length > 0 && starts.every((start) => start >= dayStart("2026-10-13")), `只读 10-13（今天）这没固定的一天，读了：${starts.map((start) => new Date(start).toISOString())}`);
+    }
+  });
+}
